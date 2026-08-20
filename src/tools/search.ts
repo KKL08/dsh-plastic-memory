@@ -1,6 +1,6 @@
 import type { MemoryStore } from '../store.ts'
 import type { TypeRegistry } from '../type-registry.ts'
-import { stalenessNote } from '../snapshot.ts'
+import { sourceNote } from '../index-line.ts'
 
 /** memory_search 运行时需要的会话上下文，由框架绑定层的 resolveContext 提供。 */
 export interface SearchContext {
@@ -27,13 +27,13 @@ export interface SearchHit {
   type: string
   summary: string
   content: string
-  staleness: string
+  sourceNote: string
 }
 
 /** 把命中结果渲染成给模型看的一段文本。纯函数。 */
 export function renderSearchResult(hits: SearchHit[]): string {
   if (hits.length === 0) return '没有匹配的记忆。'
-  return hits.map(h => `[${h.id}] ${h.type}｜${h.summary}${h.staleness}\n${h.content}`).join('\n\n')
+  return hits.map(h => `[${h.id}] ${h.type}｜${h.summary}${h.sourceNote}\n${h.content}`).join('\n\n')
 }
 
 /**
@@ -61,7 +61,7 @@ export async function executeSearch(
   return {
     hits: hits.map(h => ({
       id: h.id, type: h.type, summary: h.summary, content: h.content,
-      staleness: stalenessNote(h, deps.registry.get(h.type), Date.now()) ?? '',
+      sourceNote: sourceNote(h),
     })),
   }
 }

@@ -2,6 +2,7 @@ import type { MemoryRecord } from './record-schema.ts'
 import { CONFIDENCE_BY_SOURCE, memoryRecordSchema } from './record-schema.ts'
 import type { MemoryStore } from './store.ts'
 import type { TypeRegistry } from './type-registry.ts'
+import { detectSecrets } from './governance/rule-scan.ts'
 
 export interface SaveCandidate {
   action: 'create' | 'update'
@@ -21,8 +22,8 @@ export interface SaveCandidate {
 }
 
 export type PipelineResult =
-  | { kind: 'saved'; record: MemoryRecord }
-  | { kind: 'updated'; record: MemoryRecord }
+  | { kind: 'saved'; record: MemoryRecord; warnings?: string[] }
+  | { kind: 'updated'; record: MemoryRecord; warnings?: string[] }
   | { kind: 'duplicate-suspected'; existing: Array<{ id: string; summary: string }> }
   | { kind: 'rejected'; reason: string }
 
@@ -140,5 +141,18 @@ export async function runSavePipeline(
     }
   }
 
-  return candidate.action === 'update' ? { kind: 'updated', record: clean } : { kind: 'saved', record: clean }
+  // 7. 写盘前 secret 检查：不阻断，仅警告
+  const secretHits = detectSecrets(candidate.content)
+  const baseResult = candidate.action === 'update'
+    ? { kind: 'updated' as const, record: clean }
+    : { kind: 'saved' as const, record: clean }
+
+  if (secretHits.length > 0) {
+    return {
+      ...baseResult,
+      warnings: [`疑似密钥（${secretHits.join('、')}），建议改写后再存——记忆将来可能随同步离开本机`],
+    }
+  }
+
+  return baseResult
 }

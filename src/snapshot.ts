@@ -1,15 +1,9 @@
 import type { MemoryRecord } from './record-schema.ts'
-import type { MemoryTypeDefinition } from './types.ts'
 import type { MemoryStore } from './store.ts'
 import type { TypeRegistry } from './type-registry.ts'
+import { sourceNote, formatIndexLine } from './index-line.ts'
 
 export const COLD_START_TEXT = `记忆库当前为空。如果时机合适，可以问一句用户是否愿意介绍自己的背景（角色、常用技术、工作习惯），愿意就用 memory_save 记下来；不愿意就在后续任务中自然积累，不要追问。`
-
-export function stalenessNote(record: MemoryRecord, typeDef: MemoryTypeDefinition, now: number): string | null {
-  if (typeDef.decayDays === null) return null
-  const days = Math.floor((now - record.lastConfirmedAt) / 86_400_000)
-  return days > typeDef.decayDays ? `（${days} 天未确认，可能已过期）` : null
-}
 
 /** 粗略 token 估算：中文字 ×1.5，其余按空白分词 ×1.3。预算是软约束，够用即可。 */
 export function estimateTokens(text: string): number {
@@ -39,7 +33,7 @@ export function assembleSnapshot(deps: {
     .sort((a, b) => b.confidence - a.confidence || b.recallCount - a.recallCount)
   const coreIncluded: MemoryRecord[] = []
   for (const r of coreRecords) {
-    const line = `- ${r.content}${stalenessNote(r, registry.get(r.type), now) ?? ''}`
+    const line = `- ${r.content}${sourceNote(r)}`
     const cost = estimateTokens(line)
     if (used + cost > coreBudget) break
     parts.push(line)
@@ -63,9 +57,7 @@ export function assembleSnapshot(deps: {
     const def = registry.get(type)
     const lines = [`\n## ${def.label}（${type}）`]
     for (const r of records) {
-      lines.push(def.recall === 'passive'
-        ? `- [${r.id}] ${r.name}`
-        : `- [${r.id}] ${r.name}（${r.summary}）${stalenessNote(r, def, now) ?? ''}`)
+      lines.push(formatIndexLine(r, { passive: def.recall === 'passive' }))
     }
     const cost = estimateTokens(lines.join('\n'))
     if (used + cost > deps.budget) {

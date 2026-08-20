@@ -24,7 +24,6 @@ export const memoryRecordSchema = z.object({
   status: z.enum(['active', 'stale', 'superseded', 'expired', 'deleted']),
   confidence: z.number().min(0).max(1),
   supersedes: z.array(z.string()).optional(),
-  sensitivity: z.enum(['ordinary', 'private', 'sensitive', 'restricted']).optional(),
 })
 export type MemoryRecord = z.infer<typeof memoryRecordSchema>
 

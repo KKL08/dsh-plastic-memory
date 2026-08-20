@@ -22,7 +22,7 @@ export function createSaveTool(deps: SaveToolDeps): ToolDefinition {
       scope: { type: 'string', enum: ['global', 'workspace'], required: true },
       content: { type: 'string', required: true },
       summary: { type: 'string', required: true, description: '一行摘要，会显示在记忆索引里' },
-      tags: { type: 'array', items: { type: 'string' } },
+      tags: { type: 'array', items: { type: 'string' }, description: '检索用关键词——技术名、路径、专有名词，不写泛化概念' },
       sourceMode: { type: 'string', enum: ['user-explicit', 'user-behavior', 'environment-observed', 'agent-inferred', 'agent-action-confirmed'], required: true },
       confidence: { type: 'number' },
       supersedes: { type: 'array', items: { type: 'string' } },
