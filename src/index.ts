@@ -18,6 +18,7 @@ import { createScanTool } from './tools/scan-tool.ts'
 import { createHealthTool } from './tools/health-tool.ts'
 import { createSnapshotTool } from './tools/snapshot-tool.ts'
 import { SnapshotCache, resolveWorkspacePath } from './runtime.ts'
+import { resolveHealthThresholds, type HealthSensitivity } from './governance/health-presets.ts'
 import { PendingDecisionsStore } from './governance/decisions.ts'
 import { SnapshotStore } from './governance/snapshots.ts'
 import { BaselineCache } from './governance/baseline.ts'
@@ -35,7 +36,7 @@ export interface Config {
   snapshotTokenBudget: number
   template: 'coding' | 'office' | 'custom'
   customTypes: Record<string, Omit<MemoryTypeDefinition, 'name'>>
-  governance: { enabled: boolean; onWrite: boolean }
+  governance: { enabled: boolean; onWrite: boolean; health: { sensitivity: HealthSensitivity } }
   /** 记忆文件根目录，缺省解析到 ${DSH_HOME:-~/.dsh}/memories（storage/paths.ts） */
   memoryRoot: string
 }
@@ -58,6 +59,9 @@ export const Config: z<Config> = z.object({
   governance: z.object({
     enabled: z.boolean().default(true),
     onWrite: z.boolean().default(true),
+    health: z.object({
+      sensitivity: z.union(['conservative', 'normal', 'proactive'] as const).default('normal'),
+    }).default({ sensitivity: 'normal' }),
   }),
   memoryRoot: z.string().default(''),
 })
@@ -81,8 +85,9 @@ export async function apply(ctx: Context, config: Config) {
   ctx.effect(() => () => void domain.close())
   // P1.5：正文迁到 FileTable（磁盘 markdown），KV 只留易变的召回统计 sidecar（recall_stats）
   const statsTable = domain.table('recall_stats') as unknown as KvTable<RecallStats>
+  const memoryRoot = resolveMemoryRoot(config.memoryRoot)
   const fileTable = new FileTable({
-    root: resolveMemoryRoot(config.memoryRoot),
+    root: memoryRoot,
     stats: statsTable,
     // 磁盘索引不带陈旧度（静态文件里的时间相对标注会随时间失真），注入侧的陈旧度由 snapshot.ts 计算
     formatIndexLine: r => formatIndexLine(r, { passive: registry.get(r.type).recall === 'passive' }),
@@ -94,7 +99,7 @@ export async function apply(ctx: Context, config: Config) {
   const snapshots = new SnapshotStore(domain.table('snapshots') as unknown as KvTable<MemorySnapshot>)
   const scanCache = domain.table('scan_cache') as unknown as KvTable<ScanCacheEntry>
   const baseline = new BaselineCache()
-  const snapshotCache = new SnapshotCache({ store, registry, budget: config.snapshotTokenBudget })
+  const snapshotCache = new SnapshotCache({ store, registry, budget: config.snapshotTokenBudget, memoryRoot })
 
   /** 工具执行前感知外部文件修改；对 ToolDefinition 做统一包装，避免改 7 个 -tool.ts。
    *  systemPrompt 注入路径不经这层：同步组装，永远服务最近一次加载的 Map（设计 §7 已登记）。 */
@@ -189,6 +194,7 @@ export async function apply(ctx: Context, config: Config) {
     })))
     ctx.tools.register(withRefresh(createHealthTool({
       store, registry, decisions, cache: scanCache,
+      thresholds: resolveHealthThresholds(config.governance.health.sensitivity),
       getQuarantined: () => fileTable.quarantined(),
     })))
   }

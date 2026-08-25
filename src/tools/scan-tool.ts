@@ -1,6 +1,6 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { executeScan, type ScanToolDeps, type ScanToolResult } from './scan.ts'
+import { executeScan, renderScanResult, type ScanToolDeps, type ScanToolResult } from './scan.ts'
 
 /**
  * 把 memory_scan 接到 dsh 框架上。测试只测 scan.ts 纯逻辑，
@@ -16,14 +16,7 @@ export function createScanTool(deps: ScanToolDeps): ToolDefinition {
     },
     output: {
       schema: { type: 'json' },
-      render: (_args, value) => {
-        const r = value as ScanToolResult
-        const lines = [r.message]
-        for (const f of r.findings) {
-          lines.push(`- [${f.severity}] ${f.type} ${f.memoryIds.join('+')}：${f.summary} → ${f.suggestedAction}`)
-        }
-        return [{ type: 'text', text: lines.join('\n') }]
-      },
+      render: (_args, value) => [{ type: 'text', text: renderScanResult(value as ScanToolResult) }],
     },
     execute: (args, exec) => executeScan(args, deps, exec) as never,
   })

@@ -1,6 +1,6 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { executeHealth, type HealthToolDeps, type HealthToolResult } from './health.ts'
+import { executeHealth, renderHealthResult, type HealthToolDeps, type HealthToolResult } from './health.ts'
 
 /**
  * 把 memory_health 接到 dsh 框架上。测试只测 health.ts 纯逻辑，
@@ -15,7 +15,7 @@ export function createHealthTool(deps: HealthToolDeps): ToolDefinition {
     },
     output: {
       schema: { type: 'json' },
-      render: (_args, value) => [{ type: 'text', text: (value as HealthToolResult).message }],
+      render: (_args, value) => [{ type: 'text', text: renderHealthResult(value as HealthToolResult) }],
     },
     execute: (args) => executeHealth(args, deps) as never,
   })

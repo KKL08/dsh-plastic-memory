@@ -3,18 +3,24 @@ import type { TypeRegistry } from '../type-registry.ts'
 import type { PendingDecisionsStore } from '../governance/decisions.ts'
 import type { KvTable } from '../governance/table.ts'
 import type { ScanCacheEntry } from '../governance/schema.ts'
+import { FINDING_TYPES } from '../governance/schema.ts'
+import type { HealthThresholds } from '../governance/health-presets.ts'
 import { runRuleScan, buildMalformedFindings } from '../governance/rule-scan.ts'
 import { computeHealth } from '../governance/scoring.ts'
 import { cacheKey } from './scan.ts'
 
-export const PENDING_REMINDER_MS = 7 * 86_400_000
 const DAY = 86_400_000
+
+/** tier 枚举 → 用户面中文文案（结构化 tier 字段仍保留 green/amber/red 供程序用）。 */
+const TIER_LABEL = { green: '绿色', amber: '黄色', red: '红色' } as const
 
 export interface HealthToolDeps {
   store: MemoryStore
   registry: TypeRegistry
   decisions: PendingDecisionsStore
   cache: KvTable<ScanCacheEntry>
+  /** 触发阈值（由 index.ts 从 sensitivity 预设解析后注入）。 */
+  thresholds: HealthThresholds
   /** 存储层隔离的不可解析记忆文件（FileTable.quarantined）；缺省视为无。 */
   getQuarantined?: () => readonly { path: string; error: string }[]
   now?: () => number
@@ -32,10 +38,32 @@ export interface HealthToolResult {
     semanticLayer: { conflict: number; redundancy: number; misplaced: number; unclear: number; penalty: number; cachedAt: number | null }
     freshness: { avgRatio: number; staleCount: number; penalty: number }
   }
-  pendingDecisions: { total: number; overdue: number }
+  pendingDecisions: {
+    total: number
+    overdue: number
+    items: Array<{ id: string; summary: string; overdue: boolean }>
+  }
   totalMemories: number
   recommendation: string
   message: string
+}
+
+/** 把健康检查结果渲染成给模型看的一段文本。纯函数。 */
+export function renderHealthResult(result: HealthToolResult): string {
+  const { breakdown } = result
+  const lines = [result.message]
+  lines.push(
+    `规则层扣分 ${breakdown.ruleLayer.penalty}（secret ${breakdown.ruleLayer.secret} / expired ${breakdown.ruleLayer.expired} / bloat ${breakdown.ruleLayer.bloat} / orphan ${breakdown.ruleLayer.orphan} / malformed ${breakdown.ruleLayer.malformed}）；`
+    + `语义层扣分 ${breakdown.semanticLayer.penalty}（conflict ${breakdown.semanticLayer.conflict} / redundancy ${breakdown.semanticLayer.redundancy} / misplaced ${breakdown.semanticLayer.misplaced} / unclear ${breakdown.semanticLayer.unclear}）；`
+    + `新鲜度扣分 ${breakdown.freshness.penalty}（${breakdown.freshness.staleCount} 条超期）`,
+  )
+  if (result.pendingDecisions.items.length > 0) {
+    lines.push('待裁决冲突（memory_confirm resolve）：')
+    for (const item of result.pendingDecisions.items) {
+      lines.push(`- [${item.id}] ${item.summary}${item.overdue ? '（挂起超 7 天）' : ''}`)
+    }
+  }
+  return lines.join('\n')
 }
 
 /**
@@ -45,6 +73,8 @@ export interface HealthToolResult {
 export async function executeHealth(rawArgs: unknown, deps: HealthToolDeps): Promise<HealthToolResult> {
   const args = (rawArgs ?? {}) as HealthArgs
   const now = deps.now?.() ?? Date.now()
+  const th = deps.thresholds
+  const overdueMs = th.pendingOverdueDays * DAY
 
   // 与 memory_scan 一致：scope 限定用 visible 语义（global + 该 workspace），
   // 否则健康分与扫描口径不一致，同一个 workspace 会算出两套结论。
@@ -73,22 +103,26 @@ export async function executeHealth(rawArgs: unknown, deps: HealthToolDeps): Pro
   })
 
   const pending = deps.decisions.list()
-  const overdue = pending.filter(e => now - e.firstSeenAt >= PENDING_REMINDER_MS)
+  const overdue = pending.filter(e => now - e.firstSeenAt >= overdueMs)
 
-  // recommendation 优先级链（设计稿 §7.3）
+  // recommendation 优先级链。secret 永远最高优先、不受档位影响；其余判据用可调阈值。
   let recommendation: string
   if (health.counts.secret > 0) {
     recommendation = `发现 ${health.counts.secret} 条疑似密钥泄漏，建议立即确认并用 memory_forget 删除、轮换凭证`
   } else if (overdue.length > 0) {
-    recommendation = `${overdue.length} 条冲突挂起超 7 天，建议用 memory_confirm 裁决`
+    recommendation = `${overdue.length} 条冲突挂起超 ${th.pendingOverdueDays} 天，建议用 memory_confirm 裁决`
   } else if (!cached) {
     recommendation = '尚未做过语义扫描，建议首次运行 memory_scan'
-  } else if (now - cached.scannedAt > PENDING_REMINDER_MS) {
+  } else if (now - cached.scannedAt > th.scanStaleDays * DAY) {
     recommendation = `语义扫描已是 ${Math.floor((now - cached.scannedAt) / DAY)} 天前，建议重新运行 memory_scan`
   } else if (health.freshness.staleCount > 0) {
     recommendation = `${health.freshness.staleCount} 条记忆超过衰退期，建议用 memory_confirm 确认或更新`
-  } else if (health.score < 80) {
+  } else if (health.score < th.actionScoreThreshold) {
     recommendation = '存在待清理问题，建议运行 memory_scan 查看明细'
+  } else if (health.rulePenalty + health.semanticPenalty > 0) {
+    // ④：有 findings 但未达提示阈值——不说"无需操作"，软提一句
+    const kinds = FINDING_TYPES.filter(t => health.counts[t] > 0).length
+    recommendation = `有 ${kinds} 类问题（未达提示阈值），可运行 memory_scan 查看`
   } else {
     recommendation = '记忆库健康，无需操作'
   }
@@ -118,9 +152,13 @@ export async function executeHealth(rawArgs: unknown, deps: HealthToolDeps): Pro
         penalty: Math.round(health.freshness.penalty * 100) / 100,
       },
     },
-    pendingDecisions: { total: pending.length, overdue: overdue.length },
+    pendingDecisions: {
+      total: pending.length,
+      overdue: overdue.length,
+      items: pending.map(e => ({ id: e.id, summary: e.summary, overdue: now - e.firstSeenAt >= overdueMs })),
+    },
     totalMemories: records.length,
     recommendation,
-    message: `记忆库健康分 ${Math.round(health.score)}/100（${health.tier}）${semanticNote}。${recommendation}。`,
+    message: `记忆库健康分 ${Math.round(health.score)}/100（${TIER_LABEL[health.tier]}）${semanticNote}。${recommendation}。`,
   }
 }

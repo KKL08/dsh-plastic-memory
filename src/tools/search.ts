@@ -1,4 +1,4 @@
-import type { MemoryStore } from '../store.ts'
+import { expandQueryTerms, matchScore, type MemoryStore } from '../store.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import { sourceNote } from '../index-line.ts'
 
@@ -53,10 +53,14 @@ export async function executeSearch(
     : a.scope === 'workspace' && workspacePath
       ? { kind: 'workspace' as const, path: workspacePath }
       : { kind: 'visible' as const, workspacePath }
+  // OR 匹配后按（命中词数 ↓ → confidence ↓ → recallCount ↓）排序：命中更多查询词者更相关。
+  const terms = expandQueryTerms(a.query)
   const hits = deps.store
     .query({ keyword: a.query, types: a.types, scope: scopeFilter })
-    .sort((x, y) => y.confidence - x.confidence || y.lastConfirmedAt - x.lastConfirmedAt)
+    .map(r => ({ r, score: matchScore(r, terms) }))
+    .sort((x, y) => y.score - x.score || y.r.confidence - x.r.confidence || y.r.recallCount - x.r.recallCount)
     .slice(0, limit)
+    .map(e => e.r)
   deps.store.markRecalled(hits.map(h => h.id))
   return {
     hits: hits.map(h => ({

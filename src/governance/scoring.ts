@@ -1,11 +1,11 @@
 import { FINDING_TYPES, type Finding, type FindingType } from './schema.ts'
 
-/** 绝对扣分（"绝对不该有"，每条直接扣，不随库规模归一）。设计稿 §5。 */
-export const ABSOLUTE_WEIGHTS = { secret: 20, conflict: 10 } as const
+/** 绝对扣分（"绝对不该有"，每条直接扣，不随库规模归一）。 */
+export const ABSOLUTE_WEIGHTS = { secret: 25, conflict: 10 } as const
 
-/** 比例扣分系数（噪音类）：penalty = min(系数, 系数 × 问题数/总数 × 100)。 */
+/** 比例扣分系数（噪音类）：penalty = min(系数, 系数 × 问题数/总数 × 100)。系数即该类满分 cap。 */
 export const PROPORTIONAL_COEFF = {
-  redundancy: 3, misplaced: 5, unclear: 3, bloat: 3, expired: 5, orphan: 3, malformed: 3,
+  redundancy: 6, misplaced: 10, unclear: 6, bloat: 6, expired: 10, orphan: 6, malformed: 6,
 } as const
 
 export const FRESHNESS_PENALTY_CAP = 15

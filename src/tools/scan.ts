@@ -30,11 +30,30 @@ export interface ScanArgs {
 
 export interface ScanToolResult {
   findings: Finding[]
-  pendingDecisions: { created: number; existing: number }
+  pendingDecisions: {
+    created: number
+    existing: number
+    items: Array<{ id: string; memoryIds: string[]; summary: string; isNew: boolean }>
+  }
   stats: { scanned: number; clean: number; issues: number; byType: Record<string, number> }
   semanticCachedAt: number | null
   notes: string[]
   message: string
+}
+
+/** 把扫描结果渲染成给模型看的一段文本。纯函数。 */
+export function renderScanResult(result: ScanToolResult): string {
+  const lines = [result.message]
+  for (const f of result.findings) {
+    lines.push(`- [${f.severity}] ${f.type} ${f.memoryIds.join('+')}：${f.summary} → ${f.suggestedAction}`)
+  }
+  if (result.pendingDecisions.items.length > 0) {
+    lines.push('待裁决冲突（用 memory_confirm resolve 裁决，需 decisionId）：')
+    for (const item of result.pendingDecisions.items) {
+      lines.push(`- [${item.id}] ${item.summary}`)
+    }
+  }
+  return lines.join('\n')
 }
 
 /**
@@ -88,6 +107,7 @@ export async function executeScan(rawArgs: unknown, deps: ScanToolDeps, exec?: u
   // conflict → 待决账本（不自动裁决）
   let created = 0
   let existing = 0
+  const items: ScanToolResult['pendingDecisions']['items'] = []
   for (const f of findings) {
     if (f.type !== 'conflict') continue
     const r = await deps.decisions.upsert({
@@ -97,6 +117,7 @@ export async function executeScan(rawArgs: unknown, deps: ScanToolDeps, exec?: u
     }, now)
     if (r.created) created++
     else existing++
+    items.push({ id: r.entry.id, memoryIds: r.entry.memoryIds, summary: r.entry.summary, isNew: r.created })
   }
 
   const problemIds = new Set(findings.flatMap(f => f.memoryIds))
@@ -111,7 +132,7 @@ export async function executeScan(rawArgs: unknown, deps: ScanToolDeps, exec?: u
 
   const noteSuffix = notes.length > 0 ? `（${notes.join('；')}）` : ''
   return {
-    findings, pendingDecisions: { created, existing }, stats, semanticCachedAt, notes,
+    findings, pendingDecisions: { created, existing, items }, stats, semanticCachedAt, notes,
     message: `扫描 ${stats.scanned} 条记忆，发现 ${stats.issues} 个问题${created > 0 ? `，新增 ${created} 个待决冲突` : ''}${noteSuffix}。清理需用户确认后执行：删除用 memory_forget，冲突裁决用 memory_confirm。`,
   }
 }
