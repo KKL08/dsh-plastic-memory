@@ -20,7 +20,7 @@ export function renderSaveResult(result: PipelineResult): string {
   let text: string
   switch (result.kind) {
     case 'saved':
-      text = `已保存记忆 ${result.record.id}（${result.record.type}，${result.record.scope}），下个会话生效。`
+      text = `已保存记忆 ${result.record.id}（${result.record.type}，${result.record.scope}）。下个会话注入；本会话若触发上下文压缩，压缩后即生效。`
       break
     case 'updated':
       text = `已更新记忆 ${result.record.id}。`
@@ -57,7 +57,9 @@ export async function executeSave(
   return runSavePipeline(candidate, {
     store: deps.store,
     registry: deps.registry,
-    workspacePath: candidate.scope === 'workspace' ? context.workspacePath : undefined,
+    // 无条件传真实 workspace 上下文：pipeline 要靠它判断 global 是否降级为候选（scope=global 时
+    // 也需要知道当前有没有 workspace 桶）。global 记忆最终不带 workspacePath 由 pipeline 组装时归 undefined。
+    workspacePath: context.workspacePath,
     session: context.session,
   })
 }

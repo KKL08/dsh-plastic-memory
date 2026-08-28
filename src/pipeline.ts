@@ -58,7 +58,8 @@ export async function runSavePipeline(
     store: MemoryStore
     registry: TypeRegistry
     workspacePath: string | undefined
-    session: { id: string; lastSeq: number }
+    /** turnStartSeq：触发本次保存的当轮 turn/start 事件 seq（绑定层机械回找），缺省 0（整会话兜底）。 */
+    session: { id: string; lastSeq: number; turnStartSeq?: number }
   },
 ): Promise<PipelineResult> {
   const { store, registry, session } = deps
@@ -68,7 +69,16 @@ export async function runSavePipeline(
   if (!registry.has(candidate.type)) {
     return { kind: 'rejected', reason: `未知类型 "${candidate.type}"，可用类型见工具说明` }
   }
-  const scope = candidate.scope === 'workspace' && deps.workspacePath === undefined ? 'global' : candidate.scope
+  // 模型无 global 直写通道：填 global（且当前有 workspace）→ 降级 workspace + globalCandidate 标记，
+  // 真正提升到 global 只能走 memory_promote（用户确认）。无 workspace 桶时保持 global（技术兜底）。
+  let scope = candidate.scope
+  let globalCandidate: true | undefined
+  if (candidate.scope === 'global' && deps.workspacePath !== undefined) {
+    scope = 'workspace'
+    globalCandidate = true
+  } else if (candidate.scope === 'workspace' && deps.workspacePath === undefined) {
+    scope = 'global'
+  }
   if (candidate.action === 'update') {
     const target = candidate.id ? store.get(candidate.id) : undefined
     if (!target || target.status === 'deleted') {
@@ -100,7 +110,10 @@ export async function runSavePipeline(
   // 4. 审批：P0 只有 auto，其余配置在插件入口已警告降级
 
   // 5. 持久化（写入前必须过 schema——KvTable.put 不校验，脏记录会让下次 domain open 整库拒载）
-  const source = { sessionId: session.id, eventRange: [0, session.lastSeq] as [number, number], sourceMode: candidate.sourceMode }
+  // 真锚（设计 evidence-anchor §3）：eventRange = [当轮 turn/start, save 时刻]，两个数都是机械事实。
+  // 模型上下文里没有 seq 标注，任何模型填的区间都是编造——锚只能由绑定层填。
+  const anchorStart = Math.min(session.turnStartSeq ?? 0, session.lastSeq)
+  const source = { sessionId: session.id, eventRange: [anchorStart, session.lastSeq] as [number, number], sourceMode: candidate.sourceMode }
   let record: MemoryRecord
   if (candidate.action === 'update') {
     const target = store.get(candidate.id!)!
@@ -113,6 +126,7 @@ export async function runSavePipeline(
       validFrom: candidate.validFrom, validTo: candidate.validTo,
       updatedAt: now, lastConfirmedAt: now,
       supersedes: candidate.supersedes ?? target.supersedes,
+      globalCandidate: globalCandidate || target.globalCandidate,
     }
   } else {
     record = {
@@ -124,16 +138,28 @@ export async function runSavePipeline(
       lastRecalledAt: null, recallCount: 0,
       validFrom: candidate.validFrom, validTo: candidate.validTo,
       status: 'active', confidence, supersedes: candidate.supersedes,
+      globalCandidate,
     }
   }
   const parsed = memoryRecordSchema.safeParse(record)
   if (!parsed.success) {
     return { kind: 'rejected', reason: `字段校验失败：${parsed.error.issues.map(i => i.message).join('；')}` }
   }
+
+  // 6. 写盘前 secret 检查（D6）：高危（明确厂商特征）直接拦截、不落盘；疑似仅警告、照常落盘。
+  const secretHits = detectSecrets(candidate.content)
+  const critical = secretHits.filter(h => h.severity === 'critical')
+  if (critical.length > 0) {
+    return {
+      kind: 'rejected',
+      reason: `检测到高危密钥（${critical.map(h => h.name).join('、')}），未保存。密钥不该进记忆（将来可能随同步离开本机）——如需记录，请改写成不含密钥的指针（如「AWS 凭证在 1Password 的 X 条目」）再存。`,
+    }
+  }
+
   const clean = pruneUndefined(parsed.data)
   await store.put(clean)
 
-  // 6. supersedes 处理
+  // 7. supersedes 处理
   for (const oldId of candidate.supersedes ?? []) {
     const old = store.get(oldId)
     if (old && old.id !== clean.id) {
@@ -141,16 +167,15 @@ export async function runSavePipeline(
     }
   }
 
-  // 7. 写盘前 secret 检查：不阻断，仅警告
-  const secretHits = detectSecrets(candidate.content)
   const baseResult = candidate.action === 'update'
     ? { kind: 'updated' as const, record: clean }
     : { kind: 'saved' as const, record: clean }
 
-  if (secretHits.length > 0) {
+  const suspected = secretHits.filter(h => h.severity === 'suspected')
+  if (suspected.length > 0) {
     return {
       ...baseResult,
-      warnings: [`疑似密钥（${secretHits.join('、')}），建议改写后再存——记忆将来可能随同步离开本机`],
+      warnings: [`疑似密钥（${suspected.map(h => h.name).join('、')}），建议改写后再存——记忆将来可能随同步离开本机`],
     }
   }
 

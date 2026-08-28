@@ -16,7 +16,12 @@ import { createForgetTool } from './tools/forget-tool.ts'
 import { createConfirmTool } from './tools/confirm-tool.ts'
 import { createScanTool } from './tools/scan-tool.ts'
 import { createHealthTool } from './tools/health-tool.ts'
+import { createPromoteTool } from './tools/promote-tool.ts'
+import type { PromoteTarget } from './tools/promote.ts'
+import { createAgentsMdWriter, agentsMdPath } from './storage/agents-md.ts'
 import { createSnapshotTool } from './tools/snapshot-tool.ts'
+import { createSourceTool } from './tools/source-tool.ts'
+import type { ReadEventFn } from './tools/source.ts'
 import { SnapshotCache, resolveWorkspacePath } from './runtime.ts'
 import { resolveHealthThresholds, type HealthSensitivity } from './governance/health-presets.ts'
 import { PendingDecisionsStore } from './governance/decisions.ts'
@@ -34,9 +39,11 @@ export interface Config {
   approval: 'auto' | 'always' | 'by-type'
   approvalTypes: string[]
   snapshotTokenBudget: number
+  /** 证据下钻档位（docs/design-evidence-anchor.md §4）：off 不鼓励回查原始轨迹、strict 仅硬信号、active 开放路标式引导。 */
+  evidenceLookup: 'off' | 'strict' | 'active'
   template: 'coding' | 'office' | 'custom'
   customTypes: Record<string, Omit<MemoryTypeDefinition, 'name'>>
-  governance: { enabled: boolean; onWrite: boolean; health: { sensitivity: HealthSensitivity } }
+  governance: { enabled: boolean; onWrite: boolean; health: { sensitivity: HealthSensitivity }; globalPromoteTarget: 'plugin-global' | 'agents-md' }
   /** 记忆文件根目录，缺省解析到 ${DSH_HOME:-~/.dsh}/memories（storage/paths.ts） */
   memoryRoot: string
 }
@@ -48,10 +55,12 @@ export const Config: z<Config> = z.object({
   approval: z.union(['auto', 'always', 'by-type'] as const).default('auto'),
   approvalTypes: z.array(z.string()).default([]),
   snapshotTokenBudget: z.number().default(4000),
+  evidenceLookup: z.union(['off', 'strict', 'active'] as const).default('strict'),
   template: z.union(['coding', 'office', 'custom'] as const).default('coding'),
   customTypes: z.dict(z.object({
     label: z.string().required(),
     description: z.string().required(),
+    whenToSave: z.string().required(),
     recall: z.union(['core', 'search', 'passive'] as const).required(),
     decayDays: z.union([z.number(), z.const(null)]).default(null),
     governancePriority: z.union(['high', 'medium', 'low'] as const).required(),
@@ -62,6 +71,7 @@ export const Config: z<Config> = z.object({
     health: z.object({
       sensitivity: z.union(['conservative', 'normal', 'proactive'] as const).default('normal'),
     }).default({ sensitivity: 'normal' }),
+    globalPromoteTarget: z.union(['plugin-global', 'agents-md'] as const).default('plugin-global'),
   }),
   memoryRoot: z.string().default(''),
 })
@@ -99,7 +109,7 @@ export async function apply(ctx: Context, config: Config) {
   const snapshots = new SnapshotStore(domain.table('snapshots') as unknown as KvTable<MemorySnapshot>)
   const scanCache = domain.table('scan_cache') as unknown as KvTable<ScanCacheEntry>
   const baseline = new BaselineCache()
-  const snapshotCache = new SnapshotCache({ store, registry, budget: config.snapshotTokenBudget, memoryRoot })
+  const snapshotCache = new SnapshotCache({ store, registry, budget: config.snapshotTokenBudget, memoryRoot, evidenceLookup: config.evidenceLookup })
 
   /** 工具执行前感知外部文件修改；对 ToolDefinition 做统一包装，避免改 7 个 -tool.ts。
    *  systemPrompt 注入路径不经这层：同步组装，永远服务最近一次加载的 Map（设计 §7 已登记）。 */
@@ -169,11 +179,21 @@ export async function apply(ctx: Context, config: Config) {
   async function resolveContext(exec: unknown) {
     const agent = (exec as { agent?: { session?: { header?: { id?: string; cwd?: string }; events?: unknown[] } } }).agent
     const session = agent?.session
+    const events = (session?.events ?? []) as Array<{ type?: string; seq?: number }>
+    // 真锚 start：尾部回找最后一个 turn/start（触发本次保存的当轮），找不到兜底 0（整会话）
+    let turnStartSeq = 0
+    for (let i = events.length - 1; i >= 0; i--) {
+      if (events[i]?.type === 'turn/start') {
+        turnStartSeq = typeof events[i].seq === 'number' ? events[i].seq! : i
+        break
+      }
+    }
     return {
       workspacePath: await resolveWorkspacePath(ctx, session?.header?.cwd),
       session: {
         id: session?.header?.id ?? 'unknown',
-        lastSeq: Math.max((session?.events?.length ?? 1) - 1, 0),
+        lastSeq: Math.max(events.length - 1, 0),
+        turnStartSeq,
       },
     }
   }
@@ -184,6 +204,19 @@ export async function apply(ctx: Context, config: Config) {
   // 快照的写入与恢复必须成对——治理关闭时 forget 仍会拍快照，若没有恢复入口，
   // 14 天的快照就是死存储。故 memory_snapshot 放在治理开关之外，与 forget 一起常驻。
   ctx.tools.register(withRefresh(createSnapshotTool({ store, snapshots })))
+  // memory_source：证据下钻（日常 + 治理都用，常驻）。sessionQuery 是 base bundle 默认服务，
+  // 但按 llm 同款惯例 per-call 探测 + try/catch——某些 profile 缺席时工具内优雅降级，不挂载失败。
+  ctx.tools.register(withRefresh(createSourceTool({
+    store, resolveContext,
+    getReadEvent: () => {
+      try {
+        const sq = ctx.get('sessionQuery') as { readEvent?: ReadEventFn } | undefined
+        return sq?.readEvent ? sq.readEvent.bind(sq) as ReadEventFn : null
+      } catch {
+        return null
+      }
+    },
+  })))
   if (config.governance.enabled) {
     ctx.tools.register(withRefresh(createConfirmTool({ store, decisions, snapshots })))
     ctx.tools.register(withRefresh(createScanTool({
@@ -197,6 +230,11 @@ export async function apply(ctx: Context, config: Config) {
       thresholds: resolveHealthThresholds(config.governance.health.sensitivity),
       getQuarantined: () => fileTable.quarantined(),
     })))
+    // memory_promote：把用户确认的候选提升 global。确认由模型先调 ask_user_question 完成
+    // （工具内部弹 userQuestions 会被 web 会话拒绝 "requires agent-owned session"），本工具纯执行。
+    const agentsMd = createAgentsMdWriter(agentsMdPath(memoryRoot))
+    const defaultTarget: PromoteTarget = config.governance.globalPromoteTarget === 'agents-md' ? 'agents-md' : 'global'
+    ctx.tools.register(withRefresh(createPromoteTool({ store, agentsMd, defaultTarget })))
   }
 
   // frozen snapshot：按 session 隔离缓存，session/created 异步解析 workspace，compaction 结束失效重建。

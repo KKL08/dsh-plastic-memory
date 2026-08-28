@@ -3,6 +3,7 @@ import type { MemoryStore } from './store.ts'
 import type { TypeRegistry } from './type-registry.ts'
 import { sourceNote, formatIndexLine } from './index-line.ts'
 import { workspaceDirName } from './storage/paths.ts'
+import { EVIDENCE_GUIDANCE, type EvidenceLookupLevel } from './evidence-guidance.ts'
 
 export const COLD_START_TEXT = `记忆库当前为空。如果时机合适，可以问一句用户是否愿意介绍自己的背景（角色、常用技术、工作习惯），愿意就用 memory_save 记下来；不愿意就在后续任务中自然积累，不要追问。`
 
@@ -21,6 +22,8 @@ export function assembleSnapshot(deps: {
   now: number
   /** 记忆文件根目录（运行时解析）。给出时在快照末尾附一行磁盘路径，让 grep 通道在自定义根下也可发现。 */
   memoryRoot?: string
+  /** 证据下钻档位（设计 evidence-anchor §4）：给出时在快照末尾拼对应引导文案；缺省不拼（纯测试场景）。 */
+  evidenceLookup?: EvidenceLookupLevel
 }): { text: string; coreIds: string[] } {
   const { registry, now } = deps
   const all = deps.store.query({ scope: { kind: 'visible', workspacePath: deps.workspacePath } })
@@ -37,7 +40,7 @@ export function assembleSnapshot(deps: {
   const coreIncluded: MemoryRecord[] = []
   for (const r of coreRecords) {
     // ⑤ 归属前缀：模型不信来路不明的裸句，标出这是长期记忆及其类型，减少"全文在手仍重搜"
-    const line = `- 【记忆·${registry.get(r.type).label}】${r.content}${sourceNote(r)}`
+    const line = `- [${r.id}]【记忆·${registry.get(r.type).label}】${r.content}${sourceNote(r)}`
     const cost = estimateTokens(line)
     if (used + cost > coreBudget) break
     parts.push(line)
@@ -46,8 +49,10 @@ export function assembleSnapshot(deps: {
   }
 
   // 索引区：全部记忆按类型分组（含 core 区已出现的），超预算按治理优先级 low → medium → high 整组丢弃
+  // core 类型的正文已在 core 区（带 id），索引区不再重复列它们——避免同一条记忆两处冗余。
   const groups = new Map<string, MemoryRecord[]>()
   for (const r of all) {
+    if (registry.get(r.type).recall === 'core') continue
     const list = groups.get(r.type) ?? []
     list.push(r)
     groups.set(r.type, list)
@@ -86,6 +91,8 @@ export function assembleSnapshot(deps: {
     lines.push('其他项目的记忆不在上列——除非用户明确给出该项目路径，否则不要去读别的 workspace 目录。')
     parts.push(lines.join('\n'))
   }
+  // 证据下钻引导：固定尾注不计预算（与磁盘路径行同待遇，预算是软约束）
+  if (deps.evidenceLookup) parts.push(`\n${EVIDENCE_GUIDANCE[deps.evidenceLookup]}`)
 
   return { text: parts.join('\n'), coreIds: coreIncluded.map(r => r.id) }
 }

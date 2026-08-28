@@ -24,6 +24,8 @@ export const memoryRecordSchema = z.object({
   status: z.enum(['active', 'stale', 'superseded', 'expired', 'deleted']),
   confidence: z.number().min(0).max(1),
   supersedes: z.array(z.string()).optional(),
+  /** 模型自主判断"该全局"但无权直写 global：落 workspace 时打此标记，治理时作为提升候选。 */
+  globalCandidate: z.boolean().optional(),
 })
 export type MemoryRecord = z.infer<typeof memoryRecordSchema>
 

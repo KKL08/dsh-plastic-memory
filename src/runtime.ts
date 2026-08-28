@@ -1,5 +1,6 @@
 import type { MemoryStore } from './store.ts'
 import type { TypeRegistry } from './type-registry.ts'
+import type { EvidenceLookupLevel } from './evidence-guidance.ts'
 import { assembleSnapshot } from './snapshot.ts'
 
 /**
@@ -12,7 +13,7 @@ export class SnapshotCache {
   /** 值为 undefined 表示"已解析、无 workspace"；键不存在表示"还没解析完" */
   private workspacePaths = new WeakMap<object, string | undefined>()
 
-  constructor(private deps: { store: MemoryStore; registry: TypeRegistry; budget: number; memoryRoot?: string }) {}
+  constructor(private deps: { store: MemoryStore; registry: TypeRegistry; budget: number; memoryRoot?: string; evidenceLookup?: EvidenceLookupLevel }) {}
 
   setWorkspacePath(session: object, path: string | undefined): void {
     this.workspacePaths.set(session, path)

@@ -36,10 +36,15 @@ export interface ScanToolResult {
     items: Array<{ id: string; memoryIds: string[]; summary: string; isNew: boolean }>
   }
   stats: { scanned: number; clean: number; issues: number; byType: Record<string, number> }
+  /** global 提升候选：模型存时标了 globalCandidate 的 workspace 记忆，待用户确认后 memory_promote。 */
+  promoteCandidates: { items: Array<{ id: string; summary: string }>; more: number }
   semanticCachedAt: number | null
   notes: string[]
   message: string
 }
+
+/** 提升候选一次最多列这些，其余折叠——不让治理报告被候选淹没。 */
+const PROMOTE_LIMIT = 5
 
 /** 把扫描结果渲染成给模型看的一段文本。纯函数。 */
 export function renderScanResult(result: ScanToolResult): string {
@@ -47,11 +52,24 @@ export function renderScanResult(result: ScanToolResult): string {
   for (const f of result.findings) {
     lines.push(`- [${f.severity}] ${f.type} ${f.memoryIds.join('+')}：${f.summary} → ${f.suggestedAction}`)
   }
+  // 证据下钻提示（设计 evidence-anchor §6）：治理裁决是高赌注不可逆动作，下钻引导不低于 strict
+  if (result.findings.some(f => f.type === 'expired')) {
+    lines.push('过期候选可先用 memory_source 回查出处，向用户复述当时语境，再决定 refresh 还是 forget。')
+  }
   if (result.pendingDecisions.items.length > 0) {
     lines.push('待裁决冲突（用 memory_confirm resolve 裁决，需 decisionId）：')
     for (const item of result.pendingDecisions.items) {
       lines.push(`- [${item.id}] ${item.summary}`)
     }
+    lines.push('裁决前可用 memory_source 回查双方记忆的原始出处（当时谁说的、什么语境）；与 AGENTS.md 基线的垂直冲突请核对当前基线内容，不必回查旧会话。')
+  }
+  if (result.promoteCandidates.items.length > 0) {
+    lines.push('建议提升全局（模型标记，需你确认后用 memory_promote 提升；不确认就留在项目内）：')
+    for (const c of result.promoteCandidates.items) {
+      lines.push(`- [${c.id}] ${c.summary}`)
+    }
+    if (result.promoteCandidates.more > 0) lines.push(`  …另有 ${result.promoteCandidates.more} 条提升候选未列出`)
+    lines.push('提升前可用 memory_source 回查候选的出生语境，确认当时确实是跨项目通用的表述、不是项目绑定的顺口一句。')
   }
   return lines.join('\n')
 }
@@ -130,9 +148,16 @@ export async function executeScan(rawArgs: unknown, deps: ScanToolDeps, exec?: u
     byType,
   }
 
+  // global 提升候选：只吃模型主动标的 globalCandidate（不掺 misplaced——它双向，该降级的会被误列）。限流。
+  const allCandidates = records.filter(r => r.globalCandidate).map(r => ({ id: r.id, summary: r.summary }))
+  const promoteCandidates = {
+    items: allCandidates.slice(0, PROMOTE_LIMIT),
+    more: Math.max(0, allCandidates.length - PROMOTE_LIMIT),
+  }
+
   const noteSuffix = notes.length > 0 ? `（${notes.join('；')}）` : ''
   return {
-    findings, pendingDecisions: { created, existing, items }, stats, semanticCachedAt, notes,
-    message: `扫描 ${stats.scanned} 条记忆，发现 ${stats.issues} 个问题${created > 0 ? `，新增 ${created} 个待决冲突` : ''}${noteSuffix}。清理需用户确认后执行：删除用 memory_forget，冲突裁决用 memory_confirm。`,
+    findings, pendingDecisions: { created, existing, items }, stats, promoteCandidates, semanticCachedAt, notes,
+    message: `扫描 ${stats.scanned} 条记忆，发现 ${stats.issues} 个问题${created > 0 ? `，新增 ${created} 个待决冲突` : ''}${promoteCandidates.items.length > 0 ? `，${allCandidates.length} 条建议提升全局` : ''}${noteSuffix}。清理需用户确认后执行：删除用 memory_forget，冲突裁决用 memory_confirm，提升全局用 memory_promote。`,
   }
 }

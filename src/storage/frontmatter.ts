@@ -11,7 +11,7 @@ const ISO_MS_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const FILE_KEY_ORDER = [
   'id', 'name', 'type', 'tags', 'status', 'confidence', 'source',
   'createdAt', 'updatedAt', 'lastConfirmedAt', 'validFrom', 'validTo',
-  'supersedes', 'summary',
+  'supersedes', 'summary', 'globalCandidate',
 ] as const
 const KNOWN_FILE_KEYS = new Set<string>(FILE_KEY_ORDER)
 
