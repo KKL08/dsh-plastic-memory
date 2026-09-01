@@ -1,9 +1,9 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { executeSnapshotTool, type SnapshotToolDeps, type SnapshotToolResult } from './snapshot-tool-logic.ts'
+import { executeSnapshotTool, type SnapshotToolDeps, type SnapshotToolResult } from './snapshot.ts'
 
 /**
- * 把 memory_snapshot 接到 dsh 框架上。测试只测 snapshot-tool-logic.ts 纯逻辑，
+ * 把 memory_snapshot 接到 dsh 框架上。测试只测 snapshot.ts 纯逻辑，
  * 本文件由 typecheck + 真机冒烟保证（docs/p1-verification.md）。
  */
 export function createSnapshotTool(deps: SnapshotToolDeps): ToolDefinition {
@@ -21,6 +21,6 @@ export function createSnapshotTool(deps: SnapshotToolDeps): ToolDefinition {
       schema: { type: 'json' },
       render: (_args, value) => [{ type: 'text', text: (value as SnapshotToolResult).message }],
     },
-    execute: (args) => executeSnapshotTool(args, deps) as never,
+    execute: (args) => executeSnapshotTool(args, deps),
   })
 }

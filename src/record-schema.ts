@@ -21,7 +21,7 @@ export const memoryRecordSchema = z.object({
   recallCount: z.number(),
   validFrom: z.number().optional(),
   validTo: z.number().optional(),
-  status: z.enum(['active', 'stale', 'superseded', 'expired', 'deleted']),
+  status: z.enum(['active', 'superseded', 'deleted']),
   confidence: z.number().min(0).max(1),
   supersedes: z.array(z.string()).optional(),
   /** 模型自主判断"该全局"但无权直写 global：落 workspace 时打此标记，治理时作为提升候选。 */

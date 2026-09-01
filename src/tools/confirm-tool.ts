@@ -20,6 +20,6 @@ export function createConfirmTool(deps: ConfirmToolDeps): ToolDefinition {
       schema: { type: 'json' },
       render: (_args, value) => [{ type: 'text', text: (value as ConfirmResult).message }],
     },
-    execute: (args) => executeConfirm(args, deps) as never,
+    execute: (args) => executeConfirm(args, deps),
   })
 }

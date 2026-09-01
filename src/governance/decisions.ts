@@ -1,4 +1,4 @@
-import type { KvTable } from './table.ts'
+import type { KvTable } from '../kv-table.ts'
 import { genId, type PendingDecision } from './schema.ts'
 
 /** 去重 key：memoryIds 排序拼接 + baselineRef（垂直冲突与横向冲突互不干扰）。 */
@@ -7,10 +7,14 @@ export function dedupKey(memoryIds: string[], baselineRef?: string): string {
 }
 
 /**
- * pending-decisions 待决账本（设计稿 §4）。只放 conflict；resolved 直接删（审计走 dsh trace）。
+ * pending-decisions 待决账本（docs/p1-governance-health-design.md §4）。只放 conflict；resolved 直接删（审计走 dsh trace）。
  */
 export class PendingDecisionsStore {
-  constructor(private table: KvTable<PendingDecision>) {}
+  private table: KvTable<PendingDecision>
+
+  constructor(table: KvTable<PendingDecision>) {
+    this.table = table
+  }
 
   list(): PendingDecision[] {
     return [...this.table.entries()].map(([, e]) => e).sort((a, b) => a.firstSeenAt - b.firstSeenAt)

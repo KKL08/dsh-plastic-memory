@@ -3,9 +3,8 @@ import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { executeForget, type ForgetResult, type ForgetToolDeps } from './forget.ts'
 
 /**
- * 把 memory_forget 工具接到 dsh 框架上。顶层 import defineTool，运行时无法在
- * 本地测试环境加载（dsh peer 依赖未装），所以测试只测 forget.ts 的纯逻辑；
- * 本文件的正确性由 typecheck 保证，真机接线见 docs/p1-verification.md。
+ * 把 memory_forget 工具接到 dsh 框架上。纯逻辑在 forget.ts，不依赖框架包，测试直接测它；
+ * 本文件由 typecheck + 真机验证保证（docs/p1-verification.md）。
  */
 export function createForgetTool(deps: ForgetToolDeps): ToolDefinition {
   return defineTool({
@@ -19,6 +18,6 @@ export function createForgetTool(deps: ForgetToolDeps): ToolDefinition {
       schema: { type: 'json' },
       render: (_args, value) => [{ type: 'text', text: (value as ForgetResult).message }],
     },
-    execute: (args) => executeForget(args, deps) as never,
+    execute: (args) => executeForget(args, deps),
   })
 }

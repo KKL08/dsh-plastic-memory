@@ -1,18 +1,25 @@
 import type { MemoryStore } from '../store.ts'
 import type { TypeRegistry } from '../type-registry.ts'
+import type { SnapshotStore } from '../governance/snapshots.ts'
 import { runSavePipeline, type PipelineResult, type SaveCandidate } from '../pipeline.ts'
 
 /** memory_save 运行时需要的会话上下文，由框架绑定层的 resolveContext 提供。 */
 export interface SaveContext {
   workspacePath: string | undefined
-  session: { id: string; lastSeq: number }
+  /** turnStartSeq 是证据锚的起点（当轮 turn/start 的 seq）；缺省时管线回退整会话锚。 */
+  session: { id: string; lastSeq: number; turnStartSeq?: number }
 }
+
+/** memory_save 的入参：schema 里 tags 可选，落库前归一化成 SaveCandidate（tags 必填）。 */
+export type SaveArgs = Omit<SaveCandidate, 'tags'> & { tags?: string[] }
 
 /** memory_save 工具的依赖，纯逻辑层与框架绑定层共用。 */
 export interface SaveToolDeps {
   store: MemoryStore
   registry: TypeRegistry
   resolveContext(exec: unknown): Promise<SaveContext>
+  /** update global 目标前拍快照用（快照先行）；生产接线传入已有实例，测试可缺省。 */
+  snapshots?: SnapshotStore
 }
 
 /** 把管线结果渲染成给模型看的一段文本。纯函数。 */
@@ -47,13 +54,12 @@ export function renderSaveResult(result: PipelineResult): string {
  * 不依赖任何 dsh 框架包，测试直接调它。
  */
 export async function executeSave(
-  rawArgs: unknown,
+  args: SaveArgs,
   exec: unknown,
   deps: SaveToolDeps,
 ): Promise<PipelineResult> {
   const context = await deps.resolveContext(exec)
-  const raw = rawArgs as SaveCandidate & { tags?: string[] }
-  const candidate: SaveCandidate = { ...raw, tags: raw.tags ?? [] } // 可选参数归一化
+  const candidate: SaveCandidate = { ...args, tags: args.tags ?? [] } // 可选参数归一化
   return runSavePipeline(candidate, {
     store: deps.store,
     registry: deps.registry,
@@ -61,5 +67,6 @@ export async function executeSave(
     // 也需要知道当前有没有 workspace 桶）。global 记忆最终不带 workspacePath 由 pipeline 组装时归 undefined。
     workspacePath: context.workspacePath,
     session: context.session,
+    snapshots: deps.snapshots,
   })
 }

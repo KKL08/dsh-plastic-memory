@@ -1,60 +1,254 @@
 # dsh-plastic-memory
 
-dsh 的跨 session 结构化记忆插件：把对话里值得长期记住的信息（用户偏好、项目状态、事实经验）存下来，按 session 冻结成 snapshot 注入上下文，并配一层治理机制防止记忆腐烂。
+![Plastic Memories](assets/banner.jpg)
 
-## 安装
+![Version](https://img.shields.io/badge/version-0.1.0--beta-yellow)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+![Platform](https://img.shields.io/badge/platform-DeepSeek%20Harness%20%E2%89%A50.1.1-4D6BFF)
+![Node](https://img.shields.io/badge/node-%5E22.19.0%20%7C%7C%20%E2%89%A524-339933?logo=node.js&logoColor=white)
+
+*「愿你有一天，能与珍爱之人再次相逢。」——《可塑性记忆》*
+
+对话产生轨迹，轨迹沉淀为记忆。记忆是原始经历经过提炼与重构后的认知结论，且在整个生命周期中持续塑形演进。
+
+---
+
+
+
+### 灵感来源
+
+插件取名灵感源自动画《可塑性记忆》（*Plastic Memories*）。在原作中，拥有独立心智的 Giftia 寿命被严格限制在 **81,920 小时（约 9 年 4 个月）**。若记忆容量超载且缺乏妥善管理与回收，Giftia 的人格便会发生不可逆的崩溃，异化为失去理智的**「徘徊者（Wanderer）」**。
+
+在 LLM 时代，智能体（Agent）的长期记忆系统同样面临着类似的工程挑战：过期、矛盾、冗余与孤立的记忆不断堆积，导致 Agent 认知漂移、输出幻觉与冲突决策，造成 Token 浪费与任务结果质量腐化。
+
+为此，`dsh-plastic-memory` 是一款基于 DeepSeek Harness 的 **Agent 记忆插件**。它提供记忆存储、分类、检索与治理功能，赋予 Agent 记忆**可塑性（Plasticity）与生命周期（Lifecycle）**：除了常规记忆的提炼沉淀与精准唤起，还具备健康体检、事实冲突判定与适时遗忘机制。让有价值的共识历久弥新，让腐化的信息有序退场。
+
+---
+
+
+
+### 基础功能映射
+
+
+| 《可塑性记忆》世界观设定             | `dsh-plastic-memory` 功能对应                | 作用价值                                |
+| ------------------------ | ---------------------------------------- | ----------------------------------- |
+| **艾拉的日记**                | **对话中沉淀记忆（**`memory_save`**）**           | 从日常对话与任务中提炼记忆点，自动写入保存               |
+| **Giftia 的灵魂载体 Alma OS** | **文件即记忆（Markdown）**                      | 每条记忆为一个标准 Markdown 文件，透明、可编辑、便于维护管理 |
+| **Giftia 的心智寿命**         | **记忆保质与衰退机制 (**`decayDays`**)**          | 引入基于时间维度的记忆新鲜度                      |
+| **徘徊者（Wanderer）**        | **记忆矛盾与事实冲突（Memory Rot）**                | 陈旧与相互矛盾的记忆会干扰上下文，支持针对性扫描并处置      |
+| **第 1 终端服务（回收业务）**       | **记忆治理层（**`Governance`**）**              | 全库记忆体检、置信度刷新、清理问题记忆与孤立节点            |
+| **人机搭档协作制**              | **用户与 Agent 协同提权（**`memory_promote`**）** | Global 全局记忆与跨作用域提升**必须经由用户显式确认**    |
+| **最初相遇的节点**              | **记忆溯源（**`memory_source`**）**            | 每条记忆均锚定原始对话切片，确保记忆原始出处可查可追溯          |
+
+
+---
+
+
+
+## ✨ 核心特性
+
+- 🗂️ **记忆分类与可扩展**  
+内置 `profile` / `preference` / `knowledge` / `project` / `reference` 五类，覆盖身份、习惯、知识、项目决策与资源指南，分类保存、按需召回。同时支持扩展自定义分类（测试功能）。
+- 🛡️ **严格的工作区隔离与写入保护**  
+工作区（Workspace）记忆相互物理隔离，互不可见；全局（Global）记忆跨项目只读共享。模型无权直接写入全局域，任何项目记忆提升到全局必须经由用户确认，避免全局规则无序扩张与污染。
+- 🩺 **内建多层治理体系（Governance）**  
+配备记忆体检机制，阻断高危信息写入（如 API 密钥），治理规则冲突，防止长期运行带来的认知退化。
+- 🔍 **精确的因果溯源（Traceability）**  
+每条记忆沉淀时均锚定原始会话轨迹切片。深入分析时，模型可调用 `memory_source` 回溯对话原始背景。
+
+---
+
+
+
+## 🏗️ 架构概览
+
+![架构概览](assets/architecture.svg)
+
+
+
+**工作流简述：** 对话中模型触发 `memory_save` 提炼有效记忆节点，写入前经由安全管线完成去重与密钥泄露拦截。记忆保存为 Markdown 文件，在会话启动或上下文压缩时以只读快照形式精准注入。存储层之上叠加治理层，持续读取并处置记忆库，抑制上下文腐化与规则漂移。
+
+---
+
+
+
+## 📦 安装
 
 ```bash
+dsh plugin --profile <name> add github:KKL08/dsh-plastic-memory
+```
+
+> 将 `<name>` 替换为目标 Profile 名称（如 `web`）。安装后插件声明将自动写入该 Profile 的 `cordis.patch.yml`，重启该 Profile 后生效。仓库自带编译产物，安装不需要构建授权。  
+> **运行环境要求**：Node.js `^22.19.0 || >=24`，DeepSeek Harness ≥ 0.1.1。
+
+从本地检出安装时，先在检出目录装好运行依赖，再按路径添加：
+
+```bash
+pnpm install --prod --config.auto-install-peers=false
 dsh plugin --profile <name> add ./dsh-plastic-memory
 ```
 
-`<name>` 换成目标 profile 名（如 `web`）。安装后插件的 bundle 声明（见 `cordis.patch.yml`）会写入该 profile 自己的 cordis.patch.yml，随 profile 一起启动。
+---
 
-## 配置项
 
-在 profile 的 cordis.patch.yml 里，找到 `id: plastic-memory` 那一行，在 `config` 下调整：
 
-| 字段 | 默认值 | 说明 |
-| --- | --- | --- |
-| `writeMode` | `'proactive'` | 写入模式。`proactive` 是模型在对话中直接调 `memory_save`；`reflective`（P1）是空闲后由小模型异步提取，P0 只支持 `proactive`，其余取值按 `auto` 兼容处理 |
-| `reflectModel` | `null` | `reflective` 模式下用的模型名，P0 未启用 |
-| `reflectIdleMinutes` | `30` | `reflective` 模式下的空闲触发阈值（分钟），P0 未启用 |
-| `approval` | `'auto'` | 写入审批策略。`auto` 免审批直接写，`always`/`by-type`（P1）分别是逐条审批、按类型审批，P0 只支持 `auto` |
-| `approvalTypes` | `[]` | `approval: by-type` 时需要审批的类型列表，P0 未启用 |
-| `snapshotTokenBudget` | `4000` | frozen snapshot 注入上下文时的 token 预算上限 |
-| `template` | `'coding'` | 场景模板，决定内置五类之外追加哪些类型。`coding` 追加 `procedure`（可复用流程），`office` 追加 `decision`/`commitment`/`person`，`custom` 不追加，只用五类内置 + `customTypes` |
-| `customTypes` | `{}` | 用户自定义类型，键是类型名，值是 `{ label, description, recall, decayDays, governancePriority }`；不能与内置五类重名，重名插件加载即报错 |
-| `governance.enabled` | `true` | 是否启用治理层（陈旧度标注、健康检查等） |
-| `governance.onWrite` | `true` | 是否在每次写入时触发治理检查（如重复检测） |
+## 🚀 快速上手
 
-## 内置五类记忆
+1. **保存记忆**：对话中告诉模型需要记住的内容，模型自动识别并写入；下次开启新会话时，已保存的记忆随上下文快照自动注入，无需手动操作。
+2. **检索记忆**：需要回顾时，让模型搜索相关记忆，支持按类型、作用域过滤。
+3. **查看健康度**：让模型检查记忆库整体健康评分，了解当前记忆质量状况。
+4. **整理记忆**：让模型扫描全库，自动检出冲突、冗余、过期等问题并给出处置建议，确认后一键优化。
 
-不区分模板，任何配置下都可用：
+---
 
-| 类型 | 名称 | 说明 |
-| --- | --- | --- |
-| `profile` | 用户画像 | 用户的身份、角色、能力和知识水平。例：「用户是数据工程师，Go 熟练，React 刚上手」 |
-| `preference` | 行为偏好 | 用户纠正过的做法、确认过的习惯。例：「测试里不要 mock 数据库」 |
-| `knowledge` | 事实与经验 | 不随项目结束而失效的客观事实、规则、工具行为。例：「报销截止每月 25 日」 |
-| `project` | 项目信息 | 绑定项目生命周期的状态、决策、进展。例：「merge freeze 到 3 月 5 日」 |
-| `reference` | 参考引用 | 外部资源的位置指针，回答「去哪找」。例：「pipeline bugs 在 Linear 的 INGEST 项目」 |
 
-`template: coding`（默认）额外追加 `procedure`（可复用流程），`template: office` 额外追加 `decision`/`commitment`/`person`。
 
-## 工具
+## 🧠 记忆体系
 
-**P0 已实现：**
+系统内置 5 类基础记忆类型，适用于所有交互场景：
 
-- `memory_save` —— 保存或更新一条记忆（`action: create|update`）。写入前过格式校验、结构去重和审批决策；怀疑重复时返回 duplicate-suspected，需要模型改用 `update` 或带 `force: true` 重发。
-- `memory_search` —— 按关键词检索记忆（匹配内容/摘要/标签），可按类型和 scope（global/workspace/all-visible）过滤。
-- `memory_forget` —— 软删除一条记忆（标记已删除，不再注入和检索），需要给出遗忘原因。
 
-**P1 规划中（尚未实现）：**
+| 类型 (`Type`)  | 说明                   |
+| ------------ | -------------------- |
+| `profile`    | 用户的个人身份、专业角色与能力画像    |
+| `preference` | 经过纠正与确认的准则、行为习惯      |
+| `knowledge`  | 跨越项目周期的通用事实、业务常识与规则  |
+| `project`    | 与当前项目生命周期强相关的临时状态与决策 |
+| `reference`  | 外部系统与资源的索引           |
 
-- `memory_confirm` —— 确认记忆仍然有效，刷新陈旧度时间戳。
-- `memory_scan` —— 触发一次深度治理扫描。
-- `memory_health` —— 返回记忆库的健康评分和问题摘要。
 
-## 范围说明
 
-当前是 P0：五类内置类型、三个核心工具、写入候选管线、frozen snapshot 注入、proactive 写入模式、陈旧度标注。P1 计划补齐 reflective 写入模式、治理层三个工具、健康评分、场景模板/自定义类型的进一步打磨，以及 office 模板的 sensitivity gate；P2 展望包括 companion 模板、可视化记忆地图、技能结晶等。详见 `docs/prd-plastic-memory.md` 第 11 节。
+
+### 场景扩展模板
+
+通过配置模板可在基础 5 类之上追加领域专用类型：
+
+- `coding`（默认）：追加 `procedure`（可复用的标准操作流程）。
+- `office`：追加 `decision`（会议决议）/ `commitment`（待办承诺）/ `person`（团队人员画像）。
+- `custom`：仅保留 5 类核心内置，其余完全由用户在配置中自定义声明（测试中，后续会进一步优化）。
+
+
+
+### 召回注入模式 (`recall`)
+
+控制不同记忆类型在上下文中的呈现形式：
+
+
+| 模式        | 注入行为                           | 适用场景        |
+| --------- | ------------------------------ | ----------- |
+| `core`    | **全文注入**：常驻系统上下文               | 高频核心偏好与人设画像 |
+| `search`  | **索引注入**：进入概览索引，模型按需调取         | 详细流程规范与业务知识 |
+| `passive` | **静默索引**：仅在索引中呈现名称，最大化节约 Token | 偶发调用的参考信息   |
+
+
+
+
+### 自定义类型定义
+
+在配置项 `customTypes` 中声明（名称不能与内置 5 类冲突）：
+
+```yaml
+customTypes:
+  ritual:
+    label: 团队仪式
+    description: 定期执行的团队流程与规范
+    whenToSave: 用户提到固定周期执行的流程或仪式时
+    recall: search
+    governancePriority: low
+    decayDays: 90
+```
+
+---
+
+
+
+## 🛠️ 工具集一览
+
+
+
+### 1. 日常交互工具
+
+
+| 工具                | 用途与特性                                               |
+| ----------------- | --------------------------------------------------- |
+| `memory_save`     | 沉淀或更新记忆。内置重复性校验与密钥嗅探，遇到近似内容时主动引导 `update` 或 `force` |
+| `memory_search`   | 多维全文检索，支持按类型（Type）及作用域（Scope）过滤，默认返回 10 条（上限 50）    |
+| `memory_forget`   | 记忆批量移除。删除前自动归档快照，14 天内可恢复                           |
+| `memory_snapshot` | 快照管理：手动打标、差异比对（Diff）、历史版本回滚与误删恢复                    |
+| `memory_source`   | **因果溯源**：回溯记忆提炼时的原始会话轨迹切片，校验记忆产生的原始意图与上下文背景，防范幻觉     |
+
+
+
+
+### 2. 记忆健康治理工具（`governance.enabled = true`）
+
+
+| 工具               | 用途与特性                                                                |
+| ---------------- | -------------------------------------------------------------------- |
+| `memory_health`  | **健康度评分（0–100）**：评估全库记忆质量                                            |
+| `memory_scan`    | 全库深度体检：规则层（密钥泄露、超长、孤立引用、破损文件）；语义层（冲突、冗余）按需调用 LLM                     |
+| `memory_confirm` | **保质期刷新与处置决策**：确认陈旧记忆置信度以延展生命周期，或对冲突扫描结果进行人工仲裁                       |
+| `memory_promote` | **记忆提权流转**：将验证过的项目专属记忆提升至全局（Global）或同步至 `AGENTS.md`，**必须经由用户明确指令确认** |
+
+
+---
+
+
+
+## 📂 存储与物理布局
+
+记忆在本地文件系统中的组织清晰透明，支持直观查看与维护：
+
+```text
+<memoryRoot>/
+  global/                    # 全局记忆（跨项目共享）
+    <id>.md                  # 独立记忆词条（YAML Frontmatter + 正文）
+    MEMORY.md                # 自动生成的全局聚合索引
+  <项目slug>-<hash>/         # 项目记忆（工作区隔离）
+    .workspace               # 关联的本地绝对路径标记
+    <id>.md
+    MEMORY.md
+```
+
+
+
+### 手动编辑与文件热重载规范
+
+插件具备**外部变更感知机制**，每次调用工具前均会自动校验外部修改并重载。
+
+> ⚠️ **编辑注意事项**：  
+> 元数据中的时间戳必须严格遵循 **ISO 8601 UTC** 格式（例如 `2026-09-01T08:30:00.000Z`）。若格式损坏，该文件会被系统安全隔离以防止全局污染，待修复后自动重新载入。
+
+---
+
+
+
+## ⚙️ 核心配置参考
+
+在 Profile 对应的 `cordis.patch.yml` 中调整 `plastic-memory` 配置：
+
+
+| 配置项                              | 默认值               | 说明                                                           |
+| -------------------------------- | ----------------- | ------------------------------------------------------------ |
+| `writeMode`                      | `'proactive'`     | 写入模式（目前唯一值，后续会扩展更多模式）                                        |
+| `snapshotTokenBudget`            | `4000`            | 注入上下文的最大 Token 预算上限                                          |
+| `evidenceLookup`                 | `'strict'`        | 证据溯源模式：`off`（关闭） / `strict`（仅强信号提示） / `active`（主动引导）         |
+| `template`                       | `'coding'`        | 预设场景模板：`coding` / `office` / `custom`                        |
+| `customTypes`                    | `{}`              | 自定义记忆类型定义字典                                                  |
+| `governance.enabled`             | `true`            | 是否启用主动治理层（体检、健康分、提权）                                         |
+| `governance.health.sensitivity`  | `'normal'`        | 健康警报灵敏度：`conservative` / `normal` / `proactive`              |
+| `governance.globalPromoteTarget` | `'plugin-global'` | 提权目标：`plugin-global`（插件全局域）或 `agents-md`（`~/.dsh/AGENTS.md`） |
+| `memoryRoot`                     | `''`              | 存储根路径，缺省为 `${DSH_HOME:-~/.dsh}/memories`                     |
+
+
+---
+
+
+
+## 📄 License
+
+[MIT License](LICENSE)
+
+---
+
+如果这个项目对你有帮助，欢迎点个 ⭐ 支持一下，十分感谢。

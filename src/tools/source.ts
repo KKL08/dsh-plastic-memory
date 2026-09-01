@@ -56,7 +56,7 @@ export function extractEventText(event: RawEvent): { role: string; text: string 
 }
 
 /**
- * memory_source 纯逻辑（设计 §5）：memoryId → store 取锚 → readEvent 单点+窗口 → 紧凑渲染。
+ * memory_source 纯逻辑（docs/design-evidence-anchor.md §5）：memoryId → store 取锚 → readEvent 单点+窗口 → 紧凑渲染。
  * 锚在工具内部解析，模型构造不出任意 sessionId+seq；可读位置被记忆库枚举死。
  */
 export async function executeSource(
@@ -66,7 +66,7 @@ export async function executeSource(
 ): Promise<SourceResult> {
   const record = deps.store.get(args.memoryId)
   if (!record || record.status === 'deleted') return { kind: 'not-found', memoryId: args.memoryId }
-  // ⑧ 跨项目隔离：只准解引用当前项目或 global 记忆的锚
+  // 跨项目隔离：只准解引用当前项目或 global 记忆的锚
   if (record.scope === 'workspace' && record.workspacePath !== context.workspacePath) {
     return { kind: 'forbidden', memoryId: args.memoryId }
   }

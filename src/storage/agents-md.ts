@@ -1,4 +1,5 @@
-import { readFile, writeFile, mkdir } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 /**
@@ -8,9 +9,10 @@ import { dirname, join } from 'node:path'
 const BLOCK_START = '<!-- dsh-memory:start -->'
 const BLOCK_END = '<!-- dsh-memory:end -->'
 
-/** memoryRoot 是 $DSH_HOME/memories，其父目录即 $DSH_HOME，全局指令文件在 $DSH_HOME/AGENTS.md。 */
-export function agentsMdPath(memoryRoot: string): string {
-  return join(dirname(memoryRoot), 'AGENTS.md')
+/** 独立解析 $DSH_HOME（与 paths.ts 的 resolveMemoryRoot 同源），不从 memoryRoot 反推：
+ *  memoryRoot 可自定义配置到别处，反推会把内容写进 dsh 永不读取的 AGENTS.md。 */
+export function agentsMdPath(): string {
+  return join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'AGENTS.md')
 }
 
 export interface AgentsMdWriter {
@@ -21,7 +23,13 @@ export interface AgentsMdWriter {
 export function createAgentsMdWriter(filePath: string): AgentsMdWriter {
   return {
     async append(line: string): Promise<void> {
-      const entry = `- ${line}`
+      // 写入净化：进区块的文本不得长得像区块边界。区块定位靠 indexOf 标记字面量（数据与
+      // 控制信号同在纯文本通道），内容里混入标记会让后续 append 误认边界、写出受管区；
+      // 换行同理——区块格式是一行一条，多行内容会破坏幂等判断的按行语义。
+      const sanitized = line
+        .replaceAll(BLOCK_START, '').replaceAll(BLOCK_END, '')
+        .replace(/\s*\n\s*/g, ' ').trim()
+      const entry = `- ${sanitized}`
       let existing = ''
       try { existing = await readFile(filePath, 'utf8') } catch { /* 文件不存在，按空处理 */ }
 
@@ -40,7 +48,11 @@ export function createAgentsMdWriter(filePath: string): AgentsMdWriter {
         next = `${before.endsWith('\n') ? before : before + '\n'}${entry}\n${after}`
       }
       await mkdir(dirname(filePath), { recursive: true })
-      await writeFile(filePath, next, 'utf8')
+      // AGENTS.md 是用户手维护的文件，中断留下半个文件会毁掉用户内容；tmp+rename 让本次写入
+      // 要么整体生效要么完全不动（与全库原子写纪律一致）。
+      const tmp = `${filePath}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+      await writeFile(tmp, next, 'utf8')
+      await rename(tmp, filePath)
     },
   }
 }

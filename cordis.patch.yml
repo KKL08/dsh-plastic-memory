@@ -1,8 +1,8 @@
 # dsh-plastic-memory 的 bundle 声明：插件安装到某个 profile 后，
 # `dsh plugin add` 把这段 insert 写进该 profile 自己的 cordis.patch.yml，
-# 交给 dsh 的 patch 合成流程按 id 装配。config 只列出偏离 schema 默认值的字段，
-# 其余项（approval / approvalTypes / snapshotTokenBudget / customTypes /
-# governance 等）沿用 src/index.ts 里 Config 的默认值，见 README 配置项一节。
+# 交给 dsh 的 patch 合成流程按 id 装配。config 显式钉住两项核心运行模式（当前取值即默认值），
+# 其余项（snapshotTokenBudget / evidenceLookup / customTypes / governance 等）
+# 沿用 src/index.ts 里 Config 的默认值，见 README 配置项一节。
 - insert:
     - id: plastic-memory
       name: dsh-plastic-memory

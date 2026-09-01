@@ -1,24 +1,34 @@
 {
   "name": "dsh-plastic-memory",
-  "version": "0.1.0",
+  "version": "0.1.0-beta",
+  "description": "Memory plugin with built-in governance for DeepSeek Harness",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KKL08/dsh-plastic-memory.git"
+  },
   "type": "module",
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },
-  "main": "src/index.ts",
+  "main": "lib/index.js",
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dependencies": {
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/dsh-attachment": "*",
-    "@deepseek-ai/dsh-brand": "*",
-    "@deepseek-ai/dsh-invariants": "*",
     "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-storage-domain": "*",
     "@deepseek-ai/dsh-system-prompt": "*",
     "@deepseek-ai/dsh-timeout": "*",
     "@deepseek-ai/dsh-tools": "*",
-    "@deepseek-ai/schemastery": "*",
-    "yaml": "*",
-    "zod": "^4.4.3"
+    "@deepseek-ai/schemastery": "*"
   },
   "dsh": {
     "bundle": {

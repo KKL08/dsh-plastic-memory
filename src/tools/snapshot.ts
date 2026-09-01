@@ -22,7 +22,7 @@ export type SnapshotToolResult =
   | { kind: 'error'; message: string }
 
 /**
- * memory_snapshot（设计稿 §6 恢复流程的工具面）：create 手动快照 / list 清单 /
+ * memory_snapshot（docs/p1-governance-health-design.md §6 恢复流程的工具面）：create 手动快照 / list 清单 /
  * show 对比 / restore 选择性恢复。restore 冲突保护：快照后被修改过的记录默认跳过。
  */
 export async function executeSnapshotTool(
@@ -31,6 +31,7 @@ export async function executeSnapshotTool(
 ): Promise<SnapshotToolResult> {
   const args = rawArgs as SnapshotToolArgs
   const now = deps.now?.() ?? Date.now()
+  await deps.snapshots.sweep(now)  // 任何动作都先清一遍超窗旧快照（list 入口也发生）
 
   if (args.action === 'create') {
     // 去重（与 memory_forget 的约定一致）：调用者传入重复 id 不应重复计入快照
@@ -39,7 +40,7 @@ export async function executeSnapshotTool(
       ? uniqueIds
           .map(id => deps.store.get(id))
           .filter((r): r is MemoryRecord => r !== undefined && r.status !== 'deleted')
-      : deps.store.query({ status: ['active', 'stale'] })
+      : deps.store.query({ status: ['active'] })
     const snap = await deps.snapshots.capture({
       operation: 'manual',
       description: args.description ?? `手动快照（${records.length} 条）`,

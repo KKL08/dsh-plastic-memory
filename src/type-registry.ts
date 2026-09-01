@@ -1,5 +1,9 @@
-import type { Config } from './index.ts'
 import type { MemoryTypeDefinition } from './types.ts'
+
+export interface TypeRegistryConfig {
+  template: string
+  customTypes: Record<string, Omit<MemoryTypeDefinition, 'name'>>
+}
 
 export const BUILTIN_TYPES: readonly MemoryTypeDefinition[] = [
   { name: 'profile', label: '用户画像', description: '用户的身份、角色、能力和知识水平。例：「用户是数据工程师，Go 熟练，React 刚上手」', whenToSave: '用户透露身份、角色、常用技术栈或熟练度', recall: 'core', decayDays: null, governancePriority: 'low' },
@@ -49,9 +53,7 @@ export function assertNoBuiltinCollision(types: readonly MemoryTypeDefinition[],
   }
 }
 
-export function buildTypeRegistry(
-  config: Pick<Config, 'template' | 'customTypes'>,
-): TypeRegistry {
+export function buildTypeRegistry(config: TypeRegistryConfig): TypeRegistry {
   const map = new Map<string, MemoryTypeDefinition>()
   for (const t of BUILTIN_TYPES) map.set(t.name, t)
 

@@ -1,7 +1,7 @@
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { memoryRecordSchema, type MemoryRecord } from '../record-schema.ts'
 
-/** 文件面不存在的字段：位置由目录表达，易变统计住 KV sidecar（契约总表见设计稿 §3）。 */
+/** 文件面不存在的字段：位置由目录表达，易变统计住 KV sidecar（契约总表见 docs/p15-storage-search-redesign.md §3）。 */
 const NON_FILE_KEYS = new Set(['scope', 'workspacePath', 'recallCount', 'lastRecalledAt', 'content'])
 /** 时间戳字段：文件面 ISO 8601（UTC、毫秒），内存面 epoch ms。 */
 const TIME_KEYS = new Set(['createdAt', 'updatedAt', 'lastConfirmedAt', 'validFrom', 'validTo'])

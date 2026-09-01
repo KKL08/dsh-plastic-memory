@@ -1,4 +1,13 @@
 import type { MemoryRecord } from './record-schema.ts'
+import { expandQueryTerms, matchScore } from './text.ts'
+
+/** 纯逻辑层的日志注入口：接线层（index.ts）传入 ctx.logger，缺省回退 console，
+ *  保证测试与独立使用场景仍有输出。file-table.ts / forget.ts 复用此形状，保持三层注入风格一致。 */
+export interface MemoryLogger {
+  info(message: string, detail?: unknown): void
+  warn(message: string, detail?: unknown): void
+  error(message: string, detail?: unknown): void
+}
 
 export interface MemoryTable {
   get(key: string): MemoryRecord | undefined
@@ -27,30 +36,6 @@ export class InMemoryTable implements MemoryTable {
   entries() { return this.map.entries() }
 }
 
-/** 把查询串展开成匹配项：空白分词后，每个词内的 CJK 段切 2 字滑窗 bigram（单字 CJK 段保留），
- * 非 CJK 段整体保留。无分词器时对 CJK 语料的标准做法——让"部署流程配置"这类非连续短语也能命中。 */
-export function expandQueryTerms(keyword: string): string[] {
-  const out = new Set<string>()
-  for (const term of keyword.toLowerCase().split(/\s+/).filter(Boolean)) {
-    for (const seg of term.match(/[一-鿿]+|[^一-鿿]+/g) ?? []) {
-      if (/[一-鿿]/.test(seg)) {
-        const chars = [...seg]
-        if (chars.length >= 2) for (let i = 0; i < chars.length - 1; i++) out.add(chars[i] + chars[i + 1])
-        else out.add(seg)
-      } else if (seg) out.add(seg)
-    }
-  }
-  return [...out]
-}
-
-/** 记录对一组匹配项的命中数（各项子串命中计 1）。haystack 覆盖 id/name/content/summary/tags。 */
-export function matchScore(record: MemoryRecord, terms: string[]): number {
-  const haystack = `${record.id}\n${record.name}\n${record.content}\n${record.summary}\n${record.tags.join(' ')}`.toLowerCase()
-  let n = 0
-  for (const t of terms) if (haystack.includes(t)) n++
-  return n
-}
-
 export interface QueryFilter {
   scope?: { kind: 'global' } | { kind: 'workspace'; path: string } | { kind: 'visible'; workspacePath: string | undefined }
   types?: string[]
@@ -60,7 +45,13 @@ export interface QueryFilter {
 }
 
 export class MemoryStore {
-  constructor(private table: MemoryTable) {}
+  private table: MemoryTable
+  private log?: MemoryLogger
+
+  constructor(table: MemoryTable, log?: MemoryLogger) {
+    this.table = table
+    this.log = log
+  }
 
   get(id: string) { return this.table.get(id) }
   put(record: MemoryRecord) { return this.table.put(record.id, record) }
@@ -72,7 +63,7 @@ export class MemoryStore {
   }
 
   query(filter: QueryFilter): MemoryRecord[] {
-    const statuses = filter.status ?? ['active', 'stale']
+    const statuses = filter.status ?? ['active']
     const keyword = filter.keyword?.toLowerCase()
     // 排序 OR：命中任一匹配项即入选（硬 AND 会让"多一个不相关词"整组落空）。中文经 bigram 切分
     // 也参与匹配。命中数排序与 limit 由调用方（executeSearch）用同一 matchScore 收敛。
@@ -101,7 +92,7 @@ export class MemoryStore {
       void this.table
         .update(id, r => ({ ...r, lastRecalledAt: now, recallCount: r.recallCount + 1 }))
         .catch((err: unknown) => {
-          console.error('[plastic-memory] 召回统计更新失败:', err)
+          ;(this.log ?? console).error('[plastic-memory] 召回统计更新失败:', err)
         })
     }
   }

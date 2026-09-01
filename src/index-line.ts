@@ -7,6 +7,6 @@ export function sourceNote(r: MemoryRecord): string {
 
 export function formatIndexLine(r: MemoryRecord, opts: { passive: boolean }): string {
   const tags = r.tags.length > 0 ? ` — ${r.tags.join(', ')}` : ''
-  if (opts.passive) return `- [${r.id}] ${r.name}${tags}${sourceNote(r)}`  // passive 同样带低置信标注（drift D5）
+  if (opts.passive) return `- [${r.id}] ${r.name}${tags}${sourceNote(r)}`  // passive 同样带低置信标注
   return `- [${r.id}] ${r.name}（${r.summary}）${tags}${sourceNote(r)}`
 }

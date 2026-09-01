@@ -1,4 +1,4 @@
-import type { MemoryStore } from '../store.ts'
+import type { MemoryStore, MemoryLogger } from '../store.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
 import type { PendingDecisionsStore } from '../governance/decisions.ts'
 import type { MemoryRecord } from '../record-schema.ts'
@@ -9,6 +9,8 @@ export interface ForgetToolDeps {
   snapshots: SnapshotStore
   decisions: PendingDecisionsStore
   now?: () => number
+  /** 日志注入口，缺省回退 console（见 store.ts MemoryLogger）。 */
+  log?: MemoryLogger
 }
 
 export interface ForgetArgs {
@@ -25,14 +27,14 @@ export interface ForgetResult {
 }
 
 /**
- * memory_forget（P1 批量版）：快照先行 → 逐条软删 → 清理待决账本悬空引用。
+ * memory_forget（批量）：快照先行 → 逐条软删 → 清理待决账本悬空引用。
  * 不依赖任何 dsh 框架包，测试直接调它。
  */
 export async function executeForget(
-  rawArgs: unknown,
+  args: ForgetArgs,
   deps: ForgetToolDeps,
 ): Promise<ForgetResult> {
-  const { ids, reason } = rawArgs as ForgetArgs
+  const { ids, reason } = args
   const now = deps.now?.() ?? Date.now()
 
   // 调用者从多个扫描结果汇总 id 列表时可能重复某个 id
@@ -54,7 +56,7 @@ export async function executeForget(
     }
   }
 
-  // 快照先行（设计稿 §6）：删除前把受影响记录的完整状态存进 snapshots 表
+  // 快照先行（docs/p1-governance-health-design.md §6）：删除前把受影响记录的完整状态存进 snapshots 表
   const snapshot = await deps.snapshots.capture({
     operation: 'pre-forget',
     description: `遗忘 ${found.length} 条记忆前（原因：${reason}）`,
@@ -67,7 +69,7 @@ export async function executeForget(
   }
   await deps.decisions.removeByMemoryIds(forgotten)
 
-  console.log(`[plastic-memory] 遗忘 ${forgotten.length} 条记忆（${forgotten.join('、')}），原因：${reason}`)
+  ;(deps.log ?? console).info(`[plastic-memory] 遗忘 ${forgotten.length} 条记忆（${forgotten.join('、')}），原因：${reason}`)
   const missingNote = missing.length > 0 ? `；未找到：${missing.join('、')}` : ''
   return {
     ok: true, forgotten, missing, snapshotId: snapshot.id,

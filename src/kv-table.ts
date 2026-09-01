@@ -1,4 +1,4 @@
-/** 治理表的最小 KV 接口。与 store.ts 的 MemoryTable 同构，但泛型化以承载不同记录类型。 */
+/** 最小 KV 接口，供存储侧车表与治理各表共用。与 store.ts 的 MemoryTable 同构，但泛型化以承载不同记录类型。 */
 export interface KvTable<T> {
   get(key: string): T | undefined
   put(key: string, value: T): Promise<void>

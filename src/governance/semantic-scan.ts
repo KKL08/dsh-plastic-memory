@@ -3,11 +3,26 @@ import { SEVERITY_BY_TYPE, type Finding } from './schema.ts'
 
 /** 语义层的 LLM 抽象：纯逻辑只依赖这个接口，真机接线在 index.ts。 */
 export interface SemanticLlm {
-  complete(input: { system: string; user: string }): Promise<string>
+  /** signal 触发时应尽快取消在途请求，并抛出 AbortError（宿主 exec.signal 契约）。 */
+  complete(input: { system: string; user: string }, signal?: AbortSignal): Promise<string>
+}
+
+/** 取消判定：signal 已 abort，或捕获到的错误本身就是 AbortError。取消不降级、直接向上抛。 */
+export function isAbort(err: unknown, signal?: AbortSignal): boolean {
+  return signal?.aborted === true || (err instanceof Error && err.name === 'AbortError')
 }
 
 /** 单次语义扫描分析的记忆条数上限——超出会把整库内容塞进一条消息，撑爆上下文窗口。 */
 export const SEMANTIC_SCAN_MAX_RECORDS = 200
+
+/** 基线全文长度上限——大基线不设限会连同记忆列表一起撑爆上下文，导致语义层整体 failed。 */
+export const BASELINE_MAX_CHARS = 8000
+
+function clampBaseline(baseline: string): string {
+  if (baseline.length <= BASELINE_MAX_CHARS) return baseline
+  const omitted = baseline.length - BASELINE_MAX_CHARS
+  return `${baseline.slice(0, BASELINE_MAX_CHARS)}\n（基线过长，已截断，其余 ${omitted} 字符未纳入垂直冲突检测）`
+}
 
 const SEMANTIC_TYPES = new Set(['conflict', 'redundancy', 'misplaced', 'unclear'])
 
@@ -27,7 +42,7 @@ export function buildSemanticPrompt(
   baseline: string | null,
 ): { system: string; user: string } {
   const baselineSection = baseline
-    ? `## 权威配置基线（AGENTS.md/CLAUDE.md）\n${baseline}`
+    ? `## 权威配置基线（AGENTS.md/CLAUDE.md）\n${clampBaseline(baseline)}`
     : '## 权威配置基线\n（无权威配置基线，跳过垂直冲突检测）'
   const memoryLines = records.map(r =>
     `- id=${r.id} type=${r.type} scope=${r.scope}${r.workspacePath ? `(${r.workspacePath})` : ''}\n  content: ${r.content}\n  summary: ${r.summary}`)
@@ -89,6 +104,7 @@ export async function runSemanticScan(
   records: MemoryRecord[],
   baseline: string | null,
   llm: SemanticLlm,
+  signal?: AbortSignal,
 ): Promise<{ findings: Finding[]; failed: boolean; truncated?: number }> {
   // 全量记忆一次性塞进一条消息没有上限，库大了会撑爆上下文窗口——只分析前
   // SEMANTIC_SCAN_MAX_RECORDS 条，未分析的数量报给调用方，让用户知道结果不全。
@@ -103,9 +119,11 @@ export async function runSemanticScan(
   // 否则 layers=full 时已经算好的规则层结果会被一起丢掉。
   let firstRaw: string | null = null
   try {
-    firstRaw = await llm.complete(prompt)
-  } catch {
-    // 落到下面的重试
+    firstRaw = await llm.complete(prompt, signal)
+  } catch (err) {
+    // 用户取消不降级也不重试：立即向上抛，让工具结果标记为 isError（宿主 exec.signal 契约）。
+    if (isAbort(err, signal)) throw err
+    // 普通错误落到下面的重试
   }
   const first = firstRaw === null ? null : parseSemanticFindings(firstRaw, knownIds)
   if (first !== null) return { findings: first, failed: false, ...truncatedField }
@@ -113,8 +131,10 @@ export async function runSemanticScan(
   // 同上：重试调用本身也可能抛，与"重试输出仍无法解析"同等降级为 failed。
   let retryRaw: string | null = null
   try {
-    retryRaw = await llm.complete({ system: prompt.system, user: `${prompt.user}\n\n上次输出无法解析，请只输出 JSON。` })
-  } catch {
+    retryRaw = await llm.complete({ system: prompt.system, user: `${prompt.user}\n\n上次输出无法解析，请只输出 JSON。` }, signal)
+  } catch (err) {
+    // 同首次：取消直接抛，不吞成 failed
+    if (isAbort(err, signal)) throw err
     // 两次都失败，落到下面返回 failed:true
   }
   const retry = retryRaw === null ? null : parseSemanticFindings(retryRaw, knownIds)

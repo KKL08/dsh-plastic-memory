@@ -4,9 +4,8 @@ import type { PipelineResult } from '../pipeline.ts'
 import { executeSave, renderSaveResult, type SaveToolDeps } from './save.ts'
 
 /**
- * 把 memory_save 工具接到 dsh 框架上。顶层 import defineTool，运行时无法在
- * 本地测试环境加载（dsh peer 依赖未装），所以测试只测 save.ts 的纯逻辑；
- * 本文件的正确性由 typecheck 保证，真机接线留到 Task 10 验证。
+ * 把 memory_save 工具接到 dsh 框架上。纯逻辑在 save.ts，不依赖框架包，测试直接测它；
+ * 本文件由 typecheck + 真机验证保证。
  */
 export function createSaveTool(deps: SaveToolDeps): ToolDefinition {
   const typeNames = deps.registry.all().map(t => t.name)
@@ -34,6 +33,6 @@ export function createSaveTool(deps: SaveToolDeps): ToolDefinition {
       schema: { type: 'json' },
       render: (_args, value) => [{ type: 'text', text: renderSaveResult(value as PipelineResult) }],
     },
-    execute: (args, exec) => executeSave(args, exec, deps) as never,
+    execute: (args, exec) => executeSave(args, exec, deps),
   })
 }

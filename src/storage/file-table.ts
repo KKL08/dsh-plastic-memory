@@ -1,15 +1,20 @@
 import { mkdir, readdir, readFile, writeFile, rename, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { MemoryRecord } from '../record-schema.ts'
-import type { MemoryTable } from '../store.ts'
-import type { KvTable } from '../governance/table.ts'
+import type { MemoryTable, MemoryLogger } from '../store.ts'
+import type { KvTable } from '../kv-table.ts'
 import type { RecallStats } from './schema.ts'
 import { splitFrontmatter, decodeRecord, encodeRecord, type FileLocation } from './frontmatter.ts'
 import { WORKSPACE_MARKER, INDEX_FILE, GLOBAL_DIR, workspaceDirName, slugifyName, isReservedFileName } from './paths.ts'
 import { formatIndexLine } from '../index-line.ts'
+import { RETENTION_MS } from '../retention.ts'
 
-/** 与 governance/snapshots.ts 的 SNAPSHOT_RETENTION_MS 对齐（设计稿 §2）——改动需同步两处。 */
-export const DELETED_RETENTION_MS = 14 * 86_400_000
+/** 软删记录清扫窗口：与快照保留共用 retention.ts 的单一来源（两者必须一致）。 */
+export const DELETED_RETENTION_MS = RETENTION_MS
+
+/** tmp 残留清理的陈旧阈值：写入-rename 窗口是毫秒级，60 秒足够排除任何在途文件。 */
+const TMP_STALE_MS = 60_000
+
 
 export interface FileTableOptions {
   root: string
@@ -17,6 +22,8 @@ export interface FileTableOptions {
   /** 索引行格式器由接线层注入（storage 层不依赖 registry）；缺省用无陈旧度的简版。 */
   formatIndexLine?: (r: MemoryRecord) => string
   now?: () => number
+  /** 日志注入口，缺省回退 console（见 store.ts MemoryLogger）。 */
+  log?: MemoryLogger
 }
 
 interface Slot { record: MemoryRecord; extras: Record<string, unknown>; filePath: string; dir: string }
@@ -27,8 +34,13 @@ export class FileTable implements MemoryTable {
   private wsDirs = new Map<string, string>()   // workspacePath -> 绝对目录
   private fingerprint = ''
   private chain: Promise<unknown> = Promise.resolve()  // 进程内互斥：写与重载串行化
+  private readonly log: MemoryLogger
+  private opts: FileTableOptions
 
-  constructor(private opts: FileTableOptions) {}
+  constructor(opts: FileTableOptions) {
+    this.opts = opts
+    this.log = opts.log ?? console
+  }
 
   /** 互斥执行：所有写路径与重载都经过这里串行。 */
   private locked<T>(fn: () => Promise<T>): Promise<T> {
@@ -44,7 +56,7 @@ export class FileTable implements MemoryTable {
   /** 绝不 throw：任何失败都降级（隔离/警告），插件加载不能因记忆坏文件而失败。 */
   async load(): Promise<void> {
     await this.locked(() => this.loadInner()).catch(err => {
-      console.warn('[plastic-memory] 记忆目录加载失败，按空库继续：', err)
+      ;this.log.warn('[plastic-memory] 记忆目录加载失败，按空库继续：', err)
     })
   }
 
@@ -70,14 +82,28 @@ export class FileTable implements MemoryTable {
         wsDirs.set(wsPath, dir)
         dirs.push({ dir, loc: { scope: 'workspace', workspacePath: wsPath } })
       } catch (err) {
-        console.warn(`[plastic-memory] workspace 目录缺失有效 .workspace 标记，跳过：${dir}`, err)
+        ;this.log.warn(`[plastic-memory] workspace 目录缺失有效 .workspace 标记，跳过：${dir}`, err)
       }
     }
     for (const { dir, loc } of dirs) {
       let names: string[]
-      try { names = await readdir(dir) } catch { console.warn(`[plastic-memory] 目录不可读，计空：${dir}`); continue }
+      try { names = await readdir(dir) } catch { this.log.warn(`[plastic-memory] 目录不可读，计空：${dir}`); continue }
       for (const name of names) {
-        if (/\.tmp-/.test(name)) { await rm(join(dir, name), { force: true }); continue } // 原子写崩溃残留清理
+        if (/\.tmp-/.test(name)) {
+          // 只删两类原子写残留：① pid 段是本进程（自家崩溃）② mtime 超 60 秒的陈旧文件。
+          // 多进程共用 memoryRoot 时，别的进程在途 tmp（毫秒级窗口）绝不能碰，否则会让对方
+          // rename 落空。stat 失败＝竞态已消失，静默跳过。
+          const path = join(dir, name)
+          const pidMatch = /\.tmp-(\d+)-/.exec(name)
+          if (pidMatch && Number(pidMatch[1]) === process.pid) {
+            await rm(path, { force: true })
+          } else {
+            try {
+              if (this.now() - (await stat(path)).mtimeMs > TMP_STALE_MS) await rm(path, { force: true })
+            } catch { /* 竞态消失 */ }
+          }
+          continue
+        }
         if (!name.endsWith('.md') || name === INDEX_FILE) continue
         const filePath = join(dir, name)
         try {
@@ -88,14 +114,14 @@ export class FileTable implements MemoryTable {
             // 崩溃窗口兜底：同 id 两处取新删旧（scope 移动中断的产物）
             const keepNew = record.updatedAt >= existing.record.updatedAt
             const loser = keepNew ? existing.filePath : filePath
-            console.warn(`[plastic-memory] 发现重复 id ${record.id}，保留较新者，删除：${loser}`)
+            ;this.log.warn(`[plastic-memory] 发现重复 id ${record.id}，保留较新者，删除：${loser}`)
             await rm(loser, { force: true })
             if (!keepNew) continue
           }
           map.set(record.id, { record, extras, filePath, dir })
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)
-          console.warn(`[plastic-memory] 记忆文件解析失败，已隔离：${filePath}（${error}）`)
+          ;this.log.warn(`[plastic-memory] 记忆文件解析失败，已隔离：${filePath}（${error}）`)
           quarantine.push({ path: filePath, error })
         }
       }
@@ -129,11 +155,13 @@ export class FileTable implements MemoryTable {
 
   async refreshIfChanged(): Promise<void> {
     await this.locked(async () => {
+      // 无条件扫描：触发面只有记忆工具（低频），实测热缓存千条级 <10ms，不值得节流——
+      // 无条件的入口校准让"外部编辑不被旧态覆盖"成为无注记的硬保证。
       const fp = await this.computeFingerprint()
       if (fp !== this.fingerprint) await this.loadInner()
     // 指纹不同 → 触发 loadInner；loadInner 内部是 build-then-swap，中途失败不会碰
     // this.map/this.quarantine/this.wsDirs，所以"沿用内存态"在这里是真实成立的。
-    }).catch(err => console.warn('[plastic-memory] 记忆重载失败，沿用内存态：', err))
+    }).catch(err => this.log.warn('[plastic-memory] 记忆重载失败，沿用内存态：', err))
   }
 
   private async sweepDeletedInner(map: Map<string, Slot>): Promise<void> {
@@ -147,19 +175,25 @@ export class FileTable implements MemoryTable {
     }
   }
 
-  private async regenerateIndexes(map: Map<string, Slot>, wsDirs: Map<string, string>): Promise<void> {
+  private async regenerateIndexes(map: Map<string, Slot>, wsDirs: Map<string, string>, onlyDirs?: Iterable<string>): Promise<void> {
     const byDir = new Map<string, MemoryRecord[]>()
     for (const slot of map.values()) {
-      if (slot.record.status !== 'active' && slot.record.status !== 'stale') continue // 索引只列 active+stale
+      if (slot.record.status !== 'active') continue // 索引只列 active
       const list = byDir.get(slot.dir) ?? []
       list.push(slot.record); byDir.set(slot.dir, list)
     }
     // 缺省格式器与注入侧同源（src/index-line.ts）。磁盘索引不带陈旧度：静态文件里的
-    // 时间相对标注会随时间失真——这是对设计稿 §6"同源同格式"的有意偏离，已回写设计稿登记。
+    // 时间相对标注会随时间失真——这是对 docs/p15-storage-search-redesign.md §6"同源同格式"的有意偏离，已回写设计稿登记。
     const fmt = this.opts.formatIndexLine ?? ((r: MemoryRecord) => formatIndexLine(r, { passive: false }))
-    const allDirs = new Set<string>([join(this.opts.root, GLOBAL_DIR), ...wsDirs.values()])
-    for (const dir of allDirs) {
-      const lines = (byDir.get(dir) ?? []).map(fmt)
+    // onlyDirs 给出时只再生这几个目录（byDir 仍取自全量 map，分组正确）；写路径只动到自己的目录，
+    // 全量再生纯属浪费。缺省（加载路径）仍再生所有目录。
+    const targetDirs = onlyDirs ?? new Set<string>([join(this.opts.root, GLOBAL_DIR), ...wsDirs.values()])
+    for (const dir of targetDirs) {
+      // 索引行序必须确定：Map 插入序取决于 readdir 序，跨设备不确定，多设备同步下会造成
+      // 索引文件 churn。按 name 排序（不用 localeCompare——locale 依赖环境），name 相同用 id 决胜。
+      const records = (byDir.get(dir) ?? []).slice().sort((a, b) =>
+        a.name < b.name ? -1 : a.name > b.name ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+      const lines = records.map(fmt)
       const text = `# Memory Index\n\n${lines.join('\n')}${lines.length ? '\n' : ''}`
       try {
         const prev = await readFile(join(dir, INDEX_FILE), 'utf8').catch(() => '')
@@ -179,7 +213,7 @@ export class FileTable implements MemoryTable {
     return [...this.map.entries()].map(([k, s]) => [k, s.record] as [string, MemoryRecord]).values()
   }
 
-  // —— 写侧：Task 4 实现 ——
+  // —— 写侧 ——
 
   private volatileEqual(a: MemoryRecord, b: MemoryRecord): boolean {
     return a.recallCount === b.recallCount && a.lastRecalledAt === b.lastRecalledAt
@@ -220,7 +254,7 @@ export class FileTable implements MemoryTable {
 
   /**
    * 撞名检查必须同时看内存态和磁盘：this.map 看不到隔离文件、也看不到 .workspace 标记
-   * 缺失而整目录跳过的文件——只查 map 会把用户手写/隔离中的内容静默覆盖（终审 I1，实测复现）。
+   * 缺失而整目录跳过的文件——只查 map 会把用户手写/隔离中的内容静默覆盖（实测复现过）。
    */
   private async filePathFor(record: MemoryRecord, dir: string): Promise<string> {
     const base = slugifyName(record.name)
@@ -246,15 +280,22 @@ export class FileTable implements MemoryTable {
     if (stableChanged) {
       const dir = await this.dirFor(next)
       const moved = prev !== undefined && prev.dir !== dir
-      const filePath = moved || !prev ? await this.filePathFor(next, dir) : prev.filePath
+      // 改名后文件名要跟着变，否则磁盘文件仍叫旧 slug，用户浏览/grep 被误导。比较 slug 而非
+      // name（空白等变化不折腾文件），且忽略大小写：APFS 等大小写不敏感文件系统上，仅大小写
+      // 不同的新旧路径是同一个文件——若触发重命名，"先写新后删旧"会把刚写的文件删掉，丢数据。
+      const renamed = prev !== undefined
+        && slugifyName(next.name).toLowerCase() !== slugifyName(prev.record.name).toLowerCase()
+      const filePath = moved || renamed || !prev ? await this.filePathFor(next, dir) : prev.filePath
       const extras = prev?.extras ?? {}
       await this.atomicWrite(filePath, encodeRecord(next, extras))   // 易变字段由 encodeRecord 剔除
-      if (moved) await rm(prev.filePath, { force: true })            // 先写新后删旧；崩溃窗口由加载去重兜底
+      // 先写新后删旧；崩溃窗口由加载去重兜底。filePathFor 撞名回退可能落回原路径，故加
+      // prev.filePath !== filePath 保护，不能删掉刚写的自己。
+      if ((moved || renamed) && prev!.filePath !== filePath) await rm(prev!.filePath, { force: true })
       slot = { record: next, extras, filePath, dir }
       this.map.set(key, slot)
       // status 变为 deleted 时顺手清扫（"forget 工具路径顺手做"的落点）
       if (next.status === 'deleted') await this.sweepDeletedInner(this.map)
-      await this.regenerateIndexes(this.map, this.wsDirs)
+      await this.regenerateIndexes(this.map, this.wsDirs, moved ? [dir, prev!.dir] : [dir])
     } else {
       slot = { ...prev!, record: next }
       this.map.set(key, slot)
@@ -267,7 +308,7 @@ export class FileTable implements MemoryTable {
 
   async put(key: string, value: MemoryRecord): Promise<void> {
     await this.locked(() => {
-      // put 不承载召回统计（设计稿 §3 登记：快照恢复不恢复召回统计）。唯一写入方是
+      // put 不承载召回统计（docs/p15-storage-search-redesign.md §3 登记：快照恢复不恢复召回统计）。唯一写入方是
       // markRecalled 走的 update 路径；prev 在时以内存态现值为准，restore 旧记录不回退 sidecar。
       const prev = this.map.get(key)
       const next = prev
@@ -294,7 +335,7 @@ export class FileTable implements MemoryTable {
       await rm(slot.filePath, { force: true })
       await this.opts.stats.delete(key)
       this.map.delete(key)
-      await this.regenerateIndexes(this.map, this.wsDirs)
+      await this.regenerateIndexes(this.map, this.wsDirs, [slot.dir])
       this.fingerprint = await this.computeFingerprint()
       return true
     })

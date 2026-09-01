@@ -21,7 +21,7 @@ export function createSourceTool(deps: SourceToolBindingDeps): ToolDefinition {
     ].join(''),
     parameters: {
       memoryId: { type: 'string', required: true, description: '要回查的记忆 id（快照/搜索结果里的 mem_ 开头 id）' },
-      window: { type: 'number', description: '向前回看的事件条数，缺省覆盖记忆产生的当轮对话，上限 24' },
+      window: { type: 'number', description: '从记忆产生的当轮起点向后读取的事件条数，缺省覆盖当轮对话，上限 24' },
     },
     output: {
       schema: { type: 'json' },
@@ -31,9 +31,9 @@ export function createSourceTool(deps: SourceToolBindingDeps): ToolDefinition {
         return [{ type: 'text', text: renderSourceResult(result, name) }]
       },
     },
-    execute: (async (args: { memoryId: string; window?: number }, exec: unknown) => {
+    execute: async (args, exec) => {
       const context = await deps.resolveContext(exec)
       return executeSource(args, context, deps)
-    }) as never,
+    },
   })
 }
