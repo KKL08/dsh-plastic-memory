@@ -1,12 +1,22 @@
 {
   "name": "dsh-plastic-memory",
-  "version": "0.1.0-beta",
+  "version": "0.1.0-beta.1",
   "description": "Memory plugin with built-in governance for DeepSeek Harness",
   "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "agent-memory",
+    "memory",
+    "llm",
+    "plastic-memory"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/KKL08/dsh-plastic-memory.git"
   },
+  "homepage": "https://github.com/KKL08/dsh-plastic-memory#readme",
   "type": "module",
   "engines": {
     "node": "^22.19.0 || >=24.0.0"

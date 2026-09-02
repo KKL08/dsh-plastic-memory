@@ -2,7 +2,7 @@
 
 ![Plastic Memories](assets/banner.jpg)
 
-![Version](https://img.shields.io/badge/version-0.1.0--beta-yellow)
+![Version](https://img.shields.io/badge/version-0.1.0--beta.1-yellow)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-DeepSeek%20Harness%20%E2%89%A50.1.1-4D6BFF)
 ![Node](https://img.shields.io/badge/node-%5E22.19.0%20%7C%7C%20%E2%89%A524-339933?logo=node.js&logoColor=white)
@@ -75,18 +75,13 @@
 ## 📦 安装
 
 ```bash
-dsh plugin --profile <name> add github:KKL08/dsh-plastic-memory
+dsh plugin --profile <name> add dsh-plastic-memory@beta
 ```
 
-> 将 `<name>` 替换为目标 Profile 名称（如 `web`）。安装后插件声明将自动写入该 Profile 的 `cordis.patch.yml`，重启该 Profile 后生效。仓库自带编译产物，安装不需要构建授权。  
+> 将 `<name>` 替换为目标 Profile 名称（如 `web`）。安装后插件声明将自动写入该 Profile 的 `cordis.patch.yml`，重启该 Profile 后生效。插件以预构建产物发布到 npm，安装不需要构建授权。  
 > **运行环境要求**：Node.js `^22.19.0 || >=24`，DeepSeek Harness ≥ 0.1.1。
-
-从本地检出安装时，先在检出目录装好运行依赖，再按路径添加：
-
-```bash
-pnpm install --prod --config.auto-install-peers=false
-dsh plugin --profile <name> add ./dsh-plastic-memory
-```
+>
+> 当前为 beta 阶段，需带 `@beta` 标签获取；发布稳定版后可直接 `dsh plugin --profile <name> add dsh-plastic-memory`。
 
 ---
 
