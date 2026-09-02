@@ -75,13 +75,13 @@
 ## 📦 安装
 
 ```bash
-dsh plugin --profile <name> add dsh-plastic-memory@beta
+dsh plugin --profile web add dsh-plastic-memory@beta
 ```
 
-> 将 `<name>` 替换为目标 Profile 名称（如 `web`）。安装后插件声明将自动写入该 Profile 的 `cordis.patch.yml`，重启该 Profile 后生效。插件以预构建产物发布到 npm，安装不需要构建授权。  
+> 把 `web` 换成你的目标 Profile 名即可（该 Profile 不存在会自动创建）。安装后插件声明将自动写入该 Profile 的 `cordis.patch.yml`，重启该 Profile 后生效。插件以预构建产物发布到 npm，安装不需要构建授权。  
 > **运行环境要求**：Node.js `^22.19.0 || >=24`，DeepSeek Harness ≥ 0.1.1。
 >
-> 当前为 beta 阶段，需带 `@beta` 标签获取；发布稳定版后可直接 `dsh plugin --profile <name> add dsh-plastic-memory`。
+> 当前为 beta 阶段，需带 `@beta` 标签获取；发布稳定版后可直接 `dsh plugin --profile web add dsh-plastic-memory`。
 
 ---
 
