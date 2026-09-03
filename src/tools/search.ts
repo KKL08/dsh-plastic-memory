@@ -1,4 +1,5 @@
 import type { MemoryStore } from '../store.ts'
+import type { SearchNoteCode } from '../contract-codes.ts'
 import { expandQueryTerms, matchScore } from '../text.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import { sourceNote } from '../index-line.ts'
@@ -48,13 +49,13 @@ export async function executeSearch(
   args: SearchArgs,
   exec: unknown,
   deps: SearchToolDeps,
-): Promise<{ hits: SearchHit[]; note?: string }> {
+): Promise<{ hits: SearchHit[]; note?: string; noteCode?: SearchNoteCode }> {
   const a = args
   const { workspacePath } = await deps.resolveContext(exec)
   // 明确要"只看本项目"而当前会话没有工作目录：显式说明而非静默落回 global-only——
   // 用户要项目范围时给他全局结果是误导
   if (a.scope === 'workspace' && workspacePath === undefined) {
-    return { hits: [], note: '当前会话没有工作目录，无法限定项目范围；查全局记忆请用 scope: "global"。' }
+    return { hits: [], noteCode: 'no-workspace', note: '当前会话没有工作目录，无法限定项目范围；查全局记忆请用 scope: "global"。' }
   }
   const limit = Math.min(a.limit ?? 10, 50)
   const scopeFilter = a.scope === 'global'

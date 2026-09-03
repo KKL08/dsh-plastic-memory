@@ -15,7 +15,7 @@ export type SnapshotToolArgs =
   | { action: 'restore'; snapshotId: string; memoryIds?: string[]; overwriteChanged?: boolean }
 
 export type SnapshotToolResult =
-  | { kind: 'created'; snapshotId: string; count: number; message: string }
+  | { kind: 'created'; snapshotId: string; count: number; missing: string[]; message: string }
   | { kind: 'listed'; snapshots: Array<{ id: string; createdAt: number; operation: string; description: string; count: number }>; message: string }
   | { kind: 'shown'; entries: SnapshotDiffEntry[]; message: string }
   | { kind: 'restored'; restored: string[]; skipped: string[]; message: string }
@@ -52,7 +52,7 @@ export async function executeSnapshotTool(
     const missing = (uniqueIds ?? []).filter(id => !capturedIds.has(id))
     const missingNote = missing.length > 0 ? `；未找到或已删除：${missing.join('、')}` : ''
     return {
-      kind: 'created', snapshotId: snap.id, count: records.length,
+      kind: 'created', snapshotId: snap.id, count: records.length, missing,
       message: `已创建快照 ${snap.id}（${records.length} 条记忆），14 天内可恢复${missingNote}。`,
     }
   }

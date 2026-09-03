@@ -16,7 +16,7 @@ export type ConfirmArgs =
 
 export type ConfirmResult =
   | { kind: 'refreshed'; memoryId: string; lastConfirmedAt: number; message: string }
-  | { kind: 'resolved'; decisionId: string; verdict: string; actions: string[]; message: string }
+  | { kind: 'resolved'; decisionId: string; verdict: string; actions: string[]; alsoCleared: number; message: string }
   | { kind: 'error'; message: string }
 
 /**
@@ -51,6 +51,7 @@ export async function executeConfirm(
   }
 
   const actions: string[] = []
+  let alsoCleared = 0
   const vertical = entry.baselineRef !== undefined
 
   // 需要删除的记忆（keep-left/keep-right 的败方）；keep-both/dismiss 无删除
@@ -77,7 +78,7 @@ export async function executeConfirm(
     await deps.decisions.remove(entry.id)
     // 该记忆的一方已被删除，可能还挂在其他待决项上——这些冲突已无法再裁决，一并清理
     // 但不能悄悄发生：把清理数量报进 actions，让用户知道有条目被顺带处理
-    const alsoCleared = await deps.decisions.removeByMemoryIds([toDelete.id])
+    alsoCleared = await deps.decisions.removeByMemoryIds([toDelete.id])
     if (alsoCleared > 0) {
       actions.push(`另清理 ${alsoCleared} 条同样引用该记忆的待决冲突（其一方已删除，无法再裁决）`)
     }
@@ -88,7 +89,7 @@ export async function executeConfirm(
   }
 
   return {
-    kind: 'resolved', decisionId: entry.id, verdict: args.verdict, actions,
+    kind: 'resolved', decisionId: entry.id, verdict: args.verdict, actions, alsoCleared,
     message: `冲突已裁决（${args.verdict}）：${actions.join('；')}`,
   }
 }

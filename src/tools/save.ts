@@ -42,7 +42,7 @@ export function renderSaveResult(result: PipelineResult): string {
 
   // 渲染警告行
   if ((result.kind === 'saved' || result.kind === 'updated') && result.warnings) {
-    const warnings = result.warnings.map(w => `⚠️ ${w}`).join('\n')
+    const warnings = result.warnings.map(w => `⚠️ ${w.text}`).join('\n')
     text = `${text}\n${warnings}`
   }
 

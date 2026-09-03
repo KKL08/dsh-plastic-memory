@@ -1,4 +1,5 @@
 import type { MemoryStore } from '../store.ts'
+import type { HealthRecommendationKind } from '../contract-codes.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { PendingDecisionsStore } from '../governance/decisions.ts'
 import type { KvTable } from '../kv-table.ts'
@@ -11,7 +12,7 @@ import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, ch
 const DAY = 86_400_000
 
 /** tier 枚举 → 用户面中文文案（结构化 tier 字段仍保留 green/amber/red 供程序用）。 */
-const TIER_LABEL = { green: '绿色', amber: '黄色', red: '红色' } as const
+export const TIER_LABEL = { green: '绿色', amber: '黄色', red: '红色' } as const
 
 export interface HealthToolDeps {
   store: MemoryStore
@@ -60,6 +61,8 @@ export interface SingleHealthResult {
   /** workspace 视图下 global 层检出的疑似密钥条数——不计本层分数，但必须报警。 */
   globalSecretAlert: number
   recommendation: string
+  /** recommendation 的结构化对应：独占层单元素、行动项层多元素（按代码顺序）、无事为空数组。 */
+  recommendationKinds: HealthRecommendationKind[]
   message: string
 }
 
@@ -201,21 +204,31 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
   // 单选链会让先命中的分支埋没档位早提示，sensitivity 差异在输出上失明。
   // 闲时层：提升候选是唯一的"闲时事务"——只在没有任何行动项时露出，避免粘性候选反复打扰
   let recommendation: string
+  const recommendationKinds: HealthRecommendationKind[] = []
   if (health.gate.secret) {
+    recommendationKinds.push('secret')
     recommendation = `发现 ${health.counts.secret} 条疑似密钥泄漏，建议立即确认并用 memory_forget 删除、轮换凭证`
   } else if (globalSecretAlert > 0) {
+    recommendationKinds.push('global-secret')
     recommendation = `global 层检出 ${globalSecretAlert} 条疑似密钥泄漏（不计本项目分数），建议立即确认并用 memory_forget 删除、轮换凭证`
   } else {
     const actions: string[] = []
+    if (overdue.length > 0) recommendationKinds.push('pending-overdue')
     if (overdue.length > 0) actions.push(`${overdue.length} 条冲突挂起超 ${th.pendingOverdueDays} 天，建议用 memory_confirm 裁决`)
+    if (cachedAt === null) recommendationKinds.push('semantic-never-scanned')
+    else if (now - cachedAt > th.scanStaleDays * DAY) recommendationKinds.push('semantic-stale')
     if (cachedAt === null) actions.push('尚未做过语义扫描，建议首次运行 memory_scan')
     else if (now - cachedAt > th.scanStaleDays * DAY) actions.push(`语义扫描已是 ${Math.floor((now - cachedAt) / DAY)} 天前，建议重新运行 memory_scan`)
+    if (health.freshness.staleCount > 0) recommendationKinds.push('freshness-stale')
     if (health.freshness.staleCount > 0) actions.push(`${health.freshness.staleCount} 条记忆超过衰退期，建议用 memory_confirm 确认或更新`)
+    if (health.score < th.actionScoreThreshold) recommendationKinds.push('score-below-threshold')
+    else if (health.rulePenalty + health.semanticPenalty > 0) recommendationKinds.push('issues-below-threshold')
     if (health.score < th.actionScoreThreshold) actions.push('存在待清理问题，建议运行 memory_scan 查看明细')
     else if (health.rulePenalty + health.semanticPenalty > 0) {
       const kinds = FINDING_TYPES.filter(t => health.counts[t] > 0).length
       actions.push(`有 ${kinds} 类问题（未达提示阈值），可运行 memory_scan 查看`)
     }
+    if (actions.length === 0 && scored.promoteCandidates > 0) recommendationKinds.push('promote-candidates')
     recommendation = actions.length > 0 ? actions.join('；')
       : scored.promoteCandidates > 0
         ? `本项目有 ${scored.promoteCandidates} 条全局提升候选待确认——可发起确认后用 memory_promote 提升；用户拒绝的用 dismiss 清除标记，之后不再提示`
@@ -265,6 +278,7 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
     promoteCandidates: scored.promoteCandidates,
     globalSecretAlert,
     recommendation,
+    recommendationKinds,
     message: `${layerLabel}健康分 ${Math.floor(health.score)}/100（${TIER_LABEL[health.tier]}）${gateNote}${semanticNote}。${recommendation}。`,
   }
 }

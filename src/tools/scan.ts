@@ -1,4 +1,5 @@
 import type { MemoryStore } from '../store.ts'
+import type { CodedNote, ScanNoteCode } from '../contract-codes.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { PendingDecisionsStore } from '../governance/decisions.ts'
@@ -57,7 +58,7 @@ export interface SingleScanResult {
   /** global 提升候选：模型存时标了 globalCandidate 的 workspace 记忆，待用户确认后 memory_promote。 */
   promoteCandidates: { items: Array<{ id: string; summary: string }>; more: number }
   semanticCachedAt: number | null
-  notes: string[]
+  notes: ScanNote[]
   message: string
 }
 
@@ -83,7 +84,7 @@ export interface CheckupScanResult {
   promoteCandidates: { total: number; byWorkspace: Array<{ workspacePath: string; items: Array<{ id: string; summary: string }> }> }
   /** 跨项目重复主题（global 缺口）：语义层主力，LLM 不可用时实体聚类保底（疑似级）。 */
   duplicates: { items: CrossWsDuplicate[]; via: 'semantic' | 'entity' | 'none' }
-  notes: string[]
+  notes: ScanNote[]
   message: string
 }
 
@@ -132,7 +133,7 @@ export function renderScanResult(result: ScanToolResult): string {
       }
       lines.push('确认确属通用后，可提炼一条 global 记忆经用户确认提升。')
     }
-    if (result.notes.length > 0) lines.push(`（${result.notes.join('；')}）`)
+    if (result.notes.length > 0) lines.push(`（${result.notes.map(n => n.text).join('；')}）`)
     return lines.join('\n')
   }
 
@@ -162,11 +163,14 @@ export function renderScanResult(result: ScanToolResult): string {
   return lines.join('\n')
 }
 
+/** 扫描过程的说明条目：code 稳定供程序判断，text 给人/模型看。 */
+export type ScanNote = CodedNote<ScanNoteCode>
+
 interface ScanPass {
   findings: Finding[]
   scanned: number
   semanticCachedAt: number | null
-  notes: string[]
+  notes: ScanNote[]
   decisionItems: Array<{ id: string; memoryIds: string[]; summary: string; isNew: boolean }>
   created: number
   existing: number
@@ -185,7 +189,7 @@ async function scanPass(
   now: number,
   signal?: AbortSignal,
 ): Promise<ScanPass> {
-  const notes: string[] = []
+  const notes: ScanNote[] = []
   const findings: Finding[] = []
   if (layers === 'rule' || layers === 'full') {
     findings.push(...runRuleScan(records, id => deps.store.get(id), now))
@@ -196,8 +200,8 @@ async function scanPass(
   if (layers === 'semantic' || layers === 'full') {
     if (!llm) {
       notes.push(layers === 'semantic'
-        ? '语义层不可用（当前环境拿不到 LLM），且 layers=semantic 不含规则层，本次未执行任何检测'
-        : '语义层不可用（当前环境拿不到 LLM），只返回规则层结果')
+        ? { code: 'no-layer-executed', text: '语义层不可用（当前环境拿不到 LLM），且 layers=semantic 不含规则层，本次未执行任何检测' }
+        : { code: 'semantic-unavailable', text: '语义层不可用（当前环境拿不到 LLM），只返回规则层结果' })
     } else {
       // 截断前按治理优先级 + 新近度排序：库超上限时先分析重要且新的，而不是任意文件序的前 N 条
       const priorityOrder = { high: 0, medium: 1, low: 2 } as const
@@ -206,10 +210,10 @@ async function scanPass(
         || b.updatedAt - a.updatedAt)
       const semantic = await runSemanticScan(ordered, baseline, llm, signal)
       if (semantic.truncated) {
-        notes.push(`记忆过多，本次语义层只分析了前 ${SEMANTIC_SCAN_MAX_RECORDS} 条（按治理优先级与新近度挑选），另有 ${semantic.truncated} 条未分析`)
+        notes.push({ code: 'semantic-truncated', text: `记忆过多，本次语义层只分析了前 ${SEMANTIC_SCAN_MAX_RECORDS} 条（按治理优先级与新近度挑选），另有 ${semantic.truncated} 条未分析` })
       }
       if (semantic.failed) {
-        notes.push('语义分析失败（LLM 输出无法解析，已重试一次），本次未更新语义缓存')
+        notes.push({ code: 'semantic-failed', text: '语义分析失败（LLM 输出无法解析，已重试一次），本次未更新语义缓存' })
       } else {
         findings.push(...semantic.findings)
         // 写缓存前设检查点：取消后不留下半截的语义结果。
@@ -274,8 +278,8 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec?: 
   }
   if (checkup) {
     const wsList = args.scopes && args.scopes.length > 0 ? args.scopes : listWorkspaces(deps.store)
-    const notes: string[] = []
-    if (baseline === null) notes.push('未检测到 AGENTS.md 基线，垂直冲突检测未执行')
+    const notes: ScanNote[] = []
+    if (baseline === null) notes.push({ code: 'baseline-missing', text: '未检测到 AGENTS.md 基线，垂直冲突检测未执行' })
 
     const decisionItems: ScanPass['decisionItems'] = []
     const seenDecisions = new Set<string>()
@@ -285,7 +289,7 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec?: 
         seenDecisions.add(item.id)
         decisionItems.push(item)
       }
-      notes.push(...pass.notes.filter(n => !notes.includes(n)))
+      notes.push(...pass.notes.filter(n => !notes.some(m => m.code === n.code && m.text === n.text)))
     }
 
     // 每个 workspace 独立扫描：输入是该 ws 的可见集合（含 global，跨层冲突要在同一 prompt 里才可判），
@@ -307,7 +311,7 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec?: 
     const globalRecords = deps.store.query({ status: ['active'], scope: { kind: 'global' } })
     collect(await scanPass(deps, globalRecords, GLOBAL_CACHE_KEY, 'global', layerQuarantined(undefined), layers, llm, baseline, now, signal))
     if (baselineSkipped > 0 && llm && layers !== 'rule') {
-      notes.push(`基线随当前会话，${baselineSkipped} 个其他 workspace 的垂直冲突检测已跳过`)
+      notes.push({ code: 'baseline-session-scoped', text: `基线随当前会话，${baselineSkipped} 个其他 workspace 的垂直冲突检测已跳过` })
     }
     const created = decisionItems.filter(i => i.isNew).length
     const existing = decisionItems.length - created
@@ -341,7 +345,7 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec?: 
         const cross = await runCrossWsScan(byWorkspace, globalRecords, llm, signal)
         if (!cross.failed) duplicates = { items: cross.items, via: 'semantic' }
         else {
-          notes.push('跨项目重复分析失败（LLM 输出无法解析），退用实体聚类保底')
+          notes.push({ code: 'cross-ws-failed', text: '跨项目重复分析失败（LLM 输出无法解析），退用实体聚类保底' })
           duplicates = { items: findEntityDuplicates(byWorkspace, globalRecords), via: 'entity' }
         }
       } else {
@@ -383,8 +387,8 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec?: 
   const pass = await scanPass(deps, records, cacheKey(wsPath), wsPath ?? 'global', layerQuarantined(wsPath), layers, llm, passBaseline, now, signal)
   const notes = [...pass.notes]
   if ((layers === 'semantic' || layers === 'full') && llm) {
-    if (baseline === null) notes.push('未检测到 AGENTS.md 基线，垂直冲突检测未执行')
-    else if (passBaseline === null) notes.push('基线随当前会话，扫描其他 workspace 时垂直冲突检测已跳过')
+    if (baseline === null) notes.push({ code: 'baseline-missing', text: '未检测到 AGENTS.md 基线，垂直冲突检测未执行' })
+    else if (passBaseline === null) notes.push({ code: 'baseline-session-scoped', text: '基线随当前会话，扫描其他 workspace 时垂直冲突检测已跳过' })
   }
 
   const problemIds = new Set(pass.findings.flatMap(f => f.memoryIds))
@@ -404,7 +408,7 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec?: 
     more: Math.max(0, allCandidates.length - PROMOTE_LIMIT),
   }
 
-  const noteSuffix = notes.length > 0 ? `（${notes.join('；')}）` : ''
+  const noteSuffix = notes.length > 0 ? `（${notes.map(n => n.text).join('；')}）` : ''
   const scopeLabel = wsPath === undefined ? 'global 记忆'
     : wsPath === currentWs ? '本项目可见记忆'
     : `workspace ${wsPath} 可见记忆`

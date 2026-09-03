@@ -1,4 +1,5 @@
 import type { MemoryRecord } from './record-schema.ts'
+import type { CodedNote, RejectCode, WarningCode } from './contract-codes.ts'
 import { CONFIDENCE_BY_SOURCE, memoryRecordSchema } from './record-schema.ts'
 import type { MemoryStore } from './store.ts'
 import type { TypeRegistry } from './type-registry.ts'
@@ -25,10 +26,13 @@ export interface SaveCandidate {
 }
 
 export type PipelineResult =
-  | { kind: 'saved'; record: MemoryRecord; warnings?: string[] }
-  | { kind: 'updated'; record: MemoryRecord; warnings?: string[] }
+  | { kind: 'saved'; record: MemoryRecord; warnings?: SaveWarning[] }
+  | { kind: 'updated'; record: MemoryRecord; warnings?: SaveWarning[] }
   | { kind: 'duplicate-suspected'; existing: Array<{ id: string; summary: string }> }
-  | { kind: 'rejected'; reason: string }
+  | { kind: 'rejected'; code: RejectCode; reason: string }
+
+/** 保存成功但要提醒模型/用户的事：code 稳定、text 可改。 */
+export type SaveWarning = CodedNote<WarningCode>
 
 /**
  * 深度剔除值为 undefined 的键。MemoryRecord 的可选字段（workspacePath/validFrom/
@@ -60,23 +64,23 @@ export async function runSavePipeline(
 
   // 1. 格式校验
   if (!registry.has(candidate.type)) {
-    return { kind: 'rejected', reason: `未知类型 "${candidate.type}"，可用类型见工具说明` }
+    return { kind: 'rejected', code: 'unknown-type', reason: `未知类型 "${candidate.type}"，可用类型见工具说明` }
   }
   // 模型无 global 直写通道：新建时填 global → 降级 workspace + globalCandidate 标记，
   // 真正提升到 global 只能走 memory_promote（用户确认）。
   let scope = candidate.scope
   let globalCandidate: true | undefined
-  const scopeWarnings: string[] = []
+  const scopeWarnings: SaveWarning[] = []
   let target: MemoryRecord | undefined
   if (candidate.action === 'update') {
     target = candidate.id ? store.get(candidate.id) : undefined
     if (!target || target.status === 'deleted') {
-      return { kind: 'rejected', reason: `更新目标不存在或已删除：${candidate.id ?? '(缺 id)'}` }
+      return { kind: 'rejected', code: 'target-missing', reason: `更新目标不存在或已删除：${candidate.id ?? '(缺 id)'}` }
     }
     // 跨 workspace 改写拦截：workspace 记忆只能在其所属项目里更新（deps.workspacePath 为 undefined
     // 的无 cwd 会话也落此拦截）。global 目标不受限——例行维护全局记忆是设计意图（快照先行兜底）。
     if (target.scope === 'workspace' && target.workspacePath !== deps.workspacePath) {
-      return { kind: 'rejected', reason: `不能跨项目修改其他 workspace 的记忆：目标属于 ${target.workspacePath ?? '(未知项目)'}，当前会话在 ${deps.workspacePath ?? '(无工作目录)'}。请在该项目的会话里更新。` }
+      return { kind: 'rejected', code: 'cross-workspace', reason: `不能跨项目修改其他 workspace 的记忆：目标属于 ${target.workspacePath ?? '(未知项目)'}，当前会话在 ${deps.workspacePath ?? '(无工作目录)'}。请在该项目的会话里更新。` }
     }
     // scope 不随 update 变更——否则例行内容更新会把用户确认提升过的 global 记忆
     // 静默拉回当前项目（提升闸被写入链绕过）。降级同样没有免确认通道。
@@ -85,16 +89,16 @@ export async function runSavePipeline(
       // 模型对 workspace 记录重申 global 意图：转成提升候选（已是候选则静默幂等）
       if (!target.globalCandidate) {
         globalCandidate = true
-        scopeWarnings.push('scope 不随更新变更；已将这条记忆标记为全局提升候选，治理时经用户确认后提升')
+        scopeWarnings.push({ code: 'update-global-candidate', text: 'scope 不随更新变更；已将这条记忆标记为全局提升候选，治理时经用户确认后提升' })
       }
     } else if (candidate.scope !== target.scope) {
-      scopeWarnings.push(`scope 不随更新变更，记忆保持 ${target.scope}`)
+      scopeWarnings.push({ code: 'update-scope-kept', text: `scope 不随更新变更，记忆保持 ${target.scope}` })
     }
   } else {
     // workspacePath 缺失说明会话连 cwd 都没有（runtime 对有 cwd 的会话总能给出目录兜底桶）：
     // workspace 桶不存在，落 global 又会绕过用户确认闸，两头无路可落，新建一律拒存。
     if (deps.workspacePath === undefined) {
-      return { kind: 'rejected', reason: '当前会话没有工作目录，记忆无处归属：workspace 桶不存在，global 写入必须经用户确认的提升流程。请在有工作目录的会话里保存。' }
+      return { kind: 'rejected', code: 'no-workspace', reason: '当前会话没有工作目录，记忆无处归属：workspace 桶不存在，global 写入必须经用户确认的提升流程。请在有工作目录的会话里保存。' }
     }
     if (candidate.scope === 'global') {
       scope = 'workspace'
@@ -163,7 +167,7 @@ export async function runSavePipeline(
   }
   const parsed = memoryRecordSchema.safeParse(record)
   if (!parsed.success) {
-    return { kind: 'rejected', reason: `字段校验失败：${parsed.error.issues.map(i => i.message).join('；')}` }
+    return { kind: 'rejected', code: 'schema-invalid', reason: `字段校验失败：${parsed.error.issues.map(i => i.message).join('；')}` }
   }
 
   // 5. 写盘前 secret 检查：高危（明确厂商特征）直接拦截、不落盘；疑似仅警告、照常落盘。
@@ -173,6 +177,7 @@ export async function runSavePipeline(
   if (critical.length > 0) {
     return {
       kind: 'rejected',
+      code: 'secret-critical',
       reason: `检测到高危密钥（${critical.map(h => h.name).join('、')}），未保存。密钥不该进记忆（将来可能随同步离开本机）——如需记录，请改写成不含密钥的指针（如「AWS 凭证在 1Password 的 X 条目」）再存。`,
     }
   }
@@ -211,16 +216,16 @@ export async function runSavePipeline(
     : { kind: 'saved' as const, record: clean }
 
   const suspected = secretHits.filter(h => h.severity === 'suspected')
-  const warnings = [
+  const warnings: SaveWarning[] = [
     ...scopeWarnings,
     ...(crossBucketSupersede
-      ? ['跨桶替代不允许：supersedes 目标不在本次写入的记忆桶内，已跳过不置 superseded。global 记忆的矛盾走 memory_scan 的冲突裁决，跨层提升合并走 memory_promote']
+      ? [{ code: 'cross-bucket-supersede' as const, text: '跨桶替代不允许：supersedes 目标不在本次写入的记忆桶内，已跳过不置 superseded。global 记忆的矛盾走 memory_scan 的冲突裁决，跨层提升合并走 memory_promote' }]
       : []),
     ...(updateSnapshotId
-      ? [`已自动快照（${updateSnapshotId}），14 天内可用 memory_snapshot 恢复`]
+      ? [{ code: 'auto-snapshot' as const, text: `已自动快照（${updateSnapshotId}），14 天内可用 memory_snapshot 恢复` }]
       : []),
     ...(suspected.length > 0
-      ? [`疑似密钥（${suspected.map(h => h.name).join('、')}），建议改写后再存——记忆将来可能随同步离开本机`]
+      ? [{ code: 'secret-suspected' as const, text: `疑似密钥（${suspected.map(h => h.name).join('、')}），建议改写后再存——记忆将来可能随同步离开本机` }]
       : []),
   ]
   if (warnings.length > 0) return { ...baseResult, warnings }
