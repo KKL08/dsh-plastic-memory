@@ -1,0 +1,28 @@
+name: host-contract (semantic layer)
+
+# Manual only: needs DEEPSEEK_API_KEY. Runs the full host contract including the
+# two semantic-layer checks (mid-stream abort, full semantic scan).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/dsh-plastic-memory
+          key: dsh-host-${{ runner.os }}-node24-${{ hashFiles('package.json') }}
+      - run: pnpm host:contract
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}

@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - name: Published files stay on the whitelist
+        run: |
+          pnpm pack --dry-run 2>&1 | tee pack.log
+          if grep -E '^\s*(src|tests|docs|e2e)/' pack.log; then echo 'unexpected files in the package'; exit 1; fi
+      - run: scripts/check-no-local-paths.sh
+      - name: Cache the pinned dsh host
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/dsh-plastic-memory
+          key: dsh-host-${{ runner.os }}-node${{ matrix.node }}-${{ hashFiles('package.json') }}
+      - run: pnpm host:smoke
+      - run: pnpm host:contract
