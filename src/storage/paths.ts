@@ -18,7 +18,9 @@ export function isReservedFileName(fileName: string): boolean {
 }
 
 export function slugifyName(name: string): string {
-  const s = name.trim().replace(/[\/\\:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40)
+  // 截断后再去一次尾部连字符：slice 可能恰好落在分隔符位而重新露出 '-'，不去掉则 slug
+  // 不幂等（slug(slug(x)) !== slug(x)）且文件名以 '-' 结尾。
+  const s = name.trim().replace(/[\/\\:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/g, '')
   return s.length > 0 ? s : 'memory'
 }
 
