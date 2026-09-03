@@ -240,6 +240,19 @@ customTypes:
 
 
 
+## 🧪 开发与测试
+
+```bash
+pnpm install --frozen-lockfile
+pnpm typecheck && pnpm test && pnpm build
+pnpm host:smoke      # 把打包产物装进一个全新的 dsh 宿主，验证可装可加载（无需 key）
+pnpm host:contract   # 在该宿主里直接驱动九个工具，验证宿主契约（无需 key；带 key 多跑语义层两项）
+```
+
+目录约定、测试分层、宿主钉版与提交规范见 [CONTRIBUTING.md](CONTRIBUTING.md)；变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+
+---
+
 ## 📄 License
 
 [MIT License](LICENSE)
