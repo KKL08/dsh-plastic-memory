@@ -10,16 +10,18 @@ set -euo pipefail
 
 target="${1:-}"
 
-# Directories that are never published and never scanned.
-excludes=(.git node_modules coverage lib e2e .agent-handoff docs)
-exclude_re="$(IFS='|'; printf '%s' "${excludes[*]}")"
+# Directories that are never published and never scanned. `lib` is only skipped in
+# git-tracked mode (it is gitignored there); in directory mode it is the compiled
+# artefact that ships to npm and must be scanned.
+excludes=(.git node_modules coverage e2e .agent-handoff docs)
+exclude_re="$(IFS='|'; printf '%s' "${excludes[*]//./\\.}")"
 
 # Build the machine-path needle without ever writing the literal, so this script
 # does not flag itself when it scans the tracked tree.
 slash='/'
 users_needle="${slash}Users${slash}"
 home_needle="${HOME:-}"
-host_needle="$(hostname)"
+host_needle="$(hostname 2>/dev/null || true)"
 
 files=()
 if [[ -n "$target" ]]; then
@@ -29,7 +31,7 @@ if [[ -n "$target" ]]; then
 else
   cd "$(git rev-parse --show-toplevel)"
   while IFS= read -r f; do files+=("$f"); done \
-    < <(git ls-files | grep -vE "^($exclude_re)/" || true)
+    < <(git ls-files | grep -vE "^($exclude_re|lib)/" || true)
 fi
 
 if [[ ${#files[@]} -eq 0 ]]; then
