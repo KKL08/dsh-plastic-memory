@@ -66,6 +66,8 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
-    "host:contract": "bash scripts/host-contract/run.sh"
-  }
+    "host:contract": "bash scripts/host-contract/run.sh",
+    "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build"
+  },
+  "packageManager": "pnpm@11.22.0"
 }
