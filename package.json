@@ -62,6 +62,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "host:smoke": "bash scripts/host-smoke.sh",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit"
