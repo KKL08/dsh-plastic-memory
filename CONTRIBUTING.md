@@ -48,8 +48,8 @@ before a release or when touching anything that talks to the host.
    checks the config layer and a plain-Node import. No API key.
 3. **Host contract** — `pnpm host:contract`. Same fresh host plus a sibling
    verify plugin; nine checks need no key (tool registration, no-cwd rejection,
-   file layout, lossless outputs, rule scan, snapshot round trip, promote
-   dismissal, dangling evidence anchor). Set `DEEPSEEK_API_KEY` to also run the
+   fresh-library health advice, file layout, lossless outputs, rule scan,
+   snapshot round trip, promote dismissal, dangling evidence anchor). Set `DEEPSEEK_API_KEY` to also run the
    two semantic-layer checks; the key is written only into the temporary
    `DSH_HOME` and never anywhere else.
 
