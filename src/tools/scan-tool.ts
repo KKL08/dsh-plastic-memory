@@ -1,6 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { executeScan, renderScanResult, type ScanToolDeps, type ScanToolResult } from './scan.ts'
+import { toToolOutput } from './output.ts'
 
 /** 把 memory_scan 接到 dsh 框架上。测试只测 scan.ts 纯逻辑，本文件由 typecheck 保证。 */
 export function createScanTool(deps: ScanToolDeps): ToolDefinition {
@@ -19,8 +20,8 @@ export function createScanTool(deps: ScanToolDeps): ToolDefinition {
     },
     output: {
       schema: { type: 'json' },
-      render: (_args, value) => [{ type: 'text', text: renderScanResult(value as ScanToolResult) }],
+      render: (_args, value) => [{ type: 'text', text: renderScanResult(value as unknown as ScanToolResult) }],
     },
-    execute: (args, exec) => executeScan(args, deps, exec),
+    execute: async (args, exec) => toToolOutput(await executeScan(args, deps, exec)),
   })
 }

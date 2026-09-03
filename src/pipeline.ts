@@ -5,6 +5,7 @@ import type { TypeRegistry } from './type-registry.ts'
 import type { SnapshotStore } from './governance/snapshots.ts'
 import { detectSecrets } from './secrets.ts'
 import { extractEntities, textSimilarity, DUPLICATE_SIMILARITY_THRESHOLD } from './text.ts'
+import { toToolOutput } from './tools/output.ts'
 
 export interface SaveCandidate {
   action: 'create' | 'update'
@@ -30,17 +31,15 @@ export type PipelineResult =
   | { kind: 'rejected'; reason: string }
 
 /**
- * 剔除值为 undefined 的顶层键。MemoryRecord 的可选字段（workspacePath/validFrom/
+ * 深度剔除值为 undefined 的键。MemoryRecord 的可选字段（workspacePath/validFrom/
  * validTo/supersedes 等）不填时为 undefined，zod .optional() 会把这些键连值保留，
  * 使记录无法无损 JSON 序列化。dsh 工具输出要求 lossless JSON——save 返回带 undefined
  * 键的记录会被框架以 "value is not lossless JSON" 拒绝。put 前也剔除，保证内存缓存干净。
+ * 走工具出口同一套深度剔除（tools/output.ts），单一来源；记录已过 zod 校验、只余 undefined
+ * 可选键，toToolOutput 不会抛错，返回值仍是合法 MemoryRecord（去掉可选键仍满足接口）。
  */
 function pruneUndefined(record: MemoryRecord): MemoryRecord {
-  const out: Record<string, unknown> = {}
-  for (const [k, v] of Object.entries(record)) {
-    if (v !== undefined) out[k] = v
-  }
-  return out as MemoryRecord
+  return toToolOutput(record) as unknown as MemoryRecord
 }
 
 export async function runSavePipeline(

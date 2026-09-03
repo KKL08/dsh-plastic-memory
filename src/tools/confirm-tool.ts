@@ -1,6 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { executeConfirm, type ConfirmResult, type ConfirmToolDeps } from './confirm.ts'
+import { toToolOutput } from './output.ts'
 
 /**
  * 把 memory_confirm 接到 dsh 框架上。测试只测 confirm.ts 纯逻辑，
@@ -18,8 +19,8 @@ export function createConfirmTool(deps: ConfirmToolDeps): ToolDefinition {
     },
     output: {
       schema: { type: 'json' },
-      render: (_args, value) => [{ type: 'text', text: (value as ConfirmResult).message }],
+      render: (_args, value) => [{ type: 'text', text: (value as unknown as ConfirmResult).message }],
     },
-    execute: (args) => executeConfirm(args, deps),
+    execute: async (args) => toToolOutput(await executeConfirm(args, deps)),
   })
 }

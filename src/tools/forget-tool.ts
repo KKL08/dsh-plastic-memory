@@ -1,6 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { executeForget, type ForgetResult, type ForgetToolDeps } from './forget.ts'
+import { toToolOutput } from './output.ts'
 
 /**
  * 把 memory_forget 工具接到 dsh 框架上。纯逻辑在 forget.ts，不依赖框架包，测试直接测它；
@@ -16,8 +17,8 @@ export function createForgetTool(deps: ForgetToolDeps): ToolDefinition {
     },
     output: {
       schema: { type: 'json' },
-      render: (_args, value) => [{ type: 'text', text: (value as ForgetResult).message }],
+      render: (_args, value) => [{ type: 'text', text: (value as unknown as ForgetResult).message }],
     },
-    execute: (args) => executeForget(args, deps),
+    execute: async (args) => toToolOutput(await executeForget(args, deps)),
   })
 }

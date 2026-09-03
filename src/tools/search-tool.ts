@@ -1,6 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { executeSearch, renderSearchResult, type SearchHit, type SearchToolDeps } from './search.ts'
+import { toToolOutput } from './output.ts'
 
 /**
  * 把 memory_search 工具接到 dsh 框架上。纯逻辑在 search.ts，不依赖框架包，测试直接测它；
@@ -18,8 +19,8 @@ export function createSearchTool(deps: SearchToolDeps): ToolDefinition {
     },
     output: {
       schema: { type: 'json' },
-      render: (_args, value) => [{ type: 'text', text: renderSearchResult(value as { hits: SearchHit[]; note?: string }) }],
+      render: (_args, value) => [{ type: 'text', text: renderSearchResult(value as unknown as { hits: SearchHit[]; note?: string }) }],
     },
-    execute: (args, exec) => executeSearch(args, exec, deps),
+    execute: async (args, exec) => toToolOutput(await executeSearch(args, exec, deps)),
   })
 }

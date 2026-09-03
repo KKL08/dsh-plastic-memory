@@ -2,6 +2,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { PipelineResult } from '../pipeline.ts'
 import { executeSave, renderSaveResult, type SaveToolDeps } from './save.ts'
+import { toToolOutput } from './output.ts'
 
 /**
  * 把 memory_save 工具接到 dsh 框架上。纯逻辑在 save.ts，不依赖框架包，测试直接测它；
@@ -31,8 +32,8 @@ export function createSaveTool(deps: SaveToolDeps): ToolDefinition {
     },
     output: {
       schema: { type: 'json' },
-      render: (_args, value) => [{ type: 'text', text: renderSaveResult(value as PipelineResult) }],
+      render: (_args, value) => [{ type: 'text', text: renderSaveResult(value as unknown as PipelineResult) }],
     },
-    execute: (args, exec) => executeSave(args, exec, deps),
+    execute: async (args, exec) => toToolOutput(await executeSave(args, exec, deps)),
   })
 }

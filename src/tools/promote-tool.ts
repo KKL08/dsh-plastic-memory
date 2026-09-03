@@ -1,6 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { executePromote, type PromoteTarget, type PromoteDeps, type PromoteResult } from './promote.ts'
+import { toToolOutput } from './output.ts'
 
 export interface PromoteToolDeps extends PromoteDeps {
   defaultTarget: PromoteTarget
@@ -25,10 +26,10 @@ export function createPromoteTool(deps: PromoteToolDeps): ToolDefinition {
       target: { type: 'string', enum: ['global', 'agents-md'], description: 'global=插件全局记忆（默认）；agents-md=写入 ~/.dsh/AGENTS.md 交由用户统一维护' },
       dismiss: { type: 'boolean', description: 'true=用户明确不想提升，只清除这些候选的提升标记、记忆留在项目内，忽略 target' },
     },
-    output: { schema: { type: 'json' }, render: (_a, v) => [{ type: 'text', text: (v as PromoteResult).message }] },
+    output: { schema: { type: 'json' }, render: (_a, v) => [{ type: 'text', text: (v as unknown as PromoteResult).message }] },
     execute: async (args) => {
       const target: PromoteTarget = args.target ?? deps.defaultTarget
-      return executePromote({ confirmedIds: args.ids, target, dismiss: args.dismiss }, deps)
+      return toToolOutput(await executePromote({ confirmedIds: args.ids, target, dismiss: args.dismiss }, deps))
     },
   })
 }

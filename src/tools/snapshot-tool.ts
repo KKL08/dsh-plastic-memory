@@ -1,6 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { executeSnapshotTool, type SnapshotToolDeps, type SnapshotToolResult } from './snapshot.ts'
+import { toToolOutput } from './output.ts'
 
 /**
  * 把 memory_snapshot 接到 dsh 框架上。测试只测 snapshot.ts 纯逻辑，
@@ -19,8 +20,8 @@ export function createSnapshotTool(deps: SnapshotToolDeps): ToolDefinition {
     },
     output: {
       schema: { type: 'json' },
-      render: (_args, value) => [{ type: 'text', text: (value as SnapshotToolResult).message }],
+      render: (_args, value) => [{ type: 'text', text: (value as unknown as SnapshotToolResult).message }],
     },
-    execute: (args) => executeSnapshotTool(args, deps),
+    execute: async (args) => toToolOutput(await executeSnapshotTool(args, deps)),
   })
 }

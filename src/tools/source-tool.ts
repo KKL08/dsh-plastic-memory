@@ -1,6 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { executeSource, renderSourceResult, type SourceToolDeps, type SourceResult } from './source.ts'
+import { toToolOutput } from './output.ts'
 
 export interface SourceToolBindingDeps extends SourceToolDeps {
   resolveContext: (exec: unknown) => Promise<{ workspacePath: string | undefined }>
@@ -26,14 +27,14 @@ export function createSourceTool(deps: SourceToolBindingDeps): ToolDefinition {
     output: {
       schema: { type: 'json' },
       render: (_args, value) => {
-        const result = value as SourceResult
+        const result = value as unknown as SourceResult
         const name = result.kind === 'ok' ? deps.store.get(result.memoryId)?.name : undefined
         return [{ type: 'text', text: renderSourceResult(result, name) }]
       },
     },
     execute: async (args, exec) => {
       const context = await deps.resolveContext(exec)
-      return executeSource(args, context, deps)
+      return toToolOutput(await executeSource(args, context, deps))
     },
   })
 }
