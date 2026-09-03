@@ -12,6 +12,9 @@
 # seconds, and returns non-zero on failure (callers rely on set -e + a trap).
 
 host_init() {
+  # The dsh CLI package (@deepseek-ai/dsh) is versioned in lockstep with the
+  # @deepseek-ai/dsh-* libraries the plugin pins as devDependencies; read the pin
+  # from dsh-tools rather than adding a second place to bump.
   PINNED="$(node -e 'process.stdout.write(require(process.argv[1]).devDependencies["@deepseek-ai/dsh-tools"])' "$REPO/package.json")"
   TMP="$(mktemp -d "${TMPDIR:-/tmp}/${1:-host-check}.XXXXXX")"
   STAGE="$TMP/stage"
@@ -52,23 +55,12 @@ host_cleanup() {
   fi
 }
 
-# Build lib/ into STAGE and write the published package shape (same rewrite as
-# scripts/publish-sync.sh: runtime fields only, main -> lib/index.js, files
-# whitelist), then npm pack it. Sets TGZ.
+# Build lib/ into STAGE and write the published package shape (the single
+# rewrite in scripts/publish-shape.cjs), then npm pack it. Sets TGZ.
 host_stage_and_pack() {
   host_run build "$REPO/node_modules/.bin/tsc" -p "$REPO/tsconfig.build.json" --outDir "$STAGE/lib"
-  cp "$REPO/cordis.patch.yml" "$STAGE/cordis.patch.yml"
-  cp "$REPO/README.md" "$STAGE/README.md"
-  host_run stage node -e '
-const fs = require("fs");
-const p = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-const keep = ["name","version","description","author","license","keywords","repository","homepage","type","engines","main","files","dependencies","peerDependencies","dsh"];
-const out = {};
-for (const k of keep) if (p[k] !== undefined) out[k] = p[k];
-out.main = "lib/index.js";
-out.files = ["lib", "cordis.patch.yml", "README.md"];
-fs.writeFileSync(process.argv[2], JSON.stringify(out, null, 2) + "\n");
-' "$REPO/package.json" "$STAGE/package.json"
+  host_run stage-files cp "$REPO/cordis.patch.yml" "$REPO/README.md" "$STAGE/"
+  host_run stage node "$REPO/scripts/publish-shape.cjs" "$REPO/package.json" "$STAGE/package.json"
   host_run pack sh -c 'cd "$1" && npm pack --loglevel=error' _ "$STAGE"
   TGZ="$STAGE/$(ls -t "$STAGE"/*.tgz | head -n 1 | xargs basename)"
   [ -f "$TGZ" ] || { STEP=pack; echo "$HOST_TAG: no tarball produced" >&2; return 1; }
@@ -100,7 +92,9 @@ host_install_plugin() {
   host_run plugin-add env DSH_HOME="$HOMEDIR" "$DSH" plugin --profile "$profile" add "$TGZ"
 }
 
-# Fail if anything under the real ~/.dsh is newer than MARKER.
+# Write tripwire: fail if anything under the real ~/.dsh is newer than MARKER.
+# (Read isolation rests on the DSH_HOME redirect and on credentials being written
+# only into the isolated home; mtimes cannot prove that nothing was read.)
 host_assert_isolated() {
   local real="${DSH_HOME_REAL:-$HOME/.dsh}"
   if [ -d "$real" ]; then
