@@ -65,6 +65,7 @@
     "host:smoke": "bash scripts/host-smoke.sh",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "host:contract": "bash scripts/host-contract/run.sh"
   }
 }

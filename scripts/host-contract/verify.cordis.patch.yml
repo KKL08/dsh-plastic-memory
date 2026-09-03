@@ -1,0 +1,23 @@
+# R1 宿主契约检查的 overlay（run.sh 会把 __VERIFY_URL__ 换成 verify-plugin 的 file:// URL）。
+# 宿主 v0.1.1-rc.2 的 dsh-base 不含 storage 三件套与 workspace，headless 形态自带；
+# 0.1.2+ 若 base 已自带，需删掉 storage 三条 insert（保留 workspace）。
+- id: plastic-memory
+  config:
+    writeMode: proactive
+    template: coding
+- insert:
+    - id: storage
+      name: '@deepseek-ai/dsh-storage'
+    - id: storage-json
+      name: '@deepseek-ai/dsh-storage-json'
+      config:
+        root: !!js dshHomePath('storages')
+    - id: storage-domain
+      name: '@deepseek-ai/dsh-storage-domain'
+      config:
+        backend: json
+    - id: workspace
+      name: '@deepseek-ai/dsh-workspace'
+    - id: plastic-memory-host-contract
+      name: __VERIFY_URL__
+      inject: [tools]
