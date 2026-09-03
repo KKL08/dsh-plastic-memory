@@ -6,13 +6,14 @@
 # otherwise they are reported as SKIPPED. Never touches ~/.dsh.
 #
 #   scripts/host-contract/run.sh              run (temp dir removed on exit)
-#   HOST_SMOKE_KEEP=1 ...                     keep the temp dir (logs, DSH_HOME)
+#   HOST_SMOKE_KEEP=1 ...                     keep the temp dir (logs, DSH_HOME) — with a key set,
+#                                             the kept dir holds an owner-only .credentials.yaml
 #   DEEPSEEK_API_KEY=... ...                  enable the two semantic-layer cases
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 # Schema version of $DSH_HOME/.credentials.yaml understood by the pinned host
 # (refs.<NAME> holds the secret); bump alongside the pinned host if it changes.
-CREDENTIALS_SCHEMA_VERSION="${CREDENTIALS_SCHEMA_VERSION:- 1}"
+CREDENTIALS_SCHEMA_VERSION="${CREDENTIALS_SCHEMA_VERSION:-1}"
 HOST_TAG="host-contract"
 . "$REPO/scripts/host-common.sh"
 

@@ -5,7 +5,7 @@
  * 规则层/语义层 note 码、快照回路、提升候选 dismiss、证据锚悬空降级。
  * 有 DEEPSEEK_API_KEY 且宿主能选出默认模型时再跑语义扫描与取消两项，否则标 SKIPPED。
  *
- * 只用可擦除的 TypeScript 语法（Node 22.18+/24 原生 strip-types 直接加载，不需要构建）。
+ * 只用可擦除的 TypeScript 语法（engines 要求的 Node 22.19+/24 原生 strip-types 直接加载，不需要构建）。
  */
 import { existsSync, readdirSync, readFileSync, mkdtempSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -128,10 +128,11 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
     await attempt('H8-GLOBAL-CANDIDATE-DISMISS', async () => {
       const r = await call('memory_save', { action: 'create', name: 'global-wish', summary: '全局意图', content: '所有项目日志统一 JSON', ...MEMORY_BASE, scope: 'global' }, execA) as { kind: string; record?: { id: string; scope: string; globalCandidate?: boolean } }
       if (r.kind !== 'saved' || !r.record) return { ok: false, detail: `kind=${r.kind}` }
+      const before = await call('memory_health', {}, execA) as { promoteCandidates: number }
       const p = await call('memory_promote', { ids: [r.record.id], dismiss: true }, execA) as { dismissed?: string[]; promoted?: string[] }
-      const after = await call('memory_search', { query: '全局意图' }, execA) as { hits: Array<{ id: string; globalCandidate?: boolean }> }
-      const hit = after.hits.find(h => h.id === r.record!.id)
-      return { ok: r.record.scope === 'workspace' && r.record.globalCandidate === true && (p.dismissed ?? []).includes(r.record.id) && !!hit && !hit.globalCandidate, detail: `scope=${r.record.scope} candidate=${r.record.globalCandidate} dismissed=${JSON.stringify(p.dismissed)} afterCandidate=${hit?.globalCandidate}` }
+      const after = await call('memory_health', {}, execA) as { promoteCandidates: number }
+      // health 的 promoteCandidates 直接数存储里的 globalCandidate 标记：dismiss 前 1、后 0 才算真清了
+      return { ok: r.record.scope === 'workspace' && r.record.globalCandidate === true && before.promoteCandidates === 1 && (p.dismissed ?? []).includes(r.record.id) && after.promoteCandidates === 0, detail: `scope=${r.record.scope} candidate=${r.record.globalCandidate} candidatesBefore=${before.promoteCandidates} dismissed=${JSON.stringify(p.dismissed)} candidatesAfter=${after.promoteCandidates}` }
     })
 
     // H9 证据锚悬空（合成会话未持久化）→ memory_source 优雅降级不抛
@@ -148,13 +149,21 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       const dm = ctx.get('agentDefaultModel') as { currentSelection?: () => { provider?: string; model?: string } } | undefined
       sel = dm?.currentSelection?.() ?? {}
     } catch { /* 无默认模型服务 */ }
-    const llmReady = !!process.env.DEEPSEEK_API_KEY && !!sel.provider && !!sel.model
+    const hasKey = !!process.env.DEEPSEEK_API_KEY
+    const llmReady = hasKey && !!sel.provider && !!sel.model
+    // 有 key 却选不出默认模型是宿主契约变了（agentDefaultModel 服务改名/消失），必须响亮失败，
+    // 不能悄悄 SKIP 让绿色结果少验一段
+    const semanticGate = (): { ok: boolean; skipped?: boolean; detail: string } | null => {
+      if (llmReady) return null
+      if (!hasKey) return { ok: true, skipped: true, detail: 'SKIPPED: 无 DEEPSEEK_API_KEY' }
+      return { ok: false, detail: `有 DEEPSEEK_API_KEY 但宿主未选出默认模型（agentDefaultModel.currentSelection → ${JSON.stringify(sel)}）` }
+    }
     const wsB = mkWs('b')
     for (const [n, c] of [['b-1', '部署统一跑 deploy.sh'], ['b-2', '单测不 mock 数据库'], ['b-3', '提交信息用英文祈使句']]) {
       await call('memory_save', { action: 'create', name: n, summary: c, content: c, ...MEMORY_BASE }, mkExec(wsB, sel))
     }
     await attempt('H10-SEMANTIC-SCAN-ABORT', async () => {
-      if (!llmReady) return { ok: true, skipped: true, detail: `SKIPPED: ${process.env.DEEPSEEK_API_KEY ? '宿主无默认模型' : '无 DEEPSEEK_API_KEY'}` }
+      const gate = semanticGate(); if (gate) return gate
       const ac = new AbortController()
       // 规则层毫秒级完成，LLM 请求至少几百毫秒：100ms 取消落在语义请求进行中（库小时 800ms 已经扫完）
       const timer = setTimeout(() => ac.abort(new DOMException('user cancelled', 'AbortError')), 100)
@@ -166,7 +175,7 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       return { ok: isAbort && h.breakdown.semanticLayer.cachedAt === null, detail: `rejected=${rejected instanceof Error ? rejected.name : String(rejected)} cachedAt=${h.breakdown.semanticLayer.cachedAt}` }
     })
     await attempt('H11-SEMANTIC-SCAN-FULL', async () => {
-      if (!llmReady) return { ok: true, skipped: true, detail: `SKIPPED: ${process.env.DEEPSEEK_API_KEY ? '宿主无默认模型' : '无 DEEPSEEK_API_KEY'}` }
+      const gate = semanticGate(); if (gate) return gate
       const r = await call('memory_scan', { layers: 'full' }, mkExec(wsB, sel)) as { kind: string; semanticCachedAt: number | null; notes?: Array<{ code: string }> }
       const codes = (r.notes ?? []).map(n => n.code)
       return { ok: r.kind === 'single' && typeof r.semanticCachedAt === 'number' && !codes.includes('semantic-failed') && !codes.includes('semantic-unavailable'), detail: `kind=${r.kind} cachedAt=${r.semanticCachedAt} notes=${codes.join(',')}` }
