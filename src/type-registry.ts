@@ -1,4 +1,5 @@
 import type { MemoryTypeDefinition } from './types.ts'
+import { TypeRegistryError } from './errors.ts'
 
 export interface TypeRegistryConfig {
   template: string
@@ -48,7 +49,7 @@ export interface TypeRegistry {
 export function assertNoBuiltinCollision(types: readonly MemoryTypeDefinition[], origin: string): void {
   for (const t of types) {
     if (BUILTIN_TYPES.some(b => b.name === t.name)) {
-      throw new Error(`${origin}类型 "${t.name}" 与内置类型重名，内置五类不可覆盖`)
+      throw new TypeRegistryError('builtin-collision', `${origin}类型 "${t.name}" 与内置类型重名，内置五类不可覆盖`)
     }
   }
 }

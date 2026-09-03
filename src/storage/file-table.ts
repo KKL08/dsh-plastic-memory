@@ -1,4 +1,5 @@
 import { mkdir, readdir, readFile, writeFile, rename, rm, stat } from 'node:fs/promises'
+import { RecordNotFoundError } from '../errors.ts'
 import { join } from 'node:path'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { MemoryTable, MemoryLogger } from '../store.ts'
@@ -321,7 +322,7 @@ export class FileTable implements MemoryTable {
   async update(key: string, fn: (current: MemoryRecord) => MemoryRecord): Promise<MemoryRecord> {
     return this.locked(async () => {
       const current = this.map.get(key)
-      if (!current) throw new Error(`记录不存在：${key}`)
+      if (!current) throw new RecordNotFoundError(key)
       const next = fn(current.record)
       await this.persist(key, next)
       return next

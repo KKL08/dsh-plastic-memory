@@ -1,4 +1,5 @@
 import type { MemoryRecord } from './record-schema.ts'
+import { RecordNotFoundError } from './errors.ts'
 import { expandQueryTerms, matchScore } from './text.ts'
 
 /** 纯逻辑层的日志注入口：接线层（index.ts）传入 ctx.logger，缺省回退 console，
@@ -27,7 +28,7 @@ export class InMemoryTable implements MemoryTable {
   }
   async update(key: string, fn: (c: MemoryRecord) => MemoryRecord) {
     const current = this.map.get(key)
-    if (!current) throw new Error(`记录不存在：${key}`)
+    if (!current) throw new RecordNotFoundError(key)
     const next = fn(current)
     this.map.set(key, next)
     return next

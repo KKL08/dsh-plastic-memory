@@ -1,4 +1,5 @@
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
+import { FrontmatterError } from '../errors.ts'
 import { memoryRecordSchema, type MemoryRecord } from '../record-schema.ts'
 
 /** 文件面不存在的字段：位置由目录表达，易变统计住 KV sidecar（契约总表见 docs/p15-storage-search-redesign.md §3）。 */
@@ -22,11 +23,11 @@ const FENCE = '---\n'
 const CLOSE = '\n---\n'
 
 export function splitFrontmatter(raw: string): ParsedMemoryFile {
-  if (!raw.startsWith(FENCE)) throw new Error('缺少 frontmatter 围栏')
+  if (!raw.startsWith(FENCE)) throw new FrontmatterError('missing-fence', '缺少 frontmatter 围栏')
   const close = raw.indexOf(CLOSE, FENCE.length - 1)
-  if (close < 0) throw new Error('frontmatter 围栏未闭合')
+  if (close < 0) throw new FrontmatterError('unclosed-fence', 'frontmatter 围栏未闭合')
   const data = parseYaml(raw.slice(FENCE.length, close + 1)) // 坏 YAML 由 yaml 包抛出
-  if (data === null || typeof data !== 'object' || Array.isArray(data)) throw new Error('frontmatter 不是对象')
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) throw new FrontmatterError('not-object', 'frontmatter 不是对象')
   let body = raw.slice(close + CLOSE.length)
   if (body.startsWith('\n')) body = body.slice(1)      // encode 时围栏后有一个空行
   return { data: data as Record<string, unknown>, body: body.replace(/\n$/, '') }
@@ -48,9 +49,9 @@ export function decodeRecord(
       const val = String(src[k])
       // 宽松的 Date.parse 会把手改的 '2026-08-19' 静默折算成 UTC 零点——亚日精度悄悄丢失，
       // 而快照冲突判定按毫秒比较。格式不对必须响亮失败（进 malformed 隔离），不能安静接受。
-      if (!ISO_MS_RE.test(val)) throw new Error(`时间戳必须是 UTC 毫秒 ISO 格式（toISOString）：${k}=${val}`)
+      if (!ISO_MS_RE.test(val)) throw new FrontmatterError('timestamp-format', `时间戳必须是 UTC 毫秒 ISO 格式（toISOString）：${k}=${val}`)
       const ms = Date.parse(val)
-      if (!Number.isFinite(ms)) throw new Error(`时间戳无法解析：${k}=${val}`)
+      if (!Number.isFinite(ms)) throw new FrontmatterError('timestamp-parse', `时间戳无法解析：${k}=${val}`)
       src[k] = ms
     }
   }
@@ -63,7 +64,7 @@ export function decodeRecord(
     lastRecalledAt: null,
   }
   const r = memoryRecordSchema.safeParse(assembled) // eventRange 二元组由 z.tuple 强制
-  if (!r.success) throw new Error(`schema 校验失败：${r.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('；')}`)
+  if (!r.success) throw new FrontmatterError('schema-invalid', `schema 校验失败：${r.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('；')}`)
   return { record: r.data, extras }
 }
 
