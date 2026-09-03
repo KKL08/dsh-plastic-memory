@@ -7,12 +7,12 @@ import type { ScanCacheEntry } from '../governance/schema.ts'
 import { FINDING_TYPES } from '../governance/schema.ts'
 import type { HealthThresholds } from '../governance/health-presets.ts'
 import { runRuleScan } from '../governance/rule-scan.ts'
-import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, checkupRowBase, type LayerRef } from '../governance/layer-health.ts'
+import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, checkupRowBase, type LayerRef, TIER_LABEL } from '../governance/layer-health.ts'
 
 const DAY = 86_400_000
 
 /** tier 枚举 → 用户面中文文案（结构化 tier 字段仍保留 green/amber/red 供程序用）。 */
-export const TIER_LABEL = { green: '绿色', amber: '黄色', red: '红色' } as const
+export { TIER_LABEL }
 
 export interface HealthToolDeps {
   store: MemoryStore

@@ -10,6 +10,9 @@ import { runRuleScan, buildMalformedFindings } from './rule-scan.ts'
 import { computeHealth, type HealthScore } from './scoring.ts'
 import { workspaceDirName, GLOBAL_DIR } from '../storage/paths.ts'
 
+/** 健康档位的用户面标签（scan 体检行与 health message 共用一份，枚举值仍是 green/amber/red）。 */
+export const TIER_LABEL = { green: '绿色', amber: '黄色', red: '红色' } as const
+
 const DAY = 86_400_000
 
 /** 评分层引用：workspace 层按项目目录桶，global 层单列。 */

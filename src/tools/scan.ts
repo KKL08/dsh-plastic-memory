@@ -7,7 +7,7 @@ import type { KvTable } from '../kv-table.ts'
 import type { Finding, ScanCacheEntry } from '../governance/schema.ts'
 import { runRuleScan, buildMalformedFindings } from '../governance/rule-scan.ts'
 import { runSemanticScan, SEMANTIC_SCAN_MAX_RECORDS, type SemanticLlm } from '../governance/semantic-scan.ts'
-import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, checkupRowBase, GLOBAL_CACHE_KEY, type LayerRef } from '../governance/layer-health.ts'
+import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, checkupRowBase, GLOBAL_CACHE_KEY, type LayerRef, TIER_LABEL } from '../governance/layer-health.ts'
 import { join, sep } from 'node:path'
 import { workspaceDirName, GLOBAL_DIR } from '../storage/paths.ts'
 import { runCrossWsScan, findEntityDuplicates, type CrossWsDuplicate } from '../governance/cross-ws.ts'
@@ -104,11 +104,10 @@ export function renderScanResult(result: ScanToolResult): string {
   if (result.kind === 'error') return result.message
   if (result.kind === 'checkup') {
     const lines = [result.message]
-    const tierLabel = { green: '绿色', amber: '黄色', red: '红色' } as const
     for (const row of result.rows) {
       const name = row.layer === 'global' ? 'global' : row.workspacePath!
       const gateNote = row.gate.secret ? '｜⚠️ 检出密钥' : ''
-      lines.push(`- ${name}：${Math.floor(row.score)}/100（${tierLabel[row.tier]}）｜${row.totalMemories} 条｜${row.issueSummary}${gateNote}`)
+      lines.push(`- ${name}：${Math.floor(row.score)}/100（${TIER_LABEL[row.tier]}）｜${row.totalMemories} 条｜${row.issueSummary}${gateNote}`)
     }
     for (const c of result.crossLayerConflicts) {
       lines.push(`⚠️ 跨层冲突：global ${c.globalId} 与 ${c.workspaces.length} 个项目存在待决冲突（${c.workspaces.join('、')}）——被多数项目反对的全局规则建议优先裁定（memory_confirm resolve：${c.decisionIds.join('、')}）`)
