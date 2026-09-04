@@ -29,7 +29,7 @@ needed.
 | `tests/` | vitest unit and integration tests (`tests/helpers/` has shared fixtures). |
 | `scripts/host-smoke.sh` | Installs the packed plugin into a fresh, pinned dsh host and checks it loads. |
 | `scripts/host-contract/` | Boots that host with a verify plugin that drives the nine tools through the real tool registry. |
-| `docs/` | Design notes (not published with the package). |
+| `docs/` | Design notes referenced from source comments (`docs/*.md`). Not published yet; the contracts they describe are pinned by the tests and by `src/contract-codes.ts`. |
 
 ## Tests
 
