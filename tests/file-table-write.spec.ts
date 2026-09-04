@@ -145,7 +145,9 @@ describe('FileTable 写侧', () => {
     expect(await readFile(join(root, GLOBAL_DIR, 'a.md'), 'utf8')).toContain('customField')
   })
 
-  it('自写后指纹已刷新：refreshIfChanged 不触发假重载', async () => {
+  // 白盒守卫（非契约）：假重载对外不可观测，只有 spy 私有 loadInner 能证明"自写后指纹已刷新、
+  // 不重读整库"。改动 loadInner 的名字或调用结构时同步改这里，不要为让它过而保留旧结构。
+  it('自写后指纹已刷新：refreshIfChanged 不触发假重载（白盒）', async () => {
     const t = await load()
     await t.put('mem_x', record({ id: 'mem_x' }))
     const spy = vi.spyOn(t as unknown as { loadInner: () => Promise<void> }, 'loadInner')
