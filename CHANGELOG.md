@@ -7,6 +7,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0-beta.3] - 2026-09-04
+
 ### Added
 - Stable machine-readable codes on tool results: `code` on rejected saves,
   `{ code, text }` warnings and scan notes, `recommendationKinds` on health,
