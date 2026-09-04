@@ -23,6 +23,12 @@ jobs:
         with:
           path: ~/.cache/dsh-plastic-memory
           key: dsh-host-${{ runner.os }}-node24-${{ hashFiles('package.json') }}
+      # This workflow exists to run the two semantic-layer cases; without the
+      # secret they would be reported as SKIP and the run would still be green.
+      - name: Require DEEPSEEK_API_KEY
+        run: test -n "$DEEPSEEK_API_KEY" || { echo "DEEPSEEK_API_KEY secret is not set"; exit 1; }
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
       - run: pnpm host:contract
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
