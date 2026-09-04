@@ -2,11 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { snapshotJsonValue } from '@deepseek-ai/dsh-session'
 import { toToolOutput } from '../src/tools/output.ts'
 
-// 契约来源：.superpowers/sdd/task-1.3-brief.md「控制器补充：toToolOutput 的精确契约」。
-// 语义 =「宿主 snapshotJsonValue 会接受的值」，只做一件宽容：深度剔除 undefined。
-// 其余非 JSON 值（NaN/±Infinity/-0、Date/Map/Set/类实例/函数/bigint/symbol、循环）
-// 一律抛 TypeError，让契约测试而非宿主报错。本文件先写、先红——src/tools/output.ts
-// 尚不存在，实现由另一 agent 补齐。
+// toToolOutput 的契约：语义 =「宿主 snapshotJsonValue 会接受的值」，只做一件宽容：深度剔除
+// undefined。其余非 JSON 值（NaN/±Infinity/-0、Date/Map/Set/类实例/函数/bigint/symbol、循环）
+// 一律抛 TypeError，让契约测试而非宿主报错。
 
 /** 递归深冻一个对象，供不可变测试：实现若尝试原地改动会在严格模式抛错。 */
 function deepFreeze<T>(value: T): T {
@@ -96,6 +94,16 @@ describe('toToolOutput — 拒绝非纯对象/函数/bigint/symbol（抛 TypeErr
 
   it('symbol 抛 TypeError', () => {
     expect(() => toToolOutput({ s: Symbol('x') })).toThrow(TypeError)
+  })
+
+  it('symbol 键抛 TypeError（不静默丢弃）', () => {
+    expect(() => toToolOutput({ ok: 1, [Symbol('hidden')]: 2 })).toThrow(TypeError)
+  })
+
+  it('非枚举键抛 TypeError（不静默丢弃）', () => {
+    const obj: Record<string, unknown> = { ok: 1 }
+    Object.defineProperty(obj, 'hidden', { value: 2, enumerable: false })
+    expect(() => toToolOutput(obj)).toThrow(TypeError)
   })
 
   it('带 toJSON 方法的对象抛 TypeError（不调用 toJSON，函数值属性即非 JSON）', () => {

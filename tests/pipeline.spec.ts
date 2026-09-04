@@ -33,14 +33,14 @@ describe('extractEntities', () => {
 })
 
 describe('runSavePipeline', () => {
-  it('未知 type 返回 rejected', async () => {
+  it('未知 type 返回 rejected(unknown-type)', async () => {
     const result = await runSavePipeline(candidate({ type: 'ghost' }), deps())
-    expect(result.kind).toBe('rejected')
+    expect(result).toMatchObject({ kind: 'rejected', code: 'unknown-type' })
   })
 
   it('组装出的记录过不了 schema 时 rejected 而非写入脏数据', async () => {
     const result = await runSavePipeline(candidate({ name: '' }), deps())   // name 最短 1 字符
-    expect(result.kind).toBe('rejected')
+    expect(result).toMatchObject({ kind: 'rejected', code: 'schema-invalid' })
   })
 
   it('create 成功：生成 id、时间字段一致、confidence 按映射', async () => {
@@ -99,7 +99,7 @@ describe('runSavePipeline', () => {
 
   it('填 global 且无 workspacePath 时同样拒存（global 直写必须过提升闸，无桶可降级）', async () => {
     const result = await runSavePipeline(candidate({ scope: 'global' }), { ...deps(), workspacePath: undefined })
-    expect(result.kind).toBe('rejected')
+    expect(result).toMatchObject({ kind: 'rejected', code: 'no-workspace' })
   })
 
   // A1 回归：例行 update 不得变更 scope——已经用户确认提升的 global 记忆若能被 update
@@ -179,10 +179,10 @@ describe('runSavePipeline', () => {
     expect(updated.record.lastConfirmedAt).toBeGreaterThan(first.record.lastConfirmedAt)
   })
 
-  it('update 目标 id 不存在时 rejected', async () => {
+  it('update 目标 id 不存在时 rejected(target-missing)', async () => {
     const result = await runSavePipeline(
       candidate({ action: 'update', id: 'mem_不存在' }), deps())
-    expect(result.kind).toBe('rejected')
+    expect(result).toMatchObject({ kind: 'rejected', code: 'target-missing' })
   })
 
   it('update 目标已 softDelete 时 rejected', async () => {
@@ -192,7 +192,7 @@ describe('runSavePipeline', () => {
     await store.softDelete(created.record.id)
     const result = await runSavePipeline(
       candidate({ action: 'update', id: created.record.id, content: '新内容' }), deps(store))
-    expect(result.kind).toBe('rejected')
+    expect(result).toMatchObject({ kind: 'rejected', code: 'target-missing' })
   })
 
   it('supersedes 把旧记忆置为 superseded', async () => {
@@ -258,7 +258,7 @@ describe('runSavePipeline', () => {
     const result = await runSavePipeline(
       candidate({ action: 'update', id: created.record.id, content: '无 cwd 想改' }),
       { ...deps(store), workspacePath: undefined })
-    expect(result.kind).toBe('rejected')
+    expect(result).toMatchObject({ kind: 'rejected', code: 'cross-workspace' })
   })
 
   // B1c：update global 目标快照先行
@@ -440,7 +440,7 @@ describe('runSavePipeline', () => {
       candidate({ scope: 'workspace', content: '正文干净', summary: '密钥 sk-TESTONLYaaaaaaaaaaaaaaaa 备份' }),
       deps(store),
     )
-    expect(result.kind).toBe('rejected')
+    expect(result).toMatchObject({ kind: 'rejected', code: 'secret-critical' })
     expect(store.query({}).length).toBe(0)
   })
 
