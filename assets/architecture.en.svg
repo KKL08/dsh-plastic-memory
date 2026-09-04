@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 554" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+<rect width="860" height="554" fill="#F5F7FA"/>
+<defs>
+<marker id="n" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M2 1.5L8 5L2 8.5" fill="none" stroke="#8A93A2" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+</marker>
+<marker id="g" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M2 1.5L8 5L2 8.5" fill="none" stroke="#B4832F" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+</marker>
+</defs>
+
+<!-- Conversation surface (external, neutral gray) -->
+<rect x="60" y="24" width="740" height="48" rx="12" fill="#EAECF0" stroke="#C2C8D2" stroke-width="1.5"/>
+<text x="430" y="43" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#232833">Conversation</text>
+<text x="430" y="60" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#5A6472">User–Agent dialogue · Model identifies what's worth saving</text>
+
+<!-- ingest / recall short arrows -->
+<line x1="250" y1="72" x2="250" y2="102" stroke="#8A93A2" stroke-width="1.6" marker-end="url(#n)"/>
+<text x="260" y="88" dominant-baseline="central" font-size="11" fill="#5A6472">memory_save</text>
+<line x1="610" y1="102" x2="610" y2="72" stroke="#8A93A2" stroke-width="1.6" marker-end="url(#n)"/>
+<text x="600" y="88" text-anchor="end" dominant-baseline="central" font-size="11" fill="#5A6472">Snapshot injection</text>
+
+<!-- Write pipeline -->
+<rect x="100" y="104" width="320" height="62" rx="8" fill="#FFFFFF" stroke="#CBD2DC" stroke-width="1"/>
+<text x="260" y="127" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#232833">Write Safety Pipeline</text>
+<text x="260" y="149" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#5A6472">Deduplication · Secret leak blocking</text>
+
+<!-- Context snapshot -->
+<rect x="490" y="104" width="320" height="62" rx="8" fill="#FFFFFF" stroke="#CBD2DC" stroke-width="1"/>
+<text x="650" y="127" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#232833">Context Snapshot · Read-only</text>
+<text x="650" y="149" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#5A6472">Injected at session start or context compression</text>
+
+<!-- write -> store / store -> read -->
+<line x1="250" y1="166" x2="250" y2="204" stroke="#8A93A2" stroke-width="1.6" marker-end="url(#n)"/>
+<line x1="610" y1="204" x2="610" y2="166" stroke="#8A93A2" stroke-width="1.6" marker-end="url(#n)"/>
+
+<!-- ===== Memory store (data plane / hub) ===== -->
+<rect x="60" y="204" width="740" height="200" rx="14" fill="#E9F1FB" stroke="#3F72AD" stroke-width="1.5"/>
+<text x="82" y="230" dominant-baseline="central" font-size="14" font-weight="500" fill="#1C3E63">Memory Storage</text>
+<text x="778" y="230" text-anchor="end" dominant-baseline="central" font-size="12" fill="#3C6494">File-based · Each memory = one Markdown file</text>
+
+<rect x="90" y="252" width="330" height="66" rx="8" fill="#FFFFFF" stroke="#A9C6E6" stroke-width="1"/>
+<text x="255" y="276" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#1C3E63">Workspace · Project Memories</text>
+<text x="255" y="296" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#3C6494">Isolated per project, invisible across workspaces</text>
+
+<rect x="440" y="252" width="330" height="66" rx="8" fill="#FFFFFF" stroke="#A9C6E6" stroke-width="1"/>
+<text x="605" y="276" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#1C3E63">Global · Shared Memories</text>
+<text x="605" y="296" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#3C6494">Read-only across projects · User-gated writes</text>
+
+<!-- memory type chips (same category -> same hue) -->
+<text x="90" y="341" dominant-baseline="central" font-size="12" fill="#3C6494">Types</text>
+<rect x="130" y="330" width="62" height="22" rx="11" fill="#DBE7F6"/><text x="161" y="341" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#1C3E63">profile</text>
+<rect x="200" y="330" width="86" height="22" rx="11" fill="#DBE7F6"/><text x="243" y="341" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#1C3E63">preference</text>
+<rect x="294" y="330" width="84" height="22" rx="11" fill="#DBE7F6"/><text x="336" y="341" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#1C3E63">knowledge</text>
+<rect x="386" y="330" width="64" height="22" rx="11" fill="#DBE7F6"/><text x="418" y="341" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#1C3E63">project</text>
+<rect x="458" y="330" width="80" height="22" rx="11" fill="#DBE7F6"/><text x="498" y="341" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#1C3E63">reference</text>
+<rect x="546" y="330" width="72" height="22" rx="11" fill="#EEF1F5"/><text x="582" y="341" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#5A6472">+ custom</text>
+
+<rect x="90" y="360" width="680" height="32" rx="8" fill="#D8E6F6" stroke="#8FB4DD" stroke-width="1"/>
+<text x="430" y="376" text-anchor="middle" dominant-baseline="central" font-size="13" fill="#1C3E63">MEMORY.md dynamic index · Snapshot injection source</text>
+
+<!-- ===== store <-> governance ===== -->
+<line x1="430" y1="404" x2="430" y2="442" stroke="#B4832F" stroke-width="2" marker-start="url(#g)" marker-end="url(#g)"/>
+<text x="444" y="423" dominant-baseline="central" font-size="12" fill="#B4832F">Audit &amp; act (read &#x2192; write back)</text>
+
+<!-- ===== Governance (control plane) ===== -->
+<rect x="60" y="442" width="740" height="96" rx="14" fill="#FBF2E0" stroke="#C79A45" stroke-width="1.5"/>
+<text x="82" y="468" dominant-baseline="central" font-size="14" font-weight="500" fill="#6E4E14">Memory Governance</text>
+<text x="778" y="468" text-anchor="end" dominant-baseline="central" font-size="12" fill="#8F6A22">Operates on all stored memories</text>
+
+<rect x="82" y="486" width="165" height="46" rx="8" fill="#FFFFFF" stroke="#E0C288" stroke-width="1"/>
+<text x="164" y="509" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#6E4E14">scan · Full audit</text>
+
+<rect x="259" y="486" width="165" height="46" rx="8" fill="#FFFFFF" stroke="#E0C288" stroke-width="1"/>
+<text x="341" y="509" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#6E4E14">health · Scoring</text>
+
+<rect x="436" y="486" width="165" height="46" rx="8" fill="#FFFFFF" stroke="#E0C288" stroke-width="1"/>
+<text x="518" y="509" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#6E4E14">confirm · Triage</text>
+
+<rect x="613" y="486" width="165" height="46" rx="8" fill="#FFFFFF" stroke="#E0C288" stroke-width="1"/>
+<text x="695" y="509" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#6E4E14">promote · Scope lift</text>
+
+</svg>
