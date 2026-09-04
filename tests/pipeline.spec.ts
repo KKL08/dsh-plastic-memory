@@ -7,6 +7,7 @@ import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
 import type { MemorySnapshot } from '../src/governance/schema.ts'
 import { candidate } from './helpers/record.ts'
+import { FAKE_SECRET } from './helpers/secrets.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const session = { id: 's1', lastSeq: 42 }
@@ -369,7 +370,7 @@ describe('runSavePipeline', () => {
   it('含高危密钥（明确厂商特征）时 rejected 且不落盘（D6）', async () => {
     const store = new MemoryStore(new InMemoryTable())
     const result = await runSavePipeline(
-      candidate({ content: '我的 API 密钥是 sk-proj-TESTONLY0000000000000000' }),
+      candidate({ content: `我的 API 密钥是 ${FAKE_SECRET.skProj}` }),
       deps(store),
     )
     expect(result.kind).toBe('rejected')
@@ -437,7 +438,7 @@ describe('runSavePipeline', () => {
   it('高危密钥只出现在 summary 时同样拦截不落盘', async () => {
     const store = new MemoryStore(new InMemoryTable())
     const result = await runSavePipeline(
-      candidate({ scope: 'workspace', content: '正文干净', summary: '密钥 sk-TESTONLYaaaaaaaaaaaaaaaa 备份' }),
+      candidate({ scope: 'workspace', content: '正文干净', summary: `密钥 ${FAKE_SECRET.sk} 备份` }),
       deps(store),
     )
     expect(result).toMatchObject({ kind: 'rejected', code: 'secret-critical' })

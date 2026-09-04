@@ -7,6 +7,7 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { PendingDecision, ScanCacheEntry, Finding } from '../src/governance/schema.ts'
 import { record } from './helpers/record.ts'
 import { DAY } from './helpers/clock.ts'
+import { FAKE_SECRET } from './helpers/secrets.ts'
 
 function semantic(type: Finding['type'], memoryIds: string[], summary = ''): Finding {
   return { type, layer: 'semantic', severity: 'info', memoryIds, summary, suggestedAction: '' }
@@ -74,7 +75,7 @@ describe('executeHealth 单层视图', () => {
 
   it('红线门：本层 secret 直接判死——tier 强制红、score 压进红区', async () => {
     const deps = makeDeps(1000)
-    await deps.store.put(record({ id: 'mem_s', content: 'key: sk-TESTONLYaaaaaaaaaaaaaaaa' }))
+    await deps.store.put(record({ id: 'mem_s', content: `key: ${FAKE_SECRET.sk}` }))
     const r = await runSingle({}, deps)
     expect(r.gate.secret).toBe(true)
     expect(r.tier).toBe('red')
@@ -85,7 +86,7 @@ describe('executeHealth 单层视图', () => {
   it('workspace 视图兜住 global 层密钥：报警置顶但不计本层分数', async () => {
     const deps = makeDeps(1000, '/proj')
     await deps.store.put(record({ id: 'mem_ws', scope: 'workspace', workspacePath: '/proj' }))
-    await deps.store.put(record({ id: 'mem_gs', content: 'key: sk-TESTONLYaaaaaaaaaaaaaaaa' })) // global
+    await deps.store.put(record({ id: 'mem_gs', content: `key: ${FAKE_SECRET.sk}` })) // global
     const r = await runSingle({}, deps)
     expect(r.gate.secret).toBe(false)   // 本层干净
     expect(r.score).toBe(100)           // global 密钥不扣本层分
