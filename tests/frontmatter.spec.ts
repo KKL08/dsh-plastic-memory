@@ -96,6 +96,13 @@ describe('malformed 判定', () => {
     expect(() => decodeRecord(splitFrontmatter(bad), { scope: 'global' })).toThrow()
   })
 
+  it('格式合法但日期不存在的时间戳 → FrontmatterError(timestamp-parse)', () => {
+    const bad = encodeRecord(record({}), {}).replace(/createdAt: \S+/, 'createdAt: 2026-13-45T00:00:00.000Z')
+    const err = captureError(() => decodeRecord(splitFrontmatter(bad), { scope: 'global' }))
+    expect(err).toBeInstanceOf(FrontmatterError)
+    expect(err).toMatchObject({ code: 'timestamp-parse' })
+  })
+
   it('日期-only 时间戳（丢失毫秒精度）必须响亮拒绝，不得静默折算', () => {
     const bad = encodeRecord(record({}), {}).replace(/createdAt: \S+/, 'createdAt: 2026-08-19')
     const err = captureError(() => decodeRecord(splitFrontmatter(bad), { scope: 'global' }))

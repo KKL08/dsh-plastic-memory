@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { executeScan, cacheKey, renderScanResult, type ScanToolDeps, type ScanArgs, type SingleScanResult } from '../src/tools/scan.ts'
 import { GLOBAL_CACHE_KEY } from '../src/governance/layer-health.ts'
+import { SEMANTIC_SCAN_MAX_RECORDS } from '../src/governance/semantic-scan.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
@@ -194,6 +195,14 @@ describe('executeScan 单层模式', () => {
     expect(Object.keys(deps2.decisions.list()[0])).not.toContain('baselineRef')
   })
 
+  it('记忆数超过语义层上限：note 带 semantic-truncated，语义层仍完成', async () => {
+    const deps = makeDeps({ getLlm: (_exec: unknown) => ({ complete: async () => JSON.stringify({ findings: [] }) }) })
+    for (let i = 0; i < SEMANTIC_SCAN_MAX_RECORDS + 1; i++) await deps.store.put(record({ id: `mem_${i}` }))
+    const r = await scanSingle({ layers: 'semantic' }, deps)
+    expect(r.notes.map(n => n.code)).toContain('semantic-truncated')
+    expect(r.semanticCachedAt).toBe(9000)
+  })
+
   it('cacheKey：workspace 路径分桶，缺省落 global 层桶', () => {
     expect(cacheKey('/proj')).toBe('cache_/proj')
     expect(cacheKey(undefined)).toBe(GLOBAL_CACHE_KEY)
@@ -225,6 +234,27 @@ describe('executeScan 全库体检', () => {
     expect(deps.cache.get('cache_/proj-a')?.scannedAt).toBe(9000)
     expect(deps.cache.get('cache_/proj-b')?.scannedAt).toBe(9000)
     expect(deps.cache.get(GLOBAL_CACHE_KEY)?.scannedAt).toBe(9000)
+  })
+
+  it('无 AGENTS.md 基线时 note 带 baseline-missing', async () => {
+    const deps = makeDeps({ getBaseline: () => null })
+    await seedTwoWs(deps)
+    const r = await executeScan({ scope: 'all', layers: 'rule' }, deps, {})
+    if (r.kind !== 'checkup') throw new Error(r.kind)
+    expect(r.notes.map(n => n.code)).toContain('baseline-missing')
+  })
+
+  it('跨项目重复分析输出无法解析：note 带 cross-ws-failed，退用实体聚类', async () => {
+    const brokenCrossLlm = {
+      complete: async ({ system }: { system: string; user: string }) =>
+        system.includes('global 缺位') ? '不是 JSON' : JSON.stringify({ findings: [] }),
+    }
+    const deps = makeDeps({ getLlm: (_exec: unknown) => brokenCrossLlm })
+    await seedTwoWs(deps)
+    const r = await executeScan({ scope: 'all' }, deps, {})
+    if (r.kind !== 'checkup') throw new Error(r.kind)
+    expect(r.notes.map(n => n.code)).toContain('cross-ws-failed')
+    expect(r.duplicates.via).toBe('entity')
   })
 
   it('scope=all 自动枚举库里的全部 workspace', async () => {

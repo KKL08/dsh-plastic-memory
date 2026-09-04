@@ -62,6 +62,16 @@ describe('executeHealth 单层视图', () => {
     expect(r.recommendationKinds).toContain('semantic-never-scanned')
   })
 
+  it('语义缓存早于 scanStaleDays：recommendation 带 semantic-stale', async () => {
+    const now = 100 * DAY
+    const deps = makeDeps(now)
+    await deps.store.put(record({ id: 'mem_a' }))
+    await deps.cache.put('cache_global', { id: 'cache_global', scannedAt: now - 8 * DAY, scope: 'global', findings: [] })
+    const r = await runSingle({}, deps)
+    expect(r.recommendationKinds).toContain('semantic-stale')
+    expect(r.recommendationKinds).not.toContain('semantic-never-scanned')
+  })
+
   it('红线门：本层 secret 直接判死——tier 强制红、score 压进红区', async () => {
     const deps = makeDeps(1000)
     await deps.store.put(record({ id: 'mem_s', content: 'key: sk-TESTONLYaaaaaaaaaaaaaaaa' }))
