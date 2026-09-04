@@ -31,6 +31,8 @@ All notable changes to this project are documented here. The format follows
   every result now passes through one outbound boundary.
 - `slugifyName` was not idempotent at the 40-character cut and could produce a
   file name ending in `-`.
+- The output boundary dropped an own key named `__proto__` and rewrote the
+  result's prototype instead; such keys are now kept as the host keeps them.
 
 ## [0.1.0-beta.1] - 2026-09-02
 

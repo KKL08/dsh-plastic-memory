@@ -126,6 +126,34 @@ describe('toToolOutput — 拒绝非纯对象/函数/bigint/symbol（抛 TypeErr
   })
 })
 
+describe('toToolOutput — 与宿主同样对待的键与数组形态', () => {
+  it('名为 __proto__ 的自有键原样保留为自有键，输出原型仍是 Object.prototype（不污染原型）', () => {
+    const input = JSON.parse('{"__proto__":{"polluted":true},"ok":1}') as Record<string, unknown>
+    const out = toToolOutput(input) as Record<string, unknown>
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype)
+    expect(Object.keys(out)).toEqual(['__proto__', 'ok'])
+    expect(Object.getOwnPropertyDescriptor(out, '__proto__')?.value).toEqual({ polluted: true })
+    expect(snapshotJsonValue(out)).toEqual(snapshotJsonValue(input))
+  })
+
+  it('数组上的额外自有属性被丢弃，只保留下标元素（宿主同样忽略）', () => {
+    const arr = [1, 2] as number[] & { extra?: string }
+    arr.extra = 'x'
+    const out = toToolOutput(arr)
+    expect(out).toEqual([1, 2])
+    expect(Object.keys(out as object)).toEqual(['0', '1'])
+    expect(snapshotJsonValue(out)).toEqual([1, 2])
+  })
+
+  it('稀疏数组的空洞按 undefined 元素规则转 null，长度不变', () => {
+    // eslint-disable-next-line no-sparse-arrays
+    const out = toToolOutput([1, , 3])
+    expect(out).toEqual([1, null, 3])
+    expect((out as unknown[]).length).toBe(3)
+    expect(snapshotJsonValue(out)).toEqual([1, null, 3])
+  })
+})
+
 describe('toToolOutput — 循环引用', () => {
   it('循环引用抛 TypeError', () => {
     const cyclic: Record<string, unknown> = { a: 1 }

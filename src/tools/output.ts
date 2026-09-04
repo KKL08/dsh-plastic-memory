@@ -74,7 +74,12 @@ function walk(value: unknown, path: string, ancestors: Set<object>): JsonValue {
     for (const key of Object.keys(obj)) {
       const child = (obj as Record<string, unknown>)[key]
       if (child === undefined) continue // 对象值为 undefined 的键：删除
-      out[key] = walk(child, path === '' ? key : `${path}.${key}`, ancestors)
+      // defineProperty 而非赋值：名为 __proto__ 的自有键（JSON.parse 会产生，宿主原样接受）
+      // 走赋值会改写 out 的原型并丢掉这个键
+      Object.defineProperty(out, key, {
+        value: walk(child, path === '' ? key : `${path}.${key}`, ancestors),
+        enumerable: true, writable: true, configurable: true,
+      })
     }
     return out
   } finally {
