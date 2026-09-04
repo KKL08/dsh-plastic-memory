@@ -139,8 +139,9 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
     await attempt('H9-SOURCE-DANGLING-ANCHOR', async () => {
       const r = await call('memory_save', { action: 'create', name: 'anchor-probe', summary: '锚', content: '证据锚探针', ...MEMORY_BASE }, execA) as { kind: string; record?: { id: string } }
       if (r.kind !== 'saved' || !r.record) return { ok: false, detail: `kind=${r.kind}` }
-      const s = await call('memory_source', { memoryId: r.record.id }, execA) as { kind: string; message?: string }
-      return { ok: typeof s.kind === 'string' && snapshotJsonValue(s) !== undefined, detail: `kind=${s.kind}` }
+      const s = await call('memory_source', { memoryId: r.record.id }, execA) as { kind: string; memoryId?: string; reason?: string }
+      // 记录存在但其合成会话不可读：必须是 unavailable（not-found/forbidden 都是别的分支），且带回同一 memoryId
+      return { ok: s.kind === 'unavailable' && s.memoryId === r.record.id && snapshotJsonValue(s) !== undefined, detail: `kind=${s.kind} memoryId=${s.memoryId} reason=${s.reason}` }
     })
 
     // 语义层两项：需要凭证 + 宿主可选默认模型

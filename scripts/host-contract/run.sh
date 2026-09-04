@@ -54,5 +54,12 @@ const fails = r.filter(o => !o.ok).length, skips = r.filter(o => o.skipped).leng
 console.log(`host-contract: ${r.length - fails - skips} passed, ${skips} skipped, ${fails} failed`);
 process.exit(fails ? 1 : 0);
 ' "$RESULTS"
+# The verify plugin exits the host with 0 only when every case passed; a host that
+# wrote the results and then died on shutdown must not be reported as PASS.
+if [ "$code" -ne 0 ]; then
+  echo "$HOST_TAG: host exited ($code) after writing results; boot.log tail:" >&2
+  tail -n 20 "$LOGS/boot.log" >&2
+  exit 1
+fi
 host_assert_isolated
 echo "$HOST_TAG: PASS in ${SECONDS}s — host @$PINNED, ~/.dsh untouched"
