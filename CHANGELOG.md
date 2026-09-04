@@ -12,7 +12,8 @@ All notable changes to this project are documented here. The format follows
   `{ code, text }` warnings and scan notes, `recommendationKinds` on health,
   `noteCode` on search, `missing` on snapshot creation and `alsoCleared` on
   confirm. The authoritative list lives in `src/contract-codes.ts`.
-- Typed errors: `RecordNotFoundError`, `FrontmatterError` (with a code) and
+- Typed errors: `RecordNotFoundError`, `FrontmatterError` (with a code,
+  including `yaml-parse` for a fence that is not valid YAML) and
   `TypeRegistryError`.
 - A reproducible build for contributors: `pnpm install && pnpm typecheck && pnpm
   test && pnpm build` works from a clean clone; dev dependencies resolve from

@@ -26,7 +26,12 @@ export function splitFrontmatter(raw: string): ParsedMemoryFile {
   if (!raw.startsWith(FENCE)) throw new FrontmatterError('missing-fence', '缺少 frontmatter 围栏')
   const close = raw.indexOf(CLOSE, FENCE.length - 1)
   if (close < 0) throw new FrontmatterError('unclosed-fence', 'frontmatter 围栏未闭合')
-  const data = parseYaml(raw.slice(FENCE.length, close + 1)) // 坏 YAML 由 yaml 包抛出
+  let data: unknown
+  try {
+    data = parseYaml(raw.slice(FENCE.length, close + 1))
+  } catch (e) {
+    throw new FrontmatterError('yaml-parse', `frontmatter 不是合法 YAML：${e instanceof Error ? e.message : String(e)}`)
+  }
   if (data === null || typeof data !== 'object' || Array.isArray(data)) throw new FrontmatterError('not-object', 'frontmatter 不是对象')
   let body = raw.slice(close + CLOSE.length)
   if (body.startsWith('\n')) body = body.slice(1)      // encode 时围栏后有一个空行

@@ -49,6 +49,7 @@ export type SearchNoteCode = 'no-workspace' // scope=workspace 但当前会话�
 export type FrontmatterErrorCode =
   | 'missing-fence'     // 文件不以 --- 开头
   | 'unclosed-fence'    // 找不到闭合的 ---
+  | 'yaml-parse'        // 围栏内不是合法 YAML
   | 'not-object'        // YAML 顶层不是对象
   | 'timestamp-format'  // 时间戳不是 UTC 毫秒 ISO 格式
   | 'timestamp-parse'   // 时间戳无法解析

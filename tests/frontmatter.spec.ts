@@ -76,11 +76,17 @@ describe('未知键往返保留', () => {
 
 describe('malformed 判定', () => {
   it.each([
-    ['无围栏', '没有 frontmatter 的普通文本'],
-    ['坏 YAML', '---\nname: [未闭合\n---\n正文'],
-    ['eventRange 三元组', null], // 由下方单独构造
-  ])('%s → throw', (label, raw) => {
-    if (raw !== null) { expect(() => splitFrontmatter(raw)).toThrow(); return }
+    ['无围栏', '没有 frontmatter 的普通文本', 'missing-fence'],
+    ['围栏未闭合', '---\nname: x\n正文没有闭合围栏', 'unclosed-fence'],
+    ['坏 YAML', '---\nname: [未闭合\n---\n正文', 'yaml-parse'],
+    ['顶层不是对象', '---\n- 列表\n---\n正文', 'not-object'],
+  ])('%s → FrontmatterError(%s)', (_label, raw, code) => {
+    const err = captureError(() => splitFrontmatter(raw))
+    expect(err).toBeInstanceOf(FrontmatterError)
+    expect(err).toMatchObject({ code })
+  })
+
+  it('eventRange 三元组 → throw', () => {
     const bad = encodeRecord(record({}), {}).replace('- 0\n    - 42', '- 0\n    - 42\n    - 1')
     expect(() => decodeRecord(splitFrontmatter(bad), { scope: 'global' })).toThrow()
   })
