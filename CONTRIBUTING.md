@@ -3,6 +3,9 @@
 Thanks for helping. This page covers everything needed to go from a clone to a
 pull request. The user-facing documentation is in [README.md](README.md).
 
+> The plugin is in beta: interfaces, stored formats and the tool contract
+> may still change between pre-releases.
+
 ## Setup
 
 Requirements: Node `^22.19.0 || >=24`, [pnpm](https://pnpm.io) (the version is
