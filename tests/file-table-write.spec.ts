@@ -6,6 +6,8 @@ import { FileTable } from '../src/storage/file-table.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { workspaceDirName, WORKSPACE_MARKER, GLOBAL_DIR } from '../src/storage/paths.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
+import { SnapshotStore } from '../src/governance/snapshots.ts'
+import type { MemorySnapshot } from '../src/governance/schema.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
@@ -132,10 +134,26 @@ describe('FileTable 写侧', () => {
     expect(names).toHaveLength(2)
   })
 
-  it('物理清理后 restore（put 到已无文件的 id）重建文件', async () => {
+  it('put 全新 id 后内存可读（冒烟）', async () => {
     const t = await load()
     await t.put('mem_r', record({ id: 'mem_r', content: '复活' }))
     expect(t.get('mem_r')!.content).toBe('复活')
+  })
+
+  it('真实恢复链：快照 → 物理删除（文件不在） → SnapshotStore.restore → 新实例重载仍可见', async () => {
+    const t = await load()
+    const rec = record({ id: 'mem_r', content: '删掉再复活' })
+    await t.put('mem_r', rec)
+    const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
+    const snap = await snapshots.capture({ operation: 'manual', description: '恢复链测试', records: [rec] }, 10)
+    await t.delete('mem_r')
+    const mdFiles = async () => (await readdir(join(root, GLOBAL_DIR))).filter(n => n.endsWith('.md') && n !== 'MEMORY.md')
+    expect(await mdFiles()).toHaveLength(0)
+    const { restored } = await snapshots.restore(snap, undefined, r => t.put(r.id, r), id => t.get(id), false)
+    expect(restored).toEqual(['mem_r'])
+    expect(await mdFiles()).toHaveLength(1)
+    const reloaded = await load()
+    expect(reloaded.get('mem_r')!.content).toBe('删掉再复活')
   })
 
   it('unknown extras 经 update 往返仍在文件里', async () => {
@@ -228,5 +246,32 @@ describe('FileTable 撞名检查看得见磁盘（终审 I1：隔离文件不可
     const t2 = await load() // 重载：新记录在、坏文件仍被隔离（malformed finding 不消失）
     expect(t2.get('mem_new')!.name).toBe('pnpm')
     expect(t2.quarantined()).toHaveLength(1)
+  })
+})
+
+describe('自写指纹校准范围', () => {
+  it('写 A 期间外部改了 B：自写只校准 A，下次 refresh 仍能看见 B 的外部编辑，且不会把旧 B 写回磁盘', async () => {
+    await seedGlobal('a.md', record({ id: 'mem_a', name: 'A' }))
+    await seedGlobal('b.md', record({ id: 'mem_b', name: 'B', content: '旧 B' }))
+    const externalB = '外部改过的 B，长度和原来不一样'
+    // 用子类在 A 的原子写之前安排 B 的外部编辑，确定性地制造"写 A 与改 B 交错"。
+    class Interleaved extends FileTable {
+      armed = false
+      protected override async atomicWrite(filePath: string, text: string): Promise<void> {
+        if (this.armed && filePath.endsWith('a.md')) {
+          this.armed = false
+          await writeFile(join(root, GLOBAL_DIR, 'b.md'), encodeRecord(record({ id: 'mem_b', name: 'B', content: externalB }), {}))
+        }
+        return super.atomicWrite(filePath, text)
+      }
+    }
+    const t = new Interleaved({ root, stats: new InMemoryKvTable<RecallStats>() })
+    await t.load()
+    t.armed = true
+    await t.update('mem_a', r => ({ ...r, content: '改 A', updatedAt: 2 }))
+    await t.refreshIfChanged()
+    expect(t.get('mem_b')!.content).toBe(externalB)
+    await t.update('mem_b', r => ({ ...r, lastConfirmedAt: 99 }))
+    expect(await readFile(join(root, GLOBAL_DIR, 'b.md'), 'utf8')).toContain(externalB)
   })
 })
