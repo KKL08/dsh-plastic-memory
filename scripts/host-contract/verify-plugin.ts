@@ -4,6 +4,8 @@
  * 断言宿主层面的契约：工具注册、输出深度无损 JSON、会话/工作目录解析、落盘布局、
  * 规则层/语义层 note 码、快照回路、提升候选 dismiss、证据锚悬空降级。
  * 有 DEEPSEEK_API_KEY 且宿主能选出默认模型时再跑语义扫描与取消两项，否则标 SKIPPED。
+ * run.sh 随后用同一个 DSH_HOME 再起一次宿主（HOST_CONTRACT_PHASE=restart）：第一趟把
+ * 恢复的记录 id 写进交接文件，第二趟只跑 H12，证明恢复结果过了进程重启仍可读。
  *
  * 只用可擦除的 TypeScript 语法（engines 要求的 Node 22.19+/24 原生 strip-types 直接加载，不需要构建）。
  */
@@ -32,12 +34,23 @@ function mkExec(cwd: string | undefined, model: { provider?: string; model?: str
 
 const MEMORY_BASE = { type: 'knowledge', scope: 'workspace', sourceMode: 'user-explicit', tags: [] as string[] }
 
+/** 第一趟写、第二趟读的交接内容：重启后要重新读取的记录与它所属的 workspace。 */
+interface Handoff { savedId: string; wsA: string; snapshotId: string | undefined }
+
 async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
   const outcomes: Outcome[] = []
   const push = (o: Outcome) => { outcomes.push(o) }
   const attempt = async (id: string, fn: () => Promise<{ ok: boolean; detail: string; skipped?: boolean }>) => {
     try { push({ id, ...(await fn()) }) } catch (e) { push({ id, ok: false, detail: `异常: ${e instanceof Error ? e.stack ?? e.message : String(e)}` }) }
   }
+  const finish = () => {
+    const out = process.env.HOST_CONTRACT_OUT
+    if (out) writeFileSync(out, JSON.stringify(outcomes, null, 2))
+    process.stdout.write(`\n===HOST-CONTRACT-RESULTS===\n${JSON.stringify(outcomes, null, 2)}\n===END===\n`)
+    exit(outcomes.every(o => o.ok) ? 0 : 1)
+  }
+  const handoffPath = process.env.HOST_CONTRACT_HANDOFF
+  let snapshotId: string | undefined
   try {
     await (ctx.get('loader') as { await(): Promise<void> } | undefined)?.await()
     const tools = ctx.get('tools') as Tools | undefined
@@ -51,6 +64,35 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
     const memoriesRoot = join(home, 'memories')
     const wsRoot = mkdtempSync(join(tmpdir(), 'pm-host-ws-'))
     const mkWs = (label: string) => { const d = join(wsRoot, label); mkdirSync(d, { recursive: true }); return realpathSync(d) }
+    const readMemoryFile = (id: string): string | undefined => {
+      for (const d of readdirSync(memoriesRoot)) {
+        for (const f of readdirSync(join(memoriesRoot, d))) {
+          if (!f.endsWith('.md') || f === 'MEMORY.md') continue
+          const text = readFileSync(join(memoriesRoot, d, f), 'utf8')
+          if (text.includes(`id: ${id}`)) return text
+        }
+      }
+      return undefined
+    }
+
+    if (process.env.HOST_CONTRACT_PHASE === 'restart') {
+      // 第二趟：同一 DSH_HOME 的全新宿主进程。第一趟 H7 恢复过的记录必须从磁盘重新加载出来，
+      // 可检索、active，且快照（KV 后端）也过了重启——内存态在这里不存在，只能靠持久化。
+      const handoff = JSON.parse(readFileSync(handoffPath ?? '', 'utf8')) as Handoff
+      await attempt('H12-RESTART-READ', async () => {
+        const exec = mkExec(handoff.wsA)
+        const searched = await call('memory_search', { query: 'host-contract-probe' }, exec) as { hits?: Array<{ id: string }> }
+        const searchable = (searched.hits ?? []).some(h => h.id === handoff.savedId)
+        const text = readMemoryFile(handoff.savedId)
+        const activeOnDisk = text !== undefined && text.includes('status: active')
+        const shown = await call('memory_snapshot', { action: 'show', snapshotId: handoff.snapshotId }, exec) as { kind: string; entries?: Array<{ id: string }> }
+        const snapshotKept = shown.kind === 'shown' && (shown.entries ?? []).some(e => e.id === handoff.savedId)
+        return { ok: searchable && activeOnDisk && snapshotKept, detail: `restarted host: searchable=${searchable} activeOnDisk=${activeOnDisk} snapshotKept=${snapshotKept} (snap=${handoff.snapshotId})` }
+      })
+      finish()
+      return
+    }
+
     const wsA = mkWs('a')
     const execA = mkExec(wsA)
 
@@ -118,17 +160,14 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
     // H7 快照回路：create → forget → show → restore，恢复后记录重新可检索、磁盘文件回到 active
     await attempt('H7-SNAPSHOT-ROUNDTRIP', async () => {
       const snap = await call('memory_snapshot', { action: 'create', reason: '探针' }, execA) as { kind: string; snapshotId?: string; missing?: string[] }
+      snapshotId = snap.snapshotId
       const forgot = await call('memory_forget', { ids: [savedId], reason: '探针清理' }, execA) as { ok: boolean }
       const shown = await call('memory_snapshot', { action: 'show', snapshotId: snap.snapshotId }, execA) as { kind: string; entries?: Array<{ id: string }> }
       const entry = (shown.entries ?? []).find(e => e.id === savedId)
       const restored = await call('memory_snapshot', { action: 'restore', snapshotId: snap.snapshotId, memoryIds: [savedId] }, execA) as { kind: string; restored?: string[] }
       const searched = await call('memory_search', { query: 'host-contract-probe' }, execA) as { hits?: Array<{ id: string }> }
       const searchable = (searched.hits ?? []).some(h => h.id === savedId)
-      const activeOnDisk = readdirSync(memoriesRoot).filter(d => d !== 'global').some(d => readdirSync(join(memoriesRoot, d)).some(f => {
-        if (!f.endsWith('.md') || f === 'MEMORY.md') return false
-        const text = readFileSync(join(memoriesRoot, d, f), 'utf8')
-        return text.includes(`id: ${savedId}`) && text.includes('status: active')
-      }))
+      const activeOnDisk = readMemoryFile(savedId)?.includes('status: active') === true
       const ok = snap.kind === 'created' && Array.isArray(snap.missing) && forgot.ok === true && shown.kind === 'shown' && !!entry && snapshotJsonValue(shown) !== undefined
         && restored.kind === 'restored' && (restored.restored ?? []).includes(savedId) && searchable && activeOnDisk
       return { ok, detail: `snap=${snap.kind}/${snap.snapshotId} missing=${JSON.stringify(snap.missing)} forget.ok=${forgot.ok} shown=${shown.kind} entries=${shown.entries?.length} restored=${restored.kind}/${JSON.stringify(restored.restored)} searchable=${searchable} activeOnDisk=${activeOnDisk}` }
@@ -191,13 +230,12 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       const codes = (r.notes ?? []).map(n => n.code)
       return { ok: r.kind === 'single' && typeof r.semanticCachedAt === 'number' && !codes.includes('semantic-failed') && !codes.includes('semantic-unavailable'), detail: `kind=${r.kind} cachedAt=${r.semanticCachedAt} notes=${codes.join(',')}` }
     })
+    // 交接给第二趟（重启验证）：恢复过的记录 id、它的 workspace、H7 拍的快照 id
+    if (handoffPath) writeFileSync(handoffPath, JSON.stringify({ savedId, wsA, snapshotId } satisfies Handoff))
   } catch (e) {
     push({ id: 'FATAL', ok: false, detail: `顶层异常: ${e instanceof Error ? e.stack : String(e)}` })
   }
-  const out = process.env.HOST_CONTRACT_OUT
-  if (out) writeFileSync(out, JSON.stringify(outcomes, null, 2))
-  process.stdout.write(`\n===HOST-CONTRACT-RESULTS===\n${JSON.stringify(outcomes, null, 2)}\n===END===\n`)
-  exit(outcomes.every(o => o.ok) ? 0 : 1)
+  finish()
 }
 
 export function apply(ctx: Context): void {

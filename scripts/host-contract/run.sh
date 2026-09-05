@@ -37,8 +37,9 @@ if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
   chmod 600 "$HOMEDIR/.credentials.yaml"  # the host refuses a credentials file readable beyond its owner
 fi
 RESULTS="$TMP/results.json"
+HANDOFF="$TMP/handoff.json"
 set +e
-env DSH_HOME="$HOMEDIR" HOST_CONTRACT_OUT="$RESULTS" "$DSH" --profile host --patch "$PATCH" >"$LOGS/boot.log" 2>&1
+env DSH_HOME="$HOMEDIR" HOST_CONTRACT_OUT="$RESULTS" HOST_CONTRACT_HANDOFF="$HANDOFF" "$DSH" --profile host --patch "$PATCH" >"$LOGS/boot.log" 2>&1
 code=$?
 set -e
 STEP=boot
@@ -47,18 +48,37 @@ if [ ! -f "$RESULTS" ]; then
   grep -iE "error|fatal" "$LOGS/boot.log" | head -n 10 >&2 || true
   exit 1
 fi
+# Second boot of the same isolated home (H12): the record restored in H7 must come
+# back from disk in a fresh host process, and its snapshot must survive the restart.
+RESULTS2="$TMP/results-restart.json"
+STEP=restart
+if [ ! -f "$HANDOFF" ]; then
+  echo "$HOST_TAG: first boot exited ($code) without a handoff file; restart check cannot run. boot.log errors:" >&2
+  grep -iE "error|fatal" "$LOGS/boot.log" | head -n 10 >&2 || true
+  exit 1
+fi
+set +e
+env DSH_HOME="$HOMEDIR" HOST_CONTRACT_OUT="$RESULTS2" HOST_CONTRACT_HANDOFF="$HANDOFF" HOST_CONTRACT_PHASE=restart "$DSH" --profile host --patch "$PATCH" >"$LOGS/restart.log" 2>&1
+code2=$?
+set -e
+if [ ! -f "$RESULTS2" ]; then
+  echo "$HOST_TAG: restarted host exited ($code2) without results; restart.log errors:" >&2
+  grep -iE "error|fatal" "$LOGS/restart.log" | head -n 10 >&2 || true
+  exit 1
+fi
 node -e '
-const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+const fs = require("fs");
+const r = [...JSON.parse(fs.readFileSync(process.argv[1], "utf8")), ...JSON.parse(fs.readFileSync(process.argv[2], "utf8"))];
 for (const o of r) console.log(`${o.ok ? (o.skipped ? "SKIP" : "PASS") : "FAIL"}  ${o.id}  ${o.detail}`);
 const fails = r.filter(o => !o.ok).length, skips = r.filter(o => o.skipped).length;
 console.log(`host-contract: ${r.length - fails - skips} passed, ${skips} skipped, ${fails} failed`);
 process.exit(fails ? 1 : 0);
-' "$RESULTS"
+' "$RESULTS" "$RESULTS2"
 # The verify plugin exits the host with 0 only when every case passed; a host that
 # wrote the results and then died on shutdown must not be reported as PASS.
-if [ "$code" -ne 0 ]; then
-  echo "$HOST_TAG: host exited ($code) after writing results; boot.log tail:" >&2
-  tail -n 20 "$LOGS/boot.log" >&2
+if [ "$code" -ne 0 ] || [ "$code2" -ne 0 ]; then
+  echo "$HOST_TAG: host exited (first=$code restart=$code2) after writing results; log tails:" >&2
+  tail -n 20 "$LOGS/boot.log" "$LOGS/restart.log" >&2
   exit 1
 fi
 host_assert_isolated
