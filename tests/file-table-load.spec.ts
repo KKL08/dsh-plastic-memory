@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
-import { mkdtemp, mkdir, writeFile, rm, stat, chmod } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, rm, stat, chmod, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTable, DELETED_RETENTION_MS } from '../src/storage/file-table.ts'
@@ -178,4 +178,19 @@ it('MEMORY.md 内容未变时 load 不改其 mtime（refresh 不得空转写盘�
   await load()
   const after = await stat(join(root, GLOBAL_DIR, 'MEMORY.md'))
   expect(after.mtimeMs).toBe(before.mtimeMs)
+})
+
+it('合法名称含 .tmp- 不是原子写残留：新实例重载、推进 61 秒后记录与文件都还在', async () => {
+  // 原子写残留形如 <file>.tmp-<pid>-<rand>（结尾无 .md）；正式记忆文件以 .md 结尾。
+  // 只看子串会把 cache.tmp-notes.md 当残留：先在内存里消失，再被当陈旧文件物理删除。
+  let clock = 1_000_000
+  const mk = () => new FileTable({ root, stats: new InMemoryKvTable<RecallStats>(), now: () => clock })
+  const t1 = mk(); await t1.load()
+  await t1.put('mem_tmp', record({ id: 'mem_tmp', name: 'cache.tmp-notes' }))
+  const t2 = mk(); await t2.load()
+  expect(t2.get('mem_tmp')?.name).toBe('cache.tmp-notes')
+  clock += 61_000
+  const t3 = mk(); await t3.load()
+  expect(t3.get('mem_tmp')?.name).toBe('cache.tmp-notes')
+  expect(await readdir(join(root, GLOBAL_DIR))).toContain('cache.tmp-notes.md')
 })

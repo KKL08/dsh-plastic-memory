@@ -16,6 +16,10 @@ export const DELETED_RETENTION_MS = RETENTION_MS
 /** tmp 残留清理的陈旧阈值：写入-rename 窗口是毫秒级，60 秒足够排除任何在途文件。 */
 const TMP_STALE_MS = 60_000
 
+/** 原子写临时文件的完整后缀（与 atomicWrite 生成规则一致，锚定结尾）。合法记忆名可以含 ".tmp-"
+ *  子串（如 cache.tmp-notes.md），只看子串会把正式 .md 当残留删掉；正式文件永远以 .md 结尾。 */
+const TMP_SUFFIX_RE = /\.tmp-(\d+)-[a-z0-9]+$/
+
 
 export interface FileTableOptions {
   root: string
@@ -90,13 +94,13 @@ export class FileTable implements MemoryTable {
       let names: string[]
       try { names = await readdir(dir) } catch { this.log.warn(`[plastic-memory] 目录不可读，计空：${dir}`); continue }
       for (const name of names) {
-        if (/\.tmp-/.test(name)) {
+        const tmpMatch = TMP_SUFFIX_RE.exec(name)
+        if (tmpMatch) {
           // 只删两类原子写残留：① pid 段是本进程（自家崩溃）② mtime 超 60 秒的陈旧文件。
           // 多进程共用 memoryRoot 时，别的进程在途 tmp（毫秒级窗口）绝不能碰，否则会让对方
           // rename 落空。stat 失败＝竞态已消失，静默跳过。
           const path = join(dir, name)
-          const pidMatch = /\.tmp-(\d+)-/.exec(name)
-          if (pidMatch && Number(pidMatch[1]) === process.pid) {
+          if (Number(tmpMatch[1]) === process.pid) {
             await rm(path, { force: true })
           } else {
             try {
