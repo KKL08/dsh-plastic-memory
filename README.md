@@ -23,7 +23,7 @@
 
 在 LLM 时代，智能体（Agent）的长期记忆系统同样面临着类似的工程挑战：过期、矛盾、冗余与孤立的记忆不断堆积，导致 Agent 认知漂移、产生幻觉与决策冲突，造成 Token 浪费与输出质量退化。
 
-为此，`dsh-plastic-memory` 作为一款基于 DeepSeek Harness 的 **Agent 记忆插件**，提供记忆的存储、分类、检索与治理，赋予 Agent 记忆**可塑性（Plasticity）与生命周期（Lifecycle）**：既能提炼沉淀、精准唤起，也能诊断健康、判定事实冲突、适时遗忘。让有价值的共识历久弥新，让失效的信息有序退场。
+为此，`dsh-plastic-memory` 作为一款基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 **Agent 记忆插件**，提供记忆的存储、分类、检索与治理，赋予 Agent 记忆**可塑性（Plasticity）与生命周期（Lifecycle）**：既能提炼沉淀、精准唤起，也能诊断健康、判定事实冲突、适时遗忘。让有价值的共识历久弥新，让失效的信息有序退场。
 
 ---
 

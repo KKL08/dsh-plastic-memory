@@ -23,7 +23,7 @@ The name comes from the anime *Plastic Memories*. In that world, Giftias — and
 
 LLM agents face a strikingly similar challenge: stale, contradictory, redundant, and orphaned memories pile up over time, causing cognitive drift, hallucinations, conflicting decisions, wasted tokens, and degraded output quality.
 
-`dsh-plastic-memory` is a **memory plugin for [DeepSeek Harness](https://github.com/nicepkg/deepseek-harness)** that brings **plasticity** and **lifecycle management** to agent memory. It stores, classifies, retrieves, and governs memories — distilling valuable knowledge for precise recall, diagnosing memory health, detecting factual conflicts, and gracefully forgetting what no longer serves.
+`dsh-plastic-memory` is a **memory plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** that brings **plasticity** and **lifecycle management** to agent memory. It stores, classifies, retrieves, and governs memories — distilling valuable knowledge for precise recall, diagnosing memory health, detecting factual conflicts, and gracefully forgetting what no longer serves.
 
 ---
 
