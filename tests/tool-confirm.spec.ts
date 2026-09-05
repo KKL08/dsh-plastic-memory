@@ -96,6 +96,29 @@ describe('memory_confirm resolve（横向冲突）', () => {
   })
 })
 
+describe('memory_confirm resolve（账本里的非法条目）', () => {
+  it('横向条目两个 id 相同：拒绝裁决、不删记忆、不拍快照，并把该条目清出账本', async () => {
+    const deps = makeDeps()
+    await deps.store.put(record({ id: 'mem_c', content: '唯一一条' }))
+    const { entry } = await deps.decisions.upsert({ memoryIds: ['mem_c', 'mem_c'], summary: '自冲突' }, 1)
+    const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-left' }, deps)
+    expect(r.kind).toBe('error')
+    expect(deps.store.get('mem_c')!.status).toBe('active')
+    expect(deps.snapshots.list()).toHaveLength(0)
+    expect(deps.decisions.list()).toHaveLength(0)
+  })
+
+  it('横向条目只有一个 id（无 baselineRef）：同样拒绝并清理', async () => {
+    const deps = makeDeps()
+    await deps.store.put(record({ id: 'mem_only' }))
+    const { entry } = await deps.decisions.upsert({ memoryIds: ['mem_only'], summary: '缺一方' }, 1)
+    const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-right' }, deps)
+    expect(r.kind).toBe('error')
+    expect(deps.store.get('mem_only')!.status).toBe('active')
+    expect(deps.decisions.list()).toHaveLength(0)
+  })
+})
+
 describe('memory_confirm resolve（垂直冲突）', () => {
   async function setupVertical(deps: ConfirmToolDeps) {
     await deps.store.put(record({ id: 'mem_v', content: '与基线矛盾的记忆' }))
