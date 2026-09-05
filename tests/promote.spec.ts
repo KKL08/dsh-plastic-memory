@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { executePromote } from '../src/tools/promote.ts'
+import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
@@ -136,5 +140,42 @@ describe('executePromote', () => {
     const r = await executePromote({ confirmedIds: ['mem_d', 'mem_ghost'], target: 'global', dismiss: true }, { store, agentsMd: fakeAgentsMd().writer, snapshots: makeSnapshots() })
     expect(r.dismissed).toEqual(['mem_d'])
     expect(r.skipped).toEqual(['mem_ghost'])
+  })
+})
+
+describe('executePromote × 真实 AgentsMdWriter', () => {
+  let dir: string
+  beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'pm-promote-real-')) })
+  afterEach(async () => { await rm(dir, { recursive: true, force: true }) })
+
+  it('并发提升两条到 agents-md：两次都报 promoted 时，两条内容都必须在目标文件里', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await store.put(record({ id: 'mem_p1', name: '甲', content: '并发提升的第一条' }))
+    await store.put(record({ id: 'mem_p2', name: '乙', content: '并发提升的第二条' }))
+    const writer = createAgentsMdWriter(join(dir, 'AGENTS.md'))
+    const snapshots = makeSnapshots()
+    const [r1, r2] = await Promise.all([
+      executePromote({ confirmedIds: ['mem_p1'], target: 'agents-md' }, { store, agentsMd: writer, snapshots }),
+      executePromote({ confirmedIds: ['mem_p2'], target: 'agents-md' }, { store, agentsMd: writer, snapshots }),
+    ])
+    expect(r1.promoted.map(p => p.id)).toEqual(['mem_p1'])
+    expect(r2.promoted.map(p => p.id)).toEqual(['mem_p2'])
+    const text = await readFile(join(dir, 'AGENTS.md'), 'utf8')
+    expect(text).toContain('- 甲 — 并发提升的第一条')
+    expect(text).toContain('- 乙 — 并发提升的第二条')
+    expect(store.get('mem_p1')!.status).toBe('deleted')
+    expect(store.get('mem_p2')!.status).toBe('deleted')
+  })
+
+  it('串行提升前缀相同的两条：两条都进目标文件，源记录都软删', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await store.put(record({ id: 'mem_long', name: '包管理', content: '使用 pnpm 安装依赖并运行测试' }))
+    await store.put(record({ id: 'mem_short', name: '包管理', content: '使用 pnpm 安装依赖' }))
+    const writer = createAgentsMdWriter(join(dir, 'AGENTS.md'))
+    const deps = { store, agentsMd: writer, snapshots: makeSnapshots() }
+    await executePromote({ confirmedIds: ['mem_long'], target: 'agents-md' }, deps)
+    await executePromote({ confirmedIds: ['mem_short'], target: 'agents-md' }, deps)
+    const text = await readFile(join(dir, 'AGENTS.md'), 'utf8')
+    expect(text.split('\n').filter(l => l.startsWith('- 包管理 — '))).toHaveLength(2)
   })
 })

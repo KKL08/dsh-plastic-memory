@@ -21,38 +21,48 @@ export interface AgentsMdWriter {
 }
 
 export function createAgentsMdWriter(filePath: string): AgentsMdWriter {
+  // 进程内串行：append 是"读取→构造→写入"三步，两次并发读改写会互相覆盖（tmp+rename 只保证
+  // 单次替换完整，不保证两次替换不丢更新）。与 FileTable.locked 同款链式互斥。
+  let chain: Promise<unknown> = Promise.resolve()
   return {
-    async append(line: string): Promise<void> {
-      // 写入净化：进区块的文本不得长得像区块边界。区块定位靠 indexOf 标记字面量（数据与
-      // 控制信号同在纯文本通道），内容里混入标记会让后续 append 误认边界、写出受管区；
-      // 换行同理——区块格式是一行一条，多行内容会破坏幂等判断的按行语义。
-      const sanitized = line
-        .replaceAll(BLOCK_START, '').replaceAll(BLOCK_END, '')
-        .replace(/\s*\n\s*/g, ' ').trim()
-      const entry = `- ${sanitized}`
-      let existing = ''
-      try { existing = await readFile(filePath, 'utf8') } catch { /* 文件不存在，按空处理 */ }
-
-      const startIdx = existing.indexOf(BLOCK_START)
-      const endIdx = existing.indexOf(BLOCK_END)
-      let next: string
-      if (startIdx === -1 || endIdx === -1 || endIdx < startIdx) {
-        // 无有效区块：在文件末尾新建
-        const prefix = existing ? (existing.endsWith('\n') ? existing + '\n' : existing + '\n\n') : ''
-        next = `${prefix}${BLOCK_START}\n${entry}\n${BLOCK_END}\n`
-      } else {
-        const inner = existing.slice(startIdx + BLOCK_START.length, endIdx)
-        if (inner.includes(entry)) return // 幂等：已有同行不重复
-        const before = existing.slice(0, endIdx)
-        const after = existing.slice(endIdx)
-        next = `${before.endsWith('\n') ? before : before + '\n'}${entry}\n${after}`
-      }
-      await mkdir(dirname(filePath), { recursive: true })
-      // AGENTS.md 是用户手维护的文件，中断留下半个文件会毁掉用户内容；tmp+rename 让本次写入
-      // 要么整体生效要么完全不动（与全库原子写纪律一致）。
-      const tmp = `${filePath}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
-      await writeFile(tmp, next, 'utf8')
-      await rename(tmp, filePath)
+    append(line: string): Promise<void> {
+      const next = chain.then(() => appendInner(filePath, line), () => appendInner(filePath, line))
+      chain = next.catch(() => {})
+      return next
     },
   }
+}
+
+async function appendInner(filePath: string, line: string): Promise<void> {
+  // 写入净化：进区块的文本不得长得像区块边界。区块定位靠 indexOf 标记字面量（数据与
+  // 控制信号同在纯文本通道），内容里混入标记会让后续 append 误认边界、写出受管区；
+  // 换行同理——区块格式是一行一条，多行内容会破坏幂等判断的按行语义。
+  const sanitized = line
+    .replaceAll(BLOCK_START, '').replaceAll(BLOCK_END, '')
+    .replace(/\s*\n\s*/g, ' ').trim()
+  const entry = `- ${sanitized}`
+  let existing = ''
+  try { existing = await readFile(filePath, 'utf8') } catch { /* 文件不存在，按空处理 */ }
+
+  const startIdx = existing.indexOf(BLOCK_START)
+  const endIdx = existing.indexOf(BLOCK_END)
+  let next: string
+  if (startIdx === -1 || endIdx === -1 || endIdx < startIdx) {
+    // 无有效区块：在文件末尾新建
+    const prefix = existing ? (existing.endsWith('\n') ? existing + '\n' : existing + '\n\n') : ''
+    next = `${prefix}${BLOCK_START}\n${entry}\n${BLOCK_END}\n`
+  } else {
+    const inner = existing.slice(startIdx + BLOCK_START.length, endIdx)
+    // 幂等按整行相等判：子串包含会把"前缀相同的更短条目"误判为重复而漏写。
+    if (inner.split('\n').some(l => l.trim() === entry)) return
+    const before = existing.slice(0, endIdx)
+    const after = existing.slice(endIdx)
+    next = `${before.endsWith('\n') ? before : before + '\n'}${entry}\n${after}`
+  }
+  await mkdir(dirname(filePath), { recursive: true })
+  // AGENTS.md 是用户手维护的文件，中断留下半个文件会毁掉用户内容；tmp+rename 让本次写入
+  // 要么整体生效要么完全不动（与全库原子写纪律一致）。
+  const tmp = `${filePath}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+  await writeFile(tmp, next, 'utf8')
+  await rename(tmp, filePath)
 }
