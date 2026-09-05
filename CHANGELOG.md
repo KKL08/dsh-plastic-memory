@@ -7,6 +7,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- The host contract check now boots the host a second time on the same home
+  and reads the restored memory back, so a restore that only lived in memory
+  cannot pass.
+
 ### Fixed
 - A memory whose name contains `.tmp-` (for example `cache.tmp-notes`) was
   treated as an atomic-write leftover on reload: it vanished from the table and
