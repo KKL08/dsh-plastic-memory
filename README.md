@@ -2,7 +2,7 @@
 
 ![Plastic Memories](assets/banner.jpg)
 
-![Version](https://img.shields.io/badge/version-0.1.0--beta.3-yellow)
+![Version](https://img.shields.io/badge/version-0.1.0--beta.4-yellow)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-DeepSeek%20Harness%20%E2%89%A50.1.1-4D6BFF)
 ![Node](https://img.shields.io/badge/node-%5E22.19.0%20%7C%7C%20%E2%89%A524-339933?logo=node.js&logoColor=white)
@@ -77,7 +77,7 @@
 ## 📦 安装
 
 ```bash
-dsh plugin --profile web add dsh-plastic-memory@0.1.0-beta.3
+dsh plugin --profile web add dsh-plastic-memory@0.1.0-beta.4
 ```
 
 > 把 `web` 换成你的目标 Profile 名即可（若该 Profile 不存在则自动创建）。安装后插件声明将自动写入该 Profile 的 `cordis.patch.yml`，重启该 Profile 后生效。插件以预构建产物发布到 npm，安装不需要构建授权。  
