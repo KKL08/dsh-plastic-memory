@@ -7,6 +7,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0-beta.4] - 2026-09-05
+
 ### Changed
 - The host contract check now boots the host a second time on the same home
   and reads the restored memory back, so a restore that only lived in memory
