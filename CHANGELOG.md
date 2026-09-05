@@ -7,6 +7,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- A memory whose name contains `.tmp-` (for example `cache.tmp-notes`) was
+  treated as an atomic-write leftover on reload: it vanished from the table and
+  the file was removed once it looked stale. Only the exact temp suffix written
+  by the store is cleaned up now.
+- Saving one memory refreshed the change fingerprint for the whole library, so a
+  manual edit to another file made during that save was never picked up and
+  could be overwritten by the stale in-memory copy. A save now only calibrates
+  the files it touched.
+- Two concurrent promotions to `AGENTS.md` could both report success while only
+  one line landed; appends on the same writer are now serialized.
+- `AGENTS.md` de-duplication matched substrings, so an entry that was a prefix
+  of an existing one was silently skipped. Entries are compared as whole lines.
+- A semantic-scan finding listing the same memory id twice was accepted as a
+  two-sided conflict, and resolving it with keep-left deleted the memory the
+  user asked to keep. Duplicate ids are collapsed at parse time and malformed
+  pending decisions are rejected and cleared instead of acted on.
+
 ## [0.1.0-beta.3] - 2026-09-04
 
 ### Added

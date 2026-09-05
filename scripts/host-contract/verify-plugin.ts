@@ -115,13 +115,23 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       return { ok: r.kind === 'single' && Array.isArray(r.findings) && semantic.length === 0, detail: `kind=${r.kind} findings=${r.findings?.length} notes=${codes.join(',')}` }
     })
 
-    // H7 快照回路：create → forget → show，条目仍可被宿主接受
+    // H7 快照回路：create → forget → show → restore，恢复后记录重新可检索、磁盘文件回到 active
     await attempt('H7-SNAPSHOT-ROUNDTRIP', async () => {
       const snap = await call('memory_snapshot', { action: 'create', reason: '探针' }, execA) as { kind: string; snapshotId?: string; missing?: string[] }
       const forgot = await call('memory_forget', { ids: [savedId], reason: '探针清理' }, execA) as { ok: boolean }
       const shown = await call('memory_snapshot', { action: 'show', snapshotId: snap.snapshotId }, execA) as { kind: string; entries?: Array<{ id: string }> }
       const entry = (shown.entries ?? []).find(e => e.id === savedId)
-      return { ok: snap.kind === 'created' && Array.isArray(snap.missing) && forgot.ok === true && shown.kind === 'shown' && !!entry && snapshotJsonValue(shown) !== undefined, detail: `snap=${snap.kind}/${snap.snapshotId} missing=${JSON.stringify(snap.missing)} forget.ok=${forgot.ok} shown=${shown.kind} entries=${shown.entries?.length}` }
+      const restored = await call('memory_snapshot', { action: 'restore', snapshotId: snap.snapshotId, memoryIds: [savedId] }, execA) as { kind: string; restored?: string[] }
+      const searched = await call('memory_search', { query: 'host-contract-probe' }, execA) as { hits?: Array<{ id: string }> }
+      const searchable = (searched.hits ?? []).some(h => h.id === savedId)
+      const activeOnDisk = readdirSync(memoriesRoot).filter(d => d !== 'global').some(d => readdirSync(join(memoriesRoot, d)).some(f => {
+        if (!f.endsWith('.md') || f === 'MEMORY.md') return false
+        const text = readFileSync(join(memoriesRoot, d, f), 'utf8')
+        return text.includes(`id: ${savedId}`) && text.includes('status: active')
+      }))
+      const ok = snap.kind === 'created' && Array.isArray(snap.missing) && forgot.ok === true && shown.kind === 'shown' && !!entry && snapshotJsonValue(shown) !== undefined
+        && restored.kind === 'restored' && (restored.restored ?? []).includes(savedId) && searchable && activeOnDisk
+      return { ok, detail: `snap=${snap.kind}/${snap.snapshotId} missing=${JSON.stringify(snap.missing)} forget.ok=${forgot.ok} shown=${shown.kind} entries=${shown.entries?.length} restored=${restored.kind}/${JSON.stringify(restored.restored)} searchable=${searchable} activeOnDisk=${activeOnDisk}` }
     })
 
     // H8 模型填 global → 降级为 workspace + 提升候选；promote dismiss 清掉候选
