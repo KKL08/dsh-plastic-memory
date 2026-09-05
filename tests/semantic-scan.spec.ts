@@ -92,6 +92,17 @@ describe('parseSemanticFindings', () => {
     expect(out.map(f => f.summary)).toEqual(['垂直', '横向'])
   })
 
+  it('横向 conflict 的两个 id 必须不同：重复 id 不能被当作两方（否则 keep-left 会删掉保留方）', () => {
+    const raw = JSON.stringify({
+      findings: [
+        { type: 'conflict', memoryIds: ['mem_c', 'mem_c'], summary: '自冲突', suggestedAction: 'a' },
+        { type: 'redundancy', memoryIds: ['mem_a', 'mem_a', 'mem_b'], summary: '重复列出', suggestedAction: 'a' },
+      ],
+    })
+    const out = parseSemanticFindings(raw, new Set(['mem_a', 'mem_b', 'mem_c']))!
+    expect(out.map(f => [f.type, f.memoryIds])).toEqual([['redundancy', ['mem_a', 'mem_b']]])
+  })
+
   it('findings 数组里的 null / 非对象项只丢该条，不废整批', () => {
     const raw = JSON.stringify({
       findings: [

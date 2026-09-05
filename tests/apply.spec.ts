@@ -7,7 +7,9 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { apply, Config } from '../src/index.ts'
 import { InMemoryTable } from '../src/store.ts'
 import { INDEX_FILE } from '../src/storage/paths.ts'
+import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { TypeRegistryError } from '../src/errors.ts'
+import { record } from './helpers/record.ts'
 
 function mockCtx() {
   const registered: string[] = []
@@ -102,6 +104,20 @@ describe('apply', () => {
       'memory_confirm', 'memory_forget', 'memory_health', 'memory_promote',
       'memory_save', 'memory_scan', 'memory_search', 'memory_snapshot', 'memory_source',
     ])
+  })
+
+  it('接线集成：apply 注册后的 memory_search 能看见加载之后外部新写入的文件（入口刷新真的接上了）', async () => {
+    // 只保存名称的 stub 守不住 withRefresh 这段接线：移除 refreshIfChanged 调用，全套单测照样绿。
+    // 这里留住真实 ToolDefinition，经注册后的 execute 走一遍：加载后外部落盘的记忆必须能被检索到。
+    type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
+    const defs = new Map<string, ToolDef>()
+    const ctx = { ...mockCtx(), tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } } }
+    const memoryRoot = await makeTmpRoot()
+    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    await writeFile(join(memoryRoot, 'global', 'external.md'),
+      encodeRecord(record({ id: 'mem_ext', content: '外部落盘的记忆 zebra' }), {}), 'utf8')
+    const out = await defs.get('memory_search')!.execute({ query: 'zebra' }, {}) as { hits: Array<{ id: string }> }
+    expect(out.hits.map(h => h.id)).toEqual(['mem_ext'])
   })
 
   it('自定义类型与内置重名时加载即抛错', async () => {

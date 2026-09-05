@@ -50,9 +50,19 @@ export async function executeConfirm(
     return { kind: 'error', message: `待决项不存在：${args.decisionId}（可能已被裁决或涉及的记忆已删除）` }
   }
 
+  const vertical = entry.baselineRef !== undefined
+  // 账本里的条目也要过基数校验：横向必须是两个不同 id，垂直必须恰好一个。旧版本写入的或
+  // 手工篡改的非法条目一旦按 memoryIds[0]/[1] 裁决，就可能删掉用户要保留的那条。
+  const wellFormed = vertical
+    ? entry.memoryIds.length === 1
+    : entry.memoryIds.length === 2 && entry.memoryIds[0] !== entry.memoryIds[1]
+  if (!wellFormed) {
+    await deps.decisions.remove(entry.id)
+    return { kind: 'error', message: `待决项 ${entry.id} 的记忆 id 不合法（${entry.memoryIds.join('、')}），已从账本清除，未做任何删除。` }
+  }
+
   const actions: string[] = []
   let alsoCleared = 0
-  const vertical = entry.baselineRef !== undefined
 
   // 需要删除的记忆（keep-left/keep-right 的败方）；keep-both/dismiss 无删除
   let toDelete: MemoryRecord | undefined

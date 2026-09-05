@@ -64,6 +64,24 @@ describe('createAgentsMdWriter.append', () => {
     expect(text).toContain('- 第二条')
   })
 
+  it('同一 writer 并发 append 两条不同内容：两条都落到文件（读改写不能互相覆盖）', async () => {
+    const w = createAgentsMdWriter(file)
+    await Promise.all([w.append('并发甲'), w.append('并发乙')])
+    const text = await readFile(file, 'utf8')
+    expect(text).toContain('- 并发甲')
+    expect(text).toContain('- 并发乙')
+  })
+
+  it('判重按整行相等：前缀相同但更短的条目不算重复，两条都写入', async () => {
+    const w = createAgentsMdWriter(file)
+    await w.append('包管理 — 使用 pnpm 安装依赖并运行测试')
+    await w.append('包管理 — 使用 pnpm 安装依赖')
+    const text = await readFile(file, 'utf8')
+    const inner = text.slice(text.indexOf('<!-- dsh-memory:start -->'), text.indexOf('<!-- dsh-memory:end -->'))
+    const entries = inner.split('\n').filter(l => l.startsWith('- '))
+    expect(entries).toEqual(['- 包管理 — 使用 pnpm 安装依赖并运行测试', '- 包管理 — 使用 pnpm 安装依赖'])
+  })
+
   it('原子写：写入成功后目录不留 .tmp- 残留', async () => {
     await createAgentsMdWriter(file).append('一条记忆')
     const names = await readdir(dir)

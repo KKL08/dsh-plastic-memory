@@ -73,8 +73,10 @@ export function parseSemanticFindings(raw: string, knownIds: Set<string>): Findi
     const f = item as Record<string, unknown>
     const type = f.type as string
     if (!SEMANTIC_TYPES.has(type)) continue
-    const memoryIds = (Array.isArray(f.memoryIds) ? f.memoryIds : [])
-      .filter((id): id is string => typeof id === 'string' && knownIds.has(id))
+    // 去重后再数基数：模型可能把同一 id 写两遍，["mem_c","mem_c"] 当作横向冲突的两方会让
+    // keep-left 删掉保留方（右侧 id 就是左侧 id）。
+    const memoryIds = [...new Set((Array.isArray(f.memoryIds) ? f.memoryIds : [])
+      .filter((id): id is string => typeof id === 'string' && knownIds.has(id)))]
     if (memoryIds.length === 0) continue
     // 空字符串 baselineRef 不算"有基线"：下游 dedupKey 用真值判断、executeConfirm 用
     // !== undefined 判断，两者对空字符串的态度不一致，必须在这里收口成"要么是非空字符串要么不存在"。

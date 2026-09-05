@@ -1,6 +1,6 @@
 import { mkdir, readdir, readFile, writeFile, rename, rm, stat } from 'node:fs/promises'
 import { RecordNotFoundError } from '../errors.ts'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { MemoryTable, MemoryLogger } from '../store.ts'
 import type { KvTable } from '../kv-table.ts'
@@ -15,6 +15,10 @@ export const DELETED_RETENTION_MS = RETENTION_MS
 
 /** tmp 残留清理的陈旧阈值：写入-rename 窗口是毫秒级，60 秒足够排除任何在途文件。 */
 const TMP_STALE_MS = 60_000
+
+/** 原子写临时文件的完整后缀（与 atomicWrite 生成规则一致，锚定结尾）。合法记忆名可以含 ".tmp-"
+ *  子串（如 cache.tmp-notes.md），只看子串会把正式 .md 当残留删掉；正式文件永远以 .md 结尾。 */
+const TMP_SUFFIX_RE = /\.tmp-(\d+)-[a-z0-9]+$/
 
 
 export interface FileTableOptions {
@@ -33,7 +37,7 @@ export class FileTable implements MemoryTable {
   private map = new Map<string, Slot>()
   private quarantine: { path: string; error: string }[] = []
   private wsDirs = new Map<string, string>()   // workspacePath -> 绝对目录
-  private fingerprint = ''
+  private fingerprint = new Map<string, string>()   // "<目录名>/<文件名>" -> "mtime:size"
   private chain: Promise<unknown> = Promise.resolve()  // 进程内互斥：写与重载串行化
   private readonly log: MemoryLogger
   private opts: FileTableOptions
@@ -90,13 +94,13 @@ export class FileTable implements MemoryTable {
       let names: string[]
       try { names = await readdir(dir) } catch { this.log.warn(`[plastic-memory] 目录不可读，计空：${dir}`); continue }
       for (const name of names) {
-        if (/\.tmp-/.test(name)) {
+        const tmpMatch = TMP_SUFFIX_RE.exec(name)
+        if (tmpMatch) {
           // 只删两类原子写残留：① pid 段是本进程（自家崩溃）② mtime 超 60 秒的陈旧文件。
           // 多进程共用 memoryRoot 时，别的进程在途 tmp（毫秒级窗口）绝不能碰，否则会让对方
           // rename 落空。stat 失败＝竞态已消失，静默跳过。
           const path = join(dir, name)
-          const pidMatch = /\.tmp-(\d+)-/.exec(name)
-          if (pidMatch && Number(pidMatch[1]) === process.pid) {
+          if (Number(tmpMatch[1]) === process.pid) {
             await rm(path, { force: true })
           } else {
             try {
@@ -139,19 +143,37 @@ export class FileTable implements MemoryTable {
   }
 
   /** per-file 指纹：目录 mtime 抓不到就地编辑（sed -i/追加写）。 */
-  private async computeFingerprint(): Promise<string> {
-    const parts: string[] = []
+  private async computeFingerprint(): Promise<Map<string, string>> {
+    const fp = new Map<string, string>()
     let dirNames: string[] = []
-    try { dirNames = await readdir(this.opts.root) } catch { return '' }
-    for (const d of dirNames.sort()) {
+    try { dirNames = await readdir(this.opts.root) } catch { return fp }
+    for (const d of dirNames) {
       const dir = join(this.opts.root, d)
       let names: string[] = []
       try { names = (await readdir(dir)).filter(n => n.endsWith('.md') && n !== INDEX_FILE) } catch { continue }
-      for (const n of names.sort()) {
-        try { const s = await stat(join(dir, n)); parts.push(`${d}/${n}:${s.mtimeMs}:${s.size}`) } catch { /* 竞态删除 */ }
+      for (const n of names) {
+        try { const s = await stat(join(dir, n)); fp.set(`${d}/${n}`, `${s.mtimeMs}:${s.size}`) } catch { /* 竞态删除 */ }
       }
     }
-    return parts.join('|')
+    return fp
+  }
+
+  private static sameFingerprint(a: Map<string, string>, b: Map<string, string>): boolean {
+    if (a.size !== b.size) return false
+    for (const [key, value] of a) if (b.get(key) !== value) return false
+    return true
+  }
+
+  /**
+   * 自写后只校准本次触碰的文件，绝不整库重算：写 A 期间用户手改了 B，整库重算会把 B 的新
+   * 状态收进基线，下次 refresh 判"没变"，内存里的旧 B 随后还会被写回磁盘（外部编辑丢失）。
+   * 只更新触碰文件的条目，B 的差异留给下一次 refresh 触发重载。
+   */
+  private async calibrateFingerprint(paths: Iterable<string>): Promise<void> {
+    for (const path of paths) {
+      const key = `${basename(dirname(path))}/${basename(path)}`
+      try { const s = await stat(path); this.fingerprint.set(key, `${s.mtimeMs}:${s.size}`) } catch { this.fingerprint.delete(key) }
+    }
   }
 
   async refreshIfChanged(): Promise<void> {
@@ -159,21 +181,25 @@ export class FileTable implements MemoryTable {
       // 无条件扫描：触发面只有记忆工具（低频），实测热缓存千条级 <10ms，不值得节流——
       // 无条件的入口校准让"外部编辑不被旧态覆盖"成为无注记的硬保证。
       const fp = await this.computeFingerprint()
-      if (fp !== this.fingerprint) await this.loadInner()
+      if (!FileTable.sameFingerprint(fp, this.fingerprint)) await this.loadInner()
     // 指纹不同 → 触发 loadInner；loadInner 内部是 build-then-swap，中途失败不会碰
     // this.map/this.quarantine/this.wsDirs，所以"沿用内存态"在这里是真实成立的。
     }).catch(err => this.log.warn('[plastic-memory] 记忆重载失败，沿用内存态：', err))
   }
 
-  private async sweepDeletedInner(map: Map<string, Slot>): Promise<void> {
+  /** 返回被物理清掉的文件路径，写路径据此校准指纹。 */
+  private async sweepDeletedInner(map: Map<string, Slot>): Promise<string[]> {
     const cutoff = this.now() - DELETED_RETENTION_MS
+    const removed: string[] = []
     for (const [id, slot] of [...map]) {
       if (slot.record.status === 'deleted' && slot.record.updatedAt < cutoff) {
         await rm(slot.filePath, { force: true })
         await this.opts.stats.delete(id)
         map.delete(id)
+        removed.push(slot.filePath)
       }
     }
+    return removed
   }
 
   private async regenerateIndexes(map: Map<string, Slot>, wsDirs: Map<string, string>, onlyDirs?: Iterable<string>): Promise<void> {
@@ -277,6 +303,7 @@ export class FileTable implements MemoryTable {
     const prev = this.map.get(key)
     const volatileChanged = !prev || !this.volatileEqual(prev.record, next)
     const stableChanged = !prev || !this.stableEqual(prev.record, next)
+    const touched: string[] = []   // 本次写路径触碰的记忆文件（写入/删除），用于指纹校准
     let slot: Slot
     if (stableChanged) {
       const dir = await this.dirFor(next)
@@ -289,13 +316,17 @@ export class FileTable implements MemoryTable {
       const filePath = moved || renamed || !prev ? await this.filePathFor(next, dir) : prev.filePath
       const extras = prev?.extras ?? {}
       await this.atomicWrite(filePath, encodeRecord(next, extras))   // 易变字段由 encodeRecord 剔除
+      touched.push(filePath)
       // 先写新后删旧；崩溃窗口由加载去重兜底。filePathFor 撞名回退可能落回原路径，故加
       // prev.filePath !== filePath 保护，不能删掉刚写的自己。
-      if ((moved || renamed) && prev!.filePath !== filePath) await rm(prev!.filePath, { force: true })
+      if ((moved || renamed) && prev!.filePath !== filePath) {
+        await rm(prev!.filePath, { force: true })
+        touched.push(prev!.filePath)
+      }
       slot = { record: next, extras, filePath, dir }
       this.map.set(key, slot)
       // status 变为 deleted 时顺手清扫（"forget 工具路径顺手做"的落点）
-      if (next.status === 'deleted') await this.sweepDeletedInner(this.map)
+      if (next.status === 'deleted') touched.push(...await this.sweepDeletedInner(this.map))
       await this.regenerateIndexes(this.map, this.wsDirs, moved ? [dir, prev!.dir] : [dir])
     } else {
       slot = { ...prev!, record: next }
@@ -304,7 +335,7 @@ export class FileTable implements MemoryTable {
     if (volatileChanged) {
       await this.opts.stats.put(key, { id: key, recallCount: next.recallCount, lastRecalledAt: next.lastRecalledAt })
     }
-    if (stableChanged) this.fingerprint = await this.computeFingerprint() // 自写后刷新基线，防假重载
+    if (stableChanged) await this.calibrateFingerprint(touched) // 只校准触碰过的文件，防假重载又不吞外部编辑
   }
 
   async put(key: string, value: MemoryRecord): Promise<void> {
@@ -337,7 +368,7 @@ export class FileTable implements MemoryTable {
       await this.opts.stats.delete(key)
       this.map.delete(key)
       await this.regenerateIndexes(this.map, this.wsDirs, [slot.dir])
-      this.fingerprint = await this.computeFingerprint()
+      await this.calibrateFingerprint([slot.filePath])
       return true
     })
   }
