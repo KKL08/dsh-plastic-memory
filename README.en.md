@@ -4,7 +4,7 @@
 
 ![Version](https://img.shields.io/badge/version-0.1.0--beta.4-yellow)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
-![Platform](https://img.shields.io/badge/platform-DeepSeek%20Harness%20%E2%89%A50.1.1-4D6BFF)
+![Platform](https://img.shields.io/badge/platform-DeepSeek%20Harness%20%E2%89%A5v0.1.5--rc.2-4D6BFF)
 ![Node](https://img.shields.io/badge/node-%5E22.19.0%20%7C%7C%20%E2%89%A524-339933?logo=node.js&logoColor=white)
 
 [简体中文](README.md) | **English**
@@ -81,7 +81,8 @@ dsh plugin --profile web add dsh-plastic-memory@0.1.0-beta.4
 ```
 
 > Replace `web` with the name of your target profile (it will be created automatically if it doesn't exist). The plugin declaration is written to the profile's `cordis.patch.yml` and takes effect after a restart. The package ships prebuilt on npm — no build step required.  
-> **Requirements:** Node.js `^22.19.0 || >=24`, DeepSeek Harness >= 0.1.1.
+> **Requirements:** Node.js `^22.19.0 || >=24`, DeepSeek Harness v0.1.5-rc.2 or later (older hosts lack the session APIs the plugin relies on and will not work even if the install succeeds).
+> (DeepSeek Harness is still in pre-release and may ship further breaking changes; before upgrading the host, check the version range this plugin currently supports, see the badge at the top and the CHANGELOG.)
 >
 > While in beta, pin the exact version in the install command. Once a stable release ships, you can simply run `dsh plugin --profile web add dsh-plastic-memory`.
 

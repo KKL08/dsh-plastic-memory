@@ -66,7 +66,7 @@ rejects machine-local paths and hostnames in tracked files.
 ## Host version
 
 The plugin is built and tested against one DeepSeek Harness version, pinned by
-the `@deepseek-ai/*` dev dependencies (`0.1.1-rc.2` today). `peerDependencies`
+the `@deepseek-ai/*` dev dependencies (`0.1.5-rc.2` today). `peerDependencies`
 stay open while the host is in pre-release because npm's semver treats
 pre-release ranges strictly. Upgrading the host is a deliberate change: bump the
 dev dependencies together, run all three test layers, and note anything that
