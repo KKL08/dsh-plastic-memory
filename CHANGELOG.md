@@ -13,21 +13,18 @@ All notable changes to this project are documented here. The format follows
 - Requires DeepSeek Harness v0.1.5-rc.2 or later. Earlier hosts lack the
   session APIs the plugin now depends on, so the plugin no longer loads on
   them.
-- The host checks that ship with the repository (`pnpm host:smoke` and
-  `pnpm host:contract`) now exercise the plugin through the host's real
-  sessions, including the evidence anchor of the current turn.
-
-### Fixed
-- On host 0.1.5, `memory_save` anchored every memory at the start of the
-  session instead of the triggering turn, so `memory_source` could not drill
-  into the original conversation.
-- On host 0.1.5, `memory_scan` never compared memories against `AGENTS.md` /
-  `CLAUDE.md`, so vertical conflicts went undetected. The comparison now
-  follows each instruction file as the host reports it: later edits replace
-  earlier text, subdirectory instructions survive a restart, and when the
-  baseline exceeds the prompt budget the newest revisions are kept.
-- The evidence anchor logs a warning when it has to fall back to the whole
-  session instead of degrading silently.
+- Rebuilt on the v0.1.5 session APIs. `memory_source` still drills into the
+  turn that triggered a save, and `memory_scan` still checks memories against
+  `AGENTS.md` / `CLAUDE.md`; both now read the session through the host's new
+  projection interfaces. `memory_scan` follows each instruction file as the
+  host reports it: later edits replace earlier text, subdirectory instructions
+  survive a restart, and when the baseline exceeds the prompt budget the newest
+  revisions are kept.
+- The evidence anchor no longer falls back silently: when it cannot resolve the
+  triggering turn it logs a warning and anchors the whole session.
+- The bundled host checks (`pnpm host:smoke` and `pnpm host:contract`) now
+  exercise the plugin through the host's real sessions, including the evidence
+  anchor of the current turn.
 
 ## [0.1.0-beta.4] - 2026-09-05
 
