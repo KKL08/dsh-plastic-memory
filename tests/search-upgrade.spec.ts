@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { fakeExec } from './helpers/exec.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { sourceNote, formatIndexLine, INFERENCE_NOTE } from '../src/index-line.ts'
 import { STALENESS_NOTE } from '../src/record-freshness.ts'
@@ -55,7 +56,7 @@ describe('executeSearch 排序：命中词数 → confidence → recallCount', (
       store, registry,
       resolveContext: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }),
     }
-    const result = await executeSearch({ query: 'deploy hook' }, {} as never, deps)
+    const result = await executeSearch({ query: 'deploy hook' }, fakeExec(), deps)
     // mem_two 命中 2 词、confidence 0.5；mem_one 命中 1 词、confidence 0.9——命中数优先
     expect(result.hits.map(h => h.id)).toEqual(['mem_two', 'mem_one'])
   })
@@ -80,7 +81,7 @@ describe('低置信标注', () => {
       store, registry,
       resolveContext: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }),
     }
-    const { hits } = await executeSearch({ query: 'magicword' }, {} as never, deps)
+    const { hits } = await executeSearch({ query: 'magicword' }, fakeExec(), deps)
     const ids = hits.map(h => h.id)
     expect(ids).not.toContain('mem_dead')
     expect(hits.find(h => h.id === 'mem_stale')!.stalenessNote).toBe(STALENESS_NOTE(100))
@@ -107,7 +108,7 @@ describe('低置信标注', () => {
       store, registry,
       resolveContext: async () => ({ workspacePath: undefined, session: { id: 's1', lastSeq: 1 } }),
     }
-    const result = await executeSearch({ query: '推断' }, {} as never, deps)
+    const result = await executeSearch({ query: '推断' }, fakeExec(), deps)
     expect(result.hits[0].sourceNote).toBe(INFERENCE_NOTE)
   })
 
@@ -161,12 +162,12 @@ describe('scope=workspace 无工作目录时显式说明', () => {
       store, registry,
       resolveContext: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }),
     }
-    const result = await executeSearch({ query: 'magicword', scope: 'workspace' }, {} as never, deps)
+    const result = await executeSearch({ query: 'magicword', scope: 'workspace' }, fakeExec(), deps)
     expect(result.hits).toEqual([])
     expect(result.noteCode).toBe('no-workspace')
     expect(renderSearchResult(result)).toContain('scope: "global"')
     // 不带 scope 或 scope=global 不受影响
-    const fallback = await executeSearch({ query: 'magicword' }, {} as never, deps)
+    const fallback = await executeSearch({ query: 'magicword' }, fakeExec(), deps)
     expect(fallback.hits.map(h => h.id)).toEqual(['mem_g'])
     expect(fallback.note).toBeUndefined()
   })

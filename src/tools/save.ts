@@ -1,3 +1,4 @@
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryStore } from '../store.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
@@ -17,7 +18,7 @@ export type SaveArgs = Omit<SaveCandidate, 'tags'> & { tags?: string[] }
 export interface SaveToolDeps {
   store: MemoryStore
   registry: TypeRegistry
-  resolveContext(exec: unknown): Promise<SaveContext>
+  resolveContext(exec: ToolRunContext): Promise<SaveContext>
   /** update global 目标前拍快照用（快照先行）；生产接线传入已有实例，测试可缺省。 */
   snapshots?: SnapshotStore
 }
@@ -55,7 +56,7 @@ export function renderSaveResult(result: PipelineResult): string {
  */
 export async function executeSave(
   args: SaveArgs,
-  exec: unknown,
+  exec: ToolRunContext,
   deps: SaveToolDeps,
 ): Promise<PipelineResult> {
   const context = await deps.resolveContext(exec)

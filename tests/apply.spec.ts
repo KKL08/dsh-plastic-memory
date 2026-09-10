@@ -2,6 +2,9 @@ import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { fakeExec } from './helpers/exec.ts'
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { TurnBoundaryProjection } from '@deepseek-ai/dsh-agent'
 
 // 真实 dsh-tools / dsh-storage-domain 包已从 npm 装好，此处不 mock 任何框架包。
 import { apply, Config } from '../src/index.ts'
@@ -116,7 +119,7 @@ describe('apply', () => {
     await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
     await writeFile(join(memoryRoot, 'global', 'external.md'),
       encodeRecord(record({ id: 'mem_ext', content: '外部落盘的记忆 zebra' }), {}), 'utf8')
-    const out = await defs.get('memory_search')!.execute({ query: 'zebra' }, {}) as { hits: Array<{ id: string }> }
+    const out = await defs.get('memory_search')!.execute({ query: 'zebra' }, fakeExec()) as { hits: Array<{ id: string }> }
     expect(out.hits.map(h => h.id)).toEqual(['mem_ext'])
   })
 
@@ -147,5 +150,101 @@ describe('apply', () => {
     // 钉住 root 真的来自 config 且 load 跑到了 regenerateIndexes：空库也会落出
     // global/MEMORY.md。若 resolveMemoryRoot 漏传 config 落到默认值，这里 stat 必抛。
     expect((await stat(join(memoryRoot, 'global', INDEX_FILE))).isFile()).toBe(true)
+  })
+})
+
+/**
+ * 证据锚（设计 evidence-anchor §3）在宿主 0.1.5 上的读法：起点来自 agent-loop 注册的 turnBoundary
+ * 投影（openTurnStartSeq = 当轮 turn/start 的 seq），终点是 session.seq - 1。投影是宿主
+ * 按事件增量折叠的状态，插件按调用经 ctx.get('sessionProjections') 探测，缺席一律退回整会话锚。
+ * 这里用 apply 注册后的真 ToolDefinition 走一遍 memory_save，只看落到记录上的 eventRange。
+ */
+describe('证据锚：读 turnBoundary 投影', () => {
+  type SaveOut = { kind: string; record?: { source: { eventRange: [number, number] } } }
+  type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
+  const SAVE_ARGS = { action: 'create', name: 'anchor', summary: '锚', content: '证据锚探针', type: 'knowledge', scope: 'workspace', sourceMode: 'user-explicit', tags: [] }
+
+  /** 起一个带 sessionProjections 桩的 ctx，并留住注册后的工具定义。 */
+  async function boot(projections: { stateOf: (session: object, key: string) => unknown } | undefined) {
+    const defs = new Map<string, ToolDef>()
+    const warnings: string[] = []
+    const base = mockCtx()
+    const ctx = {
+      ...base,
+      tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
+      get: (name: string) => (name === 'sessionProjections' ? projections : undefined),
+      logger: { info() {}, warn: (msg: string) => { warnings.push(msg) }, error() {} },
+    }
+    const memoryRoot = await makeTmpRoot()
+    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    const cwd = await makeTmpRoot() // 会话 cwd 必须真实存在（resolveWorkspacePath 走 realpath）
+    const session = (seq: number) => ({ header: { id: 'sess-1', cwd }, seq, requestHeader: () => undefined })
+    const save = async (s: ReturnType<typeof session>, name = 'anchor'): Promise<[number, number]> => {
+      const exec = fakeExec({ agent: { session: s, options: {} } as unknown as ToolRunContext['agent'] })
+      const out = await defs.get('memory_save')!.execute({ ...SAVE_ARGS, name, force: true }, exec) as SaveOut
+      expect(out.kind).toBe('saved')
+      return out.record!.source.eventRange
+    }
+    return { session, save, warnings }
+  }
+  const projectionWith = (state: Partial<TurnBoundaryProjection> | undefined) => ({
+    stateOf: (_session: object, key: string) => (key === 'turnBoundary' ? state : undefined),
+  })
+
+  it('投影给出 openTurnStartSeq 时，eventRange = [openTurnStartSeq, seq - 1]，不打 warn', async () => {
+    const { session, save, warnings } = await boot(projectionWith({ openTurnStartSeq: 3 as TurnBoundaryProjection['openTurnStartSeq'] }))
+    expect(await save(session(7))).toEqual([3, 6])
+    expect(warnings).toEqual([])
+  })
+
+  it('sessionProjections 服务缺席 → 退回整会话锚 [0, seq - 1]，warn 说明原因', async () => {
+    const { session, save, warnings } = await boot(undefined)
+    expect(await save(session(7))).toEqual([0, 6])
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('sess-1')
+    expect(warnings[0]).toContain('service is absent')
+  })
+
+  it('stateOf 对 turnBoundary 返回 undefined（投影未注册）→ [0, seq - 1]，warn 说明原因', async () => {
+    const { session, save, warnings } = await boot(projectionWith(undefined))
+    expect(await save(session(7))).toEqual([0, 6])
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('not registered')
+  })
+
+  it('openTurnStartSeq 为 null（工具执行时却没有开着的轮）→ [0, seq - 1]，warn 说明原因', async () => {
+    const { session, save, warnings } = await boot(projectionWith({ openTurnStartSeq: null }))
+    expect(await save(session(7))).toEqual([0, 6])
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('no open turn')
+  })
+
+  it('投影对象缺少 openTurnStartSeq 字段（宿主形状变化）→ [0, seq - 1]，warn 而不是静默', async () => {
+    const { session, save, warnings } = await boot(projectionWith({}))
+    expect(await save(session(7))).toEqual([0, 6])
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('undefined')
+  })
+
+  it('stateOf 抛错（宿主行为变化）→ 退回 [0, seq - 1]，warn 带上错误', async () => {
+    const { session, save, warnings } = await boot({ stateOf: () => { throw new Error('projection exploded') } })
+    expect(await save(session(7))).toEqual([0, 6])
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('projection exploded')
+  })
+
+  it('同一 session 反复退化只 warn 一次，不同 session 各自 warn', async () => {
+    const { session, save, warnings } = await boot(undefined)
+    const first = session(7)
+    await save(first, 'anchor-1')
+    await save(first, 'anchor-2')
+    expect(warnings).toHaveLength(1)
+    await save(session(9), 'anchor-3')
+    expect(warnings).toHaveLength(2)
+  })
+
+  it('空日志（seq = 0）→ [0, 0]', async () => {
+    const { session, save } = await boot(projectionWith({ openTurnStartSeq: null }))
+    expect(await save(session(0))).toEqual([0, 0])
   })
 })

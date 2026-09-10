@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { fakeExec } from './helpers/exec.ts'
 import { executeSearch, type SearchToolDeps } from '../src/tools/search.ts'
 import { executeForget } from '../src/tools/forget.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
@@ -43,7 +44,7 @@ describe('executeSearch', () => {
     const store = new MemoryStore(new InMemoryTable())
     await seed(store, '低置信条目', 0.5)
     const high = await seed(store, '高置信条目', 0.9)
-    const result = await executeSearch({ query: '条目', limit: 1 }, {} as never, makeSearchDeps(store))
+    const result = await executeSearch({ query: '条目', limit: 1 }, fakeExec(), makeSearchDeps(store))
     expect(result.hits).toHaveLength(1)
     expect(result.hits[0].id).toBe(high.id)
   })
@@ -51,7 +52,7 @@ describe('executeSearch', () => {
   it('命中后更新召回统计', async () => {
     const store = new MemoryStore(new InMemoryTable())
     const r = await seed(store, '某个知识')
-    await executeSearch({ query: '知识' }, {} as never, makeSearchDeps(store))
+    await executeSearch({ query: '知识' }, fakeExec(), makeSearchDeps(store))
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(store.get(r.id)!.recallCount).toBe(1)
   })
@@ -60,7 +61,7 @@ describe('executeSearch', () => {
     const store = new MemoryStore(new InMemoryTable())
     const r = await seed(store, '老知识')
     await store.put({ ...store.get(r.id)!, lastConfirmedAt: Date.now() - 100 * 86_400_000 }) // knowledge 衰减 90 天
-    const result = await executeSearch({ query: '老知识' }, {} as never, makeSearchDeps(store))
+    const result = await executeSearch({ query: '老知识' }, fakeExec(), makeSearchDeps(store))
     expect(result.hits[0].stalenessNote).toBe(STALENESS_NOTE(100))
   })
 })

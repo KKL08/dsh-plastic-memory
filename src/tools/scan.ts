@@ -1,3 +1,4 @@
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryStore } from '../store.ts'
 import type { CodedNote, ScanNoteCode } from '../contract-codes.ts'
 import type { TypeRegistry } from '../type-registry.ts'
@@ -26,13 +27,13 @@ export interface ScanToolDeps {
   /** malformed 按文件路径归层需要根目录；缺省不归层。 */
   memoryRoot?: string
   /** 按触发调用的 session 取该会话的 AGENTS.md/CLAUDE.md 基线（BaselineCache 按 session 隔离）。 */
-  getBaseline: (exec: unknown) => string | null
+  getBaseline: (exec: ToolRunContext) => readonly string[] | null
   /** 按调用解析（而非加载时一次性解析）——provider/model 只能从触发调用的 exec 上下文里的
    *  agent 拿到，插件加载时不存在。null = 当前环境拿不到 LLM 或解析不出 provider/model
    *  （语义层跳过并说明） */
-  getLlm: (exec: unknown) => SemanticLlm | null
+  getLlm: (exec: ToolRunContext) => SemanticLlm | null
   /** 当前会话的 workspace（默认口径"当前项目"的来源）。 */
-  resolveContext: (exec: unknown) => Promise<{ workspacePath: string | undefined }>
+  resolveContext: (exec: ToolRunContext) => Promise<{ workspacePath: string | undefined }>
   now?: () => number
 }
 
@@ -184,7 +185,7 @@ async function scanPass(
   quarantined: readonly { path: string; error: string }[],
   layers: 'rule' | 'semantic' | 'full',
   llm: SemanticLlm | null,
-  baseline: string | null,
+  baseline: readonly string[] | null,
   now: number,
   signal?: AbortSignal,
 ): Promise<ScanPass> {
@@ -250,11 +251,11 @@ async function scanPass(
  * 默认口径=当前 workspace 的可见集合（global + 本项目）；scope='all' 或 scopes 列表进入
  * 全库体检：逐 workspace 独立扫描计分 + global 层专项（缺口检测、跨层冲突聚合）。
  */
-export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec?: unknown): Promise<ScanToolResult> {
+export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: ToolRunContext): Promise<ScanToolResult> {
   const args = rawArgs
   const layers = args.layers ?? 'full'
   // 用户取消信号（宿主 exec.signal 契约）：每个语义调用透传，各写入前设检查点。
-  const signal = (exec as { signal?: AbortSignal } | undefined)?.signal
+  const signal = exec?.signal
   const now = deps.now?.() ?? Date.now()
   const quarantined = deps.getQuarantined?.() ?? []
   const llm = deps.getLlm(exec)

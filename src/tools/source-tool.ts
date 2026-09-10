@@ -1,10 +1,10 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { executeSource, renderSourceResult, type SourceToolDeps, type SourceResult } from './source.ts'
 import { toToolOutput } from './output.ts'
 
 export interface SourceToolBindingDeps extends SourceToolDeps {
-  resolveContext: (exec: unknown) => Promise<{ workspacePath: string | undefined }>
+  resolveContext: (exec: ToolRunContext) => Promise<{ workspacePath: string | undefined }>
 }
 
 /**

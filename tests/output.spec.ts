@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { snapshotJsonValue } from '@deepseek-ai/dsh-session'
+import { snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
 import { toToolOutput } from '../src/tools/output.ts'
 
 // toToolOutput 的契约：语义 =「宿主 snapshotJsonValue 会接受的值」，只做一件宽容：深度剔除

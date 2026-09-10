@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { fakeExec } from './helpers/exec.ts'
 import { executeSave, renderSaveResult, type SaveToolDeps } from '../src/tools/save.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
@@ -29,7 +30,7 @@ describe('executeSave', () => {
     const store = new MemoryStore(new InMemoryTable())
     const result = await executeSave(
       { ...base, name: 'commit 语言', content: 'commit 信息用英文', summary: 'commit 英文' },
-      {} as never,
+      fakeExec(),
       makeDeps(store),
     )
     expect(result.kind).toBe('saved')
@@ -41,7 +42,7 @@ describe('executeSave', () => {
     const result = await executeSave(
       // 故意不传 tags，验证 executeSave 里的归一化
       { action: 'create', type: 'preference', scope: 'global', sourceMode: 'user-explicit', name: '标题', content: '内容', summary: '摘要' },
-      {} as never,
+      fakeExec(),
       makeDeps(store),
     )
     if (result.kind !== 'saved') throw new Error(result.kind)
@@ -51,8 +52,8 @@ describe('executeSave', () => {
   it('同实体的同类记忆触发 duplicate-suspected', async () => {
     const store = new MemoryStore(new InMemoryTable())
     const deps = makeDeps(store)
-    await executeSave({ ...base, name: '认证位置', content: '认证逻辑在 `src/auth.ts`', summary: 'auth 位置' }, {} as never, deps)
-    const dup = await executeSave({ ...base, name: '认证位置改', content: '`src/auth.ts` 负责认证', summary: 'auth 位置改' }, {} as never, deps)
+    await executeSave({ ...base, name: '认证位置', content: '认证逻辑在 `src/auth.ts`', summary: 'auth 位置' }, fakeExec(), deps)
+    const dup = await executeSave({ ...base, name: '认证位置改', content: '`src/auth.ts` 负责认证', summary: 'auth 位置改' }, fakeExec(), deps)
     expect(dup.kind).toBe('duplicate-suspected')
   })
 
@@ -64,7 +65,7 @@ describe('executeSave', () => {
     }
     const result = await executeSave(
       { ...base, scope: 'workspace', name: '项目规则', content: '本项目用 pnpm', summary: 'pnpm' },
-      {} as never, deps,
+      fakeExec(), deps,
     )
     if (result.kind !== 'rejected') throw new Error(result.kind)
     expect(result).toMatchObject({ kind: 'rejected', code: 'no-workspace' })
@@ -80,7 +81,7 @@ describe('executeSave', () => {
     }
     const result = await executeSave(
       { ...base, scope: 'global', name: '全局偏好', content: '所有项目用 pnpm', summary: 'pnpm' },
-      {} as never, deps,
+      fakeExec(), deps,
     )
     if (result.kind !== 'saved') throw new Error(result.kind)
     expect(result.record.scope).toBe('workspace')
@@ -94,13 +95,13 @@ describe('executeSave', () => {
     const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
     const deps: SaveToolDeps = { ...makeDeps(store), snapshots }
     const created = await executeSave(
-      { ...base, name: '全局偏好', content: '旧全局内容', summary: 'pref' }, {} as never, deps)
+      { ...base, name: '全局偏好', content: '旧全局内容', summary: 'pref' }, fakeExec(), deps)
     if (created.kind !== 'saved') throw new Error(created.kind)
     // 降级成了 workspace 候选，手工提到 global 模拟 promote 后
     await store.put({ ...created.record, scope: 'global', workspacePath: undefined } as never)
     const updated = await executeSave(
       { ...base, action: 'update', id: created.record.id, name: '全局偏好', content: '新全局内容', summary: 'pref' },
-      {} as never, deps)
+      fakeExec(), deps)
     if (updated.kind !== 'updated') throw new Error(updated.kind)
     const list = snapshots.list()
     expect(list).toHaveLength(1)
@@ -114,7 +115,7 @@ describe('renderSaveResult', () => {
     const store = new MemoryStore(new InMemoryTable())
     const result = await executeSave(
       { ...base, name: 'commit 语言', content: 'commit 信息用英文', summary: 'commit 英文' },
-      {} as never,
+      fakeExec(),
       makeDeps(store),
     )
     if (result.kind !== 'saved') throw new Error(result.kind)
@@ -129,13 +130,13 @@ describe('renderSaveResult', () => {
     const deps = makeDeps(store)
     const created = await executeSave(
       { ...base, name: 'commit 语言', content: 'commit 信息用英文', summary: 'commit 英文' },
-      {} as never,
+      fakeExec(),
       deps,
     )
     if (created.kind !== 'saved') throw new Error(created.kind)
     const updated = await executeSave(
       { ...base, action: 'update', id: created.record.id, name: 'commit 语言', content: '改用中文', summary: 'commit 中文' },
-      {} as never,
+      fakeExec(),
       deps,
     )
     if (updated.kind !== 'updated') throw new Error(updated.kind)
@@ -158,7 +159,7 @@ describe('renderSaveResult', () => {
     const store = new MemoryStore(new InMemoryTable())
     const result = await executeSave(
       { ...base, name: '密钥记录', content: '内部约定 api_key: 1234567890abcdefghij', summary: 'key' },
-      {} as never,
+      fakeExec(),
       makeDeps(store),
     )
     if (result.kind !== 'saved') throw new Error(result.kind)
@@ -173,13 +174,13 @@ describe('renderSaveResult', () => {
     const deps = makeDeps(store)
     const created = await executeSave(
       { ...base, name: 'title', content: '普通内容', summary: '摘要' },
-      {} as never,
+      fakeExec(),
       deps,
     )
     if (created.kind !== 'saved') throw new Error(created.kind)
     const updated = await executeSave(
       { ...base, action: 'update', id: created.record.id, name: 'title', content: '密码:TESTONLYpassw0rd', summary: 'summary' },
-      {} as never,
+      fakeExec(),
       deps,
     )
     if (updated.kind !== 'updated') throw new Error(updated.kind)
@@ -193,7 +194,7 @@ describe('renderSaveResult', () => {
     const store = new MemoryStore(new InMemoryTable())
     const result = await executeSave(
       { ...base, name: 'clean content', content: 'just regular text', summary: 'summary' },
-      {} as never,
+      fakeExec(),
       makeDeps(store),
     )
     if (result.kind !== 'saved') throw new Error(result.kind)

@@ -2,9 +2,9 @@
 
 ![Plastic Memories](assets/banner.jpg)
 
-![Version](https://img.shields.io/badge/version-0.1.0--beta.4-yellow)
+![Version](https://img.shields.io/badge/version-0.1.1--beta.1-yellow)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
-![Platform](https://img.shields.io/badge/platform-DeepSeek%20Harness%20%E2%89%A50.1.1-4D6BFF)
+![Platform](https://img.shields.io/badge/platform-DeepSeek%20Harness%20%E2%89%A5v0.1.5--rc.2-4D6BFF)
 ![Node](https://img.shields.io/badge/node-%5E22.19.0%20%7C%7C%20%E2%89%A524-339933?logo=node.js&logoColor=white)
 
 **简体中文** | [English](README.en.md)
@@ -77,11 +77,12 @@
 ## 📦 安装
 
 ```bash
-dsh plugin --profile web add dsh-plastic-memory@0.1.0-beta.4
+dsh plugin --profile web add dsh-plastic-memory@0.1.1-beta.1
 ```
 
 > 把 `web` 换成你的目标 Profile 名即可（若该 Profile 不存在则自动创建）。安装后插件声明将自动写入该 Profile 的 `cordis.patch.yml`，重启该 Profile 后生效。插件以预构建产物发布到 npm，安装不需要构建授权。  
-> **运行环境要求**：Node.js `^22.19.0 || >=24`，DeepSeek Harness ≥ 0.1.1。
+> **运行环境要求**：Node.js `^22.19.0 || >=24`，DeepSeek Harness v0.1.5-rc.2 或更新（更早的宿主缺少插件依赖的会话接口，装上也无法工作）。
+> （DeepSeek Harness 仍在预发布阶段，之后还可能出现破坏性更新；升级宿主前请留意本插件当前支持的版本范围，见顶部徽章和 CHANGELOG。）
 >
 > 当前为 beta 阶段，安装命令直接写明版本号；发布稳定版后可直接 `dsh plugin --profile web add dsh-plastic-memory`。
 

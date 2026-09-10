@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { fakeExec } from './helpers/exec.ts'
 import { executeScan, type ScanToolDeps } from '../src/tools/scan.ts'
 import { executeHealth, type HealthToolDeps } from '../src/tools/health.ts'
 import { GLOBAL_CACHE_KEY } from '../src/governance/layer-health.ts'
@@ -64,8 +65,8 @@ describe('体检聚合：scan 与 health 对同一层同口径（提取前先钉
     await store.put(record({ id: 'mem_wq', type: 'preference', scope: 'workspace', workspacePath: '/q' }))
 
     const { scanDeps, healthDeps } = sharedDeps(store, decisions, cache)
-    const h = await executeHealth({ scope: 'all' }, healthDeps, {})
-    const s = await executeScan({ scope: 'all' }, scanDeps, {})
+    const h = await executeHealth({ scope: 'all' }, healthDeps, fakeExec())
+    const s = await executeScan({ scope: 'all' }, scanDeps, fakeExec())
     if (h.kind !== 'checkup' || s.kind !== 'checkup') throw new Error('expected checkup')
 
     const expected = ['conflict 1、redundancy 1、misplaced 1、unclear 1、超期 1', '超期 1', '—']
@@ -97,8 +98,8 @@ describe('体检聚合：scan 与 health 对同一层同口径（提取前先钉
     await decisions.upsert({ memoryIds: ['mem_gZ', 'mem_wA'], summary: '' }, 600)
 
     const { scanDeps, healthDeps } = sharedDeps(store, decisions, cache)
-    const h = await executeHealth({ scope: 'all' }, healthDeps, {})
-    const s = await executeScan({ scope: 'all', layers: 'rule' }, scanDeps, {})
+    const h = await executeHealth({ scope: 'all' }, healthDeps, fakeExec())
+    const s = await executeScan({ scope: 'all', layers: 'rule' }, scanDeps, fakeExec())
     if (h.kind !== 'checkup' || s.kind !== 'checkup') throw new Error('expected checkup')
 
     const expected = [{

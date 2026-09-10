@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { fakeExec } from './helpers/exec.ts'
 import { executeScan, cacheKey, renderScanResult, type ScanToolDeps, type ScanArgs, type SingleScanResult } from '../src/tools/scan.ts'
 import { GLOBAL_CACHE_KEY } from '../src/governance/layer-health.ts'
 import { SEMANTIC_SCAN_MAX_RECORDS } from '../src/governance/semantic-scan.ts'
@@ -25,7 +26,7 @@ function makeDeps(overrides?: Partial<ScanToolDeps>): ScanToolDeps {
 
 /** 单层扫描断言助手：结果必须是 single 形态。 */
 async function scanSingle(args: ScanArgs, deps: ScanToolDeps): Promise<SingleScanResult> {
-  const r = await executeScan(args, deps, {})
+  const r = await executeScan(args, deps, fakeExec())
   if (r.kind !== 'single') throw new Error(`expected single, got ${r.kind}`)
   return r
 }
@@ -227,7 +228,7 @@ describe('executeScan 全库体检', () => {
   it('scopes 列表：逐 workspace + global 各自扫描计分，语义缓存写各自桶', async () => {
     const deps = makeDeps({ getLlm: (_exec: unknown) => checkupLlm })
     await seedTwoWs(deps)
-    const r = await executeScan({ scopes: ['/proj-a', '/proj-b'] }, deps, {})
+    const r = await executeScan({ scopes: ['/proj-a', '/proj-b'] }, deps, fakeExec())
     if (r.kind !== 'checkup') throw new Error(r.kind)
     expect(r.rows.map(row => row.layer === 'global' ? 'global' : row.workspacePath)).toEqual(['global', '/proj-a', '/proj-b'])
     expect(r.rows.every(row => row.tier === 'green')).toBe(true)
@@ -239,7 +240,7 @@ describe('executeScan 全库体检', () => {
   it('无 AGENTS.md 基线时 note 带 baseline-missing', async () => {
     const deps = makeDeps({ getBaseline: () => null })
     await seedTwoWs(deps)
-    const r = await executeScan({ scope: 'all', layers: 'rule' }, deps, {})
+    const r = await executeScan({ scope: 'all', layers: 'rule' }, deps, fakeExec())
     if (r.kind !== 'checkup') throw new Error(r.kind)
     expect(r.notes.map(n => n.code)).toContain('baseline-missing')
   })
@@ -251,7 +252,7 @@ describe('executeScan 全库体检', () => {
     }
     const deps = makeDeps({ getLlm: (_exec: unknown) => brokenCrossLlm })
     await seedTwoWs(deps)
-    const r = await executeScan({ scope: 'all' }, deps, {})
+    const r = await executeScan({ scope: 'all' }, deps, fakeExec())
     if (r.kind !== 'checkup') throw new Error(r.kind)
     expect(r.notes.map(n => n.code)).toContain('cross-ws-failed')
     expect(r.duplicates.via).toBe('entity')
@@ -260,7 +261,7 @@ describe('executeScan 全库体检', () => {
   it('scope=all 自动枚举库里的全部 workspace', async () => {
     const deps = makeDeps()
     await seedTwoWs(deps)
-    const r = await executeScan({ scope: 'all', layers: 'rule' }, deps, {})
+    const r = await executeScan({ scope: 'all', layers: 'rule' }, deps, fakeExec())
     if (r.kind !== 'checkup') throw new Error(r.kind)
     expect(r.rows).toHaveLength(3)
   })
@@ -268,7 +269,7 @@ describe('executeScan 全库体检', () => {
   it('global 视角一：候选按 workspace 聚合 + 跨项目重复主题（语义层）', async () => {
     const deps = makeDeps({ getLlm: (_exec: unknown) => checkupLlm })
     await seedTwoWs(deps)
-    const r = await executeScan({ scope: 'all' }, deps, {})
+    const r = await executeScan({ scope: 'all' }, deps, fakeExec())
     if (r.kind !== 'checkup') throw new Error(r.kind)
     expect(r.promoteCandidates.total).toBe(1)
     expect(r.promoteCandidates.byWorkspace[0].workspacePath).toBe('/proj-a')
@@ -280,7 +281,7 @@ describe('executeScan 全库体检', () => {
   it('无 LLM 时跨项目重复退用实体聚类保底（疑似级）', async () => {
     const deps = makeDeps()
     await seedTwoWs(deps)
-    const r = await executeScan({ scope: 'all', layers: 'rule' }, deps, {})
+    const r = await executeScan({ scope: 'all', layers: 'rule' }, deps, fakeExec())
     if (r.kind !== 'checkup') throw new Error(r.kind)
     expect(r.duplicates.via).toBe('entity')
     expect(r.duplicates.items[0].topic).toBe('pnpm')  // 反引号实体在两个 ws 出现且 global 缺位
@@ -289,11 +290,11 @@ describe('executeScan 全库体检', () => {
   it('基线只用于当前会话所属 workspace 与 global 层：其他 ws 跳过垂直检测并留 note', async () => {
     const deps = makeDeps({
       getLlm: (_exec: unknown) => ({ complete: async () => JSON.stringify({ findings: [] }) }),
-      getBaseline: () => '# CLAUDE.md\n用 pnpm',
+      getBaseline: () => ['# CLAUDE.md\n用 pnpm'],
       resolveContext: async () => ({ workspacePath: '/proj-a' }),
     })
     await seedTwoWs(deps)
-    const r = await executeScan({ scopes: ['/proj-a', '/proj-b'] }, deps, {})
+    const r = await executeScan({ scopes: ['/proj-a', '/proj-b'] }, deps, fakeExec())
     if (r.kind !== 'checkup') throw new Error(r.kind)
     expect(r.notes.map(n => n.code)).toContain('baseline-session-scoped')
   })
@@ -301,7 +302,7 @@ describe('executeScan 全库体检', () => {
   it('单层显式扫别的 workspace：基线不适用并留 note；扫自己不留', async () => {
     const deps = makeDeps({
       getLlm: (_exec: unknown) => ({ complete: async () => JSON.stringify({ findings: [] }) }),
-      getBaseline: () => '基线内容',
+      getBaseline: () => ['基线内容'],
       resolveContext: async () => ({ workspacePath: '/proj-a' }),
     })
     await seedTwoWs(deps)
@@ -335,15 +336,15 @@ describe('executeScan 全库体检', () => {
           ? JSON.stringify({ findings: [{ type: 'conflict', memoryIds: ['mem_g1'], baselineRef: 'AGENTS.md：规则', summary: '与基线矛盾', suggestedAction: '裁决' }] })
           : JSON.stringify({ findings: [] }),
     }
-    const deps = makeDeps({ getLlm: (_exec: unknown) => verticalLlm, getBaseline: () => '基线' })
+    const deps = makeDeps({ getLlm: (_exec: unknown) => verticalLlm, getBaseline: () => ['基线'] })
     await seedTwoWs(deps)
-    const first = await executeScan({ scope: 'all' }, deps, {})
+    const first = await executeScan({ scope: 'all' }, deps, fakeExec())
     if (first.kind !== 'checkup') throw new Error(first.kind)
     // mem_g1 在两个 ws 的 visible 桶与 global 桶各被发现一次，dedupKey 收敛为一条
     expect(first.pendingDecisions.items).toHaveLength(1)
     expect(first.pendingDecisions.created).toBe(1)
     expect(first.pendingDecisions.existing).toBe(0)
-    const second = await executeScan({ scope: 'all' }, deps, {})
+    const second = await executeScan({ scope: 'all' }, deps, fakeExec())
     if (second.kind !== 'checkup') throw new Error(second.kind)
     expect(second.pendingDecisions.created).toBe(0)
     expect(second.pendingDecisions.existing).toBe(1)
@@ -355,7 +356,7 @@ describe('executeScan 全库体检', () => {
     await deps.cache.put('cache_/gone-ws', { id: 'cache_/gone-ws', scannedAt: 1, scope: '/gone-ws', findings: [] })
     await deps.cache.put('cache_all', { id: 'cache_all', scannedAt: 1, scope: 'all', findings: [] })
     await deps.cache.put('cache_/proj-a', { id: 'cache_/proj-a', scannedAt: 1, scope: '/proj-a', findings: [] })
-    await executeScan({ scope: 'all', layers: 'rule' }, deps, {})
+    await executeScan({ scope: 'all', layers: 'rule' }, deps, fakeExec())
     expect(deps.cache.get('cache_/gone-ws')).toBeUndefined()
     expect(deps.cache.get('cache_all')).toBeUndefined()
     expect(deps.cache.get('cache_/proj-a')).toBeDefined()
@@ -366,7 +367,7 @@ describe('executeScan 全库体检', () => {
     await seedTwoWs(deps)
     await deps.decisions.upsert({ memoryIds: ['mem_g1', 'mem_a1'], summary: '' }, 500)
     await deps.decisions.upsert({ memoryIds: ['mem_g1', 'mem_b1'], summary: '' }, 500)
-    const r = await executeScan({ scope: 'all', layers: 'rule' }, deps, {})
+    const r = await executeScan({ scope: 'all', layers: 'rule' }, deps, fakeExec())
     if (r.kind !== 'checkup') throw new Error(r.kind)
     expect(r.crossLayerConflicts).toHaveLength(1)
     expect(r.crossLayerConflicts[0].globalId).toBe('mem_g1')
@@ -387,7 +388,7 @@ describe('executeScan 全库体检', () => {
     }
     const deps = makeDeps({ getLlm: (_exec: unknown) => abortingLlm })
     await seedTwoWs(deps)
-    await expect(executeScan({ scopes: ['/proj-a', '/proj-b'] }, deps, { signal: controller.signal }))
+    await expect(executeScan({ scopes: ['/proj-a', '/proj-b'] }, deps, fakeExec({ signal: controller.signal })))
       .rejects.toThrow(/cancel|abort/i)
     // 首个 workspace 之外不再调用 LLM（语义 + 跨项目重复都未触及）
     expect(calls).toHaveLength(1)
@@ -401,7 +402,7 @@ describe('executeScan 全库体检', () => {
     const countingLlm = { complete: async (): Promise<string> => { calls++; return '{"duplicates":[]}' } }
     const deps = makeDeps({ getLlm: (_exec: unknown) => countingLlm })
     await seedTwoWs(deps)
-    const r = await executeScan({ scope: 'all', layers: 'rule' }, deps, {})
+    const r = await executeScan({ scope: 'all', layers: 'rule' }, deps, fakeExec())
     if (r.kind !== 'checkup') throw new Error(r.kind)
     expect(calls).toBe(0)
     expect(r.duplicates.via).toBe('entity')
@@ -414,11 +415,11 @@ describe('executeScan 全库体检', () => {
     }
     const depsNoSignal = makeDeps({ getLlm: (_exec: unknown) => emptyLlm })
     await seed(depsNoSignal)
-    const withoutSignal = await executeScan({ scope: '/proj' }, depsNoSignal, {})
+    const withoutSignal = await executeScan({ scope: '/proj' }, depsNoSignal, fakeExec())
 
     const depsSignal = makeDeps({ getLlm: (_exec: unknown) => emptyLlm })
     await seed(depsSignal)
-    const withSignal = await executeScan({ scope: '/proj' }, depsSignal, { signal: new AbortController().signal })
+    const withSignal = await executeScan({ scope: '/proj' }, depsSignal, fakeExec({ signal: new AbortController().signal }))
 
     expect(withSignal).toEqual(withoutSignal)
   })
@@ -478,7 +479,7 @@ describe('executeScan scope 校验', () => {
     const deps = makeDeps({ resolveContext: async () => ({ workspacePath: '/proj' }) })
     await deps.store.put(record({ id: 'mem_w', scope: 'workspace', workspacePath: '/proj' }))
     await deps.store.put(record({ id: 'mem_o', scope: 'workspace', workspacePath: '/other' }))
-    const r = await executeScan({ scope: 'proj-alpha-8641b727' }, deps, {})
+    const r = await executeScan({ scope: 'proj-alpha-8641b727' }, deps, fakeExec())
     expect(r.kind).toBe('error')
     const text = renderScanResult(r)
     expect(text).toContain('proj-alpha-8641b727')
@@ -489,9 +490,9 @@ describe('executeScan scope 校验', () => {
   it('体检 scopes 含未知值：整体报错（不部分扫描），"all" 字面量也不属于 scopes', async () => {
     const deps = makeDeps()
     await deps.store.put(record({ id: 'mem_w', scope: 'workspace', workspacePath: '/proj' }))
-    const bad = await executeScan({ scopes: ['/proj', 'proj-beta-3fb46caf'] }, deps, {})
+    const bad = await executeScan({ scopes: ['/proj', 'proj-beta-3fb46caf'] }, deps, fakeExec())
     expect(bad.kind).toBe('error')
-    const asAll = await executeScan({ scopes: ['all'] }, deps, {})
+    const asAll = await executeScan({ scopes: ['all'] }, deps, fakeExec())
     expect(asAll.kind).toBe('error')
   })
 

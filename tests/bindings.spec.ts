@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { snapshotJsonValue } from '@deepseek-ai/dsh-session'
+import { fakeExec } from './helpers/exec.ts'
+import { snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
 import { validateJsonSchemaValue, type JsonSchemaNode, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 import { createSaveTool } from '../src/tools/save-tool.ts'
@@ -43,7 +44,7 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const NOW = 1_000_000
 /** 绑定层 execute 只从 exec 读 signal（scan）或转交给 resolveContext；最小桩即可。 */
-const exec = {} as never
+const exec = fakeExec()
 const jsonOk = (v: unknown): boolean => snapshotJsonValue(v) !== undefined
 const schemaOf = (tool: ToolDefinition): JsonSchemaNode => tool.parameters as unknown as JsonSchemaNode
 

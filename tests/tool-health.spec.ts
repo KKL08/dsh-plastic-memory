@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { fakeExec } from './helpers/exec.ts'
 import { executeHealth, renderHealthResult, type HealthToolDeps, type HealthArgs, type SingleHealthResult, TIER_LABEL } from '../src/tools/health.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
@@ -28,7 +30,7 @@ function makeDeps(now: number, workspacePath?: string): HealthToolDeps {
 }
 
 /** 单层视图断言助手：结果必须是 single 形态。 */
-async function runSingle(args: HealthArgs, deps: HealthToolDeps, exec: unknown = {}): Promise<SingleHealthResult> {
+async function runSingle(args: HealthArgs, deps: HealthToolDeps, exec: ToolRunContext = fakeExec()): Promise<SingleHealthResult> {
   const r = await executeHealth(args, deps, exec)
   if (r.kind !== 'single') throw new Error(`expected single, got ${r.kind}`)
   return r
@@ -292,7 +294,7 @@ describe('executeHealth 全库体检（scope=all）', () => {
     await deps.store.put(record({ id: 'mem_a1', scope: 'workspace', workspacePath: '/proj-a' }))
     await deps.store.put(record({ id: 'mem_a2', scope: 'workspace', workspacePath: '/proj-a' }))
     await deps.store.put(record({ id: 'mem_b1', scope: 'workspace', workspacePath: '/proj-b' }))
-    const r = await executeHealth({ scope: 'all' }, deps, {})
+    const r = await executeHealth({ scope: 'all' }, deps, fakeExec())
     if (r.kind !== 'checkup') throw new Error(r.kind)
     expect(r.rows.map(row => row.layer === 'global' ? 'global' : row.workspacePath)).toEqual(['global', '/proj-a', '/proj-b'])
     expect(r.rows[0].totalMemories).toBe(1)
@@ -309,7 +311,7 @@ describe('executeHealth 全库体检（scope=all）', () => {
     await deps.decisions.upsert({ memoryIds: ['mem_g1', 'mem_a'], summary: '' }, 500)
     await deps.decisions.upsert({ memoryIds: ['mem_g1', 'mem_b'], summary: '' }, 500)
     await deps.decisions.upsert({ memoryIds: ['mem_g2', 'mem_a'], summary: '' }, 500)
-    const r = await executeHealth({ scope: 'all' }, deps, {})
+    const r = await executeHealth({ scope: 'all' }, deps, fakeExec())
     if (r.kind !== 'checkup') throw new Error(r.kind)
     expect(r.crossLayerConflicts).toHaveLength(1)
     expect(r.crossLayerConflicts[0].globalId).toBe('mem_g1')
@@ -323,7 +325,7 @@ describe('executeHealth 全库体检（scope=all）', () => {
     await deps.store.put(record({ id: 'mem_c2', scope: 'workspace', workspacePath: '/proj-a', globalCandidate: true }))
     await deps.store.put(record({ id: 'mem_c3', scope: 'workspace', workspacePath: '/proj-b', globalCandidate: true }))
     await deps.store.put(record({ id: 'mem_n', scope: 'workspace', workspacePath: '/proj-b' }))
-    const r = await executeHealth({ scope: 'all' }, deps, {})
+    const r = await executeHealth({ scope: 'all' }, deps, fakeExec())
     if (r.kind !== 'checkup') throw new Error(r.kind)
     expect(r.promoteCandidates.total).toBe(3)
     expect(r.promoteCandidates.byWorkspace).toEqual([
@@ -367,7 +369,7 @@ describe('renderHealthResult', () => {
     await deps.store.put(record({ id: 'mem_b', scope: 'workspace', workspacePath: '/proj-b' }))
     await deps.decisions.upsert({ memoryIds: ['mem_g1', 'mem_a'], summary: '' }, 500)
     await deps.decisions.upsert({ memoryIds: ['mem_g1', 'mem_b'], summary: '' }, 500)
-    const r = await executeHealth({ scope: 'all' }, deps, {})
+    const r = await executeHealth({ scope: 'all' }, deps, fakeExec())
     if (r.kind !== 'checkup') throw new Error(r.kind)
     // 结构化事实：跨层冲突的 global id 与提升候选合计如实计算
     expect(r.crossLayerConflicts[0].globalId).toBe('mem_g1')
@@ -383,7 +385,7 @@ describe('renderHealthResult', () => {
   it('scope 传未知 workspace 值：报错列出合法路径，不静默算错层', async () => {
     const deps = makeDeps(1000, '/proj')
     await deps.store.put(record({ id: 'mem_w', scope: 'workspace', workspacePath: '/proj' }))
-    const r = await executeHealth({ scope: 'proj-8641b727' }, deps, {})
+    const r = await executeHealth({ scope: 'proj-8641b727' }, deps, fakeExec())
     expect(r.kind).toBe('error')
     const text = renderHealthResult(r)
     expect(text).toContain('proj-8641b727')
