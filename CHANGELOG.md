@@ -7,6 +7,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1-beta.1] - 2026-09-10
+
 ### Changed
 - Requires DeepSeek Harness v0.1.5-rc.2 or later. Earlier hosts lack the
   session APIs the plugin now depends on, so the plugin no longer loads on
