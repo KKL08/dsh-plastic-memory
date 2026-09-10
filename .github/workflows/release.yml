@@ -1,0 +1,53 @@
+name: release
+
+# Publishes the GitHub Release when a v* tag is pushed. Notes come from the
+# matching CHANGELOG section; a version with a pre-release suffix (-beta, -rc)
+# is marked as a pre-release. npm publishing stays manual.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Derive the version from the tag
+        id: v
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          case "$version" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - name: The tag matches package.json
+        run: |
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$pkg" != "${{ steps.v.outputs.version }}" ]; then
+            echo "tag ${{ steps.v.outputs.version }} does not match package.json $pkg"
+            exit 1
+          fi
+      - name: Extract the CHANGELOG section
+        run: |
+          awk -v head="## [${{ steps.v.outputs.version }}]" '
+            index($0, head) == 1 { flag = 1; next }
+            flag && /^## \[/ { exit }
+            flag { print }
+          ' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "no CHANGELOG entry for ${{ steps.v.outputs.version }}"
+            exit 1
+          fi
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "${{ steps.v.outputs.version }}" \
+            --notes-file notes.md \
+            --verify-tag \
+            ${{ steps.v.outputs.prerelease == 'true' && '--prerelease' || '' }}
