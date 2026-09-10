@@ -1,3 +1,4 @@
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryStore } from '../store.ts'
 import type { HealthRecommendationKind } from '../contract-codes.ts'
 import type { TypeRegistry } from '../type-registry.ts'
@@ -26,7 +27,7 @@ export interface HealthToolDeps {
   /** malformed 按文件路径归层需要根目录；缺省不归层。 */
   memoryRoot?: string
   /** 当前会话的 workspace（默认口径"当前项目"的来源）。 */
-  resolveContext: (exec: unknown) => Promise<{ workspacePath: string | undefined }>
+  resolveContext: (exec: ToolRunContext) => Promise<{ workspacePath: string | undefined }>
   now?: () => number
 }
 
@@ -139,7 +140,7 @@ export function renderHealthResult(result: HealthToolResult): string {
  * 默认口径=当前 workspace（占比分母是本项目规模，不被跨项目聚合稀释）；
  * scope='all' 输出各 workspace 分数表 + global 层（零成本，无需用户确认）。
  */
-export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, exec?: unknown): Promise<HealthToolResult> {
+export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, exec: ToolRunContext): Promise<HealthToolResult> {
   const args = rawArgs
   const now = deps.now?.() ?? Date.now()
   const th = deps.thresholds

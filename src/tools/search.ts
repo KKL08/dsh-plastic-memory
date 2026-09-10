@@ -1,3 +1,4 @@
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryStore } from '../store.ts'
 import type { SearchNoteCode } from '../contract-codes.ts'
 import { expandQueryTerms, matchScore } from '../text.ts'
@@ -15,7 +16,7 @@ export interface SearchContext {
 export interface SearchToolDeps {
   store: MemoryStore
   registry: TypeRegistry
-  resolveContext(exec: unknown): Promise<SearchContext>
+  resolveContext(exec: ToolRunContext): Promise<SearchContext>
 }
 
 export interface SearchArgs {
@@ -47,7 +48,7 @@ export function renderSearchResult(result: { hits: SearchHit[]; note?: string })
  */
 export async function executeSearch(
   args: SearchArgs,
-  exec: unknown,
+  exec: ToolRunContext,
   deps: SearchToolDeps,
 ): Promise<{ hits: SearchHit[]; note?: string; noteCode?: SearchNoteCode }> {
   const a = args

@@ -8,7 +8,11 @@ import { MemoryStore } from './store.ts'
 import { FileTable } from './storage/file-table.ts'
 import { resolveMemoryRoot } from './storage/paths.ts'
 import { formatIndexLine } from './index-line.ts'
-import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { Session } from '@deepseek-ai/dsh-session'
+// dsh-agent 的类型增广把 turnBoundary 键登记进投影状态表；stateOf(session, 'turnBoundary') 因此按宿主真实键表校验。
+import type {} from '@deepseek-ai/dsh-agent'
+import type { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import { createSaveTool } from './tools/save-tool.ts'
 import { createSearchTool } from './tools/search-tool.ts'
 import { createForgetTool } from './tools/forget-tool.ts'
@@ -95,7 +99,7 @@ export async function apply(ctx: Context, config: Config) {
   const decisions = new PendingDecisionsStore(domain.table('pending_decisions'))
   const snapshots = new SnapshotStore(domain.table('snapshots'))
   const scanCache = domain.table('scan_cache')
-  const baseline = new BaselineCache()
+  const baseline = new BaselineCache(message => ctx.logger.warn(message))
   // cwd → workspace 归属的单一解析路径：SnapshotCache 的 lazy 自愈与 session/created 的 eager 预热共用，
   // 避免两处各写一份 resolveWorkspacePath 调用。
   const resolveWorkspace = (session: object) => resolveWorkspacePath(ctx, (session as SessionLike).header?.cwd)
@@ -170,28 +174,47 @@ export async function apply(ctx: Context, config: Config) {
     }
   }
 
-  // 工具执行上下文：从 exec.agent.session 取 session 与 workspace（session.log 私有，用 events）
-  async function resolveContext(exec: unknown) {
-    const agent = (exec as { agent?: { session?: { header?: { id?: string; cwd?: string }; events?: unknown[] } } }).agent
-    const session = agent?.session
-    const events = (session?.events ?? []) as Array<{ type?: string; seq?: number }>
-    // 真锚 start：尾部回找最后一个 turn/start（触发本次保存的当轮），找不到兜底 0（整会话）
-    let turnStartSeq = 0
-    for (let i = events.length - 1; i >= 0; i--) {
-      if (events[i]?.type === 'turn/start') {
-        turnStartSeq = typeof events[i].seq === 'number' ? events[i].seq! : i
-        break
-      }
-    }
+  // 工具执行上下文：从 exec.agent.session 取 session 与 workspace。证据锚的两个数都走宿主
+  // 0.1.5 起的明码标价读法（Session 不再暴露整份事件数组）：终点 = session.seq - 1（seq 是下一条
+  // 事件的位置，O(1)）；起点 = agent-loop 注册的 turnBoundary 投影里的 openTurnStartSeq
+  // （当轮 turn/start 的 seq，宿主按事件增量折叠，不重扫日志）。
+  async function resolveContext(exec: ToolRunContext) {
+    const session = exec.agent?.session
     return {
-      workspacePath: await resolveWorkspacePath(ctx, session?.header?.cwd),
+      workspacePath: await resolveWorkspacePath(ctx, session?.header.cwd),
       session: {
-        id: session?.header?.id ?? 'unknown',
-        // 与 turnStartSeq 同口径优先取末事件的 seq，防宿主 seq 契约变化（现契约 seq === 下标）
-        lastSeq: typeof events[events.length - 1]?.seq === 'number' ? events[events.length - 1]!.seq! : Math.max(events.length - 1, 0),
-        turnStartSeq,
+        id: session?.header.id ?? 'unknown',
+        lastSeq: session ? Math.max(session.seq - 1, 0) : 0,
+        turnStartSeq: session ? openTurnStartSeq(session) : 0,
       },
     }
+  }
+
+  /** 当轮 turn/start 的 seq；拿不到一律 0（整会话锚）。sessionProjections 按调用经 ctx.get 探测
+   *  （与 llm、sessionQuery 同款惯例，不进 inject）。服务缺席（如 sdk-minimal 这类不带 agent-loop 的
+   *  profile）、投影未注册、工具执行时却没有开着的轮、投影读取抛错，都退回整会话锚——但退化不能悄无声息：
+   *  每个 session 第一次退化时打 warn 留痕（之后同一 session 不再重复）。 */
+  const anchorFallbackWarned = new WeakSet<Session>()
+  function openTurnStartSeq(session: Session): number {
+    let reason: string
+    try {
+      const projections = ctx.get('sessionProjections') as SessionProjectionRegistry | undefined
+      if (projections === undefined) {
+        reason = 'sessionProjections service is absent'
+      } else {
+        const turn = projections.stateOf(session, 'turnBoundary')
+        if (turn === undefined) reason = 'turnBoundary projection is not registered'
+        else if (typeof turn.openTurnStartSeq === 'number') return turn.openTurnStartSeq
+        else reason = `openTurnStartSeq is ${String(turn.openTurnStartSeq)} (no open turn)`
+      }
+    } catch (error) {
+      reason = `projection read threw: ${String(error)}`
+    }
+    if (!anchorFallbackWarned.has(session)) {
+      anchorFallbackWarned.add(session)
+      ctx.logger.warn(`turnBoundary projection unavailable for session "${session.header.id}", anchoring the whole session: ${reason}`)
+    }
+    return 0
   }
 
   ctx.tools.register(withRefresh(createSaveTool({ store, registry, resolveContext, snapshots })))
@@ -216,19 +239,13 @@ export async function apply(ctx: Context, config: Config) {
   if (config.governance.enabled) {
     ctx.tools.register(withRefresh(createConfirmTool({ store, decisions, snapshots })))
     // 基线按触发调用的 session 取（BaselineCache 按 session 隔离，防多会话串台）
-    const sessionOf = (exec: unknown): object | undefined =>
-      (exec as { agent?: { session?: object } } | undefined)?.agent?.session
+    const sessionOf = (exec: ToolRunContext) => exec.agent?.session
     ctx.tools.register(withRefresh(createScanTool({
       store, registry, decisions, cache: scanCache,
-      getBaseline: exec => baseline.get(sessionOf(exec) as (object & { events?: unknown[] }) | undefined),
+      getBaseline: exec => baseline.get(sessionOf(exec)),
       // exec → { session, agentOptions } 的小 helper：makeSemanticLlm 本体不再触碰 exec 形状。
       getLlm: exec => {
-        const agent = (exec as {
-          agent?: {
-            session?: { requestHeader?: () => { config?: { provider?: string; model?: string } } | undefined }
-            options?: { provider?: string; model?: string }
-          }
-        }).agent
+        const agent = exec.agent
         return makeSemanticLlm({ session: agent?.session, agentOptions: agent?.options })
       },
       getQuarantined: () => fileTable.quarantined(),
@@ -263,7 +280,7 @@ export async function apply(ctx: Context, config: Config) {
     void snapshotCache.awaitResolved(session)
   })
   lifecycle.on('session/event', (session, event) => {
-    // 基线已改按需从 session.events 推导（BaselineCache.get），不再观察 session/event；
+    // 基线已改按需从 session 日志增量折叠（BaselineCache.get），不再观察 session/event；
     // 本监听只留 compaction 失效——快照按 session 冻结，压缩结束后须重建。
     if (event.type === 'compaction/end') snapshotCache.invalidate(session)
   })

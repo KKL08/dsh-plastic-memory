@@ -1,4 +1,4 @@
-import type { JsonValue } from '@deepseek-ai/dsh-session'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 
 /**
  * 工具执行结果 → 宿主可无损序列化的 JsonValue。

@@ -5,7 +5,7 @@ import { record } from './helpers/record.ts'
 describe('buildSemanticPrompt', () => {
   it('user 部分含每条记忆的 id/content，有基线时包含基线内容', () => {
     const { system, user } = buildSemanticPrompt(
-      [record({ id: 'mem_a', content: '用 pnpm' })], 'AGENTS.md 内容：包管理用 npm')
+      [record({ id: 'mem_a', content: '用 pnpm' })], ['AGENTS.md 内容：包管理用 npm'])
     expect(user).toContain('mem_a')
     expect(user).toContain('用 pnpm')
     expect(user).toContain('包管理用 npm')
@@ -18,18 +18,30 @@ describe('buildSemanticPrompt', () => {
     expect(user).toContain('（无权威配置基线，跳过垂直冲突检测）')
   })
 
-  it('基线超长时截断到上限并追加说明行', () => {
-    const baseline = 'x'.repeat(BASELINE_MAX_CHARS + 500)
-    const { user } = buildSemanticPrompt([record({ id: 'mem_a' })], baseline)
-    expect(user).toContain('已截断，其余 500 字符未纳入垂直冲突检测')
-    expect(user).not.toContain('x'.repeat(BASELINE_MAX_CHARS + 1))
+  it('基线超预算时按整条消息从最新往前收，装不下的较早消息整条舍弃并说明', () => {
+    const stale = 'Instructions from: AGENTS.md\n\n包管理用 npm'.padEnd(BASELINE_MAX_CHARS, '。')
+    const fresh = 'Updated instructions from: AGENTS.md\n\n包管理用 pnpm'
+    const { user } = buildSemanticPrompt([record({ id: 'mem_a' })], [stale, fresh])
+    expect(user).toContain('较早的 1 条指令消息共 8000 字符未纳入垂直冲突检测')
+    expect(user).toContain(fresh)
+    expect(user).not.toContain('包管理用 npm')
   })
 
-  it('基线不超长时原样纳入，不带截断说明', () => {
-    const baseline = '包管理用 npm'.padEnd(BASELINE_MAX_CHARS, '。')
-    const { user } = buildSemanticPrompt([record({ id: 'mem_a' })], baseline)
-    expect(user).toContain(baseline)
-    expect(user).not.toContain('已截断')
+  it('最新一条消息自身超预算时只保留其开头（来源抬头在前），并说明截断', () => {
+    const huge = 'Instructions from: AGENTS.md\n\n' + 'x'.repeat(BASELINE_MAX_CHARS + 500)
+    const { user } = buildSemanticPrompt([record({ id: 'mem_a' })], ['更早的一条', huge])
+    expect(user).toContain('最新一条指令消息已截断末尾')
+    expect(user).toContain('Instructions from: AGENTS.md')
+    expect(user).not.toContain('x'.repeat(BASELINE_MAX_CHARS + 1))
+    expect(user).not.toContain('更早的一条')
+  })
+
+  it('基线不超预算时按顺序原样纳入，不带说明', () => {
+    const a = 'Instructions from: AGENTS.md\n\n包管理用 pnpm'
+    const b = 'Additional instructions from: pkg/AGENTS.md\n\n子包用 vitest'
+    const { user } = buildSemanticPrompt([record({ id: 'mem_a' })], [a, b])
+    expect(user).toContain(`${a}\n\n${b}`)
+    expect(user).not.toContain('基线过长')
   })
 })
 

@@ -1,8 +1,10 @@
 /**
  * R1 宿主契约检查：作为兄弟 cordis 插件挂进一个真实、全新安装的 dsh 宿主，经真实
- * `ctx.tools` 取 dsh-plastic-memory 的九个工具，用合成 exec（会话身份 + cwd）直调，
- * 断言宿主层面的契约：工具注册、输出深度无损 JSON、会话/工作目录解析、落盘布局、
- * 规则层/语义层 note 码、快照回路、提升候选 dismiss、证据锚悬空降级。
+ * `ctx.tools` 取 dsh-plastic-memory 的九个工具，用宿主真 Session（ctx.sessions.create，
+ * cwd 走创建选项）搭 exec 直调，断言宿主层面的契约：工具注册、输出深度无损 JSON、
+ * 会话/工作目录解析、落盘布局、规则层/语义层 note 码、快照回路、提升候选 dismiss、
+ * 证据锚悬空降级（H9a 把落盘记录的 sessionId 改成不存在的会话）、真会话下钻（H9b 读回原文）、
+ * 当轮锚来自宿主 turnBoundary 投影（H13）。
  * 有 DEEPSEEK_API_KEY 且宿主能选出默认模型时再跑语义扫描与取消两项，否则标 SKIPPED。
  * run.sh 随后用同一个 DSH_HOME 再起一次宿主（HOST_CONTRACT_PHASE=restart）：第一趟把
  * 恢复的记录 id 写进交接文件，第二趟只跑 H12，证明恢复结果过了进程重启仍可读。
@@ -12,25 +14,22 @@
 import { existsSync, readdirSync, readFileSync, mkdtempSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { snapshotJsonValue } from '@deepseek-ai/dsh-session'
+import { snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Context } from '@deepseek-ai/cordis'
 
 export const name = 'dsh-plastic-memory-host-contract'
-export const inject = ['tools']
+export const inject = ['tools', 'sessions']
 
 interface Outcome { id: string; ok: boolean; skipped?: boolean; detail: string }
-type Exec = { agent: { session: { header: { id: string; cwd?: string }; events: Array<{ type: string; seq: number }>; requestHeader: () => undefined }; options: { provider?: string; model?: string } }; signal: AbortSignal }
+type ModelOpts = { provider?: string; model?: string }
+type Exec = { agent: { session: unknown; options: ModelOpts }; signal: AbortSignal }
 type ToolDef = { execute(args: unknown, exec: unknown): Promise<unknown> }
 type Tools = { get(name: string): ToolDef | undefined; schemas(): Array<{ name: string }> }
-
-function mkExec(cwd: string | undefined, model: { provider?: string; model?: string } = {}, signal?: AbortSignal): Exec {
-  const header: { id: string; cwd?: string } = { id: `sess-${Math.random().toString(36).slice(2, 8)}` }
-  if (cwd !== undefined) header.cwd = cwd
-  return {
-    agent: { session: { header, events: [{ type: 'turn/start', seq: 0 }], requestHeader: () => undefined }, options: model },
-    signal: signal ?? new AbortController().signal,
-  }
-}
+/** 宿主 SessionStore 的最小契约：只用到 create（建真 Session，会话 id 由宿主分配）。 */
+type Sessions = { create(id?: string, options?: { meta?: { cwd?: string } }): SessionLike }
+/** 宿主 Session 的最小契约：resolveContext 读 header；H9b 用 append 落一条用户消息。 */
+type SessionLike = { header: { id: string; cwd?: string }; seq: number; append(type: string, data: unknown, opts?: unknown): { seq: number } }
 
 const MEMORY_BASE = { type: 'knowledge', scope: 'workspace', sourceMode: 'user-explicit', tags: [] as string[] }
 
@@ -60,19 +59,30 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       if (!def) throw new Error(`tool not found: ${tool}`)
       return def.execute(args, exec)
     }
+    const sessions = ctx.get('sessions') as Sessions | undefined
+    if (!sessions) throw new Error('sessions service unavailable after loader.await() — host boot incomplete')
+    // 宿主真 Session 搭 exec：cwd 走创建选项，会话 id 由宿主分配、live 可读（sessionQuery 优先读活会话）。
+    const mkExec = (cwd: string | undefined, model: ModelOpts = {}, signal?: AbortSignal): Exec => ({
+      agent: { session: sessions.create(undefined, cwd !== undefined ? { meta: { cwd } } : undefined), options: model },
+      signal: signal ?? new AbortController().signal,
+    })
     const home = process.env.DSH_HOME ?? ''
     const memoriesRoot = join(home, 'memories')
     const wsRoot = mkdtempSync(join(tmpdir(), 'pm-host-ws-'))
     const mkWs = (label: string) => { const d = join(wsRoot, label); mkdirSync(d, { recursive: true }); return realpathSync(d) }
-    const readMemoryFile = (id: string): string | undefined => {
+    const memoryFilePath = (id: string): string | undefined => {
       for (const d of readdirSync(memoriesRoot)) {
         for (const f of readdirSync(join(memoriesRoot, d))) {
           if (!f.endsWith('.md') || f === 'MEMORY.md') continue
-          const text = readFileSync(join(memoriesRoot, d, f), 'utf8')
-          if (text.includes(`id: ${id}`)) return text
+          const path = join(memoriesRoot, d, f)
+          if (readFileSync(path, 'utf8').includes(`id: ${id}`)) return path
         }
       }
       return undefined
+    }
+    const readMemoryFile = (id: string): string | undefined => {
+      const path = memoryFilePath(id)
+      return path === undefined ? undefined : readFileSync(path, 'utf8')
     }
 
     if (process.env.HOST_CONTRACT_PHASE === 'restart') {
@@ -184,13 +194,57 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       return { ok: r.record.scope === 'workspace' && r.record.globalCandidate === true && before.promoteCandidates === 1 && (p.dismissed ?? []).includes(r.record.id) && after.promoteCandidates === 0, detail: `scope=${r.record.scope} candidate=${r.record.globalCandidate} candidatesBefore=${before.promoteCandidates} dismissed=${JSON.stringify(p.dismissed)} candidatesAfter=${after.promoteCandidates}` }
     })
 
-    // H9 证据锚悬空（合成会话未持久化）→ memory_source 优雅降级不抛
-    await attempt('H9-SOURCE-DANGLING-ANCHOR', async () => {
-      const r = await call('memory_save', { action: 'create', name: 'anchor-probe', summary: '锚', content: '证据锚探针', ...MEMORY_BASE }, execA) as { kind: string; record?: { id: string } }
-      if (r.kind !== 'saved' || !r.record) return { ok: false, detail: `kind=${r.kind}` }
-      const s = await call('memory_source', { memoryId: r.record.id }, execA) as { kind: string; memoryId?: string; reason?: string }
-      // 记录存在但其合成会话不可读：必须是 unavailable（not-found/forbidden 都是别的分支），且带回同一 memoryId
-      return { ok: s.kind === 'unavailable' && s.memoryId === r.record.id && snapshotJsonValue(s) !== undefined, detail: `kind=${s.kind} memoryId=${s.memoryId} reason=${s.reason}` }
+    // H9a 证据锚悬空：记忆文件是用户可编辑的 markdown——真 Session 正常保存后，把磁盘上那条记录的
+    // sessionId 改成不存在的会话 id（下一次工具调用经 withRefresh 重读），memory_source 须优雅降级不抛
+    await attempt('H9a-SOURCE-DANGLING-ANCHOR', async () => {
+      const exec = mkExec(wsA)
+      const r = await call('memory_save', { action: 'create', name: 'dangling-probe', summary: '悬空锚', content: '指向不存在会话的证据锚', ...MEMORY_BASE }, exec) as { kind: string; record?: { id: string; source: { sessionId: string } } }
+      if (r.kind !== 'saved' || !r.record) return { ok: false, detail: `save kind=${r.kind}` }
+      const path = memoryFilePath(r.record.id)
+      if (path === undefined) return { ok: false, detail: `record file not found for ${r.record.id}` }
+      const dangling = `dangling-${Math.random().toString(36).slice(2, 8)}`
+      writeFileSync(path, readFileSync(path, 'utf8').replace(`sessionId: ${r.record.source.sessionId}`, `sessionId: ${dangling}`), 'utf8')
+      const s = await call('memory_source', { memoryId: r.record.id }, exec) as { kind: string; memoryId?: string; reason?: string }
+      // 记录存在但其会话 id 不在 store 也未持久化：readEvent 报无此会话，工具须降级 unavailable
+      // （not-found/forbidden 都是别的分支），且带回同一 memoryId
+      return { ok: s.kind === 'unavailable' && s.memoryId === r.record.id && (s.reason ?? '').includes(dangling) && snapshotJsonValue(s) !== undefined, detail: `kind=${s.kind} memoryId=${s.memoryId} reason=${s.reason}` }
+    })
+
+    // H9b 证据锚下钻真会话：真 Session 里落一条用户消息，保存后 memory_source 读回原文
+    await attempt('H9b-SOURCE-REAL-SESSION', async () => {
+      const exec = mkExec(wsA)
+      const session = exec.agent.session as SessionLike
+      const probe = 'H9b 用户原话：证据锚下钻要能读到这句原文'
+      session.append('user/message', createUserMessage({ content: [{ type: 'text', text: probe }], source: { kind: 'user' } }), { surfaceOp: 'append' })
+      const r = await call('memory_save', { action: 'create', name: 'real-anchor', summary: '真会话锚', content: '真会话证据锚探针', ...MEMORY_BASE }, exec) as { kind: string; record?: { id: string } }
+      if (r.kind !== 'saved' || !r.record) return { ok: false, detail: `save kind=${r.kind}` }
+      // 会话里没有 turn/start，锚起点退回 0（整会话），默认窗口从 0 向后开到 save 时刻，覆盖到用户消息。
+      const s = await call('memory_source', { memoryId: r.record.id }, exec) as { kind: string; memoryId?: string; sessionId?: string; lines?: string[] }
+      // 真 live 会话可读：成功分支下钻，且能在窗口里读到落进去的用户原文
+      const readOriginal = (s.lines ?? []).some(l => l.includes(probe))
+      return { ok: s.kind === 'ok' && s.memoryId === r.record.id && readOriginal && snapshotJsonValue(s) !== undefined, detail: `kind=${s.kind} sessionId=${s.sessionId} readOriginal=${readOriginal} lines=${JSON.stringify(s.lines)}` }
+    })
+
+    // H13 证据锚起点来自宿主 turnBoundary 投影：先开一轮并结束，再开第二轮，起点必须落在第二个
+    // turn/start（seq > 0，区分「投影正常」与「服务缺席退回 0」）；终点是 save 时刻的 session.seq - 1；
+    // 下钻从起点向后开窗，命中当轮用户原话。
+    await attempt('H13-ANCHOR-TURN-BOUNDARY', async () => {
+      const exec = mkExec(wsA)
+      const session = exec.agent.session as SessionLike
+      session.append('turn/start', { turn: 1 })
+      session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      const second = session.append('turn/start', { turn: 2 })
+      const probe = 'H13 当轮用户原话：证据锚起点必须落在第二轮'
+      session.append('user/message', createUserMessage({ content: [{ type: 'text', text: probe }], source: { kind: 'user' } }), { surfaceOp: 'append' })
+      const r = await call('memory_save', { action: 'create', name: 'turn-anchor', summary: '当轮锚', content: '当轮证据锚探针', ...MEMORY_BASE }, exec) as { kind: string; record?: { id: string; source: { eventRange: [number, number] } } }
+      if (r.kind !== 'saved' || !r.record) return { ok: false, detail: `save kind=${r.kind}` }
+      const [start, end] = r.record.source.eventRange
+      const s = await call('memory_source', { memoryId: r.record.id }, exec) as { kind: string; lines?: string[] }
+      const hit = (s.lines ?? []).some(l => l.includes(probe))
+      return {
+        ok: second.seq > 0 && start === second.seq && end === session.seq - 1 && s.kind === 'ok' && hit,
+        detail: `eventRange=[${start},${end}] secondTurnStart=${second.seq} sessionSeq=${session.seq} source=${s.kind} hit=${hit}`,
+      }
     })
 
     // 语义层两项：需要凭证 + 宿主可选默认模型

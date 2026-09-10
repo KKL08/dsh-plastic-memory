@@ -3,3 +3,9 @@ packages:
 
 allowBuilds:
   esbuild: true
+
+# Host packages are pinned to exact versions in devDependencies and a host
+# release is only usable here after its packages exist, so they are exempt from
+# pnpm's minimum release age (which otherwise rejects a fresh host for 24h).
+minimumReleaseAgeExclude:
+  - '@deepseek-ai/*'
