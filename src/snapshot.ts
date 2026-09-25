@@ -8,6 +8,18 @@ import { stalenessNote, withinValidity } from './record-freshness.ts'
 
 export const COLD_START_TEXT = `记忆库当前为空。如果时机合适，可以问一句用户是否愿意介绍自己的背景（角色、常用技术、工作习惯），愿意就用 memory_save 记下来；不愿意就在后续任务中自然积累，不要追问。`
 
+/** 提示词变量名：apply() 注册它、值为 '{{'，快照出口把 `{{` 转义成对它的引用。 */
+export const PROMPT_LBRACE_VARIABLE = 'plastic_memory_lbrace'
+
+/**
+ * 宿主渲染 context 时把 `{{名字}}` 当变量插值，不合法或未注册就抛错，而记忆正文可能含
+ * `${{ secrets.X }}`、`{{ msg }}`。把每个 `{{`（从左到右、不重叠）换成对 PROMPT_LBRACE_VARIABLE
+ * 的引用：宿主单遍插值、替换值不重扫，渲染结果逐字等于原文。
+ */
+export function escapePromptBraces(text: string): string {
+  return text.replaceAll('{{', `{{${PROMPT_LBRACE_VARIABLE}}}`)
+}
+
 /** 粗略 token 估算：中文字 ×1.5，其余按空白分词 ×1.3。预算是软约束，够用即可。 */
 export function estimateTokens(text: string): number {
   const cjk = (text.match(/[一-鿿]/g) ?? []).length

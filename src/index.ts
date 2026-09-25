@@ -26,6 +26,7 @@ import { createSnapshotTool } from './tools/snapshot-tool.ts'
 import { createSourceTool } from './tools/source-tool.ts'
 import type { ReadEventFn } from './tools/source.ts'
 import { SnapshotCache, resolveWorkspacePath } from './runtime.ts'
+import { PROMPT_LBRACE_VARIABLE } from './snapshot.ts'
 import { resolveHealthThresholds, type HealthSensitivity } from './governance/health-presets.ts'
 import { PendingDecisionsStore } from './governance/decisions.ts'
 import { SnapshotStore } from './governance/snapshots.ts'
@@ -297,6 +298,9 @@ export async function apply(ctx: Context, config: Config) {
     }
     return next()
   })
+  // 宿主对 context 文本做 {{变量}} 插值、没有关闭选项，记忆正文又是用户可控内容：
+  // 快照出口把 {{ 转义成对这个变量的引用，由宿主插值还原（见 snapshot.ts escapePromptBraces）。
+  ctx.systemPrompt.variable(PROMPT_LBRACE_VARIABLE, () => '{{')
   ctx.systemPrompt.context({
     name: 'plastic-memory',
     order: 50,

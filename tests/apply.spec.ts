@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -14,10 +14,20 @@ import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { TypeRegistryError } from '../src/errors.ts'
 import { buildSemanticPrompt } from '../src/governance/semantic-scan.ts'
 import { record } from './helpers/record.ts'
+import { renderViaHost } from './helpers/render-via-host.ts'
+import { PROMPT_LBRACE_VARIABLE, assembleSnapshot } from '../src/snapshot.ts'
+import { FileTable } from '../src/storage/file-table.ts'
+import { MemoryStore } from '../src/store.ts'
+import { WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
+import { buildTypeRegistry } from '../src/type-registry.ts'
+import type { AssembleContext, PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 
 function mockCtx() {
   const registered: string[] = []
   const contexts: string[] = []
+  // 完整的 context 注册对象（含 text provider）与提示词变量，供转义接线用例取用
+  const contextDefs: Array<{ name: string; order: number; text: (assembleCtx?: AssembleContext) => string }> = []
+  const variables = new Map<string, (assembleCtx: AssembleContext) => string | undefined>()
   const listeners = new Map<string, (...args: unknown[]) => unknown>()
   // 假 llm：记下每次 stream 收到的请求对象，回一段语义扫描能解析的空结果。
   const llmRequests: Array<{ messages: unknown[] }> = []
@@ -28,9 +38,12 @@ function mockCtx() {
     },
   }
   return {
-    registered, contexts, listeners, llmRequests,
+    registered, contexts, contextDefs, variables, listeners, llmRequests,
     tools: { register: (def: { name: string }) => { registered.push(def.name); return () => {} } },
-    systemPrompt: { context: (c: { name: string }) => { contexts.push(c.name); return () => {} } },
+    systemPrompt: {
+      context: (c: (typeof contextDefs)[number]) => { contexts.push(c.name); contextDefs.push(c); return () => {} },
+      variable: (name: string, provider: (assembleCtx: AssembleContext) => string | undefined) => { variables.set(name, provider); return () => {} },
+    },
     storageDomain: {
       open: async () => ({
         table: () => new InMemoryTable(),
@@ -158,6 +171,68 @@ describe('apply', () => {
     // 钉住 root 真的来自 config 且 load 跑到了 regenerateIndexes：空库也会落出
     // global/MEMORY.md。若 resolveMemoryRoot 漏传 config 落到默认值，这里 stat 必抛。
     expect((await stat(join(memoryRoot, 'global', INDEX_FILE))).isFile()).toBe(true)
+  })
+})
+
+/**
+ * 宿主对 context 文本做 {{变量}} 插值且没有关闭选项，记忆正文是用户可控内容：apply() 注册
+ * 左花括号变量，快照出口把 {{ 转义成对它的引用。这里验证接线：变量注册了，且 assemble
+ * 中间件覆写后的文本经宿主真实渲染还原为原文快照。
+ */
+describe('快照 {{ 转义接线', () => {
+  it('apply 注册 plastic_memory_lbrace 变量，provider 返回 {{', async () => {
+    const ctx = mockCtx()
+    const memoryRoot = await makeTmpRoot()
+    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    const provider = ctx.variables.get(PROMPT_LBRACE_VARIABLE)
+    expect(provider).toBeDefined()
+    expect(provider!({})).toBe('{{')
+  })
+
+  it('system-prompt/assemble 中间件覆写的文本经宿主渲染还原为原文快照（含 {{ 的工作区记忆逐字保留）', async () => {
+    const memoryRoot = await makeTmpRoot()
+    const cwd = await makeTmpRoot() // resolveWorkspacePath 走 realpath，cwd 须真实存在
+    const workspacePath = await realpath(cwd) // 无 workspaceRegistry 时规范化 cwd 即目录桶
+    const content = 'Vue 模板写 {{ msg }}'
+    const wsDir = join(memoryRoot, workspaceDirName(workspacePath))
+    await mkdir(wsDir, { recursive: true })
+    await writeFile(join(wsDir, WORKSPACE_MARKER), workspacePath, 'utf8')
+    const now = Date.now()
+    await writeFile(join(wsDir, 'vue.md'), encodeRecord(record({
+      id: 'mem_vue', type: 'preference', scope: 'workspace', workspacePath, content,
+      createdAt: now, updatedAt: now, lastConfirmedAt: now,
+    }), {}), 'utf8')
+
+    const ctx = mockCtx()
+    const config = new Config({ memoryRoot } as unknown as Config)
+    await apply(ctx as never, config)
+
+    const session = { header: { id: 'sess-1', cwd } }
+    const assembleCtx = { scope: { session } } as unknown as AssembleContext
+    const def = ctx.contextDefs.find(c => c.name === 'plastic-memory')!
+    const assembly: PromptAssembly = {
+      sections: [],
+      contexts: [{ name: 'plastic-memory', text: def.text(assembleCtx) }],
+      tools: [],
+      variables: {},
+    }
+    const middleware = ctx.listeners.get('system-prompt/assemble')!
+    await middleware(assembly, assembleCtx, async () => assembly)
+    const text = assembly.contexts[0]!.text
+
+    // 期望原文：同一份磁盘记忆、同一组参数独立组装一次快照
+    const fileTable = new FileTable({ root: memoryRoot, stats: new InMemoryTable() })
+    await fileTable.load()
+    const expected = assembleSnapshot({
+      store: new MemoryStore(fileTable), registry: buildTypeRegistry(config),
+      workspacePath, budget: config.snapshotTokenBudget, now: Date.now(),
+      memoryRoot, evidenceLookup: config.evidenceLookup,
+    }).text
+    expect(expected).toContain(content)
+    expect(text.replaceAll(`{{${PROMPT_LBRACE_VARIABLE}}}`, '')).not.toContain('{{')
+    const rendered = renderViaHost(text)
+    expect(rendered).toBe(expected)
+    expect(rendered).toContain(content)
   })
 })
 

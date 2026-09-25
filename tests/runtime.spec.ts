@@ -5,9 +5,10 @@ import { join } from 'node:path'
 import { SnapshotCache, resolveWorkspacePath } from '../src/runtime.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
-import { COLD_START_TEXT } from '../src/snapshot.ts'
+import { COLD_START_TEXT, PROMPT_LBRACE_VARIABLE, assembleSnapshot } from '../src/snapshot.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
+import { renderViaHost } from './helpers/render-via-host.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 
@@ -192,6 +193,44 @@ describe('SnapshotCache', () => {
     expect(cache.render(a)).toBe(COLD_START_TEXT)
     // b 未解析 workspace，独立走兜底，不受 a 影响
     expect(cache.render(b)).toBe(COLD_START_TEXT)
+  })
+})
+
+// render 的三个返回点（兜底、完整组装、缓存命中）加 invalidate 重建，出口文本都要转义且只转义一次。
+// 判据用宿主真实渲染往返：转义文本经宿主插值还原后逐字等于 assembleSnapshot 的原文。
+describe('SnapshotCache.render 出口转义 {{', () => {
+  it('兜底 → 完整 → 命中 → 失效重建，四步都经宿主还原为原文，召回只计一次', async () => {
+    const { store, cache } = makeCache()
+    const spy = vi.spyOn(store, 'markRecalled')
+    await store.put(record({ id: 'mem_vue', type: 'preference', content: 'Vue 模板写 {{ msg }}' }))
+    await store.put(record({ id: 'mem_lit', type: 'preference', content: `字面 {{${PROMPT_LBRACE_VARIABLE}}} 探测二次转义` }))
+    await store.put(record({ id: 'mem_ci', type: 'preference', scope: 'workspace', workspacePath: '/repo', content: 'CI 用 ${{ secrets.NPM_TOKEN }}' }))
+    const raw = (workspacePath: string | undefined) =>
+      assembleSnapshot({ store, registry, budget: 4000, workspacePath, now: Date.now() }).text
+    const session = {}
+
+    // ① workspace 未解析：global-only 兜底
+    const fallback = cache.render(session)
+    const fallbackRaw = raw(undefined)
+    expect(fallbackRaw).toContain('{{ msg }}')
+    expect(fallback).not.toBe(fallbackRaw)
+    expect(renderViaHost(fallback)).toBe(fallbackRaw)
+
+    // ② 解析落定：完整组装并写缓存
+    cache.setWorkspacePath(session, '/repo')
+    const full = cache.render(session)
+    const fullRaw = raw('/repo')
+    expect(fullRaw).toContain('${{ secrets.NPM_TOKEN }}')
+    expect(renderViaHost(full)).toBe(fullRaw)
+
+    // ③ 缓存命中：与 ② 逐字相同（仍是转义后的文本，不是缓存里的原文）
+    expect(cache.render(session)).toBe(full)
+
+    // ④ 失效重建：仍经宿主还原为原文
+    cache.invalidate(session)
+    expect(renderViaHost(cache.render(session))).toBe(fullRaw)
+
+    expect(spy).toHaveBeenCalledTimes(1)
   })
 })
 
