@@ -7,10 +7,13 @@
  * 当轮锚来自宿主 turnBoundary 投影（H13）。
  * 有 DEEPSEEK_API_KEY 且宿主能选出默认模型时再跑语义扫描与取消两项，否则标 SKIPPED。
  * run.sh 随后用同一个 DSH_HOME 再起一次宿主（HOST_CONTRACT_PHASE=restart）：第一趟把
- * 恢复的记录 id 写进交接文件，第二趟只跑 H12，证明恢复结果过了进程重启仍可读。
+ * 恢复的记录 id 写进交接文件，第二趟跑 H12，证明恢复结果过了进程重启仍可读；H14 第一趟建持久化会话、
+ * 写入完整 AGENTS.md 基线，第二趟照宿主恢复配方重开，证明基线投影过了重启仍在。
  *
  * 只用可擦除的 TypeScript 语法（engines 要求的 Node 22.19+/24 原生 strip-types 直接加载，不需要构建）。
  */
+// H14 构造 agent-instructions 来源的消息，需要该包对 MessageSourceMap 的类型增广（纯类型引用，无运行时导入）
+/// <reference types="@deepseek-ai/dsh-agent-instructions" />
 import { existsSync, readdirSync, readFileSync, mkdtempSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -33,8 +36,42 @@ type SessionLike = { header: { id: string; cwd?: string }; seq: number; append(t
 
 const MEMORY_BASE = { type: 'knowledge', scope: 'workspace', sourceMode: 'user-explicit', tags: [] as string[] }
 
-/** 第一趟写、第二趟读的交接内容：重启后要重新读取的记录与它所属的 workspace。 */
-interface Handoff { savedId: string; wsA: string; snapshotId: string | undefined }
+/** H14 用到的宿主会话持久化最小契约（照 agent-loop 的建会话/恢复配方：prepare → create 句柄 → enter + announce；
+ *  恢复是 open + read(0) → prepare(seed) → enter + announce）。 */
+type SessionHeaderLike = { id: string; cwd?: string }
+type StoredHandle = {
+  header: SessionHeaderLike
+  inheritedEventCount: number
+  read(offset?: number): Promise<{ events: readonly unknown[]; eventState: string }>
+  close(): Promise<void>
+}
+type Persistence = {
+  create(header: SessionHeaderLike, options?: { inheritedEventCount?: number }): Promise<StoredHandle>
+  open(id: string, access: 'read' | 'write'): Promise<StoredHandle>
+}
+type PreparedSession = SessionLike & { id: string; inheritedEventCount: number }
+type SessionPhases = {
+  prepare(id: string, options: { meta?: unknown; seed?: readonly unknown[]; inheritedEventCount?: number; eventState?: string }): PreparedSession
+  enter(session: PreparedSession): () => void
+  announce(session: PreparedSession): void
+}
+type Projections = {
+  checkpoint(session: PreparedSession): Record<string, { ver: number; seq: number; val: unknown } | undefined>
+  stateOf(session: PreparedSession, key: string): unknown
+}
+type ProjectionCache = { write(session: PreparedSession): Promise<void> }
+
+/** 插件基线投影的键与 stateVersion（与 src/governance/baseline.ts 的定义同步，递增时这里跟着改）。 */
+const BASELINE_KEY = 'plasticMemoryBaseline'
+const BASELINE_STATE_VERSION = 1
+/** H14 完整基线消息的正文：投影状态与重启后的 stateOf 里都要能找到它。 */
+const H14_PROBE = 'H14 基线探针：重启宿主后 AGENTS.md 基线必须仍在投影里'
+
+/** H14 第一趟的结论随交接文件带到第二趟，由第二趟合成一条结果（整条用例只出一行）。 */
+interface H14Handoff { ok: boolean; skipped?: boolean; detail: string; sessionId?: string }
+
+/** 第一趟写、第二趟读的交接内容：重启后要重新读取的记录与它所属的 workspace；H14 第一趟的结论与会话 id。 */
+interface Handoff { savedId: string; wsA: string; snapshotId: string | undefined; h14: H14Handoff | undefined }
 
 async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
   const outcomes: Outcome[] = []
@@ -85,6 +122,23 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       return path === undefined ? undefined : readFileSync(path, 'utf8')
     }
 
+    // H14 的宿主服务按需探测，不进 inject（进了就是硬依赖，缺一个整个契约插件起不来）：缺持久化或投影时该用例标 SKIPPED，
+    // 缺 checkpoint 缓存只在 detail 里注明（这条证明端到端存活，不依赖 checkpoint 被消费）。
+    const phases = sessions as unknown as SessionPhases
+    const h14Services = (): { persistence: Persistence; projections: Projections; cache: ProjectionCache | undefined } | string => {
+      const persistence = ctx.get('sessionPersistence') as Persistence | undefined
+      const projections = ctx.get('sessionProjections') as Projections | undefined
+      if (persistence && projections) return { persistence, projections, cache: ctx.get('sessionProjectionCache') as ProjectionCache | undefined }
+      return `SKIPPED: 宿主缺 ${[persistence ? '' : 'sessionPersistence', projections ? '' : 'sessionProjections'].filter(Boolean).join(',')}`
+    }
+    const hasProbe = (state: unknown) => ((state as { entries?: Array<{ text: string }> } | undefined)?.entries ?? []).some(e => e.text.includes(H14_PROBE))
+    /** 全库体检（无 key 也跑）：只看它带不带 baseline-missing。 */
+    const checkupBaseline = async (session: PreparedSession) => {
+      const exec: Exec = { agent: { session, options: {} }, signal: new AbortController().signal }
+      const r = await call('memory_scan', { scope: 'all' }, exec) as { kind: string; notes?: Array<{ code: string }> }
+      return { kind: r.kind, missing: (r.notes ?? []).some(n => n.code === 'baseline-missing') }
+    }
+
     if (process.env.HOST_CONTRACT_PHASE === 'restart') {
       // 第二趟：同一 DSH_HOME 的全新宿主进程。第一趟 H7 恢复过的记录必须从磁盘重新加载出来，
       // 可检索、active，且快照（KV 后端）也过了重启——内存态在这里不存在，只能靠持久化。
@@ -98,6 +152,31 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
         const shown = await call('memory_snapshot', { action: 'show', snapshotId: handoff.snapshotId }, exec) as { kind: string; entries?: Array<{ id: string }> }
         const snapshotKept = shown.kind === 'shown' && (shown.entries ?? []).some(e => e.id === handoff.savedId)
         return { ok: searchable && activeOnDisk && snapshotKept, detail: `restarted host: searchable=${searchable} activeOnDisk=${activeOnDisk} snapshotKept=${snapshotKept} (snap=${handoff.snapshotId})` }
+      })
+      // H14 第二趟：按宿主恢复配方重开第一趟持久化的会话（open read → read(0) → prepare(seed) → enter + announce），
+      // 投影里基线仍在、checkup 不带 baseline-missing。证明的是端到端存活，不是 checkpoint 被消费（恢复读全量日志）。
+      // 第一趟的结论经交接文件带过来，整条用例在这里只出一行。
+      await attempt('H14-BASELINE-SURVIVES-RESTART', async () => {
+        const first = handoff.h14
+        if (first === undefined) return { ok: false, detail: '第一趟没有留下 H14 结论' }
+        if (!first.ok || first.skipped === true || first.sessionId === undefined) return { ok: first.ok, skipped: first.skipped, detail: `phase1: ${first.detail}` }
+        const svc = h14Services()
+        if (typeof svc === 'string') return { ok: true, skipped: true, detail: `phase1: ${first.detail} | restart: ${svc}` }
+        const handle = await svc.persistence.open(first.sessionId, 'read')
+        const cold = await handle.read(0).finally(() => handle.close())
+        const session = phases.prepare(first.sessionId, { seed: cold.events, meta: structuredClone(handle.header), inheritedEventCount: handle.inheritedEventCount, eventState: cold.eventState })
+        const detach = phases.enter(session)
+        try {
+          phases.announce(session)
+          const restored = hasProbe(svc.projections.stateOf(session, BASELINE_KEY))
+          const scan = await checkupBaseline(session)
+          return {
+            ok: restored && scan.kind === 'checkup' && !scan.missing,
+            detail: `phase1: ${first.detail} | restart: reopened events=${cold.events.length} eventState=${cold.eventState} stateOf.hasBaseline=${restored} checkup=${scan.kind} baselineMissing=${scan.missing}`,
+          }
+        } finally {
+          detach()
+        }
       })
       finish()
       return
@@ -247,6 +326,44 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       }
     })
 
+    // H14 第一趟：照 agent-loop 的建会话配方造一个持久化的真会话（prepare → create 写句柄 → enter + announce，
+    // 之后事件由后端按 session id 路由进句柄），追加一条 agent-instructions 完整基线消息。对照：追加前 checkup 带
+    // baseline-missing；追加后不带，checkpoint 行 ver 对、val 含正文；落 checkpoint、关句柄。结论不单独出行，
+    // 随交接文件交给第二趟合成 H14 一条结果。
+    const h14 = await (async (): Promise<H14Handoff> => {
+      const svc = h14Services()
+      if (typeof svc === 'string') return { ok: true, skipped: true, detail: svc }
+      const session = phases.prepare(`h14-${Math.random().toString(36).slice(2, 8)}`, { meta: { cwd: mkWs('h14') } })
+      const handle = await svc.persistence.create(session.header, { inheritedEventCount: session.inheritedEventCount })
+      const detach = phases.enter(session)
+      try {
+        phases.announce(session)
+        const before = await checkupBaseline(session)
+        // 形状照宿主 agent-instructions 的完整基线：user-global 与项目根两个 scope（目录 + NUL + 文件名）
+        const appended = session.append('user/message', createUserMessage({
+          content: [{ type: 'text', text: H14_PROBE }],
+          source: {
+            kind: 'agent-instructions', form: 'instructions', baseline: true,
+            changes: [
+              { action: 'set', scope: 'user-global\u0000AGENTS.md', path: '~/.dsh/AGENTS.md' },
+              { action: 'set', scope: '.\u0000AGENTS.md', path: 'AGENTS.md' },
+            ],
+          },
+        }), { surfaceOp: 'append' })
+        const after = await checkupBaseline(session)
+        const row = svc.projections.checkpoint(session)[BASELINE_KEY]
+        const inRow = row !== undefined && hasProbe(row.val)
+        if (svc.cache) await svc.cache.write(session)
+        return {
+          ok: before.missing && after.kind === 'checkup' && !after.missing && row?.ver === BASELINE_STATE_VERSION && inRow,
+          detail: `session=${session.id} baselineSeq=${appended.seq} checkup baselineMissing before=${before.missing} after=${after.missing} row.ver=${row?.ver} row.seq=${row?.seq} row.hasBaseline=${inRow} checkpointCache=${svc.cache ? 'written' : 'absent'}`,
+          sessionId: session.id,
+        }
+      } finally {
+        try { await handle.close() } finally { detach() }
+      }
+    })().catch((e: unknown): H14Handoff => ({ ok: false, detail: `异常: ${e instanceof Error ? e.stack ?? e.message : String(e)}` }))
+
     // 语义层两项：需要凭证 + 宿主可选默认模型
     let sel: { provider?: string; model?: string } = {}
     try {
@@ -285,7 +402,7 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       return { ok: r.kind === 'single' && typeof r.semanticCachedAt === 'number' && !codes.includes('semantic-failed') && !codes.includes('semantic-unavailable'), detail: `kind=${r.kind} cachedAt=${r.semanticCachedAt} notes=${codes.join(',')}` }
     })
     // 交接给第二趟（重启验证）：恢复过的记录 id、它的 workspace、H7 拍的快照 id
-    if (handoffPath) writeFileSync(handoffPath, JSON.stringify({ savedId, wsA, snapshotId } satisfies Handoff))
+    if (handoffPath) writeFileSync(handoffPath, JSON.stringify({ savedId, wsA, snapshotId, h14 } satisfies Handoff))
   } catch (e) {
     push({ id: 'FATAL', ok: false, detail: `顶层异常: ${e instanceof Error ? e.stack : String(e)}` })
   }
