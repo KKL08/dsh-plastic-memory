@@ -26,6 +26,10 @@ All notable changes to this project are documented here. The format follows
   its way into the prompt and restored by the host, so the model sees it byte
   for byte. All earlier releases are affected; if you cannot upgrade yet,
   remove or edit the offending memory file under `~/.dsh/memories/`.
+- A semantic scan whose LLM stream broke off after the model had already
+  produced a complete answer was recorded as a clean scan, replacing earlier
+  cached findings with an empty result. Such a scan now reports
+  `semantic-failed` and leaves the cache as it was.
 
 ## [0.1.1-beta.1] - 2026-09-10
 
