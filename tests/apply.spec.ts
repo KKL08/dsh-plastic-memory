@@ -12,14 +12,23 @@ import { InMemoryTable } from '../src/store.ts'
 import { INDEX_FILE } from '../src/storage/paths.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { TypeRegistryError } from '../src/errors.ts'
+import { buildSemanticPrompt } from '../src/governance/semantic-scan.ts'
 import { record } from './helpers/record.ts'
 
 function mockCtx() {
   const registered: string[] = []
   const contexts: string[] = []
   const listeners = new Map<string, (...args: unknown[]) => unknown>()
+  // 假 llm：记下每次 stream 收到的请求对象，回一段语义扫描能解析的空结果。
+  const llmRequests: Array<{ messages: unknown[] }> = []
+  const llm = {
+    async *stream(req: { messages: unknown[] }) {
+      llmRequests.push(req)
+      yield { type: 'text-delta', text: '{"findings":[]}' }
+    },
+  }
   return {
-    registered, contexts, listeners,
+    registered, contexts, listeners, llmRequests,
     tools: { register: (def: { name: string }) => { registered.push(def.name); return () => {} } },
     systemPrompt: { context: (c: { name: string }) => { contexts.push(c.name); return () => {} } },
     storageDomain: {
@@ -30,10 +39,9 @@ function mockCtx() {
     },
     on: (event: string, fn: (...args: unknown[]) => unknown) => { listeners.set(event, fn); return () => {} },
     effect: (fn: () => unknown) => { fn() },
-    // resolveWorkspacePath 的 ctx.get('workspaceRegistry') 和 makeSemanticLlm 的
-    // ctx.get('llm') 共用这个 stub：两者都拿 undefined，前者判无 workspace 插件，
-    // 后者判语义层不可用——这里不模拟 cordis proxy 对未知服务名的抛错行为。
-    get: () => undefined,
+    // 按服务名分发：'llm' 给上面的假 llm；其余（如 resolveWorkspacePath 的 workspaceRegistry）
+    // 一律 undefined，判为服务缺席——这里不模拟 cordis proxy 对未知服务名的抛错行为。
+    get: (name: string) => (name === 'llm' ? llm : undefined),
   }
 }
 
@@ -98,7 +106,7 @@ describe('apply', () => {
 
   it('Fix 1 回归：ctx.get 对任意服务名抛错也不拖垮插件加载，九个工具照常注册', async () => {
     // 真实 cordis 的 Context 是 proxy：对未 inject 的服务名走属性访问会抛错，且不会退化为
-    // undefined。mockCtx() 的 get() 简单返回 undefined，测不出这种抛错——这里用会抛错的
+    // undefined。mockCtx() 的 get() 对未知服务名返回 undefined，测不出这种抛错——这里用会抛错的
     // get() 逼近 cordis 行为，钉住"服务解析失败/抛错不能让 apply() 整体失败"这条回归。
     const ctx = mockCtxWithThrowingGet()
     const memoryRoot = await makeTmpRoot()
@@ -150,6 +158,41 @@ describe('apply', () => {
     // 钉住 root 真的来自 config 且 load 跑到了 regenerateIndexes：空库也会落出
     // global/MEMORY.md。若 resolveMemoryRoot 漏传 config 落到默认值，这里 stat 必抛。
     expect((await stat(join(memoryRoot, 'global', INDEX_FILE))).isFile()).toBe(true)
+  })
+})
+
+/**
+ * 语义扫描发给宿主 llm 的请求形状：只发一次、不进会话的辅助请求用宿主的 RequestUserInput
+ * （只有 role + content，没有 id/source）。exec 里的假 agent 带 options.provider/model，
+ * makeSemanticLlm 走三层解析的第二层拿到路由，才会真的调 stream。
+ */
+describe('语义扫描请求形状', () => {
+  it('memory_scan 语义层发出的 messages[0] 是 RequestUserInput：只有 role 与 content', async () => {
+    type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
+    const defs = new Map<string, ToolDef>()
+    const base = mockCtx()
+    const ctx = {
+      ...base,
+      tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
+      logger: { info() {}, warn() {}, error() {} },
+    }
+    const memoryRoot = await makeTmpRoot()
+    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    const cwd = await makeTmpRoot()
+    const session = { header: { id: 'sess-1', cwd }, seq: 0, requestHeader: () => undefined }
+    const exec = fakeExec({
+      agent: { session, options: { provider: 'deepseek', model: 'deepseek-chat' } } as unknown as ToolRunContext['agent'],
+    })
+    await defs.get('memory_scan')!.execute({ layers: 'semantic' }, exec)
+
+    expect(base.llmRequests).toHaveLength(1)
+    const [request] = base.llmRequests
+    expect(request).toMatchObject({ provider: 'deepseek', model: 'deepseek-chat' })
+    const msg = request!.messages[0]
+    const { user } = buildSemanticPrompt([], null)
+    expect(msg).toEqual({ role: 'user', content: [{ type: 'text', text: user }] })
+    expect(msg).not.toHaveProperty('id')
+    expect(msg).not.toHaveProperty('source')
   })
 })
 

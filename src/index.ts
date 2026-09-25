@@ -31,7 +31,7 @@ import { PendingDecisionsStore } from './governance/decisions.ts'
 import { SnapshotStore } from './governance/snapshots.ts'
 import { BaselineCache } from './governance/baseline.ts'
 import type { SemanticLlm } from './governance/semantic-scan.ts'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 
 export interface Config {
   // reflective（会话结束/空闲时批量提取）是规划中的第二写入模式；实现时再回 schema 加回该取值
@@ -127,8 +127,9 @@ export async function apply(ctx: Context, config: Config) {
   //   2) StreamChunk 是判别联合，text-delta 和 reasoning-delta 都带 .text——开启推理时
   //      （本环境 DeepSeek-V4-Flash High effort）若不按 type 过滤会把思维链拼进输出，导致 JSON 解析失败。
   //      只累加 type === 'text-delta' 的 chunk。
-  //   3) Message 需要 id/role/content/source 四个字段，content 是 ContentBlock[] 而非字符串，
-  //      用真实构造函数 createUserMessage 生成，避免手搭形状不符的假消息。
+  //   3) 只发一次、不进会话的辅助请求用宿主的 RequestUserInput：只有 role 与 content（ContentBlock[]），
+  //      没有 id/source——宿主 0.1.7 起 Auto Review 与 compaction 摘要器同款。请求对象标注为
+  //      GenerateOptions，形状由编译器校验。
   const makeSemanticLlm = (input: {
     session?: { requestHeader?: () => { config?: { provider?: string; model?: string } } | undefined }
     agentOptions?: { provider?: string; model?: string }
@@ -139,7 +140,7 @@ export async function apply(ctx: Context, config: Config) {
     const model = routed?.model ?? input.agentOptions?.model
     if (!provider || !model) return null
 
-    let llm: { stream?: (req: object) => AsyncIterable<{ type: string; text?: string }> } | undefined
+    let llm: { stream?: (req: GenerateOptions) => AsyncIterable<{ type: string; text?: string }> } | undefined
     try {
       llm = ctx.get('llm') as typeof llm
     } catch {
@@ -155,16 +156,14 @@ export async function apply(ctx: Context, config: Config) {
         // stream 建立或迭代过程中抛出的错误按 rejected promise 向上传播，
         // 由 runSemanticScan 的调用点捕获降级，这里不吞掉。
         // signal 透传给宿主 GenerateOptions，让在途请求随取消中断。
-        for await (const chunk of llm.stream!({
+        const request: GenerateOptions = {
           provider,
           model,
           system,
           signal,
-          messages: [createUserMessage({
-            content: [{ type: 'text', text: user }],
-            source: { kind: 'plugin', plugin: 'dsh-plastic-memory' },
-          })],
-        })) {
+          messages: [{ role: 'user', content: [{ type: 'text', text: user }] }],
+        }
+        for await (const chunk of llm.stream!(request)) {
           if (chunk.type === 'text-delta' && typeof chunk.text === 'string') out += chunk.text
         }
         // 宿主可能在取消时正常结束迭代而不抛——循环收尾再判一次，取消一律抛 AbortError。
