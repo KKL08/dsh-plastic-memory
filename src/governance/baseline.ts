@@ -7,6 +7,11 @@
  * 宿主 0.1.5 起 Session 不再暴露整份事件数组，读取代价显式化：`seq` 是下一条事件的位置（O(1)），
  * `snapshotEvents(from, to)` 按半开区间物化。缓存键因此改为 seq：不变直接返回；前进只物化新增区间
  * 折叠进状态。冷读一次与分批读折的是同一串事件，结果逐字一致。
+ *
+ * 宿主 0.1.7 把 `snapshotEvents` / `eventAt` / `ownEvents` 标为 `@deprecated`：已有调用照用，不许新增
+ * （设计笔记 2026-09-09「deprecate synchronous session event reads」）。官方替代是注册 session projection，
+ * 随事件增量折叠状态。宿主自带的 agent-instructions 投影不保留指令正文，迁移就得注册本插件自己的投影、
+ * 设计它的恢复语义——登记为后续工作，这里不做。
  */
 
 // 只为拿到 dsh-agent-instructions 对 MessageSourceMap 的类型增广（source.kind === 'agent-instructions'
