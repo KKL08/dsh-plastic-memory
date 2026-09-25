@@ -222,11 +222,13 @@ describe('快照 {{ 转义接线', () => {
     const session = { header: { id: 'sess-1', cwd } }
     const assembleCtx = { scope: { session } } as unknown as AssembleContext
     const def = ctx.contextDefs.find(c => c.name === 'plastic-memory')!
+    // 变量表只取 apply() 注册的 provider 求值结果：注册与渲染在同一用例里接上
+    const variables = Object.fromEntries([...ctx.variables].map(([name, provider]) => [name, provider(assembleCtx)]))
     const assembly: PromptAssembly = {
       sections: [],
       contexts: [{ name: 'plastic-memory', text: def.text(assembleCtx) }],
       tools: [],
-      variables: {},
+      variables,
     }
     const middleware = ctx.listeners.get('system-prompt/assemble')!
     await middleware(assembly, assembleCtx, async () => assembly)
@@ -242,7 +244,7 @@ describe('快照 {{ 转义接线', () => {
     }).text
     expect(expected).toContain(content)
     expect(text.replaceAll(`{{${PROMPT_LBRACE_VARIABLE}}}`, '')).not.toContain('{{')
-    const rendered = renderViaHost(text)
+    const rendered = renderViaHost(text, assembly.variables)
     expect(rendered).toBe(expected)
     expect(rendered).toContain(content)
   })
