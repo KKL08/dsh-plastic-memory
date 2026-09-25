@@ -26,7 +26,7 @@ export interface ScanToolDeps {
   getQuarantined?: () => readonly { path: string; error: string }[]
   /** malformed 按文件路径归层需要根目录；缺省不归层。 */
   memoryRoot?: string
-  /** 按触发调用的 session 取该会话的 AGENTS.md/CLAUDE.md 基线（BaselineCache 按 session 隔离）。 */
+  /** 按触发调用的 session 取该会话的 AGENTS.md/CLAUDE.md 基线（宿主投影按 session 隔离）。 */
   getBaseline: (exec: ToolRunContext) => readonly string[] | null
   /** 按调用解析（而非加载时一次性解析）——provider/model 只能从触发调用的 exec 上下文里的
    *  agent 拿到，插件加载时不存在。null = 当前环境拿不到 LLM 或解析不出 provider/model
