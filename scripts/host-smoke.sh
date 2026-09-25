@@ -76,10 +76,10 @@ if [ -z "$BOOT_READY" ]; then
 fi
 echo "$HOST_TAG: step boot ok ($((SECONDS - BOOT_T0))s)"
 
-# Static checks on the installed build: every file parses, and no relative import
-# still ends in .ts (rewriteRelativeImportExtensions turns them into .js; one that
-# slipped through would fail at load time, since Node won't strip types under
-# node_modules). grep exit 1 = no match = pass; 0 (a hit) or 2 (error) fail.
+# Static checks on the installed build: every .js file under lib/ parses, and no
+# relative import still ends in .ts (rewriteRelativeImportExtensions turns them into
+# .js; one that slipped through would fail at load time, since Node won't strip
+# types under node_modules). grep exit 1 = no match = pass; 0 (a hit) or 2 (error) fail.
 IDX="$(find "$HOMEDIR" -type f -path '*dsh-plastic-memory/lib/index.js' 2>/dev/null | head -n 1)"
 [ -n "$IDX" ] || { STEP=syntax; echo "$HOST_TAG: installed lib/index.js not found under $HOMEDIR" >&2; exit 1; }
 TS_IMPORT_RE="(from|import)[[:space:]]*\(?[[:space:]]*[\"']\.{1,2}/[^\"']*\.[cm]?tsx?[\"']"
@@ -89,7 +89,18 @@ no_ts_imports() {
   grep -rEn --include='*.js' "$TS_IMPORT_RE" "$1" || rc=$?
   [ "$rc" -eq 1 ]
 }
-host_run syntax node --check "$IDX"
+# One node --check per file: given several paths it checks only the first (the rest
+# become script args), and find -exec ... \; would swallow a failing exit status.
+check_syntax() {
+  local f n=0
+  while IFS= read -r -d '' f; do
+    node --check "$f" || { echo "syntax error: $f"; return 1; }
+    n=$((n + 1))
+  done < <(find "$1" -type f -name '*.js' -print0)
+  echo "checked $n files"
+  [ "$n" -gt 0 ]
+}
+host_run syntax check_syntax "$(dirname "$IDX")"
 host_run lib-imports no_ts_imports "$(dirname "$IDX")"
 
 host_assert_isolated
