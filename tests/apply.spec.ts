@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -8,32 +8,65 @@ import type { TurnBoundaryProjection } from '@deepseek-ai/dsh-agent'
 
 // 真实 dsh-tools / dsh-storage-domain 包已从 npm 装好，此处不 mock 任何框架包。
 import { apply, Config } from '../src/index.ts'
-import { InMemoryTable } from '../src/store.ts'
-import { INDEX_FILE } from '../src/storage/paths.ts'
+import { InMemoryTable, MemoryStore } from '../src/store.ts'
+import { INDEX_FILE, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { TypeRegistryError } from '../src/errors.ts'
+import { buildSemanticPrompt } from '../src/governance/semantic-scan.ts'
 import { record } from './helpers/record.ts'
+import { renderViaHost } from './helpers/render-via-host.ts'
+import { PROMPT_LBRACE_VARIABLE, assembleSnapshot } from '../src/snapshot.ts'
+import { FileTable } from '../src/storage/file-table.ts'
+import { buildTypeRegistry } from '../src/type-registry.ts'
+import type { AssembleContext, PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
+import type { StreamChunk } from '@deepseek-ai/dsh-llm'
+import { cacheKey } from '../src/tools/scan.ts'
+import type { ScanCacheEntry } from '../src/governance/schema.ts'
 
 function mockCtx() {
   const registered: string[] = []
   const contexts: string[] = []
+  // 完整的 context 注册对象（含 text provider）与提示词变量，供转义接线用例取用
+  const contextDefs: Array<{ name: string; order: number; text: (assembleCtx?: AssembleContext) => string }> = []
+  const variables = new Map<string, (assembleCtx: AssembleContext) => string | undefined>()
   const listeners = new Map<string, (...args: unknown[]) => unknown>()
+  // 假 llm：记下每次 stream 收到的请求对象；每次调用从 llmScript 取一段 chunk 序列，
+  // 脚本用完回默认序列——语义扫描能解析的空结果，以 stop 收尾（宿主每条流都以 finish 结束）。
+  const llmRequests: Array<{ messages: unknown[] }> = []
+  const llmScript: StreamChunk[][] = []
+  const llm = {
+    async *stream(req: { messages: unknown[] }): AsyncIterable<StreamChunk> {
+      llmRequests.push(req)
+      yield* llmScript.shift() ?? [
+        { type: 'text-delta', index: 0, text: '{"findings":[]}' },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ]
+    },
+  }
+  // 按表名复用同一张表：用例可以在 apply() 前预置、事后读回插件打开的那张表。
+  const tables = new Map<string, InMemoryTable>()
   return {
-    registered, contexts, listeners,
+    registered, contexts, contextDefs, variables, listeners, llmRequests, llmScript, tables,
     tools: { register: (def: { name: string }) => { registered.push(def.name); return () => {} } },
-    systemPrompt: { context: (c: { name: string }) => { contexts.push(c.name); return () => {} } },
+    systemPrompt: {
+      context: (c: (typeof contextDefs)[number]) => { contexts.push(c.name); contextDefs.push(c); return () => {} },
+      variable: (name: string, provider: (assembleCtx: AssembleContext) => string | undefined) => { variables.set(name, provider); return () => {} },
+    },
     storageDomain: {
       open: async () => ({
-        table: () => new InMemoryTable(),
+        table: (name: string) => {
+          let table = tables.get(name)
+          if (!table) tables.set(name, table = new InMemoryTable())
+          return table
+        },
         global: {}, name: 'plastic_memory', close: async () => {},
       }),
     },
     on: (event: string, fn: (...args: unknown[]) => unknown) => { listeners.set(event, fn); return () => {} },
     effect: (fn: () => unknown) => { fn() },
-    // resolveWorkspacePath 的 ctx.get('workspaceRegistry') 和 makeSemanticLlm 的
-    // ctx.get('llm') 共用这个 stub：两者都拿 undefined，前者判无 workspace 插件，
-    // 后者判语义层不可用——这里不模拟 cordis proxy 对未知服务名的抛错行为。
-    get: () => undefined,
+    // 按服务名分发：'llm' 给上面的假 llm；其余（如 resolveWorkspacePath 的 workspaceRegistry）
+    // 一律 undefined，判为服务缺席——这里不模拟 cordis proxy 对未知服务名的抛错行为。
+    get: (name: string) => (name === 'llm' ? llm : undefined),
   }
 }
 
@@ -98,7 +131,7 @@ describe('apply', () => {
 
   it('Fix 1 回归：ctx.get 对任意服务名抛错也不拖垮插件加载，九个工具照常注册', async () => {
     // 真实 cordis 的 Context 是 proxy：对未 inject 的服务名走属性访问会抛错，且不会退化为
-    // undefined。mockCtx() 的 get() 简单返回 undefined，测不出这种抛错——这里用会抛错的
+    // undefined。mockCtx() 的 get() 对未知服务名返回 undefined，测不出这种抛错——这里用会抛错的
     // get() 逼近 cordis 行为，钉住"服务解析失败/抛错不能让 apply() 整体失败"这条回归。
     const ctx = mockCtxWithThrowingGet()
     const memoryRoot = await makeTmpRoot()
@@ -150,6 +183,171 @@ describe('apply', () => {
     // 钉住 root 真的来自 config 且 load 跑到了 regenerateIndexes：空库也会落出
     // global/MEMORY.md。若 resolveMemoryRoot 漏传 config 落到默认值，这里 stat 必抛。
     expect((await stat(join(memoryRoot, 'global', INDEX_FILE))).isFile()).toBe(true)
+  })
+})
+
+/**
+ * 宿主对 context 文本做 {{变量}} 插值且没有关闭选项，记忆正文是用户可控内容：apply() 注册
+ * 左花括号变量，快照出口把 {{ 转义成对它的引用。这里验证接线：变量注册了，且 assemble
+ * 中间件覆写后的文本经宿主真实渲染还原为原文快照。
+ */
+describe('快照 {{ 转义接线', () => {
+  it('apply 注册 plastic_memory_lbrace 变量，provider 返回 {{', async () => {
+    const ctx = mockCtx()
+    const memoryRoot = await makeTmpRoot()
+    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    const provider = ctx.variables.get(PROMPT_LBRACE_VARIABLE)
+    expect(provider).toBeDefined()
+    expect(provider!({})).toBe('{{')
+  })
+
+  it('system-prompt/assemble 中间件覆写的文本经宿主渲染还原为原文快照（含 {{ 的工作区记忆逐字保留）', async () => {
+    const memoryRoot = await makeTmpRoot()
+    const cwd = await makeTmpRoot() // resolveWorkspacePath 走 realpath，cwd 须真实存在
+    const workspacePath = await realpath(cwd) // 无 workspaceRegistry 时规范化 cwd 即目录桶
+    const content = 'Vue 模板写 {{ msg }}'
+    const wsDir = join(memoryRoot, workspaceDirName(workspacePath))
+    await mkdir(wsDir, { recursive: true })
+    await writeFile(join(wsDir, WORKSPACE_MARKER), workspacePath, 'utf8')
+    const now = Date.now()
+    await writeFile(join(wsDir, 'vue.md'), encodeRecord(record({
+      id: 'mem_vue', type: 'preference', scope: 'workspace', workspacePath, content,
+      createdAt: now, updatedAt: now, lastConfirmedAt: now,
+    }), {}), 'utf8')
+
+    const ctx = mockCtx()
+    const config = new Config({ memoryRoot } as unknown as Config)
+    await apply(ctx as never, config)
+
+    const session = { header: { id: 'sess-1', cwd } }
+    const assembleCtx = { scope: { session } } as unknown as AssembleContext
+    const def = ctx.contextDefs.find(c => c.name === 'plastic-memory')!
+    // 变量表只取 apply() 注册的 provider 求值结果：注册与渲染在同一用例里接上
+    const variables = Object.fromEntries([...ctx.variables].map(([name, provider]) => [name, provider(assembleCtx)]))
+    const assembly: PromptAssembly = {
+      sections: [],
+      contexts: [{ name: 'plastic-memory', text: def.text(assembleCtx) }],
+      tools: [],
+      variables,
+    }
+    const middleware = ctx.listeners.get('system-prompt/assemble')!
+    await middleware(assembly, assembleCtx, async () => assembly)
+    const text = assembly.contexts[0]!.text
+
+    // 期望原文：同一份磁盘记忆、同一组参数独立组装一次快照
+    const fileTable = new FileTable({ root: memoryRoot, stats: new InMemoryTable() })
+    await fileTable.load()
+    const expected = assembleSnapshot({
+      store: new MemoryStore(fileTable), registry: buildTypeRegistry(config),
+      workspacePath, budget: config.snapshotTokenBudget, now: Date.now(),
+      memoryRoot, evidenceLookup: config.evidenceLookup,
+    }).text
+    expect(expected).toContain(content)
+    expect(text.replaceAll(`{{${PROMPT_LBRACE_VARIABLE}}}`, '')).not.toContain('{{')
+    const rendered = renderViaHost(text, assembly.variables)
+    expect(rendered).toBe(expected)
+    expect(rendered).toContain(content)
+  })
+})
+
+/**
+ * 语义扫描发给宿主 llm 的请求形状：只发一次、不进会话的辅助请求用宿主的 RequestUserInput
+ * （只有 role + content，没有 id/source）。exec 里的假 agent 带 options.provider/model，
+ * makeSemanticLlm 走三层解析的第二层拿到路由，才会真的调 stream。
+ */
+describe('语义扫描请求形状', () => {
+  it('memory_scan 语义层发出的 messages[0] 是 RequestUserInput：只有 role 与 content', async () => {
+    type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
+    const defs = new Map<string, ToolDef>()
+    const base = mockCtx()
+    const ctx = {
+      ...base,
+      tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
+      logger: { info() {}, warn() {}, error() {} },
+    }
+    const memoryRoot = await makeTmpRoot()
+    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    const cwd = await makeTmpRoot()
+    const session = { header: { id: 'sess-1', cwd }, seq: 0, requestHeader: () => undefined }
+    const exec = fakeExec({
+      agent: { session, options: { provider: 'deepseek', model: 'deepseek-chat' } } as unknown as ToolRunContext['agent'],
+    })
+    await defs.get('memory_scan')!.execute({ layers: 'semantic' }, exec)
+
+    expect(base.llmRequests).toHaveLength(1)
+    const [request] = base.llmRequests
+    expect(request).toMatchObject({ provider: 'deepseek', model: 'deepseek-chat' })
+    const msg = request!.messages[0]
+    const { user } = buildSemanticPrompt([], null)
+    expect(msg).toEqual({ role: 'user', content: [{ type: 'text', text: user }] })
+    expect(msg).not.toHaveProperty('id')
+    expect(msg).not.toHaveProperty('source')
+  })
+
+  it('流已吐出可解析 JSON 后以 error 收尾：按失败处理（重试一次后 semantic-failed），语义缓存保持原样', async () => {
+    type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
+    const defs = new Map<string, ToolDef>()
+    const base = mockCtx()
+    const ctx = {
+      ...base,
+      tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
+      logger: { info() {}, warn() {}, error() {} },
+    }
+    const memoryRoot = await makeTmpRoot()
+    const cwd = await makeTmpRoot()
+    const bucket = cacheKey(await realpath(cwd)) // 无 workspaceRegistry 时规范化 cwd 即目录桶
+    const prior: ScanCacheEntry = {
+      id: bucket, scannedAt: 1, scope: await realpath(cwd),
+      findings: [{
+        type: 'conflict', layer: 'semantic', severity: 'critical', memoryIds: ['mem_a', 'mem_b'],
+        summary: '先前缓存的冲突', suggestedAction: '裁决',
+      }],
+    }
+    const cache = new InMemoryTable()
+    await cache.put(bucket, prior as never)
+    base.tables.set('scan_cache', cache)
+    // 首次与重试都是：先吐完整 JSON，再以 error 终止（DeepSeek 适配器在 message_stop 前断流）
+    const brokenStream = (): StreamChunk[] => [
+      { type: 'text-delta', index: 0, text: '{"findings":[]}' },
+      { type: 'finish', reason: { kind: 'error', failure: { code: 'STREAM_CLOSED', message: 'stream ended before message_stop' } } },
+    ]
+    base.llmScript.push(brokenStream(), brokenStream())
+
+    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    const session = { header: { id: 'sess-1', cwd }, seq: 0, requestHeader: () => undefined }
+    const exec = fakeExec({
+      agent: { session, options: { provider: 'deepseek', model: 'deepseek-chat' } } as unknown as ToolRunContext['agent'],
+    })
+    const out = await defs.get('memory_scan')!.execute({ layers: 'semantic' }, exec) as { notes?: Array<{ code: string }> }
+
+    expect(base.llmRequests).toHaveLength(2)
+    expect(out.notes?.map(n => n.code)).toContain('semantic-failed')
+    expect(cache.get(bucket)).toEqual(prior)
+  })
+
+  it('流以 aborted 收尾而 signal 未触发：按取消拒绝（AbortError、不重试），不当成功', async () => {
+    type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
+    const defs = new Map<string, ToolDef>()
+    const base = mockCtx()
+    const ctx = {
+      ...base,
+      tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
+      logger: { info() {}, warn() {}, error() {} },
+    }
+    base.llmScript.push([
+      { type: 'text-delta', index: 0, text: '{"findings":[]}' },
+      { type: 'finish', reason: { kind: 'aborted', failure: { code: 'ABORTED', message: 'request aborted' } } },
+    ])
+    const memoryRoot = await makeTmpRoot()
+    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    const cwd = await makeTmpRoot()
+    const session = { header: { id: 'sess-1', cwd }, seq: 0, requestHeader: () => undefined }
+    const exec = fakeExec({
+      agent: { session, options: { provider: 'deepseek', model: 'deepseek-chat' } } as unknown as ToolRunContext['agent'],
+    })
+    await expect(defs.get('memory_scan')!.execute({ layers: 'semantic' }, exec)).rejects.toMatchObject({ name: 'AbortError' })
+    expect(base.llmRequests).toHaveLength(1)
+    expect(base.tables.get('scan_cache')!.get(cacheKey(await realpath(cwd)))).toBeUndefined()
   })
 })
 

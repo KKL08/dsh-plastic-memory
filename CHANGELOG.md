@@ -7,6 +7,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- Requires DeepSeek Harness v0.1.7-rc.2 or later, the version the plugin is
+  now built and tested against. The `@deepseek-ai/dsh-*` peer dependencies
+  declare this minimum; hosts from v0.1.7 on check it when the plugin is
+  installed and started, while on older hosts it is at most a package-manager
+  warning.
+- `pnpm host:smoke` no longer waits for the module fallback links the host
+  stopped writing in v0.1.7. It now checks the installed `lib/` statically (it
+  parses, and no relative import still points at a `.ts` file) instead of
+  importing it outside the host.
+
+### Fixed
+- A memory whose text contained `{{ ... }}` (a GitHub Actions
+  `${{ secrets.X }}`, a Vue or Handlebars template, …) made every turn fail
+  while it was in the prompt: the host reads `{{name}}` in the system prompt as
+  a variable reference and rejects unknown names. Memory text is now escaped on
+  its way into the prompt and restored by the host, so the model sees it byte
+  for byte. All earlier releases are affected; if you cannot upgrade yet,
+  remove or edit the offending memory file under `~/.dsh/memories/`.
+
 ## [0.1.1-beta.1] - 2026-09-10
 
 ### Changed

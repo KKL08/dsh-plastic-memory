@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { assembleSnapshot, estimateTokens, COLD_START_TEXT } from '../src/snapshot.ts'
+import { assembleSnapshot, estimateTokens, COLD_START_TEXT, escapePromptBraces, PROMPT_LBRACE_VARIABLE } from '../src/snapshot.ts'
 import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
@@ -8,6 +8,7 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { DAY } from './helpers/clock.ts'
 import { STALENESS_NOTE } from '../src/record-freshness.ts'
+import { renderViaHost } from './helpers/render-via-host.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 
@@ -209,5 +210,55 @@ describe('assembleSnapshot', () => {
 
     expect(text.indexOf('mem_hi')).toBeLessThan(text.indexOf('mem_mid'))
     expect(text.indexOf('mem_mid')).toBeLessThan(text.indexOf('mem_lo'))
+  })
+})
+
+describe('escapePromptBraces', () => {
+  const LB = `{{${PROMPT_LBRACE_VARIABLE}}}`
+
+  it('无花括号原样返回', () => {
+    expect(escapePromptBraces('不要 mock 数据库')).toBe('不要 mock 数据库')
+  })
+
+  it('{{ msg }} 的 {{ 换成变量引用', () => {
+    expect(escapePromptBraces('{{ msg }}')).toBe(`${LB} msg }}`)
+  })
+
+  it('CI 的 ${{ secrets.NPM_TOKEN }} 同理', () => {
+    expect(escapePromptBraces('token: ${{ secrets.NPM_TOKEN }}')).toBe(`token: $${LB} secrets.NPM_TOKEN }}`)
+  })
+
+  it('{{{ 按从左到右不重叠替换', () => {
+    expect(escapePromptBraces('{{{')).toBe(`${LB}{`)
+  })
+
+  it('只有 }} 不动', () => {
+    expect(escapePromptBraces('a }} b }}')).toBe('a }} b }}')
+  })
+
+  it('多处 {{ 全部替换', () => {
+    expect(escapePromptBraces('{{a}} 和 {{ b }} 还有 {{')).toBe(`${LB}a}} 和 ${LB} b }} 还有 ${LB}`)
+  })
+})
+
+// 宿主真实渲染往返：转义后的文本经宿主插值（变量值 '{{'）还原，必须逐字等于原文。
+describe('escapePromptBraces × 宿主 renderContextSections 往返', () => {
+  const inputs = [
+    '不要 mock 数据库',
+    '{{ msg }}',
+    'token: ${{ secrets.NPM_TOKEN }}',
+    '{{{',
+    'a }} b }}',
+    '{{a}} 和 {{ b }} 还有 {{',
+    `字面变量 {{${PROMPT_LBRACE_VARIABLE}}} 不能被还原两次`,
+  ]
+  for (const input of inputs) {
+    it(`往返无损：${JSON.stringify(input)}`, () => {
+      expect(renderViaHost(escapePromptBraces(input))).toBe(input)
+    })
+  }
+
+  it('对照组：不转义时宿主对 {{ msg }} 抛错（宿主放宽后此例会红，届时可评估删掉转义）', () => {
+    expect(() => renderViaHost('{{ msg }}')).toThrow(/malformed prompt variable reference/)
   })
 })

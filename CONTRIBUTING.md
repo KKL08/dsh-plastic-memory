@@ -47,8 +47,9 @@ before a release or when touching anything that talks to the host.
    the host's lossless-JSON rule — keep it green when you change a result shape.
 2. **Install smoke** — `pnpm host:smoke`. Builds and packs the published shape,
    installs the pinned dsh host into `~/.cache/dsh-plastic-memory` (once; later
-   runs take seconds), installs the tarball into a temporary `DSH_HOME` and
-   checks the config layer and a plain-Node import. No API key.
+   runs take seconds), installs the tarball into a temporary `DSH_HOME`, checks
+   the config layer, boots the host until the plugin starts, and checks the
+   installed `lib/` statically. No API key.
 3. **Host contract** — `pnpm host:contract`. Same fresh host plus a sibling
    verify plugin; nine checks need no key (tool registration, no-cwd rejection,
    fresh-library health advice, file layout, lossless outputs, rule scan,
@@ -66,11 +67,16 @@ rejects machine-local paths and hostnames in tracked files.
 ## Host version
 
 The plugin is built and tested against one DeepSeek Harness version, pinned by
-the `@deepseek-ai/*` dev dependencies (`0.1.5-rc.2` today). `peerDependencies`
-stay open while the host is in pre-release because npm's semver treats
-pre-release ranges strictly. Upgrading the host is a deliberate change: bump the
-dev dependencies together, run all three test layers, and note anything that
-moved in the changelog.
+the `@deepseek-ai/*` dev dependencies (`0.1.7-rc.2` today). The four
+`@deepseek-ai/dsh-*` peer dependencies declare that version as the minimum
+(`>=0.1.7-rc.2`). Hosts from 0.1.7 on check these ranges when a plugin is
+installed and started; like pnpm, they compare with pre-releases included, so
+`0.1.8-rc.1` still satisfies the range. Older hosts do not check, and the range
+is at most a package-manager warning there. `@deepseek-ai/cordis` and
+`@deepseek-ai/schemastery` stay `*` because the host only checks `dsh-*` peers.
+Upgrading the host is a deliberate change: bump the dev dependencies and the
+peer minimum together, run all three test layers, and note anything that moved
+in the changelog.
 
 ## Commits and pull requests
 

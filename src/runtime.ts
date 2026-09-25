@@ -3,7 +3,7 @@ import { dirname } from 'node:path'
 import type { MemoryStore } from './store.ts'
 import type { TypeRegistry } from './type-registry.ts'
 import type { EvidenceLookupLevel } from './evidence-guidance.ts'
-import { assembleSnapshot } from './snapshot.ts'
+import { assembleSnapshot, escapePromptBraces } from './snapshot.ts'
 
 /**
  * session 内冻结的 snapshot 缓存，按 session 隔离（WeakMap），compaction 结束后失效重建。
@@ -11,6 +11,7 @@ import { assembleSnapshot } from './snapshot.ts'
  * 触发一次 fire-and-forget 解析（同 session 去重），落定后下一次 render 组装完整版并冻结、计召回一次。
  * session/created 只是 eager 预热；靠它单点灌缓存会在插件热重载（HMR）后对存量 session 永久退化——
  * 旧注册清理后 WeakMap 全空、宿主又不为存量 session 重发 session/created，render 会一直走兜底。
+ * 缓存存原文；render 在出口统一转义 `{{`，兜底、组装、命中三条路径都只转义一次。
  */
 export interface SnapshotCacheDeps {
   store: MemoryStore
@@ -69,7 +70,12 @@ export class SnapshotCache {
     clearTimeout(timer)
   }
 
+  /** 快照进宿主的唯一出口：缓存与组装都是原文，每次在这里转义 `{{`（见 escapePromptBraces）。 */
   render(session: object): string {
+    return escapePromptBraces(this.renderRaw(session))
+  }
+
+  private renderRaw(session: object): string {
     const cached = this.cache.get(session)
     if (cached !== undefined) return cached
 

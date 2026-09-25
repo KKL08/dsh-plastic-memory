@@ -213,7 +213,7 @@ async function scanPass(
         notes.push({ code: 'semantic-truncated', text: `记忆过多，本次语义层只分析了前 ${SEMANTIC_SCAN_MAX_RECORDS} 条（按治理优先级与新近度挑选），另有 ${semantic.truncated} 条未分析` })
       }
       if (semantic.failed) {
-        notes.push({ code: 'semantic-failed', text: '语义分析失败（LLM 输出无法解析，已重试一次），本次未更新语义缓存' })
+        notes.push({ code: 'semantic-failed', text: '语义分析失败（LLM 调用出错或输出无法解析，已重试一次），本次未更新语义缓存' })
       } else {
         findings.push(...semantic.findings)
         // 写缓存前设检查点：取消后不留下半截的语义结果。
