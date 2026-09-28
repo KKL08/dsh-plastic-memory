@@ -5,7 +5,7 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/) with pre-release tags while the host
 (DeepSeek Harness) is itself in pre-release.
 
-## [Unreleased]
+## [0.1.1-beta.3] - 2026-09-28
 
 ### Changed
 - The `AGENTS.md` / `CLAUDE.md` baseline that `memory_scan` checks memories
