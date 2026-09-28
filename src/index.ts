@@ -30,7 +30,7 @@ import { PROMPT_LBRACE_VARIABLE } from './snapshot.ts'
 import { resolveHealthThresholds, type HealthSensitivity } from './governance/health-presets.ts'
 import { PendingDecisionsStore } from './governance/decisions.ts'
 import { SnapshotStore } from './governance/snapshots.ts'
-import { BaselineCache } from './governance/baseline.ts'
+import { baselineProjectionDefinition, readBaseline } from './governance/baseline.ts'
 import type { SemanticLlm } from './governance/semantic-scan.ts'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 
@@ -100,7 +100,11 @@ export async function apply(ctx: Context, config: Config) {
   const decisions = new PendingDecisionsStore(domain.table('pending_decisions'))
   const snapshots = new SnapshotStore(domain.table('snapshots'))
   const scanCache = domain.table('scan_cache')
-  const baseline = new BaselineCache(message => ctx.logger.warn(message))
+  // AGENTS.md 基线投影走可选注册：插件的 inject 不列 sessionProjections（精简 profile 可能没有这个服务），
+  // 改在 ctx.inject(['sessionProjections'], …) 里注册，这是宿主 registry 文档（dsh-session-projection README）
+  // 给出的保留可选注册的写法。disposer 随 child fiber 走，插件卸载键即消失。服务缺席时插件照常挂载，
+  // 只是不注册投影：垂直冲突检测跳过，memory_scan 打 baseline-missing。
+  ctx.inject(['sessionProjections'], child => void child.sessionProjections.register(baselineProjectionDefinition))
   // cwd → workspace 归属的单一解析路径：SnapshotCache 的 lazy 自愈与 session/created 的 eager 预热共用，
   // 避免两处各写一份 resolveWorkspacePath 调用。
   const resolveWorkspace = (session: object) => resolveWorkspacePath(ctx, (session as SessionLike).header?.cwd)
@@ -231,6 +235,38 @@ export async function apply(ctx: Context, config: Config) {
     return 0
   }
 
+  /** 该 session 当前生效的指令正文（按事件顺序）；null = 没有生效指令，或服务缺席、键未注册、读取抛错
+   *  （垂直冲突检测跳过，扫描打 baseline-missing）。探测惯例同 openTurnStartSeq。
+   *  状态里的形状漂移按 session 对象、每个 seq 只 warn 一次（插件重载后对历史漂移会再 warn 一次）；
+   *  读取抛错每个 session 也只 warn 一次。 */
+  const baselineDriftWarned = new WeakMap<Session, Set<number>>()
+  const baselineReadWarned = new WeakSet<Session>()
+  function sessionBaseline(session: Session | undefined): readonly string[] | null {
+    if (session === undefined) return null
+    let projections: SessionProjectionRegistry | undefined
+    try {
+      projections = ctx.get('sessionProjections') as SessionProjectionRegistry | undefined
+    } catch {
+      return null
+    }
+    let state
+    try {
+      state = projections?.stateOf(session, 'plasticMemoryBaseline')
+    } catch (error) {
+      if (!baselineReadWarned.has(session)) {
+        baselineReadWarned.add(session)
+        ctx.logger.warn(`plasticMemoryBaseline projection read threw for session "${session.header.id}", skipping the AGENTS.md baseline: ${String(error)}`)
+      }
+      return null
+    }
+    if (state === undefined) return null
+    let warned = baselineDriftWarned.get(session)
+    if (warned === undefined) baselineDriftWarned.set(session, warned = new Set())
+    const { texts, warnings } = readBaseline(state, warned)
+    for (const message of warnings) ctx.logger.warn(message)
+    return texts.length === 0 ? null : texts
+  }
+
   ctx.tools.register(withRefresh(createSaveTool({ store, registry, resolveContext, snapshots })))
   ctx.tools.register(withRefresh(createSearchTool({ store, registry, resolveContext })))
   ctx.tools.register(withRefresh(createForgetTool({ store, snapshots, decisions, log: ctx.logger })))
@@ -252,11 +288,10 @@ export async function apply(ctx: Context, config: Config) {
   })))
   if (config.governance.enabled) {
     ctx.tools.register(withRefresh(createConfirmTool({ store, decisions, snapshots })))
-    // 基线按触发调用的 session 取（BaselineCache 按 session 隔离，防多会话串台）
-    const sessionOf = (exec: ToolRunContext) => exec.agent?.session
+    // 基线按触发调用的 session 取（宿主投影 cell 按 session 隔离，防多会话串台）
     ctx.tools.register(withRefresh(createScanTool({
       store, registry, decisions, cache: scanCache,
-      getBaseline: exec => baseline.get(sessionOf(exec)),
+      getBaseline: exec => sessionBaseline(exec.agent?.session),
       // exec → { session, agentOptions } 的小 helper：makeSemanticLlm 本体不再触碰 exec 形状。
       getLlm: exec => {
         const agent = exec.agent
@@ -294,7 +329,7 @@ export async function apply(ctx: Context, config: Config) {
     void snapshotCache.awaitResolved(session)
   })
   lifecycle.on('session/event', (session, event) => {
-    // 基线已改按需从 session 日志增量折叠（BaselineCache.get），不再观察 session/event；
+    // 基线由宿主投影随事件折叠（plasticMemoryBaseline），不在这里观察；
     // 本监听只留 compaction 失效——快照按 session 冻结，压缩结束后须重建。
     if (event.type === 'compaction/end') snapshotCache.invalidate(session)
   })

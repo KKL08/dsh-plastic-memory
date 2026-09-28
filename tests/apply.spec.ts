@@ -5,6 +5,10 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { fakeExec } from './helpers/exec.ts'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { TurnBoundaryProjection } from '@deepseek-ai/dsh-agent'
+import { Context } from '@deepseek-ai/cordis'
+import Registry, { type SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { MessageSourceMap } from '@deepseek-ai/dsh-llm'
 
 // 真实 dsh-tools / dsh-storage-domain 包已从 npm 装好，此处不 mock 任何框架包。
 import { apply, Config } from '../src/index.ts'
@@ -22,8 +26,13 @@ import type { AssembleContext, PromptAssembly } from '@deepseek-ai/dsh-system-pr
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { cacheKey } from '../src/tools/scan.ts'
 import type { ScanCacheEntry } from '../src/governance/schema.ts'
+import { baselineProjectionDefinition } from '../src/governance/baseline.ts'
 
-function mockCtx() {
+/**
+ * projections：ctx.get('sessionProjections') 给出的注册表（缺省 = 服务缺席）。inject 仿 cordis 的
+ * ctx.inject(deps, cb)：依赖齐了才同步回调、把服务放进 child；registerProjection=false 模拟回调始终没触发。
+ */
+function mockCtx(opts: { projections?: SessionProjectionRegistry; registerProjection?: boolean } = {}) {
   const registered: string[] = []
   const contexts: string[] = []
   // 完整的 context 注册对象（含 text provider）与提示词变量，供转义接线用例取用
@@ -64,9 +73,14 @@ function mockCtx() {
     },
     on: (event: string, fn: (...args: unknown[]) => unknown) => { listeners.set(event, fn); return () => {} },
     effect: (fn: () => unknown) => { fn() },
-    // 按服务名分发：'llm' 给上面的假 llm；其余（如 resolveWorkspacePath 的 workspaceRegistry）
-    // 一律 undefined，判为服务缺席——这里不模拟 cordis proxy 对未知服务名的抛错行为。
-    get: (name: string) => (name === 'llm' ? llm : undefined),
+    // 按服务名分发：'llm' 给上面的假 llm，'sessionProjections' 给 opts.projections；其余（如
+    // resolveWorkspacePath 的 workspaceRegistry）一律 undefined，判为服务缺席——这里不模拟 cordis
+    // proxy 对未知服务名的抛错行为。
+    get: (name: string) => (name === 'llm' ? llm : name === 'sessionProjections' ? opts.projections : undefined),
+    inject: (_deps: string[], callback: (child: { sessionProjections: SessionProjectionRegistry }) => void) => {
+      if (opts.projections !== undefined && opts.registerProjection !== false) callback({ sessionProjections: opts.projections })
+      return () => {}
+    },
   }
 }
 
@@ -444,5 +458,172 @@ describe('证据锚：读 turnBoundary 投影', () => {
   it('空日志（seq = 0）→ [0, 0]', async () => {
     const { session, save } = await boot(projectionWith({ openTurnStartSeq: null }))
     expect(await save(session(0))).toEqual([0, 0])
+  })
+})
+
+/**
+ * AGENTS.md 基线来自插件注册到宿主的 plasticMemoryBaseline 投影。这里用真的 SessionProjectionRegistry
+ * （挂在裸 cordis Context 上），会话给结构化对象：registry 首次触碰时对 snapshotEvents() 全量补折。
+ */
+describe('AGENTS.md 基线：读 plasticMemoryBaseline 投影', () => {
+  type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
+  type ScanOut = { notes?: Array<{ code: string }> }
+
+  async function hostRegistry(): Promise<SessionProjectionRegistry> {
+    const host = new Context()
+    await host.plugin(Registry)
+    return host.sessionProjections
+  }
+
+  /** 宿主 agent-instructions 的完整基线消息（source 形状照 AgentInstructionSource）。 */
+  function baselineMessage(seq: number, text: string): SessionEvent {
+    const source: MessageSourceMap['agent-instructions'] = {
+      kind: 'agent-instructions', form: 'instructions', baseline: true,
+      changes: [{ action: 'set', scope: '.', path: 'AGENTS.md' }],
+    }
+    return { type: 'user/message', seq, time: 0, data: { id: `instr-${seq}`, role: 'user', content: [{ type: 'text', text }], source } } as unknown as SessionEvent
+  }
+
+  let sessionCount = 0
+  function fakeSession(cwd: string, events: SessionEvent[]) {
+    return {
+      header: { id: `sess-${++sessionCount}`, cwd },
+      inheritedEventCount: 0,
+      get seq() { return events.length },
+      snapshotEvents: () => events,
+      eventAt: (seq: number) => events[seq],
+      requestHeader: () => undefined,
+    }
+  }
+
+  async function boot(base: ReturnType<typeof mockCtx>, overrides: { get?: (name: string) => unknown } = {}) {
+    const defs = new Map<string, ToolDef>()
+    const ctx = {
+      ...base,
+      ...overrides,
+      tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
+      logger: { info() {}, warn: (msg: string) => { warnings.push(msg) }, error() {} },
+    }
+    const warnings: string[] = []
+    await apply(ctx as never, new Config({ memoryRoot: await makeTmpRoot() } as unknown as Config))
+    const scan = async (session: object, args: object) => await defs.get('memory_scan')!.execute(args, fakeExec({
+      agent: { session, options: { provider: 'deepseek', model: 'deepseek-chat' } } as unknown as ToolRunContext['agent'],
+    })) as ScanOut
+    return { scan, warnings }
+  }
+  const promptUser = (request: { messages: unknown[] } | undefined) =>
+    (request?.messages[0] as { content: Array<{ text: string }> }).content[0]!.text
+
+  it('apply() 注册 plasticMemoryBaseline：checkpoint 读回键、ver 与折叠出的正文', async () => {
+    const projections = await hostRegistry()
+    await boot(mockCtx({ projections }))
+    const session = fakeSession(await makeTmpRoot(), [baselineMessage(0, '# AGENTS.md\n用 pnpm')])
+    const row = projections.checkpoint(session as never).plasticMemoryBaseline
+    expect(row?.ver).toBe(baselineProjectionDefinition.stateVersion)
+    expect(row?.val).toMatchObject({ entries: [{ text: '# AGENTS.md\n用 pnpm' }] })
+  })
+
+  it('注册归属随父插件（真 cordis）：父插件经 inject 注册，dispose 后键随之卸载，stateOf 返回 undefined', async () => {
+    const host = new Context()
+    await host.plugin(Registry)
+    let child: unknown
+    const parent = await host.plugin({
+      name: 'parent',
+      apply(p: Context) { child = p.inject(['sessionProjections'], c => void c.sessionProjections.register(baselineProjectionDefinition)) },
+    })
+    await child
+    const session = fakeSession(await makeTmpRoot(), [baselineMessage(0, '# AGENTS.md\n用 pnpm')])
+    expect(host.sessionProjections.stateOf(session as never, 'plasticMemoryBaseline')?.entries).toEqual([{ text: '# AGENTS.md\n用 pnpm', scopes: ['.'] }])
+    const row = host.sessionProjections.checkpoint(session as never).plasticMemoryBaseline
+    expect(row?.ver).toBe(baselineProjectionDefinition.stateVersion)
+    expect(baselineProjectionDefinition.stateSchema.safeParse(row?.val).success).toBe(true)
+    await parent.dispose()
+    expect(host.sessionProjections.stateOf(session as never, 'plasticMemoryBaseline')).toBeUndefined()
+    await host.fiber.dispose()
+  })
+
+  it('日志里早有完整基线、之后才注册：首次语义扫描的 prompt 就带基线正文（宿主晚注册补折）', async () => {
+    const projections = await hostRegistry()
+    const session = fakeSession(await makeTmpRoot(), [baselineMessage(0, '# AGENTS.md\n不要 mock 数据库')])
+    const base = mockCtx({ projections })
+    const { scan } = await boot(base)
+    const out = await scan(session, { layers: 'semantic' })
+    expect(base.llmRequests).toHaveLength(1)
+    expect(promptUser(base.llmRequests[0])).toBe(buildSemanticPrompt([], ['# AGENTS.md\n不要 mock 数据库']).user)
+    expect(out.notes?.map(n => n.code) ?? []).not.toContain('baseline-missing')
+  })
+
+  it('两个 session 的基线互不串台', async () => {
+    const projections = await hostRegistry()
+    const base = mockCtx({ projections })
+    const { scan } = await boot(base)
+    const a = fakeSession(await makeTmpRoot(), [baselineMessage(0, '项目甲：用 pnpm')])
+    const b = fakeSession(await makeTmpRoot(), [baselineMessage(0, '项目乙：用 npm')])
+    await scan(a, { layers: 'semantic' })
+    await scan(b, { layers: 'semantic' })
+    await scan(a, { layers: 'semantic' })
+    expect(base.llmRequests.map(promptUser)).toEqual([
+      buildSemanticPrompt([], ['项目甲：用 pnpm']).user,
+      buildSemanticPrompt([], ['项目乙：用 npm']).user,
+      buildSemanticPrompt([], ['项目甲：用 pnpm']).user,
+    ])
+  })
+
+  it('sessionProjections 服务缺席（ctx.get 返回 undefined，cordis 的真实形状）：体检扫描带 baseline-missing，不告警', async () => {
+    const { scan, warnings } = await boot(mockCtx())
+    const out = await scan(fakeSession(await makeTmpRoot(), [baselineMessage(0, '有基线但没有投影服务')]), { scope: 'all' })
+    expect(out.notes?.map(n => n.code)).toContain('baseline-missing')
+    expect(warnings.filter(w => /baseline/i.test(w))).toEqual([])
+  })
+
+  it('sessionProjections 服务缺席（ctx.get 抛错）：体检扫描带 baseline-missing，不抛', async () => {
+    const base = mockCtx()
+    const { scan } = await boot(base, {
+      get: name => {
+        if (name === 'sessionProjections') throw new Error(`no such service: ${name}`)
+        return base.get(name)
+      },
+    })
+    const out = await scan(fakeSession(await makeTmpRoot(), [baselineMessage(0, '有基线但读不到')]), { scope: 'all' })
+    expect(out.notes?.map(n => n.code)).toContain('baseline-missing')
+  })
+
+  it('注册表在、但插件的投影没注册上（stateOf 返回 undefined）：体检扫描带 baseline-missing，不抛', async () => {
+    const projections = await hostRegistry()
+    const { scan } = await boot(mockCtx({ projections, registerProjection: false }))
+    const session = fakeSession(await makeTmpRoot(), [baselineMessage(0, '有基线但键未注册')])
+    const out = await scan(session, { scope: 'all' })
+    expect(projections.checkpoint(session as never)).not.toHaveProperty('plasticMemoryBaseline')
+    expect(out.notes?.map(n => n.code)).toContain('baseline-missing')
+  })
+
+  it('日志里有形状漂移的指令消息：首次扫描 warn 一次，同一 session 再扫不重复', async () => {
+    const projections = await hostRegistry()
+    const { scan, warnings } = await boot(mockCtx({ projections }))
+    const broken = baselineMessage(0, '缺 changes 的基线')
+    delete (broken.data as { source: { changes?: unknown } }).source.changes
+    const session = fakeSession(await makeTmpRoot(), [broken])
+    const out = await scan(session, { scope: 'all' })
+    expect(out.notes?.map(n => n.code) ?? []).not.toContain('baseline-missing')
+    await scan(session, { scope: 'all' })
+    const drift = warnings.filter(w => w.includes('agent-instructions message'))
+    expect(drift).toEqual(['agent-instructions message at seq 0 carries no changes array; keeping its text without scope tracking'])
+  })
+
+  it('stateOf 读取抛错（会话日志读不出）：体检扫描带 baseline-missing、不抛，同一 session 只 warn 一次', async () => {
+    const projections = await hostRegistry()
+    const { scan, warnings } = await boot(mockCtx({ projections }))
+    const session = {
+      ...fakeSession(await makeTmpRoot(), []),
+      snapshotEvents: () => { throw new Error('log unreadable') },
+    }
+    const first = await scan(session, { scope: 'all' })
+    const second = await scan(session, { scope: 'all' })
+    expect(first.notes?.map(n => n.code)).toContain('baseline-missing')
+    expect(second.notes?.map(n => n.code)).toContain('baseline-missing')
+    const baselineWarnings = warnings.filter(w => w.includes('plasticMemoryBaseline'))
+    expect(baselineWarnings).toHaveLength(1)
+    expect(baselineWarnings[0]).toContain(session.header.id)
+    expect(baselineWarnings[0]).toContain('log unreadable')
   })
 })

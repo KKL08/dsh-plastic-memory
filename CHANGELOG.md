@@ -5,6 +5,17 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/) with pre-release tags while the host
 (DeepSeek Harness) is itself in pre-release.
 
+## [Unreleased]
+
+### Changed
+- The `AGENTS.md` / `CLAUDE.md` baseline that `memory_scan` checks memories
+  against for vertical conflicts is now maintained by the host's session
+  projection service instead of being re-read from session history, a way of
+  reading sessions the host is phasing out. The baseline is kept with the
+  session and survives a session resume. On hosts or profiles without the
+  session projection service the plugin still loads, but vertical-conflict
+  detection is now off and `memory_scan` reports `baseline-missing`.
+
 ## [0.1.1-beta.2] - 2026-09-25
 
 ### Changed
