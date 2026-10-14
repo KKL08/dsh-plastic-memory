@@ -5,6 +5,14 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/) with pre-release tags while the host
 (DeepSeek Harness) is itself in pre-release.
 
+## [Unreleased]
+
+### Changed
+- Requires DeepSeek Harness v0.2.0-rc.2 or later, the version the plugin is
+  now built and tested against. v0.1.7 hosts refuse to install or start this
+  release; stay on 0.1.1-beta.3 if you cannot upgrade the host yet. No plugin
+  behaviour changes.
+
 ## [0.1.1-beta.3] - 2026-09-28
 
 ### Changed
