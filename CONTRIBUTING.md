@@ -67,11 +67,11 @@ rejects machine-local paths and hostnames in tracked files.
 ## Host version
 
 The plugin is built and tested against one DeepSeek Harness version, pinned by
-the `@deepseek-ai/*` dev dependencies (`0.1.7-rc.2` today). The four
+the `@deepseek-ai/*` dev dependencies (`0.2.0-rc.2` today). The four
 `@deepseek-ai/dsh-*` peer dependencies declare that version as the minimum
-(`>=0.1.7-rc.2`). Hosts from 0.1.7 on check these ranges when a plugin is
+(`>=0.2.0-rc.2`). Hosts from 0.1.7 on check these ranges when a plugin is
 installed and started; like pnpm, they compare with pre-releases included, so
-`0.1.8-rc.1` still satisfies the range. Older hosts do not check, and the range
+`0.2.1-alpha.1` still satisfies the range. Older hosts do not check, and the range
 is at most a package-manager warning there. `@deepseek-ai/cordis` and
 `@deepseek-ai/schemastery` stay `*` because the host only checks `dsh-*` peers.
 Upgrading the host is a deliberate change: bump the dev dependencies and the
