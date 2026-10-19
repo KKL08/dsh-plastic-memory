@@ -5,6 +5,18 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/) with pre-release tags while the host
 (DeepSeek Harness) is itself in pre-release.
 
+## [Unreleased]
+
+### Changed
+- Built and tested against DeepSeek Harness v0.2.1-rc.2. CI now also runs the
+  type check, tests, `host:smoke` and `host:contract` on the minimum supported
+  host.
+- Supports DeepSeek Harness v0.1.7-rc.1 and later again. 0.1.1-beta.4 had
+  raised the minimum to v0.2.0-rc.2 without needing anything from it; the
+  plugin now runs unchanged on every host from v0.1.7-rc.1 to v0.2.1-rc.2.
+  From now on the minimum only rises when the plugin needs a newer host API or
+  the host breaks compatibility.
+
 ## [0.1.1-beta.4] - 2026-10-14
 
 ### Changed

@@ -32,6 +32,7 @@ needed.
 | `tests/` | vitest unit and integration tests (`tests/helpers/` has shared fixtures). |
 | `scripts/host-smoke.sh` | Installs the packed plugin into a fresh, pinned dsh host and checks it loads. |
 | `scripts/host-contract/` | Boots that host with a verify plugin that drives the nine tools through the real tool registry. |
+| `scripts/use-host.cjs` | Points the host dev dependencies at another dsh version (default: the peer floor) for the floor CI job or a trial run. |
 | `docs/` | Design notes referenced from source comments (`docs/*.md`). Not published yet; the contracts they describe are pinned by the tests and by `src/contract-codes.ts`. |
 
 ## Tests
@@ -66,17 +67,28 @@ rejects machine-local paths and hostnames in tracked files.
 
 ## Host version
 
-The plugin is built and tested against one DeepSeek Harness version, pinned by
-the `@deepseek-ai/*` dev dependencies (`0.2.0-rc.2` today). The four
-`@deepseek-ai/dsh-*` peer dependencies declare that version as the minimum
-(`>=0.2.0-rc.2`). Hosts from 0.1.7 on check these ranges when a plugin is
-installed and started; like pnpm, they compare with pre-releases included, so
-`0.2.1-alpha.1` still satisfies the range. Older hosts do not check, and the range
-is at most a package-manager warning there. `@deepseek-ai/cordis` and
-`@deepseek-ai/schemastery` stay `*` because the host only checks `dsh-*` peers.
-Upgrading the host is a deliberate change: bump the dev dependencies and the
-peer minimum together, run all three test layers, and note anything that moved
-in the changelog.
+The plugin supports a range of DeepSeek Harness versions, not just the newest.
+
+- **Pin.** The `@deepseek-ai/*` dev dependencies pin the version the plugin is
+  built against (`0.2.1-rc.2` today); local checks and the `check` CI job run
+  on it.
+- **Floor.** The four `@deepseek-ai/dsh-*` peer dependencies declare the oldest
+  supported host (`>=0.1.7-rc.1`), with no upper bound. Hosts from 0.1.7 on
+  check these ranges when a plugin is installed and started; like pnpm, they
+  compare with pre-releases included, so `0.2.1-alpha.1` satisfies the range.
+  `@deepseek-ai/cordis` and `@deepseek-ai/schemastery` stay `*` because the
+  host only checks `dsh-*` peers. The `host-floor` CI job rewrites the dev
+  dependencies to the floor with `node scripts/use-host.cjs` and runs the same
+  checks there.
+
+Moving the pin to a new host is routine: bump the dev dependencies (take
+cordis and schemastery from `npm view @deepseek-ai/dsh@<version> dependencies`),
+run all three test layers, and keep the floor where it is. Raise the floor only
+when the plugin has to use a host API the floor lacks, or a host release breaks
+compatibility so one build cannot serve both; say so in the changelog. To try a
+host without editing by hand, run `node scripts/use-host.cjs <version>` and
+`pnpm install --no-frozen-lockfile`, then revert `package.json` and
+`pnpm-lock.yaml`.
 
 ## Commits and pull requests
 
