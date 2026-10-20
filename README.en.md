@@ -81,7 +81,7 @@ dsh plugin --profile web add dsh-plastic-memory@0.1.1-beta.4
 ```
 
 > Replace `web` with the name of your target profile (it will be created automatically if it doesn't exist). The plugin declaration is written to the profile's `cordis.patch.yml` and takes effect after a restart. The package ships prebuilt on npm — no build step required.  
-> **Requirements:** Node.js `^22.19.0 || >=24`, DeepSeek Harness v0.1.7-rc.1 or later (every change is tested on this minimum and on v0.2.1-rc.2, the version the plugin is built against; earlier hosts are not supported).
+> **Requirements:** Node.js `^22.19.0 || >=24`, DeepSeek Harness v0.1.7-rc.1 or later (verified up to v0.2.1-rc.2).
 > (DeepSeek Harness is still in pre-release and may ship further breaking changes; before upgrading the host, check the version range this plugin currently supports, see the badge at the top and the CHANGELOG.)
 >
 > While in beta, pin the exact version in the install command. Once a stable release ships, you can simply run `dsh plugin --profile web add dsh-plastic-memory`.
