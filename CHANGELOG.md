@@ -5,7 +5,7 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/) with pre-release tags while the host
 (DeepSeek Harness) is itself in pre-release.
 
-## [Unreleased]
+## [0.1.1-beta.5] - 2026-10-20
 
 ### Changed
 - Built and tested against DeepSeek Harness v0.2.1-rc.2. CI now also runs the
