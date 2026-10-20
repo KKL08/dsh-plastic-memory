@@ -38,3 +38,27 @@ jobs:
           key: dsh-host-${{ runner.os }}-node${{ matrix.node }}-${{ hashFiles('package.json') }}
       - run: pnpm host:smoke
       - run: pnpm host:contract
+
+  # The oldest host the peer range admits (`>=x` on the dsh-* peers). The job
+  # above runs on the pinned host; this one rewrites the dev dependencies to the
+  # floor so a change that needs a newer host fails here instead of on users.
+  host-floor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+      - run: node scripts/use-host.cjs
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - name: Cache the floor dsh host
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/dsh-plastic-memory
+          key: dsh-host-floor-${{ runner.os }}-${{ hashFiles('package.json') }}
+      - run: pnpm host:smoke
+      - run: pnpm host:contract
