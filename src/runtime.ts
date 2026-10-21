@@ -8,7 +8,7 @@ import { assembleSnapshot, escapePromptBraces } from './snapshot.ts'
 /**
  * session 内冻结的 snapshot 缓存，按 session 隔离（WeakMap）。
  * 构建只发生在 assemble（system-prompt/assemble 中间件调用，异步）：等 workspace 解析落定或超时 →
- * 缓存缺失或已过期则预读可见记录、组装、冻结 → 首次冻结计一次召回。同步的 render（context provider）
+ * 缓存缺失或已过期则预读可见记录、组装、冻结 → 首次冻结计一次召回 → 维护点（global + 当前 workspace）。同步的 render（context provider）
  * 只回缓存，没有缓存回空串；冷启动文案由组装在可见集合为空时产出，provider 不兜底。
  * compaction 结束只标过期（markStale）不清空：宿主只调同步 provider 的 admission refresh 拿到上一份快照。
  * workspacePath 走 pull + memoize：render 发现某 session 未解析时触发一次 fire-and-forget 解析
@@ -115,6 +115,12 @@ export class SnapshotCache {
     if (!this.recalled.has(session)) {
       this.recalled.add(session)
       await this.deps.store.markRecalled(coreIds)
+    }
+    // 快照冻结是维护点之一（设计稿 §5 §6）：对 global + 当前 workspace 做维护；失败只记日志，不拖垮注入
+    try {
+      await this.deps.store.maintain({ kind: 'visible', workspacePath })
+    } catch (err) {
+      ;(this.deps.log ?? console).error('[plastic-memory] 记忆目录维护失败:', err)
     }
     return text
   }

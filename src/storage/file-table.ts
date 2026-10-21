@@ -1,6 +1,6 @@
 import { mkdir, readdir, readFile, writeFile, rename, rm, stat, link } from 'node:fs/promises'
 import { RecordNotFoundError } from '../errors.ts'
-import { dirname, join, relative } from 'node:path'
+import { basename, dirname, join, relative } from 'node:path'
 import type { MemoryRecord } from '../record-schema.ts'
 import {
   resolveDuplicates,
@@ -9,12 +9,13 @@ import {
 } from './table.ts'
 import type { KvTable } from '../kv-table.ts'
 import type { RecallStats } from './schema.ts'
-import { decodeFile, encodeRecord, type FileLocation } from './frontmatter.ts'
+import { decodeFile, digestMismatch, encodeRecord, type FileLocation } from './frontmatter.ts'
 import {
   WORKSPACE_MARKER, INDEX_FILE, GLOBAL_DIR, ARCHIVE_DIR, workspaceDirName, slugifyName, isReservedFileName,
   isMemoryFileName, isWorkspaceDirName, deriveFileId, isDerivedFileId,
 } from './paths.ts'
 import { formatIndexLine } from '../index-line.ts'
+import { withinValidity } from '../record-freshness.ts'
 import { RETENTION_MS } from '../retention.ts'
 
 /** 软删记录清扫窗口：与快照保留共用 retention.ts 的单一来源（两者必须一致）。 */
@@ -29,6 +30,8 @@ const TMP_SUFFIX_RE = /\.tmp-(\d+)-[a-z0-9]+$/
 
 /** frontmatter 里的 id 行：允许引号与两侧空白，行尾的 \r（CRLF 文件）被 \s* 吃掉。 */
 const ID_LINE_RE = /^id:\s*["']?([^"'\s]+)["']?\s*$/m
+/** frontmatter 里的 digest 行（维护点判手编：认识且不匹配才把时间戳取 mtime）；形态同 id 行。 */
+const DIGEST_LINE_RE = /^digest:\s*["']?([^"'\s]+)["']?\s*$/m
 
 /**
  * 原文与解码值可能不同的 frontmatter 形态，这类文件一律不预筛（预筛必须是超集）：
@@ -49,8 +52,8 @@ export interface FileTableOptions {
   log?: MemoryLogger
 }
 
-/** 带 extras 的读取结果（readScope 内部形态；对外的 LocatedRecord 不带 extras）。 */
-type Slot = LocatedFile
+/** 读取结果的内部形态：带 extras、磁盘原文与 mtime（维护点逐字节比较与取 mtime 用）；对外的 LocatedRecord / LocatedFile 不带后两者。 */
+interface Slot extends LocatedFile { raw: string; mtimeMs: number }
 
 interface ScopeDir { dir: string; loc: FileLocation }
 
@@ -71,6 +74,7 @@ function frontmatterOf(raw: string): string {
 /**
  * 文件表：磁盘是唯一真相，进程里不常驻记忆表（设计稿 §0）。构造不做 I/O；每个操作读它涉及的目录。
  * 读路径不加锁、不写盘；写路径经一条 Promise 链串行，锁内先 locate 重读磁盘再应用修改（外部编辑不丢）；create 是例外：新 id 不定位，排他占名。
+ * 记忆目录的维护只有两处入口：写路径末尾（被写的目录）与 maintain（快照冻结时由调用方对 global + 当前 workspace 调用），都走同一把锁。
  */
 export class FileTable implements MemoryTable {
   private chain: Promise<unknown> = Promise.resolve()  // 进程内互斥：写路径与维护点串行化
@@ -161,9 +165,13 @@ export class FileTable implements MemoryTable {
     const row = statsRows.get(outcome.record.id)
     const record = row ? { ...outcome.record, recallCount: row.recallCount, lastRecalledAt: row.lastRecalledAt } : outcome.record
     return {
-      slot: { record, extras: outcome.extras, filePath, dir },
+      slot: { record, extras: outcome.extras, filePath, dir, raw, mtimeMs },
       notes: outcome.notes.map(n => ({ ...n, path: filePath })),
     }
+  }
+
+  private toLocated({ record, extras, filePath, dir }: Slot): LocatedFile {
+    return { record, extras, filePath, dir }
   }
 
   /** 读一组已解析位置的目录（顶层，可选含 .archive/），带 extras 的内部形态。 */
@@ -209,7 +217,7 @@ export class FileTable implements MemoryTable {
     const { scopeDirs, directoryNotes } = await this.resolveDirs(dirs)
     const read = await this.readDirs(scopeDirs, opts)
     return {
-      records: read.slots.map(({ record, filePath, dir }) => ({ record, filePath, dir })),
+      records: read.slots.map(({ record, filePath, dir }) => ({ record, filePath, dir })),   // 原文与 mtime 不出内部
       quarantined: read.quarantined,
       directoryNotes: [...directoryNotes, ...read.directoryNotes],
     }
@@ -286,37 +294,75 @@ export class FileTable implements MemoryTable {
     const global: ScopeDir = { dir: this.globalDir, loc: { scope: 'global' } }
     const hinted = hint?.workspacePath === undefined ? [] : await this.hintDirs(hint.workspacePath)
     const first = await this.scanForId(id, [global, ...hinted])
-    if (first.length > 0) return resolveDuplicates(first, hint)[0]
+    if (first.length > 0) return this.toLocated(resolveDuplicates(first, hint)[0])
     const scanned = new Set([this.globalDir, ...hinted.map(d => d.dir)])
     const rest = (await this.listWorkspaceDirs()).entries
       .filter(e => !scanned.has(e.dir))
       .map(e => ({ dir: e.dir, loc: { scope: 'workspace', workspacePath: e.workspacePath } as FileLocation }))
     const second = await this.scanForId(id, rest)
-    return second.length > 0 ? resolveDuplicates(second, hint)[0] : undefined
+    return second.length > 0 ? this.toLocated(resolveDuplicates(second, hint)[0]) : undefined
   }
 
   // —— 写侧（锁内）——
 
+  async maintain(dirs: string[]): Promise<void> {
+    await this.locked(() => this.maintainDirs(dirs))
+  }
+
   /**
-   * 写路径末尾的维护动作（只动给定目录，幂等）：① deleted 且超保留期的物理删除并清召回统计行
-   * ② 再生 MEMORY.md（只列 active，内容不变不写）③ 清陈旧 tmp 残留。维护点的正式化是票 11。
+   * 维护点（设计稿 §5；锁内，只动给定目录，幂等）。每个目录读顶层 + .archive/ 一遍，逐文件：
+   *  - .archive/ 里 status 仍为 active 的按位置归一成 deleted（位置即作用域，不搬回顶层）；deleted 缺 deletedAt 用 mtime 补
+   *  - ③ .archive/ 里 deletedAt 超保留期的物理删除并清召回统计行（superseded 不清）
+   *  - ④ 手建 / 手编回写：digest 认识且不匹配 → handEdited、updatedAt 与 lastConfirmedAt 取 mtime；缺 id / 缺 digest / 时间戳形态 /
+   *    缺省字段由重新 encode 补齐；判「有变化」= 重新 encode 后与磁盘原文逐字节比较，不同才写
+   *  - ② 顶层非 active 的搬进 .archive/（撞名追加 id 片段）；已过期的 active 文件不动
+   *  - ① 再生 MEMORY.md：顶层 active 且未过期，同 id 取一份，name 再 id 排序，内容不变不写
+   *  - ⑤ 陈旧 tmp 清理
+   * 同 id 副本不在这里删（只在写该 id 时清理，见 persist）。
    */
   private async maintainDirs(dirs: readonly string[]): Promise<void> {
     const { scopeDirs } = await this.resolveDirs([...new Set(dirs)])
-    const cutoff = this.now() - DELETED_RETENTION_MS
+    const now = this.now()
+    const cutoff = now - DELETED_RETENTION_MS
     for (const sd of scopeDirs) {
+      const archive = join(sd.dir, ARCHIVE_DIR)
       const { slots } = await this.readDirs([sd], { includeArchive: true })
       const kept: LocatedRecord[] = []
-      for (const slot of resolveDuplicates(slots)) {
-        if (slot.record.status === 'deleted' && slot.record.updatedAt < cutoff) {
+      for (const slot of slots) {
+        const inArchive = dirname(slot.filePath) === archive
+        let record = slot.record
+        if (inArchive && record.status === 'active') record = { ...record, status: 'deleted' }
+        if (record.status === 'deleted' && record.deletedAt === undefined) record = { ...record, deletedAt: slot.mtimeMs }
+        if (inArchive && record.status === 'deleted' && record.deletedAt! < cutoff) {
           await rm(slot.filePath, { force: true })
-          await this.opts.stats.delete(slot.record.id)
-        } else kept.push(slot)
+          await this.opts.stats.delete(record.id)
+          continue
+        }
+        if (digestMismatch(DIGEST_LINE_RE.exec(frontmatterOf(slot.raw))?.[1], record)) {
+          record = { ...record, handEdited: true, updatedAt: slot.mtimeMs, lastConfirmedAt: slot.mtimeMs }
+        }
+        const text = encodeRecord(record, slot.extras)
+        if (!inArchive && record.status !== 'active') {
+          // 搬家不改文件名（spec：文件名不变；手编文件的名字由用户起），撞名由占名追加 id 片段
+          await mkdir(archive, { recursive: true })
+          const path = await this.claimAndWrite(record, archive, text, basename(slot.filePath, '.md'))
+          if (path.toLowerCase() !== slot.filePath.toLowerCase()) await rm(slot.filePath, { force: true })
+          continue
+        }
+        if (text !== slot.raw) await this.atomicWrite(slot.filePath, text)
+        if (!inArchive) kept.push({ record, filePath: slot.filePath, dir: slot.dir })
       }
-      // 索引只列顶层 active：.archive/ 里的文件按位置即"不再有效"，哪怕 status 写着 active
-      const topLevelActive = kept.filter(s => s.record.status === 'active' && dirname(s.filePath) === sd.dir).map(s => s.record)
-      await this.regenerateIndex(sd.dir, topLevelActive)
-      for (const level of [sd.dir, join(sd.dir, ARCHIVE_DIR)]) await this.cleanStaleTmp(level)
+      // kept 只剩顶层 active（非 active 已搬走）：同 id 取一份，再过滤已过期的
+      await this.regenerateIndex(sd.dir, resolveDuplicates(kept).map(s => s.record).filter(r => withinValidity(r, now)))
+      for (const level of [sd.dir, archive]) await this.cleanStaleTmp(level)
+    }
+  }
+
+  /** 写该 id 之后清掉可见集合（global + 该记录所在目录，含各自 .archive/）里的其余副本；其他项目的副本不动（ARCHITECTURE.md ⑥-6d）。 */
+  private async removeOtherCopies(id: string, keepPath: string, dir: string): Promise<void> {
+    const { scopeDirs } = await this.resolveDirs([...new Set([this.globalDir, dir])])
+    for (const copy of await this.scanForId(id, scopeDirs)) {
+      if (copy.filePath.toLowerCase() !== keepPath.toLowerCase()) await rm(copy.filePath, { force: true })
     }
   }
 
@@ -408,8 +454,7 @@ export class FileTable implements MemoryTable {
    * 文件（崩溃残留、同 id 副本）才允许 rename 覆盖，否则换下一个候选：基础名 → id 片段名 → 全 id 名（按构造只属于本记录，
    * 直接覆盖）。两个进程写同名异 id 的记录因此两条都存活；隔离文件、缺标记目录里的文件也不会被同 slug 写入静默覆盖。
    */
-  private async claimAndWrite(record: MemoryRecord, level: string, text: string): Promise<string> {
-    const base = slugifyName(record.name)
+  private async claimAndWrite(record: MemoryRecord, level: string, text: string, base = slugifyName(record.name)): Promise<string> {
     const tmp = join(level, `${base}.md.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`)
     await writeFile(tmp, text, 'utf8')
     try {
@@ -435,7 +480,7 @@ export class FileTable implements MemoryTable {
   /**
    * 写路径（锁内，设计稿 §5）：选目录（scope；workspace 目录不存在则 mkdir + 写标记）→ 选层（status 离开 active 进
    * .archive/，deleted 缺 deletedAt 补 now；回到 active 搬回顶层）→ 编码 → 已定位到自己文件且目录、层、slug 都没变就原地
-   * tmp + rename 覆盖，否则排他占名 → 搬家删旧 → 本目录（搬家时两个）维护点。返回实际写出的记录。
+   * tmp + rename 覆盖，否则排他占名 → 搬家删旧 → 清可见集合里该 id 的其余副本 → 本目录（搬家时两个）维护点。返回实际写出的记录。
    */
   private async persist(key: string, prev: LocatedFile | undefined, value: MemoryRecord): Promise<MemoryRecord> {
     const next = value.status === 'deleted' && value.deletedAt === undefined ? { ...value, deletedAt: this.now() } : value
@@ -453,15 +498,18 @@ export class FileTable implements MemoryTable {
       const renamed = prev !== undefined
         && slugifyName(next.name).toLowerCase() !== slugifyName(prev.record.name).toLowerCase()
       const text = encodeRecord(next, prev?.extras ?? {})   // 易变字段由 encodeRecord 剔除
+      let filePath: string
       if (prev !== undefined && !moved && !renamed && dirname(prev.filePath) === level) {
-        await this.atomicWrite(prev.filePath, text)   // 自己的文件：rename 只覆盖同一记录自己的文件
+        filePath = prev.filePath
+        await this.atomicWrite(filePath, text)   // 自己的文件：rename 只覆盖同一记录自己的文件
       } else {
         await mkdir(level, { recursive: true })
-        const filePath = await this.claimAndWrite(next, level, text)
+        filePath = await this.claimAndWrite(next, level, text)
         // 先写新后删旧；崩溃窗口由读路径的同 id 取舍兜底。占名可能落回原路径（候选名正被自己占着），
         // 路径比较忽略大小写：大小写不敏感文件系统上不能删掉刚写的自己。
         if (prev !== undefined && prev.filePath.toLowerCase() !== filePath.toLowerCase()) await rm(prev.filePath, { force: true })
       }
+      await this.removeOtherCopies(key, filePath, dir)
       await this.maintainDirs(moved ? [dir, prev!.dir] : [dir])
     }
     if (volatileChanged) {

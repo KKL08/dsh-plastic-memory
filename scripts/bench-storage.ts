@@ -24,9 +24,9 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
-import { GLOBAL_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
+import { ARCHIVE_DIR, GLOBAL_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
 import type { MemoryLogger } from '../src/storage/table.ts'
-import type { MemoryRecord } from '../src/record-schema.ts'
+import { CONFIDENCE_BY_SOURCE, type MemoryRecord } from '../src/record-schema.ts'
 import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { formatIndexLine } from '../src/index-line.ts'
@@ -81,24 +81,30 @@ function makeRecord(id: string, name: string, loc: { scope: 'global' } | { scope
   const w1 = pick(WORDS), w2 = pick(WORDS), p1 = pick(PHRASES), p2 = pick(PHRASES)
   const roll = rand()
   const status = roll < 0.95 ? 'active' : roll < 0.98 ? 'superseded' : 'deleted'
-  // deleted 的 updatedAt 留在 14 天清扫窗口内，否则预热加载会把它们物理清掉、改变数据集
-  const updatedAt = status === 'deleted' ? now - Math.floor(rand() * 5 * DAY) : now - Math.floor(rand() * 60 * DAY)
+  const updatedAt = now - Math.floor(rand() * 60 * DAY)
   const createdAt = updatedAt - Math.floor(rand() * 30 * DAY)
+  const mode = pick(MODES)
   return {
     id, name, type: pick(TYPES), ...loc,
     tags: [w1, p1],
     content: `${p1}里 ${w1} 与 ${w2} 配合时要先确认${p2}，第 ${Math.floor(rand() * 100)} 次排查记下的经验：改动后重跑 ${w2} 相关检查，再看${p1}是否回归。`,
     summary: `${w1} ${p1}要点`,
-    source: { sessionId: `bench-${Math.floor(rand() * 500)}`, eventRange: [0, Math.floor(rand() * 200)], sourceMode: pick(MODES) },
+    source: { sessionId: `bench-${Math.floor(rand() * 500)}`, eventRange: [0, Math.floor(rand() * 200)], sourceMode: mode },
     createdAt, updatedAt, lastConfirmedAt: updatedAt,
     lastRecalledAt: null, recallCount: 0,
-    status, confidence: pick([0.5, 0.8, 0.9]),
+    status,
+    // 置信度不超过 sourceMode 上限：否则维护点首次读到会按上限收口并回写，数据集在预热轮被改写
+    confidence: Math.min(pick([0.5, 0.8, 0.9]), CONFIDENCE_BY_SOURCE[mode]),
+    // deleted 落 .archive/ 且 deletedAt 留在 14 天清扫窗口内，否则维护点会把它们搬家或物理清掉、改变数据集
+    ...(status === 'deleted' ? { deletedAt: now - Math.floor(rand() * 5 * DAY) } : {}),
   }
 }
 
+/** 按插件自己的布局落盘：非 active 的进 .archive/，和维护点整理后的目录一致，计时轮里没有搬家。 */
 async function writeDir(dir: string, records: MemoryRecord[]): Promise<void> {
-  await mkdir(dir, { recursive: true })
-  await Promise.all(records.map(r => writeFile(join(dir, `${r.name}.md`), encodeRecord(r, {}), 'utf8')))
+  await mkdir(join(dir, ARCHIVE_DIR), { recursive: true })
+  await Promise.all(records.map(r =>
+    writeFile(join(r.status === 'active' ? dir : join(dir, ARCHIVE_DIR), `${r.name}.md`), encodeRecord(r, {}), 'utf8')))
 }
 
 async function generate(root: string, workspaces: string[], now: number): Promise<MemoryRecord[]> {
@@ -178,6 +184,8 @@ try {
     resolveContext,
   }
   const updateTargets = seeded.filter(r => r.workspacePath === currentWs && r.status === 'active')
+  // 顶层只有 active（非 active 在 .archive/，缺省不读）
+  const visibleActive = seeded.filter(r => r.status === 'active' && (r.scope === 'global' || r.workspacePath === currentWs)).length
 
   const results = [
     await bench('构造（零 I/O）', async () => {
@@ -185,7 +193,7 @@ try {
     }),
     await bench('readScope（当前项目 + global）', async () => {
       const r = await fileTable.readScope([join(root, workspaceDirName(currentWs)), join(root, GLOBAL_DIR)])
-      if (r.records.length !== perProject + GLOBAL_COUNT) throw new Error(`readScope 记录数不对：${r.records.length}`)
+      if (r.records.length !== visibleActive) throw new Error(`readScope 记录数不对：${r.records.length}，应为 ${visibleActive}`)
     }),
     await bench('快照冻结（当前项目 + global）', async () => {
       const s = {}

@@ -35,17 +35,20 @@ export async function prereadLayers(
   directoryNotes.push(...duplicateNotes(read, chosen))
   const byId = new Map<string, MemoryRecord>(chosen.map(l => [l.record.id, l.record]))
   const cache = new Map(await deps.cache.list())
+  const pending = await deps.decisions.list()
 
   const refs = new Set<string>()
   for (const r of byId.values()) if (r.status === 'active') for (const id of r.supersedes ?? []) refs.add(id)
   for (const layer of layers) for (const f of cache.get(layerCacheKey(layer))?.findings ?? []) for (const id of f.memoryIds) refs.add(id)
+  // 待决条目的另一方可能只剩归档（目录不进体检清单，预读不到）：触及本次层的条目，其成员也按 id 定位，跨层冲突聚合才不漏
+  for (const e of pending) if (e.memoryIds.some(id => byId.has(id))) for (const id of e.memoryIds) refs.add(id)
   for (const id of refs) {
     if (byId.has(id)) continue
     const hit = await deps.store.locate(id, hint)
     if (hit) byId.set(id, hit.record)
   }
 
-  return { byId, pending: await deps.decisions.list(), cache, quarantined, directoryNotes }
+  return { byId, pending, cache, quarantined, directoryNotes }
 }
 
 /** 同 id 的多余副本：每份一条说明（路径是副本，正文点出读取时用的那份）。 */

@@ -1,4 +1,4 @@
-import { dirname, join, relative } from 'node:path'
+import { basename, dirname, join, relative } from 'node:path'
 import type { MemoryRecord } from './record-schema.ts'
 import { RecordNotFoundError } from './errors.ts'
 import { expandQueryTerms, matchScore } from './text.ts'
@@ -10,6 +10,7 @@ import {
 import { ARCHIVE_DIR, GLOBAL_DIR, deriveFileId, isReservedFileName, slugifyName, workspaceDirName } from './storage/paths.ts'
 import { InMemoryBatchKvTable, type BatchKvTable } from './kv-table.ts'
 import type { RecallStats } from './storage/schema.ts'
+import { RETENTION_MS } from './retention.ts'
 
 export type { MemoryLogger, MemoryTable } from './storage/table.ts'
 
@@ -36,8 +37,7 @@ export class InMemoryTable implements MemoryTable {
   }
 
   /** 与 FileTable.claimAndWrite 同规则：基础名 → id 片段名 → 全 id 名，被别的 id 占着就换下一个（level 是顶层或 .archive/）。 */
-  private pathFor(record: MemoryRecord, level: string): string {
-    const base = slugifyName(record.name)
+  private pathFor(record: MemoryRecord, level: string, base = slugifyName(record.name)): string {
     for (const name of [`${base}.md`, `${base}-${record.id.slice(-6)}.md`]) {
       if (isReservedFileName(name)) continue
       const path = join(level, name)
@@ -94,7 +94,7 @@ export class InMemoryTable implements MemoryTable {
   }
 
   /** 落槽位（与 FileTable.persist 同规则）：status 离开 active 进 .archive/（deleted 缺 deletedAt 补 now）；目录、层、slug 都没变
-   *  就留在原路径，否则在目标层重新取名。返回实际落下的记录。 */
+   *  就留在原路径，否则在目标层重新取名；落下后清掉可见集合（global + 该记录的目录）里同 id 的其余副本。返回实际落下的记录。 */
   private place(prev: LocatedFile | undefined, value: MemoryRecord): MemoryRecord {
     const next = value.status === 'deleted' && value.deletedAt === undefined ? { ...value, deletedAt: Date.now() } : value
     if (prev) this.slots.delete(prev.filePath)
@@ -104,8 +104,31 @@ export class InMemoryTable implements MemoryTable {
     const renamed = prev !== undefined && slugifyName(next.name).toLowerCase() !== slugifyName(prev.record.name).toLowerCase()
     const inPlace = prev !== undefined && sameLocation && !renamed && dirname(prev.filePath) === level
     const filePath = inPlace ? prev.filePath : this.pathFor(next, level)
+    for (const s of this.slots.values()) {
+      if (s.record.id === next.id && s.filePath !== filePath && (s.dir === this.globalDir || s.dir === dir)) this.slots.delete(s.filePath)
+    }
     this.slots.set(filePath, { record: next, extras: prev?.extras ?? {}, filePath, dir })
     return next
+  }
+
+  /** 维护点的内存对应：顶层非 active 搬 .archive/（deleted 补 deletedAt）；.archive/ 里 active 按位置归一成 deleted；
+   *  .archive/ 里 deletedAt 超保留期的删掉。索引、digest、tmp 在内存里没有对应物。 */
+  async maintain(dirs: string[]) {
+    const want = new Set(dirs)
+    const now = Date.now()
+    for (const s of [...this.slots.values()].filter(s => want.has(s.dir))) {
+      const archive = join(s.dir, ARCHIVE_DIR)
+      const inArchive = dirname(s.filePath) === archive
+      let record = s.record
+      if (inArchive && record.status === 'active') record = { ...record, status: 'deleted' }
+      if (record.status === 'deleted' && record.deletedAt === undefined) record = { ...record, deletedAt: now }
+      if (inArchive && record.status === 'deleted' && record.deletedAt! < now - RETENTION_MS) { this.slots.delete(s.filePath); continue }
+      if (!inArchive && record.status !== 'active') {
+        this.slots.delete(s.filePath)
+        const filePath = this.pathFor(record, archive, basename(s.filePath, '.md'))   // 搬家不改文件名
+        this.slots.set(filePath, { ...s, record, filePath })
+      } else if (record !== s.record) this.slots.set(s.filePath, { ...s, record })
+    }
   }
 
   async create(record: MemoryRecord) {
@@ -187,9 +210,18 @@ export class MemoryStore {
     return [this.table.globalDir, ...(scope.workspacePath === undefined ? [] : await this.table.workspaceDirs(scope.workspacePath))]
   }
 
-  /** 按范围原样读目录：记录含非 active、同 id 不取舍。health / scan 的层预读用它。 */
+  /** 按范围原样读目录：记录含非 active、同 id 不取舍。health / scan 的层预读用它。
+   *  位置即作用域：.archive/ 里 status 仍写着 active 的文件（手工搬进去的）按 deleted 看待，维护点会把它归一落盘。 */
   async readLayer(scope: QueryScope | undefined, opts: ScopeReadOptions = {}): Promise<ScopeReadResult> {
-    return this.table.readScope(await this.dirsOf(scope), opts)
+    const read = await this.table.readScope(await this.dirsOf(scope), opts)
+    const records = read.records.map(l =>
+      l.record.status === 'active' && dirname(l.filePath) !== l.dir ? { ...l, record: { ...l.record, status: 'deleted' as const } } : l)
+    return { ...read, records }
+  }
+
+  /** 维护点入口（快照冻结时调用）：scope 决定维护哪些目录；未解析 workspace 时只有 global。 */
+  async maintain(scope: QueryScope): Promise<void> {
+    await this.table.maintain(await this.dirsOf(scope))
   }
 
   /**

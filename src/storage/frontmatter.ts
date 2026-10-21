@@ -82,6 +82,15 @@ export function computeDigest(name: string, summary: string, content: string): s
   return `${DIGEST_PREFIX}${createHash('sha1').update(text).digest('hex').slice(0, 16)}`
 }
 
+/**
+ * 文件里的 digest「认识且不匹配」= 内容被手改过：读取时据此标 handEdited，维护点据此把 updatedAt / lastConfirmedAt
+ * 取 mtime。缺省或前缀不认识视为未知（0.1.x 文件、手建文件），不算不匹配。
+ */
+export function digestMismatch(fileDigest: unknown, r: Pick<MemoryRecord, 'name' | 'summary' | 'content'>): boolean {
+  return typeof fileDigest === 'string' && fileDigest.startsWith(DIGEST_PREFIX)
+    && fileDigest !== computeDigest(r.name, r.summary, r.content)
+}
+
 function parseTimestamp(key: string, value: unknown): number {
   if (typeof value === 'number') {
     if (Number.isFinite(value)) return value                       // 数字毫秒（epoch ms）
@@ -134,10 +143,7 @@ export function decodeRecord(parsed: ParsedMemoryFile, loc: FileLocation, opts: 
   const confidence = cap === undefined ? (r.data.confidence ?? HAND_WRITTEN_CONFIDENCE) : Math.min(r.data.confidence ?? cap, cap)
   const record: MemoryRecord = { ...r.data, confidence }
   // digest：缺省或前缀不认识 = 未知（0.1.x 文件、手建文件），不标；认识且不匹配 = 被手改过
-  if (typeof fileDigest === 'string' && fileDigest.startsWith(DIGEST_PREFIX)
-    && fileDigest !== computeDigest(record.name, record.summary, record.content)) {
-    record.handEdited = true
-  }
+  if (digestMismatch(fileDigest, record)) record.handEdited = true
   const notes: DecodeNote[] = reserved.length === 0 ? [] : [{
     level: 'info', code: 'reserved-keys', keys: reserved,
     text: `frontmatter 含保留键 ${reserved.join('、')}，已忽略（位置由目录决定，正文即 content，召回统计不在文件里）`,

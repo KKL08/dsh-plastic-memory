@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTable, DELETED_RETENTION_MS } from '../src/storage/file-table.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
-import { workspaceDirName, WORKSPACE_MARKER, GLOBAL_DIR, STATE_DIR } from '../src/storage/paths.ts'
+import { workspaceDirName, WORKSPACE_MARKER, GLOBAL_DIR, STATE_DIR, ARCHIVE_DIR } from '../src/storage/paths.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
@@ -26,6 +26,10 @@ afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 async function seedGlobal(name: string, r: MemoryRecord, extras = {}) {
   await mkdir(join(root, GLOBAL_DIR), { recursive: true })
   await writeFile(join(root, GLOBAL_DIR, name), encodeRecord(r, extras))
+}
+async function seedArchived(name: string, r: MemoryRecord) {
+  await mkdir(join(root, GLOBAL_DIR, ARCHIVE_DIR), { recursive: true })
+  await writeFile(join(root, GLOBAL_DIR, ARCHIVE_DIR, name), encodeRecord(r, {}))
 }
 async function seedWorkspace(wsPath: string, name: string, r: MemoryRecord) {
   const dir = join(root, workspaceDirName(wsPath))
@@ -94,15 +98,15 @@ it('sidecar 合并：有行取行值，无行注入默认', async () => {
   expect(byId.get('mem_b')!.recallCount).toBe(0)
 })
 
-it('清扫在写路径末尾：deleted 且超 14 天 → 物理删除；未超期保留；纯读不清', async () => {
+it('清扫在写路径末尾：.archive/ 里 deletedAt 超 14 天 → 物理删除；未超期保留；纯读不清', async () => {
   const now = 100 * 86_400_000
-  await seedGlobal('old.md', record({ id: 'mem_old', status: 'deleted', updatedAt: now - DELETED_RETENTION_MS - 1 }))
-  await seedGlobal('fresh.md', record({ id: 'mem_fresh', status: 'deleted', updatedAt: now - 1000 }))
+  await seedArchived('old.md', record({ id: 'mem_old', status: 'deleted', updatedAt: now, deletedAt: now - DELETED_RETENTION_MS - 1 }))
+  await seedArchived('fresh.md', record({ id: 'mem_fresh', status: 'deleted', updatedAt: now - 30 * 86_400_000, deletedAt: now - 1000 }))
   const t = open({ now: () => now })
   expect(((await t.locate('mem_old'))?.record)!.status).toBe('deleted')   // 读路径不清
   await t.put('mem_x', record({ id: 'mem_x', name: 'x', updatedAt: now }))   // 写该目录触发维护
   expect((await t.locate('mem_old'))?.record).toBeUndefined()
-  await expect(stat(join(root, GLOBAL_DIR, 'old.md'))).rejects.toThrow()
+  await expect(stat(join(root, GLOBAL_DIR, ARCHIVE_DIR, 'old.md'))).rejects.toThrow()
   expect(((await t.locate('mem_fresh'))?.record)!.status).toBe('deleted')
 })
 

@@ -340,6 +340,24 @@ describe('SnapshotCache', () => {
     expect(calls).toBe(1)
   })
 
+  it('快照冻结是维护点：冻结后对 global + 当前 workspace 调一次 store.maintain；缓存命中与未解析的临时文本不调', async () => {
+    const { store, cache } = makeCache()
+    const spy = vi.spyOn(store, 'maintain')
+    await store.put(record({ id: 'mem_core', type: 'preference', content: '不要 mock 数据库' }))
+    const session = {}
+    await cache.assemble(session)                     // 未解析：临时文本，不冻结、不维护
+    expect(spy).not.toHaveBeenCalled()
+    cache.setWorkspacePath(session, '/repo')
+    await cache.assemble(session)
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(spy).toHaveBeenCalledWith({ kind: 'visible', workspacePath: '/repo' })
+    await cache.assemble(session)                     // 缓存命中
+    expect(spy).toHaveBeenCalledTimes(1)
+    cache.markStale(session)
+    await cache.assemble(session)                     // 重建再冻结：再维护一次
+    expect(spy).toHaveBeenCalledTimes(2)
+  })
+
   it('缓存按 session 隔离', async () => {
     const { cache } = makeCache()
     const a = {}

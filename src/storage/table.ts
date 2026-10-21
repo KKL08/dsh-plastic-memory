@@ -82,6 +82,12 @@ export interface MemoryTable {
   update(key: string, fn: (current: MemoryRecord) => MemoryRecord): Promise<MemoryRecord>
   /** 物理删除（含 .archive/ 里的文件）。 */
   delete(key: string): Promise<boolean>
+  /**
+   * 维护点（设计稿 §5）：只动给定目录，锁内、幂等。再生索引；顶层非 active 搬 .archive/（.archive/ 里 status 仍为 active
+   * 的按位置归一成 deleted）；.archive/ 里 deletedAt 超保留期的物理删除；手建 / 手编文件回写；陈旧 tmp 清理。
+   * 写路径末尾对被写的目录自动调用；快照冻结时由调用方对 global + 当前 workspace 调用。不删同 id 副本。
+   */
+  maintain(dirs: string[]): Promise<void>
 }
 
 /**

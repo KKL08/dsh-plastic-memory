@@ -21,6 +21,7 @@ import {
 import { record } from './helpers/record.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { RecordNotFoundError } from '../src/errors.ts'
+import { RETENTION_MS } from '../src/retention.ts'
 import { captureRejection } from './helpers/errors.ts'
 
 /** 与 P0/P1 既有测试同一约定：只声明必填字段，可选字段（validTo/supersedes/workspacePath）
@@ -478,9 +479,9 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect(typeof deleted.deletedAt).toBe('number')
     expect((await table.locate('mem_sup', { workspacePath: WS_A }))!.record.deletedAt).toBeUndefined()
 
-    // 显式给的 deletedAt 不被覆盖
-    await table.update('mem_sup', r => ({ ...r, status: 'deleted', deletedAt: 777, updatedAt: NOW - 1 }))
-    expect((await table.locate('mem_sup', { workspacePath: WS_A }))!.record.deletedAt).toBe(777)
+    // 显式给的 deletedAt 不被覆盖（取窗口内的值：清扫按 deletedAt 计 14 天）
+    await table.update('mem_sup', r => ({ ...r, status: 'deleted', deletedAt: NOW - 777, updatedAt: NOW - 1 }))
+    expect((await table.locate('mem_sup', { workspacePath: WS_A }))!.record.deletedAt).toBe(NOW - 777)
 
     // restore：整条 put 回 active（无 deletedAt）→ 从 .archive/ 搬回顶层，归档文件消失
     await table.put('mem_del', ws(WS_A, { id: 'mem_del', name: 'del', updatedAt: NOW }))
@@ -498,6 +499,70 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect(await table.locate('mem_gone')).toBeUndefined()
     expect(await topLevel(h.globalDir)).toEqual([])
     expect(await table.delete('mem_gone')).toBe(false)
+  })
+
+  // —— 票 11：维护点（docs/design-storage-file-is-memory.md §5）——
+
+  it('maintain：顶层非 active 文件搬进 .archive/（deleted 补 deletedAt，superseded 不补）；active 留在顶层', async () => {
+    const dir = h.wsDir(WS_A)
+    await h.seedFile({ dir, fileName: 'del.md', record: ws(WS_A, { id: 'mem_del', status: 'deleted' }) })
+    await h.seedFile({ dir, fileName: 'sup.md', record: ws(WS_A, { id: 'mem_sup', status: 'superseded' }) })
+    await h.seedFile({ dir, fileName: 'live.md', record: ws(WS_A, { id: 'mem_live' }) })
+    await table.maintain([dir])
+    expect((await table.readScope([dir])).records.map(r => r.record.id)).toEqual(['mem_live'])
+    const rows = new Map(await topLevel(dir))
+    expect(rows.get('mem_del')).toBe(join(dir, ARCHIVE_DIR, 'del.md'))
+    expect(rows.get('mem_sup')).toBe(join(dir, ARCHIVE_DIR, 'sup.md'))
+    expect(typeof (await table.locate('mem_del', { workspacePath: WS_A }))!.record.deletedAt).toBe('number')
+    expect((await table.locate('mem_sup', { workspacePath: WS_A }))!.record.deletedAt).toBeUndefined()
+  })
+
+  it('.archive/ 里 status 仍为 active 的文件按位置视为无效：readLayer / query 不把它当 active；maintain 把它归一成 deleted', async () => {
+    const dir = h.wsDir(WS_A)
+    await h.seedFile({ dir, fileName: 'stray.md', record: ws(WS_A, { id: 'mem_stray' }), archived: true })
+    await h.seedFile({ dir, fileName: 'live.md', record: ws(WS_A, { id: 'mem_live' }) })
+    const layer = await store.readLayer({ kind: 'workspace', path: WS_A }, { includeArchive: true })
+    expect(layer.records.find(r => r.record.id === 'mem_stray')!.record.status).toBe('deleted')
+    expect((await store.query({ scope: { kind: 'workspace', path: WS_A }, status: ['active', 'superseded', 'deleted'] }))
+      .map(r => [r.id, r.status]).sort()).toEqual([['mem_live', 'active'], ['mem_stray', 'deleted']])
+    await table.maintain([dir])
+    const hit = (await table.locate('mem_stray', { workspacePath: WS_A }))!
+    expect(hit.record.status).toBe('deleted')
+    expect(typeof hit.record.deletedAt).toBe('number')
+    expect(hit.filePath).toBe(join(dir, ARCHIVE_DIR, 'stray.md'))   // 不搬回顶层
+  })
+
+  it('maintain：.archive/ 里 deletedAt 超 14 天的物理删除（判据是 deletedAt）；superseded 与窗口内的 deleted 保留', async () => {
+    const now = Date.now()
+    const old = now - RETENTION_MS - 86_400_000
+    await h.seedFile({ dir: h.globalDir, fileName: 'gone.md', record: record({ id: 'mem_gone', status: 'deleted', updatedAt: now, deletedAt: old }), archived: true })
+    await h.seedFile({ dir: h.globalDir, fileName: 'fresh.md', record: record({ id: 'mem_fresh', status: 'deleted', updatedAt: old, deletedAt: now }), archived: true })
+    await h.seedFile({ dir: h.globalDir, fileName: 'sup.md', record: record({ id: 'mem_sup', status: 'superseded', updatedAt: old }), archived: true })
+    await table.maintain([h.globalDir])
+    expect((await topLevel(h.globalDir)).map(([id]) => id).sort()).toEqual(['mem_fresh', 'mem_sup'])
+    expect(await table.locate('mem_gone')).toBeUndefined()
+  })
+
+  it('同 id 副本只在写该 id 时清理，且只删可见集合（global + 该记录的 workspace 目录，含 .archive/）内的其余副本', async () => {
+    const now = Date.now()
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'cur.md', record: ws(WS_A, { id: 'mem_c', content: '当前', updatedAt: now - 1 }) })
+    await h.seedFile({ dir: h.globalDir, fileName: 'cur-g.md', record: record({ id: 'mem_c', content: 'global 副本', updatedAt: now - 2 }) })
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'cur-old.md', record: ws(WS_A, { id: 'mem_c', content: '归档副本', status: 'deleted', updatedAt: now - 3, deletedAt: now }), archived: true })
+    await h.seedFile({ dir: h.wsDir(WS_B), fileName: 'cur.md', record: ws(WS_B, { id: 'mem_c', content: '别的项目', updatedAt: now - 4 }) })
+    await h.seedFile({ dir: h.globalDir, fileName: 'by-1.md', record: record({ id: 'mem_by', updatedAt: 100 }) })
+    await h.seedFile({ dir: h.globalDir, fileName: 'by-2.md', record: record({ id: 'mem_by', updatedAt: 200 }) })
+    // 维护点本身不删副本
+    await table.maintain([h.globalDir, h.wsDir(WS_A)])
+    expect((await topLevel(h.globalDir)).filter(([id]) => id === 'mem_by')).toHaveLength(2)
+    expect((await table.readScope([h.globalDir, h.wsDir(WS_A)], { includeArchive: true })).records.filter(r => r.record.id === 'mem_c')).toHaveLength(3)
+
+    // put 带 workspacePath：一级定位 global + 本项目目录，取舍到 updatedAt 最新的本项目那份
+    await table.put('mem_c', ws(WS_A, { id: 'mem_c', content: '改过', updatedAt: now }))
+    const visible = (await table.readScope([h.globalDir, h.wsDir(WS_A)], { includeArchive: true })).records
+    expect(visible.filter(r => r.record.id === 'mem_c').map(r => r.filePath)).toEqual([join(h.wsDir(WS_A), 'cur.md')])
+    expect(visible.filter(r => r.record.id === 'mem_by')).toHaveLength(2)                        // 别的 id 的副本不动
+    expect((await topLevel(h.wsDir(WS_B))).map(([id, p]) => [id, p])).toEqual([['mem_c', join(h.wsDir(WS_B), 'cur.md')]])   // 其他项目不动
+    expect((await table.locate('mem_c', { workspacePath: WS_A }))!.record.content).toBe('改过')
   })
 
 })
