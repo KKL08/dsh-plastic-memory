@@ -140,6 +140,21 @@ describe('预筛是超集（性质测试）', () => {
     }), { numRuns: 40 })
   })
 
+  it('readScope(prefilterTerms, prefilterMatch: any) 的结果 ⊇ 真匹配（任一词项子串命中）的记录', async () => {
+    await fc.assert(fc.asyncProperty(fc.array(rec, { minLength: 1, maxLength: 6 }), fc.array(term, { minLength: 1, maxLength: 3 }), async (recs, terms) => {
+      const dir = await mkdtemp(join(root, 'prop-'))
+      const gdir = join(dir, GLOBAL_DIR)
+      await mkdir(gdir)
+      await Promise.all(recs.map((r, i) => writeFile(join(gdir, `r${i}.md`), encodeRecord(record({ id: `mem_p${i}`, ...r }), {}))))
+      const t = new FileTable({ root: dir, stats: new InMemoryKvTable<RecallStats>() })
+      const lower = terms.map(x => x.toLowerCase())
+      const truth = (await t.readScope([gdir])).records.filter(r => matchScore(r.record, lower) > 0).map(r => r.record.id)
+      const filtered = (await t.readScope([gdir], { prefilterTerms: terms, prefilterMatch: 'any' })).records.map(r => r.record.id)
+      for (const id of truth) expect(filtered).toContain(id)
+      await rm(dir, { recursive: true, force: true })
+    }), { numRuns: 40 })
+  })
+
   it('手写的转义标量（双引号反斜杠、单引号 \'\' 、折行续行）一律不预筛', async () => {
     await mkdir(globalDir(), { recursive: true })
     const files: Record<string, string> = {

@@ -26,9 +26,14 @@ export interface LocatedRecord { record: MemoryRecord; filePath: string; dir: st
 /** 定位结果：比 LocatedRecord 多带 extras（未知 frontmatter 键，写回时保留）。 */
 export interface LocatedFile extends LocatedRecord { extras: Record<string, unknown> }
 
+/** 多词关键词的匹配模式：all = 全部词项命中，any = 任一词项命中。 */
+export type KeywordMatch = 'all' | 'any'
+
 export interface ScopeReadOptions {
-  /** 原文预筛词项（小写子串，全部命中才解析）；预筛是超集，不改变匹配结果。内存实现不预筛。 */
+  /** 原文预筛词项（小写子串）；预筛是超集，不改变匹配结果。内存实现不预筛。 */
   prefilterTerms?: string[]
+  /** 预筛模式：all（缺省）= 全部词项命中才解析；any = 任一词项命中即解析。与关键词匹配模式一致。 */
+  prefilterMatch?: KeywordMatch
   /** 只要这些 type 的记录（解析后过滤）。 */
   types?: string[]
   /** 连同各目录的 .archive/ 一起读。 */

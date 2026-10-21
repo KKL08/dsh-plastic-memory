@@ -46,7 +46,9 @@ export type HealthRecommendationKind =
 export type ToolGateCode = 'subagent-readonly' // 子 agent 会话（delegationDepth ≥ 1）不可写
 
 /** memory_search 的说明性 note（search.ts）。 */
-export type SearchNoteCode = 'no-workspace' // scope=workspace 但当前会话没有工作目录
+export type SearchNoteCode =
+  | 'no-workspace'   // scope=workspace 但当前会话没有工作目录
+  | 'or-fallback'    // 多词查询没有同时命中全部词项的记忆，结果改为命中任一词项、按命中数排序
 
 /** frontmatter 解析失败的原因（storage/frontmatter.ts）。 */
 export type FrontmatterErrorCode =

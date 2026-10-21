@@ -4,7 +4,7 @@ import { RecordNotFoundError } from './errors.ts'
 import { expandQueryTerms, matchScore } from './text.ts'
 import {
   resolveDuplicates,
-  type MemoryLogger, type MemoryTable, type LocatedFile, type LocateHint, type ScopeReadOptions, type ScopeReadResult,
+  type MemoryLogger, type MemoryTable, type LocatedFile, type LocateHint, type ScopeReadOptions, type ScopeReadResult, type KeywordMatch,
   type WorkspaceDirListing, type DirectoryNote, type QuarantineEntry,
 } from './storage/table.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, deriveFileId, isReservedFileName, slugifyName, workspaceDirName } from './storage/paths.ts'
@@ -12,7 +12,7 @@ import { InMemoryBatchKvTable, type BatchKvTable } from './kv-table.ts'
 import type { RecallStats } from './storage/schema.ts'
 import { RETENTION_MS } from './retention.ts'
 
-export type { MemoryLogger, MemoryTable } from './storage/table.ts'
+export type { MemoryLogger, MemoryTable, KeywordMatch } from './storage/table.ts'
 
 /** 双后端套件往虚拟目录放文件用的记录：缺 id 时按相对路径派生（对应 FileTable 读手建文件）。 */
 export type SeedRecord = Omit<MemoryRecord, 'id'> & { id?: string }
@@ -164,6 +164,8 @@ export interface QueryFilter {
   tags?: string[]
   status?: MemoryRecord['status'][]
   keyword?: string
+  /** keyword 展开后的多个词项怎么算命中：all（缺省）= 全部命中，any = 任一命中。 */
+  keywordMatch?: KeywordMatch
 }
 
 /** 一次查询的完整结果：记录之外带上同一次读取里的隔离文件与目录级说明（冷启动文案要分辨「空」与「全坏」）。 */
@@ -232,18 +234,21 @@ export class MemoryStore {
     const statuses = filter.status ?? ['active']
     const scope = filter.scope
     const hint = scope?.kind === 'workspace' ? scope.path : scope?.kind === 'visible' ? scope.workspacePath : undefined
-    // keyword 是排序 OR：命中任一匹配项即入选（硬 AND 会让"多一个不相关词"整组落空），所以不传原文预筛——
-    // 预筛是 AND 语义，只有全部词项都必须命中时才能用。中文经 bigram 切分也参与匹配；命中数排序与 limit
-    // 由调用方（executeSearch）用同一 matchScore 收敛。
+    // keyword 按 keywordMatch 取全部或任一词项命中（AND 零命中回退 OR 由调用方 executeSearch 决定）。
+    // 原文预筛用同一组词项、同一模式：expandQueryTerms 只做小写、按空白切分、CJK 段切 bigram，不扩同义词，
+    // 每个词项都是查询原文的子串，命中记录的原文里必然以子串出现（缺 id 行文件的派生 id 由 FileTable 预筛一并算入），
+    // 所以预筛是超集。
+    const terms = filter.keyword ? expandQueryTerms(filter.keyword.toLowerCase()) : []
+    const keywordMatch = filter.keywordMatch ?? 'all'
     const read = await this.readLayer(scope, {
       ...(filter.types ? { types: filter.types } : {}),
+      ...(terms.length > 0 ? { prefilterTerms: terms, prefilterMatch: keywordMatch } : {}),
       includeArchive: statuses.some(s => s !== 'active'),
     })
-    const terms = filter.keyword ? expandQueryTerms(filter.keyword.toLowerCase()) : []
     const records = resolveDuplicates(read.records, { workspacePath: hint }).map(l => l.record).filter(r =>
       statuses.includes(r.status)
       && (!filter.tags || filter.tags.some(t => r.tags.includes(t)))
-      && (terms.length === 0 || matchScore(r, terms) > 0))
+      && (terms.length === 0 || (keywordMatch === 'any' ? matchScore(r, terms) > 0 : matchScore(r, terms) === terms.length)))
     return { records, quarantined: read.quarantined, directoryNotes: read.directoryNotes }
   }
 

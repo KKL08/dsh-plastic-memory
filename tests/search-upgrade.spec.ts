@@ -10,17 +10,18 @@ import { record } from './helpers/record.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 
-describe('store.query 关键词 OR 匹配（含 CJK bigram）+ id/name 入 haystack', () => {
-  it('命中任一词即入选（OR 放宽）；多一个不相关词不再空手', async () => {
+describe('store.query 关键词匹配（含 CJK bigram）+ id/name 入 haystack', () => {
+  it('缺省全部词项命中（AND）；keywordMatch any 时命中任一词即入选', async () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_pnpm', content: '这个项目的包管理一律用 pnpm，不要用 npm' }))
 
     expect((await store.query({ keyword: 'pnpm 包管理' })).map(r => r.id)).toEqual(['mem_pnpm'])
     expect((await store.query({ keyword: 'pnpm 不要用' })).map(r => r.id)).toEqual(['mem_pnpm'])
-    // OR 放宽：夹一个不匹配词不再零结果（硬 AND 的病灶）
-    expect((await store.query({ keyword: 'pnpm 不存在的怪词' })).map(r => r.id)).toEqual(['mem_pnpm'])
+    // 夹一个不匹配词：AND 落空，any 仍命中（executeSearch 据此回退）
+    expect((await store.query({ keyword: 'pnpm 不存在的怪词' })).map(r => r.id)).toEqual([])
+    expect((await store.query({ keyword: 'pnpm 不存在的怪词', keywordMatch: 'any' })).map(r => r.id)).toEqual(['mem_pnpm'])
     // 全不匹配才空
-    expect((await store.query({ keyword: 'golang rust' })).map(r => r.id)).toEqual([])
+    expect((await store.query({ keyword: 'golang rust', keywordMatch: 'any' })).map(r => r.id)).toEqual([])
   })
 
   it('按 id 可检索、按 name 可检索（索引→全文断路修复）', async () => {
@@ -42,13 +43,13 @@ describe('store.query 关键词 OR 匹配（含 CJK bigram）+ id/name 入 hayst
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_deploy', content: '部署的流程和配置都记在 wiki' }))
 
-    // "部署流程配置"整段在正文里不连续；bigram(部署/署流/流程/程配/配置)命中 部署+流程+配置
-    expect((await store.query({ keyword: '部署流程配置' })).map(r => r.id)).toEqual(['mem_deploy'])
+    // "部署流程配置"整段在正文里不连续；bigram(部署/署流/流程/程配/配置)命中 部署+流程+配置（任一命中模式）
+    expect((await store.query({ keyword: '部署流程配置', keywordMatch: 'any' })).map(r => r.id)).toEqual(['mem_deploy'])
   })
 })
 
-describe('executeSearch 排序：命中词数 → confidence → recallCount', () => {
-  it('命中更多查询词的排前，即使 confidence 较低', async () => {
+describe('executeSearch 排序：命中词数 → confidence → lastConfirmedAt', () => {
+  it('OR 回退时命中更多查询词的排前，即使 confidence 较低', async () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_two', content: 'deploy hook 都齐了', confidence: 0.5 }))
     await store.put(record({ id: 'mem_one', content: '只提到 deploy', confidence: 0.9 }))
@@ -56,7 +57,7 @@ describe('executeSearch 排序：命中词数 → confidence → recallCount', (
       store, registry,
       resolveContext: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }),
     }
-    const result = await executeSearch({ query: 'deploy hook' }, fakeExec(), deps)
+    const result = await executeSearch({ query: 'deploy hook rollback' }, fakeExec(), deps)
     // mem_two 命中 2 词、confidence 0.5；mem_one 命中 1 词、confidence 0.9——命中数优先
     expect(result.hits.map(h => h.id)).toEqual(['mem_two', 'mem_one'])
   })

@@ -5,7 +5,7 @@ import type { MemoryRecord } from '../record-schema.ts'
 import {
   resolveDuplicates,
   type MemoryTable, type MemoryLogger, type DirectoryNote, type QuarantineEntry, type LocatedFile, type LocatedRecord,
-  type LocateHint, type ScopeReadOptions, type ScopeReadResult, type WorkspaceDirListing,
+  type LocateHint, type ScopeReadOptions, type ScopeReadResult, type WorkspaceDirListing, type KeywordMatch,
 } from './table.ts'
 import type { KvTable } from '../kv-table.ts'
 import type { RecallStats } from './schema.ts'
@@ -41,6 +41,10 @@ const DIGEST_LINE_RE = /^digest:\s*["']?([^"'\s]+)["']?\s*$/m
  * 其余折行（纯量在空格处折行、块标量）只改变空白，词项不含空白，子串匹配不受影响。
  */
 const ESCAPED_SCALAR_RE = /"[^"]*\\|'[^']*''/
+
+/** 原文预筛：小写词项与模式（all = 全部命中才解析，any = 任一命中即解析）。词项为空即不预筛。 */
+interface Prefilter { terms: readonly string[]; match: KeywordMatch }
+const NO_PREFILTER: Prefilter = { terms: [], match: 'all' }
 
 export interface FileTableOptions {
   root: string
@@ -137,16 +141,18 @@ export class FileTable implements MemoryTable {
     }
   }
 
-  private passesPrefilter(raw: string, terms: readonly string[]): boolean {
+  private passesPrefilter(raw: string, filePath: string, { terms, match }: Prefilter): boolean {
     if (terms.length === 0) return true
     if (ESCAPED_SCALAR_RE.test(frontmatterOf(raw))) return true   // 解码后才出现的子串：不敢排除
-    const lower = raw.toLowerCase()
-    return terms.every(t => lower.includes(t))
+    // 缺 id 行的手建文件，id 由相对路径派生、原文里没有：一并算进去（索引里列出派生 id，模型会拿它来搜）。
+    // 词项不含空白，不会跨过拼接处的换行。
+    const text = `${raw.toLowerCase()}\n${deriveFileId(relative(this.opts.root, filePath))}`
+    return match === 'any' ? terms.some(t => text.includes(t)) : terms.every(t => text.includes(t))
   }
 
   /** 读单个记忆文件。返回 undefined = 被预筛跳过 / 竞态消失 / 不是普通文件。 */
   private async readMemoryFile(
-    filePath: string, dir: string, loc: FileLocation, terms: readonly string[], statsRows: ReadonlyMap<string, RecallStats>,
+    filePath: string, dir: string, loc: FileLocation, prefilter: Prefilter, statsRows: ReadonlyMap<string, RecallStats>,
   ): Promise<{ slot: Slot; notes: DirectoryNote[] } | { quarantined: QuarantineEntry } | undefined> {
     let mtimeMs: number
     let raw: string
@@ -159,7 +165,7 @@ export class FileTable implements MemoryTable {
       if (errnoCode(err) === 'ENOENT') return undefined   // readdir 之后被删：竞态
       return { quarantined: { path: filePath, error: err instanceof Error ? err.message : String(err) } }
     }
-    if (!this.passesPrefilter(raw, terms)) return undefined
+    if (!this.passesPrefilter(raw, filePath, prefilter)) return undefined
     const outcome = decodeFile(raw, { path: filePath, loc, relPath: relative(this.opts.root, filePath), mtimeMs })
     if (!outcome.ok) return { quarantined: { path: outcome.path, error: outcome.error } }
     const row = statsRows.get(outcome.record.id)
@@ -179,7 +185,10 @@ export class FileTable implements MemoryTable {
     const slots: Slot[] = []
     const quarantined: QuarantineEntry[] = []
     const directoryNotes: DirectoryNote[] = []
-    const terms = (opts.prefilterTerms ?? []).map(t => t.toLowerCase()).filter(t => t !== '')
+    const prefilter: Prefilter = {
+      terms: (opts.prefilterTerms ?? []).map(t => t.toLowerCase()).filter(t => t !== ''),
+      match: opts.prefilterMatch ?? 'all',
+    }
     const statsRows = new Map(await this.opts.stats.list())
     for (const { dir, loc } of dirs) {
       const levels = opts.includeArchive ? [dir, join(dir, ARCHIVE_DIR)] : [dir]
@@ -187,7 +196,7 @@ export class FileTable implements MemoryTable {
         const listed = await this.listMemoryFiles(level)
         if ('note' in listed) { directoryNotes.push(listed.note); continue }
         const results = await Promise.all(listed.names.sort().map(name =>
-          this.readMemoryFile(join(level, name), dir, loc, terms, statsRows)))
+          this.readMemoryFile(join(level, name), dir, loc, prefilter, statsRows)))
         for (const r of results) {
           if (r === undefined) continue
           if ('quarantined' in r) { quarantined.push(r.quarantined); continue }
@@ -282,7 +291,7 @@ export class FileTable implements MemoryTable {
         }))
         for (const filePath of hits) {
           if (filePath === undefined) continue
-          const r = await this.readMemoryFile(filePath, dir, loc, [], statsRows)
+          const r = await this.readMemoryFile(filePath, dir, loc, NO_PREFILTER, statsRows)
           if (r !== undefined && 'slot' in r && r.slot.record.id === id) found.push(r.slot)
         }
       }

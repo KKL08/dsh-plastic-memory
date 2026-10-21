@@ -1,5 +1,5 @@
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { MemoryStore } from '../store.ts'
+import type { MemoryStore, KeywordMatch } from '../store.ts'
 import type { SearchNoteCode } from '../contract-codes.ts'
 import { expandQueryTerms, matchScore } from '../text.ts'
 import type { TypeRegistry } from '../type-registry.ts'
@@ -35,11 +35,14 @@ export interface SearchHit {
   stalenessNote: string
 }
 
-/** 把命中结果渲染成给模型看的一段文本。纯函数。 */
+/** OR 回退的说明文案（noteCode 'or-fallback'）。 */
+export const OR_FALLBACK_NOTE = '没有同时命中全部关键词的记忆，以下是命中任一关键词的结果，按命中词数排序。'
+
+/** 把命中结果渲染成给模型看的一段文本：有说明先写说明，再列命中。纯函数。 */
 export function renderSearchResult(result: { hits: SearchHit[]; note?: string }): string {
-  if (result.note !== undefined) return result.note
-  if (result.hits.length === 0) return '没有匹配的记忆。'
-  return result.hits.map(h => `[${h.id}] ${h.type}｜${h.summary}${h.sourceNote}${h.stalenessNote}\n${h.content}`).join('\n\n')
+  const blocks = result.hits.map(h => `[${h.id}] ${h.type}｜${h.summary}${h.sourceNote}${h.stalenessNote}\n${h.content}`)
+  if (result.note !== undefined) blocks.unshift(result.note)
+  return blocks.length === 0 ? '没有匹配的记忆。' : blocks.join('\n\n')
 }
 
 /**
@@ -64,18 +67,28 @@ export async function executeSearch(
     : a.scope === 'workspace' && workspacePath
       ? { kind: 'workspace' as const, path: workspacePath }
       : { kind: 'visible' as const, workspacePath }
-  // OR 匹配后按（命中词数 ↓ → confidence ↓ → recallCount ↓）排序：命中更多查询词者更相关。
   const terms = expandQueryTerms(a.query)
   const now = Date.now()
-  // 预读范围：只读 active（store.query 缺省 status），按 scope 与关键词过滤
-  const hits = (await deps.store.query({ keyword: a.query, types: a.types, scope: scopeFilter }))
-    .filter(r => withinValidity(r, now)) // validTo 已过期的不进检索，与注入口径一致（治理扫描仍可见）
+  // 预读范围：只读 active（store.query 缺省 status），按 scope 与关键词过滤；
+  // validTo 已过期的不进检索，与注入口径一致（治理扫描仍可见）
+  const find = async (keywordMatch: KeywordMatch) =>
+    (await deps.store.query({ keyword: a.query, keywordMatch, types: a.types, scope: scopeFilter })).filter(r => withinValidity(r, now))
+  // 先 AND（全部词项命中）；零命中且不止一个词项时回退 OR（任一命中），并说明走了回退
+  let found = await find('all')
+  let fallback = false
+  if (found.length === 0 && terms.length > 1) {
+    found = await find('any')
+    fallback = found.length > 0
+  }
+  // 命中词数 ↓ → confidence ↓ → lastConfirmedAt ↓；召回计数不参与
+  const hits = found
     .map(r => ({ r, score: matchScore(r, terms) }))
-    .sort((x, y) => y.score - x.score || y.r.confidence - x.r.confidence || y.r.recallCount - x.r.recallCount)
+    .sort((x, y) => y.score - x.score || y.r.confidence - x.r.confidence || y.r.lastConfirmedAt - x.r.lastConfirmedAt)
     .slice(0, limit)
     .map(e => e.r)
   await deps.store.markRecalled(hits.map(h => h.id))
   return {
+    ...(fallback ? { noteCode: 'or-fallback' as const, note: OR_FALLBACK_NOTE } : {}),
     hits: hits.map(h => ({
       id: h.id, type: h.type, summary: h.summary, content: h.content,
       sourceNote: sourceNote(h),

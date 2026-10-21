@@ -12,7 +12,7 @@ export function createSearchTool(deps: SearchToolDeps): ToolDefinition {
     name: 'memory_search',
     description: '按关键词检索长期记忆。索引里列出的记忆想看全文、或怀疑有相关记忆没列出时用。',
     parameters: {
-      query: { type: 'string', required: true, description: '关键词，对内容、摘要、标签匹配' },
+      query: { type: 'string', required: true, description: '关键词，对内容、摘要、标签匹配；多个词要全部命中，全部不命中时回退到任一命中并在结果里说明' },
       types: { type: 'array', items: { type: 'string' } },
       scope: { type: 'string', enum: ['global', 'workspace', 'all-visible'], description: '缺省 all-visible（global + 当前 workspace）' },
       limit: { type: 'number', description: '返回条数上限，缺省 10，最大 50' },

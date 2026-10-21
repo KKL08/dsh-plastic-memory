@@ -21,7 +21,7 @@ export function createSaveTool(deps: SaveToolDeps): ToolDefinition {
       type: { type: 'string', enum: typeNames, required: true },
       scope: { type: 'string', enum: ['global', 'workspace'], required: true },
       content: { type: 'string', required: true },
-      summary: { type: 'string', required: true, description: '一行摘要，会显示在记忆索引里' },
+      summary: { type: 'string', required: true, description: '检索面，写会被搜到的限定词、专有名词，不复述 name。一行，也显示在记忆索引里' },
       tags: { type: 'array', items: { type: 'string' }, description: '检索用关键词——技术名、路径、专有名词，不写泛化概念' },
       sourceMode: { type: 'string', enum: ['user-explicit', 'user-behavior', 'environment-observed', 'agent-inferred', 'agent-action-confirmed'], required: true },
       confidence: { type: 'number', description: '取值 0–1（0.9=确定，0.5=推测）。越界会被夹到边界、不报错，所以想表达低置信就填小值，别填 0 以上的整数' },
