@@ -42,6 +42,9 @@ export type HealthRecommendationKind =
   | 'issues-below-threshold'  // 有问题但未达提示阈值
   | 'promote-candidates'      // 闲时事务：有全局提升候选待确认
 
+/** 注册处统一拦截的工具门拒绝码（tools/subagent-gate.ts）。 */
+export type ToolGateCode = 'subagent-readonly' // 子 agent 会话（delegationDepth ≥ 1）不可写
+
 /** memory_search 的说明性 note（search.ts）。 */
 export type SearchNoteCode = 'no-workspace' // scope=workspace 但当前会话没有工作目录
 

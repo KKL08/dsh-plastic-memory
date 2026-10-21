@@ -9,7 +9,7 @@ import { FileTable } from './storage/file-table.ts'
 import { SidecarStore, type LegacyKvTables } from './storage/sidecar.ts'
 import { resolveMemoryRoot } from './storage/paths.ts'
 import { formatIndexLine } from './index-line.ts'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { Session } from '@deepseek-ai/dsh-session'
 // dsh-agent 的类型增广把 turnBoundary 键登记进投影状态表；stateOf(session, 'turnBoundary') 因此按宿主真实键表校验。
 import type {} from '@deepseek-ai/dsh-agent'
@@ -25,6 +25,7 @@ import type { PromoteTarget } from './tools/promote.ts'
 import { createAgentsMdWriter, agentsMdPath } from './storage/agents-md.ts'
 import { createSnapshotTool } from './tools/snapshot-tool.ts'
 import { createSourceTool } from './tools/source-tool.ts'
+import { delegationDepthOf, gateSubagentWrites } from './tools/subagent-gate.ts'
 import type { ReadEventFn } from './tools/source.ts'
 import { SnapshotCache, resolveWorkspacePath } from './runtime.ts'
 import { PROMPT_LBRACE_VARIABLE } from './snapshot.ts'
@@ -208,7 +209,7 @@ export async function apply(ctx: Context, config: Config) {
     }
   }
 
-  // 工具执行上下文：从 exec.agent.session 取 session 与 workspace。证据锚的两个数都走宿主
+  // 工具执行上下文：从 exec.agent.session 取 session、workspace 与子 agent 深度（header.delegationDepth）。证据锚的两个数都走宿主
   // 0.1.5 起的明码标价读法（Session 不再暴露整份事件数组）：终点 = session.seq - 1（seq 是下一条
   // 事件的位置，O(1)）；起点 = agent-loop 注册的 turnBoundary 投影里的 openTurnStartSeq
   // （当轮 turn/start 的 seq，宿主按事件增量折叠，不重扫日志）。
@@ -216,6 +217,7 @@ export async function apply(ctx: Context, config: Config) {
     const session = exec.agent?.session
     return {
       workspacePath: await resolveWorkspacePath(ctx, session?.header.cwd),
+      delegationDepth: delegationDepthOf(session),
       session: {
         id: session?.header.id ?? 'unknown',
         lastSeq: session ? Math.max(session.seq - 1, 0) : 0,
@@ -283,12 +285,14 @@ export async function apply(ctx: Context, config: Config) {
     return texts.length === 0 ? null : texts
   }
 
-  ctx.tools.register(createSaveTool({ store, registry, resolveContext, snapshots }))
+  // 子 agent 只读门：写入与治理工具在注册处统一套门，子 agent 会话（delegationDepth ≥ 1）调用即拒
+  const registerWrite = (tool: ToolDefinition) => ctx.tools.register(gateSubagentWrites(tool, resolveContext))
+  registerWrite(createSaveTool({ store, registry, resolveContext, snapshots }))
   ctx.tools.register(createSearchTool({ store, registry, resolveContext }))
-  ctx.tools.register(createForgetTool({ store, snapshots, decisions, log: ctx.logger }))
+  registerWrite(createForgetTool({ store, snapshots, decisions, log: ctx.logger }))
   // 快照的写入与恢复必须成对——治理关闭时 forget 仍会拍快照，若没有恢复入口，
   // 14 天的快照就是死存储。故 memory_snapshot 放在治理开关之外，与 forget 一起常驻。
-  ctx.tools.register(createSnapshotTool({ store, snapshots }))
+  registerWrite(createSnapshotTool({ store, snapshots }))
   // memory_source：证据下钻（日常 + 治理都用，常驻）。sessionQuery 是 base bundle 默认服务，
   // 但按 llm 同款惯例 per-call 探测 + try/catch——某些 profile 缺席时工具内优雅降级，不挂载失败。
   ctx.tools.register(createSourceTool({
@@ -303,9 +307,10 @@ export async function apply(ctx: Context, config: Config) {
     },
   }))
   if (config.governance.enabled) {
-    ctx.tools.register(createConfirmTool({ store, decisions, snapshots }))
-    // 基线按触发调用的 session 取（宿主投影 cell 按 session 隔离，防多会话串台）
-    ctx.tools.register(createScanTool({
+    registerWrite(createConfirmTool({ store, decisions, snapshots }))
+    // 基线按触发调用的 session 取（宿主投影 cell 按 session 隔离，防多会话串台）。
+    // 扫描会写语义缓存、登记待决冲突，归写工具；health 纯读，不套门
+    registerWrite(createScanTool({
       store, registry, decisions, cache: scanCache,
       getBaseline: exec => sessionBaseline(exec.agent?.session),
       // exec → { session, agentOptions } 的小 helper：makeSemanticLlm 本体不再触碰 exec 形状。
@@ -325,7 +330,7 @@ export async function apply(ctx: Context, config: Config) {
     // AGENTS.md 位置从 DSH_HOME 独立解析（不从 memoryRoot 反推——自定义 root 时会指向 dsh 不读的文件）
     const agentsMd = createAgentsMdWriter(agentsMdPath())
     const defaultTarget: PromoteTarget = config.governance.globalPromoteTarget === 'agents-md' ? 'agents-md' : 'global'
-    ctx.tools.register(createPromoteTool({ store, agentsMd, snapshots, defaultTarget }))
+    registerWrite(createPromoteTool({ store, agentsMd, snapshots, defaultTarget }))
   }
 
   // frozen snapshot：按 session 隔离缓存，session/created 异步解析 workspace，compaction 结束标过期、下一次中间件重建。
