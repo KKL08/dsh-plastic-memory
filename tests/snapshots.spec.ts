@@ -32,7 +32,7 @@ describe('SnapshotStore.diff / restore', () => {
   it('diff 标出快照后被修改过的记录', async () => {
     const s = makeStore()
     const snap = await s.capture({ operation: 'pre-forget', description: 'd', records: [record({ id: 'mem_a', updatedAt: 50 })] }, 100)
-    const changed = record({ id: 'mem_a', updatedAt: 150 })
+    const changed = record({ id: 'mem_a', content: '改过', updatedAt: 150 })
     const entries = s.diff(snap, new Map([['mem_a', changed]]))
     expect(entries).toHaveLength(1)
     expect(entries[0].changedAfterSnapshot).toBe(true)

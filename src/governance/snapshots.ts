@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { KvTable } from '../kv-table.ts'
 import { genId, type MemorySnapshot } from './schema.ts'
@@ -14,11 +15,26 @@ export interface SnapshotDiffEntry {
 }
 
 /**
- * 软删除不是"更新的编辑"，它正是要撤销的对象；把它算作冲突会让 memory_forget 的撤销默认失效。
- * 因此当前记录若已是 status: 'deleted'，即便 updatedAt 晚于快照，也不计入冲突。
+ * 恢复比较投影（docs/design-storage-file-is-memory.md §13）：判「快照后被修改」只比这些内容字段，
+ * 不含时间戳、status、handEdited、位置与召回统计，也不读文件里的 digest——手改后立即恢复也能判出，
+ * 没有 digest 的旧快照同样能比。正文 CRLF 归一为 LF（与 digest 一致，换行风格不算修改）。
  */
-function isConflicting(current: MemoryRecord | undefined, snapshot: MemorySnapshot): boolean {
-  return current !== undefined && current.status !== 'deleted' && current.updatedAt > snapshot.createdAt
+export function restoreProjection(r: MemoryRecord) {
+  return {
+    name: r.name, type: r.type, tags: r.tags, summary: r.summary,
+    content: r.content.replace(/\r\n/g, '\n'),
+    validFrom: r.validFrom, validTo: r.validTo, confidence: r.confidence, supersedes: r.supersedes,
+    source: r.source && { sessionId: r.source.sessionId, eventRange: r.source.eventRange, sourceMode: r.source.sourceMode },
+  }
+}
+
+/**
+ * 当前记录与快照记录的投影不同才算冲突。软删除不是"更新的编辑"，它正是要撤销的对象；
+ * 把它算作冲突会让 memory_forget 的撤销默认失效，因此当前记录若已是 status: 'deleted' 不计入冲突。
+ */
+function isConflicting(current: MemoryRecord | undefined, snapshotted: MemoryRecord): boolean {
+  return current !== undefined && current.status !== 'deleted'
+    && !isDeepStrictEqual(restoreProjection(current), restoreProjection(snapshotted))
 }
 
 /**
@@ -74,7 +90,7 @@ export class SnapshotStore {
         id: snapshotted.id,
         snapshotted,
         current: present,
-        changedAfterSnapshot: isConflicting(present, snapshot),
+        changedAfterSnapshot: isConflicting(present, snapshotted),
       }
     })
   }
@@ -95,7 +111,7 @@ export class SnapshotStore {
     const skipped: string[] = []
     const targets = ids ? snapshot.data.filter(r => ids.includes(r.id)) : snapshot.data
     for (const rec of targets) {
-      if (isConflicting(current.get(rec.id), snapshot) && !overwriteChanged) {
+      if (isConflicting(current.get(rec.id), rec) && !overwriteChanged) {
         skipped.push(rec.id)
         continue
       }

@@ -151,6 +151,8 @@ export async function runSavePipeline(
       updatedAt: now, lastConfirmedAt: now,
       supersedes: candidate.supersedes ?? target!.supersedes,
       globalCandidate: globalCandidate || target!.globalCandidate,
+      // 内容由本次会话重写，出处随之对应：清除手编标记（pruneUndefined 剔键）
+      handEdited: undefined,
     }
   } else {
     record = {

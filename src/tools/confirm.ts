@@ -37,8 +37,8 @@ export async function executeConfirm(
     if (!target || target.status === 'deleted') {
       return { kind: 'error', message: `记忆不存在或已删除：${args.memoryId}` }
     }
-    // refresh 不是内容编辑，写 updatedAt 会让快照把它误判为"快照后被编辑过"而拒绝恢复
-    // （isConflicting 读 updatedAt 判断编辑冲突），lastConfirmedAt 已足够独立记录确认动作。
+    // refresh 不是内容编辑，updatedAt 保持为最近一次内容修改的时刻；lastConfirmedAt 独立记录确认动作
+    // （快照恢复按内容投影判断"快照后被修改"，不看 updatedAt，见 governance/snapshots.ts restoreProjection）。
     await deps.store.put({ ...target, lastConfirmedAt: now })
     return {
       kind: 'refreshed', memoryId: args.memoryId, lastConfirmedAt: now,
