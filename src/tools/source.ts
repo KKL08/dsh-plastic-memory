@@ -64,7 +64,8 @@ export async function executeSource(
   context: { workspacePath: string | undefined },
   deps: SourceToolDeps,
 ): Promise<SourceResult> {
-  const record = deps.store.get(args.memoryId)
+  // 预读范围：按 id 定位单条（store.get，含非 active），已删的按不存在处理
+  const record = await deps.store.get(args.memoryId)
   if (!record || record.status === 'deleted') return { kind: 'not-found', memoryId: args.memoryId }
   // 跨项目隔离：只准解引用当前项目或 global 记忆的锚
   if (record.scope === 'workspace' && record.workspacePath !== context.workspacePath) {

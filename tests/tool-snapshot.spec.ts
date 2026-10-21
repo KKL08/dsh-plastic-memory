@@ -24,7 +24,7 @@ describe('memory_snapshot', () => {
     await deps.store.put(record({ id: 'mem_dead', status: 'deleted' }))
     const r = await executeSnapshotTool({ action: 'create', description: '大清理前' }, deps)
     expect(r.kind).toBe('created')
-    const snap = deps.snapshots.list()[0]
+    const snap = (await deps.snapshots.list())[0]
     expect(snap.operation).toBe('manual')
     expect(snap.memoryIds).toEqual(['mem_a'])
   })
@@ -34,7 +34,7 @@ describe('memory_snapshot', () => {
     await deps.store.put(record({ id: 'mem_a' }))
     await deps.store.put(record({ id: 'mem_b' }))
     await executeSnapshotTool({ action: 'create', memoryIds: ['mem_b'] }, deps)
-    expect(deps.snapshots.list()[0].memoryIds).toEqual(['mem_b'])
+    expect((await deps.snapshots.list())[0].memoryIds).toEqual(['mem_b'])
   })
 
   it('create：重复 id 去重，未找到/已删除的 id 在返回消息里报告，不悄悄丢弃', async () => {
@@ -46,7 +46,7 @@ describe('memory_snapshot', () => {
     expect(r.kind).toBe('created')
     if (r.kind === 'created') {
       expect(r.count).toBe(1)
-      expect(deps.snapshots.list()[0].memoryIds).toEqual(['mem_a'])
+      expect((await deps.snapshots.list())[0].memoryIds).toEqual(['mem_a'])
       expect(r.missing).toEqual(['mem_typo', 'mem_dead'])
     }
   })
@@ -81,7 +81,7 @@ describe('memory_snapshot', () => {
     // 记录完全不存在（非 forget 场景的软删，而是彻底不在库里）：直接恢复
     const r = await executeSnapshotTool({ action: 'restore', snapshotId: snap.id }, deps)
     expect(r.kind).toBe('restored')
-    expect(deps.store.get('mem_a')!.content).toBe('原文')
+    expect((await deps.store.get('mem_a'))!.content).toBe('原文')
   })
 
   it('forget 之后 restore 能把记忆原样救回（撤销误删的核心路径）', async () => {
@@ -92,7 +92,7 @@ describe('memory_snapshot', () => {
 
     const forgot = await executeForget({ ids: ['mem_a'], reason: '误删' }, { store, snapshots, decisions })
     expect(forgot.ok).toBe(true)
-    expect(store.get('mem_a')!.status).toBe('deleted')
+    expect((await store.get('mem_a'))!.status).toBe('deleted')
 
     const r = await executeSnapshotTool(
       { action: 'restore', snapshotId: forgot.snapshotId! },
@@ -103,7 +103,7 @@ describe('memory_snapshot', () => {
       expect(r.restored).toEqual(['mem_a'])
       expect(r.skipped).toEqual([])
     }
-    const revived = store.get('mem_a')!
+    const revived = (await store.get('mem_a'))!
     expect(revived.status).toBe('active')
     expect(revived.content).toBe('不该被删的内容')
   })
@@ -114,7 +114,7 @@ describe('memory_snapshot', () => {
     const r = await executeSnapshotTool({ action: 'list' }, deps)
     expect(r.kind).toBe('listed')
     if (r.kind === 'listed') expect(r.snapshots).toEqual([])
-    expect(deps.snapshots.list()).toEqual([])  // KV 表已被清
+    expect(await deps.snapshots.list()).toEqual([])  // KV 表已被清
   })
 
   it('snapshotId 不存在返回 error', async () => {
@@ -139,7 +139,7 @@ describe('memory_snapshot', () => {
       expect(skipped.message).toContain('overwriteChanged')
     }
     // 关键：默认路径下更新的编辑必须原样保住
-    expect(deps.store.get('mem_a')!.content).toBe('后来改过的内容')
+    expect((await deps.store.get('mem_a'))!.content).toBe('后来改过的内容')
 
     const forced = await executeSnapshotTool(
       { action: 'restore', snapshotId: snap.id, overwriteChanged: true }, deps)
@@ -148,6 +148,6 @@ describe('memory_snapshot', () => {
       expect(forced.restored).toEqual(['mem_a'])
       expect(forced.skipped).toEqual([])
     }
-    expect(deps.store.get('mem_a')!.content).toBe('快照时的内容')
+    expect((await deps.store.get('mem_a'))!.content).toBe('快照时的内容')
   })
 })

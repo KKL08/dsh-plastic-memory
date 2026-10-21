@@ -201,7 +201,7 @@ describe('runSavePipeline', () => {
     const old = await runSavePipeline(candidate(), deps(store))
     if (old.kind !== 'saved') throw new Error(old.kind)
     await runSavePipeline(candidate({ content: '完全不同的新说法', force: true, supersedes: [old.record.id] }), deps(store))
-    expect(store.get(old.record.id)!.status).toBe('superseded')
+    expect((await store.get(old.record.id))!.status).toBe('superseded')
   })
 
   // B1a：supersedes 目标必须与本次写入记录同桶
@@ -215,7 +215,7 @@ describe('runSavePipeline', () => {
       candidate({ scope: 'workspace', name: '新事实', content: '完全不同的新说法', force: true, supersedes: ['mem_global'] }),
       deps(store))
     if (saved.kind !== 'saved') throw new Error(saved.kind)
-    expect(store.get('mem_global')!.status).toBe('active')
+    expect((await store.get('mem_global'))!.status).toBe('active')
     expect(saved.warnings?.map(w => w.code)).toContain('cross-bucket-supersede')
   })
 
@@ -227,7 +227,7 @@ describe('runSavePipeline', () => {
       candidate({ scope: 'workspace', name: '新事实', content: '完全不同的新说法', force: true, supersedes: [old.record.id] }),
       deps(store))
     if (saved.kind !== 'saved') throw new Error(saved.kind)
-    expect(store.get(old.record.id)!.status).toBe('superseded')
+    expect((await store.get(old.record.id))!.status).toBe('superseded')
     expect(saved.warnings).toBeUndefined()
   })
 
@@ -273,7 +273,7 @@ describe('runSavePipeline', () => {
       candidate({ action: 'update', id: created.record.id, scope: 'global', content: '新的全局内容' }),
       { ...deps(store), snapshots: snaps })
     if (updated.kind !== 'updated') throw new Error(updated.kind)
-    const list = snaps.list()
+    const list = await snaps.list()
     expect(list).toHaveLength(1)
     expect(list[0].operation).toBe('pre-update')
     expect(list[0].data[0].content).toBe('旧的全局内容')
@@ -300,7 +300,7 @@ describe('runSavePipeline', () => {
       candidate({ action: 'update', id: created.record.id, content: '本项目内更新' }),
       { ...deps(store), snapshots: snaps })
     expect(updated.kind).toBe('updated')
-    expect(snaps.list()).toHaveLength(0)
+    expect(await snaps.list()).toHaveLength(0)
   })
 
   // B2：判重级联——实体轴优先，实体为空才落 Dice 兜底
@@ -378,7 +378,7 @@ describe('runSavePipeline', () => {
       expect(result.code).toBe('secret-critical')
       expect(result.reason.length).toBeGreaterThan(0)
     }
-    expect(store.query({ scope: { kind: 'global' } })).toHaveLength(0) // 未落盘
+    expect(await store.query({ scope: { kind: 'global' } })).toHaveLength(0) // 未落盘
   })
 
   it('无密钥 content 时 result 不存在 warnings 键（undefined 键纪律）', async () => {
@@ -442,7 +442,7 @@ describe('runSavePipeline', () => {
       deps(store),
     )
     expect(result).toMatchObject({ kind: 'rejected', code: 'secret-critical' })
-    expect(store.query({}).length).toBe(0)
+    expect((await store.query({})).length).toBe(0)
   })
 
   it('疑似密钥出现在 tags 时照常落盘但给警告', async () => {

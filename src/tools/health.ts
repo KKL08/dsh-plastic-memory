@@ -9,6 +9,7 @@ import { FINDING_TYPES } from '../governance/schema.ts'
 import type { HealthThresholds } from '../governance/health-presets.ts'
 import { runRuleScan } from '../governance/rule-scan.ts'
 import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, checkupRowBase, type LayerRef, TIER_LABEL } from '../governance/layer-health.ts'
+import { prereadLayers } from './layer-preread.ts'
 
 const DAY = 86_400_000
 
@@ -145,10 +146,13 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
   const now = deps.now?.() ?? Date.now()
   const th = deps.thresholds
   const overdueMs = th.pendingOverdueDays * DAY
+  // 预读范围：与 memory_scan 共用 prereadLayers——全部状态的记录（含 superseded / deleted）、
+  // 待决账本、语义缓存、隔离文件；之后的评分与聚合都是同步纯计算
+  const data = await prereadLayers(deps)
 
   if (args.scope === 'all') {
-    const layers: LayerRef[] = [{ kind: 'global' }, ...listWorkspaces(deps.store).map(path => ({ kind: 'workspace' as const, path }))]
-    const scored = layers.map(l => scoreLayer(deps, l, now))
+    const layers: LayerRef[] = [{ kind: 'global' }, ...listWorkspaces(data.byId.values()).map(path => ({ kind: 'workspace' as const, path }))]
+    const scored = layers.map(l => scoreLayer(deps, data, l, now))
     const rows: CheckupRow[] = scored.map(r => ({
       ...checkupRowBase(r),
       semanticCachedAt: r.semanticCachedAt,
@@ -163,9 +167,9 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
     const wsCount = rows.length - 1
     return {
       kind: 'checkup', rows,
-      crossLayerConflicts: crossLayerConflicts(deps.store, deps.decisions),
+      crossLayerConflicts: crossLayerConflicts(data.byId, data.pending),
       promoteCandidates,
-      pendingTotal: deps.decisions.list().length,
+      pendingTotal: data.pending.length,
       message: `全库健康体检：global + ${wsCount} 个 workspace，各层独立计分（分母为该层自身规模）。`,
     }
   }
@@ -173,31 +177,29 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
   // 单层视图：显式路径 > 当前会话 workspace > global 层（无 workspace 会话）
   const currentWs = exec !== undefined ? (await deps.resolveContext(exec)).workspacePath : undefined
   if (args.scope !== undefined) {
-    const invalid = validateScopePaths(deps.store, currentWs, [args.scope])
+    const invalid = validateScopePaths(data.byId.values(), currentWs, [args.scope])
     if (invalid !== null) return { kind: 'error', message: invalid }
   }
   const wsPath = args.scope ?? currentWs
   const layer: LayerRef = wsPath !== undefined ? { kind: 'workspace', path: wsPath } : { kind: 'global' }
-  const scored = scoreLayer(deps, layer, now)
+  const scored = scoreLayer(deps, data, layer, now)
   const { health, records, semanticCachedAt } = scored
+  const globalActive = [...data.byId.values()].filter(r => r.status === 'active' && r.scope === 'global')
   const cachedAt = semanticCachedAt
 
   // workspace 视图必须兜住 global 层的密钥——它在本会话同样生效，但归属（与修复责任）在 global 层，
   // 不计本层分数，走报警 + recommendation 置顶
   let globalSecretAlert = 0
   if (layer.kind === 'workspace') {
-    const globalRecords = deps.store.query({ status: ['active'], scope: { kind: 'global' } })
-    globalSecretAlert = runRuleScan(globalRecords, id => deps.store.get(id), now).filter(f => f.type === 'secret').length
+    globalSecretAlert = runRuleScan(globalActive, id => data.byId.get(id), now).filter(f => f.type === 'secret').length
   }
 
   // 待决项列可见集合（本层 + global——跨层冲突影响本 workspace 的会话）内的
   const visibleIds = new Set([
     ...records.map(r => r.id),
-    ...(layer.kind === 'workspace'
-      ? deps.store.query({ status: ['active'], scope: { kind: 'global' } }).map(r => r.id)
-      : []),
+    ...(layer.kind === 'workspace' ? globalActive.map(r => r.id) : []),
   ])
-  const pending = deps.decisions.list().filter(e => e.memoryIds.every(id => visibleIds.has(id)))
+  const pending = data.pending.filter(e => e.memoryIds.every(id => visibleIds.has(id)))
   const overdue = pending.filter(e => now - e.firstSeenAt >= overdueMs)
 
   // recommendation 分层并列。独占层：密钥（本层红线或 global 报警）永远最高、不受档位

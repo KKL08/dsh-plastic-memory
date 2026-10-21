@@ -14,7 +14,7 @@ describe('SnapshotStore.capture', () => {
     const s = makeStore()
     await s.capture({ operation: 'pre-forget', description: '早', records: [record({ id: 'mem_a' })] }, 100)
     await s.capture({ operation: 'manual', description: '晚', records: [record({ id: 'mem_b' }), record({ id: 'mem_c' })] }, 200)
-    const list = s.list()
+    const list = await s.list()
     expect(list.map(x => x.description)).toEqual(['晚', '早'])
     expect(list[0].memoryIds.sort()).toEqual(['mem_b', 'mem_c'])
     expect(list[0].data).toHaveLength(2)
@@ -24,7 +24,7 @@ describe('SnapshotStore.capture', () => {
     const s = makeStore()
     await s.capture({ operation: 'manual', description: '老', records: [] }, 0)
     await s.capture({ operation: 'manual', description: '新', records: [] }, SNAPSHOT_RETENTION_MS + 1)
-    expect(s.list().map(x => x.description)).toEqual(['新'])
+    expect((await s.list()).map(x => x.description)).toEqual(['新'])
   })
 })
 
@@ -33,7 +33,7 @@ describe('SnapshotStore.diff / restore', () => {
     const s = makeStore()
     const snap = await s.capture({ operation: 'pre-forget', description: 'd', records: [record({ id: 'mem_a', updatedAt: 50 })] }, 100)
     const changed = record({ id: 'mem_a', updatedAt: 150 })
-    const entries = s.diff(snap, id => (id === 'mem_a' ? changed : undefined))
+    const entries = s.diff(snap, new Map([['mem_a', changed]]))
     expect(entries).toHaveLength(1)
     expect(entries[0].changedAfterSnapshot).toBe(true)
   })
@@ -47,11 +47,11 @@ describe('SnapshotStore.diff / restore', () => {
     const written: MemoryRecord[] = []
     const put = async (r: MemoryRecord) => { written.push(r) }
 
-    const r1 = await s.restore(snap, undefined, put, () => changed, false)
+    const r1 = await s.restore(snap, undefined, put, new Map([['mem_a', changed]]), false)
     expect(r1.skipped).toEqual(['mem_a'])
     expect(written).toHaveLength(0)
 
-    const r2 = await s.restore(snap, undefined, put, () => changed, true)
+    const r2 = await s.restore(snap, undefined, put, new Map([['mem_a', changed]]), true)
     expect(r2.restored).toEqual(['mem_a'])
     expect(written[0].content).toBe('原文')
   })
@@ -62,7 +62,7 @@ describe('SnapshotStore.diff / restore', () => {
     const b = record({ id: 'mem_b', content: 'B' })
     const snap = await s.capture({ operation: 'pre-forget', description: 'd', records: [a, b] }, 100)
     const written: MemoryRecord[] = []
-    const r = await s.restore(snap, ['mem_b'], async rec => { written.push(rec) }, () => undefined, false)
+    const r = await s.restore(snap, ['mem_b'], async rec => { written.push(rec) }, new Map(), false)
     expect(r.restored).toEqual(['mem_b'])
     expect(written.map(x => x.id)).toEqual(['mem_b'])
   })
@@ -75,12 +75,12 @@ describe('SnapshotStore.diff / restore', () => {
     const softDeleted = record({ id: 'mem_a', content: '原文', status: 'deleted', updatedAt: 150 })
 
     const written: MemoryRecord[] = []
-    const r = await s.restore(snap, undefined, async rec => { written.push(rec) }, () => softDeleted, false)
+    const r = await s.restore(snap, undefined, async rec => { written.push(rec) }, new Map([['mem_a', softDeleted]]), false)
     expect(r.restored).toEqual(['mem_a'])
     expect(r.skipped).toEqual([])
     expect(written[0].status).toBe('active')
 
     // diff 也不应把它标成“快照后被修改过”
-    expect(s.diff(snap, () => softDeleted)[0].changedAfterSnapshot).toBe(false)
+    expect(s.diff(snap, new Map([['mem_a', softDeleted]]))[0].changedAfterSnapshot).toBe(false)
   })
 })

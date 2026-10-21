@@ -6,6 +6,7 @@ import { buildTypeRegistry } from './type-registry.ts'
 import { memoryDomainSpec } from './domain-spec.ts'
 import { MemoryStore } from './store.ts'
 import { FileTable } from './storage/file-table.ts'
+import { SidecarStore, type LegacyKvTables } from './storage/sidecar.ts'
 import { resolveMemoryRoot } from './storage/paths.ts'
 import { formatIndexLine } from './index-line.ts'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -30,6 +31,8 @@ import { PROMPT_LBRACE_VARIABLE } from './snapshot.ts'
 import { resolveHealthThresholds, type HealthSensitivity } from './governance/health-presets.ts'
 import { PendingDecisionsStore } from './governance/decisions.ts'
 import { SnapshotStore } from './governance/snapshots.ts'
+import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from './governance/schema.ts'
+import type { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { baselineProjectionDefinition, readBaseline } from './governance/baseline.ts'
 import type { SemanticLlm } from './governance/semantic-scan.ts'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -72,7 +75,7 @@ export const Config: z<Config> = z.object({
 })
 
 export const name = 'dsh-plastic-memory'
-export const inject = ['tools', 'systemPrompt', 'storageDomain']
+export const inject = ['tools', 'systemPrompt']
 
 /** session/created 回调里用得到的最小 session 结构（真实类型是 dsh-session 的 Session）。 */
 type SessionLike = object & { header?: { cwd?: string } }
@@ -80,26 +83,49 @@ type SessionLike = object & { header?: { cwd?: string } }
 export async function apply(ctx: Context, config: Config) {
   const registry = buildTypeRegistry(config) // 重名内置类型在这里抛错，加载即失败
 
-  const domain = await ctx.storageDomain.open(memoryDomainSpec)
-  ctx.effect(() => () => void domain.close())
-  // 正文住 FileTable（磁盘 markdown），KV 只放易变的召回统计 sidecar（recall_stats）
-  const statsTable = domain.table('recall_stats')
   const memoryRoot = resolveMemoryRoot(config.memoryRoot)
+  // 侧表（快照、待决账本、扫描缓存、召回统计）住 <memoryRoot>/.state/，构造不做 I/O。
+  // storageDomain 不再是必需注入：只为首次侧表访问时导入旧 KV 的快照与待决账本（0.3.0 移除）。
+  // 按 llm / sessionQuery 同款惯例经 ctx.get 探测，且推迟到导入真正发生时——apply 期间宿主的
+  // storageDomain 未必已挂上，此刻探测落空会写下 source: none 的标记，旧数据就再也不导了。
+  const sidecar = new SidecarStore({
+    root: memoryRoot,
+    schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema },
+    openLegacyKv: async (): Promise<LegacyKvTables | undefined> => {
+      let facility: DomainFacility | undefined
+      try {
+        facility = ctx.get('storageDomain') as DomainFacility | undefined
+      } catch {
+        return undefined // ctx.get 按 cordis 现契约不抛；防御宿主行为变化，按服务缺席处理
+      }
+      if (facility === undefined) return undefined
+      const domain = await facility.open(memoryDomainSpec)
+      try {
+        return {
+          snapshots: [...domain.table('snapshots').entries()],
+          pending: [...domain.table('pending_decisions').entries()],
+        }
+      } finally {
+        await domain.close()
+      }
+    },
+    log: ctx.logger,
+  })
   // 纯逻辑层（file-table/store/forget）不 import 框架包，日志经 MemoryLogger 注入；
   // ctx.logger 结构上满足该形状（info/warn/error），直接注入，宿主按插件名归因。
   const fileTable = new FileTable({
     root: memoryRoot,
-    stats: statsTable,
+    stats: sidecar.recallStats,
     // 磁盘索引不带陈旧度（静态文件里的时间相对标注会随时间失真），注入侧的陈旧度由 snapshot.ts 计算
     formatIndexLine: r => formatIndexLine(r, { passive: registry.get(r.type).recall === 'passive' }),
     log: ctx.logger,
   })
   await fileTable.load() // 契约：绝不 throw——记忆坏文件不能拖垮插件加载
-  const store = new MemoryStore(fileTable, ctx.logger)
+  const store = new MemoryStore(fileTable, ctx.logger, sidecar.recallStats)
   // forget 的快照先行与待决账本清理需要这两个存储，治理关闭时也接线
-  const decisions = new PendingDecisionsStore(domain.table('pending_decisions'))
-  const snapshots = new SnapshotStore(domain.table('snapshots'))
-  const scanCache = domain.table('scan_cache')
+  const decisions = new PendingDecisionsStore(sidecar.pending)
+  const snapshots = new SnapshotStore(sidecar.snapshots)
+  const scanCache = sidecar.scanCache
   // AGENTS.md 基线投影走可选注册：插件的 inject 不列 sessionProjections（精简 profile 可能没有这个服务），
   // 改在 ctx.inject(['sessionProjections'], …) 里注册，这是宿主 registry 文档（dsh-session-projection README）
   // 给出的保留可选注册的写法。disposer 随 child fiber 走，插件卸载键即消失。服务缺席时插件照常挂载，
@@ -108,10 +134,10 @@ export async function apply(ctx: Context, config: Config) {
   // cwd → workspace 归属的单一解析路径：SnapshotCache 的 lazy 自愈与 session/created 的 eager 预热共用，
   // 避免两处各写一份 resolveWorkspacePath 调用。
   const resolveWorkspace = (session: object) => resolveWorkspacePath(ctx, (session as SessionLike).header?.cwd)
-  const snapshotCache = new SnapshotCache({ store, registry, budget: config.snapshotTokenBudget, memoryRoot, evidenceLookup: config.evidenceLookup, resolveWorkspace })
+  const snapshotCache = new SnapshotCache({ store, registry, budget: config.snapshotTokenBudget, memoryRoot, evidenceLookup: config.evidenceLookup, resolveWorkspace, log: ctx.logger })
 
   /** 工具执行前感知外部文件修改；对 ToolDefinition 做统一包装，避免逐个改 -tool.ts。
-   *  systemPrompt 注入路径不经这层：同步组装，永远服务最近一次加载的 Map（docs/p15-storage-search-redesign.md §7 已登记）。 */
+   *  systemPrompt 注入路径不经这层：assemble 中间件组装，永远服务最近一次加载的 Map（docs/p15-storage-search-redesign.md §7 已登记）。 */
   const withRefresh = (def: ToolDefinition): ToolDefinition => ({
     ...def,
     execute: async (args, exec) => {
@@ -316,7 +342,7 @@ export async function apply(ctx: Context, config: Config) {
     ctx.tools.register(withRefresh(createPromoteTool({ store, agentsMd, snapshots, defaultTarget })))
   }
 
-  // frozen snapshot：按 session 隔离缓存，session/created 异步解析 workspace，compaction 结束失效重建。
+  // frozen snapshot：按 session 隔离缓存，session/created 异步解析 workspace，compaction 结束标过期、下一次中间件重建。
   // session/* 事件由常驻的 @deepseek-ai/dsh-session 提供，但其 cordis Events 增广不在本插件的
   // 类型图内（该包非直接依赖），故按最小结构签名订阅；运行时事件名只是字符串，行为不受影响。
   const lifecycle = ctx as unknown as {
@@ -324,25 +350,25 @@ export async function apply(ctx: Context, config: Config) {
     on(name: 'session/event', fn: (session: object, event: { type: string }) => void): () => void
   }
   lifecycle.on('session/created', session => {
-    // eager 预热：新 session 不必等首次 render 才解析 workspace（HMR 后存量 session 走 render 侧自愈）。
-    // 走 awaitResolved 的共享入口，与 assemble 中间件同一份 memoize，不重复解析。
-    void snapshotCache.awaitResolved(session)
+    // eager 预热：新 session 不必等首次组装才解析 workspace（HMR 后存量 session 走 render 侧自愈）。
+    // 与 assemble 中间件的解析等待同一份 memoize，不重复解析；只解析不组装，快照仍在首次中间件组装时冻结。
+    snapshotCache.prewarm(session)
   })
   lifecycle.on('session/event', (session, event) => {
     // 基线由宿主投影随事件折叠（plasticMemoryBaseline），不在这里观察；
-    // 本监听只留 compaction 失效——快照按 session 冻结，压缩结束后须重建。
-    if (event.type === 'compaction/end') snapshotCache.invalidate(session)
+    // 本监听只留 compaction 过期标记——快照按 session 冻结，压缩结束后由下一次中间件重建；
+    // 不清空，宿主只调同步 provider 的 admission refresh 仍拿到上一份快照。
+    if (event.type === 'compaction/end') snapshotCache.markStale(session)
   })
-  // 首轮竞态根治：workspace 解析是异步 I/O，text provider 是同步回调，且宿主在跑
-  // assemble waterfall【之前】就已物化全部 provider 文本——解析没赶上时冷快照已经
-  // 在 assembly 里了。故在 waterfall（异步）中等解析落定后，把本插件那条 context
-  // 的文本原位替换为热渲染；超时按原冷文本放行（降级语义不变），不阻塞宿主。
+  // 快照只在 assemble waterfall（异步）里构建：宿主在跑 waterfall【之前】就已物化全部 provider 文本，
+  // 而同步 provider 只回缓存（首轮为空串）。中间件等 workspace 解析落定后组装或复用冻结快照，
+  // 把本插件那条 context 的文本原位替换；解析超时走 global-only 临时文本（不冻结），不阻塞宿主。
   ctx.on('system-prompt/assemble', async (assembly: PromptAssembly, assembleCtx: AssembleContext, next: () => Promise<PromptAssembly>) => {
     const session = (assembleCtx?.scope as { session?: object } | undefined)?.session
     if (session) {
-      await snapshotCache.awaitResolved(session)
+      const text = await snapshotCache.assemble(session)
       for (const entry of assembly.contexts) {
-        if (entry.name === 'plastic-memory') entry.text = snapshotCache.render(session)
+        if (entry.name === 'plastic-memory') entry.text = text
       }
     }
     return next()
@@ -353,7 +379,7 @@ export async function apply(ctx: Context, config: Config) {
   ctx.systemPrompt.context({
     name: 'plastic-memory',
     order: 50,
-    // AssembleContext.scope 是发起组装的 Agent，从它拿到所属 session，按 session 渲染各自的冻结快照
+    // AssembleContext.scope 是发起组装的 Agent，从它拿到所属 session，只回该 session 的冻结快照（无则空串）
     text: (assembleCtx?: AssembleContext) => {
       const session = (assembleCtx?.scope as { session?: object } | undefined)?.session
       return session ? snapshotCache.render(session) : ''

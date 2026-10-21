@@ -57,7 +57,7 @@ it('导出 global + workspace 记录，坏记录进 skipped 不中断；FileTabl
 
   const t = await load(root)
 
-  const g = t.get('mem_global')!
+  const g = (await t.get('mem_global'))!
   expect(g).toBeDefined()
   expect(g.scope).toBe('global')
   expect(g.name).toBe('包管理用 pnpm')
@@ -79,7 +79,7 @@ it('导出 global + workspace 记录，坏记录进 skipped 不中断；FileTabl
   expect(g.validTo).toBeUndefined()
   expect(g.supersedes).toBeUndefined()
 
-  const w = t.get('mem_ws')!
+  const w = (await t.get('mem_ws'))!
   expect(w).toBeDefined()
   expect(w.scope).toBe('workspace')
   expect(w.workspacePath).toBe('/home/dev/example-project') // .workspace 标记无损还原
@@ -91,7 +91,7 @@ it('导出 global + workspace 记录，坏记录进 skipped 不中断；FileTabl
   expect(w.createdAt).toBe(1787166378178)
   expect(w.updatedAt).toBe(1787166720840)
 
-  expect(t.get('mem_bad')).toBeUndefined()
+  expect(await t.get('mem_bad')).toBeUndefined()
 })
 
 it('同目录内 name slug 撞名 → 缀 id 兜底，两条记录都能落盘且互不覆盖', async () => {
@@ -117,8 +117,8 @@ it('同目录内 name slug 撞名 → 缀 id 兜底，两条记录都能落盘�
   expect(result.skipped).toHaveLength(0)
 
   const t = await load(root)
-  expect(t.get('mem_one')!.content).toBe('第一条')
-  expect(t.get('mem_two')!.content).toBe('第二条')
+  expect((await t.get('mem_one'))!.content).toBe('第一条')
+  expect((await t.get('mem_two'))!.content).toBe('第二条')
 })
 
 it('KV JSON 顶层缺 tables.memories 时直接抛错（信封损坏，不当作 0 条静默通过）', async () => {
@@ -145,11 +145,11 @@ it('可选键在场时无损往返（validFrom/validTo/supersedes 走 ISO 编解
   expect(result.skipped).toHaveLength(0)
 
   const t = await load(root)
-  const v = t.get('mem_valid')!
+  const v = (await t.get('mem_valid'))!
   expect(v.validFrom).toBe(1754697600000)
   expect(v.validTo).toBe(1754784000000)
   expect(v.supersedes).toEqual(['mem_old1', 'mem_old2'])
-  expect(t.get('mem_del')!.status).toBe('deleted')
+  expect((await t.get('mem_del'))!.status).toBe('deleted')
 })
 
 it('目标目录已有其他 id 的同名文件时不覆盖：改走 id 兜底名；两个名都被占则 skipped', async () => {
@@ -167,8 +167,8 @@ it('目标目录已有其他 id 的同名文件时不覆盖：改走 id 兜底�
   // 原文件未被动过，导出的记录落在 id 兜底名
   expect(await readFile(join(root, 'global', '同名记录.md'), 'utf8')).toContain('id: mem_new_sys')
   const t = await load(root)
-  expect(t.get('mem_new_sys')!.content).toBe('mem_new_sys 的内容')
-  expect(t.get('mem_old_kv')!.content).toBe('mem_old_kv 的内容')
+  expect((await t.get('mem_new_sys'))!.content).toBe('mem_new_sys 的内容')
+  expect((await t.get('mem_old_kv'))!.content).toBe('mem_old_kv 的内容')
 
   // 基础名与兜底名都被其他 id 占用 → skipped，绝不覆盖
   const frag = 'mem_third'.slice(-6)
@@ -200,5 +200,5 @@ it('名字 slug 为保留名 memory 时避让（APFS 上 memory.md 会与索引 
   expect(files).not.toContain('memory.md')
   expect(files).toContain(`memory-${'mem_rsv'.slice(-6)}.md`)
   const t = await load(root) // 索引再生后记录仍在、未被隔离
-  expect(t.get('mem_rsv')!.content).toBe('mem_rsv 的内容')
+  expect((await t.get('mem_rsv'))!.content).toBe('mem_rsv 的内容')
 })

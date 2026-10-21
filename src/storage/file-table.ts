@@ -2,11 +2,11 @@ import { mkdir, readdir, readFile, writeFile, rename, rm, stat } from 'node:fs/p
 import { RecordNotFoundError } from '../errors.ts'
 import { basename, dirname, join } from 'node:path'
 import type { MemoryRecord } from '../record-schema.ts'
-import type { MemoryTable, MemoryLogger } from '../store.ts'
+import type { MemoryTable, MemoryLogger } from './table.ts'
 import type { KvTable } from '../kv-table.ts'
 import type { RecallStats } from './schema.ts'
 import { splitFrontmatter, decodeRecord, encodeRecord, type FileLocation } from './frontmatter.ts'
-import { WORKSPACE_MARKER, INDEX_FILE, GLOBAL_DIR, workspaceDirName, slugifyName, isReservedFileName } from './paths.ts'
+import { WORKSPACE_MARKER, INDEX_FILE, GLOBAL_DIR, STATE_DIR, workspaceDirName, slugifyName, isReservedFileName } from './paths.ts'
 import { formatIndexLine } from '../index-line.ts'
 import { RETENTION_MS } from '../retention.ts'
 
@@ -79,7 +79,7 @@ export class FileTable implements MemoryTable {
       { dir: join(this.opts.root, GLOBAL_DIR), loc: { scope: 'global' } },
     ]
     for (const entry of await readdir(this.opts.root, { withFileTypes: true })) {
-      if (!entry.isDirectory() || entry.name === GLOBAL_DIR) continue
+      if (!entry.isDirectory() || entry.name === GLOBAL_DIR || entry.name === STATE_DIR) continue
       const dir = join(this.opts.root, entry.name)
       try {
         const wsPath = (await readFile(join(dir, WORKSPACE_MARKER), 'utf8')).trim()
@@ -133,7 +133,7 @@ export class FileTable implements MemoryTable {
     }
     // sidecar 合并（无行 → decode 已注入默认）
     for (const slot of map.values()) {
-      const row = this.opts.stats.get(slot.record.id)
+      const row = await this.opts.stats.get(slot.record.id)
       if (row) slot.record = { ...slot.record, recallCount: row.recallCount, lastRecalledAt: row.lastRecalledAt }
     }
     await this.sweepDeletedInner(map)
@@ -235,9 +235,9 @@ export class FileTable implements MemoryTable {
     await rename(tmp, filePath)
   }
 
-  get(key: string): MemoryRecord | undefined { return this.map.get(key)?.record }
-  entries(): IterableIterator<[string, MemoryRecord]> {
-    return [...this.map.entries()].map(([k, s]) => [k, s.record] as [string, MemoryRecord]).values()
+  async get(key: string): Promise<MemoryRecord | undefined> { return this.map.get(key)?.record }
+  async list(): Promise<MemoryRecord[]> {
+    return [...this.map.values()].map(s => s.record)
   }
 
   // —— 写侧 ——
@@ -340,8 +340,8 @@ export class FileTable implements MemoryTable {
 
   async put(key: string, value: MemoryRecord): Promise<void> {
     await this.locked(() => {
-      // put 不承载召回统计（docs/p15-storage-search-redesign.md §3 登记：快照恢复不恢复召回统计）。唯一写入方是
-      // markRecalled 走的 update 路径；prev 在时以内存态现值为准，restore 旧记录不回退 sidecar。
+      // put 不承载召回统计（docs/p15-storage-search-redesign.md §3 登记：快照恢复不恢复召回统计）。召回统计
+      // 由 MemoryStore.markRecalled 直写侧表；prev 在时以内存态现值为准，restore 旧记录不回退 sidecar。
       const prev = this.map.get(key)
       const next = prev
         ? { ...value, recallCount: prev.record.recallCount, lastRecalledAt: prev.record.lastRecalledAt }

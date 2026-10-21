@@ -34,7 +34,7 @@ describe('executeSave', () => {
       makeDeps(store),
     )
     expect(result.kind).toBe('saved')
-    expect(store.query({}).length).toBe(1)
+    expect((await store.query({})).length).toBe(1)
   })
 
   it('tags 缺省时归一化为空数组仍能保存', async () => {
@@ -103,7 +103,7 @@ describe('executeSave', () => {
       { ...base, action: 'update', id: created.record.id, name: '全局偏好', content: '新全局内容', summary: 'pref' },
       fakeExec(), deps)
     if (updated.kind !== 'updated') throw new Error(updated.kind)
-    const list = snapshots.list()
+    const list = await snapshots.list()
     expect(list).toHaveLength(1)
     expect(list[0].operation).toBe('pre-update')
     expect(list[0].data[0].content).toBe('旧全局内容')

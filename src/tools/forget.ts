@@ -41,10 +41,11 @@ export async function executeForget(
   // 去重保证快照、计数、删除日志中都不会出现重复
   const uniqueIds = [...new Set(ids)]
 
+  // 预读范围：按 id 逐条定位（store.get，含非 active），已删的计入 missing
   const found: MemoryRecord[] = []
   const missing: string[] = []
   for (const id of uniqueIds) {
-    const record = deps.store.get(id)
+    const record = await deps.store.get(id)
     if (record && record.status !== 'deleted') found.push(record)
     else missing.push(id)
   }

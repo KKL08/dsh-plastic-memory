@@ -22,8 +22,8 @@ describe('memory_confirm refresh', () => {
     await deps.store.put(record({ id: 'mem_a', lastConfirmedAt: 1, updatedAt: 1 }))
     const r = await executeConfirm({ action: 'refresh', memoryId: 'mem_a' }, deps)
     expect(r.kind).toBe('refreshed')
-    expect(deps.store.get('mem_a')!.lastConfirmedAt).toBe(5000)
-    expect(deps.store.get('mem_a')!.updatedAt).toBe(1)
+    expect((await deps.store.get('mem_a'))!.lastConfirmedAt).toBe(5000)
+    expect((await deps.store.get('mem_a'))!.updatedAt).toBe(1)
   })
 
   it('目标不存在或已删除返回 error', async () => {
@@ -48,12 +48,12 @@ describe('memory_confirm resolve（横向冲突）', () => {
     const entry = await setupHorizontal(deps)
     const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-left' }, deps)
     expect(r.kind).toBe('resolved')
-    expect(deps.store.get('mem_right')!.status).toBe('deleted')
-    expect(deps.store.get('mem_left')!.status).toBe('active')
-    expect(deps.snapshots.list()[0].operation).toBe('pre-resolve')
-    expect(deps.snapshots.list()[0].memoryIds).toEqual(['mem_right'])
-    expect(deps.snapshots.list()[0].data[0].status).toBe('active')
-    expect(deps.decisions.list()).toHaveLength(0)
+    expect((await deps.store.get('mem_right'))!.status).toBe('deleted')
+    expect((await deps.store.get('mem_left'))!.status).toBe('active')
+    expect((await deps.snapshots.list())[0].operation).toBe('pre-resolve')
+    expect((await deps.snapshots.list())[0].memoryIds).toEqual(['mem_right'])
+    expect((await deps.snapshots.list())[0].data[0].status).toBe('active')
+    expect(await deps.decisions.list()).toHaveLength(0)
   })
 
   it('删除败方时顺带清理其他引用该记忆的待决项，并在 actions 中报告数量', async () => {
@@ -71,15 +71,15 @@ describe('memory_confirm resolve（横向冲突）', () => {
     if (r.kind === 'resolved') {
       expect(r.alsoCleared).toBe(1)
     }
-    expect(deps.decisions.list()).toHaveLength(0)
+    expect(await deps.decisions.list()).toHaveLength(0)
   })
 
   it('keep-right：删 left', async () => {
     const deps = makeDeps()
     const entry = await setupHorizontal(deps)
     await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-right' }, deps)
-    expect(deps.store.get('mem_left')!.status).toBe('deleted')
-    expect(deps.store.get('mem_right')!.status).toBe('active')
+    expect((await deps.store.get('mem_left'))!.status).toBe('deleted')
+    expect((await deps.store.get('mem_right'))!.status).toBe('active')
   })
 
   it('keep-both / dismiss：不删任何记忆、不写快照、条目移除', async () => {
@@ -88,10 +88,10 @@ describe('memory_confirm resolve（横向冲突）', () => {
       const entry = await setupHorizontal(deps)
       const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict }, deps)
       expect(r.kind).toBe('resolved')
-      expect(deps.store.get('mem_left')!.status).toBe('active')
-      expect(deps.store.get('mem_right')!.status).toBe('active')
-      expect(deps.snapshots.list()).toHaveLength(0)
-      expect(deps.decisions.list()).toHaveLength(0)
+      expect((await deps.store.get('mem_left'))!.status).toBe('active')
+      expect((await deps.store.get('mem_right'))!.status).toBe('active')
+      expect(await deps.snapshots.list()).toHaveLength(0)
+      expect(await deps.decisions.list()).toHaveLength(0)
     }
   })
 })
@@ -103,9 +103,9 @@ describe('memory_confirm resolve（账本里的非法条目）', () => {
     const { entry } = await deps.decisions.upsert({ memoryIds: ['mem_c', 'mem_c'], summary: '自冲突' }, 1)
     const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-left' }, deps)
     expect(r.kind).toBe('error')
-    expect(deps.store.get('mem_c')!.status).toBe('active')
-    expect(deps.snapshots.list()).toHaveLength(0)
-    expect(deps.decisions.list()).toHaveLength(0)
+    expect((await deps.store.get('mem_c'))!.status).toBe('active')
+    expect(await deps.snapshots.list()).toHaveLength(0)
+    expect(await deps.decisions.list()).toHaveLength(0)
   })
 
   it('横向条目只有一个 id（无 baselineRef）：同样拒绝并清理', async () => {
@@ -114,8 +114,8 @@ describe('memory_confirm resolve（账本里的非法条目）', () => {
     const { entry } = await deps.decisions.upsert({ memoryIds: ['mem_only'], summary: '缺一方' }, 1)
     const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-right' }, deps)
     expect(r.kind).toBe('error')
-    expect(deps.store.get('mem_only')!.status).toBe('active')
-    expect(deps.decisions.list()).toHaveLength(0)
+    expect((await deps.store.get('mem_only'))!.status).toBe('active')
+    expect(await deps.decisions.list()).toHaveLength(0)
   })
 })
 
@@ -132,17 +132,17 @@ describe('memory_confirm resolve（垂直冲突）', () => {
     const entry = await setupVertical(deps)
     const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-left' }, deps)
     expect(r.kind).toBe('resolved')
-    expect(deps.store.get('mem_v')!.status).toBe('active')
-    expect(deps.snapshots.list()).toHaveLength(0)
-    expect(deps.decisions.list()).toHaveLength(0)
+    expect((await deps.store.get('mem_v'))!.status).toBe('active')
+    expect(await deps.snapshots.list()).toHaveLength(0)
+    expect(await deps.decisions.list()).toHaveLength(0)
   })
 
   it('keep-right：基线胜，删记忆（先快照）', async () => {
     const deps = makeDeps()
     const entry = await setupVertical(deps)
     await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-right' }, deps)
-    expect(deps.store.get('mem_v')!.status).toBe('deleted')
-    expect(deps.snapshots.list()[0].memoryIds).toEqual(['mem_v'])
+    expect((await deps.store.get('mem_v'))!.status).toBe('deleted')
+    expect((await deps.snapshots.list())[0].memoryIds).toEqual(['mem_v'])
   })
 })
 

@@ -56,13 +56,13 @@ describe('governance schemas', () => {
 })
 
 describe('InMemoryKvTable', () => {
-  it('put/get/delete/entries 基本行为', async () => {
+  it('put/get/delete/list 基本行为', async () => {
     const t = new InMemoryKvTable<{ v: number }>()
     await t.put('a', { v: 1 })
-    expect(t.get('a')).toEqual({ v: 1 })
-    expect([...t.entries()]).toEqual([['a', { v: 1 }]])
+    expect(await t.get('a')).toEqual({ v: 1 })
+    expect(await t.list()).toEqual([['a', { v: 1 }]])
     expect(await t.delete('a')).toBe(true)
     expect(await t.delete('a')).toBe(false)
-    expect(t.get('a')).toBeUndefined()
+    expect(await t.get('a')).toBeUndefined()
   })
 })

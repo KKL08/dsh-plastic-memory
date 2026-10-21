@@ -33,6 +33,7 @@ export async function executePromote(
   deps: PromoteDeps,
 ): Promise<PromoteResult> {
   const now = deps.now?.() ?? Date.now()
+  // 预读范围：按 id 逐条定位（store.get，含非 active），已删的计入 skipped
   const promoted: PromoteResult['promoted'] = []
   const skipped: string[] = []
 
@@ -42,7 +43,7 @@ export async function executePromote(
   if (args.dismiss) {
     const dismissed: string[] = []
     for (const id of args.confirmedIds) {
-      const r = deps.store.get(id)
+      const r = await deps.store.get(id)
       if (!r || r.status === 'deleted') { skipped.push(id); continue }
       // 无损 JSON 不变式：解构剔键而非置 undefined。
       const { globalCandidate, ...rest } = r
@@ -59,7 +60,7 @@ export async function executePromote(
   // 缺失/已删的先剔除计 skipped，不进快照；剩下的才是本次实际提升的目标。
   const found: MemoryRecord[] = []
   for (const id of args.confirmedIds) {
-    const r = deps.store.get(id)
+    const r = await deps.store.get(id)
     if (!r || r.status === 'deleted') { skipped.push(id); continue }
     found.push(r)
   }

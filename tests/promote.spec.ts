@@ -34,7 +34,7 @@ describe('executePromote', () => {
     const { writer } = fakeAgentsMd()
     const r = await executePromote({ confirmedIds: ['mem_x'], target: 'global' }, { store, agentsMd: writer, snapshots: makeSnapshots() })
     expect(r.promoted).toEqual([{ id: 'mem_x', target: 'global' }])
-    const after = store.get('mem_x')!
+    const after = (await store.get('mem_x'))!
     expect(after.scope).toBe('global')
     expect(after.workspacePath).toBeUndefined()
     expect(after.globalCandidate).toBeUndefined()
@@ -45,7 +45,7 @@ describe('executePromote', () => {
     await store.put(record({ id: 'mem_x' }))
     const { writer } = fakeAgentsMd()
     await executePromote({ confirmedIds: ['mem_x'], target: 'global' }, { store, agentsMd: writer, snapshots: makeSnapshots() })
-    const keys = Object.keys(store.get('mem_x')!)
+    const keys = Object.keys((await store.get('mem_x'))!)
     expect(keys).not.toContain('workspacePath')
     expect(keys).not.toContain('globalCandidate')
   })
@@ -57,7 +57,7 @@ describe('executePromote', () => {
     const r = await executePromote({ confirmedIds: ['mem_y'], target: 'agents-md' }, { store, agentsMd: writer, snapshots: makeSnapshots() })
     expect(r.promoted).toEqual([{ id: 'mem_y', target: 'agents-md' }])
     expect(lines).toEqual(['偏好 — 用 pnpm'])
-    expect(store.get('mem_y')!.status).toBe('deleted')
+    expect((await store.get('mem_y'))!.status).toBe('deleted')
   })
 
   it('快照先行：两种 target 提升前都对目标整批拍 pre-promote 快照，data 含原记录', async () => {
@@ -66,7 +66,7 @@ describe('executePromote', () => {
       await store.put(record({ id: 'mem_s', name: '偏好', content: '用 pnpm' }))
       const snapshots = makeSnapshots()
       const r = await executePromote({ confirmedIds: ['mem_s'], target }, { store, agentsMd: fakeAgentsMd().writer, snapshots })
-      const list = snapshots.list()
+      const list = await snapshots.list()
       expect(list).toHaveLength(1)
       expect(list[0].operation).toBe('pre-promote')
       expect(list[0].memoryIds).toEqual(['mem_s'])
@@ -81,7 +81,7 @@ describe('executePromote', () => {
     const store = new MemoryStore(new InMemoryTable())
     const snapshots = makeSnapshots()
     await executePromote({ confirmedIds: ['mem_ghost'], target: 'global' }, { store, agentsMd: fakeAgentsMd().writer, snapshots })
-    expect(snapshots.list()).toHaveLength(0)
+    expect(await snapshots.list()).toHaveLength(0)
   })
 
   it('agents-md 分支 append 失败时回滚软删：记忆仍 active、计入 skipped、不谎报 promoted', async () => {
@@ -91,7 +91,7 @@ describe('executePromote', () => {
     const r = await executePromote({ confirmedIds: ['mem_z'], target: 'agents-md' }, { store, agentsMd: failing, snapshots: makeSnapshots() })
     expect(r.promoted).toEqual([])
     expect(r.skipped).toEqual(['mem_z'])
-    expect(store.get('mem_z')!.status).toBe('active')  // 软删已回滚，记忆没有丢
+    expect((await store.get('mem_z'))!.status).toBe('active')  // 软删已回滚，记忆没有丢
   })
 
   it('已删除/不存在的 id 跳过、不计入 promoted', async () => {
@@ -108,8 +108,8 @@ describe('executePromote', () => {
     await store.put(record({ id: 'mem_b' }))
     const { writer } = fakeAgentsMd()
     await executePromote({ confirmedIds: ['mem_a'], target: 'global' }, { store, agentsMd: writer, snapshots: makeSnapshots() })
-    expect(store.get('mem_a')!.scope).toBe('global')
-    expect(store.get('mem_b')!.scope).toBe('workspace') // 未确认，不动
+    expect((await store.get('mem_a'))!.scope).toBe('global')
+    expect((await store.get('mem_b'))!.scope).toBe('workspace') // 未确认，不动
   })
 
   it('dismiss：清除候选标记、记忆留在项目内、scope 与 updatedAt 不变', async () => {
@@ -119,7 +119,7 @@ describe('executePromote', () => {
     const r = await executePromote({ confirmedIds: ['mem_d'], target: 'global', dismiss: true }, { store, agentsMd: writer, snapshots: makeSnapshots() })
     expect(r.dismissed).toEqual(['mem_d'])
     expect(r.promoted).toEqual([])
-    const after = store.get('mem_d')!
+    const after = (await store.get('mem_d'))!
     expect(Object.keys(after)).not.toContain('globalCandidate')
     expect(after.status).toBe('active')
     expect(after.scope).toBe('workspace')
@@ -131,7 +131,7 @@ describe('executePromote', () => {
     await store.put(record({ id: 'mem_d' }))
     const snapshots = makeSnapshots()
     await executePromote({ confirmedIds: ['mem_d'], target: 'global', dismiss: true }, { store, agentsMd: fakeAgentsMd().writer, snapshots })
-    expect(snapshots.list()).toHaveLength(0)
+    expect(await snapshots.list()).toHaveLength(0)
   })
 
   it('dismiss：缺失/已删的 id 计入 skipped', async () => {
@@ -163,8 +163,8 @@ describe('executePromote × 真实 AgentsMdWriter', () => {
     const text = await readFile(join(dir, 'AGENTS.md'), 'utf8')
     expect(text).toContain('- 甲 — 并发提升的第一条')
     expect(text).toContain('- 乙 — 并发提升的第二条')
-    expect(store.get('mem_p1')!.status).toBe('deleted')
-    expect(store.get('mem_p2')!.status).toBe('deleted')
+    expect((await store.get('mem_p1'))!.status).toBe('deleted')
+    expect((await store.get('mem_p2'))!.status).toBe('deleted')
   })
 
   it('串行提升前缀相同的两条：两条都进目标文件，源记录都软删', async () => {

@@ -53,27 +53,28 @@ export class SnapshotStore {
    * 旧快照会永留 KV。 */
   async sweep(now: number): Promise<void> {
     const cutoff = now - SNAPSHOT_RETENTION_MS
-    for (const [key, snap] of [...this.table.entries()]) {
+    for (const [key, snap] of await this.table.list()) {
       if (snap.createdAt < cutoff) await this.table.delete(key)
     }
   }
 
-  list(): MemorySnapshot[] {
-    return [...this.table.entries()].map(([, s]) => s).sort((a, b) => b.createdAt - a.createdAt)
+  async list(): Promise<MemorySnapshot[]> {
+    return (await this.table.list()).map(([, s]) => s).sort((a, b) => b.createdAt - a.createdAt)
   }
 
-  get(id: string): MemorySnapshot | undefined {
+  get(id: string): Promise<MemorySnapshot | undefined> {
     return this.table.get(id)
   }
 
-  diff(snapshot: MemorySnapshot, lookup: (id: string) => MemoryRecord | undefined): SnapshotDiffEntry[] {
+  /** current：调用方预读的现状（至少含快照内各 id，含非 active），缺键视为当前不存在。 */
+  diff(snapshot: MemorySnapshot, current: ReadonlyMap<string, MemoryRecord>): SnapshotDiffEntry[] {
     return snapshot.data.map(snapshotted => {
-      const current = lookup(snapshotted.id)
+      const present = current.get(snapshotted.id)
       return {
         id: snapshotted.id,
         snapshotted,
-        current,
-        changedAfterSnapshot: isConflicting(current, snapshot),
+        current: present,
+        changedAfterSnapshot: isConflicting(present, snapshot),
       }
     })
   }
@@ -81,20 +82,20 @@ export class SnapshotStore {
   /**
    * 选择性恢复：ids 为 undefined 恢复全部。快照后被修改过的记录默认跳过（冲突保护），
    * overwriteChanged=true 才覆盖。恢复动作本身只 put 旧数据，不做二次快照。
+   * current：调用方预读的现状（同 diff）。
    */
   async restore(
     snapshot: MemorySnapshot,
     ids: string[] | undefined,
     put: (record: MemoryRecord) => Promise<void>,
-    lookup: (id: string) => MemoryRecord | undefined,
+    current: ReadonlyMap<string, MemoryRecord>,
     overwriteChanged: boolean,
   ): Promise<{ restored: string[]; skipped: string[] }> {
     const restored: string[] = []
     const skipped: string[] = []
     const targets = ids ? snapshot.data.filter(r => ids.includes(r.id)) : snapshot.data
     for (const rec of targets) {
-      const current = lookup(rec.id)
-      if (isConflicting(current, snapshot) && !overwriteChanged) {
+      if (isConflicting(current.get(rec.id), snapshot) && !overwriteChanged) {
         skipped.push(rec.id)
         continue
       }

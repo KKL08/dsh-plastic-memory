@@ -67,14 +67,14 @@ export async function executeSearch(
   // OR 匹配后按（命中词数 ↓ → confidence ↓ → recallCount ↓）排序：命中更多查询词者更相关。
   const terms = expandQueryTerms(a.query)
   const now = Date.now()
-  const hits = deps.store
-    .query({ keyword: a.query, types: a.types, scope: scopeFilter })
+  // 预读范围：只读 active（store.query 缺省 status），按 scope 与关键词过滤
+  const hits = (await deps.store.query({ keyword: a.query, types: a.types, scope: scopeFilter }))
     .filter(r => withinValidity(r, now)) // validTo 已过期的不进检索，与注入口径一致（治理扫描仍可见）
     .map(r => ({ r, score: matchScore(r, terms) }))
     .sort((x, y) => y.score - x.score || y.r.confidence - x.r.confidence || y.r.recallCount - x.r.recallCount)
     .slice(0, limit)
     .map(e => e.r)
-  deps.store.markRecalled(hits.map(h => h.id))
+  await deps.store.markRecalled(hits.map(h => h.id))
   return {
     hits: hits.map(h => ({
       id: h.id, type: h.type, summary: h.summary, content: h.content,

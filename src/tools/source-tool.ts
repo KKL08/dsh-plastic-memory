@@ -13,6 +13,8 @@ export interface SourceToolBindingDeps extends SourceToolDeps {
  * 姿态归档位管，写进描述会让 off 档的"不鼓励"失效。
  */
 export function createSourceTool(deps: SourceToolBindingDeps): ToolDefinition {
+  // render 是同步回调、读不了异步 store：execute 时顺手预读记忆名，按 id 留给 render 取
+  const names = new Map<string, string>()
   return defineTool({
     name: 'memory_source',
     description: [
@@ -28,13 +30,19 @@ export function createSourceTool(deps: SourceToolBindingDeps): ToolDefinition {
       schema: { type: 'json' },
       render: (_args, value) => {
         const result = value as unknown as SourceResult
-        const name = result.kind === 'ok' ? deps.store.get(result.memoryId)?.name : undefined
+        const name = result.kind === 'ok' ? names.get(result.memoryId) : undefined
         return [{ type: 'text', text: renderSourceResult(result, name) }]
       },
     },
     execute: async (args, exec) => {
       const context = await deps.resolveContext(exec)
-      return toToolOutput(await executeSource(args, context, deps))
+      const result = await executeSource(args, context, deps)
+      if (result.kind === 'ok') {
+        const name = (await deps.store.get(result.memoryId))?.name
+        if (name !== undefined) names.set(result.memoryId, name)
+        else names.delete(result.memoryId)
+      }
+      return toToolOutput(result)
     },
   })
 }

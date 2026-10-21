@@ -1,5 +1,4 @@
 import type { MemoryRecord } from './record-schema.ts'
-import type { MemoryStore } from './store.ts'
 import type { TypeRegistry } from './type-registry.ts'
 import { sourceNote, formatIndexLine } from './index-line.ts'
 import { workspaceDirName } from './storage/paths.ts'
@@ -27,8 +26,9 @@ export function estimateTokens(text: string): number {
   return Math.ceil(cjk * 1.5 + words * 1.3)
 }
 
+/** 纯函数：吃调用方预读的可见记录（global + 当前 workspace 的 active 记录），不读存储。 */
 export function assembleSnapshot(deps: {
-  store: MemoryStore
+  records: readonly MemoryRecord[]
   registry: TypeRegistry
   workspacePath: string | undefined
   budget: number
@@ -39,7 +39,7 @@ export function assembleSnapshot(deps: {
   evidenceLookup?: EvidenceLookupLevel
 }): { text: string; coreIds: string[] } {
   const { registry, now } = deps
-  const visible = deps.store.query({ scope: { kind: 'visible', workspacePath: deps.workspacePath } })
+  const visible = deps.records
   if (visible.length === 0) return { text: COLD_START_TEXT, coreIds: [] }
   const all = visible.filter(r => withinValidity(r, now))
 

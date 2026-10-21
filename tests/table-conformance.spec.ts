@@ -1,17 +1,21 @@
-import { describe, expect, it, beforeEach, afterEach } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { MemoryStore, InMemoryTable, type MemoryTable } from '../src/store.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { GLOBAL_DIR } from '../src/storage/paths.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable, type BatchKvTable } from '../src/kv-table.ts'
+import { SidecarStore } from '../src/storage/sidecar.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
 import { executeForget } from '../src/tools/forget.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
-import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
+import {
+  memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema,
+  type MemorySnapshot, type PendingDecision,
+} from '../src/governance/schema.ts'
 import { record } from './helpers/record.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { RecordNotFoundError } from '../src/errors.ts'
@@ -23,6 +27,8 @@ import { captureRejection } from './helpers/errors.ts'
 
 interface BackendHandle {
   table: MemoryTable
+  /** 召回统计侧表：FileTable 用真实的 .state/recall-stats.json，InMemoryTable 用内存表。 */
+  stats: BatchKvTable<RecallStats>
   cleanup(): Promise<void>
   /** 仅 FileTable 提供：强制重载一遍磁盘，逼真实走 encode→disk→decode。
    *  InMemoryTable 的 map 本来就没有序列化环节，省略此字段即跳过重载步骤。 */
@@ -33,14 +39,17 @@ interface BackendHandle {
 interface Backend { name: string; make(): Promise<BackendHandle> }
 
 const backends: Backend[] = [
-  { name: 'InMemoryTable', make: async () => ({ table: new InMemoryTable(), cleanup: async () => {} }) },
+  { name: 'InMemoryTable', make: async () => ({ table: new InMemoryTable(), stats: new InMemoryBatchKvTable<RecallStats>(), cleanup: async () => {} }) },
   {
     name: 'FileTable',
     make: async () => {
       const root = await mkdtemp(join(tmpdir(), 'pm-conf-'))
-      const t = new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() })
+      const { recallStats: stats } = new SidecarStore({
+        root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema },
+      })
+      const t = new FileTable({ root, stats })
       await t.load()
-      return { table: t, cleanup: () => rm(root, { recursive: true, force: true }), reload: () => t.load(), root }
+      return { table: t, stats, cleanup: () => rm(root, { recursive: true, force: true }), reload: () => t.load(), root }
     },
   },
 ]
@@ -50,12 +59,13 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
   let cleanup: () => Promise<void>
   let reload: (() => Promise<void>) | undefined
   let root: string | undefined
+  let stats: BatchKvTable<RecallStats>
   let store: MemoryStore
 
   beforeEach(async () => {
     const handle = await make()
-    table = handle.table; cleanup = handle.cleanup; reload = handle.reload; root = handle.root
-    store = new MemoryStore(table)
+    table = handle.table; stats = handle.stats; cleanup = handle.cleanup; reload = handle.reload; root = handle.root
+    store = new MemoryStore(table, undefined, stats)
   })
   afterEach(() => cleanup())
 
@@ -94,25 +104,25 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     if (reload) await reload()
 
     // put→get 逐字段相等（FileTable 场景下强制先过 encode→disk→decode）
-    expect(table.get(recGlobal.id)).toEqual(recGlobal)
-    expect(table.get(recA.id)).toEqual(recA)
-    expect(table.get(recB.id)).toEqual(recB)
-    expect(table.get(recADeleted.id)).toEqual(recADeleted)
+    expect(await table.get(recGlobal.id)).toEqual(recGlobal)
+    expect(await table.get(recA.id)).toEqual(recA)
+    expect(await table.get(recB.id)).toEqual(recB)
+    expect(await table.get(recADeleted.id)).toEqual(recADeleted)
 
     const s = new MemoryStore(table)
 
     // visible(/repo-with-hyphens/sub-dir) → global + ws=/a，ws=/b 因 scope 不匹配被排除
-    const visibleA = s.query({ scope: { kind: 'visible', workspacePath: '/home/dev/repo-with-hyphens/sub-dir' } })
+    const visibleA = await s.query({ scope: { kind: 'visible', workspacePath: '/home/dev/repo-with-hyphens/sub-dir' } })
     expect(visibleA.map(r => r.id).sort()).toEqual([recA.id, recGlobal.id].sort())
 
     // 缺省 status 过滤排除 deleted（即便 scope 命中 visible 范围）
     expect(visibleA.some(r => r.id === recADeleted.id)).toBe(false)
-    const deletedOnly = s.query({ status: ['deleted'] })
+    const deletedOnly = await s.query({ status: ['deleted'] })
     expect(deletedOnly.map(r => r.id)).toEqual([recADeleted.id])
 
     // 多词 keyword：Task 6 起 store.query 是多词 AND（词序无关）。"pnpm 环境" 两词都命中
     // recGlobal（连续子串）与 recA（词序相反但两词都在），recB 不含这两个词故不命中。
-    const kwHits = s.query({ keyword: 'pnpm 环境', status: ['active'] })
+    const kwHits = await s.query({ keyword: 'pnpm 环境', status: ['active'] })
     expect(kwHits.map(r => r.id).sort()).toEqual([recA.id, recGlobal.id].sort())
   })
 
@@ -122,7 +132,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
 
     const updated = await table.update(rec.id, r => ({ ...r, content: '更新后内容', updatedAt: 2 }))
     expect(updated.content).toBe('更新后内容')
-    expect(table.get(rec.id)!.content).toBe('更新后内容')
+    expect((await table.get(rec.id))!.content).toBe('更新后内容')
 
     const err = await captureRejection(table.update('ghost', r => r))
     expect(err).toBeInstanceOf(RecordNotFoundError)
@@ -130,27 +140,38 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
 
     const ok = await store.softDelete(rec.id)
     expect(ok).toBe(true)
-    expect(table.get(rec.id)!.status).toBe('deleted')
+    expect((await table.get(rec.id))!.status).toBe('deleted')
     expect(await store.softDelete('ghost2')).toBe(false)
   })
 
-  it('markRecalled 更新统计（等待微任务后断言 recallCount+1）', async () => {
+  it('markRecalled 只写召回统计侧表：统计 +1，不经 table.update，记忆文件 mtime 不变', async () => {
     const rec = record({ id: 'mem_recall_1', name: 'markrecalled-test', content: '待召回内容', updatedAt: 1 })
     await store.put(rec)
 
     const filePath = root ? join(root, GLOBAL_DIR, 'markrecalled-test.md') : undefined
     const before = filePath ? (await stat(filePath)).mtimeMs : undefined
+    const update = vi.spyOn(table, 'update')
+    const putMany = vi.spyOn(stats, 'putMany')
 
-    store.markRecalled([rec.id])
-    await new Promise(setImmediate)
+    await store.markRecalled([rec.id])
+    await store.markRecalled([rec.id, 'mem_ghost'])
 
-    expect(store.get(rec.id)!.recallCount).toBe(1)
-    expect(store.get(rec.id)!.lastRecalledAt).not.toBeNull()
+    expect(update).not.toHaveBeenCalled()
+    expect(putMany).toHaveBeenCalledTimes(2) // 每次 markRecalled 只批量写一次，不论几个 id
+    const row = await stats.get(rec.id)
+    expect(row).toMatchObject({ id: rec.id, recallCount: 2 })
+    expect(row!.lastRecalledAt).not.toBeNull()
+    expect(await stats.get('mem_ghost')).toBeUndefined() // 不存在的记忆不留统计行
 
-    // §4 核心命题：易变字段的更新只走 sidecar，文件本体不重写——mtime 不变
+    // 设计稿 §7 核心命题：召回统计只走侧表，文件本体不重写——mtime 不变
     if (filePath) {
       const after = (await stat(filePath)).mtimeMs
       expect(after).toBe(before)
+    }
+    // FileTable 的合并读法不变：重载后记录带上侧表里的统计
+    if (reload) {
+      await reload()
+      expect((await table.get(rec.id))!.recallCount).toBe(2)
     }
   })
 
@@ -166,7 +187,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     }, deps)
     expect(created.kind).toBe('saved')
     if (created.kind !== 'saved') throw new Error('unreachable')
-    expect(store.get(created.record.id)).toEqual(created.record)
+    expect(await store.get(created.record.id)).toEqual(created.record)
 
     const updated = await runSavePipeline({
       action: 'update', id: created.record.id, name: '流程A-v2', type: 'procedure', scope: 'global',
@@ -192,12 +213,12 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
       sourceMode: 'user-explicit', force: true, supersedes: [other.record.id],
     }, deps)
     expect(superseder.kind).toBe('saved')
-    expect(store.get(other.record.id)!.status).toBe('superseded')
+    expect((await store.get(other.record.id))!.status).toBe('superseded')
 
     if (reload) await reload()
-    expect(table.get(updated.record.id)!.content).toBe('流程A 的内容 v2')
-    expect(table.get(updated.record.id)!.createdAt).toBe(created.record.createdAt)
-    expect(table.get(other.record.id)!.status).toBe('superseded')
+    expect((await table.get(updated.record.id))!.content).toBe('流程A 的内容 v2')
+    expect((await table.get(updated.record.id))!.createdAt).toBe(created.record.createdAt)
+    expect((await table.get(other.record.id))!.status).toBe('superseded')
   })
 
   it('forget 批量 + 快照先行 + restore 复活：端到端一致', async () => {
@@ -210,21 +231,22 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     const result = await executeForget({ ids: [rec.id], reason: '测试遗忘' }, forgetDeps)
     expect(result.ok).toBe(true)
     expect(result.forgotten).toEqual([rec.id])
-    expect(store.get(rec.id)!.status).toBe('deleted')
+    expect((await store.get(rec.id))!.status).toBe('deleted')
 
-    const snap = snapshots.get(result.snapshotId!)!
+    const snap = (await snapshots.get(result.snapshotId!))!
     expect(snap.data).toHaveLength(1)
     expect(snap.data[0].id).toBe(rec.id)
     expect(snap.data[0].status).toBe('active') // 快照记的是删除前的状态
 
+    const byId = new Map((await table.list()).map(r => [r.id, r]))
     const { restored } = await snapshots.restore(
-      snap, undefined, r => store.put(r), id => store.get(id), false,
+      snap, undefined, r => store.put(r), byId, false,
     )
     expect(restored).toEqual([rec.id])
-    expect(store.get(rec.id)!.status).toBe('active')
+    expect((await store.get(rec.id))!.status).toBe('active')
 
     if (reload) await reload()
-    expect(table.get(rec.id)!.status).toBe('active') // FileTable：重载后复活仍成立
+    expect((await table.get(rec.id))!.status).toBe('active') // FileTable：重载后复活仍成立
   })
 
   it('put 不承载召回统计：restore 旧记录不回退 recallCount/lastRecalledAt（设计稿 §3 登记语义）', async () => {
@@ -233,13 +255,13 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     await table.update('mem_vol', c => ({ ...c, recallCount: 7, lastRecalledAt: 1787200000000 }))
     // 模拟 snapshots.restore：把快照时点的旧记录（recallCount=0）整条 put 回来
     await table.put('mem_vol', { ...r, summary: '恢复后的摘要' })
-    const after = table.get('mem_vol')!
+    const after = (await table.get('mem_vol'))!
     expect(after.summary).toBe('恢复后的摘要')  // 稳定字段照常恢复
     expect(after.recallCount).toBe(7)           // 召回统计不回退
     expect(after.lastRecalledAt).toBe(1787200000000)
     if (reload) {
       await reload()
-      const reloaded = table.get('mem_vol')!
+      const reloaded = (await table.get('mem_vol'))!
       expect(reloaded.recallCount).toBe(7)      // sidecar 一致：重载前后同值
       expect(reloaded.lastRecalledAt).toBe(1787200000000)
     }

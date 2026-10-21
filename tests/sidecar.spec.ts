@@ -1,0 +1,295 @@
+import { describe, expect, it, beforeEach, afterEach } from 'vitest'
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { SidecarStore, STATE_DIR, KV_IMPORT_MARKER, RECALL_STATS_FILE, type LegacyKvTables } from '../src/storage/sidecar.ts'
+import { kvImportMarkerSchema } from '../src/storage/schema.ts'
+import {
+  memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema,
+  type MemorySnapshot, type PendingDecision, type ScanCacheEntry,
+} from '../src/governance/schema.ts'
+import { record } from './helpers/record.ts'
+
+const schemas = { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema }
+
+function snap(id: string, partial: Partial<MemorySnapshot> = {}): MemorySnapshot {
+  return { id, createdAt: 1, operation: 'manual', description: id, memoryIds: [], data: [], ...partial }
+}
+function pd(id: string, partial: Partial<PendingDecision> = {}): PendingDecision {
+  return { id, memoryIds: ['mem_a', 'mem_b'], summary: id, firstSeenAt: 1, ...partial }
+}
+function cacheEntry(id: string): ScanCacheEntry {
+  return { id, scannedAt: 1, scope: 'all', findings: [] }
+}
+
+/** 收集 warn，坏文件跳过要留痕。 */
+function makeLog() {
+  const warns: string[] = []
+  return { warns, log: { info() {}, warn: (m: string) => { warns.push(m) }, error() {} } }
+}
+
+let root: string
+let state: string
+beforeEach(async () => {
+  root = await mkdtemp(join(tmpdir(), 'pm-sidecar-'))
+  state = join(root, STATE_DIR)
+})
+afterEach(async () => { await rm(root, { recursive: true, force: true }) })
+
+async function exists(path: string) {
+  return stat(path).then(() => true, () => false)
+}
+
+/** 递归列出 .state 下所有文件（相对路径）。 */
+async function listFiles(dir: string, prefix = ''): Promise<string[]> {
+  const out: string[] = []
+  for (const e of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+    if (e.isDirectory()) out.push(...await listFiles(join(dir, e.name), `${prefix}${e.name}/`))
+    else out.push(prefix + e.name)
+  }
+  return out.sort()
+}
+
+describe('SidecarStore：四张表落 .state/', () => {
+  it('构造不做 I/O：.state/ 不存在', async () => {
+    new SidecarStore({ root, schemas })
+    expect(await exists(state)).toBe(false)
+  })
+
+  it('snapshots：每条一个 snapshots/<id>.json，get / list / delete', async () => {
+    const s = new SidecarStore({ root, schemas })
+    await s.snapshots.put('snap_a', snap('snap_a'))
+    await s.snapshots.put('snap_b', snap('snap_b', { data: [record({ id: 'mem_x' })] }))
+    const raw = JSON.parse(await readFile(join(state, 'snapshots', 'snap_b.json'), 'utf8'))
+    expect(memorySnapshotSchema.parse(raw).data[0]!.id).toBe('mem_x')
+    expect((await s.snapshots.get('snap_a'))?.description).toBe('snap_a')
+    expect((await s.snapshots.list()).map(([k]) => k).sort()).toEqual(['snap_a', 'snap_b'])
+    expect(await s.snapshots.delete('snap_a')).toBe(true)
+    expect(await s.snapshots.delete('snap_a')).toBe(false)
+    expect(await s.snapshots.get('snap_a')).toBeUndefined()
+    expect(await exists(join(state, 'snapshots', 'snap_a.json'))).toBe(false)
+  })
+
+  it('pending：每条一个 pending/<id>.json；覆盖写取最新值', async () => {
+    const s = new SidecarStore({ root, schemas })
+    await s.pending.put('pd_a', pd('pd_a'))
+    await s.pending.put('pd_a', pd('pd_a', { summary: '改过' }))
+    expect(await listFiles(join(state, 'pending'))).toEqual(['pd_a.json'])
+    expect((await s.pending.get('pd_a'))?.summary).toBe('改过')
+    expect(await s.pending.list()).toEqual([['pd_a', pd('pd_a', { summary: '改过' })]])
+  })
+
+  it('scan-cache：文件名是 sha1(桶键)，list 还原原始桶键', async () => {
+    const s = new SidecarStore({ root, schemas })
+    const key = 'cache_/home/dev/proj'
+    await s.scanCache.put(key, cacheEntry(key))
+    const hashed = createHash('sha1').update(key).digest('hex')
+    expect(await listFiles(join(state, 'scan-cache'))).toEqual([`${hashed}.json`])
+    expect(await s.scanCache.get(key)).toEqual(cacheEntry(key))
+    expect(await s.scanCache.list()).toEqual([[key, cacheEntry(key)]])
+    expect(await s.scanCache.delete(key)).toBe(true)
+    expect(await s.scanCache.list()).toEqual([])
+  })
+
+  it('recall-stats：整张表一个 recall-stats.json；删不存在的键不建文件', async () => {
+    const s = new SidecarStore({ root, schemas })
+    expect(await s.recallStats.delete('mem_none')).toBe(false)
+    expect(await s.recallStats.get('mem_none')).toBeUndefined()
+    expect(await exists(state)).toBe(false)
+
+    await s.recallStats.put('mem_a', { id: 'mem_a', recallCount: 1, lastRecalledAt: 10 })
+    await s.recallStats.put('mem_b', { id: 'mem_b', recallCount: 2, lastRecalledAt: null })
+    const raw = JSON.parse(await readFile(join(state, RECALL_STATS_FILE), 'utf8'))
+    expect(Object.keys(raw).sort()).toEqual(['mem_a', 'mem_b'])
+    expect(await s.recallStats.get('mem_b')).toEqual({ id: 'mem_b', recallCount: 2, lastRecalledAt: null })
+    expect(await s.recallStats.delete('mem_a')).toBe(true)
+    expect((await s.recallStats.list()).map(([k]) => k)).toEqual(['mem_b'])
+  })
+
+  it('recall-stats.putMany：一次写入多条、与已有条目合并，只换一次文件', async () => {
+    const s = new SidecarStore({ root, schemas })
+    await s.recallStats.put('mem_a', { id: 'mem_a', recallCount: 1, lastRecalledAt: 1 })
+    const before = (await stat(join(state, RECALL_STATS_FILE))).ino
+    await s.recallStats.putMany([
+      ['mem_b', { id: 'mem_b', recallCount: 2, lastRecalledAt: 2 }],
+      ['mem_c', { id: 'mem_c', recallCount: 3, lastRecalledAt: 3 }],
+    ])
+    expect((await s.recallStats.list()).map(([k]) => k).sort()).toEqual(['mem_a', 'mem_b', 'mem_c'])
+    expect((await stat(join(state, RECALL_STATS_FILE))).ino).not.toBe(before) // tmp + rename 换了文件
+    expect((await listFiles(state)).filter(f => f.includes('.tmp-'))).toEqual([])
+  })
+
+  it('recall-stats 跨实例可见：另一个实例（模拟另一进程）写入后本实例读到新值', async () => {
+    const a = new SidecarStore({ root, schemas })
+    const b = new SidecarStore({ root, schemas })
+    await a.recallStats.put('mem_a', { id: 'mem_a', recallCount: 1, lastRecalledAt: 1 })
+    expect((await b.recallStats.get('mem_a'))?.recallCount).toBe(1)
+    await b.recallStats.put('mem_a', { id: 'mem_a', recallCount: 5, lastRecalledAt: 2 })
+    expect((await a.recallStats.get('mem_a'))?.recallCount).toBe(5)
+  })
+
+  it('原子写：并发写入后没有 tmp 残留，单文件表的并发 put 不丢条目（进程内串行）', async () => {
+    const s = new SidecarStore({ root, schemas })
+    await Promise.all([
+      ...Array.from({ length: 10 }, (_, i) => s.snapshots.put(`snap_${i}`, snap(`snap_${i}`))),
+      ...Array.from({ length: 10 }, (_, i) => s.pending.put(`pd_${i}`, pd(`pd_${i}`))),
+      ...Array.from({ length: 10 }, (_, i) => s.scanCache.put(`cache_${i}`, cacheEntry(`cache_${i}`))),
+      ...Array.from({ length: 10 }, (_, i) => s.recallStats.put(`mem_${i}`, { id: `mem_${i}`, recallCount: i, lastRecalledAt: null })),
+    ])
+    const files = await listFiles(state)
+    expect(files.filter(f => f.includes('.tmp-'))).toEqual([])
+    expect(files.filter(f => f.startsWith('snapshots/'))).toHaveLength(10)
+    expect(files.filter(f => f.startsWith('pending/'))).toHaveLength(10)
+    expect(files.filter(f => f.startsWith('scan-cache/'))).toHaveLength(10)
+    expect(await s.recallStats.list()).toHaveLength(10)
+  })
+
+  it('坏 JSON 与不合 schema 的文件跳过并记日志，不抛；在途 tmp 文件不当成条目', async () => {
+    const { warns, log } = makeLog()
+    const s = new SidecarStore({ root, schemas, log })
+    await s.snapshots.put('snap_ok', snap('snap_ok'))
+    await writeFile(join(state, 'snapshots', 'snap_broken.json'), '{ not json', 'utf8')
+    await writeFile(join(state, 'snapshots', 'snap_shape.json'), JSON.stringify({ id: 'snap_shape' }), 'utf8')
+    await writeFile(join(state, 'snapshots', 'snap_x.json.tmp-1-abc'), JSON.stringify(snap('snap_x')), 'utf8')
+    expect((await s.snapshots.list()).map(([k]) => k)).toEqual(['snap_ok'])
+    expect(await s.snapshots.get('snap_broken')).toBeUndefined()
+    expect(await s.snapshots.get('snap_shape')).toBeUndefined()
+    expect(warns.some(w => w.includes('snap_broken.json'))).toBe(true)
+    expect(warns.some(w => w.includes('snap_shape.json'))).toBe(true)
+  })
+
+  it('recall-stats.json 整体坏掉按空表读、不抛；单条不合 schema 只跳过那一条', async () => {
+    const { warns, log } = makeLog()
+    const s = new SidecarStore({ root, schemas, log })
+    await mkdir(state, { recursive: true })
+    await writeFile(join(state, RECALL_STATS_FILE), 'garbage', 'utf8')
+    expect(await s.recallStats.list()).toEqual([])
+    expect(warns.length).toBeGreaterThan(0)
+
+    await writeFile(join(state, RECALL_STATS_FILE), JSON.stringify({
+      mem_ok: { id: 'mem_ok', recallCount: 1, lastRecalledAt: null },
+      mem_bad: { id: 'mem_bad', recallCount: 'many' },
+    }), 'utf8')
+    expect((await s.recallStats.list()).map(([k]) => k)).toEqual(['mem_ok'])
+    expect(warns.some(w => w.includes('mem_bad'))).toBe(true)
+  })
+
+  it('put 的键必须等于值的 id（list 从文件内容还原键）', async () => {
+    const s = new SidecarStore({ root, schemas })
+    await expect(s.snapshots.put('snap_a', snap('snap_b'))).rejects.toThrow()
+    await expect(s.scanCache.put('k1', cacheEntry('k2'))).rejects.toThrow()
+  })
+})
+
+describe('SidecarStore：KV 导入协议', () => {
+  function legacyOf(tables: Partial<LegacyKvTables>) {
+    let calls = 0
+    const open = async (): Promise<LegacyKvTables> => {
+      calls++
+      return { snapshots: tables.snapshots ?? [], pending: tables.pending ?? [] }
+    }
+    return { open, calls: () => calls }
+  }
+  async function readMarker() {
+    return kvImportMarkerSchema.parse(JSON.parse(await readFile(join(state, KV_IMPORT_MARKER), 'utf8')))
+  }
+
+  it('无旧 KV：首次访问写 source: none 的标记', async () => {
+    const s = new SidecarStore({ root, schemas, now: () => 42 })
+    expect(await s.snapshots.list()).toEqual([])
+    expect(await readMarker()).toEqual({ version: 1, importedAt: 42, source: 'none', counts: { snapshots: 0, pending: 0 } })
+  })
+
+  it('有旧 KV：首次访问前导入 snapshots 与 pending，写 source: kv 的标记与条数', async () => {
+    const legacy = legacyOf({
+      snapshots: [['snap_a', snap('snap_a')], ['snap_b', snap('snap_b')]],
+      pending: [['pd_a', pd('pd_a')]],
+    })
+    const s = new SidecarStore({ root, schemas, openLegacyKv: legacy.open, now: () => 7 })
+    expect((await s.pending.list()).map(([k]) => k)).toEqual(['pd_a'])
+    expect((await s.snapshots.list()).map(([k]) => k).sort()).toEqual(['snap_a', 'snap_b'])
+    expect(await readMarker()).toEqual({ version: 1, importedAt: 7, source: 'kv', counts: { snapshots: 2, pending: 1 } })
+    expect(legacy.calls()).toBe(1)
+  })
+
+  it('并发首次访问只导入一次', async () => {
+    const legacy = legacyOf({ snapshots: [['snap_a', snap('snap_a')]] })
+    const s = new SidecarStore({ root, schemas, openLegacyKv: legacy.open })
+    await Promise.all([s.snapshots.list(), s.pending.list(), s.scanCache.get('x'), s.snapshots.put('snap_n', snap('snap_n'))])
+    expect(legacy.calls()).toBe(1)
+    expect((await s.snapshots.list()).map(([k]) => k).sort()).toEqual(['snap_a', 'snap_n'])
+  })
+
+  it('标记已存在：不再打开旧 KV', async () => {
+    await new SidecarStore({ root, schemas }).snapshots.list() // 写 none 标记
+    const legacy = legacyOf({ snapshots: [['snap_a', snap('snap_a')]] })
+    const s = new SidecarStore({ root, schemas, openLegacyKv: legacy.open })
+    expect(await s.snapshots.list()).toEqual([])
+    expect(legacy.calls()).toBe(0)
+  })
+
+  it('召回统计不经导入屏障：只碰 recall-stats 不触发导入', async () => {
+    const legacy = legacyOf({ snapshots: [['snap_a', snap('snap_a')]] })
+    const s = new SidecarStore({ root, schemas, openLegacyKv: legacy.open })
+    await s.recallStats.get('mem_a')
+    await s.recallStats.put('mem_a', { id: 'mem_a', recallCount: 1, lastRecalledAt: null })
+    expect(legacy.calls()).toBe(0)
+    expect(await exists(join(state, KV_IMPORT_MARKER))).toBe(false)
+  })
+
+  it('导入中断后续传：已迁入且被改过的条目不被覆盖，缺的补上，标记出现', async () => {
+    // 上次导入写了两条就崩了（无标记）；之后插件改过其中一条
+    await mkdir(join(state, 'snapshots'), { recursive: true })
+    await mkdir(join(state, 'pending'), { recursive: true })
+    await writeFile(join(state, 'snapshots', 'snap_a.json'), JSON.stringify(snap('snap_a')), 'utf8')
+    await writeFile(join(state, 'pending', 'pd_a.json'), JSON.stringify(pd('pd_a', { summary: '迁移后改过' })), 'utf8')
+    const legacy = legacyOf({
+      snapshots: [['snap_a', snap('snap_a')], ['snap_b', snap('snap_b')]],
+      pending: [['pd_a', pd('pd_a', { summary: 'KV 里的旧值' })], ['pd_b', pd('pd_b')]],
+    })
+    const s = new SidecarStore({ root, schemas, openLegacyKv: legacy.open })
+    expect((await s.pending.get('pd_a'))?.summary).toBe('迁移后改过')
+    expect((await s.pending.get('pd_b'))?.id).toBe('pd_b')
+    expect((await s.snapshots.list()).map(([k]) => k).sort()).toEqual(['snap_a', 'snap_b'])
+    expect((await readMarker()).counts).toEqual({ snapshots: 2, pending: 2 })
+    expect((await listFiles(state)).filter(f => f.includes('.tmp-'))).toEqual([])
+  })
+
+  it('旧 KV 里不合 schema 或键不能当文件名的条目跳过并记日志，其余照常导入', async () => {
+    const { warns, log } = makeLog()
+    const legacy = legacyOf({
+      snapshots: [['snap_ok', snap('snap_ok')], ['snap_bad', { id: 'snap_bad' }], ['../evil', snap('../evil')]],
+    })
+    const s = new SidecarStore({ root, schemas, openLegacyKv: legacy.open, log })
+    expect((await s.snapshots.list()).map(([k]) => k)).toEqual(['snap_ok'])
+    expect((await readMarker()).counts.snapshots).toBe(1)
+    expect(warns.some(w => w.includes('snap_bad'))).toBe(true)
+    expect(warns.some(w => w.includes('../evil'))).toBe(true)
+    expect(await exists(join(root, 'evil.json'))).toBe(false)
+  })
+
+  it('打开旧 KV 失败：不写标记、记日志，侧表照常可用；下一个实例（下次启动）重试', async () => {
+    const { warns, log } = makeLog()
+    const s = new SidecarStore({ root, schemas, log, openLegacyKv: async () => { throw new Error('domain busy') } })
+    await s.snapshots.put('snap_n', snap('snap_n'))
+    expect((await s.snapshots.list()).map(([k]) => k)).toEqual(['snap_n'])
+    expect(await exists(join(state, KV_IMPORT_MARKER))).toBe(false)
+    expect(warns.some(w => w.includes('domain busy'))).toBe(true)
+
+    const legacy = legacyOf({ snapshots: [['snap_a', snap('snap_a')]] })
+    const next = new SidecarStore({ root, schemas, openLegacyKv: legacy.open })
+    expect((await next.snapshots.list()).map(([k]) => k).sort()).toEqual(['snap_a', 'snap_n'])
+    expect((await readMarker()).source).toBe('kv')
+  })
+
+  it('标记文件坏掉按缺失处理，重新导入（排他创建保证不覆盖）', async () => {
+    await mkdir(state, { recursive: true })
+    await writeFile(join(state, KV_IMPORT_MARKER), '{ broken', 'utf8')
+    const legacy = legacyOf({ snapshots: [['snap_a', snap('snap_a')]] })
+    const s = new SidecarStore({ root, schemas, openLegacyKv: legacy.open })
+    expect((await s.snapshots.list()).map(([k]) => k)).toEqual(['snap_a'])
+    expect(legacy.calls()).toBe(1)
+    expect((await readMarker()).source).toBe('kv')
+  })
+})

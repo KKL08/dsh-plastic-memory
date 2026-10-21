@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
+import { InMemoryBatchKvTable } from '../src/kv-table.ts'
+import type { RecallStats } from '../src/storage/schema.ts'
 import { record } from './helpers/record.ts'
 
 describe('MemoryStore.query', () => {
@@ -8,7 +10,7 @@ describe('MemoryStore.query', () => {
     await store.put(record({ id: 'g', scope: 'global' }))
     await store.put(record({ id: 'w1', scope: 'workspace', workspacePath: '/a' }))
     await store.put(record({ id: 'w2', scope: 'workspace', workspacePath: '/b' }))
-    const ids = store.query({ scope: { kind: 'visible', workspacePath: '/a' } }).map(r => r.id)
+    const ids = (await store.query({ scope: { kind: 'visible', workspacePath: '/a' } })).map(r => r.id)
     expect(ids.sort()).toEqual(['g', 'w1'])
   })
 
@@ -16,7 +18,7 @@ describe('MemoryStore.query', () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'g', scope: 'global' }))
     await store.put(record({ id: 'w', scope: 'workspace', workspacePath: '/a' }))
-    expect(store.query({ scope: { kind: 'visible', workspacePath: undefined } }).map(r => r.id)).toEqual(['g'])
+    expect((await store.query({ scope: { kind: 'visible', workspacePath: undefined } })).map(r => r.id)).toEqual(['g'])
   })
 
   it('status 缺省只返回 active（superseded/deleted 排除）', async () => {
@@ -24,14 +26,14 @@ describe('MemoryStore.query', () => {
     await store.put(record({ id: 'a', status: 'active' }))
     await store.put(record({ id: 'd', status: 'deleted' }))
     await store.put(record({ id: 'p', status: 'superseded' }))
-    expect(store.query({}).map(r => r.id)).toEqual(['a'])
+    expect((await store.query({})).map(r => r.id)).toEqual(['a'])
   })
 
   it('keyword 对 content/summary/tags 小写子串匹配', async () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'hit', content: '用 PostgreSQL 存储' }))
     await store.put(record({ id: 'miss', content: '无关内容', summary: '无关' }))
-    expect(store.query({ keyword: 'postgresql' }).map(r => r.id)).toEqual(['hit'])
+    expect((await store.query({ keyword: 'postgresql' })).map(r => r.id)).toEqual(['hit'])
   })
 })
 
@@ -40,16 +42,39 @@ describe('MemoryStore 变更', () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'x' }))
     expect(await store.softDelete('x')).toBe(true)
-    expect(store.get('x')!.status).toBe('deleted')
+    expect((await store.get('x'))!.status).toBe('deleted')
     expect(await store.softDelete('ghost')).toBe(false)
   })
 
-  it('markRecalled 刷新统计', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+  it('markRecalled 读改写召回统计侧表，不改记录', async () => {
+    const stats = new InMemoryBatchKvTable<RecallStats>()
+    const store = new MemoryStore(new InMemoryTable(), undefined, stats)
     await store.put(record({ id: 'x' }))
-    store.markRecalled(['x'])
-    await new Promise(r => setTimeout(r, 0))
-    expect(store.get('x')!.recallCount).toBe(1)
-    expect(store.get('x')!.lastRecalledAt).not.toBeNull()
+    await store.markRecalled(['x'])
+    expect(await stats.get('x')).toMatchObject({ id: 'x', recallCount: 1 })
+    expect((await stats.get('x'))!.lastRecalledAt).not.toBeNull()
+    expect((await store.get('x'))!.recallCount).toBe(0)
+  })
+
+  it('markRecalled 并发调用不丢计数（进程内读改写串行）', async () => {
+    const stats = new InMemoryBatchKvTable<RecallStats>()
+    const store = new MemoryStore(new InMemoryTable(), undefined, stats)
+    await store.put(record({ id: 'x' }))
+    await Promise.all([store.markRecalled(['x']), store.markRecalled(['x']), store.markRecalled(['x'])])
+    expect((await stats.get('x'))!.recallCount).toBe(3)
+  })
+
+  it('markRecalled 召回 N 个 id：一次读、内存合并、一次批量写（不逐条 put）', async () => {
+    const stats = new InMemoryBatchKvTable<RecallStats>()
+    const store = new MemoryStore(new InMemoryTable(), undefined, stats)
+    for (const id of ['a', 'b', 'c']) await store.put(record({ id }))
+    await stats.put('b', { id: 'b', recallCount: 4, lastRecalledAt: 1 })
+    const put = vi.spyOn(stats, 'put')
+    const putMany = vi.spyOn(stats, 'putMany')
+    await store.markRecalled(['a', 'b', 'c', 'ghost', 'a'])
+    expect(put).not.toHaveBeenCalled()
+    expect(putMany).toHaveBeenCalledTimes(1)
+    // 'a' 出现两次按两次计（与改批量前逐条累加的行为一致）；不存在的 id 不留行
+    expect((await stats.list()).map(([k, v]) => [k, v.recallCount]).sort()).toEqual([['a', 2], ['b', 5], ['c', 1]])
   })
 })
