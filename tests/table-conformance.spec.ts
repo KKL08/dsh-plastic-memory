@@ -1,10 +1,11 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtemp, rm, stat } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { MemoryStore, InMemoryTable, type MemoryTable } from '../src/store.ts'
+import { MemoryStore, InMemoryTable, type MemoryTable, type SeedRecord } from '../src/store.ts'
 import { FileTable } from '../src/storage/file-table.ts'
-import { GLOBAL_DIR } from '../src/storage/paths.ts'
+import { encodeRecord } from '../src/storage/frontmatter.ts'
+import { ARCHIVE_DIR, GLOBAL_DIR, WORKSPACE_MARKER, deriveFileId, workspaceDirName } from '../src/storage/paths.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable, type BatchKvTable } from '../src/kv-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
@@ -12,6 +13,7 @@ import { executeForget } from '../src/tools/forget.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
+import type { MemoryRecord } from '../src/record-schema.ts'
 import {
   memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema,
   type MemorySnapshot, type PendingDecision,
@@ -25,21 +27,47 @@ import { captureRejection } from './helpers/errors.ts'
  *  只在 partial 里显式传入时才出现——不写成 `key: undefined`，否则 encode/decode 往返后
  *  "键缺失" vs "键存在但值 undefined" 会制造假的不等。 */
 
+/** 往一个目录直接放文件（对应手写 / 外部落盘 / 备份复制出的文件），绕过 put：两个后端各自实现。 */
+interface SeedFile { dir: string; fileName: string; record: SeedRecord; archived?: boolean }
+
 interface BackendHandle {
   table: MemoryTable
   /** 召回统计侧表：FileTable 用真实的 .state/recall-stats.json，InMemoryTable 用内存表。 */
   stats: BatchKvTable<RecallStats>
   cleanup(): Promise<void>
-  /** 仅 FileTable 提供：强制重载一遍磁盘，逼真实走 encode→disk→decode。
-   *  InMemoryTable 的 map 本来就没有序列化环节，省略此字段即跳过重载步骤。 */
+  /** 仅 FileTable 提供（现为空操作）：没有常驻表之后每次读都走 encode→disk→decode，保留调用点让断言照跑。 */
   reload?: () => Promise<void>
   /** 仅 FileTable 提供：记忆根目录，供 markRecalled 的 mtime 断言直接 stat 文件。 */
   root?: string
+  /** 两个后端共用的目录名（storage/paths 同源）：readScope 的 dirs 用它表达。 */
+  globalDir: string
+  wsDir(workspacePath: string): string
+  seedFile(file: SeedFile): Promise<void>
 }
 interface Backend { name: string; make(): Promise<BackendHandle> }
 
+/** 手写文件：只写有的键；缺 id 就不写 id 行（FileTable 据相对路径派生）。 */
+function handWritten(r: SeedRecord): string {
+  if (r.id !== undefined) return encodeRecord(r as MemoryRecord, {})
+  const { content, ...rest } = r
+  const lines = ['---', `name: ${rest.name}`, `type: ${rest.type}`]
+  if (rest.summary) lines.push(`summary: ${rest.summary}`)
+  return `${lines.join('\n')}\n---\n\n${content}\n`
+}
+
 const backends: Backend[] = [
-  { name: 'InMemoryTable', make: async () => ({ table: new InMemoryTable(), stats: new InMemoryBatchKvTable<RecallStats>(), cleanup: async () => {} }) },
+  {
+    name: 'InMemoryTable',
+    make: async () => {
+      const root = '/in-memory'
+      const t = new InMemoryTable(root)
+      return {
+        table: t, stats: new InMemoryBatchKvTable<RecallStats>(), cleanup: async () => {},
+        globalDir: join(root, GLOBAL_DIR), wsDir: p => join(root, workspaceDirName(p)),
+        seedFile: async f => { t.seedFile(f) },
+      }
+    },
+  },
   {
     name: 'FileTable',
     make: async () => {
@@ -48,8 +76,16 @@ const backends: Backend[] = [
         root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema },
       })
       const t = new FileTable({ root, stats })
-      await t.load()
-      return { table: t, stats, cleanup: () => rm(root, { recursive: true, force: true }), reload: () => t.load(), root }
+      return {
+        table: t, stats, cleanup: () => rm(root, { recursive: true, force: true }), reload: async () => {}, root,
+        globalDir: join(root, GLOBAL_DIR), wsDir: p => join(root, workspaceDirName(p)),
+        seedFile: async f => {
+          const dir = f.archived ? join(f.dir, ARCHIVE_DIR) : f.dir
+          await mkdir(dir, { recursive: true })
+          if (f.record.scope === 'workspace') await writeFile(join(f.dir, WORKSPACE_MARKER), `${f.record.workspacePath}\n`)
+          await writeFile(join(dir, f.fileName), handWritten(f.record))
+        },
+      }
     },
   },
 ]
@@ -61,9 +97,11 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
   let root: string | undefined
   let stats: BatchKvTable<RecallStats>
   let store: MemoryStore
+  let h: BackendHandle
 
   beforeEach(async () => {
-    const handle = await make()
+    h = await make()
+    const handle = h
     table = handle.table; stats = handle.stats; cleanup = handle.cleanup; reload = handle.reload; root = handle.root
     store = new MemoryStore(table, undefined, stats)
   })
@@ -265,6 +303,125 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
       expect(reloaded.recallCount).toBe(7)      // sidecar 一致：重载前后同值
       expect(reloaded.lastRecalledAt).toBe(1787200000000)
     }
+  })
+
+
+  // —— 票 08：按范围读取、两级定位、取舍（docs/design-storage-file-is-memory.md §3 §4）——
+
+  const WS_A = '/home/dev/proj-a'
+  const WS_B = '/home/dev/proj-b'
+  const ws = (workspacePath: string, partial: Partial<MemoryRecord> = {}) =>
+    record({ scope: 'workspace', workspacePath, ...partial })
+
+  it('两级定位：提示目录命中即止（别的项目里更新的副本看不到）；提示目录无命中才扫全部 workspace 目录', async () => {
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'dup.md', record: ws(WS_A, { id: 'mem_dup', content: 'A 的旧副本', updatedAt: 100 }) })
+    await h.seedFile({ dir: h.wsDir(WS_B), fileName: 'dup.md', record: ws(WS_B, { id: 'mem_dup', content: 'B 的新副本', updatedAt: 200 }) })
+
+    const hitA = await table.locate('mem_dup', { workspacePath: WS_A })
+    expect(hitA!.record.content).toBe('A 的旧副本')             // 一级命中即止，B 的更新副本不参与
+    expect(hitA!.dir).toBe(h.wsDir(WS_A))
+    expect(hitA!.filePath).toBe(join(h.wsDir(WS_A), 'dup.md'))
+
+    const fromElsewhere = await table.locate('mem_dup', { workspacePath: '/home/dev/proj-c' })
+    expect(fromElsewhere!.record.content).toBe('B 的新副本')     // 落到二级：全部 workspace 目录，updatedAt 新者
+    expect((await table.locate('mem_dup'))!.record.content).toBe('B 的新副本')  // 无提示同样落到二级
+    expect(await table.locate('mem_ghost', { workspacePath: WS_A })).toBeUndefined()
+  })
+
+  it('同 id 取舍①：updatedAt 新者优先，压过目录偏好', async () => {
+    await h.seedFile({ dir: h.globalDir, fileName: 'g.md', record: record({ id: 'mem_r1', content: 'global 较新', updatedAt: 200 }) })
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'w.md', record: ws(WS_A, { id: 'mem_r1', content: '提示目录较旧', updatedAt: 100 }) })
+    expect((await table.locate('mem_r1', { workspacePath: WS_A }))!.record.content).toBe('global 较新')
+  })
+
+  it('同 id 取舍②：updatedAt 相同时提示的 workspace 目录优先于 global', async () => {
+    await h.seedFile({ dir: h.globalDir, fileName: 'g.md', record: record({ id: 'mem_r2', content: 'global', updatedAt: 100 }) })
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'w.md', record: ws(WS_A, { id: 'mem_r2', content: '提示目录', updatedAt: 100 }) })
+    expect((await table.locate('mem_r2', { workspacePath: WS_A }))!.record.content).toBe('提示目录')
+  })
+
+  it('同 id 取舍③：global 优先于其他项目（readAll 的无提示取舍）', async () => {
+    await h.seedFile({ dir: h.globalDir, fileName: 'g.md', record: record({ id: 'mem_r3', content: 'global', updatedAt: 100 }) })
+    await h.seedFile({ dir: h.wsDir(WS_B), fileName: 'w.md', record: ws(WS_B, { id: 'mem_r3', content: '其他项目', updatedAt: 100 }) })
+    const all = await table.readAll()
+    expect(all.records.filter(r => r.id === 'mem_r3').map(r => r.content)).toEqual(['global'])
+    expect((await table.get('mem_r3'))!.content).toBe('global')
+  })
+
+  it('同 id 取舍④：提示的 workspace 目录优先于其他项目，⑤ 都是其他项目时按文件路径字典序', async () => {
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'a.md', record: ws(WS_A, { id: 'mem_r4', content: '提示目录', updatedAt: 100 }) })
+    await h.seedFile({ dir: h.wsDir(WS_B), fileName: 'b.md', record: ws(WS_B, { id: 'mem_r4', content: '其他项目', updatedAt: 100 }) })
+    expect((await table.locate('mem_r4', { workspacePath: WS_A }))!.record.content).toBe('提示目录')
+
+    await h.seedFile({ dir: h.wsDir(WS_B), fileName: 'z.md', record: ws(WS_B, { id: 'mem_r5', content: 'z 文件', updatedAt: 100 }) })
+    await h.seedFile({ dir: h.wsDir(WS_B), fileName: 'b.md', record: ws(WS_B, { id: 'mem_r5', content: 'b 文件', updatedAt: 100 }) })
+    const picked = await table.locate('mem_r5', { workspacePath: WS_A })   // 二级：两份都在其他项目
+    expect(picked!.record.content).toBe('b 文件')
+    expect(picked!.filePath).toBe(join(h.wsDir(WS_B), 'b.md'))
+  })
+
+  it('派生 id：只有 name/type/正文的文件 readScope 返回派生 id，locate 能按它找到（不读内容）', async () => {
+    const { id: _id, ...noId } = record({ name: '手建', type: 'knowledge', content: '手写的正文' })
+    await h.seedFile({ dir: h.globalDir, fileName: '手建.md', record: noId })
+    const expected = deriveFileId(`${GLOBAL_DIR}/手建.md`)
+    const read = await table.readScope([h.globalDir])
+    expect(read.records.map(r => r.record.id)).toEqual([expected])
+    expect(read.records[0].record).toMatchObject({ name: '手建', content: '手写的正文', scope: 'global' })
+    const hit = await table.locate(expected)
+    expect(hit!.filePath).toBe(join(h.globalDir, '手建.md'))
+    expect(hit!.record.name).toBe('手建')
+    expect(await table.locate(deriveFileId(`${GLOBAL_DIR}/不存在.md`))).toBeUndefined()
+  })
+
+  it('派生 id 写回后跟着记录走：改名让文件换了路径，仍能按原派生 id 定位', async () => {
+    const { id: _id, ...noId } = record({ name: '手建', type: 'knowledge', content: '手写的正文' })
+    await h.seedFile({ dir: h.globalDir, fileName: '手建.md', record: noId })
+    const derived = deriveFileId(`${GLOBAL_DIR}/手建.md`)
+    await table.update(derived, r => ({ ...r, name: '改过名', updatedAt: r.updatedAt + 1 }))
+    const hit = await table.locate(derived)
+    expect(hit).toBeDefined()
+    expect(hit!.record.name).toBe('改过名')
+    expect(hit!.filePath).toBe(join(h.globalDir, '改过名.md'))
+    expect(await table.locate(deriveFileId(`${GLOBAL_DIR}/改过名.md`))).toBeUndefined()   // 新路径的哈希不是它的 id
+  })
+
+  it('update 锁内重读：fn 看到的是磁盘当前内容，外部修改不丢', async () => {
+    await table.put('mem_ext', record({ id: 'mem_ext', name: 'ext', content: '原始', updatedAt: 1 }))
+    // 外部覆盖同一个文件（put 落的文件名是 slug(name).md）
+    await h.seedFile({ dir: h.globalDir, fileName: 'ext.md', record: record({ id: 'mem_ext', name: 'ext', content: '外部改过', updatedAt: 2 }) })
+    const next = await table.update('mem_ext', r => ({ ...r, content: `${r.content}+追加`, updatedAt: 3 }))
+    expect(next.content).toBe('外部改过+追加')
+    expect((await table.get('mem_ext'))!.content).toBe('外部改过+追加')
+  })
+
+  it('readScope：缺省只读顶层，includeArchive 连 .archive/ 一起读；types 在解析后过滤；记录含非 active', async () => {
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'k.md', record: ws(WS_A, { id: 'mem_k', type: 'knowledge' }) })
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'p.md', record: ws(WS_A, { id: 'mem_p', type: 'project', status: 'superseded' }) })
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'd.md', record: ws(WS_A, { id: 'mem_d', type: 'project', status: 'deleted' }), archived: true })
+    await h.seedFile({ dir: h.globalDir, fileName: 'g.md', record: record({ id: 'mem_g', type: 'project' }) })
+    const ids = (r: { records: Array<{ record: MemoryRecord }> }) => r.records.map(x => x.record.id).sort()
+
+    expect(ids(await table.readScope([h.wsDir(WS_A)]))).toEqual(['mem_k', 'mem_p'])
+    expect(ids(await table.readScope([h.wsDir(WS_A)], { includeArchive: true }))).toEqual(['mem_d', 'mem_k', 'mem_p'])
+    expect(ids(await table.readScope([h.wsDir(WS_A), h.globalDir], { includeArchive: true, types: ['project'] }))).toEqual(['mem_d', 'mem_g', 'mem_p'])
+    expect(ids(await table.readScope([h.globalDir]))).toEqual(['mem_g'])
+    const archived = (await table.readScope([h.wsDir(WS_A)], { includeArchive: true })).records.find(r => r.record.id === 'mem_d')!
+    expect(archived.dir).toBe(h.wsDir(WS_A))
+    expect(archived.filePath).toBe(join(h.wsDir(WS_A), ARCHIVE_DIR, 'd.md'))
+  })
+
+  it('listWorkspaceDirs：顶层有记忆文件的 hasActiveTopLevel 为真；只剩归档的为假并带 dir-empty 说明', async () => {
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'a.md', record: ws(WS_A, { id: 'mem_a' }) })
+    await h.seedFile({ dir: h.wsDir(WS_B), fileName: 'b.md', record: ws(WS_B, { id: 'mem_b', status: 'deleted' }), archived: true })
+    await h.seedFile({ dir: h.globalDir, fileName: 'g.md', record: record({ id: 'mem_g' }) })
+    const listing = await table.listWorkspaceDirs()
+    expect(listing.entries.sort((x, y) => (x.dir < y.dir ? -1 : 1))).toEqual([
+      { workspacePath: WS_A, dir: h.wsDir(WS_A), hasActiveTopLevel: true },
+      { workspacePath: WS_B, dir: h.wsDir(WS_B), hasActiveTopLevel: false },
+    ].sort((x, y) => (x.dir < y.dir ? -1 : 1)))
+    expect(listing.directoryNotes.map(n => [n.code, n.path])).toEqual([['dir-empty', h.wsDir(WS_B)]])
+    // 定位用全部目录：只剩归档的目录也能按 id 找到
+    expect((await table.locate('mem_b'))!.record.status).toBe('deleted')
   })
 
 })

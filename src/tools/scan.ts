@@ -23,7 +23,7 @@ export interface ScanToolDeps {
   registry: TypeRegistry
   decisions: PendingDecisionsStore
   cache: KvTable<ScanCacheEntry>
-  /** 存储层隔离的不可解析记忆文件（FileTable.quarantined）；缺省视为无。 */
+  /** 过渡的测试桩：覆盖预读到的隔离清单（InMemoryTable 没有隔离文件）；缺省取本次读取的结果。票 09 删除。 */
   getQuarantined?: () => readonly { path: string; error: string }[]
   /** malformed 按文件路径归层需要根目录；缺省不归层。 */
   memoryRoot?: string
@@ -259,13 +259,13 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
   // 用户取消信号（宿主 exec.signal 契约）：每个语义调用透传，各写入前设检查点。
   const signal = exec?.signal
   const now = deps.now?.() ?? Date.now()
-  const quarantined = deps.getQuarantined?.() ?? []
   const llm = deps.getLlm(exec)
   const baseline = deps.getBaseline(exec)
   const currentWs = exec !== undefined ? (await deps.resolveContext(exec)).workspacePath : undefined
   // 预读范围：与 memory_health 共用 prereadLayers——全部状态的记录（含 superseded / deleted）、
   // 待决账本、语义缓存、隔离文件。扫描输入（active 的可见集合 / 本层集合）从这份预读里筛
   const data = await prereadLayers(deps)
+  const quarantined = data.quarantined
   const active = (pred: (r: MemoryRecord) => boolean) =>
     [...data.byId.values()].filter(r => r.status === 'active' && pred(r))
   const visibleTo = (ws: string | undefined) => (r: MemoryRecord) =>

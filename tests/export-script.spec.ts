@@ -19,9 +19,7 @@ function kvJson(memories: Record<string, unknown>) {
 }
 
 async function load(root: string) {
-  const t = new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() })
-  await t.load()
-  return t
+  return new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() })   // 构造零 I/O，读时直接读目录
 }
 
 it('导出 global + workspace 记录，坏记录进 skipped 不中断；FileTable 读回全字段往返', async () => {
@@ -71,7 +69,7 @@ it('导出 global + workspace 记录，坏记录进 skipped 不中断；FileTabl
   expect(g.status).toBe('active')
   expect(g.confidence).toBe(0.9)
   // recallCount/lastRecalledAt 是 sidecar-only 字段（frontmatter 不承载），导出脚本不写 KvTable 侧车，
-  // 因此 FileTable.load 在无侧车行时按文档默认注入 0/null——这是有意的、非本脚本职责范围内的已知损失。
+  // 因此 FileTable 读文件时在无侧车行时按文档默认注入 0/null——这是有意的、非本脚本职责范围内的已知损失。
   expect(g.recallCount).toBe(0)
   expect(g.lastRecalledAt).toBeNull()
   // 可选键（validFrom/validTo/supersedes）原始记录未携带 → 往返后仍不出现
@@ -131,7 +129,7 @@ const makeRecord = (id: string, name: string, overrides: Partial<MemoryRecord> =
 
 it('可选键在场时无损往返（validFrom/validTo/supersedes 走 ISO 编解码），deleted 状态记录也还原', async () => {
   // 真实备份数据里存在带 validTo 和 status: deleted 的记录——这两条编解码路径必须被钉住。
-  const now = Date.now() // deleted 且新鲜（14 天内）：load 期 sweep 不应清它
+  const now = Date.now() // deleted 且新鲜（14 天内）：写路径的清扫不应清它
   const kv = kvJson({
     mem_valid: makeRecord('mem_valid', '带有效期', {
       validFrom: 1754697600000, validTo: 1754784000000, supersedes: ['mem_old1', 'mem_old2'],
@@ -199,6 +197,6 @@ it('名字 slug 为保留名 memory 时避让（APFS 上 memory.md 会与索引 
   const files = await readdir(join(root, 'global'))
   expect(files).not.toContain('memory.md')
   expect(files).toContain(`memory-${'mem_rsv'.slice(-6)}.md`)
-  const t = await load(root) // 索引再生后记录仍在、未被隔离
+  const t = await load(root) // 记录仍在、未被隔离
   expect((await t.get('mem_rsv'))!.content).toBe('mem_rsv 的内容')
 })

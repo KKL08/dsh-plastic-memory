@@ -3,6 +3,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { FrontmatterError } from '../errors.ts'
 import { memoryRecordSchema, CONFIDENCE_BY_SOURCE, type MemoryRecord } from '../record-schema.ts'
 import type { CodedNote, DirectoryNoteCode } from '../contract-codes.ts'
+import type { QuarantineEntry } from './table.ts'
 import { deriveFileId } from './paths.ts'
 
 /** 保留键：位置由目录表达、正文即 content、召回统计住 .state/（契约表见 docs/design-storage-file-is-memory.md §2）。 */
@@ -40,33 +41,39 @@ export interface DecodeOptions {
   /** 文件 mtime：缺 createdAt / updatedAt / lastConfirmedAt 时取它。 */
   mtimeMs?: number
 }
-/** 目录级说明（info 级）：调用方按文件归集。 */
+/** 目录级说明（info 级）：调用方按文件归集（file-table 补上 path 成 DirectoryNote）。 */
 export interface DecodeNote extends CodedNote<DirectoryNoteCode> { level: 'info'; keys: string[] }
 export interface DecodedRecord { record: MemoryRecord; extras: Record<string, unknown>; notes: DecodeNote[] }
-/** 解析失败的文件：不抛，随本次读取返回。 */
-export interface QuarantineEntry { path: string; error: string }
+export type { QuarantineEntry }
 export type DecodeOutcome = ({ ok: true } & DecodedRecord) | ({ ok: false } & QuarantineEntry)
 
 const FENCE = '---\n'
-const CLOSE = '\n---\n'
+/** 开围栏：第一行只有 ---，接受 CRLF（手建文件）。 */
+const OPEN_FENCE_RE = /^---\r?\n/
+/** 闭围栏：独占一行的 ---，接受 CRLF；从开围栏的换行处起找，空 frontmatter（---\n---\n）也能闭合。 */
+const CLOSE_FENCE_RE = /\r?\n---\r?\n/g
 
 /** confidence 在文件面可省：先按可选解析，校验过 source 之后再补缺省、按 sourceMode 收口。 */
 const fileRecordSchema = memoryRecordSchema.extend({ confidence: memoryRecordSchema.shape.confidence.optional() })
 
 export function splitFrontmatter(raw: string): ParsedMemoryFile {
-  if (!raw.startsWith(FENCE)) throw new FrontmatterError('missing-fence', '缺少 frontmatter 围栏')
-  const close = raw.indexOf(CLOSE, FENCE.length - 1)
-  if (close < 0) throw new FrontmatterError('unclosed-fence', 'frontmatter 围栏未闭合')
+  const open = OPEN_FENCE_RE.exec(raw)
+  if (!open) throw new FrontmatterError('missing-fence', '缺少 frontmatter 围栏')
+  CLOSE_FENCE_RE.lastIndex = open[0].length - 1   // 指向开围栏的 \n：空 frontmatter 的闭围栏紧接着它
+  const close = CLOSE_FENCE_RE.exec(raw)
+  if (!close) throw new FrontmatterError('unclosed-fence', 'frontmatter 围栏未闭合')
   let data: unknown
   try {
-    data = parseYaml(raw.slice(FENCE.length, close + 1))
+    // YAML 文本带上闭围栏前的换行（块标量的末尾换行语义不变）；正文保留原样的换行风格，digest 另行归一
+    data = parseYaml(raw.slice(open[0].length, close.index + close[0].indexOf('---')))
   } catch (e) {
     throw new FrontmatterError('yaml-parse', `frontmatter 不是合法 YAML：${e instanceof Error ? e.message : String(e)}`)
   }
   if (data === null || typeof data !== 'object' || Array.isArray(data)) throw new FrontmatterError('not-object', 'frontmatter 不是对象')
-  let body = raw.slice(close + CLOSE.length)
-  if (body.startsWith('\n')) body = body.slice(1)      // encode 时围栏后有一个空行
-  return { data: data as Record<string, unknown>, body: body.replace(/\n$/, '') }
+  const body = raw.slice(close.index + close[0].length)
+    .replace(/^\r?\n/, '')      // encode 时围栏后有一个空行
+    .replace(/\r?\n$/, '')
+  return { data: data as Record<string, unknown>, body }
 }
 
 /** 内容摘要：name、summary、正文以 LF 拼接（CRLF 归一）后 sha1 前 16 位，带算法前缀。只用于手编检测。 */

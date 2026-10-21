@@ -23,7 +23,7 @@ export interface HealthToolDeps {
   cache: KvTable<ScanCacheEntry>
   /** 触发阈值（由 index.ts 从 sensitivity 预设解析后注入）。 */
   thresholds: HealthThresholds
-  /** 存储层隔离的不可解析记忆文件（FileTable.quarantined）；缺省视为无。 */
+  /** 过渡的测试桩：覆盖预读到的隔离清单（InMemoryTable 没有隔离文件）；缺省取本次读取的结果。票 09 删除。 */
   getQuarantined?: () => readonly { path: string; error: string }[]
   /** malformed 按文件路径归层需要根目录；缺省不归层。 */
   memoryRoot?: string

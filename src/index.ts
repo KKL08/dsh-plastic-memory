@@ -9,7 +9,7 @@ import { FileTable } from './storage/file-table.ts'
 import { SidecarStore, type LegacyKvTables } from './storage/sidecar.ts'
 import { resolveMemoryRoot } from './storage/paths.ts'
 import { formatIndexLine } from './index-line.ts'
-import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { Session } from '@deepseek-ai/dsh-session'
 // dsh-agent 的类型增广把 turnBoundary 键登记进投影状态表；stateOf(session, 'turnBoundary') 因此按宿主真实键表校验。
 import type {} from '@deepseek-ai/dsh-agent'
@@ -120,7 +120,7 @@ export async function apply(ctx: Context, config: Config) {
     formatIndexLine: r => formatIndexLine(r, { passive: registry.get(r.type).recall === 'passive' }),
     log: ctx.logger,
   })
-  await fileTable.load() // 契约：绝不 throw——记忆坏文件不能拖垮插件加载
+  // 加载期零 I/O：FileTable 构造不碰磁盘，每个操作读它涉及的目录（设计稿 §0）
   const store = new MemoryStore(fileTable, ctx.logger, sidecar.recallStats)
   // forget 的快照先行与待决账本清理需要这两个存储，治理关闭时也接线
   const decisions = new PendingDecisionsStore(sidecar.pending)
@@ -135,16 +135,6 @@ export async function apply(ctx: Context, config: Config) {
   // 避免两处各写一份 resolveWorkspacePath 调用。
   const resolveWorkspace = (session: object) => resolveWorkspacePath(ctx, (session as SessionLike).header?.cwd)
   const snapshotCache = new SnapshotCache({ store, registry, budget: config.snapshotTokenBudget, memoryRoot, evidenceLookup: config.evidenceLookup, resolveWorkspace, log: ctx.logger })
-
-  /** 工具执行前感知外部文件修改；对 ToolDefinition 做统一包装，避免逐个改 -tool.ts。
-   *  systemPrompt 注入路径不经这层：assemble 中间件组装，永远服务最近一次加载的 Map（docs/p15-storage-search-redesign.md §7 已登记）。 */
-  const withRefresh = (def: ToolDefinition): ToolDefinition => ({
-    ...def,
-    execute: async (args, exec) => {
-      await fileTable.refreshIfChanged()
-      return def.execute(args, exec)
-    },
-  })
 
   // 语义层 LLM：per-call 构建（provider/model 只能从触发调用的 agent 上拿到，插件加载时没有）。
   // 用 ctx.get 而非属性访问——cordis 的 Context 是 proxy，未 inject 的服务名走属性访问会抛错
@@ -293,15 +283,15 @@ export async function apply(ctx: Context, config: Config) {
     return texts.length === 0 ? null : texts
   }
 
-  ctx.tools.register(withRefresh(createSaveTool({ store, registry, resolveContext, snapshots })))
-  ctx.tools.register(withRefresh(createSearchTool({ store, registry, resolveContext })))
-  ctx.tools.register(withRefresh(createForgetTool({ store, snapshots, decisions, log: ctx.logger })))
+  ctx.tools.register(createSaveTool({ store, registry, resolveContext, snapshots }))
+  ctx.tools.register(createSearchTool({ store, registry, resolveContext }))
+  ctx.tools.register(createForgetTool({ store, snapshots, decisions, log: ctx.logger }))
   // 快照的写入与恢复必须成对——治理关闭时 forget 仍会拍快照，若没有恢复入口，
   // 14 天的快照就是死存储。故 memory_snapshot 放在治理开关之外，与 forget 一起常驻。
-  ctx.tools.register(withRefresh(createSnapshotTool({ store, snapshots })))
+  ctx.tools.register(createSnapshotTool({ store, snapshots }))
   // memory_source：证据下钻（日常 + 治理都用，常驻）。sessionQuery 是 base bundle 默认服务，
   // 但按 llm 同款惯例 per-call 探测 + try/catch——某些 profile 缺席时工具内优雅降级，不挂载失败。
-  ctx.tools.register(withRefresh(createSourceTool({
+  ctx.tools.register(createSourceTool({
     store, resolveContext,
     getReadEvent: () => {
       try {
@@ -311,11 +301,11 @@ export async function apply(ctx: Context, config: Config) {
         return null
       }
     },
-  })))
+  }))
   if (config.governance.enabled) {
-    ctx.tools.register(withRefresh(createConfirmTool({ store, decisions, snapshots })))
+    ctx.tools.register(createConfirmTool({ store, decisions, snapshots }))
     // 基线按触发调用的 session 取（宿主投影 cell 按 session 隔离，防多会话串台）
-    ctx.tools.register(withRefresh(createScanTool({
+    ctx.tools.register(createScanTool({
       store, registry, decisions, cache: scanCache,
       getBaseline: exec => sessionBaseline(exec.agent?.session),
       // exec → { session, agentOptions } 的小 helper：makeSemanticLlm 本体不再触碰 exec 形状。
@@ -323,23 +313,21 @@ export async function apply(ctx: Context, config: Config) {
         const agent = exec.agent
         return makeSemanticLlm({ session: agent?.session, agentOptions: agent?.options })
       },
-      getQuarantined: () => fileTable.quarantined(),
       memoryRoot,
       resolveContext,
-    })))
-    ctx.tools.register(withRefresh(createHealthTool({
+    }))
+    ctx.tools.register(createHealthTool({
       store, registry, decisions, cache: scanCache,
       thresholds: resolveHealthThresholds(config.governance.health.sensitivity),
-      getQuarantined: () => fileTable.quarantined(),
       memoryRoot,
       resolveContext,
-    })))
+    }))
     // memory_promote：把用户确认的候选提升 global。确认由模型先调 ask_user_question 完成
     // （工具内部弹 userQuestions 会被 web 会话拒绝 "requires agent-owned session"），本工具纯执行。
     // AGENTS.md 位置从 DSH_HOME 独立解析（不从 memoryRoot 反推——自定义 root 时会指向 dsh 不读的文件）
     const agentsMd = createAgentsMdWriter(agentsMdPath())
     const defaultTarget: PromoteTarget = config.governance.globalPromoteTarget === 'agents-md' ? 'agents-md' : 'global'
-    ctx.tools.register(withRefresh(createPromoteTool({ store, agentsMd, snapshots, defaultTarget })))
+    ctx.tools.register(createPromoteTool({ store, agentsMd, snapshots, defaultTarget }))
   }
 
   // frozen snapshot：按 session 隔离缓存，session/created 异步解析 workspace，compaction 结束标过期、下一次中间件重建。

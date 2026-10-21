@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -31,10 +31,9 @@ async function seedGlobal(name: string, r: MemoryRecord, extras = {}) {
   await writeFile(join(root, GLOBAL_DIR, name), encodeRecord(r, extras))
 }
 async function load() {
-  const t = new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() })
-  await t.load()
-  return t
+  return new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() })   // 构造零 I/O：没有加载期
 }
+const quarantined = (t: FileTable) => t.readScope([join(root, GLOBAL_DIR)]).then(r => r.quarantined)
 
 describe('FileTable 写侧', () => {
   it('markRecalled 型更新（只动易变字段）不触碰文件——mtime 不变', async () => {
@@ -164,16 +163,6 @@ describe('FileTable 写侧', () => {
     expect(await readFile(join(root, GLOBAL_DIR, 'a.md'), 'utf8')).toContain('customField')
   })
 
-  // 白盒守卫（非契约）：假重载对外不可观测，只有 spy 私有 loadInner 能证明"自写后指纹已刷新、
-  // 不重读整库"。改动 loadInner 的名字或调用结构时同步改这里，不要为让它过而保留旧结构。
-  it('自写后指纹已刷新：refreshIfChanged 不触发假重载（白盒）', async () => {
-    const t = await load()
-    await t.put('mem_x', record({ id: 'mem_x' }))
-    const spy = vi.spyOn(t as unknown as { loadInner: () => Promise<void> }, 'loadInner')
-    await t.refreshIfChanged()
-    expect(spy).not.toHaveBeenCalled()
-  })
-
   it('MEMORY.md 在写路径末尾再生且只列 active+stale', async () => {
     const t = await load()
     await t.put('mem_a', record({ id: 'mem_a', name: '活着' }))
@@ -225,9 +214,9 @@ describe('FileTable 保留名避让（评审 M4：APFS 大小写不敏感，memo
     expect(files).not.toContain('memory.md')
     expect(files).toContain(`memory-${'mem_rsv'.slice(-6)}.md`)
 
-    const t2 = await load() // 全新实例重载：记录仍在、隔离区为空
+    const t2 = await load() // 全新实例：记录仍在、隔离区为空
     expect((await t2.get('mem_rsv'))!.name).toBe('memory')
-    expect(t2.quarantined()).toEqual([])
+    expect(await quarantined(t2)).toEqual([])
   })
 })
 
@@ -236,7 +225,7 @@ describe('FileTable 撞名检查看得见磁盘（终审 I1：隔离文件不可
     await mkdir(join(root, GLOBAL_DIR), { recursive: true })
     await writeFile(join(root, GLOBAL_DIR, 'pnpm.md'), '用户手写的一段没有 frontmatter 的内容\n', 'utf8')
     const t = await load()
-    expect(t.quarantined()).toHaveLength(1)
+    expect(await quarantined(t)).toHaveLength(1)
 
     await t.put('mem_new', record({ id: 'mem_new', name: 'pnpm' }))
     // 用户手写内容必须原样保留
@@ -244,14 +233,14 @@ describe('FileTable 撞名检查看得见磁盘（终审 I1：隔离文件不可
     const files = await readdir(join(root, GLOBAL_DIR))
     expect(files).toContain(`pnpm-${'mem_new'.slice(-6)}.md`)
 
-    const t2 = await load() // 重载：新记录在、坏文件仍被隔离（malformed finding 不消失）
+    const t2 = await load() // 新实例：新记录在、坏文件仍被隔离（malformed finding 不消失）
     expect((await t2.get('mem_new'))!.name).toBe('pnpm')
-    expect(t2.quarantined()).toHaveLength(1)
+    expect(await quarantined(t2)).toHaveLength(1)
   })
 })
 
-describe('自写指纹校准范围', () => {
-  it('写 A 期间外部改了 B：自写只校准 A，下次 refresh 仍能看见 B 的外部编辑，且不会把旧 B 写回磁盘', async () => {
+describe('写路径与外部编辑交错', () => {
+  it('写 A 期间外部改了 B：之后读 B 看到外部编辑，再写 B 也不会把旧 B 写回磁盘（锁内重读）', async () => {
     await seedGlobal('a.md', record({ id: 'mem_a', name: 'A' }))
     await seedGlobal('b.md', record({ id: 'mem_b', name: 'B', content: '旧 B' }))
     const externalB = '外部改过的 B，长度和原来不一样'
@@ -267,10 +256,8 @@ describe('自写指纹校准范围', () => {
       }
     }
     const t = new Interleaved({ root, stats: new InMemoryKvTable<RecallStats>() })
-    await t.load()
     t.armed = true
     await t.update('mem_a', r => ({ ...r, content: '改 A', updatedAt: 2 }))
-    await t.refreshIfChanged()
     expect((await t.get('mem_b'))!.content).toBe(externalB)
     await t.update('mem_b', r => ({ ...r, lastConfirmedAt: 99 }))
     expect(await readFile(join(root, GLOBAL_DIR, 'b.md'), 'utf8')).toContain(externalB)

@@ -55,9 +55,12 @@ export type FrontmatterErrorCode =
   | 'timestamp-parse'   // 时间戳无法解析
   | 'schema-invalid'    // 记录 schema 校验失败
 
-/** 读取记忆目录时的目录级说明（info 级，按文件列出；storage/frontmatter.ts）。 */
+/** 读取记忆目录时的目录级说明（info 级，按文件或目录列出；storage/frontmatter.ts、storage/file-table.ts）。 */
 export type DirectoryNoteCode =
   | 'reserved-keys'     // frontmatter 写了保留键（scope、workspacePath、召回统计、content），已忽略
+  | 'marker-missing'    // workspace 目录缺 .workspace 标记（或标记为空），目录不进清单、文件不读
+  | 'dir-unreadable'    // 目录不可读（权限等），计空
+  | 'dir-empty'         // workspace 目录顶层没有记忆文件（只剩归档或全空），不进体检清单
 
 /** 带 code 的说明条目（scan notes / save warnings 共用形状）。 */
 export interface CodedNote<C extends string> {

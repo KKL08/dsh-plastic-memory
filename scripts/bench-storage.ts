@@ -8,11 +8,11 @@
  *   node scripts/bench-storage.ts --projects 3 ...       同上（Node ≥23.6 原生执行 .ts）
  *
  * 计时口径（每项先空跑一轮预热，不计入；之后跑 --rounds 轮取中位数）：
- *   - 插件加载：新建 SidecarStore + FileTable，首次 load()（读全部记忆文件、合并召回统计、核对索引）。
- *   - refreshIfChanged（无变化）：工具调用前的外部改动检测，下面四个工具项都包含这一步。
+ *   - 构造：新建 SidecarStore + FileTable，零 I/O（应接近 0 ms）。
+ *   - readScope（当前项目 + global）：按范围读两目录（读文件、解析、合并召回统计），执行器切换后每次工具调用的基本成本。
  *   - 快照冻结：SnapshotCache.assemble，每轮一个新 session（预读可见记录 + 组装 + 首次冻结计召回）。
- *   - memory_search / memory_save / update / memory_health：refreshIfChanged + 对应执行器，
- *     与插件接线（index.ts 的 withRefresh）一致；不接 llm / sessionQuery，health 只有规则层。
+ *   - memory_search / memory_save / update / memory_health：对应执行器；不接 llm / sessionQuery，health 只有规则层。
+ *     票 09 之前执行器仍经 MemoryStore.query 全量读（list()），这几项的耗时是过渡态。
  * 页缓存是热的：测的是同一进程内反复操作的稳态，不含冷盘 I/O。
  */
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
@@ -166,7 +166,6 @@ try {
   // 工具共用的一份运行时（对应插件加载后的常驻状态）
   const sidecar = newSidecar(root)
   const fileTable = new FileTable({ root, stats: sidecar.recallStats, formatIndexLine: fmtIndex, log: quietLog })
-  await fileTable.load()
   const store = new MemoryStore(fileTable, quietLog, sidecar.recallStats)
   const decisions = new PendingDecisionsStore(sidecar.pending)
   const exec = { signal: new AbortController().signal } as ToolRunContext
@@ -176,17 +175,18 @@ try {
   const healthDeps = {
     store, registry, decisions, cache: sidecar.scanCache,
     thresholds: resolveHealthThresholds('normal'),
-    getQuarantined: () => fileTable.quarantined(),
     memoryRoot: root, resolveContext,
   }
   const updateTargets = seeded.filter(r => r.workspacePath === currentWs && r.status === 'active')
 
   const results = [
-    await bench('插件加载（构造 + 首次 load）', async () => {
-      const table = new FileTable({ root, stats: newSidecar(root).recallStats, formatIndexLine: fmtIndex, log: quietLog })
-      await table.load()
+    await bench('构造（零 I/O）', async () => {
+      new FileTable({ root, stats: newSidecar(root).recallStats, formatIndexLine: fmtIndex, log: quietLog })
     }),
-    await bench('refreshIfChanged（无变化）', () => fileTable.refreshIfChanged()),
+    await bench('readScope（当前项目 + global）', async () => {
+      const r = await fileTable.readScope([join(root, workspaceDirName(currentWs)), join(root, GLOBAL_DIR)])
+      if (r.records.length !== perProject + GLOBAL_COUNT) throw new Error(`readScope 记录数不对：${r.records.length}`)
+    }),
     await bench('快照冻结（当前项目 + global）', async () => {
       const s = {}
       snapshotCache.setWorkspacePath(s, currentWs)
@@ -194,12 +194,10 @@ try {
       if (!text.startsWith('# 长期记忆')) throw new Error('快照没有组装出记忆内容')
     }),
     await bench('memory_search', async () => {
-      await fileTable.refreshIfChanged()
       const r = await executeSearch({ query: `${WORDS[0]} 部署流程` }, exec, { store, registry, resolveContext })
       if (r.hits.length === 0) throw new Error('memory_search 没有命中')
     }),
     await bench('memory_save（create）', async round => {
-      await fileTable.refreshIfChanged()
       // 正文全是随机词：每轮都要真的落盘，不能被 bigram 相似度判成前几轮样本的重复
       const words = Array.from({ length: 6 }, () => Math.random().toString(36).slice(2, 10))
       const r = await executeSave({
@@ -209,7 +207,6 @@ try {
       if (r.kind !== 'saved') throw new Error(`memory_save 未落盘：${r.kind}`)
     }),
     await bench('memory_save（update）', async round => {
-      await fileTable.refreshIfChanged()
       const target = updateTargets[(round + 1) % updateTargets.length]
       const r = await executeSave({
         action: 'update', id: target.id, name: target.name, type: target.type, scope: 'workspace',
@@ -218,11 +215,9 @@ try {
       if (r.kind !== 'updated') throw new Error(`update 未落盘：${r.kind}`)
     }),
     await bench('memory_health 单层（当前项目）', async () => {
-      await fileTable.refreshIfChanged()
       await executeHealth({}, healthDeps, exec)
     }),
     await bench(`memory_health 全库（global + ${projects} 个项目）`, async () => {
-      await fileTable.refreshIfChanged()
       await executeHealth({ scope: 'all' }, healthDeps, exec)
     }),
   ]
