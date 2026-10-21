@@ -137,7 +137,7 @@ export async function apply(ctx: Context, config: Config) {
   const snapshotCache = new SnapshotCache({ store, registry, budget: config.snapshotTokenBudget, memoryRoot, evidenceLookup: config.evidenceLookup, resolveWorkspace, log: ctx.logger })
 
   /** 工具执行前感知外部文件修改；对 ToolDefinition 做统一包装，避免逐个改 -tool.ts。
-   *  systemPrompt 注入路径不经这层：同步组装，永远服务最近一次加载的 Map（docs/p15-storage-search-redesign.md §7 已登记）。 */
+   *  systemPrompt 注入路径不经这层：assemble 中间件组装，永远服务最近一次加载的 Map（docs/p15-storage-search-redesign.md §7 已登记）。 */
   const withRefresh = (def: ToolDefinition): ToolDefinition => ({
     ...def,
     execute: async (args, exec) => {
@@ -342,7 +342,7 @@ export async function apply(ctx: Context, config: Config) {
     ctx.tools.register(withRefresh(createPromoteTool({ store, agentsMd, snapshots, defaultTarget })))
   }
 
-  // frozen snapshot：按 session 隔离缓存，session/created 异步解析 workspace，compaction 结束失效重建。
+  // frozen snapshot：按 session 隔离缓存，session/created 异步解析 workspace，compaction 结束标过期、下一次中间件重建。
   // session/* 事件由常驻的 @deepseek-ai/dsh-session 提供，但其 cordis Events 增广不在本插件的
   // 类型图内（该包非直接依赖），故按最小结构签名订阅；运行时事件名只是字符串，行为不受影响。
   const lifecycle = ctx as unknown as {
@@ -351,24 +351,24 @@ export async function apply(ctx: Context, config: Config) {
   }
   lifecycle.on('session/created', session => {
     // eager 预热：新 session 不必等首次组装才解析 workspace（HMR 后存量 session 走 render 侧自愈）。
-    // 与 assemble 中间件的 awaitResolved 同一份 memoize，不重复解析；只解析不组装，快照仍在首次组装时冻结。
+    // 与 assemble 中间件的解析等待同一份 memoize，不重复解析；只解析不组装，快照仍在首次中间件组装时冻结。
     snapshotCache.prewarm(session)
   })
   lifecycle.on('session/event', (session, event) => {
     // 基线由宿主投影随事件折叠（plasticMemoryBaseline），不在这里观察；
-    // 本监听只留 compaction 失效——快照按 session 冻结，压缩结束后须重建。
-    if (event.type === 'compaction/end') snapshotCache.invalidate(session)
+    // 本监听只留 compaction 过期标记——快照按 session 冻结，压缩结束后由下一次中间件重建；
+    // 不清空，宿主只调同步 provider 的 admission refresh 仍拿到上一份快照。
+    if (event.type === 'compaction/end') snapshotCache.markStale(session)
   })
-  // 首轮竞态根治：workspace 解析是异步 I/O，text provider 是同步回调，且宿主在跑
-  // assemble waterfall【之前】就已物化全部 provider 文本——解析没赶上时冷快照已经
-  // 在 assembly 里了。故在 waterfall（异步）中等解析落定后，把本插件那条 context
-  // 的文本原位替换为热渲染；超时按原冷文本放行（降级语义不变），不阻塞宿主。
+  // 快照只在 assemble waterfall（异步）里构建：宿主在跑 waterfall【之前】就已物化全部 provider 文本，
+  // 而同步 provider 只回缓存（首轮为空串）。中间件等 workspace 解析落定后组装或复用冻结快照，
+  // 把本插件那条 context 的文本原位替换；解析超时走 global-only 临时文本（不冻结），不阻塞宿主。
   ctx.on('system-prompt/assemble', async (assembly: PromptAssembly, assembleCtx: AssembleContext, next: () => Promise<PromptAssembly>) => {
     const session = (assembleCtx?.scope as { session?: object } | undefined)?.session
     if (session) {
-      await snapshotCache.awaitResolved(session)
+      const text = await snapshotCache.assemble(session)
       for (const entry of assembly.contexts) {
-        if (entry.name === 'plastic-memory') entry.text = snapshotCache.render(session)
+        if (entry.name === 'plastic-memory') entry.text = text
       }
     }
     return next()
@@ -379,7 +379,7 @@ export async function apply(ctx: Context, config: Config) {
   ctx.systemPrompt.context({
     name: 'plastic-memory',
     order: 50,
-    // AssembleContext.scope 是发起组装的 Agent，从它拿到所属 session，按 session 渲染各自的冻结快照
+    // AssembleContext.scope 是发起组装的 Agent，从它拿到所属 session，只回该 session 的冻结快照（无则空串）
     text: (assembleCtx?: AssembleContext) => {
       const session = (assembleCtx?.scope as { session?: object } | undefined)?.session
       return session ? snapshotCache.render(session) : ''

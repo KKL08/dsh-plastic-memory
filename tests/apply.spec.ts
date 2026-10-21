@@ -394,6 +394,51 @@ describe('快照 {{ 转义接线', () => {
 })
 
 /**
+ * 注入链接线（spec「注入链」）：快照只在 system-prompt/assemble 中间件里构建；同步 provider 只回缓存、
+ * 无缓存回空串；compaction/end 只标过期，provider 仍回旧快照，下一次中间件重建。
+ */
+describe('注入链接线', () => {
+  it('provider 首轮空串 → 中间件冻结 → provider 回缓存；compaction/end 后 provider 回旧快照、下一次中间件回新快照', async () => {
+    type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
+    const defs = new Map<string, ToolDef>()
+    const ctx = { ...mockCtx(), tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } } }
+    const memoryRoot = await makeTmpRoot()
+    await mkdir(join(memoryRoot, 'global'), { recursive: true })
+    await writeFile(join(memoryRoot, 'global', 'old.md'),
+      encodeRecord(record({ id: 'mem_old', type: 'preference', content: '压缩前就有的偏好' }), {}), 'utf8')
+    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+
+    const session = { header: { id: 'sess-1' } } // 无 cwd：解析落定为"无工作目录"，走正常冻结路径
+    const assembleCtx = { scope: { session } } as unknown as AssembleContext
+    const def = ctx.contextDefs.find(c => c.name === 'plastic-memory')!
+    const middleware = ctx.listeners.get('system-prompt/assemble')!
+    const onEvent = ctx.listeners.get('session/event')!
+    const assembleOnce = async () => {
+      const assembly: PromptAssembly = { sections: [], contexts: [{ name: 'plastic-memory', text: def.text(assembleCtx) }], tools: [], variables: {} }
+      await middleware(assembly, assembleCtx, async () => assembly)
+      return assembly.contexts[0]!.text
+    }
+
+    expect(def.text(assembleCtx)).toBe('') // 中间件之前：空串，不是冷启动文案
+    const first = await assembleOnce()
+    expect(first).toContain('压缩前就有的偏好')
+    expect(def.text(assembleCtx)).toBe(first)
+
+    // 外部落盘一条新记忆，经工具入口刷新进内存（注入路径本身不刷新）
+    await writeFile(join(memoryRoot, 'global', 'new.md'),
+      encodeRecord(record({ id: 'mem_new', type: 'preference', content: '压缩后新增的偏好 zebra' }), {}), 'utf8')
+    await defs.get('memory_search')!.execute({ query: 'zebra' }, fakeExec())
+    expect(await assembleOnce()).toBe(first) // 未压缩：仍是冻结快照
+
+    onEvent(session, { type: 'compaction/end' })
+    expect(def.text(assembleCtx)).toBe(first) // admission refresh 只调 provider：拿到上一份快照
+    const rebuilt = await assembleOnce()
+    expect(rebuilt).toContain('压缩后新增的偏好 zebra')
+    expect(def.text(assembleCtx)).toBe(rebuilt)
+  })
+})
+
+/**
  * 语义扫描发给宿主 llm 的请求形状：只发一次、不进会话的辅助请求用宿主的 RequestUserInput
  * （只有 role + content，没有 id/source）。exec 里的假 agent 带 options.provider/model，
  * makeSemanticLlm 走三层解析的第二层拿到路由，才会真的调 stream。
