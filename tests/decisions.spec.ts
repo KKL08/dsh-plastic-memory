@@ -27,14 +27,14 @@ describe('PendingDecisionsStore', () => {
     expect(r2.entry.id).toBe(r1.entry.id)
     expect(r2.entry.firstSeenAt).toBe(100)
     expect(r2.entry.summary).toBe('第二次措辞')
-    expect(s.list()).toHaveLength(1)
+    expect(await s.list()).toHaveLength(1)
   })
 
   it('垂直冲突（带 baselineRef）与横向冲突不互相去重', async () => {
     const s = makeStore()
     await s.upsert({ memoryIds: ['mem_a'], baselineRef: 'AGENTS.md：X', summary: 'v' }, 1)
     await s.upsert({ memoryIds: ['mem_a'], baselineRef: 'AGENTS.md：Y', summary: 'v2' }, 2)
-    expect(s.list()).toHaveLength(2)
+    expect(await s.list()).toHaveLength(2)
   })
 
   it('removeByMemoryIds 删除引用任一 id 的条目并返回数量', async () => {
@@ -44,14 +44,14 @@ describe('PendingDecisionsStore', () => {
     await s.upsert({ memoryIds: ['mem_d', 'mem_e'], summary: '3' }, 3)
     const n = await s.removeByMemoryIds(['mem_b', 'mem_c'])
     expect(n).toBe(2)
-    expect(s.list().map(e => e.summary)).toEqual(['3'])
+    expect((await s.list()).map(e => e.summary)).toEqual(['3'])
   })
 
   it('list 按 firstSeenAt 升序；remove 幂等', async () => {
     const s = makeStore()
     const { entry } = await s.upsert({ memoryIds: ['mem_x', 'mem_y'], summary: '后' }, 200)
     await s.upsert({ memoryIds: ['mem_p', 'mem_q'], summary: '先' }, 100)
-    expect(s.list().map(e => e.summary)).toEqual(['先', '后'])
+    expect((await s.list()).map(e => e.summary)).toEqual(['先', '后'])
     expect(await s.remove(entry.id)).toBe(true)
     expect(await s.remove(entry.id)).toBe(false)
   })

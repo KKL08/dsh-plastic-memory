@@ -44,7 +44,7 @@ describe('FileTable 写侧', () => {
     await t.update('mem_a', r => ({ ...r, recallCount: r.recallCount + 1, lastRecalledAt: 123 }))
     const after = (await stat(join(root, GLOBAL_DIR, 'a.md'))).mtimeMs
     expect(after).toBe(before)                       // §4 核心命题
-    expect(t.get('mem_a')!.recallCount).toBe(1)      // 内存与 sidecar 已更新
+    expect((await t.get('mem_a'))!.recallCount).toBe(1)      // 内存与 sidecar 已更新
   })
 
   it('内容更新重写文件，且文件里不出现易变字段（旧统计不被 spread 带进文件）', async () => {
@@ -73,7 +73,7 @@ describe('FileTable 写侧', () => {
     await writeFile(join(root, workspaceDirName('/tmp/proj-y'), 'a.md'),
       encodeRecord(record({ id: 'mem_w', scope: 'workspace', workspacePath: '/tmp/proj-y' }), {}))
     const t = await load()
-    expect(t.get('mem_w')).toBeDefined()
+    expect(await t.get('mem_w')).toBeDefined()
     await t.update('mem_w', r => ({ ...r, scope: 'global', workspacePath: undefined, updatedAt: 3 }))
     const wsDir = join(root, workspaceDirName('/tmp/proj-y'))
     const wsMds = (await readdir(wsDir)).filter(n => n.endsWith('.md') && n !== 'MEMORY.md')
@@ -123,7 +123,7 @@ describe('FileTable 写侧', () => {
     expect(mds).toHaveLength(1)                    // 文件仍在（丢数据回归钉子）
     const raw = await readFile(join(root, GLOBAL_DIR, mds[0]), 'utf8')
     expect(raw).toContain('name: mock rule')       // 内容已更新
-    expect(t.get('mem_a')!.name).toBe('mock rule')
+    expect((await t.get('mem_a'))!.name).toBe('mock rule')
   })
 
   it('put 全新 id：建文件；slug 冲突缀 id 片段', async () => {
@@ -137,7 +137,7 @@ describe('FileTable 写侧', () => {
   it('put 全新 id 后内存可读（冒烟）', async () => {
     const t = await load()
     await t.put('mem_r', record({ id: 'mem_r', content: '复活' }))
-    expect(t.get('mem_r')!.content).toBe('复活')
+    expect((await t.get('mem_r'))!.content).toBe('复活')
   })
 
   it('真实恢复链：快照 → 物理删除（文件不在） → SnapshotStore.restore → 新实例重载仍可见', async () => {
@@ -149,11 +149,13 @@ describe('FileTable 写侧', () => {
     await t.delete('mem_r')
     const mdFiles = async () => (await readdir(join(root, GLOBAL_DIR))).filter(n => n.endsWith('.md') && n !== 'MEMORY.md')
     expect(await mdFiles()).toHaveLength(0)
-    const { restored } = await snapshots.restore(snap, undefined, r => t.put(r.id, r), id => t.get(id), false)
+    // restore 的 lookup 仍是同步签名（票 03 改为吃预读数据）：这里先把现状预读成 Map 再传入
+    const byId = new Map((await t.list()).map(r => [r.id, r]))
+    const { restored } = await snapshots.restore(snap, undefined, r => t.put(r.id, r), id => byId.get(id), false)
     expect(restored).toEqual(['mem_r'])
     expect(await mdFiles()).toHaveLength(1)
     const reloaded = await load()
-    expect(reloaded.get('mem_r')!.content).toBe('删掉再复活')
+    expect((await reloaded.get('mem_r'))!.content).toBe('删掉再复活')
   })
 
   it('unknown extras 经 update 往返仍在文件里', async () => {
@@ -189,7 +191,7 @@ describe('FileTable 写侧', () => {
       t.update('mem_a', r => ({ ...r, recallCount: r.recallCount + 1 })),
       t.update('mem_a', r => ({ ...r, recallCount: r.recallCount + 1 })),
     ])
-    expect(t.get('mem_a')!.recallCount).toBe(2)
+    expect((await t.get('mem_a'))!.recallCount).toBe(2)
   })
 
   it('update 缺 key 抛 RecordNotFoundError（与 InMemoryTable 同一错误类）', async () => {
@@ -203,7 +205,7 @@ describe('FileTable 写侧', () => {
     await seedGlobal('a.md', record({ id: 'mem_a' }))
     const t = await load()
     expect(await t.delete('mem_a')).toBe(true)
-    expect(t.get('mem_a')).toBeUndefined()
+    expect(await t.get('mem_a')).toBeUndefined()
     await expect(stat(join(root, GLOBAL_DIR, 'a.md'))).rejects.toThrow()
     expect(await t.delete('mem_a')).toBe(false)
   })
@@ -212,7 +214,7 @@ describe('FileTable 写侧', () => {
     const t = await load()
     await t.put('mem_a', record({ id: 'mem_a' }))
     await expect(t.update('mem_a', r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))).resolves.toBeDefined()
-    expect(t.get('mem_a')!.status).toBe('deleted')
+    expect((await t.get('mem_a'))!.status).toBe('deleted')
   })
 })
 
@@ -225,7 +227,7 @@ describe('FileTable 保留名避让（评审 M4：APFS 大小写不敏感，memo
     expect(files).toContain(`memory-${'mem_rsv'.slice(-6)}.md`)
 
     const t2 = await load() // 全新实例重载：记录仍在、隔离区为空
-    expect(t2.get('mem_rsv')!.name).toBe('memory')
+    expect((await t2.get('mem_rsv'))!.name).toBe('memory')
     expect(t2.quarantined()).toEqual([])
   })
 })
@@ -244,7 +246,7 @@ describe('FileTable 撞名检查看得见磁盘（终审 I1：隔离文件不可
     expect(files).toContain(`pnpm-${'mem_new'.slice(-6)}.md`)
 
     const t2 = await load() // 重载：新记录在、坏文件仍被隔离（malformed finding 不消失）
-    expect(t2.get('mem_new')!.name).toBe('pnpm')
+    expect((await t2.get('mem_new'))!.name).toBe('pnpm')
     expect(t2.quarantined()).toHaveLength(1)
   })
 })
@@ -270,7 +272,7 @@ describe('自写指纹校准范围', () => {
     t.armed = true
     await t.update('mem_a', r => ({ ...r, content: '改 A', updatedAt: 2 }))
     await t.refreshIfChanged()
-    expect(t.get('mem_b')!.content).toBe(externalB)
+    expect((await t.get('mem_b'))!.content).toBe(externalB)
     await t.update('mem_b', r => ({ ...r, lastConfirmedAt: 99 }))
     expect(await readFile(join(root, GLOBAL_DIR, 'b.md'), 'utf8')).toContain(externalB)
   })

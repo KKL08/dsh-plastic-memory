@@ -2,7 +2,7 @@ import { mkdir, readdir, readFile, writeFile, rename, rm, stat } from 'node:fs/p
 import { RecordNotFoundError } from '../errors.ts'
 import { basename, dirname, join } from 'node:path'
 import type { MemoryRecord } from '../record-schema.ts'
-import type { MemoryTable, MemoryLogger } from '../store.ts'
+import type { MemoryTable, MemoryLogger } from './table.ts'
 import type { KvTable } from '../kv-table.ts'
 import type { RecallStats } from './schema.ts'
 import { splitFrontmatter, decodeRecord, encodeRecord, type FileLocation } from './frontmatter.ts'
@@ -133,7 +133,7 @@ export class FileTable implements MemoryTable {
     }
     // sidecar 合并（无行 → decode 已注入默认）
     for (const slot of map.values()) {
-      const row = this.opts.stats.get(slot.record.id)
+      const row = await this.opts.stats.get(slot.record.id)
       if (row) slot.record = { ...slot.record, recallCount: row.recallCount, lastRecalledAt: row.lastRecalledAt }
     }
     await this.sweepDeletedInner(map)
@@ -235,9 +235,9 @@ export class FileTable implements MemoryTable {
     await rename(tmp, filePath)
   }
 
-  get(key: string): MemoryRecord | undefined { return this.map.get(key)?.record }
-  entries(): IterableIterator<[string, MemoryRecord]> {
-    return [...this.map.entries()].map(([k, s]) => [k, s.record] as [string, MemoryRecord]).values()
+  async get(key: string): Promise<MemoryRecord | undefined> { return this.map.get(key)?.record }
+  async list(): Promise<MemoryRecord[]> {
+    return [...this.map.values()].map(s => s.record)
   }
 
   // —— 写侧 ——

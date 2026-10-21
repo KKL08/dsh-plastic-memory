@@ -14,7 +14,7 @@ describe('SnapshotStore.capture', () => {
     const s = makeStore()
     await s.capture({ operation: 'pre-forget', description: '早', records: [record({ id: 'mem_a' })] }, 100)
     await s.capture({ operation: 'manual', description: '晚', records: [record({ id: 'mem_b' }), record({ id: 'mem_c' })] }, 200)
-    const list = s.list()
+    const list = await s.list()
     expect(list.map(x => x.description)).toEqual(['晚', '早'])
     expect(list[0].memoryIds.sort()).toEqual(['mem_b', 'mem_c'])
     expect(list[0].data).toHaveLength(2)
@@ -24,7 +24,7 @@ describe('SnapshotStore.capture', () => {
     const s = makeStore()
     await s.capture({ operation: 'manual', description: '老', records: [] }, 0)
     await s.capture({ operation: 'manual', description: '新', records: [] }, SNAPSHOT_RETENTION_MS + 1)
-    expect(s.list().map(x => x.description)).toEqual(['新'])
+    expect((await s.list()).map(x => x.description)).toEqual(['新'])
   })
 })
 

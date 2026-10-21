@@ -94,25 +94,25 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     if (reload) await reload()
 
     // put→get 逐字段相等（FileTable 场景下强制先过 encode→disk→decode）
-    expect(table.get(recGlobal.id)).toEqual(recGlobal)
-    expect(table.get(recA.id)).toEqual(recA)
-    expect(table.get(recB.id)).toEqual(recB)
-    expect(table.get(recADeleted.id)).toEqual(recADeleted)
+    expect(await table.get(recGlobal.id)).toEqual(recGlobal)
+    expect(await table.get(recA.id)).toEqual(recA)
+    expect(await table.get(recB.id)).toEqual(recB)
+    expect(await table.get(recADeleted.id)).toEqual(recADeleted)
 
     const s = new MemoryStore(table)
 
     // visible(/repo-with-hyphens/sub-dir) → global + ws=/a，ws=/b 因 scope 不匹配被排除
-    const visibleA = s.query({ scope: { kind: 'visible', workspacePath: '/home/dev/repo-with-hyphens/sub-dir' } })
+    const visibleA = await s.query({ scope: { kind: 'visible', workspacePath: '/home/dev/repo-with-hyphens/sub-dir' } })
     expect(visibleA.map(r => r.id).sort()).toEqual([recA.id, recGlobal.id].sort())
 
     // 缺省 status 过滤排除 deleted（即便 scope 命中 visible 范围）
     expect(visibleA.some(r => r.id === recADeleted.id)).toBe(false)
-    const deletedOnly = s.query({ status: ['deleted'] })
+    const deletedOnly = await s.query({ status: ['deleted'] })
     expect(deletedOnly.map(r => r.id)).toEqual([recADeleted.id])
 
     // 多词 keyword：Task 6 起 store.query 是多词 AND（词序无关）。"pnpm 环境" 两词都命中
     // recGlobal（连续子串）与 recA（词序相反但两词都在），recB 不含这两个词故不命中。
-    const kwHits = s.query({ keyword: 'pnpm 环境', status: ['active'] })
+    const kwHits = await s.query({ keyword: 'pnpm 环境', status: ['active'] })
     expect(kwHits.map(r => r.id).sort()).toEqual([recA.id, recGlobal.id].sort())
   })
 
@@ -122,7 +122,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
 
     const updated = await table.update(rec.id, r => ({ ...r, content: '更新后内容', updatedAt: 2 }))
     expect(updated.content).toBe('更新后内容')
-    expect(table.get(rec.id)!.content).toBe('更新后内容')
+    expect((await table.get(rec.id))!.content).toBe('更新后内容')
 
     const err = await captureRejection(table.update('ghost', r => r))
     expect(err).toBeInstanceOf(RecordNotFoundError)
@@ -130,22 +130,21 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
 
     const ok = await store.softDelete(rec.id)
     expect(ok).toBe(true)
-    expect(table.get(rec.id)!.status).toBe('deleted')
+    expect((await table.get(rec.id))!.status).toBe('deleted')
     expect(await store.softDelete('ghost2')).toBe(false)
   })
 
-  it('markRecalled 更新统计（等待微任务后断言 recallCount+1）', async () => {
+  it('markRecalled 更新统计（await 后断言 recallCount+1）', async () => {
     const rec = record({ id: 'mem_recall_1', name: 'markrecalled-test', content: '待召回内容', updatedAt: 1 })
     await store.put(rec)
 
     const filePath = root ? join(root, GLOBAL_DIR, 'markrecalled-test.md') : undefined
     const before = filePath ? (await stat(filePath)).mtimeMs : undefined
 
-    store.markRecalled([rec.id])
-    await new Promise(setImmediate)
+    await store.markRecalled([rec.id])
 
-    expect(store.get(rec.id)!.recallCount).toBe(1)
-    expect(store.get(rec.id)!.lastRecalledAt).not.toBeNull()
+    expect((await store.get(rec.id))!.recallCount).toBe(1)
+    expect((await store.get(rec.id))!.lastRecalledAt).not.toBeNull()
 
     // §4 核心命题：易变字段的更新只走 sidecar，文件本体不重写——mtime 不变
     if (filePath) {
@@ -166,7 +165,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     }, deps)
     expect(created.kind).toBe('saved')
     if (created.kind !== 'saved') throw new Error('unreachable')
-    expect(store.get(created.record.id)).toEqual(created.record)
+    expect(await store.get(created.record.id)).toEqual(created.record)
 
     const updated = await runSavePipeline({
       action: 'update', id: created.record.id, name: '流程A-v2', type: 'procedure', scope: 'global',
@@ -192,12 +191,12 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
       sourceMode: 'user-explicit', force: true, supersedes: [other.record.id],
     }, deps)
     expect(superseder.kind).toBe('saved')
-    expect(store.get(other.record.id)!.status).toBe('superseded')
+    expect((await store.get(other.record.id))!.status).toBe('superseded')
 
     if (reload) await reload()
-    expect(table.get(updated.record.id)!.content).toBe('流程A 的内容 v2')
-    expect(table.get(updated.record.id)!.createdAt).toBe(created.record.createdAt)
-    expect(table.get(other.record.id)!.status).toBe('superseded')
+    expect((await table.get(updated.record.id))!.content).toBe('流程A 的内容 v2')
+    expect((await table.get(updated.record.id))!.createdAt).toBe(created.record.createdAt)
+    expect((await table.get(other.record.id))!.status).toBe('superseded')
   })
 
   it('forget 批量 + 快照先行 + restore 复活：端到端一致', async () => {
@@ -210,21 +209,23 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     const result = await executeForget({ ids: [rec.id], reason: '测试遗忘' }, forgetDeps)
     expect(result.ok).toBe(true)
     expect(result.forgotten).toEqual([rec.id])
-    expect(store.get(rec.id)!.status).toBe('deleted')
+    expect((await store.get(rec.id))!.status).toBe('deleted')
 
-    const snap = snapshots.get(result.snapshotId!)!
+    const snap = (await snapshots.get(result.snapshotId!))!
     expect(snap.data).toHaveLength(1)
     expect(snap.data[0].id).toBe(rec.id)
     expect(snap.data[0].status).toBe('active') // 快照记的是删除前的状态
 
+    // restore 的 lookup 仍是同步签名（票 03 改为吃预读数据）：这里先把现状预读成 Map 再传入
+    const byId = new Map((await table.list()).map(r => [r.id, r]))
     const { restored } = await snapshots.restore(
-      snap, undefined, r => store.put(r), id => store.get(id), false,
+      snap, undefined, r => store.put(r), id => byId.get(id), false,
     )
     expect(restored).toEqual([rec.id])
-    expect(store.get(rec.id)!.status).toBe('active')
+    expect((await store.get(rec.id))!.status).toBe('active')
 
     if (reload) await reload()
-    expect(table.get(rec.id)!.status).toBe('active') // FileTable：重载后复活仍成立
+    expect((await table.get(rec.id))!.status).toBe('active') // FileTable：重载后复活仍成立
   })
 
   it('put 不承载召回统计：restore 旧记录不回退 recallCount/lastRecalledAt（设计稿 §3 登记语义）', async () => {
@@ -233,13 +234,13 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     await table.update('mem_vol', c => ({ ...c, recallCount: 7, lastRecalledAt: 1787200000000 }))
     // 模拟 snapshots.restore：把快照时点的旧记录（recallCount=0）整条 put 回来
     await table.put('mem_vol', { ...r, summary: '恢复后的摘要' })
-    const after = table.get('mem_vol')!
+    const after = (await table.get('mem_vol'))!
     expect(after.summary).toBe('恢复后的摘要')  // 稳定字段照常恢复
     expect(after.recallCount).toBe(7)           // 召回统计不回退
     expect(after.lastRecalledAt).toBe(1787200000000)
     if (reload) {
       await reload()
-      const reloaded = table.get('mem_vol')!
+      const reloaded = (await table.get('mem_vol'))!
       expect(reloaded.recallCount).toBe(7)      // sidecar 一致：重载前后同值
       expect(reloaded.lastRecalledAt).toBe(1787200000000)
     }

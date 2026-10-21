@@ -43,8 +43,8 @@ it('加载 global 与 workspace，含连字符的路径经 .workspace 无损还�
   await seedWorkspace('/home/dev/example-project', 'b.md',
     record({ id: 'mem_w', scope: 'workspace', workspacePath: '/home/dev/example-project' }))
   const t = await load()
-  expect(t.get('mem_g')!.scope).toBe('global')
-  expect(t.get('mem_w')!.workspacePath).toBe('/home/dev/example-project') // Critical #1 回归钉
+  expect((await t.get('mem_g'))!.scope).toBe('global')
+  expect((await t.get('mem_w'))!.workspacePath).toBe('/home/dev/example-project') // Critical #1 回归钉
 })
 
 it('MEMORY.md 被跳过不算 malformed；坏文件隔离且不影响其余', async () => {
@@ -53,7 +53,7 @@ it('MEMORY.md 被跳过不算 malformed；坏文件隔离且不影响其余', as
   await writeFile(join(root, GLOBAL_DIR, 'MEMORY.md'), '# 索引\n')
   await writeFile(join(root, GLOBAL_DIR, 'bad.md'), '没有 frontmatter')
   const t = await load()
-  expect(t.get('mem_ok')!.status).toBe('active')
+  expect((await t.get('mem_ok'))!.status).toBe('active')
   expect(t.quarantined()).toHaveLength(1)
   expect(t.quarantined()[0].path).toContain('bad.md')
 })
@@ -62,7 +62,7 @@ it('同 id 两处 → 取 updatedAt 新者，旧文件被删除', async () => {
   await seedGlobal('old.md', record({ id: 'mem_dup', updatedAt: 100 }))
   await seedGlobal('new.md', record({ id: 'mem_dup', updatedAt: 200, content: '新版' }))
   const t = await load()
-  expect(t.get('mem_dup')!.content).toBe('新版')
+  expect((await t.get('mem_dup'))!.content).toBe('新版')
   await expect(stat(join(root, GLOBAL_DIR, 'old.md'))).rejects.toThrow()
 })
 
@@ -72,11 +72,11 @@ it('sidecar 合并：有行取行值，无行注入默认', async () => {
   const stats = new InMemoryKvTable<RecallStats>()
   await stats.put('mem_a', { id: 'mem_a', recallCount: 7, lastRecalledAt: 999 })
   const t = new FileTable({ root, stats }); await t.load()
-  expect(t.get('mem_a')!.recallCount).toBe(7)
-  expect(t.get('mem_a')!.lastRecalledAt).toBe(999)
+  expect((await t.get('mem_a'))!.recallCount).toBe(7)
+  expect((await t.get('mem_a'))!.lastRecalledAt).toBe(999)
   // mem_b 在 sidecar 里无行 → decode 阶段注入默认值，合并循环不应改动
-  expect(t.get('mem_b')!.recallCount).toBe(0)
-  expect(t.get('mem_b')!.lastRecalledAt).toBeNull()
+  expect((await t.get('mem_b'))!.recallCount).toBe(0)
+  expect((await t.get('mem_b'))!.lastRecalledAt).toBeNull()
 })
 
 it('清扫：deleted 且超 14 天 → 物理删除；未超期保留', async () => {
@@ -85,8 +85,8 @@ it('清扫：deleted 且超 14 天 → 物理删除；未超期保留', async ()
   await seedGlobal('fresh.md', record({ id: 'mem_fresh', status: 'deleted', updatedAt: now - 1000 }))
   const t = new FileTable({ root, stats: new InMemoryKvTable<RecallStats>(), now: () => now })
   await t.load()
-  expect(t.get('mem_old')).toBeUndefined()
-  expect(t.get('mem_fresh')!.status).toBe('deleted')
+  expect(await t.get('mem_old')).toBeUndefined()
+  expect((await t.get('mem_fresh'))!.status).toBe('deleted')
 })
 
 it('外部就地追加写被指纹感知（目录 mtime 抓不到的场景）', async () => {
@@ -95,7 +95,7 @@ it('外部就地追加写被指纹感知（目录 mtime 抓不到的场景）', 
   await new Promise(r => setTimeout(r, 10))
   await writeFile(join(root, GLOBAL_DIR, 'a.md'), encodeRecord(record({ id: 'mem_a', content: '外部改过' }), {}))
   await t.refreshIfChanged()
-  expect(t.get('mem_a')!.content).toBe('外部改过')
+  expect((await t.get('mem_a'))!.content).toBe('外部改过')
 })
 
 it('refreshIfChanged 无节流：紧邻的外部编辑也立即被感知（入口校准是无条件硬保证）', async () => {
@@ -106,19 +106,19 @@ it('refreshIfChanged 无节流：紧邻的外部编辑也立即被感知（入�
 
   await writeFile(join(root, GLOBAL_DIR, 'a.md'), encodeRecord(record({ id: 'mem_a', content: '改动1' }), {}))
   await t.refreshIfChanged() // 与上一次 refresh 零间隔，也必须看到外部编辑
-  expect(t.get('mem_a')!.content).toBe('改动1')
+  expect((await t.get('mem_a'))!.content).toBe('改动1')
 })
 
 it('重载失败不丢内存态：root 变得不可读后 refreshIfChanged 保留原记录', async () => {
   await seedGlobal('a.md', record({ id: 'mem_a' }))
   const t = await load()
-  expect(t.get('mem_a')).toBeDefined()
+  expect(await t.get('mem_a')).toBeDefined()
   await chmod(root, 0o000)
   try {
     // 指纹计算得到 '' ≠ 原指纹 → 触发重载 → 重载因权限失败 → 必须保留旧 map
     await t.refreshIfChanged()
-    expect(t.get('mem_a')).toBeDefined()
-    expect(t.get('mem_a')!.id).toBe('mem_a')
+    expect(await t.get('mem_a')).toBeDefined()
+    expect((await t.get('mem_a'))!.id).toBe('mem_a')
   } finally {
     await chmod(root, 0o755)  // 恢复权限，否则 afterEach 的 rm 会失败
   }
@@ -137,8 +137,8 @@ it('单个 workspace 目录不可读 → 该目录记录缺失，其余目录记
   await chmod(wsDir, 0o000)
   try {
     const t = await load()
-    expect(t.get('mem_g')!.scope).toBe('global')
-    expect(t.get('mem_w')).toBeUndefined()
+    expect((await t.get('mem_g'))!.scope).toBe('global')
+    expect(await t.get('mem_w')).toBeUndefined()
   } finally {
     await chmod(wsDir, 0o755)  // 恢复权限，否则 afterEach 的 rm 会失败
   }
@@ -188,9 +188,9 @@ it('合法名称含 .tmp- 不是原子写残留：新实例重载、推进 61 �
   const t1 = mk(); await t1.load()
   await t1.put('mem_tmp', record({ id: 'mem_tmp', name: 'cache.tmp-notes' }))
   const t2 = mk(); await t2.load()
-  expect(t2.get('mem_tmp')?.name).toBe('cache.tmp-notes')
+  expect((await t2.get('mem_tmp'))?.name).toBe('cache.tmp-notes')
   clock += 61_000
   const t3 = mk(); await t3.load()
-  expect(t3.get('mem_tmp')?.name).toBe('cache.tmp-notes')
+  expect((await t3.get('mem_tmp'))?.name).toBe('cache.tmp-notes')
   expect(await readdir(join(root, GLOBAL_DIR))).toContain('cache.tmp-notes.md')
 })

@@ -1,26 +1,14 @@
 import type { MemoryRecord } from './record-schema.ts'
 import { RecordNotFoundError } from './errors.ts'
 import { expandQueryTerms, matchScore } from './text.ts'
+import type { MemoryLogger, MemoryTable } from './storage/table.ts'
 
-/** 纯逻辑层的日志注入口：接线层（index.ts）传入 ctx.logger，缺省回退 console，
- *  保证测试与独立使用场景仍有输出。file-table.ts / forget.ts 复用此形状，保持三层注入风格一致。 */
-export interface MemoryLogger {
-  info(message: string, detail?: unknown): void
-  warn(message: string, detail?: unknown): void
-  error(message: string, detail?: unknown): void
-}
-
-export interface MemoryTable {
-  get(key: string): MemoryRecord | undefined
-  put(key: string, value: MemoryRecord): Promise<void>
-  update(key: string, fn: (current: MemoryRecord) => MemoryRecord): Promise<MemoryRecord>
-  delete(key: string): Promise<boolean>
-  entries(): IterableIterator<[string, MemoryRecord]>
-}
+export type { MemoryLogger, MemoryTable } from './storage/table.ts'
 
 export class InMemoryTable implements MemoryTable {
   private map = new Map<string, MemoryRecord>()
-  get(key: string) { return this.map.get(key) }
+  async get(key: string) { return this.map.get(key) }
+  async list() { return [...this.map.values()] }
   async put(key: string, value: MemoryRecord) {
     // 与 FileTable 同语义：put 不承载召回统计，唯一写入方是 markRecalled 走的 update 路径
     const prev = this.map.get(key)
@@ -34,7 +22,6 @@ export class InMemoryTable implements MemoryTable {
     return next
   }
   async delete(key: string) { return this.map.delete(key) }
-  entries() { return this.map.entries() }
 }
 
 export interface QueryFilter {
@@ -58,19 +45,19 @@ export class MemoryStore {
   put(record: MemoryRecord) { return this.table.put(record.id, record) }
 
   async softDelete(id: string): Promise<boolean> {
-    if (!this.table.get(id)) return false
+    if (!(await this.table.get(id))) return false
     await this.table.update(id, r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))
     return true
   }
 
-  query(filter: QueryFilter): MemoryRecord[] {
+  async query(filter: QueryFilter): Promise<MemoryRecord[]> {
     const statuses = filter.status ?? ['active']
     const keyword = filter.keyword?.toLowerCase()
     // 排序 OR：命中任一匹配项即入选（硬 AND 会让"多一个不相关词"整组落空）。中文经 bigram 切分
     // 也参与匹配。命中数排序与 limit 由调用方（executeSearch）用同一 matchScore 收敛。
     const terms = keyword ? expandQueryTerms(keyword) : []
     const out: MemoryRecord[] = []
-    for (const [, r] of this.table.entries()) {
+    for (const r of await this.table.list()) {
       if (!statuses.includes(r.status)) continue
       if (filter.types && !filter.types.includes(r.type)) continue
       if (filter.tags && !filter.tags.some(t => r.tags.includes(t))) continue
@@ -86,11 +73,11 @@ export class MemoryStore {
     return out
   }
 
-  markRecalled(ids: string[]): void {
+  async markRecalled(ids: string[]): Promise<void> {
     const now = Date.now()
     for (const id of ids) {
-      if (!this.table.get(id)) continue
-      void this.table
+      if (!(await this.table.get(id))) continue
+      await this.table
         .update(id, r => ({ ...r, lastRecalledAt: now, recallCount: r.recallCount + 1 }))
         .catch((err: unknown) => {
           ;(this.log ?? console).error('[plastic-memory] 召回统计更新失败:', err)
