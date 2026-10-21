@@ -9,6 +9,7 @@ import type { Finding, ScanCacheEntry } from '../governance/schema.ts'
 import { runRuleScan, buildMalformedFindings } from '../governance/rule-scan.ts'
 import { runSemanticScan, SEMANTIC_SCAN_MAX_RECORDS, type SemanticLlm } from '../governance/semantic-scan.ts'
 import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, checkupRowBase, GLOBAL_CACHE_KEY, type LayerRef, TIER_LABEL } from '../governance/layer-health.ts'
+import { prereadLayers } from './layer-preread.ts'
 import { join, sep } from 'node:path'
 import { workspaceDirName, GLOBAL_DIR } from '../storage/paths.ts'
 import { runCrossWsScan, findEntityDuplicates, type CrossWsDuplicate } from '../governance/cross-ws.ts'
@@ -179,6 +180,7 @@ interface ScanPass {
 /** 一次记录集的完整扫描（规则 + 语义 + 冲突挂账）。单层模式与体检的每层循环共用。 */
 async function scanPass(
   deps: ScanToolDeps,
+  byId: ReadonlyMap<string, MemoryRecord>,
   records: MemoryRecord[],
   bucket: string,
   scopeLabel: string,
@@ -192,11 +194,11 @@ async function scanPass(
   const notes: ScanNote[] = []
   const findings: Finding[] = []
   if (layers === 'rule' || layers === 'full') {
-    findings.push(...runRuleScan(records, id => deps.store.get(id), now))
+    findings.push(...runRuleScan(records, id => byId.get(id), now))
     findings.push(...buildMalformedFindings(quarantined))
   }
 
-  let semanticCachedAt: number | null = deps.cache.get(bucket)?.scannedAt ?? null
+  let semanticCachedAt: number | null = (await deps.cache.get(bucket))?.scannedAt ?? null
   if (layers === 'semantic' || layers === 'full') {
     if (!llm) {
       notes.push(layers === 'semantic'
@@ -261,6 +263,14 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
   const llm = deps.getLlm(exec)
   const baseline = deps.getBaseline(exec)
   const currentWs = exec !== undefined ? (await deps.resolveContext(exec)).workspacePath : undefined
+  // 预读范围：与 memory_health 共用 prereadLayers——全部状态的记录（含 superseded / deleted）、
+  // 待决账本、语义缓存、隔离文件。扫描输入（active 的可见集合 / 本层集合）从这份预读里筛
+  const data = await prereadLayers(deps)
+  const active = (pred: (r: MemoryRecord) => boolean) =>
+    [...data.byId.values()].filter(r => r.status === 'active' && pred(r))
+  const visibleTo = (ws: string | undefined) => (r: MemoryRecord) =>
+    r.scope === 'global' || (ws !== undefined && r.workspacePath === ws)
+  const isGlobal = (r: MemoryRecord) => r.scope === 'global'
   // malformed 按扫描层归属（与 memory_health 的 scoreLayer 同口径），无 memoryRoot 时不归层
   const layerQuarantined = (ws: string | undefined) => {
     if (deps.memoryRoot === undefined) return quarantined
@@ -273,11 +283,11 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     const requested = checkup
       ? args.scopes ?? []
       : args.scope !== undefined ? [args.scope] : []
-    const invalid = validateScopePaths(deps.store, currentWs, requested)
+    const invalid = validateScopePaths(data.byId.values(), currentWs, requested)
     if (invalid !== null) return { kind: 'error', message: invalid }
   }
   if (checkup) {
-    const wsList = args.scopes && args.scopes.length > 0 ? args.scopes : listWorkspaces(deps.store)
+    const wsList = args.scopes && args.scopes.length > 0 ? args.scopes : listWorkspaces(data.byId.values())
     const notes: ScanNote[] = []
     if (baseline === null) notes.push({ code: 'baseline-missing', text: '未检测到 AGENTS.md 基线，垂直冲突检测未执行' })
 
@@ -300,26 +310,28 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     let baselineSkipped = 0
     for (const ws of wsList) {
       signal?.throwIfAborted()
-      const visible = deps.store.query({ status: ['active'], scope: { kind: 'visible', workspacePath: ws } })
+      const visible = active(visibleTo(ws))
       const wsBaseline = ws === currentWs ? baseline : null
       if (baseline !== null && wsBaseline === null) baselineSkipped++
-      collect(await scanPass(deps, visible, cacheKey(ws), ws, layerQuarantined(ws), layers, llm, wsBaseline, now, signal))
-      byWorkspace.set(ws, deps.store.query({ status: ['active'], scope: { kind: 'workspace', path: ws } }))
+      collect(await scanPass(deps, data.byId, visible, cacheKey(ws), ws, layerQuarantined(ws), layers, llm, wsBaseline, now, signal))
+      byWorkspace.set(ws, active(r => r.scope === 'workspace' && r.workspacePath === ws))
     }
     // global 层：global-only 输入，独立桶
     signal?.throwIfAborted()
-    const globalRecords = deps.store.query({ status: ['active'], scope: { kind: 'global' } })
-    collect(await scanPass(deps, globalRecords, GLOBAL_CACHE_KEY, 'global', layerQuarantined(undefined), layers, llm, baseline, now, signal))
+    const globalRecords = active(isGlobal)
+    collect(await scanPass(deps, data.byId, globalRecords, GLOBAL_CACHE_KEY, 'global', layerQuarantined(undefined), layers, llm, baseline, now, signal))
     if (baselineSkipped > 0 && llm && layers !== 'rule') {
       notes.push({ code: 'baseline-session-scoped', text: `基线随当前会话，${baselineSkipped} 个其他 workspace 的垂直冲突检测已跳过` })
     }
     const created = decisionItems.filter(i => i.isNew).length
     const existing = decisionItems.length - created
 
-    // 分层计分（与 memory_health 共用 scoreLayer，两个工具对同一层永远同分）
+    // 分层计分（与 memory_health 共用 prereadLayers + scoreLayer，两个工具对同一层永远同分）。
+    // 上面的扫描写了语义缓存与待决账本，计分前重读一份，口径与 health 读到的现状一致
+    const scored = await prereadLayers(deps)
     const layerRefs: LayerRef[] = [{ kind: 'global' }, ...wsList.map(path => ({ kind: 'workspace' as const, path }))]
     const rows = layerRefs.map(ref => {
-      const r = scoreLayer(deps, ref, now)
+      const r = scoreLayer(deps, scored, ref, now)
       return {
         ...checkupRowBase(r),
         issues: r.ruleFindings.length + r.semanticFindings.length,
@@ -356,8 +368,8 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     // 体检收尾：清理孤儿语义缓存桶（废弃 workspace 的、历史遗留键）——体检本就是全库视角，
     // 天然的清扫时机；合法桶按"库里现存的全部 workspace"算，不受本次 scopes 子集影响
     signal?.throwIfAborted()
-    const validKeys = new Set([GLOBAL_CACHE_KEY, ...listWorkspaces(deps.store).map(ws => cacheKey(ws))])
-    for (const [key] of [...deps.cache.entries()]) {
+    const validKeys = new Set([GLOBAL_CACHE_KEY, ...listWorkspaces(scored.byId.values()).map(ws => cacheKey(ws))])
+    for (const key of scored.cache.keys()) {
       if (!validKeys.has(key)) await deps.cache.delete(key)
     }
 
@@ -365,7 +377,7 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     return {
       kind: 'checkup', rows,
       pendingDecisions: { created, existing, items: decisionItems },
-      crossLayerConflicts: crossLayerConflicts(deps.store, deps.decisions),
+      crossLayerConflicts: crossLayerConflicts(scored.byId, scored.pending),
       promoteCandidates, duplicates, notes,
       message: `全库体检完成：global + ${wsList.length} 个 workspace 各自独立扫描计分${created > 0 ? `，新增 ${created} 个待决冲突` : ''}。清理需用户确认后执行：删除用 memory_forget，冲突裁决用 memory_confirm，提升全局用 memory_promote。`,
     }
@@ -375,16 +387,11 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
   // 输入用可见集合（global + 本项目）——global 里的问题（含最高危的 secret）对本会话同样生效，
   // 跨层冲突也要双方同在 prompt 里才可判；分数归属的拆分在 memory_health（scoreLayer）做。
   const wsPath = args.scope ?? currentWs
-  const records = deps.store.query({
-    status: ['active'],
-    ...(wsPath !== undefined
-      ? { scope: { kind: 'visible' as const, workspacePath: wsPath } }
-      : { scope: { kind: 'global' as const } }),
-  })
+  const records = active(wsPath !== undefined ? visibleTo(wsPath) : isGlobal)
   // 显式扫别的 workspace 时基线不适用（基线随当前会话）；扫自己或 global 层照用
   const passBaseline = wsPath === undefined || wsPath === currentWs ? baseline : null
   signal?.throwIfAborted()
-  const pass = await scanPass(deps, records, cacheKey(wsPath), wsPath ?? 'global', layerQuarantined(wsPath), layers, llm, passBaseline, now, signal)
+  const pass = await scanPass(deps, data.byId, records, cacheKey(wsPath), wsPath ?? 'global', layerQuarantined(wsPath), layers, llm, passBaseline, now, signal)
   const notes = [...pass.notes]
   if ((layers === 'semantic' || layers === 'full') && llm) {
     if (baseline === null) notes.push({ code: 'baseline-missing', text: '未检测到 AGENTS.md 基线，垂直冲突检测未执行' })

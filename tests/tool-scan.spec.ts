@@ -81,8 +81,8 @@ describe('executeScan 单层模式', () => {
     const r = await scanSingle({}, deps)
     expect(r.findings.some(f => f.type === 'conflict')).toBe(true)
     expect(r.pendingDecisions.created).toBe(1)
-    expect(deps.decisions.list()).toHaveLength(1)
-    const cached = deps.cache.get(GLOBAL_CACHE_KEY)!
+    expect(await deps.decisions.list()).toHaveLength(1)
+    const cached = (await deps.cache.get(GLOBAL_CACHE_KEY))!
     expect(cached.scannedAt).toBe(9000)
     expect(cached.findings).toHaveLength(1)
     expect(r.semanticCachedAt).toBe(9000)
@@ -104,7 +104,7 @@ describe('executeScan 单层模式', () => {
     const r2 = await scanSingle({}, deps)
     expect(r2.pendingDecisions.created).toBe(0)
     expect(r2.pendingDecisions.existing).toBe(1)
-    expect(deps.decisions.list()).toHaveLength(1)
+    expect(await deps.decisions.list()).toHaveLength(1)
     expect(r2.pendingDecisions.items).toHaveLength(1)
     expect(r2.pendingDecisions.items[0].id).toBe(firstId)
     expect(r2.pendingDecisions.items[0].isNew).toBe(false)
@@ -122,7 +122,7 @@ describe('executeScan 单层模式', () => {
     await deps.store.put(record({ id: 'mem_a' }))
     const r = await scanSingle({}, deps)
     expect(r.notes.map(n => n.code)).toContain('semantic-failed')
-    expect(deps.cache.get(GLOBAL_CACHE_KEY)).toBeUndefined()
+    expect(await deps.cache.get(GLOBAL_CACHE_KEY)).toBeUndefined()
   })
 
   it('scope 限定时按 visible 语义扫描（global + 该 workspace），stats.clean 为无问题记忆数', async () => {
@@ -170,7 +170,7 @@ describe('executeScan 单层模式', () => {
     })
     const r = await scanSingle({}, deps)
     expect(r.notes.map(n => n.code)).toContain('semantic-failed')
-    const cached = deps.cache.get(GLOBAL_CACHE_KEY)!
+    const cached = (await deps.cache.get(GLOBAL_CACHE_KEY))!
     expect(cached.scannedAt).toBe(500)
     expect(cached.findings[0].summary).toBe('旧发现')
     expect(r.semanticCachedAt).toBe(500)
@@ -185,7 +185,7 @@ describe('executeScan 单层模式', () => {
     const deps = makeDeps({ getLlm: (_exec: unknown) => verticalLlm })
     await deps.store.put(record({ id: 'mem_a' }))
     await scanSingle({}, deps)
-    const entry = deps.decisions.list()[0]
+    const entry = (await deps.decisions.list())[0]
     expect(entry.baselineRef).toBe('AGENTS.md：包管理')
 
     // 横向冲突：baselineRef 键必须整个不存在，不能是值为 undefined 的键
@@ -193,7 +193,7 @@ describe('executeScan 单层模式', () => {
     await deps2.store.put(record({ id: 'mem_a' }))
     await deps2.store.put(record({ id: 'mem_b' }))
     await scanSingle({}, deps2)
-    expect(Object.keys(deps2.decisions.list()[0])).not.toContain('baselineRef')
+    expect(Object.keys((await deps2.decisions.list())[0])).not.toContain('baselineRef')
   })
 
   it('记忆数超过语义层上限：note 带 semantic-truncated，语义层仍完成', async () => {
@@ -232,9 +232,9 @@ describe('executeScan 全库体检', () => {
     if (r.kind !== 'checkup') throw new Error(r.kind)
     expect(r.rows.map(row => row.layer === 'global' ? 'global' : row.workspacePath)).toEqual(['global', '/proj-a', '/proj-b'])
     expect(r.rows.every(row => row.tier === 'green')).toBe(true)
-    expect(deps.cache.get('cache_/proj-a')?.scannedAt).toBe(9000)
-    expect(deps.cache.get('cache_/proj-b')?.scannedAt).toBe(9000)
-    expect(deps.cache.get(GLOBAL_CACHE_KEY)?.scannedAt).toBe(9000)
+    expect((await deps.cache.get('cache_/proj-a'))?.scannedAt).toBe(9000)
+    expect((await deps.cache.get('cache_/proj-b'))?.scannedAt).toBe(9000)
+    expect((await deps.cache.get(GLOBAL_CACHE_KEY))?.scannedAt).toBe(9000)
   })
 
   it('无 AGENTS.md 基线时 note 带 baseline-missing', async () => {
@@ -357,9 +357,9 @@ describe('executeScan 全库体检', () => {
     await deps.cache.put('cache_all', { id: 'cache_all', scannedAt: 1, scope: 'all', findings: [] })
     await deps.cache.put('cache_/proj-a', { id: 'cache_/proj-a', scannedAt: 1, scope: '/proj-a', findings: [] })
     await executeScan({ scope: 'all', layers: 'rule' }, deps, fakeExec())
-    expect(deps.cache.get('cache_/gone-ws')).toBeUndefined()
-    expect(deps.cache.get('cache_all')).toBeUndefined()
-    expect(deps.cache.get('cache_/proj-a')).toBeDefined()
+    expect(await deps.cache.get('cache_/gone-ws')).toBeUndefined()
+    expect(await deps.cache.get('cache_all')).toBeUndefined()
+    expect(await deps.cache.get('cache_/proj-a')).toBeDefined()
   })
 
   it('global 视角二：同一 global 记忆被 ≥2 个项目反对时聚合高亮', async () => {
@@ -393,8 +393,8 @@ describe('executeScan 全库体检', () => {
     // 首个 workspace 之外不再调用 LLM（语义 + 跨项目重复都未触及）
     expect(calls).toHaveLength(1)
     // 取消发生在写入前：scan_cache 与 pending_decisions 无新增
-    expect([...deps.cache.entries()]).toHaveLength(0)
-    expect(deps.decisions.list()).toHaveLength(0)
+    expect(await deps.cache.list()).toHaveLength(0)
+    expect(await deps.decisions.list()).toHaveLength(0)
   })
 
   it('layers=rule 体检不发跨项目重复的 LLM 调用，退用实体聚类保底', async () => {

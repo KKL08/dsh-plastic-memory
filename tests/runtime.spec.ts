@@ -35,6 +35,7 @@ describe('SnapshotCache', () => {
     await store.put(record({ id: 'mem_ws', type: 'preference', scope: 'workspace', workspacePath: '/repo', content: '仅本仓库生效的偏好' }))
     const session = {}
 
+    await cache.awaitResolved(session) // 未注入 resolver、未显式喂：按未解析组装进冷槽
     const first = cache.render(session)
     expect(first).toContain('不要 mock 数据库')
     expect(first).not.toContain('仅本仓库生效的偏好')
@@ -42,6 +43,7 @@ describe('SnapshotCache', () => {
 
     // 未冻结：workspace 解析完成后仍能拿到完整版，证明兜底路径没把内容缓存住
     cache.setWorkspacePath(session, '/repo')
+    await cache.awaitResolved(session)
     const second = cache.render(session)
     expect(second).toContain('仅本仓库生效的偏好')
   })
@@ -53,6 +55,7 @@ describe('SnapshotCache', () => {
     const session = {}
     cache.setWorkspacePath(session, undefined)
 
+    await cache.awaitResolved(session)
     const text = cache.render(session)
     expect(text).toContain('不要 mock 数据库')
     expect(spy).toHaveBeenCalledTimes(1)
@@ -60,6 +63,7 @@ describe('SnapshotCache', () => {
 
     // 冻结：后续写入新记忆，同一 session 仍返回旧快照，不重新组装，也不再计召回
     await store.put(record({ id: 'mem_new', type: 'preference', content: '另一条偏好' }))
+    await cache.awaitResolved(session)
     expect(cache.render(session)).toBe(text)
     expect(spy).toHaveBeenCalledTimes(1)
   })
@@ -71,8 +75,10 @@ describe('SnapshotCache', () => {
     const session = {}
     cache.setWorkspacePath(session, undefined)
 
+    await cache.awaitResolved(session)
     cache.render(session)
     cache.invalidate(session)      // 模拟压缩失效
+    await cache.awaitResolved(session)
     const rebuilt = cache.render(session)          // 重建：内容重新组装但不重复计召回
     expect(rebuilt).toContain('不要 mock 数据库')  // 确有重建产出（非空、非兜底），召回计数才有意义
     expect(spy).toHaveBeenCalledTimes(1)
@@ -88,9 +94,11 @@ describe('SnapshotCache', () => {
     const { store, cache } = makeCache()
     const session = {}
     cache.setWorkspacePath(session, undefined)
+    await cache.awaitResolved(session)
     cache.render(session) // 冻结冷启动文案
     await store.put(record({ id: 'mem_new', type: 'preference', content: '不要 mock 数据库' }))
     cache.invalidate(session)
+    await cache.awaitResolved(session)
     const text = cache.render(session)
     expect(text).not.toBe(COLD_START_TEXT)
     expect(text).toContain('不要 mock 数据库')
@@ -102,9 +110,11 @@ describe('SnapshotCache', () => {
     const cache = new SnapshotCache({ store, registry, budget: 4000, memoryRoot: '/home/.dsh/memories' })
     const session = {}
     // 兜底路径（workspace 未解析）
+    await cache.awaitResolved(session)
     expect(cache.render(session)).toContain('/home/.dsh/memories/global/')
     // 完整路径（解析完成后冻结）
     cache.setWorkspacePath(session, undefined)
+    await cache.awaitResolved(session)
     expect(cache.render(session)).toContain('/home/.dsh/memories/global/')
   })
 
@@ -116,27 +126,34 @@ describe('SnapshotCache', () => {
 
     // 模拟热重载后的新实例：没经过任何 session/created，仅靠 render 侧自愈解析 workspace
     let calls = 0
+    let release!: () => void
+    const gate = new Promise<void>(r => { release = r })
     const cache = new SnapshotCache({
       store, registry, budget: 4000,
-      resolveWorkspace: async (s: object) => { calls++; return (s as { header?: { cwd?: string } }).header?.cwd },
+      resolveWorkspace: async (s: object) => { calls++; await gate; return (s as { header?: { cwd?: string } }).header?.cwd },
     })
     const session = { header: { cwd: '/repo' } }
 
-    // 首次 render：workspace 未解析，global-only 兜底，不含 workspace 记忆、不计召回
+    // 首次组装：workspace 解析未落定（超时放行），global-only 兜底，不含 workspace 记忆、不计召回
+    cache.render(session) // render 侧自愈：触发解析
+    await cache.awaitResolved(session, 0)
     const first = cache.render(session)
     expect(first).toContain('不要 mock 数据库')
     expect(first).not.toContain('仅本仓库生效的偏好')
     expect(spy).not.toHaveBeenCalled()
 
     // 等待 fire-and-forget 解析落定
+    release()
     await new Promise(r => setTimeout(r))
     expect(calls).toBe(1)
 
-    // 解析完成后 render：完整版含 workspace 记忆，冻结并计召回一次
+    // 解析完成后组装：完整版含 workspace 记忆，冻结并计召回一次
+    await cache.awaitResolved(session)
     const second = cache.render(session)
     expect(second).toContain('仅本仓库生效的偏好')
     expect(spy).toHaveBeenCalledTimes(1)
-    // 冻结：后续 render 返回同一快照，不再计召回
+    // 冻结：后续组装返回同一快照，不再计召回
+    await cache.awaitResolved(session)
     expect(cache.render(session)).toBe(second)
     expect(spy).toHaveBeenCalledTimes(1)
   })
@@ -205,29 +222,35 @@ describe('SnapshotCache.render 出口转义 {{', () => {
     await store.put(record({ id: 'mem_vue', type: 'preference', content: 'Vue 模板写 {{ msg }}' }))
     await store.put(record({ id: 'mem_lit', type: 'preference', content: `字面 {{${PROMPT_LBRACE_VARIABLE}}} 探测二次转义` }))
     await store.put(record({ id: 'mem_ci', type: 'preference', scope: 'workspace', workspacePath: '/repo', content: 'CI 用 ${{ secrets.NPM_TOKEN }}' }))
-    const raw = (workspacePath: string | undefined) =>
-      assembleSnapshot({ store, registry, budget: 4000, workspacePath, now: Date.now() }).text
+    const raw = async (workspacePath: string | undefined) => assembleSnapshot({
+      records: await store.query({ scope: { kind: 'visible', workspacePath } }),
+      registry, budget: 4000, workspacePath, now: Date.now(),
+    }).text
     const session = {}
 
     // ① workspace 未解析：global-only 兜底
+    await cache.awaitResolved(session)
     const fallback = cache.render(session)
-    const fallbackRaw = raw(undefined)
+    const fallbackRaw = await raw(undefined)
     expect(fallbackRaw).toContain('{{ msg }}')
     expect(fallback).not.toBe(fallbackRaw)
     expect(renderViaHost(fallback)).toBe(fallbackRaw)
 
     // ② 解析落定：完整组装并写缓存
     cache.setWorkspacePath(session, '/repo')
+    await cache.awaitResolved(session)
     const full = cache.render(session)
-    const fullRaw = raw('/repo')
+    const fullRaw = await raw('/repo')
     expect(fullRaw).toContain('${{ secrets.NPM_TOKEN }}')
     expect(renderViaHost(full)).toBe(fullRaw)
 
     // ③ 缓存命中：与 ② 逐字相同（仍是转义后的文本，不是缓存里的原文）
+    await cache.awaitResolved(session)
     expect(cache.render(session)).toBe(full)
 
     // ④ 失效重建：仍经宿主还原为原文
     cache.invalidate(session)
+    await cache.awaitResolved(session)
     expect(renderViaHost(cache.render(session))).toBe(fullRaw)
 
     expect(spy).toHaveBeenCalledTimes(1)

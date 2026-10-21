@@ -149,9 +149,8 @@ describe('FileTable 写侧', () => {
     await t.delete('mem_r')
     const mdFiles = async () => (await readdir(join(root, GLOBAL_DIR))).filter(n => n.endsWith('.md') && n !== 'MEMORY.md')
     expect(await mdFiles()).toHaveLength(0)
-    // restore 的 lookup 仍是同步签名（票 03 改为吃预读数据）：这里先把现状预读成 Map 再传入
     const byId = new Map((await t.list()).map(r => [r.id, r]))
-    const { restored } = await snapshots.restore(snap, undefined, r => t.put(r.id, r), id => byId.get(id), false)
+    const { restored } = await snapshots.restore(snap, undefined, r => t.put(r.id, r), byId, false)
     expect(restored).toEqual(['mem_r'])
     expect(await mdFiles()).toHaveLength(1)
     const reloaded = await load()

@@ -14,20 +14,22 @@ const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 
 // 本文件默认时间戳为 0。
 const record = (partial: Partial<MemoryRecord> = {}) => baseRecord({ createdAt: 0, updatedAt: 0, lastConfirmedAt: 0, ...partial })
+// assembleSnapshot 吃预读的可见记录：按调用方（runtime）的口径从 store 预读
+const visible = (store: MemoryStore, workspacePath?: string) => store.query({ scope: { kind: 'visible', workspacePath } })
 
 describe('assembleSnapshot', () => {
   const base = { registry, workspacePath: undefined, budget: 4000, now: 10 * DAY }
 
-  it('记忆库为空输出冷启动文案，coreIds 为空数组', () => {
+  it('记忆库为空输出冷启动文案，coreIds 为空数组', async () => {
     const store = new MemoryStore(new InMemoryTable())
-    expect(assembleSnapshot({ ...base, store })).toEqual({ text: COLD_START_TEXT, coreIds: [] })
+    expect(assembleSnapshot({ ...base, records: await visible(store) })).toEqual({ text: COLD_START_TEXT, coreIds: [] })
   })
 
   it('core 类型正文出现在 core 区（带 id），且不在索引区重复；passive 只显示 name', async () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_core', name: 'mock 禁令', type: 'preference', content: '不要 mock 数据库', summary: '测试不 mock 数据库' }))
     await store.put(record({ id: 'mem_ref', name: '看板', type: 'reference', content: '看板在 https://x.dev', summary: '团队看板的地址' }))
-    const { text } = assembleSnapshot({ ...base, store })
+    const { text } = assembleSnapshot({ ...base, records: await visible(store) })
     expect(text).toContain('不要 mock 数据库')
     expect(text).toMatch(/\[mem_core\]【记忆·[^】]+】不要 mock 数据库/) // ⑤+id：core 区带 id 与归属前缀
     expect(text.match(/mem_core/g)?.length).toBe(1)                    // core 只出现一次（索引区不重复）
@@ -40,16 +42,16 @@ describe('assembleSnapshot', () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_core', type: 'preference', content: '不要 mock 数据库' }))
     // 无 workspace（global-only）：只透 global，不指向任何项目目录、不说"各 workspace 子目录"
-    const globalOnly = assembleSnapshot({ ...base, store, memoryRoot: '/home/.dsh/memories' })
+    const globalOnly = assembleSnapshot({ ...base, records: await visible(store), memoryRoot: '/home/.dsh/memories' })
     expect(globalOnly.text).toContain('/home/.dsh/memories/global/')
     expect(globalOnly.text).not.toContain('各 workspace 子目录')
     // 有 workspace：透 global + 当前项目目录（workspaceDirName），并叮嘱别读其他 workspace
-    const withWs = assembleSnapshot({ ...base, store, workspacePath: '/repo/myproj', memoryRoot: '/home/.dsh/memories' })
+    const withWs = assembleSnapshot({ ...base, records: await visible(store, '/repo/myproj'), workspacePath: '/repo/myproj', memoryRoot: '/home/.dsh/memories' })
     expect(withWs.text).toContain('/home/.dsh/memories/global/')
     expect(withWs.text).toContain(`/home/.dsh/memories/${workspaceDirName('/repo/myproj')}/`)
     expect(withWs.text).toMatch(/其他项目|别的 workspace|不要.*读/)
     // 未提供 memoryRoot：无路径行
-    const withoutRoot = assembleSnapshot({ ...base, store })
+    const withoutRoot = assembleSnapshot({ ...base, records: await visible(store) })
     expect(withoutRoot.text).not.toContain('记忆文件在磁盘')
   })
 
@@ -58,7 +60,7 @@ describe('assembleSnapshot', () => {
     await store.put(record({ id: 'mem_p', type: 'project', lastConfirmedAt: 0, summary: '冻结到三月' }))          // project 衰减 7 天，now=10 天 → 超期
     await store.put(record({ id: 'mem_fresh', type: 'project', lastConfirmedAt: 9 * DAY, summary: '新决定' }))    // 1 天前确认 → 期内
     await store.put(record({ id: 'mem_core', type: 'preference', lastConfirmedAt: 0, content: '偏好内容' }))       // decayDays=null 永不标注
-    const { text } = assembleSnapshot({ ...base, store })
+    const { text } = assembleSnapshot({ ...base, records: await visible(store) })
     const lineOf = (id: string) => text.split('\n').find(l => l.includes(id))!
     expect(lineOf('mem_p')).toContain(STALENESS_NOTE(10))
     // 任何天数的陈旧标注都不该出现在期内记录上：正则由模板常量派生，文案改了也跟着改
@@ -70,7 +72,7 @@ describe('assembleSnapshot', () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_dead', validTo: 9 * DAY, summary: '已失效约定' }))
     await store.put(record({ id: 'mem_alive', validTo: 11 * DAY, summary: '仍有效约定' }))
-    const { text } = assembleSnapshot({ ...base, store })
+    const { text } = assembleSnapshot({ ...base, records: await visible(store) })
     expect(text).not.toContain('mem_dead')
     expect(text).toContain('mem_alive')
   })
@@ -78,7 +80,7 @@ describe('assembleSnapshot', () => {
   it('库里只剩 validTo 过期记忆时不误报冷启动', async () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_dead', validTo: 9 * DAY }))
-    const { text } = assembleSnapshot({ ...base, store })
+    const { text } = assembleSnapshot({ ...base, records: await visible(store) })
     expect(text).not.toBe(COLD_START_TEXT)
   })
 
@@ -88,7 +90,7 @@ describe('assembleSnapshot', () => {
       await store.put(record({ id: `mem_k${i}`, type: 'knowledge', summary: `知识条目${i}`.repeat(8) }))
       await store.put(record({ id: `mem_r${i}`, type: 'reference' }))
     }
-    const { text } = assembleSnapshot({ ...base, store, budget: 800 })
+    const { text } = assembleSnapshot({ ...base, records: await visible(store), budget: 800 })
     expect(text).toMatch(/另有 \d+ 条/)
   })
 
@@ -97,7 +99,7 @@ describe('assembleSnapshot', () => {
     const spy = vi.spyOn(store, 'markRecalled')
     await store.put(record({ id: 'mem_core', name: 'mock 禁令', type: 'preference', content: '不要 mock 数据库', summary: '测试不 mock 数据库' }))
     await store.put(record({ id: 'mem_ref', name: '看板', type: 'reference', content: '看板在 https://x.dev', summary: '团队看板的地址' }))
-    const { coreIds } = assembleSnapshot({ ...base, store })
+    const { coreIds } = assembleSnapshot({ ...base, records: await visible(store) })
     expect(coreIds).toEqual(['mem_core'])
     expect(spy).not.toHaveBeenCalled()
   })
@@ -106,7 +108,7 @@ describe('assembleSnapshot', () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_1' }))
     for (const level of ['off', 'strict', 'active'] as const) {
-      const { text } = assembleSnapshot({ ...base, store, evidenceLookup: level })
+      const { text } = assembleSnapshot({ ...base, records: await visible(store), evidenceLookup: level })
       expect(text).toContain(EVIDENCE_GUIDANCE[level])
     }
     // 三档行为差异靠关键词粗验：strict 有硬信号限定、active 有低置信路标、off 不列举回查条件
@@ -114,10 +116,10 @@ describe('assembleSnapshot', () => {
     expect(EVIDENCE_GUIDANCE.active).toContain('模型推断，未经确认')
     expect(EVIDENCE_GUIDANCE.off).not.toContain('矛盾')
     // 缺省（纯测试场景）不拼
-    expect(assembleSnapshot({ ...base, store }).text).not.toContain('memory_source')
+    expect(assembleSnapshot({ ...base, records: await visible(store) }).text).not.toContain('memory_source')
     // 空库冷启动路径不拼（没有记忆就没有锚）
     const empty = new MemoryStore(new InMemoryTable())
-    expect(assembleSnapshot({ ...base, store: empty, evidenceLookup: 'active' }).text).toBe(COLD_START_TEXT)
+    expect(assembleSnapshot({ ...base, records: await visible(empty), evidenceLookup: 'active' }).text).toBe(COLD_START_TEXT)
   })
 
   it('三段档位文案各自自包含：不引用其他档位名（运行时只有一段在场，跨段引用是悬空的）', () => {
@@ -154,7 +156,7 @@ describe('assembleSnapshot', () => {
       + estimateTokens(`\n## ${highDef.label}（ztypeh）`)
       + estimateTokens(`- [${highRec.id}] ${highRec.name}（${highRec.summary}）`)
 
-    const { text } = assembleSnapshot({ registry: priorityRegistry, workspacePath: undefined, budget, now, store })
+    const { text } = assembleSnapshot({ registry: priorityRegistry, workspacePath: undefined, budget, now, records: await visible(store) })
 
     expect(text).toContain('高优先级条目')
     expect(text).not.toContain('低优先级条目')
@@ -182,7 +184,7 @@ describe('assembleSnapshot', () => {
       + estimateTokens(`\n## ${priorityRegistry.get('ztypeh').label}（ztypeh）`)
       + 2 * estimateTokens(`- [mem_h0] ${highRecs[0].name}（${highRecs[0].summary}）`)
 
-    const { text } = assembleSnapshot({ registry: priorityRegistry, workspacePath: undefined, budget, now, store })
+    const { text } = assembleSnapshot({ registry: priorityRegistry, workspacePath: undefined, budget, now, records: await visible(store) })
 
     // high 组装入前 2 条（置信度最高的 mem_h0、mem_h1），其余进尾注
     expect(text).toContain('[mem_h0]')
@@ -206,7 +208,7 @@ describe('assembleSnapshot', () => {
     await store.put(record({ id: 'mem_hi', type: 'ztypeh', name: '高置信', summary: 'x', confidence: 0.95 }))
     await store.put(record({ id: 'mem_mid', type: 'ztypeh', name: '中置信', summary: 'x', confidence: 0.7 }))
 
-    const { text } = assembleSnapshot({ registry: priorityRegistry, workspacePath: undefined, budget: 4000, now: 10 * DAY, store })
+    const { text } = assembleSnapshot({ registry: priorityRegistry, workspacePath: undefined, budget: 4000, now: 10 * DAY, records: await visible(store) })
 
     expect(text.indexOf('mem_hi')).toBeLessThan(text.indexOf('mem_mid'))
     expect(text.indexOf('mem_mid')).toBeLessThan(text.indexOf('mem_lo'))

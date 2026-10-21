@@ -12,13 +12,14 @@ import type { MessageSourceMap } from '@deepseek-ai/dsh-llm'
 
 // 真实 dsh-tools / dsh-storage-domain 包已从 npm 装好，此处不 mock 任何框架包。
 import { apply, Config } from '../src/index.ts'
-import { InMemoryTable, MemoryStore } from '../src/store.ts'
+import { InMemoryKvTable, type SyncKvTable } from '../src/kv-table.ts'
 import { INDEX_FILE, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { TypeRegistryError } from '../src/errors.ts'
 import { buildSemanticPrompt } from '../src/governance/semantic-scan.ts'
 import { record } from './helpers/record.ts'
 import { renderViaHost } from './helpers/render-via-host.ts'
+import { MemoryStore } from '../src/store.ts'
 import { PROMPT_LBRACE_VARIABLE, assembleSnapshot } from '../src/snapshot.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
@@ -27,6 +28,15 @@ import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { cacheKey } from '../src/tools/scan.ts'
 import type { ScanCacheEntry } from '../src/governance/schema.ts'
 import { baselineProjectionDefinition } from '../src/governance/baseline.ts'
+
+/** 宿主 storageDomain 表的替身：读同步、写异步（形状同 kv-table.ts 的 SyncKvTable）。 */
+class HostKvTable<T = unknown> implements SyncKvTable<T> {
+  private map = new Map<string, T>()
+  get(key: string) { return this.map.get(key) }
+  entries() { return this.map.entries() }
+  async put(key: string, value: T) { this.map.set(key, value) }
+  async delete(key: string) { return this.map.delete(key) }
+}
 
 /**
  * projections：ctx.get('sessionProjections') 给出的注册表（缺省 = 服务缺席）。inject 仿 cordis 的
@@ -53,7 +63,7 @@ function mockCtx(opts: { projections?: SessionProjectionRegistry; registerProjec
     },
   }
   // 按表名复用同一张表：用例可以在 apply() 前预置、事后读回插件打开的那张表。
-  const tables = new Map<string, InMemoryTable>()
+  const tables = new Map<string, HostKvTable>()
   return {
     registered, contexts, contextDefs, variables, listeners, llmRequests, llmScript, tables,
     tools: { register: (def: { name: string }) => { registered.push(def.name); return () => {} } },
@@ -65,7 +75,7 @@ function mockCtx(opts: { projections?: SessionProjectionRegistry; registerProjec
       open: async () => ({
         table: (name: string) => {
           let table = tables.get(name)
-          if (!table) tables.set(name, table = new InMemoryTable())
+          if (!table) tables.set(name, table = new HostKvTable())
           return table
         },
         global: {}, name: 'plastic_memory', close: async () => {},
@@ -249,10 +259,11 @@ describe('快照 {{ 转义接线', () => {
     const text = assembly.contexts[0]!.text
 
     // 期望原文：同一份磁盘记忆、同一组参数独立组装一次快照
-    const fileTable = new FileTable({ root: memoryRoot, stats: new InMemoryTable() })
+    const fileTable = new FileTable({ root: memoryRoot, stats: new InMemoryKvTable() })
     await fileTable.load()
     const expected = assembleSnapshot({
-      store: new MemoryStore(fileTable), registry: buildTypeRegistry(config),
+      records: await new MemoryStore(fileTable).query({ scope: { kind: 'visible', workspacePath } }),
+      registry: buildTypeRegistry(config),
       workspacePath, budget: config.snapshotTokenBudget, now: Date.now(),
       memoryRoot, evidenceLookup: config.evidenceLookup,
     }).text
@@ -317,8 +328,8 @@ describe('语义扫描请求形状', () => {
         summary: '先前缓存的冲突', suggestedAction: '裁决',
       }],
     }
-    const cache = new InMemoryTable()
-    await cache.put(bucket, prior as never)
+    const cache = new HostKvTable()
+    await cache.put(bucket, prior)
     base.tables.set('scan_cache', cache)
     // 首次与重试都是：先吐完整 JSON，再以 error 终止（DeepSeek 适配器在 message_stop 前断流）
     const brokenStream = (): StreamChunk[] => [

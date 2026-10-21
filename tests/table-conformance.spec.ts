@@ -216,10 +216,9 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect(snap.data[0].id).toBe(rec.id)
     expect(snap.data[0].status).toBe('active') // 快照记的是删除前的状态
 
-    // restore 的 lookup 仍是同步签名（票 03 改为吃预读数据）：这里先把现状预读成 Map 再传入
     const byId = new Map((await table.list()).map(r => [r.id, r]))
     const { restored } = await snapshots.restore(
-      snap, undefined, r => store.put(r), id => byId.get(id), false,
+      snap, undefined, r => store.put(r), byId, false,
     )
     expect(restored).toEqual([rec.id])
     expect((await store.get(rec.id))!.status).toBe('active')

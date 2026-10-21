@@ -30,9 +30,10 @@ export async function executeConfirm(
 ): Promise<ConfirmResult> {
   const args = rawArgs as ConfirmArgs
   const now = deps.now?.() ?? Date.now()
+  // 预读范围：按 id 定位单条记录（store.get，含非 active，由下方逐处判 deleted）与账本单条目，不预读整层
 
   if (args.action === 'refresh') {
-    const target = deps.store.get(args.memoryId)
+    const target = await deps.store.get(args.memoryId)
     if (!target || target.status === 'deleted') {
       return { kind: 'error', message: `记忆不存在或已删除：${args.memoryId}` }
     }
@@ -45,7 +46,7 @@ export async function executeConfirm(
     }
   }
 
-  const entry = deps.decisions.get(args.decisionId)
+  const entry = await deps.decisions.get(args.decisionId)
   if (!entry) {
     return { kind: 'error', message: `待决项不存在：${args.decisionId}（可能已被裁决或涉及的记忆已删除）` }
   }
@@ -68,11 +69,11 @@ export async function executeConfirm(
   let toDelete: MemoryRecord | undefined
   if (vertical) {
     // 垂直：left=记忆 right=基线。keep-right = 基线胜，记忆删除
-    if (args.verdict === 'keep-right') toDelete = deps.store.get(entry.memoryIds[0])
+    if (args.verdict === 'keep-right') toDelete = await deps.store.get(entry.memoryIds[0])
     if (args.verdict === 'keep-left') actions.push(`保留记忆 ${entry.memoryIds[0]}（用户确认 override ${entry.baselineRef}）`)
   } else {
-    if (args.verdict === 'keep-left') toDelete = deps.store.get(entry.memoryIds[1])
-    if (args.verdict === 'keep-right') toDelete = deps.store.get(entry.memoryIds[0])
+    if (args.verdict === 'keep-left') toDelete = await deps.store.get(entry.memoryIds[1])
+    if (args.verdict === 'keep-right') toDelete = await deps.store.get(entry.memoryIds[0])
   }
 
   if (toDelete && toDelete.status !== 'deleted') {

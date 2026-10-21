@@ -36,11 +36,11 @@ export async function executeSnapshotTool(
   if (args.action === 'create') {
     // 去重（与 memory_forget 的约定一致）：调用者传入重复 id 不应重复计入快照
     const uniqueIds = args.memoryIds ? [...new Set(args.memoryIds)] : undefined
+    // 预读范围：给了 id 则逐条定位（含非 active，再剔除已删）；否则只读 active 全量
     const records = uniqueIds
-      ? uniqueIds
-          .map(id => deps.store.get(id))
+      ? (await Promise.all(uniqueIds.map(id => deps.store.get(id))))
           .filter((r): r is MemoryRecord => r !== undefined && r.status !== 'deleted')
-      : deps.store.query({ status: ['active'] })
+      : await deps.store.query({ status: ['active'] })
     const snap = await deps.snapshots.capture({
       operation: 'manual',
       description: args.description ?? `手动快照（${records.length} 条）`,
@@ -58,7 +58,7 @@ export async function executeSnapshotTool(
   }
 
   if (args.action === 'list') {
-    const snapshots = deps.snapshots.list().map(s => ({
+    const snapshots = (await deps.snapshots.list()).map(s => ({
       id: s.id, createdAt: s.createdAt, operation: s.operation,
       description: s.description, count: s.memoryIds.length,
     }))
@@ -70,13 +70,19 @@ export async function executeSnapshotTool(
     }
   }
 
-  const snap = deps.snapshots.get(args.snapshotId)
+  const snap = await deps.snapshots.get(args.snapshotId)
   if (!snap) {
     return { kind: 'error', message: `快照不存在：${args.snapshotId}（可能已超过 14 天保留窗口）` }
   }
+  // show / restore 的预读范围：快照内每个 id 的现状，按 id 定位（含非 active）
+  const current = new Map<string, MemoryRecord>()
+  for (const { id } of snap.data) {
+    const r = await deps.store.get(id)
+    if (r) current.set(id, r)
+  }
 
   if (args.action === 'show') {
-    const entries = deps.snapshots.diff(snap, id => deps.store.get(id))
+    const entries = deps.snapshots.diff(snap, current)
     const lines = entries.map(e => {
       const state = e.current === undefined ? '当前不存在（已删）'
         : e.current.status === 'deleted' ? '当前已软删'
@@ -90,7 +96,7 @@ export async function executeSnapshotTool(
   const { restored, skipped } = await deps.snapshots.restore(
     snap, args.memoryIds,
     r => deps.store.put(r),
-    id => deps.store.get(id),
+    current,
     args.overwriteChanged ?? false,
   )
   const skippedNote = skipped.length > 0

@@ -5,6 +5,7 @@ import type { MemoryTypeDefinition } from './types.ts'
 import { buildTypeRegistry } from './type-registry.ts'
 import { memoryDomainSpec } from './domain-spec.ts'
 import { MemoryStore } from './store.ts'
+import { wrapSyncKvTable } from './kv-table.ts'
 import { FileTable } from './storage/file-table.ts'
 import { resolveMemoryRoot } from './storage/paths.ts'
 import { formatIndexLine } from './index-line.ts'
@@ -83,7 +84,7 @@ export async function apply(ctx: Context, config: Config) {
   const domain = await ctx.storageDomain.open(memoryDomainSpec)
   ctx.effect(() => () => void domain.close())
   // 正文住 FileTable（磁盘 markdown），KV 只放易变的召回统计 sidecar（recall_stats）
-  const statsTable = domain.table('recall_stats')
+  const statsTable = wrapSyncKvTable(domain.table('recall_stats'))
   const memoryRoot = resolveMemoryRoot(config.memoryRoot)
   // 纯逻辑层（file-table/store/forget）不 import 框架包，日志经 MemoryLogger 注入；
   // ctx.logger 结构上满足该形状（info/warn/error），直接注入，宿主按插件名归因。
@@ -97,9 +98,9 @@ export async function apply(ctx: Context, config: Config) {
   await fileTable.load() // 契约：绝不 throw——记忆坏文件不能拖垮插件加载
   const store = new MemoryStore(fileTable, ctx.logger)
   // forget 的快照先行与待决账本清理需要这两个存储，治理关闭时也接线
-  const decisions = new PendingDecisionsStore(domain.table('pending_decisions'))
-  const snapshots = new SnapshotStore(domain.table('snapshots'))
-  const scanCache = domain.table('scan_cache')
+  const decisions = new PendingDecisionsStore(wrapSyncKvTable(domain.table('pending_decisions')))
+  const snapshots = new SnapshotStore(wrapSyncKvTable(domain.table('snapshots')))
+  const scanCache = wrapSyncKvTable(domain.table('scan_cache'))
   // AGENTS.md 基线投影走可选注册：插件的 inject 不列 sessionProjections（精简 profile 可能没有这个服务），
   // 改在 ctx.inject(['sessionProjections'], …) 里注册，这是宿主 registry 文档（dsh-session-projection README）
   // 给出的保留可选注册的写法。disposer 随 child fiber 走，插件卸载键即消失。服务缺席时插件照常挂载，
@@ -108,7 +109,7 @@ export async function apply(ctx: Context, config: Config) {
   // cwd → workspace 归属的单一解析路径：SnapshotCache 的 lazy 自愈与 session/created 的 eager 预热共用，
   // 避免两处各写一份 resolveWorkspacePath 调用。
   const resolveWorkspace = (session: object) => resolveWorkspacePath(ctx, (session as SessionLike).header?.cwd)
-  const snapshotCache = new SnapshotCache({ store, registry, budget: config.snapshotTokenBudget, memoryRoot, evidenceLookup: config.evidenceLookup, resolveWorkspace })
+  const snapshotCache = new SnapshotCache({ store, registry, budget: config.snapshotTokenBudget, memoryRoot, evidenceLookup: config.evidenceLookup, resolveWorkspace, log: ctx.logger })
 
   /** 工具执行前感知外部文件修改；对 ToolDefinition 做统一包装，避免逐个改 -tool.ts。
    *  systemPrompt 注入路径不经这层：同步组装，永远服务最近一次加载的 Map（docs/p15-storage-search-redesign.md §7 已登记）。 */
@@ -324,9 +325,9 @@ export async function apply(ctx: Context, config: Config) {
     on(name: 'session/event', fn: (session: object, event: { type: string }) => void): () => void
   }
   lifecycle.on('session/created', session => {
-    // eager 预热：新 session 不必等首次 render 才解析 workspace（HMR 后存量 session 走 render 侧自愈）。
-    // 走 awaitResolved 的共享入口，与 assemble 中间件同一份 memoize，不重复解析。
-    void snapshotCache.awaitResolved(session)
+    // eager 预热：新 session 不必等首次组装才解析 workspace（HMR 后存量 session 走 render 侧自愈）。
+    // 与 assemble 中间件的 awaitResolved 同一份 memoize，不重复解析；只解析不组装，快照仍在首次组装时冻结。
+    snapshotCache.prewarm(session)
   })
   lifecycle.on('session/event', (session, event) => {
     // 基线由宿主投影随事件折叠（plasticMemoryBaseline），不在这里观察；

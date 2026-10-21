@@ -16,11 +16,11 @@ export class PendingDecisionsStore {
     this.table = table
   }
 
-  list(): PendingDecision[] {
-    return [...this.table.entries()].map(([, e]) => e).sort((a, b) => a.firstSeenAt - b.firstSeenAt)
+  async list(): Promise<PendingDecision[]> {
+    return (await this.table.list()).map(([, e]) => e).sort((a, b) => a.firstSeenAt - b.firstSeenAt)
   }
 
-  get(id: string): PendingDecision | undefined {
+  get(id: string): Promise<PendingDecision | undefined> {
     return this.table.get(id)
   }
 
@@ -29,7 +29,7 @@ export class PendingDecisionsStore {
     now: number,
   ): Promise<{ created: boolean; entry: PendingDecision }> {
     const key = dedupKey(input.memoryIds, input.baselineRef)
-    for (const [, existing] of this.table.entries()) {
+    for (const [, existing] of await this.table.list()) {
       if (dedupKey(existing.memoryIds, existing.baselineRef) === key) {
         const updated: PendingDecision = { ...existing, summary: input.summary }
         await this.table.put(updated.id, updated)
@@ -53,7 +53,7 @@ export class PendingDecisionsStore {
 
   /** 悬空引用清理：任一被删记忆出现在条目里，整条移除。 */
   async removeByMemoryIds(memoryIds: string[]): Promise<number> {
-    const hit = [...this.table.entries()]
+    const hit = (await this.table.list())
       .filter(([, e]) => e.memoryIds.some(id => memoryIds.includes(id)))
       .map(([key]) => key)
     for (const key of hit) await this.table.delete(key)

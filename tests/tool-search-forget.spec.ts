@@ -54,13 +54,13 @@ describe('executeSearch', () => {
     const r = await seed(store, '某个知识')
     await executeSearch({ query: '知识' }, fakeExec(), makeSearchDeps(store))
     await new Promise(resolve => setTimeout(resolve, 0))
-    expect(store.get(r.id)!.recallCount).toBe(1)
+    expect((await store.get(r.id))!.recallCount).toBe(1)
   })
 
   it('超过衰减期未确认的命中带陈旧度标注', async () => {
     const store = new MemoryStore(new InMemoryTable())
     const r = await seed(store, '老知识')
-    await store.put({ ...store.get(r.id)!, lastConfirmedAt: Date.now() - 100 * 86_400_000 }) // knowledge 衰减 90 天
+    await store.put({ ...(await store.get(r.id))!, lastConfirmedAt: Date.now() - 100 * 86_400_000 }) // knowledge 衰减 90 天
     const result = await executeSearch({ query: '老知识' }, fakeExec(), makeSearchDeps(store))
     expect(result.hits[0].stalenessNote).toBe(STALENESS_NOTE(100))
   })
@@ -74,8 +74,8 @@ describe('executeForget（P1 批量版）', () => {
     const result = await executeForget({ ids: ['mem_a'], reason: '用户要求' }, deps)
     expect(result.ok).toBe(true)
     expect(result.forgotten).toEqual(['mem_a'])
-    expect(store.get('mem_a')!.status).toBe('deleted')
-    const snaps = deps.snapshots.list()
+    expect((await store.get('mem_a'))!.status).toBe('deleted')
+    const snaps = await deps.snapshots.list()
     expect(snaps).toHaveLength(1)
     expect(snaps[0].operation).toBe('pre-forget')
     expect(snaps[0].data[0].content).toBe('要删的')
@@ -90,8 +90,8 @@ describe('executeForget（P1 批量版）', () => {
     const deps = makeForgetDeps(store)
     const result = await executeForget({ ids: ['mem_a', 'mem_b'], reason: 'scan 清理' }, deps)
     expect(result.forgotten.sort()).toEqual(['mem_a', 'mem_b'])
-    expect(deps.snapshots.list()).toHaveLength(1)
-    expect(deps.snapshots.list()[0].memoryIds.sort()).toEqual(['mem_a', 'mem_b'])
+    expect(await deps.snapshots.list()).toHaveLength(1)
+    expect((await deps.snapshots.list())[0].memoryIds.sort()).toEqual(['mem_a', 'mem_b'])
   })
 
   it('部分命中：找不到/已删除的进 missing，找到的正常删', async () => {
@@ -111,7 +111,7 @@ describe('executeForget（P1 批量版）', () => {
     const result = await executeForget({ ids: ['mem_ghost'], reason: 'r' }, deps)
     expect(result.ok).toBe(false)
     expect(result.snapshotId).toBeNull()
-    expect(deps.snapshots.list()).toHaveLength(0)
+    expect(await deps.snapshots.list()).toHaveLength(0)
   })
 
   it('遗忘后清理引用被删记忆的 pending-decisions 条目', async () => {
@@ -121,7 +121,7 @@ describe('executeForget（P1 批量版）', () => {
     await deps.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '冲突' }, 1)
     await deps.decisions.upsert({ memoryIds: ['mem_x', 'mem_y'], summary: '无关' }, 2)
     await executeForget({ ids: ['mem_a'], reason: 'r' }, deps)
-    expect(deps.decisions.list().map(e => e.summary)).toEqual(['无关'])
+    expect((await deps.decisions.list()).map(e => e.summary)).toEqual(['无关'])
   })
 
   it('重复 id 只当一条处理：快照不重复存、计数不虚报', async () => {
@@ -131,7 +131,7 @@ describe('executeForget（P1 批量版）', () => {
     const deps = makeForgetDeps(store)
     const result = await executeForget({ ids: ['mem_a', 'mem_a', 'mem_b'], reason: 'r' }, deps)
     expect(result.forgotten.sort()).toEqual(['mem_a', 'mem_b'])
-    const snap = deps.snapshots.list()[0]
+    const snap = (await deps.snapshots.list())[0]
     expect(snap.memoryIds.sort()).toEqual(['mem_a', 'mem_b'])
     expect(snap.data).toHaveLength(2)
   })

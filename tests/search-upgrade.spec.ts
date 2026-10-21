@@ -15,27 +15,27 @@ describe('store.query 关键词 OR 匹配（含 CJK bigram）+ id/name 入 hayst
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_pnpm', content: '这个项目的包管理一律用 pnpm，不要用 npm' }))
 
-    expect(store.query({ keyword: 'pnpm 包管理' }).map(r => r.id)).toEqual(['mem_pnpm'])
-    expect(store.query({ keyword: 'pnpm 不要用' }).map(r => r.id)).toEqual(['mem_pnpm'])
+    expect((await store.query({ keyword: 'pnpm 包管理' })).map(r => r.id)).toEqual(['mem_pnpm'])
+    expect((await store.query({ keyword: 'pnpm 不要用' })).map(r => r.id)).toEqual(['mem_pnpm'])
     // OR 放宽：夹一个不匹配词不再零结果（硬 AND 的病灶）
-    expect(store.query({ keyword: 'pnpm 不存在的怪词' }).map(r => r.id)).toEqual(['mem_pnpm'])
+    expect((await store.query({ keyword: 'pnpm 不存在的怪词' })).map(r => r.id)).toEqual(['mem_pnpm'])
     // 全不匹配才空
-    expect(store.query({ keyword: 'golang rust' }).map(r => r.id)).toEqual([])
+    expect((await store.query({ keyword: 'golang rust' })).map(r => r.id)).toEqual([])
   })
 
   it('按 id 可检索、按 name 可检索（索引→全文断路修复）', async () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_abc', name: '专有名词名字', content: '与关键词无关的正文', summary: '也无关' }))
 
-    expect(store.query({ keyword: 'mem_abc' }).map(r => r.id)).toEqual(['mem_abc'])
-    expect(store.query({ keyword: '专有名词名字' }).map(r => r.id)).toEqual(['mem_abc'])
+    expect((await store.query({ keyword: 'mem_abc' })).map(r => r.id)).toEqual(['mem_abc'])
+    expect((await store.query({ keyword: '专有名词名字' })).map(r => r.id)).toEqual(['mem_abc'])
   })
 
   it('连写中文仍命中（bigram 覆盖连续子串）', async () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_cjk', content: '这个项目的包管理一律用 pnpm，不要用 npm' }))
 
-    expect(store.query({ keyword: '包管理一律' }).map(r => r.id)).toEqual(['mem_cjk'])
+    expect((await store.query({ keyword: '包管理一律' })).map(r => r.id)).toEqual(['mem_cjk'])
   })
 
   it('中文短语经 bigram 切分，正文里非连续也能命中', async () => {
@@ -43,7 +43,7 @@ describe('store.query 关键词 OR 匹配（含 CJK bigram）+ id/name 入 hayst
     await store.put(record({ id: 'mem_deploy', content: '部署的流程和配置都记在 wiki' }))
 
     // "部署流程配置"整段在正文里不连续；bigram(部署/署流/流程/程配/配置)命中 部署+流程+配置
-    expect(store.query({ keyword: '部署流程配置' }).map(r => r.id)).toEqual(['mem_deploy'])
+    expect((await store.query({ keyword: '部署流程配置' })).map(r => r.id)).toEqual(['mem_deploy'])
   })
 })
 
@@ -122,7 +122,7 @@ describe('低置信标注', () => {
       id: 'mem_idx_inferred', type: 'knowledge', name: '索引区条目', content: '知识正文', summary: '知识摘要',
       source: { sessionId: 's', eventRange: [0, 1], sourceMode: 'agent-inferred' },
     }))
-    const { text } = assembleSnapshot({ store, registry, workspacePath: undefined, budget: 4000, now: 10 })
+    const { text } = assembleSnapshot({ records: await store.query({ scope: { kind: 'visible', workspacePath: undefined } }), registry, workspacePath: undefined, budget: 4000, now: 10 })
     expect(text).toContain(`模型推断出的偏好${INFERENCE_NOTE}`)
     expect(text).toContain(`[mem_idx_inferred] 索引区条目（知识摘要）${INFERENCE_NOTE}`)
   })

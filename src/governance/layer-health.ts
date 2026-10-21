@@ -1,10 +1,8 @@
 import { join, sep } from 'node:path'
-import type { MemoryStore } from '../store.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { MemoryRecord } from '../record-schema.ts'
-import { dedupKey, type PendingDecisionsStore } from './decisions.ts'
-import type { KvTable } from '../kv-table.ts'
-import type { Finding, ScanCacheEntry } from './schema.ts'
+import { dedupKey } from './decisions.ts'
+import type { Finding, PendingDecision, ScanCacheEntry } from './schema.ts'
 import { FINDING_TYPES } from './schema.ts'
 import { runRuleScan, buildMalformedFindings } from './rule-scan.ts'
 import { computeHealth, type HealthScore } from './scoring.ts'
@@ -25,11 +23,11 @@ export function layerCacheKey(layer: LayerRef): string {
   return layer.kind === 'global' ? GLOBAL_CACHE_KEY : `cache_${layer.path}`
 }
 
-/** 库里实际存在活跃记忆的 workspace 清单，按路径排序。体检的枚举来源。 */
-export function listWorkspaces(store: MemoryStore): string[] {
+/** 库里实际存在活跃记忆的 workspace 清单，按路径排序。体检的枚举来源。records 可含非 active，这里只数 active。 */
+export function listWorkspaces(records: Iterable<MemoryRecord>): string[] {
   const paths = new Set<string>()
-  for (const r of store.query({ status: ['active'] })) {
-    if (r.scope === 'workspace' && r.workspacePath !== undefined) paths.add(r.workspacePath)
+  for (const r of records) {
+    if (r.status === 'active' && r.scope === 'workspace' && r.workspacePath !== undefined) paths.add(r.workspacePath)
   }
   return [...paths].sort()
 }
@@ -40,11 +38,11 @@ export function listWorkspaces(store: MemoryStore): string[] {
  * （如 proj-alpha-8641b727）当 scope 传——不校验就会静默扫成空集还给满分。
  */
 export function validateScopePaths(
-  store: MemoryStore,
+  records: Iterable<MemoryRecord>,
   currentWs: string | undefined,
   requested: string[],
 ): string | null {
-  const known = new Set(listWorkspaces(store))
+  const known = new Set(listWorkspaces(records))
   if (currentWs !== undefined) known.add(currentWs)
   const invalid = requested.filter(s => !known.has(s))
   if (invalid.length === 0) return null
@@ -55,13 +53,25 @@ export function validateScopePaths(
 }
 
 export interface LayerHealthDeps {
-  store: MemoryStore
   registry: TypeRegistry
-  decisions: PendingDecisionsStore
-  cache: KvTable<ScanCacheEntry>
-  getQuarantined?: () => readonly { path: string; error: string }[]
   /** 给出时 malformed 按文件路径归层（global 目录 / 对应 workspace 目录）；缺省不归层（避免跨层重复计数）。 */
   memoryRoot?: string
+}
+
+/**
+ * health / scan 执行器预读好的评分输入（tools/layer-preread.ts 产出）。评分只吃它，不碰 store、
+ * 账本表、缓存表——两个工具用同一份预读函数，对同一层永远同分。
+ */
+export interface LayerPreread {
+  /** 全部状态（active / superseded / deleted）的记录，按 id 索引：orphan 检测要分辨取代链引用，
+   *  缓存过滤要核对跨层记录是否存活。 */
+  byId: ReadonlyMap<string, MemoryRecord>
+  /** 待决账本（按 firstSeenAt 升序）。 */
+  pending: readonly PendingDecision[]
+  /** 语义扫描缓存，键为缓存桶。 */
+  cache: ReadonlyMap<string, ScanCacheEntry>
+  /** 存储层隔离的不可解析记忆文件。 */
+  quarantined: readonly { path: string; error: string }[]
 }
 
 export interface LayerHealthResult {
@@ -89,23 +99,22 @@ export interface LayerHealthResult {
  * - conflict 还须仍在待决账本里（dedupKey 匹配）——用户裁决 keep-both/dismiss 后双方记忆都在、
  *   缓存过滤不掉，不对账会出现"刚裁决完分数纹丝不动"的自相矛盾。
  */
-export function scoreLayer(deps: LayerHealthDeps, layer: LayerRef, now: number): LayerHealthResult {
-  const records = deps.store.query({
-    status: ['active'],
-    scope: layer.kind === 'global' ? { kind: 'global' } : { kind: 'workspace', path: layer.path },
-  })
+export function scoreLayer(deps: LayerHealthDeps, data: LayerPreread, layer: LayerRef, now: number): LayerHealthResult {
+  const records = [...data.byId.values()].filter(r => r.status === 'active' && (layer.kind === 'global'
+    ? r.scope === 'global'
+    : r.scope === 'workspace' && r.workspacePath === layer.path))
   const liveIds = new Set(records.map(r => r.id))
 
-  const ruleFindings = runRuleScan(records, id => deps.store.get(id), now)
+  const ruleFindings = runRuleScan(records, id => data.byId.get(id), now)
   if (deps.memoryRoot !== undefined) {
     const dir = join(deps.memoryRoot, layer.kind === 'global' ? GLOBAL_DIR : workspaceDirName(layer.path))
-    const mine = (deps.getQuarantined?.() ?? []).filter(q => q.path.startsWith(dir + sep))
+    const mine = data.quarantined.filter(q => q.path.startsWith(dir + sep))
     ruleFindings.push(...buildMalformedFindings(mine))
   }
 
-  const cached = deps.cache.get(layerCacheKey(layer))
-  const pendingKeys = new Set(deps.decisions.list().map(e => dedupKey(e.memoryIds, e.baselineRef)))
-  const alive = (id: string) => deps.store.get(id)?.status === 'active'
+  const cached = data.cache.get(layerCacheKey(layer))
+  const pendingKeys = new Set(data.pending.map(e => dedupKey(e.memoryIds, e.baselineRef)))
+  const alive = (id: string) => data.byId.get(id)?.status === 'active'
   const semanticFindings = (cached?.findings ?? []).filter(f => {
     if (f.memoryIds.length === 0) return false
     if (!f.memoryIds.every(alive) || !f.memoryIds.some(id => liveIds.has(id))) return false
@@ -135,12 +144,12 @@ export function scoreLayer(deps: LayerHealthDeps, layer: LayerRef, now: number):
  * memory_scan 体检与 memory_health 体检共用，两个工具对同一账本永远给出同一结果。
  */
 export function crossLayerConflicts(
-  store: MemoryStore,
-  decisions: PendingDecisionsStore,
+  byId: ReadonlyMap<string, MemoryRecord>,
+  pending: readonly PendingDecision[],
 ): Array<{ globalId: string; workspaces: string[]; decisionIds: string[] }> {
   const byGlobalId = new Map<string, { workspaces: Set<string>; decisionIds: string[] }>()
-  for (const e of decisions.list()) {
-    const members = e.memoryIds.map(id => store.get(id)).filter((r): r is MemoryRecord => r !== undefined)
+  for (const e of pending) {
+    const members = e.memoryIds.map(id => byId.get(id)).filter((r): r is MemoryRecord => r !== undefined)
     const globalSide = members.find(r => r.scope === 'global')
     const wsSide = members.find(r => r.scope === 'workspace' && r.workspacePath !== undefined)
     if (!globalSide || !wsSide) continue
