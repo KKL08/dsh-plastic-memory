@@ -1,17 +1,21 @@
-import { describe, expect, it, beforeEach, afterEach } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { MemoryStore, InMemoryTable, type MemoryTable } from '../src/store.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { GLOBAL_DIR } from '../src/storage/paths.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable, type BatchKvTable } from '../src/kv-table.ts'
+import { SidecarStore } from '../src/storage/sidecar.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
 import { executeForget } from '../src/tools/forget.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
-import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
+import {
+  memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema,
+  type MemorySnapshot, type PendingDecision,
+} from '../src/governance/schema.ts'
 import { record } from './helpers/record.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { RecordNotFoundError } from '../src/errors.ts'
@@ -23,6 +27,8 @@ import { captureRejection } from './helpers/errors.ts'
 
 interface BackendHandle {
   table: MemoryTable
+  /** 召回统计侧表：FileTable 用真实的 .state/recall-stats.json，InMemoryTable 用内存表。 */
+  stats: BatchKvTable<RecallStats>
   cleanup(): Promise<void>
   /** 仅 FileTable 提供：强制重载一遍磁盘，逼真实走 encode→disk→decode。
    *  InMemoryTable 的 map 本来就没有序列化环节，省略此字段即跳过重载步骤。 */
@@ -33,14 +39,17 @@ interface BackendHandle {
 interface Backend { name: string; make(): Promise<BackendHandle> }
 
 const backends: Backend[] = [
-  { name: 'InMemoryTable', make: async () => ({ table: new InMemoryTable(), cleanup: async () => {} }) },
+  { name: 'InMemoryTable', make: async () => ({ table: new InMemoryTable(), stats: new InMemoryBatchKvTable<RecallStats>(), cleanup: async () => {} }) },
   {
     name: 'FileTable',
     make: async () => {
       const root = await mkdtemp(join(tmpdir(), 'pm-conf-'))
-      const t = new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() })
+      const { recallStats: stats } = new SidecarStore({
+        root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema },
+      })
+      const t = new FileTable({ root, stats })
       await t.load()
-      return { table: t, cleanup: () => rm(root, { recursive: true, force: true }), reload: () => t.load(), root }
+      return { table: t, stats, cleanup: () => rm(root, { recursive: true, force: true }), reload: () => t.load(), root }
     },
   },
 ]
@@ -50,12 +59,13 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
   let cleanup: () => Promise<void>
   let reload: (() => Promise<void>) | undefined
   let root: string | undefined
+  let stats: BatchKvTable<RecallStats>
   let store: MemoryStore
 
   beforeEach(async () => {
     const handle = await make()
-    table = handle.table; cleanup = handle.cleanup; reload = handle.reload; root = handle.root
-    store = new MemoryStore(table)
+    table = handle.table; stats = handle.stats; cleanup = handle.cleanup; reload = handle.reload; root = handle.root
+    store = new MemoryStore(table, undefined, stats)
   })
   afterEach(() => cleanup())
 
@@ -134,22 +144,34 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect(await store.softDelete('ghost2')).toBe(false)
   })
 
-  it('markRecalled 更新统计（await 后断言 recallCount+1）', async () => {
+  it('markRecalled 只写召回统计侧表：统计 +1，不经 table.update，记忆文件 mtime 不变', async () => {
     const rec = record({ id: 'mem_recall_1', name: 'markrecalled-test', content: '待召回内容', updatedAt: 1 })
     await store.put(rec)
 
     const filePath = root ? join(root, GLOBAL_DIR, 'markrecalled-test.md') : undefined
     const before = filePath ? (await stat(filePath)).mtimeMs : undefined
+    const update = vi.spyOn(table, 'update')
+    const putMany = vi.spyOn(stats, 'putMany')
 
     await store.markRecalled([rec.id])
+    await store.markRecalled([rec.id, 'mem_ghost'])
 
-    expect((await store.get(rec.id))!.recallCount).toBe(1)
-    expect((await store.get(rec.id))!.lastRecalledAt).not.toBeNull()
+    expect(update).not.toHaveBeenCalled()
+    expect(putMany).toHaveBeenCalledTimes(2) // 每次 markRecalled 只批量写一次，不论几个 id
+    const row = await stats.get(rec.id)
+    expect(row).toMatchObject({ id: rec.id, recallCount: 2 })
+    expect(row!.lastRecalledAt).not.toBeNull()
+    expect(await stats.get('mem_ghost')).toBeUndefined() // 不存在的记忆不留统计行
 
-    // §4 核心命题：易变字段的更新只走 sidecar，文件本体不重写——mtime 不变
+    // 设计稿 §7 核心命题：召回统计只走侧表，文件本体不重写——mtime 不变
     if (filePath) {
       const after = (await stat(filePath)).mtimeMs
       expect(after).toBe(before)
+    }
+    // FileTable 的合并读法不变：重载后记录带上侧表里的统计
+    if (reload) {
+      await reload()
+      expect((await table.get(rec.id))!.recallCount).toBe(2)
     }
   })
 

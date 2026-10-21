@@ -5,6 +5,8 @@ import { createHash } from 'node:crypto'
 export const WORKSPACE_MARKER = '.workspace'
 export const INDEX_FILE = 'MEMORY.md'
 export const GLOBAL_DIR = 'global'
+/** 侧表目录（storage/sidecar.ts），不是 workspace 目录 */
+export const STATE_DIR = '.state'
 
 export function resolveMemoryRoot(configured: string): string {
   if (configured) return configured

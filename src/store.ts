@@ -2,6 +2,8 @@ import type { MemoryRecord } from './record-schema.ts'
 import { RecordNotFoundError } from './errors.ts'
 import { expandQueryTerms, matchScore } from './text.ts'
 import type { MemoryLogger, MemoryTable } from './storage/table.ts'
+import { InMemoryBatchKvTable, type BatchKvTable } from './kv-table.ts'
+import type { RecallStats } from './storage/schema.ts'
 
 export type { MemoryLogger, MemoryTable } from './storage/table.ts'
 
@@ -10,7 +12,7 @@ export class InMemoryTable implements MemoryTable {
   async get(key: string) { return this.map.get(key) }
   async list() { return [...this.map.values()] }
   async put(key: string, value: MemoryRecord) {
-    // 与 FileTable 同语义：put 不承载召回统计，唯一写入方是 markRecalled 走的 update 路径
+    // 与 FileTable 同语义：put 不承载召回统计（召回统计住侧表，由 MemoryStore.markRecalled 写）
     const prev = this.map.get(key)
     this.map.set(key, prev ? { ...value, recallCount: prev.recallCount, lastRecalledAt: prev.lastRecalledAt } : value)
   }
@@ -35,10 +37,14 @@ export interface QueryFilter {
 export class MemoryStore {
   private table: MemoryTable
   private log?: MemoryLogger
+  private stats: BatchKvTable<RecallStats>
+  private recallChain: Promise<unknown> = Promise.resolve() // markRecalled 的读改写在进程内串行
 
-  constructor(table: MemoryTable, log?: MemoryLogger) {
+  /** stats：召回统计侧表（接线层传 .state/recall-stats.json）；缺省内存表，供不关心召回统计的测试。 */
+  constructor(table: MemoryTable, log?: MemoryLogger, stats: BatchKvTable<RecallStats> = new InMemoryBatchKvTable<RecallStats>()) {
     this.table = table
     this.log = log
+    this.stats = stats
   }
 
   get(id: string) { return this.table.get(id) }
@@ -73,15 +79,29 @@ export class MemoryStore {
     return out
   }
 
-  async markRecalled(ids: string[]): Promise<void> {
+  /** 召回统计只读改写侧表，不经 table.update——记忆文件不因召回而重写。一次调用一次读、内存合并、
+   *  一次批量写（单文件表只换一次文件）。跨进程单文件 LWW（参考字段）。 */
+  markRecalled(ids: string[]): Promise<void> {
+    const run = () => this.markRecalledInner(ids)
+    const next = this.recallChain.then(run, run)
+    this.recallChain = next.catch(() => {})
+    return next
+  }
+
+  private async markRecalledInner(ids: string[]): Promise<void> {
     const now = Date.now()
-    for (const id of ids) {
-      if (!(await this.table.get(id))) continue
-      await this.table
-        .update(id, r => ({ ...r, lastRecalledAt: now, recallCount: r.recallCount + 1 }))
-        .catch((err: unknown) => {
-          ;(this.log ?? console).error('[plastic-memory] 召回统计更新失败:', err)
-        })
+    try {
+      const current = new Map(await this.stats.list())
+      const next = new Map<string, RecallStats>()
+      for (const id of ids) {
+        if (!(await this.table.get(id))) continue
+        // 同一次调用里重复出现的 id 累加（与逐条 put 时的旧行为一致）
+        const row = next.get(id) ?? current.get(id)
+        next.set(id, { id, recallCount: (row?.recallCount ?? 0) + 1, lastRecalledAt: now })
+      }
+      await this.stats.putMany([...next])
+    } catch (err) {
+      ;(this.log ?? console).error('[plastic-memory] 召回统计更新失败:', err)
     }
   }
 }

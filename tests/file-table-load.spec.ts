@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTable, DELETED_RETENTION_MS } from '../src/storage/file-table.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
-import { workspaceDirName, WORKSPACE_MARKER, GLOBAL_DIR } from '../src/storage/paths.ts'
+import { workspaceDirName, WORKSPACE_MARKER, GLOBAL_DIR, STATE_DIR } from '../src/storage/paths.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
@@ -64,6 +64,15 @@ it('同 id 两处 → 取 updatedAt 新者，旧文件被删除', async () => {
   const t = await load()
   expect((await t.get('mem_dup'))!.content).toBe('新版')
   await expect(stat(join(root, GLOBAL_DIR, 'old.md'))).rejects.toThrow()
+})
+
+it('.state/（侧表目录）不当 workspace 目录：不告警、不建索引', async () => {
+  await mkdir(join(root, STATE_DIR, 'snapshots'), { recursive: true })
+  const warns: string[] = []
+  const t = new FileTable({ root, stats: new InMemoryKvTable<RecallStats>(), log: { info() {}, warn: m => { warns.push(m) }, error() {} } })
+  await t.load()
+  expect(warns).toEqual([])
+  expect(await readdir(join(root, STATE_DIR))).toEqual(['snapshots'])
 })
 
 it('sidecar 合并：有行取行值，无行注入默认', async () => {

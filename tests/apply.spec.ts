@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -11,8 +11,10 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { MessageSourceMap } from '@deepseek-ai/dsh-llm'
 
 // 真实 dsh-tools / dsh-storage-domain 包已从 npm 装好，此处不 mock 任何框架包。
-import { apply, Config } from '../src/index.ts'
-import { InMemoryKvTable, type SyncKvTable } from '../src/kv-table.ts'
+import { apply, Config, inject } from '../src/index.ts'
+import { InMemoryKvTable } from '../src/kv-table.ts'
+import { SidecarStore, STATE_DIR, KV_IMPORT_MARKER, RECALL_STATS_FILE } from '../src/storage/sidecar.ts'
+import { kvImportMarkerSchema } from '../src/storage/schema.ts'
 import { INDEX_FILE, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { TypeRegistryError } from '../src/errors.ts'
@@ -26,11 +28,14 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { AssembleContext, PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { cacheKey } from '../src/tools/scan.ts'
-import type { ScanCacheEntry } from '../src/governance/schema.ts'
+import {
+  memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema,
+  type MemorySnapshot, type PendingDecision, type ScanCacheEntry,
+} from '../src/governance/schema.ts'
 import { baselineProjectionDefinition } from '../src/governance/baseline.ts'
 
-/** 宿主 storageDomain 表的替身：读同步、写异步（形状同 kv-table.ts 的 SyncKvTable）。 */
-class HostKvTable<T = unknown> implements SyncKvTable<T> {
+/** 宿主 storageDomain 表的替身（@deepseek-ai/dsh-storage-domain KvTable 的形状）：读同步、写异步。 */
+class HostKvTable<T = unknown> {
   private map = new Map<string, T>()
   get(key: string) { return this.map.get(key) }
   entries() { return this.map.entries() }
@@ -42,7 +47,7 @@ class HostKvTable<T = unknown> implements SyncKvTable<T> {
  * projections：ctx.get('sessionProjections') 给出的注册表（缺省 = 服务缺席）。inject 仿 cordis 的
  * ctx.inject(deps, cb)：依赖齐了才同步回调、把服务放进 child；registerProjection=false 模拟回调始终没触发。
  */
-function mockCtx(opts: { projections?: SessionProjectionRegistry; registerProjection?: boolean } = {}) {
+function mockCtx(opts: { projections?: SessionProjectionRegistry; registerProjection?: boolean; storageDomain?: boolean } = {}) {
   const registered: string[] = []
   const contexts: string[] = []
   // 完整的 context 注册对象（含 text provider）与提示词变量，供转义接线用例取用
@@ -62,31 +67,39 @@ function mockCtx(opts: { projections?: SessionProjectionRegistry; registerProjec
       ]
     },
   }
-  // 按表名复用同一张表：用例可以在 apply() 前预置、事后读回插件打开的那张表。
+  // 旧宿主 KV 域（opts.storageDomain=true 时经 ctx.get('storageDomain') 给出，缺省服务缺席）。
+  // 按表名复用同一张表：用例可以在 apply() 前预置；domainOpens / domainCloses 计数证明域开没开、关没关。
   const tables = new Map<string, HostKvTable>()
-  return {
-    registered, contexts, contextDefs, variables, listeners, llmRequests, llmScript, tables,
-    tools: { register: (def: { name: string }) => { registered.push(def.name); return () => {} } },
-    systemPrompt: {
-      context: (c: (typeof contextDefs)[number]) => { contexts.push(c.name); contextDefs.push(c); return () => {} },
-      variable: (name: string, provider: (assembleCtx: AssembleContext) => string | undefined) => { variables.set(name, provider); return () => {} },
-    },
-    storageDomain: {
-      open: async () => ({
+  const domain = { opens: 0, closes: 0 }
+  const storageDomain = {
+    open: async () => {
+      domain.opens++
+      return {
         table: (name: string) => {
           let table = tables.get(name)
           if (!table) tables.set(name, table = new HostKvTable())
           return table
         },
-        global: {}, name: 'plastic_memory', close: async () => {},
-      }),
+        global: {}, name: 'plastic_memory', close: async () => { domain.closes++ },
+      }
+    },
+  }
+  return {
+    registered, contexts, contextDefs, variables, listeners, llmRequests, llmScript, tables, domain,
+    tools: { register: (def: { name: string }) => { registered.push(def.name); return () => {} } },
+    systemPrompt: {
+      context: (c: (typeof contextDefs)[number]) => { contexts.push(c.name); contextDefs.push(c); return () => {} },
+      variable: (name: string, provider: (assembleCtx: AssembleContext) => string | undefined) => { variables.set(name, provider); return () => {} },
     },
     on: (event: string, fn: (...args: unknown[]) => unknown) => { listeners.set(event, fn); return () => {} },
     effect: (fn: () => unknown) => { fn() },
-    // 按服务名分发：'llm' 给上面的假 llm，'sessionProjections' 给 opts.projections；其余（如
-    // resolveWorkspacePath 的 workspaceRegistry）一律 undefined，判为服务缺席——这里不模拟 cordis
-    // proxy 对未知服务名的抛错行为。
-    get: (name: string) => (name === 'llm' ? llm : name === 'sessionProjections' ? opts.projections : undefined),
+    // 按服务名分发：'llm' 给上面的假 llm，'sessionProjections' 给 opts.projections，'storageDomain'
+    // 按 opts.storageDomain 给旧 KV 域；其余（如 resolveWorkspacePath 的 workspaceRegistry）一律
+    // undefined，判为服务缺席——这里不模拟 cordis proxy 对未知服务名的抛错行为。
+    get: (name: string) => (name === 'llm' ? llm
+      : name === 'sessionProjections' ? opts.projections
+        : name === 'storageDomain' && opts.storageDomain === true ? storageDomain
+          : undefined),
     inject: (_deps: string[], callback: (child: { sessionProjections: SessionProjectionRegistry }) => void) => {
       if (opts.projections !== undefined && opts.registerProjection !== false) callback({ sessionProjections: opts.projections })
       return () => {}
@@ -119,6 +132,11 @@ async function makeTmpRoot(): Promise<string> {
 afterEach(async () => {
   await Promise.all(tmpDirs.splice(0).map(d => rm(d, { recursive: true, force: true })))
 })
+
+/** 同一 memoryRoot 上的另一个侧表实例：用例经它预置或读回插件落在 .state/ 的数据（文件是唯一真相）。 */
+function sidecarAt(memoryRoot: string) {
+  return new SidecarStore({ root: memoryRoot, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+}
 
 describe('apply', () => {
   it('治理默认开启：注册九个工具和一个 runtime context', async () => {
@@ -207,6 +225,106 @@ describe('apply', () => {
     // 钉住 root 真的来自 config 且 load 跑到了 regenerateIndexes：空库也会落出
     // global/MEMORY.md。若 resolveMemoryRoot 漏传 config 落到默认值，这里 stat 必抛。
     expect((await stat(join(memoryRoot, 'global', INDEX_FILE))).isFile()).toBe(true)
+  })
+})
+
+/**
+ * 侧表落文件与旧 KV 导入（spec「侧表」、测试第 4 层）：storageDomain 退出必需注入，只在首次侧表访问时
+ * 经 ctx.get 探测、惰性打开旧域导入 snapshots 与 pending；apply 期间 .state/ 不出现。
+ */
+describe('侧表与旧 KV 导入接线', () => {
+  type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
+  function withTools(base: ReturnType<typeof mockCtx>) {
+    const defs = new Map<string, ToolDef>()
+    const ctx = {
+      ...base,
+      tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
+      logger: { info() {}, warn() {}, error() {} },
+    }
+    return { ctx, defs }
+  }
+  const snap = (id: string): MemorySnapshot => ({
+    id, createdAt: Date.now(), operation: 'manual', description: id, memoryIds: [], data: [],
+  })
+  const pd = (id: string): PendingDecision => ({ id, memoryIds: ['mem_a', 'mem_b'], summary: id, firstSeenAt: 1 })
+  async function readMarker(memoryRoot: string) {
+    return kvImportMarkerSchema.parse(JSON.parse(await readFile(join(memoryRoot, STATE_DIR, KV_IMPORT_MARKER), 'utf8')))
+  }
+
+  it('注册列表不含 storageDomain：只要求 tools 与 systemPrompt', () => {
+    expect(inject).toEqual(['tools', 'systemPrompt'])
+  })
+
+  it('加载期零侧表 I/O：apply 返回时 .state/ 不存在，旧域没被打开（即使已有记忆文件）', async () => {
+    const memoryRoot = await makeTmpRoot()
+    await mkdir(join(memoryRoot, 'global'), { recursive: true })
+    await writeFile(join(memoryRoot, 'global', 'a.md'), encodeRecord(record({ id: 'mem_a' }), {}), 'utf8')
+    const base = mockCtx({ storageDomain: true })
+    await apply(withTools(base).ctx as never, new Config({ memoryRoot } as unknown as Config))
+    await expect(stat(join(memoryRoot, STATE_DIR))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(base.domain.opens).toBe(0)
+  })
+
+  it('有 storageDomain：首次侧表访问时导入 snapshots 与 pending（不导 recall_stats / scan_cache），写 kv 标记并关域', async () => {
+    const memoryRoot = await makeTmpRoot()
+    const base = mockCtx({ storageDomain: true })
+    const kv = (name: string) => { const t = new HostKvTable(); base.tables.set(name, t); return t }
+    const oldSnap = snap('snap_old')
+    await kv('snapshots').put('snap_old', oldSnap)
+    await kv('pending_decisions').put('pd_old', pd('pd_old'))
+    await kv('recall_stats').put('mem_a', { id: 'mem_a', recallCount: 3, lastRecalledAt: 1 })
+    await kv('scan_cache').put('cache_all', { id: 'cache_all', scannedAt: 1, scope: 'all', findings: [] })
+    const { ctx, defs } = withTools(base)
+    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+
+    const out = await defs.get('memory_snapshot')!.execute({ action: 'list' }, fakeExec()) as { snapshots: Array<{ id: string }> }
+    expect(out.snapshots.map(s => s.id)).toEqual(['snap_old'])
+    const state = join(memoryRoot, STATE_DIR)
+    expect(await readdir(join(state, 'snapshots'))).toEqual(['snap_old.json'])
+    expect(await readdir(join(state, 'pending'))).toEqual(['pd_old.json'])
+    await expect(stat(join(state, 'scan-cache'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(join(state, RECALL_STATS_FILE))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readMarker(memoryRoot)).toMatchObject({ version: 1, source: 'kv', counts: { snapshots: 1, pending: 1 } })
+    expect(base.domain).toEqual({ opens: 1, closes: 1 })
+    // KV 不删、不清
+    expect(base.tables.get('snapshots')!.get('snap_old')).toEqual(oldSnap)
+  })
+
+  it('标记已存在：不再打开旧域', async () => {
+    const memoryRoot = await makeTmpRoot()
+    await sidecarAt(memoryRoot).snapshots.list() // 无旧 KV 的实例先写下 none 标记
+    const base = mockCtx({ storageDomain: true })
+    base.tables.set('snapshots', new HostKvTable())
+    await base.tables.get('snapshots')!.put('snap_old', snap('snap_old'))
+    const { ctx, defs } = withTools(base)
+    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    const out = await defs.get('memory_snapshot')!.execute({ action: 'list' }, fakeExec()) as { snapshots: unknown[] }
+    expect(out.snapshots).toEqual([])
+    expect(base.domain.opens).toBe(0)
+  })
+
+  it('storageDomain 缺席：照常挂载九个工具，首次侧表访问写 source: none 的标记', async () => {
+    const memoryRoot = await makeTmpRoot()
+    const base = mockCtx()
+    const { ctx, defs } = withTools(base)
+    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    expect([...defs.keys()].sort()).toEqual([
+      'memory_confirm', 'memory_forget', 'memory_health', 'memory_promote',
+      'memory_save', 'memory_scan', 'memory_search', 'memory_snapshot', 'memory_source',
+    ])
+    await defs.get('memory_snapshot')!.execute({ action: 'create' }, fakeExec())
+    expect(await readMarker(memoryRoot)).toMatchObject({ source: 'none', counts: { snapshots: 0, pending: 0 } })
+    expect((await sidecarAt(memoryRoot).snapshots.list())).toHaveLength(1)
+  })
+
+  it('memory_search 命中只写 .state/recall-stats.json', async () => {
+    const memoryRoot = await makeTmpRoot()
+    await mkdir(join(memoryRoot, 'global'), { recursive: true })
+    await writeFile(join(memoryRoot, 'global', 'a.md'), encodeRecord(record({ id: 'mem_a', content: '斑马 zebra' }), {}), 'utf8')
+    const { ctx, defs } = withTools(mockCtx())
+    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    await defs.get('memory_search')!.execute({ query: 'zebra' }, fakeExec())
+    expect(await sidecarAt(memoryRoot).recallStats.get('mem_a')).toMatchObject({ recallCount: 1 })
   })
 })
 
@@ -328,9 +446,8 @@ describe('语义扫描请求形状', () => {
         summary: '先前缓存的冲突', suggestedAction: '裁决',
       }],
     }
-    const cache = new HostKvTable()
+    const cache = sidecarAt(memoryRoot).scanCache
     await cache.put(bucket, prior)
-    base.tables.set('scan_cache', cache)
     // 首次与重试都是：先吐完整 JSON，再以 error 终止（DeepSeek 适配器在 message_stop 前断流）
     const brokenStream = (): StreamChunk[] => [
       { type: 'text-delta', index: 0, text: '{"findings":[]}' },
@@ -347,7 +464,7 @@ describe('语义扫描请求形状', () => {
 
     expect(base.llmRequests).toHaveLength(2)
     expect(out.notes?.map(n => n.code)).toContain('semantic-failed')
-    expect(cache.get(bucket)).toEqual(prior)
+    expect(await cache.get(bucket)).toEqual(prior)
   })
 
   it('流以 aborted 收尾而 signal 未触发：按取消拒绝（AbortError、不重试），不当成功', async () => {
@@ -372,7 +489,7 @@ describe('语义扫描请求形状', () => {
     })
     await expect(defs.get('memory_scan')!.execute({ layers: 'semantic' }, exec)).rejects.toMatchObject({ name: 'AbortError' })
     expect(base.llmRequests).toHaveLength(1)
-    expect(base.tables.get('scan_cache')!.get(cacheKey(await realpath(cwd)))).toBeUndefined()
+    expect(await sidecarAt(memoryRoot).scanCache.get(cacheKey(await realpath(cwd)))).toBeUndefined()
   })
 })
 

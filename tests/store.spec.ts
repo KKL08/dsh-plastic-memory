@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
+import { InMemoryBatchKvTable } from '../src/kv-table.ts'
+import type { RecallStats } from '../src/storage/schema.ts'
 import { record } from './helpers/record.ts'
 
 describe('MemoryStore.query', () => {
@@ -44,11 +46,35 @@ describe('MemoryStore 变更', () => {
     expect(await store.softDelete('ghost')).toBe(false)
   })
 
-  it('markRecalled 刷新统计', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+  it('markRecalled 读改写召回统计侧表，不改记录', async () => {
+    const stats = new InMemoryBatchKvTable<RecallStats>()
+    const store = new MemoryStore(new InMemoryTable(), undefined, stats)
     await store.put(record({ id: 'x' }))
     await store.markRecalled(['x'])
-    expect((await store.get('x'))!.recallCount).toBe(1)
-    expect((await store.get('x'))!.lastRecalledAt).not.toBeNull()
+    expect(await stats.get('x')).toMatchObject({ id: 'x', recallCount: 1 })
+    expect((await stats.get('x'))!.lastRecalledAt).not.toBeNull()
+    expect((await store.get('x'))!.recallCount).toBe(0)
+  })
+
+  it('markRecalled 并发调用不丢计数（进程内读改写串行）', async () => {
+    const stats = new InMemoryBatchKvTable<RecallStats>()
+    const store = new MemoryStore(new InMemoryTable(), undefined, stats)
+    await store.put(record({ id: 'x' }))
+    await Promise.all([store.markRecalled(['x']), store.markRecalled(['x']), store.markRecalled(['x'])])
+    expect((await stats.get('x'))!.recallCount).toBe(3)
+  })
+
+  it('markRecalled 召回 N 个 id：一次读、内存合并、一次批量写（不逐条 put）', async () => {
+    const stats = new InMemoryBatchKvTable<RecallStats>()
+    const store = new MemoryStore(new InMemoryTable(), undefined, stats)
+    for (const id of ['a', 'b', 'c']) await store.put(record({ id }))
+    await stats.put('b', { id: 'b', recallCount: 4, lastRecalledAt: 1 })
+    const put = vi.spyOn(stats, 'put')
+    const putMany = vi.spyOn(stats, 'putMany')
+    await store.markRecalled(['a', 'b', 'c', 'ghost', 'a'])
+    expect(put).not.toHaveBeenCalled()
+    expect(putMany).toHaveBeenCalledTimes(1)
+    // 'a' 出现两次按两次计（与改批量前逐条累加的行为一致）；不存在的 id 不留行
+    expect((await stats.list()).map(([k, v]) => [k, v.recallCount]).sort()).toEqual([['a', 2], ['b', 5], ['c', 1]])
   })
 })

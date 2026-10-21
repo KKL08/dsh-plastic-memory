@@ -5,8 +5,8 @@ import type { MemoryTypeDefinition } from './types.ts'
 import { buildTypeRegistry } from './type-registry.ts'
 import { memoryDomainSpec } from './domain-spec.ts'
 import { MemoryStore } from './store.ts'
-import { wrapSyncKvTable } from './kv-table.ts'
 import { FileTable } from './storage/file-table.ts'
+import { SidecarStore, type LegacyKvTables } from './storage/sidecar.ts'
 import { resolveMemoryRoot } from './storage/paths.ts'
 import { formatIndexLine } from './index-line.ts'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -31,6 +31,8 @@ import { PROMPT_LBRACE_VARIABLE } from './snapshot.ts'
 import { resolveHealthThresholds, type HealthSensitivity } from './governance/health-presets.ts'
 import { PendingDecisionsStore } from './governance/decisions.ts'
 import { SnapshotStore } from './governance/snapshots.ts'
+import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from './governance/schema.ts'
+import type { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { baselineProjectionDefinition, readBaseline } from './governance/baseline.ts'
 import type { SemanticLlm } from './governance/semantic-scan.ts'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -73,7 +75,7 @@ export const Config: z<Config> = z.object({
 })
 
 export const name = 'dsh-plastic-memory'
-export const inject = ['tools', 'systemPrompt', 'storageDomain']
+export const inject = ['tools', 'systemPrompt']
 
 /** session/created 回调里用得到的最小 session 结构（真实类型是 dsh-session 的 Session）。 */
 type SessionLike = object & { header?: { cwd?: string } }
@@ -81,26 +83,49 @@ type SessionLike = object & { header?: { cwd?: string } }
 export async function apply(ctx: Context, config: Config) {
   const registry = buildTypeRegistry(config) // 重名内置类型在这里抛错，加载即失败
 
-  const domain = await ctx.storageDomain.open(memoryDomainSpec)
-  ctx.effect(() => () => void domain.close())
-  // 正文住 FileTable（磁盘 markdown），KV 只放易变的召回统计 sidecar（recall_stats）
-  const statsTable = wrapSyncKvTable(domain.table('recall_stats'))
   const memoryRoot = resolveMemoryRoot(config.memoryRoot)
+  // 侧表（快照、待决账本、扫描缓存、召回统计）住 <memoryRoot>/.state/，构造不做 I/O。
+  // storageDomain 不再是必需注入：只为首次侧表访问时导入旧 KV 的快照与待决账本（0.3.0 移除）。
+  // 按 llm / sessionQuery 同款惯例经 ctx.get 探测，且推迟到导入真正发生时——apply 期间宿主的
+  // storageDomain 未必已挂上，此刻探测落空会写下 source: none 的标记，旧数据就再也不导了。
+  const sidecar = new SidecarStore({
+    root: memoryRoot,
+    schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema },
+    openLegacyKv: async (): Promise<LegacyKvTables | undefined> => {
+      let facility: DomainFacility | undefined
+      try {
+        facility = ctx.get('storageDomain') as DomainFacility | undefined
+      } catch {
+        return undefined // ctx.get 按 cordis 现契约不抛；防御宿主行为变化，按服务缺席处理
+      }
+      if (facility === undefined) return undefined
+      const domain = await facility.open(memoryDomainSpec)
+      try {
+        return {
+          snapshots: [...domain.table('snapshots').entries()],
+          pending: [...domain.table('pending_decisions').entries()],
+        }
+      } finally {
+        await domain.close()
+      }
+    },
+    log: ctx.logger,
+  })
   // 纯逻辑层（file-table/store/forget）不 import 框架包，日志经 MemoryLogger 注入；
   // ctx.logger 结构上满足该形状（info/warn/error），直接注入，宿主按插件名归因。
   const fileTable = new FileTable({
     root: memoryRoot,
-    stats: statsTable,
+    stats: sidecar.recallStats,
     // 磁盘索引不带陈旧度（静态文件里的时间相对标注会随时间失真），注入侧的陈旧度由 snapshot.ts 计算
     formatIndexLine: r => formatIndexLine(r, { passive: registry.get(r.type).recall === 'passive' }),
     log: ctx.logger,
   })
   await fileTable.load() // 契约：绝不 throw——记忆坏文件不能拖垮插件加载
-  const store = new MemoryStore(fileTable, ctx.logger)
+  const store = new MemoryStore(fileTable, ctx.logger, sidecar.recallStats)
   // forget 的快照先行与待决账本清理需要这两个存储，治理关闭时也接线
-  const decisions = new PendingDecisionsStore(wrapSyncKvTable(domain.table('pending_decisions')))
-  const snapshots = new SnapshotStore(wrapSyncKvTable(domain.table('snapshots')))
-  const scanCache = wrapSyncKvTable(domain.table('scan_cache'))
+  const decisions = new PendingDecisionsStore(sidecar.pending)
+  const snapshots = new SnapshotStore(sidecar.snapshots)
+  const scanCache = sidecar.scanCache
   // AGENTS.md 基线投影走可选注册：插件的 inject 不列 sessionProjections（精简 profile 可能没有这个服务），
   // 改在 ctx.inject(['sessionProjections'], …) 里注册，这是宿主 registry 文档（dsh-session-projection README）
   // 给出的保留可选注册的写法。disposer 随 child fiber 走，插件卸载键即消失。服务缺席时插件照常挂载，

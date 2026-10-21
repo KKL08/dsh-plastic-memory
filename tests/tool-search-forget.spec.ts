@@ -7,8 +7,9 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from '../src/kv-table.ts'
 import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
+import type { RecallStats } from '../src/storage/schema.ts'
 import { record } from './helpers/record.ts'
 import { STALENESS_NOTE } from '../src/record-freshness.ts'
 
@@ -50,11 +51,12 @@ describe('executeSearch', () => {
   })
 
   it('命中后更新召回统计', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const stats = new InMemoryBatchKvTable<RecallStats>()
+    const store = new MemoryStore(new InMemoryTable(), undefined, stats)
     const r = await seed(store, '某个知识')
     await executeSearch({ query: '知识' }, fakeExec(), makeSearchDeps(store))
     await new Promise(resolve => setTimeout(resolve, 0))
-    expect((await store.get(r.id))!.recallCount).toBe(1)
+    expect((await stats.get(r.id))!.recallCount).toBe(1)
   })
 
   it('超过衰减期未确认的命中带陈旧度标注', async () => {
