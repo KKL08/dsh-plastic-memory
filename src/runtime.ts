@@ -1,9 +1,28 @@
 import { realpath } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { basename, dirname } from 'node:path'
 import type { MemoryLogger, MemoryStore } from './store.ts'
+import type { MemoryRecord } from './record-schema.ts'
+import { resolveDuplicates } from './storage/table.ts'
 import type { TypeRegistry } from './type-registry.ts'
 import type { EvidenceLookupLevel } from './evidence-guidance.ts'
 import { assembleSnapshot, escapePromptBraces } from './snapshot.ts'
+
+/**
+ * 快照的预读：global + 当前 workspace 顶层的 active 记录（同 id 按取舍规则留一份，口径同 queryScope 的默认查询），
+ * 外加 id → 文件路径（相对记忆根目录：`<目录名>/<文件名>`），索引行末尾用它。走 readLayer 是为了拿到文件路径——
+ * queryScope 只回记录。同一次读取的隔离文件数给冷启动文案用。
+ */
+export async function prereadSnapshot(store: MemoryStore, workspacePath: string | undefined): Promise<{
+  records: MemoryRecord[]; files: Map<string, string>; quarantinedCount: number
+}> {
+  const read = await store.readLayer({ kind: 'visible', workspacePath })
+  const located = resolveDuplicates(read.records, { workspacePath }).filter(l => l.record.status === 'active')
+  return {
+    records: located.map(l => l.record),
+    files: new Map(located.map(l => [l.record.id, `${basename(l.dir)}/${basename(l.filePath)}`])),
+    quarantinedCount: read.quarantined.length,
+  }
+}
 
 /**
  * session 内冻结的 snapshot 缓存，按 session 隔离（WeakMap）。
@@ -103,8 +122,7 @@ export class SnapshotCache {
     const isResolved = this.workspacePaths.has(session)
     const workspacePath = isResolved ? this.workspacePaths.get(session) : undefined
     // 预读范围：只读 active，global + 当前 workspace（未解析时 global-only）；同一次读取的隔离文件数给冷启动文案用
-    const { records, quarantined } = await this.deps.store.queryScope({ scope: { kind: 'visible', workspacePath } })
-    const { text, coreIds } = assembleSnapshot({ ...this.deps, records, quarantinedCount: quarantined.length, workspacePath, now: Date.now() })
+    const { text, coreIds } = assembleSnapshot({ ...this.deps, ...(await prereadSnapshot(this.deps.store, workspacePath)), workspacePath, now: Date.now() })
     if (!isResolved) return text
     // 构建期间被标过期：这份文本只给本次用，不进缓存、不计召回，下一次中间件按新代次重建
     if ((this.generations.get(session) ?? 0) !== generation) return text

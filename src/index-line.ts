@@ -14,8 +14,14 @@ export function sourceNote(r: MemoryRecord): string {
   return r.source?.sourceMode === 'agent-inferred' ? INFERENCE_NOTE : ''
 }
 
-export function formatIndexLine(r: MemoryRecord, opts: { passive: boolean }): string {
+/**
+ * 索引行：MEMORY.md 与注入索引同一个格式器（设计稿 §11）。
+ * file：行末的文件引用，MEMORY.md 给同目录文件名，注入给相对记忆根目录的路径（注入混排 global 与本项目两个目录）。
+ * note：注入侧的陈旧度标注，放在文件名之前，让文件名始终在行末；磁盘索引不传。
+ */
+export function formatIndexLine(r: MemoryRecord, opts: { passive: boolean; file?: string; note?: string }): string {
   const tags = r.tags.length > 0 ? ` — ${r.tags.join(', ')}` : ''
-  if (opts.passive) return `- [${r.id}] ${r.name}${tags}${sourceNote(r)}`  // passive 同样带低置信标注
-  return `- [${r.id}] ${r.name}（${r.summary}）${tags}${sourceNote(r)}`
+  const tail = `${sourceNote(r)}${opts.note ?? ''}${opts.file === undefined ? '' : ` · ${opts.file}`}`
+  if (opts.passive) return `- [${r.id}] ${r.name}${tags}${tail}`  // passive 同样带低置信标注
+  return `- [${r.id}] ${r.name}（${r.summary}）${tags}${tail}`
 }

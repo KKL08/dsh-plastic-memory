@@ -118,7 +118,7 @@ export async function apply(ctx: Context, config: Config) {
     root: memoryRoot,
     stats: sidecar.recallStats,
     // 磁盘索引不带陈旧度（静态文件里的时间相对标注会随时间失真），注入侧的陈旧度由 snapshot.ts 计算
-    formatIndexLine: r => formatIndexLine(r, { passive: registry.get(r.type).recall === 'passive' }),
+    formatIndexLine: (r, file) => formatIndexLine(r, { passive: registry.get(r.type).recall === 'passive', file }),
     log: ctx.logger,
   })
   // 加载期零 I/O：FileTable 构造不碰磁盘，每个操作读它涉及的目录（设计稿 §0）

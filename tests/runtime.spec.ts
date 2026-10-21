@@ -9,6 +9,7 @@ import { COLD_START_TEXT, PROMPT_LBRACE_VARIABLE, assembleSnapshot } from '../sr
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { renderViaHost } from './helpers/render-via-host.ts'
+import { workspaceDirName } from '../src/storage/paths.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 
@@ -151,10 +152,10 @@ describe('SnapshotCache', () => {
     // 可控的 store 替身：本次预读按调用时刻读出记录，然后挂起，直到测试放行
     let release!: () => void
     const gate = new Promise<void>(r => { release = r })
-    const query = store.queryScope.bind(store)
+    const query = store.readLayer.bind(store)
     let entered!: () => void
     const inQuery = new Promise<void>(r => { entered = r })
-    vi.spyOn(store, 'queryScope').mockImplementationOnce(async (...args) => {
+    vi.spyOn(store, 'readLayer').mockImplementationOnce(async (...args) => {
       const result = await query(...args)
       entered()
       await gate
@@ -193,10 +194,10 @@ describe('SnapshotCache', () => {
 
     let release!: () => void
     const gate = new Promise<void>(r => { release = r })
-    const query = store.queryScope.bind(store)
+    const query = store.readLayer.bind(store)
     let entered!: () => void
     const inQuery = new Promise<void>(r => { entered = r })
-    vi.spyOn(store, 'queryScope').mockImplementationOnce(async (...args) => {
+    vi.spyOn(store, 'readLayer').mockImplementationOnce(async (...args) => {
       const result = await query(...args)
       entered()
       await gate
@@ -227,6 +228,18 @@ describe('SnapshotCache', () => {
     // 冻结快照（解析完成后）
     cache.setWorkspacePath(session, undefined)
     expect(await cache.assemble(session)).toContain('/home/.dsh/memories/global/')
+  })
+
+  it('MEMORY.md 行与注入索引行末尾带文件名（同源格式，passive 不带 summary；磁盘侧不带陈旧度，注入侧带）：冻结快照的索引行以相对记忆根目录的实际文件路径收尾', async () => {
+    const store = new MemoryStore(new InMemoryTable('/home/.dsh/memories'))
+    await store.put(record({ id: 'mem_g', name: '网关限流', type: 'knowledge', summary: '阈值 80', lastConfirmedAt: Date.now() }))
+    await store.put(record({ id: 'mem_w', name: '发布节奏', type: 'knowledge', summary: '周四发布', scope: 'workspace', workspacePath: '/repo', lastConfirmedAt: Date.now() }))
+    const cache = new SnapshotCache({ store, registry, budget: 4000, memoryRoot: '/home/.dsh/memories' })
+    const session = {}
+    cache.setWorkspacePath(session, '/repo')
+    const lines = (await cache.assemble(session)).split('\n')
+    expect(lines).toContain('- [mem_g] 网关限流（阈值 80） · global/网关限流.md')
+    expect(lines).toContain(`- [mem_w] 发布节奏（周四发布） · ${workspaceDirName('/repo')}/发布节奏.md`)
   })
 
   it('HMR 已知窗口：新建缓存实例对存量 session 首次 provider 为空串并触发解析；首次中间件补上，解析落定后冻结完整版', async () => {
@@ -285,7 +298,7 @@ describe('SnapshotCache', () => {
 
   it('awaitResolved 只等解析：落定后不组装，provider 仍为空串', async () => {
     const { store } = makeCache()
-    const spy = vi.spyOn(store, 'queryScope')
+    const spy = vi.spyOn(store, 'readLayer')
     const cache = new SnapshotCache({ store, registry, budget: 4000, resolveWorkspace: async () => '/repo' })
     const session = { header: { cwd: '/repo' } }
     await cache.awaitResolved(session)
@@ -316,13 +329,13 @@ describe('SnapshotCache', () => {
     const cache = new SnapshotCache({ store, registry, budget: 4000, log })
     const session = {}
     cache.setWorkspacePath(session, undefined)
-    vi.spyOn(store, 'queryScope').mockRejectedValueOnce(new Error('boom'))
+    vi.spyOn(store, 'readLayer').mockRejectedValueOnce(new Error('boom'))
     expect(await cache.assemble(session)).toBe('')
     expect(log.error).toHaveBeenCalledTimes(1)
 
     const frozen = await cache.assemble(session)
     cache.markStale(session)
-    vi.spyOn(store, 'queryScope').mockRejectedValueOnce(new Error('boom'))
+    vi.spyOn(store, 'readLayer').mockRejectedValueOnce(new Error('boom'))
     expect(await cache.assemble(session)).toBe(frozen)
     expect(log.error).toHaveBeenCalledTimes(2)
   })

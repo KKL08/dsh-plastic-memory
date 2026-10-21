@@ -20,6 +20,7 @@ import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
+import { formatIndexLine } from '../src/index-line.ts'
 
 // 票 11：维护点（docs/design-storage-file-is-memory.md §5）。只测 FileTable 专属的磁盘效应；
 // 双后端一致的语义在 table-conformance.spec.ts。全部用真实目录，不 mock 自己的模块。
@@ -98,6 +99,21 @@ describe('维护点动作 ①：再生 MEMORY.md', () => {
     await new Promise(r => setTimeout(r, 5))
     await table.maintain([globalDir()])
     expect((await stat(join(globalDir(), INDEX_FILE))).mtimeMs).toBe(mtime)
+  })
+})
+
+describe('MEMORY.md 行与注入索引行末尾带文件名（同源格式，passive 不带 summary；磁盘侧不带陈旧度，注入侧带）', () => {
+  it('MEMORY.md 行以 · 磁盘上的实际文件名收尾；超过衰减期也不带陈旧度', async () => {
+    // project 衰减 7 天，lastConfirmedAt 远在过去；手起的文件名与 slug(name) 不同，索引照实写磁盘文件名
+    const r = record({ id: 'mem_gw', name: '网关路由表', type: 'project', summary: '路由表', tags: ['gateway'] })
+    await writeMem(globalDir(), '网关路由表-手写.md', r)
+    const { table } = open()
+    await table.maintain([globalDir()])
+    const idx = await readFile(join(globalDir(), INDEX_FILE), 'utf8')
+    const line = idx.split('\n').find(l => l.includes('[mem_gw]'))!
+    expect(line).toBe(formatIndexLine(r, { passive: false, file: '网关路由表-手写.md' }))
+    expect(line).toBe('- [mem_gw] 网关路由表（路由表） — gateway · 网关路由表-手写.md')
+    expect(line).not.toContain('未确认')
   })
 })
 

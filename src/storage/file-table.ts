@@ -49,8 +49,8 @@ const NO_PREFILTER: Prefilter = { terms: [], match: 'all' }
 export interface FileTableOptions {
   root: string
   stats: KvTable<RecallStats>
-  /** 索引行格式器由接线层注入（storage 层不依赖 registry）；缺省用无陈旧度的简版。 */
-  formatIndexLine?: (r: MemoryRecord) => string
+  /** 索引行格式器由接线层注入（storage 层不依赖 registry）；缺省用无陈旧度的简版。fileName 是同目录的文件名。 */
+  formatIndexLine?: (r: MemoryRecord, fileName: string) => string
   now?: () => number
   /** 日志注入口，缺省回退 console（见 store.ts MemoryLogger）。 */
   log?: MemoryLogger
@@ -362,7 +362,7 @@ export class FileTable implements MemoryTable {
         if (!inArchive) kept.push({ record, filePath: slot.filePath, dir: slot.dir })
       }
       // kept 只剩顶层 active（非 active 已搬走）：同 id 取一份，再过滤已过期的
-      await this.regenerateIndex(sd.dir, resolveDuplicates(kept).map(s => s.record).filter(r => withinValidity(r, now)))
+      await this.regenerateIndex(sd.dir, resolveDuplicates(kept).filter(s => withinValidity(s.record, now)))
       for (const level of [sd.dir, archive]) await this.cleanStaleTmp(level)
     }
   }
@@ -375,15 +375,16 @@ export class FileTable implements MemoryTable {
     }
   }
 
-  private async regenerateIndex(dir: string, active: readonly MemoryRecord[]): Promise<void> {
+  private async regenerateIndex(dir: string, active: readonly LocatedRecord[]): Promise<void> {
     // 缺省格式器与注入侧同源（src/index-line.ts）。磁盘索引不带陈旧度：静态文件里的
     // 时间相对标注会随时间失真——这是对 docs/p15-storage-search-redesign.md §6"同源同格式"的有意偏离，已回写设计稿登记。
-    const fmt = this.opts.formatIndexLine ?? ((r: MemoryRecord) => formatIndexLine(r, { passive: false }))
+    // 行末带同目录的实际文件名（设计稿 §11），模型拿到即可 Read，不用再 grep id。
+    const fmt = this.opts.formatIndexLine ?? ((r: MemoryRecord, file: string) => formatIndexLine(r, { passive: false, file }))
     // 索引行序必须确定：readdir 序跨设备不确定，多设备同步下会造成索引文件 churn。
     // 按 name 排序（不用 localeCompare——locale 依赖环境），name 相同用 id 决胜。
-    const records = active.slice().sort((a, b) =>
+    const located = active.slice().sort(({ record: a }, { record: b }) =>
       a.name < b.name ? -1 : a.name > b.name ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
-    const lines = records.map(fmt)
+    const lines = located.map(l => fmt(l.record, basename(l.filePath)))
     const text = `# Memory Index\n\n${lines.join('\n')}${lines.length ? '\n' : ''}`
     try {
       const prev = await readFile(join(dir, INDEX_FILE), 'utf8').catch(() => '')
