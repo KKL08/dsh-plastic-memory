@@ -9,7 +9,8 @@ import { FINDING_TYPES } from '../governance/schema.ts'
 import type { HealthThresholds } from '../governance/health-presets.ts'
 import { runRuleScan } from '../governance/rule-scan.ts'
 import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, checkupRowBase, type LayerRef, TIER_LABEL } from '../governance/layer-health.ts'
-import { prereadLayers } from './layer-preread.ts'
+import type { DirectoryNote } from '../storage/table.ts'
+import { prereadLayers, listingNotes, checkupWorkspaces, renderDirectoryNotes } from './layer-preread.ts'
 
 const DAY = 86_400_000
 
@@ -23,10 +24,6 @@ export interface HealthToolDeps {
   cache: KvTable<ScanCacheEntry>
   /** 触发阈值（由 index.ts 从 sensitivity 预设解析后注入）。 */
   thresholds: HealthThresholds
-  /** 过渡的测试桩：覆盖预读到的隔离清单（InMemoryTable 没有隔离文件）；缺省取本次读取的结果。票 09 删除。 */
-  getQuarantined?: () => readonly { path: string; error: string }[]
-  /** malformed 按文件路径归层需要根目录；缺省不归层。 */
-  memoryRoot?: string
   /** 当前会话的 workspace（默认口径"当前项目"的来源）。 */
   resolveContext: (exec: ToolRunContext) => Promise<{ workspacePath: string | undefined }>
   now?: () => number
@@ -65,6 +62,8 @@ export interface SingleHealthResult {
   recommendation: string
   /** recommendation 的结构化对应：独占层单元素、行动项层多元素（按代码顺序）、无事为空数组。 */
   recommendationKinds: HealthRecommendationKind[]
+  /** 本次读取的目录级说明：缺标记 / 不可读目录、含保留键的文件、同 id 副本。 */
+  directoryNotes: DirectoryNote[]
   message: string
 }
 
@@ -88,6 +87,8 @@ export interface CheckupHealthResult {
   crossLayerConflicts: Array<{ globalId: string; workspaces: string[]; decisionIds: string[] }>
   promoteCandidates: { total: number; byWorkspace: Array<{ workspacePath: string; count: number }> }
   pendingTotal: number
+  /** 全库目录级说明：缺标记 / 不可读 / 只剩归档的目录、含保留键的文件、同 id 副本（含跨项目副本）。 */
+  directoryNotes: DirectoryNote[]
   message: string
 }
 
@@ -116,6 +117,7 @@ export function renderHealthResult(result: HealthToolResult): string {
       const detail = result.promoteCandidates.byWorkspace.map(w => `${w.workspacePath} ${w.count} 条`).join('、')
       lines.push(`提升候选合计 ${result.promoteCandidates.total} 条（${detail}），经用户确认后用 memory_promote 提升；用户拒绝的用 dismiss 清除标记。`)
     }
+    lines.push(...renderDirectoryNotes(result.directoryNotes))
     return lines.join('\n')
   }
 
@@ -132,6 +134,7 @@ export function renderHealthResult(result: HealthToolResult): string {
       lines.push(`- [${item.id}] ${item.summary}${item.overdue ? `（挂起超 ${result.pendingDecisions.overdueDays} 天）` : ''}`)
     }
   }
+  lines.push(...renderDirectoryNotes(result.directoryNotes))
   return lines.join('\n')
 }
 
@@ -146,11 +149,14 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
   const now = deps.now?.() ?? Date.now()
   const th = deps.thresholds
   const overdueMs = th.pendingOverdueDays * DAY
-  // 预读范围：与 memory_scan 共用 prereadLayers——全部状态的记录（含 superseded / deleted）、
-  // 待决账本、语义缓存、隔离文件；之后的评分与聚合都是同步纯计算
-  const data = await prereadLayers(deps)
+  // 预读范围：与 memory_scan 共用 prereadLayers——目标层（含 .archive/）的全部状态记录、层外引用按 id 定位、
+  // 待决账本、语义缓存、按层归档的隔离文件；之后的评分与聚合都是同步纯计算。
+  // 目录枚举只读标记与文件名：体检清单、scope 校验、缺标记 / 不可读目录的说明都出自它
+  const listing = await deps.store.listWorkspaceDirs()
 
   if (args.scope === 'all') {
+    // 全库：global + 体检清单里的全部 workspace 目录
+    const data = await prereadLayers(deps, [{ kind: 'global' }, ...checkupWorkspaces(listing).map(path => ({ kind: 'workspace' as const, path }))])
     const layers: LayerRef[] = [{ kind: 'global' }, ...listWorkspaces(data.byId.values()).map(path => ({ kind: 'workspace' as const, path }))]
     const scored = layers.map(l => scoreLayer(deps, data, l, now))
     const rows: CheckupRow[] = scored.map(r => ({
@@ -170,6 +176,7 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
       crossLayerConflicts: crossLayerConflicts(data.byId, data.pending),
       promoteCandidates,
       pendingTotal: data.pending.length,
+      directoryNotes: [...listingNotes(listing, { includeEmpty: true }), ...data.directoryNotes],
       message: `全库健康体检：global + ${wsCount} 个 workspace，各层独立计分（分母为该层自身规模）。`,
     }
   }
@@ -177,11 +184,13 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
   // 单层视图：显式路径 > 当前会话 workspace > global 层（无 workspace 会话）
   const currentWs = exec !== undefined ? (await deps.resolveContext(exec)).workspacePath : undefined
   if (args.scope !== undefined) {
-    const invalid = validateScopePaths(data.byId.values(), currentWs, [args.scope])
+    const invalid = validateScopePaths(checkupWorkspaces(listing), currentWs, [args.scope])
     if (invalid !== null) return { kind: 'error', message: invalid }
   }
   const wsPath = args.scope ?? currentWs
   const layer: LayerRef = wsPath !== undefined ? { kind: 'workspace', path: wsPath } : { kind: 'global' }
+  // 单层：目标层 + global（workspace 视图要兜住 global 层的密钥，待决项也看 global 一侧）
+  const data = await prereadLayers(deps, layer.kind === 'workspace' ? [layer, { kind: 'global' }] : [layer], wsPath)
   const scored = scoreLayer(deps, data, layer, now)
   const { health, records, semanticCachedAt } = scored
   const globalActive = [...data.byId.values()].filter(r => r.status === 'active' && r.scope === 'global')
@@ -282,6 +291,7 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
     globalSecretAlert,
     recommendation,
     recommendationKinds,
+    directoryNotes: [...listingNotes(listing, { includeEmpty: false }), ...data.directoryNotes],
     message: `${layerLabel}健康分 ${Math.floor(health.score)}/100（${TIER_LABEL[health.tier]}）${gateNote}${semanticNote}。${recommendation}。`,
   }
 }

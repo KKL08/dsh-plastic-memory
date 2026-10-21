@@ -64,17 +64,16 @@ export interface WorkspaceDirListing {
 /**
  * 记忆表：磁盘是唯一真相，进程里不常驻记忆表（设计稿 §0 §3）。读方法不加锁、不写盘；写方法在实现内串行。
  * `dirs` 用绝对目录路径标识（global 用 global 目录）；InMemoryTable 用同一套目录名（storage/paths），语义是按 scope 过滤。
- * `get` / `list` / `readAll` 是过渡读法：`get` = 无提示的两级 locate；`list` / `readAll` 读全部目录（含归档），票 09 执行器切到
- * readScope 后删除。
+ * 执行器的读法只有三种：按范围 readScope、按 id locate、listWorkspaceDirs 枚举。
  */
 export interface MemoryTable {
+  /** global 目录的绝对路径。 */
+  readonly globalDir: string
+  /** 某个 workspace 的目录：确定性目录名的标记匹配就用它，否则经清单找（手工改名的目录）；还没有目录时为空。 */
+  workspaceDirs(workspacePath: string): Promise<string[]>
   readScope(dirs: string[], opts?: ScopeReadOptions): Promise<ScopeReadResult>
   locate(id: string, hint?: LocateHint): Promise<LocatedFile | undefined>
   listWorkspaceDirs(): Promise<WorkspaceDirListing>
-  /** 过渡：global + 全部 workspace 目录（含归档）一次读出，同 id 已按取舍规则（无提示）选一份。 */
-  readAll(): Promise<{ records: MemoryRecord[]; quarantined: QuarantineEntry[]; directoryNotes: DirectoryNote[] }>
-  get(key: string): Promise<MemoryRecord | undefined>
-  list(): Promise<MemoryRecord[]>
   put(key: string, value: MemoryRecord): Promise<void>
   update(key: string, fn: (current: MemoryRecord) => MemoryRecord): Promise<MemoryRecord>
   delete(key: string): Promise<boolean>

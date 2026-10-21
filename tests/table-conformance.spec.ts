@@ -142,10 +142,10 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     if (reload) await reload()
 
     // put→get 逐字段相等（FileTable 场景下强制先过 encode→disk→decode）
-    expect(await table.get(recGlobal.id)).toEqual(recGlobal)
-    expect(await table.get(recA.id)).toEqual(recA)
-    expect(await table.get(recB.id)).toEqual(recB)
-    expect(await table.get(recADeleted.id)).toEqual(recADeleted)
+    expect((await table.locate(recGlobal.id))?.record).toEqual(recGlobal)
+    expect((await table.locate(recA.id))?.record).toEqual(recA)
+    expect((await table.locate(recB.id))?.record).toEqual(recB)
+    expect((await table.locate(recADeleted.id))?.record).toEqual(recADeleted)
 
     const s = new MemoryStore(table)
 
@@ -170,7 +170,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
 
     const updated = await table.update(rec.id, r => ({ ...r, content: '更新后内容', updatedAt: 2 }))
     expect(updated.content).toBe('更新后内容')
-    expect((await table.get(rec.id))!.content).toBe('更新后内容')
+    expect(((await table.locate(rec.id))?.record)!.content).toBe('更新后内容')
 
     const err = await captureRejection(table.update('ghost', r => r))
     expect(err).toBeInstanceOf(RecordNotFoundError)
@@ -178,28 +178,30 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
 
     const ok = await store.softDelete(rec.id)
     expect(ok).toBe(true)
-    expect((await table.get(rec.id))!.status).toBe('deleted')
+    expect(((await table.locate(rec.id))?.record)!.status).toBe('deleted')
     expect(await store.softDelete('ghost2')).toBe(false)
   })
 
-  it('markRecalled 只写召回统计侧表：统计 +1，不经 table.update，记忆文件 mtime 不变', async () => {
+  it('markRecalled 只写召回统计侧表：统计 +1，不经 table.update、不逐 id 定位，记忆文件 mtime 不变', async () => {
     const rec = record({ id: 'mem_recall_1', name: 'markrecalled-test', content: '待召回内容', updatedAt: 1 })
     await store.put(rec)
 
     const filePath = root ? join(root, GLOBAL_DIR, 'markrecalled-test.md') : undefined
     const before = filePath ? (await stat(filePath)).mtimeMs : undefined
     const update = vi.spyOn(table, 'update')
+    const locate = vi.spyOn(table, 'locate')
     const putMany = vi.spyOn(stats, 'putMany')
 
     await store.markRecalled([rec.id])
-    await store.markRecalled([rec.id, 'mem_ghost'])
+    await store.markRecalled([rec.id, rec.id])
 
     expect(update).not.toHaveBeenCalled()
+    // ids 来自调用方同一次读取的结果（search 命中、快照 core 区），存活由那次读保证，不再逐 id 两级定位
+    expect(locate).not.toHaveBeenCalled()
     expect(putMany).toHaveBeenCalledTimes(2) // 每次 markRecalled 只批量写一次，不论几个 id
     const row = await stats.get(rec.id)
-    expect(row).toMatchObject({ id: rec.id, recallCount: 2 })
+    expect(row).toMatchObject({ id: rec.id, recallCount: 3 })
     expect(row!.lastRecalledAt).not.toBeNull()
-    expect(await stats.get('mem_ghost')).toBeUndefined() // 不存在的记忆不留统计行
 
     // 设计稿 §7 核心命题：召回统计只走侧表，文件本体不重写——mtime 不变
     if (filePath) {
@@ -209,7 +211,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     // FileTable 的合并读法不变：重载后记录带上侧表里的统计
     if (reload) {
       await reload()
-      expect((await table.get(rec.id))!.recallCount).toBe(2)
+      expect(((await table.locate(rec.id))?.record)!.recallCount).toBe(3)
     }
   })
 
@@ -254,9 +256,9 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect((await store.get(other.record.id))!.status).toBe('superseded')
 
     if (reload) await reload()
-    expect((await table.get(updated.record.id))!.content).toBe('流程A 的内容 v2')
-    expect((await table.get(updated.record.id))!.createdAt).toBe(created.record.createdAt)
-    expect((await table.get(other.record.id))!.status).toBe('superseded')
+    expect(((await table.locate(updated.record.id))?.record)!.content).toBe('流程A 的内容 v2')
+    expect(((await table.locate(updated.record.id))?.record)!.createdAt).toBe(created.record.createdAt)
+    expect(((await table.locate(other.record.id))?.record)!.status).toBe('superseded')
   })
 
   it('forget 批量 + 快照先行 + restore 复活：端到端一致', async () => {
@@ -276,7 +278,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect(snap.data[0].id).toBe(rec.id)
     expect(snap.data[0].status).toBe('active') // 快照记的是删除前的状态
 
-    const byId = new Map((await table.list()).map(r => [r.id, r]))
+    const byId = new Map((await store.query({ status: ['active', 'superseded', 'deleted'] })).map(r => [r.id, r]))
     const { restored } = await snapshots.restore(
       snap, undefined, r => store.put(r), byId, false,
     )
@@ -284,7 +286,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect((await store.get(rec.id))!.status).toBe('active')
 
     if (reload) await reload()
-    expect((await table.get(rec.id))!.status).toBe('active') // FileTable：重载后复活仍成立
+    expect(((await table.locate(rec.id))?.record)!.status).toBe('active') // FileTable：重载后复活仍成立
   })
 
   it('put 不承载召回统计：restore 旧记录不回退 recallCount/lastRecalledAt（设计稿 §3 登记语义）', async () => {
@@ -293,13 +295,13 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     await table.update('mem_vol', c => ({ ...c, recallCount: 7, lastRecalledAt: 1787200000000 }))
     // 模拟 snapshots.restore：把快照时点的旧记录（recallCount=0）整条 put 回来
     await table.put('mem_vol', { ...r, summary: '恢复后的摘要' })
-    const after = (await table.get('mem_vol'))!
+    const after = ((await table.locate('mem_vol'))?.record)!
     expect(after.summary).toBe('恢复后的摘要')  // 稳定字段照常恢复
     expect(after.recallCount).toBe(7)           // 召回统计不回退
     expect(after.lastRecalledAt).toBe(1787200000000)
     if (reload) {
       await reload()
-      const reloaded = (await table.get('mem_vol'))!
+      const reloaded = ((await table.locate('mem_vol'))?.record)!
       expect(reloaded.recallCount).toBe(7)      // sidecar 一致：重载前后同值
       expect(reloaded.lastRecalledAt).toBe(1787200000000)
     }
@@ -340,12 +342,23 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect((await table.locate('mem_r2', { workspacePath: WS_A }))!.record.content).toBe('提示目录')
   })
 
-  it('同 id 取舍③：global 优先于其他项目（readAll 的无提示取舍）', async () => {
+  it('同 id 取舍③：global 优先于其他项目（不带范围的 query 无提示取舍）', async () => {
     await h.seedFile({ dir: h.globalDir, fileName: 'g.md', record: record({ id: 'mem_r3', content: 'global', updatedAt: 100 }) })
     await h.seedFile({ dir: h.wsDir(WS_B), fileName: 'w.md', record: ws(WS_B, { id: 'mem_r3', content: '其他项目', updatedAt: 100 }) })
-    const all = await table.readAll()
-    expect(all.records.filter(r => r.id === 'mem_r3').map(r => r.content)).toEqual(['global'])
-    expect((await table.get('mem_r3'))!.content).toBe('global')
+    const all = await store.query({})
+    expect(all.filter(r => r.id === 'mem_r3').map(r => r.content)).toEqual(['global'])
+    expect(((await table.locate('mem_r3'))?.record)!.content).toBe('global')
+  })
+
+  it('query 按范围读：可见集合 = global + 当前 workspace 目录，同 id 多文件只返回一条（新者优先，相等时当前 workspace 优先）', async () => {
+    await h.seedFile({ dir: h.globalDir, fileName: 'n.md', record: record({ id: 'mem_q1', content: 'global 较新', updatedAt: 200 }) })
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'n.md', record: ws(WS_A, { id: 'mem_q1', content: '本项目较旧', updatedAt: 100 }) })
+    await h.seedFile({ dir: h.globalDir, fileName: 't.md', record: record({ id: 'mem_q2', content: 'global 同时', updatedAt: 100 }) })
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 't.md', record: ws(WS_A, { id: 'mem_q2', content: '本项目同时', updatedAt: 100 }) })
+    await h.seedFile({ dir: h.wsDir(WS_B), fileName: 'b.md', record: ws(WS_B, { id: 'mem_q3', content: '别的项目' }) })
+    const visible = await store.query({ scope: { kind: 'visible', workspacePath: WS_A } })
+    expect(visible.map(r => [r.id, r.content]).sort()).toEqual([['mem_q1', 'global 较新'], ['mem_q2', '本项目同时']])
+    expect(await table.workspaceDirs(WS_A)).toEqual([h.wsDir(WS_A)])
   })
 
   it('同 id 取舍④：提示的 workspace 目录优先于其他项目，⑤ 都是其他项目时按文件路径字典序', async () => {
@@ -391,7 +404,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     await h.seedFile({ dir: h.globalDir, fileName: 'ext.md', record: record({ id: 'mem_ext', name: 'ext', content: '外部改过', updatedAt: 2 }) })
     const next = await table.update('mem_ext', r => ({ ...r, content: `${r.content}+追加`, updatedAt: 3 }))
     expect(next.content).toBe('外部改过+追加')
-    expect((await table.get('mem_ext'))!.content).toBe('外部改过+追加')
+    expect(((await table.locate('mem_ext'))?.record)!.content).toBe('外部改过+追加')
   })
 
   it('readScope：缺省只读顶层，includeArchive 连 .archive/ 一起读；types 在解析后过滤；记录含非 active', async () => {

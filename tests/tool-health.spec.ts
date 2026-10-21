@@ -1,4 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { FileTable } from '../src/storage/file-table.ts'
+import { GLOBAL_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
+import type { RecallStats } from '../src/storage/schema.ts'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { fakeExec } from './helpers/exec.ts'
 import { executeHealth, renderHealthResult, type HealthToolDeps, type HealthArgs, type SingleHealthResult, TIER_LABEL } from '../src/tools/health.ts'
@@ -28,6 +34,23 @@ function makeDeps(now: number, workspacePath?: string): HealthToolDeps {
     now: () => now,
   }
 }
+
+/** 真实记忆根（FileTable）：隔离文件只能从真实目录读出来。files 的键是相对 memoryRoot 的路径；markers 给 workspace 目录写 .workspace。 */
+async function fileBackedStore(files: Record<string, string>, workspaces: string[] = []): Promise<{ root: string; store: MemoryStore }> {
+  const root = await mkdtemp(join(tmpdir(), 'pm-broken-'))
+  roots.push(root)
+  for (const ws of workspaces) {
+    await mkdir(join(root, workspaceDirName(ws)), { recursive: true })
+    await writeFile(join(root, workspaceDirName(ws), WORKSPACE_MARKER), ws + '\n')
+  }
+  for (const [rel, text] of Object.entries(files)) {
+    await mkdir(dirname(join(root, rel)), { recursive: true })
+    await writeFile(join(root, rel), text)
+  }
+  return { root, store: new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() })) }
+}
+const roots: string[] = []
+afterEach(async () => { for (const r of roots.splice(0)) await rm(r, { recursive: true, force: true }) })
 
 /** 单层视图断言助手：结果必须是 single 形态。 */
 async function runSingle(args: HealthArgs, deps: HealthToolDeps, exec: ToolRunContext = fakeExec()): Promise<SingleHealthResult> {
@@ -141,20 +164,16 @@ describe('executeHealth 单层视图', () => {
     expect(r.score).toBe(95)
   })
 
-  it('quarantined 文件按路径归层计 malformed；无 memoryRoot 时不归层', async () => {
-    const base = makeDeps(1000)
-    const quarantined = [
-      { path: '/root/global/a.md', error: 'frontmatter 缺失' },
-      { path: '/root/global/b.md', error: 'yaml 解析失败' },
-      { path: '/root/other-ws-x1y2z3/c.md', error: '别的 workspace 的坏文件' },
-    ]
-    const withRoot: HealthToolDeps = { ...base, getQuarantined: () => quarantined, memoryRoot: '/root' }
-    const r = await runSingle({}, withRoot)
+  it('quarantined 文件按所在目录归层计 malformed', async () => {
+    const { store } = await fileBackedStore({
+      [`${GLOBAL_DIR}/a.md`]: '没有 frontmatter\n',
+      [`${GLOBAL_DIR}/b.md`]: '---\nname: [未闭合\n---\n',
+      [`${workspaceDirName('/other')}/c.md`]: '别的 workspace 的坏文件\n',
+    }, ['/other'])
+    const r = await runSingle({}, { ...makeDeps(1000), store })
     expect(r.breakdown.ruleLayer.malformed).toBe(2) // 只算 global 目录下的
     // total=0 时占比轴缺席：进度 2/3 → 6×2/3=4 → 96
     expect(r.score).toBe(96)
-    const noRoot: HealthToolDeps = { ...base, getQuarantined: () => quarantined }
-    expect((await runSingle({}, noRoot)).breakdown.ruleLayer.malformed).toBe(0)
   })
 
   it('待决项 ≥7 天标 overdue 并进 recommendation', async () => {

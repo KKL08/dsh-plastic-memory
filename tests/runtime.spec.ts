@@ -151,14 +151,14 @@ describe('SnapshotCache', () => {
     // 可控的 store 替身：本次预读按调用时刻读出记录，然后挂起，直到测试放行
     let release!: () => void
     const gate = new Promise<void>(r => { release = r })
-    const query = store.query.bind(store)
+    const query = store.queryScope.bind(store)
     let entered!: () => void
     const inQuery = new Promise<void>(r => { entered = r })
-    vi.spyOn(store, 'query').mockImplementationOnce(async (...args) => {
-      const records = await query(...args)
+    vi.spyOn(store, 'queryScope').mockImplementationOnce(async (...args) => {
+      const result = await query(...args)
       entered()
       await gate
-      return records
+      return result
     })
 
     const pending = cache.assemble(session)
@@ -193,14 +193,14 @@ describe('SnapshotCache', () => {
 
     let release!: () => void
     const gate = new Promise<void>(r => { release = r })
-    const query = store.query.bind(store)
+    const query = store.queryScope.bind(store)
     let entered!: () => void
     const inQuery = new Promise<void>(r => { entered = r })
-    vi.spyOn(store, 'query').mockImplementationOnce(async (...args) => {
-      const records = await query(...args)
+    vi.spyOn(store, 'queryScope').mockImplementationOnce(async (...args) => {
+      const result = await query(...args)
       entered()
       await gate
-      return records
+      return result
     })
 
     const pending = cache.assemble(session)
@@ -285,7 +285,7 @@ describe('SnapshotCache', () => {
 
   it('awaitResolved 只等解析：落定后不组装，provider 仍为空串', async () => {
     const { store } = makeCache()
-    const spy = vi.spyOn(store, 'query')
+    const spy = vi.spyOn(store, 'queryScope')
     const cache = new SnapshotCache({ store, registry, budget: 4000, resolveWorkspace: async () => '/repo' })
     const session = { header: { cwd: '/repo' } }
     await cache.awaitResolved(session)
@@ -316,13 +316,13 @@ describe('SnapshotCache', () => {
     const cache = new SnapshotCache({ store, registry, budget: 4000, log })
     const session = {}
     cache.setWorkspacePath(session, undefined)
-    vi.spyOn(store, 'query').mockRejectedValueOnce(new Error('boom'))
+    vi.spyOn(store, 'queryScope').mockRejectedValueOnce(new Error('boom'))
     expect(await cache.assemble(session)).toBe('')
     expect(log.error).toHaveBeenCalledTimes(1)
 
     const frozen = await cache.assemble(session)
     cache.markStale(session)
-    vi.spyOn(store, 'query').mockRejectedValueOnce(new Error('boom'))
+    vi.spyOn(store, 'queryScope').mockRejectedValueOnce(new Error('boom'))
     expect(await cache.assemble(session)).toBe(frozen)
     expect(log.error).toHaveBeenCalledTimes(2)
   })

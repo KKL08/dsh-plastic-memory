@@ -73,7 +73,7 @@ export async function runSavePipeline(
   const scopeWarnings: SaveWarning[] = []
   let target: MemoryRecord | undefined
   if (candidate.action === 'update') {
-    target = candidate.id ? await store.get(candidate.id) : undefined
+    target = candidate.id ? await store.get(candidate.id, { workspacePath: deps.workspacePath }) : undefined
     if (!target || target.status === 'deleted') {
       return { kind: 'rejected', code: 'target-missing', reason: `更新目标不存在或已删除：${candidate.id ?? '(缺 id)'}` }
     }
@@ -200,7 +200,7 @@ export async function runSavePipeline(
   // 不同桶的目标跳过不置 superseded，仅给一条警告。目标不存在维持静默跳过。
   let crossBucketSupersede = false
   for (const oldId of candidate.supersedes ?? []) {
-    const old = await store.get(oldId)
+    const old = await store.get(oldId, { workspacePath: deps.workspacePath })
     if (!old || old.id === clean.id) continue
     const sameBucket = old.scope === clean.scope
       && (clean.scope !== 'workspace' || old.workspacePath === clean.workspacePath)

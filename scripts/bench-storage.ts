@@ -12,7 +12,7 @@
  *   - readScope（当前项目 + global）：按范围读两目录（读文件、解析、合并召回统计），执行器切换后每次工具调用的基本成本。
  *   - 快照冻结：SnapshotCache.assemble，每轮一个新 session（预读可见记录 + 组装 + 首次冻结计召回）。
  *   - memory_search / memory_save / update / memory_health：对应执行器；不接 llm / sessionQuery，health 只有规则层。
- *     票 09 之前执行器仍经 MemoryStore.query 全量读（list()），这几项的耗时是过渡态。
+ *     执行器按范围读：search 与快照读当前项目 + global，health 单层读该层（含 .archive/）+ global，全库体检读全部目录。
  * 页缓存是热的：测的是同一进程内反复操作的稳态，不含冷盘 I/O。
  */
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
@@ -175,7 +175,7 @@ try {
   const healthDeps = {
     store, registry, decisions, cache: sidecar.scanCache,
     thresholds: resolveHealthThresholds('normal'),
-    memoryRoot: root, resolveContext,
+    resolveContext,
   }
   const updateTargets = seeded.filter(r => r.workspacePath === currentWs && r.status === 'active')
 

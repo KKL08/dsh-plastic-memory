@@ -4,7 +4,7 @@
  * cwd 走创建选项）搭 exec 直调，断言宿主层面的契约：工具注册、输出深度无损 JSON、
  * 会话/工作目录解析、落盘布局、规则层/语义层 note 码、快照回路、提升候选 dismiss、
  * 证据锚悬空降级（H9a 把落盘记录的 sessionId 改成不存在的会话）、真会话下钻（H9b 读回原文）、
- * 当轮锚来自宿主 turnBoundary 投影（H13）。
+ * 当轮锚来自宿主 turnBoundary 投影（H13）、外部直接写进记忆目录的文件在新会话组装时注入（H15）。
  * 有 DEEPSEEK_API_KEY 且宿主能选出默认模型时再跑语义扫描与取消两项，否则标 SKIPPED。
  * run.sh 随后用同一个 DSH_HOME 再起一次宿主（HOST_CONTRACT_PHASE=restart）：第一趟把
  * 恢复的记录 id 写进交接文件，第二趟跑 H12，证明恢复结果过了进程重启仍可读；H14 第一趟建持久化会话、
@@ -324,6 +324,23 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
         ok: second.seq > 0 && start === second.seq && end === session.seq - 1 && s.kind === 'ok' && hit,
         detail: `eventRange=[${start},${end}] secondTurnStart=${second.seq} sessionSeq=${session.seq} source=${s.kind} hit=${hit}`,
       }
+    })
+
+    // H15 外部写入可见：插件已在 wsA 上跑过多次操作之后，绕过工具直接往该 workspace 的记忆目录写一个手建文件
+    // （只有 name / type / 正文），再新建会话、走一遍宿主 system prompt 组装：本插件那条 context 必须含这条记忆，
+    // 中间不经任何刷新调用。按 .workspace 标记找目录，不依赖目录名算法。
+    await attempt('H15-EXTERNAL-WRITE-INJECTED', async () => {
+      const systemPrompt = ctx.get('systemPrompt') as { assemble(context: { scope?: object }): Promise<{ contexts: Array<{ name: string; text: string }> }> } | undefined
+      if (!systemPrompt) return { ok: false, detail: 'systemPrompt service unavailable' }
+      const dir = readdirSync(memoriesRoot).map(d => join(memoriesRoot, d))
+        .find(d => existsSync(join(d, '.workspace')) && readFileSync(join(d, '.workspace'), 'utf8').trim() === wsA)
+      if (dir === undefined) return { ok: false, detail: `找不到 ${wsA} 的记忆目录` }
+      const probe = 'H15 外部写入探针：新会话组装必须看到它'
+      writeFileSync(join(dir, 'h15-external-probe.md'), `---\nname: h15-external-probe\ntype: preference\n---\n\n${probe}\n`)
+      const session = sessions.create(undefined, { meta: { cwd: wsA } })
+      const assembly = await systemPrompt.assemble({ scope: { session } })
+      const text = assembly.contexts.find(c => c.name === 'plastic-memory')?.text ?? ''
+      return { ok: text.includes(probe), detail: `contexts=${assembly.contexts.map(c => c.name).join(',')} plasticMemoryChars=${text.length} hasProbe=${text.includes(probe)}` }
     })
 
     // H14 第一趟：照 agent-loop 的建会话配方造一个持久化的真会话（prepare → create 写句柄 → enter + announce，

@@ -1,4 +1,5 @@
 import type { MemoryStore } from '../store.ts'
+import { HAND_EDITED_NOTE } from '../index-line.ts'
 
 /** ctx.sessionQuery.readEvent 的最小契约（真机验证：2026-08-28 探针，docs/design-evidence-anchor.md §2） */
 export interface ReadEventFn {
@@ -25,7 +26,7 @@ export interface SourceToolDeps {
 }
 
 export type SourceResult =
-  | { kind: 'ok'; memoryId: string; sessionId: string; range: [number, number]; lines: string[]; skipped: number }
+  | { kind: 'ok'; memoryId: string; sessionId: string; range: [number, number]; lines: string[]; skipped: number; handEdited?: true }
   | { kind: 'not-found'; memoryId: string }
   | { kind: 'no-source'; memoryId: string }
   | { kind: 'forbidden'; memoryId: string }
@@ -65,8 +66,8 @@ export async function executeSource(
   context: { workspacePath: string | undefined },
   deps: SourceToolDeps,
 ): Promise<SourceResult> {
-  // 预读范围：按 id 定位单条（store.get，含非 active），已删的按不存在处理
-  const record = await deps.store.get(args.memoryId)
+  // 预读范围：按 id 两级定位单条（一级 global + 当前 workspace，含 .archive/），已删的按不存在处理
+  const record = await deps.store.get(args.memoryId, { workspacePath: context.workspacePath })
   if (!record || record.status === 'deleted') return { kind: 'not-found', memoryId: args.memoryId }
   // 跨项目隔离：只准解引用当前项目或 global 记忆的锚
   if (record.scope === 'workspace' && record.workspacePath !== context.workspacePath) {
@@ -103,6 +104,7 @@ export async function executeSource(
   return {
     kind: 'ok', memoryId: args.memoryId, sessionId: source.sessionId,
     range: [win.startSeq ?? start, win.endSeq ?? end], lines, skipped,
+    ...(record.handEdited ? { handEdited: true as const } : {}),
   }
 }
 
@@ -120,7 +122,8 @@ export function renderSourceResult(result: SourceResult, memoryName?: string): s
       const head = `记忆 ${result.memoryId}${memoryName ? `（${memoryName}）` : ''} 源自会话 ${result.sessionId} 的 seq ${result.range[0]}–${result.range[1]}：`
       const body = result.lines.length > 0 ? result.lines.join('\n') : '（该窗口内没有可读的对话文本）'
       const tail = result.skipped > 0 ? `（另有 ${result.skipped} 个结构事件未显示）` : ''
-      return [head, body, tail].filter(Boolean).join('\n')
+      const edited = result.handEdited ? `注意：这条记忆${HAND_EDITED_NOTE}——保存后被手工改过，下面的对话可能已不是现在内容的来源。` : ''
+      return [head, edited, body, tail].filter(Boolean).join('\n')
     }
   }
 }

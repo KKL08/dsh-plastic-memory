@@ -30,7 +30,7 @@ export function runRuleScan(
         type: 'expired', layer: 'rule', severity: SEVERITY_BY_TYPE.expired,
         memoryIds: [r.id],
         summary: `已过有效期（validTo=${r.validTo}）`,
-        suggestedAction: '确认后用 memory_forget 删除，或用 memory_save 更新有效期',
+        suggestedAction: '向用户确认：仍然有效就用 memory_save 延长 validTo；已经失效就用 memory_forget 归档',
       })
     }
     if (r.content.length > BLOAT_THRESHOLD) {

@@ -5,7 +5,7 @@ import { expandQueryTerms, matchScore } from './text.ts'
 import {
   resolveDuplicates,
   type MemoryLogger, type MemoryTable, type LocatedFile, type LocateHint, type ScopeReadOptions, type ScopeReadResult,
-  type WorkspaceDirListing, type DirectoryNote,
+  type WorkspaceDirListing, type DirectoryNote, type QuarantineEntry,
 } from './storage/table.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, deriveFileId, isReservedFileName, slugifyName, workspaceDirName } from './storage/paths.ts'
 import { InMemoryBatchKvTable, type BatchKvTable } from './kv-table.ts'
@@ -23,7 +23,7 @@ export type SeedRecord = Omit<MemoryRecord, 'id'> & { id?: string }
  */
 export class InMemoryTable implements MemoryTable {
   private readonly root: string
-  private readonly globalDir: string
+  readonly globalDir: string
   private slots = new Map<string, LocatedFile>()   // filePath → 槽位
 
   constructor(root = '/in-memory') {
@@ -54,6 +54,10 @@ export class InMemoryTable implements MemoryTable {
     const slot: LocatedFile = { record: { ...opts.record, id }, extras: opts.extras ?? {}, filePath, dir: opts.dir }
     this.slots.set(filePath, slot)
     return slot
+  }
+
+  async workspaceDirs(workspacePath: string): Promise<string[]> {
+    return [join(this.root, workspaceDirName(workspacePath))]
   }
 
   async readScope(dirs: string[], opts: ScopeReadOptions = {}): Promise<ScopeReadResult> {
@@ -89,13 +93,6 @@ export class InMemoryTable implements MemoryTable {
     return { entries, directoryNotes }
   }
 
-  async readAll() {
-    return { records: resolveDuplicates([...this.slots.values()]).map(s => s.record), quarantined: [], directoryNotes: [] }
-  }
-
-  async get(key: string) { return (await this.locate(key))?.record }
-  async list() { return (await this.readAll()).records }
-
   /** 落槽位：位置没变且 slug 没变就留在原路径，否则按 scope 目录重新取名（与 FileTable.persist 同规则）。 */
   private place(prev: LocatedFile | undefined, next: MemoryRecord): void {
     if (prev) this.slots.delete(prev.filePath)
@@ -126,12 +123,25 @@ export class InMemoryTable implements MemoryTable {
   }
 }
 
+/** 查询范围：global 层、某个 workspace 层、或当前会话的可见集合（global + 当前 workspace）。缺省读全部目录。 */
+export type QueryScope =
+  | { kind: 'global' }
+  | { kind: 'workspace'; path: string }
+  | { kind: 'visible'; workspacePath: string | undefined }
+
 export interface QueryFilter {
-  scope?: { kind: 'global' } | { kind: 'workspace'; path: string } | { kind: 'visible'; workspacePath: string | undefined }
+  scope?: QueryScope
   types?: string[]
   tags?: string[]
   status?: MemoryRecord['status'][]
   keyword?: string
+}
+
+/** 一次查询的完整结果：记录之外带上同一次读取里的隔离文件与目录级说明（冷启动文案要分辨「空」与「全坏」）。 */
+export interface QueryResult {
+  records: MemoryRecord[]
+  quarantined: QuarantineEntry[]
+  directoryNotes: DirectoryNote[]
 }
 
 export class MemoryStore {
@@ -147,42 +157,63 @@ export class MemoryStore {
     this.stats = stats
   }
 
-  get(id: string) { return this.table.get(id) }
+  /** 按 id 两级定位（含非 active）；hint 是当前 workspace，一级先看它的目录。 */
+  async get(id: string, hint?: LocateHint): Promise<MemoryRecord | undefined> {
+    return (await this.table.locate(id, hint))?.record
+  }
+  locate(id: string, hint?: LocateHint) { return this.table.locate(id, hint) }
+  listWorkspaceDirs() { return this.table.listWorkspaceDirs() }
   put(record: MemoryRecord) { return this.table.put(record.id, record) }
-  /** 过渡：全部目录一次读出（记录含全部状态、隔离条目、目录级说明），票 09 换成按范围读取。 */
-  readAll() { return this.table.readAll() }
 
   async softDelete(id: string): Promise<boolean> {
-    if (!(await this.table.get(id))) return false
+    if (!(await this.table.locate(id))) return false
     await this.table.update(id, r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))
     return true
   }
 
-  async query(filter: QueryFilter): Promise<MemoryRecord[]> {
+  /** scope → 目录。缺省读全部目录（global + 全部有标记的 workspace 目录）。 */
+  private async dirsOf(scope: QueryScope | undefined): Promise<string[]> {
+    if (scope === undefined) return [this.table.globalDir, ...(await this.table.listWorkspaceDirs()).entries.map(e => e.dir)]
+    if (scope.kind === 'global') return [this.table.globalDir]
+    if (scope.kind === 'workspace') return this.table.workspaceDirs(scope.path)
+    return [this.table.globalDir, ...(scope.workspacePath === undefined ? [] : await this.table.workspaceDirs(scope.workspacePath))]
+  }
+
+  /** 按范围原样读目录：记录含非 active、同 id 不取舍。health / scan 的层预读用它。 */
+  async readLayer(scope: QueryScope | undefined, opts: ScopeReadOptions = {}): Promise<ScopeReadResult> {
+    return this.table.readScope(await this.dirsOf(scope), opts)
+  }
+
+  /**
+   * 执行器的统一查询入口：scope 决定读哪些目录（只读 active 时不读 .archive/），同 id 多文件按取舍规则留一份，
+   * 再按 status / types / tags / keyword 过滤。validTo 过期的过滤留给调用方（注入与检索过滤，治理仍可见）。
+   */
+  async queryScope(filter: QueryFilter): Promise<QueryResult> {
     const statuses = filter.status ?? ['active']
-    const keyword = filter.keyword?.toLowerCase()
-    // 排序 OR：命中任一匹配项即入选（硬 AND 会让"多一个不相关词"整组落空）。中文经 bigram 切分
-    // 也参与匹配。命中数排序与 limit 由调用方（executeSearch）用同一 matchScore 收敛。
-    const terms = keyword ? expandQueryTerms(keyword) : []
-    const out: MemoryRecord[] = []
-    for (const r of await this.table.list()) {
-      if (!statuses.includes(r.status)) continue
-      if (filter.types && !filter.types.includes(r.type)) continue
-      if (filter.tags && !filter.tags.some(t => r.tags.includes(t))) continue
-      if (filter.scope) {
-        const s = filter.scope
-        if (s.kind === 'global' && r.scope !== 'global') continue
-        if (s.kind === 'workspace' && (r.scope !== 'workspace' || r.workspacePath !== s.path)) continue
-        if (s.kind === 'visible' && !(r.scope === 'global' || (s.workspacePath !== undefined && r.workspacePath === s.workspacePath))) continue
-      }
-      if (terms.length > 0 && matchScore(r, terms) === 0) continue
-      out.push(r)
-    }
-    return out
+    const scope = filter.scope
+    const hint = scope?.kind === 'workspace' ? scope.path : scope?.kind === 'visible' ? scope.workspacePath : undefined
+    // keyword 是排序 OR：命中任一匹配项即入选（硬 AND 会让"多一个不相关词"整组落空），所以不传原文预筛——
+    // 预筛是 AND 语义，只有全部词项都必须命中时才能用。中文经 bigram 切分也参与匹配；命中数排序与 limit
+    // 由调用方（executeSearch）用同一 matchScore 收敛。
+    const read = await this.readLayer(scope, {
+      ...(filter.types ? { types: filter.types } : {}),
+      includeArchive: statuses.some(s => s !== 'active'),
+    })
+    const terms = filter.keyword ? expandQueryTerms(filter.keyword.toLowerCase()) : []
+    const records = resolveDuplicates(read.records, { workspacePath: hint }).map(l => l.record).filter(r =>
+      statuses.includes(r.status)
+      && (!filter.tags || filter.tags.some(t => r.tags.includes(t)))
+      && (terms.length === 0 || matchScore(r, terms) > 0))
+    return { records, quarantined: read.quarantined, directoryNotes: read.directoryNotes }
+  }
+
+  async query(filter: QueryFilter): Promise<MemoryRecord[]> {
+    return (await this.queryScope(filter)).records
   }
 
   /** 召回统计只读改写侧表，不经 table.update——记忆文件不因召回而重写。一次调用一次读、内存合并、
-   *  一次批量写（单文件表只换一次文件）。跨进程单文件 LWW（参考字段）。 */
+   *  一次批量写（单文件表只换一次文件）。跨进程单文件 LWW（参考字段）。
+   *  ids 取自调用方同一次读取的结果（search 命中、快照 core 区），存活由那次读保证，这里不再逐 id 定位。 */
   markRecalled(ids: string[]): Promise<void> {
     const run = () => this.markRecalledInner(ids)
     const next = this.recallChain.then(run, run)
@@ -196,7 +227,6 @@ export class MemoryStore {
       const current = new Map(await this.stats.list())
       const next = new Map<string, RecallStats>()
       for (const id of ids) {
-        if (!(await this.table.get(id))) continue
         // 同一次调用里重复出现的 id 累加（与逐条 put 时的旧行为一致）
         const row = next.get(id) ?? current.get(id)
         next.set(id, { id, recallCount: (row?.recallCount ?? 0) + 1, lastRecalledAt: now })

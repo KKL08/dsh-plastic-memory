@@ -7,6 +7,11 @@ import { stalenessNote, withinValidity } from './record-freshness.ts'
 
 export const COLD_START_TEXT = `记忆库当前为空。如果时机合适，可以问一句用户是否愿意介绍自己的背景（角色、常用技术、工作习惯），愿意就用 memory_save 记下来；不愿意就在后续任务中自然积累，不要追问。`
 
+/** 可见集合为空、但两个目录里有解析失败的文件：不能说「记忆库为空」，否则模型会反过来向用户索要背景。 */
+export function coldStartUnparseableText(count: number): string {
+  return `记忆目录里有 ${count} 个文件无法解析，当前没有可用的长期记忆。这不代表记忆库为空，不要因此向用户索要背景；可以用 memory_health 列出这些文件，提醒用户修复。`
+}
+
 /** 提示词变量名：apply() 注册它、值为 '{{'，快照出口把 `{{` 转义成对它的引用。 */
 export const PROMPT_LBRACE_VARIABLE = 'plastic_memory_lbrace'
 
@@ -29,6 +34,8 @@ export function estimateTokens(text: string): number {
 /** 纯函数：吃调用方预读的可见记录（global + 当前 workspace 的 active 记录），不读存储。 */
 export function assembleSnapshot(deps: {
   records: readonly MemoryRecord[]
+  /** 同一次读取里解析失败的文件数（global + 当前 workspace）；可见集合为空时决定冷启动文案。 */
+  quarantinedCount?: number
   registry: TypeRegistry
   workspacePath: string | undefined
   budget: number
@@ -40,7 +47,10 @@ export function assembleSnapshot(deps: {
 }): { text: string; coreIds: string[] } {
   const { registry, now } = deps
   const visible = deps.records
-  if (visible.length === 0) return { text: COLD_START_TEXT, coreIds: [] }
+  if (visible.length === 0) {
+    const broken = deps.quarantinedCount ?? 0
+    return { text: broken > 0 ? coldStartUnparseableText(broken) : COLD_START_TEXT, coreIds: [] }
+  }
   const all = visible.filter(r => withinValidity(r, now))
 
   const parts: string[] = ['# 长期记忆']

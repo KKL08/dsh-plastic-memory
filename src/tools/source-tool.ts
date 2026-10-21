@@ -38,7 +38,7 @@ export function createSourceTool(deps: SourceToolBindingDeps): ToolDefinition {
       const context = await deps.resolveContext(exec)
       const result = await executeSource(args, context, deps)
       if (result.kind === 'ok') {
-        const name = (await deps.store.get(result.memoryId))?.name
+        const name = (await deps.store.get(result.memoryId, { workspacePath: context.workspacePath }))?.name
         if (name !== undefined) names.set(result.memoryId, name)
         else names.delete(result.memoryId)
       }

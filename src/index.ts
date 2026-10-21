@@ -313,13 +313,11 @@ export async function apply(ctx: Context, config: Config) {
         const agent = exec.agent
         return makeSemanticLlm({ session: agent?.session, agentOptions: agent?.options })
       },
-      memoryRoot,
       resolveContext,
     }))
     ctx.tools.register(createHealthTool({
       store, registry, decisions, cache: scanCache,
       thresholds: resolveHealthThresholds(config.governance.health.sensitivity),
-      memoryRoot,
       resolveContext,
     }))
     // memory_promote：把用户确认的候选提升 global。确认由模型先调 ask_user_question 完成

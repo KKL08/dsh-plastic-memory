@@ -1,4 +1,3 @@
-import { join, sep } from 'node:path'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { dedupKey } from './decisions.ts'
@@ -6,7 +5,7 @@ import type { Finding, PendingDecision, ScanCacheEntry } from './schema.ts'
 import { FINDING_TYPES } from './schema.ts'
 import { runRuleScan, buildMalformedFindings } from './rule-scan.ts'
 import { computeHealth, type HealthScore } from './scoring.ts'
-import { workspaceDirName, GLOBAL_DIR } from '../storage/paths.ts'
+import type { DirectoryNote, QuarantineEntry } from '../storage/table.ts'
 
 /** 健康档位的用户面标签（scan 体检行与 health message 共用一份，枚举值仍是 green/amber/red）。 */
 export const TIER_LABEL = { green: '绿色', amber: '黄色', red: '红色' } as const
@@ -36,13 +35,14 @@ export function listWorkspaces(records: Iterable<MemoryRecord>): string[] {
  * 校验 scope/scopes 里的 workspace 标识：只接受已知 workspace 的绝对路径（或当前会话的
  * workspace）。合法返回 null，否则返回给模型看的报错文本。模型容易把记忆存储目录名
  * （如 proj-alpha-8641b727）当 scope 传——不校验就会静默扫成空集还给满分。
+ * knownWorkspaces：体检清单（顶层有记忆文件的 workspace 目录）。
  */
 export function validateScopePaths(
-  records: Iterable<MemoryRecord>,
+  knownWorkspaces: Iterable<string>,
   currentWs: string | undefined,
   requested: string[],
 ): string | null {
-  const known = new Set(listWorkspaces(records))
+  const known = new Set(knownWorkspaces)
   if (currentWs !== undefined) known.add(currentWs)
   const invalid = requested.filter(s => !known.has(s))
   if (invalid.length === 0) return null
@@ -54,8 +54,6 @@ export function validateScopePaths(
 
 export interface LayerHealthDeps {
   registry: TypeRegistry
-  /** 给出时 malformed 按文件路径归层（global 目录 / 对应 workspace 目录）；缺省不归层（避免跨层重复计数）。 */
-  memoryRoot?: string
 }
 
 /**
@@ -63,15 +61,17 @@ export interface LayerHealthDeps {
  * 账本表、缓存表——两个工具用同一份预读函数，对同一层永远同分。
  */
 export interface LayerPreread {
-  /** 全部状态（active / superseded / deleted）的记录，按 id 索引：orphan 检测要分辨取代链引用，
-   *  缓存过滤要核对跨层记录是否存活。 */
+  /** 预读各层的全部状态（active / superseded / deleted，含 .archive/）记录，加上按 id 定位到的层外引用，按 id 索引：
+   *  orphan 检测要分辨取代链引用，缓存过滤要核对跨层记录是否存活。 */
   byId: ReadonlyMap<string, MemoryRecord>
   /** 待决账本（按 firstSeenAt 升序）。 */
   pending: readonly PendingDecision[]
   /** 语义扫描缓存，键为缓存桶。 */
   cache: ReadonlyMap<string, ScanCacheEntry>
-  /** 存储层隔离的不可解析记忆文件。 */
-  quarantined: readonly { path: string; error: string }[]
+  /** 解析失败的记忆文件，按读到它的层归档（键为 layerCacheKey）。 */
+  quarantined: ReadonlyMap<string, readonly QuarantineEntry[]>
+  /** 本次读取的目录级说明（保留键、不可读目录、同 id 副本）。 */
+  directoryNotes: readonly DirectoryNote[]
 }
 
 export interface LayerHealthResult {
@@ -106,11 +106,7 @@ export function scoreLayer(deps: LayerHealthDeps, data: LayerPreread, layer: Lay
   const liveIds = new Set(records.map(r => r.id))
 
   const ruleFindings = runRuleScan(records, id => data.byId.get(id), now)
-  if (deps.memoryRoot !== undefined) {
-    const dir = join(deps.memoryRoot, layer.kind === 'global' ? GLOBAL_DIR : workspaceDirName(layer.path))
-    const mine = data.quarantined.filter(q => q.path.startsWith(dir + sep))
-    ruleFindings.push(...buildMalformedFindings(mine))
-  }
+  ruleFindings.push(...buildMalformedFindings(data.quarantined.get(layerCacheKey(layer)) ?? []))
 
   const cached = data.cache.get(layerCacheKey(layer))
   const pendingKeys = new Set(data.pending.map(e => dedupKey(e.memoryIds, e.baselineRef)))

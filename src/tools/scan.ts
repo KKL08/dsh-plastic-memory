@@ -9,9 +9,8 @@ import type { Finding, ScanCacheEntry } from '../governance/schema.ts'
 import { runRuleScan, buildMalformedFindings } from '../governance/rule-scan.ts'
 import { runSemanticScan, SEMANTIC_SCAN_MAX_RECORDS, type SemanticLlm } from '../governance/semantic-scan.ts'
 import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, checkupRowBase, GLOBAL_CACHE_KEY, type LayerRef, TIER_LABEL } from '../governance/layer-health.ts'
-import { prereadLayers } from './layer-preread.ts'
-import { join, sep } from 'node:path'
-import { workspaceDirName, GLOBAL_DIR } from '../storage/paths.ts'
+import { prereadLayers, listingNotes, checkupWorkspaces, renderDirectoryNotes } from './layer-preread.ts'
+import type { DirectoryNote } from '../storage/table.ts'
 import { runCrossWsScan, findEntityDuplicates, type CrossWsDuplicate } from '../governance/cross-ws.ts'
 
 export function cacheKey(scope: string | undefined): string {
@@ -23,10 +22,6 @@ export interface ScanToolDeps {
   registry: TypeRegistry
   decisions: PendingDecisionsStore
   cache: KvTable<ScanCacheEntry>
-  /** 过渡的测试桩：覆盖预读到的隔离清单（InMemoryTable 没有隔离文件）；缺省取本次读取的结果。票 09 删除。 */
-  getQuarantined?: () => readonly { path: string; error: string }[]
-  /** malformed 按文件路径归层需要根目录；缺省不归层。 */
-  memoryRoot?: string
   /** 按触发调用的 session 取该会话的 AGENTS.md/CLAUDE.md 基线（宿主投影按 session 隔离）。 */
   getBaseline: (exec: ToolRunContext) => readonly string[] | null
   /** 按调用解析（而非加载时一次性解析）——provider/model 只能从触发调用的 exec 上下文里的
@@ -61,6 +56,8 @@ export interface SingleScanResult {
   promoteCandidates: { items: Array<{ id: string; summary: string }>; more: number }
   semanticCachedAt: number | null
   notes: ScanNote[]
+  /** 本次读取的目录级说明：缺标记 / 不可读目录、含保留键的文件、同 id 副本。 */
+  directoryNotes: DirectoryNote[]
   message: string
 }
 
@@ -87,6 +84,8 @@ export interface CheckupScanResult {
   /** 跨项目重复主题（global 缺口）：语义层主力，LLM 不可用时实体聚类保底（疑似级）。 */
   duplicates: { items: CrossWsDuplicate[]; via: 'semantic' | 'entity' | 'none' }
   notes: ScanNote[]
+  /** 全库目录级说明：缺标记 / 不可读 / 只剩归档的目录、含保留键的文件、同 id 副本（含跨项目副本）。 */
+  directoryNotes: DirectoryNote[]
   message: string
 }
 
@@ -135,6 +134,7 @@ export function renderScanResult(result: ScanToolResult): string {
       lines.push('确认确属通用后，可提炼一条 global 记忆经用户确认提升。')
     }
     if (result.notes.length > 0) lines.push(`（${result.notes.map(n => n.text).join('；')}）`)
+    lines.push(...renderDirectoryNotes(result.directoryNotes))
     return lines.join('\n')
   }
 
@@ -161,6 +161,7 @@ export function renderScanResult(result: ScanToolResult): string {
     if (result.promoteCandidates.more > 0) lines.push(`  …另有 ${result.promoteCandidates.more} 条提升候选未列出`)
     lines.push('提升前可用 memory_source 回查候选的出生语境，确认当时确实是跨项目通用的表述、不是项目绑定的顺口一句。')
   }
+  lines.push(...renderDirectoryNotes(result.directoryNotes))
   return lines.join('\n')
 }
 
@@ -262,30 +263,33 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
   const llm = deps.getLlm(exec)
   const baseline = deps.getBaseline(exec)
   const currentWs = exec !== undefined ? (await deps.resolveContext(exec)).workspacePath : undefined
-  // 预读范围：与 memory_health 共用 prereadLayers——全部状态的记录（含 superseded / deleted）、
-  // 待决账本、语义缓存、隔离文件。扫描输入（active 的可见集合 / 本层集合）从这份预读里筛
-  const data = await prereadLayers(deps)
-  const quarantined = data.quarantined
-  const active = (pred: (r: MemoryRecord) => boolean) =>
-    [...data.byId.values()].filter(r => r.status === 'active' && pred(r))
-  const visibleTo = (ws: string | undefined) => (r: MemoryRecord) =>
-    r.scope === 'global' || (ws !== undefined && r.workspacePath === ws)
-  const isGlobal = (r: MemoryRecord) => r.scope === 'global'
-  // malformed 按扫描层归属（与 memory_health 的 scoreLayer 同口径），无 memoryRoot 时不归层
-  const layerQuarantined = (ws: string | undefined) => {
-    if (deps.memoryRoot === undefined) return quarantined
-    const dir = join(deps.memoryRoot, ws === undefined ? GLOBAL_DIR : workspaceDirName(ws))
-    return quarantined.filter(q => q.path.startsWith(dir + sep))
-  }
-
+  // 目录枚举只读标记与文件名：体检清单、scope 校验、缺标记 / 不可读目录的说明都出自它
+  const listing = await deps.store.listWorkspaceDirs()
   const checkup = args.scope === 'all' || (args.scopes !== undefined && args.scopes.length > 0)
   {
     const requested = checkup
       ? args.scopes ?? []
       : args.scope !== undefined ? [args.scope] : []
-    const invalid = validateScopePaths(data.byId.values(), currentWs, requested)
+    const invalid = validateScopePaths(checkupWorkspaces(listing), currentWs, requested)
     if (invalid !== null) return { kind: 'error', message: invalid }
   }
+  // 单层模式的目标：显式路径 > 当前会话 workspace > global 层（无 workspace 会话）
+  const wsPath = args.scope ?? currentWs
+  // 预读范围：与 memory_health 共用 prereadLayers——目标层（含 .archive/）的全部状态记录、层外引用按 id 定位、
+  // 待决账本、语义缓存、按层归档的隔离文件。体检读 global + 所选 workspace；单层读可见集合（global + 本项目）。
+  // 扫描输入（active 的可见集合 / 本层集合）从这份预读里筛
+  const readLayers: LayerRef[] = checkup
+    ? [{ kind: 'global' }, ...(args.scopes && args.scopes.length > 0 ? args.scopes : checkupWorkspaces(listing)).map(path => ({ kind: 'workspace' as const, path }))]
+    : wsPath !== undefined ? [{ kind: 'workspace', path: wsPath }, { kind: 'global' }] : [{ kind: 'global' }]
+  const data = await prereadLayers(deps, readLayers, checkup ? undefined : wsPath)
+  const active = (pred: (r: MemoryRecord) => boolean) =>
+    [...data.byId.values()].filter(r => r.status === 'active' && pred(r))
+  const visibleTo = (ws: string | undefined) => (r: MemoryRecord) =>
+    r.scope === 'global' || (ws !== undefined && r.workspacePath === ws)
+  const isGlobal = (r: MemoryRecord) => r.scope === 'global'
+  // malformed 按扫描层归属（与 memory_health 的 scoreLayer 同口径）：隔离文件按读到它的目录归层
+  const layerQuarantined = (ws: string | undefined) => data.quarantined.get(cacheKey(ws)) ?? []
+
   if (checkup) {
     const wsList = args.scopes && args.scopes.length > 0 ? args.scopes : listWorkspaces(data.byId.values())
     const notes: ScanNote[] = []
@@ -328,7 +332,7 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
 
     // 分层计分（与 memory_health 共用 prereadLayers + scoreLayer，两个工具对同一层永远同分）。
     // 上面的扫描写了语义缓存与待决账本，计分前重读一份，口径与 health 读到的现状一致
-    const scored = await prereadLayers(deps)
+    const scored = await prereadLayers(deps, readLayers)
     const layerRefs: LayerRef[] = [{ kind: 'global' }, ...wsList.map(path => ({ kind: 'workspace' as const, path }))]
     const rows = layerRefs.map(ref => {
       const r = scoreLayer(deps, scored, ref, now)
@@ -368,7 +372,7 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     // 体检收尾：清理孤儿语义缓存桶（废弃 workspace 的、历史遗留键）——体检本就是全库视角，
     // 天然的清扫时机；合法桶按"库里现存的全部 workspace"算，不受本次 scopes 子集影响
     signal?.throwIfAborted()
-    const validKeys = new Set([GLOBAL_CACHE_KEY, ...listWorkspaces(scored.byId.values()).map(ws => cacheKey(ws))])
+    const validKeys = new Set([GLOBAL_CACHE_KEY, ...checkupWorkspaces(listing).map(ws => cacheKey(ws))])
     for (const key of scored.cache.keys()) {
       if (!validKeys.has(key)) await deps.cache.delete(key)
     }
@@ -379,14 +383,13 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
       pendingDecisions: { created, existing, items: decisionItems },
       crossLayerConflicts: crossLayerConflicts(scored.byId, scored.pending),
       promoteCandidates, duplicates, notes,
+      directoryNotes: [...listingNotes(listing, { includeEmpty: true }), ...data.directoryNotes],
       message: `全库体检完成：global + ${wsList.length} 个 workspace 各自独立扫描计分${created > 0 ? `，新增 ${created} 个待决冲突` : ''}。清理需用户确认后执行：删除用 memory_forget，冲突裁决用 memory_confirm，提升全局用 memory_promote。`,
     }
   }
 
-  // 单层模式：显式路径 > 当前会话 workspace > global 层（无 workspace 会话）。
-  // 输入用可见集合（global + 本项目）——global 里的问题（含最高危的 secret）对本会话同样生效，
+  // 单层模式：输入用可见集合（global + 本项目）——global 里的问题（含最高危的 secret）对本会话同样生效，
   // 跨层冲突也要双方同在 prompt 里才可判；分数归属的拆分在 memory_health（scoreLayer）做。
-  const wsPath = args.scope ?? currentWs
   const records = active(wsPath !== undefined ? visibleTo(wsPath) : isGlobal)
   // 显式扫别的 workspace 时基线不适用（基线随当前会话）；扫自己或 global 层照用
   const passBaseline = wsPath === undefined || wsPath === currentWs ? baseline : null
@@ -429,6 +432,7 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     stats, promoteCandidates,
     semanticCachedAt: pass.semanticCachedAt,
     notes,
+    directoryNotes: [...listingNotes(listing, { includeEmpty: false }), ...data.directoryNotes],
     message: `扫描${scopeLabel} ${stats.scanned} 条，发现 ${stats.issues} 个问题${pass.created > 0 ? `，新增 ${pass.created} 个待决冲突` : ''}${promoteCandidates.items.length > 0 ? `，${allCandidates.length} 条建议提升全局` : ''}${noteSuffix}。清理需用户确认后执行：删除用 memory_forget，冲突裁决用 memory_confirm，提升全局用 memory_promote。`,
   }
 }

@@ -102,9 +102,9 @@ export class SnapshotCache {
     if (cached && cached.generation === generation) return cached.text
     const isResolved = this.workspacePaths.has(session)
     const workspacePath = isResolved ? this.workspacePaths.get(session) : undefined
-    // 预读范围：只读 active，global + 当前 workspace（未解析时 global-only）
-    const records = await this.deps.store.query({ scope: { kind: 'visible', workspacePath } })
-    const { text, coreIds } = assembleSnapshot({ ...this.deps, records, workspacePath, now: Date.now() })
+    // 预读范围：只读 active，global + 当前 workspace（未解析时 global-only）；同一次读取的隔离文件数给冷启动文案用
+    const { records, quarantined } = await this.deps.store.queryScope({ scope: { kind: 'visible', workspacePath } })
+    const { text, coreIds } = assembleSnapshot({ ...this.deps, records, quarantinedCount: quarantined.length, workspacePath, now: Date.now() })
     if (!isResolved) return text
     // 构建期间被标过期：这份文本只给本次用，不进缓存、不计召回，下一次中间件按新代次重建
     if ((this.generations.get(session) ?? 0) !== generation) return text

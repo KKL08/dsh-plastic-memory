@@ -48,13 +48,13 @@ describe('外部写入立即可见：没有任何刷新调用', () => {
     expect((await t.readScope([globalDir()])).records).toEqual([])
     await seedGlobal('a.md', record({ id: 'mem_a', content: '第一版' }))
     expect((await t.readScope([globalDir()])).records.map(r => r.record.content)).toEqual(['第一版'])
-    expect((await t.get('mem_a'))!.content).toBe('第一版')
+    expect(((await t.locate('mem_a'))?.record)!.content).toBe('第一版')
     await writeFile(join(globalDir(), 'a.md'), encodeRecord(record({ id: 'mem_a', content: '第二版' }), {}))
     expect((await t.readScope([globalDir()])).records.map(r => r.record.content)).toEqual(['第二版'])
-    expect((await t.get('mem_a'))!.content).toBe('第二版')
+    expect(((await t.locate('mem_a'))?.record)!.content).toBe('第二版')
     await rm(join(globalDir(), 'a.md'))
     expect((await t.readScope([globalDir()])).records).toEqual([])
-    expect(await t.get('mem_a')).toBeUndefined()
+    expect((await t.locate('mem_a'))?.record).toBeUndefined()
   })
 
   it('readScope 的记录带实际文件路径与所在目录；workspacePath 取自 .workspace 标记', async () => {
@@ -107,7 +107,7 @@ describe('读路径零写入', () => {
     const listing = await t.listWorkspaceDirs()
     expect(listing.entries.map(e => e.workspacePath)).toEqual(['/home/dev/p'])
     expect(listing.directoryNotes.map(n => n.code)).toEqual(['marker-missing'])
-    await t.readAll()
+    await t.readScope([t.globalDir, ...listing.entries.map(e => e.dir)], { includeArchive: true })
 
     expect(await treeSnapshot(root)).toEqual(before)
     expect(Object.keys(before)).not.toContain(STATE_DIR)
@@ -199,11 +199,10 @@ describe('加载期零 I/O', () => {
     expect(await t.readScope([join(missing, GLOBAL_DIR), join(missing, 'any')])).toEqual({ records: [], quarantined: [], directoryNotes: [] })
     expect(await t.listWorkspaceDirs()).toEqual({ entries: [], directoryNotes: [] })
     expect(await t.locate('mem_a', { workspacePath: '/p' })).toBeUndefined()
-    expect(await t.list()).toEqual([])
     await expect(stat(missing)).rejects.toThrow()
     // 首次写才建目录
     await t.put('mem_a', record({ id: 'mem_a' }))
-    expect((await t.get('mem_a'))!.id).toBe('mem_a')
+    expect(((await t.locate('mem_a'))?.record)!.id).toBe('mem_a')
   })
 })
 

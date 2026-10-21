@@ -76,7 +76,7 @@ export class FileTable implements MemoryTable {
   private chain: Promise<unknown> = Promise.resolve()  // 进程内互斥：写路径与维护点串行化
   private readonly log: MemoryLogger
   private readonly opts: FileTableOptions
-  private readonly globalDir: string
+  readonly globalDir: string
 
   constructor(opts: FileTableOptions) {
     this.opts = opts
@@ -251,6 +251,10 @@ export class FileTable implements MemoryTable {
     return listing.entries.filter(e => e.workspacePath === workspacePath).map(e => ({ dir: e.dir, loc }))
   }
 
+  async workspaceDirs(workspacePath: string): Promise<string[]> {
+    return (await this.hintDirs(workspacePath)).map(d => d.dir)
+  }
+
   /** 在一组目录（顶层 + .archive/）里找 id 的全部候选：看原文 id 行，只解析命中文件。派生 id 先按文件路径重算哈希（不读内容，
    *  覆盖还没写回 id 的手建文件）；路径没命中再看 id 行——写回过 id 的文件改名或搬家后路径哈希已变，frontmatter 里的 id 才是它的身份。 */
   private async scanForId(id: string, dirs: readonly ScopeDir[]): Promise<Slot[]> {
@@ -290,20 +294,6 @@ export class FileTable implements MemoryTable {
     const second = await this.scanForId(id, rest)
     return second.length > 0 ? resolveDuplicates(second, hint)[0] : undefined
   }
-
-  // —— 过渡读法（票 09 执行器切到 readScope 后删除）——
-
-  private async allDirs(): Promise<string[]> {
-    return [this.globalDir, ...(await this.listWorkspaceDirs()).entries.map(e => e.dir)]
-  }
-
-  async readAll() {
-    const read = await this.readScope(await this.allDirs(), { includeArchive: true })
-    return { records: resolveDuplicates(read.records).map(r => r.record), quarantined: read.quarantined, directoryNotes: read.directoryNotes }
-  }
-
-  async get(key: string): Promise<MemoryRecord | undefined> { return (await this.locate(key))?.record }
-  async list(): Promise<MemoryRecord[]> { return (await this.readAll()).records }
 
   // —— 写侧（锁内）——
 
