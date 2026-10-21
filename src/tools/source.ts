@@ -27,6 +27,7 @@ export interface SourceToolDeps {
 export type SourceResult =
   | { kind: 'ok'; memoryId: string; sessionId: string; range: [number, number]; lines: string[]; skipped: number }
   | { kind: 'not-found'; memoryId: string }
+  | { kind: 'no-source'; memoryId: string }
   | { kind: 'forbidden'; memoryId: string }
   | { kind: 'unavailable'; memoryId: string; reason: string }
 
@@ -72,17 +73,21 @@ export async function executeSource(
     return { kind: 'forbidden', memoryId: args.memoryId }
   }
 
+  // 手编/手建文件没有出处锚：没有可回查的会话
+  const source = record.source
+  if (!source) return { kind: 'no-source', memoryId: args.memoryId }
+
   const readEvent = deps.getReadEvent()
   if (!readEvent) return { kind: 'unavailable', memoryId: args.memoryId, reason: '会话查询服务未挂载' }
 
-  const [start, end] = record.source.eventRange
+  const [start, end] = source.eventRange
   // 入口 = 当轮 turn/start（start）向后开窗——触发保存的用户原话紧随 turn/start，必在窗内。
   // 真机教训：入口若设在 end（save 时刻）向前开窗，长 turn（宽度 >> cap）会只读到
   // turn 尾部的结构事件，用户原话永远够不着。window 覆盖默认宽度，封顶 WINDOW_CAP。
   const after = Math.min(Math.max(args.window ?? end - start, 1), WINDOW_CAP)
   let win: Awaited<ReturnType<ReadEventFn>>
   try {
-    win = await readEvent({ sessionId: record.source.sessionId, seq: start, before: 2, after })
+    win = await readEvent({ sessionId: source.sessionId, seq: start, before: 2, after })
   } catch (e) {
     return { kind: 'unavailable', memoryId: args.memoryId, reason: `原始会话不可读（${e instanceof Error ? e.message : String(e)}）` }
   }
@@ -96,7 +101,7 @@ export async function executeSource(
     lines.push(`- [${ev.seq}] ${extracted.role}: ${text}`)
   }
   return {
-    kind: 'ok', memoryId: args.memoryId, sessionId: record.source.sessionId,
+    kind: 'ok', memoryId: args.memoryId, sessionId: source.sessionId,
     range: [win.startSeq ?? start, win.endSeq ?? end], lines, skipped,
   }
 }
@@ -105,6 +110,8 @@ export function renderSourceResult(result: SourceResult, memoryName?: string): s
   switch (result.kind) {
     case 'not-found':
       return `记忆不存在或已删除：${result.memoryId}`
+    case 'no-source':
+      return `记忆 ${result.memoryId} 无出处（手写或手改的记忆文件），没有可回查的会话轨迹。请把它当作用户写下的内容使用。`
     case 'forbidden':
       return `记忆 ${result.memoryId} 不属于当前项目，不能回查其他项目的会话轨迹。`
     case 'unavailable':

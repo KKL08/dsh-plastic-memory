@@ -71,6 +71,11 @@ describe('低置信标注', () => {
     expect(sourceNote(explicitLow)).toBe('')
   })
 
+  it('无 source（手编/无出处）不带推断标注', () => {
+    const { source: _s, ...handWritten } = record({ confidence: 0.9 })
+    expect(sourceNote(handWritten)).toBe('')
+  })
+
   it('executeSearch 过滤 validTo 已过期的记忆，命中项带陈旧度标注', async () => {
     const store = new MemoryStore(new InMemoryTable())
     const now = Date.now()

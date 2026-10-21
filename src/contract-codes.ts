@@ -51,9 +51,13 @@ export type FrontmatterErrorCode =
   | 'unclosed-fence'    // 找不到闭合的 ---
   | 'yaml-parse'        // 围栏内不是合法 YAML
   | 'not-object'        // YAML 顶层不是对象
-  | 'timestamp-format'  // 时间戳不是 UTC 毫秒 ISO 格式
+  | 'timestamp-format'  // 时间戳不是可接受的形态（日期、ISO 8601 日期时间、数字毫秒）
   | 'timestamp-parse'   // 时间戳无法解析
   | 'schema-invalid'    // 记录 schema 校验失败
+
+/** 读取记忆目录时的目录级说明（info 级，按文件列出；storage/frontmatter.ts）。 */
+export type DirectoryNoteCode =
+  | 'reserved-keys'     // frontmatter 写了保留键（scope、workspacePath、召回统计、content），已忽略
 
 /** 带 code 的说明条目（scan notes / save warnings 共用形状）。 */
 export interface CodedNote<C extends string> {

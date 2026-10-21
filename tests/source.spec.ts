@@ -50,6 +50,16 @@ describe('executeSource', () => {
     expect(readEvent).toHaveBeenCalledWith(expect.objectContaining({ after: 24 }))
   })
 
+  it('无 source（手编/手建文件）→ no-source，不调 readEvent；渲染说明无出处', async () => {
+    const { source: _s, ...handWritten } = record({})
+    const store = await storeWith(handWritten)
+    const readEvent: ReadEventFn = vi.fn()
+    const result = await executeSource({ memoryId: 'mem_a' }, ctx, { store, getReadEvent: () => readEvent })
+    expect(result).toEqual({ kind: 'no-source', memoryId: 'mem_a' })
+    expect(readEvent).not.toHaveBeenCalled()
+    expect(renderSourceResult(result)).toContain('无出处')
+  })
+
   it('记忆不存在或已删除 → not-found', async () => {
     const store = await storeWith(record({ id: 'mem_del', status: 'deleted' }))
     const deps = { store, getReadEvent: () => null }

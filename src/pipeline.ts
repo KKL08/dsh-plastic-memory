@@ -1,4 +1,4 @@
-import type { MemoryRecord } from './record-schema.ts'
+import type { MemoryRecord, SourceMode } from './record-schema.ts'
 import type { CodedNote, RejectCode, WarningCode } from './contract-codes.ts'
 import { CONFIDENCE_BY_SOURCE, memoryRecordSchema } from './record-schema.ts'
 import type { MemoryStore } from './store.ts'
@@ -17,7 +17,7 @@ export interface SaveCandidate {
   content: string
   summary: string
   tags: string[]
-  sourceMode: MemoryRecord['source']['sourceMode']
+  sourceMode: SourceMode
   confidence?: number
   supersedes?: string[]
   validFrom?: number

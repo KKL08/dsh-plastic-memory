@@ -1,5 +1,5 @@
 import { homedir } from 'node:os'
-import { join, basename } from 'node:path'
+import { join, basename, sep } from 'node:path'
 import { createHash } from 'node:crypto'
 
 export const WORKSPACE_MARKER = '.workspace'
@@ -30,4 +30,13 @@ export function slugifyName(name: string): string {
 export function workspaceDirName(workspacePath: string): string {
   const hash = createHash('sha1').update(workspacePath).digest('hex').slice(0, 8)
   return `${slugifyName(basename(workspacePath))}-${hash}`
+}
+
+/**
+ * 手建文件（frontmatter 缺 id）的确定性派生 id：`mem_f` + sha1(相对 memoryRoot 的 POSIX 路径，大小写保留)[:10]。
+ * 会进 supersedes、账本和快照——算法是难撤销契约（ARCHITECTURE.md ⑥-4），改了旧引用就断。
+ */
+export function deriveFileId(relPath: string): string {
+  const posix = relPath.split(sep).join('/')
+  return `mem_f${createHash('sha1').update(posix).digest('hex').slice(0, 10)}`
 }

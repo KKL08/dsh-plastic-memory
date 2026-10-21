@@ -57,13 +57,13 @@ describe('runSavePipeline', () => {
   it('session 带 turnStartSeq 时 eventRange 用真实当轮区间', async () => {
     const result = await runSavePipeline(candidate(), { ...deps(), session: { id: 's1', lastSeq: 42, turnStartSeq: 37 } })
     if (result.kind !== 'saved') throw new Error(result.kind)
-    expect(result.record.source.eventRange).toEqual([37, 42])
+    expect(result.record.source?.eventRange).toEqual([37, 42])
   })
 
   it('turnStartSeq 越过 lastSeq 时夹到 lastSeq（防坏输入产出倒置区间）', async () => {
     const result = await runSavePipeline(candidate(), { ...deps(), session: { id: 's1', lastSeq: 5, turnStartSeq: 9 } })
     if (result.kind !== 'saved') throw new Error(result.kind)
-    expect(result.record.source.eventRange).toEqual([5, 5])
+    expect(result.record.source?.eventRange).toEqual([5, 5])
   })
 
   it('confidence 只能下调不能上调', async () => {

@@ -103,11 +103,10 @@ describe('malformed 判定', () => {
     expect(err).toMatchObject({ code: 'timestamp-parse' })
   })
 
-  it('日期-only 时间戳（丢失毫秒精度）必须响亮拒绝，不得静默折算', () => {
-    const bad = encodeRecord(record({}), {}).replace(/createdAt: \S+/, 'createdAt: 2026-08-19')
-    const err = captureError(() => decodeRecord(splitFrontmatter(bad), { scope: 'global' }))
-    expect(err).toBeInstanceOf(FrontmatterError)
-    expect(err).toMatchObject({ code: 'timestamp-format' })
+  // 0.2.0 契约放宽：日期-only 按 UTC 零点、无时区日期时间按本地时间接受（手写文件最常见的写法）
+  it('无时区的日期时间：接受并按本地时间解析', () => {
+    const text = encodeRecord(record({}), {}).replace(/createdAt: \S+/, 'createdAt: 2026-08-19T10:00:00')
+    expect(decodeRecord(splitFrontmatter(text), { scope: 'global' }).record.createdAt).toBe(new Date(2026, 7, 19, 10).getTime())
   })
 
   it('frontmatter 里手写 content/scope 等保留字段：不进 extras、不污染记录', () => {

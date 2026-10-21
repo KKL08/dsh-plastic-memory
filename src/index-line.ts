@@ -5,7 +5,8 @@ export const INFERENCE_NOTE = '（模型推断，未经确认）'
 
 export function sourceNote(r: MemoryRecord): string {
   // 判据是 sourceMode 而非 confidence：任何来源都可被下调，user-explicit 存 0.7 会被阈值误标
-  return r.source.sourceMode === 'agent-inferred' ? INFERENCE_NOTE : ''
+  // 无 source = 手编/无出处：不带推断标注
+  return r.source?.sourceMode === 'agent-inferred' ? INFERENCE_NOTE : ''
 }
 
 export function formatIndexLine(r: MemoryRecord, opts: { passive: boolean }): string {
