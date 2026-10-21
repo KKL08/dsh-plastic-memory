@@ -25,13 +25,19 @@ export class PendingDecisionsStore {
   }
 
   async upsert(
-    input: { memoryIds: string[]; baselineRef?: string; summary: string },
+    input: { memoryIds: string[]; baselineRef?: string; summary: string; workspaces?: string[] },
     now: number,
   ): Promise<{ created: boolean; entry: PendingDecision }> {
     const key = dedupKey(input.memoryIds, input.baselineRef)
     for (const [, existing] of await this.table.list()) {
       if (dedupKey(existing.memoryIds, existing.baselineRef) === key) {
-        const updated: PendingDecision = { ...existing, summary: input.summary }
+        // workspaces 与 memoryIds 一一对应：去重键不看顺序，按已有条目的 id 顺序重排
+        const wsById = new Map(input.memoryIds.map((id, i) => [id, input.workspaces?.[i]]))
+        const workspaces = input.workspaces !== undefined ? existing.memoryIds.map(id => wsById.get(id) ?? '(未知)') : undefined
+        const updated: PendingDecision = {
+          ...existing, summary: input.summary,
+          ...(workspaces !== undefined ? { workspaces } : {}),
+        }
         await this.table.put(updated.id, updated)
         return { created: false, entry: updated }
       }
@@ -42,6 +48,7 @@ export class PendingDecisionsStore {
       ...(input.baselineRef !== undefined ? { baselineRef: input.baselineRef } : {}),
       summary: input.summary,
       firstSeenAt: now,
+      ...(input.workspaces !== undefined ? { workspaces: input.workspaces } : {}),
     }
     await this.table.put(entry.id, entry)
     return { created: true, entry }

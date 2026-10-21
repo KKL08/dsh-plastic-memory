@@ -12,6 +12,7 @@ import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, ch
 import { prereadLayers, listingNotes, checkupWorkspaces, renderDirectoryNotes } from './layer-preread.ts'
 import type { DirectoryNote } from '../storage/table.ts'
 import { runCrossWsScan, findEntityDuplicates, type CrossWsDuplicate } from '../governance/cross-ws.ts'
+import { decisionWorkspaces, decisionWorkspacesNote, workspaceLabel } from './workspace-gate.ts'
 
 export function cacheKey(scope: string | undefined): string {
   return scope ? `cache_${scope}` : GLOBAL_CACHE_KEY
@@ -49,7 +50,7 @@ export interface SingleScanResult {
   pendingDecisions: {
     created: number
     existing: number
-    items: Array<{ id: string; memoryIds: string[]; summary: string; isNew: boolean }>
+    items: Array<{ id: string; memoryIds: string[]; workspaces: string[]; summary: string; isNew: boolean }>
   }
   stats: { scanned: number; clean: number; issues: number; byType: Record<string, number> }
   /** global 提升候选：模型存时标了 globalCandidate 的 workspace 记忆，待用户确认后 memory_promote。 */
@@ -76,7 +77,7 @@ export interface CheckupScanResult {
   pendingDecisions: {
     created: number
     existing: number
-    items: Array<{ id: string; memoryIds: string[]; summary: string; isNew: boolean }>
+    items: Array<{ id: string; memoryIds: string[]; workspaces: string[]; summary: string; isNew: boolean }>
   }
   /** 同一条 global 记忆与 ≥2 个 workspace 的待决冲突：被多数项目反对，优先裁定。 */
   crossLayerConflicts: Array<{ globalId: string; workspaces: string[]; decisionIds: string[] }>
@@ -116,7 +117,7 @@ export function renderScanResult(result: ScanToolResult): string {
     if (result.pendingDecisions.items.length > 0) {
       lines.push('待裁决冲突（用 memory_confirm resolve 裁决，需 decisionId）：')
       for (const item of result.pendingDecisions.items) {
-        lines.push(`- [${item.id}] ${item.summary}`)
+        lines.push(`- [${item.id}] ${item.summary}${decisionWorkspacesNote(item.workspaces)}`)
       }
     }
     if (result.promoteCandidates.total > 0) {
@@ -149,7 +150,7 @@ export function renderScanResult(result: ScanToolResult): string {
   if (result.pendingDecisions.items.length > 0) {
     lines.push('待裁决冲突（用 memory_confirm resolve 裁决，需 decisionId）：')
     for (const item of result.pendingDecisions.items) {
-      lines.push(`- [${item.id}] ${item.summary}`)
+      lines.push(`- [${item.id}] ${item.summary}${decisionWorkspacesNote(item.workspaces)}`)
     }
     lines.push('裁决前可用 memory_source 回查双方记忆的原始出处（当时谁说的、什么语境）；与 AGENTS.md 基线的垂直冲突请核对当前基线内容，不必回查旧会话。')
   }
@@ -173,7 +174,7 @@ interface ScanPass {
   scanned: number
   semanticCachedAt: number | null
   notes: ScanNote[]
-  decisionItems: Array<{ id: string; memoryIds: string[]; summary: string; isNew: boolean }>
+  decisionItems: Array<{ id: string; memoryIds: string[]; workspaces: string[]; summary: string; isNew: boolean }>
   created: number
   existing: number
 }
@@ -239,10 +240,14 @@ async function scanPass(
       memoryIds: f.memoryIds,
       ...(f.baselineRef !== undefined ? { baselineRef: f.baselineRef } : {}),
       summary: f.summary,
+      workspaces: f.memoryIds.map(id => workspaceLabel(byId.get(id))),
     }, now)
     if (r.created) created++
     else existing++
-    decisionItems.push({ id: r.entry.id, memoryIds: r.entry.memoryIds, summary: r.entry.summary, isNew: r.created })
+    decisionItems.push({
+      id: r.entry.id, memoryIds: r.entry.memoryIds, workspaces: decisionWorkspaces(r.entry, id => byId.get(id)),
+      summary: r.entry.summary, isNew: r.created,
+    })
   }
 
   return { findings, scanned: records.length, semanticCachedAt, notes, decisionItems, created, existing }

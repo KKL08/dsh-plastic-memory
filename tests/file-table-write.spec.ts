@@ -359,7 +359,7 @@ describe('票 10：写路径内核（锁内定位、排他占名、搬家与归�
     }, saveDeps(sessionId))
     const results = await Promise.all([
       save('s1', 1), save('s2', 1),
-      executeForget({ ids: [victim.id], reason: '并发测试' }, { store, snapshots, decisions }),
+      executeForget({ ids: [victim.id], reason: '并发测试' }, { workspacePath: WS }, { store, snapshots, decisions }),
       save('s1', 2), save('s2', 2),
     ])
     const saved = results.filter((r): r is Extract<typeof r, { kind: 'saved' }> => 'kind' in r && r.kind === 'saved')
@@ -381,7 +381,7 @@ describe('票 10：写路径内核（锁内定位、排他占名、搬家与归�
     const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
     const r = wsRecord({ id: 'mem_p', name: '提升', content: '要提升的', globalCandidate: true, updatedAt: 100 })
     await t.create(r)
-    const promoted = await executePromote({ confirmedIds: ['mem_p'], target: 'global' }, {
+    const promoted = await executePromote({ confirmedIds: ['mem_p'], target: 'global' }, { workspacePath: WS }, {
       store, snapshots, agentsMd: { append: async () => {} }, now: () => 200,
     })
     expect(promoted.promoted).toEqual([{ id: 'mem_p', target: 'global' }])

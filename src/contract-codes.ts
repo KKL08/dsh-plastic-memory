@@ -12,6 +12,10 @@ export type RejectCode =
   | 'schema-invalid'    // 字段校验失败
   | 'secret-critical'   // 明确厂商特征的密钥，拒存不落盘
 
+/** 治理工具（forget / confirm / promote / snapshot）按记录的拒绝原因（tools/workspace-gate.ts）。 */
+export type GovernanceRejectCode =
+  | 'cross-workspace'   // 目标不在可见集合（global + 当前 workspace），且未带 allowCrossWorkspace
+
 /** memory_save 成功但附带的警告（pipeline.ts）。 */
 export type WarningCode =
   | 'update-global-candidate' // update 填 global：scope 不变，标记为提升候选

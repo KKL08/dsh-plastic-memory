@@ -269,7 +269,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     await store.put(rec)
 
     const forgetDeps = { store, snapshots, decisions, now: () => 5000 }
-    const result = await executeForget({ ids: [rec.id], reason: '测试遗忘' }, forgetDeps)
+    const result = await executeForget({ ids: [rec.id], reason: '测试遗忘' }, { workspacePath: '/proj' }, forgetDeps)
     expect(result.ok).toBe(true)
     expect(result.forgotten).toEqual([rec.id])
     expect((await store.get(rec.id))!.status).toBe('deleted')

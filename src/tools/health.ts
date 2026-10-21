@@ -11,6 +11,7 @@ import { runRuleScan } from '../governance/rule-scan.ts'
 import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, checkupRowBase, type LayerRef, TIER_LABEL } from '../governance/layer-health.ts'
 import type { DirectoryNote } from '../storage/table.ts'
 import { prereadLayers, listingNotes, checkupWorkspaces, renderDirectoryNotes } from './layer-preread.ts'
+import { decisionWorkspaces, decisionWorkspacesNote } from './workspace-gate.ts'
 
 const DAY = 86_400_000
 
@@ -52,7 +53,7 @@ export interface SingleHealthResult {
     overdue: number
     /** overdue 判定用的阈值天数（随 sensitivity 档位变化），渲染文案据此显示"超 N 天"。 */
     overdueDays: number
-    items: Array<{ id: string; summary: string; overdue: boolean }>
+    items: Array<{ id: string; memoryIds: string[]; workspaces: string[]; summary: string; overdue: boolean }>
   }
   totalMemories: number
   /** 本层的全局提升候选数（闲时才进 recommendation 文本，字段常在）。 */
@@ -131,7 +132,7 @@ export function renderHealthResult(result: HealthToolResult): string {
   if (result.pendingDecisions.items.length > 0) {
     lines.push('待裁决冲突（memory_confirm resolve）：')
     for (const item of result.pendingDecisions.items) {
-      lines.push(`- [${item.id}] ${item.summary}${item.overdue ? `（挂起超 ${result.pendingDecisions.overdueDays} 天）` : ''}`)
+      lines.push(`- [${item.id}] ${item.summary}${decisionWorkspacesNote(item.workspaces)}${item.overdue ? `（挂起超 ${result.pendingDecisions.overdueDays} 天）` : ''}`)
     }
   }
   lines.push(...renderDirectoryNotes(result.directoryNotes))
@@ -284,7 +285,10 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
       total: pending.length,
       overdue: overdue.length,
       overdueDays: th.pendingOverdueDays,
-      items: pending.map(e => ({ id: e.id, summary: e.summary, overdue: now - e.firstSeenAt >= overdueMs })),
+      items: pending.map(e => ({
+        id: e.id, memoryIds: e.memoryIds, workspaces: decisionWorkspaces(e, id => data.byId.get(id)),
+        summary: e.summary, overdue: now - e.firstSeenAt >= overdueMs,
+      })),
     },
     totalMemories: records.length,
     promoteCandidates: scored.promoteCandidates,

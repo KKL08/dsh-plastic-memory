@@ -77,7 +77,7 @@ function harness() {
       return cache.assemble(s)
     },
     save: (args: Parameters<typeof executeSave>[0]) => executeSave(args, fakeExec(), { store, registry, resolveContext: ctx, snapshots }),
-    snapshot: (args: Parameters<typeof executeSnapshotTool>[0]) => executeSnapshotTool(args, { store, snapshots }),
+    snapshot: (args: Parameters<typeof executeSnapshotTool>[0]) => executeSnapshotTool(args, { workspacePath: WS }, { store, snapshots }),
   }
 }
 
@@ -200,12 +200,12 @@ describe('票 12 验收：手编检测与恢复比较投影', () => {
     const path = await writeMem('keep.md', wsRec({ id: 'mem_keep', globalCandidate: true }))
     const before = (await frontmatter(path)).updatedAt
 
-    const confirmed = await executeConfirm({ action: 'refresh', memoryId: 'mem_keep' }, { store: h.store, decisions: h.decisions, snapshots: h.snapshots })
+    const confirmed = await executeConfirm({ action: 'refresh', memoryId: 'mem_keep' }, { workspacePath: WS }, { store: h.store, decisions: h.decisions, snapshots: h.snapshots })
     expect(confirmed.kind).toBe('refreshed')
     expect((await frontmatter(path)).updatedAt).toBe(before)
 
     const agentsMd = createAgentsMdWriter(join(root, 'AGENTS.md'))
-    const dismissed = await executePromote({ confirmedIds: ['mem_keep'], target: 'global', dismiss: true }, { store: h.store, agentsMd, snapshots: h.snapshots })
+    const dismissed = await executePromote({ confirmedIds: ['mem_keep'], target: 'global', dismiss: true }, { workspacePath: WS }, { store: h.store, agentsMd, snapshots: h.snapshots })
     expect(dismissed.dismissed).toEqual(['mem_keep'])
     const fm = await frontmatter(path)
     expect(fm.updatedAt).toBe(before)

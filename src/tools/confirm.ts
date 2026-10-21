@@ -2,6 +2,8 @@ import type { MemoryStore } from '../store.ts'
 import type { PendingDecisionsStore } from '../governance/decisions.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
 import type { MemoryRecord } from '../record-schema.ts'
+import type { GovernanceRejectCode } from '../contract-codes.ts'
+import { crossWorkspaceNote, gateRecords, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
 
 export interface ConfirmToolDeps {
   store: MemoryStore
@@ -10,14 +12,16 @@ export interface ConfirmToolDeps {
   now?: () => number
 }
 
+/** allowCrossWorkspace：用户明确选择「全局整理」时才为 true，放行其他项目的记录（见 workspace-gate.ts）。 */
 export type ConfirmArgs =
-  | { action: 'refresh'; memoryId: string }
-  | { action: 'resolve'; decisionId: string; verdict: 'keep-left' | 'keep-right' | 'keep-both' | 'dismiss' }
+  | { action: 'refresh'; memoryId: string; allowCrossWorkspace?: boolean }
+  | { action: 'resolve'; decisionId: string; verdict: 'keep-left' | 'keep-right' | 'keep-both' | 'dismiss'; allowCrossWorkspace?: boolean }
 
+/** otherWorkspaces：带参数放行、属于其他项目的记录；error 带 code 时 rejected 列出被拒记录。 */
 export type ConfirmResult =
-  | { kind: 'refreshed'; memoryId: string; lastConfirmedAt: number; message: string }
-  | { kind: 'resolved'; decisionId: string; verdict: string; actions: string[]; alsoCleared: number; message: string }
-  | { kind: 'error'; message: string }
+  | { kind: 'refreshed'; memoryId: string; lastConfirmedAt: number; otherWorkspaces: OtherWorkspaceMark[]; message: string }
+  | { kind: 'resolved'; decisionId: string; verdict: string; actions: string[]; alsoCleared: number; otherWorkspaces: OtherWorkspaceMark[]; message: string }
+  | { kind: 'error'; code?: GovernanceRejectCode; rejected?: CrossWorkspaceRejection[]; message: string }
 
 /**
  * memory_confirm（docs/p1-governance-health-design.md §7.1）：refresh 刷新新鲜度；resolve 裁决待决冲突。
@@ -26,23 +30,29 @@ export type ConfirmResult =
  */
 export async function executeConfirm(
   rawArgs: unknown,
+  context: GovernanceContext,
   deps: ConfirmToolDeps,
 ): Promise<ConfirmResult> {
   const args = rawArgs as ConfirmArgs
   const now = deps.now?.() ?? Date.now()
-  // 预读范围：按 id 定位单条记录（store.get，含非 active，由下方逐处判 deleted）与账本单条目，不预读整层
+  // 预读范围：按 id 两级定位单条记录（含非 active，当前 workspace 优先，由下方逐处判 deleted）与账本单条目，不预读整层
+  const locate = (id: string) => deps.store.get(id, { workspacePath: context.workspacePath })
 
   if (args.action === 'refresh') {
-    const target = await deps.store.get(args.memoryId)
+    const target = await locate(args.memoryId)
     if (!target || target.status === 'deleted') {
       return { kind: 'error', message: `记忆不存在或已删除：${args.memoryId}` }
+    }
+    const { rejected, otherWorkspaces } = gateRecords([target], context, args.allowCrossWorkspace)
+    if (rejected.length > 0) {
+      return { kind: 'error', code: 'cross-workspace', rejected, message: `未刷新记忆 ${args.memoryId}。${crossWorkspaceNote(rejected, [])}` }
     }
     // refresh 不是内容编辑，updatedAt 保持为最近一次内容修改的时刻；lastConfirmedAt 独立记录确认动作
     // （快照恢复按内容投影判断"快照后被修改"，不看 updatedAt，见 governance/snapshots.ts restoreProjection）。
     await deps.store.put({ ...target, lastConfirmedAt: now })
     return {
-      kind: 'refreshed', memoryId: args.memoryId, lastConfirmedAt: now,
-      message: `已确认记忆 ${args.memoryId} 仍然准确，新鲜度已刷新。`,
+      kind: 'refreshed', memoryId: args.memoryId, lastConfirmedAt: now, otherWorkspaces,
+      message: `已确认记忆 ${args.memoryId} 仍然准确，新鲜度已刷新。${crossWorkspaceNote([], otherWorkspaces)}`,
     }
   }
 
@@ -62,19 +72,30 @@ export async function executeConfirm(
     return { kind: 'error', message: `待决项 ${entry.id} 的记忆 id 不合法（${entry.memoryIds.join('、')}），已从账本清除，未做任何删除。` }
   }
 
+  // 条目涉及的记忆逐条定位，过跨 workspace 门：任一方属于其他项目且未带参数，整条拒绝、账本不动
+  const members = new Map<string, MemoryRecord>()
+  for (const id of entry.memoryIds) {
+    const r = await locate(id)
+    if (r) members.set(id, r)
+  }
+  const { rejected, otherWorkspaces } = gateRecords([...members.values()], context, args.allowCrossWorkspace)
+  if (rejected.length > 0) {
+    return { kind: 'error', code: 'cross-workspace', rejected, message: `未裁决待决项 ${entry.id}，账本条目保留。${crossWorkspaceNote(rejected, [])}` }
+  }
+
+  // 败方（keep-left/keep-right 要删的记忆）；keep-both/dismiss 无败方。
+  // 垂直：left=记忆 right=基线，keep-right = 基线胜、记忆删除；横向：left=memoryIds[0]、right=memoryIds[1]
+  const loserId = vertical
+    ? (args.verdict === 'keep-right' ? entry.memoryIds[0] : undefined)
+    : args.verdict === 'keep-left' ? entry.memoryIds[1] : args.verdict === 'keep-right' ? entry.memoryIds[0] : undefined
+  const toDelete = loserId === undefined ? undefined : members.get(loserId)
+  if (loserId !== undefined && toDelete === undefined) {
+    return { kind: 'error', message: `定位不到败方记忆 ${loserId}，未做任何删除，待决项 ${entry.id} 保留在账本里。可确认 id 后重试，或用 dismiss 清除该条目。` }
+  }
+
   const actions: string[] = []
   let alsoCleared = 0
-
-  // 需要删除的记忆（keep-left/keep-right 的败方）；keep-both/dismiss 无删除
-  let toDelete: MemoryRecord | undefined
-  if (vertical) {
-    // 垂直：left=记忆 right=基线。keep-right = 基线胜，记忆删除
-    if (args.verdict === 'keep-right') toDelete = await deps.store.get(entry.memoryIds[0])
-    if (args.verdict === 'keep-left') actions.push(`保留记忆 ${entry.memoryIds[0]}（用户确认 override ${entry.baselineRef}）`)
-  } else {
-    if (args.verdict === 'keep-left') toDelete = await deps.store.get(entry.memoryIds[1])
-    if (args.verdict === 'keep-right') toDelete = await deps.store.get(entry.memoryIds[0])
-  }
+  if (vertical && args.verdict === 'keep-left') actions.push(`保留记忆 ${entry.memoryIds[0]}（用户确认 override ${entry.baselineRef}）`)
 
   if (toDelete && toDelete.status !== 'deleted') {
     // 快照先行（docs/p1-governance-health-design.md §6），再软删
@@ -94,13 +115,14 @@ export async function executeConfirm(
       actions.push(`另清理 ${alsoCleared} 条同样引用该记忆的待决冲突（其一方已删除，无法再裁决）`)
     }
   } else {
+    if (toDelete) actions.push(`败方记忆 ${toDelete.id} 已是删除状态，无需再删`)
     if (args.verdict === 'keep-both') actions.push('两条并存（用户确认不冲突）')
     if (args.verdict === 'dismiss') actions.push('标记为误报')
     await deps.decisions.remove(entry.id)
   }
 
   return {
-    kind: 'resolved', decisionId: entry.id, verdict: args.verdict, actions, alsoCleared,
-    message: `冲突已裁决（${args.verdict}）：${actions.join('；')}`,
+    kind: 'resolved', decisionId: entry.id, verdict: args.verdict, actions, alsoCleared, otherWorkspaces,
+    message: `冲突已裁决（${args.verdict}）：${actions.join('；')}${crossWorkspaceNote([], otherWorkspaces)}`,
   }
 }

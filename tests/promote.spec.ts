@@ -32,7 +32,7 @@ describe('executePromote', () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_x' }))
     const { writer } = fakeAgentsMd()
-    const r = await executePromote({ confirmedIds: ['mem_x'], target: 'global' }, { store, agentsMd: writer, snapshots: makeSnapshots() })
+    const r = await executePromote({ confirmedIds: ['mem_x'], target: 'global' }, { workspacePath: '/proj' }, { store, agentsMd: writer, snapshots: makeSnapshots() })
     expect(r.promoted).toEqual([{ id: 'mem_x', target: 'global' }])
     const after = (await store.get('mem_x'))!
     expect(after.scope).toBe('global')
@@ -44,7 +44,7 @@ describe('executePromote', () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_x' }))
     const { writer } = fakeAgentsMd()
-    await executePromote({ confirmedIds: ['mem_x'], target: 'global' }, { store, agentsMd: writer, snapshots: makeSnapshots() })
+    await executePromote({ confirmedIds: ['mem_x'], target: 'global' }, { workspacePath: '/proj' }, { store, agentsMd: writer, snapshots: makeSnapshots() })
     const keys = Object.keys((await store.get('mem_x'))!)
     expect(keys).not.toContain('workspacePath')
     expect(keys).not.toContain('globalCandidate')
@@ -54,7 +54,7 @@ describe('executePromote', () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_y', name: '偏好', content: '用 pnpm' }))
     const { writer, lines } = fakeAgentsMd()
-    const r = await executePromote({ confirmedIds: ['mem_y'], target: 'agents-md' }, { store, agentsMd: writer, snapshots: makeSnapshots() })
+    const r = await executePromote({ confirmedIds: ['mem_y'], target: 'agents-md' }, { workspacePath: '/proj' }, { store, agentsMd: writer, snapshots: makeSnapshots() })
     expect(r.promoted).toEqual([{ id: 'mem_y', target: 'agents-md' }])
     expect(lines).toEqual(['偏好 — 用 pnpm'])
     expect((await store.get('mem_y'))!.status).toBe('deleted')
@@ -65,7 +65,7 @@ describe('executePromote', () => {
       const store = new MemoryStore(new InMemoryTable())
       await store.put(record({ id: 'mem_s', name: '偏好', content: '用 pnpm' }))
       const snapshots = makeSnapshots()
-      const r = await executePromote({ confirmedIds: ['mem_s'], target }, { store, agentsMd: fakeAgentsMd().writer, snapshots })
+      const r = await executePromote({ confirmedIds: ['mem_s'], target }, { workspacePath: '/proj' }, { store, agentsMd: fakeAgentsMd().writer, snapshots })
       const list = await snapshots.list()
       expect(list).toHaveLength(1)
       expect(list[0].operation).toBe('pre-promote')
@@ -80,7 +80,7 @@ describe('executePromote', () => {
   it('无可提升记录时不拍快照', async () => {
     const store = new MemoryStore(new InMemoryTable())
     const snapshots = makeSnapshots()
-    await executePromote({ confirmedIds: ['mem_ghost'], target: 'global' }, { store, agentsMd: fakeAgentsMd().writer, snapshots })
+    await executePromote({ confirmedIds: ['mem_ghost'], target: 'global' }, { workspacePath: '/proj' }, { store, agentsMd: fakeAgentsMd().writer, snapshots })
     expect(await snapshots.list()).toHaveLength(0)
   })
 
@@ -88,7 +88,7 @@ describe('executePromote', () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_z', name: '偏好', content: '用 pnpm' }))
     const failing = { append: async () => { throw new Error('EACCES: AGENTS.md 不可写') } }
-    const r = await executePromote({ confirmedIds: ['mem_z'], target: 'agents-md' }, { store, agentsMd: failing, snapshots: makeSnapshots() })
+    const r = await executePromote({ confirmedIds: ['mem_z'], target: 'agents-md' }, { workspacePath: '/proj' }, { store, agentsMd: failing, snapshots: makeSnapshots() })
     expect(r.promoted).toEqual([])
     expect(r.skipped).toEqual(['mem_z'])
     expect((await store.get('mem_z'))!.status).toBe('active')  // 软删已回滚，记忆没有丢
@@ -97,7 +97,7 @@ describe('executePromote', () => {
   it('已删除/不存在的 id 跳过、不计入 promoted', async () => {
     const store = new MemoryStore(new InMemoryTable())
     const { writer } = fakeAgentsMd()
-    const r = await executePromote({ confirmedIds: ['mem_ghost'], target: 'global' }, { store, agentsMd: writer, snapshots: makeSnapshots() })
+    const r = await executePromote({ confirmedIds: ['mem_ghost'], target: 'global' }, { workspacePath: '/proj' }, { store, agentsMd: writer, snapshots: makeSnapshots() })
     expect(r.promoted).toEqual([])
     expect(r.skipped).toEqual(['mem_ghost'])
   })
@@ -107,7 +107,7 @@ describe('executePromote', () => {
     await store.put(record({ id: 'mem_a' }))
     await store.put(record({ id: 'mem_b' }))
     const { writer } = fakeAgentsMd()
-    await executePromote({ confirmedIds: ['mem_a'], target: 'global' }, { store, agentsMd: writer, snapshots: makeSnapshots() })
+    await executePromote({ confirmedIds: ['mem_a'], target: 'global' }, { workspacePath: '/proj' }, { store, agentsMd: writer, snapshots: makeSnapshots() })
     expect((await store.get('mem_a'))!.scope).toBe('global')
     expect((await store.get('mem_b'))!.scope).toBe('workspace') // 未确认，不动
   })
@@ -116,7 +116,7 @@ describe('executePromote', () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_d', updatedAt: 111 }))
     const { writer } = fakeAgentsMd()
-    const r = await executePromote({ confirmedIds: ['mem_d'], target: 'global', dismiss: true }, { store, agentsMd: writer, snapshots: makeSnapshots() })
+    const r = await executePromote({ confirmedIds: ['mem_d'], target: 'global', dismiss: true }, { workspacePath: '/proj' }, { store, agentsMd: writer, snapshots: makeSnapshots() })
     expect(r.dismissed).toEqual(['mem_d'])
     expect(r.promoted).toEqual([])
     const after = (await store.get('mem_d'))!
@@ -130,14 +130,14 @@ describe('executePromote', () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_d' }))
     const snapshots = makeSnapshots()
-    await executePromote({ confirmedIds: ['mem_d'], target: 'global', dismiss: true }, { store, agentsMd: fakeAgentsMd().writer, snapshots })
+    await executePromote({ confirmedIds: ['mem_d'], target: 'global', dismiss: true }, { workspacePath: '/proj' }, { store, agentsMd: fakeAgentsMd().writer, snapshots })
     expect(await snapshots.list()).toHaveLength(0)
   })
 
   it('dismiss：缺失/已删的 id 计入 skipped', async () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_d' }))
-    const r = await executePromote({ confirmedIds: ['mem_d', 'mem_ghost'], target: 'global', dismiss: true }, { store, agentsMd: fakeAgentsMd().writer, snapshots: makeSnapshots() })
+    const r = await executePromote({ confirmedIds: ['mem_d', 'mem_ghost'], target: 'global', dismiss: true }, { workspacePath: '/proj' }, { store, agentsMd: fakeAgentsMd().writer, snapshots: makeSnapshots() })
     expect(r.dismissed).toEqual(['mem_d'])
     expect(r.skipped).toEqual(['mem_ghost'])
   })
@@ -155,8 +155,8 @@ describe('executePromote × 真实 AgentsMdWriter', () => {
     const writer = createAgentsMdWriter(join(dir, 'AGENTS.md'))
     const snapshots = makeSnapshots()
     const [r1, r2] = await Promise.all([
-      executePromote({ confirmedIds: ['mem_p1'], target: 'agents-md' }, { store, agentsMd: writer, snapshots }),
-      executePromote({ confirmedIds: ['mem_p2'], target: 'agents-md' }, { store, agentsMd: writer, snapshots }),
+      executePromote({ confirmedIds: ['mem_p1'], target: 'agents-md' }, { workspacePath: '/proj' }, { store, agentsMd: writer, snapshots }),
+      executePromote({ confirmedIds: ['mem_p2'], target: 'agents-md' }, { workspacePath: '/proj' }, { store, agentsMd: writer, snapshots }),
     ])
     expect(r1.promoted.map(p => p.id)).toEqual(['mem_p1'])
     expect(r2.promoted.map(p => p.id)).toEqual(['mem_p2'])
@@ -173,8 +173,8 @@ describe('executePromote × 真实 AgentsMdWriter', () => {
     await store.put(record({ id: 'mem_short', name: '包管理', content: '使用 pnpm 安装依赖' }))
     const writer = createAgentsMdWriter(join(dir, 'AGENTS.md'))
     const deps = { store, agentsMd: writer, snapshots: makeSnapshots() }
-    await executePromote({ confirmedIds: ['mem_long'], target: 'agents-md' }, deps)
-    await executePromote({ confirmedIds: ['mem_short'], target: 'agents-md' }, deps)
+    await executePromote({ confirmedIds: ['mem_long'], target: 'agents-md' }, { workspacePath: '/proj' }, deps)
+    await executePromote({ confirmedIds: ['mem_short'], target: 'agents-md' }, { workspacePath: '/proj' }, deps)
     const text = await readFile(join(dir, 'AGENTS.md'), 'utf8')
     expect(text.split('\n').filter(l => l.startsWith('- 包管理 — '))).toHaveLength(2)
   })

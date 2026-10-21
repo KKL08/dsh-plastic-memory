@@ -106,7 +106,7 @@ function harness(opts: { readEvent?: ReadEventFn; now?: number } = {}) {
       executeSource({ memoryId }, { workspacePath: ws ?? undefined }, { store, getReadEvent: () => opts.readEvent ?? null }),
     save: (args: Parameters<typeof executeSave>[0], ws: string | null = WS) =>
       executeSave(args, fakeExec(), { store, registry, resolveContext: ctx(ws), snapshots }),
-    forget: (ids: string[]) => executeForget({ ids, reason: '测试' }, { store, snapshots, decisions }),
+    forget: (ids: string[]) => executeForget({ ids, reason: '测试' }, { workspacePath: WS }, { store, snapshots, decisions }),
   }
 }
 

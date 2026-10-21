@@ -289,10 +289,10 @@ export async function apply(ctx: Context, config: Config) {
   const registerWrite = (tool: ToolDefinition) => ctx.tools.register(gateSubagentWrites(tool, resolveContext))
   registerWrite(createSaveTool({ store, registry, resolveContext, snapshots }))
   ctx.tools.register(createSearchTool({ store, registry, resolveContext }))
-  registerWrite(createForgetTool({ store, snapshots, decisions, log: ctx.logger }))
+  registerWrite(createForgetTool({ store, snapshots, decisions, log: ctx.logger, resolveContext }))
   // 快照的写入与恢复必须成对——治理关闭时 forget 仍会拍快照，若没有恢复入口，
   // 14 天的快照就是死存储。故 memory_snapshot 放在治理开关之外，与 forget 一起常驻。
-  registerWrite(createSnapshotTool({ store, snapshots }))
+  registerWrite(createSnapshotTool({ store, snapshots, resolveContext }))
   // memory_source：证据下钻（日常 + 治理都用，常驻）。sessionQuery 是 base bundle 默认服务，
   // 但按 llm 同款惯例 per-call 探测 + try/catch——某些 profile 缺席时工具内优雅降级，不挂载失败。
   ctx.tools.register(createSourceTool({
@@ -307,7 +307,7 @@ export async function apply(ctx: Context, config: Config) {
     },
   }))
   if (config.governance.enabled) {
-    registerWrite(createConfirmTool({ store, decisions, snapshots }))
+    registerWrite(createConfirmTool({ store, decisions, snapshots, resolveContext }))
     // 基线按触发调用的 session 取（宿主投影 cell 按 session 隔离，防多会话串台）。
     // 扫描会写语义缓存、登记待决冲突，归写工具；health 纯读，不套门
     registerWrite(createScanTool({
@@ -330,7 +330,7 @@ export async function apply(ctx: Context, config: Config) {
     // AGENTS.md 位置从 DSH_HOME 独立解析（不从 memoryRoot 反推——自定义 root 时会指向 dsh 不读的文件）
     const agentsMd = createAgentsMdWriter(agentsMdPath())
     const defaultTarget: PromoteTarget = config.governance.globalPromoteTarget === 'agents-md' ? 'agents-md' : 'global'
-    registerWrite(createPromoteTool({ store, agentsMd, snapshots, defaultTarget }))
+    registerWrite(createPromoteTool({ store, agentsMd, snapshots, defaultTarget, resolveContext }))
   }
 
   // frozen snapshot：按 session 隔离缓存，session/created 异步解析 workspace，compaction 结束标过期、下一次中间件重建。

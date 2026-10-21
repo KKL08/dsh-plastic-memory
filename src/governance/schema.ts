@@ -12,6 +12,8 @@ export const pendingDecisionSchema = z.object({
   baselineRef: z.string().optional(),
   summary: z.string(),
   firstSeenAt: z.number(),
+  /** 与 memoryIds 一一对应的所属 workspace 路径，global 记忆为 'global'。旧条目没有此字段。 */
+  workspaces: z.array(z.string()).optional(),
 })
 export type PendingDecision = z.infer<typeof pendingDecisionSchema>
 

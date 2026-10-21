@@ -1,6 +1,7 @@
 import type { MemoryStore } from '../store.ts'
 import type { SnapshotStore, SnapshotDiffEntry } from '../governance/snapshots.ts'
 import type { MemoryRecord } from '../record-schema.ts'
+import { crossWorkspaceNote, gateRecords, isVisible, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
 
 export interface SnapshotToolDeps {
   store: MemoryStore
@@ -8,17 +9,24 @@ export interface SnapshotToolDeps {
   now?: () => number
 }
 
+/** allowCrossWorkspace：用户明确选择「全局整理」时才为 true，放行其他项目的记录（见 workspace-gate.ts）。 */
 export type SnapshotToolArgs =
-  | { action: 'create'; description?: string; memoryIds?: string[] }
+  | { action: 'create'; description?: string; memoryIds?: string[]; allowCrossWorkspace?: boolean }
   | { action: 'list' }
-  | { action: 'show'; snapshotId: string }
-  | { action: 'restore'; snapshotId: string; memoryIds?: string[]; overwriteChanged?: boolean }
+  | { action: 'show'; snapshotId: string; allowCrossWorkspace?: boolean }
+  | { action: 'restore'; snapshotId: string; memoryIds?: string[]; overwriteChanged?: boolean; allowCrossWorkspace?: boolean }
+
+/** rejected：属于其他项目、因未带参数被拒的记录；otherWorkspaces：带参数放行、属于其他项目的记录。 */
+interface CrossWorkspaceFields {
+  rejected: CrossWorkspaceRejection[]
+  otherWorkspaces: OtherWorkspaceMark[]
+}
 
 export type SnapshotToolResult =
-  | { kind: 'created'; snapshotId: string; count: number; missing: string[]; message: string }
+  | { kind: 'created'; snapshotId: string; count: number; missing: string[]; message: string } & CrossWorkspaceFields
   | { kind: 'listed'; snapshots: Array<{ id: string; createdAt: number; operation: string; description: string; count: number }>; message: string }
-  | { kind: 'shown'; entries: SnapshotDiffEntry[]; message: string }
-  | { kind: 'restored'; restored: string[]; skipped: string[]; message: string }
+  | { kind: 'shown'; entries: SnapshotDiffEntry[]; message: string } & CrossWorkspaceFields
+  | { kind: 'restored'; restored: string[]; skipped: string[]; message: string } & CrossWorkspaceFields
   | { kind: 'error'; message: string }
 
 /**
@@ -27,6 +35,7 @@ export type SnapshotToolResult =
  */
 export async function executeSnapshotTool(
   rawArgs: unknown,
+  context: GovernanceContext,
   deps: SnapshotToolDeps,
 ): Promise<SnapshotToolResult> {
   const args = rawArgs as SnapshotToolArgs
@@ -36,11 +45,12 @@ export async function executeSnapshotTool(
   if (args.action === 'create') {
     // 去重（与 memory_forget 的约定一致）：调用者传入重复 id 不应重复计入快照
     const uniqueIds = args.memoryIds ? [...new Set(args.memoryIds)] : undefined
-    // 预读范围：给了 id 则逐条定位（含非 active，再剔除已删）；否则只读 active 全量
-    const records = uniqueIds
-      ? (await Promise.all(uniqueIds.map(id => deps.store.get(id))))
-          .filter((r): r is MemoryRecord => r !== undefined && r.status !== 'deleted')
-      : await deps.store.query({ status: ['active'] })
+    // 预读范围：给了 id 则逐条两级定位（含非 active，当前 workspace 优先，再剔除已删）并过跨 workspace 门；否则只读 active 全量
+    const gated = uniqueIds
+      ? gateRecords((await Promise.all(uniqueIds.map(id => deps.store.get(id, { workspacePath: context.workspacePath }))))
+          .filter((r): r is MemoryRecord => r !== undefined && r.status !== 'deleted'), context, args.allowCrossWorkspace)
+      : { allowed: await deps.store.query({ status: ['active'] }), rejected: [], otherWorkspaces: [] }
+    const { allowed: records, rejected, otherWorkspaces } = gated
     const snap = await deps.snapshots.capture({
       operation: 'manual',
       description: args.description ?? `手动快照（${records.length} 条）`,
@@ -48,12 +58,12 @@ export async function executeSnapshotTool(
     }, now)
     // 未找到或已删除的 id 不能悄悄丢掉——否则用户以为安全网覆盖了全部请求的记忆，
     // 实际只存了一部分
-    const capturedIds = new Set(records.map(r => r.id))
-    const missing = (uniqueIds ?? []).filter(id => !capturedIds.has(id))
+    const handledIds = new Set([...records.map(r => r.id), ...rejected.map(r => r.id)])
+    const missing = (uniqueIds ?? []).filter(id => !handledIds.has(id))
     const missingNote = missing.length > 0 ? `；未找到或已删除：${missing.join('、')}` : ''
     return {
-      kind: 'created', snapshotId: snap.id, count: records.length, missing,
-      message: `已创建快照 ${snap.id}（${records.length} 条记忆），14 天内可恢复${missingNote}。`,
+      kind: 'created', snapshotId: snap.id, count: records.length, missing, rejected, otherWorkspaces,
+      message: `已创建快照 ${snap.id}（${records.length} 条记忆），14 天内可恢复${missingNote}。${crossWorkspaceNote(rejected, otherWorkspaces)}`,
     }
   }
 
@@ -74,27 +84,35 @@ export async function executeSnapshotTool(
   if (!snap) {
     return { kind: 'error', message: `快照不存在：${args.snapshotId}（可能已超过 14 天保留窗口）` }
   }
-  // show / restore 的预读范围：快照内每个 id 的现状，按 id 定位（含非 active）
+  // show / restore 的预读范围：快照内每个 id 的现状，按 id 两级定位（含非 active，当前 workspace 优先）
   const current = new Map<string, MemoryRecord>()
   for (const { id } of snap.data) {
-    const r = await deps.store.get(id)
+    const r = await deps.store.get(id, { workspacePath: context.workspacePath })
     if (r) current.set(id, r)
   }
+  // 跨 workspace 门：快照里的记录与它的现状任一方落在其他项目，就按那个项目判定（restore 写回快照里的位置）
+  const targets = args.action === 'restore' && args.memoryIds ? snap.data.filter(r => args.memoryIds!.includes(r.id)) : snap.data
+  const { allowed, rejected, otherWorkspaces } = gateRecords(targets.map(r => {
+    const present = current.get(r.id)
+    return present !== undefined && !isVisible(present, context) ? present : r
+  }), context, args.allowCrossWorkspace)
+  const allowedIds = new Set(allowed.map(r => r.id))
+  const wsNote = crossWorkspaceNote(rejected, otherWorkspaces)
 
   if (args.action === 'show') {
-    const entries = deps.snapshots.diff(snap, current)
+    const entries = deps.snapshots.diff(snap, current).filter(e => allowedIds.has(e.id))
     const lines = entries.map(e => {
       const state = e.current === undefined ? '当前不存在（已删）'
         : e.current.status === 'deleted' ? '当前已软删'
         : e.changedAfterSnapshot ? '快照后被修改过 ⚠️' : '与快照一致或未变'
       return `- ${e.id}：${state}｜快照内容：${e.snapshotted.summary}`
     })
-    return { kind: 'shown', entries, message: `快照 ${snap.id}（${snap.description}）：\n${lines.join('\n')}` }
+    return { kind: 'shown', entries, rejected, otherWorkspaces, message: `快照 ${snap.id}（${snap.description}）：\n${lines.join('\n')}${wsNote}` }
   }
 
   // restore
   const { restored, skipped } = await deps.snapshots.restore(
-    snap, args.memoryIds,
+    snap, [...allowedIds],
     r => deps.store.put(r),
     current,
     args.overwriteChanged ?? false,
@@ -103,7 +121,7 @@ export async function executeSnapshotTool(
     ? `；${skipped.length} 条因快照后被修改而跳过（确认覆盖请带 overwriteChanged: true）`
     : ''
   return {
-    kind: 'restored', restored, skipped,
-    message: `已恢复 ${restored.length} 条记忆（${restored.join('、')}）${skippedNote}。`,
+    kind: 'restored', restored, skipped, rejected, otherWorkspaces,
+    message: `已恢复 ${restored.length} 条记忆（${restored.join('、')}）${skippedNote}。${wsNote}`,
   }
 }

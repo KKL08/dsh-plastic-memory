@@ -148,6 +148,7 @@ describe('memory_forget 绑定', () => {
     return createForgetTool({
       store, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
       decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()), now: () => NOW,
+      resolveContext: async () => ({ workspacePath: '/proj' }),
     })
   }
 
@@ -186,6 +187,7 @@ describe('memory_promote 绑定', () => {
     return createPromoteTool({
       store, agentsMd: { append: async () => {} } as never,
       snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), defaultTarget: 'global', now: () => NOW,
+      resolveContext: async () => ({ workspacePath: '/proj' }),
     })
   }
 
@@ -224,6 +226,7 @@ describe('memory_confirm 绑定', () => {
     return createConfirmTool({
       store, decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
       snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), now: () => NOW,
+      resolveContext: async () => ({ workspacePath: '/proj' }),
     })
   }
 
@@ -257,7 +260,7 @@ describe('memory_confirm 绑定', () => {
 // ---------------------------------------------------------------------------
 describe('memory_snapshot 绑定', () => {
   const makeTool = (store: MemoryStore, snapshots: SnapshotStore) =>
-    createSnapshotTool({ store, snapshots, now: () => NOW })
+    createSnapshotTool({ store, snapshots, now: () => NOW, resolveContext: async () => ({ workspacePath: '/proj' }) })
 
   it('(a) 合法参数过、缺必填（action）拒', () => {
     const tool = makeTool(new MemoryStore(new InMemoryTable()), new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()))
