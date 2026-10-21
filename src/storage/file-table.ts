@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, writeFile, rename, rm, stat } from 'node:fs/promises'
+import { mkdir, readdir, readFile, writeFile, rename, rm, stat, link } from 'node:fs/promises'
 import { RecordNotFoundError } from '../errors.ts'
 import { dirname, join, relative } from 'node:path'
 import type { MemoryRecord } from '../record-schema.ts'
@@ -70,7 +70,7 @@ function frontmatterOf(raw: string): string {
 
 /**
  * 文件表：磁盘是唯一真相，进程里不常驻记忆表（设计稿 §0）。构造不做 I/O；每个操作读它涉及的目录。
- * 读路径不加锁、不写盘；写路径经一条 Promise 链串行，锁内先 locate 重读磁盘再应用修改（外部编辑不丢）。
+ * 读路径不加锁、不写盘；写路径经一条 Promise 链串行，锁内先 locate 重读磁盘再应用修改（外部编辑不丢）；create 是例外：新 id 不定位，排他占名。
  */
 export class FileTable implements MemoryTable {
   private chain: Promise<unknown> = Promise.resolve()  // 进程内互斥：写路径与维护点串行化
@@ -402,44 +402,76 @@ export class FileTable implements MemoryTable {
     return m ? m[1] : 'unreadable'
   }
 
-  /** 撞名检查看磁盘：隔离文件、缺标记目录里的文件都看得见，不会被同 slug 写入静默覆盖。占名原子化是票 10。 */
-  private async filePathFor(record: MemoryRecord, dir: string): Promise<string> {
+  /**
+   * 排他占名并写入（设计稿 §5；ARCHITECTURE.md ⑥-2 撞名追加 id 片段）。完整内容先进 tmp，再 link 到候选名：目标名原子出现
+   * 且内容完整，没有"先建空文件再填"的窗口，崩溃最多留下 tmp（维护点清）。EEXIST 表示名被占——占着的是同一记录自己的
+   * 文件（崩溃残留、同 id 副本）才允许 rename 覆盖，否则换下一个候选：基础名 → id 片段名 → 全 id 名（按构造只属于本记录，
+   * 直接覆盖）。两个进程写同名异 id 的记录因此两条都存活；隔离文件、缺标记目录里的文件也不会被同 slug 写入静默覆盖。
+   */
+  private async claimAndWrite(record: MemoryRecord, level: string, text: string): Promise<string> {
     const base = slugifyName(record.name)
-    const idFrag = record.id.slice(-6)
-    // 依次尝试：基础名 → id 片段名 → 全 id 名（全 id 全局唯一，兜底必然可用）
-    for (const name of [`${base}.md`, `${base}-${idFrag}.md`]) {
-      if (isReservedFileName(name)) continue // memory.md ≈ MEMORY.md，索引再生会覆盖它
-      const path = join(dir, name)
-      const onDisk = await this.readIdOnDisk(path)
-      if (onDisk !== null && onDisk !== record.id) continue
+    const tmp = join(level, `${base}.md.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`)
+    await writeFile(tmp, text, 'utf8')
+    try {
+      for (const name of [`${base}.md`, `${base}-${record.id.slice(-6)}.md`]) {
+        if (isReservedFileName(name)) continue // memory.md ≈ MEMORY.md，索引再生会覆盖它
+        const path = join(level, name)
+        try {
+          await link(tmp, path)
+          return path
+        } catch (err) {
+          if (errnoCode(err) !== 'EEXIST') throw err
+        }
+        if ((await this.readIdOnDisk(path)) === record.id) { await rename(tmp, path); return path }
+      }
+      const path = join(level, `${base}-${record.id}.md`)
+      await rename(tmp, path)
       return path
+    } finally {
+      await rm(tmp, { force: true })   // link 成功后多出的那个名字；rename 过的已不存在
     }
-    return join(dir, `${base}-${record.id}.md`)
   }
 
-  private async persist(key: string, prev: LocatedFile | undefined, next: MemoryRecord): Promise<void> {
+  /**
+   * 写路径（锁内，设计稿 §5）：选目录（scope；workspace 目录不存在则 mkdir + 写标记）→ 选层（status 离开 active 进
+   * .archive/，deleted 缺 deletedAt 补 now；回到 active 搬回顶层）→ 编码 → 已定位到自己文件且目录、层、slug 都没变就原地
+   * tmp + rename 覆盖，否则排他占名 → 搬家删旧 → 本目录（搬家时两个）维护点。返回实际写出的记录。
+   */
+  private async persist(key: string, prev: LocatedFile | undefined, value: MemoryRecord): Promise<MemoryRecord> {
+    const next = value.status === 'deleted' && value.deletedAt === undefined ? { ...value, deletedAt: this.now() } : value
     const volatileChanged = !prev || !this.volatileEqual(prev.record, next)
     const stableChanged = !prev || !this.stableEqual(prev.record, next)
     if (stableChanged) {
       // 位置没变就留在原目录（覆盖手工改名的 workspace 目录），变了才按 scope 选目录
       const sameLocation = prev !== undefined && prev.record.scope === next.scope && prev.record.workspacePath === next.workspacePath
       const dir = sameLocation ? prev.dir : await this.dirFor(next)
+      const level = next.status === 'active' ? dir : join(dir, ARCHIVE_DIR)
       const moved = prev !== undefined && prev.dir !== dir
       // 改名后文件名要跟着变，否则磁盘文件仍叫旧 slug，用户浏览/grep 被误导。比较 slug 而非
       // name（空白等变化不折腾文件），且忽略大小写：APFS 等大小写不敏感文件系统上，仅大小写
       // 不同的新旧路径是同一个文件——若触发重命名，"先写新后删旧"会把刚写的文件删掉，丢数据。
       const renamed = prev !== undefined
         && slugifyName(next.name).toLowerCase() !== slugifyName(prev.record.name).toLowerCase()
-      const filePath = moved || renamed || !prev ? await this.filePathFor(next, dir) : prev.filePath
-      await this.atomicWrite(filePath, encodeRecord(next, prev?.extras ?? {}))   // 易变字段由 encodeRecord 剔除
-      // 先写新后删旧；崩溃窗口由读路径的同 id 取舍兜底。filePathFor 撞名回退可能落回原路径，故加
-      // prev.filePath !== filePath 保护，不能删掉刚写的自己。
-      if ((moved || renamed) && prev!.filePath !== filePath) await rm(prev!.filePath, { force: true })
+      const text = encodeRecord(next, prev?.extras ?? {})   // 易变字段由 encodeRecord 剔除
+      if (prev !== undefined && !moved && !renamed && dirname(prev.filePath) === level) {
+        await this.atomicWrite(prev.filePath, text)   // 自己的文件：rename 只覆盖同一记录自己的文件
+      } else {
+        await mkdir(level, { recursive: true })
+        const filePath = await this.claimAndWrite(next, level, text)
+        // 先写新后删旧；崩溃窗口由读路径的同 id 取舍兜底。占名可能落回原路径（候选名正被自己占着），
+        // 路径比较忽略大小写：大小写不敏感文件系统上不能删掉刚写的自己。
+        if (prev !== undefined && prev.filePath.toLowerCase() !== filePath.toLowerCase()) await rm(prev.filePath, { force: true })
+      }
       await this.maintainDirs(moved ? [dir, prev!.dir] : [dir])
     }
     if (volatileChanged) {
       await this.opts.stats.put(key, { id: key, recallCount: next.recallCount, lastRecalledAt: next.lastRecalledAt })
     }
+    return next
+  }
+
+  async create(record: MemoryRecord): Promise<void> {
+    await this.locked(async () => { await this.persist(record.id, undefined, record) })
   }
 
   async put(key: string, value: MemoryRecord): Promise<void> {
@@ -458,9 +490,7 @@ export class FileTable implements MemoryTable {
     return this.locked(async () => {
       const current = await this.locate(key)   // 锁内重读磁盘：外部编辑不丢
       if (!current) throw new RecordNotFoundError(key)
-      const next = fn(current.record)
-      await this.persist(key, current, next)
-      return next
+      return this.persist(key, current, fn(current.record))
     })
   }
 

@@ -135,7 +135,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
       id: 'mem_ws_a_deleted', name: 'workspace-a-deleted-memory', type: 'project', scope: 'workspace',
       workspacePath: '/home/dev/repo-with-hyphens/sub-dir',
       content: '已被遗忘的 ws-a 记忆', summary: 'ws-a 已删除摘要', status: 'deleted',
-      createdAt: NOW, updatedAt: NOW, lastConfirmedAt: NOW,
+      createdAt: NOW, updatedAt: NOW, lastConfirmedAt: NOW, deletedAt: NOW,   // 缺 deletedAt 时写路径会补 now，显式给定保证逐字段相等
     })
 
     for (const r of [recGlobal, recA, recB, recADeleted]) await table.put(r.id, r)
@@ -435,6 +435,69 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect(listing.directoryNotes.map(n => [n.code, n.path])).toEqual([['dir-empty', h.wsDir(WS_B)]])
     // 定位用全部目录：只剩归档的目录也能按 id 找到
     expect((await table.locate('mem_b'))!.record.status).toBe('deleted')
+  })
+
+  // —— 票 10：写路径内核（docs/design-storage-file-is-memory.md §3 §5）——
+
+  const topLevel = async (dir: string) =>
+    (await table.readScope([dir], { includeArchive: true })).records.map(r => [r.record.id, r.filePath] as const)
+
+  it('create 不定位：不调用 locate 直接占名落盘；同名异 id 两条都在、文件名不同', async () => {
+    const locate = vi.spyOn(table, 'locate')
+    await table.create(ws(WS_A, { id: 'mem_c1', name: '同名', content: '第一条' }))
+    await table.create(ws(WS_A, { id: 'mem_c2', name: '同名', content: '第二条' }))
+    expect(locate).not.toHaveBeenCalled()
+    const rows = await topLevel(h.wsDir(WS_A))
+    expect(rows.map(([id]) => id).sort()).toEqual(['mem_c1', 'mem_c2'])
+    expect(new Set(rows.map(([, p]) => p)).size).toBe(2)
+    expect((await table.locate('mem_c2', { workspacePath: WS_A }))!.record.content).toBe('第二条')
+  })
+
+  it('put 跨目录定位旧文件：global put 不带 workspacePath 也找到 workspace 里的旧文件并搬家，旧目录无、新目录有', async () => {
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'mv.md', record: ws(WS_A, { id: 'mem_mv', name: 'mv', content: '搬家前', updatedAt: 1 }) })
+    const { workspacePath: _w, ...rest } = ws(WS_A, { id: 'mem_mv', name: 'mv', content: '搬家后', updatedAt: 2 })
+    await table.put('mem_mv', { ...rest, scope: 'global' })
+    expect(await topLevel(h.wsDir(WS_A))).toEqual([])
+    const inGlobal = await topLevel(h.globalDir)
+    expect(inGlobal.map(([id]) => id)).toEqual(['mem_mv'])
+    expect((await table.locate('mem_mv'))!.record).toMatchObject({ scope: 'global', content: '搬家后' })
+  })
+
+  it('status 变为 deleted / superseded 时文件移入同目录 .archive/，deleted 补 deletedAt；回到 active 搬回顶层', async () => {
+    const NOW = Date.now()   // deleted 的 updatedAt 要落在 14 天保留窗口内，否则写路径末尾的清扫会顺手删掉它
+    await table.create(ws(WS_A, { id: 'mem_del', name: 'del', updatedAt: NOW - 3 }))
+    await table.create(ws(WS_A, { id: 'mem_sup', name: 'sup', updatedAt: NOW - 3 }))
+    const dir = h.wsDir(WS_A)
+    await table.update('mem_del', r => ({ ...r, status: 'deleted', updatedAt: NOW - 2 }))
+    await table.update('mem_sup', r => ({ ...r, status: 'superseded', updatedAt: NOW - 2 }))
+    const rows = new Map(await topLevel(dir))
+    expect(rows.get('mem_del')).toBe(join(dir, ARCHIVE_DIR, 'del.md'))
+    expect(rows.get('mem_sup')).toBe(join(dir, ARCHIVE_DIR, 'sup.md'))
+    expect((await table.readScope([dir])).records).toEqual([])                      // 顶层已空
+    const deleted = (await table.locate('mem_del', { workspacePath: WS_A }))!.record
+    expect(typeof deleted.deletedAt).toBe('number')
+    expect((await table.locate('mem_sup', { workspacePath: WS_A }))!.record.deletedAt).toBeUndefined()
+
+    // 显式给的 deletedAt 不被覆盖
+    await table.update('mem_sup', r => ({ ...r, status: 'deleted', deletedAt: 777, updatedAt: NOW - 1 }))
+    expect((await table.locate('mem_sup', { workspacePath: WS_A }))!.record.deletedAt).toBe(777)
+
+    // restore：整条 put 回 active（无 deletedAt）→ 从 .archive/ 搬回顶层，归档文件消失
+    await table.put('mem_del', ws(WS_A, { id: 'mem_del', name: 'del', updatedAt: NOW }))
+    const after = await topLevel(dir)
+    expect(after.find(([id]) => id === 'mem_del')![1]).toBe(join(dir, 'del.md'))
+    expect(after.filter(([id]) => id === 'mem_del')).toHaveLength(1)
+    expect((await table.locate('mem_del', { workspacePath: WS_A }))!.record.deletedAt).toBeUndefined()
+  })
+
+  it('delete 物理删除，含 .archive/ 里的文件', async () => {
+    await table.create(record({ id: 'mem_gone', name: 'gone', updatedAt: Date.now() - 1 }))
+    await table.update('mem_gone', r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))   // 保留窗口内，不被清扫
+    expect((await topLevel(h.globalDir)).map(([, p]) => p)).toEqual([join(h.globalDir, ARCHIVE_DIR, 'gone.md')])
+    expect(await table.delete('mem_gone')).toBe(true)
+    expect(await table.locate('mem_gone')).toBeUndefined()
+    expect(await topLevel(h.globalDir)).toEqual([])
+    expect(await table.delete('mem_gone')).toBe(false)
   })
 
 })

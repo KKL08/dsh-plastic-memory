@@ -194,7 +194,9 @@ export async function runSavePipeline(
   }
 
   const clean = pruneUndefined(parsed.data)
-  await store.put(clean)
+  // 新 id 不定位（create 排他占名）；update 走 put：锁内定位旧文件，scope 没变就原地覆盖
+  if (candidate.action === 'update') await store.put(clean)
+  else await store.create(clean)
 
   // 6. supersedes 处理：目标必须与本次写入记录同桶——跨桶替代会绕过用户确认闸、无快照、无复活路径。
   // 不同桶的目标跳过不置 superseded，仅给一条警告。目标不存在维持静默跳过。

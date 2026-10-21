@@ -35,16 +35,16 @@ export class InMemoryTable implements MemoryTable {
     return record.scope === 'global' ? this.globalDir : join(this.root, workspaceDirName(record.workspacePath!))
   }
 
-  /** 与 FileTable.filePathFor 同规则：基础名 → id 片段名 → 全 id 名，被别的 id 占着就换下一个。 */
-  private pathFor(record: MemoryRecord, dir: string): string {
+  /** 与 FileTable.claimAndWrite 同规则：基础名 → id 片段名 → 全 id 名，被别的 id 占着就换下一个（level 是顶层或 .archive/）。 */
+  private pathFor(record: MemoryRecord, level: string): string {
     const base = slugifyName(record.name)
     for (const name of [`${base}.md`, `${base}-${record.id.slice(-6)}.md`]) {
       if (isReservedFileName(name)) continue
-      const path = join(dir, name)
+      const path = join(level, name)
       const taken = this.slots.get(path)
       if (taken === undefined || taken.record.id === record.id) return path
     }
-    return join(dir, `${base}-${record.id}.md`)
+    return join(level, `${base}-${record.id}.md`)
   }
 
   /** 供双后端套件直接往虚拟目录放一个文件（对应 FileTable 的手写 / 外部落盘文件）。archived 放进 .archive/。 */
@@ -93,16 +93,24 @@ export class InMemoryTable implements MemoryTable {
     return { entries, directoryNotes }
   }
 
-  /** 落槽位：位置没变且 slug 没变就留在原路径，否则按 scope 目录重新取名（与 FileTable.persist 同规则）。 */
-  private place(prev: LocatedFile | undefined, next: MemoryRecord): void {
+  /** 落槽位（与 FileTable.persist 同规则）：status 离开 active 进 .archive/（deleted 缺 deletedAt 补 now）；目录、层、slug 都没变
+   *  就留在原路径，否则在目标层重新取名。返回实际落下的记录。 */
+  private place(prev: LocatedFile | undefined, value: MemoryRecord): MemoryRecord {
+    const next = value.status === 'deleted' && value.deletedAt === undefined ? { ...value, deletedAt: Date.now() } : value
     if (prev) this.slots.delete(prev.filePath)
     const sameLocation = prev !== undefined && prev.record.scope === next.scope && prev.record.workspacePath === next.workspacePath
     const dir = sameLocation ? prev.dir : this.dirOf(next)
+    const level = next.status === 'active' ? dir : join(dir, ARCHIVE_DIR)
     const renamed = prev !== undefined && slugifyName(next.name).toLowerCase() !== slugifyName(prev.record.name).toLowerCase()
-    const filePath = prev !== undefined && sameLocation && !renamed ? prev.filePath : this.pathFor(next, dir)
+    const inPlace = prev !== undefined && sameLocation && !renamed && dirname(prev.filePath) === level
+    const filePath = inPlace ? prev.filePath : this.pathFor(next, level)
     this.slots.set(filePath, { record: next, extras: prev?.extras ?? {}, filePath, dir })
+    return next
   }
 
+  async create(record: MemoryRecord) {
+    this.place(undefined, record)   // 不定位：新 id 直接占名
+  }
   async put(key: string, value: MemoryRecord) {
     // 与 FileTable 同语义：put 不承载召回统计（召回统计住侧表，由 MemoryStore.markRecalled 写）
     const prev = await this.locate(key, { workspacePath: value.workspacePath })
@@ -111,9 +119,7 @@ export class InMemoryTable implements MemoryTable {
   async update(key: string, fn: (c: MemoryRecord) => MemoryRecord) {
     const current = await this.locate(key)
     if (!current) throw new RecordNotFoundError(key)
-    const next = fn(current.record)
-    this.place(current, next)
-    return next
+    return this.place(current, fn(current.record))
   }
   async delete(key: string) {
     const current = await this.locate(key)
@@ -163,6 +169,8 @@ export class MemoryStore {
   }
   locate(id: string, hint?: LocateHint) { return this.table.locate(id, hint) }
   listWorkspaceDirs() { return this.table.listWorkspaceDirs() }
+  /** 新记录：不定位，排他占名（save create 用）。 */
+  create(record: MemoryRecord) { return this.table.create(record) }
   put(record: MemoryRecord) { return this.table.put(record.id, record) }
 
   async softDelete(id: string): Promise<boolean> {

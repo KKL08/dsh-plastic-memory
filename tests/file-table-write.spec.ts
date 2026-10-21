@@ -4,12 +4,18 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
-import { workspaceDirName, WORKSPACE_MARKER, GLOBAL_DIR } from '../src/storage/paths.ts'
+import { workspaceDirName, WORKSPACE_MARKER, GLOBAL_DIR, ARCHIVE_DIR } from '../src/storage/paths.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
-import type { MemorySnapshot } from '../src/governance/schema.ts'
+import { PendingDecisionsStore } from '../src/governance/decisions.ts'
+import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
+import { MemoryStore } from '../src/store.ts'
+import { runSavePipeline } from '../src/pipeline.ts'
+import { executeForget } from '../src/tools/forget.ts'
+import { executePromote } from '../src/tools/promote.ts'
+import { buildTypeRegistry } from '../src/type-registry.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { RecordNotFoundError } from '../src/errors.ts'
 import { captureRejection } from './helpers/errors.ts'
@@ -236,6 +242,165 @@ describe('FileTable 撞名检查看得见磁盘（终审 I1：隔离文件不可
     const t2 = await load() // 新实例：新记录在、坏文件仍被隔离（malformed finding 不消失）
     expect(((await t2.locate('mem_new'))?.record)!.name).toBe('pnpm')
     expect(await quarantined(t2)).toHaveLength(1)
+  })
+})
+
+describe('票 10：写路径内核（锁内定位、排他占名、搬家与归档）', () => {
+  const mds = async (dir: string) => (await readdir(dir).catch(() => [] as string[])).filter(n => n.endsWith('.md') && n !== 'MEMORY.md').sort()
+  const tmps = async (dir: string) => (await readdir(dir).catch(() => [] as string[])).filter(n => n.includes('.tmp-'))
+  const globalDir = () => join(root, GLOBAL_DIR)
+  const WS = '/tmp/proj-k'
+  const wsDir = () => join(root, workspaceDirName(WS))
+  const wsRecord = (partial: Partial<MemoryRecord> = {}) => record({ scope: 'workspace', workspacePath: WS, ...partial })
+
+  it('create 不定位：排他创建占名，被别的 id 占着就追加 id 片段，再撞走全 id 名；已有文件一字不动', async () => {
+    await seedGlobal('同名.md', record({ id: 'mem_other1', name: '同名', content: '别人的 ①' }))
+    await seedGlobal(`同名-${'mem_new'.slice(-6)}.md`, record({ id: 'mem_other2', name: '同名', content: '别人的 ②' }))
+    const t = await load()
+    await t.create(record({ id: 'mem_new', name: '同名', content: '新来的' }))
+    expect(await mds(globalDir())).toEqual(['同名-mem_new.md', `同名-${'mem_new'.slice(-6)}.md`, '同名.md'].sort())
+    expect(await readFile(join(globalDir(), '同名.md'), 'utf8')).toContain('别人的 ①')
+    expect(await readFile(join(globalDir(), `同名-${'mem_new'.slice(-6)}.md`), 'utf8')).toContain('别人的 ②')
+    expect(await readFile(join(globalDir(), '同名-mem_new.md'), 'utf8')).toContain('新来的')
+    expect(await tmps(globalDir())).toEqual([])
+  })
+
+  it('create 之后 locate 能按 id 找到，内容逐字段相等', async () => {
+    const t = await load()
+    const r = wsRecord({ id: 'mem_cr', name: '新建', content: '新建正文', updatedAt: 5 })
+    await t.create(r)
+    expect((await t.locate('mem_cr', { workspacePath: WS }))!.record).toEqual(r)
+    expect((await readFile(join(wsDir(), WORKSPACE_MARKER), 'utf8')).trim()).toBe(WS)   // workspace 目录不存在则 mkdir + 写标记
+  })
+
+  it('rename 只允许覆盖同一记录自己的文件：改 slug 撞上别的记录的文件名时走 id 片段名，别人的文件不动', async () => {
+    await seedGlobal('a.md', record({ id: 'mem_a', name: 'A', content: '我是 A' }))
+    await seedGlobal('b.md', record({ id: 'mem_b', name: 'b', content: '我是 B' }))
+    const t = await load()
+    await t.update('mem_a', r => ({ ...r, name: 'b', updatedAt: 2 }))
+    expect(await mds(globalDir())).toEqual([`b-${'mem_a'.slice(-6)}.md`, 'b.md'].sort())
+    expect(await readFile(join(globalDir(), 'b.md'), 'utf8')).toContain('我是 B')
+    expect(await readFile(join(globalDir(), `b-${'mem_a'.slice(-6)}.md`), 'utf8')).toContain('我是 A')
+  })
+
+  it('status→deleted：文件移入同目录 .archive/、顶层消失、补 deletedAt（取 now）、MEMORY.md 不再列它', async () => {
+    const NOW = 1_800_000_000_000
+    const t = new FileTable({ root, stats: new InMemoryKvTable<RecallStats>(), now: () => NOW })
+    await t.create(record({ id: 'mem_a', name: '活着', updatedAt: NOW - 10 }))
+    await t.create(record({ id: 'mem_d', name: '要删', updatedAt: NOW - 10 }))
+    const next = await t.update('mem_d', r => ({ ...r, status: 'deleted', updatedAt: NOW }))
+    expect(next.deletedAt).toBe(NOW)
+    expect(await mds(globalDir())).toEqual(['活着.md'])
+    expect(await mds(join(globalDir(), ARCHIVE_DIR))).toEqual(['要删.md'])
+    expect(await readFile(join(globalDir(), ARCHIVE_DIR, '要删.md'), 'utf8')).toContain('deletedAt:')
+    const idx = await readFile(join(globalDir(), 'MEMORY.md'), 'utf8')
+    expect(idx).toContain('mem_a')
+    expect(idx).not.toContain('mem_d')
+    expect((await t.locate('mem_d'))!.record.deletedAt).toBe(NOW)
+  })
+
+  it('归档时 .archive/ 已有同名异 id 文件：追加 id 片段，两份都保留', async () => {
+    await mkdir(join(globalDir(), ARCHIVE_DIR), { recursive: true })
+    const NOW = Date.now()   // 归档里的 deleted 要落在保留窗口内，否则维护点先把它清掉、撞名就不成立
+    await writeFile(join(globalDir(), ARCHIVE_DIR, '同名.md'),
+      encodeRecord(record({ id: 'mem_old', name: '同名', status: 'deleted', content: '早先归档的', updatedAt: NOW, deletedAt: NOW }), {}))
+    const t = await load()
+    await t.create(record({ id: 'mem_cur', name: '同名', content: '后来归档的' }))
+    await t.update('mem_cur', r => ({ ...r, status: 'superseded', updatedAt: Date.now() }))
+    expect(await mds(globalDir())).toEqual([])
+    expect(await mds(join(globalDir(), ARCHIVE_DIR))).toEqual([`同名-${'mem_cur'.slice(-6)}.md`, '同名.md'].sort())
+    expect(await readFile(join(globalDir(), ARCHIVE_DIR, '同名.md'), 'utf8')).toContain('早先归档的')
+    expect((await t.locate('mem_old'))!.record.content).toBe('早先归档的')
+    expect((await t.locate('mem_cur'))!.record.content).toBe('后来归档的')
+  })
+
+  it('回到 active（restore）：从 .archive/ 搬回顶层并占名，.archive/ 里的文件消失', async () => {
+    const t = await load()
+    const r = record({ id: 'mem_r', name: '复活', content: '复活正文', updatedAt: 10 })
+    await t.create(r)
+    await t.update('mem_r', c => ({ ...c, status: 'deleted', updatedAt: Date.now() }))
+    expect(await mds(globalDir())).toEqual([])
+    await t.put('mem_r', r)   // 快照恢复：整条旧记录 put 回来
+    expect(await mds(globalDir())).toEqual(['复活.md'])
+    expect(await mds(join(globalDir(), ARCHIVE_DIR))).toEqual([])
+    expect((await t.locate('mem_r'))!.record).toEqual(r)
+  })
+
+  it('delete 物理删除 .archive/ 里的文件（供 S1 使用）', async () => {
+    const t = await load()
+    await t.create(record({ id: 'mem_s', name: '密钥' }))
+    await t.update('mem_s', r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))
+    expect(await mds(join(globalDir(), ARCHIVE_DIR))).toEqual(['密钥.md'])
+    expect(await t.delete('mem_s')).toBe(true)
+    expect(await mds(join(globalDir(), ARCHIVE_DIR))).toEqual([])
+    expect(await t.locate('mem_s')).toBeUndefined()
+  })
+
+  it('顶层 deleted 文件搬进 .archive/ 后 listWorkspaceDirs 的 hasActiveTopLevel 自然收敛（票 09 转来）', async () => {
+    const t = await load()
+    await t.create(wsRecord({ id: 'mem_only', name: '唯一' }))
+    expect((await t.listWorkspaceDirs()).entries).toEqual([{ workspacePath: WS, dir: wsDir(), hasActiveTopLevel: true }])
+    await t.update('mem_only', r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))
+    expect((await t.listWorkspaceDirs()).entries).toEqual([{ workspacePath: WS, dir: wsDir(), hasActiveTopLevel: false }])
+  })
+
+  it('同进程并发：两个会话对象 Promise.all 同时 save 与 forget，结束后文件齐全、无 tmp 残留', async () => {
+    const t = await load()
+    const store = new MemoryStore(t)
+    const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
+    const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
+    const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
+    const victim = wsRecord({ id: 'mem_victim', name: '待遗忘', content: '会被遗忘' })
+    await t.create(victim)
+    const saveDeps = (id: string) => ({ store, registry, workspacePath: WS, session: { id, lastSeq: 3 } })
+    const save = (sessionId: string, i: number) => runSavePipeline({
+      action: 'create', name: `并发-${sessionId}`, type: 'knowledge', scope: 'workspace',
+      content: `会话 ${sessionId} 第 ${i} 条`, summary: `${sessionId}-${i}`, tags: [], sourceMode: 'user-explicit', force: true,
+    }, saveDeps(sessionId))
+    const results = await Promise.all([
+      save('s1', 1), save('s2', 1),
+      executeForget({ ids: [victim.id], reason: '并发测试' }, { store, snapshots, decisions }),
+      save('s1', 2), save('s2', 2),
+    ])
+    const saved = results.filter((r): r is Extract<typeof r, { kind: 'saved' }> => 'kind' in r && r.kind === 'saved')
+    expect(saved).toHaveLength(4)
+    expect((results[2] as Awaited<ReturnType<typeof executeForget>>).forgotten).toEqual([victim.id])
+    expect(await mds(wsDir())).toHaveLength(4)                               // 四条新记忆各占一个文件
+    expect(await mds(join(wsDir(), ARCHIVE_DIR))).toEqual(['待遗忘.md'])        // 被遗忘的进了归档
+    expect(await tmps(wsDir())).toEqual([])
+    expect(await tmps(join(wsDir(), ARCHIVE_DIR))).toEqual([])
+    for (const s of saved) expect((await t.locate(s.record.id, { workspacePath: WS }))!.record.content).toBe(s.record.content)
+    const idx = await readFile(join(wsDir(), 'MEMORY.md'), 'utf8')
+    for (const s of saved) expect(idx).toContain(s.record.id)
+    expect(idx).not.toContain(victim.id)
+  })
+
+  it('promote 到 global 后旧 workspace 文件消失、新实例只看到 global 那份；pre-promote 快照 restore 后 global 消失、workspace 回来（无双文件）', async () => {
+    const t = await load()
+    const store = new MemoryStore(t)
+    const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
+    const r = wsRecord({ id: 'mem_p', name: '提升', content: '要提升的', globalCandidate: true, updatedAt: 100 })
+    await t.create(r)
+    const promoted = await executePromote({ confirmedIds: ['mem_p'], target: 'global' }, {
+      store, snapshots, agentsMd: { append: async () => {} }, now: () => 200,
+    })
+    expect(promoted.promoted).toEqual([{ id: 'mem_p', target: 'global' }])
+    expect(await mds(wsDir())).toEqual([])
+    expect(await mds(globalDir())).toEqual(['提升.md'])
+    const fresh = await load()
+    expect((await fresh.readScope([fresh.globalDir, wsDir()], { includeArchive: true })).records.map(x => [x.record.id, x.record.scope]))
+      .toEqual([['mem_p', 'global']])
+
+    const snap = (await snapshots.list()).find(s => s.operation === 'pre-promote')!
+    const current = new Map([['mem_p', (await store.get('mem_p'))!]])
+    const { restored } = await snapshots.restore(snap, undefined, rec => store.put(rec), current, false)
+    expect(restored).toEqual(['mem_p'])
+    expect(await mds(globalDir())).toEqual([])
+    expect(await mds(wsDir())).toEqual(['提升.md'])
+    const again = await load()
+    expect((await again.readScope([again.globalDir, wsDir()], { includeArchive: true })).records.map(x => [x.record.id, x.record.scope]))
+      .toEqual([['mem_p', 'workspace']])
+    expect((await again.locate('mem_p'))!.record).toEqual(r)
   })
 })
 

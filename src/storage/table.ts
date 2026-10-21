@@ -74,8 +74,13 @@ export interface MemoryTable {
   readScope(dirs: string[], opts?: ScopeReadOptions): Promise<ScopeReadResult>
   locate(id: string, hint?: LocateHint): Promise<LocatedFile | undefined>
   listWorkspaceDirs(): Promise<WorkspaceDirListing>
+  /** 新 id：不定位，排他占名落盘（撞名追加 id 片段，不覆盖别的记录）。 */
+  create(record: MemoryRecord): Promise<void>
+  /** 锁内 locate → 写；scope / workspacePath 变化时搬家删旧；status 离开 active 时文件进 .archive/，回到 active 搬回顶层。 */
   put(key: string, value: MemoryRecord): Promise<void>
+  /** 锁内 locate → fn(当前) → 写（同 put 的搬家与归档规则）；返回实际写出的记录（deleted 缺 deletedAt 时已补）。 */
   update(key: string, fn: (current: MemoryRecord) => MemoryRecord): Promise<MemoryRecord>
+  /** 物理删除（含 .archive/ 里的文件）。 */
   delete(key: string): Promise<boolean>
 }
 
