@@ -6,7 +6,7 @@ import type { TypeRegistry } from './type-registry.ts'
 import type { SnapshotStore } from './governance/snapshots.ts'
 import { detectSecrets } from './secrets.ts'
 import { extractEntities, textSimilarity, DUPLICATE_SIMILARITY_THRESHOLD } from './text.ts'
-import { toToolOutput } from './tools/output.ts'
+import { toToolOutput } from './output.ts'
 
 export interface SaveCandidate {
   action: 'create' | 'update'
@@ -39,7 +39,7 @@ export type SaveWarning = CodedNote<WarningCode>
  * validTo/supersedes 等）不填时为 undefined，zod .optional() 会把这些键连值保留，
  * 使记录无法无损 JSON 序列化。dsh 工具输出要求 lossless JSON——save 返回带 undefined
  * 键的记录会被框架以 "value is not lossless JSON" 拒绝。put 前也剔除，保证内存缓存干净。
- * 走工具出口同一套深度剔除（tools/output.ts），单一来源；记录已过 zod 校验、只余 undefined
+ * 走工具出口同一套深度剔除（output.ts），单一来源；记录已过 zod 校验、只余 undefined
  * 可选键，toToolOutput 不会抛错，返回值仍是合法 MemoryRecord（去掉可选键仍满足接口）。
  */
 function pruneUndefined(record: MemoryRecord): MemoryRecord {
@@ -73,7 +73,7 @@ export async function runSavePipeline(
   const scopeWarnings: SaveWarning[] = []
   let target: MemoryRecord | undefined
   if (candidate.action === 'update') {
-    target = candidate.id ? store.get(candidate.id) : undefined
+    target = candidate.id ? await store.get(candidate.id) : undefined
     if (!target || target.status === 'deleted') {
       return { kind: 'rejected', code: 'target-missing', reason: `更新目标不存在或已删除：${candidate.id ?? '(缺 id)'}` }
     }
@@ -116,7 +116,7 @@ export async function runSavePipeline(
   if (candidate.action === 'create' && !candidate.force) {
     const text = `${candidate.content}\n${candidate.summary}`
     const entities = extractEntities(text)
-    const peers = store.query({
+    const peers = await store.query({
       types: [candidate.type],
       scope: { kind: 'workspace', path: deps.workspacePath! }, // create 必有 workspace 桶（前置已拒无 cwd）
       status: ['active'],
@@ -200,7 +200,7 @@ export async function runSavePipeline(
   // 不同桶的目标跳过不置 superseded，仅给一条警告。目标不存在维持静默跳过。
   let crossBucketSupersede = false
   for (const oldId of candidate.supersedes ?? []) {
-    const old = store.get(oldId)
+    const old = await store.get(oldId)
     if (!old || old.id === clean.id) continue
     const sameBucket = old.scope === clean.scope
       && (clean.scope !== 'workspace' || old.workspacePath === clean.workspacePath)
