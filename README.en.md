@@ -170,8 +170,8 @@ customTypes:
 | Tool              | Description                                                                                                          |
 | ----------------- | -------------------------------------------------------------------------------------------------------------------- |
 | `memory_save`     | Distill or update a memory. Built-in dedup and secret detection; when near-duplicate content is found, prompts the user to `update` or `force` |
-| `memory_search`   | Full-text search with type and scope filters. Returns up to 10 results by default (max 50)                           |
-| `memory_forget`   | Batch-remove memories. An archive snapshot is created automatically; recoverable within 14 days                       |
+| `memory_search`   | Full-text search with type and scope filters. Returns up to 10 results by default (max 50). Several keywords must all match; if none does, falls back to any-match and says so in the result |
+| `memory_forget`   | Batch-remove memories: the file moves to `.archive/`, a snapshot is taken first, recoverable within 14 days. Memories containing secrets are the exception: deleted physically at once, their copies in every snapshot redacted, not recoverable |
 | `memory_snapshot` | Snapshot management: manual tagging, diff comparison, rollback, and undelete                                         |
 | `memory_source`   | **Provenance:** trace back to the original conversation slice a memory was distilled from — verify intent and guard against hallucination |
 
@@ -183,10 +183,12 @@ customTypes:
 
 | Tool             | Description                                                                                                         |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `memory_health`  | **Health score (0–100):** assess overall memory library quality                                                     |
+| `memory_health`  | **Health score (0–100):** assess overall memory library quality; also lists quarantined files that failed to parse and directory problems (duplicate ids, missing `.workspace` marker, …) |
 | `memory_scan`    | Deep audit — rule layer (secret leaks, oversized entries, orphaned refs, corrupt files); semantic layer (conflicts, redundancies) calls LLM on demand |
 | `memory_confirm` | **Freshness refresh & triage:** reaffirm stale memories to extend their lifecycle, or arbitrate conflict scan results |
 | `memory_promote` | **Scope promotion:** elevate validated workspace memories to global or sync to `AGENTS.md` — **requires explicit user approval** |
+
+Governance tools act on global and current-workspace memories only; pass `allowCrossWorkspace: true` to touch other projects' memories (when the user explicitly asks for a library-wide clean-up). Sub-agent sessions (tasks the host delegates) are read-only: `memory_search`, `memory_source` and `memory_health` work, every writing tool (including `memory_scan`) is refused, and memories are still injected as usual.
 
 
 ---

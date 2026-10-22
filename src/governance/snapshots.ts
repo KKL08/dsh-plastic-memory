@@ -80,7 +80,7 @@ export class SnapshotStore {
   }
 
   /** 清扫超保留窗口的旧快照。capture 内复用，工具入口也调用——否则停用 forget/promote 后
-   * 旧快照会永留 KV。 */
+   * 旧快照会永留侧表。 */
   async sweep(now: number): Promise<void> {
     const cutoff = now - SNAPSHOT_RETENTION_MS
     for (const [key, snap] of await this.table.list()) {
