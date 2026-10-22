@@ -86,7 +86,8 @@ export async function executePromote(
     if (args.target === 'global') {
       // 无损 JSON 不变式：不能把 workspacePath/globalCandidate 置为 undefined 键，解构剔键。
       const { workspacePath, globalCandidate, ...rest } = r
-      await deps.store.put({ ...rest, scope: 'global' })
+      // 按原记录的 workspace 定位：同 id 多副本时搬走的才是门放行的这份，不是 global 或别的项目的副本
+      await deps.store.put({ ...rest, scope: 'global' }, { workspacePath })
     } else {
       // 两步无法原子：先软删再写 AGENTS.md，append 失败回滚软删——失败方向宁可"没提升"
       // 也不能"两处并存"（原顺序 append 成功+softDelete 失败会双份注入且结果谎报 promoted）。

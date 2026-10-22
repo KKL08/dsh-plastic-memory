@@ -532,11 +532,11 @@ export class FileTable implements MemoryTable {
     await this.locked(async () => { await this.persist(record.id, undefined, record) })
   }
 
-  async put(key: string, value: MemoryRecord): Promise<void> {
+  async put(key: string, value: MemoryRecord, hint: LocateHint = { workspacePath: value.workspacePath }): Promise<void> {
     await this.locked(async () => {
       // put 不承载召回统计（设计稿 §2：召回统计只住 .state/recall-stats.json，快照恢复不恢复它）。召回统计
       // 由 MemoryStore.markRecalled 直写侧表；prev 在时以侧表现值为准，restore 旧记录不回退 sidecar。
-      const prev = await this.locate(key, { workspacePath: value.workspacePath })
+      const prev = await this.locate(key, hint)
       const next = prev
         ? { ...value, recallCount: prev.record.recallCount, lastRecalledAt: prev.record.lastRecalledAt }
         : value
@@ -557,8 +557,10 @@ export class FileTable implements MemoryTable {
       const slot = await this.locate(key, hint)
       if (!slot) return false
       await rm(slot.filePath, { force: true })
+      // 密钥硬删的承诺是「可见集合里再没有它」：global 与该记录目录里同 id 的其余副本（含 .archive/）一并物理删除
+      await this.removeOtherCopies(key, slot.filePath, slot.dir)
       await this.opts.stats.delete(key)
-      await this.maintainDirs([slot.dir])
+      await this.maintainDirs([...new Set([slot.dir, this.globalDir])])
       return true
     })
   }
