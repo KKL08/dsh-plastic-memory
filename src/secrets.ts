@@ -44,3 +44,62 @@ export function secretFields(r: SecretSurface): SecretField[] {
   const hit = SECRET_FIELDS.filter(f => detectSecrets(fieldText(r, f)).length > 0)
   return hit.length === 0 && hasSecret(r) ? [...SECRET_FIELDS] : hit
 }
+
+/** 注入时遮盖命中片段用的占位文本。 */
+export const SECRET_MASK = '[已隐藏]'
+
+// matchAll 要全局正则；SECRET_PATTERNS 本身不带 g，detectSecrets 的 test() 才不受 lastIndex 影响。
+const GLOBAL_PATTERNS = SECRET_PATTERNS.map(p => new RegExp(p.re.source, `${p.re.flags}g`))
+
+type Span = [start: number, end: number]
+
+/** text 里所有命中片段的区间：各规则全局匹配，重叠或相接的合并。 */
+function secretSpans(text: string): Span[] {
+  const spans: Span[] = GLOBAL_PATTERNS.flatMap(re => [...text.matchAll(re)].map((m): Span => [m.index, m.index + m[0].length]))
+  spans.sort((a, b) => a[0] - b[0])
+  const merged: Span[] = []
+  for (const [start, end] of spans) {
+    const last = merged.at(-1)
+    if (last !== undefined && start <= last[1]) last[1] = Math.max(last[1], end)
+    else merged.push([start, end])
+  }
+  return merged
+}
+
+/** 取 text 的 [from, to) 段，其中落在命中区间里的部分换成占位文本。 */
+function maskRange(text: string, spans: readonly Span[], from: number, to: number): string {
+  let out = ''
+  let pos = from
+  for (const [start, end] of spans) {
+    const a = Math.max(start, from)
+    const b = Math.min(end, to)
+    if (a >= b) continue
+    out += text.slice(pos, a) + SECRET_MASK
+    pos = b
+  }
+  return out + text.slice(pos, to)
+}
+
+/** 按片段遮盖：命中任一密钥规则的片段换成占位文本，其余文字原样。 */
+export function maskSecrets(text: string): string {
+  return maskRange(text, secretSpans(text), 0, text.length)
+}
+
+/**
+ * 四个面按片段遮盖。在与 hasSecret 同口径的拼接文本上找命中区间再切回各字段，
+ * 跨字段拼接才命中的，各字段落在区间里的部分各换一个占位。没有命中原样返回同一个对象。
+ */
+export function maskSecretSurface<T extends SecretSurface>(r: T): T {
+  const segments = [r.content, r.name, r.summary, ...r.tags]
+  const starts: number[] = []
+  let text = ''
+  segments.forEach((segment, i) => {
+    if (i > 0) text += i <= 3 ? '\n' : ' '  // 字段间换行、标签间空格，同 fieldText 的拼法
+    starts.push(text.length)
+    text += segment
+  })
+  const spans = secretSpans(text)
+  if (spans.length === 0) return r
+  const [content, name, summary, ...tags] = segments.map((segment, i) => maskRange(text, spans, starts[i], starts[i] + segment.length))
+  return { ...r, content, name, summary, tags }
+}

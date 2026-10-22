@@ -77,6 +77,15 @@ All notable changes to this project are documented here. The format follows
   (H16). `pnpm host:smoke` boots the real host with a probe plugin that
   confirms the tools are registered.
 
+### Fixed
+- A memory that looks like it holds a secret (a password or key saved with
+  `force: true`, or typed into a memory file by hand) was injected into every
+  conversation as is. The injected text now shows `[已隐藏]` in place of just
+  the matching part; the rest of the memory is injected as before, with no
+  extra notice in the conversation. If the secret is in a memory's name, its
+  index line leaves out the file path, since the file name repeats it. The
+  file on disk is untouched; `memory_forget` removes it for good.
+
 ## [0.1.1-beta.5] - 2026-10-20
 
 ### Changed
