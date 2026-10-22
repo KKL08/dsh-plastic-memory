@@ -355,9 +355,9 @@ describe('runSavePipeline', () => {
     expect(Object.values(updated.record).filter(v => v === undefined)).toEqual([])
   })
 
-  it('含疑似密钥（无厂商特征）时 saved + warnings、照常落盘', async () => {
+  it('含疑似密钥（无厂商特征）时带 force 才落盘，保留 warnings', async () => {
     const result = await runSavePipeline(
-      candidate({ content: '内部约定 api_key: TESTONLY0000000000000' }),
+      candidate({ content: '内部约定 api_key: TESTONLY0000000000000', force: true }),
       deps(),
     )
     if (result.kind !== 'saved') throw new Error(result.kind)
@@ -387,12 +387,12 @@ describe('runSavePipeline', () => {
     expect(Object.keys(result)).not.toContain('warnings')
   })
 
-  it('update 含密钥时返回 warnings', async () => {
+  it('update 含疑似密钥带 force 时返回 warnings', async () => {
     const store = new MemoryStore(new InMemoryTable())
     const created = await runSavePipeline(candidate(), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
     const updated = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, content: '密码:TESTONLYpassw0rd' }),
+      candidate({ action: 'update', id: created.record.id, content: '密码:TESTONLYpassw0rd', force: true }),
       deps(store),
     )
     if (updated.kind !== 'updated') throw new Error(updated.kind)
@@ -445,13 +445,12 @@ describe('runSavePipeline', () => {
     expect((await store.query({})).length).toBe(0)
   })
 
-  it('疑似密钥出现在 tags 时照常落盘但给警告', async () => {
+  it('疑似密钥出现在 tags 时同样拦下待确认', async () => {
     const result = await runSavePipeline(
       candidate({ scope: 'workspace', content: '正文干净', tags: ['api_key: TESTONLY0000000000000'] }),
       deps(),
     )
-    if (result.kind !== 'saved') throw new Error(result.kind)
-    expect(result.warnings?.map(w => w.code)).toContain('secret-suspected')
+    expect(result).toMatchObject({ kind: 'rejected', code: 'secret-suspected' })
   })
 
   it('update 无密钥时不存在 warnings 键', async () => {

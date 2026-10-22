@@ -158,7 +158,7 @@ describe('renderSaveResult', () => {
   it('saved 含 warnings 时渲染显示警告行', async () => {
     const store = new MemoryStore(new InMemoryTable())
     const result = await executeSave(
-      { ...base, name: '密钥记录', content: '内部约定 api_key: 1234567890abcdefghij', summary: 'key' },
+      { ...base, name: '密钥记录', content: '内部约定 api_key: 1234567890abcdefghij', summary: 'key', force: true },
       fakeExec(),
       makeDeps(store),
     )
@@ -179,7 +179,7 @@ describe('renderSaveResult', () => {
     )
     if (created.kind !== 'saved') throw new Error(created.kind)
     const updated = await executeSave(
-      { ...base, action: 'update', id: created.record.id, name: 'title', content: '密码:TESTONLYpassw0rd', summary: 'summary' },
+      { ...base, action: 'update', id: created.record.id, name: 'title', content: '密码:TESTONLYpassw0rd', summary: 'summary', force: true },
       fakeExec(),
       deps,
     )

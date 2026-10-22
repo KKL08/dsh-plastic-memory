@@ -198,6 +198,9 @@ export class MemoryStore {
   create(record: MemoryRecord) { return this.table.create(record) }
   put(record: MemoryRecord) { return this.table.put(record.id, record) }
 
+  /** 物理删除文件（不进 .archive/，不可恢复）：只给密钥硬删用（tools/forget.ts）。 */
+  hardDelete(id: string): Promise<boolean> { return this.table.delete(id) }
+
   async softDelete(id: string): Promise<boolean> {
     if (!(await this.table.locate(id))) return false
     await this.table.update(id, r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))

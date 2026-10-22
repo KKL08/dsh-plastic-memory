@@ -1,15 +1,16 @@
 import { isDeepStrictEqual } from 'node:util'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { KvTable } from '../kv-table.ts'
-import { genId, type MemorySnapshot } from './schema.ts'
+import { REDACTED_PLACEHOLDER, genId, type MemorySnapshot, type SnapshotRecord } from './schema.ts'
 import { RETENTION_MS } from '../retention.ts'
+import { secretFields } from '../secrets.ts'
 
 /** 保留窗口：与软删清扫共用 retention.ts 的单一来源（两者必须一致）。 */
 export const SNAPSHOT_RETENTION_MS = RETENTION_MS
 
 export interface SnapshotDiffEntry {
   id: string
-  snapshotted: MemoryRecord
+  snapshotted: SnapshotRecord
   current: MemoryRecord | undefined
   changedAfterSnapshot: boolean
 }
@@ -38,6 +39,19 @@ function isConflicting(current: MemoryRecord | undefined, snapshotted: MemoryRec
 }
 
 /**
+ * 密钥硬删的快照脱敏（docs/design-storage-file-is-memory.md §10）：命中密钥的字段换成占位文本，打 redacted 标记，
+ * 其余字段原样。按这份记录自己的内容检测——旧版本可能还没贴密钥，那就只打标记（记忆已物理删除，不再可恢复）。
+ */
+export function redactRecord(r: SnapshotRecord): SnapshotRecord {
+  const next: SnapshotRecord = { ...r, redacted: true }
+  for (const field of secretFields(r)) {
+    if (field === 'tags') next.tags = [REDACTED_PLACEHOLDER]
+    else next[field] = REDACTED_PLACEHOLDER
+  }
+  return next
+}
+
+/**
  * 记忆快照（docs/p1-governance-health-design.md §6）：只管记忆数据的可恢复性，操作审计走 dsh session log。
  * 只存受影响记录，非全量。
  */
@@ -49,7 +63,7 @@ export class SnapshotStore {
   }
 
   async capture(
-    input: { operation: MemorySnapshot['operation']; description: string; records: MemoryRecord[] },
+    input: { operation: MemorySnapshot['operation']; description: string; records: SnapshotRecord[] },
     now: number,
   ): Promise<MemorySnapshot> {
     const snapshot: MemorySnapshot = {
@@ -82,6 +96,23 @@ export class SnapshotStore {
     return this.table.get(id)
   }
 
+  /**
+   * 密钥硬删（ARCHITECTURE.md ⑥-6c）：所有含这些 id 的快照里把该记录脱敏（redactRecord），同快照的其他记录不动。
+   * 每个快照经侧表 put 原子重写（tmp + rename）；内容没变的（不含这些 id、或已脱敏过）不写。
+   */
+  async redact(ids: ReadonlySet<string>): Promise<void> {
+    for (const [, snap] of await this.table.list()) {
+      let changed = false
+      const data = snap.data.map(r => {
+        if (!ids.has(r.id)) return r
+        const next = redactRecord(r)
+        if (!isDeepStrictEqual(next, r)) changed = true
+        return next
+      })
+      if (changed) await this.table.put(snap.id, { ...snap, data })
+    }
+  }
+
   /** current：调用方预读的现状（至少含快照内各 id，含非 active），缺键视为当前不存在。 */
   diff(snapshot: MemorySnapshot, current: ReadonlyMap<string, MemoryRecord>): SnapshotDiffEntry[] {
     return snapshot.data.map(snapshotted => {
@@ -97,8 +128,8 @@ export class SnapshotStore {
 
   /**
    * 选择性恢复：ids 为 undefined 恢复全部。快照后被修改过的记录默认跳过（冲突保护），
-   * overwriteChanged=true 才覆盖。恢复动作本身只 put 旧数据，不做二次快照。
-   * current：调用方预读的现状（同 diff）。
+   * overwriteChanged=true 才覆盖。脱敏记录（密钥硬删）一律跳过，计入 skipped 并单列在 redacted。
+   * 恢复动作本身只 put 旧数据，不做二次快照。current：调用方预读的现状（同 diff）。
    */
   async restore(
     snapshot: MemorySnapshot,
@@ -106,11 +137,17 @@ export class SnapshotStore {
     put: (record: MemoryRecord) => Promise<void>,
     current: ReadonlyMap<string, MemoryRecord>,
     overwriteChanged: boolean,
-  ): Promise<{ restored: string[]; skipped: string[] }> {
+  ): Promise<{ restored: string[]; skipped: string[]; redacted: string[] }> {
     const restored: string[] = []
     const skipped: string[] = []
+    const redacted: string[] = []
     const targets = ids ? snapshot.data.filter(r => ids.includes(r.id)) : snapshot.data
     for (const rec of targets) {
+      if (rec.redacted) {
+        skipped.push(rec.id)
+        redacted.push(rec.id)
+        continue
+      }
       if (isConflicting(current.get(rec.id), rec) && !overwriteChanged) {
         skipped.push(rec.id)
         continue
@@ -118,6 +155,6 @@ export class SnapshotStore {
       await put(rec)
       restored.push(rec.id)
     }
-    return { restored, skipped }
+    return { restored, skipped, redacted }
   }
 }

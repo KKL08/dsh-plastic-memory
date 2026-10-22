@@ -26,7 +26,8 @@ export type SnapshotToolResult =
   | { kind: 'created'; snapshotId: string; count: number; missing: string[]; message: string } & CrossWorkspaceFields
   | { kind: 'listed'; snapshots: Array<{ id: string; createdAt: number; operation: string; description: string; count: number }>; message: string }
   | { kind: 'shown'; entries: SnapshotDiffEntry[]; message: string } & CrossWorkspaceFields
-  | { kind: 'restored'; restored: string[]; skipped: string[]; message: string } & CrossWorkspaceFields
+  /** skipped 含 redacted：redacted 是含密钥已物理删除、快照里只剩脱敏副本的记录，永不恢复。 */
+  | { kind: 'restored'; restored: string[]; skipped: string[]; redacted: string[]; message: string } & CrossWorkspaceFields
   | { kind: 'error'; message: string }
 
 /**
@@ -102,7 +103,8 @@ export async function executeSnapshotTool(
   if (args.action === 'show') {
     const entries = deps.snapshots.diff(snap, current).filter(e => allowedIds.has(e.id))
     const lines = entries.map(e => {
-      const state = e.current === undefined ? '当前不存在（已删）'
+      const state = e.snapshotted.redacted ? '含密钥已物理删除（快照内为脱敏副本，不可恢复）'
+        : e.current === undefined ? '当前不存在（已删）'
         : e.current.status === 'deleted' ? '当前已软删'
         : e.changedAfterSnapshot ? '快照后被修改过 ⚠️' : '与快照一致或未变'
       return `- ${e.id}：${state}｜快照内容：${e.snapshotted.summary}`
@@ -111,17 +113,21 @@ export async function executeSnapshotTool(
   }
 
   // restore
-  const { restored, skipped } = await deps.snapshots.restore(
+  const { restored, skipped, redacted } = await deps.snapshots.restore(
     snap, [...allowedIds],
     r => deps.store.put(r),
     current,
     args.overwriteChanged ?? false,
   )
-  const skippedNote = skipped.length > 0
-    ? `；${skipped.length} 条因快照后被修改而跳过（确认覆盖请带 overwriteChanged: true）`
+  const changedCount = skipped.length - redacted.length
+  const skippedNote = changedCount > 0
+    ? `；${changedCount} 条因快照后被修改而跳过（确认覆盖请带 overwriteChanged: true）`
+    : ''
+  const redactedNote = redacted.length > 0
+    ? `；${redacted.length} 条因含密钥已物理删除而跳过（${redacted.join('、')}），快照里只剩脱敏副本，不可恢复`
     : ''
   return {
-    kind: 'restored', restored, skipped, rejected, otherWorkspaces,
-    message: `已恢复 ${restored.length} 条记忆（${restored.join('、')}）${skippedNote}。${wsNote}`,
+    kind: 'restored', restored, skipped, redacted, rejected, otherWorkspaces,
+    message: `已恢复 ${restored.length} 条记忆（${restored.join('、')}）${skippedNote}${redactedNote}。${wsNote}`,
   }
 }

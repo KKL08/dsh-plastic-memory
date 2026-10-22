@@ -22,7 +22,7 @@ export function runRuleScan(
         type: 'secret', layer: 'rule', severity: SEVERITY_BY_TYPE.secret,
         memoryIds: [r.id],
         summary: `疑似密钥泄漏（${hits.map(h => h.name).join('、')}）`,
-        suggestedAction: '确认后用 memory_forget 删除，并轮换泄漏的凭证',
+        suggestedAction: '确认后用 memory_forget 删除（memory_forget 会立即物理删除，不进 14 天回收），并轮换泄漏的凭证',
       })
     }
     if (r.validTo !== undefined && r.validTo < now) {

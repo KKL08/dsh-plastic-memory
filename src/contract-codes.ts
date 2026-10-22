@@ -11,6 +11,7 @@ export type RejectCode =
   | 'no-workspace'      // 无工作目录的会话 create（无处归属）
   | 'schema-invalid'    // 字段校验失败
   | 'secret-critical'   // 明确厂商特征的密钥，拒存不落盘
+  | 'secret-suspected'  // 疑似密钥（无厂商特征），未带 force 时拒存；用户确认后带 force: true 重发
 
 /** 治理工具（forget / confirm / promote / snapshot）按记录的拒绝原因（tools/workspace-gate.ts）。 */
 export type GovernanceRejectCode =
@@ -22,7 +23,7 @@ export type WarningCode =
   | 'update-scope-kept'       // update 填了与目标不同的 scope：保持原 scope
   | 'cross-bucket-supersede'  // supersedes 目标不在本次写入的记忆桶内，跳过
   | 'auto-snapshot'           // 更新 global 记忆前已自动快照
-  | 'secret-suspected'        // 疑似密钥（无厂商特征），已落盘但建议改写
+  | 'secret-suspected'        // 疑似密钥（无厂商特征），带 force: true 放行落盘，仍建议改写
 
 /** memory_scan 的说明性 note（scan.ts）。 */
 export type ScanNoteCode =

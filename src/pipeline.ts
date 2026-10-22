@@ -172,7 +172,7 @@ export async function runSavePipeline(
     return { kind: 'rejected', code: 'schema-invalid', reason: `字段校验失败：${parsed.error.issues.map(i => i.message).join('；')}` }
   }
 
-  // 5. 写盘前 secret 检查：高危（明确厂商特征）直接拦截、不落盘；疑似仅警告、照常落盘。
+  // 5. 写盘前 secret 检查：高危（明确厂商特征）直接拦截、不落盘；疑似拦下待确认，force 放行并保留警告。
   // summary 进注入索引、name 进文件名、tags 进索引行——密钥藏在哪个字段都会外泄，四个面一起查。
   const secretHits = detectSecrets(`${candidate.content}\n${candidate.name}\n${candidate.summary}\n${candidate.tags.join(' ')}`)
   const critical = secretHits.filter(h => h.severity === 'critical')
@@ -181,6 +181,14 @@ export async function runSavePipeline(
       kind: 'rejected',
       code: 'secret-critical',
       reason: `检测到高危密钥（${critical.map(h => h.name).join('、')}），未保存。密钥不该进记忆（将来可能随同步离开本机）——如需记录，请改写成不含密钥的指针（如「AWS 凭证在 1Password 的 X 条目」）再存。`,
+    }
+  }
+  const suspected = secretHits.filter(h => h.severity === 'suspected')
+  if (suspected.length > 0 && !candidate.force) {
+    return {
+      kind: 'rejected',
+      code: 'secret-suspected',
+      reason: `检测到疑似密钥（${suspected.map(h => h.name).join('、')}），未保存。是密钥就改写成不含密钥的指针再存；向用户确认不是密钥后，带 force: true 重发。`,
     }
   }
 
@@ -219,7 +227,6 @@ export async function runSavePipeline(
     ? { kind: 'updated' as const, record: clean }
     : { kind: 'saved' as const, record: clean }
 
-  const suspected = secretHits.filter(h => h.severity === 'suspected')
   const warnings: SaveWarning[] = [
     ...scopeWarnings,
     ...(crossBucketSupersede

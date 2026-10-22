@@ -17,13 +17,23 @@ export const pendingDecisionSchema = z.object({
 })
 export type PendingDecision = z.infer<typeof pendingDecisionSchema>
 
+/** 密钥硬删（S1）后快照里命中字段的占位文本。识别脱敏记录看 redacted 标记，不匹配这段文本。 */
+export const REDACTED_PLACEHOLDER = '[redacted: secret]'
+
+/** 快照里的记录：记忆记录 + 脱敏标记。redacted: true = 该记忆因含密钥已物理删除，命中字段已换成占位文本，
+ *  restore 跳过；脱敏不可逆（ARCHITECTURE.md ⑥-6c）。缺省 = 未脱敏，旧快照照常解析。 */
+export const snapshotRecordSchema = memoryRecordSchema.extend({
+  redacted: z.literal(true).optional(),
+})
+export type SnapshotRecord = z.infer<typeof snapshotRecordSchema>
+
 export const memorySnapshotSchema = z.object({
   id: z.string(),
   createdAt: z.number(),
   operation: z.enum(['pre-forget', 'pre-resolve', 'manual', 'pre-promote', 'pre-update']),
   description: z.string(),
   memoryIds: z.array(z.string()),
-  data: z.array(memoryRecordSchema),
+  data: z.array(snapshotRecordSchema),
 })
 export type MemorySnapshot = z.infer<typeof memorySnapshotSchema>
 
