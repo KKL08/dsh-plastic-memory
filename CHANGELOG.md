@@ -78,13 +78,18 @@ All notable changes to this project are documented here. The format follows
   confirms the tools are registered.
 
 ### Fixed
-- A memory that looks like it holds a secret (a password or key saved with
-  `force: true`, or typed into a memory file by hand) was injected into every
-  conversation as is. The injected text now shows `[已隐藏]` in place of just
-  the matching part; the rest of the memory is injected as before, with no
-  extra notice in the conversation. If the secret is in a memory's name, its
-  index line leaves out the file path, since the file name repeats it. The
-  file on disk is untouched; `memory_forget` removes it for good.
+- A memory holding a vendor-format key (such as `sk-`, `ghp_` or an AWS
+  access key), for example typed into a memory file by hand, was injected
+  into every conversation as is. The injected text now shows `[已隐藏]` in
+  place of just the key and leaves the rest of the memory as it was, with no
+  extra notice in the conversation; if the key is in a memory's name, its
+  index line leaves out the file path. `memory_forget` still removes the file
+  for good.
+- A suspected secret you had confirmed with `force: true` (a password or
+  `api_key` value without a vendor format) kept the health check red until
+  you deleted or rewrote it. It is now treated as confirmed: it no longer
+  counts as a secret in `memory_health` or `memory_scan` and is injected
+  unmasked.
 
 ## [0.1.1-beta.5] - 2026-10-20
 

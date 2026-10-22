@@ -2,6 +2,7 @@
  * 密钥模式集（参考 isla scan.py）。severity 分两级：
  * - critical：有明确厂商前缀/格式，几乎不误报 → 写入时直接拦截（pipeline reject，不落盘）。
  * - suspected：无厂商特征、正则较宽、可能误报 → 写入时拦下待确认，带 force 放行并保留警告。
+ * 库里的 suspected 是用户确认过不是密钥才放行的，注入遮盖与体检判红只看 critical；
  * forget 时两级一视同仁：命中任一级即物理删除（tools/forget.ts）。
  */
 export type SecretSeverity = 'critical' | 'suspected'
@@ -49,7 +50,10 @@ export function secretFields(r: SecretSurface): SecretField[] {
 export const SECRET_MASK = '[已隐藏]'
 
 // matchAll 要全局正则；SECRET_PATTERNS 本身不带 g，detectSecrets 的 test() 才不受 lastIndex 影响。
-const GLOBAL_PATTERNS = SECRET_PATTERNS.map(p => new RegExp(p.re.source, `${p.re.flags}g`))
+// 只遮 critical：suspected 写入时已由用户确认放行，遮了反而违背确认。
+const GLOBAL_PATTERNS = SECRET_PATTERNS
+  .filter(p => p.severity === 'critical')
+  .map(p => new RegExp(p.re.source, `${p.re.flags}g`))
 
 type Span = [start: number, end: number]
 
@@ -80,7 +84,7 @@ function maskRange(text: string, spans: readonly Span[], from: number, to: numbe
   return out + text.slice(pos, to)
 }
 
-/** 按片段遮盖：命中任一密钥规则的片段换成占位文本，其余文字原样。 */
+/** 按片段遮盖：命中 critical 规则的片段换成占位文本，其余文字原样。 */
 export function maskSecrets(text: string): string {
   return maskRange(text, secretSpans(text), 0, text.length)
 }
