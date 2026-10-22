@@ -377,7 +377,7 @@ export class FileTable implements MemoryTable {
 
   private async regenerateIndex(dir: string, active: readonly LocatedRecord[]): Promise<void> {
     // 缺省格式器与注入侧同源（src/index-line.ts）。磁盘索引不带陈旧度：静态文件里的
-    // 时间相对标注会随时间失真——这是对 docs/p15-storage-search-redesign.md §6"同源同格式"的有意偏离，已回写设计稿登记。
+    // 时间相对标注会随时间失真（设计稿 §6 登记的有意偏离）。
     // 行末带同目录的实际文件名（设计稿 §11），模型拿到即可 Read，不用再 grep id。
     const fmt = this.opts.formatIndexLine ?? ((r: MemoryRecord, file: string) => formatIndexLine(r, { passive: false, file }))
     // 索引行序必须确定：readdir 序跨设备不确定，多设备同步下会造成索引文件 churn。
@@ -534,7 +534,7 @@ export class FileTable implements MemoryTable {
 
   async put(key: string, value: MemoryRecord): Promise<void> {
     await this.locked(async () => {
-      // put 不承载召回统计（docs/p15-storage-search-redesign.md §3 登记：快照恢复不恢复召回统计）。召回统计
+      // put 不承载召回统计（设计稿 §2：召回统计只住 .state/recall-stats.json，快照恢复不恢复它）。召回统计
       // 由 MemoryStore.markRecalled 直写侧表；prev 在时以侧表现值为准，restore 旧记录不回退 sidecar。
       const prev = await this.locate(key, { workspacePath: value.workspacePath })
       const next = prev

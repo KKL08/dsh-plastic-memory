@@ -142,7 +142,7 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
 
     if (process.env.HOST_CONTRACT_PHASE === 'restart') {
       // 第二趟：同一 DSH_HOME 的全新宿主进程。第一趟 H7 恢复过的记录必须从磁盘重新加载出来，
-      // 可检索、active，且快照（KV 后端）也过了重启——内存态在这里不存在，只能靠持久化。
+      // 可检索、active，且快照（.state/ 侧表）也过了重启——内存态在这里不存在，只能靠持久化。
       const handoff = JSON.parse(readFileSync(handoffPath ?? '', 'utf8')) as Handoff
       await attempt('H12-RESTART-READ', async () => {
         const exec = mkExec(handoff.wsA)
@@ -275,7 +275,7 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
     })
 
     // H9a 证据锚悬空：记忆文件是用户可编辑的 markdown——真 Session 正常保存后，把磁盘上那条记录的
-    // sessionId 改成不存在的会话 id（下一次工具调用经 withRefresh 重读），memory_source 须优雅降级不抛
+    // sessionId 改成不存在的会话 id（磁盘是唯一真相，下一次工具调用直接读到），memory_source 须优雅降级不抛
     await attempt('H9a-SOURCE-DANGLING-ANCHOR', async () => {
       const exec = mkExec(wsA)
       const r = await call('memory_save', { action: 'create', name: 'dangling-probe', summary: '悬空锚', content: '指向不存在会话的证据锚', ...MEMORY_BASE }, exec) as { kind: string; record?: { id: string; source: { sessionId: string } } }

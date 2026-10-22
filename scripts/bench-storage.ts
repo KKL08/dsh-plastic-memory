@@ -169,7 +169,7 @@ try {
     .map(r => [r.id, { id: r.id, recallCount: 1 + Math.floor(rand() * 20), lastRecalledAt: now - Math.floor(rand() * 30 * DAY) }]))
   const genMs = performance.now() - t0
 
-  // 工具共用的一份运行时（对应插件加载后的常驻状态）
+  // 工具共用的一份运行时（对应插件加载后的接线对象；记忆本身不常驻内存）
   const sidecar = newSidecar(root)
   const fileTable = new FileTable({ root, stats: sidecar.recallStats, formatIndexLine: fmtIndex, log: quietLog })
   const store = new MemoryStore(fileTable, quietLog, sidecar.recallStats)
