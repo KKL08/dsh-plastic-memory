@@ -104,7 +104,7 @@ export async function executeConfirm(
       description: `裁决冲突 ${entry.id}（${args.verdict}）删除败方前`,
       records: [toDelete],
     }, now)
-    await deps.store.softDelete(toDelete.id)
+    await deps.store.softDelete(toDelete)
     actions.push(`已删除败方记忆 ${toDelete.id}（快照 ${snapshot.id}）`)
     // 先移除当前条目，这样 removeByMemoryIds 的返回值就只统计"额外"清理的条目
     await deps.decisions.remove(entry.id)

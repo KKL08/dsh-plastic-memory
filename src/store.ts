@@ -139,13 +139,13 @@ export class InMemoryTable implements MemoryTable {
     const prev = await this.locate(key, { workspacePath: value.workspacePath })
     this.place(prev, prev ? { ...value, recallCount: prev.record.recallCount, lastRecalledAt: prev.record.lastRecalledAt } : value)
   }
-  async update(key: string, fn: (c: MemoryRecord) => MemoryRecord) {
-    const current = await this.locate(key)
+  async update(key: string, fn: (c: MemoryRecord) => MemoryRecord, hint?: LocateHint) {
+    const current = await this.locate(key, hint)
     if (!current) throw new RecordNotFoundError(key)
     return this.place(current, fn(current.record))
   }
-  async delete(key: string) {
-    const current = await this.locate(key)
+  async delete(key: string, hint?: LocateHint) {
+    const current = await this.locate(key, hint)
     if (!current) return false
     this.slots.delete(current.filePath)
     return true
@@ -198,12 +198,19 @@ export class MemoryStore {
   create(record: MemoryRecord) { return this.table.create(record) }
   put(record: MemoryRecord) { return this.table.put(record.id, record) }
 
-  /** 物理删除文件（不进 .archive/，不可恢复）：只给密钥硬删用（tools/forget.ts）。 */
-  hardDelete(id: string): Promise<boolean> { return this.table.delete(id) }
+  /**
+   * 删除按记录定位：调用方传入它读到并过了门的那条记录，按该记录自己的 workspace 定位（与 put 同约定），
+   * 同 id 多副本时改的就是门检查过的那份，不会落到 global 或别的项目的副本上。
+   * hardDelete 物理删除文件（不进 .archive/，不可恢复）：只给密钥硬删用（tools/forget.ts）。
+   */
+  hardDelete(record: Pick<MemoryRecord, 'id' | 'workspacePath'>): Promise<boolean> {
+    return this.table.delete(record.id, { workspacePath: record.workspacePath })
+  }
 
-  async softDelete(id: string): Promise<boolean> {
-    if (!(await this.table.locate(id))) return false
-    await this.table.update(id, r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))
+  async softDelete(record: Pick<MemoryRecord, 'id' | 'workspacePath'>): Promise<boolean> {
+    const hint = { workspacePath: record.workspacePath }
+    if (!(await this.table.locate(record.id, hint))) return false
+    await this.table.update(record.id, r => ({ ...r, status: 'deleted', updatedAt: Date.now() }), hint)
     return true
   }
 

@@ -41,9 +41,9 @@ describe('MemoryStore 变更', () => {
   it('softDelete 置 status 为 deleted', async () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'x' }))
-    expect(await store.softDelete('x')).toBe(true)
+    expect(await store.softDelete({ id: 'x', workspacePath: undefined })).toBe(true)
     expect((await store.get('x'))!.status).toBe('deleted')
-    expect(await store.softDelete('ghost')).toBe(false)
+    expect(await store.softDelete({ id: 'ghost', workspacePath: undefined })).toBe(false)
   })
 
   it('markRecalled 读改写召回统计侧表，不改记录', async () => {

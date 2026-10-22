@@ -29,6 +29,7 @@ import { InMemoryKvTable } from '../src/kv-table.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { GovernanceRejectCode, RejectCode } from '../src/contract-codes.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
+import type { MemoryLogger } from "../src/storage/table.ts"
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
@@ -263,7 +264,7 @@ describe('带参数：放行，结构化结果与渲染文本对非可见集合�
     expect(created.otherWorkspaces).toEqual([{ id: 'mem_b', workspacePath: B }])
     expect(created.message).toContain(B)
 
-    await w.store.softDelete('mem_b')
+    await w.store.softDelete(inB('mem_b'))
     const shown = await executeSnapshotTool({ action: 'show', snapshotId: created.snapshotId, allowCrossWorkspace: true }, IN_A, w.deps)
     if (shown.kind !== 'shown') throw new Error(shown.kind)
     expect(shown.entries.map(e => e.id).sort()).toEqual(['mem_a', 'mem_b'])
@@ -500,5 +501,58 @@ describe('在项目 A 的会话里操作项目 B 记录的正反两组测试', (
     if (r.kind !== 'resolved') throw new Error(r.kind)
     expect(r.otherWorkspaces).toEqual([{ id: 'mem_b', workspacePath: B }])
     expect((await store.get('mem_b'))!.status).toBe('deleted')
+  })
+})
+
+describe('同 id 多副本时，门放行的那份就是被改的那份：删除按放行记录自己的 workspace 定位', () => {
+  // 门用当前 workspace 提示定位（global + 当前项目优先），删除若不带提示会先看 global、再按路径序全库取舍，
+  // 同 id 多副本时两步可能落到不同文件：改了门没检查的那份，门检查过的那份还活着。
+  const ZETA = '/home/dev/zeta'    // 当前项目：目录名排在后
+  const ALPHA = '/home/dev/alpha'  // 其他项目：目录名排在前
+  const IN_ZETA = { workspacePath: ZETA as string | undefined }
+  const quiet = { info() {}, warn() {}, error() {}, debug() {} } as unknown as MemoryLogger
+
+  function dupWorld() {
+    const table = new InMemoryTable()
+    const store = new MemoryStore(table)
+    const deps = {
+      store, log: quiet, now: () => 5000,
+      snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
+      decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
+    }
+    const activeIn = async (path: string) =>
+      (await store.queryScope({ scope: { kind: 'workspace', path }, status: ['active'] })).records.map(r => r.id)
+    return { table, store, deps, activeIn }
+  }
+
+  it('forget：当前项目的副本较新、global 有旧副本 → 归档的是当前项目那份', async () => {
+    const w = dupWorld()
+    w.table.seedFile({ dir: w.table.globalDir, fileName: 'dup.md', record: glob('mem_dup', { updatedAt: 100 }) })
+    w.table.seedFile({ dir: join('/in-memory', workspaceDirName(ZETA)), fileName: 'dup.md', record: record({ id: 'mem_dup', scope: 'workspace', workspacePath: ZETA, updatedAt: 200 }) })
+    const r = await executeForget({ ids: ['mem_dup'], reason: '清理' }, IN_ZETA, w.deps)
+    expect(r.forgotten).toEqual(['mem_dup'])
+    expect(await w.activeIn(ZETA)).toEqual([])
+  })
+
+  it('forget：其他项目有同 id、同 updatedAt 的副本且目录名排在前 → 门放行当前项目那份，其他项目那份不动', async () => {
+    const w = dupWorld()
+    w.table.seedFile({ dir: join('/in-memory', workspaceDirName(ALPHA)), fileName: 'dup.md', record: record({ id: 'mem_dup', scope: 'workspace', workspacePath: ALPHA, updatedAt: 100 }) })
+    w.table.seedFile({ dir: join('/in-memory', workspaceDirName(ZETA)), fileName: 'dup.md', record: record({ id: 'mem_dup', scope: 'workspace', workspacePath: ZETA, updatedAt: 100 }) })
+    const r = await executeForget({ ids: ['mem_dup'], reason: '清理' }, IN_ZETA, w.deps)
+    expect(r.forgotten).toEqual(['mem_dup'])
+    expect(r.rejected).toEqual([])
+    expect(await w.activeIn(ZETA)).toEqual([])
+    expect(await w.activeIn(ALPHA)).toEqual(['mem_dup'])
+  })
+
+  it('forget 硬删：含密钥的当前项目副本被物理删除，其他项目的同 id 副本不动', async () => {
+    const w = dupWorld()
+    const secret = 'token sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz'
+    w.table.seedFile({ dir: join('/in-memory', workspaceDirName(ALPHA)), fileName: 'dup.md', record: record({ id: 'mem_dup', scope: 'workspace', workspacePath: ALPHA, updatedAt: 100, content: secret }) })
+    w.table.seedFile({ dir: join('/in-memory', workspaceDirName(ZETA)), fileName: 'dup.md', record: record({ id: 'mem_dup', scope: 'workspace', workspacePath: ZETA, updatedAt: 100, content: secret }) })
+    const r = await executeForget({ ids: ['mem_dup'], reason: '泄漏' }, IN_ZETA, w.deps)
+    expect(r.hardDeleted).toEqual(['mem_dup'])
+    expect(await w.activeIn(ZETA)).toEqual([])
+    expect(await w.activeIn(ALPHA)).toEqual(['mem_dup'])
   })
 })

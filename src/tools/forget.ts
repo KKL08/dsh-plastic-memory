@@ -89,11 +89,11 @@ export async function executeForget(
   const hardDeleted: string[] = []
   for (const record of found) {
     if (secretIds.has(record.id)) {
-      if (await deps.store.hardDelete(record.id)) {
+      if (await deps.store.hardDelete(record)) {
         forgotten.push(record.id)
         hardDeleted.push(record.id)
       }
-    } else if (await deps.store.softDelete(record.id)) forgotten.push(record.id)
+    } else if (await deps.store.softDelete(record)) forgotten.push(record.id)
   }
   await deps.decisions.removeByMemoryIds(forgotten)
 

@@ -90,7 +90,7 @@ export async function executePromote(
     } else {
       // 两步无法原子：先软删再写 AGENTS.md，append 失败回滚软删——失败方向宁可"没提升"
       // 也不能"两处并存"（原顺序 append 成功+softDelete 失败会双份注入且结果谎报 promoted）。
-      await deps.store.softDelete(r.id)
+      await deps.store.softDelete(r)
       try {
         await deps.agentsMd.append(`${r.name} — ${r.content}`)
       } catch {

@@ -544,17 +544,17 @@ export class FileTable implements MemoryTable {
     })
   }
 
-  async update(key: string, fn: (current: MemoryRecord) => MemoryRecord): Promise<MemoryRecord> {
+  async update(key: string, fn: (current: MemoryRecord) => MemoryRecord, hint?: LocateHint): Promise<MemoryRecord> {
     return this.locked(async () => {
-      const current = await this.locate(key)   // 锁内重读磁盘：外部编辑不丢
+      const current = await this.locate(key, hint)   // 锁内重读磁盘：外部编辑不丢
       if (!current) throw new RecordNotFoundError(key)
       return this.persist(key, current, fn(current.record))
     })
   }
 
-  async delete(key: string): Promise<boolean> {
+  async delete(key: string, hint?: LocateHint): Promise<boolean> {
     return this.locked(async () => {
-      const slot = await this.locate(key)
+      const slot = await this.locate(key, hint)
       if (!slot) return false
       await rm(slot.filePath, { force: true })
       await this.opts.stats.delete(key)

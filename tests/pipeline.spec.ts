@@ -190,7 +190,7 @@ describe('runSavePipeline', () => {
     const store = new MemoryStore(new InMemoryTable())
     const created = await runSavePipeline(candidate(), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
-    await store.softDelete(created.record.id)
+    await store.softDelete(created.record)
     const result = await runSavePipeline(
       candidate({ action: 'update', id: created.record.id, content: '新内容' }), deps(store))
     expect(result).toMatchObject({ kind: 'rejected', code: 'target-missing' })

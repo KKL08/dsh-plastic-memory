@@ -177,10 +177,10 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect(err).toBeInstanceOf(RecordNotFoundError)
     expect(err).toMatchObject({ id: 'ghost' })
 
-    const ok = await store.softDelete(rec.id)
+    const ok = await store.softDelete(rec)
     expect(ok).toBe(true)
     expect(((await table.locate(rec.id))?.record)!.status).toBe('deleted')
-    expect(await store.softDelete('ghost2')).toBe(false)
+    expect(await store.softDelete({ id: 'ghost2', workspacePath: undefined })).toBe(false)
   })
 
   it('markRecalled 只写召回统计侧表：统计 +1，不经 table.update、不逐 id 定位，记忆文件 mtime 不变', async () => {
