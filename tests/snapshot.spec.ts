@@ -10,6 +10,8 @@ import { DAY } from './helpers/clock.ts'
 import { STALENESS_NOTE } from '../src/record-freshness.ts'
 import { formatIndexLine } from '../src/index-line.ts'
 import { renderViaHost } from './helpers/render-via-host.ts'
+import { SECRET_MASK } from '../src/secrets.ts'
+import { FAKE_SECRET } from './helpers/secrets.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 
@@ -384,5 +386,63 @@ describe('escapePromptBraces × 宿主 renderContextSections 往返', () => {
 
   it('对照组：不转义时宿主对 {{ msg }} 抛错（宿主放宽后此例会红，届时可评估删掉转义）', () => {
     expect(() => renderViaHost('{{ msg }}')).toThrow(/malformed prompt variable reference/)
+  })
+})
+
+// 疑似密钥不跳过、不加提示：注入时只把命中片段遮成占位，整条照常带入
+describe('assembleSnapshot × 密钥遮盖', () => {
+  const base = { registry, workspacePath: undefined, budget: 4000, now: 10 * DAY }
+
+  it('core 正文里的疑似密码只遮命中片段，记录照常注入', () => {
+    const r = record({ id: 'mem_pwd', type: 'preference', content: '测试库密码: Abc12345 别提交到仓库' })
+    const { text, coreIds } = assembleSnapshot({ ...base, records: [r] })
+    expect(text).toContain(`[mem_pwd]【记忆·行为偏好】测试库${SECRET_MASK} 别提交到仓库`)
+    expect(text).not.toContain('Abc12345')
+    expect(coreIds).toEqual(['mem_pwd'])
+  })
+
+  it('索引行里 summary、tags 的 sk- key 遮住，其余照常', () => {
+    const r = record({ id: 'mem_sk', name: '模型网关', summary: `网关 key ${FAKE_SECRET.sk}`, tags: ['网关', FAKE_SECRET.github] })
+    const { text } = assembleSnapshot({ ...base, records: [r] })
+    expect(text).toContain(`- [mem_sk] 模型网关（网关 key ${SECRET_MASK}） — 网关, ${SECRET_MASK}`)
+    expect(text).not.toContain(FAKE_SECRET.sk)
+    expect(text).not.toContain(FAKE_SECRET.github)
+  })
+
+  it('跨字段拼接才命中的密钥也遮住（渲染后两段不相邻，逐段检测发现不了）', () => {
+    const r = record({ id: 'mem_cross', name: '数据库', summary: '数据库的 api_key', tags: ['=abcdef1234567890XYZ'] })
+    const { text } = assembleSnapshot({ ...base, records: [r] })
+    expect(text).not.toContain('abcdef1234567890XYZ')
+    expect(text).toContain(`- [mem_cross] 数据库（数据库的 ${SECRET_MASK}） — ${SECRET_MASK}`)
+  })
+
+  it('name 里有密钥：索引行不带文件路径（文件名由 name 派生）；文件名自带密钥的遮住', () => {
+    const named = record({ id: 'mem_named', name: `key ${FAKE_SECRET.sk}` })
+    const handFile = record({ id: 'mem_hand', name: '手写' })
+    const files = new Map([
+      ['mem_named', `global/key-${FAKE_SECRET.sk}.md`],
+      ['mem_hand', `global/备份-${FAKE_SECRET.aws}.md`],
+    ])
+    const { text } = assembleSnapshot({ ...base, records: [named, handFile], files })
+    expect(text).not.toContain(FAKE_SECRET.sk)
+    expect(text).not.toContain(FAKE_SECRET.aws)
+    expect(text).toContain(`- [mem_named] key ${SECRET_MASK}（摘要）\n`)
+    expect(text).toContain(`- [mem_hand] 手写（摘要） · global/备份-${SECRET_MASK}.md`)
+  })
+
+  it('截断导航图里的高频标签同样遮住', () => {
+    const records = [1, 2].map(i => record({ id: `mem_t${i}`, tags: [FAKE_SECRET.sk] }))
+    const { text } = assembleSnapshot({ ...base, records, budget: 5 })
+    expect(text).toContain('索引未列全')
+    expect(text).toContain(`${SECRET_MASK}（2）`)
+    expect(text).not.toContain(FAKE_SECRET.sk)
+  })
+
+  it('无密钥的记录输出与遮盖前逐字一致', () => {
+    const r = record({ id: 'mem_clean', name: '看板', summary: '团队看板', tags: ['协作'] })
+    const files = new Map([['mem_clean', 'global/看板.md']])
+    const { text } = assembleSnapshot({ ...base, records: [r], files })
+    expect(text).toContain(formatIndexLine(r, { passive: false, file: 'global/看板.md', note: '' }))
+    expect(text).not.toContain(SECRET_MASK)
   })
 })
