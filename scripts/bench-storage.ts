@@ -8,11 +8,11 @@
  *   node scripts/bench-storage.ts --projects 3 ...       同上（Node ≥23.6 原生执行 .ts）
  *
  * 计时口径（每项先空跑一轮预热，不计入；之后跑 --rounds 轮取中位数）：
- *   - 插件加载：新建 SidecarStore + FileTable，首次 load()（读全部记忆文件、合并召回统计、核对索引）。
- *   - refreshIfChanged（无变化）：工具调用前的外部改动检测，下面四个工具项都包含这一步。
+ *   - 构造：新建 SidecarStore + FileTable，零 I/O（应接近 0 ms）。
+ *   - readScope（当前项目 + global）：按范围读两目录（读文件、解析、合并召回统计），执行器切换后每次工具调用的基本成本。
  *   - 快照冻结：SnapshotCache.assemble，每轮一个新 session（预读可见记录 + 组装 + 首次冻结计召回）。
- *   - memory_search / memory_save / update / memory_health：refreshIfChanged + 对应执行器，
- *     与插件接线（index.ts 的 withRefresh）一致；不接 llm / sessionQuery，health 只有规则层。
+ *   - memory_search / memory_save / update / memory_health：对应执行器；不接 llm / sessionQuery，health 只有规则层。
+ *     执行器按范围读：search 与快照读当前项目 + global，health 单层读该层（含 .archive/）+ global，全库体检读全部目录。
  * 页缓存是热的：测的是同一进程内反复操作的稳态，不含冷盘 I/O。
  */
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
@@ -24,9 +24,9 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
-import { GLOBAL_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
+import { ARCHIVE_DIR, GLOBAL_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
 import type { MemoryLogger } from '../src/storage/table.ts'
-import type { MemoryRecord } from '../src/record-schema.ts'
+import { CONFIDENCE_BY_SOURCE, type MemoryRecord } from '../src/record-schema.ts'
 import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { formatIndexLine } from '../src/index-line.ts'
@@ -81,24 +81,30 @@ function makeRecord(id: string, name: string, loc: { scope: 'global' } | { scope
   const w1 = pick(WORDS), w2 = pick(WORDS), p1 = pick(PHRASES), p2 = pick(PHRASES)
   const roll = rand()
   const status = roll < 0.95 ? 'active' : roll < 0.98 ? 'superseded' : 'deleted'
-  // deleted 的 updatedAt 留在 14 天清扫窗口内，否则预热加载会把它们物理清掉、改变数据集
-  const updatedAt = status === 'deleted' ? now - Math.floor(rand() * 5 * DAY) : now - Math.floor(rand() * 60 * DAY)
+  const updatedAt = now - Math.floor(rand() * 60 * DAY)
   const createdAt = updatedAt - Math.floor(rand() * 30 * DAY)
+  const mode = pick(MODES)
   return {
     id, name, type: pick(TYPES), ...loc,
     tags: [w1, p1],
     content: `${p1}里 ${w1} 与 ${w2} 配合时要先确认${p2}，第 ${Math.floor(rand() * 100)} 次排查记下的经验：改动后重跑 ${w2} 相关检查，再看${p1}是否回归。`,
     summary: `${w1} ${p1}要点`,
-    source: { sessionId: `bench-${Math.floor(rand() * 500)}`, eventRange: [0, Math.floor(rand() * 200)], sourceMode: pick(MODES) },
+    source: { sessionId: `bench-${Math.floor(rand() * 500)}`, eventRange: [0, Math.floor(rand() * 200)], sourceMode: mode },
     createdAt, updatedAt, lastConfirmedAt: updatedAt,
     lastRecalledAt: null, recallCount: 0,
-    status, confidence: pick([0.5, 0.8, 0.9]),
+    status,
+    // 置信度不超过 sourceMode 上限：否则维护点首次读到会按上限收口并回写，数据集在预热轮被改写
+    confidence: Math.min(pick([0.5, 0.8, 0.9]), CONFIDENCE_BY_SOURCE[mode]),
+    // deleted 落 .archive/ 且 deletedAt 留在 14 天清扫窗口内，否则维护点会把它们搬家或物理清掉、改变数据集
+    ...(status === 'deleted' ? { deletedAt: now - Math.floor(rand() * 5 * DAY) } : {}),
   }
 }
 
+/** 按插件自己的布局落盘：非 active 的进 .archive/，和维护点整理后的目录一致，计时轮里没有搬家。 */
 async function writeDir(dir: string, records: MemoryRecord[]): Promise<void> {
-  await mkdir(dir, { recursive: true })
-  await Promise.all(records.map(r => writeFile(join(dir, `${r.name}.md`), encodeRecord(r, {}), 'utf8')))
+  await mkdir(join(dir, ARCHIVE_DIR), { recursive: true })
+  await Promise.all(records.map(r =>
+    writeFile(join(r.status === 'active' ? dir : join(dir, ARCHIVE_DIR), `${r.name}.md`), encodeRecord(r, {}), 'utf8')))
 }
 
 async function generate(root: string, workspaces: string[], now: number): Promise<MemoryRecord[]> {
@@ -163,10 +169,9 @@ try {
     .map(r => [r.id, { id: r.id, recallCount: 1 + Math.floor(rand() * 20), lastRecalledAt: now - Math.floor(rand() * 30 * DAY) }]))
   const genMs = performance.now() - t0
 
-  // 工具共用的一份运行时（对应插件加载后的常驻状态）
+  // 工具共用的一份运行时（对应插件加载后的接线对象；记忆本身不常驻内存）
   const sidecar = newSidecar(root)
   const fileTable = new FileTable({ root, stats: sidecar.recallStats, formatIndexLine: fmtIndex, log: quietLog })
-  await fileTable.load()
   const store = new MemoryStore(fileTable, quietLog, sidecar.recallStats)
   const decisions = new PendingDecisionsStore(sidecar.pending)
   const exec = { signal: new AbortController().signal } as ToolRunContext
@@ -176,17 +181,20 @@ try {
   const healthDeps = {
     store, registry, decisions, cache: sidecar.scanCache,
     thresholds: resolveHealthThresholds('normal'),
-    getQuarantined: () => fileTable.quarantined(),
-    memoryRoot: root, resolveContext,
+    resolveContext,
   }
   const updateTargets = seeded.filter(r => r.workspacePath === currentWs && r.status === 'active')
+  // 顶层只有 active（非 active 在 .archive/，缺省不读）
+  const visibleActive = seeded.filter(r => r.status === 'active' && (r.scope === 'global' || r.workspacePath === currentWs)).length
 
   const results = [
-    await bench('插件加载（构造 + 首次 load）', async () => {
-      const table = new FileTable({ root, stats: newSidecar(root).recallStats, formatIndexLine: fmtIndex, log: quietLog })
-      await table.load()
+    await bench('构造（零 I/O）', async () => {
+      new FileTable({ root, stats: newSidecar(root).recallStats, formatIndexLine: fmtIndex, log: quietLog })
     }),
-    await bench('refreshIfChanged（无变化）', () => fileTable.refreshIfChanged()),
+    await bench('readScope（当前项目 + global）', async () => {
+      const r = await fileTable.readScope([join(root, workspaceDirName(currentWs)), join(root, GLOBAL_DIR)])
+      if (r.records.length !== visibleActive) throw new Error(`readScope 记录数不对：${r.records.length}，应为 ${visibleActive}`)
+    }),
     await bench('快照冻结（当前项目 + global）', async () => {
       const s = {}
       snapshotCache.setWorkspacePath(s, currentWs)
@@ -194,12 +202,10 @@ try {
       if (!text.startsWith('# 长期记忆')) throw new Error('快照没有组装出记忆内容')
     }),
     await bench('memory_search', async () => {
-      await fileTable.refreshIfChanged()
       const r = await executeSearch({ query: `${WORDS[0]} 部署流程` }, exec, { store, registry, resolveContext })
       if (r.hits.length === 0) throw new Error('memory_search 没有命中')
     }),
     await bench('memory_save（create）', async round => {
-      await fileTable.refreshIfChanged()
       // 正文全是随机词：每轮都要真的落盘，不能被 bigram 相似度判成前几轮样本的重复
       const words = Array.from({ length: 6 }, () => Math.random().toString(36).slice(2, 10))
       const r = await executeSave({
@@ -209,7 +215,6 @@ try {
       if (r.kind !== 'saved') throw new Error(`memory_save 未落盘：${r.kind}`)
     }),
     await bench('memory_save（update）', async round => {
-      await fileTable.refreshIfChanged()
       const target = updateTargets[(round + 1) % updateTargets.length]
       const r = await executeSave({
         action: 'update', id: target.id, name: target.name, type: target.type, scope: 'workspace',
@@ -218,11 +223,9 @@ try {
       if (r.kind !== 'updated') throw new Error(`update 未落盘：${r.kind}`)
     }),
     await bench('memory_health 单层（当前项目）', async () => {
-      await fileTable.refreshIfChanged()
       await executeHealth({}, healthDeps, exec)
     }),
     await bench(`memory_health 全库（global + ${projects} 个项目）`, async () => {
-      await fileTable.refreshIfChanged()
       await executeHealth({ scope: 'all' }, healthDeps, exec)
     }),
   ]

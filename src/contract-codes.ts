@@ -11,6 +11,11 @@ export type RejectCode =
   | 'no-workspace'      // 无工作目录的会话 create（无处归属）
   | 'schema-invalid'    // 字段校验失败
   | 'secret-critical'   // 明确厂商特征的密钥，拒存不落盘
+  | 'secret-suspected'  // 疑似密钥（无厂商特征），未带 force 时拒存；用户确认后带 force: true 重发
+
+/** 治理工具（forget / confirm / promote / snapshot）按记录的拒绝原因（tools/workspace-gate.ts）。 */
+export type GovernanceRejectCode =
+  | 'cross-workspace'   // 目标不在可见集合（global + 当前 workspace），且未带 allowCrossWorkspace
 
 /** memory_save 成功但附带的警告（pipeline.ts）。 */
 export type WarningCode =
@@ -18,7 +23,7 @@ export type WarningCode =
   | 'update-scope-kept'       // update 填了与目标不同的 scope：保持原 scope
   | 'cross-bucket-supersede'  // supersedes 目标不在本次写入的记忆桶内，跳过
   | 'auto-snapshot'           // 更新 global 记忆前已自动快照
-  | 'secret-suspected'        // 疑似密钥（无厂商特征），已落盘但建议改写
+  | 'secret-suspected'        // 疑似密钥（无厂商特征），带 force: true 放行落盘，仍建议改写
 
 /** memory_scan 的说明性 note（scan.ts）。 */
 export type ScanNoteCode =
@@ -42,8 +47,13 @@ export type HealthRecommendationKind =
   | 'issues-below-threshold'  // 有问题但未达提示阈值
   | 'promote-candidates'      // 闲时事务：有全局提升候选待确认
 
+/** 注册处统一拦截的工具门拒绝码（tools/subagent-gate.ts）。 */
+export type ToolGateCode = 'subagent-readonly' // 子 agent 会话（delegationDepth ≥ 1）不可写
+
 /** memory_search 的说明性 note（search.ts）。 */
-export type SearchNoteCode = 'no-workspace' // scope=workspace 但当前会话没有工作目录
+export type SearchNoteCode =
+  | 'no-workspace'   // scope=workspace 但当前会话没有工作目录
+  | 'or-fallback'    // 多词查询没有同时命中全部词项的记忆，结果改为命中任一词项、按命中数排序
 
 /** frontmatter 解析失败的原因（storage/frontmatter.ts）。 */
 export type FrontmatterErrorCode =
@@ -51,9 +61,17 @@ export type FrontmatterErrorCode =
   | 'unclosed-fence'    // 找不到闭合的 ---
   | 'yaml-parse'        // 围栏内不是合法 YAML
   | 'not-object'        // YAML 顶层不是对象
-  | 'timestamp-format'  // 时间戳不是 UTC 毫秒 ISO 格式
+  | 'timestamp-format'  // 时间戳不是可接受的形态（日期、ISO 8601 日期时间、数字毫秒）
   | 'timestamp-parse'   // 时间戳无法解析
   | 'schema-invalid'    // 记录 schema 校验失败
+
+/** 读取记忆目录时的目录级说明（info 级，按文件或目录列出；storage/frontmatter.ts、storage/file-table.ts、tools/layer-preread.ts）。 */
+export type DirectoryNoteCode =
+  | 'reserved-keys'     // frontmatter 写了保留键（scope、workspacePath、召回统计、content），已忽略
+  | 'marker-missing'    // workspace 目录缺 .workspace 标记（或标记为空），目录不进清单、文件不读
+  | 'dir-unreadable'    // 目录不可读（权限等），计空
+  | 'dir-empty'         // workspace 目录顶层没有记忆文件（只剩归档或全空），不进体检清单
+  | 'duplicate-id'      // 同一 id 有多个文件：读取时按取舍规则用一份，其余副本不自动删（health / scan 报出）
 
 /** 带 code 的说明条目（scan notes / save warnings 共用形状）。 */
 export interface CodedNote<C extends string> {

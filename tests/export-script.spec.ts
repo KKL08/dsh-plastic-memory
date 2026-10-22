@@ -19,9 +19,7 @@ function kvJson(memories: Record<string, unknown>) {
 }
 
 async function load(root: string) {
-  const t = new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() })
-  await t.load()
-  return t
+  return new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() })   // 构造零 I/O，读时直接读目录
 }
 
 it('导出 global + workspace 记录，坏记录进 skipped 不中断；FileTable 读回全字段往返', async () => {
@@ -57,7 +55,7 @@ it('导出 global + workspace 记录，坏记录进 skipped 不中断；FileTabl
 
   const t = await load(root)
 
-  const g = (await t.get('mem_global'))!
+  const g = ((await t.locate('mem_global'))?.record)!
   expect(g).toBeDefined()
   expect(g.scope).toBe('global')
   expect(g.name).toBe('包管理用 pnpm')
@@ -71,7 +69,7 @@ it('导出 global + workspace 记录，坏记录进 skipped 不中断；FileTabl
   expect(g.status).toBe('active')
   expect(g.confidence).toBe(0.9)
   // recallCount/lastRecalledAt 是 sidecar-only 字段（frontmatter 不承载），导出脚本不写 KvTable 侧车，
-  // 因此 FileTable.load 在无侧车行时按文档默认注入 0/null——这是有意的、非本脚本职责范围内的已知损失。
+  // 因此 FileTable 读文件时在无侧车行时按文档默认注入 0/null——这是有意的、非本脚本职责范围内的已知损失。
   expect(g.recallCount).toBe(0)
   expect(g.lastRecalledAt).toBeNull()
   // 可选键（validFrom/validTo/supersedes）原始记录未携带 → 往返后仍不出现
@@ -79,7 +77,7 @@ it('导出 global + workspace 记录，坏记录进 skipped 不中断；FileTabl
   expect(g.validTo).toBeUndefined()
   expect(g.supersedes).toBeUndefined()
 
-  const w = (await t.get('mem_ws'))!
+  const w = ((await t.locate('mem_ws'))?.record)!
   expect(w).toBeDefined()
   expect(w.scope).toBe('workspace')
   expect(w.workspacePath).toBe('/home/dev/example-project') // .workspace 标记无损还原
@@ -91,7 +89,7 @@ it('导出 global + workspace 记录，坏记录进 skipped 不中断；FileTabl
   expect(w.createdAt).toBe(1787166378178)
   expect(w.updatedAt).toBe(1787166720840)
 
-  expect(await t.get('mem_bad')).toBeUndefined()
+  expect((await t.locate('mem_bad'))?.record).toBeUndefined()
 })
 
 it('同目录内 name slug 撞名 → 缀 id 兜底，两条记录都能落盘且互不覆盖', async () => {
@@ -117,8 +115,8 @@ it('同目录内 name slug 撞名 → 缀 id 兜底，两条记录都能落盘�
   expect(result.skipped).toHaveLength(0)
 
   const t = await load(root)
-  expect((await t.get('mem_one'))!.content).toBe('第一条')
-  expect((await t.get('mem_two'))!.content).toBe('第二条')
+  expect(((await t.locate('mem_one'))?.record)!.content).toBe('第一条')
+  expect(((await t.locate('mem_two'))?.record)!.content).toBe('第二条')
 })
 
 it('KV JSON 顶层缺 tables.memories 时直接抛错（信封损坏，不当作 0 条静默通过）', async () => {
@@ -131,7 +129,7 @@ const makeRecord = (id: string, name: string, overrides: Partial<MemoryRecord> =
 
 it('可选键在场时无损往返（validFrom/validTo/supersedes 走 ISO 编解码），deleted 状态记录也还原', async () => {
   // 真实备份数据里存在带 validTo 和 status: deleted 的记录——这两条编解码路径必须被钉住。
-  const now = Date.now() // deleted 且新鲜（14 天内）：load 期 sweep 不应清它
+  const now = Date.now() // deleted 且新鲜（14 天内）：写路径的清扫不应清它
   const kv = kvJson({
     mem_valid: makeRecord('mem_valid', '带有效期', {
       validFrom: 1754697600000, validTo: 1754784000000, supersedes: ['mem_old1', 'mem_old2'],
@@ -145,11 +143,11 @@ it('可选键在场时无损往返（validFrom/validTo/supersedes 走 ISO 编解
   expect(result.skipped).toHaveLength(0)
 
   const t = await load(root)
-  const v = (await t.get('mem_valid'))!
+  const v = ((await t.locate('mem_valid'))?.record)!
   expect(v.validFrom).toBe(1754697600000)
   expect(v.validTo).toBe(1754784000000)
   expect(v.supersedes).toEqual(['mem_old1', 'mem_old2'])
-  expect((await t.get('mem_del'))!.status).toBe('deleted')
+  expect(((await t.locate('mem_del'))?.record)!.status).toBe('deleted')
 })
 
 it('目标目录已有其他 id 的同名文件时不覆盖：改走 id 兜底名；两个名都被占则 skipped', async () => {
@@ -167,8 +165,8 @@ it('目标目录已有其他 id 的同名文件时不覆盖：改走 id 兜底�
   // 原文件未被动过，导出的记录落在 id 兜底名
   expect(await readFile(join(root, 'global', '同名记录.md'), 'utf8')).toContain('id: mem_new_sys')
   const t = await load(root)
-  expect((await t.get('mem_new_sys'))!.content).toBe('mem_new_sys 的内容')
-  expect((await t.get('mem_old_kv'))!.content).toBe('mem_old_kv 的内容')
+  expect(((await t.locate('mem_new_sys'))?.record)!.content).toBe('mem_new_sys 的内容')
+  expect(((await t.locate('mem_old_kv'))?.record)!.content).toBe('mem_old_kv 的内容')
 
   // 基础名与兜底名都被其他 id 占用 → skipped，绝不覆盖
   const frag = 'mem_third'.slice(-6)
@@ -199,6 +197,6 @@ it('名字 slug 为保留名 memory 时避让（APFS 上 memory.md 会与索引 
   const files = await readdir(join(root, 'global'))
   expect(files).not.toContain('memory.md')
   expect(files).toContain(`memory-${'mem_rsv'.slice(-6)}.md`)
-  const t = await load(root) // 索引再生后记录仍在、未被隔离
-  expect((await t.get('mem_rsv'))!.content).toBe('mem_rsv 的内容')
+  const t = await load(root) // 记录仍在、未被隔离
+  expect(((await t.locate('mem_rsv'))?.record)!.content).toBe('mem_rsv 的内容')
 })

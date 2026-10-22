@@ -5,6 +5,78 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/) with pre-release tags while the host
 (DeepSeek Harness) is itself in pre-release.
 
+## [Unreleased]
+
+### Changed
+- Memories are now plain files and nothing else. The Markdown files on disk
+  are the only copy: the plugin keeps no table in memory, loads nothing at
+  start-up, and reads just the directories an operation needs. A file you
+  create, edit or delete by hand, with git or from another process shows up in
+  the next tool call and the next session's prompt without a restart. On a
+  library of 10 projects × 1000 memories (Apple M4), start-up dropped from
+  1.5 s to 0 and the 109 ms fingerprint check before every tool call is gone;
+  `memory_search` takes about 30 ms, `memory_save` 190–280 ms, a single-layer
+  `memory_health` 135 ms and a whole-library one 1.1 s. `pnpm bench:storage`
+  reproduces these numbers on your machine.
+- Storage layout: `global/` and one `<project>-<hash>/` directory per
+  workspace (marked by a `.workspace` file holding the project path). A memory
+  file is named after its `name`; `MEMORY.md` in each directory is a generated
+  index of the memories currently in effect; `.archive/` holds forgotten and
+  superseded memories for 14 days; `.state/` holds the plugin's own snapshots,
+  pending decisions, scan cache and recall statistics. Existing files are read
+  in place; snapshots and pending decisions are imported from the host's KV
+  store on first use. The host's `storageDomain` service is therefore no
+  longer required.
+- Hand-written memory files need only `name` and `type` in the frontmatter; the
+  id is derived from the file path and every other field is filled in at the
+  next write or session start. Timestamps accept dates, ISO 8601 date-times
+  and millisecond values. A file edited by hand is marked as such until the
+  next `memory_save` update, and `memory_source` says its provenance may no
+  longer match. Files that fail to parse are quarantined individually and
+  listed by `memory_health` and `memory_scan` instead of breaking the library.
+- Derived views are rebuilt only at the end of a write and when a session's
+  memory snapshot is frozen: index files, moving non-active files to
+  `.archive/`, sweeping archived files older than 14 days, recording hand edits
+  and cleaning up leftover temporary files. Reads never write.
+- Memories whose `validTo` has passed stay where they are but are no longer
+  injected or found by `memory_search`; `memory_health` reports them as
+  `expired` and suggests extending the date or forgetting them.
+- `memory_search` with several keywords first requires all of them to match;
+  when nothing matches all of them it falls back to any-match ordered by hit
+  count and says so (`or-fallback`).
+- Injected index lines now end with the memory's file path (`global/x.md`,
+  `<project>/x.md`), so the model can open the full text directly, and the
+  prompt ends with a fixed note that memories are background material: they
+  shape how a requested task is done but never start a task, run commands,
+  change files or override what the user is saying now. `.archive/` is a
+  hidden directory, so the host's grep tool no longer surfaces forgotten text.
+- `memory_forget` moves the file to `.archive/`, recoverable for 14 days as
+  before. A memory that contains a secret is the exception: it is deleted
+  physically at once and its copy in every existing snapshot is replaced by a
+  `[redacted: secret]` placeholder, so the snapshot stays usable for its other
+  records while the secret is gone for good; `memory_snapshot restore` reports
+  such records as `redacted`. A suspected secret without vendor markers is
+  refused with `secret-suspected` until you confirm with `force: true`.
+- Governance tools (`memory_forget`, `memory_confirm`, `memory_promote`,
+  `memory_snapshot`) act on global and current-workspace memories only; a
+  target from another project is refused with `cross-workspace` unless the
+  call carries `allowCrossWorkspace: true`, meant for an explicit
+  library-wide clean-up. Pending decisions record which workspaces they
+  involve.
+- Sub-agent sessions (tasks the host delegates, `delegationDepth ≥ 1`) are
+  read-only: `memory_search`, `memory_source` and `memory_health` work, every
+  writing tool including `memory_scan` is refused with `subagent-readonly`,
+  and memories are still injected as usual.
+- `memory_health` also lists quarantined files and directory-level problems:
+  duplicate ids (the newest copy wins and the others stay until you remove
+  them), workspace directories without a `.workspace` marker, unreadable or
+  empty directories.
+- `pnpm host:contract` now also checks that a file written straight into the
+  memory directory is injected into the next session (H15) and that the
+  host's grep tool finds top-level memories but nothing under `.archive/`
+  (H16). `pnpm host:smoke` boots the real host with a probe plugin that
+  confirms the tools are registered.
+
 ## [0.1.1-beta.5] - 2026-10-20
 
 ### Changed

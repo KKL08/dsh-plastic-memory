@@ -1,14 +1,33 @@
 import { realpath } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { basename, dirname } from 'node:path'
 import type { MemoryLogger, MemoryStore } from './store.ts'
+import type { MemoryRecord } from './record-schema.ts'
+import { resolveDuplicates } from './storage/table.ts'
 import type { TypeRegistry } from './type-registry.ts'
 import type { EvidenceLookupLevel } from './evidence-guidance.ts'
 import { assembleSnapshot, escapePromptBraces } from './snapshot.ts'
 
 /**
+ * 快照的预读：global + 当前 workspace 顶层的 active 记录（同 id 按取舍规则留一份，口径同 queryScope 的默认查询），
+ * 外加 id → 文件路径（相对记忆根目录：`<目录名>/<文件名>`），索引行末尾用它。走 readLayer 是为了拿到文件路径——
+ * queryScope 只回记录。同一次读取的隔离文件数给冷启动文案用。
+ */
+export async function prereadSnapshot(store: MemoryStore, workspacePath: string | undefined): Promise<{
+  records: MemoryRecord[]; files: Map<string, string>; quarantinedCount: number
+}> {
+  const read = await store.readLayer({ kind: 'visible', workspacePath })
+  const located = resolveDuplicates(read.records, { workspacePath }).filter(l => l.record.status === 'active')
+  return {
+    records: located.map(l => l.record),
+    files: new Map(located.map(l => [l.record.id, `${basename(l.dir)}/${basename(l.filePath)}`])),
+    quarantinedCount: read.quarantined.length,
+  }
+}
+
+/**
  * session 内冻结的 snapshot 缓存，按 session 隔离（WeakMap）。
  * 构建只发生在 assemble（system-prompt/assemble 中间件调用，异步）：等 workspace 解析落定或超时 →
- * 缓存缺失或已过期则预读可见记录、组装、冻结 → 首次冻结计一次召回。同步的 render（context provider）
+ * 缓存缺失或已过期则预读可见记录、组装、冻结 → 首次冻结计一次召回 → 维护点（global + 当前 workspace）。同步的 render（context provider）
  * 只回缓存，没有缓存回空串；冷启动文案由组装在可见集合为空时产出，provider 不兜底。
  * compaction 结束只标过期（markStale）不清空：宿主只调同步 provider 的 admission refresh 拿到上一份快照。
  * workspacePath 走 pull + memoize：render 发现某 session 未解析时触发一次 fire-and-forget 解析
@@ -102,9 +121,8 @@ export class SnapshotCache {
     if (cached && cached.generation === generation) return cached.text
     const isResolved = this.workspacePaths.has(session)
     const workspacePath = isResolved ? this.workspacePaths.get(session) : undefined
-    // 预读范围：只读 active，global + 当前 workspace（未解析时 global-only）
-    const records = await this.deps.store.query({ scope: { kind: 'visible', workspacePath } })
-    const { text, coreIds } = assembleSnapshot({ ...this.deps, records, workspacePath, now: Date.now() })
+    // 预读范围：只读 active，global + 当前 workspace（未解析时 global-only）；同一次读取的隔离文件数给冷启动文案用
+    const { text, coreIds } = assembleSnapshot({ ...this.deps, ...(await prereadSnapshot(this.deps.store, workspacePath)), workspacePath, now: Date.now() })
     if (!isResolved) return text
     // 构建期间被标过期：这份文本只给本次用，不进缓存、不计召回，下一次中间件按新代次重建
     if ((this.generations.get(session) ?? 0) !== generation) return text
@@ -115,6 +133,12 @@ export class SnapshotCache {
     if (!this.recalled.has(session)) {
       this.recalled.add(session)
       await this.deps.store.markRecalled(coreIds)
+    }
+    // 快照冻结是维护点之一（设计稿 §5 §6）：对 global + 当前 workspace 做维护；失败只记日志，不拖垮注入
+    try {
+      await this.deps.store.maintain({ kind: 'visible', workspacePath })
+    } catch (err) {
+      ;(this.deps.log ?? console).error('[plastic-memory] 记忆目录维护失败:', err)
     }
     return text
   }

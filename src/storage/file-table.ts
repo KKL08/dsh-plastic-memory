@@ -1,13 +1,21 @@
-import { mkdir, readdir, readFile, writeFile, rename, rm, stat } from 'node:fs/promises'
+import { mkdir, readdir, readFile, writeFile, rename, rm, stat, link } from 'node:fs/promises'
 import { RecordNotFoundError } from '../errors.ts'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, relative } from 'node:path'
 import type { MemoryRecord } from '../record-schema.ts'
-import type { MemoryTable, MemoryLogger } from './table.ts'
+import {
+  resolveDuplicates,
+  type MemoryTable, type MemoryLogger, type DirectoryNote, type QuarantineEntry, type LocatedFile, type LocatedRecord,
+  type LocateHint, type ScopeReadOptions, type ScopeReadResult, type WorkspaceDirListing, type KeywordMatch,
+} from './table.ts'
 import type { KvTable } from '../kv-table.ts'
 import type { RecallStats } from './schema.ts'
-import { splitFrontmatter, decodeRecord, encodeRecord, type FileLocation } from './frontmatter.ts'
-import { WORKSPACE_MARKER, INDEX_FILE, GLOBAL_DIR, STATE_DIR, workspaceDirName, slugifyName, isReservedFileName } from './paths.ts'
+import { decodeFile, digestMismatch, encodeRecord, type FileLocation } from './frontmatter.ts'
+import {
+  WORKSPACE_MARKER, INDEX_FILE, GLOBAL_DIR, ARCHIVE_DIR, workspaceDirName, slugifyName, isReservedFileName,
+  isMemoryFileName, isWorkspaceDirName, deriveFileId, isDerivedFileId,
+} from './paths.ts'
 import { formatIndexLine } from '../index-line.ts'
+import { withinValidity } from '../record-freshness.ts'
 import { RETENTION_MS } from '../retention.ts'
 
 /** 软删记录清扫窗口：与快照保留共用 retention.ts 的单一来源（两者必须一致）。 */
@@ -20,34 +28,71 @@ const TMP_STALE_MS = 60_000
  *  子串（如 cache.tmp-notes.md），只看子串会把正式 .md 当残留删掉；正式文件永远以 .md 结尾。 */
 const TMP_SUFFIX_RE = /\.tmp-(\d+)-[a-z0-9]+$/
 
+/** frontmatter 里的 id 行：允许引号与两侧空白，行尾的 \r（CRLF 文件）被 \s* 吃掉。 */
+const ID_LINE_RE = /^id:\s*["']?([^"'\s]+)["']?\s*$/m
+/** frontmatter 里的 digest 行（维护点判手编：认识且不匹配才把时间戳取 mtime）；形态同 id 行。 */
+const DIGEST_LINE_RE = /^digest:\s*["']?([^"'\s]+)["']?\s*$/m
+
+/**
+ * 原文与解码值可能不同的 frontmatter 形态，这类文件一律不预筛（预筛必须是超集）：
+ *  - 带反斜杠的双引号标量（"a\"b"、"café"、长串用 \ 续行）。允许跨行：双引号标量可以折成多行，
+ *    续行符可能落在没有引号的那一行，所以不按行界定。
+ *  - 单引号标量里的 '' 转义（'it''s' 解码成 it's）。
+ * 其余折行（纯量在空格处折行、块标量）只改变空白，词项不含空白，子串匹配不受影响。
+ */
+const ESCAPED_SCALAR_RE = /"[^"]*\\|'[^']*''/
+
+/** 原文预筛：小写词项与模式（all = 全部命中才解析，any = 任一命中即解析）。词项为空即不预筛。 */
+interface Prefilter { terms: readonly string[]; match: KeywordMatch }
+const NO_PREFILTER: Prefilter = { terms: [], match: 'all' }
 
 export interface FileTableOptions {
   root: string
   stats: KvTable<RecallStats>
-  /** 索引行格式器由接线层注入（storage 层不依赖 registry）；缺省用无陈旧度的简版。 */
-  formatIndexLine?: (r: MemoryRecord) => string
+  /** 索引行格式器由接线层注入（storage 层不依赖 registry）；缺省用无陈旧度的简版。fileName 是同目录的文件名。 */
+  formatIndexLine?: (r: MemoryRecord, fileName: string) => string
   now?: () => number
   /** 日志注入口，缺省回退 console（见 store.ts MemoryLogger）。 */
   log?: MemoryLogger
 }
 
-interface Slot { record: MemoryRecord; extras: Record<string, unknown>; filePath: string; dir: string }
+/** 读取结果的内部形态：带 extras、磁盘原文与 mtime（维护点逐字节比较与取 mtime 用）；对外的 LocatedRecord / LocatedFile 不带后两者。 */
+interface Slot extends LocatedFile { raw: string; mtimeMs: number }
 
+interface ScopeDir { dir: string; loc: FileLocation }
+
+function errnoCode(err: unknown): string | undefined {
+  return (err as NodeJS.ErrnoException | undefined)?.code
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** 原文的 frontmatter 段（到闭围栏前）：预筛的转义检查与 id 行匹配只看这一段，正文里的 "id:" 行不算。 */
+function frontmatterOf(raw: string): string {
+  const closeAt = raw.indexOf('\n---', 3)
+  return closeAt < 0 ? raw : raw.slice(0, closeAt)
+}
+
+/**
+ * 文件表：磁盘是唯一真相，进程里不常驻记忆表（设计稿 §0）。构造不做 I/O；每个操作读它涉及的目录。
+ * 读路径不加锁、不写盘；写路径经一条 Promise 链串行，锁内先 locate 重读磁盘再应用修改（外部编辑不丢）；create 是例外：新 id 不定位，排他占名。
+ * 记忆目录的维护只有两处入口：写路径末尾（被写的目录）与 maintain（快照冻结时由调用方对 global + 当前 workspace 调用），都走同一把锁。
+ */
 export class FileTable implements MemoryTable {
-  private map = new Map<string, Slot>()
-  private quarantine: { path: string; error: string }[] = []
-  private wsDirs = new Map<string, string>()   // workspacePath -> 绝对目录
-  private fingerprint = new Map<string, string>()   // "<目录名>/<文件名>" -> "mtime:size"
-  private chain: Promise<unknown> = Promise.resolve()  // 进程内互斥：写与重载串行化
+  private chain: Promise<unknown> = Promise.resolve()  // 进程内互斥：写路径与维护点串行化
   private readonly log: MemoryLogger
-  private opts: FileTableOptions
+  private readonly opts: FileTableOptions
+  readonly globalDir: string
 
   constructor(opts: FileTableOptions) {
     this.opts = opts
     this.log = opts.log ?? console
+    this.globalDir = join(opts.root, GLOBAL_DIR)
   }
 
-  /** 互斥执行：所有写路径与重载都经过这里串行。 */
+  /** 互斥执行：所有写路径都经过这里串行。 */
   private locked<T>(fn: () => Promise<T>): Promise<T> {
     const next = this.chain.then(fn, fn)
     this.chain = next.catch(() => {})
@@ -56,176 +101,309 @@ export class FileTable implements MemoryTable {
 
   private now() { return this.opts.now?.() ?? Date.now() }
 
-  quarantined(): readonly { path: string; error: string }[] { return this.quarantine }
+  // —— 读侧（不加锁、不写盘）——
 
-  /** 绝不 throw：任何失败都降级（隔离/警告），插件加载不能因记忆坏文件而失败。 */
-  async load(): Promise<void> {
-    await this.locked(() => this.loadInner()).catch(err => {
-      ;this.log.warn('[plastic-memory] 记忆目录加载失败，按空库继续：', err)
-    })
+  /** 读 .workspace 标记：返回路径；ENOENT / 空标记 → undefined；其他错误抛出（调用方记 dir-unreadable）。 */
+  private async readMarker(dir: string): Promise<string | undefined> {
+    try {
+      const text = (await readFile(join(dir, WORKSPACE_MARKER), 'utf8')).trim()
+      return text === '' ? undefined : text
+    } catch (err) {
+      if (errnoCode(err) === 'ENOENT') return undefined
+      throw err
+    }
+  }
+
+  private note(code: DirectoryNote['code'], path: string, text: string): DirectoryNote {
+    return { level: 'info', code, path, text }
+  }
+
+  /** 把 dir 解析成 FileLocation：global 目录直接给；其余读标记。缺标记返回 note；目录根本不存在返回 undefined（计空，不是问题）。 */
+  private async locationOf(dir: string): Promise<{ loc: FileLocation } | { note: DirectoryNote } | undefined> {
+    if (dir === this.globalDir) return { loc: { scope: 'global' } }
+    try {
+      const workspacePath = await this.readMarker(dir)
+      if (workspacePath !== undefined) return { loc: { scope: 'workspace', workspacePath } }
+      try { await stat(dir) } catch (err) { if (errnoCode(err) === 'ENOENT') return undefined; throw err }
+      return { note: this.note('marker-missing', dir, `目录缺少有效的 ${WORKSPACE_MARKER} 标记，其中的记忆文件未读取：${dir}`) }
+    } catch (err) {
+      return { note: this.note('dir-unreadable', dir, `目录不可读，计空：${dir}（${err instanceof Error ? err.message : String(err)}）`) }
+    }
+  }
+
+  /** 列目录里的记忆文件名；ENOENT 计空（目录还没建）；其他错误返回 note。 */
+  private async listMemoryFiles(dir: string): Promise<{ names: string[] } | { note: DirectoryNote }> {
+    try {
+      return { names: (await readdir(dir)).filter(isMemoryFileName) }
+    } catch (err) {
+      if (errnoCode(err) === 'ENOENT') return { names: [] }
+      return { note: this.note('dir-unreadable', dir, `目录不可读，计空：${dir}（${err instanceof Error ? err.message : String(err)}）`) }
+    }
+  }
+
+  private passesPrefilter(raw: string, filePath: string, { terms, match }: Prefilter): boolean {
+    if (terms.length === 0) return true
+    if (ESCAPED_SCALAR_RE.test(frontmatterOf(raw))) return true   // 解码后才出现的子串：不敢排除
+    // 缺 id 行的手建文件，id 由相对路径派生、原文里没有：一并算进去（索引里列出派生 id，模型会拿它来搜）。
+    // 词项不含空白，不会跨过拼接处的换行。
+    const text = `${raw.toLowerCase()}\n${deriveFileId(relative(this.opts.root, filePath))}`
+    return match === 'any' ? terms.some(t => text.includes(t)) : terms.every(t => text.includes(t))
+  }
+
+  /** 读单个记忆文件。返回 undefined = 被预筛跳过 / 竞态消失 / 不是普通文件。 */
+  private async readMemoryFile(
+    filePath: string, dir: string, loc: FileLocation, prefilter: Prefilter, statsRows: ReadonlyMap<string, RecallStats>,
+  ): Promise<{ slot: Slot; notes: DirectoryNote[] } | { quarantined: QuarantineEntry } | undefined> {
+    let mtimeMs: number
+    let raw: string
+    try {
+      const s = await stat(filePath)
+      if (!s.isFile()) return undefined
+      mtimeMs = s.mtimeMs
+      raw = await readFile(filePath, 'utf8')
+    } catch (err) {
+      if (errnoCode(err) === 'ENOENT') return undefined   // readdir 之后被删：竞态
+      return { quarantined: { path: filePath, error: err instanceof Error ? err.message : String(err) } }
+    }
+    if (!this.passesPrefilter(raw, filePath, prefilter)) return undefined
+    const outcome = decodeFile(raw, { path: filePath, loc, relPath: relative(this.opts.root, filePath), mtimeMs })
+    if (!outcome.ok) return { quarantined: { path: outcome.path, error: outcome.error } }
+    const row = statsRows.get(outcome.record.id)
+    const record = row ? { ...outcome.record, recallCount: row.recallCount, lastRecalledAt: row.lastRecalledAt } : outcome.record
+    return {
+      slot: { record, extras: outcome.extras, filePath, dir, raw, mtimeMs },
+      notes: outcome.notes.map(n => ({ ...n, path: filePath })),
+    }
+  }
+
+  private toLocated({ record, extras, filePath, dir }: Slot): LocatedFile {
+    return { record, extras, filePath, dir }
+  }
+
+  /** 读一组已解析位置的目录（顶层，可选含 .archive/），带 extras 的内部形态。 */
+  private async readDirs(dirs: readonly ScopeDir[], opts: ScopeReadOptions): Promise<{ slots: Slot[]; quarantined: QuarantineEntry[]; directoryNotes: DirectoryNote[] }> {
+    const slots: Slot[] = []
+    const quarantined: QuarantineEntry[] = []
+    const directoryNotes: DirectoryNote[] = []
+    const prefilter: Prefilter = {
+      terms: (opts.prefilterTerms ?? []).map(t => t.toLowerCase()).filter(t => t !== ''),
+      match: opts.prefilterMatch ?? 'all',
+    }
+    const statsRows = new Map(await this.opts.stats.list())
+    for (const { dir, loc } of dirs) {
+      const levels = opts.includeArchive ? [dir, join(dir, ARCHIVE_DIR)] : [dir]
+      for (const level of levels) {
+        const listed = await this.listMemoryFiles(level)
+        if ('note' in listed) { directoryNotes.push(listed.note); continue }
+        const results = await Promise.all(listed.names.sort().map(name =>
+          this.readMemoryFile(join(level, name), dir, loc, prefilter, statsRows)))
+        for (const r of results) {
+          if (r === undefined) continue
+          if ('quarantined' in r) { quarantined.push(r.quarantined); continue }
+          if (opts.types !== undefined && !opts.types.includes(r.slot.record.type)) continue
+          slots.push(r.slot)
+          directoryNotes.push(...r.notes)
+        }
+      }
+    }
+    return { slots, quarantined, directoryNotes }
+  }
+
+  /** 把调用方给的目录解析成带 FileLocation 的列表；缺标记 / 不可读的目录产 note、不读文件。 */
+  private async resolveDirs(dirs: readonly string[]): Promise<{ scopeDirs: ScopeDir[]; directoryNotes: DirectoryNote[] }> {
+    const scopeDirs: ScopeDir[] = []
+    const directoryNotes: DirectoryNote[] = []
+    for (const dir of dirs) {
+      const r = await this.locationOf(dir)
+      if (r === undefined) continue
+      if ('note' in r) directoryNotes.push(r.note)
+      else scopeDirs.push({ dir, loc: r.loc })
+    }
+    return { scopeDirs, directoryNotes }
+  }
+
+  async readScope(dirs: string[], opts: ScopeReadOptions = {}): Promise<ScopeReadResult> {
+    const { scopeDirs, directoryNotes } = await this.resolveDirs(dirs)
+    const read = await this.readDirs(scopeDirs, opts)
+    return {
+      records: read.slots.map(({ record, filePath, dir }) => ({ record, filePath, dir })),   // 原文与 mtime 不出内部
+      quarantined: read.quarantined,
+      directoryNotes: [...directoryNotes, ...read.directoryNotes],
+    }
+  }
+
+  async listWorkspaceDirs(): Promise<WorkspaceDirListing> {
+    const entries: WorkspaceDirListing['entries'] = []
+    const directoryNotes: DirectoryNote[] = []
+    let names: string[]
+    try {
+      names = (await readdir(this.opts.root, { withFileTypes: true })).filter(e => e.isDirectory()).map(e => e.name)
+    } catch (err) {
+      if (errnoCode(err) !== 'ENOENT') directoryNotes.push(this.note('dir-unreadable', this.opts.root, `记忆根目录不可读，计空：${this.opts.root}`))
+      return { entries, directoryNotes }
+    }
+    for (const name of names.filter(isWorkspaceDirName).sort()) {
+      const dir = join(this.opts.root, name)
+      const loc = await this.locationOf(dir)
+      if (loc === undefined) continue   // readdir 之后被删：竞态
+      if ('note' in loc) { directoryNotes.push(loc.note); continue }
+      if (loc.loc.scope !== 'workspace') continue   // 只有 global 目录会落到这支，已被 isWorkspaceDirName 排除
+      const listed = await this.listMemoryFiles(dir)
+      if ('note' in listed) { directoryNotes.push(listed.note); continue }
+      const hasActiveTopLevel = listed.names.length > 0
+      if (!hasActiveTopLevel) directoryNotes.push(this.note('dir-empty', dir, `workspace 目录顶层没有记忆文件（只剩归档或全空），不进体检清单：${dir}`))
+      entries.push({ workspacePath: loc.loc.workspacePath, dir, hasActiveTopLevel })
+    }
+    return { entries, directoryNotes }
+  }
+
+  /** 提示 workspace 的目录：先算确定性目录名并校验标记；算不出或标记不符时经清单找（覆盖手工改名的目录）。 */
+  private async hintDirs(workspacePath: string): Promise<ScopeDir[]> {
+    const loc: FileLocation = { scope: 'workspace', workspacePath }
+    const dir = join(this.opts.root, workspaceDirName(workspacePath))
+    try {
+      if ((await this.readMarker(dir)) === workspacePath) return [{ dir, loc }]
+    } catch { /* 不可读：走清单 */ }
+    const listing = await this.listWorkspaceDirs()
+    return listing.entries.filter(e => e.workspacePath === workspacePath).map(e => ({ dir: e.dir, loc }))
+  }
+
+  async workspaceDirs(workspacePath: string): Promise<string[]> {
+    return (await this.hintDirs(workspacePath)).map(d => d.dir)
+  }
+
+  /** 在一组目录（顶层 + .archive/）里找 id 的全部候选：看原文 id 行，只解析命中文件。派生 id 先按文件路径重算哈希（不读内容，
+   *  覆盖还没写回 id 的手建文件）；路径没命中再看 id 行——写回过 id 的文件改名或搬家后路径哈希已变，frontmatter 里的 id 才是它的身份。 */
+  private async scanForId(id: string, dirs: readonly ScopeDir[]): Promise<Slot[]> {
+    const derived = isDerivedFileId(id)
+    const idLine = new RegExp(`^id:\\s*["']?${escapeRegExp(id)}["']?\\s*$`, 'm')
+    const found: Slot[] = []
+    const statsRows = new Map(await this.opts.stats.list())
+    for (const { dir, loc } of dirs) {
+      for (const level of [dir, join(dir, ARCHIVE_DIR)]) {
+        const listed = await this.listMemoryFiles(level)
+        if ('note' in listed) continue
+        // 非命中文件只读原文做正则，不解析；命中的再走完整解析并核对 id
+        const hits = await Promise.all(listed.names.sort().map(async name => {
+          const filePath = join(level, name)
+          if (derived && deriveFileId(relative(this.opts.root, filePath)) === id) return filePath
+          try { return idLine.test(frontmatterOf(await readFile(filePath, 'utf8'))) ? filePath : undefined } catch { return undefined }
+        }))
+        for (const filePath of hits) {
+          if (filePath === undefined) continue
+          const r = await this.readMemoryFile(filePath, dir, loc, NO_PREFILTER, statsRows)
+          if (r !== undefined && 'slot' in r && r.slot.record.id === id) found.push(r.slot)
+        }
+      }
+    }
+    return found
+  }
+
+  async locate(id: string, hint?: LocateHint): Promise<LocatedFile | undefined> {
+    const global: ScopeDir = { dir: this.globalDir, loc: { scope: 'global' } }
+    const hinted = hint?.workspacePath === undefined ? [] : await this.hintDirs(hint.workspacePath)
+    const first = await this.scanForId(id, [global, ...hinted])
+    if (first.length > 0) return this.toLocated(resolveDuplicates(first, hint)[0])
+    const scanned = new Set([this.globalDir, ...hinted.map(d => d.dir)])
+    const rest = (await this.listWorkspaceDirs()).entries
+      .filter(e => !scanned.has(e.dir))
+      .map(e => ({ dir: e.dir, loc: { scope: 'workspace', workspacePath: e.workspacePath } as FileLocation }))
+    const second = await this.scanForId(id, rest)
+    return second.length > 0 ? this.toLocated(resolveDuplicates(second, hint)[0]) : undefined
+  }
+
+  // —— 写侧（锁内）——
+
+  async maintain(dirs: string[]): Promise<void> {
+    await this.locked(() => this.maintainDirs(dirs))
   }
 
   /**
-   * build-then-swap：所有可能失败的 I/O 先在局部变量里跑完，只有全部成功后才在末尾
-   * 一次性 swap 到 this.map/this.quarantine/this.wsDirs。任何一步中途抛出，this.* 保持
-   * 调用前的旧状态不变——这样 refreshIfChanged 的 catch 里"沿用内存态"才是真的。
+   * 维护点（设计稿 §5；锁内，只动给定目录，幂等）。每个目录读顶层 + .archive/ 一遍，逐文件：
+   *  - .archive/ 里 status 仍为 active 的按位置归一成 deleted（位置即作用域，不搬回顶层）；deleted 缺 deletedAt 用 mtime 补
+   *  - ③ .archive/ 里 deletedAt 超保留期的物理删除并清召回统计行（superseded 不清）
+   *  - ④ 手建 / 手编回写：digest 认识且不匹配 → handEdited、updatedAt 与 lastConfirmedAt 取 mtime；缺 id / 缺 digest / 时间戳形态 /
+   *    缺省字段由重新 encode 补齐；判「有变化」= 重新 encode 后与磁盘原文逐字节比较，不同才写
+   *  - ② 顶层非 active 的搬进 .archive/（撞名追加 id 片段）；已过期的 active 文件不动
+   *  - ① 再生 MEMORY.md：顶层 active 且未过期，同 id 取一份，name 再 id 排序，内容不变不写
+   *  - ⑤ 陈旧 tmp 清理
+   * 同 id 副本不在这里删（只在写该 id 时清理，见 persist）。
    */
-  private async loadInner(): Promise<void> {
-    const map = new Map<string, Slot>()
-    const quarantine: { path: string; error: string }[] = []
-    const wsDirs = new Map<string, string>()
-    await mkdir(join(this.opts.root, GLOBAL_DIR), { recursive: true })
-    const dirs: Array<{ dir: string; loc: FileLocation }> = [
-      { dir: join(this.opts.root, GLOBAL_DIR), loc: { scope: 'global' } },
-    ]
-    for (const entry of await readdir(this.opts.root, { withFileTypes: true })) {
-      if (!entry.isDirectory() || entry.name === GLOBAL_DIR || entry.name === STATE_DIR) continue
-      const dir = join(this.opts.root, entry.name)
-      try {
-        const wsPath = (await readFile(join(dir, WORKSPACE_MARKER), 'utf8')).trim()
-        if (!wsPath) throw new Error('空 .workspace')
-        wsDirs.set(wsPath, dir)
-        dirs.push({ dir, loc: { scope: 'workspace', workspacePath: wsPath } })
-      } catch (err) {
-        ;this.log.warn(`[plastic-memory] workspace 目录缺失有效 .workspace 标记，跳过：${dir}`, err)
-      }
-    }
-    for (const { dir, loc } of dirs) {
-      let names: string[]
-      try { names = await readdir(dir) } catch { this.log.warn(`[plastic-memory] 目录不可读，计空：${dir}`); continue }
-      for (const name of names) {
-        const tmpMatch = TMP_SUFFIX_RE.exec(name)
-        if (tmpMatch) {
-          // 只删两类原子写残留：① pid 段是本进程（自家崩溃）② mtime 超 60 秒的陈旧文件。
-          // 多进程共用 memoryRoot 时，别的进程在途 tmp（毫秒级窗口）绝不能碰，否则会让对方
-          // rename 落空。stat 失败＝竞态已消失，静默跳过。
-          const path = join(dir, name)
-          if (Number(tmpMatch[1]) === process.pid) {
-            await rm(path, { force: true })
-          } else {
-            try {
-              if (this.now() - (await stat(path)).mtimeMs > TMP_STALE_MS) await rm(path, { force: true })
-            } catch { /* 竞态消失 */ }
-          }
+  private async maintainDirs(dirs: readonly string[]): Promise<void> {
+    const { scopeDirs } = await this.resolveDirs([...new Set(dirs)])
+    const now = this.now()
+    const cutoff = now - DELETED_RETENTION_MS
+    for (const sd of scopeDirs) {
+      const archive = join(sd.dir, ARCHIVE_DIR)
+      const { slots } = await this.readDirs([sd], { includeArchive: true })
+      const kept: LocatedRecord[] = []
+      for (const slot of slots) {
+        const inArchive = dirname(slot.filePath) === archive
+        let record = slot.record
+        if (inArchive && record.status === 'active') record = { ...record, status: 'deleted' }
+        if (record.status === 'deleted' && record.deletedAt === undefined) record = { ...record, deletedAt: slot.mtimeMs }
+        if (inArchive && record.status === 'deleted' && record.deletedAt! < cutoff) {
+          await rm(slot.filePath, { force: true })
+          await this.opts.stats.delete(record.id)
           continue
         }
-        if (!name.endsWith('.md') || name === INDEX_FILE) continue
-        const filePath = join(dir, name)
-        try {
-          const raw = await readFile(filePath, 'utf8')
-          const { record, extras } = decodeRecord(splitFrontmatter(raw), loc)
-          const existing = map.get(record.id)
-          if (existing) {
-            // 崩溃窗口兜底：同 id 两处取新删旧（scope 移动中断的产物）
-            const keepNew = record.updatedAt >= existing.record.updatedAt
-            const loser = keepNew ? existing.filePath : filePath
-            ;this.log.warn(`[plastic-memory] 发现重复 id ${record.id}，保留较新者，删除：${loser}`)
-            await rm(loser, { force: true })
-            if (!keepNew) continue
-          }
-          map.set(record.id, { record, extras, filePath, dir })
-        } catch (err) {
-          const error = err instanceof Error ? err.message : String(err)
-          ;this.log.warn(`[plastic-memory] 记忆文件解析失败，已隔离：${filePath}（${error}）`)
-          quarantine.push({ path: filePath, error })
+        if (digestMismatch(DIGEST_LINE_RE.exec(frontmatterOf(slot.raw))?.[1], record)) {
+          record = { ...record, handEdited: true, updatedAt: slot.mtimeMs, lastConfirmedAt: slot.mtimeMs }
         }
+        const text = encodeRecord(record, slot.extras)
+        if (!inArchive && record.status !== 'active') {
+          // 搬家不改文件名（spec：文件名不变；手编文件的名字由用户起），撞名由占名追加 id 片段
+          await mkdir(archive, { recursive: true })
+          const path = await this.claimAndWrite(record, archive, text, basename(slot.filePath, '.md'))
+          if (path.toLowerCase() !== slot.filePath.toLowerCase()) await rm(slot.filePath, { force: true })
+          continue
+        }
+        if (text !== slot.raw) await this.atomicWrite(slot.filePath, text)
+        if (!inArchive) kept.push({ record, filePath: slot.filePath, dir: slot.dir })
       }
-    }
-    // sidecar 合并（无行 → decode 已注入默认）
-    for (const slot of map.values()) {
-      const row = await this.opts.stats.get(slot.record.id)
-      if (row) slot.record = { ...slot.record, recallCount: row.recallCount, lastRecalledAt: row.lastRecalledAt }
-    }
-    await this.sweepDeletedInner(map)
-    await this.regenerateIndexes(map, wsDirs)
-    const fingerprint = await this.computeFingerprint()
-    this.map = map; this.quarantine = quarantine; this.wsDirs = wsDirs; this.fingerprint = fingerprint
-  }
-
-  /** per-file 指纹：目录 mtime 抓不到就地编辑（sed -i/追加写）。 */
-  private async computeFingerprint(): Promise<Map<string, string>> {
-    const fp = new Map<string, string>()
-    let dirNames: string[] = []
-    try { dirNames = await readdir(this.opts.root) } catch { return fp }
-    for (const d of dirNames) {
-      const dir = join(this.opts.root, d)
-      let names: string[] = []
-      try { names = (await readdir(dir)).filter(n => n.endsWith('.md') && n !== INDEX_FILE) } catch { continue }
-      for (const n of names) {
-        try { const s = await stat(join(dir, n)); fp.set(`${d}/${n}`, `${s.mtimeMs}:${s.size}`) } catch { /* 竞态删除 */ }
-      }
-    }
-    return fp
-  }
-
-  private static sameFingerprint(a: Map<string, string>, b: Map<string, string>): boolean {
-    if (a.size !== b.size) return false
-    for (const [key, value] of a) if (b.get(key) !== value) return false
-    return true
-  }
-
-  /**
-   * 自写后只校准本次触碰的文件，绝不整库重算：写 A 期间用户手改了 B，整库重算会把 B 的新
-   * 状态收进基线，下次 refresh 判"没变"，内存里的旧 B 随后还会被写回磁盘（外部编辑丢失）。
-   * 只更新触碰文件的条目，B 的差异留给下一次 refresh 触发重载。
-   */
-  private async calibrateFingerprint(paths: Iterable<string>): Promise<void> {
-    for (const path of paths) {
-      const key = `${basename(dirname(path))}/${basename(path)}`
-      try { const s = await stat(path); this.fingerprint.set(key, `${s.mtimeMs}:${s.size}`) } catch { this.fingerprint.delete(key) }
+      // kept 只剩顶层 active（非 active 已搬走）：同 id 取一份，再过滤已过期的
+      await this.regenerateIndex(sd.dir, resolveDuplicates(kept).filter(s => withinValidity(s.record, now)))
+      for (const level of [sd.dir, archive]) await this.cleanStaleTmp(level)
     }
   }
 
-  async refreshIfChanged(): Promise<void> {
-    await this.locked(async () => {
-      // 无条件扫描：触发面只有记忆工具（低频），实测热缓存千条级 <10ms，不值得节流——
-      // 无条件的入口校准让"外部编辑不被旧态覆盖"成为无注记的硬保证。
-      const fp = await this.computeFingerprint()
-      if (!FileTable.sameFingerprint(fp, this.fingerprint)) await this.loadInner()
-    // 指纹不同 → 触发 loadInner；loadInner 内部是 build-then-swap，中途失败不会碰
-    // this.map/this.quarantine/this.wsDirs，所以"沿用内存态"在这里是真实成立的。
-    }).catch(err => this.log.warn('[plastic-memory] 记忆重载失败，沿用内存态：', err))
+  /** 写该 id 之后清掉可见集合（global + 该记录所在目录，含各自 .archive/）里的其余副本；其他项目的副本不动（ARCHITECTURE.md ⑥-6d）。 */
+  private async removeOtherCopies(id: string, keepPath: string, dir: string): Promise<void> {
+    const { scopeDirs } = await this.resolveDirs([...new Set([this.globalDir, dir])])
+    for (const copy of await this.scanForId(id, scopeDirs)) {
+      if (copy.filePath.toLowerCase() !== keepPath.toLowerCase()) await rm(copy.filePath, { force: true })
+    }
   }
 
-  /** 返回被物理清掉的文件路径，写路径据此校准指纹。 */
-  private async sweepDeletedInner(map: Map<string, Slot>): Promise<string[]> {
-    const cutoff = this.now() - DELETED_RETENTION_MS
-    const removed: string[] = []
-    for (const [id, slot] of [...map]) {
-      if (slot.record.status === 'deleted' && slot.record.updatedAt < cutoff) {
-        await rm(slot.filePath, { force: true })
-        await this.opts.stats.delete(id)
-        map.delete(id)
-        removed.push(slot.filePath)
-      }
-    }
-    return removed
-  }
-
-  private async regenerateIndexes(map: Map<string, Slot>, wsDirs: Map<string, string>, onlyDirs?: Iterable<string>): Promise<void> {
-    const byDir = new Map<string, MemoryRecord[]>()
-    for (const slot of map.values()) {
-      if (slot.record.status !== 'active') continue // 索引只列 active
-      const list = byDir.get(slot.dir) ?? []
-      list.push(slot.record); byDir.set(slot.dir, list)
-    }
+  private async regenerateIndex(dir: string, active: readonly LocatedRecord[]): Promise<void> {
     // 缺省格式器与注入侧同源（src/index-line.ts）。磁盘索引不带陈旧度：静态文件里的
-    // 时间相对标注会随时间失真——这是对 docs/p15-storage-search-redesign.md §6"同源同格式"的有意偏离，已回写设计稿登记。
-    const fmt = this.opts.formatIndexLine ?? ((r: MemoryRecord) => formatIndexLine(r, { passive: false }))
-    // onlyDirs 给出时只再生这几个目录（byDir 仍取自全量 map，分组正确）；写路径只动到自己的目录，
-    // 全量再生纯属浪费。缺省（加载路径）仍再生所有目录。
-    const targetDirs = onlyDirs ?? new Set<string>([join(this.opts.root, GLOBAL_DIR), ...wsDirs.values()])
-    for (const dir of targetDirs) {
-      // 索引行序必须确定：Map 插入序取决于 readdir 序，跨设备不确定，多设备同步下会造成
-      // 索引文件 churn。按 name 排序（不用 localeCompare——locale 依赖环境），name 相同用 id 决胜。
-      const records = (byDir.get(dir) ?? []).slice().sort((a, b) =>
-        a.name < b.name ? -1 : a.name > b.name ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
-      const lines = records.map(fmt)
-      const text = `# Memory Index\n\n${lines.join('\n')}${lines.length ? '\n' : ''}`
+    // 时间相对标注会随时间失真（设计稿 §6 登记的有意偏离）。
+    // 行末带同目录的实际文件名（设计稿 §11），模型拿到即可 Read，不用再 grep id。
+    const fmt = this.opts.formatIndexLine ?? ((r: MemoryRecord, file: string) => formatIndexLine(r, { passive: false, file }))
+    // 索引行序必须确定：readdir 序跨设备不确定，多设备同步下会造成索引文件 churn。
+    // 按 name 排序（不用 localeCompare——locale 依赖环境），name 相同用 id 决胜。
+    const located = active.slice().sort(({ record: a }, { record: b }) =>
+      a.name < b.name ? -1 : a.name > b.name ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+    const lines = located.map(l => fmt(l.record, basename(l.filePath)))
+    const text = `# Memory Index\n\n${lines.join('\n')}${lines.length ? '\n' : ''}`
+    try {
+      const prev = await readFile(join(dir, INDEX_FILE), 'utf8').catch(() => '')
+      if (prev !== text) await this.atomicWrite(join(dir, INDEX_FILE), text) // 内容不变不写
+    } catch { /* 索引是生成物，失败不致命 */ }
+  }
+
+  /** 只删两类原子写残留：① pid 段是本进程（自家崩溃）② mtime 超 60 秒的陈旧文件。多进程共用 memoryRoot 时，
+   *  别的进程在途 tmp（毫秒级窗口）绝不能碰，否则会让对方 rename 落空。stat 失败＝竞态已消失，静默跳过。 */
+  private async cleanStaleTmp(dir: string): Promise<void> {
+    let names: string[]
+    try { names = await readdir(dir) } catch { return }
+    for (const name of names) {
+      const m = TMP_SUFFIX_RE.exec(name)
+      if (!m) continue
+      const path = join(dir, name)
       try {
-        const prev = await readFile(join(dir, INDEX_FILE), 'utf8').catch(() => '')
-        if (prev !== text) await this.atomicWrite(join(dir, INDEX_FILE), text) // 内容不变不写：refresh 触发的重载不得空转写盘
-      } catch { /* 索引是生成物，失败不致命 */ }
+        if (Number(m[1]) === process.pid || this.now() - (await stat(path)).mtimeMs > TMP_STALE_MS) await rm(path, { force: true })
+      } catch { /* 竞态消失 */ }
     }
   }
 
@@ -234,13 +412,6 @@ export class FileTable implements MemoryTable {
     await writeFile(tmp, text, 'utf8')
     await rename(tmp, filePath)
   }
-
-  async get(key: string): Promise<MemoryRecord | undefined> { return this.map.get(key)?.record }
-  async list(): Promise<MemoryRecord[]> {
-    return [...this.map.values()].map(s => s.record)
-  }
-
-  // —— 写侧 ——
 
   private volatileEqual(a: MemoryRecord, b: MemoryRecord): boolean {
     return a.recallCount === b.recallCount && a.lastRecalledAt === b.lastRecalledAt
@@ -252,16 +423,25 @@ export class FileTable implements MemoryTable {
     return JSON.stringify(proj(a)) === JSON.stringify(proj(b))
   }
 
+  /** 记录该落的目录。workspace 目录：确定性目录名的标记匹配就用它；缺标记则建目录写标记；标记不符（手工改名的目录）走清单找。 */
   private async dirFor(record: MemoryRecord): Promise<string> {
-    if (record.scope === 'global') return join(this.opts.root, GLOBAL_DIR)
-    const wsPath = record.workspacePath!
-    let dir = this.wsDirs.get(wsPath)
-    if (!dir) {
-      dir = join(this.opts.root, workspaceDirName(wsPath))
-      await mkdir(dir, { recursive: true })
-      await this.atomicWrite(join(dir, WORKSPACE_MARKER), wsPath + '\n')
-      this.wsDirs.set(wsPath, dir)
+    if (record.scope === 'global') {
+      await mkdir(this.globalDir, { recursive: true })
+      return this.globalDir
     }
+    const wsPath = record.workspacePath!
+    const dir = join(this.opts.root, workspaceDirName(wsPath))
+    let marker: string | undefined
+    try { marker = await this.readMarker(dir) } catch { marker = undefined }
+    if (marker === wsPath) return dir
+    const existing = (await this.listWorkspaceDirs()).entries.find(e => e.workspacePath === wsPath)
+    if (existing) return existing.dir
+    if (marker !== undefined) {
+      this.log.warn(`[plastic-memory] 目录 ${dir} 的 ${WORKSPACE_MARKER} 标记指向别的路径（${marker}），仍写入该目录`)
+      return dir
+    }
+    await mkdir(dir, { recursive: true })
+    await this.atomicWrite(join(dir, WORKSPACE_MARKER), wsPath + '\n')
     return dir
   }
 
@@ -271,104 +451,114 @@ export class FileTable implements MemoryTable {
     try {
       text = await readFile(path, 'utf8')
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
+      if (errnoCode(err) === 'ENOENT') return null
       return 'unreadable'
     }
-    const frontmatter = text.startsWith('---\n') ? text.slice(4).split('\n---')[0] ?? '' : ''
-    const m = /^id:\s*(\S+)\s*$/m.exec(frontmatter)
+    const m = ID_LINE_RE.exec(frontmatterOf(text))
     return m ? m[1] : 'unreadable'
   }
 
   /**
-   * 撞名检查必须同时看内存态和磁盘：this.map 看不到隔离文件、也看不到 .workspace 标记
-   * 缺失而整目录跳过的文件——只查 map 会把用户手写/隔离中的内容静默覆盖（实测复现过）。
+   * 排他占名并写入（设计稿 §5；ARCHITECTURE.md ⑥-2 撞名追加 id 片段）。完整内容先进 tmp，再 link 到候选名：目标名原子出现
+   * 且内容完整，没有"先建空文件再填"的窗口，崩溃最多留下 tmp（维护点清）。EEXIST 表示名被占——占着的是同一记录自己的
+   * 文件（崩溃残留、同 id 副本）才允许 rename 覆盖，否则换下一个候选：基础名 → id 片段名 → 全 id 名（按构造只属于本记录，
+   * 直接覆盖）。两个进程写同名异 id 的记录因此两条都存活；隔离文件、缺标记目录里的文件也不会被同 slug 写入静默覆盖。
    */
-  private async filePathFor(record: MemoryRecord, dir: string): Promise<string> {
-    const base = slugifyName(record.name)
-    const idFrag = record.id.slice(-6)
-    // 依次尝试：基础名 → id 片段名 → 全 id 名（全 id 全局唯一，兜底必然可用）
-    for (const name of [`${base}.md`, `${base}-${idFrag}.md`]) {
-      if (isReservedFileName(name)) continue // memory.md ≈ MEMORY.md，索引再生会覆盖它
-      const path = join(dir, name)
-      const takenInMap = [...this.map.values()].some(slot => slot.filePath === path && slot.record.id !== record.id)
-      if (takenInMap) continue
-      const onDisk = await this.readIdOnDisk(path)
-      if (onDisk !== null && onDisk !== record.id) continue
+  private async claimAndWrite(record: MemoryRecord, level: string, text: string, base = slugifyName(record.name)): Promise<string> {
+    const tmp = join(level, `${base}.md.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`)
+    await writeFile(tmp, text, 'utf8')
+    try {
+      for (const name of [`${base}.md`, `${base}-${record.id.slice(-6)}.md`]) {
+        if (isReservedFileName(name)) continue // memory.md ≈ MEMORY.md，索引再生会覆盖它
+        const path = join(level, name)
+        try {
+          await link(tmp, path)
+          return path
+        } catch (err) {
+          if (errnoCode(err) !== 'EEXIST') throw err
+        }
+        if ((await this.readIdOnDisk(path)) === record.id) { await rename(tmp, path); return path }
+      }
+      const path = join(level, `${base}-${record.id}.md`)
+      await rename(tmp, path)
       return path
+    } finally {
+      await rm(tmp, { force: true })   // link 成功后多出的那个名字；rename 过的已不存在
     }
-    return join(dir, `${base}-${record.id}.md`)
   }
 
-  private async persist(key: string, next: MemoryRecord): Promise<void> {
-    const prev = this.map.get(key)
+  /**
+   * 写路径（锁内，设计稿 §5）：选目录（scope；workspace 目录不存在则 mkdir + 写标记）→ 选层（status 离开 active 进
+   * .archive/，deleted 缺 deletedAt 补 now；回到 active 搬回顶层）→ 编码 → 已定位到自己文件且目录、层、slug 都没变就原地
+   * tmp + rename 覆盖，否则排他占名 → 搬家删旧 → 清可见集合里该 id 的其余副本 → 本目录（搬家时两个）维护点。返回实际写出的记录。
+   */
+  private async persist(key: string, prev: LocatedFile | undefined, value: MemoryRecord): Promise<MemoryRecord> {
+    const next = value.status === 'deleted' && value.deletedAt === undefined ? { ...value, deletedAt: this.now() } : value
     const volatileChanged = !prev || !this.volatileEqual(prev.record, next)
     const stableChanged = !prev || !this.stableEqual(prev.record, next)
-    const touched: string[] = []   // 本次写路径触碰的记忆文件（写入/删除），用于指纹校准
-    let slot: Slot
     if (stableChanged) {
-      const dir = await this.dirFor(next)
+      // 位置没变就留在原目录（覆盖手工改名的 workspace 目录），变了才按 scope 选目录
+      const sameLocation = prev !== undefined && prev.record.scope === next.scope && prev.record.workspacePath === next.workspacePath
+      const dir = sameLocation ? prev.dir : await this.dirFor(next)
+      const level = next.status === 'active' ? dir : join(dir, ARCHIVE_DIR)
       const moved = prev !== undefined && prev.dir !== dir
       // 改名后文件名要跟着变，否则磁盘文件仍叫旧 slug，用户浏览/grep 被误导。比较 slug 而非
       // name（空白等变化不折腾文件），且忽略大小写：APFS 等大小写不敏感文件系统上，仅大小写
       // 不同的新旧路径是同一个文件——若触发重命名，"先写新后删旧"会把刚写的文件删掉，丢数据。
       const renamed = prev !== undefined
         && slugifyName(next.name).toLowerCase() !== slugifyName(prev.record.name).toLowerCase()
-      const filePath = moved || renamed || !prev ? await this.filePathFor(next, dir) : prev.filePath
-      const extras = prev?.extras ?? {}
-      await this.atomicWrite(filePath, encodeRecord(next, extras))   // 易变字段由 encodeRecord 剔除
-      touched.push(filePath)
-      // 先写新后删旧；崩溃窗口由加载去重兜底。filePathFor 撞名回退可能落回原路径，故加
-      // prev.filePath !== filePath 保护，不能删掉刚写的自己。
-      if ((moved || renamed) && prev!.filePath !== filePath) {
-        await rm(prev!.filePath, { force: true })
-        touched.push(prev!.filePath)
+      const text = encodeRecord(next, prev?.extras ?? {})   // 易变字段由 encodeRecord 剔除
+      let filePath: string
+      if (prev !== undefined && !moved && !renamed && dirname(prev.filePath) === level) {
+        filePath = prev.filePath
+        await this.atomicWrite(filePath, text)   // 自己的文件：rename 只覆盖同一记录自己的文件
+      } else {
+        await mkdir(level, { recursive: true })
+        filePath = await this.claimAndWrite(next, level, text)
+        // 先写新后删旧；崩溃窗口由读路径的同 id 取舍兜底。占名可能落回原路径（候选名正被自己占着），
+        // 路径比较忽略大小写：大小写不敏感文件系统上不能删掉刚写的自己。
+        if (prev !== undefined && prev.filePath.toLowerCase() !== filePath.toLowerCase()) await rm(prev.filePath, { force: true })
       }
-      slot = { record: next, extras, filePath, dir }
-      this.map.set(key, slot)
-      // status 变为 deleted 时顺手清扫（"forget 工具路径顺手做"的落点）
-      if (next.status === 'deleted') touched.push(...await this.sweepDeletedInner(this.map))
-      await this.regenerateIndexes(this.map, this.wsDirs, moved ? [dir, prev!.dir] : [dir])
-    } else {
-      slot = { ...prev!, record: next }
-      this.map.set(key, slot)
+      await this.removeOtherCopies(key, filePath, dir)
+      await this.maintainDirs(moved ? [dir, prev!.dir] : [dir])
     }
     if (volatileChanged) {
       await this.opts.stats.put(key, { id: key, recallCount: next.recallCount, lastRecalledAt: next.lastRecalledAt })
     }
-    if (stableChanged) await this.calibrateFingerprint(touched) // 只校准触碰过的文件，防假重载又不吞外部编辑
+    return next
+  }
+
+  async create(record: MemoryRecord): Promise<void> {
+    await this.locked(async () => { await this.persist(record.id, undefined, record) })
   }
 
   async put(key: string, value: MemoryRecord): Promise<void> {
-    await this.locked(() => {
-      // put 不承载召回统计（docs/p15-storage-search-redesign.md §3 登记：快照恢复不恢复召回统计）。召回统计
-      // 由 MemoryStore.markRecalled 直写侧表；prev 在时以内存态现值为准，restore 旧记录不回退 sidecar。
-      const prev = this.map.get(key)
+    await this.locked(async () => {
+      // put 不承载召回统计（设计稿 §2：召回统计只住 .state/recall-stats.json，快照恢复不恢复它）。召回统计
+      // 由 MemoryStore.markRecalled 直写侧表；prev 在时以侧表现值为准，restore 旧记录不回退 sidecar。
+      const prev = await this.locate(key, { workspacePath: value.workspacePath })
       const next = prev
         ? { ...value, recallCount: prev.record.recallCount, lastRecalledAt: prev.record.lastRecalledAt }
         : value
-      return this.persist(key, next)
+      await this.persist(key, prev, next)
     })
   }
 
-  async update(key: string, fn: (current: MemoryRecord) => MemoryRecord): Promise<MemoryRecord> {
+  async update(key: string, fn: (current: MemoryRecord) => MemoryRecord, hint?: LocateHint): Promise<MemoryRecord> {
     return this.locked(async () => {
-      const current = this.map.get(key)
+      const current = await this.locate(key, hint)   // 锁内重读磁盘：外部编辑不丢
       if (!current) throw new RecordNotFoundError(key)
-      const next = fn(current.record)
-      await this.persist(key, next)
-      return next
+      return this.persist(key, current, fn(current.record))
     })
   }
 
-  async delete(key: string): Promise<boolean> {
+  async delete(key: string, hint?: LocateHint): Promise<boolean> {
     return this.locked(async () => {
-      const slot = this.map.get(key)
+      const slot = await this.locate(key, hint)
       if (!slot) return false
       await rm(slot.filePath, { force: true })
       await this.opts.stats.delete(key)
-      this.map.delete(key)
-      await this.regenerateIndexes(this.map, this.wsDirs, [slot.dir])
-      await this.calibrateFingerprint([slot.filePath])
+      await this.maintainDirs([slot.dir])
       return true
     })
   }

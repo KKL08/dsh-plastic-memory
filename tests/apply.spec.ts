@@ -15,7 +15,7 @@ import { apply, Config, inject } from '../src/index.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
 import { SidecarStore, STATE_DIR, KV_IMPORT_MARKER, RECALL_STATS_FILE } from '../src/storage/sidecar.ts'
 import { kvImportMarkerSchema } from '../src/storage/schema.ts'
-import { INDEX_FILE, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
+import { WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { TypeRegistryError } from '../src/errors.ts'
 import { buildSemanticPrompt } from '../src/governance/semantic-scan.ts'
@@ -184,14 +184,14 @@ describe('apply', () => {
     ])
   })
 
-  it('接线集成：apply 注册后的 memory_search 能看见加载之后外部新写入的文件（入口刷新真的接上了）', async () => {
-    // 只保存名称的 stub 守不住 withRefresh 这段接线：移除 refreshIfChanged 调用，全套单测照样绿。
-    // 这里留住真实 ToolDefinition，经注册后的 execute 走一遍：加载后外部落盘的记忆必须能被检索到。
+  it('接线集成：apply 注册后的 memory_search 能看见之后外部新写入的文件（每次调用直接读目录）', async () => {
+    // 留住真实 ToolDefinition，经注册后的 execute 走一遍：apply 之后外部落盘的记忆必须能被检索到。
     type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
     const defs = new Map<string, ToolDef>()
     const ctx = { ...mockCtx(), tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } } }
     const memoryRoot = await makeTmpRoot()
     await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    await mkdir(join(memoryRoot, 'global'), { recursive: true })   // 加载期零 I/O：global/ 由首次写或外部建
     await writeFile(join(memoryRoot, 'global', 'external.md'),
       encodeRecord(record({ id: 'mem_ext', content: '外部落盘的记忆 zebra' }), {}), 'utf8')
     const out = await defs.get('memory_search')!.execute({ query: 'zebra' }, fakeExec()) as { hits: Array<{ id: string }> }
@@ -212,19 +212,26 @@ describe('apply', () => {
     await expect(apply(mockCtx() as never, config)).rejects.toThrow(TypeRegistryError)
   })
 
-  it('磁盘上有坏 md（无 frontmatter）时 apply 仍正常完成（load 不抛，插件加载不受记忆坏文件影响）', async () => {
+  it('磁盘上有坏 md（无 frontmatter）时 apply 仍正常完成且加载期零 I/O（插件加载不受记忆坏文件影响）', async () => {
+    type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
+    const defs = new Map<string, ToolDef>()
+    const ctx = { ...mockCtx(), tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } } }
     const memoryRoot = await makeTmpRoot()
     await mkdir(join(memoryRoot, 'global'), { recursive: true })
     await writeFile(join(memoryRoot, 'global', 'broken.md'), '这是一段没有 frontmatter 的纯文本\n', 'utf8')
-    const ctx = mockCtx()
+    await writeFile(join(memoryRoot, 'global', 'good.md'),
+      encodeRecord(record({ id: 'mem_good', content: '坏文件旁边的好记忆 zebra' }), {}), 'utf8')
     await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
-    expect(ctx.registered.sort()).toEqual([
+    expect([...defs.keys()].sort()).toEqual([
       'memory_confirm', 'memory_forget', 'memory_health', 'memory_promote',
       'memory_save', 'memory_scan', 'memory_search', 'memory_snapshot', 'memory_source',
     ])
-    // 钉住 root 真的来自 config 且 load 跑到了 regenerateIndexes：空库也会落出
-    // global/MEMORY.md。若 resolveMemoryRoot 漏传 config 落到默认值，这里 stat 必抛。
-    expect((await stat(join(memoryRoot, 'global', INDEX_FILE))).isFile()).toBe(true)
+    // 加载期零 I/O：apply 不建索引、不建 .state/，目录里只有测试放的两个文件
+    expect((await readdir(join(memoryRoot, 'global'))).sort()).toEqual(['broken.md', 'good.md'])
+    expect(await readdir(memoryRoot)).toEqual(['global'])
+    // 钉住 root 真的来自 config：经注册后的 memory_search 读到 config 指定目录里的好记忆，坏文件不碍事
+    const out = await defs.get('memory_search')!.execute({ query: 'zebra' }, fakeExec()) as { hits: Array<{ id: string }> }
+    expect(out.hits.map(h => h.id)).toEqual(['mem_good'])
   })
 })
 
@@ -378,7 +385,6 @@ describe('快照 {{ 转义接线', () => {
 
     // 期望原文：同一份磁盘记忆、同一组参数独立组装一次快照
     const fileTable = new FileTable({ root: memoryRoot, stats: new InMemoryKvTable() })
-    await fileTable.load()
     const expected = assembleSnapshot({
       records: await new MemoryStore(fileTable).query({ scope: { kind: 'visible', workspacePath } }),
       registry: buildTypeRegistry(config),

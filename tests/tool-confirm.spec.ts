@@ -20,7 +20,7 @@ describe('memory_confirm refresh', () => {
   it('刷新 lastConfirmedAt，不动 updatedAt（refresh 不是编辑，避免快照把它误判为编辑过）', async () => {
     const deps = makeDeps()
     await deps.store.put(record({ id: 'mem_a', lastConfirmedAt: 1, updatedAt: 1 }))
-    const r = await executeConfirm({ action: 'refresh', memoryId: 'mem_a' }, deps)
+    const r = await executeConfirm({ action: 'refresh', memoryId: 'mem_a' }, { workspacePath: '/proj' }, deps)
     expect(r.kind).toBe('refreshed')
     expect((await deps.store.get('mem_a'))!.lastConfirmedAt).toBe(5000)
     expect((await deps.store.get('mem_a'))!.updatedAt).toBe(1)
@@ -29,8 +29,8 @@ describe('memory_confirm refresh', () => {
   it('目标不存在或已删除返回 error', async () => {
     const deps = makeDeps()
     await deps.store.put(record({ id: 'mem_dead', status: 'deleted' }))
-    expect((await executeConfirm({ action: 'refresh', memoryId: 'mem_ghost' }, deps)).kind).toBe('error')
-    expect((await executeConfirm({ action: 'refresh', memoryId: 'mem_dead' }, deps)).kind).toBe('error')
+    expect((await executeConfirm({ action: 'refresh', memoryId: 'mem_ghost' }, { workspacePath: '/proj' }, deps)).kind).toBe('error')
+    expect((await executeConfirm({ action: 'refresh', memoryId: 'mem_dead' }, { workspacePath: '/proj' }, deps)).kind).toBe('error')
   })
 })
 
@@ -46,7 +46,7 @@ describe('memory_confirm resolve（横向冲突）', () => {
   it('keep-left：删 right，先快照，条目移除', async () => {
     const deps = makeDeps()
     const entry = await setupHorizontal(deps)
-    const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-left' }, deps)
+    const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-left' }, { workspacePath: '/proj' }, deps)
     expect(r.kind).toBe('resolved')
     expect((await deps.store.get('mem_right'))!.status).toBe('deleted')
     expect((await deps.store.get('mem_left'))!.status).toBe('active')
@@ -66,7 +66,7 @@ describe('memory_confirm resolve（横向冲突）', () => {
     // mem_right 还牵涉在另一条无关冲突里；它被删后那条冲突无法再裁决
     await deps.decisions.upsert({ memoryIds: ['mem_right', 'mem_other'], summary: '另一条' }, 2)
 
-    const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-left' }, deps)
+    const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-left' }, { workspacePath: '/proj' }, deps)
     expect(r.kind).toBe('resolved')
     if (r.kind === 'resolved') {
       expect(r.alsoCleared).toBe(1)
@@ -77,7 +77,7 @@ describe('memory_confirm resolve（横向冲突）', () => {
   it('keep-right：删 left', async () => {
     const deps = makeDeps()
     const entry = await setupHorizontal(deps)
-    await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-right' }, deps)
+    await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-right' }, { workspacePath: '/proj' }, deps)
     expect((await deps.store.get('mem_left'))!.status).toBe('deleted')
     expect((await deps.store.get('mem_right'))!.status).toBe('active')
   })
@@ -86,7 +86,7 @@ describe('memory_confirm resolve（横向冲突）', () => {
     for (const verdict of ['keep-both', 'dismiss'] as const) {
       const deps = makeDeps()
       const entry = await setupHorizontal(deps)
-      const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict }, deps)
+      const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict }, { workspacePath: '/proj' }, deps)
       expect(r.kind).toBe('resolved')
       expect((await deps.store.get('mem_left'))!.status).toBe('active')
       expect((await deps.store.get('mem_right'))!.status).toBe('active')
@@ -101,7 +101,7 @@ describe('memory_confirm resolve（账本里的非法条目）', () => {
     const deps = makeDeps()
     await deps.store.put(record({ id: 'mem_c', content: '唯一一条' }))
     const { entry } = await deps.decisions.upsert({ memoryIds: ['mem_c', 'mem_c'], summary: '自冲突' }, 1)
-    const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-left' }, deps)
+    const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-left' }, { workspacePath: '/proj' }, deps)
     expect(r.kind).toBe('error')
     expect((await deps.store.get('mem_c'))!.status).toBe('active')
     expect(await deps.snapshots.list()).toHaveLength(0)
@@ -112,7 +112,7 @@ describe('memory_confirm resolve（账本里的非法条目）', () => {
     const deps = makeDeps()
     await deps.store.put(record({ id: 'mem_only' }))
     const { entry } = await deps.decisions.upsert({ memoryIds: ['mem_only'], summary: '缺一方' }, 1)
-    const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-right' }, deps)
+    const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-right' }, { workspacePath: '/proj' }, deps)
     expect(r.kind).toBe('error')
     expect((await deps.store.get('mem_only'))!.status).toBe('active')
     expect(await deps.decisions.list()).toHaveLength(0)
@@ -130,7 +130,7 @@ describe('memory_confirm resolve（垂直冲突）', () => {
   it('keep-left：保留记忆（用户明确 override 基线），仅移除条目', async () => {
     const deps = makeDeps()
     const entry = await setupVertical(deps)
-    const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-left' }, deps)
+    const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-left' }, { workspacePath: '/proj' }, deps)
     expect(r.kind).toBe('resolved')
     expect((await deps.store.get('mem_v'))!.status).toBe('active')
     expect(await deps.snapshots.list()).toHaveLength(0)
@@ -140,7 +140,7 @@ describe('memory_confirm resolve（垂直冲突）', () => {
   it('keep-right：基线胜，删记忆（先快照）', async () => {
     const deps = makeDeps()
     const entry = await setupVertical(deps)
-    await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-right' }, deps)
+    await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-right' }, { workspacePath: '/proj' }, deps)
     expect((await deps.store.get('mem_v'))!.status).toBe('deleted')
     expect((await deps.snapshots.list())[0].memoryIds).toEqual(['mem_v'])
   })
@@ -149,7 +149,7 @@ describe('memory_confirm resolve（垂直冲突）', () => {
 describe('memory_confirm resolve 边界', () => {
   it('decisionId 不存在返回 error', async () => {
     const deps = makeDeps()
-    const r = await executeConfirm({ action: 'resolve', decisionId: 'pd_ghost', verdict: 'dismiss' }, deps)
+    const r = await executeConfirm({ action: 'resolve', decisionId: 'pd_ghost', verdict: 'dismiss' }, { workspacePath: '/proj' }, deps)
     expect(r.kind).toBe('error')
   })
 })

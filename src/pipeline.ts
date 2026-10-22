@@ -1,4 +1,4 @@
-import type { MemoryRecord } from './record-schema.ts'
+import type { MemoryRecord, SourceMode } from './record-schema.ts'
 import type { CodedNote, RejectCode, WarningCode } from './contract-codes.ts'
 import { CONFIDENCE_BY_SOURCE, memoryRecordSchema } from './record-schema.ts'
 import type { MemoryStore } from './store.ts'
@@ -17,7 +17,7 @@ export interface SaveCandidate {
   content: string
   summary: string
   tags: string[]
-  sourceMode: MemoryRecord['source']['sourceMode']
+  sourceMode: SourceMode
   confidence?: number
   supersedes?: string[]
   validFrom?: number
@@ -73,7 +73,7 @@ export async function runSavePipeline(
   const scopeWarnings: SaveWarning[] = []
   let target: MemoryRecord | undefined
   if (candidate.action === 'update') {
-    target = candidate.id ? await store.get(candidate.id) : undefined
+    target = candidate.id ? await store.get(candidate.id, { workspacePath: deps.workspacePath }) : undefined
     if (!target || target.status === 'deleted') {
       return { kind: 'rejected', code: 'target-missing', reason: `更新目标不存在或已删除：${candidate.id ?? '(缺 id)'}` }
     }
@@ -151,6 +151,8 @@ export async function runSavePipeline(
       updatedAt: now, lastConfirmedAt: now,
       supersedes: candidate.supersedes ?? target!.supersedes,
       globalCandidate: globalCandidate || target!.globalCandidate,
+      // 内容由本次会话重写，出处随之对应：清除手编标记（pruneUndefined 剔键）
+      handEdited: undefined,
     }
   } else {
     record = {
@@ -170,7 +172,7 @@ export async function runSavePipeline(
     return { kind: 'rejected', code: 'schema-invalid', reason: `字段校验失败：${parsed.error.issues.map(i => i.message).join('；')}` }
   }
 
-  // 5. 写盘前 secret 检查：高危（明确厂商特征）直接拦截、不落盘；疑似仅警告、照常落盘。
+  // 5. 写盘前 secret 检查：高危（明确厂商特征）直接拦截、不落盘；疑似拦下待确认，force 放行并保留警告。
   // summary 进注入索引、name 进文件名、tags 进索引行——密钥藏在哪个字段都会外泄，四个面一起查。
   const secretHits = detectSecrets(`${candidate.content}\n${candidate.name}\n${candidate.summary}\n${candidate.tags.join(' ')}`)
   const critical = secretHits.filter(h => h.severity === 'critical')
@@ -179,6 +181,14 @@ export async function runSavePipeline(
       kind: 'rejected',
       code: 'secret-critical',
       reason: `检测到高危密钥（${critical.map(h => h.name).join('、')}），未保存。密钥不该进记忆（将来可能随同步离开本机）——如需记录，请改写成不含密钥的指针（如「AWS 凭证在 1Password 的 X 条目」）再存。`,
+    }
+  }
+  const suspected = secretHits.filter(h => h.severity === 'suspected')
+  if (suspected.length > 0 && !candidate.force) {
+    return {
+      kind: 'rejected',
+      code: 'secret-suspected',
+      reason: `检测到疑似密钥（${suspected.map(h => h.name).join('、')}），未保存。是密钥就改写成不含密钥的指针再存；向用户确认不是密钥后，带 force: true 重发。`,
     }
   }
 
@@ -194,13 +204,15 @@ export async function runSavePipeline(
   }
 
   const clean = pruneUndefined(parsed.data)
-  await store.put(clean)
+  // 新 id 不定位（create 排他占名）；update 走 put：锁内定位旧文件，scope 没变就原地覆盖
+  if (candidate.action === 'update') await store.put(clean)
+  else await store.create(clean)
 
   // 6. supersedes 处理：目标必须与本次写入记录同桶——跨桶替代会绕过用户确认闸、无快照、无复活路径。
   // 不同桶的目标跳过不置 superseded，仅给一条警告。目标不存在维持静默跳过。
   let crossBucketSupersede = false
   for (const oldId of candidate.supersedes ?? []) {
-    const old = await store.get(oldId)
+    const old = await store.get(oldId, { workspacePath: deps.workspacePath })
     if (!old || old.id === clean.id) continue
     const sameBucket = old.scope === clean.scope
       && (clean.scope !== 'workspace' || old.workspacePath === clean.workspacePath)
@@ -215,7 +227,6 @@ export async function runSavePipeline(
     ? { kind: 'updated' as const, record: clean }
     : { kind: 'saved' as const, record: clean }
 
-  const suspected = secretHits.filter(h => h.severity === 'suspected')
   const warnings: SaveWarning[] = [
     ...scopeWarnings,
     ...(crossBucketSupersede

@@ -1,4 +1,5 @@
 import type { MemoryStore } from '../store.ts'
+import { HAND_EDITED_NOTE } from '../index-line.ts'
 
 /** ctx.sessionQuery.readEvent 的最小契约（真机验证：2026-08-28 探针，docs/design-evidence-anchor.md §2） */
 export interface ReadEventFn {
@@ -25,8 +26,9 @@ export interface SourceToolDeps {
 }
 
 export type SourceResult =
-  | { kind: 'ok'; memoryId: string; sessionId: string; range: [number, number]; lines: string[]; skipped: number }
+  | { kind: 'ok'; memoryId: string; sessionId: string; range: [number, number]; lines: string[]; skipped: number; handEdited?: true }
   | { kind: 'not-found'; memoryId: string }
+  | { kind: 'no-source'; memoryId: string }
   | { kind: 'forbidden'; memoryId: string }
   | { kind: 'unavailable'; memoryId: string; reason: string }
 
@@ -64,25 +66,29 @@ export async function executeSource(
   context: { workspacePath: string | undefined },
   deps: SourceToolDeps,
 ): Promise<SourceResult> {
-  // 预读范围：按 id 定位单条（store.get，含非 active），已删的按不存在处理
-  const record = await deps.store.get(args.memoryId)
+  // 预读范围：按 id 两级定位单条（一级 global + 当前 workspace，含 .archive/），已删的按不存在处理
+  const record = await deps.store.get(args.memoryId, { workspacePath: context.workspacePath })
   if (!record || record.status === 'deleted') return { kind: 'not-found', memoryId: args.memoryId }
   // 跨项目隔离：只准解引用当前项目或 global 记忆的锚
   if (record.scope === 'workspace' && record.workspacePath !== context.workspacePath) {
     return { kind: 'forbidden', memoryId: args.memoryId }
   }
 
+  // 手编/手建文件没有出处锚：没有可回查的会话
+  const source = record.source
+  if (!source) return { kind: 'no-source', memoryId: args.memoryId }
+
   const readEvent = deps.getReadEvent()
   if (!readEvent) return { kind: 'unavailable', memoryId: args.memoryId, reason: '会话查询服务未挂载' }
 
-  const [start, end] = record.source.eventRange
+  const [start, end] = source.eventRange
   // 入口 = 当轮 turn/start（start）向后开窗——触发保存的用户原话紧随 turn/start，必在窗内。
   // 真机教训：入口若设在 end（save 时刻）向前开窗，长 turn（宽度 >> cap）会只读到
   // turn 尾部的结构事件，用户原话永远够不着。window 覆盖默认宽度，封顶 WINDOW_CAP。
   const after = Math.min(Math.max(args.window ?? end - start, 1), WINDOW_CAP)
   let win: Awaited<ReturnType<ReadEventFn>>
   try {
-    win = await readEvent({ sessionId: record.source.sessionId, seq: start, before: 2, after })
+    win = await readEvent({ sessionId: source.sessionId, seq: start, before: 2, after })
   } catch (e) {
     return { kind: 'unavailable', memoryId: args.memoryId, reason: `原始会话不可读（${e instanceof Error ? e.message : String(e)}）` }
   }
@@ -96,8 +102,9 @@ export async function executeSource(
     lines.push(`- [${ev.seq}] ${extracted.role}: ${text}`)
   }
   return {
-    kind: 'ok', memoryId: args.memoryId, sessionId: record.source.sessionId,
+    kind: 'ok', memoryId: args.memoryId, sessionId: source.sessionId,
     range: [win.startSeq ?? start, win.endSeq ?? end], lines, skipped,
+    ...(record.handEdited ? { handEdited: true as const } : {}),
   }
 }
 
@@ -105,6 +112,8 @@ export function renderSourceResult(result: SourceResult, memoryName?: string): s
   switch (result.kind) {
     case 'not-found':
       return `记忆不存在或已删除：${result.memoryId}`
+    case 'no-source':
+      return `记忆 ${result.memoryId} 无出处（手写或手改的记忆文件），没有可回查的会话轨迹。请把它当作用户写下的内容使用。`
     case 'forbidden':
       return `记忆 ${result.memoryId} 不属于当前项目，不能回查其他项目的会话轨迹。`
     case 'unavailable':
@@ -113,7 +122,8 @@ export function renderSourceResult(result: SourceResult, memoryName?: string): s
       const head = `记忆 ${result.memoryId}${memoryName ? `（${memoryName}）` : ''} 源自会话 ${result.sessionId} 的 seq ${result.range[0]}–${result.range[1]}：`
       const body = result.lines.length > 0 ? result.lines.join('\n') : '（该窗口内没有可读的对话文本）'
       const tail = result.skipped > 0 ? `（另有 ${result.skipped} 个结构事件未显示）` : ''
-      return [head, body, tail].filter(Boolean).join('\n')
+      const edited = result.handEdited ? `注意：这条记忆${HAND_EDITED_NOTE}——保存后被手工改过，下面的对话可能已不是现在内容的来源。` : ''
+      return [head, edited, body, tail].filter(Boolean).join('\n')
     }
   }
 }

@@ -41,9 +41,9 @@ describe('MemoryStore 变更', () => {
   it('softDelete 置 status 为 deleted', async () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'x' }))
-    expect(await store.softDelete('x')).toBe(true)
+    expect(await store.softDelete({ id: 'x', workspacePath: undefined })).toBe(true)
     expect((await store.get('x'))!.status).toBe('deleted')
-    expect(await store.softDelete('ghost')).toBe(false)
+    expect(await store.softDelete({ id: 'ghost', workspacePath: undefined })).toBe(false)
   })
 
   it('markRecalled 读改写召回统计侧表，不改记录', async () => {
@@ -71,10 +71,10 @@ describe('MemoryStore 变更', () => {
     await stats.put('b', { id: 'b', recallCount: 4, lastRecalledAt: 1 })
     const put = vi.spyOn(stats, 'put')
     const putMany = vi.spyOn(stats, 'putMany')
-    await store.markRecalled(['a', 'b', 'c', 'ghost', 'a'])
+    await store.markRecalled(['a', 'b', 'c', 'a'])
     expect(put).not.toHaveBeenCalled()
     expect(putMany).toHaveBeenCalledTimes(1)
-    // 'a' 出现两次按两次计（与改批量前逐条累加的行为一致）；不存在的 id 不留行
+    // 'a' 出现两次按两次计（与改批量前逐条累加的行为一致）。ids 来自调用方同一次读取，这里不再逐 id 核对存活
     expect((await stats.list()).map(([k, v]) => [k, v.recallCount]).sort()).toEqual([['a', 2], ['b', 5], ['c', 1]])
   })
 })

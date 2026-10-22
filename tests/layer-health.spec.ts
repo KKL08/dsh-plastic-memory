@@ -2,10 +2,15 @@ import { describe, expect, it } from 'vitest'
 import { scoreLayer, listWorkspaces, layerCacheKey, GLOBAL_CACHE_KEY, type LayerHealthDeps, type LayerRef } from '../src/governance/layer-health.ts'
 import { prereadLayers } from '../src/tools/layer-preread.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
+import { FileTable } from '../src/storage/file-table.ts'
+import type { RecallStats } from '../src/storage/schema.ts'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
-import { workspaceDirName } from '../src/storage/paths.ts'
+import { workspaceDirName, GLOBAL_DIR, WORKSPACE_MARKER } from '../src/storage/paths.ts'
 import type { PendingDecision, ScanCacheEntry, Finding } from '../src/governance/schema.ts'
 import { record } from './helpers/record.ts'
 
@@ -18,7 +23,6 @@ interface Fixture extends LayerHealthDeps {
   store: MemoryStore
   decisions: PendingDecisionsStore
   cache: InMemoryKvTable<ScanCacheEntry>
-  getQuarantined?: () => readonly { path: string; error: string }[]
 }
 
 function makeDeps(): Fixture {
@@ -30,8 +34,10 @@ function makeDeps(): Fixture {
   }
 }
 
+/** 与 memory_health 单层视图同一预读范围：workspace 层连同 global 一起读，global 层只读自己。 */
 async function score(deps: Fixture, layer: LayerRef, now: number) {
-  return scoreLayer(deps, await prereadLayers(deps), layer, now)
+  const layers: LayerRef[] = layer.kind === 'workspace' ? [layer, { kind: 'global' }] : [layer]
+  return scoreLayer(deps, await prereadLayers(deps, layers, layer.kind === 'workspace' ? layer.path : undefined), layer, now)
 }
 
 describe('listWorkspaces', () => {
@@ -109,20 +115,22 @@ describe('scoreLayer 归属规则', () => {
     expect(r.health.semanticPenalty).toBeCloseTo(10)
   })
 
-  it('malformed 按文件路径归层：只算本层目录下的隔离文件', async () => {
-    const deps: Fixture = {
-      ...makeDeps(),
-      memoryRoot: '/root',
-      getQuarantined: () => [
-        { path: `/root/global/bad1.md`, error: 'x' },
-        { path: `/root/${workspaceDirName('/p')}/bad2.md`, error: 'x' },
-      ],
+  it('malformed 按所在目录归层：只算本层目录下的隔离文件', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pm-layer-'))
+    try {
+      await mkdir(join(root, GLOBAL_DIR), { recursive: true })
+      await writeFile(join(root, GLOBAL_DIR, 'bad1.md'), '没有 frontmatter\n')
+      const wsDir = join(root, workspaceDirName('/p'))
+      await mkdir(wsDir, { recursive: true })
+      await writeFile(join(wsDir, WORKSPACE_MARKER), '/p\n')
+      await writeFile(join(wsDir, 'bad2.md'), '没有 frontmatter\n')
+      const deps: Fixture = { ...makeDeps(), store: new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() })) }
+      expect((await score(deps, { kind: 'global' }, 200)).health.counts.malformed).toBe(1)
+      // workspace 层的预读同时读了 global，global 的坏文件不算进本层（不跨层重复扣分）
+      expect((await score(deps, { kind: 'workspace', path: '/p' }, 200)).health.counts.malformed).toBe(1)
+    } finally {
+      await rm(root, { recursive: true, force: true })
     }
-    expect((await score(deps, { kind: 'global' }, 200)).health.counts.malformed).toBe(1)
-    expect((await score(deps, { kind: 'workspace', path: '/p' }, 200)).health.counts.malformed).toBe(1)
-    // 无 memoryRoot 时不归层，两层都不计（避免同一文件跨层重复扣分）
-    const noRoot = { ...makeDeps(), getQuarantined: deps.getQuarantined }
-    expect((await score(noRoot, { kind: 'global' }, 200)).health.counts.malformed).toBe(0)
   })
 
   it('提升候选只在 workspace 层计数', async () => {

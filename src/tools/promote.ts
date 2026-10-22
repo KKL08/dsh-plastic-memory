@@ -3,6 +3,7 @@ import type { AgentsMdWriter } from '../storage/agents-md.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { MemorySnapshot } from '../governance/schema.ts'
+import { crossWorkspaceNote, gateRecords, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
 
 export type PromoteTarget = 'global' | 'agents-md'
 
@@ -17,6 +18,10 @@ export interface PromoteResult {
   promoted: Array<{ id: string; target: PromoteTarget }>
   dismissed: string[]
   skipped: string[]
+  /** 属于其他项目、因未带 allowCrossWorkspace 被拒的记录。 */
+  rejected: CrossWorkspaceRejection[]
+  /** 带参数放行、属于其他项目的记录。 */
+  otherWorkspaces: OtherWorkspaceMark[]
   message: string
 }
 
@@ -29,42 +34,43 @@ export interface PromoteResult {
  * - dismiss=true：用户明确不想提升，只清除候选标记、记忆留在项目内，忽略 target。
  */
 export async function executePromote(
-  args: { confirmedIds: string[]; target: PromoteTarget; dismiss?: boolean },
+  args: { confirmedIds: string[]; target: PromoteTarget; dismiss?: boolean; allowCrossWorkspace?: boolean },
+  context: GovernanceContext,
   deps: PromoteDeps,
 ): Promise<PromoteResult> {
   const now = deps.now?.() ?? Date.now()
-  // 预读范围：按 id 逐条定位（store.get，含非 active），已删的计入 skipped
+  // 预读范围：按 id 逐条两级定位（含非 active，当前 workspace 优先），已删的计入 skipped；
+  // 定位到的再过跨 workspace 门，其他项目的记录不带参数时单独列出、不动
   const promoted: PromoteResult['promoted'] = []
   const skipped: string[] = []
+  const located: MemoryRecord[] = []
+  for (const id of args.confirmedIds) {
+    const r = await deps.store.get(id, { workspacePath: context.workspacePath })
+    if (!r || r.status === 'deleted') { skipped.push(id); continue }
+    located.push(r)
+  }
+  const { allowed: found, rejected, otherWorkspaces } = gateRecords(located, context, args.allowCrossWorkspace)
+  const wsNote = crossWorkspaceNote(rejected, otherWorkspaces)
 
   // dismiss：用户表态不提升，清除候选标记即可。清标记可逆（模型可经 update 重新标记），故不拍快照、
   // 不写 AGENTS.md、不搬目录。updatedAt 不动——这不是内容编辑，改了会让快照把记忆误判为"快照后被
   // 编辑过"而拒绝恢复（对齐 confirm refresh 的同款理由）；put 语义保留召回统计。
   if (args.dismiss) {
     const dismissed: string[] = []
-    for (const id of args.confirmedIds) {
-      const r = await deps.store.get(id)
-      if (!r || r.status === 'deleted') { skipped.push(id); continue }
+    for (const r of found) {
       // 无损 JSON 不变式：解构剔键而非置 undefined。
       const { globalCandidate, ...rest } = r
       await deps.store.put(rest)
-      dismissed.push(id)
+      dismissed.push(r.id)
     }
     const skipNote = skipped.length > 0 ? `（${skipped.length} 条不存在或已删除，见 skipped）` : ''
     return {
-      promoted: [], dismissed, skipped,
-      message: `已清除 ${dismissed.length} 条提升候选标记，这些记忆保留在项目内，之后不再提示提升。${skipNote}`,
+      promoted: [], dismissed, skipped, rejected, otherWorkspaces,
+      message: `已清除 ${dismissed.length} 条提升候选标记，这些记忆保留在项目内，之后不再提示提升。${skipNote}${wsNote}`,
     }
   }
 
-  // 缺失/已删的先剔除计 skipped，不进快照；剩下的才是本次实际提升的目标。
-  const found: MemoryRecord[] = []
-  for (const id of args.confirmedIds) {
-    const r = await deps.store.get(id)
-    if (!r || r.status === 'deleted') { skipped.push(id); continue }
-    found.push(r)
-  }
-
+  // 缺失/已删的已计 skipped、其他项目被拒的已计 rejected，都不进快照；found 才是本次实际提升的目标。
   // 快照先行（对齐 forget/confirm）：global 分支搬家、agents-md 分支软删，都在改动前对整批目标
   // 拍一次快照——否则 agents-md 软删后 14 天 sweep 就不可恢复。无目标时不拍。
   let snapshot: MemorySnapshot | undefined
@@ -84,7 +90,7 @@ export async function executePromote(
     } else {
       // 两步无法原子：先软删再写 AGENTS.md，append 失败回滚软删——失败方向宁可"没提升"
       // 也不能"两处并存"（原顺序 append 成功+softDelete 失败会双份注入且结果谎报 promoted）。
-      await deps.store.softDelete(r.id)
+      await deps.store.softDelete(r)
       try {
         await deps.agentsMd.append(`${r.name} — ${r.content}`)
       } catch {
@@ -102,5 +108,5 @@ export async function executePromote(
     : args.target === 'global'
       ? `已提升 ${promoted.length} 条记忆到全局（插件 global 记忆）。${snapNote}`
       : `已写入 ${promoted.length} 条记忆到 ~/.dsh/AGENTS.md，原项目记忆已归档软删。${snapNote}`
-  return { promoted, dismissed: [], skipped, message }
+  return { promoted, dismissed: [], skipped, rejected, otherWorkspaces, message: `${message}${wsNote}` }
 }

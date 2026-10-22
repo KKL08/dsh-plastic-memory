@@ -1,4 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { FileTable } from '../src/storage/file-table.ts'
+import { GLOBAL_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
+import type { RecallStats } from '../src/storage/schema.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { executeScan, cacheKey, renderScanResult, type ScanToolDeps, type ScanArgs, type SingleScanResult } from '../src/tools/scan.ts'
 import { GLOBAL_CACHE_KEY } from '../src/governance/layer-health.ts'
@@ -23,6 +29,23 @@ function makeDeps(overrides?: Partial<ScanToolDeps>): ScanToolDeps {
     ...overrides,
   }
 }
+
+/** 真实记忆根（FileTable）：隔离文件只能从真实目录读出来。files 的键是相对 memoryRoot 的路径；markers 给 workspace 目录写 .workspace。 */
+async function fileBackedStore(files: Record<string, string>, workspaces: string[] = []): Promise<{ root: string; store: MemoryStore }> {
+  const root = await mkdtemp(join(tmpdir(), 'pm-broken-'))
+  roots.push(root)
+  for (const ws of workspaces) {
+    await mkdir(join(root, workspaceDirName(ws)), { recursive: true })
+    await writeFile(join(root, workspaceDirName(ws), WORKSPACE_MARKER), ws + '\n')
+  }
+  for (const [rel, text] of Object.entries(files)) {
+    await mkdir(dirname(join(root, rel)), { recursive: true })
+    await writeFile(join(root, rel), text)
+  }
+  return { root, store: new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() })) }
+}
+const roots: string[] = []
+afterEach(async () => { for (const r of roots.splice(0)) await rm(r, { recursive: true, force: true }) })
 
 /** 单层扫描断言助手：结果必须是 single 形态。 */
 async function scanSingle(args: ScanArgs, deps: ScanToolDeps): Promise<SingleScanResult> {
@@ -139,15 +162,14 @@ describe('executeScan 单层模式', () => {
   })
 
   it('规则层扫描输出包含 malformed finding；空 memoryIds 不影响 stats.clean', async () => {
-    const deps = makeDeps({
-      getQuarantined: () => [{ path: '/mem/broken.md', error: 'frontmatter 缺失 name 字段' }],
-    })
+    const { root, store } = await fileBackedStore({ [`${GLOBAL_DIR}/broken.md`]: '---\ntype: preference\n---\n\n缺 name\n' })
+    const deps = makeDeps({ store })
     await deps.store.put(record({ id: 'mem_ok' }))
     const r = await scanSingle({ layers: 'rule' }, deps)
     const malformed = r.findings.find(f => f.type === 'malformed')
     expect(malformed).toBeDefined()
     expect(malformed!.memoryIds).toEqual([])
-    expect(malformed!.summary).toContain('/mem/broken.md')
+    expect(malformed!.summary).toContain(join(root, GLOBAL_DIR, 'broken.md'))
     // malformed 无对应记录，memoryIds 为空，不进 problemIds——mem_ok 仍算 clean
     expect(r.stats.clean).toBe(1)
     expect(r.stats.issues).toBe(1)
@@ -312,17 +334,13 @@ describe('executeScan 全库体检', () => {
     expect(own.notes.map(n => n.code)).not.toContain('baseline-session-scoped')
   })
 
-  it('单层 malformed 按目录归层（有 memoryRoot 时），与 memory_health 同口径', async () => {
-    const { workspaceDirName } = await import('../src/storage/paths.ts')
-    const deps = makeDeps({
-      memoryRoot: '/root',
-      resolveContext: async () => ({ workspacePath: '/proj-a' }),
-      getQuarantined: () => [
-        { path: `/root/${workspaceDirName('/proj-a')}/bad.md`, error: 'x' },
-        { path: '/root/global/gbad.md', error: 'x' },
-        { path: `/root/${workspaceDirName('/elsewhere')}/other.md`, error: 'x' },
-      ],
-    })
+  it('单层 malformed 按所在目录归层，与 memory_health 同口径', async () => {
+    const { store } = await fileBackedStore({
+      [`${workspaceDirName('/proj-a')}/bad.md`]: '没有 frontmatter\n',
+      [`${GLOBAL_DIR}/gbad.md`]: '没有 frontmatter\n',
+      [`${workspaceDirName('/elsewhere')}/other.md`]: '没有 frontmatter\n',
+    }, ['/proj-a', '/elsewhere'])
+    const deps = makeDeps({ store, resolveContext: async () => ({ workspacePath: '/proj-a' }) })
     await deps.store.put(record({ id: 'mem_a', scope: 'workspace', workspacePath: '/proj-a' }))
     const r = await scanSingle({ layers: 'rule' }, deps)
     expect(r.findings.filter(f => f.type === 'malformed')).toHaveLength(1)

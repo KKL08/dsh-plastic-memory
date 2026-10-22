@@ -5,18 +5,20 @@
 #
 # Steps: build lib -> stage the published shape -> npm pack -> pinned dsh host
 # (cached per version) -> `dsh plugin --profile smoke add <tgz>` -> --dump-config
-# has a `name: dsh-plastic-memory` layer -> short smoke-profile boot -> static
-# checks on the installed lib/ (`node --check`, no relative import left on .ts).
+# has a `name: dsh-plastic-memory` layer -> short smoke-profile boot with a probe
+# plugin -> static checks on the installed lib/ (`node --check`, no relative
+# import left on .ts).
 #
 # Why the boot step: it is the only proof that the published package loads inside
-# the real host — the plugin's apply() runs, observable as the memories/global
-# directory it creates. Since dsh 0.1.7 the host resolves its own packages (e.g.
+# the real host — the plugin's apply() runs, observable as memory_search being
+# registered in ctx.tools (checked by scripts/host-smoke-probe.ts, patched in after
+# the plugin; the plugin's load path does no disk I/O, so no directory can serve as
+# the mark). Since dsh 0.1.7 the host resolves its own packages (e.g.
 # @deepseek-ai/schemastery, which the plugin imports) from an in-memory runtime
 # table and no longer writes `$DSH_HOME/profiles/node_modules` fallback links, so
 # plain Node outside the host cannot resolve them and no pure-Node import of lib/
-# is attempted. The static checks guard the build output instead. The smoke
-# profile has no app that exits on its own, so we launch the host, poll for the
-# apply() mark, then terminate it.
+# is attempted. The static checks guard the build output instead. The probe exits
+# the host once it has its answer; a boot that never gets there is cut off after ~30s.
 #
 # What this deliberately does NOT exercise: no LLM call, no tool invocation, no
 # session run. It is an install/load/config contract check only; the host
@@ -49,29 +51,30 @@ if ! grep -Eq 'name:[[:space:]]*dsh-plastic-memory' "$LOGS/dump-config.log"; the
   exit 1
 fi
 
-# Boot the smoke profile once and wait for the plugin's own apply() to start inside
-# the host, observable as the memories/global directory it creates early on (the
-# host logs nothing without a TTY, so boot.log stays empty on success). The profile
-# has no app to exit on, so poll for that mark, then stop the host (TERM, then KILL
-# as a backstop). If the host dies first — e.g. the plugin fails to load —
-# host_cleanup tails boot.log.
+# Boot the smoke profile once with the probe patched in after the plugin: the probe
+# waits for the loader, checks memory_search is registered in ctx.tools, writes the
+# verdict to PROBE_OUT and exits the host (the host logs nothing without a TTY, so
+# boot.log stays empty on success). Poll for the verdict with a ~30s cap, then stop
+# the host (TERM, then KILL as a backstop) in case it did not exit on its own. If
+# the host dies first — e.g. the plugin fails to load — host_cleanup tails boot.log.
 STEP=boot
-APPLIED="$HOMEDIR/memories/global"
+PATCH="$TMP/smoke.cordis.patch.yml"
+sed "s#__PROBE_URL__#file://$REPO/scripts/host-smoke-probe.ts#" "$REPO/scripts/host-smoke-probe.cordis.patch.yml" > "$PATCH"
+PROBE_OUT="$TMP/probe.txt"
 BOOT_T0=$SECONDS
-env DSH_HOME="$HOMEDIR" "$DSH" --profile smoke >"$LOGS/boot.log" 2>&1 &
+env DSH_HOME="$HOMEDIR" HOST_SMOKE_OUT="$PROBE_OUT" "$DSH" --profile smoke --patch "$PATCH" >"$LOGS/boot.log" 2>&1 &
 BOOT_PID=$!
 disown "$BOOT_PID" 2>/dev/null || true   # we reap it by signal; keep job control quiet
-BOOT_READY=""
-for _ in $(seq 1 300); do          # up to ~30s for plugin apply
-  if [ -d "$APPLIED" ]; then BOOT_READY=1; break; fi
-  kill -0 "$BOOT_PID" 2>/dev/null || break   # host died before the mark appeared
+for _ in $(seq 1 300); do          # up to ~30s for plugin apply + probe
+  if [ -f "$PROBE_OUT" ]; then break; fi
+  kill -0 "$BOOT_PID" 2>/dev/null || break   # host died before the verdict appeared
   sleep 0.1
 done
 kill -TERM "$BOOT_PID" 2>/dev/null || true
 for _ in $(seq 1 20); do kill -0 "$BOOT_PID" 2>/dev/null || break; sleep 0.1; done
 kill -KILL "$BOOT_PID" 2>/dev/null || true
-if [ -z "$BOOT_READY" ]; then
-  echo "$HOST_TAG: smoke boot never ran the plugin's apply() ($APPLIED missing)" >&2
+if [ "$(cat "$PROBE_OUT" 2>/dev/null)" != "ok" ]; then
+  echo "$HOST_TAG: smoke boot never registered the plugin's tools (probe: $(cat "$PROBE_OUT" 2>/dev/null || echo 'no verdict'))" >&2
   exit 1
 fi
 echo "$HOST_TAG: step boot ok ($((SECONDS - BOOT_T0))s)"
@@ -104,4 +107,4 @@ host_run syntax check_syntax "$(dirname "$IDX")"
 host_run lib-imports no_ts_imports "$(dirname "$IDX")"
 
 host_assert_isolated
-echo "$HOST_TAG: PASS in ${SECONDS}s — host @$PINNED, tgz installed, dump-config layer present, smoke boot started the plugin's apply() in the real host (full load is host:contract's job), installed lib/ parses with no .ts relative imports, ~/.dsh untouched"
+echo "$HOST_TAG: PASS in ${SECONDS}s — host @$PINNED, tgz installed, dump-config layer present, smoke boot registered the plugin's tools in the real host (tool behavior is host:contract's job), installed lib/ parses with no .ts relative imports, ~/.dsh untouched"

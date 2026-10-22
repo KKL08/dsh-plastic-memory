@@ -18,6 +18,8 @@ const MAPPED_ELSEWHERE = new Set<string>([
   'content', // markdown 正文
   'lastRecalledAt', 'recallCount', // 易变统计住 KV sidecar
 ])
+/** 写出时由记录派生、不是 schema 字段的键（digest = 内容摘要，每次写重算）。 */
+const DERIVED_ON_WRITE = new Set<string>(['digest'])
 
 /** 所有可选字段都填满，确保它们真的出现在 frontmatter（encode 跳过 undefined）。 */
 const fullRecord: MemoryRecord = {
@@ -26,7 +28,7 @@ const fullRecord: MemoryRecord = {
   source: { sessionId: 's1', eventRange: [0, 42], sourceMode: 'user-explicit' },
   createdAt: 1, updatedAt: 2, lastConfirmedAt: 3, lastRecalledAt: 4, recallCount: 5,
   validFrom: 6, validTo: 7, status: 'active', confidence: 0.9,
-  supersedes: ['mem_old'], globalCandidate: true,
+  supersedes: ['mem_old'], globalCandidate: true, handEdited: true, deletedAt: 8,
 }
 
 const schemaKeys = Object.keys(memoryRecordSchema.shape)
@@ -34,7 +36,7 @@ const writtenKeys = new Set(Object.keys(splitFrontmatter(encodeRecord(fullRecord
 
 describe('frontmatter 写入键集与 schema 一致', () => {
   it('写入键集恰为 schema 键集减去别处映射的键（双向相等）', () => {
-    const expectedWritten = schemaKeys.filter(k => !MAPPED_ELSEWHERE.has(k))
+    const expectedWritten = [...schemaKeys.filter(k => !MAPPED_ELSEWHERE.has(k)), ...DERIVED_ON_WRITE]
     expect([...writtenKeys].sort()).toEqual(expectedWritten.sort())
   })
 

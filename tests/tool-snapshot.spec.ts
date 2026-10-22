@@ -22,7 +22,7 @@ describe('memory_snapshot', () => {
     const deps = makeDeps()
     await deps.store.put(record({ id: 'mem_a' }))
     await deps.store.put(record({ id: 'mem_dead', status: 'deleted' }))
-    const r = await executeSnapshotTool({ action: 'create', description: '大清理前' }, deps)
+    const r = await executeSnapshotTool({ action: 'create', description: '大清理前' }, { workspacePath: '/proj' }, deps)
     expect(r.kind).toBe('created')
     const snap = (await deps.snapshots.list())[0]
     expect(snap.operation).toBe('manual')
@@ -33,7 +33,7 @@ describe('memory_snapshot', () => {
     const deps = makeDeps()
     await deps.store.put(record({ id: 'mem_a' }))
     await deps.store.put(record({ id: 'mem_b' }))
-    await executeSnapshotTool({ action: 'create', memoryIds: ['mem_b'] }, deps)
+    await executeSnapshotTool({ action: 'create', memoryIds: ['mem_b'] }, { workspacePath: '/proj' }, deps)
     expect((await deps.snapshots.list())[0].memoryIds).toEqual(['mem_b'])
   })
 
@@ -42,7 +42,7 @@ describe('memory_snapshot', () => {
     await deps.store.put(record({ id: 'mem_a' }))
     await deps.store.put(record({ id: 'mem_dead', status: 'deleted' }))
     const r = await executeSnapshotTool(
-      { action: 'create', memoryIds: ['mem_a', 'mem_a', 'mem_typo', 'mem_dead'] }, deps)
+      { action: 'create', memoryIds: ['mem_a', 'mem_a', 'mem_typo', 'mem_dead'] }, { workspacePath: '/proj' }, deps)
     expect(r.kind).toBe('created')
     if (r.kind === 'created') {
       expect(r.count).toBe(1)
@@ -55,7 +55,7 @@ describe('memory_snapshot', () => {
     const deps = makeDeps()
     await deps.snapshots.capture({ operation: 'manual', description: '早', records: [] }, 100)
     await deps.snapshots.capture({ operation: 'pre-forget', description: '晚', records: [] }, 200)
-    const r = await executeSnapshotTool({ action: 'list' }, deps)
+    const r = await executeSnapshotTool({ action: 'list' }, { workspacePath: '/proj' }, deps)
     expect(r.kind).toBe('listed')
     if (r.kind === 'listed') {
       expect(r.snapshots.map(s => s.description)).toEqual(['晚', '早'])
@@ -67,7 +67,7 @@ describe('memory_snapshot', () => {
     const original = record({ id: 'mem_a', content: '原文', updatedAt: 50 })
     const snap = await deps.snapshots.capture({ operation: 'pre-forget', description: 'd', records: [original] }, 100)
     await deps.store.put(record({ id: 'mem_a', content: '改过', updatedAt: 150 }))
-    const r = await executeSnapshotTool({ action: 'show', snapshotId: snap.id }, deps)
+    const r = await executeSnapshotTool({ action: 'show', snapshotId: snap.id }, { workspacePath: '/proj' }, deps)
     expect(r.kind).toBe('shown')
     if (r.kind === 'shown') {
       expect(r.entries[0].changedAfterSnapshot).toBe(true)
@@ -79,7 +79,7 @@ describe('memory_snapshot', () => {
     const original = record({ id: 'mem_a', content: '原文', updatedAt: 50 })
     const snap = await deps.snapshots.capture({ operation: 'pre-forget', description: 'd', records: [original] }, 100)
     // 记录完全不存在（非 forget 场景的软删，而是彻底不在库里）：直接恢复
-    const r = await executeSnapshotTool({ action: 'restore', snapshotId: snap.id }, deps)
+    const r = await executeSnapshotTool({ action: 'restore', snapshotId: snap.id }, { workspacePath: '/proj' }, deps)
     expect(r.kind).toBe('restored')
     expect((await deps.store.get('mem_a'))!.content).toBe('原文')
   })
@@ -90,12 +90,12 @@ describe('memory_snapshot', () => {
     const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
     const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
 
-    const forgot = await executeForget({ ids: ['mem_a'], reason: '误删' }, { store, snapshots, decisions })
+    const forgot = await executeForget({ ids: ['mem_a'], reason: '误删' }, { workspacePath: '/proj' }, { store, snapshots, decisions })
     expect(forgot.ok).toBe(true)
     expect((await store.get('mem_a'))!.status).toBe('deleted')
 
     const r = await executeSnapshotTool(
-      { action: 'restore', snapshotId: forgot.snapshotId! },
+      { action: 'restore', snapshotId: forgot.snapshotId! }, { workspacePath: '/proj' },
       { store, snapshots },
     )
     expect(r.kind).toBe('restored')
@@ -111,7 +111,7 @@ describe('memory_snapshot', () => {
   it('list 入口也清扫超窗旧快照：只造超窗快照后 list 返回空且表被清', async () => {
     const deps = makeDeps(SNAPSHOT_RETENTION_MS + 1)  // 工具入口以此 now 清扫
     await deps.snapshots.capture({ operation: 'manual', description: '超窗', records: [] }, 0)
-    const r = await executeSnapshotTool({ action: 'list' }, deps)
+    const r = await executeSnapshotTool({ action: 'list' }, { workspacePath: '/proj' }, deps)
     expect(r.kind).toBe('listed')
     if (r.kind === 'listed') expect(r.snapshots).toEqual([])
     expect(await deps.snapshots.list()).toEqual([])  // KV 表已被清
@@ -119,8 +119,8 @@ describe('memory_snapshot', () => {
 
   it('snapshotId 不存在返回 error', async () => {
     const deps = makeDeps()
-    expect((await executeSnapshotTool({ action: 'show', snapshotId: 'snap_ghost' }, deps)).kind).toBe('error')
-    expect((await executeSnapshotTool({ action: 'restore', snapshotId: 'snap_ghost' }, deps)).kind).toBe('error')
+    expect((await executeSnapshotTool({ action: 'show', snapshotId: 'snap_ghost' }, { workspacePath: '/proj' }, deps)).kind).toBe('error')
+    expect((await executeSnapshotTool({ action: 'restore', snapshotId: 'snap_ghost' }, { workspacePath: '/proj' }, deps)).kind).toBe('error')
   })
 
   it('restore 默认跳过快照后被真正编辑过的记录，overwriteChanged 才覆盖', async () => {
@@ -131,7 +131,7 @@ describe('memory_snapshot', () => {
     // 快照之后用户又改了这条：它是"更新的编辑"，不是软删除，必须受保护
     await deps.store.put(record({ id: 'mem_a', content: '后来改过的内容', updatedAt: 150 }))
 
-    const skipped = await executeSnapshotTool({ action: 'restore', snapshotId: snap.id }, deps)
+    const skipped = await executeSnapshotTool({ action: 'restore', snapshotId: snap.id }, { workspacePath: '/proj' }, deps)
     expect(skipped.kind).toBe('restored')
     if (skipped.kind === 'restored') {
       expect(skipped.restored).toEqual([])
@@ -142,7 +142,7 @@ describe('memory_snapshot', () => {
     expect((await deps.store.get('mem_a'))!.content).toBe('后来改过的内容')
 
     const forced = await executeSnapshotTool(
-      { action: 'restore', snapshotId: snap.id, overwriteChanged: true }, deps)
+      { action: 'restore', snapshotId: snap.id, overwriteChanged: true }, { workspacePath: '/proj' }, deps)
     expect(forced.kind).toBe('restored')
     if (forced.kind === 'restored') {
       expect(forced.restored).toEqual(['mem_a'])

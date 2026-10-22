@@ -4,7 +4,8 @@
  * cwd 走创建选项）搭 exec 直调，断言宿主层面的契约：工具注册、输出深度无损 JSON、
  * 会话/工作目录解析、落盘布局、规则层/语义层 note 码、快照回路、提升候选 dismiss、
  * 证据锚悬空降级（H9a 把落盘记录的 sessionId 改成不存在的会话）、真会话下钻（H9b 读回原文）、
- * 当轮锚来自宿主 turnBoundary 投影（H13）。
+ * 当轮锚来自宿主 turnBoundary 投影（H13）、外部直接写进记忆目录的文件在新会话组装时注入（H15）、
+ * 宿主 grep 工具搜记忆根目录时顶层命中、.archive/ 不命中（H16）。
  * 有 DEEPSEEK_API_KEY 且宿主能选出默认模型时再跑语义扫描与取消两项，否则标 SKIPPED。
  * run.sh 随后用同一个 DSH_HOME 再起一次宿主（HOST_CONTRACT_PHASE=restart）：第一趟把
  * 恢复的记录 id 写进交接文件，第二趟跑 H12，证明恢复结果过了进程重启仍可读；H14 第一趟建持久化会话、
@@ -141,7 +142,7 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
 
     if (process.env.HOST_CONTRACT_PHASE === 'restart') {
       // 第二趟：同一 DSH_HOME 的全新宿主进程。第一趟 H7 恢复过的记录必须从磁盘重新加载出来，
-      // 可检索、active，且快照（KV 后端）也过了重启——内存态在这里不存在，只能靠持久化。
+      // 可检索、active，且快照（.state/ 侧表）也过了重启——内存态在这里不存在，只能靠持久化。
       const handoff = JSON.parse(readFileSync(handoffPath ?? '', 'utf8')) as Handoff
       await attempt('H12-RESTART-READ', async () => {
         const exec = mkExec(handoff.wsA)
@@ -274,7 +275,7 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
     })
 
     // H9a 证据锚悬空：记忆文件是用户可编辑的 markdown——真 Session 正常保存后，把磁盘上那条记录的
-    // sessionId 改成不存在的会话 id（下一次工具调用经 withRefresh 重读），memory_source 须优雅降级不抛
+    // sessionId 改成不存在的会话 id（磁盘是唯一真相，下一次工具调用直接读到），memory_source 须优雅降级不抛
     await attempt('H9a-SOURCE-DANGLING-ANCHOR', async () => {
       const exec = mkExec(wsA)
       const r = await call('memory_save', { action: 'create', name: 'dangling-probe', summary: '悬空锚', content: '指向不存在会话的证据锚', ...MEMORY_BASE }, exec) as { kind: string; record?: { id: string; source: { sessionId: string } } }
@@ -324,6 +325,43 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
         ok: second.seq > 0 && start === second.seq && end === session.seq - 1 && s.kind === 'ok' && hit,
         detail: `eventRange=[${start},${end}] secondTurnStart=${second.seq} sessionSeq=${session.seq} source=${s.kind} hit=${hit}`,
       }
+    })
+
+    // H15 外部写入可见：插件已在 wsA 上跑过多次操作之后，绕过工具直接往该 workspace 的记忆目录写一个手建文件
+    // （只有 name / type / 正文），再新建会话、走一遍宿主 system prompt 组装：本插件那条 context 必须含这条记忆，
+    // 中间不经任何刷新调用。按 .workspace 标记找目录，不依赖目录名算法。
+    await attempt('H15-EXTERNAL-WRITE-INJECTED', async () => {
+      const systemPrompt = ctx.get('systemPrompt') as { assemble(context: { scope?: object }): Promise<{ contexts: Array<{ name: string; text: string }> }> } | undefined
+      if (!systemPrompt) return { ok: false, detail: 'systemPrompt service unavailable' }
+      const dir = readdirSync(memoriesRoot).map(d => join(memoriesRoot, d))
+        .find(d => existsSync(join(d, '.workspace')) && readFileSync(join(d, '.workspace'), 'utf8').trim() === wsA)
+      if (dir === undefined) return { ok: false, detail: `找不到 ${wsA} 的记忆目录` }
+      const probe = 'H15 外部写入探针：新会话组装必须看到它'
+      writeFileSync(join(dir, 'h15-external-probe.md'), `---\nname: h15-external-probe\ntype: preference\n---\n\n${probe}\n`)
+      const session = sessions.create(undefined, { meta: { cwd: wsA } })
+      const assembly = await systemPrompt.assemble({ scope: { session } })
+      const text = assembly.contexts.find(c => c.name === 'plastic-memory')?.text ?? ''
+      return { ok: text.includes(probe), detail: `contexts=${assembly.contexts.map(c => c.name).join(',')} plasticMemoryChars=${text.length} hasProbe=${text.includes(probe)}` }
+    })
+
+    // H16 宿主 grep 工具搜记忆根目录：.archive/ 是隐藏目录，宿主 grep 基于 ripgrep 且不传 --hidden，所以顶层文件命中、
+    // 归档文件不命中——设计稿 §1 把"隐藏目录挡住 grep"作为归档不可见的依据，这里在真机复核。grep 工具不在 ctx.tools 里则 SKIPPED。
+    await attempt('H16-GREP-SKIPS-ARCHIVE', async () => {
+      if (tools.get('grep') === undefined) return { ok: true, skipped: true, detail: 'SKIPPED: 宿主没有注册 grep 工具' }
+      const dir = readdirSync(memoriesRoot).map(d => join(memoriesRoot, d))
+        .find(d => existsSync(join(d, '.workspace')) && readFileSync(join(d, '.workspace'), 'utf8').trim() === wsA)
+      if (dir === undefined) return { ok: false, detail: `找不到 ${wsA} 的记忆目录` }
+      const token = `H16GREPPROBE${Math.random().toString(36).slice(2, 8)}`
+      writeFileSync(join(dir, 'h16-top.md'), `---\nname: h16-top\ntype: knowledge\n---\n\n${token} 顶层\n`)
+      mkdirSync(join(dir, '.archive'), { recursive: true })
+      writeFileSync(join(dir, '.archive', 'h16-archived.md'), `---\nname: h16-archived\ntype: knowledge\nstatus: deleted\ndeletedAt: ${new Date().toISOString()}\n---\n\n${token} 归档\n`)
+      // 不带 agent：宿主 grep 对带 agent 的 exec 会经 workingDirectory.ensure 取真 Agent 的 fiber（合成 exec 没有），
+      // 无 agent 时按 process.cwd() 起搜；这里搜的是绝对路径，工作目录不影响结果
+      const r = await call('grep', { pattern: token, path: memoriesRoot }, { signal: new AbortController().signal } as unknown as Exec) as { matches?: Array<{ path: string; line: string }> }
+      const paths = (r.matches ?? []).map(m => m.path)
+      const topHit = paths.some(p => p.endsWith('h16-top.md'))
+      const archiveHit = paths.some(p => p.includes('.archive'))
+      return { ok: topHit && !archiveHit, detail: `topHit=${topHit} archiveHit=${archiveHit} matches=${JSON.stringify(paths)}` }
     })
 
     // H14 第一趟：照 agent-loop 的建会话配方造一个持久化的真会话（prepare → create 写句柄 → enter + announce，

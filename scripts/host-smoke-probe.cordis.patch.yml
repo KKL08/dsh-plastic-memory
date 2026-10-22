@@ -1,0 +1,6 @@
+# R0 安装冒烟的 overlay（host-smoke.sh 会把 __PROBE_URL__ 换成 host-smoke-probe.ts 的 file:// URL）：
+# 在本插件之后插入探针，等 loader 完成后确认 memory_search 已注册、写标记、退出宿主。
+- insert:
+    - id: plastic-memory-host-smoke
+      name: __PROBE_URL__
+      inject: [tools]

@@ -1,10 +1,12 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { executePromote, type PromoteTarget, type PromoteDeps, type PromoteResult } from './promote.ts'
 import { toToolOutput } from './output.ts'
+import { ALLOW_CROSS_WORKSPACE_PARAM, type GovernanceContext } from './workspace-gate.ts'
 
 export interface PromoteToolDeps extends PromoteDeps {
   defaultTarget: PromoteTarget
+  resolveContext: (exec: ToolRunContext) => Promise<GovernanceContext>
 }
 
 /**
@@ -25,11 +27,13 @@ export function createPromoteTool(deps: PromoteToolDeps): ToolDefinition {
       ids: { type: 'array', items: { type: 'string' }, required: true, description: '用户确认要提升、或明确拒绝提升的候选记忆 id' },
       target: { type: 'string', enum: ['global', 'agents-md'], description: 'global=插件全局记忆（默认）；agents-md=写入 ~/.dsh/AGENTS.md 交由用户统一维护' },
       dismiss: { type: 'boolean', description: 'true=用户明确不想提升，只清除这些候选的提升标记、记忆留在项目内，忽略 target' },
+      allowCrossWorkspace: ALLOW_CROSS_WORKSPACE_PARAM,
     },
     output: { schema: { type: 'json' }, render: (_a, v) => [{ type: 'text', text: (v as unknown as PromoteResult).message }] },
-    execute: async (args) => {
+    execute: async (args, exec) => {
       const target: PromoteTarget = args.target ?? deps.defaultTarget
-      return toToolOutput(await executePromote({ confirmedIds: args.ids, target, dismiss: args.dismiss }, deps))
+      const context = await deps.resolveContext(exec)
+      return toToolOutput(await executePromote({ confirmedIds: args.ids, target, dismiss: args.dismiss, allowCrossWorkspace: args.allowCrossWorkspace }, context, deps))
     },
   })
 }

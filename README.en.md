@@ -170,8 +170,8 @@ customTypes:
 | Tool              | Description                                                                                                          |
 | ----------------- | -------------------------------------------------------------------------------------------------------------------- |
 | `memory_save`     | Distill or update a memory. Built-in dedup and secret detection; when near-duplicate content is found, prompts the user to `update` or `force` |
-| `memory_search`   | Full-text search with type and scope filters. Returns up to 10 results by default (max 50)                           |
-| `memory_forget`   | Batch-remove memories. An archive snapshot is created automatically; recoverable within 14 days                       |
+| `memory_search`   | Full-text search with type and scope filters. Returns up to 10 results by default (max 50). Several keywords must all match; if none does, falls back to any-match and says so in the result |
+| `memory_forget`   | Batch-remove memories: the file moves to `.archive/`, a snapshot is taken first, recoverable within 14 days. Memories containing secrets are the exception: deleted physically at once, their copies in every snapshot redacted, not recoverable |
 | `memory_snapshot` | Snapshot management: manual tagging, diff comparison, rollback, and undelete                                         |
 | `memory_source`   | **Provenance:** trace back to the original conversation slice a memory was distilled from — verify intent and guard against hallucination |
 
@@ -183,10 +183,12 @@ customTypes:
 
 | Tool             | Description                                                                                                         |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `memory_health`  | **Health score (0–100):** assess overall memory library quality                                                     |
+| `memory_health`  | **Health score (0–100):** assess overall memory library quality; also lists quarantined files that failed to parse and directory problems (duplicate ids, missing `.workspace` marker, …) |
 | `memory_scan`    | Deep audit — rule layer (secret leaks, oversized entries, orphaned refs, corrupt files); semantic layer (conflicts, redundancies) calls LLM on demand |
 | `memory_confirm` | **Freshness refresh & triage:** reaffirm stale memories to extend their lifecycle, or arbitrate conflict scan results |
 | `memory_promote` | **Scope promotion:** elevate validated workspace memories to global or sync to `AGENTS.md` — **requires explicit user approval** |
+
+Governance tools act on global and current-workspace memories only; pass `allowCrossWorkspace: true` to touch other projects' memories (when the user explicitly asks for a library-wide clean-up). Sub-agent sessions (tasks the host delegates) are read-only: `memory_search`, `memory_source` and `memory_health` work, every writing tool (including `memory_scan`) is refused, and memories are still injected as usual.
 
 
 ---
@@ -195,26 +197,35 @@ customTypes:
 
 ## 📂 Storage Layout
 
-Memories are organized transparently on the local filesystem:
+Memories are files: the Markdown on disk is the only source of truth and the plugin keeps no copy in memory. Create, edit or delete a file in your editor and the next tool call or new session sees it, no restart needed.
 
 ```text
 <memoryRoot>/
-  global/                    # Global memories (shared read-only across projects)
-    <id>.md                  # Individual memory entry (YAML frontmatter + body)
-    MEMORY.md                # Auto-generated aggregate index
+  global/                    # Global memories (shared across projects)
+    <name-slug>.md           # One memory per file (YAML frontmatter + body)
+    MEMORY.md                # Generated index of live memories; hand edits are overwritten
+    .archive/                # Forgotten and superseded memories; purged 14 days after forgetting
   <project-slug>-<hash>/    # Workspace memories (isolated per project)
-    .workspace               # Marker linking to the local project path
-    <id>.md
+    .workspace               # One line: the project's absolute path
+    <name-slug>.md
     MEMORY.md
+    .archive/
+  .state/                    # Plugin bookkeeping: snapshots, pending decisions, scan cache, recall stats
 ```
 
+Index lines end with the file name, so the model can open the full text directly; `.archive/` is a hidden directory, so the host's grep does not surface forgotten content.
 
 
-### Manual Editing & Hot Reload
 
-The plugin detects external changes and reloads automatically before every tool call.
+### Manual Editing
 
-> **Note:** When editing files by hand, timestamps must follow ISO 8601 UTC format (e.g. `2026-09-01T08:30:00.000Z`). Files with malformed timestamps are quarantined individually — other memories load normally and the issue surfaces in health checks. Fix the format and the file is picked up on the next tool call.
+- **Create**: a `.md` file whose frontmatter has at least `name` and `type`; the body is the memory. `id`, timestamps, `tags`, `summary` and `confidence` may be omitted and are filled in on the next write or session start (the `id` is derived from the file path and then stays with the file).
+- **Timestamps**: `2026-09-01`, `2026-09-01T08:30:00Z` and offsets are all accepted; missing ones default to the file's modification time.
+- **Edit**: after a hand edit the memory is marked as hand-edited and `memory_source` warns that the provenance may no longer match; updating it with `memory_save` clears the mark.
+- **Expiry**: a memory whose `validTo` has passed stays in place but is neither injected nor searched; `memory_health` suggests extending it or forgetting it.
+- **Recovery**: a memory forgotten by mistake sits in `.archive/`; restore it with `memory_snapshot`, or move the file back up one level and set `status` to `active`.
+- **Malformed files** are quarantined individually and never block other memories; `memory_health` and `memory_scan` list them, and a fix takes effect immediately.
+- `MEMORY.md` is generated; do not edit it by hand.
 
 ---
 
