@@ -3,8 +3,8 @@ import { maskSecrets, maskSecretSurface, SECRET_MASK, hasSecret } from '../src/s
 import { FAKE_SECRET } from './helpers/secrets.ts'
 
 describe('maskSecrets：只换命中片段', () => {
-  it('疑似密码：命中片段换成占位，前后文字原样', () => {
-    expect(maskSecrets('服务器密码: Abc12345 周五前改')).toBe(`服务器${SECRET_MASK} 周五前改`)
+  it('疑似密码不遮：写入时用户已确认不是密钥才放行', () => {
+    expect(maskSecrets('服务器密码: Abc12345 周五前改')).toBe('服务器密码: Abc12345 周五前改')
   })
 
   it('sk- key：只遮 key 本身', () => {
@@ -33,12 +33,17 @@ describe('maskSecretSurface：四个面按片段遮盖', () => {
   })
 
   it('跨字段拼接才命中：两边落在命中区间里的部分都遮住', () => {
-    const r = { ...surface, summary: '数据库的 api_key', tags: ['=abcdef1234567890XYZ', '运维'] }
+    const r = { ...surface, summary: '认证头 Bearer', tags: ['TESTONLYabcdefghijklmnop', '运维'] }
     expect(hasSecret(r)).toBe(true)
     const masked = maskSecretSurface(r)
-    expect(masked.summary).toBe(`数据库的 ${SECRET_MASK}`)
+    expect(masked.summary).toBe(`认证头 ${SECRET_MASK}`)
     expect(masked.tags).toEqual([SECRET_MASK, '运维'])
     expect(hasSecret(masked)).toBe(false)
+  })
+
+  it('只命中疑似规则返回原对象', () => {
+    const r = { ...surface, content: '预发库密码: Abc12345', summary: '数据库的 api_key: 1234567890abcdef' }
+    expect(maskSecretSurface(r)).toBe(r)
   })
 
   it('无命中返回原对象', () => {

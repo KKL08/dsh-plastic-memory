@@ -389,16 +389,23 @@ describe('escapePromptBraces × 宿主 renderContextSections 往返', () => {
   })
 })
 
-// 疑似密钥不跳过、不加提示：注入时只把命中片段遮成占位，整条照常带入
+// 明确密钥不跳过、不加提示：注入时只把命中片段遮成占位，整条照常带入；疑似级别写入时已由用户确认，照原文注入
 describe('assembleSnapshot × 密钥遮盖', () => {
   const base = { registry, workspacePath: undefined, budget: 4000, now: 10 * DAY }
 
-  it('core 正文里的疑似密码只遮命中片段，记录照常注入', () => {
-    const r = record({ id: 'mem_pwd', type: 'preference', content: '测试库密码: Abc12345 别提交到仓库' })
+  it('core 正文里的明确密钥只遮命中片段，记录照常注入', () => {
+    const r = record({ id: 'mem_key', type: 'preference', content: `测试网关用 ${FAKE_SECRET.sk} 别提交到仓库` })
     const { text, coreIds } = assembleSnapshot({ ...base, records: [r] })
-    expect(text).toContain(`[mem_pwd]【记忆·行为偏好】测试库${SECRET_MASK} 别提交到仓库`)
-    expect(text).not.toContain('Abc12345')
-    expect(coreIds).toEqual(['mem_pwd'])
+    expect(text).toContain(`[mem_key]【记忆·行为偏好】测试网关用 ${SECRET_MASK} 别提交到仓库`)
+    expect(text).not.toContain(FAKE_SECRET.sk)
+    expect(coreIds).toEqual(['mem_key'])
+  })
+
+  it('疑似密码照原文注入：写入时用户已确认不是密钥', () => {
+    const r = record({ id: 'mem_pwd', type: 'preference', content: '测试库密码: Abc12345 别提交到仓库' })
+    const { text } = assembleSnapshot({ ...base, records: [r] })
+    expect(text).toContain('[mem_pwd]【记忆·行为偏好】测试库密码: Abc12345 别提交到仓库')
+    expect(text).not.toContain(SECRET_MASK)
   })
 
   it('索引行里 summary、tags 的 sk- key 遮住，其余照常', () => {
@@ -410,10 +417,10 @@ describe('assembleSnapshot × 密钥遮盖', () => {
   })
 
   it('跨字段拼接才命中的密钥也遮住（渲染后两段不相邻，逐段检测发现不了）', () => {
-    const r = record({ id: 'mem_cross', name: '数据库', summary: '数据库的 api_key', tags: ['=abcdef1234567890XYZ'] })
+    const r = record({ id: 'mem_cross', name: '数据库', summary: '认证头 Bearer', tags: ['TESTONLYabcdefghijklmnop'] })
     const { text } = assembleSnapshot({ ...base, records: [r] })
-    expect(text).not.toContain('abcdef1234567890XYZ')
-    expect(text).toContain(`- [mem_cross] 数据库（数据库的 ${SECRET_MASK}） — ${SECRET_MASK}`)
+    expect(text).not.toContain('TESTONLYabcdefghijklmnop')
+    expect(text).toContain(`- [mem_cross] 数据库（认证头 ${SECRET_MASK}） — ${SECRET_MASK}`)
   })
 
   it('name 里有密钥：索引行不带文件路径（文件名由 name 派生）；文件名自带密钥的遮住', () => {
