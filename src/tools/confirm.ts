@@ -118,7 +118,12 @@ export async function executeConfirm(
     if (toDelete) actions.push(`败方记忆 ${toDelete.id} 已是删除状态，无需再删`)
     if (args.verdict === 'keep-both') actions.push('两条并存（用户确认不冲突）')
     if (args.verdict === 'dismiss') actions.push('标记为误报')
-    await deps.decisions.remove(entry.id)
+    // 两边都留（keep-both / dismiss / 垂直 keep-left）：记下裁决，双方内容不变时体检不再报
+    if (loserId === undefined && args.verdict !== 'keep-right' && await deps.decisions.settle(entry.id, args.verdict, now)) {
+      actions.push('以后体检不再报这一对，除非其中一条（或基线）被改写')
+    } else {
+      await deps.decisions.remove(entry.id)
+    }
   }
 
   return {

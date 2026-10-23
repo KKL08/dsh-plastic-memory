@@ -90,6 +90,11 @@ All notable changes to this project are documented here. The format follows
   you deleted or rewrote it. It is now treated as confirmed: it no longer
   counts as a secret in `memory_health` or `memory_scan` and is injected
   unmasked.
+- A conflict you resolved by keeping both memories (`keep-both`,
+  `dismiss`, or keeping a memory over `AGENTS.md`) came back on the next
+  `memory_scan`. The verdict is now remembered: the pair stays off the
+  pending list until either memory, or the `AGENTS.md` it was checked
+  against, changes.
 
 ## [0.1.1-beta.5] - 2026-10-20
 
