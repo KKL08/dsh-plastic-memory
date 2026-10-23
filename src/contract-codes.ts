@@ -34,6 +34,7 @@ export type ScanNoteCode =
   | 'baseline-missing'        // 未检测到 AGENTS.md 基线，垂直冲突检测未执行
   | 'baseline-session-scoped' // 基线随当前会话，其他 workspace 的垂直冲突检测已跳过
   | 'cross-ws-failed'         // 跨项目重复分析失败，退用实体聚类保底
+  | 'conflicts-settled'       // 有冲突此前裁决为两边都留、双方未改，本次不再列出
 
 /** memory_health 建议的分层并列结构（health.ts）：独占层单元素，行动项层多元素，无事为空数组。 */
 export type HealthRecommendationKind =
