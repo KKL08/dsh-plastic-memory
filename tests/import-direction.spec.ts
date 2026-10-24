@@ -18,6 +18,7 @@ type LayerName = keyof typeof LAYER
 const LEAF_MODULES = new Set([
   'text', 'secrets', 'record-freshness', 'retention', 'contract-codes', 'index-line', 'errors',
   'kv-table', 'record-schema', 'output', 'storage/paths', 'storage/table', 'types', 'gui/contract',
+  'search/tokenizer',
 ])
 const MEMORY_MODULES = new Set([
   'pipeline', 'store', 'snapshot', 'runtime', 'type-registry', 'evidence-guidance',
