@@ -177,7 +177,7 @@ describe('交付卡', () => {
     const card = <SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} deleted={deleted} />
     const { unmount } = renderInShell(card, gateway)
     fireEvent.click(screen.getByRole('button', { name: '删除这条记忆' }))
-    expect(await screen.findByText('这条记忆里有密钥，删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeInTheDocument()
+    expect(await screen.findByText('彻底删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeInTheDocument()
     expect(screen.getByText('原文')).toBeInTheDocument()
     expect(screen.queryByText(/14 天/)).toBeNull()
 
@@ -198,9 +198,31 @@ describe('交付卡', () => {
     renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} deleted={new Map()} />, gateway)
     fireEvent.click(screen.getByRole('button', { name: '删除这条记忆' }))
     fireEvent.click(await screen.findByRole('button', { name: '取消' }))
-    expect(screen.queryByText('这条记忆里有密钥，删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeNull()
+    expect(screen.queryByText('彻底删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeNull()
     expect(screen.getByText('原文')).toBeInTheDocument()
     expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'mem_1' }])
+  })
+
+  it('含密钥确认收起后键盘焦点不丢：「取消」回到删除按钮；彻底删除后落到原位那行说明上', async () => {
+    const gateway = createFakeGateway({
+      respond: command => command.cmd === 'forget'
+        ? { ok: false, cmd: command.cmd, code: 'has-secret' }
+        : { ok: true, cmd: command.cmd, memoryIds: ['mem_1'] },
+    })
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文'), saved('mem_2', '另一条')]} now={NOW} openDetail={() => {}} deleted={new Map()} />, gateway)
+    const del = screen.getAllByRole('button', { name: '删除这条记忆' })[0]!
+    del.focus()
+    fireEvent.click(del)
+    const cancel = await screen.findByRole('button', { name: '取消' })
+    cancel.focus()
+    fireEvent.click(cancel)
+    await waitFor(() => { expect(del).toHaveFocus() })
+
+    fireEvent.click(del)
+    const confirm = await screen.findByRole('button', { name: '彻底删除' })
+    confirm.focus()
+    fireEvent.click(confirm)
+    await waitFor(() => { expect(screen.getByText('已彻底删除。如果它是真的凭证，记得去换一个新的。')).toHaveFocus() })
   })
 
   it('删除失败时原文还在，旁边写服务端原话', async () => {

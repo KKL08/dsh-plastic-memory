@@ -70,7 +70,7 @@ function SavedRow({ sessionId, item, now, deleted, typeLabel, onDetail }: {
   if (state.kind === 'purged') {
     return (
       <div className="pm-saved-row pm-saved-row--deleted" data-memory-id={id}>
-        <p className="pm-saved-note">{t('pending.secret.deletedNotice')}</p>
+        <p className="pm-saved-note" tabIndex={-1}>{t('pending.secret.deletedNotice')}</p>
       </div>
     )
   }

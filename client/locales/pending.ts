@@ -29,7 +29,6 @@ export const pendingZh = {
   'pending.secret.confirmDelete': '彻底删除',
   'pending.secret.deleted': '已彻底删除',
   'pending.secret.deletedBody': '如果它是真的凭证，记得去换一个新的。',
-  'pending.secret.forgetBody': '这条记忆里有密钥，删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。',
   'pending.secret.deletedNotice': '已彻底删除。如果它是真的凭证，记得去换一个新的。',
 
   'pending.conflict.preferred': '决定前 agent 按 {side} 来。',
@@ -113,7 +112,6 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.secret.confirmDelete': 'Delete permanently',
   'pending.secret.deleted': 'Deleted permanently',
   'pending.secret.deletedBody': 'If it was a real credential, remember to rotate it.',
-  'pending.secret.forgetBody': 'This memory contains a secret, so deleting it is permanent: it skips Recently deleted and cannot be undone. Copies in earlier snapshots are erased too.',
   'pending.secret.deletedNotice': 'Deleted permanently. If it was a real credential, remember to rotate it.',
 
   'pending.conflict.preferred': 'Until you decide, the agent follows {side}.',
