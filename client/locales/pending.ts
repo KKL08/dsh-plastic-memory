@@ -117,7 +117,7 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
 
 
   'pending.promote.title': 'This fits every project',
-  'pending.promote.titleIn': 'The one in {name} fits every project',
+  'pending.promote.titleIn': 'This memory in {name} fits every project',
   'pending.promote.global': 'Make global',
   'pending.promote.globalIn': 'Promote the one in {name}',
   'pending.promote.agentsMd': 'Write into AGENTS.md',
@@ -135,7 +135,7 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.overflow.raise': 'Raise the limit',
   'pending.overflow.save': 'Save',
   'pending.overflow.raiseHint': 'No more reminders until the new limit is reached.',
-  'pending.overflow.cleanup': 'Clean up memories ›',
+  'pending.overflow.cleanup': 'Review memories ›',
   'pending.overflow.invalid': 'Enter a whole number above {budget}.',
   'pending.overflow.saveFailed': 'Could not save. Try again.',
 
