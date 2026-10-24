@@ -387,6 +387,20 @@ describe('提升候选与超限', () => {
     expect((await pendingCandidates(e)).map(i => i.kind === 'promote-candidate' && i.memory?.id)).toEqual([memoryId])
   })
 
+  it('keep-local 的指纹按记忆此刻的内容记：上次体检后模型改过内容，留在本项目后同内容再被标记也不重开', async () => {
+    const e = env({ llm: quietLlm })
+    const { decisionId, memoryId } = await seedCandidate(e)
+    // 体检之后、用户点「留在本项目」之前，模型改了内容（仍是候选）
+    await e.store.put({ ...(await e.store.get(memoryId))!, content: '所有项目都用 vitest，覆盖率不设门槛' })
+    ok(await e.run({ cmd: 'keep-local', decisionId }))
+    expect((await e.store.get(memoryId))!.globalCandidate).toBeUndefined()
+
+    await e.store.put({ ...(await e.store.get(memoryId))!, globalCandidate: true }) // 模型又把同样的内容标为全局
+    ok(await e.run({ cmd: 'scan' }))
+    expect(await pendingCandidates(e)).toEqual([])
+    expect((await e.decisions.listSettled()).map(d => d.id)).toEqual([decisionId])
+  })
+
   it('promote / keep-local 指向冲突条目 → failed，条目不动', async () => {
     const e = env()
     const entry = await seedPair(e)

@@ -6,7 +6,7 @@ import type { KvTable } from '../kv-table.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { AgentsMdWriter } from '../storage/agents-md.ts'
 import { hasSecret } from '../secrets.ts'
-import { kindOf, verdictLoser, type PendingDecisionsStore } from '../governance/decisions.ts'
+import { candidateFingerprint, kindOf, verdictLoser, type PendingDecisionsStore } from '../governance/decisions.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
 import type { PendingDecision, ScanCacheEntry } from '../governance/schema.ts'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
@@ -225,7 +225,9 @@ async function dispatch(
       )
       if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
       if (r.dismissed.length === 0) return fail(cmd, 'failed', r.message)
-      await deps.decisions.settle(entry.id, 'keep-local', now)
+      // 指纹按记忆此刻的内容记：上次体检后模型改过内容的话，账本里的旧指纹对不上，同内容再被标记会白提示一次
+      const current = await deps.store.get(entry.memoryIds[0]!)
+      await deps.decisions.settle(entry.id, 'keep-local', now, current !== undefined ? { fingerprint: candidateFingerprint(current) } : {})
       return { ok: true, cmd, decisionId: entry.id, memoryIds: r.dismissed }
     }
 
