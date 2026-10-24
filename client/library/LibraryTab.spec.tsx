@@ -147,6 +147,30 @@ describe('全部记忆', () => {
     expect(screen.getByRole('status')).toHaveTextContent('没有成功：记忆 b1 不存在')
   })
 
+  it('别的项目里含密钥的记忆：先确认彻底删除，再确认跨项目，重发的是带 allowCrossWorkspace 的 hard-delete，最后提示不可恢复', async () => {
+    const gateway = createFakeGateway({
+      views: { library: library() },
+      respond: command => command.cmd === 'forget'
+        ? { ok: false, cmd: command.cmd, code: 'has-secret', detail: '记忆 b1 含密钥，删除后不可恢复，未做任何改动' }
+        : 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
+          ? { ok: true, cmd: command.cmd, memoryIds: ['b1'] }
+          : { ok: false, cmd: command.cmd, code: 'cross-workspace', rejected: [{ id: 'b1', workspacePath: '/w/blog' }] },
+    })
+    renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'workspace', workspacePath: '/w/blog' }} session={session} now={NOW} />, gateway)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '彻底删除' })) })
+    expect(screen.getByText('这条记忆属于 blog 项目，不是当前项目。确定在这里处理它吗？')).toBeInTheDocument()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '继续处理' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([
+      { cmd: 'forget', memoryId: 'b1' },
+      { cmd: 'hard-delete', memoryId: 'b1' },
+      { cmd: 'hard-delete', memoryId: 'b1', allowCrossWorkspace: true },
+    ])
+    expect(screen.getByRole('status')).toHaveTextContent('已彻底删除。如果它是真的凭证，记得去换一个新的。')
+    expect(screen.queryByText(/14 天/)).toBeNull()
+    expect(screen.queryByRole('button', { name: '去最近删除 ›' })).toBeNull()
+  })
+
   it('空状态：一条记忆都没有是首次空态「还没有记忆」；只是这一层空是日常空态', () => {
     const empty = library({ layers: [{ layer: { kind: 'global' }, items: [] }] })
     const { unmount } = renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'global' }} session={session} now={NOW} />, createFakeGateway({ views: { library: empty } }))
