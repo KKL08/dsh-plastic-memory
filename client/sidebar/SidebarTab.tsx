@@ -6,6 +6,7 @@
  * 健康视图（bootedAt：插件本次加载时刻）。
  * 四种状态：无记忆、有全局没本项目、正常、frozenAt 早于插件本次加载（重启后未重新带入；视图没带 bootedAt 时不判断）。
  * 刚裁决的冲突在本地留原位可撤销，tab 卸载后收起。
+ * 新记的含密钥时不能软删（服务端回 has-secret，什么都没动）：原位确认，「彻底删除」发 hard-delete，删后原位留不可恢复的说明，tab 卸载后收起。
  */
 import { useMemo, useState, type ReactNode } from 'react'
 import { CONFLICT_ACTION_VERDICTS, type MemoryCard as MemoryCardData, type MemoryCommand, type PendingItem } from '../../src/gui/contract.ts'
@@ -21,7 +22,7 @@ import { ContextBudgetBar } from '../ui/ContextBudgetBar.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { TrashIcon } from '../ui/TrashIcon.tsx'
-import { CrossConfirm, crossConfirmCss } from '../pending/action.tsx'
+import { CrossConfirm, crossConfirmCss, SecretDeleteConfirm } from '../pending/action.tsx'
 
 type Conflict = Extract<PendingItem, { kind: 'conflict-horizontal' }>
 type VerticalConflict = Extract<PendingItem, { kind: 'conflict-vertical' }>
@@ -76,6 +77,8 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const health = gateway.useView(session, 'health')
   const [ruled, setRuled] = useState<readonly Ruled[]>([])
   const [forgotten, setForgotten] = useState<ReadonlySet<string>>(new Set())
+  const [purged, setPurged] = useState<ReadonlySet<string>>(new Set())
+  const [secretId, setSecretId] = useState<string | undefined>(undefined)
   const [busy, setBusy] = useState<string | undefined>(undefined)
   const [failure, setFailure] = useState<{ id: string; detail: string } | undefined>(undefined)
   // 涉及其他项目时服务端先拒（什么都没动），和待处理卡同一套：原位确认，「继续处理」才带 allowCrossWorkspace 重发
@@ -85,12 +88,14 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     setBusy(id)
     setFailure(undefined)
     setCross(undefined)
+    setSecretId(undefined)
     const result = await gateway.execute(sessionId, command)
     setBusy(undefined)
     if (result.ok) { onOk(); return }
     const workspacePath = result.rejected?.[0]?.workspacePath
     const isAllowed = 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
     if (result.code === 'cross-workspace' && !isAllowed && workspacePath !== undefined) setCross({ id, workspacePath, command, onOk })
+    else if (result.code === 'has-secret' && command.cmd === 'forget') setSecretId(id)
     else setFailure({ id, detail: result.detail ?? result.code })
   }
   const rule = (item: Conflict, verdict: Verdict) => {
@@ -112,6 +117,9 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   }
   const forget = (memoryId: string) => {
     void run(memoryId, { cmd: 'forget', memoryId }, () => { setForgotten(prev => new Set(prev).add(memoryId)) })
+  }
+  const hardDelete = (memoryId: string) => {
+    void run(memoryId, { cmd: 'hard-delete', memoryId }, () => { setPurged(prev => new Set(prev).add(memoryId)) })
   }
 
   if (library.status !== 'ready') return <div className="pm-side"><ViewNote state={library} /></div>
@@ -170,7 +178,12 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
       shown.add(id)
     }
   }
-  const saved = (snapshot?.savedIds ?? []).filter(id => !forgotten.has(id)).flatMap(id => byId.get(id) ?? [])
+  // 彻底删除的那条视图里已经没有了，按 id 原位留一行说明
+  const saved = (snapshot?.savedIds ?? []).filter(id => !forgotten.has(id))
+    .flatMap((id): Array<{ id: string; memory: MemoryCardData | undefined }> => {
+      const memory = byId.get(id)
+      return purged.has(id) ? [{ id, memory: undefined }] : memory === undefined ? [] : [{ id, memory }]
+    })
   const scope = ws === undefined ? undefined : { kind: 'workspace' as const, workspacePath: ws }
   const restPending = ws === undefined || pending.status !== 'ready'
     ? 0
@@ -180,6 +193,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     <MemoryCard memory={memory} now={now} typeLabel={label(memory.type)} hideScope={memory.scope === 'workspace'} chip={chip} />
   )
   const failed = (id: string) => {
+    if (secretId === id) return <SecretDeleteConfirm onCancel={() => { setSecretId(undefined) }} onConfirm={() => { hardDelete(id) }} />
     if (cross?.id === id) {
       return (
         <CrossConfirm
@@ -193,7 +207,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
       ? <p className="pm-side-error" role="alert">{t('sidebar.action.failed', { detail: failure.detail })}</p>
       : null
   }
-  const isWaiting = (id: string) => busy === id || cross?.id === id
+  const isWaiting = (id: string) => busy === id || cross?.id === id || secretId === id
 
   // 会话快照冻结在插件本次加载之前 = 重启后还没重新带入
   const bootedAt = health.status === 'ready' ? health.data.bootedAt : undefined
@@ -230,22 +244,24 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
         ? (
           <section className="pm-side-section" aria-label={t('sidebar.saved.title')}>
             <h2 className="pm-side-title">{t('sidebar.saved.title')}</h2>
-            {saved.map(memory => (
-              <div key={memory.id} className="pm-side-saved">
-                <div className="pm-side-saved-card">{card(memory)}</div>
-                <button
-                  type="button"
-                  className="pm-side-delete"
-                  aria-label={t('sidebar.saved.delete')}
-                  title={t('sidebar.saved.delete')}
-                  aria-disabled={isWaiting(memory.id) || undefined}
-                  onClick={() => { if (!isWaiting(memory.id)) forget(memory.id) }}
-                >
-                  <TrashIcon />
-                </button>
-                {failed(memory.id)}
-              </div>
-            ))}
+            {saved.map(({ id, memory }) => memory === undefined
+              ? <p key={id} className="pm-side-hint">{t('pending.secret.deletedNotice')}</p>
+              : (
+                <div key={id} className="pm-side-saved">
+                  <div className="pm-side-saved-card">{card(memory)}</div>
+                  <button
+                    type="button"
+                    className="pm-side-delete"
+                    aria-label={t('sidebar.saved.delete')}
+                    title={t('sidebar.saved.delete')}
+                    aria-disabled={isWaiting(id) || undefined}
+                    onClick={() => { if (!isWaiting(id)) forget(id) }}
+                  >
+                    <TrashIcon />
+                  </button>
+                  {failed(id)}
+                </div>
+              ))}
           </section>
         )
         : null}
