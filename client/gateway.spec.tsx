@@ -76,6 +76,9 @@ describe('createHostGateway', () => {
   const sessions = list(summary('s1', { cwd: '/w/app', retainedBy: { mainView: 1 } }))
   let executed: string[]
   let resources: Record<string, ResourceSnapshot<WorkspaceFileStat>>
+  /** 假服务端的视图文件：refresh-views 写出 pending.json。 */
+  let files: Record<string, string>
+  const pendingPath = '/h/memories/.state/gui/pending.json'
 
   function fakeCtx(): HostContext {
     return {
@@ -86,6 +89,7 @@ describe('createHostGateway', () => {
         commands: {
           execute: vi.fn(async (_sid: string, line: string) => {
             executed.push(line)
+            if (line === '/memory refresh-views') files[pendingPath] = JSON.stringify(pending)
             const text = line.startsWith('/memory info')
               ? JSON.stringify({ ok: true, cmd: 'info', info: { memoryRoot: '/h/memories', viewDir: '/h/memories/.state/gui', views: { pending: '', health: '', library: '', deleted: '' }, version: GUI_VIEW_VERSION } })
               : JSON.stringify({ ok: true, cmd: line.split(' ')[1] })
@@ -93,7 +97,9 @@ describe('createHostGateway', () => {
           }),
         },
         workspaceFiles: {
-          read: vi.fn(async (_sid: string, path: string) => ({ ok: true as const, value: { absolutePath: path, version: 'v1', text: JSON.stringify(pending) } })),
+          read: vi.fn(async (_sid: string, path: string) => files[path] === undefined
+            ? { ok: false as const, error: { code: 'workspace-file/not-found', message: path } }
+            : { ok: true as const, value: { absolutePath: path, version: 'v1', text: files[path] } }),
         },
       },
     }
@@ -103,27 +109,37 @@ describe('createHostGateway', () => {
     useResource: (address: string) => resources[address] ?? { status: 'none' as const, value: undefined, failure: undefined },
   }
 
-  beforeEach(() => { executed = []; resources = {}; localStorage.clear() })
+  beforeEach(() => { executed = []; resources = {}; files = {}; localStorage.clear() })
   afterEach(() => { localStorage.clear() })
 
-  it('首次：借会话发 info，缓存 memoryRoot，再发一次 refresh-views；文件版本到了就读出视图', async () => {
-    const address = fileAddress('s1', '/h/memories/.state/gui/pending.json')
+  it('首次：借会话发 info，缓存 memoryRoot，再发一次 refresh-views；资源仍停在 not-found 也直接读出视图', async () => {
+    resources[fileAddress('s1', pendingPath)] = { status: 'failed', value: undefined, failure: { code: 'workspace-file/not-found', message: '' } }
+    const gateway = createHostGateway(fakeCtx())(props)
+    const { result } = renderHook(() => gateway.useView(gateway.useSession('/w/app'), 'pending'))
+    await waitFor(() => { expect(result.current).toEqual({ status: 'ready', data: pending }) })
+    expect(executed).toEqual(['/memory info', '/memory refresh-views'])
+    expect(localStorage.getItem(MEMORY_ROOT_KEY)).toBe('/h/memories')
+  })
+
+  it('文件缺失且刷新后仍读不到：missing；之后资源推来版本就按版本读', async () => {
+    localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+    const address = fileAddress('s1', '/h/memories/.state/gui/library.json')
     resources[address] = { status: 'failed', value: undefined, failure: { code: 'workspace-file/not-found', message: '' } }
     const gateway = createHostGateway(fakeCtx())(props)
-    const { result, rerender } = renderHook(() => gateway.useView(gateway.useSession('/w/app'), 'pending'))
-    await waitFor(() => { expect(executed).toEqual(['/memory info', '/memory refresh-views']) })
-    expect(localStorage.getItem(MEMORY_ROOT_KEY)).toBe('/h/memories')
+    const { result, rerender } = renderHook(() => gateway.useView(gateway.useSession('/w/app'), 'library'))
+    await waitFor(() => { expect(executed).toEqual(['/memory refresh-views']) })
     expect(result.current).toEqual({ status: 'missing' })
 
-    resources[address] = { status: 'live', value: { absolutePath: '/h/memories/.state/gui/pending.json', version: 'v1' }, failure: undefined }
+    files['/h/memories/.state/gui/library.json'] = JSON.stringify({ version: GUI_VIEW_VERSION + 1 })
+    resources[address] = { status: 'live', value: { absolutePath: 'x', version: 'v1' }, failure: undefined }
     rerender()
-    await waitFor(() => { expect(result.current).toEqual({ status: 'ready', data: pending }) })
-    expect(executed).toHaveLength(2)
+    await waitFor(() => { expect(result.current).toEqual({ status: 'outdated' }) })
   })
 
   it('localStorage 里已有 memoryRoot：不发命令直接订阅', async () => {
     localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
-    resources[fileAddress('s1', '/h/memories/.state/gui/pending.json')] = { status: 'live', value: { absolutePath: 'x', version: 'v2' }, failure: undefined }
+    resources[fileAddress('s1', pendingPath)] = { status: 'live', value: { absolutePath: 'x', version: 'v2' }, failure: undefined }
+    files[pendingPath] = JSON.stringify(pending)
     const gateway = createHostGateway(fakeCtx())(props)
     const { result } = renderHook(() => gateway.useView(gateway.useSession(undefined), 'pending'))
     await waitFor(() => { expect(result.current.status).toBe('ready') })

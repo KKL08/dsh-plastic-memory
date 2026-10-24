@@ -147,16 +147,17 @@ export function fileAddress(sessionId: string, path: string): string {
 
 export const MEMORY_ROOT_KEY = 'dsh-plastic-memory.gui.memoryRoot'
 
-interface RootState { memoryRoot?: string; error?: string }
+/** refreshes：refresh-views 成功的次数。文件资源起步就是 not-found 时，宿主在文件写出后未必再推一帧，靠它触发重读。 */
+interface RootState { memoryRoot?: string; error?: string; refreshes: number }
 
 type RunLine = (sessionId: string, line: string) => Promise<RemoteResult<CommandExecution | undefined>>
 
 /** memoryRoot：localStorage 有就用；没有就借会话发一次 info（并发请求合并成一条），再发一次 refresh-views。 */
 function createRootStore(run: RunLine) {
-  let state: RootState = {}
+  let state: RootState = { refreshes: 0 }
   try {
     const saved = localStorage.getItem(MEMORY_ROOT_KEY)
-    if (saved) state = { memoryRoot: saved }
+    if (saved) state = { ...state, memoryRoot: saved }
   } catch { /* 存储不可用：每次进入发一次 info */ }
   const listeners = new Set<() => void>()
   let infoInflight = false
@@ -173,10 +174,10 @@ function createRootStore(run: RunLine) {
         const result = decodeExecution('info', r)
         if (result.ok && result.info !== undefined) {
           try { localStorage.setItem(MEMORY_ROOT_KEY, result.info.memoryRoot) } catch { /* 只在本页生效 */ }
-          set({ memoryRoot: result.info.memoryRoot })
+          set({ ...state, memoryRoot: result.info.memoryRoot })
           store.ensureViews(sessionId)
         } else {
-          set({ error: result.ok ? 'info returned no paths' : (result.detail ?? result.code) })
+          set({ ...state, error: result.ok ? 'info returned no paths' : (result.detail ?? result.code) })
         }
       })
     },
@@ -184,13 +185,15 @@ function createRootStore(run: RunLine) {
     ensureViews(sessionId: string) {
       if (refreshed) return
       refreshed = true
-      void run(sessionId, encodeMemoryCommand({ cmd: 'refresh-views' }))
+      void run(sessionId, encodeMemoryCommand({ cmd: 'refresh-views' })).then((r) => {
+        if (decodeExecution('refresh-views', r).ok) set({ ...state, refreshes: state.refreshes + 1 })
+      })
     },
   }
   return store
 }
 
-interface ReadState<V> { key: string; view: ViewState<V> }
+interface ReadState<V> { key: string; trigger: string; view: ViewState<V> }
 
 /**
  * 宿主网关。共享状态（memoryRoot）在外层闭包里，每个插槽根组件用自己的标准 props 绑定一份：
@@ -234,23 +237,28 @@ export function createHostGateway(ctx: HostContext): (props: RootStandardProps) 
       const isMissing = stat.status === 'failed' && stat.failure?.code === 'workspace-file/not-found'
       useEffect(() => { if (sessionId !== undefined && isMissing) root.ensureViews(sessionId) }, [sessionId, isMissing])
       const key = `${sessionId}\0${path}`
+      // 有版本按版本读；资源还停在 not-found、但 refresh-views 已写过文件时，按刷新次数直接读一次
+      const trigger = version ?? (isMissing && rootState.refreshes > 0 ? `refresh:${rootState.refreshes}` : undefined)
       const [read, setRead] = useState<ReadState<ViewMap[typeof name]> | undefined>(undefined)
       useEffect(() => {
-        if (sessionId === undefined || path === undefined || version === undefined) return
+        if (sessionId === undefined || path === undefined || trigger === undefined) return
         let live = true
         void ctx.remote.workspaceFiles.read(sessionId, path, {}).then((r) => {
           if (!live) return
-          setRead({ key, view: r.ok ? parseView(name, r.value.text) : { status: 'error', message: `${r.error.code}: ${r.error.message}` } })
-        }, (err: unknown) => { if (live) setRead({ key, view: { status: 'error', message: String(err) } }) })
+          const view: ViewState<ViewMap[typeof name]> = r.ok
+            ? parseView(name, r.value.text)
+            : r.error.code === 'workspace-file/not-found' ? { status: 'missing' } : { status: 'error', message: `${r.error.code}: ${r.error.message}` }
+          setRead({ key, trigger, view })
+        }, (err: unknown) => { if (live) setRead({ key, trigger, view: { status: 'error', message: String(err) } }) })
         return () => { live = false }
-      }, [sessionId, path, version, key, name])
+      }, [sessionId, path, trigger, key, name])
 
       if (sessionId === undefined) return { status: 'idle' }
       if (rootState.error !== undefined) return { status: 'error', message: rootState.error }
       if (stat.status === 'failed') {
-        return isMissing
-          ? { status: 'missing' }
-          : { status: 'error', message: `${stat.failure?.code}: ${stat.failure?.message}` }
+        if (!isMissing) return { status: 'error', message: `${stat.failure?.code}: ${stat.failure?.message}` }
+        // 只认这次刷新触发的读：文件删掉后不拿旧内容顶上
+        return read !== undefined && read.key === key && read.trigger === trigger ? read.view : { status: 'missing' }
       }
       // 同一文件的新版本还在读时先留着旧内容
       return read !== undefined && read.key === key ? read.view : { status: 'loading' }
