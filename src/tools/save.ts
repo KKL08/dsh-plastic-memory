@@ -21,6 +21,8 @@ export interface SaveToolDeps {
   resolveContext(exec: ToolRunContext): Promise<SaveContext>
   /** update global 目标前拍快照用（快照先行）；生产接线传入已有实例，测试可缺省。 */
   snapshots?: SnapshotStore
+  /** 新建成功后调用（会话视图的「这次对话新记的」，接线在 index.ts）。 */
+  onSaved?: (sessionId: string, memoryId: string) => void
 }
 
 /** 把管线结果渲染成给模型看的一段文本。纯函数。 */
@@ -61,7 +63,7 @@ export async function executeSave(
 ): Promise<PipelineResult> {
   const context = await deps.resolveContext(exec)
   const candidate: SaveCandidate = { ...args, tags: args.tags ?? [] } // 可选参数归一化
-  return runSavePipeline(candidate, {
+  const result = await runSavePipeline(candidate, {
     store: deps.store,
     registry: deps.registry,
     // 无条件传真实 workspace 上下文：pipeline 要靠它判断 global 是否降级为候选（scope=global 时
@@ -70,4 +72,6 @@ export async function executeSave(
     session: context.session,
     snapshots: deps.snapshots,
   })
+  if (result.kind === 'saved') deps.onSaved?.(context.session.id, result.record.id)
+  return result
 }

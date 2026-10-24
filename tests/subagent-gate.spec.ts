@@ -69,7 +69,7 @@ async function boot() {
   }
   const memoryRoot = await makeTmp()
   const cwd = await makeTmp() // resolveWorkspacePath 走 realpath，cwd 必须真实存在
-  await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+  await apply(ctx as never, new Config({ memoryRoot } as never))
 
   const session = (delegationDepth?: number) => ({
     header: { id: delegationDepth === undefined ? 'sess-main' : `sess-d${delegationDepth}`, cwd, ...(delegationDepth === undefined ? {} : { delegationDepth }) },

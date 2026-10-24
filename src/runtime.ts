@@ -73,6 +73,8 @@ export class SnapshotCache {
   private cache = new WeakMap<object, { text: string; generation: number }>()
   /** 每次 markStale 加一（缺省 0）。构建开始时记下代次，写缓存前核对：中途被标过期的构建结果不进缓存。 */
   private generations = new WeakMap<object, number>()
+  /** 全体代次：每次 markAllStale 加一，计入每个会话的代次。 */
+  private epoch = 0
   /** 值为 undefined 表示"已解析、无工作目录"（无 cwd 或目录已不存在）；键不存在表示"还没解析完" */
   private workspacePaths = new WeakMap<object, string | undefined>()
   /** 已计过召回的 session。语义是"每会话计一次"：markStale 不清它，同一 session 多次
@@ -137,18 +139,25 @@ export class SnapshotCache {
     }
   }
 
+  /** 会话的当前代次：本会话的 markStale 次数加全体的 markAllStale 次数。 */
+  private generationOf(session: object): number {
+    return (this.generations.get(session) ?? 0) + this.epoch
+  }
+
   private async build(session: object): Promise<string> {
-    const generation = this.generations.get(session) ?? 0
+    const generation = this.generationOf(session)
     const cached = this.cache.get(session)
     if (cached && cached.generation === generation) return cached.text
     const isResolved = this.workspacePaths.has(session)
     const workspacePath = isResolved ? this.workspacePaths.get(session) : undefined
+    // 上限、超限处理、溯源档位可能是用时读配置的 getter：一次构建只取一次值，组装与冻结后的超限同步用同一份
+    const deps = { ...this.deps }
     // 预读范围：只读 active，global + 当前 workspace（未解析时 global-only）；同一次读取的隔离文件数给冷启动文案用
     const now = Date.now()
-    const { text, coreIds, ...usage } = assembleSnapshot({ ...this.deps, ...(await prereadSnapshot(this.deps.store, workspacePath)), workspacePath, now })
+    const { text, coreIds, ...usage } = assembleSnapshot({ ...deps, ...(await prereadSnapshot(deps.store, workspacePath)), workspacePath, now })
     if (!isResolved) return text
     // 构建期间被标过期：这份文本只给本次用，不进缓存、不计召回，下一次中间件按新代次重建
-    if ((this.generations.get(session) ?? 0) !== generation) return text
+    if (this.generationOf(session) !== generation) return text
     // 同代次的并发构建：先落定的那份为准，保证冻结内容一致
     const landed = this.cache.get(session)
     if (landed && landed.generation === generation) return landed.text
@@ -163,14 +172,14 @@ export class SnapshotCache {
     } catch (err) {
       ;(this.deps.log ?? console).error('[plastic-memory] 记忆目录维护失败:', err)
     }
-    await this.afterFreeze(session, workspacePath, now, usage)
+    await this.afterFreeze(deps, session, workspacePath, now, usage)
     return text
   }
 
   /** 冻结之后：同步超限提醒、交出会话视图的原料。都是旁路，失败只记日志。 */
-  private async afterFreeze(session: object, workspacePath: string | undefined, now: number, usage: SnapshotUsage): Promise<void> {
-    const { budget, overflowLedger, onFrozen } = this.deps
-    const mode = this.deps.overflow ?? 'relax'
+  private async afterFreeze(deps: SnapshotCacheDeps, session: object, workspacePath: string | undefined, now: number, usage: SnapshotUsage): Promise<void> {
+    const { budget, overflowLedger, onFrozen } = deps
+    const mode = deps.overflow ?? 'relax'
     let overflowChanged = false
     try {
       if (overflowLedger) {
@@ -198,6 +207,11 @@ export class SnapshotCache {
   /** compaction 结束：标记过期，不清空缓存（provider 继续回旧快照），也不清召回记录。 */
   markStale(session: object): void {
     this.generations.set(session, (this.generations.get(session) ?? 0) + 1)
+  }
+
+  /** 配置热更新：所有会话一起标过期（会话按 WeakMap 存、无法枚举，改为抬全体代次），语义同 markStale。 */
+  markAllStale(): void {
+    this.epoch++
   }
 }
 

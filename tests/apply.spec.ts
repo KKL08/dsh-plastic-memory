@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { fakeExec } from './helpers/exec.ts'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { TurnBoundaryProjection } from '@deepseek-ai/dsh-agent'
@@ -33,6 +33,8 @@ import {
   type MemorySnapshot, type PendingDecision, type ScanCacheEntry,
 } from '../src/governance/schema.ts'
 import { baselineProjectionDefinition } from '../src/governance/baseline.ts'
+import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
+import { GUI_VIEW_DIR, GUI_VIEW_FILES, sessionViewFile, sessionViewSchema } from '../src/gui/contract.ts'
 
 /** 宿主 storageDomain 表的替身（@deepseek-ai/dsh-storage-domain KvTable 的形状）：读同步、写异步。 */
 class HostKvTable<T = unknown> {
@@ -86,7 +88,7 @@ function mockCtx(opts: { projections?: SessionProjectionRegistry; registerProjec
   }
   return {
     registered, contexts, contextDefs, variables, listeners, llmRequests, llmScript, tables, domain,
-    tools: { register: (def: { name: string }) => { registered.push(def.name); return () => {} } },
+    tools: { register: (def: { name: string }) => { registered.push(def.name); return () => { registered.splice(registered.indexOf(def.name), 1) } } },
     systemPrompt: {
       context: (c: (typeof contextDefs)[number]) => { contexts.push(c.name); contextDefs.push(c); return () => {} },
       variable: (name: string, provider: (assembleCtx: AssembleContext) => string | undefined) => { variables.set(name, provider); return () => {} },
@@ -146,7 +148,7 @@ describe('apply', () => {
   it('治理默认开启：注册九个工具和一个 runtime context', async () => {
     const ctx = mockCtx()
     const memoryRoot = await makeTmpRoot()
-    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    await apply(ctx as never, new Config({ memoryRoot } as never))
     expect(ctx.registered.sort()).toEqual([
       'memory_confirm', 'memory_forget', 'memory_health', 'memory_promote',
       'memory_save', 'memory_scan', 'memory_search', 'memory_snapshot', 'memory_source',
@@ -163,16 +165,16 @@ describe('apply', () => {
     // 没有恢复入口的话 14 天保留窗口的快照就是死存储。
     const ctx = mockCtx()
     const memoryRoot = await makeTmpRoot()
-    const config = new Config({ memoryRoot, governance: { enabled: false, onWrite: false } } as unknown as Config)
+    const config = new Config({ memoryRoot, governance: { enabled: false, onWrite: false } } as never)
     await apply(ctx as never, config)
     expect(ctx.registered.sort()).toEqual(['memory_forget', 'memory_save', 'memory_search', 'memory_snapshot', 'memory_source'])
   })
 
-  it('监听 session/created、session/event 与 system-prompt/assemble（首轮竞态等待）', async () => {
+  it('监听 session/created、session/event、system-prompt/assemble（首轮竞态等待）与 loader/volatile-update（配置热生效）', async () => {
     const ctx = mockCtx()
     const memoryRoot = await makeTmpRoot()
-    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
-    expect([...ctx.listeners.keys()].sort()).toEqual(['session/created', 'session/event', 'system-prompt/assemble'])
+    await apply(ctx as never, new Config({ memoryRoot } as never))
+    expect([...ctx.listeners.keys()].sort()).toEqual(['loader/volatile-update', 'session/created', 'session/event', 'system-prompt/assemble'])
   })
 
   it('Fix 1 回归：ctx.get 对任意服务名抛错也不拖垮插件加载，九个工具照常注册', async () => {
@@ -181,7 +183,7 @@ describe('apply', () => {
     // get() 逼近 cordis 行为，钉住"服务解析失败/抛错不能让 apply() 整体失败"这条回归。
     const ctx = mockCtxWithThrowingGet()
     const memoryRoot = await makeTmpRoot()
-    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    await apply(ctx as never, new Config({ memoryRoot } as never))
     expect(ctx.registered.sort()).toEqual([
       'memory_confirm', 'memory_forget', 'memory_health', 'memory_promote',
       'memory_save', 'memory_scan', 'memory_search', 'memory_snapshot', 'memory_source',
@@ -194,7 +196,7 @@ describe('apply', () => {
     const defs = new Map<string, ToolDef>()
     const ctx = { ...mockCtx(), tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } } }
     const memoryRoot = await makeTmpRoot()
-    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    await apply(ctx as never, new Config({ memoryRoot } as never))
     await mkdir(join(memoryRoot, 'global'), { recursive: true })   // 加载期零 I/O：global/ 由首次写或外部建
     await writeFile(join(memoryRoot, 'global', 'external.md'),
       encodeRecord(record({ id: 'mem_ext', content: '外部落盘的记忆 zebra' }), {}), 'utf8')
@@ -210,7 +212,7 @@ describe('apply', () => {
     const config = new Config({
       memoryRoot,
       customTypes: { profile: { label: 'x', description: 'x', whenToSave: 'x', recall: 'core', decayDays: 90, governancePriority: 'low' } },
-    } as unknown as Config)
+    } as never)
     // 该用例在 buildTypeRegistry 阶段就抛错，FileTable 根本没构造——传 memoryRoot 只是
     // 确保就算未来实现顺序调整，也不会有路径意外落到默认值指向的真实 ~/.dsh/memories。
     await expect(apply(mockCtx() as never, config)).rejects.toThrow(TypeRegistryError)
@@ -225,7 +227,7 @@ describe('apply', () => {
     await writeFile(join(memoryRoot, 'global', 'broken.md'), '这是一段没有 frontmatter 的纯文本\n', 'utf8')
     await writeFile(join(memoryRoot, 'global', 'good.md'),
       encodeRecord(record({ id: 'mem_good', content: '坏文件旁边的好记忆 zebra' }), {}), 'utf8')
-    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    await apply(ctx as never, new Config({ memoryRoot } as never))
     expect([...defs.keys()].sort()).toEqual([
       'memory_confirm', 'memory_forget', 'memory_health', 'memory_promote',
       'memory_save', 'memory_scan', 'memory_search', 'memory_snapshot', 'memory_source',
@@ -239,6 +241,13 @@ describe('apply', () => {
   })
 })
 
+/** 启动时那遍视图写入是旁路（不 await）：等四个全局视图都落盘，免得它和用例的后续写入、afterEach 的清理交错。 */
+async function startupViews(memoryRoot: string): Promise<void> {
+  await vi.waitFor(async () => {
+    for (const file of Object.values(GUI_VIEW_FILES)) await stat(join(memoryRoot, GUI_VIEW_DIR, file))
+  })
+}
+
 /** GUI 半侧的服务端接线：commands 服务在时注册 /memory 命令处理器，缺席时静默跳过；加载期都不碰磁盘。 */
 describe('GUI 命令接线', () => {
   type CommandDef = { name: string; handler(inv: { rawInput: string; agent: unknown }): Promise<{ kind: string; text?: string }> }
@@ -246,7 +255,8 @@ describe('GUI 命令接线', () => {
     const memoryRoot = await makeTmpRoot()
     const defs: CommandDef[] = []
     const ctx = mockCtx({ commands: { register: (def) => { defs.push(def as CommandDef); return () => {} } } })
-    await apply({ ...ctx, logger: { info() {}, warn() {}, error() {} } } as never, new Config({ memoryRoot } as unknown as Config))
+    await apply({ ...ctx, logger: { info() {}, warn() {}, error() {} } } as never, new Config({ memoryRoot } as never))
+    await startupViews(memoryRoot)
     // 借来的会话：没有 cwd（只有 global 可见），会话 id 来自 header
     const agent = { session: { header: { id: 'sess-x' }, seq: 1 } }
     const exec = async (line: string) => {
@@ -256,10 +266,10 @@ describe('GUI 命令接线', () => {
     return { memoryRoot, defs, exec }
   }
 
-  it('宿主有 commands：注册一条 memory 命令，加载时不写 .state/', async () => {
+  it('宿主有 commands：注册一条 memory 命令；启动后不等调用就写一遍全局视图（首次打开记忆页要有内容）', async () => {
     const { memoryRoot, defs } = await withCommands()
     expect(defs.map(d => d.name)).toEqual(['memory'])
-    await expect(stat(join(memoryRoot, '.state'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(JSON.parse(await readFile(join(memoryRoot, GUI_VIEW_DIR, GUI_VIEW_FILES.pending), 'utf8'))).toMatchObject({ items: [] })
   })
 
   it('执行回调：info 返回配置的 memoryRoot 与该会话的视图路径', async () => {
@@ -292,7 +302,7 @@ describe('GUI 命令接线', () => {
 
   it('宿主没有 commands（旧宿主）：apply 照常完成，不注册、不写 .state/', async () => {
     const memoryRoot = await makeTmpRoot()
-    await apply(mockCtx() as never, new Config({ memoryRoot } as unknown as Config))
+    await apply(mockCtx() as never, new Config({ memoryRoot } as never))
     await expect(stat(join(memoryRoot, '.state'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 })
@@ -329,7 +339,7 @@ describe('侧表与旧 KV 导入接线', () => {
     await mkdir(join(memoryRoot, 'global'), { recursive: true })
     await writeFile(join(memoryRoot, 'global', 'a.md'), encodeRecord(record({ id: 'mem_a' }), {}), 'utf8')
     const base = mockCtx({ storageDomain: true })
-    await apply(withTools(base).ctx as never, new Config({ memoryRoot } as unknown as Config))
+    await apply(withTools(base).ctx as never, new Config({ memoryRoot } as never))
     await expect(stat(join(memoryRoot, STATE_DIR))).rejects.toMatchObject({ code: 'ENOENT' })
     expect(base.domain.opens).toBe(0)
   })
@@ -344,7 +354,7 @@ describe('侧表与旧 KV 导入接线', () => {
     await kv('recall_stats').put('mem_a', { id: 'mem_a', recallCount: 3, lastRecalledAt: 1 })
     await kv('scan_cache').put('cache_all', { id: 'cache_all', scannedAt: 1, scope: 'all', findings: [] })
     const { ctx, defs } = withTools(base)
-    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    await apply(ctx as never, new Config({ memoryRoot } as never))
 
     const out = await defs.get('memory_snapshot')!.execute({ action: 'list' }, fakeExec()) as { snapshots: Array<{ id: string }> }
     expect(out.snapshots.map(s => s.id)).toEqual(['snap_old'])
@@ -366,7 +376,7 @@ describe('侧表与旧 KV 导入接线', () => {
     base.tables.set('snapshots', new HostKvTable())
     await base.tables.get('snapshots')!.put('snap_old', snap('snap_old'))
     const { ctx, defs } = withTools(base)
-    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    await apply(ctx as never, new Config({ memoryRoot } as never))
     const out = await defs.get('memory_snapshot')!.execute({ action: 'list' }, fakeExec()) as { snapshots: unknown[] }
     expect(out.snapshots).toEqual([])
     expect(base.domain.opens).toBe(0)
@@ -376,7 +386,7 @@ describe('侧表与旧 KV 导入接线', () => {
     const memoryRoot = await makeTmpRoot()
     const base = mockCtx()
     const { ctx, defs } = withTools(base)
-    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    await apply(ctx as never, new Config({ memoryRoot } as never))
     expect([...defs.keys()].sort()).toEqual([
       'memory_confirm', 'memory_forget', 'memory_health', 'memory_promote',
       'memory_save', 'memory_scan', 'memory_search', 'memory_snapshot', 'memory_source',
@@ -391,7 +401,7 @@ describe('侧表与旧 KV 导入接线', () => {
     await mkdir(join(memoryRoot, 'global'), { recursive: true })
     await writeFile(join(memoryRoot, 'global', 'a.md'), encodeRecord(record({ id: 'mem_a', content: '斑马 zebra' }), {}), 'utf8')
     const { ctx, defs } = withTools(mockCtx())
-    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    await apply(ctx as never, new Config({ memoryRoot } as never))
     await defs.get('memory_search')!.execute({ query: 'zebra' }, fakeExec())
     expect(await sidecarAt(memoryRoot).recallStats.get('mem_a')).toMatchObject({ recallCount: 1 })
   })
@@ -406,7 +416,7 @@ describe('快照 {{ 转义接线', () => {
   it('apply 注册 plastic_memory_lbrace 变量，provider 返回 {{', async () => {
     const ctx = mockCtx()
     const memoryRoot = await makeTmpRoot()
-    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    await apply(ctx as never, new Config({ memoryRoot } as never))
     const provider = ctx.variables.get(PROMPT_LBRACE_VARIABLE)
     expect(provider).toBeDefined()
     expect(provider!({})).toBe('{{')
@@ -427,7 +437,7 @@ describe('快照 {{ 转义接线', () => {
     }), {}), 'utf8')
 
     const ctx = mockCtx()
-    const config = new Config({ memoryRoot } as unknown as Config)
+    const config = new Config({ memoryRoot } as never)
     await apply(ctx as never, config)
 
     const session = { header: { id: 'sess-1', cwd } }
@@ -449,9 +459,9 @@ describe('快照 {{ 转义接线', () => {
     const fileTable = new FileTable({ root: memoryRoot, stats: new InMemoryKvTable() })
     const expected = assembleSnapshot({
       records: await new MemoryStore(fileTable).query({ scope: { kind: 'visible', workspacePath } }),
-      registry: buildTypeRegistry(config),
-      workspacePath, budget: config.snapshotTokenBudget, now: Date.now(),
-      memoryRoot, evidenceLookup: config.evidenceLookup,
+      registry: buildTypeRegistry({ template: config.template.get(), customTypes: config.customTypes.get() }),
+      workspacePath, budget: config.snapshotTokenBudget.get(), now: Date.now(),
+      memoryRoot, evidenceLookup: config.evidenceLookup.get(),
     }).text
     expect(expected).toContain(content)
     expect(text.replaceAll(`{{${PROMPT_LBRACE_VARIABLE}}}`, '')).not.toContain('{{')
@@ -474,7 +484,7 @@ describe('注入链接线', () => {
     await mkdir(join(memoryRoot, 'global'), { recursive: true })
     await writeFile(join(memoryRoot, 'global', 'old.md'),
       encodeRecord(record({ id: 'mem_old', type: 'preference', content: '压缩前就有的偏好' }), {}), 'utf8')
-    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    await apply(ctx as never, new Config({ memoryRoot } as never))
 
     const session = { header: { id: 'sess-1' } } // 无 cwd：解析落定为"无工作目录"，走正常冻结路径
     const assembleCtx = { scope: { session } } as unknown as AssembleContext
@@ -522,7 +532,7 @@ describe('语义扫描请求形状', () => {
       logger: { info() {}, warn() {}, error() {} },
     }
     const memoryRoot = await makeTmpRoot()
-    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    await apply(ctx as never, new Config({ memoryRoot } as never))
     const cwd = await makeTmpRoot()
     const session = { header: { id: 'sess-1', cwd }, seq: 0, requestHeader: () => undefined }
     const exec = fakeExec({
@@ -568,7 +578,7 @@ describe('语义扫描请求形状', () => {
     ]
     base.llmScript.push(brokenStream(), brokenStream())
 
-    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    await apply(ctx as never, new Config({ memoryRoot } as never))
     const session = { header: { id: 'sess-1', cwd }, seq: 0, requestHeader: () => undefined }
     const exec = fakeExec({
       agent: { session, options: { provider: 'deepseek', model: 'deepseek-chat' } } as unknown as ToolRunContext['agent'],
@@ -594,7 +604,7 @@ describe('语义扫描请求形状', () => {
       { type: 'finish', reason: { kind: 'aborted', failure: { code: 'ABORTED', message: 'request aborted' } } },
     ])
     const memoryRoot = await makeTmpRoot()
-    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    await apply(ctx as never, new Config({ memoryRoot } as never))
     const cwd = await makeTmpRoot()
     const session = { header: { id: 'sess-1', cwd }, seq: 0, requestHeader: () => undefined }
     const exec = fakeExec({
@@ -629,7 +639,7 @@ describe('证据锚：读 turnBoundary 投影', () => {
       logger: { info() {}, warn: (msg: string) => { warnings.push(msg) }, error() {} },
     }
     const memoryRoot = await makeTmpRoot()
-    await apply(ctx as never, new Config({ memoryRoot } as unknown as Config))
+    await apply(ctx as never, new Config({ memoryRoot } as never))
     const cwd = await makeTmpRoot() // 会话 cwd 必须真实存在（resolveWorkspacePath 走 realpath）
     const session = (seq: number) => ({ header: { id: 'sess-1', cwd }, seq, requestHeader: () => undefined })
     const save = async (s: ReturnType<typeof session>, name = 'anchor'): Promise<[number, number]> => {
@@ -746,7 +756,7 @@ describe('AGENTS.md 基线：读 plasticMemoryBaseline 投影', () => {
       logger: { info() {}, warn: (msg: string) => { warnings.push(msg) }, error() {} },
     }
     const warnings: string[] = []
-    await apply(ctx as never, new Config({ memoryRoot: await makeTmpRoot() } as unknown as Config))
+    await apply(ctx as never, new Config({ memoryRoot: await makeTmpRoot() } as never))
     const scan = async (session: object, args: object) => await defs.get('memory_scan')!.execute(args, fakeExec({
       agent: { session, options: { provider: 'deepseek', model: 'deepseek-chat' } } as unknown as ToolRunContext['agent'],
     })) as ScanOut
@@ -866,5 +876,181 @@ describe('AGENTS.md 基线：读 plasticMemoryBaseline 投影', () => {
     expect(baselineWarnings).toHaveLength(1)
     expect(baselineWarnings[0]).toContain(session.header.id)
     expect(baselineWarnings[0]).toContain('log unreadable')
+  })
+})
+
+/**
+ * 配置热生效：宿主 Loader 只把 volatile 字段的新值写进运行中的引用、再向本插件发一次 loader/volatile-update
+ * （载荷是变化路径的键数组），不重挂插件。这里用 commitVolatile 当 Loader 的替身，其余全走 apply 注册出来的真实接线。
+ */
+describe('配置热生效（loader/volatile-update）', () => {
+  type ToolDef = { name: string; description: string; parameters: { properties: Record<string, { enum?: string[] }> }; execute(args: unknown, exec: unknown): Promise<unknown> }
+  type CommandDef = { name: string; handler(inv: { rawInput: string; agent: unknown }): Promise<{ kind: string; text?: string }> }
+  const VOLATILE_WRITE = Symbol.for('cosmokit.volatile.write')
+  const GOVERNANCE_TOOLS = ['memory_confirm', 'memory_health', 'memory_promote', 'memory_scan']
+  const regulation = { label: '合规要求', description: '行业法规', whenToSave: '出现合规要求时', recall: 'core', decayDays: null, governancePriority: 'high' }
+
+  /** Loader 替身：按 schema 校验候选配置，值变了的 volatile 引用写入新值，返回变化路径（等值不报）。 */
+  function commitVolatile(config: Config, raw: object): string[][] {
+    const next = new Config(raw as never)
+    const paths: string[][] = []
+    const visit = (current: unknown, candidate: unknown, path: string[]) => {
+      if (typeof current !== 'object' || current === null) return
+      if (VOLATILE_WRITE in current) {
+        const ref = current as unknown as { get(): unknown; [VOLATILE_WRITE](v: unknown): void }
+        const value = (candidate as { get(): unknown }).get()
+        if (JSON.stringify(ref.get()) === JSON.stringify(value)) return
+        ref[VOLATILE_WRITE](value)
+        paths.push(path)
+        return
+      }
+      for (const [key, child] of Object.entries(current)) visit(child, (candidate as Record<string, unknown>)[key], [...path, key])
+    }
+    visit(config, next, [])
+    return paths
+  }
+
+  async function setup(raw: object = {}) {
+    const memoryRoot = await makeTmpRoot()
+    const workDir = await realpath(await makeTmpRoot())
+    const defs = new Map<string, ToolDef>()
+    const commands: CommandDef[] = []
+    const base = mockCtx({ commands: { register: def => { commands.push(def as CommandDef); return () => {} } } })
+    const ctx = {
+      ...base,
+      logger: { info() {}, warn() {}, error() {} },
+      // 同名重复注册在宿主里直接抛错：重注册必须先注销
+      tools: {
+        register: (def: ToolDef) => {
+          if (defs.has(def.name)) throw new Error(`tool "${def.name}" already registered`)
+          defs.set(def.name, def)
+          return () => { defs.delete(def.name) }
+        },
+      },
+    }
+    const config = new Config({ memoryRoot, ...raw } as never)
+    await apply(ctx as never, config)
+    await startupViews(memoryRoot)
+
+    const session = { header: { id: 'sess-hot', cwd: workDir }, seq: 3 }
+    const assembleCtx = { scope: { session } } as unknown as AssembleContext
+    const def = ctx.contextDefs.find(c => c.name === 'plastic-memory')!
+    const assembleOnce = async () => {
+      const assembly: PromptAssembly = { sections: [], contexts: [{ name: 'plastic-memory', text: def.text(assembleCtx) }], tools: [], variables: {} }
+      await ctx.listeners.get('system-prompt/assemble')!(assembly, assembleCtx, async () => assembly)
+      return assembly.contexts[0]!.text
+    }
+    /** 改配置并发事件；监听器返回的 promise（含视图重写）等它跑完。 */
+    const update = async (next: object) => {
+      const paths = commitVolatile(config, { memoryRoot, ...next })
+      await ctx.listeners.get('loader/volatile-update')!(paths)
+      return paths
+    }
+    const tool = (name: string) => defs.get(name)!
+    const exec = fakeExec({ agent: { session, options: {} } } as never)
+    const save = (args: object) => tool('memory_save').execute(
+      { action: 'create', scope: 'workspace', summary: '摘要', sourceMode: 'user-explicit', ...args }, exec) as Promise<{ kind: string; code?: string; record?: { id: string } }>
+    const command = async (line: string) => {
+      const r = await commands[0]!.handler({ rawInput: line.slice('/memory'.length), agent: { session } })
+      return { kind: r.kind, body: JSON.parse(r.text!) as Record<string, unknown> }
+    }
+    const sessionViewPath = join(memoryRoot, GUI_VIEW_DIR, sessionViewFile('sess-hot'))
+    /** 会话视图是旁路写入：等它满足条件。 */
+    const sessionView = (check: (v: ReturnType<typeof sessionViewSchema.parse>) => void) =>
+      vi.waitFor(async () => {
+        const v = sessionViewSchema.parse(JSON.parse(await readFile(sessionViewPath, 'utf8')))
+        check(v)
+        return v
+      })
+    const putGlobal = async (r: Parameters<typeof record>[0]) => {
+      await mkdir(join(memoryRoot, 'global'), { recursive: true })
+      await writeFile(join(memoryRoot, 'global', `${r!.id}.md`), encodeRecord(record(r), {}), 'utf8')
+    }
+    return { memoryRoot, defs, config, assembleOnce, update, tool, save, command, sessionView, putGlobal }
+  }
+
+  it('改上限、超限处理、溯源档位后，同一会话下一次组装就按新值（不等压缩）', async () => {
+    const t = await setup()
+    await t.putGlobal({ id: 'mem_k', type: 'knowledge', name: '报销截止', content: '报销截止每月 25 日', summary: '报销截止日' })
+    const first = await t.assembleOnce()
+    expect(first).toContain(EVIDENCE_GUIDANCE.strict)
+    expect(first).toContain('mem_k')
+    await t.sessionView(v => expect(v).toMatchObject({ budget: 4000, overflowMode: 'relax', injectedIds: ['mem_k'], omittedCount: 0 }))
+    expect(await t.assembleOnce()).toBe(first) // 没改配置：冻结快照不动
+
+    const paths = await t.update({ snapshotTokenBudget: 1.5, snapshotOverflow: 'strict', evidenceLookup: 'active' })
+    expect(paths).toEqual([['snapshotTokenBudget'], ['snapshotOverflow'], ['evidenceLookup']])
+    const second = await t.assembleOnce()
+    expect(second).toContain(EVIDENCE_GUIDANCE.active)
+    expect(second).not.toContain(EVIDENCE_GUIDANCE.strict)
+    expect(second).not.toContain('- [mem_k]') // 严格按 1.5 token 的上限：这条装不下
+    // 上限是 number（配置就是 number），会话视图原样带出
+    await t.sessionView(v => expect(v).toMatchObject({ budget: 1.5, overflowMode: 'strict', injectedIds: [], omittedCount: 1 }))
+  })
+
+  it('改模板与自定义类型：memory_save 重注册（类型枚举重算），写时只认新模板，带入按新类型定义', async () => {
+    const t = await setup()
+    await t.putGlobal({ id: 'mem_reg', type: 'regulation', content: '数据出境要先过安全评估', summary: '数据出境' })
+    const saveDef = t.tool('memory_save')
+    expect(saveDef.parameters.properties.type!.enum).toContain('procedure')
+    expect(saveDef.parameters.properties.type!.enum).not.toContain('regulation')
+    expect(await t.assembleOnce()).not.toContain('【记忆·合规要求】')
+    await expect(t.save({ type: 'regulation', name: '合规', content: '某条合规' })).rejects.toThrow(/type/) // 宿主按枚举校验参数
+
+    expect(await t.update({ template: 'office', customTypes: { regulation } })).toEqual([['template'], ['customTypes']])
+    const resaved = t.tool('memory_save')
+    expect(resaved).not.toBe(saveDef)
+    expect(resaved.parameters.properties.type!.enum).toEqual(expect.arrayContaining(['decision', 'commitment', 'person', 'regulation']))
+    expect(resaved.parameters.properties.type!.enum).not.toContain('procedure')
+    expect(resaved.description).toContain('regulation（合规要求）')
+    // 自定义类型是常驻（core）：下一次组装就以完整正文带入；旧模板独有类型的记忆照常带入，分组名不退化
+    await t.putGlobal({ id: 'mem_proc', type: 'procedure', name: '发版流程', summary: '发版步骤' })
+    const switched = await t.assembleOnce()
+    expect(switched).toContain('【记忆·合规要求】数据出境要先过安全评估')
+    expect(switched).toContain('## 可复用流程（procedure）\n- [mem_proc] 发版流程（发版步骤）')
+    await expect(t.save({ type: 'procedure', name: '流程', content: '旧模板的类型' })).rejects.toThrow(/type/)
+    expect(await t.save({ type: 'decision', name: '定了用 A', content: '周会定了选型用 A 方案' })).toMatchObject({ kind: 'saved' })
+  })
+
+  it('关闭体检：四个治理工具注销、治理类子命令返回 governance-disabled、其余照常；重开后恢复，记忆不变', async () => {
+    const t = await setup()
+    await t.putGlobal({ id: 'mem_keep', content: '一直都在的记忆' })
+    const before = await readFile(join(t.memoryRoot, 'global', 'mem_keep.md'), 'utf8')
+    expect([...t.defs.keys()]).toEqual(expect.arrayContaining(GOVERNANCE_TOOLS))
+
+    expect(await t.update({ governance: { enabled: false } })).toEqual([['governance', 'enabled']])
+    expect([...t.defs.keys()].sort()).toEqual(['memory_forget', 'memory_save', 'memory_search', 'memory_snapshot', 'memory_source'])
+    for (const line of [
+      '/memory resolve {"decisionId":"pd_x","verdict":"keep-left"}', '/memory undo {"decisionId":"pd_x"}',
+      '/memory promote {"decisionId":"pd_x","target":"global"}', '/memory keep-local {"decisionId":"pd_x"}',
+      '/memory scan', '/memory dismiss-overflow {"decisionId":"pd_x"}',
+    ]) {
+      expect(await t.command(line)).toMatchObject({ kind: 'error', body: { ok: false, code: 'governance-disabled' } })
+    }
+    expect((await t.command('/memory info')).body).toMatchObject({ ok: true, cmd: 'info' })
+    expect((await t.command('/memory refresh-views')).body).toEqual({ ok: true, cmd: 'refresh-views' })
+    expect((await t.command('/memory restore {"memoryId":"mem_keep"}')).body).toMatchObject({ ok: false, code: 'not-found' })
+
+    await t.update({ governance: { enabled: true } })
+    expect([...t.defs.keys()]).toEqual(expect.arrayContaining(GOVERNANCE_TOOLS))
+    expect((await t.command('/memory resolve {"decisionId":"pd_x","verdict":"keep-left"}')).body).toMatchObject({ ok: false, code: 'not-found' })
+    expect(await readFile(join(t.memoryRoot, 'global', 'mem_keep.md'), 'utf8')).toBe(before)
+  })
+
+  it('配置热更新之后重写一遍全局视图', async () => {
+    const t = await setup()
+    await rm(join(t.memoryRoot, GUI_VIEW_DIR), { recursive: true })
+    await t.update({ governance: { health: { sensitivity: 'proactive' } } })
+    for (const file of Object.values(GUI_VIEW_FILES)) await stat(join(t.memoryRoot, GUI_VIEW_DIR, file))
+  })
+
+  it('快照冻结写该会话的视图；这次对话 memory_save 新记的 id 追加进去', async () => {
+    const t = await setup()
+    await t.putGlobal({ id: 'mem_p', type: 'preference', content: '测试里不要 mock 数据库' })
+    await t.assembleOnce()
+    const frozen = await t.sessionView(v => expect(v).toMatchObject({ sessionId: 'sess-hot', injectedIds: ['mem_p'], savedIds: [] }))
+    const saved = await t.save({ type: 'project', name: '冻结到 3 月', content: 'merge freeze 到 3 月 5 日' })
+    expect(saved.kind).toBe('saved')
+    await t.sessionView(v => expect(v).toEqual({ ...frozen, savedIds: [saved.record!.id] }))
   })
 })
