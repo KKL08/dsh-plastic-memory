@@ -4,6 +4,7 @@
  */
 
 import { composerEn, composerZh } from './locales/composer.ts'
+import { libraryEn, libraryZh } from './locales/library.ts'
 
 /** 宿主 locale 命名空间，和面板 id 同名。 */
 export const NS = 'plastic-memory'
@@ -75,6 +76,7 @@ export const zh = {
   'settings.readOnly': '当前配置是只读的，改不了。',
   'settings.unavailable': '宿主暂时没有提供这份配置。',
   ...composerZh,
+  ...libraryZh,
 } as const
 
 export type LocaleKey = keyof typeof zh
@@ -146,4 +148,5 @@ export const en: Record<LocaleKey, string> = {
   'settings.readOnly': 'These settings are read-only.',
   'settings.unavailable': 'The host is not serving these settings right now.',
   ...composerEn,
+  ...libraryEn,
 }

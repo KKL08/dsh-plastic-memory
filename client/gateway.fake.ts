@@ -12,11 +12,15 @@ export interface FakeGatewayInit {
   views?: { [N in ViewName]?: ViewMap[N] | ViewState<ViewMap[N]> }
   /** 命令的返回；缺省一律 `{ ok: true, cmd }`。 */
   respond?: (command: MemoryCommand) => MemoryCommandResult
+  /** openPath 的返回；缺省 true。 */
+  openOk?: boolean
 }
 
 export interface FakeGateway extends MemoryGateway {
   /** 发出过的命令，按顺序。 */
   readonly executed: Array<{ sessionId: string; command: MemoryCommand }>
+  /** openPath 调用，按顺序。 */
+  readonly opened: Array<{ path: string; action?: 'reveal' }>
   /** 每次 useSession 被问到的作用域（最近一次在最后）。 */
   readonly sessionRequests: Array<string | undefined>
   setSession(session: BorrowedSession): void
@@ -44,9 +48,11 @@ export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
 
   const executed: FakeGateway['executed'] = []
   const sessionRequests: FakeGateway['sessionRequests'] = []
+  const opened: FakeGateway['opened'] = []
 
   return {
     executed,
+    opened,
     sessionRequests,
     setSession(next) { session = next; bump() },
     setCurrentWorkspace(path) { currentWorkspace = path; bump() },
@@ -68,6 +74,10 @@ export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
     async execute(sessionId, command) {
       executed.push({ sessionId, command })
       return init.respond?.(command) ?? { ok: true, cmd: command.cmd }
+    },
+    async openPath(path, action) {
+      opened.push(action === undefined ? { path } : { path, action })
+      return init.openOk ?? true
     },
   }
 }

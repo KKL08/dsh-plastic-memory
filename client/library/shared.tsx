@@ -1,0 +1,136 @@
+/**
+ * 「全部记忆」「最近删除」共用的几件小东西：视图没就绪时的一行说明、带参数打开时的目标行高亮、
+ * 跨项目标记、行尾动作的进行中 / 结果提示。
+ */
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import type { MemoryCard, MemoryCommand } from '../../src/gui/contract.ts'
+import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
+import { useT } from '../i18n.tsx'
+import { useNavTarget, type NavStore, type NavTarget } from '../nav.ts'
+
+/** 视图不是 ready 时的一行说明；idle（没有会话）由页面壳的空态负责，这里不画。 */
+export function ViewMessage({ state }: { state: Exclude<ViewState<unknown>, { status: 'ready' }> }) {
+  const t = useT()
+  if (state.status === 'idle') return null
+  const text = state.status === 'error' ? t('view.error', { message: state.message }) : t(`view.${state.status}`)
+  return <p className="pm-tab-message">{text}</p>
+}
+
+/**
+ * 导航目标带 memoryId 且这一行在列表里时，高亮它一次并滚入视野。按目标对象认「一次」：
+ * 视图刷新不重播，入口再导航一次（新目标）会重播。
+ */
+export function useFlashTarget(nav: NavStore, ids: readonly string[]): { flashId: string | undefined; clear: () => void } {
+  const target = useNavTarget(nav)
+  const present = target.memoryId !== undefined && ids.includes(target.memoryId)
+  const handled = useRef<NavTarget | undefined>(undefined)
+  const [flashId, setFlashId] = useState<string | undefined>(undefined)
+  useEffect(() => {
+    if (!present || handled.current === target) return
+    handled.current = target
+    setFlashId(target.memoryId)
+  }, [target, present])
+  return { flashId, clear: () => { setFlashId(undefined) } }
+}
+
+/** 高亮动画时长：播完收起高亮类，下次导航到同一条才能重播。 */
+export const FLASH_MS = 1800
+
+/** 高亮行：开始高亮时滚入视野，FLASH_MS 后回调收起。 */
+export function FlashRow({ flashing, onFlashEnd, className, children }: {
+  flashing: boolean
+  onFlashEnd: () => void
+  className: string
+  children: ReactNode
+}) {
+  const ref = useRef<HTMLLIElement>(null)
+  const end = useRef(onFlashEnd)
+  end.current = onFlashEnd
+  useEffect(() => {
+    if (!flashing) return
+    ref.current?.scrollIntoView?.({ block: 'center' })
+    const timer = setTimeout(() => { end.current() }, FLASH_MS)
+    return () => { clearTimeout(timer) }
+  }, [flashing])
+  return (
+    <li ref={ref} className={flashing ? `${className} pm-flash` : className}>
+      {children}
+    </li>
+  )
+}
+
+function samePath(a: string | undefined, b: string | undefined): boolean {
+  return a !== undefined && b !== undefined && a.replace(/[\\/]+$/, '') === b.replace(/[\\/]+$/, '')
+}
+
+/** 项目记忆不在借来的会话所在项目里时，命令要带 allowCrossWorkspace：用户在页面上点的就是这一条。 */
+export function crossWorkspace(memory: MemoryCard, session: BorrowedSession): { allowCrossWorkspace?: true } {
+  if (memory.scope !== 'workspace' || session.kind !== 'ready') return {}
+  return samePath(memory.workspacePath, session.cwd) ? {} : { allowCrossWorkspace: true }
+}
+
+export type Notice = { kind: 'ok'; text: string; memoryId: string } | { kind: 'error'; text: string }
+
+/** 行尾动作：进行中的记忆 id 和最近一次结果。命令失败显示宿主或执行器的原话。 */
+export function useRowActions(session: BorrowedSession) {
+  const t = useT()
+  const gateway = useGateway()
+  const [busy, setBusy] = useState<ReadonlySet<string>>(new Set())
+  const [notice, setNotice] = useState<Notice | undefined>(undefined)
+  const sessionId = session.kind === 'ready' ? session.sessionId : undefined
+  const mark = (id: string, on: boolean) => {
+    setBusy((prev) => {
+      const next = new Set(prev)
+      if (on) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
+  return {
+    notice,
+    /** 按钮的 unavailable：没有会话或这条正在处理时给原因。 */
+    unavailable(id: string, needsSession = true): string | undefined {
+      if (needsSession && sessionId === undefined) return t('session.none.hint')
+      return busy.has(id) ? t('action.busy') : undefined
+    },
+    async run(memoryId: string, command: MemoryCommand, okText: (result: { decisionId?: string }) => string) {
+      if (sessionId === undefined) return
+      mark(memoryId, true)
+      const result = await gateway.execute(sessionId, command)
+      mark(memoryId, false)
+      setNotice(result.ok
+        ? { kind: 'ok', text: okText(result), memoryId }
+        : { kind: 'error', text: t('action.failed', { detail: result.detail ?? result.code }) })
+    },
+    async open(path: string, action?: 'reveal') {
+      if (!(await gateway.openPath(path, action))) setNotice({ kind: 'error', text: t('action.openFailed') })
+    },
+  }
+}
+
+export const sharedTabCss = `
+.pm-tab-message { margin: 24px 0; text-align: center; font-size: 12px; color: var(--pm-text-2); }
+.pm-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
+.pm-link {
+  padding: 0; border: 0; background: transparent; font: inherit; color: var(--pm-text); cursor: pointer;
+}
+.pm-link:hover { text-decoration: underline; }
+.pm-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.pm-list-row {
+  position: relative; display: flex; align-items: flex-start; gap: 12px;
+  padding: 12px 12px 12px 16px; border-radius: 10px;
+}
+.pm-list-row + .pm-list-row::after {
+  content: ''; position: absolute; left: 16px; right: 12px; top: 0; border-top: .5px solid var(--pm-line);
+}
+.pm-list-row > .pm-mc { flex: 1; }
+.pm-row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; flex-shrink: 0; }
+.pm-row-actions .pm-btn { padding: 2px 10px; font-size: 12px; }
+.pm-flash { animation: pm-flash ${FLASH_MS}ms ease-out both; }
+.pm-flash::before {
+  content: ''; position: absolute; left: 4px; top: 9px; bottom: 9px; width: 2px; border-radius: 2px;
+  background: var(--pm-accent); animation: pm-flash-bar ${FLASH_MS}ms ease-out both;
+}
+@keyframes pm-flash { 0%, 60% { background: var(--pm-accent-tint); } 100% { background: transparent; } }
+@keyframes pm-flash-bar { 0%, 60% { opacity: 1; } 100% { opacity: 0; } }
+`

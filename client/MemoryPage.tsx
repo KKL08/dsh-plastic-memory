@@ -9,6 +9,9 @@ import { useGateway, type ViewState } from './gateway.ts'
 import { baseName, formatNumber, useT, type Translate } from './i18n.tsx'
 import { MEMORY_TABS, useNavTarget, type MemoryTab, type NavStore } from './nav.ts'
 import { EmptyState } from './ui/EmptyState.tsx'
+import { DeletedTab, deletedTabCss } from './deleted/DeletedTab.tsx'
+import { LibraryTab, libraryTabCss } from './library/LibraryTab.tsx'
+import { sharedTabCss } from './library/shared.tsx'
 import { SegmentedTabs, type SegmentedTab } from './ui/Segmented.tsx'
 
 const TAB_LABEL = { pending: 'tab.pending', library: 'tab.library', health: 'tab.health', deleted: 'tab.deleted' } as const
@@ -81,7 +84,11 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
           <>
             <SegmentedTabs label={t('tabs.label')} items={items} value={target.tab} onChange={(tab) => { nav.update({ tab, memoryId: undefined }) }} />
             <div role="tabpanel" id={`${tabsId}-${target.tab}-panel`} aria-labelledby={`${tabsId}-${target.tab}`} className="pm-page-panel">
-              <p className="pm-page-placeholder">{t('page.placeholder')}</p>
+              {target.tab === 'library'
+                ? <LibraryTab nav={nav} scope={scope} session={session} />
+                : target.tab === 'deleted'
+                  ? <DeletedTab nav={nav} scope={scope} session={session} />
+                  : <p className="pm-page-placeholder">{t('page.placeholder')}</p>}
             </div>
           </>
         )}
@@ -170,4 +177,4 @@ export const memoryPageCss = `
 .pm-scope-option:hover { background: var(--pm-hover); }
 .pm-scope-option[aria-selected='true'] { font-weight: 600; }
 @media (max-width: 560px) { .pm-page { padding: 16px; } }
-`
+` + sharedTabCss + libraryTabCss + deletedTabCss
