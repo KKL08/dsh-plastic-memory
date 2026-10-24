@@ -35,18 +35,19 @@ All notable changes to this project are documented here. The format follows
 - An amber dot on the left-nav icon when something waits for your decision; a
   red mark when a secret was found. Nothing lights up for warnings you cannot
   act on.
-- New setting `snapshotOverflow` (`relax`, the default, or `strict`). With
-  `relax` all memories are still injected when they exceed
-  `snapshotTokenBudget`; the budget is relaxed in 25 % steps and each step is
-  reported once on the memory page, with a shortcut to raise the limit or
-  dismiss. With `strict` the index lines are cut at the budget and the page
-  says how many memories were left out.
 - `pnpm host:contract` now also checks the shipped browser bundle: the
   package declares `dsh.client`, the host's module loader can load
   `lib/client.js`, and both locale files ship. CI fails when the bundle is
   missing from the package.
 
 ### Changed
+- Memories that exceed `snapshotTokenBudget` are no longer cut from the
+  injected index by default. The new setting `snapshotOverflow` defaults to
+  `relax`: everything is still injected, the budget is relaxed in 25 % steps
+  and each step is reported once on the memory page, with a shortcut to raise
+  the limit or dismiss. Set it to `strict` to keep the previous behaviour, in
+  which the index lines stop at the budget; the page then says how many
+  memories were left out.
 - Settings changed in the GUI or in `cordis.patch.yml` now apply to running
   conversations at their next step: a new budget or source-lookup level is
   used the next time memories are assembled, a template or custom-type change
