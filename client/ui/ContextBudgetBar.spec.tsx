@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, screen } from '@testing-library/react'
-import { ContextBudgetBar, relaxedCap } from './ContextBudgetBar.tsx'
+import { barScale, ContextBudgetBar, relaxedCap } from './ContextBudgetBar.tsx'
 import { renderInShell } from '../test-utils.tsx'
 
 const widths = (container: HTMLElement) =>
@@ -13,6 +13,15 @@ describe('relaxedCap', () => {
     expect(relaxedCap(4001, 4000)).toBe(5000)
     expect(relaxedCap(5000, 4000)).toBe(5000)
     expect(relaxedCap(5200, 4000)).toBe(6000)
+  })
+})
+
+describe('barScale', () => {
+  it('满格 = 按计入上限的用量放宽到的档，三段之和更大时取三段之和', () => {
+    expect(barScale(3120, 3120, 4000)).toBe(4000)
+    expect(barScale(5000, 4500, 4000)).toBe(5000)
+    expect(barScale(4100, 3900, 4000)).toBe(4100)
+    expect(barScale(0, 0, 0)).toBe(1)
   })
 })
 
@@ -39,6 +48,8 @@ describe('ContextBudgetBar', () => {
     expect(screen.getByText('40 条 · 约 4,100 / 4,000')).toBeInTheDocument()
     expect(screen.getByText('全部带入')).toBeInTheDocument()
     expect(container.querySelector('.pm-budget-limit')).toBeNull()
+    // 满格取三段之和，三段不溢出条外
+    expect(widths(container).reduce((sum, w) => sum + parseFloat(w), 0)).toBeCloseTo(100)
   })
 
   it('严格模式装不下：写没带入的条数，「处理 ›」回调', () => {

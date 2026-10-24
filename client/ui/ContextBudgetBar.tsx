@@ -23,12 +23,21 @@ export function relaxedCap(total: number, budget: number): number {
   return budget * (1 + 0.25 * Math.ceil((total - budget) / (budget * 0.25)))
 }
 
+/**
+ * 用量条满格的刻度：按计入上限的用量（limited）放宽到的档；三段之和（used，含固定说明）更大时取三段之和，三段不溢出条外。
+ * 记忆页右侧栏的用量条和输入框弹层的三段条共用。
+ */
+export function barScale(used: number, limited: number, budget: number): number {
+  return Math.max(relaxedCap(limited, budget), used, 1)
+}
+
 export function ContextBudgetBar({ count, budget, tokens, limitTokens, droppedCount = 0, onHandle }: ContextBudgetBarProps) {
   const t = useT()
   const used = tokens.workspace + tokens.global + tokens.fixed
   const limited = limitTokens ?? used
-  const cap = Math.max(relaxedCap(limited, budget), 1)
-  const pct = (n: number) => `${(n / cap) * 100}%`
+  const cap = relaxedCap(limited, budget)
+  const scale = barScale(used, limited, budget)
+  const pct = (n: number) => `${(n / scale) * 100}%`
   const relaxed = limited > budget && droppedCount === 0
   return (
     <div className="pm-budget">

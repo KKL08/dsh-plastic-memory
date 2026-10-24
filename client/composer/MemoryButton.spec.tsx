@@ -62,7 +62,7 @@ describe('显示条件', () => {
 })
 
 describe('弹层数字', () => {
-  it('有投影：占比按快照 usedTokens / contextWindow，带约已用 / 上限、三段和条数', () => {
+  it('有投影：占比按三段之和 / contextWindow，带约已用 / 上限、三段和条数', () => {
     setup({ view: sessionView(), pressure: { pressureTokens: 50_000, contextWindow: 128_000 } })
     const dialog = openPanel()
     expect(dialog).toHaveTextContent('记忆占上下文2%') // 3,120 / 128,000 ≈ 2.4%，按宿主取整
@@ -72,6 +72,13 @@ describe('弹层数字', () => {
     expect(dialog).toHaveTextContent('固定说明约 200')
     expect(dialog).toHaveTextContent('带入 2 条 · 这次新记 1 条')
     expect(dialog).not.toHaveTextContent('处理 ›')
+  })
+
+  it('占比与「约已用」的分子都是三段之和（和用量条同一口径），不是计入上限的 usedTokens', () => {
+    setup({ view: sessionView({ usedTokens: 2920 }), pressure: { contextWindow: 10_000 } })
+    const dialog = openPanel()
+    expect(dialog).toHaveTextContent('记忆占上下文31%') // 3,120 / 10,000；按 usedTokens 会是 29%
+    expect(dialog).toHaveTextContent('约 3,120 / 上限 4,000')
   })
 
   it('读不到投影：只写约已用 / 上限，不写百分比', () => {
