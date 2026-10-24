@@ -44,9 +44,10 @@ function samePath(a: string | undefined, b: string): boolean {
   return a !== undefined && a.replace(/[\\/]+$/, '') === b.replace(/[\\/]+$/, '')
 }
 
-function typeLabel(t: Translate, type: string): string {
+/** 内置类型按界面语言写；其余（自定义、切模板前的旧类型）取待处理视图的 typeLabels，再认不出写 id。 */
+function typeLabel(t: Translate, type: string, labels: Readonly<Record<string, string>> | undefined): string {
   const key = `sidebar.type.${type}`
-  return key in sidebarZh ? t(key as LocaleKey) : type
+  return key in sidebarZh ? t(key as LocaleKey) : labels?.[type] ?? type
 }
 
 /** 待处理条目是否属于这个项目。 */
@@ -115,6 +116,8 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const conflicts = pending.status === 'ready'
     ? pending.data.items.filter((item): item is Conflict => item.kind === 'conflict-horizontal')
     : []
+  const labels = pending.status === 'ready' ? pending.data.typeLabels : undefined
+  const label = (type: string) => typeLabel(t, type, labels)
   const ruledIds = new Set(ruled.map(r => r.decisionId))
   const inline = new Set<string>()
   const shown = new Set<string>()
@@ -149,7 +152,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     : pending.data.items.filter(item => inWorkspace(item, ws) && !('decisionId' in item && (inline.has(item.decisionId) || ruledIds.has(item.decisionId)))).length
   const now = Date.now()
   const card = (memory: MemoryCardData, chip?: ReactNode) => (
-    <MemoryCard memory={memory} now={now} typeLabel={typeLabel(t, memory.type)} hideScope={memory.scope === 'workspace'} chip={chip} />
+    <MemoryCard memory={memory} now={now} typeLabel={label(memory.type)} hideScope={memory.scope === 'workspace'} chip={chip} />
   )
   const failed = (id: string) => (failure?.id === id
     ? <p className="pm-side-error" role="alert">{t('sidebar.action.failed', { detail: failure.detail })}</p>
@@ -215,9 +218,9 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
           <section className="pm-side-section" aria-label={t('sidebar.groups.title')}>
             <h2 className="pm-side-title">{t('sidebar.groups.title')}</h2>
             {[...groups].map(([type, entries]) => (
-              <section key={type} className="pm-side-group" aria-label={typeLabel(t, type)}>
+              <section key={type} className="pm-side-group" aria-label={label(type)}>
                 <h3 className="pm-side-group-title">
-                  {typeLabel(t, type)}{' '}
+                  {label(type)}{' '}
                   <span className="pm-side-group-count">{formatNumber(counts.get(type) ?? 0)}</span>
                 </h3>
                 {entries.map((entry) => {
@@ -231,7 +234,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
                           left={item.left}
                           right={item.right}
                           now={now}
-                          typeLabel={type => typeLabel(t, type)}
+                          typeLabel={label}
                           hideScope={item.left?.scope !== 'global' && item.right?.scope !== 'global'}
                           unavailable={busy === item.decisionId ? t('sidebar.action.busy') : undefined}
                           onRule={(verdict) => { rule(item, verdict) }}

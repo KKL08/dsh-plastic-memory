@@ -1,7 +1,7 @@
 // 「全部记忆」tab：对假网关断言渲染出什么、每个动作发出了哪条命令或宿主调用。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, screen, within } from '@testing-library/react'
-import { GUI_VIEW_VERSION, type LibraryView } from '../../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
 import type { BorrowedSession } from '../gateway.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createNavStore } from '../nav.ts'
@@ -37,6 +37,13 @@ describe('全部记忆', () => {
     expect(screen.getByText('2 条记忆，每条一个文件')).toBeInTheDocument()
     expect(screen.getByText('/m/app-1')).toBeInTheDocument()
     expect(screen.getByText(/MEMORY\.md 是插件生成的索引，手改会被覆盖。/)).toHaveTextContent('agent 需要细节时再读文件')
+  })
+
+  it('类型写显示名（待处理视图的 typeLabels）；认不出的类型写 id', () => {
+    const view = library({ layers: [{ layer: app, items: [memory({ id: 'a1' }), memory({ id: 'a2', type: 'mystery', content: '提交前跑 typecheck' })] }] })
+    const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], typeLabels: { preference: '行为偏好' } }
+    renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: view, pending } }))
+    expect(screen.getAllByRole('listitem').map(li => li.querySelector('.pm-mc-meta span')?.textContent)).toEqual(['行为偏好', 'mystery'])
   })
 
   it('目录问题来自视图，灰色一行一条，路径相对存储目录', () => {

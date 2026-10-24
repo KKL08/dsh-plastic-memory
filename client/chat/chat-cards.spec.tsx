@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { ComponentType } from 'react'
+import { GUI_VIEW_VERSION } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createHostGateway } from '../gateway.ts'
 import type { SessionListState } from '../host.ts'
@@ -151,6 +152,12 @@ describe('交付卡', () => {
     fireEvent.click(screen.getByRole('button', { name: '撤销' }))
     expect(await screen.findByText('测试不 mock 数据库')).toBeInTheDocument()
     expect(gateway.executed.at(-1)).toEqual({ sessionId: 's1', command: { cmd: 'restore', memoryId: 'mem_1' } })
+  })
+
+  it('记忆卡的类型写显示名（待处理视图的 typeLabels）', () => {
+    const gateway = createFakeGateway({ views: { pending: { version: GUI_VIEW_VERSION, dot: 'none', items: [], typeLabels: { preference: '行为偏好' } } } })
+    const { container } = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} deleted={new Set()} />, gateway)
+    expect(container.querySelector('.pm-mc-meta')).toHaveTextContent(/^行为偏好/)
   })
 
   it('删除失败时原文还在，旁边写服务端原话', async () => {

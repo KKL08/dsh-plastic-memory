@@ -9,7 +9,7 @@ import type { NavStore } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
-import { crossWorkspace, FlashRow, useFlashTarget, useRowActions, ViewMessage } from './shared.tsx'
+import { crossWorkspace, FlashRow, useFlashTarget, useRowActions, useTypeLabel, ViewMessage } from './shared.tsx'
 
 function sameLayer(a: GuiLayerRef, b: GuiLayerRef): boolean {
   return a.kind === b.kind && (a.kind === 'global' || (b.kind === 'workspace' && a.workspacePath === b.workspacePath))
@@ -56,6 +56,7 @@ export function LibraryTab({ nav, scope, session, now = Date.now() }: {
   const items = view.status === 'ready' ? view.data.layers.find(l => sameLayer(l.layer, scope))?.items ?? [] : []
   const { flashId, clear } = useFlashTarget(nav, items.map(m => m.id))
   const actions = useRowActions(session)
+  const typeLabel = useTypeLabel(session)
   if (view.status !== 'ready') return <ViewMessage state={view} />
 
   const data = view.data
@@ -113,7 +114,7 @@ export function LibraryTab({ nav, scope, session, now = Date.now() }: {
           <ul className="pm-list">
             {items.map(memory => (
               <FlashRow key={memory.id} className="pm-list-row" flashing={flashId === memory.id} onFlashEnd={clear}>
-                <MemoryCard memory={memory} now={now} hideScope />
+                <MemoryCard memory={memory} now={now} typeLabel={typeLabel(memory.type)} hideScope />
                 <div className="pm-row-actions">
                   <Button onClick={() => { void actions.open(memory.filePath) }}>{t('library.openFile')}</Button>
                   <Button onClick={() => { void actions.open(memory.filePath, 'reveal') }}>{t('library.reveal')}</Button>
