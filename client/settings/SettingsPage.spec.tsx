@@ -12,7 +12,7 @@ import { summarize } from './StatusCard.tsx'
 
 const t = createTranslator(zh)
 
-const library = (count: number, memoryRoot = '/Users/me/.dsh/memories'): LibraryView => ({
+const library = (count: number, memoryRoot = '/home/me/.dsh/memories'): LibraryView => ({
   version: GUI_VIEW_VERSION, memoryRoot, directoryIssues: [],
   layers: [{ layer: { kind: 'global' }, items: Array.from({ length: count }, (_, i) => memory({ id: `m${i}` })) }],
 })
@@ -76,7 +76,7 @@ describe('三组设置的渲染', () => {
     expect(screen.getByText(/插件不再管理这些内容/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '查看最近删除 ›' }))
     expect(onOpen).toHaveBeenCalledWith('deleted')
-    expect(screen.getByText('/Users/me/.dsh/memories')).toBeInTheDocument()
+    expect(screen.getByText('/home/me/.dsh/memories')).toBeInTheDocument()
     expect(screen.queryByRole('textbox', { name: '记忆文件位置' })).toBeNull()
   })
 
