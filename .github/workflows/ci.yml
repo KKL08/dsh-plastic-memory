@@ -29,7 +29,10 @@ jobs:
       - name: Published files stay on the whitelist
         run: |
           pnpm pack --dry-run 2>&1 | tee pack.log
-          if grep -E '^\s*(src|tests|docs|e2e)/' pack.log; then echo 'unexpected files in the package'; exit 1; fi
+          if grep -E '^\s*(src|tests|client|docs|e2e)/' pack.log; then echo 'unexpected files in the package'; exit 1; fi
+          for f in lib/index.js lib/client.js locale/en.json locale/zh.json cordis.patch.yml; do
+            grep -Eq "^\s*$f\s*$" pack.log || { echo "missing from the package: $f"; exit 1; }
+          done
       - run: scripts/check-no-local-paths.sh
       - name: Cache the pinned dsh host
         uses: actions/cache@v4
