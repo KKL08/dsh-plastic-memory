@@ -28,6 +28,8 @@ All notable changes to this project are documented here. The format follows
   and what is waiting. Saving writes the same `cordis.patch.yml` the YAML
   path uses and takes effect without a restart. Hosts without the plugin
   manager page keep the YAML path.
+- A whale-tail icon for the plugin on the host's plugin page, in place of the
+  generic placeholder.
 - A card under each turn in which the model saved a memory (with a delete
   button and a link to the memory page), a one-line summary on every memory
   tool call, and a 「记忆」 button next to the composer showing the share of

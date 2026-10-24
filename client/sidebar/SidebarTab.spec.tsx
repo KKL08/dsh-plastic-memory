@@ -104,9 +104,9 @@ describe('SidebarTab 四种状态', () => {
   })
 
   it('自定义类型的分组标题写注册表显示名（待处理视图的 typeLabels）', () => {
-    const note = memory({ id: 'n1', type: 'meeting-note', content: '周会改到周四。' })
-    setup({ library: library(note), session: snapshot({ injectedIds: ['n1'] }), pending: { ...pending(), typeLabels: { 'meeting-note': '会议纪要' } } })
-    expect(within(screen.getByRole('region', { name: '带入的记忆' })).getByRole('heading', { name: '会议纪要 1' })).toBeInTheDocument()
+    const note = memory({ id: 'n1', type: 'domain-term', content: '「灰度」指先放给一小部分用户。' })
+    setup({ library: library(note), session: snapshot({ injectedIds: ['n1'] }), pending: { ...pending(), typeLabels: { 'domain-term': '术语' } } })
+    expect(within(screen.getByRole('region', { name: '带入的记忆' })).getByRole('heading', { name: '术语 1' })).toBeInTheDocument()
   })
 
   it('会话视图还没有（这次对话没组装过快照）：说明发出第一条消息后才有', () => {

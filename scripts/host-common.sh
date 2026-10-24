@@ -64,6 +64,7 @@ host_stage_and_pack() {
   host_run build-client node "$REPO/scripts/build-client.ts" --outfile "$STAGE/lib/client.js"
   host_run stage-files cp "$REPO/cordis.patch.yml" "$REPO/README.md" "$STAGE/"
   host_run stage-locale cp -R "$REPO/locale" "$STAGE/"
+  host_run stage-icon sh -c 'mkdir -p "$2/assets" && cp "$1/assets/icon.svg" "$2/assets/"' _ "$REPO" "$STAGE"
   host_run stage node "$REPO/scripts/publish-shape.cjs" "$REPO/package.json" "$STAGE/package.json" "$@"
   host_run pack sh -c 'cd "$1" && npm pack --loglevel=error' _ "$STAGE"
   TGZ="$STAGE/$(ls -t "$STAGE"/*.tgz | head -n 1 | xargs basename)"
