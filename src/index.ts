@@ -138,6 +138,18 @@ export async function apply(ctx: Context, config: Config) {
         return {
           snapshots: [...domain.table('snapshots').entries()],
           pending: [...domain.table('pending_decisions').entries()],
+          // 导入完成后重新打开域，删掉这两张表的全部行
+          discard: async () => {
+            const again = await facility.open(memoryDomainSpec)
+            try {
+              for (const name of ['snapshots', 'pending_decisions'] as const) {
+                const table = again.table(name)
+                for (const key of [...table.keys()]) await table.delete(key)
+              }
+            } finally {
+              await again.close()
+            }
+          },
         }
       } finally {
         await domain.close()
