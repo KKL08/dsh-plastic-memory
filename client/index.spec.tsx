@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import type { ComponentType } from 'react'
 import { apply, inject } from './index.tsx'
-import type { HostContext, RootStandardProps, SessionListState } from './host.ts'
+import type { HostContext, RootStandardProps, SessionListState, SidebarHost } from './host.ts'
 import { createTranslator } from './i18n.tsx'
 import { en, NS, zh } from './locales.ts'
 import { PANEL_ID } from './nav.ts'
@@ -11,15 +11,17 @@ import { PANEL_ID } from './nav.ts'
 function setup() {
   const registered: Array<{ options: { name: string; id?: string; key?: string; label?: string | (() => string) }; component: ComponentType<never> }> = []
   const register = vi.fn()
-  const ctx: HostContext = {
+  const ctx: HostContext & SidebarHost = {
     inject: () => () => {},
     slots: {
       inject: (_name, fn) => { fn(); return () => {} },
       register: (options, component) => { registered.push({ options, component: component as ComponentType<never> }); return () => {} },
     },
     locale: { register, bind: () => createTranslator(zh) as (key: string) => string, getSnapshot: () => 0, subscribe: () => () => {} },
-    layout: { selectPanel: vi.fn() },
+    effect: (fn) => { fn() },
+    sidebarRightTabs: { register: vi.fn(() => () => {}) },
     sidebarRight: { openTab: vi.fn() },
+    layout: { selectPanel: vi.fn() },
     pluginNavigation: { openBundle: vi.fn() },
     remote: {
       commands: { execute: vi.fn(async () => ({ ok: false as const, error: { code: 'x', message: 'x' } })) },

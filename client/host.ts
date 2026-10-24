@@ -73,6 +73,25 @@ export interface SessionStandardProps extends RootStandardProps {
   useProjection: (key: 'contextPressure') => ContextPressureProjection | undefined
 }
 
+/** ui-sidebar-right 的 SidebarRightGuideEntry 子集（「开始」页入口）。 */
+export interface SidebarGuideEntry {
+  id: string
+  order: number
+  title: () => string
+  description?: () => string
+  icon?: ComponentType<{ size?: number | undefined; className?: string | undefined }>
+}
+
+/** ui-sidebar-right 的 SidebarRightTabDefinition 子集：页面类 tab（不认地址，按 kind 打开）。 */
+export interface SidebarTabDefinition {
+  /** 实现身份，也是正文与标题插槽的 key。 */
+  id: string
+  /** `openTab` 认的类型名。 */
+  kind: string
+  title: (address: string) => string
+  guide?: readonly SidebarGuideEntry[]
+}
+
 export interface SlotRegisterOptions {
   name: string
   id?: string
@@ -137,4 +156,18 @@ export interface HostContext {
   }
   /** 插件配置（profile 行 id 即 entryId）。 */
   configForms?: { get(entryId: string): ConfigForm }
+}
+
+/** 右侧栏 tab 用到的宿主服务（ui-sidebar-right）与 cordis effect。 */
+export interface SidebarHost {
+  /** cordis：登记一个随插件卸载而撤销的副作用。 */
+  effect(execute: () => () => void, label?: string): void
+  sidebarRightTabs: {
+    /** 静态登记 tab 类型；返回撤销函数。登记挂在宿主注册表自己的上下文上，所以调用方要包进自己的 effect。 */
+    register(definition: SidebarTabDefinition): () => void
+  }
+  sidebarRight: {
+    /** 在当前会话的右侧栏打开（或聚焦）一个页面类 tab；没有会话在屏幕上时抛错。 */
+    openTab(kind: string, options?: { params?: unknown }): void
+  }
 }

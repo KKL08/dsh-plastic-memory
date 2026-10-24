@@ -88,6 +88,9 @@ describe('lib/client.js 工厂格式', () => {
       },
       locale: { register: () => () => {}, bind: () => (key: string) => key, getSnapshot: () => 0, subscribe: () => () => {} },
       layout: { selectPanel: () => {} },
+      effect: (fn: () => unknown) => { fn() },
+      sidebarRightTabs: { register: () => () => {} },
+      sidebarRight: { openTab: () => {} },
     }
     plugin.apply(ctx)
     const icon = registered.find(r => r.name === 'sidebar.panellist')

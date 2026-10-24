@@ -6,18 +6,19 @@ import { useCallback, useMemo, useSyncExternalStore } from 'react'
 import { createComposerDock, DOCK_ID, DOCK_ORDER } from './composer/dock.tsx'
 import { registerChatCards } from './chat/index.tsx'
 import { createHostGateway } from './gateway.ts'
-import type { HostContext, HostLocale, RootStandardProps } from './host.ts'
+import type { HostContext, HostLocale, RootStandardProps, SidebarHost } from './host.ts'
 import type { Translate } from './i18n.tsx'
 import { en, NS, zh } from './locales.ts'
 import { healthCss } from './health/HealthTab.tsx'
 import { MemoryIcon } from './MemoryIcon.tsx'
 import { MemoryPage, memoryPageCss } from './MemoryPage.tsx'
 import { createNavStore, PANEL_ID, type NavStore } from './nav.ts'
+import { registerSidebarTab } from './sidebar/register.tsx'
 import { PanelShell } from './ui/PanelShell.tsx'
 
 export { PANEL_ID }
 
-export const inject = ['slots', 'locale', 'layout', 'sidebarRight', 'remote', 'remote.commands', 'remote.workspaceFiles', 'remote.session', 'pluginNavigation', 'configForms']
+export const inject = ['slots', 'locale', 'layout', 'sidebarRight', 'remote', 'remote.commands', 'remote.workspaceFiles', 'remote.session', 'pluginNavigation', 'configForms', 'sidebarRightTabs']
 
 /** npm 包名：宿主插件页按它打开本插件的详情（配置区在详情页里）。 */
 export const PACKAGE_NAME = 'dsh-plastic-memory'
@@ -45,7 +46,7 @@ function createMainPanel(ctx: HostContext, nav: NavStore) {
   }
 }
 
-export function apply(ctx: HostContext): void {
+export function apply(ctx: HostContext & SidebarHost): void {
   ctx.locale.register(NS, { zh, en })
   const t = ctx.locale.bind(NS)
   const nav = createNavStore(undefined, { openSettings: () => { ctx.pluginNavigation.openBundle(PACKAGE_NAME) } })
@@ -60,4 +61,5 @@ export function apply(ctx: HostContext): void {
   const Dock = createComposerDock(ctx, nav, createHostGateway(ctx), () => useHostTranslate(ctx.locale))
   ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({ name: 'conversation.composer.dock', id: DOCK_ID, order: DOCK_ORDER }, Dock))
   registerChatCards(ctx, nav)
+  registerSidebarTab(ctx, nav, () => useHostTranslate(ctx.locale))
 }

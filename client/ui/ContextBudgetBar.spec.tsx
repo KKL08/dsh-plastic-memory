@@ -34,6 +34,13 @@ describe('ContextBudgetBar', () => {
     expect(screen.getByText('已放宽到 5,000')).toBeInTheDocument()
   })
 
+  it('是否放宽按计入上限的用量算：固定说明把三段之和顶过上限时不算放宽', () => {
+    const { container } = renderInShell(<ContextBudgetBar count={40} budget={4000} tokens={{ workspace: 2900, global: 1000, fixed: 200 }} limitTokens={3900} />)
+    expect(screen.getByText('40 条 · 约 4,100 / 4,000')).toBeInTheDocument()
+    expect(screen.getByText('全部带入')).toBeInTheDocument()
+    expect(container.querySelector('.pm-budget-limit')).toBeNull()
+  })
+
   it('严格模式装不下：写没带入的条数，「处理 ›」回调', () => {
     const onHandle = vi.fn()
     renderInShell(<ContextBudgetBar count={40} budget={4000} tokens={{ workspace: 2800, global: 1000, fixed: 200 }} droppedCount={3} onHandle={onHandle} />)

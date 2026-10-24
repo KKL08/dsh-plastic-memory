@@ -4,7 +4,7 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import type { ComponentType } from 'react'
 import { GUI_VIEW_VERSION, type SessionView } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
-import type { ContextPressureProjection, HostContext, SessionStandardProps } from '../host.ts'
+import type { ContextPressureProjection, HostContext, SessionStandardProps, SidebarHost } from '../host.ts'
 import { createTranslator } from '../i18n.tsx'
 import { apply, inject } from '../index.tsx'
 import { zh } from '../locales.ts'
@@ -129,8 +129,10 @@ describe('跳转', () => {
 describe('注册', () => {
   it('apply 在 conversation.composer.dock 注册按钮，依赖 sidebarRight', () => {
     const registered: Array<{ options: { name: string; id?: string; order?: number }; component: ComponentType<never> }> = []
-    const ctx: HostContext = {
+    const ctx: HostContext & SidebarHost = {
       inject: () => () => {},
+      effect: (fn) => { fn() },
+      sidebarRightTabs: { register: vi.fn(() => () => {}) },
       slots: {
         inject: (_name, fn) => { fn(); return () => {} },
         register: (options, component) => { registered.push({ options, component: component as ComponentType<never> }); return () => {} },
