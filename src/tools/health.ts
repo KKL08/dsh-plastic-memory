@@ -2,7 +2,7 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryStore } from '../store.ts'
 import type { HealthRecommendationKind } from '../contract-codes.ts'
 import type { TypeRegistry } from '../type-registry.ts'
-import type { PendingDecisionsStore } from '../governance/decisions.ts'
+import { overflowLevelOf, overflowScopeOf, type PendingDecisionsStore } from '../governance/decisions.ts'
 import type { KvTable } from '../kv-table.ts'
 import type { ScanCacheEntry } from '../governance/schema.ts'
 import { FINDING_TYPES } from '../governance/schema.ts'
@@ -60,6 +60,8 @@ export interface SingleHealthResult {
   promoteCandidates: number
   /** workspace 视图下 global 层检出的疑似密钥条数——不计本层分数，但必须报警。 */
   globalSecretAlert: number
+  /** 本层会话带入的记忆超出上限（含已忽略的）：列为问题、不扣分。没超为 null。summary 是账本里的说明。 */
+  overflow: { mode: 'relax' | 'strict'; tier: number; summary: string } | null
   recommendation: string
   /** recommendation 的结构化对应：独占层单元素、行动项层多元素（按代码顺序）、无事为空数组。 */
   recommendationKinds: HealthRecommendationKind[]
@@ -129,6 +131,7 @@ export function renderHealthResult(result: HealthToolResult): string {
     + `语义层扣分 ${breakdown.semanticLayer.penalty}（conflict ${breakdown.semanticLayer.conflict} / redundancy ${breakdown.semanticLayer.redundancy} / misplaced ${breakdown.semanticLayer.misplaced} / unclear ${breakdown.semanticLayer.unclear}）；`
     + `新鲜度扣分 ${breakdown.freshness.penalty}（${breakdown.freshness.staleCount} 条超期）`,
   )
+  if (result.overflow !== null) lines.push(`超出上限（不扣分）：${result.overflow.summary}`)
   if (result.pendingDecisions.items.length > 0) {
     lines.push('待裁决冲突（memory_confirm resolve）：')
     for (const item of result.pendingDecisions.items) {
@@ -211,6 +214,9 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
   ])
   const pending = data.pending.filter(e => e.memoryIds.every(id => visibleIds.has(id)))
   const overdue = pending.filter(e => now - e.firstSeenAt >= overdueMs)
+  // 超限按会话所属项目记账（无项目的会话记在 global）：列为问题，不进评分
+  const overflowEntry = (await deps.decisions.listOverflow()).find(e => overflowScopeOf(e) === (layer.kind === 'global' ? 'global' : layer.path))
+  const overflow = overflowEntry === undefined ? null : { ...overflowLevelOf(overflowEntry), summary: overflowEntry.summary }
 
   // recommendation 分层并列。独占层：密钥（本层红线或 global 报警）永远最高、不受档位
   // 影响，出现时不并列其他建议（避免稀释警报）。行动项层：条件独立成立的全部列出——
@@ -228,6 +234,8 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
     const actions: string[] = []
     if (overdue.length > 0) recommendationKinds.push('pending-overdue')
     if (overdue.length > 0) actions.push(`${overdue.length} 条冲突挂起超 ${th.pendingOverdueDays} 天，建议用 memory_confirm 裁决`)
+    if (overflow !== null) recommendationKinds.push('budget-overflow')
+    if (overflow !== null) actions.push(`${overflow.summary}（不扣分），建议整理记忆或调高 snapshotTokenBudget`)
     if (cachedAt === null) recommendationKinds.push('semantic-never-scanned')
     else if (now - cachedAt > th.scanStaleDays * DAY) recommendationKinds.push('semantic-stale')
     if (cachedAt === null) actions.push('尚未做过语义扫描，建议首次运行 memory_scan')
@@ -293,6 +301,7 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
     totalMemories: records.length,
     promoteCandidates: scored.promoteCandidates,
     globalSecretAlert,
+    overflow,
     recommendation,
     recommendationKinds,
     directoryNotes: [...listingNotes(listing, { includeEmpty: false }), ...data.directoryNotes],
