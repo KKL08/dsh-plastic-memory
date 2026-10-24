@@ -102,5 +102,8 @@
     "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build",
     "build:client": "node scripts/build-client.ts"
   },
-  "packageManager": "pnpm@11.22.0"
+  "packageManager": "pnpm@11.22.0",
+  "optionalDependencies": {
+    "@node-rs/jieba": "2.0.4"
+  }
 }

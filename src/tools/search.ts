@@ -3,7 +3,7 @@ import type { MemoryStore, QueryScope } from '../store.ts'
 import type { SearchNoteCode } from '../contract-codes.ts'
 import { expandQueryTerms } from '../text.ts'
 import { resolveDuplicates } from '../storage/table.ts'
-import { createTokenizer } from '../search/tokenizer.ts'
+import { tokenizerForQuery, type QueryTokenizerOptions } from '../search/jieba-segmenter.ts'
 import { rankRecords, TIER_ORDER, type RankedRecord, type SearchTier } from '../search/ranking.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import { sourceNote } from '../index-line.ts'
@@ -20,6 +20,8 @@ export interface SearchToolDeps {
   store: MemoryStore
   registry: TypeRegistry
   resolveContext(exec: ToolRunContext): Promise<SearchContext>
+  /** 分词器选项：用户词典路径（现读）与降级告警的日志器。缺省只用主词典、告警走 console。 */
+  tokenizer?: QueryTokenizerOptions
 }
 
 export interface SearchArgs {
@@ -50,9 +52,6 @@ export function renderSearchResult(result: { hits: SearchHit[]; note?: string })
   if (result.note !== undefined) blocks.unshift(result.note)
   return blocks.length === 0 ? '没有匹配的记忆。' : blocks.join('\n\n')
 }
-
-/** 查询与记录两侧共用的分词器（缺省 bigram）。 */
-const tokenize = createTokenizer()
 
 const CJK_CHAR = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u
 
@@ -92,6 +91,8 @@ export async function executeSearch(
       ? { kind: 'workspace', path: workspacePath }
       : { kind: 'visible', workspacePath }
   const hint = scopeFilter.kind === 'workspace' ? scopeFilter.path : scopeFilter.kind === 'visible' ? scopeFilter.workspacePath : undefined
+  // 查询与记录两侧共用这一个分词器：查询含汉字时是 jieba 档（首次搜索才加载），否则 bigram
+  const tokenize = await tokenizerForQuery(a.query, deps.tokenizer)
   // 两套词项：新 token 定前两档并打分；旧词项（expandQueryTerms）给子串档，保证今天靠子串能命中的查询仍命中
   const tokens = [...new Set(tokenize(a.query))].filter(t => !isNoiseTerm(t))
   const legacyTerms = expandQueryTerms(a.query)

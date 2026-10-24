@@ -282,7 +282,8 @@ function tapTable(t: MemoryTable, mode: 'strip' | 'spy', seen: ScopeReadOptions[
   }
 }
 
-describe('性质测试', () => {
+// 每例 40 轮真实落盘，全量并行跑时单例要 3 秒上下；装了 jieba 时首个汉字查询还要加载词典，默认 5 秒上限偏紧
+describe('性质测试', { timeout: 15_000 }, () => {
   it('预筛开关不改变三档成员与顺序', async () => {
     await fc.assert(fc.asyncProperty(corpus, query, async (rows, q) => {
       const dir = await mkdtemp(join(root, 'prop-'))

@@ -35,6 +35,7 @@ import {
 import { baselineProjectionDefinition } from '../src/governance/baseline.ts'
 import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
 import { GUI_VIEW_DIR, GUI_VIEW_FILES, sessionViewFile, sessionViewSchema } from '../src/gui/contract.ts'
+import { defaultJiebaLoader } from '../src/search/jieba-segmenter.ts'
 
 /** 宿主 storageDomain 表的替身（@deepseek-ai/dsh-storage-domain KvTable 的形状）：读同步、写异步。 */
 class HostKvTable<T = unknown> {
@@ -126,6 +127,9 @@ function mockCtxWithThrowingGet() {
     get: (name: string) => { throw new Error(`no such service: ${name}`) },
   }
 }
+
+// 用户词典热生效的用例要真实 @node-rs/jieba（可选依赖没装上或平台二进制缺失时 skip）。
+const hasRealJieba = await defaultJiebaLoader.importJieba().then(() => true, () => false)
 
 // FileTable 是纯 fs 类，vitest 下用 mkdtemp 真实落盘跑；afterEach 统一清理，
 // 避免任何用例（包括抛错用例）碰到缺省 memoryRoot 从而落到真实 ~/.dsh/memories。
@@ -1046,6 +1050,25 @@ describe('配置热生效（loader/volatile-update）', () => {
     await rm(join(t.memoryRoot, GUI_VIEW_DIR), { recursive: true })
     await t.update({ governance: { health: { sensitivity: 'proactive' } } })
     for (const file of Object.values(GUI_VIEW_FILES)) await stat(join(t.memoryRoot, GUI_VIEW_DIR, file))
+  })
+
+  // 观察切法：查询「插件记忆」，记录只写了「插件的记忆」。只用主词典时查询切成 插件 / 记忆，记录全命中；
+  // 用户词典加了「插件记忆」后查询多出这个整词，记录只部分命中，结果带 or-fallback。
+  it.skipIf(!hasRealJieba)('改 search.userDictionaryPath：下一次 memory_search 按新词典切分，清空回到只用主词典', async () => {
+    const t = await setup()
+    const dict = join(t.memoryRoot, 'user.dict.txt')
+    await writeFile(dict, '插件记忆 10 n\n')
+    await t.putGlobal({ id: 'mem_plugin', content: '插件的记忆放在这里' })
+    const search = () => t.tool('memory_search').execute({ query: '插件记忆' }, fakeExec()) as Promise<{ hits: Array<{ id: string }>; noteCode?: string }>
+
+    expect(await search()).toMatchObject({ hits: [{ id: 'mem_plugin' }] })
+    expect((await search()).noteCode).toBeUndefined()
+
+    expect(await t.update({ search: { userDictionaryPath: dict } })).toEqual([['search', 'userDictionaryPath']])
+    expect(await search()).toMatchObject({ hits: [{ id: 'mem_plugin' }], noteCode: 'or-fallback' })
+
+    expect(await t.update({})).toEqual([['search', 'userDictionaryPath']])
+    expect((await search()).noteCode).toBeUndefined()
   })
 
   it('快照冻结写该会话的视图；这次对话 memory_save 新记的 id 追加进去', async () => {

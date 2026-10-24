@@ -18,9 +18,9 @@ type LayerName = keyof typeof LAYER
 const LEAF_MODULES = new Set([
   'text', 'secrets', 'record-freshness', 'retention', 'contract-codes', 'index-line', 'errors',
   'kv-table', 'record-schema', 'output', 'storage/paths', 'storage/table', 'types', 'gui/contract',
-  'search/tokenizer',
+  'search/tokenizer', 'search/jieba-segmenter',
 ])
-// search/ranking 与 store 同层：只 import 叶子，被执行器用；分词器留在叶子
+// search/ranking 与 store 同层：只 import 叶子，被执行器用；分词器与 jieba 切分器留在叶子（只碰 Node 内置，词典路径与日志器由调用方注入）
 const MEMORY_MODULES = new Set([
   'pipeline', 'store', 'snapshot', 'runtime', 'type-registry', 'evidence-guidance', 'search/ranking',
 ])
