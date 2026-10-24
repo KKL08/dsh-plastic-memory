@@ -3,11 +3,12 @@
  * 涉及其他项目时服务端先拒（cross-workspace，什么都没动），卡片里就地写明是哪个项目，用户点「继续处理」才带
  * allowCrossWorkspace 重发。失败把宿主 / 执行器的原话显示在卡片里。
  */
-import { useState } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import type { MemoryCommand, MemoryCommandResult } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, useT } from '../i18n.tsx'
 import { Button } from '../ui/Button.tsx'
+import { useReturnFocus } from '../ui/focus-return.ts'
 
 export type ActionState =
   | { kind: 'idle' }
@@ -57,34 +58,53 @@ export function useItemAction(session: BorrowedSession, onOk: (command: MemoryCo
   }
 }
 
+/**
+ * 行内确认的外壳：说明文字 + 按钮组，role=group。收起时把焦点还给打开它的控件，控件没了就落到附近（useReturnFocus）。
+ * 跨项目确认和彻底删除确认都用它，各处不再自己管焦点。
+ */
+function ConfirmGroup({ label, children }: { label: string; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null)
+  useReturnFocus(ref)
+  return <div ref={ref} className="pm-pending-confirm" role="group" aria-label={label}>{children}</div>
+}
+
 /** 跨项目确认行：写明记忆属于哪个项目，「取消」或「继续处理」。待处理卡和全部记忆 / 最近删除的行共用。 */
 export function CrossConfirm({ workspacePath, onCancel, onConfirm }: { workspacePath: string; onCancel: () => void; onConfirm: () => void }) {
   const t = useT()
   return (
-    <div className="pm-pending-confirm" role="group" aria-label={t('pending.cross.confirm')}>
+    <ConfirmGroup label={t('pending.cross.confirm')}>
       <p className="pm-pending-text">{t('pending.cross.body', { name: baseName(workspacePath) })}</p>
       <div className="pm-pending-actions">
         <Button onClick={onCancel}>{t('pending.cancel')}</Button>
         <Button onClick={onConfirm}>{t('pending.cross.confirm')}</Button>
       </div>
-    </div>
+    </ConfirmGroup>
   )
 }
 
 /**
- * 含密钥记忆的删除确认：普通删除 14 天内可恢复，含密钥的只能彻底删除，服务端回 has-secret（什么都没动）后就地出现，
- * 「彻底删除」改发 hard-delete。全部记忆、对话交付卡、右侧栏共用，样式同 CrossConfirm。
+ * 彻底删除的确认：不进最近删除、不能恢复，快照里的副本也抹掉。待处理的密钥卡点「彻底删除…」时出现；
+ * 全部记忆、对话交付卡、右侧栏普通删除含密钥的记忆时服务端回 has-secret（什么都没动），也在原位出现，「彻底删除」改发 hard-delete。
+ * 密钥卡标题已写明有密钥，`showTitle={false}`；其余地方用户只点了删除，先补一行「这条记忆里有密钥」说明为什么。
  */
-export function SecretDeleteConfirm({ onCancel, onConfirm }: { onCancel: () => void; onConfirm: () => void }) {
+export function SecretDeleteConfirm({ onCancel, onConfirm, unavailable, showTitle = true }: {
+  onCancel: () => void
+  onConfirm: () => void
+  /** 「彻底删除」暂不可用的原因（密钥卡没有会话、正在处理时）。 */
+  unavailable?: string | undefined
+  showTitle?: boolean
+}) {
   const t = useT()
   return (
-    <div className="pm-pending-confirm" role="group" aria-label={t('pending.secret.confirmDelete')}>
-      <p className="pm-pending-text">{t('pending.secret.forgetBody')}</p>
+    <ConfirmGroup label={t('pending.secret.confirmDelete')}>
+      {showTitle ? <p className="pm-pending-text pm-pending-confirm-title">{t('pending.secret.title')}</p> : null}
+      <p className="pm-pending-text">{t('pending.secret.confirmBody')}</p>
       <div className="pm-pending-actions">
+        {/* 默认焦点在「取消」：回车不会手滑删掉 */}
         <Button autoFocus onClick={onCancel}>{t('pending.cancel')}</Button>
-        <Button variant="danger" onClick={onConfirm}>{t('pending.secret.confirmDelete')}</Button>
+        <Button variant="danger" unavailable={unavailable} onClick={onConfirm}>{t('pending.secret.confirmDelete')}</Button>
       </div>
-    </div>
+    </ConfirmGroup>
   )
 }
 
@@ -92,6 +112,7 @@ export function SecretDeleteConfirm({ onCancel, onConfirm }: { onCancel: () => v
 export const crossConfirmCss = `
 .pm-pending-text { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-pending-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.pm-pending-confirm-title { font-weight: 600; color: var(--pm-text); }
 .pm-pending-confirm { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: var(--dsw-radius-md, 12px); background: var(--pm-bg-block); }
 `
 

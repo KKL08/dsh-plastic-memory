@@ -66,7 +66,7 @@ export function DeletedTab({ nav, scope, session, now = Date.now() }: {
 
   return (
     <div className="pm-del">
-      {actions.notice !== undefined ? <p className="pm-notice" role="status">{actions.notice.text}</p> : null}
+      {actions.notice !== undefined ? <p className="pm-notice" role="status" tabIndex={-1}>{actions.notice.text}</p> : null}
       <ul className="pm-list">
         {items.map(({ memory, deletedAt, purgeAt, cause }) => {
           const meta = [

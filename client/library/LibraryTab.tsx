@@ -91,7 +91,7 @@ export function LibraryTab({ nav, scope, session, now = Date.now() }: {
         : null}
       {notice !== undefined
         ? (
-          <p className="pm-notice" role="status">
+          <p className="pm-notice" role="status" tabIndex={-1}>
             {notice.text}
             {notice.kind === 'ok'
               ? (

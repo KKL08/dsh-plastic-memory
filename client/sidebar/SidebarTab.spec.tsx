@@ -1,6 +1,6 @@
 // 右侧栏「记忆」tab：四种状态、用量条两种超限、就地裁决与撤销、新记的实时增加、底部入口跳转。全部对内存假网关。
 import { describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, screen, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import {
   GUI_VIEW_VERSION,
   type HealthView, type LibraryView, type MemoryCard, type PendingItem, type PendingView, type SessionView,
@@ -161,12 +161,12 @@ describe('SidebarTab 这次对话新记的', () => {
     )
     const saved = within(screen.getByRole('region', { name: '这次对话新记的' }))
     await act(async () => { fireEvent.click(saved.getByRole('button', { name: '删除这条记忆' })) })
-    expect(saved.getByText('这条记忆里有密钥，删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeInTheDocument()
+    expect(saved.getByText('彻底删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeInTheDocument()
     expect(saved.getByRole('button', { name: '删除这条记忆' })).toHaveAttribute('aria-disabled', 'true')
     expect(saved.getByText('报销截止每月 25 日。')).toBeInTheDocument()
 
     fireEvent.click(saved.getByRole('button', { name: '取消' }))
-    expect(saved.queryByText('这条记忆里有密钥，删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeNull()
+    expect(saved.queryByText('彻底删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeNull()
     await act(async () => { fireEvent.click(saved.getByRole('button', { name: '删除这条记忆' })) })
     await act(async () => { fireEvent.click(saved.getByRole('button', { name: '彻底删除' })) })
     expect(gateway.executed.map(e => e.command)).toEqual([
@@ -308,5 +308,49 @@ describe('SidebarTab 底部入口', () => {
     fireEvent.click(screen.getByRole('button', { name: '在记忆页处理 ›' }))
     expect(nav.get()).toEqual({ tab: 'pending', scope: { kind: 'workspace', workspacePath: WS } })
     expect(layout.selectPanel).toHaveBeenCalledWith(PANEL_ID)
+  })
+})
+
+describe('SidebarTab 确认收起后的键盘焦点', () => {
+  /** 键盘用户按回车：焦点先落在按钮上再触发点击。 */
+  const press = async (button: HTMLElement) => {
+    button.focus()
+    await act(async () => { fireEvent.click(button) })
+  }
+
+  it('含密钥确认：「取消」回到删除按钮；彻底删除后落到原位那行说明上', async () => {
+    const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
+    setup(
+      { library: library(pref, proj, glob, fresh), session: snapshot({ savedIds: ['n1'] }), pending: pending() },
+      command => command.cmd === 'forget' ? { ok: false, cmd: command.cmd, code: 'has-secret' } : { ok: true, cmd: command.cmd, memoryIds: ['n1'] },
+    )
+    const saved = within(screen.getByRole('region', { name: '这次对话新记的' }))
+    const del = saved.getByRole('button', { name: '删除这条记忆' })
+    await press(del)
+    await press(saved.getByRole('button', { name: '取消' }))
+    await waitFor(() => { expect(del).toHaveFocus() })
+
+    await press(del)
+    await press(saved.getByRole('button', { name: '彻底删除' }))
+    await waitFor(() => { expect(saved.getByText('已彻底删除。如果它是真的凭证，记得去换一个新的。')).toHaveFocus() })
+  })
+
+  it('跨项目确认：「取消」回到裁决按钮；「继续处理」裁决完落到结果的「撤销」', async () => {
+    const other = memory({ id: 'p2', type: 'preference', workspacePath: '/w/blog', content: '测试里 mock 数据库就行。' })
+    const cross: PendingItem = { ...conflict, right: other } as PendingItem
+    setup(
+      { library: library(pref, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending(cross) },
+      command => 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
+        ? { ok: true, cmd: command.cmd }
+        : { ok: false, cmd: command.cmd, code: 'cross-workspace', rejected: [{ id: 'p2', workspacePath: '/w/blog' }] },
+    )
+    const keepBoth = screen.getByRole('button', { name: '都保留' })
+    await press(keepBoth)
+    await press(screen.getByRole('button', { name: '取消' }))
+    await waitFor(() => { expect(keepBoth).toHaveFocus() })
+
+    await press(keepBoth)
+    await press(screen.getByRole('button', { name: '继续处理' }))
+    await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
   })
 })
