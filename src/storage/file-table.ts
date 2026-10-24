@@ -181,8 +181,9 @@ export class FileTable implements MemoryTable {
   }
 
   /** 读一组已解析位置的目录（顶层，可选含 .archive/），带 extras 的内部形态。 */
-  private async readDirs(dirs: readonly ScopeDir[], opts: ScopeReadOptions): Promise<{ slots: Slot[]; quarantined: QuarantineEntry[]; directoryNotes: DirectoryNote[] }> {
+  private async readDirs(dirs: readonly ScopeDir[], opts: ScopeReadOptions): Promise<{ slots: Slot[]; listedCount: number; quarantined: QuarantineEntry[]; directoryNotes: DirectoryNote[] }> {
     const slots: Slot[] = []
+    let listedCount = 0
     const quarantined: QuarantineEntry[] = []
     const directoryNotes: DirectoryNote[] = []
     const prefilter: Prefilter = {
@@ -195,6 +196,7 @@ export class FileTable implements MemoryTable {
       for (const level of levels) {
         const listed = await this.listMemoryFiles(level)
         if ('note' in listed) { directoryNotes.push(listed.note); continue }
+        if (level === dir) listedCount += listed.names.length   // 只数顶层，预筛、解析、types 之前
         const results = await Promise.all(listed.names.sort().map(name =>
           this.readMemoryFile(join(level, name), dir, loc, prefilter, statsRows)))
         for (const r of results) {
@@ -206,7 +208,7 @@ export class FileTable implements MemoryTable {
         }
       }
     }
-    return { slots, quarantined, directoryNotes }
+    return { slots, listedCount, quarantined, directoryNotes }
   }
 
   /** 把调用方给的目录解析成带 FileLocation 的列表；缺标记 / 不可读的目录产 note、不读文件。 */
@@ -227,6 +229,7 @@ export class FileTable implements MemoryTable {
     const read = await this.readDirs(scopeDirs, opts)
     return {
       records: read.slots.map(({ record, filePath, dir }) => ({ record, filePath, dir })),   // 原文与 mtime 不出内部
+      listedCount: read.listedCount,
       quarantined: read.quarantined,
       directoryNotes: [...directoryNotes, ...read.directoryNotes],
     }
