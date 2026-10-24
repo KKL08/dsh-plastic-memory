@@ -200,7 +200,7 @@ export async function apply(ctx: Context, config: Config) {
   // （cordis reflect.ts _getImpl），下面的 try/catch 只是对宿主行为变化的防御。
   // ⚠️ 真机验证确认的 dsh llm 契约（packages/llm/llm）：
   //   1) LlmRuntime.stream(options: GenerateOptions) 的 provider/model 是必填 string，没有"用会话当前模型"的默认值；
-  //      三层解析顺序抄自 packages/compaction/compaction-basic/src/summarizer.ts：
+  //      三层解析顺序对齐宿主 compaction 摘要器的做法：
   //      session.requestHeader()?.config（最近一次路由请求的配置）→ agent.options.provider/model；
   //      两者都拿不到（provider 或 model 缺失）就返回 null，语义层降级，绝不猜默认模型。
   //   2) StreamChunk 是判别联合，text-delta 和 reasoning-delta 都带 .text——开启推理时

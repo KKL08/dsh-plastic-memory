@@ -42,7 +42,7 @@ const saveArgs = {
 }
 const SAVED_TEXT = '已保存记忆 mem_1（preference，workspace）。下个会话注入；本会话若触发上下文压缩，压缩后即生效。'
 
-describe('折叠行：照抄宿主通用工具行，只换摘要', () => {
+describe('折叠行：对齐宿主通用工具行，只换摘要', () => {
   it('九个工具各一句摘要', () => {
     const hit = (id: string) => `[${id}] preference｜摘要\n原文`
     const cases: Array<[MemoryToolViewProps, string]> = [

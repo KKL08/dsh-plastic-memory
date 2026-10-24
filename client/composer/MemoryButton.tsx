@@ -1,6 +1,6 @@
 /**
  * 输入框下方的「记忆」按钮（PRD 5.9 方案 A）：只有图标，不变色、不加点；这个会话没有记忆（会话视图不存在，
- * 或带入与新记都为空）时不渲染。点开的弹层照抄宿主 ContextMeter 弹层的版式：标题行占比 + 约已用 / 上限、
+ * 或带入与新记都为空）时不渲染。点开的弹层对齐宿主 ContextMeter 弹层的版式：标题行占比 + 约已用 / 上限、
  * 三段作用域条与明细、带入与新记条数、超限行、「查看带入的记忆 ›」。
  *
  * 已用 = 会话视图三段（本项目、全局、固定说明）之和，和用量条同一口径；占比 = 已用 / 宿主 contextPressure 投影的
@@ -161,7 +161,7 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
   )
 }
 
-/** 按钮照抄宿主 ContextMeter 的 trigger；弹层照抄它的 panel（菜单面：宿主菜单底色、prominent 投影）。 */
+/** 按钮对齐宿主 ContextMeter 的 trigger；弹层对齐它的 panel（菜单面：宿主菜单底色、prominent 投影）。 */
 export const memoryButtonCss = `
 .pm-composer-root { display: contents; }
 .pm-composer { display: inline-flex; flex: none; }

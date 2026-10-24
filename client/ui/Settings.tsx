@@ -1,6 +1,6 @@
 /**
  * 设置页（宿主绑定面）的结构：
- * - SettingsForm：照抄宿主 ui-primitives/settings-form/SettingsForm 的框架——只读提示、控件、保存行（保存靠左，
+ * - SettingsForm：对齐宿主 ui-primitives/settings-form/SettingsForm 的框架——只读提示、控件、保存行（保存靠左，
  *   主按钮没有改动时 .4 置灰）。离开页面丢弃暂存改动由调用方 onDiscard 处理。
  * - SettingsGroupCard：我们按用户决定加的分组卡片（「记什么 · 怎么用 · 怎么管」），组标题在卡片外。
  * - SettingsItem：卡片里的一项，上下各 14px，项与项之间 0.5px 细线。

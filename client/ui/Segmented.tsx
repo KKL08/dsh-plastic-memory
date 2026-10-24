@@ -1,5 +1,5 @@
 /**
- * 宿主两种分段控件的照抄版（技能禁止外部插件 require ui-primitives，标记与 CSS 复制自宿主 0.2.1-rc.2）：
+ * 宿主两种分段控件的对齐版（技能禁止外部插件 require ui-primitives，标记与 CSS 对齐宿主 0.2.1-rc.2）：
  * - SegmentedTabs：插件页顶部的页内 tab（ui-primitives/SegmentedTabs），记忆页四个 tab 用它；
  * - SegmentedControl：设置卡里切换模式（ui-primitives/SegmentedControl），如「自动放宽 / 严格按上限」。
  * 两者都是受控的 tablist，左右键 / Home / End 切换，只有选中项是 tab 停靠点，面板由调用方渲染。

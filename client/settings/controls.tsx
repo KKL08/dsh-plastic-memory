@@ -1,5 +1,5 @@
 /**
- * 设置页用到的宿主控件照抄版（标记与 CSS 复制自宿主 0.2.1-rc.2 ui-primitives，技能禁止外部插件 require 它）：
+ * 设置页用到的宿主控件对齐版（标记与 CSS 对齐宿主 0.2.1-rc.2 ui-primitives，技能禁止外部插件 require 它）：
  * Switch（Switch.tsx）、文本输入（settings-form/fields 的 .input / .invalid）、Dialog（Modal.tsx 的居中弹层）。
  */
 import { useEffect, useRef, type ReactNode } from 'react'

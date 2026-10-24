@@ -111,7 +111,7 @@ describe('EmptyState', () => {
 })
 
 describe('焦点环（故事 50）', () => {
-  it('按钮与链接的焦点环照抄宿主令牌，自有控件不写 outline: none', () => {
+  it('按钮与链接的焦点环对齐宿主令牌，自有控件不写 outline: none', () => {
     expect(themeCss).toMatch(/:focus-visible\s*\{\s*outline: var\(--dsw-focus-ring-width, 2px\) solid var\(--pm-focus\);\s*outline-offset: 2px;/)
     expect(themeCss).toContain('--pm-focus: var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary))')
     for (const css of [themeCss, buttonCss]) expect(css).not.toMatch(/outline:\s*(none|0)/)
