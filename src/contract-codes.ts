@@ -55,8 +55,8 @@ export type ToolGateCode = 'subagent-readonly' // 子 agent 会话（delegationD
 /** memory_search 的说明性 note（search.ts）。 */
 export type SearchNoteCode =
   | 'no-workspace'        // scope=workspace 但当前会话没有工作目录
-  | 'or-fallback'         // 返回列表里没有同时命中全部查询 token 的记忆，结果按相关性排序（部分命中在前、子串命中在后）
-  | 'substring-fallback'  // 返回列表里没有任何 token 命中的记忆，只有旧子串匹配命中的；与 or-fallback 互斥、优先于它
+  | 'or-fallback'         // 返回列表里没有同时命中全部查询 token（分词命中或字段子串命中）的记忆，结果按相关性排序（部分命中在前、旧子串匹配命中在后）
+  | 'substring-fallback'  // 返回列表里没有任何 token 命中的记忆，只有旧子串匹配命中的（如 id 前缀）；与 or-fallback 互斥、优先于它
 
 /** frontmatter 解析失败的原因（storage/frontmatter.ts）。 */
 export type FrontmatterErrorCode =

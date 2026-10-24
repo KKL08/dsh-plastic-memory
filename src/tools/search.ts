@@ -42,7 +42,7 @@ export interface SearchHit {
   path: string
 }
 
-/** 说明文案（码在 contract-codes）：返回列表里没有全命中记录 / 只有子串命中记录。 */
+/** 说明文案（码在 contract-codes）：返回列表里没有全命中记录 / 只有旧子串匹配命中的记录（第三档）。 */
 export const OR_FALLBACK_NOTE = '没有同时命中全部关键词的记忆，以下按相关性排序。'
 export const SUBSTRING_FALLBACK_NOTE = '没有命中关键词的记忆，以下只是关键词以子串出现的结果。'
 
@@ -93,10 +93,11 @@ export async function executeSearch(
   const hint = scopeFilter.kind === 'workspace' ? scopeFilter.path : scopeFilter.kind === 'visible' ? scopeFilter.workspacePath : undefined
   // 查询与记录两侧共用这一个分词器：查询含汉字时是 jieba 档（首次搜索才加载），否则 bigram
   const tokenize = await tokenizerForQuery(a.query, deps.tokenizer)
-  // 两套词项：新 token 定前两档并打分；旧词项（expandQueryTerms）给子串档，保证今天靠子串能命中的查询仍命中
+  // 两套词项：新 token 定前两档并打分（分词命中计词频，字段子串命中只计命中）；旧词项（expandQueryTerms）给第三档，
+  // 兜住 id 这类不打分字段的子串命中，保证今天靠子串能命中的查询仍命中
   const tokens = [...new Set(tokenize(a.query))].filter(t => !isNoiseTerm(t))
   const legacyTerms = expandQueryTerms(a.query)
-  // 预筛词 = token ∪ 旧词项，any 模式；两侧同一分词器，记录侧 token 必是原文连续子串，所以预筛是超集。
+  // 预筛词 = token ∪ 旧词项，any 模式；两侧同一分词器，记录侧 token 必是原文连续子串，字段子串命中按定义也是，所以预筛是超集。
   // 并集里出现噪声词项（单字母、纯数字）时不预筛：剔掉它会漏掉只靠它命中的记录，留着它预筛也几乎不跳过任何文件。
   const unionTerms = [...new Set([...tokens, ...legacyTerms])]
   const prefilter = unionTerms.length > 0 && !unionTerms.some(isNoiseTerm)
@@ -126,7 +127,7 @@ export async function executeSearch(
   const top = ranked.slice(0, limit)
   await deps.store.markRecalled(top.map(e => e.record.id))
 
-  // 说明码只看返回列表：没有全命中 → or-fallback；连部分命中也没有 → substring-fallback（互斥、substring 优先）
+  // 说明码只看返回列表：没有全命中 → or-fallback；连部分命中也没有、只剩第三档 → substring-fallback（互斥、substring 优先）
   const hasTier = (tier: SearchTier) => top.some(e => e.tier === tier)
   const note = top.length === 0 || hasTier('all') ? undefined
     : hasTier('partial') ? { noteCode: 'or-fallback' as const, note: OR_FALLBACK_NOTE }

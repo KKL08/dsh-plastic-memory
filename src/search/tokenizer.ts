@@ -59,7 +59,8 @@ export function createTokenizer(opts?: { cjk?: CjkSegmenter }): (text: string) =
   return text => {
     const out: string[] = []
     for (const [, cjkRun, word] of text.matchAll(SEGMENT)) {
-      if (cjkRun !== undefined) out.push(...cjk.segment(cjkRun))
+      // 逐项追加：正文没有长度上限，push(...arr) 遇到十几万个 token 会超出参数个数上限而抛 RangeError
+      if (cjkRun !== undefined) for (const tok of cjk.segment(cjkRun)) out.push(tok)
       else if (word !== undefined) tokenizeWord(word, out)
     }
     return out

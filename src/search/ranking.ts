@@ -6,7 +6,7 @@ import { matchScore } from '../text.ts'
  * 给每条候选定档位与分数；调用方（memory_search 执行器）负责排序、截断与说明码。
  */
 
-/** 参与打分的字段，按加权顺序。id 不在其中：id 直达与子串档（matchScore）另行覆盖。 */
+/** 参与打分的字段，按加权顺序。id 不在其中：id 直达与第三档（旧子串匹配 matchScore）另行覆盖。 */
 export const RANKING_FIELDS = ['name', 'summary', 'tags', 'content'] as const
 export type RankingField = (typeof RANKING_FIELDS)[number]
 
@@ -37,7 +37,12 @@ export interface RankingParams {
   fields: Record<RankingField, { weight: number; avgLength: number }>
 }
 
-/** 三档：全部查询 token 命中 → 部分命中 → token 零命中但旧子串匹配命中。 */
+/**
+ * 三档：全部查询 token 命中 → 部分命中 → 一个都没命中但旧子串匹配（matchScore）命中。
+ * 「token 命中」= 某字段分词后含该 token，或某字段的小写原文以子串含该 token（如 deploy 之于 deployment；
+ * 自身是别的查询 token 子串的子词除外，见 substringEligible）。
+ * 第三档于是只剩 id 这类不打分字段的命中，以及全是噪声词项（单字母、纯数字）的查询。
+ */
 export type SearchTier = 'all' | 'partial' | 'substring'
 /** 档位的排序序号，小的在前。 */
 export const TIER_ORDER: Record<SearchTier, number> = { all: 0, partial: 1, substring: 2 }
@@ -45,14 +50,14 @@ export const TIER_ORDER: Record<SearchTier, number> = { all: 0, partial: 1, subs
 export interface RankedRecord {
   record: MemoryRecord
   tier: SearchTier
-  /** all / partial 档是 BM25F 分数；substring 档是旧词项的命中词数。只在同档内可比。 */
+  /** all / partial 档是 BM25F 分数（只以子串命中的 token 不贡献词频）；substring 档是旧词项的命中词数。只在同档内可比。 */
   score: number
 }
 
 export interface RankInput {
   /** 查询 token（已去重、已剔除噪声 token）。 */
   tokens: readonly string[]
-  /** 旧词项（expandQueryTerms），只用于子串档。 */
+  /** 旧词项（expandQueryTerms），只用于第三档。 */
   legacyTerms: readonly string[]
   /** 解析后的候选（已过 scope / 状态 / types / validTo）。 */
   records: readonly MemoryRecord[]
@@ -71,7 +76,7 @@ interface DocStats {
   tf: number[][]
   /** 各字段长度（UTF-16 单元数） */
   len: number[]
-  /** 命中的查询 token 数（任一字段含该 token 即计 1） */
+  /** 命中的查询 token 数：任一字段分词含该 token，或任一字段小写原文以子串含它，即计 1 */
   hitCount: number
 }
 
@@ -79,12 +84,25 @@ function fieldText(record: MemoryRecord, field: RankingField): string {
   return field === 'tags' ? record.tags.join(' ') : record[field]
 }
 
-function collectStats(record: MemoryRecord, tokenIndex: ReadonlyMap<string, number>, tokenize: (text: string) => string[]): DocStats {
+/**
+ * 哪些查询 token 可以靠字段子串算命中：自身是另一个查询 token 子串的不行。分词器会把 mem_x8v4 拆出子词 mem，
+ * 它只是整词的一部分，若也按子串命中，含 memory 的记录全都会算部分命中，把真正按 id 命中的目标挤出结果。
+ */
+export function substringEligible(tokens: readonly string[]): boolean[] {
+  return tokens.map(tok => !tokens.some(other => other !== tok && other.includes(tok)))
+}
+
+function collectStats(
+  record: MemoryRecord,
+  tokenIndex: ReadonlyMap<string, number>,
+  eligible: readonly boolean[],
+  tokenize: (text: string) => string[],
+): DocStats {
   const tf = RANKING_FIELDS.map(() => new Array<number>(tokenIndex.size).fill(0))
   const len: number[] = []
   const hit = new Array<boolean>(tokenIndex.size).fill(false)
-  RANKING_FIELDS.forEach((field, f) => {
-    const text = fieldText(record, field)
+  const texts = RANKING_FIELDS.map(field => fieldText(record, field))
+  texts.forEach((text, f) => {
     len.push(text.length)
     for (const tok of tokenize(text)) {
       const i = tokenIndex.get(tok)
@@ -93,6 +111,13 @@ function collectStats(record: MemoryRecord, tokenIndex: ReadonlyMap<string, numb
       hit[i] = true
     }
   })
+  // 词频为零的 token 再查子串：只计命中、不计词频，所以同档内排在有词频的记录之后。小写原文按需算、每字段一次
+  let lower: string[] | undefined
+  for (const [tok, i] of tokenIndex) {
+    if (hit[i] || !eligible[i]) continue
+    lower ??= texts.map(t => t.toLowerCase())
+    hit[i] = lower.some(t => t.includes(tok))
+  }
   return { record, tf, len, hitCount: hit.filter(Boolean).length }
 }
 
@@ -120,10 +145,12 @@ function bm25f(doc: DocStats, idfs: readonly number[], { k1, b, fields }: Rankin
 /**
  * 给每条候选定档位与分数；不在任何档的候选不返回。顺序与输入一致，不排序。
  * df 按文档粒度在候选集上数：token 是记录原文的子串，被预筛跳过的文件对 df 贡献为零，候选集上数就是精确值。
+ * df 只数有词频的文档：只以子串命中的 token 分数为 0，不参与 idf。
  */
 export function rankRecords({ tokens, legacyTerms, records, listedCount, tokenize, params = RANKING_PARAMS }: RankInput): RankedRecord[] {
   const tokenIndex = new Map(tokens.map((t, i) => [t, i] as const))
-  const docs = records.map(r => collectStats(r, tokenIndex, tokenize))
+  const eligible = substringEligible(tokens)
+  const docs = records.map(r => collectStats(r, tokenIndex, eligible, tokenize))
   // df 按文档粒度：某 token 在该文档任一字段出现即计 1
   const df = new Array<number>(tokens.length).fill(0)
   for (const doc of docs) {

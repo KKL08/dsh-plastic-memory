@@ -11,7 +11,7 @@ import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { expandQueryTerms, matchScore } from '../src/text.ts'
-import { RANKING_FIELDS, TIER_ORDER, type SearchTier } from '../src/search/ranking.ts'
+import { RANKING_FIELDS, TIER_ORDER, substringEligible, type SearchTier } from '../src/search/ranking.ts'
 import { defaultJiebaLoader, resetJieba, tokenizerForQuery, type JiebaLoader } from '../src/search/jieba-segmenter.ts'
 import { executeSearch, type SearchToolDeps } from '../src/tools/search.ts'
 import type { SearchNoteCode } from '../src/contract-codes.ts'
@@ -57,14 +57,17 @@ const CJK_CHAR = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script
 const isNoiseTerm = (t: string) => /^\p{N}+$/u.test(t) || ([...t].length === 1 && !CJK_CHAR.test(t))
 const byId = new Map(EVAL_RECORDS.map(r => [r.id, r]))
 
-/** 用生产分词器（当前档）独立算出每条记录相对查询的档位；不在任何档返回 undefined。 */
+/** 用生产分词器（当前档）独立算出每条记录相对查询的档位；不在任何档返回 undefined。
+ * token 命中 = 某字段分词含它，或某字段小写原文以子串含它。 */
 async function tierOracle(query: string): Promise<(r: MemoryRecord) => SearchTier | undefined> {
   const tokenize = await tokenizerForQuery(query, { log: silent })
   const tokens = [...new Set(tokenize(query))].filter(t => !isNoiseTerm(t))
+  const eligible = substringEligible(tokens)
   const legacy = expandQueryTerms(query)
   return r => {
-    const fieldTokens = RANKING_FIELDS.flatMap(f => tokenize(f === 'tags' ? r.tags.join(' ') : r[f]))
-    const hit = tokens.filter(t => fieldTokens.includes(t)).length
+    const texts = RANKING_FIELDS.map(f => f === 'tags' ? r.tags.join(' ') : r[f])
+    const fieldTokens = texts.flatMap(t => tokenize(t))
+    const hit = tokens.filter((t, i) => fieldTokens.includes(t) || (eligible[i]! && texts.some(x => x.toLowerCase().includes(t)))).length
     if (hit > 0) return hit === tokens.length ? 'all' : 'partial'
     return matchScore(r, legacy) > 0 ? 'substring' : undefined
   }
@@ -144,12 +147,17 @@ describe('不变量（与权重无关）', { timeout: 60_000 }, () => {
     })
   }
 
-  it('三种说明码在评估语料上的触发：全命中无码；只有部分命中 or-fallback；只有子串 substring-fallback', async () => {
+  it('三种说明码在评估语料上的触发：全命中无码；只有部分命中 or-fallback；只有 id 子串 substring-fallback', async () => {
     useTier('bigram')
     expect((await search('pnpm lockfile')).noteCode).toBeUndefined()
     expect((await search('pnpm zzqqxx')).noteCode).toBe('or-fallback')
-    const sub = await search('memor')
-    expect(sub.hits.length).toBeGreaterThan(0)
+    // memor 以子串出现在 memory 里，算全命中
+    const fieldSub = await search('memor')
+    expect(fieldSub.hits.length).toBeGreaterThan(0)
+    expect(fieldSub.noteCode).toBeUndefined()
+    // k7q2 只出现在 id 里
+    const sub = await search('k7q2')
+    expect(sub.hits.map(h => h.id)).toEqual(['mem_k7q2a1'])
     expect(sub.noteCode).toBe('substring-fallback')
   })
 })

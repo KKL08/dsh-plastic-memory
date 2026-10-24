@@ -170,6 +170,14 @@ describe('jieba 档：懒加载与单例（注入加载器）', () => {
     expect(tokenize('カタカナ')).toEqual(bigram('カタカナ'))
   })
 
+  it('超长段（15 万汉字、15 万假名）切分不抛，token 数正确', async () => {
+    resetJieba(fakeLoader().loader)
+    const tokenize = await tokenizerForQuery('宿主', {})
+
+    expect(tokenize('中'.repeat(150_000))).toHaveLength(150_000)   // 假词典里没有「中」，逐字输出
+    expect(tokenize('カ'.repeat(150_000))).toHaveLength(149_999)
+  })
+
   it('不含汉字的查询不加载词典（假名、谚文照旧二字切分）', async () => {
     const { loader, calls } = fakeLoader()
     resetJieba(loader)

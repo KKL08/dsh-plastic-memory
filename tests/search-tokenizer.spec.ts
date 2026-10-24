@@ -29,6 +29,12 @@ describe('检索分词器：CJK 段', () => {
     expect(tokenize('宿主readScope插件页')).toEqual(['宿主', 'readscope', 'read', 'scope', '插件', '件页'])
     expect(bigramSegmenter.segment('宿主插件')).toEqual(['宿主', '主插', '插件'])
   })
+
+  it('超长 CJK 段（15 万汉字）切分不抛，token 数等于字数减一', () => {
+    const tokens = tokenize('中'.repeat(150_000))
+    expect(tokens).toHaveLength(149_999)
+    expect(tokens[0]).toBe('中中')
+  })
 })
 
 describe('检索分词器：大小写与标点', () => {

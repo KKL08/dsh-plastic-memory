@@ -135,8 +135,9 @@ function jiebaSegmenter(jieba: JiebaInstance): CjkSegmenter {
     segment(run) {
       const out: string[] = []
       for (const [part] of run.matchAll(HAN_OR_OTHER)) {
-        if (!HAN.test(part)) out.push(...bigramSegmenter.segment(part))
-        else out.push(...jieba.cutForSearch(part, true))
+        // 逐项追加，理由同 createTokenizer：超长段展开成参数会抛 RangeError
+        const toks = HAN.test(part) ? jieba.cutForSearch(part, true) : bigramSegmenter.segment(part)
+        for (const tok of toks) out.push(tok)
       }
       return out
     },

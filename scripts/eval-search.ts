@@ -28,7 +28,7 @@ import { expandQueryTerms, matchScore } from '../src/text.ts'
 import { bigramSegmenter, createTokenizer, type CjkSegmenter } from '../src/search/tokenizer.ts'
 import { defaultJiebaLoader, resetJieba, type JiebaInstance } from '../src/search/jieba-segmenter.ts'
 import {
-  RANKING_FIELDS, RANKING_PARAMS, TIER_ORDER, rankRecords,
+  RANKING_FIELDS, RANKING_PARAMS, TIER_ORDER, rankRecords, substringEligible,
   type RankedRecord, type RankingField, type RankingParams, type SearchTier,
 } from '../src/search/ranking.ts'
 import { EVAL_CATEGORIES, EVAL_QUERIES, EVAL_RECORDS, type EvalQuery } from '../tests/fixtures/search-eval.ts'
@@ -149,19 +149,24 @@ type Scoring = 'bm25' | 'bm25f'
  */
 function rankLocal(scoring: Scoring, tokens: readonly string[], legacyTerms: readonly string[], records: readonly MemoryRecord[], tokenize: (t: string) => string[], p: RankingParams): RankedRecord[] {
   const index = new Map(tokens.map((t, i) => [t, i] as const))
+  const eligible = substringEligible(tokens)
   const docs = records.map(record => {
     const tf = RANKING_FIELDS.map(() => new Array<number>(tokens.length).fill(0))
-    const len = RANKING_FIELDS.map(f => fieldText(record, f).length)
+    const texts = RANKING_FIELDS.map(f => fieldText(record, f))
+    const len = texts.map(t => t.length)
     RANKING_FIELDS.forEach((f, fi) => {
-      for (const tok of tokenize(fieldText(record, f))) {
+      for (const tok of tokenize(texts[fi]!)) {
         const i = index.get(tok)
         if (i !== undefined) tf[fi]![i]!++
       }
     })
-    const hit = tokens.map((_, i) => tf.some(row => row[i]! > 0))
+    // 与 rankRecords 同一条命中规则：有词频，或（可做子串检查的 token）字段小写原文以子串含它
+    const lower = texts.map(t => t.toLowerCase())
+    const hit = tokens.map((tok, i) => tf.some(row => row[i]! > 0) || (eligible[i]! && lower.some(t => t.includes(tok))))
+    // df 只数有词频的文档，与生产一致
     return { record, tf, len, hit }
   })
-  const df = tokens.map((_, i) => docs.filter(d => d.hit[i]).length)
+  const df = tokens.map((_, i) => docs.filter(d => d.tf.some(row => row[i]! > 0)).length)
   const N = records.length
   const idf = df.map(d => Math.log(1 + (N - d + 0.5) / (d + 0.5)))
   const lengthNorm = (fi: number, len: number) => 1 - p.b + p.b * len / p.fields[RANKING_FIELDS[fi]!].avgLength
