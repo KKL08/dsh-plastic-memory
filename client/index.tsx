@@ -2,43 +2,33 @@
  * 浏览器半侧入口：注册双语文案、左栏图标（sidebar.panellist）与同 id 的记忆页（main）。
  * 导航 store 与宿主网关都在这里各建一份，所有插槽根共用（memoryRoot 每次页面加载最多问一次），组件只认网关接口。
  */
-import { useCallback, useMemo, useSyncExternalStore } from 'react'
+import { useMemo } from 'react'
 import { createComposerDock, DOCK_ID, DOCK_ORDER } from './composer/dock.tsx'
 import { registerChatCards } from './chat/index.tsx'
 import { createHostGateway, GatewayProvider, type BindGateway } from './gateway.ts'
-import type { HostContext, HostLocale, RootStandardProps } from './host.ts'
-import type { Translate } from './i18n.tsx'
+import type { HostContext, RootStandardProps } from './host.ts'
+import { useHostTranslate } from './i18n.tsx'
 import { en, NS, zh } from './locales.ts'
 import { healthCss } from './health/HealthTab.tsx'
 import { MemoryPage, memoryPageCss } from './MemoryPage.tsx'
 import { NavIcon } from './NavIcon.tsx'
 import { createNavStore, PANEL_ID, type NavStore } from './nav.ts'
 import { registerSidebarTab } from './sidebar/register.tsx'
+import { PACKAGE_NAME } from './settings/config.ts'
 import { applySettings } from './settings/index.tsx'
 import { PanelShell } from './ui/PanelShell.tsx'
 
 export { PANEL_ID }
+/** npm 包名：宿主插件页按它打开本插件的详情（配置区在详情页里）；定义在 settings/config.ts。 */
+export { PACKAGE_NAME }
 
 /** 核心依赖：缺一个宿主就不加载本插件。右侧栏、插件页导航、配置表单是可选服务，在 apply 里按需 `ctx.inject`。 */
 export const inject = ['slots', 'locale', 'layout', 'remote', 'remote.commands', 'remote.workspaceFiles', 'remote.session']
 
-/** npm 包名：宿主插件页按它打开本插件的详情（配置区在详情页里）。 */
-export const PACKAGE_NAME = 'dsh-plastic-memory'
-
-/** 宿主 locale 的翻译函数；切语言或字典晚到时换一个新引用，让组件重渲染。 */
-function useHostTranslate(locale: HostLocale): Translate {
-  const subscribe = useCallback((fn: () => void) => locale.subscribe(fn), [locale])
-  const snapshot = useSyncExternalStore(subscribe, () => locale.getSnapshot())
-  return useMemo(() => {
-    const bound = locale.bind(NS)
-    return (key, params) => bound(key, params)
-  }, [locale, snapshot])
-}
-
 function createMainPanel(ctx: HostContext, nav: NavStore, bind: BindGateway) {
   return function MemoryMainPanel(props: RootStandardProps) {
     const gateway = useMemo(() => bind(props), [props.useSessions, props.useResource])
-    const t = useHostTranslate(ctx.locale)
+    const t = useHostTranslate(ctx.locale, NS)
     return (
       <PanelShell gateway={gateway} t={t} extraCss={memoryPageCss + healthCss}>
         <MemoryPage nav={nav} />
@@ -75,9 +65,9 @@ export function apply(ctx: HostContext): void {
     order: 20,
     label: () => t('nav.label'),
   }, createNavIcon(bind)))
-  const Dock = createComposerDock(ctx, nav, bind, () => useHostTranslate(ctx.locale))
+  const Dock = createComposerDock(ctx, nav, bind, () => useHostTranslate(ctx.locale, NS))
   ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({ name: 'conversation.composer.dock', id: DOCK_ID, order: DOCK_ORDER }, Dock))
   registerChatCards(ctx, nav, bind)
-  ctx.inject(['sidebarRightTabs', 'sidebarRight'], (scope) => { registerSidebarTab(scope, nav, bind, () => useHostTranslate(ctx.locale)) })
-  applySettings(ctx, nav, bind, () => useHostTranslate(ctx.locale))
+  ctx.inject(['sidebarRightTabs', 'sidebarRight'], (scope) => { registerSidebarTab(scope, nav, bind, () => useHostTranslate(ctx.locale, NS)) })
+  applySettings(ctx, nav, bind, () => useHostTranslate(ctx.locale, NS))
 }

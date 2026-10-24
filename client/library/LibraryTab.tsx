@@ -5,15 +5,11 @@
 import type { GuiLayerRef, LibraryView } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { formatNumber, useT, type Translate } from '../i18n.tsx'
-import type { NavStore } from '../nav.ts'
+import { sameScope, type NavStore } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { FlashRow, useFlashTarget, useRowActions, useTypeLabel, ViewMessage } from './shared.tsx'
-
-function sameLayer(a: GuiLayerRef, b: GuiLayerRef): boolean {
-  return a.kind === b.kind && (a.kind === 'global' || (b.kind === 'workspace' && a.workspacePath === b.workspacePath))
-}
 
 function dirName(path: string): string {
   return path.replace(/[\\/][^\\/]*$/, '')
@@ -53,7 +49,7 @@ export function LibraryTab({ nav, scope, session, now = Date.now() }: {
   const t = useT()
   const gateway = useGateway()
   const view = gateway.useView(session, 'library')
-  const items = view.status === 'ready' ? view.data.layers.find(l => sameLayer(l.layer, scope))?.items ?? [] : []
+  const items = view.status === 'ready' ? view.data.layers.find(l => sameScope(l.layer, scope))?.items ?? [] : []
   const { flashId, clear } = useFlashTarget(nav, items.map(m => m.id))
   const actions = useRowActions(session)
   const typeLabel = useTypeLabel(session)

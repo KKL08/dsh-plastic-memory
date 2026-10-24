@@ -3,8 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { GUI_VIEW_VERSION, type PendingView } from '../src/gui/contract.ts'
 import {
-  CONFIG_ENTRY_ID, createHostGateway, decodeExecution, fileAddress, MEMORY_ROOT_KEY, parseView, pickSession, toPluginConfig, viewPath,
+  createHostGateway, decodeExecution, fileAddress, MEMORY_ROOT_KEY, parseView, pickSession, toPluginConfig, viewPath,
 } from './gateway.ts'
+import { ENTRY_ID } from './settings/config.ts'
 import { fakeHostContext } from './test-utils.tsx'
 import type { ConfigFormSnapshot, HostContext, ResourceSnapshot, SessionListState, SessionSummary, WorkspaceFileStat } from './host.ts'
 
@@ -222,7 +223,7 @@ describe('createHostGateway', () => {
     expect(result.current).toBeUndefined()
     act(() => { snapshot = { status: 'ready', value, revision: 1, writable: true }; for (const fn of listeners) fn() })
     expect(result.current).toEqual({ snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget: 'agents-md' })
-    expect(get).toHaveBeenCalledWith(CONFIG_ENTRY_ID)
+    expect(get).toHaveBeenCalledWith(ENTRY_ID)
     expect(await gateway.setConfig('snapshotTokenBudget', 5000)).toBe(true)
     expect(set).toHaveBeenCalledWith('snapshotTokenBudget', 5000)
   })

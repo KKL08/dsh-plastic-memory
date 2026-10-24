@@ -11,15 +11,11 @@ import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { formatDay, formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
 import { healthZh } from '../locales/health.ts'
-import { useCanOpen, type NavStore } from '../nav.ts'
+import { sameScope, useCanOpen, type NavStore } from '../nav.ts'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { HealthBanner } from '../ui/HealthBanner.tsx'
 
 type HealthLayer = HealthView['layers'][number]
-
-function sameLayer(a: GuiLayerRef, b: GuiLayerRef): boolean {
-  return a.kind === b.kind && (a.kind === 'global' || (b.kind === 'workspace' && a.workspacePath === b.workspacePath))
-}
 
 function layerName(layer: GuiLayerRef, t: Translate): string {
   return t(layer.kind === 'global' ? 'health.layer.global' : 'health.layer.workspace')
@@ -75,7 +71,7 @@ function LayerHealth({ layer, data, now }: { layer: GuiLayerRef; data: HealthLay
 function HardAlerts({ pending, layers }: { pending: ViewState<PendingView>; layers: readonly GuiLayerRef[] }) {
   const t = useT()
   if (pending.status !== 'ready') return null
-  const inShown = (ref: GuiLayerRef) => layers.some(l => sameLayer(l, ref))
+  const inShown = (ref: GuiLayerRef) => layers.some(l => sameScope(l, ref))
   const lines: Array<{ key: string; text: string }> = []
   for (const item of pending.data.items) {
     if (item.kind === 'secret') {
@@ -131,7 +127,7 @@ export function HealthTab({ session, scope, nav }: { session: BorrowedSession; s
 
   const now = Date.now()
   const layers: GuiLayerRef[] = scope.kind === 'workspace' ? [scope, { kind: 'global' }] : [{ kind: 'global' }]
-  const rows = layers.map(layer => ({ layer, data: health.data.layers.find(l => sameLayer(l.layer, layer)) }))
+  const rows = layers.map(layer => ({ layer, data: health.data.layers.find(l => sameScope(l.layer, layer)) }))
   const body = rows.map(({ layer, data }) => (
     <LayerHealth key={layer.kind === 'global' ? 'global' : layer.workspacePath} layer={layer} data={data} now={now} />
   ))

@@ -9,7 +9,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } f
 import type { GuiLayerRef } from '../src/gui/contract.ts'
 import { useGateway, type ViewState } from './gateway.ts'
 import { baseName, formatNumber, useT, type Translate } from './i18n.tsx'
-import { MEMORY_TABS, useCanOpen, useNavTarget, type MemoryTab, type NavStore, type NavTarget } from './nav.ts'
+import { MEMORY_TABS, sameScope, useCanOpen, useNavTarget, type MemoryTab, type NavStore, type NavTarget } from './nav.ts'
 import { HealthTab } from './health/HealthTab.tsx'
 import { ScanControl } from './health/ScanControl.tsx'
 import { PendingTab } from './pending/PendingTab.tsx'
@@ -21,10 +21,6 @@ import { sharedTabCss } from './library/shared.tsx'
 import { SegmentedTabs, type SegmentedTab } from './ui/Segmented.tsx'
 
 const TAB_LABEL = { pending: 'tab.pending', library: 'tab.library', health: 'tab.health', deleted: 'tab.deleted' } as const
-
-function sameScope(a: GuiLayerRef, b: GuiLayerRef): boolean {
-  return a.kind === b.kind && (a.kind === 'global' || (b.kind === 'workspace' && a.workspacePath === b.workspacePath))
-}
 
 function scopeLabel(scope: GuiLayerRef, currentWorkspace: string | undefined, t: Translate): string {
   if (scope.kind === 'global') return t('scope.global')

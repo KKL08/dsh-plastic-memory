@@ -2,7 +2,8 @@
  * 文案与格式化：组件经 useT() 取翻译函数，不直接碰宿主 locale 服务。宿主侧由面板壳把
  * `ctx.locale.bind(NS)` 包成 Translate 放进上下文；测试用 createTranslator(zh) 直接给。
  */
-import { createContext, useContext } from 'react'
+import { createContext, useCallback, useContext, useMemo, useSyncExternalStore } from 'react'
+import type { HostLocale } from './host.ts'
 import { zh, type LocaleKey } from './locales.ts'
 
 export type Translate = (key: LocaleKey, params?: Record<string, string | number>) => string
@@ -22,6 +23,16 @@ export const TranslateProvider = TranslateContext.Provider
 
 export function useT(): Translate {
   return useContext(TranslateContext)
+}
+
+/** 宿主 locale 某个命名空间的翻译函数；切语言或字典晚到时换一个新引用，让组件重渲染。 */
+export function useHostTranslate(locale: HostLocale, ns: string): Translate {
+  const subscribe = useCallback((fn: () => void) => locale.subscribe(fn), [locale])
+  const snapshot = useSyncExternalStore(subscribe, () => locale.getSnapshot())
+  return useMemo(() => {
+    const bound = locale.bind(ns)
+    return (key, params) => bound(key, params)
+  }, [locale, ns, snapshot])
 }
 
 /** 数字写全数、千分位逗号（3,120），中英一致。 */

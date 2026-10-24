@@ -18,6 +18,7 @@ import {
 import type {
   CommandExecution, ConfigForm, ConfigFormSnapshot, HostContext, RemoteResult, RootStandardProps, SessionListState,
 } from './host.ts'
+import { ENTRY_ID } from './settings/config.ts'
 
 export interface ViewMap {
   pending: PendingView
@@ -110,8 +111,10 @@ export function pickSession(list: SessionListState, workspacePath: string | unde
   return id === undefined ? { kind: 'none' } : { kind: 'ready', sessionId: id, cwd: list.byId[id]!.cwd }
 }
 
-function samePath(a: string | undefined, b: string): boolean {
-  return a !== undefined && a.replace(/[\\/]+$/, '') === b.replace(/[\\/]+$/, '')
+/** 两个路径是否同一处（忽略末尾的分隔符）；任一为 undefined 时不同。 */
+export function samePath(a: string | undefined, b: string | undefined): boolean {
+  const strip = (p: string) => p.replace(/[\\/]+$/, '')
+  return a !== undefined && b !== undefined && strip(a) === strip(b)
 }
 
 function failed(detail: string, cmd?: string): MemoryCommandResult {
@@ -174,9 +177,6 @@ export function toPluginConfig(value: unknown): PluginConfig | undefined {
 // —— 宿主实现 ——
 
 export const MEMORY_ROOT_KEY = 'dsh-plastic-memory.gui.memoryRoot'
-
-/** 插件配置的 entryId：cordis.patch.yml 插入的 profile 行 id。 */
-export const CONFIG_ENTRY_ID = 'plastic-memory'
 
 interface ConfigBinding {
   form: ConfigForm | undefined
@@ -285,7 +285,7 @@ export function createHostGateway(ctx: HostContext): BindGateway {
   const config = (): ConfigBinding => {
     if (binding !== undefined) return binding
     if (configForms === undefined) return NO_CONFIG
-    const form = configForms.get(CONFIG_ENTRY_ID)
+    const form = configForms.get(ENTRY_ID)
     binding = { form, get: () => form.getSnapshot(), subscribe: fn => form.subscribe(fn) }
     return binding
   }

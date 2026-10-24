@@ -9,7 +9,7 @@
  */
 import { useMemo, useState, type ReactNode } from 'react'
 import type { MemoryCard as MemoryCardData, MemoryCommand, PendingItem } from '../../src/gui/contract.ts'
-import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
+import { samePath, useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { baseName, formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
 import { sidebarZh } from '../locales/sidebar.ts'
@@ -19,6 +19,7 @@ import { ConflictRuling } from '../ui/ConflictRuling.tsx'
 import { ContextBudgetBar } from '../ui/ContextBudgetBar.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
+import { TrashIcon } from '../ui/TrashIcon.tsx'
 
 type Conflict = Extract<PendingItem, { kind: 'conflict-horizontal' }>
 type Verdict = 'keep-left' | 'keep-right' | 'keep-both'
@@ -38,10 +39,6 @@ export interface SidebarTabProps {
   workspacePath?: string | undefined
   /** 跳到记忆页（经导航 store）。 */
   openPage: (target: NavTarget) => void
-}
-
-function samePath(a: string | undefined, b: string): boolean {
-  return a !== undefined && a.replace(/[\\/]+$/, '') === b.replace(/[\\/]+$/, '')
 }
 
 /** 内置类型按界面语言写；其余（自定义、切模板前的旧类型）取待处理视图的 typeLabels，再认不出写 id。 */
@@ -319,14 +316,6 @@ function ViewNote({ state }: { state: ViewState<unknown> }) {
     : state.status === 'missing' ? t('view.missing')
     : t('view.loading')
   return <p className="pm-side-hint" role="status">{text}</p>
-}
-
-function TrashIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M2.5 4.5h11M6.5 4.5V3h3v1.5M4 4.5l.7 8.5h6.6l.7-8.5M6.8 7v4M9.2 7v4" />
-    </svg>
-  )
 }
 
 export const sidebarTabCss = `

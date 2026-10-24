@@ -4,7 +4,7 @@
  */
 import { useState, type ReactNode } from 'react'
 import { CONFLICT_ACTION_VERDICTS, type MemoryCard as MemoryCardData, type PendingItem } from '../../src/gui/contract.ts'
-import { useGateway, type BorrowedSession } from '../gateway.ts'
+import { samePath, useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, formatNumber, useT, type Translate } from '../i18n.tsx'
 import { Button } from '../ui/Button.tsx'
 import { Chip } from '../ui/Chip.tsx'
@@ -31,11 +31,6 @@ export interface CardProps<K extends PendingItem['kind']> {
   now: number
   typeLabels: Readonly<Record<string, string>>
   onDone: (outcome: Outcome) => void
-}
-
-function samePath(a: string | undefined, b: string | undefined): boolean {
-  const strip = (p: string) => p.replace(/[\\/]+$/, '')
-  return a !== undefined && b !== undefined && strip(a) === strip(b)
 }
 
 /** 记忆在别的项目里（相对借来的会话所在项目）时返回项目路径。 */
