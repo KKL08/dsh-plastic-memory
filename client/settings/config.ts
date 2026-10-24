@@ -18,7 +18,8 @@ export type { ConfigForm, ConfigFormSnapshot, ConfigPathOp } from '../host.ts'
 
 // —— 配置段 ——
 
-export const TEMPLATES = ['coding', 'office', 'custom'] as const
+/** 场景模板，也是设置页分段控件的顺序：通用排第一（2026-10-25 用户定）。custom 在界面上叫「通用」。 */
+export const TEMPLATES = ['custom', 'coding', 'office'] as const
 export const OVERFLOW_MODES = ['relax', 'strict'] as const
 export const EVIDENCE_LEVELS = ['off', 'strict', 'active'] as const
 export const SENSITIVITIES = ['conservative', 'normal', 'proactive'] as const
@@ -162,8 +163,9 @@ export interface CustomTypeDraft {
 
 export type CustomTypeError = 'required' | 'name-format' | 'name-builtin' | 'name-taken' | 'decay-invalid'
 
+/** 新增类型的初始草稿：召回方式、治理优先级预选「搜索」「中」，分段控件打开就有选中项（2026-10-25 用户定）。 */
 export const EMPTY_TYPE_DRAFT: CustomTypeDraft = {
-  name: '', label: '', description: '', whenToSave: '', recall: '', governancePriority: '', decayDays: '',
+  name: '', label: '', description: '', whenToSave: '', recall: 'search', governancePriority: 'medium', decayDays: '',
 }
 
 export function draftOf(name: string, type: CustomType): CustomTypeDraft {

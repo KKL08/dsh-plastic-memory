@@ -55,7 +55,9 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
         <SettingsGroupCard title={t('settings.group.what')}>
           <SettingsItem
             label={t('settings.template.label')}
-            hint={f.template !== saved.template ? t('settings.template.switchHint') : t('settings.template.hint')}
+            hint={f.template !== saved.template
+              ? t('settings.template.hintSwitched', { hint: t(`settings.template.hint.${f.template}`), switch: t('settings.template.switchHint') })
+              : t(`settings.template.hint.${f.template}`)}
           >
             <SegmentedControl
               id={`${id}-template`}

@@ -47,7 +47,7 @@ describe('三组设置的渲染', () => {
     expect(screen.getByRole('heading', { name: '记什么' })).toBeInTheDocument()
     expect(tab('场景模板', '办公')).toHaveAttribute('aria-selected', 'true')
     expect(tab('场景模板', '编码')).toHaveAttribute('aria-selected', 'false')
-    expect(tab('场景模板', '仅通用')).toBeInTheDocument()
+    expect(tab('场景模板', '通用')).toBeInTheDocument()
     expect(screen.getByText('会议纪要')).toBeInTheDocument()
     expect(screen.getByText('meeting-note')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '编辑 会议纪要' })).toBeInTheDocument()
@@ -88,11 +88,22 @@ describe('三组设置的渲染', () => {
     expect(screen.getByText('开一个会话后显示实际路径。')).toBeInTheDocument()
   })
 
+  it('模板按通用、编码、办公排列，说明随选中项列出这一档的类型', () => {
+    setup()
+    const names = within(screen.getByRole('tablist', { name: '场景模板' })).getAllByRole('tab').map(el => el.textContent)
+    expect(names).toEqual(['通用', '编码', '办公'])
+    expect(screen.getByText('在通用五类之外，多一类「可复用流程」。')).toBeInTheDocument()
+    fireEvent.click(tab('场景模板', '办公'))
+    expect(screen.getByText(/^在通用五类之外，多「决定」「承诺」「人物」三类。/)).toBeInTheDocument()
+    fireEvent.click(tab('场景模板', '通用'))
+    expect(screen.getByText(/^用五类通用记忆：用户画像、行为偏好、事实与经验、项目信息、参考引用。/)).toBeInTheDocument()
+  })
+
   it('模板切换后提示后果', () => {
     setup()
     expect(screen.queryByText(/旧模板独有类型的记忆仍会带入/)).toBeNull()
-    fireEvent.click(tab('场景模板', '仅通用'))
-    expect(screen.getByText('切换后，旧模板独有类型的记忆仍会带入、能搜到，agent 不再新增这类记忆。')).toBeInTheDocument()
+    fireEvent.click(tab('场景模板', '通用'))
+    expect(screen.getByText('用五类通用记忆：用户画像、行为偏好、事实与经验、项目信息、参考引用。切换后，旧模板独有类型的记忆仍会带入、能搜到，agent 不再新增这类记忆。')).toBeInTheDocument()
   })
 
   it('配置还在加载时只显示一行；宿主不服务这份配置时只显示提示', () => {
@@ -110,12 +121,30 @@ describe('我加的类型：增删改弹层', () => {
   const dialog = () => screen.getByRole('dialog', { name: '添加类型' })
   const fill = (label: string, value: string) => { fireEvent.change(within(dialog()).getByLabelText(label), { target: { value } }) }
 
+  it('召回方式默认「搜索」、治理优先级默认「中」，不点也能确定', async () => {
+    const { form } = setup()
+    openAdd()
+    expect(within(dialog()).getByRole('tab', { name: '搜索' })).toHaveAttribute('aria-selected', 'true')
+    expect(within(dialog()).getByRole('tab', { name: '中' })).toHaveAttribute('aria-selected', 'true')
+    fill('中文名', '会议纪要')
+    fill('英文名', 'meeting-note')
+    fill('说明', '会上定下的事')
+    fill('什么时候记', '开完会')
+    fireEvent.click(within(dialog()).getByRole('button', { name: '确定' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    await clickSave(form)
+    expect(form.calls[0]!.ops).toEqual([{
+      op: 'set', path: ['customTypes', 'meeting-note'],
+      value: { label: '会议纪要', description: '会上定下的事', whenToSave: '开完会', recall: 'search', decayDays: null, governancePriority: 'medium' },
+    }])
+  })
+
   it('必填项没填不能确定，逐项就地提示', () => {
     setup()
     openAdd()
     fireEvent.click(within(dialog()).getByRole('button', { name: '确定' }))
     expect(dialog()).toBeInTheDocument()
-    expect(within(dialog()).getAllByText('必填。')).toHaveLength(6)
+    expect(within(dialog()).getAllByText('必填。')).toHaveLength(4)
     expect(within(dialog()).getByLabelText('中文名')).toHaveAttribute('aria-invalid', 'true')
     expect(within(dialog()).getByLabelText('过期天数')).not.toHaveAttribute('aria-invalid')
   })
