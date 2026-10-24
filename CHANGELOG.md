@@ -102,8 +102,9 @@ All notable changes to this project are documented here. The format follows
   superseded memories for 14 days; `.state/` holds the plugin's own snapshots,
   pending decisions, scan cache and recall statistics. Existing files are read
   in place; snapshots and pending decisions are imported from the host's KV
-  store on first use. The host's `storageDomain` service is therefore no
-  longer required.
+  store on first use, and the copies there are removed once the import has
+  finished, so nothing stays behind in the host's store. The host's
+  `storageDomain` service is therefore no longer required.
 - Hand-written memory files need only `name` and `type` in the frontmatter; the
   id is derived from the file path and every other field is filled in at the
   next write or session start. Timestamps accept dates, ISO 8601 date-times
@@ -195,6 +196,11 @@ All notable changes to this project are documented here. The format follows
   `memory_scan`. The verdict is now remembered: the pair stays off the
   pending list until either memory, or the `AGENTS.md` it was checked
   against, changes.
+- Promoting a memory that contains a secret to `AGENTS.md` copied the secret
+  there in plain text, where every session in every project reads it and
+  forgetting the memory cannot remove it. Such memories are now refused with
+  a message saying why and stay in the project unchanged. Promoting to global
+  memory is unaffected.
 
 ## [0.1.1-beta.5] - 2026-10-20
 

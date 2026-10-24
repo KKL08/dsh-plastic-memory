@@ -10,6 +10,7 @@ import { InMemoryKvTable } from '../src/kv-table.ts'
 import type { MemorySnapshot } from '../src/governance/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
+import { FAKE_SECRET } from './helpers/secrets.ts'
 
 // 本文件默认造一条 workspace 层、待提升的 preference（agent-inferred，globalCandidate）。
 const record = (partial: Partial<MemoryRecord> = {}) => baseRecord({
@@ -92,6 +93,49 @@ describe('executePromote', () => {
     expect(r.promoted).toEqual([])
     expect(r.skipped).toEqual(['mem_z'])
     expect((await store.get('mem_z'))!.status).toBe('active')  // 软删已回滚，记忆没有丢
+  })
+
+  // AGENTS.md 原文注入所有项目的会话、不归插件管：含密钥的记忆写进去就是明文外泄，原记忆进回收站后留下的只剩这份明文
+  it('target=agents-md：含 critical 密钥的记录拒绝写入，AGENTS.md 不动、记忆仍 active、计入 skipped 并说明原因', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await store.put(record({ id: 'mem_sec', name: '部署凭证', content: `token ${FAKE_SECRET.sk}` }))
+    const { writer, lines } = fakeAgentsMd()
+    const snapshots = makeSnapshots()
+    const r = await executePromote({ confirmedIds: ['mem_sec'], target: 'agents-md' }, { workspacePath: '/proj' }, { store, agentsMd: writer, snapshots })
+    expect(r.promoted).toEqual([])
+    expect(r.skipped).toEqual(['mem_sec'])
+    expect(lines).toEqual([])
+    expect((await store.get('mem_sec'))!.status).toBe('active')
+    expect(r.message).toContain('含密钥的记忆不能写入 AGENTS.md')
+    expect(await snapshots.list()).toHaveLength(0) // 没有实际提升目标，不拍快照
+  })
+
+  it('target=agents-md：只含 suspected 密钥（用户 force 放行保存）的记录同样拒绝', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await store.put(record({ id: 'mem_sus', name: '测试库', content: '数据库密码: hunter2024x' }))
+    const { writer, lines } = fakeAgentsMd()
+    const r = await executePromote({ confirmedIds: ['mem_sus'], target: 'agents-md' }, { workspacePath: '/proj' }, { store, agentsMd: writer, snapshots: makeSnapshots() })
+    expect(r.promoted).toEqual([])
+    expect(r.skipped).toEqual(['mem_sus'])
+    expect(lines).toEqual([])
+    expect((await store.get('mem_sus'))!.status).toBe('active')
+    expect(r.message).toContain('含密钥的记忆不能写入 AGENTS.md')
+  })
+
+  it('target=agents-md：同一批里干净的照常写入，含密钥的被拒', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await store.put(record({ id: 'mem_ok', name: '偏好', content: '用 pnpm' }))
+    await store.put(record({ id: 'mem_sec', name: '部署凭证', content: `token ${FAKE_SECRET.github}` }))
+    const { writer, lines } = fakeAgentsMd()
+    const snapshots = makeSnapshots()
+    const r = await executePromote({ confirmedIds: ['mem_ok', 'mem_sec'], target: 'agents-md' }, { workspacePath: '/proj' }, { store, agentsMd: writer, snapshots })
+    expect(r.promoted).toEqual([{ id: 'mem_ok', target: 'agents-md' }])
+    expect(r.skipped).toEqual(['mem_sec'])
+    expect(lines).toEqual(['偏好 — 用 pnpm'])
+    expect((await store.get('mem_ok'))!.status).toBe('deleted')
+    expect((await store.get('mem_sec'))!.status).toBe('active')
+    expect(r.message).toContain('含密钥的记忆不能写入 AGENTS.md')
+    expect((await snapshots.list())[0].memoryIds).toEqual(['mem_ok'])
   })
 
   it('已删除/不存在的 id 跳过、不计入 promoted', async () => {

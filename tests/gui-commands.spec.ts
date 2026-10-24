@@ -390,6 +390,19 @@ describe('提升候选与超限', () => {
     expect(await pendingCandidates(e)).toEqual([])
   })
 
+  it('promote 含密钥的记忆到 AGENTS.md → failed 并说明原因，什么都不动', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_sec', name: '部署凭证', content: `token ${FAKE_SECRET.sk}`, scope: 'workspace', workspacePath: SESSION_WS, globalCandidate: true }))
+    const { entry } = await e.decisions.upsert({ kind: 'promote-candidate', memoryIds: ['mem_sec'], summary: '部署凭证', workspaces: [SESSION_WS], fingerprint: 'fp-sec' }, 1)
+    const body = err(await e.run({ cmd: 'promote', decisionId: entry.id, target: 'agents-md' }))
+    expect(body.code).toBe('failed')
+    expect(body.detail).toContain('含密钥的记忆不能写入 AGENTS.md')
+    await expect(stat(join(root, 'AGENTS.md'))).rejects.toThrow()
+    expect((await e.store.get('mem_sec'))!.status).toBe('active')
+    expect(await e.decisions.list()).toEqual([entry])
+    expect(await e.snapshots.list()).toEqual([])
+  })
+
   it('keep-local：清候选标记、条目 settled 为 keep-local；再体检不重开，内容改了（模型又标为全局）才重新提示', async () => {
     const e = env({ llm: quietLlm })
     const { decisionId, memoryId } = await seedCandidate(e)
