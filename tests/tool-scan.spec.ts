@@ -534,6 +534,33 @@ describe('executeScan scope 校验', () => {
   })
 })
 
+describe('executeScan 冲突挂账与进行中的裁决', () => {
+  it('语义层跑着的时候用户裁决了这对冲突（败方软删、条目 settled 记快照）：扫描结束不把它反撤成未决', async () => {
+    const deps = makeDeps({ resolveContext: async () => ({ workspacePath: '/proj' }) })
+    const a = record({ id: 'mem_a', scope: 'workspace', workspacePath: '/proj', content: '用 pnpm' })
+    const b = record({ id: 'mem_b', scope: 'workspace', workspacePath: '/proj', content: '用 npm' })
+    await deps.store.put(a)
+    await deps.store.put(b)
+    // 第一次扫描挂账
+    await scanSingle({}, makeDeps({ ...deps, getLlm: (_exec: unknown) => conflictLlm }))
+    const [entry] = await deps.decisions.list()
+    expect(entry!.memoryIds.sort()).toEqual(['mem_a', 'mem_b'])
+
+    // 第二次扫描：模型调用期间用户「以 A 为准」——条目 settled 记快照、B 软删（confirm 执行器做的事）
+    const ruleMidScan: SemanticLlm = {
+      complete: async () => {
+        await deps.decisions.settle(entry!.id, 'keep-left', 9500, { snapshotId: 'snap_ruling' })
+        await deps.store.softDelete(b)
+        return JSON.stringify({ findings: [{ type: 'conflict', memoryIds: ['mem_a', 'mem_b'], summary: '互相矛盾', suggestedAction: '留一条' }] })
+      },
+    }
+    const r = await scanSingle({}, makeDeps({ ...deps, getLlm: (_exec: unknown) => ruleMidScan }))
+    expect(r.findings.filter(f => f.type === 'conflict')).toEqual([])
+    expect(await deps.decisions.list()).toEqual([])
+    expect((await deps.decisions.listSettled()).map(d => [d.id, d.settled?.verdict, d.settled?.snapshotId])).toEqual([[entry!.id, 'keep-left', 'snap_ruling']])
+  })
+})
+
 describe('executeScan 提升候选入账', () => {
   const candidates = async (deps: ScanToolDeps) => (await deps.decisions.list()).filter(d => d.kind === 'promote-candidate')
   const settledCandidates = async (deps: ScanToolDeps) => (await deps.decisions.listSettled()).filter(d => d.kind === 'promote-candidate')

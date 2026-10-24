@@ -237,6 +237,13 @@ async function scanPass(
   signal?.throwIfAborted()
   for (const f of [...findings]) {
     if (f.type !== 'conflict') continue
+    // 语义层跑的这几十秒里用户可能已经裁决（败方软删、条目 settled 记了快照）：按预读数据挂账会把那条裁决
+    // 当成「败方回来了」反撤。挂账前重读成员，任一方已不是 active 就跳过这条发现。
+    const live = await Promise.all(f.memoryIds.map(id => deps.store.get(id)))
+    if (live.some(r => r === undefined || r.status !== 'active')) {
+      findings.splice(findings.indexOf(f), 1)
+      continue
+    }
     const members = f.memoryIds.map(id => byId.get(id))
     const fingerprint = members.every(m => m !== undefined)
       ? conflictFingerprint(members, f.baselineRef !== undefined ? baseline ?? [] : undefined)
