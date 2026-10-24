@@ -5,7 +5,7 @@
  * tab 不常驻：从「开始」页入口或 `openMemoryTab`（`ctx.sidebarRight.openTab`）打开。
  */
 import { useMemo } from 'react'
-import { createHostGateway } from '../gateway.ts'
+import type { BindGateway } from '../gateway.ts'
 import type { HostContext, SessionStandardProps, SidebarHost } from '../host.ts'
 import type { Translate } from '../i18n.tsx'
 import { NS } from '../locales.ts'
@@ -28,7 +28,7 @@ export function openMemoryTab(ctx: Pick<SidebarHost, 'sidebarRight'>): void {
   ctx.sidebarRight.openTab(SIDEBAR_TAB_KIND)
 }
 
-export function registerSidebarTab(ctx: HostContext & SidebarHost, nav: NavStore, useTranslate: () => Translate): void {
+export function registerSidebarTab(ctx: HostContext & SidebarHost, nav: NavStore, bind: BindGateway, useTranslate: () => Translate): void {
   const t = ctx.locale.bind(NS)
   ctx.effect(() => ctx.sidebarRightTabs.register({
     id: SIDEBAR_TAB_ID,
@@ -46,7 +46,6 @@ export function registerSidebarTab(ctx: HostContext & SidebarHost, nav: NavStore
   // 宿主启动时间：浏览器半侧拿不到宿主进程的启动时刻（boot 数据与 Remote 都没有），先用插件加载（≈ 页面加载）时刻代替。
   // 页面通常随宿主一起打开；刷新页面后，刷新前冻结的会话也会显示「重启后未重新带入」。
   const hostStartedAt = Date.now()
-  const bind = createHostGateway(ctx)
   function MemorySidebarTab(props: SessionStandardProps) {
     const gateway = useMemo(() => bind(props), [props.useSessions, props.useResource])
     const translate = useTranslate()

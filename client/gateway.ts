@@ -237,11 +237,14 @@ function createRootStore(run: RunLine) {
 
 interface ReadState<V> { key: string; trigger: string; view: ViewState<V> }
 
+/** 网关绑定函数：插槽根组件用自己的标准 props 绑定一份网关。 */
+export type BindGateway = (props: RootStandardProps) => MemoryGateway
+
 /**
- * 宿主网关。共享状态（memoryRoot）在外层闭包里，每个插槽根组件用自己的标准 props 绑定一份：
- * `const gateway = useMemo(() => bind(props), [props.useSessions, props.useResource])`。
+ * 宿主网关。共享状态（memoryRoot）在外层闭包里；每个插件实例只建一份（apply 里），所有插槽根共用，
+ * 每个插槽根组件用自己的标准 props 绑定：`const gateway = useMemo(() => bind(props), [props.useSessions, props.useResource])`。
  */
-export function createHostGateway(ctx: HostContext): (props: RootStandardProps) => MemoryGateway {
+export function createHostGateway(ctx: HostContext): BindGateway {
   const run: RunLine = async (sessionId, line) => {
     try {
       return await ctx.remote.commands.execute(sessionId, line, [])

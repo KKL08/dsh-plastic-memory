@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import type { ComponentType } from 'react'
+import { createHostGateway } from '../gateway.ts'
 import type { HostContext, RootStandardProps } from '../host.ts'
 import { createTranslator } from '../i18n.tsx'
 import { zh } from '../locales.ts'
@@ -30,7 +31,7 @@ function setup(withConfigForms = true) {
     inject: (deps: string[], fn: (scope: unknown) => void) => { expect(deps).toEqual(['configForms']); fn(withConfigForms ? { ...ctx, configForms } : ctx) },
   } as unknown as HostContext
   const nav = createNavStore()
-  applySettings(ctx, nav, () => createTranslator(zh))
+  applySettings(ctx, nav, createHostGateway(ctx), () => createTranslator(zh))
   return { registered, configForms, selectPanel, nav }
 }
 

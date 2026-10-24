@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import type { ComponentType } from 'react'
+import { createHostGateway } from '../gateway.ts'
 import type { HostContext, SessionStandardProps, SidebarHost, SidebarTabDefinition } from '../host.ts'
 import { createTranslator } from '../i18n.tsx'
 import { zh } from '../locales.ts'
@@ -31,7 +32,7 @@ function setup() {
       session: { openWorkspacePath: vi.fn() },
     },
   }
-  registerSidebarTab(ctx, createNavStore(), () => t)
+  registerSidebarTab(ctx, createNavStore(), createHostGateway(ctx), () => t)
   return { ctx, slots, definitions, effects }
 }
 

@@ -3,7 +3,7 @@
  * 本轮新记的记忆由会话事件 Definition 挂到 Turn 上。`uiConversation` 是可选服务，没有就不注册交付卡。
  */
 import { useCallback, useMemo, useSyncExternalStore } from 'react'
-import { createHostGateway } from '../gateway.ts'
+import type { BindGateway } from '../gateway.ts'
 import type { HostContext, HostLocale, RootStandardProps } from '../host.ts'
 import { TranslateProvider, type Translate } from '../i18n.tsx'
 import { NS } from '../locales.ts'
@@ -52,8 +52,7 @@ function createToolView(ctx: HostContext) {
   }
 }
 
-function createTurnTail(ctx: HostContext, nav: NavStore) {
-  const bind = createHostGateway(ctx)
+function createTurnTail(ctx: HostContext, nav: NavStore, bind: BindGateway) {
   const deleted = new Set<string>()
   const openDetail = (target: Parameters<typeof openMemoryPage>[2]) => openMemoryPage(ctx, nav, target)
   return function MemoryTurnTail(props: TurnTailProps) {
@@ -73,7 +72,7 @@ function createTurnTail(ctx: HostContext, nav: NavStore) {
   }
 }
 
-export function registerChatCards(ctx: HostContext, nav: NavStore): void {
+export function registerChatCards(ctx: HostContext, nav: NavStore, bind: BindGateway): void {
   const ToolView = createToolView(ctx)
   ctx.slots.inject('tool.call.toolview', () => {
     const disposers = MEMORY_TOOLS.map(key => ctx.slots.register({ name: 'tool.call.toolview', key }, ToolView))
@@ -82,7 +81,7 @@ export function registerChatCards(ctx: HostContext, nav: NavStore): void {
   ctx.inject(['uiConversation'], (child) => {
     const chat = child as ChatContext
     chat.uiConversation.events.register(savedTurnDefinition)
-    const TurnTail = createTurnTail(chat, nav)
+    const TurnTail = createTurnTail(chat, nav, bind)
     chat.slots.inject('conversation.chat.turnTail', () => chat.slots.register(
       { name: 'conversation.chat.turnTail', id: 'plastic-memory-saved', order: 30 },
       TurnTail,

@@ -4,8 +4,8 @@
  * 根节点 `display: contents`：没有记忆时 dock 的 flex 行里不留空项、不多占一个 gap。
  */
 import { useMemo } from 'react'
-import type { MemoryGateway } from '../gateway.ts'
-import type { HostContext, RootStandardProps, SessionStandardProps } from '../host.ts'
+import type { BindGateway } from '../gateway.ts'
+import type { HostContext, SessionStandardProps } from '../host.ts'
 import type { Translate } from '../i18n.tsx'
 import { openMemoryPage, SIDEBAR_TAB_KIND, type NavStore } from '../nav.ts'
 import { PanelShell } from '../ui/PanelShell.tsx'
@@ -19,7 +19,7 @@ export const DOCK_ORDER = 100
 export function createComposerDock(
   ctx: Pick<HostContext, 'layout' | 'sidebarRight'>,
   nav: NavStore,
-  bind: (props: RootStandardProps) => MemoryGateway,
+  bind: BindGateway,
   useTranslate: () => Translate,
 ) {
   return function MemoryComposerDock(props: SessionStandardProps) {

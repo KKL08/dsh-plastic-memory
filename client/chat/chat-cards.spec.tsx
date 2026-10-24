@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { ComponentType } from 'react'
 import { createFakeGateway } from '../gateway.fake.ts'
+import { createHostGateway } from '../gateway.ts'
 import type { HostContext, SessionListState } from '../host.ts'
 import { createTranslator } from '../i18n.tsx'
 import { zh } from '../locales.ts'
@@ -183,7 +184,7 @@ function fakeHost() {
     remote: { commands: { execute }, workspaceFiles: { read: vi.fn() }, session: { openWorkspacePath: vi.fn() } },
   }
   const nav = createNavStore()
-  registerChatCards(ctx, nav)
+  registerChatCards(ctx, nav, createHostGateway(ctx))
   return { ctx, nav, registered, definitions, execute }
 }
 

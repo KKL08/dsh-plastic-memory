@@ -5,7 +5,7 @@
  * 宿主没有它（或它被卸下）时只是没有设置页，记忆页等其余插槽照常。
  */
 import { useMemo } from 'react'
-import { createHostGateway } from '../gateway.ts'
+import type { BindGateway } from '../gateway.ts'
 import type { HostContext, RootStandardProps } from '../host.ts'
 import type { Translate } from '../i18n.tsx'
 import { openMemoryPage, type NavStore } from '../nav.ts'
@@ -20,8 +20,7 @@ export type ConfigFormsService = NonNullable<HostContext['configForms']>
 
 const SETTINGS_CSS = controlsCss + customTypesCss + settingsPageCss + statusCardCss
 
-export function createSettingsCard(ctx: HostContext, configForms: ConfigFormsService, nav: NavStore, useTranslate: () => Translate) {
-  const bind = createHostGateway(ctx)
+export function createSettingsCard(ctx: HostContext, configForms: ConfigFormsService, nav: NavStore, bind: BindGateway, useTranslate: () => Translate) {
   return function PlasticMemorySettings(props: RootStandardProps & { view?: 'summary' | 'page' }) {
     const gateway = useMemo(() => bind(props), [props.useSessions, props.useResource])
     const form = useMemo(() => configForms.get(ENTRY_ID), [])
@@ -35,11 +34,11 @@ export function createSettingsCard(ctx: HostContext, configForms: ConfigFormsSer
   }
 }
 
-export function applySettings(ctx: HostContext, nav: NavStore, useTranslate: () => Translate): void {
+export function applySettings(ctx: HostContext, nav: NavStore, bind: BindGateway, useTranslate: () => Translate): void {
   ctx.inject(['configForms'], (scope) => {
     const configForms = scope.configForms
     if (configForms === undefined) return
-    const Card = createSettingsCard(ctx, configForms, nav, useTranslate)
+    const Card = createSettingsCard(ctx, configForms, nav, bind, useTranslate)
     scope.slots.inject('plugins.bundle.config', () => scope.slots.register({ name: 'plugins.bundle.config', key: PACKAGE_NAME }, Card))
   })
 }
