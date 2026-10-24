@@ -37,7 +37,8 @@ import type { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { baselineProjectionDefinition, readBaseline } from './governance/baseline.ts'
 import type { SemanticLlm } from './governance/semantic-scan.ts'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { createMemoryCommand, writePing, type MemoryCommand } from './gui/ping.ts'
+import { createMemoryCommand, type MemoryCommandDefinition } from './gui/commands.ts'
+import { ViewWriter, collectGlobalViews } from './gui/view-writer.ts'
 
 export interface Config {
   // reflective（会话结束/空闲时批量提取）是规划中的第二写入模式；实现时再回 schema 加回该取值
@@ -133,13 +134,6 @@ export async function apply(ctx: Context, config: Config) {
   // 给出的保留可选注册的写法。disposer 随 child fiber 走，插件卸载键即消失。服务缺席时插件照常挂载，
   // 只是不注册投影：垂直冲突检测跳过，memory_scan 打 baseline-missing。
   ctx.inject(['sessionProjections'], child => void child.sessionProjections.register(baselineProjectionDefinition))
-  // GUI（浏览器半侧）的动作通道：commands 同样走可选注册，旧宿主没有这个服务时插件照常挂载、不注册、不报错。
-  // 启动时写一次 .state/gui/ping.json（不 await，不拖住加载），让浏览器半侧在第一次 ping 之前就有文件可订阅。
-  ctx.inject(['commands'], child => {
-    const commands = (child as unknown as { commands: { register(def: MemoryCommand): () => void } }).commands
-    commands.register(createMemoryCommand(memoryRoot))
-    writePing(memoryRoot, 'startup').catch((err: unknown) => ctx.logger.warn(`plastic-memory: gui ping write failed: ${String(err)}`))
-  })
   // cwd → workspace 归属的单一解析路径：SnapshotCache 的 lazy 自愈与 session/created 的 eager 预热共用，
   // 避免两处各写一份 resolveWorkspacePath 调用。
   const resolveWorkspace = (session: object) => resolveWorkspacePath(ctx, (session as SessionLike).header?.cwd)
@@ -293,6 +287,13 @@ export async function apply(ctx: Context, config: Config) {
     return texts.length === 0 ? null : texts
   }
 
+  // 语义层模型与基线都按触发调用的 agent 取：memory_scan 与 /memory scan（借来的会话）共用
+  const getLlm = (exec: ToolRunContext) => makeSemanticLlm({ session: exec.agent?.session, agentOptions: exec.agent?.options })
+  const getBaseline = (exec: ToolRunContext) => sessionBaseline(exec.agent?.session)
+  // AGENTS.md 位置从 DSH_HOME 独立解析（不从 memoryRoot 反推——自定义 root 时会指向 dsh 不读的文件）；
+  // memory_promote 与 /memory promote 共用一个写入器（进程内串行）
+  const agentsMd = createAgentsMdWriter(agentsMdPath())
+
   // 子 agent 只读门：写入与治理工具在注册处统一套门，子 agent 会话（delegationDepth ≥ 1）调用即拒
   const registerWrite = (tool: ToolDefinition) => ctx.tools.register(gateSubagentWrites(tool, resolveContext))
   registerWrite(createSaveTool({ store, registry, resolveContext, snapshots }))
@@ -320,12 +321,8 @@ export async function apply(ctx: Context, config: Config) {
     // 扫描会写语义缓存、登记待决冲突，归写工具；health 纯读，不套门
     registerWrite(createScanTool({
       store, registry, decisions, cache: scanCache,
-      getBaseline: exec => sessionBaseline(exec.agent?.session),
-      // exec → { session, agentOptions } 的小 helper：makeSemanticLlm 本体不再触碰 exec 形状。
-      getLlm: exec => {
-        const agent = exec.agent
-        return makeSemanticLlm({ session: agent?.session, agentOptions: agent?.options })
-      },
+      getBaseline,
+      getLlm,
       resolveContext,
     }))
     ctx.tools.register(createHealthTool({
@@ -335,11 +332,23 @@ export async function apply(ctx: Context, config: Config) {
     }))
     // memory_promote：把用户确认的候选提升 global。确认由模型先调 ask_user_question 完成
     // （工具内部弹 userQuestions 会被 web 会话拒绝 "requires agent-owned session"），本工具纯执行。
-    // AGENTS.md 位置从 DSH_HOME 独立解析（不从 memoryRoot 反推——自定义 root 时会指向 dsh 不读的文件）
-    const agentsMd = createAgentsMdWriter(agentsMdPath())
     const defaultTarget: PromoteTarget = config.governance.globalPromoteTarget === 'agents-md' ? 'agents-md' : 'global'
     registerWrite(createPromoteTool({ store, agentsMd, snapshots, defaultTarget, resolveContext }))
   }
+
+  // GUI（浏览器半侧）的动作通道：/memory 命令走可选注册，旧宿主没有 commands 服务时插件照常挂载、不注册、不报错。
+  // 加载期不写视图：视图在命令落盘后、refresh-views / scan 时重写（浏览器半侧首次进入发 info 拿路径）。
+  ctx.inject(['commands'], child => {
+    const commands = (child as unknown as { commands: { register(def: MemoryCommandDefinition): () => void } }).commands
+    const views = new ViewWriter({
+      memoryRoot, log: ctx.logger,
+      collect: () => collectGlobalViews({ store, decisions, cache: scanCache, registry, memoryRoot }),
+    })
+    commands.register(createMemoryCommand({
+      memoryRoot, store, decisions, snapshots, cache: scanCache, registry, agentsMd, views,
+      resolveContext, getLlm, getBaseline, log: ctx.logger,
+    }))
+  })
 
   // frozen snapshot：按 session 隔离缓存，session/created 异步解析 workspace，compaction 结束标过期、下一次中间件重建。
   // session/* 事件由常驻的 @deepseek-ai/dsh-session 提供，但其 cordis Events 增广不在本插件的

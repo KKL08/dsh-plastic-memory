@@ -239,17 +239,55 @@ describe('apply', () => {
   })
 })
 
-/** GUI 半侧的服务端接线（walking skeleton）：commands 服务在时注册 /memory 并写一次 ping.json，缺席时静默跳过。 */
+/** GUI 半侧的服务端接线：commands 服务在时注册 /memory 命令处理器，缺席时静默跳过；加载期都不碰磁盘。 */
 describe('GUI 命令接线', () => {
-  it('宿主有 commands：注册 memory 命令，启动时写一次 .state/gui/ping.json', async () => {
+  type CommandDef = { name: string; handler(inv: { rawInput: string; agent: unknown }): Promise<{ kind: string; text?: string }> }
+  async function withCommands() {
     const memoryRoot = await makeTmpRoot()
-    const defs: Array<{ name: string }> = []
-    const ctx = mockCtx({ commands: { register: (def) => { defs.push(def as { name: string }); return () => {} } } })
+    const defs: CommandDef[] = []
+    const ctx = mockCtx({ commands: { register: (def) => { defs.push(def as CommandDef); return () => {} } } })
     await apply({ ...ctx, logger: { info() {}, warn() {}, error() {} } } as never, new Config({ memoryRoot } as unknown as Config))
+    // 借来的会话：没有 cwd（只有 global 可见），会话 id 来自 header
+    const agent = { session: { header: { id: 'sess-x' }, seq: 1 } }
+    const exec = async (line: string) => {
+      const r = await defs[0]!.handler({ rawInput: line.slice('/memory'.length), agent })
+      return { kind: r.kind, body: JSON.parse(r.text!) as Record<string, unknown> }
+    }
+    return { memoryRoot, defs, exec }
+  }
+
+  it('宿主有 commands：注册一条 memory 命令，加载时不写 .state/', async () => {
+    const { memoryRoot, defs } = await withCommands()
     expect(defs.map(d => d.name)).toEqual(['memory'])
-    await expect.poll(async () => {
-      try { return (JSON.parse(await readFile(join(memoryRoot, '.state', 'gui', 'ping.json'), 'utf8')) as { source: string }).source } catch { return undefined }
-    }).toBe('startup')
+    await expect(stat(join(memoryRoot, '.state'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('执行回调：info 返回配置的 memoryRoot 与该会话的视图路径', async () => {
+    const { memoryRoot, exec } = await withCommands()
+    const { kind, body } = await exec('/memory info')
+    expect(kind).toBe('success')
+    expect(body).toMatchObject({ ok: true, cmd: 'info', info: { memoryRoot, views: { session: join(memoryRoot, '.state', 'gui', 'session-sess-x.json') } } })
+  })
+
+  it('执行回调：refresh-views 写出视图文件；改记忆的子命令落盘后也重写视图', async () => {
+    const { memoryRoot, exec } = await withCommands()
+    expect((await exec('/memory refresh-views')).body).toEqual({ ok: true, cmd: 'refresh-views' })
+    const pendingPath = join(memoryRoot, '.state', 'gui', 'pending.json')
+    expect(JSON.parse(await readFile(pendingPath, 'utf8'))).toMatchObject({ items: [] })
+
+    await mkdir(join(memoryRoot, 'global'), { recursive: true })
+    await writeFile(join(memoryRoot, 'global', 'gone.md'), encodeRecord(record({ id: 'mem_gone', name: '要删的' }), {}), 'utf8')
+    const forgot = await exec('/memory forget {"memoryId":"mem_gone"}')
+    expect(forgot.body).toMatchObject({ ok: true, cmd: 'forget', memoryIds: ['mem_gone'] })
+    const deleted = JSON.parse(await readFile(join(memoryRoot, '.state', 'gui', 'deleted.json'), 'utf8')) as { items: Array<{ memory: { id: string } }> }
+    expect(deleted.items.map(i => i.memory.id)).toEqual(['mem_gone'])
+  })
+
+  it('执行回调：未知子命令返回 error 与 invalid-args', async () => {
+    const { exec } = await withCommands()
+    const { kind, body } = await exec('/memory ping')
+    expect(kind).toBe('error')
+    expect(body).toMatchObject({ ok: false, code: 'invalid-args' })
   })
 
   it('宿主没有 commands（旧宿主）：apply 照常完成，不注册、不写 .state/', async () => {
