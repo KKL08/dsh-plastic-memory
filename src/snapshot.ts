@@ -114,7 +114,7 @@ export function assembleSnapshot(deps: {
   }
   // 疑似密钥不跳过、不加提示：四个面只把命中片段遮成占位，整条照常注入（id 不动，coreIds 与文件路径照常对应）
   const valid = visible.filter(r => withinValidity(r, now))
-  const all = valid.map(maskSecretSurface)
+  const all = valid.map(r => maskSecretSurface(r))
   // 文件名由 name 派生，slug 只换分隔符，name 被遮了路径里多半还留着同一段密钥：这条不给路径，看全文走 memory_search。
   // 手起名的文件名可能自带密钥，路径本身也遮一遍。
   const files = new Map<string, string>()

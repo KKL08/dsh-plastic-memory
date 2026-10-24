@@ -49,17 +49,26 @@ export function secretFields(r: SecretSurface): SecretField[] {
 /** 注入时遮盖命中片段用的占位文本。 */
 export const SECRET_MASK = '[已隐藏]'
 
+/**
+ * 遮盖口径。缺省（critical）只遮 critical：注入与视图用，suspected 写入时已由用户确认放行，遮了反而违背确认。
+ * suspected = critical 与 suspected 都遮：对话卡用，那里展示的是 agent 发的原文，密钥一律不出现（spec 42）。
+ */
+export interface MaskOptions { severity?: SecretSeverity }
+
 // matchAll 要全局正则；SECRET_PATTERNS 本身不带 g，detectSecrets 的 test() 才不受 lastIndex 影响。
-// 只遮 critical：suspected 写入时已由用户确认放行，遮了反而违背确认。
-const GLOBAL_PATTERNS = SECRET_PATTERNS
-  .filter(p => p.severity === 'critical')
+const globalPatterns = (severities: readonly SecretSeverity[]) => SECRET_PATTERNS
+  .filter(p => severities.includes(p.severity))
   .map(p => new RegExp(p.re.source, `${p.re.flags}g`))
+const GLOBAL_PATTERNS: Record<SecretSeverity, RegExp[]> = {
+  critical: globalPatterns(['critical']),
+  suspected: globalPatterns(['critical', 'suspected']),
+}
 
 type Span = [start: number, end: number]
 
 /** text 里所有命中片段的区间：各规则全局匹配，重叠或相接的合并。 */
-function secretSpans(text: string): Span[] {
-  const spans: Span[] = GLOBAL_PATTERNS.flatMap(re => [...text.matchAll(re)].map((m): Span => [m.index, m.index + m[0].length]))
+function secretSpans(text: string, opts: MaskOptions): Span[] {
+  const spans: Span[] = GLOBAL_PATTERNS[opts.severity ?? 'critical'].flatMap(re => [...text.matchAll(re)].map((m): Span => [m.index, m.index + m[0].length]))
   spans.sort((a, b) => a[0] - b[0])
   const merged: Span[] = []
   for (const [start, end] of spans) {
@@ -84,16 +93,16 @@ function maskRange(text: string, spans: readonly Span[], from: number, to: numbe
   return out + text.slice(pos, to)
 }
 
-/** 按片段遮盖：命中 critical 规则的片段换成占位文本，其余文字原样。 */
-export function maskSecrets(text: string): string {
-  return maskRange(text, secretSpans(text), 0, text.length)
+/** 按片段遮盖：命中规则的片段（口径见 MaskOptions，缺省只看 critical）换成占位文本，其余文字原样。 */
+export function maskSecrets(text: string, opts: MaskOptions = {}): string {
+  return maskRange(text, secretSpans(text, opts), 0, text.length)
 }
 
 /**
  * 四个面按片段遮盖。在与 hasSecret 同口径的拼接文本上找命中区间再切回各字段，
  * 跨字段拼接才命中的，各字段落在区间里的部分各换一个占位。没有命中原样返回同一个对象。
  */
-export function maskSecretSurface<T extends SecretSurface>(r: T): T {
+export function maskSecretSurface<T extends SecretSurface>(r: T, opts: MaskOptions = {}): T {
   const segments = [r.content, r.name, r.summary, ...r.tags]
   const starts: number[] = []
   let text = ''
@@ -102,7 +111,7 @@ export function maskSecretSurface<T extends SecretSurface>(r: T): T {
     starts.push(text.length)
     text += segment
   })
-  const spans = secretSpans(text)
+  const spans = secretSpans(text, opts)
   if (spans.length === 0) return r
   const [content, name, summary, ...tags] = segments.map((segment, i) => maskRange(text, spans, starts[i], starts[i] + segment.length))
   return { ...r, content, name, summary, tags }

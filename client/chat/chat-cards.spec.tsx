@@ -199,6 +199,20 @@ describe('密钥永远不出现在对话卡里', () => {
     expect(container.textContent).not.toContain(KEY)
     expect(container.querySelector('.pm-tr-summary')).toHaveTextContent('[已隐藏]')
   })
+
+  it('带 force 存下的疑似密钥（password: …）同样不出现在交付卡和折叠行里', () => {
+    const PASS = 'password: Hunter2-2026'
+    const args = { ...saveArgs, name: `登录 ${PASS}`, content: `测试环境 ${PASS}，周五前改。`, force: true }
+    const data = turnData([turnStart, call(2, 'c1', 'memory_save', args), res(3, 'c1', SAVED_TEXT)])
+    const card = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={data!.saved} now={NOW} openDetail={() => {}} deleted={new Set()} />, createFakeGateway())
+    expect(card.container.textContent).not.toContain('Hunter2-2026')
+    expect(card.container.textContent).toContain('[已隐藏]')
+    card.unmount()
+    let expanded = true
+    const props: MemoryToolViewProps = { ...result('memory_save', args, `${SAVED_TEXT}\n${PASS}`), useDisclosure: () => ({ expanded, toggle: () => { expanded = !expanded } }) }
+    const { container } = renderInShell(<MemoryToolRow {...props} hostT={hostT} />)
+    expect(container.textContent).not.toContain('Hunter2-2026')
+  })
 })
 
 // —— 注册与导航 ——

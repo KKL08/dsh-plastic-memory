@@ -2,7 +2,7 @@
  * 折叠区外的交付卡（DESIGN.md「Navigation & Entries」）：「这一轮记住了 N 条」，每条一张记忆卡，行尾垃圾桶图标
  * （软删 `/memory forget`，可撤销，不用红），删后原位留「已删除。14 天内也能在最近删除里找回。」和「撤销」；
  * 每条右下角「查看详情 ›」（次文字色、常规字重）打开记忆页「全部记忆」并定位到这一条（故事 41）。
- * 密钥不会出现在这里：记忆卡在 savedMemoryCard 里已按服务端同一套规则遮盖。
+ * 密钥不会出现在这里：记忆卡在 savedMemoryCard 里已遮盖，口径比视图宽（疑似密钥也遮，见 tool-summary.ts）。
  */
 import { useMemo, useState } from 'react'
 import type { GuiLayerRef } from '../../src/gui/contract.ts'

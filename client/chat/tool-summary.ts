@@ -67,7 +67,7 @@ const SOURCE_MODES = ['user-explicit', 'user-behavior', 'environment-observed', 
 
 /**
  * 一次成功的新记（kind = saved）→ 记忆卡：id / 类型 / 作用域取结果，原文、名字、来源取参数。
- * 参数是 agent 发的原文，没经过视图的遮盖，这里按同一套规则遮掉密钥片段（带 force 存下的也不例外）。
+ * 参数是 agent 发的原文，没经过视图的遮盖，这里遮掉密钥片段，疑似密钥也遮（带 force 存下的也不例外）。
  */
 export function savedMemoryCard(args: Args | undefined, resultText: string, time: number): MemoryCard | undefined {
   const result = parseSaveResult(resultText)
@@ -86,7 +86,7 @@ export function savedMemoryCard(args: Args | undefined, resultText: string, time
     updatedAt: time,
     lastConfirmedAt: time,
     filePath: '',
-  })
+  }, { severity: 'suspected' })
 }
 
 function scopeSummary(args: Args): Summary {
