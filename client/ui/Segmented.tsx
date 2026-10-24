@@ -113,9 +113,11 @@ export function SegmentedControl<Value extends string>({ id, value, options, onC
     if (target !== undefined && target.value !== value) onChange(target.value)
   }
   const indicator = { '--pm-segment-count': String(options.length), '--pm-segment-index': String(selected) } as CSSProperties
+  // 一项都没选（必填项还没填）时不画指示块，第一个可用项当 tab 停靠点
+  const stop = selected >= 0 ? options[selected]?.value : options.find(option => option.disabled !== true)?.value
   return (
     <div ref={list} role="tablist" aria-label={label} className="pm-segmented" style={indicator}>
-      <span aria-hidden="true" className="pm-segmented-indicator" />
+      {selected >= 0 ? <span aria-hidden="true" className="pm-segmented-indicator" /> : null}
       {options.map((option) => {
         const active = option.value === value
         return (
@@ -126,7 +128,7 @@ export function SegmentedControl<Value extends string>({ id, value, options, onC
             role="tab"
             aria-selected={active}
             aria-controls={`${id}-${option.value}-panel`}
-            tabIndex={active ? 0 : -1}
+            tabIndex={option.value === stop ? 0 : -1}
             disabled={disabled || option.disabled === true}
             title={option.title}
             className="pm-segment"

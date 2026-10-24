@@ -10,6 +10,7 @@ import { en, NS, zh } from './locales.ts'
 import { MemoryIcon } from './MemoryIcon.tsx'
 import { MemoryPage, memoryPageCss } from './MemoryPage.tsx'
 import { createNavStore, PANEL_ID, type NavStore } from './nav.ts'
+import { applySettings } from './settings/index.tsx'
 import { PanelShell } from './ui/PanelShell.tsx'
 
 export { PANEL_ID }
@@ -51,4 +52,5 @@ export function apply(ctx: HostContext): void {
     order: 20,
     label: () => t('nav.label'),
   }, MemoryIcon))
+  applySettings(ctx, nav, () => useHostTranslate(ctx.locale))
 }

@@ -53,15 +53,17 @@ export function SettingsGroupCard({ title, children }: { title: ReactNode; child
   )
 }
 
-export function SettingsItem({ label, hint, htmlFor, children }: {
+export function SettingsItem({ label, hint, htmlFor, disabled = false, children }: {
   label: ReactNode
   hint?: ReactNode
   /** 控件 id，和标签关联。 */
   htmlFor?: string
+  /** 置灰保留（例如体检关闭时依赖它的项）：标签和说明降为次级色，控件由调用方禁用。 */
+  disabled?: boolean
   children: ReactNode
 }) {
   return (
-    <div className="pm-setting">
+    <div className={disabled ? 'pm-setting pm-setting--disabled' : 'pm-setting'}>
       <label className="pm-setting-label" htmlFor={htmlFor}>{label}</label>
       {children}
       {hint !== undefined ? <p className="pm-setting-hint">{hint}</p> : null}
@@ -81,4 +83,5 @@ export const settingsCss = `
 .pm-setting + .pm-setting { border-top: .5px solid var(--pm-line); }
 .pm-setting-label { font-size: 13px; font-weight: 500; line-height: 1.5; color: var(--pm-text); }
 .pm-setting-hint { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-3); }
+.pm-setting--disabled .pm-setting-label { color: var(--pm-text-3); }
 `

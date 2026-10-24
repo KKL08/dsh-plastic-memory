@@ -6,7 +6,8 @@ import type { ReactNode } from 'react'
 import { StatusMarker, type MarkerKind } from './StatusMarker.tsx'
 
 export interface HealthBannerProps {
-  marker: MarkerKind
+  /** 缺省 = 不是状态，只是一句说明（如「还没有记忆」「体检已关闭」）。 */
+  marker?: MarkerKind
   /** 一句结论，例如「有 2 处冲突等你决定」。标记的状态靠这句文字兜底。 */
   conclusion: ReactNode
   /** 例如「上次体检：10 月 17 日」。 */
@@ -18,7 +19,7 @@ export function HealthBanner({ marker, conclusion, detail, actions }: HealthBann
   return (
     <section className="pm-banner">
       <div className="pm-banner-main">
-        <p className="pm-banner-title"><StatusMarker kind={marker} />{conclusion}</p>
+        <p className="pm-banner-title">{marker !== undefined ? <StatusMarker kind={marker} /> : null}{conclusion}</p>
         {detail !== undefined ? <p className="pm-banner-detail">{detail}</p> : null}
       </div>
       {actions !== undefined ? <div className="pm-banner-actions">{actions}</div> : null}
@@ -34,5 +35,6 @@ export const healthBannerCss = `
 .pm-banner-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .pm-banner-title { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
 .pm-banner-detail { margin: 0 0 0 16px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
+.pm-banner-title:not(:has(.pm-marker)) + .pm-banner-detail { margin-left: 0; }
 .pm-banner-actions { display: flex; gap: 8px; flex-shrink: 0; }
 `
