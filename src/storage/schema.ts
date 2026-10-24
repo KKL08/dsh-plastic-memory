@@ -10,11 +10,14 @@ export const recallStatsSchema = z.object({
 export type RecallStats = z.infer<typeof recallStatsSchema>
 
 /** 旧宿主 KV 导入的完成标记 `.state/kv-import.json`。source = none 表示宿主没有 storageDomain，无可导。
- *  counts 是成功落成文件（新建或早已存在）的旧 KV 条目数。 */
+ *  counts 是成功落成文件（新建或早已存在）的旧 KV 条目数。
+ *  discarded 只对 source = kv 有意义：true = 旧 KV 行已删净；false 或缺失（早先版本写的标记）= 待清理，
+ *  后续启动重试删除、不重导。 */
 export const kvImportMarkerSchema = z.object({
   version: z.literal(1),
   importedAt: z.number(),
   source: z.enum(['kv', 'none']),
   counts: z.object({ snapshots: z.number(), pending: z.number() }),
+  discarded: z.boolean().optional(),
 })
 export type KvImportMarker = z.infer<typeof kvImportMarkerSchema>

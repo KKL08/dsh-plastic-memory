@@ -1,9 +1,10 @@
-import { describe, expect, it, beforeEach, afterEach } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import { SidecarStore, STATE_DIR, KV_IMPORT_MARKER, RECALL_STATS_FILE, type LegacyKvTables } from '../src/storage/sidecar.ts'
+import { spawnSync } from 'node:child_process'
+import { SidecarStore, STATE_DIR, KV_IMPORT_MARKER, KV_IMPORT_LOCK, RECALL_STATS_FILE, type LegacyKvTables } from '../src/storage/sidecar.ts'
 import { kvImportMarkerSchema } from '../src/storage/schema.ts'
 import {
   memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema,
@@ -183,7 +184,7 @@ describe('SidecarStore：四张表落 .state/', () => {
 })
 
 describe('SidecarStore：KV 导入协议', () => {
-  /** 旧 KV 替身。discard 默认清空自身两张表（像宿主那样删行）；onDiscard 可换成抛错等行为。 */
+  /** 旧 KV 替身。open 在调用那一刻拷下两张表；discard 先跑 onDiscard（可抛错），不抛才清空两张表（像宿主那样删行）。 */
   function legacyOf(tables: Partial<LegacyKvTables>, opts: { onDiscard?: () => Promise<void> } = {}) {
     let calls = 0
     let discards = 0
@@ -195,7 +196,7 @@ describe('SidecarStore：KV 导入协议', () => {
         pending: [...rows.pending],
         discard: async () => {
           discards++
-          if (opts.onDiscard) return opts.onDiscard()
+          if (opts.onDiscard) await opts.onDiscard()
           rows.snapshots = []
           rows.pending = []
         },
@@ -247,7 +248,7 @@ describe('SidecarStore：KV 导入协议', () => {
     const s = new SidecarStore({ root, schemas, openLegacyKv: legacy.open, now: () => 7 })
     expect((await s.pending.list()).map(([k]) => k)).toEqual(['pd_a'])
     expect((await s.snapshots.list()).map(([k]) => k).sort()).toEqual(['snap_a', 'snap_b'])
-    expect(await readMarker()).toEqual({ version: 1, importedAt: 7, source: 'kv', counts: { snapshots: 2, pending: 1 } })
+    expect(await readMarker()).toEqual({ version: 1, importedAt: 7, source: 'kv', counts: { snapshots: 2, pending: 1 }, discarded: true })
     expect(legacy.calls()).toBe(1)
   })
 
@@ -321,13 +322,15 @@ describe('SidecarStore：KV 导入协议', () => {
     expect((await readMarker()).source).toBe('kv')
   })
 
-  it('标记文件坏掉按缺失处理，重新导入（排他创建保证不覆盖）', async () => {
+  it('标记文件坏掉按缺失处理，重新导入（排他创建保证不覆盖）；损坏只告警一次', async () => {
+    const { warns, log } = makeLog()
     await mkdir(state, { recursive: true })
     await writeFile(join(state, KV_IMPORT_MARKER), '{ broken', 'utf8')
     const legacy = legacyOf({ snapshots: [['snap_a', snap('snap_a')]] })
-    const s = new SidecarStore({ root, schemas, openLegacyKv: legacy.open })
+    const s = new SidecarStore({ root, schemas, openLegacyKv: legacy.open, log })
     expect((await s.snapshots.list()).map(([k]) => k)).toEqual(['snap_a'])
     expect(legacy.calls()).toBe(1)
+    expect(warns.filter(w => w.includes('导入标记损坏'))).toHaveLength(1)
     expect((await readMarker()).source).toBe('kv')
   })
 
@@ -376,5 +379,141 @@ describe('SidecarStore：KV 导入协议', () => {
     expect(await second.pending.list()).toEqual([])
     expect(legacy.calls()).toBe(2)
     expect((await readMarker()).counts).toEqual({ snapshots: 0, pending: 0 })
+  })
+
+  function deferred() {
+    let resolve!: () => void
+    const promise = new Promise<void>(r => { resolve = r })
+    return { promise, resolve }
+  }
+
+  it('两个进程同时启动：先导完的一方之后被处理掉的待决，不会被晚一步的导入者写回来', async () => {
+    const legacy = legacyOf({ pending: [['pd_p', pd('pd_p')]] })
+    /** open 拷下行之后停在 gate 上，模拟取完旧行还没写盘的进程。 */
+    const gatedOpen = (gate: Promise<void>, opened: () => void) => async () => {
+      const tables = await legacy.open()
+      opened()
+      await gate
+      return tables
+    }
+    const aGate = deferred(), aOpened = deferred(), bGate = deferred(), bOpened = deferred(), bReached = deferred()
+    const a = new SidecarStore({ root, schemas, openLegacyKv: gatedOpen(aGate.promise, aOpened.resolve) })
+    // B 的 now 被调到 = B 已越过标记检查（走到导入锁或写标记）；open 被调到同理
+    const b = new SidecarStore({ root, schemas, openLegacyKv: gatedOpen(bGate.promise, bOpened.resolve), now: () => { bReached.resolve(); return Date.now() } })
+
+    const aList = a.pending.list()
+    await aOpened.promise // A 正在导入，标记未写
+    const bList = b.pending.list()
+    await Promise.race([bOpened.promise, bReached.promise])
+    aGate.resolve()
+    expect((await aList).map(([k]) => k)).toEqual(['pd_p'])
+    expect(await a.pending.delete('pd_p')).toBe(true) // 迁移完成后用户处理掉了 P
+    bGate.resolve()
+    await bList
+
+    expect(await b.pending.list()).toEqual([])
+    expect(await a.pending.get('pd_p')).toBeUndefined()
+    expect(legacy.calls()).toBe(1) // B 在锁内看到标记，没有再取旧行
+  })
+
+  it.each([
+    ['早先版本写的标记（无 discarded 字段）', {}],
+    ['discarded: false', { discarded: false }],
+  ])('标记写下但旧行没删（%s）：下次启动补删旧行，不重新导入', async (_, extra) => {
+    await mkdir(state, { recursive: true })
+    await writeFile(join(state, KV_IMPORT_MARKER), JSON.stringify({ version: 1, importedAt: 1, source: 'kv', counts: { snapshots: 1, pending: 1 }, ...extra }), 'utf8')
+    // 导入之后用户处理掉了 pd_a、删了 snap_a，旧行还留在 KV 里
+    const legacy = legacyOf({ snapshots: [['snap_a', snap('snap_a')]], pending: [['pd_a', pd('pd_a')]] })
+    const s = new SidecarStore({ root, schemas, openLegacyKv: legacy.open })
+    expect(await s.pending.list()).toEqual([])
+    expect(await s.snapshots.list()).toEqual([])
+    expect(legacy.discards()).toBe(1)
+    expect(await readMarker()).toEqual({ version: 1, importedAt: 1, source: 'kv', counts: { snapshots: 1, pending: 1 }, discarded: true })
+
+    const again = new SidecarStore({ root, schemas, openLegacyKv: legacy.open })
+    await again.snapshots.list()
+    expect(legacy.calls()).toBe(1) // 清理完成后不再打开旧 KV
+  })
+
+  it('删除旧行失败：标记记为未清理，下次启动重试删除，期间处理掉的待决不复活', async () => {
+    const { warns, log } = makeLog()
+    let attempts = 0
+    const legacy = legacyOf({ pending: [['pd_a', pd('pd_a')]] }, { onDiscard: async () => { if (++attempts === 1) throw new Error('kv locked') } })
+    const first = new SidecarStore({ root, schemas, openLegacyKv: legacy.open, log })
+    expect((await first.pending.list()).map(([k]) => k)).toEqual(['pd_a'])
+    expect(warns.some(w => w.includes('kv locked'))).toBe(true)
+    expect((await readMarker()).discarded).toBe(false)
+    expect(await first.pending.delete('pd_a')).toBe(true)
+
+    const second = new SidecarStore({ root, schemas, openLegacyKv: legacy.open })
+    expect(await second.pending.list()).toEqual([])
+    expect(legacy.discards()).toBe(2)
+    expect((await readMarker()).discarded).toBe(true)
+  })
+
+  it('旧行待清理时宿主没有 KV 服务：标记保持未清理，服务回来后再删', async () => {
+    await mkdir(state, { recursive: true })
+    await writeFile(join(state, KV_IMPORT_MARKER), JSON.stringify({ version: 1, importedAt: 1, source: 'kv', counts: { snapshots: 0, pending: 1 }, discarded: false }), 'utf8')
+    const absent = new SidecarStore({ root, schemas, openLegacyKv: async () => undefined })
+    expect(await absent.pending.list()).toEqual([])
+    expect((await readMarker()).discarded).toBe(false)
+
+    const legacy = legacyOf({ pending: [['pd_a', pd('pd_a')]] })
+    const next = new SidecarStore({ root, schemas, openLegacyKv: legacy.open })
+    expect(await next.pending.list()).toEqual([])
+    expect(legacy.discards()).toBe(1)
+    expect((await readMarker()).discarded).toBe(true)
+  })
+
+  it.each([
+    ['持锁进程已退出', () => ({ pid: spawnSync(process.execPath, ['-e', '']).pid, at: Date.now() })],
+    ['锁超时', () => ({ pid: process.pid, at: 0 })],
+  ])('导入锁残留（%s）：清掉后照常导入，导完不留锁', async (_, lockOf) => {
+    await mkdir(state, { recursive: true })
+    await writeFile(join(state, KV_IMPORT_LOCK), JSON.stringify({ ...lockOf(), id: 'stale' }), 'utf8')
+    const legacy = legacyOf({ pending: [['pd_a', pd('pd_a')]] })
+    const s = new SidecarStore({ root, schemas, openLegacyKv: legacy.open })
+    expect((await s.pending.list()).map(([k]) => k)).toEqual(['pd_a'])
+    expect((await readMarker()).discarded).toBe(true)
+    expect(await listFiles(state)).toEqual([KV_IMPORT_MARKER, 'pending/pd_a.json'])
+  })
+
+  it('持锁期间定时刷新锁的时间戳：慢导入超过 60 秒也不会被当成残留清掉，释放后不再刷新', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    try {
+      const lockPath = join(state, KV_IMPORT_LOCK)
+      const lockAt = async () => (JSON.parse(await readFile(lockPath, 'utf8')) as { at: number }).at
+      let clock = 0
+      const legacy = legacyOf({ pending: [['pd_a', pd('pd_a')]] })
+      const aGate = deferred(), aOpened = deferred()
+      const a = new SidecarStore({
+        root, schemas, now: () => clock,
+        openLegacyKv: async () => { const t = await legacy.open(); aOpened.resolve(); await aGate.promise; return t },
+      })
+      const { warns, log } = makeLog()
+      let bNowCalls = 0
+      const b = new SidecarStore({ root, schemas, log, openLegacyKv: legacy.open, now: () => { bNowCalls++; return clock } })
+
+      const aList = a.pending.list()
+      await aOpened.promise // A 持锁，锁时间戳 0
+      clock = 65_000
+      vi.advanceTimersByTime(10_000)
+      await vi.waitFor(async () => { expect(await lockAt()).toBe(65_000) })
+
+      clock = 70_000 // 离加锁已超 60 秒，离上次刷新只有 5 秒
+      const bList = b.pending.list()
+      await vi.waitFor(() => { expect(bNowCalls).toBeGreaterThanOrEqual(3) }) // B 至少判过一轮锁
+      expect(warns.filter(w => w.includes('导入锁残留'))).toEqual([])
+
+      aGate.resolve()
+      expect((await aList).map(([k]) => k)).toEqual(['pd_a'])
+      await bList
+      expect(legacy.calls()).toBe(1)
+      expect(await exists(lockPath)).toBe(false)
+      vi.advanceTimersByTime(30_000) // 释放后计时器已停，不会重建锁文件
+      expect(await exists(lockPath)).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

@@ -107,7 +107,9 @@ All notable changes to this project are documented here. The format follows
   pending decisions, scan cache and recall statistics. Existing files are read
   in place; snapshots and pending decisions are imported from the host's KV
   store on first use (or at a later start if the store is not available yet),
-  and the copies there are removed once the import has finished, so nothing
+  by one host process at a time so a decision you settle right after the
+  upgrade does not come back, and the copies there are removed once the
+  import has finished (retried at later starts if removal fails), so nothing
   stays behind in the host's store. The host's
   `storageDomain` service is therefore no longer required.
 - Hand-written memory files need only `name` and `type` in the frontmatter; the
