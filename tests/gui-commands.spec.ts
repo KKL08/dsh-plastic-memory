@@ -5,11 +5,12 @@ import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
+import { STATE_DIR } from '../src/storage/paths.ts'
 import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
+import { REDACTED_PLACEHOLDER, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import { ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
@@ -280,6 +281,33 @@ describe('hard-delete', () => {
     expect(body.memoryIds).toEqual(['mem_s'])
     expect(await e.store.get('mem_s')).toBeUndefined()
     expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
+  })
+
+  it('既有快照里这条记忆的副本一律换成脱敏占位（不可恢复），同快照的其他记录不动；盘上不留明文', async () => {
+    const e = env()
+    const secret = record({ id: 'mem_s', name: '部署凭证', content: `token ${FAKE_SECRET.sk}` })
+    const other = record({ id: 'mem_o', name: '旁人', content: '用 pnpm' })
+    await e.store.create(secret)
+    await e.store.create(other)
+    const both = await e.snapshots.capture({ operation: 'manual', description: '两条', records: [secret, other] }, NOW - 3)
+    const alone = await e.snapshots.capture({ operation: 'pre-update', description: '只有它', records: [secret] }, NOW - 2)
+    const unrelated = await e.snapshots.capture({ operation: 'manual', description: '无关', records: [other] }, NOW - 1)
+
+    ok(await e.run({ cmd: 'hard-delete', memoryId: 'mem_s' }))
+    const byId = new Map((await e.snapshots.list()).map(s => [s.id, s]))
+    for (const id of [both.id, alone.id]) {
+      const copy = byId.get(id)!.data.find(r => r.id === 'mem_s')!
+      expect(copy).toMatchObject({ redacted: true, content: REDACTED_PLACEHOLDER })
+    }
+    expect(byId.get(both.id)!.data.find(r => r.id === 'mem_o')).toEqual(other)
+    expect(byId.get(unrelated.id)!.data).toEqual([other])
+    // 删除前那份 pre-forget 快照也只存脱敏副本
+    const preForget = [...byId.values()].find(s => s.operation === 'pre-forget')!
+    expect(preForget.data).toEqual([expect.objectContaining({ id: 'mem_s', redacted: true, content: REDACTED_PLACEHOLDER })])
+    const snapDir = join(root, STATE_DIR, 'snapshots')
+    for (const file of await readdir(snapDir)) expect(await readFile(join(snapDir, file), 'utf8')).not.toContain(FAKE_SECRET.sk)
+    // 不能从快照恢复回来
+    expect(err(await e.run({ cmd: 'restore', memoryId: 'mem_s' })).code).toBe('not-found')
   })
 
   it('不含密钥的记忆不走硬删：failed，什么都不动', async () => {
