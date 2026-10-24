@@ -83,6 +83,7 @@ describe('createHostGateway', () => {
 
   function fakeCtx(): HostContext {
     return {
+      inject: () => () => {},
       slots: { inject: () => () => {}, register: () => () => {} },
       locale: { register: () => () => {}, bind: () => k => k, getSnapshot: () => 0, subscribe: () => () => {} },
       layout: { selectPanel: () => {} },

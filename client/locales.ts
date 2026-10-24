@@ -5,6 +5,7 @@
 
 import { composerEn, composerZh } from './locales/composer.ts'
 import { libraryEn, libraryZh } from './locales/library.ts'
+import { chatEn, chatZh } from './locales/chat.ts'
 
 /** 宿主 locale 命名空间，和面板 id 同名。 */
 export const NS = 'plastic-memory'
@@ -77,6 +78,7 @@ export const zh = {
   'settings.unavailable': '宿主暂时没有提供这份配置。',
   ...composerZh,
   ...libraryZh,
+  ...chatZh,
 } as const
 
 export type LocaleKey = keyof typeof zh
@@ -149,4 +151,5 @@ export const en: Record<LocaleKey, string> = {
   'settings.unavailable': 'The host is not serving these settings right now.',
   ...composerEn,
   ...libraryEn,
+  ...chatEn,
 }
