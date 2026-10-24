@@ -1,4 +1,4 @@
-import { link, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import type { ZodType } from 'zod'
@@ -6,6 +6,7 @@ import type { BatchKvTable, KvTable } from '../kv-table.ts'
 import type { MemoryLogger } from './table.ts'
 import { kvImportMarkerSchema, recallStatsSchema, type KvImportMarker, type RecallStats } from './schema.ts'
 import { STATE_DIR } from './paths.ts'
+import { linkExclusive } from './exclusive-link.ts'
 
 /**
  * 侧表文件存储（设计稿 docs/design-storage-file-is-memory.md §1 §7 §8）：快照、待决账本、扫描缓存、
@@ -82,12 +83,12 @@ async function atomicWrite(path: string, text: string): Promise<void> {
 
 /** 原子排他创建：先写 tmp，再 link 到目标（目标已存在则 EEXIST，不覆盖），最后删 tmp。
  *  比直接 `wx` 写目标多一步，换来崩溃时不会留下半截文件——半截文件在续传时会被当成"已存在"跳过。
- *  返回 false = 目标已存在。 */
+ *  卷不支持硬链接时 linkExclusive 退回排他复制，仍不覆盖，但崩溃可能留下半截文件。返回 false = 目标已存在。 */
 async function createExclusive(path: string, text: string): Promise<boolean> {
   const tmp = tmpPathFor(path)
   await writeFile(tmp, text, 'utf8')
   try {
-    await link(tmp, path)
+    await linkExclusive(tmp, path)
     return true
   } catch (err) {
     if (errnoCode(err) === 'EEXIST') return false
