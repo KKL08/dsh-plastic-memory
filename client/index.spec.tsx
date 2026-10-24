@@ -67,4 +67,28 @@ describe('apply', () => {
     render(<Page {...props({ ids: ['s1'], byId: { s1: { id: 's1', displayTitle: 's1', running: false, updatedAt: 1, retainedBy: {} } }, phase: 'ready' })} />)
     expect(screen.getAllByRole('tab')).toHaveLength(4)
   })
+
+  it('左栏图标接宿主 {size, active} + 根作用域 props；没有会话时只画图标、不亮点', () => {
+    const { registered } = setup()
+    const Icon = registered.find(r => r.options.name === 'sidebar.panellist')!.component as ComponentType<RootStandardProps & { size: number; active: boolean }>
+    const { container } = render(<Icon {...props({ ids: [], byId: {}, phase: 'ready' })} size={18} active={false} />)
+    const svg = container.querySelector('svg')!
+    expect(svg).toHaveAttribute('width', '18')
+    expect(svg).not.toHaveAttribute('data-marker')
+  })
+
+  it('左栏图标与记忆页共用一个网关：借会话要 memoryRoot 只发一次 info', () => {
+    localStorage.clear()
+    const { registered, ctx } = setup()
+    const Icon = registered.find(r => r.options.name === 'sidebar.panellist')!.component as ComponentType<RootStandardProps & { size: number; active: boolean }>
+    const Page = registered.find(r => r.options.name === 'main')!.component as ComponentType<RootStandardProps>
+    const state: SessionListState = { ids: ['s1'], byId: { s1: { id: 's1', displayTitle: 's1', running: true, updatedAt: 1, retainedBy: {} } }, phase: 'ready' }
+    const infoCalls = () => vi.mocked(ctx.remote.commands.execute).mock.calls.filter(([, line]) => line === '/memory info')
+    // 图标自己就要读待处理视图
+    const icon = render(<Icon {...props(state)} size={18} active={false} />)
+    expect(infoCalls()).toHaveLength(1)
+    icon.unmount()
+    render(<><Icon {...props(state)} size={18} active /><Page {...props(state)} /></>)
+    expect(infoCalls()).toHaveLength(1)
+  })
 })

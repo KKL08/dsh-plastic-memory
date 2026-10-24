@@ -2,15 +2,18 @@
  * 左栏记忆页的外壳：标题「记忆」+ 作用域下拉，四个 tab（待处理、全部记忆带数；健康、最近删除），tab 内容由后续票填。
  * 两态：一个会话都没有 → 空态「开一个会话后这里可用」；有会话 → 全功能。
  * 当前视图与作用域在导航 store 里，入口直达时先写 store 再切面板。
+ * 不是入口打开的（点左栏图标、宿主恢复上次的面板）按默认落点：待处理有条目落在待处理，为空落在全部记忆（PRD §4 入口③）。
+ * 右上是「设置」和「体检当前项目」。
  */
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import type { GuiLayerRef } from '../src/gui/contract.ts'
 import { useGateway, type ViewState } from './gateway.ts'
 import { baseName, formatNumber, useT, type Translate } from './i18n.tsx'
-import { MEMORY_TABS, useNavTarget, type MemoryTab, type NavStore } from './nav.ts'
+import { MEMORY_TABS, useNavTarget, type MemoryTab, type NavStore, type NavTarget } from './nav.ts'
 import { HealthTab } from './health/HealthTab.tsx'
 import { ScanControl } from './health/ScanControl.tsx'
 import { PendingTab } from './pending/PendingTab.tsx'
+import { Button } from './ui/Button.tsx'
 import { EmptyState } from './ui/EmptyState.tsx'
 import { DeletedTab, deletedTabCss } from './deleted/DeletedTab.tsx'
 import { LibraryTab, libraryTabCss } from './library/LibraryTab.tsx'
@@ -44,6 +47,7 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
   const pending = gateway.useView(session, 'pending')
   const library = gateway.useView(session, 'library')
   const tabsId = useId()
+  useDefaultLanding(nav, pending)
 
   const options: GuiLayerRef[] = []
   const add = (ref: GuiLayerRef) => { if (!options.some(o => sameScope(o, ref))) options.push(ref) }
@@ -62,6 +66,7 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
       {counts[tab] !== undefined ? <span className="pm-tab-count">{formatNumber(counts[tab])}</span> : null}
     </>
   )
+  const settingsButton = <Button onClick={() => { nav.openSettings() }}>{t('page.settings')}</Button>
   const items = MEMORY_TABS.map((tab): SegmentedTab<MemoryTab> => ({
     value: tab, label: tabLabel(tab), id: `${tabsId}-${tab}`, panelId: `${tabsId}-${tab}-panel`,
   })) as [SegmentedTab<MemoryTab>, ...SegmentedTab<MemoryTab>[]]
@@ -81,8 +86,8 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
           )
           : null}
         {session.kind === 'ready'
-          ? <ScanControl session={session} workspacePath={scope.kind === 'workspace' ? scope.workspacePath : currentWorkspace} hasPending={(counts.pending ?? 1) > 0} nav={nav} />
-          : null}
+          ? <ScanControl session={session} workspacePath={scope.kind === 'workspace' ? scope.workspacePath : currentWorkspace} hasPending={(counts.pending ?? 1) > 0} nav={nav} leading={settingsButton} />
+          : <div className="pm-scan">{settingsButton}</div>}
       </header>
       {session.kind === 'none'
         ? <EmptyState variant="daily" title={t('session.none.title')}>{t('session.none.body')}</EmptyState>
@@ -91,7 +96,7 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
             <SegmentedTabs label={t('tabs.label')} items={items} value={target.tab} onChange={(tab) => { nav.update({ tab, memoryId: undefined }) }} />
             <div role="tabpanel" id={`${tabsId}-${target.tab}-panel`} aria-labelledby={`${tabsId}-${target.tab}`} className="pm-page-panel">
               {target.tab === 'pending'
-                ? <PendingTab session={session} workspacePath={scope.kind === 'workspace' ? scope.workspacePath : undefined} />
+                ? <PendingTab nav={nav} session={session} workspacePath={scope.kind === 'workspace' ? scope.workspacePath : undefined} />
                 : target.tab === 'library'
                   ? <LibraryTab nav={nav} scope={scope} session={session} />
                   : target.tab === 'deleted'
@@ -104,6 +109,30 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
         )}
     </div>
   )
+}
+
+/**
+ * 默认落点。挂载时取走入口标记：有就照入口写的目标走；没有就先落在待处理（作用域回到当前项目），
+ * 待处理视图到了发现为空再改落全部记忆——只判断一次，用户在这之前动过目标就不改。
+ * 页面开着时入口写的目标当场生效，标记随即作废，免得下次从图标进来被误当成入口。
+ */
+function useDefaultLanding(nav: NavStore, pending: ViewState<{ items: readonly unknown[] }>): void {
+  const [fromEntry] = useState(() => nav.takeEntry())
+  const landedAt = useRef<NavTarget | undefined>(undefined)
+  const decided = useRef(fromEntry)
+  useLayoutEffect(() => {
+    const drain = nav.subscribe(() => { nav.takeEntry() })
+    if (!fromEntry) {
+      nav.navigate({ tab: 'pending' })
+      landedAt.current = nav.get()
+    }
+    return drain
+  }, [nav])
+  useLayoutEffect(() => {
+    if (decided.current || pending.status !== 'ready') return
+    decided.current = true
+    if (nav.get() === landedAt.current && pending.data.items.length === 0) nav.navigate({ tab: 'library' })
+  }, [nav, pending])
 }
 
 function ScopePicker({ value, options, label, onChange }: {

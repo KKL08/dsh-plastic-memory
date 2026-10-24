@@ -54,8 +54,9 @@ describe('体检当前项目', () => {
 
   it('作用域切到别的项目时体检那个项目', async () => {
     const gateway = createFakeGateway({ currentWorkspace: '/w/app', views: { pending: noPending, health: health() } })
-    const nav = createNavStore({ tab: 'health', scope: { kind: 'workspace', workspacePath: '/w/blog' } })
+    const nav = createNavStore()
     renderInShell(<MemoryPage nav={nav} />, gateway)
+    act(() => { nav.update({ tab: 'health', scope: { kind: 'workspace', workspacePath: '/w/blog' } }) })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '体检当前项目' })) })
     expect(gateway.executed[0]!.command).toEqual({ cmd: 'scan', workspacePath: '/w/blog' })
   })

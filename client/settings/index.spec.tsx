@@ -64,6 +64,15 @@ describe('applySettings', () => {
     expect(selectPanel).toHaveBeenCalledWith(PANEL_ID)
   })
 
+  it('状态卡「打开记忆页 ›」（入口⑤）：先写导航目标（读不到视图时落待处理）再切到记忆页', () => {
+    const { registered, selectPanel, nav } = setup()
+    const Card = registered[0]!.component
+    render(<Card {...props} view="page" />)
+    fireEvent.click(screen.getByRole('button', { name: '打开记忆页 ›' }))
+    expect(nav.get()).toEqual({ tab: 'pending' })
+    expect(selectPanel).toHaveBeenCalledWith(PANEL_ID)
+  })
+
   it('宿主不提供 configForms 时不注册', () => {
     expect(setup(false).registered).toEqual([])
   })

@@ -19,6 +19,7 @@ export const zh = {
 
   'page.title': '记忆',
   'page.placeholder': '这一栏还在做。',
+  'page.settings': '设置',
 
   'scope.label': '作用域',
   'scope.current': '本项目 {name}',
@@ -96,6 +97,7 @@ export const en: Record<LocaleKey, string> = {
 
   'page.title': 'Memory',
   'page.placeholder': 'This view is still being built.',
+  'page.settings': 'Settings',
 
   'scope.label': 'Scope',
   'scope.current': 'This project {name}',

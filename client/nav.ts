@@ -23,8 +23,15 @@ export interface NavTarget {
 export interface NavStore {
   get(): NavTarget
   subscribe(fn: () => void): () => void
-  /** 入口用：整体替换目标。 */
+  /** 整体替换目标。 */
   navigate(target: NavTarget): void
+  /** 入口用：整体替换目标，并记下「这次打开来自入口」（openMemoryPage 先调它再切面板）。 */
+  enter(target: NavTarget): void
+  /**
+   * 取走入口标记（取完即清）。记忆页挂载时据此判断：入口写过目标就照目标走，
+   * 没有（点左栏图标、宿主恢复上次的面板）就按默认落点。
+   */
+  takeEntry(): boolean
   /** 页内用：只改给出的字段。 */
   update(patch: Partial<NavTarget>): void
   /** 跳到宿主插件页里本插件的配置（「去设置里打开 ›」）。 */
@@ -33,12 +40,15 @@ export interface NavStore {
 
 export function createNavStore(initial: NavTarget = { tab: 'pending' }, opts: { openSettings?: () => void } = {}): NavStore {
   let target = initial
+  let entered = false
   const listeners = new Set<() => void>()
   const set = (next: NavTarget) => { target = next; for (const fn of listeners) fn() }
   return {
     get: () => target,
     subscribe(fn) { listeners.add(fn); return () => { listeners.delete(fn) } },
     navigate: set,
+    enter(next) { entered = true; set(next) },
+    takeEntry() { const was = entered; entered = false; return was },
     update: patch => set({ ...target, ...patch }),
     openSettings: () => { opts.openSettings?.() },
   }
@@ -50,6 +60,6 @@ export function useNavTarget(nav: NavStore): NavTarget {
 
 /** 入口直达记忆页：先写目标，再切面板。 */
 export function openMemoryPage(ctx: Pick<HostContext, 'layout'>, nav: NavStore, target: NavTarget): void {
-  nav.navigate(target)
+  nav.enter(target)
   ctx.layout.selectPanel(PANEL_ID)
 }

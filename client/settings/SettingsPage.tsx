@@ -3,7 +3,7 @@
  * 插件名、简介、版本由宿主插件页的页头画（locale/*.json 的 meta 与 package.json 的 version），这里不重复。
  * 改动先暂存、点保存一次提交（useSettingsDraft）；体检关闭时依赖它的三项置灰保留，不隐藏。
  */
-import { useId } from 'react'
+import { useId, useState } from 'react'
 import { useGateway } from '../gateway.ts'
 import { useT } from '../i18n.tsx'
 import type { MemoryTab } from '../nav.ts'
@@ -43,7 +43,7 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
 
   return (
     <div className="pm-settings">
-      <StatusCard governanceEnabled={saved.governance} onOpen={() => { onOpenMemoryPage('pending') }} {...(now !== undefined ? { now } : {})} />
+      <StatusCard governanceEnabled={saved.governance} onOpen={onOpenMemoryPage} {...(now !== undefined ? { now } : {})} />
       <SettingsForm
         state={{
           available: snapshot.status === 'ready', writable: snapshot.writable, dirty: draft.dirty,
@@ -176,15 +176,26 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
   )
 }
 
-/** 实际路径来自视图（服务端解析过的绝对路径）；还没读到时显示配置里写的，都没有就提示开会话。 */
+/**
+ * 实际路径来自视图（服务端解析过的绝对路径）；还没读到时显示配置里写的，都没有就提示开会话。
+ * 有路径就能「在访达中显示」（openWorkspacePath 不要会话）。
+ */
 function MemoryRoot({ configured }: { configured: string }) {
   const t = useT()
   const gateway = useGateway()
   const library = gateway.useView(gateway.useSession(undefined), 'library')
+  const [isRefused, setRefused] = useState(false)
   const path = library.status === 'ready' ? library.data.memoryRoot : configured
-  return path !== ''
-    ? <code className="pm-settings-path">{path}</code>
-    : <span className="pm-setting-hint">{t('settings.root.unknown')}</span>
+  if (path === '') return <span className="pm-setting-hint">{t('settings.root.unknown')}</span>
+  return (
+    <span className="pm-settings-root">
+      <code className="pm-settings-path">{path}</code>
+      <button type="button" className="pm-link" onClick={() => { void gateway.openPath(path, 'reveal').then((ok) => { setRefused(!ok) }) }}>
+        {t('library.reveal')}
+      </button>
+      {isRefused ? <span className="pm-setting-hint" role="status">{t('action.openFailed')}</span> : null}
+    </span>
+  )
 }
 
 export const settingsPageCss = `
@@ -192,6 +203,7 @@ export const settingsPageCss = `
 .pm-settings-note { margin: 16px 0 0; }
 .pm-settings-conflict { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
 .pm-settings-conflict p { flex: 1; min-width: 0; margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text); }
+.pm-settings-root { display: inline-flex; flex-wrap: wrap; align-items: baseline; justify-content: flex-end; gap: 4px 12px; }
 .pm-settings-path {
   font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 12px; line-height: 1.5;
   color: var(--pm-text-2); word-break: break-all; user-select: text;

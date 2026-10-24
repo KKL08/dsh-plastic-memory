@@ -273,10 +273,10 @@ describe('体检关闭时置灰', () => {
 
 describe('状态卡', () => {
   const views = (p = pending(), h = health(NOW), l = library(3)) => ({ pending: p, health: h, library: l })
+  const conflict = { kind: 'conflict-horizontal' as const, decisionId: 'd', firstSeenAt: NOW, summary: 's', left: null, right: null }
+  const unreadable = { kind: 'unreadable-file' as const, layer: { kind: 'global' as const }, filePath: '/f', relativePath: 'f', error: 'e' }
 
   it('结论按优先级：体检关闭 → 密钥 → 等你决定 → 没有记忆 → 没体检 → 良好', () => {
-    const conflict = { kind: 'conflict-horizontal' as const, decisionId: 'd', firstSeenAt: NOW, summary: 's', left: null, right: null }
-    const unreadable = { kind: 'unreadable-file' as const, layer: { kind: 'global' as const }, filePath: '/f', relativePath: 'f', error: 'e' }
     expect(summarize(views(), false, NOW, t)).toEqual({ conclusion: '体检已关闭', detail: '共 3 条记忆' })
     expect(summarize(views(pending([{ kind: 'secret', memory: memory() }, conflict])), true, NOW, t).marker).toBe('secret')
     expect(summarize(views(pending([conflict, conflict, unreadable])), true, NOW, t))
@@ -287,12 +287,84 @@ describe('状态卡', () => {
       .toEqual({ marker: 'ok', conclusion: '状态良好', detail: '共 3 条记忆 · 上次体检：10 月 3 日' })
   })
 
-  it('读视图渲染结论，「打开记忆页 ›」直达待处理；没有会话时只写一句提示', () => {
+  it('读视图渲染结论；没有等你决定的事时「打开记忆页 ›」去健康；没有会话时只写一句提示', () => {
     const { onOpen, gateway } = setup()
     expect(screen.getByText('状态良好')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '打开记忆页 ›' }))
-    expect(onOpen).toHaveBeenCalledWith('pending')
+    expect(onOpen).toHaveBeenCalledWith('health')
     act(() => { gateway.setSession({ kind: 'none' }) })
     expect(screen.getByText('开一个会话后这里显示记忆状态')).toBeInTheDocument()
+  })
+
+  it('有等你决定的事（含密钥）时「打开记忆页 ›」去待处理；只有读不出的文件仍去健康', () => {
+    const { onOpen, gateway } = setup()
+    act(() => { gateway.setView('pending', pending([conflict])) })
+    fireEvent.click(screen.getByRole('button', { name: '打开记忆页 ›' }))
+    expect(onOpen).toHaveBeenLastCalledWith('pending')
+    act(() => { gateway.setView('pending', pending([{ kind: 'secret', memory: memory() }])) })
+    fireEvent.click(screen.getByRole('button', { name: '打开记忆页 ›' }))
+    expect(onOpen).toHaveBeenLastCalledWith('pending')
+    act(() => { gateway.setView('pending', pending([unreadable])) })
+    fireEvent.click(screen.getByRole('button', { name: '打开记忆页 ›' }))
+    expect(onOpen).toHaveBeenLastCalledWith('health')
+  })
+})
+
+describe('状态卡「立即体检」', () => {
+  function render(init: Parameters<typeof createFakeGateway>[0] = {}, value?: Record<string, unknown>) {
+    const gateway = createFakeGateway({ views: { pending: pending(), health: health(NOW), library: library(3) }, ...init })
+    renderInShell(<SettingsPage form={createFakeConfigForm(value ? { value } : {})} onOpenMemoryPage={() => {}} now={NOW} />, gateway)
+    return gateway
+  }
+  const button = () => screen.getByRole('button', { name: /立即体检|正在体检|再试一次/ })
+
+  it('发 /memory scan，体检当前选中会话所在的项目；进行中按钮禁用，完成后写一句', async () => {
+    let finish: (r: { ok: true; cmd: 'scan' }) => void = () => {}
+    const gateway = render({ currentWorkspace: '/w/app', respond: () => new Promise((resolve) => { finish = resolve }) })
+    fireEvent.click(button())
+    expect(gateway.executed).toEqual([{ sessionId: 'fake-session', command: { cmd: 'scan', workspacePath: '/w/app' } }])
+    expect(button()).toHaveTextContent('正在体检…')
+    expect(button()).toBeDisabled()
+    await act(async () => { finish({ ok: true, cmd: 'scan' }) })
+    expect(button()).toHaveTextContent('立即体检')
+    expect(screen.getByText('体检完成。')).toBeInTheDocument()
+  })
+
+  it('插件页没有选中的会话时体检全部层', async () => {
+    const gateway = render()
+    await act(async () => { fireEvent.click(button()) })
+    expect(gateway.executed[0]!.command).toEqual({ cmd: 'scan' })
+  })
+
+  it('失败：原位写原因并提示在对话里让 agent 体检，按钮变「再试一次」', async () => {
+    render({ respond: () => ({ ok: false, cmd: 'scan', code: 'llm-unavailable', detail: 'x' }) })
+    await act(async () => { fireEvent.click(button()) })
+    expect(screen.getByText(/借用的会话拿不到模型/)).toHaveTextContent('可以在对话里让 agent 体检。')
+    expect(button()).toHaveTextContent('再试一次')
+  })
+
+  it('体检关闭或没有会话：按钮不可用，点了不发命令', () => {
+    const gateway = render({}, section({ governance: { enabled: false, health: { sensitivity: 'standard' }, globalPromoteTarget: 'plugin-global' } }))
+    expect(button()).toHaveAttribute('aria-disabled', 'true')
+    fireEvent.click(button())
+    act(() => { gateway.setSession({ kind: 'none' }) })
+    expect(button()).toHaveAttribute('aria-disabled', 'true')
+    fireEvent.click(button())
+    expect(gateway.executed).toEqual([])
+  })
+})
+
+describe('记忆文件位置「在访达中显示」', () => {
+  it('有实际路径时可以在访达中显示；宿主拒绝时写一句', async () => {
+    const gateway = createFakeGateway({ views: { pending: pending(), health: health(NOW), library: library(3, '/home/me/.dsh/memories') }, openOk: false })
+    renderInShell(<SettingsPage form={createFakeConfigForm()} onOpenMemoryPage={() => {}} now={NOW} />, gateway)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '在访达中显示' })) })
+    expect(gateway.opened).toEqual([{ path: '/home/me/.dsh/memories', action: 'reveal' }])
+    expect(screen.getByText('没能打开，宿主拒绝了这个路径。')).toBeInTheDocument()
+  })
+
+  it('还不知道路径时没有这个按钮', () => {
+    renderInShell(<SettingsPage form={createFakeConfigForm()} onOpenMemoryPage={() => {}} now={NOW} />, createFakeGateway())
+    expect(screen.queryByRole('button', { name: '在访达中显示' })).toBeNull()
   })
 })

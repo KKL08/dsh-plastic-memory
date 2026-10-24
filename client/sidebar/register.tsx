@@ -23,7 +23,12 @@ function GuideIcon({ size }: { size?: number | undefined }) {
   return <MemoryIcon size={size ?? 22} active={false} />
 }
 
-/** 打开（或聚焦）当前会话右侧栏里的「记忆」tab。 */
+/**
+ * 打开（或聚焦）当前会话右侧栏里的「记忆」tab，落在 tab 顶部。
+ * 页面类 tab 不认地址，`openTab(kind)` 没有可以指向「某一段」的地址；宿主虽然允许带 `params`
+ * （正文从 tab 信息的 `navigation.params` 读，每次打开 `revision` 加一），但这个 tab 只有一屏、没有要直达的子位置，
+ * 所以不传参数。「开始」页入口卡由宿主自己按 kind 打开（`tab.actions.openTab(kind, {replaceTab: true})`），落点相同。
+ */
 export function openMemoryTab(ctx: Pick<SidebarHost, 'sidebarRight'>): void {
   ctx.sidebarRight.openTab(SIDEBAR_TAB_KIND)
 }

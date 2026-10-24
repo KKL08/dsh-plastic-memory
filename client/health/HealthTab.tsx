@@ -3,6 +3,7 @@
  * 下一行上次体检时间，横幅下是问题列表。从没体检过不显示分数（不出现 0 或 100 分），时间行写「内容检查还没做过」。
  * 有密钥的层不打分（score 为 null），写原因；超出上限列为问题、不扣分。
  * 体检关闭时整块置灰并给「去设置里打开 ›」，密钥与读不出的文件仍从待处理视图提示（规则检查，不调模型）。
+ * 层块下面两行入口：「待你决定 N 条，其中 M 条超过 7 天 · 去处理 ›」「可提升为全局 N 条 · 去看 ›」，都去待处理 tab。
  */
 import type { ReactNode } from 'react'
 import type { GuiLayerRef, HealthView, PendingView } from '../../src/gui/contract.ts'
@@ -88,6 +89,38 @@ function HardAlerts({ pending, layers }: { pending: ViewState<PendingView>; laye
   return <ul className="pm-health-alerts">{lines.map(l => <li key={l.key}>{l.text}</li>)}</ul>
 }
 
+const WAITING_LONG_MS = 7 * 24 * 60 * 60 * 1000
+
+/** 去待处理的两行入口。读不出的文件不算「待你决定」（与左栏圆点、状态卡同一口径）；条数为 0 的行不出。 */
+function PendingEntries({ pending, nav, now }: { pending: ViewState<PendingView>; nav: NavStore; now: number }) {
+  const t = useT()
+  if (pending.status !== 'ready') return null
+  const decisions = pending.data.items.filter(item => item.kind !== 'unreadable-file')
+  const old = decisions.filter(item => 'firstSeenAt' in item && now - item.firstSeenAt > WAITING_LONG_MS).length
+  const promotable = decisions.filter(item => item.kind === 'promote-candidate').length
+  if (decisions.length === 0) return null
+  const go = () => { nav.update({ tab: 'pending', memoryId: undefined }) }
+  const n = formatNumber(decisions.length)
+  return (
+    <ul className="pm-health-entries">
+      <li>
+        <span>{old > 0 ? t('health.entry.pendingOld', { n, old: formatNumber(old) }) : t('health.entry.pending', { n })}</span>
+        <i className="pm-sep" aria-hidden="true">·</i>
+        <button type="button" className="pm-link" onClick={go}>{t('health.entry.pendingLink')}</button>
+      </li>
+      {promotable > 0
+        ? (
+          <li>
+            <span>{t('health.entry.promote', { n: formatNumber(promotable) })}</span>
+            <i className="pm-sep" aria-hidden="true">·</i>
+            <button type="button" className="pm-link" onClick={go}>{t('health.entry.promoteLink')}</button>
+          </li>
+        )
+        : null}
+    </ul>
+  )
+}
+
 export function HealthTab({ session, scope, nav }: { session: BorrowedSession; scope: GuiLayerRef; nav: NavStore }) {
   const t = useT()
   const gateway = useGateway()
@@ -122,6 +155,7 @@ export function HealthTab({ session, scope, nav }: { session: BorrowedSession; s
   return (
     <div className="pm-health">
       {body}
+      <PendingEntries pending={pending} nav={nav} now={now} />
       {neverScanned
         ? <EmptyState variant="daily" title={t('health.semanticEmpty.title')}>{t('health.semanticEmpty.body')}</EmptyState>
         : null}
@@ -144,9 +178,12 @@ export const healthCss = `
 .pm-health-issues ul, .pm-health-alerts { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 2px; font-size: 13px; line-height: 1.55; }
 .pm-health-none { margin: 0; font-size: 13px; color: var(--pm-text-2); }
 .pm-health-alerts { padding: 0 16px; }
+.pm-health-entries { margin: 0; padding: 0 16px; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 13px; line-height: 1.55; color: var(--pm-text); }
+.pm-health-entries .pm-link { font-weight: 600; }
 .pm-health-off { opacity: .5; }
 .pm-health-status { margin: 24px 0; text-align: center; font-size: 12px; color: var(--pm-text-2); }
 .pm-scan { margin-left: auto; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.pm-scan-row { display: flex; align-items: center; gap: 8px; }
 .pm-scan-status { margin: 0; max-width: 420px; text-align: right; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-scan-status:empty { display: none; }
 .pm-scan-note { display: block; }
