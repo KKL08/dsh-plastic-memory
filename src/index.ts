@@ -1,8 +1,8 @@
 import z from '@deepseek-ai/schemastery'
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
 import type { AssembleContext, PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import type { MemoryTypeDefinition } from './types.ts'
-import { buildTypeRegistry } from './type-registry.ts'
+import { buildTypeRegistry, type TypeRegistry } from './type-registry.ts'
 import { memoryDomainSpec } from './domain-spec.ts'
 import { MemoryStore } from './store.ts'
 import { FileTable } from './storage/file-table.ts'
@@ -40,29 +40,39 @@ import type { SemanticLlm } from './governance/semantic-scan.ts'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { createMemoryCommand, type MemoryCommandDefinition } from './gui/commands.ts'
 import { ViewWriter, collectGlobalViews } from './gui/view-writer.ts'
+import { buildSessionView } from './gui/views.ts'
+import type { SessionView } from './gui/contract.ts'
 
+/**
+ * 进 GUI 的字段标 `.volatile()`：插件页或 yaml 改了它们，宿主 Loader 把新值写进运行中的引用、发 `loader/volatile-update`，
+ * 不重挂插件。这些字段一律用时 `.get()`，不把值留到下一次操作。writeMode、memoryRoot 不进 GUI，改了照旧重挂。
+ */
 export interface Config {
   // reflective（会话结束/空闲时批量提取）是规划中的第二写入模式；实现时再回 schema 加回该取值
   // 及其参数（reflectModel 等）——配置面只声明当前真实生效的字段。
   writeMode: 'proactive'
-  snapshotTokenBudget: number
+  snapshotTokenBudget: Volatile<number>
   /** 带入量超过 snapshotTokenBudget 时：relax 自动放宽（需要多少带多少，每进一档 25% 提醒一次）、strict 严格按上限（截断，95% 提醒）。 */
-  snapshotOverflow: OverflowMode
+  snapshotOverflow: Volatile<OverflowMode>
   /** 证据下钻档位（docs/design-evidence-anchor.md §4）：off 不鼓励回查原始轨迹、strict 仅硬信号、active 开放路标式引导。 */
-  evidenceLookup: 'off' | 'strict' | 'active'
-  template: 'coding' | 'office' | 'custom'
-  customTypes: Record<string, Omit<MemoryTypeDefinition, 'name'>>
-  governance: { enabled: boolean; health: { sensitivity: HealthSensitivity }; globalPromoteTarget: 'plugin-global' | 'agents-md' }
+  evidenceLookup: Volatile<'off' | 'strict' | 'active'>
+  template: Volatile<'coding' | 'office' | 'custom'>
+  customTypes: Volatile<Record<string, Omit<MemoryTypeDefinition, 'name'>>>
+  governance: {
+    enabled: Volatile<boolean>
+    health: { sensitivity: Volatile<HealthSensitivity> }
+    globalPromoteTarget: Volatile<'plugin-global' | 'agents-md'>
+  }
   /** 记忆文件根目录，缺省解析到 ${DSH_HOME:-~/.dsh}/memories（storage/paths.ts） */
   memoryRoot: string
 }
 
-export const Config: z<Config> = z.object({
+export const Config = z.object({
   writeMode: z.const('proactive').default('proactive'),
-  snapshotTokenBudget: z.number().default(4000),
-  snapshotOverflow: z.union(OVERFLOW_MODES).default('relax'),
-  evidenceLookup: z.union(['off', 'strict', 'active'] as const).default('strict'),
-  template: z.union(['coding', 'office', 'custom'] as const).default('coding'),
+  snapshotTokenBudget: z.number().default(4000).volatile(),
+  snapshotOverflow: z.union(OVERFLOW_MODES).default('relax').volatile(),
+  evidenceLookup: z.union(['off', 'strict', 'active'] as const).default('strict').volatile(),
+  template: z.union(['coding', 'office', 'custom'] as const).default('coding').volatile(),
   customTypes: z.dict(z.object({
     label: z.string().required(),
     description: z.string().required(),
@@ -70,13 +80,13 @@ export const Config: z<Config> = z.object({
     recall: z.union(['core', 'search', 'passive'] as const).required(),
     decayDays: z.union([z.number(), z.const(null)]).default(null),
     governancePriority: z.union(['high', 'medium', 'low'] as const).required(),
-  })).default({}),
+  })).default({}).volatile(),
   governance: z.object({
-    enabled: z.boolean().default(true),
+    enabled: z.boolean().default(true).volatile(),
     health: z.object({
-      sensitivity: z.union(['conservative', 'normal', 'proactive'] as const).default('normal'),
+      sensitivity: z.union(['conservative', 'normal', 'proactive'] as const).default('normal').volatile(),
     }).default({ sensitivity: 'normal' }),
-    globalPromoteTarget: z.union(['plugin-global', 'agents-md'] as const).default('plugin-global'),
+    globalPromoteTarget: z.union(['plugin-global', 'agents-md'] as const).default('plugin-global').volatile(),
   }),
   memoryRoot: z.string().default(''),
 })
@@ -85,10 +95,18 @@ export const name = 'dsh-plastic-memory'
 export const inject = ['tools', 'systemPrompt']
 
 /** session/created 回调里用得到的最小 session 结构（真实类型是 dsh-session 的 Session）。 */
-type SessionLike = object & { header?: { cwd?: string } }
+type SessionLike = object & { header?: { id?: string; cwd?: string } }
 
 export async function apply(ctx: Context, config: Config) {
-  const registry = buildTypeRegistry(config) // 重名内置类型在这里抛错，加载即失败
+  // 类型表随 template / customTypes 热更新重建；各处拿到的是转发到当前表的同一个对象
+  const buildRegistry = () => buildTypeRegistry({ template: config.template.get(), customTypes: config.customTypes.get() })
+  let currentRegistry = buildRegistry() // 重名内置类型在这里抛错，加载即失败
+  const registry: TypeRegistry = {
+    get: name => currentRegistry.get(name),
+    has: name => currentRegistry.has(name),
+    all: () => currentRegistry.all(),
+    renderSaveDescription: () => currentRegistry.renderSaveDescription(),
+  }
 
   const memoryRoot = resolveMemoryRoot(config.memoryRoot)
   // 侧表（快照、待决账本、扫描缓存、召回统计）住 <memoryRoot>/.state/，构造不做 I/O。
@@ -141,10 +159,37 @@ export async function apply(ctx: Context, config: Config) {
   // cwd → workspace 归属的单一解析路径：SnapshotCache 的 lazy 自愈与 session/created 的 eager 预热共用，
   // 避免两处各写一份 resolveWorkspacePath 调用。
   const resolveWorkspace = (session: object) => resolveWorkspacePath(ctx, (session as SessionLike).header?.cwd)
-  // 超限提醒进待决账本（治理关闭时也记：它是待处理里的提醒，不是体检结果）；会话视图的 onFrozen 接线在视图写入那张票
+  // GUI 视图写入器：宿主有 commands 服务（GUI 半侧可用）时才有，见下方 ctx.inject(['commands'], …)
+  let views: ViewWriter | undefined
+  // 会话视图（进程内存）：每个会话最近一次冻结的视图，与这次对话新记的 id（可能早于首次冻结）
+  const frozenViews = new Map<string, SessionView>()
+  const savedIds = new Map<string, string[]>()
+  const onSaved = (sessionId: string, memoryId: string) => {
+    if (sessionId === 'unknown') return
+    const ids = [...(savedIds.get(sessionId) ?? []), memoryId]
+    savedIds.set(sessionId, ids)
+    const last = frozenViews.get(sessionId)
+    if (last === undefined) return
+    const view = { ...last, savedIds: ids }
+    frozenViews.set(sessionId, view)
+    void views?.requestSession(view)
+  }
+  // 超限提醒进待决账本（治理关闭时也记：它是待处理里的提醒，不是体检结果）。
+  // 上限、超限处理、溯源档位是 getter：每次构建快照时现读配置（SnapshotCache 一次构建只取一次）。
   const snapshotCache = new SnapshotCache({
-    store, registry, budget: config.snapshotTokenBudget, overflow: config.snapshotOverflow, overflowLedger: decisions,
-    memoryRoot, evidenceLookup: config.evidenceLookup, resolveWorkspace, log: ctx.logger,
+    store, registry, overflowLedger: decisions, memoryRoot, resolveWorkspace, log: ctx.logger,
+    get budget() { return config.snapshotTokenBudget.get() },
+    get overflow() { return config.snapshotOverflow.get() },
+    get evidenceLookup() { return config.evidenceLookup.get() },
+    onFrozen: (session, { overflowChanged, ...info }) => {
+      const sessionId = (session as SessionLike).header?.id
+      if (views === undefined || sessionId === undefined) return
+      const view = buildSessionView({ sessionId, ...info, savedIds: savedIds.get(sessionId) ?? [] })
+      frozenViews.set(sessionId, view)
+      // 旁路写入：不拖住快照组装（写失败由写入器记日志）
+      void views.requestSession(view)
+      if (overflowChanged) void views.request(['pending', 'health'])
+    },
   })
 
   // 语义层 LLM：per-call 构建（provider/model 只能从触发调用的 agent 上拿到，插件加载时没有）。
@@ -304,7 +349,9 @@ export async function apply(ctx: Context, config: Config) {
 
   // 子 agent 只读门：写入与治理工具在注册处统一套门，子 agent 会话（delegationDepth ≥ 1）调用即拒
   const registerWrite = (tool: ToolDefinition) => ctx.tools.register(gateSubagentWrites(tool, resolveContext))
-  registerWrite(createSaveTool({ store, registry, resolveContext, snapshots }))
+  // memory_save 的类型枚举与说明在注册时从类型表生成：模板或自定义类型热更新后注销重注册
+  const registerSave = () => registerWrite(createSaveTool({ store, registry, resolveContext, snapshots, onSaved }))
+  let disposeSave = registerSave()
   ctx.tools.register(createSearchTool({ store, registry, resolveContext }))
   registerWrite(createForgetTool({ store, snapshots, decisions, log: ctx.logger, resolveContext }))
   // 快照的写入与恢复必须成对——治理关闭时 forget 仍会拍快照，若没有恢复入口，
@@ -323,39 +370,75 @@ export async function apply(ctx: Context, config: Config) {
       }
     },
   }))
-  if (config.governance.enabled) {
-    registerWrite(createConfirmTool({ store, decisions, snapshots, resolveContext }))
-    // 基线按触发调用的 session 取（宿主投影 cell 按 session 隔离，防多会话串台）。
-    // 扫描会写语义缓存、登记待决冲突，归写工具；health 纯读，不套门
-    registerWrite(createScanTool({
-      store, registry, decisions, cache: scanCache,
-      getBaseline,
-      getLlm,
-      resolveContext,
-    }))
-    ctx.tools.register(createHealthTool({
-      store, registry, decisions, cache: scanCache,
-      thresholds: resolveHealthThresholds(config.governance.health.sensitivity),
-      resolveContext,
-    }))
-    // memory_promote：把用户确认的候选提升 global。确认由模型先调 ask_user_question 完成
-    // （工具内部弹 userQuestions 会被 web 会话拒绝 "requires agent-owned session"），本工具纯执行。
-    const defaultTarget: PromoteTarget = config.governance.globalPromoteTarget === 'agents-md' ? 'agents-md' : 'global'
-    registerWrite(createPromoteTool({ store, agentsMd, snapshots, defaultTarget, resolveContext }))
+  // 体检、健康分、裁决、提升四个工具随体检开关注册 / 注销（开关热更新时再同步一次）。
+  // 灵敏度与提升目标不必重注册：工具执行时经 getter 现读配置。
+  let governanceTools: Array<() => void> = []
+  const syncGovernanceTools = () => {
+    for (const dispose of governanceTools.splice(0)) dispose()
+    if (!config.governance.enabled.get()) return
+    governanceTools = [
+      registerWrite(createConfirmTool({ store, decisions, snapshots, resolveContext })),
+      // 基线按触发调用的 session 取（宿主投影 cell 按 session 隔离，防多会话串台）。
+      // 扫描会写语义缓存、登记待决冲突，归写工具；health 纯读，不套门
+      registerWrite(createScanTool({
+        store, registry, decisions, cache: scanCache,
+        getBaseline,
+        getLlm,
+        resolveContext,
+      })),
+      ctx.tools.register(createHealthTool({
+        store, registry, decisions, cache: scanCache,
+        get thresholds() { return resolveHealthThresholds(config.governance.health.sensitivity.get()) },
+        resolveContext,
+      })),
+      // memory_promote：把用户确认的候选提升 global。确认由模型先调 ask_user_question 完成
+      // （工具内部弹 userQuestions 会被 web 会话拒绝 "requires agent-owned session"），本工具纯执行。
+      registerWrite(createPromoteTool({
+        store, agentsMd, snapshots, resolveContext,
+        get defaultTarget(): PromoteTarget { return config.governance.globalPromoteTarget.get() === 'agents-md' ? 'agents-md' : 'global' },
+      })),
+    ]
   }
+  syncGovernanceTools()
 
   // GUI（浏览器半侧）的动作通道：/memory 命令走可选注册，旧宿主没有 commands 服务时插件照常挂载、不注册、不报错。
-  // 加载期不写视图：视图在命令落盘后、refresh-views / scan 时重写（浏览器半侧首次进入发 info 拿路径）。
+  // 注册后不等调用就写一遍全局视图（不 await）：浏览器半侧首次打开时要有内容。
   ctx.inject(['commands'], child => {
     const commands = (child as unknown as { commands: { register(def: MemoryCommandDefinition): () => void } }).commands
-    const views = new ViewWriter({
+    const writer = new ViewWriter({
       memoryRoot, log: ctx.logger,
       collect: () => collectGlobalViews({ store, decisions, cache: scanCache, registry, memoryRoot }),
     })
+    views = writer
     commands.register(createMemoryCommand({
-      memoryRoot, store, decisions, snapshots, cache: scanCache, registry, agentsMd, views,
+      memoryRoot, store, decisions, snapshots, cache: scanCache, registry, agentsMd, views: writer,
       resolveContext, getLlm, getBaseline, log: ctx.logger,
+      isGovernanceEnabled: () => config.governance.enabled.get(),
     }))
+    void writer.request()
+  })
+
+  // 配置热生效：宿主只在 volatile 字段变化时发本事件（载荷是变化路径，如 [['governance', 'enabled']]），已提交的新值经 .get() 读到。
+  // 所有会话的快照标过期（宿主每一步都组装，同一轮的下一步就按新配置重建），按变化项重注册工具，最后重写视图。
+  // 事件的 Events 增广在 @deepseek-ai/cordis-plugin-loader（非直接依赖），按最小结构签名订阅，同下方 session/* 事件。
+  const loaderEvents = ctx as unknown as {
+    on(name: 'loader/volatile-update', fn: (paths: readonly (readonly string[])[]) => Promise<void>): () => void
+  }
+  loaderEvents.on('loader/volatile-update', async paths => {
+    const changed = (...keys: string[]) => paths.some(path => keys.includes(path.join('.')))
+    if (changed('template', 'customTypes')) {
+      try {
+        currentRegistry = buildRegistry()
+        disposeSave()
+        disposeSave = registerSave()
+      } catch (err) {
+        // 自定义类型与内置重名：保留原类型表与 memory_save，等配置改对
+        ctx.logger.error('[plastic-memory] 类型配置热更新失败，沿用原类型表:', err)
+      }
+    }
+    if (changed('governance.enabled')) syncGovernanceTools()
+    snapshotCache.markAllStale()
+    await views?.rewriteAll()
   })
 
   // frozen snapshot：按 session 隔离缓存，session/created 异步解析 workspace，compaction 结束标过期、下一次中间件重建。

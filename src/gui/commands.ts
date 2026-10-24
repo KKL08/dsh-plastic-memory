@@ -41,6 +41,8 @@ export interface MemoryCommandDeps {
   /** 在借来的会话的 agent 上解析模型；null = 拿不到。 */
   getLlm: (exec: ToolRunContext) => SemanticLlm | null
   getBaseline: (exec: ToolRunContext) => readonly string[] | null
+  /** 体检开关（用时读配置）；关闭时治理类子命令返回 governance-disabled。缺省视为开启。 */
+  isGovernanceEnabled?: () => boolean
   log?: MemoryLogger
   now?: () => number
 }
@@ -60,6 +62,9 @@ export interface MemoryCommandDefinition {
   description: string
   handler: (invocation: MemoryCommandInvocation) => Promise<HostCommandResult>
 }
+
+/** 依赖体检开关的子命令（对应四个治理工具的能力）；forget / restore / hard-delete / refresh-views 不受开关影响。 */
+const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'undo', 'promote', 'keep-local', 'scan', 'dismiss-overflow'])
 
 type Ok = Extract<MemoryCommandResult, { ok: true }>
 type Err = Extract<MemoryCommandResult, { ok: false }>
@@ -93,6 +98,9 @@ async function run(deps: MemoryCommandDeps, invocation: MemoryCommandInvocation)
   const exec = { agent: invocation.agent } as unknown as ToolRunContext
   const context = await deps.resolveContext(exec)
   if (command.cmd === 'info') return info(deps, context.session.id)
+  if (GOVERNANCE_COMMANDS.has(command.cmd) && deps.isGovernanceEnabled?.() === false) {
+    return fail(command.cmd, 'governance-disabled', '体检已关闭，可在插件设置里打开')
+  }
   if (context.delegationDepth > 0) return fail(command.cmd, 'subagent-readonly', '借用的会话是子 agent，记忆只读')
   const now = deps.now?.() ?? Date.now()
   const result = await dispatch(deps, command, { workspacePath: context.workspacePath }, exec, now)

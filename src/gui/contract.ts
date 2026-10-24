@@ -192,7 +192,7 @@ export const sessionViewSchema = z.object({
   workspacePath: z.string().optional(),
   /** 快照冻结时刻；早于宿主启动时间说明重启后还没重新带入。 */
   frozenAt: z.number(),
-  budget: z.number().int().nonnegative(),
+  budget: z.number().nonnegative(),
   overflowMode: z.enum(OVERFLOW_MODES),
   /** 三段之和即总用量：本项目、全局、固定说明（标题、导航图、固定尾注）。 */
   tokens: z.object({ workspace: z.number(), global: z.number(), fixed: z.number() }),
@@ -269,6 +269,7 @@ export const GUI_ERROR_CODES = [
   'cross-workspace',    // 涉及其他项目且未带 allowCrossWorkspace，什么都没动
   'llm-unavailable',    // 体检拿不到模型
   'subagent-readonly',  // 借的会话是子 agent，不可写
+  'governance-disabled', // 体检已关闭：裁决、撤销、提升、留在本项目、体检、忽略超限不可用
   'failed',             // 执行器报错，detail 带原话
 ] as const
 export type GuiErrorCode = (typeof GUI_ERROR_CODES)[number]
