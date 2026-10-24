@@ -3,8 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { GUI_VIEW_VERSION, type PendingView } from '../src/gui/contract.ts'
 import {
-  createHostGateway, decodeExecution, fileAddress, MEMORY_ROOT_KEY, parseView, pickSession, toPluginConfig, viewPath,
+  createHostGateway, decodeExecution, fileAddress, MEMORY_ROOT_CONFIG_KEY, MEMORY_ROOT_KEY, parseView, pickSession, toPluginConfig, viewPath,
 } from './gateway.ts'
+import { createFakeConfigForm, DEFAULT_SECTION } from './settings/config-form.fake.ts'
 import { ENTRY_ID } from './settings/config.ts'
 import { fakeHostContext } from './test-utils.tsx'
 import type { ConfigFormSnapshot, HostContext, ResourceSnapshot, SessionListState, SessionSummary, WorkspaceFileStat } from './host.ts'
@@ -163,6 +164,59 @@ describe('createHostGateway', () => {
     await waitFor(() => { expect(result.current).toEqual({ status: 'ready', data: pending }) })
     expect(executed).toEqual(['/memory refresh-views', '/memory info'])
     expect(localStorage.getItem(MEMORY_ROOT_KEY)).toBe('/h/memories')
+  })
+
+  it('设置里改了 memoryRoot（旧目录还有视图文件）：配置值和缓存时不一样就丢掉缓存，发一次 info，再 refresh-views，从新根读', async () => {
+    localStorage.setItem(MEMORY_ROOT_KEY, '/old/memories')
+    localStorage.setItem(MEMORY_ROOT_CONFIG_KEY, '')
+    files['/old/memories/.state/gui/pending.json'] = JSON.stringify({ ...pending, dot: 'none' })
+    resources[fileAddress('s1', '/old/memories/.state/gui/pending.json')] = { status: 'live', value: { absolutePath: 'x', version: 'v1' }, failure: undefined }
+    resources[fileAddress('s1', pendingPath)] = { status: 'live', value: { absolutePath: pendingPath, version: 'v1' }, failure: undefined }
+    const form = createFakeConfigForm({ value: { ...DEFAULT_SECTION, memoryRoot: '/h/memories' } })
+    const gateway = createHostGateway(fakeCtx({ configForms: { get: () => form } }))(props)
+    const { result } = renderHook(() => gateway.useView(gateway.useSession('/w/app'), 'pending'))
+    await waitFor(() => { expect(result.current).toEqual({ status: 'ready', data: pending }) })
+    expect(executed).toEqual(['/memory info', '/memory refresh-views'])
+    expect(localStorage.getItem(MEMORY_ROOT_KEY)).toBe('/h/memories')
+    expect(localStorage.getItem(MEMORY_ROOT_CONFIG_KEY)).toBe('/h/memories')
+  })
+
+  it('配置值和缓存时一样：不发命令，直接用缓存的根', async () => {
+    localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+    localStorage.setItem(MEMORY_ROOT_CONFIG_KEY, '')
+    resources[fileAddress('s1', pendingPath)] = { status: 'live', value: { absolutePath: pendingPath, version: 'v1' }, failure: undefined }
+    files[pendingPath] = JSON.stringify(pending)
+    const form = createFakeConfigForm()
+    const gateway = createHostGateway(fakeCtx({ configForms: { get: () => form } }))(props)
+    const { result } = renderHook(() => gateway.useView(gateway.useSession('/w/app'), 'pending'))
+    await waitFor(() => { expect(result.current.status).toBe('ready') })
+    expect(executed).toEqual([])
+  })
+
+  it('页面开着时配置里的 memoryRoot 变了：同样丢掉缓存重来一次', async () => {
+    localStorage.setItem(MEMORY_ROOT_KEY, '/old/memories')
+    localStorage.setItem(MEMORY_ROOT_CONFIG_KEY, '')
+    files['/old/memories/.state/gui/pending.json'] = JSON.stringify({ ...pending, dot: 'none' })
+    resources[fileAddress('s1', '/old/memories/.state/gui/pending.json')] = { status: 'live', value: { absolutePath: 'x', version: 'v1' }, failure: undefined }
+    resources[fileAddress('s1', pendingPath)] = { status: 'live', value: { absolutePath: pendingPath, version: 'v1' }, failure: undefined }
+    const form = createFakeConfigForm()
+    const gateway = createHostGateway(fakeCtx({ configForms: { get: () => form } }))(props)
+    const { result } = renderHook(() => gateway.useView(gateway.useSession('/w/app'), 'pending'))
+    await waitFor(() => { expect(result.current).toMatchObject({ status: 'ready', data: { dot: 'none' } }) })
+    expect(executed).toEqual([])
+    act(() => { form.externalChange([{ op: 'set', path: ['memoryRoot'], value: '/h/memories' }]) })
+    await waitFor(() => { expect(result.current).toEqual({ status: 'ready', data: pending }) })
+    expect(executed).toEqual(['/memory info', '/memory refresh-views'])
+  })
+
+  it('首次（没有缓存）拿到根时把当时的配置值一起记下', async () => {
+    resources[fileAddress('s1', pendingPath)] = { status: 'failed', value: undefined, failure: { code: 'workspace-file/not-found', message: '' } }
+    const form = createFakeConfigForm({ value: { ...DEFAULT_SECTION, memoryRoot: '~/mem' } })
+    const gateway = createHostGateway(fakeCtx({ configForms: { get: () => form } }))(props)
+    const { result } = renderHook(() => gateway.useView(gateway.useSession('/w/app'), 'pending'))
+    await waitFor(() => { expect(result.current.status).toBe('ready') })
+    expect(executed).toEqual(['/memory info', '/memory refresh-views'])
+    expect(localStorage.getItem(MEMORY_ROOT_CONFIG_KEY)).toBe('~/mem')
   })
 
   it('info 失败后是 error；换一个会话时重试', async () => {
