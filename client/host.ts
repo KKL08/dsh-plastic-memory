@@ -1,6 +1,6 @@
 /**
- * 宿主浏览器侧接口的最小结构子集（对照 dsh 0.2.1-rc.2 源码手写）。walking skeleton 只用到这几样，
- * 不引宿主客户端契约包做开发依赖；后续票需要更多接口时再换成宿主类型。
+ * 宿主浏览器侧接口的最小结构子集（对照 dsh 0.2.1-rc.2 源码手写）。只列客户端用到的字段，
+ * 不引宿主客户端契约包做开发依赖；组件不直接碰这些接口，只认 gateway.ts 的网关。
  */
 import type { ComponentType } from 'react'
 
@@ -36,11 +36,16 @@ export interface ResourceSnapshot<V> {
   failure: { code: string; message: string } | undefined
 }
 
+/** dsh-api-session-controller 的 SessionSummary（只列用到的字段）。 */
 export interface SessionSummary {
   id: string
   displayTitle: string
   running: boolean
   cwd?: string
+  origin?: 'subagent'
+  updatedAt: number
+  /** 本地持有计数；mainView > 0 的那个就是当前选中（主视图里显示）的会话。 */
+  retainedBy: Readonly<Record<string, number | undefined>>
 }
 
 export interface SessionListState {
@@ -63,10 +68,23 @@ export interface SlotRegisterOptions {
   label?: string | (() => string)
 }
 
+/** 宿主 locale 服务（ui-slots LocaleFace 子集）。 */
+export interface HostLocale {
+  register(ns: string, dicts: { zh: Record<string, string>; en: Record<string, string> }): () => void
+  bind(ns: string): (key: string, params?: Record<string, unknown>) => string
+  getSnapshot(): unknown
+  subscribe(fn: () => void): () => void
+}
+
 export interface HostContext {
   slots: {
     inject(name: string, fn: () => (() => void) | void): () => void
     register<P>(options: SlotRegisterOptions, component: ComponentType<P>): () => void
+  }
+  locale: HostLocale
+  layout: {
+    /** 只收面板 id、不带参数；面板未注册会抛错。 */
+    selectPanel(panelId: string | null): void
   }
   remote: {
     commands: {
