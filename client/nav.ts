@@ -1,6 +1,7 @@
 /**
  * 导航 store：宿主 `layout.selectPanel` 只收面板 id、不带参数，所以入口先把目标（视图 / 作用域 / 记忆 id）
  * 写进这里，再切面板；记忆页从这里读当前视图与作用域，页内切换也写回这里。
+ * 另管两个依赖宿主可选服务的出口（插件页、右侧栏记忆 tab）：服务在才能用，不能用的入口不画。
  */
 import { useSyncExternalStore } from 'react'
 import type { GuiLayerRef } from '../src/gui/contract.ts'
@@ -25,6 +26,9 @@ export interface NavTarget {
   memoryId?: string
 }
 
+/** 依赖宿主可选服务的出口：插件页里本插件的配置（pluginNavigation）、当前会话右侧栏的记忆 tab（sidebarRightTabs + sidebarRight）。 */
+export type HostExit = 'settings' | 'sidebarTab'
+
 export interface NavStore {
   get(): NavTarget
   subscribe(fn: () => void): () => void
@@ -39,15 +43,26 @@ export interface NavStore {
   takeEntry(): boolean
   /** 页内用：只改给出的字段。 */
   update(patch: Partial<NavTarget>): void
-  /** 跳到宿主插件页里本插件的配置（「去设置里打开 ›」）。 */
+  /** 跳到宿主插件页里本插件的配置（「去设置里打开 ›」）；出口不可用时什么都不做。 */
   openSettings(): void
+  /** 打开当前会话右侧栏的记忆 tab；出口不可用时什么都不做。 */
+  openSidebarTab(): void
+  /** 出口现在能不能用（对应的宿主服务在不在）。 */
+  canOpen(exit: HostExit): boolean
+  /** apply 用：服务就位时给出打开函数，离开时给 undefined；通知订阅者。 */
+  provide(exit: HostExit, open: (() => void) | undefined): void
 }
 
-export function createNavStore(initial: NavTarget = { tab: 'pending' }, opts: { openSettings?: () => void } = {}): NavStore {
+export function createNavStore(
+  initial: NavTarget = { tab: 'pending' },
+  opts: { openSettings?: () => void; openSidebarTab?: () => void } = {},
+): NavStore {
   let target = initial
   let entered = false
+  const exits: Partial<Record<HostExit, () => void>> = { settings: opts.openSettings, sidebarTab: opts.openSidebarTab }
   const listeners = new Set<() => void>()
-  const set = (next: NavTarget) => { target = next; for (const fn of listeners) fn() }
+  const notify = () => { for (const fn of listeners) fn() }
+  const set = (next: NavTarget) => { target = next; notify() }
   return {
     get: () => target,
     subscribe(fn) { listeners.add(fn); return () => { listeners.delete(fn) } },
@@ -55,12 +70,20 @@ export function createNavStore(initial: NavTarget = { tab: 'pending' }, opts: { 
     enter(next) { entered = true; set(next) },
     takeEntry() { const was = entered; entered = false; return was },
     update: patch => set({ ...target, ...patch }),
-    openSettings: () => { opts.openSettings?.() },
+    openSettings: () => { exits.settings?.() },
+    openSidebarTab: () => { exits.sidebarTab?.() },
+    canOpen: exit => exits[exit] !== undefined,
+    provide(exit, open) { exits[exit] = open; notify() },
   }
 }
 
 export function useNavTarget(nav: NavStore): NavTarget {
   return useSyncExternalStore(nav.subscribe, nav.get)
+}
+
+/** hook：出口能不能用；服务来去时重渲染。 */
+export function useCanOpen(nav: NavStore, exit: HostExit): boolean {
+  return useSyncExternalStore(nav.subscribe, () => nav.canOpen(exit))
 }
 
 /** 入口直达记忆页：先写目标，再切面板。 */

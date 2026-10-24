@@ -8,7 +8,7 @@ import type { ContextPressureProjection, SessionStandardProps } from '../host.ts
 import { createTranslator } from '../i18n.tsx'
 import { apply, inject } from '../index.tsx'
 import { zh } from '../locales.ts'
-import { createNavStore, PANEL_ID, SIDEBAR_TAB_KIND } from '../nav.ts'
+import { createNavStore, PANEL_ID } from '../nav.ts'
 import { fakeHostContext } from '../test-utils.tsx'
 import { createComposerDock, DOCK_ID, DOCK_ORDER } from './dock.tsx'
 import { memoryShare } from './MemoryButton.tsx'
@@ -23,10 +23,11 @@ function sessionView(overrides: Partial<SessionView> = {}): SessionView {
   }
 }
 
-function setup({ view, pressure }: { view?: SessionView; pressure?: ContextPressureProjection } = {}) {
+function setup({ view, pressure, hasSidebar = true }: { view?: SessionView; pressure?: ContextPressureProjection; hasSidebar?: boolean } = {}) {
   const gateway = createFakeGateway({ views: view === undefined ? {} : { session: view } })
-  const ctx = { layout: { selectPanel: vi.fn() }, sidebarRight: { openTab: vi.fn() } }
-  const nav = createNavStore({ tab: 'library' })
+  const ctx = { layout: { selectPanel: vi.fn() } }
+  const openSidebarTab = vi.fn()
+  const nav = createNavStore({ tab: 'library' }, hasSidebar ? { openSidebarTab } : {})
   const t = createTranslator(zh)
   const Dock = createComposerDock(ctx, nav, () => gateway, () => t)
   const props: SessionStandardProps = {
@@ -36,7 +37,7 @@ function setup({ view, pressure }: { view?: SessionView; pressure?: ContextPress
     useResource: () => ({ status: 'none', value: undefined, failure: undefined }),
   }
   render(<Dock {...props} />)
-  return { ctx, nav }
+  return { ctx, nav, openSidebarTab }
 }
 
 const openPanel = () => { fireEvent.click(screen.getByRole('button', { name: '记忆' })); return screen.getByRole('dialog') }
@@ -103,12 +104,17 @@ describe('超限行', () => {
 })
 
 describe('跳转', () => {
-  it('「查看带入的记忆 ›」打开右侧栏记忆 tab 并收起弹层', () => {
-    const { ctx } = setup({ view: sessionView() })
+  it('「查看带入的记忆 ›」经 nav store 打开右侧栏记忆 tab 并收起弹层', () => {
+    const { openSidebarTab } = setup({ view: sessionView() })
     openPanel()
     fireEvent.click(screen.getByRole('button', { name: '查看带入的记忆 ›' }))
-    expect(ctx.sidebarRight.openTab).toHaveBeenCalledWith(SIDEBAR_TAB_KIND)
+    expect(openSidebarTab).toHaveBeenCalledTimes(1)
     expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('宿主没有右侧栏：不画「查看带入的记忆 ›」', () => {
+    setup({ view: sessionView(), hasSidebar: false })
+    expect(openPanel()).not.toHaveTextContent('查看带入的记忆')
   })
 
   it('「处理 ›」经 nav store 打开记忆页待处理', () => {
@@ -128,7 +134,7 @@ describe('跳转', () => {
 })
 
 describe('注册', () => {
-  it('apply 在 conversation.composer.dock 注册按钮，依赖 sidebarRight', () => {
+  it('apply 在 conversation.composer.dock 注册按钮；右侧栏是可选服务，不进 inject', () => {
     const registered: Array<{ options: { name: string; id?: string; order?: number }; component: ComponentType<never> }> = []
     const ctx = fakeHostContext({
       slots: {
@@ -137,7 +143,7 @@ describe('注册', () => {
       },
     })
     apply(ctx)
-    expect(inject).toContain('sidebarRight')
+    expect(inject).not.toContain('sidebarRight')
     const dock = registered.find(r => r.options.name === 'conversation.composer.dock')
     expect(dock?.options).toMatchObject({ id: DOCK_ID, order: DOCK_ORDER })
   })

@@ -132,9 +132,40 @@ export interface ConfigForm {
   mutate(ops: readonly ConfigPathOp[], expectedRevision?: number): Promise<boolean>
 }
 
-export interface HostContext {
+/**
+ * 可选的宿主服务：缺了插件照常加载，依赖它们的界面在 `ctx.inject([...], scope => …)` 里注册，
+ * 服务不在就不注册（cordis：依赖不齐时回调不执行，服务离开时子上下文连同注册一起撤掉）。
+ */
+export interface OptionalServices {
+  /** ui-sidebar-right：在当前会话的右侧栏打开（或聚焦）一个页面类 tab；kind 没注册、或没有会话在屏幕上时抛错。 */
+  sidebarRight: {
+    openTab(kind: string, options?: { params?: unknown }): void
+  }
+  /** ui-sidebar-right：静态登记 tab 类型；返回撤销函数。登记挂在宿主注册表自己的上下文上，所以调用方要包进自己的 effect。 */
+  sidebarRightTabs: {
+    register(definition: SidebarTabDefinition): () => void
+  }
+  /** ui-plugin-manager：切到插件页并打开某个包的详情，不换当前会话。 */
+  pluginNavigation: {
+    openBundle(packageName: string): void
+  }
+  /** ui-settings：插件配置（profile 行 id 即 entryId）。 */
+  configForms: { get(entryId: string): ConfigForm }
+}
+export type OptionalServiceName = keyof OptionalServices
+
+/** `ctx.inject(deps, …)` 回调里的子上下文：申请到的可选服务一定在。 */
+export type ScopedContext<K extends string> = HostContext & Pick<OptionalServices, Extract<K, OptionalServiceName>>
+
+/**
+ * 插件根上下文。可选服务在这里标成可选，但根上下文没有 inject 它们，直接读会被 cordis 拒绝（抛错）：
+ * 只在 `ctx.inject` 的回调里经子上下文使用。
+ */
+export interface HostContext extends Partial<OptionalServices> {
   /** cordis 可选依赖：服务全部就位后在子上下文里执行 fn，服务离开时子上下文连同其注册一起撤掉。 */
-  inject(deps: string[], fn: (child: HostContext) => void): unknown
+  inject<K extends string>(deps: K[], fn: (scope: ScopedContext<K>) => void): unknown
+  /** cordis：登记一个随（子）上下文卸载而撤销的副作用。 */
+  effect(execute: () => () => void, label?: string): void
   slots: {
     inject(name: string, fn: () => (() => void) | void): () => void
     register<P>(options: SlotRegisterOptions, component: ComponentType<P>): () => void
@@ -143,14 +174,6 @@ export interface HostContext {
   layout: {
     /** 只收面板 id、不带参数；面板未注册会抛错。 */
     selectPanel(panelId: string | null): void
-  }
-  sidebarRight: {
-    /** 按 kind 打开右侧栏页面类型；kind 没注册会抛错。 */
-    openTab(kind: string): void
-  }
-  /** ui-plugin-manager 提供：切到插件页并打开某个包的详情，不换当前会话。 */
-  pluginNavigation: {
-    openBundle(packageName: string): void
   }
   remote: {
     commands: {
@@ -164,20 +187,7 @@ export interface HostContext {
       openWorkspacePath(request: { path: string; action?: 'reveal' }): Promise<RemoteResult<unknown>>
     }
   }
-  /** 插件配置（profile 行 id 即 entryId）。 */
-  configForms?: { get(entryId: string): ConfigForm }
 }
 
-/** 右侧栏 tab 用到的宿主服务（ui-sidebar-right）与 cordis effect。 */
-export interface SidebarHost {
-  /** cordis：登记一个随插件卸载而撤销的副作用。 */
-  effect(execute: () => () => void, label?: string): void
-  sidebarRightTabs: {
-    /** 静态登记 tab 类型；返回撤销函数。登记挂在宿主注册表自己的上下文上，所以调用方要包进自己的 effect。 */
-    register(definition: SidebarTabDefinition): () => void
-  }
-  sidebarRight: {
-    /** 在当前会话的右侧栏打开（或聚焦）一个页面类 tab；没有会话在屏幕上时抛错。 */
-    openTab(kind: string, options?: { params?: unknown }): void
-  }
-}
+/** 右侧栏 tab 注册时的子上下文（sidebarRightTabs + sidebarRight 都在）。 */
+export type SidebarHost = ScopedContext<'sidebarRightTabs' | 'sidebarRight'>

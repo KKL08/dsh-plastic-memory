@@ -34,7 +34,8 @@ export function hasSessionMemory(view: SessionView | undefined): view is Session
 }
 
 export interface MemoryButtonProps extends Pick<SessionStandardProps, 'sessionId' | 'useProjection'> {
-  onOpenTab: () => void
+  /** 打开右侧栏记忆 tab；缺省（宿主没有右侧栏）时不画「查看带入的记忆 ›」。 */
+  onOpenTab: (() => void) | undefined
   onHandle: () => void
 }
 
@@ -147,9 +148,11 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
               <button type="button" className="pm-link" onClick={() => { close(); onHandle() }}>{t('composer.handle')}</button>
             </div>
           )}
-          <button type="button" className="pm-link pm-composer-open" onClick={() => { close(); onOpenTab() }}>
-            {t('composer.viewInjected')}
-          </button>
+          {onOpenTab === undefined ? null : (
+            <button type="button" className="pm-link pm-composer-open" onClick={() => { close(); onOpenTab() }}>
+              {t('composer.viewInjected')}
+            </button>
+          )}
         </div>,
         document.body,
       )}

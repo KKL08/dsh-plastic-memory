@@ -6,7 +6,7 @@
  */
 import { useMemo } from 'react'
 import type { BindGateway } from '../gateway.ts'
-import type { HostContext, SessionStandardProps, SidebarHost } from '../host.ts'
+import type { SessionStandardProps, SidebarHost } from '../host.ts'
 import type { Translate } from '../i18n.tsx'
 import { NS } from '../locales.ts'
 import { MemoryIcon } from '../MemoryIcon.tsx'
@@ -28,8 +28,16 @@ export function openMemoryTab(ctx: Pick<SidebarHost, 'sidebarRight'>): void {
   ctx.sidebarRight.openTab(SIDEBAR_TAB_KIND)
 }
 
-export function registerSidebarTab(ctx: HostContext & SidebarHost, nav: NavStore, bind: BindGateway, useTranslate: () => Translate): void {
+/**
+ * 在 `ctx.inject(['sidebarRightTabs', 'sidebarRight'], …)` 的子上下文里调用：登记 tab 类型、注册正文与标题，
+ * 并把「打开记忆 tab」交给导航 store（输入框弹层的「查看带入的记忆 ›」靠它；kind 没登记时 openTab 会抛错，所以随登记一起给出）。
+ */
+export function registerSidebarTab(ctx: SidebarHost, nav: NavStore, bind: BindGateway, useTranslate: () => Translate): void {
   const t = ctx.locale.bind(NS)
+  ctx.effect(() => {
+    nav.provide('sidebarTab', () => { openMemoryTab(ctx) })
+    return () => { nav.provide('sidebarTab', undefined) }
+  }, 'plastic-memory: sidebar tab exit')
   ctx.effect(() => ctx.sidebarRightTabs.register({
     id: SIDEBAR_TAB_ID,
     kind: SIDEBAR_TAB_KIND,

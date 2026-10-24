@@ -36,9 +36,7 @@ export function createSettingsCard(ctx: HostContext, configForms: ConfigFormsSer
 
 export function applySettings(ctx: HostContext, nav: NavStore, bind: BindGateway, useTranslate: () => Translate): void {
   ctx.inject(['configForms'], (scope) => {
-    const configForms = scope.configForms
-    if (configForms === undefined) return
-    const Card = createSettingsCard(ctx, configForms, nav, bind, useTranslate)
+    const Card = createSettingsCard(ctx, scope.configForms, nav, bind, useTranslate)
     scope.slots.inject('plugins.bundle.config', () => scope.slots.register({ name: 'plugins.bundle.config', key: PACKAGE_NAME }, Card))
   })
 }

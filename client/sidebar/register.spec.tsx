@@ -24,14 +24,15 @@ function setup() {
     effect: (fn, label) => { effects.push(label ?? ''); fn() },
     sidebarRightTabs: { register: vi.fn((definition: SidebarTabDefinition) => { definitions.push(definition); return () => {} }) },
   })
-  registerSidebarTab(ctx, createNavStore(), createHostGateway(ctx), () => t)
-  return { ctx, slots, definitions, effects }
+  const nav = createNavStore()
+  registerSidebarTab(ctx, nav, createHostGateway(ctx), () => t)
+  return { ctx, nav, slots, definitions, effects }
 }
 
 describe('registerSidebarTab', () => {
   it('登记页面类 tab 类型（不认地址），包在插件自己的 effect 里；「开始」页一条入口', () => {
     const { definitions, effects } = setup()
-    expect(effects).toEqual(['plastic-memory: sidebar tab type'])
+    expect(effects).toEqual(['plastic-memory: sidebar tab exit', 'plastic-memory: sidebar tab type'])
     expect(definitions).toHaveLength(1)
     const def = definitions[0]!
     expect(def).toMatchObject({ id: SIDEBAR_TAB_ID, kind: SIDEBAR_TAB_KIND })
@@ -72,6 +73,13 @@ describe('registerSidebarTab', () => {
   it('openMemoryTab 按 kind 走 sidebarRight.openTab', () => {
     const { ctx } = setup()
     openMemoryTab(ctx)
+    expect(ctx.sidebarRight.openTab).toHaveBeenCalledWith(SIDEBAR_TAB_KIND)
+  })
+
+  it('登记后把「打开记忆 tab」交给导航 store（输入框弹层的链接靠它）', () => {
+    const { ctx, nav } = setup()
+    expect(nav.canOpen('sidebarTab')).toBe(true)
+    nav.openSidebarTab()
     expect(ctx.sidebarRight.openTab).toHaveBeenCalledWith(SIDEBAR_TAB_KIND)
   })
 })

@@ -1,8 +1,8 @@
 // 面板注册壳：apply 注册双语字典、左栏图标与记忆页；记忆页挂在宿主标准 props 上能渲染出两态。
 import { describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { ComponentType } from 'react'
-import { apply, inject } from './index.tsx'
+import { apply, inject, PACKAGE_NAME } from './index.tsx'
 import type { RootStandardProps, SessionListState, SessionStandardProps } from './host.ts'
 import { createTranslator } from './i18n.tsx'
 import { en, NS, zh } from './locales.ts'
@@ -10,7 +10,7 @@ import { PANEL_ID } from './nav.ts'
 import { createFakeConfigForm } from './settings/config-form.fake.ts'
 import { fakeHostContext } from './test-utils.tsx'
 
-function setup() {
+function setup(overrides: Parameters<typeof fakeHostContext>[0] = {}) {
   const registered: Array<{ options: { name: string; id?: string; key?: string; label?: string | (() => string) }; component: ComponentType<never> }> = []
   const register = vi.fn()
   const ctx = fakeHostContext({
@@ -20,6 +20,7 @@ function setup() {
       register: (options, component) => { registered.push({ options, component: component as ComponentType<never> }); return () => {} },
     },
     locale: { register, bind: () => createTranslator(zh) as (key: string) => string, getSnapshot: () => 0, subscribe: () => () => {} },
+    ...overrides,
   })
   apply(ctx)
   return { ctx, registered, register }
@@ -37,8 +38,27 @@ describe('apply', () => {
     expect(register).toHaveBeenCalledWith(NS, { zh, en })
   })
 
-  it('依赖 pluginNavigation（「去设置里打开 ›」跳插件页）', () => {
-    expect(inject).toContain('pluginNavigation')
+  it('右侧栏、插件页导航、配置表单是可选服务，不进 inject（缺了插件照常加载）', () => {
+    for (const service of ['sidebarRight', 'sidebarRightTabs', 'pluginNavigation', 'configForms']) expect(inject).not.toContain(service)
+  })
+
+  it('宿主有插件页导航：记忆页页头「设置」跳插件页里本插件的详情', () => {
+    const { registered, ctx } = setup()
+    const Page = registered.find(r => r.options.name === 'main')!.component as ComponentType<RootStandardProps>
+    render(<Page {...props({ ids: ['s1'], byId: { s1: { id: 's1', displayTitle: 's1', running: false, updatedAt: 1, retainedBy: {} } }, phase: 'ready' })} />)
+    fireEvent.click(screen.getByRole('button', { name: '设置' }))
+    expect(ctx.pluginNavigation!.openBundle).toHaveBeenCalledWith(PACKAGE_NAME)
+  })
+
+  it('宿主缺可选服务：记忆页照常注册，不注册右侧栏 tab 与设置页，也不画「设置」', () => {
+    const { registered } = setup({ sidebarRight: undefined, sidebarRightTabs: undefined, pluginNavigation: undefined, configForms: undefined })
+    expect(registered.map(r => r.options.name)).toEqual(expect.arrayContaining(['main', 'sidebar.panellist', 'conversation.composer.dock']))
+    expect(registered.map(r => r.options.name)).not.toContain('sidebar.right.pane.tab')
+    expect(registered.map(r => r.options.name)).not.toContain('plugins.bundle.config')
+    const Page = registered.find(r => r.options.name === 'main')!.component as ComponentType<RootStandardProps>
+    render(<Page {...props({ ids: ['s1'], byId: { s1: { id: 's1', displayTitle: 's1', running: false, updatedAt: 1, retainedBy: {} } }, phase: 'ready' })} />)
+    expect(screen.getAllByRole('tab')).toHaveLength(4)
+    expect(screen.queryByRole('button', { name: '设置' })).toBeNull()
   })
 
   it('左栏图标与记忆页同 id，图标名称走 locale', () => {

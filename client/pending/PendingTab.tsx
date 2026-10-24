@@ -10,7 +10,7 @@ import type { HealthView, PendingItem, PendingView } from '../../src/gui/contrac
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { formatDay, useT } from '../i18n.tsx'
 import { FlashRow, useFlashTarget } from '../library/shared.tsx'
-import type { NavStore } from '../nav.ts'
+import { useCanOpen, type NavStore } from '../nav.ts'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import {
   HorizontalCard, OverflowCard, PromoteCard, ResultCard, SecretCard, UnreadableCard, VerticalCard, type Outcome,
@@ -106,7 +106,7 @@ export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
     <div className="pm-pending">
       <style data-plastic-memory-pending="">{pendingCss}</style>
       {rows.length === 0
-        ? <PendingEmpty session={session} workspacePath={workspacePath} health={health.status === 'ready' ? health.data : undefined} governanceEnabled={config?.governanceEnabled} now={now} />
+        ? <PendingEmpty nav={nav} session={session} workspacePath={workspacePath} health={health.status === 'ready' ? health.data : undefined} governanceEnabled={config?.governanceEnabled} now={now} />
         : rows.map(row => (
           <FlashRow key={row.key} as="div" className="pm-pending-row" flashing={row.flashing ?? false} onFlashEnd={clear}>{row.node}</FlashRow>
         ))}
@@ -129,7 +129,8 @@ function lastScanAt(health: HealthView): number | null {
   return times.length === 0 ? null : Math.max(...times)
 }
 
-function PendingEmpty({ session, workspacePath, health, governanceEnabled, now }: {
+function PendingEmpty({ nav, session, workspacePath, health, governanceEnabled, now }: {
+  nav: NavStore
   session: BorrowedSession
   workspacePath: string | undefined
   health: HealthView | undefined
@@ -137,14 +138,14 @@ function PendingEmpty({ session, workspacePath, health, governanceEnabled, now }
   now: number
 }) {
   const t = useT()
-  const gateway = useGateway()
+  const canOpenSettings = useCanOpen(nav, 'settings')
 
   if (governanceEnabled === false) {
     return (
       <EmptyState
         variant="daily"
         title={t('pending.off.title')}
-        action={<button type="button" className="pm-pending-link" onClick={() => { gateway.openSettings() }}>{t('pending.off.action')}</button>}
+        action={canOpenSettings ? <button type="button" className="pm-pending-link" onClick={() => { nav.openSettings() }}>{t('pending.off.action')}</button> : undefined}
       >
         {t('pending.off.body')}
       </EmptyState>

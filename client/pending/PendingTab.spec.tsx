@@ -301,11 +301,18 @@ describe('待处理：两态与空状态', () => {
   })
 
   it('体检关闭：「去设置里打开 ›」是唯一能点的，打开插件设置页', () => {
-    const { gateway } = setup([], { config: { ...config, governanceEnabled: false } })
+    const openSettings = vi.fn()
+    setup([], { config: { ...config, governanceEnabled: false } }, createNavStore(undefined, { openSettings }))
     expect(screen.getByRole('status')).toHaveTextContent('体检已关闭')
     expect(screen.getAllByRole('button').map(b => b.textContent)).toEqual(['去设置里打开 ›'])
     fireEvent.click(screen.getByRole('button', { name: '去设置里打开 ›' }))
-    expect(gateway.settingsOpened.count).toBe(1)
+    expect(openSettings).toHaveBeenCalledTimes(1)
+  })
+
+  it('体检关闭、宿主没有插件页导航：只有说明，不画「去设置里打开 ›」', () => {
+    setup([], { config: { ...config, governanceEnabled: false } })
+    expect(screen.getByRole('status')).toHaveTextContent('体检已关闭')
+    expect(screen.queryByRole('button')).toBeNull()
   })
 })
 

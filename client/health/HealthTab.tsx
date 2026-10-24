@@ -11,7 +11,7 @@ import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { formatDay, formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
 import { healthZh } from '../locales/health.ts'
-import type { NavStore } from '../nav.ts'
+import { useCanOpen, type NavStore } from '../nav.ts'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { HealthBanner } from '../ui/HealthBanner.tsx'
 
@@ -126,6 +126,7 @@ export function HealthTab({ session, scope, nav }: { session: BorrowedSession; s
   const gateway = useGateway()
   const health = gateway.useView(session, 'health')
   const pending = gateway.useView(session, 'pending')
+  const canOpenSettings = useCanOpen(nav, 'settings')
   if (health.status !== 'ready') return <ViewStatus state={health} />
 
   const now = Date.now()
@@ -141,7 +142,7 @@ export function HealthTab({ session, scope, nav }: { session: BorrowedSession; s
         <EmptyState
           variant="daily"
           title={t('health.off.title')}
-          action={<button type="button" className="pm-link" onClick={() => { nav.openSettings() }}>{t('scan.openSettings')}</button>}
+          action={canOpenSettings ? <button type="button" className="pm-link" onClick={() => { nav.openSettings() }}>{t('scan.openSettings')}</button> : undefined}
         >
           {t('health.off.body')}
         </EmptyState>

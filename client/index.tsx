@@ -6,7 +6,7 @@ import { useCallback, useMemo, useSyncExternalStore } from 'react'
 import { createComposerDock, DOCK_ID, DOCK_ORDER } from './composer/dock.tsx'
 import { registerChatCards } from './chat/index.tsx'
 import { createHostGateway, GatewayProvider, type BindGateway } from './gateway.ts'
-import type { HostContext, HostLocale, RootStandardProps, SidebarHost } from './host.ts'
+import type { HostContext, HostLocale, RootStandardProps } from './host.ts'
 import type { Translate } from './i18n.tsx'
 import { en, NS, zh } from './locales.ts'
 import { healthCss } from './health/HealthTab.tsx'
@@ -19,7 +19,8 @@ import { PanelShell } from './ui/PanelShell.tsx'
 
 export { PANEL_ID }
 
-export const inject = ['slots', 'locale', 'layout', 'sidebarRight', 'remote', 'remote.commands', 'remote.workspaceFiles', 'remote.session', 'pluginNavigation', 'configForms', 'sidebarRightTabs']
+/** 核心依赖：缺一个宿主就不加载本插件。右侧栏、插件页导航、配置表单是可选服务，在 apply 里按需 `ctx.inject`。 */
+export const inject = ['slots', 'locale', 'layout', 'remote', 'remote.commands', 'remote.workspaceFiles', 'remote.session']
 
 /** npm 包名：宿主插件页按它打开本插件的详情（配置区在详情页里）。 */
 export const PACKAGE_NAME = 'dsh-plastic-memory'
@@ -54,10 +55,17 @@ function createNavIcon(bind: BindGateway) {
   }
 }
 
-export function apply(ctx: HostContext & SidebarHost): void {
+export function apply(ctx: HostContext): void {
   ctx.locale.register(NS, { zh, en })
   const t = ctx.locale.bind(NS)
-  const nav = createNavStore(undefined, { openSettings: () => { ctx.pluginNavigation.openBundle(PACKAGE_NAME) } })
+  const nav = createNavStore()
+  // 宿主有插件页导航才有「设置」「去设置里打开 ›」
+  ctx.inject(['pluginNavigation'], (scope) => {
+    scope.effect(() => {
+      nav.provide('settings', () => { scope.pluginNavigation.openBundle(PACKAGE_NAME) })
+      return () => { nav.provide('settings', undefined) }
+    }, 'plastic-memory: settings exit')
+  })
   const bind = createHostGateway(ctx)
   const MainPanel = createMainPanel(ctx, nav, bind)
   ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID }, MainPanel))
@@ -70,6 +78,6 @@ export function apply(ctx: HostContext & SidebarHost): void {
   const Dock = createComposerDock(ctx, nav, bind, () => useHostTranslate(ctx.locale))
   ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({ name: 'conversation.composer.dock', id: DOCK_ID, order: DOCK_ORDER }, Dock))
   registerChatCards(ctx, nav, bind)
-  registerSidebarTab(ctx, nav, bind, () => useHostTranslate(ctx.locale))
+  ctx.inject(['sidebarRightTabs', 'sidebarRight'], (scope) => { registerSidebarTab(scope, nav, bind, () => useHostTranslate(ctx.locale)) })
   applySettings(ctx, nav, bind, () => useHostTranslate(ctx.locale))
 }

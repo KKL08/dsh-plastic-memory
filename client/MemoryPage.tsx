@@ -9,7 +9,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } f
 import type { GuiLayerRef } from '../src/gui/contract.ts'
 import { useGateway, type ViewState } from './gateway.ts'
 import { baseName, formatNumber, useT, type Translate } from './i18n.tsx'
-import { MEMORY_TABS, useNavTarget, type MemoryTab, type NavStore, type NavTarget } from './nav.ts'
+import { MEMORY_TABS, useCanOpen, useNavTarget, type MemoryTab, type NavStore, type NavTarget } from './nav.ts'
 import { HealthTab } from './health/HealthTab.tsx'
 import { ScanControl } from './health/ScanControl.tsx'
 import { PendingTab } from './pending/PendingTab.tsx'
@@ -66,7 +66,8 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
       {counts[tab] !== undefined ? <span className="pm-tab-count">{formatNumber(counts[tab])}</span> : null}
     </>
   )
-  const settingsButton = <Button onClick={() => { nav.openSettings() }}>{t('page.settings')}</Button>
+  const canOpenSettings = useCanOpen(nav, 'settings')
+  const settingsButton = canOpenSettings ? <Button onClick={() => { nav.openSettings() }}>{t('page.settings')}</Button> : null
   const items = MEMORY_TABS.map((tab): SegmentedTab<MemoryTab> => ({
     value: tab, label: tabLabel(tab), id: `${tabsId}-${tab}`, panelId: `${tabsId}-${tab}-panel`,
   })) as [SegmentedTab<MemoryTab>, ...SegmentedTab<MemoryTab>[]]

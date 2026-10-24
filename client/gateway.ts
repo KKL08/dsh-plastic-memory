@@ -61,8 +61,6 @@ export interface MemoryGateway {
   readFile(sessionId: string, path: string): Promise<string | undefined>
   /** 用默认应用打开宿主上的文件，或在文件管理器中显示；宿主接受为 true。 */
   openPath(path: string, action?: 'open' | 'reveal'): Promise<boolean>
-  /** 打开插件页里本插件的详情（配置页）。 */
-  openSettings(): void
 }
 
 /** 界面用到的配置项（宿主配置段 `plastic-memory` 的子集，值已按 schema 带上默认值）。 */
@@ -180,14 +178,15 @@ export const MEMORY_ROOT_KEY = 'dsh-plastic-memory.gui.memoryRoot'
 /** 插件配置的 entryId：cordis.patch.yml 插入的 profile 行 id。 */
 export const CONFIG_ENTRY_ID = 'plastic-memory'
 
-/** 插件页按 npm 包名打开详情。 */
-export const PACKAGE_NAME = 'dsh-plastic-memory'
-
 interface ConfigBinding {
   form: ConfigForm | undefined
   get: () => ConfigFormSnapshot | undefined
   subscribe: (fn: () => void) => () => void
 }
+
+const NO_CONFIG: ConfigBinding = { form: undefined, get: () => undefined, subscribe: () => () => {} }
+
+type ConfigFormsService = NonNullable<HostContext['configForms']>
 
 /** refreshes：refresh-views 成功的次数。文件资源起步就是 not-found 时，宿主在文件写出后未必再推一帧，靠它触发重读。 */
 interface RootState { memoryRoot?: string; error?: string; refreshes: number }
@@ -255,14 +254,21 @@ export function createHostGateway(ctx: HostContext): BindGateway {
   const execute: MemoryGateway['execute'] = async (sessionId, command) =>
     decodeExecution(command.cmd, await run(sessionId, encodeMemoryCommand(command)))
   const root = createRootStore(run)
-  // 第一次用到时才向宿主要表单（get 会触发配置镜像加载）；绑定一次，订阅函数身份稳定
+  // configForms 是可选服务：就位时记下，离开时清掉（根上下文没 inject 它，不能直接读）
+  let configForms: ConfigFormsService | undefined
   let binding: ConfigBinding | undefined
+  ctx.inject(['configForms'], (scope) => {
+    scope.effect(() => {
+      configForms = scope.configForms
+      return () => { configForms = undefined; binding = undefined }
+    }, 'plastic-memory: gateway config form')
+  })
+  // 第一次用到时才向宿主要表单（get 会触发配置镜像加载）；服务在时绑定一次，订阅函数身份稳定
   const config = (): ConfigBinding => {
     if (binding !== undefined) return binding
-    const form = ctx.configForms?.get(CONFIG_ENTRY_ID)
-    binding = form === undefined
-      ? { form, get: () => undefined, subscribe: () => () => {} }
-      : { form, get: () => form.getSnapshot(), subscribe: fn => form.subscribe(fn) }
+    if (configForms === undefined) return NO_CONFIG
+    const form = configForms.get(CONFIG_ENTRY_ID)
+    binding = { form, get: () => form.getSnapshot(), subscribe: fn => form.subscribe(fn) }
     return binding
   }
 
@@ -288,7 +294,6 @@ export function createHostGateway(ctx: HostContext): BindGateway {
         return r?.ok ?? false
       } catch { return false }
     },
-    openSettings() { ctx.pluginNavigation?.openBundle(PACKAGE_NAME) },
     useSession(workspacePath) {
       const list = useSessions(s => s)
       const picked = pickSession(list, workspacePath)
