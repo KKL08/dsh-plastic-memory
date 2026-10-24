@@ -85,10 +85,11 @@ export async function executeSnapshotTool(
   if (!snap) {
     return { kind: 'error', message: `快照不存在：${args.snapshotId}（可能已超过 14 天保留窗口）` }
   }
-  // show / restore 的预读范围：快照内每个 id 的现状，按 id 两级定位（含非 active，当前 workspace 优先）
+  // show / restore 的预读范围：快照内每个记录的现状，按该记录自己的 workspace 定位（含非 active）——restore 的 put 按同一
+  // 提示定位，冲突判断看的就是将被覆盖的那份文件；按会话 workspace 定位会在同 id 多副本时比错对象。
   const current = new Map<string, MemoryRecord>()
-  for (const { id } of snap.data) {
-    const r = await deps.store.get(id, { workspacePath: context.workspacePath })
+  for (const { id, workspacePath } of snap.data) {
+    const r = await deps.store.get(id, { workspacePath })
     if (r) current.set(id, r)
   }
   // 跨 workspace 门：快照里的记录与它的现状任一方落在其他项目，就按那个项目判定（restore 写回快照里的位置）

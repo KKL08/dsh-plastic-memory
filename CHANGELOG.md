@@ -105,8 +105,9 @@ All notable changes to this project are documented here. The format follows
   hidden directory, so the host's grep tool no longer surfaces forgotten text.
 - `memory_forget` moves the file to `.archive/`, recoverable for 14 days as
   before. A memory that contains a secret is the exception: it is deleted
-  physically at once and its copy in every existing snapshot is replaced by a
-  `[redacted: secret]` placeholder, so the snapshot stays usable for its other
+  physically at once, together with any other copy of the same id in the
+  global and current-project directories, and its copy in every existing
+  snapshot is replaced by a `[redacted: secret]` placeholder, so the snapshot stays usable for its other
   records while the secret is gone for good; `memory_snapshot restore` reports
   such records as `redacted`. A suspected secret without vendor markers is
   refused with `secret-suspected` until you confirm with `force: true`.
