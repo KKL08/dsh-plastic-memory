@@ -4,11 +4,12 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import type { ComponentType } from 'react'
 import { GUI_VIEW_VERSION, type SessionView } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
-import type { ContextPressureProjection, HostContext, SessionStandardProps, SidebarHost } from '../host.ts'
+import type { ContextPressureProjection, SessionStandardProps } from '../host.ts'
 import { createTranslator } from '../i18n.tsx'
 import { apply, inject } from '../index.tsx'
 import { zh } from '../locales.ts'
 import { createNavStore, PANEL_ID, SIDEBAR_TAB_KIND } from '../nav.ts'
+import { fakeHostContext } from '../test-utils.tsx'
 import { createComposerDock, DOCK_ID, DOCK_ORDER } from './dock.tsx'
 import { memoryShare } from './MemoryButton.tsx'
 
@@ -129,20 +130,12 @@ describe('跳转', () => {
 describe('注册', () => {
   it('apply 在 conversation.composer.dock 注册按钮，依赖 sidebarRight', () => {
     const registered: Array<{ options: { name: string; id?: string; order?: number }; component: ComponentType<never> }> = []
-    const ctx: HostContext & SidebarHost = {
-      inject: () => () => {},
-      effect: (fn) => { fn() },
-      sidebarRightTabs: { register: vi.fn(() => () => {}) },
+    const ctx = fakeHostContext({
       slots: {
         inject: (_name, fn) => { fn(); return () => {} },
         register: (options, component) => { registered.push({ options, component: component as ComponentType<never> }); return () => {} },
       },
-      locale: { register: vi.fn(), bind: () => createTranslator(zh) as (key: string) => string, getSnapshot: () => 0, subscribe: () => () => {} },
-      layout: { selectPanel: vi.fn() },
-      sidebarRight: { openTab: vi.fn() },
-      pluginNavigation: { openBundle: vi.fn() },
-      remote: { commands: { execute: vi.fn() }, workspaceFiles: { read: vi.fn() }, session: { openWorkspacePath: vi.fn() } },
-    }
+    })
     apply(ctx)
     expect(inject).toContain('sidebarRight')
     const dock = registered.find(r => r.options.name === 'conversation.composer.dock')

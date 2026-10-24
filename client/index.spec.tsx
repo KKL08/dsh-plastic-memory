@@ -3,35 +3,24 @@ import { describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import type { ComponentType } from 'react'
 import { apply, inject } from './index.tsx'
-import type { HostContext, RootStandardProps, SessionListState, SessionStandardProps, SidebarHost } from './host.ts'
+import type { RootStandardProps, SessionListState, SessionStandardProps } from './host.ts'
 import { createTranslator } from './i18n.tsx'
 import { en, NS, zh } from './locales.ts'
 import { PANEL_ID } from './nav.ts'
 import { createFakeConfigForm } from './settings/config-form.fake.ts'
+import { fakeHostContext } from './test-utils.tsx'
 
 function setup() {
   const registered: Array<{ options: { name: string; id?: string; key?: string; label?: string | (() => string) }; component: ComponentType<never> }> = []
   const register = vi.fn()
-  const ctx: HostContext & SidebarHost = {
-    // cordis 语义：依赖的服务都在才执行回调（这里只有 configForms 能就位）
-    inject: (deps, fn) => { if (deps.every(d => d in ctx)) fn(ctx) },
+  const ctx = fakeHostContext({
     configForms: { get: () => createFakeConfigForm() },
     slots: {
       inject: (_name, fn) => { fn(); return () => {} },
       register: (options, component) => { registered.push({ options, component: component as ComponentType<never> }); return () => {} },
     },
     locale: { register, bind: () => createTranslator(zh) as (key: string) => string, getSnapshot: () => 0, subscribe: () => () => {} },
-    effect: (fn) => { fn() },
-    sidebarRightTabs: { register: vi.fn(() => () => {}) },
-    sidebarRight: { openTab: vi.fn() },
-    layout: { selectPanel: vi.fn() },
-    pluginNavigation: { openBundle: vi.fn() },
-    remote: {
-      commands: { execute: vi.fn(async () => ({ ok: false as const, error: { code: 'x', message: 'x' } })) },
-      workspaceFiles: { read: vi.fn() },
-      session: { openWorkspacePath: vi.fn() },
-    },
-  }
+  })
   apply(ctx)
   return { ctx, registered, register }
 }

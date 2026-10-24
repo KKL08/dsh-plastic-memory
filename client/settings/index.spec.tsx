@@ -3,10 +3,11 @@ import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import type { ComponentType } from 'react'
 import { createHostGateway } from '../gateway.ts'
-import type { HostContext, RootStandardProps } from '../host.ts'
+import type { RootStandardProps } from '../host.ts'
 import { createTranslator } from '../i18n.tsx'
 import { zh } from '../locales.ts'
 import { createNavStore, PANEL_ID } from '../nav.ts'
+import { fakeHostContext } from '../test-utils.tsx'
 import { createFakeConfigForm } from './config-form.fake.ts'
 import { applySettings, type ConfigFormsService } from './index.tsx'
 
@@ -17,19 +18,14 @@ function setup(withConfigForms = true) {
   const form = createFakeConfigForm()
   const configForms: ConfigFormsService = { get: vi.fn(() => form) }
   const selectPanel = vi.fn()
-  const ctx = {
+  const ctx = fakeHostContext({
+    ...(withConfigForms ? { configForms } : {}),
     slots: {
-      inject: (_name: string, fn: () => void) => { fn(); return () => {} },
-      register: (options: { name: string; key?: string }, component: ComponentType<CardProps>) => { registered.push({ options, component }); return () => {} },
+      inject: (_name, fn) => { fn(); return () => {} },
+      register: (options, component) => { registered.push({ options, component: component as ComponentType<CardProps> }); return () => {} },
     },
-    locale: { register: vi.fn(), bind: () => createTranslator(zh) as (key: string) => string, getSnapshot: () => 0, subscribe: () => () => {} },
     layout: { selectPanel },
-    remote: {
-      commands: { execute: vi.fn(async () => ({ ok: false as const, error: { code: 'x', message: 'x' } })) },
-      workspaceFiles: { read: vi.fn() },
-    },
-    inject: (deps: string[], fn: (scope: unknown) => void) => { expect(deps).toEqual(['configForms']); fn(withConfigForms ? { ...ctx, configForms } : ctx) },
-  } as unknown as HostContext
+  })
   const nav = createNavStore()
   applySettings(ctx, nav, createHostGateway(ctx), () => createTranslator(zh))
   return { registered, configForms, selectPanel, nav }

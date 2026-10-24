@@ -3,10 +3,11 @@ import { describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import type { ComponentType } from 'react'
 import { createHostGateway } from '../gateway.ts'
-import type { HostContext, SessionStandardProps, SidebarHost, SidebarTabDefinition } from '../host.ts'
+import type { SessionStandardProps, SidebarTabDefinition } from '../host.ts'
 import { createTranslator } from '../i18n.tsx'
 import { zh } from '../locales.ts'
 import { createNavStore, SIDEBAR_TAB_ID, SIDEBAR_TAB_KIND } from '../nav.ts'
+import { fakeHostContext } from '../test-utils.tsx'
 import { openMemoryTab, registerSidebarTab } from './register.tsx'
 
 function setup() {
@@ -14,8 +15,7 @@ function setup() {
   const slots: Array<{ name: string; key?: string; component: ComponentType<never> }> = []
   const definitions: SidebarTabDefinition[] = []
   const effects: string[] = []
-  const ctx: HostContext & SidebarHost = {
-    inject: () => () => {},
+  const ctx = fakeHostContext({
     slots: {
       inject: (_name, fn) => { fn(); return () => {} },
       register: (options, component) => { slots.push({ name: options.name, key: options.key, component: component as ComponentType<never> }); return () => {} },
@@ -23,15 +23,7 @@ function setup() {
     locale: { register: vi.fn(), bind: () => t as (key: string) => string, getSnapshot: () => 0, subscribe: () => () => {} },
     effect: (fn, label) => { effects.push(label ?? ''); fn() },
     sidebarRightTabs: { register: vi.fn((definition: SidebarTabDefinition) => { definitions.push(definition); return () => {} }) },
-    sidebarRight: { openTab: vi.fn() },
-    layout: { selectPanel: vi.fn() },
-    pluginNavigation: { openBundle: vi.fn() },
-    remote: {
-      commands: { execute: vi.fn(async () => ({ ok: false as const, error: { code: 'x', message: 'x' } })) },
-      workspaceFiles: { read: vi.fn() },
-      session: { openWorkspacePath: vi.fn() },
-    },
-  }
+  })
   registerSidebarTab(ctx, createNavStore(), createHostGateway(ctx), () => t)
   return { ctx, slots, definitions, effects }
 }

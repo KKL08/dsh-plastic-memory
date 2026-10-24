@@ -4,11 +4,9 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import type { ComponentType } from 'react'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createHostGateway } from '../gateway.ts'
-import type { HostContext, SessionListState } from '../host.ts'
-import { createTranslator } from '../i18n.tsx'
-import { zh } from '../locales.ts'
+import type { SessionListState } from '../host.ts'
 import { createNavStore, PANEL_ID } from '../nav.ts'
-import { NOW, renderInShell } from '../test-utils.tsx'
+import { fakeHostContext, NOW, renderInShell } from '../test-utils.tsx'
 import { registerChatCards, type TurnTailProps } from './index.tsx'
 import { MemoryToolRow, type MemoryToolViewProps } from './MemoryToolRow.tsx'
 import { savedTurnDefinition, type SavedMemory, type SavedTurnData } from './saved-turn.ts'
@@ -170,19 +168,14 @@ function fakeHost() {
   const registered: Array<{ options: { name: string; key?: string; id?: string }; component: ComponentType<never> }> = []
   const execute = vi.fn(async (_sid: string, line: string) => ({ ok: true as const, value: { commandId: 'x', result: { kind: 'success' as const, text: JSON.stringify({ ok: true, cmd: line.split(' ')[1] }) } } }))
   const definitions: unknown[] = []
-  const ctx: HostContext & { uiConversation: unknown } = {
-    inject: (deps, fn) => { expect(deps).toEqual(['uiConversation']); fn(ctx) },
+  const ctx = fakeHostContext({
     uiConversation: { events: { register: (def: unknown) => { definitions.push(def); return () => {} } } },
     slots: {
       inject: (_name, fn) => { fn(); return () => {} },
       register: (options, component) => { registered.push({ options, component: component as ComponentType<never> }); return () => {} },
     },
-    locale: { register: () => () => {}, bind: () => createTranslator(zh) as (key: string) => string, getSnapshot: () => 0, subscribe: () => () => {} },
-    layout: { selectPanel: vi.fn() },
-    sidebarRight: { openTab: vi.fn() },
-    pluginNavigation: { openBundle: vi.fn() },
-    remote: { commands: { execute }, workspaceFiles: { read: vi.fn() }, session: { openWorkspacePath: vi.fn() } },
-  }
+    remote: { commands: { execute } },
+  })
   const nav = createNavStore()
   registerChatCards(ctx, nav, createHostGateway(ctx))
   return { ctx, nav, registered, definitions, execute }
