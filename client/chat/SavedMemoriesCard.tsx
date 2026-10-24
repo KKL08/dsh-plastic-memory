@@ -129,9 +129,6 @@ export const savedMemoriesCardCss = `
 .pm-icon-btn:hover:not([aria-disabled='true']) { background: var(--pm-hover); color: var(--pm-text); }
 .pm-icon-btn[aria-disabled='true'] { opacity: .4; cursor: default; }
 .pm-saved-foot { display: flex; justify-content: flex-end; }
-.pm-link {
-  padding: 0; border: 0; background: none; font: inherit; font-size: 12px; font-weight: 400;
-  color: var(--pm-text-2); cursor: pointer;
-}
-.pm-link:hover { color: var(--pm-text); }
+.pm-saved-foot .pm-link { font-size: 12px; font-weight: 400; color: var(--pm-text-2); }
+.pm-saved-foot .pm-link:hover { color: var(--pm-text); text-decoration: none; }
 `

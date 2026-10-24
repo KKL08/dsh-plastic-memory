@@ -180,7 +180,6 @@ export const healthCss = `
 .pm-health-none { margin: 0; font-size: 13px; color: var(--pm-text-2); }
 .pm-health-alerts { padding: 0 16px; }
 .pm-health-entries { margin: 0; padding: 0 16px; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 13px; line-height: 1.55; color: var(--pm-text); }
-.pm-health-entries .pm-link { font-weight: 600; }
 .pm-health-off { opacity: .5; }
 .pm-health-status { margin: 24px 0; text-align: center; font-size: 12px; color: var(--pm-text-2); }
 .pm-scan { margin-left: auto; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }

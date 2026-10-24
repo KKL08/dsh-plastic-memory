@@ -110,7 +110,7 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
         aria-expanded={open}
         onClick={toggle}
       >
-        <MemoryIcon size={14} active={false} />
+        <MemoryIcon size={14} />
       </button>
       {open && createPortal(
         <div ref={panelRef} className="pm-root pm-composer-panel" style={position!} role="dialog" aria-label={t('composer.dialog')}>

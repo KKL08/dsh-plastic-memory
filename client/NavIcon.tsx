@@ -7,11 +7,11 @@
 import { useGateway } from './gateway.ts'
 import { MemoryIcon, type IconMarker } from './MemoryIcon.tsx'
 
-export function NavIcon({ size, active }: { size: number; active: boolean }) {
+export function NavIcon({ size }: { size: number; active: boolean }) {
   const gateway = useGateway()
   // 待处理视图覆盖全部层，借哪个会话都一样
   const pending = gateway.useView(gateway.useSession(undefined), 'pending')
   const dot = pending.status === 'ready' ? pending.data.dot : 'none'
   const marker: IconMarker | undefined = dot === 'red' ? 'secret' : dot === 'amber' ? 'pending' : undefined
-  return <MemoryIcon size={size} active={active} marker={marker} />
+  return <MemoryIcon size={size} marker={marker} />
 }

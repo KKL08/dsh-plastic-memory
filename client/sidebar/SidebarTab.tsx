@@ -352,7 +352,7 @@ export const sidebarTabCss = `
 .pm-side-saved > .pm-side-error { grid-column: 1 / -1; }
 .pm-side-delete {
   display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0;
-  border: 0; border-radius: var(--dsw-radius-sm, 8px); background: transparent; color: var(--pm-text-3); cursor: pointer;
+  border: 0; border-radius: var(--dsw-radius-sm, 8px); background: transparent; color: var(--pm-text-2); cursor: pointer;
 }
 .pm-side-delete:hover { background: var(--pm-hover); color: var(--pm-text); }
 .pm-side-delete[aria-disabled='true'] { opacity: .4; cursor: default; }

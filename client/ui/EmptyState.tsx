@@ -24,7 +24,7 @@ export function EmptyState({ variant, title, children, action, icon }: EmptyStat
   return (
     <div className={`pm-empty pm-empty--${variant}`} role="status">
       <div className="pm-empty-icon" onMouseEnter={variant === 'first' ? () => { setPlay(n => n + 1) } : undefined}>
-        {variant === 'first' ? <WhaleTail key={play} /> : (icon ?? <MemoryIcon size={20} active={false} />)}
+        {variant === 'first' ? <WhaleTail key={play} /> : (icon ?? <MemoryIcon size={20} />)}
       </div>
       <p className="pm-empty-title">{title}</p>
       {children !== undefined ? <p className="pm-empty-body">{children}</p> : null}

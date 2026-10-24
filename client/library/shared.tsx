@@ -144,10 +144,6 @@ export function useRowActions(session: BorrowedSession) {
 export const sharedTabCss = crossConfirmCss + `
 .pm-tab-message { margin: 24px 0; text-align: center; font-size: 12px; color: var(--pm-text-2); }
 .pm-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
-.pm-link {
-  padding: 0; border: 0; background: transparent; font: inherit; color: var(--pm-text); cursor: pointer;
-}
-.pm-link:hover { text-decoration: underline; }
 .pm-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
 .pm-list-row {
   position: relative; display: flex; align-items: flex-start; gap: 12px;

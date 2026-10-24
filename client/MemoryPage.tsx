@@ -1,5 +1,5 @@
 /**
- * 左栏记忆页的外壳：标题「记忆」+ 作用域下拉，四个 tab（待处理、全部记忆带数；健康、最近删除），tab 内容由后续票填。
+ * 左栏记忆页的外壳：标题「记忆」+ 作用域下拉，四个 tab（待处理、全部记忆带数；健康、最近删除）。
  * 两态：一个会话都没有 → 空态「开一个会话后这里可用」；有会话 → 全功能。
  * 当前视图与作用域在导航 store 里，入口直达时先写 store 再切面板。
  * 不是入口打开的（点左栏图标、宿主恢复上次的面板）按默认落点：待处理有条目落在待处理，为空落在全部记忆（PRD §4 入口③）。
@@ -102,9 +102,7 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
                   ? <LibraryTab nav={nav} scope={scope} session={session} />
                   : target.tab === 'deleted'
                     ? <DeletedTab nav={nav} scope={scope} session={session} />
-                    : target.tab === 'health'
-                      ? <HealthTab session={session} scope={scope} nav={nav} />
-                      : <p className="pm-page-placeholder">{t('page.placeholder')}</p>}
+                    : <HealthTab session={session} scope={scope} nav={nav} />}
             </div>
           </>
         )}

@@ -15,7 +15,7 @@ import { PanelShell } from '../ui/PanelShell.tsx'
 import { SidebarTab, sidebarTabCss } from './SidebarTab.tsx'
 
 function GuideIcon({ size }: { size?: number | undefined }) {
-  return <MemoryIcon size={size ?? 22} active={false} />
+  return <MemoryIcon size={size ?? 22} />
 }
 
 /**
@@ -67,7 +67,7 @@ export function registerSidebarTab(ctx: SidebarHost, nav: NavStore, bind: BindGa
   }
   function MemorySidebarTitle() {
     const translate = useTranslate()
-    return <><MemoryIcon size={16} active={false} />{translate('sidebar.tab.title')}</>
+    return <><MemoryIcon size={16} />{translate('sidebar.tab.title')}</>
   }
   ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({ name: 'sidebar.right.pane.tab', key: SIDEBAR_TAB_ID }, MemorySidebarTab))
   ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({ name: 'sidebar.right.pane.tab.title', key: SIDEBAR_TAB_ID }, MemorySidebarTitle))
