@@ -22,6 +22,8 @@ export interface PromoteResult {
   rejected: CrossWorkspaceRejection[]
   /** 带参数放行、属于其他项目的记录。 */
   otherWorkspaces: OtherWorkspaceMark[]
+  /** 提升前的自动快照；dismiss 或没有目标时为 null。 */
+  snapshotId: string | null
   message: string
 }
 
@@ -65,7 +67,7 @@ export async function executePromote(
     }
     const skipNote = skipped.length > 0 ? `（${skipped.length} 条不存在或已删除，见 skipped）` : ''
     return {
-      promoted: [], dismissed, skipped, rejected, otherWorkspaces,
+      promoted: [], dismissed, skipped, rejected, otherWorkspaces, snapshotId: null,
       message: `已清除 ${dismissed.length} 条提升候选标记，这些记忆保留在项目内，之后不再提示提升。${skipNote}${wsNote}`,
     }
   }
@@ -108,5 +110,5 @@ export async function executePromote(
     : args.target === 'global'
       ? `已提升 ${promoted.length} 条记忆到全局（插件 global 记忆）。${snapNote}`
       : `已写入 ${promoted.length} 条记忆到 ~/.dsh/AGENTS.md，原项目记忆已归档软删。${snapNote}`
-  return { promoted, dismissed: [], skipped, rejected, otherWorkspaces, message: `${message}${wsNote}` }
+  return { promoted, dismissed: [], skipped, rejected, otherWorkspaces, snapshotId: snapshot?.id ?? null, message: `${message}${wsNote}` }
 }

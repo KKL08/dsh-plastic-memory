@@ -56,4 +56,15 @@ describe('保留窗口过后连带清理已裁决条目', () => {
     await decisions.settle(next.id, 'keep-both', T0 + RETENTION_MS + 1)
     expect((await decisions.listSettled()).map(e => e.id)).toEqual([next.id])
   })
+
+  it('提升为全局的条目同样过了保留窗口就清掉（快照已过期，不能再撤销）；留在本项目的不动', async () => {
+    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+    const decisions = new PendingDecisionsStore(sidecar.pending)
+    const promoted = (await decisions.upsert({ kind: 'promote-candidate', memoryIds: ['mem_p'], summary: '', fingerprint: 'fp' }, T0)).entry
+    const local = (await decisions.upsert({ kind: 'promote-candidate', memoryIds: ['mem_q'], summary: '', fingerprint: 'fq' }, T0)).entry
+    await decisions.settle(promoted.id, 'promoted', T0, { snapshotId: 'snap_p' })
+    await decisions.settle(local.id, 'keep-local', T0)
+    await decisions.sweep(T0 + RETENTION_MS + 1)
+    expect((await decisions.listSettled()).map(e => e.id)).toEqual([local.id])
+  })
 })

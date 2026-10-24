@@ -199,10 +199,18 @@ export type SessionView = z.infer<typeof sessionViewSchema>
 
 const allowCrossWorkspace = z.boolean().optional()
 
-/** `/memory` 子命令的参数（命令名与文本编码在命令处理器票里定）。 */
+/** 宿主命令名（不带斜杠）。 */
+export const MEMORY_COMMAND_NAME = 'memory'
+
+/**
+ * `/memory` 子命令的参数。文本编码：`/memory <cmd> <其余字段的 JSON 对象>`，没有其余字段时只写子命令，
+ * 如 `/memory info`、`/memory resolve {"decisionId":"pd_x","verdict":"keep-left"}`（见 encodeMemoryCommand）。
+ */
 export const memoryCommandSchema = z.discriminatedUnion('cmd', [
+  z.object({ cmd: z.literal('info') }),
   z.object({ cmd: z.literal('resolve'), decisionId: z.string(), verdict: z.enum(RESOLVE_VERDICTS), allowCrossWorkspace }),
-  z.object({ cmd: z.literal('undo'), decisionId: z.string() }),
+  /** 撤销一条已裁决条目：去掉 settled，记了快照的按它恢复败方（提升为全局则恢复原位）。 */
+  z.object({ cmd: z.literal('undo'), decisionId: z.string(), allowCrossWorkspace }),
   z.object({ cmd: z.literal('promote'), decisionId: z.string(), target: z.enum(['global', 'agents-md']), allowCrossWorkspace }),
   z.object({ cmd: z.literal('keep-local'), decisionId: z.string(), allowCrossWorkspace }),
   z.object({ cmd: z.literal('forget'), memoryId: z.string(), allowCrossWorkspace }),
@@ -214,6 +222,34 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
 ])
 export type MemoryCommand = z.infer<typeof memoryCommandSchema>
 export type MemoryCommandName = MemoryCommand['cmd']
+
+/** 命令 → 整行文本（客户端发给 `remote.commands.execute`）。 */
+export function encodeMemoryCommand(command: MemoryCommand): string {
+  const { cmd, ...rest } = command
+  return `/${MEMORY_COMMAND_NAME} ${cmd}${Object.keys(rest).length > 0 ? ` ${JSON.stringify(rest)}` : ''}`
+}
+
+/** 命令名之后的原文（宿主 rawInput，含分隔空白）→ 命令；不合法时 detail 说明原因。 */
+export function parseMemoryCommand(rawInput: string): { ok: true; command: MemoryCommand } | { ok: false; detail: string } {
+  const text = rawInput.trim()
+  const space = text.search(/\s/)
+  const cmd = space === -1 ? text : text.slice(0, space)
+  const argText = space === -1 ? '' : text.slice(space).trim()
+  let args: object = {}
+  if (argText !== '') {
+    let value: unknown
+    try {
+      value = JSON.parse(argText)
+    } catch {
+      return { ok: false, detail: `参数不是合法 JSON：${argText}` }
+    }
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return { ok: false, detail: '参数必须是 JSON 对象' }
+    args = value
+  }
+  const parsed = memoryCommandSchema.safeParse({ ...args, cmd })
+  if (!parsed.success) return { ok: false, detail: parsed.error.issues.map(i => `${i.path.join('.') || 'cmd'}: ${i.message}`).join('; ') }
+  return { ok: true, command: parsed.data }
+}
 
 /** 命令错误码。 */
 export const GUI_ERROR_CODES = [
@@ -235,6 +271,13 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     snapshotId: z.string().optional(),
     /** scan：体检的说明码（如 baseline-session-scoped）。 */
     notes: z.array(z.custom<ScanNoteCode>(v => typeof v === 'string')).optional(),
+    /** info：记忆根目录、视图目录与各视图文件的绝对路径（session 是发命令的这个会话的视图）、视图版本。 */
+    info: z.object({
+      memoryRoot: z.string(),
+      viewDir: z.string(),
+      views: z.object({ pending: z.string(), health: z.string(), library: z.string(), deleted: z.string(), session: z.string().optional() }),
+      version: z.number(),
+    }).optional(),
   }),
   z.object({
     ok: z.literal(false),

@@ -45,6 +45,11 @@ function isDeletionSettled(entry: PendingDecision): boolean {
   return entry.settled !== undefined && verdictLoser(entry, entry.settled.verdict) !== undefined
 }
 
+/** 留作撤销的已裁决条目（删一方、提升为全局）：快照过了保留窗口就无从撤销，由 sweep 清掉。 */
+function isUndoable(entry: PendingDecision): boolean {
+  return isDeletionSettled(entry) || entry.settled?.verdict === 'promoted'
+}
+
 type UpsertInput = { kind?: PendingKind; memoryIds: string[]; baselineRef?: string; summary: string; workspaces?: string[]; fingerprint?: string }
 
 /** 同键再报：更新 summary / workspaces / 指纹，保留 id 与 firstSeenAt。workspaces 与 memoryIds 一一对应，按已有条目的 id 顺序重排。 */
@@ -142,13 +147,22 @@ export class PendingDecisionsStore {
 
   /**
    * 连带清理：删一方的已裁决条目，败方软删时刻就是裁决时刻，超出保留窗口后败方已被维护点物理删除、
-   * 快照也已过期，撤销无从谈起，条目一起清掉（与 storage 维护点、SnapshotStore.sweep 同一个 RETENTION_MS 截止线）。
+   * 快照也已过期，撤销无从谈起，条目一起清掉（提升为全局的同理：快照过期即不可撤销）（与 storage 维护点、SnapshotStore.sweep 同一个 RETENTION_MS 截止线）。
    */
   async sweep(now: number): Promise<void> {
     const cutoff = now - RETENTION_MS
     for (const [key, e] of await this.table.list()) {
-      if (isDeletionSettled(e) && e.settled!.at < cutoff) await this.table.delete(key)
+      if (isUndoable(e) && e.settled!.at < cutoff) await this.table.delete(key)
     }
+  }
+
+  /** 撤销裁决：去掉 settled，条目回到待处理（沿用原 id 与 firstSeenAt）。条目不存在或未裁决返回 false。 */
+  async unsettle(id: string): Promise<boolean> {
+    const entry = await this.table.get(id)
+    if (!entry?.settled) return false
+    const { settled: _settled, ...open } = entry
+    await this.table.put(id, open)
+    return true
   }
 
   async remove(id: string): Promise<boolean> {

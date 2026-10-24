@@ -12,9 +12,10 @@ export type PendingKind = (typeof PENDING_KINDS)[number]
 
 /**
  * 已裁决条目的 verdict。两边都留：keep-both、dismiss（也是超限提醒的「忽略」）、垂直 keep-left；
- * 删一方：横向 keep-left / keep-right、垂直 keep-right（败方见 decisions.ts verdictLoser）；keep-local：提升候选「留在本项目」。
+ * 删一方：横向 keep-left / keep-right、垂直 keep-right（败方见 decisions.ts verdictLoser）；keep-local：提升候选「留在本项目」；
+ * promoted：提升候选已提升为全局，snapshotId 是提升前的快照，保留窗口内可撤销。
  */
-export const SETTLED_VERDICTS = ['keep-both', 'dismiss', 'keep-left', 'keep-right', 'keep-local'] as const
+export const SETTLED_VERDICTS = ['keep-both', 'dismiss', 'keep-left', 'keep-right', 'keep-local', 'promoted'] as const
 export type SettledVerdict = (typeof SETTLED_VERDICTS)[number]
 
 export const pendingDecisionSchema = z.object({
