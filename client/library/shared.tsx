@@ -144,7 +144,7 @@ export function useRowActions(session: BorrowedSession) {
 export const sharedTabCss = crossConfirmCss + `
 .pm-tab-message { margin: 24px 0; text-align: center; font-size: 12px; color: var(--pm-text-2); }
 .pm-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
-.pm-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.pm-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; container-type: inline-size; }
 .pm-list-row {
   position: relative; display: flex; align-items: flex-start; gap: 12px;
   padding: 12px 12px 12px 16px; border-radius: 10px;
@@ -156,6 +156,9 @@ export const sharedTabCss = crossConfirmCss + `
 .pm-row-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
 .pm-row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; flex-shrink: 0; }
 .pm-row-actions .pm-btn { padding: 2px 10px; font-size: 12px; }
+@container (max-width: 500px) {
+  .pm-list-row { flex-direction: column; align-items: stretch; gap: 8px; }
+}
 .pm-flash { animation: pm-flash ${FLASH_MS}ms ease-out both; }
 .pm-flash::before {
   content: ''; position: absolute; left: 4px; top: 9px; bottom: 9px; width: 2px; border-radius: 2px;

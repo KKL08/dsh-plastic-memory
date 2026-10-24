@@ -138,6 +138,7 @@ export const libraryTabCss = `
 .pm-lib { display: flex; flex-direction: column; gap: 12px; }
 .pm-lib-storage { display: flex; flex-direction: column; gap: 2px; padding: 0 16px; }
 .pm-lib-storage-line { display: flex; align-items: center; gap: 0; min-width: 0; margin: 0; font-size: 13px; color: var(--pm-text); }
+.pm-lib-storage-line > span:first-child { flex-shrink: 0; white-space: nowrap; }
 .pm-lib-storage-line .pm-link { margin-left: 8px; flex-shrink: 0; }
 .pm-lib-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--pm-text-2); font-size: 12px; }
 .pm-lib-storage-note { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }

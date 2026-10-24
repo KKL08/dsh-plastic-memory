@@ -203,11 +203,13 @@ export const settingsPageCss = `
 .pm-settings-note { margin: 16px 0 0; }
 .pm-settings-conflict { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
 .pm-settings-conflict p { flex: 1; min-width: 0; margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text); }
-.pm-settings-root { display: inline-flex; flex-wrap: wrap; align-items: baseline; justify-content: flex-end; gap: 4px 12px; }
+.pm-settings-root { display: flex; align-self: stretch; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
 .pm-settings-path {
+  flex: 1 1 240px; min-width: 0;
   font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 12px; line-height: 1.5;
-  color: var(--pm-text-2); word-break: break-all; user-select: text;
+  color: var(--pm-text-2); overflow-wrap: anywhere; user-select: text;
 }
+.pm-settings-root > .pm-setting-hint { flex-basis: 100%; }
 .pm-settings .pm-link { font-size: 13px; line-height: 1.5; color: var(--pm-text-2); white-space: nowrap; }
 .pm-settings .pm-link:hover { color: var(--pm-text); text-decoration: none; }
 `
