@@ -3,6 +3,7 @@
  * 网关（宿主实现）与导航 store 在这里各建一份，所有插槽根共用；组件只认网关接口。
  */
 import { useCallback, useMemo, useSyncExternalStore } from 'react'
+import { registerChatCards } from './chat/index.tsx'
 import { createHostGateway } from './gateway.ts'
 import type { HostContext, HostLocale, RootStandardProps } from './host.ts'
 import type { Translate } from './i18n.tsx'
@@ -51,4 +52,5 @@ export function apply(ctx: HostContext): void {
     order: 20,
     label: () => t('nav.label'),
   }, MemoryIcon))
+  registerChatCards(ctx, nav)
 }

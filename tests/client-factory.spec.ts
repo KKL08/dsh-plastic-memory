@@ -76,6 +76,7 @@ describe('lib/client.js 工厂格式', () => {
     const plugin = evaluate()[0]!.factory(fakeRequire([])) as ClientPlugin
     const registered: Array<{ name: string; id?: string; key?: string }> = []
     const ctx = {
+      inject: () => () => {},
       slots: {
         inject: (_name: string, fn: () => unknown) => { fn(); return () => {} },
         register: (opts: { name: string; id?: string; key?: string }) => { registered.push(opts); return () => {} },

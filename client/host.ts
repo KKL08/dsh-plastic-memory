@@ -77,6 +77,8 @@ export interface HostLocale {
 }
 
 export interface HostContext {
+  /** cordis 可选依赖：服务全部就位后在子上下文里执行 fn，服务离开时子上下文连同其注册一起撤掉。 */
+  inject(deps: string[], fn: (child: HostContext) => void): unknown
   slots: {
     inject(name: string, fn: () => (() => void) | void): () => void
     register<P>(options: SlotRegisterOptions, component: ComponentType<P>): () => void

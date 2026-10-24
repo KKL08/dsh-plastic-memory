@@ -12,6 +12,7 @@ function setup() {
   const registered: Array<{ options: { name: string; id?: string; key?: string; label?: string | (() => string) }; component: ComponentType<never> }> = []
   const register = vi.fn()
   const ctx: HostContext = {
+    inject: () => () => {},
     slots: {
       inject: (_name, fn) => { fn(); return () => {} },
       register: (options, component) => { registered.push({ options, component: component as ComponentType<never> }); return () => {} },
