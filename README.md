@@ -2,7 +2,7 @@
 
 ![Plastic Memories](assets/banner.jpg)
 
-![Version](https://img.shields.io/badge/version-0.1.1--beta.5-yellow)
+![Version](https://img.shields.io/badge/version-0.2.0--beta.1-yellow)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-DeepSeek%20Harness%20%E2%89%A5v0.1.7--rc.1-4D6BFF)
 ![Node](https://img.shields.io/badge/node-%5E22.19.0%20%7C%7C%20%E2%89%A524-339933?logo=node.js&logoColor=white)
@@ -77,14 +77,14 @@
 ## 📦 安装
 
 ```bash
-dsh plugin --profile web add dsh-plastic-memory@0.1.1-beta.5
+dsh plugin --profile web add dsh-plastic-memory@0.2.0-beta.1
 ```
 
 > 把 `web` 换成你的目标 Profile 名即可（若该 Profile 不存在则自动创建）。安装后插件声明将自动写入该 Profile 的 `cordis.patch.yml`，重启该 Profile 后生效。插件以预构建产物发布到 npm，安装不需要构建授权。  
 > **桌面版**：先打开一次 DeepSeek Harness 桌面版，让它建好自己的 Profile，然后完全退出，在终端运行下面这条，再重新打开桌面版。`dsh` 命令用 npm 装的或桌面版自带的都可以。
 >
 > ```bash
-> dsh plugin --profile desktop add dsh-plastic-memory@0.1.1-beta.5
+> dsh plugin --profile desktop add dsh-plastic-memory@0.2.0-beta.1
 > ```
 >
 > **运行环境要求**：Node.js `^22.19.0 || >=24`，DeepSeek Harness v0.1.7-rc.1 及以上（目前已验证到 v0.2.1-rc.2）；图形界面要 v0.2.1-rc.2 及以上。

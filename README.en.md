@@ -2,7 +2,7 @@
 
 ![Plastic Memories](assets/banner.jpg)
 
-![Version](https://img.shields.io/badge/version-0.1.1--beta.5-yellow)
+![Version](https://img.shields.io/badge/version-0.2.0--beta.1-yellow)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-DeepSeek%20Harness%20%E2%89%A5v0.1.7--rc.1-4D6BFF)
 ![Node](https://img.shields.io/badge/node-%5E22.19.0%20%7C%7C%20%E2%89%A524-339933?logo=node.js&logoColor=white)
@@ -77,14 +77,14 @@ LLM agents face a strikingly similar challenge: stale, contradictory, redundant,
 ## 📦 Installation
 
 ```bash
-dsh plugin --profile web add dsh-plastic-memory@0.1.1-beta.5
+dsh plugin --profile web add dsh-plastic-memory@0.2.0-beta.1
 ```
 
 > Replace `web` with the name of your target profile (it will be created automatically if it doesn't exist). The plugin declaration is written to the profile's `cordis.patch.yml` and takes effect after a restart. The package ships prebuilt on npm — no build step required.  
 > **Desktop app:** open the DeepSeek Harness desktop app once so it creates its profile, quit it completely, run the command below in a terminal, then reopen the app. Either the npm-installed `dsh` or the command bundled with the desktop app works.
 >
 > ```bash
-> dsh plugin --profile desktop add dsh-plastic-memory@0.1.1-beta.5
+> dsh plugin --profile desktop add dsh-plastic-memory@0.2.0-beta.1
 > ```
 >
 > **Requirements:** Node.js `^22.19.0 || >=24`, DeepSeek Harness v0.1.7-rc.1 or later (verified up to v0.2.1-rc.2); the graphical interface needs v0.2.1-rc.2 or later.
