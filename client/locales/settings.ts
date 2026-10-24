@@ -82,6 +82,9 @@ export const settingsZh = {
   'settings.evidence.strict': '遇到矛盾或高风险时',
   'settings.evidence.active': '主动积极',
   'settings.evidence.hint': 'agent 回到这条记忆产生的那次对话，核对当时的原话、原因和约束。',
+  'settings.dictionary.label': '用户词典路径',
+  'settings.dictionary.hint': '追加在内置词典之上，留空只用内置词典。要填绝对路径；没装 @node-rs/jieba 时不生效。',
+  'settings.dictionary.format': '每行「词 词频 词性」，词频必填，例如 插件记忆 10 n',
   'settings.usage.reloadNote': '已有对话的下一条消息会重新载入记忆，多消耗一些 token。',
 
   'settings.governance.label': '记忆体检',
@@ -195,6 +198,9 @@ export const settingsEn: Record<keyof typeof settingsZh, string> = {
   'settings.evidence.strict': 'On contradictions or high risk',
   'settings.evidence.active': 'Proactively',
   'settings.evidence.hint': 'The agent goes back to the chat a memory came from to check the original words, reasons and constraints.',
+  'settings.dictionary.label': 'User dictionary path',
+  'settings.dictionary.hint': 'Added on top of the built-in dictionary; leave empty to use the built-in one only. Must be an absolute path; has no effect unless @node-rs/jieba is installed.',
+  'settings.dictionary.format': 'One entry per line as “word frequency tag”; the frequency is required, for example 插件记忆 10 n',
   'settings.usage.reloadNote': 'The next message in open chats reloads memories, using a few more tokens.',
 
   'settings.governance.label': 'Memory checkups',

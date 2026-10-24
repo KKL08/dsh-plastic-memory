@@ -1,11 +1,12 @@
 // 插件设置页：三组设置的渲染、「我加的类型」弹层必填校验、revision 冻结与冲突提示、非法值、体检关闭时置灰、状态卡。
 import { describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { GUI_VIEW_VERSION, type HealthView, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createTranslator } from '../i18n.tsx'
-import { zh } from '../locales.ts'
+import { en, zh } from '../locales.ts'
 import { memory, NOW, renderInShell } from '../test-utils.tsx'
+import { PanelShell } from '../ui/PanelShell.tsx'
 import { createFakeConfigForm, DEFAULT_SECTION, type FakeConfigForm } from './config-form.fake.ts'
 import { SettingsPage } from './SettingsPage.tsx'
 import { summarize } from './StatusCard.tsx'
@@ -251,6 +252,55 @@ describe('保存：revision 冻结、冲突、非法值', () => {
     expect(screen.getByText('当前配置是只读的，改不了。')).toBeInTheDocument()
     expect(tab('场景模板', '办公')).toBeDisabled()
     expect(screen.getByRole('switch', { name: '记忆体检' })).toBeDisabled()
+  })
+})
+
+describe('用户词典路径', () => {
+  const field = () => screen.getByLabelText('用户词典路径')
+  /** 输入框经 aria-describedby 关联的说明。 */
+  const description = (input: HTMLElement) => document.getElementById(input.getAttribute('aria-describedby')!)
+
+  it('归在「怎么用」，默认空；说明写明追加在内置词典之上、要绝对路径、没装 @node-rs/jieba 时不生效，并给「词 词频 词性」示例、注明词频必填', () => {
+    setup()
+    const how = screen.getByRole('heading', { name: '怎么用' }).closest('section')!
+    expect(within(how).getByLabelText('用户词典路径')).toHaveValue('')
+    const hint = description(field())
+    expect(hint).toHaveTextContent('追加在内置词典之上，留空只用内置词典。要填绝对路径；没装 @node-rs/jieba 时不生效。')
+    expect(hint).toHaveTextContent('每行「词 词频 词性」，词频必填，例如 插件记忆 10 n')
+  })
+
+  it('已配置时显示配置的路径', () => {
+    setup({ value: section({ search: { userDictionaryPath: '/opt/dict/domain.txt' } }) })
+    expect(field()).toHaveValue('/opt/dict/domain.txt')
+  })
+
+  it('填写后保存写 search.userDictionaryPath（去掉首尾空白），不提示重新载入记忆；只填空白不算改动', async () => {
+    const { form } = setup()
+    fireEvent.change(field(), { target: { value: '   ' } })
+    expect(save()).toBeDisabled()
+    fireEvent.change(field(), { target: { value: ' /opt/dict/domain.txt ' } })
+    expect(screen.queryByText(/重新载入记忆/)).toBeNull()
+    await clickSave(form)
+    expect(form.calls[0]!.ops).toEqual([{ op: 'set', path: ['search', 'userDictionaryPath'], value: '/opt/dict/domain.txt' }])
+    await waitFor(() => { expect(field()).toHaveValue('/opt/dict/domain.txt') })
+    expect(save()).toBeDisabled()
+  })
+
+  it('清空后保存写 unset，回到只用内置词典', async () => {
+    const { form } = setup({ value: section({ search: { userDictionaryPath: '/opt/dict/domain.txt' } }) })
+    fireEvent.change(field(), { target: { value: '' } })
+    await clickSave(form)
+    expect(form.calls[0]!.ops).toEqual([{ op: 'unset', path: ['search', 'userDictionaryPath'] }])
+    await waitFor(() => { expect(form.value.search).toEqual({}) })
+  })
+
+  it('英文文案同样写明追加、绝对路径、没装 @node-rs/jieba 时不生效与词典格式', () => {
+    render(<PanelShell gateway={createFakeGateway()} t={createTranslator(en)}><SettingsPage form={createFakeConfigForm()} onOpenMemoryPage={() => {}} now={NOW} /></PanelShell>)
+    const input = screen.getByLabelText('User dictionary path')
+    expect(input).toHaveValue('')
+    const hint = description(input)
+    expect(hint).toHaveTextContent('Added on top of the built-in dictionary; leave empty to use the built-in one only. Must be an absolute path; has no effect unless @node-rs/jieba is installed.')
+    expect(hint).toHaveTextContent('One entry per line as “word frequency tag”; the frequency is required, for example 插件记忆 10 n')
   })
 })
 

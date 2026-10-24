@@ -106,6 +106,15 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
               onChange={(evidence) => { edit({ evidence }) }}
             />
           </SettingsItem>
+          <SettingsItem label={t('settings.dictionary.label')} htmlFor={`${id}-dictionary`}>
+            <TextField
+              id={`${id}-dictionary`}
+              value={f.userDictionary}
+              disabled={locked}
+              onChange={(userDictionary) => { edit({ userDictionary }) }}
+              hint={<>{t('settings.dictionary.hint')}<br />{t('settings.dictionary.format')}</>}
+            />
+          </SettingsItem>
         </SettingsGroupCard>
 
         <SettingsGroupCard title={t('settings.group.manage')}>
