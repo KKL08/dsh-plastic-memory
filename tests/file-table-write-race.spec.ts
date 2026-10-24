@@ -18,6 +18,8 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
+import type { LocatedFile } from '../src/storage/table.ts'
+import { executeSnapshotTool } from '../src/tools/snapshot.ts'
 import { record as baseRecord, candidate } from './helpers/record.ts'
 import { captureRejection } from './helpers/errors.ts'
 
@@ -127,19 +129,26 @@ describe('put：locate 之后文件被改，按新的位置与附加字段重写
   })
 })
 
-/** 工具读到目标之后、写回之前，别处改了这条记忆的正文（经工具自己那次 get 的时机注入）。 */
-function changeContentAfterGet(store: MemoryStore, id: string, content: string) {
+/** 工具读到目标之后、写回之前，别处动了这条记忆（经工具自己那次 get 的时机注入，动作走真实文件）。 */
+function afterGet(store: MemoryStore, id: string, act: (loc: LocatedFile) => Promise<void>) {
   const get = store.get.bind(store)
   let fired = false
   vi.spyOn(store, 'get').mockImplementation(async (gid, hint) => {
     const r = await get(gid, hint)
     if (gid === id && !fired && r !== undefined) {
       fired = true
-      const loc = (await store.locate(gid, hint))!
-      await writeFile(loc.filePath, encodeRecord({ ...loc.record, content }, loc.extras), 'utf8')
+      await act((await store.locate(gid, hint))!)
     }
     return r
   })
+}
+function changeContentAfterGet(store: MemoryStore, id: string, content: string) {
+  afterGet(store, id, loc => writeFile(loc.filePath, encodeRecord({ ...loc.record, content }, loc.extras), 'utf8'))
+}
+/** 别处把它删了：硬删 = 文件没了；软删 = 文件里 status 改成 deleted（随后维护点才搬进 .archive/）。 */
+const removals = {
+  硬删: (loc: LocatedFile) => rm(loc.filePath),
+  软删: (loc: LocatedFile) => writeFile(loc.filePath, encodeRecord({ ...loc.record, status: 'deleted', deletedAt: Date.now() }, loc.extras), 'utf8'),
 }
 
 describe('读改写的工具调用：读到之后被别处改过的正文不丢', () => {
@@ -202,5 +211,104 @@ describe('读改写的工具调用：读到之后被别处改过的正文不丢'
     const after = (await store.get(old.record.id, { workspacePath: '/proj' }))!
     expect(after.status).toBe('superseded')
     expect(after.content).toBe('并发改的')
+  })
+})
+
+describe('memory_snapshot restore：预读之后被改的记录按「快照后被修改」跳过', () => {
+  async function setup() {
+    const store = new MemoryStore(newTable())
+    await store.put(record({ content: '快照时' }))
+    const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
+    const snap = await snapshots.capture({ operation: 'manual', description: 'd', records: [(await store.get('mem_race'))!] }, Date.now())
+    changeContentAfterGet(store, 'mem_race', '并发改的')
+    return { store, deps: { store, snapshots }, snap }
+  }
+
+  it('overwriteChanged=false：不覆盖并发修改，计入 skipped，提示与预读冲突时相同', async () => {
+    const { store, deps, snap } = await setup()
+    const r = await executeSnapshotTool({ action: 'restore', snapshotId: snap.id }, { workspacePath: '/proj' }, deps)
+    vi.restoreAllMocks()
+    if (r.kind !== 'restored') throw new Error(r.kind)
+    expect(r.restored).toEqual([])
+    expect(r.skipped).toEqual(['mem_race'])
+    expect(r.message).toContain('1 条因快照后被修改而跳过（确认覆盖请带 overwriteChanged: true）')
+    expect((await store.get('mem_race'))!.content).toBe('并发改的')
+  })
+
+  it('overwriteChanged=true：照常覆盖', async () => {
+    const { store, deps, snap } = await setup()
+    const r = await executeSnapshotTool({ action: 'restore', snapshotId: snap.id, overwriteChanged: true }, { workspacePath: '/proj' }, deps)
+    vi.restoreAllMocks()
+    if (r.kind !== 'restored') throw new Error(r.kind)
+    expect(r.restored).toEqual(['mem_race'])
+    expect((await store.get('mem_race'))!.content).toBe('快照时')
+  })
+})
+
+describe('读改写的工具调用：读到之后记录被别处删掉，返回可读结果而不是抛错', () => {
+  const newStore = () => new MemoryStore(newTable())
+  const confirmDeps = (store: MemoryStore) => ({
+    store, now: () => 5000,
+    decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
+    snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
+  })
+  const wsRecord = () => record({ scope: 'workspace', workspacePath: '/proj', globalCandidate: true })
+  const promoteDeps = (store: MemoryStore) => ({
+    store, agentsMd: { append: async () => {} }, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
+  })
+
+  it.each(Object.keys(removals) as Array<keyof typeof removals>)('memory_confirm refresh（%s）：返回 error「记忆不存在或已删除」', async how => {
+    const store = newStore()
+    await store.put(record())
+    afterGet(store, 'mem_race', removals[how])
+    const r = await executeConfirm({ action: 'refresh', memoryId: 'mem_race' }, { workspacePath: '/proj' }, confirmDeps(store))
+    expect(r).toMatchObject({ kind: 'error', message: '记忆不存在或已删除：mem_race' })
+  })
+
+  it.each(Object.keys(removals) as Array<keyof typeof removals>)('memory_promote dismiss（%s）：计入 skipped', async how => {
+    const store = newStore()
+    await store.put(wsRecord())
+    afterGet(store, 'mem_race', removals[how])
+    const r = await executePromote({ confirmedIds: ['mem_race'], target: 'global', dismiss: true }, { workspacePath: '/proj' }, promoteDeps(store))
+    expect(r.dismissed).toEqual([])
+    expect(r.skipped).toEqual(['mem_race'])
+    expect(r.message).toContain('不存在或已删除')
+  })
+
+  it.each(Object.keys(removals) as Array<keyof typeof removals>)('memory_promote 提升到 global（%s）：计入 skipped，不报已提升', async how => {
+    const store = newStore()
+    await store.put(wsRecord())
+    afterGet(store, 'mem_race', removals[how])
+    const r = await executePromote({ confirmedIds: ['mem_race'], target: 'global' }, { workspacePath: '/proj' }, promoteDeps(store))
+    expect(r.promoted).toEqual([])
+    expect(r.skipped).toEqual(['mem_race'])
+    vi.restoreAllMocks()
+    const after = await store.get('mem_race', { workspacePath: '/proj' })
+    expect(after === undefined || after.scope === 'workspace').toBe(true)
+  })
+
+  it.each(Object.keys(removals) as Array<keyof typeof removals>)('memory_promote 写入 AGENTS.md（%s）：计入 skipped，不写 AGENTS.md', async how => {
+    const store = newStore()
+    await store.put(wsRecord())
+    afterGet(store, 'mem_race', removals[how])
+    const lines: string[] = []
+    const deps = { ...promoteDeps(store), agentsMd: { append: async (l: string) => { lines.push(l) } } }
+    const r = await executePromote({ confirmedIds: ['mem_race'], target: 'agents-md' }, { workspacePath: '/proj' }, deps)
+    expect(r.promoted).toEqual([])
+    expect(r.skipped).toEqual(['mem_race'])
+    expect(lines).toEqual([])
+  })
+
+  it('memory_save 的 supersedes 目标被硬删：照常保存新记忆，静默跳过（同目标本就不存在时）', async () => {
+    const store = newStore()
+    const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
+    const deps = { store, registry, workspacePath: '/proj' as string | undefined, session: { id: 's1', lastSeq: 42 } }
+    const old = await runSavePipeline(candidate({ content: '旧说法' }), deps)
+    if (old.kind !== 'saved') throw new Error(old.kind)
+    afterGet(store, old.record.id, removals.硬删)
+    const r = await runSavePipeline(candidate({ content: '完全不同的新说法', force: true, supersedes: [old.record.id] }), deps)
+    expect(r.kind).toBe('saved')
+    vi.restoreAllMocks()
+    expect(await store.get(old.record.id, { workspacePath: '/proj' })).toBeUndefined()
   })
 })

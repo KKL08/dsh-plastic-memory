@@ -5,6 +5,7 @@ import type { MemoryStore } from './store.ts'
 import type { TypeRegistry } from './type-registry.ts'
 import type { SnapshotStore } from './governance/snapshots.ts'
 import { detectSecrets } from './secrets.ts'
+import { RecordNotFoundError } from './errors.ts'
 import { extractEntities, textSimilarity, DUPLICATE_SIMILARITY_THRESHOLD } from './text.ts'
 import { toToolOutput } from './output.ts'
 
@@ -220,7 +221,11 @@ export async function runSavePipeline(
       crossBucketSupersede = true
       continue
     }
-    await store.update(old, r => ({ ...r, status: 'superseded', updatedAt: now }))
+    try {
+      await store.update(old, r => ({ ...r, status: 'superseded', updatedAt: now }))
+    } catch (err) {
+      if (!(err instanceof RecordNotFoundError)) throw err   // 读到之后被别处删掉：同目标不存在，静默跳过
+    }
   }
 
   const baseResult = candidate.action === 'update'

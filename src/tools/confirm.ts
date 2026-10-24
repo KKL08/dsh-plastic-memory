@@ -49,7 +49,10 @@ export async function executeConfirm(
     }
     // refresh 不是内容编辑，updatedAt 保持为最近一次内容修改的时刻；lastConfirmedAt 独立记录确认动作
     // （快照恢复按内容投影判断"快照后被修改"，不看 updatedAt，见 governance/snapshots.ts restoreProjection）。
-    await deps.store.update(target, r => ({ ...r, lastConfirmedAt: now }))
+    // 读到之后被别处删掉（硬删或软删）：与预读时就不在同一个答复
+    if (!(await deps.store.updateIfLive(target, r => ({ ...r, lastConfirmedAt: now })))) {
+      return { kind: 'error', message: `记忆不存在或已删除：${args.memoryId}` }
+    }
     return {
       kind: 'refreshed', memoryId: args.memoryId, lastConfirmedAt: now, otherWorkspaces,
       message: `已确认记忆 ${args.memoryId} 仍然准确，新鲜度已刷新。${crossWorkspaceNote([], otherWorkspaces)}`,

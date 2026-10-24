@@ -587,15 +587,17 @@ export class FileTable implements MemoryTable {
     await this.locked(async () => { await this.persist(record.id, undefined, record) })
   }
 
-  async put(key: string, value: MemoryRecord, hint: LocateHint = { workspacePath: value.workspacePath }): Promise<void> {
-    // put 是整条替换：值由调用方给定，重来时只换新的位置、附加字段与召回统计，不重算内容
-    await this.locked(() => this.withFreshLocate(key, hint, async prev => {
+  async put(key: string, value: MemoryRecord, hint: LocateHint = { workspacePath: value.workspacePath }, skipIf?: (current: MemoryRecord) => boolean): Promise<boolean> {
+    // put 是整条替换：值由调用方给定，重来时只换新的位置、附加字段与召回统计，不重算内容；skipIf 每轮按新读数重判
+    return this.locked(() => this.withFreshLocate(key, hint, async prev => {
+      if (prev !== undefined && skipIf?.(prev.record)) return false
       // put 不承载召回统计（设计稿 §2：召回统计只住 .state/recall-stats.json，快照恢复不恢复它）。召回统计
       // 由 MemoryStore.markRecalled 直写侧表；prev 在时以侧表现值为准，restore 旧记录不回退 sidecar。
       const next = prev
         ? { ...value, recallCount: prev.record.recallCount, lastRecalledAt: prev.record.lastRecalledAt }
         : value
       await this.persist(key, prev, next)
+      return true
     }))
   }
 
