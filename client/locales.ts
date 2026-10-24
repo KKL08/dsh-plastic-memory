@@ -2,6 +2,7 @@
  * 客户端界面文案（`ctx.locale.register(NS, {zh, en})`）。插件元信息（标题、描述）在仓库根 `locale/*.json`，
  * 那是宿主插件页读的，和这里分开。占位符 `{name}` 由宿主 locale 服务替换。
  */
+import { sidebarEn, sidebarZh } from './locales/sidebar.ts'
 
 /** 宿主 locale 命名空间，和面板 id 同名。 */
 export const NS = 'plastic-memory'
@@ -72,6 +73,7 @@ export const zh = {
   'settings.saveFailed': '没有保存成功，再试一次。',
   'settings.readOnly': '当前配置是只读的，改不了。',
   'settings.unavailable': '宿主暂时没有提供这份配置。',
+  ...sidebarZh,
 } as const
 
 export type LocaleKey = keyof typeof zh
@@ -142,4 +144,5 @@ export const en: Record<LocaleKey, string> = {
   'settings.saveFailed': 'Could not save. Try again.',
   'settings.readOnly': 'These settings are read-only.',
   'settings.unavailable': 'The host is not serving these settings right now.',
+  ...sidebarEn,
 }

@@ -4,17 +4,18 @@
  */
 import { useCallback, useMemo, useSyncExternalStore } from 'react'
 import { createHostGateway } from './gateway.ts'
-import type { HostContext, HostLocale, RootStandardProps } from './host.ts'
+import type { HostContext, HostLocale, RootStandardProps, SidebarHost } from './host.ts'
 import type { Translate } from './i18n.tsx'
 import { en, NS, zh } from './locales.ts'
 import { MemoryIcon } from './MemoryIcon.tsx'
 import { MemoryPage, memoryPageCss } from './MemoryPage.tsx'
 import { createNavStore, PANEL_ID, type NavStore } from './nav.ts'
+import { registerSidebarTab } from './sidebar/register.tsx'
 import { PanelShell } from './ui/PanelShell.tsx'
 
 export { PANEL_ID }
 
-export const inject = ['slots', 'locale', 'layout', 'remote', 'remote.commands', 'remote.workspaceFiles']
+export const inject = ['slots', 'locale', 'layout', 'remote', 'remote.commands', 'remote.workspaceFiles', 'sidebarRightTabs', 'sidebarRight']
 
 /** 宿主 locale 的翻译函数；切语言或字典晚到时换一个新引用，让组件重渲染。 */
 function useHostTranslate(locale: HostLocale): Translate {
@@ -39,7 +40,7 @@ function createMainPanel(ctx: HostContext, nav: NavStore) {
   }
 }
 
-export function apply(ctx: HostContext): void {
+export function apply(ctx: HostContext & SidebarHost): void {
   ctx.locale.register(NS, { zh, en })
   const t = ctx.locale.bind(NS)
   const nav = createNavStore()
@@ -51,4 +52,5 @@ export function apply(ctx: HostContext): void {
     order: 20,
     label: () => t('nav.label'),
   }, MemoryIcon))
+  registerSidebarTab(ctx, nav, () => useHostTranslate(ctx.locale))
 }

@@ -10,6 +10,8 @@ export interface ContextBudgetBarProps {
   count: number
   budget: number
   tokens: { workspace: number; global: number; fixed: number }
+  /** 计入上限的用量（会话视图的 usedTokens，固定尾注不计）；缺省按三段之和。是否放宽、放宽到哪一档按它算。 */
+  limitTokens?: number
   /** 严格模式下没带入的记忆条数；> 0 时状态写「已到上限，N 条没带入 · 处理 ›」。 */
   droppedCount?: number
   onHandle?: () => void
@@ -21,12 +23,13 @@ export function relaxedCap(total: number, budget: number): number {
   return budget * (1 + 0.25 * Math.ceil((total - budget) / (budget * 0.25)))
 }
 
-export function ContextBudgetBar({ count, budget, tokens, droppedCount = 0, onHandle }: ContextBudgetBarProps) {
+export function ContextBudgetBar({ count, budget, tokens, limitTokens, droppedCount = 0, onHandle }: ContextBudgetBarProps) {
   const t = useT()
   const used = tokens.workspace + tokens.global + tokens.fixed
-  const cap = Math.max(relaxedCap(used, budget), 1)
+  const limited = limitTokens ?? used
+  const cap = Math.max(relaxedCap(limited, budget), 1)
   const pct = (n: number) => `${(n / cap) * 100}%`
-  const relaxed = used > budget && droppedCount === 0
+  const relaxed = limited > budget && droppedCount === 0
   return (
     <div className="pm-budget">
       <div className="pm-budget-summary">
