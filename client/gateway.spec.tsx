@@ -1,7 +1,7 @@
 // 宿主网关：它本身就是进程边界的适配层，这里给它一个假的宿主 ctx（远程调用 + 标准 props），断言它发出的命令与读出的视图。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { GUI_VIEW_VERSION, type PendingView } from '../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, sessionViewFile, type PendingView } from '../src/gui/contract.ts'
 import {
   createHostGateway, decodeExecution, fileAddress, MEMORY_ROOT_CONFIG_KEY, MEMORY_ROOT_KEY, parseView, pickSession, toPluginConfig, viewPath,
 } from './gateway.ts'
@@ -64,6 +64,27 @@ describe('pickSession：只有「无会话 / 有会话」两态', () => {
     )
     expect(pickSession(rows, '/w/app')).toMatchObject({ sessionId: 'busy-app' })
     expect(pickSession(rows, '/w/none')).toMatchObject({ sessionId: 'selected' })
+  })
+
+  it('项目子目录里开的会话算这个项目的；共用前缀的兄弟目录不算', () => {
+    const rows = list(
+      summary('sub', { cwd: '/w/app/packages/core', updatedAt: 1 }),
+      summary('sibling', { cwd: '/w/app-other', updatedAt: 9 }),
+      summary('selected', { cwd: '/w/third', updatedAt: 2, retainedBy: { mainView: 1 } }),
+    )
+    expect(pickSession(rows, '/w/app')).toMatchObject({ sessionId: 'sub' })
+    expect(pickSession(rows, '/w/app/')).toMatchObject({ sessionId: 'sub' })
+    expect(pickSession(list(rows.byId.sibling!, rows.byId.selected!), '/w/app')).toMatchObject({ sessionId: 'selected' })
+  })
+
+  it('服务端给出了会话的归属时以它为准：原始 cwd 对不上也算，cwd 在项目里、归属却是别的项目则不算', () => {
+    const rows = list(
+      summary('linked', { cwd: '/link/app', updatedAt: 1 }),
+      summary('nested', { cwd: '/w/app/pkg', updatedAt: 9 }),
+      summary('latest', { cwd: '/w/third', updatedAt: 5 }),
+    )
+    expect(pickSession(rows, '/w/app', { linked: '/w/app', nested: '/w/app/pkg' })).toMatchObject({ sessionId: 'linked' })
+    expect(pickSession(rows, '/w/app/pkg', { linked: '/w/app', nested: '/w/app/pkg' })).toMatchObject({ sessionId: 'nested' })
   })
 })
 
@@ -351,6 +372,48 @@ describe('createHostGateway', () => {
     expect(executed).toEqual(['/memory resolve {"decisionId":"d1","verdict":"keep-both"}'])
     const { result } = renderHook(() => gateway.useCurrentWorkspace())
     expect(result.current).toBe('/w/app')
+  })
+
+  describe('会话归属与服务端一致', () => {
+    const viewOf = (sessionId: string) => `/h/memories/.state/gui/${sessionViewFile(sessionId)}`
+    function withSessions(state: SessionListState) {
+      return { ...props, useSessions: <S,>(selector: (s: SessionListState) => S) => selector(state) }
+    }
+    function serveSessionView(sessionId: string, workspacePath: string) {
+      files[viewOf(sessionId)] = JSON.stringify({
+        version: GUI_VIEW_VERSION, sessionId, workspacePath, frozenAt: 1, budget: 100, overflowMode: 'relax',
+        tokens: { workspace: 0, global: 0, fixed: 0 }, usedTokens: 0, injectedIds: [], omittedCount: 0, savedIds: [],
+      })
+      resources[fileAddress(sessionId, viewOf(sessionId))] = { status: 'live', value: { absolutePath: 'x', version: 'v1' }, failure: undefined }
+    }
+
+    it('当前工作区：选中会话在项目子目录里开的，默认作用域取服务端算出的项目', async () => {
+      localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+      serveSessionView('sel', '/w/app')
+      const gateway = createHostGateway(fakeCtx())(withSessions(list(summary('sel', { cwd: '/w/app/sub', retainedBy: { mainView: 1 } }))))
+      const { result } = renderHook(() => gateway.useCurrentWorkspace())
+      await waitFor(() => { expect(result.current).toBe('/w/app') })
+      // 只读文件，不为此发命令
+      expect(executed).toEqual([])
+    })
+
+    it('当前工作区：服务端还没写出会话视图时先用原始 cwd', () => {
+      const gateway = createHostGateway(fakeCtx())(withSessions(list(summary('sel', { cwd: '/w/app/sub', retainedBy: { mainView: 1 } }))))
+      const { result } = renderHook(() => gateway.useCurrentWorkspace())
+      expect(result.current).toBe('/w/app/sub')
+    })
+
+    it('借会话：选中会话经软链接开在项目里，服务端说它属于这个项目，就进项目这一档（空闲优先照旧）', async () => {
+      localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+      serveSessionView('sel', '/w/app')
+      const rows = list(
+        summary('busy-app', { cwd: '/w/app', updatedAt: 9, running: true }),
+        summary('sel', { cwd: '/link/app', updatedAt: 1, retainedBy: { mainView: 1 } }),
+      )
+      const gateway = createHostGateway(fakeCtx())(withSessions(rows))
+      const { result } = renderHook(() => gateway.useSession('/w/app'))
+      await waitFor(() => { expect(result.current).toMatchObject({ sessionId: 'sel' }) })
+    })
   })
 
   it('openPath：打开只带 path，显示目录带 action: reveal；宿主拒绝或抛错都是 false', async () => {

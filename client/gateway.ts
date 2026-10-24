@@ -46,11 +46,11 @@ export type ViewState<V> =
 
 export interface MemoryGateway {
   /**
-   * hook：借哪个会话。优先 workspacePath 下最近更新的会话，其次当前选中的会话，再其次最近更新的任一会话；
-   * 同一档里先借空闲的，都在跑才借正在跑的。子 agent 会话不借（它们只读）。
+   * hook：借哪个会话。优先属于 workspacePath 的会话里最近更新的，其次当前选中的会话，再其次最近更新的任一会话；
+   * 同一档里先借空闲的，都在跑才借正在跑的。子 agent 会话不借（它们只读）。归属规则见 pickSession。
    */
   useSession(workspacePath: string | undefined): BorrowedSession
-  /** hook：当前选中会话的工作目录，作用域下拉的默认项。 */
+  /** hook：当前选中会话所属的项目，作用域下拉的默认项。服务端写出的会话视图里有归属就用它，还没有时用原始 cwd。 */
   useCurrentWorkspace(): string | undefined
   /** hook：订阅一份视图，版本变化再读。 */
   useView<N extends ViewName>(session: BorrowedSession, name: N): ViewState<ViewMap[N]>
@@ -108,9 +108,22 @@ export function selectedSessionId(list: SessionListState): string | undefined {
   return list.ids.find(id => (list.byId[id]?.retainedBy.mainView ?? 0) > 0)
 }
 
-export function pickSession(list: SessionListState, workspacePath: string | undefined): BorrowedSession {
+/**
+ * 会话是否属于项目 workspacePath。服务端按 realpath 后最近的已注册项目目录归属会话，浏览器半侧解析不了软链接：
+ * resolved（会话 id → 服务端会话视图里的 workspacePath）里有就以它为准，没有就看 cwd 是否就是该目录或在它下面。
+ */
+export function belongsTo(
+  list: SessionListState, id: string, workspacePath: string, resolved: Readonly<Record<string, string>>,
+): boolean {
+  const known = resolved[id]
+  return known !== undefined ? samePath(known, workspacePath) : isWithin(list.byId[id]!.cwd, workspacePath)
+}
+
+export function pickSession(
+  list: SessionListState, workspacePath: string | undefined, resolved: Readonly<Record<string, string>> = {},
+): BorrowedSession {
   const candidates = list.ids.filter(id => isBorrowable(list, id))
-  const inWorkspace = workspacePath === undefined ? [] : candidates.filter(id => samePath(list.byId[id]!.cwd, workspacePath))
+  const inWorkspace = workspacePath === undefined ? [] : candidates.filter(id => belongsTo(list, id, workspacePath, resolved))
   const selected = selectedSessionId(list)
   const id = preferIdle(list, inWorkspace)
     ?? (selected !== undefined && candidates.includes(selected) ? selected : undefined)
@@ -118,10 +131,19 @@ export function pickSession(list: SessionListState, workspacePath: string | unde
   return id === undefined ? { kind: 'none' } : { kind: 'ready', sessionId: id, cwd: list.byId[id]!.cwd }
 }
 
+const stripTrailing = (p: string) => p.replace(/[\\/]+$/, '')
+
 /** 两个路径是否同一处（忽略末尾的分隔符）；任一为 undefined 时不同。 */
 export function samePath(a: string | undefined, b: string | undefined): boolean {
-  const strip = (p: string) => p.replace(/[\\/]+$/, '')
-  return a !== undefined && b !== undefined && strip(a) === strip(b)
+  return a !== undefined && b !== undefined && stripTrailing(a) === stripTrailing(b)
+}
+
+/** path 是否就是 dir 或在它下面（按整段比，/w/app-other 不在 /w/app 下）；任一为 undefined 时否。 */
+export function isWithin(path: string | undefined, dir: string | undefined): boolean {
+  if (path === undefined || dir === undefined) return false
+  const p = stripTrailing(path)
+  const d = stripTrailing(dir)
+  return p === d || p.startsWith(`${d}/`) || p.startsWith(`${d}\\`)
 }
 
 function failed(detail: string, cmd?: string): MemoryCommandResult {
@@ -331,67 +353,33 @@ export function createHostGateway(ctx: HostContext): BindGateway {
     return binding
   }
 
-  return ({ useSessions, useResource }) => ({
-    execute,
-    useConfig() {
-      const { get, subscribe } = config()
-      const snapshot = useSyncExternalStore(subscribe, get)
-      return useMemo(() => snapshot?.status === 'ready' ? toPluginConfig(snapshot.value) : undefined, [snapshot])
-    },
-    async setConfig(field, value) {
-      try { return (await config().form?.set(field, value)) ?? false } catch { return false }
-    },
-    async readFile(sessionId, path) {
-      try {
-        const r = await ctx.remote.workspaceFiles.read(sessionId, path, {})
-        return r.ok ? r.value.text : undefined
-      } catch { return undefined }
-    },
-    async openPath(path, action) {
-      try {
-        const r = await ctx.remote.session?.openWorkspacePath(action === 'reveal' ? { path, action } : { path })
-        return r?.ok ?? false
-      } catch { return false }
-    },
-    useSession(workspacePath) {
-      const list = useSessions(s => s)
-      const picked = pickSession(list, workspacePath)
-      // 选择结果每次是新对象，按身份字段稳定下来，避免下游 effect 每次渲染都重跑
-      const sessionId = picked.kind === 'ready' ? picked.sessionId : undefined
-      const cwd = picked.kind === 'ready' ? picked.cwd : undefined
-      return useMemo(() => picked, [sessionId, cwd])
-    },
-    useCurrentWorkspace() {
-      return useSessions((s) => {
-        const id = selectedSessionId(s)
-        return id === undefined ? undefined : s.byId[id]?.cwd
-      })
-    },
-    useView(session, name) {
+  return ({ useSessions, useResource }) => {
+    /** isPassive：只读不催，不为它发 info / refresh-views（读的会话可能正在跑；根由页面自己的视图问到）。 */
+    function useViewState<N extends ViewName>(session: BorrowedSession, name: N, isPassive: boolean): ViewState<ViewMap[N]> {
       const rootState = useSyncExternalStore(root.subscribe, root.get)
       const { get: getConfig, subscribe: subscribeConfig } = config()
       const configSnapshot = useSyncExternalStore(subscribeConfig, getConfig)
       const configured = configSnapshot?.status === 'ready' ? configuredRoot(configSnapshot.value) : undefined
       useEffect(() => { root.syncConfig(configured) }, [configured])
       const sessionId = session.kind === 'ready' ? session.sessionId : undefined
-      useEffect(() => { if (sessionId !== undefined) root.ensureRoot(sessionId) }, [sessionId, rootState])
+      useEffect(() => { if (!isPassive && sessionId !== undefined) root.ensureRoot(sessionId) }, [isPassive, sessionId, rootState])
       const path = sessionId !== undefined && rootState.memoryRoot !== undefined ? viewPath(rootState.memoryRoot, name, sessionId) : undefined
       const stat = useResource(sessionId !== undefined && path !== undefined ? fileAddress(sessionId, path) : '')
       const version = stat.status === 'live' ? stat.value?.version : undefined
       const isMissing = stat.status === 'failed' && stat.failure?.code === 'workspace-file/not-found'
-      useEffect(() => { if (sessionId !== undefined && isMissing) root.ensureViews(sessionId) }, [sessionId, isMissing])
+      useEffect(() => { if (!isPassive && sessionId !== undefined && isMissing) root.ensureViews(sessionId) }, [isPassive, sessionId, isMissing])
       const key = `${sessionId}\0${path}`
       // 有版本按版本读；资源还停在 not-found、但 refresh-views 已写过文件时，按刷新次数直接读一次
       const trigger = version ?? (isMissing && rootState.refreshes > 0 ? `refresh:${rootState.refreshes}` : undefined)
-      const [read, setRead] = useState<ReadState<ViewMap[typeof name]> | undefined>(undefined)
+      const [read, setRead] = useState<ReadState<ViewMap[N]> | undefined>(undefined)
       const isStillMissing = isMissing && trigger !== undefined && read?.key === key && read.trigger === trigger && read.view.status === 'missing'
-      useEffect(() => { if (sessionId !== undefined && isStillMissing) root.revalidate(sessionId) }, [sessionId, isStillMissing])
+      useEffect(() => { if (!isPassive && sessionId !== undefined && isStillMissing) root.revalidate(sessionId) }, [isPassive, sessionId, isStillMissing])
       useEffect(() => {
         if (sessionId === undefined || path === undefined || trigger === undefined) return
         let live = true
         void ctx.remote.workspaceFiles.read(sessionId, path, {}).then((r) => {
           if (!live) return
-          const view: ViewState<ViewMap[typeof name]> = r.ok
+          const view: ViewState<ViewMap[N]> = r.ok
             ? parseView(name, r.value.text)
             : r.error.code === 'workspace-file/not-found' ? { status: 'missing' } : { status: 'error', message: `${r.error.code}: ${r.error.message}` }
           setRead({ key, trigger, view })
@@ -408,6 +396,59 @@ export function createHostGateway(ctx: HostContext): BindGateway {
       }
       // 同一文件的新版本还在读时先留着旧内容
       return read !== undefined && read.key === key ? read.view : { status: 'loading' }
-    },
-  })
+    }
+
+    /**
+     * 当前选中的会话，和服务端会话视图里记下的归属（realpath 后最近的项目目录）；视图还没写出、或 isEnabled 为否时 workspace 为 undefined。
+     * 只读选中的这一个：页面默认作用域就是它，借会话时它也是唯一要额外核对的。
+     */
+    function useSelected(isEnabled: boolean): { id: string | undefined; cwd: string | undefined; workspace: string | undefined } {
+      const id = useSessions(selectedSessionId)
+      const cwd = useSessions(s => id === undefined ? undefined : s.byId[id]?.cwd)
+      const session = useMemo<BorrowedSession>(
+        () => isEnabled && id !== undefined ? { kind: 'ready', sessionId: id, cwd } : { kind: 'none' }, [isEnabled, id, cwd])
+      const view = useViewState(session, 'session', true)
+      return { id, cwd, workspace: view.status === 'ready' ? view.data.workspacePath : undefined }
+    }
+
+    return {
+      execute,
+      useConfig() {
+        const { get, subscribe } = config()
+        const snapshot = useSyncExternalStore(subscribe, get)
+        return useMemo(() => snapshot?.status === 'ready' ? toPluginConfig(snapshot.value) : undefined, [snapshot])
+      },
+      async setConfig(field, value) {
+        try { return (await config().form?.set(field, value)) ?? false } catch { return false }
+      },
+      async readFile(sessionId, path) {
+        try {
+          const r = await ctx.remote.workspaceFiles.read(sessionId, path, {})
+          return r.ok ? r.value.text : undefined
+        } catch { return undefined }
+      },
+      async openPath(path, action) {
+        try {
+          const r = await ctx.remote.session?.openWorkspacePath(action === 'reveal' ? { path, action } : { path })
+          return r?.ok ?? false
+        } catch { return false }
+      },
+      useSession(workspacePath) {
+        const list = useSessions(s => s)
+        const selected = useSelected(workspacePath !== undefined)
+        const picked = pickSession(list, workspacePath, selected.workspace !== undefined ? { [selected.id!]: selected.workspace } : {})
+        // 选择结果每次是新对象，按身份字段稳定下来，避免下游 effect 每次渲染都重跑
+        const sessionId = picked.kind === 'ready' ? picked.sessionId : undefined
+        const cwd = picked.kind === 'ready' ? picked.cwd : undefined
+        return useMemo(() => picked, [sessionId, cwd])
+      },
+      useCurrentWorkspace() {
+        const selected = useSelected(true)
+        return selected.workspace ?? selected.cwd
+      },
+      useView(session, name) {
+        return useViewState(session, name, false)
+      },
+    }
+  }
 }
