@@ -18,7 +18,19 @@ export type { ConfigForm, ConfigFormSnapshot, ConfigPathOp } from '../host.ts'
 
 // —— 配置段 ——
 
-export const TEMPLATES = ['coding', 'office', 'custom'] as const
+/** 场景模板，也是设置页分段控件的顺序：通用排第一（2026-10-25 用户定）。custom 在界面上叫「通用」。 */
+export const TEMPLATES = ['custom', 'coding', 'office'] as const
+/** 各模板在通用五类之外多出的类型（src/type-registry.ts TEMPLATES，tests/client-settings-mirror.spec.ts 守一致）。 */
+export const TEMPLATE_TYPES: Record<(typeof TEMPLATES)[number], readonly string[]> = {
+  custom: [],
+  coding: ['procedure'],
+  office: ['decision', 'commitment', 'person'],
+}
+
+/** 从 from 切到 to 后不再新增的类型：from 独有、to 没有的那几类。通用五类始终都在。 */
+export function droppedTypes(from: (typeof TEMPLATES)[number], to: (typeof TEMPLATES)[number]): string[] {
+  return TEMPLATE_TYPES[from].filter(name => !TEMPLATE_TYPES[to].includes(name))
+}
 export const OVERFLOW_MODES = ['relax', 'strict'] as const
 export const EVIDENCE_LEVELS = ['off', 'strict', 'active'] as const
 export const SENSITIVITIES = ['conservative', 'normal', 'proactive'] as const
@@ -52,6 +64,8 @@ export interface SettingsFields {
   governance: boolean
   sensitivity: (typeof SENSITIVITIES)[number]
   promoteTarget: (typeof PROMOTE_TARGETS)[number]
+  /** 用户词典路径，空串 = 未设（只用内置词典）。 */
+  userDictionary: string
 }
 
 /** 各字段在配置段里的路径（customTypes 按键逐条写，见 buildOps）。 */
@@ -63,11 +77,12 @@ const PATHS: Record<Exclude<keyof SettingsFields, 'customTypes'>, string[]> = {
   governance: ['governance', 'enabled'],
   sensitivity: ['governance', 'health', 'sensitivity'],
   promoteTarget: ['governance', 'globalPromoteTarget'],
+  userDictionary: ['search', 'userDictionaryPath'],
 }
 
 const DEFAULTS: SettingsFields = {
   template: 'coding', customTypes: {}, budget: '4000', overflow: 'relax', evidence: 'strict',
-  governance: true, sensitivity: 'normal', promoteTarget: 'plugin-global',
+  governance: true, sensitivity: 'normal', promoteTarget: 'plugin-global', userDictionary: '',
 }
 
 function at(value: unknown, path: readonly string[]): unknown {
@@ -88,6 +103,7 @@ export function fieldsOf(section: unknown): SettingsFields {
   const budget = at(section, PATHS.budget)
   const enabled = at(section, PATHS.governance)
   const types = at(section, ['customTypes'])
+  const dictionary = at(section, PATHS.userDictionary)
   return {
     template: oneOf(TEMPLATES, at(section, PATHS.template), DEFAULTS.template),
     customTypes: typeof types === 'object' && types !== null ? types as Record<string, CustomType> : {},
@@ -97,6 +113,7 @@ export function fieldsOf(section: unknown): SettingsFields {
     governance: typeof enabled === 'boolean' ? enabled : DEFAULTS.governance,
     sensitivity: oneOf(SENSITIVITIES, at(section, PATHS.sensitivity), DEFAULTS.sensitivity),
     promoteTarget: oneOf(PROMOTE_TARGETS, at(section, PATHS.promoteTarget), DEFAULTS.promoteTarget),
+    userDictionary: typeof dictionary === 'string' ? dictionary : DEFAULTS.userDictionary,
   }
 }
 
@@ -121,6 +138,7 @@ function sameType(a: CustomType | undefined, b: CustomType | undefined): boolean
 
 /**
  * 草稿 → 一次提交的操作。只写和已存值不同的字段；customTypes 按键 set / unset，不整段覆盖。
+ * 用户词典路径去掉首尾空白再比，清空写 unset（schema 里它没有默认值，未设即只用内置词典）。
  * 上限草稿不合法时返回 undefined（调用方不提交）。
  */
 export function buildOps(saved: SettingsFields, draft: SettingsFields): ConfigPathOp[] | undefined {
@@ -133,6 +151,12 @@ export function buildOps(saved: SettingsFields, draft: SettingsFields): ConfigPa
       if (String(n) !== saved.budget) ops.push({ op: 'set', path: PATHS.budget, value: n })
       continue
     }
+    if (key === 'userDictionary') {
+      const path = draft.userDictionary.trim()
+      if (path === saved.userDictionary) continue
+      ops.push(path === '' ? { op: 'unset', path: PATHS.userDictionary } : { op: 'set', path: PATHS.userDictionary, value: path })
+      continue
+    }
     ops.push({ op: 'set', path: PATHS[key], value: draft[key] })
   }
   for (const [name, type] of Object.entries(draft.customTypes)) {
@@ -142,6 +166,19 @@ export function buildOps(saved: SettingsFields, draft: SettingsFields): ConfigPa
     if (!(name in draft.customTypes)) ops.push({ op: 'unset', path: ['customTypes', name] })
   }
   return ops
+}
+
+/** 自定义类型的改动，按中文名汇总（保存确认弹窗用）：修改、新增取草稿里的名字，删除取已存的。 */
+export function customTypeChanges(saved: SettingsFields['customTypes'], draft: SettingsFields['customTypes']):
+  { added: string[]; edited: string[]; removed: string[] } {
+  const added: string[] = []
+  const edited: string[] = []
+  for (const [name, type] of Object.entries(draft)) {
+    if (!(name in saved)) added.push(type.label)
+    else if (!sameType(saved[name], type)) edited.push(type.label)
+  }
+  const removed = Object.entries(saved).filter(([name]) => !(name in draft)).map(([, type]) => type.label)
+  return { added, edited, removed }
 }
 
 // —— 自定义类型 ——
@@ -162,8 +199,9 @@ export interface CustomTypeDraft {
 
 export type CustomTypeError = 'required' | 'name-format' | 'name-builtin' | 'name-taken' | 'decay-invalid'
 
+/** 新增类型的初始草稿：召回方式、治理优先级预选「搜索」「中」，分段控件打开就有选中项（2026-10-25 用户定）。 */
 export const EMPTY_TYPE_DRAFT: CustomTypeDraft = {
-  name: '', label: '', description: '', whenToSave: '', recall: '', governancePriority: '', decayDays: '',
+  name: '', label: '', description: '', whenToSave: '', recall: 'search', governancePriority: 'medium', decayDays: '',
 }
 
 export function draftOf(name: string, type: CustomType): CustomTypeDraft {

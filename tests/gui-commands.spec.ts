@@ -273,6 +273,30 @@ describe('跨项目', () => {
   })
 })
 
+describe('forget 遇到含密钥的记忆', () => {
+  // forget 承诺 14 天可撤销；含密钥的记忆只能物理删除，界面要先问用户，改走 hard-delete
+  it.each([
+    ['critical 密钥', `token ${FAKE_SECRET.sk}`],
+    ['仅 suspected（用户 force 存下的疑似口令）', 'password: TESTONLY99'],
+  ])('%s：has-secret，记忆原样留着、不建快照', async (_label, content) => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_s', content }))
+    expect(err(await e.run({ cmd: 'forget', memoryId: 'mem_s' })).code).toBe('has-secret')
+    expect((await e.store.get('mem_s'))!.status).toBe('active')
+    expect(await e.snapshots.list()).toEqual([])
+
+    ok(await e.run({ cmd: 'hard-delete', memoryId: 'mem_s' }))
+    expect(await e.store.get('mem_s')).toBeUndefined()
+  })
+
+  it('不含密钥的记忆照常软删', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_plain' }))
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_plain' }))
+    expect((await e.store.get('mem_plain'))!.status).toBe('deleted')
+  })
+})
+
 describe('hard-delete', () => {
   it('含密钥的记忆物理删除：文件没了、不进最近删除', async () => {
     const e = env()
@@ -364,6 +388,19 @@ describe('提升候选与超限', () => {
     expect(await readFile(join(root, 'AGENTS.md'), 'utf8')).toContain('戊')
     expect(await allEntries(e)).toEqual([])
     expect(await pendingCandidates(e)).toEqual([])
+  })
+
+  it('promote 含密钥的记忆到 AGENTS.md → failed 并说明原因，什么都不动', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_sec', name: '部署凭证', content: `token ${FAKE_SECRET.sk}`, scope: 'workspace', workspacePath: SESSION_WS, globalCandidate: true }))
+    const { entry } = await e.decisions.upsert({ kind: 'promote-candidate', memoryIds: ['mem_sec'], summary: '部署凭证', workspaces: [SESSION_WS], fingerprint: 'fp-sec' }, 1)
+    const body = err(await e.run({ cmd: 'promote', decisionId: entry.id, target: 'agents-md' }))
+    expect(body.code).toBe('failed')
+    expect(body.detail).toContain('含密钥的记忆不能写入 AGENTS.md')
+    await expect(stat(join(root, 'AGENTS.md'))).rejects.toThrow()
+    expect((await e.store.get('mem_sec'))!.status).toBe('active')
+    expect(await e.decisions.list()).toEqual([entry])
+    expect(await e.snapshots.list()).toEqual([])
   })
 
   it('keep-local：清候选标记、条目 settled 为 keep-local；再体检不重开，内容改了（模型又标为全局）才重新提示', async () => {

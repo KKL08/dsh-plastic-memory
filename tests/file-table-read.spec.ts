@@ -211,7 +211,7 @@ describe('加载期零 I/O', () => {
   it('memoryRoot 不存在：构造不报错，读方法返回空且不建目录', async () => {
     const missing = join(root, '还不存在')
     const t = new FileTable({ root: missing, stats: new InMemoryKvTable<RecallStats>() })
-    expect(await t.readScope([join(missing, GLOBAL_DIR), join(missing, 'any')])).toEqual({ records: [], quarantined: [], directoryNotes: [] })
+    expect(await t.readScope([join(missing, GLOBAL_DIR), join(missing, 'any')])).toEqual({ records: [], listedCount: 0, quarantined: [], directoryNotes: [] })
     expect(await t.listWorkspaceDirs()).toEqual({ entries: [], directoryNotes: [] })
     expect(await t.locate('mem_a', { workspacePath: '/p' })).toBeUndefined()
     await expect(stat(missing)).rejects.toThrow()

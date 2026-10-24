@@ -28,6 +28,8 @@ All notable changes to this project are documented here. The format follows
   and what is waiting. Saving writes the same `cordis.patch.yml` the YAML
   path uses and takes effect without a restart. Hosts without the plugin
   manager page keep the YAML path.
+- A whale-tail icon for the plugin on the host's plugin page, in place of the
+  generic placeholder.
 - A card under each turn in which the model saved a memory (with a delete
   button and a link to the memory page), a one-line summary on every memory
   tool call, and a 「记忆」 button next to the composer showing the share of
@@ -39,6 +41,27 @@ All notable changes to this project are documented here. The format follows
   package declares `dsh.client`, the host's module loader can load
   `lib/client.js`, and both locale files ship. CI fails when the bundle is
   missing from the package.
+- Chinese word segmentation for `memory_search`. The optional dependency
+  `@node-rs/jieba` is installed with the plugin from npm and loaded the first
+  time a query contains Chinese, once per host process, so a long Chinese
+  question matches memories by word instead of by stray character pairs. If
+  it cannot be installed or loaded on your platform, Chinese search falls
+  back to two-character segments, a warning is logged once, and nothing else
+  changes.
+- A user dictionary for that segmentation: `search.userDictionaryPath`, also
+  a field on the settings page, points to a file with one
+  `word frequency tag` entry per line (for example `插件记忆 10 n`). Its words
+  are added on top of the built-in dictionary from the next search on. The
+  path must be absolute and the frequency is required; a missing or
+  malformed file leaves search on the built-in dictionary and is reported
+  once in the log.
+- Each `memory_search` hit carries the absolute path of its memory file,
+  shown at the end of the hit's first line, so the model can read the full
+  file or its surroundings directly.
+- An evaluation set of 86 synthetic memories and 48 queries (short and long
+  Chinese, identifiers, partial words, plain names, ids) runs with the tests
+  and fails when top-1 or top-3 accuracy drops below a fixed floor, with and
+  without the Chinese segmenter.
 
 ### Changed
 - Memories that exceed `snapshotTokenBudget` are no longer cut from the
@@ -69,9 +92,9 @@ All notable changes to this project are documented here. The format follows
   the next tool call and the next session's prompt without a restart. On a
   library of 10 projects × 1000 memories (Apple M4), start-up dropped from
   1.5 s to 0 and the 109 ms fingerprint check before every tool call is gone;
-  `memory_search` takes about 30 ms, `memory_save` 190–280 ms, a single-layer
-  `memory_health` 135 ms and a whole-library one 1.1 s. `pnpm bench:storage`
-  reproduces these numbers on your machine.
+  `memory_save` takes 190–280 ms, a single-layer `memory_health` 135 ms and a
+  whole-library one 1.1 s. `pnpm bench:storage` reproduces these numbers on
+  your machine.
 - Storage layout: `global/` and one `<project>-<hash>/` directory per
   workspace (marked by a `.workspace` file holding the project path). A memory
   file is named after its `name`; `MEMORY.md` in each directory is a generated
@@ -79,8 +102,9 @@ All notable changes to this project are documented here. The format follows
   superseded memories for 14 days; `.state/` holds the plugin's own snapshots,
   pending decisions, scan cache and recall statistics. Existing files are read
   in place; snapshots and pending decisions are imported from the host's KV
-  store on first use. The host's `storageDomain` service is therefore no
-  longer required.
+  store on first use, and the copies there are removed once the import has
+  finished, so nothing stays behind in the host's store. The host's
+  `storageDomain` service is therefore no longer required.
 - Hand-written memory files need only `name` and `type` in the frontmatter; the
   id is derived from the file path and every other field is filled in at the
   next write or session start. Timestamps accept dates, ISO 8601 date-times
@@ -95,9 +119,22 @@ All notable changes to this project are documented here. The format follows
 - Memories whose `validTo` has passed stay where they are but are no longer
   injected or found by `memory_search`; `memory_health` reports them as
   `expired` and suggests extending the date or forgetting them.
-- `memory_search` with several keywords first requires all of them to match;
-  when nothing matches all of them it falls back to any-match ordered by hit
-  count and says so (`or-fallback`).
+- `memory_search` ranks results by relevance. Memories containing every
+  query word come before those containing only some of them, a word that
+  appears as a whole word ranks above one that only appears inside a longer
+  word (`scope` in `readScope`), and matches in the name, summary and tags
+  weigh more than matches in the content; a query that is exactly a memory id
+  returns that memory first. The result opens with a note when no returned
+  memory contains every word (`or-fallback`), or when none contains any of
+  them and only a literal match on the query text is left
+  (`substring-fallback`).
+- The `memory_search` tool description now says what the tool does: it ranks
+  by relevance, accepts Chinese and English queries and returns file paths. It
+  also tells the model how to query well (two to four content words, both the
+  Chinese and English form of a term), and when a result opens with a
+  fallback note the note now suggests searching again with synonyms or fewer
+  words. `memory_save` asks for synonyms and bilingual aliases in tags so
+  later searches phrased differently still find the memory.
 - Injected index lines now end with the memory's file path (`global/x.md`,
   `<project>/x.md`), so the model can open the full text directly, and the
   prompt ends with a fixed note that memories are background material: they
@@ -131,6 +168,15 @@ All notable changes to this project are documented here. The format follows
   host's grep tool finds top-level memories but nothing under `.archive/`
   (H16). `pnpm host:smoke` boots the real host with a probe plugin that
   confirms the tools are registered.
+- `pnpm host:smoke` runs twice, once with the package as published and once
+  with its optional dependencies removed; both must load and register
+  `memory_search`. `pnpm host:contract` also checks that every search hit
+  carries an absolute path to an existing file.
+- `pnpm bench:storage` reports search latency, the share of files that pass
+  the pre-read text filter, and the heap used while scoring, for a typical
+  query and a common-word query under both segmenters. Each row passes when
+  search is at most 80 ms slower than a reference measured in the same run
+  and scoring holds less than 2 MB.
 
 ### Fixed
 - A memory holding a vendor-format key (such as `sk-`, `ghp_` or an AWS
@@ -150,6 +196,11 @@ All notable changes to this project are documented here. The format follows
   `memory_scan`. The verdict is now remembered: the pair stays off the
   pending list until either memory, or the `AGENTS.md` it was checked
   against, changes.
+- Promoting a memory that contains a secret to `AGENTS.md` copied the secret
+  there in plain text, where every session in every project reads it and
+  forgetting the memory cannot remove it. Such memories are now refused with
+  a message saying why and stay in the project unchanged. Promoting to global
+  memory is unaffected.
 
 ## [0.1.1-beta.5] - 2026-10-20
 

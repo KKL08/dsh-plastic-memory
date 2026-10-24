@@ -18,9 +18,17 @@ describe('对话卡解析的文本格式与服务端渲染器一致', () => {
   })
 
   it('memory_search：命中数按段计', () => {
-    const hit = (id: string) => ({ id, type: 'fact', summary: `摘要 ${id}`, content: '正文\n第二行', sourceNote: '', stalenessNote: '（可能过时）' })
+    const hit = (id: string) => ({ id, type: 'fact', summary: `摘要 ${id}`, content: '正文\n第二行', sourceNote: '', stalenessNote: '（可能过时）', path: `/m/global/${id}.md` })
     expect(countSearchHits(renderSearchResult({ hits: [hit('a'), hit('b'), hit('c')] }))).toBe(3)
     expect(countSearchHits(renderSearchResult({ hits: [], note: '没有命中。' }))).toBe(0)
+  })
+
+  it('memory_search：头行末尾带绝对路径后命中计数不变', () => {
+    const hit = (id: string, path: string) => ({ id, type: 'fact', summary: `摘要 ${id}`, content: '正文\n第二行', sourceNote: '', stalenessNote: '', path })
+    const hits = [hit('a', '/m/global/a.md'), hit('b', '/m/my proj-1234abcd/带 空格｜竖线.md'), hit('c', 'C:\\m\\global\\c.md')]
+    const text = renderSearchResult({ hits, note: '没有同时命中全部关键词的记忆，以下按相关性排序。' })
+    expect(text).toContain('[a] fact｜摘要 a · /m/global/a.md\n')
+    expect(countSearchHits(text)).toBe(3)
   })
 
   it('memory_forget：从 message 里读「已遗忘 N 条」', () => {

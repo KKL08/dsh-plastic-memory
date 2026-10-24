@@ -35,12 +35,14 @@ import {
 import { baselineProjectionDefinition } from '../src/governance/baseline.ts'
 import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
 import { GUI_VIEW_DIR, GUI_VIEW_FILES, sessionViewFile, sessionViewSchema } from '../src/gui/contract.ts'
+import { defaultJiebaLoader } from '../src/search/jieba-segmenter.ts'
 
 /** 宿主 storageDomain 表的替身（@deepseek-ai/dsh-storage-domain KvTable 的形状）：读同步、写异步。 */
 class HostKvTable<T = unknown> {
   private map = new Map<string, T>()
   get(key: string) { return this.map.get(key) }
   entries() { return this.map.entries() }
+  keys() { return this.map.keys() }
   async put(key: string, value: T) { this.map.set(key, value) }
   async delete(key: string) { return this.map.delete(key) }
 }
@@ -126,6 +128,9 @@ function mockCtxWithThrowingGet() {
     get: (name: string) => { throw new Error(`no such service: ${name}`) },
   }
 }
+
+// 用户词典热生效的用例要真实 @node-rs/jieba（可选依赖没装上或平台二进制缺失时 skip）。
+const hasRealJieba = await defaultJiebaLoader.importJieba().then(() => true, () => false)
 
 // FileTable 是纯 fs 类，vitest 下用 mkdtemp 真实落盘跑；afterEach 统一清理，
 // 避免任何用例（包括抛错用例）碰到缺省 memoryRoot 从而落到真实 ~/.dsh/memories。
@@ -345,12 +350,11 @@ describe('侧表与旧 KV 导入接线', () => {
     expect(base.domain.opens).toBe(0)
   })
 
-  it('有 storageDomain：首次侧表访问时导入 snapshots 与 pending（不导 recall_stats / scan_cache），写 kv 标记并关域', async () => {
+  it('有 storageDomain：首次侧表访问时导入 snapshots 与 pending（不导 recall_stats / scan_cache），写 kv 标记、删掉旧行并关域', async () => {
     const memoryRoot = await makeTmpRoot()
     const base = mockCtx({ storageDomain: true })
     const kv = (name: string) => { const t = new HostKvTable(); base.tables.set(name, t); return t }
-    const oldSnap = snap('snap_old')
-    await kv('snapshots').put('snap_old', oldSnap)
+    await kv('snapshots').put('snap_old', snap('snap_old'))
     await kv('pending_decisions').put('pd_old', pd('pd_old'))
     await kv('recall_stats').put('mem_a', { id: 'mem_a', recallCount: 3, lastRecalledAt: 1 })
     await kv('scan_cache').put('cache_all', { id: 'cache_all', scannedAt: 1, scope: 'all', findings: [] })
@@ -365,9 +369,13 @@ describe('侧表与旧 KV 导入接线', () => {
     await expect(stat(join(state, 'scan-cache'))).rejects.toMatchObject({ code: 'ENOENT' })
     await expect(stat(join(state, RECALL_STATS_FILE))).rejects.toMatchObject({ code: 'ENOENT' })
     expect(await readMarker(memoryRoot)).toMatchObject({ version: 1, source: 'kv', counts: { snapshots: 1, pending: 1 } })
-    expect(base.domain).toEqual({ opens: 1, closes: 1 })
-    // KV 不删、不清
-    expect(base.tables.get('snapshots')!.get('snap_old')).toEqual(oldSnap)
+    // 读一次、删一次，各自开关域
+    expect(base.domain).toEqual({ opens: 2, closes: 2 })
+    // 导入的两张表清空，不再留副本；另两张表不碰
+    expect([...base.tables.get('snapshots')!.keys()]).toEqual([])
+    expect([...base.tables.get('pending_decisions')!.keys()]).toEqual([])
+    expect([...base.tables.get('recall_stats')!.keys()]).toEqual(['mem_a'])
+    expect([...base.tables.get('scan_cache')!.keys()]).toEqual(['cache_all'])
   })
 
   it('标记已存在：不再打开旧域', async () => {
@@ -1046,6 +1054,25 @@ describe('配置热生效（loader/volatile-update）', () => {
     await rm(join(t.memoryRoot, GUI_VIEW_DIR), { recursive: true })
     await t.update({ governance: { health: { sensitivity: 'proactive' } } })
     for (const file of Object.values(GUI_VIEW_FILES)) await stat(join(t.memoryRoot, GUI_VIEW_DIR, file))
+  })
+
+  // 观察切法：查询「插件记忆」，记录只写了「插件的记忆」。只用主词典时查询切成 插件 / 记忆，记录全命中；
+  // 用户词典加了「插件记忆」后查询多出这个整词，记录只部分命中，结果带 or-fallback。
+  it.skipIf(!hasRealJieba)('改 search.userDictionaryPath：下一次 memory_search 按新词典切分，清空回到只用主词典', async () => {
+    const t = await setup()
+    const dict = join(t.memoryRoot, 'user.dict.txt')
+    await writeFile(dict, '插件记忆 10 n\n')
+    await t.putGlobal({ id: 'mem_plugin', content: '插件的记忆放在这里' })
+    const search = () => t.tool('memory_search').execute({ query: '插件记忆' }, fakeExec()) as Promise<{ hits: Array<{ id: string }>; noteCode?: string }>
+
+    expect(await search()).toMatchObject({ hits: [{ id: 'mem_plugin' }] })
+    expect((await search()).noteCode).toBeUndefined()
+
+    expect(await t.update({ search: { userDictionaryPath: dict } })).toEqual([['search', 'userDictionaryPath']])
+    expect(await search()).toMatchObject({ hits: [{ id: 'mem_plugin' }], noteCode: 'or-fallback' })
+
+    expect(await t.update({})).toEqual([['search', 'userDictionaryPath']])
+    expect((await search()).noteCode).toBeUndefined()
   })
 
   it('快照冻结写该会话的视图；这次对话 memory_save 新记的 id 追加进去', async () => {

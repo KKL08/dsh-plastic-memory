@@ -2,13 +2,22 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { parse } from 'yaml'
-import { BUILTIN_TYPE_NAMES, ENTRY_ID, PACKAGE_NAME, SENSITIVITY_NUMBERS } from '../client/settings/config.ts'
+import { BUILTIN_TYPE_NAMES, ENTRY_ID, PACKAGE_NAME, SENSITIVITY_NUMBERS, TEMPLATE_TYPES, TEMPLATES as CLIENT_TEMPLATES, buildOps, fieldsOf } from '../client/settings/config.ts'
+import { applyOps } from '../client/settings/config-form.fake.ts'
+import { Config } from '../src/index.ts'
 import { SENSITIVITY_PRESETS } from '../src/governance/health-presets.ts'
-import { BUILTIN_TYPES } from '../src/type-registry.ts'
+import { BUILTIN_TYPES, TEMPLATES } from '../src/type-registry.ts'
 
 describe('设置页手抄的服务端常量', () => {
   it('内置类型名与 BUILTIN_TYPES 一致', () => {
     expect([...BUILTIN_TYPE_NAMES].sort()).toEqual(BUILTIN_TYPES.map(t => t.name).sort())
+  })
+
+  it('每个模板在通用五类之外多出的类型与 TEMPLATES 一致', () => {
+    for (const name of Object.keys(TEMPLATES)) expect(CLIENT_TEMPLATES).toContain(name)
+    for (const name of CLIENT_TEMPLATES) {
+      expect([...TEMPLATE_TYPES[name]]).toEqual((TEMPLATES[name] ?? []).map(t => t.name))
+    }
   })
 
   it('灵敏度说明里的数值与预设一致', () => {
@@ -23,5 +32,19 @@ describe('设置页手抄的服务端常量', () => {
     expect(patch[0]!.insert[0]).toMatchObject({ id: ENTRY_ID, name: PACKAGE_NAME })
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { name: string }
     expect(pkg.name).toBe(PACKAGE_NAME)
+  })
+
+  it('用户词典路径字段写进 Config 的 search.userDictionaryPath；默认未设、表单显示为空，清空回到未设', () => {
+    expect(new Config({} as never).search.userDictionaryPath.get()).toBeUndefined()
+    const empty = fieldsOf({})
+    expect(empty.userDictionary).toBe('')
+
+    const written = applyOps({}, buildOps(empty, { ...empty, userDictionary: '/opt/dict/domain.txt' })!)
+    expect(new Config(written as never).search.userDictionaryPath.get()).toBe('/opt/dict/domain.txt')
+    const saved = fieldsOf(written)
+    expect(saved.userDictionary).toBe('/opt/dict/domain.txt')
+
+    const cleared = applyOps(written, buildOps(saved, { ...saved, userDictionary: '' })!)
+    expect(new Config(cleared as never).search.userDictionaryPath.get()).toBeUndefined()
   })
 })

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { parse } from 'yaml'
 
 import { Config } from '../src/index.ts'
 
@@ -51,5 +52,15 @@ describe('Config schema', () => {
       },
     } as never)
     expect(value.customTypes.get().regulation!.decayDays).toBeNull()
+  })
+
+  it('search.userDictionaryPath 可选、volatile，YAML 可配', () => {
+    const unset = new Config({} as never)
+    expect(typeof unset.search.userDictionaryPath.get).toBe('function')
+    expect(unset.search.userDictionaryPath.get()).toBeUndefined()
+
+    const fromYaml = new Config(parse('search:\n  userDictionaryPath: /opt/dict/domain.txt\n') as never)
+    expect(fromYaml.search.userDictionaryPath.get()).toBe('/opt/dict/domain.txt')
+    expect(() => new Config({ search: { userDictionaryPath: 42 } } as never)).toThrow()
   })
 })

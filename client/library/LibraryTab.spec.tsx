@@ -47,10 +47,10 @@ describe('全部记忆', () => {
   })
 
   it('待处理视图没有这个类型时，用全部记忆视图自带的 typeLabels', () => {
-    const view = library({ layers: [{ layer: app, items: [memory({ id: 'a1', type: 'meeting-note' })] }], typeLabels: { 'meeting-note': '会议纪要' } })
+    const view = library({ layers: [{ layer: app, items: [memory({ id: 'a1', type: 'domain-term' })] }], typeLabels: { 'domain-term': '术语' } })
     const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], typeLabels: {} }
     renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: view, pending } }))
-    expect(screen.getByRole('listitem').querySelector('.pm-mc-meta span')).toHaveTextContent('会议纪要')
+    expect(screen.getByRole('listitem').querySelector('.pm-mc-meta span')).toHaveTextContent('术语')
   })
 
   it('目录问题来自视图，灰色一行一条，路径相对存储目录', () => {
@@ -93,6 +93,35 @@ describe('全部记忆', () => {
     expect(screen.getByRole('status')).toHaveTextContent('已删除，14 天内可在「最近删除」恢复。')
     fireEvent.click(screen.getByRole('button', { name: '去最近删除 ›' }))
     expect(nav.get()).toEqual({ tab: 'deleted', memoryId: 'a2' })
+  })
+
+  it('含密钥的记忆：forget 回 has-secret（什么都没动）后在行里确认、不提示可恢复；取消收起；「彻底删除」发 hard-delete，之后提示不可恢复、不带去最近删除的链接', async () => {
+    const gateway = createFakeGateway({
+      views: { library: library() },
+      respond: command => command.cmd === 'forget'
+        ? { ok: false, cmd: command.cmd, code: 'has-secret', detail: '记忆 a2 含密钥，删除后不可恢复，未做任何改动' }
+        : { ok: true, cmd: command.cmd, memoryIds: ['a2'] },
+    })
+    renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
+    const row = rowOf('提交前跑 typecheck')
+    await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '删除' })) })
+    expect(within(row).getByText('这条记忆里有密钥，删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeInTheDocument()
+    expect(within(row).getByRole('button', { name: '删除' })).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.queryByRole('status')).toBeNull()
+
+    fireEvent.click(within(row).getByRole('button', { name: '取消' }))
+    expect(screen.queryByText('这条记忆里有密钥，删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeNull()
+    await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '删除' })) })
+    await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '彻底删除' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([
+      { cmd: 'forget', memoryId: 'a2' },
+      { cmd: 'forget', memoryId: 'a2' },
+      { cmd: 'hard-delete', memoryId: 'a2' },
+    ])
+    expect(screen.queryByText('这条记忆里有密钥，删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeNull()
+    expect(screen.getByRole('status')).toHaveTextContent('已彻底删除。如果它是真的凭证，记得去换一个新的。')
+    expect(screen.queryByText(/14 天/)).toBeNull()
+    expect(screen.queryByRole('button', { name: '去最近删除 ›' })).toBeNull()
   })
 
   it('删别的项目里的记忆：服务端拒（cross-workspace）后在行里确认，「继续处理」才带 allowCrossWorkspace 重发；失败显示原话', async () => {

@@ -47,7 +47,7 @@ export type ViewState<V> =
 export interface MemoryGateway {
   /**
    * hook：借哪个会话。优先 workspacePath 下最近更新的会话，其次当前选中的会话，再其次最近更新的任一会话；
-   * 子 agent 会话不借（它们只读）。
+   * 同一档里先借空闲的，都在跑才借正在跑的。子 agent 会话不借（它们只读）。
    */
   useSession(workspacePath: string | undefined): BorrowedSession
   /** hook：当前选中会话的工作目录，作用域下拉的默认项。 */
@@ -98,6 +98,11 @@ function newest(list: SessionListState, ids: readonly string[]): string | undefi
   return best
 }
 
+/** 一档里挑一个：先挑空闲的（命令会立刻插进正在跑的那一轮），都在跑才退回正在跑的，保证界面总能用。 */
+function preferIdle(list: SessionListState, ids: readonly string[]): string | undefined {
+  return newest(list, ids.filter(id => !list.byId[id]!.running)) ?? newest(list, ids)
+}
+
 /** 当前选中的会话：主视图持有它（retainedBy.mainView > 0）。 */
 export function selectedSessionId(list: SessionListState): string | undefined {
   return list.ids.find(id => (list.byId[id]?.retainedBy.mainView ?? 0) > 0)
@@ -107,9 +112,9 @@ export function pickSession(list: SessionListState, workspacePath: string | unde
   const candidates = list.ids.filter(id => isBorrowable(list, id))
   const inWorkspace = workspacePath === undefined ? [] : candidates.filter(id => samePath(list.byId[id]!.cwd, workspacePath))
   const selected = selectedSessionId(list)
-  const id = newest(list, inWorkspace)
+  const id = preferIdle(list, inWorkspace)
     ?? (selected !== undefined && candidates.includes(selected) ? selected : undefined)
-    ?? newest(list, candidates)
+    ?? preferIdle(list, candidates)
   return id === undefined ? { kind: 'none' } : { kind: 'ready', sessionId: id, cwd: list.byId[id]!.cwd }
 }
 
@@ -275,12 +280,13 @@ function createRootStore(run: RunLine) {
         if (result.ok && result.info !== undefined && result.info.memoryRoot !== state.memoryRoot) remember(result.info.memoryRoot)
       })
     },
-    /** 让服务端把视图文件写出来：首次拿到 memoryRoot 之后、或视图文件缺失时，每个页面生命周期一次。 */
+    /** 让服务端把视图文件写出来：首次拿到 memoryRoot 之后、或视图文件缺失时，每个页面生命周期成功一次；同一时间只发一条，失败了下次再试。 */
     ensureViews(sessionId: string) {
       if (refreshed) return
       refreshed = true
       void run(sessionId, encodeMemoryCommand({ cmd: 'refresh-views' })).then((r) => {
         if (decodeExecution('refresh-views', r).ok) set({ ...state, refreshes: state.refreshes + 1 })
+        else refreshed = false
       })
     },
   }

@@ -104,9 +104,9 @@ describe('SidebarTab 四种状态', () => {
   })
 
   it('自定义类型的分组标题写注册表显示名（待处理视图的 typeLabels）', () => {
-    const note = memory({ id: 'n1', type: 'meeting-note', content: '周会改到周四。' })
-    setup({ library: library(note), session: snapshot({ injectedIds: ['n1'] }), pending: { ...pending(), typeLabels: { 'meeting-note': '会议纪要' } } })
-    expect(within(screen.getByRole('region', { name: '带入的记忆' })).getByRole('heading', { name: '会议纪要 1' })).toBeInTheDocument()
+    const note = memory({ id: 'n1', type: 'domain-term', content: '「灰度」指先放给一小部分用户。' })
+    setup({ library: library(note), session: snapshot({ injectedIds: ['n1'] }), pending: { ...pending(), typeLabels: { 'domain-term': '术语' } } })
+    expect(within(screen.getByRole('region', { name: '带入的记忆' })).getByRole('heading', { name: '术语 1' })).toBeInTheDocument()
   })
 
   it('会话视图还没有（这次对话没组装过快照）：说明发出第一条消息后才有', () => {
@@ -151,6 +151,32 @@ describe('SidebarTab 这次对话新记的', () => {
     await act(async () => { fireEvent.click(saved.getByRole('button', { name: '删除这条记忆' })) })
     expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'n1' }])
     expect(screen.queryByText('报销截止每月 25 日。')).toBeNull()
+  })
+
+  it('含密钥的记忆：forget 回 has-secret 时原位确认；取消收起；「彻底删除」发 hard-delete，原位留不可恢复的说明', async () => {
+    const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
+    const { gateway } = setup(
+      { library: library(pref, proj, glob, fresh), session: snapshot({ savedIds: ['n1'] }), pending: pending() },
+      command => command.cmd === 'forget' ? { ok: false, cmd: command.cmd, code: 'has-secret' } : { ok: true, cmd: command.cmd, memoryIds: ['n1'] },
+    )
+    const saved = within(screen.getByRole('region', { name: '这次对话新记的' }))
+    await act(async () => { fireEvent.click(saved.getByRole('button', { name: '删除这条记忆' })) })
+    expect(saved.getByText('这条记忆里有密钥，删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeInTheDocument()
+    expect(saved.getByRole('button', { name: '删除这条记忆' })).toHaveAttribute('aria-disabled', 'true')
+    expect(saved.getByText('报销截止每月 25 日。')).toBeInTheDocument()
+
+    fireEvent.click(saved.getByRole('button', { name: '取消' }))
+    expect(saved.queryByText('这条记忆里有密钥，删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeNull()
+    await act(async () => { fireEvent.click(saved.getByRole('button', { name: '删除这条记忆' })) })
+    await act(async () => { fireEvent.click(saved.getByRole('button', { name: '彻底删除' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([
+      { cmd: 'forget', memoryId: 'n1' },
+      { cmd: 'forget', memoryId: 'n1' },
+      { cmd: 'hard-delete', memoryId: 'n1' },
+    ])
+    expect(saved.queryByText('报销截止每月 25 日。')).toBeNull()
+    expect(saved.getByText('已彻底删除。如果它是真的凭证，记得去换一个新的。')).toBeInTheDocument()
+    expect(screen.queryByText(/14 天/)).toBeNull()
   })
 })
 

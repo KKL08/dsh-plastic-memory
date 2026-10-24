@@ -14,7 +14,8 @@ export interface FakeConfigForm extends ConfigForm {
   readonly value: Record<string, unknown>
 }
 
-function apply(value: Record<string, unknown>, ops: readonly ConfigPathOp[]): Record<string, unknown> {
+/** 按路径把操作落到配置段上（不改原对象）。 */
+export function applyOps(value: Record<string, unknown>, ops: readonly ConfigPathOp[]): Record<string, unknown> {
   const next = structuredClone(value)
   for (const op of ops) {
     let cur: Record<string, unknown> = next
@@ -31,7 +32,7 @@ function apply(value: Record<string, unknown>, ops: readonly ConfigPathOp[]): Re
 
 export const DEFAULT_SECTION = {
   writeMode: 'proactive', snapshotTokenBudget: 4000, snapshotOverflow: 'relax', evidenceLookup: 'strict', template: 'coding',
-  customTypes: {}, governance: { enabled: true, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global' }, memoryRoot: '',
+  customTypes: {}, governance: { enabled: true, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global' }, search: {}, memoryRoot: '',
 }
 
 export function createFakeConfigForm(init: Partial<ConfigFormSnapshot> & { value?: Record<string, unknown> } = {}): FakeConfigForm {
@@ -52,11 +53,11 @@ export function createFakeConfigForm(init: Partial<ConfigFormSnapshot> & { value
       calls.push({ ops: structuredClone([...ops]), expectedRevision })
       if (reject) { reject = false; return false }
       if (expectedRevision !== undefined && expectedRevision !== snapshot.revision) return false
-      publish({ ...snapshot, value: apply(snapshot.value as Record<string, unknown>, ops), revision: (snapshot.revision ?? 0) + 1 })
+      publish({ ...snapshot, value: applyOps(snapshot.value as Record<string, unknown>, ops), revision: (snapshot.revision ?? 0) + 1 })
       return true
     },
     externalChange(ops) {
-      publish({ ...snapshot, value: apply(snapshot.value as Record<string, unknown>, ops), revision: (snapshot.revision ?? 0) + 1 })
+      publish({ ...snapshot, value: applyOps(snapshot.value as Record<string, unknown>, ops), revision: (snapshot.revision ?? 0) + 1 })
     },
     rejectNext() { reject = true },
   }

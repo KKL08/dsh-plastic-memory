@@ -71,12 +71,12 @@ describe('AND 命中集 ⊆ OR 命中集（性质测试）；零 AND 命中时�
     await store.put(record({ id: 'mem_one', content: '只提到 deploy' }))
     await store.put(record({ id: 'mem_none', content: '无关内容' }))
 
-    // AND 有命中：只返回全部词项都命中的，不带说明码
+    // 有全命中：全命中排第一、不带说明码；部分命中不再被排除，排在后面（三档一张表）
     const and = await executeSearch({ query: 'deploy hook' }, fakeExec(), searchDeps(store))
-    expect(and.hits.map(h => h.id)).toEqual(['mem_two'])
+    expect(and.hits.map(h => h.id)).toEqual(['mem_two', 'mem_one'])
     expect(and.noteCode).toBeUndefined()
 
-    // AND 零命中：回退 OR，按命中数排序，带说明码，渲染里先说明再列结果
+    // 没有全命中：都是部分命中，按相关性排序，带说明码，渲染里先说明再列结果
     const or = await executeSearch({ query: 'deploy hook rollback' }, fakeExec(), searchDeps(store))
     expect(or.hits.map(h => h.id)).toEqual(['mem_two', 'mem_one'])
     expect(or.noteCode).toBe(OR_FALLBACK)

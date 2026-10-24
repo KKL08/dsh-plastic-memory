@@ -15,7 +15,7 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 
-// Codex 0.2.0 挑战式评审（2026-10-23）：同 id 多副本时，执行器预读 / 过门用的那份记录与最终写入落到的那份
+// 同 id 多副本时，执行器预读 / 过门用的那份记录与最终写入落到的那份
 // 必须是同一个文件，否则会改到门没检查过的副本（其他项目的、或 global 上被修改过的）。
 // 场景统一：会话在 ZETA；ALPHA 是另一个项目，目录名排在 ZETA 之前，让「按路径序取舍」更容易落到它。
 
