@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, screen, within } from '@testing-library/react'
 import {
   GUI_VIEW_VERSION,
-  type LibraryView, type MemoryCard, type PendingItem, type PendingView, type SessionView,
+  type HealthView, type LibraryView, type MemoryCard, type PendingItem, type PendingView, type SessionView,
 } from '../../src/gui/contract.ts'
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { createNavStore, openMemoryPage, PANEL_ID } from '../nav.ts'
@@ -11,7 +11,8 @@ import { memory, renderInShell } from '../test-utils.tsx'
 import { SidebarTab } from './SidebarTab.tsx'
 
 const WS = '/w/app'
-const STARTED = 1_000
+/** 插件本次加载时刻（健康视图的 bootedAt）。 */
+const BOOTED = 1_000
 
 const pref = memory({ id: 'p1', type: 'preference', content: '测试用真实 Postgres。' })
 const pref2 = memory({ id: 'p2', type: 'preference', content: '测试里 mock 数据库就行。' })
@@ -30,11 +31,16 @@ function library(...items: MemoryCard[]): LibraryView {
 
 function snapshot(overrides: Partial<SessionView> = {}): SessionView {
   return {
-    version: GUI_VIEW_VERSION, sessionId: 's1', workspacePath: WS, frozenAt: STARTED + 1, budget: 4000, overflowMode: 'relax',
+    version: GUI_VIEW_VERSION, sessionId: 's1', workspacePath: WS, frozenAt: BOOTED + 1, budget: 4000, overflowMode: 'relax',
     tokens: { workspace: 1870, global: 1050, fixed: 200 }, usedTokens: 2920,
     injectedIds: ['p1', 'j1', 'g1'], omittedCount: 0, savedIds: [],
     ...overrides,
   }
+}
+
+/** null = 视图没带 bootedAt（旧服务端）。 */
+function health(bootedAt: number | null = BOOTED): HealthView {
+  return { version: GUI_VIEW_VERSION, governanceEnabled: true, ...(bootedAt === null ? {} : { bootedAt }), layers: [] }
 }
 
 function pending(...items: PendingItem[]): PendingView {
@@ -45,9 +51,9 @@ const conflict: PendingItem = { kind: 'conflict-horizontal', decisionId: 'pd_1',
 const promote: PendingItem = { kind: 'promote-candidate', decisionId: 'pd_2', firstSeenAt: 1, memory: proj }
 
 function setup(views: FakeGatewayInit['views'], respond?: FakeGatewayInit['respond']) {
-  const gateway = createFakeGateway({ views, ...(respond === undefined ? {} : { respond }) })
+  const gateway = createFakeGateway({ views: { health: health(), ...views }, ...(respond === undefined ? {} : { respond }) })
   const openPage = vi.fn()
-  const utils = renderInShell(<SidebarTab sessionId="s1" workspacePath={WS} hostStartedAt={STARTED} openPage={openPage} />, gateway)
+  const utils = renderInShell(<SidebarTab sessionId="s1" workspacePath={WS} openPage={openPage} />, gateway)
   return { ...utils, gateway, openPage }
 }
 
@@ -84,10 +90,16 @@ describe('SidebarTab 四种状态', () => {
     expect(openPage).toHaveBeenCalledWith({ tab: 'library', scope: { kind: 'workspace', workspacePath: WS } })
   })
 
-  it('frozenAt 早于宿主启动：写「重启后未重新带入」，不画过时的用量条', () => {
-    const { container } = setup({ library: library(pref, proj, glob), session: snapshot({ frozenAt: STARTED - 1 }), pending: pending() })
+  it('frozenAt 早于插件本次加载（健康视图 bootedAt）：写「重启后未重新带入」，不画过时的用量条', () => {
+    const { container } = setup({ library: library(pref, proj, glob), session: snapshot({ frozenAt: BOOTED - 1 }), pending: pending() })
     expect(screen.getByText('重启后未重新带入')).toBeInTheDocument()
     expect(container.querySelector('.pm-budget')).toBeNull()
+  })
+
+  it('健康视图没带 bootedAt：判断不了是否重启过，照常画用量条', () => {
+    const { container } = setup({ library: library(pref, proj, glob), session: snapshot({ frozenAt: BOOTED - 1 }), pending: pending(), health: health(null) })
+    expect(screen.queryByText('重启后未重新带入')).toBeNull()
+    expect(container.querySelector('.pm-budget')).not.toBeNull()
   })
 
   it('会话视图还没有（这次对话没组装过快照）：说明发出第一条消息后才有', () => {
@@ -192,7 +204,7 @@ describe('SidebarTab 底部入口', () => {
     const nav = createNavStore({ tab: 'library' })
     const layout = { selectPanel: vi.fn() }
     renderInShell(
-      <SidebarTab sessionId="s1" workspacePath={WS} hostStartedAt={STARTED} openPage={(target) => { openMemoryPage({ layout }, nav, target) }} />,
+      <SidebarTab sessionId="s1" workspacePath={WS} openPage={(target) => { openMemoryPage({ layout }, nav, target) }} />,
       gateway,
     )
     expect(screen.getByText(/本项目还有 1 处待处理/)).toBeInTheDocument()

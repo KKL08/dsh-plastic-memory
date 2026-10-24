@@ -51,9 +51,6 @@ export function registerSidebarTab(ctx: SidebarHost, nav: NavStore, bind: BindGa
     }],
   }), 'plastic-memory: sidebar tab type')
 
-  // 宿主启动时间：浏览器半侧拿不到宿主进程的启动时刻（boot 数据与 Remote 都没有），先用插件加载（≈ 页面加载）时刻代替。
-  // 页面通常随宿主一起打开；刷新页面后，刷新前冻结的会话也会显示「重启后未重新带入」。
-  const hostStartedAt = Date.now()
   function MemorySidebarTab(props: SessionStandardProps) {
     const gateway = useMemo(() => bind(props), [props.useSessions, props.useResource])
     const translate = useTranslate()
@@ -63,7 +60,6 @@ export function registerSidebarTab(ctx: SidebarHost, nav: NavStore, bind: BindGa
         <SidebarTab
           sessionId={props.sessionId}
           workspacePath={cwd}
-          hostStartedAt={hostStartedAt}
           openPage={(target) => { openMemoryPage(ctx, nav, target) }}
         />
       </PanelShell>

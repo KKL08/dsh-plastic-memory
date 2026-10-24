@@ -2,8 +2,9 @@
  * 右侧栏「记忆」tab 正文（DESIGN.md Layout「右侧栏记忆 tab 内容（结构 A）」）。从上到下：
  * 面包屑「本项目 / 项目名」→ 这次对话带入的记忆（用量条）→ 这次对话新记的（可删）→ 带入的记忆（按类型分组，
  * 带入的记忆有待决横向冲突时冲突卡挂在那条记忆所在组里就地裁决）→ 底部一行入口（其余待处理只在这里带数字）。
- * 数据：会话视图（带入 / 新记的 id、用量）、全部记忆视图（按 id 取记忆卡）、待处理视图（冲突与本项目待处理数）。
- * 四种状态：无记忆、有全局没本项目、正常、frozenAt 早于宿主启动（重启后未重新带入）。
+ * 数据：会话视图（带入 / 新记的 id、用量）、全部记忆视图（按 id 取记忆卡）、待处理视图（冲突与本项目待处理数）、
+ * 健康视图（bootedAt：插件本次加载时刻）。
+ * 四种状态：无记忆、有全局没本项目、正常、frozenAt 早于插件本次加载（重启后未重新带入；视图没带 bootedAt 时不判断）。
  * 刚裁决的冲突在本地留原位可撤销，tab 卸载后收起。
  */
 import { useMemo, useState, type ReactNode } from 'react'
@@ -35,8 +36,6 @@ export interface SidebarTabProps {
   sessionId: string
   /** 该会话的工作目录；会话视图带了 workspacePath 时以视图为准。 */
   workspacePath?: string | undefined
-  /** 宿主启动时间（毫秒）；会话视图的 frozenAt 早于它说明重启后还没重新带入。 */
-  hostStartedAt: number
   /** 跳到记忆页（经导航 store）。 */
   openPage: (target: NavTarget) => void
 }
@@ -61,13 +60,14 @@ function inWorkspace(item: PendingItem, ws: string): boolean {
   }
 }
 
-export function SidebarTab({ sessionId, workspacePath: cwd, hostStartedAt, openPage }: SidebarTabProps) {
+export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarTabProps) {
   const t = useT()
   const gateway = useGateway()
   const session = useMemo<BorrowedSession>(() => ({ kind: 'ready', sessionId, cwd }), [sessionId, cwd])
   const sessionView = gateway.useView(session, 'session')
   const library = gateway.useView(session, 'library')
   const pending = gateway.useView(session, 'pending')
+  const health = gateway.useView(session, 'health')
   const [ruled, setRuled] = useState<readonly Ruled[]>([])
   const [forgotten, setForgotten] = useState<ReadonlySet<string>>(new Set())
   const [busy, setBusy] = useState<string | undefined>(undefined)
@@ -155,11 +155,13 @@ export function SidebarTab({ sessionId, workspacePath: cwd, hostStartedAt, openP
     ? <p className="pm-side-error" role="alert">{t('sidebar.action.failed', { detail: failure.detail })}</p>
     : null)
 
+  // 会话快照冻结在插件本次加载之前 = 重启后还没重新带入
+  const bootedAt = health.status === 'ready' ? health.data.bootedAt : undefined
   const usage = snapshot === undefined
     ? sessionView.status === 'missing'
       ? <Note title={t('sidebar.noSnapshot.title')}>{t('sidebar.noSnapshot.body')}</Note>
       : <ViewNote state={sessionView} />
-    : snapshot.frozenAt < hostStartedAt
+    : bootedAt !== undefined && snapshot.frozenAt < bootedAt
       ? <Note title={t('sidebar.stale.title')}>{t('sidebar.stale.body')}</Note>
       : (
         <ContextBudgetBar
