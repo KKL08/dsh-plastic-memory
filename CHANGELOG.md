@@ -58,6 +58,10 @@ All notable changes to this project are documented here. The format follows
 - Each `memory_search` hit carries the absolute path of its memory file,
   shown at the end of the hit's first line, so the model can read the full
   file or its surroundings directly.
+- When a `memory_search` query matches more memories than it returns, the
+  result opens with the total and the number shown. The model can then ask
+  for more with a larger `limit`, up to 50, or narrow the query with more
+  specific keywords.
 - An evaluation set of 86 synthetic memories and 48 queries (short and long
   Chinese, identifiers, partial words, plain names, ids) runs with the tests
   and fails when top-1 or top-3 accuracy drops below a fixed floor, with and

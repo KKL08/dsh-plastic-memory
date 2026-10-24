@@ -48,10 +48,26 @@ export const RETRY_HINT = '命中弱，可以换同义词、减少词数或换�
 export const OR_FALLBACK_NOTE = `没有同时命中全部关键词的记忆，以下按相关性排序。${RETRY_HINT}`
 export const SUBSTRING_FALLBACK_NOTE = `没有命中关键词的记忆，以下只是关键词以子串出现的结果。${RETRY_HINT}`
 
+/** 返回条数上限的缺省值与硬上限。 */
+export const DEFAULT_SEARCH_LIMIT = 10
+export const MAX_SEARCH_LIMIT = 50
+
+/**
+ * 命中多于返回条数时附在开头：不说的话模型以为结果就这么多。两条路都摆出来，由模型按需要选——
+ * 要更全就调大 limit，结果太杂就换更具体的词缩小范围；limit 已到上限时只剩后一条。
+ */
+export function truncationNote(total: number, shown: number, atCap: boolean): string {
+  const head = `共命中 ${total} 条，只列出前 ${shown} 条。`
+  return atCap
+    ? `${head}limit 已是上限 ${MAX_SEARCH_LIMIT}，想缩小范围可以换更具体的关键词。`
+    : `${head}要看更多可以调大 limit（最多 ${MAX_SEARCH_LIMIT}），想缩小范围可以换更具体的关键词。`
+}
+
 /** 把命中结果渲染成给模型看的一段文本：有说明先写说明，再列命中（头行末尾带文件绝对路径）。纯函数。 */
-export function renderSearchResult(result: { hits: SearchHit[]; note?: string }): string {
+export function renderSearchResult(result: { hits: SearchHit[]; note?: string; moreNote?: string }): string {
   const blocks = result.hits.map(h => `[${h.id}] ${h.type}｜${h.summary}${h.sourceNote}${h.stalenessNote} · ${h.path}\n${h.content}`)
-  if (result.note !== undefined) blocks.unshift(result.note)
+  const head = [result.note, result.moreNote].filter((x): x is string => x !== undefined).join('\n')
+  if (head !== '') blocks.unshift(head)
   return blocks.length === 0 ? '没有匹配的记忆。' : blocks.join('\n\n')
 }
 
@@ -78,7 +94,7 @@ export async function executeSearch(
   args: SearchArgs,
   exec: ToolRunContext,
   deps: SearchToolDeps,
-): Promise<{ hits: SearchHit[]; note?: string; noteCode?: SearchNoteCode }> {
+): Promise<{ hits: SearchHit[]; note?: string; noteCode?: SearchNoteCode; moreNote?: string }> {
   const a = args
   const { workspacePath } = await deps.resolveContext(exec)
   // 明确要"只看本项目"而当前会话没有工作目录：显式说明而非静默落回 global-only——
@@ -86,7 +102,7 @@ export async function executeSearch(
   if (a.scope === 'workspace' && workspacePath === undefined) {
     return { hits: [], noteCode: 'no-workspace', note: '当前会话没有工作目录，无法限定项目范围；查全局记忆请用 scope: "global"。' }
   }
-  const limit = Math.min(a.limit ?? 10, 50)
+  const limit = Math.min(a.limit ?? DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT)
   const scopeFilter: QueryScope = a.scope === 'global'
     ? { kind: 'global' }
     : a.scope === 'workspace' && workspacePath
@@ -136,6 +152,7 @@ export async function executeSearch(
       : { noteCode: 'substring-fallback' as const, note: SUBSTRING_FALLBACK_NOTE }
   return {
     ...note,
+    ...(ranked.length > top.length ? { moreNote: truncationNote(ranked.length, top.length, limit === MAX_SEARCH_LIMIT) } : {}),
     hits: top.map(({ record: h }) => ({
       id: h.id, type: h.type, summary: h.summary, content: h.content,
       sourceNote: sourceNote(h),
