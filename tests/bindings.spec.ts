@@ -121,7 +121,7 @@ describe('memory_search 绑定', () => {
     const tool = await seededTool()
     expect(tool.description).toContain('2 到 4 个实词')
     expect(tool.description).toContain('中英文两种写法')
-    expect(tool.description).toContain('再搜一次，不必一次搜准')
+    expect(tool.description).toContain('换个角度再搜一次')
     const query = (schemaOf(tool) as { properties: Record<string, { description?: string }> }).properties.query!
     expect(query.description).toContain('建议换词再搜一次')
   })
