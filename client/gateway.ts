@@ -4,7 +4,7 @@
  *
  * 数据通道（spec「数据通道」）：视图是 `<memoryRoot>/.state/gui/*.json`，经文件资源订阅版本、版本变了再读；
  * 动作是 `/memory` 会话命令。浏览器半侧不知道 memoryRoot：首次需要时借会话发一次 `info`，结果缓存到 localStorage；
- * 视图文件不存在时再发一次 `refresh-views` 让服务端生成。
+ * 视图文件不存在时再发一次 `refresh-views` 让服务端生成；用的是缓存的根、刷新后还读不到时再问一次 `info`（根可能换了）。
  * 只有两态：一个会话都没有 → none；有会话（历史或在跑，宿主会自动 resume 冷会话）→ ready。
  */
 import { createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
@@ -193,33 +193,51 @@ interface RootState { memoryRoot?: string; error?: string; refreshes: number }
 
 type RunLine = (sessionId: string, line: string) => Promise<RemoteResult<CommandExecution | undefined>>
 
-/** memoryRoot：localStorage 有就用；没有就借会话发一次 info（并发请求合并成一条），再发一次 refresh-views。 */
+/**
+ * memoryRoot：localStorage 有就用；没有就借会话发一次 info（并发请求合并成一条），再发一次 refresh-views。
+ * info 失败后换了会话可以重试；缓存的根在刷新后仍读不到视图时，由 revalidate 再问一次。
+ */
 function createRootStore(run: RunLine) {
   let state: RootState = { refreshes: 0 }
+  let isCached = false
   try {
     const saved = localStorage.getItem(MEMORY_ROOT_KEY)
-    if (saved) state = { ...state, memoryRoot: saved }
+    if (saved) { state = { ...state, memoryRoot: saved }; isCached = true }
   } catch { /* 存储不可用：每次进入发一次 info */ }
   const listeners = new Set<() => void>()
   let infoInflight = false
+  let failedSessionId: string | undefined
   let refreshed = false
   const set = (next: RootState) => { state = next; for (const fn of listeners) fn() }
+  const remember = (memoryRoot: string) => {
+    try { localStorage.setItem(MEMORY_ROOT_KEY, memoryRoot) } catch { /* 只在本页生效 */ }
+    set({ ...state, memoryRoot, error: undefined })
+  }
   const store = {
     get: () => state,
     subscribe(fn: () => void) { listeners.add(fn); return () => { listeners.delete(fn) } },
     ensureRoot(sessionId: string) {
-      if (state.memoryRoot !== undefined || state.error !== undefined || infoInflight) return
+      if (state.memoryRoot !== undefined || infoInflight || (state.error !== undefined && sessionId === failedSessionId)) return
       infoInflight = true
       void run(sessionId, encodeMemoryCommand({ cmd: 'info' })).then((r) => {
         infoInflight = false
         const result = decodeExecution('info', r)
         if (result.ok && result.info !== undefined) {
-          try { localStorage.setItem(MEMORY_ROOT_KEY, result.info.memoryRoot) } catch { /* 只在本页生效 */ }
-          set({ ...state, memoryRoot: result.info.memoryRoot })
+          remember(result.info.memoryRoot)
           store.ensureViews(sessionId)
         } else {
+          failedSessionId = sessionId
           set({ ...state, error: result.ok ? 'info returned no paths' : (result.detail ?? result.code) })
         }
+      })
+    },
+    /** 缓存的根刷新后仍读不到视图：再发一次 info（每个页面生命周期一次），根变了就换掉缓存，视图跟着换路径。 */
+    revalidate(sessionId: string) {
+      if (!isCached) return
+      isCached = false
+      void run(sessionId, encodeMemoryCommand({ cmd: 'info' })).then((r) => {
+        const result = decodeExecution('info', r)
+        if (result.ok && result.info !== undefined && result.info.memoryRoot !== state.memoryRoot) remember(result.info.memoryRoot)
       })
     },
     /** 让服务端把视图文件写出来：首次拿到 memoryRoot 之后、或视图文件缺失时，每个页面生命周期一次。 */
@@ -321,6 +339,8 @@ export function createHostGateway(ctx: HostContext): BindGateway {
       // 有版本按版本读；资源还停在 not-found、但 refresh-views 已写过文件时，按刷新次数直接读一次
       const trigger = version ?? (isMissing && rootState.refreshes > 0 ? `refresh:${rootState.refreshes}` : undefined)
       const [read, setRead] = useState<ReadState<ViewMap[typeof name]> | undefined>(undefined)
+      const isStillMissing = isMissing && trigger !== undefined && read?.key === key && read.trigger === trigger && read.view.status === 'missing'
+      useEffect(() => { if (sessionId !== undefined && isStillMissing) root.revalidate(sessionId) }, [sessionId, isStillMissing])
       useEffect(() => {
         if (sessionId === undefined || path === undefined || trigger === undefined) return
         let live = true
