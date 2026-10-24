@@ -1,7 +1,7 @@
 /**
  * 折叠区外的交付卡（DESIGN.md「Navigation & Entries」）：「这一轮记住了 N 条」，每条一张记忆卡，行尾垃圾桶图标
  * （软删 `/memory forget`，可撤销，不用红），删后原位留「已删除。14 天内也能在最近删除里找回。」和「撤销」；
- * 右下角「查看详情 ›」（次文字色、常规字重）打开记忆页「全部记忆」并定位到这一条。
+ * 每条右下角「查看详情 ›」（次文字色、常规字重）打开记忆页「全部记忆」并定位到这一条（故事 41）。
  * 密钥不会出现在这里：记忆卡在 savedMemoryCard 里已按服务端同一套规则遮盖。
  */
 import { useMemo, useState } from 'react'
@@ -29,7 +29,14 @@ export interface SavedMemoriesCardProps {
   deleted: Set<string>
 }
 
-function SavedRow({ sessionId, item, now, deleted, typeLabel }: { sessionId: string; item: SavedMemory; now: number; deleted: Set<string>; typeLabel: (type: string) => string }) {
+function SavedRow({ sessionId, item, now, deleted, typeLabel, onDetail }: {
+  sessionId: string
+  item: SavedMemory
+  now: number
+  deleted: Set<string>
+  typeLabel: (type: string) => string
+  onDetail: () => void
+}) {
   const t = useT()
   const gateway = useGateway()
   const id = item.memory.id
@@ -60,6 +67,9 @@ function SavedRow({ sessionId, item, now, deleted, typeLabel }: { sessionId: str
       <div className="pm-saved-main">
         <MemoryCard memory={item.memory} now={now} typeLabel={typeLabel(item.memory.type)} />
         {state.kind === 'failed' ? <p className="pm-saved-note">{t('chat.card.failed', { detail: state.detail })}</p> : null}
+        <div className="pm-saved-foot">
+          <button type="button" className="pm-link" onClick={onDetail}>{t('chat.card.detail')}</button>
+        </div>
       </div>
       <button
         type="button"
@@ -79,23 +89,27 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail, dele
   const t = useT()
   const session = useMemo<BorrowedSession>(() => ({ kind: 'ready', sessionId, cwd }), [sessionId, cwd])
   const typeLabel = useTypeLabel(session)
-  const first = saved[0]!.memory
-  const scope: GuiLayerRef | undefined = first.scope === 'global' ? { kind: 'global' }
-    : cwd === undefined ? undefined : { kind: 'workspace', workspacePath: cwd }
+  // 全局记忆落在全局；本项目记忆落在会话的工作目录，不知道工作目录时只带 id
+  const detail = (memory: SavedMemory['memory']) => {
+    const scope: GuiLayerRef | undefined = memory.scope === 'global' ? { kind: 'global' }
+      : cwd === undefined ? undefined : { kind: 'workspace', workspacePath: cwd }
+    openDetail({ tab: 'library', ...(scope === undefined ? {} : { scope }), memoryId: memory.id })
+  }
   return (
     <section className="pm-saved" aria-label={t('chat.card.title', { count: saved.length })}>
       <h3 className="pm-saved-title">{t('chat.card.title', { count: saved.length })}</h3>
       <div className="pm-saved-list">
-        {saved.map(item => <SavedRow key={item.callId} sessionId={sessionId} item={item} now={now} deleted={deleted} typeLabel={typeLabel} />)}
-      </div>
-      <div className="pm-saved-foot">
-        <button
-          type="button"
-          className="pm-link"
-          onClick={() => openDetail({ tab: 'library', ...(scope === undefined ? {} : { scope }), memoryId: first.id })}
-        >
-          {t('chat.card.detail')}
-        </button>
+        {saved.map(item => (
+          <SavedRow
+            key={item.callId}
+            sessionId={sessionId}
+            item={item}
+            now={now}
+            deleted={deleted}
+            typeLabel={typeLabel}
+            onDetail={() => { detail(item.memory) }}
+          />
+        ))}
       </div>
     </section>
   )

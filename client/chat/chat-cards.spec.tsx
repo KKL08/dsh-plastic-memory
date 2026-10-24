@@ -249,16 +249,22 @@ describe('注册', () => {
     await waitFor(() => expect(execute).toHaveBeenCalledWith('s1', '/memory forget {"memoryId":"mem_1"}', []))
   })
 
-  it('「查看详情 ›」：先写导航目标（全部记忆 · 记忆所在作用域 · 这条的 id），再切到记忆页', () => {
+  it('每条各有「查看详情 ›」：先写导航目标（全部记忆 · 这条所在作用域 · 这条的 id），再切到记忆页', () => {
     const { registered, nav, ctx } = fakeHost()
     const Tail = registered.find(r => r.options.name === 'conversation.chat.turnTail')!.component as ComponentType<TurnTailProps>
-    const { unmount } = render(<Tail {...tailProps({ saved: [saved('mem_1', '原文'), saved('mem_2', '二')] })} />)
-    fireEvent.click(screen.getByRole('button', { name: '查看详情 ›' }))
-    expect(nav.get()).toEqual({ tab: 'library', scope: { kind: 'workspace', workspacePath: '/w/app' }, memoryId: 'mem_1' })
+    render(<Tail {...tailProps({ saved: [saved('mem_1', '原文'), saved('mem_g', '全局', 'global'), saved('mem_2', '二')] })} />)
+    const links = screen.getAllByRole('button', { name: '查看详情 ›' })
+    expect(links).toHaveLength(3)
+    expect(links.map(link => link.closest('[data-memory-id]')?.getAttribute('data-memory-id'))).toEqual(['mem_1', 'mem_g', 'mem_2'])
+    fireEvent.click(links[2]!)
+    expect(nav.get()).toEqual({ tab: 'library', scope: { kind: 'workspace', workspacePath: '/w/app' }, memoryId: 'mem_2' })
     expect(ctx.layout.selectPanel).toHaveBeenCalledWith(PANEL_ID)
-    unmount()
-    render(<Tail {...tailProps({ saved: [saved('mem_g', '全局', 'global')] })} />)
-    fireEvent.click(within(screen.getByRole('region')).getByRole('button', { name: '查看详情 ›' }))
+    fireEvent.click(links[1]!)
     expect(nav.get()).toEqual({ tab: 'library', scope: { kind: 'global' }, memoryId: 'mem_g' })
+  })
+
+  it('删掉的那条不再有「查看详情 ›」', () => {
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '一'), saved('mem_2', '二')]} now={NOW} openDetail={() => {}} deleted={new Set(['mem_1'])} />)
+    expect(screen.getAllByRole('button', { name: '查看详情 ›' }).map(link => link.closest('[data-memory-id]')?.getAttribute('data-memory-id'))).toEqual(['mem_2'])
   })
 })
