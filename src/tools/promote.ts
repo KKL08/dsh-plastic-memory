@@ -3,6 +3,7 @@ import type { AgentsMdWriter } from '../storage/agents-md.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { MemorySnapshot } from '../governance/schema.ts'
+import { hasSecret } from '../secrets.ts'
 import { crossWorkspaceNote, gateRecords, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
 
 export type PromoteTarget = 'global' | 'agents-md'
@@ -33,6 +34,7 @@ export interface PromoteResult {
  * （工具内部弹窗会被 web 会话拒绝，见 promote-tool.ts），纯逻辑不弹窗，便于测。
  * - target=global：scope 改 global（FileTable persist 检测目录变化自动搬家），清除候选标记。
  * - target=agents-md：内容写进 ~/.dsh/AGENTS.md 专属区块，原项目记忆软删（已脱离插件治理，避免重复）。
+ *   含密钥（critical 或 force 放行的 suspected）的记录拒绝写入，原样留在项目内，计入 skipped。
  * - dismiss=true：用户明确不想提升，只清除候选标记、记忆留在项目内，忽略 target。
  */
 export async function executePromote(
@@ -51,8 +53,14 @@ export async function executePromote(
     if (!r || r.status === 'deleted') { skipped.push(id); continue }
     located.push(r)
   }
-  const { allowed: found, rejected, otherWorkspaces } = gateRecords(located, context, args.allowCrossWorkspace)
+  const { allowed, rejected, otherWorkspaces } = gateRecords(located, context, args.allowCrossWorkspace)
   const wsNote = crossWorkspaceNote(rejected, otherWorkspaces)
+  // AGENTS.md 通常随仓库提交，含密钥的记录写进去就是明文外泄（原记忆进回收站后，留下的只剩这份明文）。
+  // 两级密钥一视同仁：suspected 是用户确认过才放行保存的，但那份确认只针对本地记忆库，不针对提交进仓库。
+  const secretIds = args.dismiss || args.target !== 'agents-md' ? [] : allowed.filter(hasSecret).map(r => r.id)
+  const found = secretIds.length === 0 ? allowed : allowed.filter(r => !secretIds.includes(r.id))
+  skipped.push(...secretIds)
+  const secretNote = secretIds.length > 0 ? `${secretIds.length} 条含密钥的记忆不能写入 AGENTS.md（该文件通常会提交到仓库），已原样保留在项目内，见 skipped。` : ''
 
   // dismiss：用户表态不提升，清除候选标记即可。清标记可逆（模型可经 update 重新标记），故不拍快照、
   // 不写 AGENTS.md、不搬目录。updatedAt 不动——这不是内容编辑，改了会让快照把记忆误判为"快照后被
@@ -107,9 +115,9 @@ export async function executePromote(
 
   const snapNote = snapshot ? ` 已自动快照（${snapshot.id}），14 天内可用 memory_snapshot 恢复。` : ''
   const message = promoted.length === 0
-    ? '没有记忆被提升（目标已删除、不存在，或写入失败，见 skipped）。'
+    ? (secretIds.length > 0 && skipped.length === secretIds.length ? '没有记忆被提升。' : '没有记忆被提升（目标已删除、不存在，或写入失败，见 skipped）。')
     : args.target === 'global'
       ? `已提升 ${promoted.length} 条记忆到全局（插件 global 记忆）。${snapNote}`
       : `已写入 ${promoted.length} 条记忆到 ~/.dsh/AGENTS.md，原项目记忆已归档软删。${snapNote}`
-  return { promoted, dismissed: [], skipped, rejected, otherWorkspaces, snapshotId: snapshot?.id ?? null, message: `${message}${wsNote}` }
+  return { promoted, dismissed: [], skipped, rejected, otherWorkspaces, snapshotId: snapshot?.id ?? null, message: `${message}${secretNote}${wsNote}` }
 }
