@@ -42,9 +42,11 @@ export interface SearchHit {
   path: string
 }
 
+/** 命中弱时附在说明末尾：说明码本身就是「相关度弱」的信号，提示模型换词再搜，而不是把弱结果当定论。 */
+export const RETRY_HINT = '命中弱，可换同义词或减少词数再搜一次。'
 /** 说明文案（码在 contract-codes）：返回列表里没有全命中记录 / 只有旧子串匹配命中的记录（第三档）。 */
-export const OR_FALLBACK_NOTE = '没有同时命中全部关键词的记忆，以下按相关性排序。'
-export const SUBSTRING_FALLBACK_NOTE = '没有命中关键词的记忆，以下只是关键词以子串出现的结果。'
+export const OR_FALLBACK_NOTE = `没有同时命中全部关键词的记忆，以下按相关性排序。${RETRY_HINT}`
+export const SUBSTRING_FALLBACK_NOTE = `没有命中关键词的记忆，以下只是关键词以子串出现的结果。${RETRY_HINT}`
 
 /** 把命中结果渲染成给模型看的一段文本：有说明先写说明，再列命中（头行末尾带文件绝对路径）。纯函数。 */
 export function renderSearchResult(result: { hits: SearchHit[]; note?: string }): string {

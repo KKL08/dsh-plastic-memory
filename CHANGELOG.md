@@ -128,7 +128,12 @@ All notable changes to this project are documented here. The format follows
   them and only a literal match on the query text is left
   (`substring-fallback`).
 - The `memory_search` tool description now says what the tool does: it ranks
-  by relevance, accepts Chinese and English queries and returns file paths.
+  by relevance, accepts Chinese and English queries and returns file paths. It
+  also tells the model how to query well (two to four content words, both the
+  Chinese and English form of a term), and when a result opens with a
+  fallback note the note now suggests searching again with synonyms or fewer
+  words. `memory_save` asks for synonyms and bilingual aliases in tags so
+  later searches phrased differently still find the memory.
 - Injected index lines now end with the memory's file path (`global/x.md`,
   `<project>/x.md`), so the model can open the full text directly, and the
   prompt ends with a fixed note that memories are background material: they
