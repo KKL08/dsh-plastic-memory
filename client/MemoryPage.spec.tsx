@@ -7,7 +7,7 @@ import { createNavStore, openMemoryPage, PANEL_ID } from './nav.ts'
 import { memory, renderInShell } from './test-utils.tsx'
 
 const pending: PendingView = {
-  version: GUI_VIEW_VERSION, dot: 'amber',
+  version: GUI_VIEW_VERSION, dot: 'amber', typeLabels: {},
   items: [{ kind: 'promote-candidate', decisionId: 'd1', firstSeenAt: 1, memory: memory() }],
 }
 const library: LibraryView = {
@@ -34,7 +34,7 @@ describe('记忆页外壳', () => {
     expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['待处理1', '全部记忆2', '健康', '最近删除'])
     expect(screen.getByRole('tab', { name: /待处理/ })).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByRole('button', { name: /本项目 app/ })).toHaveAttribute('aria-haspopup', 'listbox')
-    expect(screen.getByRole('tabpanel')).toHaveTextContent('这一栏还在做。')
+    expect(screen.getByRole('tabpanel')).toHaveTextContent('这条适合所有项目')
     expect(gateway.sessionRequests.at(-1)).toBe('/w/app')
   })
 

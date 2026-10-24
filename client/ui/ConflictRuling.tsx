@@ -22,6 +22,8 @@ export interface ConflictRulingProps {
   onRule: (verdict: HorizontalVerdict) => void
   /** 缺省「两条记忆互相矛盾，等你决定」；记忆页用条目标题。 */
   title?: ReactNode
+  /** 标题下的一句默认行为（「决定前 agent 按 A 来。」）。 */
+  note?: ReactNode
   /** 动作暂不可用的原因（无会话等）。 */
   unavailable?: string | undefined
   typeLabel?: (type: string) => string
@@ -54,6 +56,7 @@ export function ConflictRuling(props: ConflictRulingProps) {
         <StatusMarker kind="pending" />
         <h3 className="pm-conflict-title">{props.title ?? t('conflict.title')}</h3>
       </header>
+      {props.note !== undefined ? <p className="pm-conflict-note">{props.note}</p> : null}
       <div className="pm-conflict-sides">
         {side('A', props.left, wide ? <div className="pm-conflict-actions">{keepA}</div> : null)}
         {side('B', props.right, wide ? <div className="pm-conflict-actions">{keepB}</div> : null)}
@@ -79,6 +82,7 @@ export const conflictRulingCss = `
 .pm-conflict { padding-bottom: 18px; }
 .pm-conflict-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 .pm-conflict-title { margin: 0; font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
+.pm-conflict-note { margin: -6px 0 12px 16px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-conflict-sides { display: flex; flex-direction: column; gap: 12px; }
 .pm-conflict--wide .pm-conflict-sides { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; padding-left: 16px; }
 .pm-conflict-side { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }

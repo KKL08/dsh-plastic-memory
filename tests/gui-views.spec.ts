@@ -94,6 +94,30 @@ describe('待处理视图', () => {
     expect((await h.decisions.list()).map(e => e.kind ?? 'conflict').sort()).toEqual(['conflict', 'conflict', 'overflow', 'promote-candidate'])
   })
 
+  it('横向冲突带 preferredId（快照注入排序：confidence 降序 → lastConfirmedAt 降序）；一方找不到时取另一方', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_low', name: 'L', confidence: 0.5, lastConfirmedAt: T0 + 10 }))
+    await h.store.create(w({ id: 'mem_high', name: 'H', confidence: 0.9, lastConfirmedAt: T0 }))
+    await h.store.create(w({ id: 'mem_old', name: 'O', confidence: 0.9, lastConfirmedAt: T0 - 10 }))
+    await h.decisions.upsert({ memoryIds: ['mem_low', 'mem_high'], summary: '按置信度', fingerprint: 'c' }, 1)
+    await h.decisions.upsert({ memoryIds: ['mem_old', 'mem_high'], summary: '同置信度按确认时间', fingerprint: 't' }, 2)
+    await h.decisions.upsert({ memoryIds: ['mem_gone', 'mem_low'], summary: '悬空', fingerprint: 'g' }, 3)
+    const { pending } = await h.views()
+    expect(pendingViewSchema.parse(pending)).toEqual(pending)
+    expect(pending.items.map(i => i.kind === 'conflict-horizontal' && [i.summary, i.preferredId])).toEqual([
+      ['按置信度', 'mem_high'], ['同置信度按确认时间', 'mem_high'], ['悬空', 'mem_low'],
+    ])
+  })
+
+  it('typeLabels：当前注册表的类型和待处理里出现的类型 → 显示名，认不出的类型显示 id', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_a', name: 'A', type: 'decision' }))
+    await h.store.create(w({ id: 'mem_b', name: 'B', type: 'mystery' }))
+    await h.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '矛盾', fingerprint: 'h' }, 1)
+    const { pending } = await h.views()
+    expect(pending.typeLabels).toMatchObject({ preference: '行为偏好', procedure: '可复用流程', decision: '决定', mystery: 'mystery' })
+  })
+
   it('已裁决条目不在待处理里；只有读不出的文件时不亮点，只有冲突时亮琥珀点', async () => {
     const h = harness()
     await h.store.create(w({ id: 'mem_a', name: 'A' }))

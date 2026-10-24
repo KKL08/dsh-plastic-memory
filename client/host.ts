@@ -76,6 +76,20 @@ export interface HostLocale {
   subscribe(fn: () => void): () => void
 }
 
+/** ui-settings ConfigFormSnapshot 子集。 */
+export interface ConfigFormSnapshot {
+  status: 'loading' | 'ready' | 'unavailable'
+  /** 按 schema 解析后的配置段（含默认值）；首次接受前为 undefined。 */
+  value: unknown
+}
+
+/** ui-settings ConfigForm 子集：任意组件都能写单个字段（宿主接受为 true）。 */
+export interface ConfigForm {
+  getSnapshot(): ConfigFormSnapshot
+  subscribe(listener: () => void): () => void
+  set(field: string, value: unknown): Promise<boolean>
+}
+
 export interface HostContext {
   slots: {
     inject(name: string, fn: () => (() => void) | void): () => void
@@ -93,5 +107,13 @@ export interface HostContext {
     workspaceFiles: {
       read(sessionId: string, path: string, range: { offset?: number; limit?: number }): Promise<RemoteResult<WorkspaceFileText>>
     }
+    /** 用默认应用打开宿主上的路径，或在文件管理器中显示（ui-open-in-app 同一调用）。 */
+    session?: {
+      openWorkspacePath(request: { path: string; action?: 'reveal' }): Promise<RemoteResult<unknown>>
+    }
   }
+  /** 插件配置（profile 行 id 即 entryId）。 */
+  configForms?: { get(entryId: string): ConfigForm }
+  /** 插件页提供：打开某个包的详情（含它的配置页）。 */
+  pluginNavigation?: { openBundle(packageName: string): void }
 }

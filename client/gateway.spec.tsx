@@ -1,11 +1,11 @@
 // 宿主网关：它本身就是进程边界的适配层，这里给它一个假的宿主 ctx（远程调用 + 标准 props），断言它发出的命令与读出的视图。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { renderHook, waitFor } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { GUI_VIEW_VERSION, type PendingView } from '../src/gui/contract.ts'
 import {
-  createHostGateway, decodeExecution, fileAddress, MEMORY_ROOT_KEY, parseView, pickSession, viewPath,
+  CONFIG_ENTRY_ID, createHostGateway, decodeExecution, fileAddress, MEMORY_ROOT_KEY, PACKAGE_NAME, parseView, pickSession, toPluginConfig, viewPath,
 } from './gateway.ts'
-import type { HostContext, ResourceSnapshot, SessionListState, SessionSummary, WorkspaceFileStat } from './host.ts'
+import type { ConfigFormSnapshot, HostContext, ResourceSnapshot, SessionListState, SessionSummary, WorkspaceFileStat } from './host.ts'
 
 function summary(id: string, patch: Partial<SessionSummary> = {}): SessionSummary {
   return { id, displayTitle: id, running: false, updatedAt: 0, retainedBy: {}, ...patch }
@@ -56,7 +56,7 @@ describe('decodeExecution', () => {
 })
 
 describe('parseView', () => {
-  const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [] }
+  const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], typeLabels: {} }
   it('合法视图 → ready；版本号不认识 → outdated；结构不对 → error', () => {
     expect(parseView('pending', JSON.stringify(pending))).toEqual({ status: 'ready', data: pending })
     expect(parseView('pending', JSON.stringify({ ...pending, version: GUI_VIEW_VERSION + 1 }))).toEqual({ status: 'outdated' })
@@ -72,7 +72,7 @@ describe('parseView', () => {
 })
 
 describe('createHostGateway', () => {
-  const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'amber', items: [] }
+  const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'amber', items: [], typeLabels: {} }
   const sessions = list(summary('s1', { cwd: '/w/app', retainedBy: { mainView: 1 } }))
   let executed: string[]
   let resources: Record<string, ResourceSnapshot<WorkspaceFileStat>>
@@ -159,5 +159,43 @@ describe('createHostGateway', () => {
     expect(executed).toEqual(['/memory resolve {"decisionId":"d1","verdict":"keep-both"}'])
     const { result } = renderHook(() => gateway.useCurrentWorkspace())
     expect(result.current).toBe('/w/app')
+  })
+
+  it('配置：按 entryId 取表单，ready 时折成界面用的几项；setConfig 走单字段 set', async () => {
+    const value = { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governance: { enabled: true, globalPromoteTarget: 'agents-md' } }
+    let snapshot: ConfigFormSnapshot = { status: 'loading', value: undefined }
+    const listeners = new Set<() => void>()
+    const set = vi.fn(async () => true)
+    const get = vi.fn(() => ({ getSnapshot: () => snapshot, subscribe: (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn) } }, set }))
+    const gateway = createHostGateway({ ...fakeCtx(), configForms: { get } })(props)
+    const { result } = renderHook(() => gateway.useConfig())
+    expect(result.current).toBeUndefined()
+    act(() => { snapshot = { status: 'ready', value }; for (const fn of listeners) fn() })
+    expect(result.current).toEqual({ snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget: 'agents-md' })
+    expect(get).toHaveBeenCalledWith(CONFIG_ENTRY_ID)
+    expect(await gateway.setConfig('snapshotTokenBudget', 5000)).toBe(true)
+    expect(set).toHaveBeenCalledWith('snapshotTokenBudget', 5000)
+  })
+
+  it('宿主不服务配置：useConfig 为 undefined，setConfig 为 false；结构不对的值不认', async () => {
+    const gateway = createHostGateway(fakeCtx())(props)
+    expect(renderHook(() => gateway.useConfig()).result.current).toBeUndefined()
+    expect(await gateway.setConfig('snapshotTokenBudget', 5000)).toBe(false)
+    expect(toPluginConfig({ snapshotTokenBudget: '4000' })).toBeUndefined()
+  })
+
+  it('打开文件 / 在文件管理器中显示走 session.openWorkspacePath；读文件走 workspaceFiles；设置走插件页导航', async () => {
+    const openWorkspacePath = vi.fn(async () => ({ ok: true as const, value: { opened: true } }))
+    const openBundle = vi.fn()
+    const ctx = fakeCtx()
+    files['/m/a.md'] = '---\nname: a\n---\n正文'
+    const gateway = createHostGateway({ ...ctx, remote: { ...ctx.remote, session: { openWorkspacePath } }, pluginNavigation: { openBundle } })(props)
+    expect(await gateway.openPath('/m/a.md', 'open')).toBe(true)
+    expect(await gateway.openPath('/m/a.md', 'reveal')).toBe(true)
+    expect(openWorkspacePath.mock.calls).toEqual([[{ path: '/m/a.md' }], [{ path: '/m/a.md', action: 'reveal' }]])
+    expect(await gateway.readFile('s1', '/m/a.md')).toBe('---\nname: a\n---\n正文')
+    expect(await gateway.readFile('s1', '/m/none.md')).toBeUndefined()
+    gateway.openSettings()
+    expect(openBundle).toHaveBeenCalledWith(PACKAGE_NAME)
   })
 })

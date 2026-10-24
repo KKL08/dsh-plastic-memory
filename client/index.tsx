@@ -14,7 +14,7 @@ import { PanelShell } from './ui/PanelShell.tsx'
 
 export { PANEL_ID }
 
-export const inject = ['slots', 'locale', 'layout', 'remote', 'remote.commands', 'remote.workspaceFiles']
+export const inject = ['slots', 'locale', 'layout', 'remote', 'remote.commands', 'remote.workspaceFiles', 'remote.session', 'configForms', 'pluginNavigation']
 
 /** 宿主 locale 的翻译函数；切语言或字典晚到时换一个新引用，让组件重渲染。 */
 function useHostTranslate(locale: HostLocale): Translate {
