@@ -75,14 +75,14 @@ export function CrossConfirm({ workspacePath, onCancel, onConfirm }: { workspace
  * 含密钥记忆的删除确认：普通删除 14 天内可恢复，含密钥的只能彻底删除，服务端回 has-secret（什么都没动）后就地出现，
  * 「彻底删除」改发 hard-delete。全部记忆、对话交付卡、右侧栏共用，样式同 CrossConfirm。
  */
-export function SecretDeleteConfirm({ unavailable, onCancel, onConfirm }: { unavailable?: string | undefined; onCancel: () => void; onConfirm: () => void }) {
+export function SecretDeleteConfirm({ onCancel, onConfirm }: { onCancel: () => void; onConfirm: () => void }) {
   const t = useT()
   return (
     <div className="pm-pending-confirm" role="group" aria-label={t('pending.secret.confirmDelete')}>
       <p className="pm-pending-text">{t('pending.secret.forgetBody')}</p>
       <div className="pm-pending-actions">
         <Button autoFocus onClick={onCancel}>{t('pending.cancel')}</Button>
-        <Button variant="danger" unavailable={unavailable} onClick={onConfirm}>{t('pending.secret.confirmDelete')}</Button>
+        <Button variant="danger" onClick={onConfirm}>{t('pending.secret.confirmDelete')}</Button>
       </div>
     </div>
   )
