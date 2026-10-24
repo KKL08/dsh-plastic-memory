@@ -196,6 +196,11 @@ All notable changes to this project are documented here. The format follows
   `memory_scan`. The verdict is now remembered: the pair stays off the
   pending list until either memory, or the `AGENTS.md` it was checked
   against, changes.
+- Promoting a memory that contains a secret to `AGENTS.md` copied the secret
+  there in plain text, where every session in every project reads it and
+  forgetting the memory cannot remove it. Such memories are now refused with
+  a message saying why and stay in the project unchanged. Promoting to global
+  memory is unaffected.
 
 ## [0.1.1-beta.5] - 2026-10-20
 
