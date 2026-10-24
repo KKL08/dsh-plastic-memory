@@ -3,8 +3,10 @@
  * 通用工具行（ui-tool `GenericToolCard` → `ToolRow` → ui-primitives `DisclosureRow`，0.2.1-rc.2），图标、标题、
  * 输入 / 输出与运行状态的文案也用宿主的（`conversation` 命名空间），只把摘要换成一句话。
  * 没照抄的：运行中的 TextShimmer 扫光动画（只保留读屏用的状态文字）。
+ * 摘要、输入、输出都先遮掉密钥片段再显示：参数是 agent 发的原文，没经过视图的遮盖。
  */
 import { useMemo, type KeyboardEvent } from 'react'
+import { maskSecrets } from '../../src/gui/contract.ts'
 import { useT } from '../i18n.tsx'
 import { parseArgs, toolSummary, type MemoryToolName } from './tool-summary.ts'
 
@@ -76,7 +78,7 @@ export function MemoryToolRow(props: MemoryToolViewProps & { hostT: HostTranslat
   const { expanded, toggle } = useDisclosure()
   const done = props.phase === 'result'
   const argsRaw = props.phase === 'result' ? props.block.call?.argsRaw ?? '' : props.phase === 'start' ? props.block.argsRaw : null
-  const output = props.phase === 'result' ? resultText(props.block) || null : null
+  const output = props.phase === 'result' ? maskSecrets(resultText(props.block)) || null : null
   const state: RowState = props.phase === 'preparing' ? 'preparing' : props.phase === 'start' ? 'running'
     : props.block.error?.code === 'interrupted' ? 'stopped' : props.block.isError ? 'error' : 'ok'
 
@@ -86,7 +88,7 @@ export function MemoryToolRow(props: MemoryToolViewProps & { hostT: HostTranslat
     if (summary === null) return ''
     const params = { ...summary.params }
     if (summary.scope !== undefined) params.scope = t(summary.scope.key, summary.scope.params)
-    return t(summary.key, params)
+    return maskSecrets(t(summary.key, params))
   }, [state, output, toolName, argsRaw, done, t])
 
   const bodyRaw = argsRaw === '' ? null : argsRaw
@@ -140,7 +142,7 @@ export function MemoryToolRow(props: MemoryToolViewProps & { hostT: HostTranslat
               {bodyRaw !== null ? (
                 <div className="pm-tr-io-section">
                   <span className="pm-tr-io-label">{hostT('row.input')}</span>
-                  <span className="pm-tr-io-text">{formatBody(bodyRaw)}</span>
+                  <span className="pm-tr-io-text">{maskSecrets(formatBody(bodyRaw))}</span>
                 </div>
               ) : null}
               {bodyRaw !== null && output !== null ? <span className="pm-tr-io-divider" aria-hidden="true" /> : null}

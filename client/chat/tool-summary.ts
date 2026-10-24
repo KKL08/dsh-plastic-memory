@@ -5,7 +5,7 @@
  * 「搜到几条」只能从 `src/tools/*` 的结果文本里读；那几句是服务端的中文定稿，改了要同步这里的正则。
  * 其余工具的摘要只看参数。
  */
-import type { MemoryCard } from '../../src/gui/contract.ts'
+import { maskSecretSurface, type MemoryCard } from '../../src/gui/contract.ts'
 import { baseName } from '../path.ts'
 import type { LocaleKey } from '../locales.ts'
 
@@ -65,12 +65,15 @@ function forgottenCount(text: string): number {
 
 const SOURCE_MODES = ['user-explicit', 'user-behavior', 'environment-observed', 'agent-inferred', 'agent-action-confirmed'] as const
 
-/** 一次成功的新记（kind = saved）→ 记忆卡：id / 类型 / 作用域取结果，原文、名字、来源取参数。 */
+/**
+ * 一次成功的新记（kind = saved）→ 记忆卡：id / 类型 / 作用域取结果，原文、名字、来源取参数。
+ * 参数是 agent 发的原文，没经过视图的遮盖，这里按同一套规则遮掉密钥片段（带 force 存下的也不例外）。
+ */
 export function savedMemoryCard(args: Args | undefined, resultText: string, time: number): MemoryCard | undefined {
   const result = parseSaveResult(resultText)
   if (result?.kind !== 'saved' || args === undefined) return undefined
   const sourceMode = SOURCE_MODES.find(mode => mode === args.sourceMode)
-  return {
+  return maskSecretSurface({
     id: result.id,
     name: str(args.name),
     type: result.type ?? str(args.type),
@@ -83,7 +86,7 @@ export function savedMemoryCard(args: Args | undefined, resultText: string, time
     updatedAt: time,
     lastConfirmedAt: time,
     filePath: '',
-  }
+  })
 }
 
 function scopeSummary(args: Args): Summary {
