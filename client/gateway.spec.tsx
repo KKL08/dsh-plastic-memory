@@ -1,9 +1,10 @@
 // 宿主网关：它本身就是进程边界的适配层，这里给它一个假的宿主 ctx（远程调用 + 标准 props），断言它发出的命令与读出的视图。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { GUI_VIEW_VERSION, type PendingView } from '../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, type PendingView } from '../src/gui/contract.ts'
 import {
-  createHostGateway, decodeExecution, fileAddress, MEMORY_ROOT_CONFIG_KEY, MEMORY_ROOT_KEY, parseView, pickSession, toPluginConfig, viewPath,
+  belongsTo, createHostGateway, decodeExecution, fileAddress, MEMORY_ROOT_CONFIG_KEY, MEMORY_ROOT_KEY, parseView, pickSession, toPluginConfig, viewPath,
+  workspaceOf,
 } from './gateway.ts'
 import { createFakeConfigForm, DEFAULT_SECTION } from './settings/config-form.fake.ts'
 import { ENTRY_ID } from './settings/config.ts'
@@ -64,6 +65,52 @@ describe('pickSession：只有「无会话 / 有会话」两态', () => {
     )
     expect(pickSession(rows, '/w/app')).toMatchObject({ sessionId: 'busy-app' })
     expect(pickSession(rows, '/w/none')).toMatchObject({ sessionId: 'selected' })
+  })
+
+  it('项目子目录里开的会话算这个项目的；共用前缀的兄弟目录不算', () => {
+    const rows = list(
+      summary('sub', { cwd: '/w/app/packages/core', updatedAt: 1 }),
+      summary('sibling', { cwd: '/w/app-other', updatedAt: 9 }),
+      summary('selected', { cwd: '/w/third', updatedAt: 2, retainedBy: { mainView: 1 } }),
+    )
+    expect(pickSession(rows, '/w/app')).toMatchObject({ sessionId: 'sub' })
+    expect(pickSession(rows, '/w/app/')).toMatchObject({ sessionId: 'sub' })
+    expect(pickSession(list(rows.byId.sibling!, rows.byId.selected!), '/w/app')).toMatchObject({ sessionId: 'selected' })
+  })
+
+  it('服务端记下的对照（原始 cwd → 项目）以它为准：软链接路径也算，cwd 在项目里、归属却是嵌套的子项目则不算', () => {
+    const rows = list(
+      summary('linked', { cwd: '/link/app', updatedAt: 1 }),
+      summary('nested', { cwd: '/w/app/pkg', updatedAt: 9 }),
+      summary('latest', { cwd: '/w/third', updatedAt: 5 }),
+    )
+    const map = { '/link/app': '/w/app', '/w/app/pkg': '/w/app/pkg' }
+    expect(pickSession(rows, '/w/app', map)).toMatchObject({ sessionId: 'linked' })
+    expect(pickSession(rows, '/w/app/pkg', map)).toMatchObject({ sessionId: 'nested' })
+  })
+
+  it('服务端没见过的会话按路径判断，取包含 cwd 的最深的已知项目：嵌套子项目里的会话归子项目', () => {
+    const rows = list(
+      summary('in-pkg', { cwd: '/w/app/pkg/src', updatedAt: 9 }),
+      summary('in-app', { cwd: '/w/app/docs', updatedAt: 1 }),
+    )
+    // /w/app/pkg 是已知项目（对照里有别的会话归到它）
+    const map = { '/elsewhere': '/w/app/pkg' }
+    expect(pickSession(rows, '/w/app', map)).toMatchObject({ sessionId: 'in-app' })
+    expect(pickSession(rows, '/w/app/pkg', map)).toMatchObject({ sessionId: 'in-pkg' })
+    // 不知道 pkg 是项目时，两个都算 /w/app 的，照旧挑最近的
+    expect(pickSession(rows, '/w/app')).toMatchObject({ sessionId: 'in-pkg' })
+  })
+
+  it('belongsTo / workspaceOf：对照优先，其次最深的已知项目，都没有时 workspaceOf 回原始 cwd', () => {
+    const map = { '/link/app': '/w/app', '/x': '/w/app/pkg' }
+    expect(belongsTo('/link/app/', '/w/app', map)).toBe(true)
+    expect(belongsTo('/w/app/pkg/a', '/w/app', map)).toBe(false)
+    expect(belongsTo('/w/app-other', '/w/app', map)).toBe(false)
+    expect(belongsTo(undefined, '/w/app', map)).toBe(false)
+    expect(workspaceOf('/link/app', map)).toBe('/w/app')
+    expect(workspaceOf('/w/app/pkg/a', map)).toBe('/w/app/pkg')
+    expect(workspaceOf('/w/new/sub', map)).toBe('/w/new/sub')
   })
 })
 
@@ -345,12 +392,93 @@ describe('createHostGateway', () => {
     expect(executed).toEqual([])
   })
 
-  it('execute 按契约编码命令并解析结果；当前工作区取选中会话的 cwd', async () => {
+  it('execute 按契约编码命令并解析结果；当前工作区等对照读到再定', async () => {
     const gateway = createHostGateway(fakeCtx())(props)
     expect(await gateway.execute('s1', { cmd: 'resolve', decisionId: 'd1', verdict: 'keep-both' })).toEqual({ ok: true, cmd: 'resolve' })
     expect(executed).toEqual(['/memory resolve {"decisionId":"d1","verdict":"keep-both"}'])
+    // 根还不知道、对照读不到：先是 loading
     const { result } = renderHook(() => gateway.useCurrentWorkspace())
-    expect(result.current).toBe('/w/app')
+    expect(result.current).toEqual({ status: 'loading' })
+  })
+
+  describe('会话归属与服务端一致', () => {
+    const mapPath = `/h/memories/.state/gui/${GUI_WORKSPACE_MAP_FILE}`
+    function withSessions(state: SessionListState) {
+      return { ...props, useSessions: <S,>(selector: (s: SessionListState) => S) => selector(state) }
+    }
+    /** 服务端写出的对照文件，经 via 这个会话的文件通道可见。 */
+    function serveMap(via: string, cwds: Record<string, string>) {
+      files[mapPath] = JSON.stringify({ version: GUI_VIEW_VERSION, cwds })
+      resources[fileAddress(via, mapPath)] = { status: 'live', value: { absolutePath: 'x', version: 'v1' }, failure: undefined }
+    }
+    function mapMissing(via: string) {
+      resources[fileAddress(via, mapPath)] = { status: 'failed', value: undefined, failure: { code: 'workspace-file/not-found', message: '' } }
+    }
+
+    it('借会话：没选中的会话经软链接开在项目里，对照说它属于这个项目，就进项目这一档', async () => {
+      localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+      serveMap('sel', { '/link/app': '/w/app' })
+      const rows = list(
+        summary('sel', { cwd: '/w/other', updatedAt: 9, retainedBy: { mainView: 1 } }),
+        summary('linked', { cwd: '/link/app', updatedAt: 1 }),
+      )
+      const gateway = createHostGateway(fakeCtx())(withSessions(rows))
+      const { result } = renderHook(() => gateway.useSession('/w/app'))
+      await waitFor(() => { expect(result.current).toMatchObject({ sessionId: 'linked', workspaces: { '/link/app': '/w/app' } }) })
+      // 只读文件，不为此发命令
+      expect(executed).toEqual([])
+    })
+
+    it('借会话：服务端没见过的会话在嵌套子项目里，归子项目，不借给外层项目', async () => {
+      localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+      serveMap('sel', { '/w/app/pkg': '/w/app/pkg' })
+      const rows = list(
+        summary('sel', { cwd: '/w/other', updatedAt: 1, retainedBy: { mainView: 1 } }),
+        summary('in-pkg', { cwd: '/w/app/pkg/src', updatedAt: 9 }),
+      )
+      const gateway = createHostGateway(fakeCtx())(withSessions(rows))
+      const { result } = renderHook(() => gateway.useSession('/w/app'))
+      await waitFor(() => { expect(result.current).toMatchObject({ workspaces: { '/w/app/pkg': '/w/app/pkg' } }) })
+      expect(result.current).toMatchObject({ sessionId: 'sel' })
+    })
+
+    it('当前工作区：对照还在读时是 loading，不先拿原始 cwd 顶上；读到后给服务端的项目', async () => {
+      localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+      const rows = list(summary('sel', { cwd: '/link/app/sub', retainedBy: { mainView: 1 } }))
+      const gateway = createHostGateway(fakeCtx())(withSessions(rows))
+      const { result, rerender } = renderHook(() => gateway.useCurrentWorkspace())
+      const seen = [result.current]
+      expect(result.current).toEqual({ status: 'loading' })
+      serveMap('sel', { '/link/app/sub': '/w/app' })
+      rerender()
+      await waitFor(() => { seen.push(result.current); expect(result.current).toEqual({ status: 'ready', workspacePath: '/w/app' }) })
+      expect(seen.some(v => v.status === 'ready' && v.workspacePath !== '/w/app')).toBe(false)
+      expect(executed).toEqual([])
+    })
+
+    it('当前工作区：对照文件确认不存在后才按路径判断（最深的已知项目，否则原始 cwd）', async () => {
+      localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+      mapMissing('sel')
+      const gateway = createHostGateway(fakeCtx())(withSessions(list(summary('sel', { cwd: '/w/app/sub', retainedBy: { mainView: 1 } }))))
+      const { result } = renderHook(() => gateway.useCurrentWorkspace())
+      expect(result.current).toEqual({ status: 'ready', workspacePath: '/w/app/sub' })
+      // 不为对照发 refresh-views
+      expect(executed).toEqual([])
+    })
+
+    it('当前工作区：对照里没有这个 cwd 时取包含它的最深已知项目', async () => {
+      localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+      serveMap('sel', { '/elsewhere': '/w/app' })
+      const gateway = createHostGateway(fakeCtx())(withSessions(list(summary('sel', { cwd: '/w/app/sub', retainedBy: { mainView: 1 } }))))
+      const { result } = renderHook(() => gateway.useCurrentWorkspace())
+      await waitFor(() => { expect(result.current).toEqual({ status: 'ready', workspacePath: '/w/app' }) })
+    })
+
+    it('当前工作区：没有选中的会话时直接是 ready / undefined', () => {
+      const gateway = createHostGateway(fakeCtx())(withSessions(list(summary('a'))))
+      const { result } = renderHook(() => gateway.useCurrentWorkspace())
+      expect(result.current).toEqual({ status: 'ready', workspacePath: undefined })
+    })
   })
 
   it('openPath：打开只带 path，显示目录带 action: reveal；宿主拒绝或抛错都是 false', async () => {

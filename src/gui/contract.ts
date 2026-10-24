@@ -221,6 +221,22 @@ export const sessionViewSchema = z.object({
 })
 export type SessionView = z.infer<typeof sessionViewSchema>
 
+// —— 会话归属 ——
+
+/** 会话归属对照的文件名（在视图目录里，与全局视图并列，不随 refresh-views 重写）。 */
+export const GUI_WORKSPACE_MAP_FILE = 'workspaces.json'
+
+/**
+ * 会话归属对照：服务端每次解析会话所属项目（会话出现、快照冻结、工具调用、/memory 命令）都记一笔，
+ * 宿主给的原始 cwd → realpath 后最近的已注册项目目录（不在任何项目里时是 realpath 后的 cwd 本身）。
+ * 浏览器半侧解析不了软链接，也不知道哪些目录注册成了项目，判断会话属于哪个项目时以它为准。
+ */
+export const workspaceMapViewSchema = z.object({
+  version,
+  cwds: z.record(z.string(), z.string()),
+})
+export type WorkspaceMapView = z.infer<typeof workspaceMapViewSchema>
+
 // —— 命令 ——
 
 const allowCrossWorkspace = z.boolean().optional()

@@ -177,11 +177,21 @@ export async function apply(ctx: Context, config: Config) {
   // 给出的保留可选注册的写法。disposer 随 child fiber 走，插件卸载键即消失。服务缺席时插件照常挂载，
   // 只是不注册投影：垂直冲突检测跳过，memory_scan 打 baseline-missing。
   ctx.inject(['sessionProjections'], child => void child.sessionProjections.register(baselineProjectionDefinition))
-  // cwd → workspace 归属的单一解析路径：SnapshotCache 的 lazy 自愈与 session/created 的 eager 预热共用，
-  // 避免两处各写一份 resolveWorkspacePath 调用。
-  const resolveWorkspace = (session: object) => resolveWorkspacePath(ctx, (session as SessionLike).header?.cwd)
   // GUI 视图写入器：宿主有 commands 服务（GUI 半侧可用）时才有，见下方 ctx.inject(['commands'], …)
   let views: ViewWriter | undefined
+  // 会话归属对照（契约 GUI_WORKSPACE_MAP_FILE）：每次解析都记一笔原始 cwd → 项目；写入器就位前解析到的先留着，就位时补记
+  const earlyWorkspaces = new Map<string, string>()
+  const resolveCwd = async (cwd: string | undefined) => {
+    const workspacePath = await resolveWorkspacePath(ctx, cwd)
+    if (cwd && workspacePath !== undefined) {
+      if (views) void views.requestWorkspace(cwd, workspacePath)
+      else earlyWorkspaces.set(cwd, workspacePath)
+    }
+    return workspacePath
+  }
+  // cwd → workspace 归属的单一解析路径：SnapshotCache 的 lazy 自愈与 session/created 的 eager 预热共用，
+  // 避免两处各写一份 resolveWorkspacePath 调用。
+  const resolveWorkspace = (session: object) => resolveCwd((session as SessionLike).header?.cwd)
   // 会话视图（进程内存）：每个会话最近一次冻结的视图，与这次对话新记的 id（可能早于首次冻结）
   const frozenViews = new Map<string, SessionView>()
   const savedIds = new Map<string, string[]>()
@@ -292,7 +302,7 @@ export async function apply(ctx: Context, config: Config) {
   async function resolveContext(exec: ToolRunContext) {
     const session = exec.agent?.session
     return {
-      workspacePath: await resolveWorkspacePath(ctx, session?.header.cwd),
+      workspacePath: await resolveCwd(session?.header.cwd),
       delegationDepth: delegationDepthOf(session),
       session: {
         id: session?.header.id ?? 'unknown',
@@ -437,6 +447,8 @@ export async function apply(ctx: Context, config: Config) {
       }),
     })
     views = writer
+    for (const [cwd, workspacePath] of earlyWorkspaces) void writer.requestWorkspace(cwd, workspacePath)
+    earlyWorkspaces.clear()
     commands.register(createMemoryCommand({
       memoryRoot, store, decisions, snapshots, cache: scanCache, registry, agentsMd, views: writer,
       resolveContext, getLlm, getBaseline, log: ctx.logger,

@@ -38,6 +38,17 @@ describe('记忆页外壳', () => {
     expect(gateway.sessionRequests.at(-1)).toBe('/w/app')
   })
 
+  it('当前项目还在确认（会话归属对照没读到）：只显示读取中，不先按别的作用域渲染再跳；确认后直接落在当前项目', () => {
+    const gateway = createFakeGateway({ currentWorkspace: { status: 'loading' }, views: { pending, library } })
+    renderInShell(<MemoryPage nav={createNavStore()} />, gateway)
+    expect(screen.getByRole('status')).toHaveTextContent('正在读取…')
+    expect(screen.queryByRole('tablist')).toBeNull()
+    expect(screen.queryByRole('button', { name: /全局|本项目/ })).toBeNull()
+    act(() => { gateway.setCurrentWorkspace('/w/app') })
+    expect(screen.getByRole('button', { name: /本项目 app/ })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /全部记忆/ })).toHaveTextContent('全部记忆2')
+  })
+
   it('作用域下拉列出当前项目、视图里的其他项目和全局；选了写回导航 store、按新作用域借会话', () => {
     const gateway = createFakeGateway({ currentWorkspace: '/w/app', views: { pending, library } })
     const nav = createNavStore()

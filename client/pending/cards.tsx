@@ -4,7 +4,7 @@
  */
 import { useState, type ReactNode } from 'react'
 import { CONFLICT_ACTION_VERDICTS, type GuiLayerRef, type MemoryCard as MemoryCardData, type PendingItem } from '../../src/gui/contract.ts'
-import { samePath, useGateway, type BorrowedSession } from '../gateway.ts'
+import { belongsTo, useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, formatNumber, useT, type Translate } from '../i18n.tsx'
 import { Button } from '../ui/Button.tsx'
 import { Chip } from '../ui/Chip.tsx'
@@ -36,7 +36,7 @@ export interface CardProps<K extends PendingItem['kind']> {
 /** 记忆在别的项目里（相对借来的会话所在项目）时返回项目路径。 */
 function otherProject(memory: MemoryCardData | null, session: BorrowedSession): string | undefined {
   if (memory?.workspacePath === undefined) return undefined
-  return session.kind === 'ready' && samePath(memory.workspacePath, session.cwd) ? undefined : memory.workspacePath
+  return session.kind === 'ready' && belongsTo(session.cwd, memory.workspacePath, session.workspaces ?? {}) ? undefined : memory.workspacePath
 }
 
 /** 记忆文件全文 → 正文（去掉 frontmatter）。 */

@@ -36,10 +36,13 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
   const t = useT()
   const gateway = useGateway()
   const target = useNavTarget(nav)
-  const currentWorkspace = gateway.useCurrentWorkspace()
+  const current = gateway.useCurrentWorkspace()
+  const currentWorkspace = current.status === 'ready' ? current.workspacePath : undefined
+  // 当前项目还在确认、入口也没指定作用域：先不定作用域（显示读取中），免得先按别的作用域渲染再跳过去
+  const isScopeLoading = target.scope === undefined && current.status === 'loading'
   const scope: GuiLayerRef = target.scope
     ?? (currentWorkspace !== undefined ? { kind: 'workspace', workspacePath: currentWorkspace } : { kind: 'global' })
-  const session = gateway.useSession(scope.kind === 'workspace' ? scope.workspacePath : undefined)
+  const session = gateway.useSession(scope.kind === 'workspace' && !isScopeLoading ? scope.workspacePath : undefined)
   const pending = gateway.useView(session, 'pending')
   const library = gateway.useView(session, 'library')
   const tabsId = useId()
@@ -72,7 +75,7 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
     <div className="pm-page">
       <header className="pm-page-head">
         <h1 className="pm-page-title">{t('page.title')}</h1>
-        {session.kind === 'ready'
+        {session.kind === 'ready' && !isScopeLoading
           ? (
             <ScopePicker
               value={scope}
@@ -82,26 +85,28 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
             />
           )
           : null}
-        {session.kind === 'ready'
+        {session.kind === 'ready' && !isScopeLoading
           ? <ScanControl session={session} workspacePath={scope.kind === 'workspace' ? scope.workspacePath : currentWorkspace} hasPending={(counts.pending ?? 1) > 0} nav={nav} leading={settingsButton} />
           : <div className="pm-scan">{settingsButton}</div>}
       </header>
       {session.kind === 'none'
         ? <EmptyState variant="daily" title={t('session.none.title')}>{t('session.none.body')}</EmptyState>
-        : (
-          <>
-            <SegmentedTabs label={t('tabs.label')} items={items} value={target.tab} onChange={(tab) => { nav.update({ tab, memoryId: undefined }) }} />
-            <div role="tabpanel" id={`${tabsId}-${target.tab}-panel`} aria-labelledby={`${tabsId}-${target.tab}`} className="pm-page-panel">
-              {target.tab === 'pending'
-                ? <PendingTab nav={nav} session={session} workspacePath={scope.kind === 'workspace' ? scope.workspacePath : undefined} />
-                : target.tab === 'library'
-                  ? <LibraryTab nav={nav} scope={scope} session={session} />
-                  : target.tab === 'deleted'
-                    ? <DeletedTab nav={nav} scope={scope} session={session} />
-                    : <HealthTab session={session} scope={scope} nav={nav} />}
-            </div>
-          </>
-        )}
+        : isScopeLoading
+          ? <p className="pm-page-placeholder" role="status">{t('view.loading')}</p>
+          : (
+            <>
+              <SegmentedTabs label={t('tabs.label')} items={items} value={target.tab} onChange={(tab) => { nav.update({ tab, memoryId: undefined }) }} />
+              <div role="tabpanel" id={`${tabsId}-${target.tab}-panel`} aria-labelledby={`${tabsId}-${target.tab}`} className="pm-page-panel">
+                {target.tab === 'pending'
+                  ? <PendingTab nav={nav} session={session} workspacePath={scope.kind === 'workspace' ? scope.workspacePath : undefined} />
+                  : target.tab === 'library'
+                    ? <LibraryTab nav={nav} scope={scope} session={session} />
+                    : target.tab === 'deleted'
+                      ? <DeletedTab nav={nav} scope={scope} session={session} />
+                      : <HealthTab session={session} scope={scope} nav={nav} />}
+              </div>
+            </>
+          )}
     </div>
   )
 }
