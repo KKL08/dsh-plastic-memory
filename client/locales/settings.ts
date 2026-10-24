@@ -75,8 +75,8 @@ export const settingsZh = {
   'settings.type.error.name-taken': '已经有这个英文名了。',
   'settings.type.error.decay-invalid': '填一个大于 0 的整数，或者留空。',
 
-  'settings.budget.label': '每次对话带入的记忆上限',
-  'settings.budget.hint': '默认 4,000。',
+  'settings.budget.label': '自动带入的记忆上限（token）',
+  'settings.budget.hint': '默认 4,000。包括全局和当前项目的记忆，按各类型「怎么召回」的设置带入全文、一行索引或只列名字。对话中检索到的记忆不计入。',
   'settings.budget.invalid': '填一个大于 0 的整数。',
   'settings.overflow.label': '超出上限时',
   'settings.overflow.relax': '自动放宽',
@@ -210,8 +210,8 @@ export const settingsEn: Record<keyof typeof settingsZh, string> = {
   'settings.type.error.name-taken': 'This identifier is already used.',
   'settings.type.error.decay-invalid': 'Enter a whole number above 0, or leave it empty.',
 
-  'settings.budget.label': 'Memory limit per chat',
-  'settings.budget.hint': 'Default 4,000.',
+  'settings.budget.label': 'Auto-loaded memory limit (tokens)',
+  'settings.budget.hint': "Default 4,000. Covers global and current-project memories, loaded as full text, one index line or just the name, per each type's Recall setting. Memories found by search during a chat don't count.",
   'settings.budget.invalid': 'Enter a whole number above 0.',
   'settings.overflow.label': 'When over the limit',
   'settings.overflow.relax': 'Relax automatically',
