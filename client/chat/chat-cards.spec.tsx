@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { ComponentType } from 'react'
-import { GUI_VIEW_VERSION } from '../../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, type LibraryView } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createHostGateway } from '../gateway.ts'
 import type { SessionListState } from '../host.ts'
@@ -156,6 +156,13 @@ describe('交付卡', () => {
 
   it('记忆卡的类型写显示名（待处理视图的 typeLabels）', () => {
     const gateway = createFakeGateway({ views: { pending: { version: GUI_VIEW_VERSION, dot: 'none', items: [], typeLabels: { preference: '行为偏好' } } } })
+    const { container } = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} deleted={new Set()} />, gateway)
+    expect(container.querySelector('.pm-mc-meta')).toHaveTextContent(/^行为偏好/)
+  })
+
+  it('待处理视图没有这个类型时，类型显示名取全部记忆视图的 typeLabels', () => {
+    const library: LibraryView = { version: GUI_VIEW_VERSION, memoryRoot: '/m', layers: [], directoryIssues: [], typeLabels: { preference: '行为偏好' } }
+    const gateway = createFakeGateway({ views: { library, pending: { version: GUI_VIEW_VERSION, dot: 'none', items: [], typeLabels: {} } } })
     const { container } = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} deleted={new Set()} />, gateway)
     expect(container.querySelector('.pm-mc-meta')).toHaveTextContent(/^行为偏好/)
   })

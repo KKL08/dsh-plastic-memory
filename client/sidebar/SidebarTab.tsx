@@ -14,6 +14,7 @@ import { baseName, formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
 import { sidebarZh } from '../locales/sidebar.ts'
 import type { NavTarget } from '../nav.ts'
+import { mergeTypeLabels } from '../library/shared.tsx'
 import { Chip } from '../ui/Chip.tsx'
 import { ConflictRuling } from '../ui/ConflictRuling.tsx'
 import { ContextBudgetBar } from '../ui/ContextBudgetBar.tsx'
@@ -41,7 +42,7 @@ export interface SidebarTabProps {
   openPage: (target: NavTarget) => void
 }
 
-/** 内置类型按界面语言写；其余（自定义、切模板前的旧类型）取待处理视图的 typeLabels，再认不出写 id。 */
+/** 内置类型按界面语言写；其余（自定义、切模板前的旧类型）取全部记忆、待处理视图的 typeLabels，再认不出写 id。 */
 function typeLabel(t: Translate, type: string, labels: Readonly<Record<string, string>> | undefined): string {
   const key = `sidebar.type.${type}`
   return key in sidebarZh ? t(key as LocaleKey) : labels?.[type] ?? type
@@ -113,7 +114,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const conflicts = pending.status === 'ready'
     ? pending.data.items.filter((item): item is Conflict => item.kind === 'conflict-horizontal')
     : []
-  const labels = pending.status === 'ready' ? pending.data.typeLabels : undefined
+  const labels = mergeTypeLabels(library, pending)
   const label = (type: string) => typeLabel(t, type, labels)
   const ruledIds = new Set(ruled.map(r => r.decisionId))
   const inline = new Set<string>()

@@ -71,6 +71,12 @@ describe('最近删除', () => {
     expect(rowOf('用 pnpm 不用 npm').querySelector('.pm-mc-meta')).toHaveTextContent(/^行为偏好/)
   })
 
+  it('待处理视图还没到时，类型显示名取最近删除视图自带的 typeLabels', () => {
+    const view = { ...deleted, typeLabels: { preference: '行为偏好' } }
+    renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { deleted: view, pending: { status: 'loading' } } }))
+    expect(rowOf('用 pnpm 不用 npm').querySelector('.pm-mc-meta')).toHaveTextContent(/^行为偏好/)
+  })
+
   it('恢复发 /memory restore；被裁决删掉的恢复后提示冲突回到待处理', async () => {
     const gateway = createFakeGateway({
       views: { deleted },

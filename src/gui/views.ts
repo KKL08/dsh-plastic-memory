@@ -133,15 +133,14 @@ export function buildPendingView(input: ViewInput): PendingView {
   items.sort((a, b) => rank(a) - rank(b))
   const dot = items.some(i => i.kind === 'secret') ? 'red'
     : items.some(i => i.kind !== 'unreadable-file') ? 'amber' : 'none'
-  return { version: GUI_VIEW_VERSION, dot, items, typeLabels: typeLabels(input.registry, items) }
+  const cards = items.flatMap(i => i.kind === 'conflict-horizontal' ? [i.left, i.right] : 'memory' in i ? [i.memory] : [])
+  return { version: GUI_VIEW_VERSION, dot, items, typeLabels: typeLabels(input.registry, cards.map(m => m?.type)) }
 }
 
-/** 注册表里的类型加上待处理记忆卡里出现的类型（切模板后旧模板的、认不出的），读时 get 给显示名。 */
-function typeLabels(registry: TypeRegistry, items: readonly PendingItem[]): Record<string, string> {
+/** 注册表里的类型加上视图里出现的类型（切模板后旧模板的、认不出的），读时 get 给显示名。 */
+function typeLabels(registry: TypeRegistry, present: Iterable<string | undefined>): Record<string, string> {
   const types = new Set(registry.all().map(t => t.name))
-  for (const i of items) {
-    for (const m of i.kind === 'conflict-horizontal' ? [i.left, i.right] : 'memory' in i ? [i.memory] : []) if (m) types.add(m.type)
-  }
+  for (const type of present) if (type !== undefined) types.add(type)
   return Object.fromEntries([...types].map(name => [name, registry.get(name).label]))
 }
 
@@ -184,7 +183,8 @@ export function buildLibraryView(input: ViewInput): LibraryView {
   const directoryIssues = [...input.listingNotes, ...input.data.directoryNotes]
     .filter(n => n.code !== 'dir-empty')
     .map(n => ({ code: n.code, path: n.path, ...(n.keys !== undefined ? { keys: n.keys } : {}) }))
-  return { version: GUI_VIEW_VERSION, memoryRoot: input.memoryRoot, layers, directoryIssues }
+  const typeLabelsOfView = typeLabels(input.registry, layers.flatMap(l => l.items.map(m => m.type)))
+  return { version: GUI_VIEW_VERSION, memoryRoot: input.memoryRoot, layers, directoryIssues, typeLabels: typeLabelsOfView }
 }
 
 /** 最近删除：保留窗口内软删的记忆；裁决删掉的从已裁决条目找来源（同一条记忆被多次裁决取最近的）。 */
@@ -212,7 +212,10 @@ export function buildDeletedView(input: ViewInput): DeletedView {
       }
       return { memory: card(r, input.data), deletedAt, purgeAt: deletedAt + RETENTION_MS, ...(cause !== undefined ? { cause } : {}) }
     })
-  return { version: GUI_VIEW_VERSION, items }
+  // 裁决对方（横向冲突的胜方）也给显示名：界面会提到它
+  const counterparts = items.map(i => i.cause !== undefined && 'counterpartId' in i.cause && i.cause.counterpartId !== undefined
+    ? input.data.byId.get(i.cause.counterpartId)?.type : undefined)
+  return { version: GUI_VIEW_VERSION, items, typeLabels: typeLabels(input.registry, [...items.map(i => i.memory.type), ...counterparts]) }
 }
 
 /** 会话视图：快照冻结时由调用方给出带入的记忆与三段用量。 */

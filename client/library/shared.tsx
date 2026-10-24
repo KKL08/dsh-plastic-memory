@@ -2,21 +2,31 @@
  * 「全部记忆」「最近删除」共用的几件小东西：视图没就绪时的一行说明、带参数打开时的目标行高亮、
  * 行尾动作的进行中 / 结果提示与跨项目确认、类型显示名。
  */
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { MemoryCommand } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { useT } from '../i18n.tsx'
 import { useNavTarget, type NavStore, type NavTarget } from '../nav.ts'
 import { CrossConfirm, crossConfirmCss } from '../pending/action.tsx'
 
+type LabelledView = ViewState<{ typeLabels?: Readonly<Record<string, string>> }>
+
 /**
- * hook：类型 id → 显示名。显示名只有待处理视图带（typeLabels，注册表的 label，含切模板前的旧类型）；
- * 视图还没到、或认不出的类型显示 id。
+ * 几份视图的 typeLabels 合成一张表（注册表的 label，含切模板前的旧类型）。全部记忆、最近删除、待处理各自带
+ * 本视图出现的类型，同一类型的显示名出自同一注册表，谁先谁后无所谓；没就绪的视图跳过。
  */
+export function mergeTypeLabels(...views: readonly LabelledView[]): Record<string, string> {
+  return Object.assign({}, ...views.map(v => v.status === 'ready' ? v.data.typeLabels ?? {} : {}))
+}
+
+/** hook：类型 id → 显示名，取自全部记忆 / 最近删除 / 待处理里已就绪的那几份；视图都没到、或认不出的类型显示 id。 */
 export function useTypeLabel(session: BorrowedSession): (type: string) => string {
-  const pending = useGateway().useView(session, 'pending')
-  const labels = pending.status === 'ready' ? pending.data.typeLabels : undefined
-  return useCallback((type: string) => labels?.[type] ?? type, [labels])
+  const gateway = useGateway()
+  const library = gateway.useView(session, 'library')
+  const deleted = gateway.useView(session, 'deleted')
+  const pending = gateway.useView(session, 'pending')
+  const labels = useMemo(() => mergeTypeLabels(library, deleted, pending), [library, deleted, pending])
+  return useCallback((type: string) => labels[type] ?? type, [labels])
 }
 
 /** 视图不是 ready 时的一行说明；idle（没有会话）由页面壳的空态负责，这里不画。 */
