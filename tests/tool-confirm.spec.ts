@@ -43,7 +43,7 @@ describe('memory_confirm resolve（横向冲突）', () => {
     return entry
   }
 
-  it('keep-left：删 right，先快照，条目移除', async () => {
+  it('keep-left：删 right，先快照，条目移出待处理', async () => {
     const deps = makeDeps()
     const entry = await setupHorizontal(deps)
     const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-left' }, { workspacePath: '/proj' }, deps)
