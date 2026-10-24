@@ -10,13 +10,14 @@ import { posix } from 'node:path'
 
 const SRC_DIR = fileURLToPath(new URL('../src/', import.meta.url))
 
-const LAYER = { leaf: 0, storage: 1, memory: 2, governance: 3, executor: 4, binding: 5, entry: 6 } as const
+// gui/*（GUI 层）在执行器之上、绑定层之下：可 import 执行器及以下，不 import 绑定层，执行器不 import 它；gui/contract 归叶子
+const LAYER = { leaf: 0, storage: 1, memory: 2, governance: 3, executor: 4, gui: 4.5, binding: 5, entry: 6 } as const
 type LayerName = keyof typeof LAYER
 
 // 共享契约（record-schema、contract-codes、kv-table、storage/table、storage/paths）归叶子
 const LEAF_MODULES = new Set([
   'text', 'secrets', 'record-freshness', 'retention', 'contract-codes', 'index-line', 'errors',
-  'kv-table', 'record-schema', 'output', 'storage/paths', 'storage/table', 'types',
+  'kv-table', 'record-schema', 'output', 'storage/paths', 'storage/table', 'types', 'gui/contract',
 ])
 const MEMORY_MODULES = new Set([
   'pipeline', 'store', 'snapshot', 'runtime', 'type-registry', 'evidence-guidance',
@@ -37,6 +38,7 @@ function layerOf(mod: string): LayerName | undefined {
   if (ENTRY_MODULES.has(mod)) return 'entry'
   if (/^storage\/[^/]+$/.test(mod)) return 'storage'
   if (/^governance\/[^/]+$/.test(mod)) return 'governance'
+  if (/^gui\/[^/]+$/.test(mod)) return 'gui'
   if (/^tools\/[^/]+-tool$/.test(mod)) return 'binding'
   if (/^tools\/[^/]+$/.test(mod)) return 'executor'
   return undefined
