@@ -22,6 +22,12 @@ interface CrossWorkspaceFields {
   otherWorkspaces: OtherWorkspaceMark[]
 }
 
+/** 只给 GUI 用的选项，不在工具参数里。isExactLayer：show / restore 按快照里每条记录自己的那一层定位与写回，
+ *  不取别层更新的同 id 副本（GUI 恢复页面上那一份）。 */
+export interface SnapshotToolOptions {
+  isExactLayer?: boolean
+}
+
 export type SnapshotToolResult =
   | { kind: 'created'; snapshotId: string; count: number; missing: string[]; message: string } & CrossWorkspaceFields
   | { kind: 'listed'; snapshots: Array<{ id: string; createdAt: number; operation: string; description: string; count: number }>; message: string }
@@ -38,6 +44,7 @@ export async function executeSnapshotTool(
   rawArgs: unknown,
   context: GovernanceContext,
   deps: SnapshotToolDeps,
+  options: SnapshotToolOptions = {},
 ): Promise<SnapshotToolResult> {
   const args = rawArgs as SnapshotToolArgs
   const now = deps.now?.() ?? Date.now()
@@ -87,9 +94,10 @@ export async function executeSnapshotTool(
   }
   // show / restore 的预读范围：快照内每个记录的现状，按该记录自己的 workspace 定位（含非 active）——restore 的 put 按同一
   // 提示定位，冲突判断看的就是将被覆盖的那份文件；按会话 workspace 定位会在同 id 多副本时比错对象。
+  const exact = options.isExactLayer === true ? { isExactLayer: true } : {}
   const current = new Map<string, MemoryRecord>()
   for (const { id, workspacePath } of snap.data) {
-    const r = await deps.store.get(id, { workspacePath })
+    const r = await deps.store.get(id, { workspacePath, ...exact })
     if (r) current.set(id, r)
   }
   // 跨 workspace 门：快照里的记录与它的现状任一方落在其他项目，就按那个项目判定（restore 写回快照里的位置）
@@ -116,7 +124,7 @@ export async function executeSnapshotTool(
   // restore
   const { restored, skipped, redacted } = await deps.snapshots.restore(
     snap, [...allowedIds],
-    (r, skipIf) => deps.store.put(r, undefined, skipIf),
+    (r, skipIf) => deps.store.put(r, options.isExactLayer === true ? { workspacePath: r.workspacePath, isExactLayer: true } : undefined, skipIf),
     current,
     args.overwriteChanged ?? false,
   )

@@ -149,7 +149,7 @@ describe('SidebarTab 这次对话新记的', () => {
     const saved = within(screen.getByRole('region', { name: '这次对话新记的' }))
     expect(saved.getByText('报销截止每月 25 日。')).toBeInTheDocument()
     await act(async () => { fireEvent.click(saved.getByRole('button', { name: '删除这条记忆' })) })
-    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'n1' }])
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'n1', layer: { kind: 'workspace', workspacePath: WS } }])
     expect(screen.queryByText('报销截止每月 25 日。')).toBeNull()
   })
 
@@ -170,13 +170,51 @@ describe('SidebarTab 这次对话新记的', () => {
     await act(async () => { fireEvent.click(saved.getByRole('button', { name: '删除这条记忆' })) })
     await act(async () => { fireEvent.click(saved.getByRole('button', { name: '彻底删除' })) })
     expect(gateway.executed.map(e => e.command)).toEqual([
-      { cmd: 'forget', memoryId: 'n1' },
-      { cmd: 'forget', memoryId: 'n1' },
-      { cmd: 'hard-delete', memoryId: 'n1' },
+      { cmd: 'forget', memoryId: 'n1', layer: { kind: 'workspace', workspacePath: WS } },
+      { cmd: 'forget', memoryId: 'n1', layer: { kind: 'workspace', workspacePath: WS } },
+      { cmd: 'hard-delete', memoryId: 'n1', layer: { kind: 'workspace', workspacePath: WS } },
     ])
     expect(saved.queryByText('报销截止每月 25 日。')).toBeNull()
     expect(saved.getByText('已彻底删除。如果它是真的凭证，记得去换一个新的。')).toBeInTheDocument()
     expect(screen.queryByText(/14 天/)).toBeNull()
+  })
+})
+
+describe('SidebarTab 同 id 的多份副本', () => {
+  const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。', updatedAt: 100 })
+  const withLayers = (...extra: LibraryView['layers']) => {
+    const base = library(pref, proj, glob, fresh)
+    return { ...base, layers: [...base.layers, ...extra] }
+  }
+
+  it('别的项目里有同 id 的更新副本：只看会话看得见的层，显示并删除本项目那份', async () => {
+    const elsewhere = memory({ id: 'n1', type: 'knowledge', content: '别的项目的同 id 副本', workspacePath: '/w/blog', updatedAt: 999 })
+    const { gateway } = setup({
+      library: withLayers({ layer: { kind: 'workspace', workspacePath: '/w/blog' }, items: [elsewhere] }),
+      session: snapshot({ savedIds: ['n1'] }), pending: pending(),
+    })
+    const saved = within(screen.getByRole('region', { name: '这次对话新记的' }))
+    expect(saved.getByText('报销截止每月 25 日。')).toBeInTheDocument()
+    expect(screen.queryByText('别的项目的同 id 副本')).toBeNull()
+    await act(async () => { fireEvent.click(saved.getByRole('button', { name: '删除这条记忆' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'n1', layer: { kind: 'workspace', workspacePath: WS } }])
+  })
+
+  it('全局和本项目各有一份：取服务端会取的那份，updatedAt 新者优先，相同时本项目优先', async () => {
+    const newerGlobal = memory({ id: 'n1', type: 'knowledge', scope: 'global', workspacePath: undefined, content: '全局更新的那份', updatedAt: 200 })
+    const view = library(pref, proj, glob, fresh)
+    const layers = view.layers.map(l => (l.layer.kind === 'global' ? { ...l, items: [...l.items, newerGlobal] } : l))
+    const first = setup({ library: { ...view, layers }, session: snapshot({ savedIds: ['n1'] }), pending: pending() })
+    const saved = within(screen.getByRole('region', { name: '这次对话新记的' }))
+    expect(saved.getByText('全局更新的那份')).toBeInTheDocument()
+    await act(async () => { fireEvent.click(saved.getByRole('button', { name: '删除这条记忆' })) })
+    expect(first.gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'n1', layer: { kind: 'global' } }])
+    first.unmount()
+
+    const sameAge = { ...newerGlobal, content: '全局同龄的那份', updatedAt: 100 }
+    const tied = view.layers.map(l => (l.layer.kind === 'global' ? { ...l, items: [...l.items, sameAge] } : l))
+    setup({ library: { ...view, layers: tied }, session: snapshot({ savedIds: ['n1'] }), pending: pending() })
+    expect(within(screen.getByRole('region', { name: '这次对话新记的' })).getByText('报销截止每月 25 日。')).toBeInTheDocument()
   })
 })
 

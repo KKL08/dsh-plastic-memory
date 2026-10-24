@@ -17,10 +17,11 @@ import { ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../src/gui/commands.ts'
 import {
   GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, encodeMemoryCommand, sessionViewFile,
-  deletedViewSchema, memoryCommandResultSchema, pendingViewSchema,
+  deletedViewSchema, libraryViewSchema, memoryCommandResultSchema, pendingViewSchema,
   type MemoryCommand, type MemoryCommandResult,
 } from '../src/gui/contract.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
+import { executeForget } from '../src/tools/forget.ts'
 import { candidate, record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 
@@ -294,6 +295,184 @@ describe('forget 遇到含密钥的记忆', () => {
     await e.store.create(record({ id: 'mem_plain' }))
     ok(await e.run({ cmd: 'forget', memoryId: 'mem_plain' }))
     expect((await e.store.get('mem_plain'))!.status).toBe('deleted')
+  })
+})
+
+describe('forget 与并发写入的密钥', () => {
+  /** 第一次按 id 定位之后，另一个会话往这条记忆里写进密钥（模拟两次读之间的竞态）。 */
+  const secretAfterFirstLookup = (e: ReturnType<typeof env>, id: string) => {
+    const get = e.store.get.bind(e.store)
+    let isInjected = false
+    e.store.get = async (key, hint) => {
+      const found = await get(key, hint)
+      if (key === id && !isInjected) {
+        isInjected = true
+        await e.store.put({ ...(await get(key, hint))!, content: `token ${FAKE_SECRET.sk}` })
+      }
+      return found
+    }
+  }
+
+  it('GUI forget：查找之后才出现的密钥不会被物理删除，回 has-secret，记忆原样留着', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_r', content: '用 pnpm' }))
+    secretAfterFirstLookup(e, 'mem_r')
+    expect(err(await e.run({ cmd: 'forget', memoryId: 'mem_r' })).code).toBe('has-secret')
+    const after = await e.store.get('mem_r')
+    expect(after).toMatchObject({ status: 'active', content: `token ${FAKE_SECRET.sk}` })
+  })
+
+  it('memory_forget 不受影响：含密钥的记录照旧物理删除，结果里不多字段', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_r', content: `token ${FAKE_SECRET.sk}` }))
+    const r = await executeForget({ ids: ['mem_r'], reason: '模型遗忘' }, { workspacePath: SESSION_WS }, { store: e.store, snapshots: e.snapshots, decisions: e.decisions })
+    expect(r).toMatchObject({ ok: true, forgotten: ['mem_r'], hardDeleted: ['mem_r'] })
+    expect(r).not.toHaveProperty('skippedSecrets')
+    expect(await e.store.get('mem_r')).toBeUndefined()
+  })
+})
+
+describe('同 id 在两个项目里各有一份', () => {
+  // 页面按项目列记忆：用户在 OTHER 项目下点的那一份，即使借来的会话属于 SESSION 项目，也只动 OTHER 的副本
+  const other = { kind: 'workspace', workspacePath: OTHER_WS } as const
+  const own = { kind: 'workspace', workspacePath: SESSION_WS } as const
+  const seedCopies = async (e: ReturnType<typeof env>, content = '内容') => {
+    await e.store.create(record({ id: 'mem_dup', name: '本项目那份', content, scope: 'workspace', workspacePath: SESSION_WS }))
+    await e.store.create(record({ id: 'mem_dup', name: '别的项目那份', content, scope: 'workspace', workspacePath: OTHER_WS }))
+  }
+  /** 直接读那一层的目录（含 .archive/），不经同 id 取舍。 */
+  const copyIn = async (e: ReturnType<typeof env>, ws: string | undefined) =>
+    (await e.store.readLayer(ws === undefined ? { kind: 'global' } : { kind: 'workspace', path: ws }, { includeArchive: true }))
+      .records.find(l => l.record.id === 'mem_dup')?.record
+
+  it('forget 指明别的项目：先要 allowCrossWorkspace，带上后只软删那一份', async () => {
+    const e = env()
+    await seedCopies(e)
+    const body = err(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: other }))
+    expect(body).toMatchObject({ code: 'cross-workspace', rejected: [{ id: 'mem_dup', workspacePath: OTHER_WS }] })
+    expect((await copyIn(e, OTHER_WS))!.status).toBe('active')
+    expect((await copyIn(e, SESSION_WS))!.status).toBe('active')
+
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: other, allowCrossWorkspace: true }))
+    expect((await copyIn(e, OTHER_WS))!.status).toBe('deleted')
+    expect((await copyIn(e, SESSION_WS))!.status).toBe('active')
+  })
+
+  it('forget 指明会话自己的项目：不用确认，只动这一份', async () => {
+    const e = env()
+    await seedCopies(e)
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: own }))
+    expect((await copyIn(e, SESSION_WS))!.status).toBe('deleted')
+    expect((await copyIn(e, OTHER_WS))!.status).toBe('active')
+  })
+
+  it('restore 指明别的项目：恢复那一份（要 allowCrossWorkspace），会话项目里活着的那份不碰', async () => {
+    const e = env()
+    await seedCopies(e)
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: other, allowCrossWorkspace: true }))
+    const live = await copyIn(e, SESSION_WS)
+
+    expect(err(await e.run({ cmd: 'restore', memoryId: 'mem_dup', layer: other })).code).toBe('cross-workspace')
+    expect((await copyIn(e, OTHER_WS))!.status).toBe('deleted')
+    ok(await e.run({ cmd: 'restore', memoryId: 'mem_dup', layer: other, allowCrossWorkspace: true }))
+    expect((await copyIn(e, OTHER_WS))!.status).toBe('active')
+    expect(await copyIn(e, SESSION_WS)).toEqual(live)
+  })
+
+  it('hard-delete 指明别的项目：先要 allowCrossWorkspace，带上后只物理删除那一份', async () => {
+    const e = env()
+    await seedCopies(e, `token ${FAKE_SECRET.sk}`)
+    expect(err(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: other, allowCrossWorkspace: true })).code).toBe('has-secret')
+    expect(err(await e.run({ cmd: 'hard-delete', memoryId: 'mem_dup', layer: other })).code).toBe('cross-workspace')
+    expect(await copyIn(e, OTHER_WS)).toBeDefined()
+
+    ok(await e.run({ cmd: 'hard-delete', memoryId: 'mem_dup', layer: other, allowCrossWorkspace: true }))
+    expect(await copyIn(e, OTHER_WS)).toBeUndefined()
+    expect((await copyIn(e, SESSION_WS))!.status).toBe('active')
+  })
+
+  it('指明的那一层没有这个 id：not-found，不落到别的副本上', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_dup', scope: 'workspace', workspacePath: SESSION_WS }))
+    expect(err(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: other, allowCrossWorkspace: true })).code).toBe('not-found')
+    expect(err(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: { kind: 'global' } })).code).toBe('not-found')
+    expect((await copyIn(e, SESSION_WS))!.status).toBe('active')
+  })
+
+  it('指明全局：动全局那一份，项目里的同 id 副本不碰；恢复同理', async () => {
+    const e = env()
+    // 先建项目那份：写全局那份只清全局目录里的同 id 副本，反过来会把全局那份清掉
+    await e.store.create(record({ id: 'mem_dup', name: '别的项目那份', scope: 'workspace', workspacePath: OTHER_WS }))
+    await e.store.create(record({ id: 'mem_dup', name: '全局那份' }))
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: { kind: 'global' } }))
+    expect((await copyIn(e, undefined))!.status).toBe('deleted')
+    expect((await copyIn(e, OTHER_WS))!.status).toBe('active')
+    ok(await e.run({ cmd: 'restore', memoryId: 'mem_dup', layer: { kind: 'global' } }))
+    expect((await copyIn(e, undefined))!.status).toBe('active')
+    expect((await copyIn(e, OTHER_WS))!.status).toBe('active')
+  })
+})
+
+describe('同 id 在本项目和全局各有一份、全局那份更新', () => {
+  // 页面在本项目层下列出的那一份：即使全局副本更新、按会话定位会取到全局那份，带了层也只动本项目这一份
+  const own = { kind: 'workspace', workspacePath: SESSION_WS } as const
+  const newer = Date.now() + 60_000
+  const layerCopy = async (e: ReturnType<typeof env>, ws: string | undefined) =>
+    (await e.store.readLayer(ws === undefined ? { kind: 'global' } : { kind: 'workspace', path: ws }, { includeArchive: true }))
+      .records.find(l => l.record.id === 'mem_dup')?.record
+  const seed = async (e: ReturnType<typeof env>, content = '内容', globalUpdatedAt = newer) => {
+    // 先建项目那份：写全局那份只清全局目录里的同 id 副本
+    await e.store.create(record({ id: 'mem_dup', name: '本项目那份', content, scope: 'workspace', workspacePath: SESSION_WS }))
+    await e.store.create(record({ id: 'mem_dup', name: '全局那份', content, updatedAt: globalUpdatedAt }))
+  }
+  /** 全局那份还活着，且全部记忆视图的全局层照样列着它（用户没点它，不能跟着没了）。 */
+  const expectGlobalLive = async (e: ReturnType<typeof env>) => {
+    expect(await layerCopy(e, undefined)).toMatchObject({ name: '全局那份', status: 'active' })
+    const library = libraryViewSchema.parse(await e.readView('library'))
+    expect(library.layers.find(l => l.layer.kind === 'global')!.items.map(i => i.id)).toContain('mem_dup')
+  }
+
+  it('forget 带本项目的层：软删本项目那份', async () => {
+    const e = env()
+    await seed(e)
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: own }))
+    expect((await layerCopy(e, SESSION_WS))!.status).toBe('deleted')
+    await expectGlobalLive(e)
+  })
+
+  it('restore 带本项目的层：恢复本项目那份，不拿更新的全局副本比对或覆盖', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_dup', name: '本项目那份', scope: 'workspace', workspacePath: SESSION_WS }))
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: own }))
+    await e.store.create(record({ id: 'mem_dup', name: '全局那份', updatedAt: newer }))
+    const restored = ok(await e.run({ cmd: 'restore', memoryId: 'mem_dup', layer: own }))
+    expect(restored.memoryIds).toEqual(['mem_dup'])
+    expect(await layerCopy(e, SESSION_WS)).toMatchObject({ name: '本项目那份', status: 'active' })
+    await expectGlobalLive(e)
+  })
+
+  it('hard-delete 带本项目的层：物理删除本项目那份', async () => {
+    const e = env()
+    await seed(e, `token ${FAKE_SECRET.sk}`)
+    ok(await e.run({ cmd: 'hard-delete', memoryId: 'mem_dup', layer: own }))
+    expect(await layerCopy(e, SESSION_WS)).toBeUndefined()
+    await expectGlobalLive(e)
+  })
+
+  it('不带层时照旧按会话定位：取到更新的全局那份', async () => {
+    const e = env()
+    await seed(e)
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup' }))
+    expect((await layerCopy(e, undefined))!.status).toBe('deleted')
+    expect((await layerCopy(e, SESSION_WS))!.status).toBe('active')
+  })
+
+  it('不带层时可见集合去重照旧：删本项目那份（同龄时本项目优先），全局的同 id 副本一并清掉', async () => {
+    const e = env()
+    await seed(e, '内容', 1)
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup' }))
+    expect((await layerCopy(e, SESSION_WS))!.status).toBe('deleted')
+    expect(await layerCopy(e, undefined)).toBeUndefined()
   })
 })
 

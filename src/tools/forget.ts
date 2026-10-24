@@ -4,7 +4,10 @@ import type { PendingDecisionsStore } from '../governance/decisions.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { redactRecord } from '../governance/snapshots.ts'
 import { hasSecret } from '../secrets.ts'
-import { crossWorkspaceNote, gateRecords, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
+import {
+  crossWorkspaceNote, gateRecords, locateCopy,
+  type CopyTarget, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark,
+} from './workspace-gate.ts'
 
 /** memory_forget 工具的依赖，纯逻辑层与框架绑定层共用。 */
 export interface ForgetToolDeps {
@@ -23,6 +26,14 @@ export interface ForgetArgs {
   allowCrossWorkspace?: boolean
 }
 
+/** 只给 GUI 用的选项，不在工具参数里，模型传不进来。 */
+export interface ForgetOptions {
+  /** 只软删：含密钥的记录不删，列进 skippedSecrets，由调用方先问用户再走彻底删除。 */
+  isSoftOnly?: boolean
+  /** 同 id 多副本时只认这一份（GUI 按页面上那一份操作）；缺省按会话 workspace 定位。跨 workspace 门照旧按会话判定。 */
+  target?: CopyTarget
+}
+
 export interface ForgetResult {
   ok: boolean
   message: string
@@ -36,6 +47,8 @@ export interface ForgetResult {
   /** 带参数放行、属于其他项目的记录（已遗忘）。 */
   otherWorkspaces: OtherWorkspaceMark[]
   snapshotId: string | null
+  /** 只在 isSoftOnly 时出现：含密钥、没有动的 id。 */
+  skippedSecrets?: string[]
 }
 
 /**
@@ -48,6 +61,7 @@ export async function executeForget(
   args: ForgetArgs,
   context: GovernanceContext,
   deps: ForgetToolDeps,
+  options: ForgetOptions = {},
 ): Promise<ForgetResult> {
   const { ids, reason } = args
   const now = deps.now?.() ?? Date.now()
@@ -61,18 +75,25 @@ export async function executeForget(
   const located: MemoryRecord[] = []
   const missing: string[] = []
   for (const id of uniqueIds) {
-    const record = await deps.store.get(id, { workspacePath: context.workspacePath })
+    const record = options.target === undefined
+      ? await deps.store.get(id, { workspacePath: context.workspacePath })
+      : await locateCopy(deps.store, id, options.target)
     if (record && record.status !== 'deleted') located.push(record)
     else missing.push(id)
   }
-  const { allowed: found, rejected, otherWorkspaces } = gateRecords(located, context, args.allowCrossWorkspace)
+  const { allowed, rejected, otherWorkspaces } = gateRecords(located, context, args.allowCrossWorkspace)
   const wsNote = crossWorkspaceNote(rejected, otherWorkspaces)
+  // 只软删：这次读到含密钥的不进快照、不删，交回调用方；删除时锁内再看一次（见下）
+  const skippedSecrets = options.isSoftOnly === true ? allowed.filter(hasSecret).map(r => r.id) : []
+  const found = options.isSoftOnly === true ? allowed.filter(r => !hasSecret(r)) : allowed
+  const softOnlyFields = () => (options.isSoftOnly === true ? { skippedSecrets } : {})
+  const secretNote = () => (skippedSecrets.length > 0 ? `${skippedSecrets.length} 条含密钥（${skippedSecrets.join('、')}），只能彻底删除，未做改动。` : '')
 
   if (found.length === 0) {
     const missingText = missing.length > 0 ? `没有找到可遗忘的记忆（${missing.join('、')}），可能 id 有误或已删除。` : '没有遗忘任何记忆。'
     return {
-      ok: false, forgotten: [], hardDeleted: [], missing, rejected, otherWorkspaces, snapshotId: null,
-      message: `${missingText}${wsNote}`,
+      ok: false, forgotten: [], hardDeleted: [], missing, rejected, otherWorkspaces, snapshotId: null, ...softOnlyFields(),
+      message: `${missingText}${secretNote()}${wsNote}`,
     }
   }
 
@@ -87,13 +108,20 @@ export async function executeForget(
 
   const forgotten: string[] = []
   const hardDeleted: string[] = []
+  // 指明了副本：删的时候也只认那一层，与定位同口径
+  const deleteOpts = { isExactLayer: options.target !== undefined }
   for (const record of found) {
     if (secretIds.has(record.id)) {
-      if (await deps.store.hardDelete(record)) {
+      if (await deps.store.hardDelete(record, deleteOpts)) {
         forgotten.push(record.id)
         hardDeleted.push(record.id)
       }
-    } else if (await deps.store.softDelete(record)) forgotten.push(record.id)
+    } else if (options.isSoftOnly === true) {
+      // 读过之后另一个会话才写进密钥：锁内拦下，照样交回调用方
+      const outcome = await deps.store.softDeleteUnlessSecret(record, deleteOpts)
+      if (outcome === 'deleted') forgotten.push(record.id)
+      else if (outcome === 'has-secret') skippedSecrets.push(record.id)
+    } else if (await deps.store.softDelete(record, deleteOpts)) forgotten.push(record.id)
   }
   await deps.decisions.removeByMemoryIds(forgotten)
 
@@ -104,7 +132,7 @@ export async function executeForget(
     : ''
   const restoreNote = hardDeleted.length < forgotten.length ? `已自动快照（${snapshot.id}），14 天内可用 memory_snapshot 恢复。` : ''
   return {
-    ok: true, forgotten, hardDeleted, missing, rejected, otherWorkspaces, snapshotId: snapshot.id,
-    message: `已遗忘 ${forgotten.length} 条记忆${missingNote}。${hardNote}${restoreNote}${wsNote}`,
+    ok: true, forgotten, hardDeleted, missing, rejected, otherWorkspaces, snapshotId: snapshot.id, ...softOnlyFields(),
+    message: `已遗忘 ${forgotten.length} 条记忆${missingNote}。${hardNote}${restoreNote}${secretNote()}${wsNote}`,
   }
 }

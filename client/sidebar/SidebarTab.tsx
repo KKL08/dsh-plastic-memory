@@ -9,7 +9,7 @@
  * 新记的含密钥时不能软删（服务端回 has-secret，什么都没动）：原位确认，「彻底删除」发 hard-delete，删后原位留不可恢复的说明，tab 卸载后收起。
  */
 import { useMemo, useState, type ReactNode } from 'react'
-import { CONFLICT_ACTION_VERDICTS, type MemoryCard as MemoryCardData, type MemoryCommand, type PendingItem } from '../../src/gui/contract.ts'
+import { CONFLICT_ACTION_VERDICTS, layerOfMemory, type MemoryCard as MemoryCardData, type MemoryCommand, type PendingItem } from '../../src/gui/contract.ts'
 import { samePath, useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { baseName, formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
@@ -115,11 +115,12 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const undo = (decisionId: string) => {
     void run(decisionId, { cmd: 'undo', decisionId }, () => { setRuled(prev => prev.filter(r => r.decisionId !== decisionId)) })
   }
-  const forget = (memoryId: string) => {
-    void run(memoryId, { cmd: 'forget', memoryId }, () => { setForgotten(prev => new Set(prev).add(memoryId)) })
+  const forget = (memory: MemoryCardData) => {
+    const memoryId = memory.id
+    void run(memoryId, { cmd: 'forget', memoryId, layer: layerOfMemory(memory) }, () => { setForgotten(prev => new Set(prev).add(memoryId)) })
   }
-  const hardDelete = (memoryId: string) => {
-    void run(memoryId, { cmd: 'hard-delete', memoryId }, () => { setPurged(prev => new Set(prev).add(memoryId)) })
+  const hardDelete = (memoryId: string, memory: MemoryCardData | undefined) => {
+    void run(memoryId, { cmd: 'hard-delete', memoryId, layer: memory && layerOfMemory(memory) }, () => { setPurged(prev => new Set(prev).add(memoryId)) })
   }
 
   if (library.status !== 'ready') return <div className="pm-side"><ViewNote state={library} /></div>
@@ -130,9 +131,15 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   let globalCount = 0
   let projectCount = 0
   for (const { layer, items } of library.data.layers) {
-    for (const item of items) byId.set(item.id, item)
+    const isOwn = layer.kind === 'workspace' && ws !== undefined && samePath(layer.workspacePath, ws)
     if (layer.kind === 'global') globalCount += items.length
-    else if (ws !== undefined && samePath(layer.workspacePath, ws)) projectCount += items.length
+    else if (isOwn) projectCount += items.length
+    // 只收会话看得见的层（global + 本项目）；同 id 两层都有时取服务端会取的那份：updatedAt 新者，相同时本项目优先
+    if (layer.kind !== 'global' && !isOwn) continue
+    for (const item of items) {
+      const current = byId.get(item.id)
+      if (current === undefined || item.updatedAt > current.updatedAt || (item.updatedAt === current.updatedAt && isOwn)) byId.set(item.id, item)
+    }
   }
   if (globalCount === 0 && projectCount === 0) {
     return <div className="pm-side"><EmptyState variant="first" title={t('sidebar.empty.title')}>{t('sidebar.empty.body')}</EmptyState></div>
@@ -193,7 +200,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     <MemoryCard memory={memory} now={now} typeLabel={label(memory.type)} hideScope={memory.scope === 'workspace'} chip={chip} />
   )
   const failed = (id: string) => {
-    if (secretId === id) return <SecretDeleteConfirm onCancel={() => { setSecretId(undefined) }} onConfirm={() => { hardDelete(id) }} />
+    if (secretId === id) return <SecretDeleteConfirm onCancel={() => { setSecretId(undefined) }} onConfirm={() => { hardDelete(id, byId.get(id)) }} />
     if (cross?.id === id) {
       return (
         <CrossConfirm
@@ -255,7 +262,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
                     aria-label={t('sidebar.saved.delete')}
                     title={t('sidebar.saved.delete')}
                     aria-disabled={isWaiting(id) || undefined}
-                    onClick={() => { if (!isWaiting(id)) forget(id) }}
+                    onClick={() => { if (!isWaiting(id)) forget(memory) }}
                   >
                     <TrashIcon />
                   </button>

@@ -10,6 +10,7 @@ import { DeletedTab } from './DeletedTab.tsx'
 
 const DAY = 24 * 60 * 60 * 1000
 const app = { kind: 'workspace', workspacePath: '/w/app' } as const
+const blog = { kind: 'workspace', workspacePath: '/w/blog' } as const
 const session: BorrowedSession = { kind: 'ready', sessionId: 's1', cwd: '/w/app' }
 
 const plain = { memory: memory({ id: 'd1', name: 'pnpm-only', content: '用 pnpm 不用 npm' }), deletedAt: NOW - 2 * DAY, purgeAt: NOW + 12 * DAY }
@@ -84,7 +85,7 @@ describe('最近删除', () => {
     })
     renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
     await act(async () => { fireEvent.click(within(rowOf('测试用 sqlite')).getByRole('button', { name: '恢复' })) })
-    expect(gateway.executed).toEqual([{ sessionId: 's1', command: { cmd: 'restore', memoryId: 'd2' } }])
+    expect(gateway.executed).toEqual([{ sessionId: 's1', command: { cmd: 'restore', memoryId: 'd2', layer: app } }])
     expect(screen.getByRole('status')).toHaveTextContent('已恢复，这条冲突回到了待处理。')
   })
 
@@ -100,14 +101,14 @@ describe('最近删除', () => {
     expect(screen.getByText('这条记忆属于 blog 项目，不是当前项目。确定在这里处理它吗？')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '取消' }))
     expect(screen.queryByText(/属于 blog 项目/)).toBeNull()
-    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'restore', memoryId: 'd5' }])
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'restore', memoryId: 'd5', layer: blog }])
 
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '恢复' })) })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '继续处理' })) })
     expect(gateway.executed.map(e => e.command)).toEqual([
-      { cmd: 'restore', memoryId: 'd5' },
-      { cmd: 'restore', memoryId: 'd5' },
-      { cmd: 'restore', memoryId: 'd5', allowCrossWorkspace: true },
+      { cmd: 'restore', memoryId: 'd5', layer: blog },
+      { cmd: 'restore', memoryId: 'd5', layer: blog },
+      { cmd: 'restore', memoryId: 'd5', layer: blog, allowCrossWorkspace: true },
     ])
     expect(screen.getByRole('status')).toHaveTextContent('已恢复。')
   })

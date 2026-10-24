@@ -1,5 +1,6 @@
 import type { MemoryRecord } from '../record-schema.ts'
 import type { GovernanceRejectCode } from '../contract-codes.ts'
+import type { MemoryStore } from '../store.ts'
 
 /**
  * 跨 workspace 门（S2）：治理工具只在用户明确选择「全局整理」后才动其他项目的记录。
@@ -35,6 +36,22 @@ export const ALLOW_CROSS_WORKSPACE_PARAM = {
 
 export function isVisible(record: Pick<MemoryRecord, 'scope' | 'workspacePath'>, context: GovernanceContext): boolean {
   return record.scope === 'global' || (context.workspacePath !== undefined && record.workspacePath === context.workspacePath)
+}
+
+/** 同 id 在几个层里各有一份时指明哪一份：global 层或某个项目的层（GUI 按页面上那一份操作，结构同 GUI 契约的层引用）。 */
+export type CopyTarget = { kind: 'global' } | { kind: 'workspace'; workspacePath: string }
+
+export function isCopyOf(record: Pick<MemoryRecord, 'scope' | 'workspacePath'>, target: CopyTarget): boolean {
+  return target.kind === 'global' ? record.scope === 'global' : record.scope === 'workspace' && record.workspacePath === target.workspacePath
+}
+
+/**
+ * 按副本定位（含非 active）：只读目标那一层（isExactLayer），别层同 id 的副本再新也不取；目标层没有这个 id 时当作没找到。
+ * 写回时调用方带同样的只认层提示（store 删除类方法的 isExactLayer），改的就是读到的这一份。
+ */
+export async function locateCopy(store: Pick<MemoryStore, 'get'>, id: string, target: CopyTarget): Promise<MemoryRecord | undefined> {
+  const record = await store.get(id, { workspacePath: target.kind === 'workspace' ? target.workspacePath : undefined, isExactLayer: true })
+  return record !== undefined && isCopyOf(record, target) ? record : undefined
 }
 
 /** 记录所属 workspace 的标签：global 记忆为 'global'（待决账本的 workspaces 字段同口径）。 */

@@ -3,7 +3,7 @@
  * 模型怎么读到）和目录问题（来自视图，不在这里重算）；行尾打开文件、在访达中显示、删除（软删，提示去最近删除恢复；
  * 含密钥的先确认再彻底删除，不可恢复）。
  */
-import type { GuiLayerRef, LibraryView } from '../../src/gui/contract.ts'
+import { layerOfMemory, type GuiLayerRef, type LibraryView } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { formatNumber, useT, type Translate } from '../i18n.tsx'
 import { sameScope, type NavStore } from '../nav.ts'
@@ -122,7 +122,7 @@ export function LibraryTab({ nav, scope, session, now = Date.now() }: {
                   <Button
                     unavailable={actions.unavailable(memory.id)}
                     onClick={() => {
-                      void actions.run(memory.id, { cmd: 'forget', memoryId: memory.id }, () => t('library.deletedNotice'))
+                      void actions.run(memory.id, { cmd: 'forget', memoryId: memory.id, layer: layerOfMemory(memory) }, () => t('library.deletedNotice'))
                     }}
                   >
                     {t('library.delete')}

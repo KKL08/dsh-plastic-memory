@@ -62,6 +62,9 @@ export interface ScopeReadResult {
 export interface LocateHint {
   /** 当前 workspace：一级定位先看它的目录，取舍时它优先于 global 与其他项目。 */
   workspacePath?: string
+  /** 只认指明的那一层：有 workspacePath 只看它的目录，没有就只看 global 目录；不比别层的副本、不落到二级扫描。
+   *  调用方明确要动某一层的那一份时用（GUI 按页面上那一份操作）。带它的写与删只清同一层里的同 id 副本，别层的不动。 */
+  isExactLayer?: boolean
 }
 
 export interface WorkspaceDirEntry {
@@ -99,7 +102,7 @@ export interface MemoryTable {
   put(key: string, value: MemoryRecord, hint?: LocateHint, skipIf?: (current: MemoryRecord) => boolean): Promise<boolean>
   /** 锁内 locate（带 hint，同 id 多副本时与调用方读到的那份一致）→ fn(当前) → 写（同 put 的搬家与归档规则）；返回实际写出的记录（deleted 缺 deletedAt 时已补）。 */
   update(key: string, fn: (current: MemoryRecord) => MemoryRecord, hint?: LocateHint): Promise<MemoryRecord>
-  /** 物理删除（含 .archive/ 里的文件）；hint 同 update。可见集合（global + 该记录目录）里同 id 的其余副本一并删除。 */
+  /** 物理删除（含 .archive/ 里的文件）；hint 同 update。可见集合（global + 该记录目录）里同 id 的其余副本一并删除（只认层时只删该目录里的）。 */
   delete(key: string, hint?: LocateHint): Promise<boolean>
   /**
    * 维护点（设计稿 §5）：只动给定目录，锁内、幂等。再生索引；顶层非 active 搬 .archive/（.archive/ 里 status 仍为 active

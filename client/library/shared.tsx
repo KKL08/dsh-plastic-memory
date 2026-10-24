@@ -100,7 +100,8 @@ export function useRowActions(session: BorrowedSession) {
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set())
   const [notice, setNotice] = useState<Notice | undefined>(undefined)
   const [cross, setCross] = useState<CrossPending | undefined>(undefined)
-  const [secretId, setSecretId] = useState<string | undefined>(undefined)
+  /** forget 回了 has-secret 的那条命令：彻底删除沿用它指明的那一份，跨项目确认过的也不再问。 */
+  const [secret, setSecret] = useState<Extract<MemoryCommand, { cmd: 'forget' }> | undefined>(undefined)
   const sessionId = session.kind === 'ready' ? session.sessionId : undefined
   const mark = (id: string, on: boolean) => {
     setBusy((prev) => {
@@ -124,7 +125,7 @@ export function useRowActions(session: BorrowedSession) {
     }
     if (!result.ok && result.code === 'has-secret' && command.cmd === 'forget') {
       setNotice(undefined)
-      setSecretId(memoryId)
+      setSecret(command)
       return
     }
     setNotice(result.ok
@@ -136,7 +137,7 @@ export function useRowActions(session: BorrowedSession) {
     /** 按钮的 unavailable：没有会话、这条正在处理或等跨项目 / 彻底删除确认时给原因。 */
     unavailable(id: string, needsSession = true): string | undefined {
       if (needsSession && sessionId === undefined) return t('session.none.hint')
-      return busy.has(id) || cross?.memoryId === id || secretId === id ? t('action.busy') : undefined
+      return busy.has(id) || cross?.memoryId === id || secret?.memoryId === id ? t('action.busy') : undefined
     },
     run,
     /** 这一行的跨项目确认；不在等确认时为 null。 */
@@ -155,13 +156,13 @@ export function useRowActions(session: BorrowedSession) {
     },
     /** 这一行的彻底删除确认（forget 回了 has-secret）；不在等确认时为 null。 */
     secretConfirm(memoryId: string): ReactNode {
-      if (secretId !== memoryId) return null
+      if (secret?.memoryId !== memoryId) return null
       return (
         <SecretDeleteConfirm
-          onCancel={() => { setSecretId(undefined) }}
+          onCancel={() => { setSecret(undefined) }}
           onConfirm={() => {
-            setSecretId(undefined)
-            void run(memoryId, { cmd: 'hard-delete', memoryId }, () => t('pending.secret.deletedNotice'))
+            setSecret(undefined)
+            void run(memoryId, { ...secret, cmd: 'hard-delete' }, () => t('pending.secret.deletedNotice'))
           }}
         />
       )

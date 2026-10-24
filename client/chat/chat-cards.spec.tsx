@@ -154,6 +154,18 @@ describe('交付卡', () => {
     expect(gateway.executed.at(-1)).toEqual({ sessionId: 's1', command: { cmd: 'restore', memoryId: 'mem_1' } })
   })
 
+  it('全局记忆：删除与撤销都带上全局层，服务端只动全局那一份', async () => {
+    const gateway = createFakeGateway()
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_g', '回答用中文', 'global')]} now={NOW} openDetail={() => {}} deleted={new Map()} />, gateway)
+    fireEvent.click(screen.getByRole('button', { name: '删除这条记忆' }))
+    fireEvent.click(await screen.findByRole('button', { name: '撤销' }))
+    await screen.findByText('回答用中文')
+    expect(gateway.executed.map(e => e.command)).toEqual([
+      { cmd: 'forget', memoryId: 'mem_g', layer: { kind: 'global' } },
+      { cmd: 'restore', memoryId: 'mem_g', layer: { kind: 'global' } },
+    ])
+  })
+
   it('记忆卡的类型写显示名（待处理视图的 typeLabels）', () => {
     const gateway = createFakeGateway({ views: { pending: { version: GUI_VIEW_VERSION, dot: 'none', items: [], typeLabels: { preference: '行为偏好' } } } })
     const { container } = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} deleted={new Map()} />, gateway)
