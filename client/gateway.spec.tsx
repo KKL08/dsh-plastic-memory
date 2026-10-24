@@ -182,14 +182,14 @@ describe('createHostGateway', () => {
 
   it('配置：按 entryId 取表单，ready 时折成界面用的几项；setConfig 走单字段 set', async () => {
     const value = { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governance: { enabled: true, globalPromoteTarget: 'agents-md' } }
-    let snapshot: ConfigFormSnapshot = { status: 'loading', value: undefined }
+    let snapshot: ConfigFormSnapshot = { status: 'loading', value: undefined, revision: undefined, writable: true }
     const listeners = new Set<() => void>()
     const set = vi.fn(async () => true)
-    const get = vi.fn(() => ({ getSnapshot: () => snapshot, subscribe: (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn) } }, set }))
+    const get = vi.fn(() => ({ getSnapshot: () => snapshot, subscribe: (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn) } }, set, mutate: vi.fn(async () => true) }))
     const gateway = createHostGateway({ ...fakeCtx(), configForms: { get } })(props)
     const { result } = renderHook(() => gateway.useConfig())
     expect(result.current).toBeUndefined()
-    act(() => { snapshot = { status: 'ready', value }; for (const fn of listeners) fn() })
+    act(() => { snapshot = { status: 'ready', value, revision: 1, writable: true }; for (const fn of listeners) fn() })
     expect(result.current).toEqual({ snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget: 'agents-md' })
     expect(get).toHaveBeenCalledWith(CONFIG_ENTRY_ID)
     expect(await gateway.setConfig('snapshotTokenBudget', 5000)).toBe(true)

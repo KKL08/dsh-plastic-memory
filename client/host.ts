@@ -108,18 +108,28 @@ export interface HostLocale {
   subscribe(fn: () => void): () => void
 }
 
+/** ui-settings 的配置写入操作（config-form-types.ts，0.2.1-rc.2）。 */
+export type ConfigPathOp =
+  | { op: 'set'; path: string[]; value: unknown }
+  | { op: 'unset'; path: string[] }
+
 /** ui-settings ConfigFormSnapshot 子集。 */
 export interface ConfigFormSnapshot {
   status: 'loading' | 'ready' | 'unavailable'
   /** 按 schema 解析后的配置段（含默认值）；首次接受前为 undefined。 */
   value: unknown
+  /** 下一次写入用来防冲突的版本号。 */
+  revision: number | undefined
+  writable: boolean
 }
 
-/** ui-settings ConfigForm 子集：任意组件都能写单个字段（宿主接受为 true）。 */
+/** ui-settings ConfigForm 子集：单字段快捷写入用 `set`，设置页整批提交用 `mutate`（宿主接受为 true）。 */
 export interface ConfigForm {
   getSnapshot(): ConfigFormSnapshot
   subscribe(listener: () => void): () => void
   set(field: string, value: unknown): Promise<boolean>
+  /** 一次原子提交；false = 宿主拒绝（版本冲突或校验不过），宿主已重读最新值。传输失败 reject。 */
+  mutate(ops: readonly ConfigPathOp[], expectedRevision?: number): Promise<boolean>
 }
 
 export interface HostContext {

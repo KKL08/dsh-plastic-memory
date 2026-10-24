@@ -14,6 +14,7 @@ import { MemoryIcon } from './MemoryIcon.tsx'
 import { MemoryPage, memoryPageCss } from './MemoryPage.tsx'
 import { createNavStore, PANEL_ID, type NavStore } from './nav.ts'
 import { registerSidebarTab } from './sidebar/register.tsx'
+import { applySettings } from './settings/index.tsx'
 import { PanelShell } from './ui/PanelShell.tsx'
 
 export { PANEL_ID }
@@ -62,4 +63,5 @@ export function apply(ctx: HostContext & SidebarHost): void {
   ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({ name: 'conversation.composer.dock', id: DOCK_ID, order: DOCK_ORDER }, Dock))
   registerChatCards(ctx, nav)
   registerSidebarTab(ctx, nav, () => useHostTranslate(ctx.locale))
+  applySettings(ctx, nav, () => useHostTranslate(ctx.locale))
 }

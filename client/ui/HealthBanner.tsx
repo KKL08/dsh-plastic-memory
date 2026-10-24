@@ -6,7 +6,7 @@ import type { ReactNode } from 'react'
 import { StatusMarker, type MarkerKind } from './StatusMarker.tsx'
 
 export interface HealthBannerProps {
-  /** 缺省不画标记：分数偏低不是「等你决定」，不借琥珀和红。 */
+  /** 缺省不画标记：只是一句说明（如「还没有记忆」「体检已关闭」），分数偏低也不借琥珀和红。 */
   marker?: MarkerKind
   /** 一句结论，例如「有 2 处冲突等你决定」。标记的状态靠这句文字兜底。 */
   conclusion: ReactNode

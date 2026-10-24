@@ -9,6 +9,7 @@ import { libraryEn, libraryZh } from './locales/library.ts'
 import { chatEn, chatZh } from './locales/chat.ts'
 import { healthEn, healthZh } from './locales/health.ts'
 import { sidebarEn, sidebarZh } from './locales/sidebar.ts'
+import { settingsEn, settingsZh } from './locales/settings.ts'
 
 /** 宿主 locale 命名空间，和面板 id 同名。 */
 export const NS = 'plastic-memory'
@@ -85,6 +86,7 @@ export const zh = {
   ...healthZh,
   ...pendingZh,
   ...sidebarZh,
+  ...settingsZh,
 } as const
 
 export type LocaleKey = keyof typeof zh
@@ -161,4 +163,5 @@ export const en: Record<LocaleKey, string> = {
   ...healthEn,
   ...pendingEn,
   ...sidebarEn,
+  ...settingsEn,
 }
