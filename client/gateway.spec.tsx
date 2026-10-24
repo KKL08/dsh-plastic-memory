@@ -3,8 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { GUI_VIEW_VERSION, type PendingView } from '../src/gui/contract.ts'
 import {
-  CONFIG_ENTRY_ID, createHostGateway, decodeExecution, fileAddress, MEMORY_ROOT_KEY, PACKAGE_NAME, parseView, pickSession, toPluginConfig, viewPath,
+  CONFIG_ENTRY_ID, createHostGateway, decodeExecution, fileAddress, MEMORY_ROOT_KEY, parseView, pickSession, toPluginConfig, viewPath,
 } from './gateway.ts'
+import { fakeHostContext } from './test-utils.tsx'
 import type { ConfigFormSnapshot, HostContext, ResourceSnapshot, SessionListState, SessionSummary, WorkspaceFileStat } from './host.ts'
 
 function summary(id: string, patch: Partial<SessionSummary> = {}): SessionSummary {
@@ -81,14 +82,9 @@ describe('createHostGateway', () => {
   const pendingPath = '/h/memories/.state/gui/pending.json'
   let openWorkspacePath: ReturnType<typeof vi.fn>
 
-  function fakeCtx(): HostContext {
-    return {
-      inject: () => () => {},
-      slots: { inject: () => () => {}, register: () => () => {} },
-      locale: { register: () => () => {}, bind: () => k => k, getSnapshot: () => 0, subscribe: () => () => {} },
-      layout: { selectPanel: () => {} },
-      sidebarRight: { openTab: () => {} },
-      pluginNavigation: { openBundle: () => {} },
+  function fakeCtx(overrides: Parameters<typeof fakeHostContext>[0] = {}): HostContext {
+    return fakeHostContext({
+      ...overrides,
       remote: {
         commands: {
           execute: vi.fn(async (_sid: string, line: string) => {
@@ -106,9 +102,11 @@ describe('createHostGateway', () => {
             : { ok: true as const, value: { absolutePath: path, version: 'v1', text: files[path] } }),
         },
         session: { openWorkspacePath },
+        ...overrides.remote,
       },
-    }
+    })
   }
+
   const props = {
     useSessions: <S,>(selector: (s: SessionListState) => S) => selector(sessions),
     useResource: (address: string) => resources[address] ?? { status: 'none' as const, value: undefined, failure: undefined },
@@ -186,7 +184,7 @@ describe('createHostGateway', () => {
     const listeners = new Set<() => void>()
     const set = vi.fn(async () => true)
     const get = vi.fn(() => ({ getSnapshot: () => snapshot, subscribe: (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn) } }, set, mutate: vi.fn(async () => true) }))
-    const gateway = createHostGateway({ ...fakeCtx(), configForms: { get } })(props)
+    const gateway = createHostGateway(fakeCtx({ configForms: { get } }))(props)
     const { result } = renderHook(() => gateway.useConfig())
     expect(result.current).toBeUndefined()
     act(() => { snapshot = { status: 'ready', value, revision: 1, writable: true }; for (const fn of listeners) fn() })
@@ -203,18 +201,14 @@ describe('createHostGateway', () => {
     expect(toPluginConfig({ snapshotTokenBudget: '4000' })).toBeUndefined()
   })
 
-  it('打开文件 / 在文件管理器中显示走 session.openWorkspacePath；读文件走 workspaceFiles；设置走插件页导航', async () => {
+  it('打开文件 / 在文件管理器中显示走 session.openWorkspacePath；读文件走 workspaceFiles', async () => {
     const openWorkspacePath = vi.fn(async () => ({ ok: true as const, value: { opened: true } }))
-    const openBundle = vi.fn()
-    const ctx = fakeCtx()
     files['/m/a.md'] = '---\nname: a\n---\n正文'
-    const gateway = createHostGateway({ ...ctx, remote: { ...ctx.remote, session: { openWorkspacePath } }, pluginNavigation: { openBundle } })(props)
+    const gateway = createHostGateway(fakeCtx({ remote: { session: { openWorkspacePath } } }))(props)
     expect(await gateway.openPath('/m/a.md', 'open')).toBe(true)
     expect(await gateway.openPath('/m/a.md', 'reveal')).toBe(true)
     expect(openWorkspacePath.mock.calls).toEqual([[{ path: '/m/a.md' }], [{ path: '/m/a.md', action: 'reveal' }]])
     expect(await gateway.readFile('s1', '/m/a.md')).toBe('---\nname: a\n---\n正文')
     expect(await gateway.readFile('s1', '/m/none.md')).toBeUndefined()
-    gateway.openSettings()
-    expect(openBundle).toHaveBeenCalledWith(PACKAGE_NAME)
   })
 })

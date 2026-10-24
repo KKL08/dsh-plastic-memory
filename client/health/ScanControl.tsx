@@ -7,7 +7,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { MemoryCommandResult } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { useT } from '../i18n.tsx'
-import type { NavStore } from '../nav.ts'
+import { useCanOpen, type NavStore } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 
 type ScanNote = NonNullable<Extract<MemoryCommandResult, { ok: true }>['notes']>[number]
@@ -45,11 +45,14 @@ export function ScanControl({ session, workspacePath, hasPending, nav, leading }
     })
   }
 
-  const openSettings = <button type="button" className="pm-link" onClick={() => { nav.openSettings() }}>{t('scan.openSettings')}</button>
+  const canOpenSettings = useCanOpen(nav, 'settings')
+  const openSettings = canOpenSettings
+    ? <><i className="pm-sep" aria-hidden="true">·</i><button type="button" className="pm-link" onClick={() => { nav.openSettings() }}>{t('scan.openSettings')}</button></>
+    : null
   const isRunning = state.kind === 'running'
   let status: ReactNode = null
   if (isOff || (state.kind === 'failed' && state.code === 'governance-disabled')) {
-    status = <>{t('scan.off')}<i className="pm-sep" aria-hidden="true">·</i>{openSettings}</>
+    status = <>{t('scan.off')}{openSettings}</>
   } else if (state.kind === 'running') {
     status = t('scan.runningHint')
   } else if (state.kind === 'failed') {

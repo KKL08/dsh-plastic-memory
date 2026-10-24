@@ -3,7 +3,8 @@
  * 或带入与新记都为空）时不渲染。点开的弹层照抄宿主 ContextMeter 弹层的版式：标题行占比 + 约已用 / 上限、
  * 三段作用域条与明细、带入与新记条数、超限行、「查看带入的记忆 ›」。
  *
- * 占比 = 快照 usedTokens / 宿主 contextPressure 投影的 contextWindow（宿主公式的分母）；读不到窗口只写「约已用 / 上限」。
+ * 已用 = 会话视图三段（本项目、全局、固定说明）之和，和用量条同一口径；占比 = 已用 / 宿主 contextPressure 投影的
+ * contextWindow（宿主公式的分母）；读不到窗口只写「约已用 / 上限」。超限行按计入上限的 usedTokens（服务端是否放宽按它定）。
  * 记忆 token 是插件估算，和宿主计数口径不同，所以一律带「约」。
  */
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
@@ -13,7 +14,7 @@ import { useGateway, type BorrowedSession } from '../gateway.ts'
 import type { ContextPressureProjection, SessionStandardProps } from '../host.ts'
 import { formatNumber, useT } from '../i18n.tsx'
 import { MemoryIcon } from '../MemoryIcon.tsx'
-import { relaxedCap } from '../ui/ContextBudgetBar.tsx'
+import { barScale, relaxedCap } from '../ui/ContextBudgetBar.tsx'
 
 /** 分割占比句子用的标记，和宿主 ContextMeter 的 READING_SLOT 同法。 */
 const READING_SLOT = '\u0000'
@@ -21,10 +22,10 @@ const PANEL_WIDTH = 264
 const EDGE = 12
 
 /** 记忆占上下文的读数；没有上下文窗口时为 null。不到 1% 写「<1%」，避免把有记忆写成 0%。 */
-export function memoryShare(usedTokens: number, pressure: ContextPressureProjection | undefined): string | null {
+export function memoryShare(used: number, pressure: ContextPressureProjection | undefined): string | null {
   const window = pressure?.contextWindow
   if (window === undefined || window <= 0) return null
-  const ratio = (usedTokens / window) * 100
+  const ratio = (used / window) * 100
   if (ratio > 0 && ratio < 1) return '<1%'
   return `${Math.min(100, Math.round(ratio))}%`
 }
@@ -34,7 +35,8 @@ export function hasSessionMemory(view: SessionView | undefined): view is Session
 }
 
 export interface MemoryButtonProps extends Pick<SessionStandardProps, 'sessionId' | 'useProjection'> {
-  onOpenTab: () => void
+  /** 打开右侧栏记忆 tab；缺省（宿主没有右侧栏）时不画「查看带入的记忆 ›」。 */
+  onOpenTab: (() => void) | undefined
   onHandle: () => void
 }
 
@@ -78,11 +80,11 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
     setPosition({ left, bottom: window.innerHeight - rect.top + 8, width })
   }
 
-  const share = memoryShare(view.usedTokens, pressure)
-  const [headBefore = '', headAfter = ''] = t('composer.share', { percent: READING_SLOT }).split(READING_SLOT).map(s => s.trim())
   const { workspace, global, fixed } = view.tokens
-  const total = workspace + global + fixed
-  const scale = Math.max(relaxedCap(total, view.budget), total, 1)
+  const used = workspace + global + fixed
+  const share = memoryShare(used, pressure)
+  const [headBefore = '', headAfter = ''] = t('composer.share', { percent: READING_SLOT }).split(READING_SLOT).map(s => s.trim())
+  const scale = barScale(used, view.usedTokens, view.budget)
   const rows = [
     { key: 'workspace', label: t('composer.workspace'), n: workspace },
     { key: 'global', label: t('composer.global'), n: global },
@@ -121,7 +123,7 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
               </>
             )}
             <span className="pm-composer-figures">
-              {t('composer.figures', { used: formatNumber(view.usedTokens), budget: formatNumber(view.budget) })}
+              {t('composer.figures', { used: formatNumber(used), budget: formatNumber(view.budget) })}
             </span>
           </div>
           <div className="pm-composer-bar">
@@ -147,9 +149,11 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
               <button type="button" className="pm-link" onClick={() => { close(); onHandle() }}>{t('composer.handle')}</button>
             </div>
           )}
-          <button type="button" className="pm-link pm-composer-open" onClick={() => { close(); onOpenTab() }}>
-            {t('composer.viewInjected')}
-          </button>
+          {onOpenTab === undefined ? null : (
+            <button type="button" className="pm-link pm-composer-open" onClick={() => { close(); onOpenTab() }}>
+              {t('composer.viewInjected')}
+            </button>
+          )}
         </div>,
         document.body,
       )}

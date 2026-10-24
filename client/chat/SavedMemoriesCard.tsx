@@ -4,12 +4,13 @@
  * 右下角「查看详情 ›」（次文字色、常规字重）打开记忆页「全部记忆」并定位到这一条。
  * 密钥不会出现在这里：厂商格式写入时就被拒，疑似的写入前已问过用户。
  */
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import type { GuiLayerRef } from '../../src/gui/contract.ts'
-import { useGateway } from '../gateway.ts'
+import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { useT } from '../i18n.tsx'
 import type { NavTarget } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
+import { useTypeLabel } from '../library/shared.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import type { SavedMemory } from './saved-turn.ts'
 
@@ -37,7 +38,7 @@ const TrashIcon = () => (
   </svg>
 )
 
-function SavedRow({ sessionId, item, now, deleted }: { sessionId: string; item: SavedMemory; now: number; deleted: Set<string> }) {
+function SavedRow({ sessionId, item, now, deleted, typeLabel }: { sessionId: string; item: SavedMemory; now: number; deleted: Set<string>; typeLabel: (type: string) => string }) {
   const t = useT()
   const gateway = useGateway()
   const id = item.memory.id
@@ -66,7 +67,7 @@ function SavedRow({ sessionId, item, now, deleted }: { sessionId: string; item: 
   return (
     <div className="pm-saved-row" data-memory-id={id}>
       <div className="pm-saved-main">
-        <MemoryCard memory={item.memory} now={now} />
+        <MemoryCard memory={item.memory} now={now} typeLabel={typeLabel(item.memory.type)} />
         {state.kind === 'failed' ? <p className="pm-saved-note">{t('chat.card.failed', { detail: state.detail })}</p> : null}
       </div>
       <button
@@ -85,6 +86,8 @@ function SavedRow({ sessionId, item, now, deleted }: { sessionId: string; item: 
 
 export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail, deleted }: SavedMemoriesCardProps) {
   const t = useT()
+  const session = useMemo<BorrowedSession>(() => ({ kind: 'ready', sessionId, cwd }), [sessionId, cwd])
+  const typeLabel = useTypeLabel(session)
   const first = saved[0]!.memory
   const scope: GuiLayerRef | undefined = first.scope === 'global' ? { kind: 'global' }
     : cwd === undefined ? undefined : { kind: 'workspace', workspacePath: cwd }
@@ -92,7 +95,7 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail, dele
     <section className="pm-saved" aria-label={t('chat.card.title', { count: saved.length })}>
       <h3 className="pm-saved-title">{t('chat.card.title', { count: saved.length })}</h3>
       <div className="pm-saved-list">
-        {saved.map(item => <SavedRow key={item.callId} sessionId={sessionId} item={item} now={now} deleted={deleted} />)}
+        {saved.map(item => <SavedRow key={item.callId} sessionId={sessionId} item={item} now={now} deleted={deleted} typeLabel={typeLabel} />)}
       </div>
       <div className="pm-saved-foot">
         <button

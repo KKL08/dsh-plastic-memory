@@ -5,19 +5,14 @@
  * tab 不常驻：从「开始」页入口或 `openMemoryTab`（`ctx.sidebarRight.openTab`）打开。
  */
 import { useMemo } from 'react'
-import { createHostGateway } from '../gateway.ts'
-import type { HostContext, SessionStandardProps, SidebarHost } from '../host.ts'
+import type { BindGateway } from '../gateway.ts'
+import type { SessionStandardProps, SidebarHost } from '../host.ts'
 import type { Translate } from '../i18n.tsx'
 import { NS } from '../locales.ts'
 import { MemoryIcon } from '../MemoryIcon.tsx'
-import { openMemoryPage, type NavStore } from '../nav.ts'
+import { openMemoryPage, SIDEBAR_TAB_ID, SIDEBAR_TAB_KIND, type NavStore } from '../nav.ts'
 import { PanelShell } from '../ui/PanelShell.tsx'
 import { SidebarTab, sidebarTabCss } from './SidebarTab.tsx'
-
-/** 实现身份（宿主要求全局唯一，取包名），也是正文与标题插槽的 key。 */
-export const SIDEBAR_TAB_ID = 'dsh-plastic-memory'
-/** `openTab` 认的类型名。 */
-export const SIDEBAR_TAB_KIND = 'plastic-memory'
 
 function GuideIcon({ size }: { size?: number | undefined }) {
   return <MemoryIcon size={size ?? 22} active={false} />
@@ -33,8 +28,16 @@ export function openMemoryTab(ctx: Pick<SidebarHost, 'sidebarRight'>): void {
   ctx.sidebarRight.openTab(SIDEBAR_TAB_KIND)
 }
 
-export function registerSidebarTab(ctx: HostContext & SidebarHost, nav: NavStore, useTranslate: () => Translate): void {
+/**
+ * 在 `ctx.inject(['sidebarRightTabs', 'sidebarRight'], …)` 的子上下文里调用：登记 tab 类型、注册正文与标题，
+ * 并把「打开记忆 tab」交给导航 store（输入框弹层的「查看带入的记忆 ›」靠它；kind 没登记时 openTab 会抛错，所以随登记一起给出）。
+ */
+export function registerSidebarTab(ctx: SidebarHost, nav: NavStore, bind: BindGateway, useTranslate: () => Translate): void {
   const t = ctx.locale.bind(NS)
+  ctx.effect(() => {
+    nav.provide('sidebarTab', () => { openMemoryTab(ctx) })
+    return () => { nav.provide('sidebarTab', undefined) }
+  }, 'plastic-memory: sidebar tab exit')
   ctx.effect(() => ctx.sidebarRightTabs.register({
     id: SIDEBAR_TAB_ID,
     kind: SIDEBAR_TAB_KIND,
@@ -48,10 +51,6 @@ export function registerSidebarTab(ctx: HostContext & SidebarHost, nav: NavStore
     }],
   }), 'plastic-memory: sidebar tab type')
 
-  // 宿主启动时间：浏览器半侧拿不到宿主进程的启动时刻（boot 数据与 Remote 都没有），先用插件加载（≈ 页面加载）时刻代替。
-  // 页面通常随宿主一起打开；刷新页面后，刷新前冻结的会话也会显示「重启后未重新带入」。
-  const hostStartedAt = Date.now()
-  const bind = createHostGateway(ctx)
   function MemorySidebarTab(props: SessionStandardProps) {
     const gateway = useMemo(() => bind(props), [props.useSessions, props.useResource])
     const translate = useTranslate()
@@ -61,7 +60,6 @@ export function registerSidebarTab(ctx: HostContext & SidebarHost, nav: NavStore
         <SidebarTab
           sessionId={props.sessionId}
           workspacePath={cwd}
-          hostStartedAt={hostStartedAt}
           openPage={(target) => { openMemoryPage(ctx, nav, target) }}
         />
       </PanelShell>

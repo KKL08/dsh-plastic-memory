@@ -31,8 +31,6 @@ export interface FakeGateway extends MemoryGateway {
   readonly opened: Array<{ path: string; action?: 'reveal' }>
   /** readFile 读过的路径。 */
   readonly reads: string[]
-  /** openSettings 调用次数。 */
-  readonly settingsOpened: { count: number }
   setConfigValue(config: PluginConfig | undefined): void
   setSession(session: BorrowedSession): void
   setCurrentWorkspace(path: string | undefined): void
@@ -62,7 +60,6 @@ export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
   const configWrites: FakeGateway['configWrites'] = []
   const opened: FakeGateway['opened'] = []
   const reads: string[] = []
-  const settingsOpened = { count: 0 }
   let config = init.config
 
   return {
@@ -71,7 +68,6 @@ export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
     sessionRequests,
     configWrites,
     reads,
-    settingsOpened,
     setConfigValue(next) { config = next; bump() },
     useConfig() {
       useRevision()
@@ -85,7 +81,6 @@ export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
       reads.push(path)
       return init.files?.[path]
     },
-    openSettings() { settingsOpened.count += 1 },
     setSession(next) { session = next; bump() },
     setCurrentWorkspace(path) { currentWorkspace = path; bump() },
     setView(name, value) { views.set(name, toState(value)); bump() },

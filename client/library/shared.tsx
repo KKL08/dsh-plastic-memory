@@ -1,12 +1,22 @@
 /**
  * 「全部记忆」「最近删除」共用的几件小东西：视图没就绪时的一行说明、带参数打开时的目标行高亮、
- * 跨项目标记、行尾动作的进行中 / 结果提示。
+ * 跨项目标记、行尾动作的进行中 / 结果提示、类型显示名。
  */
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { MemoryCard, MemoryCommand } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { useT } from '../i18n.tsx'
 import { useNavTarget, type NavStore, type NavTarget } from '../nav.ts'
+
+/**
+ * hook：类型 id → 显示名。显示名只有待处理视图带（typeLabels，注册表的 label，含切模板前的旧类型）；
+ * 视图还没到、或认不出的类型显示 id。
+ */
+export function useTypeLabel(session: BorrowedSession): (type: string) => string {
+  const pending = useGateway().useView(session, 'pending')
+  const labels = pending.status === 'ready' ? pending.data.typeLabels : undefined
+  return useCallback((type: string) => labels?.[type] ?? type, [labels])
+}
 
 /** 视图不是 ready 时的一行说明；idle（没有会话）由页面壳的空态负责，这里不画。 */
 export function ViewMessage({ state }: { state: Exclude<ViewState<unknown>, { status: 'ready' }> }) {

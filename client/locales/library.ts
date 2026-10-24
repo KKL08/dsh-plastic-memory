@@ -21,6 +21,7 @@ export const libraryZh = {
   'library.empty.scope': '这里还没有记忆',
 
   'deleted.label': '已删除',
+  'deleted.cause.keep': '以「{name}」为准时删除',
   'deleted.cause.keepA': '以 A 为准时删除',
   'deleted.cause.keepB': '以 B 为准时删除',
   'deleted.cause.baseline': '以基线为准时删除',
@@ -59,6 +60,7 @@ export const libraryEn: Record<keyof typeof libraryZh, string> = {
   'library.empty.scope': 'No memories here yet',
 
   'deleted.label': 'Deleted',
+  'deleted.cause.keep': 'Deleted when going with “{name}”',
   'deleted.cause.keepA': 'Deleted when going with A',
   'deleted.cause.keepB': 'Deleted when going with B',
   'deleted.cause.baseline': 'Deleted when going with the baseline',
