@@ -99,7 +99,11 @@ export function buildPendingView(input: ViewInput): PendingView {
   for (const e of [...input.open].sort((a, b) => a.firstSeenAt - b.firstSeenAt)) {
     const base = { decisionId: e.id, firstSeenAt: e.firstSeenAt }
     const kind = kindOf(e)
-    if (kind === 'promote-candidate') items.push({ kind, ...base, memory: cardOf(e.memoryIds[0], data) })
+    if (kind === 'promote-candidate') {
+      // 记忆已不是本项目候选（模型直接 memory_promote、标记被清、记忆没了）：旧条目不显示，下次体检清掉
+      const r = data.byId.get(e.memoryIds[0] ?? '')
+      if (r?.status === 'active' && r.scope === 'workspace' && r.globalCandidate) items.push({ kind, ...base, memory: card(r, data) })
+    }
     else if (kind === 'overflow') {
       const scope = overflowScopeOf(e)
       items.push({ kind, ...base, ...overflowLevelOf(e), ...(scope !== undefined && scope !== 'global' ? { workspacePath: scope } : {}) })

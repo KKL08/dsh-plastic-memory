@@ -19,7 +19,8 @@ import {
   deletedViewSchema, memoryCommandResultSchema, pendingViewSchema,
   type MemoryCommand, type MemoryCommandResult,
 } from '../src/gui/contract.ts'
-import { record } from './helpers/record.ts'
+import { runSavePipeline } from '../src/pipeline.ts'
+import { candidate, record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 
 // /memory 命令处理器：真实临时目录（FileTable + .state 侧表 + 视图文件），只把宿主那一侧
@@ -290,40 +291,72 @@ describe('hard-delete', () => {
 })
 
 describe('提升候选与超限', () => {
-  async function seedCandidate(e: ReturnType<typeof env>) {
-    await e.store.create(record({ id: 'mem_p', name: '戊', scope: 'workspace', workspacePath: SESSION_WS, globalCandidate: true }))
-    return (await e.decisions.upsert({ kind: 'promote-candidate', memoryIds: ['mem_p'], summary: '可提升', fingerprint: 'fp-p' }, 1)).entry
-  }
+  const quietLlm: SemanticLlm = { complete: async () => '{"findings":[]}' }
 
-  it('promote 到全局：记忆变 global、条目 settled 为 promoted 并带快照；undo 后回到本项目、候选回到待处理', async () => {
-    const e = env()
-    const entry = await seedCandidate(e)
-    const body = ok(await e.run({ cmd: 'promote', decisionId: entry.id, target: 'global' }))
-    expect(body.memoryIds).toEqual(['mem_p'])
-    expect((await e.store.get('mem_p'))!.scope).toBe('global')
+  /** 真实路径：模型以 scope: global 保存 → 管线降级为本项目 + globalCandidate → 体检把它挂进账本 → 待处理视图里出现。 */
+  async function seedCandidate(e: ReturnType<typeof env>) {
+    const saved = await runSavePipeline(candidate({ name: '戊', content: '所有项目都用 vitest', summary: '都用 vitest' }), {
+      store: e.store, registry, workspacePath: SESSION_WS, session: { id: 'sess-1', lastSeq: 1 },
+    })
+    if (saved.kind !== 'saved') throw new Error(saved.kind)
+    expect([saved.record.scope, saved.record.workspacePath, saved.record.globalCandidate]).toEqual(['workspace', SESSION_WS, true])
+    ok(await e.run({ cmd: 'scan' }))
+    const items = pendingViewSchema.parse(await e.readView('pending')).items.filter(i => i.kind === 'promote-candidate')
+    expect(items.map(i => i.kind === 'promote-candidate' && i.memory?.id)).toEqual([saved.record.id])
+    return { decisionId: (items[0] as { decisionId: string }).decisionId, memoryId: saved.record.id }
+  }
+  const pendingCandidates = async (e: ReturnType<typeof env>) =>
+    pendingViewSchema.parse(await e.readView('pending')).items.filter(i => i.kind === 'promote-candidate')
+
+  it('promote 到全局：记忆变 global、条目 settled 为 promoted 并带快照、待处理里消失；undo 后回到本项目、候选回到待处理', async () => {
+    const e = env({ llm: quietLlm })
+    const { decisionId, memoryId } = await seedCandidate(e)
+    const body = ok(await e.run({ cmd: 'promote', decisionId, target: 'global' }))
+    expect(body.memoryIds).toEqual([memoryId])
+    expect((await e.store.get(memoryId))!.scope).toBe('global')
     const [snap] = await e.snapshots.list()
     expect((await e.decisions.listSettled()).map(d => d.settled)).toEqual([{ verdict: 'promoted', at: NOW, snapshotId: snap!.id }])
+    expect(await pendingCandidates(e)).toEqual([])
 
-    ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
-    const back = (await e.store.get('mem_p'))!
+    // 提升后再体检：已提升的不再挂候选
+    ok(await e.run({ cmd: 'scan' }))
+    expect(await pendingCandidates(e)).toEqual([])
+
+    ok(await e.run({ cmd: 'undo', decisionId }))
+    const back = (await e.store.get(memoryId))!
     expect([back.scope, back.workspacePath, back.globalCandidate]).toEqual(['workspace', SESSION_WS, true])
-    expect((await e.decisions.list()).map(d => d.id)).toEqual([entry.id])
+    expect((await e.decisions.list()).map(d => d.id)).toEqual([decisionId])
+    expect((await pendingCandidates(e)).map(i => 'decisionId' in i && i.decisionId)).toEqual([decisionId])
   })
 
   it('promote 写进 AGENTS.md：条目移出账本（插件不再管理，不可撤销）', async () => {
-    const e = env()
-    const entry = await seedCandidate(e)
-    ok(await e.run({ cmd: 'promote', decisionId: entry.id, target: 'agents-md' }))
+    const e = env({ llm: quietLlm })
+    const { decisionId } = await seedCandidate(e)
+    ok(await e.run({ cmd: 'promote', decisionId, target: 'agents-md' }))
     expect(await readFile(join(root, 'AGENTS.md'), 'utf8')).toContain('戊')
     expect(await allEntries(e)).toEqual([])
+    expect(await pendingCandidates(e)).toEqual([])
   })
 
-  it('keep-local：清候选标记、条目 settled 为 keep-local', async () => {
-    const e = env()
-    const entry = await seedCandidate(e)
-    ok(await e.run({ cmd: 'keep-local', decisionId: entry.id }))
-    expect((await e.store.get('mem_p'))!.globalCandidate).toBeUndefined()
+  it('keep-local：清候选标记、条目 settled 为 keep-local；再体检不重开，内容改了（模型又标为全局）才重新提示', async () => {
+    const e = env({ llm: quietLlm })
+    const { decisionId, memoryId } = await seedCandidate(e)
+    ok(await e.run({ cmd: 'keep-local', decisionId }))
+    expect((await e.store.get(memoryId))!.globalCandidate).toBeUndefined()
     expect((await e.decisions.listSettled()).map(d => d.settled?.verdict)).toEqual(['keep-local'])
+    expect(await pendingCandidates(e)).toEqual([])
+
+    ok(await e.run({ cmd: 'scan' }))
+    expect(await pendingCandidates(e)).toEqual([])
+    expect((await e.decisions.listSettled()).map(d => d.id)).toEqual([decisionId])
+
+    const updated = await runSavePipeline(candidate({ action: 'update', id: memoryId, name: '戊', content: '所有项目都用 vitest，覆盖率不设门槛', summary: '都用 vitest' }), {
+      store: e.store, registry, workspacePath: SESSION_WS, session: { id: 'sess-1', lastSeq: 2 },
+    })
+    expect(updated.kind).toBe('updated')
+    expect((await e.store.get(memoryId))!.globalCandidate).toBe(true)
+    ok(await e.run({ cmd: 'scan' }))
+    expect((await pendingCandidates(e)).map(i => i.kind === 'promote-candidate' && i.memory?.id)).toEqual([memoryId])
   })
 
   it('promote / keep-local 指向冲突条目 → failed，条目不动', async () => {

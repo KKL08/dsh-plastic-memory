@@ -533,3 +533,89 @@ describe('executeScan scope 校验', () => {
     expect(self.message).not.toContain('/proj') // 自己的 workspace 走「本项目」标签，不带路径
   })
 })
+
+describe('executeScan 提升候选入账', () => {
+  const candidates = async (deps: ScanToolDeps) => (await deps.decisions.list()).filter(d => d.kind === 'promote-candidate')
+  const settledCandidates = async (deps: ScanToolDeps) => (await deps.decisions.listSettled()).filter(d => d.kind === 'promote-candidate')
+  const atProj = () => makeDeps({ resolveContext: async () => ({ workspacePath: '/proj' }) })
+
+  it('单层扫描：本项目带 globalCandidate 的记忆各挂一条 promote-candidate（memoryIds、workspaces、summary、指纹）；重扫不重复', async () => {
+    const deps = atProj()
+    await deps.store.put(record({ id: 'mem_c', scope: 'workspace', workspacePath: '/proj', summary: '候选摘要', globalCandidate: true }))
+    await deps.store.put(record({ id: 'mem_plain', scope: 'workspace', workspacePath: '/proj' }))
+    await scanSingle({ layers: 'rule' }, deps)
+    const [entry, ...rest] = await candidates(deps)
+    expect(rest).toEqual([])
+    expect(entry).toMatchObject({ kind: 'promote-candidate', memoryIds: ['mem_c'], workspaces: ['/proj'], summary: '候选摘要', firstSeenAt: 9000 })
+    expect(entry!.fingerprint).toEqual(expect.any(String))
+
+    await scanSingle({ layers: 'rule' }, deps)
+    expect((await candidates(deps)).map(d => d.id)).toEqual([entry!.id])
+  })
+
+  it('留在本项目（settled keep-local + 清标记）后重扫不重开；同内容再被标记也不重开；内容改了重新提示', async () => {
+    const deps = atProj()
+    const rec = record({ id: 'mem_c', scope: 'workspace', workspacePath: '/proj', content: '用 pnpm', globalCandidate: true })
+    await deps.store.put(rec)
+    await scanSingle({ layers: 'rule' }, deps)
+    const [entry] = await candidates(deps)
+    await deps.decisions.settle(entry!.id, 'keep-local', 9000)
+    const { globalCandidate: _flag, ...unflagged } = rec
+    await deps.store.put(unflagged)
+
+    await scanSingle({ layers: 'rule' }, deps)
+    expect(await candidates(deps)).toEqual([])
+    expect((await settledCandidates(deps)).map(d => d.id)).toEqual([entry!.id])
+
+    await deps.store.put(rec) // 模型又标了一次，内容没变
+    await scanSingle({ layers: 'rule' }, deps)
+    expect(await candidates(deps)).toEqual([])
+
+    await deps.store.put({ ...rec, content: '用 pnpm，锁文件要提交' })
+    await scanSingle({ layers: 'rule' }, deps)
+    expect((await candidates(deps)).map(d => d.memoryIds)).toEqual([['mem_c']])
+    expect(await settledCandidates(deps)).toEqual([])
+  })
+
+  it('未决候选的记忆不再是候选（标记被清 / 已提升为全局 / 记忆没了）：重扫移除条目', async () => {
+    const deps = atProj()
+    const a = record({ id: 'mem_a', scope: 'workspace', workspacePath: '/proj', globalCandidate: true })
+    const b = record({ id: 'mem_b', scope: 'workspace', workspacePath: '/proj', globalCandidate: true })
+    const c = record({ id: 'mem_c', scope: 'workspace', workspacePath: '/proj', globalCandidate: true })
+    for (const r of [a, b, c]) await deps.store.put(r)
+    await scanSingle({ layers: 'rule' }, deps)
+    expect((await candidates(deps)).map(d => d.memoryIds[0]).sort()).toEqual(['mem_a', 'mem_b', 'mem_c'])
+
+    const { globalCandidate: _a, ...aCleared } = a
+    await deps.store.put(aCleared)
+    const { globalCandidate: _b, workspacePath: _ws, ...bRest } = b
+    await deps.store.put({ ...bRest, scope: 'global' })
+    await deps.store.put({ ...c, status: 'deleted', deletedAt: 9000 })
+    await scanSingle({ layers: 'rule' }, deps)
+    expect(await candidates(deps)).toEqual([])
+  })
+
+  it('已提升（settled promoted）的记忆又成了本项目候选（被快照恢复回来）：重新回到待处理', async () => {
+    const deps = atProj()
+    await deps.store.put(record({ id: 'mem_c', scope: 'workspace', workspacePath: '/proj', globalCandidate: true }))
+    await scanSingle({ layers: 'rule' }, deps)
+    const [entry] = await candidates(deps)
+    await deps.decisions.settle(entry!.id, 'promoted', 9000, { snapshotId: 'snap_x' })
+
+    await scanSingle({ layers: 'rule' }, deps)
+    expect((await candidates(deps)).map(d => d.id)).toEqual([entry!.id])
+  })
+
+  it('全库体检：每个项目的候选都入账；scopes 子集不动其他项目的条目', async () => {
+    const deps = makeDeps()
+    await deps.store.put(record({ id: 'mem_a1', scope: 'workspace', workspacePath: '/proj-a', globalCandidate: true }))
+    await deps.store.put(record({ id: 'mem_b1', scope: 'workspace', workspacePath: '/proj-b', globalCandidate: true }))
+    await executeScan({ scope: 'all', layers: 'rule' }, deps, fakeExec())
+    expect((await candidates(deps)).map(d => [d.memoryIds[0], d.workspaces]).sort()).toEqual([['mem_a1', ['/proj-a']], ['mem_b1', ['/proj-b']]])
+
+    // proj-b 的记忆没了，但这次只体检 proj-a：proj-b 的条目留着，等扫到它再说
+    await deps.store.put(record({ id: 'mem_b1', scope: 'workspace', workspacePath: '/proj-b', status: 'deleted', deletedAt: 9000 }))
+    await executeScan({ scopes: ['/proj-a'], layers: 'rule' }, deps, fakeExec())
+    expect((await candidates(deps)).map(d => d.memoryIds[0]).sort()).toEqual(['mem_a1', 'mem_b1'])
+  })
+})

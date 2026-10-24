@@ -69,7 +69,7 @@ describe('待处理视图', () => {
     await h.store.create(w({ id: 'mem_a', name: 'A', content: '用 pnpm' }))
     await h.store.create(w({ id: 'mem_b', name: 'B', content: '用 npm' }))
     await h.store.create(w({ id: 'mem_v', name: 'V', content: '用 yarn' }))
-    await h.store.create(w({ id: 'mem_p', name: 'P', content: '所有项目都用 vitest' }))
+    await h.store.create(w({ id: 'mem_p', name: 'P', content: '所有项目都用 vitest', globalCandidate: true }))
     await writeFile(join(wsDir(), 'broken.md'), '---\nname: [\n---\n正文\n')
     await h.decisions.syncOverflow(WS, { mode: 'relax', tier: 2 }, 1, '超限')
     const [overflow] = await h.decisions.listOverflow()
@@ -129,6 +129,26 @@ describe('待处理视图', () => {
     const { pending } = await h.views()
     expect(pending.items.map(i => i.kind)).toEqual(['unreadable-file'])
     expect(pending.dot).toBe('none')
+  })
+})
+
+describe('待处理视图：提升候选', () => {
+  it('记忆已不是本项目候选（模型直接 memory_promote 了、标记被清、记忆没了）：账本里的旧条目不显示、不亮点，等下次体检清掉', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_live', name: 'L', globalCandidate: true }))
+    await h.store.create(w({ id: 'mem_cleared', name: 'C' }))
+    await h.store.create(g({ id: 'mem_promoted', name: 'G' }))
+    for (const [id, t] of [['mem_live', 1], ['mem_cleared', 2], ['mem_promoted', 3], ['mem_gone', 4]] as const) {
+      await h.decisions.upsert({ kind: 'promote-candidate', memoryIds: [id], summary: '', workspaces: [WS], fingerprint: id }, t)
+    }
+    const { pending } = await h.views()
+    expect(pending.items.map(i => i.kind === 'promote-candidate' && i.memory?.id)).toEqual(['mem_live'])
+
+    const { globalCandidate: _flag, ...cleared } = (await h.store.get('mem_live'))!
+    await h.store.put(cleared)
+    const after = (await h.views()).pending
+    expect(after.items).toEqual([])
+    expect(after.dot).toBe('none')
   })
 })
 

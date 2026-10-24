@@ -3,7 +3,7 @@ import type { MemoryStore } from '../store.ts'
 import type { CodedNote, ScanNoteCode } from '../contract-codes.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { MemoryRecord } from '../record-schema.ts'
-import { conflictFingerprint, type PendingDecisionsStore } from '../governance/decisions.ts'
+import { candidateFingerprint, conflictFingerprint, type PendingDecisionsStore } from '../governance/decisions.ts'
 import type { KvTable } from '../kv-table.ts'
 import type { Finding, ScanCacheEntry } from '../governance/schema.ts'
 import { runRuleScan, buildMalformedFindings } from '../governance/rule-scan.ts'
@@ -267,7 +267,24 @@ async function scanPass(
 }
 
 /**
- * memory_scan：只读+报告。副作用仅两个——语义结果写 scan_cache、conflict 进 pending_decisions。
+ * 提升候选入账：扫到的每个项目，把带 globalCandidate 的 active 记忆同步成 promote-candidate 条目（GUI 待处理读它）。
+ * 只看规则数据、不调模型，所以 layers=rule 也做；只动本次扫到的项目，别的项目的条目等扫到它再说。
+ */
+async function syncPromoteCandidates(
+  decisions: PendingDecisionsStore,
+  byId: ReadonlyMap<string, MemoryRecord>,
+  workspaces: readonly string[],
+  now: number,
+): Promise<void> {
+  for (const ws of workspaces) {
+    const own = [...byId.values()].filter(r => r.status === 'active' && r.scope === 'workspace' && r.workspacePath === ws)
+    const candidates = own.filter(r => r.globalCandidate).map(r => ({ id: r.id, summary: r.summary, fingerprint: candidateFingerprint(r) }))
+    await decisions.syncPromoteCandidates(ws, candidates, new Set(own.map(r => r.id)), now)
+  }
+}
+
+/**
+ * memory_scan：只读+报告。副作用仅两处——语义结果写 scan_cache；conflict 与提升候选进 pending_decisions。
  * 清理动作由模型经用户确认后调 forget/save 执行。
  * 默认口径=当前 workspace 的可见集合（global + 本项目）；scope='all' 或 scopes 列表进入
  * 全库体检：逐 workspace 独立扫描计分 + global 层专项（缺口检测、跨层冲突聚合）。
@@ -345,6 +362,8 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     if (baselineSkipped > 0 && llm && layers !== 'rule') {
       notes.push({ code: 'baseline-session-scoped', text: `基线随当前会话，${baselineSkipped} 个其他 workspace 的垂直冲突检测已跳过` })
     }
+    signal?.throwIfAborted()
+    await syncPromoteCandidates(deps.decisions, data.byId, wsList, now)
     const created = decisionItems.filter(i => i.isNew).length
     const existing = decisionItems.length - created
 
@@ -413,6 +432,8 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
   const passBaseline = wsPath === undefined || wsPath === currentWs ? baseline : null
   signal?.throwIfAborted()
   const pass = await scanPass(deps, data.byId, records, cacheKey(wsPath), wsPath ?? 'global', layerQuarantined(wsPath), layers, llm, passBaseline, now, signal)
+  signal?.throwIfAborted()
+  if (wsPath !== undefined) await syncPromoteCandidates(deps.decisions, data.byId, [wsPath], now)
   const notes = [...pass.notes]
   if ((layers === 'semantic' || layers === 'full') && llm) {
     if (baseline === null) notes.push({ code: 'baseline-missing', text: '未检测到 AGENTS.md 基线，垂直冲突检测未执行' })
