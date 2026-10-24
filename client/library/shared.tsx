@@ -7,7 +7,7 @@ import type { MemoryCommand } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { useT } from '../i18n.tsx'
 import { useNavTarget, type NavStore, type NavTarget } from '../nav.ts'
-import { CrossConfirm, crossConfirmCss } from '../pending/action.tsx'
+import { CrossConfirm, crossConfirmCss, SecretDeleteConfirm } from '../pending/action.tsx'
 
 type LabelledView = ViewState<{ typeLabels?: Readonly<Record<string, string>> }>
 
@@ -81,7 +81,8 @@ export function FlashRow({ flashing, onFlashEnd, className, children, as: Tag = 
   )
 }
 
-export type Notice = { kind: 'ok'; text: string; memoryId: string } | { kind: 'error'; text: string }
+/** purged：含密钥的记忆已彻底删除，不进最近删除，提示里不带去那儿的链接。 */
+export type Notice = { kind: 'ok'; text: string; memoryId: string } | { kind: 'purged'; text: string } | { kind: 'error'; text: string }
 
 type OkText = (result: { decisionId?: string }) => string
 
@@ -91,6 +92,7 @@ interface CrossPending { memoryId: string; workspacePath: string; command: Memor
 /**
  * 行尾动作：进行中的记忆 id 和最近一次结果。命令失败显示宿主或执行器的原话。
  * 涉及其他项目时和待处理卡同一套流程：先不带 allowCrossWorkspace 发，服务端回 cross-workspace 就在那一行确认。
+ * 删除含密钥的记忆时服务端回 has-secret（什么都没动），同样在那一行确认，用户点「彻底删除」才发 hard-delete。
  */
 export function useRowActions(session: BorrowedSession) {
   const t = useT()
@@ -98,6 +100,7 @@ export function useRowActions(session: BorrowedSession) {
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set())
   const [notice, setNotice] = useState<Notice | undefined>(undefined)
   const [cross, setCross] = useState<CrossPending | undefined>(undefined)
+  const [secretId, setSecretId] = useState<string | undefined>(undefined)
   const sessionId = session.kind === 'ready' ? session.sessionId : undefined
   const mark = (id: string, on: boolean) => {
     setBusy((prev) => {
@@ -119,16 +122,21 @@ export function useRowActions(session: BorrowedSession) {
       setCross({ memoryId, workspacePath, command, okText })
       return
     }
+    if (!result.ok && result.code === 'has-secret' && command.cmd === 'forget') {
+      setNotice(undefined)
+      setSecretId(memoryId)
+      return
+    }
     setNotice(result.ok
-      ? { kind: 'ok', text: okText(result), memoryId }
+      ? command.cmd === 'hard-delete' ? { kind: 'purged', text: okText(result) } : { kind: 'ok', text: okText(result), memoryId }
       : { kind: 'error', text: t('action.failed', { detail: result.detail ?? result.code }) })
   }
   return {
     notice,
-    /** 按钮的 unavailable：没有会话、这条正在处理或等跨项目确认时给原因。 */
+    /** 按钮的 unavailable：没有会话、这条正在处理或等跨项目 / 彻底删除确认时给原因。 */
     unavailable(id: string, needsSession = true): string | undefined {
       if (needsSession && sessionId === undefined) return t('session.none.hint')
-      return busy.has(id) || cross?.memoryId === id ? t('action.busy') : undefined
+      return busy.has(id) || cross?.memoryId === id || secretId === id ? t('action.busy') : undefined
     },
     run,
     /** 这一行的跨项目确认；不在等确认时为 null。 */
@@ -141,6 +149,19 @@ export function useRowActions(session: BorrowedSession) {
           onConfirm={() => {
             setCross(undefined)
             void run(cross.memoryId, { ...cross.command, allowCrossWorkspace: true } as MemoryCommand, cross.okText)
+          }}
+        />
+      )
+    },
+    /** 这一行的彻底删除确认（forget 回了 has-secret）；不在等确认时为 null。 */
+    secretConfirm(memoryId: string): ReactNode {
+      if (secretId !== memoryId) return null
+      return (
+        <SecretDeleteConfirm
+          onCancel={() => { setSecretId(undefined) }}
+          onConfirm={() => {
+            setSecretId(undefined)
+            void run(memoryId, { cmd: 'hard-delete', memoryId }, () => t('pending.secret.deletedNotice'))
           }}
         />
       )

@@ -140,7 +140,7 @@ describe('交付卡', () => {
   it('「这一轮记住了 N 条」，每条一张记忆卡；删除发 forget，原位留撤销提示，撤销发 restore', async () => {
     const gateway = createFakeGateway()
     const items = [saved('mem_1', '测试不 mock 数据库'), saved('mem_2', '提交信息用英文')]
-    renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={items} now={NOW} openDetail={() => {}} deleted={new Set()} />, gateway)
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={items} now={NOW} openDetail={() => {}} deleted={new Map()} />, gateway)
     expect(screen.getByRole('heading', { name: '这一轮记住了 2 条' })).toBeInTheDocument()
     expect(screen.getByText('测试不 mock 数据库')).toBeInTheDocument()
 
@@ -156,20 +156,56 @@ describe('交付卡', () => {
 
   it('记忆卡的类型写显示名（待处理视图的 typeLabels）', () => {
     const gateway = createFakeGateway({ views: { pending: { version: GUI_VIEW_VERSION, dot: 'none', items: [], typeLabels: { preference: '行为偏好' } } } })
-    const { container } = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} deleted={new Set()} />, gateway)
+    const { container } = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} deleted={new Map()} />, gateway)
     expect(container.querySelector('.pm-mc-meta')).toHaveTextContent(/^行为偏好/)
   })
 
   it('待处理视图没有这个类型时，类型显示名取全部记忆视图的 typeLabels', () => {
     const library: LibraryView = { version: GUI_VIEW_VERSION, memoryRoot: '/m', layers: [], directoryIssues: [], typeLabels: { preference: '行为偏好' } }
     const gateway = createFakeGateway({ views: { library, pending: { version: GUI_VIEW_VERSION, dot: 'none', items: [], typeLabels: {} } } })
-    const { container } = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} deleted={new Set()} />, gateway)
+    const { container } = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} deleted={new Map()} />, gateway)
     expect(container.querySelector('.pm-mc-meta')).toHaveTextContent(/^行为偏好/)
+  })
+
+  it('含密钥的记忆：forget 回 has-secret 时原位确认、不说可找回；「彻底删除」发 hard-delete，之后只留不可恢复的说明、没有撤销，卸载重挂也一样', async () => {
+    const gateway = createFakeGateway({
+      respond: command => command.cmd === 'forget'
+        ? { ok: false, cmd: command.cmd, code: 'has-secret' }
+        : { ok: true, cmd: command.cmd, memoryIds: ['mem_1'] },
+    })
+    const deleted = new Map<string, 'soft' | 'hard'>()
+    const card = <SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} deleted={deleted} />
+    const { unmount } = renderInShell(card, gateway)
+    fireEvent.click(screen.getByRole('button', { name: '删除这条记忆' }))
+    expect(await screen.findByText('这条记忆里有密钥，删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeInTheDocument()
+    expect(screen.getByText('原文')).toBeInTheDocument()
+    expect(screen.queryByText(/14 天/)).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: '彻底删除' }))
+    expect(await screen.findByText('已彻底删除。如果它是真的凭证，记得去换一个新的。')).toBeInTheDocument()
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'mem_1' }, { cmd: 'hard-delete', memoryId: 'mem_1' }])
+    expect(screen.queryByText('原文')).toBeNull()
+    expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
+
+    unmount()
+    renderInShell(card, gateway)
+    expect(screen.getByText('已彻底删除。如果它是真的凭证，记得去换一个新的。')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
+  })
+
+  it('含密钥确认时点「取消」：收起确认，原文和删除按钮照旧', async () => {
+    const gateway = createFakeGateway({ respond: command => ({ ok: false, cmd: command.cmd, code: 'has-secret' }) })
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} deleted={new Map()} />, gateway)
+    fireEvent.click(screen.getByRole('button', { name: '删除这条记忆' }))
+    fireEvent.click(await screen.findByRole('button', { name: '取消' }))
+    expect(screen.queryByText('这条记忆里有密钥，删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeNull()
+    expect(screen.getByText('原文')).toBeInTheDocument()
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'mem_1' }])
   })
 
   it('删除失败时原文还在，旁边写服务端原话', async () => {
     const gateway = createFakeGateway({ respond: () => ({ ok: false, code: 'not-found', detail: '记忆不存在' }) })
-    renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} deleted={new Set()} />, gateway)
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} deleted={new Map()} />, gateway)
     fireEvent.click(screen.getByRole('button', { name: '删除这条记忆' }))
     expect(await screen.findByText('没有成功：记忆不存在')).toBeInTheDocument()
     expect(screen.getByText('原文')).toBeInTheDocument()
@@ -186,7 +222,7 @@ describe('密钥永远不出现在对话卡里', () => {
     const data = turnData([turnStart, call(2, 'c1', 'memory_save', secretArgs), res(3, 'c1', SAVED_TEXT)])
     expect(data?.saved).toHaveLength(1)
     expect(JSON.stringify(data)).not.toContain(KEY)
-    const { container } = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={data!.saved} now={NOW} openDetail={() => {}} deleted={new Set()} />, createFakeGateway())
+    const { container } = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={data!.saved} now={NOW} openDetail={() => {}} deleted={new Map()} />, createFakeGateway())
     expect(container.textContent).not.toContain(KEY)
     expect(container.textContent).toContain('[已隐藏]')
   })
@@ -204,7 +240,7 @@ describe('密钥永远不出现在对话卡里', () => {
     const PASS = 'password: Hunter2-2026'
     const args = { ...saveArgs, name: `登录 ${PASS}`, content: `测试环境 ${PASS}，周五前改。`, force: true }
     const data = turnData([turnStart, call(2, 'c1', 'memory_save', args), res(3, 'c1', SAVED_TEXT)])
-    const card = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={data!.saved} now={NOW} openDetail={() => {}} deleted={new Set()} />, createFakeGateway())
+    const card = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={data!.saved} now={NOW} openDetail={() => {}} deleted={new Map()} />, createFakeGateway())
     expect(card.container.textContent).not.toContain('Hunter2-2026')
     expect(card.container.textContent).toContain('[已隐藏]')
     card.unmount()
@@ -278,7 +314,7 @@ describe('注册', () => {
   })
 
   it('删掉的那条不再有「查看详情 ›」', () => {
-    renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '一'), saved('mem_2', '二')]} now={NOW} openDetail={() => {}} deleted={new Set(['mem_1'])} />)
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '一'), saved('mem_2', '二')]} now={NOW} openDetail={() => {}} deleted={new Map([['mem_1', 'soft']])} />)
     expect(screen.getAllByRole('button', { name: '查看详情 ›' }).map(link => link.closest('[data-memory-id]')?.getAttribute('data-memory-id'))).toEqual(['mem_2'])
   })
 })

@@ -1,6 +1,7 @@
 /**
  * 「全部记忆」tab：页面作用域那一层的记忆卡列表。顶部存储说明（多少条、目录、MEMORY.md 是生成的索引、
- * 模型怎么读到）和目录问题（来自视图，不在这里重算）；行尾打开文件、在访达中显示、删除（软删，提示去最近删除恢复）。
+ * 模型怎么读到）和目录问题（来自视图，不在这里重算）；行尾打开文件、在访达中显示、删除（软删，提示去最近删除恢复；
+ * 含密钥的先确认再彻底删除，不可恢复）。
  */
 import type { GuiLayerRef, LibraryView } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
@@ -113,6 +114,7 @@ export function LibraryTab({ nav, scope, session, now = Date.now() }: {
                 <div className="pm-row-body">
                   <MemoryCard memory={memory} now={now} typeLabel={typeLabel(memory.type)} hideScope />
                   {actions.crossConfirm(memory.id)}
+                  {actions.secretConfirm(memory.id)}
                 </div>
                 <div className="pm-row-actions">
                   <Button onClick={() => { void actions.open(memory.filePath) }}>{t('library.openFile')}</Button>

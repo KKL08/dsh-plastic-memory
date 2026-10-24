@@ -233,11 +233,14 @@ async function dispatch(
 
     case 'forget':
     case 'hard-delete': {
+      const rec = await deps.store.get(command.memoryId, { workspacePath: gov.workspacePath })
       if (command.cmd === 'hard-delete') {
         // 只给密钥条目用：不含密钥的记忆 forget 会软删，与「彻底删除」的承诺不符
-        const rec = await deps.store.get(command.memoryId, { workspacePath: gov.workspacePath })
         if (!rec || rec.status === 'deleted') return notFound(command.memoryId)
         if (!hasSecret(rec)) return fail(cmd, 'failed', `记忆 ${command.memoryId} 不含密钥，彻底删除只用于密钥条目，未做任何改动`)
+      } else if (rec && rec.status !== 'deleted' && hasSecret(rec)) {
+        // forget 承诺 14 天可撤销，含密钥的记忆却只能物理删除：不动它，让界面先问用户再发 hard-delete
+        return fail(cmd, 'has-secret', `记忆 ${command.memoryId} 含密钥，删除后不可恢复，未做任何改动`)
       }
       const r = await executeForget(
         { ids: [command.memoryId], reason: command.cmd === 'hard-delete' ? '用户在记忆页彻底删除密钥条目' : '用户在记忆页删除', allowCrossWorkspace: command.allowCrossWorkspace },
