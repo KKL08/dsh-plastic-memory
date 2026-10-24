@@ -4,11 +4,12 @@
  */
 import { useSyncExternalStore } from 'react'
 import type { MemoryCommand, MemoryCommandResult } from '../src/gui/contract.ts'
-import type { BorrowedSession, MemoryGateway, PluginConfig, ViewMap, ViewName, ViewState } from './gateway.ts'
+import type { BorrowedSession, CurrentWorkspace, MemoryGateway, PluginConfig, ViewMap, ViewName, ViewState } from './gateway.ts'
 
 export interface FakeGatewayInit {
   session?: BorrowedSession
-  currentWorkspace?: string
+  /** 当前项目；传 `{ status: 'loading' }` 模拟归属对照还没读到。 */
+  currentWorkspace?: string | { status: 'loading' }
   views?: { [N in ViewName]?: ViewMap[N] | ViewState<ViewMap[N]> }
   /** 命令的返回；缺省一律 `{ ok: true, cmd }`。返回 Promise 可模拟进行中。 */
   respond?: (command: MemoryCommand) => MemoryCommandResult | Promise<MemoryCommandResult>
@@ -33,7 +34,7 @@ export interface FakeGateway extends MemoryGateway {
   readonly reads: string[]
   setConfigValue(config: PluginConfig | undefined): void
   setSession(session: BorrowedSession): void
-  setCurrentWorkspace(path: string | undefined): void
+  setCurrentWorkspace(path: string | undefined | { status: 'loading' }): void
   /** 推一份新视图（等同文件版本变化后读到新内容）；传 ViewState 可模拟 loading / missing / error。 */
   setView<N extends ViewName>(name: N, value: ViewMap[N] | ViewState<ViewMap[N]>): void
 }
@@ -45,8 +46,11 @@ function toState<V>(value: V | ViewState<V> | undefined): ViewState<V> {
 }
 
 export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
-  let session: BorrowedSession = init.session ?? { kind: 'ready', sessionId: 'fake-session', cwd: init.currentWorkspace }
-  let currentWorkspace = init.currentWorkspace
+  const toCurrent = (value: string | undefined | { status: 'loading' }): CurrentWorkspace =>
+    typeof value === 'object' ? value : { status: 'ready', workspacePath: value }
+  let currentWorkspace = toCurrent(init.currentWorkspace)
+  let session: BorrowedSession = init.session
+    ?? { kind: 'ready', sessionId: 'fake-session', cwd: currentWorkspace.status === 'ready' ? currentWorkspace.workspacePath : undefined }
   const views = new Map<ViewName, ViewState<unknown>>()
   for (const [name, value] of Object.entries(init.views ?? {})) views.set(name as ViewName, toState(value))
   let revision = 0
@@ -82,7 +86,7 @@ export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
       return init.files?.[path]
     },
     setSession(next) { session = next; bump() },
-    setCurrentWorkspace(path) { currentWorkspace = path; bump() },
+    setCurrentWorkspace(path) { currentWorkspace = toCurrent(path); bump() },
     setView(name, value) { views.set(name, toState(value)); bump() },
     useSession(workspacePath) {
       useRevision()

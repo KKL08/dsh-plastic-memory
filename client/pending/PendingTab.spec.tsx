@@ -121,6 +121,18 @@ describe('待处理：各类卡', () => {
     expect(screen.getByRole('button', { name: '提升 blog 里的这条' })).toHaveAttribute('title', '正在读取设置…')
   })
 
+  it('候选是否在别的项目：按会话归属判断（对照里的软链接、项目子目录都算本项目；嵌套子项目里的会话看外层的记忆算别的项目）', () => {
+    const check = (session: { kind: 'ready'; sessionId: string; cwd: string; workspaces?: Record<string, string> }, heading: string) => {
+      const gateway = createFakeGateway({ session, config, views: { pending: view(promote), health: scannedHealth(NOW) } })
+      const { unmount } = renderInShell(<PendingTab nav={createNavStore()} session={session} workspacePath="/w/app" now={NOW} />, gateway)
+      expect(screen.getByRole('heading', { name: heading })).toBeInTheDocument()
+      unmount()
+    }
+    check({ kind: 'ready', sessionId: 's1', cwd: '/link/app', workspaces: { '/link/app': '/w/app' } }, '这条适合所有项目')
+    check({ kind: 'ready', sessionId: 's1', cwd: '/w/app/sub' }, '这条适合所有项目')
+    check({ kind: 'ready', sessionId: 's1', cwd: '/w/app/pkg', workspaces: { '/w/app/pkg': '/w/app/pkg' } }, 'app 里的这条适合所有项目')
+  })
+
   it('超限：「整理记忆 ›」去全部记忆，作用域是这张卡那一层（项目或全局），不发命令', () => {
     const nav = createNavStore()
     const global: PendingItem = { kind: 'overflow', decisionId: 'd-g', firstSeenAt: 5, mode: 'strict', tier: 0 }
