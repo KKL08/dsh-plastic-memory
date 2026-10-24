@@ -138,11 +138,13 @@ export class SnapshotStore {
    * 选择性恢复：ids 为 undefined 恢复全部。快照后被修改过的记录默认跳过（冲突保护），
    * overwriteChanged=true 才覆盖。脱敏记录（密钥硬删）一律跳过，计入 skipped 并单列在 redacted。
    * 恢复动作本身只 put 旧数据，不做二次快照。current：调用方预读的现状（同 diff）。
+   * 预读之后记录仍可能被别处改动：不覆盖时把冲突判定交给 put 的 skipIf，在写入那一刻按最新内容再判一次；
+   * put 返回 false 即按「快照后被修改」跳过。返回 void 的 put 视为已写入。
    */
   async restore(
     snapshot: MemorySnapshot,
     ids: string[] | undefined,
-    put: (record: MemoryRecord) => Promise<void>,
+    put: (record: MemoryRecord, skipIf?: (current: MemoryRecord) => boolean) => Promise<boolean | void>,
     current: ReadonlyMap<string, MemoryRecord>,
     overwriteChanged: boolean,
   ): Promise<{ restored: string[]; skipped: string[]; redacted: string[] }> {
@@ -160,8 +162,9 @@ export class SnapshotStore {
         skipped.push(rec.id)
         continue
       }
-      await put(rec)
-      restored.push(rec.id)
+      const written = await put(rec, overwriteChanged ? undefined : cur => isConflicting(cur, rec))
+      if (written === false) skipped.push(rec.id)
+      else restored.push(rec.id)
     }
     return { restored, skipped, redacted }
   }

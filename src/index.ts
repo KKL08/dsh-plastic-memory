@@ -121,7 +121,7 @@ export async function apply(ctx: Context, config: Config) {
   // 侧表（快照、待决账本、扫描缓存、召回统计）住 <memoryRoot>/.state/，构造不做 I/O。
   // storageDomain 不再是必需注入：只为首次侧表访问时导入旧 KV 的快照与待决账本（0.3.0 移除）。
   // 按 llm / sessionQuery 同款惯例经 ctx.get 探测，且推迟到导入真正发生时——apply 期间宿主的
-  // storageDomain 未必已挂上，此刻探测落空会写下 source: none 的标记，旧数据就再也不导了。
+  // storageDomain 未必已挂上。探测落空返回 undefined：不写标记，本进程不再探，下次启动重探。
   const sidecar = new SidecarStore({
     root: memoryRoot,
     schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema },

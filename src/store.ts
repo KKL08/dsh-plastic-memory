@@ -136,10 +136,12 @@ export class InMemoryTable implements MemoryTable {
   async create(record: MemoryRecord) {
     this.place(undefined, record)   // 不定位：新 id 直接占名
   }
-  async put(key: string, value: MemoryRecord, hint: LocateHint = { workspacePath: value.workspacePath }) {
+  async put(key: string, value: MemoryRecord, hint: LocateHint = { workspacePath: value.workspacePath }, skipIf?: (current: MemoryRecord) => boolean) {
     // 与 FileTable 同语义：put 不承载召回统计（召回统计住侧表，由 MemoryStore.markRecalled 写）
     const prev = await this.locate(key, hint)
+    if (prev !== undefined && skipIf?.(prev.record)) return false
     this.place(prev, prev ? { ...value, recallCount: prev.record.recallCount, lastRecalledAt: prev.record.lastRecalledAt } : value)
+    return true
   }
   async update(key: string, fn: (c: MemoryRecord) => MemoryRecord, hint?: LocateHint) {
     const current = await this.locate(key, hint)
@@ -201,8 +203,26 @@ export class MemoryStore {
   listWorkspaceDirs() { return this.table.listWorkspaceDirs() }
   /** 新记录：不定位，排他占名（save create 用）。 */
   create(record: MemoryRecord) { return this.table.create(record) }
-  /** hint：跨 scope 搬家（promote）时传原记录的 workspace，让定位到的是门放行的那份；缺省按 record 自己的 workspace。 */
-  put(record: MemoryRecord, hint?: LocateHint) { return this.table.put(record.id, record, hint) }
+  /** 整条替换。hint：跨 scope 搬家时传原记录的 workspace，让定位到的是门放行的那份；缺省按 record 自己的 workspace。
+   *  skipIf 见 MemoryTable.put：锁内按最新内容判定为真就不写，返回 false。 */
+  put(record: MemoryRecord, hint?: LocateHint, skipIf?: (current: MemoryRecord) => boolean) { return this.table.put(record.id, record, hint, skipIf) }
+  /** 读改写：锁内按调用方读到的那条记录定位（定位约定同 put），对磁盘上的当前内容套 fn；
+   *  调用方读到之后被别处改过的字段不丢。只改几个字段的写回都该走这里，整条替换才用 put。 */
+  update(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, fn: (current: MemoryRecord) => MemoryRecord, hint: LocateHint = { workspacePath: record.workspacePath }) {
+    return this.table.update(record.id, fn, hint)
+  }
+  /** 同 update，但锁内发现记录已不存在或已软删就不写、返回 undefined（工具据此报「不存在或已删除」，不抛错）。 */
+  async updateIfLive(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, fn: (current: MemoryRecord) => MemoryRecord): Promise<MemoryRecord | undefined> {
+    try {
+      return await this.update(record, r => {
+        if (r.status === 'deleted') throw new RecordNotFoundError(r.id)
+        return fn(r)
+      })
+    } catch (err) {
+      if (err instanceof RecordNotFoundError) return undefined
+      throw err
+    }
+  }
 
   /**
    * 删除按记录定位：调用方传入它读到并过了门的那条记录，按该记录自己的 workspace 定位（与 put 同约定），
@@ -216,7 +236,12 @@ export class MemoryStore {
   async softDelete(record: Pick<MemoryRecord, 'id' | 'workspacePath'>): Promise<boolean> {
     const hint = { workspacePath: record.workspacePath }
     if (!(await this.table.locate(record.id, hint))) return false
-    await this.table.update(record.id, r => ({ ...r, status: 'deleted', updatedAt: Date.now() }), hint)
+    try {
+      await this.table.update(record.id, r => ({ ...r, status: 'deleted', updatedAt: Date.now() }), hint)
+    } catch (err) {
+      if (err instanceof RecordNotFoundError) return false   // 定位之后被别处删掉
+      throw err
+    }
     return true
   }
 

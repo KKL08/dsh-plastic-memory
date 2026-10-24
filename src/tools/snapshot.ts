@@ -116,7 +116,7 @@ export async function executeSnapshotTool(
   // restore
   const { restored, skipped, redacted } = await deps.snapshots.restore(
     snap, [...allowedIds],
-    r => deps.store.put(r),
+    (r, skipIf) => deps.store.put(r, undefined, skipIf),
     current,
     args.overwriteChanged ?? false,
   )
