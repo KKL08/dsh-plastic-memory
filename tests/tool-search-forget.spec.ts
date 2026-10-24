@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { fakeExec } from './helpers/exec.ts'
-import { executeSearch, type SearchToolDeps } from '../src/tools/search.ts'
+import { executeSearch, renderSearchResult, truncationNote, type SearchToolDeps } from '../src/tools/search.ts'
+import { countSearchHits } from '../client/chat/tool-summary.ts'
 import { executeForget } from '../src/tools/forget.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
@@ -136,5 +137,56 @@ describe('executeForget（P1 批量版）', () => {
     const snap = (await deps.snapshots.list())[0]
     expect(snap.memoryIds.sort()).toEqual(['mem_a', 'mem_b'])
     expect(snap.data).toHaveLength(2)
+  })
+})
+
+describe('executeSearch：命中多于返回条数时说明总数', () => {
+  const seedMany = async (store: MemoryStore, n: number) => {
+    for (let i = 0; i < n; i++) await seed(store, `发版条目第${i}号`)
+  }
+
+  it('截断时说明共命中几条、列了几条，给出调大 limit 与换更具体关键词两条路', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await seedMany(store, 3)
+    const r = await executeSearch({ query: '发版条目', limit: 1 }, fakeExec(), makeSearchDeps(store))
+    expect(r.hits).toHaveLength(1)
+    expect(r.moreNote).toBe(truncationNote(3, 1, false))
+    expect(r.moreNote).toContain('共命中 3 条')
+    expect(r.moreNote).toContain('limit')
+    expect(r.moreNote).toContain('更具体的关键词')
+    const text = renderSearchResult(r)
+    expect(text.startsWith(r.moreNote!)).toBe(true)
+    expect(countSearchHits(text)).toBe(1)
+  })
+
+  it('没有截断时不附说明', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await seedMany(store, 2)
+    const r = await executeSearch({ query: '发版条目' }, fakeExec(), makeSearchDeps(store))
+    expect(r.hits).toHaveLength(2)
+    expect(r.moreNote).toBeUndefined()
+  })
+
+  it('limit 已到上限 50（含传入更大的值）时，只建议换更具体的关键词', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await seedMany(store, 52)
+    for (const limit of [50, 80]) {
+      const r = await executeSearch({ query: '发版条目', limit }, fakeExec(), makeSearchDeps(store))
+      expect(r.hits).toHaveLength(50)
+      expect(r.moreNote).toBe(truncationNote(52, 50, true))
+      expect(r.moreNote).toContain('更具体的关键词')
+      expect(r.moreNote).not.toContain('调大 limit')
+    }
+  })
+
+  it('命中弱的说明与截断说明同时出现：两句都在命中列表之前', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await seedMany(store, 3)
+    const r = await executeSearch({ query: '发版条目 zzqqxx', limit: 1 }, fakeExec(), makeSearchDeps(store))
+    expect(r.noteCode).toBe('or-fallback')
+    expect(r.moreNote).toBe(truncationNote(3, 1, false))
+    const head = renderSearchResult(r).split('\n\n')[0]!
+    expect(head).toContain(r.note!)
+    expect(head).toContain(r.moreNote!)
   })
 })
