@@ -39,6 +39,8 @@ const SAFE_KEY_RE = /^[A-Za-z0-9_-]+$/
 export interface LegacyKvTables {
   snapshots: Array<[string, unknown]>
   pending: Array<[string, unknown]>
+  /** 删掉旧 KV 里这两张表的全部行。标记写下后调用一次：宿主不再留明文副本，标记丢失后重导也找不到旧行。 */
+  discard: () => Promise<void>
 }
 
 export interface SidecarOptions<S, P, C> {
@@ -332,6 +334,12 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
     await atomicWrite(markerPath, JSON.stringify(marker))
     if (legacy !== undefined) {
       this.log.info(`[plastic-memory] 旧 KV 侧表已导入：快照 ${counts.snapshots} 条，待决 ${counts.pending} 条`)
+      // 标记已挡住重导，删旧行失败不影响本次操作，只留痕
+      try {
+        await legacy.discard()
+      } catch (err) {
+        this.log.warn(`[plastic-memory] 旧 KV 侧表已导入，但删除旧行失败：${describeError(err)}`)
+      }
     }
   }
 
