@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, writeFile, rename, rm, stat, link } from 'node:fs/promises'
+import { mkdir, readdir, readFile, writeFile, rename, rm, stat } from 'node:fs/promises'
 import { RecordNotFoundError } from '../errors.ts'
 import { basename, dirname, join, relative } from 'node:path'
 import type { MemoryRecord } from '../record-schema.ts'
@@ -14,6 +14,7 @@ import {
   WORKSPACE_MARKER, INDEX_FILE, GLOBAL_DIR, ARCHIVE_DIR, workspaceDirName, slugifyName, isReservedFileName,
   isMemoryFileName, isWorkspaceDirName, deriveFileId, isDerivedFileId,
 } from './paths.ts'
+import { linkExclusive } from './exclusive-link.ts'
 import { formatIndexLine } from '../index-line.ts'
 import { withinValidity } from '../record-freshness.ts'
 import { RETENTION_MS } from '../retention.ts'
@@ -467,7 +468,8 @@ export class FileTable implements MemoryTable {
 
   /**
    * 排他占名并写入（设计稿 §5；ARCHITECTURE.md ⑥-2 撞名追加 id 片段）。完整内容先进 tmp，再 link 到候选名：目标名原子出现
-   * 且内容完整，没有"先建空文件再填"的窗口，崩溃最多留下 tmp（维护点清）。EEXIST 表示名被占——占着的是同一记录自己的
+   * 且内容完整，没有"先建空文件再填"的窗口，崩溃最多留下 tmp（维护点清）。卷不支持硬链接时 linkExclusive 退回排他复制，
+   * 排他不变，只是不再原子。EEXIST 表示名被占——占着的是同一记录自己的
    * 文件（崩溃残留、同 id 副本）才允许 rename 覆盖，否则换下一个候选：基础名 → id 片段名 → 全 id 名（按构造只属于本记录，
    * 直接覆盖）。两个进程写同名异 id 的记录因此两条都存活；隔离文件、缺标记目录里的文件也不会被同 slug 写入静默覆盖。
    */
@@ -479,7 +481,7 @@ export class FileTable implements MemoryTable {
         if (isReservedFileName(name)) continue // memory.md ≈ MEMORY.md，索引再生会覆盖它
         const path = join(level, name)
         try {
-          await link(tmp, path)
+          await linkExclusive(tmp, path)
           return path
         } catch (err) {
           if (errnoCode(err) !== 'EEXIST') throw err
@@ -490,7 +492,7 @@ export class FileTable implements MemoryTable {
       await rename(tmp, path)
       return path
     } finally {
-      await rm(tmp, { force: true })   // link 成功后多出的那个名字；rename 过的已不存在
+      await rm(tmp, { force: true })   // 占名成功后 tmp 仍在（link 多出的名字或复制的源）；rename 过的已不存在
     }
   }
 
