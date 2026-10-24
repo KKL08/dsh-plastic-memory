@@ -393,18 +393,32 @@ describe('侧表与旧 KV 导入接线', () => {
     expect(base.domain.opens).toBe(0)
   })
 
-  it('storageDomain 缺席：照常挂载九个工具，首次侧表访问写 source: none 的标记', async () => {
+  it('storageDomain 缺席：照常挂载九个工具，侧表照常可用；不写标记、本进程只探测一次（服务可能只是暂时没挂上，下次启动再探）', async () => {
     const memoryRoot = await makeTmpRoot()
     const base = mockCtx()
-    const { ctx, defs } = withTools(base)
+    let probes = 0
+    const get = base.get
+    const { ctx, defs } = withTools({ ...base, get: (name: string) => { if (name === 'storageDomain') probes++; return get(name) } })
     await apply(ctx as never, new Config({ memoryRoot } as never))
     expect([...defs.keys()].sort()).toEqual([
       'memory_confirm', 'memory_forget', 'memory_health', 'memory_promote',
       'memory_save', 'memory_scan', 'memory_search', 'memory_snapshot', 'memory_source',
     ])
     await defs.get('memory_snapshot')!.execute({ action: 'create' }, fakeExec())
-    expect(await readMarker(memoryRoot)).toMatchObject({ source: 'none', counts: { snapshots: 0, pending: 0 } })
+    await defs.get('memory_snapshot')!.execute({ action: 'list' }, fakeExec())
+    expect(probes).toBe(1)
+    await expect(stat(join(memoryRoot, STATE_DIR, KV_IMPORT_MARKER))).rejects.toMatchObject({ code: 'ENOENT' })
     expect((await sidecarAt(memoryRoot).snapshots.list())).toHaveLength(1)
+  })
+
+  it('storageDomain 在但两张表都空：写 source: none 的标记，只开关一次域', async () => {
+    const memoryRoot = await makeTmpRoot()
+    const base = mockCtx({ storageDomain: true })
+    const { ctx, defs } = withTools(base)
+    await apply(ctx as never, new Config({ memoryRoot } as never))
+    await defs.get('memory_snapshot')!.execute({ action: 'list' }, fakeExec())
+    expect(await readMarker(memoryRoot)).toMatchObject({ source: 'none', counts: { snapshots: 0, pending: 0 } })
+    expect(base.domain).toEqual({ opens: 1, closes: 1 })
   })
 
   it('memory_search 命中只写 .state/recall-stats.json', async () => {

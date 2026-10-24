@@ -48,8 +48,9 @@ export interface SidecarOptions<S, P, C> {
   /** memoryRoot；侧表住其下 `.state/` */
   root: string
   schemas: { snapshots: ZodType<S>; pending: ZodType<P>; scanCache: ZodType<C> }
-  /** 惰性读取旧宿主 KV（打开域、取两张表、关域）。只在标记缺失时调用一次；
-   *  缺省或返回 undefined = 宿主没有 storageDomain，写 source: none 的标记。 */
+  /** 惰性读取旧宿主 KV（打开域、取两张表、关域）。只在标记缺失时调用，每个实例（进程）至多一次。
+   *  缺省 = 没有旧 KV 可导，写 source: none 的标记；返回 undefined = 宿主此刻没有 storageDomain（可能只是
+   *  暂时没挂上），不写标记，下个实例再探；两张表都空同样写 source: none。 */
   openLegacyKv?: () => Promise<LegacyKvTables | undefined>
   log?: MemoryLogger
   now?: () => number
@@ -307,7 +308,7 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
     return next
   }
 
-  /** 锁内初始化屏障，memoize 成一个 Promise。失败只记日志、不写标记：本进程不再重试，
+  /** 锁内初始化屏障，memoize 成一个 Promise。失败或服务缺席都不写标记：本进程不再重试，
    *  下次启动标记仍缺失，续传（排他创建保证已迁入的条目不被覆盖）。 */
   private ensureImported(): Promise<void> {
     this.imported ??= this.locked(() => this.importInner()).catch(err => {
@@ -319,7 +320,12 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
   private async importInner(): Promise<void> {
     const markerPath = join(this.stateDir, KV_IMPORT_MARKER)
     if (await this.hasMarker(markerPath)) return
-    const legacy = await this.opts.openLegacyKv?.()
+    let legacy: LegacyKvTables | undefined
+    if (this.opts.openLegacyKv !== undefined) {
+      legacy = await this.opts.openLegacyKv()
+      if (legacy === undefined) return   // 服务缺席：不写「没东西可导」的标记，旧数据可能还在 KV 里
+      if (legacy.snapshots.length === 0 && legacy.pending.length === 0) legacy = undefined
+    }
     const counts = { snapshots: 0, pending: 0 }
     if (legacy !== undefined) {
       counts.snapshots = await this.importTable(legacy.snapshots, SNAPSHOTS_DIR, this.opts.schemas.snapshots)

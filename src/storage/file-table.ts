@@ -336,6 +336,7 @@ export class FileTable implements MemoryTable {
    *  - ① 再生 MEMORY.md：顶层 active 且未过期，同 id 取一份，name 再 id 排序，内容不变不写
    *  - ⑤ 陈旧 tmp 清理
    * 同 id 副本不在这里删（只在写该 id 时清理，见 persist）。
+   * 锁只管本进程：回写、搬家、过期删除动手前都复核磁盘原文，读后被别的进程或用户改过的文件本轮跳过，下次维护再处理。
    */
   private async maintainDirs(dirs: readonly string[]): Promise<void> {
     const { scopeDirs } = await this.resolveDirs([...new Set(dirs)])
@@ -351,6 +352,7 @@ export class FileTable implements MemoryTable {
         if (inArchive && record.status === 'active') record = { ...record, status: 'deleted' }
         if (record.status === 'deleted' && record.deletedAt === undefined) record = { ...record, deletedAt: slot.mtimeMs }
         if (inArchive && record.status === 'deleted' && record.deletedAt! < cutoff) {
+          if (!(await this.unchangedSince(slot))) continue
           await rm(slot.filePath, { force: true })
           await this.opts.stats.delete(record.id)
           continue
@@ -361,18 +363,28 @@ export class FileTable implements MemoryTable {
         const text = encodeRecord(record, slot.extras)
         if (!inArchive && record.status !== 'active') {
           // 搬家不改文件名（spec：文件名不变；手编文件的名字由用户起），撞名由占名追加 id 片段
+          if (!(await this.unchangedSince(slot))) continue
           await mkdir(archive, { recursive: true })
           const path = await this.claimAndWrite(record, archive, text, basename(slot.filePath, '.md'))
-          if (path.toLowerCase() !== slot.filePath.toLowerCase()) await rm(slot.filePath, { force: true })
+          if (path.toLowerCase() !== slot.filePath.toLowerCase()) {
+            // 占名期间源文件被改：撤回刚写的归档副本，源文件留给下次维护
+            if (await this.unchangedSince(slot)) await rm(slot.filePath, { force: true })
+            else await rm(path, { force: true })
+          }
           continue
         }
-        if (text !== slot.raw) await this.atomicWrite(slot.filePath, text)
+        if (text !== slot.raw && await this.unchangedSince(slot)) await this.atomicWrite(slot.filePath, text)
         if (!inArchive) kept.push({ record, filePath: slot.filePath, dir: slot.dir })
       }
       // kept 只剩顶层 active（非 active 已搬走）：同 id 取一份，再过滤已过期的
       await this.regenerateIndex(sd.dir, resolveDuplicates(kept).filter(s => withinValidity(s.record, now)))
       for (const level of [sd.dir, archive]) await this.cleanStaleTmp(level)
     }
+  }
+
+  /** 维护点动手前的复核：磁盘原文仍等于读到的那份。读不出（已删、不可读）也算变了。 */
+  private async unchangedSince(slot: Slot): Promise<boolean> {
+    try { return (await readFile(slot.filePath, 'utf8')) === slot.raw } catch { return false }
   }
 
   /** 写该 id 之后清掉可见集合（global + 该记录所在目录，含各自 .archive/）里的其余副本；其他项目的副本不动（ARCHITECTURE.md ⑥-6d）。 */

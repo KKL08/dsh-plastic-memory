@@ -213,6 +213,32 @@ describe('SidecarStore：KV 导入协议', () => {
     expect(await readMarker()).toEqual({ version: 1, importedAt: 42, source: 'none', counts: { snapshots: 0, pending: 0 } })
   })
 
+  it('旧 KV 服务暂时缺席（openLegacyKv 返回 undefined）：不写标记，本进程只探测一次；下个实例重新探测，服务在了就导入', async () => {
+    let probes = 0
+    const absent = new SidecarStore({ root, schemas, openLegacyKv: async () => { probes++; return undefined } })
+    await absent.snapshots.put('snap_n', snap('snap_n'))
+    expect(await exists(join(state, KV_IMPORT_MARKER))).toBe(false)
+    await absent.pending.list()
+    await absent.scanCache.get('x')
+    expect(probes).toBe(1)
+    expect(await exists(join(state, KV_IMPORT_MARKER))).toBe(false)
+
+    const legacy = legacyOf({ snapshots: [['snap_a', snap('snap_a')]], pending: [['pd_a', pd('pd_a')]] })
+    const next = new SidecarStore({ root, schemas, openLegacyKv: legacy.open })
+    expect((await next.snapshots.list()).map(([k]) => k).sort()).toEqual(['snap_a', 'snap_n'])
+    expect((await next.pending.list()).map(([k]) => k)).toEqual(['pd_a'])
+    expect(await readMarker()).toMatchObject({ source: 'kv', counts: { snapshots: 1, pending: 1 } })
+    expect(legacy.calls()).toBe(1)
+  })
+
+  it('旧 KV 服务在但两张表都空：写 source: none 的标记，不丢弃', async () => {
+    const legacy = legacyOf({})
+    const s = new SidecarStore({ root, schemas, openLegacyKv: legacy.open, now: () => 9 })
+    expect(await s.snapshots.list()).toEqual([])
+    expect(await readMarker()).toEqual({ version: 1, importedAt: 9, source: 'none', counts: { snapshots: 0, pending: 0 } })
+    expect(legacy.discards()).toBe(0)
+  })
+
   it('有旧 KV：首次访问前导入 snapshots 与 pending，写 source: kv 的标记与条数', async () => {
     const legacy = legacyOf({
       snapshots: [['snap_a', snap('snap_a')], ['snap_b', snap('snap_b')]],

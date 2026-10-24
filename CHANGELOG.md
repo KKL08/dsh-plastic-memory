@@ -106,8 +106,9 @@ All notable changes to this project are documented here. The format follows
   superseded memories for 14 days; `.state/` holds the plugin's own snapshots,
   pending decisions, scan cache and recall statistics. Existing files are read
   in place; snapshots and pending decisions are imported from the host's KV
-  store on first use, and the copies there are removed once the import has
-  finished, so nothing stays behind in the host's store. The host's
+  store on first use (or at a later start if the store is not available yet),
+  and the copies there are removed once the import has finished, so nothing
+  stays behind in the host's store. The host's
   `storageDomain` service is therefore no longer required.
 - Hand-written memory files need only `name` and `type` in the frontmatter; the
   id is derived from the file path and every other field is filled in at the
