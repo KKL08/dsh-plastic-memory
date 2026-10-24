@@ -1,4 +1,5 @@
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { setTimeout as delay } from 'node:timers/promises'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import type { ZodType } from 'zod'
@@ -17,21 +18,29 @@ import { linkExclusive } from './exclusive-link.ts'
  *   .state/scan-cache/<sha1(桶键)>.json
  *   .state/recall-stats.json        整张表一个文件 { [id]: RecallStats }
  *   .state/kv-import.json           旧宿主 KV 导入的完成标记
+ *   .state/kv-import.lock           导入期间的跨进程锁，导完即删
  *
- * 写都是 tmp + rename 原子写，进程内经一条 Promise 链串行；读不加锁。跨进程单条 LWW，不引入锁文件。
+ * 写都是 tmp + rename 原子写，进程内经一条 Promise 链串行；读不加锁。侧表读写跨进程单条 LWW，
+ * 只有旧 KV 导入用锁文件跨进程串行。
  * 坏文件跳过并记日志，不抛。条目 schema 由接线层注入（storage 不 import governance）。
  *
- * 导入屏障：snapshots / pending / scan-cache 的每个读写方法先 await 一次 memoize 的导入（锁内执行）。
+ * 导入屏障：snapshots / pending / scan-cache 的每个读写方法先 await 一次 memoize 的导入（进程内锁 +
+ * 跨进程锁文件内执行，锁内重查标记）。
  * 召回统计不过屏障——导入不碰它，而 FileTable 加载时就要逐条读它，过屏障会把导入拖进 apply。
  * 0.3.0 删除导入代码（openLegacyKv、标记、LegacyKvTables）。
  */
 
 export { STATE_DIR }
 export const KV_IMPORT_MARKER = 'kv-import.json'
+export const KV_IMPORT_LOCK = 'kv-import.lock'
 export const RECALL_STATS_FILE = 'recall-stats.json'
 const SNAPSHOTS_DIR = 'snapshots'
 const PENDING_DIR = 'pending'
 const SCAN_CACHE_DIR = 'scan-cache'
+
+/** 导入锁超过这个年龄按残留处理（兜底持锁进程崩溃后 pid 被复用）；正常导入远用不了这么久。 */
+const IMPORT_LOCK_STALE_MS = 60_000
+const IMPORT_LOCK_POLL_MS = 50
 
 /** 能直接当文件名的键（genId 产出的 snap_ / pd_ id 都满足）；其余一律不落盘，防路径穿越。 */
 const SAFE_KEY_RE = /^[A-Za-z0-9_-]+$/
@@ -40,7 +49,8 @@ const SAFE_KEY_RE = /^[A-Za-z0-9_-]+$/
 export interface LegacyKvTables {
   snapshots: Array<[string, unknown]>
   pending: Array<[string, unknown]>
-  /** 删掉旧 KV 里这两张表的全部行。标记写下后调用一次：宿主不再留明文副本，标记丢失后重导也找不到旧行。 */
+  /** 删掉旧 KV 里这两张表的全部行。标记写下后调用：宿主不再留明文副本，标记丢失后重导也找不到旧行。
+   *  失败或中途崩溃时标记记为待清理，后续启动重试。 */
   discard: () => Promise<void>
 }
 
@@ -48,7 +58,8 @@ export interface SidecarOptions<S, P, C> {
   /** memoryRoot；侧表住其下 `.state/` */
   root: string
   schemas: { snapshots: ZodType<S>; pending: ZodType<P>; scanCache: ZodType<C> }
-  /** 惰性读取旧宿主 KV（打开域、取两张表、关域）。只在标记缺失时调用，每个实例（进程）至多一次。
+  /** 惰性读取旧宿主 KV（打开域、取两张表、关域）。只在标记缺失或旧行待清理时、持跨进程锁调用，
+   *  每个实例（进程）至多一次。
    *  缺省 = 没有旧 KV 可导，写 source: none 的标记；返回 undefined = 宿主此刻没有 storageDomain（可能只是
    *  暂时没挂上），不写标记，下个实例再探；两张表都空同样写 source: none。 */
   openLegacyKv?: () => Promise<LegacyKvTables | undefined>
@@ -71,6 +82,20 @@ function errnoCode(err: unknown): string | undefined {
 
 function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+/** 标记在且无需再清理旧 KV 行。 */
+function isSettled(marker: KvImportMarker): boolean {
+  return marker.source === 'none' || marker.discarded === true
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    return errnoCode(err) === 'EPERM' // 进程在，只是不归我们管
+  }
 }
 
 /** tmp 命名带 pid，与 FileTable.atomicWrite 同规则。 */
@@ -317,9 +342,32 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
     return this.imported
   }
 
+  private now(): number {
+    return this.opts.now?.() ?? Date.now()
+  }
+
   private async importInner(): Promise<void> {
     const markerPath = join(this.stateDir, KV_IMPORT_MARKER)
-    if (await this.hasMarker(markerPath)) return
+    const seen = await this.readMarker(markerPath)
+    if (seen !== undefined && isSettled(seen)) return // 常态：不抢锁
+    const release = await this.acquireImportLock()
+    try {
+      await this.importLocked(markerPath)
+    } finally {
+      await release()
+    }
+  }
+
+  /** 持跨进程锁执行。等锁期间别的进程可能已导完：锁内重查标记，标记在就一条不写，只补做未完成的清理。
+   *  旧行也在锁内现取，不用锁外拿到的旧副本。 */
+  private async importLocked(markerPath: string): Promise<void> {
+    const existing = await this.readMarker(markerPath)
+    if (existing !== undefined) {
+      if (isSettled(existing)) return
+      const legacy = await this.opts.openLegacyKv?.()
+      if (legacy !== undefined) await this.discardLegacy(markerPath, existing, legacy) // 服务缺席：保持待清理
+      return
+    }
     let legacy: LegacyKvTables | undefined
     if (this.opts.openLegacyKv !== undefined) {
       legacy = await this.opts.openLegacyKv()
@@ -333,37 +381,95 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
     }
     const marker: KvImportMarker = {
       version: 1,
-      importedAt: this.opts.now?.() ?? Date.now(),
+      importedAt: this.now(),
       source: legacy === undefined ? 'none' : 'kv',
       counts,
+      ...(legacy === undefined ? {} : { discarded: false }),
     }
     await mkdir(this.stateDir, { recursive: true })
     await atomicWrite(markerPath, JSON.stringify(marker))
     if (legacy !== undefined) {
       this.log.info(`[plastic-memory] 旧 KV 侧表已导入：快照 ${counts.snapshots} 条，待决 ${counts.pending} 条`)
-      // 标记已挡住重导，删旧行失败不影响本次操作，只留痕
-      try {
-        await legacy.discard()
-      } catch (err) {
-        this.log.warn(`[plastic-memory] 旧 KV 侧表已导入，但删除旧行失败：${describeError(err)}`)
-      }
+      await this.discardLegacy(markerPath, marker, legacy)
     }
   }
 
-  private async hasMarker(path: string): Promise<boolean> {
+  /** 删旧 KV 行，成功后把标记改成已清理。标记已挡住重导，失败不影响本次操作，只留痕、下次启动重试。 */
+  private async discardLegacy(markerPath: string, marker: KvImportMarker, legacy: LegacyKvTables): Promise<void> {
+    try {
+      await legacy.discard()
+    } catch (err) {
+      this.log.warn(`[plastic-memory] 旧 KV 侧表已导入，但删除旧行失败，下次启动重试：${describeError(err)}`)
+      return
+    }
+    await atomicWrite(markerPath, JSON.stringify({ ...marker, discarded: true }))
+  }
+
+  /** 排他创建锁文件；已被占用就轮询等待。持锁进程已退出或锁超龄按残留清掉。返回释放函数。 */
+  private async acquireImportLock(): Promise<() => Promise<void>> {
+    const lockPath = join(this.stateDir, KV_IMPORT_LOCK)
+    await mkdir(this.stateDir, { recursive: true })
+    for (;;) {
+      const mine = JSON.stringify({ pid: process.pid, at: this.now(), id: Math.random().toString(36).slice(2) })
+      if (await createExclusive(lockPath, mine)) {
+        return async () => {
+          // 只删自己的锁：超龄被别人清掉并重建时不误删对方的
+          if (await readFile(lockPath, 'utf8').catch(() => undefined) === mine) await rm(lockPath, { force: true })
+        }
+      }
+      let held: string
+      try {
+        held = await readFile(lockPath, 'utf8')
+      } catch (err) {
+        if (errnoCode(err) === 'ENOENT') continue // 刚被释放
+        throw err
+      }
+      if (!this.isStaleLock(held)) {
+        await delay(IMPORT_LOCK_POLL_MS)
+        continue
+      }
+      this.log.warn(`[plastic-memory] 旧 KV 导入锁残留（持有进程已退出或超时），清理后重试：${lockPath}`)
+      // 先改名再核对：判定之后锁可能已换主，内容变了就放回去，不误删新主的锁
+      const grave = tmpPathFor(lockPath)
+      try {
+        await rename(lockPath, grave)
+      } catch (err) {
+        if (errnoCode(err) === 'ENOENT') continue // 别人先清掉了
+        throw err
+      }
+      if (await readFile(grave, 'utf8') !== held) {
+        await linkExclusive(grave, lockPath).catch(err => { if (errnoCode(err) !== 'EEXIST') throw err })
+      }
+      await rm(grave, { force: true })
+    }
+  }
+
+  /** 内容读不懂（半截文件）也按残留：走 link 时目标原子出现，读不懂只会是崩溃留下的；退回复制时可能正在写，
+   *  由清理前的改名核对兜住。 */
+  private isStaleLock(text: string): boolean {
+    let lock: { pid?: unknown; at?: unknown }
+    try {
+      lock = JSON.parse(text) as { pid?: unknown; at?: unknown }
+    } catch {
+      return true
+    }
+    if (typeof lock.pid !== 'number' || typeof lock.at !== 'number') return true
+    return !isAlive(lock.pid) || this.now() - lock.at > IMPORT_LOCK_STALE_MS
+  }
+
+  private async readMarker(path: string): Promise<KvImportMarker | undefined> {
     let text: string
     try {
       text = await readFile(path, 'utf8')
     } catch (err) {
-      if (errnoCode(err) === 'ENOENT') return false
+      if (errnoCode(err) === 'ENOENT') return undefined
       throw err
     }
     try {
-      kvImportMarkerSchema.parse(JSON.parse(text))
-      return true
+      return kvImportMarkerSchema.parse(JSON.parse(text))
     } catch (err) {
       this.log.warn(`[plastic-memory] 导入标记损坏，按缺失处理、重新导入：${path}（${describeError(err)}）`)
-      return false
+      return undefined
     }
   }
 
