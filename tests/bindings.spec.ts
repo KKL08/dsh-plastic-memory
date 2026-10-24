@@ -117,13 +117,13 @@ describe('memory_search 绑定', () => {
     return createSearchTool({ store, registry, resolveContext: async () => ({ workspacePath: '/proj', session: { id: 's', lastSeq: 1 } }) })
   }
 
-  it('工具描述教模型怎么下关键词（2 到 4 个实词、中英文两种写法），并说明命中弱时换词再搜', async () => {
+  it('工具描述教模型怎么下关键词（2 到 4 个实词、中英文两种写法），并鼓励命中弱时换词再搜一次', async () => {
     const tool = await seededTool()
     expect(tool.description).toContain('2 到 4 个实词')
     expect(tool.description).toContain('中英文两种写法')
-    expect(tool.description).toContain('换同义词或减少词数再搜一次')
+    expect(tool.description).toContain('再搜一次，不必一次搜准')
     const query = (schemaOf(tool) as { properties: Record<string, { description?: string }> }).properties.query!
-    expect(query.description).toContain('建议换词再搜')
+    expect(query.description).toContain('建议换词再搜一次')
   })
 
   it('(a) 合法参数过、缺必填（query）拒', async () => {

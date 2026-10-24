@@ -10,9 +10,9 @@ import { toToolOutput } from './output.ts'
 export function createSearchTool(deps: SearchToolDeps): ToolDefinition {
   return defineTool({
     name: 'memory_search',
-    description: '按相关性检索长期记忆，中英文查询都可用。同时命中全部关键词的排在前面，其次是命中部分关键词的，最后是关键词只以子串出现的；每条命中带记忆文件的绝对路径。关键词写 2 到 4 个实词（技术名、专有名词），术语把中英文两种写法都带上，不写整句；结果开头提示命中弱时，换同义词或减少词数再搜一次。',
+    description: '按相关性检索长期记忆，中英文查询都可用。同时命中全部关键词的排在前面，其次是命中部分关键词的，最后是关键词只以子串出现的；每条命中带记忆文件的绝对路径。关键词写 2 到 4 个实词（技术名、专有名词），术语把中英文两种写法都带上，不写整句；结果开头提示命中弱、或结果不像要找的内容时，换同义词、减少词数或换个角度再搜一次，不必一次搜准。',
     parameters: {
-      query: { type: 'string', required: true, description: '关键词，中英文均可，2 到 4 个实词、空格分隔；对名称、摘要、标签、内容匹配。没有记录命中全部关键词、或只有子串命中时，结果开头会说明并建议换词再搜' },
+      query: { type: 'string', required: true, description: '关键词，中英文均可，2 到 4 个实词、空格分隔；对名称、摘要、标签、内容匹配。没有记录命中全部关键词、或只有子串命中时，结果开头会说明并建议换词再搜一次' },
       types: { type: 'array', items: { type: 'string' } },
       scope: { type: 'string', enum: ['global', 'workspace', 'all-visible'], description: '缺省 all-visible（global + 当前 workspace）' },
       limit: { type: 'number', description: '返回条数上限，缺省 10，最大 50' },
