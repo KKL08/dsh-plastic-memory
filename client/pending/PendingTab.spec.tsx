@@ -374,3 +374,20 @@ describe('待处理：直达某条记忆', () => {
     expect(scrollIntoView).not.toHaveBeenCalled()
   })
 })
+
+// —— 键盘（故事 50）：裁决、提升、删除都是原生 button，能 Tab 到；焦点环用宿主令牌（见 ui/basics.spec 的主题检查） ——
+
+describe('键盘', () => {
+  it('裁决 / 提升 / 删除控件都是原生 button，不在 Tab 序列外', () => {
+    setup([secret, horizontal, vertical, promote])
+    const names = ['以 A 为准', '以 B 为准', '都保留', '以基线为准', '保留这条记忆', '提升为全局', '留在本项目', '彻底删除…']
+    for (const name of names) {
+      const button = screen.getByRole('button', { name })
+      expect(button.tagName).toBe('BUTTON')
+      expect(button).not.toBeDisabled()
+      expect(button.tabIndex).toBe(0)
+      button.focus()
+      expect(document.activeElement).toBe(button)
+    }
+  })
+})

@@ -1,7 +1,8 @@
 // 小组件的渲染测试：按钮、状态标记、chip、体检横幅、空状态。
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, screen } from '@testing-library/react'
-import { Button } from './Button.tsx'
+import { Button, buttonCss } from './Button.tsx'
+import { themeCss } from './theme.ts'
 import { Chip } from './Chip.tsx'
 import { EmptyState } from './EmptyState.tsx'
 import { HealthBanner } from './HealthBanner.tsx'
@@ -106,5 +107,13 @@ describe('EmptyState', () => {
     expect(container.querySelector('.pm-whale')).toBeNull()
     expect(container.querySelector('.pm-empty-body')).toBeNull()
     expect(screen.getAllByRole('button')).toHaveLength(1)
+  })
+})
+
+describe('焦点环（故事 50）', () => {
+  it('按钮与链接的焦点环照抄宿主令牌，自有控件不写 outline: none', () => {
+    expect(themeCss).toMatch(/:focus-visible\s*\{\s*outline: var\(--dsw-focus-ring-width, 2px\) solid var\(--pm-focus\);\s*outline-offset: 2px;/)
+    expect(themeCss).toContain('--pm-focus: var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary))')
+    for (const css of [themeCss, buttonCss]) expect(css).not.toMatch(/outline:\s*(none|0)/)
   })
 })
