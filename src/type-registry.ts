@@ -26,6 +26,9 @@ export const TEMPLATES: Record<string, readonly MemoryTypeDefinition[]> = {
   // companion 模板 P2
 }
 
+/** 全部模板的类型按名索引：读时 fallback 用。 */
+const ANY_TEMPLATE_TYPE = new Map(Object.values(TEMPLATES).flat().map(t => [t.name, t]))
+
 export const FALLBACK_POLICY: Omit<MemoryTypeDefinition, 'name' | 'label' | 'description'> = {
   whenToSave: '跨会话可能还有用、未来的你会因此做得更好', recall: 'search', decayDays: 90, governancePriority: 'high',
 }
@@ -67,7 +70,8 @@ export function buildTypeRegistry(config: TypeRegistryConfig): TypeRegistry {
   for (const t of customTypes) map.set(t.name, t)
 
   return {
-    get: name => map.get(name) ?? { name, label: name, description: '', ...FALLBACK_POLICY },
+    // 读时认得所有模板的类型（切模板后旧模板的记忆照常带入、能搜到），写时 has 仍只认当前模板
+    get: name => map.get(name) ?? ANY_TEMPLATE_TYPE.get(name) ?? { name, label: name, description: '', ...FALLBACK_POLICY },
     has: name => map.has(name),
     all: () => [...map.values()],
     renderSaveDescription() {

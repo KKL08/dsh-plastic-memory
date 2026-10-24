@@ -50,6 +50,16 @@ describe('buildTypeRegistry', () => {
     expect(policy.decayDays).toBe(90)
   })
 
+  it('切模板后读时认得其他模板的类型（label、decayDays 不退化），写时仍只认当前模板', () => {
+    const office = buildTypeRegistry({ template: 'office', customTypes: {} })
+    expect(office.get('procedure')).toMatchObject({ label: '可复用流程', decayDays: 90, recall: 'search', governancePriority: 'medium' })
+    expect(office.has('procedure')).toBe(false)
+    expect(office.all().map(t => t.name)).not.toContain('procedure')
+    const coding = buildTypeRegistry(base)
+    expect(coding.get('commitment')).toMatchObject({ label: '承诺', decayDays: 14, recall: 'core' })
+    expect(coding.has('commitment')).toBe(false)
+  })
+
   it('renderSaveDescription 通用层含守门句/γ/推断低置信/隐私负向 + 全部类型', () => {
     const text = buildTypeRegistry(base).renderSaveDescription()
     expect(text).toContain('各类型何时记')
