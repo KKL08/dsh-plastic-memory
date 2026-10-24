@@ -134,9 +134,9 @@ export class InMemoryTable implements MemoryTable {
   async create(record: MemoryRecord) {
     this.place(undefined, record)   // 不定位：新 id 直接占名
   }
-  async put(key: string, value: MemoryRecord) {
+  async put(key: string, value: MemoryRecord, hint: LocateHint = { workspacePath: value.workspacePath }) {
     // 与 FileTable 同语义：put 不承载召回统计（召回统计住侧表，由 MemoryStore.markRecalled 写）
-    const prev = await this.locate(key, { workspacePath: value.workspacePath })
+    const prev = await this.locate(key, hint)
     this.place(prev, prev ? { ...value, recallCount: prev.record.recallCount, lastRecalledAt: prev.record.lastRecalledAt } : value)
   }
   async update(key: string, fn: (c: MemoryRecord) => MemoryRecord, hint?: LocateHint) {
@@ -147,7 +147,10 @@ export class InMemoryTable implements MemoryTable {
   async delete(key: string, hint?: LocateHint) {
     const current = await this.locate(key, hint)
     if (!current) return false
-    this.slots.delete(current.filePath)
+    // 与 FileTable 同语义：可见集合（global + 该记录目录）里同 id 的其余副本一并删除
+    for (const s of this.slots.values()) {
+      if (s.record.id === key && (s.dir === this.globalDir || s.dir === current.dir)) this.slots.delete(s.filePath)
+    }
     return true
   }
 }
@@ -196,7 +199,8 @@ export class MemoryStore {
   listWorkspaceDirs() { return this.table.listWorkspaceDirs() }
   /** 新记录：不定位，排他占名（save create 用）。 */
   create(record: MemoryRecord) { return this.table.create(record) }
-  put(record: MemoryRecord) { return this.table.put(record.id, record) }
+  /** hint：跨 scope 搬家（promote）时传原记录的 workspace，让定位到的是门放行的那份；缺省按 record 自己的 workspace。 */
+  put(record: MemoryRecord, hint?: LocateHint) { return this.table.put(record.id, record, hint) }
 
   /**
    * 删除按记录定位：调用方传入它读到并过了门的那条记录，按该记录自己的 workspace 定位（与 put 同约定），

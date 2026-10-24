@@ -81,11 +81,12 @@ export interface MemoryTable {
   listWorkspaceDirs(): Promise<WorkspaceDirListing>
   /** 新 id：不定位，排他占名落盘（撞名追加 id 片段，不覆盖别的记录）。 */
   create(record: MemoryRecord): Promise<void>
-  /** 锁内 locate → 写；scope / workspacePath 变化时搬家删旧；status 离开 active 时文件进 .archive/，回到 active 搬回顶层。 */
-  put(key: string, value: MemoryRecord): Promise<void>
+  /** 锁内 locate（hint 缺省取 value 自己的 workspace；跨 scope 搬家时调用方传原记录的 workspace，定位到的才是要搬的那份）→ 写；
+   *  scope / workspacePath 变化时搬家删旧；status 离开 active 时文件进 .archive/，回到 active 搬回顶层。 */
+  put(key: string, value: MemoryRecord, hint?: LocateHint): Promise<void>
   /** 锁内 locate（带 hint，同 id 多副本时与调用方读到的那份一致）→ fn(当前) → 写（同 put 的搬家与归档规则）；返回实际写出的记录（deleted 缺 deletedAt 时已补）。 */
   update(key: string, fn: (current: MemoryRecord) => MemoryRecord, hint?: LocateHint): Promise<MemoryRecord>
-  /** 物理删除（含 .archive/ 里的文件）；hint 同 update。 */
+  /** 物理删除（含 .archive/ 里的文件）；hint 同 update。可见集合（global + 该记录目录）里同 id 的其余副本一并删除。 */
   delete(key: string, hint?: LocateHint): Promise<boolean>
   /**
    * 维护点（设计稿 §5）：只动给定目录，锁内、幂等。再生索引；顶层非 active 搬 .archive/（.archive/ 里 status 仍为 active

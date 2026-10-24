@@ -57,6 +57,8 @@ export function redactRecord(r: SnapshotRecord): SnapshotRecord {
  */
 export class SnapshotStore {
   private table: KvTable<MemorySnapshot>
+  /** redact 是整快照的读改写，进程内串行，否则两次并发脱敏会把对方的明文写回。 */
+  private redactChain: Promise<void> = Promise.resolve()
 
   constructor(table: KvTable<MemorySnapshot>) {
     this.table = table
@@ -100,7 +102,13 @@ export class SnapshotStore {
    * 密钥硬删（ARCHITECTURE.md ⑥-6c）：所有含这些 id 的快照里把该记录脱敏（redactRecord），同快照的其他记录不动。
    * 每个快照经侧表 put 原子重写（tmp + rename）；内容没变的（不含这些 id、或已脱敏过）不写。
    */
-  async redact(ids: ReadonlySet<string>): Promise<void> {
+  redact(ids: ReadonlySet<string>): Promise<void> {
+    const run = this.redactChain.then(() => this.redactNow(ids))
+    this.redactChain = run.catch(() => {})
+    return run
+  }
+
+  private async redactNow(ids: ReadonlySet<string>): Promise<void> {
     for (const [, snap] of await this.table.list()) {
       let changed = false
       const data = snap.data.map(r => {
