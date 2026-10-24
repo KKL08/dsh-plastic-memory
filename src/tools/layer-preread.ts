@@ -1,5 +1,5 @@
 import type { MemoryStore } from '../store.ts'
-import type { PendingDecisionsStore } from '../governance/decisions.ts'
+import { kindOf, type PendingDecisionsStore } from '../governance/decisions.ts'
 import type { KvTable } from '../kv-table.ts'
 import type { ScanCacheEntry } from '../governance/schema.ts'
 import { layerCacheKey, type LayerPreread, type LayerRef } from '../governance/layer-health.ts'
@@ -12,7 +12,7 @@ import { resolveDuplicates, type DirectoryNote, type LocatedRecord, type Quarant
  * 缓存过滤要核对记录是否存活。层外的引用（取代链与语义缓存里指向其他层的 id，如提升到 global 后
  * global 记录的 supersedes 指向 workspace 旧条）按 id 两级定位，不整库预读。
  * 隔离条目按读到它的层归档（malformed 按所在目录归层）；同 id 多文件按取舍规则留一份，其余副本报目录级说明、不删。
- * 另取待决账本全量、语义缓存全部条目。
+ * 另取待决账本里的全部未决冲突、语义缓存全部条目。
  */
 export async function prereadLayers(
   deps: { store: MemoryStore; decisions: PendingDecisionsStore; cache: KvTable<ScanCacheEntry> },
@@ -35,7 +35,8 @@ export async function prereadLayers(
   directoryNotes.push(...duplicateNotes(read, chosen))
   const byId = new Map<string, MemoryRecord>(chosen.map(l => [l.record.id, l.record]))
   const cache = new Map(await deps.cache.list())
-  const pending = await deps.decisions.list()
+  // 评分与跨层聚合只认冲突；提升候选、超限提醒（GUI 条目）不进
+  const pending = (await deps.decisions.list()).filter(e => kindOf(e) === 'conflict')
 
   const refs = new Set<string>()
   for (const r of byId.values()) if (r.status === 'active') for (const id of r.supersedes ?? []) refs.add(id)
