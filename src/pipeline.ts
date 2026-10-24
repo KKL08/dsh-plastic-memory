@@ -220,7 +220,7 @@ export async function runSavePipeline(
       crossBucketSupersede = true
       continue
     }
-    await store.put({ ...old, status: 'superseded', updatedAt: now })
+    await store.update(old, r => ({ ...r, status: 'superseded', updatedAt: now }))
   }
 
   const baseResult = candidate.action === 'update'

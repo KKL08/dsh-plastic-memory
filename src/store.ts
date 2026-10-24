@@ -201,8 +201,13 @@ export class MemoryStore {
   listWorkspaceDirs() { return this.table.listWorkspaceDirs() }
   /** 新记录：不定位，排他占名（save create 用）。 */
   create(record: MemoryRecord) { return this.table.create(record) }
-  /** hint：跨 scope 搬家（promote）时传原记录的 workspace，让定位到的是门放行的那份；缺省按 record 自己的 workspace。 */
+  /** 整条替换。hint：跨 scope 搬家时传原记录的 workspace，让定位到的是门放行的那份；缺省按 record 自己的 workspace。 */
   put(record: MemoryRecord, hint?: LocateHint) { return this.table.put(record.id, record, hint) }
+  /** 读改写：锁内按调用方读到的那条记录定位（定位约定同 put），对磁盘上的当前内容套 fn；
+   *  调用方读到之后被别处改过的字段不丢。只改几个字段的写回都该走这里，整条替换才用 put。 */
+  update(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, fn: (current: MemoryRecord) => MemoryRecord, hint: LocateHint = { workspacePath: record.workspacePath }) {
+    return this.table.update(record.id, fn, hint)
+  }
 
   /**
    * 删除按记录定位：调用方传入它读到并过了门的那条记录，按该记录自己的 workspace 定位（与 put 同约定），

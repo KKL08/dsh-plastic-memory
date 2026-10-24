@@ -49,7 +49,7 @@ export async function executeConfirm(
     }
     // refresh 不是内容编辑，updatedAt 保持为最近一次内容修改的时刻；lastConfirmedAt 独立记录确认动作
     // （快照恢复按内容投影判断"快照后被修改"，不看 updatedAt，见 governance/snapshots.ts restoreProjection）。
-    await deps.store.put({ ...target, lastConfirmedAt: now })
+    await deps.store.update(target, r => ({ ...r, lastConfirmedAt: now }))
     return {
       kind: 'refreshed', memoryId: args.memoryId, lastConfirmedAt: now, otherWorkspaces,
       message: `已确认记忆 ${args.memoryId} 仍然准确，新鲜度已刷新。${crossWorkspaceNote([], otherWorkspaces)}`,

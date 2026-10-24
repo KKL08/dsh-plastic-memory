@@ -1,5 +1,5 @@
 import { mkdir, readdir, readFile, writeFile, rename, rm, stat } from 'node:fs/promises'
-import { RecordNotFoundError } from '../errors.ts'
+import { ConcurrentModificationError, RecordNotFoundError } from '../errors.ts'
 import { basename, dirname, join, relative } from 'node:path'
 import type { MemoryRecord } from '../record-schema.ts'
 import {
@@ -28,6 +28,12 @@ const TMP_STALE_MS = 60_000
 /** 原子写临时文件的完整后缀（与 atomicWrite 生成规则一致，锚定结尾）。合法记忆名可以含 ".tmp-"
  *  子串（如 cache.tmp-notes.md），只看子串会把正式 .md 当残留删掉；正式文件永远以 .md 结尾。 */
 const TMP_SUFFIX_RE = /\.tmp-(\d+)-[a-z0-9]+$/
+
+/** 写路径 locate 到写盘之间文件被别处改动时，重读重算的总次数上限；到上限仍在变就报错不写。 */
+const WRITE_ATTEMPTS = 3
+
+/** 写前复核发现 locate 之后文件被改：本轮写作废，由 update / put 重新 locate 再来（只在本文件内流转）。 */
+class StaleReadError extends Error {}
 
 /** frontmatter 里的 id 行：允许引号与两侧空白，行尾的 \r（CRLF 文件）被 \s* 吃掉。 */
 const ID_LINE_RE = /^id:\s*["']?([^"'\s]+)["']?\s*$/m
@@ -79,6 +85,7 @@ function frontmatterOf(raw: string): string {
 /**
  * 文件表：磁盘是唯一真相，进程里不常驻记忆表（设计稿 §0）。构造不做 I/O；每个操作读它涉及的目录。
  * 读路径不加锁、不写盘；写路径经一条 Promise 链串行，锁内先 locate 重读磁盘再应用修改（外部编辑不丢）；create 是例外：新 id 不定位，排他占名。
+ * 锁只管本进程：写盘前复核文件原文仍是 locate 读到的那份，被别的进程或用户改过就重新 locate、重算后再写。
  * 记忆目录的维护只有两处入口：写路径末尾（被写的目录）与 maintain（快照冻结时由调用方对 global + 当前 workspace 调用），都走同一把锁。
  */
 export class FileTable implements MemoryTable {
@@ -308,16 +315,22 @@ export class FileTable implements MemoryTable {
   }
 
   async locate(id: string, hint?: LocateHint): Promise<LocatedFile | undefined> {
+    const slot = await this.locateSlot(id, hint)
+    return slot && this.toLocated(slot)
+  }
+
+  /** locate 的内部形态：带磁盘原文，写路径据此在写盘前复核。 */
+  private async locateSlot(id: string, hint?: LocateHint): Promise<Slot | undefined> {
     const global: ScopeDir = { dir: this.globalDir, loc: { scope: 'global' } }
     const hinted = hint?.workspacePath === undefined ? [] : await this.hintDirs(hint.workspacePath)
     const first = await this.scanForId(id, [global, ...hinted])
-    if (first.length > 0) return this.toLocated(resolveDuplicates(first, hint)[0])
+    if (first.length > 0) return resolveDuplicates(first, hint)[0]
     const scanned = new Set([this.globalDir, ...hinted.map(d => d.dir)])
     const rest = (await this.listWorkspaceDirs()).entries
       .filter(e => !scanned.has(e.dir))
       .map(e => ({ dir: e.dir, loc: { scope: 'workspace', workspacePath: e.workspacePath } as FileLocation }))
     const second = await this.scanForId(id, rest)
-    return second.length > 0 ? this.toLocated(resolveDuplicates(second, hint)[0]) : undefined
+    return second.length > 0 ? resolveDuplicates(second, hint)[0] : undefined
   }
 
   // —— 写侧（锁内）——
@@ -382,7 +395,7 @@ export class FileTable implements MemoryTable {
     }
   }
 
-  /** 维护点动手前的复核：磁盘原文仍等于读到的那份。读不出（已删、不可读）也算变了。 */
+  /** 动手前的复核（维护点与写路径共用）：磁盘原文仍等于读到的那份。读不出（已删、不可读）也算变了。 */
   private async unchangedSince(slot: Slot): Promise<boolean> {
     try { return (await readFile(slot.filePath, 'utf8')) === slot.raw } catch { return false }
   }
@@ -512,8 +525,9 @@ export class FileTable implements MemoryTable {
    * 写路径（锁内，设计稿 §5）：选目录（scope；workspace 目录不存在则 mkdir + 写标记）→ 选层（status 离开 active 进
    * .archive/，deleted 缺 deletedAt 补 now；回到 active 搬回顶层）→ 编码 → 已定位到自己文件且目录、层、slug 都没变就原地
    * tmp + rename 覆盖，否则排他占名 → 搬家删旧 → 清可见集合里该 id 的其余副本 → 本目录（搬家时两个）维护点。返回实际写出的记录。
+   * 覆盖、占名、删旧之前都复核 prev 的原文，变了抛 StaleReadError（占名后才发现的先撤回新文件），由调用方重来。
    */
-  private async persist(key: string, prev: LocatedFile | undefined, value: MemoryRecord): Promise<MemoryRecord> {
+  private async persist(key: string, prev: Slot | undefined, value: MemoryRecord): Promise<MemoryRecord> {
     const next = value.status === 'deleted' && value.deletedAt === undefined ? { ...value, deletedAt: this.now() } : value
     const volatileChanged = !prev || !this.volatileEqual(prev.record, next)
     const stableChanged = !prev || !this.stableEqual(prev.record, next)
@@ -532,13 +546,21 @@ export class FileTable implements MemoryTable {
       let filePath: string
       if (prev !== undefined && !moved && !renamed && dirname(prev.filePath) === level) {
         filePath = prev.filePath
+        if (!(await this.unchangedSince(prev))) throw new StaleReadError()
         await this.atomicWrite(filePath, text)   // 自己的文件：rename 只覆盖同一记录自己的文件
       } else {
+        if (prev !== undefined && !(await this.unchangedSince(prev))) throw new StaleReadError()
         await mkdir(level, { recursive: true })
         filePath = await this.claimAndWrite(next, level, text)
         // 先写新后删旧；崩溃窗口由读路径的同 id 取舍兜底。占名可能落回原路径（候选名正被自己占着），
         // 路径比较忽略大小写：大小写不敏感文件系统上不能删掉刚写的自己。
-        if (prev !== undefined && prev.filePath.toLowerCase() !== filePath.toLowerCase()) await rm(prev.filePath, { force: true })
+        if (prev !== undefined && prev.filePath.toLowerCase() !== filePath.toLowerCase()) {
+          if (!(await this.unchangedSince(prev))) {
+            await rm(filePath, { force: true })   // 占名期间旧文件被改：撤回刚写的新文件，旧文件留着重来
+            throw new StaleReadError()
+          }
+          await rm(prev.filePath, { force: true })
+        }
       }
       await this.removeOtherCopies(key, filePath, dir)
       await this.maintainDirs(moved ? [dir, prev!.dir] : [dir])
@@ -549,28 +571,40 @@ export class FileTable implements MemoryTable {
     return next
   }
 
+  /** 锁内 locate → attempt；attempt 因复核失败作废就重新 locate 再来，总共 WRITE_ATTEMPTS 次。 */
+  private async withFreshLocate<T>(key: string, hint: LocateHint | undefined, attempt: (current: Slot | undefined) => Promise<T>): Promise<T> {
+    for (let i = 0; i < WRITE_ATTEMPTS; i++) {
+      try {
+        return await attempt(await this.locateSlot(key, hint))
+      } catch (err) {
+        if (!(err instanceof StaleReadError)) throw err
+      }
+    }
+    throw new ConcurrentModificationError(key, WRITE_ATTEMPTS)
+  }
+
   async create(record: MemoryRecord): Promise<void> {
     await this.locked(async () => { await this.persist(record.id, undefined, record) })
   }
 
   async put(key: string, value: MemoryRecord, hint: LocateHint = { workspacePath: value.workspacePath }): Promise<void> {
-    await this.locked(async () => {
+    // put 是整条替换：值由调用方给定，重来时只换新的位置、附加字段与召回统计，不重算内容
+    await this.locked(() => this.withFreshLocate(key, hint, async prev => {
       // put 不承载召回统计（设计稿 §2：召回统计只住 .state/recall-stats.json，快照恢复不恢复它）。召回统计
       // 由 MemoryStore.markRecalled 直写侧表；prev 在时以侧表现值为准，restore 旧记录不回退 sidecar。
-      const prev = await this.locate(key, hint)
       const next = prev
         ? { ...value, recallCount: prev.record.recallCount, lastRecalledAt: prev.record.lastRecalledAt }
         : value
       await this.persist(key, prev, next)
-    })
+    }))
   }
 
   async update(key: string, fn: (current: MemoryRecord) => MemoryRecord, hint?: LocateHint): Promise<MemoryRecord> {
-    return this.locked(async () => {
-      const current = await this.locate(key, hint)   // 锁内重读磁盘：外部编辑不丢
+    // 锁内重读磁盘：外部编辑不丢；写盘前又被改就在新内容上重算 fn
+    return this.locked(() => this.withFreshLocate(key, hint, async current => {
       if (!current) throw new RecordNotFoundError(key)
       return this.persist(key, current, fn(current.record))
-    })
+    }))
   }
 
   async delete(key: string, hint?: LocateHint): Promise<boolean> {
