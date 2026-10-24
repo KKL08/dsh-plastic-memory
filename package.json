@@ -25,18 +25,21 @@
   "exports": {
     ".": "./src/index.ts",
     "./client": "./lib/client.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
   "publishConfig": {
     "main": "lib/index.js",
     "exports": {
       ".": "./lib/index.js",
       "./client": "./lib/client.js",
-      "./package.json": "./package.json"
+      "./package.json": "./package.json",
+      "./locale/*.json": "./locale/*.json"
     }
   },
   "files": [
     "lib",
+    "locale",
     "cordis.patch.yml",
     "README.md"
   ],
@@ -65,11 +68,18 @@
     "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
     "@deepseek-ai/dsh-util-values": "0.2.1-rc.2",
     "@deepseek-ai/schemastery": "3.18.5",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.3",
     "@types/node": "^26.2.0",
     "@types/react": "^18.3.31",
+    "@types/react-dom": "~18.3.7",
     "@vitest/coverage-v8": "3.2.7",
     "esbuild": "^0.28.2",
     "fast-check": "^4.9.0",
+    "jsdom": "29.1.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   },
