@@ -249,7 +249,11 @@ export class FileTable implements MemoryTable {
       const dir = join(this.opts.root, name)
       const loc = await this.locationOf(dir)
       if (loc === undefined) continue   // readdir 之后被删：竞态
-      if ('note' in loc) { directoryNotes.push(loc.note); continue }
+      if ('note' in loc) {
+        // 点开头又没有标记的目录（.git 之类）不是插件建的，不报缺标记
+        if (!(name.startsWith('.') && loc.note.code === 'marker-missing')) directoryNotes.push(loc.note)
+        continue
+      }
       if (loc.loc.scope !== 'workspace') continue   // 只有 global 目录会落到这支，已被 isWorkspaceDirName 排除
       const listed = await this.listMemoryFiles(dir)
       if ('note' in listed) { directoryNotes.push(listed.note); continue }

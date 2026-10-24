@@ -21,14 +21,21 @@ export function isReservedFileName(fileName: string): boolean {
   return fileName.toLowerCase() === INDEX_FILE.toLowerCase()
 }
 
-/** 目录顶层哪些文件名算记忆文件：.md 结尾、不是索引、不以 . 开头（原子写的 tmp 以 .tmp-<pid>-<rand> 结尾，天然排除）。 */
+/**
+ * 目录顶层哪些文件名算记忆文件：.md 结尾、不是索引。文件名由记忆名字生成，名字可以以点开头（「.env 约定」），
+ * 所以点开头的照常算；只排除 macOS 在非原生卷上生成的 ._ 伴生文件和编辑器的 .# 锁文件。
+ * 原子写的 tmp 以 .tmp-<pid>-<rand> 结尾，天然排除。
+ */
 export function isMemoryFileName(fileName: string): boolean {
-  return fileName.endsWith('.md') && !fileName.startsWith('.') && !isReservedFileName(fileName)
+  return fileName.endsWith('.md') && !fileName.startsWith('._') && !fileName.startsWith('.#') && !isReservedFileName(fileName)
 }
 
-/** 根目录下哪些子目录可能是 workspace 目录：排除 global 与所有隐藏目录（.state/、.archive/ 等）。 */
+/**
+ * 根目录下哪些子目录可能是 workspace 目录：排除 global 与插件自己的 .state/、.archive/。
+ * 目录名取自项目目录名，项目在 ~/.dotfiles 这类路径下时也以点开头；是不是 workspace 目录由 .workspace 标记定。
+ */
 export function isWorkspaceDirName(dirName: string): boolean {
-  return dirName !== GLOBAL_DIR && !dirName.startsWith('.')
+  return dirName !== GLOBAL_DIR && dirName !== STATE_DIR && dirName !== ARCHIVE_DIR
 }
 
 export function slugifyName(name: string): string {
