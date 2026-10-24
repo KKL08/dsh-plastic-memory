@@ -195,7 +195,7 @@ type RunLine = (sessionId: string, line: string) => Promise<RemoteResult<Command
 
 /**
  * memoryRoot：localStorage 有就用；没有就借会话发一次 info（并发请求合并成一条），再发一次 refresh-views。
- * info 失败后换了会话可以重试；缓存的根在刷新后仍读不到视图时，由 revalidate 再问一次。
+ * info 失败后同一会话不再重试（两个挂着不同会话的视图不能来回触发），换了会话可以试一次；缓存的根在刷新后仍读不到视图时，由 revalidate 再问一次。
  */
 function createRootStore(run: RunLine) {
   let state: RootState = { refreshes: 0 }
@@ -206,7 +206,7 @@ function createRootStore(run: RunLine) {
   } catch { /* 存储不可用：每次进入发一次 info */ }
   const listeners = new Set<() => void>()
   let infoInflight = false
-  let failedSessionId: string | undefined
+  const failedSessions = new Set<string>()
   let refreshed = false
   const set = (next: RootState) => { state = next; for (const fn of listeners) fn() }
   const remember = (memoryRoot: string) => {
@@ -217,7 +217,7 @@ function createRootStore(run: RunLine) {
     get: () => state,
     subscribe(fn: () => void) { listeners.add(fn); return () => { listeners.delete(fn) } },
     ensureRoot(sessionId: string) {
-      if (state.memoryRoot !== undefined || infoInflight || (state.error !== undefined && sessionId === failedSessionId)) return
+      if (state.memoryRoot !== undefined || infoInflight || failedSessions.has(sessionId)) return
       infoInflight = true
       void run(sessionId, encodeMemoryCommand({ cmd: 'info' })).then((r) => {
         infoInflight = false
@@ -226,7 +226,7 @@ function createRootStore(run: RunLine) {
           remember(result.info.memoryRoot)
           store.ensureViews(sessionId)
         } else {
-          failedSessionId = sessionId
+          failedSessions.add(sessionId)
           set({ ...state, error: result.ok ? 'info returned no paths' : (result.detail ?? result.code) })
         }
       })

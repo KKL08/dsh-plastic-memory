@@ -186,6 +186,18 @@ describe('createHostGateway', () => {
     expect(executed).toEqual(['/memory info', '/memory info', '/memory refresh-views'])
   })
 
+  it('两个视图挂着不同会话、info 都失败：各试一次就停，不来回重试', async () => {
+    const two = list(summary('s1', { cwd: '/w/a', updatedAt: 1 }), summary('s2', { cwd: '/w/b', updatedAt: 2 }))
+    const ctx = fakeCtx()
+    const execute = ctx.remote.commands.execute as ReturnType<typeof vi.fn>
+    execute.mockImplementation(async (_sid: string, line: string) => (executed.push(line), { ok: false as const, error: { code: 'boom', message: 'no plugin' } }))
+    const gateway = createHostGateway(ctx)({ ...props, useSessions: <S,>(selector: (s: SessionListState) => S) => selector(two) })
+    const { result } = renderHook(() => [gateway.useView(gateway.useSession('/w/a'), 'pending'), gateway.useView(gateway.useSession('/w/b'), 'pending')])
+    await waitFor(() => { expect(result.current.every(v => v.status === 'error')).toBe(true) })
+    await new Promise(r => setTimeout(r, 50))
+    expect(executed).toEqual(['/memory info', '/memory info'])
+  })
+
   it('没有会话：idle，不发命令', () => {
     const gateway = createHostGateway(fakeCtx())({ ...props, useSessions: <S,>(selector: (s: SessionListState) => S) => selector(list()) })
     const { result } = renderHook(() => gateway.useView(gateway.useSession(undefined), 'library'))
