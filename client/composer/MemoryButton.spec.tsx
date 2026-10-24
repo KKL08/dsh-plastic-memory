@@ -130,6 +130,7 @@ describe('注册', () => {
   it('apply 在 conversation.composer.dock 注册按钮，依赖 sidebarRight', () => {
     const registered: Array<{ options: { name: string; id?: string; order?: number }; component: ComponentType<never> }> = []
     const ctx: HostContext = {
+      inject: () => () => {},
       slots: {
         inject: (_name, fn) => { fn(); return () => {} },
         register: (options, component) => { registered.push({ options, component: component as ComponentType<never> }); return () => {} },

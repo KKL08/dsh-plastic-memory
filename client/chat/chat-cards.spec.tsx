@@ -178,7 +178,7 @@ function fakeHost() {
     },
     locale: { register: () => () => {}, bind: () => createTranslator(zh) as (key: string) => string, getSnapshot: () => 0, subscribe: () => () => {} },
     layout: { selectPanel: vi.fn() },
-    remote: { commands: { execute }, workspaceFiles: { read: vi.fn() } },
+    remote: { commands: { execute }, workspaceFiles: { read: vi.fn() }, session: { openWorkspacePath: vi.fn() } },
   }
   const nav = createNavStore()
   registerChatCards(ctx, nav)
