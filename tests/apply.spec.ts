@@ -140,8 +140,10 @@ async function makeTmpRoot(): Promise<string> {
   tmpDirs.push(dir)
   return dir
 }
+// 视图写入是旁路（不 await），用例结束时可能还在往 .state/gui 落文件，rm 遍历到一半会撞 ENOTEMPTY：
+// 清理本身允许重试，不影响任何断言
 afterEach(async () => {
-  await Promise.all(tmpDirs.splice(0).map(d => rm(d, { recursive: true, force: true })))
+  await Promise.all(tmpDirs.splice(0).map(d => rm(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })))
 })
 
 /** 同一 memoryRoot 上的另一个侧表实例：用例经它预置或读回插件落在 .state/ 的数据（文件是唯一真相）。 */
