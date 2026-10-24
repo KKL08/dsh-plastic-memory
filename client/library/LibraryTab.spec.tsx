@@ -1,6 +1,6 @@
 // 「全部记忆」tab：对假网关断言渲染出什么、每个动作发出了哪条命令或宿主调用。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, screen, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { GUI_VIEW_VERSION, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
 import type { BorrowedSession } from '../gateway.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
@@ -105,12 +105,13 @@ describe('全部记忆', () => {
     renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
     const row = rowOf('提交前跑 typecheck')
     await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '删除' })) })
-    expect(within(row).getByText('这条记忆里有密钥，删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeInTheDocument()
+    expect(within(row).getByText('彻底删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeInTheDocument()
+    expect(within(row).getByText('这条记忆里有密钥')).toBeInTheDocument()
     expect(within(row).getByRole('button', { name: '删除' })).toHaveAttribute('aria-disabled', 'true')
     expect(screen.queryByRole('status')).toBeNull()
 
     fireEvent.click(within(row).getByRole('button', { name: '取消' }))
-    expect(screen.queryByText('这条记忆里有密钥，删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeNull()
+    expect(screen.queryByText('彻底删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeNull()
     await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '删除' })) })
     await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '彻底删除' })) })
     expect(gateway.executed.map(e => e.command)).toEqual([
@@ -118,7 +119,7 @@ describe('全部记忆', () => {
       { cmd: 'forget', memoryId: 'a2' },
       { cmd: 'hard-delete', memoryId: 'a2' },
     ])
-    expect(screen.queryByText('这条记忆里有密钥，删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeNull()
+    expect(screen.queryByText('彻底删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeNull()
     expect(screen.getByRole('status')).toHaveTextContent('已彻底删除。如果它是真的凭证，记得去换一个新的。')
     expect(screen.queryByText(/14 天/)).toBeNull()
     expect(screen.queryByRole('button', { name: '去最近删除 ›' })).toBeNull()
@@ -188,6 +189,66 @@ describe('全部记忆', () => {
     renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway())
     expect(screen.getByText('还没有生成这份数据。')).toBeInTheDocument()
     expect(screen.queryByRole('list')).toBeNull()
+  })
+
+  describe('确认收起后的键盘焦点', () => {
+    const A1 = '测试里不要 mock 数据库，用 testcontainers 起真实 Postgres。'
+    const secretFirst = () => createFakeGateway({
+      views: { library: library() },
+      respond: command => command.cmd === 'forget'
+        ? { ok: false, cmd: command.cmd, code: 'has-secret' }
+        : { ok: true, cmd: command.cmd },
+    })
+    /** 键盘用户按回车：焦点先落在按钮上再触发点击。 */
+    const press = async (button: HTMLElement) => {
+      button.focus()
+      await act(async () => { fireEvent.click(button) })
+    }
+
+    it('含密钥确认点「取消」：焦点回到这一行的「删除」', async () => {
+      renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, secretFirst())
+      const del = within(rowOf(A1)).getByRole('button', { name: '删除' })
+      await press(del)
+      await press(within(rowOf(A1)).getByRole('button', { name: '取消' }))
+      await waitFor(() => { expect(del).toHaveFocus() })
+    })
+
+    it('彻底删除后这一行没了：焦点落到下一行的「删除」；删的是最后一条时落到提示上', async () => {
+      const gateway = secretFirst()
+      renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
+      const del = within(rowOf(A1)).getByRole('button', { name: '删除' })
+      await press(del)
+      await press(within(rowOf(A1)).getByRole('button', { name: '彻底删除' }))
+      await waitFor(() => { expect(del).toHaveFocus() })
+      act(() => { gateway.setView('library', library({ layers: [{ layer: app, items: [memory({ id: 'a2', content: '提交前跑 typecheck' })] }] })) })
+      const next = within(rowOf('提交前跑 typecheck')).getByRole('button', { name: '删除' })
+      await waitFor(() => { expect(next).toHaveFocus() })
+
+      await press(next)
+      await press(within(rowOf('提交前跑 typecheck')).getByRole('button', { name: '彻底删除' }))
+      act(() => { gateway.setView('library', library({ layers: [{ layer: app, items: [] }, { layer: { kind: 'global' }, items: [memory({ id: 'g1' })] }] })) })
+      await waitFor(() => { expect(screen.getByText('已彻底删除。如果它是真的凭证，记得去换一个新的。')).toHaveFocus() })
+    })
+
+    it('跨项目确认：「取消」回到「删除」；「继续处理」先回到「删除」，删掉后落到下一行', async () => {
+      const gateway = createFakeGateway({
+        views: { library: library() },
+        respond: command => 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
+          ? { ok: true, cmd: command.cmd, memoryIds: ['a1'] }
+          : { ok: false, cmd: command.cmd, code: 'cross-workspace', rejected: [{ id: 'a1', workspacePath: '/w/blog' }] },
+      })
+      renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
+      const del = within(rowOf(A1)).getByRole('button', { name: '删除' })
+      await press(del)
+      await press(screen.getByRole('button', { name: '取消' }))
+      await waitFor(() => { expect(del).toHaveFocus() })
+
+      await press(del)
+      await press(screen.getByRole('button', { name: '继续处理' }))
+      await waitFor(() => { expect(del).toHaveFocus() })
+      act(() => { gateway.setView('library', library({ layers: [{ layer: app, items: [memory({ id: 'a2', content: '提交前跑 typecheck' })] }] })) })
+      await waitFor(() => { expect(within(rowOf('提交前跑 typecheck')).getByRole('button', { name: '删除' })).toHaveFocus() })
+    })
   })
 
   describe('带 memoryId 打开', () => {
