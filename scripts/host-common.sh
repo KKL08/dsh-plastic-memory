@@ -59,6 +59,7 @@ host_cleanup() {
 # rewrite in scripts/publish-shape.cjs), then npm pack it. Sets TGZ.
 host_stage_and_pack() {
   host_run build "$REPO/node_modules/.bin/tsc" -p "$REPO/tsconfig.build.json" --outDir "$STAGE/lib"
+  host_run build-client node "$REPO/scripts/build-client.ts" --outfile "$STAGE/lib/client.js"
   host_run stage-files cp "$REPO/cordis.patch.yml" "$REPO/README.md" "$STAGE/"
   host_run stage node "$REPO/scripts/publish-shape.cjs" "$REPO/package.json" "$STAGE/package.json"
   host_run pack sh -c 'cd "$1" && npm pack --loglevel=error' _ "$STAGE"
