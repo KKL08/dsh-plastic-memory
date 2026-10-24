@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach, afterEach } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -322,13 +322,15 @@ describe('SidecarStore：KV 导入协议', () => {
     expect((await readMarker()).source).toBe('kv')
   })
 
-  it('标记文件坏掉按缺失处理，重新导入（排他创建保证不覆盖）', async () => {
+  it('标记文件坏掉按缺失处理，重新导入（排他创建保证不覆盖）；损坏只告警一次', async () => {
+    const { warns, log } = makeLog()
     await mkdir(state, { recursive: true })
     await writeFile(join(state, KV_IMPORT_MARKER), '{ broken', 'utf8')
     const legacy = legacyOf({ snapshots: [['snap_a', snap('snap_a')]] })
-    const s = new SidecarStore({ root, schemas, openLegacyKv: legacy.open })
+    const s = new SidecarStore({ root, schemas, openLegacyKv: legacy.open, log })
     expect((await s.snapshots.list()).map(([k]) => k)).toEqual(['snap_a'])
     expect(legacy.calls()).toBe(1)
+    expect(warns.filter(w => w.includes('导入标记损坏'))).toHaveLength(1)
     expect((await readMarker()).source).toBe('kv')
   })
 
@@ -474,5 +476,44 @@ describe('SidecarStore：KV 导入协议', () => {
     expect((await s.pending.list()).map(([k]) => k)).toEqual(['pd_a'])
     expect((await readMarker()).discarded).toBe(true)
     expect(await listFiles(state)).toEqual([KV_IMPORT_MARKER, 'pending/pd_a.json'])
+  })
+
+  it('持锁期间定时刷新锁的时间戳：慢导入超过 60 秒也不会被当成残留清掉，释放后不再刷新', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    try {
+      const lockPath = join(state, KV_IMPORT_LOCK)
+      const lockAt = async () => (JSON.parse(await readFile(lockPath, 'utf8')) as { at: number }).at
+      let clock = 0
+      const legacy = legacyOf({ pending: [['pd_a', pd('pd_a')]] })
+      const aGate = deferred(), aOpened = deferred()
+      const a = new SidecarStore({
+        root, schemas, now: () => clock,
+        openLegacyKv: async () => { const t = await legacy.open(); aOpened.resolve(); await aGate.promise; return t },
+      })
+      const { warns, log } = makeLog()
+      let bNowCalls = 0
+      const b = new SidecarStore({ root, schemas, log, openLegacyKv: legacy.open, now: () => { bNowCalls++; return clock } })
+
+      const aList = a.pending.list()
+      await aOpened.promise // A 持锁，锁时间戳 0
+      clock = 65_000
+      vi.advanceTimersByTime(10_000)
+      await vi.waitFor(async () => { expect(await lockAt()).toBe(65_000) })
+
+      clock = 70_000 // 离加锁已超 60 秒，离上次刷新只有 5 秒
+      const bList = b.pending.list()
+      await vi.waitFor(() => { expect(bNowCalls).toBeGreaterThanOrEqual(3) }) // B 至少判过一轮锁
+      expect(warns.filter(w => w.includes('导入锁残留'))).toEqual([])
+
+      aGate.resolve()
+      expect((await aList).map(([k]) => k)).toEqual(['pd_a'])
+      await bList
+      expect(legacy.calls()).toBe(1)
+      expect(await exists(lockPath)).toBe(false)
+      vi.advanceTimersByTime(30_000) // 释放后计时器已停，不会重建锁文件
+      expect(await exists(lockPath)).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

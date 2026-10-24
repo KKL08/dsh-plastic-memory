@@ -38,7 +38,8 @@ const SNAPSHOTS_DIR = 'snapshots'
 const PENDING_DIR = 'pending'
 const SCAN_CACHE_DIR = 'scan-cache'
 
-/** 导入锁超过这个年龄按残留处理（兜底持锁进程崩溃后 pid 被复用）；正常导入远用不了这么久。 */
+/** 持锁期间每隔这么久刷新一次锁的时间戳；超过 STALE 没刷新按残留处理（兜底持锁进程崩溃后 pid 被复用）。 */
+const IMPORT_LOCK_REFRESH_MS = 10_000
 const IMPORT_LOCK_STALE_MS = 60_000
 const IMPORT_LOCK_POLL_MS = 50
 
@@ -310,6 +311,7 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
   private readonly log: MemoryLogger
   private chain: Promise<unknown> = Promise.resolve() // 进程内互斥：侧表写与导入串行化
   private imported: Promise<void> | undefined
+  private markerWarned = false // 坏标记每个实例只告警一次（锁外、锁内各读一次）
 
   /** 构造不做 I/O：目录按需在首次写入时建。 */
   constructor(opts: SidecarOptions<S, P, C>) {
@@ -405,16 +407,30 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
     await atomicWrite(markerPath, JSON.stringify({ ...marker, discarded: true }))
   }
 
-  /** 排他创建锁文件；已被占用就轮询等待。持锁进程已退出或锁超龄按残留清掉。返回释放函数。 */
+  /** 排他创建锁文件；已被占用就轮询等待。持锁进程已退出或锁久未刷新按残留清掉。
+   *  持锁期间定时刷新时间戳，慢导入不会被当成残留。返回释放函数。 */
   private async acquireImportLock(): Promise<() => Promise<void>> {
     const lockPath = join(this.stateDir, KV_IMPORT_LOCK)
     await mkdir(this.stateDir, { recursive: true })
+    const id = Math.random().toString(36).slice(2)
+    const lockText = () => JSON.stringify({ pid: process.pid, at: this.now(), id })
     for (;;) {
-      const mine = JSON.stringify({ pid: process.pid, at: this.now(), id: Math.random().toString(36).slice(2) })
-      if (await createExclusive(lockPath, mine)) {
+      if (await createExclusive(lockPath, lockText())) {
+        // 刷新串成一条链，释放时等它跑完，免得删锁之后又被在途的刷新写回来
+        let refreshing: Promise<void> = Promise.resolve()
+        const timer = setInterval(() => {
+          refreshing = refreshing.then(async () => {
+            if (await this.lockOwner(lockPath) === id) await atomicWrite(lockPath, lockText())
+          }).catch(err => {
+            this.log.warn(`[plastic-memory] 刷新旧 KV 导入锁失败：${describeError(err)}`)
+          })
+        }, IMPORT_LOCK_REFRESH_MS)
+        timer.unref() // 不因这个计时器拖住进程退出
         return async () => {
-          // 只删自己的锁：超龄被别人清掉并重建时不误删对方的
-          if (await readFile(lockPath, 'utf8').catch(() => undefined) === mine) await rm(lockPath, { force: true })
+          clearInterval(timer)
+          await refreshing
+          // 只删自己的锁：被当成残留清掉并重建时不误删对方的
+          if (await this.lockOwner(lockPath) === id) await rm(lockPath, { force: true })
         }
       }
       let held: string
@@ -444,6 +460,14 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
     }
   }
 
+  private async lockOwner(lockPath: string): Promise<unknown> {
+    try {
+      return (JSON.parse(await readFile(lockPath, 'utf8')) as { id?: unknown }).id
+    } catch {
+      return undefined
+    }
+  }
+
   /** 内容读不懂（半截文件）也按残留：走 link 时目标原子出现，读不懂只会是崩溃留下的；退回复制时可能正在写，
    *  由清理前的改名核对兜住。 */
   private isStaleLock(text: string): boolean {
@@ -468,7 +492,8 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
     try {
       return kvImportMarkerSchema.parse(JSON.parse(text))
     } catch (err) {
-      this.log.warn(`[plastic-memory] 导入标记损坏，按缺失处理、重新导入：${path}（${describeError(err)}）`)
+      if (!this.markerWarned) this.log.warn(`[plastic-memory] 导入标记损坏，按缺失处理、重新导入：${path}（${describeError(err)}）`)
+      this.markerWarned = true
       return undefined
     }
   }
