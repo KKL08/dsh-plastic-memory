@@ -39,6 +39,27 @@ All notable changes to this project are documented here. The format follows
   package declares `dsh.client`, the host's module loader can load
   `lib/client.js`, and both locale files ship. CI fails when the bundle is
   missing from the package.
+- Chinese word segmentation for `memory_search`. The optional dependency
+  `@node-rs/jieba` is installed with the plugin from npm and loaded the first
+  time a query contains Chinese, once per host process, so a long Chinese
+  question matches memories by word instead of by stray character pairs. If
+  it cannot be installed or loaded on your platform, Chinese search falls
+  back to two-character segments, a warning is logged once, and nothing else
+  changes.
+- A user dictionary for that segmentation: `search.userDictionaryPath`, also
+  a field on the settings page, points to a file with one
+  `word frequency tag` entry per line (for example `插件记忆 10 n`). Its words
+  are added on top of the built-in dictionary from the next search on. The
+  path must be absolute and the frequency is required; a missing or
+  malformed file leaves search on the built-in dictionary and is reported
+  once in the log.
+- Each `memory_search` hit carries the absolute path of its memory file,
+  shown at the end of the hit's first line, so the model can read the full
+  file or its surroundings directly.
+- An evaluation set of 86 synthetic memories and 48 queries (short and long
+  Chinese, identifiers, partial words, plain names, ids) runs with the tests
+  and fails when top-1 or top-3 accuracy drops below a fixed floor, with and
+  without the Chinese segmenter.
 
 ### Changed
 - Memories that exceed `snapshotTokenBudget` are no longer cut from the
@@ -69,9 +90,9 @@ All notable changes to this project are documented here. The format follows
   the next tool call and the next session's prompt without a restart. On a
   library of 10 projects × 1000 memories (Apple M4), start-up dropped from
   1.5 s to 0 and the 109 ms fingerprint check before every tool call is gone;
-  `memory_search` takes about 30 ms, `memory_save` 190–280 ms, a single-layer
-  `memory_health` 135 ms and a whole-library one 1.1 s. `pnpm bench:storage`
-  reproduces these numbers on your machine.
+  `memory_save` takes 190–280 ms, a single-layer `memory_health` 135 ms and a
+  whole-library one 1.1 s. `pnpm bench:storage` reproduces these numbers on
+  your machine.
 - Storage layout: `global/` and one `<project>-<hash>/` directory per
   workspace (marked by a `.workspace` file holding the project path). A memory
   file is named after its `name`; `MEMORY.md` in each directory is a generated
@@ -95,9 +116,17 @@ All notable changes to this project are documented here. The format follows
 - Memories whose `validTo` has passed stay where they are but are no longer
   injected or found by `memory_search`; `memory_health` reports them as
   `expired` and suggests extending the date or forgetting them.
-- `memory_search` with several keywords first requires all of them to match;
-  when nothing matches all of them it falls back to any-match ordered by hit
-  count and says so (`or-fallback`).
+- `memory_search` ranks results by relevance. Memories containing every
+  query word come before those containing only some of them, a word that
+  appears as a whole word ranks above one that only appears inside a longer
+  word (`scope` in `readScope`), and matches in the name, summary and tags
+  weigh more than matches in the content; a query that is exactly a memory id
+  returns that memory first. The result opens with a note when no returned
+  memory contains every word (`or-fallback`), or when none contains any of
+  them and only a literal match on the query text is left
+  (`substring-fallback`).
+- The `memory_search` tool description now says what the tool does: it ranks
+  by relevance, accepts Chinese and English queries and returns file paths.
 - Injected index lines now end with the memory's file path (`global/x.md`,
   `<project>/x.md`), so the model can open the full text directly, and the
   prompt ends with a fixed note that memories are background material: they
@@ -131,6 +160,15 @@ All notable changes to this project are documented here. The format follows
   host's grep tool finds top-level memories but nothing under `.archive/`
   (H16). `pnpm host:smoke` boots the real host with a probe plugin that
   confirms the tools are registered.
+- `pnpm host:smoke` runs twice, once with the package as published and once
+  with its optional dependencies removed; both must load and register
+  `memory_search`. `pnpm host:contract` also checks that every search hit
+  carries an absolute path to an existing file.
+- `pnpm bench:storage` reports search latency, the share of files that pass
+  the pre-read text filter, and the heap used while scoring, for a typical
+  query and a common-word query under both segmenters. Each row passes when
+  search is at most 80 ms slower than a reference measured in the same run
+  and scoring holds less than 2 MB.
 
 ### Fixed
 - A memory holding a vendor-format key (such as `sk-`, `ghp_` or an AWS
