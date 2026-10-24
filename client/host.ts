@@ -93,5 +93,9 @@ export interface HostContext {
     workspaceFiles: {
       read(sessionId: string, path: string, range: { offset?: number; limit?: number }): Promise<RemoteResult<WorkspaceFileText>>
     }
+    /** dsh-api-session-controller 的 openWorkspacePath：不带会话，宿主核对路径后交给本机打开或在文件管理器里显示。 */
+    session: {
+      openWorkspacePath(request: { path: string; action?: 'reveal' }): Promise<RemoteResult<unknown>>
+    }
   }
 }

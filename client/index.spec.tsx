@@ -21,6 +21,7 @@ function setup() {
     remote: {
       commands: { execute: vi.fn(async () => ({ ok: false as const, error: { code: 'x', message: 'x' } })) },
       workspaceFiles: { read: vi.fn() },
+      session: { openWorkspacePath: vi.fn() },
     },
   }
   apply(ctx)
@@ -34,7 +35,7 @@ const props = (state: SessionListState): RootStandardProps => ({
 
 describe('apply', () => {
   it('依赖 locale 与 layout；注册命名空间的中英字典', () => {
-    expect(inject).toEqual(expect.arrayContaining(['slots', 'locale', 'layout', 'remote.commands', 'remote.workspaceFiles']))
+    expect(inject).toEqual(expect.arrayContaining(['slots', 'locale', 'layout', 'remote.commands', 'remote.workspaceFiles', 'remote.session']))
     const { register } = setup()
     expect(register).toHaveBeenCalledWith(NS, { zh, en })
   })

@@ -79,6 +79,7 @@ describe('createHostGateway', () => {
   /** 假服务端的视图文件：refresh-views 写出 pending.json。 */
   let files: Record<string, string>
   const pendingPath = '/h/memories/.state/gui/pending.json'
+  let openWorkspacePath: ReturnType<typeof vi.fn>
 
   function fakeCtx(): HostContext {
     return {
@@ -101,6 +102,7 @@ describe('createHostGateway', () => {
             ? { ok: false as const, error: { code: 'workspace-file/not-found', message: path } }
             : { ok: true as const, value: { absolutePath: path, version: 'v1', text: files[path] } }),
         },
+        session: { openWorkspacePath },
       },
     }
   }
@@ -109,7 +111,10 @@ describe('createHostGateway', () => {
     useResource: (address: string) => resources[address] ?? { status: 'none' as const, value: undefined, failure: undefined },
   }
 
-  beforeEach(() => { executed = []; resources = {}; files = {}; localStorage.clear() })
+  beforeEach(() => {
+    executed = []; resources = {}; files = {}; localStorage.clear()
+    openWorkspacePath = vi.fn(async () => ({ ok: true as const, value: { opened: true } }))
+  })
   afterEach(() => { localStorage.clear() })
 
   it('首次：借会话发 info，缓存 memoryRoot，再发一次 refresh-views；资源仍停在 not-found 也直接读出视图', async () => {
@@ -159,5 +164,16 @@ describe('createHostGateway', () => {
     expect(executed).toEqual(['/memory resolve {"decisionId":"d1","verdict":"keep-both"}'])
     const { result } = renderHook(() => gateway.useCurrentWorkspace())
     expect(result.current).toBe('/w/app')
+  })
+
+  it('openPath：打开只带 path，显示目录带 action: reveal；宿主拒绝或抛错都是 false', async () => {
+    const gateway = createHostGateway(fakeCtx())(props)
+    expect(await gateway.openPath('/m/app/a.md')).toBe(true)
+    expect(await gateway.openPath('/m/app/a.md', 'reveal')).toBe(true)
+    expect(openWorkspacePath.mock.calls.map(call => call[0])).toEqual([{ path: '/m/app/a.md' }, { path: '/m/app/a.md', action: 'reveal' }])
+    openWorkspacePath.mockResolvedValueOnce({ ok: false, error: { code: 'gateway/bad-request', message: 'no' } })
+    expect(await gateway.openPath('/x')).toBe(false)
+    openWorkspacePath.mockRejectedValueOnce(new Error('down'))
+    expect(await gateway.openPath('/x')).toBe(false)
   })
 })

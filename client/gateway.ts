@@ -51,6 +51,8 @@ export interface MemoryGateway {
   useView<N extends ViewName>(session: BorrowedSession, name: N): ViewState<ViewMap[N]>
   /** 执行一条 `/memory` 命令，结果按契约解析；宿主或解析层面的失败折成 `failed`。 */
   execute(sessionId: string, command: MemoryCommand): Promise<MemoryCommandResult>
+  /** 用本机默认程序打开一个路径，或在文件管理器里显示它（reveal）；宿主拒绝或调不通时返回 false。 */
+  openPath(path: string, action?: 'reveal'): Promise<boolean>
 }
 
 const GatewayContext = createContext<MemoryGateway | null>(null)
@@ -210,9 +212,17 @@ export function createHostGateway(ctx: HostContext): (props: RootStandardProps) 
   const execute: MemoryGateway['execute'] = async (sessionId, command) =>
     decodeExecution(command.cmd, await run(sessionId, encodeMemoryCommand(command)))
   const root = createRootStore(run)
+  const openPath: MemoryGateway['openPath'] = async (path, action) => {
+    try {
+      return (await ctx.remote.session.openWorkspacePath(action === 'reveal' ? { path, action } : { path })).ok
+    } catch {
+      return false
+    }
+  }
 
   return ({ useSessions, useResource }) => ({
     execute,
+    openPath,
     useSession(workspacePath) {
       const list = useSessions(s => s)
       const picked = pickSession(list, workspacePath)
