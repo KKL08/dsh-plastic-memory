@@ -27,7 +27,7 @@ import type { MemoryRecord } from '../src/record-schema.ts'
  * src/tools/<x>.ts 有独立单测，但 defineTool 把逻辑接到框架、以及"结果必须是无损 JSON"
  * 这层契约没人守。本文件用真实 defineTool 构造每个工具，喂典型参数，对每个工具独立断言三件事：
  *   (a) 参数 DSL 校验——合法参数过、非法（缺必填 / 违枚举 / 错类型）拒；
- *   (b) execute 结果过宿主同款深度校验 snapshotJsonValue(result) !== undefined；
+ *   (b) execute 结果通过与宿主一致的深度校验 snapshotJsonValue(result) !== undefined；
  *   (c) render 返回非空 ContentBlock[]，且每块过 snapshotJsonValue。
  *
  * 关于 (a) 的取材：dsh 不把作者面的 ParameterSchemaSpec 挂到定义上，defineTool 编译后

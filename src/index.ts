@@ -200,7 +200,7 @@ export async function apply(ctx: Context, config: Config) {
   // （cordis reflect.ts _getImpl），下面的 try/catch 只是对宿主行为变化的防御。
   // ⚠️ 真机验证确认的 dsh llm 契约（packages/llm/llm）：
   //   1) LlmRuntime.stream(options: GenerateOptions) 的 provider/model 是必填 string，没有"用会话当前模型"的默认值；
-  //      三层解析顺序抄自 packages/compaction/compaction-basic/src/summarizer.ts：
+  //      解析顺序对齐宿主 compaction 摘要器（packages/compaction/compaction-basic）：
   //      session.requestHeader()?.config（最近一次路由请求的配置）→ agent.options.provider/model；
   //      两者都拿不到（provider 或 model 缺失）就返回 null，语义层降级，绝不猜默认模型。
   //   2) StreamChunk 是判别联合，text-delta 和 reasoning-delta 都带 .text——开启推理时
@@ -208,7 +208,7 @@ export async function apply(ctx: Context, config: Config) {
   //      只累加 type === 'text-delta' 的 chunk。每条流以 finish chunk 收尾：适配器中途抛错会被宿主
   //      折成 finish.reason.kind === 'error'（或 'aborted'），此时即使已收到可解析的文本也按失败处理。
   //   3) 只发一次、不进会话的辅助请求用宿主的 RequestUserInput：只有 role 与 content（ContentBlock[]），
-  //      没有 id/source——宿主 0.1.7 起 Auto Review 与 compaction 摘要器同款。请求对象标注为
+  //      没有 id/source——与宿主 0.1.7 起 Auto Review、compaction 摘要器的做法一致。请求对象标注为
   //      GenerateOptions，形状由编译器校验。
   const makeSemanticLlm = (input: {
     session?: { requestHeader?: () => { config?: { provider?: string; model?: string } } | undefined }

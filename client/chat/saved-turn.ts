@@ -1,5 +1,5 @@
 /**
- * 本轮新记的记忆：照宿主定时任务卡的做法（ui-schedule `schedule-turn.ts`），注册一个只产出 Turn 数据、
+ * 本轮新记的记忆：遵守宿主会话事件的注册约定（与 ui-schedule `schedule-turn.ts` 一致），注册一个只产出 Turn 数据、
  * 不产出视图节点的会话事件 Definition（`ctx.uiConversation.events.register`），把本轮成功的 `memory_save`
  * 挂到 Turn 上；交付卡在 `conversation.chat.turnTail` 里按 `turn.data` 读。数据从会话日志重放得到，
  * 历史会话、刷新后都一样。宿主类型不引包，按结构手写最小子集（0.2.1-rc.2）。

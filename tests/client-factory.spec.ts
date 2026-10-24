@@ -9,7 +9,7 @@ import { buildClient } from '../scripts/build-client.ts'
 // 浏览器半侧的工厂格式（spec「Testing Decisions」第 2 层）：构建产物在 vm 里用假的
 // window.__ModuleLoader__ 加载，断言 id 等于包名、factory 返回 {inject, apply}、
 // require 只问过宿主共享模块表里的名字。
-// 白名单抄自宿主 packages/client/web/src/platform.ts 的 PLATFORM_MODULES（0.2.1-rc.2），
+// 白名单对齐宿主 packages/client/web/src/platform.ts 的 PLATFORM_MODULES（0.2.1-rc.2），
 // 故意不从构建脚本导入：构建脚本的 externals 写错时这里要能拦住。
 const HOST_PLATFORM_MODULES = new Set([
   'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client', '@deepseek-ai/cordis',

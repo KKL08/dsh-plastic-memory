@@ -35,7 +35,7 @@ const otherEvent = (type: string) => ({ type, seq: nextSeq++, time: 0, data: {} 
 
 /** 断言用：把有效消息正文按顺序拼起来；没有生效指令时 null。 */
 const joined = (texts: readonly string[] | null) => (texts === null || texts.length === 0 ? null : texts.join('\n\n'))
-/** 照宿主 registry 的驱动方式：init 起步，逐条事件过 apply。 */
+/** 按宿主 registry 的驱动方式：init 起步，逐条事件过 apply。 */
 const { init, apply } = baselineProjectionDefinition
 const reduce = (events: SessionEvent[]) => events.reduce(apply, init())
 const fold = (events: SessionEvent[]) => joined(baselineTexts(reduce(events)))

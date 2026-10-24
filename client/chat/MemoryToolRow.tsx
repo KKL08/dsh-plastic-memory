@@ -1,8 +1,8 @@
 /**
- * 九个记忆工具在折叠区里的行（`tool.call.toolview`，key = 工具名）。宿主绑定面：标记、类名结构和 CSS 照抄宿主
+ * 九个记忆工具在折叠区里的行（`tool.call.toolview`，key = 工具名）。宿主绑定面：标记、类名结构和 CSS 对齐宿主
  * 通用工具行（ui-tool `GenericToolCard` → `ToolRow` → ui-primitives `DisclosureRow`，0.2.1-rc.2），图标、标题、
  * 输入 / 输出与运行状态的文案也用宿主的（`conversation` 命名空间），只把摘要换成一句话。
- * 没照抄的：运行中的 TextShimmer 扫光动画（只保留读屏用的状态文字）。
+ * 没有对齐的：运行中的 TextShimmer 扫光动画（只保留读屏用的状态文字）。
  * 摘要、输入、输出都先遮掉密钥片段再显示：参数是 agent 发的原文，没经过视图的遮盖。疑似密钥也遮（带 force 存下的
  * password= / api_key= 赋值），密钥一律不出现在对话卡里。
  */
@@ -167,7 +167,7 @@ export function MemoryToolRow(props: MemoryToolViewProps & { hostT: HostTranslat
   )
 }
 
-/** 照抄宿主 DisclosureRow.module.css + ToolRow.module.css 里通用行用到的规则，类名换成插件前缀。 */
+/** 对齐宿主 DisclosureRow.module.css + ToolRow.module.css 里通用行的规则，类名用插件前缀。 */
 export const memoryToolRowCss = `
 .pm-tr { display: flex; flex-direction: column; }
 .pm-tr-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

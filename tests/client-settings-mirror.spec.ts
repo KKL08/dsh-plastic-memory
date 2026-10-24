@@ -1,4 +1,4 @@
-// 设置页在浏览器半侧手抄的几份服务端常量（客户端只许 import src/gui/contract）：和服务端源头保持一致。
+// 设置页在浏览器侧重复声明的几份服务端常量（客户端只许 import src/gui/contract）：和服务端源头保持一致。
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { parse } from 'yaml'
@@ -6,7 +6,7 @@ import { BUILTIN_TYPE_NAMES, ENTRY_ID, PACKAGE_NAME, SENSITIVITY_NUMBERS } from 
 import { SENSITIVITY_PRESETS } from '../src/governance/health-presets.ts'
 import { BUILTIN_TYPES } from '../src/type-registry.ts'
 
-describe('设置页手抄的服务端常量', () => {
+describe('设置页重复声明的服务端常量', () => {
   it('内置类型名与 BUILTIN_TYPES 一致', () => {
     expect([...BUILTIN_TYPE_NAMES].sort()).toEqual(BUILTIN_TYPES.map(t => t.name).sort())
   })

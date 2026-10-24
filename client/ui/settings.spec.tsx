@@ -1,4 +1,4 @@
-// 照抄宿主的设置结构与分段控件，加分组卡片。
+// 设置结构与分段控件对齐宿主，另加分组卡片。
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, screen } from '@testing-library/react'
 import { SegmentedControl, SegmentedTabs } from './Segmented.tsx'

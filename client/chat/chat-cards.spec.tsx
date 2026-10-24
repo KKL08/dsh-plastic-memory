@@ -42,7 +42,7 @@ const saveArgs = {
 }
 const SAVED_TEXT = '已保存记忆 mem_1（preference，workspace）。下个会话注入；本会话若触发上下文压缩，压缩后即生效。'
 
-describe('折叠行：照抄宿主通用工具行，只换摘要', () => {
+describe('折叠行：对齐宿主通用工具行，只换摘要', () => {
   it('九个工具各一句摘要', () => {
     const hit = (id: string) => `[${id}] preference｜摘要\n原文`
     const cases: Array<[MemoryToolViewProps, string]> = [
@@ -68,7 +68,7 @@ describe('折叠行：照抄宿主通用工具行，只换摘要', () => {
     expect(rowSummary(result('memory_scan', {}, 'ok'))).toBe('体检本项目')
   })
 
-  it('标题、图标位、运行中与失败照宿主：还在跑时摘要按参数，失败时摘要是结果首行', () => {
+  it('标题、图标位、运行中与失败对齐宿主：还在跑时摘要按参数，失败时摘要是结果首行', () => {
     const running: MemoryToolViewProps = { toolName: 'memory_save', useDisclosure: disclosure(), phase: 'start', block: { argsRaw: JSON.stringify(saveArgs) } }
     const { container } = renderInShell(<MemoryToolRow {...running} hostT={hostT} />)
     expect(container.querySelector('.pm-tr-title')).toHaveTextContent('工具调用')

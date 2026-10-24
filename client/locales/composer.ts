@@ -3,7 +3,7 @@
 export const composerZh = {
   'composer.button': '记忆',
   'composer.dialog': '记忆用量',
-  // {percent} 是分割点：两边各自成段，语序由各语言自己决定（照宿主 context.aria 的做法）
+  // {percent} 是分割点：两边各自成段，语序由各语言自己决定（与宿主 context.aria 的约定一致）
   'composer.share': '记忆占上下文 {percent}',
   'composer.figures': '约 {used} / 上限 {budget}',
   'composer.workspace': '本项目',

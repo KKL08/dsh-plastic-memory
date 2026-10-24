@@ -9,7 +9,7 @@
  * 有 DEEPSEEK_API_KEY 且宿主能选出默认模型时再跑语义扫描与取消两项，否则标 SKIPPED。
  * run.sh 随后用同一个 DSH_HOME 再起一次宿主（HOST_CONTRACT_PHASE=restart）：第一趟把
  * 恢复的记录 id 写进交接文件，第二趟跑 H12，证明恢复结果过了进程重启仍可读；H14 第一趟建持久化会话、
- * 写入完整 AGENTS.md 基线，第二趟照宿主恢复配方重开，证明基线投影过了重启仍在。
+ * 写入完整 AGENTS.md 基线，第二趟按宿主的恢复流程重开，证明基线投影过了重启仍在。
  *
  * 只用可擦除的 TypeScript 语法（engines 要求的 Node 22.19+/24 原生 strip-types 直接加载，不需要构建）。
  */
@@ -218,7 +218,7 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       return { ok: r.record.scope === 'workspace' && found.length === 1 && !inGlobal && index, detail: `scope=${r.record.scope} wsDirs=${wsDirs.join(',')} foundIn=${found.join(',')} inGlobal=${inGlobal} indexed=${index}` }
     })
 
-    // H5 九个工具的典型输出都通过宿主同款深度无损校验（snapshotJsonValue）
+    // H5 九个工具的典型输出都通过与宿主一致的深度无损校验（snapshotJsonValue）
     await attempt('H5-OUTPUTS-LOSSLESS', async () => {
       const probes: Array<[string, unknown]> = [
         ['memory_search', { query: '探针' }],
@@ -377,7 +377,7 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       try {
         phases.announce(session)
         const before = await checkupBaseline(session)
-        // 形状照宿主 agent-instructions 的完整基线：user-global 与项目根两个 scope（目录 + NUL + 文件名）
+        // 形状对齐宿主 agent-instructions 的完整基线：user-global 与项目根两个 scope（目录 + NUL + 文件名）
         const appended = session.append('user/message', createUserMessage({
           content: [{ type: 'text', text: H14_PROBE }],
           source: {

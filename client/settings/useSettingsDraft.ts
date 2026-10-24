@@ -1,5 +1,5 @@
 /**
- * 设置页的暂存草稿（照宿主 ui-primitives SettingsFormModel 的做法）：改动先暂存，点保存才写；
+ * 设置页的暂存草稿（对齐宿主 ui-primitives SettingsFormModel 的保存约定）：改动先暂存，点保存才写；
  * 第一次改动时冻结表单 revision，保存用 `mutate(ops, 冻结的 revision)` 一次提交。
  * 宿主拒绝时它已重读最新配置：revision 变了 = 别处（另一个标签页、agent、手改 yaml）先改过 → 冲突，
  * 草稿保留、保存锁住，等用户「载入最新配置」后再改；revision 没变 = 宿主校验不过 → 保存失败。
