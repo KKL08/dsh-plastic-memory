@@ -1,8 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { GUI_VIEW_VERSION, type HealthView, type MemoryCommand, type PendingItem, type PendingView } from '../../src/gui/contract.ts'
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { useGateway, type PluginConfig } from '../gateway.ts'
+import { FLASH_MS } from '../library/shared.tsx'
+import { createNavStore, type NavStore } from '../nav.ts'
 import { memory, NOW, renderInShell } from '../test-utils.tsx'
 import { PendingTab } from './PendingTab.tsx'
 
@@ -30,9 +32,9 @@ const scannedHealth = (at: number | null): HealthView => ({
   layers: [{ layer: { kind: 'global' }, totalMemories: 1, score: 1, tier: 'green', gate: { secret: false }, issues: [], staleCount: 0, semanticCachedAt: at, overflow: null }],
 })
 
-function setup(items: PendingItem[], init: FakeGatewayInit = {}) {
+function setup(items: PendingItem[], init: FakeGatewayInit = {}, nav: NavStore = createNavStore()) {
   const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(...items), health: scannedHealth(NOW) }, ...init })
-  const utils = renderInShell(<PendingTab session={SESSION} workspacePath="/w/app" now={NOW} />, gateway)
+  const utils = renderInShell(<PendingTab nav={nav} session={SESSION} workspacePath="/w/app" now={NOW} />, gateway)
   const commands = () => gateway.executed.map(e => e.command)
   return { ...utils, gateway, commands }
 }
@@ -262,7 +264,7 @@ describe('待处理：跨项目先确认', () => {
 describe('待处理：两态与空状态', () => {
   it('没有会话：读不到视图，提示先开会话', () => {
     const gateway = createFakeGateway({ session: { kind: 'none' }, config, views: { pending: view(horizontal) } })
-    renderInShell(<PendingTab session={{ kind: 'none' }} workspacePath={undefined} now={NOW} />, gateway)
+    renderInShell(<PendingTab nav={createNavStore()} session={{ kind: 'none' }} workspacePath={undefined} now={NOW} />, gateway)
     expect(screen.getByRole('status')).toHaveTextContent('开一个会话后这里可用')
     expect(screen.queryByRole('button')).toBeNull()
   })
@@ -270,7 +272,7 @@ describe('待处理：两态与空状态', () => {
   it('有结果卡时会话没了：撤销不可用并提示「先开一个会话」', async () => {
     // 和页面一样从网关借会话
     function Tab() {
-      return <PendingTab session={useGateway().useSession('/w/app')} workspacePath="/w/app" now={NOW} />
+      return <PendingTab nav={createNavStore()} session={useGateway().useSession('/w/app')} workspacePath="/w/app" now={NOW} />
     }
     const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(horizontal), health: scannedHealth(NOW) } })
     renderInShell(<Tab />, gateway)
@@ -304,5 +306,41 @@ describe('待处理：两态与空状态', () => {
     expect(screen.getAllByRole('button').map(b => b.textContent)).toEqual(['去设置里打开 ›'])
     fireEvent.click(screen.getByRole('button', { name: '去设置里打开 ›' }))
     expect(gateway.settingsOpened.count).toBe(1)
+  })
+})
+
+// 入口带记忆 id 打开待处理：含这条记忆的卡（冲突任一方、提升候选、密钥）滚入视野并高亮一次。
+describe('待处理：直达某条记忆', () => {
+  const scrollIntoView = vi.fn()
+  beforeEach(() => { vi.useFakeTimers(); scrollIntoView.mockClear(); Element.prototype.scrollIntoView = scrollIntoView })
+  afterEach(() => { vi.useRealTimers(); delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView })
+  const cardOf = (title: string) => screen.getByRole('heading', { level: 3, name: title }).closest('.pm-pending-row')!
+
+  it('记忆在横向冲突的 B 方：那张冲突卡高亮并滚入视野，播完收起', () => {
+    const nav = createNavStore({ tab: 'pending', memoryId: 'b' })
+    setup([vertical, horizontal, promote], {}, nav)
+    const row = cardOf('测试里怎么准备数据库，两条记忆互相矛盾')
+    expect(row).toHaveClass('pm-flash')
+    expect(document.querySelectorAll('.pm-flash')).toHaveLength(1)
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    expect(scrollIntoView.mock.contexts[0]).toBe(row)
+    act(() => { vi.advanceTimersByTime(FLASH_MS) })
+    expect(row).not.toHaveClass('pm-flash')
+  })
+
+  it('提升候选、垂直冲突、密钥都认它们那条记忆；入口换一条再高亮一次', () => {
+    const nav = createNavStore({ tab: 'pending', memoryId: 'p' })
+    setup([secret, vertical, promote], {}, nav)
+    expect(cardOf('这条适合所有项目')).toHaveClass('pm-flash')
+    act(() => { nav.navigate({ tab: 'pending', memoryId: 'v' }) })
+    expect(cardOf('包管理器和基线矛盾')).toHaveClass('pm-flash')
+    act(() => { nav.navigate({ tab: 'pending', memoryId: 's' }) })
+    expect(cardOf('这条记忆里有密钥')).toHaveClass('pm-flash')
+  })
+
+  it('目标不在待处理里：不高亮、不滚动', () => {
+    setup([horizontal], {}, createNavStore({ tab: 'pending', memoryId: 'nope' }))
+    expect(document.querySelector('.pm-flash')).toBeNull()
+    expect(scrollIntoView).not.toHaveBeenCalled()
   })
 })

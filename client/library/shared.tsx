@@ -36,14 +36,15 @@ export function useFlashTarget(nav: NavStore, ids: readonly string[]): { flashId
 /** 高亮动画时长：播完收起高亮类，下次导航到同一条才能重播。 */
 export const FLASH_MS = 1800
 
-/** 高亮行：开始高亮时滚入视野，FLASH_MS 后回调收起。 */
-export function FlashRow({ flashing, onFlashEnd, className, children }: {
+/** 高亮行：开始高亮时滚入视野，FLASH_MS 后回调收起。列表行是 li，待处理的卡是 div。 */
+export function FlashRow({ flashing, onFlashEnd, className, children, as: Tag = 'li' }: {
   flashing: boolean
   onFlashEnd: () => void
   className: string
   children: ReactNode
+  as?: 'li' | 'div'
 }) {
-  const ref = useRef<HTMLLIElement>(null)
+  const ref = useRef<HTMLLIElement & HTMLDivElement>(null)
   const end = useRef(onFlashEnd)
   end.current = onFlashEnd
   useEffect(() => {
@@ -53,9 +54,9 @@ export function FlashRow({ flashing, onFlashEnd, className, children }: {
     return () => { clearTimeout(timer) }
   }, [flashing])
   return (
-    <li ref={ref} className={flashing ? `${className} pm-flash` : className}>
+    <Tag ref={ref} className={flashing ? `${className} pm-flash` : className}>
       {children}
-    </li>
+    </Tag>
   )
 }
 

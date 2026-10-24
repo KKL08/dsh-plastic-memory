@@ -110,3 +110,45 @@ describe('健康 tab', () => {
     expect(screen.queryByRole('region')).toBeNull()
   })
 })
+
+// 层块下面两行入口（PRD 5.4）：待你决定的条数（读不出的文件不算）与其中等了 7 天以上的，可提升为全局的条数；都去待处理。
+describe('健康 tab：去待处理的入口', () => {
+  const DAY = 24 * 60 * 60 * 1000
+  const conflict = (id: string, firstSeenAt: number) => ({
+    kind: 'conflict-horizontal', decisionId: id, firstSeenAt, summary: 's', left: memory({ id: `${id}l` }), right: memory({ id: `${id}r` }),
+  }) as const
+  const promote = { kind: 'promote-candidate', decisionId: 'p1', firstSeenAt: NOW, memory: memory({ id: 'p' }) } as const
+  const unreadable = { kind: 'unreadable-file', layer: WS, filePath: '/m/app/x.md', relativePath: 'app/x.md', error: 'bad' } as const
+  const pendingOf = (...items: PendingView['items']): PendingView => ({ version: GUI_VIEW_VERSION, dot: items.length > 0 ? 'amber' : 'none', items, typeLabels: {} })
+  function render(pending: PendingView, governanceEnabled = true) {
+    const gateway = createFakeGateway({ session, views: { health: health([layer()], governanceEnabled), pending } })
+    const nav = createNavStore({ tab: 'health' })
+    return { nav, ...renderInShell(<HealthTab session={session} scope={WS} nav={nav} />, gateway) }
+  }
+
+  it('两行入口带数，点了都落到待处理', () => {
+    const { nav } = render(pendingOf(conflict('d1', NOW - 10 * DAY), conflict('d2', NOW - DAY), promote, unreadable))
+    expect(screen.getByText('待你决定 3 条，其中 1 条超过 7 天')).toBeInTheDocument()
+    expect(screen.getByText('可提升为全局 1 条')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '去处理 ›' }))
+    expect(nav.get()).toEqual({ tab: 'pending' })
+    nav.update({ tab: 'health' })
+    fireEvent.click(screen.getByRole('button', { name: '去看 ›' }))
+    expect(nav.get().tab).toBe('pending')
+  })
+
+  it('没有超过 7 天的不写后半句；没有提升候选不出第二行', () => {
+    render(pendingOf(conflict('d1', NOW - DAY)))
+    expect(screen.getByText('待你决定 1 条')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '去看 ›' })).toBeNull()
+  })
+
+  it('只有读不出的文件、体检关闭：都不出入口行', () => {
+    const { unmount } = render(pendingOf(unreadable))
+    expect(screen.queryByRole('button', { name: '去处理 ›' })).toBeNull()
+    unmount()
+    render(pendingOf(conflict('d1', NOW), promote), false)
+    expect(screen.queryByRole('button', { name: '去处理 ›' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '去看 ›' })).toBeNull()
+  })
+})

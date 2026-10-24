@@ -14,10 +14,11 @@ import { ENTRY_ID, PACKAGE_NAME, type ConfigForm } from './config.ts'
 import { controlsCss } from './controls.tsx'
 import { customTypesCss } from './CustomTypes.tsx'
 import { SettingsPage, settingsPageCss } from './SettingsPage.tsx'
+import { statusCardCss } from './StatusCard.tsx'
 
 export type ConfigFormsService = NonNullable<HostContext['configForms']>
 
-const SETTINGS_CSS = controlsCss + customTypesCss + settingsPageCss
+const SETTINGS_CSS = controlsCss + customTypesCss + settingsPageCss + statusCardCss
 
 export function createSettingsCard(ctx: HostContext, configForms: ConfigFormsService, nav: NavStore, useTranslate: () => Translate) {
   const bind = createHostGateway(ctx)

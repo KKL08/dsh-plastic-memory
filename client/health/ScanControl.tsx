@@ -19,13 +19,15 @@ type ScanState =
   | { kind: 'done'; notes: readonly ScanNote[] }
   | { kind: 'failed'; code: ScanFailure['code']; detail: string | undefined }
 
-export function ScanControl({ session, workspacePath, hasPending, nav }: {
+export function ScanControl({ session, workspacePath, hasPending, nav, leading }: {
   session: Extract<BorrowedSession, { kind: 'ready' }>
   /** 体检哪个项目；缺省体检全部层。 */
   workspacePath: string | undefined
   /** 有待处理时用次按钮。 */
   hasPending: boolean
   nav: NavStore
+  /** 同一行排在按钮前面的东西（记忆页页头的「设置」）。 */
+  leading?: ReactNode
 }) {
   const t = useT()
   const gateway = useGateway()
@@ -65,14 +67,17 @@ export function ScanControl({ session, workspacePath, hasPending, nav }: {
 
   return (
     <div className="pm-scan">
-      <Button
-        variant={hasPending ? 'secondary' : 'primary'}
-        disabled={isRunning}
-        unavailable={isOff ? t('scan.off') : undefined}
-        onClick={run}
-      >
-        {isRunning ? t('scan.running') : state.kind === 'failed' ? t('scan.retry') : t('scan.button')}
-      </Button>
+      <div className="pm-scan-row">
+        {leading}
+        <Button
+          variant={hasPending ? 'secondary' : 'primary'}
+          disabled={isRunning}
+          unavailable={isOff ? t('scan.off') : undefined}
+          onClick={run}
+        >
+          {isRunning ? t('scan.running') : state.kind === 'failed' ? t('scan.retry') : t('scan.button')}
+        </Button>
+      </div>
       <p className="pm-scan-status" role="status">{status}</p>
     </div>
   )

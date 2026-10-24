@@ -3,11 +3,14 @@
  * 各出一张卡。视图不含刚处理完的条目，所以列表在本地记住最近一次处理（原条目 + 结果 + 原位置），在原位显示结果卡；
  * 撤销成功后等视图把条目带回来，再去掉本地那张。离开页面就收起。
  * 空状态三种：体检关闭（「去设置里打开 ›」）、从没体检过（说明体检是什么，按钮在页头）、待处理为空（上次体检时间）。
+ * 入口带记忆 id 打开时，含这条记忆的卡（冲突任一方、提升候选、密钥）滚入视野并高亮一次。
  */
 import { useEffect, useState, type ReactElement } from 'react'
 import type { HealthView, PendingItem, PendingView } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { formatDay, useT } from '../i18n.tsx'
+import { FlashRow, useFlashTarget } from '../library/shared.tsx'
+import type { NavStore } from '../nav.ts'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import {
   HorizontalCard, OverflowCard, PromoteCard, ResultCard, SecretCard, UnreadableCard, VerticalCard, type Outcome,
@@ -22,9 +25,21 @@ function keyOf(item: PendingItem): string {
   }
 }
 
+/** 卡里出现的记忆 id（直达高亮用）；超限和读不出的文件不对应某条记忆。 */
+function memoryIdsOf(item: PendingItem): string[] {
+  switch (item.kind) {
+    case 'secret': return [item.memory.id]
+    case 'conflict-horizontal': return [item.left?.id, item.right?.id].filter((id): id is string => id !== undefined)
+    case 'conflict-vertical':
+    case 'promote-candidate': return item.memory === null ? [] : [item.memory.id]
+    default: return []
+  }
+}
+
 interface Recent { item: PendingItem; index: number; outcome: Outcome; undone: boolean }
 
-export function PendingTab({ session, workspacePath, now = Date.now() }: {
+export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
+  nav: NavStore
   session: BorrowedSession
   /** 页面当前作用域的项目（「体检当前项目」体检它）；全局为 undefined。 */
   workspacePath: string | undefined
@@ -38,6 +53,7 @@ export function PendingTab({ session, workspacePath, now = Date.now() }: {
 
   const viewItems = pending.status === 'ready' ? pending.data.items : []
   const typeLabels = pending.status === 'ready' ? pending.data.typeLabels : {}
+  const { flashId, clear } = useFlashTarget(nav, viewItems.flatMap(memoryIdsOf))
   const recentKey = recent === undefined ? undefined : keyOf(recent.item)
   const backInView = recentKey !== undefined && viewItems.some(i => keyOf(i) === recentKey)
   // 撤销后视图把条目带回来了：本地那张让位
@@ -47,8 +63,9 @@ export function PendingTab({ session, workspacePath, now = Date.now() }: {
 
   // 视图还没重写时刚处理的条目仍在里面：先藏起来，原位放结果卡
   const items = viewItems.filter(i => recent === undefined || recent.undone || keyOf(i) !== recentKey)
-  const rows: Array<{ key: string; node: ReactElement }> = items.map((item, index) => ({
+  const rows: Array<{ key: string; node: ReactElement; flashing?: boolean }> = items.map((item, index) => ({
     key: keyOf(item),
+    flashing: flashId !== undefined && memoryIdsOf(item).includes(flashId),
     node: renderCard(item, (outcome) => { setRecent({ item, index, outcome, undone: false }) }),
   }))
   if (recent !== undefined && !(recent.undone && backInView)) {
@@ -90,7 +107,9 @@ export function PendingTab({ session, workspacePath, now = Date.now() }: {
       <style data-plastic-memory-pending="">{pendingCss}</style>
       {rows.length === 0
         ? <PendingEmpty session={session} workspacePath={workspacePath} health={health.status === 'ready' ? health.data : undefined} governanceEnabled={config?.governanceEnabled} now={now} />
-        : rows.map(row => <div key={row.key} className="pm-pending-row">{row.node}</div>)}
+        : rows.map(row => (
+          <FlashRow key={row.key} as="div" className="pm-pending-row" flashing={row.flashing ?? false} onFlashEnd={clear}>{row.node}</FlashRow>
+        ))}
     </div>
   )
 }
@@ -149,7 +168,10 @@ function PendingEmpty({ session, workspacePath, health, governanceEnabled, now }
 
 export const pendingCss = `
 .pm-pending { display: flex; flex-direction: column; }
+.pm-pending-row { position: relative; }
 .pm-pending-row + .pm-pending-row { border-top: .5px solid var(--pm-line); }
+.pm-pending-row.pm-flash { margin-inline: -12px; padding-inline: 12px; border-radius: 10px; }
+.pm-pending-row.pm-flash::before { left: 2px; }
 .pm-pending-item { padding: 16px 0 18px; }
 .pm-pending-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 .pm-pending-title { margin: 0; flex: 1; min-width: 0; font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }

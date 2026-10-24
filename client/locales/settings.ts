@@ -15,6 +15,8 @@ export const settingsZh = {
   'settings.status.lastScan': '上次体检：{date}',
   'settings.status.neverScanned': '还没体检过',
   'settings.status.open': '打开记忆页 ›',
+  'settings.status.scan': '立即体检',
+  'settings.status.scanning': '正在体检…',
 
   'settings.group.what': '记什么',
   'settings.group.how': '怎么用',
@@ -126,6 +128,8 @@ export const settingsEn: Record<keyof typeof settingsZh, string> = {
   'settings.status.lastScan': 'Last checkup: {date}',
   'settings.status.neverScanned': 'Never checked',
   'settings.status.open': 'Open Memory page ›',
+  'settings.status.scan': 'Check now',
+  'settings.status.scanning': 'Checking…',
 
   'settings.group.what': 'What to remember',
   'settings.group.how': 'How to use',

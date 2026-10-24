@@ -41,6 +41,11 @@ export const healthZh = {
   'health.overflow.strict': '带入的记忆已用到上限的 95%（不扣分）',
   'health.stale': '很久没确认、可能过时 {n} 条，带进对话时会标注',
   'health.noMemories': '本项目还没有记忆。',
+  'health.entry.pending': '待你决定 {n} 条',
+  'health.entry.pendingOld': '待你决定 {n} 条，其中 {old} 条超过 7 天',
+  'health.entry.pendingLink': '去处理 ›',
+  'health.entry.promote': '可提升为全局 {n} 条',
+  'health.entry.promoteLink': '去看 ›',
 
   'health.semanticEmpty.title': '内容检查还没做过',
   'health.semanticEmpty.body': '体检会找出互相矛盾、内容重复、放错地方、表述不清的记忆。上面是规则检查的结果，每次打开都重新算。',
@@ -93,6 +98,11 @@ export const healthEn: Record<HealthLocaleKey, string> = {
   'health.overflow.strict': 'Memories brought in reached 95% of the limit (no score penalty)',
   'health.stale': '{n} not confirmed in a long time and may be outdated; they are flagged when brought into a chat',
   'health.noMemories': 'This project has no memories yet.',
+  'health.entry.pending': '{n} waiting for your decision',
+  'health.entry.pendingOld': '{n} waiting for your decision, {old} for over 7 days',
+  'health.entry.pendingLink': 'Handle ›',
+  'health.entry.promote': '{n} could become global',
+  'health.entry.promoteLink': 'Take a look ›',
 
   'health.semanticEmpty.title': 'Content check not run yet',
   'health.semanticEmpty.body': 'A checkup finds memories that contradict each other, repeat, sit in the wrong place, or are unclear. Above is the rule check, recomputed every time you open this.',
