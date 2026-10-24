@@ -7,6 +7,7 @@ import { maskSecretSurface } from '../secrets.ts'
 import { FINDING_TYPES, type PendingDecision } from '../governance/schema.ts'
 import { kindOf, overflowLevelOf, overflowScopeOf, verdictLoser } from '../governance/decisions.ts'
 import { runRuleScan } from '../governance/rule-scan.ts'
+import { byConfidenceThenConfirmed } from '../snapshot.ts'
 import { layerCacheKey, scoreLayer, type LayerPreread, type LayerRef } from '../governance/layer-health.ts'
 import {
   GUI_VIEW_VERSION, PENDING_ITEM_KINDS,
@@ -104,7 +105,11 @@ export function buildPendingView(input: ViewInput): PendingView {
     else if (e.baselineRef !== undefined) {
       items.push({ kind: 'conflict-vertical', ...base, summary: e.summary, memory: cardOf(e.memoryIds[0], data), baselineRef: e.baselineRef })
     } else {
-      items.push({ kind: 'conflict-horizontal', ...base, summary: e.summary, left: cardOf(e.memoryIds[0], data), right: cardOf(e.memoryIds[1], data) })
+      const preferred = e.memoryIds.slice(0, 2).map(id => data.byId.get(id)).filter(r => r !== undefined).sort(byConfidenceThenConfirmed)[0]
+      items.push({
+        kind: 'conflict-horizontal', ...base, summary: e.summary, left: cardOf(e.memoryIds[0], data), right: cardOf(e.memoryIds[1], data),
+        ...(preferred !== undefined ? { preferredId: preferred.id } : {}),
+      })
     }
   }
   for (const layer of input.readLayers) {
@@ -120,7 +125,16 @@ export function buildPendingView(input: ViewInput): PendingView {
   items.sort((a, b) => rank(a) - rank(b))
   const dot = items.some(i => i.kind === 'secret') ? 'red'
     : items.some(i => i.kind !== 'unreadable-file') ? 'amber' : 'none'
-  return { version: GUI_VIEW_VERSION, dot, items }
+  return { version: GUI_VIEW_VERSION, dot, items, typeLabels: typeLabels(input.registry, items) }
+}
+
+/** 注册表里的类型加上待处理记忆卡里出现的类型（切模板后旧模板的、认不出的），读时 get 给显示名。 */
+function typeLabels(registry: TypeRegistry, items: readonly PendingItem[]): Record<string, string> {
+  const types = new Set(registry.all().map(t => t.name))
+  for (const i of items) {
+    for (const m of i.kind === 'conflict-horizontal' ? [i.left, i.right] : 'memory' in i ? [i.memory] : []) if (m) types.add(m.type)
+  }
+  return Object.fromEntries([...types].map(name => [name, registry.get(name).label]))
 }
 
 /** 健康：每层复用 scoreLayer（与 memory_health / memory_scan 同分）；有密钥的层不打分。超限另列（不扣分）。 */

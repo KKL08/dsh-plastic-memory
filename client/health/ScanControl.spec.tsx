@@ -8,10 +8,11 @@ import { createNavStore } from '../nav.ts'
 import { memory, renderInShell } from '../test-utils.tsx'
 
 const health = (governanceEnabled = true): HealthView => ({ version: GUI_VIEW_VERSION, governanceEnabled, layers: [] })
-const noPending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [] }
+const noPending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], typeLabels: {} }
 const somePending: PendingView = {
   version: GUI_VIEW_VERSION, dot: 'amber',
   items: [{ kind: 'promote-candidate', decisionId: 'd1', firstSeenAt: 1, memory: memory() }],
+  typeLabels: {},
 }
 
 function renderPage(init: FakeGatewayInit = {}, openSettings = vi.fn()) {

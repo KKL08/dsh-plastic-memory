@@ -89,6 +89,20 @@ export interface HostLocale {
   subscribe(fn: () => void): () => void
 }
 
+/** ui-settings ConfigFormSnapshot 子集。 */
+export interface ConfigFormSnapshot {
+  status: 'loading' | 'ready' | 'unavailable'
+  /** 按 schema 解析后的配置段（含默认值）；首次接受前为 undefined。 */
+  value: unknown
+}
+
+/** ui-settings ConfigForm 子集：任意组件都能写单个字段（宿主接受为 true）。 */
+export interface ConfigForm {
+  getSnapshot(): ConfigFormSnapshot
+  subscribe(listener: () => void): () => void
+  set(field: string, value: unknown): Promise<boolean>
+}
+
 export interface HostContext {
   /** cordis 可选依赖：服务全部就位后在子上下文里执行 fn，服务离开时子上下文连同其注册一起撤掉。 */
   inject(deps: string[], fn: (child: HostContext) => void): unknown
@@ -121,4 +135,6 @@ export interface HostContext {
       openWorkspacePath(request: { path: string; action?: 'reveal' }): Promise<RemoteResult<unknown>>
     }
   }
+  /** 插件配置（profile 行 id 即 entryId）。 */
+  configForms?: { get(entryId: string): ConfigForm }
 }

@@ -17,7 +17,7 @@ import { PanelShell } from './ui/PanelShell.tsx'
 
 export { PANEL_ID }
 
-export const inject = ['slots', 'locale', 'layout', 'sidebarRight', 'remote', 'remote.commands', 'remote.workspaceFiles', 'remote.session', 'pluginNavigation']
+export const inject = ['slots', 'locale', 'layout', 'sidebarRight', 'remote', 'remote.commands', 'remote.workspaceFiles', 'remote.session', 'pluginNavigation', 'configForms']
 
 /** npm 包名：宿主插件页按它打开本插件的详情（配置区在详情页里）。 */
 export const PACKAGE_NAME = 'dsh-plastic-memory'

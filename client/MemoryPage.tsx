@@ -10,6 +10,7 @@ import { baseName, formatNumber, useT, type Translate } from './i18n.tsx'
 import { MEMORY_TABS, useNavTarget, type MemoryTab, type NavStore } from './nav.ts'
 import { HealthTab } from './health/HealthTab.tsx'
 import { ScanControl } from './health/ScanControl.tsx'
+import { PendingTab } from './pending/PendingTab.tsx'
 import { EmptyState } from './ui/EmptyState.tsx'
 import { DeletedTab, deletedTabCss } from './deleted/DeletedTab.tsx'
 import { LibraryTab, libraryTabCss } from './library/LibraryTab.tsx'
@@ -89,13 +90,15 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
           <>
             <SegmentedTabs label={t('tabs.label')} items={items} value={target.tab} onChange={(tab) => { nav.update({ tab, memoryId: undefined }) }} />
             <div role="tabpanel" id={`${tabsId}-${target.tab}-panel`} aria-labelledby={`${tabsId}-${target.tab}`} className="pm-page-panel">
-              {target.tab === 'library'
-                ? <LibraryTab nav={nav} scope={scope} session={session} />
-                : target.tab === 'deleted'
-                  ? <DeletedTab nav={nav} scope={scope} session={session} />
-                  : target.tab === 'health'
-                    ? <HealthTab session={session} scope={scope} nav={nav} />
-                    : <p className="pm-page-placeholder">{t('page.placeholder')}</p>}
+              {target.tab === 'pending'
+                ? <PendingTab session={session} workspacePath={scope.kind === 'workspace' ? scope.workspacePath : undefined} />
+                : target.tab === 'library'
+                  ? <LibraryTab nav={nav} scope={scope} session={session} />
+                  : target.tab === 'deleted'
+                    ? <DeletedTab nav={nav} scope={scope} session={session} />
+                    : target.tab === 'health'
+                      ? <HealthTab session={session} scope={scope} nav={nav} />
+                      : <p className="pm-page-placeholder">{t('page.placeholder')}</p>}
             </div>
           </>
         )}

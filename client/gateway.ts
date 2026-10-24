@@ -13,9 +13,11 @@ import {
   deletedViewSchema, healthViewSchema, libraryViewSchema, pendingViewSchema, sessionViewSchema,
   memoryCommandResultSchema,
   type DeletedView, type HealthView, type LibraryView, type MemoryCommand, type MemoryCommandResult,
-  type PendingView, type SessionView,
+  type PendingItem, type PendingView, type SessionView,
 } from '../src/gui/contract.ts'
-import type { CommandExecution, HostContext, RemoteResult, RootStandardProps, SessionListState } from './host.ts'
+import type {
+  CommandExecution, ConfigForm, ConfigFormSnapshot, HostContext, RemoteResult, RootStandardProps, SessionListState,
+} from './host.ts'
 
 export interface ViewMap {
   pending: PendingView
@@ -51,8 +53,24 @@ export interface MemoryGateway {
   useView<N extends ViewName>(session: BorrowedSession, name: N): ViewState<ViewMap[N]>
   /** 执行一条 `/memory` 命令，结果按契约解析；宿主或解析层面的失败折成 `failed`。 */
   execute(sessionId: string, command: MemoryCommand): Promise<MemoryCommandResult>
-  /** 用本机默认程序打开一个路径，或在文件管理器里显示它（reveal）；宿主拒绝或调不通时返回 false。 */
-  openPath(path: string, action?: 'reveal'): Promise<boolean>
+  /** hook：插件配置里界面要用的几项；宿主还没给出（或不服务这份配置）时为 undefined。 */
+  useConfig(): PluginConfig | undefined
+  /** 写一个配置字段（`configForms.set`，单字段快捷写入）；宿主接受为 true。 */
+  setConfig(field: 'snapshotTokenBudget', value: number): Promise<boolean>
+  /** 读一个文件的全文（借会话的文件通道，只在本机内存里用）；读不到为 undefined。 */
+  readFile(sessionId: string, path: string): Promise<string | undefined>
+  /** 用默认应用打开宿主上的文件，或在文件管理器中显示；宿主接受为 true。 */
+  openPath(path: string, action?: 'open' | 'reveal'): Promise<boolean>
+  /** 打开插件页里本插件的详情（配置页）。 */
+  openSettings(): void
+}
+
+/** 界面用到的配置项（宿主配置段 `plastic-memory` 的子集，值已按 schema 带上默认值）。 */
+export interface PluginConfig {
+  snapshotTokenBudget: number
+  snapshotOverflow: Extract<PendingItem, { kind: 'overflow' }>['mode']
+  governanceEnabled: boolean
+  globalPromoteTarget: 'plugin-global' | 'agents-md'
 }
 
 const GatewayContext = createContext<MemoryGateway | null>(null)
@@ -145,9 +163,31 @@ export function fileAddress(sessionId: string, path: string): string {
   return `dsh-resource://file/session/${enc(sessionId)}/${path.replace(/\\/g, '/').split('/').map(enc).join('/')}`
 }
 
+/** 宿主配置段（schema 解析后的值）→ 界面用到的几项；结构不对为 undefined。 */
+export function toPluginConfig(value: unknown): PluginConfig | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const v = value as { snapshotTokenBudget?: unknown; snapshotOverflow?: unknown; governance?: { enabled?: unknown; globalPromoteTarget?: unknown } }
+  const g = v.governance
+  if (typeof v.snapshotTokenBudget !== 'number' || (v.snapshotOverflow !== 'relax' && v.snapshotOverflow !== 'strict')
+    || typeof g?.enabled !== 'boolean' || (g.globalPromoteTarget !== 'plugin-global' && g.globalPromoteTarget !== 'agents-md')) return undefined
+  return { snapshotTokenBudget: v.snapshotTokenBudget, snapshotOverflow: v.snapshotOverflow, governanceEnabled: g.enabled, globalPromoteTarget: g.globalPromoteTarget }
+}
+
 // —— 宿主实现 ——
 
 export const MEMORY_ROOT_KEY = 'dsh-plastic-memory.gui.memoryRoot'
+
+/** 插件配置的 entryId：cordis.patch.yml 插入的 profile 行 id。 */
+export const CONFIG_ENTRY_ID = 'plastic-memory'
+
+/** 插件页按 npm 包名打开详情。 */
+export const PACKAGE_NAME = 'dsh-plastic-memory'
+
+interface ConfigBinding {
+  form: ConfigForm | undefined
+  get: () => ConfigFormSnapshot | undefined
+  subscribe: (fn: () => void) => () => void
+}
 
 /** refreshes：refresh-views 成功的次数。文件资源起步就是 not-found 时，宿主在文件写出后未必再推一帧，靠它触发重读。 */
 interface RootState { memoryRoot?: string; error?: string; refreshes: number }
@@ -212,17 +252,40 @@ export function createHostGateway(ctx: HostContext): (props: RootStandardProps) 
   const execute: MemoryGateway['execute'] = async (sessionId, command) =>
     decodeExecution(command.cmd, await run(sessionId, encodeMemoryCommand(command)))
   const root = createRootStore(run)
-  const openPath: MemoryGateway['openPath'] = async (path, action) => {
-    try {
-      return (await ctx.remote.session.openWorkspacePath(action === 'reveal' ? { path, action } : { path })).ok
-    } catch {
-      return false
-    }
+  // 第一次用到时才向宿主要表单（get 会触发配置镜像加载）；绑定一次，订阅函数身份稳定
+  let binding: ConfigBinding | undefined
+  const config = (): ConfigBinding => {
+    if (binding !== undefined) return binding
+    const form = ctx.configForms?.get(CONFIG_ENTRY_ID)
+    binding = form === undefined
+      ? { form, get: () => undefined, subscribe: () => () => {} }
+      : { form, get: () => form.getSnapshot(), subscribe: fn => form.subscribe(fn) }
+    return binding
   }
 
   return ({ useSessions, useResource }) => ({
     execute,
-    openPath,
+    useConfig() {
+      const { get, subscribe } = config()
+      const snapshot = useSyncExternalStore(subscribe, get)
+      return useMemo(() => snapshot?.status === 'ready' ? toPluginConfig(snapshot.value) : undefined, [snapshot])
+    },
+    async setConfig(field, value) {
+      try { return (await config().form?.set(field, value)) ?? false } catch { return false }
+    },
+    async readFile(sessionId, path) {
+      try {
+        const r = await ctx.remote.workspaceFiles.read(sessionId, path, {})
+        return r.ok ? r.value.text : undefined
+      } catch { return undefined }
+    },
+    async openPath(path, action) {
+      try {
+        const r = await ctx.remote.session?.openWorkspacePath(action === 'reveal' ? { path, action } : { path })
+        return r?.ok ?? false
+      } catch { return false }
+    },
+    openSettings() { ctx.pluginNavigation?.openBundle(PACKAGE_NAME) },
     useSession(workspacePath) {
       const list = useSessions(s => s)
       const picked = pickSession(list, workspacePath)

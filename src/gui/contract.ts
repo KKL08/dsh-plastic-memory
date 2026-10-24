@@ -75,6 +75,8 @@ export const pendingItemSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('conflict-horizontal'), decisionId: z.string(), firstSeenAt: z.number(), summary: z.string(),
     left: memoryCardSchema.nullable(), right: memoryCardSchema.nullable(),
+    /** 决定前 agent 按哪条来：快照注入的排序（confidence 降序 → lastConfirmedAt 降序）排在前的一方；两方都找不到时缺省。 */
+    preferredId: z.string().optional(),
   }),
   z.object({
     kind: z.literal('conflict-vertical'), decisionId: z.string(), firstSeenAt: z.number(), summary: z.string(),
@@ -103,6 +105,8 @@ export const pendingViewSchema = z.object({
   version,
   dot: z.enum(PENDING_DOTS),
   items: z.array(pendingItemSchema),
+  /** 类型 id → 显示名（注册表的 label），供记忆卡元信息；认不出的类型显示 id。 */
+  typeLabels: z.record(z.string(), z.string()),
 })
 export type PendingView = z.infer<typeof pendingViewSchema>
 

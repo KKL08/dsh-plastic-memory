@@ -89,6 +89,7 @@ describe('健康 tab', () => {
         { kind: 'secret', memory: memory({ id: 's2', name: 'other-project', workspacePath: '/w/blog' }) },
         { kind: 'unreadable-file', layer: { kind: 'global' }, filePath: '/m/global/bad.md', relativePath: 'global/bad.md', error: 'yaml-parse' },
       ],
+      typeLabels: {},
     }
     renderTab(health([layer(), layer({ layer: { kind: 'global' } })], false), { pending, openSettings })
     expect(screen.getByRole('status')).toHaveTextContent('体检已关闭')

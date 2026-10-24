@@ -43,7 +43,7 @@ export function estimateTokens(text: string): number {
 }
 
 /** 注入排序（设计稿 §6）：confidence 降序 → lastConfirmedAt 降序。recallCount 不参与：被宽泛查询扫到的记忆不该越排越前。 */
-function byConfidenceThenConfirmed(a: MemoryRecord, b: MemoryRecord): number {
+export function byConfidenceThenConfirmed(a: MemoryRecord, b: MemoryRecord): number {
   return b.confidence - a.confidence || b.lastConfirmedAt - a.lastConfirmedAt
 }
 

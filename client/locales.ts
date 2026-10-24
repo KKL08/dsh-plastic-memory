@@ -2,6 +2,7 @@
  * 客户端界面文案（`ctx.locale.register(NS, {zh, en})`）。插件元信息（标题、描述）在仓库根 `locale/*.json`，
  * 那是宿主插件页读的，和这里分开。占位符 `{name}` 由宿主 locale 服务替换。
  */
+import { pendingEn, pendingZh } from './locales/pending.ts'
 
 import { composerEn, composerZh } from './locales/composer.ts'
 import { libraryEn, libraryZh } from './locales/library.ts'
@@ -81,6 +82,7 @@ export const zh = {
   ...libraryZh,
   ...chatZh,
   ...healthZh,
+  ...pendingZh,
 } as const
 
 export type LocaleKey = keyof typeof zh
@@ -155,4 +157,5 @@ export const en: Record<LocaleKey, string> = {
   ...libraryEn,
   ...chatEn,
   ...healthEn,
+  ...pendingEn,
 }

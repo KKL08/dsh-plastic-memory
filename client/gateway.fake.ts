@@ -4,7 +4,7 @@
  */
 import { useSyncExternalStore } from 'react'
 import type { MemoryCommand, MemoryCommandResult } from '../src/gui/contract.ts'
-import type { BorrowedSession, MemoryGateway, ViewMap, ViewName, ViewState } from './gateway.ts'
+import type { BorrowedSession, MemoryGateway, PluginConfig, ViewMap, ViewName, ViewState } from './gateway.ts'
 
 export interface FakeGatewayInit {
   session?: BorrowedSession
@@ -14,15 +14,26 @@ export interface FakeGatewayInit {
   respond?: (command: MemoryCommand) => MemoryCommandResult | Promise<MemoryCommandResult>
   /** openPath 的返回；缺省 true。 */
   openOk?: boolean
+  /** 插件配置；缺省 undefined（宿主还没给出）。 */
+  config?: PluginConfig
+  /** readFile 能读到的文件（绝对路径 → 全文）。 */
+  files?: Record<string, string>
 }
 
 export interface FakeGateway extends MemoryGateway {
   /** 发出过的命令，按顺序。 */
   readonly executed: Array<{ sessionId: string; command: MemoryCommand }>
-  /** openPath 调用，按顺序。 */
-  readonly opened: Array<{ path: string; action?: 'reveal' }>
   /** 每次 useSession 被问到的作用域（最近一次在最后）。 */
   readonly sessionRequests: Array<string | undefined>
+  /** setConfig 写过的字段，按顺序。 */
+  readonly configWrites: Array<{ field: string; value: unknown }>
+  /** openPath 调用，按顺序（打开只记 path，显示目录带 action）。 */
+  readonly opened: Array<{ path: string; action?: 'reveal' }>
+  /** readFile 读过的路径。 */
+  readonly reads: string[]
+  /** openSettings 调用次数。 */
+  readonly settingsOpened: { count: number }
+  setConfigValue(config: PluginConfig | undefined): void
   setSession(session: BorrowedSession): void
   setCurrentWorkspace(path: string | undefined): void
   /** 推一份新视图（等同文件版本变化后读到新内容）；传 ViewState 可模拟 loading / missing / error。 */
@@ -48,12 +59,33 @@ export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
 
   const executed: FakeGateway['executed'] = []
   const sessionRequests: FakeGateway['sessionRequests'] = []
+  const configWrites: FakeGateway['configWrites'] = []
   const opened: FakeGateway['opened'] = []
+  const reads: string[] = []
+  const settingsOpened = { count: 0 }
+  let config = init.config
 
   return {
     executed,
     opened,
     sessionRequests,
+    configWrites,
+    reads,
+    settingsOpened,
+    setConfigValue(next) { config = next; bump() },
+    useConfig() {
+      useRevision()
+      return config
+    },
+    async setConfig(field, value) {
+      configWrites.push({ field, value })
+      return true
+    },
+    async readFile(_sessionId, path) {
+      reads.push(path)
+      return init.files?.[path]
+    },
+    openSettings() { settingsOpened.count += 1 },
     setSession(next) { session = next; bump() },
     setCurrentWorkspace(path) { currentWorkspace = path; bump() },
     setView(name, value) { views.set(name, toState(value)); bump() },
@@ -76,7 +108,7 @@ export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
       return await (init.respond?.(command) ?? { ok: true, cmd: command.cmd })
     },
     async openPath(path, action) {
-      opened.push(action === undefined ? { path } : { path, action })
+      opened.push(action === 'reveal' ? { path, action } : { path })
       return init.openOk ?? true
     },
   }
