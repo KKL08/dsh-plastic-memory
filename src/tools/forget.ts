@@ -108,18 +108,20 @@ export async function executeForget(
 
   const forgotten: string[] = []
   const hardDeleted: string[] = []
+  // 指明了副本：删的时候也只认那一层，与定位同口径
+  const deleteOpts = { isExactLayer: options.target !== undefined }
   for (const record of found) {
     if (secretIds.has(record.id)) {
-      if (await deps.store.hardDelete(record)) {
+      if (await deps.store.hardDelete(record, deleteOpts)) {
         forgotten.push(record.id)
         hardDeleted.push(record.id)
       }
     } else if (options.isSoftOnly === true) {
       // 读过之后另一个会话才写进密钥：锁内拦下，照样交回调用方
-      const outcome = await deps.store.softDeleteUnlessSecret(record)
+      const outcome = await deps.store.softDeleteUnlessSecret(record, deleteOpts)
       if (outcome === 'deleted') forgotten.push(record.id)
       else if (outcome === 'has-secret') skippedSecrets.push(record.id)
-    } else if (await deps.store.softDelete(record)) forgotten.push(record.id)
+    } else if (await deps.store.softDelete(record, deleteOpts)) forgotten.push(record.id)
   }
   await deps.decisions.removeByMemoryIds(forgotten)
 

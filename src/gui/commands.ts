@@ -143,8 +143,8 @@ async function dispatch(
   const notFound = (what: string) => fail(cmd, 'not-found', `不存在或已处理：${what}`)
 
   /** 按快照恢复这些记忆；返回恢复了的 id，或错误结果（快照过期、跨项目被拒、快照后被改过）。 */
-  const restoreFrom = async (snapshotId: string, memoryIds: string[], allowCrossWorkspace: boolean | undefined): Promise<string[] | Err> => {
-    const r = await executeSnapshotTool({ action: 'restore', snapshotId, memoryIds, allowCrossWorkspace }, gov, executorDeps)
+  const restoreFrom = async (snapshotId: string, memoryIds: string[], allowCrossWorkspace: boolean | undefined, isExactLayer = false): Promise<string[] | Err> => {
+    const r = await executeSnapshotTool({ action: 'restore', snapshotId, memoryIds, allowCrossWorkspace }, gov, executorDeps, { isExactLayer })
     if (r.kind === 'error') return fail(cmd, 'not-found', r.message)
     if (r.kind !== 'restored') return fail(cmd, 'failed', r.message)
     if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
@@ -203,7 +203,7 @@ async function dispatch(
         && (layer === undefined || covers(snapshots.find(s => s.id === d.settled!.snapshotId)))).at(-1)
       const snapshotId = entry?.settled?.snapshotId ?? snapshots.find(covers)?.id
       if (snapshotId === undefined) return fail(cmd, 'not-found', `没有覆盖 ${memoryId} 的快照（可能已超过保留窗口）`)
-      const r = await restoreFrom(snapshotId, [memoryId], command.allowCrossWorkspace)
+      const r = await restoreFrom(snapshotId, [memoryId], command.allowCrossWorkspace, layer !== undefined)
       if (isErr(r)) return r
       if (entry) await deps.decisions.unsettle(entry.id)
       return { ok: true, cmd, memoryIds: r, snapshotId, ...(entry ? { decisionId: entry.id } : {}) }

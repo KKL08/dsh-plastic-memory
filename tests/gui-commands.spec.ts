@@ -413,6 +413,52 @@ describe('同 id 在两个项目里各有一份', () => {
   })
 })
 
+describe('同 id 在本项目和全局各有一份、全局那份更新', () => {
+  // 页面在本项目层下列出的那一份：即使全局副本更新、按会话定位会取到全局那份，带了层也只动本项目这一份
+  const own = { kind: 'workspace', workspacePath: SESSION_WS } as const
+  const newer = Date.now() + 60_000
+  const layerCopy = async (e: ReturnType<typeof env>, ws: string | undefined) =>
+    (await e.store.readLayer(ws === undefined ? { kind: 'global' } : { kind: 'workspace', path: ws }, { includeArchive: true }))
+      .records.find(l => l.record.id === 'mem_dup')?.record
+  const seed = async (e: ReturnType<typeof env>, content = '内容') => {
+    // 先建项目那份：写全局那份只清全局目录里的同 id 副本
+    await e.store.create(record({ id: 'mem_dup', name: '本项目那份', content, scope: 'workspace', workspacePath: SESSION_WS }))
+    await e.store.create(record({ id: 'mem_dup', name: '全局那份', content, updatedAt: newer }))
+  }
+
+  it('forget 带本项目的层：软删本项目那份', async () => {
+    const e = env()
+    await seed(e)
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: own }))
+    expect((await layerCopy(e, SESSION_WS))!.status).toBe('deleted')
+  })
+
+  it('restore 带本项目的层：恢复本项目那份，不拿更新的全局副本比对或覆盖', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_dup', name: '本项目那份', scope: 'workspace', workspacePath: SESSION_WS }))
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: own }))
+    await e.store.create(record({ id: 'mem_dup', name: '全局那份', updatedAt: newer }))
+    const restored = ok(await e.run({ cmd: 'restore', memoryId: 'mem_dup', layer: own }))
+    expect(restored.memoryIds).toEqual(['mem_dup'])
+    expect(await layerCopy(e, SESSION_WS)).toMatchObject({ name: '本项目那份', status: 'active' })
+  })
+
+  it('hard-delete 带本项目的层：物理删除本项目那份', async () => {
+    const e = env()
+    await seed(e, `token ${FAKE_SECRET.sk}`)
+    ok(await e.run({ cmd: 'hard-delete', memoryId: 'mem_dup', layer: own }))
+    expect(await layerCopy(e, SESSION_WS)).toBeUndefined()
+  })
+
+  it('不带层时照旧按会话定位：取到更新的全局那份', async () => {
+    const e = env()
+    await seed(e)
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup' }))
+    expect((await layerCopy(e, undefined))!.status).toBe('deleted')
+    expect((await layerCopy(e, SESSION_WS))!.status).toBe('active')
+  })
+})
+
 describe('hard-delete', () => {
   it('含密钥的记忆物理删除：文件没了、不进最近删除', async () => {
     const e = env()

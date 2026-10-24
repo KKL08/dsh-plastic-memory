@@ -75,6 +75,10 @@ export class InMemoryTable implements MemoryTable {
 
   async locate(id: string, hint?: LocateHint): Promise<LocatedFile | undefined> {
     const all = [...this.slots.values()].filter(s => s.record.id === id)
+    if (hint?.isExactLayer === true) {
+      const ownDir = hint.workspacePath === undefined ? this.globalDir : join(this.root, workspaceDirName(hint.workspacePath))
+      return resolveDuplicates(all.filter(s => s.dir === ownDir), hint)[0]
+    }
     const firstLevel = all.filter(s => s.dir === this.globalDir
       || (hint?.workspacePath !== undefined && s.record.scope === 'workspace' && s.record.workspacePath === hint.workspacePath))
     return resolveDuplicates(firstLevel.length > 0 ? firstLevel : all, hint)[0]
@@ -183,6 +187,16 @@ export interface QueryResult {
   directoryNotes: DirectoryNote[]
 }
 
+/** 删除类方法的选项。 */
+export interface DeleteOptions {
+  isExactLayer?: boolean
+}
+
+/** 按记录自己的 workspace 定位；global 记录没有 workspacePath，只认层时即 global 层。 */
+function deleteHint(record: Pick<MemoryRecord, 'workspacePath'>, opts: DeleteOptions): LocateHint {
+  return { workspacePath: record.workspacePath, ...(opts.isExactLayer === true ? { isExactLayer: true } : {}) }
+}
+
 export class MemoryStore {
   private table: MemoryTable
   private log?: MemoryLogger
@@ -229,13 +243,14 @@ export class MemoryStore {
    * 删除按记录定位：调用方传入它读到并过了门的那条记录，按该记录自己的 workspace 定位（与 put 同约定），
    * 同 id 多副本时改的就是门检查过的那份，不会落到 global 或别的项目的副本上。
    * hardDelete 物理删除文件（不进 .archive/，不可恢复）：只给密钥硬删用（tools/forget.ts）。
+   * isExactLayer：只认这条记录所在的那一层（见 LocateHint），同可见集合里别层的副本更新也不改到它头上。
    */
-  hardDelete(record: Pick<MemoryRecord, 'id' | 'workspacePath'>): Promise<boolean> {
-    return this.table.delete(record.id, { workspacePath: record.workspacePath })
+  hardDelete(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, opts: DeleteOptions = {}): Promise<boolean> {
+    return this.table.delete(record.id, deleteHint(record, opts))
   }
 
-  async softDelete(record: Pick<MemoryRecord, 'id' | 'workspacePath'>): Promise<boolean> {
-    const hint = { workspacePath: record.workspacePath }
+  async softDelete(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, opts: DeleteOptions = {}): Promise<boolean> {
+    const hint = deleteHint(record, opts)
     if (!(await this.table.locate(record.id, hint))) return false
     try {
       await this.table.update(record.id, r => ({ ...r, status: 'deleted', updatedAt: Date.now() }), hint)
@@ -250,11 +265,17 @@ export class MemoryStore {
    * 只软删（GUI 的 forget）：锁内看到的当前内容含密钥就不动它、回 has-secret，由调用方先问用户；
    * 调用方读过之后另一个会话才写进的密钥也拦得住。定位同 softDelete。
    */
-  async softDeleteUnlessSecret(record: Pick<MemoryRecord, 'id' | 'workspacePath'>): Promise<'deleted' | 'has-secret' | 'missing'> {
-    const hint = { workspacePath: record.workspacePath }
+  async softDeleteUnlessSecret(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, opts: DeleteOptions = {}): Promise<'deleted' | 'has-secret' | 'missing'> {
+    const hint = deleteHint(record, opts)
     if (!(await this.table.locate(record.id, hint))) return 'missing'
-    const written = await this.table.update(record.id, r => (hasSecret(r) ? r : { ...r, status: 'deleted', updatedAt: Date.now() }), hint)
-    return written.status === 'deleted' ? 'deleted' : 'has-secret'
+    try {
+      // 走 update 的读改写：写盘前又被改就在新内容上重判，判密钥看的始终是将被覆盖的那份
+      const written = await this.update(record, r => (hasSecret(r) ? r : { ...r, status: 'deleted', updatedAt: Date.now() }), hint)
+      return written.status === 'deleted' ? 'deleted' : 'has-secret'
+    } catch (err) {
+      if (err instanceof RecordNotFoundError) return 'missing'   // 定位之后被别处删掉
+      throw err
+    }
   }
 
   /** scope → 目录。缺省读全部目录（global + 全部有标记的 workspace 目录）。 */

@@ -323,6 +323,10 @@ export class FileTable implements MemoryTable {
   private async locateSlot(id: string, hint?: LocateHint): Promise<Slot | undefined> {
     const global: ScopeDir = { dir: this.globalDir, loc: { scope: 'global' } }
     const hinted = hint?.workspacePath === undefined ? [] : await this.hintDirs(hint.workspacePath)
+    if (hint?.isExactLayer === true) {
+      const own = await this.scanForId(id, hint.workspacePath === undefined ? [global] : hinted)
+      return own.length > 0 ? resolveDuplicates(own, hint)[0] : undefined
+    }
     const first = await this.scanForId(id, [global, ...hinted])
     if (first.length > 0) return resolveDuplicates(first, hint)[0]
     const scanned = new Set([this.globalDir, ...hinted.map(d => d.dir)])

@@ -337,6 +337,23 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect((await table.locate('mem_r1', { workspacePath: WS_A }))!.record.content).toBe('global 较新')
   })
 
+  it('只认指明的层（isExactLayer）：项目层只看它的目录、不取更新的 global 副本，缺 workspacePath 即 global 层；update / delete 带同一提示改的也是那一份', async () => {
+    await h.seedFile({ dir: h.globalDir, fileName: 'g.md', record: record({ id: 'mem_x', content: 'global 较新', updatedAt: 200 }) })
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'w.md', record: ws(WS_A, { id: 'mem_x', content: 'A 较旧', updatedAt: 100 }) })
+    await h.seedFile({ dir: h.wsDir(WS_B), fileName: 'b.md', record: ws(WS_B, { id: 'mem_only_b', content: '只在 B' }) })
+    const inA = { workspacePath: WS_A, isExactLayer: true }
+    expect((await table.locate('mem_x', inA))!.record.content).toBe('A 较旧')
+    expect((await table.locate('mem_x', { isExactLayer: true }))!.record.content).toBe('global 较新')
+    expect(await table.locate('mem_only_b', inA)).toBeUndefined()           // 不落到二级扫别的项目
+    expect(await table.locate('mem_only_b', { isExactLayer: true })).toBeUndefined()
+
+    const written = await table.update('mem_x', r => ({ ...r, content: 'A 改过' }), inA)
+    expect(written.workspacePath).toBe(WS_A)
+    expect((await table.locate('mem_x', inA))!.record.content).toBe('A 改过')
+    expect(await table.delete('mem_x', inA)).toBe(true)
+    expect(await table.locate('mem_x', inA)).toBeUndefined()
+  })
+
   it('同 id 取舍②：updatedAt 相同时提示的 workspace 目录优先于 global', async () => {
     await h.seedFile({ dir: h.globalDir, fileName: 'g.md', record: record({ id: 'mem_r2', content: 'global', updatedAt: 100 }) })
     await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'w.md', record: ws(WS_A, { id: 'mem_r2', content: '提示目录', updatedAt: 100 }) })

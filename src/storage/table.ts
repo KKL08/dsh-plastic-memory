@@ -62,6 +62,9 @@ export interface ScopeReadResult {
 export interface LocateHint {
   /** 当前 workspace：一级定位先看它的目录，取舍时它优先于 global 与其他项目。 */
   workspacePath?: string
+  /** 只认指明的那一层：有 workspacePath 只看它的目录，没有就只看 global 目录；不比别层的副本、不落到二级扫描。
+   *  调用方明确要动某一层的那一份时用（GUI 按页面上那一份操作）。 */
+  isExactLayer?: boolean
 }
 
 export interface WorkspaceDirEntry {

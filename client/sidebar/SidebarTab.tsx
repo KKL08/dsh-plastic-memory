@@ -131,9 +131,15 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   let globalCount = 0
   let projectCount = 0
   for (const { layer, items } of library.data.layers) {
-    for (const item of items) byId.set(item.id, item)
+    const isOwn = layer.kind === 'workspace' && ws !== undefined && samePath(layer.workspacePath, ws)
     if (layer.kind === 'global') globalCount += items.length
-    else if (ws !== undefined && samePath(layer.workspacePath, ws)) projectCount += items.length
+    else if (isOwn) projectCount += items.length
+    // 只收会话看得见的层（global + 本项目）；同 id 两层都有时取服务端会取的那份：updatedAt 新者，相同时本项目优先
+    if (layer.kind !== 'global' && !isOwn) continue
+    for (const item of items) {
+      const current = byId.get(item.id)
+      if (current === undefined || item.updatedAt > current.updatedAt || (item.updatedAt === current.updatedAt && isOwn)) byId.set(item.id, item)
+    }
   }
   if (globalCount === 0 && projectCount === 0) {
     return <div className="pm-side"><EmptyState variant="first" title={t('sidebar.empty.title')}>{t('sidebar.empty.body')}</EmptyState></div>

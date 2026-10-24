@@ -46,11 +46,11 @@ export function isCopyOf(record: Pick<MemoryRecord, 'scope' | 'workspacePath'>, 
 }
 
 /**
- * 按副本定位（含非 active）：提示给目标所在的项目，与写路径按记录自己的 workspace 定位同口径；
- * 定位结果不是那一份（目标层没有这个 id，或同可见集合里别的副本更新）时当作没找到，不落到别的副本上。
+ * 按副本定位（含非 active）：只读目标那一层（isExactLayer），别层同 id 的副本再新也不取；目标层没有这个 id 时当作没找到。
+ * 写回时调用方带同样的只认层提示（store 删除类方法的 isExactLayer），改的就是读到的这一份。
  */
 export async function locateCopy(store: Pick<MemoryStore, 'get'>, id: string, target: CopyTarget): Promise<MemoryRecord | undefined> {
-  const record = await store.get(id, { workspacePath: target.kind === 'workspace' ? target.workspacePath : undefined })
+  const record = await store.get(id, { workspacePath: target.kind === 'workspace' ? target.workspacePath : undefined, isExactLayer: true })
   return record !== undefined && isCopyOf(record, target) ? record : undefined
 }
 
