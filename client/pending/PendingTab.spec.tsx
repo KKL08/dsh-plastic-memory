@@ -121,6 +121,18 @@ describe('待处理：各类卡', () => {
     expect(screen.getByRole('button', { name: '提升 blog 里的这条' })).toHaveAttribute('title', '正在读取设置…')
   })
 
+  it('候选是否在别的项目：按会话归属判断（对照里的软链接、项目子目录都算本项目；嵌套子项目里的会话看外层的记忆算别的项目）', () => {
+    const check = (session: { kind: 'ready'; sessionId: string; cwd: string; workspaces?: Record<string, string> }, heading: string) => {
+      const gateway = createFakeGateway({ session, config, views: { pending: view(promote), health: scannedHealth(NOW) } })
+      const { unmount } = renderInShell(<PendingTab nav={createNavStore()} session={session} workspacePath="/w/app" now={NOW} />, gateway)
+      expect(screen.getByRole('heading', { name: heading })).toBeInTheDocument()
+      unmount()
+    }
+    check({ kind: 'ready', sessionId: 's1', cwd: '/link/app', workspaces: { '/link/app': '/w/app' } }, '这条适合所有项目')
+    check({ kind: 'ready', sessionId: 's1', cwd: '/w/app/sub' }, '这条适合所有项目')
+    check({ kind: 'ready', sessionId: 's1', cwd: '/w/app/pkg', workspaces: { '/w/app/pkg': '/w/app/pkg' } }, 'app 里的这条适合所有项目')
+  })
+
   it('超限：「整理记忆 ›」去全部记忆，作用域是这张卡那一层（项目或全局），不发命令', () => {
     const nav = createNavStore()
     const global: PendingItem = { kind: 'overflow', decisionId: 'd-g', firstSeenAt: 5, mode: 'strict', tier: 0 }
@@ -276,6 +288,42 @@ describe('待处理：跨项目先确认', () => {
       { cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-left' },
       { cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-left', allowCrossWorkspace: true },
     ])
+  })
+})
+
+describe('待处理：确认收起后的键盘焦点', () => {
+  /** 键盘用户按回车：焦点先落在按钮上再触发点击。 */
+  const press = async (button: HTMLElement) => {
+    button.focus()
+    await act(async () => { fireEvent.click(button) })
+  }
+
+  it('密钥卡：「取消」回到「彻底删除…」；确认删除后落到原位的结果卡上', async () => {
+    setup([secret, promote])
+    await press(screen.getByRole('button', { name: '彻底删除…' }))
+    await press(screen.getByRole('button', { name: '取消' }))
+    await waitFor(() => { expect(screen.getByRole('button', { name: '彻底删除…' })).toHaveFocus() })
+
+    await press(screen.getByRole('button', { name: '彻底删除…' }))
+    await press(screen.getByRole('button', { name: '彻底删除' }))
+    const result = (await screen.findByText('如果它是真的凭证，记得去换一个新的。')).closest('article')
+    await waitFor(() => { expect(result).toHaveFocus() })
+  })
+
+  it('跨项目确认：「取消」回到裁决按钮；「继续处理」裁决完落到结果卡的「撤销」', async () => {
+    const respond = (command: MemoryCommand) => 'allowCrossWorkspace' in command && command.allowCrossWorkspace
+      ? { ok: true as const, cmd: command.cmd }
+      : { ok: false as const, cmd: command.cmd, code: 'cross-workspace' as const, rejected: [{ id: 'a', workspacePath: '/w/blog' }] }
+    setup([horizontal], { respond })
+    const keepA = screen.getByRole('button', { name: '以 A 为准' })
+    await press(keepA)
+    await press(screen.getByRole('button', { name: '取消' }))
+    await waitFor(() => { expect(keepA).toHaveFocus() })
+
+    await press(keepA)
+    await press(screen.getByRole('button', { name: '继续处理' }))
+    await screen.findByText('已按 A')
+    await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
   })
 })
 

@@ -245,7 +245,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
           <section className="pm-side-section" aria-label={t('sidebar.saved.title')}>
             <h2 className="pm-side-title">{t('sidebar.saved.title')}</h2>
             {saved.map(({ id, memory }) => memory === undefined
-              ? <p key={id} className="pm-side-hint">{t('pending.secret.deletedNotice')}</p>
+              ? <p key={id} className="pm-side-hint" tabIndex={-1}>{t('pending.secret.deletedNotice')}</p>
               : (
                 <div key={id} className="pm-side-saved">
                   <div className="pm-side-saved-card">{card(memory)}</div>

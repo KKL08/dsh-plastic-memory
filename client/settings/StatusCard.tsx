@@ -57,12 +57,14 @@ type ScanState =
 
 function useScan(session: BorrowedSession) {
   const gateway = useGateway()
-  const workspacePath = gateway.useCurrentWorkspace()
+  const current = gateway.useCurrentWorkspace()
+  const workspacePath = current.status === 'ready' ? current.workspacePath : undefined
   const [state, setState] = useState<ScanState>({ kind: 'idle' })
   const live = useRef(true)
   useEffect(() => () => { live.current = false }, [])
   const run = () => {
-    if (session.kind !== 'ready') return
+    // 当前项目还没确认时不发：否则会按全部项目去体检
+    if (session.kind !== 'ready' || current.status === 'loading') return
     setState({ kind: 'running' })
     void gateway.execute(session.sessionId, { cmd: 'scan', ...(workspacePath !== undefined ? { workspacePath } : {}) }).then((result) => {
       if (live.current) setState(result.ok ? { kind: 'done' } : { kind: 'failed', code: result.code, detail: result.detail })

@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
@@ -17,8 +17,8 @@ import { executeForget } from '../src/tools/forget.ts'
 import { executeHealth } from '../src/tools/health.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import {
-  GUI_VIEW_DIR, GUI_VIEW_FILES, PENDING_ITEM_KINDS, deletedViewSchema, healthViewSchema, libraryViewSchema, pendingViewSchema,
-  sessionViewFile, sessionViewSchema, type GlobalViewName,
+  GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, PENDING_ITEM_KINDS, deletedViewSchema, healthViewSchema,
+  libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema, workspaceMapViewSchema, type GlobalViewName,
 } from '../src/gui/contract.ts'
 import { buildSessionView } from '../src/gui/views.ts'
 import { ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
@@ -372,6 +372,29 @@ describe('视图写入', () => {
     expect(healthViewSchema.safeParse(await readView('health')).success).toBe(true)
     expect(libraryViewSchema.safeParse(await readView('library')).success).toBe(true)
     expect(deletedViewSchema.safeParse(await readView('deleted')).success).toBe(true)
+  })
+
+  it('会话归属对照：同一 tick 的多笔合成一次写；新写入器接着磁盘上已有的对照往里添，同一 cwd 以最新为准', async () => {
+    const mapPath = join(root, GUI_VIEW_DIR, GUI_WORKSPACE_MAP_FILE)
+    const readMap = async () => workspaceMapViewSchema.parse(JSON.parse(await readFile(mapPath, 'utf8')))
+    const first = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') } })
+    await Promise.all([first.requestWorkspace('/link/app', '/w/app'), first.requestWorkspace('/w/app/sub', '/w/app')])
+    expect(await readMap()).toEqual({ version: GUI_VIEW_VERSION, cwds: { '/link/app': '/w/app', '/w/app/sub': '/w/app' } })
+
+    // 插件重载：新写入器先读回旧对照再合并，不把之前见过的会话丢掉
+    const second = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') } })
+    await second.requestWorkspace('/w/app/pkg', '/w/app/pkg')
+    await second.requestWorkspace('/w/app/sub', '/w/app/sub')
+    expect((await readMap()).cwds).toEqual({ '/link/app': '/w/app', '/w/app/sub': '/w/app/sub', '/w/app/pkg': '/w/app/pkg' })
+  })
+
+  it('会话归属对照：磁盘上的旧文件读不懂（版本不对、坏 JSON）就从空表重来', async () => {
+    const mapPath = join(root, GUI_VIEW_DIR, GUI_WORKSPACE_MAP_FILE)
+    await mkdir(join(root, GUI_VIEW_DIR), { recursive: true })
+    await writeFile(mapPath, '{not json', 'utf8')
+    const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') } })
+    await writer.requestWorkspace('/w/app', '/w/app')
+    expect(workspaceMapViewSchema.parse(JSON.parse(await readFile(mapPath, 'utf8'))).cwds).toEqual({ '/w/app': '/w/app' })
   })
 
   it('会话视图：同一 tick 内同一会话多次写入合并为最后一份', async () => {

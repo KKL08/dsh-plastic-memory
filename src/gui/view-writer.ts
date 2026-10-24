@@ -1,4 +1,4 @@
-import { mkdir, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { MemoryStore, MemoryLogger } from '../store.ts'
 import type { KvTable } from '../kv-table.ts'
@@ -7,7 +7,10 @@ import type { PendingDecisionsStore } from '../governance/decisions.ts'
 import type { ScanCacheEntry } from '../governance/schema.ts'
 import type { LayerRef } from '../governance/layer-health.ts'
 import { checkupWorkspaces, listingNotes, prereadLayers } from '../tools/layer-preread.ts'
-import { GUI_VIEW_DIR, GUI_VIEW_FILES, sessionViewFile, type GlobalViewName, type SessionView } from './contract.ts'
+import {
+  GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, sessionViewFile, workspaceMapViewSchema,
+  type GlobalViewName, type SessionView, type WorkspaceMapView,
+} from './contract.ts'
 import { GLOBAL_VIEW_NAMES, buildGlobalViews, type GlobalViews } from './views.ts'
 
 export interface ViewSourceDeps {
@@ -52,6 +55,10 @@ export class ViewWriter {
   private readonly dir: string
   private readonly queued = new Set<GlobalViewName>()
   private readonly sessions = new Map<string, SessionView>()
+  /** 待写进归属对照的条目（原始 cwd → 项目）。 */
+  private readonly cwds = new Map<string, string>()
+  /** 已落盘的归属对照；首次写入前从磁盘读回（插件重载后接着记，不丢之前见过的会话）。 */
+  private workspaceMap: Record<string, string> | undefined
   private scheduled: Promise<void> | undefined
   private tail: Promise<void> = Promise.resolve()
   private readonly log: MemoryLogger
@@ -73,6 +80,13 @@ export class ViewWriter {
     return this.schedule()
   }
 
+  /** 记一笔会话归属（原始 cwd → 服务端解析出的项目）；和已落盘的一样就不写。 */
+  requestWorkspace(cwd: string, workspacePath: string): Promise<void> {
+    if (this.workspaceMap?.[cwd] === workspacePath && !this.cwds.has(cwd)) return Promise.resolve()
+    this.cwds.set(cwd, workspacePath)
+    return this.schedule()
+  }
+
   /** 全量重写入口：不等节流，排在进行中的写入之后立即收集并写出四个全局视图。 */
   rewriteAll(): Promise<void> {
     return this.enqueue(() => this.writeGlobal(GLOBAL_VIEW_NAMES))
@@ -83,10 +97,13 @@ export class ViewWriter {
       this.scheduled = undefined
       const views = [...this.queued]
       const sessions = [...this.sessions.values()]
+      const cwds = [...this.cwds]
       this.queued.clear()
       this.sessions.clear()
+      this.cwds.clear()
       if (views.length > 0) await this.writeGlobal(views)
       for (const s of sessions) await this.writeFile(sessionViewFile(s.sessionId), s)
+      if (cwds.length > 0) await this.writeWorkspaceMap(cwds)
     }))
     return this.scheduled
   }
@@ -100,6 +117,26 @@ export class ViewWriter {
   private async writeGlobal(names: readonly GlobalViewName[]): Promise<void> {
     const views = await this.opts.collect()
     for (const name of names) await this.writeFile(GUI_VIEW_FILES[name], views[name])
+  }
+
+  private async writeWorkspaceMap(entries: ReadonlyArray<readonly [string, string]>): Promise<void> {
+    const map = this.workspaceMap ?? await this.readWorkspaceMap()
+    const next = { ...map }
+    for (const [cwd, workspacePath] of entries) next[cwd] = workspacePath
+    if (entries.every(([cwd, workspacePath]) => map[cwd] === workspacePath)) { this.workspaceMap = next; return }
+    const view: WorkspaceMapView = { version: GUI_VIEW_VERSION, cwds: next }
+    await this.writeFile(GUI_WORKSPACE_MAP_FILE, view)
+    this.workspaceMap = next
+  }
+
+  /** 磁盘上的旧对照；没有、读不懂（坏 JSON、版本不对）都从空表开始。 */
+  private async readWorkspaceMap(): Promise<Record<string, string>> {
+    try {
+      const parsed = workspaceMapViewSchema.safeParse(JSON.parse(await readFile(join(this.dir, GUI_WORKSPACE_MAP_FILE), 'utf8')))
+      return parsed.success ? { ...parsed.data.cwds } : {}
+    } catch {
+      return {}
+    }
   }
 
   private async writeFile(fileName: string, view: unknown): Promise<void> {

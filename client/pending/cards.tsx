@@ -4,14 +4,14 @@
  */
 import { useState, type ReactNode } from 'react'
 import { CONFLICT_ACTION_VERDICTS, type GuiLayerRef, type MemoryCard as MemoryCardData, type PendingItem } from '../../src/gui/contract.ts'
-import { samePath, useGateway, type BorrowedSession } from '../gateway.ts'
+import { belongsTo, useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, formatNumber, useT, type Translate } from '../i18n.tsx'
 import { Button } from '../ui/Button.tsx'
 import { Chip } from '../ui/Chip.tsx'
 import { ConflictRuling, VerticalConflictRuling } from '../ui/ConflictRuling.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { StatusMarker } from '../ui/StatusMarker.tsx'
-import { ActionFeedback, useItemAction } from './action.tsx'
+import { ActionFeedback, SecretDeleteConfirm, useItemAction } from './action.tsx'
 
 type Item<K extends PendingItem['kind']> = Extract<PendingItem, { kind: K }>
 type Verdict = 'keep-left' | 'keep-right' | 'keep-both'
@@ -36,7 +36,7 @@ export interface CardProps<K extends PendingItem['kind']> {
 /** 记忆在别的项目里（相对借来的会话所在项目）时返回项目路径。 */
 function otherProject(memory: MemoryCardData | null, session: BorrowedSession): string | undefined {
   if (memory?.workspacePath === undefined) return undefined
-  return session.kind === 'ready' && samePath(memory.workspacePath, session.cwd) ? undefined : memory.workspacePath
+  return session.kind === 'ready' && belongsTo(session.cwd, memory.workspacePath, session.workspaces ?? {}) ? undefined : memory.workspacePath
 }
 
 /** 记忆文件全文 → 正文（去掉 frontmatter）。 */
@@ -47,9 +47,16 @@ export function bodyOf(text: string): string {
 
 const isMac = () => typeof navigator !== 'undefined' && /mac/i.test(navigator.platform)
 
-function Card({ marker, title, aside, children }: { marker?: ReactNode; title: ReactNode; aside?: ReactNode; children: ReactNode }) {
+/** focusable：结果卡可以接住焦点（tabIndex=-1），确认收起后原来的按钮没了就落在它上面。 */
+function Card({ marker, title, aside, focusable = false, children }: {
+  marker?: ReactNode
+  title: ReactNode
+  aside?: ReactNode
+  focusable?: boolean
+  children: ReactNode
+}) {
   return (
-    <article className="pm-pending-item">
+    <article className="pm-pending-item" tabIndex={focusable ? -1 : undefined}>
       <header className="pm-pending-head">
         {marker}
         <h3 className="pm-pending-title">{title}</h3>
@@ -97,16 +104,12 @@ export function SecretCard({ item, session, now, typeLabels, onDone }: CardProps
       <p className="pm-pending-text">{t('pending.secret.body')}</p>
       {confirming
         ? (
-          <div className="pm-pending-confirm" role="group" aria-label={t('pending.secret.confirmDelete')}>
-            <p className="pm-pending-text">{t('pending.secret.confirmBody')}</p>
-            <div className="pm-pending-actions">
-              {/* 默认焦点在「取消」：回车不会手滑删掉 */}
-              <Button autoFocus onClick={() => { setConfirming(false) }}>{t('pending.cancel')}</Button>
-              <Button variant="danger" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'hard-delete', memoryId: memory.id }) }}>
-                {t('pending.secret.confirmDelete')}
-              </Button>
-            </div>
-          </div>
+          <SecretDeleteConfirm
+            showTitle={false}
+            unavailable={action.unavailable}
+            onCancel={() => { setConfirming(false) }}
+            onConfirm={() => { action.run({ cmd: 'hard-delete', memoryId: memory.id }) }}
+          />
         )
         : (
           <div className="pm-pending-actions">
@@ -357,7 +360,7 @@ export function ResultCard({ item, outcome, session, now, typeLabels, onUndone }
   const copy = resultCopy(item, outcome, t)
   const chip = <Chip variant="result">{copy.chip}</Chip>
   return (
-    <Card title={titleOf(item, t)}>
+    <Card title={titleOf(item, t)} focusable>
       {copy.memory ? <MemoryOf memory={copy.memory} now={now} typeLabels={typeLabels} chip={chip} /> : <div>{chip}</div>}
       <div className="pm-pending-result">
         <p className="pm-pending-text">{copy.body}</p>

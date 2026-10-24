@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -34,7 +34,7 @@ import {
 } from '../src/governance/schema.ts'
 import { baselineProjectionDefinition } from '../src/governance/baseline.ts'
 import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
-import { GUI_VIEW_DIR, GUI_VIEW_FILES, sessionViewFile, sessionViewSchema } from '../src/gui/contract.ts'
+import { GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_FILE, sessionViewFile, sessionViewSchema, workspaceMapViewSchema } from '../src/gui/contract.ts'
 import { defaultJiebaLoader } from '../src/search/jieba-segmenter.ts'
 
 /** 宿主 storageDomain 表的替身（@deepseek-ai/dsh-storage-domain KvTable 的形状）：读同步、写异步。 */
@@ -299,6 +299,34 @@ describe('GUI 命令接线', () => {
     expect(forgot.body).toMatchObject({ ok: true, cmd: 'forget', memoryIds: ['mem_gone'] })
     const deleted = JSON.parse(await readFile(join(memoryRoot, '.state', 'gui', 'deleted.json'), 'utf8')) as { items: Array<{ memory: { id: string } }> }
     expect(deleted.items.map(i => i.memory.id)).toEqual(['mem_gone'])
+  })
+
+  it('会话归属对照：在会话里执行 /memory 命令时，记下原始 cwd → 服务端解析出的项目（软链接、子目录都按 realpath）', async () => {
+    const { memoryRoot, defs } = await withCommands()
+    const real = await makeTmpRoot()
+    await mkdir(join(real, 'sub'))
+    const link = join(await makeTmpRoot(), 'link')
+    await symlink(real, link)
+    const sub = join(link, 'sub')
+    await defs[0]!.handler({ rawInput: ' info', agent: { session: { header: { id: 'sess-sub', cwd: sub }, seq: 1 } } })
+    const file = join(memoryRoot, GUI_VIEW_DIR, GUI_WORKSPACE_MAP_FILE)
+    await vi.waitFor(async () => {
+      expect(workspaceMapViewSchema.parse(JSON.parse(await readFile(file, 'utf8'))).cwds).toEqual({ [sub]: await realpath(sub) })
+    })
+  })
+
+  it('会话归属对照：session/created 预热解析时也记下', async () => {
+    const memoryRoot = await makeTmpRoot()
+    const ctx = mockCtx({ commands: { register: () => () => {} } })
+    await apply({ ...ctx, logger: { info() {}, warn() {}, error() {} } } as never, new Config({ memoryRoot } as never))
+    const real = await makeTmpRoot()
+    const link = join(await makeTmpRoot(), 'link')
+    await symlink(real, link)
+    ctx.listeners.get('session/created')!({ header: { id: 'sess-link', cwd: link } })
+    const file = join(memoryRoot, GUI_VIEW_DIR, GUI_WORKSPACE_MAP_FILE)
+    await vi.waitFor(async () => {
+      expect(workspaceMapViewSchema.parse(JSON.parse(await readFile(file, 'utf8'))).cwds).toEqual({ [link]: await realpath(real) })
+    })
   })
 
   it('执行回调：未知子命令返回 error 与 invalid-args', async () => {
