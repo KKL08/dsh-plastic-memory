@@ -20,8 +20,9 @@ const LEAF_MODULES = new Set([
   'kv-table', 'record-schema', 'output', 'storage/paths', 'storage/table', 'types', 'gui/contract',
   'search/tokenizer',
 ])
+// search/ranking 与 store 同层：只 import 叶子，被执行器用；分词器留在叶子
 const MEMORY_MODULES = new Set([
-  'pipeline', 'store', 'snapshot', 'runtime', 'type-registry', 'evidence-guidance',
+  'pipeline', 'store', 'snapshot', 'runtime', 'type-registry', 'evidence-guidance', 'search/ranking',
 ])
 // 接线层：index.ts 与交给 ctx.storageDomain.open 的域定义（只被 index.ts 用）
 const ENTRY_MODULES = new Set(['index', 'domain-spec'])
