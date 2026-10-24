@@ -1,21 +1,22 @@
 /**
  * 插件设置页（plugins.bundle.config）：状态卡 + 三组设置「记什么 · 怎么用 · 怎么管」+ 保存行。
  * 插件名、简介、版本由宿主插件页的页头画（locale/*.json 的 meta 与 package.json 的 version），这里不重复。
- * 改动先暂存、点保存一次提交（useSettingsDraft）；体检关闭时依赖它的三项置灰保留，不隐藏。
+ * 改动先暂存，点保存先弹窗列出改了哪几项，确认后一次提交（useSettingsDraft）；体检关闭时依赖它的三项置灰保留，不隐藏。
  */
 import { useId, useState } from 'react'
 import { useGateway } from '../gateway.ts'
-import { useT } from '../i18n.tsx'
+import { useT, type Translate } from '../i18n.tsx'
+import type { LocaleKey } from '../locales.ts'
 import type { MemoryTab } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { Chip } from '../ui/Chip.tsx'
 import { SegmentedControl } from '../ui/Segmented.tsx'
 import { SettingsForm, SettingsGroupCard, SettingsItem } from '../ui/Settings.tsx'
 import {
-  EVIDENCE_LEVELS, OVERFLOW_MODES, PROMOTE_TARGETS, SENSITIVITIES, SENSITIVITY_NUMBERS, TEMPLATES, configuredRoot, parsePositiveInt,
-  type ConfigForm, type SettingsFields,
+  EVIDENCE_LEVELS, OVERFLOW_MODES, PROMOTE_TARGETS, SENSITIVITIES, SENSITIVITY_NUMBERS, TEMPLATES, configuredRoot, customTypeChanges,
+  droppedTypes, parsePositiveInt, type ConfigForm, type SettingsFields,
 } from './config.ts'
-import { Switch, TextField } from './controls.tsx'
+import { Dialog, Switch, TextField } from './controls.tsx'
 import { CustomTypeList } from './CustomTypes.tsx'
 import { StatusCard } from './StatusCard.tsx'
 import { useSettingsDraft } from './useSettingsDraft.ts'
@@ -34,12 +35,15 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
   const id = useId()
   const draft = useSettingsDraft(form)
   const { snapshot, fields: f, saved, edit } = draft
+  const [isConfirming, setConfirming] = useState(false)
   if (snapshot.status === 'loading') return <p className="pm-form-note" role="status">{t('settings.loading')}</p>
 
   const locked = !snapshot.writable || draft.saving
   const governanceOff = !f.governance
   const budgetInvalid = f.budget !== saved.budget && parsePositiveInt(f.budget) === undefined
   const sensitivity = SENSITIVITY_NUMBERS[f.sensitivity]
+  const templateHint = t(`settings.template.hint.${f.template}`)
+  const dropped = droppedTypes(saved.template, f.template)
 
   return (
     <div className="pm-settings">
@@ -49,15 +53,15 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
           available: snapshot.status === 'ready', writable: snapshot.writable, dirty: draft.dirty,
           invalid: draft.invalid, saving: draft.saving, failed: draft.outcome === 'failed',
         }}
-        onSave={() => { void draft.save() }}
+        onSave={() => { setConfirming(true) }}
         onDiscard={draft.discard}
       >
         <SettingsGroupCard title={t('settings.group.what')}>
           <SettingsItem
             label={t('settings.template.label')}
-            hint={f.template !== saved.template
-              ? t('settings.template.hintSwitched', { hint: t(`settings.template.hint.${f.template}`), switch: t('settings.template.switchHint') })
-              : t(`settings.template.hint.${f.template}`)}
+            hint={dropped.length > 0
+              ? t('settings.template.hintSwitched', { hint: templateHint, switch: t('settings.template.dropHint', { types: typeNames(t, dropped.map(n => t(`sidebar.type.${n}` as LocaleKey))) }) })
+              : templateHint}
           >
             <SegmentedControl
               id={`${id}-template`}
@@ -174,8 +178,72 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
           )
           : null}
       </SettingsForm>
+      {isConfirming
+        ? (
+          <Dialog
+            title={t('settings.confirm.title')}
+            closeLabel={t('settings.confirm.close')}
+            onClose={() => { setConfirming(false) }}
+            footer={(
+              <>
+                <Button onClick={() => { setConfirming(false) }}>{t('settings.confirm.cancel')}</Button>
+                <Button variant="primary" onClick={() => { setConfirming(false); void draft.save() }}>{t('settings.confirm.save')}</Button>
+              </>
+            )}
+          >
+            <ul className="pm-settings-changes">
+              {changeLines(t, saved, f, draft.changed).map(line => <li key={line}>{line}</li>)}
+            </ul>
+          </Dialog>
+        )
+        : null}
     </div>
   )
+}
+
+/** 一串类型名，加引号、按语言习惯连起来（中文「A」「B」，英文 “A”, “B”）。 */
+function typeNames(t: Translate, labels: readonly string[]): string {
+  return t('settings.typeOpen') + labels.join(t('settings.typeSep')) + t('settings.typeClose')
+}
+
+/** 确认弹窗的行，按页面上的顺序；值写成界面上的叫法。 */
+const FIELD_LABELS: Record<keyof SettingsFields, LocaleKey> = {
+  template: 'settings.template.label',
+  customTypes: 'settings.types.label',
+  budget: 'settings.budget.label',
+  overflow: 'settings.overflow.label',
+  evidence: 'settings.evidence.label',
+  governance: 'settings.governance.label',
+  sensitivity: 'settings.sensitivity.label',
+  promoteTarget: 'settings.target.label',
+}
+
+function valueText(t: Translate, key: Exclude<keyof SettingsFields, 'customTypes'>, fields: SettingsFields): string {
+  switch (key) {
+    case 'template': return t(`settings.template.${fields.template}`)
+    case 'budget': return String(parsePositiveInt(fields.budget) ?? fields.budget)
+    case 'overflow': return t(`settings.overflow.${fields.overflow}`)
+    case 'evidence': return t(`settings.evidence.${fields.evidence}`)
+    case 'governance': return t(fields.governance ? 'settings.confirm.on' : 'settings.confirm.off')
+    case 'sensitivity': return t(`settings.sensitivity.${fields.sensitivity}`)
+    case 'promoteTarget': return t(`settings.target.${fields.promoteTarget}`)
+  }
+}
+
+function changeLines(t: Translate, saved: SettingsFields, fields: SettingsFields, changed: ReadonlySet<keyof SettingsFields>): string[] {
+  return (Object.keys(FIELD_LABELS) as (keyof SettingsFields)[]).filter(key => changed.has(key)).map((key) => {
+    let change: string
+    if (key === 'customTypes') {
+      const parts = customTypeChanges(saved.customTypes, fields.customTypes)
+      change = (['added', 'edited', 'removed'] as const)
+        .filter(kind => parts[kind].length > 0)
+        .map(kind => t(`settings.confirm.${kind}`, { names: typeNames(t, parts[kind]) }))
+        .join(t('settings.confirm.partSep'))
+    } else {
+      change = t('settings.confirm.change', { from: valueText(t, key, saved), to: valueText(t, key, fields) })
+    }
+    return t('settings.confirm.item', { label: t(FIELD_LABELS[key]), change })
+  })
 }
 
 /**
@@ -203,6 +271,7 @@ function MemoryRoot({ configured }: { configured: string }) {
 export const settingsPageCss = `
 .pm-settings { display: flex; flex-direction: column; gap: 32px; }
 .pm-settings-note { margin: 16px 0 0; }
+.pm-settings-changes { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.6; color: var(--pm-text); }
 .pm-settings-conflict { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
 .pm-settings-conflict p { flex: 1; min-width: 0; margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text); }
 .pm-settings-root { display: flex; align-self: stretch; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }

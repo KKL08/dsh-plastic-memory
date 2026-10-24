@@ -20,6 +20,17 @@ export type { ConfigForm, ConfigFormSnapshot, ConfigPathOp } from '../host.ts'
 
 /** 场景模板，也是设置页分段控件的顺序：通用排第一（2026-10-25 用户定）。custom 在界面上叫「通用」。 */
 export const TEMPLATES = ['custom', 'coding', 'office'] as const
+/** 各模板在通用五类之外多出的类型（src/type-registry.ts TEMPLATES，tests/client-settings-mirror.spec.ts 守一致）。 */
+export const TEMPLATE_TYPES: Record<(typeof TEMPLATES)[number], readonly string[]> = {
+  custom: [],
+  coding: ['procedure'],
+  office: ['decision', 'commitment', 'person'],
+}
+
+/** 从 from 切到 to 后不再新增的类型：from 独有、to 没有的那几类。通用五类始终都在。 */
+export function droppedTypes(from: (typeof TEMPLATES)[number], to: (typeof TEMPLATES)[number]): string[] {
+  return TEMPLATE_TYPES[from].filter(name => !TEMPLATE_TYPES[to].includes(name))
+}
 export const OVERFLOW_MODES = ['relax', 'strict'] as const
 export const EVIDENCE_LEVELS = ['off', 'strict', 'active'] as const
 export const SENSITIVITIES = ['conservative', 'normal', 'proactive'] as const
@@ -143,6 +154,19 @@ export function buildOps(saved: SettingsFields, draft: SettingsFields): ConfigPa
     if (!(name in draft.customTypes)) ops.push({ op: 'unset', path: ['customTypes', name] })
   }
   return ops
+}
+
+/** 自定义类型的改动，按中文名汇总（保存确认弹窗用）：修改、新增取草稿里的名字，删除取已存的。 */
+export function customTypeChanges(saved: SettingsFields['customTypes'], draft: SettingsFields['customTypes']):
+  { added: string[]; edited: string[]; removed: string[] } {
+  const added: string[] = []
+  const edited: string[] = []
+  for (const [name, type] of Object.entries(draft)) {
+    if (!(name in saved)) added.push(type.label)
+    else if (!sameType(saved[name], type)) edited.push(type.label)
+  }
+  const removed = Object.entries(saved).filter(([name]) => !(name in draft)).map(([, type]) => type.label)
+  return { added, edited, removed }
 }
 
 // —— 自定义类型 ——
