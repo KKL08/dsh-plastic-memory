@@ -269,17 +269,21 @@ async function scanPass(
 /**
  * 提升候选入账：扫到的每个项目，把带 globalCandidate 的 active 记忆同步成 promote-candidate 条目（GUI 待处理读它）。
  * 只看规则数据、不调模型，所以 layers=rule 也做；只动本次扫到的项目，别的项目的条目等扫到它再说。
+ * 语义层可能跑几十秒，期间用户可能在 GUI 里点了「提升」或撤销，所以不用扫描开头预读的数据，写账本前按项目重读一次。
  */
 async function syncPromoteCandidates(
-  decisions: PendingDecisionsStore,
-  byId: ReadonlyMap<string, MemoryRecord>,
+  deps: Pick<ScanToolDeps, 'store' | 'decisions'>,
   workspaces: readonly string[],
   now: number,
 ): Promise<void> {
   for (const ws of workspaces) {
-    const own = [...byId.values()].filter(r => r.status === 'active' && r.scope === 'workspace' && r.workspacePath === ws)
-    const candidates = own.filter(r => r.globalCandidate).map(r => ({ id: r.id, summary: r.summary, fingerprint: candidateFingerprint(r) }))
-    await decisions.syncPromoteCandidates(ws, candidates, new Set(own.map(r => r.id)), now)
+    const fresh = await deps.store.readLayer({ kind: 'workspace', path: ws })
+    const own = new Map<string, MemoryRecord>()
+    for (const { record: r } of fresh.records) {
+      if (r.status === 'active' && r.scope === 'workspace' && r.workspacePath === ws && !own.has(r.id)) own.set(r.id, r)
+    }
+    const candidates = [...own.values()].filter(r => r.globalCandidate).map(r => ({ id: r.id, summary: r.summary, fingerprint: candidateFingerprint(r) }))
+    await deps.decisions.syncPromoteCandidates(ws, candidates, new Set(own.keys()), now)
   }
 }
 
@@ -363,7 +367,7 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
       notes.push({ code: 'baseline-session-scoped', text: `基线随当前会话，${baselineSkipped} 个其他 workspace 的垂直冲突检测已跳过` })
     }
     signal?.throwIfAborted()
-    await syncPromoteCandidates(deps.decisions, data.byId, wsList, now)
+    await syncPromoteCandidates(deps, wsList, now)
     const created = decisionItems.filter(i => i.isNew).length
     const existing = decisionItems.length - created
 
@@ -433,7 +437,7 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
   signal?.throwIfAborted()
   const pass = await scanPass(deps, data.byId, records, cacheKey(wsPath), wsPath ?? 'global', layerQuarantined(wsPath), layers, llm, passBaseline, now, signal)
   signal?.throwIfAborted()
-  if (wsPath !== undefined) await syncPromoteCandidates(deps.decisions, data.byId, [wsPath], now)
+  if (wsPath !== undefined) await syncPromoteCandidates(deps, [wsPath], now)
   const notes = [...pass.notes]
   if ((layers === 'semantic' || layers === 'full') && llm) {
     if (baseline === null) notes.push({ code: 'baseline-missing', text: '未检测到 AGENTS.md 基线，垂直冲突检测未执行' })

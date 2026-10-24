@@ -8,7 +8,7 @@ import type { RecallStats } from '../src/storage/schema.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { executeScan, cacheKey, renderScanResult, type ScanToolDeps, type ScanArgs, type SingleScanResult } from '../src/tools/scan.ts'
 import { GLOBAL_CACHE_KEY } from '../src/governance/layer-health.ts'
-import { SEMANTIC_SCAN_MAX_RECORDS } from '../src/governance/semantic-scan.ts'
+import { SEMANTIC_SCAN_MAX_RECORDS, type SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
@@ -604,6 +604,28 @@ describe('executeScan 提升候选入账', () => {
 
     await scanSingle({ layers: 'rule' }, deps)
     expect((await candidates(deps)).map(d => d.id)).toEqual([entry!.id])
+  })
+
+  it('语义层跑着的时候用户在 GUI 里点了「提升」：写账本前按项目重读，不拿扫描开头的旧数据把 promoted 反撤成未决', async () => {
+    const deps = atProj()
+    const rec = record({ id: 'mem_c', scope: 'workspace', workspacePath: '/proj', content: '用 pnpm', globalCandidate: true })
+    await deps.store.put(rec)
+    await deps.store.put(record({ id: 'mem_d', scope: 'workspace', workspacePath: '/proj', content: '用 npm' }))
+    await scanSingle({ layers: 'rule' }, deps)
+    const [entry] = await candidates(deps)
+
+    // 语义层调用期间：条目 settled 为 promoted、记忆变 global（commands.ts 的 promote 做的事）
+    const promoteMidScan: SemanticLlm = {
+      complete: async () => {
+        await deps.decisions.settle(entry!.id, 'promoted', 9500, { snapshotId: 'snap_x' })
+        const { globalCandidate: _flag, workspacePath, ...rest } = rec
+        await deps.store.put({ ...rest, scope: 'global' }, { workspacePath })
+        return '{"findings":[]}'
+      },
+    }
+    await scanSingle({}, makeDeps({ ...deps, getLlm: (_exec: unknown) => promoteMidScan }))
+    expect(await candidates(deps)).toEqual([])
+    expect((await settledCandidates(deps)).map(d => [d.id, d.settled?.verdict])).toEqual([[entry!.id, 'promoted']])
   })
 
   it('全库体检：每个项目的候选都入账；scopes 子集不动其他项目的条目', async () => {
