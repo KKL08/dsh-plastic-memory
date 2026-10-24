@@ -15,10 +15,10 @@ import { executeForget } from '../tools/forget.ts'
 import { executePromote } from '../tools/promote.ts'
 import { executeScan } from '../tools/scan.ts'
 import { executeSnapshotTool } from '../tools/snapshot.ts'
-import type { CrossWorkspaceRejection, GovernanceContext } from '../tools/workspace-gate.ts'
+import { isCopyOf, locateCopy, type CrossWorkspaceRejection, type GovernanceContext } from '../tools/workspace-gate.ts'
 import {
   GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, parseMemoryCommand, sessionViewFile,
-  type GuiErrorCode, type MemoryCommand, type MemoryCommandResult,
+  type GuiErrorCode, type GuiLayerRef, type MemoryCommand, type MemoryCommandResult,
 } from './contract.ts'
 import type { ViewWriter } from './view-writer.ts'
 
@@ -159,6 +159,9 @@ async function dispatch(
     return entry
   }
   const isErr = (v: unknown): v is Err => typeof v === 'object' && v !== null && 'ok' in v && v.ok === false
+  /** 命令带了层就只认那一份，否则按借来的会话定位（当前项目优先）。 */
+  const locate = (memoryId: string, layer: GuiLayerRef | undefined) =>
+    layer === undefined ? deps.store.get(memoryId, { workspacePath: gov.workspacePath }) : locateCopy(deps.store, memoryId, layer)
 
   switch (command.cmd) {
     case 'resolve': {
@@ -189,13 +192,18 @@ async function dispatch(
     case 'restore': {
       // 最近删除里的一条：被裁决删掉的走撤销那条路（按裁决的快照恢复，冲突回到待处理、沿用原条目）；
       // 其余按最近一份含它的快照恢复
-      const rec = await deps.store.get(command.memoryId, { workspacePath: gov.workspacePath })
-      if (!rec || rec.status !== 'deleted') return notFound(command.memoryId)
-      const entry = (await deps.decisions.listSettled()).filter(d => verdictLoser(d, d.settled!.verdict) === command.memoryId).at(-1)
-      const snapshotId = entry?.settled?.snapshotId
-        ?? (await deps.snapshots.list()).find(s => s.data.some(r => r.id === command.memoryId && !r.redacted))?.id
-      if (snapshotId === undefined) return fail(cmd, 'not-found', `没有覆盖 ${command.memoryId} 的快照（可能已超过保留窗口）`)
-      const r = await restoreFrom(snapshotId, [command.memoryId], command.allowCrossWorkspace)
+      const { memoryId, layer } = command
+      const rec = await locate(memoryId, layer)
+      if (!rec || rec.status !== 'deleted') return notFound(memoryId)
+      // 带了层时，裁决条目与快照都得覆盖那一份：同 id 别的副本的快照不拿来恢复它
+      const snapshots = await deps.snapshots.list()
+      const covers = (s: (typeof snapshots)[number] | undefined) =>
+        s?.data.some(r => r.id === memoryId && !r.redacted && (layer === undefined || isCopyOf(r, layer))) === true
+      const entry = (await deps.decisions.listSettled()).filter(d => verdictLoser(d, d.settled!.verdict) === memoryId
+        && (layer === undefined || covers(snapshots.find(s => s.id === d.settled!.snapshotId)))).at(-1)
+      const snapshotId = entry?.settled?.snapshotId ?? snapshots.find(covers)?.id
+      if (snapshotId === undefined) return fail(cmd, 'not-found', `没有覆盖 ${memoryId} 的快照（可能已超过保留窗口）`)
+      const r = await restoreFrom(snapshotId, [memoryId], command.allowCrossWorkspace)
       if (isErr(r)) return r
       if (entry) await deps.decisions.unsettle(entry.id)
       return { ok: true, cmd, memoryIds: r, snapshotId, ...(entry ? { decisionId: entry.id } : {}) }
@@ -233,20 +241,21 @@ async function dispatch(
 
     case 'forget':
     case 'hard-delete': {
-      const rec = await deps.store.get(command.memoryId, { workspacePath: gov.workspacePath })
-      if (command.cmd === 'hard-delete') {
+      const isHardDelete = command.cmd === 'hard-delete'
+      if (isHardDelete) {
         // 只给密钥条目用：不含密钥的记忆 forget 会软删，与「彻底删除」的承诺不符
+        const rec = await locate(command.memoryId, command.layer)
         if (!rec || rec.status === 'deleted') return notFound(command.memoryId)
         if (!hasSecret(rec)) return fail(cmd, 'failed', `记忆 ${command.memoryId} 不含密钥，彻底删除只用于密钥条目，未做任何改动`)
-      } else if (rec && rec.status !== 'deleted' && hasSecret(rec)) {
-        // forget 承诺 14 天可撤销，含密钥的记忆却只能物理删除：不动它，让界面先问用户再发 hard-delete
-        return fail(cmd, 'has-secret', `记忆 ${command.memoryId} 含密钥，删除后不可恢复，未做任何改动`)
       }
+      // forget 承诺 14 天可撤销，含密钥的记忆却只能物理删除：只软删，含密钥的由执行器在决定删不删的那次读里交回，
+      // 不动它，让界面先问用户再发 hard-delete
       const r = await executeForget(
-        { ids: [command.memoryId], reason: command.cmd === 'hard-delete' ? '用户在记忆页彻底删除密钥条目' : '用户在记忆页删除', allowCrossWorkspace: command.allowCrossWorkspace },
-        gov, executorDeps,
+        { ids: [command.memoryId], reason: isHardDelete ? '用户在记忆页彻底删除密钥条目' : '用户在记忆页删除', allowCrossWorkspace: command.allowCrossWorkspace },
+        gov, executorDeps, { isSoftOnly: !isHardDelete, ...(command.layer !== undefined ? { target: command.layer } : {}) },
       )
       if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
+      if ((r.skippedSecrets?.length ?? 0) > 0) return fail(cmd, 'has-secret', `记忆 ${command.memoryId} 含密钥，删除后不可恢复，未做任何改动`)
       if (!r.ok) return fail(cmd, 'not-found', r.message)
       return { ok: true, cmd, memoryIds: r.forgotten, ...(r.snapshotId !== null ? { snapshotId: r.snapshotId } : {}) }
     }

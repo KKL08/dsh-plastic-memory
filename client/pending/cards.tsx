@@ -3,7 +3,7 @@
  * 成功后把结果（Outcome）交给列表，由列表在原位换成结果卡。
  */
 import { useState, type ReactNode } from 'react'
-import { CONFLICT_ACTION_VERDICTS, type GuiLayerRef, type MemoryCard as MemoryCardData, type PendingItem } from '../../src/gui/contract.ts'
+import { CONFLICT_ACTION_VERDICTS, layerOfMemory, type GuiLayerRef, type MemoryCard as MemoryCardData, type PendingItem } from '../../src/gui/contract.ts'
 import { belongsTo, useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, formatNumber, useT, type Translate } from '../i18n.tsx'
 import { Button } from '../ui/Button.tsx'
@@ -108,7 +108,7 @@ export function SecretCard({ item, session, now, typeLabels, onDone }: CardProps
             showTitle={false}
             unavailable={action.unavailable}
             onCancel={() => { setConfirming(false) }}
-            onConfirm={() => { action.run({ cmd: 'hard-delete', memoryId: memory.id }) }}
+            onConfirm={() => { action.run({ cmd: 'hard-delete', memoryId: memory.id, layer: layerOfMemory(memory) }) }}
           />
         )
         : (

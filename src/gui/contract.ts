@@ -66,6 +66,12 @@ export const memoryCardSchema = z.object({
 })
 export type MemoryCard = z.infer<typeof memoryCardSchema>
 
+/** 记忆卡所在的层：同 id 在几个层里各有一份时，命令带上它指明页面上的那一份。项目记忆缺 workspacePath 时为 undefined（服务端按借来的会话定位）。 */
+export function layerOfMemory(memory: Pick<MemoryCard, 'scope' | 'workspacePath'>): GuiLayerRef | undefined {
+  if (memory.scope === 'global') return { kind: 'global' }
+  return memory.workspacePath === undefined ? undefined : { kind: 'workspace', workspacePath: memory.workspacePath }
+}
+
 // —— 待处理 ——
 
 export const PENDING_ITEM_KINDS = ['secret', 'conflict-horizontal', 'conflict-vertical', 'promote-candidate', 'overflow', 'unreadable-file'] as const
@@ -240,6 +246,8 @@ export type WorkspaceMapView = z.infer<typeof workspaceMapViewSchema>
 // —— 命令 ——
 
 const allowCrossWorkspace = z.boolean().optional()
+/** 目标记忆所在的层（见 layerOfMemory）：服务端只动这一份，跨项目门仍按借来的会话判定；缺省按借来的会话定位。 */
+const layer = layerRefSchema.optional()
 
 /** 宿主命令名（不带斜杠）。 */
 export const MEMORY_COMMAND_NAME = 'memory'
@@ -255,9 +263,9 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   z.object({ cmd: z.literal('undo'), decisionId: z.string(), allowCrossWorkspace }),
   z.object({ cmd: z.literal('promote'), decisionId: z.string(), target: z.enum(['global', 'agents-md']), allowCrossWorkspace }),
   z.object({ cmd: z.literal('keep-local'), decisionId: z.string(), allowCrossWorkspace }),
-  z.object({ cmd: z.literal('forget'), memoryId: z.string(), allowCrossWorkspace }),
-  z.object({ cmd: z.literal('restore'), memoryId: z.string(), allowCrossWorkspace }),
-  z.object({ cmd: z.literal('hard-delete'), memoryId: z.string(), allowCrossWorkspace }),
+  z.object({ cmd: z.literal('forget'), memoryId: z.string(), layer, allowCrossWorkspace }),
+  z.object({ cmd: z.literal('restore'), memoryId: z.string(), layer, allowCrossWorkspace }),
+  z.object({ cmd: z.literal('hard-delete'), memoryId: z.string(), layer, allowCrossWorkspace }),
   z.object({ cmd: z.literal('dismiss-overflow'), decisionId: z.string() }),
   z.object({ cmd: z.literal('scan'), workspacePath: z.string().optional() }),
   z.object({ cmd: z.literal('refresh-views') }),

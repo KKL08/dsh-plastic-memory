@@ -221,7 +221,7 @@ describe('待处理：密钥', () => {
     fireEvent.click(screen.getByRole('button', { name: '彻底删除' }))
     expect(await screen.findByText('如果它是真的凭证，记得去换一个新的。')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
-    expect(commands()).toEqual([{ cmd: 'hard-delete', memoryId: 's' }])
+    expect(commands()).toEqual([{ cmd: 'hard-delete', memoryId: 's', layer: { kind: 'workspace', workspacePath: '/w/app' } }])
   })
 })
 

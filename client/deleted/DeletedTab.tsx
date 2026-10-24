@@ -4,7 +4,7 @@
  * 密钥是物理删除，不在这里，空状态写明。
  */
 import { Fragment } from 'react'
-import type { DeletedView, GuiLayerRef, LibraryView } from '../../src/gui/contract.ts'
+import { layerOfMemory, type DeletedView, type GuiLayerRef, type LibraryView } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { formatDay, useT, type Translate } from '../i18n.tsx'
 import type { NavStore } from '../nav.ts'
@@ -95,7 +95,7 @@ export function DeletedTab({ nav, scope, session, now = Date.now() }: {
                   onClick={() => {
                     void actions.run(
                       memory.id,
-                      { cmd: 'restore', memoryId: memory.id },
+                      { cmd: 'restore', memoryId: memory.id, layer: layerOfMemory(memory) },
                       result => t(result.decisionId !== undefined ? 'deleted.restoredConflict' : 'deleted.restored'),
                     )
                   }}

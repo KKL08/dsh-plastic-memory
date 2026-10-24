@@ -6,7 +6,7 @@
  * 密钥不会出现在这里：记忆卡在 savedMemoryCard 里已遮盖，口径比视图宽（疑似密钥也遮，见 tool-summary.ts）。
  */
 import { useMemo, useState } from 'react'
-import type { GuiLayerRef } from '../../src/gui/contract.ts'
+import { layerOfMemory, type GuiLayerRef } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { useT } from '../i18n.tsx'
 import type { NavTarget } from '../nav.ts'
@@ -56,7 +56,7 @@ function SavedRow({ sessionId, item, now, deleted, typeLabel, onDetail }: {
     if (state.kind === 'busy') return
     const before = state
     setState({ kind: 'busy' })
-    const result = await gateway.execute(sessionId, { cmd, memoryId: id })
+    const result = await gateway.execute(sessionId, { cmd, memoryId: id, layer: layerOfMemory(item.memory) })
     if (result.ok) {
       if (cmd === 'restore') deleted.delete(id)
       else deleted.set(id, cmd === 'hard-delete' ? 'hard' : 'soft')

@@ -1,5 +1,6 @@
 import type { MemoryRecord } from '../record-schema.ts'
 import type { GovernanceRejectCode } from '../contract-codes.ts'
+import type { MemoryStore } from '../store.ts'
 
 /**
  * 跨 workspace 门（S2）：治理工具只在用户明确选择「全局整理」后才动其他项目的记录。
@@ -35,6 +36,22 @@ export const ALLOW_CROSS_WORKSPACE_PARAM = {
 
 export function isVisible(record: Pick<MemoryRecord, 'scope' | 'workspacePath'>, context: GovernanceContext): boolean {
   return record.scope === 'global' || (context.workspacePath !== undefined && record.workspacePath === context.workspacePath)
+}
+
+/** 同 id 在几个层里各有一份时指明哪一份：global 层或某个项目的层（GUI 按页面上那一份操作，结构同 GUI 契约的层引用）。 */
+export type CopyTarget = { kind: 'global' } | { kind: 'workspace'; workspacePath: string }
+
+export function isCopyOf(record: Pick<MemoryRecord, 'scope' | 'workspacePath'>, target: CopyTarget): boolean {
+  return target.kind === 'global' ? record.scope === 'global' : record.scope === 'workspace' && record.workspacePath === target.workspacePath
+}
+
+/**
+ * 按副本定位（含非 active）：提示给目标所在的项目，与写路径按记录自己的 workspace 定位同口径；
+ * 定位结果不是那一份（目标层没有这个 id，或同可见集合里别的副本更新）时当作没找到，不落到别的副本上。
+ */
+export async function locateCopy(store: Pick<MemoryStore, 'get'>, id: string, target: CopyTarget): Promise<MemoryRecord | undefined> {
+  const record = await store.get(id, { workspacePath: target.kind === 'workspace' ? target.workspacePath : undefined })
+  return record !== undefined && isCopyOf(record, target) ? record : undefined
 }
 
 /** 记录所属 workspace 的标签：global 记忆为 'global'（待决账本的 workspaces 字段同口径）。 */

@@ -10,6 +10,7 @@ import { LibraryTab } from './LibraryTab.tsx'
 import { FLASH_MS } from './shared.tsx'
 
 const app = { kind: 'workspace', workspacePath: '/w/app' } as const
+const blog = { kind: 'workspace', workspacePath: '/w/blog' } as const
 const session: BorrowedSession = { kind: 'ready', sessionId: 's1', cwd: '/w/app' }
 
 function library(patch: Partial<LibraryView> = {}): LibraryView {
@@ -89,7 +90,7 @@ describe('全部记忆', () => {
     const nav = createNavStore({ tab: 'library' })
     renderInShell(<LibraryTab nav={nav} scope={app} session={session} now={NOW} />, gateway)
     await act(async () => { fireEvent.click(within(rowOf('提交前跑 typecheck')).getByRole('button', { name: '删除' })) })
-    expect(gateway.executed).toEqual([{ sessionId: 's1', command: { cmd: 'forget', memoryId: 'a2' } }])
+    expect(gateway.executed).toEqual([{ sessionId: 's1', command: { cmd: 'forget', memoryId: 'a2', layer: app } }])
     expect(screen.getByRole('status')).toHaveTextContent('已删除，14 天内可在「最近删除」恢复。')
     fireEvent.click(screen.getByRole('button', { name: '去最近删除 ›' }))
     expect(nav.get()).toEqual({ tab: 'deleted', memoryId: 'a2' })
@@ -115,9 +116,9 @@ describe('全部记忆', () => {
     await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '删除' })) })
     await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '彻底删除' })) })
     expect(gateway.executed.map(e => e.command)).toEqual([
-      { cmd: 'forget', memoryId: 'a2' },
-      { cmd: 'forget', memoryId: 'a2' },
-      { cmd: 'hard-delete', memoryId: 'a2' },
+      { cmd: 'forget', memoryId: 'a2', layer: app },
+      { cmd: 'forget', memoryId: 'a2', layer: app },
+      { cmd: 'hard-delete', memoryId: 'a2', layer: app },
     ])
     expect(screen.queryByText('彻底删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeNull()
     expect(screen.getByRole('status')).toHaveTextContent('已彻底删除。如果它是真的凭证，记得去换一个新的。')
@@ -134,15 +135,15 @@ describe('全部记忆', () => {
     })
     renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'workspace', workspacePath: '/w/blog' }} session={session} now={NOW} />, gateway)
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除' })) })
-    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'b1' }])
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'b1', layer: blog }])
     expect(screen.getByText('这条记忆属于 blog 项目，不是当前项目。确定在这里处理它吗？')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '删除' })).toHaveAttribute('aria-disabled', 'true')
     expect(screen.queryByRole('status')).toBeNull()
 
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '继续处理' })) })
     expect(gateway.executed.map(e => e.command)).toEqual([
-      { cmd: 'forget', memoryId: 'b1' },
-      { cmd: 'forget', memoryId: 'b1', allowCrossWorkspace: true },
+      { cmd: 'forget', memoryId: 'b1', layer: blog },
+      { cmd: 'forget', memoryId: 'b1', layer: blog, allowCrossWorkspace: true },
     ])
     expect(screen.queryByText(/属于 blog 项目/)).toBeNull()
     expect(screen.getByRole('status')).toHaveTextContent('没有成功：记忆 b1 不存在')
@@ -163,13 +164,34 @@ describe('全部记忆', () => {
     expect(screen.getByText('这条记忆属于 blog 项目，不是当前项目。确定在这里处理它吗？')).toBeInTheDocument()
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '继续处理' })) })
     expect(gateway.executed.map(e => e.command)).toEqual([
-      { cmd: 'forget', memoryId: 'b1' },
-      { cmd: 'hard-delete', memoryId: 'b1' },
-      { cmd: 'hard-delete', memoryId: 'b1', allowCrossWorkspace: true },
+      { cmd: 'forget', memoryId: 'b1', layer: blog },
+      { cmd: 'hard-delete', memoryId: 'b1', layer: blog },
+      { cmd: 'hard-delete', memoryId: 'b1', layer: blog, allowCrossWorkspace: true },
     ])
     expect(screen.getByRole('status')).toHaveTextContent('已彻底删除。如果它是真的凭证，记得去换一个新的。')
     expect(screen.queryByText(/14 天/)).toBeNull()
     expect(screen.queryByRole('button', { name: '去最近删除 ›' })).toBeNull()
+  })
+
+  it('别的项目里含密钥的记忆，先确认了跨项目：彻底删除沿用那条命令的层与 allowCrossWorkspace，不再问一次', async () => {
+    const gateway = createFakeGateway({
+      views: { library: library() },
+      respond: command => !('allowCrossWorkspace' in command && command.allowCrossWorkspace === true)
+        ? { ok: false, cmd: command.cmd, code: 'cross-workspace', rejected: [{ id: 'b1', workspacePath: '/w/blog' }] }
+        : command.cmd === 'forget'
+          ? { ok: false, cmd: command.cmd, code: 'has-secret' }
+          : { ok: true, cmd: command.cmd, memoryIds: ['b1'] },
+    })
+    renderInShell(<LibraryTab nav={createNavStore()} scope={blog} session={session} now={NOW} />, gateway)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '继续处理' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '彻底删除' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([
+      { cmd: 'forget', memoryId: 'b1', layer: blog },
+      { cmd: 'forget', memoryId: 'b1', layer: blog, allowCrossWorkspace: true },
+      { cmd: 'hard-delete', memoryId: 'b1', layer: blog, allowCrossWorkspace: true },
+    ])
+    expect(screen.getByRole('status')).toHaveTextContent('已彻底删除。如果它是真的凭证，记得去换一个新的。')
   })
 
   it('空状态：一条记忆都没有是首次空态「还没有记忆」；只是这一层空是日常空态', () => {

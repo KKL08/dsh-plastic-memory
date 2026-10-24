@@ -11,6 +11,7 @@ import { ARCHIVE_DIR, GLOBAL_DIR, deriveFileId, isReservedFileName, slugifyName,
 import { InMemoryBatchKvTable, type BatchKvTable } from './kv-table.ts'
 import type { RecallStats } from './storage/schema.ts'
 import { RETENTION_MS } from './retention.ts'
+import { hasSecret } from './secrets.ts'
 
 export type { MemoryLogger, MemoryTable, KeywordMatch } from './storage/table.ts'
 
@@ -243,6 +244,17 @@ export class MemoryStore {
       throw err
     }
     return true
+  }
+
+  /**
+   * 只软删（GUI 的 forget）：锁内看到的当前内容含密钥就不动它、回 has-secret，由调用方先问用户；
+   * 调用方读过之后另一个会话才写进的密钥也拦得住。定位同 softDelete。
+   */
+  async softDeleteUnlessSecret(record: Pick<MemoryRecord, 'id' | 'workspacePath'>): Promise<'deleted' | 'has-secret' | 'missing'> {
+    const hint = { workspacePath: record.workspacePath }
+    if (!(await this.table.locate(record.id, hint))) return 'missing'
+    const written = await this.table.update(record.id, r => (hasSecret(r) ? r : { ...r, status: 'deleted', updatedAt: Date.now() }), hint)
+    return written.status === 'deleted' ? 'deleted' : 'has-secret'
   }
 
   /** scope → 目录。缺省读全部目录（global + 全部有标记的 workspace 目录）。 */

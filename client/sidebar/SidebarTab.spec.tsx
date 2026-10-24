@@ -149,7 +149,7 @@ describe('SidebarTab 这次对话新记的', () => {
     const saved = within(screen.getByRole('region', { name: '这次对话新记的' }))
     expect(saved.getByText('报销截止每月 25 日。')).toBeInTheDocument()
     await act(async () => { fireEvent.click(saved.getByRole('button', { name: '删除这条记忆' })) })
-    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'n1' }])
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'n1', layer: { kind: 'workspace', workspacePath: WS } }])
     expect(screen.queryByText('报销截止每月 25 日。')).toBeNull()
   })
 
@@ -170,9 +170,9 @@ describe('SidebarTab 这次对话新记的', () => {
     await act(async () => { fireEvent.click(saved.getByRole('button', { name: '删除这条记忆' })) })
     await act(async () => { fireEvent.click(saved.getByRole('button', { name: '彻底删除' })) })
     expect(gateway.executed.map(e => e.command)).toEqual([
-      { cmd: 'forget', memoryId: 'n1' },
-      { cmd: 'forget', memoryId: 'n1' },
-      { cmd: 'hard-delete', memoryId: 'n1' },
+      { cmd: 'forget', memoryId: 'n1', layer: { kind: 'workspace', workspacePath: WS } },
+      { cmd: 'forget', memoryId: 'n1', layer: { kind: 'workspace', workspacePath: WS } },
+      { cmd: 'hard-delete', memoryId: 'n1', layer: { kind: 'workspace', workspacePath: WS } },
     ])
     expect(saved.queryByText('报销截止每月 25 日。')).toBeNull()
     expect(saved.getByText('已彻底删除。如果它是真的凭证，记得去换一个新的。')).toBeInTheDocument()
