@@ -36,6 +36,8 @@ export interface ViewInput {
   listingNotes: readonly DirectoryNote[]
   /** 体检开关的当前值。 */
   governanceEnabled: boolean
+  /** 插件本次加载的时刻；缺省不写进视图。 */
+  bootedAt?: number
 }
 
 export type GlobalViews = { pending: PendingView; health: HealthView; library: LibraryView; deleted: DeletedView }
@@ -143,6 +145,7 @@ export function buildHealthView(input: ViewInput): HealthView {
   return {
     version: GUI_VIEW_VERSION,
     governanceEnabled: input.governanceEnabled,
+    ...(input.bootedAt !== undefined ? { bootedAt: input.bootedAt } : {}),
     layers: input.healthLayers.map(layer => {
       const r = scoreLayer({ registry: input.registry }, input.data, layer, input.now)
       return {

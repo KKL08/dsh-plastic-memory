@@ -98,6 +98,8 @@ export const inject = ['tools', 'systemPrompt']
 type SessionLike = object & { header?: { id?: string; cwd?: string } }
 
 export async function apply(ctx: Context, config: Config) {
+  // 插件本次加载的时刻：健康视图带给浏览器半侧，判断冻结快照是否早于这次启动
+  const bootedAt = Date.now()
   // 类型表随 template / customTypes 热更新重建；各处拿到的是转发到当前表的同一个对象
   const buildRegistry = () => buildTypeRegistry({ template: config.template.get(), customTypes: config.customTypes.get() })
   let currentRegistry = buildRegistry() // 重名内置类型在这里抛错，加载即失败
@@ -409,7 +411,7 @@ export async function apply(ctx: Context, config: Config) {
     const writer = new ViewWriter({
       memoryRoot, log: ctx.logger,
       collect: () => collectGlobalViews({
-        store, decisions, cache: scanCache, registry, memoryRoot, isGovernanceEnabled: () => config.governance.enabled.get(),
+        store, decisions, cache: scanCache, registry, memoryRoot, isGovernanceEnabled: () => config.governance.enabled.get(), bootedAt,
       }),
     })
     views = writer

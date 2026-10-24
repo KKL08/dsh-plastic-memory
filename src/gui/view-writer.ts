@@ -19,6 +19,8 @@ export interface ViewSourceDeps {
   now?: () => number
   /** 体检开关（用时读配置）；缺省视为开启。 */
   isGovernanceEnabled?: () => boolean
+  /** 插件本次加载的时刻，写进健康视图（契约 bootedAt）。 */
+  bootedAt?: number
 }
 
 /**
@@ -37,6 +39,7 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
     now, memoryRoot: deps.memoryRoot, registry: deps.registry, data, readLayers, healthLayers, open, settled,
     listingNotes: listingNotes(listing, { includeEmpty: false }),
     governanceEnabled: deps.isGovernanceEnabled?.() ?? true,
+    ...(deps.bootedAt !== undefined ? { bootedAt: deps.bootedAt } : {}),
   })
 }
 

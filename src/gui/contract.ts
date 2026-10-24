@@ -142,6 +142,8 @@ export const healthViewSchema = z.object({
   version,
   /** 体检开关（governance.enabled）：关闭时界面置灰健康内容、「体检当前项目」不可用。 */
   governanceEnabled: z.boolean(),
+  /** 插件本次加载的时刻（epoch ms）：会话快照的 frozenAt 早于它就是「重启后未重新带入」；浏览器半侧拿不到宿主进程时间，从这里读。 */
+  bootedAt: z.number().optional(),
   layers: z.array(healthLayerSchema),
 })
 export type HealthView = z.infer<typeof healthViewSchema>

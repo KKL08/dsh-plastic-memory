@@ -241,6 +241,13 @@ describe('健康视图', () => {
     expect(off.health.governanceEnabled).toBe(false)
     expect(off.health.layers.map(l => l.layer.kind)).toEqual(['global', 'workspace'])
   })
+  it('带插件启动时刻：给了就写进健康视图（右侧栏据此判断冻结快照是否在重启前），不给就不出现', async () => {
+    const h = harness()
+    const withBoot = await collectGlobalViews({ ...h.sourceDeps, bootedAt: 1_700_000_000_000 })
+    expect(healthViewSchema.parse(withBoot.health)).toEqual(withBoot.health)
+    expect(withBoot.health.bootedAt).toBe(1_700_000_000_000)
+    expect((await h.views()).health).not.toHaveProperty('bootedAt')
+  })
 })
 
 describe('会话视图', () => {
