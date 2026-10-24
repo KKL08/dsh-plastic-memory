@@ -17,7 +17,7 @@ import { ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../src/gui/commands.ts'
 import {
   GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, encodeMemoryCommand, sessionViewFile,
-  deletedViewSchema, memoryCommandResultSchema, pendingViewSchema,
+  deletedViewSchema, libraryViewSchema, memoryCommandResultSchema, pendingViewSchema,
   type MemoryCommand, type MemoryCommandResult,
 } from '../src/gui/contract.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
@@ -420,10 +420,16 @@ describe('同 id 在本项目和全局各有一份、全局那份更新', () => 
   const layerCopy = async (e: ReturnType<typeof env>, ws: string | undefined) =>
     (await e.store.readLayer(ws === undefined ? { kind: 'global' } : { kind: 'workspace', path: ws }, { includeArchive: true }))
       .records.find(l => l.record.id === 'mem_dup')?.record
-  const seed = async (e: ReturnType<typeof env>, content = '内容') => {
+  const seed = async (e: ReturnType<typeof env>, content = '内容', globalUpdatedAt = newer) => {
     // 先建项目那份：写全局那份只清全局目录里的同 id 副本
     await e.store.create(record({ id: 'mem_dup', name: '本项目那份', content, scope: 'workspace', workspacePath: SESSION_WS }))
-    await e.store.create(record({ id: 'mem_dup', name: '全局那份', content, updatedAt: newer }))
+    await e.store.create(record({ id: 'mem_dup', name: '全局那份', content, updatedAt: globalUpdatedAt }))
+  }
+  /** 全局那份还活着，且全部记忆视图的全局层照样列着它（用户没点它，不能跟着没了）。 */
+  const expectGlobalLive = async (e: ReturnType<typeof env>) => {
+    expect(await layerCopy(e, undefined)).toMatchObject({ name: '全局那份', status: 'active' })
+    const library = libraryViewSchema.parse(await e.readView('library'))
+    expect(library.layers.find(l => l.layer.kind === 'global')!.items.map(i => i.id)).toContain('mem_dup')
   }
 
   it('forget 带本项目的层：软删本项目那份', async () => {
@@ -431,6 +437,7 @@ describe('同 id 在本项目和全局各有一份、全局那份更新', () => 
     await seed(e)
     ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: own }))
     expect((await layerCopy(e, SESSION_WS))!.status).toBe('deleted')
+    await expectGlobalLive(e)
   })
 
   it('restore 带本项目的层：恢复本项目那份，不拿更新的全局副本比对或覆盖', async () => {
@@ -441,6 +448,7 @@ describe('同 id 在本项目和全局各有一份、全局那份更新', () => 
     const restored = ok(await e.run({ cmd: 'restore', memoryId: 'mem_dup', layer: own }))
     expect(restored.memoryIds).toEqual(['mem_dup'])
     expect(await layerCopy(e, SESSION_WS)).toMatchObject({ name: '本项目那份', status: 'active' })
+    await expectGlobalLive(e)
   })
 
   it('hard-delete 带本项目的层：物理删除本项目那份', async () => {
@@ -448,6 +456,7 @@ describe('同 id 在本项目和全局各有一份、全局那份更新', () => 
     await seed(e, `token ${FAKE_SECRET.sk}`)
     ok(await e.run({ cmd: 'hard-delete', memoryId: 'mem_dup', layer: own }))
     expect(await layerCopy(e, SESSION_WS)).toBeUndefined()
+    await expectGlobalLive(e)
   })
 
   it('不带层时照旧按会话定位：取到更新的全局那份', async () => {
@@ -456,6 +465,14 @@ describe('同 id 在本项目和全局各有一份、全局那份更新', () => 
     ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup' }))
     expect((await layerCopy(e, undefined))!.status).toBe('deleted')
     expect((await layerCopy(e, SESSION_WS))!.status).toBe('active')
+  })
+
+  it('不带层时可见集合去重照旧：删本项目那份（同龄时本项目优先），全局的同 id 副本一并清掉', async () => {
+    const e = env()
+    await seed(e, '内容', 1)
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup' }))
+    expect((await layerCopy(e, SESSION_WS))!.status).toBe('deleted')
+    expect(await layerCopy(e, undefined)).toBeUndefined()
   })
 })
 

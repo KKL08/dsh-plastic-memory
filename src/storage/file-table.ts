@@ -404,9 +404,9 @@ export class FileTable implements MemoryTable {
     try { return (await readFile(slot.filePath, 'utf8')) === slot.raw } catch { return false }
   }
 
-  /** 写该 id 之后清掉可见集合（global + 该记录所在目录，含各自 .archive/）里的其余副本；其他项目的副本不动（ARCHITECTURE.md ⑥-6d）。 */
-  private async removeOtherCopies(id: string, keepPath: string, dir: string): Promise<void> {
-    const { scopeDirs } = await this.resolveDirs([...new Set([this.globalDir, dir])])
+  /** 写该 id 之后清掉可见集合（global + 该记录所在目录，含各自 .archive/）里的其余副本；其他项目的副本不动（ARCHITECTURE.md ⑥-6d）；只认层的写只清该目录。 */
+  private async removeOtherCopies(id: string, keepPath: string, dir: string, isExactLayer: boolean): Promise<void> {
+    const { scopeDirs } = await this.resolveDirs(isExactLayer ? [dir] : [...new Set([this.globalDir, dir])])
     for (const copy of await this.scanForId(id, scopeDirs)) {
       if (copy.filePath.toLowerCase() !== keepPath.toLowerCase()) await rm(copy.filePath, { force: true })
     }
@@ -531,7 +531,7 @@ export class FileTable implements MemoryTable {
    * tmp + rename 覆盖，否则排他占名 → 搬家删旧 → 清可见集合里该 id 的其余副本 → 本目录（搬家时两个）维护点。返回实际写出的记录。
    * 覆盖、占名、删旧之前都复核 prev 的原文，变了抛 StaleReadError（占名后才发现的先撤回新文件），由调用方重来。
    */
-  private async persist(key: string, prev: Slot | undefined, value: MemoryRecord): Promise<MemoryRecord> {
+  private async persist(key: string, prev: Slot | undefined, value: MemoryRecord, isExactLayer = false): Promise<MemoryRecord> {
     const next = value.status === 'deleted' && value.deletedAt === undefined ? { ...value, deletedAt: this.now() } : value
     const volatileChanged = !prev || !this.volatileEqual(prev.record, next)
     const stableChanged = !prev || !this.stableEqual(prev.record, next)
@@ -566,7 +566,7 @@ export class FileTable implements MemoryTable {
           await rm(prev.filePath, { force: true })
         }
       }
-      await this.removeOtherCopies(key, filePath, dir)
+      await this.removeOtherCopies(key, filePath, dir, isExactLayer)
       await this.maintainDirs(moved ? [dir, prev!.dir] : [dir])
     }
     if (volatileChanged) {
@@ -600,7 +600,7 @@ export class FileTable implements MemoryTable {
       const next = prev
         ? { ...value, recallCount: prev.record.recallCount, lastRecalledAt: prev.record.lastRecalledAt }
         : value
-      await this.persist(key, prev, next)
+      await this.persist(key, prev, next, hint.isExactLayer === true)
       return true
     }))
   }
@@ -609,7 +609,7 @@ export class FileTable implements MemoryTable {
     // 锁内重读磁盘：外部编辑不丢；写盘前又被改就在新内容上重算 fn
     return this.locked(() => this.withFreshLocate(key, hint, async current => {
       if (!current) throw new RecordNotFoundError(key)
-      return this.persist(key, current, fn(current.record))
+      return this.persist(key, current, fn(current.record), hint?.isExactLayer === true)
     }))
   }
 
@@ -618,8 +618,9 @@ export class FileTable implements MemoryTable {
       const slot = await this.locate(key, hint)
       if (!slot) return false
       await rm(slot.filePath, { force: true })
-      // 密钥硬删的承诺是「可见集合里再没有它」：global 与该记录目录里同 id 的其余副本（含 .archive/）一并物理删除
-      await this.removeOtherCopies(key, slot.filePath, slot.dir)
+      // 密钥硬删的承诺是「可见集合里再没有它」：global 与该记录目录里同 id 的其余副本（含 .archive/）一并物理删除；
+      // 只认层时只删该目录里的，别层的同 id 副本是另一张卡
+      await this.removeOtherCopies(key, slot.filePath, slot.dir, hint?.isExactLayer === true)
       await this.opts.stats.delete(key)
       await this.maintainDirs([...new Set([slot.dir, this.globalDir])])
       return true

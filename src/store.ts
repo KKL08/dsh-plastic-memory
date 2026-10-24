@@ -101,8 +101,8 @@ export class InMemoryTable implements MemoryTable {
   }
 
   /** 落槽位（与 FileTable.persist 同规则）：status 离开 active 进 .archive/（deleted 缺 deletedAt 补 now）；目录、层、slug 都没变
-   *  就留在原路径，否则在目标层重新取名；落下后清掉可见集合（global + 该记录的目录）里同 id 的其余副本。返回实际落下的记录。 */
-  private place(prev: LocatedFile | undefined, value: MemoryRecord): MemoryRecord {
+   *  就留在原路径，否则在目标层重新取名；落下后清掉可见集合（global + 该记录的目录）里同 id 的其余副本，只认层时只清该目录。返回实际落下的记录。 */
+  private place(prev: LocatedFile | undefined, value: MemoryRecord, isExactLayer = false): MemoryRecord {
     const next = value.status === 'deleted' && value.deletedAt === undefined ? { ...value, deletedAt: Date.now() } : value
     if (prev) this.slots.delete(prev.filePath)
     const sameLocation = prev !== undefined && prev.record.scope === next.scope && prev.record.workspacePath === next.workspacePath
@@ -112,7 +112,7 @@ export class InMemoryTable implements MemoryTable {
     const inPlace = prev !== undefined && sameLocation && !renamed && dirname(prev.filePath) === level
     const filePath = inPlace ? prev.filePath : this.pathFor(next, level)
     for (const s of this.slots.values()) {
-      if (s.record.id === next.id && s.filePath !== filePath && (s.dir === this.globalDir || s.dir === dir)) this.slots.delete(s.filePath)
+      if (s.record.id === next.id && s.filePath !== filePath && ((!isExactLayer && s.dir === this.globalDir) || s.dir === dir)) this.slots.delete(s.filePath)
     }
     this.slots.set(filePath, { record: next, extras: prev?.extras ?? {}, filePath, dir })
     return next
@@ -145,20 +145,20 @@ export class InMemoryTable implements MemoryTable {
     // 与 FileTable 同语义：put 不承载召回统计（召回统计住侧表，由 MemoryStore.markRecalled 写）
     const prev = await this.locate(key, hint)
     if (prev !== undefined && skipIf?.(prev.record)) return false
-    this.place(prev, prev ? { ...value, recallCount: prev.record.recallCount, lastRecalledAt: prev.record.lastRecalledAt } : value)
+    this.place(prev, prev ? { ...value, recallCount: prev.record.recallCount, lastRecalledAt: prev.record.lastRecalledAt } : value, hint.isExactLayer === true)
     return true
   }
   async update(key: string, fn: (c: MemoryRecord) => MemoryRecord, hint?: LocateHint) {
     const current = await this.locate(key, hint)
     if (!current) throw new RecordNotFoundError(key)
-    return this.place(current, fn(current.record))
+    return this.place(current, fn(current.record), hint?.isExactLayer === true)
   }
   async delete(key: string, hint?: LocateHint) {
     const current = await this.locate(key, hint)
     if (!current) return false
-    // 与 FileTable 同语义：可见集合（global + 该记录目录）里同 id 的其余副本一并删除
+    // 与 FileTable 同语义：可见集合（global + 该记录目录）里同 id 的其余副本一并删除；只认层时只删该目录里的
     for (const s of this.slots.values()) {
-      if (s.record.id === key && (s.dir === this.globalDir || s.dir === current.dir)) this.slots.delete(s.filePath)
+      if (s.record.id === key && ((hint?.isExactLayer !== true && s.dir === this.globalDir) || s.dir === current.dir)) this.slots.delete(s.filePath)
     }
     return true
   }
