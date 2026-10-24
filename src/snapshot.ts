@@ -4,6 +4,7 @@ import { sourceNote, formatIndexLine } from './index-line.ts'
 import { workspaceDirName, GLOBAL_DIR, INDEX_FILE, ARCHIVE_DIR } from './storage/paths.ts'
 import { EVIDENCE_GUIDANCE, type EvidenceLookupLevel } from './evidence-guidance.ts'
 import { stalenessNote, withinValidity } from './record-freshness.ts'
+import { maskSecrets, maskSecretSurface } from './secrets.ts'
 
 export const COLD_START_TEXT = `记忆库当前为空。如果时机合适，可以问一句用户是否愿意介绍自己的背景（角色、常用技术、工作习惯），愿意就用 memory_save 记下来；不愿意就在后续任务中自然积累，不要追问。`
 
@@ -82,7 +83,16 @@ export function assembleSnapshot(deps: {
     const broken = deps.quarantinedCount ?? 0
     return { text: broken > 0 ? coldStartUnparseableText(broken) : COLD_START_TEXT, coreIds: [] }
   }
-  const all = visible.filter(r => withinValidity(r, now))
+  // 疑似密钥不跳过、不加提示：四个面只把命中片段遮成占位，整条照常注入（id 不动，coreIds 与文件路径照常对应）
+  const valid = visible.filter(r => withinValidity(r, now))
+  const all = valid.map(maskSecretSurface)
+  // 文件名由 name 派生，slug 只换分隔符，name 被遮了路径里多半还留着同一段密钥：这条不给路径，看全文走 memory_search。
+  // 手起名的文件名可能自带密钥，路径本身也遮一遍。
+  const files = new Map<string, string>()
+  valid.forEach((r, i) => {
+    const file = deps.files?.get(r.id)
+    if (file !== undefined && all[i].name === r.name) files.set(r.id, maskSecrets(file))
+  })
   // 完整索引入口：只透 global + 当前项目两处（跨项目隔离，见下方磁盘路径尾注）
   const indexPaths = deps.memoryRoot === undefined ? [] : [
     `${deps.memoryRoot}/${GLOBAL_DIR}/${INDEX_FILE}`,
@@ -137,7 +147,7 @@ export function assembleSnapshot(deps: {
     const groupLines = [`\n## ${def.label}（${type}）`]
     let groupCost = estimateTokens(groupLines[0])
     for (const r of sorted) {
-      const line = formatIndexLine(r, { passive: def.recall === 'passive', file: deps.files?.get(r.id), note: stalenessNote(r, def.decayDays, now) })
+      const line = formatIndexLine(r, { passive: def.recall === 'passive', file: files.get(r.id), note: stalenessNote(r, def.decayDays, now) })
       const cost = estimateTokens(line)
       if (used + groupCost + cost > deps.budget) { exhausted = true; break }
       groupLines.push(line)

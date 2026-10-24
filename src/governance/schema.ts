@@ -14,6 +14,13 @@ export const pendingDecisionSchema = z.object({
   firstSeenAt: z.number(),
   /** 与 memoryIds 一一对应的所属 workspace 路径，global 记忆为 'global'。旧条目没有此字段。 */
   workspaces: z.array(z.string()).optional(),
+  /** 最近一次扫描时冲突双方的内容指纹（垂直冲突含基线），见 conflictFingerprint。旧条目没有此字段。 */
+  fingerprint: z.string().optional(),
+  /** 用户裁决为两边都留（keep-both / dismiss / 垂直 keep-left）：条目留作记录，指纹不变就不再报。 */
+  settled: z.object({
+    verdict: z.enum(['keep-both', 'dismiss', 'keep-left']),
+    at: z.number(),
+  }).optional(),
 })
 export type PendingDecision = z.infer<typeof pendingDecisionSchema>
 

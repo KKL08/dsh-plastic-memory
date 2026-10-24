@@ -3,7 +3,7 @@ import type { MemoryStore } from '../store.ts'
 import type { CodedNote, ScanNoteCode } from '../contract-codes.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { MemoryRecord } from '../record-schema.ts'
-import type { PendingDecisionsStore } from '../governance/decisions.ts'
+import { conflictFingerprint, type PendingDecisionsStore } from '../governance/decisions.ts'
 import type { KvTable } from '../kv-table.ts'
 import type { Finding, ScanCacheEntry } from '../governance/schema.ts'
 import { runRuleScan, buildMalformedFindings } from '../governance/rule-scan.ts'
@@ -228,20 +228,31 @@ async function scanPass(
     }
   }
 
-  // conflict → 待决账本（不自动裁决）
+  // conflict → 待决账本（不自动裁决）。用户裁决过两边都留、双方内容（垂直含基线）都没变的，不挂账也不进 findings
   let created = 0
   let existing = 0
+  let settled = 0
   const decisionItems: ScanPass['decisionItems'] = []
   // 挂账前设检查点：取消后不再往 pending_decisions 写新冲突。
   signal?.throwIfAborted()
-  for (const f of findings) {
+  for (const f of [...findings]) {
     if (f.type !== 'conflict') continue
+    const members = f.memoryIds.map(id => byId.get(id))
+    const fingerprint = members.every(m => m !== undefined)
+      ? conflictFingerprint(members, f.baselineRef !== undefined ? baseline ?? [] : undefined)
+      : undefined
     const r = await deps.decisions.upsert({
       memoryIds: f.memoryIds,
       ...(f.baselineRef !== undefined ? { baselineRef: f.baselineRef } : {}),
       summary: f.summary,
       workspaces: f.memoryIds.map(id => workspaceLabel(byId.get(id))),
+      ...(fingerprint !== undefined ? { fingerprint } : {}),
     }, now)
+    if (r.settled) {
+      settled++
+      findings.splice(findings.indexOf(f), 1)
+      continue
+    }
     if (r.created) created++
     else existing++
     decisionItems.push({
@@ -249,6 +260,8 @@ async function scanPass(
       summary: r.entry.summary, isNew: r.created,
     })
   }
+
+  if (settled > 0) notes.push({ code: 'conflicts-settled', text: `${settled} 处冲突你之前裁决过两条都留，双方都没改，本次不再列出` })
 
   return { findings, scanned: records.length, semanticCachedAt, notes, decisionItems, created, existing }
 }

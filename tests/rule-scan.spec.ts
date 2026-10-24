@@ -81,6 +81,13 @@ describe('runRuleScan', () => {
     expect(secrets.map(f => f.memoryIds[0]).sort()).toEqual(['mem_name', 'mem_sum', 'mem_tag'])
   })
 
+  it('只命中疑似规则不出 secret finding：写入时用户已确认不是密钥才放行', () => {
+    const pwd = record({ id: 'mem_pwd', content: '预发库密码: TESTONLYpassw0rd' })
+    const apiKey = record({ id: 'mem_api', content: '干净', summary: 'api_key: 1234567890abcdef' })
+    const findings = runRuleScan([pwd, apiKey], () => undefined, 1)
+    expect(findings.filter(f => f.type === 'secret')).toEqual([])
+  })
+
   it('secret finding 的 summary 带 pattern 名', () => {
     const r = record({ id: 'mem_s', content: `密钥 ${FAKE_SECRET.sk}` })
     const findings = runRuleScan([r], () => undefined, 1)

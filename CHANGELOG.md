@@ -78,6 +78,25 @@ All notable changes to this project are documented here. The format follows
   (H16). `pnpm host:smoke` boots the real host with a probe plugin that
   confirms the tools are registered.
 
+### Fixed
+- A memory holding a vendor-format key (such as `sk-`, `ghp_` or an AWS
+  access key), for example typed into a memory file by hand, was injected
+  into every conversation as is. The injected text now shows `[已隐藏]` in
+  place of just the key and leaves the rest of the memory as it was, with no
+  extra notice in the conversation; if the key is in a memory's name, its
+  index line leaves out the file path. `memory_forget` still removes the file
+  for good.
+- A suspected secret you had confirmed with `force: true` (a password or
+  `api_key` value without a vendor format) kept the health check red until
+  you deleted or rewrote it. It is now treated as confirmed: it no longer
+  counts as a secret in `memory_health` or `memory_scan` and is injected
+  unmasked.
+- A conflict you resolved by keeping both memories (`keep-both`,
+  `dismiss`, or keeping a memory over `AGENTS.md`) came back on the next
+  `memory_scan`. The verdict is now remembered: the pair stays off the
+  pending list until either memory, or the `AGENTS.md` it was checked
+  against, changes.
+
 ## [0.1.1-beta.5] - 2026-10-20
 
 ### Changed

@@ -16,7 +16,8 @@ export function runRuleScan(
   const findings: Finding[] = []
   for (const r of records) {
     // summary 进注入索引、name 进文件名、tags 进索引行——密钥藏这三处同样会泄漏，一起喂进检测。
-    const hits = detectSecrets(`${r.content}\n${r.name}\n${r.summary}\n${r.tags.join(' ')}`)
+    // 只算 critical：suspected 写入时已由用户确认不是密钥才放行，判红等于反复追问。
+    const hits = detectSecrets(`${r.content}\n${r.name}\n${r.summary}\n${r.tags.join(' ')}`).filter(h => h.severity === 'critical')
     if (hits.length > 0) {
       findings.push({
         type: 'secret', layer: 'rule', severity: SEVERITY_BY_TYPE.secret,
