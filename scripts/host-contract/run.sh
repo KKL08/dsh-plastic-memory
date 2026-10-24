@@ -3,7 +3,9 @@
 # sibling verify plugin that drives the nine memory_* tools through the real
 # ctx.tools with synthetic sessions. No LLM is needed for H1–H9; H10/H11 run
 # only when DEEPSEEK_API_KEY is set and the host can pick a default model,
-# otherwise they are reported as SKIPPED. Never touches ~/.dsh.
+# otherwise they are reported as SKIPPED. Before booting, the installed package's
+# browser half is checked key-free (scripts/host-contract/verify-client.ts).
+# Never touches ~/.dsh.
 #
 #   scripts/host-contract/run.sh              run (temp dir removed on exit)
 #   HOST_SMOKE_KEEP=1 ...                     keep the temp dir (logs, DSH_HOME) — with a key set,
@@ -27,6 +29,7 @@ host_stage_and_pack
 host_ensure
 MARKER="$TMP/.marker"; : > "$MARKER"
 host_install_plugin host
+host_verify_client
 
 PATCH="$TMP/verify.cordis.patch.yml"
 sed "s#__VERIFY_URL__#file://$REPO/scripts/host-contract/verify-plugin.ts#" "$REPO/scripts/host-contract/verify.cordis.patch.yml" > "$PATCH"
