@@ -221,7 +221,7 @@ describe('说明码：三种触发，互斥、substring 优先', () => {
     expect(partial.hits.map(h => h.id)).toEqual(['mem_full', 'mem_part', 'mem_sub'])
     expect(partial.noteCode).toBe(OR_FALLBACK)
     expect(partial.note).toBe(OR_FALLBACK_NOTE)
-    expect(OR_FALLBACK_NOTE).toBe('没有同时命中全部关键词的记忆，以下按相关性排序。命中弱，可换同义词或减少词数再搜一次。')
+    expect(OR_FALLBACK_NOTE).toBe('没有同时命中全部关键词的记忆，以下按相关性排序。命中弱，可以换同义词、减少词数或换个角度多搜几次。')
 
     // alph 以子串出现在三条记录的正文里：都算全命中，分数同为 0，按 lastConfirmedAt 排
     const fieldSub = await search(store, 'alph')
