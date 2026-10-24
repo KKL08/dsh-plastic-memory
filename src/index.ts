@@ -37,6 +37,7 @@ import type { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { baselineProjectionDefinition, readBaseline } from './governance/baseline.ts'
 import type { SemanticLlm } from './governance/semantic-scan.ts'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { createMemoryCommand, writePing, type MemoryCommand } from './gui/ping.ts'
 
 export interface Config {
   // reflective（会话结束/空闲时批量提取）是规划中的第二写入模式；实现时再回 schema 加回该取值
@@ -132,6 +133,13 @@ export async function apply(ctx: Context, config: Config) {
   // 给出的保留可选注册的写法。disposer 随 child fiber 走，插件卸载键即消失。服务缺席时插件照常挂载，
   // 只是不注册投影：垂直冲突检测跳过，memory_scan 打 baseline-missing。
   ctx.inject(['sessionProjections'], child => void child.sessionProjections.register(baselineProjectionDefinition))
+  // GUI（浏览器半侧）的动作通道：commands 同样走可选注册，旧宿主没有这个服务时插件照常挂载、不注册、不报错。
+  // 启动时写一次 .state/gui/ping.json（不 await，不拖住加载），让浏览器半侧在第一次 ping 之前就有文件可订阅。
+  ctx.inject(['commands'], child => {
+    const commands = (child as unknown as { commands: { register(def: MemoryCommand): () => void } }).commands
+    commands.register(createMemoryCommand(memoryRoot))
+    writePing(memoryRoot, 'startup').catch((err: unknown) => ctx.logger.warn(`plastic-memory: gui ping write failed: ${String(err)}`))
+  })
   // cwd → workspace 归属的单一解析路径：SnapshotCache 的 lazy 自愈与 session/created 的 eager 预热共用，
   // 避免两处各写一份 resolveWorkspacePath 调用。
   const resolveWorkspace = (session: object) => resolveWorkspacePath(ctx, (session as SessionLike).header?.cwd)

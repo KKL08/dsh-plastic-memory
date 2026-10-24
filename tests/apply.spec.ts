@@ -47,7 +47,7 @@ class HostKvTable<T = unknown> {
  * projections：ctx.get('sessionProjections') 给出的注册表（缺省 = 服务缺席）。inject 仿 cordis 的
  * ctx.inject(deps, cb)：依赖齐了才同步回调、把服务放进 child；registerProjection=false 模拟回调始终没触发。
  */
-function mockCtx(opts: { projections?: SessionProjectionRegistry; registerProjection?: boolean; storageDomain?: boolean } = {}) {
+function mockCtx(opts: { projections?: SessionProjectionRegistry; registerProjection?: boolean; storageDomain?: boolean; commands?: { register(def: unknown): () => void } } = {}) {
   const registered: string[] = []
   const contexts: string[] = []
   // 完整的 context 注册对象（含 text provider）与提示词变量，供转义接线用例取用
@@ -100,8 +100,12 @@ function mockCtx(opts: { projections?: SessionProjectionRegistry; registerProjec
       : name === 'sessionProjections' ? opts.projections
         : name === 'storageDomain' && opts.storageDomain === true ? storageDomain
           : undefined),
-    inject: (_deps: string[], callback: (child: { sessionProjections: SessionProjectionRegistry }) => void) => {
-      if (opts.projections !== undefined && opts.registerProjection !== false) callback({ sessionProjections: opts.projections })
+    // 按依赖名分发，像 cordis 一样只在依赖的服务都在时才回调
+    inject: (deps: string[], callback: (child: Record<string, unknown>) => void) => {
+      if (deps.includes('sessionProjections') && opts.projections !== undefined && opts.registerProjection !== false) {
+        callback({ sessionProjections: opts.projections })
+      }
+      if (deps.includes('commands') && opts.commands !== undefined) callback({ commands: opts.commands })
       return () => {}
     },
   }
@@ -232,6 +236,26 @@ describe('apply', () => {
     // 钉住 root 真的来自 config：经注册后的 memory_search 读到 config 指定目录里的好记忆，坏文件不碍事
     const out = await defs.get('memory_search')!.execute({ query: 'zebra' }, fakeExec()) as { hits: Array<{ id: string }> }
     expect(out.hits.map(h => h.id)).toEqual(['mem_good'])
+  })
+})
+
+/** GUI 半侧的服务端接线（walking skeleton）：commands 服务在时注册 /memory 并写一次 ping.json，缺席时静默跳过。 */
+describe('GUI 命令接线', () => {
+  it('宿主有 commands：注册 memory 命令，启动时写一次 .state/gui/ping.json', async () => {
+    const memoryRoot = await makeTmpRoot()
+    const defs: Array<{ name: string }> = []
+    const ctx = mockCtx({ commands: { register: (def) => { defs.push(def as { name: string }); return () => {} } } })
+    await apply({ ...ctx, logger: { info() {}, warn() {}, error() {} } } as never, new Config({ memoryRoot } as unknown as Config))
+    expect(defs.map(d => d.name)).toEqual(['memory'])
+    await expect.poll(async () => {
+      try { return (JSON.parse(await readFile(join(memoryRoot, '.state', 'gui', 'ping.json'), 'utf8')) as { source: string }).source } catch { return undefined }
+    }).toBe('startup')
+  })
+
+  it('宿主没有 commands（旧宿主）：apply 照常完成，不注册、不写 .state/', async () => {
+    const memoryRoot = await makeTmpRoot()
+    await apply(mockCtx() as never, new Config({ memoryRoot } as unknown as Config))
+    await expect(stat(join(memoryRoot, '.state'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 })
 
