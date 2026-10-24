@@ -65,7 +65,7 @@ describe.each(['ENOTSUP', 'EPERM', 'ENOSYS'])('不支持硬链接的卷（link �
     await writeFile(join(stateDir(), 'snapshots', 'snap_a.json'), JSON.stringify(snap('snap_a', '迁移后改过')), 'utf8')
     const s = new SidecarStore({
       root, schemas,
-      openLegacyKv: async () => ({ snapshots: [['snap_a', snap('snap_a', 'KV 里的旧值')], ['snap_b', snap('snap_b')]], pending: [] }),
+      openLegacyKv: async () => ({ snapshots: [['snap_a', snap('snap_a', 'KV 里的旧值')], ['snap_b', snap('snap_b')]], pending: [], discard: async () => {} }),
     })
     expect((await s.snapshots.get('snap_a'))?.description).toBe('迁移后改过')
     expect((await s.snapshots.get('snap_b'))?.id).toBe('snap_b')
@@ -88,7 +88,7 @@ describe('link 的其他错误照常抛出', () => {
     const s = new SidecarStore({
       root, schemas,
       log: { info() {}, warn: (m: string) => { warns.push(m) }, error() {} },
-      openLegacyKv: async () => ({ snapshots: [['snap_a', snap('snap_a')]], pending: [] }),
+      openLegacyKv: async () => ({ snapshots: [['snap_a', snap('snap_a')]], pending: [], discard: async () => {} }),
     })
     expect(await s.snapshots.list()).toEqual([])
     expect(warns.some(w => w.includes('EACCES'))).toBe(true)
