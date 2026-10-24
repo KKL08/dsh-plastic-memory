@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import type { KvTable } from '../kv-table.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { RETENTION_MS } from '../retention.ts'
-import type { OverflowLevel } from '../snapshot.ts'
+import type { OverflowLevel } from '../contract-codes.ts'
 import { genId, type PendingDecision, type PendingKind, type SettledVerdict } from './schema.ts'
 
 /** 去重 key：memoryIds 排序拼接 + baselineRef（垂直冲突与横向冲突互不干扰）。 */
@@ -19,7 +19,12 @@ export function conflictFingerprint(records: ReadonlyArray<Pick<MemoryRecord, 'i
   return createHash('sha1').update(JSON.stringify({ parts, baseline: baseline ?? null })).digest('hex')
 }
 
-type KindKeyed = { kind?: PendingKind; memoryIds: string[]; baselineRef?: string }
+/** 提升候选的内容指纹：单条记忆的 id + name + content。内容改了，「留在本项目」的旧结论作废。 */
+export function candidateFingerprint(record: Pick<MemoryRecord, 'id' | 'name' | 'content'>): string {
+  return conflictFingerprint([record])
+}
+
+type KindKeyed ={ kind?: PendingKind; memoryIds: string[]; baselineRef?: string }
 
 /** 条目种类，缺省即冲突（旧条目）。 */
 export function kindOf(entry: { kind?: PendingKind }): PendingKind {
@@ -210,6 +215,34 @@ export class PendingDecisionsStore {
     }
     await this.table.put(entry.id, entry)
     return true
+  }
+
+  /**
+   * 扫描时同步一个项目的提升候选（scope：workspace 路径）。candidates：该项目 active 且带 globalCandidate 的记忆；
+   * liveIds：该项目全部 active 记忆。每条候选一条 promote-candidate 条目，指纹 = 记忆内容指纹（candidateFingerprint）：
+   * 「留在本项目」过的指纹不变不再提示，内容改了旧结论作废、重新提示；已提升（promoted）的又成了本项目候选
+   * （被快照恢复回来）回到待处理。未决条目的记忆不再是候选（已提升、标记被清、记忆没了）就移除；
+   * 「留在本项目」的条目在记忆不再 active 时移除；promoted 留给撤销，由 sweep 按保留窗口清。
+   */
+  async syncPromoteCandidates(
+    scope: string,
+    candidates: ReadonlyArray<{ id: string; summary: string; fingerprint: string }>,
+    liveIds: ReadonlySet<string>,
+    now: number,
+  ): Promise<void> {
+    const candidateIds = new Set(candidates.map(c => c.id))
+    for (const [key, e] of await this.table.list()) {
+      if (kindOf(e) !== 'promote-candidate' || e.workspaces?.[0] !== scope) continue
+      const id = e.memoryIds[0]!
+      if (e.settled?.verdict === 'promoted') {
+        if (candidateIds.has(id)) await this.unsettle(key)
+      } else if (e.settled === undefined ? !candidateIds.has(id) : !liveIds.has(id)) {
+        await this.table.delete(key)
+      }
+    }
+    for (const c of candidates) {
+      await this.upsert({ kind: 'promote-candidate', memoryIds: [c.id], summary: c.summary, workspaces: [scope], fingerprint: c.fingerprint }, now)
+    }
   }
 
   async remove(id: string): Promise<boolean> {

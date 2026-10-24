@@ -5,7 +5,8 @@ import type { MemoryRecord } from './record-schema.ts'
 import { resolveDuplicates } from './storage/table.ts'
 import type { TypeRegistry } from './type-registry.ts'
 import type { EvidenceLookupLevel } from './evidence-guidance.ts'
-import { assembleSnapshot, escapePromptBraces, overflowLevel, type OverflowLevel, type OverflowMode, type SnapshotUsage } from './snapshot.ts'
+import { assembleSnapshot, escapePromptBraces, overflowLevel, type OverflowMode, type SnapshotUsage } from './snapshot.ts'
+import type { OverflowLevel } from './contract-codes.ts'
 import type { SessionView } from './gui/contract.ts'
 
 /**

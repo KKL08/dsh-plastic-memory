@@ -88,7 +88,7 @@ function activeRecords(data: LayerPreread): MemoryRecord[] {
   return [...data.byId.values()].filter(r => r.status === 'active').sort(byNameThenId)
 }
 
-/** 待处理：密钥（规则扫描实时判，与健康分同口径）、账本未决条目、读不出的文件。 */
+/** 待处理：密钥（规则扫描实时判，与健康分同口径）、账本未决条目（体检开时）、读不出的文件。 */
 export function buildPendingView(input: ViewInput): PendingView {
   const { data } = input
   const items: PendingItem[] = []
@@ -96,10 +96,16 @@ export function buildPendingView(input: ViewInput): PendingView {
   for (const f of runRuleScan(active, id => data.byId.get(id), input.now)) {
     if (f.type === 'secret') items.push({ kind: 'secret', memory: card(data.byId.get(f.memoryIds[0])!, data) })
   }
-  for (const e of [...input.open].sort((a, b) => a.firstSeenAt - b.firstSeenAt)) {
+  // 体检关闭（spec 35）：只剩规则检查出的密钥和读不出的文件；账本条目（冲突、提升候选、超限）照留，打开后回来
+  const ledger = input.governanceEnabled ? input.open : []
+  for (const e of [...ledger].sort((a, b) => a.firstSeenAt - b.firstSeenAt)) {
     const base = { decisionId: e.id, firstSeenAt: e.firstSeenAt }
     const kind = kindOf(e)
-    if (kind === 'promote-candidate') items.push({ kind, ...base, memory: cardOf(e.memoryIds[0], data) })
+    if (kind === 'promote-candidate') {
+      // 记忆已不是本项目候选（模型直接 memory_promote、标记被清、记忆没了）：旧条目不显示，下次体检清掉
+      const r = data.byId.get(e.memoryIds[0] ?? '')
+      if (r?.status === 'active' && r.scope === 'workspace' && r.globalCandidate) items.push({ kind, ...base, memory: card(r, data) })
+    }
     else if (kind === 'overflow') {
       const scope = overflowScopeOf(e)
       items.push({ kind, ...base, ...overflowLevelOf(e), ...(scope !== undefined && scope !== 'global' ? { workspacePath: scope } : {}) })
