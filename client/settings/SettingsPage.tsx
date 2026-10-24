@@ -112,6 +112,15 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
               onChange={(evidence) => { edit({ evidence }) }}
             />
           </SettingsItem>
+          <SettingsItem label={t('settings.dictionary.label')} htmlFor={`${id}-dictionary`}>
+            <TextField
+              id={`${id}-dictionary`}
+              value={f.userDictionary}
+              disabled={locked}
+              onChange={(userDictionary) => { edit({ userDictionary }) }}
+              hint={<>{t('settings.dictionary.hint')}<br />{t('settings.dictionary.format')}</>}
+            />
+          </SettingsItem>
         </SettingsGroupCard>
 
         <SettingsGroupCard title={t('settings.group.manage')}>
@@ -216,6 +225,7 @@ const FIELD_LABELS: Record<keyof SettingsFields, LocaleKey> = {
   governance: 'settings.governance.label',
   sensitivity: 'settings.sensitivity.label',
   promoteTarget: 'settings.target.label',
+  userDictionary: 'settings.dictionary.label',
 }
 
 function valueText(t: Translate, key: Exclude<keyof SettingsFields, 'customTypes'>, fields: SettingsFields): string {
@@ -227,6 +237,7 @@ function valueText(t: Translate, key: Exclude<keyof SettingsFields, 'customTypes
     case 'governance': return t(fields.governance ? 'settings.confirm.on' : 'settings.confirm.off')
     case 'sensitivity': return t(`settings.sensitivity.${fields.sensitivity}`)
     case 'promoteTarget': return t(`settings.target.${fields.promoteTarget}`)
+    case 'userDictionary': return fields.userDictionary.trim() || t('settings.dictionary.unset')
   }
 }
 

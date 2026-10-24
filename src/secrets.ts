@@ -1,5 +1,5 @@
 /**
- * 密钥模式集（参考 isla scan.py）。severity 分两级：
+ * 密钥模式集。severity 分两级：
  * - critical：有明确厂商前缀/格式，几乎不误报 → 写入时直接拦截（pipeline reject，不落盘）。
  * - suspected：无厂商特征、正则较宽、可能误报 → 写入时拦下待确认，带 force 放行并保留警告。
  * 库里的 suspected 是用户确认过不是密钥才放行的，注入遮盖与体检判红只看 critical；

@@ -82,6 +82,7 @@ dsh plugin --profile web add dsh-plastic-memory@0.1.1-beta.5
 
 > Replace `web` with the name of your target profile (it will be created automatically if it doesn't exist). The plugin declaration is written to the profile's `cordis.patch.yml` and takes effect after a restart. The package ships prebuilt on npm — no build step required.  
 > **Requirements:** Node.js `^22.19.0 || >=24`, DeepSeek Harness v0.1.7-rc.1 or later (verified up to v0.2.1-rc.2); the graphical interface needs v0.2.1-rc.2 or later.
+> **Chinese word segmentation:** the optional dependency `@node-rs/jieba` (prebuilt binaries for each platform) is installed automatically with the npm package, so Chinese queries match by word. If it cannot be installed on your platform, the plugin still installs, Chinese search falls back to two-character segments, and nothing else is affected.
 > (DeepSeek Harness is still in pre-release and may ship further breaking changes; before upgrading the host, check the version range this plugin currently supports, see the badge at the top and the CHANGELOG.)
 >
 > While in beta, pin the exact version in the install command. Once a stable release ships, you can simply run `dsh plugin --profile web add dsh-plastic-memory`.
@@ -107,7 +108,7 @@ Once installed, nothing requires YAML. Three surfaces live inside the host's web
 
 - **The 「记忆」 (Memory) page in the left nav**: four tabs. *Pending* lists what waits for your decision — conflicts found by a checkup, memories worth promoting to global, budget overflows, secrets, files that failed to parse — and each item is handled in place (pick the winning side, undo, promote or keep local, delete a secret for good). *All memories* browses by project or global, opens the file or shows it in Finder, deletes. *Health* shows each layer's score and issues, with a "check this project" button in the header. *Recently deleted* restores anything removed in the last 14 days and says which memory won when a ruling deleted it. The page does not need a running conversation: it borrows an idle session of the current project to run its commands, and shows an empty state when no session exists yet.
 - **A 「记忆」 tab in the right sidebar**: which memories this conversation brought in, how much of the context they use, what the model saved during the conversation; conflicts among the injected memories can be ruled right there.
-- **The plugin's settings page** (its entry in the host's plugin manager): scenario template, custom types (add, edit, remove in a dialog), context budget and overflow mode, source lookup, checkup switch and sensitivity, where global promotions go, plus a status card. Saving writes the profile's `cordis.patch.yml` and takes effect without a restart.
+- **The plugin's settings page** (its entry in the host's plugin manager): scenario template, custom types (add, edit, remove in a dialog), context budget and overflow mode, source lookup, the user dictionary path for Chinese word segmentation, checkup switch and sensitivity, where global promotions go, plus a status card. Saving writes the profile's `cordis.patch.yml` and takes effect without a restart.
 
 Every turn in which the model saved a memory gets a card with a delete button; the dot on the left-nav icon lights amber only when something waits for your decision, and turns red when a secret was found.
 
@@ -186,7 +187,7 @@ customTypes:
 | Tool              | Description                                                                                                          |
 | ----------------- | -------------------------------------------------------------------------------------------------------------------- |
 | `memory_save`     | Distill or update a memory. Built-in dedup and secret detection; when near-duplicate content is found, prompts the user to `update` or `force` |
-| `memory_search`   | Full-text search with type and scope filters. Returns up to 10 results by default (max 50). Several keywords must all match; if none does, falls back to any-match and says so in the result |
+| `memory_search`   | Searches memories by relevance; works for Chinese and English queries. Memories containing every keyword come before those containing only some of them, and a keyword that appears as a whole word ranks above one that only appears inside a longer word (`scope` in `readScope`); when no memory contains every keyword, the result says so at the top. Each hit carries the absolute path of the memory file, so the full text can be read directly. Type and scope filters; returns up to 10 results by default (max 50) |
 | `memory_forget`   | Batch-remove memories: the file moves to `.archive/`, a snapshot is taken first, recoverable within 14 days. Memories containing secrets are the exception: deleted physically at once, their copies in every snapshot redacted, not recoverable |
 | `memory_snapshot` | Snapshot management: manual tagging, diff comparison, rollback, and undelete                                         |
 | `memory_source`   | **Provenance:** trace back to the original conversation slice a memory was distilled from — verify intent and guard against hallucination |
@@ -264,6 +265,7 @@ Adjust `plastic-memory` settings in the profile's `cordis.patch.yml`:
 | `governance.health.sensitivity`    | `'normal'`          | Health alert sensitivity: `conservative` / `normal` / `proactive`                        |
 | `governance.globalPromoteTarget`   | `'plugin-global'`   | Promotion target: `plugin-global` (plugin's global scope) or `agents-md` (`~/.dsh/AGENTS.md`) |
 | `memoryRoot`                       | `''`                | Storage root path; defaults to `${DSH_HOME:-~/.dsh}/memories`                            |
+| `search.userDictionaryPath`        | unset               | User dictionary path (the field of the same name on the settings page): added on top of the built-in dictionary, applied from the next search. Must be an absolute path; one entry per line as `word frequency tag`, the frequency is required and entries without it have no effect, for example `插件记忆 10 n`. Has no effect unless `@node-rs/jieba` is installed |
 
 
 ---

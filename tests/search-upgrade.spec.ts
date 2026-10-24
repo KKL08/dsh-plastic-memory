@@ -96,12 +96,12 @@ describe('低置信标注', () => {
 
   it('search 渲染带标注（agent-inferred）', () => {
     const hits: SearchHit[] = [
-      { id: 'mem_x', type: 'knowledge', summary: '摘要', content: '正文', sourceNote: INFERENCE_NOTE, stalenessNote: '' },
-      { id: 'mem_y', type: 'knowledge', summary: '摘要2', content: '正文2', sourceNote: '', stalenessNote: '' },
+      { id: 'mem_x', type: 'knowledge', summary: '摘要', content: '正文', sourceNote: INFERENCE_NOTE, stalenessNote: '', path: '/m/global/x.md' },
+      { id: 'mem_y', type: 'knowledge', summary: '摘要2', content: '正文2', sourceNote: '', stalenessNote: '', path: '/m/global/y.md' },
     ]
     const rendered = renderSearchResult({ hits })
-    expect(rendered).toContain(`[mem_x] knowledge｜摘要${INFERENCE_NOTE}\n正文`)
-    expect(rendered).toContain('[mem_y] knowledge｜摘要2\n正文2')
+    expect(rendered).toContain(`[mem_x] knowledge｜摘要${INFERENCE_NOTE} · /m/global/x.md\n正文`)
+    expect(rendered).toContain('[mem_y] knowledge｜摘要2 · /m/global/y.md\n正文2')
   })
 
   it('executeSearch 按 sourceMode 填充 SearchHit.sourceNote', async () => {

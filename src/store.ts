@@ -62,12 +62,14 @@ export class InMemoryTable implements MemoryTable {
 
   async readScope(dirs: string[], opts: ScopeReadOptions = {}): Promise<ScopeReadResult> {
     const want = new Set(dirs)
-    const records = [...this.slots.values()]
-      .filter(s => want.has(s.dir))
+    const inScope = [...this.slots.values()].filter(s => want.has(s.dir))
+    const records = inScope
       .filter(s => opts.includeArchive || dirname(s.filePath) === s.dir)
       .filter(s => opts.types === undefined || opts.types.includes(s.record.type))
       .map(({ record, filePath, dir }) => ({ record, filePath, dir }))
-    return { records, quarantined: [], directoryNotes: [] }
+    // 与 FileTable 同口径：只数顶层，在 types 过滤之前
+    const listedCount = inScope.filter(s => dirname(s.filePath) === s.dir).length
+    return { records, listedCount, quarantined: [], directoryNotes: [] }
   }
 
   async locate(id: string, hint?: LocateHint): Promise<LocatedFile | undefined> {

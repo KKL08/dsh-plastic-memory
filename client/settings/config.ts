@@ -64,6 +64,8 @@ export interface SettingsFields {
   governance: boolean
   sensitivity: (typeof SENSITIVITIES)[number]
   promoteTarget: (typeof PROMOTE_TARGETS)[number]
+  /** 用户词典路径，空串 = 未设（只用内置词典）。 */
+  userDictionary: string
 }
 
 /** 各字段在配置段里的路径（customTypes 按键逐条写，见 buildOps）。 */
@@ -75,11 +77,12 @@ const PATHS: Record<Exclude<keyof SettingsFields, 'customTypes'>, string[]> = {
   governance: ['governance', 'enabled'],
   sensitivity: ['governance', 'health', 'sensitivity'],
   promoteTarget: ['governance', 'globalPromoteTarget'],
+  userDictionary: ['search', 'userDictionaryPath'],
 }
 
 const DEFAULTS: SettingsFields = {
   template: 'coding', customTypes: {}, budget: '4000', overflow: 'relax', evidence: 'strict',
-  governance: true, sensitivity: 'normal', promoteTarget: 'plugin-global',
+  governance: true, sensitivity: 'normal', promoteTarget: 'plugin-global', userDictionary: '',
 }
 
 function at(value: unknown, path: readonly string[]): unknown {
@@ -100,6 +103,7 @@ export function fieldsOf(section: unknown): SettingsFields {
   const budget = at(section, PATHS.budget)
   const enabled = at(section, PATHS.governance)
   const types = at(section, ['customTypes'])
+  const dictionary = at(section, PATHS.userDictionary)
   return {
     template: oneOf(TEMPLATES, at(section, PATHS.template), DEFAULTS.template),
     customTypes: typeof types === 'object' && types !== null ? types as Record<string, CustomType> : {},
@@ -109,6 +113,7 @@ export function fieldsOf(section: unknown): SettingsFields {
     governance: typeof enabled === 'boolean' ? enabled : DEFAULTS.governance,
     sensitivity: oneOf(SENSITIVITIES, at(section, PATHS.sensitivity), DEFAULTS.sensitivity),
     promoteTarget: oneOf(PROMOTE_TARGETS, at(section, PATHS.promoteTarget), DEFAULTS.promoteTarget),
+    userDictionary: typeof dictionary === 'string' ? dictionary : DEFAULTS.userDictionary,
   }
 }
 
@@ -133,6 +138,7 @@ function sameType(a: CustomType | undefined, b: CustomType | undefined): boolean
 
 /**
  * 草稿 → 一次提交的操作。只写和已存值不同的字段；customTypes 按键 set / unset，不整段覆盖。
+ * 用户词典路径去掉首尾空白再比，清空写 unset（schema 里它没有默认值，未设即只用内置词典）。
  * 上限草稿不合法时返回 undefined（调用方不提交）。
  */
 export function buildOps(saved: SettingsFields, draft: SettingsFields): ConfigPathOp[] | undefined {
@@ -143,6 +149,12 @@ export function buildOps(saved: SettingsFields, draft: SettingsFields): ConfigPa
       const n = parsePositiveInt(draft.budget)
       if (n === undefined) return undefined
       if (String(n) !== saved.budget) ops.push({ op: 'set', path: PATHS.budget, value: n })
+      continue
+    }
+    if (key === 'userDictionary') {
+      const path = draft.userDictionary.trim()
+      if (path === saved.userDictionary) continue
+      ops.push(path === '' ? { op: 'unset', path: PATHS.userDictionary } : { op: 'set', path: PATHS.userDictionary, value: path })
       continue
     }
     ops.push({ op: 'set', path: PATHS[key], value: draft[key] })

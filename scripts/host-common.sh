@@ -56,14 +56,16 @@ host_cleanup() {
 }
 
 # Build lib/ into STAGE and write the published package shape (the single
-# rewrite in scripts/publish-shape.cjs), then npm pack it. Sets TGZ.
+# rewrite in scripts/publish-shape.cjs), then npm pack it. Sets TGZ. Extra
+# arguments go to publish-shape.cjs (host-smoke passes --without-optional for
+# the stage that ships without optionalDependencies).
 host_stage_and_pack() {
   host_run build "$REPO/node_modules/.bin/tsc" -p "$REPO/tsconfig.build.json" --outDir "$STAGE/lib"
   host_run build-client node "$REPO/scripts/build-client.ts" --outfile "$STAGE/lib/client.js"
   host_run stage-files cp "$REPO/cordis.patch.yml" "$REPO/README.md" "$STAGE/"
   host_run stage-locale cp -R "$REPO/locale" "$STAGE/"
   host_run stage-icon sh -c 'mkdir -p "$2/assets" && cp "$1/assets/icon.svg" "$2/assets/"' _ "$REPO" "$STAGE"
-  host_run stage node "$REPO/scripts/publish-shape.cjs" "$REPO/package.json" "$STAGE/package.json"
+  host_run stage node "$REPO/scripts/publish-shape.cjs" "$REPO/package.json" "$STAGE/package.json" "$@"
   host_run pack sh -c 'cd "$1" && npm pack --loglevel=error' _ "$STAGE"
   TGZ="$STAGE/$(ls -t "$STAGE"/*.tgz | head -n 1 | xargs basename)"
   [ -f "$TGZ" ] || { STEP=pack; echo "$HOST_TAG: no tarball produced" >&2; return 1; }

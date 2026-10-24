@@ -424,6 +424,28 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect(archived.filePath).toBe(join(h.wsDir(WS_A), ARCHIVE_DIR, 'd.md'))
   })
 
+  it('readScope.listedCount：范围内顶层文件数，与 types、预筛开关、includeArchive 无关；两个后端同值', async () => {
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'k.md', record: ws(WS_A, { id: 'mem_k', type: 'knowledge', content: 'alpha 部署' }) })
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'p.md', record: ws(WS_A, { id: 'mem_p', type: 'project', content: 'alpha', status: 'superseded' }) })
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'skip.md', record: ws(WS_A, { id: 'mem_skip', type: 'project', content: '预筛会跳过这条' }) })
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'd.md', record: ws(WS_A, { id: 'mem_d', type: 'project', content: 'alpha', status: 'deleted' }), archived: true })
+    await h.seedFile({ dir: h.wsDir(WS_B), fileName: 'b.md', record: ws(WS_B, { id: 'mem_b', content: 'alpha' }) })
+    await h.seedFile({ dir: h.globalDir, fileName: 'g.md', record: record({ id: 'mem_g', type: 'project', content: 'alpha' }) })
+    const dirs = [h.wsDir(WS_A), h.globalDir]
+    const listed = async (opts?: Parameters<MemoryTable['readScope']>[1]) => (await table.readScope(dirs, opts)).listedCount
+
+    // 顶层 k / p（superseded）/ skip + global 的 g；.archive/ 里的 d 与范围外的 WS_B 不算
+    expect(await listed()).toBe(4)
+    expect(await listed({ types: ['knowledge'] })).toBe(4)
+    expect(await listed({ includeArchive: true })).toBe(4)
+    const prefiltered = await table.readScope(dirs, { prefilterTerms: ['alpha', 'zzz'], prefilterMatch: 'any', includeArchive: true })
+    expect(prefiltered.listedCount).toBe(4)
+    // FileTable 确实跳过了 skip.md；内存实现不预筛，计数照样一致
+    if (h.root !== undefined) expect(prefiltered.records.map(r => r.record.id)).not.toContain('mem_skip')
+    expect((await table.readScope([h.wsDir(WS_A)], { prefilterTerms: ['zzz'] })).listedCount).toBe(3)
+    expect((await table.readScope([h.wsDir('/home/dev/never-written')])).listedCount).toBe(0)
+  })
+
   it('listWorkspaceDirs：顶层有记忆文件的 hasActiveTopLevel 为真；只剩归档的为假并带 dir-empty 说明', async () => {
     await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'a.md', record: ws(WS_A, { id: 'mem_a' }) })
     await h.seedFile({ dir: h.wsDir(WS_B), fileName: 'b.md', record: ws(WS_B, { id: 'mem_b', status: 'deleted' }), archived: true })

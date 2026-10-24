@@ -63,6 +63,10 @@ export interface Config {
     health: { sensitivity: Volatile<HealthSensitivity> }
     globalPromoteTarget: Volatile<'plugin-global' | 'agents-md'>
   }
+  search: {
+    /** jieba 用户词典（每行「词 词频 词性」）的绝对路径，追加在主词典之上；不设只用主词典。改了下一次搜索生效。 */
+    userDictionaryPath: Volatile<string | undefined>
+  }
   /** 记忆文件根目录，缺省解析到 ${DSH_HOME:-~/.dsh}/memories（storage/paths.ts） */
   memoryRoot: string
 }
@@ -87,6 +91,9 @@ export const Config = z.object({
       sensitivity: z.union(['conservative', 'normal', 'proactive'] as const).default('normal').volatile(),
     }).default({ sensitivity: 'normal' }),
     globalPromoteTarget: z.union(['plugin-global', 'agents-md'] as const).default('plugin-global').volatile(),
+  }),
+  search: z.object({
+    userDictionaryPath: z.string().volatile(),
   }),
   memoryRoot: z.string().default(''),
 })
@@ -200,7 +207,7 @@ export async function apply(ctx: Context, config: Config) {
   // （cordis reflect.ts _getImpl），下面的 try/catch 只是对宿主行为变化的防御。
   // ⚠️ 真机验证确认的 dsh llm 契约（packages/llm/llm）：
   //   1) LlmRuntime.stream(options: GenerateOptions) 的 provider/model 是必填 string，没有"用会话当前模型"的默认值；
-  //      三层解析顺序抄自 packages/compaction/compaction-basic/src/summarizer.ts：
+  //      三层解析顺序对齐宿主 compaction 摘要器的做法：
   //      session.requestHeader()?.config（最近一次路由请求的配置）→ agent.options.provider/model；
   //      两者都拿不到（provider 或 model 缺失）就返回 null，语义层降级，绝不猜默认模型。
   //   2) StreamChunk 是判别联合，text-delta 和 reasoning-delta 都带 .text——开启推理时
@@ -354,7 +361,10 @@ export async function apply(ctx: Context, config: Config) {
   // memory_save 的类型枚举与说明在注册时从类型表生成：模板或自定义类型热更新后注销重注册
   const registerSave = () => registerWrite(createSaveTool({ store, registry, resolveContext, snapshots, onSaved }))
   let disposeSave = registerSave()
-  ctx.tools.register(createSearchTool({ store, registry, resolveContext }))
+  ctx.tools.register(createSearchTool({
+    store, registry, resolveContext,
+    tokenizer: { userDictionaryPath: () => config.search.userDictionaryPath.get(), log: ctx.logger },
+  }))
   registerWrite(createForgetTool({ store, snapshots, decisions, log: ctx.logger, resolveContext }))
   // 快照的写入与恢复必须成对——治理关闭时 forget 仍会拍快照，若没有恢复入口，
   // 14 天的快照就是死存储。故 memory_snapshot 放在治理开关之外，与 forget 一起常驻。
@@ -442,6 +452,7 @@ export async function apply(ctx: Context, config: Config) {
       }
     }
     if (changed('governance.enabled')) syncGovernanceTools()
+    // search.userDictionaryPath 不用在这里处理：memory_search 每次现读路径，变了下一次搜索就重建分词实例
     snapshotCache.markAllStale()
     await views?.rewriteAll()
   })

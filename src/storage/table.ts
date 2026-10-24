@@ -30,7 +30,12 @@ export interface LocatedFile extends LocatedRecord { extras: Record<string, unkn
 export type KeywordMatch = 'all' | 'any'
 
 export interface ScopeReadOptions {
-  /** 原文预筛词项（小写子串）；预筛是超集，不改变匹配结果。内存实现不预筛。 */
+  /**
+   * 原文预筛词项；预筛是超集，不改变匹配结果。内存实现不预筛。
+   * 调用方约束：每个词项应是「命中记录的原文（小写）里必然以子串出现」的小写串，否则预筛会漏掉真命中；
+   * 不应包含单个字母与纯数字——它们几乎在每个文件里出现，any 模式下一个就让预筛失效。
+   * 实现不替调用方过滤这两类（只小写并去掉空串），由调用方不传入保证。
+   */
   prefilterTerms?: string[]
   /** 预筛模式：all（缺省）= 全部词项命中才解析；any = 任一词项命中即解析。与关键词匹配模式一致。 */
   prefilterMatch?: KeywordMatch
@@ -43,6 +48,13 @@ export interface ScopeReadOptions {
 export interface ScopeReadResult {
   /** 记录含非 active，同 id 多文件不取舍（resolveDuplicates 由调用方按需做）；由调用方按 status 过滤。 */
   records: LocatedRecord[]
+  /**
+   * 列出文件数：范围内各目录顶层列出的记忆文件数。FileTable 数 readdir 列出、文件名是记忆文件的条目，
+   * 含被预筛跳过的、随后解析失败进 quarantined 的、随后被 types 过滤或调用方按 status / validTo 滤掉的；
+   * 不含 .archive/ 里的（includeArchive 为真也只数顶层）。InMemoryTable 数范围内顶层条目，同样不受 types 影响。
+   * 用途是检索排序 BM25 的 N：它必须与预筛开关、types、后端无关，同一份磁盘内容才得出同一个排序。
+   */
+  listedCount: number
   quarantined: QuarantineEntry[]
   directoryNotes: DirectoryNote[]
 }

@@ -71,7 +71,7 @@ async function writeRaw(dir: string, fileName: string, text: string, ws?: string
   await writeFile(path, text)
   return path
 }
-/** 照 Claude Code 习惯手写的文件：只有 name / type / 正文。 */
+/** 用户手写的记忆文件：只有 name / type / 正文。 */
 const handBuilt = (name: string, body: string, type = 'preference') => `---\nname: ${name}\ntype: ${type}\n---\n\n${body}\n`
 
 function harness(opts: { readEvent?: ReadEventFn; now?: number } = {}) {

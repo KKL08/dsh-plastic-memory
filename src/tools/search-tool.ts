@@ -10,9 +10,9 @@ import { toToolOutput } from './output.ts'
 export function createSearchTool(deps: SearchToolDeps): ToolDefinition {
   return defineTool({
     name: 'memory_search',
-    description: '按关键词检索长期记忆。索引里列出的记忆想看全文、或怀疑有相关记忆没列出时用。',
+    description: '按相关性检索长期记忆，中英文查询都可用。同时命中全部关键词的排在前面，其次是命中部分关键词的，最后是关键词只以子串出现的；每条命中带记忆文件的绝对路径。',
     parameters: {
-      query: { type: 'string', required: true, description: '关键词，对内容、摘要、标签匹配；多个词要全部命中，全部不命中时回退到任一命中并在结果里说明' },
+      query: { type: 'string', required: true, description: '关键词，中英文均可，可写多个词；对名称、摘要、标签、内容匹配。没有记录命中全部关键词、或只有子串命中时，结果开头会说明' },
       types: { type: 'array', items: { type: 'string' } },
       scope: { type: 'string', enum: ['global', 'workspace', 'all-visible'], description: '缺省 all-visible（global + 当前 workspace）' },
       limit: { type: 'number', description: '返回条数上限，缺省 10，最大 50' },
