@@ -11,9 +11,9 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 
 // 两个宿主进程同时搬同一个 id 的文件：两个 FileTable 实例共用一个记忆根目录，各有各的进程内锁，互不排队。
-// fs 是进程边界：给 link / rm 套一层，在指定路径的调用之前或之后插进另一个实例的整次写入，交错时机确定，不靠 sleep。
-// 不管怎么交错，写之前存在的 id 写完至少还剩一个文件。
-type Op = 'link' | 'rm'
+// fs 是进程边界：给 link / rm / rename 套一层，在指定路径的调用之前或之后插进另一个实例的整次写入，交错时机确定，不靠 sleep。
+// 不管怎么交错，写之前存在的 id 写完至少还剩一个文件；索引最后列全目录里的记忆。
+type Op = 'link' | 'rm' | 'rename'
 const { hooks } = vi.hoisted(() => ({
   hooks: [] as Array<{ op: string; path: string; when: 'before' | 'after'; run: () => Promise<unknown> }>,
 }))
@@ -35,7 +35,12 @@ vi.mock('node:fs/promises', async importOriginal => {
     await actual.rm(...args)
     await fire('rm', String(args[0]), 'after')
   })
-  return { ...actual, link, rm }
+  const rename = vi.fn(async (...args: Parameters<typeof actual.rename>) => {   // 目标是第二个参数
+    await fire('rename', String(args[1]), 'before')
+    await actual.rename(...args)
+    await fire('rename', String(args[1]), 'after')
+  })
+  return { ...actual, link, rm, rename }
 })
 
 /** 在 op 作用到 path 的那次调用之前 / 之后跑一次 run（只触发一次）。 */
@@ -152,5 +157,27 @@ describe('两个进程同时维护同一个目录', () => {
     await a.maintain([globalDir()])
     expect(await mds(globalDir())).toEqual([])
     expect(await mds(join(globalDir(), ARCHIVE_DIR))).toEqual(['竞态.md'])
+  })
+})
+
+describe('两个进程各自写完再生同一个目录的索引', () => {
+  it('B 按旧清单写索引之前 A 已写全：B 写完重读目录发现清单变了，再写一次，索引两条都有', async () => {
+    const a = newTable()
+    const b = newTable()
+    // B 落盘、读完目录（只有自己）之后、索引换上去之前，A 整次写完（它的索引已含两条）；B 随后用旧清单盖掉
+    at('before', 'rename', join(globalDir(), INDEX_FILE), () => asOtherProcess(() => a.create(record({ id: 'mem_a', name: '抢名' }))))
+    await b.create(record({ id: 'mem_b', name: '抢名' }))
+    const index = await readFile(join(globalDir(), INDEX_FILE), 'utf8')
+    expect(index).toContain('mem_a')
+    expect(index).toContain('mem_b')
+  })
+
+  it('目录没变：索引内容不变就不再写（不空转写盘）', async () => {
+    const t = newTable()
+    await t.create(record({ id: 'mem_a', name: '甲' }))
+    const { rename } = await import('node:fs/promises')
+    vi.mocked(rename).mockClear()
+    await t.maintain([globalDir()])
+    expect(vi.mocked(rename).mock.calls.filter(c => String(c[1]) === join(globalDir(), INDEX_FILE))).toEqual([])
   })
 })

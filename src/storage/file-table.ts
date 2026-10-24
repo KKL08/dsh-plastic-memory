@@ -32,6 +32,9 @@ const TMP_SUFFIX_RE = /\.tmp-(\d+)-[a-z0-9]+$/
 /** 写路径 locate 到写盘之间文件被别处改动时，重读重算的总次数上限；到上限仍在变就报错不写。 */
 const WRITE_ATTEMPTS = 3
 
+/** 维护点写索引后发现目录变了、按新清单重写的总次数上限（含第一次写）。 */
+const INDEX_ROUNDS = 3
+
 /** 写前复核发现 locate 之后文件被改：本轮写作废，由 update / put 重新 locate 再来（只在本文件内流转）。 */
 class StaleReadError extends Error {}
 
@@ -414,7 +417,16 @@ export class FileTable implements MemoryTable {
         if (!inArchive) kept.push({ record, filePath: slot.filePath, dir: slot.dir })
       }
       // kept 只剩顶层 active（非 active 已搬走）：同 id 取一份，再过滤已过期的
-      await this.regenerateIndex(sd.dir, resolveDuplicates(kept).filter(s => withinValidity(s.record, now)))
+      const indexable = (located: readonly LocatedRecord[]) => resolveDuplicates(located).filter(s => withinValidity(s.record, now))
+      let text = this.indexText(indexable(kept))
+      // 别的进程可能在本轮读目录之后写进同一目录，并先一步写好了全的索引，本轮按旧清单写会盖掉它：写了就重读顶层，
+      // 清单变了按新的再写，最多 INDEX_ROUNDS 次。最后写索引的进程以写后的目录为准，索引收敛到全的那份
+      for (let round = 1; await this.writeIndex(sd.dir, text) && round < INDEX_ROUNDS; round++) {
+        const { slots: fresh } = await this.readDirs([sd], {})
+        const next = this.indexText(indexable(fresh.filter(s => s.record.status === 'active')))
+        if (next === text) break
+        text = next
+      }
       for (const level of [sd.dir, archive]) await this.cleanStaleTmp(level)
     }
   }
@@ -445,7 +457,8 @@ export class FileTable implements MemoryTable {
     if ((await readFile(claimed, 'utf8').catch(() => undefined)) === text) await rm(claimed, { force: true })
   }
 
-  private async regenerateIndex(dir: string, active: readonly LocatedRecord[]): Promise<void> {
+  /** 索引全文：只由传入的 active 记录决定。 */
+  private indexText(active: readonly LocatedRecord[]): string {
     // 缺省格式器与注入侧同源（src/index-line.ts）。磁盘索引不带陈旧度：静态文件里的
     // 时间相对标注会随时间失真（设计稿 §6 登记的有意偏离）。
     // 行末带同目录的实际文件名（设计稿 §11），模型拿到即可 Read，不用再 grep id。
@@ -455,11 +468,17 @@ export class FileTable implements MemoryTable {
     const located = active.slice().sort(({ record: a }, { record: b }) =>
       a.name < b.name ? -1 : a.name > b.name ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
     const lines = located.map(l => fmt(l.record, basename(l.filePath)))
-    const text = `# Memory Index\n\n${lines.join('\n')}${lines.length ? '\n' : ''}`
+    return `# Memory Index\n\n${lines.join('\n')}${lines.length ? '\n' : ''}`
+  }
+
+  /** 写索引，内容不变不写；返回是否写了。 */
+  private async writeIndex(dir: string, text: string): Promise<boolean> {
     try {
       const prev = await readFile(join(dir, INDEX_FILE), 'utf8').catch(() => '')
-      if (prev !== text) await this.atomicWrite(join(dir, INDEX_FILE), text) // 内容不变不写
-    } catch { /* 索引是生成物，失败不致命 */ }
+      if (prev === text) return false
+      await this.atomicWrite(join(dir, INDEX_FILE), text)
+      return true
+    } catch { return false /* 索引是生成物，失败不致命 */ }
   }
 
   /** 只删两类原子写残留：① pid 段是本进程（自家崩溃）② mtime 超 60 秒的陈旧文件。多进程共用 memoryRoot 时，
