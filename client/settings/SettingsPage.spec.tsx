@@ -35,22 +35,26 @@ const section = (patch: Record<string, unknown>) => ({ ...structuredClone(DEFAUL
 const tab = (group: string, name: string) => within(screen.getByRole('tablist', { name: group })).getByRole('tab', { name })
 const save = () => screen.getByRole('button', { name: '保存' })
 
+const confirmDialog = () => screen.getByRole('dialog', { name: '保存这些改动？' })
+
+/** 点保存，再在确认弹窗里点保存。 */
 async function clickSave(form: FakeConfigForm) {
   const before = form.calls.length
-  await act(async () => { fireEvent.click(save()) })
+  fireEvent.click(save())
+  await act(async () => { fireEvent.click(within(confirmDialog()).getByRole('button', { name: '保存' })) })
   await waitFor(() => { expect(form.calls.length).toBe(before + 1) })
 }
 
 describe('三组设置的渲染', () => {
   it('记什么：模板三档、我加的类型列表', () => {
-    setup({ value: section({ template: 'office', customTypes: { 'meeting-note': { label: '会议纪要', description: 'd', whenToSave: 'w', recall: 'search', decayDays: null, governancePriority: 'medium' } } }) })
+    setup({ value: section({ template: 'office', customTypes: { 'domain-term': { label: '术语', description: 'd', whenToSave: 'w', recall: 'search', decayDays: null, governancePriority: 'medium' } } }) })
     expect(screen.getByRole('heading', { name: '记什么' })).toBeInTheDocument()
     expect(tab('场景模板', '办公')).toHaveAttribute('aria-selected', 'true')
     expect(tab('场景模板', '编码')).toHaveAttribute('aria-selected', 'false')
-    expect(tab('场景模板', '仅通用')).toBeInTheDocument()
-    expect(screen.getByText('会议纪要')).toBeInTheDocument()
-    expect(screen.getByText('meeting-note')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '编辑 会议纪要' })).toBeInTheDocument()
+    expect(tab('场景模板', '通用')).toBeInTheDocument()
+    expect(screen.getByText('术语')).toBeInTheDocument()
+    expect(screen.getByText('domain-term')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '编辑 术语' })).toBeInTheDocument()
   })
 
   it('怎么用：上限数字、超出上限两种模式的说明、溯源三档', () => {
@@ -88,11 +92,37 @@ describe('三组设置的渲染', () => {
     expect(screen.getByText('开一个会话后显示实际路径。')).toBeInTheDocument()
   })
 
-  it('模板切换后提示后果', () => {
+  it('模板按通用、编码、办公排列，说明随选中项列出这一档的类型', () => {
     setup()
-    expect(screen.queryByText(/旧模板独有类型的记忆仍会带入/)).toBeNull()
-    fireEvent.click(tab('场景模板', '仅通用'))
-    expect(screen.getByText('切换后，旧模板独有类型的记忆仍会带入、能搜到，agent 不再新增这类记忆。')).toBeInTheDocument()
+    const names = within(screen.getByRole('tablist', { name: '场景模板' })).getAllByRole('tab').map(el => el.textContent)
+    expect(names).toEqual(['通用', '编码', '办公'])
+    expect(screen.getByText('在通用五类之外，多一类「可复用流程」。')).toBeInTheDocument()
+    fireEvent.click(tab('场景模板', '办公'))
+    expect(screen.getByText(/^在通用五类之外，多「决定」「承诺」「人物」三类。/)).toBeInTheDocument()
+    fireEvent.click(tab('场景模板', '通用'))
+    expect(screen.getByText(/^用五类通用记忆：用户画像、行为偏好、事实与经验、项目信息、参考引用。/)).toBeInTheDocument()
+  })
+
+  it('切换模板会少掉类型时，提示少掉的是哪几类；只多不少时不提示', () => {
+    setup()
+    expect(screen.queryByText(/不再新增/)).toBeNull()
+    fireEvent.click(tab('场景模板', '通用'))
+    expect(screen.getByText('用五类通用记忆：用户画像、行为偏好、事实与经验、项目信息、参考引用。切换后不再新增「可复用流程」类记忆，已有的仍会带入、能搜到。')).toBeInTheDocument()
+    fireEvent.click(tab('场景模板', '办公'))
+    expect(screen.getByText('在通用五类之外，多「决定」「承诺」「人物」三类。切换后不再新增「可复用流程」类记忆，已有的仍会带入、能搜到。')).toBeInTheDocument()
+  })
+
+  it('从通用切到编码只多不少，不提示后果', () => {
+    setup({ value: section({ template: 'custom' }) })
+    fireEvent.click(tab('场景模板', '编码'))
+    expect(screen.getByText('在通用五类之外，多一类「可复用流程」。')).toBeInTheDocument()
+    expect(screen.queryByText(/不再新增/)).toBeNull()
+  })
+
+  it('从办公切到通用，列出少掉的三类', () => {
+    setup({ value: section({ template: 'office' }) })
+    fireEvent.click(tab('场景模板', '通用'))
+    expect(screen.getByText(/切换后不再新增「决定」「承诺」「人物」类记忆，已有的仍会带入、能搜到。$/)).toBeInTheDocument()
   })
 
   it('配置还在加载时只显示一行；宿主不服务这份配置时只显示提示', () => {
@@ -110,12 +140,30 @@ describe('我加的类型：增删改弹层', () => {
   const dialog = () => screen.getByRole('dialog', { name: '添加类型' })
   const fill = (label: string, value: string) => { fireEvent.change(within(dialog()).getByLabelText(label), { target: { value } }) }
 
+  it('召回方式默认「搜索」、治理优先级默认「中」，不点也能确定', async () => {
+    const { form } = setup()
+    openAdd()
+    expect(within(dialog()).getByRole('tab', { name: '搜索' })).toHaveAttribute('aria-selected', 'true')
+    expect(within(dialog()).getByRole('tab', { name: '中' })).toHaveAttribute('aria-selected', 'true')
+    fill('中文名', '术语')
+    fill('英文名', 'domain-term')
+    fill('说明', '团队内部说法和它的意思')
+    fill('什么时候记', '第一次解释一个说法时')
+    fireEvent.click(within(dialog()).getByRole('button', { name: '确定' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    await clickSave(form)
+    expect(form.calls[0]!.ops).toEqual([{
+      op: 'set', path: ['customTypes', 'domain-term'],
+      value: { label: '术语', description: '团队内部说法和它的意思', whenToSave: '第一次解释一个说法时', recall: 'search', decayDays: null, governancePriority: 'medium' },
+    }])
+  })
+
   it('必填项没填不能确定，逐项就地提示', () => {
     setup()
     openAdd()
     fireEvent.click(within(dialog()).getByRole('button', { name: '确定' }))
     expect(dialog()).toBeInTheDocument()
-    expect(within(dialog()).getAllByText('必填。')).toHaveLength(6)
+    expect(within(dialog()).getAllByText('必填。')).toHaveLength(4)
     expect(within(dialog()).getByLabelText('中文名')).toHaveAttribute('aria-invalid', 'true')
     expect(within(dialog()).getByLabelText('过期天数')).not.toHaveAttribute('aria-invalid')
   })
@@ -126,7 +174,7 @@ describe('我加的类型：增删改弹层', () => {
     fill('英文名', 'Meeting Note')
     fill('过期天数', '0')
     fireEvent.click(within(dialog()).getByRole('button', { name: '确定' }))
-    expect(within(dialog()).getByText('只能用小写英文字母和连字符，例如 meeting-note。')).toBeInTheDocument()
+    expect(within(dialog()).getByText('只能用小写英文字母和连字符，例如 domain-term。')).toBeInTheDocument()
     expect(within(dialog()).getByText('填一个大于 0 的整数，或者留空。')).toBeInTheDocument()
     fill('英文名', 'preference')
     expect(within(dialog()).getByText('和内置类型重名了，换一个。')).toBeInTheDocument()
@@ -135,26 +183,26 @@ describe('我加的类型：增删改弹层', () => {
   it('填齐后进列表；保存一次提交，过期天数留空写 null', async () => {
     const { form } = setup()
     openAdd()
-    fill('中文名', '会议纪要')
-    fill('英文名', 'meeting-note')
-    fill('说明', '会上定下的事')
-    fill('什么时候记', '开完会')
+    fill('中文名', '术语')
+    fill('英文名', 'domain-term')
+    fill('说明', '团队内部说法和它的意思')
+    fill('什么时候记', '第一次解释一个说法时')
     fireEvent.click(within(dialog()).getByRole('tab', { name: '搜索' }))
     fireEvent.click(within(dialog()).getByRole('tab', { name: '高' }))
     fireEvent.click(within(dialog()).getByRole('button', { name: '确定' }))
     expect(screen.queryByRole('dialog')).toBeNull()
-    expect(screen.getByText('会议纪要')).toBeInTheDocument()
+    expect(screen.getByText('术语')).toBeInTheDocument()
     await clickSave(form)
     expect(form.calls[0]!.ops).toEqual([{
-      op: 'set', path: ['customTypes', 'meeting-note'],
-      value: { label: '会议纪要', description: '会上定下的事', whenToSave: '开完会', recall: 'search', decayDays: null, governancePriority: 'high' },
+      op: 'set', path: ['customTypes', 'domain-term'],
+      value: { label: '术语', description: '团队内部说法和它的意思', whenToSave: '第一次解释一个说法时', recall: 'search', decayDays: null, governancePriority: 'high' },
     }])
   })
 
   it('编辑时英文名只读、可改其他字段；删除写 unset', async () => {
-    const type = { label: '会议纪要', description: 'd', whenToSave: 'w', recall: 'search', decayDays: 30, governancePriority: 'medium' }
-    const { form } = setup({ value: section({ customTypes: { 'meeting-note': type, 'todo': { ...type, label: '待办' } } }) })
-    fireEvent.click(screen.getByRole('button', { name: '编辑 会议纪要' }))
+    const type = { label: '术语', description: 'd', whenToSave: 'w', recall: 'search', decayDays: 30, governancePriority: 'medium' }
+    const { form } = setup({ value: section({ customTypes: { 'domain-term': type, 'todo': { ...type, label: '待办' } } }) })
+    fireEvent.click(screen.getByRole('button', { name: '编辑 术语' }))
     const edit = screen.getByRole('dialog', { name: '编辑类型' })
     expect(within(edit).getByLabelText('英文名')).toHaveAttribute('readonly')
     expect(within(edit).getByLabelText('过期天数')).toHaveValue('30')
@@ -163,7 +211,7 @@ describe('我加的类型：增删改弹层', () => {
     fireEvent.click(screen.getByRole('button', { name: '删除 待办' }))
     await clickSave(form)
     expect(form.calls[0]!.ops).toEqual([
-      { op: 'set', path: ['customTypes', 'meeting-note'], value: { ...type, decayDays: null } },
+      { op: 'set', path: ['customTypes', 'domain-term'], value: { ...type, decayDays: null } },
       { op: 'unset', path: ['customTypes', 'todo'] },
     ])
   })
@@ -171,14 +219,53 @@ describe('我加的类型：增删改弹层', () => {
   it('取消不改草稿', () => {
     setup()
     openAdd()
-    fill('中文名', '会议纪要')
+    fill('中文名', '术语')
     fireEvent.click(within(dialog()).getByRole('button', { name: '取消' }))
-    expect(screen.queryByText('会议纪要')).toBeNull()
+    expect(screen.queryByText('术语')).toBeNull()
     expect(save()).toBeDisabled()
   })
 })
 
 describe('保存：revision 冻结、冲突、非法值', () => {
+  it('点保存先弹窗列出改了哪几项（名称：旧值 → 新值），取消不提交、草稿保留', () => {
+    const { form } = setup()
+    fireEvent.click(tab('场景模板', '办公'))
+    fireEvent.change(screen.getByLabelText('每次对话带入的记忆上限'), { target: { value: '5000' } })
+    fireEvent.click(screen.getByRole('switch', { name: '记忆体检' }))
+    fireEvent.click(save())
+    const items = within(confirmDialog()).getAllByRole('listitem').map(el => el.textContent)
+    expect(items).toEqual([
+      '场景模板：编码 → 办公',
+      '每次对话带入的记忆上限：4000 → 5000',
+      '记忆体检：开 → 关',
+    ])
+    fireEvent.click(within(confirmDialog()).getByRole('button', { name: '取消' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(form.calls).toHaveLength(0)
+    expect(tab('场景模板', '办公')).toHaveAttribute('aria-selected', 'true')
+    expect(save()).toBeEnabled()
+  })
+
+  it('确认弹窗里自定义类型按新增、修改、删除汇总名称', async () => {
+    const type = { label: '术语', description: 'd', whenToSave: 'w', recall: 'search', decayDays: null, governancePriority: 'medium' }
+    const { form } = setup({ value: section({ customTypes: { 'domain-term': type, 'todo': { ...type, label: '待办' } } }) })
+    fireEvent.click(screen.getByRole('button', { name: '删除 待办' }))
+    fireEvent.click(screen.getByRole('button', { name: '编辑 术语' }))
+    fireEvent.change(within(screen.getByRole('dialog', { name: '编辑类型' })).getByLabelText('过期天数'), { target: { value: '30' } })
+    fireEvent.click(within(screen.getByRole('dialog', { name: '编辑类型' })).getByRole('button', { name: '确定' }))
+    fireEvent.click(screen.getByRole('button', { name: '添加类型' }))
+    const add = () => screen.getByRole('dialog', { name: '添加类型' })
+    for (const [label, value] of [['中文名', '学习目标'], ['英文名', 'learning-goal'], ['说明', 'd'], ['什么时候记', 'w']] as const) {
+      fireEvent.change(within(add()).getByLabelText(label), { target: { value } })
+    }
+    fireEvent.click(within(add()).getByRole('button', { name: '确定' }))
+    fireEvent.click(save())
+    expect(within(confirmDialog()).getAllByRole('listitem').map(el => el.textContent))
+      .toEqual(['我加的类型：新增「学习目标」；修改「术语」；删除「待办」'])
+    await act(async () => { fireEvent.click(within(confirmDialog()).getByRole('button', { name: '保存' })) })
+    await waitFor(() => { expect(form.calls).toHaveLength(1) })
+  })
+
   it('没有改动时保存置灰；多项改动一次 mutate，带开始编辑时的 revision；保存后回到干净状态', async () => {
     const { form } = setup()
     expect(save()).toBeDisabled()

@@ -47,10 +47,10 @@ describe('全部记忆', () => {
   })
 
   it('待处理视图没有这个类型时，用全部记忆视图自带的 typeLabels', () => {
-    const view = library({ layers: [{ layer: app, items: [memory({ id: 'a1', type: 'meeting-note' })] }], typeLabels: { 'meeting-note': '会议纪要' } })
+    const view = library({ layers: [{ layer: app, items: [memory({ id: 'a1', type: 'domain-term' })] }], typeLabels: { 'domain-term': '术语' } })
     const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], typeLabels: {} }
     renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: view, pending } }))
-    expect(screen.getByRole('listitem').querySelector('.pm-mc-meta span')).toHaveTextContent('会议纪要')
+    expect(screen.getByRole('listitem').querySelector('.pm-mc-meta span')).toHaveTextContent('术语')
   })
 
   it('目录问题来自视图，灰色一行一条，路径相对存储目录', () => {

@@ -22,6 +22,15 @@ function setup(view: PendingView | undefined, session: 'ready' | 'none' = 'ready
 }
 
 describe('左栏图标圆点', () => {
+  it('图标是设计稿定的鲸尾出水线稿：尾叶、尾柄、水波三笔', () => {
+    const { container } = setup(undefined)
+    const paths = [...container.querySelectorAll('path')].map(el => el.getAttribute('d') ?? '')
+    expect(paths).toHaveLength(3)
+    expect(paths[0]).toMatch(/^M12 13\.2C/)
+    expect(paths[1]).toBe('M12 12v4.3')
+    expect(paths[2]).toMatch(/^M3\.5 18\.3/)
+  })
+
   it('有等你决定的条目：琥珀圆点，图标线条在圆点处被 mask 挖空', () => {
     const { container, marker } = setup(pending('amber'))
     expect(marker()).toBe('pending')
