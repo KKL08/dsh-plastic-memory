@@ -92,5 +92,4 @@ export const contextBudgetBarCss = `
 .pm-budget-seg--fixed { background: var(--pm-caption); }
 .pm-budget-limit { position: absolute; top: 0; bottom: 0; width: 1px; margin-left: -.5px; background: var(--pm-text); }
 .pm-budget-legend { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
-.pm-link { border: 0; padding: 0; background: none; font: inherit; color: var(--pm-text); font-weight: 600; cursor: pointer; }
 `

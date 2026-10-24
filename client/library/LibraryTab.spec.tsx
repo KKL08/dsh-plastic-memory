@@ -88,14 +88,26 @@ describe('全部记忆', () => {
     expect(nav.get()).toEqual({ tab: 'deleted', memoryId: 'a2' })
   })
 
-  it('删别的项目里的记忆带 allowCrossWorkspace；失败显示原话', async () => {
+  it('删别的项目里的记忆：服务端拒（cross-workspace）后在行里确认，「继续处理」才带 allowCrossWorkspace 重发；失败显示原话', async () => {
     const gateway = createFakeGateway({
       views: { library: library() },
-      respond: command => ({ ok: false, cmd: command.cmd, code: 'not-found', detail: '记忆 b1 不存在' }),
+      respond: command => 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
+        ? { ok: false, cmd: command.cmd, code: 'not-found', detail: '记忆 b1 不存在' }
+        : { ok: false, cmd: command.cmd, code: 'cross-workspace', rejected: [{ id: 'b1', workspacePath: '/w/blog' }] },
     })
     renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'workspace', workspacePath: '/w/blog' }} session={session} now={NOW} />, gateway)
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除' })) })
-    expect(gateway.executed[0]!.command).toEqual({ cmd: 'forget', memoryId: 'b1', allowCrossWorkspace: true })
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'b1' }])
+    expect(screen.getByText('这条记忆属于 blog 项目，不是当前项目。确定在这里处理它吗？')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '删除' })).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.queryByRole('status')).toBeNull()
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '继续处理' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([
+      { cmd: 'forget', memoryId: 'b1' },
+      { cmd: 'forget', memoryId: 'b1', allowCrossWorkspace: true },
+    ])
+    expect(screen.queryByText(/属于 blog 项目/)).toBeNull()
     expect(screen.getByRole('status')).toHaveTextContent('没有成功：记忆 b1 不存在')
   })
 

@@ -208,9 +208,6 @@ export const settingsPageCss = `
   font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 12px; line-height: 1.5;
   color: var(--pm-text-2); word-break: break-all; user-select: text;
 }
-.pm-link {
-  padding: 0; border: 0; background: none; font: inherit; font-size: 13px; line-height: 1.5;
-  color: var(--pm-text-2); cursor: pointer; white-space: nowrap;
-}
-.pm-link:hover { color: var(--pm-text); }
+.pm-settings .pm-link { font-size: 13px; line-height: 1.5; color: var(--pm-text-2); white-space: nowrap; }
+.pm-settings .pm-link:hover { color: var(--pm-text); text-decoration: none; }
 `

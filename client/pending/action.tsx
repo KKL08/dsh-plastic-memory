@@ -57,21 +57,32 @@ export function useItemAction(session: BorrowedSession, onOk: (command: MemoryCo
   }
 }
 
+/** 跨项目确认行：写明记忆属于哪个项目，「取消」或「继续处理」。待处理卡和全部记忆 / 最近删除的行共用。 */
+export function CrossConfirm({ workspacePath, onCancel, onConfirm }: { workspacePath: string; onCancel: () => void; onConfirm: () => void }) {
+  const t = useT()
+  return (
+    <div className="pm-pending-confirm" role="group" aria-label={t('pending.cross.confirm')}>
+      <p className="pm-pending-text">{t('pending.cross.body', { name: baseName(workspacePath) })}</p>
+      <div className="pm-pending-actions">
+        <Button onClick={onCancel}>{t('pending.cancel')}</Button>
+        <Button onClick={onConfirm}>{t('pending.cross.confirm')}</Button>
+      </div>
+    </div>
+  )
+}
+
+/** CrossConfirm 的样式；待处理卡的说明文字和按钮组也用这两个类。 */
+export const crossConfirmCss = `
+.pm-pending-text { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
+.pm-pending-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.pm-pending-confirm { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: var(--dsw-radius-md, 12px); background: var(--pm-bg-block); }
+`
+
 /** 动作的反馈：跨项目确认行，或失败原话。 */
 export function ActionFeedback({ action }: { action: ItemAction }) {
   const t = useT()
   const { state } = action
-  if (state.kind === 'cross') {
-    return (
-      <div className="pm-pending-confirm" role="group" aria-label={t('pending.cross.confirm')}>
-        <p className="pm-pending-text">{t('pending.cross.body', { name: baseName(state.workspacePath) })}</p>
-        <div className="pm-pending-actions">
-          <Button onClick={action.cancelCross}>{t('pending.cancel')}</Button>
-          <Button onClick={action.confirmCross}>{t('pending.cross.confirm')}</Button>
-        </div>
-      </div>
-    )
-  }
+  if (state.kind === 'cross') return <CrossConfirm workspacePath={state.workspacePath} onCancel={action.cancelCross} onConfirm={action.confirmCross} />
   if (state.kind === 'error') return <p className="pm-pending-error" role="alert">{t('pending.failed', { detail: state.detail })}</p>
   return null
 }

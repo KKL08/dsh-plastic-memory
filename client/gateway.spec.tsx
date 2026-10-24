@@ -3,8 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { GUI_VIEW_VERSION, type PendingView } from '../src/gui/contract.ts'
 import {
-  CONFIG_ENTRY_ID, createHostGateway, decodeExecution, fileAddress, MEMORY_ROOT_KEY, parseView, pickSession, toPluginConfig, viewPath,
+  createHostGateway, decodeExecution, fileAddress, MEMORY_ROOT_KEY, parseView, pickSession, toPluginConfig, viewPath,
 } from './gateway.ts'
+import { ENTRY_ID } from './settings/config.ts'
 import { fakeHostContext } from './test-utils.tsx'
 import type { ConfigFormSnapshot, HostContext, ResourceSnapshot, SessionListState, SessionSummary, WorkspaceFileStat } from './host.ts'
 
@@ -133,7 +134,8 @@ describe('createHostGateway', () => {
     resources[address] = { status: 'failed', value: undefined, failure: { code: 'workspace-file/not-found', message: '' } }
     const gateway = createHostGateway(fakeCtx())(props)
     const { result, rerender } = renderHook(() => gateway.useView(gateway.useSession('/w/app'), 'library'))
-    await waitFor(() => { expect(executed).toEqual(['/memory refresh-views']) })
+    // 缓存的根刷新后仍读不到：再问一次 info，根没变就留在 missing
+    await waitFor(() => { expect(executed).toEqual(['/memory refresh-views', '/memory info']) })
     expect(result.current).toEqual({ status: 'missing' })
 
     files['/h/memories/.state/gui/library.json'] = JSON.stringify({ version: GUI_VIEW_VERSION + 1 })
@@ -150,6 +152,38 @@ describe('createHostGateway', () => {
     const { result } = renderHook(() => gateway.useView(gateway.useSession(undefined), 'pending'))
     await waitFor(() => { expect(result.current.status).toBe('ready') })
     expect(executed).toEqual([])
+  })
+
+  it('缓存的 memoryRoot 过期：刷新后仍读不到就再发一次 info，换成新根并从新路径读视图', async () => {
+    localStorage.setItem(MEMORY_ROOT_KEY, '/old/memories')
+    resources[fileAddress('s1', '/old/memories/.state/gui/pending.json')] = { status: 'failed', value: undefined, failure: { code: 'workspace-file/not-found', message: '' } }
+    resources[fileAddress('s1', pendingPath)] = { status: 'live', value: { absolutePath: pendingPath, version: 'v1' }, failure: undefined }
+    const gateway = createHostGateway(fakeCtx())(props)
+    const { result } = renderHook(() => gateway.useView(gateway.useSession('/w/app'), 'pending'))
+    await waitFor(() => { expect(result.current).toEqual({ status: 'ready', data: pending }) })
+    expect(executed).toEqual(['/memory refresh-views', '/memory info'])
+    expect(localStorage.getItem(MEMORY_ROOT_KEY)).toBe('/h/memories')
+  })
+
+  it('info 失败后是 error；换一个会话时重试', async () => {
+    const two = list(summary('s1', { cwd: '/w/a', updatedAt: 1 }), summary('s2', { cwd: '/w/b', updatedAt: 2 }))
+    const ctx = fakeCtx()
+    const execute = ctx.remote.commands.execute as ReturnType<typeof vi.fn>
+    const ok = execute.getMockImplementation()!
+    execute.mockImplementation(async (sid: string, line: string) => sid === 's1'
+      ? (executed.push(line), { ok: false as const, error: { code: 'boom', message: 'no session' } })
+      : ok(sid, line))
+    resources[fileAddress('s2', pendingPath)] = { status: 'live', value: { absolutePath: pendingPath, version: 'v1' }, failure: undefined }
+    files[pendingPath] = JSON.stringify(pending)
+    const gateway = createHostGateway(ctx)({ ...props, useSessions: <S,>(selector: (s: SessionListState) => S) => selector(two) })
+    const { result, rerender } = renderHook(({ ws }) => gateway.useView(gateway.useSession(ws), 'pending'), { initialProps: { ws: '/w/a' } })
+    await waitFor(() => { expect(result.current).toEqual({ status: 'error', message: 'boom: no session' }) })
+    rerender({ ws: '/w/a' })
+    expect(executed).toEqual(['/memory info'])
+
+    rerender({ ws: '/w/b' })
+    await waitFor(() => { expect(result.current).toEqual({ status: 'ready', data: pending }) })
+    expect(executed).toEqual(['/memory info', '/memory info', '/memory refresh-views'])
   })
 
   it('没有会话：idle，不发命令', () => {
@@ -189,7 +223,7 @@ describe('createHostGateway', () => {
     expect(result.current).toBeUndefined()
     act(() => { snapshot = { status: 'ready', value, revision: 1, writable: true }; for (const fn of listeners) fn() })
     expect(result.current).toEqual({ snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget: 'agents-md' })
-    expect(get).toHaveBeenCalledWith(CONFIG_ENTRY_ID)
+    expect(get).toHaveBeenCalledWith(ENTRY_ID)
     expect(await gateway.setConfig('snapshotTokenBudget', 5000)).toBe(true)
     expect(set).toHaveBeenCalledWith('snapshotTokenBudget', 5000)
   })

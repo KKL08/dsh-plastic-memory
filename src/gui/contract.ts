@@ -2,6 +2,9 @@ import { z } from 'zod'
 import { memoryRecordSchema } from '../record-schema.ts'
 import { OVERFLOW_MODES, type DirectoryNoteCode, type ScanNoteCode } from '../contract-codes.ts'
 
+/** 密钥遮盖（与注入、视图同一套规则），浏览器半侧给对话卡里来自工具参数的文字用。 */
+export { maskSecrets, maskSecretSurface } from '../secrets.ts'
+
 /**
  * GUI 契约（命名契约：视图与命令的标识符只在这一处定义）。服务端 GUI 层与浏览器半侧共用，是叶子：
  * 只 import zod 与其他叶子，且必须能在浏览器里运行（不碰 node:*）。

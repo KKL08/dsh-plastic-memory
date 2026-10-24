@@ -15,6 +15,11 @@ export const SIDEBAR_TAB_ID = 'dsh-plastic-memory'
 /** 右侧栏记忆 tab 的类型名（`openTab` 认它）。 */
 export const SIDEBAR_TAB_KIND = 'plastic-memory'
 
+/** 两个作用域是否同一层：都是全局，或同一个项目路径。 */
+export function sameScope(a: GuiLayerRef, b: GuiLayerRef): boolean {
+  return a.kind === b.kind && (a.kind === 'global' || (b.kind === 'workspace' && a.workspacePath === b.workspacePath))
+}
+
 export const MEMORY_TABS = ['pending', 'library', 'health', 'deleted'] as const
 export type MemoryTab = (typeof MEMORY_TABS)[number]
 

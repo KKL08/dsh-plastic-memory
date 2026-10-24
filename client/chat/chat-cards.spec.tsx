@@ -169,6 +169,31 @@ describe('交付卡', () => {
   })
 })
 
+// —— 密钥不进对话卡（故事 42） ——
+
+describe('密钥永远不出现在对话卡里', () => {
+  const KEY = 'ghp_' + 'a1B2'.repeat(9)
+  const secretArgs = { ...saveArgs, name: `token ${KEY}`, summary: `用 ${KEY}`, content: `部署用的 token 是 ${KEY}，别外传。` }
+
+  it('交付卡：记忆卡的名字、摘要、原文都遮成 [已隐藏]', () => {
+    const data = turnData([turnStart, call(2, 'c1', 'memory_save', secretArgs), res(3, 'c1', SAVED_TEXT)])
+    expect(data?.saved).toHaveLength(1)
+    expect(JSON.stringify(data)).not.toContain(KEY)
+    const { container } = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={data!.saved} now={NOW} openDetail={() => {}} deleted={new Set()} />, createFakeGateway())
+    expect(container.textContent).not.toContain(KEY)
+    expect(container.textContent).toContain('[已隐藏]')
+  })
+
+  it('折叠行：摘要和展开后的输入 / 输出都不带密钥', () => {
+    let expanded = true
+    const props: MemoryToolViewProps = { ...result('memory_save', secretArgs, `${SAVED_TEXT}\n${KEY}`), useDisclosure: () => ({ expanded, toggle: () => { expanded = !expanded } }) }
+    const { container } = renderInShell(<MemoryToolRow {...props} hostT={hostT} />)
+    expect(screen.getByText('输入')).toBeInTheDocument()
+    expect(container.textContent).not.toContain(KEY)
+    expect(container.querySelector('.pm-tr-summary')).toHaveTextContent('[已隐藏]')
+  })
+})
+
 // —— 注册与导航 ——
 
 function fakeHost() {

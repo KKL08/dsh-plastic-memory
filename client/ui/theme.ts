@@ -41,6 +41,8 @@ body[data-ds-dark-theme] .pm-root {
   outline: var(--dsw-focus-ring-width, 2px) solid var(--pm-focus);
   outline-offset: 2px;
 }
+.pm-link { padding: 0; border: 0; background: none; font: inherit; font-weight: 600; color: var(--pm-text); cursor: pointer; }
+.pm-link:hover { text-decoration: underline; }
 .pm-sep { font-style: normal; color: var(--pm-caption); margin: 0 6px; }
 .pm-sr-only {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;

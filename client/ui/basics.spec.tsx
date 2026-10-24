@@ -1,11 +1,10 @@
-// 小组件的渲染测试：按钮、状态标记、chip、体检横幅、记忆列表行、空状态。
+// 小组件的渲染测试：按钮、状态标记、chip、体检横幅、空状态。
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, screen } from '@testing-library/react'
 import { Button } from './Button.tsx'
 import { Chip } from './Chip.tsx'
 import { EmptyState } from './EmptyState.tsx'
 import { HealthBanner } from './HealthBanner.tsx'
-import { MemoryListRow } from './MemoryListRow.tsx'
 import { StatusMarker } from './StatusMarker.tsx'
 import { renderInShell } from '../test-utils.tsx'
 
@@ -87,22 +86,6 @@ describe('HealthBanner', () => {
   })
 })
 
-describe('MemoryListRow', () => {
-  it('选中行带 pm-row--on 与 aria-current，点击回调', () => {
-    const onSelect = vi.fn()
-    renderInShell(<>
-      <MemoryListRow label="回答用中文" trailing="全局" selected onSelect={onSelect} />
-      <MemoryListRow label="测试不 mock" />
-    </>)
-    const on = screen.getByRole('button', { name: /回答用中文/ })
-    expect(on).toHaveClass('pm-row', 'pm-row--on')
-    expect(on).toHaveAttribute('aria-current', 'true')
-    expect(screen.getByText('全局')).toHaveClass('pm-row-trailing')
-    expect(screen.getByRole('button', { name: '测试不 mock' })).not.toHaveClass('pm-row--on')
-    fireEvent.click(on)
-    expect(onSelect).toHaveBeenCalledTimes(1)
-  })
-})
 
 describe('EmptyState', () => {
   it('首次：银藤底图标里是鲸尾线稿，鼠标移上去重播（重挂一次线稿）', () => {

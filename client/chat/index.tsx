@@ -2,10 +2,10 @@
  * 对话里的两层卡：`tool.call.toolview` 按九个工具名注册折叠行；`conversation.chat.turnTail` 注册交付卡，
  * 本轮新记的记忆由会话事件 Definition 挂到 Turn 上。`uiConversation` 是可选服务，没有就不注册交付卡。
  */
-import { useCallback, useMemo, useSyncExternalStore } from 'react'
+import { useMemo, useSyncExternalStore } from 'react'
 import type { BindGateway } from '../gateway.ts'
-import type { HostContext, HostLocale, RootStandardProps } from '../host.ts'
-import { TranslateProvider, type Translate } from '../i18n.tsx'
+import type { HostContext, RootStandardProps } from '../host.ts'
+import { TranslateProvider, useHostTranslate } from '../i18n.tsx'
 import { NS } from '../locales.ts'
 import { openMemoryPage, type NavStore } from '../nav.ts'
 import { PanelShell } from '../ui/PanelShell.tsx'
@@ -29,15 +29,6 @@ export interface TurnTailProps extends RootStandardProps {
 /** 可选服务 uiConversation 就位后的子上下文。 */
 export interface ChatContext extends HostContext {
   uiConversation: { events: { register(definition: SavedTurnDefinition): () => void } }
-}
-
-function useHostTranslate(locale: HostLocale, ns: string): Translate {
-  const subscribe = useCallback((fn: () => void) => locale.subscribe(fn), [locale])
-  const snapshot = useSyncExternalStore(subscribe, () => locale.getSnapshot())
-  return useMemo(() => {
-    const bound = locale.bind(ns)
-    return (key, params) => bound(key, params)
-  }, [locale, ns, snapshot])
 }
 
 function createToolView(ctx: HostContext) {

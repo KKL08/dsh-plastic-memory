@@ -12,7 +12,6 @@ import { contextBudgetBarCss } from './ContextBudgetBar.tsx'
 import { emptyStateCss } from './EmptyState.tsx'
 import { healthBannerCss } from './HealthBanner.tsx'
 import { memoryCardCss } from './MemoryCard.tsx'
-import { memoryListRowCss } from './MemoryListRow.tsx'
 import { segmentedCss } from './Segmented.tsx'
 import { settingsCss } from './Settings.tsx'
 import { statusMarkerCss } from './StatusMarker.tsx'
@@ -20,7 +19,7 @@ import { themeCss } from './theme.ts'
 
 export const PM_CSS = [
   themeCss, buttonCss, chipCss, statusMarkerCss, memoryCardCss, conflictRulingCss, contextBudgetBarCss,
-  memoryListRowCss, emptyStateCss, healthBannerCss, segmentedCss, settingsCss,
+  emptyStateCss, healthBannerCss, segmentedCss, settingsCss,
 ].join('')
 
 export function PanelShell({ gateway, t, className, children, extraCss = '' }: {

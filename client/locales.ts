@@ -18,7 +18,6 @@ export const zh = {
   'nav.label': '记忆',
 
   'page.title': '记忆',
-  'page.placeholder': '这一栏还在做。',
   'page.settings': '设置',
 
   'scope.label': '作用域',
@@ -53,9 +52,7 @@ export const zh = {
   'source.none': '无出处',
   'memory.expired': '不再带入对话',
 
-  'marker.pending': '等你决定',
   'marker.secret': '有密钥要处理',
-  'marker.ok': '状态良好',
 
   'conflict.title': '两条记忆互相矛盾，等你决定',
   'conflict.side': '记忆 {side}',
@@ -96,7 +93,6 @@ export const en: Record<LocaleKey, string> = {
   'nav.label': 'Memory',
 
   'page.title': 'Memory',
-  'page.placeholder': 'This view is still being built.',
   'page.settings': 'Settings',
 
   'scope.label': 'Scope',
@@ -131,9 +127,7 @@ export const en: Record<LocaleKey, string> = {
   'source.none': 'No source',
   'memory.expired': 'No longer brought into chats',
 
-  'marker.pending': 'Waiting for your decision',
   'marker.secret': 'A secret needs attention',
-  'marker.ok': 'All good',
 
   'conflict.title': 'Two memories contradict each other',
   'conflict.side': 'Memory {side}',

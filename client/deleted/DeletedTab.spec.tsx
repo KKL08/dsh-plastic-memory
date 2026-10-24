@@ -82,11 +82,27 @@ describe('最近删除', () => {
     expect(screen.getByRole('status')).toHaveTextContent('已恢复，这条冲突回到了待处理。')
   })
 
-  it('恢复别的项目里的带 allowCrossWorkspace；普通恢复只说已恢复', async () => {
-    const gateway = createFakeGateway({ views: { deleted } })
+  it('恢复别的项目里的：服务端拒后在行里确认，「取消」不重发，「继续处理」带 allowCrossWorkspace 重发；普通恢复只说已恢复', async () => {
+    const gateway = createFakeGateway({
+      views: { deleted },
+      respond: command => 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
+        ? { ok: true, cmd: command.cmd, memoryIds: ['d5'] }
+        : { ok: false, cmd: command.cmd, code: 'cross-workspace', rejected: [{ id: 'd5', workspacePath: '/w/blog' }] },
+    })
     renderInShell(<DeletedTab nav={createNavStore()} scope={{ kind: 'workspace', workspacePath: '/w/blog' }} session={session} now={NOW} />, gateway)
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '恢复' })) })
-    expect(gateway.executed[0]!.command).toEqual({ cmd: 'restore', memoryId: 'd5', allowCrossWorkspace: true })
+    expect(screen.getByText('这条记忆属于 blog 项目，不是当前项目。确定在这里处理它吗？')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(screen.queryByText(/属于 blog 项目/)).toBeNull()
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'restore', memoryId: 'd5' }])
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '恢复' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '继续处理' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([
+      { cmd: 'restore', memoryId: 'd5' },
+      { cmd: 'restore', memoryId: 'd5' },
+      { cmd: 'restore', memoryId: 'd5', allowCrossWorkspace: true },
+    ])
     expect(screen.getByRole('status')).toHaveTextContent('已恢复。')
   })
 

@@ -20,7 +20,7 @@ function trianglePath(side: number): string {
  * 带标记时贴右上角画圆点或三角，并用 SVG mask 把标记周围的图标线条挖掉，玻璃、暗色、实色侧栏上都不露光晕。
  * 图标在插槽根之外渲染，拿不到 `--pm-*` 令牌，颜色直接取宿主令牌。
  */
-export function MemoryIcon({ size, marker }: { size: number; active: boolean; marker?: IconMarker | undefined }) {
+export function MemoryIcon({ size, marker }: { size: number; marker?: IconMarker | undefined }) {
   const maskId = `pm-nav-mask-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`
   const unit = 24 / size
   const gap = GAP_PX * unit

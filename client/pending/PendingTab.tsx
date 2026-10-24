@@ -12,6 +12,7 @@ import { formatDay, useT } from '../i18n.tsx'
 import { FlashRow, useFlashTarget } from '../library/shared.tsx'
 import { useCanOpen, type NavStore } from '../nav.ts'
 import { EmptyState } from '../ui/EmptyState.tsx'
+import { crossConfirmCss } from './action.tsx'
 import {
   HorizontalCard, OverflowCard, PromoteCard, ResultCard, SecretCard, UnreadableCard, VerticalCard, type Outcome,
 } from './cards.tsx'
@@ -106,7 +107,7 @@ export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
     <div className="pm-pending">
       <style data-plastic-memory-pending="">{pendingCss}</style>
       {rows.length === 0
-        ? <PendingEmpty nav={nav} session={session} workspacePath={workspacePath} health={health.status === 'ready' ? health.data : undefined} governanceEnabled={config?.governanceEnabled} now={now} />
+        ? <PendingEmpty nav={nav} session={session} workspacePath={workspacePath} health={health.status === 'ready' ? health.data : undefined} now={now} />
         : rows.map(row => (
           <FlashRow key={row.key} as="div" className="pm-pending-row" flashing={row.flashing ?? false} onFlashEnd={clear}>{row.node}</FlashRow>
         ))}
@@ -129,18 +130,18 @@ function lastScanAt(health: HealthView): number | null {
   return times.length === 0 ? null : Math.max(...times)
 }
 
-function PendingEmpty({ nav, session, workspacePath, health, governanceEnabled, now }: {
+/** 体检开关取健康视图（和健康 tab、页头的体检按钮同一来源）；视图还没到时按开着处理。 */
+function PendingEmpty({ nav, session, workspacePath, health, now }: {
   nav: NavStore
   session: BorrowedSession
   workspacePath: string | undefined
   health: HealthView | undefined
-  governanceEnabled: boolean | undefined
   now: number
 }) {
   const t = useT()
   const canOpenSettings = useCanOpen(nav, 'settings')
 
-  if (governanceEnabled === false) {
+  if (health?.governanceEnabled === false) {
     return (
       <EmptyState
         variant="daily"
@@ -167,7 +168,7 @@ function PendingEmpty({ nav, session, workspacePath, health, governanceEnabled, 
   )
 }
 
-export const pendingCss = `
+export const pendingCss = crossConfirmCss + `
 .pm-pending { display: flex; flex-direction: column; }
 .pm-pending-row { position: relative; }
 .pm-pending-row + .pm-pending-row { border-top: .5px solid var(--pm-line); }
@@ -178,11 +179,8 @@ export const pendingCss = `
 .pm-pending-title { margin: 0; flex: 1; min-width: 0; font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
 .pm-pending-aside { margin-left: auto; }
 .pm-pending-body { display: flex; flex-direction: column; gap: 10px; padding-left: 16px; }
-.pm-pending-text { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-pending-hint { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-pending-error { margin: 6px 0 0; font-size: 12px; line-height: 1.5; color: var(--pm-text); }
-.pm-pending-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
-.pm-pending-confirm { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: var(--dsw-radius-md, 12px); background: var(--pm-bg-block); }
 .pm-pending-result { display: flex; align-items: center; gap: 12px; }
 .pm-pending-result .pm-pending-text { flex: 1; }
 .pm-pending-undo { font-weight: 600; }
