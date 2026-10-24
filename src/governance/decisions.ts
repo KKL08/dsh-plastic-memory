@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import type { KvTable } from '../kv-table.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { RETENTION_MS } from '../retention.ts'
-import type { OverflowLevel } from '../snapshot.ts'
+import type { OverflowLevel } from '../contract-codes.ts'
 import { genId, type PendingDecision, type PendingKind, type SettledVerdict } from './schema.ts'
 
 /** 去重 key：memoryIds 排序拼接 + baselineRef（垂直冲突与横向冲突互不干扰）。 */

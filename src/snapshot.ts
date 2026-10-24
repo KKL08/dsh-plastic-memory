@@ -5,7 +5,7 @@ import { workspaceDirName, GLOBAL_DIR, INDEX_FILE, ARCHIVE_DIR } from './storage
 import { EVIDENCE_GUIDANCE, type EvidenceLookupLevel } from './evidence-guidance.ts'
 import { stalenessNote, withinValidity } from './record-freshness.ts'
 import { maskSecrets, maskSecretSurface } from './secrets.ts'
-import type { OverflowMode } from './contract-codes.ts'
+import type { OverflowLevel, OverflowMode } from './contract-codes.ts'
 
 export type { OverflowMode }
 
@@ -63,9 +63,6 @@ function truncationNav(omitted: ReadonlyArray<{ type: string; records: readonly 
     : '完整索引见各记忆目录的 MEMORY.md，或用 memory_search 查询。')
   return lines.join('\n')
 }
-
-/** 档位：relax 的 tier ≥ 1，上限 × (1 + 0.25 × tier) 是放宽后的天花板；strict 只有一档（用到 95%），tier 恒为 0。 */
-export type OverflowLevel = { mode: OverflowMode; tier: number }
 
 /** 一次组装的用量。token 是 estimateTokens 的逐段估算。 */
 export interface SnapshotUsage {
