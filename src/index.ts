@@ -408,7 +408,9 @@ export async function apply(ctx: Context, config: Config) {
     const commands = (child as unknown as { commands: { register(def: MemoryCommandDefinition): () => void } }).commands
     const writer = new ViewWriter({
       memoryRoot, log: ctx.logger,
-      collect: () => collectGlobalViews({ store, decisions, cache: scanCache, registry, memoryRoot }),
+      collect: () => collectGlobalViews({
+        store, decisions, cache: scanCache, registry, memoryRoot, isGovernanceEnabled: () => config.governance.enabled.get(),
+      }),
     })
     views = writer
     commands.register(createMemoryCommand({

@@ -105,6 +105,10 @@ export interface HostContext {
     /** 按 kind 打开右侧栏页面类型；kind 没注册会抛错。 */
     openTab(kind: string): void
   }
+  /** ui-plugin-manager 提供：切到插件页并打开某个包的详情，不换当前会话。 */
+  pluginNavigation: {
+    openBundle(packageName: string): void
+  }
   remote: {
     commands: {
       execute(sessionId: string, line: string, attachments: readonly unknown[]): Promise<RemoteResult<CommandExecution | undefined>>

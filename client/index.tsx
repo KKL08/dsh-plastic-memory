@@ -9,6 +9,7 @@ import { createHostGateway } from './gateway.ts'
 import type { HostContext, HostLocale, RootStandardProps } from './host.ts'
 import type { Translate } from './i18n.tsx'
 import { en, NS, zh } from './locales.ts'
+import { healthCss } from './health/HealthTab.tsx'
 import { MemoryIcon } from './MemoryIcon.tsx'
 import { MemoryPage, memoryPageCss } from './MemoryPage.tsx'
 import { createNavStore, PANEL_ID, type NavStore } from './nav.ts'
@@ -16,7 +17,10 @@ import { PanelShell } from './ui/PanelShell.tsx'
 
 export { PANEL_ID }
 
-export const inject = ['slots', 'locale', 'layout', 'sidebarRight', 'remote', 'remote.commands', 'remote.workspaceFiles', 'remote.session']
+export const inject = ['slots', 'locale', 'layout', 'sidebarRight', 'remote', 'remote.commands', 'remote.workspaceFiles', 'remote.session', 'pluginNavigation']
+
+/** npm 包名：宿主插件页按它打开本插件的详情（配置区在详情页里）。 */
+export const PACKAGE_NAME = 'dsh-plastic-memory'
 
 /** 宿主 locale 的翻译函数；切语言或字典晚到时换一个新引用，让组件重渲染。 */
 function useHostTranslate(locale: HostLocale): Translate {
@@ -34,7 +38,7 @@ function createMainPanel(ctx: HostContext, nav: NavStore) {
     const gateway = useMemo(() => bind(props), [props.useSessions, props.useResource])
     const t = useHostTranslate(ctx.locale)
     return (
-      <PanelShell gateway={gateway} t={t} extraCss={memoryPageCss}>
+      <PanelShell gateway={gateway} t={t} extraCss={memoryPageCss + healthCss}>
         <MemoryPage nav={nav} />
       </PanelShell>
     )
@@ -44,7 +48,7 @@ function createMainPanel(ctx: HostContext, nav: NavStore) {
 export function apply(ctx: HostContext): void {
   ctx.locale.register(NS, { zh, en })
   const t = ctx.locale.bind(NS)
-  const nav = createNavStore()
+  const nav = createNavStore(undefined, { openSettings: () => { ctx.pluginNavigation.openBundle(PACKAGE_NAME) } })
   const MainPanel = createMainPanel(ctx, nav)
   ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID }, MainPanel))
   ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({

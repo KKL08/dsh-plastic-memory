@@ -208,6 +208,15 @@ describe('健康视图', () => {
     const global = health.layers.find(l => l.layer.kind === 'global')!
     expect(global).toMatchObject({ score: null, gate: { secret: true }, issues: [{ type: 'secret', count: 1 }] })
   })
+  it('带体检开关：缺省开启，关闭时 governanceEnabled 为 false（层照常列出）', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_a', name: 'A' }))
+    expect((await h.views()).health.governanceEnabled).toBe(true)
+    const off = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
+    expect(healthViewSchema.parse(off.health)).toEqual(off.health)
+    expect(off.health.governanceEnabled).toBe(false)
+    expect(off.health.layers.map(l => l.layer.kind)).toEqual(['global', 'workspace'])
+  })
 })
 
 describe('会话视图', () => {

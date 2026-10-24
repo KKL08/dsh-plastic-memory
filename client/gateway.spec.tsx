@@ -88,6 +88,7 @@ describe('createHostGateway', () => {
       locale: { register: () => () => {}, bind: () => k => k, getSnapshot: () => 0, subscribe: () => () => {} },
       layout: { selectPanel: () => {} },
       sidebarRight: { openTab: () => {} },
+      pluginNavigation: { openBundle: () => {} },
       remote: {
         commands: {
           execute: vi.fn(async (_sid: string, line: string) => {

@@ -10,8 +10,8 @@ export interface FakeGatewayInit {
   session?: BorrowedSession
   currentWorkspace?: string
   views?: { [N in ViewName]?: ViewMap[N] | ViewState<ViewMap[N]> }
-  /** 命令的返回；缺省一律 `{ ok: true, cmd }`。 */
-  respond?: (command: MemoryCommand) => MemoryCommandResult
+  /** 命令的返回；缺省一律 `{ ok: true, cmd }`。返回 Promise 可模拟进行中。 */
+  respond?: (command: MemoryCommand) => MemoryCommandResult | Promise<MemoryCommandResult>
   /** openPath 的返回；缺省 true。 */
   openOk?: boolean
 }
@@ -73,7 +73,7 @@ export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
     },
     async execute(sessionId, command) {
       executed.push({ sessionId, command })
-      return init.respond?.(command) ?? { ok: true, cmd: command.cmd }
+      return await (init.respond?.(command) ?? { ok: true, cmd: command.cmd })
     },
     async openPath(path, action) {
       opened.push(action === undefined ? { path } : { path, action })

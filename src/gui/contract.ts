@@ -10,7 +10,7 @@ import { OVERFLOW_MODES, type DirectoryNoteCode, type ScanNoteCode } from '../co
  */
 
 /** 视图 schema 的版本号：视图是派生缓存，形状变了就换号，客户端读到不认识的号按「需要刷新」处理。 */
-export const GUI_VIEW_VERSION = 2
+export const GUI_VIEW_VERSION = 3
 
 /** 视图文件所在目录（相对记忆根目录，POSIX 分隔）。 */
 export const GUI_VIEW_DIR = '.state/gui'
@@ -136,6 +136,8 @@ export const healthLayerSchema = z.object({
 })
 export const healthViewSchema = z.object({
   version,
+  /** 体检开关（governance.enabled）：关闭时界面置灰健康内容、「体检当前项目」不可用。 */
+  governanceEnabled: z.boolean(),
   layers: z.array(healthLayerSchema),
 })
 export type HealthView = z.infer<typeof healthViewSchema>

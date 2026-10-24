@@ -33,6 +33,8 @@ export interface ViewInput {
   settled: readonly PendingDecision[]
   /** 目录枚举的说明（缺标记、不可读目录）。 */
   listingNotes: readonly DirectoryNote[]
+  /** 体检开关的当前值。 */
+  governanceEnabled: boolean
 }
 
 export type GlobalViews = { pending: PendingView; health: HealthView; library: LibraryView; deleted: DeletedView }
@@ -126,6 +128,7 @@ export function buildHealthView(input: ViewInput): HealthView {
   const overflow = [...input.open, ...input.settled].filter(e => kindOf(e) === 'overflow')
   return {
     version: GUI_VIEW_VERSION,
+    governanceEnabled: input.governanceEnabled,
     layers: input.healthLayers.map(layer => {
       const r = scoreLayer({ registry: input.registry }, input.data, layer, input.now)
       return {
