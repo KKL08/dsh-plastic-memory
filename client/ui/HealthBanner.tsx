@@ -34,6 +34,7 @@ export const healthBannerCss = `
 }
 .pm-banner-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .pm-banner-title { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
+.pm-banner-title .pm-sep { margin: 0 6px 0 -2px; }
 .pm-banner-detail { margin: 0 0 0 16px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-banner--plain .pm-banner-detail { margin-left: 0; }
 .pm-banner-actions { display: flex; gap: 8px; flex-shrink: 0; }
