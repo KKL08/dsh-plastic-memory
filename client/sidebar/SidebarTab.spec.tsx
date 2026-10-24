@@ -49,6 +49,7 @@ function pending(...items: PendingItem[]): PendingView {
 
 const conflict: PendingItem = { kind: 'conflict-horizontal', decisionId: 'pd_1', firstSeenAt: 1, summary: '', left: pref, right: pref2 }
 const promote: PendingItem = { kind: 'promote-candidate', decisionId: 'pd_2', firstSeenAt: 1, memory: proj }
+const vertical: PendingItem = { kind: 'conflict-vertical', decisionId: 'pd_v', firstSeenAt: 1, summary: '', memory: proj, baselineRef: 'AGENTS.md：merge freeze' }
 
 function setup(views: FakeGatewayInit['views'], respond?: FakeGatewayInit['respond']) {
   const gateway = createFakeGateway({ views: { health: health(), ...views }, ...(respond === undefined ? {} : { respond }) })
@@ -195,6 +196,70 @@ describe('SidebarTab 就地裁决', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '都保留' })) })
     expect(screen.getByRole('alert')).toHaveTextContent('没有成功：条目已处理')
     expect(screen.getByRole('heading', { name: '两条记忆互相矛盾，等你决定' })).toBeInTheDocument()
+  })
+})
+
+describe('SidebarTab 跨项目确认', () => {
+  it('对方属于别的项目：服务端拒了就原位确认，「继续处理」带 allowCrossWorkspace 重发；「取消」什么都不发', async () => {
+    const other = memory({ id: 'p2', type: 'preference', workspacePath: '/w/blog', content: '测试里 mock 数据库就行。' })
+    const cross: PendingItem = { ...conflict, right: other } as PendingItem
+    const { gateway } = setup(
+      { library: library(pref, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending(cross) },
+      command => 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
+        ? { ok: true, cmd: command.cmd }
+        : { ok: false, cmd: command.cmd, code: 'cross-workspace', rejected: [{ id: 'p2', workspacePath: '/w/blog' }] },
+    )
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '都保留' })) })
+    expect(screen.getByText('这条记忆属于 blog 项目，不是当前项目。确定在这里处理它吗？')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByRole('button', { name: '以 A 为准' })).toHaveAttribute('aria-disabled', 'true')
+
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(screen.queryByText(/属于 blog 项目/)).toBeNull()
+    expect(gateway.executed).toHaveLength(1)
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '都保留' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '继续处理' })) })
+    expect(gateway.executed.map(e => e.command).at(-1)).toEqual({ cmd: 'resolve', decisionId: 'pd_1', verdict: 'keep-both', allowCrossWorkspace: true })
+    expect(screen.getByText('以后体检不再把它们当冲突。')).toBeInTheDocument()
+    expect(screen.queryByText(/属于 blog 项目/)).toBeNull()
+  })
+})
+
+describe('SidebarTab 就地裁决：和基线冲突', () => {
+  it('带入的记忆和基线冲突：冲突卡挂在它的组里，写明基线不会被删除；以基线为准发 keep-right，结果留原位可撤销', async () => {
+    const { gateway } = setup({ library: library(pref, proj), session: snapshot({ injectedIds: ['p1', 'j1'] }), pending: pending(vertical) })
+    const group = within(screen.getByRole('region', { name: '项目信息' }))
+    expect(group.getByRole('heading', { name: '这条记忆和基线矛盾，等你决定' })).toBeInTheDocument()
+    expect(group.getByText('AGENTS.md 是基线，不会被删除。')).toBeInTheDocument()
+    expect(screen.getAllByText('merge freeze 到 3 月 5 日。')).toHaveLength(1)
+    expect(screen.queryByText(/处待处理/)).toBeNull()
+
+    await act(async () => { fireEvent.click(group.getByRole('button', { name: '以基线为准' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'resolve', decisionId: 'pd_v', verdict: 'keep-right' }])
+    act(() => {
+      gateway.setView('pending', pending())
+      gateway.setView('library', library(pref))
+    })
+    expect(screen.getByText('已按基线')).toBeInTheDocument()
+    expect(screen.getByText(/这条记忆已删除，14 天内可恢复。/)).toBeInTheDocument()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
+    expect(gateway.executed.map(e => e.command)[1]).toEqual({ cmd: 'undo', decisionId: 'pd_v' })
+  })
+
+  it('保留这条记忆发 keep-left，记忆留在原位带「已保留这条记忆」', async () => {
+    const { gateway } = setup({ library: library(proj), session: snapshot({ injectedIds: ['j1'] }), pending: pending(vertical) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '保留这条记忆' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'resolve', decisionId: 'pd_v', verdict: 'keep-left' }])
+    act(() => { gateway.setView('pending', pending()) })
+    expect(screen.getByText('已保留这条记忆')).toBeInTheDocument()
+    expect(screen.getByText('merge freeze 到 3 月 5 日。')).toBeInTheDocument()
+  })
+
+  it('记忆没带入的基线冲突不挂出来，只在底部计数', () => {
+    setup({ library: library(pref, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending(vertical) })
+    expect(screen.queryByRole('heading', { name: '这条记忆和基线矛盾，等你决定' })).toBeNull()
+    expect(screen.getByText(/本项目还有 1 处待处理/)).toBeInTheDocument()
   })
 })
 

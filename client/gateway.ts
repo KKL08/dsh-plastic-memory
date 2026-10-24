@@ -5,6 +5,8 @@
  * 数据通道（spec「数据通道」）：视图是 `<memoryRoot>/.state/gui/*.json`，经文件资源订阅版本、版本变了再读；
  * 动作是 `/memory` 会话命令。浏览器半侧不知道 memoryRoot：首次需要时借会话发一次 `info`，结果缓存到 localStorage；
  * 视图文件不存在时再发一次 `refresh-views` 让服务端生成；用的是缓存的根、刷新后还读不到时再问一次 `info`（根可能换了）。
+ * 缓存根的同时记下当时配置里的 memoryRoot；宿主给了配置服务、且配置值和记下的不一样（用户改了存储位置，旧目录里
+ * 视图文件还在，靠「读不到」发现不了）时丢掉缓存，按首次进入重来。没有配置服务时不比对。
  * 只有两态：一个会话都没有 → none；有会话（历史或在跑，宿主会自动 resume 冷会话）→ ready。
  */
 import { createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
@@ -18,7 +20,7 @@ import {
 import type {
   CommandExecution, ConfigForm, ConfigFormSnapshot, HostContext, RemoteResult, RootStandardProps, SessionListState,
 } from './host.ts'
-import { ENTRY_ID } from './settings/config.ts'
+import { configuredRoot, ENTRY_ID } from './settings/config.ts'
 
 export interface ViewMap {
   pending: PendingView
@@ -177,6 +179,8 @@ export function toPluginConfig(value: unknown): PluginConfig | undefined {
 // —— 宿主实现 ——
 
 export const MEMORY_ROOT_KEY = 'dsh-plastic-memory.gui.memoryRoot'
+/** 缓存 memoryRoot 时配置里写的 memoryRoot（原样，空 = 默认位置）。 */
+export const MEMORY_ROOT_CONFIG_KEY = 'dsh-plastic-memory.gui.memoryRootConfig'
 
 interface ConfigBinding {
   form: ConfigForm | undefined
@@ -200,22 +204,53 @@ type RunLine = (sessionId: string, line: string) => Promise<RemoteResult<Command
 function createRootStore(run: RunLine) {
   let state: RootState = { refreshes: 0 }
   let isCached = false
+  /** 缓存的根对应的配置值；undefined = 不知道（旧缓存没记，或拿到根时配置还没到）。 */
+  let cachedConfig: string | undefined
+  /** 最近一次看到的配置值。 */
+  let liveConfig: string | undefined
+  /** 根是这个页面生命周期里 info 拿到的（不是 localStorage 里的旧值）。 */
+  let isFresh = false
   try {
     const saved = localStorage.getItem(MEMORY_ROOT_KEY)
     if (saved) { state = { ...state, memoryRoot: saved }; isCached = true }
+    cachedConfig = localStorage.getItem(MEMORY_ROOT_CONFIG_KEY) ?? undefined
   } catch { /* 存储不可用：每次进入发一次 info */ }
   const listeners = new Set<() => void>()
   let infoInflight = false
   const failedSessions = new Set<string>()
   let refreshed = false
   const set = (next: RootState) => { state = next; for (const fn of listeners) fn() }
+  const rememberConfig = (configured: string | undefined) => {
+    cachedConfig = configured
+    try {
+      if (configured === undefined) localStorage.removeItem(MEMORY_ROOT_CONFIG_KEY)
+      else localStorage.setItem(MEMORY_ROOT_CONFIG_KEY, configured)
+    } catch { /* 只在本页生效 */ }
+  }
   const remember = (memoryRoot: string) => {
     try { localStorage.setItem(MEMORY_ROOT_KEY, memoryRoot) } catch { /* 只在本页生效 */ }
+    rememberConfig(liveConfig)
+    isFresh = true
     set({ ...state, memoryRoot, error: undefined })
   }
   const store = {
     get: () => state,
     subscribe(fn: () => void) { listeners.add(fn); return () => { listeners.delete(fn) } },
+    /** 配置里的 memoryRoot（宿主还没给出或不服务配置时为 undefined，不比对）。和缓存时的值不同就丢掉缓存，useView 随后按首次进入发 info。 */
+    syncConfig(configured: string | undefined) {
+      if (configured === undefined) return
+      liveConfig = configured
+      if (state.memoryRoot === undefined || configured === cachedConfig) return
+      // 根是本页刚问到的、当时配置还没到：配置值补记上，不再问
+      if (isFresh && cachedConfig === undefined) { rememberConfig(configured); return }
+      isCached = false
+      isFresh = false
+      refreshed = false
+      failedSessions.clear()
+      try { localStorage.removeItem(MEMORY_ROOT_KEY) } catch { /* 只在本页生效 */ }
+      rememberConfig(undefined)
+      set({ ...state, memoryRoot: undefined, error: undefined })
+    },
     ensureRoot(sessionId: string) {
       if (state.memoryRoot !== undefined || infoInflight || failedSessions.has(sessionId)) return
       infoInflight = true
@@ -328,6 +363,10 @@ export function createHostGateway(ctx: HostContext): BindGateway {
     },
     useView(session, name) {
       const rootState = useSyncExternalStore(root.subscribe, root.get)
+      const { get: getConfig, subscribe: subscribeConfig } = config()
+      const configSnapshot = useSyncExternalStore(subscribeConfig, getConfig)
+      const configured = configSnapshot?.status === 'ready' ? configuredRoot(configSnapshot.value) : undefined
+      useEffect(() => { root.syncConfig(configured) }, [configured])
       const sessionId = session.kind === 'ready' ? session.sessionId : undefined
       useEffect(() => { if (sessionId !== undefined) root.ensureRoot(sessionId) }, [sessionId, rootState])
       const path = sessionId !== undefined && rootState.memoryRoot !== undefined ? viewPath(rootState.memoryRoot, name, sessionId) : undefined

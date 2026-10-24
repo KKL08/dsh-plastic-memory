@@ -33,13 +33,9 @@ export const pendingZh = {
   'pending.conflict.preferred': '决定前 agent 按 {side} 来。',
   'pending.conflict.preferredExplicit': '决定前 agent 按你明确说过的 {side} 来。',
 
-  'pending.vertical.baseline': 'AGENTS.md 是基线，不会被删除。',
-  'pending.vertical.baselineRef': '基线：{ref}',
-  'pending.vertical.keepBaseline': '以基线为准',
-  'pending.vertical.keepMemory': '保留这条记忆',
-  'pending.vertical.consequence': '以基线为准会删掉这条记忆，14 天内可恢复。保留这条记忆：基线和记忆都不变时不再报。',
 
   'pending.promote.title': '这条适合所有项目',
+  'pending.promote.titleIn': '{name} 里的这条适合所有项目',
   'pending.promote.global': '提升为全局',
   'pending.promote.globalIn': '提升 {name} 里的这条',
   'pending.promote.agentsMd': '写进 AGENTS.md',
@@ -57,6 +53,7 @@ export const pendingZh = {
   'pending.overflow.raise': '调高上限',
   'pending.overflow.save': '保存',
   'pending.overflow.raiseHint': '触发新上限前不会再提醒。',
+  'pending.overflow.cleanup': '整理记忆 ›',
   'pending.overflow.invalid': '填一个比 {budget} 大的整数。',
   'pending.overflow.saveFailed': '没有保存成功，再试一次。',
 
@@ -118,15 +115,11 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.conflict.preferred': 'Until you decide, the agent follows {side}.',
   'pending.conflict.preferredExplicit': 'Until you decide, the agent follows {side}, which you said explicitly.',
 
-  'pending.vertical.baseline': 'AGENTS.md is the baseline and will not be deleted.',
-  'pending.vertical.baselineRef': 'Baseline: {ref}',
-  'pending.vertical.keepBaseline': 'Go with the baseline',
-  'pending.vertical.keepMemory': 'Keep this memory',
-  'pending.vertical.consequence': 'Going with the baseline deletes this memory; it can be restored within 14 days. Keep this memory: not reported again while neither changes.',
 
   'pending.promote.title': 'This fits every project',
+  'pending.promote.titleIn': 'The one in {name} fits every project',
   'pending.promote.global': 'Make global',
-  'pending.promote.globalIn': 'Make this one from {name} global',
+  'pending.promote.globalIn': 'Promote the one in {name}',
   'pending.promote.agentsMd': 'Write into AGENTS.md',
   'pending.promote.globalNote': 'Every project will bring it in. You can undo within 14 days.',
   'pending.promote.agentsMdNote': 'You maintain it from then on: the plugin stops checking it and it never expires.',
@@ -142,6 +135,7 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.overflow.raise': 'Raise the limit',
   'pending.overflow.save': 'Save',
   'pending.overflow.raiseHint': 'No more reminders until the new limit is reached.',
+  'pending.overflow.cleanup': 'Clean up memories ›',
   'pending.overflow.invalid': 'Enter a whole number above {budget}.',
   'pending.overflow.saveFailed': 'Could not save. Try again.',
 

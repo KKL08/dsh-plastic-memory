@@ -98,7 +98,14 @@ export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
         const target = config === undefined ? undefined : config.globalPromoteTarget === 'agents-md' ? 'agents-md' : 'global'
         return <PromoteCard item={item} {...props} promoteTarget={target} />
       }
-      case 'overflow': return <OverflowCard item={item} {...props} budget={config?.snapshotTokenBudget} />
+      case 'overflow': return (
+        <OverflowCard
+          item={item}
+          {...props}
+          budget={config?.snapshotTokenBudget}
+          onCleanup={(scope) => { nav.update({ tab: 'library', scope, memoryId: undefined }) }}
+        />
+      )
       case 'unreadable-file': return <UnreadableCard item={item} {...props} />
     }
   }
@@ -180,6 +187,7 @@ export const pendingCss = crossConfirmCss + `
 .pm-pending-aside { margin-left: auto; }
 .pm-pending-body { display: flex; flex-direction: column; gap: 10px; padding-left: 16px; }
 .pm-pending-hint { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
+.pm-pending-hint .pm-link { margin-left: 8px; font-size: 12px; }
 .pm-pending-error { margin: 6px 0 0; font-size: 12px; line-height: 1.5; color: var(--pm-text); }
 .pm-pending-result { display: flex; align-items: center; gap: 12px; }
 .pm-pending-result .pm-pending-text { flex: 1; }

@@ -3,12 +3,12 @@
  * 成功后把结果（Outcome）交给列表，由列表在原位换成结果卡。
  */
 import { useState, type ReactNode } from 'react'
-import { CONFLICT_ACTION_VERDICTS, type MemoryCard as MemoryCardData, type PendingItem } from '../../src/gui/contract.ts'
+import { CONFLICT_ACTION_VERDICTS, type GuiLayerRef, type MemoryCard as MemoryCardData, type PendingItem } from '../../src/gui/contract.ts'
 import { samePath, useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, formatNumber, useT, type Translate } from '../i18n.tsx'
 import { Button } from '../ui/Button.tsx'
 import { Chip } from '../ui/Chip.tsx'
-import { ConflictRuling } from '../ui/ConflictRuling.tsx'
+import { ConflictRuling, VerticalConflictRuling } from '../ui/ConflictRuling.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { StatusMarker } from '../ui/StatusMarker.tsx'
 import { ActionFeedback, useItemAction } from './action.tsx'
@@ -154,26 +154,23 @@ export function HorizontalCard({ item, session, now, typeLabels, onDone }: CardP
 
 export function VerticalCard({ item, session, now, typeLabels, onDone }: CardProps<'conflict-vertical'>) {
   const t = useT()
-  const { vertical } = CONFLICT_ACTION_VERDICTS
   const action = useItemAction(session, (command) => {
     if (command.cmd === 'resolve') onDone({ kind: 'resolved', verdict: command.verdict })
   })
-  const unavailable = action.unavailable ?? (item.memory === null ? t('conflict.missingHint') : undefined)
-  const rule = (verdict: Verdict) => { action.run({ cmd: 'resolve', decisionId: item.decisionId, verdict }) }
   return (
-    <Card marker={<StatusMarker kind="pending" />} title={titleOf(item, t)}>
-      <p className="pm-pending-text">{t('pending.vertical.baseline')}</p>
-      {item.memory === null
-        ? <p className="pm-pending-text">{t('conflict.missing')}</p>
-        : <MemoryOf memory={item.memory} now={now} typeLabels={typeLabels} />}
-      <p className="pm-pending-text">{t('pending.vertical.baselineRef', { ref: item.baselineRef })}</p>
-      <p className="pm-pending-text">{t('pending.vertical.consequence')}</p>
-      <div className="pm-pending-actions">
-        <Button unavailable={unavailable} onClick={() => { rule(vertical.keepBaseline) }}>{t('pending.vertical.keepBaseline')}</Button>
-        <Button unavailable={unavailable} onClick={() => { rule(vertical.keepMemory) }}>{t('pending.vertical.keepMemory')}</Button>
-      </div>
+    <div className="pm-pending-item">
+      <VerticalConflictRuling
+        layout="wide"
+        memory={item.memory}
+        baselineRef={item.baselineRef}
+        now={now}
+        title={titleOf(item, t)}
+        unavailable={action.unavailable}
+        typeLabel={type => typeLabels[type] ?? type}
+        onRule={(verdict) => { action.run({ cmd: 'resolve', decisionId: item.decisionId, verdict }) }}
+      />
       <ActionFeedback action={action} />
-    </Card>
+    </div>
   )
 }
 
@@ -193,8 +190,10 @@ export function PromoteCard({ item, session, now, typeLabels, onDone, promoteTar
   const promoteLabel = promoteTarget === 'agents-md' ? t('pending.promote.agentsMd')
     : other !== undefined ? t('pending.promote.globalIn', { name: baseName(other) }) : t('pending.promote.global')
   return (
-    <Card marker={<StatusMarker kind="pending" />} title={t('pending.promote.title')}>
-      {other !== undefined ? <p className="pm-pending-text">{t('pending.inProject', { name: baseName(other) })}</p> : null}
+    <Card
+      marker={<StatusMarker kind="pending" />}
+      title={other !== undefined ? t('pending.promote.titleIn', { name: baseName(other) }) : t('pending.promote.title')}
+    >
       {item.memory === null
         ? <p className="pm-pending-text">{t('conflict.missing')}</p>
         : <MemoryOf memory={item.memory} now={now} typeLabels={typeLabels} />}
@@ -222,7 +221,11 @@ export function PromoteCard({ item, session, now, typeLabels, onDone, promoteTar
 /** 第 tier 档放宽到的上限：budget × (1 + 0.25 × tier)。 */
 const capOf = (budget: number, tier: number) => Math.round(budget * (1 + 0.25 * tier))
 
-export function OverflowCard({ item, session, onDone, budget }: CardProps<'overflow'> & { budget: number | undefined }) {
+export function OverflowCard({ item, session, onDone, budget, onCleanup }: CardProps<'overflow'> & {
+  budget: number | undefined
+  /** 「整理记忆 ›」：去全部记忆，作用域是这张卡那一层。 */
+  onCleanup: (scope: GuiLayerRef) => void
+}) {
   const t = useT()
   const gateway = useGateway()
   const action = useItemAction(session, () => { onDone({ kind: 'dismissed' }) })
@@ -276,6 +279,13 @@ export function OverflowCard({ item, session, onDone, budget }: CardProps<'overf
       </div>
       <p className="pm-pending-hint">
         {budget !== undefined && invalid && value.trim() !== '' ? t('pending.overflow.invalid', { budget: formatNumber(budget) }) : t('pending.overflow.raiseHint')}
+        <button
+          type="button"
+          className="pm-link"
+          onClick={() => { onCleanup(item.workspacePath !== undefined ? { kind: 'workspace', workspacePath: item.workspacePath } : { kind: 'global' }) }}
+        >
+          {t('pending.overflow.cleanup')}
+        </button>
       </p>
       <ActionFeedback action={action} />
     </Card>

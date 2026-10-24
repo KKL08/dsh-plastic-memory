@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { ComponentType } from 'react'
-import { GUI_VIEW_VERSION } from '../../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, type LibraryView } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createHostGateway } from '../gateway.ts'
 import type { SessionListState } from '../host.ts'
@@ -160,6 +160,13 @@ describe('交付卡', () => {
     expect(container.querySelector('.pm-mc-meta')).toHaveTextContent(/^行为偏好/)
   })
 
+  it('待处理视图没有这个类型时，类型显示名取全部记忆视图的 typeLabels', () => {
+    const library: LibraryView = { version: GUI_VIEW_VERSION, memoryRoot: '/m', layers: [], directoryIssues: [], typeLabels: { preference: '行为偏好' } }
+    const gateway = createFakeGateway({ views: { library, pending: { version: GUI_VIEW_VERSION, dot: 'none', items: [], typeLabels: {} } } })
+    const { container } = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} deleted={new Set()} />, gateway)
+    expect(container.querySelector('.pm-mc-meta')).toHaveTextContent(/^行为偏好/)
+  })
+
   it('删除失败时原文还在，旁边写服务端原话', async () => {
     const gateway = createFakeGateway({ respond: () => ({ ok: false, code: 'not-found', detail: '记忆不存在' }) })
     renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} deleted={new Set()} />, gateway)
@@ -191,6 +198,20 @@ describe('密钥永远不出现在对话卡里', () => {
     expect(screen.getByText('输入')).toBeInTheDocument()
     expect(container.textContent).not.toContain(KEY)
     expect(container.querySelector('.pm-tr-summary')).toHaveTextContent('[已隐藏]')
+  })
+
+  it('带 force 存下的疑似密钥（password: …）同样不出现在交付卡和折叠行里', () => {
+    const PASS = 'password: Hunter2-2026'
+    const args = { ...saveArgs, name: `登录 ${PASS}`, content: `测试环境 ${PASS}，周五前改。`, force: true }
+    const data = turnData([turnStart, call(2, 'c1', 'memory_save', args), res(3, 'c1', SAVED_TEXT)])
+    const card = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={data!.saved} now={NOW} openDetail={() => {}} deleted={new Set()} />, createFakeGateway())
+    expect(card.container.textContent).not.toContain('Hunter2-2026')
+    expect(card.container.textContent).toContain('[已隐藏]')
+    card.unmount()
+    let expanded = true
+    const props: MemoryToolViewProps = { ...result('memory_save', args, `${SAVED_TEXT}\n${PASS}`), useDisclosure: () => ({ expanded, toggle: () => { expanded = !expanded } }) }
+    const { container } = renderInShell(<MemoryToolRow {...props} hostT={hostT} />)
+    expect(container.textContent).not.toContain('Hunter2-2026')
   })
 })
 
@@ -242,16 +263,22 @@ describe('注册', () => {
     await waitFor(() => expect(execute).toHaveBeenCalledWith('s1', '/memory forget {"memoryId":"mem_1"}', []))
   })
 
-  it('「查看详情 ›」：先写导航目标（全部记忆 · 记忆所在作用域 · 这条的 id），再切到记忆页', () => {
+  it('每条各有「查看详情 ›」：先写导航目标（全部记忆 · 这条所在作用域 · 这条的 id），再切到记忆页', () => {
     const { registered, nav, ctx } = fakeHost()
     const Tail = registered.find(r => r.options.name === 'conversation.chat.turnTail')!.component as ComponentType<TurnTailProps>
-    const { unmount } = render(<Tail {...tailProps({ saved: [saved('mem_1', '原文'), saved('mem_2', '二')] })} />)
-    fireEvent.click(screen.getByRole('button', { name: '查看详情 ›' }))
-    expect(nav.get()).toEqual({ tab: 'library', scope: { kind: 'workspace', workspacePath: '/w/app' }, memoryId: 'mem_1' })
+    render(<Tail {...tailProps({ saved: [saved('mem_1', '原文'), saved('mem_g', '全局', 'global'), saved('mem_2', '二')] })} />)
+    const links = screen.getAllByRole('button', { name: '查看详情 ›' })
+    expect(links).toHaveLength(3)
+    expect(links.map(link => link.closest('[data-memory-id]')?.getAttribute('data-memory-id'))).toEqual(['mem_1', 'mem_g', 'mem_2'])
+    fireEvent.click(links[2]!)
+    expect(nav.get()).toEqual({ tab: 'library', scope: { kind: 'workspace', workspacePath: '/w/app' }, memoryId: 'mem_2' })
     expect(ctx.layout.selectPanel).toHaveBeenCalledWith(PANEL_ID)
-    unmount()
-    render(<Tail {...tailProps({ saved: [saved('mem_g', '全局', 'global')] })} />)
-    fireEvent.click(within(screen.getByRole('region')).getByRole('button', { name: '查看详情 ›' }))
+    fireEvent.click(links[1]!)
     expect(nav.get()).toEqual({ tab: 'library', scope: { kind: 'global' }, memoryId: 'mem_g' })
+  })
+
+  it('删掉的那条不再有「查看详情 ›」', () => {
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '一'), saved('mem_2', '二')]} now={NOW} openDetail={() => {}} deleted={new Set(['mem_1'])} />)
+    expect(screen.getAllByRole('button', { name: '查看详情 ›' }).map(link => link.closest('[data-memory-id]')?.getAttribute('data-memory-id'))).toEqual(['mem_2'])
   })
 })

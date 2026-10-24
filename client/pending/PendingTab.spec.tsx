@@ -98,6 +98,12 @@ describe('待处理：各类卡', () => {
     expect(commands()).toEqual([{ cmd: 'keep-local', decisionId: 'd-p' }])
   })
 
+  it('候选在本项目里：标题和按钮不写项目名', () => {
+    setup([promote])
+    expect(screen.getByRole('heading', { name: '这条适合所有项目' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '提升为全局' })).toBeInTheDocument()
+  })
+
   it('提升目标是 AGENTS.md：按钮改「写进 AGENTS.md」并说明插件不再管理；结果不能撤销', async () => {
     const { commands } = setup([promote], { config: { ...config, globalPromoteTarget: 'agents-md' } })
     expect(screen.getByText('之后由你自己维护：插件不再体检它，它也不会过期。')).toBeInTheDocument()
@@ -107,12 +113,24 @@ describe('待处理：各类卡', () => {
     expect(commands()).toEqual([{ cmd: 'promote', decisionId: 'd-p', target: 'agents-md' }])
   })
 
-  it('候选在别的项目里：写明项目名，按钮「提升 X 里的这条」；还没读到配置时提升按钮不可用', () => {
+  it('候选在别的项目里：标题写明项目名，按钮「提升 X 里的这条」；还没读到配置时提升按钮不可用', () => {
     const other: PendingItem = { ...promote, memory: memory({ id: 'p2', workspacePath: '/w/blog' }) } as PendingItem
     setup([other], { config: undefined })
-    expect(screen.getByText('在 blog 项目里')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'blog 里的这条适合所有项目' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '提升 blog 里的这条' })).toHaveAttribute('aria-disabled', 'true')
     expect(screen.getByRole('button', { name: '提升 blog 里的这条' })).toHaveAttribute('title', '正在读取设置…')
+  })
+
+  it('超限：「整理记忆 ›」去全部记忆，作用域是这张卡那一层（项目或全局），不发命令', () => {
+    const nav = createNavStore()
+    const global: PendingItem = { kind: 'overflow', decisionId: 'd-g', firstSeenAt: 5, mode: 'strict', tier: 0 }
+    const { commands } = setup([overflow, global], {}, nav)
+    const [projectLink, globalLink] = screen.getAllByRole('button', { name: '整理记忆 ›' })
+    fireEvent.click(projectLink!)
+    expect(nav.get()).toMatchObject({ tab: 'library', scope: { kind: 'workspace', workspacePath: '/w/app' }, memoryId: undefined })
+    fireEvent.click(globalLink!)
+    expect(nav.get()).toMatchObject({ tab: 'library', scope: { kind: 'global' }, memoryId: undefined })
+    expect(commands()).toEqual([])
   })
 
   it('超限：写出超出量与放宽到的档位；「忽略」发 dismiss-overflow', async () => {
@@ -354,5 +372,22 @@ describe('待处理：直达某条记忆', () => {
     setup([horizontal], {}, createNavStore({ tab: 'pending', memoryId: 'nope' }))
     expect(document.querySelector('.pm-flash')).toBeNull()
     expect(scrollIntoView).not.toHaveBeenCalled()
+  })
+})
+
+// —— 键盘（故事 50）：裁决、提升、删除都是原生 button，能 Tab 到；焦点环用宿主令牌（见 ui/basics.spec 的主题检查） ——
+
+describe('键盘', () => {
+  it('裁决 / 提升 / 删除控件都是原生 button，不在 Tab 序列外', () => {
+    setup([secret, horizontal, vertical, promote])
+    const names = ['以 A 为准', '以 B 为准', '都保留', '以基线为准', '保留这条记忆', '提升为全局', '留在本项目', '彻底删除…']
+    for (const name of names) {
+      const button = screen.getByRole('button', { name })
+      expect(button.tagName).toBe('BUTTON')
+      expect(button).not.toBeDisabled()
+      expect(button.tabIndex).toBe(0)
+      button.focus()
+      expect(document.activeElement).toBe(button)
+    }
   })
 })

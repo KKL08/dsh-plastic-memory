@@ -2,8 +2,8 @@ import { z } from 'zod'
 import { memoryRecordSchema } from '../record-schema.ts'
 import { OVERFLOW_MODES, type DirectoryNoteCode, type ScanNoteCode } from '../contract-codes.ts'
 
-/** 密钥遮盖（与注入、视图同一套规则），浏览器半侧给对话卡里来自工具参数的文字用。 */
-export { maskSecrets, maskSecretSurface } from '../secrets.ts'
+/** 密钥遮盖（缺省与注入、视图同一套规则），浏览器半侧给对话卡里来自工具参数的文字用（带 severity: 'suspected'）。 */
+export { maskSecrets, maskSecretSurface, type MaskOptions } from '../secrets.ts'
 
 /**
  * GUI 契约（命名契约：视图与命令的标识符只在这一处定义）。服务端 GUI 层与浏览器半侧共用，是叶子：
@@ -168,6 +168,8 @@ export const libraryViewSchema = z.object({
   layers: z.array(z.object({ layer: layerRefSchema, items: z.array(memoryCardSchema) })),
   /** 目录问题：同 id 多份副本、被忽略的字段、缺标记 / 不可读目录。 */
   directoryIssues: z.array(directoryIssueSchema),
+  /** 类型 id → 显示名（同待处理视图的 typeLabels），覆盖注册表与本视图出现的类型。可缺省：升级前写的视图文件没有，下次写视图补上。 */
+  typeLabels: z.record(z.string(), z.string()).optional(),
 })
 export type LibraryView = z.infer<typeof libraryViewSchema>
 
@@ -191,6 +193,8 @@ export const deletedItemSchema = z.object({
 export const deletedViewSchema = z.object({
   version,
   items: z.array(deletedItemSchema),
+  /** 类型 id → 显示名（同全部记忆视图的 typeLabels），另含裁决对方的类型。可缺省，理由同上。 */
+  typeLabels: z.record(z.string(), z.string()).optional(),
 })
 export type DeletedView = z.infer<typeof deletedViewSchema>
 

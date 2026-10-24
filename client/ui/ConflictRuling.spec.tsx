@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, screen, within } from '@testing-library/react'
-import { ConflictRuling } from './ConflictRuling.tsx'
+import { ConflictRuling, VerticalConflictRuling } from './ConflictRuling.tsx'
 import { memory, NOW, renderInShell } from '../test-utils.tsx'
 
 const left = memory({ id: 'a', content: '测试用真实 Postgres。' })
@@ -60,6 +60,32 @@ describe('ConflictRuling', () => {
     const button = screen.getByRole('button', { name: '都保留' })
     expect(button).toHaveAttribute('title', '先开一个会话')
     fireEvent.click(button)
+    expect(onRule).not.toHaveBeenCalled()
+  })
+})
+
+describe('VerticalConflictRuling', () => {
+  it('写明基线不会被删除和基线出处；「以基线为准」= keep-right、「保留这条记忆」= keep-left', () => {
+    const onRule = vi.fn()
+    const { container } = renderInShell(<VerticalConflictRuling layout="narrow" memory={left} baselineRef="AGENTS.md：用 pnpm" now={NOW} onRule={onRule} />)
+    expect(screen.getByRole('heading', { name: '这条记忆和基线矛盾，等你决定' })).toBeInTheDocument()
+    expect(container.querySelector('.pm-conflict-head .pm-marker--pending')).not.toBeNull()
+    expect(screen.getByText('AGENTS.md 是基线，不会被删除。')).toBeInTheDocument()
+    expect(screen.getByText('基线：AGENTS.md：用 pnpm')).toBeInTheDocument()
+    expect(screen.getByText('测试用真实 Postgres。')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '以基线为准' }))
+    fireEvent.click(screen.getByRole('button', { name: '保留这条记忆' }))
+    expect(onRule.mock.calls).toEqual([['keep-right'], ['keep-left']])
+    const row = container.querySelector('.pm-conflict-buttons')!
+    expect(row.querySelectorAll('button')).toHaveLength(2)
+    expect(row.nextElementSibling).toHaveTextContent('以基线为准会删掉这条记忆')
+  })
+
+  it('记忆找不到：显示说明，两个按钮都不可用', () => {
+    const onRule = vi.fn()
+    renderInShell(<VerticalConflictRuling layout="narrow" memory={null} baselineRef="AGENTS.md" now={NOW} onRule={onRule} />)
+    expect(screen.getByText('这条记忆找不到了，可能已经被删除。')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '以基线为准' }))
     expect(onRule).not.toHaveBeenCalled()
   })
 })

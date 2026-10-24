@@ -211,6 +211,15 @@ describe('全部记忆视图', () => {
     expect(library.layers[0].items[0].filePath).toBe(join(root, GLOBAL_DIR, '全局一条.md'))
     expect(library.directoryIssues.map(i => [i.code, i.path])).toEqual(expect.arrayContaining([['duplicate-id', dup], ['reserved-keys', reserved]]))
   })
+
+  it('typeLabels：注册表的类型和本视图记忆卡里出现的类型 → 显示名，认不出的类型显示 id', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_a', name: 'A', type: 'decision' }))
+    await h.store.create(g({ id: 'mem_b', name: 'B', type: 'mystery' }))
+    const { library } = await h.views()
+    expect(libraryViewSchema.parse(library)).toEqual(library)
+    expect(library.typeLabels).toMatchObject({ preference: '行为偏好', decision: '决定', mystery: 'mystery' })
+  })
 })
 
 describe('最近删除视图', () => {
@@ -231,6 +240,17 @@ describe('最近删除视图', () => {
       ['mem_x', T0 + 5000, T0 + 5000 + RETENTION_MS, undefined],
       ['mem_b', T0, T0 + RETENTION_MS, { decisionId: entry.id, verdict: 'keep-left', counterpartId: 'mem_a', snapshotId: snap.id }],
     ])
+  })
+
+  it('typeLabels：注册表的类型、删掉的记忆和裁决对方的类型 → 显示名，认不出的类型显示 id', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_a', name: 'A', type: 'legacy-a' }))
+    await h.store.create(w({ id: 'mem_b', name: 'B', type: 'legacy-b' }))
+    const { entry } = await h.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '矛盾', fingerprint: 'h' }, 1)
+    await h.resolve(entry.id, 'keep-left')
+    const { deleted } = await h.views()
+    expect(deletedViewSchema.parse(deleted)).toEqual(deleted)
+    expect(deleted.typeLabels).toMatchObject({ procedure: '可复用流程', 'legacy-a': 'legacy-a', 'legacy-b': 'legacy-b' })
   })
 
   it('垂直冲突以基线为准删掉的：来源写基线出处', async () => {
