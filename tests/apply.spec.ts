@@ -256,6 +256,7 @@ describe('GUI 命令接线', () => {
     const defs: CommandDef[] = []
     const ctx = mockCtx({ commands: { register: (def) => { defs.push(def as CommandDef); return () => {} } } })
     await apply({ ...ctx, logger: { info() {}, warn() {}, error() {} } } as never, new Config({ memoryRoot } as never))
+    ctx.listeners.get('session/created')!({ id: 'sess-x' })
     await startupViews(memoryRoot)
     // 借来的会话：没有 cwd（只有 global 可见），会话 id 来自 header
     const agent = { session: { header: { id: 'sess-x' }, seq: 1 } }
@@ -266,7 +267,7 @@ describe('GUI 命令接线', () => {
     return { memoryRoot, defs, exec }
   }
 
-  it('宿主有 commands：注册一条 memory 命令；启动后不等调用就写一遍全局视图（首次打开记忆页要有内容）', async () => {
+  it('宿主有 commands：注册一条 memory 命令；第一个会话出现后不等调用就写一遍全局视图（首次打开记忆页要有内容）', async () => {
     const { memoryRoot, defs } = await withCommands()
     expect(defs.map(d => d.name)).toEqual(['memory'])
     expect(JSON.parse(await readFile(join(memoryRoot, GUI_VIEW_DIR, GUI_VIEW_FILES.pending), 'utf8'))).toMatchObject({ items: [] })
@@ -930,9 +931,10 @@ describe('配置热生效（loader/volatile-update）', () => {
     }
     const config = new Config({ memoryRoot, ...raw } as never)
     await apply(ctx as never, config)
+    const session = { header: { id: 'sess-hot', cwd: workDir }, seq: 3 }
+    ctx.listeners.get('session/created')!(session)
     await startupViews(memoryRoot)
 
-    const session = { header: { id: 'sess-hot', cwd: workDir }, seq: 3 }
     const assembleCtx = { scope: { session } } as unknown as AssembleContext
     const def = ctx.contextDefs.find(c => c.name === 'plastic-memory')!
     const assembleOnce = async () => {
@@ -1023,10 +1025,12 @@ describe('配置热生效（loader/volatile-update）', () => {
     for (const line of [
       '/memory resolve {"decisionId":"pd_x","verdict":"keep-left"}', '/memory undo {"decisionId":"pd_x"}',
       '/memory promote {"decisionId":"pd_x","target":"global"}', '/memory keep-local {"decisionId":"pd_x"}',
-      '/memory scan', '/memory dismiss-overflow {"decisionId":"pd_x"}',
+      '/memory scan',
     ]) {
       expect(await t.command(line)).toMatchObject({ kind: 'error', body: { ok: false, code: 'governance-disabled' } })
     }
+    // 超限提醒在体检关闭时照样入账，忽略它不属于治理动作
+    expect((await t.command('/memory dismiss-overflow {"decisionId":"pd_x"}')).body).toMatchObject({ ok: false, code: 'not-found' })
     expect((await t.command('/memory info')).body).toMatchObject({ ok: true, cmd: 'info' })
     expect((await t.command('/memory refresh-views')).body).toEqual({ ok: true, cmd: 'refresh-views' })
     expect((await t.command('/memory restore {"memoryId":"mem_keep"}')).body).toMatchObject({ ok: false, code: 'not-found' })

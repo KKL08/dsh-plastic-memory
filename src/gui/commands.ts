@@ -64,7 +64,8 @@ export interface MemoryCommandDefinition {
 }
 
 /** 依赖体检开关的子命令（对应四个治理工具的能力）；forget / restore / hard-delete / refresh-views 不受开关影响。 */
-const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'undo', 'promote', 'keep-local', 'scan', 'dismiss-overflow'])
+// dismiss-overflow 不在此列：超限提醒在体检关闭时照样入账，忽略它不属于治理动作
+const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'undo', 'promote', 'keep-local', 'scan'])
 
 type Ok = Extract<MemoryCommandResult, { ok: true }>
 type Err = Extract<MemoryCommandResult, { ok: false }>

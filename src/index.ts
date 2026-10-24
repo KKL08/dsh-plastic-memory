@@ -402,7 +402,8 @@ export async function apply(ctx: Context, config: Config) {
   syncGovernanceTools()
 
   // GUI（浏览器半侧）的动作通道：/memory 命令走可选注册，旧宿主没有 commands 服务时插件照常挂载、不注册、不报错。
-  // 注册后不等调用就写一遍全局视图（不 await）：浏览器半侧首次打开时要有内容。
+  // 首次视图写入推迟到第一个 session/created（见下方）：apply 期间读账本会触发旧 KV 导入探测，
+  // 那时 storageDomain 未必挂上；而没有任何会话时浏览器半侧也读不到视图，早写没有意义。
   ctx.inject(['commands'], child => {
     const commands = (child as unknown as { commands: { register(def: MemoryCommandDefinition): () => void } }).commands
     const writer = new ViewWriter({
@@ -415,8 +416,8 @@ export async function apply(ctx: Context, config: Config) {
       resolveContext, getLlm, getBaseline, log: ctx.logger,
       isGovernanceEnabled: () => config.governance.enabled.get(),
     }))
-    void writer.request()
   })
+  let startupViewsPending = true
 
   // 配置热生效：宿主只在 volatile 字段变化时发本事件（载荷是变化路径，如 [['governance', 'enabled']]），已提交的新值经 .get() 读到。
   // 所有会话的快照标过期（宿主每一步都组装，同一轮的下一步就按新配置重建），按变化项重注册工具，最后重写视图。
@@ -452,6 +453,11 @@ export async function apply(ctx: Context, config: Config) {
     // eager 预热：新 session 不必等首次组装才解析 workspace（HMR 后存量 session 走 render 侧自愈）。
     // 与 assemble 中间件的解析等待同一份 memoize，不重复解析；只解析不组装，快照仍在首次中间件组装时冻结。
     snapshotCache.prewarm(session)
+    // 第一个会话出现时写一遍全局视图（不 await）：浏览器半侧首次打开记忆页要有内容；此时宿主已挂好 storageDomain。
+    if (startupViewsPending && views) {
+      startupViewsPending = false
+      void views.request()
+    }
   })
   lifecycle.on('session/event', (session, event) => {
     // 基线由宿主投影随事件折叠（plasticMemoryBaseline），不在这里观察；
