@@ -1,104 +1,173 @@
 /**
- * 记忆页（walking skeleton）：验证不绑定会话的主面板能否借一个会话读文件、发命令。
- * - 发：`ctx.remote.commands.execute(sessionId, '/memory ping', [])`，结果原样显示。
- * - 读：ping 结果里带 ping.json 的绝对路径（浏览器半侧不知道 memoryRoot），记下后用
- *   `dsh-resource://file/session/<sid>/<绝对路径>` 订阅版本，版本变了再经 workspaceFiles.read 读内容。
+ * 左栏记忆页的外壳：标题「记忆」+ 作用域下拉，四个 tab（待处理、全部记忆带数；健康、最近删除），tab 内容由后续票填。
+ * 两态：一个会话都没有 → 空态「开一个会话后这里可用」；有会话 → 全功能。
+ * 当前视图与作用域在导航 store 里，入口直达时先写 store 再切面板。
  */
-import { useEffect, useState } from 'react'
-import type { HostContext, RootStandardProps, SessionListState } from './host.ts'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import type { GuiLayerRef } from '../src/gui/contract.ts'
+import { useGateway, type ViewState } from './gateway.ts'
+import { baseName, formatNumber, useT, type Translate } from './i18n.tsx'
+import { MEMORY_TABS, useNavTarget, type MemoryTab, type NavStore } from './nav.ts'
+import { EmptyState } from './ui/EmptyState.tsx'
+import { SegmentedTabs, type SegmentedTab } from './ui/Segmented.tsx'
 
-const PATH_KEY = 'dsh-plastic-memory.gui.pingPath'
+const TAB_LABEL = { pending: 'tab.pending', library: 'tab.library', health: 'tab.health', deleted: 'tab.deleted' } as const
 
-function loadPath(): string | undefined {
-  try { return localStorage.getItem(PATH_KEY) ?? undefined } catch { return undefined }
-}
-function savePath(path: string): void {
-  try { localStorage.setItem(PATH_KEY, path) } catch { /* 存不了就只在本页生效 */ }
-}
-
-/** 与宿主 sessionFileAddress 同一语法：逐段 encodeURIComponent，绝对路径的前导 / 留成空段。 */
-export function fileAddress(sessionId: string, path: string): string {
-  const enc = (s: string) => encodeURIComponent(s).replace(/%3A/gi, ':')
-  return `dsh-resource://file/session/${enc(sessionId)}/${path.replace(/\\/g, '/').split('/').map(enc).join('/')}`
+function sameScope(a: GuiLayerRef, b: GuiLayerRef): boolean {
+  return a.kind === b.kind && (a.kind === 'global' || (b.kind === 'workspace' && a.workspacePath === b.workspacePath))
 }
 
-const STYLE = `
-.pm-page { padding: 24px 32px; color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-base); height: 100%; overflow: auto; box-sizing: border-box; font-size: 13px; }
-.pm-page h1 { font-size: 18px; font-weight: 600; margin: 0 0 16px; }
-.pm-row { display: flex; gap: 8px; align-items: center; margin: 0 0 12px; flex-wrap: wrap; }
-.pm-muted { color: var(--dsw-alias-label-secondary); }
-.pm-btn { border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); border-radius: 8px; padding: 4px 12px; cursor: pointer; font: inherit; }
-.pm-btn:hover { background: var(--dsw-alias-interactive-bg-hover); }
-.pm-btn:disabled { color: var(--dsw-alias-label-tertiary); cursor: default; }
-.pm-select { font: inherit; color: inherit; background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; padding: 3px 8px; max-width: 420px; }
-.pm-box { border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); border-radius: 8px; padding: 8px 12px; margin: 0 0 12px; white-space: pre-wrap; word-break: break-all; font-family: ui-monospace, monospace; font-size: 12px; }
-`
+function scopeLabel(scope: GuiLayerRef, currentWorkspace: string | undefined, t: Translate): string {
+  if (scope.kind === 'global') return t('scope.global')
+  const name = baseName(scope.workspacePath)
+  return scope.workspacePath === currentWorkspace ? t('scope.current', { name }) : name
+}
 
-export function createMemoryPage(ctx: HostContext) {
-  return function MemoryPage({ useSessions, useResource }: RootStandardProps) {
-    const list = useSessions((s: SessionListState) => s)
-    const [picked, setPicked] = useState<string | undefined>(undefined)
-    const [path, setPath] = useState<string | undefined>(loadPath)
-    const [lastResult, setLastResult] = useState('')
-    const [content, setContent] = useState('')
+function countOf<V>(state: ViewState<V>, count: (data: V) => number): number | undefined {
+  return state.status === 'ready' ? count(state.data) : undefined
+}
 
-    const fallback = list.ids.find(id => list.byId[id]?.running) ?? list.ids[0]
-    const sessionId = picked !== undefined && list.ids.includes(picked) ? picked : fallback
-    const stat = useResource(sessionId !== undefined && path !== undefined ? fileAddress(sessionId, path) : '')
-    const version = stat.value?.version
+export function MemoryPage({ nav }: { nav: NavStore }) {
+  const t = useT()
+  const gateway = useGateway()
+  const target = useNavTarget(nav)
+  const currentWorkspace = gateway.useCurrentWorkspace()
+  const scope: GuiLayerRef = target.scope
+    ?? (currentWorkspace !== undefined ? { kind: 'workspace', workspacePath: currentWorkspace } : { kind: 'global' })
+  const session = gateway.useSession(scope.kind === 'workspace' ? scope.workspacePath : undefined)
+  const pending = gateway.useView(session, 'pending')
+  const library = gateway.useView(session, 'library')
+  const tabsId = useId()
 
-    useEffect(() => {
-      if (sessionId === undefined || path === undefined || version === undefined) return
-      let live = true
-      void ctx.remote.workspaceFiles.read(sessionId, path, {}).then(r => {
-        if (live) setContent(r.ok ? r.value.text : `read failed: ${r.error.code} ${r.error.message}`)
-      })
-      return () => { live = false }
-    }, [sessionId, path, version])
+  const options: GuiLayerRef[] = []
+  const add = (ref: GuiLayerRef) => { if (!options.some(o => sameScope(o, ref))) options.push(ref) }
+  if (currentWorkspace !== undefined) add({ kind: 'workspace', workspacePath: currentWorkspace })
+  add(scope)
+  if (library.status === 'ready') for (const layer of library.data.layers) if (layer.layer.kind === 'workspace') add(layer.layer)
+  add({ kind: 'global' })
 
-    async function ping() {
-      if (sessionId === undefined) return
-      const startedAt = new Date().toISOString()
-      try {
-        const r = await ctx.remote.commands.execute(sessionId, '/memory ping', [])
-        setLastResult(`${startedAt}\n${JSON.stringify(r, null, 2)}`)
-        const text = r.ok && r.value?.result.kind === 'success' ? r.value.result.text : undefined
-        const reported = text === undefined ? undefined : (JSON.parse(text) as { path?: unknown }).path
-        if (typeof reported === 'string') { setPath(reported); savePath(reported) }
-      } catch (err) {
-        setLastResult(`${startedAt}\nthrown: ${String(err)}`)
-      }
-    }
-
-    return (
-      <div className="pm-page">
-        <style>{STYLE}</style>
-        <h1>Plastic Memory · walking skeleton</h1>
-        {list.ids.length === 0
-          ? <p className="pm-muted">没有会话（phase: {list.phase}）。开一个会话后这里可用。</p>
-          : (
-            <>
-              <div className="pm-row">
-                <span className="pm-muted">借用会话</span>
-                <select className="pm-select" value={sessionId} onChange={e => setPicked(e.target.value)}>
-                  {list.ids.map(id => (
-                    <option key={id} value={id}>
-                      {list.byId[id]?.running ? '● ' : '○ '}{list.byId[id]?.displayTitle ?? id}
-                    </option>
-                  ))}
-                </select>
-                <button type="button" className="pm-btn" onClick={() => void ping()}>/memory ping</button>
-              </div>
-              <p className="pm-muted">● = running。会话 {sessionId}，cwd {sessionId === undefined ? '' : list.byId[sessionId]?.cwd ?? '?'}</p>
-            </>
-          )}
-        <div className="pm-muted">命令结果</div>
-        <div className="pm-box">{lastResult || '（还没执行）'}</div>
-        <div className="pm-muted">文件资源 {path ?? '（路径未知：先 ping 一次）'}</div>
-        <div className="pm-box">
-          {`status: ${stat.status}\nversion: ${version ?? '-'}${stat.failure ? `\nfailure: ${stat.failure.code} ${stat.failure.message}` : ''}\n\n${content}`}
-        </div>
-      </div>
-    )
+  const counts: Partial<Record<MemoryTab, number>> = {
+    pending: countOf(pending, data => data.items.length),
+    library: countOf(library, data => data.layers.find(l => sameScope(l.layer, scope))?.items.length ?? 0),
   }
+  const tabLabel = (tab: MemoryTab): ReactNode => (
+    <>
+      {t(TAB_LABEL[tab])}
+      {counts[tab] !== undefined ? <span className="pm-tab-count">{formatNumber(counts[tab])}</span> : null}
+    </>
+  )
+  const items = MEMORY_TABS.map((tab): SegmentedTab<MemoryTab> => ({
+    value: tab, label: tabLabel(tab), id: `${tabsId}-${tab}`, panelId: `${tabsId}-${tab}-panel`,
+  })) as [SegmentedTab<MemoryTab>, ...SegmentedTab<MemoryTab>[]]
+
+  return (
+    <div className="pm-page">
+      <header className="pm-page-head">
+        <h1 className="pm-page-title">{t('page.title')}</h1>
+        {session.kind === 'ready'
+          ? (
+            <ScopePicker
+              value={scope}
+              options={options}
+              label={(ref) => scopeLabel(ref, currentWorkspace, t)}
+              onChange={(next) => { nav.update({ scope: next, memoryId: undefined }) }}
+            />
+          )
+          : null}
+      </header>
+      {session.kind === 'none'
+        ? <EmptyState variant="daily" title={t('session.none.title')}>{t('session.none.body')}</EmptyState>
+        : (
+          <>
+            <SegmentedTabs label={t('tabs.label')} items={items} value={target.tab} onChange={(tab) => { nav.update({ tab, memoryId: undefined }) }} />
+            <div role="tabpanel" id={`${tabsId}-${target.tab}-panel`} aria-labelledby={`${tabsId}-${target.tab}`} className="pm-page-panel">
+              <p className="pm-page-placeholder">{t('page.placeholder')}</p>
+            </div>
+          </>
+        )}
+    </div>
+  )
 }
+
+function ScopePicker({ value, options, label, onChange }: {
+  value: GuiLayerRef
+  options: readonly GuiLayerRef[]
+  label: (scope: GuiLayerRef) => string
+  onChange: (scope: GuiLayerRef) => void
+}) {
+  const t = useT()
+  const [open, setOpen] = useState(false)
+  const root = useRef<HTMLDivElement>(null)
+  const listId = useId()
+  useEffect(() => {
+    if (!open) return
+    const close = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false) }
+    document.addEventListener('pointerdown', close)
+    return () => { document.removeEventListener('pointerdown', close) }
+  }, [open])
+  const pick = (scope: GuiLayerRef) => { setOpen(false); if (!sameScope(scope, value)) onChange(scope) }
+  return (
+    <div className="pm-scope" ref={root} onKeyDown={(event) => { if (event.key === 'Escape') setOpen(false) }}>
+      <button
+        type="button"
+        className="pm-scope-button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={open ? listId : undefined}
+        onClick={() => { setOpen(!open) }}
+      >
+        {label(value)}
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true"><path d="m3 4.5 3 3 3-3" /></svg>
+      </button>
+      {open
+        ? (
+          <ul className="pm-scope-menu" role="listbox" id={listId} aria-label={t('scope.label')}>
+            {options.map((scope) => {
+              const selected = sameScope(scope, value)
+              return (
+                <li
+                  key={scope.kind === 'global' ? 'global' : scope.workspacePath}
+                  role="option"
+                  aria-selected={selected}
+                  tabIndex={0}
+                  className="pm-scope-option"
+                  onClick={() => { pick(scope) }}
+                  onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); pick(scope) } }}
+                >
+                  {label(scope)}
+                </li>
+              )
+            })}
+          </ul>
+        )
+        : null}
+    </div>
+  )
+}
+
+export const memoryPageCss = `
+.pm-page {
+  height: 100%; min-height: 0; overflow: auto; scrollbar-gutter: stable;
+  padding: 20px 32px 48px; background: var(--pm-bg); display: flex; flex-direction: column; gap: 16px;
+}
+.pm-page-head { display: flex; align-items: center; gap: 12px; }
+.pm-page-title { margin: 0; font-size: 20px; font-weight: 600; line-height: 28px; color: var(--pm-text); }
+.pm-tab-count { font-weight: 400; color: var(--pm-text-2); }
+.pm-page-panel { min-height: 0; }
+.pm-page-placeholder { margin: 24px 0; text-align: center; font-size: 12px; color: var(--pm-text-2); }
+.pm-scope { position: relative; }
+.pm-scope-button {
+  display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 8px; border: 0;
+  border-radius: var(--dsw-radius-sm, 8px); background: transparent; font: inherit; font-size: 13px; color: var(--pm-text-2); cursor: pointer;
+}
+.pm-scope-button:hover, .pm-scope-button[aria-expanded='true'] { background: var(--pm-hover); color: var(--pm-text); }
+.pm-scope-menu {
+  position: absolute; z-index: 10; top: calc(100% + 4px); left: 0; min-width: 200px; max-height: 320px; overflow: auto;
+  margin: 0; padding: 4px; list-style: none; border: .5px solid var(--pm-line-card); border-radius: var(--dsw-radius-md, 12px);
+  background: var(--pm-bg); box-shadow: var(--dsw-elevation-panel);
+}
+.pm-scope-option { padding: 6px 10px; border-radius: var(--dsw-radius-sm, 8px); font-size: 13px; color: var(--pm-text); cursor: pointer; white-space: nowrap; }
+.pm-scope-option:hover { background: var(--pm-hover); }
+.pm-scope-option[aria-selected='true'] { font-weight: 600; }
+@media (max-width: 560px) { .pm-page { padding: 16px; } }
+`

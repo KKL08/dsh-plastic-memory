@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { runInNewContext } from 'node:vm'
 import { buildClient } from '../scripts/build-client.ts'
@@ -43,12 +44,15 @@ function evaluate(): Handoff[] {
   return handoffs
 }
 
-/** 假 require：记下被问到的模块名，给出够 factory 求值用的桩。 */
+// 产物在加载期就会建 zod schema、React context，这几个给真模块（宿主运行时同样提供），其余给空桩。
+const realRequire = createRequire(import.meta.url)
+const REAL_MODULES = new Set(['react', 'react/jsx-runtime', 'zod'])
+
+/** 假 require：记下被问到的模块名，给出够 factory 求值用的模块。 */
 function fakeRequire(asked: string[]) {
   return (spec: string): unknown => {
     asked.push(spec)
-    const noop = () => null
-    return { createElement: noop, jsx: noop, jsxs: noop, Fragment: 'fragment', useState: noop, useEffect: noop, useCallback: noop }
+    return REAL_MODULES.has(spec) ? realRequire(spec) : {}
   }
 }
 
@@ -76,6 +80,8 @@ describe('lib/client.js 工厂格式', () => {
         inject: (_name: string, fn: () => unknown) => { fn(); return () => {} },
         register: (opts: { name: string; id?: string; key?: string }) => { registered.push(opts); return () => {} },
       },
+      locale: { register: () => () => {}, bind: () => (key: string) => key, getSnapshot: () => 0, subscribe: () => () => {} },
+      layout: { selectPanel: () => {} },
     }
     plugin.apply(ctx)
     const icon = registered.find(r => r.name === 'sidebar.panellist')
