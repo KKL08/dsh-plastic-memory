@@ -24,6 +24,12 @@ describe('Config schema', () => {
     expect(() => new Config({ governance: { health: { sensitivity: 'aggressive' } } } as unknown as Config)).toThrow()
   })
 
+  it('snapshotOverflow 默认 relax（自动放宽），接受 strict（严格按上限），拒绝非法', () => {
+    expect(new Config({} as unknown as Config).snapshotOverflow).toBe('relax')
+    expect(new Config({ snapshotOverflow: 'strict' } as unknown as Config).snapshotOverflow).toBe('strict')
+    expect(() => new Config({ snapshotOverflow: 'truncate' } as unknown as Config)).toThrow()
+  })
+
   it('自定义类型可以配 decayDays: null（不衰减），不被当成缺失字段拒绝', () => {
     const value = new Config({
       template: 'custom',

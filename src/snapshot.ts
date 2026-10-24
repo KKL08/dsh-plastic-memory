@@ -32,6 +32,9 @@ export function escapePromptBraces(text: string): string {
   return text.replaceAll('{{', `{{${PROMPT_LBRACE_VARIABLE}}}`)
 }
 
+/** 带入量超过上限时的处理（配置 snapshotOverflow）：relax 自动放宽，strict 严格按上限。 */
+export type OverflowMode = 'relax' | 'strict'
+
 /** 粗略 token 估算：中文字 ×1.5，其余按空白分词 ×1.3。预算是软约束，够用即可。 */
 export function estimateTokens(text: string): number {
   const cjk = (text.match(/[一-鿿]/g) ?? []).length
