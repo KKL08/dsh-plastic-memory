@@ -81,6 +81,12 @@ dsh plugin --profile web add dsh-plastic-memory@0.1.1-beta.5
 ```
 
 > 把 `web` 换成你的目标 Profile 名即可（若该 Profile 不存在则自动创建）。安装后插件声明将自动写入该 Profile 的 `cordis.patch.yml`，重启该 Profile 后生效。插件以预构建产物发布到 npm，安装不需要构建授权。  
+> **桌面版**：先打开一次 DeepSeek Harness 桌面版，让它建好自己的 Profile，然后完全退出，在终端运行下面这条，再重新打开桌面版。`dsh` 命令用 npm 装的或桌面版自带的都可以。
+>
+> ```bash
+> dsh plugin --profile desktop add dsh-plastic-memory@0.1.1-beta.5
+> ```
+>
 > **运行环境要求**：Node.js `^22.19.0 || >=24`，DeepSeek Harness v0.1.7-rc.1 及以上（目前已验证到 v0.2.1-rc.2）；图形界面要 v0.2.1-rc.2 及以上。
 > **中文分词**：可选依赖 `@node-rs/jieba`（带各平台预编译二进制）随 npm 安装自动带上，中文检索按词匹配；当前平台装不上时插件照常安装，中文检索退回二字切分，其他功能不受影响。
 > （DeepSeek Harness 仍在预发布阶段，之后还可能出现破坏性更新；升级宿主前请留意本插件当前支持的版本范围，见顶部徽章和 CHANGELOG。）
