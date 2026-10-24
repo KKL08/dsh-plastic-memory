@@ -39,6 +39,32 @@ describe('pickSession：只有「无会话 / 有会话」两态', () => {
   it('历史会话（没在跑）照样能借', () => {
     expect(pickSession(list(summary('cold', { running: false })), undefined).kind).toBe('ready')
   })
+
+  it('同一档里先借空闲的会话：项目里较旧的空闲会话胜过较新的、正在跑的', () => {
+    const rows = list(
+      summary('idle-app', { cwd: '/w/app', updatedAt: 1 }),
+      summary('busy-app', { cwd: '/w/app', updatedAt: 5, running: true }),
+    )
+    expect(pickSession(rows, '/w/app')).toEqual({ kind: 'ready', sessionId: 'idle-app', cwd: '/w/app' })
+    // 最后一档同理
+    expect(pickSession(rows, undefined)).toEqual({ kind: 'ready', sessionId: 'idle-app', cwd: '/w/app' })
+  })
+
+  it('只有正在跑的会话时照样借，界面不至于不能用', () => {
+    expect(pickSession(list(summary('busy', { cwd: '/w/app', running: true })), '/w/app'))
+      .toEqual({ kind: 'ready', sessionId: 'busy', cwd: '/w/app' })
+    expect(pickSession(list(summary('busy', { running: true })), undefined).kind).toBe('ready')
+  })
+
+  it('档位顺序不变：项目里正在跑的会话仍先于别处空闲的选中会话、最近会话；选中会话仍先于最近会话', () => {
+    const rows = list(
+      summary('busy-app', { cwd: '/w/app', updatedAt: 1, running: true }),
+      summary('selected', { cwd: '/w/other', updatedAt: 2, retainedBy: { mainView: 1 } }),
+      summary('latest', { cwd: '/w/third', updatedAt: 8 }),
+    )
+    expect(pickSession(rows, '/w/app')).toMatchObject({ sessionId: 'busy-app' })
+    expect(pickSession(rows, '/w/none')).toMatchObject({ sessionId: 'selected' })
+  })
 })
 
 describe('decodeExecution', () => {
@@ -250,6 +276,66 @@ describe('createHostGateway', () => {
     await waitFor(() => { expect(result.current.every(v => v.status === 'error')).toBe(true) })
     await new Promise(r => setTimeout(r, 50))
     expect(executed).toEqual(['/memory info', '/memory info'])
+  })
+
+  describe('refresh-views 失败后可重试', () => {
+    const libraryPath = '/h/memories/.state/gui/library.json'
+    const missing = { status: 'failed' as const, value: undefined, failure: { code: 'workspace-file/not-found', message: '' } }
+
+    /** 缓存了根、library 视图缺失；refresh-views 的前 failures 次被会话拒绝。 */
+    function setup(failures: number) {
+      localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+      resources[fileAddress('s1', libraryPath)] = missing
+      const ctx = fakeCtx()
+      const execute = ctx.remote.commands.execute as ReturnType<typeof vi.fn>
+      const ok = execute.getMockImplementation()!
+      let left = failures
+      execute.mockImplementation(async (sid: string, line: string) => {
+        if (line === '/memory refresh-views' && left > 0) {
+          left -= 1
+          executed.push(line)
+          return { ok: false as const, error: { code: 'session/writer-held', message: 'busy' } }
+        }
+        if (line === '/memory refresh-views') files[libraryPath] = JSON.stringify({ version: GUI_VIEW_VERSION + 1 })
+        return ok(sid, line)
+      })
+      return createHostGateway(ctx)(props)
+    }
+
+    it('失败后再次进入会重发一次', async () => {
+      const gateway = setup(1)
+      const first = renderHook(() => gateway.useView(gateway.useSession('/w/app'), 'library'))
+      await waitFor(() => { expect(executed).toEqual(['/memory refresh-views']) })
+      expect(first.result.current).toEqual({ status: 'missing' })
+      first.unmount()
+
+      const second = renderHook(() => gateway.useView(gateway.useSession('/w/app'), 'library'))
+      await waitFor(() => { expect(second.result.current).toEqual({ status: 'outdated' }) })
+      expect(executed).toEqual(['/memory refresh-views', '/memory refresh-views'])
+    })
+
+    it('成功之后不再发', async () => {
+      const gateway = setup(0)
+      const first = renderHook(() => gateway.useView(gateway.useSession('/w/app'), 'library'))
+      await waitFor(() => { expect(first.result.current).toEqual({ status: 'outdated' }) })
+      first.unmount()
+
+      const second = renderHook(() => gateway.useView(gateway.useSession('/w/app'), 'library'))
+      await waitFor(() => { expect(second.result.current).toEqual({ status: 'outdated' }) })
+      expect(executed).toEqual(['/memory refresh-views'])
+    })
+
+    it('同时多处要刷新只发一条', async () => {
+      const gateway = setup(1)
+      const { result } = renderHook(() => [
+        gateway.useView(gateway.useSession('/w/app'), 'library'),
+        gateway.useView(gateway.useSession('/w/app'), 'library'),
+      ])
+      await waitFor(() => { expect(executed).toEqual(['/memory refresh-views']) })
+      await new Promise(r => setTimeout(r, 50))
+      expect(executed).toEqual(['/memory refresh-views'])
+      expect(result.current.every(v => v.status === 'missing')).toBe(true)
+    })
   })
 
   it('没有会话：idle，不发命令', () => {
