@@ -7,7 +7,8 @@
 # (cached per version) -> `dsh plugin --profile smoke add <tgz>` -> --dump-config
 # has a `name: dsh-plastic-memory` layer -> short smoke-profile boot with a probe
 # plugin -> static checks on the installed lib/ (`node --check`, no relative
-# import left on .ts).
+# import left on .ts). The browser half (dsh.client, lib/client.js factory load,
+# locale/*.json) is checked right after install by host_verify_client.
 #
 # Why the boot step: it is the only proof that the published package loads inside
 # the real host — the plugin's apply() runs, observable as memory_search being
@@ -43,6 +44,7 @@ host_stage_and_pack
 host_ensure
 MARKER="$TMP/.marker"; : > "$MARKER"
 host_install_plugin smoke
+host_verify_client
 
 host_run dump-config env DSH_HOME="$HOMEDIR" "$DSH" --profile smoke --dump-config
 if ! grep -Eq 'name:[[:space:]]*dsh-plastic-memory' "$LOGS/dump-config.log"; then
@@ -107,4 +109,4 @@ host_run syntax check_syntax "$(dirname "$IDX")"
 host_run lib-imports no_ts_imports "$(dirname "$IDX")"
 
 host_assert_isolated
-echo "$HOST_TAG: PASS in ${SECONDS}s — host @$PINNED, tgz installed, dump-config layer present, smoke boot registered the plugin's tools in the real host (tool behavior is host:contract's job), installed lib/ parses with no .ts relative imports, ~/.dsh untouched"
+echo "$HOST_TAG: PASS in ${SECONDS}s — host @$PINNED, tgz installed, dump-config layer present, smoke boot registered the plugin's tools in the real host (tool behavior is host:contract's job), installed lib/ parses with no .ts relative imports, client bundle loads in the factory format, ~/.dsh untouched"

@@ -94,6 +94,17 @@ host_install_plugin() {
   host_run plugin-add env DSH_HOME="$HOMEDIR" "$DSH" plugin --profile "$profile" add "$TGZ"
 }
 
+# Browser half of the installed package (key-free): dsh.client + exports['./client']
+# are declared, lib/client.js loads through a fake window.__ModuleLoader__ in the
+# factory format, and locale/*.json ship. Checks the copy `plugin add` installed
+# under HOMEDIR, i.e. what a user actually gets.
+host_verify_client() {
+  local pkg
+  pkg="$(find "$HOMEDIR" -type f -path '*/node_modules/dsh-plastic-memory/package.json' 2>/dev/null | head -n 1)"
+  [ -n "$pkg" ] || { STEP=client; echo "$HOST_TAG: installed dsh-plastic-memory/package.json not found under $HOMEDIR" >&2; return 1; }
+  host_run client node "$REPO/scripts/host-contract/verify-client.ts" "$(dirname "$pkg")"
+}
+
 # Write tripwire: fail if anything under the real ~/.dsh is newer than MARKER.
 # (Read isolation rests on the DSH_HOME redirect and on credentials being written
 # only into the isolated home; mtimes cannot prove that nothing was read.)
