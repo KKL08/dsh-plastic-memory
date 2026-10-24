@@ -9,7 +9,6 @@ import { bigramSegmenter, createTokenizer, type CjkSegmenter } from './tokenizer
  */
 export interface JiebaInstance {
   loadDict(dict: Uint8Array): void
-  cut(text: string, hmm: boolean): string[]
   cutForSearch(text: string, hmm: boolean): string[]
 }
 export interface JiebaClass {
@@ -22,9 +21,6 @@ export interface JiebaLoader {
   readMainDictionary(): Uint8Array
 }
 
-/** 切分模式：search 对长词再出子词（cutForSearch），cut 只出最可能的一种切法。 */
-export type JiebaMode = 'search' | 'cut'
-
 export interface SegmenterLog {
   warn(message: string, detail?: unknown): void
 }
@@ -33,8 +29,6 @@ export interface QueryTokenizerOptions {
   /** 用户词典的绝对路径，每次搜索现读；变了下一次搜索就重建实例，空值只用主词典。 */
   userDictionaryPath?: () => string | undefined
   log?: SegmenterLog
-  /** 内部选项，供评估对比两种切分模式；缺省 search。 */
-  mode?: JiebaMode
 }
 
 // specifier 放在变量里：类型检查与打包都不把它当静态依赖，没装这个包时编译照常通过。
@@ -132,13 +126,17 @@ const HAN = /\p{Script=Han}/u
 // 汉字段交给词典；假名、谚文 jieba 只会逐字切，仍走二字滑窗。
 const HAN_OR_OTHER = /\p{Script=Han}+|[^\p{Script=Han}]+/gu
 
-function jiebaSegmenter(jieba: JiebaInstance, mode: JiebaMode): CjkSegmenter {
+/**
+ * 切分用 cutForSearch：长词之外再出子词（「新鲜度」→ 新鲜 / 鲜度 / 新鲜度），查询只写了词的一部分也能按 token 命中。
+ * 评估集上它比只出一种切法的 cut 多对两条「部分词」查询，其余持平。
+ */
+function jiebaSegmenter(jieba: JiebaInstance): CjkSegmenter {
   return {
     segment(run) {
       const out: string[] = []
       for (const [part] of run.matchAll(HAN_OR_OTHER)) {
         if (!HAN.test(part)) out.push(...bigramSegmenter.segment(part))
-        else out.push(...(mode === 'cut' ? jieba.cut(part, true) : jieba.cutForSearch(part, true)))
+        else out.push(...jieba.cutForSearch(part, true))
       }
       return out
     },
@@ -159,5 +157,5 @@ export async function tokenizerForQuery(query: string, opts: QueryTokenizerOptio
     current = { dictionaryPath, jieba: buildJieba(dictionaryPath, log) }
   }
   const jieba = await current.jieba
-  return jieba === undefined ? bigramTokenizer : createTokenizer({ cjk: jiebaSegmenter(jieba, opts.mode ?? 'search') })
+  return jieba === undefined ? bigramTokenizer : createTokenizer({ cjk: jiebaSegmenter(jieba) })
 }

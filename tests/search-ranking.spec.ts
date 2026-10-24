@@ -72,12 +72,25 @@ describe('三档一张表', () => {
 })
 
 describe('字段权重', () => {
-  it('name 命中优先于仅 content 命中', async () => {
+  // 正文取常见长度（一百多字）：name 里出现一次相当于这样的正文里出现三次
+  const ORDINARY_BODY = '上线前先在预发环境演练一遍，确认监控面板、告警规则、数据库连接池配置都正常；'
+    + '值守的人要提前在频道里报到，出了问题按预案处理，处理完把时间线和原因补进复盘文档，'
+    + '下次上线前再对照复盘文档检查一遍。必要时执行 rollback。'
+
+  it('词频相当时 name 命中优先于仅 content 命中', async () => {
+    const store = await seeded([
+      record({ id: 'mem_content', name: '普通条目', summary: '普通摘要', content: ORDINARY_BODY }),
+      record({ id: 'mem_name', name: 'rollback 流程', summary: '普通摘要', content: '正文与查询无关' }),
+    ])
+    expect(await ids(store, 'rollback')).toEqual(['mem_name', 'mem_content'])
+  })
+
+  it('正文反复出现的词可以胜过 name 碰巧含一次：各字段共用一个饱和上限（BM25F）', async () => {
     const store = await seeded([
       record({ id: 'mem_content', name: '普通条目', summary: '普通摘要', content: 'rollback rollback rollback 的正文' }),
       record({ id: 'mem_name', name: 'rollback 流程', summary: '普通摘要', content: '正文与查询无关' }),
     ])
-    expect(await ids(store, 'rollback')).toEqual(['mem_name', 'mem_content'])
+    expect(await ids(store, 'rollback')).toEqual(['mem_content', 'mem_name'])
   })
 
   it('name 平淡但 content 大段命中（全部词都在）不被 name 碰巧含一个词、内容不相干的记录压下去', async () => {
@@ -197,7 +210,8 @@ describe('说明码：三种触发，互斥、substring 优先', () => {
   })
 })
 
-describe('不变的行为', () => {
+// 这一例要逐条落盘 60 个文件，全量并行跑时偶尔越过默认 5 秒
+describe('不变的行为', { timeout: 15_000 }, () => {
   it('validTo 已过期的不进结果；types、limit 上限 50 照旧', async () => {
     const now = Date.now()
     const store = await seeded([
