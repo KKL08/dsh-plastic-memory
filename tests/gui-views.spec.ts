@@ -71,7 +71,8 @@ describe('待处理视图', () => {
     await h.store.create(w({ id: 'mem_v', name: 'V', content: '用 yarn' }))
     await h.store.create(w({ id: 'mem_p', name: 'P', content: '所有项目都用 vitest' }))
     await writeFile(join(wsDir(), 'broken.md'), '---\nname: [\n---\n正文\n')
-    const overflow = (await h.decisions.upsert({ kind: 'overflow', memoryIds: [], summary: '', fingerprint: '2' }, 1)).entry
+    await h.decisions.syncOverflow(WS, { mode: 'relax', tier: 2 }, 1, '超限')
+    const [overflow] = await h.decisions.listOverflow()
     const promote = (await h.decisions.upsert({ kind: 'promote-candidate', memoryIds: ['mem_p'], summary: '', fingerprint: 'c' }, 2)).entry
     const vertical = (await h.decisions.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '与基线矛盾', fingerprint: 'v' }, 3)).entry
     const horizontal = (await h.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '矛盾', fingerprint: 'h' }, 4)).entry
@@ -86,7 +87,7 @@ describe('待处理视图', () => {
     expect(h1).toMatchObject({ kind: 'conflict-horizontal', decisionId: horizontal.id, firstSeenAt: 4, left: { id: 'mem_a', content: '用 pnpm' }, right: { id: 'mem_b' } })
     expect(v1).toMatchObject({ kind: 'conflict-vertical', decisionId: vertical.id, baselineRef: 'AGENTS.md：包管理', memory: { id: 'mem_v' } })
     expect(p1).toMatchObject({ kind: 'promote-candidate', decisionId: promote.id, memory: { id: 'mem_p', scope: 'workspace', workspacePath: WS } })
-    expect(o1).toMatchObject({ kind: 'overflow', decisionId: overflow.id, tier: 2 })
+    expect(o1).toEqual({ kind: 'overflow', decisionId: overflow.id, firstSeenAt: 1, mode: 'relax', tier: 2, workspacePath: WS })
     expect(bad).toMatchObject({ kind: 'unreadable-file', layer: { kind: 'workspace', workspacePath: WS }, filePath: join(wsDir(), 'broken.md'), relativePath: `${workspaceDirName(WS)}/broken.md` })
     expect(bad.kind === 'unreadable-file' && bad.error.length).toBeGreaterThan(0)
     // 密钥与读不出的文件没有进账本
@@ -164,6 +165,33 @@ describe('最近删除视图', () => {
 })
 
 describe('健康视图', () => {
+  it('超限列为问题、不扣分：已忽略的仍列出；memory_health 同样报出', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_a', name: 'A' }))
+    const before = await h.health()
+    if (before.kind !== 'single') throw new Error(before.kind)
+    expect(before.recommendationKinds).not.toContain('budget-overflow')
+
+    await h.decisions.syncOverflow(WS, { mode: 'relax', tier: 1 }, T0, '带入记忆约 4100 token，超出上限 4000，已自动放宽到 5000')
+    const [entry] = await h.decisions.listOverflow()
+    await h.decisions.settle(entry.id, 'dismiss', T0)
+
+    const { health, pending } = await h.views()
+    expect(healthViewSchema.parse(health)).toEqual(health)
+    expect(pending.items).toEqual([])
+    const ws = health.layers.find(l => l.layer.kind === 'workspace')!
+    expect(ws.overflow).toEqual({ mode: 'relax', tier: 1 })
+    expect(health.layers.find(l => l.layer.kind === 'global')!.overflow).toBeNull()
+
+    const tool = await h.health()
+    if (tool.kind !== 'single') throw new Error(tool.kind)
+    expect(tool.score).toBe(before.score)
+    expect(ws.score).toBe(before.score)
+    expect(tool.overflow).toEqual({ mode: 'relax', tier: 1, summary: '带入记忆约 4100 token，超出上限 4000，已自动放宽到 5000' })
+    expect(tool.recommendationKinds).toContain('budget-overflow')
+    expect(tool.message).toContain('超出上限')
+  })
+
   it('复用治理评分：与 memory_health 同分；从没体检过 semanticCachedAt 为 null；有密钥的层不打分', async () => {
     const h = harness()
     await h.store.create(w({ id: 'mem_a', name: 'A' }))
@@ -185,8 +213,8 @@ describe('健康视图', () => {
 describe('会话视图', () => {
   it('带 frozenAt 与三段用量，只存时间戳', () => {
     const view = buildSessionView({
-      sessionId: 's1', workspacePath: WS, frozenAt: T0, budget: 4000,
-      tokens: { workspace: 120, global: 80, fixed: 40 }, injectedIds: ['mem_a'], savedIds: [],
+      sessionId: 's1', workspacePath: WS, frozenAt: T0, budget: 4000, overflowMode: 'strict',
+      tokens: { workspace: 120, global: 80, fixed: 40 }, usedTokens: 210, injectedIds: ['mem_a'], omittedCount: 3, savedIds: [],
     })
     expect(sessionViewSchema.parse(view)).toEqual(view)
     expect(view.frozenAt).toBe(T0)
@@ -232,7 +260,10 @@ describe('视图写入', () => {
 
   it('会话视图：同一 tick 内同一会话多次写入合并为最后一份', async () => {
     const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') } })
-    const base = { sessionId: 's/1', frozenAt: T0, budget: 4000, tokens: { workspace: 1, global: 2, fixed: 3 }, injectedIds: ['mem_a'] }
+    const base = {
+      sessionId: 's/1', frozenAt: T0, budget: 4000, overflowMode: 'relax' as const,
+      tokens: { workspace: 1, global: 2, fixed: 3 }, usedTokens: 3, injectedIds: ['mem_a'], omittedCount: 0,
+    }
     await Promise.all([
       writer.requestSession(buildSessionView({ ...base, savedIds: [] })),
       writer.requestSession(buildSessionView({ ...base, savedIds: ['mem_n'] })),

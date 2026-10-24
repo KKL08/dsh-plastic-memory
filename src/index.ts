@@ -29,6 +29,7 @@ import { delegationDepthOf, gateSubagentWrites } from './tools/subagent-gate.ts'
 import type { ReadEventFn } from './tools/source.ts'
 import { SnapshotCache, resolveWorkspacePath } from './runtime.ts'
 import { PROMPT_LBRACE_VARIABLE } from './snapshot.ts'
+import { OVERFLOW_MODES, type OverflowMode } from './contract-codes.ts'
 import { resolveHealthThresholds, type HealthSensitivity } from './governance/health-presets.ts'
 import { PendingDecisionsStore } from './governance/decisions.ts'
 import { SnapshotStore } from './governance/snapshots.ts'
@@ -45,6 +46,8 @@ export interface Config {
   // 及其参数（reflectModel 等）——配置面只声明当前真实生效的字段。
   writeMode: 'proactive'
   snapshotTokenBudget: number
+  /** 带入量超过 snapshotTokenBudget 时：relax 自动放宽（需要多少带多少，每进一档 25% 提醒一次）、strict 严格按上限（截断，95% 提醒）。 */
+  snapshotOverflow: OverflowMode
   /** 证据下钻档位（docs/design-evidence-anchor.md §4）：off 不鼓励回查原始轨迹、strict 仅硬信号、active 开放路标式引导。 */
   evidenceLookup: 'off' | 'strict' | 'active'
   template: 'coding' | 'office' | 'custom'
@@ -57,6 +60,7 @@ export interface Config {
 export const Config: z<Config> = z.object({
   writeMode: z.const('proactive').default('proactive'),
   snapshotTokenBudget: z.number().default(4000),
+  snapshotOverflow: z.union(OVERFLOW_MODES).default('relax'),
   evidenceLookup: z.union(['off', 'strict', 'active'] as const).default('strict'),
   template: z.union(['coding', 'office', 'custom'] as const).default('coding'),
   customTypes: z.dict(z.object({
@@ -137,7 +141,11 @@ export async function apply(ctx: Context, config: Config) {
   // cwd → workspace 归属的单一解析路径：SnapshotCache 的 lazy 自愈与 session/created 的 eager 预热共用，
   // 避免两处各写一份 resolveWorkspacePath 调用。
   const resolveWorkspace = (session: object) => resolveWorkspacePath(ctx, (session as SessionLike).header?.cwd)
-  const snapshotCache = new SnapshotCache({ store, registry, budget: config.snapshotTokenBudget, memoryRoot, evidenceLookup: config.evidenceLookup, resolveWorkspace, log: ctx.logger })
+  // 超限提醒进待决账本（治理关闭时也记：它是待处理里的提醒，不是体检结果）；会话视图的 onFrozen 接线在视图写入那张票
+  const snapshotCache = new SnapshotCache({
+    store, registry, budget: config.snapshotTokenBudget, overflow: config.snapshotOverflow, overflowLedger: decisions,
+    memoryRoot, evidenceLookup: config.evidenceLookup, resolveWorkspace, log: ctx.logger,
+  })
 
   // 语义层 LLM：per-call 构建（provider/model 只能从触发调用的 agent 上拿到，插件加载时没有）。
   // 用 ctx.get 而非属性访问——cordis 的 Context 是 proxy，未 inject 的服务名走属性访问会抛错

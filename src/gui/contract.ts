@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { memoryRecordSchema } from '../record-schema.ts'
-import type { DirectoryNoteCode, ScanNoteCode } from '../contract-codes.ts'
+import { OVERFLOW_MODES, type DirectoryNoteCode, type ScanNoteCode } from '../contract-codes.ts'
 
 /**
  * GUI 契约（命名契约：视图与命令的标识符只在这一处定义）。服务端 GUI 层与浏览器半侧共用，是叶子：
@@ -10,7 +10,7 @@ import type { DirectoryNoteCode, ScanNoteCode } from '../contract-codes.ts'
  */
 
 /** 视图 schema 的版本号：视图是派生缓存，形状变了就换号，客户端读到不认识的号按「需要刷新」处理。 */
-export const GUI_VIEW_VERSION = 1
+export const GUI_VIEW_VERSION = 2
 
 /** 视图文件所在目录（相对记忆根目录，POSIX 分隔）。 */
 export const GUI_VIEW_DIR = '.state/gui'
@@ -81,7 +81,11 @@ export const pendingItemSchema = z.discriminatedUnion('kind', [
     memory: memoryCardSchema.nullable(), baselineRef: z.string(),
   }),
   z.object({ kind: z.literal('promote-candidate'), decisionId: z.string(), firstSeenAt: z.number(), memory: memoryCardSchema.nullable() }),
-  z.object({ kind: z.literal('overflow'), decisionId: z.string(), firstSeenAt: z.number(), tier: z.number().int().nonnegative() }),
+  /** 超出上限：relax 第 tier 档（放宽到上限 × (1 + 0.25 × tier)）；strict 用到 95%（tier 为 0）。workspacePath 缺省 = 无项目的会话。 */
+  z.object({
+    kind: z.literal('overflow'), decisionId: z.string(), firstSeenAt: z.number(),
+    mode: z.enum(OVERFLOW_MODES), tier: z.number().int().nonnegative(), workspacePath: z.string().optional(),
+  }),
   z.object({
     kind: z.literal('unreadable-file'), layer: layerRefSchema,
     filePath: z.string(), relativePath: z.string(),
@@ -127,6 +131,8 @@ export const healthLayerSchema = z.object({
   staleCount: z.number().int().nonnegative(),
   /** 内容检查（语义层）上次时间；从没做过为 null。 */
   semanticCachedAt: z.number().nullable(),
+  /** 本层会话带入的记忆超出上限（已忽略的也算，忽略只是不再提醒）；列为问题、不扣分。没超为 null。 */
+  overflow: z.object({ mode: z.enum(OVERFLOW_MODES), tier: z.number().int().nonnegative() }).nullable(),
 })
 export const healthViewSchema = z.object({
   version,
@@ -187,9 +193,14 @@ export const sessionViewSchema = z.object({
   /** 快照冻结时刻；早于宿主启动时间说明重启后还没重新带入。 */
   frozenAt: z.number(),
   budget: z.number().int().nonnegative(),
-  /** 三段之和即总用量：本项目、全局、固定说明。 */
+  overflowMode: z.enum(OVERFLOW_MODES),
+  /** 三段之和即总用量：本项目、全局、固定说明（标题、导航图、固定尾注）。 */
   tokens: z.object({ workspace: z.number(), global: z.number(), fixed: z.number() }),
+  /** 计入上限的部分（固定尾注与导航图不计）：relax 下超过 budget 即已放宽，strict 下不超过 budget。 */
+  usedTokens: z.number().int().nonnegative(),
   injectedIds: z.array(z.string()),
+  /** 没带入的条数（只有 strict 会截）：「已到上限，N 条没带入」。 */
+  omittedCount: z.number().int().nonnegative(),
   /** 这次对话新记的。 */
   savedIds: z.array(z.string()),
 })

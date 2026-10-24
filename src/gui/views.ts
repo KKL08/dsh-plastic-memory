@@ -5,7 +5,7 @@ import type { DirectoryNote } from '../storage/table.ts'
 import { RETENTION_MS } from '../retention.ts'
 import { maskSecretSurface } from '../secrets.ts'
 import { FINDING_TYPES, type PendingDecision } from '../governance/schema.ts'
-import { kindOf, verdictLoser } from '../governance/decisions.ts'
+import { kindOf, overflowLevelOf, overflowScopeOf, verdictLoser } from '../governance/decisions.ts'
 import { runRuleScan } from '../governance/rule-scan.ts'
 import { layerCacheKey, scoreLayer, type LayerPreread, type LayerRef } from '../governance/layer-health.ts'
 import {
@@ -95,7 +95,10 @@ export function buildPendingView(input: ViewInput): PendingView {
     const base = { decisionId: e.id, firstSeenAt: e.firstSeenAt }
     const kind = kindOf(e)
     if (kind === 'promote-candidate') items.push({ kind, ...base, memory: cardOf(e.memoryIds[0], data) })
-    else if (kind === 'overflow') items.push({ kind, ...base, tier: Number.parseInt(e.fingerprint ?? '', 10) || 0 })
+    else if (kind === 'overflow') {
+      const scope = overflowScopeOf(e)
+      items.push({ kind, ...base, ...overflowLevelOf(e), ...(scope !== undefined && scope !== 'global' ? { workspacePath: scope } : {}) })
+    }
     else if (e.baselineRef !== undefined) {
       items.push({ kind: 'conflict-vertical', ...base, summary: e.summary, memory: cardOf(e.memoryIds[0], data), baselineRef: e.baselineRef })
     } else {
@@ -118,8 +121,9 @@ export function buildPendingView(input: ViewInput): PendingView {
   return { version: GUI_VIEW_VERSION, dot, items }
 }
 
-/** 健康：每层复用 scoreLayer（与 memory_health / memory_scan 同分）；有密钥的层不打分。 */
+/** 健康：每层复用 scoreLayer（与 memory_health / memory_scan 同分）；有密钥的层不打分。超限另列（不扣分）。 */
 export function buildHealthView(input: ViewInput): HealthView {
+  const overflow = [...input.open, ...input.settled].filter(e => kindOf(e) === 'overflow')
   return {
     version: GUI_VIEW_VERSION,
     layers: input.healthLayers.map(layer => {
@@ -133,9 +137,16 @@ export function buildHealthView(input: ViewInput): HealthView {
         issues: FINDING_TYPES.filter(t => r.health.counts[t] > 0).map(type => ({ type, count: r.health.counts[type] })),
         staleCount: r.health.freshness.staleCount,
         semanticCachedAt: r.semanticCachedAt,
+        overflow: overflowOfLayer(overflow, layer),
       }
     }),
   }
+}
+
+/** 超限按会话所属项目记账（无项目的会话记在 global），与健康分层同口径。 */
+function overflowOfLayer(entries: readonly PendingDecision[], layer: LayerRef): HealthView['layers'][number]['overflow'] {
+  const e = entries.find(o => overflowScopeOf(o) === (layer.kind === 'global' ? 'global' : layer.path))
+  return e === undefined ? null : overflowLevelOf(e)
 }
 
 /** 全部记忆：按层列 active 记忆；空的项目层不列，global 总在。目录问题不含 dir-empty（那不是问题）。 */
