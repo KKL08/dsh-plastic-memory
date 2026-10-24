@@ -9,6 +9,11 @@ import type { HostContext } from './host.ts'
 /** 左栏记忆页与左栏图标共用的 id（`main` 插槽的 key = `sidebar.panellist` 的 id）。 */
 export const PANEL_ID = 'plastic-memory'
 
+/** 右侧栏记忆 tab 的实现身份（宿主要求全局唯一，取包名），也是正文与标题插槽的 key。 */
+export const SIDEBAR_TAB_ID = 'dsh-plastic-memory'
+/** 右侧栏记忆 tab 的类型名（`openTab` 认它）。 */
+export const SIDEBAR_TAB_KIND = 'plastic-memory'
+
 export const MEMORY_TABS = ['pending', 'library', 'health', 'deleted'] as const
 export type MemoryTab = (typeof MEMORY_TABS)[number]
 

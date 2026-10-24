@@ -7,7 +7,7 @@ import { useMemo } from 'react'
 import type { MemoryGateway } from '../gateway.ts'
 import type { HostContext, RootStandardProps, SessionStandardProps } from '../host.ts'
 import type { Translate } from '../i18n.tsx'
-import { openMemoryPage, type NavStore } from '../nav.ts'
+import { openMemoryPage, SIDEBAR_TAB_KIND, type NavStore } from '../nav.ts'
 import { PanelShell } from '../ui/PanelShell.tsx'
 import { MemoryButton, memoryButtonCss } from './MemoryButton.tsx'
 
@@ -15,8 +15,6 @@ import { MemoryButton, memoryButtonCss } from './MemoryButton.tsx'
 export const DOCK_ID = 'plastic-memory'
 /** 宿主 dock 自带的统计胶囊是 order 0、1；排在它们之后，紧挨 ContextMeter（宿主把它画在 dock 条目之后）。 */
 export const DOCK_ORDER = 100
-/** 右侧栏记忆 tab 的 kind，与右侧栏 tab 注册同名。 */
-export const SIDEBAR_TAB_KIND = 'plastic-memory'
 
 export function createComposerDock(
   ctx: Pick<HostContext, 'layout' | 'sidebarRight'>,

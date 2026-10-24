@@ -10,14 +10,9 @@ import type { HostContext, SessionStandardProps, SidebarHost } from '../host.ts'
 import type { Translate } from '../i18n.tsx'
 import { NS } from '../locales.ts'
 import { MemoryIcon } from '../MemoryIcon.tsx'
-import { openMemoryPage, type NavStore } from '../nav.ts'
+import { openMemoryPage, SIDEBAR_TAB_ID, SIDEBAR_TAB_KIND, type NavStore } from '../nav.ts'
 import { PanelShell } from '../ui/PanelShell.tsx'
 import { SidebarTab, sidebarTabCss } from './SidebarTab.tsx'
-
-/** 实现身份（宿主要求全局唯一，取包名），也是正文与标题插槽的 key。 */
-export const SIDEBAR_TAB_ID = 'dsh-plastic-memory'
-/** `openTab` 认的类型名。 */
-export const SIDEBAR_TAB_KIND = 'plastic-memory'
 
 function GuideIcon({ size }: { size?: number | undefined }) {
   return <MemoryIcon size={size ?? 22} active={false} />

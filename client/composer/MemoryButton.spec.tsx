@@ -8,8 +8,8 @@ import type { ContextPressureProjection, HostContext, SessionStandardProps, Side
 import { createTranslator } from '../i18n.tsx'
 import { apply, inject } from '../index.tsx'
 import { zh } from '../locales.ts'
-import { createNavStore, PANEL_ID } from '../nav.ts'
-import { createComposerDock, DOCK_ID, DOCK_ORDER, SIDEBAR_TAB_KIND } from './dock.tsx'
+import { createNavStore, PANEL_ID, SIDEBAR_TAB_KIND } from '../nav.ts'
+import { createComposerDock, DOCK_ID, DOCK_ORDER } from './dock.tsx'
 import { memoryShare } from './MemoryButton.tsx'
 
 function sessionView(overrides: Partial<SessionView> = {}): SessionView {

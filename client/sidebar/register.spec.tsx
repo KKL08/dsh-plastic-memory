@@ -5,8 +5,8 @@ import type { ComponentType } from 'react'
 import type { HostContext, SessionStandardProps, SidebarHost, SidebarTabDefinition } from '../host.ts'
 import { createTranslator } from '../i18n.tsx'
 import { zh } from '../locales.ts'
-import { createNavStore } from '../nav.ts'
-import { openMemoryTab, registerSidebarTab, SIDEBAR_TAB_ID, SIDEBAR_TAB_KIND } from './register.tsx'
+import { createNavStore, SIDEBAR_TAB_ID, SIDEBAR_TAB_KIND } from '../nav.ts'
+import { openMemoryTab, registerSidebarTab } from './register.tsx'
 
 function setup() {
   const t = createTranslator(zh)
