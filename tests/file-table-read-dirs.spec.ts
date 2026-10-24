@@ -222,3 +222,30 @@ it('合法名称含 .tmp- 不是原子写残留：新实例、推进 61 秒后�
   expect((await t3.locate('mem_tmp'))?.record.name).toBe('cache.tmp-notes')
   expect(await readdir(join(root, GLOBAL_DIR))).toContain('cache.tmp-notes.md')
 })
+
+describe('点开头的名字（文件名由记忆名字生成，名字可以以点开头）', () => {
+  it('点开头的记忆文件照常读到；macOS 的 ._ 伴生文件与编辑器的 .# 锁文件不算记忆、也不进隔离', async () => {
+    await seedGlobal('.env-约定.md', record({ id: 'mem_dot', name: '.env 约定' }))
+    await writeFile(join(root, GLOBAL_DIR, '._.env-约定.md'), '\u0000\u0005\u0016\u0007')
+    await writeFile(join(root, GLOBAL_DIR, '.#.env-约定.md'), 'user@host.1234')
+    const { records, quarantined } = await open().readScope([globalDir()])
+    expect(records.map(r => r.record.id)).toEqual(['mem_dot'])
+    expect(quarantined).toEqual([])
+  })
+
+  it('名字以点开头的记忆写下去还能读回来', async () => {
+    const t = open()
+    await t.put('mem_npmrc', record({ id: 'mem_npmrc', name: '.npmrc 镜像' }))
+    expect(((await t.locate('mem_npmrc'))?.record)!.name).toBe('.npmrc 镜像')
+    expect((await t.readScope([globalDir()])).records.map(r => r.record.id)).toEqual(['mem_npmrc'])
+  })
+
+  it('点开头的项目目录（如 ~/.dotfiles）进全库清单；没有 .workspace 标记的点目录（如 .git）静默跳过', async () => {
+    await seedWorkspace('/home/dev/.dotfiles', 'a.md',
+      record({ id: 'mem_w', scope: 'workspace', workspacePath: '/home/dev/.dotfiles' }))
+    await mkdir(join(root, '.git', 'objects'), { recursive: true })
+    const listing = await open().listWorkspaceDirs()
+    expect(listing.entries.map(e => e.workspacePath)).toEqual(['/home/dev/.dotfiles'])
+    expect(listing.directoryNotes).toEqual([])
+  })
+})
