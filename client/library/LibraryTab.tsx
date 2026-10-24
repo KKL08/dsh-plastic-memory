@@ -9,7 +9,7 @@ import type { NavStore } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
-import { crossWorkspace, FlashRow, useFlashTarget, useRowActions, useTypeLabel, ViewMessage } from './shared.tsx'
+import { FlashRow, useFlashTarget, useRowActions, useTypeLabel, ViewMessage } from './shared.tsx'
 
 function sameLayer(a: GuiLayerRef, b: GuiLayerRef): boolean {
   return a.kind === b.kind && (a.kind === 'global' || (b.kind === 'workspace' && a.workspacePath === b.workspacePath))
@@ -114,14 +114,17 @@ export function LibraryTab({ nav, scope, session, now = Date.now() }: {
           <ul className="pm-list">
             {items.map(memory => (
               <FlashRow key={memory.id} className="pm-list-row" flashing={flashId === memory.id} onFlashEnd={clear}>
-                <MemoryCard memory={memory} now={now} typeLabel={typeLabel(memory.type)} hideScope />
+                <div className="pm-row-body">
+                  <MemoryCard memory={memory} now={now} typeLabel={typeLabel(memory.type)} hideScope />
+                  {actions.crossConfirm(memory.id)}
+                </div>
                 <div className="pm-row-actions">
                   <Button onClick={() => { void actions.open(memory.filePath) }}>{t('library.openFile')}</Button>
                   <Button onClick={() => { void actions.open(memory.filePath, 'reveal') }}>{t('library.reveal')}</Button>
                   <Button
                     unavailable={actions.unavailable(memory.id)}
                     onClick={() => {
-                      void actions.run(memory.id, { cmd: 'forget', memoryId: memory.id, ...crossWorkspace(memory, session) }, () => t('library.deletedNotice'))
+                      void actions.run(memory.id, { cmd: 'forget', memoryId: memory.id }, () => t('library.deletedNotice'))
                     }}
                   >
                     {t('library.delete')}

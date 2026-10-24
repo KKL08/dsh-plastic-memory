@@ -11,7 +11,7 @@ import type { NavStore } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
-import { crossWorkspace, FlashRow, useFlashTarget, useRowActions, useTypeLabel, ViewMessage } from '../library/shared.tsx'
+import { FlashRow, useFlashTarget, useRowActions, useTypeLabel, ViewMessage } from '../library/shared.tsx'
 
 type DeletedItem = DeletedView['items'][number]
 
@@ -86,6 +86,7 @@ export function DeletedTab({ nav, scope, session, now = Date.now() }: {
                     </Fragment>
                   ))}
                 </p>
+                {actions.crossConfirm(memory.id)}
               </div>
               <div className="pm-row-actions pm-del-actions">
                 {cause !== undefined ? <span className="pm-del-hint">{t('deleted.restoreHint')}</span> : null}
@@ -94,7 +95,7 @@ export function DeletedTab({ nav, scope, session, now = Date.now() }: {
                   onClick={() => {
                     void actions.run(
                       memory.id,
-                      { cmd: 'restore', memoryId: memory.id, ...crossWorkspace(memory, session) },
+                      { cmd: 'restore', memoryId: memory.id },
                       result => t(result.decisionId !== undefined ? 'deleted.restoredConflict' : 'deleted.restored'),
                     )
                   }}
