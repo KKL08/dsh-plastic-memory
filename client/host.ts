@@ -60,6 +60,19 @@ export interface RootStandardProps {
   useSessions: <S>(selector: (state: SessionListState) => S, equal?: (a: S, b: S) => boolean) => S
 }
 
+/** dsh-token-meter 的 ContextPressureProjection：宿主 ContextMeter 的分母 contextWindow 从这里来。 */
+export interface ContextPressureProjection {
+  pressureTokens?: number
+  projectedTokens?: number
+  contextWindow?: number
+}
+
+/** 会话作用域插槽（如 conversation.composer.dock）在根作用域之外多拿到的标准 props 子集。 */
+export interface SessionStandardProps extends RootStandardProps {
+  sessionId: string
+  useProjection: (key: 'contextPressure') => ContextPressureProjection | undefined
+}
+
 export interface SlotRegisterOptions {
   name: string
   id?: string
@@ -85,6 +98,10 @@ export interface HostContext {
   layout: {
     /** 只收面板 id、不带参数；面板未注册会抛错。 */
     selectPanel(panelId: string | null): void
+  }
+  sidebarRight: {
+    /** 按 kind 打开右侧栏页面类型；kind 没注册会抛错。 */
+    openTab(kind: string): void
   }
   remote: {
     commands: {
