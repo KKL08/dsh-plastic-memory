@@ -76,6 +76,12 @@ describe('memory_save 绑定', () => {
   })
   const legal = { action: 'create', name: '标题', type: 'preference', scope: 'global', content: '内容', summary: '摘要', sourceMode: 'user-explicit' }
 
+  it('tags 的参数说明引导写同义词与中英文别名，让换一种说法的查询也能搜到', () => {
+    const tags = (schemaOf(makeTool()) as { properties: Record<string, { description?: string }> }).properties.tags!
+    expect(tags.description).toContain('同义词')
+    expect(tags.description).toContain('中英文别名')
+  })
+
   it('(a) 合法参数过、缺必填拒', () => {
     const tool = makeTool()
     expect(validateJsonSchemaValue(schemaOf(tool), legal)).toEqual([])
@@ -110,6 +116,15 @@ describe('memory_search 绑定', () => {
     if (r.kind !== 'saved') throw new Error(r.kind)
     return createSearchTool({ store, registry, resolveContext: async () => ({ workspacePath: '/proj', session: { id: 's', lastSeq: 1 } }) })
   }
+
+  it('工具描述教模型怎么下关键词（2 到 4 个实词、中英文两种写法），并说明命中弱时换词再搜', async () => {
+    const tool = await seededTool()
+    expect(tool.description).toContain('2 到 4 个实词')
+    expect(tool.description).toContain('中英文两种写法')
+    expect(tool.description).toContain('换同义词或减少词数再搜一次')
+    const query = (schemaOf(tool) as { properties: Record<string, { description?: string }> }).properties.query!
+    expect(query.description).toContain('建议换词再搜')
+  })
 
   it('(a) 合法参数过、缺必填（query）拒', async () => {
     const tool = await seededTool()
