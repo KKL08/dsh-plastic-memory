@@ -5,6 +5,9 @@ import { workspaceDirName, GLOBAL_DIR, INDEX_FILE, ARCHIVE_DIR } from './storage
 import { EVIDENCE_GUIDANCE, type EvidenceLookupLevel } from './evidence-guidance.ts'
 import { stalenessNote, withinValidity } from './record-freshness.ts'
 import { maskSecrets, maskSecretSurface } from './secrets.ts'
+import type { OverflowMode } from './contract-codes.ts'
+
+export type { OverflowMode }
 
 export const COLD_START_TEXT = `记忆库当前为空。如果时机合适，可以问一句用户是否愿意介绍自己的背景（角色、常用技术、工作习惯），愿意就用 memory_save 记下来；不愿意就在后续任务中自然积累，不要追问。`
 
@@ -31,9 +34,6 @@ export const PROMPT_LBRACE_VARIABLE = 'plastic_memory_lbrace'
 export function escapePromptBraces(text: string): string {
   return text.replaceAll('{{', `{{${PROMPT_LBRACE_VARIABLE}}}`)
 }
-
-/** 带入量超过上限时的处理（配置 snapshotOverflow）：relax 自动放宽，strict 严格按上限。 */
-export type OverflowMode = 'relax' | 'strict'
 
 /** 粗略 token 估算：中文字 ×1.5，其余按空白分词 ×1.3。预算是软约束，够用即可。 */
 export function estimateTokens(text: string): number {

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { KvTable } from '../kv-table.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { RETENTION_MS } from '../retention.ts'
+import type { OverflowLevel } from '../snapshot.ts'
 import { genId, type PendingDecision, type PendingKind, type SettledVerdict } from './schema.ts'
 
 /** 去重 key：memoryIds 排序拼接 + baselineRef（垂直冲突与横向冲突互不干扰）。 */
@@ -43,6 +44,25 @@ export function verdictLoser(entry: KindKeyed, verdict: SettledVerdict): string 
 /** 已裁决且裁决删掉了一方的条目。 */
 function isDeletionSettled(entry: PendingDecision): boolean {
   return entry.settled !== undefined && verdictLoser(entry, entry.settled.verdict) !== undefined
+}
+
+/** 超限条目的指纹：relax 为档位号（'1'、'2'…），strict 只有一档。 */
+const STRICT_OVERFLOW_FINGERPRINT = 'strict-95'
+
+export function overflowFingerprint(level: OverflowLevel): string {
+  return level.mode === 'strict' ? STRICT_OVERFLOW_FINGERPRINT : String(level.tier)
+}
+
+/** 超限条目的档位（由指纹还原）。 */
+export function overflowLevelOf(entry: Pick<PendingDecision, 'fingerprint'>): OverflowLevel {
+  return entry.fingerprint === STRICT_OVERFLOW_FINGERPRINT
+    ? { mode: 'strict', tier: 0 }
+    : { mode: 'relax', tier: Number.parseInt(entry.fingerprint ?? '', 10) || 0 }
+}
+
+/** 超限条目所属的项目（workspace 路径，无项目的会话为 'global'），存在 workspaces[0]。 */
+export function overflowScopeOf(entry: Pick<PendingDecision, 'workspaces'>): string | undefined {
+  return entry.workspaces?.[0]
 }
 
 type UpsertInput = { kind?: PendingKind; memoryIds: string[]; baselineRef?: string; summary: string; workspaces?: string[]; fingerprint?: string }
@@ -149,6 +169,33 @@ export class PendingDecisionsStore {
     for (const [key, e] of await this.table.list()) {
       if (isDeletionSettled(e) && e.settled!.at < cutoff) await this.table.delete(key)
     }
+  }
+
+  /** 全部超限条目（含已忽略的）：已忽略只是不再提醒，超限的事实仍在，健康把它列为问题。 */
+  async listOverflow(): Promise<PendingDecision[]> {
+    return (await this.table.list()).map(([, e]) => e).filter(e => kindOf(e) === 'overflow')
+  }
+
+  /**
+   * 快照冻结时同步一个项目的超限提醒（scope：workspace 路径，无项目为 'global'）。每个项目同时只留一条，指纹 = 当前档位：
+   * 同档不动（已忽略的保持忽略，不重报）；进入更高档换一条新的未决条目；回落到没超限删掉，下次超限重新提醒；
+   * 从高档降到低档时高档条目删掉、换成低档条目，高档已忽略的低档也算忽略（回落不打扰），再升回高档重新提醒。
+   * 换模式（relax ↔ strict）旧条目作废。返回账本是否有变化。
+   */
+  async syncOverflow(scope: string, level: OverflowLevel | undefined, now: number, summary: string): Promise<boolean> {
+    const mine = (await this.table.list()).filter(([, e]) => kindOf(e) === 'overflow' && overflowScopeOf(e) === scope)
+    const fingerprint = level === undefined ? undefined : overflowFingerprint(level)
+    const current = mine.find(([, e]) => e.fingerprint === fingerprint)
+    const stale = mine.filter(entry => entry !== current)
+    for (const [key] of stale) await this.table.delete(key)
+    if (level === undefined || current !== undefined) return stale.length > 0
+    const dismissedAbove = stale.some(([, e]) => e.settled !== undefined && overflowLevelOf(e).mode === level.mode && overflowLevelOf(e).tier > level.tier)
+    const entry: PendingDecision = {
+      id: genId('pd'), kind: 'overflow', memoryIds: [], summary, firstSeenAt: now, workspaces: [scope], fingerprint: fingerprint!,
+      ...(dismissedAbove ? { settled: { verdict: 'dismiss' as const, at: now } } : {}),
+    }
+    await this.table.put(entry.id, entry)
+    return true
   }
 
   async remove(id: string): Promise<boolean> {

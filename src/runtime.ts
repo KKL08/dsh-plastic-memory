@@ -5,7 +5,8 @@ import type { MemoryRecord } from './record-schema.ts'
 import { resolveDuplicates } from './storage/table.ts'
 import type { TypeRegistry } from './type-registry.ts'
 import type { EvidenceLookupLevel } from './evidence-guidance.ts'
-import { assembleSnapshot, escapePromptBraces } from './snapshot.ts'
+import { assembleSnapshot, escapePromptBraces, overflowLevel, type OverflowLevel, type OverflowMode, type SnapshotUsage } from './snapshot.ts'
+import type { SessionView } from './gui/contract.ts'
 
 /**
  * 快照的预读：global + 当前 workspace 顶层的 active 记录（同 id 按取舍规则留一份，口径同 queryScope 的默认查询），
@@ -35,12 +36,33 @@ export async function prereadSnapshot(store: MemoryStore, workspacePath: string 
  * 已知窗口：HMR 后存量 session 缓存为空，首次 provider 回空串，首次中间件补上。
  * 缓存存原文；render 与 assemble 在出口统一转义 `{{`，每条路径都只转义一次。
  */
+/** 超限提醒的账本（PendingDecisionsStore 满足它）：按项目同步当前档位，返回账本是否有变化。 */
+export interface OverflowLedger {
+  syncOverflow(scope: string, level: OverflowLevel | undefined, now: number, summary: string): Promise<boolean>
+}
+
+/** 快照冻结时交给 onFrozen 的信息：会话视图除 sessionId、savedIds 外的全部字段，外加超限账本这次有没有变（变了要重写待处理 / 健康视图）。 */
+export type FrozenSnapshotInfo = Omit<SessionView, 'version' | 'sessionId' | 'savedIds'> & { overflowChanged: boolean }
+
+/** 写进账本的超限说明（给 agent 和日志看；界面文案由客户端按结构渲染）。 */
+function overflowSummary(level: OverflowLevel, usage: SnapshotUsage, budget: number): string {
+  return level.mode === 'relax'
+    ? `带入记忆约 ${usage.usedTokens} token，超出上限 ${budget}，已自动放宽到 ${Math.round(budget * (1 + 0.25 * level.tier))}`
+    : `带入记忆约 ${usage.usedTokens} token，已用到上限 ${budget} 的 95%${usage.omittedCount > 0 ? `，${usage.omittedCount} 条没带入` : ''}`
+}
+
 export interface SnapshotCacheDeps {
   store: MemoryStore
   registry: TypeRegistry
   budget: number
   memoryRoot?: string
   evidenceLookup?: EvidenceLookupLevel
+  /** 超出上限的处理，缺省 relax（与配置默认一致）。 */
+  overflow?: OverflowMode
+  /** 给出时，每次冻结按会话所属项目（无项目为 'global'）同步超限提醒。 */
+  overflowLedger?: OverflowLedger
+  /** 冻结之后调用（会话视图的写入口，接线在 index.ts）。失败只记日志。 */
+  onFrozen?: (session: object, info: FrozenSnapshotInfo) => void | Promise<void>
   resolveWorkspace?: (session: object) => Promise<string | undefined>
   /** 日志注入口，缺省回退 console（见 store.ts MemoryLogger）。 */
   log?: MemoryLogger
@@ -122,7 +144,8 @@ export class SnapshotCache {
     const isResolved = this.workspacePaths.has(session)
     const workspacePath = isResolved ? this.workspacePaths.get(session) : undefined
     // 预读范围：只读 active，global + 当前 workspace（未解析时 global-only）；同一次读取的隔离文件数给冷启动文案用
-    const { text, coreIds } = assembleSnapshot({ ...this.deps, ...(await prereadSnapshot(this.deps.store, workspacePath)), workspacePath, now: Date.now() })
+    const now = Date.now()
+    const { text, coreIds, ...usage } = assembleSnapshot({ ...this.deps, ...(await prereadSnapshot(this.deps.store, workspacePath)), workspacePath, now })
     if (!isResolved) return text
     // 构建期间被标过期：这份文本只给本次用，不进缓存、不计召回，下一次中间件按新代次重建
     if ((this.generations.get(session) ?? 0) !== generation) return text
@@ -140,7 +163,27 @@ export class SnapshotCache {
     } catch (err) {
       ;(this.deps.log ?? console).error('[plastic-memory] 记忆目录维护失败:', err)
     }
+    await this.afterFreeze(session, workspacePath, now, usage)
     return text
+  }
+
+  /** 冻结之后：同步超限提醒、交出会话视图的原料。都是旁路，失败只记日志。 */
+  private async afterFreeze(session: object, workspacePath: string | undefined, now: number, usage: SnapshotUsage): Promise<void> {
+    const { budget, overflowLedger, onFrozen } = this.deps
+    const mode = this.deps.overflow ?? 'relax'
+    let overflowChanged = false
+    try {
+      if (overflowLedger) {
+        const level = overflowLevel(mode, usage.usedTokens, budget)
+        overflowChanged = await overflowLedger.syncOverflow(workspacePath ?? 'global', level, now, level ? overflowSummary(level, usage, budget) : '')
+      }
+      await onFrozen?.(session, {
+        ...(workspacePath !== undefined ? { workspacePath } : {}),
+        frozenAt: now, budget, overflowMode: mode, ...usage, overflowChanged,
+      })
+    } catch (err) {
+      ;(this.deps.log ?? console).error('[plastic-memory] 快照冻结后的超限同步或会话视图失败:', err)
+    }
   }
 
   /** 同步 provider 的出口：只回冻结缓存（过期的也回），没有缓存回空串。未解析的 session
