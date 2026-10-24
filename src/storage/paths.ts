@@ -30,8 +30,8 @@ export function isMemoryFileName(fileName: string): boolean {
 }
 
 /**
- * 与 macOS 在非原生卷上生成的 ._ 伴生文件、编辑器的 .# 锁文件同形的文件名。照常读：解析成合法记忆就加载（旧版本按名字
- * 生成过这类文件名），解析不出就静默跳过，不进隔离，也不计入列出文件数。slugifyName 不会生成这个形态。
+ * 与 macOS 在非原生卷上生成的 ._ 伴生文件、编辑器的 .# 锁文件同形的文件名。照常读：解析成合法记忆就当普通记忆文件加载、计数
+ * （旧版本按名字生成过这类文件名），解析不出就静默跳过，不进隔离，也不计入列出文件数。slugifyName 不会生成这个形态。
  */
 export function isCompanionLikeFileName(fileName: string): boolean {
   return fileName.startsWith('._') || fileName.startsWith('.#')

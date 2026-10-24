@@ -74,6 +74,11 @@ function errnoCode(err: unknown): string | undefined {
   return (err as NodeJS.ErrnoException | undefined)?.code
 }
 
+/** readMemoryFile 的结果是解析成功的记录（不是被跳过或隔离）。 */
+function isSlot(r: { slot: Slot } | { quarantined: QuarantineEntry } | undefined): r is { slot: Slot; notes: DirectoryNote[] } {
+  return r !== undefined && 'slot' in r
+}
+
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
@@ -211,10 +216,12 @@ export class FileTable implements MemoryTable {
       for (const level of levels) {
         const listed = await this.listMemoryFiles(level)
         if ('note' in listed) { directoryNotes.push(listed.note); continue }
-        // 只数顶层，预筛、解析、types 之前；伴生文件形态的名字不数（非原生卷上每个文件都配一个）
-        if (level === dir) listedCount += listed.names.filter(n => !isCompanionLikeFileName(n)).length
-        const results = await Promise.all(listed.names.sort().map(name =>
-          this.readMemoryFile(join(level, name), dir, loc, prefilter, statsRows)))
+        // 伴生文件形态的名字不走预筛、一律解析：它算不算记忆文件要看解析结果，列出文件数才与预筛开关无关
+        const names = listed.names.sort()
+        const results = await Promise.all(names.map(name =>
+          this.readMemoryFile(join(level, name), dir, loc, isCompanionLikeFileName(name) ? NO_PREFILTER : prefilter, statsRows)))
+        // 只数顶层，预筛、types 之前；伴生文件形态的名字解析成记忆才数（非原生卷上每个文件都配一个伴生文件）
+        if (level === dir) listedCount += names.filter((n, i) => !isCompanionLikeFileName(n) || isSlot(results[i])).length
         for (const r of results) {
           if (r === undefined) continue
           if ('quarantined' in r) { quarantined.push(r.quarantined); continue }
@@ -273,7 +280,9 @@ export class FileTable implements MemoryTable {
       if (loc.loc.scope !== 'workspace') continue   // 只有 global 目录会落到这支，已被 isWorkspaceDirName 排除
       const listed = await this.listMemoryFiles(dir)
       if ('note' in listed) { directoryNotes.push(listed.note); continue }
+      // 只看文件名；只剩伴生文件形态的名字时才逐个解析，解析成记忆的才算
       const hasActiveTopLevel = listed.names.some(n => !isCompanionLikeFileName(n))
+        || (await Promise.all(listed.names.map(n => this.readMemoryFile(join(dir, n), dir, loc.loc, NO_PREFILTER, new Map())))).some(isSlot)
       if (!hasActiveTopLevel) directoryNotes.push(this.note('dir-empty', dir, `workspace 目录顶层没有记忆文件（只剩归档或全空），不进体检清单：${dir}`))
       entries.push({ workspacePath: loc.loc.workspacePath, dir, hasActiveTopLevel })
     }

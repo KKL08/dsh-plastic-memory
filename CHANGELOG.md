@@ -208,12 +208,6 @@ All notable changes to this project are documented here. The format follows
   forgetting the memory cannot remove it. Such memories are now refused with
   a message saying why and stay in the project unchanged. Promoting to global
   memory is unaffected.
-- A memory whose name starts with `._` or `.#` (such as `._notes`) was saved
-  to a file that search, injection and lookup then skipped, so it seemed to
-  vanish. Such names now get a file name without the leading dot, and files
-  already named this way are read again; only files that are not memories,
-  like the `._` companions macOS writes on non-native drives, are still
-  skipped.
 
 ## [0.1.1-beta.5] - 2026-10-20
 
