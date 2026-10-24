@@ -8,7 +8,7 @@ import { samePath, useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, formatNumber, useT, type Translate } from '../i18n.tsx'
 import { Button } from '../ui/Button.tsx'
 import { Chip } from '../ui/Chip.tsx'
-import { ConflictRuling } from '../ui/ConflictRuling.tsx'
+import { ConflictRuling, VerticalConflictRuling } from '../ui/ConflictRuling.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { StatusMarker } from '../ui/StatusMarker.tsx'
 import { ActionFeedback, useItemAction } from './action.tsx'
@@ -154,26 +154,23 @@ export function HorizontalCard({ item, session, now, typeLabels, onDone }: CardP
 
 export function VerticalCard({ item, session, now, typeLabels, onDone }: CardProps<'conflict-vertical'>) {
   const t = useT()
-  const { vertical } = CONFLICT_ACTION_VERDICTS
   const action = useItemAction(session, (command) => {
     if (command.cmd === 'resolve') onDone({ kind: 'resolved', verdict: command.verdict })
   })
-  const unavailable = action.unavailable ?? (item.memory === null ? t('conflict.missingHint') : undefined)
-  const rule = (verdict: Verdict) => { action.run({ cmd: 'resolve', decisionId: item.decisionId, verdict }) }
   return (
-    <Card marker={<StatusMarker kind="pending" />} title={titleOf(item, t)}>
-      <p className="pm-pending-text">{t('pending.vertical.baseline')}</p>
-      {item.memory === null
-        ? <p className="pm-pending-text">{t('conflict.missing')}</p>
-        : <MemoryOf memory={item.memory} now={now} typeLabels={typeLabels} />}
-      <p className="pm-pending-text">{t('pending.vertical.baselineRef', { ref: item.baselineRef })}</p>
-      <p className="pm-pending-text">{t('pending.vertical.consequence')}</p>
-      <div className="pm-pending-actions">
-        <Button unavailable={unavailable} onClick={() => { rule(vertical.keepBaseline) }}>{t('pending.vertical.keepBaseline')}</Button>
-        <Button unavailable={unavailable} onClick={() => { rule(vertical.keepMemory) }}>{t('pending.vertical.keepMemory')}</Button>
-      </div>
+    <div className="pm-pending-item">
+      <VerticalConflictRuling
+        layout="wide"
+        memory={item.memory}
+        baselineRef={item.baselineRef}
+        now={now}
+        title={titleOf(item, t)}
+        unavailable={action.unavailable}
+        typeLabel={type => typeLabels[type] ?? type}
+        onRule={(verdict) => { action.run({ cmd: 'resolve', decisionId: item.decisionId, verdict }) }}
+      />
       <ActionFeedback action={action} />
-    </Card>
+    </div>
   )
 }
 

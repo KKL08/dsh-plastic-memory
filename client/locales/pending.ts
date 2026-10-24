@@ -33,11 +33,6 @@ export const pendingZh = {
   'pending.conflict.preferred': '决定前 agent 按 {side} 来。',
   'pending.conflict.preferredExplicit': '决定前 agent 按你明确说过的 {side} 来。',
 
-  'pending.vertical.baseline': 'AGENTS.md 是基线，不会被删除。',
-  'pending.vertical.baselineRef': '基线：{ref}',
-  'pending.vertical.keepBaseline': '以基线为准',
-  'pending.vertical.keepMemory': '保留这条记忆',
-  'pending.vertical.consequence': '以基线为准会删掉这条记忆，14 天内可恢复。保留这条记忆：基线和记忆都不变时不再报。',
 
   'pending.promote.title': '这条适合所有项目',
   'pending.promote.titleIn': '{name} 里的这条适合所有项目',
@@ -120,11 +115,6 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.conflict.preferred': 'Until you decide, the agent follows {side}.',
   'pending.conflict.preferredExplicit': 'Until you decide, the agent follows {side}, which you said explicitly.',
 
-  'pending.vertical.baseline': 'AGENTS.md is the baseline and will not be deleted.',
-  'pending.vertical.baselineRef': 'Baseline: {ref}',
-  'pending.vertical.keepBaseline': 'Go with the baseline',
-  'pending.vertical.keepMemory': 'Keep this memory',
-  'pending.vertical.consequence': 'Going with the baseline deletes this memory; it can be restored within 14 days. Keep this memory: not reported again while neither changes.',
 
   'pending.promote.title': 'This fits every project',
   'pending.promote.titleIn': 'The one in {name} fits every project',

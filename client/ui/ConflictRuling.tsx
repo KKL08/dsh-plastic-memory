@@ -4,6 +4,8 @@
  * - 宽版（记忆页）：A、B 按钮进各自卡片底部，「都保留」居中压在横贯两卡的细线上，下方紧跟后果说明；
  * - 窄版（右侧栏）：三个按钮一行，后果说明在按钮下面。
  * 任一方定位不到（视图里为 null）时裁决会报错，三个按钮都不可用。裁决后的结果态在待处理票里做。
+ * 记忆和基线（AGENTS.md）冲突用 VerticalConflictRuling：同一套标题与后果说明，只有一张记忆卡，
+ * 按钮「以基线为准 / 保留这条记忆」，并写明基线不会被删除。
  */
 import type { ReactNode } from 'react'
 import { CONFLICT_ACTION_VERDICTS, type MemoryCard as MemoryCardData } from '../../src/gui/contract.ts'
@@ -13,6 +15,7 @@ import { MemoryCard } from './MemoryCard.tsx'
 import { StatusMarker } from './StatusMarker.tsx'
 
 type HorizontalVerdict = (typeof CONFLICT_ACTION_VERDICTS.horizontal)[keyof typeof CONFLICT_ACTION_VERDICTS.horizontal]
+type VerticalVerdict = (typeof CONFLICT_ACTION_VERDICTS.vertical)[keyof typeof CONFLICT_ACTION_VERDICTS.vertical]
 
 export interface ConflictRulingProps {
   layout: 'wide' | 'narrow'
@@ -78,6 +81,47 @@ export function ConflictRuling(props: ConflictRulingProps) {
   )
 }
 
+export interface VerticalConflictRulingProps {
+  layout: 'wide' | 'narrow'
+  memory: MemoryCardData | null
+  /** 基线出处（「AGENTS.md：包管理」）。 */
+  baselineRef: string
+  now: number
+  onRule: (verdict: VerticalVerdict) => void
+  /** 缺省「这条记忆和基线矛盾，等你决定」；记忆页用条目标题。 */
+  title?: ReactNode
+  unavailable?: string | undefined
+  typeLabel?: (type: string) => string
+  hideScope?: boolean
+}
+
+/** 记忆和基线冲突：宽版按钮靠右，窄版按钮一行靠左，后果说明都在按钮下面。 */
+export function VerticalConflictRuling(props: VerticalConflictRulingProps) {
+  const t = useT()
+  const { vertical } = CONFLICT_ACTION_VERDICTS
+  const unavailable = props.unavailable ?? (props.memory === null ? t('conflict.missingHint') : undefined)
+  return (
+    <article className={`pm-conflict pm-conflict--${props.layout} pm-conflict--vertical`}>
+      <header className="pm-conflict-head">
+        <StatusMarker kind="pending" />
+        <h3 className="pm-conflict-title">{props.title ?? t('conflict.vertical.title')}</h3>
+      </header>
+      <p className="pm-conflict-note">{t('conflict.vertical.baseline')}</p>
+      <div className="pm-conflict-single">
+        {props.memory === null
+          ? <p className="pm-conflict-missing">{t('conflict.missing')}</p>
+          : <MemoryCard memory={props.memory} now={props.now} typeLabel={props.typeLabel?.(props.memory.type)} hideScope={props.hideScope} />}
+        <p className="pm-conflict-baseline">{t('conflict.vertical.baselineRef', { ref: props.baselineRef })}</p>
+      </div>
+      <div className="pm-conflict-buttons">
+        <Button unavailable={unavailable} onClick={() => { props.onRule(vertical.keepBaseline) }}>{t('conflict.vertical.keepBaseline')}</Button>
+        <Button unavailable={unavailable} onClick={() => { props.onRule(vertical.keepMemory) }}>{t('conflict.vertical.keepMemory')}</Button>
+      </div>
+      <p className="pm-conflict-consequence">{t('conflict.vertical.consequence')}</p>
+    </article>
+  )
+}
+
 export const conflictRulingCss = `
 .pm-conflict { padding-bottom: 18px; }
 .pm-conflict-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
@@ -100,4 +144,9 @@ export const conflictRulingCss = `
 .pm-conflict-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .pm-conflict-consequence { margin: 6px 0 0; font-size: 12px; line-height: 1.6; color: var(--pm-text-2); }
 .pm-keep .pm-conflict-consequence { text-align: center; }
+.pm-conflict-single { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.pm-conflict--wide .pm-conflict-single { padding-left: 16px; }
+.pm-conflict-baseline { margin: 0; padding-left: 14px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); overflow-wrap: anywhere; }
+.pm-conflict--vertical.pm-conflict--wide .pm-conflict-buttons { justify-content: flex-end; }
+.pm-conflict--vertical.pm-conflict--wide .pm-conflict-consequence { padding-left: 16px; }
 `
