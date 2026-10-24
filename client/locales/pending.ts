@@ -40,6 +40,7 @@ export const pendingZh = {
   'pending.vertical.consequence': '以基线为准会删掉这条记忆，14 天内可恢复。保留这条记忆：基线和记忆都不变时不再报。',
 
   'pending.promote.title': '这条适合所有项目',
+  'pending.promote.titleIn': '{name} 里的这条适合所有项目',
   'pending.promote.global': '提升为全局',
   'pending.promote.globalIn': '提升 {name} 里的这条',
   'pending.promote.agentsMd': '写进 AGENTS.md',
@@ -125,8 +126,9 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.vertical.consequence': 'Going with the baseline deletes this memory; it can be restored within 14 days. Keep this memory: not reported again while neither changes.',
 
   'pending.promote.title': 'This fits every project',
+  'pending.promote.titleIn': 'The one in {name} fits every project',
   'pending.promote.global': 'Make global',
-  'pending.promote.globalIn': 'Make this one from {name} global',
+  'pending.promote.globalIn': 'Promote the one in {name}',
   'pending.promote.agentsMd': 'Write into AGENTS.md',
   'pending.promote.globalNote': 'Every project will bring it in. You can undo within 14 days.',
   'pending.promote.agentsMdNote': 'You maintain it from then on: the plugin stops checking it and it never expires.',

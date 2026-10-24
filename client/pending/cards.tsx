@@ -193,8 +193,10 @@ export function PromoteCard({ item, session, now, typeLabels, onDone, promoteTar
   const promoteLabel = promoteTarget === 'agents-md' ? t('pending.promote.agentsMd')
     : other !== undefined ? t('pending.promote.globalIn', { name: baseName(other) }) : t('pending.promote.global')
   return (
-    <Card marker={<StatusMarker kind="pending" />} title={t('pending.promote.title')}>
-      {other !== undefined ? <p className="pm-pending-text">{t('pending.inProject', { name: baseName(other) })}</p> : null}
+    <Card
+      marker={<StatusMarker kind="pending" />}
+      title={other !== undefined ? t('pending.promote.titleIn', { name: baseName(other) }) : t('pending.promote.title')}
+    >
       {item.memory === null
         ? <p className="pm-pending-text">{t('conflict.missing')}</p>
         : <MemoryOf memory={item.memory} now={now} typeLabels={typeLabels} />}
