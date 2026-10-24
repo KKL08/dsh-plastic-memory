@@ -61,6 +61,26 @@ describe('slugifyName', () => {
     )
   })
 
+  // INVARIANT: the slug never starts with "._" or ".#" — the reader silently skips
+  // such files when they fail to parse (macOS AppleDouble files, editor locks), so a
+  // generated name must never take that shape. Idempotency must survive the fix-up.
+  const companionLike = fc
+    .tuple(
+      fc.constantFrom('', ' ', '-', '/', ' -/'),
+      fc.constantFrom('._', '.#'),
+      fc.array(fc.constantFrom(...'ab中._#- /'), { maxLength: 50 }).map(cs => cs.join('')),
+    )
+    .map(([lead, pair, tail]) => lead + pair + tail)
+  it('never yields a name the reader treats as a companion file', () => {
+    fc.assert(
+      fc.property(fc.oneof(companionLike, messyName), name => {
+        const slug = slugifyName(name)
+        expect(slug).not.toMatch(/^\.[_#]/)
+        expect(slugifyName(slug)).toBe(slug)
+      }),
+    )
+  })
+
   // Not a contract: slugifyName is case-preserving by design (directory/file names keep
   // the user's casing); case-insensitive comparison lives in the rename path
   // (file-table) and in isReservedFileName, which the next block covers.

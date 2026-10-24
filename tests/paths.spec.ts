@@ -61,6 +61,25 @@ describe('slugifyName 截断边界', () => {
   })
 })
 
+// 以 ._ / .# 开头的文件名与 macOS 伴生文件、编辑器锁文件同形，读侧对这类文件解析失败时静默跳过；生成的文件名不能落进这个形态。
+describe('slugifyName 避开伴生文件形态', () => {
+  it.each([
+    ['._notes', '_notes'],
+    ['.#notes', '#notes'],
+    ['  ._ 笔记', '_-笔记'],
+    ['-._x', '_x'],
+    ['._', '_'],
+  ])('%s → %s，且幂等', (name, slug) => {
+    expect(slugifyName(name)).toBe(slug)
+    expect(slugifyName(slug)).toBe(slug)
+  })
+
+  it('其余点开头的名字照旧', () => {
+    expect(slugifyName('.env 约定')).toBe('.env-约定')
+    expect(slugifyName('..#x')).toBe('..#x')
+  })
+})
+
 describe('memoryRelativePath', () => {
   it('「目录名/文件名」格式器：目录与文件各取末段，用 / 连接；传末段名或绝对路径结果相同', () => {
     expect(memoryRelativePath('/m/root/global', '/m/root/global/看板.md')).toBe('global/看板.md')

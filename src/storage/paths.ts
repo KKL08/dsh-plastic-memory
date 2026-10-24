@@ -23,11 +23,18 @@ export function isReservedFileName(fileName: string): boolean {
 
 /**
  * 目录顶层哪些文件名算记忆文件：.md 结尾、不是索引。文件名由记忆名字生成，名字可以以点开头（「.env 约定」），
- * 所以点开头的照常算；只排除 macOS 在非原生卷上生成的 ._ 伴生文件和编辑器的 .# 锁文件。
- * 原子写的 tmp 以 .tmp-<pid>-<rand> 结尾，天然排除。
+ * 所以点开头的照常算。原子写的 tmp 以 .tmp-<pid>-<rand> 结尾，天然排除。
  */
 export function isMemoryFileName(fileName: string): boolean {
-  return fileName.endsWith('.md') && !fileName.startsWith('._') && !fileName.startsWith('.#') && !isReservedFileName(fileName)
+  return fileName.endsWith('.md') && !isReservedFileName(fileName)
+}
+
+/**
+ * 与 macOS 在非原生卷上生成的 ._ 伴生文件、编辑器的 .# 锁文件同形的文件名。照常读：解析成合法记忆就加载（旧版本按名字
+ * 生成过这类文件名），解析不出就静默跳过，不进隔离，也不计入列出文件数。slugifyName 不会生成这个形态。
+ */
+export function isCompanionLikeFileName(fileName: string): boolean {
+  return fileName.startsWith('._') || fileName.startsWith('.#')
 }
 
 /**
@@ -42,7 +49,10 @@ export function slugifyName(name: string): string {
   // 截断后再去一次尾部连字符：slice 可能恰好落在分隔符位而重新露出 '-'，不去掉则 slug
   // 不幂等（slug(slug(x)) !== slug(x)）且文件名以 '-' 结尾。
   const s = name.trim().replace(/[\/\\:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/g, '')
-  return s.length > 0 ? s : 'memory'
+  // 以 ._ / .# 开头的名字去掉开头的点：同伴生文件形态的文件解析不出时读侧静默跳过，用户手编坏了就无从发现。
+  // 去点后以 _ / # 开头，不会再命中这条，也不露出新的连字符，幂等不变。
+  const t = isCompanionLikeFileName(s) ? s.slice(1) : s
+  return t.length > 0 ? t : 'memory'
 }
 
 /**

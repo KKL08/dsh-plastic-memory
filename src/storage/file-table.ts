@@ -12,7 +12,7 @@ import type { RecallStats } from './schema.ts'
 import { decodeFile, digestMismatch, encodeRecord, type FileLocation } from './frontmatter.ts'
 import {
   WORKSPACE_MARKER, INDEX_FILE, GLOBAL_DIR, ARCHIVE_DIR, workspaceDirName, slugifyName, isReservedFileName,
-  isMemoryFileName, isWorkspaceDirName, deriveFileId, isDerivedFileId,
+  isMemoryFileName, isCompanionLikeFileName, isWorkspaceDirName, deriveFileId, isDerivedFileId,
 } from './paths.ts'
 import { linkExclusive } from './exclusive-link.ts'
 import { formatIndexLine } from '../index-line.ts'
@@ -173,11 +173,16 @@ export class FileTable implements MemoryTable {
       raw = await readFile(filePath, 'utf8')
     } catch (err) {
       if (errnoCode(err) === 'ENOENT') return undefined   // readdir 之后被删：竞态
+      if (isCompanionLikeFileName(basename(filePath))) return undefined
       return { quarantined: { path: filePath, error: err instanceof Error ? err.message : String(err) } }
     }
     if (!this.passesPrefilter(raw, filePath, prefilter)) return undefined
     const outcome = decodeFile(raw, { path: filePath, loc, relPath: relative(this.opts.root, filePath), mtimeMs })
-    if (!outcome.ok) return { quarantined: { path: outcome.path, error: outcome.error } }
+    if (!outcome.ok) {
+      // 伴生文件 / 锁文件形态的名字解析不出就不是记忆（伴生文件是二进制），静默跳过
+      if (isCompanionLikeFileName(basename(filePath))) return undefined
+      return { quarantined: { path: outcome.path, error: outcome.error } }
+    }
     const row = statsRows.get(outcome.record.id)
     const record = row ? { ...outcome.record, recallCount: row.recallCount, lastRecalledAt: row.lastRecalledAt } : outcome.record
     return {
@@ -206,7 +211,8 @@ export class FileTable implements MemoryTable {
       for (const level of levels) {
         const listed = await this.listMemoryFiles(level)
         if ('note' in listed) { directoryNotes.push(listed.note); continue }
-        if (level === dir) listedCount += listed.names.length   // 只数顶层，预筛、解析、types 之前
+        // 只数顶层，预筛、解析、types 之前；伴生文件形态的名字不数（非原生卷上每个文件都配一个）
+        if (level === dir) listedCount += listed.names.filter(n => !isCompanionLikeFileName(n)).length
         const results = await Promise.all(listed.names.sort().map(name =>
           this.readMemoryFile(join(level, name), dir, loc, prefilter, statsRows)))
         for (const r of results) {
@@ -267,7 +273,7 @@ export class FileTable implements MemoryTable {
       if (loc.loc.scope !== 'workspace') continue   // 只有 global 目录会落到这支，已被 isWorkspaceDirName 排除
       const listed = await this.listMemoryFiles(dir)
       if ('note' in listed) { directoryNotes.push(listed.note); continue }
-      const hasActiveTopLevel = listed.names.length > 0
+      const hasActiveTopLevel = listed.names.some(n => !isCompanionLikeFileName(n))
       if (!hasActiveTopLevel) directoryNotes.push(this.note('dir-empty', dir, `workspace 目录顶层没有记忆文件（只剩归档或全空），不进体检清单：${dir}`))
       entries.push({ workspacePath: loc.loc.workspacePath, dir, hasActiveTopLevel })
     }

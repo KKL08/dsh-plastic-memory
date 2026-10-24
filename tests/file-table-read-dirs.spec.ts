@@ -233,6 +233,30 @@ describe('点开头的名字（文件名由记忆名字生成，名字可以以�
     expect(quarantined).toEqual([])
   })
 
+  it('._ / .# 开头的文件是合法记忆就照常读到、能按 id 定位（旧版本按名字生成过这类文件名）；只有解析不出的才静默跳过', async () => {
+    await seedGlobal('._旧笔记.md', record({ id: 'mem_apple', name: '._旧笔记' }))
+    await seedGlobal('.#锁.md', record({ id: 'mem_lock', name: '.#锁' }))
+    await writeFile(join(root, GLOBAL_DIR, '._坏.md'), '\u0000\u0005\u0016\u0007')
+    await mkdir(join(root, GLOBAL_DIR, ARCHIVE_DIR), { recursive: true })
+    await writeFile(join(root, GLOBAL_DIR, ARCHIVE_DIR, '._归档.md'), '\u0000\u0005\u0016\u0007')
+    const t = open()
+    const { records, quarantined, listedCount } = await t.readScope([globalDir()], { includeArchive: true })
+    expect(records.map(r => r.record.id).sort()).toEqual(['mem_apple', 'mem_lock'])
+    expect(quarantined).toEqual([])
+    expect(listedCount).toBe(0)   // 伴生文件形态的名字不计入列出文件数：非原生卷上每个文件都配一个，计入会让检索的文档数翻倍
+    expect((await t.locate('mem_apple'))?.filePath).toBe(join(root, GLOBAL_DIR, '._旧笔记.md'))
+    expect((await t.locate('mem_lock'))?.record.name).toBe('.#锁')
+  })
+
+  it('名字以 ._ / .# 开头的记忆写下去还能读回来、搜得到', async () => {
+    const t = open()
+    await t.put('mem_apple', record({ id: 'mem_apple', name: '._notes' }))
+    await t.put('mem_lock', record({ id: 'mem_lock', name: '.#notes' }))
+    expect((await t.readScope([globalDir()])).records.map(r => r.record.id).sort()).toEqual(['mem_apple', 'mem_lock'])
+    expect((await t.locate('mem_apple'))?.record.name).toBe('._notes')
+    expect((await t.locate('mem_lock'))?.record.name).toBe('.#notes')
+  })
+
   it('名字以点开头的记忆写下去还能读回来', async () => {
     const t = open()
     await t.put('mem_npmrc', record({ id: 'mem_npmrc', name: '.npmrc 镜像' }))
