@@ -18,6 +18,7 @@ function setup() {
     },
     locale: { register, bind: () => createTranslator(zh) as (key: string) => string, getSnapshot: () => 0, subscribe: () => () => {} },
     layout: { selectPanel: vi.fn() },
+    pluginNavigation: { openBundle: vi.fn() },
     remote: {
       commands: { execute: vi.fn(async () => ({ ok: false as const, error: { code: 'x', message: 'x' } })) },
       workspaceFiles: { read: vi.fn() },
@@ -37,6 +38,10 @@ describe('apply', () => {
     expect(inject).toEqual(expect.arrayContaining(['slots', 'locale', 'layout', 'remote.commands', 'remote.workspaceFiles']))
     const { register } = setup()
     expect(register).toHaveBeenCalledWith(NS, { zh, en })
+  })
+
+  it('依赖 pluginNavigation（「去设置里打开 ›」跳插件页）', () => {
+    expect(inject).toContain('pluginNavigation')
   })
 
   it('左栏图标与记忆页同 id，图标名称走 locale', () => {

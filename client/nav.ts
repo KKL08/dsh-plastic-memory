@@ -27,9 +27,11 @@ export interface NavStore {
   navigate(target: NavTarget): void
   /** 页内用：只改给出的字段。 */
   update(patch: Partial<NavTarget>): void
+  /** 跳到宿主插件页里本插件的配置（「去设置里打开 ›」）。 */
+  openSettings(): void
 }
 
-export function createNavStore(initial: NavTarget = { tab: 'pending' }): NavStore {
+export function createNavStore(initial: NavTarget = { tab: 'pending' }, opts: { openSettings?: () => void } = {}): NavStore {
   let target = initial
   const listeners = new Set<() => void>()
   const set = (next: NavTarget) => { target = next; for (const fn of listeners) fn() }
@@ -38,6 +40,7 @@ export function createNavStore(initial: NavTarget = { tab: 'pending' }): NavStor
     subscribe(fn) { listeners.add(fn); return () => { listeners.delete(fn) } },
     navigate: set,
     update: patch => set({ ...target, ...patch }),
+    openSettings: () => { opts.openSettings?.() },
   }
 }
 

@@ -86,6 +86,10 @@ export interface HostContext {
     /** 只收面板 id、不带参数；面板未注册会抛错。 */
     selectPanel(panelId: string | null): void
   }
+  /** ui-plugin-manager 提供：切到插件页并打开某个包的详情，不换当前会话。 */
+  pluginNavigation: {
+    openBundle(packageName: string): void
+  }
   remote: {
     commands: {
       execute(sessionId: string, line: string, attachments: readonly unknown[]): Promise<RemoteResult<CommandExecution | undefined>>

@@ -8,6 +8,8 @@ import type { GuiLayerRef } from '../src/gui/contract.ts'
 import { useGateway, type ViewState } from './gateway.ts'
 import { baseName, formatNumber, useT, type Translate } from './i18n.tsx'
 import { MEMORY_TABS, useNavTarget, type MemoryTab, type NavStore } from './nav.ts'
+import { HealthTab } from './health/HealthTab.tsx'
+import { ScanControl } from './health/ScanControl.tsx'
 import { EmptyState } from './ui/EmptyState.tsx'
 import { SegmentedTabs, type SegmentedTab } from './ui/Segmented.tsx'
 
@@ -74,6 +76,9 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
             />
           )
           : null}
+        {session.kind === 'ready'
+          ? <ScanControl session={session} workspacePath={scope.kind === 'workspace' ? scope.workspacePath : currentWorkspace} hasPending={(counts.pending ?? 1) > 0} nav={nav} />
+          : null}
       </header>
       {session.kind === 'none'
         ? <EmptyState variant="daily" title={t('session.none.title')}>{t('session.none.body')}</EmptyState>
@@ -81,7 +86,9 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
           <>
             <SegmentedTabs label={t('tabs.label')} items={items} value={target.tab} onChange={(tab) => { nav.update({ tab, memoryId: undefined }) }} />
             <div role="tabpanel" id={`${tabsId}-${target.tab}-panel`} aria-labelledby={`${tabsId}-${target.tab}`} className="pm-page-panel">
-              <p className="pm-page-placeholder">{t('page.placeholder')}</p>
+              {target.tab === 'health'
+                ? <HealthTab session={session} scope={scope} nav={nav} />
+                : <p className="pm-page-placeholder">{t('page.placeholder')}</p>}
             </div>
           </>
         )}

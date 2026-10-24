@@ -63,6 +63,11 @@ describe('lib/client.js 工厂格式', () => {
     expect(handoffs[0]!.id).toBe(pkgName)
   })
 
+  it('插件页按包名打开本插件详情：PACKAGE_NAME 等于包名', () => {
+    const plugin = evaluate()[0]!.factory(fakeRequire([])) as ClientPlugin & { PACKAGE_NAME?: string }
+    expect(plugin.PACKAGE_NAME).toBe(pkgName)
+  })
+
   it('factory 返回 {inject, apply}，require 只问过宿主共享模块', () => {
     const asked: string[] = []
     const plugin = evaluate()[0]!.factory(fakeRequire(asked)) as ClientPlugin

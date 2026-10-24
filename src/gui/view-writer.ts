@@ -17,6 +17,8 @@ export interface ViewSourceDeps {
   registry: TypeRegistry
   memoryRoot: string
   now?: () => number
+  /** 体检开关（用时读配置）；缺省视为开启。 */
+  isGovernanceEnabled?: () => boolean
 }
 
 /**
@@ -34,6 +36,7 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
   return buildGlobalViews({
     now, memoryRoot: deps.memoryRoot, registry: deps.registry, data, readLayers, healthLayers, open, settled,
     listingNotes: listingNotes(listing, { includeEmpty: false }),
+    governanceEnabled: deps.isGovernanceEnabled?.() ?? true,
   })
 }
 
