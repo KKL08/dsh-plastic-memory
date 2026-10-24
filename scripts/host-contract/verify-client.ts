@@ -66,6 +66,17 @@ if (hasBundle) {
     const allowed = new Set<string>(HOST_MODULES)
     const stray = [...new Set(asked)].filter(spec => !allowed.has(spec))
     check(stray.length === 0, 'factory requires only host-shared modules', stray.join(', '))
+    // 旧宿主：共享模块表缺 zod 时 require 同步抛错，工厂要返回空插件而不是把错误抛给加载器
+    let degraded: { apply?: unknown; inject?: unknown } | undefined
+    let threw: string | undefined
+    try {
+      degraded = handoff.factory((spec) => {
+        if (spec === 'zod') throw new Error(`client-modules: require("${spec}") missed the module table`)
+        return real.has(spec) ? realRequire(spec) : {}
+      }) as { apply?: unknown; inject?: unknown }
+    } catch (error) { threw = error instanceof Error ? error.message : String(error) }
+    check(threw === undefined && typeof degraded?.apply === 'function' && Array.isArray(degraded?.inject) && degraded.inject.length === 0,
+      'factory degrades to an empty plugin when a host module is missing', threw ?? JSON.stringify(degraded))
   } else {
     check(false, 'registration carries a factory function')
   }
