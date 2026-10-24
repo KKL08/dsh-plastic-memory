@@ -64,6 +64,8 @@ export interface LayerPreread {
   /** 预读各层的全部状态（active / superseded / deleted，含 .archive/）记录，加上按 id 定位到的层外引用，按 id 索引：
    *  orphan 检测要分辨取代链引用，缓存过滤要核对跨层记录是否存活。 */
   byId: ReadonlyMap<string, MemoryRecord>
+  /** byId 里各记录实际读到的文件（绝对路径），评分不用，GUI 视图的「打开文件」用。 */
+  filePaths: ReadonlyMap<string, string>
   /** 待决账本（按 firstSeenAt 升序）。 */
   pending: readonly PendingDecision[]
   /** 语义扫描缓存，键为缓存桶。 */

@@ -34,6 +34,7 @@ export async function prereadLayers(
   const chosen = resolveDuplicates(read, hint)
   directoryNotes.push(...duplicateNotes(read, chosen))
   const byId = new Map<string, MemoryRecord>(chosen.map(l => [l.record.id, l.record]))
+  const filePaths = new Map<string, string>(chosen.map(l => [l.record.id, l.filePath]))
   const cache = new Map(await deps.cache.list())
   // 评分与跨层聚合只认冲突；提升候选、超限提醒（GUI 条目）不进
   const pending = (await deps.decisions.list()).filter(e => kindOf(e) === 'conflict')
@@ -46,10 +47,13 @@ export async function prereadLayers(
   for (const id of refs) {
     if (byId.has(id)) continue
     const hit = await deps.store.locate(id, hint)
-    if (hit) byId.set(id, hit.record)
+    if (hit) {
+      byId.set(id, hit.record)
+      filePaths.set(id, hit.filePath)
+    }
   }
 
-  return { byId, pending, cache, quarantined, directoryNotes }
+  return { byId, filePaths, pending, cache, quarantined, directoryNotes }
 }
 
 /** 同 id 的多余副本：每份一条说明（路径是副本，正文点出读取时用的那份）。 */
