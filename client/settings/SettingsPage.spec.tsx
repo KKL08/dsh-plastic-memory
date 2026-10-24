@@ -60,8 +60,8 @@ describe('三组设置的渲染', () => {
 
   it('怎么用：上限数字、超出上限两种模式的说明、溯源三档', () => {
     setup({ value: section({ snapshotTokenBudget: 6000, snapshotOverflow: 'strict', evidenceLookup: 'active' }) })
-    expect(screen.getByLabelText('每次对话带入的记忆上限')).toHaveValue('6000')
-    expect(screen.getByText('默认 4,000。')).toBeInTheDocument()
+    expect(screen.getByLabelText('自动带入的记忆上限（token）')).toHaveValue('6000')
+    expect(screen.getByText(/^默认 4,000。/)).toBeInTheDocument()
     expect(tab('超出上限时', '严格按上限')).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByText(/自动放宽：超出的照常带入/)).toBeInTheDocument()
     expect(screen.getByText(/严格按上限：超出的不带入/)).toBeInTheDocument()
@@ -231,13 +231,13 @@ describe('保存：revision 冻结、冲突、非法值', () => {
   it('点保存先弹窗列出改了哪几项（名称：旧值 → 新值），取消不提交、草稿保留', () => {
     const { form } = setup()
     fireEvent.click(tab('场景模板', '办公'))
-    fireEvent.change(screen.getByLabelText('每次对话带入的记忆上限'), { target: { value: '5000' } })
+    fireEvent.change(screen.getByLabelText('自动带入的记忆上限（token）'), { target: { value: '5000' } })
     fireEvent.click(screen.getByRole('switch', { name: '记忆体检' }))
     fireEvent.click(save())
     const items = within(confirmDialog()).getAllByRole('listitem').map(el => el.textContent)
     expect(items).toEqual([
       '场景模板：编码 → 办公',
-      '每次对话带入的记忆上限：4000 → 5000',
+      '自动带入的记忆上限（token）：4000 → 5000',
       '记忆体检：开 → 关',
     ])
     fireEvent.click(within(confirmDialog()).getByRole('button', { name: '取消' }))
@@ -271,7 +271,7 @@ describe('保存：revision 冻结、冲突、非法值', () => {
     const { form } = setup()
     expect(save()).toBeDisabled()
     fireEvent.click(tab('超出上限时', '严格按上限'))
-    fireEvent.change(screen.getByLabelText('每次对话带入的记忆上限'), { target: { value: '5000' } })
+    fireEvent.change(screen.getByLabelText('自动带入的记忆上限（token）'), { target: { value: '5000' } })
     fireEvent.click(screen.getByRole('switch', { name: '记忆体检' }))
     expect(screen.getByText('已有对话的下一条消息会重新载入记忆，多消耗一些 token。')).toBeInTheDocument()
     await clickSave(form)
@@ -311,7 +311,7 @@ describe('保存：revision 冻结、冲突、非法值', () => {
 
   it('非法上限就地标红、不提交', () => {
     const { form } = setup()
-    const input = screen.getByLabelText('每次对话带入的记忆上限')
+    const input = screen.getByLabelText('自动带入的记忆上限（token）')
     for (const bad of ['-5', '0', '3.5', 'abc', '']) {
       fireEvent.change(input, { target: { value: bad } })
       expect(input).toHaveAttribute('aria-invalid', 'true')

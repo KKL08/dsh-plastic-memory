@@ -262,7 +262,7 @@ Adjust `plastic-memory` settings in the profile's `cordis.patch.yml`:
 | Key                                | Default             | Description                                                                              |
 | ---------------------------------- | ------------------- | ---------------------------------------------------------------------------------------- |
 | `writeMode`                        | `'proactive'`       | Write mode (currently the only value; more modes planned)                                |
-| `snapshotTokenBudget`              | `4000`              | Maximum token budget for context injection                                               |
+| `snapshotTokenBudget`              | `4000`              | Token limit for memories loaded automatically into each chat; search results don't count |
 | `snapshotOverflow`                 | `'relax'`           | Over budget: `relax` injects everything and reports each 25 % step / `strict` cuts index lines and says how many were left out |
 | `evidenceLookup`                   | `'strict'`          | Provenance mode: `off` / `strict` (prompt on strong signals only) / `active` (proactive guidance) |
 | `template`                         | `'coding'`          | Scene template: `coding` / `office` / `custom`                                          |

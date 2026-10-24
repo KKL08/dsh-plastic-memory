@@ -262,7 +262,7 @@ customTypes:
 | 配置项                              | 默认值               | 说明                                                           |
 | -------------------------------- | ----------------- | ------------------------------------------------------------ |
 | `writeMode`                      | `'proactive'`     | 写入模式（目前唯一值，后续会扩展更多模式）                                        |
-| `snapshotTokenBudget`            | `4000`            | 注入上下文的最大 Token 预算上限                                          |
+| `snapshotTokenBudget`            | `4000`            | 每次对话自动带入记忆的 token 上限，对话中检索到的不计入                  |
 | `snapshotOverflow`               | `'relax'`         | 超出上限时：`relax` 全部带入并按 25% 一档提醒 / `strict` 截断索引行并提示漏掉几条          |
 | `evidenceLookup`                 | `'strict'`        | 证据溯源模式：`off`（关闭） / `strict`（仅强信号提示） / `active`（主动引导）         |
 | `template`                       | `'coding'`        | 预设场景模板：`coding` / `office` / `custom`                        |
