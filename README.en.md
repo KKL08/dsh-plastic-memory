@@ -81,6 +81,12 @@ dsh plugin --profile web add dsh-plastic-memory@0.1.1-beta.5
 ```
 
 > Replace `web` with the name of your target profile (it will be created automatically if it doesn't exist). The plugin declaration is written to the profile's `cordis.patch.yml` and takes effect after a restart. The package ships prebuilt on npm — no build step required.  
+> **Desktop app:** open the DeepSeek Harness desktop app once so it creates its profile, quit it completely, run the command below in a terminal, then reopen the app. Either the npm-installed `dsh` or the command bundled with the desktop app works.
+>
+> ```bash
+> dsh plugin --profile desktop add dsh-plastic-memory@0.1.1-beta.5
+> ```
+>
 > **Requirements:** Node.js `^22.19.0 || >=24`, DeepSeek Harness v0.1.7-rc.1 or later (verified up to v0.2.1-rc.2); the graphical interface needs v0.2.1-rc.2 or later.
 > **Chinese word segmentation:** the optional dependency `@node-rs/jieba` (prebuilt binaries for each platform) is installed automatically with the npm package, so Chinese queries match by word. If it cannot be installed on your platform, the plugin still installs, Chinese search falls back to two-character segments, and nothing else is affected.
 > (DeepSeek Harness is still in pre-release and may ship further breaking changes; before upgrading the host, check the version range this plugin currently supports, see the badge at the top and the CHANGELOG.)
