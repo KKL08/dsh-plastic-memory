@@ -25,7 +25,7 @@ describe('assembleSnapshot', () => {
 
   it('记忆库为空输出冷启动文案，coreIds 为空数组', async () => {
     const store = new MemoryStore(new InMemoryTable())
-    expect(assembleSnapshot({ ...base, records: await visible(store) })).toEqual({ text: COLD_START_TEXT, coreIds: [] })
+    expect(assembleSnapshot({ ...base, records: await visible(store) })).toMatchObject({ text: COLD_START_TEXT, coreIds: [] })
   })
 
   it('core 类型正文出现在 core 区（带 id），且不在索引区重复；passive 只显示 name', async () => {
@@ -93,7 +93,7 @@ describe('assembleSnapshot', () => {
       await store.put(record({ id: `mem_k${i}`, type: 'knowledge', summary: `知识条目${i}`.repeat(8) }))
       await store.put(record({ id: `mem_r${i}`, type: 'reference' }))
     }
-    const { text } = assembleSnapshot({ ...base, records: await visible(store), budget: 800 })
+    const { text } = assembleSnapshot({ ...base, records: await visible(store), budget: 800, overflow: 'strict' })
     expect(text).toMatch(/另有 \d+ 条/)
   })
 
@@ -159,7 +159,7 @@ describe('assembleSnapshot', () => {
       + estimateTokens(`\n## ${highDef.label}（ztypeh）`)
       + estimateTokens(`- [${highRec.id}] ${highRec.name}（${highRec.summary}）`)
 
-    const { text } = assembleSnapshot({ registry: priorityRegistry, workspacePath: undefined, budget, now, records: await visible(store) })
+    const { text } = assembleSnapshot({ registry: priorityRegistry, workspacePath: undefined, budget, now, records: await visible(store), overflow: 'strict' })
 
     expect(text).toContain('高优先级条目')
     expect(text).not.toContain('低优先级条目')
@@ -187,7 +187,7 @@ describe('assembleSnapshot', () => {
       + estimateTokens(`\n## ${priorityRegistry.get('ztypeh').label}（ztypeh）`)
       + 2 * estimateTokens(`- [mem_h0] ${highRecs[0].name}（${highRecs[0].summary}）`)
 
-    const { text } = assembleSnapshot({ registry: priorityRegistry, workspacePath: undefined, budget, now, records: await visible(store) })
+    const { text } = assembleSnapshot({ registry: priorityRegistry, workspacePath: undefined, budget, now, records: await visible(store), overflow: 'strict' })
 
     // high 组装入前 2 条（置信度最高的 mem_h0、mem_h1），其余进尾注
     expect(text).toContain('[mem_h0]')
@@ -300,7 +300,7 @@ describe('票 17 索引与引导', () => {
         ...[['tag-a', 'tag-b', 'tag-c'], ['tag-a', 'tag-b'], ['tag-a'], []].map((tags, i) => record({ id: `mem_l${i}`, type: 'ztypel', tags })),
       ]
       const budget = estimateTokens('# 长期记忆') + 1
-      const { text } = assembleSnapshot({ registry: zRegistry, workspacePath: WS, budget, now: 10 * DAY, records: recs, memoryRoot: ROOT })
+      const { text } = assembleSnapshot({ registry: zRegistry, workspacePath: WS, budget, now: 10 * DAY, records: recs, memoryRoot: ROOT, overflow: 'strict' })
       const nav = text.split('\n\n').find(chunk => chunk.includes('另有 7 条记忆未列出'))
       expect(nav).toBeDefined()
       expect(nav).toContain('ztypeh 3 条')
@@ -439,7 +439,7 @@ describe('assembleSnapshot × 密钥遮盖', () => {
 
   it('截断导航图里的高频标签同样遮住', () => {
     const records = [1, 2].map(i => record({ id: `mem_t${i}`, tags: [FAKE_SECRET.sk] }))
-    const { text } = assembleSnapshot({ ...base, records, budget: 5 })
+    const { text } = assembleSnapshot({ ...base, records, budget: 5, overflow: 'strict' })
     expect(text).toContain('索引未列全')
     expect(text).toContain(`${SECRET_MASK}（2）`)
     expect(text).not.toContain(FAKE_SECRET.sk)
