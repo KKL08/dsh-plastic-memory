@@ -84,7 +84,7 @@ dsh plugin --profile web add dsh-plastic-memory@0.2.0-beta.1
 > **Desktop app:** open the DeepSeek Harness desktop app once so it creates its profile, quit it completely, run the command below in a terminal, then reopen the app. Either the npm-installed `dsh` or the command bundled with the desktop app works.
 >
 > ```bash
-> dsh plugin --profile desktop add dsh-plastic-memory@0.1.1-beta.5
+> dsh plugin --profile desktop add dsh-plastic-memory@0.2.0-beta.1
 > ```
 >
 > **Requirements:** Node.js `^22.19.0 || >=24`, DeepSeek Harness v0.1.7-rc.1 or later (verified up to v0.2.1-rc.2); the graphical interface needs v0.2.1-rc.2 or later.

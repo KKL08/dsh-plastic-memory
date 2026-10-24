@@ -84,7 +84,7 @@ dsh plugin --profile web add dsh-plastic-memory@0.2.0-beta.1
 > **桌面版**：先打开一次 DeepSeek Harness 桌面版，让它建好自己的 Profile，然后完全退出，在终端运行下面这条，再重新打开桌面版。`dsh` 命令用 npm 装的或桌面版自带的都可以。
 >
 > ```bash
-> dsh plugin --profile desktop add dsh-plastic-memory@0.1.1-beta.5
+> dsh plugin --profile desktop add dsh-plastic-memory@0.2.0-beta.1
 > ```
 >
 > **运行环境要求**：Node.js `^22.19.0 || >=24`，DeepSeek Harness v0.1.7-rc.1 及以上（目前已验证到 v0.2.1-rc.2）；图形界面要 v0.2.1-rc.2 及以上。

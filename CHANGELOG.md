@@ -5,7 +5,7 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/) with pre-release tags while the host
 (DeepSeek Harness) is itself in pre-release.
 
-## [0.2.0-beta.1] - 2026-10-24
+## [0.2.0-beta.1] - 2026-10-25
 
 ### Added
 - A graphical interface inside the host's web UI, no YAML required. The
