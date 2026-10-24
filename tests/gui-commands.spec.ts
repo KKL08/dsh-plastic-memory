@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
@@ -91,7 +91,7 @@ async function seedVertical(e: ReturnType<typeof env>) {
 const allEntries = async (e: ReturnType<typeof env>) => [...await e.decisions.list(), ...await e.decisions.listSettled()]
 
 describe('info', () => {
-  it('返回 memoryRoot、视图文件绝对路径与契约版本，什么都不写', async () => {
+  it('返回 memoryRoot、视图文件绝对路径与契约版本；只建视图目录，不写视图文件（宿主的文件观察不跟踪父目录尚不存在的文件，客户端订阅前目录要先在）', async () => {
     const e = env()
     const body = ok(await e.run({ cmd: 'info' }))
     const dir = join(root, GUI_VIEW_DIR)
@@ -105,7 +105,8 @@ describe('info', () => {
       },
       version: GUI_VIEW_VERSION,
     })
-    await expect(stat(join(root, '.state'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await stat(dir)).isDirectory()).toBe(true)
+    expect(await readdir(dir)).toEqual([])
   })
 })
 

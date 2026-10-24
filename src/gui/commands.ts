@@ -1,3 +1,4 @@
+import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryLogger, MemoryStore } from '../store.ts'
@@ -98,7 +99,7 @@ async function run(deps: MemoryCommandDeps, invocation: MemoryCommandInvocation)
   const command = parsed.command
   const exec = { agent: invocation.agent } as unknown as ToolRunContext
   const context = await deps.resolveContext(exec)
-  if (command.cmd === 'info') return info(deps, context.session.id)
+  if (command.cmd === 'info') return await info(deps, context.session.id)
   if (GOVERNANCE_COMMANDS.has(command.cmd) && deps.isGovernanceEnabled?.() === false) {
     return fail(command.cmd, 'governance-disabled', '体检已关闭，可在插件设置里打开')
   }
@@ -110,8 +111,10 @@ async function run(deps: MemoryCommandDeps, invocation: MemoryCommandInvocation)
   return result
 }
 
-function info(deps: MemoryCommandDeps, sessionId: string): Ok {
+/** 顺手把视图目录建出来：宿主的文件资源对「父目录还不存在」的缺失文件不跟踪之后的创建，客户端是先问 info 再订阅视图的。 */
+async function info(deps: MemoryCommandDeps, sessionId: string): Promise<Ok> {
   const viewDir = join(deps.memoryRoot, GUI_VIEW_DIR)
+  await mkdir(viewDir, { recursive: true })
   const at = (file: string) => join(viewDir, file)
   return {
     ok: true, cmd: 'info',
