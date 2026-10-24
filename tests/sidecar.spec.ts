@@ -183,13 +183,25 @@ describe('SidecarStore：四张表落 .state/', () => {
 })
 
 describe('SidecarStore：KV 导入协议', () => {
-  function legacyOf(tables: Partial<LegacyKvTables>) {
+  /** 旧 KV 替身。discard 默认清空自身两张表（像宿主那样删行）；onDiscard 可换成抛错等行为。 */
+  function legacyOf(tables: Partial<LegacyKvTables>, opts: { onDiscard?: () => Promise<void> } = {}) {
     let calls = 0
+    let discards = 0
+    const rows = { snapshots: [...(tables.snapshots ?? [])], pending: [...(tables.pending ?? [])] }
     const open = async (): Promise<LegacyKvTables> => {
       calls++
-      return { snapshots: tables.snapshots ?? [], pending: tables.pending ?? [] }
+      return {
+        snapshots: [...rows.snapshots],
+        pending: [...rows.pending],
+        discard: async () => {
+          discards++
+          if (opts.onDiscard) return opts.onDiscard()
+          rows.snapshots = []
+          rows.pending = []
+        },
+      }
     }
-    return { open, calls: () => calls }
+    return { open, calls: () => calls, discards: () => discards }
   }
   async function readMarker() {
     return kvImportMarkerSchema.parse(JSON.parse(await readFile(join(state, KV_IMPORT_MARKER), 'utf8')))
@@ -291,5 +303,52 @@ describe('SidecarStore：KV 导入协议', () => {
     expect((await s.snapshots.list()).map(([k]) => k)).toEqual(['snap_a'])
     expect(legacy.calls()).toBe(1)
     expect((await readMarker()).source).toBe('kv')
+  })
+
+  it('导入完成后丢弃旧 KV 行：恰好一次，且发生在标记写下之后', async () => {
+    let markerAtDiscard: boolean | undefined
+    const legacy = legacyOf(
+      { snapshots: [['snap_a', snap('snap_a')]], pending: [['pd_a', pd('pd_a')]] },
+      { onDiscard: async () => { markerAtDiscard = await exists(join(state, KV_IMPORT_MARKER)) } },
+    )
+    const s = new SidecarStore({ root, schemas, openLegacyKv: legacy.open })
+    await s.snapshots.list()
+    await s.pending.list()
+    expect(legacy.discards()).toBe(1)
+    expect(markerAtDiscard).toBe(true)
+  })
+
+  it('标记已存在：不丢弃旧 KV', async () => {
+    await new SidecarStore({ root, schemas }).snapshots.list() // 写 none 标记
+    const legacy = legacyOf({ snapshots: [['snap_a', snap('snap_a')]] })
+    const s = new SidecarStore({ root, schemas, openLegacyKv: legacy.open })
+    await s.snapshots.list()
+    expect(legacy.discards()).toBe(0)
+  })
+
+  it('丢弃失败只记日志：本次操作照常成功，标记保留', async () => {
+    const { warns, log } = makeLog()
+    const legacy = legacyOf(
+      { snapshots: [['snap_a', snap('snap_a')]] },
+      { onDiscard: async () => { throw new Error('kv locked') } },
+    )
+    const s = new SidecarStore({ root, schemas, openLegacyKv: legacy.open, log })
+    expect((await s.snapshots.list()).map(([k]) => k)).toEqual(['snap_a'])
+    expect(legacy.discards()).toBe(1)
+    expect(warns.some(w => w.includes('kv locked'))).toBe(true)
+    expect((await readMarker()).source).toBe('kv')
+  })
+
+  it('丢弃后标记再丢失：重新导入找不到旧行，期间删掉的待决不会复活', async () => {
+    const legacy = legacyOf({ snapshots: [['snap_a', snap('snap_a')]], pending: [['pd_a', pd('pd_a')]] })
+    const first = new SidecarStore({ root, schemas, openLegacyKv: legacy.open })
+    expect((await first.pending.list()).map(([k]) => k)).toEqual(['pd_a'])
+    expect(await first.pending.delete('pd_a')).toBe(true) // 冲突已处理
+    await rm(join(state, KV_IMPORT_MARKER))
+
+    const second = new SidecarStore({ root, schemas, openLegacyKv: legacy.open })
+    expect(await second.pending.list()).toEqual([])
+    expect(legacy.calls()).toBe(2)
+    expect((await readMarker()).counts).toEqual({ snapshots: 0, pending: 0 })
   })
 })
