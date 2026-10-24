@@ -144,23 +144,27 @@ describe('待处理视图：体检关闭', () => {
     await h.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '矛盾', fingerprint: 'h' }, 3)
   }
 
-  it('只剩密钥和读不出的文件（规则检查，不靠模型）；有密钥亮红点', async () => {
+  it('只剩不靠模型的条目：密钥、超限提醒、读不出的文件；有密钥亮红点', async () => {
     const h = harness()
     await seedAll(h, true)
     const off = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
     expect(pendingViewSchema.parse(off.pending)).toEqual(off.pending)
-    expect(off.pending.items.map(i => i.kind)).toEqual(['secret', 'unreadable-file'])
+    expect(off.pending.items.map(i => i.kind)).toEqual(['secret', 'overflow', 'unreadable-file'])
     expect(off.pending.dot).toBe('red')
-    // 账本没动：打开体检后冲突、候选、超限都回来
+    // 账本没动：打开体检后冲突、候选都回来
     expect((await h.views()).pending.items.map(i => i.kind)).toEqual([...PENDING_ITEM_KINDS].filter(k => k !== 'conflict-vertical'))
   })
 
-  it('没有密钥时不亮点（读不出的文件本来就不亮）', async () => {
+  it('没有密钥时按剩下的条目亮点：超限提醒能处理所以亮琥珀，只剩读不出的文件则不亮', async () => {
     const h = harness()
     await seedAll(h, false)
     const off = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
-    expect(off.pending.items.map(i => i.kind)).toEqual(['unreadable-file'])
-    expect(off.pending.dot).toBe('none')
+    expect(off.pending.items.map(i => i.kind)).toEqual(['overflow', 'unreadable-file'])
+    expect(off.pending.dot).toBe('amber')
+    await h.decisions.syncOverflow(WS, undefined, 4, '超限')
+    const calm = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
+    expect(calm.pending.items.map(i => i.kind)).toEqual(['unreadable-file'])
+    expect(calm.pending.dot).toBe('none')
   })
 })
 

@@ -96,8 +96,8 @@ export function buildPendingView(input: ViewInput): PendingView {
   for (const f of runRuleScan(active, id => data.byId.get(id), input.now)) {
     if (f.type === 'secret') items.push({ kind: 'secret', memory: card(data.byId.get(f.memoryIds[0])!, data) })
   }
-  // 体检关闭（spec 35）：只剩规则检查出的密钥和读不出的文件；账本条目（冲突、提升候选、超限）照留，打开后回来
-  const ledger = input.governanceEnabled ? input.open : []
+  // 体检关闭（spec 35）：只剩不靠模型的条目——规则检查出的密钥、读不出的文件、超限提醒；冲突与提升候选照留在账本里，打开后回来
+  const ledger = input.governanceEnabled ? input.open : input.open.filter(e => kindOf(e) === 'overflow')
   for (const e of [...ledger].sort((a, b) => a.firstSeenAt - b.firstSeenAt)) {
     const base = { decisionId: e.id, firstSeenAt: e.firstSeenAt }
     const kind = kindOf(e)
