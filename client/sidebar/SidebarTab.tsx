@@ -21,6 +21,7 @@ import { ContextBudgetBar } from '../ui/ContextBudgetBar.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { TrashIcon } from '../ui/TrashIcon.tsx'
+import { CrossConfirm, crossConfirmCss } from '../pending/action.tsx'
 
 type Conflict = Extract<PendingItem, { kind: 'conflict-horizontal' }>
 type VerticalConflict = Extract<PendingItem, { kind: 'conflict-vertical' }>
@@ -77,13 +78,19 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const [forgotten, setForgotten] = useState<ReadonlySet<string>>(new Set())
   const [busy, setBusy] = useState<string | undefined>(undefined)
   const [failure, setFailure] = useState<{ id: string; detail: string } | undefined>(undefined)
+  // 涉及其他项目时服务端先拒（什么都没动），和待处理卡同一套：原位确认，「继续处理」才带 allowCrossWorkspace 重发
+  const [cross, setCross] = useState<{ id: string; workspacePath: string; command: MemoryCommand; onOk: () => void } | undefined>(undefined)
 
   const run = async (id: string, command: MemoryCommand, onOk: () => void) => {
     setBusy(id)
     setFailure(undefined)
+    setCross(undefined)
     const result = await gateway.execute(sessionId, command)
     setBusy(undefined)
-    if (result.ok) onOk()
+    if (result.ok) { onOk(); return }
+    const workspacePath = result.rejected?.[0]?.workspacePath
+    const isAllowed = 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
+    if (result.code === 'cross-workspace' && !isAllowed && workspacePath !== undefined) setCross({ id, workspacePath, command, onOk })
     else setFailure({ id, detail: result.detail ?? result.code })
   }
   const rule = (item: Conflict, verdict: Verdict) => {
@@ -172,9 +179,21 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const card = (memory: MemoryCardData, chip?: ReactNode) => (
     <MemoryCard memory={memory} now={now} typeLabel={label(memory.type)} hideScope={memory.scope === 'workspace'} chip={chip} />
   )
-  const failed = (id: string) => (failure?.id === id
-    ? <p className="pm-side-error" role="alert">{t('sidebar.action.failed', { detail: failure.detail })}</p>
-    : null)
+  const failed = (id: string) => {
+    if (cross?.id === id) {
+      return (
+        <CrossConfirm
+          workspacePath={cross.workspacePath}
+          onCancel={() => { setCross(undefined) }}
+          onConfirm={() => { void run(cross.id, { ...cross.command, allowCrossWorkspace: true } as MemoryCommand, cross.onOk) }}
+        />
+      )
+    }
+    return failure?.id === id
+      ? <p className="pm-side-error" role="alert">{t('sidebar.action.failed', { detail: failure.detail })}</p>
+      : null
+  }
+  const isWaiting = (id: string) => busy === id || cross?.id === id
 
   // 会话快照冻结在插件本次加载之前 = 重启后还没重新带入
   const bootedAt = health.status === 'ready' ? health.data.bootedAt : undefined
@@ -219,8 +238,8 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
                   className="pm-side-delete"
                   aria-label={t('sidebar.saved.delete')}
                   title={t('sidebar.saved.delete')}
-                  aria-disabled={busy === memory.id || undefined}
-                  onClick={() => { if (busy !== memory.id) forget(memory.id) }}
+                  aria-disabled={isWaiting(memory.id) || undefined}
+                  onClick={() => { if (!isWaiting(memory.id)) forget(memory.id) }}
                 >
                   <TrashIcon />
                 </button>
@@ -254,7 +273,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
                           now={now}
                           typeLabel={label}
                           hideScope={item.left?.scope !== 'global' && item.right?.scope !== 'global'}
-                          unavailable={busy === item.decisionId ? t('sidebar.action.busy') : undefined}
+                          unavailable={isWaiting(item.decisionId) ? t('sidebar.action.busy') : undefined}
                           onRule={(verdict) => { rule(item, verdict) }}
                         />
                         {failed(item.decisionId)}
@@ -272,7 +291,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
                           now={now}
                           typeLabel={label}
                           hideScope={item.memory?.scope !== 'global'}
-                          unavailable={busy === item.decisionId ? t('sidebar.action.busy') : undefined}
+                          unavailable={isWaiting(item.decisionId) ? t('sidebar.action.busy') : undefined}
                           onRule={(verdict) => { ruleVertical(item, verdict) }}
                         />
                         {failed(item.decisionId)}
@@ -282,7 +301,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
                   const { ruled: r } = entry
                   return (
                     <div key={r.decisionId}>
-                      <RuledCard ruled={r} card={card} busy={busy === r.decisionId} onUndo={() => { undo(r.decisionId) }} />
+                      <RuledCard ruled={r} card={card} busy={isWaiting(r.decisionId)} onUndo={() => { undo(r.decisionId) }} />
                       {failed(r.decisionId)}
                     </div>
                   )
@@ -365,7 +384,7 @@ function ViewNote({ state }: { state: ViewState<unknown> }) {
   return <p className="pm-side-hint" role="status">{text}</p>
 }
 
-export const sidebarTabCss = `
+export const sidebarTabCss = crossConfirmCss + `
 .pm-side-root { height: 100%; min-height: 0; }
 .pm-side {
   height: 100%; min-height: 0; overflow: auto; scrollbar-gutter: stable;

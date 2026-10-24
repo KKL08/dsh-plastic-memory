@@ -199,6 +199,33 @@ describe('SidebarTab 就地裁决', () => {
   })
 })
 
+describe('SidebarTab 跨项目确认', () => {
+  it('对方属于别的项目：服务端拒了就原位确认，「继续处理」带 allowCrossWorkspace 重发；「取消」什么都不发', async () => {
+    const other = memory({ id: 'p2', type: 'preference', workspacePath: '/w/blog', content: '测试里 mock 数据库就行。' })
+    const cross: PendingItem = { ...conflict, right: other } as PendingItem
+    const { gateway } = setup(
+      { library: library(pref, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending(cross) },
+      command => 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
+        ? { ok: true, cmd: command.cmd }
+        : { ok: false, cmd: command.cmd, code: 'cross-workspace', rejected: [{ id: 'p2', workspacePath: '/w/blog' }] },
+    )
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '都保留' })) })
+    expect(screen.getByText('这条记忆属于 blog 项目，不是当前项目。确定在这里处理它吗？')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByRole('button', { name: '以 A 为准' })).toHaveAttribute('aria-disabled', 'true')
+
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(screen.queryByText(/属于 blog 项目/)).toBeNull()
+    expect(gateway.executed).toHaveLength(1)
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '都保留' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '继续处理' })) })
+    expect(gateway.executed.map(e => e.command).at(-1)).toEqual({ cmd: 'resolve', decisionId: 'pd_1', verdict: 'keep-both', allowCrossWorkspace: true })
+    expect(screen.getByText('以后体检不再把它们当冲突。')).toBeInTheDocument()
+    expect(screen.queryByText(/属于 blog 项目/)).toBeNull()
+  })
+})
+
 describe('SidebarTab 就地裁决：和基线冲突', () => {
   it('带入的记忆和基线冲突：冲突卡挂在它的组里，写明基线不会被删除；以基线为准发 keep-right，结果留原位可撤销', async () => {
     const { gateway } = setup({ library: library(pref, proj), session: snapshot({ injectedIds: ['p1', 'j1'] }), pending: pending(vertical) })
