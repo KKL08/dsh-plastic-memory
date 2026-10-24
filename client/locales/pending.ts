@@ -58,6 +58,7 @@ export const pendingZh = {
   'pending.overflow.raise': '调高上限',
   'pending.overflow.save': '保存',
   'pending.overflow.raiseHint': '触发新上限前不会再提醒。',
+  'pending.overflow.cleanup': '整理记忆 ›',
   'pending.overflow.invalid': '填一个比 {budget} 大的整数。',
   'pending.overflow.saveFailed': '没有保存成功，再试一次。',
 
@@ -144,6 +145,7 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.overflow.raise': 'Raise the limit',
   'pending.overflow.save': 'Save',
   'pending.overflow.raiseHint': 'No more reminders until the new limit is reached.',
+  'pending.overflow.cleanup': 'Clean up memories ›',
   'pending.overflow.invalid': 'Enter a whole number above {budget}.',
   'pending.overflow.saveFailed': 'Could not save. Try again.',
 

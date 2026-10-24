@@ -121,6 +121,18 @@ describe('待处理：各类卡', () => {
     expect(screen.getByRole('button', { name: '提升 blog 里的这条' })).toHaveAttribute('title', '正在读取设置…')
   })
 
+  it('超限：「整理记忆 ›」去全部记忆，作用域是这张卡那一层（项目或全局），不发命令', () => {
+    const nav = createNavStore()
+    const global: PendingItem = { kind: 'overflow', decisionId: 'd-g', firstSeenAt: 5, mode: 'strict', tier: 0 }
+    const { commands } = setup([overflow, global], {}, nav)
+    const [projectLink, globalLink] = screen.getAllByRole('button', { name: '整理记忆 ›' })
+    fireEvent.click(projectLink!)
+    expect(nav.get()).toMatchObject({ tab: 'library', scope: { kind: 'workspace', workspacePath: '/w/app' }, memoryId: undefined })
+    fireEvent.click(globalLink!)
+    expect(nav.get()).toMatchObject({ tab: 'library', scope: { kind: 'global' }, memoryId: undefined })
+    expect(commands()).toEqual([])
+  })
+
   it('超限：写出超出量与放宽到的档位；「忽略」发 dismiss-overflow', async () => {
     const { commands } = setup([overflow])
     expect(screen.getByText('超出上限 25% 以上，已自动放宽到 5,000（上限 4,000）。')).toBeInTheDocument()

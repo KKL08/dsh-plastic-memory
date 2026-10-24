@@ -3,7 +3,7 @@
  * 成功后把结果（Outcome）交给列表，由列表在原位换成结果卡。
  */
 import { useState, type ReactNode } from 'react'
-import { CONFLICT_ACTION_VERDICTS, type MemoryCard as MemoryCardData, type PendingItem } from '../../src/gui/contract.ts'
+import { CONFLICT_ACTION_VERDICTS, type GuiLayerRef, type MemoryCard as MemoryCardData, type PendingItem } from '../../src/gui/contract.ts'
 import { samePath, useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, formatNumber, useT, type Translate } from '../i18n.tsx'
 import { Button } from '../ui/Button.tsx'
@@ -224,7 +224,11 @@ export function PromoteCard({ item, session, now, typeLabels, onDone, promoteTar
 /** 第 tier 档放宽到的上限：budget × (1 + 0.25 × tier)。 */
 const capOf = (budget: number, tier: number) => Math.round(budget * (1 + 0.25 * tier))
 
-export function OverflowCard({ item, session, onDone, budget }: CardProps<'overflow'> & { budget: number | undefined }) {
+export function OverflowCard({ item, session, onDone, budget, onCleanup }: CardProps<'overflow'> & {
+  budget: number | undefined
+  /** 「整理记忆 ›」：去全部记忆，作用域是这张卡那一层。 */
+  onCleanup: (scope: GuiLayerRef) => void
+}) {
   const t = useT()
   const gateway = useGateway()
   const action = useItemAction(session, () => { onDone({ kind: 'dismissed' }) })
@@ -278,6 +282,13 @@ export function OverflowCard({ item, session, onDone, budget }: CardProps<'overf
       </div>
       <p className="pm-pending-hint">
         {budget !== undefined && invalid && value.trim() !== '' ? t('pending.overflow.invalid', { budget: formatNumber(budget) }) : t('pending.overflow.raiseHint')}
+        <button
+          type="button"
+          className="pm-link"
+          onClick={() => { onCleanup(item.workspacePath !== undefined ? { kind: 'workspace', workspacePath: item.workspacePath } : { kind: 'global' }) }}
+        >
+          {t('pending.overflow.cleanup')}
+        </button>
       </p>
       <ActionFeedback action={action} />
     </Card>
