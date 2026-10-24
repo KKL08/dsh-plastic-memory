@@ -302,7 +302,7 @@ describe('待处理：两态与空状态', () => {
 
   it('体检关闭：「去设置里打开 ›」是唯一能点的，打开插件设置页', () => {
     const openSettings = vi.fn()
-    setup([], { config: { ...config, governanceEnabled: false } }, createNavStore(undefined, { openSettings }))
+    setup([], { views: { pending: view(), health: { ...scannedHealth(NOW), governanceEnabled: false } } }, createNavStore(undefined, { openSettings }))
     expect(screen.getByRole('status')).toHaveTextContent('体检已关闭')
     expect(screen.getAllByRole('button').map(b => b.textContent)).toEqual(['去设置里打开 ›'])
     fireEvent.click(screen.getByRole('button', { name: '去设置里打开 ›' }))
@@ -310,9 +310,14 @@ describe('待处理：两态与空状态', () => {
   })
 
   it('体检关闭、宿主没有插件页导航：只有说明，不画「去设置里打开 ›」', () => {
-    setup([], { config: { ...config, governanceEnabled: false } })
+    setup([], { views: { pending: view(), health: { ...scannedHealth(NOW), governanceEnabled: false } } })
     expect(screen.getByRole('status')).toHaveTextContent('体检已关闭')
     expect(screen.queryByRole('button')).toBeNull()
+  })
+
+  it('体检开关以健康视图为准（和健康 tab、页头一致），不看插件配置', () => {
+    setup([], { config: { ...config, governanceEnabled: false } })
+    expect(screen.getByRole('status')).not.toHaveTextContent('体检已关闭')
   })
 })
 

@@ -107,7 +107,7 @@ export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
     <div className="pm-pending">
       <style data-plastic-memory-pending="">{pendingCss}</style>
       {rows.length === 0
-        ? <PendingEmpty nav={nav} session={session} workspacePath={workspacePath} health={health.status === 'ready' ? health.data : undefined} governanceEnabled={config?.governanceEnabled} now={now} />
+        ? <PendingEmpty nav={nav} session={session} workspacePath={workspacePath} health={health.status === 'ready' ? health.data : undefined} now={now} />
         : rows.map(row => (
           <FlashRow key={row.key} as="div" className="pm-pending-row" flashing={row.flashing ?? false} onFlashEnd={clear}>{row.node}</FlashRow>
         ))}
@@ -130,18 +130,18 @@ function lastScanAt(health: HealthView): number | null {
   return times.length === 0 ? null : Math.max(...times)
 }
 
-function PendingEmpty({ nav, session, workspacePath, health, governanceEnabled, now }: {
+/** 体检开关取健康视图（和健康 tab、页头的体检按钮同一来源）；视图还没到时按开着处理。 */
+function PendingEmpty({ nav, session, workspacePath, health, now }: {
   nav: NavStore
   session: BorrowedSession
   workspacePath: string | undefined
   health: HealthView | undefined
-  governanceEnabled: boolean | undefined
   now: number
 }) {
   const t = useT()
   const canOpenSettings = useCanOpen(nav, 'settings')
 
-  if (governanceEnabled === false) {
+  if (health?.governanceEnabled === false) {
     return (
       <EmptyState
         variant="daily"
