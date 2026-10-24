@@ -1,5 +1,5 @@
 import type { MemoryStore } from '../store.ts'
-import type { PendingDecisionsStore } from '../governance/decisions.ts'
+import { kindOf, verdictLoser, type PendingDecisionsStore } from '../governance/decisions.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { GovernanceRejectCode } from '../contract-codes.ts'
@@ -61,6 +61,11 @@ export async function executeConfirm(
     return { kind: 'error', message: `待决项不存在：${args.decisionId}（可能已被裁决或涉及的记忆已删除）` }
   }
 
+  // 提升候选、超限提醒不是冲突，不能按 memoryIds 位置裁决（否则可能删掉候选记忆）；条目不动
+  if (kindOf(entry) !== 'conflict') {
+    return { kind: 'error', message: `待决项 ${entry.id} 不是冲突（${kindOf(entry)}），不能用 resolve 裁决，账本条目保留。` }
+  }
+
   const vertical = entry.baselineRef !== undefined
   // 账本里的条目也要过基数校验：横向必须是两个不同 id，垂直必须恰好一个。旧版本写入的或
   // 手工篡改的非法条目一旦按 memoryIds[0]/[1] 裁决，就可能删掉用户要保留的那条。
@@ -85,9 +90,7 @@ export async function executeConfirm(
 
   // 败方（keep-left/keep-right 要删的记忆）；keep-both/dismiss 无败方。
   // 垂直：left=记忆 right=基线，keep-right = 基线胜、记忆删除；横向：left=memoryIds[0]、right=memoryIds[1]
-  const loserId = vertical
-    ? (args.verdict === 'keep-right' ? entry.memoryIds[0] : undefined)
-    : args.verdict === 'keep-left' ? entry.memoryIds[1] : args.verdict === 'keep-right' ? entry.memoryIds[0] : undefined
+  const loserId = verdictLoser(entry, args.verdict)
   const toDelete = loserId === undefined ? undefined : members.get(loserId)
   if (loserId !== undefined && toDelete === undefined) {
     return { kind: 'error', message: `定位不到败方记忆 ${loserId}，未做任何删除，待决项 ${entry.id} 保留在账本里。可确认 id 后重试，或用 dismiss 清除该条目。` }
@@ -106,11 +109,11 @@ export async function executeConfirm(
     }, now)
     await deps.store.softDelete(toDelete)
     actions.push(`已删除败方记忆 ${toDelete.id}（快照 ${snapshot.id}）`)
-    // 先移除当前条目，这样 removeByMemoryIds 的返回值就只统计"额外"清理的条目
-    await deps.decisions.remove(entry.id)
-    // 该记忆的一方已被删除，可能还挂在其他待决项上——这些冲突已无法再裁决，一并清理
-    // 但不能悄悄发生：把清理数量报进 actions，让用户知道有条目被顺带处理
-    alsoCleared = await deps.decisions.removeByMemoryIds([toDelete.id])
+    // 条目标 settled 留在账本里并记下快照 id，供撤销（撤销 = 去掉 settled、按快照恢复败方）
+    await deps.decisions.settle(entry.id, args.verdict, now, { snapshotId: snapshot.id })
+    // 该记忆的一方已被删除，可能还挂在其他待决项上——这些冲突已无法再裁决，一并清理（当前条目除外，
+    // 返回值只统计"额外"清理的条目）。但不能悄悄发生：把清理数量报进 actions，让用户知道有条目被顺带处理
+    alsoCleared = await deps.decisions.removeByMemoryIds([toDelete.id], entry.id)
     if (alsoCleared > 0) {
       actions.push(`另清理 ${alsoCleared} 条同样引用该记忆的待决冲突（其一方已删除，无法再裁决）`)
     }
@@ -118,11 +121,10 @@ export async function executeConfirm(
     if (toDelete) actions.push(`败方记忆 ${toDelete.id} 已是删除状态，无需再删`)
     if (args.verdict === 'keep-both') actions.push('两条并存（用户确认不冲突）')
     if (args.verdict === 'dismiss') actions.push('标记为误报')
-    // 两边都留（keep-both / dismiss / 垂直 keep-left）：记下裁决，双方内容不变时体检不再报
-    if (loserId === undefined && args.verdict !== 'keep-right' && await deps.decisions.settle(entry.id, args.verdict, now)) {
+    // 两边都留（keep-both / dismiss / 垂直 keep-left）：记下裁决，双方内容不变时体检不再报。
+    // 败方早已删除的删一方裁决同样记下（没有快照可恢复）
+    if (await deps.decisions.settle(entry.id, args.verdict, now) && loserId === undefined) {
       actions.push('以后体检不再报这一对，除非其中一条（或基线）被改写')
-    } else {
-      await deps.decisions.remove(entry.id)
     }
   }
 

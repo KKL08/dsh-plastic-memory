@@ -1,22 +1,23 @@
 import { describe, expect, it } from 'vitest'
-import { readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { posix } from 'node:path'
 
-// 依赖方向守门：叶子 ← storage ← 记忆层 ← governance ← tools 执行器 ← tools 绑定层 ← 接线层（index.ts、domain-spec）。
-// 每层只能 import 本层及更低层；框架包（@deepseek-ai/*）的运行时 import 只许绑定层与接线层
+// 依赖方向守门：叶子 ← storage ← 记忆层 ← governance ← tools 执行器 ← GUI 层（gui/*）← tools 绑定层 ← 接线层（index.ts、domain-spec）。
+// 每层只能 import 本层及更低层（GUI 层可 import 执行器、不 import 绑定层，执行器不 import GUI 层）；框架包（@deepseek-ai/*）的运行时 import 只许绑定层与接线层
 // （index.ts、domain-spec）碰，type-only 引用任何层都允许。
 // 静态读文件 + 正则扫描，不执行源码。
 
 const SRC_DIR = fileURLToPath(new URL('../src/', import.meta.url))
+const CLIENT_DIR = fileURLToPath(new URL('../client/', import.meta.url))
 
-const LAYER = { leaf: 0, storage: 1, memory: 2, governance: 3, executor: 4, binding: 5, entry: 6 } as const
+const LAYER = { leaf: 0, storage: 1, memory: 2, governance: 3, executor: 4, gui: 5, binding: 6, entry: 7 } as const
 type LayerName = keyof typeof LAYER
 
 // 共享契约（record-schema、contract-codes、kv-table、storage/table、storage/paths）归叶子
 const LEAF_MODULES = new Set([
   'text', 'secrets', 'record-freshness', 'retention', 'contract-codes', 'index-line', 'errors',
-  'kv-table', 'record-schema', 'output', 'storage/paths', 'storage/table', 'types',
+  'kv-table', 'record-schema', 'output', 'storage/paths', 'storage/table', 'types', 'gui/contract',
 ])
 const MEMORY_MODULES = new Set([
   'pipeline', 'store', 'snapshot', 'runtime', 'type-registry', 'evidence-guidance',
@@ -37,17 +38,19 @@ function layerOf(mod: string): LayerName | undefined {
   if (ENTRY_MODULES.has(mod)) return 'entry'
   if (/^storage\/[^/]+$/.test(mod)) return 'storage'
   if (/^governance\/[^/]+$/.test(mod)) return 'governance'
+  if (/^gui\/[^/]+$/.test(mod)) return 'gui'
   if (/^tools\/[^/]+-tool$/.test(mod)) return 'binding'
   if (/^tools\/[^/]+$/.test(mod)) return 'executor'
   return undefined
 }
 
-function listSourceModules(dir = SRC_DIR, prefix = ''): string[] {
+function listSourceModules(dir = SRC_DIR, prefix = '', exts: readonly string[] = ['.ts']): string[] {
+  if (!existsSync(dir)) return []
   const out: string[] = []
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const rel = prefix + entry.name
-    if (entry.isDirectory()) out.push(...listSourceModules(`${dir}${entry.name}/`, `${rel}/`))
-    else if (entry.name.endsWith('.ts')) out.push(rel.slice(0, -'.ts'.length))
+    if (entry.isDirectory()) out.push(...listSourceModules(`${dir}${entry.name}/`, `${rel}/`, exts))
+    else if (exts.some(ext => entry.name.endsWith(ext)) && !entry.name.endsWith('.d.ts')) out.push(rel)
   }
   return out.sort()
 }
@@ -60,8 +63,8 @@ const STATIC_RE = /^\s*(import|export)\s+(type\s+)?(?:([^'";]*?)\s+from\s+)?['"]
 const DYNAMIC_RE = /\bimport\(\s*['"]([^'"]+)['"]\s*\)/g
 const REFERENCE_RE = /^\/\/\/\s*<reference\s+types=["']([^"']+)["']/gm
 
-function scanImports(mod: string): ImportEdge[] {
-  const source = readFileSync(`${SRC_DIR}${mod}.ts`, 'utf8')
+function scanImports(mod: string, file = `${SRC_DIR}${mod}.ts`): ImportEdge[] {
+  const source = readFileSync(file, 'utf8')
   const edges: ImportEdge[] = []
   for (const m of source.matchAll(STATIC_RE)) {
     edges.push({ from: mod, spec: m[4]!, isTypeOnly: m[2] !== undefined || isTypeOnlyClause(m[3]) })
@@ -89,8 +92,14 @@ function isException(from: string, to: string): boolean {
   return ALLOWED_EXCEPTIONS.some(e => e.from === from && e.to === to)
 }
 
-const modules = listSourceModules()
-const edges = modules.flatMap(scanImports)
+const modules = listSourceModules().map(f => f.slice(0, -'.ts'.length))
+const edges = modules.flatMap(m => scanImports(m))
+
+// 浏览器半侧 client/*：独立编译，只许 import 本目录、src/gui/contract（视图与命令的契约），以及宿主
+// 浏览器模块表提供的运行时（react、cordis 等，构建时 external）；src/ 任何模块不许 import client/。
+const CLIENT_FILES = listSourceModules(CLIENT_DIR, '', ['.ts', '.tsx'])
+const clientEdges = CLIENT_FILES.flatMap(f => scanImports(`client/${f}`, `${CLIENT_DIR}${f}`))
+const CLIENT_ALLOWED_SRC = new Set(['src/gui/contract'])
 
 describe('import 方向', () => {
   it('src 下每个模块都归入某一层', () => {
@@ -139,5 +148,35 @@ describe('import 方向', () => {
       .map(e => `${e.from} → ${e.to}`)
       .filter(key => !present.has(key))
     expect(stale).toEqual([])
+  })
+})
+
+describe('import 方向：GUI 两条边', () => {
+  it('执行器不 import GUI 层；GUI 层不 import 绑定层', () => {
+    const violations = edges
+      .map(e => ({ from: e.from, to: resolveRelative(e.from, e.spec) }))
+      .filter((e): e is { from: string; to: string } => e.to !== undefined)
+      .filter(e => (layerOf(e.from) === 'executor' && layerOf(e.to) === 'gui')
+        || (layerOf(e.from) === 'gui' && layerOf(e.to) === 'binding'))
+      .map(e => `${e.from} → ${e.to}`)
+    expect(violations).toEqual([])
+  })
+
+  it('src/ 不 import client/', () => {
+    const violations = edges
+      .filter(e => resolveRelative(e.from, e.spec)?.startsWith('../client/') === true)
+      .map(e => `${e.from} → ${e.spec}`)
+    expect(violations).toEqual([])
+  })
+
+  it('client/ 只 import 本目录与 src/gui/contract', () => {
+    const violations: string[] = []
+    for (const e of clientEdges) {
+      const to = resolveRelative(e.from, e.spec)?.replace(/\.tsx?$/, '')
+      if (to === undefined) continue // 裸包名由构建的 external 白名单与工厂格式测试把关
+      if (to.startsWith('client/') || CLIENT_ALLOWED_SRC.has(to)) continue
+      violations.push(`${e.from} → ${e.spec}`)
+    }
+    expect(violations).toEqual([])
   })
 })

@@ -7,7 +7,61 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- A graphical interface inside the host's web UI, no YAML required. The
+  left-nav 「记忆」 page lists what is waiting for your decision (conflicts
+  found by a checkup, memories worth promoting to global, budget overflows,
+  secrets, files that failed to parse), all memories by project, the health
+  of each layer and the memories deleted in the last 14 days with a one-click
+  restore. Every item is acted on in place: rule a conflict, undo the ruling,
+  promote or keep local, delete a secret for good, open the memory file or
+  show it in Finder. The page needs no running conversation: it borrows an
+  idle session of the current project to run its commands.
+- A 「记忆」 tab in the right sidebar of each conversation showing which
+  memories this session brought in, how much of the context budget they use
+  and what the model saved during the conversation; conflicts among the
+  injected memories can be ruled right there.
+- The plugin's settings page in the host's plugin manager: scenario template,
+  custom memory types (add, edit, remove in a dialog), context budget and
+  overflow mode, source lookup, checkup switch and sensitivity, where global
+  promotions go, and a status card with the memory count, the last checkup
+  and what is waiting. Saving writes the same `cordis.patch.yml` the YAML
+  path uses and takes effect without a restart. Hosts without the plugin
+  manager page keep the YAML path.
+- A card under each turn in which the model saved a memory (with a delete
+  button and a link to the memory page), a one-line summary on every memory
+  tool call, and a 「记忆」 button next to the composer showing the share of
+  the context window the memories occupy.
+- An amber dot on the left-nav icon when something waits for your decision; a
+  red mark when a secret was found. Nothing lights up for warnings you cannot
+  act on.
+- `pnpm host:contract` now also checks the shipped browser bundle: the
+  package declares `dsh.client`, the host's module loader can load
+  `lib/client.js`, and both locale files ship. CI fails when the bundle is
+  missing from the package.
+
 ### Changed
+- Memories that exceed `snapshotTokenBudget` are no longer cut from the
+  injected index by default. The new setting `snapshotOverflow` defaults to
+  `relax`: everything is still injected, the budget is relaxed in 25 % steps
+  and each step is reported once on the memory page, with a shortcut to raise
+  the limit or dismiss. Set it to `strict` to keep the previous behaviour, in
+  which the index lines stop at the budget; the page then says how many
+  memories were left out.
+- Settings changed in the GUI or in `cordis.patch.yml` now apply to running
+  conversations at their next step: a new budget or source-lookup level is
+  used the next time memories are assembled, a template or custom-type change
+  re-registers `memory_save` with the new type list, and turning the checkup
+  off removes the governance tools until it is turned back on. Previously a
+  template change waited for the next session.
+- Resolving a conflict by keeping one side no longer forgets the ruling. It
+  stays as a settled entry (not counted on the dot) so it can be undone, and
+  restoring the losing memory from 「最近删除」 brings the conflict back to the
+  pending list exactly once. The deleted memory's row says which memory won.
+- The GUI requires DeepSeek Harness v0.2.1-rc.2 or later. On older supported
+  hosts (v0.1.7-rc.1 and up) the browser bundle registers nothing and the
+  plugin's tools and memory injection work as before; nothing else is
+  affected.
 - Memories are now plain files and nothing else. The Markdown files on disk
   are the only copy: the plugin keeps no table in memory, loads nothing at
   start-up, and reads just the directories an operation needs. A file you

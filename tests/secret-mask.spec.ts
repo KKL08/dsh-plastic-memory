@@ -51,3 +51,23 @@ describe('maskSecretSurface：四个面按片段遮盖', () => {
     expect(maskSecretSurface(r)).toBe(r)
   })
 })
+
+describe('severity: suspected：疑似密钥也遮（对话卡用），缺省口径不变', () => {
+  const text = '部署账号 password: Hunter2-2026，api_key=abcdef1234567890abcd 也在这'
+
+  it('maskSecrets 遮住疑似密码与 api_key 赋值，critical 照遮', () => {
+    const masked = maskSecrets(`${text}；${FAKE_SECRET.sk}`, { severity: 'suspected' })
+    expect(masked).not.toContain('Hunter2-2026')
+    expect(masked).not.toContain('abcdef1234567890abcd')
+    expect(masked).not.toContain(FAKE_SECRET.sk)
+    expect(masked).toContain('部署账号')
+    expect(maskSecrets(text)).toBe(text)
+    expect(maskSecrets(text, { severity: 'critical' })).toBe(text)
+  })
+
+  it('maskSecretSurface 同样按选项放宽；缺省时只命中疑似规则仍返回原对象', () => {
+    const r = { content: '登录用 password: Hunter2-2026', name: '账号', summary: '', tags: [] as string[] }
+    expect(maskSecretSurface(r, { severity: 'suspected' }).content).toBe(`登录用 ${SECRET_MASK}`)
+    expect(maskSecretSurface(r)).toBe(r)
+  })
+})

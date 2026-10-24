@@ -5,6 +5,9 @@ import { workspaceDirName, GLOBAL_DIR, INDEX_FILE, ARCHIVE_DIR } from './storage
 import { EVIDENCE_GUIDANCE, type EvidenceLookupLevel } from './evidence-guidance.ts'
 import { stalenessNote, withinValidity } from './record-freshness.ts'
 import { maskSecrets, maskSecretSurface } from './secrets.ts'
+import type { OverflowLevel, OverflowMode } from './contract-codes.ts'
+
+export type { OverflowMode }
 
 export const COLD_START_TEXT = `记忆库当前为空。如果时机合适，可以问一句用户是否愿意介绍自己的背景（角色、常用技术、工作习惯），愿意就用 memory_save 记下来；不愿意就在后续任务中自然积累，不要追问。`
 
@@ -40,7 +43,7 @@ export function estimateTokens(text: string): number {
 }
 
 /** 注入排序（设计稿 §6）：confidence 降序 → lastConfirmedAt 降序。recallCount 不参与：被宽泛查询扫到的记忆不该越排越前。 */
-function byConfidenceThenConfirmed(a: MemoryRecord, b: MemoryRecord): number {
+export function byConfidenceThenConfirmed(a: MemoryRecord, b: MemoryRecord): number {
   return b.confidence - a.confidence || b.lastConfirmedAt - a.lastConfirmedAt
 }
 
@@ -61,6 +64,29 @@ function truncationNav(omitted: ReadonlyArray<{ type: string; records: readonly 
   return lines.join('\n')
 }
 
+/** 一次组装的用量。token 是 estimateTokens 的逐段估算。 */
+export interface SnapshotUsage {
+  /** 按作用域分段：记忆行（core 区正文、索引行）归 workspace / global，其余（标题、组头、导航图、固定尾注、冷启动文案）归 fixed。 */
+  tokens: { workspace: number; global: number; fixed: number }
+  /** 计入上限的用量：标题、core 区、组头、索引行；导航图与固定尾注不计。三段之和 = usedTokens + 导航图 + 固定尾注。 */
+  usedTokens: number
+  /** 带入的记忆 id（core 区在前，再按索引区顺序）。 */
+  injectedIds: string[]
+  /** 有效记忆里没带入的条数（只有 strict 会截）。 */
+  omittedCount: number
+}
+
+/**
+ * 用量落在哪一档；没到提醒线为 undefined。relax：超过上限即进入第 1 档，超过上限 × (1 + 0.25(n-1)) 进入第 n 档；
+ * strict：用到上限的 95%。上限不是正数时不提醒。
+ */
+export function overflowLevel(mode: OverflowMode, usedTokens: number, budget: number): OverflowLevel | undefined {
+  if (!(budget > 0)) return undefined
+  if (mode === 'strict') return usedTokens * 100 >= budget * 95 ? { mode, tier: 0 } : undefined
+  if (usedTokens <= budget) return undefined
+  return { mode, tier: Math.ceil(((usedTokens - budget) * 4) / budget) }
+}
+
 /** 纯函数：吃调用方预读的可见记录（global + 当前 workspace 的 active 记录），不读存储。 */
 export function assembleSnapshot(deps: {
   records: readonly MemoryRecord[]
@@ -76,16 +102,19 @@ export function assembleSnapshot(deps: {
   memoryRoot?: string
   /** 证据下钻档位（设计 evidence-anchor §4）：给出时在快照末尾拼对应引导文案；缺省不拼（纯测试场景）。 */
   evidenceLookup?: EvidenceLookupLevel
-}): { text: string; coreIds: string[] } {
+  /** 超出上限时：relax（缺省）需要多少带多少，strict 按优先级装入、超出的截掉。 */
+  overflow?: OverflowMode
+}): { text: string; coreIds: string[] } & SnapshotUsage {
   const { registry, now } = deps
   const visible = deps.records
   if (visible.length === 0) {
     const broken = deps.quarantinedCount ?? 0
-    return { text: broken > 0 ? coldStartUnparseableText(broken) : COLD_START_TEXT, coreIds: [] }
+    const text = broken > 0 ? coldStartUnparseableText(broken) : COLD_START_TEXT
+    return { text, coreIds: [], tokens: { workspace: 0, global: 0, fixed: estimateTokens(text) }, usedTokens: 0, injectedIds: [], omittedCount: 0 }
   }
   // 疑似密钥不跳过、不加提示：四个面只把命中片段遮成占位，整条照常注入（id 不动，coreIds 与文件路径照常对应）
   const valid = visible.filter(r => withinValidity(r, now))
-  const all = valid.map(maskSecretSurface)
+  const all = valid.map(r => maskSecretSurface(r))
   // 文件名由 name 派生，slug 只换分隔符，name 被遮了路径里多半还留着同一段密钥：这条不给路径，看全文走 memory_search。
   // 手起名的文件名可能自带密钥，路径本身也遮一遍。
   const files = new Map<string, string>()
@@ -101,9 +130,14 @@ export function assembleSnapshot(deps: {
 
   const parts: string[] = ['# 长期记忆']
   let used = estimateTokens(parts[0])
+  const tokens = { workspace: 0, global: 0, fixed: used }
+  const scopeOf = (r: MemoryRecord) => (r.scope === 'global' ? 'global' : 'workspace')
+  const injectedIds: string[] = []
+  // strict 才有上限；relax 需要多少装多少（core 区、索引区都不截）
+  const limit = deps.overflow === 'strict' ? deps.budget : Infinity
 
   // core 区：完整正文，占预算一半以内
-  const coreBudget = deps.budget * 0.5
+  const coreBudget = limit * 0.5
   const coreRecords = all
     .filter(r => registry.get(r.type).recall === 'core')
     .sort(byConfidenceThenConfirmed)
@@ -115,7 +149,9 @@ export function assembleSnapshot(deps: {
     if (used + cost > coreBudget) break
     parts.push(line)
     used += cost
+    tokens[scopeOf(r)] += cost
     coreIncluded.push(r)
+    injectedIds.push(r.id)
   }
 
   // 索引区：全部记忆按类型分组（含 core 区已出现的）。组按治理优先级 high → low 顺序申领预算，
@@ -145,13 +181,16 @@ export function assembleSnapshot(deps: {
       continue
     }
     const groupLines = [`\n## ${def.label}（${type}）`]
-    let groupCost = estimateTokens(groupLines[0])
+    const headerCost = estimateTokens(groupLines[0])
+    let groupCost = headerCost
+    const groupTokens = { workspace: 0, global: 0 }
     for (const r of sorted) {
       const line = formatIndexLine(r, { passive: def.recall === 'passive', file: files.get(r.id), note: stalenessNote(r, def.decayDays, now) })
       const cost = estimateTokens(line)
-      if (used + groupCost + cost > deps.budget) { exhausted = true; break }
+      if (used + groupCost + cost > limit) { exhausted = true; break }
       groupLines.push(line)
       groupCost += cost
+      groupTokens[scopeOf(r)] += cost
     }
     // 只剩组头（组头本身放不下，或首条正文就放不下）：不留孤组头，整组进 omitted
     if (groupLines.length === 1) {
@@ -161,8 +200,13 @@ export function assembleSnapshot(deps: {
     }
     parts.push(...groupLines)
     used += groupCost
+    tokens.fixed += headerCost
+    tokens.workspace += groupTokens.workspace
+    tokens.global += groupTokens.global
+    injectedIds.push(...sorted.slice(0, groupLines.length - 1).map(r => r.id))
     if (groupLines.length - 1 < sorted.length) omitted.push({ type, records: sorted.slice(groupLines.length - 1) })
   }
+  const tailStart = parts.length
   if (omitted.length > 0) parts.push(truncationNav(omitted, indexPaths))
   // 固定尾注：完整索引入口、全文引导、.archive/ 说明。**只透 global + 当前项目两处**——
   // 所有 workspace 记忆都在同一 memories 根下当兄弟目录，若透整根会让模型 grep 到别项目的
@@ -183,6 +227,11 @@ export function assembleSnapshot(deps: {
   parts.push(`\n${MEMORY_AS_DATA_NOTE}`)
   // 证据下钻引导：固定尾注不计预算（与磁盘路径行同待遇，预算是软约束）
   if (deps.evidenceLookup) parts.push(`\n${EVIDENCE_GUIDANCE[deps.evidenceLookup]}`)
+  // 导航图与固定尾注：不计上限，归固定说明
+  for (const part of parts.slice(tailStart)) tokens.fixed += estimateTokens(part)
 
-  return { text: parts.join('\n'), coreIds: coreIncluded.map(r => r.id) }
+  return {
+    text: parts.join('\n'), coreIds: coreIncluded.map(r => r.id),
+    tokens, usedTokens: used, injectedIds, omittedCount: all.length - injectedIds.length,
+  }
 }

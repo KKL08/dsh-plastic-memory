@@ -47,6 +47,7 @@ export type HealthRecommendationKind =
   | 'score-below-threshold'   // 分数低于档位提示阈值
   | 'issues-below-threshold'  // 有问题但未达提示阈值
   | 'promote-candidates'      // 闲时事务：有全局提升候选待确认
+  | 'budget-overflow'         // 本层会话带入的记忆超出上限（自动放宽进了档位 / 严格模式用到 95%），不扣分
 
 /** 注册处统一拦截的工具门拒绝码（tools/subagent-gate.ts）。 */
 export type ToolGateCode = 'subagent-readonly' // 子 agent 会话（delegationDepth ≥ 1）不可写
@@ -79,3 +80,11 @@ export interface CodedNote<C extends string> {
   code: C
   text: string
 }
+
+/** 配置 snapshotOverflow 的取值：带入量超过 snapshotTokenBudget 时 relax 自动放宽、strict 严格按上限。 */
+export const OVERFLOW_MODES = ['relax', 'strict'] as const
+export type OverflowMode = (typeof OVERFLOW_MODES)[number]
+
+/** 档位：relax 的 tier ≥ 1，上限 × (1 + 0.25 × tier) 是放宽后的天花板；strict 只有一档（用到 95%），tier 恒为 0。
+ *  快照组装算出档位、待决账本按档位记超限提醒，两边共用这个形状。 */
+export type OverflowLevel = { mode: OverflowMode; tier: number }

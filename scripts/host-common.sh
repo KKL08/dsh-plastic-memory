@@ -59,7 +59,9 @@ host_cleanup() {
 # rewrite in scripts/publish-shape.cjs), then npm pack it. Sets TGZ.
 host_stage_and_pack() {
   host_run build "$REPO/node_modules/.bin/tsc" -p "$REPO/tsconfig.build.json" --outDir "$STAGE/lib"
+  host_run build-client node "$REPO/scripts/build-client.ts" --outfile "$STAGE/lib/client.js"
   host_run stage-files cp "$REPO/cordis.patch.yml" "$REPO/README.md" "$STAGE/"
+  host_run stage-locale cp -R "$REPO/locale" "$STAGE/"
   host_run stage node "$REPO/scripts/publish-shape.cjs" "$REPO/package.json" "$STAGE/package.json"
   host_run pack sh -c 'cd "$1" && npm pack --loglevel=error' _ "$STAGE"
   TGZ="$STAGE/$(ls -t "$STAGE"/*.tgz | head -n 1 | xargs basename)"
@@ -90,6 +92,17 @@ host_ensure() {
 host_install_plugin() {
   local profile="$1"
   host_run plugin-add env DSH_HOME="$HOMEDIR" "$DSH" plugin --profile "$profile" add "$TGZ"
+}
+
+# Browser half of the installed package (key-free): dsh.client + exports['./client']
+# are declared, lib/client.js loads through a fake window.__ModuleLoader__ in the
+# factory format, and locale/*.json ship. Checks the copy `plugin add` installed
+# under HOMEDIR, i.e. what a user actually gets.
+host_verify_client() {
+  local pkg
+  pkg="$(find "$HOMEDIR" -type f -path '*/node_modules/dsh-plastic-memory/package.json' 2>/dev/null | head -n 1)"
+  [ -n "$pkg" ] || { STEP=client; echo "$HOST_TAG: installed dsh-plastic-memory/package.json not found under $HOMEDIR" >&2; return 1; }
+  host_run client node "$REPO/scripts/host-contract/verify-client.ts" "$(dirname "$pkg")"
 }
 
 # Write tripwire: fail if anything under the real ~/.dsh is newer than MARKER.

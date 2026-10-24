@@ -81,7 +81,7 @@ dsh plugin --profile web add dsh-plastic-memory@0.1.1-beta.5
 ```
 
 > Replace `web` with the name of your target profile (it will be created automatically if it doesn't exist). The plugin declaration is written to the profile's `cordis.patch.yml` and takes effect after a restart. The package ships prebuilt on npm — no build step required.  
-> **Requirements:** Node.js `^22.19.0 || >=24`, DeepSeek Harness v0.1.7-rc.1 or later (verified up to v0.2.1-rc.2).
+> **Requirements:** Node.js `^22.19.0 || >=24`, DeepSeek Harness v0.1.7-rc.1 or later (verified up to v0.2.1-rc.2); the graphical interface needs v0.2.1-rc.2 or later.
 > (DeepSeek Harness is still in pre-release and may ship further breaking changes; before upgrading the host, check the version range this plugin currently supports, see the badge at the top and the CHANGELOG.)
 >
 > While in beta, pin the exact version in the install command. Once a stable release ships, you can simply run `dsh plugin --profile web add dsh-plastic-memory`.
@@ -96,6 +96,22 @@ dsh plugin --profile web add dsh-plastic-memory@0.1.1-beta.5
 2. **Search** — Ask the agent to look up related memories. Supports filtering by type and scope.
 3. **Check health** — Ask the agent to assess the overall health score of the memory library.
 4. **Tidy up** — Ask the agent to scan for conflicts, redundancies, and stale entries, then review and apply the suggested fixes.
+
+---
+
+
+
+## 🖥️ Interface
+
+Once installed, nothing requires YAML. Three surfaces live inside the host's web UI:
+
+- **The 「记忆」 (Memory) page in the left nav**: four tabs. *Pending* lists what waits for your decision — conflicts found by a checkup, memories worth promoting to global, budget overflows, secrets, files that failed to parse — and each item is handled in place (pick the winning side, undo, promote or keep local, delete a secret for good). *All memories* browses by project or global, opens the file or shows it in Finder, deletes. *Health* shows each layer's score and issues, with a "check this project" button in the header. *Recently deleted* restores anything removed in the last 14 days and says which memory won when a ruling deleted it. The page does not need a running conversation: it borrows an idle session of the current project to run its commands, and shows an empty state when no session exists yet.
+- **A 「记忆」 tab in the right sidebar**: which memories this conversation brought in, how much of the context they use, what the model saved during the conversation; conflicts among the injected memories can be ruled right there.
+- **The plugin's settings page** (its entry in the host's plugin manager): scenario template, custom types (add, edit, remove in a dialog), context budget and overflow mode, source lookup, checkup switch and sensitivity, where global promotions go, plus a status card. Saving writes the profile's `cordis.patch.yml` and takes effect without a restart.
+
+Every turn in which the model saved a memory gets a card with a delete button; the dot on the left-nav icon lights amber only when something waits for your decision, and turns red when a secret was found.
+
+> The interface requires DeepSeek Harness v0.2.1-rc.2 or later. On earlier supported hosts (v0.1.7-rc.1 and up) the tools and memory injection work as before, without the interface.
 
 ---
 
@@ -240,6 +256,7 @@ Adjust `plastic-memory` settings in the profile's `cordis.patch.yml`:
 | ---------------------------------- | ------------------- | ---------------------------------------------------------------------------------------- |
 | `writeMode`                        | `'proactive'`       | Write mode (currently the only value; more modes planned)                                |
 | `snapshotTokenBudget`              | `4000`              | Maximum token budget for context injection                                               |
+| `snapshotOverflow`                 | `'relax'`           | Over budget: `relax` injects everything and reports each 25 % step / `strict` cuts index lines and says how many were left out |
 | `evidenceLookup`                   | `'strict'`          | Provenance mode: `off` / `strict` (prompt on strong signals only) / `active` (proactive guidance) |
 | `template`                         | `'coding'`          | Scene template: `coding` / `office` / `custom`                                          |
 | `customTypes`                      | `{}`                | Custom memory type definitions                                                           |

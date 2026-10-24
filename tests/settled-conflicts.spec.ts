@@ -106,7 +106,7 @@ describe('裁决过的冲突不再重报', () => {
     expect(changed.pendingDecisions.created).toBe(1)
   })
 
-  it('删掉一方的裁决（keep-left 横向）照旧：败方已删，不留记录', async () => {
+  it('删掉一方的裁决（keep-left 横向）：败方已删，条目移出待处理、作为已裁决留账供撤销', async () => {
     const env = makeEnv()
     await env.store.put(record({ id: 'mem_a', content: '用 pnpm' }))
     await env.store.put(record({ id: 'mem_b', content: '用 npm' }))
@@ -114,6 +114,7 @@ describe('裁决过的冲突不再重报', () => {
     await env.resolve(first.pendingDecisions.items[0].id, 'keep-left')
     expect((await env.store.get('mem_b'))!.status).toBe('deleted')
     expect(await env.decisions.list()).toHaveLength(0)
+    expect((await env.decisions.listSettled()).map(e => e.settled?.verdict)).toEqual(['keep-left'])
   })
 })
 
