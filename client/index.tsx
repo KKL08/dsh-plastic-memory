@@ -3,6 +3,7 @@
  * 网关（宿主实现）与导航 store 在这里各建一份，所有插槽根共用；组件只认网关接口。
  */
 import { useCallback, useMemo, useSyncExternalStore } from 'react'
+import { createComposerDock, DOCK_ID, DOCK_ORDER } from './composer/dock.tsx'
 import { createHostGateway } from './gateway.ts'
 import type { HostContext, HostLocale, RootStandardProps } from './host.ts'
 import type { Translate } from './i18n.tsx'
@@ -14,7 +15,7 @@ import { PanelShell } from './ui/PanelShell.tsx'
 
 export { PANEL_ID }
 
-export const inject = ['slots', 'locale', 'layout', 'remote', 'remote.commands', 'remote.workspaceFiles']
+export const inject = ['slots', 'locale', 'layout', 'sidebarRight', 'remote', 'remote.commands', 'remote.workspaceFiles']
 
 /** 宿主 locale 的翻译函数；切语言或字典晚到时换一个新引用，让组件重渲染。 */
 function useHostTranslate(locale: HostLocale): Translate {
@@ -51,4 +52,6 @@ export function apply(ctx: HostContext): void {
     order: 20,
     label: () => t('nav.label'),
   }, MemoryIcon))
+  const Dock = createComposerDock(ctx, nav, createHostGateway(ctx), () => useHostTranslate(ctx.locale))
+  ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({ name: 'conversation.composer.dock', id: DOCK_ID, order: DOCK_ORDER }, Dock))
 }

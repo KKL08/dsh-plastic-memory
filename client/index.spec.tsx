@@ -18,6 +18,7 @@ function setup() {
     },
     locale: { register, bind: () => createTranslator(zh) as (key: string) => string, getSnapshot: () => 0, subscribe: () => () => {} },
     layout: { selectPanel: vi.fn() },
+    sidebarRight: { openTab: vi.fn() },
     remote: {
       commands: { execute: vi.fn(async () => ({ ok: false as const, error: { code: 'x', message: 'x' } })) },
       workspaceFiles: { read: vi.fn() },
