@@ -36,15 +36,17 @@ export interface SearchHit {
   content: string
   sourceNote: string
   stalenessNote: string
+  /** 记忆文件的绝对路径（记忆根目录 + 目录名 + 文件名），恒有值；模型要全文或上下文时直接 Read。 */
+  path: string
 }
 
 /** 说明文案（码在 contract-codes）：返回列表里没有全命中记录 / 只有子串命中记录。 */
 export const OR_FALLBACK_NOTE = '没有同时命中全部关键词的记忆，以下按相关性排序。'
 export const SUBSTRING_FALLBACK_NOTE = '没有命中关键词的记忆，以下只是关键词以子串出现的结果。'
 
-/** 把命中结果渲染成给模型看的一段文本：有说明先写说明，再列命中。纯函数。 */
+/** 把命中结果渲染成给模型看的一段文本：有说明先写说明，再列命中（头行末尾带文件绝对路径）。纯函数。 */
 export function renderSearchResult(result: { hits: SearchHit[]; note?: string }): string {
-  const blocks = result.hits.map(h => `[${h.id}] ${h.type}｜${h.summary}${h.sourceNote}${h.stalenessNote}\n${h.content}`)
+  const blocks = result.hits.map(h => `[${h.id}] ${h.type}｜${h.summary}${h.sourceNote}${h.stalenessNote} · ${h.path}\n${h.content}`)
   if (result.note !== undefined) blocks.unshift(result.note)
   return blocks.length === 0 ? '没有匹配的记忆。' : blocks.join('\n\n')
 }
@@ -102,9 +104,11 @@ export async function executeSearch(
   const now = Date.now()
   // 与快照预读同一条路：按范围读取 → 同 id 取舍 → active → validTo（过期的不进检索，治理扫描仍可见）
   const read = await deps.store.readLayer(scopeFilter, { ...(a.types ? { types: a.types } : {}), ...prefilter })
-  const candidates = resolveDuplicates(read.records, { workspacePath: hint })
-    .map(l => l.record)
-    .filter(r => r.status === 'active' && withinValidity(r, now))
+  const located = resolveDuplicates(read.records, { workspacePath: hint })
+    .filter(l => l.record.status === 'active' && withinValidity(l.record, now))
+  const candidates = located.map(l => l.record)
+  // 取舍后同 id 只留一份，命中按 id 取回它的文件绝对路径
+  const filePathOf = new Map(located.map(l => [l.record.id, l.filePath]))
 
   let ranked: RankedRecord[]
   if (tokens.length === 0 && legacyTerms.length === 0) {
@@ -132,6 +136,7 @@ export async function executeSearch(
       id: h.id, type: h.type, summary: h.summary, content: h.content,
       sourceNote: sourceNote(h),
       stalenessNote: stalenessNote(h, deps.registry.get(h.type).decayDays, now),
+      path: filePathOf.get(h.id)!,
     })),
   }
 }

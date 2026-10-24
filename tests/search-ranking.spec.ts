@@ -1,17 +1,17 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 import fc from 'fast-check'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import type { MemoryTable, ScopeReadOptions } from '../src/storage/table.ts'
 import { FileTable } from '../src/storage/file-table.ts'
-import { GLOBAL_DIR } from '../src/storage/paths.ts'
+import { GLOBAL_DIR, workspaceDirName } from '../src/storage/paths.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
 import { expandQueryTerms, matchScore } from '../src/text.ts'
 import { createTokenizer } from '../src/search/tokenizer.ts'
 import { RANKING_FIELDS } from '../src/search/ranking.ts'
-import { executeSearch, OR_FALLBACK_NOTE, SUBSTRING_FALLBACK_NOTE, type SearchToolDeps } from '../src/tools/search.ts'
+import { executeSearch, renderSearchResult, OR_FALLBACK_NOTE, SUBSTRING_FALLBACK_NOTE, type SearchToolDeps } from '../src/tools/search.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { SearchNoteCode } from '../src/contract-codes.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
@@ -216,6 +216,31 @@ describe('不变的行为', () => {
     const r = await executeSearch({ query: 'magicword', scope: 'workspace' }, fakeExec(), deps(store, undefined))
     expect(r.hits).toEqual([])
     expect(r.noteCode).toBe(NO_WORKSPACE)
+  })
+})
+
+describe('结果形状：命中带文件绝对路径', () => {
+  it('SearchHit.path 恒有值且为绝对路径，指向真实存在的文件（global 与项目目录、关键词与零 token 查询都带）', async () => {
+    const store = await seeded([
+      record({ id: 'mem_g', name: '全局条目', content: 'magicword 全局' }),
+      record({ id: 'mem_w', name: '项目条目', scope: 'workspace', workspacePath: '/w/proj', content: 'magicword 项目' }),
+    ])
+    for (const query of ['magicword', '']) {
+      const r = await executeSearch({ query }, fakeExec(), deps(store, '/w/proj'))
+      expect(r.hits.map(h => h.id).sort()).toEqual(['mem_g', 'mem_w'])
+      for (const h of r.hits) {
+        expect(isAbsolute(h.path)).toBe(true)
+        expect(await readFile(h.path, 'utf8')).toContain(`id: ${h.id}`)
+      }
+      expect(dirname(r.hits.find(h => h.id === 'mem_g')!.path)).toBe(join(root, GLOBAL_DIR))
+      expect(dirname(r.hits.find(h => h.id === 'mem_w')!.path)).toBe(join(root, workspaceDirName('/w/proj')))
+    }
+  })
+
+  it('渲染头行末尾追加「 · 绝对路径」，其余格式不变', () => {
+    const hit = { id: 'mem_x', type: 'knowledge', summary: '摘要', content: '正文\n第二行', sourceNote: '（推断）', stalenessNote: '（可能过时）', path: '/m/global/x.md' }
+    expect(renderSearchResult({ hits: [hit] })).toBe('[mem_x] knowledge｜摘要（推断）（可能过时） · /m/global/x.md\n正文\n第二行')
+    expect(renderSearchResult({ hits: [hit], note: '说明' })).toBe('说明\n\n[mem_x] knowledge｜摘要（推断）（可能过时） · /m/global/x.md\n正文\n第二行')
   })
 })
 

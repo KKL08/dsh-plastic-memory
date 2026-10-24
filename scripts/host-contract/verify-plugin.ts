@@ -16,7 +16,7 @@
 // H14 构造 agent-instructions 来源的消息，需要该包对 MessageSourceMap 的类型增广（纯类型引用，无运行时导入）
 /// <reference types="@deepseek-ai/dsh-agent-instructions" />
 import { existsSync, readdirSync, readFileSync, mkdtempSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -36,6 +36,11 @@ type Sessions = { create(id?: string, options?: { meta?: { cwd?: string } }): Se
 type SessionLike = { header: { id: string; cwd?: string }; seq: number; append(type: string, data: unknown, opts?: unknown): { seq: number } }
 
 const MEMORY_BASE = { type: 'knowledge', scope: 'workspace', sourceMode: 'user-explicit', tags: [] as string[] }
+
+type SearchHitShape = { id: string; path?: unknown }
+/** memory_search 每条命中都带 path：字符串、绝对路径、文件真实存在；没有命中算不通过。 */
+const hitPathsAbsolute = (hits: SearchHitShape[] | undefined) =>
+  (hits ?? []).length > 0 && (hits ?? []).every(h => typeof h.path === 'string' && isAbsolute(h.path) && existsSync(h.path))
 
 /** H14 用到的宿主会话持久化最小契约（照 agent-loop 的建会话/恢复配方：prepare → create 句柄 → enter + announce；
  *  恢复是 open + read(0) → prepare(seed) → enter + announce）。 */
@@ -146,13 +151,14 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       const handoff = JSON.parse(readFileSync(handoffPath ?? '', 'utf8')) as Handoff
       await attempt('H12-RESTART-READ', async () => {
         const exec = mkExec(handoff.wsA)
-        const searched = await call('memory_search', { query: 'host-contract-probe' }, exec) as { hits?: Array<{ id: string }> }
+        const searched = await call('memory_search', { query: 'host-contract-probe' }, exec) as { hits?: SearchHitShape[] }
         const searchable = (searched.hits ?? []).some(h => h.id === handoff.savedId)
+        const pathsOk = hitPathsAbsolute(searched.hits)
         const text = readMemoryFile(handoff.savedId)
         const activeOnDisk = text !== undefined && text.includes('status: active')
         const shown = await call('memory_snapshot', { action: 'show', snapshotId: handoff.snapshotId }, exec) as { kind: string; entries?: Array<{ id: string }> }
         const snapshotKept = shown.kind === 'shown' && (shown.entries ?? []).some(e => e.id === handoff.savedId)
-        return { ok: searchable && activeOnDisk && snapshotKept, detail: `restarted host: searchable=${searchable} activeOnDisk=${activeOnDisk} snapshotKept=${snapshotKept} (snap=${handoff.snapshotId})` }
+        return { ok: searchable && pathsOk && activeOnDisk && snapshotKept, detail: `restarted host: searchable=${searchable} pathsAbsolute=${pathsOk} activeOnDisk=${activeOnDisk} snapshotKept=${snapshotKept} (snap=${handoff.snapshotId})` }
       })
       // H14 第二趟：按宿主恢复配方重开第一趟持久化的会话（open read → read(0) → prepare(seed) → enter + announce），
       // 投影里基线仍在、checkup 不带 baseline-missing。证明的是端到端存活，不是 checkpoint 被消费（恢复读全量日志）。
@@ -255,12 +261,13 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       const shown = await call('memory_snapshot', { action: 'show', snapshotId: snap.snapshotId }, execA) as { kind: string; entries?: Array<{ id: string }> }
       const entry = (shown.entries ?? []).find(e => e.id === savedId)
       const restored = await call('memory_snapshot', { action: 'restore', snapshotId: snap.snapshotId, memoryIds: [savedId] }, execA) as { kind: string; restored?: string[] }
-      const searched = await call('memory_search', { query: 'host-contract-probe' }, execA) as { hits?: Array<{ id: string }> }
+      const searched = await call('memory_search', { query: 'host-contract-probe' }, execA) as { hits?: SearchHitShape[] }
       const searchable = (searched.hits ?? []).some(h => h.id === savedId)
+      const pathsOk = hitPathsAbsolute(searched.hits)
       const activeOnDisk = readMemoryFile(savedId)?.includes('status: active') === true
       const ok = snap.kind === 'created' && Array.isArray(snap.missing) && forgot.ok === true && shown.kind === 'shown' && !!entry && snapshotJsonValue(shown) !== undefined
-        && restored.kind === 'restored' && (restored.restored ?? []).includes(savedId) && searchable && activeOnDisk
-      return { ok, detail: `snap=${snap.kind}/${snap.snapshotId} missing=${JSON.stringify(snap.missing)} forget.ok=${forgot.ok} shown=${shown.kind} entries=${shown.entries?.length} restored=${restored.kind}/${JSON.stringify(restored.restored)} searchable=${searchable} activeOnDisk=${activeOnDisk}` }
+        && restored.kind === 'restored' && (restored.restored ?? []).includes(savedId) && searchable && pathsOk && activeOnDisk
+      return { ok, detail: `snap=${snap.kind}/${snap.snapshotId} missing=${JSON.stringify(snap.missing)} forget.ok=${forgot.ok} shown=${shown.kind} entries=${shown.entries?.length} restored=${restored.kind}/${JSON.stringify(restored.restored)} searchable=${searchable} pathsAbsolute=${pathsOk} activeOnDisk=${activeOnDisk}` }
     })
 
     // H8 模型填 global → 降级为 workspace + 提升候选；promote dismiss 清掉候选

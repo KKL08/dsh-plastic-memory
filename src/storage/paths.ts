@@ -38,6 +38,14 @@ export function slugifyName(name: string): string {
   return s.length > 0 ? s : 'memory'
 }
 
+/**
+ * 记忆文件相对记忆根目录的写法：`<目录名>/<文件名>`（如 global/看板.md）。两个参数传末段名或绝对路径都行，只取末段。
+ * 注入索引行用它；工具结果给绝对路径，不经它。
+ */
+export function memoryRelativePath(dir: string, file: string): string {
+  return `${basename(dir)}/${basename(file)}`
+}
+
 /** 确定性目录名：可读前缀 + 路径 hash。slug 不承担可逆性——真路径存 .workspace 标记。 */
 export function workspaceDirName(workspacePath: string): string {
   const hash = createHash('sha1').update(workspacePath).digest('hex').slice(0, 8)

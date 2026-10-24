@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { resolveMemoryRoot, slugifyName, workspaceDirName } from '../src/storage/paths.ts'
+import { memoryRelativePath, resolveMemoryRoot, slugifyName, workspaceDirName } from '../src/storage/paths.ts'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -58,5 +58,13 @@ describe('slugifyName 截断边界', () => {
 
   it('前导分隔符加超长输入：去掉前导后截到 40 位', () => {
     expect(slugifyName('/' + 'b'.repeat(60))).toBe('b'.repeat(40))
+  })
+})
+
+describe('memoryRelativePath', () => {
+  it('「目录名/文件名」格式器：目录与文件各取末段，用 / 连接；传末段名或绝对路径结果相同', () => {
+    expect(memoryRelativePath('/m/root/global', '/m/root/global/看板.md')).toBe('global/看板.md')
+    expect(memoryRelativePath('myproj-1234abcd', 'MEMORY.md')).toBe('myproj-1234abcd/MEMORY.md')
+    expect(memoryRelativePath(join('/m', 'root', 'global'), '看板.md')).toBe('global/看板.md')
   })
 })
