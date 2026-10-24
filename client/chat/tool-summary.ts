@@ -6,7 +6,7 @@
  * 其余工具的摘要只看参数。
  */
 import type { MemoryCard } from '../../src/gui/contract.ts'
-import { baseName } from '../i18n.tsx'
+import { baseName } from '../path.ts'
 import type { LocaleKey } from '../locales.ts'
 
 export const MEMORY_TOOLS = [

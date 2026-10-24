@@ -40,7 +40,4 @@ export function formatDay(ms: number, now: number, t: Translate): string {
 }
 
 /** 路径最后一段（项目名）。 */
-export function baseName(path: string): string {
-  const parts = path.replace(/[\\/]+$/, '').split(/[\\/]/)
-  return parts[parts.length - 1] || path
-}
+export { baseName } from './path.ts'
