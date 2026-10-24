@@ -55,12 +55,13 @@ export async function executePromote(
   }
   const { allowed, rejected, otherWorkspaces } = gateRecords(located, context, args.allowCrossWorkspace)
   const wsNote = crossWorkspaceNote(rejected, otherWorkspaces)
-  // AGENTS.md 通常随仓库提交，含密钥的记录写进去就是明文外泄（原记忆进回收站后，留下的只剩这份明文）。
+  // AGENTS.md 是宿主的全局指令文件，原文进每个项目的每次会话，不遮密钥，也不归插件管（forget 擦不到）；
+  // 原记忆进回收站后，留下的只剩这份明文。
   // 两级密钥一视同仁：suspected 是用户确认过才放行保存的，但那份确认只针对本地记忆库，不针对提交进仓库。
   const secretIds = args.dismiss || args.target !== 'agents-md' ? [] : allowed.filter(hasSecret).map(r => r.id)
   const found = secretIds.length === 0 ? allowed : allowed.filter(r => !secretIds.includes(r.id))
   skipped.push(...secretIds)
-  const secretNote = secretIds.length > 0 ? `${secretIds.length} 条含密钥的记忆不能写入 AGENTS.md（该文件通常会提交到仓库），已原样保留在项目内，见 skipped。` : ''
+  const secretNote = secretIds.length > 0 ? `${secretIds.length} 条含密钥的记忆不能写入 AGENTS.md（该文件原文注入所有项目的会话，插件无法遮盖或删除），已原样保留在项目内，见 skipped。` : ''
 
   // dismiss：用户表态不提升，清除候选标记即可。清标记可逆（模型可经 update 重新标记），故不拍快照、
   // 不写 AGENTS.md、不搬目录。updatedAt 不动——这不是内容编辑，改了会让快照把记忆误判为"快照后被

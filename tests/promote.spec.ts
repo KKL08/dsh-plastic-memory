@@ -95,7 +95,7 @@ describe('executePromote', () => {
     expect((await store.get('mem_z'))!.status).toBe('active')  // 软删已回滚，记忆没有丢
   })
 
-  // AGENTS.md 通常随仓库提交：含密钥的记忆写进去就是明文外泄，原记忆进回收站后留下的只剩这份明文
+  // AGENTS.md 原文注入所有项目的会话、不归插件管：含密钥的记忆写进去就是明文外泄，原记忆进回收站后留下的只剩这份明文
   it('target=agents-md：含 critical 密钥的记录拒绝写入，AGENTS.md 不动、记忆仍 active、计入 skipped 并说明原因', async () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_sec', name: '部署凭证', content: `token ${FAKE_SECRET.sk}` }))
