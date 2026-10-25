@@ -108,6 +108,16 @@ describe('memory_snapshot', () => {
     expect(revived.content).toBe('不该被删的内容')
   })
 
+  it('restore 只按快照恢复：快照外的归档记忆（没有快照覆盖）不顺带复活，由 GUI 最近删除恢复', async () => {
+    const deps = makeDeps()
+    const kept = record({ id: 'mem_a', content: '原文' })
+    const snap = await deps.snapshots.capture({ operation: 'manual', description: 'd', records: [kept] }, 100)
+    await deps.store.put(record({ id: 'mem_hand', status: 'deleted' }))
+    const r = await executeSnapshotTool({ action: 'restore', snapshotId: snap.id, memoryIds: ['mem_a', 'mem_hand'] }, { workspacePath: '/proj' }, deps)
+    expect(r.kind === 'restored' && r.restored).toEqual(['mem_a'])
+    expect((await deps.store.get('mem_hand'))!.status).toBe('deleted')
+  })
+
   it('list 入口也清扫超窗旧快照：只造超窗快照后 list 返回空且表被清', async () => {
     const deps = makeDeps(SNAPSHOT_RETENTION_MS + 1)  // 工具入口以此 now 清扫
     await deps.snapshots.capture({ operation: 'manual', description: '超窗', records: [] }, 0)
