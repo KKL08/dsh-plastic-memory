@@ -182,7 +182,7 @@ export function buildLibraryView(input: ViewInput): LibraryView {
     .filter(l => l.layer.kind === 'global' || l.items.length > 0)
   const directoryIssues = [...input.listingNotes, ...input.data.directoryNotes]
     .filter(n => n.code !== 'dir-empty')
-    .map(n => ({ code: n.code, path: n.path, ...(n.keys !== undefined ? { keys: n.keys } : {}) }))
+    .map(n => ({ code: n.code, path: n.path, ...(n.keys !== undefined ? { keys: n.keys } : {}), ...(n.keptPath !== undefined ? { keptPath: n.keptPath } : {}) }))
   const typeLabelsOfView = typeLabels(input.registry, layers.flatMap(l => l.items.map(m => m.type)))
   return { version: GUI_VIEW_VERSION, memoryRoot: input.memoryRoot, layers, directoryIssues, typeLabels: typeLabelsOfView }
 }

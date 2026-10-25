@@ -210,6 +210,8 @@ describe('全部记忆视图', () => {
     ])
     expect(library.layers[0].items[0].filePath).toBe(join(root, GLOBAL_DIR, '全局一条.md'))
     expect(library.directoryIssues.map(i => [i.code, i.path])).toEqual(expect.arrayContaining([['duplicate-id', dup], ['reserved-keys', reserved]]))
+    // 同 id 副本：path 是没用上的那份，keptPath 是在用的那份
+    expect(library.directoryIssues.find(i => i.code === 'duplicate-id')).toEqual({ code: 'duplicate-id', path: dup, keptPath: join(root, GLOBAL_DIR, '全局一条.md') })
   })
 
   it('同 id 在 global 与本项目各一份：删掉 global 那份后本项目这份照常列出；删掉的那份进最近删除，不算同 id 副本', async () => {

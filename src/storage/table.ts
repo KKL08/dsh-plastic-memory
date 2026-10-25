@@ -19,6 +19,8 @@ export interface DirectoryNote extends CodedNote<DirectoryNoteCode> {
   path: string
   /** reserved-keys：被忽略的键。 */
   keys?: string[]
+  /** duplicate-id：读取时用的那份（path 是没用上的副本）。 */
+  keptPath?: string
 }
 
 /** 一次按范围读取里的一条记录：带实际文件路径与所在目录，索引行与注入尾注用它，不再从 name 重算。 */

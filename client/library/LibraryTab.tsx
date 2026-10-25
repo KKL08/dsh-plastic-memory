@@ -31,6 +31,10 @@ function issueText(issue: LibraryView['directoryIssues'][number], root: string, 
   const path = shortPath(issue.path, root)
   switch (issue.code) {
     case 'duplicate-id':
+      // 在用的那份缺省时（旧视图文件）只能泛泛地说
+      return issue.keptPath === undefined
+        ? t('library.issue.other', { path })
+        : t('library.issue.duplicate-id', { kept: shortPath(issue.keptPath, root), path })
     case 'marker-missing':
     case 'dir-unreadable':
       return t(`library.issue.${issue.code}`, { path })

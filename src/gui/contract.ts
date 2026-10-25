@@ -165,6 +165,8 @@ export const directoryIssueSchema = z.object({
   path: z.string(),
   /** reserved-keys：被忽略的键。 */
   keys: z.array(z.string()).optional(),
+  /** duplicate-id：读取时用的那份（path 是没用上的副本）。 */
+  keptPath: z.string().optional(),
 })
 export const libraryViewSchema = z.object({
   version,

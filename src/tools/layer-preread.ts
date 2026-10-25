@@ -64,7 +64,7 @@ export async function prereadLayers(
 function duplicateNotes(read: readonly LocatedRecord[], chosen: readonly LocatedRecord[]): DirectoryNote[] {
   const kept = new Map(chosen.map(l => [l.record.id, l.filePath]))
   return read.filter(l => kept.get(l.record.id) !== l.filePath).map(l => ({
-    level: 'info', code: 'duplicate-id', path: l.filePath,
+    level: 'info', code: 'duplicate-id', path: l.filePath, keptPath: kept.get(l.record.id),
     text: `记忆 ${l.record.id} 有多个文件：读取时用 ${kept.get(l.record.id)}，副本 ${l.filePath} 未自动删除；确认哪份有效后手工删掉多余的`,
   }))
 }
