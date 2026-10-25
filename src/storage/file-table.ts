@@ -77,6 +77,16 @@ function errnoCode(err: unknown): string | undefined {
   return (err as NodeJS.ErrnoException | undefined)?.code
 }
 
+/** 单个文件在目录签名里的一项：名字、大小、mtime。 */
+function statSignature(name: string, s: { size: number; mtimeMs: number }): string {
+  return `${name}\u0000${s.size}\u0000${s.mtimeMs}`
+}
+
+/** 目录签名：各项排序后拼接，与 readdir 顺序无关。 */
+function signatureOf(seen: ReadonlyMap<string, string>): string {
+  return [...seen.values()].sort().join('\n')
+}
+
 /** readMemoryFile 的结果是解析成功的记录（不是被跳过或隔离）。 */
 function isSlot(r: { slot: Slot } | { quarantined: QuarantineEntry } | undefined): r is { slot: Slot; notes: DirectoryNote[] } {
   return r !== undefined && 'slot' in r
@@ -171,12 +181,14 @@ export class FileTable implements MemoryTable {
   /** 读单个记忆文件。返回 undefined = 被预筛跳过 / 竞态消失 / 不是普通文件。 */
   private async readMemoryFile(
     filePath: string, dir: string, loc: FileLocation, prefilter: Prefilter, statsRows: ReadonlyMap<string, RecallStats>,
+    seen?: Map<string, string>,
   ): Promise<{ slot: Slot; notes: DirectoryNote[] } | { quarantined: QuarantineEntry } | undefined> {
     let mtimeMs: number
     let raw: string
     try {
       const s = await stat(filePath)
       if (!s.isFile()) return undefined
+      seen?.set(basename(filePath), statSignature(basename(filePath), s))   // 在读内容之前取：签名不会比读到的内容新
       mtimeMs = s.mtimeMs
       raw = await readFile(filePath, 'utf8')
     } catch (err) {
@@ -204,7 +216,10 @@ export class FileTable implements MemoryTable {
   }
 
   /** 读一组已解析位置的目录（顶层，可选含 .archive/），带 extras 的内部形态。 */
-  private async readDirs(dirs: readonly ScopeDir[], opts: ScopeReadOptions): Promise<{ slots: Slot[]; listedCount: number; quarantined: QuarantineEntry[]; directoryNotes: DirectoryNote[] }> {
+  /** topLevel：给了就记下各目录顶层记忆文件的签名（读文件时顺手取的 stat，见 topLevelSignature）。 */
+  private async readDirs(
+    dirs: readonly ScopeDir[], opts: ScopeReadOptions, topLevel?: Map<string, string>,
+  ): Promise<{ slots: Slot[]; listedCount: number; quarantined: QuarantineEntry[]; directoryNotes: DirectoryNote[] }> {
     const slots: Slot[] = []
     let listedCount = 0
     const quarantined: QuarantineEntry[] = []
@@ -222,7 +237,8 @@ export class FileTable implements MemoryTable {
         // 伴生文件形态的名字不走预筛、一律解析：它算不算记忆文件要看解析结果，列出文件数才与预筛开关无关
         const names = listed.names.sort()
         const results = await Promise.all(names.map(name =>
-          this.readMemoryFile(join(level, name), dir, loc, isCompanionLikeFileName(name) ? NO_PREFILTER : prefilter, statsRows)))
+          this.readMemoryFile(join(level, name), dir, loc, isCompanionLikeFileName(name) ? NO_PREFILTER : prefilter, statsRows,
+            level === dir ? topLevel : undefined)))
         // 只数顶层，预筛、types 之前；伴生文件形态的名字解析成记忆才数（非原生卷上每个文件都配一个伴生文件）
         if (level === dir) listedCount += names.filter((n, i) => !isCompanionLikeFileName(n) || isSlot(results[i])).length
         for (const r of results) {
@@ -378,7 +394,8 @@ export class FileTable implements MemoryTable {
     const cutoff = now - DELETED_RETENTION_MS
     for (const sd of scopeDirs) {
       const archive = join(sd.dir, ARCHIVE_DIR)
-      const { slots } = await this.readDirs([sd], { includeArchive: true })
+      const seen = new Map<string, string>()
+      const { slots } = await this.readDirs([sd], { includeArchive: true }, seen)
       const kept: LocatedRecord[] = []
       for (const slot of slots) {
         const inArchive = dirname(slot.filePath) === archive
@@ -419,11 +436,16 @@ export class FileTable implements MemoryTable {
       // kept 只剩顶层 active（非 active 已搬走）：同 id 取一份，再过滤已过期的
       const indexable = (located: readonly LocatedRecord[]) => resolveDuplicates(located).filter(s => withinValidity(s.record, now))
       let text = this.indexText(indexable(kept))
-      // 别的进程可能在本轮读目录之后写进同一目录，并先一步写好了全的索引，本轮按旧清单写会盖掉它：写了就重读顶层，
-      // 清单变了按新的再写，最多 INDEX_ROUNDS 次。最后写索引的进程以写后的目录为准，索引收敛到全的那份
+      // 别的进程可能在本轮读目录之后写进同一目录，并先一步写好了全的索引，本轮按旧清单写会盖掉它：写了就比一次顶层签名
+      // （只 readdir + stat），变了才重读顶层、按新清单再写，最多 INDEX_ROUNDS 次。插件的写都经 tmp + rename 落盘，
+      // 别处增删改都会改变名字、大小或 mtime；手编也改 mtime。最后写索引的进程以写后的目录为准，索引收敛到全的那份
+      let signature = signatureOf(seen)
       for (let round = 1; await this.writeIndex(sd.dir, text) && round < INDEX_ROUNDS; round++) {
-        const { slots: fresh } = await this.readDirs([sd], {})
-        const next = this.indexText(indexable(fresh.filter(s => s.record.status === 'active')))
+        if (await this.topLevelSignature(sd.dir) === signature) break
+        const fresh = new Map<string, string>()
+        const { slots } = await this.readDirs([sd], {}, fresh)
+        signature = signatureOf(fresh)
+        const next = this.indexText(indexable(slots.filter(s => s.record.status === 'active')))
         if (next === text) break
         text = next
       }
@@ -455,6 +477,21 @@ export class FileTable implements MemoryTable {
   private async withdrawClaim(source: string, claimed: string, text: string): Promise<void> {
     try { await stat(source) } catch { return }
     if ((await readFile(claimed, 'utf8').catch(() => undefined)) === text) await rm(claimed, { force: true })
+  }
+
+  /** 目录顶层记忆文件的签名：每个文件的名字、大小、mtime，不含索引；只 readdir + stat，不读内容。口径同 readDirs 顺手记下的那份。 */
+  private async topLevelSignature(dir: string): Promise<string> {
+    const listed = await this.listMemoryFiles(dir)
+    const seen = new Map<string, string>()
+    if ('names' in listed) {
+      await Promise.all(listed.names.map(async name => {
+        try {
+          const s = await stat(join(dir, name))
+          if (s.isFile()) seen.set(name, statSignature(name, s))
+        } catch { /* 竞态消失：不计 */ }
+      }))
+    }
+    return signatureOf(seen)
   }
 
   /** 索引全文：只由传入的 active 记录决定。 */

@@ -14,8 +14,9 @@ import { record as baseRecord } from './helpers/record.ts'
 // fs 是进程边界：给 link / rm / rename 套一层，在指定路径的调用之前或之后插进另一个实例的整次写入，交错时机确定，不靠 sleep。
 // 不管怎么交错，写之前存在的 id 写完至少还剩一个文件；索引最后列全目录里的记忆。
 type Op = 'link' | 'rm' | 'rename'
-const { hooks } = vi.hoisted(() => ({
+const { hooks, reads } = vi.hoisted(() => ({
   hooks: [] as Array<{ op: string; path: string; when: 'before' | 'after'; run: () => Promise<unknown> }>,
+  reads: [] as string[],   // readFile 读过的路径，按调用顺序
 }))
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
@@ -40,7 +41,11 @@ vi.mock('node:fs/promises', async importOriginal => {
     await actual.rename(...args)
     await fire('rename', String(args[1]), 'after')
   })
-  return { ...actual, link, rm, rename }
+  const readFile = vi.fn(async (...args: Parameters<typeof actual.readFile>) => {
+    reads.push(String(args[0]))
+    return actual.readFile(...args)
+  })
+  return { ...actual, link, rm, rename, readFile }
 })
 
 /** 在 op 作用到 path 的那次调用之前 / 之后跑一次 run（只触发一次）。 */
@@ -66,6 +71,7 @@ let root: string
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-cross-move-')) })
 afterEach(async () => {
   hooks.length = 0
+  reads.length = 0
   vi.restoreAllMocks()
   await rm(root, { recursive: true, force: true })
 })
@@ -170,6 +176,16 @@ describe('两个进程各自写完再生同一个目录的索引', () => {
     const index = await readFile(join(globalDir(), INDEX_FILE), 'utf8')
     expect(index).toContain('mem_a')
     expect(index).toContain('mem_b')
+  })
+
+  it('没有别的进程同时写：写完索引只比一次签名，不重读目录里的记忆文件', async () => {
+    for (const n of ['甲', '乙', '丙']) await seed(record({ id: `mem_${n}`, name: n }), `${n}.md`)
+    const t = newTable()
+    reads.length = 0
+    await t.create(record({ id: 'mem_new', name: '新' }))   // 索引从无到有，必写
+    const memoryReads = reads.filter(p => p.endsWith('.md') && !p.endsWith(INDEX_FILE))
+    // 维护点读目录时每个文件读一次；签名没变就不再读第二遍
+    expect(memoryReads.sort()).toEqual(['丙.md', '乙.md', '新.md', '甲.md'].map(n => join(globalDir(), n)).sort())
   })
 
   it('目录没变：索引内容不变就不再写（不空转写盘）', async () => {
