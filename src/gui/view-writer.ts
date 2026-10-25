@@ -50,6 +50,7 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
  * 视图写入器：把视图写成 `<memoryRoot>/.state/gui/*.json`（tmp + rename 原子替换）。
  * 节流：同一 tick 内的多次请求合并成一次收集、每个受影响的文件只写一遍；写入串行，进行中再来的请求排到下一轮。
  * 视图是派生缓存，写失败只记日志，不影响触发它的操作。
+ * 卸载（dispose）后不再写：之后的请求直接返回，排队未开始的丢弃，进行中的那次写完才返回。
  */
 export class ViewWriter {
   private readonly dir: string
@@ -61,6 +62,7 @@ export class ViewWriter {
   private workspaceMap: Record<string, string> | undefined
   private scheduled: Promise<void> | undefined
   private tail: Promise<void> = Promise.resolve()
+  private disposed = false
   private readonly log: MemoryLogger
 
   constructor(private readonly opts: { memoryRoot: string; collect: () => Promise<GlobalViews>; log?: MemoryLogger }) {
@@ -70,26 +72,38 @@ export class ViewWriter {
 
   /** 请求重写这些全局视图（缺省四个都写）。 */
   request(views: readonly GlobalViewName[] = GLOBAL_VIEW_NAMES): Promise<void> {
+    if (this.disposed) return Promise.resolve()
     for (const v of views) this.queued.add(v)
     return this.schedule()
   }
 
   /** 请求写一个会话的视图；同一 tick 内同一会话以最后一份为准。 */
   requestSession(view: SessionView): Promise<void> {
+    if (this.disposed) return Promise.resolve()
     this.sessions.set(view.sessionId, view)
     return this.schedule()
   }
 
   /** 记一笔会话归属（原始 cwd → 服务端解析出的项目）；和已落盘的一样就不写。 */
   requestWorkspace(cwd: string, workspacePath: string): Promise<void> {
-    if (this.workspaceMap?.[cwd] === workspacePath && !this.cwds.has(cwd)) return Promise.resolve()
+    if (this.disposed || (this.workspaceMap?.[cwd] === workspacePath && !this.cwds.has(cwd))) return Promise.resolve()
     this.cwds.set(cwd, workspacePath)
     return this.schedule()
   }
 
   /** 全量重写入口：不等节流，排在进行中的写入之后立即收集并写出四个全局视图。 */
   rewriteAll(): Promise<void> {
+    if (this.disposed) return Promise.resolve()
     return this.enqueue(() => this.writeGlobal(GLOBAL_VIEW_NAMES))
+  }
+
+  /** 插件卸载时调用：此后不再落盘；等进行中的写入结束再返回，免得旧实例的迟到写入盖掉新实例的视图。 */
+  dispose(): Promise<void> {
+    this.disposed = true
+    this.queued.clear()
+    this.sessions.clear()
+    this.cwds.clear()
+    return this.tail
   }
 
   private schedule(): Promise<void> {
@@ -109,7 +123,8 @@ export class ViewWriter {
   }
 
   private enqueue(job: () => Promise<void>): Promise<void> {
-    const run = this.tail.then(job).catch(err => this.log.warn('[plastic-memory] GUI 视图写入失败', err))
+    // 排队时还没卸载、轮到时已卸载的，跳过不写
+    const run = this.tail.then(() => this.disposed ? undefined : job()).catch(err => this.log.warn('[plastic-memory] GUI 视图写入失败', err))
     this.tail = run
     return run
   }

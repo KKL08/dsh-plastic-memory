@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
@@ -409,5 +409,53 @@ describe('视图写入', () => {
     ])
     const view = sessionViewSchema.parse(JSON.parse(await readFile(join(root, GUI_VIEW_DIR, sessionViewFile('s/1')), 'utf8')))
     expect(view.savedIds).toEqual(['mem_n'])
+  })
+
+  const sessionBase = {
+    sessionId: 's/1', frozenAt: T0, budget: 4000, overflowMode: 'relax' as const,
+    tokens: { workspace: 1, global: 2, fixed: 3 }, usedTokens: 3, injectedIds: [], omittedCount: 0, savedIds: [],
+  }
+  const listViews = () => readdir(join(root, GUI_VIEW_DIR)).catch(() => [] as string[])
+  const nextTicks = async () => { for (let i = 0; i < 3; i++) await new Promise<void>(resolve => setImmediate(resolve)) }
+
+  it('卸载：等进行中的写入落完才返回；排队未开始的丢弃，之后的请求不再写', async () => {
+    const h = harness()
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let collects = 0
+    const writer = new ViewWriter({ memoryRoot: root, collect: async () => { collects++; await gate; return collectGlobalViews(h.sourceDeps) } })
+    const inFlight = writer.rewriteAll()
+    // 排在进行中那次之后：一次节流写、一次全量重写
+    void writer.request(['pending'])
+    void writer.rewriteAll()
+    await nextTicks()
+    expect(collects).toBe(1)
+
+    let disposed = false
+    const disposing = writer.dispose().then(() => { disposed = true })
+    await nextTicks()
+    expect(disposed).toBe(false)
+    release()
+    await disposing
+    await inFlight
+    expect((await listViews()).sort()).toEqual(Object.values(GUI_VIEW_FILES).sort())
+
+    await expect(writer.requestSession(buildSessionView(sessionBase))).resolves.toBeUndefined()
+    await expect(writer.requestWorkspace('/w/app', '/w/app')).resolves.toBeUndefined()
+    await expect(writer.request()).resolves.toBeUndefined()
+    await expect(writer.rewriteAll()).resolves.toBeUndefined()
+    await nextTicks()
+    expect(collects).toBe(1)
+    expect((await listViews()).sort()).toEqual(Object.values(GUI_VIEW_FILES).sort())
+  })
+
+  it('卸载：同一 tick 内刚请求、还没开始的写入整批丢弃', async () => {
+    const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') } })
+    void writer.request(['library'])
+    void writer.requestSession(buildSessionView(sessionBase))
+    void writer.requestWorkspace('/w/app', '/w/app')
+    await writer.dispose()
+    await nextTicks()
+    expect(await listViews()).toEqual([])
   })
 })

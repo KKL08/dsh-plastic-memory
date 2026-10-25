@@ -47,9 +47,13 @@ class HostKvTable<T = unknown> {
   async delete(key: string) { return this.map.delete(key) }
 }
 
+/** 本文件建出的全部替身 ctx 的卸载入口：afterEach 先卸载插件、等它的写入收尾，再删临时目录。 */
+const liveCtxs: Array<() => Promise<void>> = []
+
 /**
  * projections：ctx.get('sessionProjections') 给出的注册表（缺省 = 服务缺席）。inject 仿 cordis 的
  * ctx.inject(deps, cb)：依赖齐了才同步回调、把服务放进 child；registerProjection=false 模拟回调始终没触发。
+ * 回调返回的 disposer 记下来，dispose() 仿插件卸载逆序逐个 await。
  */
 function mockCtx(opts: { projections?: SessionProjectionRegistry; registerProjection?: boolean; storageDomain?: boolean; commands?: { register(def: unknown): () => void } } = {}) {
   const registered: string[] = []
@@ -88,6 +92,9 @@ function mockCtx(opts: { projections?: SessionProjectionRegistry; registerProjec
       }
     },
   }
+  const disposers: Array<() => unknown> = []
+  const dispose = async () => { for (const d of disposers.splice(0).reverse()) await d() }
+  liveCtxs.push(dispose)
   return {
     registered, contexts, contextDefs, variables, listeners, llmRequests, llmScript, tables, domain,
     tools: { register: (def: { name: string }) => { registered.push(def.name); return () => { registered.splice(registered.indexOf(def.name), 1) } } },
@@ -105,13 +112,15 @@ function mockCtx(opts: { projections?: SessionProjectionRegistry; registerProjec
         : name === 'storageDomain' && opts.storageDomain === true ? storageDomain
           : undefined),
     // 按依赖名分发，像 cordis 一样只在依赖的服务都在时才回调
-    inject: (deps: string[], callback: (child: Record<string, unknown>) => void) => {
+    inject: (deps: string[], callback: (child: Record<string, unknown>) => unknown) => {
+      const collect = (dispose: unknown) => { if (typeof dispose === 'function') disposers.push(dispose as () => unknown) }
       if (deps.includes('sessionProjections') && opts.projections !== undefined && opts.registerProjection !== false) {
-        callback({ sessionProjections: opts.projections })
+        collect(callback({ sessionProjections: opts.projections }))
       }
-      if (deps.includes('commands') && opts.commands !== undefined) callback({ commands: opts.commands })
+      if (deps.includes('commands') && opts.commands !== undefined) collect(callback({ commands: opts.commands }))
       return () => {}
     },
+    dispose,
   }
 }
 
@@ -140,10 +149,9 @@ async function makeTmpRoot(): Promise<string> {
   tmpDirs.push(dir)
   return dir
 }
-// 视图写入是旁路（不 await），用例结束时可能还在往 .state/gui 落文件，rm 遍历到一半会撞 ENOTEMPTY：
-// 清理本身允许重试，不影响任何断言
 afterEach(async () => {
-  await Promise.all(tmpDirs.splice(0).map(d => rm(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })))
+  await Promise.all(liveCtxs.splice(0).map(dispose => dispose()))
+  await Promise.all(tmpDirs.splice(0).map(d => rm(d, { recursive: true, force: true })))
 })
 
 /** 同一 memoryRoot 上的另一个侧表实例：用例经它预置或读回插件落在 .state/ 的数据（文件是唯一真相）。 */
@@ -334,6 +342,57 @@ describe('GUI 命令接线', () => {
     const { kind, body } = await exec('/memory ping')
     expect(kind).toBe('error')
     expect(body).toMatchObject({ ok: false, code: 'invalid-args' })
+  })
+
+  it('插件卸载：等进行中的视图写入落完才算卸载完，之后不再有视图落盘', async () => {
+    const memoryRoot = await makeTmpRoot()
+    const ctx = mockCtx({ commands: { register: () => () => {} } })
+    await apply({ ...ctx, logger: { info() {}, warn() {}, error() {} } } as never, new Config({ memoryRoot } as never))
+    const guiFiles = async () => {
+      const dir = join(memoryRoot, GUI_VIEW_DIR)
+      const names = (await readdir(dir).catch(() => [] as string[])).sort()
+      return Promise.all(names.map(async name => [name, await readFile(join(dir, name), 'utf8')]))
+    }
+    // 配置热生效触发的全量重写：让出一个微任务，它已开始收集（还没落盘），这时开始卸载
+    const rewriting = ctx.listeners.get('loader/volatile-update')!([['governance', 'enabled']]) as Promise<void>
+    await Promise.resolve()
+    await ctx.dispose()
+    const atDispose = await guiFiles()
+    expect(atDispose.map(([name]) => name).sort()).toEqual(Object.values(GUI_VIEW_FILES).sort())
+    // 卸载后的事件不再写视图
+    ctx.listeners.get('session/created')!({ header: { id: 'sess-late' } })
+    await rewriting
+    for (let i = 0; i < 3; i++) await new Promise<void>(resolve => setImmediate(resolve))
+    expect(await guiFiles()).toEqual(atDispose)
+  })
+
+  it('卸载契约（真 cordis）：inject 回调返回的异步 disposer，重启（改配置）与删插件（热重载）都先 await 完它', async () => {
+    const host = new Context()
+    host.provide('commands' as never, {} as never)
+    const order: string[] = []
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let applies = 0
+    const probe = {
+      name: 'probe',
+      apply(p: Context) {
+        const n = ++applies
+        order.push(`apply ${n}`)
+        p.inject(['commands' as never], () => async () => { order.push(`dispose ${n}`); await gate; order.push(`disposed ${n}`) })
+      },
+    }
+    const fiber = await host.plugin(probe)
+    const restarting = fiber.restart()
+    for (let i = 0; i < 3; i++) await new Promise<void>(resolve => setImmediate(resolve))
+    expect(order).toEqual(['apply 1', 'dispose 1'])
+    release()
+    await restarting
+    expect(order).toEqual(['apply 1', 'dispose 1', 'disposed 1', 'apply 2'])
+    // 热重载先删插件、await 旧 fiber 再装新实现：await 返回时 disposer 已跑完
+    host.registry.delete(probe)
+    await fiber.await()
+    expect(order.slice(-2)).toEqual(['dispose 2', 'disposed 2'])
+    await host.fiber.dispose()
   })
 
   it('宿主没有 commands（旧宿主）：apply 照常完成，不注册、不写 .state/', async () => {
