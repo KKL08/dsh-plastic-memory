@@ -167,9 +167,9 @@ All notable changes to this project are documented here. The format follows
   writing tool including `memory_scan` is refused with `subagent-readonly`,
   and memories are still injected as usual.
 - `memory_health` also lists quarantined files and directory-level problems:
-  duplicate ids (the newest copy wins and the others stay until you remove
-  them), workspace directories without a `.workspace` marker, unreadable or
-  empty directories.
+  duplicate ids (the newest copy wins, a deleted copy never hides one still
+  in use, and the others stay until you remove them), workspace directories
+  without a `.workspace` marker, unreadable or empty directories.
 - `pnpm host:contract` now also checks that a file written straight into the
   memory directory is injected into the next session (H15) and that the
   host's grep tool finds top-level memories but nothing under `.archive/`
