@@ -121,6 +121,17 @@ describe('待处理：各类卡', () => {
     expect(screen.getByRole('button', { name: '提升 blog 里的这条' })).toHaveAttribute('title', '正在读取设置…')
   })
 
+  it('别的项目里的记忆：卡上元信息写项目名，不写「本项目」；本项目的照旧写「本项目」', () => {
+    const other: PendingItem = { ...promote, memory: memory({ id: 'p2', workspacePath: '/w/blog' }) } as PendingItem
+    const cross: PendingItem = { ...horizontal, right: memory({ id: 'b2', content: '博客里 mock 数据库。', workspacePath: '/w/blog' }) } as PendingItem
+    const { container } = setup([other, cross])
+    const metas = [...container.querySelectorAll('.pm-mc-meta')].map(el => el.textContent)
+    expect(metas).toHaveLength(3)
+    expect(metas[0]).toMatch(/·blog·/)
+    expect(metas[1]).toMatch(/·本项目·/)
+    expect(metas[2]).toMatch(/·blog·/)
+  })
+
   it('候选是否在别的项目：按会话归属判断（对照里的软链接、项目子目录都算本项目；嵌套子项目里的会话看外层的记忆算别的项目）', () => {
     const check = (session: { kind: 'ready'; sessionId: string; cwd: string; workspaces?: Record<string, string> }, heading: string) => {
       const gateway = createFakeGateway({ session, config, views: { pending: view(promote), health: scannedHealth(NOW) } })
@@ -297,6 +308,12 @@ describe('待处理：确认收起后的键盘焦点', () => {
     button.focus()
     await act(async () => { fireEvent.click(button) })
   }
+
+  it('不用确认的动作：卡片换成结果卡后焦点落到结果卡的「撤销」', async () => {
+    setup([promote])
+    await press(screen.getByRole('button', { name: '提升为全局' }))
+    await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
+  })
 
   it('密钥卡：「取消」回到「彻底删除…」；确认删除后落到原位的结果卡上', async () => {
     setup([secret, promote])

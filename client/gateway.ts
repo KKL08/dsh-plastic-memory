@@ -68,8 +68,10 @@ export interface MemoryGateway {
   useCurrentWorkspace(): CurrentWorkspace
   /** hook：订阅一份视图，版本变化再读。 */
   useView<N extends ViewName>(session: BorrowedSession, name: N): ViewState<ViewMap[N]>
-  /** 执行一条 `/memory` 命令，结果按契约解析；宿主或解析层面的失败折成 `failed`。 */
+  /** 执行一条 `/memory` 命令，结果按契约解析；宿主或解析层面的失败折成 `failed`。删除、恢复成功后记进删除状态（见 useDeletions）。 */
   execute(sessionId: string, command: MemoryCommand): Promise<MemoryCommandResult>
+  /** hook：删过的记忆（见 createDeletionStore），各处显示同一条记忆时读它。 */
+  useDeletions(): Deletions
   /** hook：插件配置里界面要用的几项；宿主还没给出（或不服务这份配置）时为 undefined。 */
   useConfig(): PluginConfig | undefined
   /** 写一个配置字段（`configForms.set`，单字段快捷写入）；宿主接受为 true。 */
@@ -86,6 +88,62 @@ export interface PluginConfig {
   snapshotOverflow: Extract<PendingItem, { kind: 'overflow' }>['mode']
   governanceEnabled: boolean
   globalPromoteTarget: 'plugin-global' | 'agents-md'
+}
+
+/** 删过的记忆 id → 删法：soft 进了最近删除、可恢复；hard 是彻底删除。恢复后去掉。 */
+export type Deletions = ReadonlyMap<string, 'soft' | 'hard'>
+
+/**
+ * 删除状态，全部记忆、最近删除、右侧栏、对话交付卡显示同一条记忆时都读这一份，删除后不会有的地方还留着删除按钮。两个来源：
+ * 1. 经本网关发出的 forget / hard-delete / restore 成功后记一笔，不等视图刷新。
+ * 2. 读到的视图：在最近删除里、全部记忆里又没有在用副本的，算软删（对话里 agent 自己删的也在这里）。别层同 id 副本还在用时
+ *    删掉的那份也列在最近删除里，所以要两份视图都读到过才判断。只认这种正面证据：视图不带生成时刻，
+ *    「两份视图里都没有」分不清是彻底删了还是刚记下视图还没写，不据此判彻底删除。
+ * 第 1 条记的软删 / 恢复在视图跟上之前优先（视图可能还是动作之前的），视图确认后就去掉，之后以视图为准；彻底删除一直记着。
+ * 页面关掉就没了。
+ */
+export function createDeletionStore() {
+  /** 经本网关的动作，视图确认前优先。 */
+  const local = new Map<string, 'soft' | 'hard' | 'restored'>()
+  /** 最近一次读到的两份视图：最近删除里的 id、全部记忆里在用的 id。 */
+  let deletedIds: ReadonlySet<string> | undefined
+  let activeIds: ReadonlySet<string> | undefined
+  /** 视图证明是软删的 id。 */
+  let viewSoft: ReadonlySet<string> = new Set()
+  let state: Deletions = new Map()
+  const listeners = new Set<() => void>()
+  const publish = () => {
+    const next = new Map<string, 'soft' | 'hard'>()
+    for (const id of viewSoft) next.set(id, 'soft')
+    for (const [id, how] of local) {
+      if (how === 'restored') next.delete(id)
+      else next.set(id, how)
+    }
+    if (next.size === state.size && [...next].every(([id, how]) => state.get(id) === how)) return
+    state = next
+    for (const fn of listeners) fn()
+  }
+  return {
+    get: () => state,
+    subscribe(fn: () => void) { listeners.add(fn); return () => { listeners.delete(fn) } },
+    record(command: MemoryCommand, result: MemoryCommandResult) {
+      if (!result.ok || (command.cmd !== 'forget' && command.cmd !== 'hard-delete' && command.cmd !== 'restore')) return
+      local.set(command.memoryId, command.cmd === 'forget' ? 'soft' : command.cmd === 'hard-delete' ? 'hard' : 'restored')
+      publish()
+    },
+    /** 读到一份最近删除或全部记忆视图：重算视图证明的软删，去掉视图已经确认的本地记录。 */
+    settle(view: { name: 'deleted'; data: DeletedView } | { name: 'library'; data: LibraryView }) {
+      if (view.name === 'deleted') deletedIds = new Set(view.data.items.map(item => item.memory.id))
+      else activeIds = new Set(view.data.layers.flatMap(layer => layer.items.map(memory => memory.id)))
+      if (deletedIds === undefined || activeIds === undefined) return
+      const active = activeIds
+      viewSoft = new Set([...deletedIds].filter(id => !active.has(id)))
+      for (const [id, how] of local) {
+        if ((how === 'soft' && viewSoft.has(id)) || (how === 'restored' && !viewSoft.has(id))) local.delete(id)
+      }
+      publish()
+    },
+  }
 }
 
 const GatewayContext = createContext<MemoryGateway | null>(null)
@@ -361,7 +419,7 @@ interface ReadState<V> { key: string; trigger: string; view: ViewState<V> }
 export type BindGateway = (props: RootStandardProps) => MemoryGateway
 
 /**
- * 宿主网关。共享状态（memoryRoot）在外层闭包里；每个插件实例只建一份（apply 里），所有插槽根共用，
+ * 宿主网关。共享状态（memoryRoot、删除状态）在外层闭包里；每个插件实例只建一份（apply 里），所有插槽根共用，
  * 每个插槽根组件用自己的标准 props 绑定：`const gateway = useMemo(() => bind(props), [props.useSessions, props.useResource])`。
  */
 export function createHostGateway(ctx: HostContext): BindGateway {
@@ -372,8 +430,12 @@ export function createHostGateway(ctx: HostContext): BindGateway {
       return { ok: false, error: { code: 'thrown', message: String(err) } }
     }
   }
-  const execute: MemoryGateway['execute'] = async (sessionId, command) =>
-    decodeExecution(command.cmd, await run(sessionId, encodeMemoryCommand(command)))
+  const deletions = createDeletionStore()
+  const execute: MemoryGateway['execute'] = async (sessionId, command) => {
+    const result = decodeExecution(command.cmd, await run(sessionId, encodeMemoryCommand(command)))
+    deletions.record(command, result)
+    return result
+  }
   const root = createRootStore(run)
   // configForms 是可选服务：就位时记下，离开时清掉（根上下文没 inject 它，不能直接读）
   let configForms: ConfigFormsService | undefined
@@ -422,6 +484,8 @@ export function createHostGateway(ctx: HostContext): BindGateway {
           const view: ViewState<ViewMap[N]> = r.ok
             ? parseView(name, r.value.text)
             : r.error.code === 'workspace-file/not-found' ? { status: 'missing' } : { status: 'error', message: `${r.error.code}: ${r.error.message}` }
+          if (view.status === 'ready' && name === 'deleted') deletions.settle({ name, data: view.data as DeletedView })
+          if (view.status === 'ready' && name === 'library') deletions.settle({ name, data: view.data as LibraryView })
           setRead({ key, trigger, view })
         }, (err: unknown) => { if (live) setRead({ key, trigger, view: { status: 'error', message: String(err) } }) })
         return () => { live = false }
@@ -456,6 +520,9 @@ export function createHostGateway(ctx: HostContext): BindGateway {
 
     return {
       execute,
+      useDeletions() {
+        return useSyncExternalStore(deletions.subscribe, deletions.get)
+      },
       useConfig() {
         const { get, subscribe } = config()
         const snapshot = useSyncExternalStore(subscribe, get)

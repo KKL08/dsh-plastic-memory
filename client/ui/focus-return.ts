@@ -7,6 +7,7 @@
  *    「已彻底删除」那行说明）；这一层找不到就往外一层。只在插件自己的容器里找，不越过 body。
  * 3. 回到控件后再盯一会儿：确认里点的是「继续处理」「彻底删除」，那一行往往等视图刷新才消失，消失时按第 2 条接住焦点；
  *    焦点被用户挪走后就不再管。
+ * 4. 不经确认的行内动作（直接删除、恢复、提升…）同样处理：动作发出时盯住焦点所在的控件（keepFocusInPlace），按第 3 条接住。
  */
 import { useLayoutEffect, useState, type RefObject } from 'react'
 
@@ -96,6 +97,17 @@ function watch(el: HTMLElement): void {
   stopWatching = stop
 }
 
+/** 开着的行内确认：收起后的焦点归 useReturnFocus 管，keepFocusInPlace 不插手。 */
+const confirmGroups = new Set<HTMLElement>()
+
+/** 行内动作发出时调用（见文件头第 4 条）。焦点不在控件上、或在行内确认里时什么都不做。 */
+export function keepFocusInPlace(): void {
+  const active = typeof document === 'undefined' ? null : document.activeElement
+  if (!(active instanceof HTMLElement) || active === active.ownerDocument.body) return
+  if ([...confirmGroups].some(group => group.contains(active))) return
+  watch(active)
+}
+
 function returnFocus(spot: Spot): void {
   if (!isFocusFree(spot.el.ownerDocument)) return
   const target = resolve(spot)
@@ -118,7 +130,9 @@ export function useReturnFocus(group: RefObject<HTMLElement | null>): void {
     const el = group.current
     if (el === null) return
     const spot = opener ?? spotOf(el)
+    confirmGroups.add(el)
     return () => {
+      confirmGroups.delete(el)
       // 卸载时确认的节点还没移除，焦点在不在里面看得出来
       const active = el.ownerDocument.activeElement
       if (!isFocusFree(el.ownerDocument) && !el.contains(active)) return

@@ -51,6 +51,7 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
   const [position, setPosition] = useState<CSSProperties | null>(null)
   const rootRef = useRef<HTMLSpanElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
   const open = position !== null && visible
   const close = () => { setPosition(null) }
 
@@ -61,7 +62,13 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
       if (rootRef.current?.contains(target) || panelRef.current?.contains(target)) return
       setPosition(null)
     }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setPosition(null) }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      // 焦点在弹层里时收起后还给按钮，不让它掉到 body
+      const isInside = panelRef.current?.contains(document.activeElement) ?? false
+      setPosition(null)
+      if (isInside) triggerRef.current?.focus()
+    }
     document.addEventListener('pointerdown', onPointer, true)
     document.addEventListener('keydown', onKey)
     return () => {
@@ -102,6 +109,7 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
   return (
     <span ref={rootRef} className="pm-composer">
       <button
+        ref={triggerRef}
         type="button"
         className="pm-composer-trigger"
         aria-label={t('composer.button')}

@@ -290,6 +290,23 @@ describe('SidebarTab 跨项目确认', () => {
   })
 })
 
+describe('SidebarTab 冲突对方在别的项目', () => {
+  it('那一方的元信息写项目名；本项目这一方写「本项目」，不再两边都不写作用域', () => {
+    const other = memory({ id: 'p2', type: 'preference', workspacePath: '/w/blog', content: '测试里 mock 数据库就行。' })
+    const { container } = setup({ library: library(pref, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending({ ...conflict, right: other } as PendingItem) })
+    const metas = [...container.querySelectorAll('.pm-conflict .pm-mc-meta')].map(el => el.textContent)
+    expect(metas).toHaveLength(2)
+    expect(metas[0]).toMatch(/·本项目·/)
+    expect(metas[1]).toMatch(/·blog·/)
+  })
+
+  it('两方都在本项目：照旧不写作用域（面包屑已经交代）', () => {
+    const { container } = setup({ library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending(conflict) })
+    const metas = [...container.querySelectorAll('.pm-conflict .pm-mc-meta')].map(el => el.textContent)
+    expect(metas.some(text => /本项目|blog/.test(text ?? ''))).toBe(false)
+  })
+})
+
 describe('SidebarTab 就地裁决：和基线冲突', () => {
   it('带入的记忆和基线冲突：冲突卡挂在它的组里，写明基线不会被删除；以基线为准发 keep-right，结果留原位可撤销', async () => {
     const { gateway } = setup({ library: library(pref, proj), session: snapshot({ injectedIds: ['p1', 'j1'] }), pending: pending(vertical) })
@@ -356,6 +373,17 @@ describe('SidebarTab 确认收起后的键盘焦点', () => {
     await act(async () => { fireEvent.click(button) })
   }
 
+  it('不用确认的删除：这一行没了焦点落到下一条的删除按钮', async () => {
+    const one = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
+    const two = memory({ id: 'n2', type: 'knowledge', content: '周报周五发。' })
+    setup({ library: library(pref, proj, glob, one, two), session: snapshot({ savedIds: ['n1', 'n2'] }), pending: pending() })
+    const saved = within(screen.getByRole('region', { name: '这次对话新记的' }))
+    const [first] = saved.getAllByRole('button', { name: '删除这条记忆' })
+    await press(first!)
+    expect(saved.queryByText('报销截止每月 25 日。')).toBeNull()
+    await waitFor(() => { expect(saved.getByRole('button', { name: '删除这条记忆' })).toHaveFocus() })
+  })
+
   it('含密钥确认：「取消」回到删除按钮；彻底删除后落到原位那行说明上', async () => {
     const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
     setup(
@@ -371,6 +399,21 @@ describe('SidebarTab 确认收起后的键盘焦点', () => {
     await press(del)
     await press(saved.getByRole('button', { name: '彻底删除' }))
     await waitFor(() => { expect(saved.getByText('已彻底删除。如果它是真的凭证，记得去换一个新的。')).toHaveFocus() })
+  })
+
+  it('彻底删除的是最后一条记忆：「还没有记忆」出来后那行说明还在，焦点落在它上面', async () => {
+    const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
+    const { gateway } = setup(
+      { library: library(fresh), session: snapshot({ injectedIds: [], savedIds: ['n1'] }), pending: pending() },
+      command => command.cmd === 'forget' ? { ok: false, cmd: command.cmd, code: 'has-secret' } : { ok: true, cmd: command.cmd, memoryIds: ['n1'] },
+    )
+    const saved = within(screen.getByRole('region', { name: '这次对话新记的' }))
+    await press(saved.getByRole('button', { name: '删除这条记忆' }))
+    await press(saved.getByRole('button', { name: '彻底删除' }))
+    act(() => { gateway.setView('library', library()) })
+    expect(screen.getByText('还没有记忆')).toBeInTheDocument()
+    const note = screen.getByText('已彻底删除。如果它是真的凭证，记得去换一个新的。')
+    await waitFor(() => { expect(note).toHaveFocus() })
   })
 
   it('跨项目确认：「取消」回到裁决按钮；「继续处理」裁决完落到结果的「撤销」', async () => {

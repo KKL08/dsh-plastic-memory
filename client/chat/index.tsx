@@ -11,7 +11,7 @@ import { openMemoryPage, type NavStore } from '../nav.ts'
 import { PanelShell } from '../ui/PanelShell.tsx'
 import { MemoryToolRow, type MemoryToolViewProps } from './MemoryToolRow.tsx'
 import { SAVED_TURN_KEY, savedTurnDefinition, type SavedTurnData, type SavedTurnDefinition } from './saved-turn.ts'
-import { SavedMemoriesCard, savedMemoriesCardCss, type DeletedRows } from './SavedMemoriesCard.tsx'
+import { SavedMemoriesCard, savedMemoriesCardCss } from './SavedMemoriesCard.tsx'
 import { MEMORY_TOOLS } from './tool-summary.ts'
 
 /** 宿主 TurnTailOwnerProps 的结构子集（turn.data 只读本插件的 key）。 */
@@ -44,7 +44,6 @@ function createToolView(ctx: HostContext) {
 }
 
 function createTurnTail(ctx: HostContext, nav: NavStore, bind: BindGateway) {
-  const deleted: DeletedRows = new Map()
   const openDetail = (target: Parameters<typeof openMemoryPage>[2]) => openMemoryPage(ctx, nav, target)
   return function MemoryTurnTail(props: TurnTailProps) {
     const source = props.turn.data.source(SAVED_TURN_KEY)
@@ -57,7 +56,7 @@ function createTurnTail(ctx: HostContext, nav: NavStore, bind: BindGateway) {
     if (saved.length === 0) return null
     return (
       <PanelShell gateway={gateway} t={t} extraCss={savedMemoriesCardCss}>
-        <SavedMemoriesCard sessionId={props.sessionId} cwd={cwd} saved={saved} now={Date.now()} openDetail={openDetail} deleted={deleted} />
+        <SavedMemoriesCard sessionId={props.sessionId} cwd={cwd} saved={saved} now={Date.now()} openDetail={openDetail} />
       </PanelShell>
     )
   }

@@ -8,6 +8,7 @@ import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { useT } from '../i18n.tsx'
 import { useNavTarget, type NavStore, type NavTarget } from '../nav.ts'
 import { CrossConfirm, crossConfirmCss, SecretDeleteConfirm } from '../pending/action.tsx'
+import { keepFocusInPlace } from '../ui/focus-return.ts'
 
 type LabelledView = ViewState<{ typeLabels?: Readonly<Record<string, string>> }>
 
@@ -113,6 +114,7 @@ export function useRowActions(session: BorrowedSession) {
   }
   const run = async (memoryId: string, command: MemoryCommand, okText: OkText) => {
     if (sessionId === undefined) return
+    keepFocusInPlace()
     mark(memoryId, true)
     const result = await gateway.execute(sessionId, command)
     mark(memoryId, false)

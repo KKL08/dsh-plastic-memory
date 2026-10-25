@@ -193,6 +193,43 @@ describe('createHostGateway', () => {
   })
   afterEach(() => { localStorage.clear() })
 
+  it('删除状态在插槽根之间共用：一处 forget / hard-delete 成功，另一处读到；restore 后去掉；失败不记', async () => {
+    const bind = createHostGateway(fakeCtx())
+    const a = bind(props)
+    const b = bind({ ...props })
+    const { result } = renderHook(() => b.useDeletions())
+    const layer = { kind: 'workspace', workspacePath: '/w/app' } as const
+    await act(async () => { await a.execute('s1', { cmd: 'forget', memoryId: 'm1', layer }) })
+    await act(async () => { await a.execute('s1', { cmd: 'hard-delete', memoryId: 'm2', layer }) })
+    expect([...result.current]).toEqual([['m1', 'soft'], ['m2', 'hard']])
+    await act(async () => { await a.execute('s1', { cmd: 'restore', memoryId: 'm1', layer }) })
+    expect([...result.current]).toEqual([['m2', 'hard']])
+
+    const failing = createHostGateway(fakeCtx({ remote: { commands: { execute: vi.fn(async () => ({ ok: false as const, error: { code: 'x', message: 'x' } })) } } }))(props)
+    await act(async () => { await failing.execute('s1', { cmd: 'forget', memoryId: 'm3', layer }) })
+    const { result: other } = renderHook(() => failing.useDeletions())
+    expect(other.current.size).toBe(0)
+  })
+
+  it('读到的视图也进删除状态：在最近删除里、全部记忆里没有在用副本的算软删', async () => {
+    localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+    const deletedPath = '/h/memories/.state/gui/deleted.json'
+    const libraryPath = '/h/memories/.state/gui/library.json'
+    for (const path of [deletedPath, libraryPath]) resources[fileAddress('s1', path)] = { status: 'live', value: { absolutePath: path, version: 'v1' }, failure: undefined }
+    const card = (id: string) => ({ id, name: id, type: 'preference', scope: 'global' as const, summary: '', content: 'x', tags: [], createdAt: 1, updatedAt: 1, lastConfirmedAt: 1, filePath: '' })
+    // m8 在别层还有在用的同 id 副本：删掉的那份虽然列在最近删除里，不算删了
+    files[deletedPath] = JSON.stringify({ version: GUI_VIEW_VERSION, items: [{ memory: card('m9'), deletedAt: 1, purgeAt: 2 }, { memory: card('m8'), deletedAt: 1, purgeAt: 2 }] })
+    files[libraryPath] = JSON.stringify({ version: GUI_VIEW_VERSION, memoryRoot: '/h/memories', directoryIssues: [], layers: [{ layer: { kind: 'global' }, items: [card('m8')] }] })
+    const gateway = createHostGateway(fakeCtx())(props)
+    const { result } = renderHook(() => {
+      const session = gateway.useSession(undefined)
+      gateway.useView(session, 'deleted')
+      gateway.useView(session, 'library')
+      return gateway.useDeletions()
+    })
+    await waitFor(() => { expect([...result.current]).toEqual([['m9', 'soft']]) })
+  })
+
   it('首次：借会话发 info，缓存 memoryRoot，再发一次 refresh-views；资源仍停在 not-found 也直接读出视图', async () => {
     resources[fileAddress('s1', pendingPath)] = { status: 'failed', value: undefined, failure: { code: 'workspace-file/not-found', message: '' } }
     const gateway = createHostGateway(fakeCtx())(props)

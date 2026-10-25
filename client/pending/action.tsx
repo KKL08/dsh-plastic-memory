@@ -8,7 +8,7 @@ import type { MemoryCommand, MemoryCommandResult } from '../../src/gui/contract.
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, useT } from '../i18n.tsx'
 import { Button } from '../ui/Button.tsx'
-import { useReturnFocus } from '../ui/focus-return.ts'
+import { keepFocusInPlace, useReturnFocus } from '../ui/focus-return.ts'
 
 export type ActionState =
   | { kind: 'idle' }
@@ -35,6 +35,7 @@ export function useItemAction(session: BorrowedSession, onOk: (command: MemoryCo
   const [state, setState] = useState<ActionState>({ kind: 'idle' })
   const run = (command: MemoryCommand) => {
     if (session.kind !== 'ready') return
+    keepFocusInPlace()
     setState({ kind: 'busy' })
     void gateway.execute(session.sessionId, command).then((r) => {
       if (r.ok) { setState({ kind: 'idle' }); onOk(command, r); return }
@@ -75,7 +76,8 @@ export function CrossConfirm({ workspacePath, onCancel, onConfirm }: { workspace
     <ConfirmGroup label={t('pending.cross.confirm')}>
       <p className="pm-pending-text">{t('pending.cross.body', { name: baseName(workspacePath) })}</p>
       <div className="pm-pending-actions">
-        <Button onClick={onCancel}>{t('pending.cancel')}</Button>
+        {/* 焦点移进确认，停在不改动任何东西的「取消」上 */}
+        <Button autoFocus onClick={onCancel}>{t('pending.cancel')}</Button>
         <Button onClick={onConfirm}>{t('pending.cross.confirm')}</Button>
       </div>
     </ConfirmGroup>

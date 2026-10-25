@@ -31,6 +31,8 @@ export interface ConflictRulingProps {
   unavailable?: string | undefined
   typeLabel?: (type: string) => string
   hideScope?: boolean
+  /** 记忆在别的项目里时的项目名（见 MemoryCard 的 projectName）。 */
+  projectName?: (memory: MemoryCardData) => string | undefined
 }
 
 export function ConflictRuling(props: ConflictRulingProps) {
@@ -43,7 +45,7 @@ export function ConflictRuling(props: ConflictRulingProps) {
       <div className="pm-conflict-body">
         {memory === null
           ? <p className="pm-conflict-missing">{t('conflict.missing')}</p>
-          : <MemoryCard memory={memory} now={props.now} typeLabel={props.typeLabel?.(memory.type)} hideScope={props.hideScope} />}
+          : <MemoryCard memory={memory} now={props.now} typeLabel={props.typeLabel?.(memory.type)} hideScope={props.hideScope} projectName={props.projectName?.(memory)} />}
         {button}
       </div>
     </section>
@@ -93,6 +95,7 @@ export interface VerticalConflictRulingProps {
   unavailable?: string | undefined
   typeLabel?: (type: string) => string
   hideScope?: boolean
+  projectName?: (memory: MemoryCardData) => string | undefined
 }
 
 /** 记忆和基线冲突：宽版按钮靠右，窄版按钮一行靠左，后果说明都在按钮下面。 */
@@ -110,7 +113,7 @@ export function VerticalConflictRuling(props: VerticalConflictRulingProps) {
       <div className="pm-conflict-single">
         {props.memory === null
           ? <p className="pm-conflict-missing">{t('conflict.missing')}</p>
-          : <MemoryCard memory={props.memory} now={props.now} typeLabel={props.typeLabel?.(props.memory.type)} hideScope={props.hideScope} />}
+          : <MemoryCard memory={props.memory} now={props.now} typeLabel={props.typeLabel?.(props.memory.type)} hideScope={props.hideScope} projectName={props.projectName?.(props.memory)} />}
         <p className="pm-conflict-baseline">{t('conflict.vertical.baselineRef', { ref: props.baselineRef })}</p>
       </div>
       <div className="pm-conflict-buttons">

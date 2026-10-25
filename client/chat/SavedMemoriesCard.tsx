@@ -3,6 +3,7 @@
  * （软删 `/memory forget`，可撤销，不用红），删后原位留「已删除。14 天内也能在最近删除里找回。」和「撤销」；
  * 每条右下角「查看详情 ›」（次文字色、常规字重）打开记忆页「全部记忆」并定位到这一条（故事 41）。
  * 含密钥的记忆不能软删（服务端回 has-secret，什么都没动）：原位确认，「彻底删除」发 hard-delete，删后只留不可恢复的说明、没有撤销。
+ * 删没删读网关的删除状态：在右侧栏、全部记忆里删了同一条，这里也换成删后的样子。
  * 密钥不会出现在这里：记忆卡在 savedMemoryCard 里已遮盖，口径比视图宽（疑似密钥也遮，见 tool-summary.ts）。
  */
 import { useMemo, useState } from 'react'
@@ -13,17 +14,16 @@ import type { NavTarget } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { useTypeLabel } from '../library/shared.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
+import { keepFocusInPlace } from '../ui/focus-return.ts'
 import { TrashIcon } from '../ui/TrashIcon.tsx'
 import { crossConfirmCss, SecretDeleteConfirm } from '../pending/action.tsx'
 import type { SavedMemory } from './saved-turn.ts'
 
+/** 这一行自己的进行中 / 失败 / 等确认；删没删读网关的删除状态（别处删的也算，交付卡卸载重挂也还在）。 */
 type RowState =
-  | { kind: 'idle' } | { kind: 'busy' } | { kind: 'deleted' } | { kind: 'failed'; detail: string }
-  /** 等用户确认彻底删除（含密钥）；purged = 已彻底删除，不可撤销。 */
-  | { kind: 'secret' } | { kind: 'purged' }
-
-/** 删过的记忆 id → 删法：soft 可撤销，hard 是含密钥、已彻底删除。 */
-export type DeletedRows = Map<string, 'soft' | 'hard'>
+  | { kind: 'idle' } | { kind: 'busy' } | { kind: 'failed'; detail: string }
+  /** 等用户确认彻底删除（含密钥）。 */
+  | { kind: 'secret' }
 
 export interface SavedMemoriesCardProps {
   sessionId: string
@@ -33,48 +33,38 @@ export interface SavedMemoriesCardProps {
   now: number
   /** 打开记忆页（入口先写导航目标再切面板）。 */
   openDetail: (target: NavTarget) => void
-  /** 删过的记忆：交付卡随对话滚动会卸载重挂，删除状态留在这里。 */
-  deleted: DeletedRows
 }
 
-function SavedRow({ sessionId, item, now, deleted, typeLabel, onDetail }: {
+function SavedRow({ sessionId, item, now, typeLabel, onDetail }: {
   sessionId: string
   item: SavedMemory
   now: number
-  deleted: DeletedRows
   typeLabel: (type: string) => string
   onDetail: () => void
 }) {
   const t = useT()
   const gateway = useGateway()
   const id = item.memory.id
-  const [state, setState] = useState<RowState>(() => {
-    const how = deleted.get(id)
-    return how === 'hard' ? { kind: 'purged' } : how === 'soft' ? { kind: 'deleted' } : { kind: 'idle' }
-  })
+  const how = gateway.useDeletions().get(id)
+  const [state, setState] = useState<RowState>({ kind: 'idle' })
   const run = async (cmd: 'forget' | 'restore' | 'hard-delete') => {
     if (state.kind === 'busy') return
-    const before = state
+    keepFocusInPlace()
     setState({ kind: 'busy' })
     const result = await gateway.execute(sessionId, { cmd, memoryId: id, layer: layerOfMemory(item.memory) })
-    if (result.ok) {
-      if (cmd === 'restore') deleted.delete(id)
-      else deleted.set(id, cmd === 'hard-delete' ? 'hard' : 'soft')
-      setState(cmd === 'forget' ? { kind: 'deleted' } : cmd === 'hard-delete' ? { kind: 'purged' } : { kind: 'idle' })
-    } else if (cmd === 'forget' && result.code === 'has-secret') {
-      setState({ kind: 'secret' })
-    } else {
-      setState(before.kind === 'deleted' ? before : { kind: 'failed', detail: result.detail ?? result.code })
-    }
+    if (result.ok) setState({ kind: 'idle' })
+    else if (cmd === 'forget' && result.code === 'has-secret') setState({ kind: 'secret' })
+    // 撤销失败时那一行还是「已删除」，不另写原因
+    else setState(cmd === 'restore' ? { kind: 'idle' } : { kind: 'failed', detail: result.detail ?? result.code })
   }
-  if (state.kind === 'purged') {
+  if (how === 'hard') {
     return (
       <div className="pm-saved-row pm-saved-row--deleted" data-memory-id={id}>
         <p className="pm-saved-note" tabIndex={-1}>{t('pending.secret.deletedNotice')}</p>
       </div>
     )
   }
-  if (state.kind === 'deleted') {
+  if (how === 'soft' && state.kind !== 'busy') {
     return (
       <div className="pm-saved-row pm-saved-row--deleted" data-memory-id={id}>
         <p className="pm-saved-note">{t('chat.card.deleted')}</p>
@@ -108,7 +98,7 @@ function SavedRow({ sessionId, item, now, deleted, typeLabel, onDetail }: {
   )
 }
 
-export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail, deleted }: SavedMemoriesCardProps) {
+export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: SavedMemoriesCardProps) {
   const t = useT()
   const session = useMemo<BorrowedSession>(() => ({ kind: 'ready', sessionId, cwd }), [sessionId, cwd])
   const typeLabel = useTypeLabel(session)
@@ -128,7 +118,6 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail, dele
             sessionId={sessionId}
             item={item}
             now={now}
-            deleted={deleted}
             typeLabel={typeLabel}
             onDetail={() => { detail(item.memory) }}
           />

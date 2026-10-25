@@ -138,6 +138,16 @@ describe('跳转', () => {
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByRole('dialog')).toBeNull()
   })
+
+  it('焦点在弹层里时 Esc 收起，焦点回到「记忆」按钮', () => {
+    setup({ view: sessionView() })
+    openPanel()
+    const link = screen.getByRole('button', { name: '查看带入的记忆 ›' })
+    link.focus()
+    fireEvent.keyDown(link, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.getByRole('button', { name: '记忆' })).toHaveFocus()
+  })
 })
 
 describe('注册', () => {

@@ -23,6 +23,7 @@ import { EmptyState } from '../ui/EmptyState.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { TrashIcon } from '../ui/TrashIcon.tsx'
 import { CrossConfirm, crossConfirmCss, SecretDeleteConfirm } from '../pending/action.tsx'
+import { keepFocusInPlace } from '../ui/focus-return.ts'
 
 type Conflict = Extract<PendingItem, { kind: 'conflict-horizontal' }>
 type VerticalConflict = Extract<PendingItem, { kind: 'conflict-vertical' }>
@@ -75,8 +76,9 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const library = gateway.useView(session, 'library')
   const pending = gateway.useView(session, 'pending')
   const health = gateway.useView(session, 'health')
+  // 删过的记忆（这里、全部记忆或对话交付卡删的）：新记的列表里立刻去掉，不等视图刷新
+  const deletions = gateway.useDeletions()
   const [ruled, setRuled] = useState<readonly Ruled[]>([])
-  const [forgotten, setForgotten] = useState<ReadonlySet<string>>(new Set())
   const [purged, setPurged] = useState<ReadonlySet<string>>(new Set())
   const [secretId, setSecretId] = useState<string | undefined>(undefined)
   const [busy, setBusy] = useState<string | undefined>(undefined)
@@ -85,6 +87,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const [cross, setCross] = useState<{ id: string; workspacePath: string; command: MemoryCommand; onOk: () => void } | undefined>(undefined)
 
   const run = async (id: string, command: MemoryCommand, onOk: () => void) => {
+    keepFocusInPlace()
     setBusy(id)
     setFailure(undefined)
     setCross(undefined)
@@ -117,7 +120,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   }
   const forget = (memory: MemoryCardData) => {
     const memoryId = memory.id
-    void run(memoryId, { cmd: 'forget', memoryId, layer: layerOfMemory(memory) }, () => { setForgotten(prev => new Set(prev).add(memoryId)) })
+    void run(memoryId, { cmd: 'forget', memoryId, layer: layerOfMemory(memory) }, () => {})
   }
   const hardDelete = (memoryId: string, memory: MemoryCardData | undefined) => {
     void run(memoryId, { cmd: 'hard-delete', memoryId, layer: memory && layerOfMemory(memory) }, () => { setPurged(prev => new Set(prev).add(memoryId)) })
@@ -141,8 +144,15 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
       if (current === undefined || item.updatedAt > current.updatedAt || (item.updatedAt === current.updatedAt && isOwn)) byId.set(item.id, item)
     }
   }
+  // 彻底删除的那条视图里已经没有了，按 id 原位留一行说明（删的是最后一条时留在空状态上面，也是焦点的落点）
+  const purgedNote = (id: string) => <p key={id} className="pm-side-hint" tabIndex={-1}>{t('pending.secret.deletedNotice')}</p>
   if (globalCount === 0 && projectCount === 0) {
-    return <div className="pm-side"><EmptyState variant="first" title={t('sidebar.empty.title')}>{t('sidebar.empty.body')}</EmptyState></div>
+    return (
+      <div className="pm-side">
+        {(snapshot?.savedIds ?? []).filter(id => purged.has(id)).map(purgedNote)}
+        <EmptyState variant="first" title={t('sidebar.empty.title')}>{t('sidebar.empty.body')}</EmptyState>
+      </div>
+    )
   }
 
   // 带入的记忆按类型分组；记忆有待决横向冲突（或刚裁决完）时，那张冲突卡占它的位置，另一方不再单独列
@@ -185,11 +195,10 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
       shown.add(id)
     }
   }
-  // 彻底删除的那条视图里已经没有了，按 id 原位留一行说明
-  const saved = (snapshot?.savedIds ?? []).filter(id => !forgotten.has(id))
+  const saved = (snapshot?.savedIds ?? [])
     .flatMap((id): Array<{ id: string; memory: MemoryCardData | undefined }> => {
       const memory = byId.get(id)
-      return purged.has(id) ? [{ id, memory: undefined }] : memory === undefined ? [] : [{ id, memory }]
+      return purged.has(id) ? [{ id, memory: undefined }] : memory === undefined || deletions.has(id) ? [] : [{ id, memory }]
     })
   const scope = ws === undefined ? undefined : { kind: 'workspace' as const, workspacePath: ws }
   const restPending = ws === undefined || pending.status !== 'ready'
@@ -215,6 +224,10 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
       : null
   }
   const isWaiting = (id: string) => busy === id || cross?.id === id || secretId === id
+  // 冲突对方可能在别的项目：那一方写项目名（这里的「本项目」是会话视图解析出的项目，和上面分层同一口径）
+  const projectName = (m: MemoryCardData) =>
+    m.scope === 'workspace' && m.workspacePath !== undefined && !samePath(m.workspacePath, ws) ? baseName(m.workspacePath) : undefined
+  const isOwnSide = (m: MemoryCardData | null) => m === null || m.scope === 'workspace' && projectName(m) === undefined
 
   // 会话快照冻结在插件本次加载之前 = 重启后还没重新带入
   const bootedAt = health.status === 'ready' ? health.data.bootedAt : undefined
@@ -252,7 +265,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
           <section className="pm-side-section" aria-label={t('sidebar.saved.title')}>
             <h2 className="pm-side-title">{t('sidebar.saved.title')}</h2>
             {saved.map(({ id, memory }) => memory === undefined
-              ? <p key={id} className="pm-side-hint" tabIndex={-1}>{t('pending.secret.deletedNotice')}</p>
+              ? purgedNote(id)
               : (
                 <div key={id} className="pm-side-saved">
                   <div className="pm-side-saved-card">{card(memory)}</div>
@@ -295,7 +308,8 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
                           right={item.right}
                           now={now}
                           typeLabel={label}
-                          hideScope={item.left?.scope !== 'global' && item.right?.scope !== 'global'}
+                          hideScope={isOwnSide(item.left) && isOwnSide(item.right)}
+                          projectName={projectName}
                           unavailable={isWaiting(item.decisionId) ? t('sidebar.action.busy') : undefined}
                           onRule={(verdict) => { rule(item, verdict) }}
                         />
