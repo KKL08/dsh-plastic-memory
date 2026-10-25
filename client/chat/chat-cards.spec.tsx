@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { ComponentType } from 'react'
-import { GUI_VIEW_VERSION, type LibraryView, type MemoryCommand, type MemoryCommandResult, type SessionView } from '../../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, type DeletedView, type LibraryView, type MemoryCommand, type MemoryCommandResult, type SessionView } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createHostGateway } from '../gateway.ts'
 import type { SessionListState } from '../host.ts'
@@ -329,6 +329,52 @@ describe('交付卡与其他界面共用删除状态', () => {
     })
     renderInShell(<SavedMemoriesCard sessionId="s1" cwd={WS} saved={[fresh()]} now={NOW} openDetail={() => {}} />, gateway)
     expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
+  })
+
+  describe('agent 在对话里彻底删除（两份视图里都没有了）', () => {
+    const emptyViews = (libraryAt: number | undefined, deletedAt = libraryAt): { library: LibraryView; deleted: DeletedView } => ({
+      library: { ...libraryView(), layers: [], ...(libraryAt === undefined ? {} : { generatedAt: libraryAt }) },
+      deleted: { version: GUI_VIEW_VERSION, items: [], ...(deletedAt === undefined ? {} : { generatedAt: deletedAt }) },
+    })
+    const render = (gateway: ReturnType<typeof createFakeGateway>) =>
+      renderInShell(<SavedMemoriesCard sessionId="s1" cwd={WS} saved={[fresh()]} now={NOW} openDetail={() => {}} />, gateway)
+
+    it('晚于记下时刻的新视图到了：换成不可恢复的说明，没有删除按钮', () => {
+      const gateway = createFakeGateway({ views: { library: libraryView(), deleted: { version: GUI_VIEW_VERSION, items: [], generatedAt: NOW - 10 } } })
+      render(gateway)
+      expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
+      const next = emptyViews(NOW + 1000)
+      act(() => { gateway.setView('library', next.library); gateway.setView('deleted', next.deleted) })
+      expect(chatCard().getByText(PURGED)).toBeInTheDocument()
+      expect(chatCard().queryByRole('button', { name: '删除这条记忆' })).toBeNull()
+    })
+
+    it('视图生成在记下之前（刚记下、视图还没写）：不判彻底删除', () => {
+      const views = emptyViews(NOW - 1000)
+      render(createFakeGateway({ views }))
+      expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
+      expect(chatCard().queryByText(PURGED)).toBeNull()
+    })
+
+    it('旧视图文件没有 generatedAt：不判彻底删除', () => {
+      render(createFakeGateway({ views: emptyViews(undefined) }))
+      expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
+    })
+
+    it('两份视图不是同一次收集写的：不判彻底删除', () => {
+      render(createFakeGateway({ views: emptyViews(NOW + 1000, NOW + 2000) }))
+      expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
+    })
+
+    it('交付卡里刚恢复、视图还没跟上：不判彻底删除', async () => {
+      const gateway = createFakeGateway({ views: { library: libraryView(), deleted: { version: GUI_VIEW_VERSION, items: [] } } })
+      render(gateway)
+      await act(async () => { fireEvent.click(chatCard().getByRole('button', { name: '删除这条记忆' })) })
+      await act(async () => { fireEvent.click(chatCard().getByRole('button', { name: '撤销' })) })
+      const next = emptyViews(NOW + 1000)
+      act(() => { gateway.setView('library', next.library); gateway.setView('deleted', next.deleted) })
+      expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
+    })
   })
 
   it('刚记下、视图里还没有这条：不当成已删除', () => {

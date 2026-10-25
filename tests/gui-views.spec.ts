@@ -284,6 +284,23 @@ describe('最近删除视图', () => {
   })
 })
 
+describe('视图生成时刻', () => {
+  it('全部记忆、最近删除带 generatedAt：同一次收集同一个时刻；没有这个字段的旧视图文件照样能解析', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_a', name: 'A' }))
+    h.setClock(T0 + 7000)
+    const { library, deleted } = await h.views()
+    expect(library.generatedAt).toBe(T0 + 7000)
+    expect(deleted.generatedAt).toBe(T0 + 7000)
+    expect(libraryViewSchema.parse(library)).toEqual(library)
+    expect(deletedViewSchema.parse(deleted)).toEqual(deleted)
+    const { generatedAt: _l, ...oldLibrary } = library
+    const { generatedAt: _d, ...oldDeleted } = deleted
+    expect(libraryViewSchema.parse(oldLibrary)).not.toHaveProperty('generatedAt')
+    expect(deletedViewSchema.parse(oldDeleted)).not.toHaveProperty('generatedAt')
+  })
+})
+
 describe('健康视图', () => {
   it('超限列为问题、不扣分：已忽略的仍列出；memory_health 同样报出', async () => {
     const h = harness()

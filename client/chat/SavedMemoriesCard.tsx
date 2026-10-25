@@ -3,7 +3,7 @@
  * （软删 `/memory forget`，可撤销，不用红），删后原位留「已删除。14 天内也能在最近删除里找回。」和「撤销」；
  * 每条右下角「查看详情 ›」（次文字色、常规字重）打开记忆页「全部记忆」并定位到这一条（故事 41）。
  * 含密钥的记忆不能软删（服务端回 has-secret，什么都没动）：原位确认，「彻底删除」发 hard-delete，删后只留不可恢复的说明、没有撤销。
- * 删没删读网关的删除状态：在右侧栏、全部记忆里删了同一条，这里也换成删后的样子。
+ * 删没删读网关的删除状态：在右侧栏、全部记忆里删了同一条，或 agent 在对话里删了它，这里也换成删后的样子。
  * 密钥不会出现在这里：记忆卡在 savedMemoryCard 里已遮盖，口径比视图宽（疑似密钥也遮，见 tool-summary.ts）。
  */
 import { useMemo, useState } from 'react'
@@ -45,7 +45,10 @@ function SavedRow({ sessionId, item, now, typeLabel, onDetail }: {
   const t = useT()
   const gateway = useGateway()
   const id = item.memory.id
-  const how = gateway.useDeletions().get(id)
+  // 记下的时刻取记忆卡上的（结果事件的时间）；没有就用这一行第一次出现的时刻。只有晚于它的视图才拿来判彻底删除
+  const [firstSeen] = useState(() => Date.now())
+  const savedAt = Number.isFinite(item.memory.updatedAt) && item.memory.updatedAt > 0 ? item.memory.updatedAt : firstSeen
+  const how = gateway.useDeletions().of(id, savedAt)
   const [state, setState] = useState<RowState>({ kind: 'idle' })
   const run = async (cmd: 'forget' | 'restore' | 'hard-delete') => {
     if (state.kind === 'busy') return

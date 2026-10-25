@@ -174,8 +174,15 @@ export const directoryIssueSchema = z.object({
   /** duplicate-id：读取时用的那份（path 是没用上的副本）。 */
   keptPath: z.string().optional(),
 })
+/**
+ * 视图生成时刻（毫秒）：这次收集开始、读记忆文件之前取，同一次收集写出的全部记忆与最近删除视图相同。
+ * 在它之前写下的记忆一定反映在视图里。可缺省：之前写出的视图文件没有它。
+ */
+const generatedAt = z.number().optional()
+
 export const libraryViewSchema = z.object({
   version,
+  generatedAt,
   /** 存储目录（绝对路径）。 */
   memoryRoot: z.string(),
   /** global 在前，项目按路径排序；每层只列 active 记忆，按 name 再 id 排序。 */
@@ -206,6 +213,7 @@ export const deletedItemSchema = z.object({
 /** 14 天内软删的记忆，按删除时间倒序。密钥是物理删除，不在这里。 */
 export const deletedViewSchema = z.object({
   version,
+  generatedAt,
   items: z.array(deletedItemSchema),
   /** 类型 id → 显示名（同全部记忆视图的 typeLabels），另含裁决对方的类型。可缺省，理由同上。 */
   typeLabels: z.record(z.string(), z.string()).optional(),
