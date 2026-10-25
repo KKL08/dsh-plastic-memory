@@ -90,37 +90,56 @@ export interface PluginConfig {
   globalPromoteTarget: 'plugin-global' | 'agents-md'
 }
 
-/** 删过的记忆 id → 删法：soft 进了最近删除、可恢复；hard 是彻底删除。恢复后去掉。 */
-export type Deletions = ReadonlyMap<string, 'soft' | 'hard'>
+/** 删除状态的一份快照：soft 进了最近删除、可恢复；hard 是彻底删除；undefined = 没删或看不出来。 */
+export interface Deletions {
+  /** savedAt：记下这条记忆的时刻；给了才可能按视图判彻底删除（见 createDeletionStore 第 3 条）。 */
+  of(id: string, savedAt?: number): 'soft' | 'hard' | undefined
+}
 
 /**
- * 删除状态，全部记忆、最近删除、右侧栏、对话交付卡显示同一条记忆时都读这一份，删除后不会有的地方还留着删除按钮。两个来源：
+ * 删除状态，全部记忆、最近删除、右侧栏、对话交付卡显示同一条记忆时都读这一份，删除后不会有的地方还留着删除按钮。三个来源：
  * 1. 经本网关发出的 forget / hard-delete / restore 成功后记一笔，不等视图刷新。
  * 2. 读到的视图：在最近删除里、全部记忆里又没有在用副本的，算软删（对话里 agent 自己删的也在这里）。别层同 id 副本还在用时
- *    删掉的那份也列在最近删除里，所以要两份视图都读到过才判断。只认这种正面证据：视图不带生成时刻，
- *    「两份视图里都没有」分不清是彻底删了还是刚记下视图还没写，不据此判彻底删除。
- * 第 1 条记的软删 / 恢复在视图跟上之前优先（视图可能还是动作之前的），视图确认后就去掉，之后以视图为准；彻底删除一直记着。
- * 页面关掉就没了。
+ *    删掉的那份也列在最近删除里，所以要两份视图都读到过才判断。
+ * 3. 彻底删除只在证据确凿时判：两份视图出自同一次收集（generatedAt 相同），晚于这条记忆记下的时刻，而两份里都没有它。
+ *    视图早于记下的时刻（刚记下、视图还没写）、两份不是同一次收集、旧视图文件没有 generatedAt，都不判。
+ * 第 1 条记的软删 / 恢复在视图确认之前优先（视图可能还是动作之前的）：软删要出现在最近删除里、恢复要重新出现在全部记忆里，
+ * 确认后去掉，之后以视图为准；有本地记录时不按第 3 条判；
+ * 彻底删除一直记着。页面关掉就没了。
  */
 export function createDeletionStore() {
   /** 经本网关的动作，视图确认前优先。 */
   const local = new Map<string, 'soft' | 'hard' | 'restored'>()
-  /** 最近一次读到的两份视图：最近删除里的 id、全部记忆里在用的 id。 */
-  let deletedIds: ReadonlySet<string> | undefined
-  let activeIds: ReadonlySet<string> | undefined
+  /** 最近一次读到的两份视图：最近删除里的 id、全部记忆里在用的 id，和各自的生成时刻。 */
+  let deleted: { ids: ReadonlySet<string>; at: number | undefined } | undefined
+  let library: { ids: ReadonlySet<string>; at: number | undefined } | undefined
   /** 视图证明是软删的 id。 */
   let viewSoft: ReadonlySet<string> = new Set()
-  let state: Deletions = new Map()
   const listeners = new Set<() => void>()
-  const publish = () => {
-    const next = new Map<string, 'soft' | 'hard'>()
-    for (const id of viewSoft) next.set(id, 'soft')
+  const snapshot = (): Deletions => {
+    const known = new Map<string, 'soft' | 'hard'>()
+    for (const id of viewSoft) known.set(id, 'soft')
     for (const [id, how] of local) {
-      if (how === 'restored') next.delete(id)
-      else next.set(id, how)
+      if (how === 'restored') known.delete(id)
+      else known.set(id, how)
     }
-    if (next.size === state.size && [...next].every(([id, how]) => state.get(id) === how)) return
-    state = next
+    const localIds = new Set(local.keys())
+    // 两份视图出自同一次收集才拿来判彻底删除
+    const at = deleted?.at !== undefined && deleted.at === library?.at ? deleted.at : undefined
+    const lib = library
+    const del = deleted
+    return {
+      of(id, savedAt) {
+        const how = known.get(id)
+        if (how !== undefined || localIds.has(id)) return how
+        if (savedAt === undefined || at === undefined || at <= savedAt || lib === undefined || del === undefined) return undefined
+        return lib.ids.has(id) || del.ids.has(id) ? undefined : 'hard'
+      },
+    }
+  }
+  let state = snapshot()
+  const publish = () => {
+    state = snapshot()
     for (const fn of listeners) fn()
   }
   return {
@@ -133,13 +152,14 @@ export function createDeletionStore() {
     },
     /** 读到一份最近删除或全部记忆视图：重算视图证明的软删，去掉视图已经确认的本地记录。 */
     settle(view: { name: 'deleted'; data: DeletedView } | { name: 'library'; data: LibraryView }) {
-      if (view.name === 'deleted') deletedIds = new Set(view.data.items.map(item => item.memory.id))
-      else activeIds = new Set(view.data.layers.flatMap(layer => layer.items.map(memory => memory.id)))
-      if (deletedIds === undefined || activeIds === undefined) return
-      const active = activeIds
-      viewSoft = new Set([...deletedIds].filter(id => !active.has(id)))
+      if (view.name === 'deleted') deleted = { ids: new Set(view.data.items.map(item => item.memory.id)), at: view.data.generatedAt }
+      else library = { ids: new Set(view.data.layers.flatMap(layer => layer.items.map(memory => memory.id))), at: view.data.generatedAt }
+      if (deleted === undefined || library === undefined) { publish(); return }
+      const active = library.ids
+      viewSoft = new Set([...deleted.ids].filter(id => !active.has(id)))
+      // 视图确认：软删的出现在最近删除里，恢复的重新出现在全部记忆里
       for (const [id, how] of local) {
-        if ((how === 'soft' && viewSoft.has(id)) || (how === 'restored' && !viewSoft.has(id))) local.delete(id)
+        if ((how === 'soft' && viewSoft.has(id)) || (how === 'restored' && active.has(id) && !viewSoft.has(id))) local.delete(id)
       }
       publish()
     },
