@@ -378,8 +378,18 @@ export async function apply(ctx: Context, config: Config) {
   // memory_promote 与 /memory promote 共用一个写入器（进程内串行）
   const agentsMd = createAgentsMdWriter(agentsMdPath())
 
-  // 子 agent 只读门：写入与治理工具在注册处统一套门，子 agent 会话（delegationDepth ≥ 1）调用即拒
-  const registerWrite = (tool: ToolDefinition) => ctx.tools.register(gateSubagentWrites(tool, resolveContext))
+  // 子 agent 只读门：写入与治理工具在注册处统一套门，子 agent 会话（delegationDepth ≥ 1）调用即拒。
+  // 门内的执行结束后（成功、失败都算，失败前可能已写了一部分）请求重写全局视图：模型改了记忆或账本，记忆页跟着变
+  const registerWrite = (tool: ToolDefinition) => ctx.tools.register(gateSubagentWrites({
+    ...tool,
+    execute: async (args, exec) => {
+      try {
+        return await tool.execute(args, exec)
+      } finally {
+        void views?.request()
+      }
+    },
+  }, resolveContext))
   // memory_save 的类型枚举与说明在注册时从类型表生成：模板或自定义类型热更新后注销重注册
   const registerSave = () => registerWrite(createSaveTool({ store, registry, resolveContext, snapshots, onSaved }))
   let disposeSave = registerSave()
