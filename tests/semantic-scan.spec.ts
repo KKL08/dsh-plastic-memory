@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { buildSemanticPrompt, parseSemanticFindings, runSemanticScan, SEMANTIC_SCAN_MAX_RECORDS, BASELINE_MAX_CHARS } from '../src/governance/semantic-scan.ts'
 import { record } from './helpers/record.ts'
+import { FAKE_SECRET } from './helpers/secrets.ts'
+import { SECRET_MASK } from '../src/secrets.ts'
 
 describe('buildSemanticPrompt', () => {
   it('user 部分含每条记忆的 id/content，有基线时包含基线内容', () => {
@@ -87,6 +89,18 @@ describe('parseSemanticFindings', () => {
       findings: [{ type: 'conflict', memoryIds: ['mem_a'], baselineRef: 'AGENTS.md：包管理', summary: 's', suggestedAction: 'a' }],
     })
     expect(parseSemanticFindings(raw, known)![0].baselineRef).toBe('AGENTS.md：包管理')
+  })
+
+  it('模型在说明里引用的密钥（两级）换成占位：这些文字会进待决账本、体检缓存和工具输出', () => {
+    const raw = JSON.stringify({
+      findings: [{
+        type: 'conflict', memoryIds: ['mem_a'], baselineRef: `AGENTS.md：${FAKE_SECRET.github}`,
+        summary: `两条都写了 ${FAKE_SECRET.sk}`, suggestedAction: '改成 password: Hunter2-2026 之外的写法',
+      }],
+    })
+    const [f] = parseSemanticFindings(raw, known)!
+    expect(f).toMatchObject({ summary: `两条都写了 ${SECRET_MASK}`, baselineRef: `AGENTS.md：${SECRET_MASK}` })
+    expect(f.suggestedAction).not.toContain('Hunter2-2026')
   })
 
   it('conflict 的基数在产出侧收口：3 个 id、1 个 id 无 baselineRef 都丢弃；1 个 id 带 baselineRef、2 个 id 无 baselineRef 都保留', () => {

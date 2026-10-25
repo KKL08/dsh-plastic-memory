@@ -3,7 +3,7 @@ import type { SnapshotStore } from '../governance/snapshots.ts'
 import type { PendingDecisionsStore } from '../governance/decisions.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { redactRecord } from '../governance/snapshots.ts'
-import { hasSecret } from '../secrets.ts'
+import { hasSecret, maskSecrets } from '../secrets.ts'
 import {
   crossWorkspaceNote, gateRecords, locateCopy,
   type CopyTarget, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark,
@@ -63,7 +63,9 @@ export async function executeForget(
   deps: ForgetToolDeps,
   options: ForgetOptions = {},
 ): Promise<ForgetResult> {
-  const { ids, reason } = args
+  // 原因是 agent 写的原文，可能引用了密钥：进日志、快照说明之前两级都遮
+  const reason = maskSecrets(args.reason, { severity: 'suspected' })
+  const { ids } = args
   const now = deps.now?.() ?? Date.now()
 
   // 调用者从多个扫描结果汇总 id 列表时可能重复某个 id

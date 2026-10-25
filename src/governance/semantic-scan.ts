@@ -1,5 +1,6 @@
 import type { MemoryRecord } from '../record-schema.ts'
 import { SEVERITY_BY_TYPE, type Finding } from './schema.ts'
+import { maskSecrets } from '../secrets.ts'
 
 /** 语义层的 LLM 抽象：纯逻辑只依赖这个接口，真机接线在 index.ts。 */
 export interface SemanticLlm {
@@ -71,6 +72,9 @@ export function buildSemanticPrompt(
   }
 }
 
+/** 模型写的说明可能引用记忆里的密钥，会进待决账本、体检缓存与工具输出：两级都遮。 */
+const maskText = (text: string) => maskSecrets(text, { severity: 'suspected' })
+
 /** 解析 LLM 输出。整体解析失败返回 null（触发重试）；单条非法只跳过该条。 */
 export function parseSemanticFindings(raw: string, knownIds: Set<string>): Finding[] | null {
   const stripped = raw.replace(/```(?:json)?/g, '').trim()
@@ -99,7 +103,7 @@ export function parseSemanticFindings(raw: string, knownIds: Set<string>): Findi
     if (memoryIds.length === 0) continue
     // 空字符串 baselineRef 不算"有基线"：下游 dedupKey 用真值判断、executeConfirm 用
     // !== undefined 判断，两者对空字符串的态度不一致，必须在这里收口成"要么是非空字符串要么不存在"。
-    const baselineRef = typeof f.baselineRef === 'string' && f.baselineRef.length > 0 ? f.baselineRef : undefined
+    const baselineRef = typeof f.baselineRef === 'string' && f.baselineRef.length > 0 ? maskText(f.baselineRef) : undefined
     if (type === 'conflict') {
       // 冲突的基数必须在产出侧收口——消费方 memory_confirm 的横向分支只认
       // memoryIds[0]/[1]，多出或缺少都会导致"用户以为裁决了、实际什么都没发生"。
@@ -112,8 +116,8 @@ export function parseSemanticFindings(raw: string, knownIds: Set<string>): Findi
       layer: 'semantic',
       severity: SEVERITY_BY_TYPE[type as keyof typeof SEVERITY_BY_TYPE],
       memoryIds,
-      summary: typeof f.summary === 'string' ? f.summary : '',
-      suggestedAction: typeof f.suggestedAction === 'string' ? f.suggestedAction : '',
+      summary: typeof f.summary === 'string' ? maskText(f.summary) : '',
+      suggestedAction: typeof f.suggestedAction === 'string' ? maskText(f.suggestedAction) : '',
       ...(baselineRef !== undefined ? { baselineRef } : {}),
     })
   }

@@ -3,7 +3,7 @@ import type { MemoryRecord } from '../record-schema.ts'
 import type { KvTable } from '../kv-table.ts'
 import { REDACTED_PLACEHOLDER, genId, type MemorySnapshot, type SnapshotRecord } from './schema.ts'
 import { RETENTION_MS } from '../retention.ts'
-import { secretFields } from '../secrets.ts'
+import { maskSecrets, secretFields } from '../secrets.ts'
 
 /** 保留窗口：与软删清扫共用 retention.ts 的单一来源（两者必须一致）。 */
 export const SNAPSHOT_RETENTION_MS = RETENTION_MS
@@ -51,6 +51,9 @@ export function redactRecord(r: SnapshotRecord): SnapshotRecord {
   return next
 }
 
+/** 快照说明可能是 agent 写的原文（forget 的原因、手动快照的说明）：落盘前两级密钥都遮。 */
+const maskDescription = (text: string) => maskSecrets(text, { severity: 'suspected' })
+
 /**
  * 记忆快照（docs/p1-governance-health-design.md §6）：只管记忆数据的可恢复性，操作审计走 dsh session log。
  * 只存受影响记录，非全量。
@@ -72,7 +75,7 @@ export class SnapshotStore {
       id: genId('snap'),
       createdAt: now,
       operation: input.operation,
-      description: input.description,
+      description: maskDescription(input.description),
       memoryIds: input.records.map(r => r.id),
       data: input.records,
     }
@@ -110,14 +113,11 @@ export class SnapshotStore {
 
   private async redactNow(ids: ReadonlySet<string>): Promise<void> {
     for (const [, snap] of await this.table.list()) {
-      let changed = false
-      const data = snap.data.map(r => {
-        if (!ids.has(r.id)) return r
-        const next = redactRecord(r)
-        if (!isDeepStrictEqual(next, r)) changed = true
-        return next
-      })
-      if (changed) await this.table.put(snap.id, { ...snap, data })
+      if (!snap.data.some(r => ids.has(r.id))) continue
+      const data = snap.data.map(r => (ids.has(r.id) ? redactRecord(r) : r))
+      // 说明一并遮：早先的快照落盘时还没遮过
+      const description = maskDescription(snap.description)
+      if (description !== snap.description || !isDeepStrictEqual(data, snap.data)) await this.table.put(snap.id, { ...snap, description, data })
     }
   }
 

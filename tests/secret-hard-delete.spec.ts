@@ -22,6 +22,7 @@ import type { RejectCode, WarningCode } from '../src/contract-codes.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord, candidate } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
+import { SECRET_MASK } from '../src/secrets.ts'
 
 // 票 13（S1）：含密钥的记忆被遗忘时立即物理删除，所有快照里不留明文，且不破坏快照里的其他记录；
 // 疑似密钥保存时被拦下确认（docs/design-storage-file-is-memory.md §10，ARCHITECTURE.md ⑥-6c）。
@@ -292,6 +293,46 @@ describe('forget 读过之后另一个会话才写进密钥', () => {
       expect(text).not.toContain(FAKE_SECRET.sk)
       expect(json.data.find(r => r.id === 'mem_late')!.redacted).toBe(true)
     }
+  })
+})
+
+describe('agent 写的说明文字里引用了密钥', () => {
+  const plain = () => wsRec({ id: 'mem_plain', name: '旧约定', content: '用 npm' })
+
+  it('forget 的原因：日志与本次快照的说明里两级密钥都换成占位，其余文字保留', async () => {
+    const h = harness()
+    await h.store.create(plain())
+    const lines: string[] = []
+    const log: MemoryLogger = { info: m => lines.push(m), warn: m => lines.push(m), error: m => lines.push(m) }
+    const result = await h.forget(['mem_plain'], `用户贴了 ${FAKE_SECRET.sk} 和 ${SUSPECTED_TEXT}，顺手清掉旧约定`, log)
+    expect(result.forgotten).toEqual(['mem_plain'])
+    for (const out of [lines.join('\n'), (await rawSnapshot(result.snapshotId!)).text]) {
+      expect(out).not.toContain(FAKE_SECRET.sk)
+      expect(out).not.toContain('TESTONLY0000000000000')
+      expect(out).toContain('顺手清掉旧约定')
+    }
+  })
+
+  it('手动快照的说明同样遮住', async () => {
+    const h = harness()
+    await h.store.create(plain())
+    const created = await h.snapshot({ action: 'create', memoryIds: ['mem_plain'], description: `换 key 前 ${FAKE_SECRET.github}` })
+    if (created.kind !== 'created') throw new Error(created.kind)
+    expect((await rawSnapshot(created.snapshotId)).text).not.toContain(FAKE_SECRET.github)
+  })
+
+  it('硬删密钥时，含该记录的既有快照说明里的密钥一并遮住', async () => {
+    const h = harness()
+    const secret = wsRec({ id: 'mem_key', name: '部署凭证', content: `token ${FAKE_SECRET.sk}` })
+    await h.store.create(secret)
+    // 早先留下的快照：说明里原样带着密钥
+    await h.sidecar.snapshots.put('snap_old', {
+      id: 'snap_old', createdAt: Date.now(), operation: 'manual', description: `备份 ${FAKE_SECRET.sk}`, memoryIds: ['mem_key'], data: [secret],
+    })
+    expect((await h.forget(['mem_key'])).hardDeleted).toEqual(['mem_key'])
+    const { text } = await rawSnapshot('snap_old')
+    expect(text).not.toContain(FAKE_SECRET.sk)
+    expect((await h.snapshots.get('snap_old'))!.description).toBe(`备份 ${SECRET_MASK}`)
   })
 })
 
