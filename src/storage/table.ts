@@ -51,7 +51,8 @@ export interface ScopeReadResult {
   /**
    * 列出文件数：范围内各目录顶层列出的记忆文件数。FileTable 数 readdir 列出、文件名是记忆文件的条目，
    * 含被预筛跳过的、随后解析失败进 quarantined 的、随后被 types 过滤或调用方按 status / validTo 滤掉的；
-   * 不含 .archive/ 里的（includeArchive 为真也只数顶层）。InMemoryTable 数范围内顶层条目，同样不受 types 影响。
+   * 不含 .archive/ 里的（includeArchive 为真也只数顶层）。伴生文件形态的名字（paths.isCompanionLikeFileName）例外：不走预筛、
+   * 一律解析，解析成合法记忆才数，解析不出的不数。InMemoryTable 数范围内顶层条目，同样不受 types 影响。
    * 用途是检索排序 BM25 的 N：它必须与预筛开关、types、后端无关，同一份磁盘内容才得出同一个排序。
    */
   listedCount: number
@@ -71,7 +72,7 @@ export interface WorkspaceDirEntry {
   workspacePath: string
   /** 绝对目录路径。 */
   dir: string
-  /** 顶层至少一个记忆文件（只看文件名，不解析）；体检清单取为真的，定位用全部。 */
+  /** 顶层至少一个记忆文件（只看文件名，不解析；伴生文件形态的名字解析成合法记忆才算）；体检清单取为真的，定位用全部。 */
   hasActiveTopLevel: boolean
 }
 

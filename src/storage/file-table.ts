@@ -12,7 +12,7 @@ import type { RecallStats } from './schema.ts'
 import { decodeFile, digestMismatch, encodeRecord, type FileLocation } from './frontmatter.ts'
 import {
   WORKSPACE_MARKER, INDEX_FILE, GLOBAL_DIR, ARCHIVE_DIR, workspaceDirName, slugifyName, isReservedFileName,
-  isMemoryFileName, isWorkspaceDirName, deriveFileId, isDerivedFileId,
+  isMemoryFileName, isCompanionLikeFileName, isWorkspaceDirName, deriveFileId, isDerivedFileId,
 } from './paths.ts'
 import { linkExclusive } from './exclusive-link.ts'
 import { formatIndexLine } from '../index-line.ts'
@@ -31,6 +31,9 @@ const TMP_SUFFIX_RE = /\.tmp-(\d+)-[a-z0-9]+$/
 
 /** 写路径 locate 到写盘之间文件被别处改动时，重读重算的总次数上限；到上限仍在变就报错不写。 */
 const WRITE_ATTEMPTS = 3
+
+/** 维护点写索引后发现目录变了、按新清单重写的总次数上限（含第一次写）。 */
+const INDEX_ROUNDS = 3
 
 /** 写前复核发现 locate 之后文件被改：本轮写作废，由 update / put 重新 locate 再来（只在本文件内流转）。 */
 class StaleReadError extends Error {}
@@ -65,11 +68,28 @@ export interface FileTableOptions {
 
 /** 读取结果的内部形态：带 extras、磁盘原文与 mtime（维护点逐字节比较与取 mtime 用）；对外的 LocatedRecord / LocatedFile 不带后两者。 */
 interface Slot extends LocatedFile { raw: string; mtimeMs: number }
+/** 写路径的定位结果：取舍出的那份，外加这次定位读到的该 id 全部副本（含它自己）。写盘时只覆盖、只删这些副本里此后没变过的。 */
+interface LocatedSlot extends Slot { copies: readonly Slot[] }
 
 interface ScopeDir { dir: string; loc: FileLocation }
 
 function errnoCode(err: unknown): string | undefined {
   return (err as NodeJS.ErrnoException | undefined)?.code
+}
+
+/** 单个文件在目录签名里的一项：名字、大小、mtime。 */
+function statSignature(name: string, s: { size: number; mtimeMs: number }): string {
+  return `${name}\u0000${s.size}\u0000${s.mtimeMs}`
+}
+
+/** 目录签名：各项排序后拼接，与 readdir 顺序无关。 */
+function signatureOf(seen: ReadonlyMap<string, string>): string {
+  return [...seen.values()].sort().join('\n')
+}
+
+/** readMemoryFile 的结果是解析成功的记录（不是被跳过或隔离）。 */
+function isSlot(r: { slot: Slot } | { quarantined: QuarantineEntry } | undefined): r is { slot: Slot; notes: DirectoryNote[] } {
+  return r !== undefined && 'slot' in r
 }
 
 function escapeRegExp(s: string): string {
@@ -161,21 +181,28 @@ export class FileTable implements MemoryTable {
   /** 读单个记忆文件。返回 undefined = 被预筛跳过 / 竞态消失 / 不是普通文件。 */
   private async readMemoryFile(
     filePath: string, dir: string, loc: FileLocation, prefilter: Prefilter, statsRows: ReadonlyMap<string, RecallStats>,
+    seen?: Map<string, string>,
   ): Promise<{ slot: Slot; notes: DirectoryNote[] } | { quarantined: QuarantineEntry } | undefined> {
     let mtimeMs: number
     let raw: string
     try {
       const s = await stat(filePath)
       if (!s.isFile()) return undefined
+      seen?.set(basename(filePath), statSignature(basename(filePath), s))   // 在读内容之前取：签名不会比读到的内容新
       mtimeMs = s.mtimeMs
       raw = await readFile(filePath, 'utf8')
     } catch (err) {
       if (errnoCode(err) === 'ENOENT') return undefined   // readdir 之后被删：竞态
+      if (isCompanionLikeFileName(basename(filePath))) return undefined
       return { quarantined: { path: filePath, error: err instanceof Error ? err.message : String(err) } }
     }
     if (!this.passesPrefilter(raw, filePath, prefilter)) return undefined
     const outcome = decodeFile(raw, { path: filePath, loc, relPath: relative(this.opts.root, filePath), mtimeMs })
-    if (!outcome.ok) return { quarantined: { path: outcome.path, error: outcome.error } }
+    if (!outcome.ok) {
+      // 伴生文件 / 锁文件形态的名字解析不出就不是记忆（伴生文件是二进制），静默跳过
+      if (isCompanionLikeFileName(basename(filePath))) return undefined
+      return { quarantined: { path: outcome.path, error: outcome.error } }
+    }
     const row = statsRows.get(outcome.record.id)
     const record = row ? { ...outcome.record, recallCount: row.recallCount, lastRecalledAt: row.lastRecalledAt } : outcome.record
     return {
@@ -189,7 +216,10 @@ export class FileTable implements MemoryTable {
   }
 
   /** 读一组已解析位置的目录（顶层，可选含 .archive/），带 extras 的内部形态。 */
-  private async readDirs(dirs: readonly ScopeDir[], opts: ScopeReadOptions): Promise<{ slots: Slot[]; listedCount: number; quarantined: QuarantineEntry[]; directoryNotes: DirectoryNote[] }> {
+  /** topLevel：给了就记下各目录顶层记忆文件的签名（读文件时顺手取的 stat，见 topLevelSignature）。 */
+  private async readDirs(
+    dirs: readonly ScopeDir[], opts: ScopeReadOptions, topLevel?: Map<string, string>,
+  ): Promise<{ slots: Slot[]; listedCount: number; quarantined: QuarantineEntry[]; directoryNotes: DirectoryNote[] }> {
     const slots: Slot[] = []
     let listedCount = 0
     const quarantined: QuarantineEntry[] = []
@@ -204,9 +234,13 @@ export class FileTable implements MemoryTable {
       for (const level of levels) {
         const listed = await this.listMemoryFiles(level)
         if ('note' in listed) { directoryNotes.push(listed.note); continue }
-        if (level === dir) listedCount += listed.names.length   // 只数顶层，预筛、解析、types 之前
-        const results = await Promise.all(listed.names.sort().map(name =>
-          this.readMemoryFile(join(level, name), dir, loc, prefilter, statsRows)))
+        // 伴生文件形态的名字不走预筛、一律解析：它算不算记忆文件要看解析结果，列出文件数才与预筛开关无关
+        const names = listed.names.sort()
+        const results = await Promise.all(names.map(name =>
+          this.readMemoryFile(join(level, name), dir, loc, isCompanionLikeFileName(name) ? NO_PREFILTER : prefilter, statsRows,
+            level === dir ? topLevel : undefined)))
+        // 只数顶层，预筛、types 之前；伴生文件形态的名字解析成记忆才数（非原生卷上每个文件都配一个伴生文件）
+        if (level === dir) listedCount += names.filter((n, i) => !isCompanionLikeFileName(n) || isSlot(results[i])).length
         for (const r of results) {
           if (r === undefined) continue
           if ('quarantined' in r) { quarantined.push(r.quarantined); continue }
@@ -265,7 +299,9 @@ export class FileTable implements MemoryTable {
       if (loc.loc.scope !== 'workspace') continue   // 只有 global 目录会落到这支，已被 isWorkspaceDirName 排除
       const listed = await this.listMemoryFiles(dir)
       if ('note' in listed) { directoryNotes.push(listed.note); continue }
-      const hasActiveTopLevel = listed.names.length > 0
+      // 只看文件名；只剩伴生文件形态的名字时才逐个解析，解析成记忆的才算
+      const hasActiveTopLevel = listed.names.some(n => !isCompanionLikeFileName(n))
+        || (await Promise.all(listed.names.map(n => this.readMemoryFile(join(dir, n), dir, loc.loc, NO_PREFILTER, new Map())))).some(isSlot)
       if (!hasActiveTopLevel) directoryNotes.push(this.note('dir-empty', dir, `workspace 目录顶层没有记忆文件（只剩归档或全空），不进体检清单：${dir}`))
       entries.push({ workspacePath: loc.loc.workspacePath, dir, hasActiveTopLevel })
     }
@@ -319,22 +355,19 @@ export class FileTable implements MemoryTable {
     return slot && this.toLocated(slot)
   }
 
-  /** locate 的内部形态：带磁盘原文，写路径据此在写盘前复核。 */
-  private async locateSlot(id: string, hint?: LocateHint): Promise<Slot | undefined> {
+  /** locate 的内部形态：带磁盘原文与读到的全部副本，写路径据此在写盘前复核。 */
+  private async locateSlot(id: string, hint?: LocateHint): Promise<LocatedSlot | undefined> {
+    const pick = (copies: Slot[]) => copies.length > 0 ? { ...resolveDuplicates(copies, hint)[0]!, copies } : undefined
     const global: ScopeDir = { dir: this.globalDir, loc: { scope: 'global' } }
     const hinted = hint?.workspacePath === undefined ? [] : await this.hintDirs(hint.workspacePath)
-    if (hint?.isExactLayer === true) {
-      const own = await this.scanForId(id, hint.workspacePath === undefined ? [global] : hinted)
-      return own.length > 0 ? resolveDuplicates(own, hint)[0] : undefined
-    }
+    if (hint?.isExactLayer === true) return pick(await this.scanForId(id, hint.workspacePath === undefined ? [global] : hinted))
     const first = await this.scanForId(id, [global, ...hinted])
-    if (first.length > 0) return resolveDuplicates(first, hint)[0]
+    if (first.length > 0) return pick(first)
     const scanned = new Set([this.globalDir, ...hinted.map(d => d.dir)])
     const rest = (await this.listWorkspaceDirs()).entries
       .filter(e => !scanned.has(e.dir))
       .map(e => ({ dir: e.dir, loc: { scope: 'workspace', workspacePath: e.workspacePath } as FileLocation }))
-    const second = await this.scanForId(id, rest)
-    return second.length > 0 ? resolveDuplicates(second, hint)[0] : undefined
+    return pick(await this.scanForId(id, rest))
   }
 
   // —— 写侧（锁内）——
@@ -361,7 +394,8 @@ export class FileTable implements MemoryTable {
     const cutoff = now - DELETED_RETENTION_MS
     for (const sd of scopeDirs) {
       const archive = join(sd.dir, ARCHIVE_DIR)
-      const { slots } = await this.readDirs([sd], { includeArchive: true })
+      const seen = new Map<string, string>()
+      const { slots } = await this.readDirs([sd], { includeArchive: true }, seen)
       const kept: LocatedRecord[] = []
       for (const slot of slots) {
         const inArchive = dirname(slot.filePath) === archive
@@ -382,11 +416,17 @@ export class FileTable implements MemoryTable {
           // 搬家不改文件名（spec：文件名不变；手编文件的名字由用户起），撞名由占名追加 id 片段
           if (!(await this.unchangedSince(slot))) continue
           await mkdir(archive, { recursive: true })
-          const path = await this.claimAndWrite(record, archive, text, basename(slot.filePath, '.md'))
+          let path: string
+          try {
+            path = await this.claimAndWrite(record, archive, text, slots.filter(s => s.record.id === record.id), basename(slot.filePath, '.md'))
+          } catch (err) {
+            if (err instanceof StaleReadError) continue   // 归档名被别的进程刚写的同 id 文件占着：本轮跳过，下次维护再处理
+            throw err
+          }
           if (path.toLowerCase() !== slot.filePath.toLowerCase()) {
             // 占名期间源文件被改：撤回刚写的归档副本，源文件留给下次维护
             if (await this.unchangedSince(slot)) await rm(slot.filePath, { force: true })
-            else await rm(path, { force: true })
+            else await this.withdrawClaim(slot.filePath, path, text)
           }
           continue
         }
@@ -394,7 +434,21 @@ export class FileTable implements MemoryTable {
         if (!inArchive) kept.push({ record, filePath: slot.filePath, dir: slot.dir })
       }
       // kept 只剩顶层 active（非 active 已搬走）：同 id 取一份，再过滤已过期的
-      await this.regenerateIndex(sd.dir, resolveDuplicates(kept).filter(s => withinValidity(s.record, now)))
+      const indexable = (located: readonly LocatedRecord[]) => resolveDuplicates(located).filter(s => withinValidity(s.record, now))
+      let text = this.indexText(indexable(kept))
+      // 别的进程可能在本轮读目录之后写进同一目录，并先一步写好了全的索引，本轮按旧清单写会盖掉它：写了就比一次顶层签名
+      // （只 readdir + stat），变了才重读顶层、按新清单再写，最多 INDEX_ROUNDS 次。插件的写都经 tmp + rename 落盘，
+      // 别处增删改都会改变名字、大小或 mtime；手编也改 mtime。最后写索引的进程以写后的目录为准，索引收敛到全的那份
+      let signature = signatureOf(seen)
+      for (let round = 1; await this.writeIndex(sd.dir, text) && round < INDEX_ROUNDS; round++) {
+        if (await this.topLevelSignature(sd.dir) === signature) break
+        const fresh = new Map<string, string>()
+        const { slots } = await this.readDirs([sd], {}, fresh)
+        signature = signatureOf(fresh)
+        const next = this.indexText(indexable(slots.filter(s => s.record.status === 'active')))
+        if (next === text) break
+        text = next
+      }
       for (const level of [sd.dir, archive]) await this.cleanStaleTmp(level)
     }
   }
@@ -404,15 +458,44 @@ export class FileTable implements MemoryTable {
     try { return (await readFile(slot.filePath, 'utf8')) === slot.raw } catch { return false }
   }
 
-  /** 写该 id 之后清掉可见集合（global + 该记录所在目录，含各自 .archive/）里的其余副本；其他项目的副本不动（ARCHITECTURE.md ⑥-6d）；只认层的写只清该目录。 */
-  private async removeOtherCopies(id: string, keepPath: string, dir: string, isExactLayer: boolean): Promise<void> {
-    const { scopeDirs } = await this.resolveDirs(isExactLayer ? [dir] : [...new Set([this.globalDir, dir])])
-    for (const copy of await this.scanForId(id, scopeDirs)) {
-      if (copy.filePath.toLowerCase() !== keepPath.toLowerCase()) await rm(copy.filePath, { force: true })
+  /**
+   * 写该 id 之后清掉可见集合（global + 该记录所在目录，含各自 .archive/）里的其余副本；其他项目的副本不动（ARCHITECTURE.md ⑥-6d）；只认层的写只清该目录。
+   * 给了 known（写路径传 locate 读到的副本）就只删其中此后没变过的：读之后才出现或被改过的是别的进程刚写的，两边都删对方的副本会一份不剩，
+   * 留下的同 id 副本由读路径取舍、下一次写清掉。不给（删除路径）就当场扫、全删。
+   */
+  private async removeOtherCopies(id: string, keepPath: string, dir: string, isExactLayer: boolean, known?: readonly Slot[]): Promise<void> {
+    const dirs = new Set(isExactLayer ? [dir] : [this.globalDir, dir])
+    const copies = known ?? await this.scanForId(id, (await this.resolveDirs([...dirs])).scopeDirs)
+    for (const copy of copies) {
+      if (!dirs.has(copy.dir) || copy.filePath.toLowerCase() === keepPath.toLowerCase()) continue
+      if (known === undefined || await this.unchangedSince(copy)) await rm(copy.filePath, { force: true })
     }
   }
 
-  private async regenerateIndex(dir: string, active: readonly LocatedRecord[]): Promise<void> {
+  /** 占名后发现源文件变了：撤回刚写的新文件。只在源文件还在、新文件仍是本轮写的原文时撤回——源文件已不在说明别的进程
+   *  搬走或删掉了它，新文件可能是这个 id 仅存的一份；新文件已被改过则是别人的写入。两种都留着，交给重来的那轮。 */
+  private async withdrawClaim(source: string, claimed: string, text: string): Promise<void> {
+    try { await stat(source) } catch { return }
+    if ((await readFile(claimed, 'utf8').catch(() => undefined)) === text) await rm(claimed, { force: true })
+  }
+
+  /** 目录顶层记忆文件的签名：每个文件的名字、大小、mtime，不含索引；只 readdir + stat，不读内容。口径同 readDirs 顺手记下的那份。 */
+  private async topLevelSignature(dir: string): Promise<string> {
+    const listed = await this.listMemoryFiles(dir)
+    const seen = new Map<string, string>()
+    if ('names' in listed) {
+      await Promise.all(listed.names.map(async name => {
+        try {
+          const s = await stat(join(dir, name))
+          if (s.isFile()) seen.set(name, statSignature(name, s))
+        } catch { /* 竞态消失：不计 */ }
+      }))
+    }
+    return signatureOf(seen)
+  }
+
+  /** 索引全文：只由传入的 active 记录决定。 */
+  private indexText(active: readonly LocatedRecord[]): string {
     // 缺省格式器与注入侧同源（src/index-line.ts）。磁盘索引不带陈旧度：静态文件里的
     // 时间相对标注会随时间失真（设计稿 §6 登记的有意偏离）。
     // 行末带同目录的实际文件名（设计稿 §11），模型拿到即可 Read，不用再 grep id。
@@ -422,11 +505,17 @@ export class FileTable implements MemoryTable {
     const located = active.slice().sort(({ record: a }, { record: b }) =>
       a.name < b.name ? -1 : a.name > b.name ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
     const lines = located.map(l => fmt(l.record, basename(l.filePath)))
-    const text = `# Memory Index\n\n${lines.join('\n')}${lines.length ? '\n' : ''}`
+    return `# Memory Index\n\n${lines.join('\n')}${lines.length ? '\n' : ''}`
+  }
+
+  /** 写索引，内容不变不写；返回是否写了。 */
+  private async writeIndex(dir: string, text: string): Promise<boolean> {
     try {
       const prev = await readFile(join(dir, INDEX_FILE), 'utf8').catch(() => '')
-      if (prev !== text) await this.atomicWrite(join(dir, INDEX_FILE), text) // 内容不变不写
-    } catch { /* 索引是生成物，失败不致命 */ }
+      if (prev === text) return false
+      await this.atomicWrite(join(dir, INDEX_FILE), text)
+      return true
+    } catch { return false /* 索引是生成物，失败不致命 */ }
   }
 
   /** 只删两类原子写残留：① pid 段是本进程（自家崩溃）② mtime 超 60 秒的陈旧文件。多进程共用 memoryRoot 时，
@@ -482,17 +571,16 @@ export class FileTable implements MemoryTable {
     return dir
   }
 
-  /** 盘上已有文件的 frontmatter id。null=不存在（可写）；'unreadable'=读不出 id（一律视为占用）。 */
-  private async readIdOnDisk(path: string): Promise<string | null> {
-    let text: string
+  /** 盘上已有文件的 frontmatter id 与原文。null=不存在（可写）；id 为 'unreadable'=读不出 id（一律视为占用）。 */
+  private async readIdOnDisk(path: string): Promise<{ id: string; raw: string } | null> {
+    let raw: string
     try {
-      text = await readFile(path, 'utf8')
+      raw = await readFile(path, 'utf8')
     } catch (err) {
       if (errnoCode(err) === 'ENOENT') return null
-      return 'unreadable'
+      return { id: 'unreadable', raw: '' }
     }
-    const m = ID_LINE_RE.exec(frontmatterOf(text))
-    return m ? m[1] : 'unreadable'
+    return { id: ID_LINE_RE.exec(frontmatterOf(raw))?.[1] ?? 'unreadable', raw }
   }
 
   /**
@@ -500,13 +588,16 @@ export class FileTable implements MemoryTable {
    * 且内容完整，没有"先建空文件再填"的窗口，崩溃最多留下 tmp（维护点清）。卷不支持硬链接时 linkExclusive 退回排他复制，
    * 排他不变，只是不再原子。EEXIST 表示名被占——占着的是同一记录自己的
    * 文件（崩溃残留、同 id 副本）才允许 rename 覆盖，否则换下一个候选：基础名 → id 片段名 → 全 id 名（按构造只属于本记录，
-   * 直接覆盖）。两个进程写同名异 id 的记录因此两条都存活；隔离文件、缺标记目录里的文件也不会被同 slug 写入静默覆盖。
+   * 被别的 id 占着也覆盖）。两个进程写同名异 id 的记录因此两条都存活；隔离文件、缺标记目录里的文件也不会被同 slug 写入静默覆盖。
+   * 同 id 的文件也只覆盖 known 里读到、此后没变过的那份：读之后才出现或被改过的是别的进程刚落的盘，覆盖会丢掉对方的修改，
+   * 抛 StaleReadError 让调用方重读再来。
    */
-  private async claimAndWrite(record: MemoryRecord, level: string, text: string, base = slugifyName(record.name)): Promise<string> {
+  private async claimAndWrite(record: MemoryRecord, level: string, text: string, known: readonly Slot[], base = slugifyName(record.name)): Promise<string> {
     const tmp = join(level, `${base}.md.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`)
     await writeFile(tmp, text, 'utf8')
+    const fullIdName = `${base}-${record.id}.md`
     try {
-      for (const name of [`${base}.md`, `${base}-${record.id.slice(-6)}.md`]) {
+      for (const name of [`${base}.md`, `${base}-${record.id.slice(-6)}.md`, fullIdName]) {
         if (isReservedFileName(name)) continue // memory.md ≈ MEMORY.md，索引再生会覆盖它
         const path = join(level, name)
         try {
@@ -515,11 +606,14 @@ export class FileTable implements MemoryTable {
         } catch (err) {
           if (errnoCode(err) !== 'EEXIST') throw err
         }
-        if ((await this.readIdOnDisk(path)) === record.id) { await rename(tmp, path); return path }
+        const onDisk = await this.readIdOnDisk(path)
+        if (onDisk?.id === record.id) {
+          if (!known.some(k => k.filePath.toLowerCase() === path.toLowerCase() && k.raw === onDisk.raw)) throw new StaleReadError()
+        } else if (name !== fullIdName) continue
+        await rename(tmp, path)
+        return path
       }
-      const path = join(level, `${base}-${record.id}.md`)
-      await rename(tmp, path)
-      return path
+      throw new Error(`unreachable: ${fullIdName}`)   // 全 id 名不会是保留名，循环必在它那里返回
     } finally {
       await rm(tmp, { force: true })   // 占名成功后 tmp 仍在（link 多出的名字或复制的源）；rename 过的已不存在
     }
@@ -531,7 +625,7 @@ export class FileTable implements MemoryTable {
    * tmp + rename 覆盖，否则排他占名 → 搬家删旧 → 清可见集合里该 id 的其余副本 → 本目录（搬家时两个）维护点。返回实际写出的记录。
    * 覆盖、占名、删旧之前都复核 prev 的原文，变了抛 StaleReadError（占名后才发现的先撤回新文件），由调用方重来。
    */
-  private async persist(key: string, prev: Slot | undefined, value: MemoryRecord, isExactLayer = false): Promise<MemoryRecord> {
+  private async persist(key: string, prev: LocatedSlot | undefined, value: MemoryRecord, isExactLayer = false): Promise<MemoryRecord> {
     const next = value.status === 'deleted' && value.deletedAt === undefined ? { ...value, deletedAt: this.now() } : value
     const volatileChanged = !prev || !this.volatileEqual(prev.record, next)
     const stableChanged = !prev || !this.stableEqual(prev.record, next)
@@ -555,18 +649,18 @@ export class FileTable implements MemoryTable {
       } else {
         if (prev !== undefined && !(await this.unchangedSince(prev))) throw new StaleReadError()
         await mkdir(level, { recursive: true })
-        filePath = await this.claimAndWrite(next, level, text)
+        filePath = await this.claimAndWrite(next, level, text, prev?.copies ?? [])
         // 先写新后删旧；崩溃窗口由读路径的同 id 取舍兜底。占名可能落回原路径（候选名正被自己占着），
         // 路径比较忽略大小写：大小写不敏感文件系统上不能删掉刚写的自己。
         if (prev !== undefined && prev.filePath.toLowerCase() !== filePath.toLowerCase()) {
           if (!(await this.unchangedSince(prev))) {
-            await rm(filePath, { force: true })   // 占名期间旧文件被改：撤回刚写的新文件，旧文件留着重来
+            await this.withdrawClaim(prev.filePath, filePath, text)   // 占名期间旧文件被改或不见了：按规则撤回新文件，重来
             throw new StaleReadError()
           }
           await rm(prev.filePath, { force: true })
         }
       }
-      await this.removeOtherCopies(key, filePath, dir, isExactLayer)
+      await this.removeOtherCopies(key, filePath, dir, isExactLayer, prev?.copies ?? [])
       await this.maintainDirs(moved ? [dir, prev!.dir] : [dir])
     }
     if (volatileChanged) {
@@ -576,7 +670,7 @@ export class FileTable implements MemoryTable {
   }
 
   /** 锁内 locate → attempt；attempt 因复核失败作废就重新 locate 再来，总共 WRITE_ATTEMPTS 次。 */
-  private async withFreshLocate<T>(key: string, hint: LocateHint | undefined, attempt: (current: Slot | undefined) => Promise<T>): Promise<T> {
+  private async withFreshLocate<T>(key: string, hint: LocateHint | undefined, attempt: (current: LocatedSlot | undefined) => Promise<T>): Promise<T> {
     for (let i = 0; i < WRITE_ATTEMPTS; i++) {
       try {
         return await attempt(await this.locateSlot(key, hint))

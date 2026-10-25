@@ -233,6 +233,33 @@ describe('点开头的名字（文件名由记忆名字生成，名字可以以�
     expect(quarantined).toEqual([])
   })
 
+  it('._ / .# 开头的文件是合法记忆就照常读到、能按 id 定位（旧版本按名字生成过这类文件名）；只有解析不出的才静默跳过', async () => {
+    await seedGlobal('._旧笔记.md', record({ id: 'mem_apple', name: '._旧笔记' }))
+    await seedGlobal('.#锁.md', record({ id: 'mem_lock', name: '.#锁' }))
+    await writeFile(join(root, GLOBAL_DIR, '._坏.md'), '\u0000\u0005\u0016\u0007')
+    await mkdir(join(root, GLOBAL_DIR, ARCHIVE_DIR), { recursive: true })
+    await writeFile(join(root, GLOBAL_DIR, ARCHIVE_DIR, '._归档.md'), '\u0000\u0005\u0016\u0007')
+    const t = open()
+    const { records, quarantined, listedCount } = await t.readScope([globalDir()], { includeArchive: true })
+    expect(records.map(r => r.record.id).sort()).toEqual(['mem_apple', 'mem_lock'])
+    expect(quarantined).toEqual([])
+    // 解析成合法记忆的照常计入列出文件数；解析不出的伴生文件不计（非原生卷上每个文件都配一个，计入会让检索的文档数翻倍）
+    expect(listedCount).toBe(2)
+    // 列出文件数与预筛无关：预筛词一个都不命中，合法的伴生文件形态名字照样数到
+    expect((await t.readScope([globalDir()], { prefilterTerms: ['不会出现的词'] })).listedCount).toBe(2)
+    expect((await t.locate('mem_apple'))?.filePath).toBe(join(root, GLOBAL_DIR, '._旧笔记.md'))
+    expect((await t.locate('mem_lock'))?.record.name).toBe('.#锁')
+  })
+
+  it('名字以 ._ / .# 开头的记忆写下去还能读回来、搜得到', async () => {
+    const t = open()
+    await t.put('mem_apple', record({ id: 'mem_apple', name: '._notes' }))
+    await t.put('mem_lock', record({ id: 'mem_lock', name: '.#notes' }))
+    expect((await t.readScope([globalDir()])).records.map(r => r.record.id).sort()).toEqual(['mem_apple', 'mem_lock'])
+    expect((await t.locate('mem_apple'))?.record.name).toBe('._notes')
+    expect((await t.locate('mem_lock'))?.record.name).toBe('.#notes')
+  })
+
   it('名字以点开头的记忆写下去还能读回来', async () => {
     const t = open()
     await t.put('mem_npmrc', record({ id: 'mem_npmrc', name: '.npmrc 镜像' }))
@@ -247,5 +274,18 @@ describe('点开头的名字（文件名由记忆名字生成，名字可以以�
     const listing = await open().listWorkspaceDirs()
     expect(listing.entries.map(e => e.workspacePath)).toEqual(['/home/dev/.dotfiles'])
     expect(listing.directoryNotes).toEqual([])
+  })
+
+  it('项目目录顶层只有 ._ 开头的文件：是合法记忆就算有记忆、进体检清单；只有伴生文件就算空目录', async () => {
+    await seedWorkspace('/home/dev/legacy', '._旧笔记.md',
+      record({ id: 'mem_legacy', scope: 'workspace', workspacePath: '/home/dev/legacy' }))
+    await seedWorkspace('/home/dev/exfat', 'a.md', record({ id: 'mem_x', scope: 'workspace', workspacePath: '/home/dev/exfat' }))
+    const exfat = join(root, workspaceDirName('/home/dev/exfat'))
+    await rm(join(exfat, 'a.md'))
+    await writeFile(join(exfat, '._a.md'), '\u0000\u0005\u0016\u0007')
+    const listing = await open().listWorkspaceDirs()
+    const byPath = new Map(listing.entries.map(e => [e.workspacePath, e.hasActiveTopLevel]))
+    expect(byPath).toEqual(new Map([['/home/dev/exfat', false], ['/home/dev/legacy', true]]))
+    expect(listing.directoryNotes.map(n => [n.code, n.path])).toEqual([['dir-empty', exfat]])
   })
 })
