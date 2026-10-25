@@ -1,6 +1,6 @@
 // 「最近删除」tab：对假网关断言每行的清除时刻、裁决来源、恢复命令与空状态。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, screen, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { GUI_VIEW_VERSION, type DeletedView, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
 import type { BorrowedSession } from '../gateway.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
@@ -111,6 +111,26 @@ describe('最近删除', () => {
       { cmd: 'restore', memoryId: 'd5', layer: blog, allowCrossWorkspace: true },
     ])
     expect(screen.getByRole('status')).toHaveTextContent('已恢复。')
+  })
+
+  it('恢复的是作用域里最后一条：空状态出来后结果提示还在，焦点落在提示上', async () => {
+    const gateway = createFakeGateway({
+      views: { deleted: { version: GUI_VIEW_VERSION, items: [otherProject] } },
+      respond: command => 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
+        ? { ok: true, cmd: command.cmd, memoryIds: ['d5'], decisionId: 'pd9' }
+        : { ok: false, cmd: command.cmd, code: 'cross-workspace', rejected: [{ id: 'd5', workspacePath: '/w/blog' }] },
+    })
+    renderInShell(<DeletedTab nav={createNavStore()} scope={blog} session={session} now={NOW} />, gateway)
+    const restore = screen.getByRole('button', { name: '恢复' })
+    restore.focus()
+    await act(async () => { fireEvent.click(restore) })
+    const confirm = screen.getByRole('button', { name: '继续处理' })
+    confirm.focus()
+    await act(async () => { fireEvent.click(confirm) })
+    act(() => { gateway.setView('deleted', { version: GUI_VIEW_VERSION, items: [] }) })
+    expect(screen.getByText('最近删除为空')).toBeInTheDocument()
+    const notice = screen.getByText('已恢复，这条冲突回到了待处理。')
+    await waitFor(() => { expect(notice).toHaveFocus() })
   })
 
   it('空状态写保留规则和密钥例外', () => {

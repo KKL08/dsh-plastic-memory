@@ -373,6 +373,21 @@ describe('SidebarTab 确认收起后的键盘焦点', () => {
     await waitFor(() => { expect(saved.getByText('已彻底删除。如果它是真的凭证，记得去换一个新的。')).toHaveFocus() })
   })
 
+  it('彻底删除的是最后一条记忆：「还没有记忆」出来后那行说明还在，焦点落在它上面', async () => {
+    const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
+    const { gateway } = setup(
+      { library: library(fresh), session: snapshot({ injectedIds: [], savedIds: ['n1'] }), pending: pending() },
+      command => command.cmd === 'forget' ? { ok: false, cmd: command.cmd, code: 'has-secret' } : { ok: true, cmd: command.cmd, memoryIds: ['n1'] },
+    )
+    const saved = within(screen.getByRole('region', { name: '这次对话新记的' }))
+    await press(saved.getByRole('button', { name: '删除这条记忆' }))
+    await press(saved.getByRole('button', { name: '彻底删除' }))
+    act(() => { gateway.setView('library', library()) })
+    expect(screen.getByText('还没有记忆')).toBeInTheDocument()
+    const note = screen.getByText('已彻底删除。如果它是真的凭证，记得去换一个新的。')
+    await waitFor(() => { expect(note).toHaveFocus() })
+  })
+
   it('跨项目确认：「取消」回到裁决按钮；「继续处理」裁决完落到结果的「撤销」', async () => {
     const other = memory({ id: 'p2', type: 'preference', workspacePath: '/w/blog', content: '测试里 mock 数据库就行。' })
     const cross: PendingItem = { ...conflict, right: other } as PendingItem

@@ -141,8 +141,15 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
       if (current === undefined || item.updatedAt > current.updatedAt || (item.updatedAt === current.updatedAt && isOwn)) byId.set(item.id, item)
     }
   }
+  // 彻底删除的那条视图里已经没有了，按 id 原位留一行说明（删的是最后一条时留在空状态上面，也是焦点的落点）
+  const purgedNote = (id: string) => <p key={id} className="pm-side-hint" tabIndex={-1}>{t('pending.secret.deletedNotice')}</p>
   if (globalCount === 0 && projectCount === 0) {
-    return <div className="pm-side"><EmptyState variant="first" title={t('sidebar.empty.title')}>{t('sidebar.empty.body')}</EmptyState></div>
+    return (
+      <div className="pm-side">
+        {(snapshot?.savedIds ?? []).filter(id => purged.has(id)).map(purgedNote)}
+        <EmptyState variant="first" title={t('sidebar.empty.title')}>{t('sidebar.empty.body')}</EmptyState>
+      </div>
+    )
   }
 
   // 带入的记忆按类型分组；记忆有待决横向冲突（或刚裁决完）时，那张冲突卡占它的位置，另一方不再单独列
@@ -185,7 +192,6 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
       shown.add(id)
     }
   }
-  // 彻底删除的那条视图里已经没有了，按 id 原位留一行说明
   const saved = (snapshot?.savedIds ?? []).filter(id => !forgotten.has(id))
     .flatMap((id): Array<{ id: string; memory: MemoryCardData | undefined }> => {
       const memory = byId.get(id)
@@ -252,7 +258,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
           <section className="pm-side-section" aria-label={t('sidebar.saved.title')}>
             <h2 className="pm-side-title">{t('sidebar.saved.title')}</h2>
             {saved.map(({ id, memory }) => memory === undefined
-              ? <p key={id} className="pm-side-hint" tabIndex={-1}>{t('pending.secret.deletedNotice')}</p>
+              ? purgedNote(id)
               : (
                 <div key={id} className="pm-side-saved">
                   <div className="pm-side-saved-card">{card(memory)}</div>

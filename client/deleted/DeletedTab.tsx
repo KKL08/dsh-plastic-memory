@@ -60,53 +60,55 @@ export function DeletedTab({ nav, scope, session, now = Date.now() }: {
   const typeLabel = useTypeLabel(session)
   if (view.status !== 'ready') return <ViewMessage state={view} />
   const names = memoryNames(library.status === 'ready' ? library.data : undefined, view.data)
-  if (items.length === 0) {
-    return <EmptyState variant="daily" title={t('deleted.empty.title')}>{t('deleted.empty.body')}</EmptyState>
-  }
 
+  // 恢复的是最后一条时空状态和结果提示同时在：提示在上面，也是确认收起后焦点的落点
   return (
     <div className="pm-del">
       {actions.notice !== undefined ? <p className="pm-notice" role="status" tabIndex={-1}>{actions.notice.text}</p> : null}
-      <ul className="pm-list">
-        {items.map(({ memory, deletedAt, purgeAt, cause }) => {
-          const meta = [
-            cause !== undefined ? causeLabel(cause, names, t) : t('deleted.label'),
-            formatDay(deletedAt, now, t),
-            purgeLabel(purgeAt, now, t),
-          ]
-          return (
-            <FlashRow key={memory.id} className="pm-list-row" flashing={flashId === memory.id} onFlashEnd={clear}>
-              <div className="pm-del-body">
-                <MemoryCard memory={memory} now={now} typeLabel={typeLabel(memory.type)} hideScope />
-                <p className="pm-del-meta">
-                  {meta.map((text, i) => (
-                    <Fragment key={i}>
-                      {i > 0 ? <i className="pm-sep" aria-hidden="true">·</i> : null}
-                      <span>{text}</span>
-                    </Fragment>
-                  ))}
-                </p>
-                {actions.crossConfirm(memory.id)}
-              </div>
-              <div className="pm-row-actions pm-del-actions">
-                {cause !== undefined ? <span className="pm-del-hint">{t('deleted.restoreHint')}</span> : null}
-                <Button
-                  unavailable={actions.unavailable(memory.id)}
-                  onClick={() => {
-                    void actions.run(
-                      memory.id,
-                      { cmd: 'restore', memoryId: memory.id, layer: layerOfMemory(memory) },
-                      result => t(result.decisionId !== undefined ? 'deleted.restoredConflict' : 'deleted.restored'),
-                    )
-                  }}
-                >
-                  {t('deleted.restore')}
-                </Button>
-              </div>
-            </FlashRow>
-          )
-        })}
-      </ul>
+      {items.length === 0
+        ? <EmptyState variant="daily" title={t('deleted.empty.title')}>{t('deleted.empty.body')}</EmptyState>
+        : (
+          <ul className="pm-list">
+            {items.map(({ memory, deletedAt, purgeAt, cause }) => {
+              const meta = [
+                cause !== undefined ? causeLabel(cause, names, t) : t('deleted.label'),
+                formatDay(deletedAt, now, t),
+                purgeLabel(purgeAt, now, t),
+              ]
+              return (
+                <FlashRow key={memory.id} className="pm-list-row" flashing={flashId === memory.id} onFlashEnd={clear}>
+                  <div className="pm-del-body">
+                    <MemoryCard memory={memory} now={now} typeLabel={typeLabel(memory.type)} hideScope />
+                    <p className="pm-del-meta">
+                      {meta.map((text, i) => (
+                        <Fragment key={i}>
+                          {i > 0 ? <i className="pm-sep" aria-hidden="true">·</i> : null}
+                          <span>{text}</span>
+                        </Fragment>
+                      ))}
+                    </p>
+                    {actions.crossConfirm(memory.id)}
+                  </div>
+                  <div className="pm-row-actions pm-del-actions">
+                    {cause !== undefined ? <span className="pm-del-hint">{t('deleted.restoreHint')}</span> : null}
+                    <Button
+                      unavailable={actions.unavailable(memory.id)}
+                      onClick={() => {
+                        void actions.run(
+                          memory.id,
+                          { cmd: 'restore', memoryId: memory.id, layer: layerOfMemory(memory) },
+                          result => t(result.decisionId !== undefined ? 'deleted.restoredConflict' : 'deleted.restored'),
+                        )
+                      }}
+                    >
+                      {t('deleted.restore')}
+                    </Button>
+                  </div>
+                </FlashRow>
+              )
+            })}
+          </ul>
+        )}
     </div>
   )
 }
