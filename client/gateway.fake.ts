@@ -65,8 +65,13 @@ export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
   const opened: FakeGateway['opened'] = []
   const reads: string[] = []
   let config = init.config
-  // 删除状态和宿主实现同一份逻辑：同一个假网关下的几个界面共用
+  // 删除状态和宿主实现同一份逻辑：同一个假网关下的几个界面共用；推来的最近删除视图也进去，等同宿主读到它
   const deletions = createDeletionStore()
+  const settle = () => {
+    const deleted = views.get('deleted')
+    if (deleted?.status === 'ready') deletions.settle(deleted.data as ViewMap['deleted'])
+  }
+  settle()
 
   return {
     executed,
@@ -89,7 +94,11 @@ export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
     },
     setSession(next) { session = next; bump() },
     setCurrentWorkspace(path) { currentWorkspace = toCurrent(path); bump() },
-    setView(name, value) { views.set(name, toState(value)); bump() },
+    setView(name, value) {
+      views.set(name, toState(value))
+      if (name === 'deleted') settle()
+      bump()
+    },
     useSession(workspacePath) {
       useRevision()
       sessionRequests.push(workspacePath)

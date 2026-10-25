@@ -211,6 +211,20 @@ describe('createHostGateway', () => {
     expect(other.current.size).toBe(0)
   })
 
+  it('读到的最近删除视图也进删除状态：里面的记忆算软删', async () => {
+    localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+    const deletedPath = '/h/memories/.state/gui/deleted.json'
+    resources[fileAddress('s1', deletedPath)] = { status: 'live', value: { absolutePath: deletedPath, version: 'v1' }, failure: undefined }
+    const card = { id: 'm9', name: 'm9', type: 'preference', scope: 'global' as const, summary: '', content: 'x', tags: [], createdAt: 1, updatedAt: 1, lastConfirmedAt: 1, filePath: '' }
+    files[deletedPath] = JSON.stringify({ version: GUI_VIEW_VERSION, items: [{ memory: card, deletedAt: 1, purgeAt: 2 }] })
+    const gateway = createHostGateway(fakeCtx())(props)
+    const { result } = renderHook(() => {
+      gateway.useView(gateway.useSession(undefined), 'deleted')
+      return gateway.useDeletions()
+    })
+    await waitFor(() => { expect([...result.current]).toEqual([['m9', 'soft']]) })
+  })
+
   it('首次：借会话发 info，缓存 memoryRoot，再发一次 refresh-views；资源仍停在 not-found 也直接读出视图', async () => {
     resources[fileAddress('s1', pendingPath)] = { status: 'failed', value: undefined, failure: { code: 'workspace-file/not-found', message: '' } }
     const gateway = createHostGateway(fakeCtx())(props)

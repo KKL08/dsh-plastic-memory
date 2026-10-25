@@ -307,6 +307,39 @@ describe('交付卡与其他界面共用删除状态', () => {
     expect(chatCard().queryByRole('button', { name: '删除这条记忆' })).toBeNull()
   })
 
+  it('对话里 agent 自己删掉（最近删除视图里有这条）：交付卡换成「已删除」可撤销；撤销后视图还没刷新也不弹回去', async () => {
+    const gateway = createFakeGateway({ views: { library: libraryView() } })
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd={WS} saved={[fresh()]} now={NOW} openDetail={() => {}} />, gateway)
+    expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
+    const gone = { ...libraryView(), layers: [{ layer: { kind: 'workspace' as const, workspacePath: WS }, items: [] }] }
+    act(() => {
+      gateway.setView('library', gone)
+      gateway.setView('deleted', { version: GUI_VIEW_VERSION, items: [{ memory: fresh().memory, deletedAt: NOW, purgeAt: NOW + 1 }] })
+    })
+    expect(chatCard().getByText('已删除。14 天内也能在最近删除里找回。')).toBeInTheDocument()
+    await act(async () => { fireEvent.click(chatCard().getByRole('button', { name: '撤销' })) })
+    expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
+    act(() => { gateway.setView('deleted', { version: GUI_VIEW_VERSION, items: [] }) })
+    expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
+  })
+
+  it('刚记下、视图里还没有这条：不当成已删除', () => {
+    const gateway = createFakeGateway({
+      views: { library: { ...libraryView(), layers: [] }, deleted: { version: GUI_VIEW_VERSION, items: [] } },
+    })
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd={WS} saved={[fresh()]} now={NOW} openDetail={() => {}} />, gateway)
+    expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
+    expect(chatCard().queryByText(PURGED)).toBeNull()
+  })
+
+  it('交付卡里删除后最近删除视图还没刷新：仍显示「已删除」，不弹回去', async () => {
+    const gateway = createFakeGateway({ views: { library: libraryView(), deleted: { version: GUI_VIEW_VERSION, items: [] } } })
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd={WS} saved={[fresh()]} now={NOW} openDetail={() => {}} />, gateway)
+    await act(async () => { fireEvent.click(chatCard().getByRole('button', { name: '删除这条记忆' })) })
+    act(() => { gateway.setView('deleted', { version: GUI_VIEW_VERSION, items: [] }) })
+    expect(chatCard().getByText('已删除。14 天内也能在最近删除里找回。')).toBeInTheDocument()
+  })
+
   it('交付卡里删除后，右侧栏「这次对话新记的」里同一条也去掉', async () => {
     const gateway = createFakeGateway({ views: { library: libraryView(), session: sessionView } })
     renderInShell(
