@@ -53,8 +53,8 @@ describe('memory_snapshot', () => {
 
   it('list：返回快照清单（倒序）', async () => {
     const deps = makeDeps()
-    await deps.snapshots.capture({ operation: 'manual', description: '早', records: [] }, 100)
-    await deps.snapshots.capture({ operation: 'pre-forget', description: '晚', records: [] }, 200)
+    await deps.snapshots.capture({ operation: 'manual', description: '早', records: [record()] }, 100)
+    await deps.snapshots.capture({ operation: 'pre-forget', description: '晚', records: [record()] }, 200)
     const r = await executeSnapshotTool({ action: 'list' }, { workspacePath: '/proj' }, deps)
     expect(r.kind).toBe('listed')
     if (r.kind === 'listed') {

@@ -12,7 +12,7 @@ export interface SnapshotToolDeps {
 /** allowCrossWorkspace：用户明确选择「全局整理」时才为 true，放行其他项目的记录（见 workspace-gate.ts）。 */
 export type SnapshotToolArgs =
   | { action: 'create'; description?: string; memoryIds?: string[]; allowCrossWorkspace?: boolean }
-  | { action: 'list' }
+  | { action: 'list'; allowCrossWorkspace?: boolean }
   | { action: 'show'; snapshotId: string; allowCrossWorkspace?: boolean }
   | { action: 'restore'; snapshotId: string; memoryIds?: string[]; overwriteChanged?: boolean; allowCrossWorkspace?: boolean }
 
@@ -77,10 +77,14 @@ export async function executeSnapshotTool(
   }
 
   if (args.action === 'list') {
-    const snapshots = (await deps.snapshots.list()).map(s => ({
-      id: s.id, createdAt: s.createdAt, operation: s.operation,
-      description: s.description, count: s.memoryIds.length,
-    }))
+    // 跨 workspace 门：只列含可见记录（global + 当前 workspace）的快照，条数按可见记录算；全是其他项目记录的快照
+    // 连描述也不露。按快照里记录自己的位置判定，不逐条读现状；带参数时照旧全列
+    const snapshots = (await deps.snapshots.list())
+      .map(s => ({
+        id: s.id, createdAt: s.createdAt, operation: s.operation, description: s.description,
+        count: args.allowCrossWorkspace === true ? s.memoryIds.length : s.data.filter(r => isVisible(r, context)).length,
+      }))
+      .filter(s => args.allowCrossWorkspace === true || s.count > 0)
     return {
       kind: 'listed', snapshots,
       message: snapshots.length === 0

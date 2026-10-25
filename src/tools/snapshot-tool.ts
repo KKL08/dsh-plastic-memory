@@ -22,7 +22,7 @@ export function createSnapshotTool(deps: SnapshotToolBindingDeps): ToolDefinitio
       memoryIds: { type: 'array', items: { type: 'string' }, description: 'create：只快照这些记忆；restore：只恢复这些记忆' },
       description: { type: 'string', description: 'create 时的备注' },
       overwriteChanged: { type: 'boolean', description: 'restore 时覆盖快照后被修改过的记录（需用户确认）' },
-      allowCrossWorkspace: { ...ALLOW_CROSS_WORKSPACE_PARAM, description: `create（指定 memoryIds）/ show / restore 适用。${ALLOW_CROSS_WORKSPACE_PARAM.description}` },
+      allowCrossWorkspace: { ...ALLOW_CROSS_WORKSPACE_PARAM, description: `create（指定 memoryIds）/ list / show / restore 适用；list 不带时只列含当前项目或全局记忆的快照。${ALLOW_CROSS_WORKSPACE_PARAM.description}` },
     },
     output: {
       schema: { type: 'json' },
