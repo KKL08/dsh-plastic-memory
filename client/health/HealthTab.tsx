@@ -1,7 +1,8 @@
 /**
  * 健康 tab：按层各一块（看项目时本项目 + 全局，看全局时只有全局），每块三段——体检横幅里是分数与结论、
  * 下一行上次体检时间，横幅下是问题列表。从没体检过不显示分数（不出现 0 或 100 分），时间行写「内容检查还没做过」。
- * 有密钥的层不打分（score 为 null），写原因；超出上限列为问题、不扣分。
+ * 有密钥的层不打分（score 为 null），写原因；超出上限列为问题、不扣分，带「去处理 ›」。本项目自己没有记忆、只有超限提醒时
+ * （视图的 overflowOnlyLayers）照实写 0 条和超限这一行。
  * 体检关闭时整块置灰并给「去设置里打开 ›」，密钥与读不出的文件仍从待处理视图提示（规则检查，不调模型）。
  * 层块下面两行入口：「待你决定 N 条，其中 M 条超过 7 天 · 去处理 ›」「可提升为全局 N 条 · 去看 ›」，都去待处理 tab。
  */
@@ -31,11 +32,60 @@ function Dotted({ parts }: { parts: readonly ReactNode[] }) {
   return <>{parts.map((part, i) => <span key={i}>{i > 0 ? <i className="pm-sep" aria-hidden="true">·</i> : null}{part}</span>)}</>
 }
 
-function LayerHealth({ layer, data, now }: { layer: GuiLayerRef; data: HealthLayer | undefined; now: number }) {
+type OverflowLevel = NonNullable<HealthLayer['overflow']>
+
+/** 问题列表：超限那一行带「去处理 ›」，落到待处理（与右侧栏用量条同一个去处）。 */
+function Issues({ lines, overflow, tail, onHandle }: { lines: readonly string[]; overflow: OverflowLevel | null; tail: readonly string[]; onHandle: () => void }) {
+  const t = useT()
+  const item = (text: string) => <li key={text}>{text}</li>
+  return (
+    <div className="pm-health-issues">
+      <h3 className="pm-health-issues-title">{t('health.issues')}</h3>
+      {lines.length === 0 && overflow === null && tail.length === 0
+        ? <p className="pm-health-none">{t('health.noIssues')}</p>
+        : (
+          <ul>
+            {lines.map(item)}
+            {overflow !== null
+              ? (
+                <li>
+                  <span>{overflow.mode === 'relax' ? t('health.overflow.relax', { percent: overflow.tier * 25 }) : t('health.overflow.strict')}</span>
+                  <i className="pm-sep" aria-hidden="true">·</i>
+                  <button type="button" className="pm-link" onClick={onHandle}>{t('health.entry.pendingLink')}</button>
+                </li>
+              )
+              : null}
+            {tail.map(item)}
+          </ul>
+        )}
+    </div>
+  )
+}
+
+function LayerHealth({ layer, data, overflowOnly, now, onHandleOverflow }: {
+  layer: GuiLayerRef
+  data: HealthLayer | undefined
+  /** 这一层不在体检清单里（自己没有记忆）、只有超限提醒时的档位。 */
+  overflowOnly: OverflowLevel | undefined
+  now: number
+  onHandleOverflow: () => void
+}) {
   const t = useT()
   const name = layerName(layer, t)
   if (data === undefined) {
-    return <section className="pm-health-layer" aria-label={name}><HealthBanner conclusion={t('health.noMemories')} /></section>
+    // 没有记忆可打分：照实写 0 条和超限这一行，不写分数与体检时间
+    return (
+      <section className="pm-health-layer" aria-label={name}>
+        {overflowOnly === undefined
+          ? <HealthBanner conclusion={t('health.noMemories')} />
+          : (
+            <>
+              <HealthBanner conclusion={<Dotted parts={[name, t('health.count', { n: formatNumber(0) })]} />} />
+              <Issues lines={[]} overflow={overflowOnly} tail={[]} onHandle={onHandleOverflow} />
+            </>
+          )}
+      </section>
+    )
   }
   // 从没体检过不显示分数：只有规则检查的分数会让人误以为体检过了
   const scorePart = data.score === null
@@ -43,13 +93,6 @@ function LayerHealth({ layer, data, now }: { layer: GuiLayerRef; data: HealthLay
     : data.semanticCachedAt === null
       ? t('health.unscored')
       : <Dotted parts={[t('health.score', { score: formatNumber(data.score) }), t(`health.tier.${data.tier}`)]} />
-  const issues: string[] = data.issues.map(i => t('health.issueCount', { label: issueLabel(i.type, t), n: formatNumber(i.count) }))
-  if (data.overflow !== null) {
-    issues.push(data.overflow.mode === 'relax'
-      ? t('health.overflow.relax', { percent: data.overflow.tier * 25 })
-      : t('health.overflow.strict'))
-  }
-  if (data.staleCount > 0) issues.push(t('health.stale', { n: formatNumber(data.staleCount) }))
   return (
     <section className="pm-health-layer" aria-label={name}>
       <HealthBanner
@@ -57,12 +100,12 @@ function LayerHealth({ layer, data, now }: { layer: GuiLayerRef; data: HealthLay
         conclusion={<Dotted parts={[name, t('health.count', { n: formatNumber(data.totalMemories) }), scorePart]} />}
         detail={data.semanticCachedAt === null ? t('health.neverScanned') : t('health.lastScan', { date: formatDay(data.semanticCachedAt, now, t) })}
       />
-      <div className="pm-health-issues">
-        <h3 className="pm-health-issues-title">{t('health.issues')}</h3>
-        {issues.length === 0
-          ? <p className="pm-health-none">{t('health.noIssues')}</p>
-          : <ul>{issues.map(text => <li key={text}>{text}</li>)}</ul>}
-      </div>
+      <Issues
+        lines={data.issues.map(i => t('health.issueCount', { label: issueLabel(i.type, t), n: formatNumber(i.count) }))}
+        overflow={data.overflow}
+        tail={data.staleCount > 0 ? [t('health.stale', { n: formatNumber(data.staleCount) })] : []}
+        onHandle={onHandleOverflow}
+      />
     </section>
   )
 }
@@ -128,8 +171,13 @@ export function HealthTab({ session, scope, nav }: { session: BorrowedSession; s
   const now = Date.now()
   const layers: GuiLayerRef[] = scope.kind === 'workspace' ? [scope, { kind: 'global' }] : [{ kind: 'global' }]
   const rows = layers.map(layer => ({ layer, data: health.data.layers.find(l => sameScope(l.layer, layer)) }))
+  const overflowOnly = (layer: GuiLayerRef) => health.data.overflowOnlyLayers?.find(l => sameScope(l.layer, layer))?.overflow
+  const toPending = () => { nav.update({ tab: 'pending', memoryId: undefined }) }
   const body = rows.map(({ layer, data }) => (
-    <LayerHealth key={layer.kind === 'global' ? 'global' : layer.workspacePath} layer={layer} data={data} now={now} />
+    <LayerHealth
+      key={layer.kind === 'global' ? 'global' : layer.workspacePath}
+      layer={layer} data={data} overflowOnly={overflowOnly(layer)} now={now} onHandleOverflow={toPending}
+    />
   ))
 
   if (!health.data.governanceEnabled) {

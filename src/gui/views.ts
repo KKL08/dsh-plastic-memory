@@ -144,7 +144,8 @@ function typeLabels(registry: TypeRegistry, present: Iterable<string | undefined
   return Object.fromEntries([...types].map(name => [name, registry.get(name).label]))
 }
 
-/** 健康：每层复用 scoreLayer（与 memory_health / memory_scan 同分）；有密钥的层不打分。超限另列（不扣分）。 */
+/** 健康：每层复用 scoreLayer（与 memory_health / memory_scan 同分）；有密钥的层不打分。超限另列（不扣分）；
+ *  自己没有记忆、不在体检清单里的项目有超限提醒时，单列进 overflowOnlyLayers（只有档位，不打分）。 */
 export function buildHealthView(input: ViewInput): HealthView {
   const overflow = [...input.open, ...input.settled].filter(e => kindOf(e) === 'overflow')
   return {
@@ -165,6 +166,11 @@ export function buildHealthView(input: ViewInput): HealthView {
         overflow: overflowOfLayer(overflow, layer),
       }
     }),
+    overflowOnlyLayers: [...new Set(overflow.map(overflowScopeOf))]
+      .filter((scope): scope is string => scope !== undefined && scope !== 'global'
+        && !input.healthLayers.some(l => l.kind === 'workspace' && l.path === scope))
+      .sort()
+      .map(path => ({ layer: { kind: 'workspace' as const, workspacePath: path }, overflow: overflowOfLayer(overflow, { kind: 'workspace', path })! })),
   }
 }
 

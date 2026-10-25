@@ -1264,11 +1264,14 @@ describe('配置热生效（loader/volatile-update）', () => {
       expect.objectContaining({ kind: 'overflow', mode: 'relax', tier: expected.tier, workspacePath }),
     ])
     expect(expected.tier).toBe(1)
+    // 会话所在项目自己没有记忆：健康里单列这条超限，档位与待处理一致
+    expect((await readNow('health', healthViewSchema)).overflowOnlyLayers).toEqual([{ layer: { kind: 'workspace', workspacePath }, overflow: expected }])
 
     await t.update({ snapshotTokenBudget: usedTokens + 1000 })
     const pending = await readNow('pending', pendingViewSchema)
     expect([pending.items, pending.dot]).toEqual([[], 'none'])
-    expect((await readNow('health', healthViewSchema)).layers.map(l => l.overflow).filter(o => o !== null)).toEqual([])
+    const health = await readNow('health', healthViewSchema)
+    expect([health.layers.map(l => l.overflow).filter(o => o !== null), health.overflowOnlyLayers]).toEqual([[], []])
     expect(await new PendingDecisionsStore(sidecarAt(t.memoryRoot).pending).listOverflow()).toEqual([])
   })
 })

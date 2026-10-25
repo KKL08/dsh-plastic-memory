@@ -312,6 +312,24 @@ describe('健康视图', () => {
     expect(tool.message).toContain('超出上限')
   })
 
+  it('超限的项目自己没有记忆（不在体检清单里）：单列在 overflowOnlyLayers，只带超限档位，不编层统计；global 照常', async () => {
+    const h = harness()
+    await h.store.create(g({ id: 'mem_g', name: '全局一条' }))
+    await h.decisions.syncOverflow(WS, { mode: 'strict', tier: 0 }, T0, '超限')
+    await h.decisions.syncOverflow('global', { mode: 'strict', tier: 0 }, T0, '超限')
+
+    const { health } = await h.views()
+    expect(healthViewSchema.parse(health)).toEqual(health)
+    expect(health.layers.map(l => [l.layer, l.overflow])).toEqual([[{ kind: 'global' }, { mode: 'strict', tier: 0 }]])
+    expect(health.overflowOnlyLayers).toEqual([{ layer: { kind: 'workspace', workspacePath: WS }, overflow: { mode: 'strict', tier: 0 } }])
+
+    // 项目有了自己的记忆就回到体检清单，不再单列
+    await h.store.create(w({ id: 'mem_w', name: '本项目一条' }))
+    const again = (await h.views()).health
+    expect(again.layers.find(l => l.layer.kind === 'workspace')!.overflow).toEqual({ mode: 'strict', tier: 0 })
+    expect(again.overflowOnlyLayers).toEqual([])
+  })
+
   it('复用治理评分：与 memory_health 同分；从没体检过 semanticCachedAt 为 null；有密钥的层不打分', async () => {
     const h = harness()
     await h.store.create(w({ id: 'mem_a', name: 'A' }))
