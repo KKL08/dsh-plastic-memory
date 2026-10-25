@@ -56,6 +56,17 @@ describe('memory_confirm resolve（横向冲突）', () => {
     expect(await deps.decisions.list()).toHaveLength(0)
   })
 
+  it('同一待决项同时收到 keep-left 与 keep-right：只有一条裁决，只删一方；另一条报错、什么都不动', async () => {
+    const deps = makeDeps()
+    const entry = await setupHorizontal(deps)
+    const results = await Promise.all((['keep-left', 'keep-right'] as const).map(verdict =>
+      executeConfirm({ action: 'resolve', decisionId: entry.id, verdict }, { workspacePath: '/proj' }, deps)))
+    expect(results.map(r => r.kind).sort()).toEqual(['error', 'resolved'])
+    const deleted = [(await deps.store.get('mem_left'))!.status, (await deps.store.get('mem_right'))!.status].filter(s => s === 'deleted')
+    expect(deleted).toHaveLength(1)
+    expect(await deps.snapshots.list()).toHaveLength(1)
+  })
+
   it('删除败方时顺带清理其他引用该记忆的待决项，并在 actions 中报告数量', async () => {
     const deps = makeDeps()
     await deps.store.put(record({ id: 'mem_left' }))

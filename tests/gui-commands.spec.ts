@@ -6,14 +6,16 @@ import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
-import { ARCHIVE_DIR, STATE_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
+import { ARCHIVE_DIR, GLOBAL_DIR, STATE_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
 import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
-import { REDACTED_PLACEHOLDER, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
+import { REDACTED_PLACEHOLDER, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, type PendingDecision } from '../src/governance/schema.ts'
+import type { ClaimKvTable } from '../src/kv-table.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
+import { SECRET_MASK } from '../src/secrets.ts'
 import { ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../src/gui/commands.ts'
 import {
@@ -39,6 +41,8 @@ beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-gui-commands-')
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
 interface EnvOpts {
+  /** 包一层账本侧表（在读写之间插入别的动作，模拟并发）。 */
+  wrapPending?: (table: ClaimKvTable<PendingDecision>) => ClaimKvTable<PendingDecision>
   workspacePath?: string
   delegationDepth?: number
   llm?: SemanticLlm | null
@@ -49,7 +53,7 @@ interface EnvOpts {
 function env(opts: EnvOpts = {}) {
   const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
-  const decisions = new PendingDecisionsStore(sidecar.pending)
+  const decisions = new PendingDecisionsStore(opts.wrapPending?.(sidecar.pending) ?? sidecar.pending)
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const cache = sidecar.scanCache
   const clock = { now: opts.now ?? NOW }
@@ -203,6 +207,128 @@ describe('resolve 与 undo', () => {
     const e = env()
     const entry = await seedPair(e)
     expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('not-found')
+  })
+})
+
+describe('并发裁决', () => {
+  /** 两条相反的裁决同时发出：恰好一条成功、只删它的败方，另一条失败且什么都不动。 */
+  async function expectOneRuling(results: MemoryCommandResult[], e: ReturnType<typeof env>) {
+    expect(results.filter(r => r.ok)).toHaveLength(1)
+    const winner = results[0]!.ok ? 'keep-left' : 'keep-right'
+    const loser = err(results.find(r => !r.ok)!)
+    expect(loser.detail).toMatch(/已被裁决|正在/)
+    const statuses = [(await e.store.get('mem_a'))!.status, (await e.store.get('mem_b'))!.status]
+    expect(statuses).toEqual(winner === 'keep-left' ? ['active', 'deleted'] : ['deleted', 'active'])
+    expect(await e.snapshots.list()).toHaveLength(1)
+    expect((await e.decisions.listSettled()).map(d => d.settled?.verdict)).toEqual([winner])
+  }
+
+  it('同一冲突同时收到 keep-left 与 keep-right：只有一条生效，只删一方', async () => {
+    const e = env()
+    const entry = await seedPair(e)
+    const results = await Promise.all([
+      e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' }),
+      e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-right' }),
+    ])
+    await expectOneRuling(results, e)
+  })
+
+  it('两个宿主实例（各自的侧表与 FileTable）共用一个根：同样只有一条生效', async () => {
+    const a = env()
+    const b = env()
+    const entry = await seedPair(a)
+    const results = await Promise.all([
+      a.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' }),
+      b.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-right' }),
+    ])
+    await expectOneRuling(results, a)
+  })
+
+  /**
+   * 体检与裁决同时进行：体检的语义层跑完之后，下一次读账本先拿到快照，再让 rule 把裁决做完，最后把裁决前的快照交给体检
+   * （体检据此挂账）。rule 由同一个实例或另一个实例（另一个宿主进程）执行。
+   */
+  async function scanDuringRuling(rule: (decisionId: string) => Promise<MemoryCommandResult>, scanner: (wrap: EnvOpts['wrapPending']) => ReturnType<typeof env>) {
+    let decisionId = ''
+    let isArmed = false
+    const wrap: EnvOpts['wrapPending'] = table => ({
+      get: key => table.get(key),
+      put: (key, value) => table.put(key, value),
+      delete: key => table.delete(key),
+      claim: key => table.claim(key),
+      list: async () => {
+        const snapshot = await table.list()
+        if (isArmed) {
+          isArmed = false
+          ok(await rule(decisionId))
+        }
+        return snapshot
+      },
+    })
+    const e = scanner(wrap)
+    decisionId = (await seedPair(e)).id
+    const armingLlm: SemanticLlm = {
+      complete: async () => {
+        isArmed = true
+        return JSON.stringify({ findings: [{ type: 'conflict', memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', suggestedAction: '裁决' }] })
+      },
+    }
+    return { e, decisionId, armingLlm }
+  }
+
+  async function expectRulingSurvives(e: ReturnType<typeof env>, decisionId: string) {
+    expect(await e.decisions.list()).toEqual([])
+    expect((await e.decisions.listSettled()).map(d => [d.id, d.settled?.verdict])).toEqual([[decisionId, 'keep-left']])
+    expect([(await e.store.get('mem_a'))!.status, (await e.store.get('mem_b'))!.status]).toEqual(['active', 'deleted'])
+    expect(await e.snapshots.list()).toHaveLength(1)
+  }
+
+  it('体检挂账时同一冲突刚被裁决：已裁决的条目不被体检改回待处理，败方只删一次', async () => {
+    let llm: SemanticLlm | undefined
+    const { e, decisionId, armingLlm } = await scanDuringRuling(
+      id => e.run({ cmd: 'resolve', decisionId: id, verdict: 'keep-left' }),
+      wrapPending => env({ wrapPending, llm: { complete: (...args) => llm!.complete(...args) } }),
+    )
+    llm = armingLlm
+    ok(await e.run({ cmd: 'scan' }))
+    await expectRulingSurvives(e, decisionId)
+  })
+
+  it('两个宿主实例共用一个根：一个在体检，另一个裁决同一冲突，同样不被改回待处理', async () => {
+    const other = env()
+    let llm: SemanticLlm | undefined
+    const { e, decisionId, armingLlm } = await scanDuringRuling(
+      id => other.run({ cmd: 'resolve', decisionId: id, verdict: 'keep-left' }),
+      wrapPending => env({ wrapPending, llm: { complete: (...args) => llm!.complete(...args) } }),
+    )
+    llm = armingLlm
+    ok(await e.run({ cmd: 'scan' }))
+    await expectRulingSurvives(e, decisionId)
+    await expectRulingSurvives(other, decisionId)
+  })
+
+  const writeClaim = async (decisionId: string, pid: number) => {
+    await mkdir(join(root, STATE_DIR, 'pending'), { recursive: true })
+    await writeFile(join(root, STATE_DIR, 'pending', `${decisionId}.claim`), JSON.stringify({ pid, at: Date.now(), id: 'other' }))
+  }
+
+  it('另一次裁决正持有认领：failed 并说明，账本与记忆都不动', async () => {
+    const e = env()
+    const entry = await seedPair(e)
+    await writeClaim(entry.id, process.pid)
+    expect(err(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' })).detail).toMatch(/正在被另一次裁决处理/)
+    expect(await e.decisions.list()).toEqual([entry])
+    expect((await e.store.get('mem_b'))!.status).toBe('active')
+    expect(await e.snapshots.list()).toEqual([])
+  })
+
+  it('裁决进程崩溃留下的认领：持有进程已不在时不挡后来的裁决，裁决完认领文件也清掉', async () => {
+    const e = env()
+    const entry = await seedPair(e)
+    await writeClaim(entry.id, 2 ** 22 + 12345) // 大于各平台的 pid 上限，必定不存在
+    ok(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' }))
+    expect((await e.store.get('mem_b'))!.status).toBe('deleted')
+    expect((await readdir(join(root, STATE_DIR, 'pending'))).filter(f => !f.endsWith('.json'))).toEqual([])
   })
 })
 
@@ -738,6 +864,25 @@ describe('提升候选与超限', () => {
     expect(await e.decisions.list()).toEqual([entry])
   })
 
+  it('同一候选同时收到 promote 与 keep-local：只有一条生效，另一条什么都不动', async () => {
+    const e = env({ llm: quietLlm })
+    const { decisionId, memoryId } = await seedCandidate(e)
+    const results = await Promise.all([
+      e.run({ cmd: 'promote', decisionId, target: 'global' }),
+      e.run({ cmd: 'keep-local', decisionId }),
+    ])
+    expect(results.filter(r => r.ok)).toHaveLength(1)
+    const settled = (await e.decisions.listSettled()).map(d => d.settled?.verdict)
+    const rec = (await e.store.get(memoryId))!
+    if (results[0]!.ok) {
+      expect(settled).toEqual(['promoted'])
+      expect(rec.scope).toBe('global')
+    } else {
+      expect(settled).toEqual(['keep-local'])
+      expect([rec.scope, rec.globalCandidate]).toEqual(['workspace', undefined])
+    }
+  })
+
   it('dismiss-overflow：超限提醒标 settled（dismiss）', async () => {
     const e = env()
     const { entry } = await e.decisions.upsert({ kind: 'overflow', memoryIds: [], summary: '超出上限', fingerprint: '1' }, 1)
@@ -790,6 +935,25 @@ describe('refresh-views', () => {
     expect(await e.decisions.listSettled()).toEqual([])
     for (const name of Object.keys(GUI_VIEW_FILES) as Array<keyof typeof GUI_VIEW_FILES>) {
       expect((await e.readView(name)) as { version: number }).toMatchObject({ version: GUI_VIEW_VERSION })
+    }
+  })
+})
+
+describe('读不出的文件', () => {
+  it('解析报错引出的原文行里有密钥（两级都算）：待处理与健康视图里换成占位，不出现原文', async () => {
+    const e = env()
+    const suspected = 'api_key: TESTONLY0000000000000000'
+    await mkdir(join(root, GLOBAL_DIR), { recursive: true })
+    // YAML 报错只引出错的那一行：两个文件各让一级密钥落在那一行上
+    await writeFile(join(root, GLOBAL_DIR, 'bad-critical.md'), `---\nname: 坏文件\nsummary: [${FAKE_SECRET.sk}\n---\n正文\n`)
+    await writeFile(join(root, GLOBAL_DIR, 'bad-suspected.md'), `---\nname: 坏文件\nnote: ${suspected}\n---\n正文\n`)
+    ok(await e.run({ cmd: 'refresh-views' }))
+    const errors = pendingViewSchema.parse(await e.readView('pending')).items.flatMap(i => i.kind === 'unreadable-file' ? [i.error] : [])
+    expect(errors).toHaveLength(2)
+    for (const error of errors) expect(error).toContain(SECRET_MASK)
+    for (const text of [...errors, JSON.stringify(await e.readView('health'))]) {
+      expect(text).not.toContain(FAKE_SECRET.sk)
+      expect(text).not.toContain(suspected)
     }
   })
 })

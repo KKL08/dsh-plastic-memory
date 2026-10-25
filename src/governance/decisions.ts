@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { KvTable } from '../kv-table.ts'
+import type { ClaimKvTable } from '../kv-table.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { RETENTION_MS } from '../retention.ts'
 import type { OverflowLevel } from '../contract-codes.ts'
@@ -75,6 +75,21 @@ export function overflowScopeOf(entry: Pick<PendingDecision, 'workspaces'>): str
   return entry.workspaces?.[0]
 }
 
+/** 按 id 读记忆此刻的状态（扫描传入 store.get）：认领条目之后据此核对，不用扫描开头预读的数据。 */
+export type ReadMemory = (id: string) => Promise<MemoryRecord | undefined>
+
+/** 记忆此刻仍是这个项目里 active 的提升候选。 */
+async function isCandidateNow(id: string, scope: string | undefined, read: ReadMemory): Promise<boolean> {
+  const r = await read(id)
+  return r?.status === 'active' && r.scope === 'workspace' && r.workspacePath === scope && r.globalCandidate === true
+}
+
+/** 体检要把条目挂成待处理时核对它此刻还成立：冲突双方都还 active；提升候选仍是该项目的候选。 */
+async function holdsNow(entry: KindKeyed & { workspaces?: string[] }, read: ReadMemory): Promise<boolean> {
+  if (kindOf(entry) === 'promote-candidate') return isCandidateNow(entry.memoryIds[0] ?? '', entry.workspaces?.[0], read)
+  return (await Promise.all(entry.memoryIds.map(read))).every(r => r?.status === 'active')
+}
+
 type UpsertInput = { kind?: PendingKind; memoryIds: string[]; baselineRef?: string; summary: string; workspaces?: string[]; fingerprint?: string }
 
 /** 同键再报：更新 summary / workspaces / 指纹，保留 id 与 firstSeenAt。workspaces 与 memoryIds 一一对应，按已有条目的 id 顺序重排。 */
@@ -96,10 +111,25 @@ function mergeReport(existing: PendingDecision, input: UpsertInput): PendingDeci
  * settled 条目对 get / list 不可见，只有 listSettled、upsert、removeByMemoryIds、sweep 会看到它。
  */
 export class PendingDecisionsStore {
-  private table: KvTable<PendingDecision>
+  private table: ClaimKvTable<PendingDecision>
 
-  constructor(table: KvTable<PendingDecision>) {
+  constructor(table: ClaimKvTable<PendingDecision>) {
     this.table = table
+  }
+
+  /**
+   * 认领一条条目后执行 fn，跑完释放：同一条目同时只有一个持有者（侧表实现跨进程），两条相反的裁决不会各删一方。
+   * 已被别人认领时不等待，返回 { isClaimed: false }，什么都不做。fn 里要重新读条目确认它仍是期望的状态：
+   * 认领之前它可能刚被别人裁决完。不可重入：fn 里不能再认领同一条。
+   */
+  async withClaim<R>(id: string, fn: () => Promise<R>): Promise<{ isClaimed: true; value: R } | { isClaimed: false }> {
+    const release = await this.table.claim(id)
+    if (release === undefined) return { isClaimed: false }
+    try {
+      return { isClaimed: true, value: await fn() }
+    } finally {
+      await release()
+    }
   }
 
   async list(): Promise<PendingDecision[]> {
@@ -116,29 +146,47 @@ export class PendingDecisionsStore {
     return (await this.table.list()).map(([, e]) => e).filter(e => e.settled).sort((a, b) => a.settled!.at - b.settled!.at)
   }
 
-  /** settled：命中已裁决条目且指纹没变，没有挂账，entry 是那条已裁决条目。 */
-  async upsert(input: UpsertInput, now: number): Promise<{ created: boolean; settled?: true; entry: PendingDecision }> {
+  /**
+   * settled：命中已裁决条目且指纹没变，没有挂账，entry 是那条已裁决条目。
+   * 改已有条目前先认领它、认领后重读：读快照之后它可能刚被裁决或撤销，不拿旧快照盖掉。正被别人认领（正在裁决）的
+   * 不动，返回 isSkipped。给了 read 时，把条目挂成待处理（重开删一方的裁决、作废旧结论、更新未决条目）之前按记忆
+   * 此刻的状态核对一遍（holdsNow），对不上也返回 isSkipped：刚删掉败方的裁决不会被当成「败方回来了」反撤。
+   */
+  async upsert(input: UpsertInput, now: number, read?: ReadMemory): Promise<{ created: boolean; settled?: true; isSkipped?: true; entry: PendingDecision }> {
     const entries = await this.table.list()
-    for (const [key, existing] of entries) {
-      if (!existing.settled || !samePair(existing, input)) continue
-      if (isDeletionSettled(existing)) {
-        // 删一方的裁决：同一对又被扫到，说明败方回来了（快照恢复等），回到待处理，沿用原条目
-        const { settled: _settled, ...open } = existing
-        const reopened = mergeReport(open, input)
-        await this.table.put(reopened.id, reopened)
-        return { created: false, entry: reopened }
-      }
-      if (input.fingerprint !== undefined && existing.fingerprint === input.fingerprint) return { created: false, settled: true, entry: existing }
-      await this.table.delete(key) // 指纹变了：旧结论作废
-    }
     const key = dedupKey(input.memoryIds, input.baselineRef)
-    for (const [, existing] of entries) {
-      if (existing.settled || kindOf(existing) !== kindOf(input)) continue
-      if (dedupKey(existing.memoryIds, existing.baselineRef) === key) {
+    // 先看已裁决的同一对，再看未决的同键条目
+    const matches = [
+      ...entries.filter(([, e]) => e.settled !== undefined && samePair(e, input)),
+      ...entries.filter(([, e]) => e.settled === undefined && kindOf(e) === kindOf(input) && dedupKey(e.memoryIds, e.baselineRef) === key),
+    ]
+    const holds = async () => read === undefined || await holdsNow(input, read)
+    for (const [id, seen] of matches) {
+      const claimed = await this.withClaim(id, async (): Promise<{ created: false; settled?: true; isSkipped?: true; entry: PendingDecision } | undefined> => {
+        const existing = await this.table.get(id)
+        if (existing === undefined || !samePair(existing, input)) return undefined
+        if (existing.settled !== undefined) {
+          if (!isDeletionSettled(existing) && input.fingerprint !== undefined && existing.fingerprint === input.fingerprint) {
+            return { created: false, settled: true, entry: existing }
+          }
+          if (!(await holds())) return { created: false, isSkipped: true, entry: existing }
+          if (!isDeletionSettled(existing)) {
+            await this.table.delete(id) // 指纹变了：旧结论作废
+            return undefined
+          }
+          // 删一方的裁决：同一对又被扫到、双方此刻都在，说明败方回来了（快照恢复等），回到待处理，沿用原条目
+          const { settled: _settled, ...open } = existing
+          const reopened = mergeReport(open, input)
+          await this.table.put(reopened.id, reopened)
+          return { created: false, entry: reopened }
+        }
+        if (!(await holds())) return { created: false, isSkipped: true, entry: existing }
         const updated = mergeReport(existing, input)
         await this.table.put(updated.id, updated)
         return { created: false, entry: updated }
-      }
+      })
+      if (!claimed.isClaimed) return { created: false, isSkipped: true, entry: seen }
+      if (claimed.value !== undefined) return claimed.value
     }
     const entry: PendingDecision = {
       id: genId('pd'),
@@ -228,25 +276,37 @@ export class PendingDecisionsStore {
    * 「留在本项目」过的指纹不变不再提示，内容改了旧结论作废、重新提示；已提升（promoted）的又成了本项目候选
    * （被快照恢复回来）回到待处理。未决条目的记忆不再是候选（已提升、标记被清、记忆没了）就移除；
    * 「留在本项目」的条目在记忆不再 active 时移除；promoted 留给撤销，由 sweep 按保留窗口清。
+   * 每条先认领、认领后重读（正被别人认领的跳过）；给了 read 时只在扫描数据与记忆此刻的状态一致时才动它
+   * （期间被提升、撤销的这次不动，下次体检再说）。
    */
   async syncPromoteCandidates(
     scope: string,
     candidates: ReadonlyArray<{ id: string; summary: string; fingerprint: string }>,
     liveIds: ReadonlySet<string>,
     now: number,
+    read?: ReadMemory,
   ): Promise<void> {
     const candidateIds = new Set(candidates.map(c => c.id))
-    for (const [key, e] of await this.table.list()) {
-      if (kindOf(e) !== 'promote-candidate' || e.workspaces?.[0] !== scope) continue
-      const id = e.memoryIds[0]!
-      if (e.settled?.verdict === 'promoted') {
-        if (candidateIds.has(id)) await this.unsettle(key)
-      } else if (e.settled === undefined ? !candidateIds.has(id) : !liveIds.has(id)) {
-        await this.table.delete(key)
-      }
+    for (const [key, seen] of await this.table.list()) {
+      if (kindOf(seen) !== 'promote-candidate' || seen.workspaces?.[0] !== scope) continue
+      await this.withClaim(key, async () => {
+        const e = await this.table.get(key)
+        if (e === undefined) return
+        const id = e.memoryIds[0]!
+        const isCandidate = candidateIds.has(id)
+        const isCandidateFresh = read === undefined ? isCandidate : await isCandidateNow(id, scope, read)
+        if (e.settled?.verdict === 'promoted') {
+          if (isCandidate && isCandidateFresh) await this.unsettle(key)
+        } else if (e.settled === undefined) {
+          if (!isCandidate && !isCandidateFresh) await this.table.delete(key)
+        } else if (!liveIds.has(id)) {
+          const r = read === undefined ? undefined : await read(id)
+          if (r?.status !== 'active' || r.workspacePath !== scope) await this.table.delete(key)
+        }
+      })
     }
     for (const c of candidates) {
-      await this.upsert({ kind: 'promote-candidate', memoryIds: [c.id], summary: c.summary, workspaces: [scope], fingerprint: c.fingerprint }, now)
+      await this.upsert({ kind: 'promote-candidate', memoryIds: [c.id], summary: c.summary, workspaces: [scope], fingerprint: c.fingerprint }, now, read)
     }
   }
 

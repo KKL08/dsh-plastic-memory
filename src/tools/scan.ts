@@ -254,7 +254,12 @@ async function scanPass(
       summary: f.summary,
       workspaces: f.memoryIds.map(id => workspaceLabel(byId.get(id))),
       ...(fingerprint !== undefined ? { fingerprint } : {}),
-    }, now)
+    }, now, id => deps.store.get(id))
+    // 条目正被裁决、或刚被裁决（败方已删）：不挂账也不进 findings
+    if (r.isSkipped) {
+      findings.splice(findings.indexOf(f), 1)
+      continue
+    }
     if (r.settled) {
       settled++
       findings.splice(findings.indexOf(f), 1)
@@ -290,7 +295,7 @@ async function syncPromoteCandidates(
       if (r.status === 'active' && r.scope === 'workspace' && r.workspacePath === ws && !own.has(r.id)) own.set(r.id, r)
     }
     const candidates = [...own.values()].filter(r => r.globalCandidate).map(r => ({ id: r.id, summary: r.summary, fingerprint: candidateFingerprint(r) }))
-    await deps.decisions.syncPromoteCandidates(ws, candidates, new Set(own.keys()), now)
+    await deps.decisions.syncPromoteCandidates(ws, candidates, new Set(own.keys()), now, id => deps.store.get(id, { workspacePath: ws }))
   }
 }
 

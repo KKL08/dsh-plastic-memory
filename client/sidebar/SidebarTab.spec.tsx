@@ -263,6 +263,28 @@ describe('SidebarTab 就地裁决', () => {
   })
 })
 
+describe('SidebarTab 一条冲突同时只发一次裁决', () => {
+  it('裁决还没回来时做了别的动作（删新记的）：那条冲突仍不可再裁决，不会发出第二条相反的裁决', async () => {
+    const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
+    let finish: (() => void) | undefined
+    const { gateway } = setup(
+      { library: library(pref, pref2, fresh), session: snapshot({ injectedIds: ['p1', 'p2'], savedIds: ['n1'] }), pending: pending(conflict) },
+      command => command.cmd === 'resolve'
+        ? new Promise(resolve => { finish = () => { resolve({ ok: true, cmd: command.cmd, decisionId: 'pd_1' }) } })
+        : { ok: true, cmd: command.cmd, memoryIds: ['n1'] },
+    )
+    const group = within(screen.getByRole('region', { name: '行为偏好' }))
+    await act(async () => { fireEvent.click(group.getByRole('button', { name: '以 A 为准' })) })
+    const saved = within(screen.getByRole('region', { name: '这次对话新记的' }))
+    await act(async () => { fireEvent.click(saved.getByRole('button', { name: '删除这条记忆' })) })
+    expect(group.getByRole('button', { name: '以 B 为准' })).toHaveAttribute('aria-disabled', 'true')
+    await act(async () => { fireEvent.click(group.getByRole('button', { name: '以 B 为准' })) })
+    expect(gateway.executed.map(e => e.command.cmd)).toEqual(['resolve', 'forget'])
+    await act(async () => { finish!() })
+    expect(screen.getByText('已按 A')).toBeInTheDocument()
+  })
+})
+
 describe('SidebarTab 跨项目确认', () => {
   it('对方属于别的项目：服务端拒了就原位确认，「继续处理」带 allowCrossWorkspace 重发；「取消」什么都不发', async () => {
     const other = memory({ id: 'p2', type: 'preference', workspacePath: '/w/blog', content: '测试里 mock 数据库就行。' })

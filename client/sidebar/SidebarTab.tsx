@@ -8,7 +8,7 @@
  * 刚裁决的冲突在本地留原位可撤销，tab 卸载后收起。
  * 新记的含密钥时不能软删（服务端回 has-secret，什么都没动）：原位确认，「彻底删除」发 hard-delete，删后原位留不可恢复的说明，tab 卸载后收起。
  */
-import { useMemo, useState, type ReactNode } from 'react'
+import { useMemo, useRef, useState, type ReactNode } from 'react'
 import { CONFLICT_ACTION_VERDICTS, layerOfMemory, type MemoryCard as MemoryCardData, type MemoryCommand, type PendingItem } from '../../src/gui/contract.ts'
 import { samePath, useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { baseName, formatNumber, useT, type Translate } from '../i18n.tsx'
@@ -81,19 +81,25 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const [ruled, setRuled] = useState<readonly Ruled[]>([])
   const [purged, setPurged] = useState<ReadonlySet<string>>(new Set())
   const [secretId, setSecretId] = useState<string | undefined>(undefined)
-  const [busy, setBusy] = useState<string | undefined>(undefined)
+  // 在途的动作按条（待决项 id / 记忆 id）记：别的动作开始或结束都不让这一条重新可点，同一条冲突不会发出两条相反的裁决。
+  // ref 同步拦截，state 只管渲染
+  const inFlight = useRef(new Set<string>())
+  const [busy, setBusy] = useState<ReadonlySet<string>>(new Set())
   const [failure, setFailure] = useState<{ id: string; detail: string } | undefined>(undefined)
   // 涉及其他项目时服务端先拒（什么都没动），和待处理卡同一套：原位确认，「继续处理」才带 allowCrossWorkspace 重发
   const [cross, setCross] = useState<{ id: string; workspacePath: string; command: MemoryCommand; onOk: () => void } | undefined>(undefined)
 
   const run = async (id: string, command: MemoryCommand, onOk: () => void) => {
+    if (inFlight.current.has(id)) return
+    inFlight.current.add(id)
     keepFocusInPlace()
-    setBusy(id)
+    setBusy(new Set(inFlight.current))
     setFailure(undefined)
     setCross(undefined)
     setSecretId(undefined)
     const result = await gateway.execute(sessionId, command)
-    setBusy(undefined)
+    inFlight.current.delete(id)
+    setBusy(new Set(inFlight.current))
     if (result.ok) { onOk(); return }
     const workspacePath = result.rejected?.[0]?.workspacePath
     const isAllowed = 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
@@ -227,7 +233,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
       ? <p className="pm-side-error" role="alert">{t('sidebar.action.failed', { detail: failure.detail })}</p>
       : null
   }
-  const isWaiting = (id: string) => busy === id || cross?.id === id || secretId === id
+  const isWaiting = (id: string) => busy.has(id) || cross?.id === id || secretId === id
   // 冲突对方可能在别的项目：那一方写项目名（这里的「本项目」是会话视图解析出的项目，和上面分层同一口径）
   const projectName = (m: MemoryCardData) =>
     m.scope === 'workspace' && m.workspacePath !== undefined && !samePath(m.workspacePath, ws) ? baseName(m.workspacePath) : undefined

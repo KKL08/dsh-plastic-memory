@@ -68,6 +68,9 @@ export interface MemoryCommandDefinition {
 // dismiss-overflow 不在此列：超限提醒在体检关闭时照样入账，忽略它不属于治理动作
 const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'undo', 'promote', 'keep-local', 'scan'])
 
+/** 改待决项的子命令，先认领条目再执行，同一条同时只跑一个（resolve 由执行器 executeConfirm 自己认领）。 */
+const CLAIMED_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['undo', 'promote', 'keep-local', 'dismiss-overflow'])
+
 type Ok = Extract<MemoryCommandResult, { ok: true }>
 type Err = Extract<MemoryCommandResult, { ok: false }>
 
@@ -105,7 +108,15 @@ async function run(deps: MemoryCommandDeps, invocation: MemoryCommandInvocation)
   }
   if (context.delegationDepth > 0) return fail(command.cmd, 'subagent-readonly', '借用的会话是子 agent，记忆只读')
   const now = deps.now?.() ?? Date.now()
-  const result = await dispatch(deps, command, { workspacePath: context.workspacePath }, exec, now)
+  const gov = { workspacePath: context.workspacePath }
+  let result: MemoryCommandResult
+  if ('decisionId' in command && CLAIMED_COMMANDS.has(command.cmd)) {
+    // 两个标签页或两个宿主进程同时处理同一条（提升与留在本项目、两次撤销）：只让一条执行，另一条什么都不动
+    const claimed = await deps.decisions.withClaim(command.decisionId, () => dispatch(deps, command, gov, exec, now))
+    result = claimed.isClaimed ? claimed.value : fail(command.cmd, 'failed', `待决项 ${command.decisionId} 正在被另一次操作处理，未做任何改动`)
+  } else {
+    result = await dispatch(deps, command, gov, exec, now)
+  }
   // scan / refresh-views 自己做全量重写
   if (result.ok && command.cmd !== 'scan' && command.cmd !== 'refresh-views') await deps.views.request()
   return result

@@ -16,6 +16,7 @@ import {
 } from './paths.ts'
 import { linkExclusive } from './exclusive-link.ts'
 import { formatIndexLine } from '../index-line.ts'
+import { maskDiagnostic } from '../secrets.ts'
 import { withinValidity } from '../record-freshness.ts'
 import { RETENTION_MS } from '../retention.ts'
 
@@ -194,14 +195,15 @@ export class FileTable implements MemoryTable {
     } catch (err) {
       if (errnoCode(err) === 'ENOENT') return undefined   // readdir 之后被删：竞态
       if (isCompanionLikeFileName(basename(filePath))) return undefined
-      return { quarantined: { path: filePath, error: err instanceof Error ? err.message : String(err) } }
+      return { quarantined: { path: filePath, error: maskDiagnostic(err instanceof Error ? err.message : String(err)) } }
     }
     if (!this.passesPrefilter(raw, filePath, prefilter)) return undefined
     const outcome = decodeFile(raw, { path: filePath, loc, relPath: relative(this.opts.root, filePath), mtimeMs })
     if (!outcome.ok) {
       // 伴生文件 / 锁文件形态的名字解析不出就不是记忆（伴生文件是二进制），静默跳过
       if (isCompanionLikeFileName(basename(filePath))) return undefined
-      return { quarantined: { path: outcome.path, error: outcome.error } }
+      // 解析报错会引出出错的原文行，进视图、体检结果之前先遮密钥
+      return { quarantined: { path: outcome.path, error: maskDiagnostic(outcome.error) } }
     }
     const row = statsRows.get(outcome.record.id)
     const record = row ? { ...outcome.record, recallCount: row.recallCount, lastRecalledAt: row.lastRecalledAt } : outcome.record

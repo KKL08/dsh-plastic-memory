@@ -183,6 +183,30 @@ describe('SidecarStore：四张表落 .state/', () => {
   })
 })
 
+describe('pending 认领', () => {
+  it('同一条只有一个持有者，两个实例（两个进程）之间同样互斥；释放后可再认领；认领文件不当条目读', async () => {
+    const a = new SidecarStore({ root, schemas })
+    const b = new SidecarStore({ root, schemas })
+    await a.pending.put('pd_a', pd('pd_a'))
+    const release = await a.pending.claim('pd_a')
+    expect(release).toBeDefined()
+    expect(await a.pending.claim('pd_a')).toBeUndefined()
+    expect(await b.pending.claim('pd_a')).toBeUndefined()
+    expect(await b.pending.claim('pd_b')).toBeDefined()
+    expect((await b.pending.list()).map(([k]) => k)).toEqual(['pd_a'])
+    await release!()
+    expect(await b.pending.claim('pd_a')).toBeDefined()
+  })
+
+  it('释放只删自己的认领：被当成残留清掉、别人又认领了，旧持有者释放时不动新的', async () => {
+    const s = new SidecarStore({ root, schemas })
+    const stale = await s.pending.claim('pd_a')
+    await writeFile(join(state, 'pending', 'pd_a.claim'), JSON.stringify({ pid: process.pid, at: Date.now(), id: 'newer' }))
+    await stale!()
+    expect(JSON.parse(await readFile(join(state, 'pending', 'pd_a.claim'), 'utf8')).id).toBe('newer')
+  })
+})
+
 describe('SidecarStore：KV 导入协议', () => {
   /** 旧 KV 替身。open 在调用那一刻拷下两张表；discard 先跑 onDiscard（可抛错），不抛才清空两张表（像宿主那样删行）。 */
   function legacyOf(tables: Partial<LegacyKvTables>, opts: { onDiscard?: () => Promise<void> } = {}) {

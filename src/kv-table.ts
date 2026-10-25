@@ -7,12 +7,24 @@ export interface KvTable<T> {
   delete(key: string): Promise<boolean>
 }
 
-export class InMemoryKvTable<T> implements KvTable<T> {
+/** 带排他认领的 KV：待决账本用，同一条目同时只许一次裁决改它。文件实现跨进程有效（见 storage/sidecar.ts）。 */
+export interface ClaimKvTable<T> extends KvTable<T> {
+  /** 认领 key：拿到返回释放函数；已被别人持有返回 undefined，不等待。认领与条目是否存在无关。 */
+  claim(key: string): Promise<(() => Promise<void>) | undefined>
+}
+
+export class InMemoryKvTable<T> implements ClaimKvTable<T> {
   private map = new Map<string, T>()
+  private claimed = new Set<string>()
   async get(key: string) { return this.map.get(key) }
   async list() { return [...this.map.entries()] }
   async put(key: string, value: T) { this.map.set(key, value) }
   async delete(key: string) { return this.map.delete(key) }
+  async claim(key: string) {
+    if (this.claimed.has(key)) return undefined
+    this.claimed.add(key)
+    return async () => { this.claimed.delete(key) }
+  }
 }
 
 /** 带批量写的 KV：只给召回统计用（单文件表，一次 markRecalled 只该换一次文件）。KvTable 本身不加批量。 */
