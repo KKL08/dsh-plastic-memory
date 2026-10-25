@@ -197,6 +197,23 @@ export class SnapshotCache {
     }
   }
 
+  /**
+   * 上限或超限处理改了：按当前配置与磁盘内容重算这些项目（无项目为 'global'）的用量、同步超限提醒，不等下一次冻结。
+   * 用量的算法与冻结时同一条路（预读可见记录 → 组装），回到上限以内的提醒当场了结。
+   */
+  async resyncOverflow(scopes: Iterable<string>): Promise<void> {
+    const deps = { ...this.deps }
+    if (!deps.overflowLedger) return
+    const mode = deps.overflow ?? 'relax'
+    const now = Date.now()
+    for (const scope of new Set(scopes)) {
+      const workspacePath = scope === 'global' ? undefined : scope
+      const { text: _text, coreIds: _coreIds, ...usage } = assembleSnapshot({ ...deps, ...(await prereadSnapshot(deps.store, workspacePath)), workspacePath, now })
+      const level = overflowLevel(mode, usage.usedTokens, deps.budget)
+      await deps.overflowLedger.syncOverflow(scope, level, now, level ? overflowSummary(level, usage, deps.budget) : '')
+    }
+  }
+
   /** 同步 provider 的出口：只回冻结缓存（过期的也回），没有缓存回空串。未解析的 session
    *  顺手触发一次自愈解析（HMR 后存量 session 首次 provider 即开始解析），组装留给下一次中间件。 */
   render(session: object): string {

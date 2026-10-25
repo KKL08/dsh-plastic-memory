@@ -31,7 +31,7 @@ import { SnapshotCache, resolveWorkspacePath } from './runtime.ts'
 import { PROMPT_LBRACE_VARIABLE } from './snapshot.ts'
 import { OVERFLOW_MODES, type OverflowMode } from './contract-codes.ts'
 import { resolveHealthThresholds, type HealthSensitivity } from './governance/health-presets.ts'
-import { PendingDecisionsStore } from './governance/decisions.ts'
+import { PendingDecisionsStore, overflowScopeOf } from './governance/decisions.ts'
 import { SnapshotStore } from './governance/snapshots.ts'
 import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from './governance/schema.ts'
 import type { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
@@ -494,6 +494,15 @@ export async function apply(ctx: Context, config: Config) {
     if (changed('governance.enabled')) syncGovernanceTools()
     // search.userDictionaryPath 不用在这里处理：memory_search 每次现读路径，变了下一次搜索就重建分词实例
     snapshotCache.markAllStale()
+    // 改了上限或超限处理：已有的超限提醒按新配置当场重算（调高上限后不再提醒，档位按新上限算），重写视图时就是新结果
+    if (changed('snapshotTokenBudget', 'snapshotOverflow')) {
+      try {
+        const scopes = (await decisions.listOverflow()).map(overflowScopeOf).filter(s => s !== undefined)
+        await snapshotCache.resyncOverflow(scopes)
+      } catch (err) {
+        ctx.logger.error('[plastic-memory] 按新上限重算超限提醒失败:', err)
+      }
+    }
     await views?.rewriteAll()
   })
 

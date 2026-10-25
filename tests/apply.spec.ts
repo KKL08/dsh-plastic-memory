@@ -22,7 +22,7 @@ import { buildSemanticPrompt } from '../src/governance/semantic-scan.ts'
 import { record } from './helpers/record.ts'
 import { renderViaHost } from './helpers/render-via-host.ts'
 import { MemoryStore } from '../src/store.ts'
-import { PROMPT_LBRACE_VARIABLE, assembleSnapshot } from '../src/snapshot.ts'
+import { PROMPT_LBRACE_VARIABLE, assembleSnapshot, overflowLevel } from '../src/snapshot.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { AssembleContext, PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
@@ -35,7 +35,7 @@ import {
 import { baselineProjectionDefinition } from '../src/governance/baseline.ts'
 import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
 import {
-  GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_FILE, deletedViewSchema, libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema,
+  GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_FILE, deletedViewSchema, healthViewSchema, libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema,
   workspaceMapViewSchema, type LibraryView,
 } from '../src/gui/contract.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
@@ -1245,5 +1245,30 @@ describe('配置热生效（loader/volatile-update）', () => {
     await globalView(t, 'pending', pendingViewSchema, v => expect(v.items.map(i => i.kind)).toEqual(['conflict-horizontal']))
     await t.tool('memory_confirm').execute({ action: 'resolve', decisionId: entry.id, verdict: 'keep-both' }, t.exec)
     await globalView(t, 'pending', pendingViewSchema, v => expect(v.items).toEqual([]))
+  })
+
+  it('调高上限：超限提醒当场按新上限重算（不等下一次组装），用量回到上限以内就了结，视图跟着重写', async () => {
+    const t = await setup({ snapshotTokenBudget: 20 })
+    await t.putGlobal({ id: 'mem_long', type: 'preference', name: '长偏好', summary: '长偏好', content: '回答先给结论再讲理由，'.repeat(30) })
+    await t.assembleOnce()
+    const { usedTokens, workspacePath } = await t.sessionView(v => expect(v.usedTokens).toBeGreaterThan(40))
+    await globalView(t, 'pending', pendingViewSchema, v => expect(v.items.map(i => i.kind)).toEqual(['overflow']))
+    const readNow = async <T>(name: keyof typeof GUI_VIEW_FILES, schema: { parse(v: unknown): T }) =>
+      schema.parse(JSON.parse(await readFile(join(t.memoryRoot, GUI_VIEW_DIR, GUI_VIEW_FILES[name]), 'utf8')))
+
+    // 还超，但档位按新上限算：用量约为新上限的 1.1 倍，落在第 1 档
+    const mid = Math.ceil(usedTokens / 1.1)
+    await t.update({ snapshotTokenBudget: mid })
+    const expected = overflowLevel('relax', usedTokens, mid)!
+    expect((await readNow('pending', pendingViewSchema)).items).toEqual([
+      expect.objectContaining({ kind: 'overflow', mode: 'relax', tier: expected.tier, workspacePath }),
+    ])
+    expect(expected.tier).toBe(1)
+
+    await t.update({ snapshotTokenBudget: usedTokens + 1000 })
+    const pending = await readNow('pending', pendingViewSchema)
+    expect([pending.items, pending.dot]).toEqual([[], 'none'])
+    expect((await readNow('health', healthViewSchema)).layers.map(l => l.overflow).filter(o => o !== null)).toEqual([])
+    expect(await new PendingDecisionsStore(sidecarAt(t.memoryRoot).pending).listOverflow()).toEqual([])
   })
 })
