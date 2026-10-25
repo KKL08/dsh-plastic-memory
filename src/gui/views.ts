@@ -65,7 +65,7 @@ const byNameThenId = (a: MemoryRecord, b: MemoryRecord) =>
   a.name < b.name ? -1 : a.name > b.name ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0
 
 /** 记忆卡：四个文字面遮盖密钥片段，路径原样。 */
-function card(r: MemoryRecord, data: LayerPreread): MemoryCard {
+function card(r: MemoryRecord, data: LayerPreread, filePath = data.filePaths.get(r.id) ?? ''): MemoryCard {
   const m = maskSecretSurface(r)
   return {
     id: r.id, name: m.name, type: r.type, scope: r.scope,
@@ -75,7 +75,7 @@ function card(r: MemoryRecord, data: LayerPreread): MemoryCard {
     createdAt: r.createdAt, updatedAt: r.updatedAt, lastConfirmedAt: r.lastConfirmedAt,
     ...(r.validTo !== undefined ? { validTo: r.validTo } : {}),
     ...(r.handEdited ? { handEdited: true } : {}),
-    filePath: data.filePaths.get(r.id) ?? '',
+    filePath,
   }
 }
 
@@ -144,7 +144,8 @@ function typeLabels(registry: TypeRegistry, present: Iterable<string | undefined
   return Object.fromEntries([...types].map(name => [name, registry.get(name).label]))
 }
 
-/** 健康：每层复用 scoreLayer（与 memory_health / memory_scan 同分）；有密钥的层不打分。超限另列（不扣分）。 */
+/** 健康：每层复用 scoreLayer（与 memory_health / memory_scan 同分）；有密钥的层不打分。超限另列（不扣分）；
+ *  自己没有记忆、不在体检清单里的项目有超限提醒时，单列进 overflowOnlyLayers（只有档位，不打分）。 */
 export function buildHealthView(input: ViewInput): HealthView {
   const overflow = [...input.open, ...input.settled].filter(e => kindOf(e) === 'overflow')
   return {
@@ -165,6 +166,11 @@ export function buildHealthView(input: ViewInput): HealthView {
         overflow: overflowOfLayer(overflow, layer),
       }
     }),
+    overflowOnlyLayers: [...new Set(overflow.map(overflowScopeOf))]
+      .filter((scope): scope is string => scope !== undefined && scope !== 'global'
+        && !input.healthLayers.some(l => l.kind === 'workspace' && l.path === scope))
+      .sort()
+      .map(path => ({ layer: { kind: 'workspace' as const, workspacePath: path }, overflow: overflowOfLayer(overflow, { kind: 'workspace', path })! })),
   }
 }
 
@@ -182,7 +188,7 @@ export function buildLibraryView(input: ViewInput): LibraryView {
     .filter(l => l.layer.kind === 'global' || l.items.length > 0)
   const directoryIssues = [...input.listingNotes, ...input.data.directoryNotes]
     .filter(n => n.code !== 'dir-empty')
-    .map(n => ({ code: n.code, path: n.path, ...(n.keys !== undefined ? { keys: n.keys } : {}) }))
+    .map(n => ({ code: n.code, path: n.path, ...(n.keys !== undefined ? { keys: n.keys } : {}), ...(n.keptPath !== undefined ? { keptPath: n.keptPath } : {}) }))
   const typeLabelsOfView = typeLabels(input.registry, layers.flatMap(l => l.items.map(m => m.type)))
   return { version: GUI_VIEW_VERSION, memoryRoot: input.memoryRoot, layers, directoryIssues, typeLabels: typeLabelsOfView }
 }
@@ -197,12 +203,17 @@ export function buildDeletedView(input: ViewInput): DeletedView {
     const prev = causeById.get(loser)
     if (prev === undefined || prev.settled!.at <= e.settled!.at) causeById.set(loser, e)
   }
-  const items = [...input.data.byId.values()]
-    .filter(r => r.status === 'deleted' && input.readLayers.some(l => inLayer(r, l)))
-    .map(r => ({ r, deletedAt: r.deletedAt ?? r.updatedAt }))
+  // 别层同 id 副本还在用时，删掉的这份不在 byId 里，从 shadowedDeleted 补上（带它自己的文件路径）
+  const deletedCopies = [
+    ...[...input.data.byId.values()].filter(r => r.status === 'deleted').map(r => ({ r, filePath: input.data.filePaths.get(r.id) ?? '' })),
+    ...input.data.shadowedDeleted.map(l => ({ r: l.record, filePath: l.filePath })),
+  ]
+  const items = deletedCopies
+    .filter(({ r }) => input.readLayers.some(l => inLayer(r, l)))
+    .map(({ r, filePath }) => ({ r, filePath, deletedAt: r.deletedAt ?? r.updatedAt }))
     .filter(({ deletedAt }) => deletedAt >= cutoff)
     .sort((a, b) => b.deletedAt - a.deletedAt || (a.r.id < b.r.id ? -1 : 1))
-    .map(({ r, deletedAt }) => {
+    .map(({ r, filePath, deletedAt }) => {
       const e = causeById.get(r.id)
       const verdict = e?.settled?.verdict
       const cause = e === undefined || (verdict !== 'keep-left' && verdict !== 'keep-right') ? undefined : {
@@ -210,7 +221,7 @@ export function buildDeletedView(input: ViewInput): DeletedView {
         ...(e.baselineRef !== undefined ? { baselineRef: e.baselineRef } : { counterpartId: e.memoryIds.find(id => id !== r.id) }),
         ...(e.settled!.snapshotId !== undefined ? { snapshotId: e.settled!.snapshotId } : {}),
       }
-      return { memory: card(r, input.data), deletedAt, purgeAt: deletedAt + RETENTION_MS, ...(cause !== undefined ? { cause } : {}) }
+      return { memory: card(r, input.data, filePath), deletedAt, purgeAt: deletedAt + RETENTION_MS, ...(cause !== undefined ? { cause } : {}) }
     })
   // 裁决对方（横向冲突的胜方）也给显示名：界面会提到它
   const counterparts = items.map(i => i.cause !== undefined && 'counterpartId' in i.cause && i.cause.counterpartId !== undefined

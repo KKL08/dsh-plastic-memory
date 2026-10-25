@@ -131,6 +131,7 @@ export const RESOLVE_VERDICTS = ['keep-left', 'keep-right', 'keep-both'] as cons
 
 // —— 健康 ——
 
+const overflowLevelSchema = z.object({ mode: z.enum(OVERFLOW_MODES), tier: z.number().int().nonnegative() })
 export const healthLayerSchema = z.object({
   layer: layerRefSchema,
   totalMemories: z.number().int().nonnegative(),
@@ -145,7 +146,7 @@ export const healthLayerSchema = z.object({
   /** 内容检查（语义层）上次时间；从没做过为 null。 */
   semanticCachedAt: z.number().nullable(),
   /** 本层会话带入的记忆超出上限（已忽略的也算，忽略只是不再提醒）；列为问题、不扣分。没超为 null。 */
-  overflow: z.object({ mode: z.enum(OVERFLOW_MODES), tier: z.number().int().nonnegative() }).nullable(),
+  overflow: overflowLevelSchema.nullable(),
 })
 export const healthViewSchema = z.object({
   version,
@@ -154,6 +155,11 @@ export const healthViewSchema = z.object({
   /** 插件本次加载的时刻（epoch ms）：会话快照的 frozenAt 早于它就是「重启后未重新带入」；浏览器半侧拿不到宿主进程时间，从这里读。 */
   bootedAt: z.number().optional(),
   layers: z.array(healthLayerSchema),
+  /**
+   * 有超限提醒、但自己没有记忆因而不在 layers 里的项目（会话在这个项目里，带入的全是 global 记忆）：只列超限档位，
+   * 没有记忆可打分，不给分数与问题计数。按路径排序。可缺省：升级前写的视图文件没有，下次写视图补上。
+   */
+  overflowOnlyLayers: z.array(z.object({ layer: layerRefSchema, overflow: overflowLevelSchema })).optional(),
 })
 export type HealthView = z.infer<typeof healthViewSchema>
 
@@ -165,6 +171,8 @@ export const directoryIssueSchema = z.object({
   path: z.string(),
   /** reserved-keys：被忽略的键。 */
   keys: z.array(z.string()).optional(),
+  /** duplicate-id：读取时用的那份（path 是没用上的副本）。 */
+  keptPath: z.string().optional(),
 })
 export const libraryViewSchema = z.object({
   version,

@@ -2,7 +2,7 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryStore, QueryScope } from '../store.ts'
 import type { SearchNoteCode } from '../contract-codes.ts'
 import { expandQueryTerms } from '../text.ts'
-import { resolveDuplicates } from '../storage/table.ts'
+import { resolveLiveFirst } from '../storage/table.ts'
 import { tokenizerForQuery, type QueryTokenizerOptions } from '../search/jieba-segmenter.ts'
 import { rankRecords, TIER_ORDER, type RankedRecord, type SearchTier } from '../search/ranking.ts'
 import type { TypeRegistry } from '../type-registry.ts'
@@ -124,7 +124,7 @@ export async function executeSearch(
   const now = Date.now()
   // 与快照预读同一条路：按范围读取 → 同 id 取舍 → active → validTo（过期的不进检索，治理扫描仍可见）
   const read = await deps.store.readLayer(scopeFilter, { ...(a.types ? { types: a.types } : {}), ...prefilter })
-  const located = resolveDuplicates(read.records, { workspacePath: hint })
+  const located = resolveLiveFirst(read.records, { workspacePath: hint })
     .filter(l => l.record.status === 'active' && withinValidity(l.record, now))
   const candidates = located.map(l => l.record)
   // 取舍后同 id 只留一份，命中按 id 取回它的文件绝对路径

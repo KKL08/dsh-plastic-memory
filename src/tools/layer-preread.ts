@@ -4,14 +4,14 @@ import type { KvTable } from '../kv-table.ts'
 import type { ScanCacheEntry } from '../governance/schema.ts'
 import { layerCacheKey, type LayerPreread, type LayerRef } from '../governance/layer-health.ts'
 import type { MemoryRecord } from '../record-schema.ts'
-import { resolveDuplicates, type DirectoryNote, type LocatedRecord, type QuarantineEntry, type WorkspaceDirListing } from '../storage/table.ts'
+import { resolveDuplicates, resolveLiveFirst, type DirectoryNote, type LocatedRecord, type QuarantineEntry, type WorkspaceDirListing } from '../storage/table.ts'
 
 /**
  * memory_health 与 memory_scan 共用的预读：两个工具从同一个函数取评分输入，对同一层永远同分。
  * 预读范围：只读给定的层（每层的目录连同 .archive/，记录取全部状态）——规则扫描要分辨取代链引用，
  * 缓存过滤要核对记录是否存活。层外的引用（取代链与语义缓存里指向其他层的 id，如提升到 global 后
  * global 记录的 supersedes 指向 workspace 旧条）按 id 两级定位，不整库预读。
- * 隔离条目按读到它的层归档（malformed 按所在目录归层）；同 id 多文件按取舍规则留一份，其余副本报目录级说明、不删。
+ * 隔离条目按读到它的层归档（malformed 按所在目录归层）；同 id 多文件按取舍规则留一份（active 副本优先），其余副本报目录级说明、不删。
  * 另取待决账本里的全部未决冲突、语义缓存全部条目。
  */
 export async function prereadLayers(
@@ -31,8 +31,12 @@ export async function prereadLayers(
     directoryNotes.push(...r.directoryNotes)
   }
   const hint = { workspacePath }
-  const chosen = resolveDuplicates(read, hint)
-  directoryNotes.push(...duplicateNotes(read, chosen))
+  // 已删、已取代的副本不遮住别层在用的同 id 副本；被盖住的已删副本单列（最近删除），也不算同 id 副本
+  const chosen = resolveLiveFirst(read, hint)
+  const kept = new Map(chosen.map(l => [l.record.id, l]))
+  const shadowed = read.filter(l => l.record.status !== 'active' && kept.get(l.record.id)?.record.status === 'active')
+  directoryNotes.push(...duplicateNotes(read.filter(l => !shadowed.includes(l)), chosen))
+  const shadowedDeleted = resolveDuplicates(shadowed.filter(l => l.record.status === 'deleted'), hint)
   const byId = new Map<string, MemoryRecord>(chosen.map(l => [l.record.id, l.record]))
   const filePaths = new Map<string, string>(chosen.map(l => [l.record.id, l.filePath]))
   const cache = new Map(await deps.cache.list())
@@ -53,14 +57,14 @@ export async function prereadLayers(
     }
   }
 
-  return { byId, filePaths, pending, cache, quarantined, directoryNotes }
+  return { byId, filePaths, pending, cache, quarantined, directoryNotes, shadowedDeleted }
 }
 
 /** 同 id 的多余副本：每份一条说明（路径是副本，正文点出读取时用的那份）。 */
 function duplicateNotes(read: readonly LocatedRecord[], chosen: readonly LocatedRecord[]): DirectoryNote[] {
   const kept = new Map(chosen.map(l => [l.record.id, l.filePath]))
   return read.filter(l => kept.get(l.record.id) !== l.filePath).map(l => ({
-    level: 'info', code: 'duplicate-id', path: l.filePath,
+    level: 'info', code: 'duplicate-id', path: l.filePath, keptPath: kept.get(l.record.id),
     text: `记忆 ${l.record.id} 有多个文件：读取时用 ${kept.get(l.record.id)}，副本 ${l.filePath} 未自动删除；确认哪份有效后手工删掉多余的`,
   }))
 }

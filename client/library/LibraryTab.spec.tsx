@@ -57,14 +57,16 @@ describe('全部记忆', () => {
   it('目录问题来自视图，灰色一行一条，路径相对存储目录', () => {
     const view = library({
       directoryIssues: [
-        { code: 'duplicate-id', path: '/m/app-1/a1-copy.md' },
+        { code: 'duplicate-id', path: '/m/app-1/a1-copy.md', keptPath: '/m/app-1/a1.md' },
+        { code: 'duplicate-id', path: '/m/app-1/a3-copy.md' },
         { code: 'reserved-keys', path: '/m/app-1/a2.md', keys: ['scope', 'content'] },
       ],
     })
     renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: view } }))
     const issues = screen.getByRole('list', { name: '目录问题' })
     expect(within(issues).getAllByRole('listitem').map(li => li.textContent)).toEqual([
-      '同一 id 有多份文件，只用了其中一份：app-1/a1-copy.md',
+      '同一 id 有多份文件：在用 app-1/a1.md，未用 app-1/a1-copy.md',
+      '目录有问题：app-1/a3-copy.md',
       '文件里写了插件自己管的字段（scope, content），已忽略：app-1/a2.md',
     ])
   })

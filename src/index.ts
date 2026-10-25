@@ -31,7 +31,7 @@ import { SnapshotCache, resolveWorkspacePath } from './runtime.ts'
 import { PROMPT_LBRACE_VARIABLE } from './snapshot.ts'
 import { OVERFLOW_MODES, type OverflowMode } from './contract-codes.ts'
 import { resolveHealthThresholds, type HealthSensitivity } from './governance/health-presets.ts'
-import { PendingDecisionsStore } from './governance/decisions.ts'
+import { PendingDecisionsStore, overflowScopeOf } from './governance/decisions.ts'
 import { SnapshotStore } from './governance/snapshots.ts'
 import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from './governance/schema.ts'
 import type { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
@@ -378,8 +378,18 @@ export async function apply(ctx: Context, config: Config) {
   // memory_promote 与 /memory promote 共用一个写入器（进程内串行）
   const agentsMd = createAgentsMdWriter(agentsMdPath())
 
-  // 子 agent 只读门：写入与治理工具在注册处统一套门，子 agent 会话（delegationDepth ≥ 1）调用即拒
-  const registerWrite = (tool: ToolDefinition) => ctx.tools.register(gateSubagentWrites(tool, resolveContext))
+  // 子 agent 只读门：写入与治理工具在注册处统一套门，子 agent 会话（delegationDepth ≥ 1）调用即拒。
+  // 门内的执行结束后（成功、失败都算，失败前可能已写了一部分）请求重写全局视图：模型改了记忆或账本，记忆页跟着变
+  const registerWrite = (tool: ToolDefinition) => ctx.tools.register(gateSubagentWrites({
+    ...tool,
+    execute: async (args, exec) => {
+      try {
+        return await tool.execute(args, exec)
+      } finally {
+        void views?.request()
+      }
+    },
+  }, resolveContext))
   // memory_save 的类型枚举与说明在注册时从类型表生成：模板或自定义类型热更新后注销重注册
   const registerSave = () => registerWrite(createSaveTool({ store, registry, resolveContext, snapshots, onSaved }))
   let disposeSave = registerSave()
@@ -484,6 +494,15 @@ export async function apply(ctx: Context, config: Config) {
     if (changed('governance.enabled')) syncGovernanceTools()
     // search.userDictionaryPath 不用在这里处理：memory_search 每次现读路径，变了下一次搜索就重建分词实例
     snapshotCache.markAllStale()
+    // 改了上限或超限处理：已有的超限提醒按新配置当场重算（调高上限后不再提醒，档位按新上限算），重写视图时就是新结果
+    if (changed('snapshotTokenBudget', 'snapshotOverflow')) {
+      try {
+        const scopes = (await decisions.listOverflow()).map(overflowScopeOf).filter(s => s !== undefined)
+        await snapshotCache.resyncOverflow(scopes)
+      } catch (err) {
+        ctx.logger.error('[plastic-memory] 按新上限重算超限提醒失败:', err)
+      }
+    }
     await views?.rewriteAll()
   })
 

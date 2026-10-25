@@ -407,9 +407,16 @@ describe('同 id 在两个项目里各有一份', () => {
     ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: { kind: 'global' } }))
     expect((await copyIn(e, undefined))!.status).toBe('deleted')
     expect((await copyIn(e, OTHER_WS))!.status).toBe('active')
+    // 视图：项目那份照常在全部记忆里，删掉的全局那份在最近删除里（页面据它的层恢复）
+    const library = libraryViewSchema.parse(await e.readView('library'))
+    expect(library.layers.map(l => [l.layer, l.items.map(m => m.name)])).toEqual([
+      [{ kind: 'global' }, []], [{ kind: 'workspace', workspacePath: OTHER_WS }, ['别的项目那份']],
+    ])
+    expect(deletedViewSchema.parse(await e.readView('deleted')).items.map(i => [i.memory.name, i.memory.scope])).toEqual([['全局那份', 'global']])
     ok(await e.run({ cmd: 'restore', memoryId: 'mem_dup', layer: { kind: 'global' } }))
     expect((await copyIn(e, undefined))!.status).toBe('active')
     expect((await copyIn(e, OTHER_WS))!.status).toBe('active')
+    expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
   })
 })
 
@@ -601,6 +608,31 @@ describe('提升候选与超限', () => {
     expect((await e.store.get(memoryId))!.globalCandidate).toBe(true)
     ok(await e.run({ cmd: 'scan' }))
     expect((await pendingCandidates(e)).map(i => i.kind === 'promote-candidate' && i.memory?.id)).toEqual([memoryId])
+  })
+
+  it('undo「留在本项目」：候选标记回到记忆上、条目回到待处理；再体检也还在，内容不变', async () => {
+    const e = env({ llm: quietLlm })
+    const { decisionId, memoryId } = await seedCandidate(e)
+    const before = (await e.store.get(memoryId))!
+    ok(await e.run({ cmd: 'keep-local', decisionId }))
+    const undone = ok(await e.run({ cmd: 'undo', decisionId }))
+    expect(undone.memoryIds).toEqual([memoryId])
+    const back = (await e.store.get(memoryId))!
+    expect([back.globalCandidate, back.content, back.updatedAt]).toEqual([true, before.content, before.updatedAt])
+    expect((await e.decisions.list()).map(d => d.id)).toEqual([decisionId])
+    expect((await pendingCandidates(e)).map(i => 'decisionId' in i && i.decisionId)).toEqual([decisionId])
+
+    ok(await e.run({ cmd: 'scan' }))
+    expect((await pendingCandidates(e)).map(i => 'decisionId' in i && i.decisionId)).toEqual([decisionId])
+  })
+
+  it('undo「留在本项目」时记忆已不在 → not-found，条目保持已裁决', async () => {
+    const e = env({ llm: quietLlm })
+    const { decisionId, memoryId } = await seedCandidate(e)
+    ok(await e.run({ cmd: 'keep-local', decisionId }))
+    await e.store.softDelete((await e.store.get(memoryId))!)
+    expect(err(await e.run({ cmd: 'undo', decisionId })).code).toBe('not-found')
+    expect((await e.decisions.listSettled()).map(d => d.id)).toEqual([decisionId])
   })
 
   it('keep-local 的指纹按记忆此刻的内容记：上次体检后模型改过内容，留在本项目后同内容再被标记也不重开', async () => {

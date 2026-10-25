@@ -22,7 +22,7 @@ import { buildSemanticPrompt } from '../src/governance/semantic-scan.ts'
 import { record } from './helpers/record.ts'
 import { renderViaHost } from './helpers/render-via-host.ts'
 import { MemoryStore } from '../src/store.ts'
-import { PROMPT_LBRACE_VARIABLE, assembleSnapshot } from '../src/snapshot.ts'
+import { PROMPT_LBRACE_VARIABLE, assembleSnapshot, overflowLevel } from '../src/snapshot.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { AssembleContext, PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
@@ -34,7 +34,11 @@ import {
 } from '../src/governance/schema.ts'
 import { baselineProjectionDefinition } from '../src/governance/baseline.ts'
 import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
-import { GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_FILE, sessionViewFile, sessionViewSchema, workspaceMapViewSchema } from '../src/gui/contract.ts'
+import {
+  GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_FILE, deletedViewSchema, healthViewSchema, libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema,
+  workspaceMapViewSchema, type LibraryView,
+} from '../src/gui/contract.ts'
+import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { defaultJiebaLoader } from '../src/search/jieba-segmenter.ts'
 
 /** 宿主 storageDomain 表的替身（@deepseek-ai/dsh-storage-domain KvTable 的形状）：读同步、写异步。 */
@@ -1079,7 +1083,7 @@ describe('配置热生效（loader/volatile-update）', () => {
       await mkdir(join(memoryRoot, 'global'), { recursive: true })
       await writeFile(join(memoryRoot, 'global', `${r!.id}.md`), encodeRecord(record(r), {}), 'utf8')
     }
-    return { memoryRoot, defs, config, assembleOnce, update, tool, save, command, sessionView, putGlobal }
+    return { memoryRoot, defs, config, assembleOnce, update, tool, exec, save, command, sessionView, putGlobal }
   }
 
   it('改上限、超限处理、溯源档位后，同一会话下一次组装就按新值（不等压缩）', async () => {
@@ -1186,5 +1190,88 @@ describe('配置热生效（loader/volatile-update）', () => {
     const saved = await t.save({ type: 'project', name: '冻结到 3 月', content: 'merge freeze 到 3 月 5 日' })
     expect(saved.kind).toBe('saved')
     await t.sessionView(v => expect(v).toEqual({ ...frozen, savedIds: [saved.record!.id] }))
+  })
+
+  /** 全局视图是旁路写入：等它满足条件。 */
+  const globalView = <T>(t: Awaited<ReturnType<typeof setup>>, name: keyof typeof GUI_VIEW_FILES, schema: { parse(v: unknown): T }, check: (v: T) => void) =>
+    vi.waitFor(async () => {
+      const v = schema.parse(JSON.parse(await readFile(join(t.memoryRoot, GUI_VIEW_DIR, GUI_VIEW_FILES[name]), 'utf8')))
+      check(v)
+      return v
+    })
+  const libraryIds = (v: LibraryView) => v.layers.flatMap(l => l.items.map(m => m.id))
+
+  it('模型 memory_save 后全部记忆里就有这条：右侧栏「这次对话新记的」按会话视图的 savedIds 到全部记忆里取卡片，两边都要到位', async () => {
+    const t = await setup()
+    await t.assembleOnce()
+    const saved = await t.save({ type: 'project', name: '冻结到 3 月', content: 'merge freeze 到 3 月 5 日' })
+    const id = saved.record!.id
+    await t.sessionView(v => expect(v.savedIds).toEqual([id]))
+    const library = await globalView(t, 'library', libraryViewSchema, v => expect(libraryIds(v)).toContain(id))
+    // 右侧栏的取法：savedIds 里的每个 id 都能在全部记忆里找到卡片
+    const byId = new Map(library.layers.flatMap(l => l.items.map(m => [m.id, m])))
+    expect(byId.get(id)).toMatchObject({ name: '冻结到 3 月', scope: 'workspace' })
+  })
+
+  it('模型 memory_forget / memory_snapshot 恢复后，全部记忆与最近删除跟着变', async () => {
+    const t = await setup()
+    const saved = await t.save({ type: 'project', name: '冻结到 3 月', content: 'merge freeze 到 3 月 5 日' })
+    const id = saved.record!.id
+    await globalView(t, 'library', libraryViewSchema, v => expect(libraryIds(v)).toContain(id))
+    const forgot = await t.tool('memory_forget').execute({ ids: [id], reason: '不再需要' }, t.exec) as { snapshotId: string }
+    await globalView(t, 'library', libraryViewSchema, v => expect(libraryIds(v)).not.toContain(id))
+    await globalView(t, 'deleted', deletedViewSchema, v => expect(v.items.map(i => i.memory.id)).toEqual([id]))
+    await t.tool('memory_snapshot').execute({ action: 'restore', snapshotId: forgot.snapshotId, memoryIds: [id] }, t.exec)
+    await globalView(t, 'library', libraryViewSchema, v => expect(libraryIds(v)).toContain(id))
+    await globalView(t, 'deleted', deletedViewSchema, v => expect(v.items).toEqual([]))
+  })
+
+  it('模型 memory_scan / memory_promote / memory_confirm 后，待处理与全部记忆跟着变', async () => {
+    const t = await setup()
+    // 在项目会话里存 global：管线降级为本项目 + 提升候选
+    const saved = await t.save({ type: 'preference', scope: 'global', name: '都用 vitest', content: '所有项目都用 vitest' })
+    const id = saved.record!.id
+    await t.tool('memory_scan').execute({ layers: 'rule' }, t.exec)
+    await globalView(t, 'pending', pendingViewSchema, v => expect(v.items.map(i => i.kind)).toEqual(['promote-candidate']))
+    await t.tool('memory_promote').execute({ ids: [id], target: 'global' }, t.exec)
+    await globalView(t, 'pending', pendingViewSchema, v => expect(v.items).toEqual([]))
+    await globalView(t, 'library', libraryViewSchema, v => expect(v.layers.find(l => l.layer.kind === 'global')!.items.map(m => m.id)).toEqual([id]))
+
+    await t.putGlobal({ id: 'mem_a', content: '用 pnpm' })
+    await t.putGlobal({ id: 'mem_b', content: '用 npm' })
+    const { entry } = await new PendingDecisionsStore(sidecarAt(t.memoryRoot).pending)
+      .upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', fingerprint: 'fp-ab' }, 1)
+    await t.command('/memory refresh-views')
+    await globalView(t, 'pending', pendingViewSchema, v => expect(v.items.map(i => i.kind)).toEqual(['conflict-horizontal']))
+    await t.tool('memory_confirm').execute({ action: 'resolve', decisionId: entry.id, verdict: 'keep-both' }, t.exec)
+    await globalView(t, 'pending', pendingViewSchema, v => expect(v.items).toEqual([]))
+  })
+
+  it('调高上限：超限提醒当场按新上限重算（不等下一次组装），用量回到上限以内就了结，视图跟着重写', async () => {
+    const t = await setup({ snapshotTokenBudget: 20 })
+    await t.putGlobal({ id: 'mem_long', type: 'preference', name: '长偏好', summary: '长偏好', content: '回答先给结论再讲理由，'.repeat(30) })
+    await t.assembleOnce()
+    const { usedTokens, workspacePath } = await t.sessionView(v => expect(v.usedTokens).toBeGreaterThan(40))
+    await globalView(t, 'pending', pendingViewSchema, v => expect(v.items.map(i => i.kind)).toEqual(['overflow']))
+    const readNow = async <T>(name: keyof typeof GUI_VIEW_FILES, schema: { parse(v: unknown): T }) =>
+      schema.parse(JSON.parse(await readFile(join(t.memoryRoot, GUI_VIEW_DIR, GUI_VIEW_FILES[name]), 'utf8')))
+
+    // 还超，但档位按新上限算：用量约为新上限的 1.1 倍，落在第 1 档
+    const mid = Math.ceil(usedTokens / 1.1)
+    await t.update({ snapshotTokenBudget: mid })
+    const expected = overflowLevel('relax', usedTokens, mid)!
+    expect((await readNow('pending', pendingViewSchema)).items).toEqual([
+      expect.objectContaining({ kind: 'overflow', mode: 'relax', tier: expected.tier, workspacePath }),
+    ])
+    expect(expected.tier).toBe(1)
+    // 会话所在项目自己没有记忆：健康里单列这条超限，档位与待处理一致
+    expect((await readNow('health', healthViewSchema)).overflowOnlyLayers).toEqual([{ layer: { kind: 'workspace', workspacePath }, overflow: expected }])
+
+    await t.update({ snapshotTokenBudget: usedTokens + 1000 })
+    const pending = await readNow('pending', pendingViewSchema)
+    expect([pending.items, pending.dot]).toEqual([[], 'none'])
+    const health = await readNow('health', healthViewSchema)
+    expect([health.layers.map(l => l.overflow).filter(o => o !== null), health.overflowOnlyLayers]).toEqual([[], []])
+    expect(await new PendingDecisionsStore(sidecarAt(t.memoryRoot).pending).listOverflow()).toEqual([])
   })
 })

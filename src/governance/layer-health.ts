@@ -5,7 +5,7 @@ import type { Finding, PendingDecision, ScanCacheEntry } from './schema.ts'
 import { FINDING_TYPES } from './schema.ts'
 import { runRuleScan, buildMalformedFindings } from './rule-scan.ts'
 import { computeHealth, type HealthScore } from './scoring.ts'
-import type { DirectoryNote, QuarantineEntry } from '../storage/table.ts'
+import type { DirectoryNote, LocatedRecord, QuarantineEntry } from '../storage/table.ts'
 
 /** 健康档位的用户面标签（scan 体检行与 health message 共用一份，枚举值仍是 green/amber/red）。 */
 export const TIER_LABEL = { green: '绿色', amber: '黄色', red: '红色' } as const
@@ -74,6 +74,8 @@ export interface LayerPreread {
   quarantined: ReadonlyMap<string, readonly QuarantineEntry[]>
   /** 本次读取的目录级说明（保留键、不可读目录、同 id 副本）。 */
   directoryNotes: readonly DirectoryNote[]
+  /** 别层同 id 的 active 副本在用、因而没进 byId 的已删副本（每个 id 一份）；评分不用，GUI 的最近删除要列它。 */
+  shadowedDeleted: readonly LocatedRecord[]
 }
 
 export interface LayerHealthResult {

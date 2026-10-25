@@ -69,6 +69,35 @@ describe('健康 tab', () => {
     expect(within(global).getByRole('listitem')).toHaveTextContent('带入的记忆超出上限，已自动放宽 50%（不扣分）')
   })
 
+  it('超限行带「去处理 ›」，落到待处理（与右侧栏用量条同一个去处）', () => {
+    const gateway = createFakeGateway({ session, views: { health: health([layer({ overflow: { mode: 'relax', tier: 1 } }), layer({ layer: { kind: 'global' } })]) } })
+    const nav = createNavStore({ tab: 'health' })
+    renderInShell(<HealthTab session={session} scope={WS} nav={nav} />, gateway)
+    const ws = screen.getByRole('region', { name: '本项目' })
+    expect(within(ws).getByRole('listitem')).toHaveTextContent('带入的记忆超出上限，已自动放宽 25%（不扣分）')
+    fireEvent.click(within(ws).getByRole('button', { name: '去处理 ›' }))
+    expect(nav.get()).toEqual({ tab: 'pending' })
+  })
+
+  it('本项目自己没有记忆、但带入超限：照实写 0 条和超限这一行（不打分、不写体检时间），能去处理', () => {
+    const view: HealthView = {
+      ...health([layer({ layer: { kind: 'global' } })]),
+      overflowOnlyLayers: [{ layer: WS, overflow: { mode: 'strict', tier: 0 } }],
+    }
+    const gateway = createFakeGateway({ session, views: { health: view } })
+    const nav = createNavStore({ tab: 'health' })
+    renderInShell(<HealthTab session={session} scope={WS} nav={nav} />, gateway)
+    const ws = screen.getByRole('region', { name: '本项目' })
+    expect(ws).toHaveTextContent('本项目·0 条')
+    expect(ws).not.toHaveTextContent(/\d+ 分/)
+    expect(ws).not.toHaveTextContent('本项目还没有记忆。')
+    expect(ws).not.toHaveTextContent('上次体检')
+    expect(ws).not.toHaveTextContent('内容检查还没做过')
+    expect(within(ws).getByRole('listitem')).toHaveTextContent('带入的记忆已用到上限的 95%（不扣分）')
+    fireEvent.click(within(ws).getByRole('button', { name: '去处理 ›' }))
+    expect(nav.get()).toEqual({ tab: 'pending' })
+  })
+
   it('从没体检过：不显示分数，时间行写内容检查还没做过，下面给空状态（没有按钮）', () => {
     renderTab(health([layer({ semanticCachedAt: null, score: 100 }), layer({ layer: { kind: 'global' }, semanticCachedAt: null })]))
     const ws = screen.getByRole('region', { name: '本项目' })

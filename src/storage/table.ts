@@ -19,6 +19,8 @@ export interface DirectoryNote extends CodedNote<DirectoryNoteCode> {
   path: string
   /** reserved-keys：被忽略的键。 */
   keys?: string[]
+  /** duplicate-id：读取时用的那份（path 是没用上的副本）。 */
+  keptPath?: string
 }
 
 /** 一次按范围读取里的一条记录：带实际文件路径与所在目录，索引行与注入尾注用它，不再从 name 重算。 */
@@ -131,4 +133,15 @@ export function resolveDuplicates<T extends LocatedRecord>(candidates: readonly 
     if (cur === undefined || better(c, cur)) byId.set(c.record.id, c)
   }
   return [...byId.values()]
+}
+
+/**
+ * 读路径的同 id 取舍：先在 active 副本里按 resolveDuplicates 取一份，没有 active 副本的 id 才从其余副本里取。
+ * 已删、已取代的副本（比如同 id 在 global 与项目各一份、删了其中一份）不遮住别处仍在用的那份。返回顺序同 resolveDuplicates。
+ */
+export function resolveLiveFirst<T extends LocatedRecord>(candidates: readonly T[], hint?: LocateHint): T[] {
+  const live = resolveDuplicates(candidates.filter(c => c.record.status === 'active'), hint)
+  const liveIds = new Set(live.map(c => c.record.id))
+  const chosen = new Map([...live, ...resolveDuplicates(candidates.filter(c => !liveIds.has(c.record.id)), hint)].map(c => [c.record.id, c]))
+  return [...new Set(candidates.map(c => c.record.id))].map(id => chosen.get(id)!)
 }

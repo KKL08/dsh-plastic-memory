@@ -203,6 +203,14 @@ describe('票 09 验收：执行器走按范围读取与两级定位', () => {
     await stat(join(wsDir(WS), 'c.md'))
   })
 
+  it('重复 id：别层那份已不是 active（手改成 deleted、还没归档）时，不遮住仍在用的这份：search 与快照照常带它', async () => {
+    await writeMem(globalDir(), 'd.md', rec({ id: 'mem_d', content: 'dupcharlie global 已删', status: 'deleted', deletedAt: 300, updatedAt: 300 }))
+    await writeMem(wsDir(WS), 'd.md', wsRec({ id: 'mem_d', name: '本项目那份', content: 'dupcharlie 本项目 在用', updatedAt: 200 }), WS)
+    const h = harness()
+    expect((await h.search('dupcharlie')).hits.map(x => x.content)).toEqual(['dupcharlie 本项目 在用'])
+    expect(await h.assemble()).toContain('dupcharlie 本项目 在用')
+  })
+
   it('定位覆盖格式：带引号 id 能定位；只有 name/type/正文的手建文件 search 返回派生 id 后，维护点之前用该 id 做 source / update / forget 都能定位', async () => {
     await writeRaw(wsDir(WS), 'quoted.md', '---\nid: "mem_quoted"\nname: 引号\ntype: preference\n---\n\n带引号 id 的记忆\n', WS)
     await writeRaw(wsDir(WS), 'h1.md', handBuilt('手建一', '格式探针 用于回查'))

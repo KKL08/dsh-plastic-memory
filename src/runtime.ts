@@ -2,7 +2,7 @@ import { realpath } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { MemoryLogger, MemoryStore } from './store.ts'
 import type { MemoryRecord } from './record-schema.ts'
-import { resolveDuplicates } from './storage/table.ts'
+import { resolveLiveFirst } from './storage/table.ts'
 import { memoryRelativePath } from './storage/paths.ts'
 import type { TypeRegistry } from './type-registry.ts'
 import type { EvidenceLookupLevel } from './evidence-guidance.ts'
@@ -19,7 +19,7 @@ export async function prereadSnapshot(store: MemoryStore, workspacePath: string 
   records: MemoryRecord[]; files: Map<string, string>; quarantinedCount: number
 }> {
   const read = await store.readLayer({ kind: 'visible', workspacePath })
-  const located = resolveDuplicates(read.records, { workspacePath }).filter(l => l.record.status === 'active')
+  const located = resolveLiveFirst(read.records, { workspacePath }).filter(l => l.record.status === 'active')
   return {
     records: located.map(l => l.record),
     files: new Map(located.map(l => [l.record.id, memoryRelativePath(l.dir, l.filePath)])),
@@ -194,6 +194,23 @@ export class SnapshotCache {
       })
     } catch (err) {
       ;(this.deps.log ?? console).error('[plastic-memory] 快照冻结后的超限同步或会话视图失败:', err)
+    }
+  }
+
+  /**
+   * 上限或超限处理改了：按当前配置与磁盘内容重算这些项目（无项目为 'global'）的用量、同步超限提醒，不等下一次冻结。
+   * 用量的算法与冻结时同一条路（预读可见记录 → 组装），回到上限以内的提醒当场了结。
+   */
+  async resyncOverflow(scopes: Iterable<string>): Promise<void> {
+    const deps = { ...this.deps }
+    if (!deps.overflowLedger) return
+    const mode = deps.overflow ?? 'relax'
+    const now = Date.now()
+    for (const scope of new Set(scopes)) {
+      const workspacePath = scope === 'global' ? undefined : scope
+      const { text: _text, coreIds: _coreIds, ...usage } = assembleSnapshot({ ...deps, ...(await prereadSnapshot(deps.store, workspacePath)), workspacePath, now })
+      const level = overflowLevel(mode, usage.usedTokens, deps.budget)
+      await deps.overflowLedger.syncOverflow(scope, level, now, level ? overflowSummary(level, usage, deps.budget) : '')
     }
   }
 
