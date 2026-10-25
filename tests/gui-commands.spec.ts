@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
-import { STATE_DIR } from '../src/storage/paths.ts'
+import { encodeRecord } from '../src/storage/frontmatter.ts'
+import { ARCHIVE_DIR, STATE_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
 import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
@@ -243,6 +244,86 @@ describe('restore', () => {
     const e = env()
     await e.store.create(record({ id: 'mem_live' }))
     expect(err(await e.run({ cmd: 'restore', memoryId: 'mem_live' })).code).toBe('not-found')
+  })
+})
+
+describe('restore：没有快照覆盖的归档记忆', () => {
+  // 不经插件删除、没拍快照的归档文件：最近删除照样列出它，恢复就拿归档文件本身
+  const own = { kind: 'workspace', workspacePath: SESSION_WS } as const
+  const wsDir = () => join(root, workspaceDirName(SESSION_WS))
+  const deletedIds = async (e: ReturnType<typeof env>) => deletedViewSchema.parse(await e.readView('deleted')).items.map(i => i.memory.id)
+  const libraryIds = async (e: ReturnType<typeof env>) =>
+    libraryViewSchema.parse(await e.readView('library')).layers.flatMap(l => l.items.map(m => m.id))
+  const isInArchive = async (e: ReturnType<typeof env>, id: string) => {
+    const found = (await e.store.locate(id, { workspacePath: SESSION_WS }))!
+    return found.filePath.startsWith(join(found.dir, ARCHIVE_DIR))
+  }
+
+  it('手工放进 .archive/ 的文件（status 仍写 active）：恢复成功，回到层顶层、重新出现在全部记忆里', async () => {
+    const e = env()
+    await mkdir(join(wsDir(), ARCHIVE_DIR), { recursive: true })
+    await writeFile(join(wsDir(), WORKSPACE_MARKER), SESSION_WS + '\n')
+    const hand = record({ id: 'mem_hand', name: '手工归档', content: '用 pnpm', scope: 'workspace', workspacePath: SESSION_WS, updatedAt: NOW })
+    await writeFile(join(wsDir(), ARCHIVE_DIR, 'hand.md'), encodeRecord(hand, {}))
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect(await deletedIds(e)).toEqual(['mem_hand'])
+    expect(await e.snapshots.list()).toEqual([])
+
+    const body = ok(await e.run({ cmd: 'restore', memoryId: 'mem_hand', layer: own }))
+    expect(body.memoryIds).toEqual(['mem_hand'])
+    expect(await e.store.get('mem_hand', { workspacePath: SESSION_WS })).toMatchObject({ status: 'active', content: '用 pnpm' })
+    expect(await isInArchive(e, 'mem_hand')).toBe(false)
+    expect(await deletedIds(e)).toEqual([])
+    expect(await libraryIds(e)).toEqual(['mem_hand'])
+  })
+
+  it('手改 frontmatter 为 status: deleted、维护点归档后：恢复成功，deletedAt 清掉', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_edit', name: '手改删除', scope: 'workspace', workspacePath: SESSION_WS }))
+    const { filePath } = (await e.store.locate('mem_edit', { workspacePath: SESSION_WS }))!
+    const text = await readFile(filePath, 'utf8')
+    expect(text).toContain('status: active')
+    await writeFile(filePath, text.replace('status: active', 'status: deleted'))
+    await e.store.maintain({ kind: 'workspace', path: SESSION_WS })
+    expect(await isInArchive(e, 'mem_edit')).toBe(true)
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect(await deletedIds(e)).toEqual(['mem_edit'])
+
+    ok(await e.run({ cmd: 'restore', memoryId: 'mem_edit', layer: own }))
+    const back = (await e.store.get('mem_edit', { workspacePath: SESSION_WS }))!
+    expect(back.status).toBe('active')
+    expect(back.deletedAt).toBeUndefined()
+    expect(await isInArchive(e, 'mem_edit')).toBe(false)
+    expect(await libraryIds(e)).toEqual(['mem_edit'])
+  })
+
+  it('不带层也能恢复（按会话定位）', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_nolayer', scope: 'workspace', workspacePath: SESSION_WS, status: 'deleted' }))
+    ok(await e.run({ cmd: 'restore', memoryId: 'mem_nolayer' }))
+    expect((await e.store.get('mem_nolayer', { workspacePath: SESSION_WS }))!.status).toBe('active')
+  })
+
+  it('别的项目的归档记忆：要 allowCrossWorkspace，带上才恢复', async () => {
+    const e = env()
+    const other = { kind: 'workspace', workspacePath: OTHER_WS } as const
+    await e.store.create(record({ id: 'mem_far', scope: 'workspace', workspacePath: OTHER_WS, status: 'deleted' }))
+    const body = err(await e.run({ cmd: 'restore', memoryId: 'mem_far', layer: other }))
+    expect(body.code).toBe('cross-workspace')
+    expect(body.rejected).toEqual([{ id: 'mem_far', workspacePath: OTHER_WS }])
+    expect((await e.store.get('mem_far', { workspacePath: OTHER_WS }))!.status).toBe('deleted')
+    ok(await e.run({ cmd: 'restore', memoryId: 'mem_far', layer: other, allowCrossWorkspace: true }))
+    expect((await e.store.get('mem_far', { workspacePath: OTHER_WS }))!.status).toBe('active')
+  })
+
+  it('快照里只剩脱敏副本的（密钥硬删过）：归档里还留着一份也不恢复', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_red', scope: 'workspace', workspacePath: SESSION_WS }))
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_red', layer: own }))
+    await e.snapshots.redact(new Set(['mem_red']))
+    const body = err(await e.run({ cmd: 'restore', memoryId: 'mem_red', layer: own }))
+    expect(body.code).toBe('not-found')
+    expect((await e.store.get('mem_red', { workspacePath: SESSION_WS }))!.status).toBe('deleted')
   })
 })
 

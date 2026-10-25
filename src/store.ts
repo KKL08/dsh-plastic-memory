@@ -210,9 +210,12 @@ export class MemoryStore {
     this.stats = stats
   }
 
-  /** 按 id 两级定位（含非 active）；hint 是当前 workspace，一级先看它的目录。 */
+  /** 按 id 两级定位（含非 active）；hint 是当前 workspace，一级先看它的目录。
+   *  位置即作用域（同 readLayer）：.archive/ 里 status 仍写着 active 的按 deleted 返回。 */
   async get(id: string, hint?: LocateHint): Promise<MemoryRecord | undefined> {
-    return (await this.table.locate(id, hint))?.record
+    const found = await this.table.locate(id, hint)
+    if (found === undefined) return undefined
+    return found.record.status === 'active' && dirname(found.filePath) !== found.dir ? { ...found.record, status: 'deleted' } : found.record
   }
   locate(id: string, hint?: LocateHint) { return this.table.locate(id, hint) }
   listWorkspaceDirs() { return this.table.listWorkspaceDirs() }
@@ -254,6 +257,20 @@ export class MemoryStore {
     if (!(await this.table.locate(record.id, hint))) return false
     try {
       await this.table.update(record.id, r => ({ ...r, status: 'deleted', updatedAt: Date.now() }), hint)
+    } catch (err) {
+      if (err instanceof RecordNotFoundError) return false   // 定位之后被别处删掉
+      throw err
+    }
+    return true
+  }
+
+  /**
+   * 归档记忆原样复活（没有快照覆盖时的恢复）：改回 active、去掉 deletedAt，经写路径搬回层顶层。
+   * 归档文件本身就是完整内容；updatedAt 记为恢复时刻，手工放进 .archive/ 仍写 active 的文件也因此会被写回顶层。定位同 softDelete。
+   */
+  async restoreArchived(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, opts: DeleteOptions = {}): Promise<boolean> {
+    try {
+      await this.table.update(record.id, ({ deletedAt: _, ...r }) => ({ ...r, status: 'active', updatedAt: Date.now() }), deleteHint(record, opts))
     } catch (err) {
       if (err instanceof RecordNotFoundError) return false   // 定位之后被别处删掉
       throw err

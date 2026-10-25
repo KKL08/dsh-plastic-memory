@@ -202,7 +202,7 @@ async function dispatch(
 
     case 'restore': {
       // 最近删除里的一条：被裁决删掉的走撤销那条路（按裁决的快照恢复，冲突回到待处理、沿用原条目）；
-      // 其余按最近一份含它的快照恢复
+      // 其余按最近一份含它的快照恢复；没有快照覆盖的（不经插件删除的归档文件）恢复归档文件本身
       const { memoryId, layer } = command
       const rec = await locate(memoryId, layer)
       if (!rec || rec.status !== 'deleted') return notFound(memoryId)
@@ -213,7 +213,16 @@ async function dispatch(
       const entry = (await deps.decisions.listSettled()).filter(d => verdictLoser(d, d.settled!.verdict) === memoryId
         && (layer === undefined || covers(snapshots.find(s => s.id === d.settled!.snapshotId)))).at(-1)
       const snapshotId = entry?.settled?.snapshotId ?? snapshots.find(covers)?.id
-      if (snapshotId === undefined) return fail(cmd, 'not-found', `没有覆盖 ${memoryId} 的快照（可能已超过保留窗口）`)
+      if (snapshotId === undefined) {
+        // 快照里只剩脱敏副本的是密钥硬删过的：归档里残留的副本也不复活
+        if (snapshots.some(s => s.data.some(r => r.id === memoryId && r.redacted === true && (layer === undefined || isCopyOf(r, layer))))) {
+          return fail(cmd, 'not-found', `${memoryId} 含密钥已物理删除，快照里只剩脱敏副本，不可恢复`)
+        }
+        const { rejected } = gateRecords([rec], gov, command.allowCrossWorkspace)
+        if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
+        if (!(await deps.store.restoreArchived(rec, { isExactLayer: layer !== undefined }))) return notFound(memoryId)
+        return { ok: true, cmd, memoryIds: [memoryId] }
+      }
       const r = await restoreFrom(snapshotId, [memoryId], command.allowCrossWorkspace, layer !== undefined)
       if (isErr(r)) return r
       if (entry) await deps.decisions.unsettle(entry.id)
