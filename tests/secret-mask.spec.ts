@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { maskSecrets, maskSecretSurface, SECRET_MASK, hasSecret } from '../src/secrets.ts'
-import { FAKE_SECRET } from './helpers/secrets.ts'
+import { detectSecrets, maskSecrets, maskSecretSurface, SECRET_MASK, hasSecret } from '../src/secrets.ts'
+import { FAKE_SECRET, generatePrivateKeyPem } from './helpers/secrets.ts'
 
 describe('maskSecrets：只换命中片段', () => {
   it('疑似密码不遮：写入时用户已确认不是密钥才放行', () => {
@@ -69,5 +69,35 @@ describe('severity: suspected：疑似密钥也遮（对话卡用），缺省口
     const r = { content: '登录用 password: Hunter2-2026', name: '账号', summary: '', tags: [] as string[] }
     expect(maskSecretSurface(r, { severity: 'suspected' }).content).toBe(`登录用 ${SECRET_MASK}`)
     expect(maskSecretSurface(r)).toBe(r)
+  })
+})
+
+describe('PEM 私钥块：从 BEGIN 到对应的 END 整块遮住', () => {
+  const { pem, bodyLines } = generatePrivateKeyPem()
+
+  it('整块换成一个占位，前后文字原样；两级口径一样', () => {
+    const text = `部署机私钥：\n${pem}\n用完删掉`
+    for (const severity of ['critical', 'suspected'] as const) {
+      expect(maskSecrets(text, { severity })).toBe(`部署机私钥：\n${SECRET_MASK}\n用完删掉`)
+    }
+  })
+
+  it('截断的粘贴（没有 END 行）遮到文本末尾', () => {
+    const truncated = pem.split('\n').slice(0, 2).join('\n')
+    expect(maskSecrets(`前文 ${truncated}`)).toBe(`前文 ${SECRET_MASK}`)
+  })
+
+  it('两块私钥各遮各的，中间的文字保留', () => {
+    expect(maskSecrets(`A：${pem}\n以及 B：${pem}`)).toBe(`A：${SECRET_MASK}\n以及 B：${SECRET_MASK}`)
+  })
+
+  it('检测口径不变：仍是 critical', () => {
+    expect(detectSecrets(pem)).toEqual([{ name: 'PEM 私钥块', severity: 'critical' }])
+  })
+
+  it('maskSecretSurface：正文里的私钥整块遮住，其他字段不动', () => {
+    const masked = maskSecretSurface({ content: `私钥\n${pem}\n别外传`, name: '部署机', summary: '部署机凭证', tags: ['ssh'] })
+    expect(masked).toEqual({ content: `私钥\n${SECRET_MASK}\n别外传`, name: '部署机', summary: '部署机凭证', tags: ['ssh'] })
+    for (const line of bodyLines) expect(JSON.stringify(masked)).not.toContain(line)
   })
 })

@@ -11,7 +11,8 @@ export const SECRET_PATTERNS: Array<{ name: string; re: RegExp; severity: Secret
   { name: 'GitHub token（ghp_/gho_ 等）', re: /\bgh[pousr]_[A-Za-z0-9]{20,}\b/, severity: 'critical' },
   { name: 'AWS Access Key', re: /\bAKIA[0-9A-Z]{16}\b/, severity: 'critical' },
   { name: 'JWT', re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/, severity: 'critical' },
-  { name: 'PEM 私钥块', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/, severity: 'critical' },
+  // 命中整块（BEGIN 到同名 END），遮盖才盖得住正文；没有 END 行（截断的粘贴）算到文本末尾
+  { name: 'PEM 私钥块', re: /-----BEGIN ([A-Z ]*)PRIVATE KEY-----[\s\S]*?(?:-----END \1PRIVATE KEY-----|$)/, severity: 'critical' },
   { name: 'Slack token', re: /\bxox[baprs]-[A-Za-z0-9-]{8,}\b/, severity: 'critical' },
   { name: 'Google API Key', re: /\bAIza[0-9A-Za-z_-]{35}\b/, severity: 'critical' },
   { name: 'Bearer token', re: /\bBearer\s+[A-Za-z0-9._-]{20,}/, severity: 'critical' },
