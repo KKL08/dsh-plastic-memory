@@ -401,6 +401,21 @@ describe('SidebarTab 确认收起后的键盘焦点', () => {
     await waitFor(() => { expect(saved.getByText('已彻底删除。如果它是真的凭证，记得去换一个新的。')).toHaveFocus() })
   })
 
+  it('彻底删除后下面只剩底部入口：焦点落在原位那行说明上，不跑到「在记忆页查看」', async () => {
+    const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
+    setup(
+      { library: library(glob, fresh), session: snapshot({ injectedIds: [], savedIds: ['n1'] }), pending: pending() },
+      command => command.cmd === 'forget' ? { ok: false, cmd: command.cmd, code: 'has-secret' } : { ok: true, cmd: command.cmd, memoryIds: ['n1'] },
+    )
+    const saved = within(screen.getByRole('region', { name: '这次对话新记的' }))
+    await press(saved.getByRole('button', { name: '删除这条记忆' }))
+    // 不包 act：命令返回后网关记删除和本组件收尾分两次提交，同浏览器里一样
+    const purge = saved.getByRole('button', { name: '彻底删除' })
+    purge.focus()
+    fireEvent.click(purge)
+    await waitFor(() => { expect(screen.getByText('已彻底删除。如果它是真的凭证，记得去换一个新的。')).toHaveFocus() })
+  })
+
   it('彻底删除的是最后一条记忆：「还没有记忆」出来后那行说明还在，焦点落在它上面', async () => {
     const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
     const { gateway } = setup(

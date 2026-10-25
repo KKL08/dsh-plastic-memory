@@ -122,9 +122,13 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     const memoryId = memory.id
     void run(memoryId, { cmd: 'forget', memoryId, layer: layerOfMemory(memory) }, () => {})
   }
+  // 发出时就记下，等删除状态记成彻底删除再换上说明：网关记删除和这里的成功回调不在同一次提交，
+  // 回调里才记会先空出一帧（这一行没了、说明还没来），焦点趁机落到后面的控件上
   const hardDelete = (memoryId: string, memory: MemoryCardData | undefined) => {
-    void run(memoryId, { cmd: 'hard-delete', memoryId, layer: memory && layerOfMemory(memory) }, () => { setPurged(prev => new Set(prev).add(memoryId)) })
+    setPurged(prev => new Set(prev).add(memoryId))
+    void run(memoryId, { cmd: 'hard-delete', memoryId, layer: memory && layerOfMemory(memory) }, () => {})
   }
+  const isPurged = (id: string) => purged.has(id) && deletions.of(id) === 'hard'
 
   if (library.status !== 'ready') return <div className="pm-side"><ViewNote state={library} /></div>
 
@@ -149,7 +153,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   if (globalCount === 0 && projectCount === 0) {
     return (
       <div className="pm-side">
-        {(snapshot?.savedIds ?? []).filter(id => purged.has(id)).map(purgedNote)}
+        {(snapshot?.savedIds ?? []).filter(isPurged).map(purgedNote)}
         <EmptyState variant="first" title={t('sidebar.empty.title')}>{t('sidebar.empty.body')}</EmptyState>
       </div>
     )
@@ -198,7 +202,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const saved = (snapshot?.savedIds ?? [])
     .flatMap((id): Array<{ id: string; memory: MemoryCardData | undefined }> => {
       const memory = byId.get(id)
-      return purged.has(id) ? [{ id, memory: undefined }] : memory === undefined || deletions.of(id) !== undefined ? [] : [{ id, memory }]
+      return isPurged(id) ? [{ id, memory: undefined }] : memory === undefined || deletions.of(id) !== undefined ? [] : [{ id, memory }]
     })
   const scope = ws === undefined ? undefined : { kind: 'workspace' as const, workspacePath: ws }
   const restPending = ws === undefined || pending.status !== 'ready'
