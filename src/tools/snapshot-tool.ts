@@ -15,7 +15,7 @@ export interface SnapshotToolBindingDeps extends SnapshotToolDeps {
 export function createSnapshotTool(deps: SnapshotToolBindingDeps): ToolDefinition {
   return defineTool({
     name: 'memory_snapshot',
-    description: '记忆快照管理：action=create 手动快照（大清理前先拍）；list 列出 14 天内的快照（forget/裁决前会自动拍）；show 查看某快照与当前状态的差异；restore 恢复误删的记忆（可指定 memoryIds 只恢复部分，快照后被改过的记录默认跳过）。',
+    description: '记忆快照管理：action=create 手动快照（大清理前先拍；不给 memoryIds 时拍当前项目与全局的全部记忆）；list 列出 14 天内的快照（forget/裁决前会自动拍）；show 查看某快照与当前状态的差异；restore 恢复误删的记忆（可指定 memoryIds 只恢复部分，快照后被改过的记录默认跳过）。',
     parameters: {
       action: { type: 'string', enum: ['create', 'list', 'show', 'restore'], required: true },
       snapshotId: { type: 'string', description: 'show/restore 时必填，snap_ 开头' },

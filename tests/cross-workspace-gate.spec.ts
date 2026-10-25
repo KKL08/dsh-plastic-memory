@@ -170,6 +170,25 @@ describe('不带参数：目标不在可见集合（global + 当前 workspace）
     expect((await w.snapshots.get(r.snapshotId))!.memoryIds).toEqual(['mem_a'])
   })
 
+  it('snapshot create（不给 id）：只拍 global 与当前项目，B 的记录不进快照，show 也看不到；allowCrossWorkspace 只对指定 id 生效', async () => {
+    const w = world()
+    await w.seed(inA('mem_a'), glob('mem_g'), inB('mem_b', { summary: 'B 的内容' }))
+    for (const allowCrossWorkspace of [undefined, true]) {
+      const r = await executeSnapshotTool({ action: 'create', allowCrossWorkspace }, IN_A, w.deps)
+      if (r.kind !== 'created') throw new Error(r.kind)
+      expect(r.count).toBe(2)
+      expect((await w.snapshots.get(r.snapshotId))!.memoryIds.sort()).toEqual(['mem_a', 'mem_g'])
+      const shown = await executeSnapshotTool({ action: 'show', snapshotId: r.snapshotId, allowCrossWorkspace }, IN_A, w.deps)
+      if (shown.kind !== 'shown') throw new Error(shown.kind)
+      expect(shown.entries.map(e => e.id).sort()).toEqual(['mem_a', 'mem_g'])
+      expect(shown.message).not.toContain('B 的内容')
+    }
+    // 项目 B 的会话照样只拍 B 与 global
+    const inB_ = await executeSnapshotTool({ action: 'create' }, { workspacePath: B }, w.deps)
+    if (inB_.kind !== 'created') throw new Error(inB_.kind)
+    expect((await w.snapshots.get(inB_.snapshotId))!.memoryIds.sort()).toEqual(['mem_b', 'mem_g'])
+  })
+
   it('snapshot show / restore：快照里 B 的记录不展示、不恢复，同快照 A 的记录照常', async () => {
     const w = world()
     const a = inA('mem_a', { summary: 'A 的旧内容' })

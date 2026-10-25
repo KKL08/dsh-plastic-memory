@@ -53,11 +53,12 @@ export async function executeSnapshotTool(
   if (args.action === 'create') {
     // 去重（与 memory_forget 的约定一致）：调用者传入重复 id 不应重复计入快照
     const uniqueIds = args.memoryIds ? [...new Set(args.memoryIds)] : undefined
-    // 预读范围：给了 id 则逐条两级定位（含非 active，当前 workspace 优先，再剔除已删）并过跨 workspace 门；否则只读 active 全量
+    // 预读范围：给了 id 则逐条两级定位（含非 active，当前 workspace 优先，再剔除已删）并过跨 workspace 门；
+    // 否则只读可见集合（global + 当前 workspace）的 active，与注入、检索同口径，allowCrossWorkspace 不放宽这一路
     const gated = uniqueIds
       ? gateRecords((await Promise.all(uniqueIds.map(id => deps.store.get(id, { workspacePath: context.workspacePath }))))
           .filter((r): r is MemoryRecord => r !== undefined && r.status !== 'deleted'), context, args.allowCrossWorkspace)
-      : { allowed: await deps.store.query({ status: ['active'] }), rejected: [], otherWorkspaces: [] }
+      : { allowed: await deps.store.query({ scope: { kind: 'visible', workspacePath: context.workspacePath }, status: ['active'] }), rejected: [], otherWorkspaces: [] }
     const { allowed: records, rejected, otherWorkspaces } = gated
     const snap = await deps.snapshots.capture({
       operation: 'manual',
