@@ -170,6 +170,43 @@ describe('不带参数：目标不在可见集合（global + 当前 workspace）
     expect((await w.snapshots.get(r.snapshotId))!.memoryIds).toEqual(['mem_a'])
   })
 
+  it('snapshot create（不给 id）：只拍 global 与当前项目，B 的记录不进快照，show 也看不到；allowCrossWorkspace 只对指定 id 生效', async () => {
+    const w = world()
+    await w.seed(inA('mem_a'), glob('mem_g'), inB('mem_b', { summary: 'B 的内容' }))
+    for (const allowCrossWorkspace of [undefined, true]) {
+      const r = await executeSnapshotTool({ action: 'create', allowCrossWorkspace }, IN_A, w.deps)
+      if (r.kind !== 'created') throw new Error(r.kind)
+      expect(r.count).toBe(2)
+      expect((await w.snapshots.get(r.snapshotId))!.memoryIds.sort()).toEqual(['mem_a', 'mem_g'])
+      const shown = await executeSnapshotTool({ action: 'show', snapshotId: r.snapshotId, allowCrossWorkspace }, IN_A, w.deps)
+      if (shown.kind !== 'shown') throw new Error(shown.kind)
+      expect(shown.entries.map(e => e.id).sort()).toEqual(['mem_a', 'mem_g'])
+      expect(shown.message).not.toContain('B 的内容')
+    }
+    // 项目 B 的会话照样只拍 B 与 global
+    const inB_ = await executeSnapshotTool({ action: 'create' }, { workspacePath: B }, w.deps)
+    if (inB_.kind !== 'created') throw new Error(inB_.kind)
+    expect((await w.snapshots.get(inB_.snapshotId))!.memoryIds.sort()).toEqual(['mem_b', 'mem_g'])
+  })
+
+  it('snapshot list：只列含可见记录的快照，条数按可见记录算；全是 B 的快照不列出（描述也不出现）', async () => {
+    const w = world()
+    await w.snapshots.capture({ operation: 'manual', description: '只有 A', records: [inA('mem_a')] }, 4000)
+    await w.snapshots.capture({ operation: 'manual', description: '混合', records: [inA('mem_a2'), glob('mem_g'), inB('mem_b')] }, 4001)
+    await w.snapshots.capture({ operation: 'pre-forget', description: 'B 的遗忘理由', records: [inB('mem_b2'), inB('mem_b3')] }, 4002)
+
+    const r = await executeSnapshotTool({ action: 'list' }, IN_A, w.deps)
+    if (r.kind !== 'listed') throw new Error(r.kind)
+    expect(r.snapshots.map(s => [s.description, s.count])).toEqual([['混合', 2], ['只有 A', 1]])
+    expect(r.message).not.toContain('B 的遗忘理由')
+    expect(r.message).toContain('混合（2 条）')
+
+    // B 的会话反过来看不到只有 A 的那个
+    const fromB = await executeSnapshotTool({ action: 'list' }, { workspacePath: B }, w.deps)
+    if (fromB.kind !== 'listed') throw new Error(fromB.kind)
+    expect(fromB.snapshots.map(s => [s.description, s.count])).toEqual([['B 的遗忘理由', 2], ['混合', 2]])
+  })
+
   it('snapshot show / restore：快照里 B 的记录不展示、不恢复，同快照 A 的记录照常', async () => {
     const w = world()
     const a = inA('mem_a', { summary: 'A 的旧内容' })
@@ -253,6 +290,16 @@ describe('带参数：放行，结构化结果与渲染文本对非可见集合�
     expect(r.otherWorkspaces).toEqual([{ id: 'mem_b', workspacePath: B }])
     expect(r.message).toContain(B)
     expect((await w.store.get('mem_b'))!.scope).toBe('global')
+  })
+
+  it('snapshot list：全部快照照列，条数按全部记录算', async () => {
+    const w = world()
+    await w.snapshots.capture({ operation: 'manual', description: '混合', records: [inA('mem_a'), inB('mem_b')] }, 4000)
+    await w.snapshots.capture({ operation: 'pre-forget', description: 'B 的遗忘理由', records: [inB('mem_b2')] }, 4001)
+    const r = await executeSnapshotTool({ action: 'list', allowCrossWorkspace: true }, IN_A, w.deps)
+    if (r.kind !== 'listed') throw new Error(r.kind)
+    expect(r.snapshots.map(s => [s.description, s.count])).toEqual([['B 的遗忘理由', 1], ['混合', 2]])
+    expect(r.message).toContain('B 的遗忘理由')
   })
 
   it('snapshot create / show / restore：B 的记录放行并标出 B', async () => {

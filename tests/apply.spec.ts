@@ -421,9 +421,11 @@ describe('侧表与旧 KV 导入接线', () => {
     }
     return { ctx, defs }
   }
-  const snap = (id: string): MemorySnapshot => ({
-    id, createdAt: Date.now(), operation: 'manual', description: id, memoryIds: [], data: [],
-  })
+  // 含一条 global 记忆：list 只列含可见记录的快照
+  const snap = (id: string): MemorySnapshot => {
+    const r = record({ id: `mem_${id}` })
+    return { id, createdAt: Date.now(), operation: 'manual', description: id, memoryIds: [r.id], data: [r] }
+  }
   const pd = (id: string): PendingDecision => ({ id, memoryIds: ['mem_a', 'mem_b'], summary: id, firstSeenAt: 1 })
   async function readMarker(memoryRoot: string) {
     return kvImportMarkerSchema.parse(JSON.parse(await readFile(join(memoryRoot, STATE_DIR, KV_IMPORT_MARKER), 'utf8')))

@@ -15,14 +15,14 @@ export interface SnapshotToolBindingDeps extends SnapshotToolDeps {
 export function createSnapshotTool(deps: SnapshotToolBindingDeps): ToolDefinition {
   return defineTool({
     name: 'memory_snapshot',
-    description: '记忆快照管理：action=create 手动快照（大清理前先拍）；list 列出 14 天内的快照（forget/裁决前会自动拍）；show 查看某快照与当前状态的差异；restore 恢复误删的记忆（可指定 memoryIds 只恢复部分，快照后被改过的记录默认跳过）。',
+    description: '记忆快照管理：action=create 手动快照（大清理前先拍；不给 memoryIds 时拍当前项目与全局的全部记忆）；list 列出 14 天内的快照（forget/裁决前会自动拍）；show 查看某快照与当前状态的差异；restore 恢复误删的记忆（可指定 memoryIds 只恢复部分，快照后被改过的记录默认跳过）。',
     parameters: {
       action: { type: 'string', enum: ['create', 'list', 'show', 'restore'], required: true },
       snapshotId: { type: 'string', description: 'show/restore 时必填，snap_ 开头' },
       memoryIds: { type: 'array', items: { type: 'string' }, description: 'create：只快照这些记忆；restore：只恢复这些记忆' },
       description: { type: 'string', description: 'create 时的备注' },
       overwriteChanged: { type: 'boolean', description: 'restore 时覆盖快照后被修改过的记录（需用户确认）' },
-      allowCrossWorkspace: { ...ALLOW_CROSS_WORKSPACE_PARAM, description: `create（指定 memoryIds）/ show / restore 适用。${ALLOW_CROSS_WORKSPACE_PARAM.description}` },
+      allowCrossWorkspace: { ...ALLOW_CROSS_WORKSPACE_PARAM, description: `create（指定 memoryIds）/ list / show / restore 适用；list 不带时只列含当前项目或全局记忆的快照。${ALLOW_CROSS_WORKSPACE_PARAM.description}` },
     },
     output: {
       schema: { type: 'json' },

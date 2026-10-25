@@ -8,6 +8,8 @@ import { record } from './helpers/record.ts'
 function makeStore() {
   return new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
 }
+/** 这些用例不涉及密钥硬删，写后复核不会要求撤回。 */
+const noDiscard = async () => {}
 
 describe('SnapshotStore.capture', () => {
   it('capture 只存受影响记录，list 按 createdAt 倒序', async () => {
@@ -47,11 +49,11 @@ describe('SnapshotStore.diff / restore', () => {
     const written: MemoryRecord[] = []
     const put = async (r: MemoryRecord) => { written.push(r) }
 
-    const r1 = await s.restore(snap, undefined, put, new Map([['mem_a', changed]]), false)
+    const r1 = await s.restore(snap, undefined, put, new Map([['mem_a', changed]]), false, noDiscard)
     expect(r1.skipped).toEqual(['mem_a'])
     expect(written).toHaveLength(0)
 
-    const r2 = await s.restore(snap, undefined, put, new Map([['mem_a', changed]]), true)
+    const r2 = await s.restore(snap, undefined, put, new Map([['mem_a', changed]]), true, noDiscard)
     expect(r2.restored).toEqual(['mem_a'])
     expect(written[0].content).toBe('原文')
   })
@@ -62,7 +64,7 @@ describe('SnapshotStore.diff / restore', () => {
     const b = record({ id: 'mem_b', content: 'B' })
     const snap = await s.capture({ operation: 'pre-forget', description: 'd', records: [a, b] }, 100)
     const written: MemoryRecord[] = []
-    const r = await s.restore(snap, ['mem_b'], async rec => { written.push(rec) }, new Map(), false)
+    const r = await s.restore(snap, ['mem_b'], async rec => { written.push(rec) }, new Map(), false, noDiscard)
     expect(r.restored).toEqual(['mem_b'])
     expect(written.map(x => x.id)).toEqual(['mem_b'])
   })
@@ -75,7 +77,7 @@ describe('SnapshotStore.diff / restore', () => {
     const softDeleted = record({ id: 'mem_a', content: '原文', status: 'deleted', updatedAt: 150 })
 
     const written: MemoryRecord[] = []
-    const r = await s.restore(snap, undefined, async rec => { written.push(rec) }, new Map([['mem_a', softDeleted]]), false)
+    const r = await s.restore(snap, undefined, async rec => { written.push(rec) }, new Map([['mem_a', softDeleted]]), false, noDiscard)
     expect(r.restored).toEqual(['mem_a'])
     expect(r.skipped).toEqual([])
     expect(written[0].status).toBe('active')

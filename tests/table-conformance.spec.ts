@@ -281,7 +281,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
 
     const byId = new Map((await store.query({ status: ['active', 'superseded', 'deleted'] })).map(r => [r.id, r]))
     const { restored } = await snapshots.restore(
-      snap, undefined, r => store.put(r), byId, false,
+      snap, undefined, r => store.put(r), byId, false, r => store.hardDelete(r),
     )
     expect(restored).toEqual([rec.id])
     expect((await store.get(rec.id))!.status).toBe('active')

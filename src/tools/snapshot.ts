@@ -12,7 +12,7 @@ export interface SnapshotToolDeps {
 /** allowCrossWorkspace：用户明确选择「全局整理」时才为 true，放行其他项目的记录（见 workspace-gate.ts）。 */
 export type SnapshotToolArgs =
   | { action: 'create'; description?: string; memoryIds?: string[]; allowCrossWorkspace?: boolean }
-  | { action: 'list' }
+  | { action: 'list'; allowCrossWorkspace?: boolean }
   | { action: 'show'; snapshotId: string; allowCrossWorkspace?: boolean }
   | { action: 'restore'; snapshotId: string; memoryIds?: string[]; overwriteChanged?: boolean; allowCrossWorkspace?: boolean }
 
@@ -53,11 +53,12 @@ export async function executeSnapshotTool(
   if (args.action === 'create') {
     // 去重（与 memory_forget 的约定一致）：调用者传入重复 id 不应重复计入快照
     const uniqueIds = args.memoryIds ? [...new Set(args.memoryIds)] : undefined
-    // 预读范围：给了 id 则逐条两级定位（含非 active，当前 workspace 优先，再剔除已删）并过跨 workspace 门；否则只读 active 全量
+    // 预读范围：给了 id 则逐条两级定位（含非 active，当前 workspace 优先，再剔除已删）并过跨 workspace 门；
+    // 否则只读可见集合（global + 当前 workspace）的 active，与注入、检索同口径，allowCrossWorkspace 不放宽这一路
     const gated = uniqueIds
       ? gateRecords((await Promise.all(uniqueIds.map(id => deps.store.get(id, { workspacePath: context.workspacePath }))))
           .filter((r): r is MemoryRecord => r !== undefined && r.status !== 'deleted'), context, args.allowCrossWorkspace)
-      : { allowed: await deps.store.query({ status: ['active'] }), rejected: [], otherWorkspaces: [] }
+      : { allowed: await deps.store.query({ scope: { kind: 'visible', workspacePath: context.workspacePath }, status: ['active'] }), rejected: [], otherWorkspaces: [] }
     const { allowed: records, rejected, otherWorkspaces } = gated
     const snap = await deps.snapshots.capture({
       operation: 'manual',
@@ -76,10 +77,14 @@ export async function executeSnapshotTool(
   }
 
   if (args.action === 'list') {
-    const snapshots = (await deps.snapshots.list()).map(s => ({
-      id: s.id, createdAt: s.createdAt, operation: s.operation,
-      description: s.description, count: s.memoryIds.length,
-    }))
+    // 跨 workspace 门：只列含可见记录（global + 当前 workspace）的快照，条数按可见记录算；全是其他项目记录的快照
+    // 连描述也不露。按快照里记录自己的位置判定，不逐条读现状；带参数时照旧全列
+    const snapshots = (await deps.snapshots.list())
+      .map(s => ({
+        id: s.id, createdAt: s.createdAt, operation: s.operation, description: s.description,
+        count: args.allowCrossWorkspace === true ? s.memoryIds.length : s.data.filter(r => isVisible(r, context)).length,
+      }))
+      .filter(s => args.allowCrossWorkspace === true || s.count > 0)
     return {
       kind: 'listed', snapshots,
       message: snapshots.length === 0
@@ -127,6 +132,7 @@ export async function executeSnapshotTool(
     (r, skipIf) => deps.store.put(r, options.isExactLayer === true ? { workspacePath: r.workspacePath, isExactLayer: true } : undefined, skipIf),
     current,
     args.overwriteChanged ?? false,
+    r => deps.store.hardDelete(r, { isExactLayer: options.isExactLayer === true }),
   )
   const changedCount = skipped.length - redacted.length
   const skippedNote = changedCount > 0
