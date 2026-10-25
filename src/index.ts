@@ -454,6 +454,12 @@ export async function apply(ctx: Context, config: Config) {
       resolveContext, getLlm, getBaseline, log: ctx.logger,
       isGovernanceEnabled: () => config.governance.enabled.get(),
     }))
+    // 卸载时（插件重载、commands 服务撤下）停写视图：cordis 卸载会 await 这个 disposer，
+    // 进行中的写入落完才轮到新实例加载，旧实例的迟到写入不会盖掉新视图
+    return async () => {
+      if (views === writer) views = undefined
+      await writer.dispose()
+    }
   })
   let startupViewsPending = true
 
