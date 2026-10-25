@@ -8,6 +8,7 @@ import { rankRecords, TIER_ORDER, type RankedRecord, type SearchTier } from '../
 import type { TypeRegistry } from '../type-registry.ts'
 import { sourceNote } from '../index-line.ts'
 import { stalenessNote, withinValidity } from '../record-freshness.ts'
+import { maskSecretSurface } from '../secrets.ts'
 
 /** memory_search 运行时需要的会话上下文，由框架绑定层的 resolveContext 提供。 */
 export interface SearchContext {
@@ -153,11 +154,15 @@ export async function executeSearch(
   return {
     ...note,
     ...(ranked.length > top.length ? { moreNote: truncationNote(ranked.length, top.length, limit === MAX_SEARCH_LIMIT) } : {}),
-    hits: top.map(({ record: h }) => ({
-      id: h.id, type: h.type, summary: h.summary, content: h.content,
-      sourceNote: sourceNote(h),
-      stalenessNote: stalenessNote(h, deps.registry.get(h.type).decayDays, now),
-      path: filePathOf.get(h.id)!,
-    })),
+    // 与注入同口径：只遮明确密钥（疑似级写入时用户已确认），文件路径照给
+    hits: top.map(({ record: h }) => {
+      const masked = maskSecretSurface(h)
+      return {
+        id: h.id, type: h.type, summary: masked.summary, content: masked.content,
+        sourceNote: sourceNote(h),
+        stalenessNote: stalenessNote(h, deps.registry.get(h.type).decayDays, now),
+        path: filePathOf.get(h.id)!,
+      }
+    }),
   }
 }

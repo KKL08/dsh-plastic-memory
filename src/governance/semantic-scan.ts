@@ -1,6 +1,6 @@
 import type { MemoryRecord } from '../record-schema.ts'
 import { SEVERITY_BY_TYPE, type Finding } from './schema.ts'
-import { maskSecrets } from '../secrets.ts'
+import { maskSecretSurface, maskSecrets } from '../secrets.ts'
 
 /** 语义层的 LLM 抽象：纯逻辑只依赖这个接口，真机接线在 index.ts。 */
 export interface SemanticLlm {
@@ -61,10 +61,11 @@ export function buildSemanticPrompt(
   records: MemoryRecord[],
   baseline: readonly string[] | null,
 ): { system: string; user: string } {
+  // 判断冲突用不到密钥原值，明确密钥不发给模型（与注入同口径）
   const baselineSection = baseline
-    ? `## 权威配置基线（AGENTS.md/CLAUDE.md）\n${renderBaselineMessages(baseline)}`
+    ? `## 权威配置基线（AGENTS.md/CLAUDE.md）\n${maskSecrets(renderBaselineMessages(baseline))}`
     : '## 权威配置基线\n（无权威配置基线，跳过垂直冲突检测）'
-  const memoryLines = records.map(r =>
+  const memoryLines = records.map(r => maskSecretSurface(r)).map(r =>
     `- id=${r.id} type=${r.type} scope=${r.scope}${r.workspacePath ? `(${r.workspacePath})` : ''}\n  content: ${r.content}\n  summary: ${r.summary}`)
   return {
     system: SYSTEM_PROMPT,

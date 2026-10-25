@@ -95,6 +95,18 @@ describe('PEM 私钥块：从 BEGIN 到对应的 END 整块遮住', () => {
     expect(detectSecrets(pem)).toEqual([{ name: 'PEM 私钥块', severity: 'critical' }])
   })
 
+  it('maskSecretSurface：正文里截断的私钥只遮到正文末尾，name、summary、tags 不动', () => {
+    const truncated = pem.split('\n').slice(0, 2).join('\n')
+    const masked = maskSecretSurface({ content: `私钥 ${truncated}`, name: '部署机', summary: '部署机凭证', tags: ['ssh', '运维'] })
+    expect(masked).toEqual({ content: `私钥 ${SECRET_MASK}`, name: '部署机', summary: '部署机凭证', tags: ['ssh', '运维'] })
+  })
+
+  it('maskSecretSurface：一个字段自己命中、另有跨字段拼接才命中的，两处都遮', () => {
+    const truncated = pem.split('\n').slice(0, 2).join('\n')
+    const r = { content: `私钥 ${truncated}`, name: '部署机', summary: '认证头 Bearer', tags: ['TESTONLYabcdefghijklmnop', '运维'] }
+    expect(maskSecretSurface(r)).toEqual({ content: `私钥 ${SECRET_MASK}`, name: '部署机', summary: `认证头 ${SECRET_MASK}`, tags: [SECRET_MASK, '运维'] })
+  })
+
   it('maskSecretSurface：正文里的私钥整块遮住，其他字段不动', () => {
     const masked = maskSecretSurface({ content: `私钥\n${pem}\n别外传`, name: '部署机', summary: '部署机凭证', tags: ['ssh'] })
     expect(masked).toEqual({ content: `私钥\n${SECRET_MASK}\n别外传`, name: '部署机', summary: '部署机凭证', tags: ['ssh'] })

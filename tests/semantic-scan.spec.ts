@@ -38,6 +38,26 @@ describe('buildSemanticPrompt', () => {
     expect(user).not.toContain('更早的一条')
   })
 
+  it('明确密钥不发给模型：记忆正文、摘要与基线里遮成占位，疑似密钥照原文', () => {
+    const { user } = buildSemanticPrompt(
+      [record({ id: 'mem_a', content: `网关 key ${FAKE_SECRET.sk}，预发库密码: Abc12345`, summary: `token ${FAKE_SECRET.github}` })],
+      [`Instructions from: AGENTS.md\n\nCI 用 ${FAKE_SECRET.aws}`])
+    for (const secret of [FAKE_SECRET.sk, FAKE_SECRET.github, FAKE_SECRET.aws]) expect(user).not.toContain(secret)
+    expect(user).toContain(`content: 网关 key ${SECRET_MASK}，预发库密码: Abc12345`)
+    expect(user).toContain(`summary: token ${SECRET_MASK}`)
+    expect(user).toContain(`CI 用 ${SECRET_MASK}`)
+  })
+
+  it('两条记忆只差在密钥值：模型看到的两条内容相同，按相同内容判断（不会因密钥值不同报冲突）', () => {
+    const other = FAKE_SECRET.sk.replace('TESTONLY', 'TESTONLX')
+    const { user } = buildSemanticPrompt([
+      record({ id: 'mem_a', content: `网关 key 用 ${FAKE_SECRET.sk}` }),
+      record({ id: 'mem_b', content: `网关 key 用 ${other}` }),
+    ], null)
+    const lines = user.split('\n').filter(l => l.startsWith('  content: '))
+    expect(lines).toEqual([`  content: 网关 key 用 ${SECRET_MASK}`, `  content: 网关 key 用 ${SECRET_MASK}`])
+  })
+
   it('基线不超预算时按顺序原样纳入，不带说明', () => {
     const a = 'Instructions from: AGENTS.md\n\n包管理用 pnpm'
     const b = 'Additional instructions from: pkg/AGENTS.md\n\n子包用 vitest'

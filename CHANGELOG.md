@@ -192,8 +192,10 @@ All notable changes to this project are documented here. The format follows
   shows `[已隐藏]` in place of just the key (for a private key, the whole
   block up to its `END` line) and leaves the rest of the memory as it was,
   with no extra notice in the conversation; if the key is in a memory's
-  name, its index line leaves out the file path. `memory_forget` still
-  removes the file for good.
+  name, its index line leaves out the file path. `memory_search` results,
+  which still give the file path, and the text a checkup sends to the model
+  hide the key the same way. `memory_forget` still removes the file for
+  good.
 - A suspected secret you had confirmed with `force: true` (a password or
   `api_key` value without a vendor format) kept the health check red until
   you deleted or rewrote it. It is now treated as confirmed: it no longer

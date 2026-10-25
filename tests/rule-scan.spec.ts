@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { runRuleScan, BLOAT_THRESHOLD } from '../src/governance/rule-scan.ts'
-import { detectSecrets } from '../src/secrets.ts'
+import { buildMalformedFindings, runRuleScan, BLOAT_THRESHOLD } from '../src/governance/rule-scan.ts'
+import { detectSecrets, SECRET_MASK } from '../src/secrets.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
@@ -94,5 +94,15 @@ describe('runRuleScan', () => {
     const secret = findings.find(f => f.type === 'secret')!
     expect(secret.severity).toBe('critical')
     expect(secret.summary).toContain('sk-')
+  })
+})
+
+describe('buildMalformedFindings', () => {
+  it('解析报错带出的文件片段里，两级密钥都遮成占位，路径照给', () => {
+    const [f] = buildMalformedFindings([{ path: '/m/global/坏文件.md', error: `bad indentation at "token: ${FAKE_SECRET.sk}" / password: Hunter2-2026` }])
+    expect(f.summary).toContain('/m/global/坏文件.md')
+    expect(f.summary).toContain(SECRET_MASK)
+    expect(f.summary).not.toContain(FAKE_SECRET.sk)
+    expect(f.summary).not.toContain('Hunter2-2026')
   })
 })
