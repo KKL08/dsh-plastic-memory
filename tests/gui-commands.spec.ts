@@ -6,7 +6,7 @@ import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
-import { ARCHIVE_DIR, STATE_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
+import { ARCHIVE_DIR, GLOBAL_DIR, STATE_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
 import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
@@ -14,6 +14,7 @@ import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { REDACTED_PLACEHOLDER, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
+import { SECRET_MASK } from '../src/secrets.ts'
 import { ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../src/gui/commands.ts'
 import {
@@ -868,6 +869,25 @@ describe('refresh-views', () => {
     expect(await e.decisions.listSettled()).toEqual([])
     for (const name of Object.keys(GUI_VIEW_FILES) as Array<keyof typeof GUI_VIEW_FILES>) {
       expect((await e.readView(name)) as { version: number }).toMatchObject({ version: GUI_VIEW_VERSION })
+    }
+  })
+})
+
+describe('读不出的文件', () => {
+  it('解析报错引出的原文行里有密钥（两级都算）：待处理与健康视图里换成占位，不出现原文', async () => {
+    const e = env()
+    const suspected = 'api_key: TESTONLY0000000000000000'
+    await mkdir(join(root, GLOBAL_DIR), { recursive: true })
+    // YAML 报错只引出错的那一行：两个文件各让一级密钥落在那一行上
+    await writeFile(join(root, GLOBAL_DIR, 'bad-critical.md'), `---\nname: 坏文件\nsummary: [${FAKE_SECRET.sk}\n---\n正文\n`)
+    await writeFile(join(root, GLOBAL_DIR, 'bad-suspected.md'), `---\nname: 坏文件\nnote: ${suspected}\n---\n正文\n`)
+    ok(await e.run({ cmd: 'refresh-views' }))
+    const errors = pendingViewSchema.parse(await e.readView('pending')).items.flatMap(i => i.kind === 'unreadable-file' ? [i.error] : [])
+    expect(errors).toHaveLength(2)
+    for (const error of errors) expect(error).toContain(SECRET_MASK)
+    for (const text of [...errors, JSON.stringify(await e.readView('health'))]) {
+      expect(text).not.toContain(FAKE_SECRET.sk)
+      expect(text).not.toContain(suspected)
     }
   })
 })

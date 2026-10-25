@@ -1,6 +1,6 @@
 import type { MemoryRecord } from '../record-schema.ts'
 import { SEVERITY_BY_TYPE, type Finding } from './schema.ts'
-import { detectSecrets, maskSecrets } from '../secrets.ts'
+import { detectSecrets, maskDiagnostic } from '../secrets.ts'
 
 export const BLOAT_THRESHOLD = 2000
 
@@ -66,8 +66,8 @@ export function buildMalformedFindings(quarantined: readonly { path: string; err
   return quarantined.map(({ path, error }) => ({
     type: 'malformed', layer: 'rule', severity: SEVERITY_BY_TYPE.malformed,
     memoryIds: [],
-    // 解析报错可能带出文件片段，两级密钥都遮
-    summary: maskSecrets(`记忆文件无法解析：${path}（${error}）`, { severity: 'suspected' }),
+    // 报错在隔离时已遮过；路径里的文件名取自记忆名，也可能带密钥
+    summary: maskDiagnostic(`记忆文件无法解析：${path}（${error}）`),
     suggestedAction: '手工修复该文件的 frontmatter，或删除后用 memory_save 重建',
   }))
 }

@@ -216,6 +216,10 @@ All notable changes to this project are documented here. The format follows
   so it stayed in the host log, the snapshots and the pending list even after
   the memory itself was deleted for good. Such keys are now replaced with
   `[已隐藏]` before the text is logged or saved.
+- A memory file that fails to parse is reported with the parser's error,
+  which quotes the offending line, so a key on that line showed up as is in
+  `memory_scan` results. Keys and suspected secrets in that error are now
+  replaced with `[已隐藏]` wherever it is shown, the memory page included.
 
 ## [0.1.1-beta.5] - 2026-10-20
 

@@ -107,6 +107,11 @@ export function maskSecrets(text: string, opts: MaskOptions = {}): string {
   return maskRange(text, secretSpans(text, opts), 0, text.length)
 }
 
+/** 报错、诊断文字（解析失败的原话可能引出文件里的整行）：两级密钥都遮。进视图、工具结果、日志之前过它。 */
+export function maskDiagnostic(text: string): string {
+  return maskSecrets(text, { severity: 'suspected' })
+}
+
 /**
  * 四个面按片段遮盖。先按单个字段找命中、各遮各的；再在与 hasSecret 同口径的拼接文本上找起点不在任何字段自身命中里的
  * 区间（跨字段拼接才命中的），各字段落在区间里的部分各换一个占位。字段内起头、一路延伸到文本末尾的命中
