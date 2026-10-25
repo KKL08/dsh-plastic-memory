@@ -11,7 +11,8 @@ import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
-import { REDACTED_PLACEHOLDER, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
+import { REDACTED_PLACEHOLDER, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, type PendingDecision } from '../src/governance/schema.ts'
+import type { ClaimKvTable } from '../src/kv-table.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
@@ -40,6 +41,8 @@ beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-gui-commands-')
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
 interface EnvOpts {
+  /** 包一层账本侧表（在读写之间插入别的动作，模拟并发）。 */
+  wrapPending?: (table: ClaimKvTable<PendingDecision>) => ClaimKvTable<PendingDecision>
   workspacePath?: string
   delegationDepth?: number
   llm?: SemanticLlm | null
@@ -50,7 +53,7 @@ interface EnvOpts {
 function env(opts: EnvOpts = {}) {
   const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
-  const decisions = new PendingDecisionsStore(sidecar.pending)
+  const decisions = new PendingDecisionsStore(opts.wrapPending?.(sidecar.pending) ?? sidecar.pending)
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const cache = sidecar.scanCache
   const clock = { now: opts.now ?? NOW }
@@ -239,6 +242,69 @@ describe('并发裁决', () => {
       b.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-right' }),
     ])
     await expectOneRuling(results, a)
+  })
+
+  /**
+   * 体检与裁决同时进行：体检的语义层跑完之后，下一次读账本先拿到快照，再让 rule 把裁决做完，最后把裁决前的快照交给体检
+   * （体检据此挂账）。rule 由同一个实例或另一个实例（另一个宿主进程）执行。
+   */
+  async function scanDuringRuling(rule: (decisionId: string) => Promise<MemoryCommandResult>, scanner: (wrap: EnvOpts['wrapPending']) => ReturnType<typeof env>) {
+    let decisionId = ''
+    let isArmed = false
+    const wrap: EnvOpts['wrapPending'] = table => ({
+      get: key => table.get(key),
+      put: (key, value) => table.put(key, value),
+      delete: key => table.delete(key),
+      claim: key => table.claim(key),
+      list: async () => {
+        const snapshot = await table.list()
+        if (isArmed) {
+          isArmed = false
+          ok(await rule(decisionId))
+        }
+        return snapshot
+      },
+    })
+    const e = scanner(wrap)
+    decisionId = (await seedPair(e)).id
+    const armingLlm: SemanticLlm = {
+      complete: async () => {
+        isArmed = true
+        return JSON.stringify({ findings: [{ type: 'conflict', memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', suggestedAction: '裁决' }] })
+      },
+    }
+    return { e, decisionId, armingLlm }
+  }
+
+  async function expectRulingSurvives(e: ReturnType<typeof env>, decisionId: string) {
+    expect(await e.decisions.list()).toEqual([])
+    expect((await e.decisions.listSettled()).map(d => [d.id, d.settled?.verdict])).toEqual([[decisionId, 'keep-left']])
+    expect([(await e.store.get('mem_a'))!.status, (await e.store.get('mem_b'))!.status]).toEqual(['active', 'deleted'])
+    expect(await e.snapshots.list()).toHaveLength(1)
+  }
+
+  it('体检挂账时同一冲突刚被裁决：已裁决的条目不被体检改回待处理，败方只删一次', async () => {
+    let llm: SemanticLlm | undefined
+    const { e, decisionId, armingLlm } = await scanDuringRuling(
+      id => e.run({ cmd: 'resolve', decisionId: id, verdict: 'keep-left' }),
+      wrapPending => env({ wrapPending, llm: { complete: (...args) => llm!.complete(...args) } }),
+    )
+    llm = armingLlm
+    ok(await e.run({ cmd: 'scan' }))
+    await expectRulingSurvives(e, decisionId)
+  })
+
+  it('两个宿主实例共用一个根：一个在体检，另一个裁决同一冲突，同样不被改回待处理', async () => {
+    const other = env()
+    let llm: SemanticLlm | undefined
+    const { e, decisionId, armingLlm } = await scanDuringRuling(
+      id => other.run({ cmd: 'resolve', decisionId: id, verdict: 'keep-left' }),
+      wrapPending => env({ wrapPending, llm: { complete: (...args) => llm!.complete(...args) } }),
+    )
+    llm = armingLlm
+    ok(await e.run({ cmd: 'scan' }))
+    await expectRulingSurvives(e, decisionId)
+    await expectRulingSurvives(other, decisionId)
   })
 
   const writeClaim = async (decisionId: string, pid: number) => {

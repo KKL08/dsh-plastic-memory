@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
+import { record } from './helpers/record.ts'
 
 // 账本侧表的 GUI 兼容扩展（ARCHITECTURE.md ⑥-7）：kind、settled.snapshotId、删一方的裁决留账、GUI 条目带指纹。
 // 真实临时目录 + 文件侧表。保留窗口的连带清理见 gui-ledger-retention.spec.ts。
@@ -59,6 +60,37 @@ describe('删一方的裁决留在账本里', () => {
     expect(again.entry.id).toBe(entry.id)
     expect((await s.list()).map(e => [e.id, e.summary, e.settled])).toEqual([[entry.id, '又矛盾', undefined]])
     expect(await s.listSettled()).toEqual([])
+  })
+
+  it('条目正被认领（裁决进行中）：体检的 upsert 不动它，返回 isSkipped', async () => {
+    const s = ledger()
+    const { entry } = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '矛盾', fingerprint: 'fp' }, 1)
+    const inner = await s.withClaim(entry.id, () => s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '改写', fingerprint: 'fp' }, 2))
+    expect(inner).toMatchObject({ isClaimed: true, value: { created: false, isSkipped: true } })
+    expect((await s.list()).map(e => e.summary)).toEqual(['矛盾'])
+  })
+
+  it('删一方的裁决：给了 read 且败方此刻不在，不当成「败方回来了」重开；败方真回来了照旧重开', async () => {
+    const s = ledger()
+    const { entry } = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '矛盾', fingerprint: 'fp' }, 1)
+    await s.settle(entry.id, 'keep-left', 2, { snapshotId: 'snap_x' })
+    const status: Record<string, 'active' | 'deleted'> = { mem_a: 'active', mem_b: 'deleted' }
+    const read = async (id: string) => record({ id, status: status[id] })
+    expect((await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '又矛盾', fingerprint: 'fp' }, 3, read)).isSkipped).toBe(true)
+    expect((await s.listSettled()).map(e => e.id)).toEqual([entry.id])
+    status.mem_b = 'active'
+    expect((await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '又矛盾', fingerprint: 'fp' }, 4, read)).entry.id).toBe(entry.id)
+    expect((await s.list()).map(e => e.id)).toEqual([entry.id])
+  })
+
+  it('提升候选同步：扫描数据还把它当候选、记忆此刻已提升为全局，已提升的条目不被重开', async () => {
+    const s = ledger()
+    const { entry } = await s.upsert({ kind: 'promote-candidate', memoryIds: ['mem_p'], summary: '', workspaces: ['/w'], fingerprint: 'c1' }, 1)
+    await s.settle(entry.id, 'promoted', 2, { snapshotId: 'snap_p' })
+    const read = async (id: string) => record({ id, scope: 'global' })
+    await s.syncPromoteCandidates('/w', [{ id: 'mem_p', summary: '', fingerprint: 'c1' }], new Set(['mem_p']), 3, read)
+    expect((await s.listSettled()).map(e => [e.id, e.settled?.verdict])).toEqual([[entry.id, 'promoted']])
+    expect(await s.list()).toEqual([])
   })
 
   it('removeByMemoryIds 可以留下指定条目（裁决刚记下的那条）', async () => {
