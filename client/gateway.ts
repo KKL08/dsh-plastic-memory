@@ -4,7 +4,7 @@
  *
  * 数据通道（spec「数据通道」）：视图是 `<memoryRoot>/.state/gui/*.json`，经文件资源订阅版本、版本变了再读；
  * 动作是 `/memory` 会话命令。浏览器半侧不知道 memoryRoot：首次需要时借会话发一次 `info`，结果缓存到 localStorage；
- * 视图文件不存在时再发一次 `refresh-views` 让服务端生成；用的是缓存的根、刷新后还读不到时再问一次 `info`（根可能换了）。
+ * 视图文件不存在、或读到不认识的版本（旧插件写的）时再发一次 `refresh-views` 让服务端生成；用的是缓存的根、刷新后还读不到时再问一次 `info`（根可能换了）。
  * 缓存根的同时记下当时配置里的 memoryRoot；宿主给了配置服务、且配置值和记下的不一样（用户改了存储位置，旧目录里
  * 视图文件还在，靠「读不到」发现不了）时丢掉缓存，按首次进入重来。没有配置服务时不比对。
  * 只有两态：一个会话都没有 → none；有会话（历史或在跑，宿主会自动 resume 冷会话）→ ready。
@@ -337,8 +337,11 @@ const NO_CONFIG: ConfigBinding = { form: undefined, get: () => undefined, subscr
 
 type ConfigFormsService = NonNullable<HostContext['configForms']>
 
-/** refreshes：refresh-views 成功的次数。文件资源起步就是 not-found 时，宿主在文件写出后未必再推一帧，靠它触发重读。 */
-interface RootState { memoryRoot?: string; error?: string; refreshes: number }
+/**
+ * refreshes：refresh-views 成功的次数。文件资源起步就是 not-found 时，宿主在文件写出后未必再推一帧，靠它触发重读。
+ * isRefreshFailed：最近一次 refresh-views 失败，版本不认识的视图不再等重写、直接显示过时。
+ */
+interface RootState { memoryRoot?: string; error?: string; refreshes: number; isRefreshFailed?: boolean }
 
 type RunLine = (sessionId: string, line: string) => Promise<RemoteResult<CommandExecution | undefined>>
 
@@ -420,13 +423,14 @@ function createRootStore(run: RunLine) {
         if (result.ok && result.info !== undefined && result.info.memoryRoot !== state.memoryRoot) remember(result.info.memoryRoot)
       })
     },
-    /** 让服务端把视图文件写出来：首次拿到 memoryRoot 之后、或视图文件缺失时，每个页面生命周期成功一次；同一时间只发一条，失败了下次再试。 */
+    /** 让服务端把视图文件写出来：首次拿到 memoryRoot 之后、视图文件缺失或版本不认识时，每个页面生命周期成功一次；同一时间只发一条，失败了下次再试。 */
     ensureViews(sessionId: string) {
       if (refreshed) return
       refreshed = true
+      if (state.isRefreshFailed === true) set({ ...state, isRefreshFailed: false })
       void run(sessionId, encodeMemoryCommand({ cmd: 'refresh-views' })).then((r) => {
         if (decodeExecution('refresh-views', r).ok) set({ ...state, refreshes: state.refreshes + 1 })
-        else refreshed = false
+        else { refreshed = false; set({ ...state, isRefreshFailed: true }) }
       })
     },
   }
@@ -491,11 +495,19 @@ export function createHostGateway(ctx: HostContext): BindGateway {
       const isMissing = stat.status === 'failed' && stat.failure?.code === 'workspace-file/not-found'
       useEffect(() => { if (!isPassive && sessionId !== undefined && isMissing) root.ensureViews(sessionId) }, [isPassive, sessionId, isMissing])
       const key = `${sessionId}\0${path}`
-      // 有版本按版本读；资源还停在 not-found、但 refresh-views 已写过文件时，按刷新次数直接读一次
-      const trigger = version ?? (isMissing && rootState.refreshes > 0 ? `refresh:${rootState.refreshes}` : undefined)
+      // 有版本按版本读，refresh-views 成功后也重读一次（宿主推新版本之前先读到重写的内容）；
+      // 资源还停在 not-found、但 refresh-views 已写过文件时，按刷新次数直接读一次
+      const trigger = version !== undefined ? `${version}#${rootState.refreshes}` : isMissing && rootState.refreshes > 0 ? `refresh:${rootState.refreshes}` : undefined
       const [read, setRead] = useState<ReadState<ViewMap[N]> | undefined>(undefined)
       const isStillMissing = isMissing && trigger !== undefined && read?.key === key && read.trigger === trigger && read.view.status === 'missing'
       useEffect(() => { if (!isPassive && sessionId !== undefined && isStillMissing) root.revalidate(sessionId) }, [isPassive, sessionId, isStillMissing])
+      // 版本不认识（旧插件写的、或刷新前留下的）：refresh-views 只重写四个全局视图，这几个请服务端重写一次，
+      // 这次页面里已全量重写过就不再发；重写完重读，仍不认识才显示过时。不轮询
+      const isRegenerable = !isPassive && name in GUI_VIEW_FILES
+      const isOutdated = read !== undefined && read.key === key && read.view.status === 'outdated'
+      useEffect(() => { if (isRegenerable && sessionId !== undefined && isOutdated) root.ensureViews(sessionId) }, [isRegenerable, sessionId, isOutdated])
+      const isAwaitingRewrite = isRegenerable && isOutdated
+        && (rootState.refreshes === 0 ? rootState.isRefreshFailed !== true : read.trigger !== trigger)
       useEffect(() => {
         if (sessionId === undefined || path === undefined || trigger === undefined) return
         let live = true
@@ -520,6 +532,7 @@ export function createHostGateway(ctx: HostContext): BindGateway {
         // 只认这次刷新触发的读：文件删掉后不拿旧内容顶上
         return read !== undefined && read.key === key && read.trigger === trigger ? read.view : { status: 'missing' }
       }
+      if (isAwaitingRewrite) return { status: 'loading' }
       // 同一文件的新版本还在读时先留着旧内容
       return read !== undefined && read.key === key ? read.view : { status: 'loading' }
     }

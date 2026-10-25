@@ -270,6 +270,58 @@ describe('createHostGateway', () => {
     expect(executed).toEqual([])
   })
 
+  describe('缓存了根、视图文件版本不认识（旧插件写的）', () => {
+    const outdatedText = JSON.stringify({ ...pending, version: GUI_VIEW_VERSION - 1 })
+    function setup(refresh: 'current' | 'still-old' | 'fail') {
+      localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+      resources[fileAddress('s1', pendingPath)] = { status: 'live', value: { absolutePath: pendingPath, version: 'v1' }, failure: undefined }
+      files[pendingPath] = outdatedText
+      const ctx = fakeCtx()
+      const execute = ctx.remote.commands.execute as ReturnType<typeof vi.fn>
+      const ok = execute.getMockImplementation()!
+      execute.mockImplementation(async (sid: string, line: string) => {
+        if (line !== '/memory refresh-views' || refresh === 'current') return ok(sid, line)
+        executed.push(line)
+        if (refresh === 'fail') return { ok: false as const, error: { code: 'session/writer-held', message: 'busy' } }
+        files[pendingPath] = outdatedText // 服务端自己也是旧版本：重写后还是不认识
+        return { ok: true as const, value: { commandId: 'c', result: { kind: 'success' as const, text: JSON.stringify({ ok: true, cmd: 'refresh-views' }) } } }
+      })
+      const gateway = createHostGateway(ctx)(props)
+      const seen: string[] = []
+      const hook = renderHook(() => {
+        const view = gateway.useView(gateway.useSession('/w/app'), 'pending')
+        seen.push(view.status)
+        return view
+      })
+      return { ...hook, seen }
+    }
+
+    it('请服务端重写一次再读，不先显示过时；读到新版本就是 ready', async () => {
+      const { result, seen } = setup('current')
+      await waitFor(() => { expect(result.current).toEqual({ status: 'ready', data: pending }) })
+      expect(executed).toEqual(['/memory refresh-views'])
+      expect(seen).not.toContain('outdated')
+    })
+
+    it('重写后仍不认识：显示过时，只发这一次，重渲染、资源推来新版本都不再发', async () => {
+      const { result, rerender } = setup('still-old')
+      await waitFor(() => { expect(result.current).toEqual({ status: 'outdated' }) })
+      resources[fileAddress('s1', pendingPath)] = { status: 'live', value: { absolutePath: pendingPath, version: 'v2' }, failure: undefined }
+      rerender()
+      await new Promise(r => setTimeout(r, 50))
+      expect(result.current).toEqual({ status: 'outdated' })
+      expect(executed).toEqual(['/memory refresh-views'])
+    })
+
+    it('重写失败：显示过时，不反复重试', async () => {
+      const { result, rerender } = setup('fail')
+      await waitFor(() => { expect(result.current).toEqual({ status: 'outdated' }) })
+      rerender()
+      await new Promise(r => setTimeout(r, 50))
+      expect(executed).toEqual(['/memory refresh-views'])
+    })
+  })
+
   it('缓存的 memoryRoot 过期：刷新后仍读不到就再发一次 info，换成新根并从新路径读视图', async () => {
     localStorage.setItem(MEMORY_ROOT_KEY, '/old/memories')
     resources[fileAddress('s1', '/old/memories/.state/gui/pending.json')] = { status: 'failed', value: undefined, failure: { code: 'workspace-file/not-found', message: '' } }
