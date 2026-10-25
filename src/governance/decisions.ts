@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { KvTable } from '../kv-table.ts'
+import type { ClaimKvTable } from '../kv-table.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { RETENTION_MS } from '../retention.ts'
 import type { OverflowLevel } from '../contract-codes.ts'
@@ -96,10 +96,25 @@ function mergeReport(existing: PendingDecision, input: UpsertInput): PendingDeci
  * settled 条目对 get / list 不可见，只有 listSettled、upsert、removeByMemoryIds、sweep 会看到它。
  */
 export class PendingDecisionsStore {
-  private table: KvTable<PendingDecision>
+  private table: ClaimKvTable<PendingDecision>
 
-  constructor(table: KvTable<PendingDecision>) {
+  constructor(table: ClaimKvTable<PendingDecision>) {
     this.table = table
+  }
+
+  /**
+   * 认领一条条目后执行 fn，跑完释放：同一条目同时只有一个持有者（侧表实现跨进程），两条相反的裁决不会各删一方。
+   * 已被别人认领时不等待，返回 { isClaimed: false }，什么都不做。fn 里要重新读条目确认它仍是期望的状态：
+   * 认领之前它可能刚被别人裁决完。不可重入：fn 里不能再认领同一条。
+   */
+  async withClaim<R>(id: string, fn: () => Promise<R>): Promise<{ isClaimed: true; value: R } | { isClaimed: false }> {
+    const release = await this.table.claim(id)
+    if (release === undefined) return { isClaimed: false }
+    try {
+      return { isClaimed: true, value: await fn() }
+    } finally {
+      await release()
+    }
   }
 
   async list(): Promise<PendingDecision[]> {

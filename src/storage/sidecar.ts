@@ -3,7 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import type { ZodType } from 'zod'
-import type { BatchKvTable, KvTable } from '../kv-table.ts'
+import type { BatchKvTable, ClaimKvTable, KvTable } from '../kv-table.ts'
 import type { MemoryLogger } from './table.ts'
 import { kvImportMarkerSchema, recallStatsSchema, type KvImportMarker, type RecallStats } from './schema.ts'
 import { STATE_DIR } from './paths.ts'
@@ -15,13 +15,14 @@ import { linkExclusive } from './exclusive-link.ts'
  *
  *   .state/snapshots/<id>.json      每条一文件
  *   .state/pending/<id>.json        每条一文件
+ *   .state/pending/<id>.claim       裁决期间的认领（排他创建，裁决完即删）
  *   .state/scan-cache/<sha1(桶键)>.json
  *   .state/recall-stats.json        整张表一个文件 { [id]: RecallStats }
  *   .state/kv-import.json           旧宿主 KV 导入的完成标记
  *   .state/kv-import.lock           导入期间的跨进程锁，导完即删
  *
  * 写都是 tmp + rename 原子写，进程内经一条 Promise 链串行；读不加锁。侧表读写跨进程单条 LWW，
- * 只有旧 KV 导入用锁文件跨进程串行。
+ * 旧 KV 导入用锁文件跨进程串行，裁决用条目旁的认领文件跨进程互斥（同一条待决项同时只许一次裁决）。
  * 坏文件跳过并记日志，不抛。条目 schema 由接线层注入（storage 不 import governance）。
  *
  * 导入屏障：snapshots / pending / scan-cache 的每个读写方法先 await 一次 memoize 的导入（进程内锁 +
@@ -42,6 +43,8 @@ const SCAN_CACHE_DIR = 'scan-cache'
 const IMPORT_LOCK_REFRESH_MS = 10_000
 const IMPORT_LOCK_STALE_MS = 60_000
 const IMPORT_LOCK_POLL_MS = 50
+/** 认领不刷新：一次裁决远用不了这么久，超过按残留处理（持有进程崩溃后 pid 被复用）。 */
+const CLAIM_STALE_MS = 60_000
 
 /** 能直接当文件名的键（genId 产出的 snap_ / pd_ id 都满足）；其余一律不落盘，防路径穿越。 */
 const SAFE_KEY_RE = /^[A-Za-z0-9_-]+$/
@@ -75,6 +78,7 @@ interface TableEnv {
   /** 导入屏障；召回统计表不用 */
   ready: () => Promise<void>
   log: MemoryLogger
+  now: () => number
 }
 
 function errnoCode(err: unknown): string | undefined {
@@ -127,8 +131,45 @@ async function createExclusive(path: string, text: string): Promise<boolean> {
   }
 }
 
+/** 锁文件里记的持有者 id；读不到或读不懂为 undefined。 */
+async function lockOwner(lockPath: string): Promise<unknown> {
+  try {
+    return (JSON.parse(await readFile(lockPath, 'utf8')) as { id?: unknown }).id
+  } catch {
+    return undefined
+  }
+}
+
+/** 持有进程已退出或超过 staleMs 没刷新按残留。内容读不懂（半截文件）也按残留：走 link 时目标原子出现，
+ *  读不懂只会是崩溃留下的；退回复制时可能正在写，由 breakStaleLock 的改名核对兜住。 */
+function isStaleLock(text: string, now: number, staleMs: number): boolean {
+  let lock: { pid?: unknown; at?: unknown }
+  try {
+    lock = JSON.parse(text) as { pid?: unknown; at?: unknown }
+  } catch {
+    return true
+  }
+  if (typeof lock.pid !== 'number' || typeof lock.at !== 'number') return true
+  return !isAlive(lock.pid) || now - lock.at > staleMs
+}
+
+/** 清掉判为残留的锁（held 是判定时读到的内容）：先改名再核对，判定之后锁可能已换主，内容变了就放回去，不误删新主的锁。 */
+async function breakStaleLock(lockPath: string, held: string): Promise<void> {
+  const grave = tmpPathFor(lockPath)
+  try {
+    await rename(lockPath, grave)
+  } catch (err) {
+    if (errnoCode(err) === 'ENOENT') return // 别人先清掉了
+    throw err
+  }
+  if (await readFile(grave, 'utf8') !== held) {
+    await linkExclusive(grave, lockPath).catch(err => { if (errnoCode(err) !== 'EEXIST') throw err })
+  }
+  await rm(grave, { force: true })
+}
+
 /** 每条一个 JSON 文件的表。键从文件内容的 id 还原，所以 put 要求键等于值的 id。 */
-class EntryFileTable<T extends { id: string }> implements KvTable<T> {
+class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T> {
   private readonly dir: string
   private readonly fileNameOf: (key: string) => string | undefined
   private readonly schema: ZodType<T>
@@ -210,6 +251,33 @@ class EntryFileTable<T extends { id: string }> implements KvTable<T> {
         throw err
       }
     })
+  }
+
+  /** 排他创建条目旁的 `<名>.claim`（list 只认 .json，不当条目）。已被占用且持有进程已退出或超时的按残留清掉，再试一次。
+   *  释放只删自己的认领：被当成残留清掉、别人又认领了时不误删。不能当文件名的键不会有条目，不用认领，直接放行。 */
+  async claim(key: string): Promise<(() => Promise<void>) | undefined> {
+    const name = this.fileNameOf(key)
+    if (name === undefined) return async () => {}
+    const path = join(this.dir, `${name}.claim`)
+    await this.env.ready()
+    await mkdir(this.dir, { recursive: true })
+    const id = Math.random().toString(36).slice(2)
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (await createExclusive(path, JSON.stringify({ pid: process.pid, at: this.env.now(), id }))) {
+        return async () => { if (await lockOwner(path) === id) await rm(path, { force: true }) }
+      }
+      let held: string
+      try {
+        held = await readFile(path, 'utf8')
+      } catch (err) {
+        if (errnoCode(err) === 'ENOENT') continue // 刚被释放
+        throw err
+      }
+      if (!isStaleLock(held, this.env.now(), CLAIM_STALE_MS)) return undefined
+      this.env.log.warn(`[plastic-memory] 待决项认领残留（持有进程已退出或超时），清理后重试：${path}`)
+      await breakStaleLock(path, held)
+    }
+    return undefined
   }
 }
 
@@ -302,7 +370,7 @@ class MapFileTable<T> implements BatchKvTable<T> {
 
 export class SidecarStore<S extends { id: string }, P extends { id: string }, C extends { id: string }> {
   readonly snapshots: KvTable<S>
-  readonly pending: KvTable<P>
+  readonly pending: ClaimKvTable<P>
   readonly scanCache: KvTable<C>
   readonly recallStats: BatchKvTable<RecallStats>
 
@@ -319,8 +387,9 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
     this.log = opts.log ?? console
     this.stateDir = join(opts.root, STATE_DIR)
     const locked: Locked = fn => this.locked(fn)
-    const gated: TableEnv = { locked, ready: () => this.ensureImported(), log: this.log }
-    const ungated: TableEnv = { locked, ready: async () => {}, log: this.log }
+    const now = () => this.now()
+    const gated: TableEnv = { locked, ready: () => this.ensureImported(), log: this.log, now }
+    const ungated: TableEnv = { locked, ready: async () => {}, log: this.log, now }
     const safeKey = (key: string) => (SAFE_KEY_RE.test(key) ? key : undefined)
     const sha1 = (key: string) => createHash('sha1').update(key).digest('hex')
     this.snapshots = new EntryFileTable(join(this.stateDir, SNAPSHOTS_DIR), safeKey, opts.schemas.snapshots, gated)
@@ -420,7 +489,7 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
         let refreshing: Promise<void> = Promise.resolve()
         const timer = setInterval(() => {
           refreshing = refreshing.then(async () => {
-            if (await this.lockOwner(lockPath) === id) await atomicWrite(lockPath, lockText())
+            if (await lockOwner(lockPath) === id) await atomicWrite(lockPath, lockText())
           }).catch(err => {
             this.log.warn(`[plastic-memory] 刷新旧 KV 导入锁失败：${describeError(err)}`)
           })
@@ -430,7 +499,7 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
           clearInterval(timer)
           await refreshing
           // 只删自己的锁：被当成残留清掉并重建时不误删对方的
-          if (await this.lockOwner(lockPath) === id) await rm(lockPath, { force: true })
+          if (await lockOwner(lockPath) === id) await rm(lockPath, { force: true })
         }
       }
       let held: string
@@ -440,45 +509,13 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
         if (errnoCode(err) === 'ENOENT') continue // 刚被释放
         throw err
       }
-      if (!this.isStaleLock(held)) {
+      if (!isStaleLock(held, this.now(), IMPORT_LOCK_STALE_MS)) {
         await delay(IMPORT_LOCK_POLL_MS)
         continue
       }
       this.log.warn(`[plastic-memory] 旧 KV 导入锁残留（持有进程已退出或超时），清理后重试：${lockPath}`)
-      // 先改名再核对：判定之后锁可能已换主，内容变了就放回去，不误删新主的锁
-      const grave = tmpPathFor(lockPath)
-      try {
-        await rename(lockPath, grave)
-      } catch (err) {
-        if (errnoCode(err) === 'ENOENT') continue // 别人先清掉了
-        throw err
-      }
-      if (await readFile(grave, 'utf8') !== held) {
-        await linkExclusive(grave, lockPath).catch(err => { if (errnoCode(err) !== 'EEXIST') throw err })
-      }
-      await rm(grave, { force: true })
+      await breakStaleLock(lockPath, held)
     }
-  }
-
-  private async lockOwner(lockPath: string): Promise<unknown> {
-    try {
-      return (JSON.parse(await readFile(lockPath, 'utf8')) as { id?: unknown }).id
-    } catch {
-      return undefined
-    }
-  }
-
-  /** 内容读不懂（半截文件）也按残留：走 link 时目标原子出现，读不懂只会是崩溃留下的；退回复制时可能正在写，
-   *  由清理前的改名核对兜住。 */
-  private isStaleLock(text: string): boolean {
-    let lock: { pid?: unknown; at?: unknown }
-    try {
-      lock = JSON.parse(text) as { pid?: unknown; at?: unknown }
-    } catch {
-      return true
-    }
-    if (typeof lock.pid !== 'number' || typeof lock.at !== 'number') return true
-    return !isAlive(lock.pid) || this.now() - lock.at > IMPORT_LOCK_STALE_MS
   }
 
   private async readMarker(path: string): Promise<KvImportMarker | undefined> {

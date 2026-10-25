@@ -206,6 +206,65 @@ describe('resolve 与 undo', () => {
   })
 })
 
+describe('并发裁决', () => {
+  /** 两条相反的裁决同时发出：恰好一条成功、只删它的败方，另一条失败且什么都不动。 */
+  async function expectOneRuling(results: MemoryCommandResult[], e: ReturnType<typeof env>) {
+    expect(results.filter(r => r.ok)).toHaveLength(1)
+    const winner = results[0]!.ok ? 'keep-left' : 'keep-right'
+    const loser = err(results.find(r => !r.ok)!)
+    expect(loser.detail).toMatch(/已被裁决|正在/)
+    const statuses = [(await e.store.get('mem_a'))!.status, (await e.store.get('mem_b'))!.status]
+    expect(statuses).toEqual(winner === 'keep-left' ? ['active', 'deleted'] : ['deleted', 'active'])
+    expect(await e.snapshots.list()).toHaveLength(1)
+    expect((await e.decisions.listSettled()).map(d => d.settled?.verdict)).toEqual([winner])
+  }
+
+  it('同一冲突同时收到 keep-left 与 keep-right：只有一条生效，只删一方', async () => {
+    const e = env()
+    const entry = await seedPair(e)
+    const results = await Promise.all([
+      e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' }),
+      e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-right' }),
+    ])
+    await expectOneRuling(results, e)
+  })
+
+  it('两个宿主实例（各自的侧表与 FileTable）共用一个根：同样只有一条生效', async () => {
+    const a = env()
+    const b = env()
+    const entry = await seedPair(a)
+    const results = await Promise.all([
+      a.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' }),
+      b.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-right' }),
+    ])
+    await expectOneRuling(results, a)
+  })
+
+  const writeClaim = async (decisionId: string, pid: number) => {
+    await mkdir(join(root, STATE_DIR, 'pending'), { recursive: true })
+    await writeFile(join(root, STATE_DIR, 'pending', `${decisionId}.claim`), JSON.stringify({ pid, at: Date.now(), id: 'other' }))
+  }
+
+  it('另一次裁决正持有认领：failed 并说明，账本与记忆都不动', async () => {
+    const e = env()
+    const entry = await seedPair(e)
+    await writeClaim(entry.id, process.pid)
+    expect(err(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' })).detail).toMatch(/正在被另一次裁决处理/)
+    expect(await e.decisions.list()).toEqual([entry])
+    expect((await e.store.get('mem_b'))!.status).toBe('active')
+    expect(await e.snapshots.list()).toEqual([])
+  })
+
+  it('裁决进程崩溃留下的认领：持有进程已不在时不挡后来的裁决，裁决完认领文件也清掉', async () => {
+    const e = env()
+    const entry = await seedPair(e)
+    await writeClaim(entry.id, 2 ** 22 + 12345) // 大于各平台的 pid 上限，必定不存在
+    ok(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' }))
+    expect((await e.store.get('mem_b'))!.status).toBe('deleted')
+    expect((await readdir(join(root, STATE_DIR, 'pending'))).filter(f => !f.endsWith('.json'))).toEqual([])
+  })
+})
+
 describe('restore', () => {
   it('从最近删除恢复被裁决删掉的那条：记忆回来、冲突回到待处理，再被扫到也不多出第二条', async () => {
     const e = env()
@@ -736,6 +795,25 @@ describe('提升候选与超限', () => {
     expect(err(await e.run({ cmd: 'promote', decisionId: entry.id, target: 'global' })).code).toBe('failed')
     expect(err(await e.run({ cmd: 'keep-local', decisionId: entry.id })).code).toBe('failed')
     expect(await e.decisions.list()).toEqual([entry])
+  })
+
+  it('同一候选同时收到 promote 与 keep-local：只有一条生效，另一条什么都不动', async () => {
+    const e = env({ llm: quietLlm })
+    const { decisionId, memoryId } = await seedCandidate(e)
+    const results = await Promise.all([
+      e.run({ cmd: 'promote', decisionId, target: 'global' }),
+      e.run({ cmd: 'keep-local', decisionId }),
+    ])
+    expect(results.filter(r => r.ok)).toHaveLength(1)
+    const settled = (await e.decisions.listSettled()).map(d => d.settled?.verdict)
+    const rec = (await e.store.get(memoryId))!
+    if (results[0]!.ok) {
+      expect(settled).toEqual(['promoted'])
+      expect(rec.scope).toBe('global')
+    } else {
+      expect(settled).toEqual(['keep-local'])
+      expect([rec.scope, rec.globalCandidate]).toEqual(['workspace', undefined])
+    }
   })
 
   it('dismiss-overflow：超限提醒标 settled（dismiss）', async () => {

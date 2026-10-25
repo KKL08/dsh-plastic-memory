@@ -59,6 +59,22 @@ export async function executeConfirm(
     }
   }
 
+  // 先认领条目再裁决：两条相反的裁决同时到（两个标签页、两个宿主进程），只让一条删败方，另一条什么都不动
+  const claimed = await deps.decisions.withClaim(args.decisionId, () => resolveClaimed(args, context, deps, now, locate))
+  if (!claimed.isClaimed) {
+    return { kind: 'error', message: `待决项 ${args.decisionId} 正在被另一次裁决处理，未做任何改动。` }
+  }
+  return claimed.value
+}
+
+/** 持有认领时裁决：条目在认领之后重读，刚被别人裁决完的这里读不到。 */
+async function resolveClaimed(
+  args: Extract<ConfirmArgs, { action: 'resolve' }>,
+  context: GovernanceContext,
+  deps: ConfirmToolDeps,
+  now: number,
+  locate: (id: string) => Promise<MemoryRecord | undefined>,
+): Promise<ConfirmResult> {
   const entry = await deps.decisions.get(args.decisionId)
   if (!entry) {
     return { kind: 'error', message: `待决项不存在：${args.decisionId}（可能已被裁决或涉及的记忆已删除）` }
