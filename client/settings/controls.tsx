@@ -57,7 +57,12 @@ export function TextField({ id, value, onChange, error, hint, multiline = false,
   )
 }
 
-/** 居中弹层：挂到 body，Esc 与点遮罩关闭，打开时聚焦第一个输入框，关闭后焦点回到打开它的元素。 */
+const TABBABLE = 'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+
+/**
+ * 居中弹层：挂到 body，Esc 与点遮罩关闭，打开时聚焦第一个输入框（没有就第一个控件），关闭后焦点回到打开它的元素。
+ * aria-modal：Tab / Shift+Tab 在弹层里循环，焦点跑到外面时 Tab 拉回第一个控件。
+ */
 export function Dialog({ title, closeLabel, onClose, footer, children }: {
   title: string
   closeLabel: string
@@ -70,8 +75,25 @@ export function Dialog({ title, closeLabel, onClose, footer, children }: {
   close.current = onClose
   useEffect(() => {
     const opener = document.activeElement as HTMLElement | null
-    dialog.current?.querySelector<HTMLElement>('input, textarea, button')?.focus()
-    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.stopPropagation(); close.current() } }
+    // 逐个元素筛，保证按文档顺序（选择器列表的查询结果有的实现不按文档顺序）
+    const tabbable = () => [...dialog.current?.querySelectorAll<HTMLElement>('*') ?? []].filter(el => el.matches(TABBABLE))
+    const initial = tabbable().find(el => el.matches('input, textarea')) ?? tabbable()[0]
+    initial?.focus()
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.stopPropagation(); close.current(); return }
+      if (event.key !== 'Tab') return
+      const items = tabbable()
+      const first = items[0]
+      const last = items.at(-1)
+      if (first === undefined || last === undefined) return
+      const active = document.activeElement
+      const isInside = dialog.current?.contains(active) ?? false
+      if (!isInside || (event.shiftKey ? active === first : active === last)) {
+        event.preventDefault()
+        const target = event.shiftKey && isInside ? last : first
+        target.focus()
+      }
+    }
     document.addEventListener('keydown', onKey)
     return () => { document.removeEventListener('keydown', onKey); opener?.focus?.() }
   }, [])
