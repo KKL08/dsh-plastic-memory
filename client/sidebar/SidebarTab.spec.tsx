@@ -290,6 +290,23 @@ describe('SidebarTab 跨项目确认', () => {
   })
 })
 
+describe('SidebarTab 冲突对方在别的项目', () => {
+  it('那一方的元信息写项目名；本项目这一方写「本项目」，不再两边都不写作用域', () => {
+    const other = memory({ id: 'p2', type: 'preference', workspacePath: '/w/blog', content: '测试里 mock 数据库就行。' })
+    const { container } = setup({ library: library(pref, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending({ ...conflict, right: other } as PendingItem) })
+    const metas = [...container.querySelectorAll('.pm-conflict .pm-mc-meta')].map(el => el.textContent)
+    expect(metas).toHaveLength(2)
+    expect(metas[0]).toMatch(/·本项目·/)
+    expect(metas[1]).toMatch(/·blog·/)
+  })
+
+  it('两方都在本项目：照旧不写作用域（面包屑已经交代）', () => {
+    const { container } = setup({ library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending(conflict) })
+    const metas = [...container.querySelectorAll('.pm-conflict .pm-mc-meta')].map(el => el.textContent)
+    expect(metas.some(text => /本项目|blog/.test(text ?? ''))).toBe(false)
+  })
+})
+
 describe('SidebarTab 就地裁决：和基线冲突', () => {
   it('带入的记忆和基线冲突：冲突卡挂在它的组里，写明基线不会被删除；以基线为准发 keep-right，结果留原位可撤销', async () => {
     const { gateway } = setup({ library: library(pref, proj), session: snapshot({ injectedIds: ['p1', 'j1'] }), pending: pending(vertical) })

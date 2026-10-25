@@ -222,6 +222,10 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
       : null
   }
   const isWaiting = (id: string) => busy === id || cross?.id === id || secretId === id
+  // 冲突对方可能在别的项目：那一方写项目名（这里的「本项目」是会话视图解析出的项目，和上面分层同一口径）
+  const projectName = (m: MemoryCardData) =>
+    m.scope === 'workspace' && m.workspacePath !== undefined && !samePath(m.workspacePath, ws) ? baseName(m.workspacePath) : undefined
+  const isOwnSide = (m: MemoryCardData | null) => m === null || m.scope === 'workspace' && projectName(m) === undefined
 
   // 会话快照冻结在插件本次加载之前 = 重启后还没重新带入
   const bootedAt = health.status === 'ready' ? health.data.bootedAt : undefined
@@ -302,7 +306,8 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
                           right={item.right}
                           now={now}
                           typeLabel={label}
-                          hideScope={item.left?.scope !== 'global' && item.right?.scope !== 'global'}
+                          hideScope={isOwnSide(item.left) && isOwnSide(item.right)}
+                          projectName={projectName}
                           unavailable={isWaiting(item.decisionId) ? t('sidebar.action.busy') : undefined}
                           onRule={(verdict) => { rule(item, verdict) }}
                         />
