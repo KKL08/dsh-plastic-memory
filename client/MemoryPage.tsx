@@ -5,7 +5,7 @@
  * 不是入口打开的（点左栏图标、宿主恢复上次的面板）按默认落点：待处理有条目落在待处理，为空落在全部记忆（PRD §4 入口③）。
  * 右上是「设置」和「体检当前项目」。
  */
-import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import type { GuiLayerRef } from '../src/gui/contract.ts'
 import { useGateway, type ViewState } from './gateway.ts'
 import { baseName, formatNumber, useT, type Translate } from './i18n.tsx'
@@ -135,6 +135,10 @@ function useDefaultLanding(nav: NavStore, pending: ViewState<{ items: readonly u
   }, [nav, pending])
 }
 
+/**
+ * 作用域下拉：按钮 + listbox。打开时焦点落在选中项，上下键逐项移动、Home / End 到首尾，回车或空格选中，
+ * Esc 收起；选中、Esc 后焦点回到按钮。选项不在 Tab 序列里，Tab 离开或点别处就收起。
+ */
 function ScopePicker({ value, options, label, onChange }: {
   value: GuiLayerRef
   options: readonly GuiLayerRef[]
@@ -144,30 +148,51 @@ function ScopePicker({ value, options, label, onChange }: {
   const t = useT()
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
+  const button = useRef<HTMLButtonElement>(null)
+  const list = useRef<HTMLUListElement>(null)
   const listId = useId()
+  const selectedIndex = Math.max(0, options.findIndex(o => sameScope(o, value)))
   useEffect(() => {
     if (!open) return
     const close = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false) }
     document.addEventListener('pointerdown', close)
     return () => { document.removeEventListener('pointerdown', close) }
   }, [open])
-  const pick = (scope: GuiLayerRef) => { setOpen(false); if (!sameScope(scope, value)) onChange(scope) }
+  const optionAt = (index: number) => list.current?.querySelectorAll<HTMLElement>('[role="option"]')[index]
+  // 只在打开的那一刻把焦点放到选中项
+  useLayoutEffect(() => { if (open) optionAt(selectedIndex)?.focus() }, [open])
+  const close = () => { setOpen(false); button.current?.focus() }
+  const pick = (scope: GuiLayerRef) => { close(); if (!sameScope(scope, value)) onChange(scope) }
+  const onListKey = (event: KeyboardEvent<HTMLUListElement>) => {
+    const items = [...(list.current?.querySelectorAll<HTMLElement>('[role="option"]') ?? [])]
+    const current = items.indexOf(document.activeElement as HTMLElement)
+    const move = { ArrowDown: Math.min(current + 1, items.length - 1), ArrowUp: Math.max(current - 1, 0), Home: 0, End: items.length - 1 }[event.key]
+    if (move !== undefined) { event.preventDefault(); items[move]?.focus(); return }
+    if ((event.key === 'Enter' || event.key === ' ') && current >= 0) { event.preventDefault(); pick(options[current]!) }
+  }
   return (
-    <div className="pm-scope" ref={root} onKeyDown={(event) => { if (event.key === 'Escape') setOpen(false) }}>
+    <div
+      className="pm-scope"
+      ref={root}
+      onKeyDown={(event) => { if (event.key === 'Escape' && open) { event.preventDefault(); close() } }}
+      onBlur={(event) => { if (open && !root.current?.contains(event.relatedTarget as Node | null)) setOpen(false) }}
+    >
       <button
+        ref={button}
         type="button"
         className="pm-scope-button"
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={open ? listId : undefined}
         onClick={() => { setOpen(!open) }}
+        onKeyDown={(event) => { if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setOpen(true) } }}
       >
         {label(value)}
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true"><path d="m3 4.5 3 3 3-3" /></svg>
       </button>
       {open
         ? (
-          <ul className="pm-scope-menu" role="listbox" id={listId} aria-label={t('scope.label')}>
+          <ul ref={list} className="pm-scope-menu" role="listbox" id={listId} aria-label={t('scope.label')} onKeyDown={onListKey}>
             {options.map((scope) => {
               const selected = sameScope(scope, value)
               return (
@@ -175,10 +200,9 @@ function ScopePicker({ value, options, label, onChange }: {
                   key={scope.kind === 'global' ? 'global' : scope.workspacePath}
                   role="option"
                   aria-selected={selected}
-                  tabIndex={0}
+                  tabIndex={-1}
                   className="pm-scope-option"
                   onClick={() => { pick(scope) }}
-                  onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); pick(scope) } }}
                 >
                   {label(scope)}
                 </li>
@@ -213,7 +237,7 @@ export const memoryPageCss = `
   background: var(--pm-bg); box-shadow: var(--dsw-elevation-panel);
 }
 .pm-scope-option { padding: 6px 10px; border-radius: var(--dsw-radius-sm, 8px); font-size: 13px; color: var(--pm-text); cursor: pointer; white-space: nowrap; }
-.pm-scope-option:hover { background: var(--pm-hover); }
+.pm-scope-option:hover, .pm-scope-option:focus-visible { background: var(--pm-hover); }
 .pm-scope-option[aria-selected='true'] { font-weight: 600; }
 @media (max-width: 560px) { .pm-page { padding: 16px; } }
 ` + sharedTabCss + libraryTabCss + deletedTabCss

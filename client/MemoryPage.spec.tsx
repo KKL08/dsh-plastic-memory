@@ -62,6 +62,72 @@ describe('记忆页外壳', () => {
     expect(gateway.sessionRequests.at(-1)).toBeUndefined()
   })
 
+  describe('作用域下拉的键盘操作（listbox）', () => {
+    const open = () => {
+      const gateway = createFakeGateway({ currentWorkspace: '/w/app', views: { pending, library } })
+      const nav = createNavStore()
+      renderInShell(<MemoryPage nav={nav} />, gateway)
+      const button = screen.getByRole('button', { name: /本项目 app/ })
+      button.focus()
+      return { nav, button }
+    }
+    const option = (name: string) => screen.getByRole('option', { name })
+
+    it('打开时焦点落在选中项；上下键逐项移动，Home / End 到首尾', () => {
+      const { button } = open()
+      fireEvent.click(button)
+      expect(option('本项目 app')).toHaveFocus()
+      fireEvent.keyDown(option('本项目 app'), { key: 'ArrowDown' })
+      expect(option('blog')).toHaveFocus()
+      fireEvent.keyDown(option('blog'), { key: 'ArrowDown' })
+      fireEvent.keyDown(option('全局'), { key: 'ArrowDown' })
+      expect(option('全局')).toHaveFocus()
+      fireEvent.keyDown(option('全局'), { key: 'ArrowUp' })
+      expect(option('blog')).toHaveFocus()
+      fireEvent.keyDown(option('blog'), { key: 'Home' })
+      expect(option('本项目 app')).toHaveFocus()
+      fireEvent.keyDown(option('本项目 app'), { key: 'End' })
+      expect(option('全局')).toHaveFocus()
+    })
+
+    it('按钮上按下键也能打开；选项不在 Tab 序列里，焦点靠方向键移动', () => {
+      const { button } = open()
+      fireEvent.keyDown(button, { key: 'ArrowDown' })
+      expect(screen.getByRole('listbox')).toBeInTheDocument()
+      expect(option('本项目 app')).toHaveFocus()
+      expect(screen.getAllByRole('option').map(o => o.tabIndex)).toEqual([-1, -1, -1])
+    })
+
+    it('回车或空格选中，收起后焦点回到按钮', () => {
+      const { nav, button } = open()
+      fireEvent.click(button)
+      fireEvent.keyDown(option('本项目 app'), { key: 'End' })
+      expect(option('全局')).toHaveFocus()
+      fireEvent.keyDown(option('全局'), { key: 'Enter' })
+      expect(nav.get().scope).toEqual({ kind: 'global' })
+      expect(screen.queryByRole('listbox')).toBeNull()
+      expect(screen.getByRole('button', { name: '全局' })).toHaveFocus()
+
+      fireEvent.click(screen.getByRole('button', { name: '全局' }))
+      expect(option('全局')).toHaveFocus()
+      fireEvent.keyDown(option('全局'), { key: 'ArrowDown' })
+      expect(option('blog')).toHaveFocus()
+      fireEvent.keyDown(option('blog'), { key: ' ' })
+      expect(nav.get().scope).toEqual({ kind: 'workspace', workspacePath: '/w/blog' })
+      expect(screen.getByRole('button', { name: 'blog' })).toHaveFocus()
+    })
+
+    it('焦点在选项上按 Esc：收起，焦点回到按钮，作用域不变', () => {
+      const { nav, button } = open()
+      fireEvent.click(button)
+      option('blog').focus()
+      fireEvent.keyDown(option('blog'), { key: 'Escape' })
+      expect(screen.queryByRole('listbox')).toBeNull()
+      expect(button).toHaveFocus()
+      expect(nav.get().scope).toBeUndefined()
+    })
+  })
+
   it('切 tab 写回导航 store', () => {
     const nav = createNavStore()
     renderInShell(<MemoryPage nav={nav} />, createFakeGateway({ views: { pending, library } }))
