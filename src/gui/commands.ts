@@ -15,7 +15,7 @@ import { executeForget } from '../tools/forget.ts'
 import { executePromote } from '../tools/promote.ts'
 import { executeScan } from '../tools/scan.ts'
 import { executeSnapshotTool } from '../tools/snapshot.ts'
-import { isCopyOf, locateCopy, type CrossWorkspaceRejection, type GovernanceContext } from '../tools/workspace-gate.ts'
+import { crossWorkspaceNote, gateRecords, isCopyOf, locateCopy, type CrossWorkspaceRejection, type GovernanceContext } from '../tools/workspace-gate.ts'
 import {
   GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, parseMemoryCommand, sessionViewFile,
   type GuiErrorCode, type GuiLayerRef, type MemoryCommand, type MemoryCommandResult,
@@ -184,6 +184,17 @@ async function dispatch(
         const r = await restoreFrom(snapshotId, targets, command.allowCrossWorkspace)
         if (isErr(r)) return r
         restored = r
+      }
+      if (verdict === 'keep-local') {
+        // 「留在本项目」清掉了候选标记、没拍快照：撤销时把标记放回去，否则条目回到待处理也找不到候选
+        const memoryId = entry.memoryIds[0] ?? ''
+        const rec = await deps.store.get(memoryId, { workspacePath: entry.workspaces?.[0] ?? gov.workspacePath })
+        if (!rec || rec.status !== 'active') return notFound(memoryId)
+        const { rejected } = gateRecords([rec], gov, command.allowCrossWorkspace)
+        if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
+        // 同 keep-local：不是内容编辑，updatedAt 不动
+        if (!(await deps.store.updateIfLive(rec, r => ({ ...r, globalCandidate: true })))) return notFound(memoryId)
+        restored = [memoryId]
       }
       await deps.decisions.unsettle(entry.id)
       return { ok: true, cmd, decisionId: entry.id, memoryIds: restored, ...(snapshotId !== undefined ? { snapshotId } : {}) }
