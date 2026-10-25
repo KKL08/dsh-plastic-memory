@@ -274,6 +274,74 @@ describe('待处理：裁决后结果留原位、撤销', () => {
   })
 })
 
+describe('待处理：别处已经在处理同一条', () => {
+  const refused = '你对「测试里怎么准备数据库，两条记忆互相矛盾」的选择没有生效：它正在别处处理，或者刚在别处处理完。'
+  const claimed = (command: MemoryCommand) => ({ ok: false as const, cmd: command.cmd, code: 'claimed' as const, detail: '待决项 d-h 正在被另一次裁决处理，未做任何改动。' })
+
+  it('另一个标签页同时裁决（claimed）：写明你的选择没有生效，不显示原话；卡随视图更新消失后提示仍在原位', async () => {
+    const { gateway } = setup([secret, horizontal, promote], { respond: claimed })
+    fireEvent.click(screen.getByRole('button', { name: '以 B 为准' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(refused)
+    expect(screen.queryByText(/正在被另一次裁决处理/)).toBeNull()
+    expect(screen.queryByText('已按 B')).toBeNull()
+
+    // 另一个标签页的裁决写进视图：这条冲突出了待处理
+    act(() => { gateway.setView('pending', view(secret, promote)) })
+    expect(screen.queryByRole('button', { name: '以 B 为准' })).toBeNull()
+    const notice = screen.getByRole('alert')
+    expect(notice).toHaveTextContent(refused)
+    // 留在冲突原来的位置：密钥卡之后、提升候选之前
+    const [secretTitle, promoteTitle] = screen.getAllByRole('heading', { level: 3 })
+    expect(secretTitle!.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(notice.compareDocumentPosition(promoteTitle!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('最后一张卡也没了：提示留在空状态上面', async () => {
+    const { gateway } = setup([horizontal], { respond: claimed })
+    fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
+    await screen.findByRole('alert')
+    act(() => { gateway.setView('pending', view()) })
+    expect(screen.getByText('没有等你决定的事')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent(refused)
+  })
+
+  it.each([
+    ['提升为全局', 'claimed', '这条适合所有项目'],
+    ['留在本项目', 'not-found', '这条适合所有项目'],
+    ['忽略', 'claimed', '带入的记忆超出上限'],
+    ['以基线为准', 'not-found', '包管理器和基线矛盾'],
+  ] as const)('「%s」回 %s：同样提示，卡消失后还在', async (button, code, title) => {
+    const { gateway } = setup([vertical, promote, overflow], {
+      respond: command => ({ ok: false, cmd: command.cmd, code, detail: `不存在或已处理：${'decisionId' in command ? command.decisionId : ''}` }),
+    })
+    fireEvent.click(screen.getByRole('button', { name: button }))
+    const text = `你对「${title}」的选择没有生效：它正在别处处理，或者刚在别处处理完。`
+    expect(await screen.findByRole('alert')).toHaveTextContent(text)
+    act(() => { gateway.setView('pending', view()) })
+    expect(screen.getByRole('alert')).toHaveTextContent(text)
+  })
+
+  it('结果卡上的撤销碰上别处正在处理（claimed）：结果卡不动，上面写明没有生效', async () => {
+    const respond = (command: MemoryCommand) => command.cmd === 'undo' ? claimed(command) : { ok: true as const, cmd: command.cmd }
+    setup([horizontal], { respond })
+    fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
+    fireEvent.click(await screen.findByRole('button', { name: '撤销' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(refused)
+    expect(screen.getByText('已按 A')).toBeInTheDocument()
+  })
+
+  it('之后在任一张卡上做成了一件事：提示收起', async () => {
+    let calls = 0
+    const respond = (command: MemoryCommand) => { calls += 1; return calls === 1 ? claimed(command) : { ok: true as const, cmd: command.cmd } }
+    setup([horizontal, promote], { respond })
+    fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
+    await screen.findByRole('alert')
+    fireEvent.click(screen.getByRole('button', { name: '提升为全局' }))
+    await screen.findByText('已提升为全局')
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+})
+
 describe('待处理：跨项目先确认', () => {
   it('服务端拒（cross-workspace）→ 卡片里写明项目、什么都没动；「继续处理」带 allowCrossWorkspace 重发；「取消」不重发', async () => {
     let calls = 0

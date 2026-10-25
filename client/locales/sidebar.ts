@@ -40,6 +40,7 @@ export const sidebarZh = {
   'sidebar.ruled.undo': '撤销',
   'sidebar.action.busy': '正在处理…',
   'sidebar.action.failed': '没有成功：{detail}',
+  'sidebar.action.refused': '你的选择没有生效：这条冲突正在别处处理，或者刚在别处处理完。',
 
   'sidebar.type.profile': '用户画像',
   'sidebar.type.preference': '行为偏好',
@@ -89,6 +90,7 @@ export const sidebarEn: Record<keyof typeof sidebarZh, string> = {
   'sidebar.ruled.undo': 'Undo',
   'sidebar.action.busy': 'Working…',
   'sidebar.action.failed': 'Did not go through: {detail}',
+  'sidebar.action.refused': 'Your choice did not take effect: this conflict is being handled elsewhere, or was just handled there.',
 
   'sidebar.type.profile': 'Profile',
   'sidebar.type.preference': 'Preference',

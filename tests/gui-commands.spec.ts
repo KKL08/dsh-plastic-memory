@@ -312,13 +312,57 @@ describe('并发裁决', () => {
     await writeFile(join(root, STATE_DIR, 'pending', `${decisionId}.claim`), JSON.stringify({ pid, at: Date.now(), id: 'other' }))
   }
 
-  it('另一次裁决正持有认领：failed 并说明，账本与记忆都不动', async () => {
+  it('另一次裁决正持有认领：claimed 并说明，账本与记忆都不动', async () => {
     const e = env()
     const entry = await seedPair(e)
     await writeClaim(entry.id, process.pid)
-    expect(err(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' })).detail).toMatch(/正在被另一次裁决处理/)
+    const body = err(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' }))
+    expect(body.code).toBe('claimed')
+    expect(body.detail).toMatch(/正在被另一次裁决处理/)
     expect(await e.decisions.list()).toEqual([entry])
     expect((await e.store.get('mem_b'))!.status).toBe('active')
+    expect(await e.snapshots.list()).toEqual([])
+  })
+
+  it('撤销、提升、留在本项目、忽略超限碰上别人持有的认领：同样回 claimed，账本与记忆都不动', async () => {
+    const e = env()
+    const pair = await seedPair(e)
+    ok(await e.run({ cmd: 'resolve', decisionId: pair.id, verdict: 'keep-left' }))
+    await e.store.create(record({ id: 'mem_c', name: '戊', scope: 'workspace', workspacePath: SESSION_WS, globalCandidate: true }))
+    const { entry: candidate } = await e.decisions.upsert({ kind: 'promote-candidate', memoryIds: ['mem_c'], summary: '候选', workspaces: [SESSION_WS], fingerprint: 'fp-c' }, 1)
+    const { entry: overflow } = await e.decisions.upsert({ kind: 'overflow', memoryIds: [], summary: '超出上限', fingerprint: '1' }, 1)
+    const before = await allEntries(e)
+    for (const id of [pair.id, candidate.id, overflow.id]) await writeClaim(id, process.pid)
+    const commands: MemoryCommand[] = [
+      { cmd: 'undo', decisionId: pair.id },
+      { cmd: 'promote', decisionId: candidate.id, target: 'global' },
+      { cmd: 'keep-local', decisionId: candidate.id },
+      { cmd: 'dismiss-overflow', decisionId: overflow.id },
+    ]
+    for (const command of commands) expect(err(await e.run(command)).code, command.cmd).toBe('claimed')
+    expect(await allEntries(e)).toEqual(before)
+    expect((await e.store.get('mem_b'))!.status).toBe('deleted')
+    expect((await e.store.get('mem_c'))!.scope).toBe('workspace')
+  })
+
+  it('认领前别处刚裁决完：not-found，什么都不动', async () => {
+    let entryId = ''
+    // 预检之后、本次认领之前，另一个标签页的裁决做完（条目出了待决）并放开了认领
+    const e = env({
+      wrapPending: table => ({
+        get: key => table.get(key),
+        put: (key, value) => table.put(key, value),
+        delete: key => table.delete(key),
+        list: () => table.list(),
+        claim: async (key) => {
+          if (key === entryId) await table.delete(key)
+          return table.claim(key)
+        },
+      }),
+    })
+    entryId = (await seedPair(e)).id
+    expect(err(await e.run({ cmd: 'resolve', decisionId: entryId, verdict: 'keep-right' })).code).toBe('not-found')
+    expect([(await e.store.get('mem_a'))!.status, (await e.store.get('mem_b'))!.status]).toEqual(['active', 'active'])
     expect(await e.snapshots.list()).toEqual([])
   })
 

@@ -161,6 +161,6 @@ describe('memory_confirm resolve 边界', () => {
   it('decisionId 不存在返回 error', async () => {
     const deps = makeDeps()
     const r = await executeConfirm({ action: 'resolve', decisionId: 'pd_ghost', verdict: 'dismiss' }, { workspacePath: '/proj' }, deps)
-    expect(r.kind).toBe('error')
+    expect(r.kind === 'error' && r.code).toBe('not-found')
   })
 })

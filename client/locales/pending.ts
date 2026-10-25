@@ -9,6 +9,7 @@ export const pendingZh = {
   'pending.cross.body': '这条记忆属于 {name} 项目，不是当前项目。确定在这里处理它吗？',
   'pending.cross.confirm': '继续处理',
   'pending.openFailed': '没能打开文件。',
+  'pending.refused': '你对「{title}」的选择没有生效：它正在别处处理，或者刚在别处处理完。',
 
   'pending.empty.title': '没有等你决定的事',
   'pending.empty.lastScan': '上次体检：{date}',
@@ -92,6 +93,7 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.cross.body': 'This memory belongs to project {name}, not this one. Handle it from here anyway?',
   'pending.cross.confirm': 'Continue',
   'pending.openFailed': 'Could not open the file.',
+  'pending.refused': 'Your choice on “{title}” did not take effect: it is being handled elsewhere, or was just handled there.',
 
   'pending.empty.title': 'Nothing is waiting for you',
   'pending.empty.lastScan': 'Last checkup: {date}',
