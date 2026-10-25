@@ -128,6 +128,7 @@ export async function executeSnapshotTool(
     (r, skipIf) => deps.store.put(r, options.isExactLayer === true ? { workspacePath: r.workspacePath, isExactLayer: true } : undefined, skipIf),
     current,
     args.overwriteChanged ?? false,
+    r => deps.store.hardDelete(r, { isExactLayer: options.isExactLayer === true }),
   )
   const changedCount = skipped.length - redacted.length
   const skippedNote = changedCount > 0

@@ -140,6 +140,9 @@ export class SnapshotStore {
    * 恢复动作本身只 put 旧数据，不做二次快照。current：调用方预读的现状（同 diff）。
    * 预读之后记录仍可能被别处改动：不覆盖时把冲突判定交给 put 的 skipIf，在写入那一刻按最新内容再判一次；
    * put 返回 false 即按「快照后被修改」跳过。返回 void 的 put 视为已写入。
+   * 密钥硬删先脱敏快照、再删文件（tools/forget.ts），可能发生在别的会话、别的进程，也可能在调用方读出快照之后：
+   * 每条写入前按盘上的这份快照现读一次，已脱敏（或快照已清扫）就不写；写入后再读一次，仍未脱敏说明对方删文件在后，
+   * 会连这份一起删掉，读到已脱敏就用 discard 删掉刚写的这份，同样计入 redacted。
    */
   async restore(
     snapshot: MemorySnapshot,
@@ -147,25 +150,41 @@ export class SnapshotStore {
     put: (record: MemoryRecord, skipIf?: (current: MemoryRecord) => boolean) => Promise<boolean | void>,
     current: ReadonlyMap<string, MemoryRecord>,
     overwriteChanged: boolean,
+    discard: (record: MemoryRecord) => Promise<unknown>,
   ): Promise<{ restored: string[]; skipped: string[]; redacted: string[] }> {
     const restored: string[] = []
     const skipped: string[] = []
     const redacted: string[] = []
     const targets = ids ? snapshot.data.filter(r => ids.includes(r.id)) : snapshot.data
     for (const rec of targets) {
-      if (rec.redacted) {
+      const latest = rec.redacted ? rec : await this.latestEntry(snapshot.id, rec.id)
+      if (latest?.redacted) {
         skipped.push(rec.id)
         redacted.push(rec.id)
         continue
       }
-      if (isConflicting(current.get(rec.id), rec) && !overwriteChanged) {
+      if (latest === undefined || (isConflicting(current.get(rec.id), rec) && !overwriteChanged)) {
         skipped.push(rec.id)
         continue
       }
       const written = await put(rec, overwriteChanged ? undefined : cur => isConflicting(cur, rec))
-      if (written === false) skipped.push(rec.id)
-      else restored.push(rec.id)
+      if (written === false) {
+        skipped.push(rec.id)
+        continue
+      }
+      if ((await this.latestEntry(snapshot.id, rec.id))?.redacted) {
+        await discard(rec)
+        skipped.push(rec.id)
+        redacted.push(rec.id)
+        continue
+      }
+      restored.push(rec.id)
     }
     return { restored, skipped, redacted }
+  }
+
+  /** 盘上这份快照里该记录的现状；快照或记录已不在时为 undefined。 */
+  private async latestEntry(snapshotId: string, id: string): Promise<SnapshotRecord | undefined> {
+    return (await this.table.get(snapshotId))?.data.find(r => r.id === id)
   }
 }
