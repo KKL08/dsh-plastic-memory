@@ -75,7 +75,8 @@ export function CrossConfirm({ workspacePath, onCancel, onConfirm }: { workspace
     <ConfirmGroup label={t('pending.cross.confirm')}>
       <p className="pm-pending-text">{t('pending.cross.body', { name: baseName(workspacePath) })}</p>
       <div className="pm-pending-actions">
-        <Button onClick={onCancel}>{t('pending.cancel')}</Button>
+        {/* 焦点移进确认，停在不改动任何东西的「取消」上 */}
+        <Button autoFocus onClick={onCancel}>{t('pending.cancel')}</Button>
         <Button onClick={onConfirm}>{t('pending.cross.confirm')}</Button>
       </div>
     </ConfirmGroup>

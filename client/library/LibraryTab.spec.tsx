@@ -254,6 +254,20 @@ describe('全部记忆', () => {
       await waitFor(() => { expect(screen.getByText('已彻底删除。如果它是真的凭证，记得去换一个新的。')).toHaveFocus() })
     })
 
+    it('跨项目确认出现时焦点移进确认、落在「取消」上；直接回车取消后回到「删除」', async () => {
+      const gateway = createFakeGateway({
+        views: { library: library() },
+        respond: command => ({ ok: false, cmd: command.cmd, code: 'cross-workspace', rejected: [{ id: 'a1', workspacePath: '/w/blog' }] }),
+      })
+      renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
+      const del = within(rowOf(A1)).getByRole('button', { name: '删除' })
+      await press(del)
+      const cancel = screen.getByRole('button', { name: '取消' })
+      expect(cancel).toHaveFocus()
+      await act(async () => { fireEvent.click(cancel) })
+      await waitFor(() => { expect(del).toHaveFocus() })
+    })
+
     it('跨项目确认：「取消」回到「删除」；「继续处理」先回到「删除」，删掉后落到下一行', async () => {
       const gateway = createFakeGateway({
         views: { library: library() },
