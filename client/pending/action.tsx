@@ -1,7 +1,7 @@
 /**
  * 待处理卡片上的一次动作：借来的会话里发一条 `/memory` 命令。
  * 涉及其他项目时服务端先拒（cross-workspace，什么都没动），卡片里就地写明是哪个项目，用户点「继续处理」才带
- * allowCrossWorkspace 重发。失败把宿主 / 执行器的原话显示在卡片里。
+ * allowCrossWorkspace 重发。失败把宿主 / 执行器的原话显示在卡片里；条目正在别处处理或刚处理完时交给列表提示（isHandledElsewhere）。
  */
 import { useRef, useState, type ReactNode } from 'react'
 import type { MemoryCommand, MemoryCommandResult } from '../../src/gui/contract.ts'
@@ -18,6 +18,19 @@ export type ActionState =
 
 type Ok = Extract<MemoryCommandResult, { ok: true }>
 
+/** 处理待决项、条目还开着才能做的命令；not-found 对它们只可能是条目已出了待决。 */
+const OPEN_ITEM_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'promote', 'keep-local', 'dismiss-overflow'])
+
+/**
+ * 命令没做任何改动，因为这一条正在别处（别的标签页、宿主进程、体检）处理（claimed），或刚在别处处理完（not-found）。
+ * 那边的结果写进视图后卡片随之消失，提示得放在卡片外面，否则用户只看到冲突没了，以为自己的选择生效了。
+ * undo 的 not-found 还可能是快照过期，照常显示原话。
+ */
+export function isHandledElsewhere(command: MemoryCommand, result: MemoryCommandResult): boolean {
+  if (result.ok) return false
+  return result.code === 'claimed' || (result.code === 'not-found' && OPEN_ITEM_COMMANDS.has(command.cmd))
+}
+
 export interface ItemAction {
   state: ActionState
   /** 按钮不可用的原因：没有会话、正在处理、等跨项目确认。 */
@@ -29,7 +42,8 @@ export interface ItemAction {
   cancelCross(): void
 }
 
-export function useItemAction(session: BorrowedSession, onOk: (command: MemoryCommand, result: Ok) => void): ItemAction {
+/** onRefused：isHandledElsewhere 为真时调用，卡片里不再显示原话。 */
+export function useItemAction(session: BorrowedSession, onOk: (command: MemoryCommand, result: Ok) => void, onRefused?: () => void): ItemAction {
   const t = useT()
   const gateway = useGateway()
   const [state, setState] = useState<ActionState>({ kind: 'idle' })
@@ -39,6 +53,7 @@ export function useItemAction(session: BorrowedSession, onOk: (command: MemoryCo
     setState({ kind: 'busy' })
     void gateway.execute(session.sessionId, command).then((r) => {
       if (r.ok) { setState({ kind: 'idle' }); onOk(command, r); return }
+      if (onRefused !== undefined && isHandledElsewhere(command, r)) { setState({ kind: 'idle' }); onRefused(); return }
       const workspacePath = r.rejected?.[0]?.workspacePath
       const allowed = 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
       if (r.code === 'cross-workspace' && !allowed && workspacePath !== undefined) setState({ kind: 'cross', workspacePath, command })

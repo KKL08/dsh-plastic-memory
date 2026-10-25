@@ -17,6 +17,11 @@ export type RejectCode =
 export type GovernanceRejectCode =
   | 'cross-workspace'   // 目标不在可见集合（global + 当前 workspace），且未带 allowCrossWorkspace
 
+/** memory_confirm 裁决待决项时什么都没动的原因（tools/confirm.ts）。 */
+export type DecisionRejectCode =
+  | 'claimed'           // 条目正被另一次裁决或体检认领
+  | 'not-found'         // 条目不存在：已被裁决，或涉及的记忆已删除
+
 /** memory_save 成功但附带的警告（pipeline.ts）。 */
 export type WarningCode =
   | 'update-global-candidate' // update 填 global：scope 不变，标记为提升候选

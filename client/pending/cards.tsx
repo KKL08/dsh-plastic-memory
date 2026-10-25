@@ -31,6 +31,8 @@ export interface CardProps<K extends PendingItem['kind']> {
   now: number
   typeLabels: Readonly<Record<string, string>>
   onDone: (outcome: Outcome) => void
+  /** 这一条正在别处处理或刚处理完，什么都没动（见 isHandledElsewhere）：由列表在卡片外提示。 */
+  onRefused: () => void
 }
 
 /** 记忆在别的项目里（相对借来的会话所在项目）时返回项目路径。 */
@@ -141,11 +143,11 @@ export function SecretCard({ item, session, now, typeLabels, onDone }: CardProps
 
 // —— 冲突 ——
 
-export function HorizontalCard({ item, session, now, typeLabels, onDone }: CardProps<'conflict-horizontal'>) {
+export function HorizontalCard({ item, session, now, typeLabels, onDone, onRefused }: CardProps<'conflict-horizontal'>) {
   const t = useT()
   const action = useItemAction(session, (command) => {
     if (command.cmd === 'resolve') onDone({ kind: 'resolved', verdict: command.verdict })
-  })
+  }, onRefused)
   const preferred = item.preferredId === undefined ? undefined
     : item.left?.id === item.preferredId ? { side: 'A', memory: item.left }
       : item.right?.id === item.preferredId ? { side: 'B', memory: item.right } : undefined
@@ -170,11 +172,11 @@ export function HorizontalCard({ item, session, now, typeLabels, onDone }: CardP
   )
 }
 
-export function VerticalCard({ item, session, now, typeLabels, onDone }: CardProps<'conflict-vertical'>) {
+export function VerticalCard({ item, session, now, typeLabels, onDone, onRefused }: CardProps<'conflict-vertical'>) {
   const t = useT()
   const action = useItemAction(session, (command) => {
     if (command.cmd === 'resolve') onDone({ kind: 'resolved', verdict: command.verdict })
-  })
+  }, onRefused)
   return (
     <div className="pm-pending-item">
       <VerticalConflictRuling
@@ -195,7 +197,7 @@ export function VerticalCard({ item, session, now, typeLabels, onDone }: CardPro
 
 // —— 提升候选 ——
 
-export function PromoteCard({ item, session, now, typeLabels, onDone, promoteTarget }: CardProps<'promote-candidate'> & {
+export function PromoteCard({ item, session, now, typeLabels, onDone, onRefused, promoteTarget }: CardProps<'promote-candidate'> & {
   /** 来自配置 governance.globalPromoteTarget；还没读到为 undefined。 */
   promoteTarget: 'global' | 'agents-md' | undefined
 }) {
@@ -203,7 +205,7 @@ export function PromoteCard({ item, session, now, typeLabels, onDone, promoteTar
   const action = useItemAction(session, (command) => {
     if (command.cmd === 'promote') onDone({ kind: 'promoted', target: command.target })
     if (command.cmd === 'keep-local') onDone({ kind: 'kept-local' })
-  })
+  }, onRefused)
   const other = otherProject(item.memory, session)
   const unavailable = action.unavailable ?? (item.memory === null ? t('conflict.missingHint') : undefined)
   const promoteLabel = promoteTarget === 'agents-md' ? t('pending.promote.agentsMd')
@@ -240,14 +242,14 @@ export function PromoteCard({ item, session, now, typeLabels, onDone, promoteTar
 /** 第 tier 档放宽到的上限：budget × (1 + 0.25 × tier)。 */
 const capOf = (budget: number, tier: number) => Math.round(budget * (1 + 0.25 * tier))
 
-export function OverflowCard({ item, session, onDone, budget, onCleanup }: CardProps<'overflow'> & {
+export function OverflowCard({ item, session, onDone, onRefused, budget, onCleanup }: CardProps<'overflow'> & {
   budget: number | undefined
   /** 「整理记忆 ›」：去全部记忆，作用域是这张卡那一层。 */
   onCleanup: (scope: GuiLayerRef) => void
 }) {
   const t = useT()
   const gateway = useGateway()
-  const action = useItemAction(session, () => { onDone({ kind: 'dismissed' }) })
+  const action = useItemAction(session, () => { onDone({ kind: 'dismissed' }) }, onRefused)
   // 建议值：下一档的起点向上取整到百，填了就不会在这一档再提醒
   const suggested = budget === undefined ? '' : String(Math.ceil(capOf(budget, item.tier + 1) / 100) * 100)
   const [draft, setDraft] = useState<string | undefined>(undefined)
@@ -363,16 +365,17 @@ function resultCopy(item: PendingItem, outcome: Outcome, t: Translate): ResultCo
   }
 }
 
-export function ResultCard({ item, outcome, session, now, typeLabels, onUndone }: {
+export function ResultCard({ item, outcome, session, now, typeLabels, onUndone, onRefused }: {
   item: PendingItem
   outcome: Outcome
   session: BorrowedSession
   now: number
   typeLabels: Readonly<Record<string, string>>
   onUndone: () => void
+  onRefused: () => void
 }) {
   const t = useT()
-  const action = useItemAction(session, () => { onUndone() })
+  const action = useItemAction(session, () => { onUndone() }, onRefused)
   const copy = resultCopy(item, outcome, t)
   const chip = <Chip variant="result">{copy.chip}</Chip>
   return (

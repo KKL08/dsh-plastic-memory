@@ -255,11 +255,49 @@ describe('SidebarTab 就地裁决', () => {
   it('裁决失败：原位写宿主原话，冲突卡还在', async () => {
     setup(
       { library: library(pref, pref2), session: snapshot({ injectedIds: ['p1'] }), pending: pending(conflict) },
-      () => ({ ok: false, code: 'not-found', detail: '条目已处理' }),
+      () => ({ ok: false, code: 'failed', detail: '定位不到败方记忆' }),
     )
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '都保留' })) })
-    expect(screen.getByRole('alert')).toHaveTextContent('没有成功：条目已处理')
+    expect(screen.getByRole('alert')).toHaveTextContent('没有成功：定位不到败方记忆')
     expect(screen.getByRole('heading', { name: '两条记忆互相矛盾，等你决定' })).toBeInTheDocument()
+  })
+})
+
+describe('SidebarTab 别处已经在处理同一条冲突', () => {
+  const refused = '你的选择没有生效：这条冲突正在别处处理，或者刚在别处处理完。'
+
+  it.each(['claimed', 'not-found'] as const)('裁决回 %s：原位写明没有生效；别处的裁决写进视图、冲突卡消失后提示还在', async (code) => {
+    const { gateway } = setup(
+      { library: library(pref, pref2, proj, glob), session: snapshot({ injectedIds: ['p1', 'j1', 'p2', 'g1'] }), pending: pending(conflict) },
+      command => ({ ok: false, cmd: command.cmd, code, detail: '待决项 pd_1 正在被另一次裁决处理，未做任何改动。' }),
+    )
+    const group = within(screen.getByRole('region', { name: '行为偏好' }))
+    await act(async () => { fireEvent.click(group.getByRole('button', { name: '以 B 为准' })) })
+    expect(group.getByRole('alert')).toHaveTextContent(refused)
+    expect(screen.queryByText(/正在被另一次裁决处理/)).toBeNull()
+
+    // 另一个标签页以 A 为准：冲突出了待处理，B 被删
+    act(() => {
+      gateway.setView('pending', pending())
+      gateway.setView('library', library(pref, proj, glob))
+    })
+    expect(screen.queryByRole('heading', { name: '两条记忆互相矛盾，等你决定' })).toBeNull()
+    expect(screen.queryByText('已按 B')).toBeNull()
+    expect(screen.getByRole('alert')).toHaveTextContent(refused)
+  })
+
+  it('带入的记忆都没了：提示留在空状态上面', async () => {
+    const { gateway } = setup(
+      { library: library(pref, pref2), session: snapshot({ injectedIds: ['p1', 'p2'] }), pending: pending(conflict) },
+      command => ({ ok: false, cmd: command.cmd, code: 'claimed' }),
+    )
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '以 B 为准' })) })
+    act(() => {
+      gateway.setView('pending', pending())
+      gateway.setView('library', library())
+    })
+    expect(screen.getByText('还没有记忆')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent(refused)
   })
 })
 

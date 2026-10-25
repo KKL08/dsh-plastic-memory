@@ -113,7 +113,7 @@ async function run(deps: MemoryCommandDeps, invocation: MemoryCommandInvocation)
   if ('decisionId' in command && CLAIMED_COMMANDS.has(command.cmd)) {
     // 两个标签页或两个宿主进程同时处理同一条（提升与留在本项目、两次撤销）：只让一条执行，另一条什么都不动
     const claimed = await deps.decisions.withClaim(command.decisionId, () => dispatch(deps, command, gov, exec, now))
-    result = claimed.isClaimed ? claimed.value : fail(command.cmd, 'failed', `待决项 ${command.decisionId} 正在被另一次操作处理，未做任何改动`)
+    result = claimed.isClaimed ? claimed.value : fail(command.cmd, 'claimed', `待决项 ${command.decisionId} 正在被另一次操作处理，未做任何改动`)
   } else {
     result = await dispatch(deps, command, gov, exec, now)
   }
@@ -178,7 +178,7 @@ async function dispatch(
     case 'resolve': {
       if (!(await deps.decisions.get(command.decisionId))) return notFound(command.decisionId)
       const r = await executeConfirm({ action: 'resolve', decisionId: command.decisionId, verdict: command.verdict, allowCrossWorkspace: command.allowCrossWorkspace }, gov, executorDeps)
-      if (r.kind === 'error') return r.code === 'cross-workspace' ? fail(cmd, 'cross-workspace', r.message, r.rejected) : fail(cmd, 'failed', r.message)
+      if (r.kind === 'error') return r.code === 'cross-workspace' ? fail(cmd, 'cross-workspace', r.message, r.rejected) : fail(cmd, r.code ?? 'failed', r.message)
       const snapshotId = (await settledEntry(command.decisionId))?.settled?.snapshotId
       return { ok: true, cmd, decisionId: command.decisionId, ...(snapshotId !== undefined ? { snapshotId } : {}) }
     }

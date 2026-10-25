@@ -6,6 +6,8 @@
  * 健康视图（bootedAt：插件本次加载时刻）。
  * 四种状态：无记忆、有全局没本项目、正常、frozenAt 早于插件本次加载（重启后未重新带入；视图没带 bootedAt 时不判断）。
  * 刚裁决的冲突在本地留原位可撤销，tab 卸载后收起。
+ * 裁决碰上这条冲突正在别处处理或刚处理完（什么都没动）：冲突卡还在时原位说明，那边的结果写进视图、卡片消失后
+ * 说明挪到「带入的记忆」上面（没有记忆了就在空状态上面），下一次动作时收起。
  * 新记的含密钥时不能软删（服务端回 has-secret，什么都没动）：原位确认，「彻底删除」发 hard-delete，删后原位留不可恢复的说明，tab 卸载后收起。
  */
 import { useMemo, useRef, useState, type ReactNode } from 'react'
@@ -22,7 +24,7 @@ import { ContextBudgetBar } from '../ui/ContextBudgetBar.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { TrashIcon } from '../ui/TrashIcon.tsx'
-import { CrossConfirm, crossConfirmCss, SecretDeleteConfirm } from '../pending/action.tsx'
+import { CrossConfirm, crossConfirmCss, isHandledElsewhere, SecretDeleteConfirm } from '../pending/action.tsx'
 import { keepFocusInPlace } from '../ui/focus-return.ts'
 
 type Conflict = Extract<PendingItem, { kind: 'conflict-horizontal' }>
@@ -86,6 +88,8 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const inFlight = useRef(new Set<string>())
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set())
   const [failure, setFailure] = useState<{ id: string; detail: string } | undefined>(undefined)
+  /** 没有生效的那次裁决或撤销（待决项 id）。 */
+  const [refused, setRefused] = useState<string | undefined>(undefined)
   // 涉及其他项目时服务端先拒（什么都没动），和待处理卡同一套：原位确认，「继续处理」才带 allowCrossWorkspace 重发
   const [cross, setCross] = useState<{ id: string; workspacePath: string; command: MemoryCommand; onOk: () => void } | undefined>(undefined)
 
@@ -95,6 +99,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     keepFocusInPlace()
     setBusy(new Set(inFlight.current))
     setFailure(undefined)
+    setRefused(undefined)
     setCross(undefined)
     setSecretId(undefined)
     const result = await gateway.execute(sessionId, command)
@@ -105,6 +110,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     const isAllowed = 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
     if (result.code === 'cross-workspace' && !isAllowed && workspacePath !== undefined) setCross({ id, workspacePath, command, onOk })
     else if (result.code === 'has-secret' && command.cmd === 'forget') setSecretId(id)
+    else if (isHandledElsewhere(command, result)) setRefused(id)
     else setFailure({ id, detail: result.detail ?? result.code })
   }
   const rule = (item: Conflict, verdict: Verdict) => {
@@ -156,10 +162,12 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   }
   // 彻底删除的那条视图里已经没有了，按 id 原位留一行说明（删的是最后一条时留在空状态上面，也是焦点的落点）
   const purgedNote = (id: string) => <p key={id} className="pm-side-hint" tabIndex={-1}>{t('pending.secret.deletedNotice')}</p>
+  const refusedNote = <p className="pm-side-error" role="alert" tabIndex={-1}>{t('sidebar.action.refused')}</p>
   if (globalCount === 0 && projectCount === 0) {
     return (
       <div className="pm-side">
         {(snapshot?.savedIds ?? []).filter(isPurged).map(purgedNote)}
+        {refused !== undefined ? refusedNote : null}
         <EmptyState variant="first" title={t('sidebar.empty.title')}>{t('sidebar.empty.body')}</EmptyState>
       </div>
     )
@@ -229,6 +237,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
         />
       )
     }
+    if (refused === id) return refusedNote
     return failure?.id === id
       ? <p className="pm-side-error" role="alert">{t('sidebar.action.failed', { detail: failure.detail })}</p>
       : null
@@ -296,6 +305,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
         )
         : null}
 
+      {refused !== undefined && !inline.has(refused) && !ruledIds.has(refused) ? refusedNote : null}
       {groups.size > 0
         ? (
           <section className="pm-side-section" aria-label={t('sidebar.groups.title')}>

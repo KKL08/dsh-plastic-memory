@@ -2,7 +2,7 @@ import type { MemoryStore } from '../store.ts'
 import { kindOf, verdictLoser, type PendingDecisionsStore } from '../governance/decisions.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
 import type { MemoryRecord } from '../record-schema.ts'
-import type { GovernanceRejectCode } from '../contract-codes.ts'
+import type { DecisionRejectCode, GovernanceRejectCode } from '../contract-codes.ts'
 import { crossWorkspaceNote, gateRecords, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
 
 export interface ConfirmToolDeps {
@@ -21,7 +21,7 @@ export type ConfirmArgs =
 export type ConfirmResult =
   | { kind: 'refreshed'; memoryId: string; lastConfirmedAt: number; otherWorkspaces: OtherWorkspaceMark[]; message: string }
   | { kind: 'resolved'; decisionId: string; verdict: string; actions: string[]; alsoCleared: number; otherWorkspaces: OtherWorkspaceMark[]; message: string }
-  | { kind: 'error'; code?: GovernanceRejectCode; rejected?: CrossWorkspaceRejection[]; message: string }
+  | { kind: 'error'; code?: GovernanceRejectCode | DecisionRejectCode; rejected?: CrossWorkspaceRejection[]; message: string }
 
 /**
  * memory_confirm（docs/p1-governance-health-design.md §7.1）：refresh 刷新新鲜度；resolve 裁决待决冲突。
@@ -62,7 +62,7 @@ export async function executeConfirm(
   // 先认领条目再裁决：两条相反的裁决同时到（两个标签页、两个宿主进程），只让一条删败方，另一条什么都不动
   const claimed = await deps.decisions.withClaim(args.decisionId, () => resolveClaimed(args, context, deps, now, locate))
   if (!claimed.isClaimed) {
-    return { kind: 'error', message: `待决项 ${args.decisionId} 正在被另一次裁决处理，未做任何改动。` }
+    return { kind: 'error', code: 'claimed', message: `待决项 ${args.decisionId} 正在被另一次裁决处理，未做任何改动。` }
   }
   return claimed.value
 }
@@ -77,7 +77,7 @@ async function resolveClaimed(
 ): Promise<ConfirmResult> {
   const entry = await deps.decisions.get(args.decisionId)
   if (!entry) {
-    return { kind: 'error', message: `待决项不存在：${args.decisionId}（可能已被裁决或涉及的记忆已删除）` }
+    return { kind: 'error', code: 'not-found', message: `待决项不存在：${args.decisionId}（可能已被裁决或涉及的记忆已删除）` }
   }
 
   // 提升候选、超限提醒不是冲突，不能按 memoryIds 位置裁决（否则可能删掉候选记忆）；条目不动

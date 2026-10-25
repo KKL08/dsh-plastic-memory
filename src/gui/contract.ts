@@ -326,6 +326,7 @@ export const GUI_ERROR_CODES = [
   'subagent-readonly',  // 借的会话是子 agent，不可写
   'governance-disabled', // 体检已关闭：裁决、撤销、提升、留在本项目、体检、忽略超限不可用
   'has-secret',         // forget 的目标含密钥（任一级），只能彻底删除：什么都没动，界面确认后改发 hard-delete
+  'claimed',            // 待决项正被另一次操作（别的标签页、宿主进程或体检）认领：什么都没动
   'failed',             // 执行器报错，detail 带原话
 ] as const
 export type GuiErrorCode = (typeof GUI_ERROR_CODES)[number]

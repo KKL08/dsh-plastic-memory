@@ -2,6 +2,8 @@
  * 记忆页「待处理」tab（PRD 5.2、5.13）：视图里的条目按服务端排好的顺序（密钥 → 冲突 → 提升候选 → 超限 → 读不出的文件）
  * 各出一张卡。视图不含刚处理完的条目，所以列表在本地记住最近一次处理（原条目 + 结果 + 原位置），在原位显示结果卡；
  * 撤销成功后等视图把条目带回来，再去掉本地那张。离开页面就收起。
+ * 动作碰上这一条正在别处处理或刚处理完（什么都没动）：在原位留一行说明，那边的结果写进视图、卡片消失后也还在，
+ * 列表空了就留在空状态上面；之后哪张卡做成了一件事就收起。
  * 空状态三种：体检关闭（「去设置里打开 ›」）、从没体检过（说明体检是什么，按钮在页头）、待处理为空（上次体检时间）。
  * 入口带记忆 id 打开时，含这条记忆的卡（冲突任一方、提升候选、密钥）滚入视野并高亮一次。
  */
@@ -14,7 +16,7 @@ import { useCanOpen, type NavStore } from '../nav.ts'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { crossConfirmCss } from './action.tsx'
 import {
-  HorizontalCard, OverflowCard, PromoteCard, ResultCard, SecretCard, UnreadableCard, VerticalCard, type Outcome,
+  HorizontalCard, OverflowCard, PromoteCard, ResultCard, SecretCard, titleOf, UnreadableCard, VerticalCard, type Outcome,
 } from './cards.tsx'
 
 /** 条目在视图之间的身份。 */
@@ -39,6 +41,9 @@ function memoryIdsOf(item: PendingItem): string[] {
 
 interface Recent { item: PendingItem; index: number; outcome: Outcome; undone: boolean }
 
+/** 没有生效的那次动作：哪一条（标题写进说明，卡片没了也认得出）、在列表里的位置。 */
+interface Refused { key: string; index: number; title: string }
+
 export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
   nav: NavStore
   session: BorrowedSession
@@ -46,11 +51,15 @@ export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
   workspacePath: string | undefined
   now?: number
 }) {
+  const t = useT()
   const gateway = useGateway()
   const pending = gateway.useView(session, 'pending')
   const health = gateway.useView(session, 'health')
   const config = gateway.useConfig()
   const [recent, setRecent] = useState<Recent | undefined>(undefined)
+  const [refused, setRefused] = useState<Refused | undefined>(undefined)
+  const done = (next: Recent) => { setRecent(next); setRefused(undefined) }
+  const refuse = (item: PendingItem, index: number) => () => { setRefused({ key: keyOf(item), index, title: titleOf(item, t) }) }
 
   const viewItems = pending.status === 'ready' ? pending.data.items : []
   const typeLabels = pending.status === 'ready' ? pending.data.typeLabels : {}
@@ -67,14 +76,14 @@ export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
   const rows: Array<{ key: string; node: ReactElement; flashing?: boolean }> = items.map((item, index) => ({
     key: keyOf(item),
     flashing: flashId !== undefined && memoryIdsOf(item).includes(flashId),
-    node: renderCard(item, (outcome) => { setRecent({ item, index, outcome, undone: false }) }),
+    node: renderCard(item, (outcome) => { done({ item, index, outcome, undone: false }) }, refuse(item, index)),
   }))
   if (recent !== undefined && !(recent.undone && backInView)) {
     rows.splice(Math.min(recent.index, rows.length), 0, {
       key: `recent:${recentKey}`,
       node: recent.undone
         // 撤销已生效、视图还没带回来：先按原样显示，可以接着处理
-        ? renderCard(recent.item, (outcome) => { setRecent({ ...recent, outcome, undone: false }) })
+        ? renderCard(recent.item, (outcome) => { done({ ...recent, outcome, undone: false }) }, refuse(recent.item, recent.index))
         : (
           <ResultCard
             item={recent.item}
@@ -82,14 +91,22 @@ export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
             session={session}
             now={now}
             typeLabels={typeLabels}
-            onUndone={() => { setRecent({ ...recent, undone: true }) }}
+            onUndone={() => { done({ ...recent, undone: true }) }}
+            onRefused={refuse(recent.item, recent.index)}
           />
         ),
     })
   }
 
-  function renderCard(item: PendingItem, onDone: (outcome: Outcome) => void): ReactElement {
-    const props = { session, now, typeLabels, onDone }
+  const isEmpty = rows.length === 0
+  const refusedRow = refused === undefined ? undefined : {
+    key: `refused:${refused.key}`,
+    node: <p className="pm-pending-refused" role="alert" tabIndex={-1}>{t('pending.refused', { title: refused.title })}</p>,
+  }
+  if (refused !== undefined && refusedRow !== undefined && !isEmpty) rows.splice(Math.min(refused.index, rows.length), 0, refusedRow)
+
+  function renderCard(item: PendingItem, onDone: (outcome: Outcome) => void, onRefused: () => void): ReactElement {
+    const props = { session, now, typeLabels, onDone, onRefused }
     switch (item.kind) {
       case 'secret': return <SecretCard item={item} {...props} />
       case 'conflict-horizontal': return <HorizontalCard item={item} {...props} />
@@ -113,8 +130,13 @@ export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
   return (
     <div className="pm-pending">
       <style data-plastic-memory-pending="">{pendingCss}</style>
-      {rows.length === 0
-        ? <PendingEmpty nav={nav} session={session} workspacePath={workspacePath} health={health.status === 'ready' ? health.data : undefined} now={now} />
+      {isEmpty
+        ? (
+          <>
+            {refusedRow?.node}
+            <PendingEmpty nav={nav} session={session} workspacePath={workspacePath} health={health.status === 'ready' ? health.data : undefined} now={now} />
+          </>
+        )
         : rows.map(row => (
           <FlashRow key={row.key} as="div" className="pm-pending-row" flashing={row.flashing ?? false} onFlashEnd={clear}>{row.node}</FlashRow>
         ))}
@@ -189,6 +211,7 @@ export const pendingCss = crossConfirmCss + `
 .pm-pending-hint { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-pending-hint .pm-link { margin-left: 8px; font-size: 12px; }
 .pm-pending-error { margin: 6px 0 0; font-size: 12px; line-height: 1.5; color: var(--pm-text); }
+.pm-pending-refused { margin: 0; padding: 12px 0; font-size: 12px; line-height: 1.5; color: var(--pm-text); }
 .pm-pending-result { display: flex; align-items: center; gap: 12px; }
 .pm-pending-result .pm-pending-text { flex: 1; }
 .pm-pending-undo { font-weight: 600; }
