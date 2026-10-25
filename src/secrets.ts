@@ -11,7 +11,8 @@ export const SECRET_PATTERNS: Array<{ name: string; re: RegExp; severity: Secret
   { name: 'GitHub token（ghp_/gho_ 等）', re: /\bgh[pousr]_[A-Za-z0-9]{20,}\b/, severity: 'critical' },
   { name: 'AWS Access Key', re: /\bAKIA[0-9A-Z]{16}\b/, severity: 'critical' },
   { name: 'JWT', re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/, severity: 'critical' },
-  { name: 'PEM 私钥块', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/, severity: 'critical' },
+  // 命中整块（BEGIN 到同名 END），遮盖才盖得住正文；没有 END 行（截断的粘贴）算到文本末尾
+  { name: 'PEM 私钥块', re: /-----BEGIN ([A-Z ]*)PRIVATE KEY-----[\s\S]*?(?:-----END \1PRIVATE KEY-----|$)/, severity: 'critical' },
   { name: 'Slack token', re: /\bxox[baprs]-[A-Za-z0-9-]{8,}\b/, severity: 'critical' },
   { name: 'Google API Key', re: /\bAIza[0-9A-Za-z_-]{35}\b/, severity: 'critical' },
   { name: 'Bearer token', re: /\bBearer\s+[A-Za-z0-9._-]{20,}/, severity: 'critical' },
@@ -66,9 +67,17 @@ const GLOBAL_PATTERNS: Record<SecretSeverity, RegExp[]> = {
 
 type Span = [start: number, end: number]
 
-/** text 里所有命中片段的区间：各规则全局匹配，重叠或相接的合并。 */
+/** text 里各规则全局匹配的命中区间，未合并。 */
+function rawSpans(text: string, opts: MaskOptions): Span[] {
+  return GLOBAL_PATTERNS[opts.severity ?? 'critical'].flatMap(re => [...text.matchAll(re)].map((m): Span => [m.index, m.index + m[0].length]))
+}
+
+/** text 里所有命中片段的区间：重叠或相接的合并。 */
 function secretSpans(text: string, opts: MaskOptions): Span[] {
-  const spans: Span[] = GLOBAL_PATTERNS[opts.severity ?? 'critical'].flatMap(re => [...text.matchAll(re)].map((m): Span => [m.index, m.index + m[0].length]))
+  return mergeSpans(rawSpans(text, opts))
+}
+
+function mergeSpans(spans: Span[]): Span[] {
   spans.sort((a, b) => a[0] - b[0])
   const merged: Span[] = []
   for (const [start, end] of spans) {
@@ -99,8 +108,9 @@ export function maskSecrets(text: string, opts: MaskOptions = {}): string {
 }
 
 /**
- * 四个面按片段遮盖。在与 hasSecret 同口径的拼接文本上找命中区间再切回各字段，
- * 跨字段拼接才命中的，各字段落在区间里的部分各换一个占位。没有命中原样返回同一个对象。
+ * 四个面按片段遮盖。先按单个字段找命中、各遮各的；再在与 hasSecret 同口径的拼接文本上找起点不在任何字段自身命中里的
+ * 区间（跨字段拼接才命中的），各字段落在区间里的部分各换一个占位。字段内起头、一路延伸到文本末尾的命中
+ * （截断的私钥）因此只遮到本字段末尾。没有命中原样返回同一个对象。
  */
 export function maskSecretSurface<T extends SecretSurface>(r: T, opts: MaskOptions = {}): T {
   const segments = [r.content, r.name, r.summary, ...r.tags]
@@ -111,7 +121,9 @@ export function maskSecretSurface<T extends SecretSurface>(r: T, opts: MaskOptio
     starts.push(text.length)
     text += segment
   })
-  const spans = secretSpans(text, opts)
+  const own = segments.flatMap((segment, i) => secretSpans(segment, opts).map(([a, b]): Span => [starts[i] + a, starts[i] + b]))
+  const cross = rawSpans(text, opts).filter(([a]) => !own.some(([start, end]) => a >= start && a < end))
+  const spans = mergeSpans([...own, ...cross])
   if (spans.length === 0) return r
   const [content, name, summary, ...tags] = segments.map((segment, i) => maskRange(text, spans, starts[i], starts[i] + segment.length))
   return { ...r, content, name, summary, tags }

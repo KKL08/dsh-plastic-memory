@@ -3,7 +3,7 @@ import type { SnapshotStore } from '../governance/snapshots.ts'
 import type { PendingDecisionsStore } from '../governance/decisions.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { redactRecord } from '../governance/snapshots.ts'
-import { hasSecret } from '../secrets.ts'
+import { hasSecret, maskSecrets } from '../secrets.ts'
 import {
   crossWorkspaceNote, gateRecords, locateCopy,
   type CopyTarget, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark,
@@ -63,7 +63,9 @@ export async function executeForget(
   deps: ForgetToolDeps,
   options: ForgetOptions = {},
 ): Promise<ForgetResult> {
-  const { ids, reason } = args
+  // 原因是 agent 写的原文，可能引用了密钥：进日志、快照说明之前两级都遮
+  const reason = maskSecrets(args.reason, { severity: 'suspected' })
+  const { ids } = args
   const now = deps.now?.() ?? Date.now()
 
   // 调用者从多个扫描结果汇总 id 列表时可能重复某个 id
@@ -110,18 +112,30 @@ export async function executeForget(
   const hardDeleted: string[] = []
   // 指明了副本：删的时候也只认那一层，与定位同口径
   const deleteOpts = { isExactLayer: options.target !== undefined }
+  const purge = async (record: MemoryRecord) => {
+    if (await deps.store.hardDelete(record, deleteOpts)) {
+      forgotten.push(record.id)
+      hardDeleted.push(record.id)
+    }
+  }
+  // 读过之后另一个会话才写进密钥的：锁内按当前内容判出来，不软删
+  const lateSecrets: MemoryRecord[] = []
   for (const record of found) {
     if (secretIds.has(record.id)) {
-      if (await deps.store.hardDelete(record, deleteOpts)) {
-        forgotten.push(record.id)
-        hardDeleted.push(record.id)
-      }
-    } else if (options.isSoftOnly === true) {
-      // 读过之后另一个会话才写进密钥：锁内拦下，照样交回调用方
-      const outcome = await deps.store.softDeleteUnlessSecret(record, deleteOpts)
-      if (outcome === 'deleted') forgotten.push(record.id)
-      else if (outcome === 'has-secret') skippedSecrets.push(record.id)
-    } else if (await deps.store.softDelete(record, deleteOpts)) forgotten.push(record.id)
+      await purge(record)
+      continue
+    }
+    const outcome = await deps.store.softDeleteUnlessSecret(record, deleteOpts)
+    if (outcome === 'deleted') forgotten.push(record.id)
+    else if (outcome === 'has-secret') {
+      if (options.isSoftOnly === true) skippedSecrets.push(record.id)   // 只软删：照样交回调用方
+      else lateSecrets.push(record)
+    }
+  }
+  if (lateSecrets.length > 0) {
+    // 改走硬删，同样先脱敏所有快照（含本次这份）再物理删除
+    await deps.snapshots.redact(new Set(lateSecrets.map(r => r.id)))
+    for (const record of lateSecrets) await purge(record)
   }
   await deps.decisions.removeByMemoryIds(forgotten)
 

@@ -11,7 +11,7 @@ import { STALENESS_NOTE } from '../src/record-freshness.ts'
 import { formatIndexLine } from '../src/index-line.ts'
 import { renderViaHost } from './helpers/render-via-host.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
-import { FAKE_SECRET } from './helpers/secrets.ts'
+import { FAKE_SECRET, generatePrivateKeyPem } from './helpers/secrets.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 
@@ -443,6 +443,16 @@ describe('assembleSnapshot × 密钥遮盖', () => {
     expect(text).toContain('索引未列全')
     expect(text).toContain(`${SECRET_MASK}（2）`)
     expect(text).not.toContain(FAKE_SECRET.sk)
+  })
+
+  it('PEM 私钥：core 正文与索引行摘要里整块遮住，正文的 base64 行一行都不出现', () => {
+    const { pem, bodyLines } = generatePrivateKeyPem()
+    const core = record({ id: 'mem_pem', type: 'preference', content: `部署机私钥\n${pem}\n用完删掉` })
+    const indexed = record({ id: 'mem_pem_idx', name: '备用私钥', summary: `私钥 ${pem.split('\n').slice(0, 3).join('\n')}` })
+    const { text } = assembleSnapshot({ ...base, records: [core, indexed] })
+    for (const line of bodyLines) expect(text).not.toContain(line)
+    expect(text).toContain(`[mem_pem]【记忆·行为偏好】部署机私钥\n${SECRET_MASK}\n用完删掉`)
+    expect(text).toContain(`- [mem_pem_idx] 备用私钥（私钥 ${SECRET_MASK}）`)
   })
 
   it('无密钥的记录输出与遮盖前逐字一致', () => {

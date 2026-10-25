@@ -3,7 +3,9 @@
  * 曾把 Google key 形状的样本当泄露报警；拼接后扫描器不命中，检测器看到的值不变。
  * TESTONLY 片段保证一眼可辨是假的。
  */
-const fill = (body: string, len: number, ch = '0'): string => body.padEnd(len, ch)
+import { generateKeyPairSync } from 'node:crypto'
+
+const fill =(body: string, len: number, ch = '0'): string => body.padEnd(len, ch)
 
 export const FAKE_SECRET = {
   /** sk- 系列（OpenAI/Anthropic 形状）：sk- + 24 位 */
@@ -21,3 +23,12 @@ export const FAKE_SECRET = {
   /** Google API Key：AIza + 35 位 */
   google: 'AIza' + fill('TESTONLY', 35),
 } as const
+
+/** 运行时生成的真实私钥（PKCS8 PEM，去掉末尾换行）与它的正文行（BEGIN、END 之间的 base64）。 */
+export function generatePrivateKeyPem(): { pem: string; bodyLines: string[] } {
+  const pem = generateKeyPairSync('ed25519', {
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+  }).privateKey.trimEnd()
+  return { pem, bodyLines: pem.split('\n').slice(1, -1) }
+}

@@ -13,6 +13,8 @@ import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.t
 import type { RecallStats } from '../src/storage/schema.ts'
 import { record } from './helpers/record.ts'
 import { STALENESS_NOTE } from '../src/record-freshness.ts'
+import { SECRET_MASK } from '../src/secrets.ts'
+import { FAKE_SECRET } from './helpers/secrets.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const session = { id: 's1', lastSeq: 1 }
@@ -58,6 +60,19 @@ describe('executeSearch', () => {
     await executeSearch({ query: '知识' }, fakeExec(), makeSearchDeps(store))
     await new Promise(resolve => setTimeout(resolve, 0))
     expect((await stats.get(r.id))!.recallCount).toBe(1)
+  })
+
+  it('与注入同口径：明确密钥遮成占位，疑似密钥照原文（用户确认过），文件路径照给', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await store.put(record({ id: 'mem_key', name: '网关', summary: `网关 key ${FAKE_SECRET.sk}`, content: `部署用 ${FAKE_SECRET.github}，预发库密码: Abc12345` }))
+    const result = await executeSearch({ query: '网关' }, fakeExec(), makeSearchDeps(store))
+    expect(result.hits[0]).toMatchObject({
+      id: 'mem_key', summary: `网关 key ${SECRET_MASK}`, content: `部署用 ${SECRET_MASK}，预发库密码: Abc12345`,
+    })
+    expect(result.hits[0].path.length).toBeGreaterThan(0)
+    const text = renderSearchResult(result)
+    expect(text).not.toContain(FAKE_SECRET.sk)
+    expect(text).not.toContain(FAKE_SECRET.github)
   })
 
   it('超过衰减期未确认的命中带陈旧度标注', async () => {

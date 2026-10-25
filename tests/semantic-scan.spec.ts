@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { buildSemanticPrompt, parseSemanticFindings, runSemanticScan, SEMANTIC_SCAN_MAX_RECORDS, BASELINE_MAX_CHARS } from '../src/governance/semantic-scan.ts'
 import { record } from './helpers/record.ts'
+import { FAKE_SECRET } from './helpers/secrets.ts'
+import { SECRET_MASK } from '../src/secrets.ts'
 
 describe('buildSemanticPrompt', () => {
   it('user 部分含每条记忆的 id/content，有基线时包含基线内容', () => {
@@ -34,6 +36,26 @@ describe('buildSemanticPrompt', () => {
     expect(user).toContain('Instructions from: AGENTS.md')
     expect(user).not.toContain('x'.repeat(BASELINE_MAX_CHARS + 1))
     expect(user).not.toContain('更早的一条')
+  })
+
+  it('明确密钥不发给模型：记忆正文、摘要与基线里遮成占位，疑似密钥照原文', () => {
+    const { user } = buildSemanticPrompt(
+      [record({ id: 'mem_a', content: `网关 key ${FAKE_SECRET.sk}，预发库密码: Abc12345`, summary: `token ${FAKE_SECRET.github}` })],
+      [`Instructions from: AGENTS.md\n\nCI 用 ${FAKE_SECRET.aws}`])
+    for (const secret of [FAKE_SECRET.sk, FAKE_SECRET.github, FAKE_SECRET.aws]) expect(user).not.toContain(secret)
+    expect(user).toContain(`content: 网关 key ${SECRET_MASK}，预发库密码: Abc12345`)
+    expect(user).toContain(`summary: token ${SECRET_MASK}`)
+    expect(user).toContain(`CI 用 ${SECRET_MASK}`)
+  })
+
+  it('两条记忆只差在密钥值：模型看到的两条内容相同，按相同内容判断（不会因密钥值不同报冲突）', () => {
+    const other = FAKE_SECRET.sk.replace('TESTONLY', 'TESTONLX')
+    const { user } = buildSemanticPrompt([
+      record({ id: 'mem_a', content: `网关 key 用 ${FAKE_SECRET.sk}` }),
+      record({ id: 'mem_b', content: `网关 key 用 ${other}` }),
+    ], null)
+    const lines = user.split('\n').filter(l => l.startsWith('  content: '))
+    expect(lines).toEqual([`  content: 网关 key 用 ${SECRET_MASK}`, `  content: 网关 key 用 ${SECRET_MASK}`])
   })
 
   it('基线不超预算时按顺序原样纳入，不带说明', () => {
@@ -87,6 +109,18 @@ describe('parseSemanticFindings', () => {
       findings: [{ type: 'conflict', memoryIds: ['mem_a'], baselineRef: 'AGENTS.md：包管理', summary: 's', suggestedAction: 'a' }],
     })
     expect(parseSemanticFindings(raw, known)![0].baselineRef).toBe('AGENTS.md：包管理')
+  })
+
+  it('模型在说明里引用的密钥（两级）换成占位：这些文字会进待决账本、体检缓存和工具输出', () => {
+    const raw = JSON.stringify({
+      findings: [{
+        type: 'conflict', memoryIds: ['mem_a'], baselineRef: `AGENTS.md：${FAKE_SECRET.github}`,
+        summary: `两条都写了 ${FAKE_SECRET.sk}`, suggestedAction: '改成 password: Hunter2-2026 之外的写法',
+      }],
+    })
+    const [f] = parseSemanticFindings(raw, known)!
+    expect(f).toMatchObject({ summary: `两条都写了 ${SECRET_MASK}`, baselineRef: `AGENTS.md：${SECRET_MASK}` })
+    expect(f.suggestedAction).not.toContain('Hunter2-2026')
   })
 
   it('conflict 的基数在产出侧收口：3 个 id、1 个 id 无 baselineRef 都丢弃；1 个 id 带 baselineRef、2 个 id 无 baselineRef 都保留', () => {
