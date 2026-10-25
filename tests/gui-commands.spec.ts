@@ -407,9 +407,16 @@ describe('同 id 在两个项目里各有一份', () => {
     ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: { kind: 'global' } }))
     expect((await copyIn(e, undefined))!.status).toBe('deleted')
     expect((await copyIn(e, OTHER_WS))!.status).toBe('active')
+    // 视图：项目那份照常在全部记忆里，删掉的全局那份在最近删除里（页面据它的层恢复）
+    const library = libraryViewSchema.parse(await e.readView('library'))
+    expect(library.layers.map(l => [l.layer, l.items.map(m => m.name)])).toEqual([
+      [{ kind: 'global' }, []], [{ kind: 'workspace', workspacePath: OTHER_WS }, ['别的项目那份']],
+    ])
+    expect(deletedViewSchema.parse(await e.readView('deleted')).items.map(i => [i.memory.name, i.memory.scope])).toEqual([['全局那份', 'global']])
     ok(await e.run({ cmd: 'restore', memoryId: 'mem_dup', layer: { kind: 'global' } }))
     expect((await copyIn(e, undefined))!.status).toBe('active')
     expect((await copyIn(e, OTHER_WS))!.status).toBe('active')
+    expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
   })
 })
 

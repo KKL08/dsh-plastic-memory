@@ -3,7 +3,7 @@ import type { MemoryRecord } from './record-schema.ts'
 import { RecordNotFoundError } from './errors.ts'
 import { expandQueryTerms, matchScore } from './text.ts'
 import {
-  resolveDuplicates,
+  resolveDuplicates, resolveLiveFirst,
   type MemoryLogger, type MemoryTable, type LocatedFile, type LocateHint, type ScopeReadOptions, type ScopeReadResult, type KeywordMatch,
   type WorkspaceDirListing, type DirectoryNote, type QuarantineEntry,
 } from './storage/table.ts'
@@ -319,7 +319,7 @@ export class MemoryStore {
       ...(terms.length > 0 ? { prefilterTerms: terms, prefilterMatch: keywordMatch } : {}),
       includeArchive: statuses.some(s => s !== 'active'),
     })
-    const records = resolveDuplicates(read.records, { workspacePath: hint }).map(l => l.record).filter(r =>
+    const records = resolveLiveFirst(read.records, { workspacePath: hint }).map(l => l.record).filter(r =>
       statuses.includes(r.status)
       && (!filter.tags || filter.tags.some(t => r.tags.includes(t)))
       && (terms.length === 0 || (keywordMatch === 'any' ? matchScore(r, terms) > 0 : matchScore(r, terms) === terms.length)))

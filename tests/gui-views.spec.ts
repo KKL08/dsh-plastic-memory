@@ -212,6 +212,24 @@ describe('全部记忆视图', () => {
     expect(library.directoryIssues.map(i => [i.code, i.path])).toEqual(expect.arrayContaining([['duplicate-id', dup], ['reserved-keys', reserved]]))
   })
 
+  it('同 id 在 global 与本项目各一份：删掉 global 那份后本项目这份照常列出；删掉的那份进最近删除，不算同 id 副本', async () => {
+    const h = harness()
+    await h.store.create(g({ id: 'mem_same', name: '全局那份' }))
+    await h.store.create(w({ id: 'mem_same', name: '本项目那份' }))
+    h.setClock(T0 + 5000)
+    expect(await h.store.softDelete({ id: 'mem_same' }, { isExactLayer: true })).toBe(true)
+
+    const { library, deleted } = await h.views()
+    expect(library.layers.map(l => [l.layer, l.items.map(i => [i.id, i.name, i.filePath])])).toEqual([
+      [{ kind: 'global' }, []],
+      [{ kind: 'workspace', workspacePath: WS }, [['mem_same', '本项目那份', join(wsDir(), '本项目那份.md')]]],
+    ])
+    expect(library.directoryIssues).toEqual([])
+    expect(deleted.items.map(i => [i.memory.id, i.memory.name, i.memory.scope, i.memory.filePath])).toEqual([
+      ['mem_same', '全局那份', 'global', join(root, GLOBAL_DIR, '.archive', '全局那份.md')],
+    ])
+  })
+
   it('typeLabels：注册表的类型和本视图记忆卡里出现的类型 → 显示名，认不出的类型显示 id', async () => {
     const h = harness()
     await h.store.create(w({ id: 'mem_a', name: 'A', type: 'decision' }))

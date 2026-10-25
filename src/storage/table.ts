@@ -132,3 +132,14 @@ export function resolveDuplicates<T extends LocatedRecord>(candidates: readonly 
   }
   return [...byId.values()]
 }
+
+/**
+ * 读路径的同 id 取舍：先在 active 副本里按 resolveDuplicates 取一份，没有 active 副本的 id 才从其余副本里取。
+ * 已删、已取代的副本（比如同 id 在 global 与项目各一份、删了其中一份）不遮住别处仍在用的那份。返回顺序同 resolveDuplicates。
+ */
+export function resolveLiveFirst<T extends LocatedRecord>(candidates: readonly T[], hint?: LocateHint): T[] {
+  const live = resolveDuplicates(candidates.filter(c => c.record.status === 'active'), hint)
+  const liveIds = new Set(live.map(c => c.record.id))
+  const chosen = new Map([...live, ...resolveDuplicates(candidates.filter(c => !liveIds.has(c.record.id)), hint)].map(c => [c.record.id, c]))
+  return [...new Set(candidates.map(c => c.record.id))].map(id => chosen.get(id)!)
+}

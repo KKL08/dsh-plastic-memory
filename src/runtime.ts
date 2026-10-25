@@ -2,7 +2,7 @@ import { realpath } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { MemoryLogger, MemoryStore } from './store.ts'
 import type { MemoryRecord } from './record-schema.ts'
-import { resolveDuplicates } from './storage/table.ts'
+import { resolveLiveFirst } from './storage/table.ts'
 import { memoryRelativePath } from './storage/paths.ts'
 import type { TypeRegistry } from './type-registry.ts'
 import type { EvidenceLookupLevel } from './evidence-guidance.ts'
@@ -19,7 +19,7 @@ export async function prereadSnapshot(store: MemoryStore, workspacePath: string 
   records: MemoryRecord[]; files: Map<string, string>; quarantinedCount: number
 }> {
   const read = await store.readLayer({ kind: 'visible', workspacePath })
-  const located = resolveDuplicates(read.records, { workspacePath }).filter(l => l.record.status === 'active')
+  const located = resolveLiveFirst(read.records, { workspacePath }).filter(l => l.record.status === 'active')
   return {
     records: located.map(l => l.record),
     files: new Map(located.map(l => [l.record.id, memoryRelativePath(l.dir, l.filePath)])),
