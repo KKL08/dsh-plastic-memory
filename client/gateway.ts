@@ -68,8 +68,10 @@ export interface MemoryGateway {
   useCurrentWorkspace(): CurrentWorkspace
   /** hook：订阅一份视图，版本变化再读。 */
   useView<N extends ViewName>(session: BorrowedSession, name: N): ViewState<ViewMap[N]>
-  /** 执行一条 `/memory` 命令，结果按契约解析；宿主或解析层面的失败折成 `failed`。 */
+  /** 执行一条 `/memory` 命令，结果按契约解析；宿主或解析层面的失败折成 `failed`。删除、恢复成功后记进删除状态（见 useDeletions）。 */
   execute(sessionId: string, command: MemoryCommand): Promise<MemoryCommandResult>
+  /** hook：经本网关删过的记忆（见 createDeletionStore），各处显示同一条记忆时读它，不等视图刷新。 */
+  useDeletions(): Deletions
   /** hook：插件配置里界面要用的几项；宿主还没给出（或不服务这份配置）时为 undefined。 */
   useConfig(): PluginConfig | undefined
   /** 写一个配置字段（`configForms.set`，单字段快捷写入）；宿主接受为 true。 */
@@ -86,6 +88,30 @@ export interface PluginConfig {
   snapshotOverflow: Extract<PendingItem, { kind: 'overflow' }>['mode']
   governanceEnabled: boolean
   globalPromoteTarget: 'plugin-global' | 'agents-md'
+}
+
+/** 删过的记忆 id → 删法：soft 进了最近删除、可恢复；hard 是彻底删除。恢复后去掉。 */
+export type Deletions = ReadonlyMap<string, 'soft' | 'hard'>
+
+/**
+ * 删除状态：forget / hard-delete / restore 成功后按命令记一笔。全部记忆、最近删除、右侧栏、对话交付卡删的是同一条记忆时，
+ * 各处读这一份，删除后不会有的地方还留着删除按钮。只记经本网关发出的命令，页面关掉就没了；别的途径删的以视图为准。
+ */
+export function createDeletionStore() {
+  let state: Deletions = new Map()
+  const listeners = new Set<() => void>()
+  return {
+    get: () => state,
+    subscribe(fn: () => void) { listeners.add(fn); return () => { listeners.delete(fn) } },
+    record(command: MemoryCommand, result: MemoryCommandResult) {
+      if (!result.ok || (command.cmd !== 'forget' && command.cmd !== 'hard-delete' && command.cmd !== 'restore')) return
+      const next = new Map(state)
+      if (command.cmd === 'restore') next.delete(command.memoryId)
+      else next.set(command.memoryId, command.cmd === 'forget' ? 'soft' : 'hard')
+      state = next
+      for (const fn of listeners) fn()
+    },
+  }
 }
 
 const GatewayContext = createContext<MemoryGateway | null>(null)
@@ -361,7 +387,7 @@ interface ReadState<V> { key: string; trigger: string; view: ViewState<V> }
 export type BindGateway = (props: RootStandardProps) => MemoryGateway
 
 /**
- * 宿主网关。共享状态（memoryRoot）在外层闭包里；每个插件实例只建一份（apply 里），所有插槽根共用，
+ * 宿主网关。共享状态（memoryRoot、删除状态）在外层闭包里；每个插件实例只建一份（apply 里），所有插槽根共用，
  * 每个插槽根组件用自己的标准 props 绑定：`const gateway = useMemo(() => bind(props), [props.useSessions, props.useResource])`。
  */
 export function createHostGateway(ctx: HostContext): BindGateway {
@@ -372,8 +398,12 @@ export function createHostGateway(ctx: HostContext): BindGateway {
       return { ok: false, error: { code: 'thrown', message: String(err) } }
     }
   }
-  const execute: MemoryGateway['execute'] = async (sessionId, command) =>
-    decodeExecution(command.cmd, await run(sessionId, encodeMemoryCommand(command)))
+  const deletions = createDeletionStore()
+  const execute: MemoryGateway['execute'] = async (sessionId, command) => {
+    const result = decodeExecution(command.cmd, await run(sessionId, encodeMemoryCommand(command)))
+    deletions.record(command, result)
+    return result
+  }
   const root = createRootStore(run)
   // configForms 是可选服务：就位时记下，离开时清掉（根上下文没 inject 它，不能直接读）
   let configForms: ConfigFormsService | undefined
@@ -456,6 +486,9 @@ export function createHostGateway(ctx: HostContext): BindGateway {
 
     return {
       execute,
+      useDeletions() {
+        return useSyncExternalStore(deletions.subscribe, deletions.get)
+      },
       useConfig() {
         const { get, subscribe } = config()
         const snapshot = useSyncExternalStore(subscribe, get)

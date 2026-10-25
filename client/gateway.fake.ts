@@ -4,7 +4,7 @@
  */
 import { useSyncExternalStore } from 'react'
 import type { MemoryCommand, MemoryCommandResult } from '../src/gui/contract.ts'
-import type { BorrowedSession, CurrentWorkspace, MemoryGateway, PluginConfig, ViewMap, ViewName, ViewState } from './gateway.ts'
+import { createDeletionStore, type BorrowedSession, type CurrentWorkspace, type MemoryGateway, type PluginConfig, type ViewMap, type ViewName, type ViewState } from './gateway.ts'
 
 export interface FakeGatewayInit {
   session?: BorrowedSession
@@ -65,6 +65,8 @@ export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
   const opened: FakeGateway['opened'] = []
   const reads: string[] = []
   let config = init.config
+  // 删除状态和宿主实现同一份逻辑：同一个假网关下的几个界面共用
+  const deletions = createDeletionStore()
 
   return {
     executed,
@@ -104,7 +106,12 @@ export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
     },
     async execute(sessionId, command) {
       executed.push({ sessionId, command })
-      return await (init.respond?.(command) ?? { ok: true, cmd: command.cmd })
+      const result = await (init.respond?.(command) ?? { ok: true, cmd: command.cmd })
+      deletions.record(command, result)
+      return result
+    },
+    useDeletions() {
+      return useSyncExternalStore(deletions.subscribe, deletions.get)
     },
     async openPath(path, action) {
       opened.push(action === 'reveal' ? { path, action } : { path })

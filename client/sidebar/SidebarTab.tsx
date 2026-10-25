@@ -75,8 +75,9 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const library = gateway.useView(session, 'library')
   const pending = gateway.useView(session, 'pending')
   const health = gateway.useView(session, 'health')
+  // 删过的记忆（这里、全部记忆或对话交付卡删的）：新记的列表里立刻去掉，不等视图刷新
+  const deletions = gateway.useDeletions()
   const [ruled, setRuled] = useState<readonly Ruled[]>([])
-  const [forgotten, setForgotten] = useState<ReadonlySet<string>>(new Set())
   const [purged, setPurged] = useState<ReadonlySet<string>>(new Set())
   const [secretId, setSecretId] = useState<string | undefined>(undefined)
   const [busy, setBusy] = useState<string | undefined>(undefined)
@@ -117,7 +118,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   }
   const forget = (memory: MemoryCardData) => {
     const memoryId = memory.id
-    void run(memoryId, { cmd: 'forget', memoryId, layer: layerOfMemory(memory) }, () => { setForgotten(prev => new Set(prev).add(memoryId)) })
+    void run(memoryId, { cmd: 'forget', memoryId, layer: layerOfMemory(memory) }, () => {})
   }
   const hardDelete = (memoryId: string, memory: MemoryCardData | undefined) => {
     void run(memoryId, { cmd: 'hard-delete', memoryId, layer: memory && layerOfMemory(memory) }, () => { setPurged(prev => new Set(prev).add(memoryId)) })
@@ -192,10 +193,10 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
       shown.add(id)
     }
   }
-  const saved = (snapshot?.savedIds ?? []).filter(id => !forgotten.has(id))
+  const saved = (snapshot?.savedIds ?? [])
     .flatMap((id): Array<{ id: string; memory: MemoryCardData | undefined }> => {
       const memory = byId.get(id)
-      return purged.has(id) ? [{ id, memory: undefined }] : memory === undefined ? [] : [{ id, memory }]
+      return purged.has(id) ? [{ id, memory: undefined }] : memory === undefined || deletions.has(id) ? [] : [{ id, memory }]
     })
   const scope = ws === undefined ? undefined : { kind: 'workspace' as const, workspacePath: ws }
   const restPending = ws === undefined || pending.status !== 'ready'

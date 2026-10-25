@@ -193,6 +193,24 @@ describe('createHostGateway', () => {
   })
   afterEach(() => { localStorage.clear() })
 
+  it('删除状态在插槽根之间共用：一处 forget / hard-delete 成功，另一处读到；restore 后去掉；失败不记', async () => {
+    const bind = createHostGateway(fakeCtx())
+    const a = bind(props)
+    const b = bind({ ...props })
+    const { result } = renderHook(() => b.useDeletions())
+    const layer = { kind: 'workspace', workspacePath: '/w/app' } as const
+    await act(async () => { await a.execute('s1', { cmd: 'forget', memoryId: 'm1', layer }) })
+    await act(async () => { await a.execute('s1', { cmd: 'hard-delete', memoryId: 'm2', layer }) })
+    expect([...result.current]).toEqual([['m1', 'soft'], ['m2', 'hard']])
+    await act(async () => { await a.execute('s1', { cmd: 'restore', memoryId: 'm1', layer }) })
+    expect([...result.current]).toEqual([['m2', 'hard']])
+
+    const failing = createHostGateway(fakeCtx({ remote: { commands: { execute: vi.fn(async () => ({ ok: false as const, error: { code: 'x', message: 'x' } })) } } }))(props)
+    await act(async () => { await failing.execute('s1', { cmd: 'forget', memoryId: 'm3', layer }) })
+    const { result: other } = renderHook(() => failing.useDeletions())
+    expect(other.current.size).toBe(0)
+  })
+
   it('首次：借会话发 info，缓存 memoryRoot，再发一次 refresh-views；资源仍停在 not-found 也直接读出视图', async () => {
     resources[fileAddress('s1', pendingPath)] = { status: 'failed', value: undefined, failure: { code: 'workspace-file/not-found', message: '' } }
     const gateway = createHostGateway(fakeCtx())(props)
