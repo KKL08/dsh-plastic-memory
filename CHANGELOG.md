@@ -186,13 +186,14 @@ All notable changes to this project are documented here. The format follows
   and scoring holds less than 2 MB.
 
 ### Fixed
-- A memory holding a vendor-format key (such as `sk-`, `ghp_` or an AWS
-  access key), for example typed into a memory file by hand, was injected
-  into every conversation as is. The injected text now shows `[已隐藏]` in
-  place of just the key and leaves the rest of the memory as it was, with no
-  extra notice in the conversation; if the key is in a memory's name, its
-  index line leaves out the file path. `memory_forget` still removes the file
-  for good.
+- A memory holding a vendor-format key (such as `sk-`, `ghp_`, an AWS
+  access key or a PEM private key), for example typed into a memory file by
+  hand, was injected into every conversation as is. The injected text now
+  shows `[已隐藏]` in place of just the key (for a private key, the whole
+  block up to its `END` line) and leaves the rest of the memory as it was,
+  with no extra notice in the conversation; if the key is in a memory's
+  name, its index line leaves out the file path. `memory_forget` still
+  removes the file for good.
 - A suspected secret you had confirmed with `force: true` (a password or
   `api_key` value without a vendor format) kept the health check red until
   you deleted or rewrote it. It is now treated as confirmed: it no longer
@@ -208,6 +209,11 @@ All notable changes to this project are documented here. The format follows
   forgetting the memory cannot remove it. Such memories are now refused with
   a message saying why and stay in the project unchanged. Promoting to global
   memory is unaffected.
+- A key quoted in the reason given to `memory_forget`, in a `memory_snapshot`
+  description or in a checkup's conflict summary was logged and saved as is,
+  so it stayed in the host log, the snapshots and the pending list even after
+  the memory itself was deleted for good. Such keys are now replaced with
+  `[已隐藏]` before the text is logged or saved.
 
 ## [0.1.1-beta.5] - 2026-10-20
 
