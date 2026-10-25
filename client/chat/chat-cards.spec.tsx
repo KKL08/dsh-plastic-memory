@@ -323,6 +323,14 @@ describe('交付卡与其他界面共用删除状态', () => {
     expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
   })
 
+  it('最近删除里有同 id 的副本、全部记忆里这条还在用（别层的副本被删）：不当成已删除', () => {
+    const gateway = createFakeGateway({
+      views: { library: libraryView(), deleted: { version: GUI_VIEW_VERSION, items: [{ memory: { ...fresh().memory, scope: 'global', workspacePath: undefined }, deletedAt: NOW, purgeAt: NOW + 1 }] } },
+    })
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd={WS} saved={[fresh()]} now={NOW} openDetail={() => {}} />, gateway)
+    expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
+  })
+
   it('刚记下、视图里还没有这条：不当成已删除', () => {
     const gateway = createFakeGateway({
       views: { library: { ...libraryView(), layers: [] }, deleted: { version: GUI_VIEW_VERSION, items: [] } },

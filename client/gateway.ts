@@ -96,7 +96,8 @@ export type Deletions = ReadonlyMap<string, 'soft' | 'hard'>
 /**
  * 删除状态，全部记忆、最近删除、右侧栏、对话交付卡显示同一条记忆时都读这一份，删除后不会有的地方还留着删除按钮。两个来源：
  * 1. 经本网关发出的 forget / hard-delete / restore 成功后记一笔，不等视图刷新。
- * 2. 读到的最近删除视图：里面的记忆算软删（对话里 agent 自己删的也在这里）。只认这种正面证据：视图不带生成时刻，
+ * 2. 读到的视图：在最近删除里、全部记忆里又没有在用副本的，算软删（对话里 agent 自己删的也在这里）。别层同 id 副本还在用时
+ *    删掉的那份也列在最近删除里，所以要两份视图都读到过才判断。只认这种正面证据：视图不带生成时刻，
  *    「两份视图里都没有」分不清是彻底删了还是刚记下视图还没写，不据此判彻底删除。
  * 第 1 条记的软删 / 恢复在视图跟上之前优先（视图可能还是动作之前的），视图确认后就去掉，之后以视图为准；彻底删除一直记着。
  * 页面关掉就没了。
@@ -104,7 +105,10 @@ export type Deletions = ReadonlyMap<string, 'soft' | 'hard'>
 export function createDeletionStore() {
   /** 经本网关的动作，视图确认前优先。 */
   const local = new Map<string, 'soft' | 'hard' | 'restored'>()
-  /** 最近一次读到的最近删除视图里的 id。 */
+  /** 最近一次读到的两份视图：最近删除里的 id、全部记忆里在用的 id。 */
+  let deletedIds: ReadonlySet<string> | undefined
+  let activeIds: ReadonlySet<string> | undefined
+  /** 视图证明是软删的 id。 */
   let viewSoft: ReadonlySet<string> = new Set()
   let state: Deletions = new Map()
   const listeners = new Set<() => void>()
@@ -127,9 +131,13 @@ export function createDeletionStore() {
       local.set(command.memoryId, command.cmd === 'forget' ? 'soft' : command.cmd === 'hard-delete' ? 'hard' : 'restored')
       publish()
     },
-    /** 读到一份最近删除视图：更新软删的 id，去掉视图已经确认的本地记录。 */
-    settle(view: DeletedView) {
-      viewSoft = new Set(view.items.map(item => item.memory.id))
+    /** 读到一份最近删除或全部记忆视图：重算视图证明的软删，去掉视图已经确认的本地记录。 */
+    settle(view: { name: 'deleted'; data: DeletedView } | { name: 'library'; data: LibraryView }) {
+      if (view.name === 'deleted') deletedIds = new Set(view.data.items.map(item => item.memory.id))
+      else activeIds = new Set(view.data.layers.flatMap(layer => layer.items.map(memory => memory.id)))
+      if (deletedIds === undefined || activeIds === undefined) return
+      const active = activeIds
+      viewSoft = new Set([...deletedIds].filter(id => !active.has(id)))
       for (const [id, how] of local) {
         if ((how === 'soft' && viewSoft.has(id)) || (how === 'restored' && !viewSoft.has(id))) local.delete(id)
       }
@@ -476,7 +484,8 @@ export function createHostGateway(ctx: HostContext): BindGateway {
           const view: ViewState<ViewMap[N]> = r.ok
             ? parseView(name, r.value.text)
             : r.error.code === 'workspace-file/not-found' ? { status: 'missing' } : { status: 'error', message: `${r.error.code}: ${r.error.message}` }
-          if (name === 'deleted' && view.status === 'ready') deletions.settle(view.data as DeletedView)
+          if (view.status === 'ready' && name === 'deleted') deletions.settle({ name, data: view.data as DeletedView })
+          if (view.status === 'ready' && name === 'library') deletions.settle({ name, data: view.data as LibraryView })
           setRead({ key, trigger, view })
         }, (err: unknown) => { if (live) setRead({ key, trigger, view: { status: 'error', message: String(err) } }) })
         return () => { live = false }
