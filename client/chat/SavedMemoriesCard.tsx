@@ -14,6 +14,7 @@ import type { NavTarget } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { useTypeLabel } from '../library/shared.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
+import { keepFocusInPlace } from '../ui/focus-return.ts'
 import { TrashIcon } from '../ui/TrashIcon.tsx'
 import { crossConfirmCss, SecretDeleteConfirm } from '../pending/action.tsx'
 import type { SavedMemory } from './saved-turn.ts'
@@ -48,6 +49,7 @@ function SavedRow({ sessionId, item, now, typeLabel, onDetail }: {
   const [state, setState] = useState<RowState>({ kind: 'idle' })
   const run = async (cmd: 'forget' | 'restore' | 'hard-delete') => {
     if (state.kind === 'busy') return
+    keepFocusInPlace()
     setState({ kind: 'busy' })
     const result = await gateway.execute(sessionId, { cmd, memoryId: id, layer: layerOfMemory(item.memory) })
     if (result.ok) setState({ kind: 'idle' })

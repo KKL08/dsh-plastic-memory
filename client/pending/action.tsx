@@ -8,7 +8,7 @@ import type { MemoryCommand, MemoryCommandResult } from '../../src/gui/contract.
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, useT } from '../i18n.tsx'
 import { Button } from '../ui/Button.tsx'
-import { useReturnFocus } from '../ui/focus-return.ts'
+import { keepFocusInPlace, useReturnFocus } from '../ui/focus-return.ts'
 
 export type ActionState =
   | { kind: 'idle' }
@@ -35,6 +35,7 @@ export function useItemAction(session: BorrowedSession, onOk: (command: MemoryCo
   const [state, setState] = useState<ActionState>({ kind: 'idle' })
   const run = (command: MemoryCommand) => {
     if (session.kind !== 'ready') return
+    keepFocusInPlace()
     setState({ kind: 'busy' })
     void gateway.execute(session.sessionId, command).then((r) => {
       if (r.ok) { setState({ kind: 'idle' }); onOk(command, r); return }

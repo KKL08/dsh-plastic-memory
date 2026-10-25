@@ -133,6 +133,22 @@ describe('最近删除', () => {
     await waitFor(() => { expect(notice).toHaveFocus() })
   })
 
+  it('不用确认的恢复：这一行没了焦点落到下一行的「恢复」；恢复的是最后一条时落到提示上', async () => {
+    const two: DeletedView = { version: GUI_VIEW_VERSION, items: [plain, ruledA] }
+    const gateway = createFakeGateway({ views: { deleted: two } })
+    renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
+    const restore = within(rowOf('用 pnpm 不用 npm')).getByRole('button', { name: '恢复' })
+    restore.focus()
+    await act(async () => { fireEvent.click(restore) })
+    act(() => { gateway.setView('deleted', { version: GUI_VIEW_VERSION, items: [ruledA] }) })
+    const next = within(rowOf('测试用 sqlite')).getByRole('button', { name: '恢复' })
+    await waitFor(() => { expect(next).toHaveFocus() })
+
+    await act(async () => { fireEvent.click(next) })
+    act(() => { gateway.setView('deleted', { version: GUI_VIEW_VERSION, items: [] }) })
+    await waitFor(() => { expect(screen.getByText('已恢复。')).toHaveFocus() })
+  })
+
   it('空状态写保留规则和密钥例外', () => {
     renderInShell(<DeletedTab nav={createNavStore()} scope={{ kind: 'global' }} session={session} now={NOW} />, createFakeGateway({ views: { deleted } }))
     const empty = screen.getByRole('status')

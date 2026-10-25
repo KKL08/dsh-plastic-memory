@@ -373,6 +373,17 @@ describe('SidebarTab 确认收起后的键盘焦点', () => {
     await act(async () => { fireEvent.click(button) })
   }
 
+  it('不用确认的删除：这一行没了焦点落到下一条的删除按钮', async () => {
+    const one = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
+    const two = memory({ id: 'n2', type: 'knowledge', content: '周报周五发。' })
+    setup({ library: library(pref, proj, glob, one, two), session: snapshot({ savedIds: ['n1', 'n2'] }), pending: pending() })
+    const saved = within(screen.getByRole('region', { name: '这次对话新记的' }))
+    const [first] = saved.getAllByRole('button', { name: '删除这条记忆' })
+    await press(first!)
+    expect(saved.queryByText('报销截止每月 25 日。')).toBeNull()
+    await waitFor(() => { expect(saved.getByRole('button', { name: '删除这条记忆' })).toHaveFocus() })
+  })
+
   it('含密钥确认：「取消」回到删除按钮；彻底删除后落到原位那行说明上', async () => {
     const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
     setup(

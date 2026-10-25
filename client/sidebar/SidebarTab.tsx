@@ -23,6 +23,7 @@ import { EmptyState } from '../ui/EmptyState.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { TrashIcon } from '../ui/TrashIcon.tsx'
 import { CrossConfirm, crossConfirmCss, SecretDeleteConfirm } from '../pending/action.tsx'
+import { keepFocusInPlace } from '../ui/focus-return.ts'
 
 type Conflict = Extract<PendingItem, { kind: 'conflict-horizontal' }>
 type VerticalConflict = Extract<PendingItem, { kind: 'conflict-vertical' }>
@@ -86,6 +87,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const [cross, setCross] = useState<{ id: string; workspacePath: string; command: MemoryCommand; onOk: () => void } | undefined>(undefined)
 
   const run = async (id: string, command: MemoryCommand, onOk: () => void) => {
+    keepFocusInPlace()
     setBusy(id)
     setFailure(undefined)
     setCross(undefined)

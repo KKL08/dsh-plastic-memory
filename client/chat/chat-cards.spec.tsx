@@ -238,6 +238,14 @@ describe('交付卡', () => {
     await waitFor(() => { expect(screen.getByText('已彻底删除。如果它是真的凭证，记得去换一个新的。')).toHaveFocus() })
   })
 
+  it('删除后焦点落到原位的「撤销」，不掉到页面上', async () => {
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} />)
+    const del = screen.getByRole('button', { name: '删除这条记忆' })
+    del.focus()
+    await act(async () => { fireEvent.click(del) })
+    await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
+  })
+
   it('删除失败时原文还在，旁边写服务端原话', async () => {
     const gateway = createFakeGateway({ respond: () => ({ ok: false, code: 'not-found', detail: '记忆不存在' }) })
     renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} />, gateway)

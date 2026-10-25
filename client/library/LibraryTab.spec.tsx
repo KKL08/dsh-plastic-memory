@@ -229,6 +229,19 @@ describe('全部记忆', () => {
       await act(async () => { fireEvent.click(button) })
     }
 
+    it('不用确认的删除：这一行没了焦点落到下一行的「删除」；删的是最后一条时落到提示里', async () => {
+      const gateway = createFakeGateway({ views: { library: library() } })
+      renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
+      await press(within(rowOf(A1)).getByRole('button', { name: '删除' }))
+      act(() => { gateway.setView('library', library({ layers: [{ layer: app, items: [memory({ id: 'a2', content: '提交前跑 typecheck' })] }] })) })
+      const next = within(rowOf('提交前跑 typecheck')).getByRole('button', { name: '删除' })
+      await waitFor(() => { expect(next).toHaveFocus() })
+
+      await press(next)
+      act(() => { gateway.setView('library', library({ layers: [{ layer: app, items: [] }, { layer: { kind: 'global' }, items: [memory({ id: 'g1' })] }] })) })
+      await waitFor(() => { expect(screen.getByText('已删除，14 天内可在「最近删除」恢复。')).toContainElement(document.activeElement as HTMLElement) })
+    })
+
     it('含密钥确认点「取消」：焦点回到这一行的「删除」', async () => {
       renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, secretFirst())
       const del = within(rowOf(A1)).getByRole('button', { name: '删除' })

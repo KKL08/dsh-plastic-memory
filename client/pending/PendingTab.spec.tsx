@@ -309,6 +309,12 @@ describe('待处理：确认收起后的键盘焦点', () => {
     await act(async () => { fireEvent.click(button) })
   }
 
+  it('不用确认的动作：卡片换成结果卡后焦点落到结果卡的「撤销」', async () => {
+    setup([promote])
+    await press(screen.getByRole('button', { name: '提升为全局' }))
+    await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
+  })
+
   it('密钥卡：「取消」回到「彻底删除…」；确认删除后落到原位的结果卡上', async () => {
     setup([secret, promote])
     await press(screen.getByRole('button', { name: '彻底删除…' }))
