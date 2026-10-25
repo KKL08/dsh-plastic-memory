@@ -190,7 +190,7 @@ export function buildLibraryView(input: ViewInput): LibraryView {
     .filter(n => n.code !== 'dir-empty')
     .map(n => ({ code: n.code, path: n.path, ...(n.keys !== undefined ? { keys: n.keys } : {}), ...(n.keptPath !== undefined ? { keptPath: n.keptPath } : {}) }))
   const typeLabelsOfView = typeLabels(input.registry, layers.flatMap(l => l.items.map(m => m.type)))
-  return { version: GUI_VIEW_VERSION, memoryRoot: input.memoryRoot, layers, directoryIssues, typeLabels: typeLabelsOfView }
+  return { version: GUI_VIEW_VERSION, generatedAt: input.now, memoryRoot: input.memoryRoot, layers, directoryIssues, typeLabels: typeLabelsOfView }
 }
 
 /** 最近删除：保留窗口内软删的记忆；裁决删掉的从已裁决条目找来源（同一条记忆被多次裁决取最近的）。 */
@@ -226,7 +226,7 @@ export function buildDeletedView(input: ViewInput): DeletedView {
   // 裁决对方（横向冲突的胜方）也给显示名：界面会提到它
   const counterparts = items.map(i => i.cause !== undefined && 'counterpartId' in i.cause && i.cause.counterpartId !== undefined
     ? input.data.byId.get(i.cause.counterpartId)?.type : undefined)
-  return { version: GUI_VIEW_VERSION, items, typeLabels: typeLabels(input.registry, [...items.map(i => i.memory.type), ...counterparts]) }
+  return { version: GUI_VIEW_VERSION, generatedAt: input.now, items, typeLabels: typeLabels(input.registry, [...items.map(i => i.memory.type), ...counterparts]) }
 }
 
 /** 会话视图：快照冻结时由调用方给出带入的记忆与三段用量。 */
