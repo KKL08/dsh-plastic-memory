@@ -16,15 +16,17 @@ export interface MemoryCardProps {
   typeLabel?: string
   /** 页面已经交代过作用域时不重复（例如右侧栏里不写「本项目」）。 */
   hideScope?: boolean
+  /** 记忆不在借来的会话所在项目里时，作用域写这个项目名，不写「本项目」。 */
+  projectName?: string | undefined
   /** 末尾的状态 chip，最多一个。 */
   chip?: ReactNode
 }
 
-export function MemoryCard({ memory, now, typeLabel, hideScope = false, chip }: MemoryCardProps) {
+export function MemoryCard({ memory, now, typeLabel, hideScope = false, projectName, chip }: MemoryCardProps) {
   const t = useT()
   const expired = memory.validTo !== undefined && memory.validTo <= now
   const meta: string[] = [typeLabel ?? memory.type]
-  if (!hideScope) meta.push(t(memory.scope === 'global' ? 'scope.global' : 'scope.workspace'))
+  if (!hideScope) meta.push(memory.scope === 'global' ? t('scope.global') : projectName ?? t('scope.workspace'))
   meta.push(t(memory.sourceMode === undefined ? 'source.none' : `source.${memory.sourceMode}`))
   meta.push(formatDay(memory.updatedAt, now, t))
   if (expired) meta.push(t('memory.expired'))

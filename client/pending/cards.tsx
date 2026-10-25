@@ -39,6 +39,14 @@ function otherProject(memory: MemoryCardData | null, session: BorrowedSession): 
   return session.kind === 'ready' && belongsTo(session.cwd, memory.workspacePath, session.workspaces ?? {}) ? undefined : memory.workspacePath
 }
 
+/** 记忆卡上的作用域：在别的项目里写项目名，在本项目里照常写「本项目」。 */
+function projectNameOf(session: BorrowedSession): (memory: MemoryCardData) => string | undefined {
+  return (memory) => {
+    const other = otherProject(memory, session)
+    return other === undefined ? undefined : baseName(other)
+  }
+}
+
 /** 记忆文件全文 → 正文（去掉 frontmatter）。 */
 export function bodyOf(text: string): string {
   const m = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/.exec(text)
@@ -67,8 +75,14 @@ function Card({ marker, title, aside, focusable = false, children }: {
   )
 }
 
-function MemoryOf({ memory, now, typeLabels, chip }: { memory: MemoryCardData; now: number; typeLabels: Readonly<Record<string, string>>; chip?: ReactNode }) {
-  return <MemoryCard memory={memory} now={now} typeLabel={typeLabels[memory.type]} chip={chip} />
+function MemoryOf({ memory, session, now, typeLabels, chip }: {
+  memory: MemoryCardData
+  session: BorrowedSession
+  now: number
+  typeLabels: Readonly<Record<string, string>>
+  chip?: ReactNode
+}) {
+  return <MemoryCard memory={memory} now={now} typeLabel={typeLabels[memory.type]} projectName={projectNameOf(session)(memory)} chip={chip} />
 }
 
 export function titleOf(item: PendingItem, t: Translate): string {
@@ -99,7 +113,7 @@ export function SecretCard({ item, session, now, typeLabels, onDone }: CardProps
   const open = () => { void gateway.openPath(memory.filePath, 'open').then((ok) => { if (!ok) action.fail(t('pending.openFailed')) }) }
   return (
     <Card marker={<StatusMarker kind="secret" label={t('marker.secret')} />} title={t('pending.secret.title')}>
-      <MemoryOf memory={typeof revealed === 'string' ? { ...memory, content: revealed } : memory} now={now} typeLabels={typeLabels} />
+      <MemoryOf session={session} memory={typeof revealed === 'string' ? { ...memory, content: revealed } : memory} now={now} typeLabels={typeLabels} />
       {revealed === null ? <p className="pm-pending-text">{t('pending.secret.readFailed')}</p> : null}
       <p className="pm-pending-text">{t('pending.secret.body')}</p>
       {confirming
@@ -148,6 +162,7 @@ export function HorizontalCard({ item, session, now, typeLabels, onDone }: CardP
         note={note}
         unavailable={action.unavailable}
         typeLabel={type => typeLabels[type] ?? type}
+        projectName={projectNameOf(session)}
         onRule={(verdict) => { action.run({ cmd: 'resolve', decisionId: item.decisionId, verdict }) }}
       />
       <ActionFeedback action={action} />
@@ -170,6 +185,7 @@ export function VerticalCard({ item, session, now, typeLabels, onDone }: CardPro
         title={titleOf(item, t)}
         unavailable={action.unavailable}
         typeLabel={type => typeLabels[type] ?? type}
+        projectName={projectNameOf(session)}
         onRule={(verdict) => { action.run({ cmd: 'resolve', decisionId: item.decisionId, verdict }) }}
       />
       <ActionFeedback action={action} />
@@ -199,7 +215,7 @@ export function PromoteCard({ item, session, now, typeLabels, onDone, promoteTar
     >
       {item.memory === null
         ? <p className="pm-pending-text">{t('conflict.missing')}</p>
-        : <MemoryOf memory={item.memory} now={now} typeLabels={typeLabels} />}
+        : <MemoryOf session={session} memory={item.memory} now={now} typeLabels={typeLabels} />}
       {promoteTarget !== undefined
         ? <p className="pm-pending-text">{t(promoteTarget === 'agents-md' ? 'pending.promote.agentsMdNote' : 'pending.promote.globalNote')}</p>
         : null}
@@ -361,7 +377,7 @@ export function ResultCard({ item, outcome, session, now, typeLabels, onUndone }
   const chip = <Chip variant="result">{copy.chip}</Chip>
   return (
     <Card title={titleOf(item, t)} focusable>
-      {copy.memory ? <MemoryOf memory={copy.memory} now={now} typeLabels={typeLabels} chip={chip} /> : <div>{chip}</div>}
+      {copy.memory ? <MemoryOf session={session} memory={copy.memory} now={now} typeLabels={typeLabels} chip={chip} /> : <div>{chip}</div>}
       <div className="pm-pending-result">
         <p className="pm-pending-text">{copy.body}</p>
         {copy.undoable && 'decisionId' in item
