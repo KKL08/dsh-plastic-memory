@@ -1428,6 +1428,23 @@ describe('move-memory（建议整理「放错层」的移到项目）', () => {
     expect((await e.decisions.listSettled()).map(d => d.id).sort()).toEqual([body.decisionId, promoted.decisionId].sort())
   })
 
+  it.each([
+    ['末尾带斜杠', `${SESSION_WS}/`],
+    ['带 ..', `${SESSION_WS}/sub/..`],
+  ])('目标路径%s：按规范化后的项目判跨项目、查重、落盘和记账', async (_label, workspacePath) => {
+    const e = env()
+    await e.store.create(original())
+    const body = ok(await e.run(move(workspacePath)))
+    const moved = (await copyIn(e, 'mem_g', SESSION_WS))!
+    expect(moved.record.workspacePath).toBe(SESSION_WS)
+    expect(dirname(moved.filePath)).toBe(join(root, workspaceDirName(SESSION_WS)))
+    expect((await e.decisions.listSettled()).map(d => [d.id, d.workspaces])).toEqual([[body.decisionId, [SESSION_WS]]])
+
+    // 查重也按规范化后的路径：已在 SESSION_WS 里，再移一次撞上它
+    await e.store.create(record({ id: 'mem_g', name: '又一份全局' }))
+    expect(err(await e.run(move(workspacePath))).code).toBe('target-taken')
+  })
+
   it('体检关闭时不可用（同提升为全局）', async () => {
     const e = env({ governanceEnabled: false })
     await e.store.create(original())

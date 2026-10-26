@@ -1,5 +1,5 @@
 import { mkdir } from 'node:fs/promises'
-import { isAbsolute, join } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryLogger, MemoryStore } from '../store.ts'
 import type { KvTable } from '../kv-table.ts'
@@ -395,8 +395,10 @@ async function dispatch(
     }
 
     case 'move-memory': {
-      const { memoryId, workspacePath } = command
-      if (!isAbsolute(workspacePath)) return fail(cmd, 'invalid-args', `目标项目不是绝对路径：${workspacePath}`)
+      const { memoryId } = command
+      if (!isAbsolute(command.workspacePath)) return fail(cmd, 'invalid-args', `目标项目不是绝对路径：${command.workspacePath}`)
+      // 去掉末尾斜杠、.. 这类写法差异，之后的跨项目门、查重、落盘、记账都按这一个路径
+      const workspacePath = resolve(command.workspacePath)
       // 只认全局那一份、且它此刻还在用：已移走、已删、不存在的什么都不动
       const rec = await locateCopy(deps.store, memoryId, { kind: 'global' })
       if (!rec || rec.status !== 'active') return notFound(memoryId)
