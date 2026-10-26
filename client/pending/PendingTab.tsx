@@ -17,6 +17,7 @@ import { useCanOpen, type NavStore } from '../nav.ts'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { crossConfirmCss } from './action.tsx'
 import { editCss } from './edit.tsx'
+import { modelEditCss } from './model-edit.tsx'
 import {
   AdviceCard, HorizontalCard, OverflowCard, PromoteCard, ResultCard, SecretCard, titleOf, UnreadableCard, VerticalCard, type Outcome,
 } from './cards.tsx'
@@ -255,7 +256,7 @@ function PendingEmpty({ nav, session, workspacePath, health, now }: {
   )
 }
 
-export const pendingCss = crossConfirmCss + editCss + `
+export const pendingCss = crossConfirmCss + editCss + modelEditCss + `
 .pm-pending { display: flex; flex-direction: column; }
 .pm-pending-group { display: flex; flex-direction: column; }
 .pm-pending-group + .pm-pending-group { margin-top: 24px; }

@@ -3,7 +3,10 @@
  * 成功后把结果（Outcome）交给列表，由列表在原位换成结果卡。
  */
 import { useState, type ReactNode } from 'react'
-import { CONFLICT_ACTION_VERDICTS, layerOfMemory, mergeKeeperIndex, type AdviceType, type GuiLayerRef, type MemoryCard as MemoryCardData, type PendingItem } from '../../src/gui/contract.ts'
+import {
+  CONFLICT_ACTION_VERDICTS, MODEL_EDIT_ADVICE_TYPES, layerOfMemory, mergeKeeperIndex,
+  type AdviceType, type GuiLayerRef, type MemoryCard as MemoryCardData, type ModelEditAdviceType, type PendingItem,
+} from '../../src/gui/contract.ts'
 import { belongsTo, useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, formatDay, formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
@@ -14,6 +17,7 @@ import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { StatusMarker } from '../ui/StatusMarker.tsx'
 import { ActionFeedback, SecretDeleteConfirm, useItemAction, type EditCommand, type ItemAction } from './action.tsx'
 import { EditPanel, type EditDraft } from './edit.tsx'
+import { ModelEditPanel } from './model-edit.tsx'
 
 type Item<K extends PendingItem['kind']> = Extract<PendingItem, { kind: K }>
 type Verdict = 'keep-left' | 'keep-right' | 'keep-both'
@@ -345,30 +349,33 @@ export function UnreadableCard({ item, session }: CardProps<'unreadable-file'>) 
 
 // —— 建议整理 ——
 
-type AdviceAction = 'confirm' | 'delete' | 'promote' | 'open' | 'edit'
+type AdviceAction = 'confirm' | 'delete' | 'promote' | 'open' | 'edit' | 'model'
 
 /**
- * 每类建议的标题、动手前的说明和动作（按 spec 表，「忽略」「让模型改 / 合并」以后加）。按钮顺序即显示顺序。
+ * 每类建议的标题、动手前的说明和动作（按 spec 表，「忽略」以后加）。按钮顺序即显示顺序。
  * 内容重复这里是只有一条（和指令文件重复）的写法，两条以上见 AdviceGroupCard；放错层这里是项目 → 全局，全局那条见 MISPLACED_TO_PROJECT。
  */
 const ADVICE_COPY = {
   expired: { title: 'pending.advice.expired.title', body: 'pending.advice.expired.body', actions: ['delete', 'open'] },
   stale: { title: 'pending.advice.stale.title', body: 'pending.advice.stale.body', actions: ['confirm', 'delete', 'open'] },
-  bloat: { title: 'pending.advice.bloat.title', body: 'pending.advice.bloat.body', actions: ['open', 'edit'] },
+  bloat: { title: 'pending.advice.bloat.title', body: 'pending.advice.bloat.body', actions: ['open', 'edit', 'model'] },
   redundancy: { title: 'pending.advice.redundancy.title', body: 'pending.advice.redundancy.baselineBody', actions: ['delete', 'open'] },
   orphan: { title: 'pending.advice.orphan.title', body: 'pending.advice.orphan.body', actions: ['open'] },
-  misplaced: { title: 'pending.advice.misplaced.title', body: 'pending.advice.misplaced.toGlobalBody', actions: ['open', 'edit', 'promote'] },
-  unclear: { title: 'pending.advice.unclear.title', body: 'pending.advice.unclear.body', actions: ['open', 'edit'] },
+  misplaced: { title: 'pending.advice.misplaced.title', body: 'pending.advice.misplaced.toGlobalBody', actions: ['open', 'edit', 'model', 'promote'] },
+  unclear: { title: 'pending.advice.unclear.title', body: 'pending.advice.unclear.body', actions: ['open', 'edit', 'model'] },
 } as const satisfies Record<AdviceType, { title: LocaleKey; body: LocaleKey; actions: readonly AdviceAction[] }>
 
-/** 放错层里全局那条（该放项目）：没有现成的执行器能挪回项目，只给打开文件和直接改。 */
-const MISPLACED_TO_PROJECT = { body: 'pending.advice.misplaced.toProjectBody', actions: ['open', 'edit'] } as const
+/** 放错层里全局那条（该放项目）：没有现成的执行器能挪回项目，只给打开文件、直接改和让模型改。 */
+const MISPLACED_TO_PROJECT = { body: 'pending.advice.misplaced.toProjectBody', actions: ['open', 'edit', 'model'] } as const
 
 /**
  * 能不能直接改：要有内容摘要（服务端靠它和 updatedAt 认出卡片加载后被改过），且不含密钥（界面上的文字可能是遮盖后的，
  * 照着改会把遮盖写回文件）。
  */
 const isEditable = (memory: MemoryCardData) => memory.digest !== undefined && memory.hasSecret !== true
+
+/** 能让模型改的建议类型（服务端按它给默认要求）。 */
+const isModelEditType = (type: AdviceType): type is ModelEditAdviceType => (MODEL_EDIT_ADVICE_TYPES as readonly AdviceType[]).includes(type)
 
 /** 命令里带回的卡片版本。 */
 const baseOf = (memory: MemoryCardData) => ({ updatedAt: memory.updatedAt, digest: memory.digest ?? '' })
@@ -381,7 +388,8 @@ function charsBefore(memories: readonly MemoryCardData[], command: EditCommand):
 
 /**
  * 建议整理卡：不着色、不带状态标记。删除走 forget（进最近删除），含密钥时原位改问彻底删除；
- * 提升为全局按记忆 id 发 promote-memory，结果和提升候选一样可撤销。直接改在卡片里换出编辑框，保存发 edit-memory，同样可撤销。
+ * 提升为全局按记忆 id 发 promote-memory，结果和提升候选一样可撤销。直接改在卡片里换出编辑框，保存发 edit-memory，同样可撤销；
+ * 让模型改在卡片里展开生成与对照，应用同样发 edit-memory。借来的会话拿不到模型时「让模型改」置灰。
  */
 export function AdviceCard(props: CardProps<'advice'>) {
   const { item, session, now, typeLabels, onDone, onRefused } = props
@@ -404,6 +412,10 @@ export function AdviceCard(props: CardProps<'advice'>) {
     }
   }, onRefused)
   const [isEditing, setEditing] = useState(false)
+  const [isModelEditing, setModelEditing] = useState(false)
+  const model = gateway.useModel(session)
+  const modelName = model.status === 'ready' ? model.model : undefined
+  const modelUnavailable = action.unavailable ?? (model.status === 'unavailable' ? t('pending.model.unavailable') : undefined)
   const buttonsOf = (memory: MemoryCardData, deleteLabel = t('pending.advice.delete')): Record<AdviceAction, ReactNode> => {
     const layer = layerOfMemory(memory)
     const open = () => { void gateway.openPath(memory.filePath, 'open').then((ok) => { if (!ok) action.fail(t('pending.openFailed')) }) }
@@ -415,9 +427,14 @@ export function AdviceCard(props: CardProps<'advice'>) {
       edit: isEditable(memory)
         ? <Button key="edit" unavailable={action.unavailable} onClick={() => { setEditing(true) }}>{t('pending.edit.edit')}</Button>
         : null,
+      model: isEditable(memory)
+        ? <Button key="model" unavailable={modelUnavailable} onClick={() => { setModelEditing(true) }}>{t('pending.model.edit')}</Button>
+        : null,
     }
   }
-  if (item.type === 'redundancy' && item.memories.length > 1) return <AdviceGroupCard {...props} action={action} buttonsOf={buttonsOf} />
+  if (item.type === 'redundancy' && item.memories.length > 1) {
+    return <AdviceGroupCard {...props} action={action} buttonsOf={buttonsOf} modelName={modelName} modelUnavailable={modelUnavailable} />
+  }
   const [memory] = item.memories
   const copy = item.type === 'misplaced' && memory.scope === 'global' ? { ...ADVICE_COPY.misplaced, ...MISPLACED_TO_PROJECT } : ADVICE_COPY[item.type]
   const buttons = buttonsOf(memory)
@@ -434,13 +451,30 @@ export function AdviceCard(props: CardProps<'advice'>) {
             onSave={(draft) => { action.run({ cmd: 'edit-memory', memoryId: memory.id, layer: layerOfMemory(memory), base: baseOf(memory), ...draft }) }}
           />
         )
-        : (
-          <>
-            <div className="pm-pending-advice-memories">{item.memories.map(m => <MemoryOf key={m.id} session={session} memory={m} now={now} typeLabels={typeLabels} />)}</div>
-            <p className="pm-pending-text">{t(copy.body, { date: formatDay(memory.lastConfirmedAt, now, t) })}</p>
-            <div className="pm-pending-actions">{copy.actions.map(a => buttons[a])}</div>
-          </>
-        )}
+        : isModelEditing && isModelEditType(item.type)
+          ? (
+            <>
+              <div className="pm-pending-advice-memories"><MemoryOf session={session} memory={memory} now={now} typeLabels={typeLabels} /></div>
+              <ModelEditPanel
+                memories={[memory]}
+                adviceType={item.type}
+                typeTitle={t(copy.title)}
+                base={{ content: memory.content, name: memory.name, summary: memory.summary, tags: memory.tags }}
+                session={session}
+                model={modelName}
+                unavailable={action.unavailable}
+                onClose={() => { setModelEditing(false) }}
+                onApply={(draft) => { action.run({ cmd: 'edit-memory', memoryId: memory.id, layer: layerOfMemory(memory), base: baseOf(memory), ...draft }) }}
+              />
+            </>
+          )
+          : (
+            <>
+              <div className="pm-pending-advice-memories">{item.memories.map(m => <MemoryOf key={m.id} session={session} memory={m} now={now} typeLabels={typeLabels} />)}</div>
+              <p className="pm-pending-text">{t(copy.body, { date: formatDay(memory.lastConfirmedAt, now, t) })}</p>
+              <div className="pm-pending-actions">{copy.actions.map(a => buttons[a])}</div>
+            </>
+          )}
       <ActionFeedback action={action} />
     </Card>
   )
@@ -458,17 +492,25 @@ function mergeDraft(pair: readonly [MemoryCardData, MemoryCardData]): { draft: E
 
 /**
  * 互相重复的几条记忆一张卡：每条各自一栏，带自己的删除和打开文件。两条时左右并排，写「删除左边 / 删除右边」，
- * 两条都能改时再给「直接合并」：合成保留的那条，另一条进最近删除。
+ * 两条都能改时再给「直接合并」「让模型合并」：合成保留的那条，另一条进最近删除。
  */
-function AdviceGroupCard({ item, session, now, typeLabels, action, buttonsOf }: CardProps<'advice'> & {
+function AdviceGroupCard({ item, session, now, typeLabels, action, buttonsOf, modelName, modelUnavailable }: CardProps<'advice'> & {
   action: ItemAction
   buttonsOf: (memory: MemoryCardData, deleteLabel?: string) => Record<AdviceAction, ReactNode>
+  modelName: string | undefined
+  /** 「让模型合并」不可用的原因（卡片忙、拿不到模型）。 */
+  modelUnavailable: string | undefined
 }) {
   const t = useT()
   const isPair = item.memories.length === 2
   const pair = isPair && item.memories.every(isEditable) ? [item.memories[0]!, item.memories[1]!] as const : undefined
   const [isMerging, setMerging] = useState(false)
+  const [isModelMerging, setModelMerging] = useState(false)
   const merge = pair === undefined ? undefined : mergeDraft(pair)
+  const mergeWith = (both: readonly [MemoryCardData, MemoryCardData], draft: EditDraft) => {
+    const memories = both.map(m => ({ memoryId: m.id, layer: layerOfMemory(m), base: baseOf(m) }))
+    action.run({ cmd: 'merge-memories', memories: [memories[0]!, memories[1]!], ...draft })
+  }
   const sides = [
     { label: 'pending.advice.redundancy.left', delete: 'pending.advice.redundancy.deleteLeft' },
     { label: 'pending.advice.redundancy.right', delete: 'pending.advice.redundancy.deleteRight' },
@@ -482,7 +524,7 @@ function AdviceGroupCard({ item, session, now, typeLabels, action, buttonsOf }: 
           return (
             <section key={m.id} className="pm-pending-advice-side" aria-label={side === undefined ? m.name : t(side.label)}>
               <MemoryOf session={session} memory={m} now={now} typeLabels={typeLabels} />
-              {isMerging ? null : <div className="pm-pending-actions">{buttons.delete}{buttons.open}</div>}
+              {isMerging || isModelMerging ? null : <div className="pm-pending-actions">{buttons.delete}{buttons.open}</div>}
             </section>
           )
         })}
@@ -495,24 +537,37 @@ function AdviceGroupCard({ item, session, now, typeLabels, action, buttonsOf }: 
             isMerge
             unavailable={action.unavailable}
             onCancel={() => { setMerging(false) }}
-            onSave={(draft) => {
-              const memories = pair.map(m => ({ memoryId: m.id, layer: layerOfMemory(m), base: baseOf(m) }))
-              action.run({ cmd: 'merge-memories', memories: [memories[0]!, memories[1]!], ...draft })
-            }}
+            onSave={(draft) => { mergeWith(pair, draft) }}
           />
         )
-        : (
-          <>
-            <p className="pm-pending-text">{t(isPair ? 'pending.advice.redundancy.body' : 'pending.advice.redundancy.manyBody')}</p>
-            {pair !== undefined
-              ? (
-                <div className="pm-pending-actions">
-                  <Button unavailable={action.unavailable} onClick={() => { setMerging(true) }}>{t('pending.edit.merge')}</Button>
-                </div>
-              )
-              : null}
-          </>
-        )}
+        : isModelMerging && pair !== undefined && merge !== undefined
+          ? (
+            <ModelEditPanel
+              memories={pair}
+              adviceType="redundancy"
+              typeTitle={t('pending.advice.redundancy.title')}
+              base={merge.draft}
+              keeper={mergeKeeperIndex(pair)}
+              session={session}
+              model={modelName}
+              unavailable={action.unavailable}
+              onClose={() => { setModelMerging(false) }}
+              onApply={(draft) => { mergeWith(pair, draft) }}
+            />
+          )
+          : (
+            <>
+              <p className="pm-pending-text">{t(isPair ? 'pending.advice.redundancy.body' : 'pending.advice.redundancy.manyBody')}</p>
+              {pair !== undefined
+                ? (
+                  <div className="pm-pending-actions">
+                    <Button unavailable={action.unavailable} onClick={() => { setMerging(true) }}>{t('pending.edit.merge')}</Button>
+                    <Button unavailable={modelUnavailable} onClick={() => { setModelMerging(true) }}>{t('pending.model.merge')}</Button>
+                  </div>
+                )
+                : null}
+            </>
+          )}
       <ActionFeedback action={action} />
     </Card>
   )
