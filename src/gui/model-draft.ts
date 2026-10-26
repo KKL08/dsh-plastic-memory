@@ -20,14 +20,12 @@ const SYSTEM_PROMPT = `你帮用户整理编码 agent 的长期记忆：按要�
 只输出一个 JSON 对象，不要代码块，也不要任何其他文字：
 {"content":"改后的正文","summary":"一句话摘要","name":"新名称，不改就省略","tags":["新标签，不改就省略"]}`
 
-/** 每类建议：发现的问题 + 用户没写要求时的默认要求。放错层按记忆现在在哪一层分两种说法。 */
+/** 每类建议：发现的问题 + 用户没写要求时的默认要求。 */
 const ISSUES = {
   'bloat': { problem: '内容过长：带入对话时占用较多。', request: '压缩成要点：删掉解释性、重复的话，保留每一条规则和步骤；命令、路径、数字原样保留。' },
   'unclear': { problem: '表述不清：换一个没有上下文的新对话，agent 很难照着做。', request: '改清楚：把原文里含糊的指代、对象、条件写明白，让新对话也能照着做；原文没有的信息不要补。' },
   'redundancy': { problem: '内容重复：这两条说的是同一件事。', request: '合并去重：两条合成一条，两边各自独有的信息都保留，重复的只写一遍。' },
-  'misplaced-to-global': { problem: '放错层：这条只放在一个项目里，看起来对所有项目都适用，打算放进全局记忆。', request: '改成适合全局记忆的说法：去掉只在这个项目里成立的细节，让它在任何项目里都能照着做。' },
-  'misplaced-to-project': { problem: '放错层：这条放在全局记忆里，会带进每个项目的对话，但看起来只和某个项目有关。', request: '改成各个项目都适用的说法：写明它只在哪个项目或什么条件下适用，别让其他项目误用。' },
-} as const
+} as const satisfies Record<ModelEditAdviceType, { problem: string; request: string }>
 
 export interface DraftInput {
   adviceType: ModelEditAdviceType
@@ -40,9 +38,7 @@ export interface DraftInput {
 }
 
 export function buildDraftPrompt(input: DraftInput): { system: string; user: string } {
-  const issue = ISSUES[input.adviceType === 'misplaced'
-    ? input.records[0]?.scope === 'global' ? 'misplaced-to-project' : 'misplaced-to-global'
-    : input.adviceType]
+  const issue = ISSUES[input.adviceType]
   const request = input.request?.trim() || issue.request
   // JSON 编码：正文里的换行、引号、像标题的行都留在字符串里，分不清边界的地方不会被当成提示词的一部分
   const memories = JSON.stringify(input.records.map(r => ({ id: r.id, name: r.name, summary: r.summary, tags: r.tags, content: r.content })), null, 2)

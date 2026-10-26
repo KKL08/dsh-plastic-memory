@@ -56,9 +56,9 @@ function isDeletionSettled(entry: PendingDecision): boolean {
   return entry.settled !== undefined && verdictLoser(entry, entry.settled.verdict) !== undefined
 }
 
-/** 留作撤销的已裁决条目（删一方、提升为全局、直接改与直接合并）：快照过了保留窗口就无从撤销，由 sweep 清掉。 */
+/** 留作撤销的已裁决条目（删一方、提升为全局、直接改与直接合并、移到项目）：快照过了保留窗口就无从撤销，由 sweep 清掉。 */
 function isUndoable(entry: PendingDecision): boolean {
-  return isDeletionSettled(entry) || entry.settled?.verdict === 'promoted' || kindOf(entry) === 'edit'
+  return isDeletionSettled(entry) || entry.settled?.verdict === 'promoted' || kindOf(entry) === 'edit' || kindOf(entry) === 'move'
 }
 
 /** 超限条目的指纹：relax 为档位号（'1'、'2'…），strict 只有一档。 */
@@ -324,7 +324,7 @@ export class PendingDecisionsStore {
   }
 
   /**
-   * 记一条生来就已结清的条目（直接改、直接合并的撤销记录）：不经过未决，别处读账本时不会把它当待处理。
+   * 记一条生来就已结清的条目（直接改、直接合并、移到项目的撤销记录）：不经过未决，别处读账本时不会把它当待处理。
    * 同一条记忆改几次就有几条，撤销各自核对指纹；超出保留窗口由 sweep 清掉。
    */
   async addSettled(

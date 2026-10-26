@@ -1241,6 +1241,168 @@ describe('promote-memory（建议整理「放错层」的提升为全局）', ()
   })
 })
 
+describe('move-memory（建议整理「放错层」的移到项目）', () => {
+  /** 模型把全局的 mem_g 判为放错层（只和某个项目有关）。 */
+  const misplacedLlm: SemanticLlm = { complete: async () => JSON.stringify({ findings: [{ type: 'misplaced', memoryIds: ['mem_g'], summary: '只和一个项目有关' }] }) }
+  const misplacedIds = async (e: ReturnType<typeof env>) => pendingViewSchema.parse(await e.readView('pending')).items
+    .flatMap(i => i.kind === 'advice' && i.type === 'misplaced' ? i.memories.map(m => m.id) : [])
+  const copyIn = async (e: ReturnType<typeof env>, id: string, workspacePath?: string) =>
+    (await e.store.locate(id, { workspacePath, isExactLayer: true }))
+  const original = () => record({
+    id: 'mem_g', name: '本仓用 pnpm', content: '这个仓库装依赖用 pnpm', summary: '装依赖用 pnpm', tags: ['pnpm'],
+    source: { sessionId: 'sess-old', eventRange: [3, 9], sourceMode: 'user-explicit' },
+    createdAt: 100, updatedAt: 200, lastConfirmedAt: 300,
+  })
+  const move = (workspacePath: string, extra: { allowCrossWorkspace?: boolean } = {}): MemoryCommand => ({ cmd: 'move-memory', memoryId: 'mem_g', workspacePath, ...extra })
+
+  it('移到项目：全局目录里没有这条、目标项目目录里有，内容、id、出处、时间戳不动；快照先行，账本留一条可撤销的移动，「放错层」消失', async () => {
+    const e = env({ llm: misplacedLlm })
+    await e.store.create(original())
+    ok(await e.run({ cmd: 'scan' }))
+    expect(await misplacedIds(e)).toEqual(['mem_g'])
+
+    const body = ok(await e.run(move(SESSION_WS)))
+    expect(await copyIn(e, 'mem_g')).toBeUndefined()
+    const moved = (await copyIn(e, 'mem_g', SESSION_WS))!
+    expect(dirname(moved.filePath)).toBe(join(root, workspaceDirName(SESSION_WS)))
+    expect(body.filePath).toBe(moved.filePath)
+    const { scope, workspacePath, ...rest } = moved.record
+    expect([scope, workspacePath]).toEqual(['workspace', SESSION_WS])
+    const { scope: _s, workspacePath: _w, ...before } = original()
+    expect(rest).toEqual(before)
+    // 索引跟着变：项目的 MEMORY.md 有它，全局的没有
+    expect(await readFile(join(dirname(moved.filePath), INDEX_FILE), 'utf8')).toContain('装依赖用 pnpm')
+    expect(await readFile(join(root, GLOBAL_DIR, INDEX_FILE), 'utf8').catch(() => '')).not.toContain('装依赖用 pnpm')
+
+    const [snap] = await e.snapshots.list()
+    expect(snap).toMatchObject({ memoryIds: ['mem_g'] })
+    expect(snap!.data[0]!.scope).toBe('global')
+    expect(body).toMatchObject({ cmd: 'move-memory', memoryIds: ['mem_g'], snapshotId: snap!.id })
+    const settled = await e.decisions.listSettled()
+    expect(settled.map(d => [d.id, d.kind, d.memoryIds, d.workspaces, d.settled])).toEqual([
+      [body.decisionId, 'move', ['mem_g'], [SESSION_WS], { verdict: 'moved', at: NOW, snapshotId: snap!.id }],
+    ])
+    expect(await misplacedIds(e)).toEqual([])
+    expect(ledgerItems(pendingViewSchema.parse(await e.readView('pending')))).toEqual([])
+    const library = libraryViewSchema.parse(await e.readView('library'))
+    expect(library.layers.map(l => [l.layer, l.items.map(m => m.id)])).toEqual([[{ kind: 'global' }, []], [{ kind: 'workspace', workspacePath: SESSION_WS }, ['mem_g']]])
+  })
+
+  it('撤销：回到全局、项目里那份不在了，账本条目清掉，「放错层」回来', async () => {
+    const e = env({ llm: misplacedLlm })
+    await e.store.create(original())
+    ok(await e.run({ cmd: 'scan' }))
+    const globalPath = (await copyIn(e, 'mem_g'))!.filePath
+    const body = ok(await e.run(move(SESSION_WS)))
+
+    const undone = ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
+    expect(undone.memoryIds).toEqual(['mem_g'])
+    expect(await copyIn(e, 'mem_g', SESSION_WS)).toBeUndefined()
+    const back = (await copyIn(e, 'mem_g'))!
+    expect(back.filePath).toBe(globalPath)
+    expect(back.record).toEqual(original())
+    expect(await allEntries(e)).toEqual([])
+    expect(await misplacedIds(e)).toEqual(['mem_g'])
+  })
+
+  it('移过去之后又被改过：拒绝撤销，什么都不动', async () => {
+    const e = env()
+    await e.store.create(original())
+    const body = ok(await e.run(move(SESSION_WS)))
+    await e.store.update({ id: 'mem_g', workspacePath: SESSION_WS }, r => ({ ...r, content: '之后又改的' }))
+    expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('failed')
+    expect((await copyIn(e, 'mem_g', SESSION_WS))!.record.content).toBe('之后又改的')
+    expect(await copyIn(e, 'mem_g')).toBeUndefined()
+    expect((await e.decisions.listSettled()).map(d => d.id)).toEqual([body.decisionId])
+  })
+
+  it('移过去之后被删了：拒绝撤销，什么都不动', async () => {
+    const e = env()
+    await e.store.create(original())
+    const body = ok(await e.run(move(SESSION_WS)))
+    await e.store.softDelete({ id: 'mem_g', workspacePath: SESSION_WS }, { isExactLayer: true })
+    expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).ok).toBe(false)
+    expect(await copyIn(e, 'mem_g')).toBeUndefined()
+  })
+
+  it.each([
+    ['在用的', 'active'],
+    ['最近删除里的', 'deleted'],
+  ] as const)('目标项目已有同 id 的记忆（%s）：拒绝，什么都不动', async (_label, status) => {
+    const e = env()
+    await e.store.create(original())
+    await e.store.create(record({ id: 'mem_g', name: '项目里那份', content: '项目里的内容', scope: 'workspace', workspacePath: SESSION_WS }))
+    if (status === 'deleted') await e.store.softDelete({ id: 'mem_g', workspacePath: SESSION_WS }, { isExactLayer: true })
+    const projectBefore = await readFile((await copyIn(e, 'mem_g', SESSION_WS))!.filePath, 'utf8')
+    const globalBefore = await readFile((await copyIn(e, 'mem_g'))!.filePath, 'utf8')
+    const snapshotsBefore = (await e.snapshots.list()).length
+
+    expect(err(await e.run(move(SESSION_WS))).code).toBe('target-taken')
+    expect(await readFile((await copyIn(e, 'mem_g'))!.filePath, 'utf8')).toBe(globalBefore)
+    expect(await readFile((await copyIn(e, 'mem_g', SESSION_WS))!.filePath, 'utf8')).toBe(projectBefore)
+    expect(await e.snapshots.list()).toHaveLength(snapshotsBefore)
+    expect(await allEntries(e)).toEqual([])
+  })
+
+  it('目标项目里有同名文件（别的 id）：按撞名规则换个文件名，两条都在', async () => {
+    const e = env()
+    await e.store.create(original())
+    await e.store.create(record({ id: 'mem_same_name', name: '本仓用 pnpm', content: '另一条', scope: 'workspace', workspacePath: SESSION_WS }))
+    ok(await e.run(move(SESSION_WS)))
+    const moved = (await copyIn(e, 'mem_g', SESSION_WS))!
+    const other = (await copyIn(e, 'mem_same_name', SESSION_WS))!
+    expect(moved.filePath).not.toBe(other.filePath)
+    expect([moved.record.content, other.record.content]).toEqual(['这个仓库装依赖用 pnpm', '另一条'])
+  })
+
+  it('不在全局（项目记忆、已删除、不存在）→ not-found，什么都不动', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_p', name: '项目的', scope: 'workspace', workspacePath: OTHER_WS }))
+    await e.store.create(record({ id: 'mem_d', name: '删掉的' }))
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_d' }))
+    for (const memoryId of ['mem_p', 'mem_d', 'mem_none']) {
+      expect(err(await e.run({ cmd: 'move-memory', memoryId, workspacePath: SESSION_WS })).code).toBe('not-found')
+    }
+    expect((await e.store.get('mem_p'))!.workspacePath).toBe(OTHER_WS)
+    expect(await allEntries(e)).toEqual([])
+    expect(await e.snapshots.list()).toHaveLength(1) // 只有 forget 那一份
+  })
+
+  it('目标是别的项目：先要 allowCrossWorkspace，带上才移；撤销同样要先确认', async () => {
+    const e = env()
+    await e.store.create(original())
+    const refused = err(await e.run(move(OTHER_WS)))
+    expect(refused).toMatchObject({ code: 'cross-workspace', rejected: [{ id: 'mem_g', workspacePath: OTHER_WS }] })
+    expect(await copyIn(e, 'mem_g')).toBeDefined()
+    expect(await copyIn(e, 'mem_g', OTHER_WS)).toBeUndefined()
+    expect(await e.snapshots.list()).toEqual([])
+
+    const body = ok(await e.run(move(OTHER_WS, { allowCrossWorkspace: true })))
+    expect(await copyIn(e, 'mem_g', OTHER_WS)).toBeDefined()
+    expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))).toMatchObject({ code: 'cross-workspace', rejected: [{ id: 'mem_g', workspacePath: OTHER_WS }] })
+    expect(await copyIn(e, 'mem_g')).toBeUndefined()
+    ok(await e.run({ cmd: 'undo', decisionId: body.decisionId!, allowCrossWorkspace: true }))
+    expect(await copyIn(e, 'mem_g')).toBeDefined()
+    expect(await copyIn(e, 'mem_g', OTHER_WS)).toBeUndefined()
+  })
+
+  it('体检关闭时不可用（同提升为全局）', async () => {
+    const e = env({ governanceEnabled: false })
+    await e.store.create(original())
+    expect(err(await e.run(move(SESSION_WS))).code).toBe('governance-disabled')
+    expect(await copyIn(e, 'mem_g')).toBeDefined()
+  })
+
+  it('移动记录 14 天后随保留窗口清掉', async () => {
+    const e = env()
+    await e.store.create(original())
+    const body = ok(await e.run(move(SESSION_WS)))
+    await e.decisions.sweep(NOW + RETENTION_MS + 1)
+    expect(await allEntries(e)).toEqual([])
+    expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('not-found')
+  })
+})
+
 describe('同 id 在会话项目和别的项目各有一份时提升', () => {
   // 页面上点的是别的项目那份：提升的必须是它，会话项目里的同 id 副本不碰
   const copyIn = async (e: ReturnType<typeof env>, layer: { kind: 'global' } | { kind: 'workspace'; path: string }) =>
@@ -1889,7 +2051,6 @@ describe('draft-edit（让模型改、让模型合并的生成）', () => {
   it.each([
     ['bloat', '内容过长', '压缩成要点'],
     ['unclear', '表述不清', '改清楚'],
-    ['misplaced', '放错层', '改成适合全局记忆的说法'],
   ] as const)('%s：没写要求时按建议类型给默认要求', async (adviceType, problem, requirement) => {
     const { llm, prompts } = scripted(answer({ content: '短', summary: '短' }))
     const e = env({ llm })
@@ -1899,12 +2060,12 @@ describe('draft-edit（让模型改、让模型合并的生成）', () => {
     expect(prompts[0]!.user).toContain(requirement)
   })
 
-  it('放错层里放在全局的那条：默认要求是改成各个项目都适用的说法', async () => {
+  it('放错层不给让模型改（改写不动层，只回答挪不挪）：invalid-args，不调模型', async () => {
     const { llm, prompts } = scripted(answer({ content: '短', summary: '短' }))
     const e = env({ llm })
     await e.store.create(record({ id: 'mem_g', content: '本仓用 pnpm' }))
-    ok(await e.run({ cmd: 'draft-edit', adviceType: 'misplaced', memories: [{ memoryId: 'mem_g', layer: { kind: 'global' } }] }))
-    expect(prompts[0]!.user).toContain('改成各个项目都适用的说法')
+    expect(err(await e.runRaw(` draft-edit ${JSON.stringify({ adviceType: 'misplaced', memories: [{ memoryId: 'mem_g', layer: { kind: 'global' } }] })}`)).code).toBe('invalid-args')
+    expect(prompts).toEqual([])
   })
 
   it('写了要求：按用户的要求，不再给默认要求', async () => {

@@ -125,8 +125,8 @@ export type AdviceType = (typeof ADVICE_TYPES)[number]
 /** 能「忽略」的建议类型：除「很久没确认」外都能（它的出路是「仍然有效」或删除）。名字定义在 contract-codes（治理侧同用）。 */
 export { IGNORABLE_ADVICE_TYPES, type IgnorableAdviceType } from '../contract-codes.ts'
 
-/** 能「让模型改」（内容重复是「让模型合并」）的建议类型：服务端按它给默认要求，界面按它出按钮。 */
-export const MODEL_EDIT_ADVICE_TYPES = ['bloat', 'redundancy', 'misplaced', 'unclear'] as const satisfies readonly AdviceType[]
+/** 能「让模型改」（内容重复是「让模型合并」）的建议类型：服务端按它给默认要求，界面按它出按钮。放错层不在其中：改写不动层，它只问挪不挪。 */
+export const MODEL_EDIT_ADVICE_TYPES = ['bloat', 'redundancy', 'unclear'] as const satisfies readonly AdviceType[]
 export type ModelEditAdviceType = (typeof MODEL_EDIT_ADVICE_TYPES)[number]
 
 /** 「等你决定」的口径（左栏圆点、设置页状态卡、健康页「待你决定」入口）：密钥与待你处理；读不出的文件、建议整理不算。 */
@@ -405,7 +405,7 @@ export const MEMORY_COMMAND_NAME = 'memory'
 export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   z.object({ cmd: z.literal('info') }),
   z.object({ cmd: z.literal('resolve'), decisionId: z.string(), verdict: z.enum(RESOLVE_VERDICTS), allowCrossWorkspace }),
-  /** 撤销一条已裁决条目：去掉 settled，记了快照的按它恢复败方（提升为全局则恢复原位）。 */
+  /** 撤销一条已裁决条目：去掉 settled，记了快照的按它恢复败方（提升为全局则恢复原位）；直接改、移到项目的撤销后条目移出账本。 */
   z.object({ cmd: z.literal('undo'), decisionId: z.string(), allowCrossWorkspace }),
   z.object({ cmd: z.literal('promote'), decisionId: z.string(), target: z.enum(['global', 'agents-md']), allowCrossWorkspace }),
   z.object({ cmd: z.literal('keep-local'), decisionId: z.string(), allowCrossWorkspace }),
@@ -414,6 +414,12 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
    * （记忆已是提升候选时就结清那一条），结果的 decisionId 交给 undo 撤销。
    */
   z.object({ cmd: z.literal('promote-memory'), memoryId: z.string(), layer, allowCrossWorkspace }),
+  /**
+   * 把一条全局记忆移到 workspacePath 那个项目（建议整理「放错层」里全局那条，与 promote-memory 对称）：只认全局那一份，
+   * 内容、id、出处、时间戳不动，全局那份不再存在。目标项目已有同 id 的记忆（在用的或最近删除里的）回 target-taken，什么都不动。
+   * 跨项目门按目标项目判。快照先行，在账本里留一条已结清的移动，结果的 decisionId 交给 undo 撤销（搬回全局）。
+   */
+  z.object({ cmd: z.literal('move-memory'), memoryId: z.string(), workspacePath: z.string(), allowCrossWorkspace }),
   z.object({ cmd: z.literal('forget'), memoryId: z.string(), layer, allowCrossWorkspace }),
   z.object({ cmd: z.literal('restore'), memoryId: z.string(), layer, allowCrossWorkspace }),
   /** 彻底删除：在用的只收含密钥的；最近删除里的不等 14 天到期，连同快照里的副本现在就清掉。 */
@@ -499,13 +505,14 @@ export const GUI_ERROR_CODES = [
   'llm-failed',         // 让模型改：模型报错，detail 带原话
   'llm-invalid-output', // 让模型改：模型的输出不合要求的格式
   'subagent-readonly',  // 借的会话是子 agent，不可写
-  'governance-disabled', // 体检已关闭：裁决、撤销、提升、留在本项目、体检、忽略超限不可用
+  'governance-disabled', // 体检已关闭：裁决、撤销、提升、移到项目、留在本项目、体检、忽略超限不可用
   'has-secret',         // forget 的目标含密钥（任一级），只能彻底删除：什么都没动，界面确认后改发 hard-delete；
                         // 直接改、直接合并的目标含密钥（界面上是遮盖后的正文）：什么都没动；让模型改的目标含密钥：不发给模型
   'stale',              // 直接改、直接合并：记忆在卡片加载后被改过，什么都没动
   'secret-critical',    // 直接改、直接合并的新内容含高危密钥：什么都没动
   'secret-suspected',   // 直接改、直接合并的新内容含疑似密钥：什么都没动，用户确认后带 force 重发
   'claimed',            // 待决项正被另一次操作（别的标签页、宿主进程或体检）认领：什么都没动
+  'target-taken',       // 移到项目：目标项目已有同 id 的记忆；撤销移到项目：全局已有同 id 的记忆。什么都没动
   'failed',             // 执行器报错，detail 带原话
 ] as const
 export type GuiErrorCode = (typeof GUI_ERROR_CODES)[number]
@@ -517,7 +524,7 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     decisionId: z.string().optional(),
     memoryIds: z.array(z.string()).optional(),
     snapshotId: z.string().optional(),
-    /** edit-memory / merge-memories：保留的那条写完后的文件（改了名称时文件名跟着变）。 */
+    /** edit-memory / merge-memories：保留的那条写完后的文件（改了名称时文件名跟着变）；move-memory：移过去之后的文件。 */
     filePath: z.string().optional(),
     /** draft-edit：模型给的改后稿。 */
     draft: memoryDraftSchema.optional(),

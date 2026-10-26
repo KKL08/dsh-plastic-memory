@@ -1,5 +1,5 @@
 import { mkdir } from 'node:fs/promises'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryLogger, MemoryStore } from '../store.ts'
 import type { KvTable } from '../kv-table.ts'
@@ -78,7 +78,7 @@ export interface MemoryCommandDefinition {
  *  refresh-views 不受开关影响，撤销直接改、直接合并的 undo 也不受（见 isEditUndo）。 */
 // dismiss-overflow 不在此列：超限提醒在体检关闭时照样入账，忽略它不属于治理动作；
 // ignore-advice / unignore-advice 同理：规则类建议在体检关闭时照样列出，忽略只是用户的处置
-const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'undo', 'promote', 'promote-memory', 'keep-local', 'scan'])
+const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'undo', 'promote', 'promote-memory', 'move-memory', 'keep-local', 'scan'])
 
 /** 不写任何东西的子命令：成功后也不重写视图。 */
 const READ_ONLY_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['draft-edit'])
@@ -241,6 +241,41 @@ async function dispatch(
     return { ok: true, cmd, decisionId: entry.id, memoryIds: r, snapshotId }
   }
 
+  /**
+   * 撤销移到项目：项目里那份此刻还是移过去时的内容，才把它搬回全局。一次搬家，全局那份回来的同时项目里那份就不在了，
+   * 不会只做成一半；之后被改过、删掉，或全局又有了这个 id 的，什么都不动。搬回后条目移出账本。
+   */
+  const undoMove = async (entry: PendingDecision, allowCrossWorkspace: boolean | undefined): Promise<MemoryCommandResult> => {
+    const memoryId = entry.memoryIds[0] ?? ''
+    const workspacePath = entry.workspaces?.[0]
+    const current = workspacePath === undefined ? undefined : await locateCopy(deps.store, memoryId, { kind: 'workspace', workspacePath })
+    if (current === undefined) return notFound(`${memoryId} 移过去的那一份`)
+    const { rejected } = gateRecords([current], gov, allowCrossWorkspace)
+    if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
+    const isOwnWrite = (r: MemoryRecord) => r.status === 'active' && editFingerprint(r) === entry.fingerprint
+    const changed = () => fail(cmd, 'failed', `记忆 ${memoryId} 移过去之后又被改过或已删除，撤销会冲掉之后的改动，未做任何改动`)
+    if (!isOwnWrite(current)) return changed()
+    if ((await locateCopy(deps.store, memoryId, { kind: 'global' })) !== undefined) {
+      return fail(cmd, 'target-taken', `全局已有记忆 ${memoryId}，搬回去会盖掉它，未做任何改动`)
+    }
+    let isMoved = false
+    try {
+      await deps.store.update(current, (cur) => {
+        // 锁内按磁盘上的现状再核对一次
+        isMoved = isOwnWrite(cur)
+        if (!isMoved) return cur
+        const { workspacePath: _workspacePath, ...rest } = cur
+        return { ...rest, scope: 'global' }
+      }, { workspacePath, isExactLayer: true })
+    } catch (error) {
+      if (!(error instanceof RecordNotFoundError)) throw error
+    }
+    if (!isMoved) return changed()
+    await deps.decisions.remove(entry.id)
+    const snapshotId = entry.settled?.snapshotId
+    return { ok: true, cmd, decisionId: entry.id, memoryIds: [memoryId], ...(snapshotId !== undefined ? { snapshotId } : {}) }
+  }
+
   switch (command.cmd) {
     case 'resolve': {
       if (!(await deps.decisions.get(command.decisionId))) return notFound(command.decisionId)
@@ -255,6 +290,7 @@ async function dispatch(
       const entry = await settledEntry(command.decisionId)
       if (!entry?.settled) return notFound(command.decisionId)
       if (kindOf(entry) === 'edit') return await undoEdit(entry, command.allowCrossWorkspace)
+      if (kindOf(entry) === 'move') return await undoMove(entry, command.allowCrossWorkspace)
       const { verdict, snapshotId } = entry.settled
       const loser = verdictLoser(entry, verdict)
       const targets = loser !== undefined ? [loser] : verdict === 'promoted' ? entry.memoryIds : []
@@ -350,6 +386,38 @@ async function dispatch(
       )
       await deps.decisions.settle(entry.id, 'promoted', now, r.snapshotId !== null ? { snapshotId: r.snapshotId } : {})
       return { ok: true, cmd, decisionId: entry.id, memoryIds: r.promoted.map(p => p.id), ...(r.snapshotId !== null ? { snapshotId: r.snapshotId } : {}) }
+    }
+
+    case 'move-memory': {
+      const { memoryId, workspacePath } = command
+      if (!isAbsolute(workspacePath)) return fail(cmd, 'invalid-args', `目标项目不是绝对路径：${workspacePath}`)
+      // 只认全局那一份、且它此刻还在用：已移走、已删、不存在的什么都不动
+      const rec = await locateCopy(deps.store, memoryId, { kind: 'global' })
+      if (!rec || rec.status !== 'active') return notFound(memoryId)
+      // 跨项目门按目标项目判：移过去之后它就是那个项目的记忆
+      const { rejected } = gateRecords([{ id: rec.id, scope: 'workspace', workspacePath }], gov, command.allowCrossWorkspace)
+      if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
+      // 目标项目里已有这个 id（在用的或最近删除里的）：搬过去会盖掉或撞上它
+      if ((await locateCopy(deps.store, rec.id, { kind: 'workspace', workspacePath })) !== undefined) {
+        return fail(cmd, 'target-taken', `${workspacePath} 里已有记忆 ${rec.id}，未做任何改动`)
+      }
+      const snapshot = await deps.snapshots.capture({ operation: 'pre-update', description: `把记忆 ${rec.id} 从全局移到 ${workspacePath} 前`, records: [rec] }, now)
+      // 只搬全局这一份（只认层）：内容、id、出处、时间戳不动；撞名由文件表按规则换文件名
+      let written: MemoryRecord | undefined
+      try {
+        written = await deps.store.update(rec, (cur) => {
+          if (cur.status !== 'active') throw new RecordNotFoundError(cur.id)
+          return { ...cur, scope: 'workspace', workspacePath }
+        }, { workspacePath: undefined, isExactLayer: true })
+      } catch (error) {
+        if (!(error instanceof RecordNotFoundError)) throw error
+      }
+      if (written === undefined) return notFound(memoryId)
+      const entry = await deps.decisions.addSettled({
+        kind: 'move', memoryIds: [rec.id], summary: rec.summary, workspaces: [workspacePath], fingerprint: editFingerprint(written),
+      }, 'moved', now, snapshot.id)
+      const located = await deps.store.locate(rec.id, { workspacePath, isExactLayer: true })
+      return { ok: true, cmd, decisionId: entry.id, memoryIds: [rec.id], snapshotId: snapshot.id, ...(located !== undefined ? { filePath: located.filePath } : {}) }
     }
 
     case 'keep-local': {
