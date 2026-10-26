@@ -1,15 +1,24 @@
+import { createHash } from 'node:crypto'
 import type { KvTable } from '../kv-table.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { IGNORABLE_ADVICE_TYPES, type IgnorableAdviceType } from '../contract-codes.ts'
-import { candidateFingerprint } from './decisions.ts'
 import type { AdviceIgnore, Finding, FindingType } from './schema.ts'
 
 /**
  * 建议忽略：用户对一条建议整理项点了「忽略」，以后不再提示、也不再扣分。记录存在单独的侧表（不进待决账本：
  * 旧版本插件的账本 schema 不认识新种类，会把它当读不出的条目；单独存放时旧版本完全看不见它）。
- * 一项 = 问题类型 + 涉及的记忆 id（内容重复成对，其余每条记忆一项），记下每条记忆当时的内容指纹（同提升候选的 candidateFingerprint）；
+ * 一项 = 问题类型 + 涉及的记忆 id（内容重复成对，其余每条记忆一项），记下每条记忆当时的指纹（adviceFingerprint）；
  * 指纹对不上就不算已忽略，问题还在就重新出现。评分前按它剔除发现（applyIgnores），评分公式不动。
  */
+
+/**
+ * 忽略用的记忆指纹：各类建议依据的字段都算进去（名称、摘要、正文、有效期、所在层、取代的旧记忆），一个函数管所有类型；
+ * 标签、确认时间不算——它们不影响任何一类建议，改了不该让用户再看一遍。
+ */
+export function adviceFingerprint(r: Pick<MemoryRecord, 'id' | 'name' | 'summary' | 'content' | 'validTo' | 'scope' | 'workspacePath' | 'supersedes'>): string {
+  const fields = [r.id, r.name, r.summary, r.content, r.validTo ?? null, r.scope, r.workspacePath ?? null, r.supersedes ?? []]
+  return createHash('sha1').update(JSON.stringify(fields)).digest('hex')
+}
 
 /** 能忽略的都是体检发现的类型（这里按 FindingType 收一次，名字有出入编译不过；名字本身只在 contract-codes 定义）。 */
 const IGNORABLE_FINDING_TYPES: readonly FindingType[] = IGNORABLE_ADVICE_TYPES
@@ -29,11 +38,11 @@ export interface IgnoredAdvice {
   memoryIds: string[]
 }
 
-/** 这条记录此刻还算数：每条记忆都在用、内容指纹与忽略时一致。 */
+/** 这条记录此刻还算数：每条记忆都在用、指纹与忽略时一致。 */
 function isStillMatching(entry: AdviceIgnore, byId: ReadonlyMap<string, MemoryRecord>): boolean {
   return entry.memoryIds.every((id, i) => {
     const r = byId.get(id)
-    return r?.status === 'active' && candidateFingerprint(r) === entry.fingerprints[i]
+    return r?.status === 'active' && adviceFingerprint(r) === entry.fingerprints[i]
   })
 }
 
@@ -76,7 +85,7 @@ export function staleIgnores(
   return ignores.filter(e => e.ignoredAt <= opts.before && e.memoryIds.some((id, i) => {
     const r = byId.get(id)
     if (r === undefined) return opts.isComplete
-    return r.status !== 'active' || candidateFingerprint(r) !== e.fingerprints[i]
+    return r.status !== 'active' || adviceFingerprint(r) !== e.fingerprints[i]
   }))
 }
 
@@ -97,7 +106,7 @@ export class AdviceIgnoreStore {
     const sorted = [...records].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
     const entry: AdviceIgnore = {
       id: adviceIdentity(type, sorted.map(r => r.id)), type,
-      memoryIds: sorted.map(r => r.id), fingerprints: sorted.map(candidateFingerprint), ignoredAt: now,
+      memoryIds: sorted.map(r => r.id), fingerprints: sorted.map(adviceFingerprint), ignoredAt: now,
     }
     await this.table.put(entry.id, entry)
     return entry

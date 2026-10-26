@@ -140,6 +140,38 @@ describe('忽略与取消忽略', () => {
     expect((await wsLayerOf(e)).ignored.map(i => i.type)).toEqual(['bloat'])
   })
 
+  it('建议依据的其他字段变了也重新出现：改摘要、延长（仍已过期的）有效期、换层', async () => {
+    const e = env()
+    await seedBloat(e)
+    ok(await e.ignore('bloat', ['mem_long']))
+    const long = (await e.store.get('mem_long', { workspacePath: WS }))!
+    await e.store.update(long, cur => ({ ...cur, summary: '新的摘要' }))
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect(await adviceOf(e)).toEqual(['bloat:mem_long'])
+
+    await e.store.create(record({ id: 'mem_exp', name: '过期的', content: '短', scope: 'workspace', workspacePath: WS, validTo: NOW - 10 }))
+    ok(await e.run({ cmd: 'refresh-views' }))
+    ok(await e.ignore('expired', ['mem_exp']))
+    const exp = (await e.store.get('mem_exp', { workspacePath: WS }))!
+    await e.store.update(exp, cur => ({ ...cur, validTo: NOW - 5 }))
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect(await adviceOf(e)).toContain('expired:mem_exp')
+
+    ok(await e.ignore('bloat', ['mem_long']))
+    ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_long', layer: { kind: 'workspace', workspacePath: WS } }))
+    expect(await adviceOf(e)).toContain('bloat:mem_long')
+  })
+
+  it('只改标签：照旧算已忽略', async () => {
+    const e = env()
+    await seedBloat(e)
+    ok(await e.ignore('bloat', ['mem_long']))
+    const long = (await e.store.get('mem_long', { workspacePath: WS }))!
+    await e.store.update(long, cur => ({ ...cur, tags: ['新标签'] }))
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect(await adviceOf(e)).toEqual([])
+  })
+
   it('记忆删除后忽略记录被清掉；从最近删除恢复后问题重新出现', async () => {
     const e = env()
     await seedBloat(e)

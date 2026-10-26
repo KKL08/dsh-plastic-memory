@@ -110,7 +110,7 @@ export interface LayerHealthResult {
  * - conflict 还须仍在待决账本里（dedupKey 匹配）——用户裁决 keep-both/dismiss 后双方记忆都在、
  *   缓存过滤不掉，不对账会出现"刚裁决完分数纹丝不动"的自相矛盾；
  * - 其余语义 findings 涉及的记忆在那次体检之后改过（updatedAt 晚于缓存时间）就不计。
- * 最后剔除用户忽略的建议（内容指纹仍对得上的），评分公式不动；新鲜度不可忽略。
+ * 最后剔除用户忽略的建议（指纹仍对得上的），评分公式不动；新鲜度不可忽略。
  */
 export function scoreLayer(deps: LayerHealthDeps, data: LayerPreread, layer: LayerRef, now: number): LayerHealthResult {
   const records = [...data.byId.values()].filter(r => r.status === 'active' && (layer.kind === 'global'
