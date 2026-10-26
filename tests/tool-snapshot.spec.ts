@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { executeSnapshotTool, type SnapshotToolDeps } from '../src/tools/snapshot.ts'
 import { executeForget } from '../src/tools/forget.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
@@ -88,6 +88,25 @@ describe('memory_snapshot', () => {
     expect(text).not.toContain(FAKE_SECRET.github)
     expect(r.message).toContain(`部署 key ${SECRET_MASK}`)
     expect(r.entries[0].current!.content).toBe(`token ${SECRET_MASK}`)
+  })
+
+  it('restore 写后发现已脱敏：只撤回恢复的那一层，别层同 id 的副本不动', async () => {
+    const deps = makeDeps()
+    const restoredRec = record({ id: 'mem_k', scope: 'workspace', workspacePath: '/proj', content: `token ${FAKE_SECRET.sk}`, updatedAt: 50 })
+    const snap = await deps.snapshots.capture({ operation: 'pre-forget', description: 'd', records: [restoredRec] }, 100)
+    const put = deps.store.put.bind(deps.store)
+    vi.spyOn(deps.store, 'put').mockImplementation(async (rec, hint, skipIf) => {
+      const written = await put(rec, hint, skipIf)
+      // 写完之后：别处在 global 写了同 id 的新副本（不含密钥），另一会话把快照里这条脱敏（彻底删除进行中）
+      await deps.store.create(record({ id: 'mem_k', content: 'global 新写的', updatedAt: 500 }))
+      await deps.snapshots.redact(new Set(['mem_k']))
+      return written
+    })
+    const r = await executeSnapshotTool({ action: 'restore', snapshotId: snap.id }, { workspacePath: '/proj' }, deps)
+    if (r.kind !== 'restored') throw new Error(r.kind)
+    expect(r.redacted).toEqual(['mem_k'])
+    expect((await deps.store.query({ scope: { kind: 'workspace', path: '/proj' } }))).toEqual([])
+    expect((await deps.store.query({ scope: { kind: 'global' } })).map(x => x.content)).toEqual(['global 新写的'])
   })
 
   it('restore：写回旧数据，冲突默认跳过', async () => {

@@ -136,7 +136,8 @@ export async function executeSnapshotTool(
     (r, skipIf) => deps.store.put(r, options.isExactLayer === true ? { workspacePath: r.workspacePath, isExactLayer: true } : undefined, skipIf),
     current,
     args.overwriteChanged ?? false,
-    r => deps.store.hardDelete(r, { isExactLayer: options.isExactLayer === true }),
+    // 撤回只删刚写回的那一份（快照里这条记录自己的那一层），别层同 id 的副本不是这次恢复写的
+    r => deps.store.hardDelete(r, { isExactLayer: true }),
   )
   const changedCount = skipped.length - redacted.length
   const skippedNote = changedCount > 0
