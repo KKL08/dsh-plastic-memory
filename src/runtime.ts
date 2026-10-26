@@ -30,7 +30,7 @@ export async function prereadSnapshot(store: MemoryStore, workspacePath: string 
 /**
  * session 内冻结的 snapshot 缓存，按 session 隔离（WeakMap）。
  * 构建只发生在 assemble（system-prompt/assemble 中间件调用，异步）：等 workspace 解析落定或超时 →
- * 缓存缺失或已过期则预读可见记录、组装、冻结 → 首次冻结计一次召回 → 维护点（global + 当前 workspace）。同步的 render（context provider）
+ * 缓存缺失或已过期则预读可见记录、组装、冻结 → 带入全文的 core 记忆计召回（每会话每条一次）→ 维护点（global + 当前 workspace）。同步的 render（context provider）
  * 只回缓存，没有缓存回空串；冷启动文案由组装在可见集合为空时产出，provider 不兜底。
  * compaction 结束只标过期（markStale）不清空。压缩在 pre-step 里发生时，index.ts 的 pre-step / request-error 监听
  * 在 next() 之后把重建等完，宿主准入时的同步 provider 已回新快照；两次组装之间若仍有只调 provider 的刷新，
@@ -73,18 +73,19 @@ export interface SnapshotCacheDeps {
 }
 
 export class SnapshotCache {
-  /** 冻结快照与冻结时的代次；代次落后于 generations 即为过期（仍可被 provider 读到）。 */
-  private cache = new WeakMap<object, { text: string; generation: number }>()
+  /** 冻结快照与冻结时的代次；代次落后于 generations 即为过期（仍可被 provider 读到）。
+   *  core：快照里带入全文的 core 记忆，id → 带入时的正文（检索据此省略重复正文）。 */
+  private cache = new WeakMap<object, { text: string; generation: number; core: ReadonlyMap<string, string> }>()
   /** 每次 markStale 加一（缺省 0）。构建开始时记下代次，写缓存前核对：中途被标过期的构建结果不进缓存。 */
   private generations = new WeakMap<object, number>()
   /** 全体代次：每次 markAllStale 加一，计入每个会话的代次。 */
   private epoch = 0
   /** 值为 undefined 表示"已解析、无工作目录"（无 cwd 或目录已不存在）；键不存在表示"还没解析完" */
   private workspacePaths = new WeakMap<object, string | undefined>()
-  /** 已计过召回的 session。语义是"每会话计一次"：markStale 不清它，同一 session 多次
-   * 压缩重建不重复计数，否则 recallCount 会从"被多少会话用过"膨胀成"组装过多少次"。
-   * 代价：压缩后重建时新进 core 的记忆不补计召回——可接受。 */
-  private recalled = new WeakSet<object>()
+  /** 每个 session 已计过召回的记忆 id（快照冻结与检索命中共用）。语义是"每会话每条计一次"：
+   * markStale 不清它，压缩重建、重复检索都不重复计数，否则 recallCount 会从"被多少会话用过"膨胀成
+   * "组装、检索过多少次"。随 session 对象回收；进程重启或热重载后从空开始，续上的会话会再计一次。 */
+  private recalled = new WeakMap<object, Set<string>>()
   /** 在途 lazy 解析（按 session memoize 的 Promise）：防同一 session 重发解析，且可被 awaitResolved 等待。 */
   private resolving = new WeakMap<object, Promise<void>>()
 
@@ -130,7 +131,7 @@ export class SnapshotCache {
   }
 
   /** assemble 中间件的入口，返回本次要写进 context 的（已转义）文本。
-   *  解析落定：缓存存在且未过期直接用；否则读盘组装、冻结、每会话首次冻结计召回。
+   *  解析落定：缓存存在且未过期直接用；否则读盘组装、冻结、计召回（每会话每条一次）。
    *  解析超时（或未注入 resolver 且未显式喂）：global-only 临时文本，只给本次用，不冻结、不计召回。
    *  组装失败只记日志，回落到 render（旧快照或空串），不拖垮宿主组装。 */
   async assemble(session: object, timeoutMs = 1500): Promise<string> {
@@ -158,18 +159,17 @@ export class SnapshotCache {
     const deps = { ...this.deps }
     // 预读范围：只读 active，global + 当前 workspace（未解析时 global-only）；同一次读取的隔离文件数给冷启动文案用
     const now = Date.now()
-    const { text, coreIds, ...usage } = assembleSnapshot({ ...deps, ...(await prereadSnapshot(deps.store, workspacePath)), workspacePath, now })
+    const preread = await prereadSnapshot(deps.store, workspacePath)
+    const { text, coreIds, ...usage } = assembleSnapshot({ ...deps, ...preread, workspacePath, now })
     if (!isResolved) return text
     // 构建期间被标过期：这份文本只给本次用，不进缓存、不计召回，下一次中间件按新代次重建
     if (this.generationOf(session) !== generation) return text
     // 同代次的并发构建：先落定的那份为准，保证冻结内容一致
     const landed = this.cache.get(session)
     if (landed && landed.generation === generation) return landed.text
-    this.cache.set(session, { text, generation })
-    if (!this.recalled.has(session)) {
-      this.recalled.add(session)
-      await this.deps.store.markRecalled(coreIds)
-    }
+    const contentOf = new Map(preread.records.map(r => [r.id, r.content]))
+    this.cache.set(session, { text, generation, core: new Map(coreIds.map(id => [id, contentOf.get(id)!])) })
+    await this.markRecalled(session, coreIds)
     // 快照冻结是维护点之一（设计稿 §5 §6）：对 global + 当前 workspace 做维护；失败只记日志，不拖垮注入
     try {
       await this.deps.store.maintain({ kind: 'visible', workspacePath })
@@ -214,6 +214,21 @@ export class SnapshotCache {
       const level = overflowLevel(mode, usage.usedTokens, deps.budget)
       await deps.overflowLedger.syncOverflow(scope, level, now, level ? overflowSummary(level, usage, deps.budget) : '')
     }
+  }
+
+  /** 该会话当前冻结快照（过期的也算，provider 仍回它）里带入全文的 core 记忆；没有冻结快照回 undefined。 */
+  injectedCore(session: object): ReadonlyMap<string, string> | undefined {
+    return this.cache.get(session)?.core
+  }
+
+  /** 计召回：同一 session 里已计过的 id 跳过，其余先记下再写侧表（并发调用也不重复计）。 */
+  async markRecalled(session: object, ids: readonly string[]): Promise<void> {
+    let counted = this.recalled.get(session)
+    if (!counted) this.recalled.set(session, counted = new Set())
+    const fresh = [...new Set(ids)].filter(id => !counted.has(id))
+    if (fresh.length === 0) return
+    for (const id of fresh) counted.add(id)
+    await this.deps.store.markRecalled(fresh)
   }
 
   /** 同步 provider 的出口：只回冻结缓存（过期的也回），没有缓存回空串。未解析的 session

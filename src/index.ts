@@ -312,6 +312,8 @@ export async function apply(ctx: Context, config: Config) {
         id: session?.header.id ?? 'unknown',
         lastSeq: session ? Math.max(session.seq - 1, 0) : 0,
         turnStartSeq: session ? openTurnStartSeq(session) : 0,
+        // 宿主 session 对象本身：检索按它找本会话的冻结快照、做召回去重
+        ...(session ? { handle: session } : {}),
       },
     }
   }
@@ -398,7 +400,7 @@ export async function apply(ctx: Context, config: Config) {
   const registerSave = () => registerWrite(createSaveTool({ store, registry, resolveContext, snapshots, onSaved }))
   let disposeSave = registerSave()
   ctx.tools.register(createSearchTool({
-    store, registry, resolveContext,
+    store, registry, resolveContext, sessionRecall: snapshotCache,
     tokenizer: { userDictionaryPath: () => config.search.userDictionaryPath.get(), log: ctx.logger },
   }))
   registerWrite(createForgetTool({ store, snapshots, decisions, log: ctx.logger, resolveContext }))

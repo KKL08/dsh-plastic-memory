@@ -14,7 +14,16 @@ import { exposedPath, maskSecretSurface } from '../secrets.ts'
 /** memory_search 运行时需要的会话上下文，由框架绑定层的 resolveContext 提供。 */
 export interface SearchContext {
   workspacePath: string | undefined
-  session: { id: string; lastSeq: number }
+  /** handle：宿主的 session 对象，快照缓存与召回去重按它分会话；拿不到 session 时缺省。 */
+  session: { id: string; lastSeq: number; handle?: object }
+}
+
+/** 会话的快照与召回去重（SnapshotCache 满足它）。 */
+export interface SessionRecall {
+  /** 该会话当前冻结快照里带入全文的 core 记忆：id → 带入时的正文；没有冻结快照回 undefined。 */
+  injectedCore(session: object): ReadonlyMap<string, string> | undefined
+  /** 计召回：同一会话里每条记忆只计一次。 */
+  markRecalled(session: object, ids: readonly string[]): Promise<void>
 }
 
 /** memory_search 工具的依赖，纯逻辑层与框架绑定层共用。 */
@@ -24,6 +33,8 @@ export interface SearchToolDeps {
   resolveContext(exec: ToolRunContext): Promise<SearchContext>
   /** 分词器选项：用户词典路径（现读）与降级告警的日志器。缺省只用主词典、告警走 console。 */
   tokenizer?: QueryTokenizerOptions
+  /** 缺省（纯测试场景）或拿不到 session 时：正文照常给全文，每次检索都计召回。 */
+  sessionRecall?: SessionRecall
 }
 
 export interface SearchArgs {
@@ -43,6 +54,9 @@ export interface SearchHit {
   /** 记忆文件的绝对路径（记忆根目录 + 目录名 + 文件名）；模型要全文或上下文时直接 Read。name 含明确密钥时不给（见 exposedPath）。 */
   path?: string
 }
+
+/** 命中的 core 记忆全文已在本会话快照里时，正文换成这句：同一段全文不在上下文里贴两遍。 */
+export const IN_SNAPSHOT_NOTE = '全文已在开头的长期记忆里。'
 
 /** 命中弱时附在说明末尾：说明码本身就是「相关度弱」的信号，提示模型换词再搜一次，而不是把弱结果当定论。 */
 export const RETRY_HINT = '命中弱，可以换同义词、减少词数或换个角度再搜一次。'
@@ -90,7 +104,7 @@ export async function executeSearch(
   deps: SearchToolDeps,
 ): Promise<{ hits: SearchHit[]; note?: string; noteCode?: SearchNoteCode; moreNote?: string }> {
   const a = args
-  const { workspacePath } = await deps.resolveContext(exec)
+  const { workspacePath, session } = await deps.resolveContext(exec)
   // 明确要"只看本项目"而当前会话没有工作目录：显式说明而非静默落回 global-only——
   // 用户要项目范围时给他全局结果是误导
   if (a.scope === 'workspace' && workspacePath === undefined) {
@@ -137,7 +151,14 @@ export async function executeSearch(
   const direct = ranked.findIndex(e => e.record.id === directId)
   if (direct > 0) ranked.unshift(...ranked.splice(direct, 1))
   const top = ranked.slice(0, limit)
-  await deps.store.markRecalled(top.map(e => e.record.id))
+  const topIds = top.map(e => e.record.id)
+  const { sessionRecall } = deps
+  const handle = session.handle
+  // 拿得到会话时同一会话每条只计一次召回，拿不到时每次都计
+  if (sessionRecall && handle) await sessionRecall.markRecalled(handle, topIds)
+  else await deps.store.markRecalled(topIds)
+  // 快照带入时的正文与现在一致才省略：冻结后改过的、同 id 取到别层副本的，开头那份不是这一版
+  const injected = sessionRecall && handle ? sessionRecall.injectedCore(handle) : undefined
 
   // 说明码只看返回列表：没有全命中 → or-fallback；连部分命中也没有、只剩第三档 → substring-fallback（互斥、substring 优先）
   const hasTier = (tier: SearchTier) => top.some(e => e.tier === tier)
@@ -152,7 +173,8 @@ export async function executeSearch(
       const masked = maskSecretSurface(h)
       const path = exposedPath(h, filePathOf.get(h.id)!)
       return {
-        id: h.id, type: h.type, summary: masked.summary, content: masked.content,
+        id: h.id, type: h.type, summary: masked.summary,
+        content: injected?.get(h.id) === h.content ? IN_SNAPSHOT_NOTE : masked.content,
         sourceNote: sourceNote(h),
         stalenessNote: stalenessNote(h, deps.registry.get(h.type).decayDays, now),
         ...(path !== undefined ? { path } : {}),
