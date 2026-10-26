@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { PendingDecisionsStore, overflowLevelOf } from '../src/governance/decisions.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
+import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
 import { SnapshotCache, type FrozenSnapshotInfo } from '../src/runtime.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
@@ -24,7 +24,7 @@ beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-overflow-')) })
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
 function ledger() {
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
   return new PendingDecisionsStore(sidecar.pending)
 }
 

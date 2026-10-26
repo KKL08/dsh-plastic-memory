@@ -7,12 +7,12 @@ import { spawnSync } from 'node:child_process'
 import { SidecarStore, STATE_DIR, KV_IMPORT_MARKER, KV_IMPORT_LOCK, RECALL_STATS_FILE, type LegacyKvTables } from '../src/storage/sidecar.ts'
 import { kvImportMarkerSchema } from '../src/storage/schema.ts'
 import {
-  memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema,
+  memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema,
   type MemorySnapshot, type PendingDecision, type ScanCacheEntry,
 } from '../src/governance/schema.ts'
 import { record } from './helpers/record.ts'
 
-const schemas = { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema }
+const schemas = { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }
 
 function snap(id: string, partial: Partial<MemorySnapshot> = {}): MemorySnapshot {
   return { id, createdAt: 1, operation: 'manual', description: id, memoryIds: [], data: [], ...partial }

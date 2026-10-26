@@ -9,7 +9,7 @@ import { MemoryStore, InMemoryTable, type MemoryLogger } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import {
-  REDACTED_PLACEHOLDER, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, type MemorySnapshot,
+  REDACTED_PLACEHOLDER, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type MemorySnapshot,
 } from '../src/governance/schema.ts'
 import { runRuleScan } from '../src/governance/rule-scan.ts'
 import { executeForget } from '../src/tools/forget.ts'
@@ -49,7 +49,7 @@ const wsRec = (partial: Partial<MemoryRecord> = {}) => baseRecord({
 })
 
 function harness() {
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const decisions = new PendingDecisionsStore(sidecar.pending)

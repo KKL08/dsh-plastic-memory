@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
+import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
 import { record } from './helpers/record.ts'
 
 // 账本侧表的 GUI 兼容扩展（ARCHITECTURE.md ⑥-7）：kind、settled.snapshotId、删一方的裁决留账、GUI 条目带指纹。
@@ -15,7 +15,7 @@ beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-gui-ledger-')) 
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
 function ledger() {
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
   return new PendingDecisionsStore(sidecar.pending)
 }
 

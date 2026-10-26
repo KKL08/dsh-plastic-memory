@@ -1,9 +1,8 @@
 import type { KvTable } from '../kv-table.ts'
 import type { MemoryRecord } from '../record-schema.ts'
-import type { AdviceIgnore } from '../storage/schema.ts'
 import { IGNORABLE_ADVICE_TYPES, type IgnorableAdviceType } from '../contract-codes.ts'
 import { candidateFingerprint } from './decisions.ts'
-import type { Finding, FindingType } from './schema.ts'
+import type { AdviceIgnore, Finding, FindingType } from './schema.ts'
 
 /**
  * 建议忽略：用户对一条建议整理项点了「忽略」，以后不再提示、也不再扣分。记录存在单独的侧表（不进待决账本：

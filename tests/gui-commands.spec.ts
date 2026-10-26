@@ -12,7 +12,7 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
-import { REDACTED_PLACEHOLDER, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, type PendingDecision } from '../src/governance/schema.ts'
+import { REDACTED_PLACEHOLDER, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type PendingDecision } from '../src/governance/schema.ts'
 import type { ClaimKvTable } from '../src/kv-table.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
@@ -54,7 +54,7 @@ interface EnvOpts {
 }
 
 function env(opts: EnvOpts = {}) {
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
   const clock = { now: opts.now ?? NOW }
   // 表和命令用同一个时钟：软删记的时刻和最近删除的保留期清扫才对得上
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now }), undefined, sidecar.recallStats)

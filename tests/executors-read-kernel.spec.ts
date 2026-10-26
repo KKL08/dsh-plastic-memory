@@ -18,7 +18,7 @@ import { executeSave } from '../src/tools/save.ts'
 import { executeForget } from '../src/tools/forget.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, type Finding } from '../src/governance/schema.ts'
+import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type Finding } from '../src/governance/schema.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { resolveHealthThresholds } from '../src/governance/health-presets.ts'
 import type { DirectoryNoteCode } from '../src/contract-codes.ts'
@@ -77,7 +77,7 @@ async function writeRaw(dir: string, fileName: string, text: string, ws?: string
 const handBuilt = (name: string, body: string, type = 'preference') => `---\nname: ${name}\ntype: ${type}\n---\n\n${body}\n`
 
 function harness(opts: { readEvent?: ReadEventFn; now?: number } = {}) {
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
   const table = new FileTable({ root, stats: sidecar.recallStats })
   const store = new MemoryStore(table, undefined, sidecar.recallStats)
   const decisions = new PendingDecisionsStore(sidecar.pending)

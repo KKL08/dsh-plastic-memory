@@ -13,7 +13,7 @@ import { executeHealth } from '../src/tools/health.ts'
 import { prereadLayers } from '../src/tools/layer-preread.ts'
 import { crossLayerConflicts } from '../src/governance/layer-health.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
+import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
 import { resolveHealthThresholds } from '../src/governance/health-presets.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
@@ -326,7 +326,7 @@ describe('同 id 重复副本只在写该 id 时清理', () => {
 
 describe('快照冻结是维护点', () => {
   function harness() {
-    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
     const table = new FileTable({ root, stats: sidecar.recallStats })
     const store = new MemoryStore(table, undefined, sidecar.recallStats)
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
@@ -389,7 +389,7 @@ describe('memory_health 纯读', () => {
     await writeRaw(globalDir(), INDEX_FILE, '# 手改\n')
     await new Promise(r => setTimeout(r, 5))
     const before = await treeSnapshot(root)
-    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
     const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
     const deps = {
       store, registry, decisions: new PendingDecisionsStore(sidecar.pending), cache: sidecar.scanCache,
@@ -409,7 +409,7 @@ describe('待决账本成员只在仅剩归档的目录里', () => {
     // proj-o 只剩归档：不进体检清单，但它的记录仍是待决条目的一方
     await writeMem(archiveOf(wsDir(OTHER)), 'b.md', wsRecord({ id: 'mem_b', status: 'deleted', deletedAt: now }, OTHER), OTHER)
     await writeFile(join(wsDir(OTHER), WORKSPACE_MARKER), OTHER + '\n')
-    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
     const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
     const decisions = new PendingDecisionsStore(sidecar.pending)
     await decisions.upsert({ memoryIds: ['mem_g1', 'mem_a'], summary: '' }, now)

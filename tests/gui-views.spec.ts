@@ -9,7 +9,7 @@ import { GLOBAL_DIR, STATE_DIR, workspaceDirName } from '../src/storage/paths.ts
 import { MemoryStore } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
-import { SEVERITY_BY_TYPE, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, type Finding, type FindingType } from '../src/governance/schema.ts'
+import { SEVERITY_BY_TYPE, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type Finding, type FindingType } from '../src/governance/schema.ts'
 import { layerCacheKey, type LayerRef } from '../src/governance/layer-health.ts'
 import { resolveHealthThresholds } from '../src/governance/health-presets.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
@@ -41,7 +41,7 @@ afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
 function harness() {
   let clock = T0
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock }), undefined, sidecar.recallStats)
   const decisions = new PendingDecisionsStore(sidecar.pending)
   const snapshots = new SnapshotStore(sidecar.snapshots)

@@ -15,7 +15,7 @@ import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import {
-  memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema,
+  memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema,
   type MemorySnapshot, type PendingDecision,
 } from '../src/governance/schema.ts'
 import { record } from './helpers/record.ts'
@@ -74,7 +74,7 @@ const backends: Backend[] = [
     make: async () => {
       const root = await mkdtemp(join(tmpdir(), 'pm-conf-'))
       const { recallStats: stats } = new SidecarStore({
-        root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema },
+        root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema },
       })
       const t = new FileTable({ root, stats })
       return {

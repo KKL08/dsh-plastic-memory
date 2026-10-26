@@ -13,7 +13,7 @@ import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
 import { resolveHealthThresholds } from '../src/governance/health-presets.ts'
 import { BLOAT_THRESHOLD } from '../src/governance/rule-scan.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, type Finding } from '../src/governance/schema.ts'
+import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type Finding } from '../src/governance/schema.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import { ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
@@ -41,7 +41,7 @@ afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
 /** 一个宿主实例：各自的侧表、FileTable、视图写入器，共用同一个根。 */
 function env(opts: { llm?: SemanticLlm } = {}) {
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => NOW }), undefined, sidecar.recallStats)
   const decisions = new PendingDecisionsStore(sidecar.pending)
   const snapshots = new SnapshotStore(sidecar.snapshots)

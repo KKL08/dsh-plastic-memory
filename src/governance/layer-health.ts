@@ -1,13 +1,12 @@
 import type { TypeRegistry } from '../type-registry.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { dedupKey } from './decisions.ts'
-import type { Finding, PendingDecision, ScanCacheEntry } from './schema.ts'
+import type { AdviceIgnore, Finding, PendingDecision, ScanCacheEntry } from './schema.ts'
 import { FINDING_TYPES } from './schema.ts'
 import { runRuleScan, buildMalformedFindings } from './rule-scan.ts'
 import { computeHealth, type HealthScore } from './scoring.ts'
 import { applyIgnores, type IgnoredAdvice } from './advice-ignores.ts'
 import type { DirectoryNote, LocatedRecord, QuarantineEntry } from '../storage/table.ts'
-import type { AdviceIgnore } from '../storage/schema.ts'
 
 /** 健康档位的用户面标签（scan 体检行与 health message 共用一份，枚举值仍是 green/amber/red）。 */
 export const TIER_LABEL = { green: '绿色', amber: '黄色', red: '红色' } as const

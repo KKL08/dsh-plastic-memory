@@ -34,7 +34,7 @@ import { resolveHealthThresholds, type HealthSensitivity } from './governance/he
 import { PendingDecisionsStore, overflowScopeOf } from './governance/decisions.ts'
 import { SnapshotStore } from './governance/snapshots.ts'
 import { AdviceIgnoreStore } from './governance/advice-ignores.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from './governance/schema.ts'
+import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from './governance/schema.ts'
 import type { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { baselineProjectionDefinition, readBaseline } from './governance/baseline.ts'
 import type { SemanticLlm } from './governance/semantic-scan.ts'
@@ -125,7 +125,7 @@ export async function apply(ctx: Context, config: Config) {
   // storageDomain 未必已挂上。探测落空返回 undefined：不写标记，本进程不再探，下次启动重探。
   const sidecar = new SidecarStore({
     root: memoryRoot,
-    schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema },
+    schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema },
     openLegacyKv: async (): Promise<LegacyKvTables | undefined> => {
       let facility: DomainFacility | undefined
       try {

@@ -29,7 +29,7 @@ import type { AssembleContext, PromptAssembly } from '@deepseek-ai/dsh-system-pr
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { cacheKey } from '../src/tools/scan.ts'
 import {
-  memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema,
+  memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema,
   type MemorySnapshot, type PendingDecision, type ScanCacheEntry,
 } from '../src/governance/schema.ts'
 import { baselineProjectionDefinition } from '../src/governance/baseline.ts'
@@ -166,7 +166,7 @@ afterEach(async () => {
 
 /** 同一 memoryRoot 上的另一个侧表实例：用例经它预置或读回插件落在 .state/ 的数据（文件是唯一真相）。 */
 function sidecarAt(memoryRoot: string) {
-  return new SidecarStore({ root: memoryRoot, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+  return new SidecarStore({ root: memoryRoot, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
 }
 
 describe('apply', () => {

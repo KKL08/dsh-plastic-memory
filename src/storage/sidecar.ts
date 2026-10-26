@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import type { ZodType } from 'zod'
 import type { BatchKvTable, ClaimKvTable, KvTable } from '../kv-table.ts'
 import type { MemoryLogger } from './table.ts'
-import { adviceIgnoreSchema, kvImportMarkerSchema, recallStatsSchema, type AdviceIgnore, type KvImportMarker, type RecallStats } from './schema.ts'
+import { kvImportMarkerSchema, recallStatsSchema, type KvImportMarker, type RecallStats } from './schema.ts'
 import { STATE_DIR } from './paths.ts'
 import { linkExclusive } from './exclusive-link.ts'
 
@@ -61,10 +61,10 @@ export interface LegacyKvTables {
   discard: () => Promise<void>
 }
 
-export interface SidecarOptions<S, P, C> {
+export interface SidecarOptions<S, P, C, I> {
   /** memoryRoot；侧表住其下 `.state/` */
   root: string
-  schemas: { snapshots: ZodType<S>; pending: ZodType<P>; scanCache: ZodType<C> }
+  schemas: { snapshots: ZodType<S>; pending: ZodType<P>; scanCache: ZodType<C>; adviceIgnores: ZodType<I> }
   /** 惰性读取旧宿主 KV（打开域、取两张表、关域）。只在标记缺失或旧行待清理时、持跨进程锁调用，
    *  每个实例（进程）至多一次。
    *  缺省 = 没有旧 KV 可导，写 source: none 的标记；返回 undefined = 宿主此刻没有 storageDomain（可能只是
@@ -371,22 +371,22 @@ class MapFileTable<T> implements BatchKvTable<T> {
   }
 }
 
-export class SidecarStore<S extends { id: string }, P extends { id: string }, C extends { id: string }> {
+export class SidecarStore<S extends { id: string }, P extends { id: string }, C extends { id: string }, I extends { id: string }> {
   readonly snapshots: KvTable<S>
   readonly pending: ClaimKvTable<P>
   readonly scanCache: KvTable<C>
   readonly recallStats: BatchKvTable<RecallStats>
-  readonly adviceIgnores: KvTable<AdviceIgnore>
+  readonly adviceIgnores: KvTable<I>
 
   private readonly stateDir: string
-  private readonly opts: SidecarOptions<S, P, C>
+  private readonly opts: SidecarOptions<S, P, C, I>
   private readonly log: MemoryLogger
   private chain: Promise<unknown> = Promise.resolve() // 进程内互斥：侧表写与导入串行化
   private imported: Promise<void> | undefined
   private markerWarned = false // 坏标记每个实例只告警一次（锁外、锁内各读一次）
 
   /** 构造不做 I/O：目录按需在首次写入时建。 */
-  constructor(opts: SidecarOptions<S, P, C>) {
+  constructor(opts: SidecarOptions<S, P, C, I>) {
     this.opts = opts
     this.log = opts.log ?? console
     this.stateDir = join(opts.root, STATE_DIR)
@@ -400,7 +400,7 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
     this.pending = new EntryFileTable(join(this.stateDir, PENDING_DIR), safeKey, opts.schemas.pending, gated)
     this.scanCache = new EntryFileTable(join(this.stateDir, SCAN_CACHE_DIR), sha1, opts.schemas.scanCache, gated)
     this.recallStats = new MapFileTable(join(this.stateDir, RECALL_STATS_FILE), recallStatsSchema, ungated)
-    this.adviceIgnores = new EntryFileTable(join(this.stateDir, ADVICE_IGNORES_DIR), sha1, adviceIgnoreSchema, ungated)
+    this.adviceIgnores = new EntryFileTable(join(this.stateDir, ADVICE_IGNORES_DIR), sha1, opts.schemas.adviceIgnores, ungated)
   }
 
   private locked<R>(fn: () => Promise<R>): Promise<R> {

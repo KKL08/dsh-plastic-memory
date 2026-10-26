@@ -7,7 +7,7 @@ import { SidecarStore } from '../src/storage/sidecar.ts'
 import { MemoryStore } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
+import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
 import { executeConfirm } from '../src/tools/confirm.ts'
 import { record } from './helpers/record.ts'
 
@@ -19,7 +19,7 @@ beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-confirm-settle-
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
 function env() {
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
   const decisions = new PendingDecisionsStore(sidecar.pending)
   const snapshots = new SnapshotStore(sidecar.snapshots)

@@ -8,7 +8,7 @@ import { createInterface } from 'node:readline'
 import { once } from 'node:events'
 import { SidecarStore } from '../../src/storage/sidecar.ts'
 import { SnapshotStore } from '../../src/governance/snapshots.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../../src/governance/schema.ts'
+import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../../src/governance/schema.ts'
 import { MemoryStore, InMemoryTable } from '../../src/store.ts'
 import { record } from './record.ts'
 
@@ -16,7 +16,7 @@ const [root, countArg, tag] = process.argv.slice(2)
 if (root === undefined || countArg === undefined || tag === undefined) throw new Error('usage: sidecar-worker.ts <root> <count> <tag>')
 
 const sidecar = new SidecarStore({
-  root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema },
+  root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema },
 })
 const snapshots = new SnapshotStore(sidecar.snapshots)
 const store = new MemoryStore(new InMemoryTable(), undefined, sidecar.recallStats)
