@@ -109,7 +109,7 @@ export function DeletedTab({ nav, scope, session, now = Date.now() }: {
                   </div>
                   <div className="pm-row-actions pm-del-actions">
                     {cause !== undefined ? <span className="pm-del-hint">{t('deleted.restoreHint')}</span> : null}
-                    <Button unavailable={unavailable} onClick={() => { setConfirming(memory.id) }}>{t('deleted.hardDelete')}</Button>
+                    <Button variant="ghost" unavailable={unavailable} onClick={() => { setConfirming(memory.id) }}>{t('deleted.hardDelete')}</Button>
                     <Button
                       unavailable={unavailable}
                       onClick={() => {
