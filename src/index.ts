@@ -457,7 +457,7 @@ export async function apply(ctx: Context, config: Config) {
     const writer = new ViewWriter({
       memoryRoot, log: ctx.logger,
       collect: () => collectGlobalViews({
-        store, decisions, cache: scanCache, ignores, registry, memoryRoot, isGovernanceEnabled: () => config.governance.enabled.get(), bootedAt,
+        store, decisions, cache: scanCache, ignores, registry, memoryRoot, isGovernanceEnabled: () => config.governance.enabled.get(), bootedAt, log: ctx.logger,
       }),
     })
     views = writer

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { KvTable } from '../kv-table.ts'
+import type { CasKvTable } from '../kv-table.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { IGNORABLE_ADVICE_TYPES, type IgnorableAdviceType } from '../contract-codes.ts'
 import type { AdviceIgnore, Finding, FindingType } from './schema.ts'
@@ -89,11 +89,11 @@ export function staleIgnores(
   }))
 }
 
-/** 建议忽略表：治理侧只经 KvTable 接口读写，不碰文件细节。 */
+/** 建议忽略表：治理侧只经 KvTable 一类接口读写（清理要条件删除，用 CasKvTable），不碰文件细节。 */
 export class AdviceIgnoreStore {
-  private readonly table: KvTable<AdviceIgnore>
+  private readonly table: CasKvTable<AdviceIgnore>
 
-  constructor(table: KvTable<AdviceIgnore>) {
+  constructor(table: CasKvTable<AdviceIgnore>) {
     this.table = table
   }
 
@@ -117,7 +117,10 @@ export class AdviceIgnoreStore {
     return this.table.delete(adviceIdentity(type, memoryIds))
   }
 
+  /** 清理点删掉判定过时的记录：只删此刻仍是判定时那一版的（忽略时间、指纹都没变），期间重新忽略写下的新记录留着。 */
   async remove(entries: readonly AdviceIgnore[]): Promise<void> {
-    for (const e of entries) await this.table.delete(e.id)
+    for (const e of entries) {
+      await this.table.deleteIf(e.id, cur => cur.ignoredAt === e.ignoredAt && cur.fingerprints.join(',') === e.fingerprints.join(','))
+    }
   }
 }

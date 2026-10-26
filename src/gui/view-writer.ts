@@ -27,6 +27,8 @@ export interface ViewSourceDeps {
   isGovernanceEnabled?: () => boolean
   /** 插件本次加载的时刻，写进健康视图（契约 bootedAt）。 */
   bootedAt?: number
+  /** 清理忽略表出错时记一条；缺省 console。 */
+  log?: MemoryLogger
 }
 
 /**
@@ -47,7 +49,12 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
     // 有读不出的文件或目录时，byId 里没有的 id 可能只是这次没读到，不按「已不在」清
     const isComplete = readLayers.every(l => (data.quarantined.get(layerCacheKey(l)) ?? []).length === 0)
       && ![...notes, ...data.directoryNotes].some(n => n.code === 'marker-missing' || n.code === 'dir-unreadable')
-    await deps.ignores.remove(staleIgnores(data.ignores, data.byId, { isComplete, before: now }))
+    // 清理是顺带的：出错只记日志，不挡视图写出（没清掉的记录指纹对不上，本来就不起作用）
+    try {
+      await deps.ignores.remove(staleIgnores(data.ignores, data.byId, { isComplete, before: now }))
+    } catch (err) {
+      (deps.log ?? console).warn('[plastic-memory] 建议忽略表清理失败，下次生成视图再试', err)
+    }
   }
   return buildGlobalViews({
     now, memoryRoot: deps.memoryRoot, registry: deps.registry, data, readLayers, healthLayers, open, settled,

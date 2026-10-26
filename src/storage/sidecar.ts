@@ -3,7 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import type { ZodType } from 'zod'
-import type { BatchKvTable, ClaimKvTable, KvTable } from '../kv-table.ts'
+import type { BatchKvTable, CasKvTable, ClaimKvTable, KvTable } from '../kv-table.ts'
 import type { MemoryLogger } from './table.ts'
 import { kvImportMarkerSchema, recallStatsSchema, type KvImportMarker, type RecallStats } from './schema.ts'
 import { STATE_DIR } from './paths.ts'
@@ -172,7 +172,7 @@ async function breakStaleLock(lockPath: string, held: string): Promise<void> {
 }
 
 /** 每条一个 JSON 文件的表。键从文件内容的 id 还原，所以 put 要求键等于值的 id。 */
-class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T> {
+class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T>, CasKvTable<T> {
   private readonly dir: string
   private readonly fileNameOf: (key: string) => string | undefined
   private readonly schema: ZodType<T>
@@ -246,6 +246,24 @@ class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T> {
     await this.env.ready()
     if (path === undefined) return false
     return this.env.locked(async () => {
+      try {
+        await rm(path)
+        return true
+      } catch (err) {
+        if (errnoCode(err) === 'ENOENT') return false
+        throw err
+      }
+    })
+  }
+
+  /** 写锁内重读再删：与 put 同在进程内的写链上，判定之后本进程刚写入的新值不会被删；跨进程仍是单条 LWW（重读到删除之间别的进程写入的会被删）。 */
+  async deleteIf(key: string, isStill: (current: T) => boolean): Promise<boolean> {
+    const path = this.pathOf(key)
+    await this.env.ready()
+    if (path === undefined) return false
+    return this.env.locked(async () => {
+      const cur = await this.read(path)
+      if (cur === undefined || !isStill(cur)) return false
       try {
         await rm(path)
         return true
@@ -376,7 +394,7 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
   readonly pending: ClaimKvTable<P>
   readonly scanCache: KvTable<C>
   readonly recallStats: BatchKvTable<RecallStats>
-  readonly adviceIgnores: KvTable<I>
+  readonly adviceIgnores: CasKvTable<I>
 
   private readonly stateDir: string
   private readonly opts: SidecarOptions<S, P, C, I>

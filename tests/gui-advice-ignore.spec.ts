@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
@@ -304,6 +304,42 @@ describe('agent 工具认忽略', () => {
     if (all.kind !== 'checkup') throw new Error(all.kind)
     expect(all.rows.find(row => row.workspacePath === WS)).toMatchObject({ score: (await wsLayerOf(e)).score, issues: 0, ignoredCount: 1 })
     expect(renderScanResult(all)).toContain('已忽略 1 条（用户可在记忆页健康里取消）')
+  })
+})
+
+describe('清理点', () => {
+  it('判定过时之后、删除之前别处按新内容重新忽略了同一项：新的那条留着', async () => {
+    const e = env()
+    await seedBloat(e)
+    ok(await e.ignore('bloat', ['mem_long']))
+    const long = (await e.store.get('mem_long', { workspacePath: WS }))!
+    await e.store.update(long, cur => ({ ...cur, content: `${LONG}y` }))
+    // 清理点读到的旧记录（指纹已对不上）
+    const judged = await e.ignores.list()
+    // 这时别处按新内容重新忽略
+    await e.ignores.ignore('bloat', [(await e.store.get('mem_long', { workspacePath: WS }))!], NOW + 1)
+    await e.ignores.remove(judged)
+    expect((await e.ignores.list()).map(i => i.ignoredAt)).toEqual([NOW + 1])
+  })
+
+  it('清理出错不挡视图：照常生成视图，记一条日志', async () => {
+    const e = env()
+    await seedBloat(e)
+    ok(await e.ignore('bloat', ['mem_long']))
+    const long = (await e.store.get('mem_long', { workspacePath: WS }))!
+    await e.store.update(long, cur => ({ ...cur, content: `${LONG}y` }))
+    const dir = join(root, STATE_DIR, 'advice-ignores')
+    const warnings: unknown[][] = []
+    const log = { info() {}, warn: (...args: unknown[]) => { warnings.push(args) }, error() {} }
+    await chmod(dir, 0o500)
+    try {
+      const views = await collectGlobalViews({ store: e.store, decisions: e.decisions, cache: e.cache, ignores: e.ignores, registry, memoryRoot: root, now: () => NOW, log })
+      expect(views.pending.items.some(i => i.kind === 'advice' && i.type === 'bloat')).toBe(true)
+    } finally {
+      await chmod(dir, 0o755)
+    }
+    expect(warnings).toHaveLength(1)
+    expect(String(warnings[0]![0])).toContain('建议忽略表')
   })
 })
 
