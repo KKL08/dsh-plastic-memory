@@ -1640,4 +1640,20 @@ describe('merge-memories（内容重复的直接合并）', () => {
     expect([(await e.store.get('mem_a'))!.content, (await e.store.get('mem_b'))!.status]).toEqual(['之后又改的', 'deleted'])
   })
 
+  it('撤销前被删的那条先从最近删除恢复、又改过：整个拒绝，保留的那条也不还原', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_a', content: '甲的正文', createdAt: 1 }))
+    await e.store.create(record({ id: 'mem_b', content: '乙的正文', createdAt: 2 }))
+    e.clock.now = LATER
+    const body = ok(await merge(e, ['mem_a', 'mem_b']))
+    ok(await e.run({ cmd: 'restore', memoryId: 'mem_b', layer: { kind: 'global' } }))
+    await e.store.update({ id: 'mem_b' }, r => ({ ...r, content: '乙恢复后又改的', updatedAt: LATER + 1 }))
+    const filePath = (await e.store.locate('mem_a'))!.filePath
+    const merged = await readFile(filePath, 'utf8')
+
+    expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('failed')
+    expect(await readFile(filePath, 'utf8')).toBe(merged)
+    expect([(await e.store.get('mem_b'))!.status, (await e.store.get('mem_b'))!.content]).toEqual(['active', '乙恢复后又改的'])
+    expect((await e.decisions.listSettled()).map(d => d.id)).toEqual([body.decisionId])
+  })
 })

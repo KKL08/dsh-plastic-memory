@@ -39,7 +39,7 @@ export function editFingerprint(r: MemoryRecord): string {
  * 当前记录与快照记录的投影不同才算冲突。软删除不是"更新的编辑"，它正是要撤销的对象；
  * 把它算作冲突会让 memory_forget 的撤销默认失效，因此当前记录若已是 status: 'deleted' 不计入冲突。
  */
-function isConflicting(current: MemoryRecord | undefined, snapshotted: MemoryRecord): boolean {
+export function isConflicting(current: MemoryRecord | undefined, snapshotted: MemoryRecord): boolean {
   return current !== undefined && current.status !== 'deleted'
     && !isDeepStrictEqual(restoreProjection(current), restoreProjection(snapshotted))
 }

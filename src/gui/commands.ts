@@ -10,7 +10,7 @@ import { RecordNotFoundError } from '../errors.ts'
 import { detectSecrets, hasSecret } from '../secrets.ts'
 import { computeDigest } from '../storage/frontmatter.ts'
 import { candidateFingerprint, kindOf, verdictLoser, type PendingDecisionsStore } from '../governance/decisions.ts'
-import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
+import { editFingerprint, isConflicting, type SnapshotStore } from '../governance/snapshots.ts'
 import type { PendingDecision, ScanCacheEntry, SnapshotRecord } from '../governance/schema.ts'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
 import { executeConfirm } from '../tools/confirm.ts'
@@ -207,6 +207,14 @@ async function dispatch(
     const current = await deps.store.get(before.id, { workspacePath: before.workspacePath, isExactLayer: true })
     if (current?.status !== 'active' || !isOwnWrite(current)) {
       return fail(cmd, 'failed', `记忆 ${before.id} 在这次修改之后又被改过或已删除，撤销会冲掉之后的改动，未做任何改动`)
+    }
+    // 要么全恢复、要么全不动：合并删掉的那条若已从最近删除恢复又改过，恢复会跳过它，保留的那条却已还原，所以先逐条核对
+    for (const rec of records) {
+      if (rec.id === before.id) continue
+      const cur = await deps.store.get(rec.id, { workspacePath: rec.workspacePath, isExactLayer: true })
+      if (isConflicting(cur, rec) && !isOwnWrite(cur!)) {
+        return fail(cmd, 'failed', `记忆 ${rec.id} 在这次修改之后又被改过，撤销会冲掉之后的改动，未做任何改动`)
+      }
     }
     const r = await restoreFrom(snapshotId, entry.memoryIds, allowCrossWorkspace, { isExactLayer: true, overwriteIf: isOwnWrite })
     if (isErr(r)) return r
