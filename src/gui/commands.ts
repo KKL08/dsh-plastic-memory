@@ -28,6 +28,7 @@ import {
 } from './contract.ts'
 import type { ViewWriter } from './view-writer.ts'
 import { generateDraft } from './model-draft.ts'
+import { scanOutcome } from './views.ts'
 
 /**
  * `/memory` 人类命令（GUI 的动作通道）：解析契约参数 → 调现有执行器 → 返回契约 JSON 文本。
@@ -45,7 +46,7 @@ export interface MemoryCommandDeps {
   ignores: AdviceIgnoreStore
   registry: TypeRegistry
   agentsMd: AgentsMdWriter
-  views: Pick<ViewWriter, 'request' | 'rewriteAll'>
+  views: Pick<ViewWriter, 'request' | 'rewriteAll' | 'collectViews'>
   /** 借来的会话 → workspace、子 agent 深度、会话 id（与工具共用接线层的同一个解析函数，exec 只带 agent）。 */
   resolveContext: (exec: ToolRunContext) => Promise<{ workspacePath: string | undefined; delegationDepth: number; session: { id: string } }>
   /** 在借来的会话的 agent 上解析模型；null = 拿不到。 */
@@ -523,15 +524,19 @@ async function dispatch(
     case 'scan': {
       // 在借来的会话的 agent 上解析模型，拿不到就不扫（只跑规则层会让界面以为体检做完了）
       if (deps.getLlm(exec) === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型，可在对话里让 agent 体检')
+      // 体检前的待处理，和体检后比出新增
+      const before = (await deps.views.collectViews()).pending
       const r = await executeScan(
         { scope: command.workspacePath ?? 'all', layers: 'full' },
         { store: deps.store, registry: deps.registry, decisions: deps.decisions, cache: deps.cache, getBaseline: deps.getBaseline, getLlm: deps.getLlm, resolveContext: deps.resolveContext, now: () => now },
         exec,
       )
       await deps.decisions.sweep(now)
-      await deps.views.rewriteAll()
+      const after = await deps.views.rewriteAll() ?? await deps.views.collectViews()
       if (r.kind === 'error') return fail(cmd, 'failed', r.message)
-      return { ok: true, cmd, notes: r.notes.map(n => n.code) }
+      // 项目体检读的是本项目的可见集合（全局 + 本项目），全库体检是全部层
+      const covered = command.workspacePath === undefined ? 'all' : [{ kind: 'global' as const }, { kind: 'workspace' as const, workspacePath: command.workspacePath }]
+      return { ok: true, cmd, notes: r.notes.map(n => n.code), ...scanOutcome(before, after, covered) }
     }
 
     case 'refresh-views':

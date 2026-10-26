@@ -511,6 +511,13 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     model: z.string().optional(),
     /** scan：体检的说明码（如 baseline-session-scoped）。 */
     notes: z.array(z.custom<ScanNoteCode>(v => typeof v === 'string')).optional(),
+    /**
+     * scan：本次新增的待处理项条数。新增 = 体检后有、体检前没有（按待处理项的身份比较，只看本次体检覆盖的层）；
+     * 用户忽略的建议不在待处理里，不算。pending = 高优问题 + 待你处理，advice = 建议整理。
+     */
+    added: z.object({ pending: z.number().int().nonnegative(), advice: z.number().int().nonnegative() }).optional(),
+    /** scan：本次体检覆盖各层的健康分（与健康视图同值，有密钥的层为 null），按健康视图的层序。 */
+    scores: z.array(z.object({ layer: layerRefSchema, score: z.number().nullable() })).optional(),
     /** info：记忆根目录、视图目录与各视图文件的绝对路径（session 是发命令的这个会话的视图）、视图版本。 */
     info: z.object({
       memoryRoot: z.string(),

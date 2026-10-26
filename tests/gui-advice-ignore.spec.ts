@@ -217,6 +217,22 @@ describe('忽略与取消忽略', () => {
     expect(await adviceOf(e)).toEqual(['redundancy:mem_a,mem_b'])
   })
 
+  it('体检结果的新增建议不算已忽略的：上次体检没报、这次又报出来的已忽略重复不计入', async () => {
+    let findings: object[] = [{ type: 'redundancy', memoryIds: ['mem_a', 'mem_b'], summary: '说的是一件事' }]
+    const e = env({ llm: { complete: async () => JSON.stringify({ findings }) } })
+    await e.store.create(record({ id: 'mem_a', name: '甲', content: '用 pnpm', scope: 'workspace', workspacePath: WS }))
+    await e.store.create(record({ id: 'mem_b', name: '乙', content: '包管理用 pnpm', scope: 'workspace', workspacePath: WS }))
+    expect(ok(await e.run({ cmd: 'scan', workspacePath: WS })).added).toEqual({ pending: 0, advice: 1 })
+    ok(await e.ignore('redundancy', ['mem_a', 'mem_b']))
+    // 模型这次没报，语义缓存里没有了；忽略记录还在（两条记忆都没改）
+    findings = []
+    ok(await e.run({ cmd: 'scan', workspacePath: WS }))
+    expect(await e.ignores.list()).toHaveLength(1)
+    findings = [{ type: 'redundancy', memoryIds: ['mem_b', 'mem_a'], summary: '还是一件事' }]
+    expect(ok(await e.run({ cmd: 'scan', workspacePath: WS })).added).toEqual({ pending: 0, advice: 0 })
+    expect((await wsLayerOf(e)).ignored.map(i => i.type)).toEqual(['redundancy'])
+  })
+
   it('参数：很久没确认不可忽略；单条类型只收一条记忆；记忆不在用 → not-found，什么都不记', async () => {
     const e = env()
     await seedBloat(e)

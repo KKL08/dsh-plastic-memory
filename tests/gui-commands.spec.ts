@@ -20,7 +20,7 @@ import { ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../src/gui/commands.ts'
 import {
   GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, encodeMemoryCommand, sessionViewFile,
-  deletedViewSchema, layerOfMemory, libraryViewSchema, memoryCommandResultSchema, pendingViewSchema,
+  deletedViewSchema, healthViewSchema, layerOfMemory, libraryViewSchema, memoryCommandResultSchema, pendingViewSchema,
   type MemoryCommand, type MemoryCommandResult, type PendingItem,
 } from '../src/gui/contract.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
@@ -1299,6 +1299,71 @@ describe('scan', () => {
     await e.store.create(record({ id: 'mem_w', scope: 'workspace', workspacePath: OTHER_WS }))
     const body = ok(await e.run({ cmd: 'scan', workspacePath: OTHER_WS }))
     expect(body.notes).toContain('baseline-session-scoped')
+  })
+
+  describe('结果：新增条数与分数', () => {
+    /** 模型这次要报的发现；测试里随时换。 */
+    const answering = (findings: () => object[]): SemanticLlm => ({ complete: async () => JSON.stringify({ findings: findings() }) })
+    const conflict = { type: 'conflict', memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', suggestedAction: '裁决' }
+    const redundancy = { type: 'redundancy', memoryIds: ['mem_c', 'mem_d'], summary: '说的是一件事' }
+    async function seedFour(e: ReturnType<typeof env>, ws = SESSION_WS) {
+      const scoped = { scope: 'workspace' as const, workspacePath: ws }
+      await e.store.create(record({ id: 'mem_a', name: '甲', content: '用 pnpm', ...scoped }))
+      await e.store.create(record({ id: 'mem_b', name: '乙', content: '用 npm', ...scoped }))
+      await e.store.create(record({ id: 'mem_c', name: '丙', content: '测试用 vitest', ...scoped }))
+      await e.store.create(record({ id: 'mem_d', name: '丁', content: '单测跑 vitest', ...scoped }))
+    }
+    const healthScores = async (e: ReturnType<typeof env>) =>
+      healthViewSchema.parse(await e.readView('health')).layers.map(l => ({ layer: l.layer, score: l.score }))
+
+    it('新增的冲突算待处理、新增的内容重复算建议；体检前就有的（很久没确认）不算；分数与健康视图一致', async () => {
+      const e = env({ llm: answering(() => [conflict, redundancy]) })
+      await seedFour(e)
+      const body = ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+      expect(body.added).toEqual({ pending: 1, advice: 1 })
+      // 项目体检覆盖全局与本项目两层
+      expect(body.scores).toEqual(await healthScores(e))
+      expect(body.scores!.map(s => s.layer)).toEqual([{ kind: 'global' }, { kind: 'workspace', workspacePath: SESSION_WS }])
+    })
+
+    it('再体检一次、发现没变：都是 0', async () => {
+      const e = env({ llm: answering(() => [conflict, redundancy]) })
+      await seedFour(e)
+      ok(await e.run({ cmd: 'scan' }))
+      expect(ok(await e.run({ cmd: 'scan' })).added).toEqual({ pending: 0, advice: 0 })
+    })
+
+    /** 体检进行中（第一次调模型时），另一个会话往别的项目存了一条含密钥的记忆。 */
+    const savingSecretMeanwhile = (e: ReturnType<typeof env>, inner: SemanticLlm): SemanticLlm => ({
+      complete: async (input) => {
+        if ((await e.store.get('mem_x', { workspacePath: OTHER_WS })) === undefined) {
+          await e.store.create(record({ id: 'mem_x', name: '己', content: `token ${FAKE_SECRET.sk}`, scope: 'workspace', workspacePath: OTHER_WS, lastConfirmedAt: NOW }))
+        }
+        return inner.complete(input)
+      },
+    })
+
+    it('只算本次体检覆盖的层：体检期间别的项目冒出来的问题不算，分数也只给覆盖的层', async () => {
+      const seeding = env()
+      await seedFour(seeding)
+      await seeding.store.create(record({ id: 'mem_o', name: '戊', content: '别的项目', scope: 'workspace', workspacePath: OTHER_WS }))
+      const e = env({ llm: savingSecretMeanwhile(seeding, answering(() => [redundancy])) })
+      const body = ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+      expect(pendingViewSchema.parse(await e.readView('pending')).items.some(i => i.kind === 'secret')).toBe(true)
+      expect(body.added).toEqual({ pending: 0, advice: 1 })
+      expect(body.scores!.map(s => s.layer)).toEqual([{ kind: 'global' }, { kind: 'workspace', workspacePath: SESSION_WS }])
+    })
+
+    it('全库体检覆盖全部层：别的项目新出的问题也算，分数给每一层', async () => {
+      const seeding = env()
+      await seedFour(seeding)
+      await seeding.store.create(record({ id: 'mem_o', name: '戊', content: '别的项目', scope: 'workspace', workspacePath: OTHER_WS }))
+      const e = env({ llm: savingSecretMeanwhile(seeding, answering(() => [])) })
+      const body = ok(await e.run({ cmd: 'scan' }))
+      expect(body.added).toEqual({ pending: 1, advice: 0 })
+      expect(body.scores).toEqual(await healthScores(e))
+      expect(body.scores).toHaveLength(3)
+    })
   })
 })
 

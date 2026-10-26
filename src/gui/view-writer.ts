@@ -111,10 +111,17 @@ export class ViewWriter {
     return this.schedule()
   }
 
-  /** 全量重写入口：不等节流，排在进行中的写入之后立即收集并写出四个全局视图。 */
-  rewriteAll(): Promise<void> {
-    if (this.disposed) return Promise.resolve()
-    return this.enqueue(() => this.writeGlobal(GLOBAL_VIEW_NAMES))
+  /** 全量重写入口：不等节流，排在进行中的写入之后立即收集并写出四个全局视图；返回写出的视图（已卸载或写失败时为 undefined）。 */
+  async rewriteAll(): Promise<GlobalViews | undefined> {
+    if (this.disposed) return undefined
+    let written: GlobalViews | undefined
+    await this.enqueue(async () => { written = await this.writeGlobal(GLOBAL_VIEW_NAMES) })
+    return written
+  }
+
+  /** 只收集、不写盘（体检前记下当时的待处理，和体检后比出新增）。 */
+  collectViews(): Promise<GlobalViews> {
+    return this.collect()
   }
 
   /** 插件卸载时调用：此后不再落盘；等进行中的写入结束再返回，免得旧实例的迟到写入盖掉新实例的视图。 */
@@ -149,9 +156,10 @@ export class ViewWriter {
     return run
   }
 
-  private async writeGlobal(names: readonly GlobalViewName[]): Promise<void> {
+  private async writeGlobal(names: readonly GlobalViewName[]): Promise<GlobalViews> {
     const views = await this.collect()
     for (const name of names) await this.writeFile(GUI_VIEW_FILES[name], views[name])
+    return views
   }
 
   private async writeWorkspaceMap(entries: ReadonlyArray<readonly [string, string]>): Promise<void> {
