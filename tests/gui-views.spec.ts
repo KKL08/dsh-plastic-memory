@@ -26,6 +26,7 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { FAKE_SECRET, generatePrivateKeyPem } from './helpers/secrets.ts'
+import { SECRET_MASK } from '../src/secrets.ts'
 
 // 视图生成：真实临时目录（FileTable + .state 侧表）+ 账本 → 五种视图 JSON。只断言视图内容，不 mock 自己的模块。
 
@@ -92,6 +93,16 @@ describe('待处理视图', () => {
     expect(bad.kind === 'unreadable-file' && bad.error.length).toBeGreaterThan(0)
     // 密钥与读不出的文件没有进账本
     expect((await h.decisions.list()).map(e => e.kind ?? 'conflict').sort()).toEqual(['conflict', 'conflict', 'overflow', 'promote-candidate'])
+  })
+
+  it('读不出的文件：显示用的相对路径遮掉文件名里的密钥，打开用的 filePath 仍是真实路径', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_a', name: 'A', content: '用 pnpm' }))
+    const broken = join(wsDir(), `deploy-${FAKE_SECRET.sk}.md`)
+    await writeFile(broken, '---\nname: [\n---\n正文\n')
+    const { pending } = await h.views()
+    const bad = pending.items.find(i => i.kind === 'unreadable-file')
+    expect(bad).toMatchObject({ filePath: broken, relativePath: `${workspaceDirName(WS)}/deploy-${SECRET_MASK}.md` })
   })
 
   it('PEM 私钥整块遮住：待处理的密钥条目与记忆库视图里都不出现私钥正文', async () => {

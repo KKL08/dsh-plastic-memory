@@ -30,7 +30,8 @@ export async function prereadLayers(
     const r = await deps.store.readLayer(scope, { includeArchive: true })
     read.push(...r.records)
     quarantined.set(layerCacheKey(layer), r.quarantined)
-    directoryNotes.push(...r.directoryNotes)
+    const byPath = new Map(r.records.map(l => [l.filePath, l]))
+    directoryNotes.push(...r.directoryNotes.map(n => maskNote(n, byPath.get(n.path))))
   }
   const hint = { workspacePath }
   // 已删、已取代的副本不遮住别层在用的同 id 副本；被盖住的已删副本单列（最近删除），也不算同 id 副本
@@ -62,10 +63,17 @@ export async function prereadLayers(
   return { byId, filePaths, pending, cache, quarantined, directoryNotes, shadowedDeleted }
 }
 
+/** 记忆文件路径与注入同口径（exposedPath）：name 含密钥的那份只给所在目录、文件名换成占位，其余路径遮一遍。 */
+const shown = (l: LocatedRecord) => exposedPath(l.record, l.filePath) ?? join(maskSecrets(dirname(l.filePath)), SECRET_MASK)
+
+/** 目录说明出去前的路径口径：落在某条记忆文件上的按 shown，其余路径遮一遍；正文里的原路径换成遮过的，再整体遮一遍。 */
+function maskNote(n: DirectoryNote, located: LocatedRecord | undefined): DirectoryNote {
+  const path = located !== undefined ? shown(located) : maskSecrets(n.path)
+  return { ...n, path, text: maskSecrets(n.text.replaceAll(n.path, path)) }
+}
+
 /** 同 id 的多余副本：每份一条说明（路径是副本，正文点出读取时用的那份）。 */
 function duplicateNotes(read: readonly LocatedRecord[], chosen: readonly LocatedRecord[]): DirectoryNote[] {
-  // 路径与注入同口径（exposedPath）：name 含密钥的那份只给所在目录、文件名换成占位，其余路径遮一遍
-  const shown = (l: LocatedRecord) => exposedPath(l.record, l.filePath) ?? join(maskSecrets(dirname(l.filePath)), SECRET_MASK)
   const kept = new Map(chosen.map(l => [l.record.id, l]))
   return read.filter(l => kept.get(l.record.id)!.filePath !== l.filePath).map(l => {
     const [path, keptPath] = [shown(l), shown(kept.get(l.record.id)!)]
@@ -78,7 +86,7 @@ function duplicateNotes(read: readonly LocatedRecord[], chosen: readonly Located
 
 /** 目录枚举的说明：缺标记与不可读目录总是列出；dir-empty 只在全库体检里有意义。 */
 export function listingNotes(listing: WorkspaceDirListing, opts: { includeEmpty: boolean }): DirectoryNote[] {
-  return listing.directoryNotes.filter(n => opts.includeEmpty || n.code !== 'dir-empty')
+  return listing.directoryNotes.filter(n => opts.includeEmpty || n.code !== 'dir-empty').map(n => maskNote(n, undefined))
 }
 
 /** 体检清单：顶层有记忆文件的 workspace（按路径排序）。 */

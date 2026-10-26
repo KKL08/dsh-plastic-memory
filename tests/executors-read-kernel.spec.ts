@@ -209,6 +209,26 @@ describe('票 09 验收：执行器走按范围读取与两级定位', () => {
     expect(text).not.toContain(FAKE_SECRET.github)
   })
 
+  it('保留键、缺标记目录说明里的路径同口径：name 含密钥的给目录加占位，路径带密钥的遮掉', async () => {
+    const reservedBody = (name: string) => `---\nname: ${name}\ntype: preference\nrecallCount: 3\n---\n\n正文\n`
+    await writeRaw(wsDir(WS), 'gw.md', reservedBody(`网关 ${FAKE_SECRET.github}`), WS)
+    await writeRaw(wsDir(WS), `deploy-${FAKE_SECRET.sk}.md`, reservedBody('部署说明'))
+    const stray = join(root, `stray-${FAKE_SECRET.sk}`)
+    await writeMem(stray, 'x.md', rec({ id: 'mem_stray' }))
+    const h = harness()
+    for (const r of [single(await h.health()), checkup(await h.health({ scope: 'all' }))]) {
+      expect(r.directoryNotes.filter(n => n.code === RESERVED_KEYS).map(n => n.path).sort()).toEqual([
+        join(wsDir(WS), SECRET_MASK), join(wsDir(WS), `deploy-${SECRET_MASK}.md`),
+      ].sort())
+      expect(r.directoryNotes.find(n => n.code === MARKER_MISSING)?.path).toBe(join(root, `stray-${SECRET_MASK}`))
+      const text = renderHealthResult(r)
+      expect(JSON.stringify(r.directoryNotes)).not.toContain(FAKE_SECRET.sk)
+      expect(JSON.stringify(r.directoryNotes)).not.toContain(FAKE_SECRET.github)
+      expect(text).not.toContain(FAKE_SECRET.sk)
+      expect(text).not.toContain(FAKE_SECRET.github)
+    }
+  })
+
   it('重复 id：search 返回一条且规则正确；副本在另一个项目时 health 报出、不删', async () => {
     // updatedAt 新者优先，压过目录偏好
     await writeMem(globalDir(), 'n.md', rec({ id: 'mem_n', content: 'dupalpha global 新', updatedAt: 300 }))

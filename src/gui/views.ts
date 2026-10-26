@@ -3,7 +3,7 @@ import type { MemoryRecord } from '../record-schema.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { DirectoryNote } from '../storage/table.ts'
 import { RETENTION_MS } from '../retention.ts'
-import { maskSecretSurface } from '../secrets.ts'
+import { maskSecretSurface, maskSecrets } from '../secrets.ts'
 import { FINDING_TYPES, type PendingDecision } from '../governance/schema.ts'
 import { kindOf, overflowLevelOf, overflowScopeOf, verdictLoser } from '../governance/decisions.ts'
 import { runRuleScan } from '../governance/rule-scan.ts'
@@ -123,8 +123,9 @@ export function buildPendingView(input: ViewInput): PendingView {
   for (const layer of input.readLayers) {
     for (const q of data.quarantined.get(layerCacheKey(layer)) ?? []) {
       items.push({
+        // 显示用的相对路径与体检说明同口径遮一遍（手起名的文件名可能带密钥）；filePath 是打开文件用的，照给
         kind: 'unreadable-file', layer: toGuiLayer(layer), filePath: q.path,
-        relativePath: relative(input.memoryRoot, q.path).split(sep).join('/'), error: q.error,
+        relativePath: maskSecrets(relative(input.memoryRoot, q.path).split(sep).join('/')), error: q.error,
       })
     }
   }
