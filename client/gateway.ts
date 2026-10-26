@@ -562,7 +562,9 @@ export function createHostGateway(ctx: HostContext): BindGateway {
       const version = stat.status === 'live' ? stat.value?.version : undefined
       const isMissing = stat.status === 'failed' && stat.failure?.code === 'workspace-file/not-found'
       useEffect(() => { if (!isPassive && sessionId !== undefined && isMissing) root.ensureViews(sessionId) }, [isPassive, sessionId, isMissing])
-      const key = `${sessionId}\0${path}`
+      // 读到的内容按文件认，不按经哪个会话读：借来的会话中途换了（它开始跑一轮、换了更新的会话），全局视图还是同一个文件，
+      // 沿用已读到的内容，不回到读取中（否则整页列表重挂，卡片上正在进行的编辑、生成都丢了）；「这次对话」视图的路径带会话 id，换会话照样重读
+      const key = path ?? ''
       // 有版本按版本读，refresh-views 成功后也重读一次（宿主推新版本之前先读到重写的内容）；
       // 资源还停在 not-found、但 refresh-views 已写过文件时，按刷新次数直接读一次
       const trigger = version !== undefined ? `${version}#${rootState.refreshes}` : isMissing && rootState.refreshes > 0 ? `refresh:${rootState.refreshes}` : undefined
