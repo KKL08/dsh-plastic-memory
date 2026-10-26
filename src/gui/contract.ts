@@ -231,9 +231,9 @@ export const sessionViewSchema = z.object({
   frozenAt: z.number(),
   budget: z.number().nonnegative(),
   overflowMode: z.enum(OVERFLOW_MODES),
-  /** 三段之和即总用量：本项目、全局、固定说明（标题、导航图、固定尾注）。 */
+  /** 三段之和即总用量：本项目、全局、固定说明（标题、附注、导航图、固定尾注）。 */
   tokens: z.object({ workspace: z.number(), global: z.number(), fixed: z.number() }),
-  /** 计入上限的部分（固定尾注与导航图不计）：relax 下超过 budget 即已放宽，strict 下不超过 budget。 */
+  /** 计入上限的部分（附注、固定尾注与导航图不计）：relax 下超过 budget 即已放宽，strict 下不超过 budget。 */
   usedTokens: z.number().int().nonnegative(),
   injectedIds: z.array(z.string()),
   /** 没带入的条数（只有 strict 会截）：「已到上限，N 条没带入」。 */

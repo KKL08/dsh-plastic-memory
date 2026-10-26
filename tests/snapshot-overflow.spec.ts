@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { assembleSnapshot, estimateTokens, overflowLevel, COLD_START_TEXT, MEMORY_AS_DATA_NOTE } from '../src/snapshot.ts'
+import { assembleSnapshot, estimateTokens, overflowLevel, COLD_START_TEXT, MEMORY_AS_DATA_NOTE, COMPACTION_ENGINE_NOTE } from '../src/snapshot.ts'
 import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { formatIndexLine } from '../src/index-line.ts'
@@ -60,14 +60,14 @@ describe('assembleSnapshot：超出上限两种模式', () => {
 })
 
 describe('assembleSnapshot：按作用域分段的 token', () => {
-  it('记忆行按作用域归本项目 / 全局，其余（标题、尾注）归固定说明；三段之和 = 预算内用量 + 固定尾注', () => {
+  it('记忆行按作用域归本项目 / 全局，其余（标题、附注、尾注）归固定说明；三段之和 = 预算内用量 + 附注 + 固定尾注', () => {
     const g = record({ id: 'mem_g', scope: 'global', name: '全局条目', summary: '全局摘要' })
     const w = record({ id: 'mem_w', scope: 'workspace', workspacePath: WS, name: '项目条目', summary: '项目摘要内容' })
     const r = assembleSnapshot({ ...base, records: [g, w], budget: 4000 })
     expect(r.tokens.global).toBe(estimateTokens(formatIndexLine(g, { passive: false, note: '' })))
     expect(r.tokens.workspace).toBe(estimateTokens(formatIndexLine(w, { passive: false, note: '' })))
     const tail = estimateTokens('\n看全文：用 memory_search 按 id 或关键词查。') + estimateTokens(`\n${MEMORY_AS_DATA_NOTE}`)
-    expect(r.tokens.workspace + r.tokens.global + r.tokens.fixed).toBe(r.usedTokens + tail)
+    expect(r.tokens.workspace + r.tokens.global + r.tokens.fixed).toBe(r.usedTokens + estimateTokens(`> ${COMPACTION_ENGINE_NOTE}`) + tail)
     expect(r.injectedIds.sort()).toEqual(['mem_g', 'mem_w'])
   })
 
