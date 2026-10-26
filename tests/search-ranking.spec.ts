@@ -12,7 +12,8 @@ import { expandQueryTerms, matchScore } from '../src/text.ts'
 import { createTokenizer } from '../src/search/tokenizer.ts'
 import { RANKING_FIELDS, substringEligible } from '../src/search/ranking.ts'
 import {
-  executeSearch, renderSearchResult, LOW_COVERAGE_NOTE, OR_FALLBACK_NOTE, RETRY_HINT, SUBSTRING_FALLBACK_NOTE, type SearchToolDeps,
+  executeSearch, renderSearchResult, termHitNote, LOW_COVERAGE_NOTE, OR_FALLBACK_NOTE, RETRY_HINT, SUBSTRING_FALLBACK_NOTE,
+  TERM_NOTE_MAX, type SearchToolDeps,
 } from '../src/tools/search.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { SearchNoteCode } from '../src/contract-codes.ts'
@@ -236,7 +237,7 @@ describe('今天靠子串能命中的查询升级后仍命中', () => {
 })
 
 describe('id 直达与零 token', () => {
-  it('查询 trim 后恰等于某条可见记忆的 id → 该条第一，其余照常；说明码仍按档位算', async () => {
+  it('查询 trim 后恰等于某条可见记忆的 id → 该条第一，其余照常；直达时不附说明', async () => {
     const store = await seeded([
       record({ id: 'mem_target', name: '目标', content: '正文里没有自己的 id', confidence: 0.1 }),
       record({ id: 'mem_mention', name: '提到者', content: 'mem_target 被提到，mem_target 很重要', confidence: 0.9 }),
@@ -244,10 +245,14 @@ describe('id 直达与零 token', () => {
     const r = await search(store, '  mem_target ')
     expect(r.hits.map(h => h.id)).toEqual(['mem_target', 'mem_mention'])
     expect(r.noteCode).toBeUndefined()   // 列表里有全命中记录（mem_mention）
-    // 只有直达那条：它在子串档，说明码照常附上
-    const only = await search(await seeded([record({ id: 'mem_solo', content: '正文' })], fileTable(await mkdtemp(join(root, 'solo-')))), 'mem_solo')
-    expect(only.hits.map(h => h.id)).toEqual(['mem_solo'])
-    expect(only.noteCode).toBe(SUBSTRING_FALLBACK)
+    // 直达那条在子串档、其余只部分命中：要找的就是排第一的这条，不提示命中弱
+    const only = await search(await seeded([
+      record({ id: 'mem_solo', content: '正文' }),
+      record({ id: 'mem_other', content: 'solo 演出安排' }),
+    ], fileTable(await mkdtemp(join(root, 'solo-')))), 'mem_solo')
+    expect(only.hits.map(h => h.id)).toEqual(['mem_solo', 'mem_other'])
+    expect(only.noteCode).toBeUndefined()
+    expect(only.note).toBeUndefined()
   })
 
   it('零 token 查询：不做关键词过滤，按 confidence、lastConfirmedAt 排并受 limit', async () => {
@@ -308,13 +313,14 @@ describe('说明码：四种触发，互斥、substring 优先', () => {
 })
 
 describe('命中弱：按排第一的部分命中记录覆盖了多少查询判断', () => {
-  it('中英双写、记忆只写了中文：or-fallback，如实说明没有全命中，不劝重搜、不列逐词命中', async () => {
+  it('中英双写、范围内有记录两种写法都有：首条只写了中文也算这个词在，or-fallback，如实说明没有全命中，不劝重搜、不列逐词命中', async () => {
     const store = await seeded([
-      record({ id: 'mem_debounce', name: '搜索框防抖', content: '前端搜索输入框防抖 300 毫秒，回车立即搜' }),
+      record({ id: 'mem_debounce', name: '搜索框防抖毫秒数', content: '前端搜索输入框防抖 300 毫秒，回车立即搜' }),
+      record({ id: 'mem_glossary', name: '术语', content: '防抖（debounce）与节流的区别' }),
       record({ id: 'mem_other', name: '无关', content: '与查询无关的内容' }),
     ])
-    const r = await search(store, '防抖 debounce')
-    expect(r.hits.map(h => h.id)).toEqual(['mem_debounce'])
+    const r = await search(store, '防抖 debounce 毫秒')
+    expect(r.hits.map(h => h.id)).toEqual(['mem_debounce', 'mem_glossary'])
     expect(r.noteCode).toBe(OR_FALLBACK)
     expect(r.note).toBe(OR_FALLBACK_NOTE)
     expect(OR_FALLBACK_NOTE).toBe('没有记忆同时含全部关键词，以下按相关性排序。')
@@ -343,14 +349,41 @@ describe('命中弱：按排第一的部分命中记录覆盖了多少查询判�
     expect(renderSearchResult(r).startsWith(r.note!)).toBe(true)
   })
 
+  it('中英双写、范围内没有记录两种写法都有：中英各算一个关键词，首条缺了英文写法就判弱', async () => {
+    const store = await seeded([
+      record({ id: 'mem_debounce', name: '搜索框防抖', content: '前端搜索输入框防抖 300 毫秒，回车立即搜' }),
+    ])
+    const r = await search(store, '防抖 debounce')
+    expect(r.noteCode).toBe(LOW_COVERAGE)
+    expect(r.note!.split('\n')[1]).toBe('各关键词命中的记忆条数：防抖 1、debounce 0。范围内一条都没命中的：debounce。')
+    // 英文词的标签去掉紧挨着的标点
+    const r2 = await search(store, 'debounce（防抖）')
+    expect(r2.note!.split('\n')[1]).toBe('各关键词命中的记忆条数：debounce 0、防抖 1。范围内一条都没命中的：debounce。')
+  })
+
   it('逐词命中里中英双写成对算：一边完整出现就算这一对命中', async () => {
     const store = await seeded([
       record({ id: 'mem_cfg', name: '配置中心', content: '功能开关存在配置中心' }),
       record({ id: 'mem_cron', name: '清理脚本', content: '用 cron 每晚清理临时文件' }),
+      record({ id: 'mem_term', name: '术语', content: '定时任务（cron）' }),
     ])
     const r = await search(store, '定时任务 cron 配置')
     expect(r.noteCode).toBe(LOW_COVERAGE)
-    expect(r.note!.split('\n')[1]).toBe('各关键词命中的记忆条数：定时任务/cron 1、配置 1。')
+    expect(r.note!.split('\n')[1]).toBe('各关键词命中的记忆条数：定时任务/cron 2、配置 1。')
+  })
+
+  it('逐词命中只列整词，超过上限只列前几个再说共几个；一个可数的词都没有（纯数字）就不列这一行', async () => {
+    expect(termHitNote([])).toBeUndefined()
+    const counts = Array.from({ length: TERM_NOTE_MAX + 2 }, (_, i) => ({ label: `词${i}`, count: i % 2 }))
+    const zero = counts.filter(c => c.count === 0).map(c => `${c.label}`)
+    expect(termHitNote(counts)).toBe(
+      `各关键词命中的记忆条数：${counts.slice(0, TERM_NOTE_MAX).map(c => `${c.label} ${c.count}`).join('、')} 等 ${counts.length} 个。`
+      + `范围内一条都没命中的：${zero.join('、')}。`,
+    )
+    const store = await seeded([record({ id: 'mem_num', content: '防抖 300 毫秒' })])
+    const r = await search(store, '300')
+    expect(r.noteCode).toBe(SUBSTRING_FALLBACK)
+    expect(r.note).toBe(SUBSTRING_FALLBACK_NOTE)
   })
 })
 

@@ -25,7 +25,8 @@ import {
 // 两层：① 与权重无关的不变量逐条断言；② bigram 与 jieba 两档的 top-1 / top-3 聚合下限，不逐条断言。
 // 锚点类（带标点的字面值）例外：逐条断言第一名，不计入聚合下限。
 // 换说法类（paraphrase）只记基线：断言查询本身没写成字面能命中、两档都能跑出合法指标，不设分数线。
-// 中英双写（bilingual）与库里没有答案（no-answer）只评「命中弱」：前者首条正确且不判弱，后者全部判弱。
+// 中英双写（bilingual）、长句（long-answerable）与库里没有答案（no-answer、long-no-answer）只评「命中弱」：
+// 有答案的看首条对不对、判弱的有几条，没有答案的必须全部判弱。
 // 跑在 FileTable 临时目录上走 executeSearch，与生产同一条路。
 
 const jiebaProbe = await defaultJiebaLoader.importJieba().then(() => undefined, (err: unknown) => err instanceof Error ? err.message : String(err))
@@ -308,28 +309,32 @@ describe('换说法类（只记基线，不设分数线）', { timeout: 60_000 }
 
 // ---- 命中弱 ----
 //
-// 判弱的说明码劝模型换词再搜。首条已经正确的不该判弱（白搜一轮），库里没有答案的必须判弱。
+// 判弱的说明码劝模型换词再搜。拿不准时偏向判弱：误判弱只多搜一轮，漏判弱会让模型把错的结果当答案。
+// 所以库里没有答案的必须判弱；首条已经正确却判弱的只设上限。
 // 改判弱口径前（只要没有全命中就判弱）的基线：评估集 93 条非零 token 查询里，bigram 判弱 61 条、其中首条正确 33 条；
-// jieba 判弱 50 条、其中首条正确 24 条。改后首次结果：bigram 判弱 27 条、首条正确 0 条；jieba 判弱 25 条、首条正确 1 条
-// （换说法类「视觉稿一般在哪儿看」）。换说法类不设门槛，只计入下面的总数上限。
+// jieba 判弱 50 条、其中首条正确 24 条。加长句两类后（114 条），按覆盖查询文字四成判弱时：没有答案的长句 bigram 漏判 6 条、
+// jieba 漏判 7 条。改成只数内容字、阈值 0.65 后：两档都不漏判；首条正确却判弱 bigram 13 条、jieba 11 条，
+// 其中 8 条是中英双写（库里没有记录两种写法都出现，按两个关键词算，见下），其余 bigram 5 条（长句）、jieba 3 条（长句 2、换说法 1）。
 
-const WEAK_CORRECT_CEILING = 2
+const WEAK_CORRECT_CEILING = 5
+const NO_ANSWER_QUERIES = EVAL_QUERIES.filter(q => q.category !== 'zero-token' && q.relevant.length === 0)
 const isWeak = (code: SearchNoteCode | undefined) => code !== undefined && (WEAK_SEARCH_NOTE_CODES as readonly string[]).includes(code)
 
 describe('命中弱', { timeout: 60_000 }, () => {
-  it('评估集有中英双写与库里没有答案两类查询，各至少 6 条；后者 relevant 为空', () => {
+  it('评估集有中英双写、库里没有答案、有答案的长句、没有答案的长句四类查询；没有答案的 relevant 为空', () => {
     expect(EVAL_QUERIES.filter(q => q.category === 'bilingual').length).toBeGreaterThanOrEqual(6)
-    const noAnswer = EVAL_QUERIES.filter(q => q.category === 'no-answer')
-    expect(noAnswer.length).toBeGreaterThanOrEqual(6)
-    for (const q of noAnswer) expect(q.relevant).toEqual([])
+    expect(EVAL_QUERIES.filter(q => q.category === 'no-answer').length).toBeGreaterThanOrEqual(6)
+    expect(EVAL_QUERIES.filter(q => q.category === 'long-answerable').length).toBeGreaterThanOrEqual(8)
+    expect(EVAL_QUERIES.filter(q => q.category === 'long-no-answer').length).toBeGreaterThanOrEqual(8)
+    for (const q of EVAL_QUERIES.filter(q => q.category === 'no-answer' || q.category === 'long-no-answer')) expect(q.relevant).toEqual([])
   })
 
   for (const tier of ['bigram', 'jieba'] as const) {
     describe.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档`, () => {
-      it('库里没有答案的查询全部判弱', async () => {
+      it('库里没有答案的查询（短词与长句）全部判弱', async () => {
         useTier(tier)
         const notWeak: string[] = []
-        for (const q of EVAL_QUERIES.filter(q => q.category === 'no-answer')) {
+        for (const q of NO_ANSWER_QUERIES) {
           const r = await search(q.query)
           expect(r.hits.length, q.query).toBeGreaterThan(0)   // 有常见词能部分命中，不是空结果
           if (!isWeak(r.noteCode)) notWeak.push(`${q.query} → ${r.noteCode ?? '无说明码'}`)
@@ -337,21 +342,20 @@ describe('命中弱', { timeout: 60_000 }, () => {
         expect(notWeak).toEqual([])
       })
 
-      it('中英双写、记忆只写了一种写法：首条正确且不判弱', async () => {
+      it('中英双写、记忆只写了一种写法：首条正确（库里没有记录两种写法都有，按两个关键词算，判弱不计入上限）', async () => {
         useTier(tier)
         const bad: string[] = []
         for (const q of EVAL_QUERIES.filter(q => q.category === 'bilingual')) {
-          const r = await search(q.query)
-          const first = r.hits[0]?.id
-          if (first === undefined || !q.relevant.includes(first) || isWeak(r.noteCode)) bad.push(`${q.query} → ${first ?? '（空）'} ${r.noteCode ?? ''}`)
+          const first = (await search(q.query)).hits[0]?.id
+          if (first === undefined || !q.relevant.includes(first)) bad.push(`${q.query} → ${first ?? '（空）'}`)
         }
         expect(bad).toEqual([])
       })
 
-      it(`首条正确却判弱的查询不超过 ${WEAK_CORRECT_CEILING} 条（库里没有答案的除外）`, async () => {
+      it(`首条正确却判弱的查询不超过 ${WEAK_CORRECT_CEILING} 条（中英双写与库里没有答案的除外）`, async () => {
         useTier(tier)
         const weakCorrect: string[] = []
-        for (const q of EVAL_QUERIES.filter(q => q.category !== 'zero-token' && q.category !== 'no-answer')) {
+        for (const q of EVAL_QUERIES.filter(q => q.category !== 'zero-token' && q.category !== 'bilingual' && q.relevant.length > 0)) {
           const r = await search(q.query)
           if (isWeak(r.noteCode) && rankOf(q, r.hits.map(h => h.id)) === 1) weakCorrect.push(q.query)
         }

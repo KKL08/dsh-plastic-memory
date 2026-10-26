@@ -91,9 +91,10 @@ All notable changes to this project are documented here. The format follows
   Chinese, identifiers, partial words, plain names, ids) runs with the tests
   and fails when top-1 or top-3 accuracy drops below a fixed floor, with and
   without the Chinese segmenter.
-  It also holds bilingual queries and queries with no answer in the corpus;
-  the tests fail when a query with no answer is not flagged as a weak match
-  or when more than two queries with a correct top hit are.
+  It also holds bilingual queries, long questions with and without an
+  answer, and short queries with no answer in the corpus; the tests fail
+  when a query with no answer is not flagged as a weak match, or when more
+  than five queries with a correct top hit are (bilingual ones excluded).
 - The checkup buttons on the memory page and the settings status card carry a
   line saying the checkup uses the current chat's model and that more
   memories take more tokens. When a checkup finishes, its result line ends
@@ -177,15 +178,17 @@ All notable changes to this project are documented here. The format follows
   appears as a whole word ranks above one that only appears inside a longer
   word (`scope` in `readScope`), and matches in the name, summary and tags
   weigh more than matches in the content; a query that is exactly a memory id
-  returns that memory first. The result opens with a note when no returned
-  memory contains every word (`or-fallback`). It flags a weak match only
-  when the top hit also misses a whole keyword or covers less than 40 % of
-  the query (`low-coverage`), or when nothing but a literal match on the
-  query text is left (`substring-fallback`); a weak match suggests searching
-  again and lists how many memories each keyword matched. A term written in
-  both Chinese and English counts as one keyword, and long questions are not
-  flagged for missing filler words, so a correct top hit does not send the
-  model on an extra search.
+  returns that memory first, without a note. The result opens with a note
+  when no returned memory contains every word (`or-fallback`). It flags a
+  weak match when the top hit also misses a whole keyword or covers less than
+  65% of the query's content words (`low-coverage`), or when nothing but a
+  literal match on the query text is left (`substring-fallback`); a weak
+  match suggests searching again and lists how many memories each keyword
+  matched. Question words and particles in long questions don't count, and
+  a term written in both Chinese and English counts as one keyword only when
+  some memory in scope contains both forms. When unsure it flags: a false
+  flag costs one extra search, a missed one lets the model take a wrong hit
+  for the answer.
 - The `memory_search` tool description now says what the tool does: it ranks
   by relevance, accepts Chinese and English queries and returns file paths. It
   also tells the model how to query well (two to four content words, both the

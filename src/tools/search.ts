@@ -69,11 +69,20 @@ export const OR_FALLBACK_NOTE = '没有记忆同时含全部关键词，以下�
 export const LOW_COVERAGE_NOTE = `没有记忆同时含全部关键词，排第一的也只含其中一部分，以下按相关性排序。${RETRY_HINT}`
 export const SUBSTRING_FALLBACK_NOTE = `没有命中关键词的记忆，以下只是关键词以子串出现的结果。${RETRY_HINT}`
 
-/** 命中弱时接在说明后的一行：各关键词在范围内命中几条，一条都没命中的单独点名，让模型知道该换哪个词。 */
-export function termHitNote(counts: readonly TermHitCount[]): string {
-  const head = `各关键词命中的记忆条数：${counts.map(c => `${c.label} ${c.count}`).join('、')}。`
+/** 逐词命中一行最多列几个词，多的写「等 N 个」。 */
+export const TERM_NOTE_MAX = 8
+
+/**
+ * 命中弱时接在说明后的一行：各关键词在范围内命中几条，一条都没命中的单独点名，让模型知道该换哪个词。
+ * 没有可列的词（如纯数字查询）时返回 undefined，不出这一行。
+ */
+export function termHitNote(counts: readonly TermHitCount[]): string | undefined {
+  if (counts.length === 0) return undefined
+  const list = (items: readonly string[]) =>
+    items.length > TERM_NOTE_MAX ? `${items.slice(0, TERM_NOTE_MAX).join('、')} 等 ${items.length} 个` : items.join('、')
+  const head = `各关键词命中的记忆条数：${list(counts.map(c => `${c.label} ${c.count}`))}。`
   const zero = counts.filter(c => c.count === 0).map(c => c.label)
-  return zero.length === 0 ? head : `${head}范围内一条都没命中的：${zero.join('、')}。`
+  return zero.length === 0 ? head : `${head}范围内一条都没命中的：${list(zero)}。`
 }
 
 /** 返回条数上限的缺省值与硬上限。 */
@@ -162,6 +171,7 @@ export async function executeSearch(
   const directId = a.query.trim()
   const direct = ranked.findIndex(e => e.record.id === directId)
   if (direct > 0) ranked.unshift(...ranked.splice(direct, 1))
+  const isDirect = direct >= 0
   const top = ranked.slice(0, limit)
   const topIds = top.map(e => e.record.id)
   const { sessionRecall } = deps
@@ -173,12 +183,14 @@ export async function executeSearch(
   const injected = sessionRecall && handle ? sessionRecall.injectedCore(handle) : undefined
 
   // 说明码只看返回列表：没有全命中时，排第一的部分命中记录覆盖够 → or-fallback，不够 → low-coverage；
-  // 连部分命中也没有、只剩第三档 → substring-fallback（三者互斥、substring 优先）。判弱的两种附逐词命中条数（范围内全部候选）
+  // 连部分命中也没有、只剩第三档 → substring-fallback（三者互斥、substring 优先）。判弱的两种附逐词命中条数（范围内全部候选）。
+  // 查询恰是某条记忆的 id：它已置顶，就是要找的那条，不出说明码
   const hasTier = (tier: SearchTier) => top.some(e => e.tier === tier)
   let note: { noteCode: SearchNoteCode; note: string } | undefined
-  if (top.length > 0 && !hasTier('all')) {
-    const groups = groupQueryTerms(a.query, tokens, tokenize)
-    const weakNote = (text: string) => `${text}\n${termHitNote(termHitCounts(groups, tokens, ranked.map(e => e.tokenHits)))}`
+  if (top.length > 0 && !hasTier('all') && !isDirect) {
+    const rows = ranked.map(e => e.tokenHits)
+    const groups = groupQueryTerms(a.query, tokens, tokenize, rows)
+    const weakNote = (text: string) => [text, termHitNote(termHitCounts(groups, tokens, rows))].filter(x => x !== undefined).join('\n')
     const first = top.find(e => e.tier === 'partial')
     if (first === undefined) note = { noteCode: 'substring-fallback', note: weakNote(SUBSTRING_FALLBACK_NOTE) }
     else if (judgeTopHit(groups, tokens, first.tokenHits).weak) note = { noteCode: 'low-coverage', note: weakNote(LOW_COVERAGE_NOTE) }
