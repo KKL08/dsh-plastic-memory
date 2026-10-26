@@ -1,9 +1,10 @@
+import { aliasForms } from './ranking.ts'
 import { CJK } from './tokenizer.ts'
 
 /**
  * 「命中弱」的判断：没有记录同时命中全部查询 token 时，看排第一的那条对上了查询的多少。
- * 查询先按空白和文字种类切成词：CJK 连续段去掉虚词后剩下的内容段，其他文字每个空白分隔的词；
- * 中英双写的同一个术语，只有范围内有记录两种写法都出现过才配成一对。逐词命中条数也按这套分组数。
+ * 查询先按空白切成词：用 / 连写的别名组（见 ranking.ts aliasForms）是一个关键词，任一写法完整出现即算；
+ * 其余的词再按文字种类切开，CJK 连续段去掉虚词后剩下的内容段，其他文字的整词。逐词命中条数也按这套分组数。
  * 纯函数，不碰存储与分词器状态。拿不准时偏向判弱：误判弱只多搜一轮，漏判弱会让模型把错的结果当答案。
  */
 
@@ -28,30 +29,26 @@ export const FUNCTION_WORDS = [
   '的', '了', '吗', '呢', '吧', '啊', '呀', '么', '在', '是',
 ] as const
 
-/** 查询里的一个词：一个非 CJK 词，或 CJK 词去掉虚词后的一个内容段。 */
+/** 查询里的一个词：一个非 CJK 词、CJK 词去掉虚词后的一个内容段，或别名组的一个写法。 */
 export interface QueryUnit {
-  /** 显示用：非 CJK 词去掉首尾标点，CJK 内容段原样。 */
+  /** 显示用：非 CJK 词去掉首尾标点，CJK 内容段与别名写法原样。 */
   label: string
-  isCjk: boolean
-  /** 非 CJK 词切出的查询 token 下标；CJK 内容段不用它，按字算覆盖。 */
+  /** CJK 内容段按字算覆盖（盖住了几个字）；其余按 tokens 算（命中了几个 token）。 */
+  byChar: boolean
+  /** 这个词切出的查询 token 下标；byChar 的不用。 */
   tokens: number[]
 }
 
 export interface TermGroup {
-  /** 一个词；或中英双写的一对（CJK 在前）。 */
+  /** 一个词；或别名组的各写法（按查询里的顺序）。 */
   units: QueryUnit[]
-  /** 关键词组：非 CJK 词、去掉虚词后 2 到 KEYWORD_MAX_CJK_CHARS 字的 CJK 词、成对的。整组没在首条出现就判弱；其余只计入覆盖度。 */
+  /** 关键词组：非 CJK 词、去掉虚词后 2 到 KEYWORD_MAX_CJK_CHARS 字的 CJK 词、别名组。整组没在首条出现就判弱；其余只计入覆盖度。 */
   keyword: boolean
 }
 
 const SCRIPT_RUN = new RegExp(`[${CJK}]+|[^${CJK}]+`, 'gu')
 const IS_CJK = new RegExp(`[${CJK}]`, 'u')
 const EDGE_PUNCT = /^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu
-/**
- * 能和中文词成对的英文词：单个全小写词（deploy、rate-limit）或全大写缩写（CI、API）。首字母大写或大小写混写的
- * 多是产品名、标识符（Redis、readScope），带数字、斜杠、点的（v2、node22、路径）是字面值，都不配对。
- */
-const PAIRABLE_LATIN = /^(?:[a-z]+(?:-[a-z]+)*|[A-Z]{2,})$/
 
 /** CJK 段按虚词切成内容段。 */
 export function contentSegments(run: string): string[] {
@@ -75,7 +72,7 @@ export function contentSegments(run: string): string[] {
 
 /** 一个词在某条记录里对上了多少：CJK 内容段逐字算（整个落在段内、且命中的查询 token 盖住的字），非 CJK 词按 token 算。 */
 function unitCover(unit: QueryUnit, tokens: readonly string[], hits: readonly boolean[]): { covered: number; total: number } {
-  if (!unit.isCjk) return { covered: unit.tokens.filter(i => hits[i]).length, total: unit.tokens.length }
+  if (!unit.byChar) return { covered: unit.tokens.filter(i => hits[i]).length, total: unit.tokens.length }
   const chars = [...unit.label]
   const covered = new Array<boolean>(chars.length).fill(false)
   tokens.forEach((token, i) => {
@@ -94,53 +91,32 @@ const isFull = (unit: QueryUnit, tokens: readonly string[], hits: readonly boole
 }
 
 /**
- * 查询切词与中英成对。tokens 是执行器清洗后的查询 token（去重、剔除噪声），tokenize 是查询与记录共用的分词器，
- * rows 是范围内各条记录对 tokens 的命中（成对的证据）。
- * 成对：关键词长度的 CJK 词与紧挨着的一个英文词（先看前面再看后面，见 PAIRABLE_LATIN），且范围内至少一条记录两种写法都完整出现。
- * 没有这样的记录，就是两个独立的关键词。不产生 token 的词（纯数字、标点）和只有虚词的 CJK 段先剔掉。
+ * 查询切词。tokens 是执行器清洗后的查询 token（去重、剔除噪声），tokenize 是查询与记录共用的分词器。
+ * 空白分开的是不同的词；别名组整组一个关键词。不产生 token 的词（纯数字、标点）和只有虚词的 CJK 段剔掉。
  */
-export function groupQueryTerms(
-  query: string, tokens: readonly string[], tokenize: (text: string) => string[], rows: readonly (readonly boolean[])[],
-): TermGroup[] {
+export function groupQueryTerms(query: string, tokens: readonly string[], tokenize: (text: string) => string[]): TermGroup[] {
   const index = new Map(tokens.map((t, i) => [t, i] as const))
-  // 词：CJK 段带上它的内容段，非 CJK 词带上 token
-  const terms: { unit: QueryUnit; keyword: boolean; segments?: QueryUnit[] }[] = []
+  const tokenIds = (text: string) => [...new Set(tokenize(text).map(t => index.get(t)).filter((i): i is number => i !== undefined))]
+  const groups: TermGroup[] = []
   for (const word of query.split(/\s+/)) {
+    const forms = aliasForms(word)
+    if (forms !== undefined) {
+      const units = forms.map(label => ({ label, byChar: false, tokens: tokenIds(label) })).filter(u => u.tokens.length > 0)
+      if (units.length > 0) groups.push({ units, keyword: true })
+      continue
+    }
     for (const [part] of word.matchAll(SCRIPT_RUN)) {
       if (IS_CJK.test(part)) {
-        const segments = contentSegments(part).map(label => ({ label, isCjk: true, tokens: [] as number[] }))
-        if (segments.length === 0) continue
-        const n = [...segments[0]!.label].length
-        if (segments.length === 1 && n >= 2 && n <= KEYWORD_MAX_CJK_CHARS) terms.push({ unit: segments[0]!, keyword: true })
-        else terms.push({ unit: segments[0]!, keyword: false, segments })
+        const segments = contentSegments(part)
+        const n = segments.length === 1 ? [...segments[0]!].length : 0
+        const keyword = n >= 2 && n <= KEYWORD_MAX_CJK_CHARS
+        for (const label of segments) groups.push({ units: [{ label, byChar: true, tokens: [] }], keyword })
         continue
       }
-      const toks = [...new Set(tokenize(part).map(t => index.get(t)).filter((i): i is number => i !== undefined))]
-      if (toks.length > 0) terms.push({ unit: { label: part.replace(EDGE_PUNCT, ''), isCjk: false, tokens: toks }, keyword: true })
+      const ids = tokenIds(part)
+      if (ids.length > 0) groups.push({ units: [{ label: part.replace(EDGE_PUNCT, ''), byChar: false, tokens: ids }], keyword: true })
     }
   }
-  const paired = new Map<number, number>()
-  const used = new Set<number>()
-  const canPair = (i: number, j: number) => j >= 0 && j < terms.length && !used.has(j) && terms[j]!.unit.isCjk === false
-    && PAIRABLE_LATIN.test(terms[j]!.unit.label)
-    && rows.some(hits => isFull(terms[i]!.unit, tokens, hits) && isFull(terms[j]!.unit, tokens, hits))
-  terms.forEach((t, i) => {
-    if (!t.unit.isCjk || !t.keyword || used.has(i)) return
-    const j = canPair(i, i - 1) ? i - 1 : canPair(i, i + 1) ? i + 1 : undefined
-    if (j === undefined) return
-    used.add(i)
-    used.add(j)
-    paired.set(i, j)
-  })
-  const groups: TermGroup[] = []
-  terms.forEach((t, i) => {
-    const j = paired.get(i)
-    if (j !== undefined) groups.push({ units: [t.unit, terms[j]!.unit], keyword: true })
-    else if (!used.has(i)) {
-      if (t.segments !== undefined) for (const s of t.segments) groups.push({ units: [s], keyword: false })
-      else groups.push({ units: [t.unit], keyword: t.keyword })
-    }
-  })
   return groups
 }
 
@@ -174,7 +150,7 @@ export interface TermHitCount {
 }
 
 /**
- * 逐词命中条数，按查询里的顺序、同名去重：每组算一个词（成对的显示成「中文/英文」，任一写法完整出现即算）。
+ * 逐词命中条数，按查询里的顺序、同名去重：每组算一个词（别名组按查询里的顺序用 / 连起各写法，任一写法完整出现即算）。
  * 句子里的内容段只列词长的（2 到 KEYWORD_MAX_CJK_CHARS 字），单字和更长的短语不列，也不列二字碎片。
  * rows 是范围内各条记录对查询 token 的命中。
  */

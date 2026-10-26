@@ -11,7 +11,7 @@ import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { expandQueryTerms, matchScore } from '../src/text.ts'
-import { RANKING_FIELDS, TIER_ORDER, substringEligible, type SearchTier } from '../src/search/ranking.ts'
+import { RANKING_FIELDS, TIER_ORDER, isFullMatch, queryAliasGroups, substringEligible, type SearchTier } from '../src/search/ranking.ts'
 import { defaultJiebaLoader, resetJieba, tokenizerForQuery, type JiebaLoader } from '../src/search/jieba-segmenter.ts'
 import { executeSearch, type SearchToolDeps } from '../src/tools/search.ts'
 import { WEAK_SEARCH_NOTE_CODES, type SearchNoteCode } from '../src/contract-codes.ts'
@@ -65,17 +65,18 @@ const isNoiseTerm = (t: string) => /^\p{N}+$/u.test(t) || ([...t].length === 1 &
 const byId = new Map(EVAL_RECORDS.map(r => [r.id, r]))
 
 /** 用生产分词器（当前档）独立算出每条记录相对查询的档位；不在任何档返回 undefined。
- * token 命中 = 某字段分词含它，或某字段小写原文以子串含它。 */
+ * token 命中 = 某字段分词含它，或某字段小写原文以子串含它；全命中按别名组算（组内任一写法全命中即可）。 */
 async function tierOracle(query: string): Promise<(r: MemoryRecord) => SearchTier | undefined> {
   const tokenize = await tokenizerForQuery(query, { log: silent })
   const tokens = [...new Set(tokenize(query))].filter(t => !isNoiseTerm(t))
   const eligible = substringEligible(tokens)
   const legacy = expandQueryTerms(query)
+  const aliasGroups = queryAliasGroups(query, tokens, tokenize)
   return r => {
     const texts = RANKING_FIELDS.map(f => f === 'tags' ? r.tags.join(' ') : r[f])
     const fieldTokens = texts.flatMap(t => tokenize(t))
-    const hit = tokens.filter((t, i) => fieldTokens.includes(t) || (eligible[i]! && texts.some(x => x.toLowerCase().includes(t)))).length
-    if (hit > 0) return hit === tokens.length ? 'all' : 'partial'
+    const hits = tokens.map((t, i) => fieldTokens.includes(t) || (eligible[i]! && texts.some(x => x.toLowerCase().includes(t))))
+    if (hits.some(Boolean)) return isFullMatch(hits, aliasGroups) ? 'all' : 'partial'
     return matchScore(r, legacy) > 0 ? 'substring' : undefined
   }
 }
@@ -313,8 +314,9 @@ describe('换说法类（只记基线，不设分数线）', { timeout: 60_000 }
 // 所以库里没有答案的必须判弱；首条已经正确却判弱的只设上限。
 // 改判弱口径前（只要没有全命中就判弱）的基线：评估集 93 条非零 token 查询里，bigram 判弱 61 条、其中首条正确 33 条；
 // jieba 判弱 50 条、其中首条正确 24 条。加长句两类后（114 条），按覆盖查询文字四成判弱时：没有答案的长句 bigram 漏判 6 条、
-// jieba 漏判 7 条。改成只数内容字、阈值 0.65 后：两档都不漏判；首条正确却判弱 bigram 13 条、jieba 11 条，
-// 其中 8 条是中英双写（库里没有记录两种写法都出现，按两个关键词算，见下），其余 bigram 5 条（长句）、jieba 3 条（长句 2、换说法 1）。
+// jieba 漏判 7 条。改成只数内容字、阈值 0.65 后：两档都不漏判；中英双写以外首条正确却判弱 bigram 5 条（长句）、
+// jieba 3 条（长句 2、换说法 1）。中英双写改用 / 连成别名组后，8 条里 bigram 判弱 1 条（断线重连/reconnect：
+// 记忆写的是「断线后的重连」，二字切分下中文写法不算完整出现）、jieba 0 条；空格分开的 2 条对照两档都判弱。
 
 const WEAK_CORRECT_CEILING = 5
 const NO_ANSWER_QUERIES = EVAL_QUERIES.filter(q => q.category !== 'zero-token' && q.relevant.length === 0)
@@ -342,14 +344,21 @@ describe('命中弱', { timeout: 60_000 }, () => {
         expect(notWeak).toEqual([])
       })
 
-      it('中英双写、记忆只写了一种写法：首条正确（库里没有记录两种写法都有，按两个关键词算，判弱不计入上限）', async () => {
+      it('中英双写、记忆只写了一种写法：首条都正确；用 / 连成别名组的至多 1 条判弱，空格分开的对照按两个关键词算、判弱', async () => {
         useTier(tier)
-        const bad: string[] = []
+        const wrong: string[] = []
+        const aliasWeak: string[] = []
+        const controlNotWeak: string[] = []
         for (const q of EVAL_QUERIES.filter(q => q.category === 'bilingual')) {
-          const first = (await search(q.query)).hits[0]?.id
-          if (first === undefined || !q.relevant.includes(first)) bad.push(`${q.query} → ${first ?? '（空）'}`)
+          const r = await search(q.query)
+          const first = r.hits[0]?.id
+          if (first === undefined || !q.relevant.includes(first)) wrong.push(`${q.query} → ${first ?? '（空）'}`)
+          if (q.query.includes('/') && isWeak(r.noteCode)) aliasWeak.push(q.query)
+          if (!q.query.includes('/') && !isWeak(r.noteCode)) controlNotWeak.push(q.query)
         }
-        expect(bad).toEqual([])
+        expect(wrong).toEqual([])
+        expect(aliasWeak.length, aliasWeak.join('、')).toBeLessThanOrEqual(1)
+        expect(controlNotWeak).toEqual([])
       })
 
       it(`首条正确却判弱的查询不超过 ${WEAK_CORRECT_CEILING} 条（中英双写与库里没有答案的除外）`, async () => {

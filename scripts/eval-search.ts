@@ -31,7 +31,7 @@ import { expandQueryTerms, matchScore } from '../src/text.ts'
 import { bigramSegmenter, createTokenizer, type CjkSegmenter } from '../src/search/tokenizer.ts'
 import { defaultJiebaLoader, resetJieba, type JiebaInstance } from '../src/search/jieba-segmenter.ts'
 import {
-  RANKING_FIELDS, RANKING_PARAMS, anchorTerms, compareRanked, countAnchorHits, rankRecords, substringEligible,
+  RANKING_FIELDS, RANKING_PARAMS, anchorTerms, compareRanked, countAnchorHits, isFullMatch, queryAliasGroups, rankRecords, substringEligible,
   type RankedRecord, type RankingField, type RankingParams, type SearchTier,
 } from '../src/search/ranking.ts'
 import { WEAK_SEARCH_NOTE_CODES, type SearchNoteCode } from '../src/contract-codes.ts'
@@ -163,7 +163,8 @@ type Scoring = 'bm25' | 'bm25f'
  * - bm25f：每个字段的词频先按该字段长度归一、乘字段权重，跨字段相加后统一做一次饱和。
  * 生产用其中一种（PRODUCTION_SCORING），对照路径对它走 rankRecords；本地实现留给另一种，并参与自检。
  */
-function rankLocal(scoring: Scoring, tokens: readonly string[], legacyTerms: readonly string[], anchors: readonly string[], records: readonly MemoryRecord[], tokenize: (t: string) => string[], p: RankingParams): RankedRecord[] {
+function rankLocal(scoring: Scoring, query: string, tokens: readonly string[], legacyTerms: readonly string[], anchors: readonly string[], records: readonly MemoryRecord[], tokenize: (t: string) => string[], p: RankingParams): RankedRecord[] {
+  const aliasGroups = queryAliasGroups(query, tokens, tokenize)
   const index = new Map(tokens.map((t, i) => [t, i] as const))
   const eligible = substringEligible(tokens)
   const docs = records.map(record => {
@@ -203,7 +204,7 @@ function rankLocal(scoring: Scoring, tokens: readonly string[], legacyTerms: rea
           if (wtf > 0) score += idf[i]! * wtf * (p.k1 + 1) / (wtf + p.k1)
         }
       })
-      out.push({ record: d.record, tier: hitCount === tokens.length ? 'all' : 'partial', anchorHits: countAnchorHits(d.record, anchors), score, tokenHits: d.hit })
+      out.push({ record: d.record, tier: isFullMatch(d.hit, aliasGroups) ? 'all' : 'partial', anchorHits: countAnchorHits(d.record, anchors), score, tokenHits: d.hit })
       continue
     }
     const legacy = legacyTerms.length > 0 ? matchScore(d.record, legacyTerms as string[]) : 0
@@ -224,9 +225,9 @@ function runVariant(v: Variant, queries: readonly EvalQuery[] = EVAL_QUERIES, re
     if (tokens.length === 0 && legacyTerms.length === 0) {
       ranked = records.map(record => ({ record, tier: 'all' as SearchTier, anchorHits: 0, score: 0, tokenHits: [] }))
     } else if (v.scoring === PRODUCTION_SCORING) {
-      ranked = rankRecords({ tokens, legacyTerms, anchors, records, listedCount: records.length, tokenize, params: v.params })
+      ranked = rankRecords({ tokens, legacyTerms, anchors, aliasGroups: queryAliasGroups(q.query, tokens, tokenize), records, listedCount: records.length, tokenize, params: v.params })
     } else {
-      ranked = rankLocal(v.scoring, tokens, legacyTerms, anchors, records, tokenize, v.params)
+      ranked = rankLocal(v.scoring, q.query, tokens, legacyTerms, anchors, records, tokenize, v.params)
     }
     ranked.sort(compareRanked)
     const direct = ranked.findIndex(e => e.record.id === q.query.trim())
@@ -244,7 +245,7 @@ function runVariantLocal(v: Variant): Results {
     const tokens = [...new Set(tokenize(q.query))].filter(t => !isNoiseTerm(t, v.dropSingleCjk))
     const legacyTerms = expandQueryTerms(q.query)
     if (tokens.length === 0 && legacyTerms.length === 0) { out.set(q, runVariant(v, [q]).get(q)!); continue }
-    const ranked = rankLocal(v.scoring, tokens, legacyTerms, anchorTerms(q.query), EVAL_RECORDS, tokenize, v.params).sort(compareRanked)
+    const ranked = rankLocal(v.scoring, q.query, tokens, legacyTerms, anchorTerms(q.query), EVAL_RECORDS, tokenize, v.params).sort(compareRanked)
     const direct = ranked.findIndex(e => e.record.id === q.query.trim())
     if (direct > 0) ranked.unshift(...ranked.splice(direct, 1))
     out.set(q, ranked.slice(0, LIMIT).map(e => e.record.id))

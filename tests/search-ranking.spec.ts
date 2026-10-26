@@ -10,7 +10,7 @@ import { GLOBAL_DIR, workspaceDirName } from '../src/storage/paths.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
 import { expandQueryTerms, matchScore } from '../src/text.ts'
 import { createTokenizer } from '../src/search/tokenizer.ts'
-import { RANKING_FIELDS, substringEligible } from '../src/search/ranking.ts'
+import { RANKING_FIELDS, aliasForms, anchorTerms, isFullMatch, substringEligible } from '../src/search/ranking.ts'
 import {
   executeSearch, renderSearchResult, termHitNote, LOW_COVERAGE_NOTE, OR_FALLBACK_NOTE, RETRY_HINT, SUBSTRING_FALLBACK_NOTE,
   TERM_NOTE_MAX, type SearchToolDeps,
@@ -313,27 +313,29 @@ describe('说明码：四种触发，互斥、substring 优先', () => {
 })
 
 describe('命中弱：按排第一的部分命中记录覆盖了多少查询判断', () => {
-  it('中英双写、范围内有记录两种写法都有：首条只写了中文也算这个词在，or-fallback，如实说明没有全命中，不劝重搜、不列逐词命中', async () => {
+  it('别名组（/ 连写）任一写法出现就算这个关键词命中：各组都命中即全命中，不出说明', async () => {
     const store = await seeded([
-      record({ id: 'mem_debounce', name: '搜索框防抖毫秒数', content: '前端搜索输入框防抖 300 毫秒，回车立即搜' }),
-      record({ id: 'mem_glossary', name: '术语', content: '防抖（debounce）与节流的区别' }),
-      record({ id: 'mem_other', name: '无关', content: '与查询无关的内容' }),
+      record({ id: 'mem_flow', name: '上线流程', content: '部署流程：先上预发再全量' }),
+      record({ id: 'mem_en', name: '脚本', content: 'deploy 脚本的流程说明' }),
+      record({ id: 'mem_other', name: '无关', content: '部署时间表' }),
     ])
-    const r = await search(store, '防抖 debounce 毫秒')
-    expect(r.hits.map(h => h.id)).toEqual(['mem_debounce', 'mem_glossary'])
-    expect(r.noteCode).toBe(OR_FALLBACK)
-    expect(r.note).toBe(OR_FALLBACK_NOTE)
-    expect(OR_FALLBACK_NOTE).toBe('没有记忆同时含全部关键词，以下按相关性排序。')
-    expect(r.note).not.toContain(RETRY_HINT)
+    const r = await search(store, '部署/deploy 流程')
+    expect(r.hits.map(h => h.id).slice(0, 2).sort()).toEqual(['mem_en', 'mem_flow'])
+    expect(r.noteCode).toBeUndefined()
+    // 空格分开就是两个关键词：没有记录三个都含
+    expect((await search(store, '部署 deploy 流程')).noteCode).toBe(LOW_COVERAGE)
   })
 
-  it('长句中文、首条只缺疑问词这类：or-fallback', async () => {
+  it('长句中文、首条只缺疑问词这类：or-fallback，如实说明没有全命中，不劝重搜、不列逐词命中', async () => {
     const store = await seeded([
       record({ id: 'mem_hand', name: '手编文件后的出处标注', content: '记忆文件被手编过时，出处可能对不上，读取时加标注' }),
     ])
     const r = await search(store, '记忆文件手编后出处对不上怎么办')
     expect(r.hits.map(h => h.id)).toEqual(['mem_hand'])
     expect(r.noteCode).toBe(OR_FALLBACK)
+    expect(r.note).toBe(OR_FALLBACK_NOTE)
+    expect(OR_FALLBACK_NOTE).toBe('没有记忆同时含全部关键词，以下按相关性排序。')
+    expect(r.note).not.toContain(RETRY_HINT)
   })
 
   it('有关键词在范围内一条都没有：low-coverage，劝重搜，再列各关键词命中条数和一条都没命中的词', async () => {
@@ -349,7 +351,7 @@ describe('命中弱：按排第一的部分命中记录覆盖了多少查询判�
     expect(renderSearchResult(r).startsWith(r.note!)).toBe(true)
   })
 
-  it('中英双写、范围内没有记录两种写法都有：中英各算一个关键词，首条缺了英文写法就判弱', async () => {
+  it('中英空格分开写：各算一个关键词，首条缺了英文写法就判弱', async () => {
     const store = await seeded([
       record({ id: 'mem_debounce', name: '搜索框防抖', content: '前端搜索输入框防抖 300 毫秒，回车立即搜' }),
     ])
@@ -361,15 +363,27 @@ describe('命中弱：按排第一的部分命中记录覆盖了多少查询判�
     expect(r2.note!.split('\n')[1]).toBe('各关键词命中的记忆条数：debounce 0、防抖 1。范围内一条都没命中的：debounce。')
   })
 
-  it('逐词命中里中英双写成对算：一边完整出现就算这一对命中', async () => {
+  it('逐词命中里别名组按查询里的写法顺序列，含任一写法的记录都算', async () => {
     const store = await seeded([
       record({ id: 'mem_cfg', name: '配置中心', content: '功能开关存在配置中心' }),
       record({ id: 'mem_cron', name: '清理脚本', content: '用 cron 每晚清理临时文件' }),
-      record({ id: 'mem_term', name: '术语', content: '定时任务（cron）' }),
+      record({ id: 'mem_job', name: '报表', content: '定时任务每天凌晨跑报表' }),
     ])
-    const r = await search(store, '定时任务 cron 配置')
+    const r = await search(store, '定时任务/cron 配置')
     expect(r.noteCode).toBe(LOW_COVERAGE)
     expect(r.note!.split('\n')[1]).toBe('各关键词命中的记忆条数：定时任务/cron 2、配置 1。')
+  })
+
+  it('别名组的判定：路径、文件名、URL 不算别名组；别名组也不当字面锚点', () => {
+    expect(aliasForms('部署/deploy')).toEqual(['部署', 'deploy'])
+    expect(aliasForms('k8s/kubernetes/容器编排')).toEqual(['k8s', 'kubernetes', '容器编排'])
+    expect(aliasForms('（部署/deploy）')).toEqual(['部署', 'deploy'])
+    for (const w of ['src/gui/contract.ts', '/Users/x/y', 'a/b/c', 'aa/bb/cc/dd/ee', 'https://x.io/a', 'deploy', '部署/']) expect(aliasForms(w), w).toBeUndefined()
+    // 别名组不是字面锚点；路径照旧是
+    expect(anchorTerms('部署/deploy src/gui/contract.ts')).toEqual(['src/gui/contract.ts'])
+    expect(isFullMatch([true, false, true], [[[0], [1]]])).toBe(true)
+    expect(isFullMatch([false, false, true], [[[0], [1]]])).toBe(false)
+    expect(isFullMatch([true, true, false], [[[0], [1]]])).toBe(false)
   })
 
   it('逐词命中只列整词，超过上限只列前几个再说共几个；一个可数的词都没有（纯数字）就不列这一行', async () => {

@@ -38,7 +38,8 @@ export interface RankingParams {
 }
 
 /**
- * 三档：全部查询 token 命中 → 部分命中 → 一个都没命中但旧子串匹配（matchScore）命中。
+ * 三档：全部关键词命中 → 部分命中 → 一个都没命中但旧子串匹配（matchScore）命中。
+ * 「全部关键词命中」= 别名组（见 aliasForms）里任一写法的 token 全命中，组外的 token 全命中；没有别名组时就是全部 token 命中。
  * 「token 命中」= 某字段分词后含该 token，或某字段的小写原文以子串含该 token（如 deploy 之于 deployment；
  * 自身是别的查询 token 子串的子词除外，见 substringEligible）。
  * 第三档于是只剩 id 这类不打分字段的命中，以及全是噪声词项（单字母、纯数字）的查询。
@@ -65,6 +66,8 @@ export interface RankInput {
   legacyTerms: readonly string[]
   /** 锚点词（anchorTerms），缺省没有。 */
   anchors?: readonly string[]
+  /** 别名组（queryAliasGroups）：组内写法任一全命中即算这个关键词命中。缺省没有。 */
+  aliasGroups?: AliasGroups
   /** 解析后的候选（已过 scope / 状态 / types / validTo）。 */
   records: readonly MemoryRecord[]
   /** 范围内顶层列出的记忆文件数（ScopeReadResult.listedCount），作 BM25 的 N。 */
@@ -142,8 +145,49 @@ const EDGE_PUNCT = /^[(（\[【「『"'“‘]+|[)）\]】」』"'”’.,;:!?�
  * 再按字面排会让恰好含这串字的记录压过分数更高的记录。
  */
 export function anchorTerms(query: string): string[] {
-  const words = query.toLowerCase().split(/\s+/).map(w => w.replace(EDGE_PUNCT, '')).filter(w => w !== '' && !WORD_CHARS_ONLY.test(w) && HAS_ALNUM.test(w))
+  const words = query.toLowerCase().split(/\s+/).map(w => w.replace(EDGE_PUNCT, ''))
+    .filter(w => w !== '' && !WORD_CHARS_ONLY.test(w) && HAS_ALNUM.test(w) && aliasForms(w) === undefined)
   return [...new Set(words)]
+}
+
+/** 别名组最多几个写法；更多的多半是路径。 */
+export const ALIAS_MAX_FORMS = 4
+
+/**
+ * 别名组：查询里用 / 连写、不带空格的同一术语的几种写法（部署/deploy、k8s/kubernetes/容器编排），任一写法命中都算。
+ * 判定（剥掉首尾句读和括号后）：2 到 ALIAS_MAX_FORMS 段，每段只含字母、数字、_、-，且至少两个字符。
+ * 路径、文件名、URL 因此不算：src/gui/contract.ts 带点，/Users/x/y 以 / 开头（首段为空），a/b/c 每段只有一个字符。
+ * 不是别名组返回 undefined。
+ */
+export function aliasForms(word: string): string[] | undefined {
+  const w = word.replace(EDGE_PUNCT, '')
+  if (!w.includes('/')) return undefined
+  const forms = w.split('/')
+  if (forms.length > ALIAS_MAX_FORMS) return undefined
+  return forms.every(f => [...f].length >= 2 && WORD_CHARS_ONLY.test(f)) ? forms : undefined
+}
+
+/** 各别名组的各写法对应的查询 token 下标。 */
+export type AliasGroups = readonly (readonly (readonly number[])[])[]
+
+/** 查询里的别名组，写法换成查询 token 下标；没有 token 的写法（纯数字等噪声）去掉，一个写法都不剩的组去掉。 */
+export function queryAliasGroups(query: string, tokens: readonly string[], tokenize: (text: string) => string[]): number[][][] {
+  const index = new Map(tokens.map((t, i) => [t, i] as const))
+  const groups: number[][][] = []
+  for (const word of query.split(/\s+/)) {
+    const forms = aliasForms(word)
+    if (forms === undefined) continue
+    const ids = forms.map(f => [...new Set(tokenize(f).map(t => index.get(t)).filter((i): i is number => i !== undefined))]).filter(f => f.length > 0)
+    if (ids.length > 0) groups.push(ids)
+  }
+  return groups
+}
+
+/** 全部关键词命中：每个别名组有一个写法的 token 全命中，且不在任何别名组里的 token 全命中。 */
+export function isFullMatch(hits: readonly boolean[], aliasGroups: AliasGroups): boolean {
+  const grouped = new Set(aliasGroups.flat(2))
+  return aliasGroups.every(g => g.some(form => form.every(i => hits[i])))
+    && hits.every((hit, i) => hit || grouped.has(i))
 }
 
 /** 记录字面含几个锚点词：id、name、summary、tags、content 的小写原文，子串即算。 */
@@ -179,7 +223,7 @@ function bm25f(doc: DocStats, idfs: readonly number[], { k1, b, fields }: Rankin
  * df 按文档粒度在候选集上数：token 是记录原文的子串，被预筛跳过的文件对 df 贡献为零，候选集上数就是精确值。
  * df 只数有词频的文档：只以子串命中的 token 分数为 0，不参与 idf。
  */
-export function rankRecords({ tokens, legacyTerms, anchors = [], records, listedCount, tokenize, params = RANKING_PARAMS }: RankInput): RankedRecord[] {
+export function rankRecords({ tokens, legacyTerms, anchors = [], aliasGroups = [], records, listedCount, tokenize, params = RANKING_PARAMS }: RankInput): RankedRecord[] {
   const tokenIndex = new Map(tokens.map((t, i) => [t, i] as const))
   const eligible = substringEligible(tokens)
   const docs = records.map(r => collectStats(r, tokenIndex, eligible, tokenize))
@@ -194,7 +238,7 @@ export function rankRecords({ tokens, legacyTerms, anchors = [], records, listed
   for (const doc of docs) {
     if (tokens.length > 0 && doc.hitCount > 0) {
       out.push({
-        record: doc.record, tier: doc.hitCount === tokens.length ? 'all' : 'partial',
+        record: doc.record, tier: isFullMatch(doc.hit, aliasGroups) ? 'all' : 'partial',
         anchorHits: countAnchorHits(doc.record, anchors), score: bm25f(doc, idfs, params), tokenHits: doc.hit,
       })
       continue
