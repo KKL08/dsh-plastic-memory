@@ -254,6 +254,21 @@ describe('全部记忆视图', () => {
     ])
   })
 
+  it('判彻底删除的正面信号：读到但不在用的 id（已取代、已删）列在 inactiveIds；有读不出的文件时 hasUnreadFiles', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_live', name: '在用' }))
+    await h.store.create(w({ id: 'mem_old', name: '被取代', status: 'superseded' }))
+    await h.store.create(g({ id: 'mem_gone', name: '删掉的' }))
+    await h.forget(['mem_gone'])
+    const clean = (await h.views()).library
+    expect(libraryViewSchema.parse(clean)).toEqual(clean)
+    expect([...clean.inactiveIds!].sort()).toEqual(['mem_gone', 'mem_old'])
+    expect(clean.hasUnreadFiles).toBe(false)
+
+    await writeFile(join(wsDir(), 'broken.md'), '---\nname: [\n---\n正文\n')
+    expect((await h.views()).library.hasUnreadFiles).toBe(true)
+  })
+
   it('typeLabels：注册表的类型和本视图记忆卡里出现的类型 → 显示名，认不出的类型显示 id', async () => {
     const h = harness()
     await h.store.create(w({ id: 'mem_a', name: 'A', type: 'decision' }))

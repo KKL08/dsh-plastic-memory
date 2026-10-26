@@ -101,8 +101,10 @@ export interface Deletions {
  * 1. 经本网关发出的 forget / hard-delete / restore 成功后记一笔，不等视图刷新。
  * 2. 读到的视图：在最近删除里、全部记忆里又没有在用副本的，算软删（对话里 agent 自己删的也在这里）。别层同 id 副本还在用时
  *    删掉的那份也列在最近删除里，所以要两份视图都读到过才判断。
- * 3. 彻底删除只在证据确凿时判：两份视图出自同一次收集（generatedAt 相同），晚于这条记忆记下的时刻，而两份里都没有它。
- *    视图早于记下的时刻（刚记下、视图还没写）、两份不是同一次收集、旧视图文件没有 generatedAt，都不判。
+ * 3. 彻底删除要有正面证据：本页读到的视图里出现过这条，之后两份视图出自同一次收集（generatedAt 相同）、晚于这条记忆记下的
+ *    时刻，而全部记忆、最近删除、不在用的 id（已取代等）里都没有它，也没有读不全的地方（读不出的文件可能就是它）。
+ *    只是缺席算不知道：从没在视图里出现过（收集落在记下与写盘之间）、视图早于记下的时刻、两份不是同一次收集、
+ *    旧视图文件缺这些字段，都不判。
  * 第 1 条记的软删 / 恢复在视图确认之前优先（视图可能还是动作之前的）：软删要出现在最近删除里、恢复要重新出现在全部记忆里，
  * 确认后去掉，之后以视图为准；有本地记录时不按第 3 条判；
  * 彻底删除一直记着。页面关掉就没了。
@@ -112,7 +114,10 @@ export function createDeletionStore() {
   const local = new Map<string, 'soft' | 'hard' | 'restored'>()
   /** 最近一次读到的两份视图：最近删除里的 id、全部记忆里在用的 id，和各自的生成时刻。 */
   let deleted: { ids: ReadonlySet<string>; at: number | undefined } | undefined
-  let library: { ids: ReadonlySet<string>; at: number | undefined } | undefined
+  /** inactive：不在用的 id；全部记忆视图没给出、或有读不全的地方时为 undefined（判不了彻底删除）。 */
+  let library: { ids: ReadonlySet<string>; inactive: ReadonlySet<string> | undefined; at: number | undefined } | undefined
+  /** 本页读到的视图里出现过的 id（在用、最近删除、不在用都算）：判彻底删除的前提。 */
+  const seen = new Set<string>()
   /** 视图证明是软删的 id。 */
   let viewSoft: ReadonlySet<string> = new Set()
   const listeners = new Set<() => void>()
@@ -132,8 +137,8 @@ export function createDeletionStore() {
       of(id, savedAt) {
         const how = known.get(id)
         if (how !== undefined || localIds.has(id)) return how
-        if (savedAt === undefined || at === undefined || at <= savedAt || lib === undefined || del === undefined) return undefined
-        return lib.ids.has(id) || del.ids.has(id) ? undefined : 'hard'
+        if (savedAt === undefined || at === undefined || at <= savedAt || lib?.inactive === undefined || del === undefined || !seen.has(id)) return undefined
+        return lib.ids.has(id) || del.ids.has(id) || lib.inactive.has(id) ? undefined : 'hard'
       },
     }
   }
@@ -152,8 +157,18 @@ export function createDeletionStore() {
     },
     /** 读到一份最近删除或全部记忆视图：重算视图证明的软删，去掉视图已经确认的本地记录。 */
     settle(view: { name: 'deleted'; data: DeletedView } | { name: 'library'; data: LibraryView }) {
-      if (view.name === 'deleted') deleted = { ids: new Set(view.data.items.map(item => item.memory.id)), at: view.data.generatedAt }
-      else library = { ids: new Set(view.data.layers.flatMap(layer => layer.items.map(memory => memory.id))), at: view.data.generatedAt }
+      if (view.name === 'deleted') {
+        deleted = { ids: new Set(view.data.items.map(item => item.memory.id)), at: view.data.generatedAt }
+        for (const id of deleted.ids) seen.add(id)
+      } else {
+        const { inactiveIds, hasUnreadFiles } = view.data
+        library = {
+          ids: new Set(view.data.layers.flatMap(layer => layer.items.map(memory => memory.id))),
+          inactive: inactiveIds === undefined || hasUnreadFiles !== false ? undefined : new Set(inactiveIds),
+          at: view.data.generatedAt,
+        }
+        for (const id of [...library.ids, ...inactiveIds ?? []]) seen.add(id)
+      }
       if (deleted === undefined || library === undefined) { publish(); return }
       const active = library.ids
       viewSoft = new Set([...deleted.ids].filter(id => !active.has(id)))

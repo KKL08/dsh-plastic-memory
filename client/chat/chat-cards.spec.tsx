@@ -333,7 +333,7 @@ describe('交付卡与其他界面共用删除状态', () => {
 
   describe('agent 在对话里彻底删除（两份视图里都没有了）', () => {
     const emptyViews = (libraryAt: number | undefined, deletedAt = libraryAt): { library: LibraryView; deleted: DeletedView } => ({
-      library: { ...libraryView(), layers: [], ...(libraryAt === undefined ? {} : { generatedAt: libraryAt }) },
+      library: { ...libraryView(), layers: [], inactiveIds: [], hasUnreadFiles: false, ...(libraryAt === undefined ? {} : { generatedAt: libraryAt }) },
       deleted: { version: GUI_VIEW_VERSION, items: [], ...(deletedAt === undefined ? {} : { generatedAt: deletedAt }) },
     })
     const render = (gateway: ReturnType<typeof createFakeGateway>) =>
@@ -347,6 +347,32 @@ describe('交付卡与其他界面共用删除状态', () => {
       act(() => { gateway.setView('library', next.library); gateway.setView('deleted', next.deleted) })
       expect(chatCard().getByText(PURGED)).toBeInTheDocument()
       expect(chatCard().queryByRole('button', { name: '删除这条记忆' })).toBeNull()
+    })
+
+    it('被取代了（视图把它列在不在用的 id 里）：不判彻底删除，照常显示', () => {
+      const gateway = createFakeGateway({ views: { library: libraryView(), deleted: { version: GUI_VIEW_VERSION, items: [] } } })
+      render(gateway)
+      const next = emptyViews(NOW + 1000)
+      act(() => { gateway.setView('library', { ...next.library, inactiveIds: ['n1'] }); gateway.setView('deleted', next.deleted) })
+      expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
+      expect(chatCard().queryByText(PURGED)).toBeNull()
+    })
+
+    it('有读不出的文件（可能就是它被改坏了）、或视图没给出不在用的 id：不判彻底删除', () => {
+      const gateway = createFakeGateway({ views: { library: libraryView(), deleted: { version: GUI_VIEW_VERSION, items: [] } } })
+      render(gateway)
+      const next = emptyViews(NOW + 1000)
+      act(() => { gateway.setView('library', { ...next.library, hasUnreadFiles: true }); gateway.setView('deleted', next.deleted) })
+      expect(chatCard().queryByText(PURGED)).toBeNull()
+      const { inactiveIds: _omit, ...legacy } = next.library
+      act(() => { gateway.setView('library', legacy); gateway.setView('deleted', next.deleted) })
+      expect(chatCard().queryByText(PURGED)).toBeNull()
+    })
+
+    it('视图里从没出现过这条（收集落在记下与写盘之间）：只是缺席，不判彻底删除', () => {
+      render(createFakeGateway({ views: emptyViews(NOW + 1000) }))
+      expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
+      expect(chatCard().queryByText(PURGED)).toBeNull()
     })
 
     it('视图生成在记下之前（刚记下、视图还没写）：不判彻底删除', () => {

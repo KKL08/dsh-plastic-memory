@@ -211,7 +211,7 @@ describe('createHostGateway', () => {
     expect(other.current.of('m3')).toBeUndefined()
   })
 
-  it('读到的视图也进删除状态：在最近删除里、全部记忆里没有在用副本的算软删；两份都没有、视图晚于记下时刻的算彻底删除', async () => {
+  it('读到的视图也进删除状态：在最近删除里、全部记忆里没有在用副本的算软删；两份里都没有、从没出现过的不算彻底删除', async () => {
     localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
     const deletedPath = '/h/memories/.state/gui/deleted.json'
     const libraryPath = '/h/memories/.state/gui/library.json'
@@ -219,7 +219,7 @@ describe('createHostGateway', () => {
     const card = (id: string) => ({ id, name: id, type: 'preference', scope: 'global' as const, summary: '', content: 'x', tags: [], createdAt: 1, updatedAt: 1, lastConfirmedAt: 1, filePath: '' })
     // m8 在别层还有在用的同 id 副本：删掉的那份虽然列在最近删除里，不算删了
     files[deletedPath] = JSON.stringify({ version: GUI_VIEW_VERSION, generatedAt: 5, items: [{ memory: card('m9'), deletedAt: 1, purgeAt: 2 }, { memory: card('m8'), deletedAt: 1, purgeAt: 2 }] })
-    files[libraryPath] = JSON.stringify({ version: GUI_VIEW_VERSION, generatedAt: 5, memoryRoot: '/h/memories', directoryIssues: [], layers: [{ layer: { kind: 'global' }, items: [card('m8')] }] })
+    files[libraryPath] = JSON.stringify({ version: GUI_VIEW_VERSION, generatedAt: 5, memoryRoot: '/h/memories', directoryIssues: [], inactiveIds: [], hasUnreadFiles: false, layers: [{ layer: { kind: 'global' }, items: [card('m8')] }] })
     const gateway = createHostGateway(fakeCtx())(props)
     const { result } = renderHook(() => {
       const session = gateway.useSession(undefined)
@@ -229,9 +229,8 @@ describe('createHostGateway', () => {
     })
     await waitFor(() => { expect(result.current.of('m9')).toBe('soft') })
     expect(result.current.of('m8')).toBeUndefined()
-    // 两份都没有的 m7：视图（同一次收集）晚于记下的时刻才算彻底删除
-    expect(result.current.of('m7', 4)).toBe('hard')
-    expect(result.current.of('m7', 5)).toBeUndefined()
+    // 两份都没有的 m7：本页视图里从没出现过，只是缺席，即使视图晚于记下的时刻也不判彻底删除
+    expect(result.current.of('m7', 4)).toBeUndefined()
     expect(result.current.of('m7')).toBeUndefined()
   })
 

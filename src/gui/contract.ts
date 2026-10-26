@@ -189,6 +189,13 @@ export const libraryViewSchema = z.object({
   layers: z.array(z.object({ layer: layerRefSchema, items: z.array(memoryCardSchema) })),
   /** 目录问题：同 id 多份副本、被忽略的字段、缺标记 / 不可读目录。 */
   directoryIssues: z.array(directoryIssueSchema),
+  /**
+   * 判「彻底删除」的正面信号（对话卡用）：这次收集读到、但不在用的记忆 id（已取代、已删，含超出保留期还没清掉的），
+   * 和有没有读不全的地方（读不出的文件、缺标记或不可读的目录，里面可能有任何 id）。一条记忆不在全部记忆、最近删除、
+   * inactiveIds 里，且没有读不全的地方，才算从磁盘上没了。可缺省：升级前写的视图文件没有，缺省时不判彻底删除。
+   */
+  inactiveIds: z.array(z.string()).optional(),
+  hasUnreadFiles: z.boolean().optional(),
   /** 类型 id → 显示名（同待处理视图的 typeLabels），覆盖注册表与本视图出现的类型。可缺省：升级前写的视图文件没有，下次写视图补上。 */
   typeLabels: z.record(z.string(), z.string()).optional(),
 })

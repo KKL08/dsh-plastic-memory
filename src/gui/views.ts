@@ -191,7 +191,14 @@ export function buildLibraryView(input: ViewInput): LibraryView {
     .filter(n => n.code !== 'dir-empty')
     .map(n => ({ code: n.code, path: n.path, ...(n.keys !== undefined ? { keys: n.keys } : {}), ...(n.keptPath !== undefined ? { keptPath: n.keptPath } : {}) }))
   const typeLabelsOfView = typeLabels(input.registry, layers.flatMap(l => l.items.map(m => m.type)))
-  return { version: GUI_VIEW_VERSION, generatedAt: input.now, memoryRoot: input.memoryRoot, layers, directoryIssues, typeLabels: typeLabelsOfView }
+  // byId 每个 id 一份（在用副本优先）：不在用的就是这个 id 没有在用副本
+  const inactiveIds = [...input.data.byId.values()].filter(r => r.status !== 'active').map(r => r.id)
+  const hasUnreadFiles = input.readLayers.some(l => (input.data.quarantined.get(layerCacheKey(l)) ?? []).length > 0)
+    || directoryIssues.some(i => i.code === 'marker-missing' || i.code === 'dir-unreadable')
+  return {
+    version: GUI_VIEW_VERSION, generatedAt: input.now, memoryRoot: input.memoryRoot, layers, directoryIssues,
+    inactiveIds, hasUnreadFiles, typeLabels: typeLabelsOfView,
+  }
 }
 
 /** 最近删除：保留窗口内软删的记忆；裁决删掉的从已裁决条目找来源（同一条记忆被多次裁决取最近的）。 */
