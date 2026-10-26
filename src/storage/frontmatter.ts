@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
+import { parse as parseYaml, stringify as stringifyYaml, YAMLParseError } from 'yaml'
 import { FrontmatterError } from '../errors.ts'
 import { memoryRecordSchema, CONFIDENCE_BY_SOURCE, type MemoryRecord } from '../record-schema.ts'
 import type { CodedNote, DirectoryNoteCode } from '../contract-codes.ts'
@@ -67,13 +67,20 @@ export function splitFrontmatter(raw: string): ParsedMemoryFile {
     // YAML 文本带上闭围栏前的换行（块标量的末尾换行语义不变）；正文保留原样的换行风格，digest 另行归一
     data = parseYaml(raw.slice(open[0].length, close.index + close[0].indexOf('---')))
   } catch (e) {
-    throw new FrontmatterError('yaml-parse', `frontmatter 不是合法 YAML：${e instanceof Error ? e.message : String(e)}`)
+    throw new FrontmatterError('yaml-parse', `frontmatter 不是合法 YAML：${yamlErrorAt(e)}`)
   }
   if (data === null || typeof data !== 'object' || Array.isArray(data)) throw new FrontmatterError('not-object', 'frontmatter 不是对象')
   const body = raw.slice(close.index + close[0].length)
     .replace(/^\r?\n/, '')      // encode 时围栏后有一个空行
     .replace(/\r?\n$/, '')
   return { data: data as Record<string, unknown>, body }
+}
+
+/** YAML 报错只留错误名与行列：yaml 的原话会引出出错那一行，长行还截掉开头，密钥前缀被截掉后遮盖规则认不出来。 */
+function yamlErrorAt(e: unknown): string {
+  if (!(e instanceof YAMLParseError)) return e instanceof Error ? e.name : 'unknown'
+  const at = e.linePos?.[0]
+  return at === undefined ? e.code : `${e.code}（frontmatter 第 ${at.line} 行第 ${at.col} 列）`
 }
 
 /** 内容摘要：name、summary、正文以 LF 拼接（CRLF 归一）后 sha1 前 16 位，带算法前缀。只用于手编检测。 */

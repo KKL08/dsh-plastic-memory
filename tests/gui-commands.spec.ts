@@ -15,7 +15,6 @@ import { REDACTED_PLACEHOLDER, memorySnapshotSchema, pendingDecisionSchema, scan
 import type { ClaimKvTable } from '../src/kv-table.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
-import { SECRET_MASK } from '../src/secrets.ts'
 import { ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../src/gui/commands.ts'
 import {
@@ -984,20 +983,23 @@ describe('refresh-views', () => {
 })
 
 describe('读不出的文件', () => {
-  it('解析报错引出的原文行里有密钥（两级都算）：待处理与健康视图里换成占位，不出现原文', async () => {
+  it('解析报错只给错误名与行列，不引出原文行：密钥（两级都算，长行截掉前缀的也算）不出现在待处理与健康视图里', async () => {
     const e = env()
     const suspected = 'api_key: TESTONLY0000000000000000'
+    const longKey = 'sk-proj-' + 'TESTONLY'.padEnd(150, '7')
     await mkdir(join(root, GLOBAL_DIR), { recursive: true })
-    // YAML 报错只引出错的那一行：两个文件各让一级密钥落在那一行上
+    // YAML 报错会引出错的那一行：三个文件各让一种密钥落在那一行上；长行的摘录会截掉 sk- 前缀
     await writeFile(join(root, GLOBAL_DIR, 'bad-critical.md'), `---\nname: 坏文件\nsummary: [${FAKE_SECRET.sk}\n---\n正文\n`)
     await writeFile(join(root, GLOBAL_DIR, 'bad-suspected.md'), `---\nname: 坏文件\nnote: ${suspected}\n---\n正文\n`)
+    await writeFile(join(root, GLOBAL_DIR, 'bad-long.md'), `---\nname: 坏文件\napi: "${longKey}" trailing\n---\n正文\n`)
     ok(await e.run({ cmd: 'refresh-views' }))
     const errors = pendingViewSchema.parse(await e.readView('pending')).items.flatMap(i => i.kind === 'unreadable-file' ? [i.error] : [])
-    expect(errors).toHaveLength(2)
-    for (const error of errors) expect(error).toContain(SECRET_MASK)
+    expect(errors).toHaveLength(3)
+    for (const error of errors) expect(error).toMatch(/第 \d+ 行第 \d+ 列/)
     for (const text of [...errors, JSON.stringify(await e.readView('health'))]) {
       expect(text).not.toContain(FAKE_SECRET.sk)
       expect(text).not.toContain(suspected)
+      expect(text).not.toContain('7777777777')
     }
   })
 })

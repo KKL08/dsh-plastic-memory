@@ -202,7 +202,7 @@ export class FileTable implements MemoryTable {
     if (!outcome.ok) {
       // 伴生文件 / 锁文件形态的名字解析不出就不是记忆（伴生文件是二进制），静默跳过
       if (isCompanionLikeFileName(basename(filePath))) return undefined
-      // 解析报错会引出出错的原文行，进视图、体检结果之前先遮密钥
+      // 解析报错可能带出文件里的原值（时间戳、字段校验），进视图、体检结果之前先遮密钥
       return { quarantined: { path: outcome.path, error: maskDiagnostic(outcome.error) } }
     }
     const row = statsRows.get(outcome.record.id)
