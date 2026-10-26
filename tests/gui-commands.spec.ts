@@ -1326,6 +1326,18 @@ describe('scan', () => {
       expect(body.scores!.map(s => s.layer)).toEqual([{ kind: 'global' }, { kind: 'workspace', workspacePath: SESSION_WS }])
     })
 
+    it('未决的垂直冲突再体检时模型换了基线出处的措辞：不算新增，待处理里仍是一张卡、健康照样扣分', async () => {
+      let wording = 'AGENTS.md：包管理用 pnpm'
+      const e = env({ llm: answering(() => [{ type: 'conflict', memoryIds: ['mem_a'], baselineRef: wording, summary: '与基线矛盾' }]), baseline: ['包管理统一用 pnpm'] })
+      await seedFour(e)
+      expect(ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS })).added).toEqual({ pending: 1, advice: 0 })
+      wording = 'AGENTS.md 里「统一用 pnpm」那条'
+      expect(ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS })).added).toEqual({ pending: 0, advice: 0 })
+      expect(ledgerItems(pendingViewSchema.parse(await e.readView('pending'))).map(i => i.kind)).toEqual(['conflict-vertical'])
+      const ws = healthViewSchema.parse(await e.readView('health')).layers.find(l => l.layer.kind === 'workspace')!
+      expect(ws.issues).toContainEqual(expect.objectContaining({ type: 'conflict', count: 1 }))
+    })
+
     it('再体检一次、发现没变：都是 0', async () => {
       const e = env({ llm: answering(() => [conflict, redundancy]) })
       await seedFour(e)

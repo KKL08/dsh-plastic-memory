@@ -104,7 +104,7 @@ export function parseSemanticFindings(raw: string, knownIds: Set<string>): Findi
     const memoryIds = [...new Set((Array.isArray(f.memoryIds) ? f.memoryIds : [])
       .filter((id): id is string => typeof id === 'string' && knownIds.has(id)))]
     if (memoryIds.length === 0) continue
-    // 空字符串 baselineRef 不算"有基线"：下游 dedupKey 用真值判断、executeConfirm 用
+    // 空字符串 baselineRef 不算"有基线"：下游 dedupKey 用真值判断、pairKey 与 executeConfirm 用
     // !== undefined 判断，两者对空字符串的态度不一致，必须在这里收口成"要么是非空字符串要么不存在"。
     const baselineRef = typeof f.baselineRef === 'string' && f.baselineRef.length > 0 ? maskText(f.baselineRef) : undefined
     if (type === 'conflict') {

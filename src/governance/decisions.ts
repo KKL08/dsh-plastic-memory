@@ -31,9 +31,14 @@ export function kindOf(entry: { kind?: PendingKind }): PendingKind {
   return entry.kind ?? 'conflict'
 }
 
+/** 同一组记忆、同一类冲突（横向 / 垂直）的键，不看 baselineRef 措辞（LLM 自由填写，每次扫描都可能不同）。 */
+export function pairKey(entry: { memoryIds: string[]; baselineRef?: string }): string {
+  return dedupKey(entry.memoryIds) + (entry.baselineRef !== undefined ? '#baseline' : '')
+}
+
 /** 两个条目是否同一种类、指同一组记忆、同一类冲突（横向 / 垂直），不看 baselineRef 措辞。 */
 function samePair(a: KindKeyed, b: KindKeyed): boolean {
-  return kindOf(a) === kindOf(b) && dedupKey(a.memoryIds) === dedupKey(b.memoryIds) && (a.baselineRef !== undefined) === (b.baselineRef !== undefined)
+  return kindOf(a) === kindOf(b) && pairKey(a) === pairKey(b)
 }
 
 /**
@@ -92,12 +97,16 @@ async function holdsNow(entry: KindKeyed & { workspaces?: string[] }, read: Read
 
 type UpsertInput = { kind?: PendingKind; memoryIds: string[]; baselineRef?: string; summary: string; workspaces?: string[]; fingerprint?: string }
 
-/** 同键再报：更新 summary / workspaces / 指纹，保留 id 与 firstSeenAt。workspaces 与 memoryIds 一一对应，按已有条目的 id 顺序重排。 */
+/**
+ * 同一对再报：更新 summary / baselineRef 措辞 / workspaces / 指纹，保留 id 与 firstSeenAt。
+ * workspaces 与 memoryIds 一一对应，按已有条目的 id 顺序重排。
+ */
 function mergeReport(existing: PendingDecision, input: UpsertInput): PendingDecision {
   const wsById = new Map(input.memoryIds.map((id, i) => [id, input.workspaces?.[i]]))
   const workspaces = input.workspaces !== undefined ? existing.memoryIds.map(id => wsById.get(id) ?? '(未知)') : undefined
   return {
     ...existing, summary: input.summary,
+    ...(input.baselineRef !== undefined ? { baselineRef: input.baselineRef } : {}),
     ...(workspaces !== undefined ? { workspaces } : {}),
     ...(input.fingerprint !== undefined ? { fingerprint: input.fingerprint } : {}),
   }
@@ -154,11 +163,10 @@ export class PendingDecisionsStore {
    */
   async upsert(input: UpsertInput, now: number, read?: ReadMemory): Promise<{ created: boolean; settled?: true; isSkipped?: true; entry: PendingDecision }> {
     const entries = await this.table.list()
-    const key = dedupKey(input.memoryIds, input.baselineRef)
-    // 先看已裁决的同一对，再看未决的同键条目
+    // 先看已裁决的同一对，再看未决的同一对（垂直冲突的 baselineRef 措辞每次扫描都可能不同，不能按它分开，否则每次重扫都多一条）
     const matches = [
       ...entries.filter(([, e]) => e.settled !== undefined && samePair(e, input)),
-      ...entries.filter(([, e]) => e.settled === undefined && kindOf(e) === kindOf(input) && dedupKey(e.memoryIds, e.baselineRef) === key),
+      ...entries.filter(([, e]) => e.settled === undefined && samePair(e, input)),
     ]
     const holds = async () => read === undefined || await holdsNow(input, read)
     for (const [id, seen] of matches) {

@@ -1,6 +1,6 @@
 import type { TypeRegistry } from '../type-registry.ts'
 import type { MemoryRecord } from '../record-schema.ts'
-import { dedupKey } from './decisions.ts'
+import { pairKey } from './decisions.ts'
 import type { AdviceIgnore, Finding, PendingDecision, ScanCacheEntry } from './schema.ts'
 import { FINDING_TYPES } from './schema.ts'
 import { runRuleScan, buildMalformedFindings } from './rule-scan.ts'
@@ -107,7 +107,7 @@ export interface LayerHealthResult {
  *   跨层条目（如提升到 global 后 ws 残留旧条构成的冗余、global vs ws 冲突）归 ws 层——
  *   它污染的是该 ws 的会话，而 global 桶的输入是 global-only、看不到 ws 侧，
  *   若 ws 层也不计就两层都失明；
- * - conflict 还须仍在待决账本里（dedupKey 匹配）——用户裁决 keep-both/dismiss 后双方记忆都在、
+ * - conflict 还须仍在待决账本里（pairKey 匹配，不看 baselineRef 措辞）——用户裁决 keep-both/dismiss 后双方记忆都在、
  *   缓存过滤不掉，不对账会出现"刚裁决完分数纹丝不动"的自相矛盾；
  * - 其余语义 findings 涉及的记忆在那次体检之后改过（updatedAt 晚于缓存时间）就不计。
  * 最后剔除用户忽略的建议（指纹仍对得上的），评分公式不动；新鲜度不可忽略。
@@ -122,14 +122,14 @@ export function scoreLayer(deps: LayerHealthDeps, data: LayerPreread, layer: Lay
   ruleScan.push(...buildMalformedFindings(data.quarantined.get(layerCacheKey(layer)) ?? []))
 
   const cached = data.cache.get(layerCacheKey(layer))
-  const pendingKeys = new Set(data.pending.map(e => dedupKey(e.memoryIds, e.baselineRef)))
+  const pendingKeys = new Set(data.pending.map(pairKey))
   const alive = (id: string) => data.byId.get(id)?.status === 'active'
   // 体检之后改过的记忆，缓存里关于它的结论（重复、放错层、表述不清）已不作数，下次体检再说；冲突走账本指纹，不在此列
   const editedSinceScan = (id: string) => cached !== undefined && (data.byId.get(id)?.updatedAt ?? 0) > cached.scannedAt
   const semanticScan = (cached?.findings ?? []).filter(f => {
     if (f.memoryIds.length === 0) return false
     if (!f.memoryIds.every(alive) || !f.memoryIds.some(id => liveIds.has(id))) return false
-    if (f.type === 'conflict') return pendingKeys.has(dedupKey(f.memoryIds, f.baselineRef))
+    if (f.type === 'conflict') return pendingKeys.has(pairKey(f))
     return !f.memoryIds.some(editedSinceScan)
   })
   const rule = applyIgnores(ruleScan, data.ignores, data.byId)

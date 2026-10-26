@@ -32,9 +32,18 @@ describe('PendingDecisionsStore', () => {
 
   it('垂直冲突（带 baselineRef）与横向冲突不互相去重', async () => {
     const s = makeStore()
-    await s.upsert({ memoryIds: ['mem_a'], baselineRef: 'AGENTS.md：X', summary: 'v' }, 1)
-    await s.upsert({ memoryIds: ['mem_a'], baselineRef: 'AGENTS.md：Y', summary: 'v2' }, 2)
+    await s.upsert({ memoryIds: ['mem_a', 'mem_b'], baselineRef: 'AGENTS.md：X', summary: 'v' }, 1)
+    await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: 'h' }, 2)
     expect(await s.list()).toHaveLength(2)
+  })
+
+  it('未决的垂直冲突再报时 baselineRef 换了措辞：仍是同一条，沿用 id，措辞与 summary 换成最新的', async () => {
+    const s = makeStore()
+    const r1 = await s.upsert({ memoryIds: ['mem_a'], baselineRef: 'AGENTS.md：包管理用 pnpm', summary: '第一次', fingerprint: 'fp' }, 1)
+    const r2 = await s.upsert({ memoryIds: ['mem_a'], baselineRef: 'AGENTS.md 里「统一用 pnpm」那条', summary: '第二次', fingerprint: 'fp' }, 2)
+    expect(r2.created).toBe(false)
+    expect(r2.entry.id).toBe(r1.entry.id)
+    expect(await s.list()).toEqual([{ ...r1.entry, baselineRef: 'AGENTS.md 里「统一用 pnpm」那条', summary: '第二次' }])
   })
 
   it('removeByMemoryIds 删除引用任一 id 的条目并返回数量', async () => {
