@@ -355,6 +355,17 @@ describe('待处理：别处已经在处理同一条', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(text)
   })
 
+  it('放错层「提升为全局」回 not-found（别处已提升或删掉）：同样提示，不显示原话', async () => {
+    const misplaced: PendingItem = { kind: 'advice', level: 'advice', type: 'misplaced', memories: [memory({ id: 'mu', filePath: '/m/app/mu.md', digest: 'sha1:mu' })] }
+    const { gateway } = setup([misplaced], { respond: command => ({ ok: false, cmd: command.cmd, code: 'not-found', detail: '不存在或已处理：mu' }) })
+    fireEvent.click(screen.getByRole('button', { name: '提升为全局' }))
+    const text = '你对「放错层」的选择没有生效：它正在别处处理，或者刚在别处处理完。'
+    expect(await screen.findByRole('alert')).toHaveTextContent(text)
+    expect(screen.queryByText(/不存在或已处理/)).toBeNull()
+    act(() => { gateway.setView('pending', view()) })
+    expect(screen.getByRole('alert')).toHaveTextContent(text)
+  })
+
   it('结果卡上的撤销碰上别处正在处理（claimed）：结果卡不动，上面写明没有生效', async () => {
     const respond = (command: MemoryCommand) => command.cmd === 'undo' ? claimed(command) : { ok: true as const, cmd: command.cmd }
     setup([horizontal], { respond })
