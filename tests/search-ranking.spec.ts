@@ -177,6 +177,25 @@ describe('字面锚点：含标点的查询词整词命中排在同档前面', (
     ])
     expect(await ids(store, '分片上传')).toEqual(['mem_ranked', 'mem_literal'])
   })
+
+  it('整词首尾的句读和括号不算标点：「分片上传？」仍按分数排，字面含这句的记录不会被提前', async () => {
+    const store = await seeded([
+      record({ id: 'mem_literal', name: '杂记', summary: '一些零碎事项', lastConfirmedAt: 9, content: '周会上有人问：分片上传？接口文档还没补。' }),
+      record({
+        id: 'mem_ranked', name: '大文件分片与上传', summary: '先分片，再逐片上传，断了只补缺的分片', lastConfirmedAt: 1,
+        content: '大文件先在客户端分片，每片 5MB，逐片上传，服务端收齐后合并；上传中断时只重传缺的分片，上传进度按已收分片算。',
+      }),
+    ])
+    expect(await ids(store, '分片上传？')).toEqual(['mem_ranked', 'mem_literal'])
+  })
+
+  it('括号包着的版本号：去掉首尾括号后按字面排', async () => {
+    const store = await seeded([
+      record({ id: 'mem_rc2', name: '已知问题', content: RELEASE_NOTE('0.2.1-rc.2'), lastConfirmedAt: 1 }),
+      record({ id: 'mem_rc1', name: '已知问题', content: RELEASE_NOTE('0.2.1-rc.1'), lastConfirmedAt: 3 }),
+    ])
+    expect((await ids(store, '（0.2.1-rc.2）'))[0]).toBe('mem_rc2')
+  })
 })
 
 describe('今天靠子串能命中的查询升级后仍命中', () => {
