@@ -371,11 +371,12 @@ const ADVICE_COPY = {
 /** 放错层里全局那条（该放项目）：没有现成的执行器能挪回项目，只给打开文件、直接改和让模型改。 */
 const MISPLACED_TO_PROJECT = { body: 'pending.advice.misplaced.toProjectBody', actions: ['open', 'edit', 'model', 'ignore'] } as const
 
-/** 右上角的「忽略」：发 ignore-advice，带这一项的类型和全部记忆 id（内容重复是整组）。 */
+/** 右上角的「忽略」：发 ignore-advice，带这一项的类型和全部记忆（内容重复是整组），每条带卡片上那一份的层和卡片版本。 */
 function IgnoreButton({ item, action }: { item: Item<'advice'>; action: ItemAction }) {
   const t = useT()
   if (item.type === 'stale') return null
-  const command: MemoryCommand = { cmd: 'ignore-advice', type: item.type, memoryIds: item.memories.map(m => m.id) }
+  const memories = item.memories.map(m => ({ memoryId: m.id, layer: layerOfMemory(m), base: baseOf(m) }))
+  const command: MemoryCommand = { cmd: 'ignore-advice', type: item.type, memories }
   return <Button variant="quiet" unavailable={action.unavailable} onClick={() => { action.run(command) }}>{t('pending.advice.ignore')}</Button>
 }
 
@@ -411,7 +412,7 @@ export function AdviceCard(props: CardProps<'advice'>) {
     if (command.cmd === 'forget') onDone({ kind: 'deleted' })
     if (command.cmd === 'hard-delete') onDone({ kind: 'hard-deleted' })
     if (command.cmd === 'promote-memory') onDone({ kind: 'promoted', target: 'global', decisionId: result.decisionId })
-    if (command.cmd === 'ignore-advice') onDone({ kind: 'ignored', type: command.type, memoryIds: command.memoryIds })
+    if (command.cmd === 'ignore-advice') onDone({ kind: 'ignored', type: command.type, memoryIds: command.memories.map(m => m.memoryId) })
     if (command.cmd === 'edit-memory' || command.cmd === 'merge-memories') {
       onDone({
         kind: command.cmd === 'edit-memory' ? 'edited' : 'merged',

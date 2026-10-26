@@ -634,7 +634,7 @@ describe('待处理：建议整理', () => {
     }
   })
 
-  it('「忽略」发 ignore-advice（类型 + 记忆 id），原位换成结果卡；撤销发 unignore-advice，撤销后回到原卡片', async () => {
+  it('「忽略」发 ignore-advice（类型 + 每条记忆的层和卡片版本），原位换成结果卡；撤销发 unignore-advice，撤销后回到原卡片', async () => {
     const { gateway, commands } = setup([bloat])
     fireEvent.click(within(cardOf('内容过长')).getByRole('button', { name: '忽略' }))
     await screen.findByText('已忽略')
@@ -642,7 +642,11 @@ describe('待处理：建议整理', () => {
     // 视图重写后这一项不在了，结果卡照旧留在原位
     act(() => { gateway.setView('pending', view()) })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
-    expect(commands()).toEqual([{ cmd: 'ignore-advice', type: 'bloat', memoryIds: ['b1'] }, { cmd: 'unignore-advice', type: 'bloat', memoryIds: ['b1'] }])
+    const base = { updatedAt: bloat.kind === 'advice' ? bloat.memories[0]!.updatedAt : 0, digest: 'sha1:b1' }
+    expect(commands()).toEqual([
+      { cmd: 'ignore-advice', type: 'bloat', memories: [{ memoryId: 'b1', layer, base }] },
+      { cmd: 'unignore-advice', type: 'bloat', memoryIds: ['b1'] },
+    ])
     act(() => { gateway.setView('pending', view(bloat)) })
     expect(within(cardOf('内容过长')).getByRole('button', { name: '忽略' })).toBeInTheDocument()
     expect(screen.queryByText('已忽略')).toBeNull()
@@ -652,7 +656,7 @@ describe('待处理：建议整理', () => {
     const { commands } = setup([pair])
     fireEvent.click(within(cardOf('内容重复')).getByRole('button', { name: '忽略' }))
     await screen.findByText('已忽略')
-    expect(commands()).toEqual([{ cmd: 'ignore-advice', type: 'redundancy', memoryIds: ['r1', 'r2'] }])
+    expect(commands()).toEqual([{ cmd: 'ignore-advice', type: 'redundancy', memories: duplicates.map(m => ({ memoryId: m.id, layer, base: { updatedAt: m.updatedAt, digest: m.digest } })) }])
   })
 
   it('说明按情形写：和指令文件重复、该放全局、只和项目有关、表述不清、内容过长', () => {

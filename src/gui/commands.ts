@@ -503,11 +503,15 @@ async function dispatch(
     }
 
     case 'ignore-advice': {
+      const refs = command.memories
+      const ids = refs.map(ref => ref.memoryId)
       // 内容重复是一组记忆一项，其余类型每条记忆一项
-      if (command.type !== 'redundancy' && command.memoryIds.length !== 1) return fail(cmd, 'invalid-args', `${command.type} 一项只对应一条记忆`)
-      // 按借来的会话定位（与视图按 id 取的那份同口径）；指纹按此刻的内容记
-      const records = await Promise.all([...new Set(command.memoryIds)].map(id => deps.store.get(id, { workspacePath: gov.workspacePath })))
-      if (!records.every(r => r?.status === 'active')) return notFound(command.memoryIds.join('、'))
+      if (command.type !== 'redundancy' && refs.length !== 1) return fail(cmd, 'invalid-args', `${command.type} 一项只对应一条记忆`)
+      if (new Set(ids).size !== ids.length) return fail(cmd, 'invalid-args', `同一条记忆出现了两次：${ids.join('、')}`)
+      // 只认卡片上那一份，且还是用户看到的那一版：指纹按它记
+      const records = await Promise.all(refs.map(ref => locate(ref.memoryId, ref.layer)))
+      if (!records.every(r => r?.status === 'active')) return notFound(ids.join('、'))
+      if (refs.some((ref, i) => isStale(records[i]!, ref.base))) return fail(cmd, 'stale', '这条记忆刚被改过，刷新后再看。未做任何改动')
       const entry = await deps.ignores.ignore(command.type, records.map(r => r!), now)
       return { ok: true, cmd, memoryIds: entry.memoryIds }
     }

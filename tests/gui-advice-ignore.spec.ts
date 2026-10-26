@@ -16,11 +16,12 @@ import { BLOAT_THRESHOLD } from '../src/governance/rule-scan.ts'
 import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type Finding } from '../src/governance/schema.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
+import { computeDigest } from '../src/storage/frontmatter.ts'
 import { ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../src/gui/commands.ts'
 import {
-  GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, encodeMemoryCommand, healthViewSchema, memoryCommandResultSchema, pendingViewSchema,
-  type MemoryCommand, type MemoryCommandResult,
+  GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, encodeMemoryCommand, healthViewSchema, layerOfMemory, memoryCommandResultSchema, pendingViewSchema,
+  type IgnorableAdviceType, type MemoryCommand, type MemoryCommandResult,
 } from '../src/gui/contract.ts'
 import { executeHealth, renderHealthResult, type SingleHealthResult, type CheckupHealthResult } from '../src/tools/health.ts'
 import { executeScan, renderScanResult, type SingleScanResult } from '../src/tools/scan.ts'
@@ -32,6 +33,7 @@ import { record } from './helpers/record.ts'
 
 const NOW = 10 * RETENTION_MS
 const WS = '/tmp/pm-ignore-ws'
+const OTHER_WS = '/tmp/pm-ignore-other'
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const LONG = 'x'.repeat(BLOAT_THRESHOLD + 1)
 
@@ -66,7 +68,14 @@ function env(opts: { llm?: SemanticLlm } = {}) {
   const healthTool = (scope?: string) => executeHealth(scope === undefined ? {} : { scope }, { ...toolDeps, thresholds: resolveHealthThresholds('normal') }, fakeExec())
   const scanTool = (args: { scope?: string; layers?: 'rule' | 'full' } = {}) =>
     executeScan({ layers: 'rule', ...args }, { ...toolDeps, getBaseline: () => null, getLlm }, fakeExec())
-  return { store, decisions, ignores, cache, run, runRaw, readView, pending, health, healthTool, scanTool }
+  /** 照界面的做法点「忽略」：从待处理视图里那张卡带上每条记忆的层和卡片版本。 */
+  const ignore = async (type: IgnorableAdviceType, ids: readonly string[]) => {
+    const key = [...ids].sort().join(',')
+    const item = (await pending()).items.find(i => i.kind === 'advice' && i.type === type && i.memories.map(m => m.id).sort().join(',') === key)
+    if (item?.kind !== 'advice') throw new Error(`待处理里没有 ${type}:${key}`)
+    return run({ cmd: 'ignore-advice', type, memories: item.memories.map(m => ({ memoryId: m.id, layer: layerOfMemory(m), base: { updatedAt: m.updatedAt, digest: m.digest! } })) })
+  }
+  return { store, decisions, ignores, cache, run, runRaw, ignore, readView, pending, health, healthTool, scanTool }
 }
 
 type Ok = Extract<MemoryCommandResult, { ok: true }>
@@ -96,7 +105,7 @@ describe('忽略与取消忽略', () => {
     expect(before.issues).toEqual([{ type: 'bloat', count: 1 }])
     expect(before.ignored).toEqual([])
 
-    expect(ok(await e.run({ cmd: 'ignore-advice', type: 'bloat', memoryIds: ['mem_long'] }))).toMatchObject({ cmd: 'ignore-advice', memoryIds: ['mem_long'] })
+    expect(ok(await e.ignore('bloat', ['mem_long']))).toMatchObject({ cmd: 'ignore-advice', memoryIds: ['mem_long'] })
     expect(await adviceOf(e)).toEqual([])
     const ignored = await wsLayerOf(e)
     expect(ignored.issues).toEqual([])
@@ -112,7 +121,7 @@ describe('忽略与取消忽略', () => {
   it('改了记忆内容后被忽略的问题（仍然过长）重新出现，旧的忽略记录在视图生成时清掉', async () => {
     const e = env()
     await seedBloat(e)
-    ok(await e.run({ cmd: 'ignore-advice', type: 'bloat', memoryIds: ['mem_long'] }))
+    ok(await e.ignore('bloat', ['mem_long']))
     expect(await adviceOf(e)).toEqual([])
     const r = (await e.store.get('mem_long'))!
     await e.store.update(r, cur => ({ ...cur, content: `${LONG}y` }))
@@ -125,7 +134,7 @@ describe('忽略与取消忽略', () => {
   it('只改了内容以外的东西（确认时间）：照旧算已忽略', async () => {
     const e = env()
     await seedBloat(e)
-    ok(await e.run({ cmd: 'ignore-advice', type: 'bloat', memoryIds: ['mem_long'] }))
+    ok(await e.ignore('bloat', ['mem_long']))
     ok(await e.run({ cmd: 'confirm', memoryId: 'mem_long' }))
     expect(await adviceOf(e)).toEqual([])
     expect((await wsLayerOf(e)).ignored.map(i => i.type)).toEqual(['bloat'])
@@ -134,7 +143,7 @@ describe('忽略与取消忽略', () => {
   it('记忆删除后忽略记录被清掉；从最近删除恢复后问题重新出现', async () => {
     const e = env()
     await seedBloat(e)
-    ok(await e.run({ cmd: 'ignore-advice', type: 'bloat', memoryIds: ['mem_long'] }))
+    ok(await e.ignore('bloat', ['mem_long']))
     expect(await ignoreFiles()).toHaveLength(1)
     ok(await e.run({ cmd: 'forget', memoryId: 'mem_long' }))
     expect(await ignoreFiles()).toEqual([])
@@ -146,8 +155,8 @@ describe('忽略与取消忽略', () => {
     const [a, b] = [env(), env()]
     await seedBloat(a)
     await Promise.all([
-      a.run({ cmd: 'ignore-advice', type: 'bloat', memoryIds: ['mem_long'] }),
-      b.run({ cmd: 'ignore-advice', type: 'bloat', memoryIds: ['mem_long'] }),
+      a.ignore('bloat', ['mem_long']),
+      b.ignore('bloat', ['mem_long']),
     ]).then(rs => rs.forEach(ok))
     expect(await ignoreFiles()).toHaveLength(1)
     expect((await b.ignores.list()).map(i => i.memoryIds)).toEqual([['mem_long']])
@@ -164,7 +173,7 @@ describe('忽略与取消忽略', () => {
     await e.store.create(record({ id: 'mem_b', name: '乙', content: '包管理用 pnpm', scope: 'workspace', workspacePath: WS }))
     ok(await e.run({ cmd: 'scan' }))
     expect(await adviceOf(e)).toEqual(['redundancy:mem_a,mem_b'])
-    ok(await e.run({ cmd: 'ignore-advice', type: 'redundancy', memoryIds: ['mem_b', 'mem_a'] }))
+    ok(await e.ignore('redundancy', ['mem_b', 'mem_a']))
     expect(await adviceOf(e)).toEqual([])
     expect((await wsLayerOf(e)).ignored).toEqual([{ type: 'redundancy', memories: [
       { id: 'mem_a', name: '甲', summary: '摘要' }, { id: 'mem_b', name: '乙', summary: '摘要' },
@@ -179,11 +188,45 @@ describe('忽略与取消忽略', () => {
   it('参数：很久没确认不可忽略；单条类型只收一条记忆；记忆不在用 → not-found，什么都不记', async () => {
     const e = env()
     await seedBloat(e)
-    expect(err(await e.runRaw(' ignore-advice {"type":"stale","memoryIds":["mem_ok"]}')).code).toBe('invalid-args')
-    expect(err(await e.run({ cmd: 'ignore-advice', type: 'bloat', memoryIds: ['mem_long', 'mem_ok'] })).code).toBe('invalid-args')
-    expect(err(await e.run({ cmd: 'ignore-advice', type: 'bloat', memoryIds: ['mem_none'] })).code).toBe('not-found')
+    const layer = { kind: 'workspace', workspacePath: WS } as const
+    const refOf = async (id: string) => {
+      const r = await e.store.get(id, { workspacePath: WS })
+      return { memoryId: id, layer, base: { updatedAt: r?.updatedAt ?? 0, digest: r === undefined ? '' : computeDigest(r.name, r.summary, r.content) } }
+    }
+    const stale = { memoryId: 'mem_ok', layer, base: { updatedAt: 1, digest: 'd' } }
+    expect(err(await e.runRaw(` ignore-advice ${JSON.stringify({ type: 'stale', memories: [stale] })}`)).code).toBe('invalid-args')
+    expect(err(await e.run({ cmd: 'ignore-advice', type: 'bloat', memories: [await refOf('mem_long'), await refOf('mem_ok')] })).code).toBe('invalid-args')
+    expect(err(await e.run({ cmd: 'ignore-advice', type: 'bloat', memories: [await refOf('mem_none')] })).code).toBe('not-found')
+    const okRef = await refOf('mem_ok')
     ok(await e.run({ cmd: 'forget', memoryId: 'mem_ok' }))
-    expect(err(await e.run({ cmd: 'ignore-advice', type: 'expired', memoryIds: ['mem_ok'] })).code).toBe('not-found')
+    expect(err(await e.run({ cmd: 'ignore-advice', type: 'expired', memories: [okRef] })).code).toBe('not-found')
+    expect(await ignoreFiles()).toEqual([])
+  })
+
+  it('同 id 在两个项目各有一份：忽略的是卡片上那一份（视图取的较新那份），之后不会被当成过时清掉', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_dup', name: '本项目那份', content: LONG, scope: 'workspace', workspacePath: WS, updatedAt: 1 }))
+    await e.store.create(record({ id: 'mem_dup', name: '别的项目那份', content: `${LONG}z`, scope: 'workspace', workspacePath: OTHER_WS, updatedAt: 2 }))
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect(await adviceOf(e)).toEqual(['bloat:mem_dup'])
+    ok(await e.ignore('bloat', ['mem_dup']))
+    expect(await adviceOf(e)).toEqual([])
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect(await adviceOf(e)).toEqual([])
+    expect(await ignoreFiles()).toHaveLength(1)
+  })
+
+  it('卡片加载后记忆被改过（比如 agent 刚改）：回 stale，什么都不记', async () => {
+    const e = env()
+    await seedBloat(e)
+    const view = await e.pending()
+    const r = (await e.store.get('mem_long', { workspacePath: WS }))!
+    await e.store.update(r, cur => ({ ...cur, content: `${LONG}y`, updatedAt: NOW }))
+    const item = view.items.find(i => i.kind === 'advice' && i.type === 'bloat')!
+    if (item.kind !== 'advice') throw new Error('unreachable')
+    const [m] = item.memories
+    const result = await e.run({ cmd: 'ignore-advice', type: 'bloat', memories: [{ memoryId: m.id, layer: layerOfMemory(m), base: { updatedAt: m.updatedAt, digest: m.digest! } }] })
+    expect(err(result).code).toBe('stale')
     expect(await ignoreFiles()).toEqual([])
   })
 
@@ -202,7 +245,7 @@ describe('agent 工具认忽略', () => {
     const plain = await e.healthTool() as SingleHealthResult
     expect(plain.ignoredCount).toBe(0)
     expect(renderHealthResult(plain)).not.toContain('已忽略')
-    ok(await e.run({ cmd: 'ignore-advice', type: 'bloat', memoryIds: ['mem_long'] }))
+    ok(await e.ignore('bloat', ['mem_long']))
     const r = await e.healthTool() as SingleHealthResult
     expect(r.score).toBe((await wsLayerOf(e)).score)
     expect(r.score).toBeGreaterThan(plain.score)
@@ -217,7 +260,7 @@ describe('agent 工具认忽略', () => {
   it('memory_scan：已忽略的不列为发现，输出注明已忽略条数；体检表的分数与界面一致', async () => {
     const e = env()
     await seedBloat(e)
-    ok(await e.run({ cmd: 'ignore-advice', type: 'bloat', memoryIds: ['mem_long'] }))
+    ok(await e.ignore('bloat', ['mem_long']))
     const r = await e.scanTool() as SingleScanResult
     expect(r.findings.filter((f: Finding) => f.type === 'bloat')).toEqual([])
     expect(r.stats.byType).toEqual({})

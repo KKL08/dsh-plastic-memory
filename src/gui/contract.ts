@@ -428,11 +428,12 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   }),
   z.object({ cmd: z.literal('dismiss-overflow'), decisionId: z.string() }),
   /**
-   * 忽略一条建议整理项：记下这几条记忆此刻的内容指纹，之后该项不再出现在待处理、不再扣分；内容变了就不再算已忽略。
-   * memoryIds 是该项涉及的记忆（内容重复为一组，顺序不论；其余类型恰好一条）。记忆不在用回 not-found。
+   * 忽略一条建议整理项：记下这几条记忆的指纹，之后该项不再出现在待处理、不再扣分；建议依据的字段变了就不再算已忽略。
+   * memories 是该项涉及的记忆（内容重复为一组，顺序不论；其余类型恰好一条），每条带卡片上那一份的层和卡片版本：
+   * 只认那一份，版本对不上（卡片加载后被改过）回 stale，不在用回 not-found，都什么都不记。
    * 不改记忆，所以不过跨项目门、不受体检开关影响；同一项再忽略一次只是刷新记录。
    */
-  z.object({ cmd: z.literal('ignore-advice'), type: z.enum(IGNORABLE_ADVICE_TYPES), memoryIds: z.array(z.string()).min(1) }),
+  z.object({ cmd: z.literal('ignore-advice'), type: z.enum(IGNORABLE_ADVICE_TYPES), memories: z.array(mergeRefSchema).min(1) }),
   /** 取消忽略（健康页「已忽略」里的一条，或刚忽略后的撤销）：本来就没忽略也算成功。 */
   z.object({ cmd: z.literal('unignore-advice'), type: z.enum(IGNORABLE_ADVICE_TYPES), memoryIds: z.array(z.string()).min(1) }),
   z.object({ cmd: z.literal('scan'), workspacePath: z.string().optional() }),
