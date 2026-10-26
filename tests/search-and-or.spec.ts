@@ -3,7 +3,6 @@ import fc from 'fast-check'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { JsonSchemaNode } from '@deepseek-ai/dsh-tools'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
@@ -11,7 +10,6 @@ import { GLOBAL_DIR, deriveFileId } from '../src/storage/paths.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
 import { expandQueryTerms, matchScore } from '../src/text.ts'
 import { executeSearch, renderSearchResult, type SearchToolDeps } from '../src/tools/search.ts'
-import { createSaveTool } from '../src/tools/save-tool.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { SearchNoteCode } from '../src/contract-codes.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
@@ -137,15 +135,6 @@ describe('原文预筛随模式切换：AND 按全部词项、OR 按任一', () 
     expect((await store.query({ keyword: `${id} alpha`, scope: { kind: 'global' } })).map(r => r.id)).toEqual([id])
     expect((await store.query({ keyword: `${id} 缺这个`, keywordMatch: 'any', scope: { kind: 'global' } })).map(r => r.id)).toEqual([id])
   })
-})
-
-it('summary 参数说明改写为「检索面，写会被搜到的限定词、专有名词，不复述 name」', () => {
-  const tool = createSaveTool({
-    store: new MemoryStore(new InMemoryTable()), registry,
-    resolveContext: async () => ({ workspacePath: '/proj', session: { id: 's', lastSeq: 1 } }),
-  })
-  const schema = tool.parameters as unknown as JsonSchemaNode & { properties: Record<string, { description?: string }> }
-  expect(schema.properties.summary.description).toContain('检索面，写会被搜到的限定词、专有名词，不复述 name')
 })
 
 it('说明码进 contract-codes', async () => {

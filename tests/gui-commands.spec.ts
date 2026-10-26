@@ -2097,6 +2097,16 @@ describe('draft-edit（让模型改、让模型合并的生成）', () => {
     expect(user).toContain('mem_l')
   })
 
+  it('提示词：summary、tags 的分工与 memory_save 一致（summary 不复述 name，tags 只写文本里没有的词）', async () => {
+    const { llm, prompts } = scripted(answer({ content: '短', summary: '短' }))
+    const e = env({ llm })
+    await seedLong(e)
+    ok(await e.run(draftOf('mem_l')))
+    const [{ system }] = prompts as [{ system: string; user: string }]
+    expect(system).toContain('summary 摘要，一句话说清这条记忆讲什么，不复述 name，不堆关键词')
+    expect(system).toContain('tags 标签，只写正文、name、summary 里都没出现、但以后可能被拿来搜它的词：同义词、中英文别名、缩写，不写泛化概念')
+  })
+
   it('提示词：用户在要求里明确给出的信息可以写进去，除此之外不新增', async () => {
     const { llm, prompts } = scripted(answer({ content: '短', summary: '短' }))
     const e = env({ llm })

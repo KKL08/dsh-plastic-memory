@@ -76,10 +76,19 @@ describe('memory_save 绑定', () => {
   })
   const legal = { action: 'create', name: '标题', type: 'preference', scope: 'global', content: '内容', summary: '摘要', sourceMode: 'user-explicit' }
 
-  it('tags 的参数说明引导写同义词与中英文别名，让换一种说法的查询也能搜到', () => {
-    const tags = (schemaOf(makeTool()) as { properties: Record<string, { description?: string }> }).properties.tags!
-    expect(tags.description).toContain('同义词')
-    expect(tags.description).toContain('中英文别名')
+  const describedParam = (name: string) => (schemaOf(makeTool()) as { properties: Record<string, { description?: string }> }).properties[name]!.description
+
+  it('content 的参数说明：先写事实或规则，再交代理由或情境，不编理由、不写很快过时的细节', () => {
+    expect(describedParam('content')).toBe('正文。先写事实或规则本身；再用一句交代用户给的理由，或者当时在聊什么（用户没说理由就写情境，不要替用户编理由）。只有不写就会做错的时候，才补一句具体做法。不写使用场景清单和通用注意事项；不写行号、临时路径这类很快过时的细节，改写稳定的位置描述。完整经过可以用 memory_source 回查，不用抄进正文。')
+  })
+
+  it('summary 与 tags 分工：summary 一句话说清讲什么，tags 只写文本里没有的检索词', () => {
+    expect(describedParam('summary')).toBe('一句话说清这条记忆讲什么，显示在索引里，供人和模型判断相关不相关；不复述 name，不堆关键词。')
+    expect(describedParam('tags')).toBe('只写正文、name、summary 里都没出现、但以后可能被拿来搜它的词：同义词、中英文别名、缩写。不写泛化概念。')
+  })
+
+  it('sourceMode 的参数说明逐一定义五种来源，推断链上有一步是推出来的就填 agent-inferred', () => {
+    expect(describedParam('sourceMode')).toBe('信息从哪来，决定置信度上限。user-explicit：用户明说的。agent-action-confirmed：你做的事经用户确认有效，或被采纳。user-behavior：用户反复做出的动作（多次改写、撤销、拒绝同一类做法）；对一次举动揣测动机不算。environment-observed：从文件、命令输出、配置里直接读到的事实。agent-inferred：你自己的推断和解读；只要中间有一步是你推出来的、不是直接看到的，就填它。')
   })
 
   it('(a) 合法参数过、缺必填拒', () => {
