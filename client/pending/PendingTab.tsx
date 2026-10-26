@@ -1,17 +1,18 @@
 /**
- * 记忆页「待处理」tab（PRD 5.2、5.13）：视图里的条目按服务端排好的顺序（密钥 → 冲突 → 提升候选 → 超限 → 读不出的文件）
- * 各出一张卡。视图不含刚处理完的条目，所以列表在本地记住最近一次处理（原条目 + 结果 + 原位置），在原位显示结果卡；
+ * 记忆页「待处理」tab（PRD 5.2、5.13）：待处理项按级别分组（必须处理 → 等你决定），组标题带条数，没有内容的组不画；
+ * 组内按服务端排好的顺序各出一张卡。视图不含刚处理完的条目，所以列表在本地记住最近一次处理（原条目 + 结果 + 原位置），在原位显示结果卡；
  * 撤销成功后等视图把条目带回来，再去掉本地那张。离开页面就收起。
  * 动作碰上这一条正在别处处理或刚处理完（什么都没动）：在原位留一行说明，那边的结果写进视图、卡片消失后也还在，
  * 列表空了就留在空状态上面；之后哪张卡做成了一件事就收起。
- * 空状态三种：体检关闭（「去设置里打开 ›」）、从没体检过（说明体检是什么，按钮在页头）、待处理为空（上次体检时间）。
+ * 空状态三种：体检关闭（「去设置里打开 ›」）、从没体检过（说明体检是什么，按钮在页头）、待处理为空（说明待处理收什么、上次体检时间）。
  * 入口带记忆 id 打开时，含这条记忆的卡（冲突任一方、提升候选、密钥）滚入视野并高亮一次。
  */
-import { useEffect, useState, type ReactElement } from 'react'
-import type { HealthView, PendingItem, PendingView } from '../../src/gui/contract.ts'
+import { useEffect, useId, useState, type ReactElement, type ReactNode } from 'react'
+import { PENDING_LEVELS, type HealthView, type PendingItem, type PendingLevel, type PendingView } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
-import { formatDay, useT } from '../i18n.tsx'
+import { formatDay, formatNumber, useT } from '../i18n.tsx'
 import { FlashRow, useFlashTarget } from '../library/shared.tsx'
+import type { LocaleKey } from '../locales.ts'
 import { useCanOpen, type NavStore } from '../nav.ts'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { crossConfirmCss } from './action.tsx'
@@ -41,8 +42,16 @@ function memoryIdsOf(item: PendingItem): string[] {
 
 interface Recent { item: PendingItem; index: number; outcome: Outcome; undone: boolean }
 
-/** 没有生效的那次动作：哪一条（标题写进说明，卡片没了也认得出）、在列表里的位置。 */
-interface Refused { key: string; index: number; title: string }
+/** 没有生效的那次动作：哪一条（标题写进说明，卡片没了也认得出）、在列表里的位置、在哪一组。 */
+interface Refused { key: string; index: number; title: string; level: PendingLevel }
+
+const LEVEL_LABEL = {
+  'must-fix': 'pending.level.must-fix',
+  'your-call': 'pending.level.your-call',
+} as const satisfies Record<PendingLevel, LocaleKey>
+
+/** 一行：待处理项的卡，或原位的结果卡、没有生效的说明。isItem 的行才算进组标题的条数。 */
+interface Row { key: string; node: ReactElement; level: PendingLevel; isItem: boolean; flashing?: boolean }
 
 export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
   nav: NavStore
@@ -59,7 +68,7 @@ export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
   const [recent, setRecent] = useState<Recent | undefined>(undefined)
   const [refused, setRefused] = useState<Refused | undefined>(undefined)
   const done = (next: Recent) => { setRecent(next); setRefused(undefined) }
-  const refuse = (item: PendingItem, index: number) => () => { setRefused({ key: keyOf(item), index, title: titleOf(item, t) }) }
+  const refuse = (item: PendingItem, index: number) => () => { setRefused({ key: keyOf(item), index, title: titleOf(item, t), level: item.level }) }
 
   const viewItems = pending.status === 'ready' ? pending.data.items : []
   const typeLabels = pending.status === 'ready' ? pending.data.typeLabels : {}
@@ -73,14 +82,18 @@ export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
 
   // 视图还没重写时刚处理的条目仍在里面：先藏起来，原位放结果卡
   const items = viewItems.filter(i => recent === undefined || recent.undone || keyOf(i) !== recentKey)
-  const rows: Array<{ key: string; node: ReactElement; flashing?: boolean }> = items.map((item, index) => ({
+  const rows: Row[] = items.map((item, index) => ({
     key: keyOf(item),
+    level: item.level,
+    isItem: true,
     flashing: flashId !== undefined && memoryIdsOf(item).includes(flashId),
     node: renderCard(item, (outcome) => { done({ item, index, outcome, undone: false }) }, refuse(item, index)),
   }))
   if (recent !== undefined && !(recent.undone && backInView)) {
     rows.splice(Math.min(recent.index, rows.length), 0, {
       key: `recent:${recentKey}`,
+      level: recent.item.level,
+      isItem: recent.undone,
       node: recent.undone
         // 撤销已生效、视图还没带回来：先按原样显示，可以接着处理
         ? renderCard(recent.item, (outcome) => { done({ ...recent, outcome, undone: false }) }, refuse(recent.item, recent.index))
@@ -99,8 +112,10 @@ export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
   }
 
   const isEmpty = rows.length === 0
-  const refusedRow = refused === undefined ? undefined : {
+  const refusedRow: Row | undefined = refused === undefined ? undefined : {
     key: `refused:${refused.key}`,
+    level: refused.level,
+    isItem: false,
     node: <p className="pm-pending-refused" role="alert" tabIndex={-1}>{t('pending.refused', { title: refused.title })}</p>,
   }
   if (refused !== undefined && refusedRow !== undefined && !isEmpty) rows.splice(Math.min(refused.index, rows.length), 0, refusedRow)
@@ -137,10 +152,32 @@ export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
             <PendingEmpty nav={nav} session={session} workspacePath={workspacePath} health={health.status === 'ready' ? health.data : undefined} now={now} />
           </>
         )
-        : rows.map(row => (
-          <FlashRow key={row.key} as="div" className="pm-pending-row" flashing={row.flashing ?? false} onFlashEnd={clear}>{row.node}</FlashRow>
-        ))}
+        : PENDING_LEVELS.map((level) => {
+          const group = rows.filter(row => row.level === level)
+          return group.length === 0 ? null : (
+            <PendingGroup key={level} level={level} count={group.filter(row => row.isItem).length}>
+              {group.map(row => (
+                <FlashRow key={row.key} as="div" className="pm-pending-row" flashing={row.flashing ?? false} onFlashEnd={clear}>{row.node}</FlashRow>
+              ))}
+            </PendingGroup>
+          )
+        })}
     </div>
+  )
+}
+
+/** 一级一组：组标题写级别和还在等你的条数（只剩结果卡时不写 0）。 */
+function PendingGroup({ level, count, children }: { level: PendingLevel; count: number; children: ReactNode }) {
+  const t = useT()
+  const titleId = useId()
+  return (
+    <section className="pm-pending-group" aria-labelledby={titleId}>
+      <h2 id={titleId} className="pm-pending-group-title">
+        {t(LEVEL_LABEL[level])}
+        {count > 0 ? <>{' '}<span className="pm-pending-group-count">{formatNumber(count)}</span></> : null}
+      </h2>
+      {children}
+    </section>
   )
 }
 
@@ -192,13 +229,18 @@ function PendingEmpty({ nav, session, workspacePath, health, now }: {
   }
   return (
     <EmptyState variant="daily" title={t('pending.empty.title')}>
-      {last === undefined ? undefined : t('pending.empty.lastScan', { date: formatDay(last, now, t) })}
+      {t('pending.empty.body')}
+      {last === undefined ? null : <><br />{t('pending.empty.lastScan', { date: formatDay(last, now, t) })}</>}
     </EmptyState>
   )
 }
 
 export const pendingCss = crossConfirmCss + `
 .pm-pending { display: flex; flex-direction: column; }
+.pm-pending-group { display: flex; flex-direction: column; }
+.pm-pending-group + .pm-pending-group { margin-top: 16px; }
+.pm-pending-group-title { margin: 4px 0 0; font-size: 12px; font-weight: 600; line-height: 1.5; color: var(--pm-text-2); }
+.pm-pending-group-count { font-weight: 400; }
 .pm-pending-row { position: relative; }
 .pm-pending-row + .pm-pending-row { border-top: .5px solid var(--pm-line); }
 .pm-pending-row.pm-flash { margin-inline: -12px; padding-inline: 12px; border-radius: 10px; }

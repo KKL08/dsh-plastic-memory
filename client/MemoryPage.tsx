@@ -56,7 +56,8 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
   add({ kind: 'global' })
 
   const counts: Partial<Record<MemoryTab, number>> = {
-    pending: countOf(pending, data => data.items.length),
+    // 主数只算必须处理和等你决定
+    pending: countOf(pending, data => data.levelCounts['must-fix'] + data.levelCounts['your-call']),
     library: countOf(library, data => data.layers.find(l => sameScope(l.layer, scope))?.items.length ?? 0),
   }
   const tabLabel = (tab: MemoryTab): ReactNode => (

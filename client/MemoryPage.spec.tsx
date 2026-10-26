@@ -42,6 +42,21 @@ describe('记忆页外壳', () => {
     expect(gateway.sessionRequests.at(-1)).toBe('/w/app')
   })
 
+  it('待处理 tab 的数 = 必须处理 + 等你决定（读不出的文件也算）', () => {
+    const conflict = { kind: 'conflict-horizontal', level: 'your-call', decisionId: 'd2', firstSeenAt: 2, summary: 's', left: null, right: null } as const
+    const leveled: PendingView = {
+      ...pending,
+      items: [
+        { kind: 'secret', level: 'must-fix', memory: memory({ id: 's1' }) },
+        { kind: 'unreadable-file', level: 'must-fix', layer: { kind: 'global' }, filePath: '/m/x.md', relativePath: 'x.md', error: 'bad' },
+        ...pending.items, conflict,
+      ],
+      levelCounts: { 'must-fix': 2, 'your-call': 2 },
+    }
+    renderInShell(<MemoryPage nav={createNavStore()} />, createFakeGateway({ currentWorkspace: '/w/app', views: { pending: leveled, library } }))
+    expect(screen.getByRole('tab', { name: /待处理/ })).toHaveTextContent('待处理4')
+  })
+
   it('英文界面：tab 依次是 Pending、Health、Browse、Recently deleted', () => {
     const gateway = createFakeGateway({ currentWorkspace: '/w/app', views: { pending, library } })
     render(<PanelShell gateway={gateway} t={createTranslator(en)}><MemoryPage nav={createNavStore()} /></PanelShell>)

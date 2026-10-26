@@ -39,13 +39,47 @@ function setup(items: PendingItem[], init: FakeGatewayInit = {}, nav: NavStore =
   return { ...utils, gateway, commands }
 }
 
-describe('待处理：各类卡', () => {
-  it('按视图顺序出卡，密钥在最前', () => {
-    setup([secret, horizontal, vertical, promote, overflow, unreadable])
-    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual([
-      '这条记忆里有密钥', '测试里怎么准备数据库，两条记忆互相矛盾', '包管理器和基线矛盾', '这条适合所有项目', '带入的记忆超出上限', '有个文件读不出来',
+describe('待处理：按级别分组', () => {
+  it('必须处理在前、等你决定在后，组标题带条数；组内按视图顺序出卡', () => {
+    setup([secret, unreadable, horizontal, vertical, promote, overflow])
+    expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['必须处理 2', '等你决定 4'])
+    const mustFix = screen.getByRole('region', { name: '必须处理 2' })
+    expect(within(mustFix).getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['这条记忆里有密钥', '有个文件读不出来'])
+    expect(within(screen.getByRole('region', { name: '等你决定 4' })).getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual([
+      '测试里怎么准备数据库，两条记忆互相矛盾', '包管理器和基线矛盾', '这条适合所有项目', '带入的记忆超出上限',
     ])
   })
+
+  it('密钥标红，读不出的文件同在必须处理组但不标红', () => {
+    setup([secret, unreadable])
+    const mustFix = screen.getByRole('region', { name: '必须处理 2' })
+    const [secretCard, fileCard] = within(mustFix).getAllByRole('article')
+    expect(within(secretCard!).getByRole('img', { name: '有密钥要处理' })).toBeInTheDocument()
+    expect(fileCard!.querySelector('.pm-marker')).toBeNull()
+  })
+
+  it('某一级没有待处理项：整组不画', () => {
+    setup([horizontal])
+    expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['等你决定 1'])
+    expect(screen.queryByRole('region', { name: /必须处理/ })).toBeNull()
+  })
+
+  it('只有必须处理：只画这一组', () => {
+    setup([unreadable])
+    expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['必须处理 1'])
+  })
+
+  it('裁决后结果卡留在原来那一组；组标题的数只算还在等你的', async () => {
+    setup([secret, horizontal, promote])
+    fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
+    await screen.findByText('已按 A')
+    const yourCall = screen.getByRole('region', { name: '等你决定 1' })
+    expect(within(yourCall).getByText('已按 A')).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: '必须处理 1' })).toBeInTheDocument()
+  })
+})
+
+describe('待处理：各类卡', () => {
 
   it('横向冲突：A / B 原文、类型显示名、「决定前 agent 按哪条来」，后果在动手前就写着；三个按钮各发对应 verdict', async () => {
     const { commands } = setup([horizontal])
@@ -301,7 +335,7 @@ describe('待处理：别处已经在处理同一条', () => {
     fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
     await screen.findByRole('alert')
     act(() => { gateway.setView('pending', view()) })
-    expect(screen.getByText('没有等你决定的事')).toBeInTheDocument()
+    expect(screen.getByText('目前没有要处理的事')).toBeInTheDocument()
     expect(screen.getByRole('alert')).toHaveTextContent(refused)
   })
 
@@ -437,10 +471,13 @@ describe('待处理：两态与空状态', () => {
     expect(gateway.executed.map(e => e.command.cmd)).toEqual(['resolve'])
   })
 
-  it('待处理为空：一句结论 + 上次体检时间，没有按钮', () => {
+  it('待处理为空：一句结论，说明待处理收什么，再写上次体检时间；不画组标题，没有按钮', () => {
     setup([], { views: { pending: view(), health: scannedHealth(new Date(2026, 9, 15, 9).getTime()) } })
-    expect(screen.getByRole('status')).toHaveTextContent('没有等你决定的事')
+    expect(screen.getByRole('status')).toHaveTextContent('目前没有要处理的事')
+    expect(screen.getByRole('status')).toHaveTextContent('必须处理（密钥、读不出的文件）')
+    expect(screen.getByRole('status')).toHaveTextContent('等你决定（互相矛盾的记忆、超出上限的提醒、适合提升为全局的记忆）')
     expect(screen.getByRole('status')).toHaveTextContent('上次体检：10 月 15 日')
+    expect(screen.queryByRole('heading', { level: 2 })).toBeNull()
     expect(screen.queryByRole('button')).toBeNull()
   })
 

@@ -11,7 +11,11 @@ export const pendingZh = {
   'pending.openFailed': '没能打开文件。',
   'pending.refused': '你对「{title}」的选择没有生效：它正在别处处理，或者刚在别处处理完。',
 
-  'pending.empty.title': '没有等你决定的事',
+  'pending.level.must-fix': '必须处理',
+  'pending.level.your-call': '等你决定',
+
+  'pending.empty.title': '目前没有要处理的事',
+  'pending.empty.body': '要你处理的事按级别列在这里：必须处理（密钥、读不出的文件）；等你决定（互相矛盾的记忆、超出上限的提醒、适合提升为全局的记忆）。',
   'pending.empty.lastScan': '上次体检：{date}',
   'pending.never.title': '还没做过体检',
   'pending.never.body': '体检会找出互相矛盾的记忆和适合提升为全局的记忆，结果列在这里。点右上角「体检当前项目」开始。',
@@ -95,7 +99,11 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.openFailed': 'Could not open the file.',
   'pending.refused': 'Your choice on “{title}” did not take effect: it is being handled elsewhere, or was just handled there.',
 
-  'pending.empty.title': 'Nothing is waiting for you',
+  'pending.level.must-fix': 'Must fix',
+  'pending.level.your-call': 'Your call',
+
+  'pending.empty.title': 'Nothing to handle right now',
+  'pending.empty.body': 'Anything that needs you is grouped here by level: Must fix (secrets, unreadable files) and Your call (memories that contradict each other, over-limit reminders, memories worth making global).',
   'pending.empty.lastScan': 'Last checkup: {date}',
   'pending.never.title': 'No checkup yet',
   'pending.never.body': 'A checkup finds memories that contradict each other and memories worth making global, and lists them here. Start one with “Check this project” in the top right.',
