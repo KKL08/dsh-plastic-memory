@@ -66,8 +66,8 @@ const maskDescription = (text: string) => maskSecrets(text, { severity: 'suspect
  */
 export class SnapshotStore {
   private table: KvTable<MemorySnapshot>
-  /** redact 是整快照的读改写，进程内串行，否则两次并发脱敏会把对方的明文写回。 */
-  private redactChain: Promise<void> = Promise.resolve()
+  /** redact / purge 是整快照的读改写，进程内串行，否则两次并发改写会把对方抹掉的内容写回。 */
+  private rewriteChain: Promise<void> = Promise.resolve()
 
   constructor(table: KvTable<MemorySnapshot>) {
     this.table = table
@@ -112,8 +112,27 @@ export class SnapshotStore {
    * 每个快照经侧表 put 原子重写（tmp + rename）；内容没变的（不含这些 id、或已脱敏过）不写。
    */
   redact(ids: ReadonlySet<string>): Promise<void> {
-    const run = this.redactChain.then(() => this.redactNow(ids))
-    this.redactChain = run.catch(() => {})
+    return this.serialize(() => this.redactNow(ids))
+  }
+
+  /**
+   * 彻底删除最近删除里的记忆（GUI 的 hard-delete）：所有快照里去掉命中的记录，快照因此空了就整份删掉。
+   * 之后按快照恢复、撤销都找不到它。
+   */
+  purge(isPurged: (r: SnapshotRecord) => boolean): Promise<void> {
+    return this.serialize(async () => {
+      for (const [key, snap] of await this.table.list()) {
+        const data = snap.data.filter(r => !isPurged(r))
+        if (data.length === snap.data.length) continue
+        if (data.length === 0) await this.table.delete(key)
+        else await this.table.put(key, { ...snap, memoryIds: data.map(r => r.id), data })
+      }
+    })
+  }
+
+  private serialize(task: () => Promise<void>): Promise<void> {
+    const run = this.rewriteChain.then(task)
+    this.rewriteChain = run.catch(() => {})
     return run
   }
 

@@ -371,6 +371,7 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   z.object({ cmd: z.literal('promote-memory'), memoryId: z.string(), layer, allowCrossWorkspace }),
   z.object({ cmd: z.literal('forget'), memoryId: z.string(), layer, allowCrossWorkspace }),
   z.object({ cmd: z.literal('restore'), memoryId: z.string(), layer, allowCrossWorkspace }),
+  /** 彻底删除：在用的只收含密钥的；最近删除里的不等 14 天到期，连同快照里的副本现在就清掉。 */
   z.object({ cmd: z.literal('hard-delete'), memoryId: z.string(), layer, allowCrossWorkspace }),
   /** 刷新一条记忆的确认时间（建议整理「很久没确认」的「仍然有效」），内容不动。不受体检开关影响。 */
   z.object({ cmd: z.literal('confirm'), memoryId: z.string(), layer, allowCrossWorkspace }),

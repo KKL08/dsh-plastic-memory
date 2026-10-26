@@ -123,19 +123,22 @@ export function CrossConfirm({ workspacePath, onCancel, onConfirm }: { workspace
  * 彻底删除的确认：不进最近删除、不能恢复，快照里的副本也抹掉。待处理的密钥卡点「彻底删除…」时出现；
  * 全部记忆、对话交付卡、右侧栏、待处理的建议整理普通删除含密钥的记忆时服务端回 has-secret（什么都没动），也在原位出现，「彻底删除」改发 hard-delete。
  * 密钥卡标题已写明有密钥，`showTitle={false}`；其余地方用户只点了删除，先补一行「这条记忆里有密钥」说明为什么。
+ * 最近删除里点「彻底删除…」也用它，`body` 换成那里的说明。
  */
-export function SecretDeleteConfirm({ onCancel, onConfirm, unavailable, showTitle = true }: {
+export function SecretDeleteConfirm({ onCancel, onConfirm, unavailable, showTitle = true, body }: {
   onCancel: () => void
   onConfirm: () => void
   /** 「彻底删除」暂不可用的原因（密钥卡没有会话、正在处理时）。 */
   unavailable?: string | undefined
   showTitle?: boolean
+  /** 说明文字，缺省是密钥条目的那句。 */
+  body?: string
 }) {
   const t = useT()
   return (
     <ConfirmGroup label={t('pending.secret.confirmDelete')}>
       {showTitle ? <p className="pm-pending-text pm-pending-confirm-title">{t('pending.secret.title')}</p> : null}
-      <p className="pm-pending-text">{t('pending.secret.confirmBody')}</p>
+      <p className="pm-pending-text">{body ?? t('pending.secret.confirmBody')}</p>
       <div className="pm-pending-actions">
         {/* 默认焦点在「取消」：回车不会手滑删掉 */}
         <Button autoFocus onClick={onCancel}>{t('pending.cancel')}</Button>

@@ -31,6 +31,9 @@ export const libraryZh = {
   'deleted.restoreHint': '恢复后这条冲突会回到待处理',
   'deleted.restored': '已恢复。',
   'deleted.restoredConflict': '已恢复，这条冲突回到了待处理。',
+  'deleted.hardDelete': '彻底删除…',
+  'deleted.hardDeleteConfirm': '现在就彻底删除这条记忆？删除后不能恢复，以前快照里的副本也一起抹掉。',
+  'deleted.hardDeleted': '已彻底删除。',
   'deleted.empty.title': '最近删除为空',
   'deleted.empty.body': '删除的记忆在这里保留 14 天，期间可以恢复，之后彻底清除。含密钥的记忆删除时直接抹掉，不进这里。',
 
@@ -70,6 +73,9 @@ export const libraryEn: Record<keyof typeof libraryZh, string> = {
   'deleted.restoreHint': 'Restoring puts this conflict back in Pending',
   'deleted.restored': 'Restored.',
   'deleted.restoredConflict': 'Restored. The conflict is back in Pending.',
+  'deleted.hardDelete': 'Delete permanently…',
+  'deleted.hardDeleteConfirm': 'Delete this memory permanently now? This cannot be undone, and copies in earlier snapshots are erased too.',
+  'deleted.hardDeleted': 'Deleted permanently.',
   'deleted.empty.title': 'Nothing recently deleted',
   'deleted.empty.body': 'Deleted memories stay here for 14 days and can be restored, then they are purged. Memories containing secrets are erased on delete and never land here.',
 

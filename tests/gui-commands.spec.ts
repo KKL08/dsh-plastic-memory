@@ -24,6 +24,7 @@ import {
 } from '../src/gui/contract.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
 import { executeForget } from '../src/tools/forget.ts'
+import { executeSnapshotTool } from '../src/tools/snapshot.ts'
 import { candidate, record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 
@@ -78,7 +79,7 @@ function env(opts: EnvOpts = {}) {
   }
   const run = (c: MemoryCommand) => runRaw(encodeMemoryCommand(c).slice(`/${MEMORY_COMMAND_NAME}`.length))
   const readView = async (name: keyof typeof GUI_VIEW_FILES) => JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES[name]), 'utf8')) as unknown
-  return { store, decisions, snapshots, cache, command, run, runRaw, readView, clock }
+  return { store, decisions, snapshots, cache, stats: sidecar.recallStats, command, run, runRaw, readView, clock }
 }
 
 type Ok = Extract<MemoryCommandResult, { ok: true }>
@@ -852,6 +853,119 @@ describe('hard-delete', () => {
     await e.store.create(record({ id: 'mem_plain' }))
     expect(err(await e.run({ cmd: 'hard-delete', memoryId: 'mem_plain' })).code).toBe('failed')
     expect((await e.store.get('mem_plain'))!.status).toBe('active')
+  })
+})
+
+describe('最近删除里彻底删除', () => {
+  // 不等 14 天到期：归档文件、召回统计行、快照里的副本现在就清掉，之后撤销、恢复都找不回来
+  const own = { kind: 'workspace', workspacePath: SESSION_WS } as const
+  const other = { kind: 'workspace', workspacePath: OTHER_WS } as const
+  const snapshotIds = async (e: ReturnType<typeof env>, id: string) =>
+    (await e.snapshots.list()).filter(s => s.data.some(r => r.id === id)).map(s => s.id)
+  /** 记忆目录下所有文件（含 .state/ 侧表、视图）的原文里都找不到这段文字。 */
+  const expectNowhereOnDisk = async (text: string) => {
+    for (const entry of await readdir(root, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile()) continue
+      const path = join(entry.parentPath, entry.name)
+      expect(await readFile(path, 'utf8'), path).not.toContain(text)
+    }
+  }
+
+  it('forget 删掉的记忆：文件、召回统计行、所有快照里的副本都没了；同快照里的别的记录不动', async () => {
+    const e = env()
+    const target = record({ id: 'mem_p', name: '要抹掉的', content: '紫藤架下的旧约定', scope: 'workspace', workspacePath: SESSION_WS })
+    const bystander = record({ id: 'mem_o', name: '旁人', content: '用 pnpm', scope: 'workspace', workspacePath: SESSION_WS })
+    await e.store.create(target)
+    await e.store.create(bystander)
+    await e.store.markRecalled(['mem_p', 'mem_o'])
+    const both = await e.snapshots.capture({ operation: 'manual', description: '两条', records: [target, bystander] }, NOW - 1)
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_p', layer: own }))
+    expect(await snapshotIds(e, 'mem_p')).toHaveLength(2)
+    expect(await e.stats.get('mem_p')).toBeDefined()
+
+    const body = ok(await e.run({ cmd: 'hard-delete', memoryId: 'mem_p', layer: own }))
+    expect(body.memoryIds).toEqual(['mem_p'])
+    expect(await e.store.get('mem_p')).toBeUndefined()
+    expect(await e.stats.get('mem_p')).toBeUndefined()
+    expect(await snapshotIds(e, 'mem_p')).toEqual([])
+    // forget 那份快照只有它，空了整份删掉；两条的那份只剩旁人
+    expect((await e.snapshots.list()).map(s => [s.id, s.memoryIds, s.data])).toEqual([[both.id, ['mem_o'], [bystander]]])
+    expect(await e.stats.get('mem_o')).toBeDefined()
+    expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
+    await expectNowhereOnDisk('紫藤架下的旧约定')
+  })
+
+  it('之后恢复、按快照恢复都找不回来', async () => {
+    const e = env()
+    const target = record({ id: 'mem_p', content: '紫藤架下的旧约定', scope: 'workspace', workspacePath: SESSION_WS })
+    await e.store.create(target)
+    const manual = await e.snapshots.capture({ operation: 'manual', description: '手动', records: [target, record({ id: 'mem_o' })] }, NOW - 1)
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_p', layer: own }))
+    ok(await e.run({ cmd: 'hard-delete', memoryId: 'mem_p', layer: own }))
+
+    expect(err(await e.run({ cmd: 'restore', memoryId: 'mem_p', layer: own })).code).toBe('not-found')
+    expect(err(await e.run({ cmd: 'restore', memoryId: 'mem_p' })).code).toBe('not-found')
+    const r = await executeSnapshotTool({ action: 'restore', snapshotId: manual.id, memoryIds: ['mem_p'] }, { workspacePath: SESSION_WS }, { store: e.store, snapshots: e.snapshots, now: () => NOW })
+    expect(r).toMatchObject({ kind: 'restored', restored: [] })
+    expect(await e.store.get('mem_p')).toBeUndefined()
+  })
+
+  it('裁决删掉的：彻底删除后撤销裁决按找不到处理，账本条目一并清掉', async () => {
+    const e = env()
+    const entry = await seedPair(e)
+    ok(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' }))
+    expect(deletedViewSchema.parse(await e.readView('deleted')).items.map(i => [i.memory.id, i.cause?.decisionId])).toEqual([['mem_b', entry.id]])
+
+    ok(await e.run({ cmd: 'hard-delete', memoryId: 'mem_b', layer: { kind: 'global' } }))
+    expect(await allEntries(e)).toEqual([])
+    expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('not-found')
+    expect(err(await e.run({ cmd: 'restore', memoryId: 'mem_b' })).code).toBe('not-found')
+    expect(await e.store.get('mem_b')).toBeUndefined()
+    expect(await snapshotIds(e, 'mem_b')).toEqual([])
+    expect((await e.store.get('mem_a'))!.status).toBe('active')
+  })
+
+  it('同 id 另一层仍在用的副本不受影响：文件、内容、它在快照里的副本都在；不带层时不会落到它头上', async () => {
+    const e = env()
+    const layerCopy = async (ws: string | undefined) =>
+      (await e.store.readLayer(ws === undefined ? { kind: 'global' } : { kind: 'workspace', path: ws }, { includeArchive: true }))
+        .records.find(l => l.record.id === 'mem_dup')?.record
+    const ownCopy = record({ id: 'mem_dup', name: '本项目那份', content: '紫藤架下的旧约定', scope: 'workspace', workspacePath: SESSION_WS })
+    await e.store.create(ownCopy)
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: own }))
+    // 先删本项目那份再建全局那份：写全局那份只清全局目录里的同 id 副本
+    const globalCopy = record({ id: 'mem_dup', name: '全局那份', content: '全局里的说法' })
+    await e.store.create(globalCopy)
+    const globalSnap = await e.snapshots.capture({ operation: 'manual', description: '全局那份', records: [globalCopy] }, NOW - 1)
+    const live = await layerCopy(undefined)
+    expect(live).toMatchObject({ status: 'active' })
+
+    // 不带层按会话定位取到在用的全局那份：它不含密钥，不动
+    expect(err(await e.run({ cmd: 'hard-delete', memoryId: 'mem_dup' })).code).toBe('failed')
+    expect(await layerCopy(SESSION_WS)).toMatchObject({ status: 'deleted' })
+
+    ok(await e.run({ cmd: 'hard-delete', memoryId: 'mem_dup', layer: own }))
+    expect(await layerCopy(SESSION_WS)).toBeUndefined()
+    expect(await layerCopy(undefined)).toEqual(live)
+    const copies = (await e.snapshots.list()).flatMap(s => s.data.filter(r => r.id === 'mem_dup').map(r => [s.id, r.scope]))
+    expect(copies).toEqual([[globalSnap.id, 'global']])
+    const library = libraryViewSchema.parse(await e.readView('library'))
+    expect(library.layers.find(l => l.layer.kind === 'global')!.items.map(i => i.name)).toEqual(['全局那份'])
+    expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
+  })
+
+  it('别的项目里的：先要 allowCrossWorkspace，什么都不动；带上才彻底删除', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_far', scope: 'workspace', workspacePath: OTHER_WS }))
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_far', layer: other, allowCrossWorkspace: true }))
+    const body = err(await e.run({ cmd: 'hard-delete', memoryId: 'mem_far', layer: other }))
+    expect(body).toMatchObject({ code: 'cross-workspace', rejected: [{ id: 'mem_far', workspacePath: OTHER_WS }] })
+    expect((await e.store.get('mem_far', { workspacePath: OTHER_WS }))!.status).toBe('deleted')
+    expect(await snapshotIds(e, 'mem_far')).toHaveLength(1)
+
+    ok(await e.run({ cmd: 'hard-delete', memoryId: 'mem_far', layer: other, allowCrossWorkspace: true }))
+    expect(await e.store.get('mem_far')).toBeUndefined()
+    expect(await snapshotIds(e, 'mem_far')).toEqual([])
   })
 })
 

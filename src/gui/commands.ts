@@ -22,7 +22,7 @@ import {
   crossWorkspaceNote, gateRecords, isCopyOf, locateCopy, workspaceLabel, type CrossWorkspaceRejection, type GovernanceContext,
 } from '../tools/workspace-gate.ts'
 import {
-  GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, mergeKeeperIndex, parseMemoryCommand, sessionViewFile,
+  GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, layerOfMemory, mergeKeeperIndex, parseMemoryCommand, sessionViewFile,
   type GuiErrorCode, type GuiLayerRef, type MemoryCommand, type MemoryCommandResult,
 } from './contract.ts'
 import type { ViewWriter } from './view-writer.ts'
@@ -343,9 +343,27 @@ async function dispatch(
     case 'hard-delete': {
       const isHardDelete = command.cmd === 'hard-delete'
       if (isHardDelete) {
-        // 只给密钥条目用：不含密钥的记忆 forget 会软删，与「彻底删除」的承诺不符
         const rec = await locate(command.memoryId, command.layer)
-        if (!rec || rec.status === 'deleted') return notFound(command.memoryId)
+        if (!rec) return notFound(command.memoryId)
+        if (rec.status === 'deleted') {
+          // 最近删除里的一条：不等 14 天到期，现在就清掉。快照先抹（中途失败时归档文件还在，重试即可），再物理删除
+          // 归档文件与召回统计行；只认它自己那一层，别层同 id 的在用副本不碰
+          const { rejected } = gateRecords([rec], gov, command.allowCrossWorkspace)
+          if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
+          // 别层还有这个 id 的副本时，快照里那一层的副本是它的历史，留着
+          const kept = new Set<string>()
+          for (const r of (await deps.snapshots.list()).flatMap(s => s.data)) {
+            const layer = layerOfMemory(r)
+            if (r.id !== rec.id || layer === undefined || isCopyOf(rec, layer) || kept.has(workspaceLabel(r))) continue
+            if ((await locateCopy(deps.store, rec.id, layer)) !== undefined) kept.add(workspaceLabel(r))
+          }
+          await deps.snapshots.purge(r => r.id === rec.id && !kept.has(workspaceLabel(r)))
+          if (!(await deps.store.hardDelete(rec, { isExactLayer: true }))) return notFound(command.memoryId)
+          // 账本按 id 记：哪层都没有它了才清，指向它的裁决撤销随之找不到
+          if ((await deps.store.get(rec.id)) === undefined) await deps.decisions.removeByMemoryIds([rec.id])
+          return { ok: true, cmd, memoryIds: [rec.id] }
+        }
+        // 在用的只给密钥条目用：不含密钥的记忆 forget 会软删，与「彻底删除」的承诺不符
         if (!hasSecret(rec)) return fail(cmd, 'failed', `记忆 ${command.memoryId} 不含密钥，彻底删除只用于密钥条目，未做任何改动`)
       }
       // forget 承诺 14 天可撤销，含密钥的记忆却只能物理删除：只软删，含密钥的由执行器在决定删不删的那次读里交回，
