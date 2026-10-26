@@ -6,13 +6,25 @@
  * forget 时两级一视同仁：命中任一级即物理删除（tools/forget.ts）。
  */
 export type SecretSeverity = 'critical' | 'suspected'
+
+/**
+ * 私钥块（PEM、PGP）的正则：命中整块（BEGIN 到同名 END），遮盖才盖得住正文。没有 END 行（截断的粘贴）只到 BEGIN 那一行
+ * 行尾，再带上紧跟着的正文行：base64 行、「键: 值」头字段行，以及后面还有 base64 行的空行。散文里提到 BEGIN 头时
+ * 只遮这一行，后文照常。
+ */
+function keyBlock(begin: string, end: string): RegExp {
+  // 正文行：整行是 base64、或是头字段、或是后面紧跟 base64 行的空行
+  const bodyLine = String.raw`\r?\n(?:[A-Za-z0-9+/=]+|[A-Za-z][A-Za-z0-9-]*: [^\r\n]*|(?=\r?\n[A-Za-z0-9+/=]))(?=\r?\n|$)`
+  return new RegExp(String.raw`${begin}(?:[\s\S]*?${end}|[^\r\n]*(?:${bodyLine})*)`)
+}
+
 export const SECRET_PATTERNS: Array<{ name: string; re: RegExp; severity: SecretSeverity }> = [
   { name: 'sk- 系列密钥（OpenAI/Anthropic 等）', re: /\bsk-[A-Za-z0-9_-]{16,}\b/, severity: 'critical' },
   { name: 'GitHub token（ghp_/gho_ 等）', re: /\bgh[pousr]_[A-Za-z0-9]{20,}\b/, severity: 'critical' },
   { name: 'AWS Access Key', re: /\bAKIA[0-9A-Z]{16}\b/, severity: 'critical' },
   { name: 'JWT', re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/, severity: 'critical' },
-  // 命中整块（BEGIN 到同名 END），遮盖才盖得住正文；没有 END 行（截断的粘贴）算到文本末尾
-  { name: 'PEM 私钥块', re: /-----BEGIN ([A-Z ]*)PRIVATE KEY-----[\s\S]*?(?:-----END \1PRIVATE KEY-----|$)/, severity: 'critical' },
+  { name: 'PEM 私钥块', re: keyBlock('-----BEGIN ([A-Z ]*)PRIVATE KEY-----', String.raw`-----END \1PRIVATE KEY-----`), severity: 'critical' },
+  { name: 'PGP 私钥块', re: keyBlock('-----BEGIN PGP PRIVATE KEY BLOCK-----', '-----END PGP PRIVATE KEY BLOCK-----'), severity: 'critical' },
   { name: 'Slack token', re: /\bxox[baprs]-[A-Za-z0-9-]{8,}\b/, severity: 'critical' },
   { name: 'Google API Key', re: /\bAIza[0-9A-Za-z_-]{35}\b/, severity: 'critical' },
   { name: 'Bearer token', re: /\bBearer\s+[A-Za-z0-9._-]{20,}/, severity: 'critical' },

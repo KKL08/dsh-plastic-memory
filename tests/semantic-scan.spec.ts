@@ -15,6 +15,13 @@ describe('buildSemanticPrompt', () => {
     expect(system).toContain('JSON')
   })
 
+  it('基线里以散文提到私钥 BEGIN 头：遮住这一行的头，后面的规则仍在', () => {
+    const { user } = buildSemanticPrompt([record({ id: 'mem_a' })],
+      [`AGENTS.md 内容：\n- 以 ${FAKE_SECRET.pem} 开头的文件不要提交\n- 包管理用 npm`])
+    expect(user).not.toContain(FAKE_SECRET.pem)
+    expect(user).toContain('包管理用 npm')
+  })
+
   it('无基线时 user 说明基线缺失，system 要求跳过垂直冲突', () => {
     const { user } = buildSemanticPrompt([record({ id: 'mem_a' })], null)
     expect(user).toContain('（无权威配置基线，跳过垂直冲突检测）')

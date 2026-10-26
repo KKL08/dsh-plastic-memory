@@ -87,6 +87,17 @@ describe('PEM 私钥块：从 BEGIN 到对应的 END 整块遮住', () => {
     expect(maskSecrets(`前文 ${truncated}`)).toBe(`前文 ${SECRET_MASK}`)
   })
 
+  it('截断的粘贴：BEGIN 行之后紧跟的正文行（base64、头字段、其间的空行）都遮住，正文之后的文字原样', () => {
+    const lines = pem.split('\n')
+    const truncated = [lines[0], 'Proc-Type: 4,ENCRYPTED', '', ...lines.slice(1, -1)].join('\n')
+    expect(maskSecrets(`前文\n${truncated}\n\n用完删掉`)).toBe(`前文\n${SECRET_MASK}\n\n用完删掉`)
+  })
+
+  it('散文里提到 BEGIN 头（没有 END 行）：只遮到这一行行尾，后面几行原样', () => {
+    const text = `- 以 ${FAKE_SECRET.pem} 开头的文件不要提交\n- 包管理用 pnpm\n- 提交前跑测试`
+    expect(maskSecrets(text)).toBe(`- 以 ${SECRET_MASK}\n- 包管理用 pnpm\n- 提交前跑测试`)
+  })
+
   it('两块私钥各遮各的，中间的文字保留', () => {
     expect(maskSecrets(`A：${pem}\n以及 B：${pem}`)).toBe(`A：${SECRET_MASK}\n以及 B：${SECRET_MASK}`)
   })
@@ -111,5 +122,21 @@ describe('PEM 私钥块：从 BEGIN 到对应的 END 整块遮住', () => {
     const masked = maskSecretSurface({ content: `私钥\n${pem}\n别外传`, name: '部署机', summary: '部署机凭证', tags: ['ssh'] })
     expect(masked).toEqual({ content: `私钥\n${SECRET_MASK}\n别外传`, name: '部署机', summary: '部署机凭证', tags: ['ssh'] })
     for (const line of bodyLines) expect(JSON.stringify(masked)).not.toContain(line)
+  })
+})
+
+describe('PGP 私钥块：同 PEM，从 BEGIN 到对应的 END 整块遮住', () => {
+  const begin = ['-----BEGIN', 'PGP PRIVATE KEY BLOCK-----'].join(' ')
+  const end = ['-----END', 'PGP PRIVATE KEY BLOCK-----'].join(' ')
+  const body = ['Version: TESTONLY', '', 'lQOYBGTESTONLYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', '=TEST']
+
+  it('整块换成一个占位，critical 级', () => {
+    const block = [begin, ...body, end].join('\n')
+    expect(detectSecrets(block)).toEqual([{ name: 'PGP 私钥块', severity: 'critical' }])
+    expect(maskSecrets(`签名私钥：\n${block}\n用完删掉`)).toBe(`签名私钥：\n${SECRET_MASK}\n用完删掉`)
+  })
+
+  it('截断的粘贴（没有 END 行）遮到正文末尾', () => {
+    expect(maskSecrets(`前文\n${[begin, ...body].join('\n')}\n后文`)).toBe(`前文\n${SECRET_MASK}\n后文`)
   })
 })
