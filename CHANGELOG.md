@@ -172,15 +172,16 @@ All notable changes to this project are documented here. The format follows
   also tells the model how to query well (two to four content words, both the
   Chinese and English form of a term), and when a result opens with a
   fallback note the note now suggests searching again with synonyms or fewer
-  words. `memory_save` asks for synonyms and bilingual aliases in tags so
-  later searches phrased differently still find the memory.
-- Saved memories now carry the reason the user gave, or the situation they
-  came up in, next to the rule itself, so a later session can tell where the
-  rule applies; details that go stale quickly, such as line numbers, are left
-  out. `memory_save` also asks for a one-sentence summary, tags limited to
-  words the text does not already contain, and explains each `sourceMode`.
-  The checkup now reports a bare one-line conclusion whose scope cannot be
-  told as unclear. Existing memories are not rewritten.
+  words. `memory_save` asks for synonyms, bilingual aliases and abbreviations
+  in tags, limited to words the name, summary and content don't already
+  contain, so later searches phrased differently still find the memory.
+- `memory_save` now asks the model to note, next to the rule itself, the
+  reason the user gave or the situation it came up in, so a later session can
+  tell where the rule applies, and to leave out details that go stale
+  quickly, such as line numbers; the summary no longer stacks keywords, and
+  each `sourceMode` value is explained. The checkup now reports a bare
+  one-line conclusion whose scope cannot be told as unclear. Existing
+  memories are not rewritten.
 - Injected index lines now end with the memory's file path (`global/x.md`,
   `<project>/x.md`), so the model can open the full text directly, and the
   prompt ends with a fixed note that memories are background material: they
