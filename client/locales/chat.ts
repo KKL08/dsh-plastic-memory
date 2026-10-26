@@ -32,6 +32,7 @@ export const chatZh = {
   'chat.scope.paths': ' {count} 个项目',
 
   'chat.card.title': '这一轮记住了 {count} 条',
+  'chat.card.folded': '这轮记住了 {count} 条新记忆：',
   'chat.card.delete': '删除这条记忆',
   'chat.card.deleted': '已删除。14 天内也能在最近删除里找回。',
   'chat.card.undo': '撤销',
@@ -68,6 +69,7 @@ export const chatEn: Record<keyof typeof chatZh, string> = {
   'chat.scope.paths': '{count} projects',
 
   'chat.card.title': 'Remembered {count} this turn',
+  'chat.card.folded': 'Remembered {count} new this turn: ',
   'chat.card.delete': 'Delete this memory',
   'chat.card.deleted': 'Deleted. You can also find it in Recently deleted for 14 days.',
   'chat.card.undo': 'Undo',

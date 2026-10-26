@@ -1,12 +1,14 @@
 /**
- * 折叠区外的交付卡（DESIGN.md「Navigation & Entries」）：「这一轮记住了 N 条」，每条一张记忆卡，行尾垃圾桶图标
- * （软删 `/memory forget`，可撤销，不用红），删后原位留「已删除。14 天内也能在最近删除里找回。」和「撤销」；
+ * 折叠区外的交付卡（DESIGN.md「Navigation & Entries」）：默认折叠成一行「这轮记住了 N 条新记忆：首条名称 ›」（名称单行截断），
+ * 点了展开成「这一轮记住了 N 条」，再点收起；展开与否只在这一次挂载里，不记。
+ * 展开后每条一张记忆卡，行尾垃圾桶图标（软删 `/memory forget`，可撤销，不用红）：点了原位换成「删除这条？ 删除 · 取消」，
+ * 点「删除」才发，删后原位留「已删除。14 天内也能在最近删除里找回。」和「撤销」；
  * 每条右下角「查看详情 ›」（次文字色、常规字重）打开记忆页「记忆查看」并定位到这一条（故事 41）。
  * 含密钥的记忆不能软删（服务端回 has-secret，什么都没动）：原位确认，「彻底删除」发 hard-delete，删后只留不可恢复的说明、没有撤销。
  * 删没删读网关的删除状态：在右侧栏、全部记忆里删了同一条，或 agent 在对话里删了它，这里也换成删后的样子。
  * 密钥不会出现在这里：记忆卡在 savedMemoryCard 里已遮盖，口径比视图宽（疑似密钥也遮，见 tool-summary.ts）。
  */
-import { useMemo, useState } from 'react'
+import { useId, useMemo, useState } from 'react'
 import { layerOfMemory, type GuiLayerRef } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { useT } from '../i18n.tsx'
@@ -16,7 +18,7 @@ import { useTypeLabel } from '../library/shared.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { keepFocusInPlace } from '../ui/focus-return.ts'
 import { TrashIcon } from '../ui/TrashIcon.tsx'
-import { crossConfirmCss, SecretDeleteConfirm } from '../pending/action.tsx'
+import { crossConfirmCss, SecretDeleteConfirm, SoftDeleteConfirm } from '../pending/action.tsx'
 import type { SavedMemory } from './saved-turn.ts'
 
 /** 这一行自己的进行中 / 失败 / 等确认；删没删读网关的删除状态（别处删的也算，交付卡卸载重挂也还在）。 */
@@ -52,6 +54,7 @@ function SavedRow({ sessionId, item, layer, now, typeLabel, onDetail }: {
   const savedAt = Number.isFinite(item.memory.updatedAt) && item.memory.updatedAt > 0 ? item.memory.updatedAt : firstSeen
   const how = gateway.useDeletions().of(id, layer, savedAt)
   const [state, setState] = useState<RowState>({ kind: 'idle' })
+  const [isConfirming, setConfirming] = useState(false)
   const run = async (cmd: 'forget' | 'restore' | 'hard-delete') => {
     if (state.kind === 'busy') return
     keepFocusInPlace()
@@ -89,22 +92,28 @@ function SavedRow({ sessionId, item, layer, now, typeLabel, onDetail }: {
           <button type="button" className="pm-link" onClick={onDetail}>{t('chat.card.detail')}</button>
         </div>
       </div>
-      <button
-        type="button"
-        className="pm-icon-btn"
-        aria-label={t('chat.card.delete')}
-        title={t('chat.card.delete')}
-        aria-disabled={state.kind === 'busy' || state.kind === 'secret' || undefined}
-        onClick={() => { if (state.kind !== 'secret') void run('forget') }}
-      >
-        <TrashIcon />
-      </button>
+      {isConfirming
+        ? <SoftDeleteConfirm onCancel={() => { setConfirming(false) }} onConfirm={() => { setConfirming(false); void run('forget') }} />
+        : (
+          <button
+            type="button"
+            className="pm-icon-btn"
+            aria-label={t('chat.card.delete')}
+            title={t('chat.card.delete')}
+            aria-disabled={state.kind === 'busy' || state.kind === 'secret' || undefined}
+            onClick={() => { if (state.kind !== 'busy' && state.kind !== 'secret') setConfirming(true) }}
+          >
+            <TrashIcon />
+          </button>
+        )}
     </div>
   )
 }
 
 export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: SavedMemoriesCardProps) {
   const t = useT()
+  const [isOpen, setOpen] = useState(false)
+  const listId = useId()
   const session = useMemo<BorrowedSession>(() => ({ kind: 'ready', sessionId, cwd }), [sessionId, cwd])
   const typeLabel = useTypeLabel(session)
   // 本项目记忆的层：工具结果里没有项目路径，取服务端给这个会话定的项目（会话视图），还没有时退回会话的工作目录
@@ -119,10 +128,22 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
     openDetail({ tab: 'library', ...(scope === undefined ? {} : { scope }), memoryId: memory.id })
   }
   return (
-    <section className="pm-saved" aria-label={t('chat.card.title', { count: saved.length })}>
-      <h3 className="pm-saved-title">{t('chat.card.title', { count: saved.length })}</h3>
-      <div className="pm-saved-list">
-        {saved.map(item => (
+    <section className="pm-saved" data-open={isOpen || undefined} aria-label={t('chat.card.title', { count: saved.length })}>
+      <h3 className="pm-saved-title">
+        <button type="button" className="pm-saved-toggle" aria-expanded={isOpen} aria-controls={listId} onClick={() => { setOpen(!isOpen) }}>
+          {isOpen
+            ? <span className="pm-saved-lead">{t('chat.card.title', { count: saved.length })}</span>
+            : (
+              <>
+                <span className="pm-saved-lead">{t('chat.card.folded', { count: saved.length })}</span>
+                <span className="pm-saved-first" title={saved[0]?.memory.name}>{saved[0]?.memory.name}</span>
+              </>
+            )}
+          <span className="pm-saved-chevron" aria-hidden="true">›</span>
+        </button>
+      </h3>
+      <div className="pm-saved-list" id={listId} hidden={!isOpen}>
+        {isOpen ? saved.map(item => (
           <SavedRow
             key={item.callId}
             sessionId={sessionId}
@@ -132,7 +153,7 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
             typeLabel={typeLabel}
             onDetail={() => { detail(item.memory) }}
           />
-        ))}
+        )) : null}
       </div>
     </section>
   )
@@ -144,6 +165,16 @@ export const savedMemoriesCardCss = crossConfirmCss + `
   border: 0.5px solid var(--pm-line-card); border-radius: var(--dsw-radius-lg, 16px); background: var(--pm-bg);
 }
 .pm-saved-title { margin: 0; font-size: 13px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
+.pm-saved-toggle {
+  display: flex; align-items: baseline; width: 100%; min-width: 0; padding: 0; border: 0; background: none;
+  font: inherit; color: inherit; text-align: left; cursor: pointer;
+}
+.pm-saved-lead { flex: none; white-space: pre; }
+.pm-saved-first { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; color: var(--pm-text-2); }
+.pm-saved-chevron { flex: none; margin-left: auto; padding-left: 8px; font-weight: 400; color: var(--pm-text-2); transition: transform 150ms ease; }
+.pm-saved[data-open] .pm-saved-chevron { transform: rotate(90deg); }
+.pm-saved-toggle:hover .pm-saved-chevron, .pm-saved-toggle:hover .pm-saved-first { color: var(--pm-text); }
+.pm-saved-list[hidden] { display: none; }
 .pm-saved-list { display: flex; flex-direction: column; gap: 12px; }
 .pm-saved-row { display: flex; align-items: flex-start; gap: 8px; }
 .pm-saved-row--deleted { align-items: center; justify-content: space-between; }

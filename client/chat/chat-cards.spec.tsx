@@ -11,7 +11,7 @@ import { fakeHostContext, NOW, renderInShell, levelCountsOf } from '../test-util
 import { registerChatCards, type TurnTailProps } from './index.tsx'
 import { MemoryToolRow, type MemoryToolViewProps } from './MemoryToolRow.tsx'
 import { savedTurnDefinition, type SavedMemory, type SavedTurnData } from './saved-turn.ts'
-import { SavedMemoriesCard } from './SavedMemoriesCard.tsx'
+import { SavedMemoriesCard, savedMemoriesCardCss } from './SavedMemoriesCard.tsx'
 import { MEMORY_TOOLS } from './tool-summary.ts'
 import { LibraryTab } from '../library/LibraryTab.tsx'
 import { SidebarTab } from '../sidebar/SidebarTab.tsx'
@@ -138,15 +138,122 @@ const saved = (id: string, content: string, scope: 'global' | 'workspace' = 'wor
   memory: { id, name: id, type: 'preference', scope, summary: '', content, tags: [], sourceMode: 'user-explicit', createdAt: NOW, updatedAt: NOW, lastConfirmedAt: NOW, filePath: '' },
 })
 
+/** 交付卡默认折叠：点折叠行展开。 */
+const expand = (scope: Pick<typeof screen, 'getByRole'> = screen) => {
+  fireEvent.click(scope.getByRole('button', { expanded: false, name: /^这轮记住了/ }))
+}
+
+/** 点垃圾桶，再点原位确认里的「删除」。 */
+const remove = async (trash: HTMLElement) => {
+  const row = trash.parentElement!
+  await act(async () => { fireEvent.click(trash) })
+  await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '删除' })) })
+}
+
+describe('交付卡默认折叠', () => {
+  const named = (id: string, name: string, content: string): SavedMemory => {
+    const item = saved(id, content)
+    return { ...item, memory: { ...item.memory, name } }
+  }
+  const items = [named('mem_1', '测试不 mock 数据库', '测试里用真实 Postgres。'), named('mem_2', '提交信息用英文', '提交信息写英文。')]
+
+  it('默认折叠成一行「这轮记住了 N 条新记忆：首条名称」：按钮语义、aria-expanded，记忆卡和删除都不显示', () => {
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={items} now={NOW} openDetail={() => {}} />)
+    const toggle = screen.getByRole('button', { name: '这轮记住了 2 条新记忆：测试不 mock 数据库' })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText('测试里用真实 Postgres。')).toBeNull()
+    expect(screen.queryByRole('button', { name: '删除这条记忆' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '查看详情 ›' })).toBeNull()
+  })
+
+  it('首条名称单行截断：名称单独一段、完整名称在 title 里，样式不换行、超出写省略号；行尾是 ›', () => {
+    const long = '一条名字很长很长的记忆，'.repeat(8)
+    const { container } = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[named('mem_1', long, '原文')]} now={NOW} openDetail={() => {}} />)
+    const name = screen.getByText(long)
+    expect(name).toHaveAttribute('title', long)
+    expect(name.className).toBe('pm-saved-first')
+    expect(savedMemoriesCardCss).toMatch(/\.pm-saved-first \{[^}]*overflow: hidden;[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;/)
+    expect(container.querySelector('.pm-saved-chevron')).toHaveTextContent('›')
+  })
+
+  it('点一下展开成卡片（每条记忆卡、查看详情、删除），再点收起；展开状态不持久，重挂又是折叠', () => {
+    const card = <SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={items} now={NOW} openDetail={() => {}} />
+    const { unmount } = renderInShell(card)
+    const toggle = screen.getByRole('button', { expanded: false })
+    fireEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(toggle).toHaveAccessibleName('这一轮记住了 2 条')
+    expect(screen.getByText('测试里用真实 Postgres。')).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: '删除这条记忆' })).toHaveLength(2)
+    expect(screen.getAllByRole('button', { name: '查看详情 ›' })).toHaveLength(2)
+
+    fireEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText('测试里用真实 Postgres。')).toBeNull()
+
+    fireEvent.click(toggle)
+    unmount()
+    renderInShell(card)
+    expect(screen.getByRole('button', { name: '这轮记住了 2 条新记忆：测试不 mock 数据库' })).toHaveAttribute('aria-expanded', 'false')
+  })
+})
+
+describe('交付卡删除的原位确认', () => {
+  const QUESTION = '删除这条？'
+
+  it('点垃圾桶不直接删：图标位置换成「删除这条？ 删除 · 取消」，焦点在「取消」，什么命令都没发', async () => {
+    const { gateway } = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} />)
+    expand()
+    const trash = screen.getByRole('button', { name: '删除这条记忆' })
+    trash.focus()
+    await act(async () => { fireEvent.click(trash) })
+    const confirm = within(screen.getByRole('group', { name: QUESTION }))
+    expect(confirm.getByText(QUESTION)).toBeInTheDocument()
+    expect(confirm.getAllByRole('button').map(b => b.textContent)).toEqual(['删除', '取消'])
+    expect(confirm.getByRole('button', { name: '取消' })).toHaveFocus()
+    expect(screen.queryByRole('button', { name: '删除这条记忆' })).toBeNull()
+    expect(screen.getByText('原文')).toBeInTheDocument()
+    expect(gateway.executed).toEqual([])
+  })
+
+  it('「取消」、Esc、焦点移走都收起确认，垃圾桶回来，什么都不发', async () => {
+    const { gateway } = renderInShell(
+      <>
+        <button type="button">别处</button>
+        <SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} />
+      </>,
+    )
+    expand()
+    const open = async () => {
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除这条记忆' })) })
+      return within(screen.getByRole('group', { name: QUESTION }))
+    }
+    fireEvent.click((await open()).getByRole('button', { name: '取消' }))
+    expect(screen.queryByRole('group', { name: QUESTION })).toBeNull()
+    await waitFor(() => { expect(screen.getByRole('button', { name: '删除这条记忆' })).toHaveFocus() })
+
+    fireEvent.keyDown((await open()).getByRole('button', { name: '取消' }), { key: 'Escape' })
+    expect(screen.queryByRole('group', { name: QUESTION })).toBeNull()
+
+    await open()
+    act(() => { screen.getByRole('button', { name: '别处' }).focus() })
+    expect(screen.queryByRole('group', { name: QUESTION })).toBeNull()
+    expect(screen.getByRole('button', { name: '别处' })).toHaveFocus()
+    expect(screen.getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
+    expect(gateway.executed).toEqual([])
+  })
+})
+
 describe('交付卡', () => {
   it('「这一轮记住了 N 条」，每条一张记忆卡；删除发 forget，原位留撤销提示，撤销发 restore', async () => {
     const gateway = createFakeGateway()
     const items = [saved('mem_1', '测试不 mock 数据库'), saved('mem_2', '提交信息用英文')]
     renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={items} now={NOW} openDetail={() => {}} />, gateway)
+    expand()
     expect(screen.getByRole('heading', { name: '这一轮记住了 2 条' })).toBeInTheDocument()
     expect(screen.getByText('测试不 mock 数据库')).toBeInTheDocument()
 
-    fireEvent.click(screen.getAllByRole('button', { name: '删除这条记忆' })[0]!)
+    await remove(screen.getAllByRole('button', { name: '删除这条记忆' })[0]!)
     expect(await screen.findByText('已删除。14 天内也能在最近删除里找回。')).toBeInTheDocument()
     expect(gateway.executed).toEqual([{ sessionId: 's1', command: { cmd: 'forget', memoryId: 'mem_1', layer: { kind: 'workspace', workspacePath: '/w/app' } } }])
     expect(screen.queryByText('测试不 mock 数据库')).toBeNull()
@@ -163,7 +270,8 @@ describe('交付卡', () => {
     }
     const gateway = createFakeGateway({ views: { session } })
     renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app/packages/web" saved={[saved('mem_w', '提交前跑测试')]} now={NOW} openDetail={() => {}} />, gateway)
-    fireEvent.click(screen.getByRole('button', { name: '删除这条记忆' }))
+    expand()
+    await remove(screen.getByRole('button', { name: '删除这条记忆' }))
     fireEvent.click(await screen.findByRole('button', { name: '撤销' }))
     await screen.findByText('提交前跑测试')
     const layer = { kind: 'workspace', workspacePath: '/w/app' }
@@ -176,7 +284,8 @@ describe('交付卡', () => {
   it('全局记忆：删除与撤销都带上全局层，服务端只动全局那一份', async () => {
     const gateway = createFakeGateway()
     renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_g', '回答用中文', 'global')]} now={NOW} openDetail={() => {}} />, gateway)
-    fireEvent.click(screen.getByRole('button', { name: '删除这条记忆' }))
+    expand()
+    await remove(screen.getByRole('button', { name: '删除这条记忆' }))
     fireEvent.click(await screen.findByRole('button', { name: '撤销' }))
     await screen.findByText('回答用中文')
     expect(gateway.executed.map(e => e.command)).toEqual([
@@ -188,6 +297,7 @@ describe('交付卡', () => {
   it('记忆卡的类型写显示名（待处理视图的 typeLabels）', () => {
     const gateway = createFakeGateway({ views: { pending: { version: GUI_VIEW_VERSION, dot: 'none', items: [], levelCounts: levelCountsOf([]), typeLabels: { preference: '行为偏好' } } } })
     const { container } = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} />, gateway)
+    expand()
     expect(container.querySelector('.pm-mc-meta')).toHaveTextContent(/^行为偏好/)
   })
 
@@ -195,6 +305,7 @@ describe('交付卡', () => {
     const library: LibraryView = { version: GUI_VIEW_VERSION, memoryRoot: '/m', layers: [], directoryIssues: [], typeLabels: { preference: '行为偏好' } }
     const gateway = createFakeGateway({ views: { library, pending: { version: GUI_VIEW_VERSION, dot: 'none', items: [], levelCounts: levelCountsOf([]), typeLabels: {} } } })
     const { container } = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} />, gateway)
+    expand()
     expect(container.querySelector('.pm-mc-meta')).toHaveTextContent(/^行为偏好/)
   })
 
@@ -206,7 +317,8 @@ describe('交付卡', () => {
     })
     const card = <SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} />
     const { unmount } = renderInShell(card, gateway)
-    fireEvent.click(screen.getByRole('button', { name: '删除这条记忆' }))
+    expand()
+    await remove(screen.getByRole('button', { name: '删除这条记忆' }))
     expect(await screen.findByText('彻底删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeInTheDocument()
     expect(screen.getByText('原文')).toBeInTheDocument()
     expect(screen.queryByText(/14 天/)).toBeNull()
@@ -219,6 +331,7 @@ describe('交付卡', () => {
 
     unmount()
     renderInShell(card, gateway)
+    expand()
     expect(screen.getByText('已彻底删除。如果它是真的凭证，记得去换一个新的。')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
   })
@@ -226,7 +339,8 @@ describe('交付卡', () => {
   it('含密钥确认时点「取消」：收起确认，原文和删除按钮照旧', async () => {
     const gateway = createFakeGateway({ respond: command => ({ ok: false, cmd: command.cmd, code: 'has-secret' }) })
     renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} />, gateway)
-    fireEvent.click(screen.getByRole('button', { name: '删除这条记忆' }))
+    expand()
+    await remove(screen.getByRole('button', { name: '删除这条记忆' }))
     fireEvent.click(await screen.findByRole('button', { name: '取消' }))
     expect(screen.queryByText('彻底删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeNull()
     expect(screen.getByText('原文')).toBeInTheDocument()
@@ -240,15 +354,20 @@ describe('交付卡', () => {
         : { ok: true, cmd: command.cmd, memoryIds: ['mem_1'] },
     })
     renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文'), saved('mem_2', '另一条')]} now={NOW} openDetail={() => {}} />, gateway)
-    const del = screen.getAllByRole('button', { name: '删除这条记忆' })[0]!
-    del.focus()
-    fireEvent.click(del)
-    const cancel = await screen.findByRole('button', { name: '取消' })
-    cancel.focus()
-    fireEvent.click(cancel)
-    await waitFor(() => { expect(del).toHaveFocus() })
+    expand()
+    const row = within(screen.getAllByRole('button', { name: '删除这条记忆' })[0]!.closest<HTMLElement>('[data-memory-id]')!)
+    const press = async (button: HTMLElement) => {
+      button.focus()
+      await act(async () => { fireEvent.click(button) })
+    }
+    await press(row.getByRole('button', { name: '删除这条记忆' }))
+    await press(row.getByRole('button', { name: '删除' }))
+    const cancel = await row.findByRole('button', { name: '取消' })
+    await press(cancel)
+    await waitFor(() => { expect(row.getByRole('button', { name: '删除这条记忆' })).toHaveFocus() })
 
-    fireEvent.click(del)
+    await press(row.getByRole('button', { name: '删除这条记忆' }))
+    await press(row.getByRole('button', { name: '删除' }))
     const confirm = await screen.findByRole('button', { name: '彻底删除' })
     confirm.focus()
     fireEvent.click(confirm)
@@ -257,16 +376,21 @@ describe('交付卡', () => {
 
   it('删除后焦点落到原位的「撤销」，不掉到页面上', async () => {
     renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} />)
+    expand()
     const del = screen.getByRole('button', { name: '删除这条记忆' })
     del.focus()
     await act(async () => { fireEvent.click(del) })
+    const ok = screen.getByRole('button', { name: '删除' })
+    ok.focus()
+    await act(async () => { fireEvent.click(ok) })
     await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
   })
 
   it('删除失败时原文还在，旁边写服务端原话', async () => {
     const gateway = createFakeGateway({ respond: () => ({ ok: false, code: 'not-found', detail: '记忆不存在' }) })
     renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} />, gateway)
-    fireEvent.click(screen.getByRole('button', { name: '删除这条记忆' }))
+    expand()
+    await remove(screen.getByRole('button', { name: '删除这条记忆' }))
     expect(await screen.findByText('没有成功：记忆不存在')).toBeInTheDocument()
     expect(screen.getByText('原文')).toBeInTheDocument()
   })
@@ -301,8 +425,10 @@ describe('交付卡与其他界面共用删除状态', () => {
       </>,
       gateway,
     )
+    expand(chatCard())
     const side = within(screen.getByRole('region', { name: '这次新写入的' }))
     await act(async () => { fireEvent.click(side.getByRole('button', { name: '删除这条记忆' })) })
+    await act(async () => { fireEvent.click(side.getByRole('button', { name: '删除' })) })
     await act(async () => { fireEvent.click(side.getByRole('button', { name: '彻底删除' })) })
     expect(chatCard().getByText(PURGED)).toBeInTheDocument()
     expect(chatCard().queryByRole('button', { name: '删除这条记忆' })).toBeNull()
@@ -319,6 +445,8 @@ describe('交付卡与其他界面共用删除状态', () => {
       </>,
       gateway,
     )
+    expand(chatCard())
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除' })) })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除' })) })
     expect(chatCard().getByText('已删除。14 天内也能在最近删除里找回。')).toBeInTheDocument()
     expect(chatCard().queryByRole('button', { name: '删除这条记忆' })).toBeNull()
@@ -327,6 +455,7 @@ describe('交付卡与其他界面共用删除状态', () => {
   it('对话里 agent 自己删掉（最近删除视图里有这条）：交付卡换成「已删除」可撤销；撤销后视图还没刷新也不弹回去', async () => {
     const gateway = createFakeGateway({ views: { library: libraryView() } })
     renderInShell(<SavedMemoriesCard sessionId="s1" cwd={WS} saved={[fresh()]} now={NOW} openDetail={() => {}} />, gateway)
+    expand(chatCard())
     expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
     const gone = { ...libraryView(), layers: [{ layer: { kind: 'workspace' as const, workspacePath: WS }, items: [] }] }
     act(() => {
@@ -353,10 +482,12 @@ describe('交付卡与其他界面共用删除状态', () => {
       </>,
       gateway,
     )
+    expand(chatCard())
     const stillShown = () => {
       expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
       expect(within(screen.getByRole('region', { name: '这次新写入的' })).getByText('报销截止每月 25 日。')).toBeInTheDocument()
     }
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除' })) })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除' })) })
     expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'n1', layer: { kind: 'global' } }])
     stillShown()
@@ -372,6 +503,7 @@ describe('交付卡与其他界面共用删除状态', () => {
       views: { library: libraryView(), deleted: { version: GUI_VIEW_VERSION, items: [{ memory: { ...fresh().memory, scope: 'global', workspacePath: undefined }, deletedAt: NOW, purgeAt: NOW + 1 }] } },
     })
     renderInShell(<SavedMemoriesCard sessionId="s1" cwd={WS} saved={[fresh()]} now={NOW} openDetail={() => {}} />, gateway)
+    expand(chatCard())
     expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
   })
 
@@ -380,8 +512,10 @@ describe('交付卡与其他界面共用删除状态', () => {
       library: { ...libraryView(), layers: [], inactiveIds: [], hasUnreadFiles: false, ...(libraryAt === undefined ? {} : { generatedAt: libraryAt }) },
       deleted: { version: GUI_VIEW_VERSION, items: [], ...(deletedAt === undefined ? {} : { generatedAt: deletedAt }) },
     })
-    const render = (gateway: ReturnType<typeof createFakeGateway>) =>
+    const render = (gateway: ReturnType<typeof createFakeGateway>) => {
       renderInShell(<SavedMemoriesCard sessionId="s1" cwd={WS} saved={[fresh()]} now={NOW} openDetail={() => {}} />, gateway)
+      expand(chatCard())
+    }
 
     it('晚于记下时刻的新视图到了：换成不可恢复的说明，没有删除按钮', () => {
       const gateway = createFakeGateway({ views: { library: libraryView(), deleted: { version: GUI_VIEW_VERSION, items: [], generatedAt: NOW - 10 } } })
@@ -439,7 +573,7 @@ describe('交付卡与其他界面共用删除状态', () => {
     it('交付卡里刚恢复、视图还没跟上：不判彻底删除', async () => {
       const gateway = createFakeGateway({ views: { library: libraryView(), deleted: { version: GUI_VIEW_VERSION, items: [] } } })
       render(gateway)
-      await act(async () => { fireEvent.click(chatCard().getByRole('button', { name: '删除这条记忆' })) })
+      await remove(chatCard().getByRole('button', { name: '删除这条记忆' }))
       await act(async () => { fireEvent.click(chatCard().getByRole('button', { name: '撤销' })) })
       const next = emptyViews(NOW + 1000)
       act(() => { gateway.setView('library', next.library); gateway.setView('deleted', next.deleted) })
@@ -452,6 +586,7 @@ describe('交付卡与其他界面共用删除状态', () => {
       views: { library: { ...libraryView(), layers: [] }, deleted: { version: GUI_VIEW_VERSION, items: [] } },
     })
     renderInShell(<SavedMemoriesCard sessionId="s1" cwd={WS} saved={[fresh()]} now={NOW} openDetail={() => {}} />, gateway)
+    expand(chatCard())
     expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
     expect(chatCard().queryByText(PURGED)).toBeNull()
   })
@@ -459,7 +594,8 @@ describe('交付卡与其他界面共用删除状态', () => {
   it('交付卡里删除后最近删除视图还没刷新：仍显示「已删除」，不弹回去', async () => {
     const gateway = createFakeGateway({ views: { library: libraryView(), deleted: { version: GUI_VIEW_VERSION, items: [] } } })
     renderInShell(<SavedMemoriesCard sessionId="s1" cwd={WS} saved={[fresh()]} now={NOW} openDetail={() => {}} />, gateway)
-    await act(async () => { fireEvent.click(chatCard().getByRole('button', { name: '删除这条记忆' })) })
+    expand(chatCard())
+    await remove(chatCard().getByRole('button', { name: '删除这条记忆' }))
     act(() => { gateway.setView('deleted', { version: GUI_VIEW_VERSION, items: [] }) })
     expect(chatCard().getByText('已删除。14 天内也能在最近删除里找回。')).toBeInTheDocument()
   })
@@ -473,7 +609,8 @@ describe('交付卡与其他界面共用删除状态', () => {
       </>,
       gateway,
     )
-    await act(async () => { fireEvent.click(chatCard().getByRole('button', { name: '删除这条记忆' })) })
+    expand(chatCard())
+    await remove(chatCard().getByRole('button', { name: '删除这条记忆' }))
     expect(screen.queryByRole('region', { name: '这次新写入的' })).toBeNull()
     await act(async () => { fireEvent.click(chatCard().getByRole('button', { name: '撤销' })) })
     expect(within(screen.getByRole('region', { name: '这次新写入的' })).getByText('报销截止每月 25 日。')).toBeInTheDocument()
@@ -493,6 +630,9 @@ describe('密钥永远不出现在对话卡里', () => {
     const { container } = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={data!.saved} now={NOW} openDetail={() => {}} />, createFakeGateway())
     expect(container.textContent).not.toContain(KEY)
     expect(container.textContent).toContain('[已隐藏]')
+    expand()
+    expect(container.textContent).not.toContain(KEY)
+    expect(container.textContent).toContain('[已隐藏]')
   })
 
   it('折叠行：摘要和展开后的输入 / 输出都不带密钥', () => {
@@ -509,6 +649,8 @@ describe('密钥永远不出现在对话卡里', () => {
     const args = { ...saveArgs, name: `登录 ${PASS}`, content: `测试环境 ${PASS}，周五前改。`, force: true }
     const data = turnData([turnStart, call(2, 'c1', 'memory_save', args), res(3, 'c1', SAVED_TEXT)])
     const card = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={data!.saved} now={NOW} openDetail={() => {}} />, createFakeGateway())
+    expect(card.container.textContent).not.toContain('Hunter2-2026')
+    expand()
     expect(card.container.textContent).not.toContain('Hunter2-2026')
     expect(card.container.textContent).toContain('[已隐藏]')
     card.unmount()
@@ -563,7 +705,8 @@ describe('注册', () => {
     expect(container).toBeEmptyDOMElement()
     unmount()
     render(<Tail {...tailProps({ saved: [saved('mem_1', '原文')] })} />)
-    fireEvent.click(screen.getByRole('button', { name: '删除这条记忆' }))
+    expand()
+    await remove(screen.getByRole('button', { name: '删除这条记忆' }))
     await waitFor(() => expect(execute).toHaveBeenCalledWith('s1', '/memory forget {"memoryId":"mem_1","layer":{"kind":"workspace","workspacePath":"/w/app"}}', []))
   })
 
@@ -571,6 +714,7 @@ describe('注册', () => {
     const { registered, nav, ctx } = fakeHost()
     const Tail = registered.find(r => r.options.name === 'conversation.chat.turnTail')!.component as ComponentType<TurnTailProps>
     render(<Tail {...tailProps({ saved: [saved('mem_1', '原文'), saved('mem_g', '全局', 'global'), saved('mem_2', '二')] })} />)
+    expand()
     const links = screen.getAllByRole('button', { name: '查看详情 ›' })
     expect(links).toHaveLength(3)
     expect(links.map(link => link.closest('[data-memory-id]')?.getAttribute('data-memory-id'))).toEqual(['mem_1', 'mem_g', 'mem_2'])
@@ -583,7 +727,8 @@ describe('注册', () => {
 
   it('删掉的那条不再有「查看详情 ›」', async () => {
     renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '一'), saved('mem_2', '二')]} now={NOW} openDetail={() => {}} />)
-    await act(async () => { fireEvent.click(screen.getAllByRole('button', { name: '删除这条记忆' })[0]!) })
+    expand()
+    await remove(screen.getAllByRole('button', { name: '删除这条记忆' })[0]!)
     expect(screen.getAllByRole('button', { name: '查看详情 ›' }).map(link => link.closest('[data-memory-id]')?.getAttribute('data-memory-id'))).toEqual(['mem_2'])
   })
 })

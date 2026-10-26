@@ -9,6 +9,8 @@ export const pendingZh = {
   'pending.cross.body': '这条记忆属于 {name} 项目，不是当前项目。确定在这里处理它吗？',
   'pending.cross.confirm': '继续处理',
   'pending.cross.moveBody': '要移去的 {name} 不是当前项目。确定从这里移过去吗？',
+  'pending.softDelete.question': '删除这条？',
+  'pending.softDelete.confirm': '删除',
   'pending.openFailed': '没能打开文件。',
   'pending.refused': '你对「{title}」的选择没有生效：它正在别处处理，或者刚在别处处理完。',
 
@@ -186,6 +188,8 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.cross.body': 'This memory belongs to project {name}, not this one. Handle it from here anyway?',
   'pending.cross.confirm': 'Continue',
   'pending.cross.moveBody': '{name}, where this would move, is not the current project. Move it from here anyway?',
+  'pending.softDelete.question': 'Delete this one?',
+  'pending.softDelete.confirm': 'Delete',
   'pending.openFailed': 'Could not open the file.',
   'pending.refused': 'Your choice on “{title}” did not take effect: it is being handled elsewhere, or was just handled there.',
 

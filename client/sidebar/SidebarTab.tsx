@@ -10,6 +10,7 @@
  * 刚裁决的冲突在本地留原位可撤销，tab 卸载后收起。
  * 裁决碰上这条冲突正在别处处理或刚处理完（什么都没动）：冲突卡还在时原位说明，那边的结果写进视图、卡片消失后
  * 说明挪到「带入的记忆」上面（没有记忆了就在空状态上面），下一次动作时收起。
+ * 新写入的行尾删除先在原位确认「删除这条？ 删除 · 取消」，点「删除」才发 forget。
  * 新写入的含密钥时不能软删（服务端回 has-secret，什么都没动）：原位确认，「彻底删除」发 hard-delete，删后原位留不可恢复的说明，tab 卸载后收起。
  */
 import { useMemo, useRef, useState, type ReactNode } from 'react'
@@ -28,7 +29,7 @@ import { ContextBudgetBar } from '../ui/ContextBudgetBar.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { TrashIcon } from '../ui/TrashIcon.tsx'
-import { CrossConfirm, crossConfirmCss, isHandledElsewhere, SecretDeleteConfirm } from '../pending/action.tsx'
+import { CrossConfirm, crossConfirmCss, isHandledElsewhere, SecretDeleteConfirm, SoftDeleteConfirm } from '../pending/action.tsx'
 import { keepFocusInPlace } from '../ui/focus-return.ts'
 import { isLiveWrite, sessionCards, writtenSinceSnapshot } from './session-memories.ts'
 
@@ -97,6 +98,8 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const [ruled, setRuled] = useState<readonly Ruled[]>([])
   const [purged, setPurged] = useState<ReadonlySet<string>>(new Set())
   const [secretId, setSecretId] = useState<string | undefined>(undefined)
+  /** 等用户确认普通删除的那条新写入。 */
+  const [confirmId, setConfirmId] = useState<string | undefined>(undefined)
   // 在途的动作按条（待决项 id / 记忆 id）记：别的动作开始或结束都不让这一条重新可点，同一条冲突不会发出两条相反的裁决。
   // ref 同步拦截，state 只管渲染
   const inFlight = useRef(new Set<string>())
@@ -311,16 +314,25 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
               : (
                 <div key={id} className="pm-side-saved">
                   <div className="pm-side-saved-card">{card(memory)}</div>
-                  <button
-                    type="button"
-                    className="pm-side-delete"
-                    aria-label={t('sidebar.saved.delete')}
-                    title={t('sidebar.saved.delete')}
-                    aria-disabled={isWaiting(id) || undefined}
-                    onClick={() => { if (!isWaiting(id)) forget(memory) }}
-                  >
-                    <TrashIcon />
-                  </button>
+                  {confirmId === id
+                    ? (
+                      <SoftDeleteConfirm
+                        onCancel={() => { setConfirmId(prev => (prev === id ? undefined : prev)) }}
+                        onConfirm={() => { setConfirmId(undefined); forget(memory) }}
+                      />
+                    )
+                    : (
+                      <button
+                        type="button"
+                        className="pm-side-delete"
+                        aria-label={t('sidebar.saved.delete')}
+                        title={t('sidebar.saved.delete')}
+                        aria-disabled={isWaiting(id) || undefined}
+                        onClick={() => { if (!isWaiting(id)) setConfirmId(id) }}
+                      >
+                        <TrashIcon />
+                      </button>
+                    )}
                   {failed(id)}
                 </div>
               ))}
@@ -492,8 +504,10 @@ export const sidebarTabCss = crossConfirmCss + `
 .pm-side-group-title .pm-sep { margin: 0 6px 0 2px; }
 .pm-side-group-depth { font-weight: 400; color: var(--pm-text-2); }
 .pm-side-section-head { display: flex; flex-direction: column; gap: 2px; }
-.pm-side-saved { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 4px 8px; }
+.pm-side-saved { display: grid; grid-template-columns: minmax(0, 1fr) 24px; align-items: start; gap: 4px 8px; }
 .pm-side-saved > .pm-side-error { grid-column: 1 / -1; }
+/* 侧栏窄，删除确认放不进行尾：换到卡片下面一行靠右，记忆卡不跟着变窄 */
+.pm-side-saved > .pm-soft-confirm { grid-column: 1 / -1; justify-self: end; }
 .pm-side-delete {
   display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0;
   border: 0; border-radius: var(--dsw-radius-sm, 8px); background: transparent; color: var(--pm-text-2); cursor: pointer;

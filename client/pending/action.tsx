@@ -159,12 +159,55 @@ export function SecretDeleteConfirm({ onCancel, onConfirm, unavailable, showTitl
   )
 }
 
-/** CrossConfirm 的样式；待处理卡的说明文字和按钮组也用这两个类。 */
+/**
+ * 普通删除（软删）的原位确认：对话交付卡、右侧栏、记忆查看里，删除按钮的位置换成「删除这条？ 删除 · 取消」，点「删除」才删。
+ * 删了还能撤销或去最近删除找回，所以不展开确认块、不用危险样式。取消、Esc、焦点移出这一组都收起，什么都不发；
+ * 窗口失焦（切到别的应用）不算移出。「取消」排在最后，落在原来按钮的位置上，连点两下也删不掉；焦点进来时也停在它上面。
+ */
+export function SoftDeleteConfirm({ onCancel, onConfirm }: { onCancel: () => void; onConfirm: () => void }) {
+  const t = useT()
+  const ref = useRef<HTMLSpanElement>(null)
+  useReturnFocus(ref)
+  return (
+    <span
+      ref={ref}
+      className="pm-soft-confirm"
+      role="group"
+      aria-label={t('pending.softDelete.question')}
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape') return
+        event.preventDefault()
+        event.stopPropagation()
+        onCancel()
+      }}
+      onBlur={(event) => {
+        const next = event.relatedTarget as Node | null
+        // 焦点没落到任何控件上：点了空白处（文档仍有焦点）才收起，切到别的应用不收
+        if (next === null ? event.currentTarget.ownerDocument.hasFocus() : !event.currentTarget.contains(next)) onCancel()
+      }}
+    >
+      <span className="pm-soft-confirm-text">{t('pending.softDelete.question')}</span>
+      <button type="button" className="pm-link" onClick={onConfirm}>{t('pending.softDelete.confirm')}</button>
+      <i className="pm-sep" aria-hidden="true">·</i>
+      <button type="button" className="pm-link pm-soft-confirm-cancel" autoFocus onClick={onCancel}>{t('pending.cancel')}</button>
+    </span>
+  )
+}
+
+/** CrossConfirm 的样式；待处理卡的说明文字和按钮组也用这两个类。软删确认（SoftDeleteConfirm）的样式也在这里，三处共用。 */
 export const crossConfirmCss = `
 .pm-pending-text { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-pending-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .pm-pending-confirm-title { font-weight: 600; color: var(--pm-text); }
 .pm-pending-confirm { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: var(--dsw-radius-md, 12px); background: var(--pm-bg-block); }
+.pm-soft-confirm {
+  display: inline-flex; flex: none; align-items: center; min-height: 24px; gap: 8px;
+  font-size: 12px; line-height: 1.5; white-space: nowrap; color: var(--pm-text-2);
+}
+.pm-soft-confirm .pm-sep { margin: 0 -2px; }
+.pm-soft-confirm .pm-link { font-size: 12px; }
+.pm-soft-confirm .pm-soft-confirm-cancel { font-weight: 400; color: var(--pm-text-2); }
+.pm-soft-confirm .pm-soft-confirm-cancel:hover { color: var(--pm-text); text-decoration: none; }
 `
 
 /** 动作的反馈：跨项目确认行、彻底删除确认（删除的记忆含密钥）、疑似密钥确认（直接改的新内容像密钥），或失败原话。 */
