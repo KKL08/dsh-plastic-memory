@@ -80,7 +80,7 @@ describe('三组设置的渲染', () => {
     expect(screen.getByText('健康分低于 80 分、或冲突等了 3 天以上时提醒你。')).toBeInTheDocument()
     expect(screen.getByText(/插件不再管理这些内容/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '查看最近删除 ›' }))
-    expect(onOpen).toHaveBeenCalledWith('deleted')
+    expect(onOpen).toHaveBeenCalledWith({ tab: 'deleted' })
     expect(screen.getByText('/home/me/.dsh/memories')).toBeInTheDocument()
     expect(screen.queryByRole('textbox', { name: '记忆文件位置' })).toBeNull()
   })
@@ -460,7 +460,7 @@ describe('状态卡', () => {
     const { onOpen, gateway } = setup()
     expect(screen.getByText('状态良好')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '打开记忆页 ›' }))
-    expect(onOpen).toHaveBeenCalledWith('health')
+    expect(onOpen).toHaveBeenCalledWith({ tab: 'health' })
     act(() => { gateway.setSession({ kind: 'none' }) })
     expect(screen.getByText('开一个会话后这里显示记忆状态')).toBeInTheDocument()
   })
@@ -469,13 +469,13 @@ describe('状态卡', () => {
     const { onOpen, gateway } = setup()
     act(() => { gateway.setView('pending', pending([conflict])) })
     fireEvent.click(screen.getByRole('button', { name: '打开记忆页 ›' }))
-    expect(onOpen).toHaveBeenLastCalledWith('pending')
+    expect(onOpen).toHaveBeenLastCalledWith({ tab: 'pending' })
     act(() => { gateway.setView('pending', pending([{ kind: 'secret', level: 'must-fix', memory: memory() }])) })
     fireEvent.click(screen.getByRole('button', { name: '打开记忆页 ›' }))
-    expect(onOpen).toHaveBeenLastCalledWith('pending')
+    expect(onOpen).toHaveBeenLastCalledWith({ tab: 'pending' })
     act(() => { gateway.setView('pending', pending([unreadable])) })
     fireEvent.click(screen.getByRole('button', { name: '打开记忆页 ›' }))
-    expect(onOpen).toHaveBeenLastCalledWith('health')
+    expect(onOpen).toHaveBeenLastCalledWith({ tab: 'health' })
   })
 })
 
@@ -498,17 +498,23 @@ describe('状态卡「立即体检」', () => {
     await act(async () => { fireEvent.click(button()) })
   }
 
-  it('有新增：和页头同一行，链接经导航直达记忆页对应的 tab', async () => {
-    await scan(scanned({ added: { pending: 1, advice: 2 } }))
+  it('有新增：和页头同一行，链接经导航直达记忆页对应的 tab 和组', async () => {
+    await scan(scanned({ added: { pending: 1, advice: 2, pendingLevel: 'must-fix' } }))
     // 原地跑：完成后不自动跳走
     expect(onOpen).not.toHaveBeenCalled()
     expect(statusLine()).toHaveTextContent(/^体检完成：新增 1 条待处理 ›·新增 2 条建议 ›·查看分数 ›$/)
     fireEvent.click(screen.getByRole('button', { name: '新增 1 条待处理 ›' }))
-    expect(onOpen).toHaveBeenLastCalledWith('pending')
+    expect(onOpen).toHaveBeenLastCalledWith({ tab: 'pending', level: 'must-fix' })
     fireEvent.click(screen.getByRole('button', { name: '新增 2 条建议 ›' }))
-    expect(onOpen).toHaveBeenLastCalledWith('pending')
+    expect(onOpen).toHaveBeenLastCalledWith({ tab: 'pending', level: 'advice' })
     fireEvent.click(screen.getByRole('button', { name: '查看分数 ›' }))
-    expect(onOpen).toHaveBeenLastCalledWith('health')
+    expect(onOpen).toHaveBeenLastCalledWith({ tab: 'health' })
+  })
+
+  it('新增的待处理分在两组：链接落在待处理顶部（不带组）', async () => {
+    await scan(scanned({ added: { pending: 2, advice: 0 } }))
+    fireEvent.click(screen.getByRole('button', { name: '新增 2 条待处理 ›' }))
+    expect(onOpen).toHaveBeenLastCalledWith({ tab: 'pending' })
   })
 
   it('只有建议：没有「待处理」那段', async () => {

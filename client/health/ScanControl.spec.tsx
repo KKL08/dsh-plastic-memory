@@ -113,15 +113,23 @@ describe('体检当前项目', () => {
       return page
     }
 
-    it('有新增：写新增几条待处理、几条建议，链接各去对应的 tab，查看分数去健康', async () => {
+    it('有新增：写新增几条待处理、几条建议；待处理分在两组时落在待处理顶部，建议落在建议整理组，查看分数去健康', async () => {
       const { nav, statusLine } = await scan(scanned({ added: { pending: 2, advice: 1 } }))
       expect(statusLine()).toHaveTextContent(/^体检完成：新增 2 条待处理 ›·新增 1 条建议 ›·查看分数 ›$/)
       fireEvent.click(screen.getByRole('button', { name: '新增 2 条待处理 ›' }))
-      expect(nav.get().tab).toBe('pending')
+      expect(nav.get()).toMatchObject({ tab: 'pending' })
+      expect(nav.get().level).toBeUndefined()
       fireEvent.click(screen.getByRole('button', { name: '查看分数 ›' }))
-      expect(nav.get().tab).toBe('health')
+      expect(nav.get()).toMatchObject({ tab: 'health' })
+      expect(nav.get().level).toBeUndefined()
       fireEvent.click(screen.getByRole('button', { name: '新增 1 条建议 ›' }))
-      expect(nav.get().tab).toBe('pending')
+      expect(nav.get()).toMatchObject({ tab: 'pending', level: 'advice' })
+    })
+
+    it.each(['must-fix', 'your-call'] as const)('新增的待处理都在同一组（%s）：链接落到那一组', async (level) => {
+      const { nav } = await scan(scanned({ added: { pending: 1, advice: 0, pendingLevel: level } }))
+      fireEvent.click(screen.getByRole('button', { name: '新增 1 条待处理 ›' }))
+      expect(nav.get()).toMatchObject({ tab: 'pending', level })
     })
 
     it('只有建议：没有「待处理」那段', async () => {

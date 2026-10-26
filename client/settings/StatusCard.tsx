@@ -9,7 +9,7 @@
 import { isAwaitingDecision, type HealthView, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { formatDay, formatNumber, useT, type Translate } from '../i18n.tsx'
-import type { MemoryTab } from '../nav.ts'
+import type { MemoryTab, NavTarget } from '../nav.ts'
 import { ScanResult, useScanCommand } from '../health/ScanResult.tsx'
 import { Button } from '../ui/Button.tsx'
 import { HealthBanner } from '../ui/HealthBanner.tsx'
@@ -60,8 +60,8 @@ function useScan(session: BorrowedSession) {
 
 export function StatusCard({ governanceEnabled, onOpen, now = Date.now() }: {
   governanceEnabled: boolean
-  /** 经导航 store 直达记忆页的某个 tab。 */
-  onOpen: (tab: MemoryTab) => void
+  /** 经导航 store 直达记忆页的某个 tab（待处理可带要定位的组）。 */
+  onOpen: (target: Pick<NavTarget, 'tab' | 'level'>) => void
   now?: number
 }) {
   const t = useT()
@@ -89,7 +89,7 @@ export function StatusCard({ governanceEnabled, onOpen, now = Date.now() }: {
             <Button disabled={isRunning} unavailable={unavailable} onClick={scan.run}>
               {isRunning ? t('settings.status.scanning') : scan.state.kind === 'failed' ? t('scan.retry') : t('settings.status.scan')}
             </Button>
-            <button type="button" className="pm-link" onClick={() => { onOpen(openTarget(pending)) }}>{t('settings.status.open')}</button>
+            <button type="button" className="pm-link" onClick={() => { onOpen({ tab: openTarget(pending) }) }}>{t('settings.status.open')}</button>
           </div>
           <p className="pm-status-scan" role="status">
             {scan.state.kind === 'done' || scan.state.kind === 'failed' ? <ScanResult state={scan.state} onOpen={onOpen} /> : null}

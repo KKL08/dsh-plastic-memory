@@ -215,8 +215,13 @@ export function scanOutcome(
   const isCovered = (layer: GuiLayerRef) => covered === 'all' || covered.some(c => sameLayer(c, layer))
   const seen = new Set(before.items.map(pendingItemKey))
   const added = after.pending.items.filter(i => !seen.has(pendingItemKey(i)) && (covered === 'all' || layersOfItem(i).some(isCovered)))
+  const pending = added.filter(i => i.level !== 'advice')
+  const levels = [...new Set(pending.map(i => i.level))]
   return {
-    added: { pending: added.filter(i => i.level !== 'advice').length, advice: added.filter(i => i.level === 'advice').length },
+    added: {
+      pending: pending.length, advice: added.length - pending.length,
+      ...(levels.length === 1 ? { pendingLevel: levels[0] } : {}),
+    },
     scores: after.health.layers.filter(l => isCovered(l.layer)).map(l => ({ layer: l.layer, score: l.score })),
   }
 }

@@ -1324,7 +1324,7 @@ describe('scan', () => {
       const e = env({ llm: answering(() => [conflict, redundancy]) })
       await seedFour(e)
       const body = ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
-      expect(body.added).toEqual({ pending: 1, advice: 1 })
+      expect(body.added).toEqual({ pending: 1, advice: 1, pendingLevel: 'your-call' })
       // 项目体检覆盖全局与本项目两层
       expect(body.scores).toEqual(await healthScores(e))
       expect(body.scores!.map(s => s.layer)).toEqual([{ kind: 'global' }, { kind: 'workspace', workspacePath: SESSION_WS }])
@@ -1334,12 +1334,20 @@ describe('scan', () => {
       let wording = 'AGENTS.md：包管理用 pnpm'
       const e = env({ llm: answering(() => [{ type: 'conflict', memoryIds: ['mem_a'], baselineRef: wording, summary: '与基线矛盾' }]), baseline: ['包管理统一用 pnpm'] })
       await seedFour(e)
-      expect(ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS })).added).toEqual({ pending: 1, advice: 0 })
+      expect(ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS })).added).toEqual({ pending: 1, advice: 0, pendingLevel: 'your-call' })
       wording = 'AGENTS.md 里「统一用 pnpm」那条'
       expect(ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS })).added).toEqual({ pending: 0, advice: 0 })
       expect(ledgerItems(pendingViewSchema.parse(await e.readView('pending'))).map(i => i.kind)).toEqual(['conflict-vertical'])
       const ws = healthViewSchema.parse(await e.readView('health')).layers.find(l => l.layer.kind === 'workspace')!
       expect(ws.issues).toContainEqual(expect.objectContaining({ type: 'conflict', count: 1 }))
+    })
+
+    it('新增的待处理分在两组（密钥和冲突）：不给 pendingLevel', async () => {
+      const seeding = env()
+      await seedFour(seeding)
+      await seeding.store.create(record({ id: 'mem_o', name: '戊', content: '别的项目', scope: 'workspace', workspacePath: OTHER_WS }))
+      const e = env({ llm: savingSecretMeanwhile(seeding, answering(() => [conflict])) })
+      expect(ok(await e.run({ cmd: 'scan' })).added).toEqual({ pending: 2, advice: 0 })
     })
 
     it('体检前收集视图出错：体检照常做完、带回说明，只是不带新增条数与分数；出错记一条日志', async () => {
@@ -1409,7 +1417,7 @@ describe('scan', () => {
       await seeding.store.create(record({ id: 'mem_o', name: '戊', content: '别的项目', scope: 'workspace', workspacePath: OTHER_WS }))
       const e = env({ llm: savingSecretMeanwhile(seeding, answering(() => [])) })
       const body = ok(await e.run({ cmd: 'scan' }))
-      expect(body.added).toEqual({ pending: 1, advice: 0 })
+      expect(body.added).toEqual({ pending: 1, advice: 0, pendingLevel: 'must-fix' })
       expect(body.scores).toEqual(await healthScores(e))
       expect(body.scores).toHaveLength(3)
     })

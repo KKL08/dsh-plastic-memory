@@ -2,13 +2,14 @@
  * 体检的状态与结果行，记忆页页头「体检当前项目」和设置页状态卡「立即体检」共用。
  * 完成时写「体检完成：新增 N 条待处理 › · 新增 M 条建议 › · 查看分数 ›」（为 0 的段省略，都为 0 时「没有发现新问题 · 查看分数 ›」），
  * 体检的说明（内容检查没做完、只查了一部分、基线检查被跳过）附在后面；失败写原话并提示在对话里让 agent 体检。
- * 链接只给出要去的 tab，由调用方决定怎么去（页头在页内切换，设置页经导航直达记忆页）；体检本身原地跑，不自动跳转。
+ * 链接只给出要去的 tab 和待处理组，由调用方决定怎么去（页头在页内切换，设置页经导航直达记忆页）；体检本身原地跑，不自动跳转。
+ * 新增建议落在建议整理组；新增待处理都在同一组时落在那一组，分在两组时落在待处理顶部。
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { MemoryCommandResult } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { formatNumber, useT } from '../i18n.tsx'
-import type { MemoryTab } from '../nav.ts'
+import type { NavTarget } from '../nav.ts'
 
 type Done = Extract<MemoryCommandResult, { ok: true }>
 type ScanFailure = Extract<MemoryCommandResult, { ok: false }>
@@ -47,7 +48,7 @@ const Sep = () => <i className="pm-sep" aria-hidden="true">·</i>
  */
 export function ScanResult({ state, onOpen, off }: {
   state: Extract<ScanState, { kind: 'done' | 'failed' }>
-  onOpen: (tab: MemoryTab) => void
+  onOpen: (target: Pick<NavTarget, 'tab' | 'level'>) => void
   off?: ReactNode
 }) {
   const t = useT()
@@ -56,13 +57,16 @@ export function ScanResult({ state, onOpen, off }: {
     const reason = state.code === 'llm-unavailable' ? t('scan.llmUnavailable') : t('scan.failed', { detail: state.detail ?? state.code })
     return <>{reason} {t('scan.askAgent')}</>
   }
-  const link = (tab: MemoryTab, text: string) => <button type="button" className="pm-link" onClick={() => { onOpen(tab) }}>{text}</button>
+  const link = (target: Pick<NavTarget, 'tab' | 'level'>, text: string) => <button type="button" className="pm-link" onClick={() => { onOpen(target) }}>{text}</button>
   const added = state.added
   const parts: ReactNode[] = []
-  if (added !== undefined && added.pending > 0) parts.push(link('pending', t('scan.result.newPending', { n: formatNumber(added.pending) })))
+  if (added !== undefined && added.pending > 0) {
+    const level = added.pendingLevel
+    parts.push(link({ tab: 'pending', ...(level !== undefined ? { level } : {}) }, t('scan.result.newPending', { n: formatNumber(added.pending) })))
+  }
   // 英文单复数不同（中文两条同文）
-  if (added !== undefined && added.advice > 0) parts.push(link('pending', t(added.advice === 1 ? 'scan.result.newAdvice.one' : 'scan.result.newAdvice', { n: formatNumber(added.advice) })))
-  parts.push(link('health', t('scan.result.scores')))
+  if (added !== undefined && added.advice > 0) parts.push(link({ tab: 'pending', level: 'advice' }, t(added.advice === 1 ? 'scan.result.newAdvice.one' : 'scan.result.newAdvice', { n: formatNumber(added.advice) })))
+  parts.push(link({ tab: 'health' }, t('scan.result.scores')))
   return (
     <>
       {added === undefined

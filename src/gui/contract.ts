@@ -515,9 +515,13 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
      * scan：本次新增的待处理项条数。新增 = 体检后有、体检前没有（按待处理项的身份比较，只看本次体检覆盖的层），
      * 不等于「体检查出来的」：体检期间别的会话写入引出的、时间推移刚越过「很久没确认」门槛的也算。
      * 用户忽略的建议不在待处理里，不算。pending = 高优问题 + 待你处理，advice = 建议整理。
+     * pendingLevel：新增的待处理都在同一组时给出那一组（界面的链接定位到它），分在两组或没有新增时缺省。
      * 收集视图出错时缺省（体检照常完成）。
      */
-    added: z.object({ pending: z.number().int().nonnegative(), advice: z.number().int().nonnegative() }).optional(),
+    added: z.object({
+      pending: z.number().int().nonnegative(), advice: z.number().int().nonnegative(),
+      pendingLevel: z.enum(['must-fix', 'your-call']).optional(),
+    }).optional(),
     /** scan：本次体检覆盖各层的健康分（与健康视图同值，有密钥的层为 null），按健康视图的层序；与 added 同时缺省。 */
     scores: z.array(z.object({ layer: layerRefSchema, score: z.number().nullable() })).optional(),
     /** info：记忆根目录、视图目录与各视图文件的绝对路径（session 是发命令的这个会话的视图）、视图版本。 */

@@ -37,7 +37,7 @@ export function ScanControl({ session, workspacePath, hasPending, nav, leading }
   } else if (state.kind === 'running') {
     status = t('scan.runningHint')
   } else if (state.kind === 'done' || state.kind === 'failed') {
-    status = <ScanResult state={state} onOpen={(tab) => { nav.update({ tab, memoryId: undefined }) }} off={openSettings} />
+    status = <ScanResult state={state} onOpen={(target) => { nav.update({ ...target, memoryId: undefined }) }} off={openSettings} />
   }
 
   return (
