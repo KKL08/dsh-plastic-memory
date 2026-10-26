@@ -3,7 +3,7 @@ import type { MemoryRecord } from './record-schema.ts'
 import { RecordNotFoundError } from './errors.ts'
 import { expandQueryTerms, matchScore } from './text.ts'
 import {
-  resolveDuplicates, resolveLiveFirst,
+  pickLiveFirst, resolveLiveFirst,
   type MemoryLogger, type MemoryTable, type LocatedFile, type LocateHint, type ScopeReadOptions, type ScopeReadResult, type KeywordMatch,
   type WorkspaceDirListing, type DirectoryNote, type QuarantineEntry,
 } from './storage/table.ts'
@@ -77,11 +77,11 @@ export class InMemoryTable implements MemoryTable {
     const all = [...this.slots.values()].filter(s => s.record.id === id)
     if (hint?.isExactLayer === true) {
       const ownDir = hint.workspacePath === undefined ? this.globalDir : join(this.root, workspaceDirName(hint.workspacePath))
-      return resolveDuplicates(all.filter(s => s.dir === ownDir), hint)[0]
+      return pickLiveFirst(all.filter(s => s.dir === ownDir), hint)
     }
     const firstLevel = all.filter(s => s.dir === this.globalDir
       || (hint?.workspacePath !== undefined && s.record.scope === 'workspace' && s.record.workspacePath === hint.workspacePath))
-    return resolveDuplicates(firstLevel.length > 0 ? firstLevel : all, hint)[0]
+    return pickLiveFirst(firstLevel.length > 0 ? firstLevel : all, hint)
   }
 
   async listWorkspaceDirs(): Promise<WorkspaceDirListing> {

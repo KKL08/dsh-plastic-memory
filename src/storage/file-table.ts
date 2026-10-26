@@ -3,7 +3,7 @@ import { ConcurrentModificationError, RecordNotFoundError } from '../errors.ts'
 import { basename, dirname, join, relative } from 'node:path'
 import type { MemoryRecord } from '../record-schema.ts'
 import {
-  resolveDuplicates,
+  resolveDuplicates, pickLiveFirst,
   type MemoryTable, type MemoryLogger, type DirectoryNote, type QuarantineEntry, type LocatedFile, type LocatedRecord,
   type LocateHint, type ScopeReadOptions, type ScopeReadResult, type WorkspaceDirListing, type KeywordMatch,
 } from './table.ts'
@@ -359,7 +359,8 @@ export class FileTable implements MemoryTable {
 
   /** locate 的内部形态：带磁盘原文与读到的全部副本，写路径据此在写盘前复核。 */
   private async locateSlot(id: string, hint?: LocateHint): Promise<LocatedSlot | undefined> {
-    const pick = (copies: Slot[]) => copies.length > 0 ? { ...resolveDuplicates(copies, hint)[0]!, copies } : undefined
+    // 先挑在用副本：别层更新的已删副本不遮住它，遗忘、刷新改的才是读路径上看得到的那份
+    const pick = (copies: Slot[]) => copies.length > 0 ? { ...pickLiveFirst(copies, hint)!, copies } : undefined
     const global: ScopeDir = { dir: this.globalDir, loc: { scope: 'global' } }
     const hinted = hint?.workspacePath === undefined ? [] : await this.hintDirs(hint.workspacePath)
     if (hint?.isExactLayer === true) return pick(await this.scanForId(id, hint.workspacePath === undefined ? [global] : hinted))

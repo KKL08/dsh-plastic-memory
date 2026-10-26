@@ -1,3 +1,4 @@
+import { dirname } from 'node:path'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { CodedNote, DirectoryNoteCode } from '../contract-codes.ts'
 
@@ -144,4 +145,13 @@ export function resolveLiveFirst<T extends LocatedRecord>(candidates: readonly T
   const liveIds = new Set(live.map(c => c.record.id))
   const chosen = new Map([...live, ...resolveDuplicates(candidates.filter(c => !liveIds.has(c.record.id)), hint)].map(c => [c.record.id, c]))
   return [...new Set(candidates.map(c => c.record.id))].map(id => chosen.get(id)!)
+}
+
+/**
+ * 按 id 定位的同 id 取舍（copies 是同一个 id 的全部候选）：规则同 resolveLiveFirst，先在在用副本里取一份，没有才从其余副本里取。
+ * 位置即作用域：.archive/ 里 status 仍写着 active 的不算在用。
+ */
+export function pickLiveFirst<T extends LocatedRecord>(copies: readonly T[], hint?: LocateHint): T | undefined {
+  const live = copies.filter(c => c.record.status === 'active' && dirname(c.filePath) === c.dir)
+  return resolveDuplicates(live.length > 0 ? live : copies, hint)[0]
 }
