@@ -12,7 +12,7 @@ import { Chip } from '../ui/Chip.tsx'
 import { ConflictRuling, VerticalConflictRuling } from '../ui/ConflictRuling.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { StatusMarker } from '../ui/StatusMarker.tsx'
-import { ActionFeedback, SecretDeleteConfirm, useItemAction } from './action.tsx'
+import { ActionFeedback, SecretDeleteConfirm, useItemAction, type ItemAction } from './action.tsx'
 
 type Item<K extends PendingItem['kind']> = Extract<PendingItem, { kind: K }>
 type Verdict = 'keep-left' | 'keep-right' | 'keep-both'
@@ -20,7 +20,8 @@ type Verdict = 'keep-left' | 'keep-right' | 'keep-both'
 /** 一次动作的结果，结果卡按它写文案、决定能不能撤销。 */
 export type Outcome =
   | { kind: 'resolved'; verdict: Verdict }
-  | { kind: 'promoted'; target: 'global' | 'agents-md' }
+  /** decisionId：撤销用的账本条目（按记忆 id 提升时由命令结果带回；提升候选用条目自己的）。 */
+  | { kind: 'promoted'; target: 'global' | 'agents-md'; decisionId?: string }
   | { kind: 'kept-local' }
   | { kind: 'hard-deleted' }
   | { kind: 'dismissed' }
@@ -341,37 +342,89 @@ export function UnreadableCard({ item, session }: CardProps<'unreadable-file'>) 
 
 // —— 建议整理 ——
 
-/** 每类建议的标题、动手前的说明和动作（按 spec 表，「忽略」「在对话里修改」以后加）。按钮顺序即显示顺序。 */
+type AdviceAction = 'confirm' | 'delete' | 'promote' | 'open'
+
+/**
+ * 每类建议的标题、动手前的说明和动作（按 spec 表，「忽略」「在对话里修改 / 合并」以后加）。按钮顺序即显示顺序。
+ * 内容重复这里是只有一条（和指令文件重复）的写法，两条以上见 AdviceGroupCard；放错层这里是项目 → 全局，全局那条见 MISPLACED_TO_PROJECT。
+ */
 const ADVICE_COPY = {
   expired: { title: 'pending.advice.expired.title', body: 'pending.advice.expired.body', actions: ['delete', 'open'] },
   stale: { title: 'pending.advice.stale.title', body: 'pending.advice.stale.body', actions: ['confirm', 'delete', 'open'] },
   bloat: { title: 'pending.advice.bloat.title', body: 'pending.advice.bloat.body', actions: ['open'] },
+  redundancy: { title: 'pending.advice.redundancy.title', body: 'pending.advice.redundancy.baselineBody', actions: ['delete', 'open'] },
   orphan: { title: 'pending.advice.orphan.title', body: 'pending.advice.orphan.body', actions: ['open'] },
-} as const satisfies Record<AdviceType, { title: LocaleKey; body: LocaleKey; actions: ReadonlyArray<'confirm' | 'delete' | 'open'> }>
+  misplaced: { title: 'pending.advice.misplaced.title', body: 'pending.advice.misplaced.toGlobalBody', actions: ['promote', 'open'] },
+  unclear: { title: 'pending.advice.unclear.title', body: 'pending.advice.unclear.body', actions: ['open'] },
+} as const satisfies Record<AdviceType, { title: LocaleKey; body: LocaleKey; actions: readonly AdviceAction[] }>
 
-/** 建议整理卡：不着色、不带状态标记。删除走 forget（进最近删除），含密钥时原位改问彻底删除。 */
-export function AdviceCard({ item, session, now, typeLabels, onDone, onRefused }: CardProps<'advice'>) {
+/** 放错层里全局那条（该放项目）：没有现成的执行器能挪回项目，只给打开文件。 */
+const MISPLACED_TO_PROJECT = { body: 'pending.advice.misplaced.toProjectBody', actions: ['open'] } as const
+
+/**
+ * 建议整理卡：不着色、不带状态标记。删除走 forget（进最近删除），含密钥时原位改问彻底删除；
+ * 提升为全局按记忆 id 发 promote-memory，结果和提升候选一样可撤销。
+ */
+export function AdviceCard(props: CardProps<'advice'>) {
+  const { item, session, now, typeLabels, onDone, onRefused } = props
   const t = useT()
   const gateway = useGateway()
-  const action = useItemAction(session, (command) => {
+  const action = useItemAction(session, (command, result) => {
     if (command.cmd === 'confirm') onDone({ kind: 'confirmed' })
     if (command.cmd === 'forget') onDone({ kind: 'deleted' })
     if (command.cmd === 'hard-delete') onDone({ kind: 'hard-deleted' })
+    if (command.cmd === 'promote-memory') onDone({ kind: 'promoted', target: 'global', decisionId: result.decisionId })
   }, onRefused)
-  const copy = ADVICE_COPY[item.type]
-  const [memory] = item.memories
-  const layer = layerOfMemory(memory)
-  const open = () => { void gateway.openPath(memory.filePath, 'open').then((ok) => { if (!ok) action.fail(t('pending.openFailed')) }) }
-  const buttons = {
-    confirm: <Button key="confirm" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'confirm', memoryId: memory.id, layer }) }}>{t('pending.advice.confirm')}</Button>,
-    delete: <Button key="delete" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'forget', memoryId: memory.id, layer }) }}>{t('pending.advice.delete')}</Button>,
-    open: <Button key="open" onClick={open}>{t('pending.advice.open')}</Button>,
+  const buttonsOf = (memory: MemoryCardData, deleteLabel = t('pending.advice.delete')): Record<AdviceAction, ReactNode> => {
+    const layer = layerOfMemory(memory)
+    const open = () => { void gateway.openPath(memory.filePath, 'open').then((ok) => { if (!ok) action.fail(t('pending.openFailed')) }) }
+    return {
+      confirm: <Button key="confirm" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'confirm', memoryId: memory.id, layer }) }}>{t('pending.advice.confirm')}</Button>,
+      delete: <Button key="delete" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'forget', memoryId: memory.id, layer }) }}>{deleteLabel}</Button>,
+      promote: <Button key="promote" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'promote-memory', memoryId: memory.id, layer }) }}>{t('pending.promote.global')}</Button>,
+      open: <Button key="open" onClick={open}>{t('pending.advice.open')}</Button>,
+    }
   }
+  if (item.type === 'redundancy' && item.memories.length > 1) return <AdviceGroupCard {...props} action={action} buttonsOf={buttonsOf} />
+  const [memory] = item.memories
+  const copy = item.type === 'misplaced' && memory.scope === 'global' ? { ...ADVICE_COPY.misplaced, ...MISPLACED_TO_PROJECT } : ADVICE_COPY[item.type]
+  const buttons = buttonsOf(memory)
   return (
     <Card title={t(copy.title)}>
       <div className="pm-pending-advice-memories">{item.memories.map(m => <MemoryOf key={m.id} session={session} memory={m} now={now} typeLabels={typeLabels} />)}</div>
       <p className="pm-pending-text">{t(copy.body, { date: formatDay(memory.lastConfirmedAt, now, t) })}</p>
       <div className="pm-pending-actions">{copy.actions.map(a => buttons[a])}</div>
+      <ActionFeedback action={action} />
+    </Card>
+  )
+}
+
+/** 互相重复的几条记忆一张卡：每条各自一栏，带自己的删除和打开文件。两条时左右并排，写「删除左边 / 删除右边」。 */
+function AdviceGroupCard({ item, session, now, typeLabels, action, buttonsOf }: CardProps<'advice'> & {
+  action: ItemAction
+  buttonsOf: (memory: MemoryCardData, deleteLabel?: string) => Record<AdviceAction, ReactNode>
+}) {
+  const t = useT()
+  const isPair = item.memories.length === 2
+  const sides = [
+    { label: 'pending.advice.redundancy.left', delete: 'pending.advice.redundancy.deleteLeft' },
+    { label: 'pending.advice.redundancy.right', delete: 'pending.advice.redundancy.deleteRight' },
+  ] as const
+  return (
+    <Card title={t('pending.advice.redundancy.title')}>
+      <div className="pm-pending-advice-memories pm-pending-advice-group">
+        {item.memories.map((m, i) => {
+          const side = isPair ? sides[i] : undefined
+          const buttons = buttonsOf(m, side === undefined ? undefined : t(side.delete))
+          return (
+            <section key={m.id} className="pm-pending-advice-side" aria-label={side === undefined ? m.name : t(side.label)}>
+              <MemoryOf session={session} memory={m} now={now} typeLabels={typeLabels} />
+              <div className="pm-pending-actions">{buttons.delete}{buttons.open}</div>
+            </section>
+          )
+        })}
+      </div>
+      <p className="pm-pending-text">{t(isPair ? 'pending.advice.redundancy.body' : 'pending.advice.redundancy.manyBody')}</p>
       <ActionFeedback action={action} />
     </Card>
   )
@@ -421,15 +474,16 @@ export function ResultCard({ item, outcome, session, now, typeLabels, onUndone, 
   const t = useT()
   const action = useItemAction(session, () => { onUndone() }, onRefused)
   const copy = resultCopy(item, outcome, t)
+  const undoId = 'decisionId' in item ? item.decisionId : outcome.kind === 'promoted' ? outcome.decisionId : undefined
   const chip = <Chip variant="result">{copy.chip}</Chip>
   return (
     <Card title={titleOf(item, t)} focusable>
       {copy.memory ? <MemoryOf session={session} memory={copy.memory} now={now} typeLabels={typeLabels} chip={chip} /> : <div>{chip}</div>}
       <div className="pm-pending-result">
         <p className="pm-pending-text">{copy.body}</p>
-        {copy.undoable && 'decisionId' in item
+        {copy.undoable && undoId !== undefined
           ? (
-            <Button className="pm-pending-undo" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'undo', decisionId: item.decisionId }) }}>
+            <Button className="pm-pending-undo" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'undo', decisionId: undoId }) }}>
               {t('pending.undo')}
             </Button>
           )

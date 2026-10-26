@@ -13,7 +13,7 @@ export { maskSecrets, maskSecretSurface, type MaskOptions } from '../secrets.ts'
  */
 
 /** 视图 schema 的版本号：视图是派生缓存，形状变了就换号，客户端读到不认识的号按「需要刷新」处理。 */
-export const GUI_VIEW_VERSION = 5
+export const GUI_VIEW_VERSION = 6
 
 /** 视图文件所在目录（相对记忆根目录，POSIX 分隔）。 */
 export const GUI_VIEW_DIR = '.state/gui'
@@ -98,10 +98,11 @@ export const PENDING_LEVEL_OF_KIND = {
 } as const satisfies Record<PendingItemKind, PendingLevel>
 
 /**
- * 建议整理项的问题类型，按显示顺序。expired / bloat / orphan 与体检发现（governance/schema.ts FINDING_TYPES）同名，
- * 规则检查实时算；stale = 超过类型衰减期没确认（健康分的新鲜度）。语义体检来的类型以后按 spec 顺序插进来。
+ * 建议整理项的问题类型，按显示顺序。除 stale 外与体检发现（governance/schema.ts FINDING_TYPES）同名：
+ * expired / bloat / orphan 由规则检查实时算；redundancy / misplaced / unclear 取该层上次语义体检的缓存（体检关闭时不出）；
+ * stale = 超过类型衰减期没确认（健康分的新鲜度）。
  */
-export const ADVICE_TYPES = ['expired', 'bloat', 'orphan', 'stale'] as const
+export const ADVICE_TYPES = ['expired', 'bloat', 'redundancy', 'orphan', 'misplaced', 'unclear', 'stale'] as const
 export type AdviceType = (typeof ADVICE_TYPES)[number]
 
 /** 「等你决定」的口径（左栏圆点、设置页状态卡、健康页「待你决定」入口）：密钥与待你处理；读不出的文件、建议整理不算。 */
@@ -140,7 +141,10 @@ export const pendingItemSchema = z.discriminatedUnion('kind', [
     /** 解析器原话。 */
     error: z.string(),
   }),
-  /** 建议整理：每次生成视图时现算，不入账本。身份 = type + 涉及的记忆 id（memories 的 id，成对的按 id 排序）。 */
+  /**
+   * 建议整理：每次生成视图时现算，不入账本。身份 = type + 涉及的记忆 id（memories 的 id，成对的按 id 排序）。
+   * redundancy 一般是两条（互相重复）；只有一条时是和指令文件（AGENTS.md 等）重复。其余类型每项一条记忆。
+   */
   z.object({
     kind: z.literal('advice'), level: levelOf('advice'), type: z.enum(ADVICE_TYPES),
     memories: z.array(memoryCardSchema).min(1),

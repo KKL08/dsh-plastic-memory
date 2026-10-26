@@ -1012,11 +1012,14 @@ describe('promote-memory（建议整理「放错层」的提升为全局）', ()
   /** 模型把 mem_m 判为放错层（该放全局）；别的层里没有这个 id，解析时丢掉。 */
   const misplacedLlm: SemanticLlm = { complete: async () => JSON.stringify({ findings: [{ type: 'misplaced', memoryIds: ['mem_m'], summary: '对所有项目都适用' }] }) }
   const wsLayer = (workspacePath: string) => ({ kind: 'workspace', workspacePath }) as const
+  const misplacedIds = async (e: ReturnType<typeof env>) => pendingViewSchema.parse(await e.readView('pending')).items
+    .flatMap(i => i.kind === 'advice' && i.type === 'misplaced' ? i.memories.map(m => m.id) : [])
 
-  it('提升到全局：记忆变 global、快照先行、留一条已结清的提升供撤销；undo 后回到本项目', async () => {
+  it('提升到全局：记忆变 global、快照先行、留一条已结清的提升供撤销，「放错层」消失；undo 后回到本项目，「放错层」回来', async () => {
     const e = env({ llm: misplacedLlm })
     await e.store.create(record({ id: 'mem_m', name: '己', scope: 'workspace', workspacePath: SESSION_WS }))
     ok(await e.run({ cmd: 'scan' }))
+    expect(await misplacedIds(e)).toEqual(['mem_m'])
 
     const body = ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_m', layer: wsLayer(SESSION_WS) }))
     const [snap] = await e.snapshots.list()
@@ -1024,15 +1027,18 @@ describe('promote-memory（建议整理「放错层」的提升为全局）', ()
     expect((await e.store.get('mem_m'))!.scope).toBe('global')
     const settled = await e.decisions.listSettled()
     expect(settled.map(d => [d.id, d.kind, d.memoryIds, d.settled])).toEqual([[body.decisionId, 'promote-candidate', ['mem_m'], { verdict: 'promoted', at: NOW, snapshotId: snap!.id }]])
+    expect(await misplacedIds(e)).toEqual([])
     expect(ledgerItems(pendingViewSchema.parse(await e.readView('pending')))).toEqual([])
 
     ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
     const back = (await e.store.get('mem_m'))!
     expect([back.scope, back.workspacePath]).toEqual(['workspace', SESSION_WS])
+    expect(await misplacedIds(e)).toEqual(['mem_m'])
     // 撤销后条目回到未决，但记忆不是提升候选：等你决定里不出现，下次体检清掉
     expect(ledgerItems(pendingViewSchema.parse(await e.readView('pending')))).toEqual([])
     ok(await e.run({ cmd: 'scan' }))
     expect(await allEntries(e)).toEqual([])
+    expect(await misplacedIds(e)).toEqual(['mem_m'])
   })
 
   it('记忆同时是提升候选：提升后那条候选一并结清，账本里只有一条；undo 后候选回到等你决定', async () => {
@@ -1166,7 +1172,7 @@ describe('refresh-views', () => {
     }
   })
 
-  it('磁盘上是上一版（版本 4，没有建议整理）的待处理视图：按新版本重写，各级条数带上建议整理', async () => {
+  it('磁盘上是旧版（版本 4，没有建议整理）的待处理视图：按新版本重写，各级条数带上建议整理', async () => {
     const e = env()
     const entry = await seedPair(e)
     await mkdir(join(root, GUI_VIEW_DIR), { recursive: true })
@@ -1177,7 +1183,7 @@ describe('refresh-views', () => {
     expect(pendingViewSchema.safeParse(JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES.pending), 'utf8'))).success).toBe(false)
     ok(await e.run({ cmd: 'refresh-views' }))
     const pending = pendingViewSchema.parse(await e.readView('pending'))
-    expect(pending.version).toBe(5)
+    expect(pending.version).toBe(6)
     expect(pending.items.filter(i => i.kind !== 'advice').map(i => [i.level, i.kind])).toEqual([['your-call', 'conflict-horizontal']])
     expect(pending.levelCounts).toMatchObject({ 'must-fix': 0, 'your-call': 1 })
     expect(pending.levelCounts.advice).toBe(pending.items.filter(i => i.level === 'advice').length)

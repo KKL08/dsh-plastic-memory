@@ -9,7 +9,8 @@ import { GLOBAL_DIR, STATE_DIR, workspaceDirName } from '../src/storage/paths.ts
 import { MemoryStore } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
+import { SEVERITY_BY_TYPE, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, type Finding, type FindingType } from '../src/governance/schema.ts'
+import { layerCacheKey, type LayerRef } from '../src/governance/layer-health.ts'
 import { resolveHealthThresholds } from '../src/governance/health-presets.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { executeConfirm } from '../src/tools/confirm.ts'
@@ -46,7 +47,7 @@ function harness() {
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const sourceDeps = { store, decisions, cache: sidecar.scanCache, registry, memoryRoot: root, now: () => clock }
   return {
-    store, decisions, snapshots, sourceDeps,
+    store, decisions, snapshots, sourceDeps, cache: sidecar.scanCache,
     setClock: (t: number) => { clock = t },
     views: () => collectGlobalViews(sourceDeps),
     resolve: (decisionId: string, verdict: 'keep-left' | 'keep-right' | 'keep-both') =>
@@ -327,6 +328,86 @@ describe('待处理视图：建议整理', () => {
     await h.store.create(w({ id: 'mem_b', name: 'B' }))
     await h.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '矛盾', fingerprint: 'h' }, 1)
     expect((await h.views()).pending.dot).toBe('amber')
+  })
+})
+
+describe('待处理视图：建议整理的语义类', () => {
+  const finding = (type: FindingType, memoryIds: string[], extra: Partial<Finding> = {}): Finding =>
+    ({ type, layer: 'semantic', severity: SEVERITY_BY_TYPE[type], memoryIds, summary: '模型的说明', suggestedAction: '', ...extra })
+  /** 写入一层的上次语义体检缓存（体检写的就是这一份）。 */
+  async function cacheLayer(h: ReturnType<typeof harness>, layer: LayerRef, findings: Finding[]) {
+    const key = layerCacheKey(layer)
+    await h.cache.put(key, { id: key, scannedAt: T0, scope: layer.kind === 'global' ? 'global' : layer.path, findings })
+  }
+  const adviceOf = (pending: { items: readonly PendingItem[] }) =>
+    pending.items.flatMap(i => i.kind === 'advice' ? [[i.type, i.memories.map(m => m.id)] as const] : [])
+
+  /** 本项目：一对内容重复、一条和指令文件重复、一条该放全局、一条表述不清、一对冲突；全局：一条该放项目。 */
+  async function seedSemantic(h: ReturnType<typeof harness>) {
+    await h.store.create(w({ id: 'mem_r2', name: 'R 甲' }))
+    await h.store.create(w({ id: 'mem_r1', name: 'R 乙' }))
+    await h.store.create(w({ id: 'mem_rb', name: 'S 基线' }))
+    await h.store.create(w({ id: 'mem_m', name: '该放全局' }))
+    await h.store.create(w({ id: 'mem_u', name: '含糊' }))
+    await h.store.create(g({ id: 'mem_gm', name: '该放项目' }))
+    await cacheLayer(h, { kind: 'workspace', path: WS }, [
+      finding('redundancy', ['mem_r2', 'mem_r1']),
+      finding('redundancy', ['mem_rb'], { baselineRef: 'AGENTS.md：包管理' }),
+      finding('misplaced', ['mem_m']),
+      finding('unclear', ['mem_u']),
+      finding('conflict', ['mem_r1', 'mem_u']),
+    ])
+    await cacheLayer(h, { kind: 'global' }, [finding('misplaced', ['mem_gm'])])
+  }
+
+  it('内容重复、放错层、表述不清从该层上次语义体检的缓存来，按身份各出一项：成对的内容重复一张卡（id 排序）；冲突不进建议整理', async () => {
+    const h = harness()
+    await seedSemantic(h)
+    const { pending } = await h.views()
+    expect(pendingViewSchema.parse(pending)).toEqual(pending)
+    expect(adviceOf(pending)).toEqual([
+      ['redundancy', ['mem_r1', 'mem_r2']], ['redundancy', ['mem_rb']],
+      ['misplaced', ['mem_gm']], ['misplaced', ['mem_m']],
+      ['unclear', ['mem_u']],
+    ])
+    expect(pending.levelCounts).toEqual({ 'must-fix': 0, 'your-call': 0, 'advice': 5 })
+    expect(pending.dot).toBe('none')
+    expect(await h.decisions.list()).toEqual([])
+  })
+
+  it('该层从没做过语义体检（没有缓存）：不出语义类', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_a', name: 'A' }))
+    await cacheLayer(h, { kind: 'global' }, [finding('unclear', ['mem_a'])])
+    expect(adviceOf((await h.views()).pending)).toEqual([])
+  })
+
+  it('体检关闭时语义类不显示，规则类照常显示', async () => {
+    const h = harness()
+    await seedSemantic(h)
+    await h.store.create(w({ id: 'mem_expired', name: '冻结期', validTo: T0 - 1 }))
+    const off = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
+    expect(adviceOf(off.pending)).toEqual([['expired', ['mem_expired']]])
+    expect(off.pending.levelCounts.advice).toBe(1)
+  })
+
+  it('缓存里的发现指向已删、已取代或已不在这一层的记忆：不显示', async () => {
+    const h = harness()
+    await seedSemantic(h)
+    await h.forget(['mem_r2'])
+    await h.store.put({ ...(await h.store.get('mem_u'))!, status: 'superseded' })
+    // 体检之后这条被提升到全局：本项目的缓存还记着它放错层，但它已不在本项目，全局的缓存里也没有它
+    const { workspacePath: _ws, ...moved } = (await h.store.get('mem_m'))!
+    await h.store.put({ ...moved, scope: 'global' }, { workspacePath: WS })
+    expect((await h.store.get('mem_m'))!.scope).toBe('global')
+    expect(adviceOf((await h.views()).pending)).toEqual([['redundancy', ['mem_rb']], ['misplaced', ['mem_gm']]])
+  })
+
+  it('同一身份在两层的缓存里都出现：只出一项', async () => {
+    const h = harness()
+    await seedSemantic(h)
+    await cacheLayer(h, { kind: 'workspace', path: WS }, [finding('misplaced', ['mem_gm', 'mem_m'])])
+    expect(adviceOf((await h.views()).pending)).toEqual([['misplaced', ['mem_gm']], ['misplaced', ['mem_m']]])
   })
 })
 

@@ -140,20 +140,37 @@ export function buildPendingView(input: ViewInput): PendingView {
   return { version: GUI_VIEW_VERSION, dot, items, levelCounts, typeLabels: typeLabels(input.registry, cards.map(m => m?.type)) }
 }
 
+/** 语义体检来的建议类型：内容重复整组一项，放错层、表述不清每条记忆一项。 */
+const SEMANTIC_ADVICE_TYPES: ReadonlySet<AdviceType> = new Set(['redundancy', 'misplaced', 'unclear'])
+
 /**
- * 建议整理（现算、不入账本）：与健康分同一次评分（scoreLayer）的规则发现和超期记忆，所以只出体检清单里各层的 active 记忆，
- * 健康分扣几条这里就列几条。不靠模型，体检关闭时照常列出。按问题类型排，同类按层（global 在前）、再按名称。
+ * 建议整理（现算、不入账本）：与健康分同一次评分（scoreLayer）的规则发现、语义缓存发现和超期记忆，所以只出体检清单里各层的
+ * active 记忆；语义缓存里指向已删、已取代或已不在这一层的记忆的发现，评分已经滤掉。规则类与超期不靠模型，体检关闭时照常列出；
+ * 语义类和冲突一样，体检关闭时不出（冲突走账本，不在这里）。同一身份（类型 + 排序后的记忆 id）只出一项。
+ * 按问题类型排，同类按层（global 在前）、再按（第一条记忆的）名称。
  */
 function adviceItems(input: ViewInput): PendingItem[] {
   const { data } = input
   const found = input.healthLayers.flatMap((layer, layerIndex) => {
     const r = scoreLayer({ registry: input.registry }, data, layer, input.now)
-    const ruleIds = (type: Exclude<AdviceType, 'stale'>) => r.ruleFindings.filter(f => f.type === type).flatMap(f => f.memoryIds)
-    return ADVICE_TYPES.flatMap(type => (type === 'stale' ? r.staleIds : ruleIds(type))
-      .map(id => ({ type, layerIndex, record: data.byId.get(id)! })))
+    const semantic = input.governanceEnabled ? r.semanticFindings : []
+    const groups = (type: AdviceType): string[][] => {
+      if (type === 'stale') return r.staleIds.map(id => [id])
+      if (!SEMANTIC_ADVICE_TYPES.has(type)) return r.ruleFindings.filter(f => f.type === type).flatMap(f => f.memoryIds.map(id => [id]))
+      const hits = semantic.filter(f => f.type === type)
+      return type === 'redundancy' ? hits.map(f => [...f.memoryIds].sort()) : hits.flatMap(f => f.memoryIds.map(id => [id]))
+    }
+    return ADVICE_TYPES.flatMap(type => groups(type).map(ids => ({ type, layerIndex, records: ids.map(id => data.byId.get(id)!) })))
   })
-  found.sort((a, b) => ADVICE_TYPES.indexOf(a.type) - ADVICE_TYPES.indexOf(b.type) || a.layerIndex - b.layerIndex || byNameThenId(a.record, b.record))
-  return found.map(({ type, record }) => ({ kind: 'advice', level: PENDING_LEVEL_OF_KIND.advice, type, memories: [card(record, data)] }))
+  const seen = new Set<string>()
+  const unique = found.filter((f) => {
+    const key = `${f.type}:${f.records.map(r => r.id).join(',')}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+  unique.sort((a, b) => ADVICE_TYPES.indexOf(a.type) - ADVICE_TYPES.indexOf(b.type) || a.layerIndex - b.layerIndex || byNameThenId(a.records[0]!, b.records[0]!))
+  return unique.map(({ type, records }) => ({ kind: 'advice', level: PENDING_LEVEL_OF_KIND.advice, type, memories: records.map(r => card(r, data)) }))
 }
 
 /** 注册表里的类型加上视图里出现的类型（切模板后旧模板的、认不出的），读时 get 给显示名。 */

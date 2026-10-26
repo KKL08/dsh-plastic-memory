@@ -571,6 +571,12 @@ describe('待处理：建议整理', () => {
   const stale = advice('stale', 's1', { lastConfirmedAt: new Date(2026, 5, 1).getTime() })
   const bloat = advice('bloat', 'b1')
   const orphan = advice('orphan', 'o1')
+  const baselineDup = advice('redundancy', 'rb')
+  const toGlobal = advice('misplaced', 'mu')
+  const toProject = advice('misplaced', 'md', { scope: 'global', workspacePath: undefined, filePath: '/m/global/md.md' })
+  const unclear = advice('unclear', 'u1')
+  const duplicates = [memory({ id: 'r1', content: '左边的内容。', filePath: '/m/app/r1.md' }), memory({ id: 'r2', content: '右边的内容。', filePath: '/m/app/r2.md' })]
+  const pair: PendingItem = { kind: 'advice', level: 'advice', type: 'redundancy', memories: duplicates }
   const layer = { kind: 'workspace', workspacePath: '/w/app' } as const
   const groupOf = () => screen.getByRole('region', { name: /^建议整理/ })
   const cardOf = (title: string) => screen.getByRole('heading', { level: 3, name: title }).closest('article')!
@@ -589,10 +595,76 @@ describe('待处理：建议整理', () => {
     ['很久没确认', stale, ['仍然有效', '删除', '打开文件']],
     ['内容过长', bloat, ['打开文件']],
     ['指向的旧记忆已不在', orphan, ['打开文件']],
+    ['内容重复', baselineDup, ['删除', '打开文件']],
+    ['放错层', toGlobal, ['提升为全局', '打开文件']],
+    ['放错层', toProject, ['打开文件']],
+    ['表述不清', unclear, ['打开文件']],
   ] as const)('%s：动作按 spec 表', (title, item, buttons) => {
     setup([item])
     expect(cardOf(title).querySelector(`[data-memory-id="${item.kind === 'advice' ? item.memories[0]!.id : ''}"]`)).not.toBeNull()
     expect(within(cardOf(title)).getAllByRole('button').map(b => b.textContent)).toEqual([...buttons])
+  })
+
+  it('说明按情形写：和指令文件重复、该放全局、只和项目有关、表述不清', () => {
+    setup([baselineDup, toGlobal, toProject, unclear])
+    for (const text of [
+      '指令文件（AGENTS.md 等）里已经写了同样的内容，这条可以删掉。删除后 14 天内可在「最近删除」恢复。',
+      '这条看起来对所有项目都适用，现在只放在一个项目里。提升为全局后所有项目都会带入它，14 天内可撤销。',
+      '这条看起来只和某个项目有关，放在全局会被带进每个项目的对话。打开文件，改成各个项目都适用的说法。',
+      '换一个没有上下文的新对话，agent 很难照这条去做。打开文件，把缺的背景、对象或条件写清楚。',
+    ]) expect(screen.getByText(text)).toBeInTheDocument()
+  })
+
+  it('内容重复的两条在同一张卡上左右并排，各自「删除左边 / 删除右边」「打开文件」；删除发 forget（带层）', async () => {
+    const { gateway, commands } = setup([pair])
+    const card = cardOf('内容重复')
+    expect(screen.getByText('两条说的是同一件事，留一条就够。删掉的那条 14 天内可在「最近删除」恢复。')).toBeInTheDocument()
+    const left = within(card).getByRole('region', { name: '左边这条' })
+    const right = within(card).getByRole('region', { name: '右边这条' })
+    expect(within(left).getByText('左边的内容。')).toBeInTheDocument()
+    expect(within(right).getByText('右边的内容。')).toBeInTheDocument()
+    expect(within(card).getAllByRole('button').map(b => b.textContent)).toEqual(['删除左边', '打开文件', '删除右边', '打开文件'])
+
+    await act(async () => { fireEvent.click(within(right).getByRole('button', { name: '打开文件' })) })
+    expect(gateway.opened).toEqual([{ path: '/m/app/r2.md' }])
+    fireEvent.click(within(right).getByRole('button', { name: '删除右边' }))
+    await screen.findByText('已删除')
+    expect(commands()).toEqual([{ cmd: 'forget', memoryId: 'r2', layer }])
+  })
+
+  it('三条以上互相重复：每条一栏，按钮写「删除」，栏名是记忆名', async () => {
+    const { commands } = setup([{ kind: 'advice', level: 'advice', type: 'redundancy', memories: [...duplicates, memory({ id: 'r3', name: '第三条' })] }])
+    const card = cardOf('内容重复')
+    expect(screen.getByText('这几条说的是同一件事，留一条就够。删掉的 14 天内可在「最近删除」恢复。')).toBeInTheDocument()
+    expect(within(card).getAllByRole('button').map(b => b.textContent)).toEqual(['删除', '打开文件', '删除', '打开文件', '删除', '打开文件'])
+    fireEvent.click(within(within(card).getByRole('region', { name: '第三条' })).getByRole('button', { name: '删除' }))
+    await screen.findByText('已删除')
+    expect(commands()).toEqual([{ cmd: 'forget', memoryId: 'r3', layer }])
+  })
+
+  it('内容重复删掉的那条含密钥：原位改问彻底删除，「彻底删除」发 hard-delete 删的还是那一条', async () => {
+    const { commands } = setup([pair], {
+      respond: command => command.cmd === 'forget'
+        ? { ok: false, cmd: command.cmd, code: 'has-secret' }
+        : { ok: true, cmd: command.cmd, memoryIds: ['r1'] },
+    })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除左边' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '彻底删除' })) })
+    await screen.findByText('已彻底删除')
+    expect(commands()).toEqual([{ cmd: 'forget', memoryId: 'r1', layer }, { cmd: 'hard-delete', memoryId: 'r1', layer }])
+  })
+
+  it('放错层（项目 → 全局）：「提升为全局」按记忆 id 发 promote-memory（带层），结果可撤销，撤销发 undo', async () => {
+    const { commands } = setup([toGlobal], {
+      respond: command => command.cmd === 'promote-memory'
+        ? { ok: true, cmd: command.cmd, decisionId: 'pd_m', memoryIds: ['mu'], snapshotId: 'snap_1' }
+        : { ok: true, cmd: command.cmd },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '提升为全局' }))
+    await screen.findByText('已提升为全局')
+    expect(screen.getByText('所有项目都会带入它，14 天内可撤销。')).toBeInTheDocument()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
+    expect(commands()).toEqual([{ cmd: 'promote-memory', memoryId: 'mu', layer }, { cmd: 'undo', decisionId: 'pd_m' }])
   })
 
   it('「仍然有效」发 confirm（带这条记忆的层），原位换成结果卡', async () => {
