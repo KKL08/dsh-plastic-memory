@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
-import { encodeRecord } from '../src/storage/frontmatter.ts'
-import { ARCHIVE_DIR, GLOBAL_DIR, STATE_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
+import { computeDigest, encodeRecord, splitFrontmatter } from '../src/storage/frontmatter.ts'
+import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE, STATE_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
 import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
@@ -47,6 +47,8 @@ interface EnvOpts {
   llm?: SemanticLlm | null
   baseline?: readonly string[] | null
   now?: number
+  /** 体检开关；缺省视为开启。 */
+  governanceEnabled?: boolean
 }
 
 function env(opts: EnvOpts = {}) {
@@ -63,6 +65,7 @@ function env(opts: EnvOpts = {}) {
     resolveContext: async () => ({ workspacePath: 'workspacePath' in opts ? opts.workspacePath : SESSION_WS, delegationDepth: opts.delegationDepth ?? 0, session: { id: 'sess-1' } }),
     getLlm: () => (opts.llm === undefined ? null : opts.llm),
     getBaseline: () => opts.baseline ?? null,
+    ...(opts.governanceEnabled !== undefined ? { isGovernanceEnabled: () => opts.governanceEnabled! } : {}),
     now: () => clock.now,
   })
   /** 按宿主 parseCommand 的切法：命令名之后的原文（含分隔空白）交给处理器。 */
@@ -1183,7 +1186,7 @@ describe('refresh-views', () => {
     expect(pendingViewSchema.safeParse(JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES.pending), 'utf8'))).success).toBe(false)
     ok(await e.run({ cmd: 'refresh-views' }))
     const pending = pendingViewSchema.parse(await e.readView('pending'))
-    expect(pending.version).toBe(6)
+    expect(pending.version).toBe(GUI_VIEW_VERSION)
     expect(pending.items.filter(i => i.kind !== 'advice').map(i => [i.level, i.kind])).toEqual([['your-call', 'conflict-horizontal']])
     expect(pending.levelCounts).toMatchObject({ 'must-fix': 0, 'your-call': 1 })
     expect(pending.levelCounts.advice).toBe(pending.items.filter(i => i.level === 'advice').length)
@@ -1209,5 +1212,273 @@ describe('读不出的文件', () => {
       expect(text).not.toContain(suspected)
       expect(text).not.toContain('7777777777')
     }
+  })
+})
+
+describe('edit-memory（建议整理的直接改）', () => {
+  const LATER = NOW + 1000
+  const wsLayer = (workspacePath: string) => ({ kind: 'workspace', workspacePath }) as const
+  const layerOf = (workspacePath: string | undefined) => (workspacePath === undefined ? { kind: 'global' } as const : wsLayer(workspacePath))
+  /** 卡片上的版本：从视图里读，和界面发的一样。 */
+  async function baseOf(e: ReturnType<typeof env>, id: string) {
+    ok(await e.run({ cmd: 'refresh-views' }))
+    const card = libraryViewSchema.parse(await e.readView('library')).layers.flatMap(l => l.items).find(m => m.id === id)!
+    return { updatedAt: card.updatedAt, digest: card.digest! }
+  }
+  const fileOf = async (e: ReturnType<typeof env>, id: string, workspacePath?: string) =>
+    (await e.store.locate(id, { workspacePath, isExactLayer: true }))!.filePath
+  const edit = (memoryId: string, workspacePath: string | undefined, base: { updatedAt: number; digest: string }, fields: Partial<Extract<MemoryCommand, { cmd: 'edit-memory' }>> = {}): MemoryCommand => ({
+    cmd: 'edit-memory', memoryId, layer: layerOf(workspacePath), base, content: '新正文', name: '新名称', summary: '新摘要', tags: ['新标签'], ...fields,
+  })
+
+  it('文件里 content / name / summary / tags 是新值；updatedAt、lastConfirmedAt 刷新，digest 重算，手编标记清除，索引行重写；其余字段一概不动', async () => {
+    const e = env()
+    const original = record({
+      id: 'mem_e', name: '发版流程', type: 'project', scope: 'workspace', workspacePath: SESSION_WS,
+      content: '旧正文', summary: '旧摘要', tags: ['发版'],
+      source: { sessionId: 'sess-old', eventRange: [3, 9], sourceMode: 'user-behavior' },
+      createdAt: 100, updatedAt: 200, lastConfirmedAt: 300, validFrom: 50, validTo: Date.UTC(2100, 0, 1),
+      confidence: 0.7, supersedes: ['mem_older'], handEdited: true, recallCount: 4, lastRecalledAt: 500,
+    })
+    await e.store.create(original)
+    const base = await baseOf(e, 'mem_e')
+    e.clock.now = LATER
+    const body = ok(await e.run(edit('mem_e', SESSION_WS, base, { content: '新正文', name: '发版步骤', summary: '新摘要', tags: ['发版', 'npm'] })))
+
+    const after = (await e.store.get('mem_e', { workspacePath: SESSION_WS }))!
+    expect([after.content, after.name, after.summary, after.tags]).toEqual(['新正文', '发版步骤', '新摘要', ['发版', 'npm']])
+    expect([after.updatedAt, after.lastConfirmedAt]).toEqual([LATER, LATER])
+    expect(after.handEdited).toBeUndefined()
+    const changed = ['content', 'name', 'summary', 'tags', 'updatedAt', 'lastConfirmedAt', 'handEdited'] as const
+    const rest = (r: typeof original) => Object.fromEntries(Object.entries(r).filter(([k]) => !(changed as readonly string[]).includes(k)))
+    expect(rest(after)).toEqual(rest(original))
+
+    const path = await fileOf(e, 'mem_e', SESSION_WS)
+    expect(body.filePath).toBe(path)
+    const fm = splitFrontmatter(await readFile(path, 'utf8')).data
+    expect(fm.digest).toBe(computeDigest('发版步骤', '新摘要', '新正文'))
+    expect(fm).not.toHaveProperty('handEdited')
+    const index = await readFile(join(dirname(path), INDEX_FILE), 'utf8')
+    expect(index).toContain('新摘要')
+    expect(index).not.toContain('旧摘要')
+
+    // 写前拍快照（项目记忆也拍），账本留一条已结清的条目交给 undo；它不进待处理
+    const [snap] = await e.snapshots.list()
+    expect(snap).toMatchObject({ operation: 'pre-update', memoryIds: ['mem_e'] })
+    expect(snap!.data[0]!.content).toBe('旧正文')
+    expect(body).toMatchObject({ cmd: 'edit-memory', memoryIds: ['mem_e'], snapshotId: snap!.id })
+    const settled = await e.decisions.listSettled()
+    expect(settled.map(d => [d.id, d.kind, d.memoryIds, d.settled])).toEqual([[body.decisionId, 'edit', ['mem_e'], { verdict: 'edited', at: LATER, snapshotId: snap!.id }]])
+    expect(ledgerItems(pendingViewSchema.parse(await e.readView('pending')))).toEqual([])
+  })
+
+  it.each([['项目记忆', SESSION_WS], ['全局记忆', undefined]] as const)('%s改后可撤销：撤销后文件与改前一字不差，账本条目清掉', async (_label, workspacePath) => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_u', name: '甲', content: '旧正文', tags: ['旧'], ...(workspacePath !== undefined ? { scope: 'workspace', workspacePath } : {}) }))
+    const path = await fileOf(e, 'mem_u', workspacePath)
+    const before = await readFile(path, 'utf8')
+    e.clock.now = LATER
+    const body = ok(await e.run(edit('mem_u', workspacePath, await baseOf(e, 'mem_u'), { name: '乙' })))
+    expect((await e.store.get('mem_u', { workspacePath }))!.content).toBe('新正文')
+
+    const undone = ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
+    expect(undone.memoryIds).toEqual(['mem_u'])
+    expect(await fileOf(e, 'mem_u', workspacePath)).toBe(path)
+    expect(await readFile(path, 'utf8')).toBe(before)
+    expect(await allEntries(e)).toEqual([])
+  })
+
+  it('体检关闭时照样能改、能撤销', async () => {
+    const e = env({ governanceEnabled: false })
+    await e.store.create(record({ id: 'mem_off', content: '旧正文' }))
+    const body = ok(await e.run(edit('mem_off', undefined, await baseOf(e, 'mem_off'))))
+    ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
+    expect((await e.store.get('mem_off'))!.content).toBe('旧正文')
+  })
+
+  it('撤销前这条又被改过：拒绝撤销，什么都不动', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_again', content: '旧正文' }))
+    e.clock.now = LATER
+    const body = ok(await e.run(edit('mem_again', undefined, await baseOf(e, 'mem_again'))))
+    await e.store.update({ id: 'mem_again' }, r => ({ ...r, content: '之后又改的', updatedAt: LATER + 1 }))
+    expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('failed')
+    expect((await e.store.get('mem_again'))!.content).toBe('之后又改的')
+    expect((await e.decisions.listSettled()).map(d => d.id)).toEqual([body.decisionId])
+  })
+
+  it('卡片加载之后记忆被改过（手改文件、别处更新）：stale，不写盘、不拍快照、不记账', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_s', name: '甲', content: '旧正文', scope: 'workspace', workspacePath: SESSION_WS }))
+    const base = await baseOf(e, 'mem_s')
+    const path = await fileOf(e, 'mem_s', SESSION_WS)
+    // 手改正文：updatedAt 没变，digest 对不上
+    const handEdited = (await readFile(path, 'utf8')).replace('旧正文', '手改的正文')
+    await writeFile(path, handEdited)
+    const body = err(await e.run(edit('mem_s', SESSION_WS, base)))
+    expect(body.code).toBe('stale')
+    expect(await readFile(path, 'utf8')).toBe(handEdited)
+    // 别处更新：正文没变，updatedAt 对不上
+    await e.store.update({ id: 'mem_s', workspacePath: SESSION_WS }, r => ({ ...r, tags: ['别处加的'], updatedAt: 99 }))
+    expect(err(await e.run(edit('mem_s', SESSION_WS, { ...base, digest: computeDigest('甲', '摘要', '手改的正文') }))).code).toBe('stale')
+    expect((await e.store.get('mem_s', { workspacePath: SESSION_WS }))!.tags).toEqual(['别处加的'])
+    expect(await e.snapshots.list()).toEqual([])
+    expect(await allEntries(e)).toEqual([])
+  })
+
+  it('高危密钥直接拦（藏在哪个字段都算），什么都不写', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_k', content: '旧正文' }))
+    const base = await baseOf(e, 'mem_k')
+    for (const fields of [{ content: `部署用 ${FAKE_SECRET.sk}` }, { tags: [FAKE_SECRET.github] }, { summary: FAKE_SECRET.aws }]) {
+      expect(err(await e.run(edit('mem_k', undefined, base, fields))).code).toBe('secret-critical')
+    }
+    expect((await e.store.get('mem_k'))!.content).toBe('旧正文')
+    expect(await e.snapshots.list()).toEqual([])
+  })
+
+  it('疑似密钥先拦下等确认；带 force 重发才写', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_q', content: '旧正文' }))
+    const base = await baseOf(e, 'mem_q')
+    const content = '测试库 api_key: TESTONLY0000000000000000'
+    expect(err(await e.run(edit('mem_q', undefined, base, { content }))).code).toBe('secret-suspected')
+    expect((await e.store.get('mem_q'))!.content).toBe('旧正文')
+    ok(await e.run(edit('mem_q', undefined, base, { content, force: true })))
+    expect((await e.store.get('mem_q'))!.content).toBe(content)
+  })
+
+  it('原记忆含密钥（界面上是遮盖后的正文）：has-secret，什么都不动', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_h', content: `token ${FAKE_SECRET.sk}` }))
+    const body = err(await e.run(edit('mem_h', undefined, await baseOf(e, 'mem_h'), { content: 'token [已隐藏]' })))
+    expect(body.code).toBe('has-secret')
+    expect((await e.store.get('mem_h'))!.content).toBe(`token ${FAKE_SECRET.sk}`)
+    expect(await e.snapshots.list()).toEqual([])
+  })
+
+  it('别的项目的记忆：先要 allowCrossWorkspace，带上才改', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_o', content: '旧正文', scope: 'workspace', workspacePath: OTHER_WS }))
+    const base = await baseOf(e, 'mem_o')
+    expect(err(await e.run(edit('mem_o', OTHER_WS, base)))).toMatchObject({ code: 'cross-workspace', rejected: [{ id: 'mem_o', workspacePath: OTHER_WS }] })
+    expect((await e.store.get('mem_o', { workspacePath: OTHER_WS }))!.content).toBe('旧正文')
+    ok(await e.run({ ...edit('mem_o', OTHER_WS, base), allowCrossWorkspace: true } as MemoryCommand))
+    expect((await e.store.get('mem_o', { workspacePath: OTHER_WS }))!.content).toBe('新正文')
+  })
+
+  it('已删除或不存在 → not-found；名称或正文为空 → invalid-args', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_gone' }))
+    await e.store.create(record({ id: 'mem_ok' }))
+    const base = await baseOf(e, 'mem_gone')
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_gone' }))
+    expect(err(await e.run(edit('mem_gone', undefined, base))).code).toBe('not-found')
+    expect(err(await e.run(edit('mem_none', undefined, base))).code).toBe('not-found')
+    const okBase = await baseOf(e, 'mem_ok')
+    expect(err(await e.run(edit('mem_ok', undefined, okBase, { name: '' }))).code).toBe('invalid-args')
+    expect(err(await e.run(edit('mem_ok', undefined, okBase, { content: '' }))).code).toBe('invalid-args')
+  })
+
+  it('改完后语义类建议（表述不清）不再显示、撤销后回来；规则类（内容过长）按新内容重算', async () => {
+    const llm: SemanticLlm = { complete: async () => JSON.stringify({ findings: [{ type: 'unclear', memoryIds: ['mem_c'], summary: '缺对象' }] }) }
+    const e = env({ llm })
+    await e.store.create(record({ id: 'mem_c', content: '照旧', scope: 'workspace', workspacePath: SESSION_WS }))
+    await e.store.create(record({ id: 'mem_l', content: 'x'.repeat(2100), scope: 'workspace', workspacePath: SESSION_WS }))
+    ok(await e.run({ cmd: 'scan' }))
+    const adviceIds = async (type: string) => pendingViewSchema.parse(await e.readView('pending')).items
+      .flatMap(i => i.kind === 'advice' && i.type === type ? i.memories.map(m => m.id) : [])
+    expect(await adviceIds('unclear')).toEqual(['mem_c'])
+    expect(await adviceIds('bloat')).toEqual(['mem_l'])
+
+    e.clock.now = LATER
+    const body = ok(await e.run(edit('mem_c', SESSION_WS, await baseOf(e, 'mem_c'), { content: '发版前在 feature 分支跑 typecheck' })))
+    expect(await adviceIds('unclear')).toEqual([])
+    ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
+    expect(await adviceIds('unclear')).toEqual(['mem_c'])
+
+    ok(await e.run(edit('mem_l', SESSION_WS, await baseOf(e, 'mem_l'), { content: 'y'.repeat(2050) })))
+    expect(await adviceIds('bloat')).toEqual(['mem_l'])
+    ok(await e.run(edit('mem_l', SESSION_WS, await baseOf(e, 'mem_l'), { content: '短了' })))
+    expect(await adviceIds('bloat')).toEqual([])
+  })
+})
+
+describe('merge-memories（内容重复的直接合并）', () => {
+  const LATER = NOW + 1000
+  const layerOf = (r: { scope: string; workspacePath?: string }) => (r.scope === 'global' ? { kind: 'global' } as const : { kind: 'workspace', workspacePath: r.workspacePath! } as const)
+  async function cardsOf(e: ReturnType<typeof env>) {
+    ok(await e.run({ cmd: 'refresh-views' }))
+    return libraryViewSchema.parse(await e.readView('library')).layers.flatMap(l => l.items)
+  }
+  async function merge(e: ReturnType<typeof env>, ids: [string, string], fields: object = {}) {
+    const cards = await cardsOf(e)
+    const ref = (id: string) => {
+      const c = cards.find(m => m.id === id)!
+      return { memoryId: id, layer: layerOf(c), base: { updatedAt: c.updatedAt, digest: c.digest! } }
+    }
+    return e.run({ cmd: 'merge-memories', memories: [ref(ids[0]), ref(ids[1])], content: '合并后的正文', name: '合并后', summary: '合并摘要', tags: ['甲', '乙'], ...fields } as MemoryCommand)
+  }
+
+  it.each([
+    ['两条同层：保留创建较早的', { scope: 'workspace', workspacePath: SESSION_WS, createdAt: 200 }, { scope: 'workspace', workspacePath: SESSION_WS, createdAt: 100 }, 'mem_b', 'mem_a'],
+    ['一条全局一条项目：保留全局那条（哪怕创建得晚）', { scope: 'workspace', workspacePath: SESSION_WS, createdAt: 100 }, { scope: 'global', createdAt: 200 }, 'mem_b', 'mem_a'],
+  ] as const)('%s；另一条进最近删除，同一份快照；撤销后两条都恢复原样', async (_label, a, b, keptId, removedId) => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_a', name: '甲', content: '甲的正文', tags: ['甲'], ...a }))
+    await e.store.create(record({ id: 'mem_b', name: '乙', content: '乙的正文', tags: ['乙'], ...b }))
+    const ws = (id: string) => (id === 'mem_a' ? a : b).scope === 'global' ? undefined : SESSION_WS
+    const paths = { kept: await (async () => (await e.store.locate(keptId, { workspacePath: ws(keptId), isExactLayer: true }))!.filePath)(), removed: (await e.store.locate(removedId, { workspacePath: ws(removedId), isExactLayer: true }))!.filePath }
+    const before = { kept: await readFile(paths.kept, 'utf8'), removed: await readFile(paths.removed, 'utf8') }
+
+    e.clock.now = LATER
+    const body = ok(await merge(e, ['mem_a', 'mem_b']))
+    expect(body.memoryIds).toEqual([keptId, removedId])
+    const kept = (await e.store.get(keptId, { workspacePath: ws(keptId), isExactLayer: true }))!
+    expect([kept.status, kept.content, kept.name, kept.summary, kept.tags, kept.updatedAt]).toEqual(['active', '合并后的正文', '合并后', '合并摘要', ['甲', '乙'], LATER])
+    expect((await e.store.get(removedId, { workspacePath: ws(removedId), isExactLayer: true }))!.status).toBe('deleted')
+    expect(deletedViewSchema.parse(await e.readView('deleted')).items.map(i => i.memory.id)).toEqual([removedId])
+    const snaps = await e.snapshots.list()
+    expect(snaps).toHaveLength(1)
+    expect([...snaps[0]!.memoryIds].sort()).toEqual(['mem_a', 'mem_b'])
+    expect((await e.decisions.listSettled()).map(d => [d.kind, d.memoryIds, d.settled?.verdict, d.settled?.snapshotId])).toEqual([['edit', [keptId, removedId], 'merged', snaps[0]!.id]])
+
+    ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
+    expect(await readFile(paths.kept, 'utf8')).toBe(before.kept)
+    expect(await readFile(paths.removed, 'utf8')).toBe(before.removed)
+    expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
+    expect(await allEntries(e)).toEqual([])
+  })
+
+  it('任一条在卡片加载后被改过：stale，两条都不动', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_a', content: '甲的正文' }))
+    await e.store.create(record({ id: 'mem_b', content: '乙的正文' }))
+    const cards = await cardsOf(e)
+    await e.store.update({ id: 'mem_b' }, r => ({ ...r, content: '乙被改了', updatedAt: 5 }))
+    const ref = (id: string) => { const c = cards.find(m => m.id === id)!; return { memoryId: id, layer: { kind: 'global' } as const, base: { updatedAt: c.updatedAt, digest: c.digest! } } }
+    const body = err(await e.run({ cmd: 'merge-memories', memories: [ref('mem_a'), ref('mem_b')], content: '合并', name: '合并', summary: '', tags: [] }))
+    expect(body.code).toBe('stale')
+    expect([(await e.store.get('mem_a'))!.content, (await e.store.get('mem_b'))!.status]).toEqual(['甲的正文', 'active'])
+    expect(await e.snapshots.list()).toEqual([])
+  })
+
+  it('同一条记忆合并两次 → invalid-args', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_a' }))
+    const cards = await cardsOf(e)
+    const ref = { memoryId: 'mem_a', layer: { kind: 'global' } as const, base: { updatedAt: cards[0]!.updatedAt, digest: cards[0]!.digest! } }
+    expect(err(await e.run({ cmd: 'merge-memories', memories: [ref, ref], content: '合并', name: '合并', summary: '', tags: [] })).code).toBe('invalid-args')
+  })
+
+  it('撤销前保留的那条又被改过：拒绝撤销，另一条也不恢复', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_a', content: '甲的正文', createdAt: 1 }))
+    await e.store.create(record({ id: 'mem_b', content: '乙的正文', createdAt: 2 }))
+    e.clock.now = LATER
+    const body = ok(await merge(e, ['mem_a', 'mem_b']))
+    await e.store.update({ id: 'mem_a' }, r => ({ ...r, content: '之后又改的', updatedAt: LATER + 1 }))
+    expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('failed')
+    expect([(await e.store.get('mem_a'))!.content, (await e.store.get('mem_b'))!.status]).toEqual(['之后又改的', 'deleted'])
   })
 })

@@ -103,7 +103,8 @@ export interface LayerHealthResult {
  *   它污染的是该 ws 的会话，而 global 桶的输入是 global-only、看不到 ws 侧，
  *   若 ws 层也不计就两层都失明；
  * - conflict 还须仍在待决账本里（dedupKey 匹配）——用户裁决 keep-both/dismiss 后双方记忆都在、
- *   缓存过滤不掉，不对账会出现"刚裁决完分数纹丝不动"的自相矛盾。
+ *   缓存过滤不掉，不对账会出现"刚裁决完分数纹丝不动"的自相矛盾；
+ * - 其余语义 findings 涉及的记忆在那次体检之后改过（updatedAt 晚于缓存时间）就不计。
  */
 export function scoreLayer(deps: LayerHealthDeps, data: LayerPreread, layer: LayerRef, now: number): LayerHealthResult {
   const records = [...data.byId.values()].filter(r => r.status === 'active' && (layer.kind === 'global'
@@ -117,10 +118,13 @@ export function scoreLayer(deps: LayerHealthDeps, data: LayerPreread, layer: Lay
   const cached = data.cache.get(layerCacheKey(layer))
   const pendingKeys = new Set(data.pending.map(e => dedupKey(e.memoryIds, e.baselineRef)))
   const alive = (id: string) => data.byId.get(id)?.status === 'active'
+  // 体检之后改过的记忆，缓存里关于它的结论（重复、放错层、表述不清）已不作数，下次体检再说；冲突走账本指纹，不在此列
+  const editedSinceScan = (id: string) => cached !== undefined && (data.byId.get(id)?.updatedAt ?? 0) > cached.scannedAt
   const semanticFindings = (cached?.findings ?? []).filter(f => {
     if (f.memoryIds.length === 0) return false
     if (!f.memoryIds.every(alive) || !f.memoryIds.some(id => liveIds.has(id))) return false
-    return f.type !== 'conflict' || pendingKeys.has(dedupKey(f.memoryIds, f.baselineRef))
+    if (f.type === 'conflict') return pendingKeys.has(dedupKey(f.memoryIds, f.baselineRef))
+    return !f.memoryIds.some(editedSinceScan)
   })
 
   const freshness = records.flatMap(r => {

@@ -3,7 +3,8 @@ import type { MemoryRecord } from '../record-schema.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { DirectoryNote } from '../storage/table.ts'
 import { RETENTION_MS } from '../retention.ts'
-import { maskSecretSurface, maskSecrets } from '../secrets.ts'
+import { hasSecret, maskSecretSurface, maskSecrets } from '../secrets.ts'
+import { computeDigest } from '../storage/frontmatter.ts'
 import { FINDING_TYPES, type PendingDecision } from '../governance/schema.ts'
 import { kindOf, overflowLevelOf, overflowScopeOf, verdictLoser } from '../governance/decisions.ts'
 import { runRuleScan } from '../governance/rule-scan.ts'
@@ -64,7 +65,7 @@ function inLayer(r: MemoryRecord, layer: LayerRef): boolean {
 const byNameThenId = (a: MemoryRecord, b: MemoryRecord) =>
   a.name < b.name ? -1 : a.name > b.name ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0
 
-/** 记忆卡：四个文字面遮盖密钥片段，路径原样。 */
+/** 记忆卡：四个文字面遮盖密钥片段，路径原样；digest 按原文算（直接改的版本核对用）。 */
 function card(r: MemoryRecord, data: LayerPreread, filePath = data.filePaths.get(r.id) ?? ''): MemoryCard {
   const m = maskSecretSurface(r)
   return {
@@ -76,6 +77,8 @@ function card(r: MemoryRecord, data: LayerPreread, filePath = data.filePaths.get
     ...(r.validTo !== undefined ? { validTo: r.validTo } : {}),
     ...(r.handEdited ? { handEdited: true } : {}),
     filePath,
+    digest: computeDigest(r.name, r.summary, r.content),
+    ...(hasSecret(r) ? { hasSecret: true as const } : {}),
   }
 }
 

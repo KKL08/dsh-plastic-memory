@@ -6,16 +6,21 @@ export function genId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
 }
 
-/** 账本条目的种类。缺省 = conflict（旧条目没有此字段）；promote-candidate、overflow 是 GUI 加的提醒（ARCHITECTURE.md ⑥-7）。 */
-export const PENDING_KINDS = ['conflict', 'promote-candidate', 'overflow'] as const
+/**
+ * 账本条目的种类。缺省 = conflict（旧条目没有此字段）；promote-candidate、overflow 是 GUI 加的提醒（ARCHITECTURE.md ⑥-7）；
+ * edit 是 GUI 直接改、直接合并留的撤销记录，生来就已结清，撤销时移出账本，不进待处理。
+ */
+export const PENDING_KINDS = ['conflict', 'promote-candidate', 'overflow', 'edit'] as const
 export type PendingKind = (typeof PENDING_KINDS)[number]
 
 /**
  * 已裁决条目的 verdict。两边都留：keep-both、dismiss（也是超限提醒的「忽略」）、垂直 keep-left；
  * 删一方：横向 keep-left / keep-right、垂直 keep-right（败方见 decisions.ts verdictLoser）；keep-local：提升候选「留在本项目」；
- * promoted：提升候选已提升为全局，snapshotId 是提升前的快照，保留窗口内可撤销。
+ * promoted：提升候选已提升为全局，snapshotId 是提升前的快照，保留窗口内可撤销；
+ * edited / merged：直接改、直接合并（memoryIds 是保留的那条，合并时再跟上删掉的那条），snapshotId 是改前的快照，
+ * fingerprint 是写完后的内容（editFingerprint），撤销前据此确认之后没被别处改过。
  */
-export const SETTLED_VERDICTS = ['keep-both', 'dismiss', 'keep-left', 'keep-right', 'keep-local', 'promoted'] as const
+export const SETTLED_VERDICTS = ['keep-both', 'dismiss', 'keep-left', 'keep-right', 'keep-local', 'promoted', 'edited', 'merged'] as const
 export type SettledVerdict = (typeof SETTLED_VERDICTS)[number]
 
 export const pendingDecisionSchema = z.object({
@@ -27,8 +32,8 @@ export const pendingDecisionSchema = z.object({
   firstSeenAt: z.number(),
   /** 与 memoryIds 一一对应的所属 workspace 路径，global 记忆为 'global'。旧条目没有此字段。 */
   workspaces: z.array(z.string()).optional(),
-  /** 冲突：最近一次扫描时双方的内容指纹（垂直冲突含基线），见 conflictFingerprint；提升候选：记忆内容指纹；超限：档位号。
-   *  旧条目没有此字段。 */
+  /** 冲突：最近一次扫描时双方的内容指纹（垂直冲突含基线），见 conflictFingerprint；提升候选：记忆内容指纹；超限：档位号；
+   *  直接改：写完后的内容指纹。旧条目没有此字段。 */
   fingerprint: z.string().optional(),
   /** 用户已裁决：条目留作记录。两边都留的指纹不变就不再报；删一方的留着供撤销，snapshotId 是删败方前的快照。 */
   settled: z.object({

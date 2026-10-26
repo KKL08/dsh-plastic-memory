@@ -13,7 +13,7 @@ export { maskSecrets, maskSecretSurface, type MaskOptions } from '../secrets.ts'
  */
 
 /** 视图 schema 的版本号：视图是派生缓存，形状变了就换号，客户端读到不认识的号按「需要刷新」处理。 */
-export const GUI_VIEW_VERSION = 6
+export const GUI_VIEW_VERSION = 7
 
 /** 视图文件所在目录（相对记忆根目录，POSIX 分隔）。 */
 export const GUI_VIEW_DIR = '.state/gui'
@@ -63,6 +63,11 @@ export const memoryCardSchema = z.object({
   handEdited: z.boolean().optional(),
   /** 记忆文件的绝对路径。 */
   filePath: z.string(),
+  /** 名称、摘要、正文的内容摘要（同文件里的 digest 算法）：直接改时连同 updatedAt 带回去，磁盘上对不上就是卡片加载后被改过。
+   *  可缺省：对话卡从工具参数拼出来，没有它。 */
+  digest: z.string().optional(),
+  /** 四个面含密钥（两级都算）：界面上的文字可能是遮盖后的，不给直接改、直接合并。 */
+  hasSecret: z.literal(true).optional(),
 })
 export type MemoryCard = z.infer<typeof memoryCardSchema>
 
@@ -71,6 +76,18 @@ export function layerOfMemory(memory: Pick<MemoryCard, 'scope' | 'workspacePath'
   if (memory.scope === 'global') return { kind: 'global' }
   return memory.workspacePath === undefined ? undefined : { kind: 'workspace', workspacePath: memory.workspacePath }
 }
+
+/**
+ * 直接合并时保留哪条：一条全局一条项目时保留全局那条；同层（或两个不同项目）保留创建较早的，同时创建按 id。
+ * 服务端按它决定保留哪条，界面按它预填名称和摘要。
+ */
+export function mergeKeeperIndex(memories: readonly [MergeSide, MergeSide]): 0 | 1 {
+  const [a, b] = memories
+  if (a.scope !== b.scope) return a.scope === 'global' ? 0 : 1
+  if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? 0 : 1
+  return a.id <= b.id ? 0 : 1
+}
+type MergeSide = Pick<MemoryCard, 'id' | 'scope' | 'createdAt'>
 
 // —— 待处理 ——
 
@@ -320,6 +337,19 @@ const allowCrossWorkspace = z.boolean().optional()
 /** 目标记忆所在的层（见 layerOfMemory）：服务端只动这一份，跨项目门仍按借来的会话判定；缺省按借来的会话定位。 */
 const layer = layerRefSchema.optional()
 
+/** 卡片加载时记忆的版本（MemoryCard 的 updatedAt 与 digest）。 */
+const memoryBaseSchema = z.object({ updatedAt: z.number(), digest: z.string() })
+const mergeRefSchema = z.object({ memoryId: z.string(), layer, base: memoryBaseSchema })
+/** 直接改、直接合并写进去的四个字段；force：疑似密钥经用户确认后放行（高危密钥一律拦）。 */
+const editFields = {
+  content: z.string().min(1),
+  name: z.string().min(1),
+  summary: z.string(),
+  tags: z.array(z.string()),
+  force: z.boolean().optional(),
+  allowCrossWorkspace,
+}
+
 /** 宿主命令名（不带斜杠）。 */
 export const MEMORY_COMMAND_NAME = 'memory'
 
@@ -344,6 +374,18 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   z.object({ cmd: z.literal('hard-delete'), memoryId: z.string(), layer, allowCrossWorkspace }),
   /** 刷新一条记忆的确认时间（建议整理「很久没确认」的「仍然有效」），内容不动。不受体检开关影响。 */
   z.object({ cmd: z.literal('confirm'), memoryId: z.string(), layer, allowCrossWorkspace }),
+  /**
+   * 建议整理的「直接改」：正文、名称、摘要、标签换成给定值，updatedAt、lastConfirmedAt 记为当前时间，手编标记清除；
+   * 类型、作用域、出处、有效期、置信度、取代关系、召回统计不动。base 是卡片加载时的版本，磁盘上对不上回 stale，什么都不动。
+   * 新内容含高危密钥回 secret-critical；疑似密钥回 secret-suspected，用户确认后带 force 重发。快照先行（项目记忆也拍），
+   * 在账本里留一条已结清的条目，结果的 decisionId 交给 undo 撤销。
+   */
+  z.object({ cmd: z.literal('edit-memory'), memoryId: z.string(), layer, base: memoryBaseSchema, ...editFields }),
+  /**
+   * 内容重复的「直接合并」：两条里按 mergeKeeperIndex 保留一条，按 edit-memory 的规则改成给定内容；另一条软删进最近删除。
+   * 两条同拍一份快照，undo 把两条都恢复。
+   */
+  z.object({ cmd: z.literal('merge-memories'), memories: z.tuple([mergeRefSchema, mergeRefSchema]), ...editFields }),
   z.object({ cmd: z.literal('dismiss-overflow'), decisionId: z.string() }),
   z.object({ cmd: z.literal('scan'), workspacePath: z.string().optional() }),
   z.object({ cmd: z.literal('refresh-views') }),
@@ -387,7 +429,11 @@ export const GUI_ERROR_CODES = [
   'llm-unavailable',    // 体检拿不到模型
   'subagent-readonly',  // 借的会话是子 agent，不可写
   'governance-disabled', // 体检已关闭：裁决、撤销、提升、留在本项目、体检、忽略超限不可用
-  'has-secret',         // forget 的目标含密钥（任一级），只能彻底删除：什么都没动，界面确认后改发 hard-delete
+  'has-secret',         // forget 的目标含密钥（任一级），只能彻底删除：什么都没动，界面确认后改发 hard-delete；
+                        // 直接改、直接合并的目标含密钥（界面上是遮盖后的正文）：什么都没动
+  'stale',              // 直接改、直接合并：记忆在卡片加载后被改过，什么都没动
+  'secret-critical',    // 直接改、直接合并的新内容含高危密钥：什么都没动
+  'secret-suspected',   // 直接改、直接合并的新内容含疑似密钥：什么都没动，用户确认后带 force 重发
   'claimed',            // 待决项正被另一次操作（别的标签页、宿主进程或体检）认领：什么都没动
   'failed',             // 执行器报错，detail 带原话
 ] as const
@@ -400,6 +446,8 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     decisionId: z.string().optional(),
     memoryIds: z.array(z.string()).optional(),
     snapshotId: z.string().optional(),
+    /** edit-memory / merge-memories：保留的那条写完后的文件（改了名称时文件名跟着变）。 */
+    filePath: z.string().optional(),
     /** scan：体检的说明码（如 baseline-session-scoped）。 */
     notes: z.array(z.custom<ScanNoteCode>(v => typeof v === 'string')).optional(),
     /** info：记忆根目录、视图目录与各视图文件的绝对路径（session 是发命令的这个会话的视图）、视图版本。 */

@@ -51,9 +51,9 @@ function isDeletionSettled(entry: PendingDecision): boolean {
   return entry.settled !== undefined && verdictLoser(entry, entry.settled.verdict) !== undefined
 }
 
-/** 留作撤销的已裁决条目（删一方、提升为全局）：快照过了保留窗口就无从撤销，由 sweep 清掉。 */
+/** 留作撤销的已裁决条目（删一方、提升为全局、直接改与直接合并）：快照过了保留窗口就无从撤销，由 sweep 清掉。 */
 function isUndoable(entry: PendingDecision): boolean {
-  return isDeletionSettled(entry) || entry.settled?.verdict === 'promoted'
+  return isDeletionSettled(entry) || entry.settled?.verdict === 'promoted' || kindOf(entry) === 'edit'
 }
 
 /** 超限条目的指纹：relax 为档位号（'1'、'2'…），strict 只有一档。 */
@@ -308,6 +308,20 @@ export class PendingDecisionsStore {
     for (const c of candidates) {
       await this.upsert({ kind: 'promote-candidate', memoryIds: [c.id], summary: c.summary, workspaces: [scope], fingerprint: c.fingerprint }, now, read)
     }
+  }
+
+  /**
+   * 记一条生来就已结清的条目（直接改、直接合并的撤销记录）：不经过未决，别处读账本时不会把它当待处理。
+   * 同一条记忆改几次就有几条，撤销各自核对指纹；超出保留窗口由 sweep 清掉。
+   */
+  async addSettled(
+    input: { kind: PendingKind; memoryIds: string[]; summary: string; workspaces: string[]; fingerprint: string },
+    verdict: SettledVerdict, now: number, snapshotId: string,
+  ): Promise<PendingDecision> {
+    const entry: PendingDecision = { id: genId('pd'), ...input, firstSeenAt: now, settled: { verdict, at: now, snapshotId } }
+    await this.table.put(entry.id, entry)
+    await this.sweep(now)
+    return entry
   }
 
   async remove(id: string): Promise<boolean> {

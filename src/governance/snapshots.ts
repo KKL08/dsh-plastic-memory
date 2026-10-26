@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { KvTable } from '../kv-table.ts'
@@ -27,6 +28,11 @@ export function restoreProjection(r: MemoryRecord) {
     validFrom: r.validFrom, validTo: r.validTo, confidence: r.confidence, supersedes: r.supersedes,
     source: r.source && { sessionId: r.source.sessionId, eventRange: r.source.eventRange, sourceMode: r.source.sourceMode },
   }
+}
+
+/** 恢复比较投影的指纹：直接改写完后记下它，撤销前比一下，就知道之后有没有被别处改过。 */
+export function editFingerprint(r: MemoryRecord): string {
+  return createHash('sha1').update(JSON.stringify(restoreProjection(r))).digest('hex')
 }
 
 /**
@@ -136,7 +142,7 @@ export class SnapshotStore {
 
   /**
    * 选择性恢复：ids 为 undefined 恢复全部。快照后被修改过的记录默认跳过（冲突保护），
-   * overwriteChanged=true 才覆盖。脱敏记录（密钥硬删）一律跳过，计入 skipped 并单列在 redacted。
+   * overwriteChanged=true 才覆盖；给函数时只覆盖它认可的现状（直接改的撤销：现状就是那次写下的内容）。脱敏记录（密钥硬删）一律跳过，计入 skipped 并单列在 redacted。
    * 恢复动作本身只 put 旧数据，不做二次快照。current：调用方预读的现状（同 diff）。
    * 预读之后记录仍可能被别处改动：不覆盖时把冲突判定交给 put 的 skipIf，在写入那一刻按最新内容再判一次；
    * put 返回 false 即按「快照后被修改」跳过。返回 void 的 put 视为已写入。
@@ -149,18 +155,20 @@ export class SnapshotStore {
     ids: string[] | undefined,
     put: (record: MemoryRecord, skipIf?: (current: MemoryRecord) => boolean) => Promise<boolean | void>,
     current: ReadonlyMap<string, MemoryRecord>,
-    overwriteChanged: boolean,
+    overwriteChanged: boolean | ((current: MemoryRecord) => boolean),
     discard: (record: MemoryRecord) => Promise<unknown>,
   ): Promise<{ restored: string[]; skipped: string[]; redacted: string[] }> {
     const targets = ids ? snapshot.data.filter(r => ids.includes(r.id)) : snapshot.data
+    const blocks = (cur: MemoryRecord | undefined, rec: MemoryRecord) =>
+      isConflicting(cur, rec) && !(typeof overwriteChanged === 'function' ? overwriteChanged(cur!) : overwriteChanged)
     const outcomes: Array<'restored' | 'skipped' | 'redacted'> = []
     const onDisk = async () => new Map((await this.table.get(snapshot.id))?.data.map(r => [r.id, r]))
     const before = await onDisk()
     for (const rec of targets) {
       const latest = rec.redacted ? rec : before.get(rec.id)
       if (latest?.redacted) outcomes.push('redacted')
-      else if (latest === undefined || (isConflicting(current.get(rec.id), rec) && !overwriteChanged)) outcomes.push('skipped')
-      else outcomes.push((await put(rec, overwriteChanged ? undefined : cur => isConflicting(cur, rec))) === false ? 'skipped' : 'restored')
+      else if (latest === undefined || blocks(current.get(rec.id), rec)) outcomes.push('skipped')
+      else outcomes.push((await put(rec, overwriteChanged === true ? undefined : cur => blocks(cur, rec))) === false ? 'skipped' : 'restored')
     }
     if (outcomes.includes('restored')) {
       const after = await onDisk()

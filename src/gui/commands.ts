@@ -5,19 +5,24 @@ import type { MemoryLogger, MemoryStore } from '../store.ts'
 import type { KvTable } from '../kv-table.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { AgentsMdWriter } from '../storage/agents-md.ts'
-import { hasSecret } from '../secrets.ts'
+import type { MemoryRecord } from '../record-schema.ts'
+import { RecordNotFoundError } from '../errors.ts'
+import { detectSecrets, hasSecret } from '../secrets.ts'
+import { computeDigest } from '../storage/frontmatter.ts'
 import { candidateFingerprint, kindOf, verdictLoser, type PendingDecisionsStore } from '../governance/decisions.ts'
-import type { SnapshotStore } from '../governance/snapshots.ts'
+import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
 import type { PendingDecision, ScanCacheEntry } from '../governance/schema.ts'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
 import { executeConfirm } from '../tools/confirm.ts'
 import { executeForget } from '../tools/forget.ts'
 import { executePromote } from '../tools/promote.ts'
 import { executeScan } from '../tools/scan.ts'
-import { executeSnapshotTool } from '../tools/snapshot.ts'
-import { crossWorkspaceNote, gateRecords, isCopyOf, locateCopy, type CrossWorkspaceRejection, type GovernanceContext } from '../tools/workspace-gate.ts'
+import { executeSnapshotTool, type SnapshotToolOptions } from '../tools/snapshot.ts'
 import {
-  GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, parseMemoryCommand, sessionViewFile,
+  crossWorkspaceNote, gateRecords, isCopyOf, locateCopy, workspaceLabel, type CrossWorkspaceRejection, type GovernanceContext,
+} from '../tools/workspace-gate.ts'
+import {
+  GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, mergeKeeperIndex, parseMemoryCommand, sessionViewFile,
   type GuiErrorCode, type GuiLayerRef, type MemoryCommand, type MemoryCommandResult,
 } from './contract.ts'
 import type { ViewWriter } from './view-writer.ts'
@@ -64,7 +69,8 @@ export interface MemoryCommandDefinition {
   handler: (invocation: MemoryCommandInvocation) => Promise<HostCommandResult>
 }
 
-/** 依赖体检开关的子命令（对应四个治理工具的能力）；forget / restore / hard-delete / confirm / refresh-views 不受开关影响。 */
+/** 依赖体检开关的子命令（对应四个治理工具的能力）；forget / restore / hard-delete / confirm / edit-memory / merge-memories /
+ *  refresh-views 不受开关影响，撤销直接改、直接合并的 undo 也不受（见 isEditUndo）。 */
 // dismiss-overflow 不在此列：超限提醒在体检关闭时照样入账，忽略它不属于治理动作
 const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'undo', 'promote', 'promote-memory', 'keep-local', 'scan'])
 
@@ -103,7 +109,7 @@ async function run(deps: MemoryCommandDeps, invocation: MemoryCommandInvocation)
   const exec = { agent: invocation.agent } as unknown as ToolRunContext
   const context = await deps.resolveContext(exec)
   if (command.cmd === 'info') return await info(deps, context.session.id)
-  if (GOVERNANCE_COMMANDS.has(command.cmd) && deps.isGovernanceEnabled?.() === false) {
+  if (GOVERNANCE_COMMANDS.has(command.cmd) && deps.isGovernanceEnabled?.() === false && !(await isEditUndo(deps.decisions, command))) {
     return fail(command.cmd, 'governance-disabled', '体检已关闭，可在插件设置里打开')
   }
   if (context.delegationDepth > 0) return fail(command.cmd, 'subagent-readonly', '借用的会话是子 agent，记忆只读')
@@ -120,6 +126,16 @@ async function run(deps: MemoryCommandDeps, invocation: MemoryCommandInvocation)
   // scan / refresh-views 自己做全量重写
   if (result.ok && command.cmd !== 'scan' && command.cmd !== 'refresh-views') await deps.views.request()
   return result
+}
+
+/** 撤销的是直接改、直接合并：改本身不受体检开关影响，撤销也不受。 */
+async function isEditUndo(decisions: PendingDecisionsStore, command: MemoryCommand): Promise<boolean> {
+  return command.cmd === 'undo' && (await decisions.listSettled()).some(d => d.id === command.decisionId && kindOf(d) === 'edit')
+}
+
+/** 记忆和卡片加载时的版本对不上：updatedAt 变了（插件写过），或名称、摘要、正文的摘要变了（手改过文件）。 */
+function isStale(r: MemoryRecord, base: { updatedAt: number; digest: string }): boolean {
+  return r.updatedAt !== base.updatedAt || computeDigest(r.name, r.summary, r.content) !== base.digest
 }
 
 /** 顺手把视图目录建出来：宿主的文件资源对「父目录还不存在」的缺失文件不跟踪之后的创建，客户端是先问 info 再订阅视图的。 */
@@ -154,8 +170,8 @@ async function dispatch(
   const notFound = (what: string) => fail(cmd, 'not-found', `不存在或已处理：${what}`)
 
   /** 按快照恢复这些记忆；返回恢复了的 id，或错误结果（快照过期、跨项目被拒、快照后被改过）。 */
-  const restoreFrom = async (snapshotId: string, memoryIds: string[], allowCrossWorkspace: boolean | undefined, isExactLayer = false): Promise<string[] | Err> => {
-    const r = await executeSnapshotTool({ action: 'restore', snapshotId, memoryIds, allowCrossWorkspace }, gov, executorDeps, { isExactLayer })
+  const restoreFrom = async (snapshotId: string, memoryIds: string[], allowCrossWorkspace: boolean | undefined, options: SnapshotToolOptions = {}): Promise<string[] | Err> => {
+    const r = await executeSnapshotTool({ action: 'restore', snapshotId, memoryIds, allowCrossWorkspace }, gov, executorDeps, options)
     if (r.kind === 'error') return fail(cmd, 'not-found', r.message)
     if (r.kind !== 'restored') return fail(cmd, 'failed', r.message)
     if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
@@ -174,6 +190,30 @@ async function dispatch(
   const locate = (memoryId: string, layer: GuiLayerRef | undefined) =>
     layer === undefined ? deps.store.get(memoryId, { workspacePath: gov.workspacePath }) : locateCopy(deps.store, memoryId, layer)
 
+  /**
+   * 撤销直接改、直接合并：保留的那条此刻还是那次写下的内容，才按改前的快照把涉及的记忆都恢复（合并删掉的那条一起回来）；
+   * 之后被别处改过的不覆盖，什么都不动。恢复后条目移出账本。
+   */
+  const undoEdit = async (entry: PendingDecision, allowCrossWorkspace: boolean | undefined): Promise<MemoryCommandResult> => {
+    const snapshotId = entry.settled?.snapshotId
+    const snapshot = snapshotId === undefined ? undefined : await deps.snapshots.get(snapshotId)
+    const records = snapshot?.data.filter(r => entry.memoryIds.includes(r.id)) ?? []
+    const before = records.find(r => r.id === entry.memoryIds[0])
+    if (snapshotId === undefined || before === undefined) return notFound(`${entry.id} 改前的快照（可能已超过 14 天）`)
+    // 先过跨项目门：放行一部分就恢复一部分，合并会只回来一半
+    const { rejected } = gateRecords(records, gov, allowCrossWorkspace)
+    if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
+    const isOwnWrite = (r: MemoryRecord) => editFingerprint(r) === entry.fingerprint
+    const current = await deps.store.get(before.id, { workspacePath: before.workspacePath, isExactLayer: true })
+    if (current?.status !== 'active' || !isOwnWrite(current)) {
+      return fail(cmd, 'failed', `记忆 ${before.id} 在这次修改之后又被改过或已删除，撤销会冲掉之后的改动，未做任何改动`)
+    }
+    const r = await restoreFrom(snapshotId, entry.memoryIds, allowCrossWorkspace, { isExactLayer: true, overwriteIf: isOwnWrite })
+    if (isErr(r)) return r
+    await deps.decisions.remove(entry.id)
+    return { ok: true, cmd, decisionId: entry.id, memoryIds: r, snapshotId }
+  }
+
   switch (command.cmd) {
     case 'resolve': {
       if (!(await deps.decisions.get(command.decisionId))) return notFound(command.decisionId)
@@ -187,6 +227,7 @@ async function dispatch(
       // 去掉 settled；记了快照的按它恢复败方（删一方的裁决）或恢复原位（提升为全局）
       const entry = await settledEntry(command.decisionId)
       if (!entry?.settled) return notFound(command.decisionId)
+      if (kindOf(entry) === 'edit') return await undoEdit(entry, command.allowCrossWorkspace)
       const { verdict, snapshotId } = entry.settled
       const loser = verdictLoser(entry, verdict)
       const targets = loser !== undefined ? [loser] : verdict === 'promoted' ? entry.memoryIds : []
@@ -235,7 +276,7 @@ async function dispatch(
         return { ok: true, cmd, memoryIds: [memoryId] }
       }
       const restore = async (): Promise<MemoryCommandResult> => {
-        const r = await restoreFrom(snapshotId, [memoryId], command.allowCrossWorkspace, layer !== undefined)
+        const r = await restoreFrom(snapshotId, [memoryId], command.allowCrossWorkspace, { isExactLayer: layer !== undefined })
         if (isErr(r)) return r
         if (entry) await deps.decisions.unsettle(entry.id)
         return { ok: true, cmd, memoryIds: r, snapshotId, ...(entry ? { decisionId: entry.id } : {}) }
@@ -326,6 +367,64 @@ async function dispatch(
       )
       if (r.kind === 'error') return r.code === 'cross-workspace' ? fail(cmd, 'cross-workspace', r.message, r.rejected) : fail(cmd, 'not-found', r.message)
       return { ok: true, cmd, memoryIds: [command.memoryId] }
+    }
+
+    case 'edit-memory':
+    case 'merge-memories': {
+      const refs = command.cmd === 'edit-memory' ? [command] : command.memories
+      if (refs.length === 2 && refs[0]!.memoryId === refs[1]!.memoryId) return fail(cmd, 'invalid-args', `要合并的两条是同一条记忆：${refs[0]!.memoryId}`)
+      // 都按页面上那一份定位，且此刻仍在用：已删、不存在的什么都不动
+      const records = await Promise.all(refs.map(ref => locate(ref.memoryId, ref.layer)))
+      if (!records.every(r => r?.status === 'active')) return notFound(refs.map(ref => ref.memoryId).join('、'))
+      const targets = refs.map((ref, i) => ({ record: records[i]!, base: ref.base }))
+      const { rejected } = gateRecords(targets.map(t => t.record), gov, command.allowCrossWorkspace)
+      if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
+      if (targets.some(t => hasSecret(t.record))) return fail(cmd, 'has-secret', '含密钥的记忆不能在这里改：界面上是遮盖后的正文，保存会把占位文字写回去。未做任何改动')
+      const stale = () => fail(cmd, 'stale', '这条记忆刚被改过，刷新后再改。未做任何改动')
+      if (targets.some(t => isStale(t.record, t.base))) return stale()
+      // 与 memory_save 同口径：四个面一起查，高危直接拦，疑似等用户确认
+      const { content, name, summary, tags } = command
+      const hits = detectSecrets(`${content}\n${name}\n${summary}\n${tags.join(' ')}`)
+      const names = (severity: 'critical' | 'suspected') => hits.filter(h => h.severity === severity).map(h => h.name).join('、')
+      if (names('critical') !== '') return fail(cmd, 'secret-critical', `检测到高危密钥（${names('critical')}），未保存`)
+      if (names('suspected') !== '' && command.force !== true) return fail(cmd, 'secret-suspected', `检测到疑似密钥（${names('suspected')}），未保存；确认不是密钥后带 force 重发`)
+
+      const keepAt = targets.length === 2 ? mergeKeeperIndex([targets[0]!.record, targets[1]!.record]) : 0
+      const kept = targets[keepAt]!
+      const removed = targets.length === 2 ? targets[1 - keepAt]! : undefined
+      // 快照先行，项目记忆也拍（memory_save 只给全局拍），否则撤销无从兑现；合并的两条同拍一份
+      const snapshot = await deps.snapshots.capture({
+        operation: 'pre-update',
+        description: removed === undefined ? `直接改记忆 ${kept.record.id} 前` : `直接合并 ${kept.record.id} 与 ${removed.record.id} 前`,
+        records: targets.map(t => t.record),
+      }, now)
+      // 出处、类型、作用域、有效期、置信度、取代关系不动：这是用户亲手改的内容，不是借来的会话说的
+      const hint = { workspacePath: kept.record.workspacePath, isExactLayer: true }
+      let isWritten = false
+      try {
+        await deps.store.update(kept.record, (cur) => {
+          // 锁内按磁盘上的现状再核对一次：读过之后被改过就原样不写
+          isWritten = cur.status === 'active' && !isStale(cur, kept.base)
+          if (!isWritten) return cur
+          const { handEdited: _handEdited, ...rest } = cur
+          return { ...rest, content, name, summary, tags, updatedAt: now, lastConfirmedAt: now }
+        }, hint)
+      } catch (error) {
+        if (!(error instanceof RecordNotFoundError)) throw error
+      }
+      if (!isWritten) return stale()
+      // 另一条走删除的老路：软删进最近删除，账本里指向它的条目一并清掉（同 forget）；快照上面已经拍过。
+      // 核对之后另一个会话才写进密钥的不删（极少见），这次只算改了保留的那条
+      const isRemoved = removed === undefined || (await deps.store.softDeleteUnlessSecret(removed.record, { isExactLayer: true })) !== 'has-secret'
+      if (removed !== undefined && isRemoved) await deps.decisions.removeByMemoryIds([removed.record.id])
+      const written = await deps.store.locate(kept.record.id, hint)
+      const memoryIds = removed !== undefined && isRemoved ? [kept.record.id, removed.record.id] : [kept.record.id]
+      const entry = await deps.decisions.addSettled({
+        kind: 'edit', memoryIds, summary: name, fingerprint: written === undefined ? '' : editFingerprint(written.record),
+        workspaces: memoryIds.map(id => workspaceLabel(targets.find(t => t.record.id === id)!.record)),
+      }, memoryIds.length === 2 ? 'merged' : 'edited', now, snapshot.id)
+      if (!isRemoved) return fail(cmd, 'has-secret', `保留的那条已改好；另一条（${removed!.record.id}）刚被写进密钥，没有删除`)
+      return { ok: true, cmd, decisionId: entry.id, memoryIds, snapshotId: snapshot.id, ...(written !== undefined ? { filePath: written.filePath } : {}) }
     }
 
     case 'dismiss-overflow': {
