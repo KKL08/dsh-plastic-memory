@@ -1720,6 +1720,16 @@ describe('draft-edit（让模型改、让模型合并的生成）', () => {
     expect(user).toContain('mem_l')
   })
 
+  it('提示词：用户在要求里明确给出的信息可以写进去，除此之外不新增', async () => {
+    const { llm, prompts } = scripted(answer({ content: '短', summary: '短' }))
+    const e = env({ llm })
+    await seedLong(e)
+    ok(await e.run(draftOf('mem_l', { request: '补上：先跑 e2e' })))
+    const [{ system, user }] = prompts as [{ system: string; user: string }]
+    expect(system).toContain('用户在「要求」里明确给出的信息可以写进去，除此之外不新增原文里没有的事实')
+    expect(user).toContain('## 要求\n补上：先跑 e2e')
+  })
+
   it.each([
     ['bloat', '内容过长', '压缩成要点'],
     ['unclear', '表述不清', '改清楚'],
