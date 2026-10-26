@@ -16,6 +16,7 @@ import type { LocaleKey } from '../locales.ts'
 import { useCanOpen, type NavStore } from '../nav.ts'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { crossConfirmCss } from './action.tsx'
+import { editCss } from './edit.tsx'
 import {
   AdviceCard, HorizontalCard, OverflowCard, PromoteCard, ResultCard, SecretCard, titleOf, UnreadableCard, VerticalCard, type Outcome,
 } from './cards.tsx'
@@ -254,7 +255,7 @@ function PendingEmpty({ nav, session, workspacePath, health, now }: {
   )
 }
 
-export const pendingCss = crossConfirmCss + `
+export const pendingCss = crossConfirmCss + editCss + `
 .pm-pending { display: flex; flex-direction: column; }
 .pm-pending-group { display: flex; flex-direction: column; }
 .pm-pending-group + .pm-pending-group { margin-top: 24px; }

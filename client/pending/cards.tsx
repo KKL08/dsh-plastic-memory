@@ -3,7 +3,7 @@
  * 成功后把结果（Outcome）交给列表，由列表在原位换成结果卡。
  */
 import { useState, type ReactNode } from 'react'
-import { CONFLICT_ACTION_VERDICTS, layerOfMemory, type AdviceType, type GuiLayerRef, type MemoryCard as MemoryCardData, type PendingItem } from '../../src/gui/contract.ts'
+import { CONFLICT_ACTION_VERDICTS, layerOfMemory, mergeKeeperIndex, type AdviceType, type GuiLayerRef, type MemoryCard as MemoryCardData, type PendingItem } from '../../src/gui/contract.ts'
 import { belongsTo, useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, formatDay, formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
@@ -12,7 +12,8 @@ import { Chip } from '../ui/Chip.tsx'
 import { ConflictRuling, VerticalConflictRuling } from '../ui/ConflictRuling.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { StatusMarker } from '../ui/StatusMarker.tsx'
-import { ActionFeedback, SecretDeleteConfirm, useItemAction, type ItemAction } from './action.tsx'
+import { ActionFeedback, SecretDeleteConfirm, useItemAction, type EditCommand, type ItemAction } from './action.tsx'
+import { EditPanel, type EditDraft } from './edit.tsx'
 
 type Item<K extends PendingItem['kind']> = Extract<PendingItem, { kind: K }>
 type Verdict = 'keep-left' | 'keep-right' | 'keep-both'
@@ -28,6 +29,8 @@ export type Outcome =
   | { kind: 'raised'; budget: number }
   | { kind: 'confirmed' }
   | { kind: 'deleted' }
+  /** 直接改、直接合并：结果行写名称和字数变化；filePath 是写完后的文件（改了名称文件名会跟着变）。 */
+  | { kind: 'edited' | 'merged'; decisionId?: string; name: string; fromChars: number; toChars: number; filePath?: string }
 
 export interface CardProps<K extends PendingItem['kind']> {
   item: Item<K>
@@ -342,28 +345,43 @@ export function UnreadableCard({ item, session }: CardProps<'unreadable-file'>) 
 
 // —— 建议整理 ——
 
-type AdviceAction = 'confirm' | 'delete' | 'promote' | 'open'
+type AdviceAction = 'confirm' | 'delete' | 'promote' | 'open' | 'edit'
 
 /**
- * 每类建议的标题、动手前的说明和动作（按 spec 表，「忽略」「在对话里修改 / 合并」以后加）。按钮顺序即显示顺序。
+ * 每类建议的标题、动手前的说明和动作（按 spec 表，「忽略」「让模型改 / 合并」以后加）。按钮顺序即显示顺序。
  * 内容重复这里是只有一条（和指令文件重复）的写法，两条以上见 AdviceGroupCard；放错层这里是项目 → 全局，全局那条见 MISPLACED_TO_PROJECT。
  */
 const ADVICE_COPY = {
   expired: { title: 'pending.advice.expired.title', body: 'pending.advice.expired.body', actions: ['delete', 'open'] },
   stale: { title: 'pending.advice.stale.title', body: 'pending.advice.stale.body', actions: ['confirm', 'delete', 'open'] },
-  bloat: { title: 'pending.advice.bloat.title', body: 'pending.advice.bloat.body', actions: ['open'] },
+  bloat: { title: 'pending.advice.bloat.title', body: 'pending.advice.bloat.body', actions: ['open', 'edit'] },
   redundancy: { title: 'pending.advice.redundancy.title', body: 'pending.advice.redundancy.baselineBody', actions: ['delete', 'open'] },
   orphan: { title: 'pending.advice.orphan.title', body: 'pending.advice.orphan.body', actions: ['open'] },
-  misplaced: { title: 'pending.advice.misplaced.title', body: 'pending.advice.misplaced.toGlobalBody', actions: ['promote', 'open'] },
-  unclear: { title: 'pending.advice.unclear.title', body: 'pending.advice.unclear.body', actions: ['open'] },
+  misplaced: { title: 'pending.advice.misplaced.title', body: 'pending.advice.misplaced.toGlobalBody', actions: ['open', 'edit', 'promote'] },
+  unclear: { title: 'pending.advice.unclear.title', body: 'pending.advice.unclear.body', actions: ['open', 'edit'] },
 } as const satisfies Record<AdviceType, { title: LocaleKey; body: LocaleKey; actions: readonly AdviceAction[] }>
 
-/** 放错层里全局那条（该放项目）：没有现成的执行器能挪回项目，只给打开文件。 */
-const MISPLACED_TO_PROJECT = { body: 'pending.advice.misplaced.toProjectBody', actions: ['open'] } as const
+/** 放错层里全局那条（该放项目）：没有现成的执行器能挪回项目，只给打开文件和直接改。 */
+const MISPLACED_TO_PROJECT = { body: 'pending.advice.misplaced.toProjectBody', actions: ['open', 'edit'] } as const
+
+/**
+ * 能不能直接改：要有内容摘要（服务端靠它和 updatedAt 认出卡片加载后被改过），且不含密钥（界面上的文字可能是遮盖后的，
+ * 照着改会把遮盖写回文件）。
+ */
+const isEditable = (memory: MemoryCardData) => memory.digest !== undefined && memory.hasSecret !== true
+
+/** 命令里带回的卡片版本。 */
+const baseOf = (memory: MemoryCardData) => ({ updatedAt: memory.updatedAt, digest: memory.digest ?? '' })
+
+/** 改前字数：直接改是那一条，直接合并是两条相加。 */
+function charsBefore(memories: readonly MemoryCardData[], command: EditCommand): number {
+  const ids = command.cmd === 'edit-memory' ? [command.memoryId] : command.memories.map(m => m.memoryId)
+  return memories.filter(m => ids.includes(m.id)).reduce((n, m) => n + m.content.length, 0)
+}
 
 /**
  * 建议整理卡：不着色、不带状态标记。删除走 forget（进最近删除），含密钥时原位改问彻底删除；
- * 提升为全局按记忆 id 发 promote-memory，结果和提升候选一样可撤销。
+ * 提升为全局按记忆 id 发 promote-memory，结果和提升候选一样可撤销。直接改在卡片里换出编辑框，保存发 edit-memory，同样可撤销。
  */
 export function AdviceCard(props: CardProps<'advice'>) {
   const { item, session, now, typeLabels, onDone, onRefused } = props
@@ -374,7 +392,18 @@ export function AdviceCard(props: CardProps<'advice'>) {
     if (command.cmd === 'forget') onDone({ kind: 'deleted' })
     if (command.cmd === 'hard-delete') onDone({ kind: 'hard-deleted' })
     if (command.cmd === 'promote-memory') onDone({ kind: 'promoted', target: 'global', decisionId: result.decisionId })
+    if (command.cmd === 'edit-memory' || command.cmd === 'merge-memories') {
+      onDone({
+        kind: command.cmd === 'edit-memory' ? 'edited' : 'merged',
+        decisionId: result.decisionId,
+        name: command.name,
+        fromChars: charsBefore(item.memories, command),
+        toChars: command.content.length,
+        filePath: result.filePath,
+      })
+    }
   }, onRefused)
+  const [isEditing, setEditing] = useState(false)
   const buttonsOf = (memory: MemoryCardData, deleteLabel = t('pending.advice.delete')): Record<AdviceAction, ReactNode> => {
     const layer = layerOfMemory(memory)
     const open = () => { void gateway.openPath(memory.filePath, 'open').then((ok) => { if (!ok) action.fail(t('pending.openFailed')) }) }
@@ -383,6 +412,9 @@ export function AdviceCard(props: CardProps<'advice'>) {
       delete: <Button key="delete" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'forget', memoryId: memory.id, layer }) }}>{deleteLabel}</Button>,
       promote: <Button key="promote" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'promote-memory', memoryId: memory.id, layer }) }}>{t('pending.promote.global')}</Button>,
       open: <Button key="open" onClick={open}>{t('pending.advice.open')}</Button>,
+      edit: isEditable(memory)
+        ? <Button key="edit" unavailable={action.unavailable} onClick={() => { setEditing(true) }}>{t('pending.edit.edit')}</Button>
+        : null,
     }
   }
   if (item.type === 'redundancy' && item.memories.length > 1) return <AdviceGroupCard {...props} action={action} buttonsOf={buttonsOf} />
@@ -391,21 +423,52 @@ export function AdviceCard(props: CardProps<'advice'>) {
   const buttons = buttonsOf(memory)
   return (
     <Card title={t(copy.title)}>
-      <div className="pm-pending-advice-memories">{item.memories.map(m => <MemoryOf key={m.id} session={session} memory={m} now={now} typeLabels={typeLabels} />)}</div>
-      <p className="pm-pending-text">{t(copy.body, { date: formatDay(memory.lastConfirmedAt, now, t) })}</p>
-      <div className="pm-pending-actions">{copy.actions.map(a => buttons[a])}</div>
+      {isEditing
+        ? (
+          <EditPanel
+            initial={{ content: memory.content, name: memory.name, summary: memory.summary, tags: memory.tags }}
+            original={{ content: memory.content, summary: memory.summary, chars: memory.content.length }}
+            isMerge={false}
+            unavailable={action.unavailable}
+            onCancel={() => { setEditing(false) }}
+            onSave={(draft) => { action.run({ cmd: 'edit-memory', memoryId: memory.id, layer: layerOfMemory(memory), base: baseOf(memory), ...draft }) }}
+          />
+        )
+        : (
+          <>
+            <div className="pm-pending-advice-memories">{item.memories.map(m => <MemoryOf key={m.id} session={session} memory={m} now={now} typeLabels={typeLabels} />)}</div>
+            <p className="pm-pending-text">{t(copy.body, { date: formatDay(memory.lastConfirmedAt, now, t) })}</p>
+            <div className="pm-pending-actions">{copy.actions.map(a => buttons[a])}</div>
+          </>
+        )}
       <ActionFeedback action={action} />
     </Card>
   )
 }
 
-/** 互相重复的几条记忆一张卡：每条各自一栏，带自己的删除和打开文件。两条时左右并排，写「删除左边 / 删除右边」。 */
+/** 直接合并的预填：保留的那条（mergeKeeperIndex）正文在前、空行接另一条，名称和摘要取保留那条，标签取并集。 */
+function mergeDraft(pair: readonly [MemoryCardData, MemoryCardData]): { draft: EditDraft; chars: number } {
+  const kept = pair[mergeKeeperIndex(pair)]
+  const other = pair[1 - mergeKeeperIndex(pair)]!
+  return {
+    draft: { content: `${kept.content}\n\n${other.content}`, name: kept.name, summary: kept.summary, tags: [...new Set([...kept.tags, ...other.tags])] },
+    chars: kept.content.length + other.content.length,
+  }
+}
+
+/**
+ * 互相重复的几条记忆一张卡：每条各自一栏，带自己的删除和打开文件。两条时左右并排，写「删除左边 / 删除右边」，
+ * 两条都能改时再给「直接合并」：合成保留的那条，另一条进最近删除。
+ */
 function AdviceGroupCard({ item, session, now, typeLabels, action, buttonsOf }: CardProps<'advice'> & {
   action: ItemAction
   buttonsOf: (memory: MemoryCardData, deleteLabel?: string) => Record<AdviceAction, ReactNode>
 }) {
   const t = useT()
   const isPair = item.memories.length === 2
+  const pair = isPair && item.memories.every(isEditable) ? [item.memories[0]!, item.memories[1]!] as const : undefined
+  const [isMerging, setMerging] = useState(false)
+  const merge = pair === undefined ? undefined : mergeDraft(pair)
   const sides = [
     { label: 'pending.advice.redundancy.left', delete: 'pending.advice.redundancy.deleteLeft' },
     { label: 'pending.advice.redundancy.right', delete: 'pending.advice.redundancy.deleteRight' },
@@ -419,12 +482,37 @@ function AdviceGroupCard({ item, session, now, typeLabels, action, buttonsOf }: 
           return (
             <section key={m.id} className="pm-pending-advice-side" aria-label={side === undefined ? m.name : t(side.label)}>
               <MemoryOf session={session} memory={m} now={now} typeLabels={typeLabels} />
-              <div className="pm-pending-actions">{buttons.delete}{buttons.open}</div>
+              {isMerging ? null : <div className="pm-pending-actions">{buttons.delete}{buttons.open}</div>}
             </section>
           )
         })}
       </div>
-      <p className="pm-pending-text">{t(isPair ? 'pending.advice.redundancy.body' : 'pending.advice.redundancy.manyBody')}</p>
+      {isMerging && pair !== undefined && merge !== undefined
+        ? (
+          <EditPanel
+            initial={merge.draft}
+            original={{ content: merge.draft.content, summary: merge.draft.summary, chars: merge.chars }}
+            isMerge
+            unavailable={action.unavailable}
+            onCancel={() => { setMerging(false) }}
+            onSave={(draft) => {
+              const memories = pair.map(m => ({ memoryId: m.id, layer: layerOfMemory(m), base: baseOf(m) }))
+              action.run({ cmd: 'merge-memories', memories: [memories[0]!, memories[1]!], ...draft })
+            }}
+          />
+        )
+        : (
+          <>
+            <p className="pm-pending-text">{t(isPair ? 'pending.advice.redundancy.body' : 'pending.advice.redundancy.manyBody')}</p>
+            {pair !== undefined
+              ? (
+                <div className="pm-pending-actions">
+                  <Button unavailable={action.unavailable} onClick={() => { setMerging(true) }}>{t('pending.edit.merge')}</Button>
+                </div>
+              )
+              : null}
+          </>
+        )}
       <ActionFeedback action={action} />
     </Card>
   )
@@ -459,6 +547,7 @@ function resultCopy(item: PendingItem, outcome: Outcome, t: Translate): ResultCo
     case 'confirmed': return { memory, chip: t('pending.result.confirmed'), body: t('pending.result.confirmedBody'), undoable: false }
     case 'deleted': return { chip: t('pending.result.deleted'), body: t('pending.result.deletedBody'), undoable: false }
     case 'resolved': throw new Error(`resolved outcome on ${item.kind}`)
+    case 'edited': case 'merged': throw new Error(`${outcome.kind} outcome renders as EditedRow`)
   }
 }
 
@@ -473,6 +562,7 @@ export function ResultCard({ item, outcome, session, now, typeLabels, onUndone, 
 }) {
   const t = useT()
   const action = useItemAction(session, () => { onUndone() }, onRefused)
+  if (outcome.kind === 'edited' || outcome.kind === 'merged') return <EditedRow item={item} outcome={outcome} action={action} />
   const copy = resultCopy(item, outcome, t)
   const undoId = 'decisionId' in item ? item.decisionId : outcome.kind === 'promoted' ? outcome.decisionId : undefined
   const chip = <Chip variant="result">{copy.chip}</Chip>
@@ -491,5 +581,39 @@ export function ResultCard({ item, outcome, session, now, typeLabels, onUndone, 
       </div>
       <ActionFeedback action={action} />
     </Card>
+  )
+}
+
+/** 直接改、直接合并的结果收成一行：结果 · 名称 · 字数变化，带撤销和打开文件（打开的是写完后的那个文件）。 */
+function EditedRow({ item, outcome, action }: {
+  item: PendingItem
+  outcome: Extract<Outcome, { kind: 'edited' | 'merged' }>
+  action: ItemAction
+}) {
+  const t = useT()
+  const gateway = useGateway()
+  const filePath = outcome.filePath ?? (item.kind === 'advice' ? item.memories[0]?.filePath : undefined)
+  const open = () => {
+    if (filePath !== undefined) void gateway.openPath(filePath, 'open').then((ok) => { if (!ok) action.fail(t('pending.openFailed')) })
+  }
+  const undoId = outcome.decisionId
+  return (
+    <article className="pm-pending-item" tabIndex={-1}>
+      <div className="pm-pending-done">
+        <Chip variant="result">{t(outcome.kind === 'edited' ? 'pending.result.edited' : 'pending.result.merged')}</Chip>
+        <span className="pm-pending-done-text">
+          {`${outcome.name} · ${t('pending.edit.count', { from: formatNumber(outcome.fromChars), to: formatNumber(outcome.toChars) })}`}
+        </span>
+        {undoId !== undefined
+          ? (
+            <Button className="pm-pending-undo" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'undo', decisionId: undoId }) }}>
+              {t('pending.undo')}
+            </Button>
+          )
+          : null}
+        {filePath !== undefined ? <Button onClick={open}>{t('pending.advice.open')}</Button> : null}
+      </div>
+      <ActionFeedback action={action} />
+    </article>
   )
 }

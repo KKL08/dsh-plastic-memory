@@ -17,6 +17,10 @@ export type ActionState =
   | { kind: 'cross'; workspacePath: string; command: MemoryCommand }
   /** forget 的目标含密钥（服务端回 has-secret，什么都没动）：等用户确认后改发 hard-delete，沿用这条命令指明的那一份。 */
   | { kind: 'secret'; command: Extract<MemoryCommand, { cmd: 'forget' }> }
+  /** 直接改、直接合并的新内容像密钥（服务端回 secret-suspected，什么都没动）：用户确认不是密钥后带 force 重发。 */
+  | { kind: 'suspected'; command: EditCommand }
+
+export type EditCommand = Extract<MemoryCommand, { cmd: 'edit-memory' | 'merge-memories' }>
 
 type Ok = Extract<MemoryCommandResult, { ok: true }>
 
@@ -41,9 +45,10 @@ export interface ItemAction {
   /** 命令以外的失败（打开文件、写配置）也显示在同一处。 */
   fail(detail: string): void
   confirmCross(): void
-  /** 取消跨项目确认或彻底删除确认。 */
+  /** 取消跨项目确认、彻底删除确认或疑似密钥确认。 */
   cancelCross(): void
   confirmSecret(): void
+  confirmSuspected(): void
 }
 
 /** onRefused：isHandledElsewhere 为真时调用，卡片里不再显示原话。 */
@@ -62,11 +67,15 @@ export function useItemAction(session: BorrowedSession, onOk: (command: MemoryCo
       const allowed = 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
       if (r.code === 'cross-workspace' && !allowed && workspacePath !== undefined) setState({ kind: 'cross', workspacePath, command })
       else if (r.code === 'has-secret' && command.cmd === 'forget') setState({ kind: 'secret', command })
+      else if (r.code === 'secret-suspected' && (command.cmd === 'edit-memory' || command.cmd === 'merge-memories')) setState({ kind: 'suspected', command })
+      // 这两种服务端原话只有中文，界面换成本地文案
+      else if (r.code === 'stale') setState({ kind: 'error', detail: t('pending.edit.stale') })
+      else if (r.code === 'secret-critical') setState({ kind: 'error', detail: t('pending.edit.secretCritical') })
       else setState({ kind: 'error', detail: r.detail ?? r.code })
     })
   }
   const unavailable = session.kind !== 'ready' ? t('session.none.hint')
-    : state.kind === 'busy' || state.kind === 'cross' || state.kind === 'secret' ? t('pending.busy') : undefined
+    : state.kind === 'busy' || state.kind === 'cross' || state.kind === 'secret' || state.kind === 'suspected' ? t('pending.busy') : undefined
   return {
     state,
     unavailable,
@@ -78,6 +87,9 @@ export function useItemAction(session: BorrowedSession, onOk: (command: MemoryCo
     cancelCross() { setState({ kind: 'idle' }) },
     confirmSecret() {
       if (state.kind === 'secret') run({ ...state.command, cmd: 'hard-delete' })
+    },
+    confirmSuspected() {
+      if (state.kind === 'suspected') run({ ...state.command, force: true })
     },
   }
 }
@@ -141,12 +153,23 @@ export const crossConfirmCss = `
 .pm-pending-confirm { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: var(--dsw-radius-md, 12px); background: var(--pm-bg-block); }
 `
 
-/** 动作的反馈：跨项目确认行、彻底删除确认（删除的记忆含密钥），或失败原话。 */
+/** 动作的反馈：跨项目确认行、彻底删除确认（删除的记忆含密钥）、疑似密钥确认（直接改的新内容像密钥），或失败原话。 */
 export function ActionFeedback({ action }: { action: ItemAction }) {
   const t = useT()
   const { state } = action
   if (state.kind === 'cross') return <CrossConfirm workspacePath={state.workspacePath} onCancel={action.cancelCross} onConfirm={action.confirmCross} />
   if (state.kind === 'secret') return <SecretDeleteConfirm onCancel={action.cancelCross} onConfirm={action.confirmSecret} />
+  if (state.kind === 'suspected') {
+    return (
+      <ConfirmGroup label={t('pending.edit.saveAnyway')}>
+        <p className="pm-pending-text">{t('pending.edit.secretSuspected')}</p>
+        <div className="pm-pending-actions">
+          <Button autoFocus onClick={action.cancelCross}>{t('pending.cancel')}</Button>
+          <Button onClick={action.confirmSuspected}>{t('pending.edit.saveAnyway')}</Button>
+        </div>
+      </ConfirmGroup>
+    )
+  }
   if (state.kind === 'error') return <p className="pm-pending-error" role="alert">{t('pending.failed', { detail: state.detail })}</p>
   return null
 }
