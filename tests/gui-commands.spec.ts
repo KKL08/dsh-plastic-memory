@@ -344,6 +344,46 @@ describe('并发裁决', () => {
     expect((await e.store.get('mem_c'))!.scope).toBe('workspace')
   })
 
+  it('从最近删除恢复裁决删掉的那条，碰上别人持有该条目的认领：claimed，记忆与账本都不动', async () => {
+    const e = env()
+    const pair = await seedPair(e)
+    ok(await e.run({ cmd: 'resolve', decisionId: pair.id, verdict: 'keep-left' }))
+    const before = await allEntries(e)
+    await writeClaim(pair.id, process.pid)
+    const body = err(await e.run({ cmd: 'restore', memoryId: 'mem_b' }))
+    expect(body.code).toBe('claimed')
+    expect(await allEntries(e)).toEqual(before)
+    expect((await e.store.get('mem_b'))!.status).toBe('deleted')
+  })
+
+  it('恢复裁决败方之前，别处撤销了这条并按相反结论重新裁决：新的裁决不被重开', async () => {
+    let entryId = ''
+    const other = env()
+    // 本次认领之前，另一个标签页撤销条目、改判保留败方（两步都持有认领，做完放开）
+    const e = env({
+      wrapPending: table => ({
+        get: key => table.get(key),
+        put: (key, value) => table.put(key, value),
+        delete: key => table.delete(key),
+        list: () => table.list(),
+        claim: async (key) => {
+          if (key === entryId) {
+            entryId = ''
+            ok(await other.run({ cmd: 'undo', decisionId: key }))
+            ok(await other.run({ cmd: 'resolve', decisionId: key, verdict: 'keep-right' }))
+          }
+          return table.claim(key)
+        },
+      }),
+    })
+    const pair = await seedPair(e)
+    ok(await e.run({ cmd: 'resolve', decisionId: pair.id, verdict: 'keep-left' }))
+    entryId = pair.id
+    await e.run({ cmd: 'restore', memoryId: 'mem_b' })
+    expect((await allEntries(e)).map(d => [d.id, d.settled?.verdict])).toEqual([[pair.id, 'keep-right']])
+    expect([(await e.store.get('mem_a'))!.status, (await e.store.get('mem_b'))!.status]).toEqual(['deleted', 'active'])
+  })
+
   it('认领前别处刚裁决完：not-found，什么都不动', async () => {
     let entryId = ''
     // 预检之后、本次认领之前，另一个标签页的裁决做完（条目出了待决）并放开了认领

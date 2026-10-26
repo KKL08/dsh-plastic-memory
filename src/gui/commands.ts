@@ -234,10 +234,20 @@ async function dispatch(
         if (!(await deps.store.restoreArchived(rec, { isExactLayer: layer !== undefined }))) return notFound(memoryId)
         return { ok: true, cmd, memoryIds: [memoryId] }
       }
-      const r = await restoreFrom(snapshotId, [memoryId], command.allowCrossWorkspace, layer !== undefined)
-      if (isErr(r)) return r
-      if (entry) await deps.decisions.unsettle(entry.id)
-      return { ok: true, cmd, memoryIds: r, snapshotId, ...(entry ? { decisionId: entry.id } : {}) }
+      const restore = async (): Promise<MemoryCommandResult> => {
+        const r = await restoreFrom(snapshotId, [memoryId], command.allowCrossWorkspace, layer !== undefined)
+        if (isErr(r)) return r
+        if (entry) await deps.decisions.unsettle(entry.id)
+        return { ok: true, cmd, memoryIds: r, snapshotId, ...(entry ? { decisionId: entry.id } : {}) }
+      }
+      if (!entry) return await restore()
+      // 裁决删掉的：同撤销，先认领条目、认领后重读，期间被撤销或重新裁决过的不再按旧裁决恢复、重开
+      const claimed = await deps.decisions.withClaim(entry.id, async () => {
+        const current = await settledEntry(entry.id)
+        if (current?.settled?.at !== entry.settled!.at || verdictLoser(current, current.settled.verdict) !== memoryId) return notFound(memoryId)
+        return await restore()
+      })
+      return claimed.isClaimed ? claimed.value : fail(cmd, 'claimed', `待决项 ${entry.id} 正在被另一次操作处理，未做任何改动`)
     }
 
     case 'promote': {
