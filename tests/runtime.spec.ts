@@ -394,14 +394,15 @@ describe('SnapshotCache 快照来历', () => {
     return { store, cache, session, frozen, last: () => frozen.at(-1)! }
   }
 
-  it('首次冻结的来历是对话开始时，带出带入全文的 core id', async () => {
+  it('首次冻结的来历是对话开始时，带出带入全文的 core id 与只带标题的 id', async () => {
     const { store, cache, session, last } = makeTracked()
     await store.put(record({ id: 'mem_core', type: 'preference', content: '不要 mock 数据库' }))
     await store.put(record({ id: 'mem_idx', type: 'knowledge', content: '报销截止每月 25 日' }))
+    await store.put(record({ id: 'mem_ref', type: 'reference', content: '看板在 Linear' }))
     await cache.assemble(session)
-    expect(last()).toMatchObject({ origin: 'start', coreIds: ['mem_core'] })
+    expect(last()).toMatchObject({ origin: 'start', coreIds: ['mem_core'], titleOnlyIds: ['mem_ref'] })
     expect(last().compactedAt).toBeUndefined()
-    expect(last().injectedIds).toEqual(['mem_core', 'mem_idx'])
+    expect(last().injectedIds).toEqual(['mem_core', 'mem_idx', 'mem_ref'])
   })
 
   it('成功压缩后下一次冻结的来历是压缩后，带压缩时刻；再之后的其他重建沿用', async () => {

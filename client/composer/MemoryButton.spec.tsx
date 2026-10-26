@@ -18,7 +18,7 @@ function sessionView(overrides: Partial<SessionView> = {}): SessionView {
     version: GUI_VIEW_VERSION, sessionId: 's1', workspacePath: '/w/app', frozenAt: 1, origin: 'start',
     budget: 4000, overflowMode: 'relax',
     tokens: { workspace: 1870, global: 1050, fixed: 200 },
-    usedTokens: 3120, injectedIds: ['a', 'b'], coreIds: ['a'], omittedCount: 0, savedIds: ['c'],
+    usedTokens: 3120, injectedIds: ['a', 'b'], coreIds: ['a'], titleOnlyIds: [], omittedCount: 0, savedIds: ['c'],
     ...overrides,
   }
 }

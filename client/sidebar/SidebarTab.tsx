@@ -2,9 +2,9 @@
  * 右侧栏「记忆」tab 正文（DESIGN.md Layout「右侧栏记忆 tab 内容（结构 A）」）。只讲插件放进上下文的那份快照和这次新写入的，
  * 对话中 memory_search 搜到的算普通上下文，不列、不计用量。从上到下：
  * 面包屑「本项目 / 项目名」→ 对话开始时 / 压缩后重新带入的记忆（随快照来历换标题，用量条）→ 这次新写入的（可删，
- * 进了新快照的移到带入的记忆）→ 带入的记忆（按类型分组，组标题标出全文或只带摘要；
+ * 进了新快照的移到带入的记忆）→ 带入的记忆（按类型分组，组标题标出全文、只带摘要或只带标题；
  * 带入的记忆有待决冲突时冲突卡挂在那条记忆所在组里就地裁决：横向是两条记忆，垂直是记忆对 AGENTS.md 基线）→ 底部一行入口（其余待处理只在这里带数字）。
- * 数据：会话视图（来历、带入 / 全文 / 新写入的 id、用量）、全部记忆视图（按 id 取记忆卡）、待处理视图（冲突与本项目待处理数）、
+ * 数据：会话视图（来历、带入 / 全文 / 只带标题 / 新写入的 id、用量）、全部记忆视图（按 id 取记忆卡）、待处理视图（冲突与本项目待处理数）、
  * 健康视图（bootedAt：插件本次加载时刻）。
  * 四种状态：无记忆、有全局没本项目、正常、frozenAt 早于插件本次加载（重启后未重新带入；视图没带 bootedAt 时不判断）。
  * 刚裁决的冲突在本地留原位可撤销，tab 卸载后收起。
@@ -188,9 +188,11 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const shown = new Set<string>()
   const groups = new Map<string, Entry[]>()
   const counts = new Map<string, number>()
-  // 每组带入全文的条数：快照按类型决定全文（core 区）还是只带索引行，一组要么全是、要么全不是
+  // 每组按带入方式计数：快照按类型决定全文（core 区）、带摘要的索引行还是只带名称和标签的索引行，一组正常只有一种
   const coreIds = new Set(snapshot?.coreIds ?? [])
+  const titleOnlyIds = new Set(snapshot?.titleOnlyIds ?? [])
   const fullCounts = new Map<string, number>()
+  const titleCounts = new Map<string, number>()
   const push = (type: string, entry: Entry) => { groups.set(type, [...groups.get(type) ?? [], entry]) }
   for (const id of snapshot?.injectedIds ?? []) {
     const done = ruled.find(r => ruledMemories(r).some(m => m.id === id))
@@ -198,6 +200,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     if (memory === undefined) continue
     counts.set(memory.type, (counts.get(memory.type) ?? 0) + 1)
     if (coreIds.has(id)) fullCounts.set(memory.type, (fullCounts.get(memory.type) ?? 0) + 1)
+    if (titleOnlyIds.has(id)) titleCounts.set(memory.type, (titleCounts.get(memory.type) ?? 0) + 1)
     if (shown.has(id)) continue
     const open = done === undefined
       ? conflicts.find(c => !ruledIds.has(c.decisionId) && (c.left?.id === id || c.right?.id === id))
@@ -262,9 +265,14 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   // 会话快照冻结在插件本次加载之前 = 重启后还没重新带入
   const bootedAt = health.status === 'ready' ? health.data.bootedAt : undefined
   const usageTitle = t(snapshot?.origin === 'compacted' ? 'sidebar.usage.titleCompacted' : 'sidebar.usage.title')
+  // 混着几种带入方式的组不标
   const depthMark = (type: string) => {
+    const total = counts.get(type) ?? 0
     const full = fullCounts.get(type) ?? 0
-    return full === counts.get(type) ? t('sidebar.groups.full') : full === 0 ? t('sidebar.groups.summary') : undefined
+    const titleOnly = titleCounts.get(type) ?? 0
+    if (full === total) return t('sidebar.groups.full')
+    if (titleOnly === total) return t('sidebar.groups.titleOnly')
+    return full === 0 && titleOnly === 0 ? t('sidebar.groups.summary') : undefined
   }
   const usage = snapshot === undefined
     ? sessionView.status === 'missing'

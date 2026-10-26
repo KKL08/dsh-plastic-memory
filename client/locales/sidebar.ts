@@ -17,6 +17,7 @@ export const sidebarZh = {
   'sidebar.groups.title': '带入的记忆',
   'sidebar.groups.full': '全文',
   'sidebar.groups.summary': '只带摘要',
+  'sidebar.groups.titleOnly': '只带标题',
   'sidebar.saved.delete': '删除这条记忆',
 
   'sidebar.empty.title': '还没有记忆',
@@ -72,6 +73,7 @@ export const sidebarEn: Record<keyof typeof sidebarZh, string> = {
   'sidebar.groups.title': 'Brought-in memories',
   'sidebar.groups.full': 'Full text',
   'sidebar.groups.summary': 'Summary only',
+  'sidebar.groups.titleOnly': 'Title only',
   'sidebar.saved.delete': 'Delete this memory',
 
   'sidebar.empty.title': 'No memories yet',

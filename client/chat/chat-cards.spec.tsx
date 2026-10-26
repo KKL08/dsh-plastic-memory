@@ -159,7 +159,7 @@ describe('交付卡', () => {
   it('本项目记忆：删除与撤销都带上会话所属项目的层（取会话视图里的项目，不用原始 cwd）', async () => {
     const session: SessionView = {
       version: GUI_VIEW_VERSION, sessionId: 's1', workspacePath: '/w/app', frozenAt: 2, origin: 'start', budget: 4000, overflowMode: 'relax',
-      tokens: { workspace: 0, global: 0, fixed: 0 }, usedTokens: 0, injectedIds: [], coreIds: [], omittedCount: 0, savedIds: [],
+      tokens: { workspace: 0, global: 0, fixed: 0 }, usedTokens: 0, injectedIds: [], coreIds: [], titleOnlyIds: [], omittedCount: 0, savedIds: [],
     }
     const gateway = createFakeGateway({ views: { session } })
     renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app/packages/web" saved={[saved('mem_w', '提交前跑测试')]} now={NOW} openDetail={() => {}} />, gateway)
@@ -284,7 +284,7 @@ describe('交付卡与其他界面共用删除状态', () => {
   })
   const sessionView: SessionView = {
     version: GUI_VIEW_VERSION, sessionId: 's1', workspacePath: WS, frozenAt: 2, origin: 'start', budget: 4000, overflowMode: 'relax',
-    tokens: { workspace: 10, global: 0, fixed: 0 }, usedTokens: 10, injectedIds: [], coreIds: [], omittedCount: 0, savedIds: ['n1'],
+    tokens: { workspace: 10, global: 0, fixed: 0 }, usedTokens: 10, injectedIds: [], coreIds: [], titleOnlyIds: [], omittedCount: 0, savedIds: ['n1'],
   }
   const secretFirst = (command: MemoryCommand): MemoryCommandResult => command.cmd === 'forget'
     ? { ok: false, cmd: command.cmd, code: 'has-secret' }

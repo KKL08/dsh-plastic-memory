@@ -41,6 +41,18 @@ describe('assembleSnapshot', () => {
     expect(text).not.toContain('团队看板的地址')
   })
 
+  it('titleOnlyIds：索引行只带名称和标签（不带摘要）的那些，与索引行格式器同一个判据', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await store.put(record({ id: 'mem_core', type: 'preference', content: '不要 mock 数据库' }))
+    await store.put(record({ id: 'mem_ref', name: '看板', type: 'reference', summary: '团队看板的地址' }))
+    await store.put(record({ id: 'mem_k', name: '报销', type: 'knowledge', summary: '报销截止每月 25 日' }))
+    const r = assembleSnapshot({ ...base, records: await visible(store) })
+    expect(r.titleOnlyIds).toEqual(['mem_ref'])
+    expect(r.text).toContain('[mem_k] 报销（报销截止每月 25 日）')
+    expect(r.text).not.toContain('团队看板的地址')
+    expect(assembleSnapshot({ ...base, records: [] }).titleOnlyIds).toEqual([])
+  })
+
   it('⑧ 磁盘路径只透 global + 当前项目，不透其他 workspace（跨项目隔离）', async () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_core', type: 'preference', content: '不要 mock 数据库' }))

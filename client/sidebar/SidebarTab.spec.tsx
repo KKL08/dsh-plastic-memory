@@ -33,7 +33,7 @@ function snapshot(overrides: Partial<SessionView> = {}): SessionView {
   return {
     version: GUI_VIEW_VERSION, sessionId: 's1', workspacePath: WS, frozenAt: BOOTED + 1, origin: 'start', budget: 4000, overflowMode: 'relax',
     tokens: { workspace: 1870, global: 1050, fixed: 200 }, usedTokens: 2920,
-    injectedIds: ['p1', 'j1', 'g1'], coreIds: ['p1', 'p2', 'g1'], omittedCount: 0, savedIds: [],
+    injectedIds: ['p1', 'j1', 'g1'], coreIds: ['p1', 'p2', 'g1'], titleOnlyIds: [], omittedCount: 0, savedIds: [],
     ...overrides,
   }
 }
@@ -173,7 +173,7 @@ describe('SidebarTab 快照来历与分组', () => {
   })
 
   it('空组不显示：快照没带入任何记忆时没有「带入的记忆」，没有新写入时没有「这次新写入的」', () => {
-    setup({ library: library(pref), session: snapshot({ injectedIds: [], coreIds: [], usedTokens: 0, tokens: { workspace: 0, global: 0, fixed: 40 } }), pending: pending() })
+    setup({ library: library(pref), session: snapshot({ injectedIds: [], coreIds: [], titleOnlyIds: [], usedTokens: 0, tokens: { workspace: 0, global: 0, fixed: 40 } }), pending: pending() })
     expect(screen.getByRole('region', { name: '对话开始时带入的记忆' })).toBeInTheDocument()
     expect(screen.queryByRole('region', { name: '带入的记忆' })).toBeNull()
     expect(screen.queryByRole('region', { name: '这次新写入的' })).toBeNull()
@@ -183,6 +183,17 @@ describe('SidebarTab 快照来历与分组', () => {
     const { container } = setup({ library: library(pref, proj, glob), session: snapshot(), pending: pending() })
     const marks = [...container.querySelectorAll('.pm-side-group-title')].map(h => h.textContent)
     expect(marks).toEqual(['行为偏好 1 ·全文', '项目信息 1 ·只带摘要', '用户画像 1 ·全文'])
+  })
+
+  it('索引行不带摘要的类型（如参考引用）标「只带标题」', () => {
+    const ref = memory({ id: 'r1', type: 'reference', content: '看板在 Linear 的 INGEST 项目。' })
+    const { container } = setup({ library: library(pref, ref), session: snapshot({ injectedIds: ['p1', 'r1'], titleOnlyIds: ['r1'] }), pending: pending() })
+    expect([...container.querySelectorAll('.pm-side-group-title')].map(h => h.textContent)).toEqual(['行为偏好 1 ·全文', '参考引用 1 ·只带标题'])
+  })
+
+  it('一组里带入方式不一致（全文与索引行混着）时不标', () => {
+    const { container } = setup({ library: library(pref, pref2), session: snapshot({ injectedIds: ['p1', 'p2'], coreIds: ['p1'] }), pending: pending() })
+    expect([...container.querySelectorAll('.pm-side-group-title')].map(h => h.textContent)).toEqual(['行为偏好 2'])
   })
 
   it('这次新写入的注明压缩后或下个对话带入；新快照里已经有的移进带入的记忆，不重复列', () => {

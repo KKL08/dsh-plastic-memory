@@ -86,6 +86,8 @@ export interface SnapshotUsage {
   usedTokens: number
   /** 带入的记忆 id（core 区在前，再按索引区顺序）。 */
   injectedIds: string[]
+  /** injectedIds 里索引行只带名称和标签、不带摘要的（passive 类型，同 formatIndexLine 的 passive）。 */
+  titleOnlyIds: string[]
   /** 有效记忆里没带入的条数（只有 strict 会截）。 */
   omittedCount: number
 }
@@ -124,7 +126,7 @@ export function assembleSnapshot(deps: {
   if (visible.length === 0) {
     const broken = deps.quarantinedCount ?? 0
     const text = broken > 0 ? coldStartUnparseableText(broken) : COLD_START_TEXT
-    return { text, coreIds: [], tokens: { workspace: 0, global: 0, fixed: estimateTokens(text) }, usedTokens: 0, injectedIds: [], omittedCount: 0 }
+    return { text, coreIds: [], tokens: { workspace: 0, global: 0, fixed: estimateTokens(text) }, usedTokens: 0, injectedIds: [], titleOnlyIds: [], omittedCount: 0 }
   }
   // 疑似密钥不跳过、不加提示：四个面只把命中片段遮成占位，整条照常注入（id 不动，coreIds 与文件路径照常对应）
   const valid = visible.filter(r => withinValidity(r, now))
@@ -151,6 +153,7 @@ export function assembleSnapshot(deps: {
   tokens.fixed += estimateTokens(compactionNote)
   const scopeOf = (r: MemoryRecord) => (r.scope === 'global' ? 'global' : 'workspace')
   const injectedIds: string[] = []
+  const titleOnlyIds: string[] = []
   // strict 才有上限；relax 需要多少装多少（core 区、索引区都不截）
   const limit = deps.overflow === 'strict' ? deps.budget : Infinity
 
@@ -192,6 +195,8 @@ export function assembleSnapshot(deps: {
   let exhausted = false
   for (const [type, records] of sortedGroups) {
     const def = registry.get(type)
+    // 索引行带不带摘要：格式器与 titleOnlyIds 共用这一个判据
+    const passive = def.recall === 'passive'
     const sorted = [...records].sort(byConfidenceThenConfirmed)
     // 预算已耗尽：剩余各组不再尝试，整组计入 omitted
     if (exhausted) {
@@ -203,7 +208,7 @@ export function assembleSnapshot(deps: {
     let groupCost = headerCost
     const groupTokens = { workspace: 0, global: 0 }
     for (const r of sorted) {
-      const line = formatIndexLine(r, { passive: def.recall === 'passive', file: files.get(r.id), note: stalenessNote(r, def.decayDays, now) })
+      const line = formatIndexLine(r, { passive, file: files.get(r.id), note: stalenessNote(r, def.decayDays, now) })
       const cost = estimateTokens(line)
       if (used + groupCost + cost > limit) { exhausted = true; break }
       groupLines.push(line)
@@ -221,7 +226,9 @@ export function assembleSnapshot(deps: {
     tokens.fixed += headerCost
     tokens.workspace += groupTokens.workspace
     tokens.global += groupTokens.global
-    injectedIds.push(...sorted.slice(0, groupLines.length - 1).map(r => r.id))
+    const included = sorted.slice(0, groupLines.length - 1).map(r => r.id)
+    injectedIds.push(...included)
+    if (passive) titleOnlyIds.push(...included)
     if (groupLines.length - 1 < sorted.length) omitted.push({ type, records: sorted.slice(groupLines.length - 1) })
   }
   const tailStart = parts.length
@@ -251,6 +258,6 @@ export function assembleSnapshot(deps: {
 
   return {
     text: parts.join('\n'), coreIds: coreIncluded.map(r => r.id),
-    tokens, usedTokens: used, injectedIds, omittedCount: all.length - injectedIds.length,
+    tokens, usedTokens: used, injectedIds, titleOnlyIds, omittedCount: all.length - injectedIds.length,
   }
 }

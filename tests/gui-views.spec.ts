@@ -681,7 +681,7 @@ describe('会话视图', () => {
   it('带 frozenAt、来历与三段用量，只存时间戳', () => {
     const view = buildSessionView({
       sessionId: 's1', workspacePath: WS, frozenAt: T0, origin: 'compacted', compactedAt: T0 - 1, budget: 4000, overflowMode: 'strict',
-      tokens: { workspace: 120, global: 80, fixed: 40 }, usedTokens: 210, injectedIds: ['mem_a', 'mem_b'], coreIds: ['mem_a'], omittedCount: 3, savedIds: [],
+      tokens: { workspace: 120, global: 80, fixed: 40 }, usedTokens: 210, injectedIds: ['mem_a', 'mem_b'], coreIds: ['mem_a'], titleOnlyIds: [], omittedCount: 3, savedIds: [],
     })
     expect(sessionViewSchema.parse(view)).toEqual(view)
     expect(view.frozenAt).toBe(T0)
@@ -753,7 +753,7 @@ describe('视图写入', () => {
     const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') } })
     const base = {
       sessionId: 's/1', frozenAt: T0, origin: 'start' as const, budget: 4000, overflowMode: 'relax' as const,
-      tokens: { workspace: 1, global: 2, fixed: 3 }, usedTokens: 3, injectedIds: ['mem_a'], coreIds: [], omittedCount: 0,
+      tokens: { workspace: 1, global: 2, fixed: 3 }, usedTokens: 3, injectedIds: ['mem_a'], coreIds: [], titleOnlyIds: [], omittedCount: 0,
     }
     await Promise.all([
       writer.requestSession(buildSessionView({ ...base, savedIds: [] })),
@@ -765,7 +765,7 @@ describe('视图写入', () => {
 
   const sessionBase = {
     sessionId: 's/1', frozenAt: T0, origin: 'start' as const, budget: 4000, overflowMode: 'relax' as const,
-    tokens: { workspace: 1, global: 2, fixed: 3 }, usedTokens: 3, injectedIds: [], coreIds: [], omittedCount: 0, savedIds: [],
+    tokens: { workspace: 1, global: 2, fixed: 3 }, usedTokens: 3, injectedIds: [], coreIds: [], titleOnlyIds: [], omittedCount: 0, savedIds: [],
   }
   const listViews = () => readdir(join(root, GUI_VIEW_DIR)).catch(() => [] as string[])
   const nextTicks = async () => { for (let i = 0; i < 3; i++) await new Promise<void>(resolve => setImmediate(resolve)) }
