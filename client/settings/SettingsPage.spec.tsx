@@ -1,6 +1,6 @@
 // 插件设置页：三组设置的渲染、「我加的类型」弹层必填校验、revision 冻结与冲突提示、非法值、体检关闭时置灰、状态卡。
 import { describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { GUI_VIEW_VERSION, type HealthView, type LibraryView, type MemoryCommandResult, type PendingView } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createTranslator } from '../i18n.tsx'
@@ -528,9 +528,25 @@ describe('状态卡「立即体检」', () => {
     expect(within(statusLine() as HTMLElement).getAllByRole('button').map(b => b.textContent)).toEqual(['查看分数 ›'])
   })
 
-  it('内容检查没做完、只查了一部分：说明附在后面', async () => {
-    await scan(scanned({ added: { pending: 1, advice: 0 }, notes: ['semantic-failed', 'semantic-truncated'] }))
-    expect(statusLine()).toHaveTextContent(/^体检完成：新增 1 条待处理 ›·查看分数 ›内容检查没有完成，这次只更新了规则检查。记忆较多，这次内容检查只看了一部分/)
+  it('内容检查没做完、分了批：说明附在后面', async () => {
+    await scan(scanned({ added: { pending: 1, advice: 0 }, notes: ['semantic-failed', 'semantic-batched'], semanticBatches: 2 }))
+    expect(statusLine()).toHaveTextContent(/^体检完成：新增 1 条待处理 ›·查看分数 ›内容检查没有完成，这次只更新了规则检查。记忆较多，分 2 批检查，不同批之间的冲突和重复可能查不出。$/)
+  })
+
+  it('宿主报了用量：结果行末尾写实际用量；没报就不写', async () => {
+    await scan(scanned({ usageTokens: 12345 }))
+    expect(statusLine()).toHaveTextContent(/^没有发现新问题·查看分数 ›·本次用了约 12,345 token$/)
+    cleanup()
+    await scan(scanned())
+    expect(statusLine()).not.toHaveTextContent(/token/)
+  })
+
+  it('按钮下常驻一行 token 消耗说明；体检关闭时不写', () => {
+    render()
+    expect(container.querySelector('.pm-scan-hint')).toHaveTextContent(/^会用当前对话的模型检查记忆内容，消耗少量 token。$/)
+    cleanup()
+    render({}, section({ governance: { enabled: false, health: { sensitivity: 'standard' }, globalPromoteTarget: 'plugin-global' } }))
+    expect(container.querySelector('.pm-scan-hint')).toBeNull()
   })
 
   it('命令回来说体检已关闭：只写体检已关闭', async () => {

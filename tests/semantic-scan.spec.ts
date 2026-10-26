@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { buildSemanticPrompt, parseSemanticFindings, runSemanticScan, SEMANTIC_SCAN_MAX_RECORDS, BASELINE_MAX_CHARS } from '../src/governance/semantic-scan.ts'
+import { buildSemanticPrompt, parseSemanticFindings, runSemanticScan, planSemanticBatches, reportedTokens, semanticMemoryLine, SEMANTIC_BATCH_TOKEN_BUDGET, BASELINE_MAX_CHARS } from '../src/governance/semantic-scan.ts'
+import { estimateTokens } from '../src/snapshot.ts'
+import type { MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
@@ -222,20 +224,86 @@ describe('runSemanticScan', () => {
     expect(out.findings).toEqual([])
   })
 
-  it('超过 SEMANTIC_SCAN_MAX_RECORDS 条时只分析前 200 条，报告 50 条未分析', async () => {
+  it('小库不分批：调用一次、批数 1，结果与模型输出一致（不再按 200 条截断）', async () => {
     const records = Array.from({ length: 250 }, (_, i) => record({ id: `mem_${i}` }))
-    let analyzedUser = ''
+    const users: string[] = []
     const llm = {
       complete: async ({ user }: { system: string; user: string }) => {
-        analyzedUser = user
-        return '{"findings":[]}'
+        users.push(user)
+        return '{"findings":[{"type":"unclear","memoryIds":["mem_249"],"summary":"s","suggestedAction":"a"}]}'
+      },
+    }
+    const out = await runSemanticScan(records, null, llm)
+    expect(users).toHaveLength(1)
+    expect(users[0]).toContain('共 250 条')
+    expect(out).toEqual({ failed: false, batches: 1, findings: [expect.objectContaining({ type: 'unclear', memoryIds: ['mem_249'] })] })
+  })
+
+  // 每条约 6,000 token（一万个汉字），六条装不进 3 万的一批
+  const bulky = () => Array.from({ length: 6 }, (_, i) => record({ id: `mem_${i}`, content: '记'.repeat(10_000) }))
+  const idsIn = (user: string) => [...user.matchAll(/id=(mem_\d+)/g)].map(m => m[1]!)
+
+  it('超预算时分批：每条都进了某一批，各批结果合并、去重', async () => {
+    const records = bulky()
+    const users: string[] = []
+    const llm = {
+      complete: async ({ user }: { system: string; user: string }) => {
+        users.push(user)
+        // 每批报一条本批的模糊，同一条写两遍
+        const f = { type: 'unclear', memoryIds: [idsIn(user)[0]], summary: 's', suggestedAction: 'a' }
+        return JSON.stringify({ findings: [f, f] })
       },
     }
     const out = await runSemanticScan(records, null, llm)
     expect(out.failed).toBe(false)
-    expect(out.truncated).toBe(50)
-    expect(analyzedUser).toContain(`共 ${SEMANTIC_SCAN_MAX_RECORDS} 条`)
-    expect(analyzedUser).not.toContain('mem_249')
+    expect(users.length).toBeGreaterThan(1)
+    expect(out.batches).toBe(users.length)
+    expect(users.flatMap(idsIn).sort()).toEqual(records.map(r => r.id).sort())
+    expect(out.findings.map(f => f.memoryIds[0])).toEqual(users.map(u => idsIn(u)[0]))
+  })
+
+  it('一批两次都失败：整层按失败处理，不交出别批的半份结果，也不再发后面的批', async () => {
+    let calls = 0
+    const llm = {
+      complete: async ({ user }: { system: string; user: string }) => {
+        calls++
+        // 第一批正常，第二批（第 2、3 次调用）都解析不了
+        if (calls > 1) return '不是 JSON'
+        return JSON.stringify({ findings: [{ type: 'unclear', memoryIds: [idsIn(user)[0]], summary: 's', suggestedAction: 'a' }] })
+      },
+    }
+    const out = await runSemanticScan(bulky(), null, llm)
+    expect(out.failed).toBe(true)
+    expect(out.findings).toEqual([])
+    expect(calls).toBe(3)
+  })
+
+  it('成对问题只认同一批里的 id：模型写进别批的 id 时那个 id 被丢掉，冲突不成立', async () => {
+    const records = bulky()
+    const llm = {
+      complete: async ({ user }: { system: string; user: string }) => {
+        const ids = idsIn(user)
+        const other = records.map(r => r.id).find(id => !ids.includes(id))!
+        return JSON.stringify({ findings: [{ type: 'conflict', memoryIds: [ids[0], other], summary: '跨批', suggestedAction: 'a' }] })
+      },
+    }
+    const out = await runSemanticScan(records, null, llm)
+    expect(out.failed).toBe(false)
+    expect(out.findings).toEqual([])
+  })
+
+  it('用量：每次调用（含重试）报的 usage 都交给 onUsage', async () => {
+    let n = 0
+    const llm = {
+      complete: async (_input: { system: string; user: string }, _signal?: AbortSignal, onUsage?: (tokens: number) => void) => {
+        n++
+        onUsage?.(n * 100)
+        return n === 1 ? '不是 JSON' : '{"findings":[]}'
+      },
+    }
+    const used: number[] = []
+    await runSemanticScan([record({ id: 'mem_a' })], null, llm, undefined, (t) => { used.push(t) })
+    expect(used).toEqual([100, 200])
   })
 
   it('首次调用抛异常、重试成功时正常返回', async () => {
@@ -265,5 +333,67 @@ describe('runSemanticScan', () => {
     await expect(runSemanticScan([record({ id: 'mem_a' })], null, llm, controller.signal))
       .rejects.toThrow(/abort/i)
     expect(calls).toBe(1) // 取消不触发重试
+  })
+})
+
+describe('planSemanticBatches', () => {
+  const cost = (rs: readonly MemoryRecord[]) => rs.reduce((n, r) => n + estimateTokens(semanticMemoryLine(r)), 0)
+  const sized = (id: string, type: string, chars: number) => record({ id, type, content: '记'.repeat(chars) })
+  const ids = (batches: MemoryRecord[][]) => batches.map(b => b.map(r => r.id))
+
+  it('预算约 3 万 token（snapshot.estimateTokens 估算），装得下就一批、顺序不变', () => {
+    expect(SEMANTIC_BATCH_TOKEN_BUDGET).toBe(30_000)
+    const records = [sized('a', 'knowledge', 10), sized('b', 'preference', 10), sized('c', 'knowledge', 10)]
+    expect(planSemanticBatches(records)).toEqual([records])
+    expect(planSemanticBatches([])).toEqual([[]])
+  })
+
+  it('装不下：每条恰好进一批，每批不超预算，同类型同批', () => {
+    const types = ['knowledge', 'preference', 'workflow']
+    const records = types.flatMap(type => Array.from({ length: 5 }, (_, i) => sized(`${type}_${i}`, type, 80)))
+    const budget = cost(records.slice(0, 5)) + 50 // 一类装得下，两类装不下
+    const batches = planSemanticBatches(records, budget)
+    expect(batches).toHaveLength(3)
+    expect(batches.flat().map(r => r.id).sort()).toEqual(records.map(r => r.id).sort())
+    for (const batch of batches) {
+      expect(cost(batch)).toBeLessThanOrEqual(budget)
+      expect(new Set(batch.map(r => r.type)).size).toBe(1)
+    }
+  })
+
+  it('小类型拼进还有空位的批', () => {
+    const big = Array.from({ length: 4 }, (_, i) => sized(`k${i}`, 'knowledge', 80))
+    const mid = [sized('p0', 'preference', 80)]
+    const tiny = [sized('w0', 'workflow', 1)]
+    const budget = cost([...big, ...mid]) - 1 // knowledge 与 preference 合起来差一点装不下
+    expect(ids(planSemanticBatches([...big, ...mid, ...tiny], budget))).toEqual([['k0', 'k1', 'k2', 'k3', 'w0'], ['p0']])
+  })
+
+  it('单个类型超预算再拆：按原顺序连续切，每段不超预算', () => {
+    const records = Array.from({ length: 10 }, (_, i) => sized(`k${i}`, 'knowledge', 80))
+    const budget = cost(records.slice(0, 3)) + 1
+    expect(ids(planSemanticBatches(records, budget))).toEqual([['k0', 'k1', 'k2'], ['k3', 'k4', 'k5'], ['k6', 'k7', 'k8'], ['k9']])
+  })
+
+  it('单条自己就超预算：单独一批，照样检查', () => {
+    const records = [sized('huge', 'knowledge', 2000), sized('s', 'knowledge', 10)]
+    expect(ids(planSemanticBatches(records, 200))).toEqual([['huge'], ['s']])
+  })
+})
+
+describe('reportedTokens', () => {
+  it('有 totalTokens 用它', () => {
+    expect(reportedTokens({ inputTokens: 10, outputTokens: 5, totalTokens: 40, cacheReadTokens: 25 })).toBe(40)
+  })
+
+  it('没有 totalTokens 时把互不重叠的几项相加（输入、缓存读写、输出）', () => {
+    expect(reportedTokens({ inputTokens: 10, outputTokens: 5, cacheReadTokens: 20, cacheWriteTokens: 1 })).toBe(36)
+    expect(reportedTokens({ inputTokens: 10, outputTokens: 5 })).toBe(15)
+  })
+
+  it('数不合法时不算', () => {
+    expect(reportedTokens({ inputTokens: Number.NaN, outputTokens: 5 })).toBeUndefined()
+    expect(reportedTokens({ inputTokens: -1, outputTokens: 5 })).toBeUndefined()
+    expect(reportedTokens({ inputTokens: 1, outputTokens: 5, totalTokens: -3 })).toBeUndefined()
   })
 })

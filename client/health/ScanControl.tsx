@@ -1,6 +1,7 @@
 /**
  * 页头「体检当前项目」：发 `/memory scan`（带页面当前项目），按钮原位变状态——进行中禁用、失败变「再试一次」；
- * 下面一行是结果区：进行中提示可以先做别的，完成、失败写体检结果行（与设置页状态卡共用 ScanResult），链接在页内切 tab。
+ * 按钮下常驻一行 token 消耗说明（体检关闭时不写）；再下面是结果区：进行中提示可以先做别的，完成、失败写体检结果行
+ * （与设置页状态卡共用 ScanResult），链接在页内切 tab。
  * 有待处理时用次按钮，不抢待处理的位置。体检关闭（健康视图 governanceEnabled = false）时按钮不可用，给「去设置里打开 ›」。
  */
 import type { ReactNode } from 'react'
@@ -53,6 +54,7 @@ export function ScanControl({ session, workspacePath, hasPending, nav, leading }
           {isRunning ? t('scan.running') : state.kind === 'failed' ? t('scan.retry') : t('scan.button')}
         </Button>
       </div>
+      {isOff ? null : <p className="pm-scan-hint">{t('scan.hint')}</p>}
       <p className="pm-scan-status" role="status">{status}</p>
     </div>
   )

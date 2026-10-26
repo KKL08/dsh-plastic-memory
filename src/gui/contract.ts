@@ -545,6 +545,10 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     }).optional(),
     /** scan：本次体检覆盖各层的健康分（与健康视图同值，有密钥的层为 null），按健康视图的层序；与 added 同时缺省。 */
     scores: z.array(z.object({ layer: layerRefSchema, score: z.number().nullable() })).optional(),
+    /** scan：内容检查分了批时的批数（分批的各层相加），与说明码 semantic-batched 同时出现；不分批时缺省。 */
+    semanticBatches: z.number().int().positive().optional(),
+    /** scan：宿主流 usage 块报的实际用量合计（所有批次、重试、跨项目重复检查）；宿主一次都没报时缺省，不拿估算顶替。 */
+    usageTokens: z.number().int().nonnegative().optional(),
     /** info：记忆根目录、视图目录与各视图文件的绝对路径（session 是发命令的这个会话的视图）、视图版本。 */
     info: z.object({
       memoryRoot: z.string(),

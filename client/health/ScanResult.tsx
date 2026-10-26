@@ -1,7 +1,8 @@
 /**
  * 体检的状态与结果行，记忆页页头「体检当前项目」和设置页状态卡「立即体检」共用。
  * 完成时写「体检完成：新增 N 条待处理 › · 新增 M 条建议 › · 查看分数 ›」（为 0 的段省略，都为 0 时「没有发现新问题 · 查看分数 ›」），
- * 体检的说明（内容检查没做完、只查了一部分、基线检查被跳过）附在后面；失败写原话并提示在对话里让 agent 体检。
+ * 宿主报了用量时这一行末尾写「本次用了约 N token」（实际用量，没报就不写）；
+ * 体检的说明（内容检查没做完、分了几批、基线检查被跳过）附在后面；失败写原话并提示在对话里让 agent 体检。
  * 链接只给出要去的 tab 和待处理组，由调用方决定怎么去（页头在页内切换，设置页经导航直达记忆页）；体检本身原地跑，不自动跳转。
  * 新增建议落在建议整理组；新增待处理都在同一组时落在那一组，分在两组时落在待处理顶部。
  */
@@ -18,7 +19,7 @@ type ScanNote = NonNullable<Done['notes']>[number]
 export type ScanState =
   | { kind: 'idle' }
   | { kind: 'running' }
-  | { kind: 'done'; notes: readonly ScanNote[]; added: Done['added'] }
+  | { kind: 'done'; notes: readonly ScanNote[]; added: Done['added']; semanticBatches?: number; usageTokens?: number }
   | { kind: 'failed'; code: ScanFailure['code']; detail: string | undefined }
 
 /** 发 `/memory scan` 并记下状态；组件卸载后回来的结果丢掉。 */
@@ -33,7 +34,11 @@ export function useScanCommand(session: BorrowedSession) {
     void gateway.execute(session.sessionId, { cmd: 'scan', ...(workspacePath !== undefined ? { workspacePath } : {}) }).then((result) => {
       if (!live.current) return
       setState(result.ok
-        ? { kind: 'done', notes: result.notes ?? [], added: result.added }
+        ? {
+            kind: 'done', notes: result.notes ?? [], added: result.added,
+            ...(result.semanticBatches !== undefined ? { semanticBatches: result.semanticBatches } : {}),
+            ...(result.usageTokens !== undefined ? { usageTokens: result.usageTokens } : {}),
+          }
         : { kind: 'failed', code: result.code, detail: result.detail })
     })
   }
@@ -78,8 +83,13 @@ export function ScanResult({ state, onOpen, off }: {
             {parts.map((part, i) => <span key={i}>{i > 0 ? <Sep /> : null}{part}</span>)}
           </>
         )}
+      {state.usageTokens !== undefined
+        ? <>{added === undefined ? null : <Sep />}{t('scan.usage', { n: formatNumber(state.usageTokens) })}</>
+        : null}
       {state.notes.includes('semantic-failed') ? <span className="pm-scan-note">{t('scan.note.semanticFailed')}</span> : null}
-      {state.notes.includes('semantic-truncated') ? <span className="pm-scan-note">{t('scan.note.semanticTruncated')}</span> : null}
+      {state.notes.includes('semantic-batched') && state.semanticBatches !== undefined
+        ? <span className="pm-scan-note">{t('scan.note.semanticBatched', { n: formatNumber(state.semanticBatches) })}</span>
+        : null}
       {state.notes.includes('baseline-session-scoped') ? <span className="pm-scan-note">{t('scan.note.baselineSessionScoped')}</span> : null}
     </>
   )

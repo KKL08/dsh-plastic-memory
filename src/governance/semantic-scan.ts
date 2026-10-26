@@ -1,13 +1,35 @@
 import type { MemoryRecord } from '../record-schema.ts'
 import { SEVERITY_BY_TYPE, type Finding } from './schema.ts'
 import { maskSecretSurface, maskSecrets } from '../secrets.ts'
+import { estimateTokens } from '../snapshot.ts'
 
 /** 语义层的 LLM 抽象：纯逻辑只依赖这个接口，真机接线在 index.ts。 */
 export interface SemanticLlm {
   /** 解析出的模型名（「让模型改」写在界面上）；宿主接线总会带上，测试桩可以不给。 */
   readonly model?: string
-  /** signal 触发时应尽快取消在途请求，并抛出 AbortError（宿主 exec.signal 契约）。 */
-  complete(input: { system: string; user: string }, signal?: AbortSignal): Promise<string>
+  /**
+   * signal 触发时应尽快取消在途请求，并抛出 AbortError（宿主 exec.signal 契约）。
+   * onUsage：宿主流里报了用量时，按这次调用的实际 token 数回调一次（出错、取消收尾的调用也算）；没报就不回调。
+   */
+  complete(input: { system: string; user: string }, signal?: AbortSignal, onUsage?: (tokens: number) => void): Promise<string>
+}
+
+/** 宿主流 usage 块的形状（宿主 TokenUsage 的子集）：各项互不重叠，缓存读写不算进 inputTokens。 */
+export interface ReportedUsage {
+  inputTokens: number
+  outputTokens: number
+  totalTokens?: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
+}
+
+/** 一次调用的实际用量：有 totalTokens 用它，否则输入、缓存读写、输出相加。数不合法时返回 undefined，不算。 */
+export function reportedTokens(usage: ReportedUsage): number | undefined {
+  const isCount = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n >= 0
+  const parts = [usage.inputTokens, usage.outputTokens, usage.cacheReadTokens ?? 0, usage.cacheWriteTokens ?? 0]
+  if (!parts.every(isCount)) return undefined
+  if (usage.totalTokens !== undefined) return isCount(usage.totalTokens) ? usage.totalTokens : undefined
+  return parts.reduce((a, b) => a + b, 0)
 }
 
 /** 取消判定：signal 已 abort，或捕获到的错误本身就是 AbortError。取消不降级、直接向上抛。 */
@@ -15,8 +37,8 @@ export function isAbort(err: unknown, signal?: AbortSignal): boolean {
   return signal?.aborted === true || (err instanceof Error && err.name === 'AbortError')
 }
 
-/** 单次语义扫描分析的记忆条数上限——超出会把整库内容塞进一条消息，撑爆上下文窗口。 */
-export const SEMANTIC_SCAN_MAX_RECORDS = 200
+/** 一次调用里记忆列表的 token 预算（snapshot.estimateTokens 估算）。整库塞进一条消息会撑爆上下文窗口，超了就分批。 */
+export const SEMANTIC_BATCH_TOKEN_BUDGET = 30_000
 
 /** 基线全文长度上限——大基线不设限会连同记忆列表一起撑爆上下文，导致语义层整体 failed。 */
 export const BASELINE_MAX_CHARS = 8000
@@ -67,12 +89,66 @@ export function buildSemanticPrompt(
   const baselineSection = baseline
     ? `## 权威配置基线（AGENTS.md/CLAUDE.md）\n${maskSecrets(renderBaselineMessages(baseline))}`
     : '## 权威配置基线\n（无权威配置基线，跳过垂直冲突检测）'
-  const memoryLines = records.map(r => maskSecretSurface(r)).map(r =>
-    `- id=${r.id} type=${r.type} scope=${r.scope}${r.workspacePath ? `(${r.workspacePath})` : ''}\n  content: ${r.content}\n  summary: ${r.summary}`)
   return {
     system: SYSTEM_PROMPT,
-    user: `${baselineSection}\n\n## 记忆列表（共 ${records.length} 条）\n${memoryLines.join('\n')}`,
+    user: `${baselineSection}\n\n## 记忆列表（共 ${records.length} 条）\n${records.map(semanticMemoryLine).join('\n')}`,
   }
+}
+
+/** 记忆列表里的一条（明确密钥已遮）。分批按它估算 token，与发给模型的文字同一口径。 */
+export function semanticMemoryLine(record: MemoryRecord): string {
+  const r = maskSecretSurface(record)
+  return `- id=${r.id} type=${r.type} scope=${r.scope}${r.workspacePath ? `(${r.workspacePath})` : ''}\n  content: ${r.content}\n  summary: ${r.summary}`
+}
+
+/**
+ * 按 token 预算把记忆分批：装得下就一批（原顺序）。装不下时按类型分组（组序按类型首次出现的位置），
+ * 同类型尽量同批——冲突、重复多发生在同类型之间；一组超预算再按原顺序连续切开，单条超预算的自成一批。
+ * 各段依次放进第一个还装得下的批，都装不下就开新批。每条恰好进一批。
+ */
+export function planSemanticBatches(records: MemoryRecord[], budget = SEMANTIC_BATCH_TOKEN_BUDGET): MemoryRecord[][] {
+  const costs = new Map(records.map(r => [r, estimateTokens(semanticMemoryLine(r))]))
+  const costOf = (rs: readonly MemoryRecord[]) => rs.reduce((n, r) => n + costs.get(r)!, 0)
+  if (costOf(records) <= budget) return [records]
+
+  const groups = new Map<string, MemoryRecord[]>()
+  for (const r of records) {
+    const group = groups.get(r.type)
+    if (group) group.push(r)
+    else groups.set(r.type, [r])
+  }
+  const pieces: MemoryRecord[][] = []
+  for (const group of groups.values()) {
+    if (costOf(group) <= budget) {
+      pieces.push(group)
+      continue
+    }
+    let piece: MemoryRecord[] = []
+    let used = 0
+    for (const r of group) {
+      if (piece.length > 0 && used + costs.get(r)! > budget) {
+        pieces.push(piece)
+        piece = []
+        used = 0
+      }
+      piece.push(r)
+      used += costs.get(r)!
+    }
+    pieces.push(piece)
+  }
+
+  const batches: Array<{ records: MemoryRecord[]; used: number }> = []
+  for (const piece of pieces) {
+    const cost = costOf(piece)
+    const batch = batches.find(b => b.used + cost <= budget)
+    if (batch) {
+      batch.records.push(...piece)
+      batch.used += cost
+    } else {
+      batches.push({ records: [...piece], used: cost })
+    }
+  }
+  return batches.map(b => b.records)
 }
 
 /** 模型写的说明可能引用记忆里的密钥，会进待决账本、体检缓存与工具输出：两级都遮。 */
@@ -127,45 +203,66 @@ export function parseSemanticFindings(raw: string, knownIds: Set<string>): Findi
   return out
 }
 
-/** 语义层扫描：一次调用批量分析；解析失败带提示重试一次，仍失败则 failed:true。 */
+/**
+ * 语义层扫描：按 token 预算分批（planSemanticBatches），每批一次调用，解析失败带提示重试一次。
+ * 单条就能判的问题每条都覆盖；成对的（冲突、重复）只在同一批里检出。任一批两次都失败，整层按失败返回
+ * （failed:true、不交出别批的结果，也不再发后面的批）。各批结果合并去重。batches 是批数，不分批时为 1。
+ */
 export async function runSemanticScan(
   records: MemoryRecord[],
   baseline: readonly string[] | null,
   llm: SemanticLlm,
   signal?: AbortSignal,
-): Promise<{ findings: Finding[]; failed: boolean; truncated?: number }> {
-  // 全量记忆一次性塞进一条消息没有上限，库大了会撑爆上下文窗口——只分析前
-  // SEMANTIC_SCAN_MAX_RECORDS 条，未分析的数量报给调用方，让用户知道结果不全。
-  const truncated = Math.max(0, records.length - SEMANTIC_SCAN_MAX_RECORDS)
-  const analyzed = truncated > 0 ? records.slice(0, SEMANTIC_SCAN_MAX_RECORDS) : records
-  const truncatedField = truncated > 0 ? { truncated } : {}
+  onUsage?: (tokens: number) => void,
+): Promise<{ findings: Finding[]; failed: boolean; batches: number }> {
+  const batches = planSemanticBatches(records)
+  const findings: Finding[] = []
+  const seen = new Set<string>()
+  for (const batch of batches) {
+    const found = await scanBatch(batch, baseline, llm, signal, onUsage)
+    if (found === null) return { findings: [], failed: true, batches: batches.length }
+    for (const f of found) {
+      const key = `${f.type}|${[...f.memoryIds].sort().join('+')}|${f.baselineRef ?? ''}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      findings.push(f)
+    }
+  }
+  return { findings, failed: false, batches: batches.length }
+}
 
-  const knownIds = new Set(analyzed.map(r => r.id))
-  const prompt = buildSemanticPrompt(analyzed, baseline)
+/** 一批的调用：解析失败带提示重试一次，两次都不行返回 null。 */
+async function scanBatch(
+  records: MemoryRecord[],
+  baseline: readonly string[] | null,
+  llm: SemanticLlm,
+  signal: AbortSignal | undefined,
+  onUsage: ((tokens: number) => void) | undefined,
+): Promise<Finding[] | null> {
+  const knownIds = new Set(records.map(r => r.id))
+  const prompt = buildSemanticPrompt(records, baseline)
 
   // LLM 调用本身可能抛（限流/超时/上下文超限/网络），必须与"输出无法解析"同等降级——
   // 否则 layers=full 时已经算好的规则层结果会被一起丢掉。
   let firstRaw: string | null = null
   try {
-    firstRaw = await llm.complete(prompt, signal)
+    firstRaw = await llm.complete(prompt, signal, onUsage)
   } catch (err) {
     // 用户取消不降级也不重试：立即向上抛，让工具结果标记为 isError（宿主 exec.signal 契约）。
     if (isAbort(err, signal)) throw err
     // 普通错误落到下面的重试
   }
   const first = firstRaw === null ? null : parseSemanticFindings(firstRaw, knownIds)
-  if (first !== null) return { findings: first, failed: false, ...truncatedField }
+  if (first !== null) return first
 
-  // 同上：重试调用本身也可能抛，与"重试输出仍无法解析"同等降级为 failed。
+  // 同上：重试调用本身也可能抛，与"重试输出仍无法解析"同等降级为失败。
   let retryRaw: string | null = null
   try {
-    retryRaw = await llm.complete({ system: prompt.system, user: `${prompt.user}\n\n上次输出无法解析，请只输出 JSON。` }, signal)
+    retryRaw = await llm.complete({ system: prompt.system, user: `${prompt.user}\n\n上次输出无法解析，请只输出 JSON。` }, signal, onUsage)
   } catch (err) {
-    // 同首次：取消直接抛，不吞成 failed
+    // 同首次：取消直接抛，不吞成失败
     if (isAbort(err, signal)) throw err
-    // 两次都失败，落到下面返回 failed:true
+    // 两次都失败，落到下面返回 null
   }
-  const retry = retryRaw === null ? null : parseSemanticFindings(retryRaw, knownIds)
-  if (retry !== null) return { findings: retry, failed: false, ...truncatedField }
-  return { findings: [], failed: true, ...truncatedField }
+  return retryRaw === null ? null : parseSemanticFindings(retryRaw, knownIds)
 }

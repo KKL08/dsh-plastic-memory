@@ -46,6 +46,14 @@ describe('体检当前项目', () => {
     expect(screen.getByRole('button', { name: '体检当前项目' })).toHaveClass('pm-btn--primary')
   })
 
+  it('按钮下常驻一行 token 消耗说明；体检关闭时不写', () => {
+    const { unmount } = renderInShell(<MemoryPage nav={createNavStore()} />, createFakeGateway({ currentWorkspace: '/w/app', views: { pending: noPending, health: health() } }))
+    expect(screen.getByText('会用当前对话的模型检查记忆内容，消耗少量 token。')).toHaveClass('pm-scan-hint')
+    unmount()
+    renderPage({ views: { pending: noPending, health: health(false) } })
+    expect(screen.queryByText('会用当前对话的模型检查记忆内容，消耗少量 token。')).toBeNull()
+  })
+
   it('有待处理时用次按钮，不抢待处理的位置', () => {
     renderPage({ views: { pending: somePending, health: health() } })
     expect(screen.getByRole('button', { name: '体检当前项目' })).toHaveClass('pm-btn--secondary')
@@ -148,9 +156,37 @@ describe('体检当前项目', () => {
       expect(statusLine()).toHaveTextContent(/^体检完成：新增 1 条待处理 ›·查看分数 ›内容检查没有完成，这次只更新了规则检查。$/)
     })
 
-    it('内容检查只查了一部分：如实写出来', async () => {
-      const { statusLine } = await scan(scanned({ notes: ['semantic-truncated'] }))
-      expect(statusLine()).toHaveTextContent(/^没有发现新问题·查看分数 ›记忆较多，这次内容检查只看了一部分/)
+    it('分了批：写分几批、跨批的冲突和重复可能查不出', async () => {
+      const { statusLine } = await scan(scanned({ notes: ['semantic-batched'], semanticBatches: 3 }))
+      expect(statusLine()).toHaveTextContent(/^没有发现新问题·查看分数 ›记忆较多，分 3 批检查，不同批之间的冲突和重复可能查不出。$/)
+    })
+
+    it('宿主报了用量：结果行末尾写实际用量，说明照样附在后面', async () => {
+      const { statusLine } = await scan(scanned({ added: { pending: 1, advice: 0 }, notes: ['semantic-batched'], semanticBatches: 2, usageTokens: 6800 }))
+      expect(statusLine()).toHaveTextContent(/^体检完成：新增 1 条待处理 ›·查看分数 ›·本次用了约 6,800 token记忆较多，分 2 批检查/)
+    })
+
+    it('宿主没报用量：结果行不写用量', async () => {
+      const { statusLine } = await scan(scanned())
+      expect(statusLine()).not.toHaveTextContent(/token/)
+    })
+
+    it('没带新增条数也写用量', async () => {
+      const { statusLine } = await scan({ ok: true, cmd: 'scan', notes: [], usageTokens: 1234 })
+      expect(statusLine()).toHaveTextContent(/^体检完成。本次用了约 1,234 token$/)
+    })
+
+    it('英文：分批说明与用量', async () => {
+      const gateway = createFakeGateway({
+        currentWorkspace: '/w/app', views: { pending: noPending, health: health() },
+        respond: () => scanned({ notes: ['semantic-batched'], semanticBatches: 3, usageTokens: 6800 }),
+      })
+      const { container } = render(<PanelShell gateway={gateway} t={createTranslator(en)}><MemoryPage nav={createNavStore()} /></PanelShell>)
+      expect(container.querySelector('.pm-scan-hint')).toHaveTextContent('Uses the model of the current chat to check memory content, which takes a few tokens.')
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Check this project' })) })
+      expect(container.querySelector('.pm-scan-status')!.textContent).toBe(
+        'No new issues found·View scores ›·Used about 6,800 tokens this time'
+        + 'Many memories, so the content was checked in 3 batches; conflicts and duplicates across batches may be missed.')
     })
 
     it('英文：数字在前，建议按单复数', async () => {

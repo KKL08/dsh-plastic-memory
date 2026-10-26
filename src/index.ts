@@ -37,7 +37,7 @@ import { AdviceIgnoreStore } from './governance/advice-ignores.ts'
 import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from './governance/schema.ts'
 import type { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { baselineProjectionDefinition, readBaseline } from './governance/baseline.ts'
-import type { SemanticLlm } from './governance/semantic-scan.ts'
+import { reportedTokens, type SemanticLlm } from './governance/semantic-scan.ts'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { createMemoryCommand, type MemoryCommandDefinition } from './gui/commands.ts'
 import { ViewWriter, collectGlobalViews } from './gui/view-writer.ts'
@@ -262,10 +262,13 @@ export async function apply(ctx: Context, config: Config) {
     if (!llm?.stream) return null
     return {
       model,
-      async complete({ system, user }, signal) {
+      async complete({ system, user }, signal, onUsage) {
         // 起步前先看取消：已取消就不发请求，直接抛（signal.reason 通常是 AbortError）。
         signal?.throwIfAborted()
         let out = ''
+        // 宿主在 finish 前发 usage 块（StreamChunk 的 'usage'，各项互不重叠），取最后一个；
+        // 出错、取消收尾的调用也已计费，finally 里照样报
+        let usage: Extract<StreamChunk, { type: 'usage' }> | undefined
         // stream 建立或迭代过程中抛出的错误按 rejected promise 向上传播，
         // 由 runSemanticScan 的调用点捕获降级，这里不吞掉。
         // signal 透传给宿主 GenerateOptions，让在途请求随取消中断。
@@ -276,21 +279,27 @@ export async function apply(ctx: Context, config: Config) {
           signal,
           messages: [{ role: 'user', content: [{ type: 'text', text: user }] }],
         }
-        for await (const chunk of llm.stream!(request)) {
-          if (chunk.type === 'text-delta') out += chunk.text
-          else if (chunk.type === 'finish') {
-            // error/aborted 带 failure，照 compaction-basic summarizer 的 finishError 一律拒绝；
-            // stop、max-tokens 及未来新增的 kind 不算错误，保留已收文本交给解析判定
-            // （与 summarizer 不同，截断的 JSON 解析不过会自然走重试）。
-            const reason = chunk.reason
-            if (reason.kind === 'error') {
-              throw Object.assign(new Error(reason.failure.message), { code: reason.failure.code })
-            }
-            if (reason.kind === 'aborted') {
-              // 宿主报 aborted 时 signal 未必已触发：仍以 AbortError 拒绝，不当成功，也不进重试。
-              throw signal?.reason ?? new DOMException(reason.failure.message, 'AbortError')
+        try {
+          for await (const chunk of llm.stream!(request)) {
+            if (chunk.type === 'text-delta') out += chunk.text
+            else if (chunk.type === 'usage') usage = chunk
+            else if (chunk.type === 'finish') {
+              // error/aborted 带 failure，照 compaction-basic summarizer 的 finishError 一律拒绝；
+              // stop、max-tokens 及未来新增的 kind 不算错误，保留已收文本交给解析判定
+              // （与 summarizer 不同，截断的 JSON 解析不过会自然走重试）。
+              const reason = chunk.reason
+              if (reason.kind === 'error') {
+                throw Object.assign(new Error(reason.failure.message), { code: reason.failure.code })
+              }
+              if (reason.kind === 'aborted') {
+                // 宿主报 aborted 时 signal 未必已触发：仍以 AbortError 拒绝，不当成功，也不进重试。
+                throw signal?.reason ?? new DOMException(reason.failure.message, 'AbortError')
+              }
             }
           }
+        } finally {
+          const tokens = usage === undefined ? undefined : reportedTokens(usage.usage)
+          if (tokens !== undefined) onUsage?.(tokens)
         }
         // 宿主可能在取消时正常结束迭代而不抛——循环收尾再判一次，取消一律抛 AbortError。
         if (signal?.aborted) throw signal.reason ?? new DOMException('memory_scan cancelled', 'AbortError')

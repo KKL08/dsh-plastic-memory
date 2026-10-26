@@ -295,7 +295,7 @@ export const healthCss = `
 .pm-health-status { margin: 24px 0; text-align: center; font-size: 12px; color: var(--pm-text-2); }
 .pm-scan { margin-left: auto; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .pm-scan-row { display: flex; align-items: center; gap: 8px; }
-.pm-scan-status { margin: 0; max-width: 420px; text-align: right; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
+.pm-scan-status, .pm-scan-hint { margin: 0; max-width: 420px; text-align: right; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-scan-status:empty { display: none; }
 .pm-scan-note { display: block; }
 `

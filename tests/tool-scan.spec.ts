@@ -8,7 +8,7 @@ import type { RecallStats } from '../src/storage/schema.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { executeScan, cacheKey, renderScanResult, type ScanToolDeps, type ScanArgs, type SingleScanResult } from '../src/tools/scan.ts'
 import { GLOBAL_CACHE_KEY } from '../src/governance/layer-health.ts'
-import { SEMANTIC_SCAN_MAX_RECORDS, type SemanticLlm } from '../src/governance/semantic-scan.ts'
+import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
@@ -218,12 +218,48 @@ describe('executeScan 单层模式', () => {
     expect(Object.keys((await deps2.decisions.list())[0])).not.toContain('baselineRef')
   })
 
-  it('记忆数超过语义层上限：note 带 semantic-truncated，语义层仍完成', async () => {
-    const deps = makeDeps({ getLlm: (_exec: unknown) => ({ complete: async () => JSON.stringify({ findings: [] }) }) })
-    for (let i = 0; i < SEMANTIC_SCAN_MAX_RECORDS + 1; i++) await deps.store.put(record({ id: `mem_${i}` }))
+  it('记忆超出一批的预算：分批检查，note 带 semantic-batched 与批数，每条都查过，语义层照常完成', async () => {
+    const users: string[] = []
+    const deps = makeDeps({ getLlm: (_exec: unknown) => ({ complete: async ({ user }) => { users.push(user); return JSON.stringify({ findings: [] }) } }) })
+    // 每条约 6,000 token，六条装不进一批
+    for (let i = 0; i < 6; i++) await deps.store.put(record({ id: `mem_${i}`, content: '记'.repeat(10_000) }))
     const r = await scanSingle({ layers: 'semantic' }, deps)
-    expect(r.notes.map(n => n.code)).toContain('semantic-truncated')
+    expect(users.length).toBeGreaterThan(1)
+    expect(r.semanticBatches).toBe(users.length)
+    expect(r.notes.find(n => n.code === 'semantic-batched')?.text).toContain(`分 ${users.length} 批`)
+    expect(users.flatMap(u => [...u.matchAll(/id=(mem_\d+)/g)].map(m => m[1])).sort()).toEqual(['mem_0', 'mem_1', 'mem_2', 'mem_3', 'mem_4', 'mem_5'])
     expect(r.semanticCachedAt).toBe(9000)
+  })
+
+  it('小库不分批：调用一次，没有分批说明、不带批数', async () => {
+    let calls = 0
+    const deps = makeDeps({ getLlm: (_exec: unknown) => ({ complete: async () => { calls++; return JSON.stringify({ findings: [] }) } }) })
+    for (let i = 0; i < 250; i++) await deps.store.put(record({ id: `mem_${i}` }))
+    const r = await scanSingle({ layers: 'semantic' }, deps)
+    expect(calls).toBe(1)
+    expect(r.notes.map(n => n.code)).not.toContain('semantic-batched')
+    expect(r).not.toHaveProperty('semanticBatches')
+  })
+
+  it('用量：宿主报的 usage 合计进结果（含重试）；宿主没报时不带用量', async () => {
+    let n = 0
+    const metered: SemanticLlm = {
+      complete: async (_input, _signal, onUsage) => { n++; onUsage?.(1000 + n); return n === 1 ? '不是 JSON' : JSON.stringify({ findings: [] }) },
+    }
+    const deps = makeDeps({ getLlm: (_exec: unknown) => metered })
+    await deps.store.put(record({ id: 'mem_a' }))
+    expect((await scanSingle({}, deps)).usageTokens).toBe(1001 + 1002)
+    const silent = makeDeps({ getLlm: (_exec: unknown) => ({ complete: async () => JSON.stringify({ findings: [] }) }) })
+    await silent.store.put(record({ id: 'mem_a' }))
+    expect(await scanSingle({}, silent)).not.toHaveProperty('usageTokens')
+  })
+
+  it('给模型看的文字不写用量', async () => {
+    const deps = makeDeps({ getLlm: (_exec: unknown) => ({ complete: async (_input, _signal, onUsage) => { onUsage?.(6800); return JSON.stringify({ findings: [] }) } }) })
+    await deps.store.put(record({ id: 'mem_a' }))
+    const r = await scanSingle({}, deps)
+    expect(r.usageTokens).toBe(6800)
+    expect(renderScanResult(r)).not.toMatch(/6800|6,800|token/)
   })
 
   it('cacheKey：workspace 路径分桶，缺省落 global 层桶', () => {
@@ -278,6 +314,32 @@ describe('executeScan 全库体检', () => {
     if (r.kind !== 'checkup') throw new Error(r.kind)
     expect(r.notes.map(n => n.code)).toContain('cross-ws-failed')
     expect(r.duplicates.via).toBe('entity')
+  })
+
+  it('用量：各层语义检查与跨项目重复检查的 usage 合计；分批的层批数相加', async () => {
+    const calls: string[] = []
+    const metered: SemanticLlm = {
+      complete: async ({ system }, _signal, onUsage) => {
+        const isCross = system.includes('global 缺位')
+        calls.push(isCross ? 'cross' : 'semantic')
+        onUsage?.(isCross ? 500 : 100)
+        return isCross ? JSON.stringify({ duplicates: [] }) : JSON.stringify({ findings: [] })
+      },
+    }
+    const deps = makeDeps({ getLlm: (_exec: unknown) => metered })
+    await seedTwoWs(deps)
+    // /proj-b 记忆多到要分批
+    for (let i = 0; i < 6; i++) await deps.store.put(record({ id: `mem_big${i}`, scope: 'workspace', workspacePath: '/proj-b', content: '记'.repeat(10_000) }))
+    const r = await executeScan({ scope: 'all' }, deps, fakeExec())
+    if (r.kind !== 'checkup') throw new Error(r.kind)
+    const semanticCalls = calls.filter(c => c === 'semantic').length
+    expect(calls.filter(c => c === 'cross')).toHaveLength(1)
+    expect(r.usageTokens).toBe(semanticCalls * 100 + 500)
+    // /proj-a、global 各一批，/proj-b 分了批
+    expect(r.semanticBatches).toBe(semanticCalls - 2)
+    const batched = r.notes.filter(n => n.code === 'semantic-batched')
+    expect(batched).toHaveLength(1)
+    expect(batched[0]!.text).toContain('/proj-b')
   })
 
   it('scope=all 自动枚举库里的全部 workspace', async () => {

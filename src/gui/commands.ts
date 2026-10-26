@@ -618,9 +618,13 @@ async function dispatch(
       // 项目体检读的是本项目的可见集合（全局 + 本项目），全库体检是全部层
       const covered = command.workspacePath === undefined ? 'all' : [{ kind: 'global' as const }, { kind: 'workspace' as const, workspacePath: command.workspacePath }]
       const notes = r.notes.map(n => n.code)
+      const extras = {
+        ...(r.semanticBatches !== undefined ? { semanticBatches: r.semanticBatches } : {}),
+        ...(r.usageTokens !== undefined ? { usageTokens: r.usageTokens } : {}),
+      }
       return before === undefined || after === undefined
-        ? { ok: true, cmd, notes }
-        : { ok: true, cmd, notes, ...scanOutcome(before, after, covered) }
+        ? { ok: true, cmd, notes, ...extras }
+        : { ok: true, cmd, notes, ...extras, ...scanOutcome(before, after, covered) }
     }
 
     case 'refresh-views':

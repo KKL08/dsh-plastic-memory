@@ -1526,6 +1526,28 @@ describe('scan', () => {
     expect(body.notes).toContain('baseline-session-scoped')
   })
 
+  it('分了批：带回 semantic-batched 与批数；用量是宿主报的合计，每次体检各算各的', async () => {
+    let calls = 0
+    const metered: SemanticLlm = { complete: async (_input, _signal, onUsage) => { calls++; onUsage?.(1000); return '{"findings":[]}' } }
+    const e = env({ llm: metered })
+    for (let i = 0; i < 6; i++) await e.store.create(record({ id: `mem_big${i}`, name: `大${i}`, content: '记'.repeat(10_000), scope: 'workspace', workspacePath: SESSION_WS }))
+    const body = ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    expect(body.notes).toContain('semantic-batched')
+    expect(body.semanticBatches).toBe(calls)
+    expect(body.usageTokens).toBe(calls * 1000)
+    const again = ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    expect(again.usageTokens).toBe(body.usageTokens)
+  })
+
+  it('宿主没报用量、没有分批：结果不带用量与批数', async () => {
+    const e = env({ llm: { complete: async () => '{"findings":[]}' } })
+    await seedPair(e, SESSION_WS)
+    const body = ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    expect(body).not.toHaveProperty('usageTokens')
+    expect(body).not.toHaveProperty('semanticBatches')
+    expect(body.notes).not.toContain('semantic-batched')
+  })
+
   describe('结果：新增条数与分数', () => {
     /** 模型这次要报的发现；测试里随时换。 */
     const answering = (findings: () => object[]): SemanticLlm => ({ complete: async () => JSON.stringify({ findings: findings() }) })

@@ -964,6 +964,46 @@ describe('语义扫描请求形状', () => {
     expect(base.llmRequests).toHaveLength(1)
     expect(await sidecarAt(memoryRoot).scanCache.get(cacheKey(await realpath(cwd)))).toBeUndefined()
   })
+
+  it('用量取每条流最后一个 usage 块，出错收尾的那次也算；一次都没报时结果不带用量', async () => {
+    type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
+    const defs = new Map<string, ToolDef>()
+    const base = mockCtx()
+    const ctx = {
+      ...base,
+      tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
+      logger: { info() {}, warn() {}, error() {} },
+    }
+    base.llmScript.push(
+      // 首次：报了用量后断流（error），进重试
+      [
+        { type: 'text-delta', index: 0, text: '{"findings":[]}' },
+        { type: 'usage', usage: { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 3000 } },
+        { type: 'finish', reason: { kind: 'error', failure: { code: 'STREAM_CLOSED', message: 'closed' } } },
+      ],
+      // 重试：两个 usage 块，以最后一个为准
+      [
+        { type: 'text-delta', index: 0, text: '{"findings":[]}' },
+        { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } },
+        { type: 'usage', usage: { inputTokens: 1000, outputTokens: 300, totalTokens: 2600 } },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ],
+    )
+    const memoryRoot = await makeTmpRoot()
+    await apply(ctx as never, new Config({ memoryRoot } as never))
+    const cwd = await makeTmpRoot()
+    const session = { header: { id: 'sess-1', cwd }, seq: 0, requestHeader: () => undefined }
+    const exec = fakeExec({
+      agent: { session, options: { provider: 'deepseek', model: 'deepseek-chat' } } as unknown as ToolRunContext['agent'],
+    })
+    const metered = await defs.get('memory_scan')!.execute({ layers: 'semantic' }, exec) as { usageTokens?: number }
+    expect(base.llmRequests).toHaveLength(2)
+    expect(metered.usageTokens).toBe(4200 + 2600)
+
+    // 脚本用完回默认流：没有 usage 块
+    const silent = await defs.get('memory_scan')!.execute({ layers: 'semantic' }, exec)
+    expect(silent).not.toHaveProperty('usageTokens')
+  })
 })
 
 /**

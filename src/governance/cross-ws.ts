@@ -97,11 +97,12 @@ export async function runCrossWsScan(
   globalRecords: readonly MemoryRecord[],
   llm: SemanticLlm,
   signal?: AbortSignal,
+  onUsage?: (tokens: number) => void,
 ): Promise<{ items: CrossWsDuplicate[]; failed: boolean }> {
   const prompt = buildCrossWsPrompt(byWorkspace, globalRecords)
   let raw: string | null = null
   try {
-    raw = await llm.complete(prompt, signal)
+    raw = await llm.complete(prompt, signal, onUsage)
   } catch (err) {
     // 用户取消不降级到实体保底：立即向上抛（宿主 exec.signal 契约）。
     if (isAbort(err, signal)) throw err

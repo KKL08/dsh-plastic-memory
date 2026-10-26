@@ -34,7 +34,7 @@ export type WarningCode =
 export type ScanNoteCode =
   | 'semantic-unavailable'    // layers=full 但拿不到 LLM，只返回规则层
   | 'no-layer-executed'       // layers=semantic 且拿不到 LLM，什么都没跑
-  | 'semantic-truncated'      // 记忆过多，语义层只分析了前 N 条
+  | 'semantic-batched'        // 记忆超出一次调用的 token 预算，语义层分批检查，跨批的成对问题可能漏
   | 'semantic-failed'         // LLM 抛异常或两次输出无法解析，未更新语义缓存
   | 'baseline-missing'        // 未检测到 AGENTS.md 基线，垂直冲突检测未执行
   | 'baseline-session-scoped' // 基线随当前会话，其他 workspace 的垂直冲突检测已跳过
