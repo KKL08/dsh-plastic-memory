@@ -18,7 +18,7 @@ describe('buildSemanticPrompt', () => {
   it('表述不清判据：只有一句结论、看不出在什么情况下定的也算，短本身不算', () => {
     const { system } = buildSemanticPrompt([record({ id: 'mem_a' })], null)
     expect(system).toContain('unclear 模糊：新会话没有额外上下文时无法据此行动；或者只有一句结论，看不出是在什么情况下定的，因此判断不了它管到哪里。')
-    expect(system).toContain('短本身不算问题，看得出管到哪里的短记忆不报。')
+    expect(system).toContain('短本身不算问题；看得出管到哪里、也能照着做的短记忆不报。')
   })
 
   it('基线里以散文提到私钥 BEGIN 头：遮住这一行的头，后面的规则仍在', () => {
