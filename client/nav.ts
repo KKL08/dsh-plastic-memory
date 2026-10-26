@@ -20,7 +20,8 @@ export function sameScope(a: GuiLayerRef, b: GuiLayerRef): boolean {
   return a.kind === b.kind && (a.kind === 'global' || (b.kind === 'workspace' && a.workspacePath === b.workspacePath))
 }
 
-export const MEMORY_TABS = ['pending', 'library', 'health', 'deleted'] as const
+/** 显示顺序；标识本身不随显示名变（入口直达按标识写目标）。 */
+export const MEMORY_TABS = ['pending', 'health', 'library', 'deleted'] as const
 export type MemoryTab = (typeof MEMORY_TABS)[number]
 
 export interface NavTarget {

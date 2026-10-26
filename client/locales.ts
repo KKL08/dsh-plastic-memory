@@ -27,7 +27,7 @@ export const zh = {
 
   'tabs.label': '记忆视图',
   'tab.pending': '待处理',
-  'tab.library': '全部记忆',
+  'tab.library': '记忆查看',
   'tab.health': '健康',
   'tab.deleted': '最近删除',
 
@@ -108,7 +108,7 @@ export const en: Record<LocaleKey, string> = {
 
   'tabs.label': 'Memory views',
   'tab.pending': 'Pending',
-  'tab.library': 'All memories',
+  'tab.library': 'Browse',
   'tab.health': 'Health',
   'tab.deleted': 'Recently deleted',
 

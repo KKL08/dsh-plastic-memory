@@ -1,5 +1,5 @@
 /**
- * 「全部记忆」「最近删除」共用的几件小东西：视图没就绪时的一行说明、带参数打开时的目标行高亮、
+ * 「记忆查看」「最近删除」共用的几件小东西：视图没就绪时的一行说明、带参数打开时的目标行高亮、
  * 行尾动作的进行中 / 结果提示与跨项目确认、类型显示名。
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'

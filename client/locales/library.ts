@@ -1,4 +1,4 @@
-/** 「全部记忆」「最近删除」两个 tab 的文案，由 locales.ts 合并进总字典。 */
+/** 「记忆查看」「最近删除」两个 tab 的文案，由 locales.ts 合并进总字典。 */
 
 export const libraryZh = {
   'library.storage.count': '{n} 条记忆，每条一个文件',
