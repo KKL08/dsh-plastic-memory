@@ -91,11 +91,14 @@ All notable changes to this project are documented here. The format follows
   Chinese, identifiers, partial words, plain names, ids) runs with the tests
   and fails when top-1 or top-3 accuracy drops below a fixed floor, with and
   without the Chinese segmenter.
+  It also holds bilingual queries and queries with no answer in the corpus;
+  the tests fail when a query with no answer is not flagged as a weak match
+  or when more than two queries with a correct top hit are.
 - The checkup buttons on the memory page and the settings status card carry a
   line saying the checkup uses the current chat's model and that more
-  memories take more tokens. When a checkup finishes, its result line ends with the tokens it
-  actually used, summed from what the host reports for every model call;
-  nothing is shown when the host reports no usage.
+  memories take more tokens. When a checkup finishes, its result line ends
+  with the tokens it actually used, summed from what the host reports for
+  every model call; nothing is shown when the host reports no usage.
 
 ### Changed
 - Memories that exceed `snapshotTokenBudget` are no longer cut from the
@@ -175,17 +178,23 @@ All notable changes to this project are documented here. The format follows
   word (`scope` in `readScope`), and matches in the name, summary and tags
   weigh more than matches in the content; a query that is exactly a memory id
   returns that memory first. The result opens with a note when no returned
-  memory contains every word (`or-fallback`), or when none contains any of
-  them and only a literal match on the query text is left
-  (`substring-fallback`).
+  memory contains every word (`or-fallback`). It flags a weak match only
+  when the top hit also misses a whole keyword or covers less than 40 % of
+  the query (`low-coverage`), or when nothing but a literal match on the
+  query text is left (`substring-fallback`); a weak match suggests searching
+  again and lists how many memories each keyword matched. A term written in
+  both Chinese and English counts as one keyword, and long questions are not
+  flagged for missing filler words, so a correct top hit does not send the
+  model on an extra search.
 - The `memory_search` tool description now says what the tool does: it ranks
   by relevance, accepts Chinese and English queries and returns file paths. It
   also tells the model how to query well (two to four content words, both the
-  Chinese and English form of a term), and when a result opens with a
-  fallback note the note now suggests searching again with synonyms or fewer
-  words. `memory_save` asks for synonyms, bilingual aliases and abbreviations
-  in tags, limited to words the name, summary and content don't already
-  contain, so later searches phrased differently still find the memory.
+  Chinese and English form of a term), and when a result is flagged as a
+  weak match the note suggests searching again with synonyms or fewer words,
+  starting with the keywords no memory contains. `memory_save` asks for
+  synonyms, bilingual aliases and abbreviations in tags, limited to words the
+  name, summary and content don't already contain, so later searches phrased
+  differently still find the memory.
 - `memory_save` now asks the model to note, next to the rule itself, the
   reason the user gave or the situation it came up in, so a later session can
   tell where the rule applies, and to leave out details that go stale

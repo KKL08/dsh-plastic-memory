@@ -54,6 +54,8 @@ export interface RankedRecord {
   anchorHits: number
   /** all / partial 档是 BM25F 分数（只以子串命中的 token 不贡献词频）；substring 档是旧词项的命中词数。只在同档内可比。 */
   score: number
+  /** 各查询 token 是否命中（下标同 RankInput.tokens，命中口径同档位）；substring 档全为 false。判「命中弱」与逐词命中条数用。 */
+  tokenHits: boolean[]
 }
 
 export interface RankInput {
@@ -80,7 +82,9 @@ interface DocStats {
   tf: number[][]
   /** 各字段长度（UTF-16 单元数） */
   len: number[]
-  /** 命中的查询 token 数：任一字段分词含该 token，或任一字段小写原文以子串含它，即计 1 */
+  /** 各查询 token 是否命中：任一字段分词含该 token，或任一字段小写原文以子串含它 */
+  hit: boolean[]
+  /** 命中的查询 token 数 */
   hitCount: number
 }
 
@@ -122,7 +126,7 @@ function collectStats(
     lower ??= texts.map(t => t.toLowerCase())
     hit[i] = lower.some(t => t.includes(tok))
   }
-  return { record, tf, len, hitCount: hit.filter(Boolean).length }
+  return { record, tf, len, hit, hitCount: hit.filter(Boolean).length }
 }
 
 // 与分词器的整词同一个字符集：字母、组合附加符、数字、_、-。整词里出现这之外的字符（. / : 等），分词就会把它打散
@@ -191,12 +195,12 @@ export function rankRecords({ tokens, legacyTerms, anchors = [], records, listed
     if (tokens.length > 0 && doc.hitCount > 0) {
       out.push({
         record: doc.record, tier: doc.hitCount === tokens.length ? 'all' : 'partial',
-        anchorHits: countAnchorHits(doc.record, anchors), score: bm25f(doc, idfs, params),
+        anchorHits: countAnchorHits(doc.record, anchors), score: bm25f(doc, idfs, params), tokenHits: doc.hit,
       })
       continue
     }
     const legacy = legacyTerms.length > 0 ? matchScore(doc.record, legacyTerms as string[]) : 0
-    if (legacy > 0) out.push({ record: doc.record, tier: 'substring', anchorHits: countAnchorHits(doc.record, anchors), score: legacy })
+    if (legacy > 0) out.push({ record: doc.record, tier: 'substring', anchorHits: countAnchorHits(doc.record, anchors), score: legacy, tokenHits: doc.hit })
   }
   return out
 }

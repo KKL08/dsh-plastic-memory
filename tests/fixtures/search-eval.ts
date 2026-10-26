@@ -776,6 +776,7 @@ export const EVAL_RECORDS: MemoryRecord[] = MEMORIES.map((m, i) => ({
 
 export const EVAL_CATEGORIES = [
   'short-cjk', 'long-cjk', 'identifier', 'partial-word', 'plain-name', 'id-direct', 'zero-token', 'anchor', 'paraphrase',
+  'bilingual', 'no-answer',
 ] as const
 export type EvalCategory = (typeof EVAL_CATEGORIES)[number]
 
@@ -787,6 +788,13 @@ export const BASELINE_ONLY_CATEGORIES: readonly EvalCategory[] = ['paraphrase']
  * 锚点类（带标点的字面值）靠字面整词命中排序键定第一名，结果是确定的，掉一条就是规则坏了，不留余量。
  */
 export const STRICT_CATEGORIES: readonly EvalCategory[] = ['anchor']
+
+/**
+ * 只用来评估「命中弱」判定的类别，不进排序指标：
+ * - 中英双写（bilingual）：按工具说明把术语的中英两种写法都带上，答案记忆只用其中一种写法（多为只写中文）；
+ * - 库里没有答案（no-answer）：查询里有常见词能部分命中，但没有一条记忆讲这件事，relevant 为空。
+ */
+export const NOTE_ONLY_CATEGORIES: readonly EvalCategory[] = ['bilingual', 'no-answer']
 
 /**
  * 换说法的四种方式：同义词（自动关机 / 定时关停）、上下位词（数据库 / Postgres）、
@@ -900,4 +908,22 @@ export const EVAL_QUERIES: readonly EvalQuery[] = [
   { query: '找服务端老大对接有什么讲究', category: 'paraphrase', paraphrase: 'colloquial', relevant: ['mem_j8b4t6'] },
   { query: '视觉稿一般在哪儿看', category: 'paraphrase', paraphrase: 'colloquial', relevant: ['mem_s3y7u1'] },
   { query: '老条目还靠不靠谱', category: 'paraphrase', paraphrase: 'colloquial', relevant: ['mem_b1h7t4', 'mem_s9h4f2'] },
+  // 中英双写：术语的中英两种写法都带上，答案记忆只写了其中一种（判弱评估用，不进排序指标）
+  { query: '防抖 debounce', category: 'bilingual', relevant: ['mem_h5e1m8'] },
+  { query: '内存泄漏 memory leak', category: 'bilingual', relevant: ['mem_z7a4k1'] },
+  { query: '轮换 rotation 密钥', category: 'bilingual', relevant: ['mem_r8f2n5'] },
+  { query: '互斥锁 mutex', category: 'bilingual', relevant: ['mem_x2k9m4', 'mem_e3t7z5'] },
+  { query: '读写分离 read replica', category: 'bilingual', relevant: ['mem_t2x5w4'] },
+  { query: '分页组件 pagination', category: 'bilingual', relevant: ['mem_v1u7j6'] },
+  { query: '断线重连 reconnect', category: 'bilingual', relevant: ['mem_o1y9b4'] },
+  { query: '部署 deploy', category: 'bilingual', relevant: ['mem_d6x2k7', 'mem_w8h3p1'] },
+  // 库里没有答案：有常见词能部分命中，但没有记忆讲这件事（判弱评估用，结果应全部判弱）
+  { query: '数据库 分库分表', category: 'no-answer', relevant: [] },
+  { query: '前端 埋点 上报', category: 'no-answer', relevant: [] },
+  { query: '周报 模板', category: 'no-answer', relevant: [] },
+  { query: 'Python 虚拟环境', category: 'no-answer', relevant: [] },
+  { query: '定时任务 cron 配置', category: 'no-answer', relevant: [] },
+  { query: '灰度发布 监控告警', category: 'no-answer', relevant: [] },
+  { query: '线上报错 Sentry 接入', category: 'no-answer', relevant: [] },
+  { query: '证书 过期 续期', category: 'no-answer', relevant: [] },
 ]

@@ -14,16 +14,18 @@ import { expandQueryTerms, matchScore } from '../src/text.ts'
 import { RANKING_FIELDS, TIER_ORDER, substringEligible, type SearchTier } from '../src/search/ranking.ts'
 import { defaultJiebaLoader, resetJieba, tokenizerForQuery, type JiebaLoader } from '../src/search/jieba-segmenter.ts'
 import { executeSearch, type SearchToolDeps } from '../src/tools/search.ts'
-import type { SearchNoteCode } from '../src/contract-codes.ts'
+import { WEAK_SEARCH_NOTE_CODES, type SearchNoteCode } from '../src/contract-codes.ts'
 import { fakeExec } from './helpers/exec.ts'
 import {
-  BASELINE_ONLY_CATEGORIES, EVAL_CATEGORIES, EVAL_QUERIES, EVAL_RECORDS, PARAPHRASE_KINDS, STRICT_CATEGORIES, type EvalQuery,
+  BASELINE_ONLY_CATEGORIES, EVAL_CATEGORIES, EVAL_QUERIES, EVAL_RECORDS, NOTE_ONLY_CATEGORIES, PARAPHRASE_KINDS, STRICT_CATEGORIES,
+  type EvalQuery,
 } from './fixtures/search-eval.ts'
 
 // 评估集回归（语料与查询见 tests/fixtures/search-eval.ts，逐条对比与调参用 scripts/eval-search.ts）。
 // 两层：① 与权重无关的不变量逐条断言；② bigram 与 jieba 两档的 top-1 / top-3 聚合下限，不逐条断言。
 // 锚点类（带标点的字面值）例外：逐条断言第一名，不计入聚合下限。
 // 换说法类（paraphrase）只记基线：断言查询本身没写成字面能命中、两档都能跑出合法指标，不设分数线。
+// 中英双写（bilingual）与库里没有答案（no-answer）只评「命中弱」：前者首条正确且不判弱，后者全部判弱。
 // 跑在 FileTable 临时目录上走 executeSearch，与生产同一条路。
 
 const jiebaProbe = await defaultJiebaLoader.importJieba().then(() => undefined, (err: unknown) => err instanceof Error ? err.message : String(err))
@@ -77,8 +79,9 @@ async function tierOracle(query: string): Promise<(r: MemoryRecord) => SearchTie
   }
 }
 
-const expectedNote = (tiers: SearchTier[]): SearchNoteCode | undefined =>
-  tiers.length === 0 || tiers.includes('all') ? undefined : tiers.includes('partial') ? 'or-fallback' : 'substring-fallback'
+/** 档位决定说明码属于哪一类：有全命中无码；只有子串档 substring-fallback；有部分命中时按首条覆盖度二选一。 */
+const expectedNotes = (tiers: SearchTier[]): readonly (SearchNoteCode | undefined)[] =>
+  tiers.length === 0 || tiers.includes('all') ? [undefined] : tiers.includes('partial') ? ['or-fallback', 'low-coverage'] : ['substring-fallback']
 
 describe('评估语料本身', () => {
   it('60 到 100 条、四个字段齐全、正文一百到五百字；查询覆盖全部类别，预期 id 都在语料里', () => {
@@ -129,7 +132,7 @@ describe('不变量（与权重无关）', { timeout: 60_000 }, () => {
           expect(tiers, q.query).not.toContain(undefined)
           const order = (tiers as SearchTier[]).map(t => TIER_ORDER[t])
           expect(order, q.query).toEqual([...order].sort((a, b) => a - b))
-          expect(r.noteCode, q.query).toBe(expectedNote(tiers as SearchTier[]))
+          expect(expectedNotes(tiers as SearchTier[]), q.query).toContain(r.noteCode)
         }
       })
 
@@ -151,10 +154,11 @@ describe('不变量（与权重无关）', { timeout: 60_000 }, () => {
     })
   }
 
-  it('三种说明码在评估语料上的触发：全命中无码；只有部分命中 or-fallback；只有 id 子串 substring-fallback', async () => {
+  it('四种说明码在评估语料上的触发：全命中无码；部分命中按首条覆盖度 or-fallback / low-coverage；只有 id 子串 substring-fallback', async () => {
     useTier('bigram')
     expect((await search('pnpm lockfile')).noteCode).toBeUndefined()
-    expect((await search('pnpm zzqqxx')).noteCode).toBe('or-fallback')
+    expect((await search('pnpm zzqqxx')).noteCode).toBe('low-coverage')
+    expect((await search('记忆文件手编后出处对不上怎么办')).noteCode).toBe('or-fallback')
     // memor 以子串出现在 memory 里，算全命中
     const fieldSub = await search('memor')
     expect(fieldSub.hits.length).toBeGreaterThan(0)
@@ -183,7 +187,7 @@ function rankOf(q: EvalQuery, ids: string[]): number {
   return i < 0 ? Infinity : i + 1
 }
 
-const GATED_QUERIES = EVAL_QUERIES.filter(q => !BASELINE_ONLY_CATEGORIES.includes(q.category) && !STRICT_CATEGORIES.includes(q.category))
+const GATED_QUERIES = EVAL_QUERIES.filter(q => ![...BASELINE_ONLY_CATEGORIES, ...STRICT_CATEGORIES, ...NOTE_ONLY_CATEGORIES].includes(q.category))
 
 describe('聚合下限', { timeout: 60_000 }, () => {
   for (const tier of ['bigram', 'jieba'] as const) {
@@ -298,6 +302,61 @@ describe('换说法类（只记基线，不设分数线）', { timeout: 60_000 }
       expect(Number.isFinite(mrr)).toBe(true)
       expect(mrr).toBeGreaterThanOrEqual(0)
       expect(mrr).toBeLessThanOrEqual(1)
+    })
+  }
+})
+
+// ---- 命中弱 ----
+//
+// 判弱的说明码劝模型换词再搜。首条已经正确的不该判弱（白搜一轮），库里没有答案的必须判弱。
+// 改判弱口径前（只要没有全命中就判弱）的基线：评估集 93 条非零 token 查询里，bigram 判弱 61 条、其中首条正确 33 条；
+// jieba 判弱 50 条、其中首条正确 24 条。改后首次结果：bigram 判弱 27 条、首条正确 0 条；jieba 判弱 25 条、首条正确 1 条
+// （换说法类「视觉稿一般在哪儿看」）。换说法类不设门槛，只计入下面的总数上限。
+
+const WEAK_CORRECT_CEILING = 2
+const isWeak = (code: SearchNoteCode | undefined) => code !== undefined && (WEAK_SEARCH_NOTE_CODES as readonly string[]).includes(code)
+
+describe('命中弱', { timeout: 60_000 }, () => {
+  it('评估集有中英双写与库里没有答案两类查询，各至少 6 条；后者 relevant 为空', () => {
+    expect(EVAL_QUERIES.filter(q => q.category === 'bilingual').length).toBeGreaterThanOrEqual(6)
+    const noAnswer = EVAL_QUERIES.filter(q => q.category === 'no-answer')
+    expect(noAnswer.length).toBeGreaterThanOrEqual(6)
+    for (const q of noAnswer) expect(q.relevant).toEqual([])
+  })
+
+  for (const tier of ['bigram', 'jieba'] as const) {
+    describe.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档`, () => {
+      it('库里没有答案的查询全部判弱', async () => {
+        useTier(tier)
+        const notWeak: string[] = []
+        for (const q of EVAL_QUERIES.filter(q => q.category === 'no-answer')) {
+          const r = await search(q.query)
+          expect(r.hits.length, q.query).toBeGreaterThan(0)   // 有常见词能部分命中，不是空结果
+          if (!isWeak(r.noteCode)) notWeak.push(`${q.query} → ${r.noteCode ?? '无说明码'}`)
+        }
+        expect(notWeak).toEqual([])
+      })
+
+      it('中英双写、记忆只写了一种写法：首条正确且不判弱', async () => {
+        useTier(tier)
+        const bad: string[] = []
+        for (const q of EVAL_QUERIES.filter(q => q.category === 'bilingual')) {
+          const r = await search(q.query)
+          const first = r.hits[0]?.id
+          if (first === undefined || !q.relevant.includes(first) || isWeak(r.noteCode)) bad.push(`${q.query} → ${first ?? '（空）'} ${r.noteCode ?? ''}`)
+        }
+        expect(bad).toEqual([])
+      })
+
+      it(`首条正确却判弱的查询不超过 ${WEAK_CORRECT_CEILING} 条（库里没有答案的除外）`, async () => {
+        useTier(tier)
+        const weakCorrect: string[] = []
+        for (const q of EVAL_QUERIES.filter(q => q.category !== 'zero-token' && q.category !== 'no-answer')) {
+          const r = await search(q.query)
+          if (isWeak(r.noteCode) && rankOf(q, r.hits.map(h => h.id)) === 1) weakCorrect.push(q.query)
+        }
+        expect(weakCorrect.length, weakCorrect.join('、')).toBeLessThanOrEqual(WEAK_CORRECT_CEILING)
+      })
     })
   }
 })

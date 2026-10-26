@@ -13,6 +13,7 @@
  * 生产用 BM25F；按字段分别饱和再加权的 BM25 与 jieba 的 cut 模式只在本脚本里实现，留作对照，不进 src。
  * 只记基线的类别（换说法）单独成行，不计入总数、逐条差异与调参对照；全部输出的末尾逐条列出它们的名次。
  * 逐条设门槛的类别（锚点）单独成行，不计入总数，但列进逐条差异与未进第一名。
+ * 只评判弱的类别（中英双写、库里没有答案）单独成行，不计入总数与调参对照；「命中弱」一节按类别统计判弱条数。
  */
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -33,8 +34,9 @@ import {
   RANKING_FIELDS, RANKING_PARAMS, anchorTerms, compareRanked, countAnchorHits, rankRecords, substringEligible,
   type RankedRecord, type RankingField, type RankingParams, type SearchTier,
 } from '../src/search/ranking.ts'
+import { WEAK_SEARCH_NOTE_CODES, type SearchNoteCode } from '../src/contract-codes.ts'
 import {
-  BASELINE_ONLY_CATEGORIES, EVAL_CATEGORIES, EVAL_QUERIES, EVAL_RECORDS, STRICT_CATEGORIES, type EvalQuery,
+  BASELINE_ONLY_CATEGORIES, EVAL_CATEGORIES, EVAL_QUERIES, EVAL_RECORDS, NOTE_ONLY_CATEGORIES, STRICT_CATEGORIES, type EvalQuery,
 } from '../tests/fixtures/search-eval.ts'
 
 const { values: argv } = parseArgs({ options: { brief: { type: 'boolean', default: false }, all: { type: 'boolean', default: false } } })
@@ -42,6 +44,8 @@ const { values: argv } = parseArgs({ options: { brief: { type: 'boolean', defaul
 const LIMIT = 10
 type Ranking = string[]
 type Results = Map<EvalQuery, Ranking>
+/** 生产路径每条查询的说明码（判弱统计用）。 */
+type NoteCodes = Map<EvalQuery, SearchNoteCode | undefined>
 
 // ---------------- 指标 ----------------
 
@@ -53,11 +57,11 @@ function rankOf(q: EvalQuery, ids: Ranking): number {
 
 interface Metrics { top1: number; top3: number; mrr: number; n: number }
 
-/** 计入聚合门槛的查询；只记基线、逐条设门槛的类别都不算进总数和调参对照。 */
-const isGated = (q: EvalQuery) => !BASELINE_ONLY_CATEGORIES.includes(q.category) && !STRICT_CATEGORIES.includes(q.category)
+/** 计入聚合门槛的查询；只记基线、逐条设门槛、只评判弱的类别都不算进总数和调参对照。 */
+const isGated = (q: EvalQuery) => ![...BASELINE_ONLY_CATEGORIES, ...STRICT_CATEGORIES, ...NOTE_ONLY_CATEGORIES].includes(q.category)
 const GATED_QUERIES = EVAL_QUERIES.filter(isGated)
 /** 列进逐条差异与未进第一名的查询：聚合门槛的加上逐条设门槛的。 */
-const LISTED_QUERIES = EVAL_QUERIES.filter(q => !BASELINE_ONLY_CATEGORIES.includes(q.category))
+const LISTED_QUERIES = EVAL_QUERIES.filter(q => !BASELINE_ONLY_CATEGORIES.includes(q.category) && !NOTE_ONLY_CATEGORIES.includes(q.category))
 
 function metrics(results: Results, filter: (q: EvalQuery) => boolean = isGated): Metrics {
   let top1 = 0, top3 = 0, mrr = 0, n = 0
@@ -86,19 +90,21 @@ const missingJieba = {
   readMainDictionary(): Uint8Array { throw new Error('unreachable') },
 }
 
-async function productionRun(store: MemoryStore, tier: 'bigram' | 'jieba'): Promise<Results> {
+async function productionRun(store: MemoryStore, tier: 'bigram' | 'jieba'): Promise<{ results: Results; notes: NoteCodes }> {
   resetJieba(tier === 'bigram' ? missingJieba : undefined)
   const deps = {
     store, registry, tokenizer: { log: silent },
     resolveContext: async () => ({ workspacePath: undefined, session: { id: 'eval', lastSeq: 1 } }),
   }
-  const out: Results = new Map()
+  const results: Results = new Map()
+  const notes: NoteCodes = new Map()
   for (const q of EVAL_QUERIES) {
     const r = await executeSearch({ query: q.query, limit: LIMIT }, exec, deps)
-    out.set(q, r.hits.map(h => h.id))
+    results.set(q, r.hits.map(h => h.id))
+    notes.set(q, r.noteCode)
   }
   resetJieba()
-  return out
+  return { results, notes }
 }
 
 // ---------------- 对照路径：内存里的 rankRecords + 真实分词器 ----------------
@@ -197,11 +203,11 @@ function rankLocal(scoring: Scoring, tokens: readonly string[], legacyTerms: rea
           if (wtf > 0) score += idf[i]! * wtf * (p.k1 + 1) / (wtf + p.k1)
         }
       })
-      out.push({ record: d.record, tier: hitCount === tokens.length ? 'all' : 'partial', anchorHits: countAnchorHits(d.record, anchors), score })
+      out.push({ record: d.record, tier: hitCount === tokens.length ? 'all' : 'partial', anchorHits: countAnchorHits(d.record, anchors), score, tokenHits: d.hit })
       continue
     }
     const legacy = legacyTerms.length > 0 ? matchScore(d.record, legacyTerms as string[]) : 0
-    if (legacy > 0) out.push({ record: d.record, tier: 'substring', anchorHits: countAnchorHits(d.record, anchors), score: legacy })
+    if (legacy > 0) out.push({ record: d.record, tier: 'substring', anchorHits: countAnchorHits(d.record, anchors), score: legacy, tokenHits: d.hit })
   }
   return out
 }
@@ -216,7 +222,7 @@ function runVariant(v: Variant, queries: readonly EvalQuery[] = EVAL_QUERIES, re
     const anchors = anchorTerms(q.query)
     let ranked: RankedRecord[]
     if (tokens.length === 0 && legacyTerms.length === 0) {
-      ranked = records.map(record => ({ record, tier: 'all' as SearchTier, anchorHits: 0, score: 0 }))
+      ranked = records.map(record => ({ record, tier: 'all' as SearchTier, anchorHits: 0, score: 0, tokenHits: [] }))
     } else if (v.scoring === PRODUCTION_SCORING) {
       ranked = rankRecords({ tokens, legacyTerms, anchors, records, listedCount: records.length, tokenize, params: v.params })
     } else {
@@ -316,7 +322,8 @@ function printTierMetrics(label: string, results: Results): void {
   console.log(`${label.padEnd(8)} ${fmt(metrics(results))}`)
   for (const c of EVAL_CATEGORIES) {
     const note = BASELINE_ONLY_CATEGORIES.includes(c) ? '  （只记基线，不计入上面的总数）'
-      : STRICT_CATEGORIES.includes(c) ? '  （逐条要第一名，不计入上面的总数）' : ''
+      : STRICT_CATEGORIES.includes(c) ? '  （逐条要第一名，不计入上面的总数）'
+        : NOTE_ONLY_CATEGORIES.includes(c) ? '  （只评判弱，不计入上面的总数）' : ''
     console.log(`  ${c.padEnd(13)} ${fmt(metrics(results, q => q.category === c))}${note}`)
   }
 }
@@ -350,6 +357,24 @@ function printBaselineOnly(tiers: [string, Results][]): void {
   }
 }
 
+const isWeak = (code: SearchNoteCode | undefined) => code !== undefined && (WEAK_SEARCH_NOTE_CODES as readonly string[]).includes(code)
+
+/**
+ * 判弱统计：各类别判弱几条、其中首条正确的几条；逐条列出首条正确却判弱的（应接近 0）与库里没有答案却没判弱的（应为 0）。
+ * 零 token 查询不出说明码，不计。
+ */
+function printWeak(label: string, run: { results: Results; notes: NoteCodes }): void {
+  const counted = EVAL_QUERIES.filter(q => q.category !== 'zero-token')
+  const correct = (q: EvalQuery) => rankOf(q, run.results.get(q)!) === 1
+  const weak = (q: EvalQuery) => isWeak(run.notes.get(q))
+  const row = (qs: EvalQuery[]) => `判弱 ${qs.filter(weak).length}/${qs.length}，其中首条正确 ${qs.filter(q => weak(q) && correct(q)).length}`
+  console.log(`${label.padEnd(8)} ${row(counted)}`)
+  for (const c of EVAL_CATEGORIES.filter(c => c !== 'zero-token')) console.log(`  ${c.padEnd(13)} ${row(counted.filter(q => q.category === c))}`)
+  const answerable = counted.filter(q => q.category !== 'no-answer')
+  for (const q of answerable.filter(q => weak(q) && correct(q))) console.log(`  首条正确却判弱：[${q.category}] ${JSON.stringify(q.query)}  ${run.notes.get(q)}`)
+  for (const q of counted.filter(q => q.category === 'no-answer' && !weak(q))) console.log(`  没有答案却没判弱：${JSON.stringify(q.query)}  ${run.notes.get(q) ?? '无说明码'}`)
+}
+
 function sameOrder(a: Results, b: Results): EvalQuery[] {
   return EVAL_QUERIES.filter(q => a.get(q)!.join() !== b.get(q)!.join())
 }
@@ -374,9 +399,11 @@ async function main(): Promise<void> {
     for (const r of EVAL_RECORDS) await store.put(r)
 
     console.log('\n## 两档指标（FileTable + executeSearch）\n')
-    const prodBigram = await productionRun(store, 'bigram')
+    const runBigram = await productionRun(store, 'bigram')
+    const prodBigram = runBigram.results
     printTierMetrics('bigram', prodBigram)
-    const prodJieba = hasJieba ? await productionRun(store, 'jieba') : undefined
+    const runJieba = hasJieba ? await productionRun(store, 'jieba') : undefined
+    const prodJieba = runJieba?.results
     if (prodJieba) printTierMetrics('jieba', prodJieba)
 
     if (prodJieba) {
@@ -387,6 +414,10 @@ async function main(): Promise<void> {
     }
     console.log()
     printMisses('bigram', prodBigram)
+
+    console.log(`\n## 命中弱（${WEAK_SEARCH_NOTE_CODES.join(' / ')}）\n`)
+    printWeak('bigram', runBigram)
+    if (runJieba) printWeak('jieba', runJieba)
     if (argv.brief) return
 
     // 自检：对照路径在生产参数下与 executeSearch 逐条同序；本地实现的生产加权方式与 rankRecords 同序

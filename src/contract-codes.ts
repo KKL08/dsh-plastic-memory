@@ -60,8 +60,12 @@ export type ToolGateCode = 'subagent-readonly' // 子 agent 会话（delegationD
 /** memory_search 的说明性 note（search.ts）。 */
 export type SearchNoteCode =
   | 'no-workspace'        // scope=workspace 但当前会话没有工作目录
-  | 'or-fallback'         // 返回列表里没有同时命中全部查询 token（分词命中或字段子串命中）的记忆，结果按相关性排序（部分命中在前、旧子串匹配命中在后）
-  | 'substring-fallback'  // 返回列表里没有任何 token 命中的记忆，只有旧子串匹配命中的（如 id 前缀）；与 or-fallback 互斥、优先于它
+  | 'or-fallback'         // 返回列表里没有同时命中全部查询 token（分词命中或字段子串命中）的记忆，但排第一的部分命中记录覆盖够（见 low-coverage），结果按相关性排序
+  | 'low-coverage'        // 同上没有全命中，且排第一的部分命中记录缺了整组关键词、或覆盖的查询文字低于阈值（search/coverage.ts）：命中弱，建议换词再搜，附逐词命中条数
+  | 'substring-fallback'  // 返回列表里没有任何 token 命中的记忆，只有旧子串匹配命中的（如 id 前缀）：命中弱，附逐词命中条数；三者互斥、substring 优先
+
+/** 表示命中弱的检索说明码：说明里带换词再搜的建议与逐词命中条数。 */
+export const WEAK_SEARCH_NOTE_CODES = ['low-coverage', 'substring-fallback'] as const satisfies readonly SearchNoteCode[]
 
 /** frontmatter 解析失败的原因（storage/frontmatter.ts）。 */
 export type FrontmatterErrorCode =

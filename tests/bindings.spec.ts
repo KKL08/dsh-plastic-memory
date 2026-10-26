@@ -134,6 +134,9 @@ describe('memory_search 绑定', () => {
     expect(d).toContain('\n怎么写关键词：\n- 写 2 到 4 个实词。版本号、路径这类原样文字可以直接搜。\n')
     expect(d).toContain('- 术语的中英两种写法都带上。\n\n怎么读结果：\n')
     expect(d).toContain('换个角度再搜一次')
+    // 没判弱时不劝重搜；判弱时说明里会列逐词命中条数
+    expect(d).toContain('没提示命中弱时，排在前面的通常就是要找的')
+    expect(d).toContain('开头提示命中弱时会列出各关键词命中几条')
     const query = (schemaOf(tool) as { properties: Record<string, { description?: string }> }).properties.query!
     expect(query.description).toContain('建议换词再搜一次')
   })

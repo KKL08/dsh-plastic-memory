@@ -6,6 +6,7 @@ import { resolveLiveFirst } from '../storage/table.ts'
 import { tokenizerForQuery, type QueryTokenizerOptions } from '../search/jieba-segmenter.ts'
 import { CJK } from '../search/tokenizer.ts'
 import { anchorTerms, compareRanked, rankRecords, type RankedRecord, type SearchTier } from '../search/ranking.ts'
+import { groupQueryTerms, judgeTopHit, termHitCounts, type TermHitCount } from '../search/coverage.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import { sourceNote } from '../index-line.ts'
 import { stalenessNote, withinValidity } from '../record-freshness.ts'
@@ -60,9 +61,20 @@ export const IN_SNAPSHOT_NOTE = '全文已在本会话带入的长期记忆里�
 
 /** 命中弱时附在说明末尾：说明码本身就是「相关度弱」的信号，提示模型换词再搜一次，而不是把弱结果当定论。 */
 export const RETRY_HINT = '命中弱，可以换同义词、减少词数或换个角度再搜一次。'
-/** 说明文案（码在 contract-codes）：返回列表里没有全命中记录 / 只有旧子串匹配命中的记录（第三档）。 */
-export const OR_FALLBACK_NOTE = `没有同时命中全部关键词的记忆，以下按相关性排序。${RETRY_HINT}`
+/**
+ * 说明文案（码在 contract-codes）：返回列表里没有全命中记录、首条覆盖够 / 首条覆盖不够（见 search/coverage.ts）/
+ * 只有旧子串匹配命中的记录（第三档）。覆盖够的只如实说明，不劝重搜：中英双写、长句提问时首条往往就是答案。
+ */
+export const OR_FALLBACK_NOTE = '没有记忆同时含全部关键词，以下按相关性排序。'
+export const LOW_COVERAGE_NOTE = `没有记忆同时含全部关键词，排第一的也只含其中一部分，以下按相关性排序。${RETRY_HINT}`
 export const SUBSTRING_FALLBACK_NOTE = `没有命中关键词的记忆，以下只是关键词以子串出现的结果。${RETRY_HINT}`
+
+/** 命中弱时接在说明后的一行：各关键词在范围内命中几条，一条都没命中的单独点名，让模型知道该换哪个词。 */
+export function termHitNote(counts: readonly TermHitCount[]): string {
+  const head = `各关键词命中的记忆条数：${counts.map(c => `${c.label} ${c.count}`).join('、')}。`
+  const zero = counts.filter(c => c.count === 0).map(c => c.label)
+  return zero.length === 0 ? head : `${head}范围内一条都没命中的：${zero.join('、')}。`
+}
 
 /** 返回条数上限的缺省值与硬上限。 */
 export const DEFAULT_SEARCH_LIMIT = 10
@@ -141,7 +153,7 @@ export async function executeSearch(
   let ranked: RankedRecord[]
   if (tokens.length === 0 && legacyTerms.length === 0) {
     // 零 token 查询：不做关键词过滤，范围内全部按 confidence、lastConfirmedAt 排
-    ranked = candidates.map(record => ({ record, tier: 'all' as const, anchorHits: 0, score: 0 }))
+    ranked = candidates.map(record => ({ record, tier: 'all' as const, anchorHits: 0, score: 0, tokenHits: [] }))
   } else {
     ranked = rankRecords({ tokens, legacyTerms, anchors: anchorTerms(a.query), records: candidates, listedCount: read.listedCount, tokenize })
   }
@@ -160,11 +172,18 @@ export async function executeSearch(
   // 快照带入时的正文与现在一致才省略：冻结后改过的、同 id 取到别层副本的，快照里那份不是这一版
   const injected = sessionRecall && handle ? sessionRecall.injectedCore(handle) : undefined
 
-  // 说明码只看返回列表：没有全命中 → or-fallback；连部分命中也没有、只剩第三档 → substring-fallback（互斥、substring 优先）
+  // 说明码只看返回列表：没有全命中时，排第一的部分命中记录覆盖够 → or-fallback，不够 → low-coverage；
+  // 连部分命中也没有、只剩第三档 → substring-fallback（三者互斥、substring 优先）。判弱的两种附逐词命中条数（范围内全部候选）
   const hasTier = (tier: SearchTier) => top.some(e => e.tier === tier)
-  const note = top.length === 0 || hasTier('all') ? undefined
-    : hasTier('partial') ? { noteCode: 'or-fallback' as const, note: OR_FALLBACK_NOTE }
-      : { noteCode: 'substring-fallback' as const, note: SUBSTRING_FALLBACK_NOTE }
+  let note: { noteCode: SearchNoteCode; note: string } | undefined
+  if (top.length > 0 && !hasTier('all')) {
+    const groups = groupQueryTerms(a.query, tokens, tokenize)
+    const weakNote = (text: string) => `${text}\n${termHitNote(termHitCounts(groups, tokens, ranked.map(e => e.tokenHits)))}`
+    const first = top.find(e => e.tier === 'partial')
+    if (first === undefined) note = { noteCode: 'substring-fallback', note: weakNote(SUBSTRING_FALLBACK_NOTE) }
+    else if (judgeTopHit(groups, tokens, first.tokenHits).weak) note = { noteCode: 'low-coverage', note: weakNote(LOW_COVERAGE_NOTE) }
+    else note = { noteCode: 'or-fallback', note: OR_FALLBACK_NOTE }
+  }
   return {
     ...note,
     ...(ranked.length > top.length ? { moreNote: truncationNote(ranked.length, top.length, limit === MAX_SEARCH_LIMIT) } : {}),
