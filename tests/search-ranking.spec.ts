@@ -140,6 +140,45 @@ describe('字段权重', () => {
   })
 })
 
+describe('字面锚点：含标点的查询词整词命中排在同档前面', () => {
+  const RELEASE_NOTE = (version: string) => `宿主 ${version} 的已知问题：插件页切换后滚动位置丢失，升级前先看这条。`
+
+  it('只差一个版本号的几条记录：字面含查询版本号的排第一，哪怕它分数一样、确认时间最早', async () => {
+    const store = await seeded([
+      record({ id: 'mem_rc2', name: '已知问题', content: RELEASE_NOTE('0.2.1-rc.2'), lastConfirmedAt: 1 }),
+      record({ id: 'mem_rc1', name: '已知问题', content: RELEASE_NOTE('0.2.1-rc.1'), lastConfirmedAt: 3 }),
+      record({ id: 'mem_old', name: '已知问题', content: RELEASE_NOTE('0.1.1-rc.3'), lastConfirmedAt: 2 }),
+    ])
+    expect((await ids(store, '0.2.1-rc.2'))[0]).toBe('mem_rc2')
+    expect((await ids(store, '0.2.1-rc.1'))[0]).toBe('mem_rc1')
+  })
+
+  it('字面比较不分大小写，tags、summary、正文里的都算；档位仍然优先，同档内锚点命中多的排前', async () => {
+    const store = await seeded([
+      record({ id: 'mem_tag', name: '契约测试', tags: ['host:contract'], content: '宿主契约 host contract 用例', lastConfirmedAt: 1 }),
+      record({ id: 'mem_both', name: '发版检查', summary: '跑 HOST:CONTRACT 与 Host:Smoke', content: '发版前 host contract、host smoke 都要绿', lastConfirmedAt: 1 }),
+      record({ id: 'mem_plain', name: '契约说明', content: 'host 与 contract 的约定，host contract 反复出现，host contract', lastConfirmedAt: 9 }),
+      record({ id: 'mem_partial', name: '只提一半', content: '写着 HOST:Contract 但没有另一个词', lastConfirmedAt: 9 }),
+    ])
+    // smoke 只在 mem_both 出现：它全命中，其余部分命中；部分命中档里字面含 host:contract 的排在只靠分词命中的前面
+    expect(await ids(store, 'host:contract host:smoke')).toEqual(['mem_both', 'mem_tag', 'mem_partial', 'mem_plain'])
+  })
+
+  it('不含标点的整词不参与字面排序：查询「分片上传」时，字面含这四个字但分数低的记录不会被提前', async () => {
+    const store = await seeded([
+      record({
+        id: 'mem_literal', name: '杂记', summary: '一些零碎事项', lastConfirmedAt: 9,
+        content: '周会提到几件事：日志保留三十天，告警阈值下调，分片上传的接口文档还没补，测试环境的证书快过期了。',
+      }),
+      record({
+        id: 'mem_ranked', name: '大文件分片与上传', summary: '先分片，再逐片上传，断了只补缺的分片', lastConfirmedAt: 1,
+        content: '大文件先在客户端分片，每片 5MB，逐片上传，服务端收齐后合并；上传中断时只重传缺的分片，上传进度按已收分片算。',
+      }),
+    ])
+    expect(await ids(store, '分片上传')).toEqual(['mem_ranked', 'mem_literal'])
+  })
+})
+
 describe('今天靠子串能命中的查询升级后仍命中', () => {
   it('「scope」命中 readScope（驼峰子词）、「memory source」命中 memory_source（下划线子词），都不走子串档', async () => {
     const store = await seeded([

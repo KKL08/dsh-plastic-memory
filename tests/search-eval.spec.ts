@@ -17,11 +17,12 @@ import { executeSearch, type SearchToolDeps } from '../src/tools/search.ts'
 import type { SearchNoteCode } from '../src/contract-codes.ts'
 import { fakeExec } from './helpers/exec.ts'
 import {
-  BASELINE_ONLY_CATEGORIES, EVAL_CATEGORIES, EVAL_QUERIES, EVAL_RECORDS, PARAPHRASE_KINDS, type EvalQuery,
+  BASELINE_ONLY_CATEGORIES, EVAL_CATEGORIES, EVAL_QUERIES, EVAL_RECORDS, PARAPHRASE_KINDS, STRICT_CATEGORIES, type EvalQuery,
 } from './fixtures/search-eval.ts'
 
 // 评估集回归（语料与查询见 tests/fixtures/search-eval.ts，逐条对比与调参用 scripts/eval-search.ts）。
 // 两层：① 与权重无关的不变量逐条断言；② bigram 与 jieba 两档的 top-1 / top-3 聚合下限，不逐条断言。
+// 锚点类（带标点的字面值）例外：逐条断言第一名，不计入聚合下限。
 // 换说法类（paraphrase）只记基线：断言查询本身没写成字面能命中、两档都能跑出合法指标，不设分数线。
 // 跑在 FileTable 临时目录上走 executeSearch，与生产同一条路。
 
@@ -182,7 +183,7 @@ function rankOf(q: EvalQuery, ids: string[]): number {
   return i < 0 ? Infinity : i + 1
 }
 
-const GATED_QUERIES = EVAL_QUERIES.filter(q => !BASELINE_ONLY_CATEGORIES.includes(q.category))
+const GATED_QUERIES = EVAL_QUERIES.filter(q => !BASELINE_ONLY_CATEGORIES.includes(q.category) && !STRICT_CATEGORIES.includes(q.category))
 
 describe('聚合下限', { timeout: 60_000 }, () => {
   for (const tier of ['bigram', 'jieba'] as const) {
@@ -197,6 +198,34 @@ describe('聚合下限', { timeout: 60_000 }, () => {
       }
       expect(top1).toBeGreaterThanOrEqual(FLOORS[tier].top1)
       expect(top3).toBeGreaterThanOrEqual(FLOORS[tier].top3)
+    })
+  }
+})
+
+// ---- 锚点类：逐条第一名 ----
+//
+// 版本号、路径、带冒号的标识符被分词打散后，只差一个版本号的几条记录同分或分数相近，名次只看确认时间。
+// 字面整词命中排序键让字面含该值的记录在同档内排前，所以每条都要第一名，不留余量。
+
+const ANCHOR_QUERIES = EVAL_QUERIES.filter(q => STRICT_CATEGORIES.includes(q.category))
+
+describe('锚点类（逐条第一名）', { timeout: 60_000 }, () => {
+  it('版本号、路径、带冒号的标识符各有几条，含只差一个版本号的情形', () => {
+    expect(ANCHOR_QUERIES.length).toBeGreaterThanOrEqual(9)
+    expect(ANCHOR_QUERIES.some(q => /\d+\.\d+\.\d+-rc\.\d+/.test(q.query))).toBe(true)
+    expect(ANCHOR_QUERIES.some(q => q.query.includes('/'))).toBe(true)
+    expect(ANCHOR_QUERIES.some(q => q.query.includes(':'))).toBe(true)
+  })
+
+  for (const tier of ['bigram', 'jieba'] as const) {
+    it.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档：每条锚点查询的第一名都是字面含该值的记录`, async () => {
+      useTier(tier)
+      const misses: string[] = []
+      for (const q of ANCHOR_QUERIES) {
+        const first = (await search(q.query)).hits[0]?.id
+        if (first === undefined || !q.relevant.includes(first)) misses.push(`${q.query} → ${first ?? '（空）'}`)
+      }
+      expect(misses).toEqual([])
     })
   }
 })

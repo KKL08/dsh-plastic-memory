@@ -4,7 +4,7 @@ import type { SearchNoteCode } from '../contract-codes.ts'
 import { expandQueryTerms } from '../text.ts'
 import { resolveLiveFirst } from '../storage/table.ts'
 import { tokenizerForQuery, type QueryTokenizerOptions } from '../search/jieba-segmenter.ts'
-import { rankRecords, TIER_ORDER, type RankedRecord, type SearchTier } from '../search/ranking.ts'
+import { anchorTerms, compareRanked, rankRecords, type RankedRecord, type SearchTier } from '../search/ranking.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import { sourceNote } from '../index-line.ts'
 import { stalenessNote, withinValidity } from '../record-freshness.ts'
@@ -79,14 +79,6 @@ function isNoiseTerm(term: string): boolean {
   return /^\p{N}+$/u.test(term) || ([...term].length === 1 && !CJK_CHAR.test(term))
 }
 
-/** 档 → 分数 → confidence → lastConfirmedAt，全部降序。 */
-function compareRanked(x: RankedRecord, y: RankedRecord): number {
-  return TIER_ORDER[x.tier] - TIER_ORDER[y.tier]
-    || y.score - x.score
-    || y.record.confidence - x.record.confidence
-    || y.record.lastConfirmedAt - x.record.lastConfirmedAt
-}
-
 /**
  * memory_search 工具的真正执行逻辑：解析上下文、按范围读取、取舍过滤、分档打分、排序截断、标记召回。
  * 不依赖任何 dsh 框架包，测试直接调它。
@@ -134,9 +126,9 @@ export async function executeSearch(
   let ranked: RankedRecord[]
   if (tokens.length === 0 && legacyTerms.length === 0) {
     // 零 token 查询：不做关键词过滤，范围内全部按 confidence、lastConfirmedAt 排
-    ranked = candidates.map(record => ({ record, tier: 'all' as const, score: 0 }))
+    ranked = candidates.map(record => ({ record, tier: 'all' as const, anchorHits: 0, score: 0 }))
   } else {
-    ranked = rankRecords({ tokens, legacyTerms, records: candidates, listedCount: read.listedCount, tokenize })
+    ranked = rankRecords({ tokens, legacyTerms, anchors: anchorTerms(a.query), records: candidates, listedCount: read.listedCount, tokenize })
   }
   ranked.sort(compareRanked)
   // id 直达：查询恰等于某条可见记忆的 id，该条排第一

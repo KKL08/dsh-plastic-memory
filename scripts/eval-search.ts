@@ -12,6 +12,7 @@
  * 对照部分在内存里跑 rankRecords + 真实分词器（换参数、换切分模式），开头先自检：生产参数下它与 executeSearch 逐条同序。
  * 生产用 BM25F；按字段分别饱和再加权的 BM25 与 jieba 的 cut 模式只在本脚本里实现，留作对照，不进 src。
  * 只记基线的类别（换说法）单独成行，不计入总数、逐条差异与调参对照；全部输出的末尾逐条列出它们的名次。
+ * 逐条设门槛的类别（锚点）单独成行，不计入总数，但列进逐条差异与未进第一名。
  */
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -29,11 +30,11 @@ import { expandQueryTerms, matchScore } from '../src/text.ts'
 import { bigramSegmenter, createTokenizer, type CjkSegmenter } from '../src/search/tokenizer.ts'
 import { defaultJiebaLoader, resetJieba, type JiebaInstance } from '../src/search/jieba-segmenter.ts'
 import {
-  RANKING_FIELDS, RANKING_PARAMS, TIER_ORDER, rankRecords, substringEligible,
+  RANKING_FIELDS, RANKING_PARAMS, anchorTerms, compareRanked, countAnchorHits, rankRecords, substringEligible,
   type RankedRecord, type RankingField, type RankingParams, type SearchTier,
 } from '../src/search/ranking.ts'
 import {
-  BASELINE_ONLY_CATEGORIES, EVAL_CATEGORIES, EVAL_QUERIES, EVAL_RECORDS, type EvalQuery,
+  BASELINE_ONLY_CATEGORIES, EVAL_CATEGORIES, EVAL_QUERIES, EVAL_RECORDS, STRICT_CATEGORIES, type EvalQuery,
 } from '../tests/fixtures/search-eval.ts'
 
 const { values: argv } = parseArgs({ options: { brief: { type: 'boolean', default: false }, all: { type: 'boolean', default: false } } })
@@ -52,9 +53,11 @@ function rankOf(q: EvalQuery, ids: Ranking): number {
 
 interface Metrics { top1: number; top3: number; mrr: number; n: number }
 
-/** 进回归门槛的查询；只记基线的类别不算进总数、逐条差异和调参对照。 */
-const isGated = (q: EvalQuery) => !BASELINE_ONLY_CATEGORIES.includes(q.category)
+/** 计入聚合门槛的查询；只记基线、逐条设门槛的类别都不算进总数和调参对照。 */
+const isGated = (q: EvalQuery) => !BASELINE_ONLY_CATEGORIES.includes(q.category) && !STRICT_CATEGORIES.includes(q.category)
 const GATED_QUERIES = EVAL_QUERIES.filter(isGated)
+/** 列进逐条差异与未进第一名的查询：聚合门槛的加上逐条设门槛的。 */
+const LISTED_QUERIES = EVAL_QUERIES.filter(q => !BASELINE_ONLY_CATEGORIES.includes(q.category))
 
 function metrics(results: Results, filter: (q: EvalQuery) => boolean = isGated): Metrics {
   let top1 = 0, top3 = 0, mrr = 0, n = 0
@@ -154,7 +157,7 @@ type Scoring = 'bm25' | 'bm25f'
  * - bm25f：每个字段的词频先按该字段长度归一、乘字段权重，跨字段相加后统一做一次饱和。
  * 生产用其中一种（PRODUCTION_SCORING），对照路径对它走 rankRecords；本地实现留给另一种，并参与自检。
  */
-function rankLocal(scoring: Scoring, tokens: readonly string[], legacyTerms: readonly string[], records: readonly MemoryRecord[], tokenize: (t: string) => string[], p: RankingParams): RankedRecord[] {
+function rankLocal(scoring: Scoring, tokens: readonly string[], legacyTerms: readonly string[], anchors: readonly string[], records: readonly MemoryRecord[], tokenize: (t: string) => string[], p: RankingParams): RankedRecord[] {
   const index = new Map(tokens.map((t, i) => [t, i] as const))
   const eligible = substringEligible(tokens)
   const docs = records.map(record => {
@@ -194,20 +197,13 @@ function rankLocal(scoring: Scoring, tokens: readonly string[], legacyTerms: rea
           if (wtf > 0) score += idf[i]! * wtf * (p.k1 + 1) / (wtf + p.k1)
         }
       })
-      out.push({ record: d.record, tier: hitCount === tokens.length ? 'all' : 'partial', score })
+      out.push({ record: d.record, tier: hitCount === tokens.length ? 'all' : 'partial', anchorHits: countAnchorHits(d.record, anchors), score })
       continue
     }
     const legacy = legacyTerms.length > 0 ? matchScore(d.record, legacyTerms as string[]) : 0
-    if (legacy > 0) out.push({ record: d.record, tier: 'substring', score: legacy })
+    if (legacy > 0) out.push({ record: d.record, tier: 'substring', anchorHits: countAnchorHits(d.record, anchors), score: legacy })
   }
   return out
-}
-
-function compareRanked(x: RankedRecord, y: RankedRecord): number {
-  return TIER_ORDER[x.tier] - TIER_ORDER[y.tier]
-    || y.score - x.score
-    || y.record.confidence - x.record.confidence
-    || y.record.lastConfirmedAt - x.record.lastConfirmedAt
 }
 
 /** 与 executeSearch 同序：清洗 token → 分档打分 → 排序 → id 直达 → 截断。 */
@@ -217,13 +213,14 @@ function runVariant(v: Variant, queries: readonly EvalQuery[] = EVAL_QUERIES, re
     const tokenize = tokenizerFor(v, q.query)
     const tokens = [...new Set(tokenize(q.query))].filter(t => !isNoiseTerm(t, v.dropSingleCjk))
     const legacyTerms = expandQueryTerms(q.query)
+    const anchors = anchorTerms(q.query)
     let ranked: RankedRecord[]
     if (tokens.length === 0 && legacyTerms.length === 0) {
-      ranked = records.map(record => ({ record, tier: 'all' as SearchTier, score: 0 }))
+      ranked = records.map(record => ({ record, tier: 'all' as SearchTier, anchorHits: 0, score: 0 }))
     } else if (v.scoring === PRODUCTION_SCORING) {
-      ranked = rankRecords({ tokens, legacyTerms, records, listedCount: records.length, tokenize, params: v.params })
+      ranked = rankRecords({ tokens, legacyTerms, anchors, records, listedCount: records.length, tokenize, params: v.params })
     } else {
-      ranked = rankLocal(v.scoring, tokens, legacyTerms, records, tokenize, v.params)
+      ranked = rankLocal(v.scoring, tokens, legacyTerms, anchors, records, tokenize, v.params)
     }
     ranked.sort(compareRanked)
     const direct = ranked.findIndex(e => e.record.id === q.query.trim())
@@ -241,7 +238,7 @@ function runVariantLocal(v: Variant): Results {
     const tokens = [...new Set(tokenize(q.query))].filter(t => !isNoiseTerm(t, v.dropSingleCjk))
     const legacyTerms = expandQueryTerms(q.query)
     if (tokens.length === 0 && legacyTerms.length === 0) { out.set(q, runVariant(v, [q]).get(q)!); continue }
-    const ranked = rankLocal(v.scoring, tokens, legacyTerms, EVAL_RECORDS, tokenize, v.params).sort(compareRanked)
+    const ranked = rankLocal(v.scoring, tokens, legacyTerms, anchorTerms(q.query), EVAL_RECORDS, tokenize, v.params).sort(compareRanked)
     const direct = ranked.findIndex(e => e.record.id === q.query.trim())
     if (direct > 0) ranked.unshift(...ranked.splice(direct, 1))
     out.set(q, ranked.slice(0, LIMIT).map(e => e.record.id))
@@ -318,13 +315,14 @@ const rankStr = (r: number) => (Number.isFinite(r) ? String(r) : '—')
 function printTierMetrics(label: string, results: Results): void {
   console.log(`${label.padEnd(8)} ${fmt(metrics(results))}`)
   for (const c of EVAL_CATEGORIES) {
-    const note = BASELINE_ONLY_CATEGORIES.includes(c) ? '  （只记基线，不计入上面的总数）' : ''
+    const note = BASELINE_ONLY_CATEGORIES.includes(c) ? '  （只记基线，不计入上面的总数）'
+      : STRICT_CATEGORIES.includes(c) ? '  （逐条要第一名，不计入上面的总数）' : ''
     console.log(`  ${c.padEnd(13)} ${fmt(metrics(results, q => q.category === c))}${note}`)
   }
 }
 
 function printDiff(a: Results, b: Results, labelA: string, labelB: string, onlyChanged = true): void {
-  for (const q of GATED_QUERIES) {
+  for (const q of LISTED_QUERIES) {
     const ra = rankOf(q, a.get(q)!), rb = rankOf(q, b.get(q)!)
     const sameTop3 = a.get(q)!.slice(0, 3).join() === b.get(q)!.slice(0, 3).join()
     if (onlyChanged && ra === rb && sameTop3) continue
@@ -335,7 +333,7 @@ function printDiff(a: Results, b: Results, labelA: string, labelB: string, onlyC
 }
 
 function printMisses(label: string, results: Results): void {
-  const misses = GATED_QUERIES.filter(q => rankOf(q, results.get(q)!) !== 1)
+  const misses = LISTED_QUERIES.filter(q => rankOf(q, results.get(q)!) !== 1)
   console.log(`${label} 未进第一名（${misses.length} 条）：`)
   for (const q of misses) {
     console.log(`- [${q.category}] ${JSON.stringify(q.query)}  预期 ${q.relevant.join(' / ')}  名次 ${rankStr(rankOf(q, results.get(q)!))}`)
@@ -345,7 +343,7 @@ function printMisses(label: string, results: Results): void {
 
 /** 只记基线的类别：逐条列出两档名次与前三名。 */
 function printBaselineOnly(tiers: [string, Results][]): void {
-  for (const q of EVAL_QUERIES.filter(q => !isGated(q))) {
+  for (const q of EVAL_QUERIES.filter(q => BASELINE_ONLY_CATEGORIES.includes(q.category))) {
     const kind = q.paraphrase === undefined ? '' : `/${q.paraphrase}`
     console.log(`- [${q.category}${kind}] ${JSON.stringify(q.query)}  预期 ${q.relevant.join(' / ')}  名次 ${tiers.map(([l, r]) => `${l} ${rankStr(rankOf(q, r.get(q)!))}`).join('、')}`)
     for (const [l, r] of tiers) console.log(`    ${l}: ${top3(r.get(q)!)}`)
@@ -358,7 +356,8 @@ function sameOrder(a: Results, b: Results): EvalQuery[] {
 
 async function main(): Promise<void> {
   const lens = EVAL_RECORDS.map(r => r.content.length)
-  console.log(`# memory_search 评估：${EVAL_RECORDS.length} 条记忆、${EVAL_QUERIES.length} 条查询（进门槛 ${GATED_QUERIES.length} 条，只记基线 ${EVAL_QUERIES.length - GATED_QUERIES.length} 条；limit ${LIMIT}）`)
+  const strictCount = EVAL_QUERIES.filter(q => STRICT_CATEGORIES.includes(q.category)).length
+  console.log(`# memory_search 评估：${EVAL_RECORDS.length} 条记忆、${EVAL_QUERIES.length} 条查询（进聚合门槛 ${GATED_QUERIES.length} 条，逐条第一名 ${strictCount} 条，只记基线 ${EVAL_QUERIES.length - GATED_QUERIES.length - strictCount} 条；limit ${LIMIT}）`)
   console.log(`正文长度 ${Math.min(...lens)}–${Math.max(...lens)} 字符；字段平均长度实测 ${RANKING_FIELDS.map(f => `${f} ${measuredLengths[f].toFixed(1)}`).join('、')}`)
 
   const hasJieba = await defaultJiebaLoader.importJieba().then(J => {

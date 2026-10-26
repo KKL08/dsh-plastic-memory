@@ -652,6 +652,64 @@ const MEMORIES: EvalMemory[] = [
       + '用户确认后升到 0.9 并刷新确认时间。长期没被确认的推断记忆，体检会建议删除。推断记忆在搜索结果里同样带「推断」标注，排序时同分情况下排在用户明确说过的记忆之后。',
     confidence: 0.5,
   },
+  // ---- 带标点的字面值：版本号、路径、带冒号的标识符；同组记录分词后几乎一样，只差字面值 ----
+  // 三条「已知问题」只差版本号，各字段长度相同、查询词频相同：分词打散版本号后同分，按确认时间分不出目标
+  {
+    id: 'mem_n3s7v2', type: 'knowledge', name: '支付 SDK 3.2.0-rc.2 的已知问题',
+    summary: '3.2.0-rc.2 在预发试过，记下问题和绕行办法，升级前先看',
+    tags: ['payment', 'sdk'],
+    content: '支付 SDK 3.2.0-rc.2 在预发环境接入试过。这一版的问题：回调验签修好了，但退款通知改成批量推送，一次最多二十条。'
+      + '绕行办法：退款回调改成逐条幂等落库，单条失败只重试那一条。正式环境升级前，先在预发把下单、回调、退款完整走一遍，确认对账文件能正常解析。',
+  },
+  {
+    id: 'mem_n5s2v6', type: 'knowledge', name: '支付 SDK 3.1.0-rc.2 的已知问题',
+    summary: '3.1.0-rc.2 在预发试过，记下问题和绕行办法，升级前先看',
+    tags: ['payment', 'sdk'],
+    content: '支付 SDK 3.1.0-rc.2 在预发环境接入试过。这一版的问题：对账文件的编码从 GBK 换成了 UTF-8，旧解析脚本读出乱码。'
+      + '绕行办法：解析前先按文件头判断编码，两种都能读。正式环境升级前，先在预发把下单、回调、退款完整走一遍，确认对账文件能正常解析。',
+  },
+  {
+    id: 'mem_n4s1v8', type: 'knowledge', name: '支付 SDK 3.2.0-rc.1 的已知问题',
+    summary: '3.2.0-rc.1 在预发试过，记下问题和绕行办法，升级前先看',
+    tags: ['payment', 'sdk'],
+    content: '支付 SDK 3.2.0-rc.1 在预发环境接入试过。这一版的问题：回调验签偶发失败，签名串里的时间戳被截成了秒级。'
+      + '绕行办法：验签前把时间戳补齐到毫秒级，或者暂时先停在上一个正式版。正式环境升级前，先在预发把下单、回调、退款完整走一遍，确认对账文件能正常解析。',
+  },
+  {
+    id: 'mem_d2a8h5', type: 'project', name: '设计文档归档',
+    summary: '过时的设计文档移进 docs/archive/，不删除',
+    tags: ['docs', 'archive'],
+    content: '设计文档过时后不删，移进 docs/archive/ 目录，文件名前加上归档日期。archive 下的文档只读，发现里面还有用的段落，就抄回现行文档再改。'
+      + '引用设计文档的地方如果指向了 archive 里的旧版，顺手换成现行文档的链接。',
+  },
+  {
+    id: 'mem_i7p2w4', type: 'knowledge', name: '接口鉴权改用短期令牌',
+    summary: '/api/v2/ 下的接口改用短期令牌鉴权，令牌十五分钟失效',
+    tags: ['api', 'auth'],
+    content: '新版接口统一挂在 /api/v2/ 下，鉴权从长期 API key 改成短期令牌：客户端先用 key 换令牌，令牌十五分钟失效，失效前五分钟可以续。'
+      + '网关只认令牌，不再接受直接带 key 的请求。服务端校验令牌时顺带检查权限范围，越权直接返回 403。',
+  },
+  {
+    id: 'mem_i6p1w9', type: 'project', name: '旧版接口下线计划',
+    summary: '/api/v1/ 在 v2 上线满半年后关闭，之前只修安全漏洞',
+    tags: ['api', 'deprecation'],
+    content: '旧版接口 /api/v1/ 进入只维护状态：只修安全漏洞，不加新功能。v2 上线满半年后关闭 /api/v1/，关闭前一个月在响应头里加下线提示，'
+      + '并给还在调用 v1 的客户逐个发通知。v1 和 v2 的鉴权方式不同，迁移时客户端要先改成换取令牌。',
+  },
+  {
+    id: 'mem_t5d1s3', type: 'procedure', name: '本地测试数据',
+    summary: '用 db:seed 灌一套固定的测试数据，账号和订单都是假的',
+    tags: ['dev', 'database'],
+    content: 'pnpm run db:seed 往本地数据库灌一套固定的测试数据：三个角色各一个账号，外加几十条订单。数据全是假的，可以随便改；想回到初始状态就清掉重灌。'
+      + '新增表时顺手在灌数脚本里补几条样例，别让新人对着空表调试。',
+  },
+  {
+    id: 'mem_t6d9r2', type: 'procedure', name: '本地数据库重置',
+    summary: 'db:reset 清空本地库后重跑迁移和 seed，只能在本地用',
+    tags: ['dev', 'database'],
+    content: 'pnpm run db:reset 会删掉本地数据库里的全部表，重跑迁移，再把 seed 数据灌回去，适合迁移写乱了想从头来的时候。'
+      + '脚本开头检查连接串，指向的不是本机就直接退出，防止误删共享环境的数据。重置后 seed 里的测试账号密码也会恢复成默认值。',
+  },
   // ---- 总览类长记录：一条里提到很多主题，各主题的专门记录才是首选 ----
   {
     id: 'mem_k3d8w2', type: 'project', name: '记忆插件设计总览',
@@ -717,12 +775,18 @@ export const EVAL_RECORDS: MemoryRecord[] = MEMORIES.map((m, i) => ({
 }))
 
 export const EVAL_CATEGORIES = [
-  'short-cjk', 'long-cjk', 'identifier', 'partial-word', 'plain-name', 'id-direct', 'zero-token', 'paraphrase',
+  'short-cjk', 'long-cjk', 'identifier', 'partial-word', 'plain-name', 'id-direct', 'zero-token', 'anchor', 'paraphrase',
 ] as const
 export type EvalCategory = (typeof EVAL_CATEGORIES)[number]
 
 /** 只记录基线、不进回归门槛的类别：换说法查询量的是字面匹配够不着的地方，分数低是预期。 */
 export const BASELINE_ONLY_CATEGORIES: readonly EvalCategory[] = ['paraphrase']
+
+/**
+ * 逐条设门槛的类别：每条查询两档都必须第一名命中，不计入聚合下限。
+ * 锚点类（带标点的字面值）靠字面整词命中排序键定第一名，结果是确定的，掉一条就是规则坏了，不留余量。
+ */
+export const STRICT_CATEGORIES: readonly EvalCategory[] = ['anchor']
 
 /**
  * 换说法的四种方式：同义词（自动关机 / 定时关停）、上下位词（数据库 / Postgres）、
@@ -802,6 +866,18 @@ export const EVAL_QUERIES: readonly EvalQuery[] = [
   // 零 token
   { query: '', category: 'zero-token', relevant: [NEWEST_CONFIDENT] },
   { query: '   ', category: 'zero-token', relevant: [NEWEST_CONFIDENT] },
+  // 锚点：带标点的字面值（版本号、路径、带冒号的标识符），分词会把它打散
+  { query: '3.2.0-rc.2', category: 'anchor', relevant: ['mem_n3s7v2'] },
+  { query: '3.2.0-rc.1', category: 'anchor', relevant: ['mem_n4s1v8'] },
+  { query: '3.1.0-rc.2', category: 'anchor', relevant: ['mem_n5s2v6'] },
+  { query: '支付 SDK 3.2.0-rc.2 已知问题', category: 'anchor', relevant: ['mem_n3s7v2'] },
+  { query: '.archive/', category: 'anchor', relevant: ['mem_p9w3c4'] },
+  { query: 'docs/archive/', category: 'anchor', relevant: ['mem_d2a8h5'] },
+  { query: '/api/v2/', category: 'anchor', relevant: ['mem_i7p2w4'] },
+  { query: '/api/v1/', category: 'anchor', relevant: ['mem_i6p1w9'] },
+  { query: 'db:seed', category: 'anchor', relevant: ['mem_t5d1s3'] },
+  { query: 'db:reset', category: 'anchor', relevant: ['mem_t6d9r2'] },
+  { query: 'host:contract', category: 'anchor', relevant: ['mem_f7o3m5'] },
   // 换说法：只看 name 列表写查询，再对照全文标注；主要实词不出现在相关记忆的四个字段里（tests/search-eval.spec.ts 检查）。
   // 只记基线，不进回归门槛。总览类记录（设计总览、新人上手须知）按惯例不算相关。
   { query: '上云开销超标的通知', category: 'paraphrase', paraphrase: 'synonym', relevant: ['mem_s6j9r8'] },
