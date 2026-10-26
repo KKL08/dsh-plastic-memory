@@ -46,7 +46,8 @@ export function MovePanel({ projects, initial, unavailable, onCancel, onMove }: 
           </div>
         )}
       <div className="pm-pending-actions">
-        <Button variant="ghost" onClick={onCancel}>{t('pending.cancel')}</Button>
+        {/* 没有可选的项目时焦点落在这里：「移到项目…」已收起，不接住就掉到页面上 */}
+        <Button variant="ghost" autoFocus={selected === undefined} onClick={onCancel}>{t('pending.cancel')}</Button>
         <Button
           variant="primary"
           unavailable={unavailable ?? (selected === undefined ? t('pending.move.none') : undefined)}

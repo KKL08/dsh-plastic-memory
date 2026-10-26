@@ -1375,4 +1375,18 @@ describe('待处理：放错层只给挪层', () => {
     expect(within(cardOf()).getByText('还没有已知的项目：在某个项目里开过对话后，它会出现在这里。')).toBeInTheDocument()
     expect(within(cardOf()).getByRole('button', { name: '移过去' })).toHaveAttribute('aria-disabled', 'true')
   })
+
+  it('展开时焦点落在选中的项目上', () => {
+    setupMove([toProject])
+    openPicker()
+    expect(within(cardOf()).getByRole('radio', { name: /^app/ })).toHaveFocus()
+  })
+
+  it('一个已知项目都没有：展开时焦点落在「取消」，不随收起的「移到项目…」掉到页面上', () => {
+    const lonely = { kind: 'ready', sessionId: 's1', cwd: undefined } as const
+    const gateway = createFakeGateway({ session: lonely, config, views: { pending: view(toProject), health: scannedHealth(NOW) } })
+    renderInShell(<PendingTab nav={createNavStore()} session={lonely} workspacePath={undefined} now={NOW} />, gateway)
+    openPicker()
+    expect(within(cardOf()).getByRole('button', { name: '取消' })).toHaveFocus()
+  })
 })
