@@ -75,7 +75,7 @@ export function layerOfMemory(memory: Pick<MemoryCard, 'scope' | 'workspacePath'
 // —— 待处理 ——
 
 /**
- * 待处理项的级别，按显示顺序：必须处理（会造成泄露或丢数据）、等你决定（二选一或拍板）。
+ * 待处理项的级别，按显示顺序：高优问题 must-fix（放着会泄露或丢数据）、待你处理 your-call（插件先按稳妥默认办，等你拍板）。
  * 每个待处理项属于且只属于一级；以后加级别时往这里追加。
  */
 export const PENDING_LEVELS = ['must-fix', 'your-call'] as const

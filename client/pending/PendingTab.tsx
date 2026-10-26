@@ -1,5 +1,5 @@
 /**
- * 记忆页「待处理」tab（PRD 5.2、5.13）：待处理项按级别分组（必须处理 → 等你决定），组标题带条数，没有内容的组不画；
+ * 记忆页「待处理」tab（PRD 5.2、5.13）：待处理项按级别分组（高优问题 → 待你处理），组标题带条数，没有内容的组不画；
  * 组内按服务端排好的顺序各出一张卡。视图不含刚处理完的条目，所以列表在本地记住最近一次处理（原条目 + 结果 + 原位置），在原位显示结果卡；
  * 撤销成功后等视图把条目带回来，再去掉本地那张。离开页面就收起。
  * 动作碰上这一条正在别处处理或刚处理完（什么都没动）：在原位留一行说明，那边的结果写进视图、卡片消失后也还在，
@@ -238,9 +238,9 @@ function PendingEmpty({ nav, session, workspacePath, health, now }: {
 export const pendingCss = crossConfirmCss + `
 .pm-pending { display: flex; flex-direction: column; }
 .pm-pending-group { display: flex; flex-direction: column; }
-.pm-pending-group + .pm-pending-group { margin-top: 16px; }
-.pm-pending-group-title { margin: 4px 0 0; font-size: 12px; font-weight: 600; line-height: 1.5; color: var(--pm-text-2); }
-.pm-pending-group-count { font-weight: 400; }
+.pm-pending-group + .pm-pending-group { margin-top: 24px; }
+.pm-pending-group-title { margin: 4px 0 0; font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
+.pm-pending-group-count { font-weight: 400; color: var(--pm-text-2); }
 .pm-pending-row { position: relative; }
 .pm-pending-row + .pm-pending-row { border-top: .5px solid var(--pm-line); }
 .pm-pending-row.pm-flash { margin-inline: -12px; padding-inline: 12px; border-radius: 10px; }

@@ -95,7 +95,7 @@ describe('待处理视图', () => {
     expect((await h.decisions.list()).map(e => e.kind ?? 'conflict').sort()).toEqual(['conflict', 'conflict', 'overflow', 'promote-candidate'])
   })
 
-  it('每个待处理项带级别：密钥、读不出的文件属必须处理，冲突、提升候选、超限属等你决定；必须处理排在前，视图带各级条数', async () => {
+  it('每个待处理项带级别：密钥、读不出的文件属高优问题，冲突、提升候选、超限属待你处理；高优问题排在前，视图带各级条数', async () => {
     const h = harness()
     await h.store.create(g({ id: 'mem_secret', name: '部署凭证', content: `token ${FAKE_SECRET.sk}` }))
     await h.store.create(w({ id: 'mem_a', name: 'A', content: '用 pnpm' }))

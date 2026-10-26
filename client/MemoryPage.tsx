@@ -56,7 +56,7 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
   add({ kind: 'global' })
 
   const counts: Partial<Record<MemoryTab, number>> = {
-    // 主数只算必须处理和等你决定
+    // 主数只算高优问题和待你处理
     pending: countOf(pending, data => data.levelCounts['must-fix'] + data.levelCounts['your-call']),
     library: countOf(library, data => data.layers.find(l => sameScope(l.layer, scope))?.items.length ?? 0),
   }

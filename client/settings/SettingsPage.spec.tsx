@@ -426,7 +426,7 @@ describe('状态卡', () => {
       .toEqual({ marker: 'ok', conclusion: '状态良好', detail: '共 3 条记忆 · 上次体检：10 月 3 日' })
   })
 
-  it('分级后口径不变：「等你决定」只数密钥以外要你拍板的事，不算同在必须处理组的读不出的文件', () => {
+  it('分级后口径不变：「等你决定」只数密钥以外要你拍板的事，不算同在高优问题组的读不出的文件', () => {
     expect(summarize(views(pending([unreadable, unreadable, conflict])), true, NOW, t).conclusion).toBe('有 1 处等你决定')
     expect(summarize(views(pending([unreadable])), true, NOW, t)).toEqual({ marker: 'ok', conclusion: '状态良好', detail: '共 3 条记忆 · 上次体检：刚刚' })
   })

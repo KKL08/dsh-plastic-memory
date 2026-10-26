@@ -42,7 +42,7 @@ describe('记忆页外壳', () => {
     expect(gateway.sessionRequests.at(-1)).toBe('/w/app')
   })
 
-  it('待处理 tab 的数 = 必须处理 + 等你决定（读不出的文件也算）', () => {
+  it('待处理 tab 的数 = 高优问题 + 待你处理（读不出的文件也算）', () => {
     const conflict = { kind: 'conflict-horizontal', level: 'your-call', decisionId: 'd2', firstSeenAt: 2, summary: 's', left: null, right: null } as const
     const leveled: PendingView = {
       ...pending,
