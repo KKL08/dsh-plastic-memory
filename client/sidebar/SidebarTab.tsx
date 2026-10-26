@@ -302,8 +302,10 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
       {saved.length > 0
         ? (
           <section className="pm-side-section" aria-label={t('sidebar.saved.title')}>
-            <h2 className="pm-side-title">{t('sidebar.saved.title')}</h2>
-            <p className="pm-side-hint pm-side-section-note">{t('sidebar.saved.note')}</p>
+            <div className="pm-side-section-head">
+              <h2 className="pm-side-title">{t('sidebar.saved.title')}</h2>
+              <p className="pm-side-hint">{t('sidebar.saved.note')}</p>
+            </div>
             {saved.map(({ id, memory }) => memory === undefined
               ? purgedNote(id)
               : (
@@ -489,7 +491,7 @@ export const sidebarTabCss = crossConfirmCss + `
 .pm-side-group-count { margin-left: 4px; font-weight: 400; color: var(--pm-text-2); }
 .pm-side-group-title .pm-sep { margin: 0 6px 0 2px; }
 .pm-side-group-depth { font-weight: 400; color: var(--pm-text-2); }
-.pm-side-section-note { margin-top: -8px; }
+.pm-side-section-head { display: flex; flex-direction: column; gap: 2px; }
 .pm-side-saved { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 4px 8px; }
 .pm-side-saved > .pm-side-error { grid-column: 1 / -1; }
 .pm-side-delete {
