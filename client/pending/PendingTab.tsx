@@ -9,9 +9,9 @@
  * 带组标识进来时（健康页「去处理 ›」）焦点落在那一组的标题上，组已不在（处理完了）落在待处理顶部；每次导航只定位一次。
  */
 import { useEffect, useId, useRef, useState, type ReactElement, type ReactNode, type RefObject } from 'react'
-import { PENDING_LEVELS, type HealthView, type PendingItem, type PendingLevel, type PendingView } from '../../src/gui/contract.ts'
+import { PENDING_LEVELS, type HealthView, type LibraryView, type PendingItem, type PendingLevel, type PendingView } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
-import { formatDay, formatNumber, useT } from '../i18n.tsx'
+import { baseName, formatDay, formatNumber, useT } from '../i18n.tsx'
 import { FlashRow, useFlashTarget } from '../library/shared.tsx'
 import type { LocaleKey } from '../locales.ts'
 import { useCanOpen, useNavTarget, type NavStore, type NavTarget } from '../nav.ts'
@@ -19,6 +19,7 @@ import { EmptyState } from '../ui/EmptyState.tsx'
 import { crossConfirmCss } from './action.tsx'
 import { editCss } from './edit.tsx'
 import { modelEditCss } from './model-edit.tsx'
+import { moveCss } from './move.tsx'
 import {
   AdviceCard, HorizontalCard, OverflowCard, PromoteCard, ResultCard, SecretCard, titleOf, UnreadableCard, VerticalCard, type Outcome,
 } from './cards.tsx'
@@ -74,7 +75,12 @@ export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
   const gateway = useGateway()
   const pending = gateway.useView(session, 'pending')
   const health = gateway.useView(session, 'health')
+  const library = gateway.useView(session, 'library')
+  const current = gateway.useCurrentWorkspace()
   const config = gateway.useConfig()
+  // 「移到项目…」默认选当前页面的项目，页面在全局时选借来的会话所在的项目
+  const defaultProject = workspacePath ?? (current.status === 'ready' ? current.workspacePath : undefined)
+  const projects = knownProjects(defaultProject, session, library.status === 'ready' ? library.data : undefined)
   const [recent, setRecent] = useState<Recent | undefined>(undefined)
   const [refused, setRefused] = useState<Refused | undefined>(undefined)
   /** 点过「展开其余 N 条」的组。 */
@@ -153,7 +159,7 @@ export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
         />
       )
       case 'unreadable-file': return <UnreadableCard item={item} {...props} />
-      case 'advice': return <AdviceCard item={item} {...props} />
+      case 'advice': return <AdviceCard item={item} {...props} projects={projects} defaultProject={defaultProject} />
     }
   }
 
@@ -204,6 +210,18 @@ function useGroupFocus(nav: NavStore, root: RefObject<HTMLDivElement | null>, is
     spot.focus({ preventScroll: true })
     spot.scrollIntoView?.({ block: 'start' })
   }, [target, isReady, root])
+}
+
+/**
+ * 「移到项目…」列出的已知项目：会话归属对照里的项目，加上全部记忆里有记忆的项目（同作用域下拉）。
+ * 默认项排第一，其余按项目名。
+ */
+function knownProjects(defaultProject: string | undefined, session: BorrowedSession, library: LibraryView | undefined): string[] {
+  const paths = new Set<string>(session.kind === 'ready' ? Object.values(session.workspaces ?? {}) : [])
+  for (const { layer } of library?.layers ?? []) if (layer.kind === 'workspace') paths.add(layer.workspacePath)
+  if (defaultProject !== undefined) paths.delete(defaultProject)
+  const rest = [...paths].sort((a, b) => baseName(a).localeCompare(baseName(b)) || a.localeCompare(b))
+  return defaultProject === undefined ? rest : [defaultProject, ...rest]
 }
 
 /** 一级一组：组标题写级别和还在等你的条数（只剩结果卡时不写 0）。 */
@@ -275,7 +293,7 @@ function PendingEmpty({ nav, session, workspacePath, health, now }: {
   )
 }
 
-export const pendingCss = crossConfirmCss + editCss + modelEditCss + `
+export const pendingCss = crossConfirmCss + editCss + modelEditCss + moveCss + `
 .pm-pending { display: flex; flex-direction: column; }
 .pm-root .pm-pending:focus-visible { outline: none; }
 .pm-pending-group { display: flex; flex-direction: column; }

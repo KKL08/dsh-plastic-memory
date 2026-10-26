@@ -26,9 +26,10 @@ type Ok = Extract<MemoryCommandResult, { ok: true }>
 
 /**
  * 条目还开着才能做的命令：处理待决项的，not-found 只可能是条目已出了待决；按记忆 id 提升为全局的，
- * not-found 只可能是那条记忆已不在那个项目里（别处已提升或删掉）；忽略建议的，not-found 只可能是涉及的记忆已在别处删掉。
+ * not-found 只可能是那条记忆已不在那个项目里（别处已提升或删掉）；移到项目的同理，是那条已不在全局；
+ * 忽略建议的，not-found 只可能是涉及的记忆已在别处删掉。
  */
-const OPEN_ITEM_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'promote', 'keep-local', 'dismiss-overflow', 'promote-memory', 'ignore-advice'])
+const OPEN_ITEM_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'promote', 'keep-local', 'dismiss-overflow', 'promote-memory', 'move-memory', 'ignore-advice'])
 
 /**
  * 命令没做任何改动，因为这一条正在别处（别的标签页、宿主进程、体检）处理（claimed），或刚在别处处理完（not-found）。
@@ -71,9 +72,10 @@ export function useItemAction(session: BorrowedSession, onOk: (command: MemoryCo
       if (r.code === 'cross-workspace' && !allowed && workspacePath !== undefined) setState({ kind: 'cross', workspacePath, command })
       else if (r.code === 'has-secret' && command.cmd === 'forget') setState({ kind: 'secret', command })
       else if (r.code === 'secret-suspected' && (command.cmd === 'edit-memory' || command.cmd === 'merge-memories')) setState({ kind: 'suspected', command })
-      // 这两种服务端原话只有中文，界面换成本地文案
+      // 这几种服务端原话只有中文，界面换成本地文案
       else if (r.code === 'stale') setState({ kind: 'error', detail: t('pending.edit.stale') })
       else if (r.code === 'secret-critical') setState({ kind: 'error', detail: t('pending.edit.secretCritical') })
+      else if (r.code === 'target-taken') setState({ kind: 'error', detail: t(command.cmd === 'undo' ? 'pending.move.undoTaken' : 'pending.move.taken') })
       else setState({ kind: 'error', detail: r.detail ?? r.code })
     })
   }
@@ -108,11 +110,17 @@ function ConfirmGroup({ label, children }: { label: string; children: ReactNode 
 }
 
 /** 跨项目确认行：写明记忆属于哪个项目，「取消」或「继续处理」。待处理卡和全部记忆 / 最近删除的行共用。 */
-export function CrossConfirm({ workspacePath, onCancel, onConfirm }: { workspacePath: string; onCancel: () => void; onConfirm: () => void }) {
+export function CrossConfirm({ workspacePath, isMove = false, onCancel, onConfirm }: {
+  workspacePath: string
+  /** 移到项目：写的是要移去的项目，不是记忆所在的项目。 */
+  isMove?: boolean
+  onCancel: () => void
+  onConfirm: () => void
+}) {
   const t = useT()
   return (
     <ConfirmGroup label={t('pending.cross.confirm')}>
-      <p className="pm-pending-text">{t('pending.cross.body', { name: baseName(workspacePath) })}</p>
+      <p className="pm-pending-text">{t(isMove ? 'pending.cross.moveBody' : 'pending.cross.body', { name: baseName(workspacePath) })}</p>
       <div className="pm-pending-actions">
         {/* 焦点移进确认，停在不改动任何东西的「取消」上 */}
         <Button autoFocus onClick={onCancel}>{t('pending.cancel')}</Button>
@@ -163,7 +171,9 @@ export const crossConfirmCss = `
 export function ActionFeedback({ action }: { action: ItemAction }) {
   const t = useT()
   const { state } = action
-  if (state.kind === 'cross') return <CrossConfirm workspacePath={state.workspacePath} onCancel={action.cancelCross} onConfirm={action.confirmCross} />
+  if (state.kind === 'cross') {
+    return <CrossConfirm workspacePath={state.workspacePath} isMove={state.command.cmd === 'move-memory'} onCancel={action.cancelCross} onConfirm={action.confirmCross} />
+  }
   if (state.kind === 'secret') return <SecretDeleteConfirm onCancel={action.cancelCross} onConfirm={action.confirmSecret} />
   if (state.kind === 'suspected') {
     return (

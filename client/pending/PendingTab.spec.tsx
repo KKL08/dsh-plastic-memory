@@ -670,8 +670,8 @@ describe('待处理：建议整理', () => {
     ['内容过长', bloat, ['忽略', '打开文件', '直接改', '让模型改']],
     ['指向的旧记忆已不在', orphan, ['忽略', '打开文件']],
     ['内容重复', baselineDup, ['忽略', '删除', '打开文件']],
-    ['放错层', toGlobal, ['忽略', '打开文件', '直接改', '让模型改', '提升为全局']],
-    ['放错层', toProject, ['忽略', '打开文件', '直接改', '让模型改']],
+    ['放错层', toGlobal, ['忽略', '打开文件', '提升为全局']],
+    ['放错层', toProject, ['忽略', '打开文件', '移到项目…']],
     ['表述不清', unclear, ['忽略', '打开文件', '直接改', '让模型改']],
   ] as const)('%s：动作按 spec 表', (title, item, buttons) => {
     setup([item])
@@ -715,7 +715,7 @@ describe('待处理：建议整理', () => {
     for (const text of [
       '指令文件（AGENTS.md 等）里已经写了同样的内容，这条可以删掉。删除后 14 天内可在「最近删除」恢复。',
       '这条看起来对所有项目都适用，现在只放在一个项目里。提升为全局后所有项目都会带入它，14 天内可撤销。',
-      '这条看起来只和某个项目有关，放在全局会被带进每个项目的对话。改成各个项目都适用的说法。',
+      '这条看起来只和某个项目有关，放在全局会被带进每个项目的对话。移到项目后只在那个项目里带入，14 天内可撤销。',
       '换一个没有上下文的新对话，agent 很难照这条去做。把缺的背景、对象或条件写清楚。',
       '内容很长，带入对话时占用较多。精简成要点更好。',
     ]) expect(screen.getByText(text)).toBeInTheDocument()
@@ -992,9 +992,8 @@ describe('待处理：直接改与直接合并', () => {
   })
 
   it('同卡别的动作在进行：「直接改」置灰', async () => {
-    const misplaced: PendingItem = { ...bloat, type: 'misplaced' }
-    setup([misplaced], { respond: command => (command.cmd === 'promote-memory' ? new Promise<never>(() => {}) : { ok: true, cmd: command.cmd }) })
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '提升为全局' })) })
+    setup([bloat], { respond: command => (command.cmd === 'ignore-advice' ? new Promise<never>(() => {}) : { ok: true, cmd: command.cmd }) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '忽略' })) })
     expect(screen.getByRole('button', { name: '直接改' })).toHaveAttribute('aria-disabled', 'true')
   })
 
@@ -1254,5 +1253,126 @@ describe('待处理：让模型改与让模型合并', () => {
       })
       expect(screen.getByText('已合并')).toBeInTheDocument()
     })
+  })
+})
+
+// —— 放错层只回答挪不挪：项目 → 全局是提升，全局 → 项目是移到项目（行内选项目） ——
+
+describe('待处理：放错层只给挪层', () => {
+  const toGlobal: PendingItem = { kind: 'advice', level: 'advice', type: 'misplaced', memories: [memory({ id: 'mu', name: '记忆 mu', filePath: '/m/app/mu.md', digest: 'sha1:mu' })] }
+  const toProject: PendingItem = {
+    kind: 'advice', level: 'advice', type: 'misplaced',
+    memories: [memory({ id: 'md', name: '记忆 md', scope: 'global', workspacePath: undefined, filePath: '/m/global/md.md', digest: 'sha1:md' })],
+  }
+  /** 借来的会话带着归属对照：已知项目是 app、blog（两个 cwd 落在 blog）。 */
+  const session = { kind: 'ready', sessionId: 's1', cwd: '/w/app', workspaces: { '/w/app': '/w/app', '/w/blog': '/w/blog', '/w/blog/web': '/w/blog' } } as const
+  /** pageProject：页面作用域的项目，null = 页面在全局。 */
+  function setupMove(items: PendingItem[], init: FakeGatewayInit = {}, pageProject: string | null = '/w/app') {
+    const gateway = createFakeGateway({ session, config, views: { pending: view(...items), health: scannedHealth(NOW) }, ...init })
+    renderInShell(<PendingTab nav={createNavStore()} session={session} workspacePath={pageProject ?? undefined} now={NOW} />, gateway)
+    return { gateway, commands: () => gateway.executed.map(e => e.command) }
+  }
+  const cardOf = () => screen.getByRole('heading', { level: 3, name: '放错层' }).closest('article')!
+  const openPicker = () => { fireEvent.click(within(cardOf()).getByRole('button', { name: '移到项目…' })) }
+
+  it('两个方向都没有「直接改」「让模型改」', () => {
+    setupMove([toGlobal, toProject])
+    for (const card of screen.getAllByRole('article')) {
+      expect(within(card).queryByRole('button', { name: '直接改' })).toBeNull()
+      expect(within(card).queryByRole('button', { name: '让模型改' })).toBeNull()
+    }
+  })
+
+  it('项目 → 全局：「忽略」发 ignore-advice，「打开文件」打开那条记忆的文件', async () => {
+    const { gateway, commands } = setupMove([toGlobal])
+    fireEvent.click(within(cardOf()).getByRole('button', { name: '打开文件' }))
+    expect(gateway.opened).toEqual([{ path: '/m/app/mu.md' }])
+    fireEvent.click(within(cardOf()).getByRole('button', { name: '忽略' }))
+    await screen.findByText('已忽略')
+    expect(commands()).toEqual([{ cmd: 'ignore-advice', type: 'misplaced', memories: [{ memoryId: 'mu', layer: { kind: 'workspace', workspacePath: '/w/app' }, base: { updatedAt: toGlobal.kind === 'advice' ? toGlobal.memories[0]!.updatedAt : 0, digest: 'sha1:mu' } }] }])
+  })
+
+  it('全局 → 项目：点「移到项目…」在卡片里展开已知项目，默认选当前页面的项目；「取消」收起，什么都不发', () => {
+    const { commands } = setupMove([toProject])
+    openPicker()
+    const group = within(cardOf()).getByRole('group', { name: '移到哪个项目' })
+    expect(within(group).getAllByRole('radio').map(r => (r as HTMLInputElement).value)).toEqual(['/w/app', '/w/blog'])
+    expect(within(group).getByRole('radio', { name: /^app/ })).toBeChecked()
+    expect(within(cardOf()).queryByRole('button', { name: '忽略' })).toBeNull()
+    fireEvent.click(within(cardOf()).getByRole('button', { name: '取消' }))
+    expect(within(cardOf()).queryByRole('group', { name: '移到哪个项目' })).toBeNull()
+    expect(within(cardOf()).getByRole('button', { name: '移到项目…' })).toBeInTheDocument()
+    expect(commands()).toEqual([])
+  })
+
+  it('页面在全局：默认选借来的会话所在的项目；全部记忆里有记忆的项目也列出来', () => {
+    setupMove([toProject], {
+      currentWorkspace: '/w/blog',
+      views: {
+        pending: view(toProject), health: scannedHealth(NOW),
+        library: { version: GUI_VIEW_VERSION, layers: [{ layer: { kind: 'global' }, items: [] }, { layer: { kind: 'workspace', workspacePath: '/w/docs' }, items: [] }] } as never,
+      },
+    }, null)
+    openPicker()
+    const group = within(cardOf()).getByRole('group', { name: '移到哪个项目' })
+    expect(within(group).getAllByRole('radio').map(r => (r as HTMLInputElement).value)).toEqual(['/w/blog', '/w/app', '/w/docs'])
+    expect(within(group).getByRole('radio', { name: /^blog/ })).toBeChecked()
+  })
+
+  it('选好项目点「移过去」才发 move-memory；结果卡写「已移到 <项目名>」，撤销发 undo', async () => {
+    const { commands } = setupMove([toProject], {
+      respond: command => command.cmd === 'move-memory'
+        ? { ok: true, cmd: command.cmd, decisionId: 'pd_mv', memoryIds: ['md'], snapshotId: 'snap_1', filePath: '/m/blog/md.md' }
+        : { ok: true, cmd: command.cmd },
+    })
+    openPicker()
+    fireEvent.click(within(cardOf()).getByRole('radio', { name: /^blog/ }))
+    expect(commands()).toEqual([])
+    fireEvent.click(within(cardOf()).getByRole('button', { name: '移过去' }))
+    await screen.findByText('已移到 blog')
+    expect(screen.getByText('只在这个项目里带入，14 天内可撤销。')).toBeInTheDocument()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
+    expect(commands()).toEqual([{ cmd: 'move-memory', memoryId: 'md', workspacePath: '/w/blog' }, { cmd: 'undo', decisionId: 'pd_mv' }])
+  })
+
+  it('目标不是借来的会话所在项目：服务端拒（cross-workspace）→ 行内写明要移去的项目；「继续处理」带 allowCrossWorkspace 重发', async () => {
+    const { commands } = setupMove([toProject], {
+      respond: command => command.cmd === 'move-memory' && command.allowCrossWorkspace !== true
+        ? { ok: false, cmd: command.cmd, code: 'cross-workspace', rejected: [{ id: 'md', workspacePath: '/w/blog' }] }
+        : { ok: true, cmd: command.cmd, decisionId: 'pd_mv' },
+    })
+    openPicker()
+    fireEvent.click(within(cardOf()).getByRole('radio', { name: /^blog/ }))
+    fireEvent.click(within(cardOf()).getByRole('button', { name: '移过去' }))
+    expect(await screen.findByText('要移去的 blog 不是当前项目。确定从这里移过去吗？')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '继续处理' }))
+    await screen.findByText('已移到 blog')
+    expect(commands()).toEqual([
+      { cmd: 'move-memory', memoryId: 'md', workspacePath: '/w/blog' },
+      { cmd: 'move-memory', memoryId: 'md', workspacePath: '/w/blog', allowCrossWorkspace: true },
+    ])
+  })
+
+  it('目标项目已有同一条（target-taken）：卡片里写明没有移动', async () => {
+    setupMove([toProject], { respond: command => ({ ok: false, cmd: command.cmd, code: 'target-taken', detail: '已有' }) })
+    openPicker()
+    fireEvent.click(within(cardOf()).getByRole('button', { name: '移过去' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('这个项目里已经有同一条记忆（也可能在最近删除里），没有移动。')
+  })
+
+  it('别处已移走或删掉（not-found）：卡片外提示没有生效', async () => {
+    setupMove([toProject], { respond: command => ({ ok: false, cmd: command.cmd, code: 'not-found', detail: '不存在或已处理：md' }) })
+    openPicker()
+    fireEvent.click(within(cardOf()).getByRole('button', { name: '移过去' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('你对「放错层」的选择没有生效：它正在别处处理，或者刚在别处处理完。')
+  })
+
+  it('一个已知项目都没有：写明原因，「移过去」不可用', () => {
+    const lonely = { kind: 'ready', sessionId: 's1', cwd: undefined } as const
+    const gateway = createFakeGateway({ session: lonely, config, views: { pending: view(toProject), health: scannedHealth(NOW) } })
+    renderInShell(<PendingTab nav={createNavStore()} session={lonely} workspacePath={undefined} now={NOW} />, gateway)
+    openPicker()
+    expect(within(cardOf()).getByText('还没有已知的项目：在某个项目里开过对话后，它会出现在这里。')).toBeInTheDocument()
+    expect(within(cardOf()).getByRole('button', { name: '移过去' })).toHaveAttribute('aria-disabled', 'true')
   })
 })

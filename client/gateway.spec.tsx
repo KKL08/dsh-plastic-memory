@@ -586,7 +586,7 @@ describe('createHostGateway', () => {
   })
 
   describe('借来的会话中途换了（它开始跑一轮，同项目里另一个会话空闲）', () => {
-    const advice: PendingItem = { kind: 'advice', level: 'advice', type: 'misplaced', memories: [memory({ id: 'm1', content: '全局都用 pnpm。', digest: 'sha1:m1' })] }
+    const advice: PendingItem = { kind: 'advice', level: 'advice', type: 'unclear', memories: [memory({ id: 'm1', content: '全局都用 pnpm。', digest: 'sha1:m1' })] }
     const view: PendingView = { ...pending, items: [advice], levelCounts: levelCountsOf([advice]) }
     const reply = (text: object) => ({ ok: true as const, value: { commandId: 'c', result: { kind: 'success' as const, text: JSON.stringify(text) } } })
 
