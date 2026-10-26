@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -7,7 +7,7 @@ import { SidecarStore } from '../src/storage/sidecar.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
 import { computeDigest, encodeRecord, splitFrontmatter } from '../src/storage/frontmatter.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE, STATE_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
-import { MemoryStore } from '../src/store.ts'
+import { MemoryStore, type MemoryLogger } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
@@ -51,6 +51,9 @@ interface EnvOpts {
   now?: number
   /** 体检开关；缺省视为开启。 */
   governanceEnabled?: boolean
+  /** 包一层视图写入器（模拟收集、写入出错）。 */
+  wrapViews?: (writer: ViewWriter) => Pick<ViewWriter, 'request' | 'rewriteAll' | 'collectViews'>
+  log?: MemoryLogger
 }
 
 function env(opts: EnvOpts = {}) {
@@ -63,7 +66,8 @@ function env(opts: EnvOpts = {}) {
   const cache = sidecar.scanCache
   const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, cache, registry, memoryRoot: root, now: () => clock.now }) })
   const command = createMemoryCommand({
-    memoryRoot: root, store, decisions, snapshots, cache, ignores: new AdviceIgnoreStore(sidecar.adviceIgnores), registry, views,
+    memoryRoot: root, store, decisions, snapshots, cache, ignores: new AdviceIgnoreStore(sidecar.adviceIgnores), registry, views: opts.wrapViews?.(views) ?? views,
+    ...(opts.log !== undefined ? { log: opts.log } : {}),
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),
     resolveContext: async () => ({ workspacePath: 'workspacePath' in opts ? opts.workspacePath : SESSION_WS, delegationDepth: opts.delegationDepth ?? 0, session: { id: 'sess-1' } }),
     getLlm: () => (opts.llm === undefined ? null : opts.llm),
@@ -1336,6 +1340,39 @@ describe('scan', () => {
       expect(ledgerItems(pendingViewSchema.parse(await e.readView('pending'))).map(i => i.kind)).toEqual(['conflict-vertical'])
       const ws = healthViewSchema.parse(await e.readView('health')).layers.find(l => l.layer.kind === 'workspace')!
       expect(ws.issues).toContainEqual(expect.objectContaining({ type: 'conflict', count: 1 }))
+    })
+
+    it('体检前收集视图出错：体检照常做完、带回说明，只是不带新增条数与分数；出错记一条日志', async () => {
+      const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+      const e = env({
+        llm: answering(() => [conflict]), log,
+        wrapViews: w => ({ request: () => w.request(), rewriteAll: () => w.rewriteAll(), collectViews: () => Promise.reject(new Error('读不出')) }),
+      })
+      await seedFour(e)
+      const body = ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+      expect(body.notes).toContain('baseline-missing')
+      expect(body).not.toHaveProperty('added')
+      expect(body).not.toHaveProperty('scores')
+      expect(await e.decisions.list()).toHaveLength(1)
+      expect(log.warn).toHaveBeenCalledTimes(1)
+    })
+
+    it('体检后视图没写成、补收集也出错：体检不算失败，照样带回说明，不带新增条数与分数', async () => {
+      const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+      let collects = 0
+      const e = env({
+        llm: answering(() => [conflict]), log,
+        wrapViews: w => ({
+          request: () => w.request(),
+          rewriteAll: async () => undefined,
+          collectViews: () => (++collects === 1 ? w.collectViews() : Promise.reject(new Error('读不出'))),
+        }),
+      })
+      await seedFour(e)
+      const body = ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+      expect(body.notes).toContain('baseline-missing')
+      expect(body).not.toHaveProperty('added')
+      expect(log.warn).toHaveBeenCalledTimes(1)
     })
 
     it('再体检一次、发现没变：都是 0', async () => {

@@ -119,7 +119,7 @@ export class ViewWriter {
     return written
   }
 
-  /** 只收集、不写盘（体检前记下当时的待处理，和体检后比出新增）。 */
+  /** 只收集、不写视图文件（体检前记下当时的待处理，和体检后比出新增）；收集本身照常清理建议忽略表里失效的记录。 */
   collectViews(): Promise<GlobalViews> {
     return this.collect()
   }

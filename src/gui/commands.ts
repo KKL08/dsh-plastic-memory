@@ -524,19 +524,27 @@ async function dispatch(
     case 'scan': {
       // 在借来的会话的 agent 上解析模型，拿不到就不扫（只跑规则层会让界面以为体检做完了）
       if (deps.getLlm(exec) === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型，可在对话里让 agent 体检')
+      // 新增条数与分数是附带的：收集视图出错只记日志、结果里不带它们，不挡体检本身，也不把做完的体检报成失败
+      const collect = () => deps.views.collectViews().catch((err: unknown) => {
+        (deps.log ?? console).warn('[plastic-memory] 体检结果的视图收集失败，这次不给新增条数与分数', err)
+        return undefined
+      })
       // 体检前的待处理，和体检后比出新增
-      const before = (await deps.views.collectViews()).pending
+      const before = (await collect())?.pending
       const r = await executeScan(
         { scope: command.workspacePath ?? 'all', layers: 'full' },
         { store: deps.store, registry: deps.registry, decisions: deps.decisions, cache: deps.cache, getBaseline: deps.getBaseline, getLlm: deps.getLlm, resolveContext: deps.resolveContext, now: () => now },
         exec,
       )
       await deps.decisions.sweep(now)
-      const after = await deps.views.rewriteAll() ?? await deps.views.collectViews()
+      const after = await deps.views.rewriteAll() ?? (before === undefined ? undefined : await collect())
       if (r.kind === 'error') return fail(cmd, 'failed', r.message)
       // 项目体检读的是本项目的可见集合（全局 + 本项目），全库体检是全部层
       const covered = command.workspacePath === undefined ? 'all' : [{ kind: 'global' as const }, { kind: 'workspace' as const, workspacePath: command.workspacePath }]
-      return { ok: true, cmd, notes: r.notes.map(n => n.code), ...scanOutcome(before, after, covered) }
+      const notes = r.notes.map(n => n.code)
+      return before === undefined || after === undefined
+        ? { ok: true, cmd, notes }
+        : { ok: true, cmd, notes, ...scanOutcome(before, after, covered) }
     }
 
     case 'refresh-views':
