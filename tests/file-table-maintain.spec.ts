@@ -162,6 +162,19 @@ describe('维护点动作 ③：.archive/ 里 deletedAt 超 14 天的物理删�
     expect(await stats.get('mem_fresh')).toMatchObject({ recallCount: 1 })
   })
 
+  it('过期清除时别层还有同 id 的在用副本：只删过期文件，召回统计行按 id 一行，留给在用那份', async () => {
+    const now = Date.now()
+    await writeMem(globalDir(), 'live.md', record({ id: 'mem_dup', name: '全局那份' }))
+    await ensureDir(wsDir(), WS)
+    await writeMem(archiveOf(wsDir()), 'old.md', wsRecord({ id: 'mem_dup', name: '项目那份', status: 'deleted', deletedAt: now - DELETED_RETENTION_MS - DAY }))
+    const { table, stats } = open()
+    await stats.put('mem_dup', { id: 'mem_dup', recallCount: 3, lastRecalledAt: now })
+    await table.maintain([wsDir()])
+    expect(await mds(archiveOf(wsDir()))).toEqual([])
+    expect(await mds(globalDir())).toEqual(['live.md'])
+    expect(await stats.get('mem_dup')).toMatchObject({ recallCount: 3 })
+  })
+
   it('顶层的 deleted 文件不直接清：先搬进 .archive/（deletedAt 取 mtime），下次维护才按 deletedAt 计窗口', async () => {
     const now = Date.now()
     const path = await writeMem(globalDir(), 'top.md', record({ id: 'mem_top', status: 'deleted', updatedAt: now - 100 * DAY }))

@@ -384,7 +384,7 @@ export class FileTable implements MemoryTable {
   /**
    * 维护点（设计稿 §5；锁内，只动给定目录，幂等）。每个目录读顶层 + .archive/ 一遍，逐文件：
    *  - .archive/ 里 status 仍为 active 的按位置归一成 deleted（位置即作用域，不搬回顶层）；deleted 缺 deletedAt 用 mtime 补
-   *  - ③ .archive/ 里 deletedAt 超保留期的物理删除并清召回统计行（superseded 不清）
+   *  - ③ .archive/ 里 deletedAt 超保留期的物理删除，哪层都没有这个 id 了才清召回统计行（superseded 不清）
    *  - ④ 手建 / 手编回写：digest 认识且不匹配 → handEdited、updatedAt 与 lastConfirmedAt 取 mtime；缺 id / 缺 digest / 时间戳形态 /
    *    缺省字段由重新 encode 补齐；判「有变化」= 重新 encode 后与磁盘原文逐字节比较，不同才写
    *  - ② 顶层非 active 的搬进 .archive/（撞名追加 id 片段）；已过期的 active 文件不动
@@ -410,7 +410,8 @@ export class FileTable implements MemoryTable {
         if (inArchive && record.status === 'deleted' && record.deletedAt! < cutoff) {
           if (!(await this.unchangedSince(slot))) continue
           await rm(slot.filePath, { force: true })
-          await this.opts.stats.delete(record.id)
+          // 同 delete：别层还有这个 id 时统计行是它的。只在真删过期文件时全盘找一次，平常的维护不多读
+          if ((await this.locateSlot(record.id)) === undefined) await this.opts.stats.delete(record.id)
           continue
         }
         if (digestMismatch(DIGEST_LINE_RE.exec(frontmatterOf(slot.raw))?.[1], record)) {
