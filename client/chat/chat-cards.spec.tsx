@@ -148,12 +148,29 @@ describe('交付卡', () => {
 
     fireEvent.click(screen.getAllByRole('button', { name: '删除这条记忆' })[0]!)
     expect(await screen.findByText('已删除。14 天内也能在最近删除里找回。')).toBeInTheDocument()
-    expect(gateway.executed).toEqual([{ sessionId: 's1', command: { cmd: 'forget', memoryId: 'mem_1' } }])
+    expect(gateway.executed).toEqual([{ sessionId: 's1', command: { cmd: 'forget', memoryId: 'mem_1', layer: { kind: 'workspace', workspacePath: '/w/app' } } }])
     expect(screen.queryByText('测试不 mock 数据库')).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: '撤销' }))
     expect(await screen.findByText('测试不 mock 数据库')).toBeInTheDocument()
-    expect(gateway.executed.at(-1)).toEqual({ sessionId: 's1', command: { cmd: 'restore', memoryId: 'mem_1' } })
+    expect(gateway.executed.at(-1)).toEqual({ sessionId: 's1', command: { cmd: 'restore', memoryId: 'mem_1', layer: { kind: 'workspace', workspacePath: '/w/app' } } })
+  })
+
+  it('本项目记忆：删除与撤销都带上会话所属项目的层（取会话视图里的项目，不用原始 cwd）', async () => {
+    const session: SessionView = {
+      version: GUI_VIEW_VERSION, sessionId: 's1', workspacePath: '/w/app', frozenAt: 2, budget: 4000, overflowMode: 'relax',
+      tokens: { workspace: 0, global: 0, fixed: 0 }, usedTokens: 0, injectedIds: [], omittedCount: 0, savedIds: [],
+    }
+    const gateway = createFakeGateway({ views: { session } })
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app/packages/web" saved={[saved('mem_w', '提交前跑测试')]} now={NOW} openDetail={() => {}} />, gateway)
+    fireEvent.click(screen.getByRole('button', { name: '删除这条记忆' }))
+    fireEvent.click(await screen.findByRole('button', { name: '撤销' }))
+    await screen.findByText('提交前跑测试')
+    const layer = { kind: 'workspace', workspacePath: '/w/app' }
+    expect(gateway.executed.map(e => e.command)).toEqual([
+      { cmd: 'forget', memoryId: 'mem_w', layer },
+      { cmd: 'restore', memoryId: 'mem_w', layer },
+    ])
   })
 
   it('全局记忆：删除与撤销都带上全局层，服务端只动全局那一份', async () => {
@@ -196,7 +213,7 @@ describe('交付卡', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '彻底删除' }))
     expect(await screen.findByText('已彻底删除。如果它是真的凭证，记得去换一个新的。')).toBeInTheDocument()
-    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'mem_1' }, { cmd: 'hard-delete', memoryId: 'mem_1' }])
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'mem_1', layer: { kind: 'workspace', workspacePath: '/w/app' } }, { cmd: 'hard-delete', memoryId: 'mem_1', layer: { kind: 'workspace', workspacePath: '/w/app' } }])
     expect(screen.queryByText('原文')).toBeNull()
     expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
 
@@ -213,7 +230,7 @@ describe('交付卡', () => {
     fireEvent.click(await screen.findByRole('button', { name: '取消' }))
     expect(screen.queryByText('彻底删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeNull()
     expect(screen.getByText('原文')).toBeInTheDocument()
-    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'mem_1' }])
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'mem_1', layer: { kind: 'workspace', workspacePath: '/w/app' } }])
   })
 
   it('含密钥确认收起后键盘焦点不丢：「取消」回到删除按钮；彻底删除后落到原位那行说明上', async () => {
@@ -547,7 +564,7 @@ describe('注册', () => {
     unmount()
     render(<Tail {...tailProps({ saved: [saved('mem_1', '原文')] })} />)
     fireEvent.click(screen.getByRole('button', { name: '删除这条记忆' }))
-    await waitFor(() => expect(execute).toHaveBeenCalledWith('s1', '/memory forget {"memoryId":"mem_1"}', []))
+    await waitFor(() => expect(execute).toHaveBeenCalledWith('s1', '/memory forget {"memoryId":"mem_1","layer":{"kind":"workspace","workspacePath":"/w/app"}}', []))
   })
 
   it('每条各有「查看详情 ›」：先写导航目标（全部记忆 · 这条所在作用域 · 这条的 id），再切到记忆页', () => {

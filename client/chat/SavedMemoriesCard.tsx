@@ -35,9 +35,11 @@ export interface SavedMemoriesCardProps {
   openDetail: (target: NavTarget) => void
 }
 
-function SavedRow({ sessionId, item, now, typeLabel, onDetail }: {
+function SavedRow({ sessionId, item, layer, now, typeLabel, onDetail }: {
   sessionId: string
   item: SavedMemory
+  /** 这条记忆所在的层：删除、撤销都带上它，同 id 别层还在用时也只动这一份。 */
+  layer: GuiLayerRef | undefined
   now: number
   typeLabel: (type: string) => string
   onDetail: () => void
@@ -48,7 +50,6 @@ function SavedRow({ sessionId, item, now, typeLabel, onDetail }: {
   // 记下的时刻取记忆卡上的（结果事件的时间）；没有就用这一行第一次出现的时刻。只有晚于它的视图才拿来判彻底删除
   const [firstSeen] = useState(() => Date.now())
   const savedAt = Number.isFinite(item.memory.updatedAt) && item.memory.updatedAt > 0 ? item.memory.updatedAt : firstSeen
-  const layer = layerOfMemory(item.memory)
   const how = gateway.useDeletions().of(id, layer, savedAt)
   const [state, setState] = useState<RowState>({ kind: 'idle' })
   const run = async (cmd: 'forget' | 'restore' | 'hard-delete') => {
@@ -106,6 +107,11 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
   const t = useT()
   const session = useMemo<BorrowedSession>(() => ({ kind: 'ready', sessionId, cwd }), [sessionId, cwd])
   const typeLabel = useTypeLabel(session)
+  // 本项目记忆的层：工具结果里没有项目路径，取服务端给这个会话定的项目（会话视图），还没有时退回会话的工作目录
+  const sessionView = useGateway().useView(session, 'session')
+  const workspacePath = (sessionView.status === 'ready' ? sessionView.data.workspacePath : undefined) ?? cwd
+  const layerOf = (memory: SavedMemory['memory']): GuiLayerRef | undefined => layerOfMemory(memory)
+    ?? (workspacePath === undefined ? undefined : { kind: 'workspace', workspacePath })
   // 全局记忆落在全局；本项目记忆落在会话的工作目录，不知道工作目录时只带 id
   const detail = (memory: SavedMemory['memory']) => {
     const scope: GuiLayerRef | undefined = memory.scope === 'global' ? { kind: 'global' }
@@ -121,6 +127,7 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
             key={item.callId}
             sessionId={sessionId}
             item={item}
+            layer={layerOf(item.memory)}
             now={now}
             typeLabel={typeLabel}
             onDetail={() => { detail(item.memory) }}
