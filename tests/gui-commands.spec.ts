@@ -19,7 +19,7 @@ import { ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../src/gui/commands.ts'
 import {
   GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, encodeMemoryCommand, sessionViewFile,
-  deletedViewSchema, libraryViewSchema, memoryCommandResultSchema, pendingViewSchema,
+  deletedViewSchema, layerOfMemory, libraryViewSchema, memoryCommandResultSchema, pendingViewSchema,
   type MemoryCommand, type MemoryCommandResult,
 } from '../src/gui/contract.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
@@ -707,6 +707,37 @@ describe('同 id 在两个项目里各有一份', () => {
     expect((await copyIn(e, undefined))!.status).toBe('active')
     expect((await copyIn(e, OTHER_WS))!.status).toBe('active')
     expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
+  })
+})
+
+describe('最近删除：同层在用副本遮住的已删副本', () => {
+  it('不列同层还有在用副本的已删副本（恢复定位到的是在用那份）；别层的已删副本照常列出，按它的层恢复', async () => {
+    const e = env()
+    const wsDir = join(root, workspaceDirName(SESSION_WS))
+    // 先建项目那份：写全局那份只清全局目录里的同 id 副本
+    await e.store.create(record({ id: 'mem_dup', name: '本项目那份', scope: 'workspace', workspacePath: SESSION_WS }))
+    await e.store.create(record({ id: 'mem_dup', name: '全局那份' }))
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: { kind: 'global' } }))
+    // 本项目归档里还躺着一份更新的已删副本（手工拷进去的旧文件）
+    const stale = record({ id: 'mem_dup', name: '本项目旧副本', scope: 'workspace', workspacePath: SESSION_WS, status: 'deleted', deletedAt: Date.now() + 60_000, updatedAt: Date.now() + 60_000 })
+    await mkdir(join(wsDir, ARCHIVE_DIR), { recursive: true })
+    await writeFile(join(wsDir, ARCHIVE_DIR, 'stale.md'), encodeRecord(stale, {}))
+    ok(await e.run({ cmd: 'refresh-views' }))
+
+    const items = deletedViewSchema.parse(await e.readView('deleted')).items
+    expect(items.map(i => [i.memory.name, i.memory.scope])).toEqual([['全局那份', 'global']])
+    ok(await e.run({ cmd: 'restore', memoryId: 'mem_dup', layer: layerOfMemory(items[0]!.memory) }))
+    expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
+  })
+
+  it('两个别层各有一份已删副本：最近删除里同一个 id 只列一份（页面按 id 作列表键）', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_dup', name: '本项目那份', scope: 'workspace', workspacePath: SESSION_WS }))
+    await e.store.create(record({ id: 'mem_dup', name: '别的项目那份', scope: 'workspace', workspacePath: OTHER_WS }))
+    await e.store.create(record({ id: 'mem_dup', name: '全局那份' }))
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: { kind: 'workspace', workspacePath: SESSION_WS } }))
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: { kind: 'workspace', workspacePath: OTHER_WS }, allowCrossWorkspace: true }))
+    expect(deletedViewSchema.parse(await e.readView('deleted')).items.map(i => i.memory.id)).toEqual(['mem_dup'])
   })
 })
 

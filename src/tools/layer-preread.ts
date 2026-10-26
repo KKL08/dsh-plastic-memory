@@ -34,12 +34,15 @@ export async function prereadLayers(
     directoryNotes.push(...r.directoryNotes.map(n => maskNote(n, byPath.get(n.path))))
   }
   const hint = { workspacePath }
-  // 已删、已取代的副本不遮住别层在用的同 id 副本；被盖住的已删副本单列（最近删除），也不算同 id 副本
+  // 已删、已取代的副本不遮住别层在用的同 id 副本；被盖住的已删副本单列（最近删除），也不算同 id 副本。
+  // 同层还有在用副本的已删副本不单列：按层恢复定位到的是在用那份，列出来也恢复不了
   const chosen = resolveLiveFirst(read, hint)
   const kept = new Map(chosen.map(l => [l.record.id, l]))
   const shadowed = read.filter(l => l.record.status !== 'active' && kept.get(l.record.id)?.record.status === 'active')
   directoryNotes.push(...duplicateNotes(read.filter(l => !shadowed.includes(l)), chosen))
-  const shadowedDeleted = resolveDuplicates(shadowed.filter(l => l.record.status === 'deleted'), hint)
+  // 在用 = 层顶层的 active（同按 id 定位的 pickLiveFirst）
+  const liveDirs = new Set(read.filter(l => l.record.status === 'active' && dirname(l.filePath) === l.dir).map(l => `${l.record.id}\n${l.dir}`))
+  const shadowedDeleted = resolveDuplicates(shadowed.filter(l => l.record.status === 'deleted' && !liveDirs.has(`${l.record.id}\n${l.dir}`)), hint)
   const byId = new Map<string, MemoryRecord>(chosen.map(l => [l.record.id, l.record]))
   const filePaths = new Map<string, string>(chosen.map(l => [l.record.id, l.filePath]))
   const cache = new Map(await deps.cache.list())
