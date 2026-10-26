@@ -34,6 +34,8 @@ export interface FakeGateway extends MemoryGateway {
   readonly opened: Array<{ path: string; action?: 'reveal' }>
   /** readFile 读过的路径。 */
   readonly reads: string[]
+  /** 每次 useModel 被问到的会话 id（宿主实现在第一次问时发 model-info）。 */
+  readonly modelRequests: string[]
   setConfigValue(config: PluginConfig | undefined): void
   setSession(session: BorrowedSession): void
   setCurrentWorkspace(path: string | undefined | { status: 'loading' }): void
@@ -66,6 +68,7 @@ export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
   const configWrites: FakeGateway['configWrites'] = []
   const opened: FakeGateway['opened'] = []
   const reads: string[] = []
+  const modelRequests: string[] = []
   let config = init.config
   // 删除状态和宿主实现同一份逻辑：同一个假网关下的几个界面共用；推来的最近删除、全部记忆视图也进去，等同宿主读到它
   const deletions = createDeletionStore()
@@ -84,6 +87,7 @@ export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
     sessionRequests,
     configWrites,
     reads,
+    modelRequests,
     setConfigValue(next) { config = next; bump() },
     useConfig() {
       useRevision()
@@ -111,6 +115,7 @@ export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
     },
     useModel(borrowed) {
       if (borrowed.kind === 'none') return { status: 'unknown' }
+      modelRequests.push(borrowed.sessionId)
       return init.model === null ? { status: 'unavailable' } : { status: 'ready', model: init.model }
     },
     useCurrentWorkspace() {

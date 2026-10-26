@@ -389,7 +389,7 @@ function charsBefore(memories: readonly MemoryCardData[], command: EditCommand):
 /**
  * 建议整理卡：不着色、不带状态标记。删除走 forget（进最近删除），含密钥时原位改问彻底删除；
  * 提升为全局按记忆 id 发 promote-memory，结果和提升候选一样可撤销。直接改在卡片里换出编辑框，保存发 edit-memory，同样可撤销；
- * 让模型改在卡片里展开生成与对照，应用同样发 edit-memory。借来的会话拿不到模型时「让模型改」置灰。
+ * 让模型改在卡片里展开生成与对照，应用同样发 edit-memory。借来的会话拿不到模型时，面板里写原因、「生成修改」置灰。
  */
 export function AdviceCard(props: CardProps<'advice'>) {
   const { item, session, now, typeLabels, onDone, onRefused } = props
@@ -413,9 +413,6 @@ export function AdviceCard(props: CardProps<'advice'>) {
   }, onRefused)
   const [isEditing, setEditing] = useState(false)
   const [isModelEditing, setModelEditing] = useState(false)
-  const model = gateway.useModel(session)
-  const modelName = model.status === 'ready' ? model.model : undefined
-  const modelUnavailable = action.unavailable ?? (model.status === 'unavailable' ? t('pending.model.unavailable') : undefined)
   const buttonsOf = (memory: MemoryCardData, deleteLabel = t('pending.advice.delete')): Record<AdviceAction, ReactNode> => {
     const layer = layerOfMemory(memory)
     const open = () => { void gateway.openPath(memory.filePath, 'open').then((ok) => { if (!ok) action.fail(t('pending.openFailed')) }) }
@@ -428,12 +425,12 @@ export function AdviceCard(props: CardProps<'advice'>) {
         ? <Button key="edit" unavailable={action.unavailable} onClick={() => { setEditing(true) }}>{t('pending.edit.edit')}</Button>
         : null,
       model: isEditable(memory)
-        ? <Button key="model" unavailable={modelUnavailable} onClick={() => { setModelEditing(true) }}>{t('pending.model.edit')}</Button>
+        ? <Button key="model" unavailable={action.unavailable} onClick={() => { setModelEditing(true) }}>{t('pending.model.edit')}</Button>
         : null,
     }
   }
   if (item.type === 'redundancy' && item.memories.length > 1) {
-    return <AdviceGroupCard {...props} action={action} buttonsOf={buttonsOf} modelName={modelName} modelUnavailable={modelUnavailable} />
+    return <AdviceGroupCard {...props} action={action} buttonsOf={buttonsOf} />
   }
   const [memory] = item.memories
   const copy = item.type === 'misplaced' && memory.scope === 'global' ? { ...ADVICE_COPY.misplaced, ...MISPLACED_TO_PROJECT } : ADVICE_COPY[item.type]
@@ -461,7 +458,6 @@ export function AdviceCard(props: CardProps<'advice'>) {
                 typeTitle={t(copy.title)}
                 base={{ content: memory.content, name: memory.name, summary: memory.summary, tags: memory.tags }}
                 session={session}
-                model={modelName}
                 unavailable={action.unavailable}
                 onClose={() => { setModelEditing(false) }}
                 onApply={(draft) => { action.run({ cmd: 'edit-memory', memoryId: memory.id, layer: layerOfMemory(memory), base: baseOf(memory), ...draft }) }}
@@ -494,12 +490,9 @@ function mergeDraft(pair: readonly [MemoryCardData, MemoryCardData]): { draft: E
  * 互相重复的几条记忆一张卡：每条各自一栏，带自己的删除和打开文件。两条时左右并排，写「删除左边 / 删除右边」，
  * 两条都能改时再给「直接合并」「让模型合并」：合成保留的那条，另一条进最近删除。
  */
-function AdviceGroupCard({ item, session, now, typeLabels, action, buttonsOf, modelName, modelUnavailable }: CardProps<'advice'> & {
+function AdviceGroupCard({ item, session, now, typeLabels, action, buttonsOf }: CardProps<'advice'> & {
   action: ItemAction
   buttonsOf: (memory: MemoryCardData, deleteLabel?: string) => Record<AdviceAction, ReactNode>
-  modelName: string | undefined
-  /** 「让模型合并」不可用的原因（卡片忙、拿不到模型）。 */
-  modelUnavailable: string | undefined
 }) {
   const t = useT()
   const isPair = item.memories.length === 2
@@ -549,7 +542,6 @@ function AdviceGroupCard({ item, session, now, typeLabels, action, buttonsOf, mo
               base={merge.draft}
               keeper={mergeKeeperIndex(pair)}
               session={session}
-              model={modelName}
               unavailable={action.unavailable}
               onClose={() => { setModelMerging(false) }}
               onApply={(draft) => { mergeWith(pair, draft) }}
@@ -562,7 +554,7 @@ function AdviceGroupCard({ item, session, now, typeLabels, action, buttonsOf, mo
                 ? (
                   <div className="pm-pending-actions">
                     <Button unavailable={action.unavailable} onClick={() => { setMerging(true) }}>{t('pending.edit.merge')}</Button>
-                    <Button unavailable={modelUnavailable} onClick={() => { setModelMerging(true) }}>{t('pending.model.merge')}</Button>
+                    <Button unavailable={action.unavailable} onClick={() => { setModelMerging(true) }}>{t('pending.model.merge')}</Button>
                   </div>
                 )
                 : null}

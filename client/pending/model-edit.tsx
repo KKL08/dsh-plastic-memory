@@ -7,7 +7,7 @@
 import { diffWords, type Change } from 'diff'
 import { Fragment, useEffect, useId, useRef, useState } from 'react'
 import { layerOfMemory, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type ModelEditAdviceType } from '../../src/gui/contract.ts'
-import { useGateway, type BorrowedSession } from '../gateway.ts'
+import { useGateway, type BorrowedSession, type ModelState } from '../gateway.ts'
 import { formatNumber, useT, type Translate } from '../i18n.tsx'
 import { Button } from '../ui/Button.tsx'
 import { keepFocusInPlace, useReturnFocus } from '../ui/focus-return.ts'
@@ -33,7 +33,13 @@ function failureOf(r: Extract<MemoryCommandResult, { ok: false }>, t: Translate)
   }
 }
 
-export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, session, model, unavailable, onClose, onApply }: {
+/** 拿到模型名写全句；会话没有模型写原因；还在问或没给名字只写后半句。 */
+function hintOf(model: ModelState, t: Translate): string {
+  if (model.status === 'unavailable') return t('pending.model.unavailable')
+  return model.status === 'ready' && model.model !== undefined ? t('pending.model.hint', { model: model.model }) : t('pending.model.hintNoName')
+}
+
+export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, session, unavailable, onClose, onApply }: {
   /** 一条，或合并时两条（卡片上的左右顺序）。 */
   memories: readonly [MemoryCard] | readonly [MemoryCard, MemoryCard]
   adviceType: ModelEditAdviceType
@@ -44,8 +50,6 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
   /** 合并时保留哪条（mergeKeeperIndex）。 */
   keeper?: 0 | 1
   session: BorrowedSession
-  /** 借来的会话的模型名；拿不到名字时提示只写后半句。 */
-  model: string | undefined
   /** 卡片的忙状态（应用中、等确认）。 */
   unavailable: string | undefined
   onClose: () => void
@@ -54,6 +58,8 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
   const t = useT()
   const id = useId()
   const gateway = useGateway()
+  // 面板打开时才问借来的会话用哪个模型（每个会话只问一次）：问一次会在那个会话的日志里留一条记录
+  const model = gateway.useModel(session)
   const [phase, setPhase] = useState<Phase>({ kind: 'ask' })
   const [request, setRequest] = useState('')
   /** 「再改改」的起点。 */
@@ -115,9 +121,15 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
         />
         {phase.error !== undefined ? <p className="pm-pending-error" role="alert">{phase.error}</p> : null}
         <div className="pm-edit-foot">
-          <span className="pm-edit-hint">{model !== undefined ? t('pending.model.hint', { model }) : t('pending.model.hintNoName')}</span>
+          <span className="pm-edit-hint">{hintOf(model, t)}</span>
           <Button variant="ghost" unavailable={unavailable} onClick={onClose}>{t('pending.cancel')}</Button>
-          <Button variant="primary" unavailable={unavailable} onClick={generate}>{t('pending.model.generate')}</Button>
+          <Button
+            variant="primary"
+            unavailable={unavailable ?? (model.status === 'unavailable' ? t('pending.model.unavailable') : undefined)}
+            onClick={generate}
+          >
+            {t('pending.model.generate')}
+          </Button>
         </div>
       </div>
     )

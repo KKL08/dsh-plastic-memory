@@ -1087,10 +1087,23 @@ describe('待处理：让模型改与让模型合并', () => {
     expect(commands()[0]).toMatchObject({ cmd: 'draft-edit', adviceType: 'unclear' })
   })
 
-  it('模型不可用：按钮置灰并写原因', () => {
-    setup([bloat], { model: null })
-    expect(screen.getByRole('button', { name: '让模型改' })).toHaveAttribute('aria-disabled', 'true')
-    expect(screen.getByRole('button', { name: '让模型改' })).toHaveAttribute('title', '拿不到当前会话的模型。')
+  it('页面加载时不问模型，点开「让模型改」「让模型合并」才问', () => {
+    const pair: PendingItem = { kind: 'advice', level: 'advice', type: 'redundancy', memories: [memory({ id: 'r1', digest: 'sha1:r1' }), memory({ id: 'r2', digest: 'sha1:r2' })] }
+    const { gateway } = setup([bloat, pair], { model: 'deepseek-v4-flash' })
+    expect(gateway.modelRequests).toEqual([])
+    open()
+    expect(gateway.modelRequests.at(-1)).toBe('s1')
+  })
+
+  it('模型不可用：按钮照常能点；点开后面板里写原因，「生成修改」不可用，不发请求', async () => {
+    const { commands } = setup([bloat], { model: null })
+    expect(screen.getByRole('button', { name: '让模型改' })).not.toHaveAttribute('aria-disabled')
+    open()
+    expect(screen.getByText('拿不到当前会话的模型。')).toBeInTheDocument()
+    expect(screen.queryByText('先给你看结果再决定')).toBeNull()
+    expect(screen.getByRole('button', { name: '生成修改' })).toHaveAttribute('aria-disabled', 'true')
+    await generate()
+    expect(commands()).toEqual([])
   })
 
   it('含密钥的记忆：没有「让模型改」「让模型合并」，也不发请求', () => {

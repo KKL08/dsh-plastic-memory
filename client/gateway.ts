@@ -72,7 +72,7 @@ export interface MemoryGateway {
   execute(sessionId: string, command: MemoryCommand): Promise<MemoryCommandResult>
   /** hook：删过的记忆（见 createDeletionStore），各处显示同一条记忆时读它。 */
   useDeletions(): Deletions
-  /** hook：借来的会话能不能用模型、用的是哪个（「让模型改」的按钮与提示）。每个会话在页面里只问一次 model-info。 */
+  /** hook：借来的会话能不能用模型、用的是哪个（「让模型改」面板的提示与「生成修改」）。打开面板时才问，每个会话在页面里只问一次 model-info。 */
   useModel(session: BorrowedSession): ModelState
   /** hook：插件配置里界面要用的几项；宿主还没给出（或不服务这份配置）时为 undefined。 */
   useConfig(): PluginConfig | undefined
@@ -495,7 +495,7 @@ function createModelStore(run: RunLine) {
       states.set(sessionId, MODEL_UNKNOWN)
       void run(sessionId, encodeMemoryCommand({ cmd: 'model-info' })).then((r) => {
         const result = decodeExecution('model-info', r)
-        // 别的失败（宿主出错、旧插件不认这条命令）不当成拿不到模型：按钮照常可点，真拿不到时生成会写原因
+        // 别的失败（宿主出错、旧插件不认这条命令）不当成拿不到模型：「生成修改」照常可点，真拿不到时生成会写原因
         states.set(sessionId, result.ok ? { status: 'ready', model: result.model }
           : result.code === 'llm-unavailable' ? { status: 'unavailable' } : { status: 'ready', model: undefined })
         for (const fn of listeners) fn()
