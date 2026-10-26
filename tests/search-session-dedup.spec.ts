@@ -79,7 +79,7 @@ describe('memory_search：已带入全文的 core 记忆不重复贴正文', () 
     expect(hits.find(h => h.id === 'mem_out')!.content).toContain('数据库约定乙')
   })
 
-  it('冻结之后正文又改过的记忆照常给新全文（开头那份已经旧了）', async () => {
+  it('冻结之后正文又改过的记忆照常给新全文（快照里那份已经旧了）', async () => {
     const { store, search, freeze } = setup()
     await store.put(core('mem_core', '测试里不要 mock 数据库'))
     const session = {}

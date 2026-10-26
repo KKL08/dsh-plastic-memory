@@ -28,6 +28,7 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { AssembleContext, PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { cacheKey } from '../src/tools/scan.ts'
+import { IN_SNAPSHOT_NOTE } from '../src/tools/search.ts'
 import {
   memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema,
   type MemorySnapshot, type PendingDecision, type ScanCacheEntry,
@@ -802,6 +803,45 @@ describe('注入链接线', () => {
     expect(await preStep(preStepPayload(new AbortController().signal), failThen)).toBe(decision)
     expect(def.text(assembleCtx)).toBe(t0) // 没压掉旧快照，文本不变，宿主不会追加第二份
     expect(await assembleOnce()).toBe(t0)
+  })
+
+  /** 起插件、落一条 core 记忆，返回中间件与按同一 session 对象执行 memory_search 的入口。 */
+  async function bootWithCore() {
+    type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
+    const defs = new Map<string, ToolDef>()
+    const ctx = {
+      ...mockCtx(),
+      tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
+      logger: { info() {}, warn() {}, error() {} },
+    }
+    const memoryRoot = await makeTmpRoot()
+    await mkdir(join(memoryRoot, 'global'), { recursive: true })
+    await writeFile(join(memoryRoot, 'global', 'core.md'),
+      encodeRecord(record({ id: 'mem_core', type: 'preference', content: '测试里不要 mock 数据库' }), {}), 'utf8')
+    await apply(ctx as never, new Config({ memoryRoot } as never))
+    const session = { header: { id: 'sess-1' }, seq: 1, requestHeader: () => undefined }
+    const assembleCtx = { scope: { session } } as unknown as AssembleContext
+    const middleware = ctx.listeners.get('system-prompt/assemble')!
+    const exec = fakeExec({ agent: { session } as unknown as ToolRunContext['agent'] })
+    const search = async () => (await defs.get('memory_search')!.execute({ query: '数据库' }, exec)) as { hits: Array<{ id: string; content: string }> }
+    const recallStats = () => readFile(join(memoryRoot, STATE_DIR, RECALL_STATS_FILE), 'utf8').catch(() => '')
+    return { middleware, assembleCtx, search, recallStats }
+  }
+
+  it('快照进了本会话上下文：memory_search 命中带入全文的 core 记忆时正文换成说明', async () => {
+    const { middleware, assembleCtx, search } = await bootWithCore()
+    const assembly: PromptAssembly = { sections: [], contexts: [{ name: 'plastic-memory', text: '' }], tools: [], variables: {} }
+    await middleware(assembly, assembleCtx, async () => assembly)
+    expect(assembly.contexts[0]!.text).toContain('测试里不要 mock 数据库')
+    expect((await search()).hits[0]!.content).toBe(IN_SNAPSHOT_NOTE)
+  })
+
+  it('宿主压掉运行时上下文（组装里没有本插件的条目）：不冻结快照、不计召回，memory_search 照常给全文', async () => {
+    const { middleware, assembleCtx, search, recallStats } = await bootWithCore()
+    const assembly: PromptAssembly = { sections: [], contexts: [], tools: [], variables: {} }
+    await middleware(assembly, assembleCtx, async () => assembly)
+    expect(await recallStats()).not.toContain('mem_core')
+    expect((await search()).hits[0]!.content).toBe('测试里不要 mock 数据库')
   })
 })
 

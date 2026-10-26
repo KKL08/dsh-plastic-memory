@@ -56,7 +56,7 @@ export interface SearchHit {
 }
 
 /** 命中的 core 记忆全文已在本会话快照里时，正文换成这句：同一段全文不在上下文里贴两遍。 */
-export const IN_SNAPSHOT_NOTE = '全文已在开头的长期记忆里。'
+export const IN_SNAPSHOT_NOTE = '全文已在本会话带入的长期记忆里。'
 
 /** 命中弱时附在说明末尾：说明码本身就是「相关度弱」的信号，提示模型换词再搜一次，而不是把弱结果当定论。 */
 export const RETRY_HINT = '命中弱，可以换同义词、减少词数或换个角度再搜一次。'
@@ -157,7 +157,7 @@ export async function executeSearch(
   // 拿得到会话时同一会话每条只计一次召回，拿不到时每次都计
   if (sessionRecall && handle) await sessionRecall.markRecalled(handle, topIds)
   else await deps.store.markRecalled(topIds)
-  // 快照带入时的正文与现在一致才省略：冻结后改过的、同 id 取到别层副本的，开头那份不是这一版
+  // 快照带入时的正文与现在一致才省略：冻结后改过的、同 id 取到别层副本的，快照里那份不是这一版
   const injected = sessionRecall && handle ? sessionRecall.injectedCore(handle) : undefined
 
   // 说明码只看返回列表：没有全命中 → or-fallback；连部分命中也没有、只剩第三档 → substring-fallback（互斥、substring 优先）

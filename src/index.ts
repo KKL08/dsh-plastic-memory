@@ -557,13 +557,14 @@ export async function apply(ctx: Context, config: Config) {
   // 快照只在 assemble waterfall（异步）里构建：宿主在跑 waterfall【之前】就已物化全部 provider 文本，
   // 而同步 provider 只回缓存（首轮为空串）。中间件等 workspace 解析落定后组装或复用冻结快照，
   // 把本插件那条 context 的文本原位替换；解析超时走 global-only 临时文本（不冻结），不阻塞宿主。
+  // 宿主压掉运行时上下文时组装里没有本插件的条目：快照不进模型上下文，就不冻结——不计召回、不出会话视图、
+  // 不同步超限，检索也不会把没带入的正文当成已在上下文里。
   ctx.on('system-prompt/assemble', async (assembly: PromptAssembly, assembleCtx: AssembleContext, next: () => Promise<PromptAssembly>) => {
     const session = (assembleCtx?.scope as { session?: object } | undefined)?.session
-    if (session) {
+    const entries = assembly.contexts.filter(entry => entry.name === 'plastic-memory')
+    if (session && entries.length > 0) {
       const text = await snapshotCache.assemble(session)
-      for (const entry of assembly.contexts) {
-        if (entry.name === 'plastic-memory') entry.text = text
-      }
+      for (const entry of entries) entry.text = text
     }
     return next()
   })
