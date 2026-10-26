@@ -360,8 +360,8 @@ function printBaselineOnly(tiers: [string, Results][]): void {
 const isWeak = (code: SearchNoteCode | undefined) => code !== undefined && (WEAK_SEARCH_NOTE_CODES as readonly string[]).includes(code)
 
 /**
- * 判弱统计：各类别判弱几条、其中首条正确的几条；逐条列出首条正确却判弱的（应接近 0）与库里没有答案却没判弱的（应为 0）。
- * 零 token 查询不出说明码，不计。
+ * 判弱统计：各类别判弱几条、其中首条正确的几条；逐条列出首条正确却判弱的（白搜一轮，应尽量少）、
+ * 首条不对却没判弱的（模型会把错的当答案）与库里没有答案却没判弱的（应为 0）。零 token 查询不出说明码，不计。
  */
 function printWeak(label: string, run: { results: Results; notes: NoteCodes }): void {
   const counted = EVAL_QUERIES.filter(q => q.category !== 'zero-token')
@@ -369,10 +369,11 @@ function printWeak(label: string, run: { results: Results; notes: NoteCodes }): 
   const weak = (q: EvalQuery) => isWeak(run.notes.get(q))
   const row = (qs: EvalQuery[]) => `判弱 ${qs.filter(weak).length}/${qs.length}，其中首条正确 ${qs.filter(q => weak(q) && correct(q)).length}`
   console.log(`${label.padEnd(8)} ${row(counted)}`)
-  for (const c of EVAL_CATEGORIES.filter(c => c !== 'zero-token')) console.log(`  ${c.padEnd(13)} ${row(counted.filter(q => q.category === c))}`)
-  const answerable = counted.filter(q => q.category !== 'no-answer')
+  for (const c of EVAL_CATEGORIES.filter(c => c !== 'zero-token')) console.log(`  ${c.padEnd(16)} ${row(counted.filter(q => q.category === c))}`)
+  const answerable = counted.filter(q => q.relevant.length > 0)
   for (const q of answerable.filter(q => weak(q) && correct(q))) console.log(`  首条正确却判弱：[${q.category}] ${JSON.stringify(q.query)}  ${run.notes.get(q)}`)
-  for (const q of counted.filter(q => q.category === 'no-answer' && !weak(q))) console.log(`  没有答案却没判弱：${JSON.stringify(q.query)}  ${run.notes.get(q) ?? '无说明码'}`)
+  for (const q of answerable.filter(q => !weak(q) && !correct(q))) console.log(`  首条不对却没判弱：[${q.category}] ${JSON.stringify(q.query)}  ${run.notes.get(q) ?? '无说明码'}`)
+  for (const q of counted.filter(q => q.relevant.length === 0 && !weak(q))) console.log(`  没有答案却没判弱：[${q.category}] ${JSON.stringify(q.query)}  ${run.notes.get(q) ?? '无说明码'}`)
 }
 
 function sameOrder(a: Results, b: Results): EvalQuery[] {

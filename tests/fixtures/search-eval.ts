@@ -776,7 +776,7 @@ export const EVAL_RECORDS: MemoryRecord[] = MEMORIES.map((m, i) => ({
 
 export const EVAL_CATEGORIES = [
   'short-cjk', 'long-cjk', 'identifier', 'partial-word', 'plain-name', 'id-direct', 'zero-token', 'anchor', 'paraphrase',
-  'bilingual', 'no-answer',
+  'bilingual', 'no-answer', 'long-answerable', 'long-no-answer',
 ] as const
 export type EvalCategory = (typeof EVAL_CATEGORIES)[number]
 
@@ -792,9 +792,10 @@ export const STRICT_CATEGORIES: readonly EvalCategory[] = ['anchor']
 /**
  * 只用来评估「命中弱」判定的类别，不进排序指标：
  * - 中英双写（bilingual）：按工具说明把术语的中英两种写法都带上，答案记忆只用其中一种写法（多为只写中文）；
- * - 库里没有答案（no-answer）：查询里有常见词能部分命中，但没有一条记忆讲这件事，relevant 为空。
+ * - 库里没有答案（no-answer）：查询里有常见词能部分命中，但没有一条记忆讲这件事，relevant 为空；
+ * - 长句提问（long-answerable / long-no-answer）：按日常说话的口气整句提问，前者库里有答案，后者没有（relevant 为空）。
  */
-export const NOTE_ONLY_CATEGORIES: readonly EvalCategory[] = ['bilingual', 'no-answer']
+export const NOTE_ONLY_CATEGORIES: readonly EvalCategory[] = ['bilingual', 'no-answer', 'long-answerable', 'long-no-answer']
 
 /**
  * 换说法的四种方式：同义词（自动关机 / 定时关停）、上下位词（数据库 / Postgres）、
@@ -926,4 +927,27 @@ export const EVAL_QUERIES: readonly EvalQuery[] = [
   { query: '灰度发布 监控告警', category: 'no-answer', relevant: [] },
   { query: '线上报错 Sentry 接入', category: 'no-answer', relevant: [] },
   { query: '证书 过期 续期', category: 'no-answer', relevant: [] },
+  // 长句提问、库里有答案（判弱评估用，不进排序指标）
+  { query: '接口超时时间设置成多少了', category: 'long-answerable', relevant: ['mem_q9u3x7'] },
+  { query: '数据库备份保留多少天', category: 'long-answerable', relevant: ['mem_b4d8l7'] },
+  { query: '提交信息应该用什么格式写', category: 'long-answerable', relevant: ['mem_f1q5p8'] },
+  { query: '第三方密钥多久轮换一次', category: 'long-answerable', relevant: ['mem_r8f2n5'] },
+  { query: '上传接口每分钟限流多少次', category: 'long-answerable', relevant: ['mem_d3s9i8'] },
+  { query: '登录会话多久会过期', category: 'long-answerable', relevant: ['mem_z5f1o3'] },
+  { query: '功能开关改了以后多久能生效', category: 'long-answerable', relevant: ['mem_c9i5q4'] },
+  { query: '时间在数据库里应该怎么存', category: 'long-answerable', relevant: ['mem_l2n6g4'] },
+  { query: '前端搜索框的防抖设了多少毫秒', category: 'long-answerable', relevant: ['mem_h5e1m8'] },
+  { query: '更新数据的时候先删缓存还是先写库', category: 'long-answerable', relevant: ['mem_e5j2f9'] },
+  { query: '依赖一般多久集中升级一次', category: 'long-answerable', relevant: ['mem_i6t9j2'] },
+  // 长句提问、库里没有答案：常见词能部分命中（判弱评估用，结果应全部判弱）
+  { query: '前端埋点数据怎么上报到服务端', category: 'long-no-answer', relevant: [] },
+  { query: '周报模板应该放在哪个目录', category: 'long-no-answer', relevant: [] },
+  { query: '定时任务的执行时间怎么配置', category: 'long-no-answer', relevant: [] },
+  { query: '生产环境的服务器一共有几台', category: 'long-no-answer', relevant: [] },
+  { query: '移动端推送证书什么时候过期', category: 'long-no-answer', relevant: [] },
+  { query: '图片上传之后要不要压缩', category: 'long-no-answer', relevant: [] },
+  { query: '单元测试覆盖率要求达到多少', category: 'long-no-answer', relevant: [] },
+  { query: '订单表的分库分表规则是什么', category: 'long-no-answer', relevant: [] },
+  { query: '线上日志要保留多少天', category: 'long-no-answer', relevant: [] },
+  { query: '接口文档放在哪个平台上维护', category: 'long-no-answer', relevant: [] },
 ]
