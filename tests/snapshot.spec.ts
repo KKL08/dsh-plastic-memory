@@ -250,7 +250,7 @@ describe('票 17 索引与引导', () => {
       expect(text).toContain(`${ROOT}/global/MEMORY.md`)
       expect(text).toContain(`${ROOT}/${workspaceDirName(WS)}/MEMORY.md`)
       expect(text).toContain(`\n完整索引：\n- 全局记忆：${ROOT}/global/MEMORY.md\n- 本项目记忆：`)
-      expect(text).toContain(`看全文：用 memory_search 按 id 或关键词查；要看文件原样，再 Read 索引行末尾的文件（路径相对 ${ROOT}/）。`)
+      expect(text).toContain(`MEMORY.md\n\n看全文：用 memory_search 按 id 或关键词查；要看文件原样，再 Read 索引行末尾的文件（路径相对 ${ROOT}/）。`)
       expect(text).not.toContain('grep')
       expect(text).toMatch(/\.archive\/[^\n]*已遗忘、已取代[^\n]*日常不要读/)
       expect(text).toMatch(/其他项目/)

@@ -226,6 +226,7 @@ export function assembleSnapshot(deps: {
     const lines = ['\n完整索引：', `- 全局记忆：${globalIndex}`]
     if (workspaceIndex !== undefined) lines.push(`- 本项目记忆：${workspaceIndex}`)
     lines.push(
+      '',
       `看全文：用 memory_search 按 id 或关键词查；要看文件原样，再 Read 索引行末尾的文件（路径相对 ${deps.memoryRoot}/）。`,
       `各目录下的 ${ARCHIVE_DIR}/ 是已遗忘、已取代记忆的存放处，日常不要读；只在回看历史时进去。`,
       '其他项目的记忆不在上列——除非用户明确给出该项目路径，否则不要去读别的 workspace 目录。',
