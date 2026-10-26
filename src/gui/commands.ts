@@ -294,6 +294,12 @@ async function dispatch(
       const { verdict, snapshotId } = entry.settled
       const loser = verdictLoser(entry, verdict)
       const targets = loser !== undefined ? [loser] : verdict === 'promoted' ? entry.memoryIds : []
+      // 撤销提升只搬全局那一份：之后又移到别的项目的，按快照恢复会顺着全目录兜底把那个项目里的副本搬走
+      if (verdict === 'promoted') {
+        for (const memoryId of targets) {
+          if ((await locateCopy(deps.store, memoryId, { kind: 'global' })) === undefined) return notFound(`${memoryId} 全局那一份`)
+        }
+      }
       let restored: string[] = []
       if (targets.length > 0 && snapshotId !== undefined) {
         const r = await restoreFrom(snapshotId, targets, command.allowCrossWorkspace)

@@ -1386,6 +1386,21 @@ describe('move-memory（建议整理「放错层」的移到项目）', () => {
     expect(await copyIn(e, 'mem_g', OTHER_WS)).toBeUndefined()
   })
 
+  it('提升为全局后又移到别的项目：撤销提升 → not-found，移过去的那份和移动记录都不动', async () => {
+    const e = env()
+    await e.store.create({ ...original(), scope: 'workspace', workspacePath: SESSION_WS })
+    const promoted = ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_g', layer: { kind: 'workspace', workspacePath: SESSION_WS } }))
+    const moved = ok(await e.run(move(OTHER_WS, { allowCrossWorkspace: true })))
+    const target = (await copyIn(e, 'mem_g', OTHER_WS))!
+    const targetBefore = await readFile(target.filePath, 'utf8')
+
+    expect(err(await e.run({ cmd: 'undo', decisionId: promoted.decisionId!, allowCrossWorkspace: true })).code).toBe('not-found')
+    expect(await readFile((await copyIn(e, 'mem_g', OTHER_WS))!.filePath, 'utf8')).toBe(targetBefore)
+    expect(await copyIn(e, 'mem_g', SESSION_WS)).toBeUndefined()
+    expect(await copyIn(e, 'mem_g')).toBeUndefined()
+    expect((await e.decisions.listSettled()).map(d => [d.id, d.settled?.verdict])).toEqual([[promoted.decisionId, 'promoted'], [moved.decisionId, 'moved']])
+  })
+
   it('体检关闭时不可用（同提升为全局）', async () => {
     const e = env({ governanceEnabled: false })
     await e.store.create(original())
