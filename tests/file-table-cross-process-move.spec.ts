@@ -9,6 +9,8 @@ import { InMemoryKvTable } from '../src/kv-table.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
+import { RecordNotFoundError } from '../src/errors.ts'
+import { captureRejection } from './helpers/errors.ts'
 
 // 两个宿主进程同时搬同一个 id 的文件：两个 FileTable 实例共用一个记忆根目录，各有各的进程内锁，互不排队。
 // fs 是进程边界：给 link / rm / rename 套一层，在指定路径的调用之前或之后插进另一个实例的整次写入，交错时机确定，不靠 sleep。
@@ -120,13 +122,12 @@ describe('两个进程把同一个 id 改成同一个名字', () => {
 })
 
 describe('占名之后、删旧文件之前源文件不见了', () => {
-  it('源文件被别处删掉：新文件不撤回（可能是仅存的一份），写入照常完成', async () => {
+  it('源文件被别处删掉、新文件仍是本轮写下的那个：删除算数，撤回新文件，重来时报不存在', async () => {
     const source = await seed()
     const b = newTable()
     at('after', 'link', join(globalDir(), '改名后.md'), () => rm(source))
-    await b.update('mem_race', renameByB)
-    expect(await mds(globalDir())).toEqual(['改名后.md'])
-    expect((await readMoved()).body).toBe('B 改的正文')
+    expect(await captureRejection(b.update('mem_race', renameByB))).toBeInstanceOf(RecordNotFoundError)
+    expect(await mds(globalDir())).toEqual([])
   })
 
   it('两个进程改成不同名字、都复核过旧文件后才删：两份都留着，下一次写收成一份', async () => {
@@ -151,6 +152,30 @@ describe('占名之后、删旧文件之前源文件不见了', () => {
     expect(await mds(globalDir())).toEqual(['乙.md', '甲.md'])
     await newTable().update('mem_race', r => ({ ...r, summary: '再写一次' }))
     expect(await mds(globalDir())).toHaveLength(1)
+  })
+})
+
+describe('搬家与彻底删除交错：删除方扫完之后搬家方才占名', () => {
+  // 时序：A 定位、复核过源文件 → B 整次删完（删源文件、扫一遍同 id 副本，这时还没有 A 的新文件）→ A 占名写新文件，
+  // 复核时发现源文件已不在。A 的新文件没人动过，留着就把刚删掉的内容（可能是密钥）又写回来了
+  it('软删进 .archive/：撤回刚写的归档副本，重来时报不存在，盘上一份不剩', async () => {
+    await seed(record({ content: '含密钥的正文' }))
+    const a = newTable()
+    const b = newTable()
+    at('before', 'link', join(globalDir(), ARCHIVE_DIR, '竞态.md'), () => asOtherProcess(() => b.delete('mem_race')))
+    expect(await captureRejection(a.update('mem_race', r => ({ ...r, status: 'deleted' })))).toBeInstanceOf(RecordNotFoundError)
+    expect(await mds(globalDir())).toEqual([])
+    expect(await mds(join(globalDir(), ARCHIVE_DIR))).toEqual([])
+  })
+
+  it('维护点把非 active 文件搬进 .archive/：同样撤回，不留归档副本', async () => {
+    await seed(record({ status: 'deleted', deletedAt: Date.now() }))
+    const a = newTable()
+    const b = newTable()
+    at('before', 'link', join(globalDir(), ARCHIVE_DIR, '竞态.md'), () => asOtherProcess(() => b.delete('mem_race')))
+    await a.maintain([globalDir()])
+    expect(await mds(globalDir())).toEqual([])
+    expect(await mds(join(globalDir(), ARCHIVE_DIR))).toEqual([])
   })
 })
 
