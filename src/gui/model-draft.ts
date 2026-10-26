@@ -22,7 +22,7 @@ const SYSTEM_PROMPT = `你帮用户整理编码 agent 的长期记忆：按要�
 
 /** 每类建议：发现的问题 + 用户没写要求时的默认要求。 */
 const ISSUES = {
-  'bloat': { problem: '内容过长：带入对话时占用较多。', request: '压缩成要点：删掉解释性、重复的话，保留每一条规则和步骤；命令、路径、数字原样保留。' },
+  'bloat': { problem: '内容过长：带入对话时占用较多。', request: '压缩成要点：删掉重复和铺陈的话，保留每一条规则、步骤，以及交代理由或情境的那一句；命令、路径、数字原样保留。' },
   'unclear': { problem: '表述不清：换一个没有上下文的新对话，agent 很难照着做。', request: '改清楚：把原文里含糊的指代、对象、条件写明白，让新对话也能照着做；原文没有的信息不要补。' },
   'redundancy': { problem: '内容重复：这两条说的是同一件事。', request: '合并去重：两条合成一条，两边各自独有的信息都保留，重复的只写一遍。' },
 } as const satisfies Record<ModelEditAdviceType, { problem: string; request: string }>

@@ -2129,6 +2129,14 @@ describe('draft-edit（让模型改、让模型合并的生成）', () => {
     expect(prompts[0]!.user).toContain(requirement)
   })
 
+  it('bloat 默认要求保留交代理由或情境的那一句，只删重复和铺陈', async () => {
+    const { llm, prompts } = scripted(answer({ content: '短', summary: '短' }))
+    const e = env({ llm })
+    await seedLong(e)
+    ok(await e.run(draftOf('mem_l')))
+    expect(prompts[0]!.user).toContain('压缩成要点：删掉重复和铺陈的话，保留每一条规则、步骤，以及交代理由或情境的那一句；命令、路径、数字原样保留。')
+  })
+
   it('放错层不给让模型改（改写不动层，只回答挪不挪）：invalid-args，不调模型', async () => {
     const { llm, prompts } = scripted(answer({ content: '短', summary: '短' }))
     const e = env({ llm })
