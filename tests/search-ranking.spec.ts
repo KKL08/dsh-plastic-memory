@@ -280,7 +280,7 @@ describe('不变的行为', { timeout: 15_000 }, () => {
 })
 
 describe('结果形状：命中带文件绝对路径', () => {
-  it('SearchHit.path 恒有值且为绝对路径，指向真实存在的文件（global 与项目目录、关键词与零 token 查询都带）', async () => {
+  it('name 不含密钥时 SearchHit.path 恒有值且为绝对路径，指向真实存在的文件（global 与项目目录、关键词与零 token 查询都带）', async () => {
     const store = await seeded([
       record({ id: 'mem_g', name: '全局条目', content: 'magicword 全局' }),
       record({ id: 'mem_w', name: '项目条目', scope: 'workspace', workspacePath: '/w/proj', content: 'magicword 项目' }),
