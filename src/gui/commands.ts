@@ -66,7 +66,7 @@ export interface MemoryCommandDefinition {
 
 /** 依赖体检开关的子命令（对应四个治理工具的能力）；forget / restore / hard-delete / confirm / refresh-views 不受开关影响。 */
 // dismiss-overflow 不在此列：超限提醒在体检关闭时照样入账，忽略它不属于治理动作
-const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'undo', 'promote', 'keep-local', 'scan'])
+const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'undo', 'promote', 'promote-memory', 'keep-local', 'scan'])
 
 /** 改待决项的子命令，先认领条目再执行，同一条同时只跑一个（resolve 由执行器 executeConfirm 自己认领）。 */
 const CLAIMED_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['undo', 'promote', 'keep-local', 'dismiss-overflow'])
@@ -262,6 +262,24 @@ async function dispatch(
       // 提升为全局留账供 14 天内撤销；写进 AGENTS.md 后插件不再管理它，条目移出账本
       if (command.target === 'global') await deps.decisions.settle(entry.id, 'promoted', now, r.snapshotId !== null ? { snapshotId: r.snapshotId } : {})
       else await deps.decisions.remove(entry.id)
+      return { ok: true, cmd, decisionId: entry.id, memoryIds: r.promoted.map(p => p.id), ...(r.snapshotId !== null ? { snapshotId: r.snapshotId } : {}) }
+    }
+
+    case 'promote-memory': {
+      // 只提升指明的那一份、且它此刻仍在项目里：已提升、已删、不存在的什么都不动
+      const rec = await locate(command.memoryId, command.layer)
+      if (!rec || rec.status !== 'active' || rec.scope !== 'workspace') return notFound(command.memoryId)
+      const r = await executePromote(
+        { confirmedIds: [rec.id], target: 'global', allowCrossWorkspace: command.allowCrossWorkspace },
+        gov, { store: deps.store, agentsMd: deps.agentsMd, snapshots: deps.snapshots, now: () => now },
+      )
+      if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
+      if (r.promoted.length === 0) return fail(cmd, 'failed', r.message)
+      // 和 promote 一样留账供 14 天内撤销：按提升候选记（同一条记忆已是候选时沿用、结清那一条），撤销走 undo
+      const { entry } = await deps.decisions.upsert(
+        { kind: 'promote-candidate', memoryIds: [rec.id], summary: rec.summary, workspaces: [rec.workspacePath!], fingerprint: candidateFingerprint(rec) }, now,
+      )
+      await deps.decisions.settle(entry.id, 'promoted', now, r.snapshotId !== null ? { snapshotId: r.snapshotId } : {})
       return { ok: true, cmd, decisionId: entry.id, memoryIds: r.promoted.map(p => p.id), ...(r.snapshotId !== null ? { snapshotId: r.snapshotId } : {}) }
     }
 

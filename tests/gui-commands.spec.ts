@@ -1008,6 +1008,69 @@ describe('提升候选与超限', () => {
   })
 })
 
+describe('promote-memory（建议整理「放错层」的提升为全局）', () => {
+  /** 模型把 mem_m 判为放错层（该放全局）；别的层里没有这个 id，解析时丢掉。 */
+  const misplacedLlm: SemanticLlm = { complete: async () => JSON.stringify({ findings: [{ type: 'misplaced', memoryIds: ['mem_m'], summary: '对所有项目都适用' }] }) }
+  const wsLayer = (workspacePath: string) => ({ kind: 'workspace', workspacePath }) as const
+
+  it('提升到全局：记忆变 global、快照先行、留一条已结清的提升供撤销；undo 后回到本项目', async () => {
+    const e = env({ llm: misplacedLlm })
+    await e.store.create(record({ id: 'mem_m', name: '己', scope: 'workspace', workspacePath: SESSION_WS }))
+    ok(await e.run({ cmd: 'scan' }))
+
+    const body = ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_m', layer: wsLayer(SESSION_WS) }))
+    const [snap] = await e.snapshots.list()
+    expect(body).toMatchObject({ cmd: 'promote-memory', memoryIds: ['mem_m'], snapshotId: snap!.id })
+    expect((await e.store.get('mem_m'))!.scope).toBe('global')
+    const settled = await e.decisions.listSettled()
+    expect(settled.map(d => [d.id, d.kind, d.memoryIds, d.settled])).toEqual([[body.decisionId, 'promote-candidate', ['mem_m'], { verdict: 'promoted', at: NOW, snapshotId: snap!.id }]])
+    expect(ledgerItems(pendingViewSchema.parse(await e.readView('pending')))).toEqual([])
+
+    ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
+    const back = (await e.store.get('mem_m'))!
+    expect([back.scope, back.workspacePath]).toEqual(['workspace', SESSION_WS])
+    // 撤销后条目回到未决，但记忆不是提升候选：等你决定里不出现，下次体检清掉
+    expect(ledgerItems(pendingViewSchema.parse(await e.readView('pending')))).toEqual([])
+    ok(await e.run({ cmd: 'scan' }))
+    expect(await allEntries(e)).toEqual([])
+  })
+
+  it('记忆同时是提升候选：提升后那条候选一并结清，账本里只有一条；undo 后候选回到等你决定', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_m', name: '己', scope: 'workspace', workspacePath: SESSION_WS, globalCandidate: true }))
+    const { entry } = await e.decisions.upsert({ kind: 'promote-candidate', memoryIds: ['mem_m'], summary: '己', workspaces: [SESSION_WS], fingerprint: 'fp-m' }, 1)
+    const body = ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_m', layer: wsLayer(SESSION_WS) }))
+    expect(body.decisionId).toBe(entry.id)
+    expect((await allEntries(e)).map(d => [d.id, d.settled?.verdict])).toEqual([[entry.id, 'promoted']])
+    ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+    expect(ledgerItems(pendingViewSchema.parse(await e.readView('pending'))).map(i => 'decisionId' in i && i.decisionId)).toEqual([entry.id])
+  })
+
+  it('已不在那个项目里（已提升、已删除、不存在）→ not-found，什么都不动', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_g', name: '全局的' }))
+    await e.store.create(record({ id: 'mem_d', name: '删掉的', scope: 'workspace', workspacePath: SESSION_WS }))
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_d' }))
+    for (const memoryId of ['mem_g', 'mem_d', 'mem_none']) {
+      expect(err(await e.run({ cmd: 'promote-memory', memoryId, layer: wsLayer(SESSION_WS) })).code).toBe('not-found')
+    }
+    expect((await e.store.get('mem_g'))!.scope).toBe('global')
+    expect(await allEntries(e)).toEqual([])
+    expect(await e.snapshots.list()).toHaveLength(1) // 只有 forget 那一份
+  })
+
+  it('别的项目的记忆：先要 allowCrossWorkspace，带上才提升', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_o', name: '别处的', scope: 'workspace', workspacePath: OTHER_WS }))
+    const body = err(await e.run({ cmd: 'promote-memory', memoryId: 'mem_o', layer: wsLayer(OTHER_WS) }))
+    expect(body).toMatchObject({ code: 'cross-workspace', rejected: [{ id: 'mem_o', workspacePath: OTHER_WS }] })
+    expect((await e.store.get('mem_o'))!.scope).toBe('workspace')
+    expect(await allEntries(e)).toEqual([])
+    ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_o', layer: wsLayer(OTHER_WS), allowCrossWorkspace: true }))
+    expect((await e.store.get('mem_o'))!.scope).toBe('global')
+  })
+})
+
 describe('scan', () => {
   const conflictLlm: SemanticLlm = {
     complete: async () => JSON.stringify({ findings: [{ type: 'conflict', memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', suggestedAction: '裁决' }] }),

@@ -1260,7 +1260,8 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect([...t.defs.keys()].sort()).toEqual(['memory_forget', 'memory_save', 'memory_search', 'memory_snapshot', 'memory_source'])
     for (const line of [
       '/memory resolve {"decisionId":"pd_x","verdict":"keep-left"}', '/memory undo {"decisionId":"pd_x"}',
-      '/memory promote {"decisionId":"pd_x","target":"global"}', '/memory keep-local {"decisionId":"pd_x"}',
+      '/memory promote {"decisionId":"pd_x","target":"global"}', '/memory promote-memory {"memoryId":"mem_keep"}',
+      '/memory keep-local {"decisionId":"pd_x"}',
       '/memory scan',
     ]) {
       expect(await t.command(line)).toMatchObject({ kind: 'error', body: { ok: false, code: 'governance-disabled' } })

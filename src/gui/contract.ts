@@ -330,6 +330,11 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   z.object({ cmd: z.literal('undo'), decisionId: z.string(), allowCrossWorkspace }),
   z.object({ cmd: z.literal('promote'), decisionId: z.string(), target: z.enum(['global', 'agents-md']), allowCrossWorkspace }),
   z.object({ cmd: z.literal('keep-local'), decisionId: z.string(), allowCrossWorkspace }),
+  /**
+   * 按记忆 id 把一条项目记忆提升为全局（建议整理「放错层」）。同 promote：快照先行，在账本里留一条已结清的提升
+   * （记忆已是提升候选时就结清那一条），结果的 decisionId 交给 undo 撤销。
+   */
+  z.object({ cmd: z.literal('promote-memory'), memoryId: z.string(), layer, allowCrossWorkspace }),
   z.object({ cmd: z.literal('forget'), memoryId: z.string(), layer, allowCrossWorkspace }),
   z.object({ cmd: z.literal('restore'), memoryId: z.string(), layer, allowCrossWorkspace }),
   z.object({ cmd: z.literal('hard-delete'), memoryId: z.string(), layer, allowCrossWorkspace }),
