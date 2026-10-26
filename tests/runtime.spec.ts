@@ -80,7 +80,7 @@ describe('SnapshotCache', () => {
     expect(spy).toHaveBeenCalledTimes(1)
   })
 
-  it('compaction（markStale）后 provider 仍返回旧快照，下一次中间件返回新快照', async () => {
+  it('两次组装之间的刷新拿到上一份：markStale 后 provider 仍返回旧快照，下一次组装返回新快照', async () => {
     const { store, cache } = makeCache()
     await store.put(record({ id: 'mem_old', type: 'preference', content: '旧偏好' }))
     const session = {}
@@ -89,7 +89,7 @@ describe('SnapshotCache', () => {
 
     await store.put(record({ id: 'mem_new', type: 'preference', content: '压缩后新增的偏好' }))
     cache.markStale(session)
-    // 宿主 admission refresh 只调同步 provider：拿到上一份快照，不是空串
+    // 两次组装之间只调同步 provider 的刷新：拿到上一份快照，不是空串
     expect(cache.render(session)).toBe(before)
 
     const after = await cache.assemble(session)

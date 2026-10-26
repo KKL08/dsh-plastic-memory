@@ -506,7 +506,7 @@ export async function apply(ctx: Context, config: Config) {
     await views?.rewriteAll()
   })
 
-  // frozen snapshot：按 session 隔离缓存，session/created 异步解析 workspace，compaction 结束标过期、下一次中间件重建。
+  // frozen snapshot：按 session 隔离缓存，session/created 异步解析 workspace，compaction 结束标过期、下一次组装重建。
   // session/* 事件由常驻的 @deepseek-ai/dsh-session 提供，但其 cordis Events 增广不在本插件的
   // 类型图内（该包非直接依赖），故按最小结构签名订阅；运行时事件名只是字符串，行为不受影响。
   const lifecycle = ctx as unknown as {
@@ -525,10 +525,26 @@ export async function apply(ctx: Context, config: Config) {
   })
   lifecycle.on('session/event', (session, event) => {
     // 基线由宿主投影随事件折叠（plasticMemoryBaseline），不在这里观察；
-    // 本监听只留 compaction 过期标记——快照按 session 冻结，压缩结束后由下一次中间件重建；
-    // 不清空，宿主只调同步 provider 的 admission refresh 仍拿到上一份快照。
+    // 本监听只留 compaction 过期标记——快照按 session 冻结，压缩结束后由下一次组装重建。
+    // 压缩在 pre-step 里发生时，下面的 pre-step / request-error 监听在 next() 之后把重建等完，宿主准入时的同步 provider 已回新快照；
+    // 两次组装之间若仍有只调 provider 的刷新，拿到的是上一份、不是空串（不清空：并发代次与 HMR 窗口靠它）。
     if (event.type === 'compaction/end') snapshotCache.markStale(session)
   })
+  // 宿主每一步先 assemble、再跑 agent/pre-step（compaction-basic 在这里压缩），准入时重调同步 provider。
+  // 等 next() 返回（压缩已做完）再重建快照，准入时追加的就是新快照，下一步中间件命中缓存、不再追加第二份。
+  // prepend 让本监听排在最外层，不依赖插件加载顺序；缓存未过期时 assemble 直接命中。
+  ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+    const decision = await next()
+    if (!signal.aborted) await snapshotCache.assemble(agent.session)
+    return decision
+  }, { prepend: true })
+  // 溢出恢复：compaction-basic 压缩后返回 retry，同一步重试前宿主同样重调 provider；只在重试时重建。
+  // 也要 prepend：compaction-basic 恢复时直接返回 retry、不调 next()，排在它里层就看不到这次重试。
+  ctx.on('agent/request-error', async ({ agent, signal }, next) => {
+    const action = await next()
+    if (action?.kind === 'retry' && !signal.aborted) await snapshotCache.assemble(agent.session)
+    return action
+  }, { prepend: true })
   // 快照只在 assemble waterfall（异步）里构建：宿主在跑 waterfall【之前】就已物化全部 provider 文本，
   // 而同步 provider 只回缓存（首轮为空串）。中间件等 workspace 解析落定后组装或复用冻结快照，
   // 把本插件那条 context 的文本原位替换；解析超时走 global-only 临时文本（不冻结），不阻塞宿主。
