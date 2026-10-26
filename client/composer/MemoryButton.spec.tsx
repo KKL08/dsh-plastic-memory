@@ -62,23 +62,37 @@ describe('显示条件', () => {
 })
 
 describe('弹层数字', () => {
-  it('有投影：占比按三段之和 / contextWindow，带约已用 / 上限、三段和条数', () => {
-    setup({ view: sessionView(), pressure: { pressureTokens: 50_000, contextWindow: 128_000 } })
+  it('有投影：占比按三段之和 / contextWindow，「约已用 / 上限」按计入上限的用量，明细和条数', () => {
+    setup({ view: sessionView({ usedTokens: 2970 }), pressure: { pressureTokens: 50_000, contextWindow: 128_000 } })
     const dialog = openPanel()
     expect(dialog).toHaveTextContent('记忆占上下文2%') // 3,120 / 128,000 ≈ 2.4%，按宿主取整
-    expect(dialog).toHaveTextContent('约 3,120 / 上限 4,000')
+    expect(dialog).toHaveTextContent('约 2,970 / 上限 4,000')
     expect(dialog).toHaveTextContent('本项目约 1,870')
     expect(dialog).toHaveTextContent('全局约 1,050')
-    expect(dialog).toHaveTextContent('固定说明约 200')
+    expect(dialog).toHaveTextContent('标题约 50')
+    expect(dialog).toHaveTextContent('固定说明（不计上限）约 150')
     expect(dialog).toHaveTextContent('带入 2 条 · 这次新记 1 条')
     expect(dialog).not.toHaveTextContent('处理 ›')
   })
 
-  it('占比与「约已用」的分子都是三段之和（和用量条同一口径），不是计入上限的 usedTokens', () => {
+  it('占比的分子是三段之和（真正放进上下文的量），「约已用」的分子是计入上限的 usedTokens（和右侧栏用量条同一口径）', () => {
     setup({ view: sessionView({ usedTokens: 2920 }), pressure: { contextWindow: 10_000 } })
     const dialog = openPanel()
     expect(dialog).toHaveTextContent('记忆占上下文31%') // 3,120 / 10,000；按 usedTokens 会是 29%
-    expect(dialog).toHaveTextContent('约 3,120 / 上限 4,000')
+    expect(dialog).toHaveTextContent('约 2,920 / 上限 4,000')
+  })
+
+  it('少量记忆（本项目 88、全局 93、固定说明 596）：分子不是 777；三段条与明细和右侧栏共用色段、色块，不计上限的部分斜纹', () => {
+    setup({ view: sessionView({ tokens: { workspace: 88, global: 93, fixed: 596 }, usedTokens: 211 }) })
+    const dialog = openPanel()
+    expect(dialog).toHaveTextContent('约 211 / 上限 4,000')
+    expect(dialog).not.toHaveTextContent('777')
+    const tints = (selector: string) => [...dialog.querySelectorAll(selector)].map(el => [...el.classList].find(c => c.startsWith('pm-budget-tint--')))
+    expect(tints('.pm-composer-bar > .pm-budget-seg:not(.pm-budget-seg--fixed), .pm-composer-bar .pm-budget-seg--fixed > i'))
+      .toEqual(['pm-budget-tint--workspace', 'pm-budget-tint--global', 'pm-budget-tint--headings', 'pm-budget-tint--uncounted'])
+    expect(tints('.pm-composer-rows .pm-budget-swatch'))
+      .toEqual(['pm-budget-tint--workspace', 'pm-budget-tint--global', 'pm-budget-tint--headings', 'pm-budget-tint--uncounted'])
+    expect(dialog).toHaveTextContent('固定说明（不计上限）约 566')
   })
 
   it('读不到投影：只写约已用 / 上限，不写百分比', () => {
@@ -97,14 +111,17 @@ describe('弹层数字', () => {
 })
 
 describe('超限行', () => {
-  it('自动放宽：超出上限 N，已自动放宽到 M · 处理 ›', () => {
-    setup({ view: sessionView({ usedTokens: 4480 }) })
-    expect(openPanel()).toHaveTextContent('超出上限 480，已自动放宽到 5,000·处理 ›')
+  it('自动放宽：超出上限 N，已自动放宽到 M · 处理 ›；分子是计入上限的用量', () => {
+    setup({ view: sessionView({ usedTokens: 4480, tokens: { workspace: 3000, global: 1400, fixed: 300 } }) })
+    const dialog = openPanel()
+    expect(dialog).toHaveTextContent('约 4,480 / 上限 4,000')
+    expect(dialog).toHaveTextContent('超出上限 480，已自动放宽到 5,000·处理 ›')
   })
 
   it('严格：已到上限，N 条没带入 · 处理 ›', () => {
-    setup({ view: sessionView({ overflowMode: 'strict', usedTokens: 4000, omittedCount: 3 }) })
+    setup({ view: sessionView({ overflowMode: 'strict', usedTokens: 4000, omittedCount: 3, tokens: { workspace: 2800, global: 1150, fixed: 250 } }) })
     const dialog = openPanel()
+    expect(dialog).toHaveTextContent('约 4,000 / 上限 4,000')
     expect(dialog).toHaveTextContent('已到上限，3 条没带入·处理 ›')
     expect(dialog).not.toHaveTextContent('放宽')
   })

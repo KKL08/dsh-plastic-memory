@@ -263,7 +263,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
           count={snapshot.injectedIds.length}
           budget={snapshot.budget}
           tokens={snapshot.tokens}
-          limitTokens={snapshot.usedTokens}
+          usedTokens={snapshot.usedTokens}
           droppedCount={snapshot.overflowMode === 'strict' ? snapshot.omittedCount : 0}
           onHandle={() => { openPage({ tab: 'pending', ...(scope === undefined ? {} : { scope }) }) }}
         />

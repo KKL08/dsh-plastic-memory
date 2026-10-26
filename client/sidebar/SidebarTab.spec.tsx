@@ -1,4 +1,4 @@
-// 右侧栏「记忆」tab：四种状态、用量条两种超限、就地裁决与撤销、新记的实时增加、底部入口跳转。全部对内存假网关。
+// 右侧栏「记忆」tab：四种状态、用量条口径与两种超限、就地裁决与撤销、新记的实时增加、底部入口跳转。全部对内存假网关。
 import { describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import {
@@ -78,7 +78,7 @@ describe('SidebarTab 四种状态', () => {
     const crumb = container.querySelector('.pm-side-crumb')!
     expect(crumb).toHaveTextContent('本项目 / app')
     expect(crumb.querySelector('.pm-side-crumb-scope')).toHaveTextContent('本项目 /')
-    expect(screen.getByText('3 条 · 约 3,120 / 4,000')).toBeInTheDocument()
+    expect(screen.getByText('3 条 · 约 2,920 / 4,000')).toBeInTheDocument()
     expect(screen.getByText('全部带入')).toBeInTheDocument()
     const groups = within(screen.getByRole('region', { name: '带入的记忆' }))
     expect(groups.getByRole('heading', { name: '行为偏好 1' })).toBeInTheDocument()
@@ -115,13 +115,31 @@ describe('SidebarTab 四种状态', () => {
   })
 })
 
-describe('SidebarTab 用量条超限', () => {
+describe('SidebarTab 用量条', () => {
+  it('少量记忆：分子是计入上限的用量（不是三段之和 777），图例是色块 + 名称 + 数字，固定说明标「不计上限」', () => {
+    const { container } = setup({
+      library: library(pref, proj, glob),
+      session: snapshot({ tokens: { workspace: 88, global: 93, fixed: 596 }, usedTokens: 211 }),
+      pending: pending(),
+    })
+    const usage = within(screen.getByRole('region', { name: '这次对话带入的记忆' }))
+    expect(usage.getByText('3 条 · 约 211 / 4,000')).toBeInTheDocument()
+    expect(container.querySelector('.pm-side-usage')).not.toHaveTextContent('777')
+    expect(usage.getByRole('img')).toHaveAttribute('aria-label', '已用上限的 5%：本项目 88，全局 93，标题 30；固定说明 566，不计上限')
+    expect([...container.querySelectorAll('.pm-side-usage .pm-budget-key')].map(k => k.textContent))
+      .toEqual(['本项目 88', '全局 93', '标题 30', '固定说明 566（不计上限）'])
+    expect(container.querySelector('.pm-side-usage .pm-budget-swatch.pm-budget-tint--uncounted')).not.toBeNull()
+    expect(container.querySelector('.pm-side-usage .pm-budget-seg--fixed > .pm-budget-tint--uncounted')).not.toBeNull()
+    expect(usage.getByText('全部带入')).toBeInTheDocument()
+  })
+
   it('严格模式：「已到上限，N 条没带入 · 处理 ›」，处理跳记忆页待处理', () => {
     const { openPage } = setup({
       library: library(pref, proj, glob),
       session: snapshot({ overflowMode: 'strict', omittedCount: 2, usedTokens: 4000, tokens: { workspace: 2800, global: 1200, fixed: 200 } }),
       pending: pending(),
     })
+    expect(screen.getByText('3 条 · 约 4,000 / 4,000')).toBeInTheDocument()
     expect(screen.getByText(/已到上限，2 条没带入/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '处理 ›' }))
     expect(openPage).toHaveBeenCalledWith({ tab: 'pending', scope: { kind: 'workspace', workspacePath: WS } })
@@ -133,6 +151,7 @@ describe('SidebarTab 用量条超限', () => {
       session: snapshot({ usedTokens: 4600, tokens: { workspace: 3000, global: 1600, fixed: 200 } }),
       pending: pending(),
     })
+    expect(screen.getByText('3 条 · 约 4,600 / 4,000')).toBeInTheDocument()
     expect(screen.getByText('已放宽到 5,000')).toBeInTheDocument()
   })
 })
