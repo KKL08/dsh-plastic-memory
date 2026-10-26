@@ -201,6 +201,9 @@ const ISSUE_LEVEL = {
  *  自己没有记忆、不在体检清单里的项目有超限提醒时，单列进 overflowOnlyLayers（只有档位，不打分）。 */
 export function buildHealthView(input: ViewInput): HealthView {
   const overflow = [...input.open, ...input.settled].filter(e => kindOf(e) === 'overflow')
+  // 体检关闭时冲突与语义建议不进待处理（见 buildPendingView）：这几类没有去处
+  const levelOf = (type: FindingType): PendingLevel | null =>
+    !input.governanceEnabled && (type === 'conflict' || SEMANTIC_ADVICE_TYPES.has(type as AdviceType)) ? null : ISSUE_LEVEL[type]
   return {
     version: GUI_VIEW_VERSION,
     governanceEnabled: input.governanceEnabled,
@@ -213,7 +216,7 @@ export function buildHealthView(input: ViewInput): HealthView {
         score: r.health.gate.secret ? null : Math.round(r.health.score * 100) / 100,
         tier: r.health.tier,
         gate: r.health.gate,
-        issues: FINDING_TYPES.filter(t => r.health.counts[t] > 0).map(type => ({ type, count: r.health.counts[type], level: ISSUE_LEVEL[type] })),
+        issues: FINDING_TYPES.filter(t => r.health.counts[t] > 0).map(type => ({ type, count: r.health.counts[type], level: levelOf(type) })),
         staleCount: r.health.freshness.staleCount,
         semanticCachedAt: r.semanticCachedAt,
         overflow: overflowOfLayer(overflow, layer),
@@ -245,7 +248,7 @@ function ignoredOfLayer(ignored: readonly IgnoredAdvice[], data: LayerPreread): 
 /** 超限按会话所属项目记账（无项目的会话记在 global），与健康分层同口径。 */
 function overflowOfLayer(entries: readonly PendingDecision[], layer: LayerRef): HealthView['layers'][number]['overflow'] {
   const e = entries.find(o => overflowScopeOf(o) === (layer.kind === 'global' ? 'global' : layer.path))
-  return e === undefined ? null : overflowLevelOf(e)
+  return e === undefined ? null : { ...overflowLevelOf(e), isDismissed: e.settled !== undefined }
 }
 
 /** 全部记忆：按层列 active 记忆；空的项目层不列，global 总在。目录问题不含 dir-empty（那不是问题）。 */

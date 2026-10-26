@@ -203,7 +203,8 @@ export const RESOLVE_VERDICTS = ['keep-left', 'keep-right', 'keep-both'] as cons
 
 // —— 健康 ——
 
-const overflowLevelSchema = z.object({ mode: z.enum(OVERFLOW_MODES), tier: z.number().int().nonnegative() })
+/** isDismissed：用户已忽略这条超限提醒（账本里已结），待处理里不再有它，健康页照列、不给「去处理 ›」。 */
+const overflowLevelSchema = z.object({ mode: z.enum(OVERFLOW_MODES), tier: z.number().int().nonnegative(), isDismissed: z.boolean() })
 export const healthLayerSchema = z.object({
   layer: layerRefSchema,
   totalMemories: z.number().int().nonnegative(),
@@ -213,9 +214,11 @@ export const healthLayerSchema = z.object({
   gate: z.object({ secret: z.boolean() }),
   /**
    * 非零的扣分原因计数（规则检查实时 + 内容检查取上次体检），type 取值见 governance/schema.ts FINDING_TYPES，按其顺序。
-   * level 是待处理里对应的组，健康页「去处理 ›」按它定位（服务端写死，客户端不另行推导）。
+   * level 是这类条目在待处理里所在的组，健康页「去处理 ›」按它定位，由服务端按类型写死；
+   * 这类条目此刻不在待处理里时为 null（体检关闭时冲突与语义建议不显示），不给「去处理 ›」。
+   * 超限、很久没确认不在 issues 里，它们的组由客户端按 PENDING_LEVEL_OF_KIND 取。
    */
-  issues: z.array(z.object({ type: z.string(), count: z.number().int().positive(), level: z.enum(PENDING_LEVELS) })),
+  issues: z.array(z.object({ type: z.string(), count: z.number().int().positive(), level: z.enum(PENDING_LEVELS).nullable() })),
   /** 超过衰退期未确认的条数。 */
   staleCount: z.number().int().nonnegative(),
   /** 内容检查（语义层）上次时间；从没做过为 null。 */

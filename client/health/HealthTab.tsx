@@ -1,8 +1,9 @@
 /**
  * 健康 tab：按层各一块（看项目时本项目 + 全局，看全局时只有全局），每块三段——体检横幅里是分数与结论、
- * 下一行上次体检时间，横幅下是扣分原因。从没体检过不显示分数（不出现 0 或 100 分），时间行写「内容检查还没做过」。
- * 有密钥的层不打分（score 为 null），写原因；超出上限列在扣分原因里、不扣分。每条扣分原因、超限、很久没确认行尾都有「去处理 ›」，
- * 落到待处理里对应的组（组标识取视图，见 contract 健康视图 issues.level）。本项目自己没有记忆、只有超限提醒时
+ * 下一行上次体检时间，横幅下是扣分原因，再下面是不扣分的「其他提醒」（超出上限、很久没确认，没有就不出）。
+ * 从没体检过不显示分数（不出现 0 或 100 分），时间行写「内容检查还没做过」。有密钥的层不打分（score 为 null），写原因。
+ * 每行行尾「去处理 ›」落到待处理里对应的组：扣分原因的组取视图（issues.level），超限、很久没确认按 PENDING_LEVEL_OF_KIND 取；
+ * 这一行的条目此刻不在待处理里时不给链接（体检关闭时的冲突与语义建议、已忽略的超限提醒）。本项目自己没有记忆、只有超限提醒时
  * （视图的 overflowOnlyLayers）照实写 0 条和超限这一行。
  * 体检关闭时整块置灰并给「去设置里打开 ›」，密钥与读不出的文件仍从待处理视图提示（规则检查，不调模型）。
  * 用户忽略的建议不扣分，层下写「已忽略 N 条」，展开逐条列问题类型和记忆名，每条可「取消忽略」。
@@ -38,37 +39,60 @@ function Dotted({ parts }: { parts: readonly ReactNode[] }) {
 
 type OverflowLevel = NonNullable<HealthLayer['overflow']>
 
-/** 扣分原因的一行：文字 + 它在待处理里对应的组。 */
-interface IssueRow { key: string; text: string; level: PendingLevel }
+/** 健康页的一行：文字 + 它在待处理里所在的组；null = 待处理里此刻没有它，不给「去处理 ›」。 */
+interface HealthRow { key: string; text: string; level: PendingLevel | null }
 
-/** 「文字 · 链接」一行；链接的说明指向这行文字（同一页有好几个「去处理 ›」，读屏时分得清是哪一条）。 */
-function LinkRow({ text, link, onClick }: { text: string; link: string; onClick: () => void }) {
+/**
+ * 「文字 · 链接」一行，没有去处时只写文字。链接的名字连上这行文字（aria-labelledby 指向文字和链接自己），
+ * 同一页好几个「去处理 ›」，读屏时分得清是哪一条。
+ */
+function LinkRow({ text, link, onClick }: { text: string; link: string; onClick: (() => void) | undefined }) {
   const textId = useId()
+  const linkId = useId()
   return (
     <li>
       <span id={textId}>{text}</span>
-      <i className="pm-sep" aria-hidden="true">·</i>
-      <button type="button" className="pm-link" aria-describedby={textId} onClick={onClick}>{link}</button>
+      {onClick === undefined
+        ? null
+        : (
+          <>
+            <i className="pm-sep" aria-hidden="true">·</i>
+            <button type="button" id={linkId} className="pm-link" aria-labelledby={`${textId} ${linkId}`} onClick={onClick}>{link}</button>
+          </>
+        )}
     </li>
   )
 }
 
-/** 扣分原因：顺序是各类问题、超限、很久没确认；每行「去处理 ›」落到待处理里对应的组。 */
-function Issues({ rows, onHandle }: { rows: readonly IssueRow[]; onHandle: (level: PendingLevel) => void }) {
+/** 一段：分区标签 + 行；empty 给出时没有行也画（写这句），否则整段不出。 */
+function RowSection({ title, rows, empty, onHandle }: { title: string; rows: readonly HealthRow[]; empty?: string; onHandle: (level: PendingLevel) => void }) {
   const t = useT()
+  if (rows.length === 0 && empty === undefined) return null
   return (
     <div className="pm-health-issues">
-      <h3 className="pm-health-issues-title">{t('health.issues')}</h3>
+      <h3 className="pm-health-issues-title">{title}</h3>
       {rows.length === 0
-        ? <p className="pm-health-none">{t('health.noIssues')}</p>
-        : <ul>{rows.map(row => <LinkRow key={row.key} text={row.text} link={t('health.entry.pendingLink')} onClick={() => { onHandle(row.level) }} />)}</ul>}
+        ? <p className="pm-health-none">{empty}</p>
+        : (
+          <ul>
+            {rows.map(({ key, text, level }) => (
+              <LinkRow key={key} text={text} link={t('health.entry.pendingLink')} onClick={level === null ? undefined : () => { onHandle(level) }} />
+            ))}
+          </ul>
+        )}
     </div>
   )
 }
 
-function overflowRow(overflow: OverflowLevel, t: Translate): IssueRow {
-  const text = overflow.mode === 'relax' ? t('health.overflow.relax', { percent: overflow.tier * 25 }) : t('health.overflow.strict')
-  return { key: 'overflow', text, level: PENDING_LEVEL_OF_KIND['overflow'] }
+/** 不扣分的提醒：超出上限（已忽略的照列、不给去处，待处理里已没有它）、很久没确认（待处理里是建议整理项）。 */
+function noticeRows(overflow: OverflowLevel | null, staleCount: number, t: Translate): HealthRow[] {
+  const rows: HealthRow[] = []
+  if (overflow !== null) {
+    const text = overflow.mode === 'relax' ? t('health.overflow.relax', { percent: overflow.tier * 25 }) : t('health.overflow.strict')
+    rows.push({ key: 'overflow', text, level: overflow.isDismissed ? null : PENDING_LEVEL_OF_KIND['overflow'] })
+  }
+  if (staleCount > 0) rows.push({ key: 'stale', text: t('health.stale', { n: formatNumber(staleCount) }), level: PENDING_LEVEL_OF_KIND['advice'] })
+  return rows
 }
 
 type IgnoredItem = HealthLayer['ignored'][number]
@@ -129,7 +153,7 @@ function LayerHealth({ layer, data, overflowOnly, now, session, onHandle }: {
           : (
             <>
               <HealthBanner conclusion={<Dotted parts={[name, t('health.count', { n: formatNumber(0) })]} />} />
-              <Issues rows={[overflowRow(overflowOnly, t)]} onHandle={onHandle} />
+              <RowSection title={t('health.notices')} rows={noticeRows(overflowOnly, 0, t)} onHandle={onHandle} />
             </>
           )}
       </section>
@@ -148,15 +172,13 @@ function LayerHealth({ layer, data, overflowOnly, now, session, onHandle }: {
         conclusion={<Dotted parts={[name, t('health.count', { n: formatNumber(data.totalMemories) }), scorePart]} />}
         detail={data.semanticCachedAt === null ? t('health.neverScanned') : t('health.lastScan', { date: formatDay(data.semanticCachedAt, now, t) })}
       />
-      <Issues
-        rows={[
-          ...data.issues.map(i => ({ key: i.type, text: t('health.issueCount', { label: issueLabel(i.type, t), n: formatNumber(i.count) }), level: i.level })),
-          ...(data.overflow !== null ? [overflowRow(data.overflow, t)] : []),
-          // 很久没确认在待处理里是建议整理项
-          ...(data.staleCount > 0 ? [{ key: 'stale', text: t('health.stale', { n: formatNumber(data.staleCount) }), level: PENDING_LEVEL_OF_KIND['advice'] }] : []),
-        ]}
+      <RowSection
+        title={t('health.issues')}
+        rows={data.issues.map(i => ({ key: i.type, text: t('health.issueCount', { label: issueLabel(i.type, t), n: formatNumber(i.count) }), level: i.level }))}
+        empty={t('health.noIssues')}
         onHandle={onHandle}
       />
+      <RowSection title={t('health.notices')} rows={noticeRows(data.overflow, data.staleCount, t)} onHandle={onHandle} />
       <Ignored items={data.ignored} session={session} />
     </section>
   )

@@ -540,7 +540,7 @@ describe('视图生成时刻', () => {
 })
 
 describe('健康视图', () => {
-  it('超限列为问题、不扣分：已忽略的仍列出；memory_health 同样报出', async () => {
+  it('超限列为问题、不扣分：已忽略的仍列出（标明已忽略，待处理里没有它）；memory_health 同样报出', async () => {
     const h = harness()
     await h.store.create(w({ id: 'mem_a', name: 'A' }))
     const before = await h.health()
@@ -555,7 +555,7 @@ describe('健康视图', () => {
     expect(healthViewSchema.parse(health)).toEqual(health)
     expect(pending.items).toEqual([])
     const ws = health.layers.find(l => l.layer.kind === 'workspace')!
-    expect(ws.overflow).toEqual({ mode: 'relax', tier: 1 })
+    expect(ws.overflow).toEqual({ mode: 'relax', tier: 1, isDismissed: true })
     expect(health.layers.find(l => l.layer.kind === 'global')!.overflow).toBeNull()
 
     const tool = await h.health()
@@ -575,13 +575,13 @@ describe('健康视图', () => {
 
     const { health } = await h.views()
     expect(healthViewSchema.parse(health)).toEqual(health)
-    expect(health.layers.map(l => [l.layer, l.overflow])).toEqual([[{ kind: 'global' }, { mode: 'strict', tier: 0 }]])
-    expect(health.overflowOnlyLayers).toEqual([{ layer: { kind: 'workspace', workspacePath: WS }, overflow: { mode: 'strict', tier: 0 } }])
+    expect(health.layers.map(l => [l.layer, l.overflow])).toEqual([[{ kind: 'global' }, { mode: 'strict', tier: 0, isDismissed: false }]])
+    expect(health.overflowOnlyLayers).toEqual([{ layer: { kind: 'workspace', workspacePath: WS }, overflow: { mode: 'strict', tier: 0, isDismissed: false } }])
 
     // 项目有了自己的记忆就回到体检清单，不再单列
     await h.store.create(w({ id: 'mem_w', name: '本项目一条' }))
     const again = (await h.views()).health
-    expect(again.layers.find(l => l.layer.kind === 'workspace')!.overflow).toEqual({ mode: 'strict', tier: 0 })
+    expect(again.layers.find(l => l.layer.kind === 'workspace')!.overflow).toEqual({ mode: 'strict', tier: 0, isDismissed: false })
     expect(again.overflowOnlyLayers).toEqual([])
   })
 
@@ -601,8 +601,8 @@ describe('健康视图', () => {
     const global = health.layers.find(l => l.layer.kind === 'global')!
     expect(global).toMatchObject({ score: null, gate: { secret: true }, issues: [{ type: 'secret', count: 1 }] })
   })
-  it('每条扣分原因带待处理里对应的组：密钥、读不出的文件在高优问题，冲突在待你处理，其余在建议整理', async () => {
-    const h = harness()
+  /** 本项目每类扣分原因各至少一条：密钥、过期、读不出的文件、冲突（缓存 + 账本）、内容重复、放错层、表述不清。 */
+  async function seedEveryIssue(h: ReturnType<typeof harness>) {
     await h.store.create(w({ id: 'mem_s', name: '凭证', content: FAKE_SECRET.github }))
     await h.store.create(w({ id: 'mem_old', name: '过期', validTo: T0 - 1 }))
     await h.store.create(w({ id: 'mem_r1', name: 'R 甲' }))
@@ -619,14 +619,45 @@ describe('健康视图', () => {
     ] })
     // 冲突还须仍在待决账本里才计
     await h.decisions.upsert({ memoryIds: ['mem_r1', 'mem_u'], summary: '矛盾', fingerprint: 'h' }, 1)
+  }
+  /** 一类扣分原因在待处理视图里以哪种条目出现。 */
+  const showsUp = (type: string) => (item: PendingItem): boolean =>
+    type === 'secret' ? item.kind === 'secret'
+      : type === 'malformed' ? item.kind === 'unreadable-file'
+        : type === 'conflict' ? item.kind === 'conflict-horizontal' || item.kind === 'conflict-vertical'
+          : item.kind === 'advice' && item.type === type
 
-    const { health } = await h.views()
+  it('每条扣分原因带待处理里对应的组：密钥、读不出的文件在高优问题，冲突在待你处理，其余在建议整理', async () => {
+    const h = harness()
+    await seedEveryIssue(h)
+    const { health, pending } = await h.views()
     expect(healthViewSchema.parse(health)).toEqual(health)
     const ws = health.layers.find(l => l.layer.kind === 'workspace')!
     expect(ws.issues.map(i => [i.type, i.level])).toEqual([
       ['secret', 'must-fix'], ['expired', 'advice'], ['malformed', 'must-fix'],
       ['conflict', 'your-call'], ['redundancy', 'advice'], ['misplaced', 'advice'], ['unclear', 'advice'],
     ])
+    // 真正的不变式：每类扣分原因的条目确实在待处理视图里、且就在它标的那一组
+    for (const issue of ws.issues) {
+      const items = pending.items.filter(showsUp(issue.type))
+      expect({ type: issue.type, levels: [...new Set(items.map(i => i.level))] }).toEqual({ type: issue.type, levels: [issue.level] })
+    }
+  })
+
+  it('体检关闭：冲突与语义建议不在待处理里，这几类的组为 null；规则类照常带组', async () => {
+    const h = harness()
+    await seedEveryIssue(h)
+    const off = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
+    expect(healthViewSchema.parse(off.health)).toEqual(off.health)
+    const ws = off.health.layers.find(l => l.layer.kind === 'workspace')!
+    expect(ws.issues.map(i => [i.type, i.level])).toEqual([
+      ['secret', 'must-fix'], ['expired', 'advice'], ['malformed', 'must-fix'],
+      ['conflict', null], ['redundancy', null], ['misplaced', null], ['unclear', null],
+    ])
+    for (const issue of ws.issues) {
+      const levels = [...new Set(off.pending.items.filter(showsUp(issue.type)).map(i => i.level))]
+      expect({ type: issue.type, levels }).toEqual({ type: issue.type, levels: issue.level === null ? [] : [issue.level] })
+    }
   })
   it('带体检开关：缺省开启，关闭时 governanceEnabled 为 false（层照常列出）', async () => {
     const h = harness()

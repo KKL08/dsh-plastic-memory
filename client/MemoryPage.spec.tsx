@@ -194,7 +194,7 @@ describe('记忆页外壳', () => {
     const nav = createNavStore()
     openMemoryPage({ layout: { selectPanel: vi.fn() } }, nav, { tab: 'health' })
     renderInShell(<MemoryPage nav={nav} />, createFakeGateway({ currentWorkspace: '/w/app', views: { pending: withAdvice, library, health } }))
-    fireEvent.click(screen.getByRole('button', { name: '去处理 ›', description: '已过有效期 1 条' }))
+    fireEvent.click(screen.getByRole('button', { name: '已过有效期 1 条 去处理 ›' }))
     expect(screen.getByRole('tab', { name: /待处理/ })).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByRole('heading', { level: 2, name: '建议整理 1' })).toHaveFocus()
     fireEvent.click(screen.getByRole('tab', { name: '健康' }))
