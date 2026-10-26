@@ -1,7 +1,7 @@
 /**
  * 输入框下方的「记忆」按钮（PRD 5.9 方案 A）：只有图标，不变色、不加点；这个会话没有记忆（会话视图不存在，
  * 或带入与新记都为空）时不渲染。点开的弹层对齐宿主 ContextMeter 弹层的版式：标题行占比 + 约已用 / 上限、
- * 三段作用域条与明细、带入与新写入条数（随快照来历写「开始时带入」或「压缩后重新带入」）、超限行、「查看带入的记忆 ›」。
+ * 三段作用域条与明细、带入与新写入条数（随快照来历写「开始时带入」「重新带入」或「压缩后重新带入」）、超限行、「查看带入的记忆 ›」。
  * 新写入只数还没进快照的：压缩后进了新快照的算在带入里，和右侧栏同一口径。
  *
  * 「约已用 / 上限」的已用 = 计入上限的 usedTokens，和右侧栏用量条同一口径，超限行也按它（服务端是否放宽按它定）；
@@ -11,12 +11,20 @@
  */
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
-import type { SessionView } from '../../src/gui/contract.ts'
+import type { SessionView, SnapshotOrigin } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import type { ContextPressureProjection, SessionStandardProps } from '../host.ts'
 import { formatNumber, useT } from '../i18n.tsx'
+import type { LocaleKey } from '../locales.ts'
 import { MemoryIcon } from '../MemoryIcon.tsx'
 import { barScale, budgetParts, BudgetSegments, BudgetSwatch, relaxedCap, shownParts } from '../ui/ContextBudgetBar.tsx'
+
+/** 条数行随快照来历变（和右侧栏用量标题同一口径）。 */
+const COUNTS_LINE: Record<SnapshotOrigin, LocaleKey> = {
+  start: 'composer.counts',
+  resumed: 'composer.countsResumed',
+  compacted: 'composer.countsCompacted',
+}
 
 /** 分割占比句子用的标记，和宿主 ContextMeter 的 READING_SLOT 同法。 */
 const READING_SLOT = '\u0000'
@@ -145,7 +153,7 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
             ))}
           </dl>
           <div className="pm-composer-line">
-            {t(view.origin === 'compacted' ? 'composer.countsCompacted' : 'composer.counts', {
+            {t(COUNTS_LINE[view.origin], {
               injected: formatNumber(view.injectedIds.length),
               saved: formatNumber(view.savedIds.filter(id => !view.injectedIds.includes(id)).length),
             })}

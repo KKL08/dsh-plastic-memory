@@ -1,7 +1,7 @@
 /**
  * 右侧栏「记忆」tab 正文（DESIGN.md Layout「右侧栏记忆 tab 内容（结构 A）」）。只讲插件放进上下文的那份快照和这次新写入的，
  * 对话中 memory_search 搜到的算普通上下文，不列、不计用量。从上到下：
- * 面包屑「本项目 / 项目名」→ 对话开始时 / 压缩后重新带入的记忆（随快照来历换标题，用量条）→ 这次新写入的（可删，
+ * 面包屑「本项目 / 项目名」→ 对话开始时 / 重新 / 压缩后重新带入的记忆（随快照来历换标题，用量条）→ 这次新写入的（可删，
  * 进了新快照的移到带入的记忆）→ 带入的记忆（按类型分组，组标题标出全文、只带摘要或只带标题；
  * 带入的记忆有待决冲突时冲突卡挂在那条记忆所在组里就地裁决：横向是两条记忆，垂直是记忆对 AGENTS.md 基线）→ 底部一行入口（其余待处理只在这里带数字）。
  * 数据：会话视图（来历、带入 / 全文 / 只带标题 / 新写入的 id、用量）、全部记忆视图（按 id 取记忆卡）、待处理视图（冲突与本项目待处理数）、
@@ -13,7 +13,9 @@
  * 新写入的含密钥时不能软删（服务端回 has-secret，什么都没动）：原位确认，「彻底删除」发 hard-delete，删后原位留不可恢复的说明，tab 卸载后收起。
  */
 import { useMemo, useRef, useState, type ReactNode } from 'react'
-import { CONFLICT_ACTION_VERDICTS, layerOfMemory, type MemoryCard as MemoryCardData, type MemoryCommand, type PendingItem } from '../../src/gui/contract.ts'
+import {
+  CONFLICT_ACTION_VERDICTS, layerOfMemory, type MemoryCard as MemoryCardData, type MemoryCommand, type PendingItem, type SnapshotOrigin,
+} from '../../src/gui/contract.ts'
 import { samePath, useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { baseName, formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
@@ -39,6 +41,13 @@ type Ruled =
   | { kind: 'vertical'; decisionId: string; verdict: Verdict; memory: MemoryCardData }
 
 const ruledMemories = (r: Ruled): MemoryCardData[] => r.kind === 'horizontal' ? [r.left, r.right] : [r.memory]
+
+/** 用量标题随快照来历变。 */
+const USAGE_TITLE: Record<SnapshotOrigin, LocaleKey> = {
+  start: 'sidebar.usage.title',
+  resumed: 'sidebar.usage.titleResumed',
+  compacted: 'sidebar.usage.titleCompacted',
+}
 
 type Entry =
   | { kind: 'memory'; memory: MemoryCardData }
@@ -264,7 +273,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
 
   // 会话快照冻结在插件本次加载之前 = 重启后还没重新带入
   const bootedAt = health.status === 'ready' ? health.data.bootedAt : undefined
-  const usageTitle = t(snapshot?.origin === 'compacted' ? 'sidebar.usage.titleCompacted' : 'sidebar.usage.title')
+  const usageTitle = t(USAGE_TITLE[snapshot?.origin ?? 'start'])
   // 混着几种带入方式的组不标
   const depthMark = (type: string) => {
     const total = counts.get(type) ?? 0

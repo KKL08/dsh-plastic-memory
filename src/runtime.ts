@@ -35,7 +35,8 @@ export async function prereadSnapshot(store: MemoryStore, workspacePath: string 
  * compaction 成功结束只标过期（markCompacted）不清空，失败的不标。压缩在 pre-step 里发生时，index.ts 的 pre-step / request-error 监听
  * 在 next() 之后把重建等完，宿主准入时的同步 provider 已回新快照；两次组装之间若仍有只调 provider 的刷新，
  * 拿到的是上一份、不是空串（并发代次与 HMR 窗口都靠不清空）。
- * 每次冻结记下快照来历（会话视图的 origin）：首次冻结是对话开始时；成功压缩后的下一次冻结是压缩后；其他重建沿用上一次。
+ * 每次冻结记下快照来历（会话视图的 origin）：首次冻结是对话开始时，会话已有更早的轮时（重启后续上、插件重载）是重新带入；
+ * 成功压缩后的下一次冻结是压缩后；其他重建沿用上一次。
  * workspacePath 走 pull + memoize：render 发现某 session 未解析时触发一次 fire-and-forget 解析
  * （同 session 去重），HMR 后存量 session 也能自愈；session/created 只做 eager 预热（prewarm）。
  * 已知窗口：HMR 后存量 session 缓存为空，首次 provider 回空串，首次中间件补上。
@@ -69,6 +70,8 @@ export interface SnapshotCacheDeps {
   /** 冻结之后调用（会话视图的写入口，接线在 index.ts）。失败只记日志。 */
   onFrozen?: (session: object, info: FrozenSnapshotInfo) => void | Promise<void>
   resolveWorkspace?: (session: object) => Promise<string | undefined>
+  /** 本实例第一次冻结某会话时问一次：会话是否已有更早的轮（是则来历记为重新带入）。缺省按没有。 */
+  hasEarlierTurns?: (session: object) => boolean
   /** 日志注入口，缺省回退 console（见 store.ts MemoryLogger）。 */
   log?: MemoryLogger
 }
@@ -174,9 +177,10 @@ export class SnapshotCache {
     const landed = this.cache.get(session)
     if (landed && landed.generation === generation) return landed.text
     const contentOf = new Map(preread.records.map(r => [r.id, r.content]))
-    // 来历：有没认领的成功压缩就是压缩后；否则沿用上一份冻结的（没有就是对话开始时）
+    // 来历：有没认领的成功压缩就是压缩后；否则沿用上一份冻结的；本实例第一次冻结时看会话有没有更早的轮
     const compactedAt = this.compactions.get(session)
-    const origin: Origin = compactedAt !== undefined ? { origin: 'compacted', compactedAt } : landed?.origin ?? { origin: 'start' }
+    const origin: Origin = compactedAt !== undefined ? { origin: 'compacted', compactedAt }
+      : landed?.origin ?? { origin: this.deps.hasEarlierTurns?.(session) ? 'resumed' : 'start' }
     this.compactions.delete(session)
     this.cache.set(session, { text, generation, core: new Map(coreIds.map(id => [id, contentOf.get(id)!])), origin })
     await this.markRecalled(session, coreIds)

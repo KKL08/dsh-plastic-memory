@@ -75,6 +75,11 @@ describe('弹层数字', () => {
     expect(dialog).not.toHaveTextContent('处理 ›')
   })
 
+  it('续上已有轮次的会话：写「重新带入」', () => {
+    setup({ view: sessionView({ origin: 'resumed' }) })
+    expect(openPanel()).toHaveTextContent('重新带入 2 条 · 新写入 1 条')
+  })
+
   it('压缩后重建的：写「压缩后重新带入」，进了新快照的新写入算在带入里，不重复计', () => {
     setup({ view: sessionView({ origin: 'compacted', compactedAt: 1, injectedIds: ['a', 'b', 'c'], savedIds: ['c', 'd'] }) })
     const dialog = openPanel()

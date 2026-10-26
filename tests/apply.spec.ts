@@ -805,6 +805,27 @@ describe('注入链接线', () => {
     expect(await assembleOnce()).toBe(t0)
   })
 
+  it('快照来历读 turnBoundary 投影：本实例首次冻结时已过了第 1 轮记为重新带入，第 1 轮内记为对话开始时；投影读不到按开始时', async () => {
+    const frozenOrigin = async (get: (name: string) => unknown, sessionId: string) => {
+      const memoryRoot = await makeTmpRoot()
+      const ctx = { ...mockCtx({ commands: { register: () => () => {} } }), get, logger: { info() {}, warn() {}, error() {} } }
+      await apply(ctx as never, new Config({ memoryRoot } as never))
+      const session = { header: { id: sessionId } }
+      const assembleCtx = { scope: { session } } as unknown as AssembleContext
+      const assembly: PromptAssembly = { sections: [], contexts: [{ name: 'plastic-memory', text: '' }], tools: [], variables: {} }
+      await ctx.listeners.get('session/created')!(session)
+      await ctx.listeners.get('system-prompt/assemble')!(assembly, assembleCtx, async () => assembly)
+      const file = join(memoryRoot, GUI_VIEW_DIR, sessionViewFile(sessionId))
+      return vi.waitFor(async () => sessionViewSchema.parse(JSON.parse(await readFile(file, 'utf8'))).origin)
+    }
+    const turn = (lastTurn: number) => (name: string) => name === 'sessionProjections'
+      ? { stateOf: (_s: object, key: string) => (key === 'turnBoundary' ? { openTurnStartSeq: 1, lastTurn } : undefined) }
+      : undefined
+    expect(await frozenOrigin(turn(3), 's-resumed')).toBe('resumed')
+    expect(await frozenOrigin(turn(1), 's-first')).toBe('start')
+    expect(await frozenOrigin(() => { throw new Error('no such service') }, 's-none')).toBe('start')
+  })
+
   /** 起插件、落一条 core 记忆，返回中间件与按同一 session 对象执行 memory_search 的入口。 */
   async function bootWithCore() {
     type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }

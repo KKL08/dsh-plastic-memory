@@ -211,7 +211,7 @@ export async function apply(ctx: Context, config: Config) {
   // 超限提醒进待决账本（治理关闭时也记：它是待处理里的提醒，不是体检结果）。
   // 上限、超限处理、溯源档位是 getter：每次构建快照时现读配置（SnapshotCache 一次构建只取一次）。
   const snapshotCache = new SnapshotCache({
-    store, registry, overflowLedger: decisions, memoryRoot, resolveWorkspace, log: ctx.logger,
+    store, registry, overflowLedger: decisions, memoryRoot, resolveWorkspace, hasEarlierTurns, log: ctx.logger,
     get budget() { return config.snapshotTokenBudget.get() },
     get overflow() { return config.snapshotOverflow.get() },
     get evidenceLookup() { return config.evidenceLookup.get() },
@@ -315,6 +315,17 @@ export async function apply(ctx: Context, config: Config) {
         // 宿主 session 对象本身：检索按它找本会话的冻结快照、做召回去重
         ...(session ? { handle: session } : {}),
       },
+    }
+  }
+
+  /** 会话是否已过了第 1 轮：快照本该在第 1 轮冻结，本实例第一次冻结时已是之后的轮，说明是重启后续上或插件重载。
+   *  读 turnBoundary 投影的 lastTurn（宿主按事件增量折叠，不读日志）；服务缺席、投影未注册、读取抛错都按没有。 */
+  function hasEarlierTurns(session: object): boolean {
+    try {
+      const projections = ctx.get('sessionProjections') as SessionProjectionRegistry | undefined
+      return (projections?.stateOf(session as Session, 'turnBoundary')?.lastTurn ?? 0) > 1
+    } catch {
+      return false
     }
   }
 

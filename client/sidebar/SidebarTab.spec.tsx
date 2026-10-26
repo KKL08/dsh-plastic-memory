@@ -179,6 +179,13 @@ describe('SidebarTab 快照来历与分组', () => {
     expect(screen.queryByRole('region', { name: '这次新写入的' })).toBeNull()
   })
 
+  it('续上已有轮次的会话（重启后、插件重载后）首次冻结的：标题写「重新带入的记忆」', () => {
+    setup({ library: library(pref, proj, glob), session: snapshot({ origin: 'resumed' }), pending: pending() })
+    const usage = within(screen.getByRole('region', { name: '重新带入的记忆' }))
+    expect(usage.getByText('对话中搜索到的记忆算普通上下文，不计入这里。')).toBeInTheDocument()
+    expect(screen.queryByText('对话开始时带入的记忆')).toBeNull()
+  })
+
   it('带入的记忆按组标出全文（core 区）与只带摘要（索引行）', () => {
     const { container } = setup({ library: library(pref, proj, glob), session: snapshot(), pending: pending() })
     const marks = [...container.querySelectorAll('.pm-side-group-title')].map(h => h.textContent)

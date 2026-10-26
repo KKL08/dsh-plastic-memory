@@ -10,6 +10,7 @@ export const sidebarZh = {
 
   'sidebar.crumb.scope': '本项目 /',
   'sidebar.usage.title': '对话开始时带入的记忆',
+  'sidebar.usage.titleResumed': '重新带入的记忆',
   'sidebar.usage.titleCompacted': '压缩后重新带入的记忆',
   'sidebar.usage.searchNote': '对话中搜索到的记忆算普通上下文，不计入这里。',
   'sidebar.saved.title': '这次新写入的',
@@ -66,6 +67,7 @@ export const sidebarEn: Record<keyof typeof sidebarZh, string> = {
 
   'sidebar.crumb.scope': 'This project /',
   'sidebar.usage.title': 'Brought in when the chat started',
+  'sidebar.usage.titleResumed': 'Brought in again',
   'sidebar.usage.titleCompacted': 'Brought in again after compaction',
   'sidebar.usage.searchNote': 'Memories found by search during the chat are regular context and do not count here.',
   'sidebar.saved.title': 'Written in this chat',

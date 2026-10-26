@@ -385,10 +385,13 @@ describe('SnapshotCache', () => {
 // 快照来历（会话视图的 origin）：首次冻结是对话开始时；成功压缩后的下一次冻结是压缩后重新带入；
 // 其他重建（失败的压缩、配置热更新）沿用上一次的来历。
 describe('SnapshotCache 快照来历', () => {
-  function makeTracked() {
+  function makeTracked(hasEarlierTurns?: (session: object) => boolean) {
     const store = new MemoryStore(new InMemoryTable())
     const frozen: FrozenSnapshotInfo[] = []
-    const cache = new SnapshotCache({ store, registry, budget: 4000, onFrozen: (_s, info) => { frozen.push(info) } })
+    const cache = new SnapshotCache({
+      store, registry, budget: 4000, onFrozen: (_s, info) => { frozen.push(info) },
+      ...(hasEarlierTurns === undefined ? {} : { hasEarlierTurns }),
+    })
     const session = {}
     cache.setWorkspacePath(session, undefined)
     return { store, cache, session, frozen, last: () => frozen.at(-1)! }
@@ -448,6 +451,51 @@ describe('SnapshotCache 快照来历', () => {
     expect(frozen).toHaveLength(1)
     await cache.assemble(session)
     expect(last()).toMatchObject({ origin: 'compacted', compactedAt: 7_000 })
+  })
+
+  it('构建被之后的 markStale / markAllStale 作废：没认领的压缩留到下一次真正冻结', async () => {
+    for (const invalidate of [(c: SnapshotCache, s: object) => { c.markStale(s) }, (c: SnapshotCache) => { c.markAllStale() }]) {
+      const { store, cache, session, frozen, last } = makeTracked()
+      await cache.assemble(session)
+      cache.markCompacted(session, 8_000)
+      let release!: () => void
+      const gate = new Promise<void>(r => { release = r })
+      let entered!: () => void
+      const inQuery = new Promise<void>(r => { entered = r })
+      const readLayer = store.readLayer.bind(store)
+      vi.spyOn(store, 'readLayer').mockImplementationOnce(async (...args) => { entered(); await gate; return readLayer(...args) })
+      const building = cache.assemble(session)
+      await inQuery
+      invalidate(cache, session) // 压缩之后的重建还没落定，又被标过期
+      release()
+      await building
+      expect(frozen).toHaveLength(1)
+      await cache.assemble(session)
+      expect(last()).toMatchObject({ origin: 'compacted', compactedAt: 8_000 })
+    }
+  })
+
+  it('本实例第一次冻结时会话已有更早的轮（重启后续上、插件重载）：来历是重新带入，之后的其他重建沿用', async () => {
+    const { cache, session, frozen, last } = makeTracked(() => true)
+    await cache.assemble(session)
+    expect(last().origin).toBe('resumed')
+    cache.markAllStale()
+    await cache.assemble(session)
+    expect(last().origin).toBe('resumed')
+    cache.markCompacted(session, 6_000)
+    await cache.assemble(session)
+    expect(last()).toMatchObject({ origin: 'compacted', compactedAt: 6_000 })
+    expect(frozen).toHaveLength(3)
+  })
+
+  it('只在第一次冻结时问有没有更早的轮：之后再有新轮也不改成重新带入', async () => {
+    let earlier = false
+    const { cache, session, last } = makeTracked(() => earlier)
+    await cache.assemble(session)
+    earlier = true
+    cache.markAllStale()
+    await cache.assemble(session)
+    expect(last().origin).toBe('start')
   })
 
   it('压缩后这次对话里新写入的记忆进了新快照', async () => {
