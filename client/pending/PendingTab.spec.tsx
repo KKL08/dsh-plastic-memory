@@ -5,7 +5,7 @@ import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { useGateway, type PluginConfig } from '../gateway.ts'
 import { FLASH_MS } from '../library/shared.tsx'
 import { createNavStore, type NavStore } from '../nav.ts'
-import { memory, NOW, renderInShell } from '../test-utils.tsx'
+import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { PendingTab } from './PendingTab.tsx'
 
 // 待处理 tab：给定一份待处理视图，断言每类卡渲染出什么、点按钮向网关发了什么命令。
@@ -15,17 +15,17 @@ const config: PluginConfig = { snapshotTokenBudget: 4000, snapshotOverflow: 'rel
 
 const A = memory({ id: 'a', content: '测试用真实 Postgres。', sourceMode: 'user-explicit' })
 const B = memory({ id: 'b', content: '测试里 mock 数据库就行。', sourceMode: 'agent-inferred' })
-const horizontal: PendingItem = { kind: 'conflict-horizontal', decisionId: 'd-h', firstSeenAt: 1, summary: '测试里怎么准备数据库，两条记忆互相矛盾', left: A, right: B, preferredId: 'a' }
-const vertical: PendingItem = { kind: 'conflict-vertical', decisionId: 'd-v', firstSeenAt: 2, summary: '包管理器和基线矛盾', memory: memory({ id: 'v', content: '用 npm。' }), baselineRef: 'AGENTS.md：用 pnpm' }
-const promote: PendingItem = { kind: 'promote-candidate', decisionId: 'd-p', firstSeenAt: 3, memory: memory({ id: 'p', content: '所有项目都用 vitest。' }) }
-const secret: PendingItem = { kind: 'secret', memory: memory({ id: 's', content: '部署 token [已隐藏]', filePath: '/m/app/deploy.md' }) }
-const overflow: PendingItem = { kind: 'overflow', decisionId: 'd-o', firstSeenAt: 4, mode: 'relax', tier: 1, workspacePath: '/w/app' }
+const horizontal: PendingItem = { kind: 'conflict-horizontal', level: 'your-call', decisionId: 'd-h', firstSeenAt: 1, summary: '测试里怎么准备数据库，两条记忆互相矛盾', left: A, right: B, preferredId: 'a' }
+const vertical: PendingItem = { kind: 'conflict-vertical', level: 'your-call', decisionId: 'd-v', firstSeenAt: 2, summary: '包管理器和基线矛盾', memory: memory({ id: 'v', content: '用 npm。' }), baselineRef: 'AGENTS.md：用 pnpm' }
+const promote: PendingItem = { kind: 'promote-candidate', level: 'your-call', decisionId: 'd-p', firstSeenAt: 3, memory: memory({ id: 'p', content: '所有项目都用 vitest。' }) }
+const secret: PendingItem = { kind: 'secret', level: 'must-fix', memory: memory({ id: 's', content: '部署 token [已隐藏]', filePath: '/m/app/deploy.md' }) }
+const overflow: PendingItem = { kind: 'overflow', level: 'your-call', decisionId: 'd-o', firstSeenAt: 4, mode: 'relax', tier: 1, workspacePath: '/w/app' }
 const unreadable: PendingItem = {
-  kind: 'unreadable-file', layer: { kind: 'workspace', workspacePath: '/w/app' }, filePath: '/m/app/broken.md', relativePath: 'app/broken.md',
+  kind: 'unreadable-file', level: 'must-fix', layer: { kind: 'workspace', workspacePath: '/w/app' }, filePath: '/m/app/broken.md', relativePath: 'app/broken.md',
   error: 'YAMLException: unexpected end of the stream within a flow collection (2:8)',
 }
 
-const view = (...items: PendingItem[]): PendingView => ({ version: GUI_VIEW_VERSION, dot: 'amber', items, typeLabels: { preference: '行为偏好' } })
+const view = (...items: PendingItem[]): PendingView => ({ version: GUI_VIEW_VERSION, dot: 'amber', items, levelCounts: levelCountsOf(items), typeLabels: { preference: '行为偏好' } })
 const scannedHealth = (at: number | null): HealthView => ({
   version: GUI_VIEW_VERSION,
   governanceEnabled: true,
@@ -146,7 +146,7 @@ describe('待处理：各类卡', () => {
 
   it('超限：「整理记忆 ›」去全部记忆，作用域是这张卡那一层（项目或全局），不发命令', () => {
     const nav = createNavStore()
-    const global: PendingItem = { kind: 'overflow', decisionId: 'd-g', firstSeenAt: 5, mode: 'strict', tier: 0 }
+    const global: PendingItem = { kind: 'overflow', level: 'your-call', decisionId: 'd-g', firstSeenAt: 5, mode: 'strict', tier: 0 }
     const { commands } = setup([overflow, global], {}, nav)
     const [projectLink, globalLink] = screen.getAllByRole('button', { name: '整理记忆 ›' })
     fireEvent.click(projectLink!)

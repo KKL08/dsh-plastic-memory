@@ -11,7 +11,8 @@ import { PanelShell } from './ui/PanelShell.tsx'
 
 const pending: PendingView = {
   version: GUI_VIEW_VERSION, dot: 'amber', typeLabels: {},
-  items: [{ kind: 'promote-candidate', decisionId: 'd1', firstSeenAt: 1, memory: memory() }],
+  items: [{ kind: 'promote-candidate', level: 'your-call', decisionId: 'd1', firstSeenAt: 1, memory: memory() }],
+  levelCounts: { 'must-fix': 0, 'your-call': 1 },
 }
 const library: LibraryView = {
   version: GUI_VIEW_VERSION, memoryRoot: '/h/memories', directoryIssues: [],

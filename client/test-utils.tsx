@@ -2,7 +2,7 @@
 import type { ReactElement } from 'react'
 import { render } from '@testing-library/react'
 import { vi } from 'vitest'
-import type { MemoryCard } from '../src/gui/contract.ts'
+import { PENDING_LEVELS, type MemoryCard, type PendingView } from '../src/gui/contract.ts'
 import { createFakeGateway, type FakeGateway } from './gateway.fake.ts'
 import type { HostContext, SidebarHost } from './host.ts'
 import { createTranslator } from './i18n.tsx'
@@ -24,6 +24,11 @@ export function memory(overrides: Partial<MemoryCard> = {}): MemoryCard {
     filePath: '/m/app/db-in-tests.md',
     ...overrides,
   }
+}
+
+/** 待处理视图夹具的各级条数：按每项自带的级别数。 */
+export function levelCountsOf(items: PendingView['items']): PendingView['levelCounts'] {
+  return Object.fromEntries(PENDING_LEVELS.map(level => [level, items.filter(i => i.level === level).length])) as PendingView['levelCounts']
 }
 
 export type FakeHost = HostContext & SidebarHost

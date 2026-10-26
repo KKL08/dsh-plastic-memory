@@ -5,7 +5,7 @@ import { GUI_VIEW_VERSION, type HealthView, type LibraryView, type PendingView }
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createTranslator } from '../i18n.tsx'
 import { en, zh } from '../locales.ts'
-import { memory, NOW, renderInShell } from '../test-utils.tsx'
+import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { PanelShell } from '../ui/PanelShell.tsx'
 import { createFakeConfigForm, DEFAULT_SECTION, type FakeConfigForm } from './config-form.fake.ts'
 import { SettingsPage } from './SettingsPage.tsx'
@@ -22,7 +22,7 @@ const health = (semanticCachedAt: number | null): HealthView => ({
   governanceEnabled: true,
   layers: [{ layer: { kind: 'global' }, totalMemories: 1, score: 90, tier: 'green', gate: { secret: false }, issues: [], staleCount: 0, semanticCachedAt, overflow: null }],
 })
-const pending = (items: PendingView['items'] = []): PendingView => ({ version: GUI_VIEW_VERSION, dot: 'none', items, typeLabels: {} })
+const pending = (items: PendingView['items'] = []): PendingView => ({ version: GUI_VIEW_VERSION, dot: 'none', items, levelCounts: levelCountsOf(items), typeLabels: {} })
 
 function setup(opts: { value?: Record<string, unknown>; views?: boolean; writable?: boolean } = {}) {
   const form = createFakeConfigForm({ ...(opts.value ? { value: opts.value } : {}), ...(opts.writable === false ? { writable: false } : {}) })
@@ -412,12 +412,12 @@ describe('体检关闭时置灰', () => {
 
 describe('状态卡', () => {
   const views = (p = pending(), h = health(NOW), l = library(3)) => ({ pending: p, health: h, library: l })
-  const conflict = { kind: 'conflict-horizontal' as const, decisionId: 'd', firstSeenAt: NOW, summary: 's', left: null, right: null }
-  const unreadable = { kind: 'unreadable-file' as const, layer: { kind: 'global' as const }, filePath: '/f', relativePath: 'f', error: 'e' }
+  const conflict = { kind: 'conflict-horizontal' as const, level: 'your-call' as const, decisionId: 'd', firstSeenAt: NOW, summary: 's', left: null, right: null }
+  const unreadable = { kind: 'unreadable-file' as const, level: 'must-fix' as const, layer: { kind: 'global' as const }, filePath: '/f', relativePath: 'f', error: 'e' }
 
   it('结论按优先级：体检关闭 → 密钥 → 等你决定 → 没有记忆 → 没体检 → 良好', () => {
     expect(summarize(views(), false, NOW, t)).toEqual({ conclusion: '体检已关闭', detail: '共 3 条记忆' })
-    expect(summarize(views(pending([{ kind: 'secret', memory: memory() }, conflict])), true, NOW, t).marker).toBe('secret')
+    expect(summarize(views(pending([{ kind: 'secret', level: 'must-fix', memory: memory() }, conflict])), true, NOW, t).marker).toBe('secret')
     expect(summarize(views(pending([conflict, conflict, unreadable])), true, NOW, t))
       .toEqual({ marker: 'pending', conclusion: '有 2 处等你决定', detail: '共 3 条记忆 · 上次体检：刚刚' })
     expect(summarize(views(pending(), health(null), library(0)), true, NOW, t)).toEqual({ conclusion: '还没有记忆' })
@@ -440,7 +440,7 @@ describe('状态卡', () => {
     act(() => { gateway.setView('pending', pending([conflict])) })
     fireEvent.click(screen.getByRole('button', { name: '打开记忆页 ›' }))
     expect(onOpen).toHaveBeenLastCalledWith('pending')
-    act(() => { gateway.setView('pending', pending([{ kind: 'secret', memory: memory() }])) })
+    act(() => { gateway.setView('pending', pending([{ kind: 'secret', level: 'must-fix', memory: memory() }])) })
     fireEvent.click(screen.getByRole('button', { name: '打开记忆页 ›' }))
     expect(onOpen).toHaveBeenLastCalledWith('pending')
     act(() => { gateway.setView('pending', pending([unreadable])) })

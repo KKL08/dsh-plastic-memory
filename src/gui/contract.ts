@@ -13,7 +13,7 @@ export { maskSecrets, maskSecretSurface, type MaskOptions } from '../secrets.ts'
  */
 
 /** 视图 schema 的版本号：视图是派生缓存，形状变了就换号，客户端读到不认识的号按「需要刷新」处理。 */
-export const GUI_VIEW_VERSION = 3
+export const GUI_VIEW_VERSION = 4
 
 /** 视图文件所在目录（相对记忆根目录，POSIX 分隔）。 */
 export const GUI_VIEW_DIR = '.state/gui'
@@ -74,31 +74,54 @@ export function layerOfMemory(memory: Pick<MemoryCard, 'scope' | 'workspacePath'
 
 // —— 待处理 ——
 
-export const PENDING_ITEM_KINDS = ['secret', 'conflict-horizontal', 'conflict-vertical', 'promote-candidate', 'overflow', 'unreadable-file'] as const
+/**
+ * 待处理项的级别，按显示顺序：必须处理（会造成泄露或丢数据）、等你决定（二选一或拍板）。
+ * 每个待处理项属于且只属于一级；以后加级别时往这里追加。
+ */
+export const PENDING_LEVELS = ['must-fix', 'your-call'] as const
+export type PendingLevel = (typeof PENDING_LEVELS)[number]
+
+/** 按级别排：同一级内的先后即视图里的先后。 */
+export const PENDING_ITEM_KINDS = ['secret', 'unreadable-file', 'conflict-horizontal', 'conflict-vertical', 'promote-candidate', 'overflow'] as const
 export type PendingItemKind = (typeof PENDING_ITEM_KINDS)[number]
 
-/** 待处理条目。冲突、提升候选、超限来自待决账本（带 decisionId）；密钥与读不出的文件从预读数据派生，不入账本。
+/** 每类待处理项归哪一级（写死，客户端不另行推导）。 */
+export const PENDING_LEVEL_OF_KIND = {
+  'secret': 'must-fix',
+  'unreadable-file': 'must-fix',
+  'conflict-horizontal': 'your-call',
+  'conflict-vertical': 'your-call',
+  'promote-candidate': 'your-call',
+  'overflow': 'your-call',
+} as const satisfies Record<PendingItemKind, PendingLevel>
+
+const levelOf = <K extends PendingItemKind>(kind: K) => z.literal(PENDING_LEVEL_OF_KIND[kind])
+
+/** 待处理项。冲突、提升候选、超限来自待决账本（带 decisionId）；密钥与读不出的文件从预读数据派生，不入账本。
  *  冲突一方定位不到时为 null（账本悬空引用，裁决会报错）。 */
 export const pendingItemSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('secret'), memory: memoryCardSchema }),
+  z.object({ kind: z.literal('secret'), level: levelOf('secret'), memory: memoryCardSchema }),
   z.object({
-    kind: z.literal('conflict-horizontal'), decisionId: z.string(), firstSeenAt: z.number(), summary: z.string(),
+    kind: z.literal('conflict-horizontal'), level: levelOf('conflict-horizontal'), decisionId: z.string(), firstSeenAt: z.number(), summary: z.string(),
     left: memoryCardSchema.nullable(), right: memoryCardSchema.nullable(),
     /** 决定前 agent 按哪条来：快照注入的排序（confidence 降序 → lastConfirmedAt 降序）排在前的一方；两方都找不到时缺省。 */
     preferredId: z.string().optional(),
   }),
   z.object({
-    kind: z.literal('conflict-vertical'), decisionId: z.string(), firstSeenAt: z.number(), summary: z.string(),
+    kind: z.literal('conflict-vertical'), level: levelOf('conflict-vertical'), decisionId: z.string(), firstSeenAt: z.number(), summary: z.string(),
     memory: memoryCardSchema.nullable(), baselineRef: z.string(),
   }),
-  z.object({ kind: z.literal('promote-candidate'), decisionId: z.string(), firstSeenAt: z.number(), memory: memoryCardSchema.nullable() }),
+  z.object({
+    kind: z.literal('promote-candidate'), level: levelOf('promote-candidate'), decisionId: z.string(), firstSeenAt: z.number(),
+    memory: memoryCardSchema.nullable(),
+  }),
   /** 超出上限：relax 第 tier 档（放宽到上限 × (1 + 0.25 × tier)）；strict 用到 95%（tier 为 0）。workspacePath 缺省 = 无项目的会话。 */
   z.object({
-    kind: z.literal('overflow'), decisionId: z.string(), firstSeenAt: z.number(),
+    kind: z.literal('overflow'), level: levelOf('overflow'), decisionId: z.string(), firstSeenAt: z.number(),
     mode: z.enum(OVERFLOW_MODES), tier: z.number().int().nonnegative(), workspacePath: z.string().optional(),
   }),
   z.object({
-    kind: z.literal('unreadable-file'), layer: layerRefSchema,
+    kind: z.literal('unreadable-file'), level: levelOf('unreadable-file'), layer: layerRefSchema,
     filePath: z.string(), relativePath: z.string(),
     /** 解析器原话。 */
     error: z.string(),
@@ -109,11 +132,13 @@ export type PendingItem = z.infer<typeof pendingItemSchema>
 /** 左栏图标圆点：密钥红点盖过琥珀点；读不出的文件不亮点。 */
 export const PENDING_DOTS = ['none', 'amber', 'red'] as const
 
-/** 待处理（全部层），按 PENDING_ITEM_KINDS 顺序、同类按 firstSeenAt 升序。 */
+/** 待处理（全部层），按 PENDING_ITEM_KINDS 顺序（先按级别）、同类按 firstSeenAt 升序。 */
 export const pendingViewSchema = z.object({
   version,
   dot: z.enum(PENDING_DOTS),
   items: z.array(pendingItemSchema),
+  /** 各级的条数（每一级都有，没有为 0）。 */
+  levelCounts: z.record(z.enum(PENDING_LEVELS), z.number().int().nonnegative()),
   /** 类型 id → 显示名（注册表的 label），供记忆卡元信息；认不出的类型显示 id。 */
   typeLabels: z.record(z.string(), z.string()),
 })

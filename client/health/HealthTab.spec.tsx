@@ -4,7 +4,7 @@ import { fireEvent, screen, within } from '@testing-library/react'
 import { GUI_VIEW_VERSION, type HealthView, type PendingView } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createNavStore } from '../nav.ts'
-import { memory, NOW, renderInShell } from '../test-utils.tsx'
+import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { HealthTab } from './HealthTab.tsx'
 
 const WS = { kind: 'workspace', workspacePath: '/w/app' } as const
@@ -114,10 +114,11 @@ describe('健康 tab', () => {
     const pending: PendingView = {
       version: GUI_VIEW_VERSION, dot: 'red',
       items: [
-        { kind: 'secret', memory: memory({ id: 's1', name: 'deploy-token' }) },
-        { kind: 'secret', memory: memory({ id: 's2', name: 'other-project', workspacePath: '/w/blog' }) },
-        { kind: 'unreadable-file', layer: { kind: 'global' }, filePath: '/m/global/bad.md', relativePath: 'global/bad.md', error: 'yaml-parse' },
+        { kind: 'secret', level: 'must-fix', memory: memory({ id: 's1', name: 'deploy-token' }) },
+        { kind: 'secret', level: 'must-fix', memory: memory({ id: 's2', name: 'other-project', workspacePath: '/w/blog' }) },
+        { kind: 'unreadable-file', level: 'must-fix', layer: { kind: 'global' }, filePath: '/m/global/bad.md', relativePath: 'global/bad.md', error: 'yaml-parse' },
       ],
+      levelCounts: { 'must-fix': 3, 'your-call': 0 },
       typeLabels: {},
     }
     renderTab(health([layer(), layer({ layer: { kind: 'global' } })], false), { pending, openSettings })
@@ -144,11 +145,11 @@ describe('健康 tab', () => {
 describe('健康 tab：去待处理的入口', () => {
   const DAY = 24 * 60 * 60 * 1000
   const conflict = (id: string, firstSeenAt: number) => ({
-    kind: 'conflict-horizontal', decisionId: id, firstSeenAt, summary: 's', left: memory({ id: `${id}l` }), right: memory({ id: `${id}r` }),
+    kind: 'conflict-horizontal', level: 'your-call', decisionId: id, firstSeenAt, summary: 's', left: memory({ id: `${id}l` }), right: memory({ id: `${id}r` }),
   }) as const
-  const promote = { kind: 'promote-candidate', decisionId: 'p1', firstSeenAt: NOW, memory: memory({ id: 'p' }) } as const
-  const unreadable = { kind: 'unreadable-file', layer: WS, filePath: '/m/app/x.md', relativePath: 'app/x.md', error: 'bad' } as const
-  const pendingOf = (...items: PendingView['items']): PendingView => ({ version: GUI_VIEW_VERSION, dot: items.length > 0 ? 'amber' : 'none', items, typeLabels: {} })
+  const promote = { kind: 'promote-candidate', level: 'your-call', decisionId: 'p1', firstSeenAt: NOW, memory: memory({ id: 'p' }) } as const
+  const unreadable = { kind: 'unreadable-file', level: 'must-fix', layer: WS, filePath: '/m/app/x.md', relativePath: 'app/x.md', error: 'bad' } as const
+  const pendingOf = (...items: PendingView['items']): PendingView => ({ version: GUI_VIEW_VERSION, dot: items.length > 0 ? 'amber' : 'none', items, levelCounts: levelCountsOf(items), typeLabels: {} })
   function render(pending: PendingView, governanceEnabled = true) {
     const gateway = createFakeGateway({ session, views: { health: health([layer()], governanceEnabled), pending } })
     const nav = createNavStore({ tab: 'health' })

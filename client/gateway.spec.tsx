@@ -8,7 +8,7 @@ import {
 } from './gateway.ts'
 import { createFakeConfigForm, DEFAULT_SECTION } from './settings/config-form.fake.ts'
 import { ENTRY_ID } from './settings/config.ts'
-import { fakeHostContext } from './test-utils.tsx'
+import { fakeHostContext, levelCountsOf } from './test-utils.tsx'
 import type { ConfigFormSnapshot, HostContext, ResourceSnapshot, SessionListState, SessionSummary, WorkspaceFileStat } from './host.ts'
 
 function summary(id: string, patch: Partial<SessionSummary> = {}): SessionSummary {
@@ -132,12 +132,17 @@ describe('decodeExecution', () => {
 })
 
 describe('parseView', () => {
-  const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], typeLabels: {} }
+  const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], levelCounts: levelCountsOf([]), typeLabels: {} }
   it('合法视图 → ready；版本号不认识 → outdated；结构不对 → error', () => {
     expect(parseView('pending', JSON.stringify(pending))).toEqual({ status: 'ready', data: pending })
     expect(parseView('pending', JSON.stringify({ ...pending, version: GUI_VIEW_VERSION + 1 }))).toEqual({ status: 'outdated' })
     expect(parseView('pending', JSON.stringify({ version: GUI_VIEW_VERSION, dot: 'blue', items: [] })).status).toBe('error')
     expect(parseView('pending', '{').status).toBe('error')
+  })
+
+  it('上一版插件写的待处理视图（版本 3，条目不带级别）→ outdated，交给重新生成，不当成结构错误', () => {
+    const v3 = { version: 3, dot: 'amber', typeLabels: {}, items: [{ kind: 'conflict-horizontal', decisionId: 'd', firstSeenAt: 1, summary: 's', left: null, right: null }] }
+    expect(parseView('pending', JSON.stringify(v3))).toEqual({ status: 'outdated' })
   })
 
   it('视图路径与文件资源地址', () => {
@@ -148,7 +153,7 @@ describe('parseView', () => {
 })
 
 describe('createHostGateway', () => {
-  const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'amber', items: [], typeLabels: {} }
+  const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'amber', items: [], levelCounts: levelCountsOf([]), typeLabels: {} }
   const sessions = list(summary('s1', { cwd: '/w/app', retainedBy: { mainView: 1 } }))
   let executed: string[]
   let resources: Record<string, ResourceSnapshot<WorkspaceFileStat>>

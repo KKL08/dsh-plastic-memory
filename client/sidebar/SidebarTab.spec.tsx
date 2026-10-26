@@ -7,7 +7,7 @@ import {
 } from '../../src/gui/contract.ts'
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { createNavStore, openMemoryPage, PANEL_ID } from '../nav.ts'
-import { memory, renderInShell } from '../test-utils.tsx'
+import { memory, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { SidebarTab } from './SidebarTab.tsx'
 
 const WS = '/w/app'
@@ -44,12 +44,12 @@ function health(bootedAt: number | null = BOOTED): HealthView {
 }
 
 function pending(...items: PendingItem[]): PendingView {
-  return { version: GUI_VIEW_VERSION, dot: items.length > 0 ? 'amber' : 'none', items, typeLabels: {} }
+  return { version: GUI_VIEW_VERSION, dot: items.length > 0 ? 'amber' : 'none', items, levelCounts: levelCountsOf(items), typeLabels: {} }
 }
 
-const conflict: PendingItem = { kind: 'conflict-horizontal', decisionId: 'pd_1', firstSeenAt: 1, summary: '', left: pref, right: pref2 }
-const promote: PendingItem = { kind: 'promote-candidate', decisionId: 'pd_2', firstSeenAt: 1, memory: proj }
-const vertical: PendingItem = { kind: 'conflict-vertical', decisionId: 'pd_v', firstSeenAt: 1, summary: '', memory: proj, baselineRef: 'AGENTS.md：merge freeze' }
+const conflict: PendingItem = { kind: 'conflict-horizontal', level: 'your-call', decisionId: 'pd_1', firstSeenAt: 1, summary: '', left: pref, right: pref2 }
+const promote: PendingItem = { kind: 'promote-candidate', level: 'your-call', decisionId: 'pd_2', firstSeenAt: 1, memory: proj }
+const vertical: PendingItem = { kind: 'conflict-vertical', level: 'your-call', decisionId: 'pd_v', firstSeenAt: 1, summary: '', memory: proj, baselineRef: 'AGENTS.md：merge freeze' }
 
 function setup(views: FakeGatewayInit['views'], respond?: FakeGatewayInit['respond']) {
   const gateway = createFakeGateway({ views: { health: health(), ...views }, ...(respond === undefined ? {} : { respond }) })

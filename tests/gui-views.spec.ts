@@ -64,7 +64,7 @@ const w = (partial: Partial<MemoryRecord>) => g({ scope: 'workspace', workspaceP
 const wsDir = () => join(root, workspaceDirName(WS))
 
 describe('待处理视图', () => {
-  it('五类来源按密钥 → 冲突 → 提升候选 → 超限 → 读不出的文件排序；密钥与读不出的文件派生、不入账本', async () => {
+  it('五类来源按密钥 → 读不出的文件 → 冲突 → 提升候选 → 超限排序；密钥与读不出的文件派生、不入账本', async () => {
     const h = harness()
     await h.store.create(g({ id: 'mem_secret', name: '部署凭证', content: `token ${FAKE_SECRET.sk}` }))
     await h.store.create(w({ id: 'mem_a', name: 'A', content: '用 pnpm' }))
@@ -82,17 +82,47 @@ describe('待处理视图', () => {
     expect(pendingViewSchema.parse(pending)).toEqual(pending)
     expect(pending.items.map(i => i.kind)).toEqual([...PENDING_ITEM_KINDS])
     expect(pending.dot).toBe('red')
-    const [secret, h1, v1, p1, o1, bad] = pending.items
+    const [secret, bad, h1, v1, p1, o1] = pending.items
     expect(secret.kind === 'secret' && secret.memory.id).toBe('mem_secret')
     expect(JSON.stringify(secret)).not.toContain(FAKE_SECRET.sk)
     expect(h1).toMatchObject({ kind: 'conflict-horizontal', decisionId: horizontal.id, firstSeenAt: 4, left: { id: 'mem_a', content: '用 pnpm' }, right: { id: 'mem_b' } })
     expect(v1).toMatchObject({ kind: 'conflict-vertical', decisionId: vertical.id, baselineRef: 'AGENTS.md：包管理', memory: { id: 'mem_v' } })
     expect(p1).toMatchObject({ kind: 'promote-candidate', decisionId: promote.id, memory: { id: 'mem_p', scope: 'workspace', workspacePath: WS } })
-    expect(o1).toEqual({ kind: 'overflow', decisionId: overflow.id, firstSeenAt: 1, mode: 'relax', tier: 2, workspacePath: WS })
+    expect(o1).toEqual({ kind: 'overflow', level: 'your-call', decisionId: overflow.id, firstSeenAt: 1, mode: 'relax', tier: 2, workspacePath: WS })
     expect(bad).toMatchObject({ kind: 'unreadable-file', layer: { kind: 'workspace', workspacePath: WS }, filePath: join(wsDir(), 'broken.md'), relativePath: `${workspaceDirName(WS)}/broken.md` })
     expect(bad.kind === 'unreadable-file' && bad.error.length).toBeGreaterThan(0)
     // 密钥与读不出的文件没有进账本
     expect((await h.decisions.list()).map(e => e.kind ?? 'conflict').sort()).toEqual(['conflict', 'conflict', 'overflow', 'promote-candidate'])
+  })
+
+  it('每个待处理项带级别：密钥、读不出的文件属必须处理，冲突、提升候选、超限属等你决定；必须处理排在前，视图带各级条数', async () => {
+    const h = harness()
+    await h.store.create(g({ id: 'mem_secret', name: '部署凭证', content: `token ${FAKE_SECRET.sk}` }))
+    await h.store.create(w({ id: 'mem_a', name: 'A', content: '用 pnpm' }))
+    await h.store.create(w({ id: 'mem_b', name: 'B', content: '用 npm' }))
+    await h.store.create(w({ id: 'mem_v', name: 'V', content: '用 yarn' }))
+    await h.store.create(w({ id: 'mem_p', name: 'P', content: '所有项目都用 vitest', globalCandidate: true }))
+    await writeFile(join(wsDir(), 'broken.md'), '---\nname: [\n---\n正文\n')
+    await h.decisions.syncOverflow(WS, { mode: 'relax', tier: 2 }, 1, '超限')
+    await h.decisions.upsert({ kind: 'promote-candidate', memoryIds: ['mem_p'], summary: '', fingerprint: 'c' }, 2)
+    await h.decisions.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '与基线矛盾', fingerprint: 'v' }, 3)
+    await h.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '矛盾', fingerprint: 'h' }, 4)
+
+    const { pending } = await h.views()
+    expect(pendingViewSchema.parse(pending)).toEqual(pending)
+    expect(pending.items.map(i => [i.level, i.kind])).toEqual([
+      ['must-fix', 'secret'], ['must-fix', 'unreadable-file'],
+      ['your-call', 'conflict-horizontal'], ['your-call', 'conflict-vertical'], ['your-call', 'promote-candidate'], ['your-call', 'overflow'],
+    ])
+    expect(pending.levelCounts).toEqual({ 'must-fix': 2, 'your-call': 4 })
+  })
+
+  it('没有待处理项：各级条数都是 0', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_a', name: 'A', content: '用 pnpm' }))
+    const { pending } = await h.views()
+    expect(pending.items).toEqual([])
+    expect(pending.levelCounts).toEqual({ 'must-fix': 0, 'your-call': 0 })
   })
 
   it('读不出的文件：显示用的相对路径遮掉文件名里的密钥，打开用的 filePath 仍是真实路径', async () => {
@@ -171,7 +201,8 @@ describe('待处理视图：体检关闭', () => {
     await seedAll(h, true)
     const off = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
     expect(pendingViewSchema.parse(off.pending)).toEqual(off.pending)
-    expect(off.pending.items.map(i => i.kind)).toEqual(['secret', 'overflow', 'unreadable-file'])
+    expect(off.pending.items.map(i => i.kind)).toEqual(['secret', 'unreadable-file', 'overflow'])
+    expect(off.pending.levelCounts).toEqual({ 'must-fix': 2, 'your-call': 1 })
     expect(off.pending.dot).toBe('red')
     // 账本没动：打开体检后冲突、候选都回来
     expect((await h.views()).pending.items.map(i => i.kind)).toEqual([...PENDING_ITEM_KINDS].filter(k => k !== 'conflict-vertical'))
@@ -181,7 +212,7 @@ describe('待处理视图：体检关闭', () => {
     const h = harness()
     await seedAll(h, false)
     const off = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
-    expect(off.pending.items.map(i => i.kind)).toEqual(['overflow', 'unreadable-file'])
+    expect(off.pending.items.map(i => i.kind)).toEqual(['unreadable-file', 'overflow'])
     expect(off.pending.dot).toBe('amber')
     await h.decisions.syncOverflow(WS, undefined, 4, '超限')
     const calm = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })

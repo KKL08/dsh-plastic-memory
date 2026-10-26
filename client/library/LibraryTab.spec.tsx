@@ -5,7 +5,7 @@ import { GUI_VIEW_VERSION, type LibraryView, type PendingView } from '../../src/
 import type { BorrowedSession } from '../gateway.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createNavStore } from '../nav.ts'
-import { memory, NOW, renderInShell } from '../test-utils.tsx'
+import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { LibraryTab } from './LibraryTab.tsx'
 import { FLASH_MS } from './shared.tsx'
 
@@ -42,14 +42,14 @@ describe('全部记忆', () => {
 
   it('类型写显示名（待处理视图的 typeLabels）；认不出的类型写 id', () => {
     const view = library({ layers: [{ layer: app, items: [memory({ id: 'a1' }), memory({ id: 'a2', type: 'mystery', content: '提交前跑 typecheck' })] }] })
-    const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], typeLabels: { preference: '行为偏好' } }
+    const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], levelCounts: levelCountsOf([]), typeLabels: { preference: '行为偏好' } }
     renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: view, pending } }))
     expect(screen.getAllByRole('listitem').map(li => li.querySelector('.pm-mc-meta span')?.textContent)).toEqual(['行为偏好', 'mystery'])
   })
 
   it('待处理视图没有这个类型时，用全部记忆视图自带的 typeLabels', () => {
     const view = library({ layers: [{ layer: app, items: [memory({ id: 'a1', type: 'domain-term' })] }], typeLabels: { 'domain-term': '术语' } })
-    const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], typeLabels: {} }
+    const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], levelCounts: levelCountsOf([]), typeLabels: {} }
     renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: view, pending } }))
     expect(screen.getByRole('listitem').querySelector('.pm-mc-meta span')).toHaveTextContent('术语')
   })

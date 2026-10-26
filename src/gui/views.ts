@@ -10,7 +10,7 @@ import { runRuleScan } from '../governance/rule-scan.ts'
 import { byConfidenceThenConfirmed } from '../snapshot.ts'
 import { layerCacheKey, scoreLayer, type LayerPreread, type LayerRef } from '../governance/layer-health.ts'
 import {
-  GUI_VIEW_VERSION, PENDING_ITEM_KINDS,
+  GUI_VIEW_VERSION, PENDING_ITEM_KINDS, PENDING_LEVEL_OF_KIND, PENDING_LEVELS,
   type DeletedView, type GlobalViewName, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCard,
   type PendingItem, type PendingView, type SessionView,
 } from './contract.ts'
@@ -94,7 +94,7 @@ export function buildPendingView(input: ViewInput): PendingView {
   const items: PendingItem[] = []
   const active = activeRecords(data)
   for (const f of runRuleScan(active, id => data.byId.get(id), input.now)) {
-    if (f.type === 'secret') items.push({ kind: 'secret', memory: card(data.byId.get(f.memoryIds[0])!, data) })
+    if (f.type === 'secret') items.push({ kind: 'secret', level: PENDING_LEVEL_OF_KIND.secret, memory: card(data.byId.get(f.memoryIds[0])!, data) })
   }
   // 体检关闭（spec 35）：只剩不靠模型的条目——规则检查出的密钥、读不出的文件、超限提醒；冲突与提升候选照留在账本里，打开后回来
   const ledger = input.governanceEnabled ? input.open : input.open.filter(e => kindOf(e) === 'overflow')
@@ -104,18 +104,18 @@ export function buildPendingView(input: ViewInput): PendingView {
     if (kind === 'promote-candidate') {
       // 记忆已不是本项目候选（模型直接 memory_promote、标记被清、记忆没了）：旧条目不显示，下次体检清掉
       const r = data.byId.get(e.memoryIds[0] ?? '')
-      if (r?.status === 'active' && r.scope === 'workspace' && r.globalCandidate) items.push({ kind, ...base, memory: card(r, data) })
+      if (r?.status === 'active' && r.scope === 'workspace' && r.globalCandidate) items.push({ kind, level: PENDING_LEVEL_OF_KIND[kind], ...base, memory: card(r, data) })
     }
     else if (kind === 'overflow') {
       const scope = overflowScopeOf(e)
-      items.push({ kind, ...base, ...overflowLevelOf(e), ...(scope !== undefined && scope !== 'global' ? { workspacePath: scope } : {}) })
+      items.push({ kind, level: PENDING_LEVEL_OF_KIND[kind], ...base, ...overflowLevelOf(e), ...(scope !== undefined && scope !== 'global' ? { workspacePath: scope } : {}) })
     }
     else if (e.baselineRef !== undefined) {
-      items.push({ kind: 'conflict-vertical', ...base, summary: e.summary, memory: cardOf(e.memoryIds[0], data), baselineRef: e.baselineRef })
+      items.push({ kind: 'conflict-vertical', level: PENDING_LEVEL_OF_KIND['conflict-vertical'], ...base, summary: e.summary, memory: cardOf(e.memoryIds[0], data), baselineRef: e.baselineRef })
     } else {
       const preferred = e.memoryIds.slice(0, 2).map(id => data.byId.get(id)).filter(r => r !== undefined).sort(byConfidenceThenConfirmed)[0]
       items.push({
-        kind: 'conflict-horizontal', ...base, summary: e.summary, left: cardOf(e.memoryIds[0], data), right: cardOf(e.memoryIds[1], data),
+        kind: 'conflict-horizontal', level: PENDING_LEVEL_OF_KIND['conflict-horizontal'], ...base, summary: e.summary, left: cardOf(e.memoryIds[0], data), right: cardOf(e.memoryIds[1], data),
         ...(preferred !== undefined ? { preferredId: preferred.id } : {}),
       })
     }
@@ -124,18 +124,19 @@ export function buildPendingView(input: ViewInput): PendingView {
     for (const q of data.quarantined.get(layerCacheKey(layer)) ?? []) {
       items.push({
         // 显示用的相对路径与体检说明同口径遮一遍（手起名的文件名可能带密钥）；filePath 是打开文件用的，照给
-        kind: 'unreadable-file', layer: toGuiLayer(layer), filePath: q.path,
+        kind: 'unreadable-file', level: PENDING_LEVEL_OF_KIND['unreadable-file'], layer: toGuiLayer(layer), filePath: q.path,
         relativePath: maskSecrets(relative(input.memoryRoot, q.path).split(sep).join('/')), error: q.error,
       })
     }
   }
-  // 稳定排序：同类保持上面的先后（账本按 firstSeenAt）
+  // 稳定排序（PENDING_ITEM_KINDS 已按级别排）：同类保持上面的先后（账本按 firstSeenAt）
   const rank = (i: PendingItem) => PENDING_ITEM_KINDS.indexOf(i.kind)
   items.sort((a, b) => rank(a) - rank(b))
   const dot = items.some(i => i.kind === 'secret') ? 'red'
     : items.some(i => i.kind !== 'unreadable-file') ? 'amber' : 'none'
   const cards = items.flatMap(i => i.kind === 'conflict-horizontal' ? [i.left, i.right] : 'memory' in i ? [i.memory] : [])
-  return { version: GUI_VIEW_VERSION, dot, items, typeLabels: typeLabels(input.registry, cards.map(m => m?.type)) }
+  const levelCounts = Object.fromEntries(PENDING_LEVELS.map(level => [level, items.filter(i => i.level === level).length])) as PendingView['levelCounts']
+  return { version: GUI_VIEW_VERSION, dot, items, levelCounts, typeLabels: typeLabels(input.registry, cards.map(m => m?.type)) }
 }
 
 /** 注册表里的类型加上视图里出现的类型（切模板后旧模板的、认不出的），读时 get 给显示名。 */

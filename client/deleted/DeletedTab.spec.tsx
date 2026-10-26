@@ -5,7 +5,7 @@ import { GUI_VIEW_VERSION, type DeletedView, type LibraryView, type PendingView 
 import type { BorrowedSession } from '../gateway.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createNavStore } from '../nav.ts'
-import { memory, NOW, renderInShell } from '../test-utils.tsx'
+import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { DeletedTab } from './DeletedTab.tsx'
 
 const DAY = 24 * 60 * 60 * 1000
@@ -28,7 +28,7 @@ const library: LibraryView = {
   version: GUI_VIEW_VERSION, memoryRoot: '/m', directoryIssues: [],
   layers: [{ layer: app, items: [memory({ id: 'm9', name: 'postgres-in-tests', content: '测试用真实 Postgres' })] }],
 }
-const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], typeLabels: { preference: '行为偏好' } }
+const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], levelCounts: levelCountsOf([]), typeLabels: { preference: '行为偏好' } }
 
 function rowOf(text: string): HTMLElement {
   return screen.getByText(text).closest('li')!

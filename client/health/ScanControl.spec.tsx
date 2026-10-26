@@ -5,13 +5,14 @@ import { GUI_VIEW_VERSION, type HealthView, type MemoryCommandResult, type Pendi
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { MemoryPage } from '../MemoryPage.tsx'
 import { createNavStore } from '../nav.ts'
-import { memory, renderInShell } from '../test-utils.tsx'
+import { memory, renderInShell, levelCountsOf } from '../test-utils.tsx'
 
 const health = (governanceEnabled = true): HealthView => ({ version: GUI_VIEW_VERSION, governanceEnabled, layers: [] })
-const noPending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], typeLabels: {} }
+const noPending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], levelCounts: levelCountsOf([]), typeLabels: {} }
 const somePending: PendingView = {
   version: GUI_VIEW_VERSION, dot: 'amber',
-  items: [{ kind: 'promote-candidate', decisionId: 'd1', firstSeenAt: 1, memory: memory() }],
+  items: [{ kind: 'promote-candidate', level: 'your-call', decisionId: 'd1', firstSeenAt: 1, memory: memory() }],
+  levelCounts: { 'must-fix': 0, 'your-call': 1 },
   typeLabels: {},
 }
 

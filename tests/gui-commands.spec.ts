@@ -1051,6 +1051,21 @@ describe('refresh-views', () => {
       expect((await e.readView(name)) as { version: number }).toMatchObject({ version: GUI_VIEW_VERSION })
     }
   })
+
+  it('磁盘上是上一版（版本 3，不带级别）的待处理视图：按新版本重写，每项带级别，视图带各级条数', async () => {
+    const e = env()
+    const entry = await seedPair(e)
+    await mkdir(join(root, GUI_VIEW_DIR), { recursive: true })
+    await writeFile(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES.pending), JSON.stringify({
+      version: 3, dot: 'amber', typeLabels: {},
+      items: [{ kind: 'conflict-horizontal', decisionId: entry.id, firstSeenAt: 1, summary: '包管理器矛盾', left: null, right: null }],
+    }))
+    ok(await e.run({ cmd: 'refresh-views' }))
+    const pending = pendingViewSchema.parse(await e.readView('pending'))
+    expect(pending.version).toBe(4)
+    expect(pending.items.map(i => [i.level, i.kind])).toEqual([['your-call', 'conflict-horizontal']])
+    expect(pending.levelCounts).toEqual({ 'must-fix': 0, 'your-call': 1 })
+  })
 })
 
 describe('读不出的文件', () => {
