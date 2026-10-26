@@ -1,6 +1,7 @@
 import type { MemoryStore } from '../store.ts'
 import type { SnapshotStore, SnapshotDiffEntry } from '../governance/snapshots.ts'
 import type { MemoryRecord } from '../record-schema.ts'
+import { maskSecretSurface } from '../secrets.ts'
 import { crossWorkspaceNote, gateRecords, isVisible, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
 
 export interface SnapshotToolDeps {
@@ -115,7 +116,10 @@ export async function executeSnapshotTool(
   const wsNote = crossWorkspaceNote(rejected, otherWorkspaces)
 
   if (args.action === 'show') {
-    const entries = deps.snapshots.diff(snap, current).filter(e => allowedIds.has(e.id))
+    // 结果会进模型上下文：快照内与现状两份都按注入的口径遮明确密钥（手工编辑或恢复的归档副本可能带着）
+    const entries = deps.snapshots.diff(snap, current).filter(e => allowedIds.has(e.id)).map(e => ({
+      ...e, snapshotted: maskSecretSurface(e.snapshotted), current: e.current && maskSecretSurface(e.current),
+    }))
     const lines = entries.map(e => {
       const state = e.snapshotted.redacted ? '含密钥已物理删除（快照内为脱敏副本，不可恢复）'
         : e.current === undefined ? '当前不存在（已删）'

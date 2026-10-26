@@ -8,6 +8,8 @@ import { InMemoryKvTable } from '../src/kv-table.ts'
 import type { MemorySnapshot } from '../src/governance/schema.ts'
 import type { PendingDecision } from '../src/governance/schema.ts'
 import { record } from './helpers/record.ts'
+import { FAKE_SECRET } from './helpers/secrets.ts'
+import { SECRET_MASK } from '../src/secrets.ts'
 
 function makeDeps(now = 1000): SnapshotToolDeps {
   return {
@@ -72,6 +74,20 @@ describe('memory_snapshot', () => {
     if (r.kind === 'shown') {
       expect(r.entries[0].changedAfterSnapshot).toBe(true)
     }
+  })
+
+  it('show：消息与 entries 里的密钥（快照内与现状两份）遮成占位，与注入同口径', async () => {
+    const deps = makeDeps()
+    await deps.store.put(record({ id: 'mem_k', summary: `部署 key ${FAKE_SECRET.sk}`, content: `token ${FAKE_SECRET.github}` }))
+    const created = await executeSnapshotTool({ action: 'create' }, { workspacePath: '/proj' }, deps)
+    if (created.kind !== 'created') throw new Error(created.kind)
+    const r = await executeSnapshotTool({ action: 'show', snapshotId: created.snapshotId }, { workspacePath: '/proj' }, deps)
+    if (r.kind !== 'shown') throw new Error(r.kind)
+    const text = JSON.stringify(r)
+    expect(text).not.toContain(FAKE_SECRET.sk)
+    expect(text).not.toContain(FAKE_SECRET.github)
+    expect(r.message).toContain(`部署 key ${SECRET_MASK}`)
+    expect(r.entries[0].current!.content).toBe(`token ${SECRET_MASK}`)
   })
 
   it('restore：写回旧数据，冲突默认跳过', async () => {
