@@ -190,11 +190,22 @@ export interface QueryResult {
 /** 删除类方法的选项。 */
 export interface DeleteOptions {
   isExactLayer?: boolean
+  /** 软删的时刻（updatedAt、deletedAt）：调用方有注入的时钟时传它，缺省取当前时间。 */
+  now?: number
 }
 
 /** 位置即作用域（同 readLayer）：.archive/ 里 status 仍写着 active 的按 deleted 看。 */
 function byPosition(found: LocatedFile): MemoryRecord {
   return found.record.status === 'active' && dirname(found.filePath) !== found.dir ? { ...found.record, status: 'deleted' } : found.record
+}
+
+/**
+ * 软删。给了 now 时 deletedAt 也记成它（已有的不动，保留期从第一次删除算起）；
+ * 缺省时 deletedAt 照旧由表在落盘时补上。
+ */
+function markDeleted(r: MemoryRecord, now: number | undefined): MemoryRecord {
+  if (now === undefined) return { ...r, status: 'deleted', updatedAt: Date.now() }
+  return { ...r, status: 'deleted', updatedAt: now, deletedAt: r.deletedAt ?? now }
 }
 
 /** 按记录自己的 workspace 定位；global 记录没有 workspacePath，只认层时即 global 层。 */
@@ -261,7 +272,7 @@ export class MemoryStore {
     const hint = deleteHint(record, opts)
     if (!(await this.table.locate(record.id, hint))) return false
     try {
-      await this.table.update(record.id, r => ({ ...r, status: 'deleted', updatedAt: Date.now() }), hint)
+      await this.table.update(record.id, r => markDeleted(r, opts.now), hint)
     } catch (err) {
       if (err instanceof RecordNotFoundError) return false   // 定位之后被别处删掉
       throw err
@@ -292,7 +303,7 @@ export class MemoryStore {
     if (!(await this.table.locate(record.id, hint))) return 'missing'
     try {
       // 走 update 的读改写：写盘前又被改就在新内容上重判，判密钥看的始终是将被覆盖的那份
-      const written = await this.update(record, r => (hasSecret(r) ? r : { ...r, status: 'deleted', updatedAt: Date.now() }), hint)
+      const written = await this.update(record, r => (hasSecret(r) ? r : markDeleted(r, opts.now)), hint)
       return written.status === 'deleted' ? 'deleted' : 'has-secret'
     } catch (err) {
       if (err instanceof RecordNotFoundError) return 'missing'   // 定位之后被别处删掉

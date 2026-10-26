@@ -54,11 +54,12 @@ interface EnvOpts {
 
 function env(opts: EnvOpts = {}) {
   const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
-  const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
+  const clock = { now: opts.now ?? NOW }
+  // 表和命令用同一个时钟：软删记的时刻和最近删除的保留期清扫才对得上
+  const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now }), undefined, sidecar.recallStats)
   const decisions = new PendingDecisionsStore(opts.wrapPending?.(sidecar.pending) ?? sidecar.pending)
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const cache = sidecar.scanCache
-  const clock = { now: opts.now ?? NOW }
   const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, cache, registry, memoryRoot: root, now: () => clock.now }) })
   const command = createMemoryCommand({
     memoryRoot: root, store, decisions, snapshots, cache, registry, views,
@@ -1591,7 +1592,9 @@ describe('merge-memories（内容重复的直接合并）', () => {
     expect(body.memoryIds).toEqual([keptId, removedId])
     const kept = (await e.store.get(keptId, { workspacePath: ws(keptId), isExactLayer: true }))!
     expect([kept.status, kept.content, kept.name, kept.summary, kept.tags, kept.updatedAt]).toEqual(['active', '合并后的正文', '合并后', '合并摘要', ['甲', '乙'], LATER])
-    expect((await e.store.get(removedId, { workspacePath: ws(removedId), isExactLayer: true }))!.status).toBe('deleted')
+    const removed = (await e.store.get(removedId, { workspacePath: ws(removedId), isExactLayer: true }))!
+    // 删除时刻用注入的时钟，最近删除的保留期才算得准
+    expect([removed.status, removed.updatedAt, removed.deletedAt]).toEqual(['deleted', LATER, LATER])
     expect(deletedViewSchema.parse(await e.readView('deleted')).items.map(i => i.memory.id)).toEqual([removedId])
     const snaps = await e.snapshots.list()
     expect(snaps).toHaveLength(1)
@@ -1636,4 +1639,5 @@ describe('merge-memories（内容重复的直接合并）', () => {
     expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('failed')
     expect([(await e.store.get('mem_a'))!.content, (await e.store.get('mem_b'))!.status]).toEqual(['之后又改的', 'deleted'])
   })
+
 })

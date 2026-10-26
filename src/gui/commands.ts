@@ -442,7 +442,7 @@ async function dispatch(
       if (!isWritten) return stale()
       // 另一条走删除的老路：软删进最近删除，账本里指向它的条目一并清掉（同 forget）；快照上面已经拍过。
       // 核对之后另一个会话才写进密钥的不删（极少见），这次只算改了保留的那条
-      const isRemoved = removed === undefined || (await deps.store.softDeleteUnlessSecret(removed.record, { isExactLayer: true })) !== 'has-secret'
+      const isRemoved = removed === undefined || (await deps.store.softDeleteUnlessSecret(removed.record, { isExactLayer: true, now })) !== 'has-secret'
       if (removed !== undefined && isRemoved) await deps.decisions.removeByMemoryIds([removed.record.id])
       const written = await deps.store.locate(kept.record.id, hint)
       const memoryIds = removed !== undefined && isRemoved ? [kept.record.id, removed.record.id] : [kept.record.id]
