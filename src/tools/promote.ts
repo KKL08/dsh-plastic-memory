@@ -4,7 +4,10 @@ import type { SnapshotStore } from '../governance/snapshots.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { MemorySnapshot } from '../governance/schema.ts'
 import { hasSecret } from '../secrets.ts'
-import { crossWorkspaceNote, gateRecords, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
+import {
+  crossWorkspaceNote, gateRecords, locateCopy,
+  type CopyTarget, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark,
+} from './workspace-gate.ts'
 
 export type PromoteTarget = 'global' | 'agents-md'
 
@@ -13,6 +16,12 @@ export interface PromoteDeps {
   agentsMd: AgentsMdWriter
   snapshots: SnapshotStore
   now?: () => number
+}
+
+/** 只给 GUI 用的选项，不在工具参数里，模型传不进来。 */
+export interface PromoteOptions {
+  /** 同 id 多副本时只认这一份（GUI 按页面上那一份、或提升候选所在的项目操作）；缺省按会话 workspace 定位。跨 workspace 门照旧按会话判定。 */
+  target?: CopyTarget
 }
 
 export interface PromoteResult {
@@ -41,15 +50,18 @@ export async function executePromote(
   args: { confirmedIds: string[]; target: PromoteTarget; dismiss?: boolean; allowCrossWorkspace?: boolean },
   context: GovernanceContext,
   deps: PromoteDeps,
+  options: PromoteOptions = {},
 ): Promise<PromoteResult> {
   const now = deps.now?.() ?? Date.now()
-  // 预读范围：按 id 逐条两级定位（含非 active，当前 workspace 优先），已删的计入 skipped；
+  // 预读范围：按 id 逐条两级定位（含非 active，当前 workspace 优先；带 target 时只认那一份），已删的计入 skipped；
   // 定位到的再过跨 workspace 门，其他项目的记录不带参数时单独列出、不动
   const promoted: PromoteResult['promoted'] = []
   const skipped: string[] = []
   const located: MemoryRecord[] = []
   for (const id of args.confirmedIds) {
-    const r = await deps.store.get(id, { workspacePath: context.workspacePath })
+    const r = options.target === undefined
+      ? await deps.store.get(id, { workspacePath: context.workspacePath })
+      : await locateCopy(deps.store, id, options.target)
     if (!r || r.status === 'deleted') { skipped.push(id); continue }
     located.push(r)
   }

@@ -1236,6 +1236,39 @@ describe('promote-memory（建议整理「放错层」的提升为全局）', ()
   })
 })
 
+describe('同 id 在会话项目和别的项目各有一份时提升', () => {
+  // 页面上点的是别的项目那份：提升的必须是它，会话项目里的同 id 副本不碰
+  const copyIn = async (e: ReturnType<typeof env>, layer: { kind: 'global' } | { kind: 'workspace'; path: string }) =>
+    (await e.store.readLayer(layer, { includeArchive: true })).records.find(l => l.record.id === 'mem_dup')?.record
+  const seedCopies = async (e: ReturnType<typeof env>) => {
+    await e.store.create(record({ id: 'mem_dup', name: '本项目那份', scope: 'workspace', workspacePath: SESSION_WS }))
+    await e.store.create(record({ id: 'mem_dup', name: '别的项目那份', scope: 'workspace', workspacePath: OTHER_WS, globalCandidate: true }))
+  }
+
+  it('promote-memory 指明别的项目：先要 allowCrossWorkspace，带上后提升的是那一份', async () => {
+    const e = env()
+    await seedCopies(e)
+    const other = { kind: 'workspace', workspacePath: OTHER_WS } as const
+    expect(err(await e.run({ cmd: 'promote-memory', memoryId: 'mem_dup', layer: other })).code).toBe('cross-workspace')
+    expect((await copyIn(e, { kind: 'workspace', path: SESSION_WS }))?.name).toBe('本项目那份')
+    ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_dup', layer: other, allowCrossWorkspace: true }))
+    expect((await copyIn(e, { kind: 'global' }))?.name).toBe('别的项目那份')
+    expect(await copyIn(e, { kind: 'workspace', path: OTHER_WS })).toBeUndefined()
+    expect((await copyIn(e, { kind: 'workspace', path: SESSION_WS }))?.name).toBe('本项目那份')
+  })
+
+  it('promote 别的项目的提升候选：同样只动候选所在项目那一份', async () => {
+    const e = env()
+    await seedCopies(e)
+    const { entry } = await e.decisions.upsert({ kind: 'promote-candidate', memoryIds: ['mem_dup'], summary: '别的项目那份', workspaces: [OTHER_WS], fingerprint: 'fp' }, 1)
+    expect(err(await e.run({ cmd: 'promote', decisionId: entry.id, target: 'global' })).code).toBe('cross-workspace')
+    expect((await copyIn(e, { kind: 'workspace', path: SESSION_WS }))?.name).toBe('本项目那份')
+    ok(await e.run({ cmd: 'promote', decisionId: entry.id, target: 'global', allowCrossWorkspace: true }))
+    expect((await copyIn(e, { kind: 'global' }))?.name).toBe('别的项目那份')
+    expect((await copyIn(e, { kind: 'workspace', path: SESSION_WS }))?.name).toBe('本项目那份')
+  })
+})
+
 describe('scan', () => {
   const conflictLlm: SemanticLlm = {
     complete: async () => JSON.stringify({ findings: [{ type: 'conflict', memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', suggestedAction: '裁决' }] }),

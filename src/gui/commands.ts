@@ -136,6 +136,12 @@ async function run(deps: MemoryCommandDeps, invocation: MemoryCommandInvocation)
   return result
 }
 
+/** 提升候选所在项目的那一份（同 id 在会话项目里另有一份时不动错）；旧条目没记项目时按会话定位。 */
+function candidateCopy(entry: PendingDecision): { target?: GuiLayerRef } {
+  const workspacePath = entry.workspaces?.[0]
+  return workspacePath === undefined || workspacePath === 'global' ? {} : { target: { kind: 'workspace', workspacePath } }
+}
+
 /** 撤销的是直接改、直接合并：改本身不受体检开关影响，撤销也不受。 */
 async function isEditUndo(decisions: PendingDecisionsStore, command: MemoryCommand): Promise<boolean> {
   return command.cmd === 'undo' && (await decisions.listSettled()).some(d => d.id === command.decisionId && kindOf(d) === 'edit')
@@ -312,7 +318,7 @@ async function dispatch(
       if (isErr(entry)) return entry
       const r = await executePromote(
         { confirmedIds: entry.memoryIds.slice(0, 1), target: command.target, allowCrossWorkspace: command.allowCrossWorkspace },
-        gov, { store: deps.store, agentsMd: deps.agentsMd, snapshots: deps.snapshots, now: () => now },
+        gov, { store: deps.store, agentsMd: deps.agentsMd, snapshots: deps.snapshots, now: () => now }, candidateCopy(entry),
       )
       if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
       if (r.promoted.length === 0) return fail(cmd, 'failed', r.message)
@@ -329,6 +335,7 @@ async function dispatch(
       const r = await executePromote(
         { confirmedIds: [rec.id], target: 'global', allowCrossWorkspace: command.allowCrossWorkspace },
         gov, { store: deps.store, agentsMd: deps.agentsMd, snapshots: deps.snapshots, now: () => now },
+        { target: { kind: 'workspace', workspacePath: rec.workspacePath! } },
       )
       if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
       if (r.promoted.length === 0) return fail(cmd, 'failed', r.message)
