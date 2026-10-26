@@ -258,6 +258,7 @@ export async function apply(ctx: Context, config: Config) {
     }
     if (!llm?.stream) return null
     return {
+      model,
       async complete({ system, user }, signal) {
         // 起步前先看取消：已取消就不发请求，直接抛（signal.reason 通常是 AbortError）。
         signal?.throwIfAborted()

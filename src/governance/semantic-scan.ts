@@ -4,6 +4,8 @@ import { maskSecretSurface, maskSecrets } from '../secrets.ts'
 
 /** 语义层的 LLM 抽象：纯逻辑只依赖这个接口，真机接线在 index.ts。 */
 export interface SemanticLlm {
+  /** 解析出的模型名（「让模型改」写在界面上）；宿主接线总会带上，测试桩可以不给。 */
+  readonly model?: string
   /** signal 触发时应尽快取消在途请求，并抛出 AbortError（宿主 exec.signal 契约）。 */
   complete(input: { system: string; user: string }, signal?: AbortSignal): Promise<string>
 }

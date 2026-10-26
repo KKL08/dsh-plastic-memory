@@ -26,6 +26,7 @@ import {
   type GuiErrorCode, type GuiLayerRef, type MemoryCommand, type MemoryCommandResult,
 } from './contract.ts'
 import type { ViewWriter } from './view-writer.ts'
+import { generateDraft } from './model-draft.ts'
 
 /**
  * `/memory` 人类命令（GUI 的动作通道）：解析契约参数 → 调现有执行器 → 返回契约 JSON 文本。
@@ -74,6 +75,9 @@ export interface MemoryCommandDefinition {
 // dismiss-overflow 不在此列：超限提醒在体检关闭时照样入账，忽略它不属于治理动作
 const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'undo', 'promote', 'promote-memory', 'keep-local', 'scan'])
 
+/** 不写任何东西的子命令：成功后也不重写视图。 */
+const READ_ONLY_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['draft-edit'])
+
 /** 改待决项的子命令，先认领条目再执行，同一条同时只跑一个（resolve 由执行器 executeConfirm 自己认领）。 */
 const CLAIMED_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['undo', 'promote', 'keep-local', 'dismiss-overflow'])
 
@@ -109,6 +113,10 @@ async function run(deps: MemoryCommandDeps, invocation: MemoryCommandInvocation)
   const exec = { agent: invocation.agent } as unknown as ToolRunContext
   const context = await deps.resolveContext(exec)
   if (command.cmd === 'info') return await info(deps, context.session.id)
+  if (command.cmd === 'model-info') {
+    const llm = deps.getLlm(exec)
+    return llm === null ? fail(command.cmd, 'llm-unavailable', '借用的会话拿不到模型') : { ok: true, cmd: command.cmd, ...(llm.model !== undefined ? { model: llm.model } : {}) }
+  }
   if (GOVERNANCE_COMMANDS.has(command.cmd) && deps.isGovernanceEnabled?.() === false && !(await isEditUndo(deps.decisions, command))) {
     return fail(command.cmd, 'governance-disabled', '体检已关闭，可在插件设置里打开')
   }
@@ -124,7 +132,7 @@ async function run(deps: MemoryCommandDeps, invocation: MemoryCommandInvocation)
     result = await dispatch(deps, command, gov, exec, now)
   }
   // scan / refresh-views 自己做全量重写
-  if (result.ok && command.cmd !== 'scan' && command.cmd !== 'refresh-views') await deps.views.request()
+  if (result.ok && command.cmd !== 'scan' && command.cmd !== 'refresh-views' && !READ_ONLY_COMMANDS.has(command.cmd)) await deps.views.request()
   return result
 }
 
@@ -160,7 +168,7 @@ async function info(deps: MemoryCommandDeps, sessionId: string): Promise<Ok> {
 
 async function dispatch(
   deps: MemoryCommandDeps,
-  command: Exclude<MemoryCommand, { cmd: 'info' }>,
+  command: Exclude<MemoryCommand, { cmd: 'info' | 'model-info' }>,
   gov: GovernanceContext,
   exec: ToolRunContext,
   now: number,
@@ -460,6 +468,20 @@ async function dispatch(
       }, memoryIds.length === 2 ? 'merged' : 'edited', now, snapshot.id)
       if (!isRemoved) return fail(cmd, 'has-secret', `保留的那条已改好；另一条（${removed!.record.id}）刚被写进密钥，没有删除`)
       return { ok: true, cmd, decisionId: entry.id, memoryIds, snapshotId: snapshot.id, ...(written !== undefined ? { filePath: written.filePath } : {}) }
+    }
+
+    case 'draft-edit': {
+      const refs = command.memories
+      if (refs.length === 2 && refs[0].memoryId === refs[1]!.memoryId) return fail(cmd, 'invalid-args', `要合并的两条是同一条记忆：${refs[0].memoryId}`)
+      const records = await Promise.all(refs.map(ref => locate(ref.memoryId, ref.layer)))
+      if (!records.every(r => r?.status === 'active')) return notFound(refs.map(ref => ref.memoryId).join('、'))
+      // 原文不发给模型：明确密钥和疑似密钥都算
+      if (records.some(r => hasSecret(r!))) return fail(cmd, 'has-secret', '含密钥的记忆不发给模型。未做任何改动')
+      const llm = deps.getLlm(exec)
+      if (llm === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型')
+      const r = await generateDraft({ adviceType: command.adviceType, records: records.map(rec => rec!), request: command.request, previous: command.previous }, llm)
+      if (!r.ok) return fail(cmd, r.code, r.detail)
+      return { ok: true, cmd, draft: r.draft, ...(llm.model !== undefined ? { model: llm.model } : {}) }
     }
 
     case 'dismiss-overflow': {

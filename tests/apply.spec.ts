@@ -294,7 +294,7 @@ describe('GUI 命令接线', () => {
       const r = await defs[0]!.handler({ rawInput: line.slice('/memory'.length), agent })
       return { kind: r.kind, body: JSON.parse(r.text!) as Record<string, unknown> }
     }
-    return { memoryRoot, defs, exec }
+    return { memoryRoot, defs, exec, ctx }
   }
 
   it('宿主有 commands：注册一条 memory 命令；第一个会话出现后不等调用就写一遍全局视图（首次打开记忆页要有内容）', async () => {
@@ -322,6 +322,58 @@ describe('GUI 命令接线', () => {
     expect(forgot.body).toMatchObject({ ok: true, cmd: 'forget', memoryIds: ['mem_gone'] })
     const deleted = JSON.parse(await readFile(join(memoryRoot, '.state', 'gui', 'deleted.json'), 'utf8')) as { items: Array<{ memory: { id: string } }> }
     expect(deleted.items.map(i => i.memory.id)).toEqual(['mem_gone'])
+  })
+
+  describe('让模型改：经宿主 llm 服务', () => {
+    // 会话带 provider/model（makeSemanticLlm 三层解析的第二层），模型才解析得到
+    const routed = { session: { header: { id: 'sess-x' }, seq: 1, requestHeader: () => undefined }, options: { provider: 'deepseek', model: 'deepseek-v4-flash' } }
+    async function withMemory() {
+      const t = await withCommands()
+      await mkdir(join(t.memoryRoot, 'global'), { recursive: true })
+      const file = join(t.memoryRoot, 'global', 'long.md')
+      await writeFile(file, encodeRecord(record({ id: 'mem_long', name: '发版流程', content: '先跑测试，再打包，再发版。', summary: '发版步骤' }), {}), 'utf8')
+      const run = async (line: string, agent: unknown = routed) => {
+        const r = await t.defs[0]!.handler({ rawInput: line.slice('/memory'.length), agent })
+        return JSON.parse(r.text!) as Record<string, unknown>
+      }
+      return { ...t, file, run }
+    }
+    const DRAFT_LINE = '/memory draft-edit {"adviceType":"bloat","memories":[{"memoryId":"mem_long","layer":{"kind":"global"}}]}'
+
+    it('model-info 回会话解析出的模型名；会话没有路由时 llm-unavailable，不猜默认模型', async () => {
+      const t = await withMemory()
+      expect(await t.run('/memory model-info')).toEqual({ ok: true, cmd: 'model-info', model: 'deepseek-v4-flash' })
+      expect(await t.run('/memory model-info', { session: { header: { id: 'sess-x' }, seq: 1 } })).toMatchObject({ ok: false, code: 'llm-unavailable' })
+      expect(t.ctx.llmRequests).toEqual([])
+    })
+
+    it('draft-edit 只发一次不进会话的请求（RequestUserInput：只有 role 与 content），只累加 text-delta；记忆文件不动', async () => {
+      const t = await withMemory()
+      const before = await readFile(t.file, 'utf8')
+      t.ctx.llmScript.push([
+        { type: 'reasoning-delta', index: 0, text: '先想想' },
+        { type: 'text-delta', index: 1, text: '{"content":"测试、打包、发版。",' },
+        { type: 'text-delta', index: 1, text: '"summary":"发版三步"}' },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ] as StreamChunk[])
+      expect(await t.run(DRAFT_LINE)).toEqual({ ok: true, cmd: 'draft-edit', draft: { content: '测试、打包、发版。', summary: '发版三步' }, model: 'deepseek-v4-flash' })
+      expect(t.ctx.llmRequests).toHaveLength(1)
+      const [request] = t.ctx.llmRequests
+      expect(request).toMatchObject({ provider: 'deepseek', model: 'deepseek-v4-flash' })
+      expect(request!.messages).toHaveLength(1)
+      expect(Object.keys(request!.messages[0] as object).sort()).toEqual(['content', 'role'])
+      expect(await readFile(t.file, 'utf8')).toBe(before)
+    })
+
+    it('流已吐出合法 JSON 却以 error 收尾：按失败返回（llm-failed），不重试', async () => {
+      const t = await withMemory()
+      t.ctx.llmScript.push([
+        { type: 'text-delta', index: 0, text: '{"content":"短","summary":"短"}' },
+        { type: 'finish', reason: { kind: 'error', failure: { code: 'STREAM_CLOSED', message: 'stream ended before message_stop' } } },
+      ])
+      expect(await t.run(DRAFT_LINE)).toMatchObject({ ok: false, code: 'llm-failed', detail: 'stream ended before message_stop' })
+      expect(t.ctx.llmRequests).toHaveLength(1)
+    })
   })
 
   it('会话归属对照：在会话里执行 /memory 命令时，记下原始 cwd → 服务端解析出的项目（软链接、子目录都按 realpath）', async () => {

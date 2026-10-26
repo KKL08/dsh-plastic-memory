@@ -122,6 +122,10 @@ export const PENDING_LEVEL_OF_KIND = {
 export const ADVICE_TYPES = ['expired', 'bloat', 'redundancy', 'orphan', 'misplaced', 'unclear', 'stale'] as const
 export type AdviceType = (typeof ADVICE_TYPES)[number]
 
+/** 能「让模型改」（内容重复是「让模型合并」）的建议类型：服务端按它给默认要求，界面按它出按钮。 */
+export const MODEL_EDIT_ADVICE_TYPES = ['bloat', 'redundancy', 'misplaced', 'unclear'] as const satisfies readonly AdviceType[]
+export type ModelEditAdviceType = (typeof MODEL_EDIT_ADVICE_TYPES)[number]
+
 /** 「等你决定」的口径（左栏圆点、设置页状态卡、健康页「待你决定」入口）：密钥与待你处理；读不出的文件、建议整理不算。 */
 export function isAwaitingDecision(item: Pick<PendingItem, 'kind' | 'level'>): boolean {
   return item.kind === 'secret' || item.level === 'your-call'
@@ -340,6 +344,16 @@ const layer = layerRefSchema.optional()
 /** 卡片加载时记忆的版本（MemoryCard 的 updatedAt 与 digest）。 */
 const memoryBaseSchema = z.object({ updatedAt: z.number(), digest: z.string() })
 const mergeRefSchema = z.object({ memoryId: z.string(), layer, base: memoryBaseSchema })
+const draftRefSchema = z.object({ memoryId: z.string(), layer })
+
+/** 「让模型改」的一稿：正文、摘要每次都有；名称、标签缺省 = 模型没改。只在界面和命令之间来回，不落盘。 */
+export const memoryDraftSchema = z.object({
+  content: z.string().min(1),
+  summary: z.string(),
+  name: z.string().min(1).optional(),
+  tags: z.array(z.string()).optional(),
+})
+export type MemoryDraft = z.infer<typeof memoryDraftSchema>
 /** 直接改、直接合并写进去的四个字段；force：疑似密钥经用户确认后放行（高危密钥一律拦）。 */
 const editFields = {
   content: z.string().min(1),
@@ -387,6 +401,20 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
    * 两条同拍一份快照，undo 把两条都恢复。
    */
   z.object({ cmd: z.literal('merge-memories'), memories: z.tuple([mergeRefSchema, mergeRefSchema]), ...editFields }),
+  /** 借来的会话用哪个模型（「让模型改」的按钮与提示）：拿不到回 llm-unavailable；拿到了但不知道名字时 model 缺省。只读。 */
+  z.object({ cmd: z.literal('model-info') }),
+  /**
+   * 「让模型改 / 让模型合并」的生成：一条（合并时两条）记忆按建议类型的默认要求、或用户写的 request，单次调用借来的会话的模型，
+   * 回一稿改后的内容（结果的 draft）。只读：不写记忆、不拍快照、不入账本、不进会话记录；「应用」由界面改发 edit-memory / merge-memories。
+   * previous：「再改改」时的上一稿，模型在它的基础上接着改。含密钥的记忆回 has-secret，原文不发给模型。
+   */
+  z.object({
+    cmd: z.literal('draft-edit'),
+    adviceType: z.enum(MODEL_EDIT_ADVICE_TYPES),
+    memories: z.union([z.tuple([draftRefSchema]), z.tuple([draftRefSchema, draftRefSchema])]),
+    request: z.string().optional(),
+    previous: memoryDraftSchema.optional(),
+  }),
   z.object({ cmd: z.literal('dismiss-overflow'), decisionId: z.string() }),
   z.object({ cmd: z.literal('scan'), workspacePath: z.string().optional() }),
   z.object({ cmd: z.literal('refresh-views') }),
@@ -427,11 +455,13 @@ export const GUI_ERROR_CODES = [
   'invalid-args',       // 参数不符合 memoryCommandSchema
   'not-found',          // 条目或记忆不存在（可能已处理）
   'cross-workspace',    // 涉及其他项目且未带 allowCrossWorkspace，什么都没动
-  'llm-unavailable',    // 体检拿不到模型
+  'llm-unavailable',    // 体检、让模型改拿不到模型
+  'llm-failed',         // 让模型改：模型报错，detail 带原话
+  'llm-invalid-output', // 让模型改：模型的输出不合要求的格式
   'subagent-readonly',  // 借的会话是子 agent，不可写
   'governance-disabled', // 体检已关闭：裁决、撤销、提升、留在本项目、体检、忽略超限不可用
   'has-secret',         // forget 的目标含密钥（任一级），只能彻底删除：什么都没动，界面确认后改发 hard-delete；
-                        // 直接改、直接合并的目标含密钥（界面上是遮盖后的正文）：什么都没动
+                        // 直接改、直接合并的目标含密钥（界面上是遮盖后的正文）：什么都没动；让模型改的目标含密钥：不发给模型
   'stale',              // 直接改、直接合并：记忆在卡片加载后被改过，什么都没动
   'secret-critical',    // 直接改、直接合并的新内容含高危密钥：什么都没动
   'secret-suspected',   // 直接改、直接合并的新内容含疑似密钥：什么都没动，用户确认后带 force 重发
@@ -449,6 +479,10 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     snapshotId: z.string().optional(),
     /** edit-memory / merge-memories：保留的那条写完后的文件（改了名称时文件名跟着变）。 */
     filePath: z.string().optional(),
+    /** draft-edit：模型给的改后稿。 */
+    draft: memoryDraftSchema.optional(),
+    /** model-info、draft-edit：借来的会话用的模型名；拿不到名字时缺省。 */
+    model: z.string().optional(),
     /** scan：体检的说明码（如 baseline-session-scoped）。 */
     notes: z.array(z.custom<ScanNoteCode>(v => typeof v === 'string')).optional(),
     /** info：记忆根目录、视图目录与各视图文件的绝对路径（session 是发命令的这个会话的视图）、视图版本。 */
