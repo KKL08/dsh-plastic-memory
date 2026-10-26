@@ -1,6 +1,6 @@
-// 页头「体检当前项目」：主 / 次按钮、进行中、失败、拿不到模型、体检关闭四种状态，以及结果区的说明。挂在真实记忆页里测。
+// 页头「体检当前项目」：主 / 次按钮、进行中、失败、拿不到模型、体检关闭四种状态，以及结果行（新增条数、链接、说明）。挂在真实记忆页里测。
 import { describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, screen } from '@testing-library/react'
+import { act, fireEvent, screen, within } from '@testing-library/react'
 import { GUI_VIEW_VERSION, type HealthView, type MemoryCommandResult, type PendingView } from '../../src/gui/contract.ts'
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { MemoryPage } from '../MemoryPage.tsx'
@@ -18,9 +18,18 @@ const somePending: PendingView = {
 
 function renderPage(init: FakeGatewayInit = {}, openSettings = vi.fn()) {
   const gateway = createFakeGateway({ currentWorkspace: '/w/app', views: { pending: noPending, health: health() }, ...init })
-  renderInShell(<MemoryPage nav={createNavStore(undefined, { openSettings })} />, gateway)
-  return { gateway, openSettings, button: () => screen.getByRole('button', { name: /体检当前项目|再试一次/ }) }
+  const nav = createNavStore(undefined, { openSettings })
+  const { container } = renderInShell(<MemoryPage nav={nav} />, gateway)
+  return {
+    gateway, nav, openSettings,
+    button: () => screen.getByRole('button', { name: /体检当前项目|再试一次/ }),
+    /** 按钮下面那一行。 */
+    statusLine: () => container.querySelector('.pm-scan-status')!,
+  }
 }
+
+const scanned = (patch: Partial<Extract<MemoryCommandResult, { ok: true }>> = {}): MemoryCommandResult =>
+  ({ ok: true, cmd: 'scan', notes: [], added: { pending: 0, advice: 0 }, ...patch })
 
 function deferred() {
   let resolve!: (r: MemoryCommandResult) => void
@@ -39,7 +48,7 @@ describe('体检当前项目', () => {
     expect(screen.getByRole('button', { name: '体检当前项目' })).toHaveClass('pm-btn--secondary')
   })
 
-  it('点击发 scan，带页面当前项目；进行中按钮禁用并原位显示状态，完成后写体检完成', async () => {
+  it('点击发 scan，带页面当前项目；进行中按钮禁用并原位显示状态，完成后写结果（没带新增条数时只写体检完成）', async () => {
     const pending = deferred()
     const { gateway, button } = renderPage({ respond: () => pending.promise })
     fireEvent.click(button())
@@ -63,10 +72,9 @@ describe('体检当前项目', () => {
   })
 
   it('借的会话不属于当前项目：结果区显示基线检查已跳过', async () => {
-    renderPage({ respond: () => ({ ok: true, cmd: 'scan', notes: ['baseline-session-scoped'] }) })
+    const { statusLine } = renderPage({ respond: () => scanned({ notes: ['baseline-session-scoped'] }) })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '体检当前项目' })) })
-    expect(screen.getByText('体检完成。')).toBeInTheDocument()
-    expect(screen.getByText(/这次没有对照本项目的 AGENTS.md 检查冲突/)).toBeInTheDocument()
+    expect(statusLine()).toHaveTextContent(/^没有发现新问题·查看分数 ›这次没有对照本项目的 AGENTS.md 检查冲突/)
   })
 
   it('失败：显示原话并提示在对话里让 agent 体检，按钮变再试一次', async () => {
@@ -93,6 +101,62 @@ describe('体检当前项目', () => {
     expect(gateway.executed).toEqual([])
     fireEvent.click(screen.getByRole('button', { name: '去设置里打开 ›' }))
     expect(openSettings).toHaveBeenCalledTimes(1)
+  })
+
+  describe('结果行', () => {
+    async function scan(result: MemoryCommandResult, init: FakeGatewayInit = {}) {
+      const page = renderPage({ respond: () => result, ...init })
+      await act(async () => { fireEvent.click(page.button()) })
+      return page
+    }
+
+    it('有新增：写新增几条待处理、几条建议，链接各去对应的 tab，查看分数去健康', async () => {
+      const { nav, statusLine } = await scan(scanned({ added: { pending: 2, advice: 1 } }))
+      expect(statusLine()).toHaveTextContent(/^体检完成：新增 2 条待处理 ›·新增 1 条建议 ›·查看分数 ›$/)
+      fireEvent.click(screen.getByRole('button', { name: '新增 2 条待处理 ›' }))
+      expect(nav.get().tab).toBe('pending')
+      fireEvent.click(screen.getByRole('button', { name: '查看分数 ›' }))
+      expect(nav.get().tab).toBe('health')
+      fireEvent.click(screen.getByRole('button', { name: '新增 1 条建议 ›' }))
+      expect(nav.get().tab).toBe('pending')
+    })
+
+    it('只有建议：没有「待处理」那段', async () => {
+      const { statusLine } = await scan(scanned({ added: { pending: 0, advice: 3 } }))
+      expect(statusLine()).toHaveTextContent(/^体检完成：新增 3 条建议 ›·查看分数 ›$/)
+    })
+
+    it('没有新增：写没有发现新问题，只留查看分数', async () => {
+      const { statusLine } = await scan(scanned())
+      expect(statusLine()).toHaveTextContent(/^没有发现新问题·查看分数 ›$/)
+      expect(within(statusLine() as HTMLElement).getAllByRole('button').map(b => b.textContent)).toEqual(['查看分数 ›'])
+    })
+
+    it('内容检查没做完：结果照写，说明附在后面', async () => {
+      const { statusLine } = await scan(scanned({ added: { pending: 1, advice: 0 }, notes: ['semantic-failed'] }))
+      expect(statusLine()).toHaveTextContent(/^体检完成：新增 1 条待处理 ›·查看分数 ›内容检查没有完成，这次只更新了规则检查。$/)
+    })
+
+    it('内容检查只查了一部分：如实写出来', async () => {
+      const { statusLine } = await scan(scanned({ notes: ['semantic-truncated'] }))
+      expect(statusLine()).toHaveTextContent(/^没有发现新问题·查看分数 ›记忆较多，这次内容检查只看了一部分/)
+    })
+
+    it('原地跑：体检完成不切走当前 tab', async () => {
+      const pending = deferred()
+      const { nav, button } = renderPage({ respond: () => pending.promise })
+      act(() => { nav.update({ tab: 'library' }) })
+      fireEvent.click(button())
+      await act(async () => { pending.resolve(scanned({ added: { pending: 1, advice: 1 } })) })
+      expect(nav.get().tab).toBe('library')
+    })
+
+    it('命令回来说体检已关闭：写体检已关闭并给「去设置里打开 ›」', async () => {
+      const { openSettings, statusLine } = await scan({ ok: false, cmd: 'scan', code: 'governance-disabled', detail: '体检已关闭，可在插件设置里打开' })
+      expect(statusLine()).toHaveTextContent(/^体检已关闭·去设置里打开 ›$/)
+      fireEvent.click(screen.getByRole('button', { name: '去设置里打开 ›' }))
+      expect(openSettings).toHaveBeenCalledTimes(1)
+    })
   })
 
   it('没有会话时不出现按钮', () => {

@@ -4,13 +4,13 @@
  * 结论按优先级：体检关闭 → 有密钥 → 有 N 处等你决定 → 还没有记忆 → 还没体检过 → 状态良好。
  * 「打开记忆页 ›」有等你决定的事时去待处理，否则去健康（PRD §4 入口⑤）。
  * 「立即体检」和记忆页页头一样发 `/memory scan`：插件页没有自己的项目，体检当前选中会话所在的项目，没有选中的会话就体检全部层；
- * 进行中、失败的状态写在按钮下面一行。
+ * 完成、失败写在按钮下面一行，与页头共用体检结果行（ScanResult），链接经导航直达记忆页对应的 tab。
  */
-import { useEffect, useRef, useState } from 'react'
-import { isAwaitingDecision, type HealthView, type LibraryView, type MemoryCommandResult, type PendingView } from '../../src/gui/contract.ts'
+import { isAwaitingDecision, type HealthView, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { formatDay, formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { MemoryTab } from '../nav.ts'
+import { ScanResult, useScanCommand } from '../health/ScanResult.tsx'
 import { Button } from '../ui/Button.tsx'
 import { HealthBanner } from '../ui/HealthBanner.tsx'
 import type { MarkerKind } from '../ui/StatusMarker.tsx'
@@ -49,39 +49,13 @@ export function openTarget(pending: PendingView | undefined): MemoryTab {
   return pending.items.some(isAwaitingDecision) ? 'pending' : 'health'
 }
 
-type ScanState =
-  | { kind: 'idle' }
-  | { kind: 'running' }
-  | { kind: 'done' }
-  | { kind: 'failed'; code: Extract<MemoryCommandResult, { ok: false }>['code']; detail: string | undefined }
-
 function useScan(session: BorrowedSession) {
   const gateway = useGateway()
   const current = gateway.useCurrentWorkspace()
   const workspacePath = current.status === 'ready' ? current.workspacePath : undefined
-  const [state, setState] = useState<ScanState>({ kind: 'idle' })
-  const live = useRef(true)
-  useEffect(() => () => { live.current = false }, [])
-  const run = () => {
-    // 当前项目还没确认时不发：否则会按全部项目去体检
-    if (session.kind !== 'ready' || current.status === 'loading') return
-    setState({ kind: 'running' })
-    void gateway.execute(session.sessionId, { cmd: 'scan', ...(workspacePath !== undefined ? { workspacePath } : {}) }).then((result) => {
-      if (live.current) setState(result.ok ? { kind: 'done' } : { kind: 'failed', code: result.code, detail: result.detail })
-    })
-  }
-  return { state, run }
-}
-
-function scanStatus(state: ScanState, t: Translate): string {
-  switch (state.kind) {
-    case 'idle':
-    case 'running': return ''
-    case 'done': return t('scan.done')
-    case 'failed':
-      if (state.code === 'governance-disabled') return t('scan.off')
-      return `${state.code === 'llm-unavailable' ? t('scan.llmUnavailable') : t('scan.failed', { detail: state.detail ?? state.code })} ${t('scan.askAgent')}`
-  }
+  const { state, run } = useScanCommand(session)
+  // 当前项目还没确认时不发：否则会按全部项目去体检
+  return { state, run: () => { if (current.status !== 'loading') run(workspacePath) } }
 }
 
 export function StatusCard({ governanceEnabled, onOpen, now = Date.now() }: {
@@ -117,7 +91,9 @@ export function StatusCard({ governanceEnabled, onOpen, now = Date.now() }: {
             </Button>
             <button type="button" className="pm-link" onClick={() => { onOpen(openTarget(pending)) }}>{t('settings.status.open')}</button>
           </div>
-          <p className="pm-status-scan" role="status">{scanStatus(scan.state, t)}</p>
+          <p className="pm-status-scan" role="status">
+            {scan.state.kind === 'done' || scan.state.kind === 'failed' ? <ScanResult state={scan.state} onOpen={onOpen} /> : null}
+          </p>
         </div>
       )}
     />
@@ -129,4 +105,5 @@ export const statusCardCss = `
 .pm-status-buttons { display: flex; align-items: center; gap: 12px; }
 .pm-status-scan { margin: 0; max-width: 360px; text-align: right; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-status-scan:empty { display: none; }
+.pm-status-scan .pm-scan-note { display: block; }
 `

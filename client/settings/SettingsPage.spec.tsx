@@ -1,7 +1,7 @@
 // 插件设置页：三组设置的渲染、「我加的类型」弹层必填校验、revision 冻结与冲突提示、非法值、体检关闭时置灰、状态卡。
 import { describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { GUI_VIEW_VERSION, type HealthView, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, type HealthView, type LibraryView, type MemoryCommandResult, type PendingView } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createTranslator } from '../i18n.tsx'
 import { en, zh } from '../locales.ts'
@@ -480,14 +480,59 @@ describe('状态卡', () => {
 })
 
 describe('状态卡「立即体检」', () => {
+  let onOpen = vi.fn()
+  let container: HTMLElement
   function render(init: Parameters<typeof createFakeGateway>[0] = {}, value?: Record<string, unknown>) {
     const gateway = createFakeGateway({ views: { pending: pending(), health: health(NOW), library: library(3) }, ...init })
-    renderInShell(<SettingsPage form={createFakeConfigForm(value ? { value } : {})} onOpenMemoryPage={() => {}} now={NOW} />, gateway)
+    onOpen = vi.fn()
+    container = renderInShell(<SettingsPage form={createFakeConfigForm(value ? { value } : {})} onOpenMemoryPage={onOpen} now={NOW} />, gateway).container
     return gateway
   }
   const button = () => screen.getByRole('button', { name: /立即体检|正在体检|再试一次/ })
+  /** 按钮下面那一行。 */
+  const statusLine = () => container.querySelector('.pm-status-scan')!
+  const scanned = (patch: Partial<Extract<MemoryCommandResult, { ok: true }>> = {}): MemoryCommandResult =>
+    ({ ok: true, cmd: 'scan', notes: [], added: { pending: 0, advice: 0 }, ...patch })
+  async function scan(result: MemoryCommandResult) {
+    render({ respond: () => result })
+    await act(async () => { fireEvent.click(button()) })
+  }
 
-  it('发 /memory scan，体检当前选中会话所在的项目；进行中按钮禁用，完成后写一句', async () => {
+  it('有新增：和页头同一行，链接经导航直达记忆页对应的 tab', async () => {
+    await scan(scanned({ added: { pending: 1, advice: 2 } }))
+    // 原地跑：完成后不自动跳走
+    expect(onOpen).not.toHaveBeenCalled()
+    expect(statusLine()).toHaveTextContent(/^体检完成：新增 1 条待处理 ›·新增 2 条建议 ›·查看分数 ›$/)
+    fireEvent.click(screen.getByRole('button', { name: '新增 1 条待处理 ›' }))
+    expect(onOpen).toHaveBeenLastCalledWith('pending')
+    fireEvent.click(screen.getByRole('button', { name: '新增 2 条建议 ›' }))
+    expect(onOpen).toHaveBeenLastCalledWith('pending')
+    fireEvent.click(screen.getByRole('button', { name: '查看分数 ›' }))
+    expect(onOpen).toHaveBeenLastCalledWith('health')
+  })
+
+  it('只有建议：没有「待处理」那段', async () => {
+    await scan(scanned({ added: { pending: 0, advice: 1 } }))
+    expect(statusLine()).toHaveTextContent(/^体检完成：新增 1 条建议 ›·查看分数 ›$/)
+  })
+
+  it('没有新增：写没有发现新问题；基线检查被跳过的说明附在后面', async () => {
+    await scan(scanned({ notes: ['baseline-session-scoped'] }))
+    expect(statusLine()).toHaveTextContent(/^没有发现新问题·查看分数 ›这次没有对照本项目的 AGENTS.md 检查冲突/)
+    expect(within(statusLine() as HTMLElement).getAllByRole('button').map(b => b.textContent)).toEqual(['查看分数 ›'])
+  })
+
+  it('内容检查没做完、只查了一部分：说明附在后面', async () => {
+    await scan(scanned({ added: { pending: 1, advice: 0 }, notes: ['semantic-failed', 'semantic-truncated'] }))
+    expect(statusLine()).toHaveTextContent(/^体检完成：新增 1 条待处理 ›·查看分数 ›内容检查没有完成，这次只更新了规则检查。记忆较多，这次内容检查只看了一部分/)
+  })
+
+  it('命令回来说体检已关闭：只写体检已关闭', async () => {
+    await scan({ ok: false, cmd: 'scan', code: 'governance-disabled', detail: '体检已关闭，可在插件设置里打开' })
+    expect(statusLine()).toHaveTextContent(/^体检已关闭$/)
+  })
+
+  it('发 /memory scan，体检当前选中会话所在的项目；进行中按钮禁用，完成后写一句（没带新增条数时只写体检完成）', async () => {
     let finish: (r: { ok: true; cmd: 'scan' }) => void = () => {}
     const gateway = render({ currentWorkspace: '/w/app', respond: () => new Promise((resolve) => { finish = resolve }) })
     fireEvent.click(button())
