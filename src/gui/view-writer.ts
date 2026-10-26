@@ -64,10 +64,12 @@ export class ViewWriter {
   private tail: Promise<void> = Promise.resolve()
   private disposed = false
   private readonly log: MemoryLogger
+  private readonly collect: () => Promise<GlobalViews>
 
-  constructor(private readonly opts: { memoryRoot: string; collect: () => Promise<GlobalViews>; log?: MemoryLogger }) {
+  constructor(opts: { memoryRoot: string; collect: () => Promise<GlobalViews>; log?: MemoryLogger }) {
     this.dir = join(opts.memoryRoot, GUI_VIEW_DIR)
     this.log = opts.log ?? console
+    this.collect = opts.collect
   }
 
   /** 请求重写这些全局视图（缺省四个都写）。 */
@@ -130,7 +132,7 @@ export class ViewWriter {
   }
 
   private async writeGlobal(names: readonly GlobalViewName[]): Promise<void> {
-    const views = await this.opts.collect()
+    const views = await this.collect()
     for (const name of names) await this.writeFile(GUI_VIEW_FILES[name], views[name])
   }
 
