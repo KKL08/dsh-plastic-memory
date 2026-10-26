@@ -88,6 +88,28 @@ describe('自动放宽：档位提醒', () => {
     expect((await overflowEntries(d)).open.map(overflowLevelOf)).toEqual([{ mode: 'relax', tier: 2 }])
   })
 
+  it('同档用量变了：沿用原条目（id、首次出现时间、忽略状态不变），说明里的数字跟着更新', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await seed(store, 10)
+    const used = (await freeze(store, undefined, 1e9)).usedTokens
+    const d = ledger()
+    await freeze(store, d, used - 1)
+    const [before] = (await overflowEntries(d)).open
+    await d.settle(before.id, 'dismiss', Date.now())
+
+    await seed(store, 1, 'more') // 多一条，用量变了但仍在第 1 档
+    const grown = await freeze(store, d, used - 1)
+    expect(grown.usedTokens).toBeGreaterThan(used)
+    expect(grown.overflowChanged).toBe(true)
+    const { open, settled } = await overflowEntries(d)
+    expect(open).toEqual([])
+    expect(settled).toHaveLength(1)
+    expect(settled[0]).toMatchObject({ id: before.id, firstSeenAt: before.firstSeenAt })
+    expect(overflowLevelOf(settled[0])).toEqual({ mode: 'relax', tier: 1 })
+    expect(settled[0].summary).not.toBe(before.summary)
+    expect(settled[0].summary).toContain(String(grown.usedTokens))
+  })
+
   it('用量降回上限以内：删除条目，再超出时重新提醒', async () => {
     const store = new MemoryStore(new InMemoryTable())
     await seed(store, 10)

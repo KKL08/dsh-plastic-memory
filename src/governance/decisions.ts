@@ -250,7 +250,7 @@ export class PendingDecisionsStore {
 
   /**
    * 快照冻结时同步一个项目的超限提醒（scope：workspace 路径，无项目为 'global'）。每个项目同时只留一条，指纹 = 当前档位：
-   * 同档不动（已忽略的保持忽略，不重报）；进入更高档换一条新的未决条目；回落到没超限删掉，下次超限重新提醒；
+   * 同档沿用原条目、只更新说明里的用量（已忽略的保持忽略，不重报）；进入更高档换一条新的未决条目；回落到没超限删掉，下次超限重新提醒；
    * 从高档降到低档时高档条目删掉、换成低档条目，高档已忽略的低档也算忽略（回落不打扰），再升回高档重新提醒。
    * 换模式（relax ↔ strict）旧条目作废。返回账本是否有变化。
    */
@@ -260,7 +260,12 @@ export class PendingDecisionsStore {
     const current = mine.find(([, e]) => e.fingerprint === fingerprint)
     const stale = mine.filter(entry => entry !== current)
     for (const [key] of stale) await this.table.delete(key)
-    if (level === undefined || current !== undefined) return stale.length > 0
+    if (level === undefined) return stale.length > 0
+    if (current !== undefined) {
+      if (current[1].summary === summary) return stale.length > 0
+      await this.table.put(current[0], { ...current[1], summary })
+      return true
+    }
     const dismissedAbove = stale.some(([, e]) => e.settled !== undefined && overflowLevelOf(e).mode === level.mode && overflowLevelOf(e).tier > level.tier)
     const entry: PendingDecision = {
       id: genId('pd'), kind: 'overflow', memoryIds: [], summary, firstSeenAt: now, workspaces: [scope], fingerprint: fingerprint!,
