@@ -4,6 +4,7 @@ import type { SearchNoteCode } from '../contract-codes.ts'
 import { expandQueryTerms } from '../text.ts'
 import { resolveLiveFirst } from '../storage/table.ts'
 import { tokenizerForQuery, type QueryTokenizerOptions } from '../search/jieba-segmenter.ts'
+import { CJK } from '../search/tokenizer.ts'
 import { anchorTerms, compareRanked, rankRecords, type RankedRecord, type SearchTier } from '../search/ranking.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import { sourceNote } from '../index-line.ts'
@@ -72,7 +73,7 @@ export function renderSearchResult(result: { hits: SearchHit[]; note?: string; m
   return blocks.length === 0 ? '没有匹配的记忆。' : blocks.join('\n\n')
 }
 
-const CJK_CHAR = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u
+const CJK_CHAR = new RegExp(`[${CJK}]`, 'u')
 
 /** 单个字母、纯数字几乎在每个文件里出现：既不作为打分 token，也不能进 any 模式预筛。单个 CJK 字是实词，保留。 */
 function isNoiseTerm(term: string): boolean {
