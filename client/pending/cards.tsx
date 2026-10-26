@@ -411,7 +411,7 @@ export function AdviceCard(props: CardProps<'advice'>) {
       confirm: <Button key="confirm" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'confirm', memoryId: memory.id, layer }) }}>{t('pending.advice.confirm')}</Button>,
       delete: <Button key="delete" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'forget', memoryId: memory.id, layer }) }}>{deleteLabel}</Button>,
       promote: <Button key="promote" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'promote-memory', memoryId: memory.id, layer }) }}>{t('pending.promote.global')}</Button>,
-      open: <Button key="open" onClick={open}>{t('pending.advice.open')}</Button>,
+      open: <Button key="open" variant="ghost" onClick={open}>{t('pending.advice.open')}</Button>,
       edit: isEditable(memory)
         ? <Button key="edit" unavailable={action.unavailable} onClick={() => { setEditing(true) }}>{t('pending.edit.edit')}</Button>
         : null,
@@ -606,7 +606,7 @@ function EditedRow({ item, outcome, action }: {
         </span>
         {undoId !== undefined
           ? (
-            <Button className="pm-pending-undo" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'undo', decisionId: undoId }) }}>
+            <Button variant="ghost" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'undo', decisionId: undoId }) }}>
               {t('pending.undo')}
             </Button>
           )

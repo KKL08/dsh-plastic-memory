@@ -112,7 +112,7 @@ export function EditPanel({ initial, original, isMerge, unavailable, onCancel, o
           {isMoreOpen ? <span>{t('pending.edit.typeFixed')}</span> : null}
         </span>
         <span className="pm-edit-count">{t('pending.edit.count', { from: formatNumber(original.chars), to: formatNumber(content.length) })}</span>
-        <Button unavailable={unavailable} onClick={onCancel}>{t('pending.cancel')}</Button>
+        <Button variant="ghost" unavailable={unavailable} onClick={onCancel}>{t('pending.cancel')}</Button>
         <Button
           variant="primary"
           unavailable={unavailable ?? (isEmpty ? t('pending.edit.empty') : undefined)}

@@ -606,6 +606,8 @@ describe('待处理：建议整理', () => {
     setup([item])
     expect(cardOf(title).querySelector(`[data-memory-id="${item.kind === 'advice' ? item.memories[0]!.id : ''}"]`)).not.toBeNull()
     expect(within(cardOf(title)).getAllByRole('button').map(b => b.textContent)).toEqual([...buttons])
+    // 「打开文件」退一步，用幽灵按钮；其余照常
+    for (const b of within(cardOf(title)).getAllByRole('button')) expect(b.classList.contains('pm-btn--ghost')).toBe(b.textContent === '打开文件')
   })
 
   it('说明按情形写：和指令文件重复、该放全局、只和项目有关、表述不清、内容过长', () => {
@@ -628,6 +630,7 @@ describe('待处理：建议整理', () => {
     expect(within(left).getByText('左边的内容。')).toBeInTheDocument()
     expect(within(right).getByText('右边的内容。')).toBeInTheDocument()
     expect(within(card).getAllByRole('button').map(b => b.textContent)).toEqual(['删除左边', '打开文件', '删除右边', '打开文件', '直接合并'])
+    for (const b of within(card).getAllByRole('button')) expect(b.classList.contains('pm-btn--ghost')).toBe(b.textContent === '打开文件')
 
     await act(async () => { fireEvent.click(within(right).getByRole('button', { name: '打开文件' })) })
     expect(gateway.opened).toEqual([{ path: '/m/app/r2.md' }])
@@ -769,6 +772,8 @@ describe('待处理：直接改与直接合并', () => {
     expect(box).toHaveValue(long)
     expect(screen.queryByRole('button', { name: '打开文件' })).toBeNull()
     expect(screen.queryByRole('textbox', { name: '名称' })).toBeNull()
+    expect(screen.getByRole('button', { name: '取消' })).toHaveClass('pm-btn--ghost')
+    expect(screen.getByRole('button', { name: '保存' })).toHaveClass('pm-btn--primary')
     const next = '1. 跑测试\n2. 发版'
     fireEvent.change(box, { target: { value: next } })
     expect(screen.getByText(`${long.length} 字 → ${next.length} 字`)).toBeInTheDocument()
@@ -831,6 +836,8 @@ describe('待处理：直接改与直接合并', () => {
     await save()
     expect(screen.getByText('已修改')).toBeInTheDocument()
     expect(screen.getByText(`发版步骤 · ${long.length} 字 → 5 字`)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '撤销' })).toHaveClass('pm-btn--ghost')
+    expect(screen.getByRole('button', { name: '打开文件' })).toHaveClass('pm-btn--secondary')
     expect(screen.queryByRole('textbox', { name: '正文' })).toBeNull()
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '打开文件' })) })
     expect(gateway.opened).toEqual([{ path: '/m/app/release.md' }])
