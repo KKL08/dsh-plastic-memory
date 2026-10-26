@@ -117,11 +117,14 @@ describe('memory_search 绑定', () => {
     return createSearchTool({ store, registry, resolveContext: async () => ({ workspacePath: '/proj', session: { id: 's', lastSeq: 1 } }) })
   }
 
-  it('工具描述教模型怎么下关键词（2 到 4 个实词、中英文两种写法），并鼓励命中弱时换词再搜一次', async () => {
+  it('工具描述开头讲清它管什么、和 grep 怎么分工，再分段教关键词写法与读结果（换行保留），命中弱时换词再搜一次', async () => {
     const tool = await seededTool()
-    expect(tool.description).toContain('2 到 4 个实词')
-    expect(tool.description).toContain('中英文两种写法')
-    expect(tool.description).toContain('换个角度再搜一次')
+    const d = tool.description
+    expect(d.startsWith('查长期记忆用这个工具：想知道某件事有没有记过、记的是什么，或按 id 取一条。\n范围是本项目和全局记忆。')).toBe(true)
+    expect(d).toContain('代码和项目文件用 grep 搜；记忆目录不要用 grep 搜：那里还存着已删除和其他项目的记忆')
+    expect(d).toContain('\n怎么写关键词：\n- 写 2 到 4 个实词。版本号、路径这类原样文字可以直接搜。\n')
+    expect(d).toContain('- 术语的中英两种写法都带上。\n\n怎么读结果：\n')
+    expect(d).toContain('换个角度再搜一次')
     const query = (schemaOf(tool) as { properties: Record<string, { description?: string }> }).properties.query!
     expect(query.description).toContain('建议换词再搜一次')
   })

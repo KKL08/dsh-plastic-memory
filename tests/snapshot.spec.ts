@@ -242,15 +242,16 @@ describe('票 17 索引与引导', () => {
     })
   })
 
-  describe('固定尾注：global 与当前项目的 MEMORY.md 路径；全文引导「直接 Read 索引行给出的文件，或 memory_search」；.archive/ 是已遗忘 / 已取代记忆的存放处、日常不要读；证据下钻引导保留', () => {
+  describe('固定尾注：global 与当前项目的 MEMORY.md 路径；全文引导「先 memory_search，要看文件原样再 Read」、不提 grep；.archive/ 是已遗忘 / 已取代记忆的存放处、日常不要读；证据下钻引导保留', () => {
     const recs = [record({ id: 'mem_k', type: 'knowledge' })]
 
     it('有 workspace：列出两个 MEMORY.md 路径与全文、.archive/、证据下钻三段引导', () => {
       const { text } = assembleSnapshot({ ...base, records: recs, workspacePath: WS, memoryRoot: ROOT, evidenceLookup: 'active' })
       expect(text).toContain(`${ROOT}/global/MEMORY.md`)
       expect(text).toContain(`${ROOT}/${workspaceDirName(WS)}/MEMORY.md`)
-      expect(text).toMatch(/直接 Read 索引行末尾的文件[^\n]*memory_search/)
-      expect(text).toContain(`路径相对 ${ROOT}/`)
+      expect(text).toContain(`\n完整索引：\n- 全局记忆：${ROOT}/global/MEMORY.md\n- 本项目记忆：`)
+      expect(text).toContain(`看全文：用 memory_search 按 id 或关键词查；要看文件原样，再 Read 索引行末尾的文件（路径相对 ${ROOT}/）。`)
+      expect(text).not.toContain('grep')
       expect(text).toMatch(/\.archive\/[^\n]*已遗忘、已取代[^\n]*日常不要读/)
       expect(text).toMatch(/其他项目/)
       expect(text).toContain(EVIDENCE_GUIDANCE.active)
@@ -309,7 +310,13 @@ describe('票 17 索引与引导', () => {
       expect(nav).not.toContain('tag-f')
       expect(nav).toContain(`${ROOT}/global/MEMORY.md`)
       expect(nav).toContain(`${ROOT}/${workspaceDirName(WS)}/MEMORY.md`)
-      expect(nav).toContain('memory_search')
+      expect(nav).toContain(`用 memory_search 查询；要浏览全部条目，完整索引见 ${ROOT}/global/MEMORY.md、${ROOT}/${workspaceDirName(WS)}/MEMORY.md。`)
+    })
+
+    it('没有记忆根目录时，导航行的完整索引指向各记忆目录的 MEMORY.md', () => {
+      const { text } = assembleSnapshot({ ...base, records: [1, 2].map(i => record({ id: `mem_n${i}` })), budget: 5, overflow: 'strict' })
+      expect(text).toContain('索引未列全')
+      expect(text).toContain('用 memory_search 查询；要浏览全部条目，完整索引见各记忆目录的 MEMORY.md。')
     })
 
     it('没有被截掉的记录时不出导航图', () => {

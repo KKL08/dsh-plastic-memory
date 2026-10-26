@@ -65,8 +65,8 @@ function truncationNav(omitted: ReadonlyArray<{ type: string; records: readonly 
   const lines = [`\n索引未列全：另有 ${total} 条记忆未列出（${omitted.map(o => `${o.type} ${o.records.length} 条`).join('、')}）。`]
   if (topTags.length > 0) lines.push(`高频标签：${topTags.map(([t, n]) => `${t}（${n}）`).join('、')}。`)
   lines.push(indexPaths.length > 0
-    ? `完整索引见 ${indexPaths.join('、')}，或用 memory_search 查询。`
-    : '完整索引见各记忆目录的 MEMORY.md，或用 memory_search 查询。')
+    ? `用 memory_search 查询；要浏览全部条目，完整索引见 ${indexPaths.join('、')}。`
+    : '用 memory_search 查询；要浏览全部条目，完整索引见各记忆目录的 MEMORY.md。')
   return lines.join('\n')
 }
 
@@ -104,7 +104,7 @@ export function assembleSnapshot(deps: {
   workspacePath: string | undefined
   budget: number
   now: number
-  /** 记忆文件根目录（运行时解析）。给出时在快照末尾附一行磁盘路径，让 grep 通道在自定义根下也可发现。 */
+  /** 记忆文件根目录（运行时解析）。给出时在快照末尾列出完整索引的磁盘路径，自定义根下也能按路径 Read 原文件。 */
   memoryRoot?: string
   /** 证据下钻档位（设计 evidence-anchor §4）：给出时在快照末尾拼对应引导文案；缺省不拼（纯测试场景）。 */
   evidenceLookup?: EvidenceLookupLevel
@@ -223,10 +223,10 @@ export function assembleSnapshot(deps: {
   // 私有记忆（跨项目泄漏）。跨项目透明可读的只应是 global；别项目记忆除非用户明确给路径才访问。
   if (deps.memoryRoot) {
     const [globalIndex, workspaceIndex] = indexPaths
-    const lines = ['\n完整索引（grep 之前先查它）：', `- 全局记忆：${globalIndex}`]
+    const lines = ['\n完整索引：', `- 全局记忆：${globalIndex}`]
     if (workspaceIndex !== undefined) lines.push(`- 本项目记忆：${workspaceIndex}`)
     lines.push(
-      `看全文：直接 Read 索引行末尾的文件（路径相对 ${deps.memoryRoot}/），或用 memory_search 按 id 或关键词查。`,
+      `看全文：用 memory_search 按 id 或关键词查；要看文件原样，再 Read 索引行末尾的文件（路径相对 ${deps.memoryRoot}/）。`,
       `各目录下的 ${ARCHIVE_DIR}/ 是已遗忘、已取代记忆的存放处，日常不要读；只在回看历史时进去。`,
       '其他项目的记忆不在上列——除非用户明确给出该项目路径，否则不要去读别的 workspace 目录。',
     )
