@@ -145,3 +145,11 @@ export function maskSecretSurface<T extends SecretSurface>(r: T, opts: MaskOptio
   const [content, name, summary, ...tags] = segments.map((segment, i) => maskRange(text, spans, starts[i], starts[i] + segment.length))
   return { ...r, content, name, summary, tags }
 }
+
+/**
+ * 记忆文件路径对外的口径（注入、检索、体检说明同口径）：文件名由 name 派生，slug 只换分隔符还会截断，name 被遮了
+ * 路径里多半还留着同一段密钥（截断后的残段规则也认不出），不给路径（undefined）；手起名的文件名可能自带密钥，其余路径遮一遍。
+ */
+export function exposedPath(r: SecretSurface, path: string): string | undefined {
+  return maskSecretSurface(r).name === r.name ? maskSecrets(path) : undefined
+}

@@ -25,6 +25,8 @@ import type { DirectoryNoteCode } from '../src/contract-codes.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
+import { FAKE_SECRET } from './helpers/secrets.ts'
+import { SECRET_MASK } from '../src/secrets.ts'
 
 // 票 09：执行器切到按范围读取与两级定位。全部用真实目录（FileTable + .state 侧表），
 // 只 mock 进程边界（sessionQuery.readEvent）；文件直接写盘模拟用户手编、git、其他进程。
@@ -178,6 +180,33 @@ describe('票 09 验收：执行器走按范围读取与两级定位', () => {
     await h.source(deriveFileId(relative(root, join(wsDir(WS), 'hand.md'))))
 
     expect(await treeSnapshot(root)).toEqual(before)
+  })
+
+  it('search 的文件路径与注入同口径：name 含密钥的不给路径，手起名的文件名带密钥的遮掉', async () => {
+    await writeMem(globalDir(), `deploy-${FAKE_SECRET.sk}.md`, rec({ id: 'mem_h', name: '部署说明', content: 'pathalpha 手起名' }))
+    await writeMem(globalDir(), 'gw.md', rec({ id: 'mem_n', name: `网关 ${FAKE_SECRET.github}`, content: 'pathbravo 名字带密钥' }))
+    const h = harness()
+    const named = (await h.search('pathalpha')).hits
+    expect(named.map(x => x.path)).toEqual([join(globalDir(), `deploy-${SECRET_MASK}.md`)])
+    const secretName = await h.search('pathbravo')
+    expect(secretName.hits.map(x => x.id)).toEqual(['mem_n'])
+    expect(secretName.hits[0].path).toBeUndefined()
+    for (const text of [renderSearchResult(secretName), renderSearchResult({ hits: named })]) {
+      expect(text).not.toContain(FAKE_SECRET.sk)
+      expect(text).not.toContain(FAKE_SECRET.github)
+    }
+  })
+
+  it('重复 id 说明里的路径同口径：name 含密钥的那份不给文件名，文件名带密钥的遮掉', async () => {
+    await writeMem(wsDir(WS), 'kept.md', wsRec({ id: 'mem_d', name: `网关 ${FAKE_SECRET.github}`, content: '在用', updatedAt: 500 }), WS)
+    await writeMem(globalDir(), `copy-${FAKE_SECRET.sk}.md`, rec({ id: 'mem_d', name: '网关', content: '副本', updatedAt: 400 }))
+    const h = harness()
+    const r = checkup(await h.health({ scope: 'all' }))
+    const notes = r.directoryNotes.filter(n => n.code === DUPLICATE_ID)
+    expect(notes.map(n => [n.path, n.keptPath])).toEqual([[join(globalDir(), `copy-${SECRET_MASK}.md`), join(wsDir(WS), SECRET_MASK)]])
+    const text = renderHealthResult(r)
+    expect(text).not.toContain(FAKE_SECRET.sk)
+    expect(text).not.toContain(FAKE_SECRET.github)
   })
 
   it('重复 id：search 返回一条且规则正确；副本在另一个项目时 health 报出、不删', async () => {

@@ -4,6 +4,8 @@ import type { KvTable } from '../kv-table.ts'
 import type { ScanCacheEntry } from '../governance/schema.ts'
 import { layerCacheKey, type LayerPreread, type LayerRef } from '../governance/layer-health.ts'
 import type { MemoryRecord } from '../record-schema.ts'
+import { dirname, join } from 'node:path'
+import { SECRET_MASK, exposedPath, maskSecrets } from '../secrets.ts'
 import { resolveDuplicates, resolveLiveFirst, type DirectoryNote, type LocatedRecord, type QuarantineEntry, type WorkspaceDirListing } from '../storage/table.ts'
 
 /**
@@ -62,11 +64,16 @@ export async function prereadLayers(
 
 /** 同 id 的多余副本：每份一条说明（路径是副本，正文点出读取时用的那份）。 */
 function duplicateNotes(read: readonly LocatedRecord[], chosen: readonly LocatedRecord[]): DirectoryNote[] {
-  const kept = new Map(chosen.map(l => [l.record.id, l.filePath]))
-  return read.filter(l => kept.get(l.record.id) !== l.filePath).map(l => ({
-    level: 'info', code: 'duplicate-id', path: l.filePath, keptPath: kept.get(l.record.id),
-    text: `记忆 ${l.record.id} 有多个文件：读取时用 ${kept.get(l.record.id)}，副本 ${l.filePath} 未自动删除；确认哪份有效后手工删掉多余的`,
-  }))
+  // 路径与注入同口径（exposedPath）：name 含密钥的那份只给所在目录、文件名换成占位，其余路径遮一遍
+  const shown = (l: LocatedRecord) => exposedPath(l.record, l.filePath) ?? join(maskSecrets(dirname(l.filePath)), SECRET_MASK)
+  const kept = new Map(chosen.map(l => [l.record.id, l]))
+  return read.filter(l => kept.get(l.record.id)!.filePath !== l.filePath).map(l => {
+    const [path, keptPath] = [shown(l), shown(kept.get(l.record.id)!)]
+    return {
+      level: 'info', code: 'duplicate-id', path, keptPath,
+      text: `记忆 ${l.record.id} 有多个文件：读取时用 ${keptPath}，副本 ${path} 未自动删除；确认哪份有效后手工删掉多余的`,
+    }
+  })
 }
 
 /** 目录枚举的说明：缺标记与不可读目录总是列出；dir-empty 只在全库体检里有意义。 */

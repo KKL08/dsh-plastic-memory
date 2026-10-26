@@ -8,7 +8,7 @@ import { rankRecords, TIER_ORDER, type RankedRecord, type SearchTier } from '../
 import type { TypeRegistry } from '../type-registry.ts'
 import { sourceNote } from '../index-line.ts'
 import { stalenessNote, withinValidity } from '../record-freshness.ts'
-import { maskSecretSurface } from '../secrets.ts'
+import { exposedPath, maskSecretSurface } from '../secrets.ts'
 
 /** memory_search 运行时需要的会话上下文，由框架绑定层的 resolveContext 提供。 */
 export interface SearchContext {
@@ -39,8 +39,8 @@ export interface SearchHit {
   content: string
   sourceNote: string
   stalenessNote: string
-  /** 记忆文件的绝对路径（记忆根目录 + 目录名 + 文件名），恒有值；模型要全文或上下文时直接 Read。 */
-  path: string
+  /** 记忆文件的绝对路径（记忆根目录 + 目录名 + 文件名）；模型要全文或上下文时直接 Read。name 含明确密钥时不给（见 exposedPath）。 */
+  path?: string
 }
 
 /** 命中弱时附在说明末尾：说明码本身就是「相关度弱」的信号，提示模型换词再搜一次，而不是把弱结果当定论。 */
@@ -66,7 +66,7 @@ export function truncationNote(total: number, shown: number, atCap: boolean): st
 
 /** 把命中结果渲染成给模型看的一段文本：有说明先写说明，再列命中（头行末尾带文件绝对路径）。纯函数。 */
 export function renderSearchResult(result: { hits: SearchHit[]; note?: string; moreNote?: string }): string {
-  const blocks = result.hits.map(h => `[${h.id}] ${h.type}｜${h.summary}${h.sourceNote}${h.stalenessNote} · ${h.path}\n${h.content}`)
+  const blocks = result.hits.map(h => `[${h.id}] ${h.type}｜${h.summary}${h.sourceNote}${h.stalenessNote}${h.path !== undefined ? ` · ${h.path}` : ''}\n${h.content}`)
   const head = [result.note, result.moreNote].filter((x): x is string => x !== undefined).join('\n')
   if (head !== '') blocks.unshift(head)
   return blocks.length === 0 ? '没有匹配的记忆。' : blocks.join('\n\n')
@@ -154,14 +154,15 @@ export async function executeSearch(
   return {
     ...note,
     ...(ranked.length > top.length ? { moreNote: truncationNote(ranked.length, top.length, limit === MAX_SEARCH_LIMIT) } : {}),
-    // 与注入同口径：只遮明确密钥（疑似级写入时用户已确认），文件路径照给
+    // 与注入同口径：只遮明确密钥（疑似级写入时用户已确认）；文件路径同注入，name 被遮的不给，其余遮一遍
     hits: top.map(({ record: h }) => {
       const masked = maskSecretSurface(h)
+      const path = exposedPath(h, filePathOf.get(h.id)!)
       return {
         id: h.id, type: h.type, summary: masked.summary, content: masked.content,
         sourceNote: sourceNote(h),
         stalenessNote: stalenessNote(h, deps.registry.get(h.type).decayDays, now),
-        path: filePathOf.get(h.id)!,
+        ...(path !== undefined ? { path } : {}),
       }
     }),
   }

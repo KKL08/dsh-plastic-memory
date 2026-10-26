@@ -69,7 +69,7 @@ describe('executeSearch', () => {
     expect(result.hits[0]).toMatchObject({
       id: 'mem_key', summary: `网关 key ${SECRET_MASK}`, content: `部署用 ${SECRET_MASK}，预发库密码: Abc12345`,
     })
-    expect(result.hits[0].path.length).toBeGreaterThan(0)
+    expect(result.hits[0].path!.length).toBeGreaterThan(0)
     const text = renderSearchResult(result)
     expect(text).not.toContain(FAKE_SECRET.sk)
     expect(text).not.toContain(FAKE_SECRET.github)

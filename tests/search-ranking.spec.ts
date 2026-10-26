@@ -289,11 +289,11 @@ describe('结果形状：命中带文件绝对路径', () => {
       const r = await executeSearch({ query }, fakeExec(), deps(store, '/w/proj'))
       expect(r.hits.map(h => h.id).sort()).toEqual(['mem_g', 'mem_w'])
       for (const h of r.hits) {
-        expect(isAbsolute(h.path)).toBe(true)
-        expect(await readFile(h.path, 'utf8')).toContain(`id: ${h.id}`)
+        expect(isAbsolute(h.path!)).toBe(true)
+        expect(await readFile(h.path!, 'utf8')).toContain(`id: ${h.id}`)
       }
-      expect(dirname(r.hits.find(h => h.id === 'mem_g')!.path)).toBe(join(root, GLOBAL_DIR))
-      expect(dirname(r.hits.find(h => h.id === 'mem_w')!.path)).toBe(join(root, workspaceDirName('/w/proj')))
+      expect(dirname(r.hits.find(h => h.id === 'mem_g')!.path!)).toBe(join(root, GLOBAL_DIR))
+      expect(dirname(r.hits.find(h => h.id === 'mem_w')!.path!)).toBe(join(root, workspaceDirName('/w/proj')))
     }
   })
 
