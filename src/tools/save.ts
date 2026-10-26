@@ -21,7 +21,7 @@ export interface SaveToolDeps {
   resolveContext(exec: ToolRunContext): Promise<SaveContext>
   /** update global 目标前拍快照用（快照先行）；生产接线传入已有实例，测试可缺省。 */
   snapshots?: SnapshotStore
-  /** 新建成功后调用（会话视图的「这次对话新记的」，接线在 index.ts）。 */
+  /** 新建成功后调用（会话视图的 savedIds：右侧栏「这次新写入的」，接线在 index.ts）。 */
   onSaved?: (sessionId: string, memoryId: string) => void
 }
 

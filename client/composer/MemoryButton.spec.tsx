@@ -15,10 +15,10 @@ import { memoryShare } from './MemoryButton.tsx'
 
 function sessionView(overrides: Partial<SessionView> = {}): SessionView {
   return {
-    version: GUI_VIEW_VERSION, sessionId: 's1', workspacePath: '/w/app', frozenAt: 1,
+    version: GUI_VIEW_VERSION, sessionId: 's1', workspacePath: '/w/app', frozenAt: 1, origin: 'start',
     budget: 4000, overflowMode: 'relax',
     tokens: { workspace: 1870, global: 1050, fixed: 200 },
-    usedTokens: 3120, injectedIds: ['a', 'b'], omittedCount: 0, savedIds: ['c'],
+    usedTokens: 3120, injectedIds: ['a', 'b'], coreIds: ['a'], omittedCount: 0, savedIds: ['c'],
     ...overrides,
   }
 }
@@ -71,8 +71,15 @@ describe('弹层数字', () => {
     expect(dialog).toHaveTextContent('全局约 1,050')
     expect(dialog).toHaveTextContent('标题约 50')
     expect(dialog).toHaveTextContent('固定说明（不计上限）约 150')
-    expect(dialog).toHaveTextContent('带入 2 条 · 这次新记 1 条')
+    expect(dialog).toHaveTextContent('开始时带入 2 条 · 新写入 1 条')
     expect(dialog).not.toHaveTextContent('处理 ›')
+  })
+
+  it('压缩后重建的：写「压缩后重新带入」，进了新快照的新写入算在带入里，不重复计', () => {
+    setup({ view: sessionView({ origin: 'compacted', compactedAt: 1, injectedIds: ['a', 'b', 'c'], savedIds: ['c', 'd'] }) })
+    const dialog = openPanel()
+    expect(dialog).toHaveTextContent('压缩后重新带入 3 条 · 新写入 1 条')
+    expect(dialog).not.toHaveTextContent('开始时带入')
   })
 
   it('占比的分子是三段之和（真正放进上下文的量），「约已用」的分子是计入上限的 usedTokens（和右侧栏用量条同一口径）', () => {

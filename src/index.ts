@@ -517,7 +517,7 @@ export async function apply(ctx: Context, config: Config) {
   // 类型图内（该包非直接依赖），故按最小结构签名订阅；运行时事件名只是字符串，行为不受影响。
   const lifecycle = ctx as unknown as {
     on(name: 'session/created', fn: (session: SessionLike) => void): () => void
-    on(name: 'session/event', fn: (session: object, event: { type: string; data?: { error?: string } }) => void): () => void
+    on(name: 'session/event', fn: (session: object, event: { type: string; time?: number; data?: unknown }) => void): () => void
   }
   lifecycle.on('session/created', session => {
     // eager 预热：新 session 不必等首次组装才解析 workspace（HMR 后存量 session 走 render 侧自愈）。
@@ -537,7 +537,10 @@ export async function apply(ctx: Context, config: Config) {
     // 带 error 的结束是失败的压缩（如摘要不比被遮蔽内容小），什么都没遮蔽：旧快照还在可见面上，
     // 这时重建只会让宿主再追加一份、两份并存；阈值附近它几乎每步失败一次，所以只在成功时标过期。
     // error 在事件的 data 里（compaction-basic 以 `{ ...lifecycle, error }` 作为 payload append）。
-    if (event.type === 'compaction/end' && event.data?.error === undefined) snapshotCache.markStale(session)
+    // 成功的压缩记下压缩时刻（markCompacted），下一次冻结记为压缩后重新带入。
+    if (event.type !== 'compaction/end') return
+    if ((event.data as { error?: unknown } | undefined)?.error !== undefined) return
+    snapshotCache.markCompacted(session, typeof event.time === 'number' ? event.time : Date.now())
   })
   // 宿主每一步先 assemble、再跑 agent/pre-step（compaction-basic 在这里压缩），准入时重调同步 provider。
   // 等 next() 返回（压缩已做完）再重建快照，准入时追加的就是新快照，下一步中间件命中缓存、不再追加第二份。

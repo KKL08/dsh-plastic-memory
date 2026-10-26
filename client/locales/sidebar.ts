@@ -6,12 +6,17 @@
 export const sidebarZh = {
   'sidebar.tab.title': '记忆',
   'sidebar.guide.title': '记忆',
-  'sidebar.guide.description': '这次对话带入和新记的记忆',
+  'sidebar.guide.description': '这次对话带入和新写入的记忆',
 
   'sidebar.crumb.scope': '本项目 /',
-  'sidebar.usage.title': '这次对话带入的记忆',
-  'sidebar.saved.title': '这次对话新记的',
+  'sidebar.usage.title': '对话开始时带入的记忆',
+  'sidebar.usage.titleCompacted': '压缩后重新带入的记忆',
+  'sidebar.usage.searchNote': '对话中搜索到的记忆算普通上下文，不计入这里。',
+  'sidebar.saved.title': '这次新写入的',
+  'sidebar.saved.note': '压缩后或下个对话带入',
   'sidebar.groups.title': '带入的记忆',
+  'sidebar.groups.full': '全文',
+  'sidebar.groups.summary': '只带摘要',
   'sidebar.saved.delete': '删除这条记忆',
 
   'sidebar.empty.title': '还没有记忆',
@@ -56,12 +61,17 @@ export const sidebarZh = {
 export const sidebarEn: Record<keyof typeof sidebarZh, string> = {
   'sidebar.tab.title': 'Memory',
   'sidebar.guide.title': 'Memory',
-  'sidebar.guide.description': 'Memories this chat brought in and saved',
+  'sidebar.guide.description': 'Memories this chat brought in and wrote',
 
   'sidebar.crumb.scope': 'This project /',
-  'sidebar.usage.title': 'Brought into this chat',
-  'sidebar.saved.title': 'Saved in this chat',
+  'sidebar.usage.title': 'Brought in when the chat started',
+  'sidebar.usage.titleCompacted': 'Brought in again after compaction',
+  'sidebar.usage.searchNote': 'Memories found by search during the chat are regular context and do not count here.',
+  'sidebar.saved.title': 'Written in this chat',
+  'sidebar.saved.note': 'Brought in after compaction or in the next chat',
   'sidebar.groups.title': 'Brought-in memories',
+  'sidebar.groups.full': 'Full text',
+  'sidebar.groups.summary': 'Summary only',
   'sidebar.saved.delete': 'Delete this memory',
 
   'sidebar.empty.title': 'No memories yet',

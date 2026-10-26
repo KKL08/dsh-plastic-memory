@@ -41,7 +41,7 @@ describe('registerSidebarTab', () => {
     expect(def.guide).toHaveLength(1)
     expect(def.guide![0]).toMatchObject({ id: 'memory', order: 40 })
     expect(def.guide![0]!.title()).toBe('记忆')
-    expect(def.guide![0]!.description?.()).toBe('这次对话带入和新记的记忆')
+    expect(def.guide![0]!.description?.()).toBe('这次对话带入和新写入的记忆')
     expect(def.guide![0]!.icon).toBeDefined()
   })
 

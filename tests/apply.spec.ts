@@ -1296,7 +1296,10 @@ describe('配置热生效（loader/volatile-update）', () => {
       await mkdir(join(memoryRoot, 'global'), { recursive: true })
       await writeFile(join(memoryRoot, 'global', `${r!.id}.md`), encodeRecord(record(r), {}), 'utf8')
     }
-    return { memoryRoot, defs, config, assembleOnce, update, tool, exec, save, command, sessionView, putGlobal }
+    /** 宿主压缩结束（成功不带 error，失败带 error）。 */
+    const endCompaction = (time: number, error?: string) => ctx.listeners.get('session/event')!(session,
+      { type: 'compaction/end', time, data: { compactionId: 'cmp_1', turn: 1, ...(error === undefined ? {} : { error }) } })
+    return { memoryRoot, defs, config, assembleOnce, update, tool, exec, save, command, sessionView, putGlobal, endCompaction }
   }
 
   it('改上限、超限处理、溯源档位后，同一会话下一次组装就按新值（不等压缩）', async () => {
@@ -1406,6 +1409,27 @@ describe('配置热生效（loader/volatile-update）', () => {
     const saved = await t.save({ type: 'project', name: '冻结到 3 月', content: 'merge freeze 到 3 月 5 日' })
     expect(saved.kind).toBe('saved')
     await t.sessionView(v => expect(v).toEqual({ ...frozen, savedIds: [saved.record!.id] }))
+  })
+
+  it('快照来历：首次冻结是对话开始时；失败的压缩与配置热更新不改；成功压缩后重建是压缩后，压缩前新写入的进了带入', async () => {
+    const t = await setup()
+    await t.putGlobal({ id: 'mem_p', type: 'preference', content: '测试里不要 mock 数据库' })
+    await t.assembleOnce()
+    await t.sessionView(v => expect(v).toMatchObject({ origin: 'start', coreIds: ['mem_p'], injectedIds: ['mem_p'] }))
+    const saved = await t.save({ type: 'project', name: '冻结到 3 月', content: 'merge freeze 到 3 月 5 日' })
+    const id = saved.record!.id
+
+    t.endCompaction(4_000, 'summarizer failed')
+    await t.assembleOnce()
+    await t.update({ evidenceLookup: 'active' })
+    await t.assembleOnce()
+    const unchanged = await t.sessionView(v => expect(v).toMatchObject({ origin: 'start', savedIds: [id] }))
+    expect(unchanged.compactedAt).toBeUndefined()
+
+    t.endCompaction(5_000)
+    await t.assembleOnce()
+    const compacted = await t.sessionView(v => expect(v).toMatchObject({ origin: 'compacted', compactedAt: 5_000, savedIds: [id] }))
+    expect(compacted.injectedIds).toContain(id)
   })
 
   /** 全局视图是旁路写入：等它满足条件。 */

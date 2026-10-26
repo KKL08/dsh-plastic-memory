@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, mkdir, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { SnapshotCache, resolveWorkspacePath } from '../src/runtime.ts'
+import { SnapshotCache, resolveWorkspacePath, type FrozenSnapshotInfo } from '../src/runtime.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { COLD_START_TEXT, PROMPT_LBRACE_VARIABLE, assembleSnapshot } from '../src/snapshot.ts'
@@ -379,6 +379,83 @@ describe('SnapshotCache', () => {
     expect(await cache.assemble(a)).toBe(COLD_START_TEXT)
     // b 未经中间件组装，provider 不受 a 的缓存影响
     expect(cache.render(b)).toBe('')
+  })
+})
+
+// 快照来历（会话视图的 origin）：首次冻结是对话开始时；成功压缩后的下一次冻结是压缩后重新带入；
+// 其他重建（失败的压缩、配置热更新）沿用上一次的来历。
+describe('SnapshotCache 快照来历', () => {
+  function makeTracked() {
+    const store = new MemoryStore(new InMemoryTable())
+    const frozen: FrozenSnapshotInfo[] = []
+    const cache = new SnapshotCache({ store, registry, budget: 4000, onFrozen: (_s, info) => { frozen.push(info) } })
+    const session = {}
+    cache.setWorkspacePath(session, undefined)
+    return { store, cache, session, frozen, last: () => frozen.at(-1)! }
+  }
+
+  it('首次冻结的来历是对话开始时，带出带入全文的 core id', async () => {
+    const { store, cache, session, last } = makeTracked()
+    await store.put(record({ id: 'mem_core', type: 'preference', content: '不要 mock 数据库' }))
+    await store.put(record({ id: 'mem_idx', type: 'knowledge', content: '报销截止每月 25 日' }))
+    await cache.assemble(session)
+    expect(last()).toMatchObject({ origin: 'start', coreIds: ['mem_core'] })
+    expect(last().compactedAt).toBeUndefined()
+    expect(last().injectedIds).toEqual(['mem_core', 'mem_idx'])
+  })
+
+  it('成功压缩后下一次冻结的来历是压缩后，带压缩时刻；再之后的其他重建沿用', async () => {
+    const { cache, session, frozen, last } = makeTracked()
+    await cache.assemble(session)
+    cache.markCompacted(session, 5_000)
+    await cache.assemble(session)
+    expect(frozen).toHaveLength(2)
+    expect(last()).toMatchObject({ origin: 'compacted', compactedAt: 5_000 })
+    cache.markAllStale() // 配置热更新
+    await cache.assemble(session)
+    expect(frozen).toHaveLength(3)
+    expect(last()).toMatchObject({ origin: 'compacted', compactedAt: 5_000 })
+  })
+
+  it('失败的压缩（只标过期）与配置热更新都不改来历', async () => {
+    const { cache, session, frozen, last } = makeTracked()
+    await cache.assemble(session)
+    cache.markStale(session)
+    await cache.assemble(session)
+    cache.markAllStale()
+    await cache.assemble(session)
+    expect(frozen).toHaveLength(3)
+    expect(frozen.map(f => f.origin)).toEqual(['start', 'start', 'start'])
+    expect(last().compactedAt).toBeUndefined()
+  })
+
+  it('构建期间碰上成功压缩：这次的结果不冻结，压缩记到下一次冻结', async () => {
+    const { store, cache, session, frozen, last } = makeTracked()
+    await cache.assemble(session)
+    let release!: () => void
+    const gate = new Promise<void>(r => { release = r })
+    let entered!: () => void
+    const inQuery = new Promise<void>(r => { entered = r })
+    const readLayer = store.readLayer.bind(store)
+    vi.spyOn(store, 'readLayer').mockImplementationOnce(async (...args) => { entered(); await gate; return readLayer(...args) })
+    cache.markStale(session)
+    const building = cache.assemble(session)
+    await inQuery // 构建已开始，预读挂在 gate 上
+    cache.markCompacted(session, 7_000)
+    release()
+    await building
+    expect(frozen).toHaveLength(1)
+    await cache.assemble(session)
+    expect(last()).toMatchObject({ origin: 'compacted', compactedAt: 7_000 })
+  })
+
+  it('压缩后这次对话里新写入的记忆进了新快照', async () => {
+    const { store, cache, session, last } = makeTracked()
+    await cache.assemble(session)
+    await store.put(record({ id: 'mem_saved', type: 'knowledge', content: '对话中新写入的' }))
+    cache.markCompacted(session, 9_000)
+    await cache.assemble(session)
+    expect(last().injectedIds).toContain('mem_saved')
   })
 })
 

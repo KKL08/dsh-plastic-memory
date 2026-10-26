@@ -31,9 +31,9 @@ function library(...items: MemoryCard[]): LibraryView {
 
 function snapshot(overrides: Partial<SessionView> = {}): SessionView {
   return {
-    version: GUI_VIEW_VERSION, sessionId: 's1', workspacePath: WS, frozenAt: BOOTED + 1, budget: 4000, overflowMode: 'relax',
+    version: GUI_VIEW_VERSION, sessionId: 's1', workspacePath: WS, frozenAt: BOOTED + 1, origin: 'start', budget: 4000, overflowMode: 'relax',
     tokens: { workspace: 1870, global: 1050, fixed: 200 }, usedTokens: 2920,
-    injectedIds: ['p1', 'j1', 'g1'], omittedCount: 0, savedIds: [],
+    injectedIds: ['p1', 'j1', 'g1'], coreIds: ['p1', 'p2', 'g1'], omittedCount: 0, savedIds: [],
     ...overrides,
   }
 }
@@ -63,7 +63,7 @@ describe('SidebarTab 四种状态', () => {
     setup({ library: library(), session: snapshot({ injectedIds: [], tokens: { workspace: 0, global: 0, fixed: 0 }, usedTokens: 0 }), pending: pending() })
     expect(screen.getByText('还没有记忆')).toBeInTheDocument()
     expect(screen.getByText(/agent 在对话里记下你的偏好/)).toBeInTheDocument()
-    expect(screen.queryByText('这次对话带入的记忆')).toBeNull()
+    expect(screen.queryByText('对话开始时带入的记忆')).toBeNull()
   })
 
   it('有全局没本项目：提示本项目还没有记忆，列出带入的全局记忆，不写「本项目 0 条」', () => {
@@ -81,9 +81,9 @@ describe('SidebarTab 四种状态', () => {
     expect(screen.getByText('3 条 · 约 2,920 / 4,000')).toBeInTheDocument()
     expect(screen.getByText('全部带入')).toBeInTheDocument()
     const groups = within(screen.getByRole('region', { name: '带入的记忆' }))
-    expect(groups.getByRole('heading', { name: '行为偏好 1' })).toBeInTheDocument()
-    expect(groups.getByRole('heading', { name: '项目信息 1' })).toBeInTheDocument()
-    expect(groups.getByRole('heading', { name: '用户画像 1' })).toBeInTheDocument()
+    expect(groups.getByRole('heading', { name: '行为偏好 1 全文' })).toBeInTheDocument()
+    expect(groups.getByRole('heading', { name: '项目信息 1 只带摘要' })).toBeInTheDocument()
+    expect(groups.getByRole('heading', { name: '用户画像 1 全文' })).toBeInTheDocument()
     expect(screen.queryByText('本项目还没有记忆，这次带入的都是全局记忆。')).toBeNull()
     expect(screen.queryByText(/处待处理/)).toBeNull()
     expect(screen.getByText(/本项目 2 条记忆/)).toBeInTheDocument()
@@ -106,7 +106,7 @@ describe('SidebarTab 四种状态', () => {
   it('自定义类型的分组标题写注册表显示名（待处理视图的 typeLabels）', () => {
     const note = memory({ id: 'n1', type: 'domain-term', content: '「灰度」指先放给一小部分用户。' })
     setup({ library: library(note), session: snapshot({ injectedIds: ['n1'] }), pending: { ...pending(), typeLabels: { 'domain-term': '术语' } } })
-    expect(within(screen.getByRole('region', { name: '带入的记忆' })).getByRole('heading', { name: '术语 1' })).toBeInTheDocument()
+    expect(within(screen.getByRole('region', { name: '带入的记忆' })).getByRole('heading', { name: '术语 1 只带摘要' })).toBeInTheDocument()
   })
 
   it('会话视图还没有（这次对话没组装过快照）：说明发出第一条消息后才有', () => {
@@ -122,7 +122,7 @@ describe('SidebarTab 用量条', () => {
       session: snapshot({ tokens: { workspace: 88, global: 93, fixed: 596 }, usedTokens: 211 }),
       pending: pending(),
     })
-    const usage = within(screen.getByRole('region', { name: '这次对话带入的记忆' }))
+    const usage = within(screen.getByRole('region', { name: '对话开始时带入的记忆' }))
     expect(usage.getByText('3 条 · 约 211 / 4,000')).toBeInTheDocument()
     expect(container.querySelector('.pm-side-usage')).not.toHaveTextContent('777')
     expect(usage.getByRole('img')).toHaveAttribute('aria-label', '已用上限的 5%：本项目 88，全局 93，标题 30；固定说明 566，不计上限')
@@ -156,16 +156,68 @@ describe('SidebarTab 用量条', () => {
   })
 })
 
-describe('SidebarTab 这次对话新记的', () => {
+describe('SidebarTab 快照来历与分组', () => {
+  it('对话开始时冻结的：标题写「对话开始时带入的记忆」，条下说明搜索到的不计入', () => {
+    setup({ library: library(pref, proj, glob), session: snapshot(), pending: pending() })
+    const usage = within(screen.getByRole('region', { name: '对话开始时带入的记忆' }))
+    expect(usage.getByRole('heading', { name: '对话开始时带入的记忆' })).toBeInTheDocument()
+    expect(usage.getByText('对话中搜索到的记忆算普通上下文，不计入这里。')).toBeInTheDocument()
+    expect(screen.queryByText('压缩后重新带入的记忆')).toBeNull()
+  })
+
+  it('成功压缩后重建的：标题写「压缩后重新带入的记忆」，说明行照旧', () => {
+    setup({ library: library(pref, proj, glob), session: snapshot({ origin: 'compacted', compactedAt: BOOTED + 1 }), pending: pending() })
+    const usage = within(screen.getByRole('region', { name: '压缩后重新带入的记忆' }))
+    expect(usage.getByText('对话中搜索到的记忆算普通上下文，不计入这里。')).toBeInTheDocument()
+    expect(screen.queryByText('对话开始时带入的记忆')).toBeNull()
+  })
+
+  it('空组不显示：快照没带入任何记忆时没有「带入的记忆」，没有新写入时没有「这次新写入的」', () => {
+    setup({ library: library(pref), session: snapshot({ injectedIds: [], coreIds: [], usedTokens: 0, tokens: { workspace: 0, global: 0, fixed: 40 } }), pending: pending() })
+    expect(screen.getByRole('region', { name: '对话开始时带入的记忆' })).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '带入的记忆' })).toBeNull()
+    expect(screen.queryByRole('region', { name: '这次新写入的' })).toBeNull()
+  })
+
+  it('带入的记忆按组标出全文（core 区）与只带摘要（索引行）', () => {
+    const { container } = setup({ library: library(pref, proj, glob), session: snapshot(), pending: pending() })
+    const marks = [...container.querySelectorAll('.pm-side-group-title')].map(h => h.textContent)
+    expect(marks).toEqual(['行为偏好 1 ·全文', '项目信息 1 ·只带摘要', '用户画像 1 ·全文'])
+  })
+
+  it('这次新写入的注明压缩后或下个对话带入；新快照里已经有的移进带入的记忆，不重复列', () => {
+    const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
+    const later = memory({ id: 'n2', type: 'knowledge', content: '周五不发版。' })
+    const { gateway } = setup({ library: library(pref, proj, glob, fresh, later), session: snapshot({ savedIds: ['n1', 'n2'] }), pending: pending() })
+    const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
+    expect(saved.getByText('压缩后或下个对话带入')).toBeInTheDocument()
+    expect(saved.getByText('报销截止每月 25 日。')).toBeInTheDocument()
+    expect(saved.getByText('周五不发版。')).toBeInTheDocument()
+
+    act(() => { gateway.setView('session', snapshot({ origin: 'compacted', injectedIds: ['p1', 'j1', 'g1', 'n1'], savedIds: ['n1', 'n2'] })) })
+    const savedAfter = within(screen.getByRole('region', { name: '这次新写入的' }))
+    expect(savedAfter.queryByText('报销截止每月 25 日。')).toBeNull()
+    expect(savedAfter.getByText('周五不发版。')).toBeInTheDocument()
+    const injected = within(screen.getByRole('region', { name: '带入的记忆' }))
+    expect(injected.getByRole('heading', { name: '事实与经验 1 只带摘要' })).toBeInTheDocument()
+    expect(screen.getAllByText('报销截止每月 25 日。')).toHaveLength(1)
+
+    act(() => { gateway.setView('session', snapshot({ origin: 'compacted', injectedIds: ['p1', 'j1', 'g1', 'n1', 'n2'], savedIds: ['n1', 'n2'] })) })
+    expect(screen.queryByRole('region', { name: '这次新写入的' })).toBeNull()
+    expect(screen.getByText('周五不发版。')).toBeInTheDocument()
+  })
+})
+
+describe('SidebarTab 这次新写入的', () => {
   it('memory_save 后会话视图版本变化，新记的实时增加；行尾删除发 forget', async () => {
     const { gateway } = setup({ library: library(pref, proj, glob), session: snapshot(), pending: pending() })
-    expect(screen.queryByText('这次对话新记的')).toBeNull()
+    expect(screen.queryByText('这次新写入的')).toBeNull()
     const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
     act(() => {
       gateway.setView('library', library(pref, proj, glob, fresh))
       gateway.setView('session', snapshot({ savedIds: ['n1'] }))
     })
-    const saved = within(screen.getByRole('region', { name: '这次对话新记的' }))
+    const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
     expect(saved.getByText('报销截止每月 25 日。')).toBeInTheDocument()
     await act(async () => { fireEvent.click(saved.getByRole('button', { name: '删除这条记忆' })) })
     expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'n1', layer: { kind: 'workspace', workspacePath: WS } }])
@@ -178,7 +230,7 @@ describe('SidebarTab 这次对话新记的', () => {
       { library: library(pref, proj, glob, fresh), session: snapshot({ savedIds: ['n1'] }), pending: pending() },
       command => command.cmd === 'forget' ? { ok: false, cmd: command.cmd, code: 'has-secret' } : { ok: true, cmd: command.cmd, memoryIds: ['n1'] },
     )
-    const saved = within(screen.getByRole('region', { name: '这次对话新记的' }))
+    const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
     await act(async () => { fireEvent.click(saved.getByRole('button', { name: '删除这条记忆' })) })
     expect(saved.getByText('彻底删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeInTheDocument()
     expect(saved.getByRole('button', { name: '删除这条记忆' })).toHaveAttribute('aria-disabled', 'true')
@@ -212,7 +264,7 @@ describe('SidebarTab 同 id 的多份副本', () => {
       library: withLayers({ layer: { kind: 'workspace', workspacePath: '/w/blog' }, items: [elsewhere] }),
       session: snapshot({ savedIds: ['n1'] }), pending: pending(),
     })
-    const saved = within(screen.getByRole('region', { name: '这次对话新记的' }))
+    const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
     expect(saved.getByText('报销截止每月 25 日。')).toBeInTheDocument()
     expect(screen.queryByText('别的项目的同 id 副本')).toBeNull()
     await act(async () => { fireEvent.click(saved.getByRole('button', { name: '删除这条记忆' })) })
@@ -224,7 +276,7 @@ describe('SidebarTab 同 id 的多份副本', () => {
     const view = library(pref, proj, glob, fresh)
     const layers = view.layers.map(l => (l.layer.kind === 'global' ? { ...l, items: [...l.items, newerGlobal] } : l))
     const first = setup({ library: { ...view, layers }, session: snapshot({ savedIds: ['n1'] }), pending: pending() })
-    const saved = within(screen.getByRole('region', { name: '这次对话新记的' }))
+    const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
     expect(saved.getByText('全局更新的那份')).toBeInTheDocument()
     await act(async () => { fireEvent.click(saved.getByRole('button', { name: '删除这条记忆' })) })
     expect(first.gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'n1', layer: { kind: 'global' } }])
@@ -233,7 +285,7 @@ describe('SidebarTab 同 id 的多份副本', () => {
     const sameAge = { ...newerGlobal, content: '全局同龄的那份', updatedAt: 100 }
     const tied = view.layers.map(l => (l.layer.kind === 'global' ? { ...l, items: [...l.items, sameAge] } : l))
     setup({ library: { ...view, layers: tied }, session: snapshot({ savedIds: ['n1'] }), pending: pending() })
-    expect(within(screen.getByRole('region', { name: '这次对话新记的' })).getByText('报销截止每月 25 日。')).toBeInTheDocument()
+    expect(within(screen.getByRole('region', { name: '这次新写入的' })).getByText('报销截止每月 25 日。')).toBeInTheDocument()
   })
 })
 
@@ -246,7 +298,7 @@ describe('SidebarTab 就地裁决', () => {
     })
     const group = within(screen.getByRole('region', { name: '行为偏好' }))
     expect(group.getByRole('heading', { name: '两条记忆互相矛盾，等你决定' })).toBeInTheDocument()
-    expect(group.getByRole('heading', { name: '行为偏好 2' })).toBeInTheDocument()
+    expect(group.getByRole('heading', { name: '行为偏好 2 全文' })).toBeInTheDocument()
     expect(screen.getAllByText('测试里 mock 数据库就行。')).toHaveLength(1)
     expect(container.querySelectorAll('.pm-conflict-buttons button')).toHaveLength(3)
 
@@ -332,7 +384,7 @@ describe('SidebarTab 一条冲突同时只发一次裁决', () => {
     )
     const group = within(screen.getByRole('region', { name: '行为偏好' }))
     await act(async () => { fireEvent.click(group.getByRole('button', { name: '以 A 为准' })) })
-    const saved = within(screen.getByRole('region', { name: '这次对话新记的' }))
+    const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
     await act(async () => { fireEvent.click(saved.getByRole('button', { name: '删除这条记忆' })) })
     expect(group.getByRole('button', { name: '以 B 为准' })).toHaveAttribute('aria-disabled', 'true')
     await act(async () => { fireEvent.click(group.getByRole('button', { name: '以 B 为准' })) })
@@ -462,7 +514,7 @@ describe('SidebarTab 确认收起后的键盘焦点', () => {
     const one = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
     const two = memory({ id: 'n2', type: 'knowledge', content: '周报周五发。' })
     setup({ library: library(pref, proj, glob, one, two), session: snapshot({ savedIds: ['n1', 'n2'] }), pending: pending() })
-    const saved = within(screen.getByRole('region', { name: '这次对话新记的' }))
+    const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
     const [first] = saved.getAllByRole('button', { name: '删除这条记忆' })
     await press(first!)
     expect(saved.queryByText('报销截止每月 25 日。')).toBeNull()
@@ -475,7 +527,7 @@ describe('SidebarTab 确认收起后的键盘焦点', () => {
       { library: library(pref, proj, glob, fresh), session: snapshot({ savedIds: ['n1'] }), pending: pending() },
       command => command.cmd === 'forget' ? { ok: false, cmd: command.cmd, code: 'has-secret' } : { ok: true, cmd: command.cmd, memoryIds: ['n1'] },
     )
-    const saved = within(screen.getByRole('region', { name: '这次对话新记的' }))
+    const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
     const del = saved.getByRole('button', { name: '删除这条记忆' })
     await press(del)
     await press(saved.getByRole('button', { name: '取消' }))
@@ -492,7 +544,7 @@ describe('SidebarTab 确认收起后的键盘焦点', () => {
       { library: library(glob, fresh), session: snapshot({ injectedIds: [], savedIds: ['n1'] }), pending: pending() },
       command => command.cmd === 'forget' ? { ok: false, cmd: command.cmd, code: 'has-secret' } : { ok: true, cmd: command.cmd, memoryIds: ['n1'] },
     )
-    const saved = within(screen.getByRole('region', { name: '这次对话新记的' }))
+    const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
     await press(saved.getByRole('button', { name: '删除这条记忆' }))
     // 不包 act：命令返回后网关记删除和本组件收尾分两次提交，同浏览器里一样
     const purge = saved.getByRole('button', { name: '彻底删除' })
@@ -507,7 +559,7 @@ describe('SidebarTab 确认收起后的键盘焦点', () => {
       { library: library(fresh), session: snapshot({ injectedIds: [], savedIds: ['n1'] }), pending: pending() },
       command => command.cmd === 'forget' ? { ok: false, cmd: command.cmd, code: 'has-secret' } : { ok: true, cmd: command.cmd, memoryIds: ['n1'] },
     )
-    const saved = within(screen.getByRole('region', { name: '这次对话新记的' }))
+    const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
     await press(saved.getByRole('button', { name: '删除这条记忆' }))
     await press(saved.getByRole('button', { name: '彻底删除' }))
     act(() => { gateway.setView('library', library()) })

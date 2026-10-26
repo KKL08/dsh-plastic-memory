@@ -158,8 +158,8 @@ describe('交付卡', () => {
 
   it('本项目记忆：删除与撤销都带上会话所属项目的层（取会话视图里的项目，不用原始 cwd）', async () => {
     const session: SessionView = {
-      version: GUI_VIEW_VERSION, sessionId: 's1', workspacePath: '/w/app', frozenAt: 2, budget: 4000, overflowMode: 'relax',
-      tokens: { workspace: 0, global: 0, fixed: 0 }, usedTokens: 0, injectedIds: [], omittedCount: 0, savedIds: [],
+      version: GUI_VIEW_VERSION, sessionId: 's1', workspacePath: '/w/app', frozenAt: 2, origin: 'start', budget: 4000, overflowMode: 'relax',
+      tokens: { workspace: 0, global: 0, fixed: 0 }, usedTokens: 0, injectedIds: [], coreIds: [], omittedCount: 0, savedIds: [],
     }
     const gateway = createFakeGateway({ views: { session } })
     renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app/packages/web" saved={[saved('mem_w', '提交前跑测试')]} now={NOW} openDetail={() => {}} />, gateway)
@@ -283,8 +283,8 @@ describe('交付卡与其他界面共用删除状态', () => {
     layers: [{ layer: { kind: 'workspace', workspacePath: WS }, items: [fresh().memory] }],
   })
   const sessionView: SessionView = {
-    version: GUI_VIEW_VERSION, sessionId: 's1', workspacePath: WS, frozenAt: 2, budget: 4000, overflowMode: 'relax',
-    tokens: { workspace: 10, global: 0, fixed: 0 }, usedTokens: 10, injectedIds: [], omittedCount: 0, savedIds: ['n1'],
+    version: GUI_VIEW_VERSION, sessionId: 's1', workspacePath: WS, frozenAt: 2, origin: 'start', budget: 4000, overflowMode: 'relax',
+    tokens: { workspace: 10, global: 0, fixed: 0 }, usedTokens: 10, injectedIds: [], coreIds: [], omittedCount: 0, savedIds: ['n1'],
   }
   const secretFirst = (command: MemoryCommand): MemoryCommandResult => command.cmd === 'forget'
     ? { ok: false, cmd: command.cmd, code: 'has-secret' }
@@ -301,7 +301,7 @@ describe('交付卡与其他界面共用删除状态', () => {
       </>,
       gateway,
     )
-    const side = within(screen.getByRole('region', { name: '这次对话新记的' }))
+    const side = within(screen.getByRole('region', { name: '这次新写入的' }))
     await act(async () => { fireEvent.click(side.getByRole('button', { name: '删除这条记忆' })) })
     await act(async () => { fireEvent.click(side.getByRole('button', { name: '彻底删除' })) })
     expect(chatCard().getByText(PURGED)).toBeInTheDocument()
@@ -355,7 +355,7 @@ describe('交付卡与其他界面共用删除状态', () => {
     )
     const stillShown = () => {
       expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
-      expect(within(screen.getByRole('region', { name: '这次对话新记的' })).getByText('报销截止每月 25 日。')).toBeInTheDocument()
+      expect(within(screen.getByRole('region', { name: '这次新写入的' })).getByText('报销截止每月 25 日。')).toBeInTheDocument()
     }
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除' })) })
     expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'n1', layer: { kind: 'global' } }])
@@ -464,7 +464,7 @@ describe('交付卡与其他界面共用删除状态', () => {
     expect(chatCard().getByText('已删除。14 天内也能在最近删除里找回。')).toBeInTheDocument()
   })
 
-  it('交付卡里删除后，右侧栏「这次对话新记的」里同一条也去掉', async () => {
+  it('交付卡里删除后，右侧栏「这次新写入的」里同一条也去掉', async () => {
     const gateway = createFakeGateway({ views: { library: libraryView(), session: sessionView } })
     renderInShell(
       <>
@@ -474,9 +474,9 @@ describe('交付卡与其他界面共用删除状态', () => {
       gateway,
     )
     await act(async () => { fireEvent.click(chatCard().getByRole('button', { name: '删除这条记忆' })) })
-    expect(screen.queryByRole('region', { name: '这次对话新记的' })).toBeNull()
+    expect(screen.queryByRole('region', { name: '这次新写入的' })).toBeNull()
     await act(async () => { fireEvent.click(chatCard().getByRole('button', { name: '撤销' })) })
-    expect(within(screen.getByRole('region', { name: '这次对话新记的' })).getByText('报销截止每月 25 日。')).toBeInTheDocument()
+    expect(within(screen.getByRole('region', { name: '这次新写入的' })).getByText('报销截止每月 25 日。')).toBeInTheDocument()
   })
 })
 

@@ -1,14 +1,16 @@
 /**
- * 右侧栏「记忆」tab 正文（DESIGN.md Layout「右侧栏记忆 tab 内容（结构 A）」）。从上到下：
- * 面包屑「本项目 / 项目名」→ 这次对话带入的记忆（用量条）→ 这次对话新记的（可删）→ 带入的记忆（按类型分组，
+ * 右侧栏「记忆」tab 正文（DESIGN.md Layout「右侧栏记忆 tab 内容（结构 A）」）。只讲插件放进上下文的那份快照和这次新写入的，
+ * 对话中 memory_search 搜到的算普通上下文，不列、不计用量。从上到下：
+ * 面包屑「本项目 / 项目名」→ 对话开始时 / 压缩后重新带入的记忆（随快照来历换标题，用量条）→ 这次新写入的（可删，
+ * 进了新快照的移到带入的记忆）→ 带入的记忆（按类型分组，组标题标出全文或只带摘要；
  * 带入的记忆有待决冲突时冲突卡挂在那条记忆所在组里就地裁决：横向是两条记忆，垂直是记忆对 AGENTS.md 基线）→ 底部一行入口（其余待处理只在这里带数字）。
- * 数据：会话视图（带入 / 新记的 id、用量）、全部记忆视图（按 id 取记忆卡）、待处理视图（冲突与本项目待处理数）、
+ * 数据：会话视图（来历、带入 / 全文 / 新写入的 id、用量）、全部记忆视图（按 id 取记忆卡）、待处理视图（冲突与本项目待处理数）、
  * 健康视图（bootedAt：插件本次加载时刻）。
  * 四种状态：无记忆、有全局没本项目、正常、frozenAt 早于插件本次加载（重启后未重新带入；视图没带 bootedAt 时不判断）。
  * 刚裁决的冲突在本地留原位可撤销，tab 卸载后收起。
  * 裁决碰上这条冲突正在别处处理或刚处理完（什么都没动）：冲突卡还在时原位说明，那边的结果写进视图、卡片消失后
  * 说明挪到「带入的记忆」上面（没有记忆了就在空状态上面），下一次动作时收起。
- * 新记的含密钥时不能软删（服务端回 has-secret，什么都没动）：原位确认，「彻底删除」发 hard-delete，删后原位留不可恢复的说明，tab 卸载后收起。
+ * 新写入的含密钥时不能软删（服务端回 has-secret，什么都没动）：原位确认，「彻底删除」发 hard-delete，删后原位留不可恢复的说明，tab 卸载后收起。
  */
 import { useMemo, useRef, useState, type ReactNode } from 'react'
 import { CONFLICT_ACTION_VERDICTS, layerOfMemory, type MemoryCard as MemoryCardData, type MemoryCommand, type PendingItem } from '../../src/gui/contract.ts'
@@ -186,12 +188,16 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const shown = new Set<string>()
   const groups = new Map<string, Entry[]>()
   const counts = new Map<string, number>()
+  // 每组带入全文的条数：快照按类型决定全文（core 区）还是只带索引行，一组要么全是、要么全不是
+  const coreIds = new Set(snapshot?.coreIds ?? [])
+  const fullCounts = new Map<string, number>()
   const push = (type: string, entry: Entry) => { groups.set(type, [...groups.get(type) ?? [], entry]) }
   for (const id of snapshot?.injectedIds ?? []) {
     const done = ruled.find(r => ruledMemories(r).some(m => m.id === id))
     const memory = byId.get(id) ?? (done === undefined ? undefined : ruledMemories(done).find(m => m.id === id))
     if (memory === undefined) continue
     counts.set(memory.type, (counts.get(memory.type) ?? 0) + 1)
+    if (coreIds.has(id)) fullCounts.set(memory.type, (fullCounts.get(memory.type) ?? 0) + 1)
     if (shown.has(id)) continue
     const open = done === undefined
       ? conflicts.find(c => !ruledIds.has(c.decisionId) && (c.left?.id === id || c.right?.id === id))
@@ -215,7 +221,10 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
       shown.add(id)
     }
   }
+  // 这次新写入的只列还没进快照的：压缩后（或配置热更新后）重建的快照已经带入的，列在带入的记忆里
+  const injected = new Set(snapshot?.injectedIds ?? [])
   const saved = (snapshot?.savedIds ?? [])
+    .filter(id => !injected.has(id))
     .flatMap((id): Array<{ id: string; memory: MemoryCardData | undefined }> => {
       const memory = byId.get(id)
       return isPurged(id) ? [{ id, memory: undefined }] : memory === undefined || deletions.of(id, layerOfMemory(memory)) !== undefined ? [] : [{ id, memory }]
@@ -252,6 +261,11 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
 
   // 会话快照冻结在插件本次加载之前 = 重启后还没重新带入
   const bootedAt = health.status === 'ready' ? health.data.bootedAt : undefined
+  const usageTitle = t(snapshot?.origin === 'compacted' ? 'sidebar.usage.titleCompacted' : 'sidebar.usage.title')
+  const depthMark = (type: string) => {
+    const full = fullCounts.get(type) ?? 0
+    return full === counts.get(type) ? t('sidebar.groups.full') : full === 0 ? t('sidebar.groups.summary') : undefined
+  }
   const usage = snapshot === undefined
     ? sessionView.status === 'missing'
       ? <Note title={t('sidebar.noSnapshot.title')}>{t('sidebar.noSnapshot.body')}</Note>
@@ -259,14 +273,17 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     : bootedAt !== undefined && snapshot.frozenAt < bootedAt
       ? <Note title={t('sidebar.stale.title')}>{t('sidebar.stale.body')}</Note>
       : (
-        <ContextBudgetBar
-          count={snapshot.injectedIds.length}
-          budget={snapshot.budget}
-          tokens={snapshot.tokens}
-          usedTokens={snapshot.usedTokens}
-          droppedCount={snapshot.overflowMode === 'strict' ? snapshot.omittedCount : 0}
-          onHandle={() => { openPage({ tab: 'pending', ...(scope === undefined ? {} : { scope }) }) }}
-        />
+        <>
+          <ContextBudgetBar
+            count={snapshot.injectedIds.length}
+            budget={snapshot.budget}
+            tokens={snapshot.tokens}
+            usedTokens={snapshot.usedTokens}
+            droppedCount={snapshot.overflowMode === 'strict' ? snapshot.omittedCount : 0}
+            onHandle={() => { openPage({ tab: 'pending', ...(scope === undefined ? {} : { scope }) }) }}
+          />
+          <p className="pm-side-hint">{t('sidebar.usage.searchNote')}</p>
+        </>
       )
 
   return (
@@ -276,8 +293,8 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
         : null}
       {projectCount === 0 ? <p className="pm-side-crumb-hint">{t('sidebar.globalOnly')}</p> : null}
 
-      <section className="pm-side-usage" aria-label={t('sidebar.usage.title')}>
-        <h2 className="pm-side-title">{t('sidebar.usage.title')}</h2>
+      <section className="pm-side-usage" aria-label={usageTitle}>
+        <h2 className="pm-side-title">{usageTitle}</h2>
         {usage}
       </section>
 
@@ -285,6 +302,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
         ? (
           <section className="pm-side-section" aria-label={t('sidebar.saved.title')}>
             <h2 className="pm-side-title">{t('sidebar.saved.title')}</h2>
+            <p className="pm-side-hint pm-side-section-note">{t('sidebar.saved.note')}</p>
             {saved.map(({ id, memory }) => memory === undefined
               ? purgedNote(id)
               : (
@@ -317,6 +335,12 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
                 <h3 className="pm-side-group-title">
                   {label(type)}{' '}
                   <span className="pm-side-group-count">{formatNumber(counts.get(type) ?? 0)}</span>
+                  {depthMark(type) === undefined ? null : (
+                    <>
+                      {' '}<i className="pm-sep" aria-hidden="true">·</i>
+                      <span className="pm-side-group-depth">{depthMark(type)}</span>
+                    </>
+                  )}
                 </h3>
                 {entries.map((entry) => {
                   if (entry.kind === 'memory') return <div key={entry.memory.id}>{card(entry.memory)}</div>
@@ -462,6 +486,9 @@ export const sidebarTabCss = crossConfirmCss + `
 .pm-side-group { display: flex; flex-direction: column; gap: 12px; }
 .pm-side-group-title { margin: 4px 0 0; font-size: 12px; font-weight: 600; line-height: 1.5; color: var(--pm-text-2); }
 .pm-side-group-count { margin-left: 4px; font-weight: 400; color: var(--pm-text-2); }
+.pm-side-group-title .pm-sep { margin: 0 6px 0 2px; }
+.pm-side-group-depth { font-weight: 400; color: var(--pm-text-2); }
+.pm-side-section-note { margin-top: -8px; }
 .pm-side-saved { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 4px 8px; }
 .pm-side-saved > .pm-side-error { grid-column: 1 / -1; }
 .pm-side-delete {

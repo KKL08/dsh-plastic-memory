@@ -1,4 +1,4 @@
-/** 垃圾桶图标：对话交付卡和右侧栏「这次对话新记的」行尾的删除按钮共用。尺寸由按钮的样式定。 */
+/** 垃圾桶图标：对话交付卡和右侧栏「这次新写入的」行尾的删除按钮共用。尺寸由按钮的样式定。 */
 export function TrashIcon() {
   return (
     <svg width={14} height={14} viewBox="0 0 16 16" fill="none" aria-hidden="true" strokeWidth={1}>
