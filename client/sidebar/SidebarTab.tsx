@@ -30,6 +30,7 @@ import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { TrashIcon } from '../ui/TrashIcon.tsx'
 import { CrossConfirm, crossConfirmCss, isHandledElsewhere, SecretDeleteConfirm } from '../pending/action.tsx'
 import { keepFocusInPlace } from '../ui/focus-return.ts'
+import { isLiveWrite, sessionCards, writtenSinceSnapshot } from './session-memories.ts'
 
 type Conflict = Extract<PendingItem, { kind: 'conflict-horizontal' }>
 type VerticalConflict = Extract<PendingItem, { kind: 'conflict-vertical' }>
@@ -159,20 +160,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
 
   const snapshot = sessionView.status === 'ready' ? sessionView.data : undefined
   const ws = snapshot?.workspacePath ?? cwd
-  const byId = new Map<string, MemoryCardData>()
-  let globalCount = 0
-  let projectCount = 0
-  for (const { layer, items } of library.data.layers) {
-    const isOwn = layer.kind === 'workspace' && ws !== undefined && samePath(layer.workspacePath, ws)
-    if (layer.kind === 'global') globalCount += items.length
-    else if (isOwn) projectCount += items.length
-    // 只收会话看得见的层（global + 本项目）；同 id 两层都有时取服务端会取的那份：updatedAt 新者，相同时本项目优先
-    if (layer.kind !== 'global' && !isOwn) continue
-    for (const item of items) {
-      const current = byId.get(item.id)
-      if (current === undefined || item.updatedAt > current.updatedAt || (item.updatedAt === current.updatedAt && isOwn)) byId.set(item.id, item)
-    }
-  }
+  const { byId, globalCount, projectCount } = sessionCards(library.data, ws)
   // 彻底删除的那条视图里已经没有了，按 id 原位留一行说明（删的是最后一条时留在空状态上面，也是焦点的落点）
   const purgedNote = (id: string) => <p key={id} className="pm-side-hint" tabIndex={-1}>{t('pending.secret.deletedNotice')}</p>
   const refusedNote = <p className="pm-side-error" role="alert" tabIndex={-1}>{t('sidebar.action.refused')}</p>
@@ -233,14 +221,10 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
       shown.add(id)
     }
   }
-  // 这次新写入的只列还没进快照的：压缩后（或配置热更新后）重建的快照已经带入的，列在带入的记忆里
-  const injected = new Set(snapshot?.injectedIds ?? [])
-  const saved = (snapshot?.savedIds ?? [])
-    .filter(id => !injected.has(id))
-    .flatMap((id): Array<{ id: string; memory: MemoryCardData | undefined }> => {
-      const memory = byId.get(id)
-      return isPurged(id) ? [{ id, memory: undefined }] : memory === undefined || deletions.of(id, layerOfMemory(memory)) !== undefined ? [] : [{ id, memory }]
-    })
+  // 这次新写入的只列还没进快照、还在的；彻底删除的原位留说明
+  const saved = (snapshot === undefined ? [] : writtenSinceSnapshot(snapshot))
+    .flatMap((id): Array<{ id: string; memory: MemoryCardData | undefined }> =>
+      isPurged(id) ? [{ id, memory: undefined }] : isLiveWrite(id, byId, deletions) ? [{ id, memory: byId.get(id) }] : [])
   const scope = ws === undefined ? undefined : { kind: 'workspace' as const, workspacePath: ws }
   const restPending = ws === undefined || pending.status !== 'ready'
     ? 0

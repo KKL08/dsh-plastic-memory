@@ -2,7 +2,7 @@
  * 输入框下方的「记忆」按钮（PRD 5.9 方案 A）：只有图标，不变色、不加点；这个会话没有记忆（会话视图不存在，
  * 或带入与新记都为空）时不渲染。点开的弹层对齐宿主 ContextMeter 弹层的版式：标题行占比 + 约已用 / 上限、
  * 三段作用域条与明细、带入与新写入条数（随快照来历写「开始时带入」「重新带入」或「压缩后重新带入」）、超限行、「查看带入的记忆 ›」。
- * 新写入只数还没进快照的：压缩后进了新快照的算在带入里，和右侧栏同一口径。
+ * 新写入只数还没进快照、也还在的（删掉的不算）：压缩后进了新快照的算在带入里，和右侧栏同一口径（见 sidebar/session-memories.ts）。
  *
  * 「约已用 / 上限」的已用 = 计入上限的 usedTokens，和右侧栏用量条同一口径，超限行也按它（服务端是否放宽按它定）；
  * 三段条与明细和用量条共用拆分、色段、色块（固定说明里不计上限的部分斜纹）。占比 = 三段之和 / 宿主 contextPressure
@@ -17,6 +17,7 @@ import type { ContextPressureProjection, SessionStandardProps } from '../host.ts
 import { formatNumber, useT } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
 import { MemoryIcon } from '../MemoryIcon.tsx'
+import { isLiveWrite, sessionCards, writtenSinceSnapshot } from '../sidebar/session-memories.ts'
 import { barScale, budgetParts, BudgetSegments, BudgetSwatch, relaxedCap, shownParts } from '../ui/ContextBudgetBar.tsx'
 
 /** 条数行随快照来历变（和右侧栏用量标题同一口径）。 */
@@ -55,6 +56,8 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
   const gateway = useGateway()
   const session = useMemo<BorrowedSession>(() => ({ kind: 'ready', sessionId, cwd: undefined }), [sessionId])
   const state = gateway.useView(session, 'session')
+  const library = gateway.useView(session, 'library')
+  const deletions = gateway.useDeletions()
   const pressure = useProjection('contextPressure')
   const view = state.status === 'ready' ? state.data : undefined
   const visible = hasSessionMemory(view)
@@ -97,6 +100,8 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
     setPosition({ left, bottom: window.innerHeight - rect.top + 8, width })
   }
 
+  // 全部记忆视图还没读到时只按删除记录数
+  const byId = library.status === 'ready' ? sessionCards(library.data, view.workspacePath).byId : undefined
   const parts = budgetParts(view)
   const share = memoryShare(parts.total, pressure)
   const [headBefore = '', headAfter = ''] = t('composer.share', { percent: READING_SLOT }).split(READING_SLOT).map(s => s.trim())
@@ -155,7 +160,7 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
           <div className="pm-composer-line">
             {t(COUNTS_LINE[view.origin], {
               injected: formatNumber(view.injectedIds.length),
-              saved: formatNumber(view.savedIds.filter(id => !view.injectedIds.includes(id)).length),
+              saved: formatNumber(writtenSinceSnapshot(view).filter(id => isLiveWrite(id, byId, deletions)).length),
             })}
           </div>
           {overflow === null ? null : (

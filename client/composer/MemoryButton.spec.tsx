@@ -1,15 +1,15 @@
 // 输入框「记忆」按钮：dock 根接假网关 + 假投影，断言显示条件、两种数字、两种超限行、两个跳转。
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import type { ComponentType } from 'react'
-import { GUI_VIEW_VERSION, type SessionView } from '../../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, type LibraryView, type SessionView } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import type { ContextPressureProjection, SessionStandardProps } from '../host.ts'
 import { createTranslator } from '../i18n.tsx'
 import { apply, inject } from '../index.tsx'
 import { zh } from '../locales.ts'
 import { createNavStore, PANEL_ID } from '../nav.ts'
-import { fakeHostContext } from '../test-utils.tsx'
+import { fakeHostContext, memory } from '../test-utils.tsx'
 import { createComposerDock, DOCK_ID, DOCK_ORDER } from './dock.tsx'
 import { memoryShare } from './MemoryButton.tsx'
 
@@ -23,8 +23,10 @@ function sessionView(overrides: Partial<SessionView> = {}): SessionView {
   }
 }
 
-function setup({ view, pressure, hasSidebar = true }: { view?: SessionView; pressure?: ContextPressureProjection; hasSidebar?: boolean } = {}) {
-  const gateway = createFakeGateway({ views: view === undefined ? {} : { session: view } })
+function setup({ view, pressure, hasSidebar = true, library }: {
+  view?: SessionView; pressure?: ContextPressureProjection; hasSidebar?: boolean; library?: LibraryView
+} = {}) {
+  const gateway = createFakeGateway({ views: { ...(view === undefined ? {} : { session: view }), ...(library === undefined ? {} : { library }) } })
   const ctx = { layout: { selectPanel: vi.fn() } }
   const openSidebarTab = vi.fn()
   const nav = createNavStore({ tab: 'library' }, hasSidebar ? { openSidebarTab } : {})
@@ -37,7 +39,7 @@ function setup({ view, pressure, hasSidebar = true }: { view?: SessionView; pres
     useResource: () => ({ status: 'none', value: undefined, failure: undefined }),
   }
   render(<Dock {...props} />)
-  return { ctx, nav, openSidebarTab }
+  return { ctx, nav, openSidebarTab, gateway }
 }
 
 const openPanel = () => { fireEvent.click(screen.getByRole('button', { name: '记忆' })); return screen.getByRole('dialog') }
@@ -73,6 +75,18 @@ describe('弹层数字', () => {
     expect(dialog).toHaveTextContent('固定说明（不计上限）约 150')
     expect(dialog).toHaveTextContent('开始时带入 2 条 · 新写入 1 条')
     expect(dialog).not.toHaveTextContent('处理 ›')
+  })
+
+  it('新写入只数还在的：在这里或别处删掉的、全部记忆里已经没有的都不算（和右侧栏同一口径）', async () => {
+    const card = (id: string) => memory({ id, workspacePath: '/w/app' })
+    const library: LibraryView = {
+      version: GUI_VIEW_VERSION, memoryRoot: '/m', directoryIssues: [],
+      layers: [{ layer: { kind: 'global' }, items: [] }, { layer: { kind: 'workspace', workspacePath: '/w/app' }, items: [card('c'), card('d')] }],
+    }
+    const { gateway } = setup({ view: sessionView({ savedIds: ['c', 'd', 'e'] }), library })
+    expect(openPanel()).toHaveTextContent('开始时带入 2 条 · 新写入 2 条') // e 已不在全部记忆里
+    await act(async () => { await gateway.execute('s1', { cmd: 'forget', memoryId: 'c', layer: { kind: 'workspace', workspacePath: '/w/app' } }) })
+    expect(screen.getByRole('dialog')).toHaveTextContent('开始时带入 2 条 · 新写入 1 条')
   })
 
   it('续上已有轮次的会话：写「重新带入」', () => {
