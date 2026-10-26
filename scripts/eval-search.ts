@@ -11,6 +11,7 @@
  * bigram 档靠注入一个「包不存在」的 jieba 加载器得到，与可选依赖没装上时的生产行为一致。
  * 对照部分在内存里跑 rankRecords + 真实分词器（换参数、换切分模式），开头先自检：生产参数下它与 executeSearch 逐条同序。
  * 生产用 BM25F；按字段分别饱和再加权的 BM25 与 jieba 的 cut 模式只在本脚本里实现，留作对照，不进 src。
+ * 只记基线的类别（换说法）单独成行，不计入总数、逐条差异与调参对照；全部输出的末尾逐条列出它们的名次。
  */
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -31,7 +32,9 @@ import {
   RANKING_FIELDS, RANKING_PARAMS, TIER_ORDER, rankRecords, substringEligible,
   type RankedRecord, type RankingField, type RankingParams, type SearchTier,
 } from '../src/search/ranking.ts'
-import { EVAL_CATEGORIES, EVAL_QUERIES, EVAL_RECORDS, type EvalQuery } from '../tests/fixtures/search-eval.ts'
+import {
+  BASELINE_ONLY_CATEGORIES, EVAL_CATEGORIES, EVAL_QUERIES, EVAL_RECORDS, type EvalQuery,
+} from '../tests/fixtures/search-eval.ts'
 
 const { values: argv } = parseArgs({ options: { brief: { type: 'boolean', default: false }, all: { type: 'boolean', default: false } } })
 
@@ -49,7 +52,11 @@ function rankOf(q: EvalQuery, ids: Ranking): number {
 
 interface Metrics { top1: number; top3: number; mrr: number; n: number }
 
-function metrics(results: Results, filter: (q: EvalQuery) => boolean = () => true): Metrics {
+/** 进回归门槛的查询；只记基线的类别不算进总数、逐条差异和调参对照。 */
+const isGated = (q: EvalQuery) => !BASELINE_ONLY_CATEGORIES.includes(q.category)
+const GATED_QUERIES = EVAL_QUERIES.filter(isGated)
+
+function metrics(results: Results, filter: (q: EvalQuery) => boolean = isGated): Metrics {
   let top1 = 0, top3 = 0, mrr = 0, n = 0
   for (const [q, ids] of results) {
     if (!filter(q)) continue
@@ -310,11 +317,14 @@ const rankStr = (r: number) => (Number.isFinite(r) ? String(r) : '—')
 
 function printTierMetrics(label: string, results: Results): void {
   console.log(`${label.padEnd(8)} ${fmt(metrics(results))}`)
-  for (const c of EVAL_CATEGORIES) console.log(`  ${c.padEnd(13)} ${fmt(metrics(results, q => q.category === c))}`)
+  for (const c of EVAL_CATEGORIES) {
+    const note = BASELINE_ONLY_CATEGORIES.includes(c) ? '  （只记基线，不计入上面的总数）' : ''
+    console.log(`  ${c.padEnd(13)} ${fmt(metrics(results, q => q.category === c))}${note}`)
+  }
 }
 
 function printDiff(a: Results, b: Results, labelA: string, labelB: string, onlyChanged = true): void {
-  for (const q of EVAL_QUERIES) {
+  for (const q of GATED_QUERIES) {
     const ra = rankOf(q, a.get(q)!), rb = rankOf(q, b.get(q)!)
     const sameTop3 = a.get(q)!.slice(0, 3).join() === b.get(q)!.slice(0, 3).join()
     if (onlyChanged && ra === rb && sameTop3) continue
@@ -325,11 +335,20 @@ function printDiff(a: Results, b: Results, labelA: string, labelB: string, onlyC
 }
 
 function printMisses(label: string, results: Results): void {
-  const misses = EVAL_QUERIES.filter(q => rankOf(q, results.get(q)!) !== 1)
+  const misses = GATED_QUERIES.filter(q => rankOf(q, results.get(q)!) !== 1)
   console.log(`${label} 未进第一名（${misses.length} 条）：`)
   for (const q of misses) {
     console.log(`- [${q.category}] ${JSON.stringify(q.query)}  预期 ${q.relevant.join(' / ')}  名次 ${rankStr(rankOf(q, results.get(q)!))}`)
     console.log(`    ${top3(results.get(q)!)}`)
+  }
+}
+
+/** 只记基线的类别：逐条列出两档名次与前三名。 */
+function printBaselineOnly(tiers: [string, Results][]): void {
+  for (const q of EVAL_QUERIES.filter(q => !isGated(q))) {
+    const kind = q.paraphrase === undefined ? '' : `/${q.paraphrase}`
+    console.log(`- [${q.category}${kind}] ${JSON.stringify(q.query)}  预期 ${q.relevant.join(' / ')}  名次 ${tiers.map(([l, r]) => `${l} ${rankStr(rankOf(q, r.get(q)!))}`).join('、')}`)
+    for (const [l, r] of tiers) console.log(`    ${l}: ${top3(r.get(q)!)}`)
   }
 }
 
@@ -339,7 +358,7 @@ function sameOrder(a: Results, b: Results): EvalQuery[] {
 
 async function main(): Promise<void> {
   const lens = EVAL_RECORDS.map(r => r.content.length)
-  console.log(`# memory_search 评估：${EVAL_RECORDS.length} 条记忆、${EVAL_QUERIES.length} 条查询（limit ${LIMIT}）`)
+  console.log(`# memory_search 评估：${EVAL_RECORDS.length} 条记忆、${EVAL_QUERIES.length} 条查询（进门槛 ${GATED_QUERIES.length} 条，只记基线 ${EVAL_QUERIES.length - GATED_QUERIES.length} 条；limit ${LIMIT}）`)
   console.log(`正文长度 ${Math.min(...lens)}–${Math.max(...lens)} 字符；字段平均长度实测 ${RANKING_FIELDS.map(f => `${f} ${measuredLengths[f].toFixed(1)}`).join('、')}`)
 
   const hasJieba = await defaultJiebaLoader.importJieba().then(J => {
@@ -440,6 +459,9 @@ async function main(): Promise<void> {
       console.log(`${''.padEnd(13)} 探针 BM25 ${probePasses({ scoring: 'bm25', params: RANKING_PARAMS })}/${FIELD_PROBES.length}、BM25F ${probePasses({ scoring: 'bm25f', params: RANKING_PARAMS })}/${FIELD_PROBES.length}`)
       printDiff(a, b, 'BM25', 'BM25F')
     }
+
+    console.log(`\n## 只记基线的类别（${BASELINE_ONLY_CATEGORIES.join('、')}）：逐条名次\n`)
+    printBaselineOnly(prodJieba ? [['bigram', prodBigram], ['jieba', prodJieba]] : [['bigram', prodBigram]])
   } finally {
     await rm(root, { recursive: true, force: true })
   }

@@ -717,9 +717,19 @@ export const EVAL_RECORDS: MemoryRecord[] = MEMORIES.map((m, i) => ({
 }))
 
 export const EVAL_CATEGORIES = [
-  'short-cjk', 'long-cjk', 'identifier', 'partial-word', 'plain-name', 'id-direct', 'zero-token',
+  'short-cjk', 'long-cjk', 'identifier', 'partial-word', 'plain-name', 'id-direct', 'zero-token', 'paraphrase',
 ] as const
 export type EvalCategory = (typeof EVAL_CATEGORIES)[number]
+
+/** 只记录基线、不进回归门槛的类别：换说法查询量的是字面匹配够不着的地方，分数低是预期。 */
+export const BASELINE_ONLY_CATEGORIES: readonly EvalCategory[] = ['paraphrase']
+
+/**
+ * 换说法的四种方式：同义词（自动关机 / 定时关停）、上下位词（数据库 / Postgres）、
+ * 中英混写（热更新 / hot reload）、口语化描述。
+ */
+export const PARAPHRASE_KINDS = ['synonym', 'hypernym', 'mixed-lang', 'colloquial'] as const
+export type ParaphraseKind = (typeof PARAPHRASE_KINDS)[number]
 
 export interface EvalQuery {
   query: string
@@ -729,6 +739,8 @@ export interface EvalQuery {
    * top-1 命中：第一名在其中；top-3 命中：前三名至少一条在其中。
    */
   relevant: readonly string[]
+  /** 仅 paraphrase 类：这条查询用的是哪种换说法。 */
+  paraphrase?: ParaphraseKind
 }
 
 /** 零 token 查询不过滤、按 confidence、lastConfirmedAt 排：预期第一名是数组里最后一条 0.9 的记录。 */
@@ -790,4 +802,26 @@ export const EVAL_QUERIES: readonly EvalQuery[] = [
   // 零 token
   { query: '', category: 'zero-token', relevant: [NEWEST_CONFIDENT] },
   { query: '   ', category: 'zero-token', relevant: [NEWEST_CONFIDENT] },
+  // 换说法：只看 name 列表写查询，再对照全文标注；主要实词不出现在相关记忆的四个字段里（tests/search-eval.spec.ts 检查）。
+  // 只记基线，不进回归门槛。总览类记录（设计总览、新人上手须知）按惯例不算相关。
+  { query: '上云开销超标的通知', category: 'paraphrase', paraphrase: 'synonym', relevant: ['mem_s6j9r8'] },
+  { query: '健康诊断分几挡', category: 'paraphrase', paraphrase: 'synonym', relevant: ['mem_j1u5k8'] },
+  { query: '代码入库说明的书写规范', category: 'paraphrase', paraphrase: 'synonym', relevant: ['mem_f1q5p8'] },
+  { query: '凭据定期更换', category: 'paraphrase', paraphrase: 'synonym', relevant: ['mem_r8f2n5'] },
+  { query: '访问别家仓库的内容需要授权吗', category: 'paraphrase', paraphrase: 'synonym', relevant: ['mem_r4t8b2'] },
+  { query: 'MySQL dump 保存期限', category: 'paraphrase', paraphrase: 'hypernym', relevant: ['mem_b4d8l7'] },
+  { query: 'Node 生态装库用哪家', category: 'paraphrase', paraphrase: 'hypernym', relevant: ['mem_p3n8j4'] },
+  { query: '单测里用 Postgres 实例还是假对象', category: 'paraphrase', paraphrase: 'hypernym', relevant: ['mem_a3c6b8'] },
+  { query: 'Redis 的 key 何时作废', category: 'paraphrase', paraphrase: 'hypernym', relevant: ['mem_e5j2f9', 'mem_l6q8f3'] },
+  { query: 'Vite 还是 webpack', category: 'paraphrase', paraphrase: 'hypernym', relevant: ['mem_y1z8a3'] },
+  { query: 'spawn 出来的程序挂掉后收尾', category: 'paraphrase', paraphrase: 'mixed-lang', relevant: ['mem_p7r1v3'] },
+  { query: '打字时 debounce 延迟设多长', category: 'paraphrase', paraphrase: 'mixed-lang', relevant: ['mem_h5e1m8'] },
+  { query: 'toggle 修改后无需发版即可起效', category: 'paraphrase', paraphrase: 'mixed-lang', relevant: ['mem_c9i5q4'] },
+  { query: 'memory leak 怎么定位', category: 'paraphrase', paraphrase: 'mixed-lang', relevant: ['mem_z7a4k1'] },
+  { query: '输出 verbosity 正式部署设成哪档', category: 'paraphrase', paraphrase: 'mixed-lang', relevant: ['mem_x6r2w9'] },
+  { query: '在自己电脑上把项目跑起来', category: 'paraphrase', paraphrase: 'colloquial', relevant: ['mem_c4h7d5'] },
+  { query: '上下文塞不下了会怎样', category: 'paraphrase', paraphrase: 'colloquial', relevant: ['mem_z3b7g9'] },
+  { query: '找服务端老大对接有什么讲究', category: 'paraphrase', paraphrase: 'colloquial', relevant: ['mem_j8b4t6'] },
+  { query: '视觉稿一般在哪儿看', category: 'paraphrase', paraphrase: 'colloquial', relevant: ['mem_s3y7u1'] },
+  { query: '老条目还靠不靠谱', category: 'paraphrase', paraphrase: 'colloquial', relevant: ['mem_b1h7t4', 'mem_s9h4f2'] },
 ]

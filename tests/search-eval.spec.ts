@@ -16,10 +16,13 @@ import { defaultJiebaLoader, resetJieba, tokenizerForQuery, type JiebaLoader } f
 import { executeSearch, type SearchToolDeps } from '../src/tools/search.ts'
 import type { SearchNoteCode } from '../src/contract-codes.ts'
 import { fakeExec } from './helpers/exec.ts'
-import { EVAL_CATEGORIES, EVAL_QUERIES, EVAL_RECORDS, type EvalQuery } from './fixtures/search-eval.ts'
+import {
+  BASELINE_ONLY_CATEGORIES, EVAL_CATEGORIES, EVAL_QUERIES, EVAL_RECORDS, PARAPHRASE_KINDS, type EvalQuery,
+} from './fixtures/search-eval.ts'
 
 // 评估集回归（语料与查询见 tests/fixtures/search-eval.ts，逐条对比与调参用 scripts/eval-search.ts）。
 // 两层：① 与权重无关的不变量逐条断言；② bigram 与 jieba 两档的 top-1 / top-3 聚合下限，不逐条断言。
+// 换说法类（paraphrase）只记基线：断言查询本身没写成字面能命中、两档都能跑出合法指标，不设分数线。
 // 跑在 FileTable 临时目录上走 executeSearch，与生产同一条路。
 
 const jiebaProbe = await defaultJiebaLoader.importJieba().then(() => undefined, (err: unknown) => err instanceof Error ? err.message : String(err))
@@ -77,7 +80,7 @@ const expectedNote = (tiers: SearchTier[]): SearchNoteCode | undefined =>
   tiers.length === 0 || tiers.includes('all') ? undefined : tiers.includes('partial') ? 'or-fallback' : 'substring-fallback'
 
 describe('评估语料本身', () => {
-  it('60 到 100 条、四个字段齐全、正文一百到五百字；查询覆盖七类，预期 id 都在语料里', () => {
+  it('60 到 100 条、四个字段齐全、正文一百到五百字；查询覆盖全部类别，预期 id 都在语料里', () => {
     expect(EVAL_RECORDS.length).toBeGreaterThanOrEqual(60)
     expect(EVAL_RECORDS.length).toBeLessThanOrEqual(100)
     expect(new Set(EVAL_RECORDS.map(r => r.id)).size).toBe(EVAL_RECORDS.length)
@@ -164,7 +167,7 @@ describe('不变量（与权重无关）', { timeout: 60_000 }, () => {
 
 // ---- 聚合下限 ----
 //
-// 门槛 = 定稿参数下首次跑出的命中数减去余量（bigram 与 jieba 各一组）。48 条查询下，首次结果：
+// 门槛 = 定稿参数下首次跑出的命中数减去余量（bigram 与 jieba 各一组）。只算进门槛的类别（48 条查询），首次结果：
 //   bigram top-1 43、top-3 48；jieba top-1 45、top-3 48。
 // 余量 top-1 留 2 条、top-3 留 1 条：调参或换分词器时允许个别查询换名次，掉得更多说明整体变差，先跑脚本看逐条差异。
 
@@ -179,19 +182,93 @@ function rankOf(q: EvalQuery, ids: string[]): number {
   return i < 0 ? Infinity : i + 1
 }
 
+const GATED_QUERIES = EVAL_QUERIES.filter(q => !BASELINE_ONLY_CATEGORIES.includes(q.category))
+
 describe('聚合下限', { timeout: 60_000 }, () => {
   for (const tier of ['bigram', 'jieba'] as const) {
-    it.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档 top-1 ≥ ${FLOORS[tier].top1}、top-3 ≥ ${FLOORS[tier].top3}（共 ${EVAL_QUERIES.length} 条）`, async () => {
+    it.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档 top-1 ≥ ${FLOORS[tier].top1}、top-3 ≥ ${FLOORS[tier].top3}（共 ${GATED_QUERIES.length} 条）`, async () => {
       useTier(tier)
       let top1 = 0
       let top3 = 0
-      for (const q of EVAL_QUERIES) {
+      for (const q of GATED_QUERIES) {
         const r = rankOf(q, (await search(q.query)).hits.map(h => h.id))
         if (r === 1) top1++
         if (r <= 3) top3++
       }
       expect(top1).toBeGreaterThanOrEqual(FLOORS[tier].top1)
       expect(top3).toBeGreaterThanOrEqual(FLOORS[tier].top3)
+    })
+  }
+})
+
+// ---- 换说法类：只记基线 ----
+//
+// 查询先只看记忆的 name 列表写，再对照全文标注相关集合。为了不写成「恰好能命中」，机械检查每条查询的主要实词
+// 都不出现在相关记忆的 name、summary、tags、content 里。
+// 主要实词 = 生产查询分词器（jieba 档，cutForSearch，含它切出的子词）切出的 token，去掉不足两个字符的，
+// 再去掉下面这份疑问、语气、指代类虚词。出现 = 字段分词结果含它，或字段小写原文以子串含它。
+
+const FUNCTION_WORDS = new Set([
+  '怎么', '怎么办', '怎样', '什么', '哪个', '哪些', '多久', '多少', '是否', '要不要', '能不能', '可以',
+  '应该', '一般', '还是', '时候', '我们', '自己', '有没有', '为什么', '如何', '一下',
+])
+
+const PARAPHRASES = EVAL_QUERIES.filter(q => q.category === 'paraphrase')
+
+describe('换说法类（只记基线，不设分数线）', { timeout: 60_000 }, () => {
+  it('15 到 20 条，四种换说法都有；相关记忆分散在不同类型，不挤在几条上', () => {
+    expect(PARAPHRASES.length).toBeGreaterThanOrEqual(15)
+    expect(PARAPHRASES.length).toBeLessThanOrEqual(20)
+    for (const q of PARAPHRASES) {
+      expect(q.paraphrase, q.query).toBeDefined()
+      expect(q.relevant.length, q.query).toBeGreaterThan(0)
+    }
+    expect(new Set(PARAPHRASES.map(q => q.paraphrase))).toEqual(new Set(PARAPHRASE_KINDS))
+    for (const kind of PARAPHRASE_KINDS) expect(PARAPHRASES.filter(q => q.paraphrase === kind).length, kind).toBeGreaterThanOrEqual(3)
+    const relevantIds = PARAPHRASES.flatMap(q => q.relevant)
+    expect(new Set(relevantIds.map(id => byId.get(id)!.type)).size).toBeGreaterThanOrEqual(5)
+    for (const id of new Set(relevantIds)) expect(relevantIds.filter(x => x === id).length, id).toBeLessThanOrEqual(2)
+  })
+
+  it.skipIf(jiebaProbe !== undefined)('每条查询的主要实词都不出现在相关记忆的四个字段里', async () => {
+    useTier('jieba')
+    expect(PARAPHRASES.length).toBeGreaterThan(0)   // 不是空过
+    for (const q of PARAPHRASES) {
+      const tokenize = await tokenizerForQuery(q.query, { log: silent })
+      const content = [...new Set(tokenize(q.query))].filter(t => [...t].length >= 2 && !FUNCTION_WORDS.has(t))
+      expect(content.length, q.query).toBeGreaterThan(0)
+      for (const id of q.relevant) {
+        const r = byId.get(id)!
+        for (const f of RANKING_FIELDS) {
+          const text = f === 'tags' ? r.tags.join(' ') : r[f]
+          const fieldTokens = new Set(tokenize(text))
+          const lower = text.toLowerCase()
+          const leaked = content.filter(t => fieldTokens.has(t) || lower.includes(t))
+          expect(leaked, `${q.query} → ${id}.${f}`).toEqual([])
+        }
+      }
+    }
+  })
+
+  for (const tier of ['bigram', 'jieba'] as const) {
+    it.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档能跑通，top-1、top-3、MRR 是合法数值`, async () => {
+      useTier(tier)
+      let top1 = 0
+      let top3 = 0
+      let mrr = 0
+      for (const q of PARAPHRASES) {
+        const r = rankOf(q, (await search(q.query)).hits.map(h => h.id))
+        if (r === 1) top1++
+        if (r <= 3) top3++
+        mrr += Number.isFinite(r) ? 1 / r : 0
+      }
+      mrr /= PARAPHRASES.length
+      expect(top1).toBeGreaterThanOrEqual(0)
+      expect(top3).toBeGreaterThanOrEqual(top1)
+      expect(top3).toBeLessThanOrEqual(PARAPHRASES.length)
+      expect(Number.isFinite(mrr)).toBe(true)
+      expect(mrr).toBeGreaterThanOrEqual(0)
+      expect(mrr).toBeLessThanOrEqual(1)
     })
   }
 })
