@@ -393,8 +393,9 @@ describe('快照标题下的压缩引擎附注', () => {
     // 块：标题、附注、core 行、全文引导、固定尾注；fixed 扣掉附注后等于没有附注时的口径（标题 + 两段尾注）
     const blocks = r.text.split('\n\n')
     expect(blocks[2]).toBe(line)
-    const noteTokens = estimateTokens(`> ${COMPACTION_ENGINE_NOTE}`)
-    expect(r.tokens.fixed - noteTokens).toBe(estimateTokens('# 长期记忆') + estimateTokens(blocks[3]) + estimateTokens(blocks[4]))
+    // 按组装时各段的原样计：附注带前后换行，两段尾注带前导换行（换行也计价）
+    const noteTokens = estimateTokens(`\n> ${COMPACTION_ENGINE_NOTE}\n`)
+    expect(r.tokens.fixed - noteTokens).toBe(estimateTokens('# 长期记忆') + estimateTokens(`\n${blocks[3]}`) + estimateTokens(`\n${blocks[4]}`))
     expect(r.tokens.workspace + r.tokens.global).toBe(estimateTokens(line))
   })
 

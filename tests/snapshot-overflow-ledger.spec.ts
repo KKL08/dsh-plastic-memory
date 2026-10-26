@@ -151,6 +151,36 @@ describe('自动放宽：档位提醒', () => {
   })
 })
 
+describe('估算口径变了（升级）：已有提醒在下次冻结时重新同步', () => {
+  // 旧版本按旧口径写下的条目：账本里只有档位与说明，不记当时怎么算的；升级后第一次冻结按新口径重算
+  const oldSummary = '带入记忆约 9000 token，超出上限 4000，已自动放宽到 9000'
+
+  it('新口径下回到上限以内：旧提醒删除，不留已忽略的残条', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await seed(store, 10)
+    const used = (await freeze(store, undefined, 1e9)).usedTokens
+    const d = ledger()
+    await d.syncOverflow(WS, { mode: 'relax', tier: 5 }, Date.now(), oldSummary)
+
+    expect((await freeze(store, d, used)).overflowChanged).toBe(true)
+    expect(await overflowEntries(d)).toEqual({ open: [], settled: [] })
+  })
+
+  it('新口径下仍超出：换成新档位，说明里是新口径的用量', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await seed(store, 10)
+    const used = (await freeze(store, undefined, 1e9)).usedTokens
+    const d = ledger()
+    await d.syncOverflow(WS, { mode: 'relax', tier: 5 }, Date.now(), oldSummary)
+
+    await freeze(store, d, used - 1)
+    const { open, settled } = await overflowEntries(d)
+    expect(settled).toEqual([])
+    expect(open.map(overflowLevelOf)).toEqual([{ mode: 'relax', tier: 1 }])
+    expect(open[0].summary).toContain(`带入记忆约 ${used} token，超出上限 ${used - 1}`)
+  })
+})
+
 describe('严格按上限：95% 提醒', () => {
   it('用到 95% 记一条 strict 提醒；截断条数进冻结信息；切回自动放宽时旧提醒换掉', async () => {
     const store = new MemoryStore(new InMemoryTable())

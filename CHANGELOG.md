@@ -100,6 +100,13 @@ All notable changes to this project are documented here. The format follows
   the limit or dismiss. Set it to `strict` to keep the previous behaviour, in
   which the index lines stop at the budget; the page then says how many
   memories were left out.
+- Token usage is now estimated per character, calibrated against DeepSeek's
+  tokenizer: each Chinese, Japanese or Korean character or full-width
+  punctuation mark counts as 0.6 tokens, any other character 0.3. The same
+  4,000 default now fits about 6,700 Chinese characters, up from about 2,700.
+  English text is counted per character too, so English-heavy memories now
+  estimate higher and may cross the limit. Existing overflow reminders are
+  recomputed the next time memories are loaded.
 - Settings changed in the GUI or in `cordis.patch.yml` now apply to running
   conversations at their next step: a new budget or source-lookup level is
   used the next time memories are assembled, a template or custom-type change

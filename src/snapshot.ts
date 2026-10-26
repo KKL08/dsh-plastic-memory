@@ -6,6 +6,7 @@ import { EVIDENCE_GUIDANCE, type EvidenceLookupLevel } from './evidence-guidance
 import { stalenessNote, withinValidity } from './record-freshness.ts'
 import { exposedPath, maskSecretSurface } from './secrets.ts'
 import type { OverflowLevel, OverflowMode } from './contract-codes.ts'
+import { CJK } from './search/tokenizer.ts'
 
 export type { OverflowMode }
 
@@ -41,11 +42,18 @@ export function escapePromptBraces(text: string): string {
   return text.replaceAll('{{', `{{${PROMPT_LBRACE_VARIABLE}}}`)
 }
 
-/** 粗略 token 估算：中文字 ×1.5，其余按空白分词 ×1.3。预算是软约束，够用即可。 */
+/** 按中文计价的字符：CJK 文字（与检索同一口径）加全角标点（CJK 符号与标点 U+3000–303F、全角形式 U+FF00–FFEF）。 */
+const CJK_PRICED = new RegExp(String.raw`[${CJK}\u3000-\u303f\uff00-\uffef]`, 'u')
+
+/**
+ * token 估算，快照组装、超限档位、会话视图用量都只走这一个函数。按码点计价：中文字符每个 0.6，
+ * 其余字符（字母、数字、空白、半角标点等）每个 0.3，合计向上取整。系数按 DeepSeek 实际分词校准，
+ * 默认上限 4,000 约合 6,700 个中文字。按十分之一 token 的整数累加，避免 0.6 × 5 这类浮点误差多进一。
+ */
 export function estimateTokens(text: string): number {
-  const cjk = (text.match(/[一-鿿]/g) ?? []).length
-  const words = text.replace(/[一-鿿]/g, ' ').split(/\s+/).filter(Boolean).length
-  return Math.ceil(cjk * 1.5 + words * 1.3)
+  let tenths = 0
+  for (const ch of text) tenths += CJK_PRICED.test(ch) ? 6 : 3
+  return Math.ceil(tenths / 10)
 }
 
 /** 注入排序（设计稿 §6）：confidence 降序 → lastConfirmedAt 降序。recallCount 不参与：被宽泛查询扫到的记忆不该越排越前。 */

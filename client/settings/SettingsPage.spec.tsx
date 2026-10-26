@@ -61,7 +61,7 @@ describe('三组设置的渲染', () => {
   it('怎么用：上限数字、超出上限两种模式的说明、溯源三档', () => {
     setup({ value: section({ snapshotTokenBudget: 6000, snapshotOverflow: 'strict', evidenceLookup: 'active' }) })
     expect(screen.getByLabelText('自动带入的记忆上限（token）')).toHaveValue('6000')
-    expect(screen.getByText(/^默认 4,000。/)).toBeInTheDocument()
+    expect(screen.getByText(/^默认 4,000，/)).toBeInTheDocument()
     expect(tab('超出上限时', '严格按上限')).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByText(/自动放宽：超出的照常带入/)).toBeInTheDocument()
     expect(screen.getByText(/严格按上限：超出的不带入/)).toBeInTheDocument()
@@ -339,6 +339,24 @@ describe('保存：revision 冻结、冲突、非法值', () => {
     expect(screen.getByText('当前配置是只读的，改不了。')).toBeInTheDocument()
     expect(tab('场景模板', '办公')).toBeDisabled()
     expect(screen.getByRole('switch', { name: '记忆体检' })).toBeDisabled()
+  })
+})
+
+describe('上限说明：按字符估算的口径', () => {
+  const description = (input: HTMLElement) => document.getElementById(input.getAttribute('aria-describedby')!)
+
+  it('写明默认 4,000 约合多少字，以及中日韩文字、全角标点与其余字符各按多少估算', () => {
+    setup()
+    const hint = description(screen.getByLabelText('自动带入的记忆上限（token）'))
+    expect(hint).toHaveTextContent('默认 4,000，约合 6,700 个汉字或 13,000 个英文字符：中日韩文字和全角标点每个按 0.6 token 估算，其余字符按 0.3。')
+    expect(hint).toHaveTextContent('对话中检索到的记忆不计入。')
+  })
+
+  it('英文文案同一口径', () => {
+    render(<PanelShell gateway={createFakeGateway()} t={createTranslator(en)}><SettingsPage form={createFakeConfigForm()} onOpenMemoryPage={() => {}} now={NOW} /></PanelShell>)
+    const hint = description(screen.getByLabelText('Auto-loaded memory limit (tokens)'))
+    expect(hint).toHaveTextContent('Default 4,000, about 6,700 Chinese characters or 13,000 English characters: each CJK character or full-width punctuation mark counts as 0.6 tokens, any other character 0.3.')
+    expect(hint).toHaveTextContent("Memories found by search during a chat don't count.")
   })
 })
 
