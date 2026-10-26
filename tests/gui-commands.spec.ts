@@ -789,9 +789,12 @@ describe('同 id 在本项目和全局各有一份、全局那份更新', () => 
   it('hard-delete 带本项目的层：物理删除本项目那份', async () => {
     const e = env()
     await seed(e, `token ${FAKE_SECRET.sk}`)
+    await e.store.markRecalled(['mem_dup'])
     ok(await e.run({ cmd: 'hard-delete', memoryId: 'mem_dup', layer: own }))
     expect(await layerCopy(e, SESSION_WS)).toBeUndefined()
     await expectGlobalLive(e)
+    // 召回统计按 id 一行：全局那份还在用，这一行留给它
+    expect(await e.stats.get('mem_dup')).toMatchObject({ recallCount: 1 })
   })
 
   it('不带层时照旧按会话定位：取到更新的全局那份', async () => {
@@ -937,8 +940,9 @@ describe('最近删除里彻底删除', () => {
     const globalCopy = record({ id: 'mem_dup', name: '全局那份', content: '全局里的说法' })
     await e.store.create(globalCopy)
     const globalSnap = await e.snapshots.capture({ operation: 'manual', description: '全局那份', records: [globalCopy] }, NOW - 1)
+    await e.store.markRecalled(['mem_dup'])
     const live = await layerCopy(undefined)
-    expect(live).toMatchObject({ status: 'active' })
+    expect(live).toMatchObject({ status: 'active', recallCount: 1 })
 
     // 不带层按会话定位取到在用的全局那份：它不含密钥，不动
     expect(err(await e.run({ cmd: 'hard-delete', memoryId: 'mem_dup' })).code).toBe('failed')
@@ -947,11 +951,48 @@ describe('最近删除里彻底删除', () => {
     ok(await e.run({ cmd: 'hard-delete', memoryId: 'mem_dup', layer: own }))
     expect(await layerCopy(SESSION_WS)).toBeUndefined()
     expect(await layerCopy(undefined)).toEqual(live)
+    expect(await e.stats.get('mem_dup')).toMatchObject({ recallCount: 1 })
     const copies = (await e.snapshots.list()).flatMap(s => s.data.filter(r => r.id === 'mem_dup').map(r => [s.id, r.scope]))
     expect(copies).toEqual([[globalSnap.id, 'global']])
     const library = libraryViewSchema.parse(await e.readView('library'))
     expect(library.layers.find(l => l.layer.kind === 'global')!.items.map(i => i.name)).toEqual(['全局那份'])
     expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
+  })
+
+  it('定位之后、物理删除之前被别处恢复：不删，failed 说明刚被恢复，恢复的那份照旧在用', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_p', content: '紫藤架下的旧约定', scope: 'workspace', workspacePath: SESSION_WS }))
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_p', layer: own }))
+    // 抹快照落在定位与物理删除之间：借它插入另一个标签页的恢复
+    const purge = e.snapshots.purge.bind(e.snapshots)
+    e.snapshots.purge = async isPurged => {
+      await purge(isPurged)
+      expect(await e.store.restoreArchived({ id: 'mem_p', workspacePath: SESSION_WS }, { isExactLayer: true })).toBe(true)
+    }
+    const body = err(await e.run({ cmd: 'hard-delete', memoryId: 'mem_p', layer: own }))
+    expect(body.code).toBe('failed')
+    expect(body.detail).toContain('刚被恢复')
+    expect(await e.store.get('mem_p', { workspacePath: SESSION_WS })).toMatchObject({ status: 'active', content: '紫藤架下的旧约定' })
+  })
+
+  it('快照已抹、物理删除失败：裁决条目已一并清掉，再恢复只是普通恢复，不说冲突会回到待处理', async () => {
+    const e = env()
+    const entry = await seedPair(e)
+    ok(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' }))
+    const hardDelete = e.store.hardDelete.bind(e.store)
+    e.store.hardDelete = async () => { throw new Error('磁盘出错') }
+    expect(err(await e.run({ cmd: 'hard-delete', memoryId: 'mem_b', layer: { kind: 'global' } })).code).toBe('failed')
+    e.store.hardDelete = hardDelete
+    expect(await snapshotIds(e, 'mem_b')).toEqual([])
+    expect(await allEntries(e)).toEqual([])
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect(deletedViewSchema.parse(await e.readView('deleted')).items.map(i => [i.memory.id, i.cause])).toEqual([['mem_b', undefined]])
+
+    const restored = ok(await e.run({ cmd: 'restore', memoryId: 'mem_b', layer: { kind: 'global' } }))
+    expect(restored.decisionId).toBeUndefined()
+    expect((await e.store.get('mem_b'))!.status).toBe('active')
+    expect(await allEntries(e)).toEqual([])
+    expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('not-found')
   })
 
   it('别的项目里的：先要 allowCrossWorkspace，什么都不动；带上才彻底删除', async () => {

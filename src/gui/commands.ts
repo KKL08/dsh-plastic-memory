@@ -11,7 +11,7 @@ import { detectSecrets, hasSecret } from '../secrets.ts'
 import { computeDigest } from '../storage/frontmatter.ts'
 import { candidateFingerprint, kindOf, verdictLoser, type PendingDecisionsStore } from '../governance/decisions.ts'
 import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
-import type { PendingDecision, ScanCacheEntry } from '../governance/schema.ts'
+import type { PendingDecision, ScanCacheEntry, SnapshotRecord } from '../governance/schema.ts'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
 import { executeConfirm } from '../tools/confirm.ts'
 import { executeForget } from '../tools/forget.ts'
@@ -346,19 +346,28 @@ async function dispatch(
         const rec = await locate(command.memoryId, command.layer)
         if (!rec) return notFound(command.memoryId)
         if (rec.status === 'deleted') {
-          // 最近删除里的一条：不等 14 天到期，现在就清掉。快照先抹（中途失败时归档文件还在，重试即可），再物理删除
-          // 归档文件与召回统计行；只认它自己那一层，别层同 id 的在用副本不碰
+          // 最近删除里的一条：不等 14 天到期，现在就清掉。先清账本、再抹快照、最后物理删除归档文件（召回统计行由存储层
+          // 按「哪层都没有它了」清）；中途失败时归档文件还在，重试即可，此时恢复就是普通恢复。只认它自己那一层，别层同 id 的副本不碰
           const { rejected } = gateRecords([rec], gov, command.allowCrossWorkspace)
           if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
           // 别层还有这个 id 的副本时，快照里那一层的副本是它的历史，留着
+          const snapshots = await deps.snapshots.list()
           const kept = new Set<string>()
-          for (const r of (await deps.snapshots.list()).flatMap(s => s.data)) {
+          for (const r of snapshots.flatMap(s => s.data)) {
             const layer = layerOfMemory(r)
             if (r.id !== rec.id || layer === undefined || isCopyOf(rec, layer) || kept.has(workspaceLabel(r))) continue
             if ((await locateCopy(deps.store, rec.id, layer)) !== undefined) kept.add(workspaceLabel(r))
           }
-          await deps.snapshots.purge(r => r.id === rec.id && !kept.has(workspaceLabel(r)))
-          if (!(await deps.store.hardDelete(rec, { isExactLayer: true }))) return notFound(command.memoryId)
+          const isPurged = (r: SnapshotRecord) => r.id === rec.id && !kept.has(workspaceLabel(r))
+          // 撤销要靠的那份快照副本马上就没了：裁决条目先清掉，之后恢复不再说冲突会回到待处理
+          const lost = new Set(snapshots.filter(s => s.data.some(isPurged)).map(s => s.id))
+          for (const d of await deps.decisions.listSettled()) if (lost.has(d.settled?.snapshotId ?? '')) await deps.decisions.remove(d.id)
+          await deps.snapshots.purge(isPurged)
+          // 锁内复核：定位之后被别处恢复成在用的，不删
+          let isRestored = false
+          if (!(await deps.store.hardDelete(rec, { isExactLayer: true }, current => (isRestored = current.status !== 'deleted')))) {
+            return isRestored ? fail(cmd, 'failed', `记忆 ${command.memoryId} 刚被恢复或改过，没有彻底删除`) : notFound(command.memoryId)
+          }
           // 账本按 id 记：哪层都没有它了才清，指向它的裁决撤销随之找不到
           if ((await deps.store.get(rec.id)) === undefined) await deps.decisions.removeByMemoryIds([rec.id])
           return { ok: true, cmd, memoryIds: [rec.id] }

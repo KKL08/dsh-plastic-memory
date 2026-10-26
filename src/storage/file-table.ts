@@ -717,15 +717,16 @@ export class FileTable implements MemoryTable {
     }))
   }
 
-  async delete(key: string, hint?: LocateHint): Promise<boolean> {
+  async delete(key: string, hint?: LocateHint, skipIf?: (current: LocatedFile) => boolean): Promise<boolean> {
     return this.locked(async () => {
       const slot = await this.locate(key, hint)
-      if (!slot) return false
+      if (!slot || skipIf?.(slot)) return false
       await rm(slot.filePath, { force: true })
-      // 密钥硬删的承诺是「可见集合里再没有它」：global 与该记录目录里同 id 的其余副本（含 .archive/）一并物理删除；
-      // 只认层时只删该目录里的，别层的同 id 副本是另一张卡
+      // 彻底删除（密钥硬删、最近删除里的彻底删除）的承诺是「可见集合里再没有它」：global 与该记录目录里同 id 的其余副本
+      // （含 .archive/）一并物理删除；只认层时只删该目录里的，别层的同 id 副本是另一张卡
       await this.removeOtherCopies(key, slot.filePath, slot.dir, hint?.isExactLayer === true)
-      await this.opts.stats.delete(key)
+      // 召回统计按 id 一行，别层还有副本时是它的，留着
+      if ((await this.locateSlot(key)) === undefined) await this.opts.stats.delete(key)
       await this.maintainDirs([...new Set([slot.dir, this.globalDir])])
       return true
     })

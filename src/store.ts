@@ -153,9 +153,9 @@ export class InMemoryTable implements MemoryTable {
     if (!current) throw new RecordNotFoundError(key)
     return this.place(current, fn(current.record), hint?.isExactLayer === true)
   }
-  async delete(key: string, hint?: LocateHint) {
+  async delete(key: string, hint?: LocateHint, skipIf?: (current: LocatedFile) => boolean) {
     const current = await this.locate(key, hint)
-    if (!current) return false
+    if (!current || skipIf?.(current)) return false
     // 与 FileTable 同语义：可见集合（global + 该记录目录）里同 id 的其余副本一并删除；只认层时只删该目录里的
     for (const s of this.slots.values()) {
       if (s.record.id === key && ((hint?.isExactLayer !== true && s.dir === this.globalDir) || s.dir === current.dir)) this.slots.delete(s.filePath)
@@ -192,6 +192,11 @@ export interface DeleteOptions {
   isExactLayer?: boolean
 }
 
+/** 位置即作用域（同 readLayer）：.archive/ 里 status 仍写着 active 的按 deleted 看。 */
+function byPosition(found: LocatedFile): MemoryRecord {
+  return found.record.status === 'active' && dirname(found.filePath) !== found.dir ? { ...found.record, status: 'deleted' } : found.record
+}
+
 /** 按记录自己的 workspace 定位；global 记录没有 workspacePath，只认层时即 global 层。 */
 function deleteHint(record: Pick<MemoryRecord, 'workspacePath'>, opts: DeleteOptions): LocateHint {
   return { workspacePath: record.workspacePath, ...(opts.isExactLayer === true ? { isExactLayer: true } : {}) }
@@ -214,8 +219,7 @@ export class MemoryStore {
    *  位置即作用域（同 readLayer）：.archive/ 里 status 仍写着 active 的按 deleted 返回。 */
   async get(id: string, hint?: LocateHint): Promise<MemoryRecord | undefined> {
     const found = await this.table.locate(id, hint)
-    if (found === undefined) return undefined
-    return found.record.status === 'active' && dirname(found.filePath) !== found.dir ? { ...found.record, status: 'deleted' } : found.record
+    return found === undefined ? undefined : byPosition(found)
   }
   locate(id: string, hint?: LocateHint) { return this.table.locate(id, hint) }
   listWorkspaceDirs() { return this.table.listWorkspaceDirs() }
@@ -245,11 +249,12 @@ export class MemoryStore {
   /**
    * 删除按记录定位：调用方传入它读到并过了门的那条记录，按该记录自己的 workspace 定位（与 put 同约定），
    * 同 id 多副本时改的就是门检查过的那份，不会落到 global 或别的项目的副本上。
-   * hardDelete 物理删除文件（不进 .archive/，不可恢复）：只给密钥硬删用（tools/forget.ts）。
+   * hardDelete 物理删除文件（不进 .archive/，不可恢复）：给密钥硬删（tools/forget.ts）和最近删除里的彻底删除（gui/commands.ts）用。
    * isExactLayer：只认这条记录所在的那一层（见 LocateHint），同可见集合里别层的副本更新也不改到它头上。
+   * skipIf：锁内对将被删的那份求值（位置即作用域，同 get），为真就不删、返回 false。
    */
-  hardDelete(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, opts: DeleteOptions = {}): Promise<boolean> {
-    return this.table.delete(record.id, deleteHint(record, opts))
+  hardDelete(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, opts: DeleteOptions = {}, skipIf?: (current: MemoryRecord) => boolean): Promise<boolean> {
+    return this.table.delete(record.id, deleteHint(record, opts), skipIf && (found => skipIf(byPosition(found))))
   }
 
   async softDelete(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, opts: DeleteOptions = {}): Promise<boolean> {
