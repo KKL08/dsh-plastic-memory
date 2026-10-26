@@ -1180,7 +1180,7 @@ describe('待处理：让模型改与让模型合并', () => {
     expect(commands().map(c => c.cmd)).toEqual(['draft-edit', 'draft-edit'])
   })
 
-  it('表述不清、放错层也给「让模型改」，默认按各自的建议类型', async () => {
+  it('表述不清也给「让模型改」，默认按「表述不清」处理', async () => {
     const { commands } = setup([{ ...bloat, type: 'unclear' }], { respond: respondWith() })
     open()
     expect(screen.getByRole('textbox', { name: '想怎么改？不写也行，会按「表述不清」默认处理' })).toBeInTheDocument()

@@ -1401,6 +1401,33 @@ describe('move-memory（建议整理「放错层」的移到项目）', () => {
     expect((await e.decisions.listSettled()).map(d => [d.id, d.settled?.verdict])).toEqual([[promoted.decisionId, 'promoted'], [moved.decisionId, 'moved']])
   })
 
+  it('撤销移动时全局已有这个 id：target-taken，什么都不动', async () => {
+    const e = env()
+    await e.store.create(original())
+    const body = ok(await e.run(move(SESSION_WS)))
+    await e.store.create(record({ id: 'mem_g', name: '后来的全局', content: '后来写进全局的' }))
+    const projectBefore = await readFile((await copyIn(e, 'mem_g', SESSION_WS))!.filePath, 'utf8')
+    const globalBefore = await readFile((await copyIn(e, 'mem_g'))!.filePath, 'utf8')
+
+    expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('target-taken')
+    expect(await readFile((await copyIn(e, 'mem_g', SESSION_WS))!.filePath, 'utf8')).toBe(projectBefore)
+    expect(await readFile((await copyIn(e, 'mem_g'))!.filePath, 'utf8')).toBe(globalBefore)
+    expect((await e.decisions.listSettled()).map(d => d.id)).toEqual([body.decisionId])
+  })
+
+  it('移过去之后又被提升回全局：撤销移动 → not-found，什么都不动', async () => {
+    const e = env()
+    await e.store.create(original())
+    const body = ok(await e.run(move(SESSION_WS)))
+    const promoted = ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_g', layer: { kind: 'workspace', workspacePath: SESSION_WS } }))
+    const globalBefore = await readFile((await copyIn(e, 'mem_g'))!.filePath, 'utf8')
+
+    expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('not-found')
+    expect(await readFile((await copyIn(e, 'mem_g'))!.filePath, 'utf8')).toBe(globalBefore)
+    expect(await copyIn(e, 'mem_g', SESSION_WS)).toBeUndefined()
+    expect((await e.decisions.listSettled()).map(d => d.id).sort()).toEqual([body.decisionId, promoted.decisionId].sort())
+  })
+
   it('体检关闭时不可用（同提升为全局）', async () => {
     const e = env({ governanceEnabled: false })
     await e.store.create(original())
