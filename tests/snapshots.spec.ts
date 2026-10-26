@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { SnapshotStore, SNAPSHOT_RETENTION_MS } from '../src/governance/snapshots.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
 import type { MemorySnapshot } from '../src/governance/schema.ts'
@@ -84,5 +84,24 @@ describe('SnapshotStore.diff / restore', () => {
 
     // diff 也不应把它标成“快照后被修改过”
     expect(s.diff(snap, new Map([['mem_a', softDeleted]]))[0].changedAfterSnapshot).toBe(false)
+  })
+})
+
+describe('SnapshotStore.restore：盘上快照只在写前、写后各读一次', () => {
+  it('恢复多少条都只读两次快照；写后才脱敏的记录统一撤回，计入 redacted，顺序同快照', async () => {
+    const kv = new InMemoryKvTable<MemorySnapshot>()
+    const s = new SnapshotStore(kv)
+    const records = Array.from({ length: 20 }, (_, i) => record({ id: `mem_${String(i).padStart(2, '0')}` }))
+    const snap = await s.capture({ operation: 'manual', description: '大快照', records }, 100)
+    const reads = vi.spyOn(kv, 'get')
+    const discarded: string[] = []
+    const r = await s.restore(snap, undefined, async rec => {
+      if (rec.id === 'mem_03' || rec.id === 'mem_11') await s.redact(new Set([rec.id]))   // 写入的同时别的会话把它彻底删除
+    }, new Map(), false, async rec => { discarded.push(rec.id) })
+    expect(reads).toHaveBeenCalledTimes(2)
+    expect(discarded).toEqual(['mem_03', 'mem_11'])
+    expect(r.redacted).toEqual(['mem_03', 'mem_11'])
+    expect(r.skipped).toEqual(['mem_03', 'mem_11'])
+    expect(r.restored).toEqual(records.map(x => x.id).filter(id => id !== 'mem_03' && id !== 'mem_11'))
   })
 })

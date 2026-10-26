@@ -141,8 +141,8 @@ export class SnapshotStore {
    * 预读之后记录仍可能被别处改动：不覆盖时把冲突判定交给 put 的 skipIf，在写入那一刻按最新内容再判一次；
    * put 返回 false 即按「快照后被修改」跳过。返回 void 的 put 视为已写入。
    * 密钥硬删先脱敏快照、再删文件（tools/forget.ts），可能发生在别的会话、别的进程，也可能在调用方读出快照之后：
-   * 每条写入前按盘上的这份快照现读一次，已脱敏（或快照已清扫）就不写；写入后再读一次，仍未脱敏说明对方删文件在后，
-   * 会连这份一起删掉，读到已脱敏就用 discard 删掉刚写的这份，同样计入 redacted。
+   * 写入前按盘上的这份快照现读一次，已脱敏（或快照已清扫）的不写；全部写完再读一次，仍未脱敏说明对方删文件在后，
+   * 会连这份一起删掉，读到已脱敏的就用 discard 删掉刚写的那份，同样计入 redacted。盘上快照只读这两次，条数多也不逐条重读。
    */
   async restore(
     snapshot: MemorySnapshot,
@@ -152,39 +152,25 @@ export class SnapshotStore {
     overwriteChanged: boolean,
     discard: (record: MemoryRecord) => Promise<unknown>,
   ): Promise<{ restored: string[]; skipped: string[]; redacted: string[] }> {
-    const restored: string[] = []
-    const skipped: string[] = []
-    const redacted: string[] = []
     const targets = ids ? snapshot.data.filter(r => ids.includes(r.id)) : snapshot.data
+    const outcomes: Array<'restored' | 'skipped' | 'redacted'> = []
+    const onDisk = async () => new Map((await this.table.get(snapshot.id))?.data.map(r => [r.id, r]))
+    const before = await onDisk()
     for (const rec of targets) {
-      const latest = rec.redacted ? rec : await this.latestEntry(snapshot.id, rec.id)
-      if (latest?.redacted) {
-        skipped.push(rec.id)
-        redacted.push(rec.id)
-        continue
-      }
-      if (latest === undefined || (isConflicting(current.get(rec.id), rec) && !overwriteChanged)) {
-        skipped.push(rec.id)
-        continue
-      }
-      const written = await put(rec, overwriteChanged ? undefined : cur => isConflicting(cur, rec))
-      if (written === false) {
-        skipped.push(rec.id)
-        continue
-      }
-      if ((await this.latestEntry(snapshot.id, rec.id))?.redacted) {
-        await discard(rec)
-        skipped.push(rec.id)
-        redacted.push(rec.id)
-        continue
-      }
-      restored.push(rec.id)
+      const latest = rec.redacted ? rec : before.get(rec.id)
+      if (latest?.redacted) outcomes.push('redacted')
+      else if (latest === undefined || (isConflicting(current.get(rec.id), rec) && !overwriteChanged)) outcomes.push('skipped')
+      else outcomes.push((await put(rec, overwriteChanged ? undefined : cur => isConflicting(cur, rec))) === false ? 'skipped' : 'restored')
     }
-    return { restored, skipped, redacted }
-  }
-
-  /** 盘上这份快照里该记录的现状；快照或记录已不在时为 undefined。 */
-  private async latestEntry(snapshotId: string, id: string): Promise<SnapshotRecord | undefined> {
-    return (await this.table.get(snapshotId))?.data.find(r => r.id === id)
+    if (outcomes.includes('restored')) {
+      const after = await onDisk()
+      for (const [i, rec] of targets.entries()) {
+        if (outcomes[i] !== 'restored' || after.get(rec.id)?.redacted !== true) continue
+        await discard(rec)
+        outcomes[i] = 'redacted'
+      }
+    }
+    const idsWhere = (keep: (outcome: (typeof outcomes)[number]) => boolean) => targets.filter((_, i) => keep(outcomes[i]!)).map(r => r.id)
+    return { restored: idsWhere(o => o === 'restored'), skipped: idsWhere(o => o !== 'restored'), redacted: idsWhere(o => o === 'redacted') }
   }
 }
