@@ -4,15 +4,18 @@
  * 有密钥的层不打分（score 为 null），写原因；超出上限列为问题、不扣分，带「去处理 ›」。本项目自己没有记忆、只有超限提醒时
  * （视图的 overflowOnlyLayers）照实写 0 条和超限这一行。
  * 体检关闭时整块置灰并给「去设置里打开 ›」，密钥与读不出的文件仍从待处理视图提示（规则检查，不调模型）。
+ * 用户忽略的建议不扣分，层下写「已忽略 N 条」，展开逐条列问题类型和记忆名，每条可「取消忽略」。
  * 层块下面两行入口：「待你决定 N 条，其中 M 条超过 7 天 · 去处理 ›」「可提升为全局 N 条 · 去看 ›」，都去待处理 tab。
  */
-import type { ReactNode } from 'react'
+import { useId, useState, type ReactNode } from 'react'
 import { isAwaitingDecision, type GuiLayerRef, type HealthView, type PendingView } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { formatDay, formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
 import { healthZh } from '../locales/health.ts'
 import { sameScope, useCanOpen, type NavStore } from '../nav.ts'
+import { ActionFeedback, useItemAction } from '../pending/action.tsx'
+import { Button } from '../ui/Button.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { HealthBanner } from '../ui/HealthBanner.tsx'
 
@@ -62,12 +65,51 @@ function Issues({ lines, overflow, tail, onHandle }: { lines: readonly string[];
   )
 }
 
-function LayerHealth({ layer, data, overflowOnly, now, onHandleOverflow }: {
+type IgnoredItem = HealthLayer['ignored'][number]
+
+/** 已忽略的一条：问题类型 · 记忆名，「取消忽略」发 unignore-advice；成功后视图重写，这一条随之消失。 */
+function IgnoredRow({ item, session }: { item: IgnoredItem; session: BorrowedSession }) {
+  const t = useT()
+  const action = useItemAction(session, () => {})
+  return (
+    <li>
+      <span><Dotted parts={[issueLabel(item.type, t), ...item.memories.map(m => m.name)]} /></span>
+      <Button
+        variant="ghost"
+        unavailable={action.unavailable}
+        onClick={() => { action.run({ cmd: 'unignore-advice', type: item.type, memoryIds: item.memories.map(m => m.id) }) }}
+      >
+        {t('health.ignored.unignore')}
+      </Button>
+      <ActionFeedback action={action} />
+    </li>
+  )
+}
+
+/** 「已忽略 N 条」：默认收起，点开列出每一条。没有忽略的层不出。 */
+function Ignored({ items, session }: { items: readonly IgnoredItem[]; session: BorrowedSession }) {
+  const t = useT()
+  const [open, setOpen] = useState(false)
+  const listId = useId()
+  if (items.length === 0) return null
+  const label = t('health.ignored.toggle', { n: formatNumber(items.length) })
+  return (
+    <div className="pm-health-ignored">
+      <button type="button" className="pm-link" aria-expanded={open} aria-controls={listId} onClick={() => { setOpen(!open) }}>{label}</button>
+      {open
+        ? <ul id={listId} aria-label={label}>{items.map(item => <IgnoredRow key={`${item.type}:${item.memories.map(m => m.id).join(',')}`} item={item} session={session} />)}</ul>
+        : null}
+    </div>
+  )
+}
+
+function LayerHealth({ layer, data, overflowOnly, now, session, onHandleOverflow }: {
   layer: GuiLayerRef
   data: HealthLayer | undefined
   /** 这一层不在体检清单里（自己没有记忆）、只有超限提醒时的档位。 */
   overflowOnly: OverflowLevel | undefined
   now: number
+  session: BorrowedSession
   onHandleOverflow: () => void
 }) {
   const t = useT()
@@ -106,6 +148,7 @@ function LayerHealth({ layer, data, overflowOnly, now, onHandleOverflow }: {
         tail={data.staleCount > 0 ? [t('health.stale', { n: formatNumber(data.staleCount) })] : []}
         onHandle={onHandleOverflow}
       />
+      <Ignored items={data.ignored} session={session} />
     </section>
   )
 }
@@ -176,7 +219,7 @@ export function HealthTab({ session, scope, nav }: { session: BorrowedSession; s
   const body = rows.map(({ layer, data }) => (
     <LayerHealth
       key={layer.kind === 'global' ? 'global' : layer.workspacePath}
-      layer={layer} data={data} overflowOnly={overflowOnly(layer)} now={now} onHandleOverflow={toPending}
+      layer={layer} data={data} overflowOnly={overflowOnly(layer)} now={now} session={session} onHandleOverflow={toPending}
     />
   ))
 
@@ -222,6 +265,11 @@ export const healthCss = `
 .pm-health-issues-title { margin: 0 0 4px; font-size: 12px; font-weight: 600; line-height: 1.5; color: var(--pm-text-2); }
 .pm-health-issues ul, .pm-health-alerts { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 2px; font-size: 13px; line-height: 1.55; }
 .pm-health-none { margin: 0; font-size: 13px; color: var(--pm-text-2); }
+.pm-health-ignored { padding: 0 16px; font-size: 13px; line-height: 1.55; }
+.pm-health-ignored ul { margin: 4px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.pm-health-ignored li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; color: var(--pm-text-2); }
+/* 取消失败的原话（待处理的样式表只在待处理 tab 注入，这里自带一份） */
+.pm-health-ignored .pm-pending-error { flex-basis: 100%; margin: 0; font-size: 12px; color: var(--pm-text); }
 .pm-health-alerts { padding: 0 16px; }
 .pm-health-entries { margin: 0; padding: 0 16px; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 13px; line-height: 1.55; color: var(--pm-text); }
 .pm-health-off { opacity: .5; }

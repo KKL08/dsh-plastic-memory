@@ -46,6 +46,8 @@ export const healthZh = {
   'health.entry.pendingLink': '去处理 ›',
   'health.entry.promote': '可提升为全局 {n} 条',
   'health.entry.promoteLink': '去看 ›',
+  'health.ignored.toggle': '已忽略 {n} 条',
+  'health.ignored.unignore': '取消忽略',
 
   'health.semanticEmpty.title': '内容检查还没做过',
   'health.semanticEmpty.body': '体检会找出互相矛盾、内容重复、放错地方、表述不清的记忆。上面是规则检查的结果，每次打开都重新算。',
@@ -103,6 +105,8 @@ export const healthEn: Record<HealthLocaleKey, string> = {
   'health.entry.pendingLink': 'Handle ›',
   'health.entry.promote': '{n} could become global',
   'health.entry.promoteLink': 'Take a look ›',
+  'health.ignored.toggle': '{n} ignored',
+  'health.ignored.unignore': 'Unignore',
 
   'health.semanticEmpty.title': 'Content check not run yet',
   'health.semanticEmpty.body': 'A checkup finds memories that contradict each other, repeat, sit in the wrong place, or are unclear. Above is the rule check, recomputed every time you open this.',

@@ -94,6 +94,7 @@ export const pendingZh = {
   'pending.advice.confirm': '仍然有效',
   'pending.advice.delete': '删除',
   'pending.advice.open': '打开文件',
+  'pending.advice.ignore': '忽略',
 
   'pending.edit.edit': '直接改',
   'pending.edit.merge': '直接合并',
@@ -163,6 +164,8 @@ export const pendingZh = {
   'pending.result.deletedBody': '14 天内可在「最近删除」恢复。',
   'pending.result.edited': '已修改',
   'pending.result.merged': '已合并',
+  'pending.result.ignored': '已忽略',
+  'pending.result.ignoredBody': '不再提示，也不再扣分；内容改了会重新检查。可在「健康」里取消忽略。',
 } as const
 
 export const pendingEn: Record<keyof typeof pendingZh, string> = {
@@ -259,6 +262,7 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.advice.confirm': 'Still valid',
   'pending.advice.delete': 'Delete',
   'pending.advice.open': 'Open file',
+  'pending.advice.ignore': 'Ignore',
 
   'pending.edit.edit': 'Edit',
   'pending.edit.merge': 'Merge',
@@ -328,4 +332,6 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.result.deletedBody': 'You can restore it from Recently deleted within 14 days.',
   'pending.result.edited': 'Edited',
   'pending.result.merged': 'Merged',
+  'pending.result.ignored': 'Ignored',
+  'pending.result.ignoredBody': 'No more reminders and no score penalty; it is checked again if the content changes. You can unignore it under Health.',
 }

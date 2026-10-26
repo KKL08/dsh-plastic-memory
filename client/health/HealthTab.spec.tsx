@@ -1,8 +1,8 @@
-// 健康 tab：按层三段（分数与结论、问题、上次体检时间）、密钥不打分、超限列为问题不扣分、从没体检过、体检关闭。
+// 健康 tab：按层三段（分数与结论、问题、上次体检时间）、密钥不打分、超限列为问题不扣分、从没体检过、体检关闭、已忽略。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, screen, within } from '@testing-library/react'
+import { act, fireEvent, screen, within } from '@testing-library/react'
 import { GUI_VIEW_VERSION, type HealthView, type PendingView } from '../../src/gui/contract.ts'
-import { createFakeGateway } from '../gateway.fake.ts'
+import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { createNavStore } from '../nav.ts'
 import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { HealthTab } from './HealthTab.tsx'
@@ -189,5 +189,51 @@ describe('健康 tab：去待处理的入口', () => {
     render(pendingOf(conflict('d1', NOW), promote), false)
     expect(screen.queryByRole('button', { name: '去处理 ›' })).toBeNull()
     expect(screen.queryByRole('button', { name: '去看 ›' })).toBeNull()
+  })
+})
+
+// 用户在待处理里忽略的建议：不扣分，层下写「已忽略 N 条」，展开能看到是哪几条、各自什么问题，并能取消忽略。
+describe('健康 tab：已忽略', () => {
+  const ignored: Layer['ignored'] = [
+    { type: 'bloat', memories: [{ id: 'b1', name: '发版流程', summary: '发版的步骤' }] },
+    { type: 'redundancy', memories: [{ id: 'r1', name: '数据库约定', summary: 's' }, { id: 'r2', name: '测试数据库', summary: 's' }] },
+  ]
+  function render(view: HealthView, respond?: FakeGatewayInit['respond']) {
+    const gateway = createFakeGateway({ session, views: { health: view }, ...(respond ? { respond } : {}) })
+    renderInShell(<HealthTab session={session} scope={WS} nav={createNavStore()} />, gateway)
+    return gateway
+  }
+
+  it('收起时只写「已忽略 N 条」；展开逐条列问题类型和记忆名，再点收起', () => {
+    render(health([layer({ ignored }), layer({ layer: { kind: 'global' } })]))
+    const ws = screen.getByRole('region', { name: '本项目' })
+    const toggle = within(ws).getByRole('button', { name: '已忽略 2 条' })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(within(ws).queryByRole('button', { name: '取消忽略' })).toBeNull()
+    fireEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    const list = within(ws).getByRole('list', { name: '已忽略 2 条' })
+    expect(within(list).getAllByRole('listitem').map(li => li.textContent)).toEqual([
+      '内容过长·发版流程取消忽略', '内容重复·数据库约定·测试数据库取消忽略',
+    ])
+    fireEvent.click(toggle)
+    expect(within(ws).queryByRole('list', { name: '已忽略 2 条' })).toBeNull()
+    // 没有忽略的层不出这一行
+    expect(within(screen.getByRole('region', { name: '全局' })).queryByRole('button', { name: /已忽略/ })).toBeNull()
+  })
+
+  it('「取消忽略」发 unignore-advice（类型 + 这一项的全部记忆 id）', async () => {
+    const gateway = render(health([layer({ ignored })]))
+    fireEvent.click(screen.getByRole('button', { name: '已忽略 2 条' }))
+    const [, redundancy] = within(screen.getByRole('list', { name: '已忽略 2 条' })).getAllByRole('listitem')
+    await act(async () => { fireEvent.click(within(redundancy!).getByRole('button', { name: '取消忽略' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'unignore-advice', type: 'redundancy', memoryIds: ['r1', 'r2'] }])
+  })
+
+  it('取消失败：原话写在那一条下面', async () => {
+    render(health([layer({ ignored })]), command => ({ ok: false, cmd: command.cmd, code: 'failed', detail: '写不进去' }))
+    fireEvent.click(screen.getByRole('button', { name: '已忽略 2 条' }))
+    await act(async () => { fireEvent.click(screen.getAllByRole('button', { name: '取消忽略' })[0]!) })
+    expect(screen.getByRole('alert')).toHaveTextContent('写不进去')
   })
 })

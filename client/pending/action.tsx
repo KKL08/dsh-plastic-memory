@@ -26,9 +26,9 @@ type Ok = Extract<MemoryCommandResult, { ok: true }>
 
 /**
  * 条目还开着才能做的命令：处理待决项的，not-found 只可能是条目已出了待决；按记忆 id 提升为全局的，
- * not-found 只可能是那条记忆已不在那个项目里（别处已提升或删掉）。
+ * not-found 只可能是那条记忆已不在那个项目里（别处已提升或删掉）；忽略建议的，not-found 只可能是涉及的记忆已在别处删掉。
  */
-const OPEN_ITEM_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'promote', 'keep-local', 'dismiss-overflow', 'promote-memory'])
+const OPEN_ITEM_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'promote', 'keep-local', 'dismiss-overflow', 'promote-memory', 'ignore-advice'])
 
 /**
  * 命令没做任何改动，因为这一条正在别处（别的标签页、宿主进程、体检）处理（claimed），或刚在别处处理完（not-found）。

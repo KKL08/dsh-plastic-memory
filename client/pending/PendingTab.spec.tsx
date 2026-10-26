@@ -355,6 +355,14 @@ describe('待处理：别处已经在处理同一条', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(text)
   })
 
+  it('建议整理「忽略」回 not-found（记忆已在别处删掉）：同样提示，不显示原话', async () => {
+    const bloat: PendingItem = { kind: 'advice', level: 'advice', type: 'bloat', memories: [memory({ id: 'bl', filePath: '/m/app/bl.md', digest: 'sha1:bl' })] }
+    setup([bloat], { respond: command => ({ ok: false, cmd: command.cmd, code: 'not-found', detail: '不存在或已处理：bl' }) })
+    fireEvent.click(screen.getByRole('button', { name: '忽略' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('你对「内容过长」的选择没有生效：它正在别处处理，或者刚在别处处理完。')
+    expect(screen.queryByText(/不存在或已处理/)).toBeNull()
+  })
+
   it('放错层「提升为全局」回 not-found（别处已提升或删掉）：同样提示，不显示原话', async () => {
     const misplaced: PendingItem = { kind: 'advice', level: 'advice', type: 'misplaced', memories: [memory({ id: 'mu', filePath: '/m/app/mu.md', digest: 'sha1:mu' })] }
     const { gateway } = setup([misplaced], { respond: command => ({ ok: false, cmd: command.cmd, code: 'not-found', detail: '不存在或已处理：mu' }) })
@@ -604,21 +612,47 @@ describe('待处理：建议整理', () => {
     expect(groupOf().querySelector('.pm-marker')).toBeNull()
   })
 
+  // 「忽略」在标题行右上（DOM 里排在最前），其余在底部一行
   it.each([
-    ['已过有效期', expired, ['删除', '打开文件']],
+    ['已过有效期', expired, ['忽略', '删除', '打开文件']],
     ['很久没确认', stale, ['仍然有效', '删除', '打开文件']],
-    ['内容过长', bloat, ['打开文件', '直接改', '让模型改']],
-    ['指向的旧记忆已不在', orphan, ['打开文件']],
-    ['内容重复', baselineDup, ['删除', '打开文件']],
-    ['放错层', toGlobal, ['打开文件', '直接改', '让模型改', '提升为全局']],
-    ['放错层', toProject, ['打开文件', '直接改', '让模型改']],
-    ['表述不清', unclear, ['打开文件', '直接改', '让模型改']],
+    ['内容过长', bloat, ['忽略', '打开文件', '直接改', '让模型改']],
+    ['指向的旧记忆已不在', orphan, ['忽略', '打开文件']],
+    ['内容重复', baselineDup, ['忽略', '删除', '打开文件']],
+    ['放错层', toGlobal, ['忽略', '打开文件', '直接改', '让模型改', '提升为全局']],
+    ['放错层', toProject, ['忽略', '打开文件', '直接改', '让模型改']],
+    ['表述不清', unclear, ['忽略', '打开文件', '直接改', '让模型改']],
   ] as const)('%s：动作按 spec 表', (title, item, buttons) => {
     setup([item])
     expect(cardOf(title).querySelector(`[data-memory-id="${item.kind === 'advice' ? item.memories[0]!.id : ''}"]`)).not.toBeNull()
     expect(within(cardOf(title)).getAllByRole('button').map(b => b.textContent)).toEqual([...buttons])
-    // 「打开文件」退一步，用幽灵按钮；其余照常
-    for (const b of within(cardOf(title)).getAllByRole('button')) expect(b.classList.contains('pm-btn--ghost')).toBe(b.textContent === '打开文件')
+    // 「打开文件」退一步，用幽灵按钮；「忽略」是右上角的淡灰小按钮（同超限卡）；其余照常
+    for (const b of within(cardOf(title)).getAllByRole('button')) {
+      expect(b.classList.contains('pm-btn--ghost')).toBe(b.textContent === '打开文件')
+      expect(b.classList.contains('pm-btn--quiet')).toBe(b.textContent === '忽略')
+      if (b.textContent === '忽略') expect(b.closest('.pm-pending-aside')).not.toBeNull()
+    }
+  })
+
+  it('「忽略」发 ignore-advice（类型 + 记忆 id），原位换成结果卡；撤销发 unignore-advice，撤销后回到原卡片', async () => {
+    const { gateway, commands } = setup([bloat])
+    fireEvent.click(within(cardOf('内容过长')).getByRole('button', { name: '忽略' }))
+    await screen.findByText('已忽略')
+    expect(screen.getByText('不再提示，也不再扣分；内容改了会重新检查。可在「健康」里取消忽略。')).toBeInTheDocument()
+    // 视图重写后这一项不在了，结果卡照旧留在原位
+    act(() => { gateway.setView('pending', view()) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
+    expect(commands()).toEqual([{ cmd: 'ignore-advice', type: 'bloat', memoryIds: ['b1'] }, { cmd: 'unignore-advice', type: 'bloat', memoryIds: ['b1'] }])
+    act(() => { gateway.setView('pending', view(bloat)) })
+    expect(within(cardOf('内容过长')).getByRole('button', { name: '忽略' })).toBeInTheDocument()
+    expect(screen.queryByText('已忽略')).toBeNull()
+  })
+
+  it('内容重复的一组：右上一个「忽略」，带上整组的记忆 id', async () => {
+    const { commands } = setup([pair])
+    fireEvent.click(within(cardOf('内容重复')).getByRole('button', { name: '忽略' }))
+    await screen.findByText('已忽略')
+    expect(commands()).toEqual([{ cmd: 'ignore-advice', type: 'redundancy', memoryIds: ['r1', 'r2'] }])
   })
 
   it('说明按情形写：和指令文件重复、该放全局、只和项目有关、表述不清、内容过长', () => {
@@ -640,7 +674,7 @@ describe('待处理：建议整理', () => {
     const right = within(card).getByRole('region', { name: '右边这条' })
     expect(within(left).getByText('左边的内容。')).toBeInTheDocument()
     expect(within(right).getByText('右边的内容。')).toBeInTheDocument()
-    expect(within(card).getAllByRole('button').map(b => b.textContent)).toEqual(['删除左边', '打开文件', '删除右边', '打开文件', '直接合并', '让模型合并'])
+    expect(within(card).getAllByRole('button').map(b => b.textContent)).toEqual(['忽略', '删除左边', '打开文件', '删除右边', '打开文件', '直接合并', '让模型合并'])
     for (const b of within(card).getAllByRole('button')) expect(b.classList.contains('pm-btn--ghost')).toBe(b.textContent === '打开文件')
 
     await act(async () => { fireEvent.click(within(right).getByRole('button', { name: '打开文件' })) })
@@ -654,7 +688,7 @@ describe('待处理：建议整理', () => {
     const { commands } = setup([{ kind: 'advice', level: 'advice', type: 'redundancy', memories: [...duplicates, memory({ id: 'r3', name: '第三条' })] }])
     const card = cardOf('内容重复')
     expect(screen.getByText('这几条说的是同一件事，留一条就够。删掉的 14 天内可在「最近删除」恢复。')).toBeInTheDocument()
-    expect(within(card).getAllByRole('button').map(b => b.textContent)).toEqual(['删除', '打开文件', '删除', '打开文件', '删除', '打开文件'])
+    expect(within(card).getAllByRole('button').map(b => b.textContent)).toEqual(['忽略', '删除', '打开文件', '删除', '打开文件', '删除', '打开文件'])
     fireEvent.click(within(within(card).getByRole('region', { name: '第三条' })).getByRole('button', { name: '删除' }))
     await screen.findByText('已删除')
     expect(commands()).toEqual([{ cmd: 'forget', memoryId: 'r3', layer }])
@@ -962,9 +996,11 @@ describe('待处理：让模型改与让模型合并', () => {
 
   it('「让模型改」在「直接改」右边；点开就地写要求，说明按哪类建议默认处理、用哪个模型；「取消」收起，不发命令', () => {
     const { commands } = setup([bloat], { model: 'deepseek-v4-flash' })
-    expect(within(screen.getByRole('article')).getAllByRole('button').map(b => b.textContent)).toEqual(['打开文件', '直接改', '让模型改'])
+    expect(within(screen.getByRole('article')).getAllByRole('button').map(b => b.textContent)).toEqual(['忽略', '打开文件', '直接改', '让模型改'])
     open()
     expect(screen.getByRole('textbox', { name: '想怎么改？不写也行，会按「内容过长」默认处理' })).toHaveValue('')
+    // 改的过程中右上角的「忽略」收起
+    expect(screen.queryByRole('button', { name: '忽略' })).toBeNull()
     expect(screen.getByText('用当前模型 deepseek-v4-flash 生成，先给你看结果再决定')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '直接改' })).toBeNull()
     expect(screen.getByRole('button', { name: '取消' })).toHaveClass('pm-btn--ghost')

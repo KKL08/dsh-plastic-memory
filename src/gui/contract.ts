@@ -124,13 +124,6 @@ export type AdviceType = (typeof ADVICE_TYPES)[number]
 
 /** 能「忽略」的建议类型：除「很久没确认」外都能（它的出路是「仍然有效」或删除）。名字定义在 contract-codes（治理侧同用）。 */
 export { IGNORABLE_ADVICE_TYPES, type IgnorableAdviceType } from '../contract-codes.ts'
-// 每个能忽略的类型都是建议类型（名字有出入编译不过）
-const IGNORABLE_ARE_ADVICE: readonly AdviceType[] = IGNORABLE_ADVICE_TYPES
-
-/** 这类建议能不能忽略（界面按它出「忽略」按钮）。 */
-export function isIgnorableAdvice(type: AdviceType): boolean {
-  return IGNORABLE_ARE_ADVICE.includes(type)
-}
 
 /** 能「让模型改」（内容重复是「让模型合并」）的建议类型：服务端按它给默认要求，界面按它出按钮。 */
 export const MODEL_EDIT_ADVICE_TYPES = ['bloat', 'redundancy', 'misplaced', 'unclear'] as const satisfies readonly AdviceType[]
