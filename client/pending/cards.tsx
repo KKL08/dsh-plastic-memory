@@ -369,7 +369,7 @@ export function AdviceCard({ item, session, now, typeLabels, onDone, onRefused }
   }
   return (
     <Card title={t(copy.title)}>
-      {item.memories.map(m => <MemoryOf key={m.id} session={session} memory={m} now={now} typeLabels={typeLabels} />)}
+      <div className="pm-pending-advice-memories">{item.memories.map(m => <MemoryOf key={m.id} session={session} memory={m} now={now} typeLabels={typeLabels} />)}</div>
       <p className="pm-pending-text">{t(copy.body, { date: formatDay(memory.lastConfirmedAt, now, t) })}</p>
       <div className="pm-pending-actions">{copy.actions.map(a => buttons[a])}</div>
       <ActionFeedback action={action} />

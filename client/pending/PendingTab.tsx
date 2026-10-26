@@ -259,6 +259,7 @@ export const pendingCss = crossConfirmCss + `
 .pm-pending-group { display: flex; flex-direction: column; }
 .pm-pending-group + .pm-pending-group { margin-top: 24px; }
 .pm-pending-group-title { margin: 4px 0 0; font-size: 16px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
+.pm-pending-advice-memories .pm-mc-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 .pm-pending-group-count { font-weight: 400; color: var(--pm-text-2); }
 .pm-pending-row { position: relative; }
 .pm-pending-row + .pm-pending-row { border-top: .5px solid var(--pm-line); }
