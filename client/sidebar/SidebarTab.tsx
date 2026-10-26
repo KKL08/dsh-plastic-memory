@@ -216,7 +216,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const saved = (snapshot?.savedIds ?? [])
     .flatMap((id): Array<{ id: string; memory: MemoryCardData | undefined }> => {
       const memory = byId.get(id)
-      return isPurged(id) ? [{ id, memory: undefined }] : memory === undefined || deletions.of(id) !== undefined ? [] : [{ id, memory }]
+      return isPurged(id) ? [{ id, memory: undefined }] : memory === undefined || deletions.of(id, layerOfMemory(memory)) !== undefined ? [] : [{ id, memory }]
     })
   const scope = ws === undefined ? undefined : { kind: 'workspace' as const, workspacePath: ws }
   const restPending = ws === undefined || pending.status !== 'ready'

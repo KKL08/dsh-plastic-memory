@@ -48,13 +48,14 @@ function SavedRow({ sessionId, item, now, typeLabel, onDetail }: {
   // 记下的时刻取记忆卡上的（结果事件的时间）；没有就用这一行第一次出现的时刻。只有晚于它的视图才拿来判彻底删除
   const [firstSeen] = useState(() => Date.now())
   const savedAt = Number.isFinite(item.memory.updatedAt) && item.memory.updatedAt > 0 ? item.memory.updatedAt : firstSeen
-  const how = gateway.useDeletions().of(id, savedAt)
+  const layer = layerOfMemory(item.memory)
+  const how = gateway.useDeletions().of(id, layer, savedAt)
   const [state, setState] = useState<RowState>({ kind: 'idle' })
   const run = async (cmd: 'forget' | 'restore' | 'hard-delete') => {
     if (state.kind === 'busy') return
     keepFocusInPlace()
     setState({ kind: 'busy' })
-    const result = await gateway.execute(sessionId, { cmd, memoryId: id, layer: layerOfMemory(item.memory) })
+    const result = await gateway.execute(sessionId, { cmd, memoryId: id, layer })
     if (result.ok) setState({ kind: 'idle' })
     else if (cmd === 'forget' && result.code === 'has-secret') setState({ kind: 'secret' })
     // 撤销失败时那一行还是「已删除」，不另写原因

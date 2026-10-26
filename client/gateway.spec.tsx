@@ -230,7 +230,7 @@ describe('createHostGateway', () => {
     await waitFor(() => { expect(result.current.of('m9')).toBe('soft') })
     expect(result.current.of('m8')).toBeUndefined()
     // 两份都没有的 m7：本页视图里从没出现过，只是缺席，即使视图晚于记下的时刻也不判彻底删除
-    expect(result.current.of('m7', 4)).toBeUndefined()
+    expect(result.current.of('m7', undefined, 4)).toBeUndefined()
     expect(result.current.of('m7')).toBeUndefined()
   })
 

@@ -323,6 +323,33 @@ describe('交付卡与其他界面共用删除状态', () => {
     expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
   })
 
+  it('同 id 在两层都在用、在全部记忆里只删了别层那份：交付卡与右侧栏里这份照常显示，视图跟上后也不变', async () => {
+    const globalCopy = { ...fresh().memory, scope: 'global' as const, workspacePath: undefined, filePath: '/m/global/n1.md' }
+    const both: LibraryView = { ...libraryView(), layers: [{ layer: { kind: 'global' }, items: [globalCopy] }, ...libraryView().layers] }
+    const gateway = createFakeGateway({ views: { library: both, session: sessionView } })
+    const session = { kind: 'ready', sessionId: 's1', cwd: WS } as const
+    renderInShell(
+      <>
+        <LibraryTab nav={createNavStore()} scope={{ kind: 'global' }} session={session} now={NOW} />
+        <SidebarTab sessionId="s1" workspacePath={WS} openPage={() => {}} />
+        <SavedMemoriesCard sessionId="s1" cwd={WS} saved={[fresh()]} now={NOW} openDetail={() => {}} />
+      </>,
+      gateway,
+    )
+    const stillShown = () => {
+      expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
+      expect(within(screen.getByRole('region', { name: '这次对话新记的' })).getByText('报销截止每月 25 日。')).toBeInTheDocument()
+    }
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'n1', layer: { kind: 'global' } }])
+    stillShown()
+    act(() => {
+      gateway.setView('library', libraryView())
+      gateway.setView('deleted', { version: GUI_VIEW_VERSION, items: [{ memory: globalCopy, deletedAt: NOW, purgeAt: NOW + 1 }] })
+    })
+    stillShown()
+  })
+
   it('最近删除里有同 id 的副本、全部记忆里这条还在用（别层的副本被删）：不当成已删除', () => {
     const gateway = createFakeGateway({
       views: { library: libraryView(), deleted: { version: GUI_VIEW_VERSION, items: [{ memory: { ...fresh().memory, scope: 'global', workspacePath: undefined }, deletedAt: NOW, purgeAt: NOW + 1 }] } },
