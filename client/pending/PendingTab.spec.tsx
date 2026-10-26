@@ -608,13 +608,14 @@ describe('待处理：建议整理', () => {
     expect(within(cardOf(title)).getAllByRole('button').map(b => b.textContent)).toEqual([...buttons])
   })
 
-  it('说明按情形写：和指令文件重复、该放全局、只和项目有关、表述不清', () => {
-    setup([baselineDup, toGlobal, toProject, unclear])
+  it('说明按情形写：和指令文件重复、该放全局、只和项目有关、表述不清、内容过长', () => {
+    setup([baselineDup, toGlobal, toProject, unclear, bloat])
     for (const text of [
       '指令文件（AGENTS.md 等）里已经写了同样的内容，这条可以删掉。删除后 14 天内可在「最近删除」恢复。',
       '这条看起来对所有项目都适用，现在只放在一个项目里。提升为全局后所有项目都会带入它，14 天内可撤销。',
-      '这条看起来只和某个项目有关，放在全局会被带进每个项目的对话。打开文件，改成各个项目都适用的说法。',
-      '换一个没有上下文的新对话，agent 很难照这条去做。打开文件，把缺的背景、对象或条件写清楚。',
+      '这条看起来只和某个项目有关，放在全局会被带进每个项目的对话。改成各个项目都适用的说法。',
+      '换一个没有上下文的新对话，agent 很难照这条去做。把缺的背景、对象或条件写清楚。',
+      '内容很长，带入对话时占用较多。精简成要点更好。',
     ]) expect(screen.getByText(text)).toBeInTheDocument()
   })
 
