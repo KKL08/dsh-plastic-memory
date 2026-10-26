@@ -98,6 +98,19 @@ describe('PEM 私钥块：从 BEGIN 到对应的 END 整块遮住', () => {
     expect(maskSecrets(text)).toBe(`- 以 ${SECRET_MASK}\n- 包管理用 pnpm\n- 提交前跑测试`)
   })
 
+  it('散文里提到 BEGIN 头、后文才有同类型的真实私钥：中间的文字原样，真实私钥整块遮住', () => {
+    const begin = pem.split('\n')[0]
+    const text = `- 以 ${begin} 开头的文件不要提交\n- 包管理用 pnpm\n- 提交前跑测试\n部署机私钥：\n${pem}\n用完删掉`
+    expect(maskSecrets(text)).toBe(`- 以 ${SECRET_MASK}\n- 包管理用 pnpm\n- 提交前跑测试\n部署机私钥：\n${SECRET_MASK}\n用完删掉`)
+  })
+
+  it('整块缩进（列表、引用里的私钥）照样整块遮住', () => {
+    const indented = pem.split('\n').map(line => `    ${line}`).join('\n')
+    const masked = maskSecrets(`部署机私钥：\n${indented}\n用完删掉`)
+    expect(masked).toBe(`部署机私钥：\n    ${SECRET_MASK}\n用完删掉`)
+    for (const line of bodyLines) expect(masked).not.toContain(line)
+  })
+
   it('两块私钥各遮各的，中间的文字保留', () => {
     expect(maskSecrets(`A：${pem}\n以及 B：${pem}`)).toBe(`A：${SECRET_MASK}\n以及 B：${SECRET_MASK}`)
   })
