@@ -597,9 +597,36 @@ describe('健康视图', () => {
     if (tool.kind !== 'single') throw new Error(tool.kind)
     const ws = health.layers.find(l => l.layer.kind === 'workspace')!
     expect(ws).toMatchObject({ layer: { kind: 'workspace', workspacePath: WS }, totalMemories: 2, score: tool.score, semanticCachedAt: null })
-    expect(ws.issues).toEqual([{ type: 'expired', count: 1 }])
+    expect(ws.issues).toEqual([{ type: 'expired', count: 1, level: 'advice' }])
     const global = health.layers.find(l => l.layer.kind === 'global')!
     expect(global).toMatchObject({ score: null, gate: { secret: true }, issues: [{ type: 'secret', count: 1 }] })
+  })
+  it('每条扣分原因带待处理里对应的组：密钥、读不出的文件在高优问题，冲突在待你处理，其余在建议整理', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_s', name: '凭证', content: FAKE_SECRET.github }))
+    await h.store.create(w({ id: 'mem_old', name: '过期', validTo: T0 - 1 }))
+    await h.store.create(w({ id: 'mem_r1', name: 'R 甲' }))
+    await h.store.create(w({ id: 'mem_r2', name: 'R 乙' }))
+    await h.store.create(w({ id: 'mem_u', name: '含糊' }))
+    await h.store.create(w({ id: 'mem_m', name: '该放全局' }))
+    await writeFile(join(wsDir(), 'broken.md'), '---\nname: [\n---\n正文\n')
+    const semantic = (type: FindingType, memoryIds: string[]): Finding =>
+      ({ type, layer: 'semantic', severity: SEVERITY_BY_TYPE[type], memoryIds, summary: 's', suggestedAction: '' })
+    const key = layerCacheKey({ kind: 'workspace', path: WS })
+    await h.cache.put(key, { id: key, scannedAt: T0, scope: WS, findings: [
+      semantic('conflict', ['mem_r1', 'mem_u']), semantic('redundancy', ['mem_r1', 'mem_r2']),
+      semantic('misplaced', ['mem_m']), semantic('unclear', ['mem_u']),
+    ] })
+    // 冲突还须仍在待决账本里才计
+    await h.decisions.upsert({ memoryIds: ['mem_r1', 'mem_u'], summary: '矛盾', fingerprint: 'h' }, 1)
+
+    const { health } = await h.views()
+    expect(healthViewSchema.parse(health)).toEqual(health)
+    const ws = health.layers.find(l => l.layer.kind === 'workspace')!
+    expect(ws.issues.map(i => [i.type, i.level])).toEqual([
+      ['secret', 'must-fix'], ['expired', 'advice'], ['malformed', 'must-fix'],
+      ['conflict', 'your-call'], ['redundancy', 'advice'], ['misplaced', 'advice'], ['unclear', 'advice'],
+    ])
   })
   it('带体检开关：缺省开启，关闭时 governanceEnabled 为 false（层照常列出）', async () => {
     const h = harness()

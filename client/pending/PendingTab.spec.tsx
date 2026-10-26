@@ -563,6 +563,57 @@ describe('待处理：直达某条记忆', () => {
   })
 })
 
+// 健康页「去处理 ›」带组标识进来：焦点落在那一组的标题上并滚入视野；组已经没有了（处理完）就落在待处理顶部。
+describe('待处理：定位到组', () => {
+  const scrollIntoView = vi.fn()
+  beforeEach(() => { scrollIntoView.mockClear(); Element.prototype.scrollIntoView = scrollIntoView })
+  afterEach(() => { delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView })
+  const advice: PendingItem = { kind: 'advice', level: 'advice', type: 'expired', memories: [memory({ id: 'e1', validTo: NOW - 1 })] }
+  const top = () => document.querySelector('.pm-pending')
+
+  it('三组各自能定位：焦点在组标题上，标题滚入视野', () => {
+    for (const [level, heading] of [['must-fix', '高优问题 1'], ['your-call', '待你处理 1'], ['advice', '建议整理 1']] as const) {
+      const { unmount } = setup([secret, horizontal, advice], {}, createNavStore({ tab: 'pending', level }))
+      const title = screen.getByRole('heading', { level: 2, name: heading })
+      expect(title).toHaveFocus()
+      expect(scrollIntoView.mock.contexts.at(-1)).toBe(title)
+      unmount()
+    }
+  })
+
+  it('那一组已经没有了：焦点落在待处理顶部', () => {
+    setup([secret, advice], {}, createNavStore({ tab: 'pending', level: 'your-call' }))
+    expect(top()).toHaveFocus()
+    expect(scrollIntoView.mock.contexts.at(-1)).toBe(top())
+  })
+
+  it('待处理全空：同样落在顶部（空状态在里面）', () => {
+    setup([], {}, createNavStore({ tab: 'pending', level: 'advice' }))
+    expect(top()).toHaveFocus()
+    expect(top()).toHaveTextContent('目前没有要处理的事')
+  })
+
+  it('视图晚到：到了再定位', () => {
+    const nav = createNavStore({ tab: 'pending', level: 'advice' })
+    const { gateway } = setup([], { views: { pending: { status: 'loading' }, health: scannedHealth(NOW) } }, nav)
+    expect(document.body).toHaveFocus()
+    act(() => { gateway.setView('pending', view(secret, advice)) })
+    expect(screen.getByRole('heading', { level: 2, name: '建议整理 1' })).toHaveFocus()
+  })
+
+  it('只定位一次：视图刷新不再抢焦点；不带组标识进来不动焦点', () => {
+    const nav = createNavStore({ tab: 'pending', level: 'advice' })
+    const { gateway } = setup([secret, advice], {}, nav)
+    const ignore = screen.getByRole('button', { name: '忽略' })
+    ignore.focus()
+    act(() => { gateway.setView('pending', view(secret, horizontal, advice)) })
+    expect(ignore).toHaveFocus()
+    act(() => { nav.update({ tab: 'pending' }) })
+    expect(ignore).toHaveFocus()
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+  })
+})
+
 // —— 键盘（故事 50）：裁决、提升、删除都是原生 button，能 Tab 到；焦点环用宿主令牌（见 ui/basics.spec 的主题检查） ——
 
 describe('键盘', () => {

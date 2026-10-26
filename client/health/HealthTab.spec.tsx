@@ -30,7 +30,7 @@ afterEach(() => { vi.useRealTimers() })
 describe('健康 tab', () => {
   it('按层三段：结论行写条数、分数与结论词，下一行上次体检时间，下面是问题；看项目时本项目在前、全局在后', () => {
     renderTab(health([
-      layer({ issues: [{ type: 'expired', count: 1 }, { type: 'conflict', count: 2 }], staleCount: 3 }),
+      layer({ issues: [{ type: 'expired', count: 1, level: 'advice' }, { type: 'conflict', count: 2, level: 'your-call' }], staleCount: 3 }),
       layer({ layer: { kind: 'global' }, totalMemories: 4, score: 62, tier: 'amber' }),
     ]))
     const [ws, global] = screen.getAllByRole('region')
@@ -38,7 +38,7 @@ describe('健康 tab', () => {
     expect(ws).toHaveTextContent('本项目·12 条·86 分·良好')
     expect(ws).toHaveTextContent('上次体检：10 月 15 日')
     expect(within(ws!).getAllByRole('listitem').map(li => li.textContent)).toEqual([
-      '已过有效期 1 条', '记忆冲突 2 条', '很久没确认、可能过时 3 条，带进对话时会标注',
+      '已过有效期 1 条·去处理 ›', '记忆冲突 2 条·去处理 ›', '很久没确认、可能过时 3 条，带进对话时会标注·去处理 ›',
     ])
     expect(global).toHaveAccessibleName('全局')
     expect(global).toHaveTextContent('全局·4 条·62 分·需要留意')
@@ -56,7 +56,7 @@ describe('健康 tab', () => {
 
   it('有密钥的层不打分，写原因；超出上限列为问题、不扣分', () => {
     renderTab(health([
-      layer({ score: null, tier: 'red', gate: { secret: true }, issues: [{ type: 'secret', count: 1 }] }),
+      layer({ score: null, tier: 'red', gate: { secret: true }, issues: [{ type: 'secret', count: 1, level: 'must-fix' }] }),
       layer({ layer: { kind: 'global' }, overflow: { mode: 'relax', tier: 2 } }),
     ]))
     const ws = screen.getByRole('region', { name: '本项目' })
@@ -69,14 +69,14 @@ describe('健康 tab', () => {
     expect(within(global).getByRole('listitem')).toHaveTextContent('带入的记忆超出上限，已自动放宽 50%（不扣分）')
   })
 
-  it('超限行带「去处理 ›」，落到待处理（与右侧栏用量条同一个去处）', () => {
+  it('超限行带「去处理 ›」，落到待处理的待你处理组（超限提醒在那一组）', () => {
     const gateway = createFakeGateway({ session, views: { health: health([layer({ overflow: { mode: 'relax', tier: 1 } }), layer({ layer: { kind: 'global' } })]) } })
     const nav = createNavStore({ tab: 'health' })
     renderInShell(<HealthTab session={session} scope={WS} nav={nav} />, gateway)
     const ws = screen.getByRole('region', { name: '本项目' })
     expect(within(ws).getByRole('listitem')).toHaveTextContent('带入的记忆超出上限，已自动放宽 25%（不扣分）')
     fireEvent.click(within(ws).getByRole('button', { name: '去处理 ›' }))
-    expect(nav.get()).toEqual({ tab: 'pending' })
+    expect(nav.get()).toEqual({ tab: 'pending', level: 'your-call' })
   })
 
   it('本项目自己没有记忆、但带入超限：照实写 0 条和超限这一行（不打分、不写体检时间），能去处理', () => {
@@ -95,7 +95,7 @@ describe('健康 tab', () => {
     expect(ws).not.toHaveTextContent('内容检查还没做过')
     expect(within(ws).getByRole('listitem')).toHaveTextContent('带入的记忆已用到上限的 95%（不扣分）')
     fireEvent.click(within(ws).getByRole('button', { name: '去处理 ›' }))
-    expect(nav.get()).toEqual({ tab: 'pending' })
+    expect(nav.get()).toEqual({ tab: 'pending', level: 'your-call' })
   })
 
   it('从没体检过：不显示分数，时间行写内容检查还没做过，下面给空状态（没有按钮）', () => {
@@ -189,6 +189,75 @@ describe('健康 tab：去待处理的入口', () => {
     render(pendingOf(conflict('d1', NOW), promote), false)
     expect(screen.queryByRole('button', { name: '去处理 ›' })).toBeNull()
     expect(screen.queryByRole('button', { name: '去看 ›' })).toBeNull()
+  })
+})
+
+// 扣分原因与待处理对齐：每条扣分原因、新鲜度、超限行尾都有「去处理 ›」，落到待处理里对应的组（组标识取视图，客户端不推导）。
+describe('健康 tab：扣分原因去处理', () => {
+  const all: Layer['issues'] = [
+    { type: 'secret', count: 1, level: 'must-fix' },
+    { type: 'expired', count: 2, level: 'advice' },
+    { type: 'bloat', count: 1, level: 'advice' },
+    { type: 'orphan', count: 1, level: 'advice' },
+    { type: 'malformed', count: 1, level: 'must-fix' },
+    { type: 'conflict', count: 3, level: 'your-call' },
+    { type: 'redundancy', count: 1, level: 'advice' },
+    { type: 'misplaced', count: 1, level: 'advice' },
+    { type: 'unclear', count: 1, level: 'advice' },
+  ]
+  function render(view: HealthView) {
+    const gateway = createFakeGateway({ session, views: { health: view } })
+    const nav = createNavStore({ tab: 'health' })
+    renderInShell(<HealthTab session={session} scope={WS} nav={nav} />, gateway)
+    return nav
+  }
+
+  it('小标题写「扣分原因」', () => {
+    render(health([layer({ issues: all })]))
+    expect(within(screen.getByRole('region', { name: '本项目' })).getByRole('heading', { level: 3 })).toHaveTextContent('扣分原因')
+  })
+
+  it('每类扣分原因、超限、很久没确认都有「去处理 ›」，按钮说明是那一行，点了落到对应的组', () => {
+    const nav = render(health([layer({ score: null, gate: { secret: true }, issues: all, staleCount: 4, overflow: { mode: 'strict', tier: 0 } })]))
+    const ws = screen.getByRole('region', { name: '本项目' })
+    const expected: Array<[string, string]> = [
+      ['密钥（厂商格式） 1 条', 'must-fix'],
+      ['已过有效期 2 条', 'advice'],
+      ['内容过长 1 条', 'advice'],
+      ['指向的旧记忆已不在 1 条', 'advice'],
+      ['文件读不出来 1 条', 'must-fix'],
+      ['记忆冲突 3 条', 'your-call'],
+      ['内容重复 1 条', 'advice'],
+      ['该放全局却在项目里（或反过来） 1 条', 'advice'],
+      ['表述不清 1 条', 'advice'],
+      ['带入的记忆已用到上限的 95%（不扣分）', 'your-call'],
+      ['很久没确认、可能过时 4 条，带进对话时会标注', 'advice'],
+    ]
+    const described = (b: HTMLElement) => document.getElementById(b.getAttribute('aria-describedby') ?? '')?.textContent
+    expect(within(ws).getAllByRole('button', { name: '去处理 ›' }).map(described)).toEqual(expected.map(([text]) => text))
+    for (const [text, level] of expected) {
+      act(() => { nav.update({ tab: 'health' }) })
+      fireEvent.click(within(ws).getByRole('button', { name: '去处理 ›', description: text }))
+      expect({ text, target: nav.get() }).toEqual({ text, target: { tab: 'pending', level } })
+    }
+  })
+
+  it('认不出的问题类型：原样显示，照样能去处理', () => {
+    const nav = render(health([layer({ issues: [{ type: 'future-kind', count: 1, level: 'advice' }] })]))
+    fireEvent.click(screen.getByRole('button', { name: '去处理 ›', description: 'future-kind 1 条' }))
+    expect(nav.get()).toEqual({ tab: 'pending', level: 'advice' })
+  })
+
+  it('底部「待你决定 N 条 · 去处理 ›」保留，落到待处理顶部（不定位到组）', () => {
+    const conflict = { kind: 'conflict-horizontal', level: 'your-call', decisionId: 'd1', firstSeenAt: NOW, summary: 's', left: memory({ id: 'l' }), right: memory({ id: 'r' }) } as const
+    const gateway = createFakeGateway({ session, views: {
+      health: health([layer({ issues: [{ type: 'conflict', count: 1, level: 'your-call' }] })]),
+      pending: { version: GUI_VIEW_VERSION, dot: 'amber', items: [conflict], levelCounts: levelCountsOf([conflict]), typeLabels: {} },
+    } })
+    const nav = createNavStore({ tab: 'health' })
+    renderInShell(<HealthTab session={session} scope={WS} nav={nav} />, gateway)
+    fireEvent.click(screen.getByRole('button', { name: '去处理 ›', description: '待你决定 1 条' }))
+    expect(nav.get()).toEqual({ tab: 'pending' })
   })
 })
 

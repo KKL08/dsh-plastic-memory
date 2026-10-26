@@ -102,7 +102,7 @@ describe('忽略与取消忽略', () => {
     await seedBloat(e)
     const before = await wsLayerOf(e)
     expect(await adviceOf(e)).toEqual(['bloat:mem_long'])
-    expect(before.issues).toEqual([{ type: 'bloat', count: 1 }])
+    expect(before.issues).toEqual([{ type: 'bloat', count: 1, level: 'advice' }])
     expect(before.ignored).toEqual([])
 
     expect(ok(await e.ignore('bloat', ['mem_long']))).toMatchObject({ cmd: 'ignore-advice', memoryIds: ['mem_long'] })

@@ -5,7 +5,7 @@ import type { DirectoryNote } from '../storage/table.ts'
 import { RETENTION_MS } from '../retention.ts'
 import { hasSecret, maskSecretSurface, maskSecrets } from '../secrets.ts'
 import { computeDigest } from '../storage/frontmatter.ts'
-import { FINDING_TYPES, type PendingDecision } from '../governance/schema.ts'
+import { FINDING_TYPES, type FindingType, type PendingDecision } from '../governance/schema.ts'
 import { kindOf, overflowLevelOf, overflowScopeOf, verdictLoser } from '../governance/decisions.ts'
 import { runRuleScan } from '../governance/rule-scan.ts'
 import { byConfidenceThenConfirmed } from '../snapshot.ts'
@@ -14,7 +14,7 @@ import type { IgnoredAdvice } from '../governance/advice-ignores.ts'
 import {
   ADVICE_TYPES, GUI_VIEW_VERSION, PENDING_ITEM_KINDS, PENDING_LEVEL_OF_KIND, PENDING_LEVELS, isAwaitingDecision,
   type AdviceType, type DeletedView, type GlobalViewName, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCard,
-  type PendingItem, type PendingView, type SessionView,
+  type PendingItem, type PendingLevel, type PendingView, type SessionView,
 } from './contract.ts'
 
 /**
@@ -184,6 +184,19 @@ function typeLabels(registry: TypeRegistry, present: Iterable<string | undefined
   return Object.fromEntries([...types].map(name => [name, registry.get(name).label]))
 }
 
+/** 扣分原因在待处理里对应的组（按它在待处理里以哪种待处理项出现）：读不出的文件即隔离区的 malformed，冲突走账本，其余是建议整理。 */
+const ISSUE_LEVEL = {
+  secret: PENDING_LEVEL_OF_KIND['secret'],
+  malformed: PENDING_LEVEL_OF_KIND['unreadable-file'],
+  conflict: PENDING_LEVEL_OF_KIND['conflict-horizontal'],
+  expired: PENDING_LEVEL_OF_KIND['advice'],
+  bloat: PENDING_LEVEL_OF_KIND['advice'],
+  orphan: PENDING_LEVEL_OF_KIND['advice'],
+  redundancy: PENDING_LEVEL_OF_KIND['advice'],
+  misplaced: PENDING_LEVEL_OF_KIND['advice'],
+  unclear: PENDING_LEVEL_OF_KIND['advice'],
+} as const satisfies Record<FindingType, PendingLevel>
+
 /** 健康：每层复用 scoreLayer（与 memory_health / memory_scan 同分，同样剔除用户忽略的建议，另列在 ignored）；有密钥的层不打分。超限另列（不扣分）；
  *  自己没有记忆、不在体检清单里的项目有超限提醒时，单列进 overflowOnlyLayers（只有档位，不打分）。 */
 export function buildHealthView(input: ViewInput): HealthView {
@@ -200,7 +213,7 @@ export function buildHealthView(input: ViewInput): HealthView {
         score: r.health.gate.secret ? null : Math.round(r.health.score * 100) / 100,
         tier: r.health.tier,
         gate: r.health.gate,
-        issues: FINDING_TYPES.filter(t => r.health.counts[t] > 0).map(type => ({ type, count: r.health.counts[type] })),
+        issues: FINDING_TYPES.filter(t => r.health.counts[t] > 0).map(type => ({ type, count: r.health.counts[type], level: ISSUE_LEVEL[type] })),
         staleCount: r.health.freshness.staleCount,
         semanticCachedAt: r.semanticCachedAt,
         overflow: overflowOfLayer(overflow, layer),

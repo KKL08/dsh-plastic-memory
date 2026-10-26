@@ -13,7 +13,7 @@ export { maskSecrets, maskSecretSurface, type MaskOptions } from '../secrets.ts'
  */
 
 /** 视图 schema 的版本号：视图是派生缓存，形状变了就换号，客户端读到不认识的号按「需要刷新」处理。 */
-export const GUI_VIEW_VERSION = 8
+export const GUI_VIEW_VERSION = 9
 
 /** 视图文件所在目录（相对记忆根目录，POSIX 分隔）。 */
 export const GUI_VIEW_DIR = '.state/gui'
@@ -211,8 +211,11 @@ export const healthLayerSchema = z.object({
   score: z.number().nullable(),
   tier: z.enum(['green', 'amber', 'red']),
   gate: z.object({ secret: z.boolean() }),
-  /** 非零的问题类计数（规则检查实时 + 内容检查取上次体检），type 取值见 governance/schema.ts FINDING_TYPES，按其顺序。 */
-  issues: z.array(z.object({ type: z.string(), count: z.number().int().positive() })),
+  /**
+   * 非零的扣分原因计数（规则检查实时 + 内容检查取上次体检），type 取值见 governance/schema.ts FINDING_TYPES，按其顺序。
+   * level 是待处理里对应的组，健康页「去处理 ›」按它定位（服务端写死，客户端不另行推导）。
+   */
+  issues: z.array(z.object({ type: z.string(), count: z.number().int().positive(), level: z.enum(PENDING_LEVELS) })),
   /** 超过衰退期未确认的条数。 */
   staleCount: z.number().int().nonnegative(),
   /** 内容检查（语义层）上次时间；从没做过为 null。 */

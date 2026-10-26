@@ -6,14 +6,15 @@
  * 列表空了就留在空状态上面；之后哪张卡做成了一件事就收起。
  * 空状态三种：体检关闭（「去设置里打开 ›」）、从没体检过（说明体检是什么，按钮在页头）、待处理为空（说明待处理收什么、上次体检时间）。
  * 入口带记忆 id 打开时，含这条记忆的卡（冲突任一方、提升候选、密钥）滚入视野并高亮一次。
+ * 带组标识进来时（健康页「去处理 ›」）焦点落在那一组的标题上，组已不在（处理完了）落在待处理顶部；每次导航只定位一次。
  */
-import { useEffect, useId, useState, type ReactElement, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type ReactElement, type ReactNode, type RefObject } from 'react'
 import { PENDING_LEVELS, type HealthView, type PendingItem, type PendingLevel, type PendingView } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { formatDay, formatNumber, useT } from '../i18n.tsx'
 import { FlashRow, useFlashTarget } from '../library/shared.tsx'
 import type { LocaleKey } from '../locales.ts'
-import { useCanOpen, type NavStore } from '../nav.ts'
+import { useCanOpen, useNavTarget, type NavStore, type NavTarget } from '../nav.ts'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { crossConfirmCss } from './action.tsx'
 import { editCss } from './edit.tsx'
@@ -84,6 +85,8 @@ export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
   const viewItems = pending.status === 'ready' ? pending.data.items : []
   const typeLabels = pending.status === 'ready' ? pending.data.typeLabels : {}
   const { flashId, clear } = useFlashTarget(nav, viewItems.flatMap(memoryIdsOf))
+  const root = useRef<HTMLDivElement>(null)
+  useGroupFocus(nav, root, pending.status === 'ready')
   const recentKey = recent === undefined ? undefined : keyOf(recent.item)
   const backInView = recentKey !== undefined && viewItems.some(i => keyOf(i) === recentKey)
   // 撤销后视图把条目带回来了：本地那张让位
@@ -155,7 +158,7 @@ export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
   }
 
   return (
-    <div className="pm-pending">
+    <div ref={root} className="pm-pending" tabIndex={-1}>
       <style data-plastic-memory-pending="">{pendingCss}</style>
       {isEmpty
         ? (
@@ -187,13 +190,29 @@ export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
   )
 }
 
+/**
+ * 导航目标带组标识时定位一次：焦点落在那一组的标题上并滚到顶，组不在了落在待处理顶部。
+ * 按目标对象认「一次」（视图刷新不重播）；视图还没到就等它到。
+ */
+function useGroupFocus(nav: NavStore, root: RefObject<HTMLDivElement | null>, isReady: boolean): void {
+  const target = useNavTarget(nav)
+  const handled = useRef<NavTarget | undefined>(undefined)
+  useEffect(() => {
+    if (target.level === undefined || !isReady || root.current === null || handled.current === target) return
+    handled.current = target
+    const spot = root.current.querySelector<HTMLElement>(`[data-level="${target.level}"]`) ?? root.current
+    spot.focus({ preventScroll: true })
+    spot.scrollIntoView?.({ block: 'start' })
+  }, [target, isReady, root])
+}
+
 /** 一级一组：组标题写级别和还在等你的条数（只剩结果卡时不写 0）。 */
 function PendingGroup({ level, count, children }: { level: PendingLevel; count: number; children: ReactNode }) {
   const t = useT()
   const titleId = useId()
   return (
     <section className="pm-pending-group" aria-labelledby={titleId}>
-      <h2 id={titleId} className="pm-pending-group-title">
+      <h2 id={titleId} className="pm-pending-group-title" data-level={level} tabIndex={-1}>
         {t(LEVEL_LABEL[level])}
         {count > 0 ? <>{' '}<span className="pm-pending-group-count">{formatNumber(count)}</span></> : null}
       </h2>
@@ -258,6 +277,7 @@ function PendingEmpty({ nav, session, workspacePath, health, now }: {
 
 export const pendingCss = crossConfirmCss + editCss + modelEditCss + `
 .pm-pending { display: flex; flex-direction: column; }
+.pm-root .pm-pending:focus-visible { outline: none; }
 .pm-pending-group { display: flex; flex-direction: column; }
 .pm-pending-group + .pm-pending-group { margin-top: 24px; }
 .pm-pending-group-title { margin: 4px 0 0; font-size: 16px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }

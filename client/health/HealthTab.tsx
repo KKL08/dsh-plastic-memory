@@ -1,14 +1,15 @@
 /**
  * 健康 tab：按层各一块（看项目时本项目 + 全局，看全局时只有全局），每块三段——体检横幅里是分数与结论、
- * 下一行上次体检时间，横幅下是问题列表。从没体检过不显示分数（不出现 0 或 100 分），时间行写「内容检查还没做过」。
- * 有密钥的层不打分（score 为 null），写原因；超出上限列为问题、不扣分，带「去处理 ›」。本项目自己没有记忆、只有超限提醒时
+ * 下一行上次体检时间，横幅下是扣分原因。从没体检过不显示分数（不出现 0 或 100 分），时间行写「内容检查还没做过」。
+ * 有密钥的层不打分（score 为 null），写原因；超出上限列在扣分原因里、不扣分。每条扣分原因、超限、很久没确认行尾都有「去处理 ›」，
+ * 落到待处理里对应的组（组标识取视图，见 contract 健康视图 issues.level）。本项目自己没有记忆、只有超限提醒时
  * （视图的 overflowOnlyLayers）照实写 0 条和超限这一行。
  * 体检关闭时整块置灰并给「去设置里打开 ›」，密钥与读不出的文件仍从待处理视图提示（规则检查，不调模型）。
  * 用户忽略的建议不扣分，层下写「已忽略 N 条」，展开逐条列问题类型和记忆名，每条可「取消忽略」。
  * 层块下面两行入口：「待你决定 N 条，其中 M 条超过 7 天 · 去处理 ›」「可提升为全局 N 条 · 去看 ›」，都去待处理 tab。
  */
 import { useId, useState, type ReactNode } from 'react'
-import { isAwaitingDecision, type GuiLayerRef, type HealthView, type PendingView } from '../../src/gui/contract.ts'
+import { isAwaitingDecision, PENDING_LEVEL_OF_KIND, type GuiLayerRef, type HealthView, type PendingLevel, type PendingView } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { formatDay, formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
@@ -37,32 +38,37 @@ function Dotted({ parts }: { parts: readonly ReactNode[] }) {
 
 type OverflowLevel = NonNullable<HealthLayer['overflow']>
 
-/** 问题列表：超限那一行带「去处理 ›」，落到待处理（与右侧栏用量条同一个去处）。 */
-function Issues({ lines, overflow, tail, onHandle }: { lines: readonly string[]; overflow: OverflowLevel | null; tail: readonly string[]; onHandle: () => void }) {
+/** 扣分原因的一行：文字 + 它在待处理里对应的组。 */
+interface IssueRow { key: string; text: string; level: PendingLevel }
+
+/** 「文字 · 链接」一行；链接的说明指向这行文字（同一页有好几个「去处理 ›」，读屏时分得清是哪一条）。 */
+function LinkRow({ text, link, onClick }: { text: string; link: string; onClick: () => void }) {
+  const textId = useId()
+  return (
+    <li>
+      <span id={textId}>{text}</span>
+      <i className="pm-sep" aria-hidden="true">·</i>
+      <button type="button" className="pm-link" aria-describedby={textId} onClick={onClick}>{link}</button>
+    </li>
+  )
+}
+
+/** 扣分原因：顺序是各类问题、超限、很久没确认；每行「去处理 ›」落到待处理里对应的组。 */
+function Issues({ rows, onHandle }: { rows: readonly IssueRow[]; onHandle: (level: PendingLevel) => void }) {
   const t = useT()
-  const item = (text: string) => <li key={text}>{text}</li>
   return (
     <div className="pm-health-issues">
       <h3 className="pm-health-issues-title">{t('health.issues')}</h3>
-      {lines.length === 0 && overflow === null && tail.length === 0
+      {rows.length === 0
         ? <p className="pm-health-none">{t('health.noIssues')}</p>
-        : (
-          <ul>
-            {lines.map(item)}
-            {overflow !== null
-              ? (
-                <li>
-                  <span>{overflow.mode === 'relax' ? t('health.overflow.relax', { percent: overflow.tier * 25 }) : t('health.overflow.strict')}</span>
-                  <i className="pm-sep" aria-hidden="true">·</i>
-                  <button type="button" className="pm-link" onClick={onHandle}>{t('health.entry.pendingLink')}</button>
-                </li>
-              )
-              : null}
-            {tail.map(item)}
-          </ul>
-        )}
+        : <ul>{rows.map(row => <LinkRow key={row.key} text={row.text} link={t('health.entry.pendingLink')} onClick={() => { onHandle(row.level) }} />)}</ul>}
     </div>
   )
+}
+
+function overflowRow(overflow: OverflowLevel, t: Translate): IssueRow {
+  const text = overflow.mode === 'relax' ? t('health.overflow.relax', { percent: overflow.tier * 25 }) : t('health.overflow.strict')
+  return { key: 'overflow', text, level: PENDING_LEVEL_OF_KIND['overflow'] }
 }
 
 type IgnoredItem = HealthLayer['ignored'][number]
@@ -103,14 +109,14 @@ function Ignored({ items, session }: { items: readonly IgnoredItem[]; session: B
   )
 }
 
-function LayerHealth({ layer, data, overflowOnly, now, session, onHandleOverflow }: {
+function LayerHealth({ layer, data, overflowOnly, now, session, onHandle }: {
   layer: GuiLayerRef
   data: HealthLayer | undefined
   /** 这一层不在体检清单里（自己没有记忆）、只有超限提醒时的档位。 */
   overflowOnly: OverflowLevel | undefined
   now: number
   session: BorrowedSession
-  onHandleOverflow: () => void
+  onHandle: (level: PendingLevel) => void
 }) {
   const t = useT()
   const name = layerName(layer, t)
@@ -123,7 +129,7 @@ function LayerHealth({ layer, data, overflowOnly, now, session, onHandleOverflow
           : (
             <>
               <HealthBanner conclusion={<Dotted parts={[name, t('health.count', { n: formatNumber(0) })]} />} />
-              <Issues lines={[]} overflow={overflowOnly} tail={[]} onHandle={onHandleOverflow} />
+              <Issues rows={[overflowRow(overflowOnly, t)]} onHandle={onHandle} />
             </>
           )}
       </section>
@@ -143,10 +149,13 @@ function LayerHealth({ layer, data, overflowOnly, now, session, onHandleOverflow
         detail={data.semanticCachedAt === null ? t('health.neverScanned') : t('health.lastScan', { date: formatDay(data.semanticCachedAt, now, t) })}
       />
       <Issues
-        lines={data.issues.map(i => t('health.issueCount', { label: issueLabel(i.type, t), n: formatNumber(i.count) }))}
-        overflow={data.overflow}
-        tail={data.staleCount > 0 ? [t('health.stale', { n: formatNumber(data.staleCount) })] : []}
-        onHandle={onHandleOverflow}
+        rows={[
+          ...data.issues.map(i => ({ key: i.type, text: t('health.issueCount', { label: issueLabel(i.type, t), n: formatNumber(i.count) }), level: i.level })),
+          ...(data.overflow !== null ? [overflowRow(data.overflow, t)] : []),
+          // 很久没确认在待处理里是建议整理项
+          ...(data.staleCount > 0 ? [{ key: 'stale', text: t('health.stale', { n: formatNumber(data.staleCount) }), level: PENDING_LEVEL_OF_KIND['advice'] }] : []),
+        ]}
+        onHandle={onHandle}
       />
       <Ignored items={data.ignored} session={session} />
     </section>
@@ -185,20 +194,8 @@ function PendingEntries({ pending, nav, now }: { pending: ViewState<PendingView>
   const n = formatNumber(decisions.length)
   return (
     <ul className="pm-health-entries">
-      <li>
-        <span>{old > 0 ? t('health.entry.pendingOld', { n, old: formatNumber(old) }) : t('health.entry.pending', { n })}</span>
-        <i className="pm-sep" aria-hidden="true">·</i>
-        <button type="button" className="pm-link" onClick={go}>{t('health.entry.pendingLink')}</button>
-      </li>
-      {promotable > 0
-        ? (
-          <li>
-            <span>{t('health.entry.promote', { n: formatNumber(promotable) })}</span>
-            <i className="pm-sep" aria-hidden="true">·</i>
-            <button type="button" className="pm-link" onClick={go}>{t('health.entry.promoteLink')}</button>
-          </li>
-        )
-        : null}
+      <LinkRow text={old > 0 ? t('health.entry.pendingOld', { n, old: formatNumber(old) }) : t('health.entry.pending', { n })} link={t('health.entry.pendingLink')} onClick={go} />
+      {promotable > 0 ? <LinkRow text={t('health.entry.promote', { n: formatNumber(promotable) })} link={t('health.entry.promoteLink')} onClick={go} /> : null}
     </ul>
   )
 }
@@ -215,11 +212,11 @@ export function HealthTab({ session, scope, nav }: { session: BorrowedSession; s
   const layers: GuiLayerRef[] = scope.kind === 'workspace' ? [scope, { kind: 'global' }] : [{ kind: 'global' }]
   const rows = layers.map(layer => ({ layer, data: health.data.layers.find(l => sameScope(l.layer, layer)) }))
   const overflowOnly = (layer: GuiLayerRef) => health.data.overflowOnlyLayers?.find(l => sameScope(l.layer, layer))?.overflow
-  const toPending = () => { nav.update({ tab: 'pending', memoryId: undefined }) }
+  const toGroup = (level: PendingLevel) => { nav.update({ tab: 'pending', memoryId: undefined, level }) }
   const body = rows.map(({ layer, data }) => (
     <LayerHealth
       key={layer.kind === 'global' ? 'global' : layer.workspacePath}
-      layer={layer} data={data} overflowOnly={overflowOnly(layer)} now={now} session={session} onHandleOverflow={toPending}
+      layer={layer} data={data} overflowOnly={overflowOnly(layer)} now={now} session={session} onHandle={toGroup}
     />
   ))
 

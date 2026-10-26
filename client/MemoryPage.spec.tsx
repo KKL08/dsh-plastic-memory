@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
-import { GUI_VIEW_VERSION, type LibraryView, type PendingView } from '../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, type HealthView, type LibraryView, type PendingView } from '../src/gui/contract.ts'
 import { createFakeGateway } from './gateway.fake.ts'
 import { createTranslator } from './i18n.tsx'
 import { en } from './locales.ts'
@@ -179,6 +179,26 @@ describe('记忆页外壳', () => {
     fireEvent.click(screen.getByRole('tab', { name: '健康' }))
     expect(nav.get().tab).toBe('health')
     expect(screen.getByRole('tab', { name: '健康' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('健康页「去处理 ›」：切到待处理，焦点落在对应组的标题上；之后切 tab 不再带着组定位', () => {
+    const health: HealthView = {
+      version: GUI_VIEW_VERSION, governanceEnabled: true,
+      layers: [{
+        layer: { kind: 'workspace', workspacePath: '/w/app' }, totalMemories: 1, score: 90, tier: 'green', gate: { secret: false },
+        issues: [{ type: 'expired', count: 1, level: 'advice' }], staleCount: 0, semanticCachedAt: 1, overflow: null, ignored: [],
+      }],
+    }
+    const expired: PendingView['items'][number] = { kind: 'advice', level: 'advice', type: 'expired', memories: [memory({ id: 'e1' })] }
+    const withAdvice: PendingView = { ...pending, items: [...pending.items, expired], levelCounts: { 'must-fix': 0, 'your-call': 1, 'advice': 1 } }
+    const nav = createNavStore()
+    openMemoryPage({ layout: { selectPanel: vi.fn() } }, nav, { tab: 'health' })
+    renderInShell(<MemoryPage nav={nav} />, createFakeGateway({ currentWorkspace: '/w/app', views: { pending: withAdvice, library, health } }))
+    fireEvent.click(screen.getByRole('button', { name: '去处理 ›', description: '已过有效期 1 条' }))
+    expect(screen.getByRole('tab', { name: /待处理/ })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('heading', { level: 2, name: '建议整理 1' })).toHaveFocus()
+    fireEvent.click(screen.getByRole('tab', { name: '健康' }))
+    expect(nav.get()).toEqual({ tab: 'health', memoryId: undefined })
   })
 
   it('入口直达：先写目标再切面板，页面跟着目标走', () => {
