@@ -86,6 +86,8 @@ export interface LayerHealthResult {
   /** 归入本层计分的 findings（规则层实时 + 语义层缓存过滤后），供报告展示。 */
   ruleFindings: Finding[]
   semanticFindings: Finding[]
+  /** 超过衰减期未确认的记忆 id（条数即 health.freshness.staleCount），GUI 待处理的「很久没确认」用。 */
+  staleIds: string[]
   /** 本层的全局提升候选数（global 层恒 0）。 */
   promoteCandidates: number
 }
@@ -121,10 +123,11 @@ export function scoreLayer(deps: LayerHealthDeps, data: LayerPreread, layer: Lay
     return f.type !== 'conflict' || pendingKeys.has(dedupKey(f.memoryIds, f.baselineRef))
   })
 
-  const freshnessRatios = records.flatMap(r => {
+  const freshness = records.flatMap(r => {
     const decayDays = deps.registry.get(r.type).decayDays
-    return decayDays === null ? [] : [(now - r.lastConfirmedAt) / (decayDays * DAY)]
+    return decayDays === null ? [] : [{ id: r.id, ratio: (now - r.lastConfirmedAt) / (decayDays * DAY) }]
   })
+  const freshnessRatios = freshness.map(f => f.ratio)
 
   const health = computeHealth({
     totalMemories: records.length, ruleFindings, semanticFindings, freshnessRatios,
@@ -134,6 +137,8 @@ export function scoreLayer(deps: LayerHealthDeps, data: LayerPreread, layer: Lay
     layer, records, health,
     semanticCachedAt: cached?.scannedAt ?? null,
     ruleFindings, semanticFindings,
+    // 与 computeHealth 的 staleCount 同一判据（ratio > 1）
+    staleIds: freshness.filter(f => f.ratio > 1).map(f => f.id),
     promoteCandidates: layer.kind === 'workspace' ? records.filter(r => r.globalCandidate).length : 0,
   }
 }

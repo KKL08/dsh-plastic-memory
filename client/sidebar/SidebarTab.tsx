@@ -67,6 +67,8 @@ function inWorkspace(item: PendingItem, ws: string): boolean {
     case 'conflict-horizontal': return own(item.left) || own(item.right)
     case 'overflow': return samePath(item.workspacePath, ws)
     case 'unreadable-file': return item.layer.kind === 'workspace' && samePath(item.layer.workspacePath, ws)
+    // 右侧栏这次不分级，建议整理不算进「本项目还有 N 处待处理」
+    case 'advice': return false
   }
 }
 

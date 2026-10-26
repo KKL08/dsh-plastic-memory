@@ -20,7 +20,7 @@ import { createMemoryCommand } from '../src/gui/commands.ts'
 import {
   GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, encodeMemoryCommand, sessionViewFile,
   deletedViewSchema, layerOfMemory, libraryViewSchema, memoryCommandResultSchema, pendingViewSchema,
-  type MemoryCommand, type MemoryCommandResult,
+  type MemoryCommand, type MemoryCommandResult, type PendingItem,
 } from '../src/gui/contract.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
 import { executeForget } from '../src/tools/forget.ts'
@@ -97,6 +97,9 @@ async function seedVertical(e: ReturnType<typeof env>) {
 
 const allEntries = async (e: ReturnType<typeof env>) => [...await e.decisions.list(), ...await e.decisions.listSettled()]
 
+/** 待处理里除建议整理以外的项：夹具记忆的确认时间很早，另有「很久没确认」的建议，与账本无关。 */
+const ledgerItems = (view: { items: readonly PendingItem[] }) => view.items.filter(i => i.kind !== 'advice')
+
 describe('info', () => {
   it('返回 memoryRoot、视图文件绝对路径与契约版本；只建视图目录，不写视图文件（宿主的文件观察不跟踪父目录尚不存在的文件，客户端订阅前目录要先在）', async () => {
     const e = env()
@@ -163,7 +166,7 @@ describe('resolve 与 undo', () => {
     expect(snap!.memoryIds).toEqual(['mem_b'])
     expect(resolved.snapshotId).toBe(snap!.id)
     expect((await e.decisions.listSettled()).map(d => [d.id, d.settled?.verdict, d.settled?.snapshotId])).toEqual([[entry.id, 'keep-left', snap!.id]])
-    expect(pendingViewSchema.parse(await e.readView('pending')).items).toEqual([])
+    expect(ledgerItems(pendingViewSchema.parse(await e.readView('pending')))).toEqual([])
     const deleted = deletedViewSchema.parse(await e.readView('deleted'))
     expect(deleted.items.map(i => [i.memory.id, i.cause?.decisionId])).toEqual([['mem_b', entry.id]])
 
@@ -173,7 +176,7 @@ describe('resolve 与 undo', () => {
     expect(await e.decisions.listSettled()).toEqual([])
     expect((await e.decisions.list()).map(d => d.id)).toEqual([entry.id])
     const pending = pendingViewSchema.parse(await e.readView('pending'))
-    expect(pending.items.map(i => [i.kind, 'decisionId' in i ? i.decisionId : undefined])).toEqual([['conflict-horizontal', entry.id]])
+    expect(ledgerItems(pending).map(i => [i.kind, 'decisionId' in i ? i.decisionId : undefined])).toEqual([['conflict-horizontal', entry.id]])
     expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
   })
 
@@ -1025,7 +1028,7 @@ describe('scan', () => {
     const [entry] = await e.decisions.list()
     expect(entry!.memoryIds).toEqual(['mem_a', 'mem_b'])
     const pending = pendingViewSchema.parse(await e.readView('pending'))
-    expect(pending.items.map(i => i.kind)).toEqual(['conflict-horizontal'])
+    expect(ledgerItems(pending).map(i => i.kind)).toEqual(['conflict-horizontal'])
     await expect(stat(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES.health))).resolves.toBeTruthy()
   })
 
@@ -1039,13 +1042,20 @@ describe('scan', () => {
 
 describe('confirm（仍然有效）', () => {
   const DAY = 86_400_000
-  it('刷新确认时间、内容与 updatedAt 不动', async () => {
+  const staleIds = async (e: ReturnType<typeof env>) => pendingViewSchema.parse(await e.readView('pending')).items
+    .flatMap(i => i.kind === 'advice' && i.type === 'stale' ? i.memories.map(m => m.id) : [])
+
+  it('刷新确认时间、内容与 updatedAt 不动；重写视图，「很久没确认」项消失', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_old', type: 'project', scope: 'workspace', workspacePath: SESSION_WS, lastConfirmedAt: NOW - 8 * DAY, updatedAt: 5 }))
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect(await staleIds(e)).toEqual(['mem_old'])
+
     const body = ok(await e.run({ cmd: 'confirm', memoryId: 'mem_old', layer: { kind: 'workspace', workspacePath: SESSION_WS } }))
     expect(body).toMatchObject({ cmd: 'confirm', memoryIds: ['mem_old'] })
     const after = (await e.store.get('mem_old'))!
     expect([after.lastConfirmedAt, after.updatedAt, after.content]).toEqual([NOW, 5, '内容'])
+    expect(await staleIds(e)).toEqual([])
   })
 
   it('已删除或不存在的记忆 → not-found', async () => {
@@ -1093,19 +1103,21 @@ describe('refresh-views', () => {
     }
   })
 
-  it('磁盘上是上一版（版本 3，不带级别）的待处理视图：按新版本重写，每项带级别，视图带各级条数', async () => {
+  it('磁盘上是上一版（版本 4，没有建议整理）的待处理视图：按新版本重写，各级条数带上建议整理', async () => {
     const e = env()
     const entry = await seedPair(e)
     await mkdir(join(root, GUI_VIEW_DIR), { recursive: true })
     await writeFile(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES.pending), JSON.stringify({
-      version: 3, dot: 'amber', typeLabels: {},
-      items: [{ kind: 'conflict-horizontal', decisionId: entry.id, firstSeenAt: 1, summary: '包管理器矛盾', left: null, right: null }],
+      version: 4, dot: 'amber', typeLabels: {}, levelCounts: { 'must-fix': 0, 'your-call': 1 },
+      items: [{ kind: 'conflict-horizontal', level: 'your-call', decisionId: entry.id, firstSeenAt: 1, summary: '包管理器矛盾', left: null, right: null }],
     }))
+    expect(pendingViewSchema.safeParse(JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES.pending), 'utf8'))).success).toBe(false)
     ok(await e.run({ cmd: 'refresh-views' }))
     const pending = pendingViewSchema.parse(await e.readView('pending'))
-    expect(pending.version).toBe(4)
-    expect(pending.items.map(i => [i.level, i.kind])).toEqual([['your-call', 'conflict-horizontal']])
-    expect(pending.levelCounts).toEqual({ 'must-fix': 0, 'your-call': 1 })
+    expect(pending.version).toBe(5)
+    expect(pending.items.filter(i => i.kind !== 'advice').map(i => [i.level, i.kind])).toEqual([['your-call', 'conflict-horizontal']])
+    expect(pending.levelCounts).toMatchObject({ 'must-fix': 0, 'your-call': 1 })
+    expect(pending.levelCounts.advice).toBe(pending.items.filter(i => i.level === 'advice').length)
   })
 })
 

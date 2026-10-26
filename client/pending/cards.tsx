@@ -1,11 +1,12 @@
 /**
- * 待处理的五类卡（PRD 5.2）与裁决后留在原位的结果卡。每张卡动手前写清后果；动作经 useItemAction 发命令，
+ * 待处理的各类卡（PRD 5.2；建议整理见 spec「建议整理的动作」）与处理后留在原位的结果卡。每张卡动手前写清后果；动作经 useItemAction 发命令，
  * 成功后把结果（Outcome）交给列表，由列表在原位换成结果卡。
  */
 import { useState, type ReactNode } from 'react'
-import { CONFLICT_ACTION_VERDICTS, layerOfMemory, type GuiLayerRef, type MemoryCard as MemoryCardData, type PendingItem } from '../../src/gui/contract.ts'
+import { CONFLICT_ACTION_VERDICTS, layerOfMemory, type AdviceType, type GuiLayerRef, type MemoryCard as MemoryCardData, type PendingItem } from '../../src/gui/contract.ts'
 import { belongsTo, useGateway, type BorrowedSession } from '../gateway.ts'
-import { baseName, formatNumber, useT, type Translate } from '../i18n.tsx'
+import { baseName, formatDay, formatNumber, useT, type Translate } from '../i18n.tsx'
+import type { LocaleKey } from '../locales.ts'
 import { Button } from '../ui/Button.tsx'
 import { Chip } from '../ui/Chip.tsx'
 import { ConflictRuling, VerticalConflictRuling } from '../ui/ConflictRuling.tsx'
@@ -24,6 +25,8 @@ export type Outcome =
   | { kind: 'hard-deleted' }
   | { kind: 'dismissed' }
   | { kind: 'raised'; budget: number }
+  | { kind: 'confirmed' }
+  | { kind: 'deleted' }
 
 export interface CardProps<K extends PendingItem['kind']> {
   item: Item<K>
@@ -95,6 +98,7 @@ export function titleOf(item: PendingItem, t: Translate): string {
     case 'promote-candidate': return t('pending.promote.title')
     case 'overflow': return t('pending.overflow.title')
     case 'unreadable-file': return t('pending.unreadable.title')
+    case 'advice': return t(ADVICE_COPY[item.type].title)
   }
 }
 
@@ -335,6 +339,44 @@ export function UnreadableCard({ item, session }: CardProps<'unreadable-file'>) 
   )
 }
 
+// —— 建议整理 ——
+
+/** 每类建议的标题、动手前的说明和动作（按 spec 表，「忽略」「在对话里修改」以后加）。按钮顺序即显示顺序。 */
+const ADVICE_COPY = {
+  expired: { title: 'pending.advice.expired.title', body: 'pending.advice.expired.body', actions: ['delete', 'open'] },
+  stale: { title: 'pending.advice.stale.title', body: 'pending.advice.stale.body', actions: ['confirm', 'delete', 'open'] },
+  bloat: { title: 'pending.advice.bloat.title', body: 'pending.advice.bloat.body', actions: ['open'] },
+  orphan: { title: 'pending.advice.orphan.title', body: 'pending.advice.orphan.body', actions: ['open'] },
+} as const satisfies Record<AdviceType, { title: LocaleKey; body: LocaleKey; actions: ReadonlyArray<'confirm' | 'delete' | 'open'> }>
+
+/** 建议整理卡：不着色、不带状态标记。删除走 forget（进最近删除），含密钥时原位改问彻底删除。 */
+export function AdviceCard({ item, session, now, typeLabels, onDone, onRefused }: CardProps<'advice'>) {
+  const t = useT()
+  const gateway = useGateway()
+  const action = useItemAction(session, (command) => {
+    if (command.cmd === 'confirm') onDone({ kind: 'confirmed' })
+    if (command.cmd === 'forget') onDone({ kind: 'deleted' })
+    if (command.cmd === 'hard-delete') onDone({ kind: 'hard-deleted' })
+  }, onRefused)
+  const copy = ADVICE_COPY[item.type]
+  const [memory] = item.memories
+  const layer = layerOfMemory(memory)
+  const open = () => { void gateway.openPath(memory.filePath, 'open').then((ok) => { if (!ok) action.fail(t('pending.openFailed')) }) }
+  const buttons = {
+    confirm: <Button key="confirm" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'confirm', memoryId: memory.id, layer }) }}>{t('pending.advice.confirm')}</Button>,
+    delete: <Button key="delete" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'forget', memoryId: memory.id, layer }) }}>{t('pending.advice.delete')}</Button>,
+    open: <Button key="open" onClick={open}>{t('pending.advice.open')}</Button>,
+  }
+  return (
+    <Card title={t(copy.title)}>
+      {item.memories.map(m => <MemoryOf key={m.id} session={session} memory={m} now={now} typeLabels={typeLabels} />)}
+      <p className="pm-pending-text">{t(copy.body, { date: formatDay(memory.lastConfirmedAt, now, t) })}</p>
+      <div className="pm-pending-actions">{copy.actions.map(a => buttons[a])}</div>
+      <ActionFeedback action={action} />
+    </Card>
+  )
+}
+
 // —— 结果卡：刚处理完留在原位，能撤销的带「撤销」 ——
 
 interface ResultCopy { memory?: MemoryCardData | null; chip: string; body: string; undoable: boolean }
@@ -350,7 +392,7 @@ function resultCopy(item: PendingItem, outcome: Outcome, t: Translate): ResultCo
       ? { chip: t('pending.result.followedBaseline'), body: t('pending.result.followedBaselineBody'), undoable: true }
       : { memory: item.memory, chip: t('pending.result.keptMemory'), body: t('pending.result.keptMemoryBody'), undoable: true }
   }
-  const memory = 'memory' in item ? item.memory : undefined
+  const memory = 'memory' in item ? item.memory : item.kind === 'advice' ? item.memories[0] : undefined
   switch (outcome.kind) {
     case 'promoted':
       // 写进 AGENTS.md 没有执行器能撤回那一行，服务端直接移出账本
@@ -361,6 +403,8 @@ function resultCopy(item: PendingItem, outcome: Outcome, t: Translate): ResultCo
     case 'hard-deleted': return { chip: t('pending.secret.deleted'), body: t('pending.secret.deletedBody'), undoable: false }
     case 'dismissed': return { chip: t('pending.result.dismissed'), body: t('pending.result.dismissedBody'), undoable: false }
     case 'raised': return { chip: t('pending.result.raised', { budget: formatNumber(outcome.budget) }), body: t('pending.overflow.raiseHint'), undoable: false }
+    case 'confirmed': return { memory, chip: t('pending.result.confirmed'), body: t('pending.result.confirmedBody'), undoable: false }
+    case 'deleted': return { chip: t('pending.result.deleted'), body: t('pending.result.deletedBody'), undoable: false }
     case 'resolved': throw new Error(`resolved outcome on ${item.kind}`)
   }
 }

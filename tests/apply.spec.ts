@@ -36,7 +36,7 @@ import { baselineProjectionDefinition } from '../src/governance/baseline.ts'
 import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
 import {
   GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_FILE, deletedViewSchema, healthViewSchema, libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema,
-  workspaceMapViewSchema, type LibraryView,
+  workspaceMapViewSchema, type LibraryView, type PendingView,
 } from '../src/gui/contract.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { defaultJiebaLoader } from '../src/search/jieba-segmenter.ts'
@@ -1365,9 +1365,11 @@ describe('配置热生效（loader/volatile-update）', () => {
     const { entry } = await new PendingDecisionsStore(sidecarAt(t.memoryRoot).pending)
       .upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', fingerprint: 'fp-ab' }, 1)
     await t.command('/memory refresh-views')
-    await globalView(t, 'pending', pendingViewSchema, v => expect(v.items.map(i => i.kind)).toEqual(['conflict-horizontal']))
+    // 这两条的确认时间很早，另有「很久没确认」的建议整理，与账本无关，不看
+    const ledgerKinds = (v: PendingView) => v.items.filter(i => i.kind !== 'advice').map(i => i.kind)
+    await globalView(t, 'pending', pendingViewSchema, v => expect(ledgerKinds(v)).toEqual(['conflict-horizontal']))
     await t.tool('memory_confirm').execute({ action: 'resolve', decisionId: entry.id, verdict: 'keep-both' }, t.exec)
-    await globalView(t, 'pending', pendingViewSchema, v => expect(v.items).toEqual([]))
+    await globalView(t, 'pending', pendingViewSchema, v => expect(ledgerKinds(v)).toEqual([]))
   })
 
   it('调高上限：超限提醒当场按新上限重算（不等下一次组装），用量回到上限以内就了结，视图跟着重写', async () => {

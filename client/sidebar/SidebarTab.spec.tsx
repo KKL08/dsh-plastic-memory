@@ -397,6 +397,12 @@ describe('SidebarTab 就地裁决：和基线冲突', () => {
     expect(screen.getByText('merge freeze 到 3 月 5 日。')).toBeInTheDocument()
   })
 
+  it('建议整理不进右侧栏，也不算进底部「本项目还有 N 处待处理」', () => {
+    const advice: PendingItem = { kind: 'advice', level: 'advice', type: 'stale', memories: [proj] }
+    setup({ library: library(pref, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending(vertical, advice) })
+    expect(screen.getByText(/本项目还有 1 处待处理/)).toBeInTheDocument()
+  })
+
   it('记忆没带入的基线冲突不挂出来，只在底部计数', () => {
     setup({ library: library(pref, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending(vertical) })
     expect(screen.queryByRole('heading', { name: '这条记忆和基线矛盾，等你决定' })).toBeNull()

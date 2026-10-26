@@ -1,6 +1,6 @@
 /**
- * 记忆页「待处理」tab（PRD 5.2、5.13）：待处理项按级别分组（高优问题 → 待你处理），组标题带条数，没有内容的组不画；
- * 组内按服务端排好的顺序各出一张卡。视图不含刚处理完的条目，所以列表在本地记住最近一次处理（原条目 + 结果 + 原位置），在原位显示结果卡；
+ * 记忆页「待处理」tab（PRD 5.2、5.13）：待处理项按级别分组（高优问题 → 待你处理 → 建议整理），组标题带条数，没有内容的组不画；
+ * 组内按服务端排好的顺序各出一张卡，先显示前 5 张，其余收进「展开其余 N 条」（直达的那条在折叠里时整组展开）。视图不含刚处理完的条目，所以列表在本地记住最近一次处理（原条目 + 结果 + 原位置），在原位显示结果卡；
  * 撤销成功后等视图把条目带回来，再去掉本地那张。离开页面就收起。
  * 动作碰上这一条正在别处处理或刚处理完（什么都没动）：在原位留一行说明，那边的结果写进视图、卡片消失后也还在，
  * 列表空了就留在空状态上面；之后哪张卡做成了一件事就收起。
@@ -17,14 +17,18 @@ import { useCanOpen, type NavStore } from '../nav.ts'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { crossConfirmCss } from './action.tsx'
 import {
-  HorizontalCard, OverflowCard, PromoteCard, ResultCard, SecretCard, titleOf, UnreadableCard, VerticalCard, type Outcome,
+  AdviceCard, HorizontalCard, OverflowCard, PromoteCard, ResultCard, SecretCard, titleOf, UnreadableCard, VerticalCard, type Outcome,
 } from './cards.tsx'
+
+/** 每组先显示的行数，其余收进「展开其余 N 条」。 */
+const GROUP_PREVIEW = 5
 
 /** 条目在视图之间的身份。 */
 function keyOf(item: PendingItem): string {
   switch (item.kind) {
     case 'secret': return `secret:${item.memory.id}`
     case 'unreadable-file': return `file:${item.filePath}`
+    case 'advice': return `advice:${item.type}:${item.memories.map(m => m.id).join(',')}`
     default: return item.decisionId
   }
 }
@@ -36,6 +40,7 @@ function memoryIdsOf(item: PendingItem): string[] {
     case 'conflict-horizontal': return [item.left?.id, item.right?.id].filter((id): id is string => id !== undefined)
     case 'conflict-vertical':
     case 'promote-candidate': return item.memory === null ? [] : [item.memory.id]
+    case 'advice': return item.memories.map(m => m.id)
     default: return []
   }
 }
@@ -48,6 +53,7 @@ interface Refused { key: string; index: number; title: string; level: PendingLev
 const LEVEL_LABEL = {
   'must-fix': 'pending.level.must-fix',
   'your-call': 'pending.level.your-call',
+  'advice': 'pending.level.advice',
 } as const satisfies Record<PendingLevel, LocaleKey>
 
 /** 一行：待处理项的卡，或原位的结果卡、没有生效的说明。isItem 的行才算进组标题的条数。 */
@@ -67,6 +73,8 @@ export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
   const config = gateway.useConfig()
   const [recent, setRecent] = useState<Recent | undefined>(undefined)
   const [refused, setRefused] = useState<Refused | undefined>(undefined)
+  /** 点过「展开其余 N 条」的组。 */
+  const [expanded, setExpanded] = useState<ReadonlySet<PendingLevel>>(new Set())
   const done = (next: Recent) => { setRecent(next); setRefused(undefined) }
   const refuse = (item: PendingItem, index: number) => () => { setRefused({ key: keyOf(item), index, title: titleOf(item, t), level: item.level }) }
 
@@ -139,6 +147,7 @@ export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
         />
       )
       case 'unreadable-file': return <UnreadableCard item={item} {...props} />
+      case 'advice': return <AdviceCard item={item} {...props} />
     }
   }
 
@@ -154,11 +163,20 @@ export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
         )
         : PENDING_LEVELS.map((level) => {
           const group = rows.filter(row => row.level === level)
+          const isOpen = expanded.has(level) || group.slice(GROUP_PREVIEW).some(row => row.flashing === true)
+          const shown = isOpen ? group : group.slice(0, GROUP_PREVIEW)
           return group.length === 0 ? null : (
             <PendingGroup key={level} level={level} count={group.filter(row => row.isItem).length}>
-              {group.map(row => (
+              {shown.map(row => (
                 <FlashRow key={row.key} as="div" className="pm-pending-row" flashing={row.flashing ?? false} onFlashEnd={clear}>{row.node}</FlashRow>
               ))}
+              {shown.length < group.length
+                ? (
+                  <button type="button" className="pm-pending-more" onClick={() => { setExpanded(prev => new Set(prev).add(level)) }}>
+                    {t('pending.more', { n: formatNumber(group.length - shown.length) })}
+                  </button>
+                )
+                : null}
             </PendingGroup>
           )
         })}
@@ -270,4 +288,9 @@ export const pendingCss = crossConfirmCss + `
   border: .5px solid var(--pm-line-input); border-radius: var(--dsw-radius-md, 12px);
 }
 .pm-pending-link { padding: 0; border: 0; background: none; font: inherit; font-size: 13px; font-weight: 600; color: var(--pm-text); cursor: pointer; }
+.pm-pending-more {
+  align-self: flex-start; margin-top: 4px; padding: 6px 0; border: 0; background: none;
+  font: inherit; font-size: 13px; color: var(--pm-text-2); cursor: pointer;
+}
+.pm-pending-more:hover { color: var(--pm-text); }
 `

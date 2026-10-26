@@ -10,8 +10,8 @@ import { runRuleScan } from '../governance/rule-scan.ts'
 import { byConfidenceThenConfirmed } from '../snapshot.ts'
 import { layerCacheKey, scoreLayer, type LayerPreread, type LayerRef } from '../governance/layer-health.ts'
 import {
-  GUI_VIEW_VERSION, PENDING_ITEM_KINDS, PENDING_LEVEL_OF_KIND, PENDING_LEVELS,
-  type DeletedView, type GlobalViewName, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCard,
+  ADVICE_TYPES, GUI_VIEW_VERSION, PENDING_ITEM_KINDS, PENDING_LEVEL_OF_KIND, PENDING_LEVELS, isAwaitingDecision,
+  type AdviceType, type DeletedView, type GlobalViewName, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCard,
   type PendingItem, type PendingView, type SessionView,
 } from './contract.ts'
 
@@ -88,7 +88,7 @@ function activeRecords(data: LayerPreread): MemoryRecord[] {
   return [...data.byId.values()].filter(r => r.status === 'active').sort(byNameThenId)
 }
 
-/** 待处理：密钥（规则扫描实时判，与健康分同口径）、账本未决条目（体检开时）、读不出的文件。 */
+/** 待处理：密钥（规则扫描实时判，与健康分同口径）、账本未决条目（体检开时）、读不出的文件、建议整理。 */
 export function buildPendingView(input: ViewInput): PendingView {
   const { data } = input
   const items: PendingItem[] = []
@@ -129,14 +129,31 @@ export function buildPendingView(input: ViewInput): PendingView {
       })
     }
   }
+  items.push(...adviceItems(input))
   // 稳定排序（PENDING_ITEM_KINDS 已按级别排）：同类保持上面的先后（账本按 firstSeenAt）
   const rank = (i: PendingItem) => PENDING_ITEM_KINDS.indexOf(i.kind)
   items.sort((a, b) => rank(a) - rank(b))
   const dot = items.some(i => i.kind === 'secret') ? 'red'
-    : items.some(i => i.kind !== 'unreadable-file') ? 'amber' : 'none'
-  const cards = items.flatMap(i => i.kind === 'conflict-horizontal' ? [i.left, i.right] : 'memory' in i ? [i.memory] : [])
+    : items.some(isAwaitingDecision) ? 'amber' : 'none'
+  const cards = items.flatMap(i => i.kind === 'conflict-horizontal' ? [i.left, i.right] : i.kind === 'advice' ? i.memories : 'memory' in i ? [i.memory] : [])
   const levelCounts = Object.fromEntries(PENDING_LEVELS.map(level => [level, items.filter(i => i.level === level).length])) as PendingView['levelCounts']
   return { version: GUI_VIEW_VERSION, dot, items, levelCounts, typeLabels: typeLabels(input.registry, cards.map(m => m?.type)) }
+}
+
+/**
+ * 建议整理（现算、不入账本）：与健康分同一次评分（scoreLayer）的规则发现和超期记忆，所以只出体检清单里各层的 active 记忆，
+ * 健康分扣几条这里就列几条。不靠模型，体检关闭时照常列出。按问题类型排，同类按层（global 在前）、再按名称。
+ */
+function adviceItems(input: ViewInput): PendingItem[] {
+  const { data } = input
+  const found = input.healthLayers.flatMap((layer, layerIndex) => {
+    const r = scoreLayer({ registry: input.registry }, data, layer, input.now)
+    const ruleIds = (type: Exclude<AdviceType, 'stale'>) => r.ruleFindings.filter(f => f.type === type).flatMap(f => f.memoryIds)
+    return ADVICE_TYPES.flatMap(type => (type === 'stale' ? r.staleIds : ruleIds(type))
+      .map(id => ({ type, layerIndex, record: data.byId.get(id)! })))
+  })
+  found.sort((a, b) => ADVICE_TYPES.indexOf(a.type) - ADVICE_TYPES.indexOf(b.type) || a.layerIndex - b.layerIndex || byNameThenId(a.record, b.record))
+  return found.map(({ type, record }) => ({ kind: 'advice', level: PENDING_LEVEL_OF_KIND.advice, type, memories: [card(record, data)] }))
 }
 
 /** 注册表里的类型加上视图里出现的类型（切模板后旧模板的、认不出的），读时 get 给显示名。 */

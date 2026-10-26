@@ -7,7 +7,7 @@
  * 层块下面两行入口：「待你决定 N 条，其中 M 条超过 7 天 · 去处理 ›」「可提升为全局 N 条 · 去看 ›」，都去待处理 tab。
  */
 import type { ReactNode } from 'react'
-import type { GuiLayerRef, HealthView, PendingView } from '../../src/gui/contract.ts'
+import { isAwaitingDecision, type GuiLayerRef, type HealthView, type PendingView } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { formatDay, formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
@@ -130,11 +130,11 @@ function HardAlerts({ pending, layers }: { pending: ViewState<PendingView>; laye
 
 const WAITING_LONG_MS = 7 * 24 * 60 * 60 * 1000
 
-/** 去待处理的两行入口。读不出的文件不算「待你决定」（与左栏圆点、状态卡同一口径）；条数为 0 的行不出。 */
+/** 去待处理的两行入口。读不出的文件、建议整理不算「待你决定」（与左栏圆点、状态卡同一口径）；条数为 0 的行不出。 */
 function PendingEntries({ pending, nav, now }: { pending: ViewState<PendingView>; nav: NavStore; now: number }) {
   const t = useT()
   if (pending.status !== 'ready') return null
-  const decisions = pending.data.items.filter(item => item.kind !== 'unreadable-file')
+  const decisions = pending.data.items.filter(isAwaitingDecision)
   const old = decisions.filter(item => 'firstSeenAt' in item && now - item.firstSeenAt > WAITING_LONG_MS).length
   const promotable = decisions.filter(item => item.kind === 'promote-candidate').length
   if (decisions.length === 0) return null

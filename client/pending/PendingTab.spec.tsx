@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
-import { GUI_VIEW_VERSION, type HealthView, type MemoryCommand, type PendingItem, type PendingView } from '../../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, type AdviceType, type HealthView, type MemoryCard, type MemoryCommand, type PendingItem, type PendingView } from '../../src/gui/contract.ts'
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { useGateway, type PluginConfig } from '../gateway.ts'
 import { FLASH_MS } from '../library/shared.tsx'
@@ -557,6 +557,119 @@ describe('键盘', () => {
       expect(button.tabIndex).toBe(0)
       button.focus()
       expect(document.activeElement).toBe(button)
+    }
+  })
+})
+
+// —— 建议整理（spec「建议整理的动作」）：卡片不着色、动作按问题类型；删除走 forget，含密钥改走彻底删除确认 ——
+
+describe('待处理：建议整理', () => {
+  const advice = (type: AdviceType, id: string, overrides: Partial<MemoryCard> = {}): PendingItem => ({
+    kind: 'advice', level: 'advice', type, memories: [memory({ id, name: `记忆 ${id}`, filePath: `/m/app/${id}.md`, ...overrides })],
+  })
+  const expired = advice('expired', 'e1', { validTo: NOW - 1 })
+  const stale = advice('stale', 's1', { lastConfirmedAt: new Date(2026, 5, 1).getTime() })
+  const bloat = advice('bloat', 'b1')
+  const orphan = advice('orphan', 'o1')
+  const layer = { kind: 'workspace', workspacePath: '/w/app' } as const
+  const groupOf = () => screen.getByRole('region', { name: /^建议整理/ })
+  const cardOf = (title: string) => screen.getByRole('heading', { level: 3, name: title }).closest('article')!
+
+  it('建议整理组排在最后，组名带条数；卡片不着色、不带状态标记', () => {
+    setup([secret, horizontal, expired, stale, bloat, orphan])
+    expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['高优问题 1', '待你处理 1', '建议整理 4'])
+    expect(within(groupOf()).getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual([
+      '已过有效期', '很久没确认', '内容过长', '指向的旧记忆已不在',
+    ])
+    expect(groupOf().querySelector('.pm-marker')).toBeNull()
+  })
+
+  it.each([
+    ['已过有效期', expired, ['删除', '打开文件']],
+    ['很久没确认', stale, ['仍然有效', '删除', '打开文件']],
+    ['内容过长', bloat, ['打开文件']],
+    ['指向的旧记忆已不在', orphan, ['打开文件']],
+  ] as const)('%s：动作按 spec 表', (title, item, buttons) => {
+    setup([item])
+    expect(cardOf(title).querySelector(`[data-memory-id="${item.kind === 'advice' ? item.memories[0]!.id : ''}"]`)).not.toBeNull()
+    expect(within(cardOf(title)).getAllByRole('button').map(b => b.textContent)).toEqual([...buttons])
+  })
+
+  it('「仍然有效」发 confirm（带这条记忆的层），原位换成结果卡', async () => {
+    const { commands } = setup([stale])
+    fireEvent.click(screen.getByRole('button', { name: '仍然有效' }))
+    await screen.findByText('已确认仍然有效')
+    expect(commands()).toEqual([{ cmd: 'confirm', memoryId: 's1', layer }])
+    expect(screen.getByText('确认时间已更新，这条不再算作很久没确认。')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
+  })
+
+  it('「删除」发 forget（带层），结果写可在最近删除恢复', async () => {
+    const { commands } = setup([expired])
+    fireEvent.click(screen.getByRole('button', { name: '删除' }))
+    await screen.findByText('已删除')
+    expect(commands()).toEqual([{ cmd: 'forget', memoryId: 'e1', layer }])
+    expect(screen.getByText('14 天内可在「最近删除」恢复。')).toBeInTheDocument()
+  })
+
+  it('删除含密钥的记忆：forget 回 has-secret（什么都没动），原位出现彻底删除确认；取消不发，「彻底删除」发 hard-delete', async () => {
+    const { commands } = setup([stale], {
+      respond: command => command.cmd === 'forget'
+        ? { ok: false, cmd: command.cmd, code: 'has-secret', detail: '记忆 s1 含密钥，删除后不可恢复，未做任何改动' }
+        : { ok: true, cmd: command.cmd, memoryIds: ['s1'] },
+    })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除' })) })
+    const card = cardOf('很久没确认')
+    expect(within(card).getByText('这条记忆里有密钥')).toBeInTheDocument()
+    expect(within(card).getByText('彻底删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeInTheDocument()
+    expect(within(card).getByRole('button', { name: '删除' })).toHaveAttribute('aria-disabled', 'true')
+    expect(within(card).queryByText(/记忆 s1 含密钥/)).toBeNull()
+    fireEvent.click(within(card).getByRole('button', { name: '取消' }))
+    expect(within(card).queryByText('这条记忆里有密钥')).toBeNull()
+
+    await act(async () => { fireEvent.click(within(card).getByRole('button', { name: '删除' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '彻底删除' })) })
+    await screen.findByText('已彻底删除')
+    expect(commands()).toEqual([
+      { cmd: 'forget', memoryId: 's1', layer },
+      { cmd: 'forget', memoryId: 's1', layer },
+      { cmd: 'hard-delete', memoryId: 's1', layer },
+    ])
+  })
+
+  it('「打开文件」打开这条记忆的文件；打不开时卡片里说明', async () => {
+    const { gateway } = setup([bloat], { openOk: false })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '打开文件' })) })
+    expect(gateway.opened).toEqual([{ path: '/m/app/b1.md' }])
+    expect(within(cardOf('内容过长')).getByRole('alert')).toHaveTextContent('没能打开文件。')
+  })
+
+  it('组内先显示 5 条，其余收进「展开其余 N 条」；点开后全部显示、按钮收起', () => {
+    const many = Array.from({ length: 7 }, (_, i) => advice('bloat', `b${i}`))
+    setup(many)
+    expect(within(groupOf()).getAllByRole('article')).toHaveLength(5)
+    expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['建议整理 7'])
+    fireEvent.click(screen.getByRole('button', { name: '展开其余 2 条' }))
+    expect(within(groupOf()).getAllByRole('article')).toHaveLength(7)
+    expect(screen.queryByRole('button', { name: /展开其余/ })).toBeNull()
+  })
+
+  it('其他组同样折叠：待你处理超过 5 条也只先显示 5 条', () => {
+    const conflicts = Array.from({ length: 6 }, (_, i) => ({ ...horizontal, decisionId: `d${i}`, summary: `冲突 ${i}` }) as PendingItem)
+    setup(conflicts)
+    expect(screen.getByRole('button', { name: '展开其余 1 条' })).toBeInTheDocument()
+    expect(screen.queryByText('冲突 5')).toBeNull()
+  })
+
+  it('直达的记忆在折叠里：这一组自动展开，那张卡高亮', () => {
+    Element.prototype.scrollIntoView = vi.fn()
+    try {
+      const many = Array.from({ length: 7 }, (_, i) => advice('bloat', `b${i}`))
+      setup(many, {}, createNavStore({ tab: 'pending', memoryId: 'b6' }))
+      expect(within(groupOf()).getAllByRole('article')).toHaveLength(7)
+      expect(document.querySelector('[data-memory-id="b6"]')!.closest('.pm-pending-row')).toHaveClass('pm-flash')
+    } finally {
+      delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView
     }
   })
 })

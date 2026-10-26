@@ -12,7 +12,7 @@ import { PanelShell } from './ui/PanelShell.tsx'
 const pending: PendingView = {
   version: GUI_VIEW_VERSION, dot: 'amber', typeLabels: {},
   items: [{ kind: 'promote-candidate', level: 'your-call', decisionId: 'd1', firstSeenAt: 1, memory: memory() }],
-  levelCounts: { 'must-fix': 0, 'your-call': 1 },
+  levelCounts: { 'must-fix': 0, 'your-call': 1, 'advice': 0 },
 }
 const library: LibraryView = {
   version: GUI_VIEW_VERSION, memoryRoot: '/h/memories', directoryIssues: [],
@@ -51,10 +51,30 @@ describe('记忆页外壳', () => {
         { kind: 'unreadable-file', level: 'must-fix', layer: { kind: 'global' }, filePath: '/m/x.md', relativePath: 'x.md', error: 'bad' },
         ...pending.items, conflict,
       ],
-      levelCounts: { 'must-fix': 2, 'your-call': 2 },
+      levelCounts: { 'must-fix': 2, 'your-call': 2, 'advice': 0 },
     }
     renderInShell(<MemoryPage nav={createNavStore()} />, createFakeGateway({ currentWorkspace: '/w/app', views: { pending: leveled, library } }))
     expect(screen.getByRole('tab', { name: /待处理/ })).toHaveTextContent('待处理4')
+  })
+
+  it('待处理 tab 写「待处理 N · 建议 M」：建议条数灰色单写、不进主数；没有建议时不写后半段', () => {
+    const advice: PendingView['items'][number] = { kind: 'advice', level: 'advice', type: 'stale', memories: [memory({ id: 'x' })] }
+    const withAdvice: PendingView = { ...pending, items: [...pending.items, advice, advice], levelCounts: { 'must-fix': 0, 'your-call': 1, 'advice': 2 } }
+    const gateway = createFakeGateway({ currentWorkspace: '/w/app', views: { pending: withAdvice, library } })
+    renderInShell(<MemoryPage nav={createNavStore()} />, gateway)
+    const tab = screen.getByRole('tab', { name: /待处理/ })
+    expect([...tab.querySelectorAll('.pm-tab-count')].map(n => n.textContent)).toEqual(['1', '· 建议 2'])
+    act(() => { gateway.setView('pending', pending) })
+    expect([...tab.querySelectorAll('.pm-tab-count')].map(n => n.textContent)).toEqual(['1'])
+  })
+
+  it('只有建议整理：主数写 0，仍落在待处理', () => {
+    const advice: PendingView['items'][number] = { kind: 'advice', level: 'advice', type: 'bloat', memories: [memory({ id: 'x' })] }
+    const onlyAdvice: PendingView = { ...pending, dot: 'none', items: [advice], levelCounts: { 'must-fix': 0, 'your-call': 0, 'advice': 1 } }
+    const nav = createNavStore()
+    renderInShell(<MemoryPage nav={nav} />, createFakeGateway({ currentWorkspace: '/w/app', views: { pending: onlyAdvice, library } }))
+    expect([...screen.getByRole('tab', { name: /待处理/ }).querySelectorAll('.pm-tab-count')].map(n => n.textContent)).toEqual(['0', '· 建议 1'])
+    expect(nav.get().tab).toBe('pending')
   })
 
   it('英文界面：tab 依次是 Pending、Health、Browse、Recently deleted', () => {

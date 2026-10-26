@@ -13,6 +13,8 @@ export const pendingZh = {
 
   'pending.level.must-fix': '高优问题',
   'pending.level.your-call': '待你处理',
+  'pending.level.advice': '建议整理',
+  'pending.more': '展开其余 {n} 条',
 
   'pending.empty.title': '目前没有要处理的事',
   'pending.empty.body': '密钥、读不出的文件、互相矛盾的记忆、超限提醒和适合提升为全局的记忆会出现在这里。',
@@ -68,6 +70,18 @@ export const pendingZh = {
   'pending.unreadable.revealMac': '在访达中显示',
   'pending.unreadable.revealOther': '在文件夹中显示',
 
+  'pending.advice.expired.title': '已过有效期',
+  'pending.advice.expired.body': '有效期已过，不再带入对话。删除后 14 天内可在「最近删除」恢复；还要用的话，打开文件改有效期。',
+  'pending.advice.stale.title': '很久没确认',
+  'pending.advice.stale.body': '上次确认是 {date}，已超过这类记忆的确认周期。内容还准确就点「仍然有效」。',
+  'pending.advice.bloat.title': '内容过长',
+  'pending.advice.bloat.body': '内容很长，带入对话时占用较多。打开文件，精简成要点。',
+  'pending.advice.orphan.title': '指向的旧记忆已不在',
+  'pending.advice.orphan.body': '它记着取代了一条旧记忆，那条已经删除或找不到了。打开文件，去掉 supersedes 里失效的那一项。',
+  'pending.advice.confirm': '仍然有效',
+  'pending.advice.delete': '删除',
+  'pending.advice.open': '打开文件',
+
   'pending.result.keptA': '已按 A',
   'pending.result.keptB': '已按 B',
   'pending.result.keptBoth': '都保留',
@@ -86,6 +100,10 @@ export const pendingZh = {
   'pending.result.dismissed': '已忽略',
   'pending.result.dismissedBody': '这一档不再提醒，用量再升一档时再提醒你。',
   'pending.result.raised': '上限已调到 {budget}',
+  'pending.result.confirmed': '已确认仍然有效',
+  'pending.result.confirmedBody': '确认时间已更新，这条不再算作很久没确认。',
+  'pending.result.deleted': '已删除',
+  'pending.result.deletedBody': '14 天内可在「最近删除」恢复。',
 } as const
 
 export const pendingEn: Record<keyof typeof pendingZh, string> = {
@@ -101,6 +119,8 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
 
   'pending.level.must-fix': 'High priority',
   'pending.level.your-call': 'Waiting on you',
+  'pending.level.advice': 'Suggested cleanup',
+  'pending.more': 'Show {n} more',
 
   'pending.empty.title': 'Nothing to handle right now',
   'pending.empty.body': 'Secrets, unreadable files, conflicting memories, over-limit reminders and memories worth making global show up here.',
@@ -156,6 +176,18 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.unreadable.revealMac': 'Show in Finder',
   'pending.unreadable.revealOther': 'Show in folder',
 
+  'pending.advice.expired.title': 'Past its end date',
+  'pending.advice.expired.body': 'Its end date has passed, so it is no longer brought into conversations. If you delete it, you can restore it from Recently deleted within 14 days; if you still need it, open the file and change the date.',
+  'pending.advice.stale.title': 'Not confirmed in a while',
+  'pending.advice.stale.body': 'Last confirmed {date}, longer ago than this type of memory allows. If it is still accurate, choose “Still valid”.',
+  'pending.advice.bloat.title': 'Too long',
+  'pending.advice.bloat.body': 'It is long and takes up a lot of room when brought into a conversation. Open the file and trim it to the key points.',
+  'pending.advice.orphan.title': 'Replaces a memory that is gone',
+  'pending.advice.orphan.body': 'It says it replaces an older memory that has been deleted or cannot be found. Open the file and remove that entry from supersedes.',
+  'pending.advice.confirm': 'Still valid',
+  'pending.advice.delete': 'Delete',
+  'pending.advice.open': 'Open file',
+
   'pending.result.keptA': 'Went with A',
   'pending.result.keptB': 'Went with B',
   'pending.result.keptBoth': 'Kept both',
@@ -174,4 +206,8 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.result.dismissed': 'Ignored',
   'pending.result.dismissedBody': 'No reminder for this tier; you will hear again if usage climbs another tier.',
   'pending.result.raised': 'Limit raised to {budget}',
+  'pending.result.confirmed': 'Confirmed still valid',
+  'pending.result.confirmedBody': 'Its confirmation date is updated; it no longer counts as not confirmed in a while.',
+  'pending.result.deleted': 'Deleted',
+  'pending.result.deletedBody': 'You can restore it from Recently deleted within 14 days.',
 }

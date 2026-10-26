@@ -1,5 +1,5 @@
 /**
- * 左栏记忆页的外壳：标题「记忆」+ 作用域下拉，四个 tab（待处理带数、健康、记忆查看带数、最近删除）。
+ * 左栏记忆页的外壳：标题「记忆」+ 作用域下拉，四个 tab（待处理带数和建议条数、健康、记忆查看带数、最近删除）。
  * 两态：一个会话都没有 → 空态「开一个会话后这里可用」；有会话 → 全功能。
  * 当前视图与作用域在导航 store 里，入口直达时先写 store 再切面板。
  * 不是入口打开的（点左栏图标、宿主恢复上次的面板）按默认落点：待处理有条目落在待处理，为空落在记忆查看（PRD §4 入口③）。
@@ -60,10 +60,13 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
     pending: countOf(pending, data => data.levelCounts['must-fix'] + data.levelCounts['your-call']),
     library: countOf(library, data => data.layers.find(l => sameScope(l.layer, scope))?.items.length ?? 0),
   }
+  // 建议整理单写在主数后面，没有时不写
+  const adviceCount = countOf(pending, data => data.levelCounts.advice) ?? 0
   const tabLabel = (tab: MemoryTab): ReactNode => (
     <>
       {t(TAB_LABEL[tab])}
       {counts[tab] !== undefined ? <span className="pm-tab-count">{formatNumber(counts[tab])}</span> : null}
+      {tab === 'pending' && adviceCount > 0 ? <span className="pm-tab-count">{t('tab.pending.advice', { n: formatNumber(adviceCount) })}</span> : null}
     </>
   )
   const canOpenSettings = useCanOpen(nav, 'settings')

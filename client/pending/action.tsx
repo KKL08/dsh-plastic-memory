@@ -15,6 +15,8 @@ export type ActionState =
   | { kind: 'busy' }
   | { kind: 'error'; detail: string }
   | { kind: 'cross'; workspacePath: string; command: MemoryCommand }
+  /** forget 的目标含密钥（服务端回 has-secret，什么都没动）：等用户确认后改发 hard-delete，沿用这条命令指明的那一份。 */
+  | { kind: 'secret'; command: Extract<MemoryCommand, { cmd: 'forget' }> }
 
 type Ok = Extract<MemoryCommandResult, { ok: true }>
 
@@ -39,7 +41,9 @@ export interface ItemAction {
   /** 命令以外的失败（打开文件、写配置）也显示在同一处。 */
   fail(detail: string): void
   confirmCross(): void
+  /** 取消跨项目确认或彻底删除确认。 */
   cancelCross(): void
+  confirmSecret(): void
 }
 
 /** onRefused：isHandledElsewhere 为真时调用，卡片里不再显示原话。 */
@@ -57,11 +61,12 @@ export function useItemAction(session: BorrowedSession, onOk: (command: MemoryCo
       const workspacePath = r.rejected?.[0]?.workspacePath
       const allowed = 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
       if (r.code === 'cross-workspace' && !allowed && workspacePath !== undefined) setState({ kind: 'cross', workspacePath, command })
+      else if (r.code === 'has-secret' && command.cmd === 'forget') setState({ kind: 'secret', command })
       else setState({ kind: 'error', detail: r.detail ?? r.code })
     })
   }
   const unavailable = session.kind !== 'ready' ? t('session.none.hint')
-    : state.kind === 'busy' || state.kind === 'cross' ? t('pending.busy') : undefined
+    : state.kind === 'busy' || state.kind === 'cross' || state.kind === 'secret' ? t('pending.busy') : undefined
   return {
     state,
     unavailable,
@@ -71,6 +76,9 @@ export function useItemAction(session: BorrowedSession, onOk: (command: MemoryCo
       if (state.kind === 'cross') run({ ...state.command, allowCrossWorkspace: true } as MemoryCommand)
     },
     cancelCross() { setState({ kind: 'idle' }) },
+    confirmSecret() {
+      if (state.kind === 'secret') run({ ...state.command, cmd: 'hard-delete' })
+    },
   }
 }
 
@@ -101,7 +109,7 @@ export function CrossConfirm({ workspacePath, onCancel, onConfirm }: { workspace
 
 /**
  * 彻底删除的确认：不进最近删除、不能恢复，快照里的副本也抹掉。待处理的密钥卡点「彻底删除…」时出现；
- * 全部记忆、对话交付卡、右侧栏普通删除含密钥的记忆时服务端回 has-secret（什么都没动），也在原位出现，「彻底删除」改发 hard-delete。
+ * 全部记忆、对话交付卡、右侧栏、待处理的建议整理普通删除含密钥的记忆时服务端回 has-secret（什么都没动），也在原位出现，「彻底删除」改发 hard-delete。
  * 密钥卡标题已写明有密钥，`showTitle={false}`；其余地方用户只点了删除，先补一行「这条记忆里有密钥」说明为什么。
  */
 export function SecretDeleteConfirm({ onCancel, onConfirm, unavailable, showTitle = true }: {
@@ -133,11 +141,12 @@ export const crossConfirmCss = `
 .pm-pending-confirm { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: var(--dsw-radius-md, 12px); background: var(--pm-bg-block); }
 `
 
-/** 动作的反馈：跨项目确认行，或失败原话。 */
+/** 动作的反馈：跨项目确认行、彻底删除确认（删除的记忆含密钥），或失败原话。 */
 export function ActionFeedback({ action }: { action: ItemAction }) {
   const t = useT()
   const { state } = action
   if (state.kind === 'cross') return <CrossConfirm workspacePath={state.workspacePath} onCancel={action.cancelCross} onConfirm={action.confirmCross} />
+  if (state.kind === 'secret') return <SecretDeleteConfirm onCancel={action.cancelCross} onConfirm={action.confirmSecret} />
   if (state.kind === 'error') return <p className="pm-pending-error" role="alert">{t('pending.failed', { detail: state.detail })}</p>
   return null
 }

@@ -9,7 +9,7 @@ import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { PanelShell } from '../ui/PanelShell.tsx'
 import { createFakeConfigForm, DEFAULT_SECTION, type FakeConfigForm } from './config-form.fake.ts'
 import { SettingsPage } from './SettingsPage.tsx'
-import { summarize } from './StatusCard.tsx'
+import { openTarget, summarize } from './StatusCard.tsx'
 
 const t = createTranslator(zh)
 
@@ -429,6 +429,13 @@ describe('状态卡', () => {
   it('分级后口径不变：「等你决定」只数密钥以外要你拍板的事，不算同在高优问题组的读不出的文件', () => {
     expect(summarize(views(pending([unreadable, unreadable, conflict])), true, NOW, t).conclusion).toBe('有 1 处等你决定')
     expect(summarize(views(pending([unreadable])), true, NOW, t)).toEqual({ marker: 'ok', conclusion: '状态良好', detail: '共 3 条记忆 · 上次体检：刚刚' })
+  })
+
+  it('建议整理不算「等你决定」：只有建议时仍是状态良好，「打开记忆页 ›」去健康', () => {
+    const advice = { kind: 'advice' as const, level: 'advice' as const, type: 'stale' as const, memories: [memory()] }
+    expect(summarize(views(pending([advice, advice, conflict])), true, NOW, t).conclusion).toBe('有 1 处等你决定')
+    expect(summarize(views(pending([advice])), true, NOW, t)).toEqual({ marker: 'ok', conclusion: '状态良好', detail: '共 3 条记忆 · 上次体检：刚刚' })
+    expect(openTarget(pending([advice]))).toBe('health')
   })
 
   it('读视图渲染结论；没有等你决定的事时「打开记忆页 ›」去健康；没有会话时只写一句提示', () => {

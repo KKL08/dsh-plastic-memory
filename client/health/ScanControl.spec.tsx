@@ -12,7 +12,7 @@ const noPending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: 
 const somePending: PendingView = {
   version: GUI_VIEW_VERSION, dot: 'amber',
   items: [{ kind: 'promote-candidate', level: 'your-call', decisionId: 'd1', firstSeenAt: 1, memory: memory() }],
-  levelCounts: { 'must-fix': 0, 'your-call': 1 },
+  levelCounts: { 'must-fix': 0, 'your-call': 1, 'advice': 0 },
   typeLabels: {},
 }
 

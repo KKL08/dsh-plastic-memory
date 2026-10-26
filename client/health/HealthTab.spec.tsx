@@ -118,7 +118,7 @@ describe('健康 tab', () => {
         { kind: 'secret', level: 'must-fix', memory: memory({ id: 's2', name: 'other-project', workspacePath: '/w/blog' }) },
         { kind: 'unreadable-file', level: 'must-fix', layer: { kind: 'global' }, filePath: '/m/global/bad.md', relativePath: 'global/bad.md', error: 'yaml-parse' },
       ],
-      levelCounts: { 'must-fix': 3, 'your-call': 0 },
+      levelCounts: { 'must-fix': 3, 'your-call': 0, 'advice': 0 },
       typeLabels: {},
     }
     renderTab(health([layer(), layer({ layer: { kind: 'global' } })], false), { pending, openSettings })
@@ -171,6 +171,15 @@ describe('健康 tab：去待处理的入口', () => {
     render(pendingOf(conflict('d1', NOW - DAY)))
     expect(screen.getByText('待你决定 1 条')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '去看 ›' })).toBeNull()
+  })
+
+  it('建议整理不算「待你决定」：只有建议时不出入口行，和冲突一起时不计入条数', () => {
+    const advice: PendingView['items'][number] = { kind: 'advice', level: 'advice', type: 'expired', memories: [memory({ id: 'e' })] }
+    const { unmount } = render(pendingOf(advice))
+    expect(screen.queryByRole('button', { name: '去处理 ›' })).toBeNull()
+    unmount()
+    render(pendingOf(conflict('d1', NOW - DAY), advice))
+    expect(screen.getByText('待你决定 1 条')).toBeInTheDocument()
   })
 
   it('只有读不出的文件、体检关闭：都不出入口行', () => {

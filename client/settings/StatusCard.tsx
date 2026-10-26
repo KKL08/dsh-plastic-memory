@@ -7,7 +7,7 @@
  * 进行中、失败的状态写在按钮下面一行。
  */
 import { useEffect, useRef, useState } from 'react'
-import type { HealthView, LibraryView, MemoryCommandResult, PendingView } from '../../src/gui/contract.ts'
+import { isAwaitingDecision, type HealthView, type LibraryView, type MemoryCommandResult, type PendingView } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { formatDay, formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { MemoryTab } from '../nav.ts'
@@ -31,8 +31,8 @@ export function summarize(
   const detail = `${countText} · ${scannedAt === null ? t('settings.status.neverScanned') : t('settings.status.lastScan', { date: formatDay(scannedAt, now, t) })}`
   const items = views.pending.items
   if (items.some(item => item.kind === 'secret')) return { marker: 'secret', conclusion: t('settings.status.secret'), detail }
-  // 读不出的文件不算「等你决定」（左栏图标也不为它亮点），在记忆页里处理
-  const decisions = items.filter(item => item.kind !== 'unreadable-file').length
+  // 读不出的文件、建议整理不算「等你决定」（左栏图标也不为它们亮点），在记忆页里处理
+  const decisions = items.filter(isAwaitingDecision).length
   if (decisions > 0) return { marker: 'pending', conclusion: t('settings.status.pending', { n: formatNumber(decisions) }), detail }
   if (count === 0) return { conclusion: t('settings.status.empty') }
   if (scannedAt === null) return { conclusion: t('settings.status.unscanned'), detail }
@@ -43,10 +43,10 @@ function settled<V>(state: ViewState<V>): V | undefined {
   return state.status === 'ready' ? state.data : undefined
 }
 
-/** 有等你决定的事（含密钥；读不出的文件不算）时去待处理，否则去健康。还没读到视图时去待处理。 */
+/** 有等你决定的事（含密钥；读不出的文件、建议整理不算）时去待处理，否则去健康。还没读到视图时去待处理。 */
 export function openTarget(pending: PendingView | undefined): MemoryTab {
   if (pending === undefined) return 'pending'
-  return pending.items.some(item => item.kind !== 'unreadable-file') ? 'pending' : 'health'
+  return pending.items.some(isAwaitingDecision) ? 'pending' : 'health'
 }
 
 type ScanState =

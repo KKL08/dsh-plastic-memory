@@ -13,7 +13,7 @@ export { maskSecrets, maskSecretSurface, type MaskOptions } from '../secrets.ts'
  */
 
 /** 视图 schema 的版本号：视图是派生缓存，形状变了就换号，客户端读到不认识的号按「需要刷新」处理。 */
-export const GUI_VIEW_VERSION = 4
+export const GUI_VIEW_VERSION = 5
 
 /** 视图文件所在目录（相对记忆根目录，POSIX 分隔）。 */
 export const GUI_VIEW_DIR = '.state/gui'
@@ -75,14 +75,15 @@ export function layerOfMemory(memory: Pick<MemoryCard, 'scope' | 'workspacePath'
 // —— 待处理 ——
 
 /**
- * 待处理项的级别，按显示顺序：高优问题 must-fix（放着会泄露或丢数据）、待你处理 your-call（插件先按稳妥默认办，等你拍板）。
+ * 待处理项的级别，按显示顺序：高优问题 must-fix（放着会泄露或丢数据）、待你处理 your-call（插件先按稳妥默认办，等你拍板）、
+ * 建议整理 advice（不处理也不出错，整理后体检分更高；不亮左栏圆点、不算进 tab 主数）。
  * 每个待处理项属于且只属于一级；以后加级别时往这里追加。
  */
-export const PENDING_LEVELS = ['must-fix', 'your-call'] as const
+export const PENDING_LEVELS = ['must-fix', 'your-call', 'advice'] as const
 export type PendingLevel = (typeof PENDING_LEVELS)[number]
 
 /** 按级别排：同一级内的先后即视图里的先后。 */
-export const PENDING_ITEM_KINDS = ['secret', 'unreadable-file', 'conflict-horizontal', 'conflict-vertical', 'promote-candidate', 'overflow'] as const
+export const PENDING_ITEM_KINDS = ['secret', 'unreadable-file', 'conflict-horizontal', 'conflict-vertical', 'promote-candidate', 'overflow', 'advice'] as const
 export type PendingItemKind = (typeof PENDING_ITEM_KINDS)[number]
 
 /** 每类待处理项归哪一级（写死，客户端不另行推导）。 */
@@ -93,11 +94,24 @@ export const PENDING_LEVEL_OF_KIND = {
   'conflict-vertical': 'your-call',
   'promote-candidate': 'your-call',
   'overflow': 'your-call',
+  'advice': 'advice',
 } as const satisfies Record<PendingItemKind, PendingLevel>
+
+/**
+ * 建议整理项的问题类型，按显示顺序。expired / bloat / orphan 与体检发现（governance/schema.ts FINDING_TYPES）同名，
+ * 规则检查实时算；stale = 超过类型衰减期没确认（健康分的新鲜度）。语义体检来的类型以后按 spec 顺序插进来。
+ */
+export const ADVICE_TYPES = ['expired', 'bloat', 'orphan', 'stale'] as const
+export type AdviceType = (typeof ADVICE_TYPES)[number]
+
+/** 「等你决定」的口径（左栏圆点、设置页状态卡、健康页「待你决定」入口）：密钥与待你处理；读不出的文件、建议整理不算。 */
+export function isAwaitingDecision(item: Pick<PendingItem, 'kind' | 'level'>): boolean {
+  return item.kind === 'secret' || item.level === 'your-call'
+}
 
 const levelOf = <K extends PendingItemKind>(kind: K) => z.literal(PENDING_LEVEL_OF_KIND[kind])
 
-/** 待处理项。冲突、提升候选、超限来自待决账本（带 decisionId）；密钥与读不出的文件从预读数据派生，不入账本。
+/** 待处理项。冲突、提升候选、超限来自待决账本（带 decisionId）；密钥、读不出的文件与建议整理从预读数据派生，不入账本。
  *  冲突一方定位不到时为 null（账本悬空引用，裁决会报错）。 */
 export const pendingItemSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('secret'), level: levelOf('secret'), memory: memoryCardSchema }),
@@ -126,13 +140,18 @@ export const pendingItemSchema = z.discriminatedUnion('kind', [
     /** 解析器原话。 */
     error: z.string(),
   }),
+  /** 建议整理：每次生成视图时现算，不入账本。身份 = type + 涉及的记忆 id（memories 的 id，成对的按 id 排序）。 */
+  z.object({
+    kind: z.literal('advice'), level: levelOf('advice'), type: z.enum(ADVICE_TYPES),
+    memories: z.array(memoryCardSchema).min(1),
+  }),
 ])
 export type PendingItem = z.infer<typeof pendingItemSchema>
 
-/** 左栏图标圆点：密钥红点盖过琥珀点；读不出的文件不亮点。 */
+/** 左栏图标圆点：密钥红点盖过琥珀点；读不出的文件、建议整理不亮点。 */
 export const PENDING_DOTS = ['none', 'amber', 'red'] as const
 
-/** 待处理（全部层），按 PENDING_ITEM_KINDS 顺序（先按级别）、同类按 firstSeenAt 升序。 */
+/** 待处理（全部层），按 PENDING_ITEM_KINDS 顺序（先按级别）、同类按 firstSeenAt 升序；建议整理按 ADVICE_TYPES、层（global 在前）、名称排。 */
 export const pendingViewSchema = z.object({
   version,
   dot: z.enum(PENDING_DOTS),

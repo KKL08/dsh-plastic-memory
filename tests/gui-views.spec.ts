@@ -18,7 +18,7 @@ import { executeHealth } from '../src/tools/health.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import {
   GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, PENDING_ITEM_KINDS, deletedViewSchema, healthViewSchema,
-  libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema, workspaceMapViewSchema, type GlobalViewName,
+  libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema, workspaceMapViewSchema, type GlobalViewName, type PendingItem,
 } from '../src/gui/contract.ts'
 import { buildSessionView } from '../src/gui/views.ts'
 import { ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
@@ -80,7 +80,7 @@ describe('待处理视图', () => {
 
     const { pending } = await h.views()
     expect(pendingViewSchema.parse(pending)).toEqual(pending)
-    expect(pending.items.map(i => i.kind)).toEqual([...PENDING_ITEM_KINDS])
+    expect(pending.items.map(i => i.kind)).toEqual(PENDING_ITEM_KINDS.filter(k => k !== 'advice'))
     expect(pending.dot).toBe('red')
     const [secret, bad, h1, v1, p1, o1] = pending.items
     expect(secret.kind === 'secret' && secret.memory.id).toBe('mem_secret')
@@ -114,7 +114,7 @@ describe('待处理视图', () => {
       ['must-fix', 'secret'], ['must-fix', 'unreadable-file'],
       ['your-call', 'conflict-horizontal'], ['your-call', 'conflict-vertical'], ['your-call', 'promote-candidate'], ['your-call', 'overflow'],
     ])
-    expect(pending.levelCounts).toEqual({ 'must-fix': 2, 'your-call': 4 })
+    expect(pending.levelCounts).toEqual({ 'must-fix': 2, 'your-call': 4, 'advice': 0 })
   })
 
   it('没有待处理项：各级条数都是 0', async () => {
@@ -122,7 +122,7 @@ describe('待处理视图', () => {
     await h.store.create(w({ id: 'mem_a', name: 'A', content: '用 pnpm' }))
     const { pending } = await h.views()
     expect(pending.items).toEqual([])
-    expect(pending.levelCounts).toEqual({ 'must-fix': 0, 'your-call': 0 })
+    expect(pending.levelCounts).toEqual({ 'must-fix': 0, 'your-call': 0, 'advice': 0 })
   })
 
   it('读不出的文件：显示用的相对路径遮掉文件名里的密钥，打开用的 filePath 仍是真实路径', async () => {
@@ -202,10 +202,10 @@ describe('待处理视图：体检关闭', () => {
     const off = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
     expect(pendingViewSchema.parse(off.pending)).toEqual(off.pending)
     expect(off.pending.items.map(i => i.kind)).toEqual(['secret', 'unreadable-file', 'overflow'])
-    expect(off.pending.levelCounts).toEqual({ 'must-fix': 2, 'your-call': 1 })
+    expect(off.pending.levelCounts).toEqual({ 'must-fix': 2, 'your-call': 1, 'advice': 0 })
     expect(off.pending.dot).toBe('red')
     // 账本没动：打开体检后冲突、候选都回来
-    expect((await h.views()).pending.items.map(i => i.kind)).toEqual([...PENDING_ITEM_KINDS].filter(k => k !== 'conflict-vertical'))
+    expect((await h.views()).pending.items.map(i => i.kind)).toEqual(PENDING_ITEM_KINDS.filter(k => k !== 'conflict-vertical' && k !== 'advice'))
   })
 
   it('没有密钥时按剩下的条目亮点：超限提醒能处理所以亮琥珀，只剩读不出的文件则不亮', async () => {
@@ -238,6 +238,95 @@ describe('待处理视图：提升候选', () => {
     const after = (await h.views()).pending
     expect(after.items).toEqual([])
     expect(after.dot).toBe('none')
+  })
+})
+
+describe('待处理视图：建议整理', () => {
+  const DAY = 86_400_000
+  /** 四类各一条：已过有效期、内容过长、指向的旧记忆已不在、很久没确认（project 类型衰减期 7 天）。 */
+  async function seedAdvice(h: ReturnType<typeof harness>) {
+    await h.store.create(w({ id: 'mem_expired', name: '冻结期', validTo: T0 - 1 }))
+    await h.store.create(w({ id: 'mem_bloat', name: '长文', content: 'x'.repeat(2001) }))
+    await h.store.create(g({ id: 'mem_orphan', name: '新规则', supersedes: ['mem_gone'] }))
+    await h.store.create(w({ id: 'mem_stale', name: '里程碑', type: 'project', lastConfirmedAt: T0 - 8 * DAY }))
+    await h.store.create(w({ id: 'mem_fine', name: '没问题', type: 'project' }))
+  }
+  const adviceOf = (pending: { items: readonly PendingItem[] }) =>
+    pending.items.flatMap(i => i.kind === 'advice' ? [[i.type, i.memories.map(m => m.id)] as const] : [])
+
+  it('四类按身份（类型 + 记忆 id）各出一项，属建议整理、排在最后，视图带建议条数；不亮左栏圆点、不进账本', async () => {
+    const h = harness()
+    await seedAdvice(h)
+    const { pending } = await h.views()
+    expect(pendingViewSchema.parse(pending)).toEqual(pending)
+    expect(adviceOf(pending)).toEqual([
+      ['expired', ['mem_expired']], ['bloat', ['mem_bloat']], ['orphan', ['mem_orphan']], ['stale', ['mem_stale']],
+    ])
+    expect(pending.items.every(i => i.level === 'advice')).toBe(true)
+    expect(pending.items[0]).toMatchObject({ kind: 'advice', level: 'advice', type: 'expired', memories: [{ id: 'mem_expired', validTo: T0 - 1, filePath: expect.stringContaining(workspaceDirName(WS)) }] })
+    expect(pending.levelCounts).toEqual({ 'must-fix': 0, 'your-call': 0, 'advice': 4 })
+    expect(pending.dot).toBe('none')
+    expect(await h.decisions.list()).toEqual([])
+  })
+
+  it('和健康视图同口径：每层的建议条数 = 该层已过有效期、内容过长、旧记忆已不在的扣分条数 + 很久没确认条数', async () => {
+    const h = harness()
+    await seedAdvice(h)
+    const { pending, health } = await h.views()
+    for (const layer of health.layers) {
+      const inLayer = pending.items.filter(i => i.kind === 'advice' && (layer.layer.kind === 'global'
+        ? i.memories[0]!.scope === 'global' : i.memories[0]!.workspacePath === layer.layer.workspacePath))
+      const ruleCount = layer.issues.filter(x => ['expired', 'bloat', 'orphan'].includes(x.type)).reduce((s, x) => s + x.count, 0)
+      expect(inLayer.length).toBe(ruleCount + layer.staleCount)
+    }
+  })
+
+  it('改好后下一次生成视图即消失：延长有效期、精简内容、去掉失效引用、确认仍然有效', async () => {
+    const h = harness()
+    await seedAdvice(h)
+    expect(adviceOf((await h.views()).pending)).toHaveLength(4)
+    const fix = async (id: string, patch: Partial<MemoryRecord>) => { await h.store.put({ ...(await h.store.get(id))!, ...patch }) }
+    await fix('mem_expired', { validTo: T0 + DAY })
+    await fix('mem_bloat', { content: '精简后' })
+    await fix('mem_orphan', { supersedes: [] })
+    const refreshed = await executeConfirm({ action: 'refresh', memoryId: 'mem_stale' }, { workspacePath: WS }, { store: h.store, decisions: h.decisions, snapshots: h.snapshots, now: () => T0 })
+    expect(refreshed.kind).toBe('refreshed')
+    const { pending } = await h.views()
+    expect(pending.items).toEqual([])
+    expect(pending.levelCounts.advice).toBe(0)
+  })
+
+  it('记忆不再 active（删除、被取代）：对应的建议不显示', async () => {
+    const h = harness()
+    await seedAdvice(h)
+    await h.forget(['mem_expired', 'mem_bloat'])
+    await h.store.put({ ...(await h.store.get('mem_stale'))!, status: 'superseded' })
+    expect(adviceOf((await h.views()).pending)).toEqual([['orphan', ['mem_orphan']]])
+  })
+
+  it('同 id 在全局和本项目各一份：按实际在用的那份出一项，不重复', async () => {
+    const h = harness()
+    await h.store.create(g({ id: 'mem_dup', name: '全局那份', validTo: T0 - 1 }))
+    await h.store.create(w({ id: 'mem_dup', name: '本项目那份', validTo: T0 - 1, updatedAt: T0 + 1 }))
+    const advice = (await h.views()).pending.items.filter(i => i.kind === 'advice')
+    expect(advice).toHaveLength(1)
+  })
+
+  it('体检关闭时四类照常显示（不靠模型）', async () => {
+    const h = harness()
+    await seedAdvice(h)
+    const off = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
+    expect(adviceOf(off.pending)).toEqual(adviceOf((await h.views()).pending))
+    expect(adviceOf(off.pending)).toHaveLength(4)
+  })
+
+  it('密钥仍亮红点、冲突仍亮琥珀点，建议整理不改变圆点', async () => {
+    const h = harness()
+    await seedAdvice(h)
+    await h.store.create(w({ id: 'mem_a', name: 'A' }))
+    await h.store.create(w({ id: 'mem_b', name: 'B' }))
+    await h.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '矛盾', fingerprint: 'h' }, 1)
+    expect((await h.views()).pending.dot).toBe('amber')
   })
 })
 
