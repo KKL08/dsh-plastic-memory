@@ -5,7 +5,8 @@ import type { KvTable } from '../kv-table.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { PendingDecisionsStore } from '../governance/decisions.ts'
 import type { ScanCacheEntry } from '../governance/schema.ts'
-import type { LayerRef } from '../governance/layer-health.ts'
+import { staleIgnores, type AdviceIgnoreStore } from '../governance/advice-ignores.ts'
+import { layerCacheKey, type LayerRef } from '../governance/layer-health.ts'
 import { checkupWorkspaces, listingNotes, prereadLayers } from '../tools/layer-preread.ts'
 import {
   GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, sessionViewFile, workspaceMapViewSchema,
@@ -17,6 +18,8 @@ export interface ViewSourceDeps {
   store: MemoryStore
   decisions: PendingDecisionsStore
   cache: KvTable<ScanCacheEntry>
+  /** 建议忽略表；缺省按没有忽略算、不做清理。 */
+  ignores?: AdviceIgnoreStore
   registry: TypeRegistry
   memoryRoot: string
   now?: () => number
@@ -29,6 +32,7 @@ export interface ViewSourceDeps {
 /**
  * 预读 → 四个全局视图。读 global + 全部 workspace 目录（含 .archive/；只剩归档的项目也读，最近删除要用），
  * 健康只列 global + 体检清单，与 memory_health 体检同一批层、同一个预读函数。
+ * 顺带是建议忽略表的清理点：读的是全部层，引用的记忆已不在用（删除、归档、彻底删除）或内容变了的记录在这里删掉。
  */
 export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalViews> {
   const now = deps.now?.() ?? Date.now()
@@ -38,9 +42,16 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
   const healthLayers: LayerRef[] = [{ kind: 'global' }, ...checkupWorkspaces(listing).map(ws)]
   const data = await prereadLayers(deps, readLayers)
   const [open, settled] = await Promise.all([deps.decisions.list(), deps.decisions.listSettled()])
+  const notes = listingNotes(listing, { includeEmpty: false })
+  if (deps.ignores !== undefined) {
+    // 有读不出的文件或目录时，byId 里没有的 id 可能只是这次没读到，不按「已不在」清
+    const isComplete = readLayers.every(l => (data.quarantined.get(layerCacheKey(l)) ?? []).length === 0)
+      && ![...notes, ...data.directoryNotes].some(n => n.code === 'marker-missing' || n.code === 'dir-unreadable')
+    await deps.ignores.remove(staleIgnores(data.ignores, data.byId, { isComplete, before: now }))
+  }
   return buildGlobalViews({
     now, memoryRoot: deps.memoryRoot, registry: deps.registry, data, readLayers, healthLayers, open, settled,
-    listingNotes: listingNotes(listing, { includeEmpty: false }),
+    listingNotes: notes,
     governanceEnabled: deps.isGovernanceEnabled?.() ?? true,
     ...(deps.bootedAt !== undefined ? { bootedAt: deps.bootedAt } : {}),
   })

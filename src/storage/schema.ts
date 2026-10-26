@@ -21,3 +21,18 @@ export const kvImportMarkerSchema = z.object({
   discarded: z.boolean().optional(),
 })
 export type KvImportMarker = z.infer<typeof kvImportMarkerSchema>
+
+/**
+ * 建议忽略表的一行（`.state/advice-ignores/<sha1(id)>.json`，见 storage/sidecar.ts）：用户对一条建议整理项点了「忽略」。
+ * id 即身份：问题类型 + 排序后的记忆 id（见 governance/advice-ignores.ts adviceIdentity），同一项只有一个文件，
+ * 并发忽略同一项落到同一个文件上。fingerprints 与 memoryIds 一一对应，是忽略时每条记忆的内容指纹；对不上就不算已忽略。
+ * type 存成字符串（取值见 contract-codes.ts IGNORABLE_ADVICE_TYPES）：新版本加的类型旧版本读得出，只是不匹配。
+ */
+export const adviceIgnoreSchema = z.object({
+  id: z.string(),
+  type: z.string(),
+  memoryIds: z.array(z.string()).min(1),
+  fingerprints: z.array(z.string()),
+  ignoredAt: z.number(),
+})
+export type AdviceIgnore = z.infer<typeof adviceIgnoreSchema>

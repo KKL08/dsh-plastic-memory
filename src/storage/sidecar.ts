@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import type { ZodType } from 'zod'
 import type { BatchKvTable, ClaimKvTable, KvTable } from '../kv-table.ts'
 import type { MemoryLogger } from './table.ts'
-import { kvImportMarkerSchema, recallStatsSchema, type KvImportMarker, type RecallStats } from './schema.ts'
+import { adviceIgnoreSchema, kvImportMarkerSchema, recallStatsSchema, type AdviceIgnore, type KvImportMarker, type RecallStats } from './schema.ts'
 import { STATE_DIR } from './paths.ts'
 import { linkExclusive } from './exclusive-link.ts'
 
@@ -17,6 +17,7 @@ import { linkExclusive } from './exclusive-link.ts'
  *   .state/pending/<id>.json        每条一文件
  *   .state/pending/<id>.claim       裁决期间的认领（排他创建，裁决完即删）
  *   .state/scan-cache/<sha1(桶键)>.json
+ *   .state/advice-ignores/<sha1(身份)>.json  建议忽略表，每项一文件
  *   .state/recall-stats.json        整张表一个文件 { [id]: RecallStats }
  *   .state/kv-import.json           旧宿主 KV 导入的完成标记
  *   .state/kv-import.lock           导入期间的跨进程锁，导完即删
@@ -27,7 +28,8 @@ import { linkExclusive } from './exclusive-link.ts'
  *
  * 导入屏障：snapshots / pending / scan-cache 的每个读写方法先 await 一次 memoize 的导入（进程内锁 +
  * 跨进程锁文件内执行，锁内重查标记）。
- * 召回统计不过屏障——导入不碰它，而 FileTable 加载时就要逐条读它，过屏障会把导入拖进 apply。
+ * 召回统计不过屏障——导入不碰它，而 FileTable 加载时就要逐条读它，过屏障会把导入拖进 apply。建议忽略表是旧 KV 之后才有的，
+ * 导入同样不碰它，也不过屏障。
  * 0.3.0 删除导入代码（openLegacyKv、标记、LegacyKvTables）。
  */
 
@@ -38,6 +40,7 @@ export const RECALL_STATS_FILE = 'recall-stats.json'
 const SNAPSHOTS_DIR = 'snapshots'
 const PENDING_DIR = 'pending'
 const SCAN_CACHE_DIR = 'scan-cache'
+const ADVICE_IGNORES_DIR = 'advice-ignores'
 
 /** 持锁期间每隔这么久刷新一次锁的时间戳；超过 STALE 没刷新按残留处理（兜底持锁进程崩溃后 pid 被复用）。 */
 const IMPORT_LOCK_REFRESH_MS = 10_000
@@ -373,6 +376,7 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
   readonly pending: ClaimKvTable<P>
   readonly scanCache: KvTable<C>
   readonly recallStats: BatchKvTable<RecallStats>
+  readonly adviceIgnores: KvTable<AdviceIgnore>
 
   private readonly stateDir: string
   private readonly opts: SidecarOptions<S, P, C>
@@ -396,6 +400,7 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
     this.pending = new EntryFileTable(join(this.stateDir, PENDING_DIR), safeKey, opts.schemas.pending, gated)
     this.scanCache = new EntryFileTable(join(this.stateDir, SCAN_CACHE_DIR), sha1, opts.schemas.scanCache, gated)
     this.recallStats = new MapFileTable(join(this.stateDir, RECALL_STATS_FILE), recallStatsSchema, ungated)
+    this.adviceIgnores = new EntryFileTable(join(this.stateDir, ADVICE_IGNORES_DIR), sha1, adviceIgnoreSchema, ungated)
   }
 
   private locked<R>(fn: () => Promise<R>): Promise<R> {

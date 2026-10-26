@@ -20,7 +20,7 @@ const library = (count: number, memoryRoot = '/home/me/.dsh/memories'): LibraryV
 const health = (semanticCachedAt: number | null): HealthView => ({
   version: GUI_VIEW_VERSION,
   governanceEnabled: true,
-  layers: [{ layer: { kind: 'global' }, totalMemories: 1, score: 90, tier: 'green', gate: { secret: false }, issues: [], staleCount: 0, semanticCachedAt, overflow: null }],
+  layers: [{ layer: { kind: 'global' }, totalMemories: 1, score: 90, tier: 'green', gate: { secret: false }, issues: [], staleCount: 0, semanticCachedAt, overflow: null, ignored: [] }],
 })
 const pending = (items: PendingView['items'] = []): PendingView => ({ version: GUI_VIEW_VERSION, dot: 'none', items, levelCounts: levelCountsOf(items), typeLabels: {} })
 

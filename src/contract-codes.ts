@@ -94,3 +94,10 @@ export type OverflowMode = (typeof OVERFLOW_MODES)[number]
 /** 档位：relax 的 tier ≥ 1，上限 × (1 + 0.25 × tier) 是放宽后的天花板；strict 只有一档（用到 95%），tier 恒为 0。
  *  快照组装算出档位、待决账本按档位记超限提醒，两边共用这个形状。 */
 export type OverflowLevel = { mode: OverflowMode; tier: number }
+
+/**
+ * 用户能「忽略」的体检发现类型（GUI 建议整理里除「很久没确认」外的各类，与体检发现同名）。忽略记录存这个值，
+ * 治理侧评分前据它剔除、GUI 命令按它校验；以后加类型往这里追加，旧版本读到不认识的值只是不匹配。
+ */
+export const IGNORABLE_ADVICE_TYPES = ['expired', 'bloat', 'redundancy', 'orphan', 'misplaced', 'unclear'] as const
+export type IgnorableAdviceType = (typeof IGNORABLE_ADVICE_TYPES)[number]

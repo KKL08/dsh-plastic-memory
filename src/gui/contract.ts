@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { memoryRecordSchema } from '../record-schema.ts'
-import { OVERFLOW_MODES, type DirectoryNoteCode, type ScanNoteCode } from '../contract-codes.ts'
+import { IGNORABLE_ADVICE_TYPES, OVERFLOW_MODES, type DirectoryNoteCode, type ScanNoteCode } from '../contract-codes.ts'
 
 /** 密钥遮盖（缺省与注入、视图同一套规则），浏览器半侧给对话卡里来自工具参数的文字用（带 severity: 'suspected'）。 */
 export { maskSecrets, maskSecretSurface, type MaskOptions } from '../secrets.ts'
@@ -13,7 +13,7 @@ export { maskSecrets, maskSecretSurface, type MaskOptions } from '../secrets.ts'
  */
 
 /** 视图 schema 的版本号：视图是派生缓存，形状变了就换号，客户端读到不认识的号按「需要刷新」处理。 */
-export const GUI_VIEW_VERSION = 7
+export const GUI_VIEW_VERSION = 8
 
 /** 视图文件所在目录（相对记忆根目录，POSIX 分隔）。 */
 export const GUI_VIEW_DIR = '.state/gui'
@@ -122,6 +122,16 @@ export const PENDING_LEVEL_OF_KIND = {
 export const ADVICE_TYPES = ['expired', 'bloat', 'redundancy', 'orphan', 'misplaced', 'unclear', 'stale'] as const
 export type AdviceType = (typeof ADVICE_TYPES)[number]
 
+/** 能「忽略」的建议类型：除「很久没确认」外都能（它的出路是「仍然有效」或删除）。名字定义在 contract-codes（治理侧同用）。 */
+export { IGNORABLE_ADVICE_TYPES, type IgnorableAdviceType } from '../contract-codes.ts'
+// 每个能忽略的类型都是建议类型（名字有出入编译不过）
+const IGNORABLE_ARE_ADVICE: readonly AdviceType[] = IGNORABLE_ADVICE_TYPES
+
+/** 这类建议能不能忽略（界面按它出「忽略」按钮）。 */
+export function isIgnorableAdvice(type: AdviceType): boolean {
+  return IGNORABLE_ARE_ADVICE.includes(type)
+}
+
 /** 能「让模型改」（内容重复是「让模型合并」）的建议类型：服务端按它给默认要求，界面按它出按钮。 */
 export const MODEL_EDIT_ADVICE_TYPES = ['bloat', 'redundancy', 'misplaced', 'unclear'] as const satisfies readonly AdviceType[]
 export type ModelEditAdviceType = (typeof MODEL_EDIT_ADVICE_TYPES)[number]
@@ -216,6 +226,14 @@ export const healthLayerSchema = z.object({
   semanticCachedAt: z.number().nullable(),
   /** 本层会话带入的记忆超出上限（已忽略的也算，忽略只是不再提醒）；列为问题、不扣分。没超为 null。 */
   overflow: overflowLevelSchema.nullable(),
+  /**
+   * 本层被用户忽略、没有计分的建议（issues 里已不含它们），按问题类型、再按第一条记忆名排；条数即长度。
+   * memories 是涉及的记忆（内容重复两条，按 id 排序），名称与摘要已遮盖密钥；取消忽略按 type + 这些 id 发 unignore-advice。
+   */
+  ignored: z.array(z.object({
+    type: z.enum(IGNORABLE_ADVICE_TYPES),
+    memories: z.array(z.object({ id: z.string(), name: z.string(), summary: z.string() })).min(1),
+  })),
 })
 export const healthViewSchema = z.object({
   version,
@@ -416,6 +434,14 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
     previous: memoryDraftSchema.optional(),
   }),
   z.object({ cmd: z.literal('dismiss-overflow'), decisionId: z.string() }),
+  /**
+   * 忽略一条建议整理项：记下这几条记忆此刻的内容指纹，之后该项不再出现在待处理、不再扣分；内容变了就不再算已忽略。
+   * memoryIds 是该项涉及的记忆（内容重复为一组，顺序不论；其余类型恰好一条）。记忆不在用回 not-found。
+   * 不改记忆，所以不过跨项目门、不受体检开关影响；同一项再忽略一次只是刷新记录。
+   */
+  z.object({ cmd: z.literal('ignore-advice'), type: z.enum(IGNORABLE_ADVICE_TYPES), memoryIds: z.array(z.string()).min(1) }),
+  /** 取消忽略（健康页「已忽略」里的一条，或刚忽略后的撤销）：本来就没忽略也算成功。 */
+  z.object({ cmd: z.literal('unignore-advice'), type: z.enum(IGNORABLE_ADVICE_TYPES), memoryIds: z.array(z.string()).min(1) }),
   z.object({ cmd: z.literal('scan'), workspacePath: z.string().optional() }),
   z.object({ cmd: z.literal('refresh-views') }),
 ])

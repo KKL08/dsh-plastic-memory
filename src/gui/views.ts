@@ -10,6 +10,7 @@ import { kindOf, overflowLevelOf, overflowScopeOf, verdictLoser } from '../gover
 import { runRuleScan } from '../governance/rule-scan.ts'
 import { byConfidenceThenConfirmed } from '../snapshot.ts'
 import { layerCacheKey, scoreLayer, type LayerPreread, type LayerRef } from '../governance/layer-health.ts'
+import type { IgnoredAdvice } from '../governance/advice-ignores.ts'
 import {
   ADVICE_TYPES, GUI_VIEW_VERSION, PENDING_ITEM_KINDS, PENDING_LEVEL_OF_KIND, PENDING_LEVELS, isAwaitingDecision,
   type AdviceType, type DeletedView, type GlobalViewName, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCard,
@@ -148,7 +149,7 @@ const SEMANTIC_ADVICE_TYPES: ReadonlySet<AdviceType> = new Set(['redundancy', 'm
 
 /**
  * 建议整理（现算、不入账本）：与健康分同一次评分（scoreLayer）的规则发现、语义缓存发现和超期记忆，所以只出体检清单里各层的
- * active 记忆；语义缓存里指向已删、已取代或已不在这一层的记忆的发现，评分已经滤掉。规则类与超期不靠模型，体检关闭时照常列出；
+ * active 记忆；语义缓存里指向已删、已取代或已不在这一层的记忆的发现、用户忽略的建议，评分已经滤掉。规则类与超期不靠模型，体检关闭时照常列出；
  * 语义类和冲突一样，体检关闭时不出（冲突走账本，不在这里）。同一身份（类型 + 排序后的记忆 id）只出一项。
  * 按问题类型排，同类按层（global 在前）、再按（第一条记忆的）名称。
  */
@@ -183,7 +184,7 @@ function typeLabels(registry: TypeRegistry, present: Iterable<string | undefined
   return Object.fromEntries([...types].map(name => [name, registry.get(name).label]))
 }
 
-/** 健康：每层复用 scoreLayer（与 memory_health / memory_scan 同分）；有密钥的层不打分。超限另列（不扣分）；
+/** 健康：每层复用 scoreLayer（与 memory_health / memory_scan 同分，同样剔除用户忽略的建议，另列在 ignored）；有密钥的层不打分。超限另列（不扣分）；
  *  自己没有记忆、不在体检清单里的项目有超限提醒时，单列进 overflowOnlyLayers（只有档位，不打分）。 */
 export function buildHealthView(input: ViewInput): HealthView {
   const overflow = [...input.open, ...input.settled].filter(e => kindOf(e) === 'overflow')
@@ -203,6 +204,7 @@ export function buildHealthView(input: ViewInput): HealthView {
         staleCount: r.health.freshness.staleCount,
         semanticCachedAt: r.semanticCachedAt,
         overflow: overflowOfLayer(overflow, layer),
+        ignored: ignoredOfLayer(r.ignored, input.data),
       }
     }),
     overflowOnlyLayers: [...new Set(overflow.map(overflowScopeOf))]
@@ -211,6 +213,20 @@ export function buildHealthView(input: ViewInput): HealthView {
       .sort()
       .map(path => ({ layer: { kind: 'workspace' as const, workspacePath: path }, overflow: overflowOfLayer(overflow, { kind: 'workspace', path })! })),
   }
+}
+
+/** 本层「已忽略」：记忆名称与摘要遮盖密钥；按问题类型（建议整理的顺序）、再按第一条记忆的名称排。 */
+function ignoredOfLayer(ignored: readonly IgnoredAdvice[], data: LayerPreread): HealthView['layers'][number]['ignored'] {
+  return ignored
+    .map(({ type, memoryIds }) => ({
+      type,
+      memories: memoryIds.map(id => data.byId.get(id)!).map((r) => {
+        const m = maskSecretSurface(r)
+        return { id: r.id, name: m.name, summary: m.summary }
+      }),
+    }))
+    .sort((a, b) => ADVICE_TYPES.indexOf(a.type) - ADVICE_TYPES.indexOf(b.type)
+      || (a.memories[0]!.name < b.memories[0]!.name ? -1 : a.memories[0]!.name > b.memories[0]!.name ? 1 : 0))
 }
 
 /** 超限按会话所属项目记账（无项目的会话记在 global），与健康分层同口径。 */

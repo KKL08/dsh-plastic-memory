@@ -8,7 +8,8 @@ import type { KvTable } from '../kv-table.ts'
 import type { Finding, ScanCacheEntry } from '../governance/schema.ts'
 import { runRuleScan, buildMalformedFindings } from '../governance/rule-scan.ts'
 import { runSemanticScan, SEMANTIC_SCAN_MAX_RECORDS, type SemanticLlm } from '../governance/semantic-scan.ts'
-import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, checkupRowBase, GLOBAL_CACHE_KEY, type LayerRef, TIER_LABEL } from '../governance/layer-health.ts'
+import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, checkupRowBase, ignoredNote, GLOBAL_CACHE_KEY, type LayerRef, TIER_LABEL } from '../governance/layer-health.ts'
+import { applyIgnores, type AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import { prereadLayers, listingNotes, checkupWorkspaces, renderDirectoryNotes } from './layer-preread.ts'
 import type { DirectoryNote } from '../storage/table.ts'
 import { runCrossWsScan, findEntityDuplicates, type CrossWsDuplicate } from '../governance/cross-ws.ts'
@@ -23,6 +24,8 @@ export interface ScanToolDeps {
   registry: TypeRegistry
   decisions: PendingDecisionsStore
   cache: KvTable<ScanCacheEntry>
+  /** 建议忽略表：被用户忽略的建议不列为发现、不扣分（与记忆页同口径）。缺省按没有忽略算。 */
+  ignores?: Pick<AdviceIgnoreStore, 'list'>
   /** 按触发调用的 session 取该会话的 AGENTS.md/CLAUDE.md 基线（宿主投影按 session 隔离）。 */
   getBaseline: (exec: ToolRunContext) => readonly string[] | null
   /** 按调用解析（而非加载时一次性解析）——provider/model 只能从触发调用的 exec 上下文里的
@@ -53,6 +56,8 @@ export interface SingleScanResult {
     items: Array<{ id: string; memoryIds: string[]; workspaces: string[]; summary: string; isNew: boolean }>
   }
   stats: { scanned: number; clean: number; issues: number; byType: Record<string, number> }
+  /** 用户在记忆页忽略、这次没有列出的建议条数。 */
+  ignoredCount: number
   /** global 提升候选：模型存时标了 globalCandidate 的 workspace 记忆，待用户确认后 memory_promote。 */
   promoteCandidates: { items: Array<{ id: string; summary: string }>; more: number }
   semanticCachedAt: number | null
@@ -73,6 +78,8 @@ export interface CheckupScanResult {
     gate: { secret: boolean }
     issues: number
     issueSummary: string
+    /** 用户忽略、没有计分的建议条数。 */
+    ignoredCount: number
   }>
   pendingDecisions: {
     created: number
@@ -111,6 +118,8 @@ export function renderScanResult(result: ScanToolResult): string {
       const gateNote = row.gate.secret ? '｜⚠️ 检出密钥' : ''
       lines.push(`- ${name}：${Math.floor(row.score)}/100（${TIER_LABEL[row.tier]}）｜${row.totalMemories} 条｜${row.issueSummary}${gateNote}`)
     }
+    const ignored = ignoredNote(result.rows.reduce((n, row) => n + row.ignoredCount, 0))
+    if (ignored !== undefined) lines.push(ignored)
     for (const c of result.crossLayerConflicts) {
       lines.push(`⚠️ 跨层冲突：global ${c.globalId} 与 ${c.workspaces.length} 个项目存在待决冲突（${c.workspaces.join('、')}）——被多数项目反对的全局规则建议优先裁定（memory_confirm resolve：${c.decisionIds.join('、')}）`)
     }
@@ -143,6 +152,8 @@ export function renderScanResult(result: ScanToolResult): string {
   for (const f of result.findings) {
     lines.push(`- [${f.severity}] ${f.type} ${f.memoryIds.join('+')}：${f.summary} → ${f.suggestedAction}`)
   }
+  const ignored = ignoredNote(result.ignoredCount)
+  if (ignored !== undefined) lines.push(ignored)
   // 证据下钻提示：治理裁决是高赌注不可逆动作，下钻引导不低于 strict
   if (result.findings.some(f => f.type === 'expired')) {
     lines.push('过期候选可先用 memory_source 回查出处，向用户复述当时语境，再决定 refresh 还是 forget。')
@@ -456,13 +467,15 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     else if (passBaseline === null) notes.push({ code: 'baseline-session-scoped', text: '基线随当前会话，扫描其他 workspace 时垂直冲突检测已跳过' })
   }
 
-  const problemIds = new Set(pass.findings.flatMap(f => f.memoryIds))
+  // 用户忽略的建议不列为发现（语义缓存仍存完整结果：取消忽略后不用重扫就能回来）
+  const { kept: findings, ignored } = applyIgnores(pass.findings, data.ignores, data.byId)
+  const problemIds = new Set(findings.flatMap(f => f.memoryIds))
   const byType: Record<string, number> = {}
-  for (const f of pass.findings) byType[f.type] = (byType[f.type] ?? 0) + 1
+  for (const f of findings) byType[f.type] = (byType[f.type] ?? 0) + 1
   const stats = {
     scanned: records.length,
     clean: records.filter(r => !problemIds.has(r.id)).length,
-    issues: pass.findings.length,
+    issues: findings.length,
     byType,
   }
 
@@ -482,9 +495,9 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     kind: 'single',
     layer: wsPath !== undefined ? 'workspace' : 'global',
     ...(wsPath !== undefined ? { workspacePath: wsPath } : {}),
-    findings: pass.findings,
+    findings,
     pendingDecisions: { created: pass.created, existing: pass.existing, items: pass.decisionItems },
-    stats, promoteCandidates,
+    stats, ignoredCount: ignored.length, promoteCandidates,
     semanticCachedAt: pass.semanticCachedAt,
     notes,
     directoryNotes: [...listingNotes(listing, { includeEmpty: false }), ...data.directoryNotes],

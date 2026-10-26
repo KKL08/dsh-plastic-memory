@@ -13,6 +13,7 @@ import { candidateFingerprint, kindOf, verdictLoser, type PendingDecisionsStore 
 import { editFingerprint, isConflicting, type SnapshotStore } from '../governance/snapshots.ts'
 import type { PendingDecision, ScanCacheEntry, SnapshotRecord } from '../governance/schema.ts'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
+import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import { executeConfirm } from '../tools/confirm.ts'
 import { executeForget } from '../tools/forget.ts'
 import { executePromote } from '../tools/promote.ts'
@@ -40,6 +41,8 @@ export interface MemoryCommandDeps {
   decisions: PendingDecisionsStore
   snapshots: SnapshotStore
   cache: KvTable<ScanCacheEntry>
+  /** 建议忽略表（ignore-advice / unignore-advice 写它）。 */
+  ignores: AdviceIgnoreStore
   registry: TypeRegistry
   agentsMd: AgentsMdWriter
   views: Pick<ViewWriter, 'request' | 'rewriteAll'>
@@ -72,7 +75,8 @@ export interface MemoryCommandDefinition {
 
 /** 依赖体检开关的子命令（对应四个治理工具的能力）；forget / restore / hard-delete / confirm / edit-memory / merge-memories /
  *  refresh-views 不受开关影响，撤销直接改、直接合并的 undo 也不受（见 isEditUndo）。 */
-// dismiss-overflow 不在此列：超限提醒在体检关闭时照样入账，忽略它不属于治理动作
+// dismiss-overflow 不在此列：超限提醒在体检关闭时照样入账，忽略它不属于治理动作；
+// ignore-advice / unignore-advice 同理：规则类建议在体检关闭时照样列出，忽略只是用户的处置
 const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'undo', 'promote', 'promote-memory', 'keep-local', 'scan'])
 
 /** 不写任何东西的子命令：成功后也不重写视图。 */
@@ -497,6 +501,20 @@ async function dispatch(
       await deps.decisions.settle(entry.id, 'dismiss', now)
       return { ok: true, cmd, decisionId: entry.id }
     }
+
+    case 'ignore-advice': {
+      // 内容重复是一组记忆一项，其余类型每条记忆一项
+      if (command.type !== 'redundancy' && command.memoryIds.length !== 1) return fail(cmd, 'invalid-args', `${command.type} 一项只对应一条记忆`)
+      // 按借来的会话定位（与视图按 id 取的那份同口径）；指纹按此刻的内容记
+      const records = await Promise.all([...new Set(command.memoryIds)].map(id => deps.store.get(id, { workspacePath: gov.workspacePath })))
+      if (!records.every(r => r?.status === 'active')) return notFound(command.memoryIds.join('、'))
+      const entry = await deps.ignores.ignore(command.type, records.map(r => r!), now)
+      return { ok: true, cmd, memoryIds: entry.memoryIds }
+    }
+
+    case 'unignore-advice':
+      await deps.ignores.unignore(command.type, command.memoryIds)
+      return { ok: true, cmd, memoryIds: [...command.memoryIds].sort() }
 
     case 'scan': {
       // 在借来的会话的 agent 上解析模型，拿不到就不扫（只跑规则层会让界面以为体检做完了）

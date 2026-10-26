@@ -13,7 +13,7 @@ type Layer = HealthView['layers'][number]
 
 const layer = (overrides: Partial<Layer> = {}): Layer => ({
   layer: WS, totalMemories: 12, score: 86, tier: 'green', gate: { secret: false },
-  issues: [], staleCount: 0, semanticCachedAt: new Date(2026, 9, 15).getTime(), overflow: null,
+  issues: [], staleCount: 0, semanticCachedAt: new Date(2026, 9, 15).getTime(), overflow: null, ignored: [],
   ...overrides,
 })
 const health = (layers: Layer[], governanceEnabled = true): HealthView => ({ version: GUI_VIEW_VERSION, governanceEnabled, layers })

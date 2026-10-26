@@ -11,6 +11,7 @@ import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
+import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
 import { REDACTED_PLACEHOLDER, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, type PendingDecision } from '../src/governance/schema.ts'
 import type { ClaimKvTable } from '../src/kv-table.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
@@ -62,7 +63,7 @@ function env(opts: EnvOpts = {}) {
   const cache = sidecar.scanCache
   const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, cache, registry, memoryRoot: root, now: () => clock.now }) })
   const command = createMemoryCommand({
-    memoryRoot: root, store, decisions, snapshots, cache, registry, views,
+    memoryRoot: root, store, decisions, snapshots, cache, ignores: new AdviceIgnoreStore(sidecar.adviceIgnores), registry, views,
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),
     resolveContext: async () => ({ workspacePath: 'workspacePath' in opts ? opts.workspacePath : SESSION_WS, delegationDepth: opts.delegationDepth ?? 0, session: { id: 'sess-1' } }),
     getLlm: () => (opts.llm === undefined ? null : opts.llm),

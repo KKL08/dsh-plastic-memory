@@ -33,6 +33,7 @@ import { OVERFLOW_MODES, type OverflowMode } from './contract-codes.ts'
 import { resolveHealthThresholds, type HealthSensitivity } from './governance/health-presets.ts'
 import { PendingDecisionsStore, overflowScopeOf } from './governance/decisions.ts'
 import { SnapshotStore } from './governance/snapshots.ts'
+import { AdviceIgnoreStore } from './governance/advice-ignores.ts'
 import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from './governance/schema.ts'
 import type { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { baselineProjectionDefinition, readBaseline } from './governance/baseline.ts'
@@ -172,6 +173,8 @@ export async function apply(ctx: Context, config: Config) {
   const decisions = new PendingDecisionsStore(sidecar.pending)
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const scanCache = sidecar.scanCache
+  // 建议忽略表：健康分、体检、GUI 视图同一份剔除口径
+  const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
   // AGENTS.md 基线投影走可选注册：插件的 inject 不列 sessionProjections（精简 profile 可能没有这个服务），
   // 改在 ctx.inject(['sessionProjections'], …) 里注册，这是宿主 registry 文档（dsh-session-projection README）
   // 给出的保留可选注册的写法。disposer 随 child fiber 走，插件卸载键即消失。服务缺席时插件照常挂载，
@@ -426,13 +429,13 @@ export async function apply(ctx: Context, config: Config) {
       // 基线按触发调用的 session 取（宿主投影 cell 按 session 隔离，防多会话串台）。
       // 扫描会写语义缓存、登记待决冲突，归写工具；health 纯读，不套门
       registerWrite(createScanTool({
-        store, registry, decisions, cache: scanCache,
+        store, registry, decisions, cache: scanCache, ignores,
         getBaseline,
         getLlm,
         resolveContext,
       })),
       ctx.tools.register(createHealthTool({
-        store, registry, decisions, cache: scanCache,
+        store, registry, decisions, cache: scanCache, ignores,
         get thresholds() { return resolveHealthThresholds(config.governance.health.sensitivity.get()) },
         resolveContext,
       })),
@@ -454,14 +457,14 @@ export async function apply(ctx: Context, config: Config) {
     const writer = new ViewWriter({
       memoryRoot, log: ctx.logger,
       collect: () => collectGlobalViews({
-        store, decisions, cache: scanCache, registry, memoryRoot, isGovernanceEnabled: () => config.governance.enabled.get(), bootedAt,
+        store, decisions, cache: scanCache, ignores, registry, memoryRoot, isGovernanceEnabled: () => config.governance.enabled.get(), bootedAt,
       }),
     })
     views = writer
     for (const [cwd, workspacePath] of earlyWorkspaces) void writer.requestWorkspace(cwd, workspacePath)
     earlyWorkspaces.clear()
     commands.register(createMemoryCommand({
-      memoryRoot, store, decisions, snapshots, cache: scanCache, registry, agentsMd, views: writer,
+      memoryRoot, store, decisions, snapshots, cache: scanCache, ignores, registry, agentsMd, views: writer,
       resolveContext, getLlm, getBaseline, log: ctx.logger,
       isGovernanceEnabled: () => config.governance.enabled.get(),
     }))
