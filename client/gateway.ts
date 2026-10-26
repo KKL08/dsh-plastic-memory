@@ -72,6 +72,8 @@ export interface MemoryGateway {
   execute(sessionId: string, command: MemoryCommand): Promise<MemoryCommandResult>
   /** hook：删过的记忆（见 createDeletionStore），各处显示同一条记忆时读它。 */
   useDeletions(): Deletions
+  /** hook：借来的会话能不能用模型、用的是哪个（「让模型改」的按钮与提示）。每个会话在页面里只问一次 model-info。 */
+  useModel(session: BorrowedSession): ModelState
   /** hook：插件配置里界面要用的几项；宿主还没给出（或不服务这份配置）时为 undefined。 */
   useConfig(): PluginConfig | undefined
   /** 写一个配置字段（`configForms.set`，单字段快捷写入）；宿主接受为 true。 */
@@ -81,6 +83,9 @@ export interface MemoryGateway {
   /** 用默认应用打开宿主上的文件，或在文件管理器中显示；宿主接受为 true。 */
   openPath(path: string, action?: 'open' | 'reveal'): Promise<boolean>
 }
+
+/** unknown：还没问到、或没有会话，按可用处理；unavailable：服务端说借来的会话拿不到模型；model 缺省 = 不知道名字。 */
+export type ModelState = { status: 'unknown' } | { status: 'ready'; model: string | undefined } | { status: 'unavailable' }
 
 /** 界面用到的配置项（宿主配置段 `plastic-memory` 的子集，值已按 schema 带上默认值）。 */
 export interface PluginConfig {
@@ -476,6 +481,29 @@ function createRootStore(run: RunLine) {
   return store
 }
 
+const MODEL_UNKNOWN: ModelState = Object.freeze({ status: 'unknown' })
+
+/** 各会话的模型：第一次用到时问一次 model-info，几处同时用只发一条，结果记到页面关掉。 */
+function createModelStore(run: RunLine) {
+  const states = new Map<string, ModelState>()
+  const listeners = new Set<() => void>()
+  return {
+    get: (sessionId: string | undefined) => (sessionId === undefined ? undefined : states.get(sessionId)) ?? MODEL_UNKNOWN,
+    subscribe(fn: () => void) { listeners.add(fn); return () => { listeners.delete(fn) } },
+    probe(sessionId: string) {
+      if (states.has(sessionId)) return
+      states.set(sessionId, MODEL_UNKNOWN)
+      void run(sessionId, encodeMemoryCommand({ cmd: 'model-info' })).then((r) => {
+        const result = decodeExecution('model-info', r)
+        // 别的失败（宿主出错、旧插件不认这条命令）不当成拿不到模型：按钮照常可点，真拿不到时生成会写原因
+        states.set(sessionId, result.ok ? { status: 'ready', model: result.model }
+          : result.code === 'llm-unavailable' ? { status: 'unavailable' } : { status: 'ready', model: undefined })
+        for (const fn of listeners) fn()
+      })
+    },
+  }
+}
+
 interface ReadState<V> { key: string; trigger: string; view: ViewState<V> }
 
 /** 网关绑定函数：插槽根组件用自己的标准 props 绑定一份网关。 */
@@ -500,6 +528,7 @@ export function createHostGateway(ctx: HostContext): BindGateway {
     return result
   }
   const root = createRootStore(run)
+  const models = createModelStore(run)
   // configForms 是可选服务：就位时记下，离开时清掉（根上下文没 inject 它，不能直接读）
   let configForms: ConfigFormsService | undefined
   let binding: ConfigBinding | undefined
@@ -594,6 +623,12 @@ export function createHostGateway(ctx: HostContext): BindGateway {
       execute,
       useDeletions() {
         return useSyncExternalStore(deletions.subscribe, deletions.get)
+      },
+      useModel(session) {
+        const sessionId = session.kind === 'ready' ? session.sessionId : undefined
+        const state = useSyncExternalStore(models.subscribe, () => models.get(sessionId))
+        useEffect(() => { if (sessionId !== undefined) models.probe(sessionId) }, [sessionId])
+        return state
       },
       useConfig() {
         const { get, subscribe } = config()

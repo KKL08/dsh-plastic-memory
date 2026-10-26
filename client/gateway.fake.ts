@@ -19,6 +19,8 @@ export interface FakeGatewayInit {
   config?: PluginConfig
   /** readFile 能读到的文件（绝对路径 → 全文）。 */
   files?: Record<string, string>
+  /** 借来的会话的模型名；null = 拿不到模型；缺省 = 可用但不知道名字。 */
+  model?: string | null
 }
 
 export interface FakeGateway extends MemoryGateway {
@@ -106,6 +108,10 @@ export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
       useRevision()
       sessionRequests.push(workspacePath)
       return session
+    },
+    useModel(borrowed) {
+      if (borrowed.kind === 'none') return { status: 'unknown' }
+      return init.model === null ? { status: 'unavailable' } : { status: 'ready', model: init.model }
     },
     useCurrentWorkspace() {
       useRevision()

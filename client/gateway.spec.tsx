@@ -579,6 +579,42 @@ describe('createHostGateway', () => {
     })
   })
 
+  it('useModel：每个会话在页面里只问一次 model-info，几处同时问也只发一条；拿到模型名就是 ready', async () => {
+    const replies: Record<string, string> = { s1: JSON.stringify({ ok: true, cmd: 'model-info', model: 'deepseek-v4-flash' }) }
+    const execute = vi.fn(async (sid: string, line: string) => {
+      executed.push(`${sid} ${line}`)
+      return { ok: true as const, value: { commandId: 'c', result: { kind: 'success' as const, text: replies[sid]! } } }
+    })
+    const bind = createHostGateway(fakeCtx({ remote: { commands: { execute } } }))
+    const a = bind(props)
+    const b = bind({ ...props })
+    const session = { kind: 'ready', sessionId: 's1', cwd: '/w/app' } as const
+    const { result } = renderHook(() => [a.useModel(session), b.useModel(session)] as const)
+    expect(result.current[0]).toEqual({ status: 'unknown' })
+    await waitFor(() => { expect(result.current).toEqual([{ status: 'ready', model: 'deepseek-v4-flash' }, { status: 'ready', model: 'deepseek-v4-flash' }]) })
+    renderHook(() => a.useModel(session))
+    expect(executed).toEqual(['s1 /memory model-info'])
+  })
+
+  it('useModel：拿不到模型是 unavailable；别的失败（宿主出错、旧插件不认）不当成拿不到，按可用处理；没有会话不问', async () => {
+    const replies: Record<string, string> = {
+      s1: JSON.stringify({ ok: false, cmd: 'model-info', code: 'llm-unavailable' }),
+      s2: JSON.stringify({ ok: false, code: 'invalid-args', detail: 'cmd: Invalid input' }),
+    }
+    const execute = vi.fn(async (sid: string, line: string) => {
+      executed.push(`${sid} ${line}`)
+      return { ok: true as const, value: { commandId: 'c', result: { kind: 'error' as const, text: replies[sid]! } } }
+    })
+    const gateway = createHostGateway(fakeCtx({ remote: { commands: { execute } } }))(props)
+    const { result } = renderHook(() => [
+      gateway.useModel({ kind: 'ready', sessionId: 's1', cwd: undefined }),
+      gateway.useModel({ kind: 'ready', sessionId: 's2', cwd: undefined }),
+      gateway.useModel({ kind: 'none' }),
+    ] as const)
+    await waitFor(() => { expect(result.current).toEqual([{ status: 'unavailable' }, { status: 'ready', model: undefined }, { status: 'unknown' }]) })
+    expect(executed).toEqual(['s1 /memory model-info', 's2 /memory model-info'])
+  })
+
   it('openPath：打开只带 path，显示目录带 action: reveal；宿主拒绝或抛错都是 false', async () => {
     const gateway = createHostGateway(fakeCtx())(props)
     expect(await gateway.openPath('/m/app/a.md')).toBe(true)
