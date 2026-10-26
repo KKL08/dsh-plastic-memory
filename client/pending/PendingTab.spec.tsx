@@ -654,11 +654,11 @@ describe('待处理：建议整理', () => {
     expect(screen.queryByRole('button', { name: /展开其余/ })).toBeNull()
   })
 
-  it('其他组同样折叠：待你处理超过 5 条也只先显示 5 条', () => {
+  it('只折叠建议整理：待你处理超过 5 条也全部显示', () => {
     const conflicts = Array.from({ length: 6 }, (_, i) => ({ ...horizontal, decisionId: `d${i}`, summary: `冲突 ${i}` }) as PendingItem)
     setup(conflicts)
-    expect(screen.getByRole('button', { name: '展开其余 1 条' })).toBeInTheDocument()
-    expect(screen.queryByText('冲突 5')).toBeNull()
+    expect(screen.queryByRole('button', { name: /展开其余/ })).toBeNull()
+    expect(screen.getByText('冲突 5')).toBeInTheDocument()
   })
 
   it('直达的记忆在折叠里：这一组自动展开，那张卡高亮', () => {
