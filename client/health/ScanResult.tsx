@@ -60,7 +60,8 @@ export function ScanResult({ state, onOpen, off }: {
   const added = state.added
   const parts: ReactNode[] = []
   if (added !== undefined && added.pending > 0) parts.push(link('pending', t('scan.result.newPending', { n: formatNumber(added.pending) })))
-  if (added !== undefined && added.advice > 0) parts.push(link('pending', t('scan.result.newAdvice', { n: formatNumber(added.advice) })))
+  // 英文单复数不同（中文两条同文）
+  if (added !== undefined && added.advice > 0) parts.push(link('pending', t(added.advice === 1 ? 'scan.result.newAdvice.one' : 'scan.result.newAdvice', { n: formatNumber(added.advice) })))
   parts.push(link('health', t('scan.result.scores')))
   return (
     <>

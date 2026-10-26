@@ -1,10 +1,13 @@
 // 页头「体检当前项目」：主 / 次按钮、进行中、失败、拿不到模型、体检关闭四种状态，以及结果行（新增条数、链接、说明）。挂在真实记忆页里测。
 import { describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { GUI_VIEW_VERSION, type HealthView, type MemoryCommandResult, type PendingView } from '../../src/gui/contract.ts'
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { MemoryPage } from '../MemoryPage.tsx'
+import { createTranslator } from '../i18n.tsx'
+import { en } from '../locales.ts'
 import { createNavStore } from '../nav.ts'
+import { PanelShell } from '../ui/PanelShell.tsx'
 import { memory, renderInShell, levelCountsOf } from '../test-utils.tsx'
 
 const health = (governanceEnabled = true): HealthView => ({ version: GUI_VIEW_VERSION, governanceEnabled, layers: [] })
@@ -140,6 +143,19 @@ describe('体检当前项目', () => {
     it('内容检查只查了一部分：如实写出来', async () => {
       const { statusLine } = await scan(scanned({ notes: ['semantic-truncated'] }))
       expect(statusLine()).toHaveTextContent(/^没有发现新问题·查看分数 ›记忆较多，这次内容检查只看了一部分/)
+    })
+
+    it('英文：数字在前，建议按单复数', async () => {
+      const lineIn = async (added: { pending: number; advice: number }) => {
+        const gateway = createFakeGateway({ currentWorkspace: '/w/app', views: { pending: noPending, health: health() }, respond: () => scanned({ added }) })
+        const { container, unmount } = render(<PanelShell gateway={gateway} t={createTranslator(en)}><MemoryPage nav={createNavStore()} /></PanelShell>)
+        await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Check this project' })) })
+        const text = container.querySelector('.pm-scan-status')!.textContent
+        unmount()
+        return text
+      }
+      expect(await lineIn({ pending: 2, advice: 1 })).toBe('Checkup finished: 2 new to handle ›·1 new suggestion ›·View scores ›')
+      expect(await lineIn({ pending: 0, advice: 3 })).toBe('Checkup finished: 3 new suggestions ›·View scores ›')
     })
 
     it('原地跑：体检完成不切走当前 tab', async () => {
