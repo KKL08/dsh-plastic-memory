@@ -3,7 +3,7 @@ import { kindOf, verdictLoser, type PendingDecisionsStore } from '../governance/
 import type { SnapshotStore } from '../governance/snapshots.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { DecisionRejectCode, GovernanceRejectCode } from '../contract-codes.ts'
-import { crossWorkspaceNote, gateRecords, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
+import { crossWorkspaceNote, gateRecords, locateCopy, type CopyTarget, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
 
 export interface ConfirmToolDeps {
   store: MemoryStore
@@ -16,6 +16,12 @@ export interface ConfirmToolDeps {
 export type ConfirmArgs =
   | { action: 'refresh'; memoryId: string; allowCrossWorkspace?: boolean }
   | { action: 'resolve'; decisionId: string; verdict: 'keep-left' | 'keep-right' | 'keep-both' | 'dismiss'; allowCrossWorkspace?: boolean }
+
+/** 只给 GUI 用的选项，不在工具参数里，模型传不进来。 */
+export interface ConfirmOptions {
+  /** refresh 时同 id 多副本只认这一份（GUI 按页面上那一份操作）；缺省按会话 workspace 定位。跨 workspace 门照旧按会话判定。 */
+  target?: CopyTarget
+}
 
 /** otherWorkspaces：带参数放行、属于其他项目的记录；error 带 code 时 rejected 列出被拒记录。 */
 export type ConfirmResult =
@@ -32,6 +38,7 @@ export async function executeConfirm(
   rawArgs: unknown,
   context: GovernanceContext,
   deps: ConfirmToolDeps,
+  options: ConfirmOptions = {},
 ): Promise<ConfirmResult> {
   const args = rawArgs as ConfirmArgs
   const now = deps.now?.() ?? Date.now()
@@ -39,7 +46,7 @@ export async function executeConfirm(
   const locate = (id: string) => deps.store.get(id, { workspacePath: context.workspacePath })
 
   if (args.action === 'refresh') {
-    const target = await locate(args.memoryId)
+    const target = options.target === undefined ? await locate(args.memoryId) : await locateCopy(deps.store, args.memoryId, options.target)
     if (!target || target.status === 'deleted') {
       return { kind: 'error', message: `记忆不存在或已删除：${args.memoryId}` }
     }

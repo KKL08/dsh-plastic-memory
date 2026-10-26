@@ -64,7 +64,7 @@ export interface MemoryCommandDefinition {
   handler: (invocation: MemoryCommandInvocation) => Promise<HostCommandResult>
 }
 
-/** 依赖体检开关的子命令（对应四个治理工具的能力）；forget / restore / hard-delete / refresh-views 不受开关影响。 */
+/** 依赖体检开关的子命令（对应四个治理工具的能力）；forget / restore / hard-delete / confirm / refresh-views 不受开关影响。 */
 // dismiss-overflow 不在此列：超限提醒在体检关闭时照样入账，忽略它不属于治理动作
 const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'undo', 'promote', 'keep-local', 'scan'])
 
@@ -299,6 +299,15 @@ async function dispatch(
       if ((r.skippedSecrets?.length ?? 0) > 0) return fail(cmd, 'has-secret', `记忆 ${command.memoryId} 含密钥，删除后不可恢复，未做任何改动`)
       if (!r.ok) return fail(cmd, 'not-found', r.message)
       return { ok: true, cmd, memoryIds: r.forgotten, ...(r.snapshotId !== null ? { snapshotId: r.snapshotId } : {}) }
+    }
+
+    case 'confirm': {
+      const r = await executeConfirm(
+        { action: 'refresh', memoryId: command.memoryId, allowCrossWorkspace: command.allowCrossWorkspace },
+        gov, executorDeps, command.layer !== undefined ? { target: command.layer } : {},
+      )
+      if (r.kind === 'error') return r.code === 'cross-workspace' ? fail(cmd, 'cross-workspace', r.message, r.rejected) : fail(cmd, 'not-found', r.message)
+      return { ok: true, cmd, memoryIds: [command.memoryId] }
     }
 
     case 'dismiss-overflow': {

@@ -1270,6 +1270,8 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect((await t.command('/memory info')).body).toMatchObject({ ok: true, cmd: 'info' })
     expect((await t.command('/memory refresh-views')).body).toEqual({ ok: true, cmd: 'refresh-views' })
     expect((await t.command('/memory restore {"memoryId":"mem_keep"}')).body).toMatchObject({ ok: false, code: 'not-found' })
+    // 「仍然有效」在体检关闭时照常可用：很久没确认的建议不靠模型，关闭时照样列出
+    expect((await t.command('/memory confirm {"memoryId":"mem_none"}')).body).toMatchObject({ ok: false, code: 'not-found' })
 
     await t.update({ governance: { enabled: true } })
     expect([...t.defs.keys()]).toEqual(expect.arrayContaining(GOVERNANCE_TOOLS))

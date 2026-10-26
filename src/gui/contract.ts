@@ -314,6 +314,8 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   z.object({ cmd: z.literal('forget'), memoryId: z.string(), layer, allowCrossWorkspace }),
   z.object({ cmd: z.literal('restore'), memoryId: z.string(), layer, allowCrossWorkspace }),
   z.object({ cmd: z.literal('hard-delete'), memoryId: z.string(), layer, allowCrossWorkspace }),
+  /** 刷新一条记忆的确认时间（建议整理「很久没确认」的「仍然有效」），内容不动。不受体检开关影响。 */
+  z.object({ cmd: z.literal('confirm'), memoryId: z.string(), layer, allowCrossWorkspace }),
   z.object({ cmd: z.literal('dismiss-overflow'), decisionId: z.string() }),
   z.object({ cmd: z.literal('scan'), workspacePath: z.string().optional() }),
   z.object({ cmd: z.literal('refresh-views') }),

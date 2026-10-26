@@ -1037,6 +1037,47 @@ describe('scan', () => {
   })
 })
 
+describe('confirm（仍然有效）', () => {
+  const DAY = 86_400_000
+  it('刷新确认时间、内容与 updatedAt 不动', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_old', type: 'project', scope: 'workspace', workspacePath: SESSION_WS, lastConfirmedAt: NOW - 8 * DAY, updatedAt: 5 }))
+    const body = ok(await e.run({ cmd: 'confirm', memoryId: 'mem_old', layer: { kind: 'workspace', workspacePath: SESSION_WS } }))
+    expect(body).toMatchObject({ cmd: 'confirm', memoryIds: ['mem_old'] })
+    const after = (await e.store.get('mem_old'))!
+    expect([after.lastConfirmedAt, after.updatedAt, after.content]).toEqual([NOW, 5, '内容'])
+  })
+
+  it('已删除或不存在的记忆 → not-found', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_gone' }))
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_gone' }))
+    expect(err(await e.run({ cmd: 'confirm', memoryId: 'mem_gone' })).code).toBe('not-found')
+    expect(err(await e.run({ cmd: 'confirm', memoryId: 'mem_none' })).code).toBe('not-found')
+  })
+
+  it('别的项目的记忆：先要 allowCrossWorkspace，带上才刷新', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_o', scope: 'workspace', workspacePath: OTHER_WS, lastConfirmedAt: 1 }))
+    const layer = { kind: 'workspace', workspacePath: OTHER_WS } as const
+    expect(err(await e.run({ cmd: 'confirm', memoryId: 'mem_o', layer }))).toMatchObject({ code: 'cross-workspace', rejected: [{ id: 'mem_o', workspacePath: OTHER_WS }] })
+    expect((await e.store.get('mem_o'))!.lastConfirmedAt).toBe(1)
+    ok(await e.run({ cmd: 'confirm', memoryId: 'mem_o', layer, allowCrossWorkspace: true }))
+    expect((await e.store.get('mem_o'))!.lastConfirmedAt).toBe(NOW)
+  })
+
+  it('同 id 在全局和本项目各一份：带层时只刷新那一份', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_dup', name: '全局那份', lastConfirmedAt: 1 }))
+    await e.store.create(record({ id: 'mem_dup', name: '本项目那份', scope: 'workspace', workspacePath: SESSION_WS, lastConfirmedAt: 1 }))
+    ok(await e.run({ cmd: 'confirm', memoryId: 'mem_dup', layer: { kind: 'global' } }))
+    const copy = async (layer: Parameters<MemoryStore['readLayer']>[0]) =>
+      (await e.store.readLayer(layer, { includeArchive: true })).records.find(l => l.record.id === 'mem_dup')!.record.lastConfirmedAt
+    expect(await copy({ kind: 'global' })).toBe(NOW)
+    expect(await copy({ kind: 'workspace', path: SESSION_WS })).toBe(1)
+  })
+})
+
 describe('refresh-views', () => {
   it('写出四个全局视图，并清掉超出保留窗口的删一方裁决', async () => {
     const e = env({ now: 1000 })
