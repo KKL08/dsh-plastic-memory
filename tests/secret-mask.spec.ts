@@ -190,3 +190,20 @@ describe('PGP 私钥块：同 PEM，从 BEGIN 到对应的 END 整块遮住', ()
     expect(maskSecrets(`签名私钥：\n${block}\n用完删掉`)).toBe(`签名私钥：\n> ${SECRET_MASK}  \n用完删掉`)
   })
 })
+
+describe('私钥块正则：行尾带空白的头字段、没有 END 行时不回溯爆炸', () => {
+  const pgpBegin = ['-----BEGIN', 'PGP PRIVATE KEY BLOCK-----'].join(' ')
+  const headers = (trailing: string) => `Note: something here${trailing}\n`.repeat(30)
+
+  for (const [label, begin] of [['PEM', FAKE_SECRET.pem], ['PGP', pgpBegin]] as const) {
+    for (const [desc, trailing] of [['一个空格', ' '], ['两个空格', '  ']] as const) {
+      it(`${label}：BEGIN 后 30 行头字段、行尾${desc}，检测在 50ms 内完成，头字段照样遮住`, () => {
+        const text = `前文\n${begin}\n${headers(trailing)}（后面省略）`
+        const t = performance.now()
+        expect(detectSecrets(text)).toEqual([{ name: `${label} 私钥块`, severity: 'critical' }])
+        expect(performance.now() - t).toBeLessThan(50)
+        expect(maskSecrets(text)).toBe(`前文\n${SECRET_MASK}\n（后面省略）`)
+      })
+    }
+  }
+})

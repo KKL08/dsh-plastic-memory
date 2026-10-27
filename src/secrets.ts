@@ -16,8 +16,9 @@ export type SecretSeverity = 'critical' | 'suspected'
 function keyBlock(begin: string, end: string): RegExp {
   // 行首：缩进与引用标记（> 、>> ）
   const lead = String.raw`[ \t>]*`
-  // 正文行：整行是 base64、或是头字段、或是后面紧跟 base64 行的空行；行尾可以带空白
-  const bodyLine = String.raw`\r?\n${lead}(?:[A-Za-z0-9+/=]+|[A-Za-z][A-Za-z0-9-]*: [^\r\n]*|(?=\r?\n${lead}[A-Za-z0-9+/=]))[ \t]*(?=\r?\n|$)`
+  // 正文行：整行是 base64、或是头字段、或是后面紧跟 base64 行的空行；行尾可以带空白。
+  // 头字段的值止于非空白字符，行尾空白只归后面的 [ \t]*：两段若能吃同一批字符，缺 END 时回溯随行数指数增长。
+  const bodyLine = String.raw`\r?\n${lead}(?:[A-Za-z0-9+/=]+|[A-Za-z][A-Za-z0-9-]*: (?:[^\r\n]*\S)?|(?=\r?\n${lead}[A-Za-z0-9+/=]))[ \t]*(?=\r?\n|$)`
   return new RegExp(String.raw`${begin}(?:[ \t]*(?:${bodyLine})*\r?\n${lead}${end}|[^\r\n]*(?:${bodyLine})*)`)
 }
 
