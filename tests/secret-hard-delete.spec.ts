@@ -217,7 +217,7 @@ describe('票 13 验收：S1 密钥硬删', () => {
     expect(await h.store.get('mem_z', { workspacePath: WS })).toBeUndefined()
   })
 
-  it('save：critical 仍拒绝；suspected 拒绝并返回 secret-suspected，force: true 放行并保留警告；force 工具说明改为「跳过结构去重与疑似密钥拦截（用户已确认）」', async () => {
+  it('save：critical 仍拒绝；suspected 拒绝并返回 secret-suspected，force: true 放行并保留警告；force 工具说明含「疑似密钥拦截」（后来又加了手改保护）', async () => {
     const store = new MemoryStore(new InMemoryTable())
     const deps = { store, registry, workspacePath: WS, session: { id: 's', lastSeq: 1 } }
 
@@ -243,7 +243,7 @@ describe('票 13 验收：S1 密钥硬删', () => {
 
     const tool = createSaveTool({ store, registry, resolveContext: async () => ({ workspacePath: WS, session: { id: 's', lastSeq: 1 } }) })
     const params = (tool.parameters as unknown as { properties: Record<string, { description?: string }> }).properties
-    expect(params.force.description).toBe('跳过结构去重与疑似密钥拦截（用户已确认）')
+    expect(params.force.description).toBe('跳过结构去重、疑似密钥拦截与手改保护（用户已确认）')
   })
 
   it('规则层 secret finding 建议文案改为「memory_forget 会立即物理删除，不进 14 天回收，并轮换凭证」', () => {

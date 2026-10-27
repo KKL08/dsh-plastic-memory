@@ -31,7 +31,8 @@ const FRAMEWORK_PREFIX = '@deepseek-ai/'
 
 /** 登记在案的例外边。`to` 是 src 下模块路径（不带 .ts）或包名。条目失效（边已消失）测试会提示删掉。 */
 const ALLOWED_EXCEPTIONS: ReadonlyArray<{ from: string; to: string; reason: string }> = [
-  { from: 'pipeline', to: 'governance/snapshots', reason: 'update global 前快照先行（2026-09-01 定）' },
+  { from: 'pipeline', to: 'governance/snapshots', reason: 'update global 前快照先行（2026-09-01 定）；改写、替代都拍，撤销记录按 editFingerprint 记指纹（2026-10-27）' },
+  { from: 'pipeline', to: 'governance/decisions', reason: '模型改写、替代后记一条已结清的撤销记录（2026-10-27 定）' },
 ]
 
 function layerOf(mod: string): LayerName | undefined {

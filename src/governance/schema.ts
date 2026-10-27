@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { memoryRecordSchema } from '../record-schema.ts'
+import { MODEL_CHANGE_KINDS } from '../contract-codes.ts'
 
 /** 与 mem_ id 同模式（pipeline.ts），不引入 nanoid。 */
 export function genId(prefix: string): string {
@@ -9,8 +10,10 @@ export function genId(prefix: string): string {
 /**
  * 账本条目的种类。缺省 = conflict（旧条目没有此字段）；promote-candidate、overflow 是 GUI 加的提醒（ARCHITECTURE.md ⑥-7）；
  * edit 是 GUI 直接改、直接合并留的撤销记录，move 是把全局记忆移到项目留的撤销记录：两者都生来就已结清，撤销时移出账本，不进待处理。
+ * rewrite、supersede 是模型用 memory_save 改写、替代已有记忆留的撤销记录：同样生来就已结清、不进待处理；撤销后标 isUndone 留到保留窗口结束，
+ * 对话卡与右侧栏据此显示「已撤销」。
  */
-export const PENDING_KINDS = ['conflict', 'promote-candidate', 'overflow', 'edit', 'move'] as const
+export const PENDING_KINDS = ['conflict', 'promote-candidate', 'overflow', 'edit', 'move', ...MODEL_CHANGE_KINDS] as const
 export type PendingKind = (typeof PENDING_KINDS)[number]
 
 /**
@@ -20,8 +23,9 @@ export type PendingKind = (typeof PENDING_KINDS)[number]
  * edited / merged：直接改、直接合并（memoryIds 是保留的那条，合并时再跟上删掉的那条），snapshotId 是改前的快照，
  * fingerprint 是写完后的内容（editFingerprint），撤销前据此确认之后没被别处改过；
  * moved：全局记忆移到了项目（memoryIds 是那条，workspaces 是目标项目），snapshotId 是移动前的快照，fingerprint 同直接改。
+ * rewritten / superseded：模型改写了 memoryIds 那条、模型把那条标成了已取代，snapshotId 是改前的快照，fingerprint 是改完后那条的内容（同直接改）。
  */
-export const SETTLED_VERDICTS = ['keep-both', 'dismiss', 'keep-left', 'keep-right', 'keep-local', 'promoted', 'edited', 'merged', 'moved'] as const
+export const SETTLED_VERDICTS = ['keep-both', 'dismiss', 'keep-left', 'keep-right', 'keep-local', 'promoted', 'edited', 'merged', 'moved', 'rewritten', 'superseded'] as const
 export type SettledVerdict = (typeof SETTLED_VERDICTS)[number]
 
 export const pendingDecisionSchema = z.object({
@@ -36,16 +40,19 @@ export const pendingDecisionSchema = z.object({
   /** 冲突：最近一次扫描时双方的内容指纹（垂直冲突含基线），见 conflictFingerprint；提升候选：记忆内容指纹；超限：档位号；
    *  直接改、移到项目：写完后的内容指纹。旧条目没有此字段。 */
   fingerprint: z.string().optional(),
+  /** 模型改写、替代：哪个会话里哪次 memory_save 调用改的（对话卡按 callId、右侧栏按 sessionId 认领）；替代时 by 是替代它的那条。 */
+  origin: z.object({ sessionId: z.string(), callId: z.string(), by: z.string().optional() }).optional(),
   /**
    * 用户已裁决：条目留作记录。两边都留的指纹不变就不再报；删一方的留着供撤销，snapshotId 是删败方前的快照。
    * isBornSettled：提升候选在等你决定之外就地处理（对话卡片、右侧栏）时账本里还没有它，这条是处理完才记的；
-   * 撤销时移出账本、回到没点过的样子，不重开进等你决定。
+   * 撤销时移出账本、回到没点过的样子，不重开进等你决定。isUndone：模型改写、替代已撤销（见 PENDING_KINDS）。
    */
   settled: z.object({
     verdict: z.enum(SETTLED_VERDICTS),
     at: z.number(),
     snapshotId: z.string().optional(),
     isBornSettled: z.literal(true).optional(),
+    isUndone: z.literal(true).optional(),
   }).optional(),
 })
 export type PendingDecision = z.infer<typeof pendingDecisionSchema>

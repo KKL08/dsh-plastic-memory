@@ -5,7 +5,8 @@ import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
-import type { MemorySnapshot } from '../src/governance/schema.ts'
+import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
+import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 
@@ -108,6 +109,20 @@ describe('executeSave', () => {
     expect(list[0].operation).toBe('pre-update')
     expect(list[0].data[0].content).toBe('旧全局内容')
   })
+
+  it('改写记下撤销记录：会话取上下文、调用 id 取这次工具调用', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
+    const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
+    const deps: SaveToolDeps = { ...makeDeps(store), snapshots, decisions }
+    const created = await executeSave({ ...base, scope: 'workspace', name: '偏好', content: '旧内容', summary: 'pref' }, fakeExec(), deps)
+    if (created.kind !== 'saved') throw new Error(created.kind)
+    expect(await decisions.listSettled()).toEqual([])
+    await executeSave(
+      { ...base, scope: 'workspace', action: 'update', id: created.record.id, name: '偏好', content: '新内容', summary: 'pref' },
+      fakeExec({ callId: 'call-9' } as never), deps)
+    expect((await decisions.listSettled())[0]).toMatchObject({ kind: 'rewrite', origin: { sessionId: 's1', callId: 'call-9' } })
+  })
 })
 
 describe('renderSaveResult', () => {
@@ -208,5 +223,9 @@ describe('renderSaveDescription（memory_save 工具描述来源）', () => {
     const description = registry.renderSaveDescription()
     expect(description).toContain('各类型何时记')
     expect(description).toContain('preference')
+  })
+
+  it('交代改写用户手改过的记忆要先问用户', () => {
+    expect(registry.renderSaveDescription()).toContain('改写或替代用户手改过的记忆，要先在对话里问用户，同意后带 force: true 重发。')
   })
 })

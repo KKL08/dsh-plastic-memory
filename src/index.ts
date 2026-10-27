@@ -417,7 +417,7 @@ export async function apply(ctx: Context, config: Config) {
     },
   }, resolveContext))
   // memory_save 的类型枚举与说明在注册时从类型表生成：模板或自定义类型热更新后注销重注册
-  const registerSave = () => registerWrite(createSaveTool({ store, registry, resolveContext, snapshots, onSaved }))
+  const registerSave = () => registerWrite(createSaveTool({ store, registry, resolveContext, snapshots, decisions, onSaved }))
   let disposeSave = registerSave()
   ctx.tools.register(createSearchTool({
     store, registry, resolveContext, sessionRecall: snapshotCache,

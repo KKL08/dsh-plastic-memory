@@ -3,8 +3,9 @@ import type { CodedNote, RejectCode, WarningCode } from './contract-codes.ts'
 import { CONFIDENCE_BY_SOURCE, memoryRecordSchema } from './record-schema.ts'
 import type { MemoryStore } from './store.ts'
 import type { TypeRegistry } from './type-registry.ts'
-import type { SnapshotStore } from './governance/snapshots.ts'
-import { detectSecrets } from './secrets.ts'
+import type { PendingDecisionsStore } from './governance/decisions.ts'
+import { editFingerprint, type SnapshotStore } from './governance/snapshots.ts'
+import { detectSecrets, maskSecretSurface } from './secrets.ts'
 import { RecordNotFoundError } from './errors.ts'
 import { extractEntities, textSimilarity, DUPLICATE_SIMILARITY_THRESHOLD } from './text.ts'
 import { toToolOutput } from './output.ts'
@@ -55,9 +56,13 @@ export async function runSavePipeline(
     workspacePath: string | undefined
     /** turnStartSeq：触发本次保存的当轮 turn/start 事件 seq（绑定层机械回找），缺省 0（整会话兜底）。 */
     session: { id: string; lastSeq: number; turnStartSeq?: number }
-    /** update global 目标前拍快照用（快照先行，对齐 forget 的可恢复性）；缺省则跳过快照，
+    /** 改写（update）、替代（supersedes）前拍快照用（快照先行，对齐 forget 的可恢复性）；缺省则跳过快照，
      *  仅测试场景可缺省，生产接线必须传。 */
     snapshots?: SnapshotStore
+    /** 改写、替代后记一条已结清的撤销记录（对话卡、右侧栏据此显示与撤销）；要和 snapshots 一起给，缺省不记。 */
+    decisions?: PendingDecisionsStore
+    /** 这次 memory_save 的工具调用 id，记进撤销记录，对话卡按它认领。 */
+    callId?: string
   },
 ): Promise<PipelineResult> {
   const { store, registry, session } = deps
@@ -173,6 +178,32 @@ export async function runSavePipeline(
     return { kind: 'rejected', code: 'schema-invalid', reason: `字段校验失败：${parsed.error.issues.map(i => i.message).join('；')}` }
   }
 
+  // 本次要标 superseded 的旧记忆：目标必须与本次写入记录同桶——跨桶替代会绕过用户确认闸、无快照、无复活路径，
+  // 不同桶的目标跳过不置 superseded，仅给一条警告（见下方 6）。目标不存在维持静默跳过。
+  const sameBucket = (old: MemoryRecord) => old.scope === parsed.data.scope
+    && (parsed.data.scope !== 'workspace' || old.workspacePath === parsed.data.workspacePath)
+  const replaced: MemoryRecord[] = []
+  for (const oldId of new Set(candidate.supersedes ?? [])) {
+    const old = await store.get(oldId, { workspacePath: deps.workspacePath })
+    if (old?.status === 'active' && old.id !== parsed.data.id && sameBucket(old)) replaced.push(old)
+  }
+
+  // 手改保护：用户手改过的记忆不被模型悄悄覆盖或替代。和疑似密钥同一个放行口（force），放在密钥检查之前：
+  // 用户同意改写后带 force 重发，疑似密钥照样落警告；反过来先拦密钥，force 会把手改保护一并跳过。
+  // 原因会进模型上下文：当前内容按注入的口径遮明确密钥。跨项目目标在上面已拒，这里只会给出本次可见的内容。
+  const handEdited = [...(candidate.action === 'update' && target!.handEdited ? [target!] : []), ...replaced.filter(r => r.handEdited)]
+  if (handEdited.length > 0 && !candidate.force) {
+    const current = handEdited.map((r) => {
+      const masked = maskSecretSurface(r)
+      return `记忆 ${r.id}（${masked.name}）用户手改过，当前内容是：\n${masked.content}`
+    })
+    return {
+      kind: 'rejected',
+      code: 'hand-edited',
+      reason: `${current.join('\n\n')}\n未保存。先在对话里问用户要不要改写，用户同意后带 force: true 重发。`,
+    }
+  }
+
   // 5. 写盘前 secret 检查：高危（明确厂商特征）直接拦截、不落盘；疑似拦下待确认，force 放行并保留警告。
   // summary 进注入索引、name 进文件名、tags 进索引行——密钥藏在哪个字段都会外泄，四个面一起查。
   const secretHits = detectSecrets(`${candidate.content}\n${candidate.name}\n${candidate.summary}\n${candidate.tags.join(' ')}`)
@@ -193,38 +224,60 @@ export async function runSavePipeline(
     }
   }
 
-  // 更新 global 记忆前拍快照（快照先行）：forget 有 14 天快照，update 覆盖旧内容却无恢复手段是
-  // 不对称的。workspace 目标不拍——高频写入会撑爆快照表，且其内容多为项目内可重建的琐碎更新。
-  let updateSnapshotId: string | undefined
-  if (candidate.action === 'update' && target!.scope === 'global' && deps.snapshots) {
-    const snap = await deps.snapshots.capture(
-      { operation: 'pre-update', description: `更新全局记忆 ${target!.id} 前`, records: [target!] },
-      now,
-    )
-    updateSnapshotId = snap.id
-  }
+  // 改写、替代前拍快照（快照先行）：forget 有 14 天快照，update 覆盖旧内容、supersedes 让旧记忆失效却无恢复手段是
+  // 不对称的。global、workspace 目标都拍，改写的目标与要替代的旧记忆同拍一份；对话卡与右侧栏的「撤销修改」按它恢复。
+  const changed = [...(candidate.action === 'update' ? [target!] : []), ...replaced]
+  const snapshot = changed.length > 0 && deps.snapshots
+    ? await deps.snapshots.capture({
+      operation: 'pre-update',
+      description: candidate.action === 'update' ? `更新记忆 ${target!.id} 前` : `替代记忆 ${replaced.map(r => r.id).join('、')} 前`,
+      records: changed,
+    }, now)
+    : undefined
+  // 模型自报的警告只对 global 目标给（与以往一致）：项目记忆的快照只供界面撤销，不增加给模型的文字
+  const updateSnapshotId = candidate.action === 'update' && target!.scope === 'global' ? snapshot?.id : undefined
 
   const clean = pruneUndefined(parsed.data)
   // 新 id 不定位（create 排他占名）；update 走 put：锁内定位旧文件，scope 没变就原地覆盖
   if (candidate.action === 'update') await store.put(clean)
   else await store.create(clean)
 
-  // 6. supersedes 处理：目标必须与本次写入记录同桶——跨桶替代会绕过用户确认闸、无快照、无复活路径。
-  // 不同桶的目标跳过不置 superseded，仅给一条警告。目标不存在维持静默跳过。
+  // 6. supersedes 处理：同桶目标置 superseded，跨桶的跳过并给警告（见上方 replaced）。
   let crossBucketSupersede = false
+  const superseded: MemoryRecord[] = []
   for (const oldId of candidate.supersedes ?? []) {
     const old = await store.get(oldId, { workspacePath: deps.workspacePath })
     if (!old || old.id === clean.id) continue
-    const sameBucket = old.scope === clean.scope
-      && (clean.scope !== 'workspace' || old.workspacePath === clean.workspacePath)
-    if (!sameBucket) {
+    if (!sameBucket(old)) {
       crossBucketSupersede = true
       continue
     }
     try {
       await store.update(old, r => ({ ...r, status: 'superseded', updatedAt: now }))
+      if (replaced.some(r => r.id === old.id)) superseded.push(old)
     } catch (err) {
       if (!(err instanceof RecordNotFoundError)) throw err   // 读到之后被别处删掉：同目标不存在，静默跳过
+    }
+  }
+
+  // 7. 撤销记录：改写、替代各记一条已结清的条目，指纹按落盘后的内容（撤销前据此确认之后没被别处改过）
+  if (snapshot && deps.decisions) {
+    const origin = { sessionId: session.id, callId: deps.callId ?? '' }
+    const fingerprintOf = async (r: MemoryRecord) => {
+      const written = await store.get(r.id, { workspacePath: r.workspacePath, isExactLayer: true })
+      return written === undefined ? '' : editFingerprint(written)
+    }
+    const workspaceOf = (r: MemoryRecord) => (r.scope === 'global' ? 'global' : r.workspacePath ?? '')
+    if (candidate.action === 'update') {
+      await deps.decisions.addSettled({
+        kind: 'rewrite', memoryIds: [clean.id], summary: clean.name, workspaces: [workspaceOf(clean)], fingerprint: await fingerprintOf(clean), origin,
+      }, 'rewritten', now, snapshot.id)
+    }
+    for (const old of superseded) {
+      await deps.decisions.addSettled({
+        kind: 'supersede', memoryIds: [old.id], summary: old.name, workspaces: [workspaceOf(old)], fingerprint: await fingerprintOf(old),
+        origin: { ...origin, by: clean.id },
+      }, 'superseded', now, snapshot.id)
     }
   }
 

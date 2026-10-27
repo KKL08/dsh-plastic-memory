@@ -12,6 +12,14 @@ export type RejectCode =
   | 'schema-invalid'    // 字段校验失败
   | 'secret-critical'   // 明确厂商特征的密钥，拒存不落盘
   | 'secret-suspected'  // 疑似密钥（无厂商特征），未带 force 时拒存；用户确认后带 force: true 重发
+  | 'hand-edited'       // update 目标或同桶 supersedes 目标用户手改过，未带 force 时拒存；问过用户、同意后带 force: true 重发
+
+/**
+ * 模型用 memory_save 改写已有记忆（rewrite）、把同桶旧记忆标成已取代（supersede）时留的撤销记录种类：
+ * 待决账本的条目种类（governance/schema.ts）与 GUI 视图（gui/contract.ts）同用。
+ */
+export const MODEL_CHANGE_KINDS = ['rewrite', 'supersede'] as const
+export type ModelChangeKind = (typeof MODEL_CHANGE_KINDS)[number]
 
 /** 治理工具（forget / confirm / promote / snapshot）按记录的拒绝原因（tools/workspace-gate.ts）。 */
 export type GovernanceRejectCode =

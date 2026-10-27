@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import type { ClaimKvTable } from '../kv-table.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { RETENTION_MS } from '../retention.ts'
-import type { OverflowLevel } from '../contract-codes.ts'
+import { MODEL_CHANGE_KINDS, type OverflowLevel } from '../contract-codes.ts'
 import { genId, type PendingDecision, type PendingKind, type SettledVerdict } from './schema.ts'
 
 /** 去重 key：memoryIds 排序拼接 + baselineRef（垂直冲突与横向冲突互不干扰）。 */
@@ -56,9 +56,14 @@ function isDeletionSettled(entry: PendingDecision): boolean {
   return entry.settled !== undefined && verdictLoser(entry, entry.settled.verdict) !== undefined
 }
 
-/** 留作撤销的已裁决条目（删一方、提升为全局、直接改与直接合并、移到项目）：快照过了保留窗口就无从撤销，由 sweep 清掉。 */
+/** 模型用 memory_save 改写、替代已有记忆留的撤销记录。 */
+export function isModelChange(entry: { kind?: PendingKind }): boolean {
+  return (MODEL_CHANGE_KINDS as readonly PendingKind[]).includes(kindOf(entry))
+}
+
+/** 留作撤销的已裁决条目（删一方、提升为全局、直接改与直接合并、移到项目、模型改写与替代）：快照过了保留窗口就无从撤销，由 sweep 清掉。 */
 function isUndoable(entry: PendingDecision): boolean {
-  return isDeletionSettled(entry) || entry.settled?.verdict === 'promoted' || kindOf(entry) === 'edit' || kindOf(entry) === 'move'
+  return isDeletionSettled(entry) || entry.settled?.verdict === 'promoted' || kindOf(entry) === 'edit' || kindOf(entry) === 'move' || isModelChange(entry)
 }
 
 /** 超限条目的指纹：relax 为档位号（'1'、'2'…），strict 只有一档。 */
@@ -324,17 +329,25 @@ export class PendingDecisionsStore {
   }
 
   /**
-   * 记一条生来就已结清的条目（直接改、直接合并、移到项目的撤销记录）：不经过未决，别处读账本时不会把它当待处理。
+   * 记一条生来就已结清的条目（直接改、直接合并、移到项目、模型改写与替代的撤销记录）：不经过未决，别处读账本时不会把它当待处理。
    * 同一条记忆改几次就有几条，撤销各自核对指纹；超出保留窗口由 sweep 清掉。
    */
   async addSettled(
-    input: { kind: PendingKind; memoryIds: string[]; summary: string; workspaces: string[]; fingerprint: string },
+    input: { kind: PendingKind; memoryIds: string[]; summary: string; workspaces: string[]; fingerprint: string; origin?: PendingDecision['origin'] },
     verdict: SettledVerdict, now: number, snapshotId: string,
   ): Promise<PendingDecision> {
     const entry: PendingDecision = { id: genId('pd'), ...input, firstSeenAt: now, settled: { verdict, at: now, snapshotId } }
     await this.table.put(entry.id, entry)
     await this.sweep(now)
     return entry
+  }
+
+  /** 模型改写、替代已撤销：条目留到保留窗口结束（对话卡与右侧栏据此显示「已撤销」），不能再撤一次。条目不存在或未结清返回 false。 */
+  async markUndone(id: string): Promise<boolean> {
+    const entry = await this.table.get(id)
+    if (!entry?.settled) return false
+    await this.table.put(id, { ...entry, settled: { ...entry.settled, isUndone: true } })
+    return true
   }
 
   async remove(id: string): Promise<boolean> {

@@ -2,6 +2,7 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryStore } from '../store.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
+import type { PendingDecisionsStore } from '../governance/decisions.ts'
 import { runSavePipeline, type PipelineResult, type SaveCandidate } from '../pipeline.ts'
 
 /** memory_save 运行时需要的会话上下文，由框架绑定层的 resolveContext 提供。 */
@@ -19,8 +20,10 @@ export interface SaveToolDeps {
   store: MemoryStore
   registry: TypeRegistry
   resolveContext(exec: ToolRunContext): Promise<SaveContext>
-  /** update global 目标前拍快照用（快照先行）；生产接线传入已有实例，测试可缺省。 */
+  /** 改写、替代前拍快照用（快照先行）；生产接线传入已有实例，测试可缺省。 */
   snapshots?: SnapshotStore
+  /** 改写、替代后记撤销记录（对话卡、右侧栏的「撤销修改」）；生产接线传入已有实例，测试可缺省。 */
+  decisions?: PendingDecisionsStore
   /** 新建成功后调用（会话视图的 savedIds：右侧栏「这次新写入的」，接线在 index.ts）。 */
   onSaved?: (sessionId: string, memoryId: string) => void
 }
@@ -71,6 +74,8 @@ export async function executeSave(
     workspacePath: context.workspacePath,
     session: context.session,
     snapshots: deps.snapshots,
+    decisions: deps.decisions,
+    callId: String(exec.callId ?? ''),
   })
   if (result.kind === 'saved') deps.onSaved?.(context.session.id, result.record.id)
   return result

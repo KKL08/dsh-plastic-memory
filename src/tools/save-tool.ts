@@ -28,7 +28,7 @@ export function createSaveTool(deps: SaveToolDeps): ToolDefinition {
       supersedes: { type: 'array', items: { type: 'string' } },
       validFrom: { type: 'number', description: '生效起始（epoch ms），有明确时效的记忆才填' },
       validTo: { type: 'number', description: '失效截止（epoch ms）' },
-      force: { type: 'boolean', description: '跳过结构去重与疑似密钥拦截（用户已确认）' },
+      force: { type: 'boolean', description: '跳过结构去重、疑似密钥拦截与手改保护（用户已确认）' },
     },
     output: {
       schema: { type: 'json' },
