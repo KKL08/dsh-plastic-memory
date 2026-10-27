@@ -7,7 +7,7 @@ import { SidecarStore } from '../src/storage/sidecar.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { GLOBAL_DIR, STATE_DIR, workspaceDirName } from '../src/storage/paths.ts'
 import { MemoryStore } from '../src/store.ts'
-import { PendingDecisionsStore } from '../src/governance/decisions.ts'
+import { candidateFingerprint, PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { SEVERITY_BY_TYPE, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type Finding, type FindingType } from '../src/governance/schema.ts'
 import { layerCacheKey, type LayerRef } from '../src/governance/layer-health.ts'
@@ -470,15 +470,18 @@ describe('全部记忆视图', () => {
     expect((await h.views()).library.hasUnreadFiles).toBe(true)
   })
 
-  it('提升状态：本项目的提升候选标 candidate，「留在本项目」过的标 kept-local（候选标记又回来时算 candidate）；体检关闭时候选不标', async () => {
+  it('提升状态：本项目的提升候选标 candidate，「留在本项目」过的标 kept-local（候选标记又回来、内容变了算 candidate，内容没变仍算 kept-local）；体检关闭时候选不标', async () => {
     const h = harness()
     await h.store.create(w({ id: 'mem_cand', name: '候选', globalCandidate: true }))
     await h.store.create(w({ id: 'mem_kept', name: '留下的' }))
     await h.store.create(w({ id: 'mem_again', name: '又标了', globalCandidate: true }))
     await h.store.create(w({ id: 'mem_plain', name: '普通' }))
     await h.store.create(g({ id: 'mem_g', name: '全局' }))
-    for (const id of ['mem_kept', 'mem_again']) {
-      const { entry } = await h.decisions.upsert({ kind: 'promote-candidate', memoryIds: [id], summary: '', workspaces: [WS], fingerprint: id }, 1)
+    // 留下后模型又把同样的内容标成候选：体检按指纹不再提，这里也还是留下了
+    const same = w({ id: 'mem_same', name: '同样内容又标了', globalCandidate: true })
+    await h.store.create(same)
+    for (const [id, fingerprint] of [['mem_kept', 'mem_kept'], ['mem_again', 'mem_again'], ['mem_same', candidateFingerprint(same)]]) {
+      const { entry } = await h.decisions.upsert({ kind: 'promote-candidate', memoryIds: [id!], summary: '', workspaces: [WS], fingerprint }, 1)
       await h.decisions.settle(entry.id, 'keep-local', 2)
     }
     const promotions = (library: Awaited<ReturnType<typeof h.views>>['library']) =>
@@ -486,10 +489,10 @@ describe('全部记忆视图', () => {
 
     const { library } = await h.views()
     expect(libraryViewSchema.parse(library)).toEqual(library)
-    expect(promotions(library)).toEqual({ mem_cand: 'candidate', mem_kept: 'kept-local', mem_again: 'candidate', mem_plain: undefined, mem_g: undefined })
+    expect(promotions(library)).toEqual({ mem_cand: 'candidate', mem_kept: 'kept-local', mem_again: 'candidate', mem_same: 'kept-local', mem_plain: undefined, mem_g: undefined })
 
     const off = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
-    expect(promotions(off.library)).toEqual({ mem_cand: undefined, mem_kept: 'kept-local', mem_again: undefined, mem_plain: undefined, mem_g: undefined })
+    expect(promotions(off.library)).toEqual({ mem_cand: undefined, mem_kept: 'kept-local', mem_again: undefined, mem_same: 'kept-local', mem_plain: undefined, mem_g: undefined })
   })
 
   it('typeLabels：注册表的类型和本视图记忆卡里出现的类型 → 显示名，认不出的类型显示 id', async () => {

@@ -6,7 +6,7 @@ import { RETENTION_MS } from '../retention.ts'
 import { hasSecret, maskSecretSurface, maskSecrets } from '../secrets.ts'
 import { computeDigest } from '../storage/frontmatter.ts'
 import { FINDING_TYPES, type FindingType, type PendingDecision } from '../governance/schema.ts'
-import { kindOf, overflowLevelOf, overflowScopeOf, verdictLoser } from '../governance/decisions.ts'
+import { candidateFingerprint, kindOf, overflowLevelOf, overflowScopeOf, verdictLoser } from '../governance/decisions.ts'
 import { runRuleScan } from '../governance/rule-scan.ts'
 import { byConfidenceThenConfirmed } from '../snapshot.ts'
 import { layerCacheKey, scoreLayer, type LayerPreread, type LayerRef } from '../governance/layer-health.ts'
@@ -300,19 +300,23 @@ function overflowOfLayer(entries: readonly PendingDecision[], layer: LayerRef): 
   return e === undefined ? null : { ...overflowLevelOf(e), isDismissed: e.settled !== undefined }
 }
 
-/** 全部记忆：按层列 active 记忆；空的项目层不列，global 总在。目录问题不含 dir-empty（那不是问题）。 */
-/** 项目记忆的提升状态：带候选标记的是候选（体检关闭时不标，同待处理）；没有标记、账本里有它「留在本项目」的已结清条目的是留下了。 */
+/**
+ * 项目记忆的提升状态：账本里有它「留在本项目」的已结清条目、且它没有候选标记或内容没变（同体检：指纹对得上不再提）的是留下了；
+ * 其余带候选标记的是候选（体检关闭时不标，同待处理）。
+ */
 function promotionReader(input: ViewInput): (r: MemoryRecord) => MemoryPromotion | undefined {
-  const keptLocal = new Set(input.settled
+  const keptLocal = new Map(input.settled
     .filter(e => kindOf(e) === 'promote-candidate' && e.settled?.verdict === 'keep-local')
-    .map(e => `${e.memoryIds[0]}\0${e.workspaces?.[0]}`))
+    .map(e => [`${e.memoryIds[0]}\0${e.workspaces?.[0]}`, e.fingerprint]))
   return (r) => {
     if (r.scope !== 'workspace') return undefined
-    if (r.globalCandidate) return input.governanceEnabled ? 'candidate' : undefined
-    return keptLocal.has(`${r.id}\0${r.workspacePath}`) ? 'kept-local' : undefined
+    const key = `${r.id}\0${r.workspacePath}`
+    if (keptLocal.has(key) && (!r.globalCandidate || keptLocal.get(key) === candidateFingerprint(r))) return 'kept-local'
+    return r.globalCandidate && input.governanceEnabled ? 'candidate' : undefined
   }
 }
 
+/** 全部记忆：按层列 active 记忆；空的项目层不列，global 总在。目录问题不含 dir-empty（那不是问题）。 */
 export function buildLibraryView(input: ViewInput): LibraryView {
   const active = activeRecords(input.data)
   const promotionOf = promotionReader(input)
