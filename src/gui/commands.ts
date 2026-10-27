@@ -429,6 +429,7 @@ async function dispatch(
         gov, { store: deps.store, agentsMd: deps.agentsMd, snapshots: deps.snapshots, now: () => now }, candidateCopy(entry),
       )
       if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
+      if (r.taken.length > 0) return fail(cmd, 'target-taken', r.message)
       if (r.promoted.length === 0) return fail(cmd, 'failed', r.message)
       // 提升为全局留账供 14 天内撤销；写进 AGENTS.md 后插件不再管理它，条目移出账本
       if (command.target === 'global') await deps.decisions.settle(entry.id, 'promoted', now, r.snapshotId !== null ? { snapshotId: r.snapshotId } : {})
@@ -449,6 +450,7 @@ async function dispatch(
           { target: { kind: 'workspace', workspacePath: rec.workspacePath! } },
         )
         if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
+        if (r.taken.length > 0) return fail(cmd, 'target-taken', r.message)
         if (r.promoted.length === 0) return fail(cmd, 'failed', r.message)
         const decisionId = target === 'global' ? await settle('promoted', r.snapshotId !== null ? { snapshotId: r.snapshotId } : {}) : await drop()
         return { ok: true, cmd, ...(decisionId !== undefined ? { decisionId } : {}), memoryIds: r.promoted.map(p => p.id), ...(r.snapshotId !== null ? { snapshotId: r.snapshotId } : {}) }

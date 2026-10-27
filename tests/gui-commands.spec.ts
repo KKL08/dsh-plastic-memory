@@ -1446,6 +1446,25 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
     expect(await e.snapshots.list()).toEqual([])
   })
 
+  it.each([
+    ['全局有在用的同 id 记忆', false],
+    ['全局同 id 的那条在最近删除里', true],
+  ] as const)('提升为全局时%s：promote 与 promote-memory 都回 target-taken，什么都不动', async (_label, isDeleted) => {
+    const e = env({ llm: quietLlm })
+    const memoryId = await saveCandidate(e)
+    const project = (await e.store.get(memoryId, { workspacePath: SESSION_WS }))!
+    const { workspacePath: _ws, ...rest } = project
+    await e.store.create({ ...rest, scope: 'global', globalCandidate: undefined, content: '全局那份' })
+    if (isDeleted) ok(await e.run({ cmd: 'forget', memoryId, layer: { kind: 'global' } }))
+    expect(err(await e.run({ cmd: 'promote-memory', memoryId, layer: wsLayer, isCandidateRequired: true })).code).toBe('target-taken')
+    const { entry: open } = await e.decisions.upsert({ kind: 'promote-candidate', memoryIds: [memoryId], summary: '', workspaces: [SESSION_WS], fingerprint: 'fp' }, 1)
+    expect(err(await e.run({ cmd: 'promote', decisionId: open.id, target: 'global' })).code).toBe('target-taken')
+    const rec = (await e.store.locate(memoryId, { workspacePath: SESSION_WS, isExactLayer: true }))!.record
+    expect([rec.scope, rec.status, rec.globalCandidate]).toEqual(['workspace', 'active', true])
+    expect(await e.decisions.list()).toEqual([open])
+    expect(await e.decisions.listSettled()).toEqual([])
+  })
+
   it('keep-local-memory：不是候选、全局的、已删的、不存在的 → not-found，账本不动', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_plain', name: '普通', scope: 'workspace', workspacePath: SESSION_WS }))

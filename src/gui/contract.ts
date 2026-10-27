@@ -531,7 +531,7 @@ export const GUI_ERROR_CODES = [
   'secret-critical',    // 直接改、直接合并的新内容含高危密钥：什么都没动
   'secret-suspected',   // 直接改、直接合并的新内容含疑似密钥：什么都没动，用户确认后带 force 重发
   'claimed',            // 待决项正被另一次操作（别的标签页、宿主进程或体检）认领：什么都没动
-  'target-taken',       // 移到项目：目标项目已有同 id 的记忆；撤销移到项目：全局已有同 id 的记忆。什么都没动
+  'target-taken',       // 移到项目：目标项目已有同 id 的记忆；撤销移到项目、提升为全局：全局已有同 id 的记忆（含最近删除）。什么都没动
   'failed',             // 执行器报错，detail 带原话
 ] as const
 export type GuiErrorCode = (typeof GUI_ERROR_CODES)[number]
