@@ -9,7 +9,7 @@ export interface SemanticLlm {
   readonly model?: string
   /**
    * signal 触发时应尽快取消在途请求，并抛出 AbortError（宿主 exec.signal 契约）。
-   * onUsage：宿主流里报了用量时，按这次调用的实际 token 数回调一次（出错、取消收尾的调用也算）；没报就不回调。
+   * onUsage：宿主流里报了用量时，按这次调用的实际 token 数回调一次（宿主在出错收尾前报了用量的也计入）；没报就不回调。
    */
   complete(input: { system: string; user: string }, signal?: AbortSignal, onUsage?: (tokens: number) => void): Promise<string>
 }
@@ -102,17 +102,22 @@ export function semanticMemoryLine(record: MemoryRecord): string {
 }
 
 /**
- * 按 token 预算把记忆分批：装得下就一批（原顺序）。装不下时按类型分组（组序按类型首次出现的位置），
- * 同类型尽量同批——冲突、重复多发生在同类型之间；一组超预算再按原顺序连续切开，单条超预算的自成一批。
+ * 按 token 预算把记忆分批：没有记忆时不分批（不调用模型）；装得下就一批（原顺序）。装不下时按类型分组，
+ * 同类型尽量同批——冲突、重复多发生在同类型之间；一组超预算再连续切开，单条超预算的自成一批。
  * 各段依次放进第一个还装得下的批，都装不下就开新批。每条恰好进一批。
+ * 分批时组按类型名、组内按 createdAt 再 id 排：改一条记忆（更新时间变了）不会挪动别的记忆所在的批，
+ * 成对问题不会因为批的边界漂移在两次体检之间时有时无。
  */
 export function planSemanticBatches(records: MemoryRecord[], budget = SEMANTIC_BATCH_TOKEN_BUDGET): MemoryRecord[][] {
+  if (records.length === 0) return []
   const costs = new Map(records.map(r => [r, estimateTokens(semanticMemoryLine(r))]))
   const costOf = (rs: readonly MemoryRecord[]) => rs.reduce((n, r) => n + costs.get(r)!, 0)
   if (costOf(records) <= budget) return [records]
 
+  const stable = [...records].sort((a, b) =>
+    (a.type < b.type ? -1 : a.type > b.type ? 1 : 0) || a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   const groups = new Map<string, MemoryRecord[]>()
-  for (const r of records) {
+  for (const r of stable) {
     const group = groups.get(r.type)
     if (group) group.push(r)
     else groups.set(r.type, [r])
@@ -206,7 +211,8 @@ export function parseSemanticFindings(raw: string, knownIds: Set<string>): Findi
 /**
  * 语义层扫描：按 token 预算分批（planSemanticBatches），每批一次调用，解析失败带提示重试一次。
  * 单条就能判的问题每条都覆盖；成对的（冲突、重复）只在同一批里检出。任一批两次都失败，整层按失败返回
- * （failed:true、不交出别批的结果，也不再发后面的批）。各批结果合并去重。batches 是批数，不分批时为 1。
+ * （failed:true、不交出别批的结果，也不再发后面的批）。各批结果合并去重。batches 是批数，不分批时为 1；
+ * 没有记忆时为 0，不调用模型，按没有发现的成功扫描返回。
  */
 export async function runSemanticScan(
   records: MemoryRecord[],

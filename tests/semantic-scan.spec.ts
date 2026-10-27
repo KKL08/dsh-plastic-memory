@@ -239,6 +239,11 @@ describe('runSemanticScan', () => {
     expect(out).toEqual({ failed: false, batches: 1, findings: [expect.objectContaining({ type: 'unclear', memoryIds: ['mem_249'] })] })
   })
 
+  it('没有记忆：不调用模型，按没有发现的成功扫描返回', async () => {
+    const llm = { complete: async (): Promise<string> => { throw new Error('不该被调') } }
+    expect(await runSemanticScan([], null, llm)).toEqual({ findings: [], failed: false, batches: 0 })
+  })
+
   // 每条约 6,000 token（一万个汉字），六条装不进 3 万的一批
   const bulky = () => Array.from({ length: 6 }, (_, i) => record({ id: `mem_${i}`, content: '记'.repeat(10_000) }))
   const idsIn = (user: string) => [...user.matchAll(/id=(mem_\d+)/g)].map(m => m[1]!)
@@ -340,12 +345,36 @@ describe('planSemanticBatches', () => {
   const cost = (rs: readonly MemoryRecord[]) => rs.reduce((n, r) => n + estimateTokens(semanticMemoryLine(r)), 0)
   const sized = (id: string, type: string, chars: number) => record({ id, type, content: '记'.repeat(chars) })
   const ids = (batches: MemoryRecord[][]) => batches.map(b => b.map(r => r.id))
+  /** 体检发给分批的顺序：治理优先级相同时按更新时间新的在前。 */
+  const byRecency = (rs: MemoryRecord[]) => [...rs].sort((a, b) => b.updatedAt - a.updatedAt)
+  const where = (batches: MemoryRecord[][]) => new Map(batches.flatMap((b, i) => b.map(r => [r.id, i] as const)))
 
   it('预算约 3 万 token（snapshot.estimateTokens 估算），装得下就一批、顺序不变', () => {
     expect(SEMANTIC_BATCH_TOKEN_BUDGET).toBe(30_000)
     const records = [sized('a', 'knowledge', 10), sized('b', 'preference', 10), sized('c', 'knowledge', 10)]
     expect(planSemanticBatches(records)).toEqual([records])
-    expect(planSemanticBatches([])).toEqual([[]])
+  })
+
+  it('没有记忆：不分批，一批都没有', () => {
+    expect(planSemanticBatches([])).toEqual([])
+  })
+
+  it('分批时按稳定键排：改了一条（更新时间变了、排到最前），别的记忆所在的批不变', () => {
+    const types = ['knowledge', 'preference', 'workflow']
+    const records = types.flatMap(type => Array.from({ length: 5 }, (_, i) =>
+      record({ id: `${type}_${i}`, type, content: '记'.repeat(80), createdAt: 10 + i, updatedAt: 100 + i })))
+    const budget = cost(records.slice(0, 7)) // 一类装得下，两类装不下
+    const before = where(planSemanticBatches(byRecency(records), budget))
+    const edited = records.map(r => r.id === 'preference_2' ? { ...r, updatedAt: 999 } : r)
+    expect(where(planSemanticBatches(byRecency(edited), budget))).toEqual(before)
+  })
+
+  it('同一类型切成几段时，改了一条，切口不动', () => {
+    const records = Array.from({ length: 10 }, (_, i) => record({ id: `k${i}`, type: 'knowledge', content: '记'.repeat(80), createdAt: 10 + i, updatedAt: 100 + i }))
+    const budget = cost(records.slice(0, 3)) + 1
+    const before = where(planSemanticBatches(byRecency(records), budget))
+    const edited = records.map(r => r.id === 'k5' ? { ...r, updatedAt: 999 } : r)
+    expect(where(planSemanticBatches(byRecency(edited), budget))).toEqual(before)
   })
 
   it('装不下：每条恰好进一批，每批不超预算，同类型同批', () => {

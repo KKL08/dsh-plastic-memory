@@ -230,7 +230,7 @@ async function scanPass(
         ? { code: 'no-layer-executed', text: '语义层不可用（当前环境拿不到 LLM），且 layers=semantic 不含规则层，本次未执行任何检测' }
         : { code: 'semantic-unavailable', text: '语义层不可用（当前环境拿不到 LLM），只返回规则层结果' })
     } else {
-      // 按治理优先级 + 新近度排序：分批时重要的类型先装批，发给模型的顺序稳定
+      // 一批装得下时按治理优先级 + 新近度发给模型；分批时由 planSemanticBatches 按稳定键重排，批的边界不随编辑漂移
       const priorityOrder = { high: 0, medium: 1, low: 2 } as const
       const ordered = [...records].sort((a, b) =>
         priorityOrder[deps.registry.get(a.type).governancePriority] - priorityOrder[deps.registry.get(b.type).governancePriority]

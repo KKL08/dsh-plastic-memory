@@ -231,6 +231,17 @@ describe('executeScan 单层模式', () => {
     expect(r.semanticCachedAt).toBe(9000)
   })
 
+  it('层里没有记忆：不调用模型，按没有发现的成功扫描写缓存，不带用量', async () => {
+    let calls = 0
+    const deps = makeDeps({ getLlm: (_exec: unknown) => ({ complete: async () => { calls++; return JSON.stringify({ findings: [] }) } }) })
+    const r = await scanSingle({ layers: 'semantic' }, deps)
+    expect(calls).toBe(0)
+    expect(r.notes.map(n => n.code)).not.toContain('semantic-failed')
+    expect(r.semanticCachedAt).toBe(9000)
+    expect(await deps.cache.get(GLOBAL_CACHE_KEY)).toMatchObject({ scannedAt: 9000, findings: [] })
+    expect(r).not.toHaveProperty('usageTokens')
+  })
+
   it('小库不分批：调用一次，没有分批说明、不带批数', async () => {
     let calls = 0
     const deps = makeDeps({ getLlm: (_exec: unknown) => ({ complete: async () => { calls++; return JSON.stringify({ findings: [] }) } }) })

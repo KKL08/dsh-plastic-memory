@@ -52,6 +52,13 @@ class HostKvTable<T = unknown> {
   async delete(key: string) { return this.map.delete(key) }
 }
 
+/** 放一条全局记忆：语义检查只在层里有记忆时才调用模型。 */
+async function seedMemory(memoryRoot: string): Promise<string> {
+  await mkdir(join(memoryRoot, 'global'), { recursive: true })
+  await writeFile(join(memoryRoot, 'global', 'seed.md'), encodeRecord(record({ id: 'mem_seed' }), {}), 'utf8')
+  return memoryRoot
+}
+
 /** 本文件建出的全部替身 ctx 的卸载入口：afterEach 先卸载插件、等它的写入收尾，再删临时目录。 */
 const liveCtxs: Array<() => Promise<void>> = []
 
@@ -881,7 +888,7 @@ describe('语义扫描请求形状', () => {
       tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
       logger: { info() {}, warn() {}, error() {} },
     }
-    const memoryRoot = await makeTmpRoot()
+    const memoryRoot = await seedMemory(await makeTmpRoot())
     await apply(ctx as never, new Config({ memoryRoot } as never))
     const cwd = await makeTmpRoot()
     const session = { header: { id: 'sess-1', cwd }, seq: 0, requestHeader: () => undefined }
@@ -894,8 +901,7 @@ describe('语义扫描请求形状', () => {
     const [request] = base.llmRequests
     expect(request).toMatchObject({ provider: 'deepseek', model: 'deepseek-chat' })
     const msg = request!.messages[0]
-    const { user } = buildSemanticPrompt([], null)
-    expect(msg).toEqual({ role: 'user', content: [{ type: 'text', text: user }] })
+    expect(msg).toEqual({ role: 'user', content: [{ type: 'text', text: expect.stringContaining('id=mem_seed') }] })
     expect(msg).not.toHaveProperty('id')
     expect(msg).not.toHaveProperty('source')
   })
@@ -909,7 +915,7 @@ describe('语义扫描请求形状', () => {
       tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
       logger: { info() {}, warn() {}, error() {} },
     }
-    const memoryRoot = await makeTmpRoot()
+    const memoryRoot = await seedMemory(await makeTmpRoot())
     const cwd = await makeTmpRoot()
     const bucket = cacheKey(await realpath(cwd)) // 无 workspaceRegistry 时规范化 cwd 即目录桶
     const prior: ScanCacheEntry = {
@@ -953,7 +959,7 @@ describe('语义扫描请求形状', () => {
       { type: 'text-delta', index: 0, text: '{"findings":[]}' },
       { type: 'finish', reason: { kind: 'aborted', failure: { code: 'ABORTED', message: 'request aborted' } } },
     ])
-    const memoryRoot = await makeTmpRoot()
+    const memoryRoot = await seedMemory(await makeTmpRoot())
     await apply(ctx as never, new Config({ memoryRoot } as never))
     const cwd = await makeTmpRoot()
     const session = { header: { id: 'sess-1', cwd }, seq: 0, requestHeader: () => undefined }
@@ -965,7 +971,7 @@ describe('语义扫描请求形状', () => {
     expect(await sidecarAt(memoryRoot).scanCache.get(cacheKey(await realpath(cwd)))).toBeUndefined()
   })
 
-  it('用量取每条流最后一个 usage 块，出错收尾的那次也算；一次都没报时结果不带用量', async () => {
+  it('用量取每条流最后一个 usage 块，宿主在出错收尾前报了用量的也计入；一次都没报时结果不带用量', async () => {
     type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
     const defs = new Map<string, ToolDef>()
     const base = mockCtx()
@@ -989,7 +995,7 @@ describe('语义扫描请求形状', () => {
         { type: 'finish', reason: { kind: 'stop' } },
       ],
     )
-    const memoryRoot = await makeTmpRoot()
+    const memoryRoot = await seedMemory(await makeTmpRoot())
     await apply(ctx as never, new Config({ memoryRoot } as never))
     const cwd = await makeTmpRoot()
     const session = { header: { id: 'sess-1', cwd }, seq: 0, requestHeader: () => undefined }
@@ -1146,14 +1152,17 @@ describe('AGENTS.md 基线：读 plasticMemoryBaseline 投影', () => {
       logger: { info() {}, warn: (msg: string) => { warnings.push(msg) }, error() {} },
     }
     const warnings: string[] = []
-    await apply(ctx as never, new Config({ memoryRoot: await makeTmpRoot() } as never))
+    await apply(ctx as never, new Config({ memoryRoot: await seedMemory(await makeTmpRoot()) } as never))
     const scan = async (session: object, args: object) => await defs.get('memory_scan')!.execute(args, fakeExec({
       agent: { session, options: { provider: 'deepseek', model: 'deepseek-chat' } } as unknown as ToolRunContext['agent'],
     })) as ScanOut
     return { scan, warnings }
   }
+  /** prompt 里的基线段（记忆列表之前的部分）。 */
   const promptUser = (request: { messages: unknown[] } | undefined) =>
-    (request?.messages[0] as { content: Array<{ text: string }> }).content[0]!.text
+    baselinePart((request?.messages[0] as { content: Array<{ text: string }> }).content[0]!.text)
+  const baselinePart = (user: string) => user.split('\n\n## 记忆列表')[0]!
+  const expectedBaseline = (baseline: string[]) => baselinePart(buildSemanticPrompt([], baseline).user)
 
   it('apply() 注册 plasticMemoryBaseline：checkpoint 读回键、ver 与折叠出的正文', async () => {
     const projections = await hostRegistry()
@@ -1190,7 +1199,7 @@ describe('AGENTS.md 基线：读 plasticMemoryBaseline 投影', () => {
     const { scan } = await boot(base)
     const out = await scan(session, { layers: 'semantic' })
     expect(base.llmRequests).toHaveLength(1)
-    expect(promptUser(base.llmRequests[0])).toBe(buildSemanticPrompt([], ['# AGENTS.md\n不要 mock 数据库']).user)
+    expect(promptUser(base.llmRequests[0])).toBe(expectedBaseline(['# AGENTS.md\n不要 mock 数据库']))
     expect(out.notes?.map(n => n.code) ?? []).not.toContain('baseline-missing')
   })
 
@@ -1204,9 +1213,9 @@ describe('AGENTS.md 基线：读 plasticMemoryBaseline 投影', () => {
     await scan(b, { layers: 'semantic' })
     await scan(a, { layers: 'semantic' })
     expect(base.llmRequests.map(promptUser)).toEqual([
-      buildSemanticPrompt([], ['项目甲：用 pnpm']).user,
-      buildSemanticPrompt([], ['项目乙：用 npm']).user,
-      buildSemanticPrompt([], ['项目甲：用 pnpm']).user,
+      expectedBaseline(['项目甲：用 pnpm']),
+      expectedBaseline(['项目乙：用 npm']),
+      expectedBaseline(['项目甲：用 pnpm']),
     ])
   })
 

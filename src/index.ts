@@ -267,7 +267,7 @@ export async function apply(ctx: Context, config: Config) {
         signal?.throwIfAborted()
         let out = ''
         // 宿主在 finish 前发 usage 块（StreamChunk 的 'usage'，各项互不重叠），取最后一个；
-        // 出错、取消收尾的调用也已计费，finally 里照样报
+        // 宿主在出错收尾前报了用量的也计入，所以放在 finally 里报
         let usage: Extract<StreamChunk, { type: 'usage' }> | undefined
         // stream 建立或迭代过程中抛出的错误按 rejected promise 向上传播，
         // 由 runSemanticScan 的调用点捕获降级，这里不吞掉。
