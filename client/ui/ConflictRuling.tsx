@@ -1,7 +1,8 @@
 /**
  * 冲突裁决（DESIGN.md「Conflict Ruling」）：琥珀圆点 + 标题，A / B 描边圆标 + 各自的记忆卡，
  * 三个按钮「以 A 为准 / 以 B 为准 / 都保留」，按钮到 verdict 的映射取契约 CONFLICT_ACTION_VERDICTS。
- * - 宽版（记忆页）：A、B 按钮进各自卡片底部，「都保留」居中压在横贯两卡的细线上，下方紧跟后果说明；
+ * - 宽版（记忆页）：A、B 各一张描边卡并排，卡底左边写选它会删掉哪条、右边是按钮；两卡下面是普通动作行，
+ *   左边说明决定前 agent 按哪条来、都保留的后果，右边「都保留」；
  * - 窄版（右侧栏）：三个按钮一行，后果说明在按钮下面。
  * 任一方定位不到（视图里为 null）时裁决会报错，三个按钮都不可用。裁决后的结果态在待处理票里做。
  * 记忆和基线（AGENTS.md）冲突用 VerticalConflictRuling：同一套标题与后果说明，只有一张记忆卡，
@@ -25,8 +26,8 @@ export interface ConflictRulingProps {
   onRule: (verdict: HorizontalVerdict) => void
   /** 缺省「两条记忆互相矛盾，等你决定」；记忆页用条目标题。 */
   title?: ReactNode
-  /** 标题下的一句默认行为（「决定前 agent 按 A 来。」）。 */
-  note?: ReactNode
+  /** 一句默认行为（「决定之前，agent 按 A 来做。」）：窄版在标题下，宽版在动作行左边。 */
+  note?: string
   /** 动作暂不可用的原因（无会话等）。 */
   unavailable?: string | undefined
   typeLabel?: (type: string) => string
@@ -41,14 +42,14 @@ export function ConflictRuling(props: ConflictRulingProps) {
   const t = useT()
   const { horizontal } = CONFLICT_ACTION_VERDICTS
   const unavailable = props.unavailable ?? (props.left === null || props.right === null ? t('conflict.missingHint') : undefined)
-  const side = (letter: 'A' | 'B', memory: MemoryCardData | null, button: ReactNode) => (
+  const side = (letter: 'A' | 'B', memory: MemoryCardData | null, foot: ReactNode) => (
     <section className="pm-conflict-side" aria-label={t('conflict.side', { side: letter })}>
       <span className="pm-ab" aria-hidden="true">{letter}</span>
       <div className="pm-conflict-body">
         {memory === null
           ? <p className="pm-conflict-missing">{t('conflict.missing')}</p>
           : <MemoryCard memory={memory} now={props.now} typeLabel={props.typeLabel?.(memory.type)} hideScope={props.hideScope} projectName={props.projectName?.(memory)} />}
-        {button}
+        {foot}
       </div>
     </section>
   )
@@ -56,6 +57,10 @@ export function ConflictRuling(props: ConflictRulingProps) {
   const keepB = <Button unavailable={unavailable} onClick={() => { props.onRule(horizontal.keepB) }}>{t('conflict.keepB')}</Button>
   const keepBoth = <Button unavailable={unavailable} onClick={() => { props.onRule(horizontal.keepBoth) }}>{t('conflict.keepBoth')}</Button>
   const wide = props.layout === 'wide'
+  const foot = (loser: 'A' | 'B', button: ReactNode) => (
+    <div className="pm-conflict-foot"><span className="pm-conflict-loses">{t('conflict.loses', { side: loser })}</span>{button}</div>
+  )
+  const keepBothHint = t('conflict.keepBothHint')
 
   return (
     <article className={`pm-conflict pm-conflict--${props.layout}`}>
@@ -64,16 +69,16 @@ export function ConflictRuling(props: ConflictRulingProps) {
         <h3 className="pm-conflict-title">{props.title ?? t('conflict.title')}</h3>
         {props.headExtra}
       </header>
-      {props.note !== undefined ? <p className="pm-conflict-note">{props.note}</p> : null}
+      {props.note !== undefined && !wide ? <p className="pm-conflict-note">{props.note}</p> : null}
       <div className="pm-conflict-sides">
-        {side('A', props.left, wide ? <div className="pm-conflict-actions">{keepA}</div> : null)}
-        {side('B', props.right, wide ? <div className="pm-conflict-actions">{keepB}</div> : null)}
+        {side('A', props.left, wide ? foot('B', keepA) : null)}
+        {side('B', props.right, wide ? foot('A', keepB) : null)}
       </div>
       {wide
         ? (
-          <div className="pm-keep">
-            <div className="pm-keep-line"><span />{keepBoth}<span /></div>
-            <p className="pm-conflict-consequence">{t('conflict.consequence')}</p>
+          <div className="pm-conflict-row">
+            <p className="pm-conflict-hint">{props.note === undefined ? keepBothHint : t('conflict.twoSentences', { first: props.note, second: keepBothHint })}</p>
+            {keepBoth}
           </div>
         )
         : (
@@ -145,13 +150,17 @@ export const conflictRulingCss = `
   width: 18px; height: 18px; margin-top: 2px; border-radius: 999px; border: 1px solid var(--pm-text);
   font-size: 11px; font-weight: 600; line-height: 1; color: var(--pm-text);
 }
-.pm-conflict-actions { display: flex; justify-content: flex-end; }
-.pm-keep { margin: 2px 0 4px 42px; }
-.pm-keep-line { display: flex; align-items: center; gap: 12px; }
-.pm-keep-line > span { flex: 1; height: .5px; background: var(--pm-line-soft); }
+.pm-conflict--wide .pm-conflict-side { align-items: stretch; padding: 12px 14px; border: .5px solid var(--pm-line-card); border-radius: var(--dsw-radius-lg, 16px); }
+.pm-conflict-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: auto; }
+.pm-conflict-loses { min-width: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
+.pm-conflict-row { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 12px; padding-left: 16px; }
+.pm-conflict-hint { flex: 1; min-width: 0; margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
+/* A / B 改成上下排：记忆页窄屏（pm-page 720px 以下），或主区（pm-main，不含左栏）内容宽 640px 以下。
+   并排时每边至少约 300px，放得下「以 A 为准」和「B 会删掉，14 天内可恢复」 */
+@container pm-page (max-width: 720px) { .pm-conflict--wide .pm-conflict-sides { grid-template-columns: minmax(0, 1fr); } }
+@container pm-main (max-width: 640px) { .pm-conflict--wide .pm-conflict-sides { grid-template-columns: minmax(0, 1fr); } }
 .pm-conflict-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .pm-conflict-consequence { margin: 6px 0 0; font-size: 12px; line-height: 1.6; color: var(--pm-text-2); }
-.pm-keep .pm-conflict-consequence { text-align: center; }
 .pm-conflict-single { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .pm-conflict--wide .pm-conflict-single { padding-left: 16px; }
 .pm-conflict-baseline { margin: 0; padding-left: 14px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); overflow-wrap: anywhere; }

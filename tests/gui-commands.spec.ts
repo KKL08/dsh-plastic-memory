@@ -1238,6 +1238,15 @@ describe('提升候选与超限', () => {
     ok(await e.run({ cmd: 'dismiss-overflow', decisionId: entry.id }))
     expect((await e.decisions.listSettled()).map(d => [d.id, d.settled?.verdict])).toEqual([[entry.id, 'dismiss']])
   })
+
+  it('undo 忽略过的超限提醒：回到未决，同一条条目', async () => {
+    const e = env()
+    const { entry } = await e.decisions.upsert({ kind: 'overflow', memoryIds: [], summary: '超出上限', fingerprint: '1' }, 1)
+    ok(await e.run({ cmd: 'dismiss-overflow', decisionId: entry.id }))
+    ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+    expect(await e.decisions.listSettled()).toEqual([])
+    expect((await e.decisions.list()).map(d => d.id)).toEqual([entry.id])
+  })
 })
 
 describe('promote-memory（建议整理「放错层」的提升为全局）', () => {

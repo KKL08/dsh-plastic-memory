@@ -204,7 +204,8 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
           <SegmentedTabs label={t('tabs.label')} items={items} value={target.view} onChange={(view) => { nav.update({ view, memoryId: undefined }) }} />
           <div role="tabpanel" id={`${tabsId}-${target.view}-panel`} aria-labelledby={`${tabsId}-${target.view}`} className="pm-page-panel">
             {target.view === 'todo'
-              ? <PendingTab nav={nav} session={session} scope={scope} workspacePath={scope.kind === 'workspace' ? scope.workspacePath : undefined} />
+              // 按范围给 key：换范围就收起上一个范围刚处理的结果卡和说明
+              ? <PendingTab key={scopeKey(scope)} nav={nav} session={session} scope={scope} workspacePath={scope.kind === 'workspace' ? scope.workspacePath : undefined} />
               : target.view === 'library'
                 ? <LibraryTab nav={nav} scope={scope} session={session} />
                 : <DeletedTab nav={nav} scope={scope} session={session} />}
@@ -355,7 +356,7 @@ function ScopeRail({ scopes, selected, onSelect, row }: {
   )
 }
 
-/** 状态条首行：有密钥红三角、不打分；否则分档圆点加分数和分档文字；从没做过内容检查不写分数。 */
+/** 状态条首行：有密钥红三角、不打分；否则分档圆点加分数和分档文字；从没体检过不写分数。 */
 function ScopeStatus({ layer }: { layer: HealthLayer }) {
   const t = useT()
   const score = scoreOf(layer)
@@ -386,7 +387,7 @@ export const memoryPageCss = `
 /* 宿主中栏是纵向 flex：根要占满中栏、允许压缩，页面里的滚动区才有固定高度可滚。 */
 .pm-root--page { flex: 1 1 0; height: 100%; min-height: 0; }
 /* 顶部留白都加上宿主窗口顶带的下沉量（对齐宿主入口页；普通浏览器里为 0），侧栏收起时内容不压在红绿灯和侧栏开关下。 */
-.pm-page-frame { height: 100%; min-height: 0; container-type: inline-size; background: var(--pm-bg); }
+.pm-page-frame { height: 100%; min-height: 0; container: pm-page / inline-size; background: var(--pm-bg); }
 .pm-page { height: 100%; min-height: 0; display: grid; grid-template-columns: 240px minmax(0, 1fr); background: var(--pm-bg); }
 .pm-page--empty { display: flex; flex-direction: column; gap: 16px; padding: calc(20px + var(--dsh-frame-top-clearance, 0px)) 32px 48px; overflow: auto; }
 .pm-page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -415,8 +416,9 @@ export const memoryPageCss = `
   background: transparent; font: inherit; font-size: 13px; color: var(--pm-text-2); cursor: pointer;
 }
 .pm-rail-settings:hover { background: var(--pm-hover); color: var(--pm-text); }
+/* 主区单独作容器（pm-main）：主区里按可用宽度排版的规则查它，宽度不含左栏。 */
 .pm-main {
-  min-height: 0; overflow: auto; scrollbar-gutter: stable;
+  min-height: 0; overflow: auto; scrollbar-gutter: stable; container: pm-main / inline-size;
   display: flex; flex-direction: column; gap: 16px; padding: calc(20px + var(--dsh-frame-top-clearance, 0px)) 32px 48px;
 }
 .pm-main > * { max-width: 840px; }
@@ -434,7 +436,7 @@ export const memoryPageCss = `
   font: inherit; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); cursor: pointer;
 }
 .pm-narrow-others:hover { color: var(--pm-text); }
-@container (max-width: 720px) {
+@container pm-page (max-width: 720px) {
   .pm-page { grid-template-columns: minmax(0, 1fr); }
   .pm-rail { display: none; }
   .pm-narrow { display: flex; }

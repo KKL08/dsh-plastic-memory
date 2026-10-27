@@ -162,12 +162,12 @@ describe('标题行与状态条', () => {
     check(/40 分\s*·\s*有问题/, 'pm-marker--error')
   })
 
-  it('有密钥的范围：状态条红三角、不打分，写「暂不打分 · 有密钥，先处理」；条目在高优问题组', () => {
+  it('有密钥的范围：状态条红三角、不打分，写「暂不打分 · 有密钥，先处理」；条目在先处理组', () => {
     open({ view: 'todo', scope: ZETA })
     expect(statusBar()).toHaveTextContent(/暂不打分\s*·\s*有密钥，先处理/)
     expect(statusBar()).not.toHaveTextContent(/\d+ 分/)
     expect(statusBar()!.querySelector('.pm-marker')).toHaveClass('pm-marker--secret')
-    expect(within(panel()).getByRole('heading', { level: 2 })).toHaveTextContent('高优问题')
+    expect(within(panel()).getByRole('heading', { level: 2 })).toHaveTextContent('先处理')
   })
 
   it('「全部」这一版不画状态条', () => {
@@ -218,6 +218,16 @@ describe('视图切换与按范围筛选', () => {
     expect(chips('这条记忆里有密钥')).toEqual(['zeta'])
     fireEvent.click(railRow('app'))
     expect(chips('全局和 app 说法相反')).toEqual([])
+  })
+
+  it('换范围：上一个范围刚处理的结果卡不跟过来，也不写「都处理完了」', async () => {
+    open({ view: 'todo', scope: GLOBAL })
+    fireEvent.click(within(panel()).getByRole('button', { name: '忽略' }))
+    await within(panel()).findByText('已忽略')
+    fireEvent.click(railRow('blog'))
+    expect(within(panel()).queryByText('已忽略')).toBeNull()
+    expect(within(panel()).queryByRole('button', { name: '撤销' })).toBeNull()
+    expect(within(panel()).queryByText('都处理完了，agent 之后按你的决定来。')).toBeNull()
   })
 
   it('左右键切视图，写回导航', () => {
@@ -301,7 +311,7 @@ describe('落点与旧导航目标', () => {
     const { nav } = open({ tab: 'health', level: 'must-fix' })
     expect(nav.get()).toEqual({ view: 'todo', level: 'must-fix' })
     expect(tab(/^处理/)).toHaveAttribute('aria-selected', 'true')
-    await waitFor(() => { expect(within(panel()).getByRole('heading', { level: 2, name: /^高优问题/ })).toHaveFocus() })
+    await waitFor(() => { expect(within(panel()).getByRole('heading', { level: 2, name: /^先处理/ })).toHaveFocus() })
   })
 
   it('旧目标「待处理」「全部记忆」「最近删除」分别落在处理、记忆查看、最近删除', () => {

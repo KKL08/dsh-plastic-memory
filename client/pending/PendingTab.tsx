@@ -1,27 +1,31 @@
 /**
- * 记忆页「待处理」tab（PRD 5.2、5.13）：待处理项按级别分组（高优问题 → 待你处理 → 建议整理），组标题带条数，没有内容的组不画；
+ * 记忆页的处理视图（PRD 5.2、5.13）：条目按级别分组（先处理 → 等你决定 → 可以整理），组标题带条数，没有内容的组不画；
  * 组内按服务端排好的顺序各出一张卡，建议整理先显示前 5 张，其余收进「展开其余 N 条」（直达的那条在折叠里时整组展开）。视图不含刚处理完的条目，所以列表在本地记住最近一次处理（原条目 + 结果 + 原位置），在原位显示结果卡；
- * 撤销成功后等视图把条目带回来，再去掉本地那张。离开页面就收起。
+ * 撤销成功后等视图把条目带回来，再去掉本地那张。离开页面、换范围就收起。
  * 动作碰上这一条正在别处处理或刚处理完（什么都没动）：在原位留一行说明，那边的结果写进视图、卡片消失后也还在，
  * 列表空了就留在空状态上面；之后哪张卡做成了一件事就收起。
- * 空状态三种：体检关闭（「去设置里打开 ›」）、从没体检过（说明体检是什么，按钮在页头）、待处理为空（说明待处理收什么、上次体检时间）。
+ * 留下的只剩结果卡时，组上方写「都处理完了」。「可以整理」组底部是这个范围的「已忽略 N 条」，展开逐条取消忽略。
+ * 空状态两种：体检关闭（「去设置里打开 ›」）、三组都空（写上次体检时间，不放体检按钮）；已忽略那一行跟在空状态下面。
  * 入口带记忆 id 打开时，含这条记忆的卡（冲突任一方、提升候选、密钥）滚入视野并高亮一次。
  * 带组标识进来时（健康页「去处理 ›」）焦点落在那一组的标题上，组已不在（处理完了）落在待处理顶部；每次导航只定位一次。
  */
 import { useEffect, useId, useRef, useState, type ReactElement, type ReactNode, type RefObject } from 'react'
-import { PENDING_LEVELS, pendingItemKey, pendingItemScopes, type HealthView, type LibraryView, type PendingItem, type PendingLevel, type PendingView } from '../../src/gui/contract.ts'
+import { PENDING_LEVELS, pendingItemKey, pendingItemScopes, type GuiLayerRef, type HealthView, type LibraryView, type PendingItem, type PendingLevel, type PendingView } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { baseName, formatDay, formatNumber, useT } from '../i18n.tsx'
 import { FlashRow, useFlashTarget } from '../library/shared.tsx'
 import type { LocaleKey } from '../locales.ts'
-import { isInScope, useCanOpen, useNavTarget, type NavStore, type NavTarget, type PageScope } from '../nav.ts'
+import { compareLayers, isInScope, useCanOpen, useNavTarget, type NavStore, type NavTarget, type PageScope } from '../nav.ts'
+import { Button } from '../ui/Button.tsx'
+import { Chip } from '../ui/Chip.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
-import { crossConfirmCss } from './action.tsx'
+import { StatusMarker } from '../ui/StatusMarker.tsx'
+import { ActionFeedback, crossConfirmCss, useItemAction } from './action.tsx'
 import { editCss } from './edit.tsx'
 import { modelEditCss } from './model-edit.tsx'
 import { moveCss } from './move.tsx'
 import {
-  AdviceCard, HorizontalCard, ItemScopeNames, OverflowCard, PromoteCard, ResultCard, SecretCard, titleOf, UnreadableCard, VerticalCard, type Outcome,
+  AdviceCard, adviceTitle, HorizontalCard, ItemScopeNames, OverflowCard, PromoteCard, ResultCard, SecretCard, titleOf, UnreadableCard, VerticalCard, type Outcome,
 } from './cards.tsx'
 
 /** 建议整理先显示的行数，其余收进「展开其余 N 条」；要紧的两组全部显示。 */
@@ -81,8 +85,12 @@ export function PendingTab({ nav, session, scope, workspacePath, now = Date.now(
   const refuse = (item: PendingItem, index: number) => () => { setRefused({ key: pendingItemKey(item), index, title: titleOf(item, t), level: item.level }) }
 
   const viewItems = pending.status === 'ready' ? pending.data.items.filter(item => isInScope(pendingItemScopes(item), scope)) : []
-  const scopeNames = (item: PendingItem): readonly string[] =>
-    scope.kind !== 'all' ? [] : pendingItemScopes(item).map(layer => layer.kind === 'global' ? t('scope.global') : baseName(layer.workspacePath))
+  const layerName = (layer: GuiLayerRef) => layer.kind === 'global' ? t('scope.global') : baseName(layer.workspacePath)
+  const scopeNames = (item: PendingItem): readonly string[] => scope.kind !== 'all' ? [] : pendingItemScopes(item).map(layerName)
+  const healthLayers = health.status === 'ready' ? health.data.layers.filter(l => isInScope([l.layer], scope)) : []
+  const ignored = [...healthLayers].sort((a, b) => compareLayers(a.layer, b.layer))
+    .flatMap(l => l.ignored.map(item => ({ item, scopeName: scope.kind === 'all' ? layerName(l.layer) : undefined })))
+  const ignoredBlock = ignored.length === 0 ? null : <Ignored entries={ignored} session={session} />
   const typeLabels = pending.status === 'ready' ? pending.data.typeLabels : {}
   const { flashId, clear } = useFlashTarget(nav, viewItems.flatMap(memoryIdsOf))
   const root = useRef<HTMLDivElement>(null)
@@ -130,6 +138,8 @@ export function PendingTab({ nav, session, scope, workspacePath, now = Date.now(
   }
 
   const isEmpty = rows.length === 0
+  // 留下的只剩结果卡：这个范围处理完了
+  const isAllDone = !isEmpty && !rows.some(row => row.isItem)
   const refusedRow: Row | undefined = refused === undefined ? undefined : {
     key: `refused:${refused.key}`,
     level: refused.level,
@@ -168,28 +178,41 @@ export function PendingTab({ nav, session, scope, workspacePath, now = Date.now(
         ? (
           <>
             {refusedRow?.node}
-            <PendingEmpty nav={nav} session={session} workspacePath={workspacePath} health={health.status === 'ready' ? health.data : undefined} now={now} />
+            <PendingEmpty
+              nav={nav}
+              isOff={health.status === 'ready' && !health.data.governanceEnabled}
+              lastCheckupAt={health.status === 'ready' ? lastScanAt(healthLayers) : undefined}
+              now={now}
+            />
+            {ignoredBlock}
           </>
         )
-        : PENDING_LEVELS.map((level) => {
-          const group = rows.filter(row => row.level === level)
-          const isOpen = level !== FOLDED_LEVEL || expanded.has(level) || group.slice(GROUP_PREVIEW).some(row => row.flashing === true)
-          const shown = isOpen ? group : group.slice(0, GROUP_PREVIEW)
-          return group.length === 0 ? null : (
-            <PendingGroup key={level} level={level} count={group.filter(row => row.isItem).length}>
-              {shown.map(row => (
-                <FlashRow key={row.key} as="div" className="pm-pending-row" flashing={row.flashing ?? false} onFlashEnd={clear}>{row.node}</FlashRow>
-              ))}
-              {shown.length < group.length
-                ? (
-                  <button type="button" className="pm-pending-more" onClick={() => { setExpanded(prev => new Set(prev).add(level)) }}>
-                    {t('pending.more', { n: formatNumber(group.length - shown.length) })}
-                  </button>
-                )
-                : null}
-            </PendingGroup>
-          )
-        })}
+        : (
+          <>
+            {isAllDone ? <p className="pm-pending-all-done"><StatusMarker kind="ok" />{t('pending.allDone')}</p> : null}
+            {PENDING_LEVELS.map((level) => {
+              const group = rows.filter(row => row.level === level)
+              const isOpen = level !== FOLDED_LEVEL || expanded.has(level) || group.slice(GROUP_PREVIEW).some(row => row.flashing === true)
+              const shown = isOpen ? group : group.slice(0, GROUP_PREVIEW)
+              const tail = level === 'advice' ? ignoredBlock : null
+              return group.length === 0 && tail === null ? null : (
+                <PendingGroup key={level} level={level} count={group.filter(row => row.isItem).length}>
+                  {shown.map(row => (
+                    <FlashRow key={row.key} as="div" className="pm-pending-row" flashing={row.flashing ?? false} onFlashEnd={clear}>{row.node}</FlashRow>
+                  ))}
+                  {shown.length < group.length
+                    ? (
+                      <button type="button" className="pm-pending-more" onClick={() => { setExpanded(prev => new Set(prev).add(level)) }}>
+                        {t('pending.more', { n: formatNumber(group.length - shown.length) })}
+                      </button>
+                    )
+                    : null}
+                  {tail}
+                </PendingGroup>
+              )
+            })}
+          </>
+        )}
     </div>
   )
 }
@@ -222,18 +245,76 @@ function knownProjects(defaultProject: string | undefined, session: BorrowedSess
   return defaultProject === undefined ? rest : [defaultProject, ...rest]
 }
 
-/** 一级一组：组标题写级别和还在等你的条数（只剩结果卡时不写 0）。 */
+/** 一级一组：组标题写级别和还在等你的条数（只剩结果卡时不写 0）；「可以整理」标题后写处理它有什么用。 */
 function PendingGroup({ level, count, children }: { level: PendingLevel; count: number; children: ReactNode }) {
   const t = useT()
   const titleId = useId()
   return (
     <section className="pm-pending-group" aria-labelledby={titleId}>
-      <h2 id={titleId} className="pm-pending-group-title" data-level={level} tabIndex={-1}>
-        {t(LEVEL_LABEL[level])}
-        {count > 0 ? <>{' '}<span className="pm-pending-group-count">{formatNumber(count)}</span></> : null}
-      </h2>
+      <header className="pm-pending-group-head">
+        <h2 id={titleId} className="pm-pending-group-title" data-level={level} tabIndex={-1}>
+          {t(LEVEL_LABEL[level])}
+          {count > 0 ? <>{' '}<span className="pm-pending-group-count">{formatNumber(count)}</span></> : null}
+        </h2>
+        {level === 'advice'
+          ? <p className="pm-pending-group-note"><i className="pm-sep" aria-hidden="true">·</i><span>{t('pending.level.advice.note')}</span></p>
+          : null}
+      </header>
       {children}
     </section>
+  )
+}
+
+type IgnoredItem = HealthView['layers'][number]['ignored'][number]
+
+/** 已忽略的一条：问题类型 · 记忆名（「全部」里带范围胶囊），「取消忽略」发 unignore-advice；成功后视图重写，这一条随之消失。 */
+function IgnoredRow({ item, scopeName, session }: { item: IgnoredItem; scopeName: string | undefined; session: BorrowedSession }) {
+  const t = useT()
+  const action = useItemAction(session, () => {})
+  return (
+    <li className="pm-ignored-row">
+      <span className="pm-ignored-text">{[adviceTitle(item.type, t), ...item.memories.map(m => m.name)].join(' · ')}</span>
+      {scopeName !== undefined ? <Chip variant="neutral">{scopeName}</Chip> : null}
+      <Button
+        variant="ghost"
+        className="pm-ignored-undo"
+        unavailable={action.unavailable}
+        onClick={() => { action.run({ cmd: 'unignore-advice', type: item.type, memoryIds: item.memories.map(m => m.id) }) }}
+      >
+        {t('pending.ignored.unignore')}
+      </Button>
+      <ActionFeedback action={action} />
+    </li>
+  )
+}
+
+/** 「已忽略 N 条 查看 ⌄」：默认收起，展开逐条列出。数据取健康视图里这个范围各层的已忽略。 */
+function Ignored({ entries, session }: { entries: ReadonlyArray<{ item: IgnoredItem; scopeName: string | undefined }>; session: BorrowedSession }) {
+  const t = useT()
+  const [isOpen, setOpen] = useState(false)
+  const listId = useId()
+  const label = t('pending.ignored.count', { n: formatNumber(entries.length) })
+  return (
+    <div className="pm-ignored">
+      <p className="pm-ignored-line">
+        <span>{label}</span>
+        <button type="button" className="pm-ignored-toggle" aria-expanded={isOpen} aria-controls={listId} onClick={() => { setOpen(!isOpen) }}>
+          {t(isOpen ? 'pending.ignored.hide' : 'pending.ignored.show')}
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M7 10l5 5 5-5" />
+          </svg>
+        </button>
+      </p>
+      {isOpen
+        ? (
+          <ul id={listId} className="pm-ignored-list" aria-label={label}>
+            {entries.map(({ item, scopeName }) => (
+              <IgnoredRow key={`${scopeName ?? ''}:${item.type}:${item.memories.map(m => m.id).join(',')}`} item={item} scopeName={scopeName} session={session} />
+            ))}
+          </ul>
+        )
+        : null}
+    </div>
   )
 }
 
@@ -246,24 +327,27 @@ function ViewStatus({ state }: { state: Exclude<ViewState<PendingView>, { status
   return <p className="pm-page-placeholder" role="status">{text}</p>
 }
 
-/** 最近一次内容检查（语义层体检）的时间；一层都没做过为 null。 */
-function lastScanAt(health: HealthView): number | null {
-  const times = health.layers.map(l => l.lastCheckupAt).filter((v): v is number => v !== null)
+/** 这个范围最近一次体检的时间；一层都没体检过为 null。 */
+function lastScanAt(layers: HealthView['layers']): number | null {
+  const times = layers.map(l => l.lastCheckupAt).filter((v): v is number => v !== null)
   return times.length === 0 ? null : Math.max(...times)
 }
 
-/** 体检开关取健康视图（和健康 tab、页头的体检按钮同一来源）；视图还没到时按开着处理。 */
-function PendingEmpty({ nav, session, workspacePath, health, now }: {
+/**
+ * 三组都空。体检开关取健康视图（和状态条同一来源），视图还没到时按开着处理、不写上次体检。
+ * 不放体检按钮：体检入口在标题行。
+ */
+function PendingEmpty({ nav, isOff, lastCheckupAt, now }: {
   nav: NavStore
-  session: BorrowedSession
-  workspacePath: string | undefined
-  health: HealthView | undefined
+  isOff: boolean
+  /** 这个范围的上次体检；null = 从没体检过，undefined = 健康视图还没到。 */
+  lastCheckupAt: number | null | undefined
   now: number
 }) {
   const t = useT()
   const canOpenSettings = useCanOpen(nav, 'settings')
 
-  if (health?.governanceEnabled === false) {
+  if (isOff) {
     return (
       <EmptyState
         variant="daily"
@@ -274,19 +358,10 @@ function PendingEmpty({ nav, session, workspacePath, health, now }: {
       </EmptyState>
     )
   }
-  const last = health === undefined ? undefined : lastScanAt(health)
-  if (last === null) {
-    // 「体检当前项目」在页头（ScanControl），这里只说明体检是什么，不重复放按钮
-    return (
-      <EmptyState variant="daily" title={t('pending.never.title')}>
-        {t('pending.never.body')}
-      </EmptyState>
-    )
-  }
   return (
     <EmptyState variant="daily" title={t('pending.empty.title')}>
-      {t('pending.empty.body')}
-      {last === undefined ? null : <><br />{t('pending.empty.lastScan', { date: formatDay(last, now, t) })}</>}
+      {lastCheckupAt === undefined ? undefined
+        : lastCheckupAt === null ? t('pending.empty.never') : t('pending.empty.lastScan', { date: formatDay(lastCheckupAt, now, t) })}
     </EmptyState>
   )
 }
@@ -296,7 +371,22 @@ export const pendingCss = crossConfirmCss + editCss + modelEditCss + moveCss + `
 .pm-root .pm-pending:focus-visible { outline: none; }
 .pm-pending-group { display: flex; flex-direction: column; }
 .pm-pending-group + .pm-pending-group { margin-top: 24px; }
-.pm-pending-group-title { margin: 4px 0 0; font-size: 16px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
+.pm-pending-group-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 6px; margin-top: 4px; }
+.pm-pending-group-title { margin: 0; font-size: 16px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
+.pm-pending-group-note { display: inline-flex; gap: 6px; margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
+.pm-pending-all-done { display: flex; align-items: center; gap: 8px; margin: 0 0 16px; font-size: 13px; line-height: 1.55; color: var(--pm-text); }
+.pm-ignored { padding: 12px 0 4px; border-top: .5px solid var(--pm-line); font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
+.pm-ignored-line { display: flex; align-items: center; gap: 8px; margin: 0; }
+.pm-ignored-toggle {
+  display: inline-flex; align-items: center; gap: 2px; padding: 0; border: 0; background: none;
+  font: inherit; font-size: 12px; font-weight: 600; color: var(--pm-text); cursor: pointer;
+}
+.pm-ignored-toggle[aria-expanded='true'] svg { transform: rotate(180deg); }
+.pm-ignored-list { margin: 8px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.pm-ignored-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.pm-ignored-text { min-width: 0; overflow-wrap: anywhere; }
+.pm-ignored-undo { margin-left: auto; padding: 2px 10px; font-size: 12px; }
+.pm-ignored-row .pm-pending-error { flex-basis: 100%; margin: 0; }
 .pm-pending-advice-memories .pm-mc-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 .pm-pending-advice-group { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .pm-pending-advice-side { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
