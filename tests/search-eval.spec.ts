@@ -11,7 +11,7 @@ import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { expandQueryTerms, matchScore } from '../src/text.ts'
-import { RANKING_FIELDS, TIER_ORDER, isFullMatch, queryAliasGroups, substringEligible, type SearchTier } from '../src/search/ranking.ts'
+import { RANKING_FIELDS, TIER_ORDER, substringEligible, type SearchTier } from '../src/search/ranking.ts'
 import { defaultJiebaLoader, resetJieba, tokenizerForQuery, type JiebaLoader } from '../src/search/jieba-segmenter.ts'
 import { executeSearch, type SearchToolDeps } from '../src/tools/search.ts'
 import { WEAK_SEARCH_NOTE_CODES, type SearchNoteCode } from '../src/contract-codes.ts'
@@ -65,18 +65,17 @@ const isNoiseTerm = (t: string) => /^\p{N}+$/u.test(t) || ([...t].length === 1 &
 const byId = new Map(EVAL_RECORDS.map(r => [r.id, r]))
 
 /** 用生产分词器（当前档）独立算出每条记录相对查询的档位；不在任何档返回 undefined。
- * token 命中 = 某字段分词含它，或某字段小写原文以子串含它；全命中按别名组算（组内任一写法全命中即可）。 */
+ * token 命中 = 某字段分词含它，或某字段小写原文以子串含它。 */
 async function tierOracle(query: string): Promise<(r: MemoryRecord) => SearchTier | undefined> {
   const tokenize = await tokenizerForQuery(query, { log: silent })
   const tokens = [...new Set(tokenize(query))].filter(t => !isNoiseTerm(t))
   const eligible = substringEligible(tokens)
   const legacy = expandQueryTerms(query)
-  const aliasGroups = queryAliasGroups(query, tokens, tokenize)
   return r => {
     const texts = RANKING_FIELDS.map(f => f === 'tags' ? r.tags.join(' ') : r[f])
     const fieldTokens = texts.flatMap(t => tokenize(t))
-    const hits = tokens.map((t, i) => fieldTokens.includes(t) || (eligible[i]! && texts.some(x => x.toLowerCase().includes(t))))
-    if (hits.some(Boolean)) return isFullMatch(hits, aliasGroups) ? 'all' : 'partial'
+    const hit = tokens.filter((t, i) => fieldTokens.includes(t) || (eligible[i]! && texts.some(x => x.toLowerCase().includes(t)))).length
+    if (hit > 0) return hit === tokens.length ? 'all' : 'partial'
     return matchScore(r, legacy) > 0 ? 'substring' : undefined
   }
 }
@@ -314,15 +313,15 @@ describe('换说法类（只记基线，不设分数线）', { timeout: 60_000 }
 // 所以库里没有答案的必须判弱；首条已经正确却判弱的只设上限。
 // 改判弱口径前（只要没有全命中就判弱）的基线：评估集 93 条非零 token 查询里，bigram 判弱 61 条、其中首条正确 33 条；
 // jieba 判弱 50 条、其中首条正确 24 条。加长句两类后（114 条），按覆盖查询文字四成判弱时：没有答案的长句 bigram 漏判 6 条、
-// jieba 漏判 7 条。改成只数内容字、阈值 0.65 后：两档都不漏判；中英双写以外首条正确却判弱 bigram 5 条（长句）、
-// jieba 3 条（长句 2、换说法 1）。中英双写改用 / 连成别名组后，8 条里 bigram 判弱 1 条（断线重连/reconnect：
-// 记忆写的是「断线后的重连」，二字切分下中文写法不算完整出现）、jieba 0 条；空格分开的 2 条对照两档都判弱。
+// jieba 漏判 7 条。改成只数内容字、阈值 0.65 后：两档都不漏判；首条正确却判弱 bigram 5 条（长句）、
+// jieba 3 条（长句 2、换说法 1）。
+// 换语言查：记忆标签里存了另一种语言的别名时，只写一种写法就全命中、不判弱；没存别名时判弱，提示换成另一种语言再搜。
 
 const WEAK_CORRECT_CEILING = 5
 const NO_ANSWER_QUERIES = EVAL_QUERIES.filter(q => q.category !== 'zero-token' && q.relevant.length === 0)
 const isWeak = (code: SearchNoteCode | undefined) => code !== undefined && (WEAK_SEARCH_NOTE_CODES as readonly string[]).includes(code)
 
-describe('同一文字的斜杠词是一个词：要字面命中，不按别名组放宽', { timeout: 60_000 }, () => {
+describe('斜杠词是普通的词：要字面命中', { timeout: 60_000 }, () => {
   const textOf = (id: string) => { const r = byId.get(id)!; return [r.id, r.name, r.summary, r.tags.join(' '), r.content].join('\n').toLowerCase() }
   for (const tier of ['bigram', 'jieba'] as const) {
     describe.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档`, () => {
@@ -345,20 +344,15 @@ describe('同一文字的斜杠词是一个词：要字面命中，不按别名�
         const r = await search('src/search 排序')
         if (r.noteCode === undefined) expect(textOf(r.hits[0]!.id)).toContain('src')
       })
-
-      it('部署/deploy 照旧是别名组：只写了「部署」的记录全命中，不出说明', async () => {
-        useTier(tier)
-        const r = await search('部署/deploy')
-        expect(r.noteCode).toBeUndefined()
-        expect(['mem_d6x2k7', 'mem_w8h3p1']).toContain(r.hits[0]?.id)
-      })
     })
   }
 })
 
 describe('命中弱', { timeout: 60_000 }, () => {
-  it('评估集有中英双写、库里没有答案、有答案的长句、没有答案的长句四类查询；没有答案的 relevant 为空', () => {
-    expect(EVAL_QUERIES.filter(q => q.category === 'bilingual').length).toBeGreaterThanOrEqual(6)
+  it('评估集有换语言查（记忆存了别名 / 没存）、库里没有答案、有答案的长句、没有答案的长句几类查询；没有答案的 relevant 为空', () => {
+    expect(EVAL_QUERIES.filter(q => q.category === 'bilingual').length).toBeGreaterThanOrEqual(3)
+    expect(EVAL_QUERIES.filter(q => q.category === 'bilingual-no-alias').length).toBeGreaterThanOrEqual(3)
+    expect(EVAL_QUERIES.some(q => q.query.includes('/') && (NOTE_ONLY_CATEGORIES as readonly string[]).includes(q.category))).toBe(false)
     expect(EVAL_QUERIES.filter(q => q.category === 'no-answer').length).toBeGreaterThanOrEqual(6)
     expect(EVAL_QUERIES.filter(q => q.category === 'long-answerable').length).toBeGreaterThanOrEqual(8)
     expect(EVAL_QUERIES.filter(q => q.category === 'long-no-answer').length).toBeGreaterThanOrEqual(8)
@@ -378,27 +372,31 @@ describe('命中弱', { timeout: 60_000 }, () => {
         expect(notWeak).toEqual([])
       })
 
-      it('中英双写、记忆只写了一种写法：首条都正确；用 / 连成别名组的至多 1 条判弱，空格分开的对照按两个关键词算、判弱', async () => {
+      it('换语言查、记忆标签里存了别名：首条正确，全命中、不出说明', async () => {
         useTier(tier)
-        const wrong: string[] = []
-        const aliasWeak: string[] = []
-        const controlNotWeak: string[] = []
+        const bad: string[] = []
         for (const q of EVAL_QUERIES.filter(q => q.category === 'bilingual')) {
           const r = await search(q.query)
           const first = r.hits[0]?.id
-          if (first === undefined || !q.relevant.includes(first)) wrong.push(`${q.query} → ${first ?? '（空）'}`)
-          if (q.query.includes('/') && isWeak(r.noteCode)) aliasWeak.push(q.query)
-          if (!q.query.includes('/') && !isWeak(r.noteCode)) controlNotWeak.push(q.query)
+          if (first === undefined || !q.relevant.includes(first) || r.noteCode !== undefined) bad.push(`${q.query} → ${first ?? '（空）'} ${r.noteCode ?? ''}`)
         }
-        expect(wrong).toEqual([])
-        expect(aliasWeak.length, aliasWeak.join('、')).toBeLessThanOrEqual(1)
-        expect(controlNotWeak).toEqual([])
+        expect(bad).toEqual([])
       })
 
-      it(`首条正确却判弱的查询不超过 ${WEAK_CORRECT_CEILING} 条（中英双写与库里没有答案的除外）`, async () => {
+      it('换语言查、记忆没存别名：有部分命中，但不当成全命中，提示命中弱', async () => {
+        useTier(tier)
+        const bad: string[] = []
+        for (const q of EVAL_QUERIES.filter(q => q.category === 'bilingual-no-alias')) {
+          const r = await search(q.query)
+          if (r.hits.length === 0 || !isWeak(r.noteCode)) bad.push(`${q.query} → ${r.hits.length} 条 ${r.noteCode ?? '无说明码'}`)
+        }
+        expect(bad).toEqual([])
+      })
+
+      it(`首条正确却判弱的查询不超过 ${WEAK_CORRECT_CEILING} 条（记忆没存别名的换语言查与库里没有答案的除外）`, async () => {
         useTier(tier)
         const weakCorrect: string[] = []
-        for (const q of EVAL_QUERIES.filter(q => q.category !== 'zero-token' && q.category !== 'bilingual' && q.relevant.length > 0)) {
+        for (const q of EVAL_QUERIES.filter(q => q.category !== 'zero-token' && q.category !== 'bilingual-no-alias' && q.relevant.length > 0)) {
           const r = await search(q.query)
           if (isWeak(r.noteCode) && rankOf(q, r.hits.map(h => h.id)) === 1) weakCorrect.push(q.query)
         }

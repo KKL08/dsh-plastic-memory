@@ -1,10 +1,8 @@
-import { queryWords } from './ranking.ts'
 import { CJK } from './tokenizer.ts'
 
 /**
  * 「命中弱」的判断：没有记录同时命中全部查询 token 时，看排第一的那条对上了查询的多少。
- * 查询先按空白切成词（与排序同一份，见 ranking.ts queryWords）：用 / 连写的别名组是一个关键词，任一写法完整出现即算；
- * 其余的词再按文字种类切开，CJK 连续段去掉虚词后剩下的内容段，其他文字的整词。逐词命中条数也按这套分组数。
+ * 查询先按空白切成词，再按文字种类切开：CJK 连续段去掉虚词后剩下的内容段，其他文字的整词。逐词命中条数也按这套分组数。
  * 纯函数，不碰存储与分词器状态。拿不准时偏向判弱：误判弱只多搜一轮，漏判弱会让模型把错的结果当答案。
  */
 
@@ -29,9 +27,9 @@ export const FUNCTION_WORDS = [
   '的', '了', '吗', '呢', '吧', '啊', '呀', '么', '在', '是',
 ] as const
 
-/** 查询里的一个词：一个非 CJK 词、CJK 词去掉虚词后的一个内容段，或别名组的一个写法。 */
+/** 查询里的一个词：一个非 CJK 词，或 CJK 词去掉虚词后的一个内容段。 */
 export interface QueryUnit {
-  /** 显示用：非 CJK 词去掉首尾标点，CJK 内容段与别名写法原样。 */
+  /** 显示用：非 CJK 词去掉首尾标点，CJK 内容段原样。 */
   label: string
   /** CJK 内容段按字算覆盖（盖住了几个字）；其余按 tokens 算（命中了几个 token）。 */
   byChar: boolean
@@ -40,9 +38,9 @@ export interface QueryUnit {
 }
 
 export interface TermGroup {
-  /** 一个词；或别名组的各写法（按查询里的顺序）。 */
+  /** 一个词。 */
   units: QueryUnit[]
-  /** 关键词组：非 CJK 词、去掉虚词后 2 到 KEYWORD_MAX_CJK_CHARS 字的 CJK 词、别名组。整组没在首条出现就判弱；其余只计入覆盖度。 */
+  /** 关键词组：非 CJK 词、去掉虚词后 2 到 KEYWORD_MAX_CJK_CHARS 字的 CJK 词。整组没在首条出现就判弱；其余只计入覆盖度。 */
   keyword: boolean
 }
 
@@ -92,18 +90,14 @@ const isFull = (unit: QueryUnit, tokens: readonly string[], hits: readonly boole
 
 /**
  * 查询切词。tokens 是执行器清洗后的查询 token（去重、剔除噪声），tokenize 是查询与记录共用的分词器。
- * 空白分开的是不同的词；别名组整组一个关键词。不产生 token 的词（纯数字、标点）和只有虚词的 CJK 段剔掉。
+ * 不产生 token 的词（纯数字、标点）和只有虚词的 CJK 段剔掉。
  */
 export function groupQueryTerms(query: string, tokens: readonly string[], tokenize: (text: string) => string[]): TermGroup[] {
   const index = new Map(tokens.map((t, i) => [t, i] as const))
   const tokenIds = (text: string) => [...new Set(tokenize(text).map(t => index.get(t)).filter((i): i is number => i !== undefined))]
   const groups: TermGroup[] = []
-  for (const word of queryWords(query, tokens, tokenize)) {
-    if (word.alias) {
-      groups.push({ units: word.forms.map(f => ({ label: f.label, byChar: false, tokens: f.tokens })), keyword: true })
-      continue
-    }
-    for (const [part] of word.text.matchAll(SCRIPT_RUN)) {
+  for (const word of query.split(/\s+/)) {
+    for (const [part] of word.matchAll(SCRIPT_RUN)) {
       if (IS_CJK.test(part)) {
         const segments = contentSegments(part)
         const n = segments.length === 1 ? [...segments[0]!].length : 0
@@ -148,7 +142,7 @@ export interface TermHitCount {
 }
 
 /**
- * 逐词命中条数，按查询里的顺序、同名去重：每组算一个词（别名组按查询里的顺序用 / 连起各写法，任一写法完整出现即算）。
+ * 逐词命中条数，按查询里的顺序、同名去重：每组算一个词，完整出现才算。
  * 句子里的内容段只列词长的（2 到 KEYWORD_MAX_CJK_CHARS 字），单字和更长的短语不列，也不列二字碎片。
  * rows 是范围内各条记录对查询 token 的命中。
  */

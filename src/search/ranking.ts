@@ -1,6 +1,5 @@
 import type { MemoryRecord } from '../record-schema.ts'
 import { matchScore } from '../text.ts'
-import { CJK } from './tokenizer.ts'
 
 /**
  * 检索排序：查询时现算、不留状态。给定查询 token、候选记录与范围内列出的文件数 N，
@@ -39,8 +38,7 @@ export interface RankingParams {
 }
 
 /**
- * 三档：全部关键词命中 → 部分命中 → 一个都没命中但旧子串匹配（matchScore）命中。
- * 「全部关键词命中」= 别名组（见 aliasForms）里任一写法的 token 全命中，组外的 token 全命中；没有别名组时就是全部 token 命中。
+ * 三档：全部查询 token 命中 → 部分命中 → 一个都没命中但旧子串匹配（matchScore）命中。
  * 「token 命中」= 某字段分词后含该 token，或某字段的小写原文以子串含该 token（如 deploy 之于 deployment；
  * 自身是别的查询 token 子串的子词除外，见 substringEligible）。
  * 第三档于是只剩 id 这类不打分字段的命中，以及全是噪声词项（单字母、纯数字）的查询。
@@ -67,8 +65,6 @@ export interface RankInput {
   legacyTerms: readonly string[]
   /** 锚点词（anchorTerms），缺省没有。 */
   anchors?: readonly string[]
-  /** 别名组（queryAliasGroups）：组内写法任一全命中即算这个关键词命中。缺省没有。 */
-  aliasGroups?: AliasGroups
   /** 解析后的候选（已过 scope / 状态 / types / validTo）。 */
   records: readonly MemoryRecord[]
   /** 范围内顶层列出的记忆文件数（ScopeReadResult.listedCount），作 BM25 的 N。 */
@@ -150,73 +146,6 @@ export function anchorTerms(query: string): string[] {
   return [...new Set(words)]
 }
 
-/** 别名组最多几个写法。 */
-export const ALIAS_MAX_FORMS = 4
-/** 别名组里非中文写法的最少字符数（挡住 部署/x 这类）；中文写法一个字也行（锁/lock）。 */
-export const ALIAS_MIN_LATIN_CHARS = 2
-
-const HAS_CJK = new RegExp(`[${CJK}]`, 'u')
-
-/**
- * 别名组：查询里用 / 连写、不带空格的同一术语的中英几种写法（部署/deploy、部署/deploy/发布），任一写法命中都算。
- * 判定（剥掉首尾句读和括号后）：2 到 ALIAS_MAX_FORMS 段，每段只含字母、数字、_、-；中文写法至少一个字，
- * 非中文写法至少 ALIAS_MIN_LATIN_CHARS 个字符；且至少一段含中文、至少一段不含中文。
- * 只有一种文字的斜杠词不算别名组，照常是一个要字面命中的词、也是字面锚点：路径（src/search、/Users/x/y）、
- * 仓库名与分支名（owner/repo、fix/compaction-snapshot）、版本（api/v2）、缩写对（TCP/IP、CI/CD）、日期（2026/10/27）。
- * 不是别名组返回 undefined。
- */
-export function aliasForms(word: string): string[] | undefined {
-  const w = word.replace(EDGE_PUNCT, '')
-  if (!w.includes('/')) return undefined
-  const forms = w.split('/')
-  if (forms.length > ALIAS_MAX_FORMS) return undefined
-  const cjk = forms.map(f => HAS_CJK.test(f))
-  const wellFormed = forms.every((f, i) => WORD_CHARS_ONLY.test(f) && [...f].length >= (cjk[i] ? 1 : ALIAS_MIN_LATIN_CHARS))
-  return wellFormed && cjk.includes(true) && cjk.includes(false) ? forms : undefined
-}
-
-/** 查询按空白切出的一个词：别名组带各写法的查询 token 下标；其余原样。 */
-export type QueryWord =
-  | { alias: true; forms: { label: string; tokens: number[] }[] }
-  | { alias: false; text: string }
-
-/**
- * 查询按空白切词，认出别名组（aliasForms）。排序（queryAliasGroups）与命中弱判断（search/coverage.ts）都从这里取，口径一致。
- * 别名组里没有 token 的写法（纯数字等噪声）去掉，一个写法都不剩的组整个去掉。
- */
-export function queryWords(query: string, tokens: readonly string[], tokenize: (text: string) => string[]): QueryWord[] {
-  const index = new Map(tokens.map((t, i) => [t, i] as const))
-  const out: QueryWord[] = []
-  for (const word of query.split(/\s+/)) {
-    if (word === '') continue
-    const forms = aliasForms(word)
-    if (forms === undefined) {
-      out.push({ alias: false, text: word })
-      continue
-    }
-    const withTokens = forms
-      .map(label => ({ label, tokens: [...new Set(tokenize(label).map(t => index.get(t)).filter((i): i is number => i !== undefined))] }))
-      .filter(f => f.tokens.length > 0)
-    if (withTokens.length > 0) out.push({ alias: true, forms: withTokens })
-  }
-  return out
-}
-
-/** 各别名组的各写法对应的查询 token 下标。 */
-export type AliasGroups = readonly (readonly (readonly number[])[])[]
-
-/** 查询里的别名组，写法换成查询 token 下标。 */
-export function queryAliasGroups(query: string, tokens: readonly string[], tokenize: (text: string) => string[]): number[][][] {
-  return queryWords(query, tokens, tokenize).flatMap(w => (w.alias ? [w.forms.map(f => f.tokens)] : []))
-}
-
-/** 全部关键词命中：每个别名组有一个写法的 token 全命中，且不在任何别名组里的 token 全命中。 */
-export function isFullMatch(hits: readonly boolean[], aliasGroups: AliasGroups): boolean {
-  const grouped = new Set(aliasGroups.flat(2))
-  return aliasGroups.every(g => g.some(form => form.every(i => hits[i])))
-    && hits.every((hit, i) => hit || grouped.has(i))
-}
-
 /** 记录字面含几个锚点词：id、name、summary、tags、content 的小写原文，子串即算。 */
 export function countAnchorHits(record: MemoryRecord, anchors: readonly string[]): number {
   if (anchors.length === 0) return 0
@@ -250,7 +179,7 @@ function bm25f(doc: DocStats, idfs: readonly number[], { k1, b, fields }: Rankin
  * df 按文档粒度在候选集上数：token 是记录原文的子串，被预筛跳过的文件对 df 贡献为零，候选集上数就是精确值。
  * df 只数有词频的文档：只以子串命中的 token 分数为 0，不参与 idf。
  */
-export function rankRecords({ tokens, legacyTerms, anchors = [], aliasGroups = [], records, listedCount, tokenize, params = RANKING_PARAMS }: RankInput): RankedRecord[] {
+export function rankRecords({ tokens, legacyTerms, anchors = [], records, listedCount, tokenize, params = RANKING_PARAMS }: RankInput): RankedRecord[] {
   const tokenIndex = new Map(tokens.map((t, i) => [t, i] as const))
   const eligible = substringEligible(tokens)
   const docs = records.map(r => collectStats(r, tokenIndex, eligible, tokenize))
@@ -265,7 +194,7 @@ export function rankRecords({ tokens, legacyTerms, anchors = [], aliasGroups = [
   for (const doc of docs) {
     if (tokens.length > 0 && doc.hitCount > 0) {
       out.push({
-        record: doc.record, tier: isFullMatch(doc.hit, aliasGroups) ? 'all' : 'partial',
+        record: doc.record, tier: doc.hitCount === tokens.length ? 'all' : 'partial',
         anchorHits: countAnchorHits(doc.record, anchors), score: bm25f(doc, idfs, params), tokenHits: doc.hit,
       })
       continue

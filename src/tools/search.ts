@@ -5,7 +5,7 @@ import { expandQueryTerms } from '../text.ts'
 import { resolveLiveFirst } from '../storage/table.ts'
 import { tokenizerForQuery, type QueryTokenizerOptions } from '../search/jieba-segmenter.ts'
 import { CJK } from '../search/tokenizer.ts'
-import { anchorTerms, compareRanked, queryAliasGroups, rankRecords, type RankedRecord, type SearchTier } from '../search/ranking.ts'
+import { anchorTerms, compareRanked, rankRecords, type RankedRecord, type SearchTier } from '../search/ranking.ts'
 import { groupQueryTerms, judgeTopHit, termHitCounts, type TermHitCount } from '../search/coverage.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import { sourceNote } from '../index-line.ts'
@@ -60,7 +60,7 @@ export interface SearchHit {
 export const IN_SNAPSHOT_NOTE = '全文已在本会话带入的长期记忆里。'
 
 /** 命中弱时附在说明末尾：说明码本身就是「相关度弱」的信号，提示模型换词再搜一次，而不是把弱结果当定论。 */
-export const RETRY_HINT = '命中弱，可以换同义词、减少词数或换个角度再搜一次。'
+export const RETRY_HINT = '命中弱，可以换同义词、换成另一种语言的写法、减少词数或换个角度再搜一次。'
 /**
  * 说明文案（码在 contract-codes）：返回列表里没有全命中记录、首条覆盖够 / 首条覆盖不够（见 search/coverage.ts）/
  * 只有旧子串匹配命中的记录（第三档）。覆盖够的只如实说明，不劝重搜：长句提问时首条往往就是答案。
@@ -164,10 +164,7 @@ export async function executeSearch(
     // 零 token 查询：不做关键词过滤，范围内全部按 confidence、lastConfirmedAt 排
     ranked = candidates.map(record => ({ record, tier: 'all' as const, anchorHits: 0, score: 0, tokenHits: [] }))
   } else {
-    ranked = rankRecords({
-      tokens, legacyTerms, anchors: anchorTerms(a.query), aliasGroups: queryAliasGroups(a.query, tokens, tokenize),
-      records: candidates, listedCount: read.listedCount, tokenize,
-    })
+    ranked = rankRecords({ tokens, legacyTerms, anchors: anchorTerms(a.query), records: candidates, listedCount: read.listedCount, tokenize })
   }
   ranked.sort(compareRanked)
   // id 直达：查询恰等于某条可见记忆的 id，该条排第一

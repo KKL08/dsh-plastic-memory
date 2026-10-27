@@ -550,7 +550,7 @@ const MEMORIES: EvalMemory[] = [
   {
     id: 'mem_o1y9b4', type: 'knowledge', name: '零碎笔记',
     summary: '一些随手记下的东西',
-    tags: [],
+    tags: ['reconnect'],
     content: '客户端 WebSocket 断线后的重连要用指数退避：第一次等一秒，之后每次翻倍，最长三十秒，并加随机抖动，'
       + '免得服务重启后所有客户端同一时刻涌回来。重连成功后先补拉断线期间的消息，再恢复实时推送。'
       + '页面不可见时暂停重连，回到前台立即重试一次。',
@@ -597,7 +597,7 @@ const MEMORIES: EvalMemory[] = [
   {
     id: 'mem_v1u7j6', type: 'knowledge', name: '分页组件样式',
     summary: '分页组件的页码与跳转样式',
-    tags: ['frontend', 'design'],
+    tags: ['frontend', 'design', 'pagination'],
     content: '表格下方的分页组件显示首页、上一页、页码、下一页和跳转输入框，页码超过七个时中间用省略号。'
       + '当前页用主色描边，禁用状态的按钮降低透明度。窄屏下只保留上一页、当前页和下一页。组件只负责展示，翻页参数是 offset 还是 cursor 由列表接口决定，组件不关心。每页条数可选 20、50、100。',
   },
@@ -746,7 +746,7 @@ const MEMORIES: EvalMemory[] = [
   {
     id: 'mem_x2k9m4', type: 'knowledge', name: '互斥锁的用法',
     summary: '进程内并发用互斥锁保护共享状态',
-    tags: ['concurrency', 'node'],
+    tags: ['concurrency', 'node', 'mutex'],
     content: 'Node 是单线程的，但异步操作交错时共享状态仍会被并发修改。进程内用一个基于 Promise 的互斥锁把临界区串起来：'
       + '拿到锁才读改写，结束后释放。锁要配超时，持有方抛错也要在 finally 里释放。'
       + '跨进程的场景用文件锁或数据库的行锁；它和缓存击穿时用的分布式锁是两回事，不要混用一套实现。',
@@ -776,7 +776,7 @@ export const EVAL_RECORDS: MemoryRecord[] = MEMORIES.map((m, i) => ({
 
 export const EVAL_CATEGORIES = [
   'short-cjk', 'long-cjk', 'identifier', 'partial-word', 'plain-name', 'id-direct', 'zero-token', 'anchor', 'paraphrase',
-  'bilingual', 'no-answer', 'long-answerable', 'long-no-answer',
+  'bilingual', 'bilingual-no-alias', 'no-answer', 'long-answerable', 'long-no-answer',
 ] as const
 export type EvalCategory = (typeof EVAL_CATEGORIES)[number]
 
@@ -791,12 +791,12 @@ export const STRICT_CATEGORIES: readonly EvalCategory[] = ['anchor']
 
 /**
  * 只用来评估「命中弱」判定的类别，不进排序指标：
- * - 中英双写（bilingual）：按工具说明把同一术语的几种写法用 / 连成别名组，答案记忆只用其中一种写法（多为只写中文）；
- *   末尾两条是对照，同样的词空格分开、按两个关键词算；
+ * - 换语言查（bilingual）：答案记忆用中文写、标签里存了英文别名（memory_save 要求的），查询只写英文：应全命中、不判弱；
+ * - 换语言查、记忆没存别名（bilingual-no-alias）：答案记忆只有中文写法，查询写英文：应判弱，提示换成另一种语言再搜；
  * - 库里没有答案（no-answer）：查询里有常见词能部分命中，但没有一条记忆讲这件事，relevant 为空；
  * - 长句提问（long-answerable / long-no-answer）：按日常说话的口气整句提问，前者库里有答案，后者没有（relevant 为空）。
  */
-export const NOTE_ONLY_CATEGORIES: readonly EvalCategory[] = ['bilingual', 'no-answer', 'long-answerable', 'long-no-answer']
+export const NOTE_ONLY_CATEGORIES: readonly EvalCategory[] = ['bilingual', 'bilingual-no-alias', 'no-answer', 'long-answerable', 'long-no-answer']
 
 /**
  * 换说法的四种方式：同义词（自动关机 / 定时关停）、上下位词（数据库 / Postgres）、
@@ -910,18 +910,15 @@ export const EVAL_QUERIES: readonly EvalQuery[] = [
   { query: '找服务端老大对接有什么讲究', category: 'paraphrase', paraphrase: 'colloquial', relevant: ['mem_j8b4t6'] },
   { query: '视觉稿一般在哪儿看', category: 'paraphrase', paraphrase: 'colloquial', relevant: ['mem_s3y7u1'] },
   { query: '老条目还靠不靠谱', category: 'paraphrase', paraphrase: 'colloquial', relevant: ['mem_b1h7t4', 'mem_s9h4f2'] },
-  // 中英双写：同一术语的几种写法用 / 连成别名组，答案记忆只写了其中一种（判弱评估用，不进排序指标）
-  { query: '防抖/debounce', category: 'bilingual', relevant: ['mem_h5e1m8'] },
-  { query: '内存泄漏/memory-leak', category: 'bilingual', relevant: ['mem_z7a4k1'] },
-  { query: '轮换/rotation 密钥', category: 'bilingual', relevant: ['mem_r8f2n5'] },
-  { query: '互斥锁/mutex', category: 'bilingual', relevant: ['mem_x2k9m4', 'mem_e3t7z5'] },
-  { query: '读写分离/read-replica', category: 'bilingual', relevant: ['mem_t2x5w4'] },
-  { query: 'pagination/分页组件', category: 'bilingual', relevant: ['mem_v1u7j6'] },
-  { query: '断线重连/reconnect', category: 'bilingual', relevant: ['mem_o1y9b4'] },
-  { query: '部署/deploy', category: 'bilingual', relevant: ['mem_d6x2k7', 'mem_w8h3p1'] },
-  // 对照：同样的词空格分开，按两个关键词算
-  { query: '防抖 debounce', category: 'bilingual', relevant: ['mem_h5e1m8'] },
-  { query: '部署 deploy', category: 'bilingual', relevant: ['mem_d6x2k7', 'mem_w8h3p1'] },
+  // 换语言查：中文记忆的标签里存了英文别名，查询只写英文（判弱评估用，不进排序指标）
+  { query: 'reconnect', category: 'bilingual', relevant: ['mem_o1y9b4'] },
+  { query: 'mutex', category: 'bilingual', relevant: ['mem_x2k9m4', 'mem_e3t7z5'] },
+  { query: 'pagination', category: 'bilingual', relevant: ['mem_v1u7j6'] },
+  // 换语言查、记忆没存别名：只有中文写法，查询写英文，应判弱（判弱评估用，不进排序指标）
+  { query: 'rotation 密钥', category: 'bilingual-no-alias', relevant: ['mem_r8f2n5'] },
+  { query: 'memory leak', category: 'bilingual-no-alias', relevant: ['mem_z7a4k1'] },
+  { query: 'read replica', category: 'bilingual-no-alias', relevant: ['mem_t2x5w4'] },
+  { query: 'debounce 毫秒', category: 'bilingual-no-alias', relevant: ['mem_h5e1m8'] },
   // 库里没有答案：有常见词能部分命中，但没有记忆讲这件事（判弱评估用，结果应全部判弱）
   { query: '数据库 分库分表', category: 'no-answer', relevant: [] },
   { query: '前端 埋点 上报', category: 'no-answer', relevant: [] },

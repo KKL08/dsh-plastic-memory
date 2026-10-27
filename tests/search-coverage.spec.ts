@@ -4,7 +4,7 @@ import {
   KEYWORD_MAX_CJK_CHARS, WEAK_COVERAGE_BELOW, contentSegments, groupQueryTerms, judgeTopHit, termHitCounts, type TermGroup,
 } from '../src/search/coverage.ts'
 
-// 「命中弱」按首条覆盖度判断：查询切成词（CJK 去掉虚词后的内容段），用 / 连写的别名组算一个关键词，
+// 「命中弱」按首条覆盖度判断：查询切成词（CJK 去掉虚词后的内容段），
 // 关键词整组缺失或覆盖的内容字不到阈值才算弱。
 // 这里用 bigram 分词器（与 jieba 是否安装无关）；生产两档在评估集上的表现见 tests/search-eval.spec.ts。
 
@@ -58,47 +58,31 @@ describe('查询切词', () => {
   })
 })
 
-describe('别名组：/ 连写的几种写法算一个关键词', () => {
-  it('写法按查询里的顺序；空格分开的永远是不同的关键词', () => {
-    expect(labels(groupsFor('部署/deploy'))).toEqual(['部署/deploy'])
-    expect(labels(groupsFor('deploy/部署 流程'))).toEqual(['deploy/部署', '流程'])
-    const g = groupsFor('k8s/kubernetes/容器编排')
-    expect(labels(g)).toEqual(['k8s/kubernetes/容器编排'])
-    expect(keywords(g)).toEqual([true])
-    expect(labels(groupsFor('部署 deploy'))).toEqual(['部署', 'deploy'])
-    expect(labels(groupsFor('vitest 配置'))).toEqual(['vitest', '配置'])
-    expect(labels(groupsFor('git 提交'))).toEqual(['git', '提交'])
-  })
-
-  it('路径、文件名、URL 不算别名组：带点、以 / 开头、某段只有一个字符、超过四段的照常切词', () => {
+describe('斜杠词', () => {
+  it('不是别名组：中英斜杠连写按文字种类切成两个关键词；同一文字的斜杠词（路径等）是一个词', () => {
+    const g = groupsFor('部署/deploy')
+    expect(labels(g)).toEqual(['部署', 'deploy'])
+    expect(keywords(g)).toEqual([true, true])
     expect(labels(groupsFor('src/gui/contract.ts'))).toEqual(['src/gui/contract.ts'])
     expect(labels(groupsFor('/Users/x/y'))).toEqual(['Users/x/y'])   // 标签去掉首尾标点
     expect(labels(groupsFor('a/b/c'))).toEqual([])   // 单字母不是 token
-    expect(labels(groupsFor('aa/bb/cc/dd/ee'))).toEqual(['aa/bb/cc/dd/ee'])
     expect(keywords(groupsFor('src/gui/contract.ts'))).toEqual([true])
   })
 
-  it('首条含任一写法即算这个关键词在：只写了中文的首条不判弱', () => {
+  it('首条只写了中文，查询里的英文写法也算一个关键词：缺了就判弱', () => {
     const v = judge('防抖/debounce', '前端搜索输入框防抖 300 毫秒')
-    expect(v.coverage).toBe(1)
-    expect(v.missingKeywords).toEqual([])
-    expect(v.weak).toBe(false)
-  })
-
-  it('空格分开时中英各是一个关键词，首条缺了英文写法就判弱', () => {
-    const v = judge('防抖 debounce', '前端搜索输入框防抖 300 毫秒')
     expect(v.missingKeywords.map(labelOf)).toEqual(['debounce'])
-    expect(v.weak).toBe(true)
-  })
-
-  it('别名组的写法都没完整出现，判弱', () => {
-    const v = judge('定时任务/cron 配置', '配置中心里的任务开关')
-    expect(v.missingKeywords.map(labelOf)).toEqual(['定时任务/cron'])
     expect(v.weak).toBe(true)
   })
 })
 
 describe('首条覆盖度判弱', () => {
+  it('中英两种写法空格分开：各是一个关键词，首条缺了英文写法就判弱', () => {
+    const v = judge('防抖 debounce', '前端搜索输入框防抖 300 毫秒')
+    expect(v.missingKeywords.map(labelOf)).toEqual(['debounce'])
+    expect(v.weak).toBe(true)
+  })
+
   it('长句中文：疑问词不算内容，首条盖住了几乎全部内容字，不判弱', () => {
     // 内容段「记忆文件手编后出处对不上」12 字，只缺「后」
     const v = judge('记忆文件手编后出处对不上怎么办', '记忆文件被手编过时，出处可能对不上，读取时加标注')
@@ -142,7 +126,7 @@ describe('首条覆盖度判弱', () => {
 })
 
 describe('逐词命中条数', () => {
-  it('按组计：别名组按查询里的顺序用 / 连起各写法，任一写法完整出现即算；空格分开的中英各算一个', () => {
+  it('每个关键词各算一条：完整出现在记录里才算', () => {
     const records = ['配置中心', '定时任务每天跑', '用 cron 定时清理', '无关']
     const q = '定时任务 cron 配置'
     const tokens = tokensOf(q)
@@ -150,13 +134,6 @@ describe('逐词命中条数', () => {
     expect(termHitCounts(groupQueryTerms(q, tokens, tokenize), tokens, rows)).toEqual([
       { label: '定时任务', count: 1 },
       { label: 'cron', count: 1 },
-      { label: '配置', count: 1 },
-    ])
-    const q2 = 'cron/定时任务 配置'
-    const t2 = tokensOf(q2)
-    const r2 = records.map(t => hitsIn(t, t2))
-    expect(termHitCounts(groupQueryTerms(q2, t2, tokenize), t2, r2)).toEqual([
-      { label: 'cron/定时任务', count: 2 },
       { label: '配置', count: 1 },
     ])
   })
