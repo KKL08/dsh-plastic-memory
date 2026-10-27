@@ -87,7 +87,7 @@ function SavedRow({ session, item, layer, promotion, now, typeLabel, onDetail, o
       <div className="pm-saved-row" data-memory-id={id}>
         <div className="pm-saved-main">
           <MemoryCard memory={item.memory} now={now} typeLabel={typeLabel(item.memory.type)} chip={promote.chip} />
-          <p className="pm-saved-note">{t('pending.result.wroteAgentsMdBody')}</p>
+          <p className="pm-saved-note pm-saved-note--meta">{t('pending.result.wroteAgentsMdBody')}</p>
         </div>
       </div>
     )
@@ -232,6 +232,7 @@ export const savedMemoriesCardCss = crossConfirmCss + promoteInPlaceCss + `
 .pm-saved-row--deleted { align-items: center; justify-content: space-between; }
 .pm-saved-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .pm-saved-note { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
+.pm-saved-note--meta { padding-left: 14px; }
 .pm-icon-btn {
   flex: none; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px;
   padding: 0; border: 0; border-radius: var(--dsw-radius-sm, 8px); background: none; color: var(--pm-text-2); cursor: pointer;
