@@ -4,7 +4,7 @@
  * cwd 走创建选项）搭 exec 直调，断言宿主层面的契约：工具注册、输出深度无损 JSON、
  * 会话/工作目录解析、落盘布局、规则层/语义层 note 码、快照回路、提升候选 dismiss、
  * 证据锚悬空降级（H9a 把落盘记录的 sessionId 改成不存在的会话）、真会话下钻（H9b 读回原文）、
- * 当轮锚来自宿主 turnBoundary 投影（H13）、外部直接写进记忆目录的文件在新会话组装时注入（H15）、
+ * 当轮锚来自宿主 turnBoundary 投影（H13）、外部直接写进记忆目录的文件出现在新会话第一步的快照消息里（H15）、
  * 宿主 grep 工具搜记忆根目录时顶层命中、.archive/ 不命中（H16）。
  * 有 DEEPSEEK_API_KEY 且宿主能选出默认模型时再跑语义扫描与取消两项，否则标 SKIPPED。
  * run.sh 随后用同一个 DSH_HOME 再起一次宿主（HOST_CONTRACT_PHASE=restart）：第一趟把
@@ -19,7 +19,7 @@ import { existsSync, readdirSync, readFileSync, mkdtempSync, mkdirSync, realpath
 import { isAbsolute, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createSystemMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Context } from '@deepseek-ai/cordis'
 
 export const name = 'dsh-plastic-memory-host-contract'
@@ -32,8 +32,16 @@ type ToolDef = { execute(args: unknown, exec: unknown): Promise<unknown> }
 type Tools = { get(name: string): ToolDef | undefined; schemas(): Array<{ name: string }> }
 /** 宿主 SessionStore 的最小契约：只用到 create（建真 Session，会话 id 由宿主分配）。 */
 type Sessions = { create(id?: string, options?: { meta?: { cwd?: string } }): SessionLike }
-/** 宿主 Session 的最小契约：resolveContext 读 header；H9b 用 append 落一条用户消息。 */
-type SessionLike = { header: { id: string; cwd?: string }; seq: number; append(type: string, data: unknown, opts?: unknown): { seq: number } }
+/** 宿主 Session 的最小契约：resolveContext 读 header；H9b 用 append 落一条用户消息；H15 读可见历史。 */
+type SessionLike = {
+  header: { id: string; cwd?: string }; seq: number
+  append(type: string, data: unknown, opts?: unknown): { seq: number }
+  deriveMessages(): Array<{ source: { kind: string } }>
+}
+/** H15 读 pre-step 返回的 decision：只看消息来源与正文文本。 */
+type DecisionLike = { kind: string; messages?: Array<{ source: { kind: string }; content: Array<{ type: string; text?: string }> }> }
+/** H15 用到的宿主 agent 工厂最小契约：建真 Agent 与它的会话（不跑模型），用完由持有者销毁。 */
+type Agents = { create(options: { sessionId: string; meta?: { cwd?: string } }): Promise<{ agent: { session: SessionLike }; dispose(): Promise<void> }> }
 
 const MEMORY_BASE = { type: 'knowledge', scope: 'workspace', sourceMode: 'user-explicit', tags: [] as string[] }
 
@@ -334,21 +342,43 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       }
     })
 
-    // H15 外部写入可见：插件已在 wsA 上跑过多次操作之后，绕过工具直接往该 workspace 的记忆目录写一个手建文件
-    // （只有 name / type / 正文），再新建会话、走一遍宿主 system prompt 组装：本插件那条 context 必须含这条记忆，
-    // 中间不经任何刷新调用。按 .workspace 标记找目录，不依赖目录名算法。
+    // H15 外部写入可见、快照走本插件自己的消息：插件已在 wsA 上跑过多次操作之后，绕过工具直接往该 workspace 的记忆目录
+    // 写一个手建文件（只有 name / type / 正文），再经宿主 agent 工厂建一个真 Agent（不跑模型），照 agent 循环的派发方式
+    // 走第一步的 agent/pre-step（带一条用户消息；宿主其他插件的 pre-step 监听照常参与）：返回的 decision 里要有本插件的
+    // 快照消息且含这条记忆，中间不经任何刷新调用。按宿主顺序先写系统提示词、再写 decision 后，可见历史第一条是系统提示词、
+    // 第二条是快照；同一会话再走一次空 decision 的第二步，快照还是一份。按 .workspace 标记找目录，不依赖目录名算法。
     await attempt('H15-EXTERNAL-WRITE-INJECTED', async () => {
-      const systemPrompt = ctx.get('systemPrompt') as { assemble(context: { scope?: object }): Promise<{ contexts: Array<{ name: string; text: string }> }> } | undefined
-      if (!systemPrompt) return { ok: false, detail: 'systemPrompt service unavailable' }
+      const agents = ctx.get('agents') as Agents | undefined
+      if (!agents) return { ok: false, detail: 'agents service unavailable' }
       const dir = readdirSync(memoriesRoot).map(d => join(memoriesRoot, d))
         .find(d => existsSync(join(d, '.workspace')) && readFileSync(join(d, '.workspace'), 'utf8').trim() === wsA)
       if (dir === undefined) return { ok: false, detail: `找不到 ${wsA} 的记忆目录` }
-      const probe = 'H15 外部写入探针：新会话组装必须看到它'
+      const probe = 'H15 外部写入探针：新会话第一步的快照必须带上它'
       writeFileSync(join(dir, 'h15-external-probe.md'), `---\nname: h15-external-probe\ntype: preference\n---\n\n${probe}\n`)
-      const session = sessions.create(undefined, { meta: { cwd: wsA } })
-      const assembly = await systemPrompt.assemble({ scope: { session } })
-      const text = assembly.contexts.find(c => c.name === 'plastic-memory')?.text ?? ''
-      return { ok: text.includes(probe), detail: `contexts=${assembly.contexts.map(c => c.name).join(',')} plasticMemoryChars=${text.length} hasProbe=${text.includes(probe)}` }
+      const handle = await agents.create({ sessionId: `h15-${Math.random().toString(36).slice(2, 8)}`, meta: { cwd: wsA } })
+      try {
+        const { agent } = handle
+        const session = agent.session
+        const bus = ctx as unknown as { waterfall(name: string, ...args: unknown[]): Promise<unknown> }
+        const preStep = (step: number, messages: unknown[]) => bus.waterfall('agent/pre-step', {
+          agent, messages, turn: 1, step, signal: new AbortController().signal,
+        }, async () => ({ kind: 'enter', messages })) as Promise<DecisionLike>
+        const said = createUserMessage({ content: [{ type: 'text', text: 'H15 用户消息' }], source: { kind: 'user' } })
+        const first = await preStep(1, [said])
+        const snapshot = first.messages?.find(m => m.source.kind === 'plastic-memory')
+        const hasProbe = snapshot?.content.some(b => b.text?.includes(probe)) ?? false
+        session.append('system/message', { turn: 1, step: 1, message: createSystemMessage('H15 系统提示词') }, { surfaceOp: 'append' })
+        for (const m of first.messages ?? []) session.append('user/message', m, { surfaceOp: 'append' })
+        const order = session.deriveMessages().map(m => m.source.kind)
+        await preStep(2, [])
+        const snapshots = session.deriveMessages().filter(m => m.source.kind === 'plastic-memory').length
+        return {
+          ok: first.kind === 'enter' && hasProbe && order[0] === 'system-prompt' && order[1] === 'plastic-memory' && snapshots === 1,
+          detail: `decision=${first.kind} hasProbe=${hasProbe} order=${order.join(',')} snapshotsAfterStep2=${snapshots}`,
+        }
+      } finally {
+        await handle.dispose()
+      }
     })
 
     // H16 宿主 grep 工具搜记忆根目录：.archive/ 是隐藏目录，宿主 grep 基于 ripgrep 且不传 --hidden，所以顶层文件命中、
