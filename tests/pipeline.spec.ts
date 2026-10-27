@@ -571,6 +571,23 @@ describe('runSavePipeline：模型改写的兜底', () => {
     expect(await e.store.query({})).toHaveLength(1)
   })
 
+  it('替代手改过的记忆、新内容又和它重叠：先拦手改，不回疑似重复（那条回复叫模型带 force 重发，会把手改保护一并跳过）', async () => {
+    const e = guarded()
+    const old = await seed(e.store, { content: '测试统一用 Postgres 16 跑集成测试' })
+    await e.store.put({ ...old, handEdited: true })
+    const r = await runSavePipeline(candidate({ scope: 'workspace', content: '测试统一用 Postgres 17 跑集成测试', supersedes: [old.id] }), e.deps)
+    expect(r).toMatchObject({ kind: 'rejected', code: 'hand-edited' })
+    expect((await e.store.get(old.id))!.status).toBe('active')
+  })
+
+  it('supersedes 里同一个 id 写两遍：只记一条撤销', async () => {
+    const e = guarded()
+    const old = await seed(e.store, { name: '旧说法' })
+    const r = await runSavePipeline(candidate({ scope: 'workspace', name: '新说法', content: '完全不同的新说法', force: true, supersedes: [old.id, old.id] }), e.deps)
+    if (r.kind !== 'saved') throw new Error(r.kind)
+    expect(await e.decisions.listSettled()).toHaveLength(1)
+  })
+
   it('手改保护先于疑似密钥拦截：问过用户带 force 重发，疑似密钥照旧留警告', async () => {
     const e = guarded()
     const target = await seed(e.store)

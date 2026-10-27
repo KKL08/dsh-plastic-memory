@@ -112,6 +112,37 @@ export async function runSavePipeline(
     }
   }
 
+  // 本次要标 superseded 的旧记忆：目标必须与本次写入记录同桶——跨桶替代会绕过用户确认闸、无快照、无复活路径，
+  // 不同桶的目标跳过不置 superseded，仅给一条警告（见下方 6）。目标不存在维持静默跳过。
+  // 本次写入记录的桶此时已定：update 继承目标，create 落当前项目（global 已降级为候选）。
+  const bucket = candidate.action === 'update'
+    ? { scope: target!.scope, workspacePath: target!.workspacePath }
+    : { scope, workspacePath: scope === 'workspace' ? deps.workspacePath : undefined }
+  const sameBucket = (old: MemoryRecord) => old.scope === bucket.scope
+    && (bucket.scope !== 'workspace' || old.workspacePath === bucket.workspacePath)
+  const supersedeIds = [...new Set(candidate.supersedes ?? [])]
+  const replaced: MemoryRecord[] = []
+  for (const oldId of supersedeIds) {
+    const old = await store.get(oldId, { workspacePath: deps.workspacePath })
+    if (old?.status === 'active' && old.id !== target?.id && sameBucket(old)) replaced.push(old)
+  }
+
+  // 手改保护：用户手改过的记忆不被模型悄悄覆盖或替代。和结构去重、疑似密钥同一个放行口（force），放在两者之前：
+  // 那两处的回复都叫模型带 force 重发，排在后面会把手改保护一并跳过；用户同意改写后带 force 重发，疑似密钥照样落警告。
+  // 原因会进模型上下文：当前内容按注入的口径遮明确密钥。跨项目目标在上面已拒，这里只会给出本次可见的内容。
+  const handEdited = [...(candidate.action === 'update' && target!.handEdited ? [target!] : []), ...replaced.filter(r => r.handEdited)]
+  if (handEdited.length > 0 && !candidate.force) {
+    const current = handEdited.map((r) => {
+      const masked = maskSecretSurface(r)
+      return `记忆 ${r.id}（${masked.name}）用户手改过，当前内容是：\n${masked.content}`
+    })
+    return {
+      kind: 'rejected',
+      code: 'hand-edited',
+      reason: `${current.join('\n\n')}\n未保存。先在对话里问用户要不要改写，用户同意后带 force: true 重发。`,
+    }
+  }
+
   // 2. confidence 决议：只能下调
   const cap = CONFIDENCE_BY_SOURCE[candidate.sourceMode]
   const confidence = Math.min(candidate.confidence ?? cap, cap)
@@ -178,32 +209,6 @@ export async function runSavePipeline(
     return { kind: 'rejected', code: 'schema-invalid', reason: `字段校验失败：${parsed.error.issues.map(i => i.message).join('；')}` }
   }
 
-  // 本次要标 superseded 的旧记忆：目标必须与本次写入记录同桶——跨桶替代会绕过用户确认闸、无快照、无复活路径，
-  // 不同桶的目标跳过不置 superseded，仅给一条警告（见下方 6）。目标不存在维持静默跳过。
-  const sameBucket = (old: MemoryRecord) => old.scope === parsed.data.scope
-    && (parsed.data.scope !== 'workspace' || old.workspacePath === parsed.data.workspacePath)
-  const replaced: MemoryRecord[] = []
-  for (const oldId of new Set(candidate.supersedes ?? [])) {
-    const old = await store.get(oldId, { workspacePath: deps.workspacePath })
-    if (old?.status === 'active' && old.id !== parsed.data.id && sameBucket(old)) replaced.push(old)
-  }
-
-  // 手改保护：用户手改过的记忆不被模型悄悄覆盖或替代。和疑似密钥同一个放行口（force），放在密钥检查之前：
-  // 用户同意改写后带 force 重发，疑似密钥照样落警告；反过来先拦密钥，force 会把手改保护一并跳过。
-  // 原因会进模型上下文：当前内容按注入的口径遮明确密钥。跨项目目标在上面已拒，这里只会给出本次可见的内容。
-  const handEdited = [...(candidate.action === 'update' && target!.handEdited ? [target!] : []), ...replaced.filter(r => r.handEdited)]
-  if (handEdited.length > 0 && !candidate.force) {
-    const current = handEdited.map((r) => {
-      const masked = maskSecretSurface(r)
-      return `记忆 ${r.id}（${masked.name}）用户手改过，当前内容是：\n${masked.content}`
-    })
-    return {
-      kind: 'rejected',
-      code: 'hand-edited',
-      reason: `${current.join('\n\n')}\n未保存。先在对话里问用户要不要改写，用户同意后带 force: true 重发。`,
-    }
-  }
-
   // 5. 写盘前 secret 检查：高危（明确厂商特征）直接拦截、不落盘；疑似拦下待确认，force 放行并保留警告。
   // summary 进注入索引、name 进文件名、tags 进索引行——密钥藏在哪个字段都会外泄，四个面一起查。
   const secretHits = detectSecrets(`${candidate.content}\n${candidate.name}\n${candidate.summary}\n${candidate.tags.join(' ')}`)
@@ -245,7 +250,7 @@ export async function runSavePipeline(
   // 6. supersedes 处理：同桶目标置 superseded，跨桶的跳过并给警告（见上方 replaced）。
   let crossBucketSupersede = false
   const superseded: MemoryRecord[] = []
-  for (const oldId of candidate.supersedes ?? []) {
+  for (const oldId of supersedeIds) {
     const old = await store.get(oldId, { workspacePath: deps.workspacePath })
     if (!old || old.id === clean.id) continue
     if (!sameBucket(old)) {
