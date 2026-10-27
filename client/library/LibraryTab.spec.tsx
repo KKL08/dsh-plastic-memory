@@ -5,7 +5,7 @@ import { GUI_VIEW_VERSION, type LibraryView, type PendingView } from '../../src/
 import type { BorrowedSession } from '../gateway.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createNavStore } from '../nav.ts'
-import { memory, NOW, renderInShell } from '../test-utils.tsx'
+import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { LibraryTab } from './LibraryTab.tsx'
 import { FLASH_MS } from './shared.tsx'
 
@@ -30,6 +30,12 @@ function rowOf(text: string): HTMLElement {
   return screen.getByText(text).closest('li')!
 }
 
+/** 点这一行的「删除」，再点原位确认里的「删除」。 */
+async function remove(row: HTMLElement) {
+  await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '删除' })) })
+  await act(async () => { fireEvent.click(within(within(row).getByRole('group', { name: '删除这条？' })).getByRole('button', { name: '删除' })) })
+}
+
 describe('全部记忆', () => {
   it('列出作用域那一层的记忆卡；顶部存储说明写条数、目录、MEMORY.md 是生成的索引、模型怎么读到', () => {
     renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: library() } }))
@@ -42,14 +48,14 @@ describe('全部记忆', () => {
 
   it('类型写显示名（待处理视图的 typeLabels）；认不出的类型写 id', () => {
     const view = library({ layers: [{ layer: app, items: [memory({ id: 'a1' }), memory({ id: 'a2', type: 'mystery', content: '提交前跑 typecheck' })] }] })
-    const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], typeLabels: { preference: '行为偏好' } }
+    const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], levelCounts: levelCountsOf([]), typeLabels: { preference: '行为偏好' } }
     renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: view, pending } }))
     expect(screen.getAllByRole('listitem').map(li => li.querySelector('.pm-mc-meta span')?.textContent)).toEqual(['行为偏好', 'mystery'])
   })
 
   it('待处理视图没有这个类型时，用全部记忆视图自带的 typeLabels', () => {
     const view = library({ layers: [{ layer: app, items: [memory({ id: 'a1', type: 'domain-term' })] }], typeLabels: { 'domain-term': '术语' } })
-    const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], typeLabels: {} }
+    const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], levelCounts: levelCountsOf([]), typeLabels: {} }
     renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: view, pending } }))
     expect(screen.getByRole('listitem').querySelector('.pm-mc-meta span')).toHaveTextContent('术语')
   })
@@ -91,11 +97,51 @@ describe('全部记忆', () => {
     const gateway = createFakeGateway({ views: { library: library() } })
     const nav = createNavStore({ tab: 'library' })
     renderInShell(<LibraryTab nav={nav} scope={app} session={session} now={NOW} />, gateway)
-    await act(async () => { fireEvent.click(within(rowOf('提交前跑 typecheck')).getByRole('button', { name: '删除' })) })
+    await remove(rowOf('提交前跑 typecheck'))
     expect(gateway.executed).toEqual([{ sessionId: 's1', command: { cmd: 'forget', memoryId: 'a2', layer: app } }])
     expect(screen.getByRole('status')).toHaveTextContent('已删除，14 天内可在「最近删除」恢复。')
     fireEvent.click(screen.getByRole('button', { name: '去最近删除 ›' }))
     expect(nav.get()).toEqual({ tab: 'deleted', memoryId: 'a2' })
+  })
+
+  it('确认开着时这一行从列表里没了（别处删了）：再回来时是「删除」按钮，不带着没收起的确认', async () => {
+    const gateway = createFakeGateway({ views: { library: library() } })
+    renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
+    await act(async () => { fireEvent.click(within(rowOf('提交前跑 typecheck')).getByRole('button', { name: '删除' })) })
+    expect(screen.getByRole('group', { name: '删除这条？' })).toBeInTheDocument()
+    const without = library()
+    act(() => { gateway.setView('library', { ...without, layers: without.layers.map(l => ({ ...l, items: l.items.filter(m => m.id !== 'a2') })) }) })
+    expect(screen.queryByText('提交前跑 typecheck')).toBeNull()
+    act(() => { gateway.setView('library', library()) })
+    expect(within(rowOf('提交前跑 typecheck')).queryByRole('group', { name: '删除这条？' })).toBeNull()
+    expect(within(rowOf('提交前跑 typecheck')).getByRole('button', { name: '删除' })).toBeInTheDocument()
+  })
+
+  it('点「删除」不直接删：原位换成「删除这条？ 删除 · 取消」，焦点在「取消」；「取消」、Esc、焦点移走都收起，什么都不发', async () => {
+    const gateway = createFakeGateway({ views: { library: library() } })
+    renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
+    const row = within(rowOf('提交前跑 typecheck'))
+    const open = async () => {
+      const del = row.getByRole('button', { name: '删除' })
+      del.focus()
+      await act(async () => { fireEvent.click(del) })
+      return within(row.getByRole('group', { name: '删除这条？' }))
+    }
+    const confirm = await open()
+    expect(confirm.getAllByRole('button').map(b => b.textContent)).toEqual(['删除', '取消'])
+    expect(confirm.getByRole('button', { name: '取消' })).toHaveFocus()
+    expect(row.getAllByRole('button', { name: '删除' })).toHaveLength(1)
+
+    fireEvent.click(confirm.getByRole('button', { name: '取消' }))
+    await waitFor(() => { expect(row.getByRole('button', { name: '删除' })).toHaveFocus() })
+    fireEvent.keyDown((await open()).getByRole('button', { name: '取消' }), { key: 'Escape' })
+    expect(row.queryByRole('group', { name: '删除这条？' })).toBeNull()
+    await open()
+    act(() => { row.getByRole('button', { name: '打开文件' }).focus() })
+    expect(row.queryByRole('group', { name: '删除这条？' })).toBeNull()
+    expect(row.getByRole('button', { name: '删除' })).toBeInTheDocument()
+    expect(gateway.executed).toEqual([])
+    expect(screen.queryByRole('status')).toBeNull()
   })
 
   it('含密钥的记忆：forget 回 has-secret（什么都没动）后在行里确认、不提示可恢复；取消收起；「彻底删除」发 hard-delete，之后提示不可恢复、不带去最近删除的链接', async () => {
@@ -107,7 +153,7 @@ describe('全部记忆', () => {
     })
     renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
     const row = rowOf('提交前跑 typecheck')
-    await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '删除' })) })
+    await remove(row)
     expect(within(row).getByText('彻底删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeInTheDocument()
     expect(within(row).getByText('这条记忆里有密钥')).toBeInTheDocument()
     expect(within(row).getByRole('button', { name: '删除' })).toHaveAttribute('aria-disabled', 'true')
@@ -115,7 +161,7 @@ describe('全部记忆', () => {
 
     fireEvent.click(within(row).getByRole('button', { name: '取消' }))
     expect(screen.queryByText('彻底删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeNull()
-    await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '删除' })) })
+    await remove(row)
     await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '彻底删除' })) })
     expect(gateway.executed.map(e => e.command)).toEqual([
       { cmd: 'forget', memoryId: 'a2', layer: app },
@@ -136,7 +182,7 @@ describe('全部记忆', () => {
         : { ok: false, cmd: command.cmd, code: 'cross-workspace', rejected: [{ id: 'b1', workspacePath: '/w/blog' }] },
     })
     renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'workspace', workspacePath: '/w/blog' }} session={session} now={NOW} />, gateway)
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除' })) })
+    await remove(screen.getByRole('listitem'))
     expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'b1', layer: blog }])
     expect(screen.getByText('这条记忆属于 blog 项目，不是当前项目。确定在这里处理它吗？')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '删除' })).toHaveAttribute('aria-disabled', 'true')
@@ -161,7 +207,7 @@ describe('全部记忆', () => {
           : { ok: false, cmd: command.cmd, code: 'cross-workspace', rejected: [{ id: 'b1', workspacePath: '/w/blog' }] },
     })
     renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'workspace', workspacePath: '/w/blog' }} session={session} now={NOW} />, gateway)
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除' })) })
+    await remove(screen.getByRole('listitem'))
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '彻底删除' })) })
     expect(screen.getByText('这条记忆属于 blog 项目，不是当前项目。确定在这里处理它吗？')).toBeInTheDocument()
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '继续处理' })) })
@@ -185,7 +231,7 @@ describe('全部记忆', () => {
           : { ok: true, cmd: command.cmd, memoryIds: ['b1'] },
     })
     renderInShell(<LibraryTab nav={createNavStore()} scope={blog} session={session} now={NOW} />, gateway)
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除' })) })
+    await remove(screen.getByRole('listitem'))
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '继续处理' })) })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '彻底删除' })) })
     expect(gateway.executed.map(e => e.command)).toEqual([
@@ -228,40 +274,43 @@ describe('全部记忆', () => {
       button.focus()
       await act(async () => { fireEvent.click(button) })
     }
+    /** 这一行的「删除」（等确认时是确认里的那个）。 */
+    const delOf = (text: string) => within(rowOf(text)).getByRole('button', { name: '删除' })
+    /** 键盘点「删除」，再在原位确认里点「删除」。 */
+    const pressRemove = async (text: string) => {
+      await press(delOf(text))
+      await press(delOf(text))
+    }
 
-    it('不用确认的删除：这一行没了焦点落到下一行的「删除」；删的是最后一条时落到提示里', async () => {
+    it('普通删除：确认后这一行没了，焦点落到下一行的「删除」；删的是最后一条时落到提示里', async () => {
       const gateway = createFakeGateway({ views: { library: library() } })
       renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
-      await press(within(rowOf(A1)).getByRole('button', { name: '删除' }))
+      await pressRemove(A1)
       act(() => { gateway.setView('library', library({ layers: [{ layer: app, items: [memory({ id: 'a2', content: '提交前跑 typecheck' })] }] })) })
-      const next = within(rowOf('提交前跑 typecheck')).getByRole('button', { name: '删除' })
-      await waitFor(() => { expect(next).toHaveFocus() })
+      await waitFor(() => { expect(delOf('提交前跑 typecheck')).toHaveFocus() })
 
-      await press(next)
+      await pressRemove('提交前跑 typecheck')
       act(() => { gateway.setView('library', library({ layers: [{ layer: app, items: [] }, { layer: { kind: 'global' }, items: [memory({ id: 'g1' })] }] })) })
       await waitFor(() => { expect(screen.getByText('已删除，14 天内可在「最近删除」恢复。')).toContainElement(document.activeElement as HTMLElement) })
     })
 
     it('含密钥确认点「取消」：焦点回到这一行的「删除」', async () => {
       renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, secretFirst())
-      const del = within(rowOf(A1)).getByRole('button', { name: '删除' })
-      await press(del)
+      await pressRemove(A1)
       await press(within(rowOf(A1)).getByRole('button', { name: '取消' }))
-      await waitFor(() => { expect(del).toHaveFocus() })
+      await waitFor(() => { expect(delOf(A1)).toHaveFocus() })
     })
 
     it('彻底删除后这一行没了：焦点落到下一行的「删除」；删的是最后一条时落到提示上', async () => {
       const gateway = secretFirst()
       renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
-      const del = within(rowOf(A1)).getByRole('button', { name: '删除' })
-      await press(del)
+      await pressRemove(A1)
       await press(within(rowOf(A1)).getByRole('button', { name: '彻底删除' }))
-      await waitFor(() => { expect(del).toHaveFocus() })
+      await waitFor(() => { expect(delOf(A1)).toHaveFocus() })
       act(() => { gateway.setView('library', library({ layers: [{ layer: app, items: [memory({ id: 'a2', content: '提交前跑 typecheck' })] }] })) })
-      const next = within(rowOf('提交前跑 typecheck')).getByRole('button', { name: '删除' })
-      await waitFor(() => { expect(next).toHaveFocus() })
+      await waitFor(() => { expect(delOf('提交前跑 typecheck')).toHaveFocus() })
 
-      await press(next)
+      await pressRemove('提交前跑 typecheck')
       await press(within(rowOf('提交前跑 typecheck')).getByRole('button', { name: '彻底删除' }))
       act(() => { gateway.setView('library', library({ layers: [{ layer: app, items: [] }, { layer: { kind: 'global' }, items: [memory({ id: 'g1' })] }] })) })
       await waitFor(() => { expect(screen.getByText('已彻底删除。如果它是真的凭证，记得去换一个新的。')).toHaveFocus() })
@@ -273,12 +322,11 @@ describe('全部记忆', () => {
         respond: command => ({ ok: false, cmd: command.cmd, code: 'cross-workspace', rejected: [{ id: 'a1', workspacePath: '/w/blog' }] }),
       })
       renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
-      const del = within(rowOf(A1)).getByRole('button', { name: '删除' })
-      await press(del)
+      await pressRemove(A1)
       const cancel = screen.getByRole('button', { name: '取消' })
       expect(cancel).toHaveFocus()
       await act(async () => { fireEvent.click(cancel) })
-      await waitFor(() => { expect(del).toHaveFocus() })
+      await waitFor(() => { expect(delOf(A1)).toHaveFocus() })
     })
 
     it('跨项目确认：「取消」回到「删除」；「继续处理」先回到「删除」，删掉后落到下一行', async () => {
@@ -289,14 +337,13 @@ describe('全部记忆', () => {
           : { ok: false, cmd: command.cmd, code: 'cross-workspace', rejected: [{ id: 'a1', workspacePath: '/w/blog' }] },
       })
       renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
-      const del = within(rowOf(A1)).getByRole('button', { name: '删除' })
-      await press(del)
+      await pressRemove(A1)
       await press(screen.getByRole('button', { name: '取消' }))
-      await waitFor(() => { expect(del).toHaveFocus() })
+      await waitFor(() => { expect(delOf(A1)).toHaveFocus() })
 
-      await press(del)
+      await pressRemove(A1)
       await press(screen.getByRole('button', { name: '继续处理' }))
-      await waitFor(() => { expect(del).toHaveFocus() })
+      await waitFor(() => { expect(delOf(A1)).toHaveFocus() })
       act(() => { gateway.setView('library', library({ layers: [{ layer: app, items: [memory({ id: 'a2', content: '提交前跑 typecheck' })] }] })) })
       await waitFor(() => { expect(within(rowOf('提交前跑 typecheck')).getByRole('button', { name: '删除' })).toHaveFocus() })
     })

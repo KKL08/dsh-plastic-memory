@@ -13,13 +13,23 @@ export interface ClaimKvTable<T> extends KvTable<T> {
   claim(key: string): Promise<(() => Promise<void>) | undefined>
 }
 
-export class InMemoryKvTable<T> implements ClaimKvTable<T> {
+/** 带条件删除的 KV：建议忽略表的清理用。在表的写锁内重读，当前值仍满足条件才删——判定之后别处刚写入的新值不会被删掉。 */
+export interface CasKvTable<T> extends KvTable<T> {
+  /** 删掉 key，前提是此刻它还在、且 isStill(当前值) 为真；删了返回 true。 */
+  deleteIf(key: string, isStill: (current: T) => boolean): Promise<boolean>
+}
+
+export class InMemoryKvTable<T> implements ClaimKvTable<T>, CasKvTable<T> {
   private map = new Map<string, T>()
   private claimed = new Set<string>()
   async get(key: string) { return this.map.get(key) }
   async list() { return [...this.map.entries()] }
   async put(key: string, value: T) { this.map.set(key, value) }
   async delete(key: string) { return this.map.delete(key) }
+  async deleteIf(key: string, isStill: (current: T) => boolean) {
+    const cur = this.map.get(key)
+    return cur !== undefined && isStill(cur) && this.map.delete(key)
+  }
   async claim(key: string) {
     if (this.claimed.has(key)) return undefined
     this.claimed.add(key)

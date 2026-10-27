@@ -2,8 +2,11 @@ import type { MemoryStore } from '../store.ts'
 import { kindOf, type PendingDecisionsStore } from '../governance/decisions.ts'
 import type { KvTable } from '../kv-table.ts'
 import type { ScanCacheEntry } from '../governance/schema.ts'
+import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import { layerCacheKey, type LayerPreread, type LayerRef } from '../governance/layer-health.ts'
 import type { MemoryRecord } from '../record-schema.ts'
+import { dirname, join } from 'node:path'
+import { SECRET_MASK, exposedPath, maskSecrets } from '../secrets.ts'
 import { resolveDuplicates, resolveLiveFirst, type DirectoryNote, type LocatedRecord, type QuarantineEntry, type WorkspaceDirListing } from '../storage/table.ts'
 
 /**
@@ -12,10 +15,10 @@ import { resolveDuplicates, resolveLiveFirst, type DirectoryNote, type LocatedRe
  * 缓存过滤要核对记录是否存活。层外的引用（取代链与语义缓存里指向其他层的 id，如提升到 global 后
  * global 记录的 supersedes 指向 workspace 旧条）按 id 两级定位，不整库预读。
  * 隔离条目按读到它的层归档（malformed 按所在目录归层）；同 id 多文件按取舍规则留一份（active 副本优先），其余副本报目录级说明、不删。
- * 另取待决账本里的全部未决冲突、语义缓存全部条目。
+ * 另取待决账本里的全部未决冲突、语义缓存全部条目、建议忽略表全部记录（缺省没有忽略表，按没有忽略算）。
  */
 export async function prereadLayers(
-  deps: { store: MemoryStore; decisions: PendingDecisionsStore; cache: KvTable<ScanCacheEntry> },
+  deps: { store: MemoryStore; decisions: PendingDecisionsStore; cache: KvTable<ScanCacheEntry>; ignores?: Pick<AdviceIgnoreStore, 'list'> },
   layers: readonly LayerRef[],
   /** 当前 workspace：同 id 取舍与跨层定位的提示。 */
   workspacePath?: string,
@@ -28,15 +31,19 @@ export async function prereadLayers(
     const r = await deps.store.readLayer(scope, { includeArchive: true })
     read.push(...r.records)
     quarantined.set(layerCacheKey(layer), r.quarantined)
-    directoryNotes.push(...r.directoryNotes)
+    const byPath = new Map(r.records.map(l => [l.filePath, l]))
+    directoryNotes.push(...r.directoryNotes.map(n => maskNote(n, byPath.get(n.path))))
   }
   const hint = { workspacePath }
-  // 已删、已取代的副本不遮住别层在用的同 id 副本；被盖住的已删副本单列（最近删除），也不算同 id 副本
+  // 已删、已取代的副本不遮住别层在用的同 id 副本；被盖住的已删副本单列（最近删除），也不算同 id 副本。
+  // 同层还有在用副本的已删副本不单列：按层恢复定位到的是在用那份，列出来也恢复不了
   const chosen = resolveLiveFirst(read, hint)
   const kept = new Map(chosen.map(l => [l.record.id, l]))
   const shadowed = read.filter(l => l.record.status !== 'active' && kept.get(l.record.id)?.record.status === 'active')
   directoryNotes.push(...duplicateNotes(read.filter(l => !shadowed.includes(l)), chosen))
-  const shadowedDeleted = resolveDuplicates(shadowed.filter(l => l.record.status === 'deleted'), hint)
+  // 在用 = 层顶层的 active（同按 id 定位的 pickLiveFirst）
+  const liveDirs = new Set(read.filter(l => l.record.status === 'active' && dirname(l.filePath) === l.dir).map(l => `${l.record.id}\n${l.dir}`))
+  const shadowedDeleted = resolveDuplicates(shadowed.filter(l => l.record.status === 'deleted' && !liveDirs.has(`${l.record.id}\n${l.dir}`)), hint)
   const byId = new Map<string, MemoryRecord>(chosen.map(l => [l.record.id, l.record]))
   const filePaths = new Map<string, string>(chosen.map(l => [l.record.id, l.filePath]))
   const cache = new Map(await deps.cache.list())
@@ -57,21 +64,34 @@ export async function prereadLayers(
     }
   }
 
-  return { byId, filePaths, pending, cache, quarantined, directoryNotes, shadowedDeleted }
+  const ignores = (await deps.ignores?.list()) ?? []
+  return { byId, filePaths, pending, cache, quarantined, directoryNotes, shadowedDeleted, ignores }
+}
+
+/** 记忆文件路径与注入同口径（exposedPath）：name 含密钥的那份只给所在目录、文件名换成占位，其余路径遮一遍。 */
+const shown = (l: LocatedRecord) => exposedPath(l.record, l.filePath) ?? join(maskSecrets(dirname(l.filePath)), SECRET_MASK)
+
+/** 目录说明出去前的路径口径：落在某条记忆文件上的按 shown，其余路径遮一遍；正文里的原路径换成遮过的，再整体遮一遍。 */
+function maskNote(n: DirectoryNote, located: LocatedRecord | undefined): DirectoryNote {
+  const path = located !== undefined ? shown(located) : maskSecrets(n.path)
+  return { ...n, path, text: maskSecrets(n.text.replaceAll(n.path, path)) }
 }
 
 /** 同 id 的多余副本：每份一条说明（路径是副本，正文点出读取时用的那份）。 */
 function duplicateNotes(read: readonly LocatedRecord[], chosen: readonly LocatedRecord[]): DirectoryNote[] {
-  const kept = new Map(chosen.map(l => [l.record.id, l.filePath]))
-  return read.filter(l => kept.get(l.record.id) !== l.filePath).map(l => ({
-    level: 'info', code: 'duplicate-id', path: l.filePath, keptPath: kept.get(l.record.id),
-    text: `记忆 ${l.record.id} 有多个文件：读取时用 ${kept.get(l.record.id)}，副本 ${l.filePath} 未自动删除；确认哪份有效后手工删掉多余的`,
-  }))
+  const kept = new Map(chosen.map(l => [l.record.id, l]))
+  return read.filter(l => kept.get(l.record.id)!.filePath !== l.filePath).map(l => {
+    const [path, keptPath] = [shown(l), shown(kept.get(l.record.id)!)]
+    return {
+      level: 'info', code: 'duplicate-id', path, keptPath,
+      text: `记忆 ${l.record.id} 有多个文件：读取时用 ${keptPath}，副本 ${path} 未自动删除；确认哪份有效后手工删掉多余的`,
+    }
+  })
 }
 
 /** 目录枚举的说明：缺标记与不可读目录总是列出；dir-empty 只在全库体检里有意义。 */
 export function listingNotes(listing: WorkspaceDirListing, opts: { includeEmpty: boolean }): DirectoryNote[] {
-  return listing.directoryNotes.filter(n => opts.includeEmpty || n.code !== 'dir-empty')
+  return listing.directoryNotes.filter(n => opts.includeEmpty || n.code !== 'dir-empty').map(n => maskNote(n, undefined))
 }
 
 /** 体检清单：顶层有记忆文件的 workspace（按路径排序）。 */

@@ -4,7 +4,7 @@
  * 另管两个依赖宿主可选服务的出口（插件页、右侧栏记忆 tab）：服务在才能用，不能用的入口不画。
  */
 import { useSyncExternalStore } from 'react'
-import type { GuiLayerRef } from '../src/gui/contract.ts'
+import type { GuiLayerRef, PendingLevel } from '../src/gui/contract.ts'
 import type { HostContext } from './host.ts'
 
 /** 左栏记忆页与左栏图标共用的 id（`main` 插槽的 key = `sidebar.panellist` 的 id）。 */
@@ -20,7 +20,8 @@ export function sameScope(a: GuiLayerRef, b: GuiLayerRef): boolean {
   return a.kind === b.kind && (a.kind === 'global' || (b.kind === 'workspace' && a.workspacePath === b.workspacePath))
 }
 
-export const MEMORY_TABS = ['pending', 'library', 'health', 'deleted'] as const
+/** 显示顺序；标识本身不随显示名变（入口直达按标识写目标）。 */
+export const MEMORY_TABS = ['pending', 'health', 'library', 'deleted'] as const
 export type MemoryTab = (typeof MEMORY_TABS)[number]
 
 export interface NavTarget {
@@ -29,6 +30,11 @@ export interface NavTarget {
   scope?: GuiLayerRef
   /** 要滚入视野并高亮的记忆。 */
   memoryId?: string
+  /**
+   * 待处理 tab 要定位的组（健康页「去处理 ›」）：焦点落在组标题上，组不在了落在待处理顶部。
+   * 只对写它的那次导航有效：update 没给出它就清掉，免得切走再切回来又被拉过去。
+   */
+  level?: PendingLevel
 }
 
 /** 依赖宿主可选服务的出口：插件页里本插件的配置（pluginNavigation）、当前会话右侧栏的记忆 tab（sidebarRightTabs + sidebarRight）。 */
@@ -46,7 +52,7 @@ export interface NavStore {
    * 没有（点左栏图标、宿主恢复上次的面板）就按默认落点。
    */
   takeEntry(): boolean
-  /** 页内用：只改给出的字段。 */
+  /** 页内用：只改给出的字段；组定位（level）不沿用。 */
   update(patch: Partial<NavTarget>): void
   /** 跳到宿主插件页里本插件的配置（「去设置里打开 ›」）；出口不可用时什么都不做。 */
   openSettings(): void
@@ -74,7 +80,7 @@ export function createNavStore(
     navigate: set,
     enter(next) { entered = true; set(next) },
     takeEntry() { const was = entered; entered = false; return was },
-    update: patch => set({ ...target, ...patch }),
+    update(patch) { const { level: _dropped, ...rest } = target; set({ ...rest, ...patch }) },
     openSettings: () => { exits.settings?.() },
     openSidebarTab: () => { exits.sidebarTab?.() },
     canOpen: exit => exits[exit] !== undefined,

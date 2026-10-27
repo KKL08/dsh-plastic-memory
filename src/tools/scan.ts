@@ -7,8 +7,9 @@ import { candidateFingerprint, conflictFingerprint, type PendingDecisionsStore }
 import type { KvTable } from '../kv-table.ts'
 import type { Finding, ScanCacheEntry } from '../governance/schema.ts'
 import { runRuleScan, buildMalformedFindings } from '../governance/rule-scan.ts'
-import { runSemanticScan, SEMANTIC_SCAN_MAX_RECORDS, type SemanticLlm } from '../governance/semantic-scan.ts'
-import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, checkupRowBase, GLOBAL_CACHE_KEY, type LayerRef, TIER_LABEL } from '../governance/layer-health.ts'
+import { runSemanticScan, type SemanticLlm } from '../governance/semantic-scan.ts'
+import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, checkupRowBase, ignoredNote, findingFingerprints, GLOBAL_CACHE_KEY, type LayerRef, TIER_LABEL } from '../governance/layer-health.ts'
+import { applyIgnores, type AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import { prereadLayers, listingNotes, checkupWorkspaces, renderDirectoryNotes } from './layer-preread.ts'
 import type { DirectoryNote } from '../storage/table.ts'
 import { runCrossWsScan, findEntityDuplicates, type CrossWsDuplicate } from '../governance/cross-ws.ts'
@@ -23,6 +24,8 @@ export interface ScanToolDeps {
   registry: TypeRegistry
   decisions: PendingDecisionsStore
   cache: KvTable<ScanCacheEntry>
+  /** 建议忽略表：被用户忽略的建议不列为发现、不扣分（与记忆页同口径）。缺省按没有忽略算。 */
+  ignores?: Pick<AdviceIgnoreStore, 'list'>
   /** 按触发调用的 session 取该会话的 AGENTS.md/CLAUDE.md 基线（宿主投影按 session 隔离）。 */
   getBaseline: (exec: ToolRunContext) => readonly string[] | null
   /** 按调用解析（而非加载时一次性解析）——provider/model 只能从触发调用的 exec 上下文里的
@@ -53,6 +56,8 @@ export interface SingleScanResult {
     items: Array<{ id: string; memoryIds: string[]; workspaces: string[]; summary: string; isNew: boolean }>
   }
   stats: { scanned: number; clean: number; issues: number; byType: Record<string, number> }
+  /** 用户在记忆页忽略、这次没有列出的建议条数。 */
+  ignoredCount: number
   /** global 提升候选：模型存时标了 globalCandidate 的 workspace 记忆，待用户确认后 memory_promote。 */
   promoteCandidates: { items: Array<{ id: string; summary: string }>; more: number }
   semanticCachedAt: number | null
@@ -60,6 +65,10 @@ export interface SingleScanResult {
   /** 本次读取的目录级说明：缺标记 / 不可读目录、含保留键的文件、同 id 副本。 */
   directoryNotes: DirectoryNote[]
   message: string
+  /** 语义层分了批时的批数（与说明码 semantic-batched 同时出现），不分批时缺省。 */
+  semanticBatches?: number
+  /** 宿主流 usage 块报的实际用量合计（含重试）；宿主一次都没报时缺省。只给界面，不写进给模型看的文字。 */
+  usageTokens?: number
 }
 
 export interface CheckupScanResult {
@@ -73,6 +82,8 @@ export interface CheckupScanResult {
     gate: { secret: boolean }
     issues: number
     issueSummary: string
+    /** 用户忽略、没有计分的建议条数。 */
+    ignoredCount: number
   }>
   pendingDecisions: {
     created: number
@@ -88,6 +99,10 @@ export interface CheckupScanResult {
   /** 全库目录级说明：缺标记 / 不可读 / 只剩归档的目录、含保留键的文件、同 id 副本（含跨项目副本）。 */
   directoryNotes: DirectoryNote[]
   message: string
+  /** 分了批的各层批数之和（与说明码 semantic-batched 同时出现），没有层分批时缺省。 */
+  semanticBatches?: number
+  /** 宿主流 usage 块报的实际用量合计（各层语义检查、跨项目重复检查，含重试）；宿主一次都没报时缺省。只给界面。 */
+  usageTokens?: number
 }
 
 /** scope/scopes 里出现无法识别的 workspace 时快速失败——静默扫错层比报错危险得多。 */
@@ -111,6 +126,8 @@ export function renderScanResult(result: ScanToolResult): string {
       const gateNote = row.gate.secret ? '｜⚠️ 检出密钥' : ''
       lines.push(`- ${name}：${Math.floor(row.score)}/100（${TIER_LABEL[row.tier]}）｜${row.totalMemories} 条｜${row.issueSummary}${gateNote}`)
     }
+    const ignored = ignoredNote(result.rows.reduce((n, row) => n + row.ignoredCount, 0))
+    if (ignored !== undefined) lines.push(ignored)
     for (const c of result.crossLayerConflicts) {
       lines.push(`⚠️ 跨层冲突：global ${c.globalId} 与 ${c.workspaces.length} 个项目存在待决冲突（${c.workspaces.join('、')}）——被多数项目反对的全局规则建议优先裁定（memory_confirm resolve：${c.decisionIds.join('、')}）`)
     }
@@ -143,6 +160,8 @@ export function renderScanResult(result: ScanToolResult): string {
   for (const f of result.findings) {
     lines.push(`- [${f.severity}] ${f.type} ${f.memoryIds.join('+')}：${f.summary} → ${f.suggestedAction}`)
   }
+  const ignored = ignoredNote(result.ignoredCount)
+  if (ignored !== undefined) lines.push(ignored)
   // 证据下钻提示：治理裁决是高赌注不可逆动作，下钻引导不低于 strict
   if (result.findings.some(f => f.type === 'expired')) {
     lines.push('过期候选可先用 memory_source 回查出处，向用户复述当时语境，再决定 refresh 还是 forget。')
@@ -177,9 +196,11 @@ interface ScanPass {
   decisionItems: Array<{ id: string; memoryIds: string[]; workspaces: string[]; summary: string; isNew: boolean }>
   created: number
   existing: number
+  /** 语义层分了批时的批数，不分批或没跑语义层时为 0。 */
+  semanticBatches: number
 }
 
-/** 一次记录集的完整扫描（规则 + 语义 + 冲突挂账）。单层模式与体检的每层循环共用。 */
+/** 一次记录集的完整扫描（规则 + 语义 + 冲突挂账）。单层模式与体检的每层循环共用。onUsage 收各次模型调用的实际用量。 */
 async function scanPass(
   deps: ScanToolDeps,
   byId: ReadonlyMap<string, MemoryRecord>,
@@ -192,9 +213,11 @@ async function scanPass(
   baseline: readonly string[] | null,
   now: number,
   signal?: AbortSignal,
+  onUsage?: (tokens: number) => void,
 ): Promise<ScanPass> {
   const notes: ScanNote[] = []
   const findings: Finding[] = []
+  let semanticBatches = 0
   if (layers === 'rule' || layers === 'full') {
     findings.push(...runRuleScan(records, id => byId.get(id), now))
     findings.push(...buildMalformedFindings(quarantined))
@@ -207,14 +230,16 @@ async function scanPass(
         ? { code: 'no-layer-executed', text: '语义层不可用（当前环境拿不到 LLM），且 layers=semantic 不含规则层，本次未执行任何检测' }
         : { code: 'semantic-unavailable', text: '语义层不可用（当前环境拿不到 LLM），只返回规则层结果' })
     } else {
-      // 截断前按治理优先级 + 新近度排序：库超上限时先分析重要且新的，而不是任意文件序的前 N 条
+      // 一批装得下时按治理优先级 + 新近度发给模型；分批时由 planSemanticBatches 按稳定键重排，批的边界不随编辑漂移
       const priorityOrder = { high: 0, medium: 1, low: 2 } as const
       const ordered = [...records].sort((a, b) =>
         priorityOrder[deps.registry.get(a.type).governancePriority] - priorityOrder[deps.registry.get(b.type).governancePriority]
         || b.updatedAt - a.updatedAt)
-      const semantic = await runSemanticScan(ordered, baseline, llm, signal)
-      if (semantic.truncated) {
-        notes.push({ code: 'semantic-truncated', text: `记忆过多，本次语义层只分析了前 ${SEMANTIC_SCAN_MAX_RECORDS} 条（按治理优先级与新近度挑选），另有 ${semantic.truncated} 条未分析` })
+      const semantic = await runSemanticScan(ordered, baseline, llm, signal, onUsage)
+      // 失败时整层没有语义结果，只报失败
+      if (semantic.batches > 1 && !semantic.failed) {
+        semanticBatches = semantic.batches
+        notes.push({ code: 'semantic-batched', text: `${scopeLabel} 记忆较多，语义层分 ${semantic.batches} 批检查，每条都查过，不同批之间的冲突和重复可能查不出` })
       }
       if (semantic.failed) {
         notes.push({ code: 'semantic-failed', text: '语义分析失败（LLM 调用出错或输出无法解析，已重试一次），本次未更新语义缓存' })
@@ -222,7 +247,10 @@ async function scanPass(
         findings.push(...semantic.findings)
         // 写缓存前设检查点：取消后不留下半截的语义结果。
         signal?.throwIfAborted()
-        await deps.cache.put(bucket, { id: bucket, scannedAt: now, scope: scopeLabel, findings: semantic.findings })
+        await deps.cache.put(bucket, {
+          id: bucket, scannedAt: now, scope: scopeLabel, findings: semantic.findings,
+          fingerprints: findingFingerprints(semantic.findings, byId),
+        })
         semanticCachedAt = now
       }
     }
@@ -275,7 +303,7 @@ async function scanPass(
 
   if (settled > 0) notes.push({ code: 'conflicts-settled', text: `${settled} 处冲突你之前裁决过两条都留，双方都没改，本次不再列出` })
 
-  return { findings, scanned: records.length, semanticCachedAt, notes, decisionItems, created, existing }
+  return { findings, scanned: records.length, semanticCachedAt, notes, decisionItems, created, existing, semanticBatches }
 }
 
 /**
@@ -312,6 +340,13 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
   const signal = exec?.signal
   const now = deps.now?.() ?? Date.now()
   const llm = deps.getLlm(exec)
+  // 本次扫描各次模型调用的实际用量合计；宿主一次都没报时保持 undefined，不拿估算顶替
+  let usageTokens: number | undefined
+  const onUsage = (tokens: number) => { usageTokens = (usageTokens ?? 0) + tokens }
+  const extras = (semanticBatches: number) => ({
+    ...(semanticBatches > 0 ? { semanticBatches } : {}),
+    ...(usageTokens !== undefined ? { usageTokens } : {}),
+  })
   const baseline = deps.getBaseline(exec)
   const currentWs = exec !== undefined ? (await deps.resolveContext(exec)).workspacePath : undefined
   // 目录枚举只读标记与文件名：体检清单、scope 校验、缺标记 / 不可读目录的说明都出自它
@@ -348,7 +383,9 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
 
     const decisionItems: ScanPass['decisionItems'] = []
     const seenDecisions = new Set<string>()
+    let semanticBatches = 0
     const collect = (pass: ScanPass) => {
+      semanticBatches += pass.semanticBatches
       for (const item of pass.decisionItems) {
         if (seenDecisions.has(item.id)) continue // 同一冲突可能在多层被复扫，呈现去重
         seenDecisions.add(item.id)
@@ -368,13 +405,13 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
       const visible = active(visibleTo(ws))
       const wsBaseline = ws === currentWs ? baseline : null
       if (baseline !== null && wsBaseline === null) baselineSkipped++
-      collect(await scanPass(deps, data.byId, visible, cacheKey(ws), ws, layerQuarantined(ws), layers, llm, wsBaseline, now, signal))
+      collect(await scanPass(deps, data.byId, visible, cacheKey(ws), ws, layerQuarantined(ws), layers, llm, wsBaseline, now, signal, onUsage))
       byWorkspace.set(ws, active(r => r.scope === 'workspace' && r.workspacePath === ws))
     }
     // global 层：global-only 输入，独立桶
     signal?.throwIfAborted()
     const globalRecords = active(isGlobal)
-    collect(await scanPass(deps, data.byId, globalRecords, GLOBAL_CACHE_KEY, 'global', layerQuarantined(undefined), layers, llm, baseline, now, signal))
+    collect(await scanPass(deps, data.byId, globalRecords, GLOBAL_CACHE_KEY, 'global', layerQuarantined(undefined), layers, llm, baseline, now, signal, onUsage))
     if (baselineSkipped > 0 && llm && layers !== 'rule') {
       notes.push({ code: 'baseline-session-scoped', text: `基线随当前会话，${baselineSkipped} 个其他 workspace 的垂直冲突检测已跳过` })
     }
@@ -411,7 +448,7 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     if (byWorkspace.size >= 2) {
       // layers=rule 承诺不碰 LLM——此时跨项目重复也只走实体聚类保底，不发语义调用。
       if (llm && layers !== 'rule') {
-        const cross = await runCrossWsScan(byWorkspace, globalRecords, llm, signal)
+        const cross = await runCrossWsScan(byWorkspace, globalRecords, llm, signal, onUsage)
         if (!cross.failed) duplicates = { items: cross.items, via: 'semantic' }
         else {
           notes.push({ code: 'cross-ws-failed', text: '跨项目重复分析失败（LLM 输出无法解析），退用实体聚类保底' })
@@ -438,6 +475,7 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
       promoteCandidates, duplicates, notes,
       directoryNotes: [...listingNotes(listing, { includeEmpty: true }), ...data.directoryNotes],
       message: `全库体检完成：global + ${wsList.length} 个 workspace 各自独立扫描计分${created > 0 ? `，新增 ${created} 个待决冲突` : ''}。清理需用户确认后执行：删除用 memory_forget，冲突裁决用 memory_confirm，提升全局用 memory_promote。`,
+      ...extras(semanticBatches),
     }
   }
 
@@ -447,7 +485,7 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
   // 显式扫别的 workspace 时基线不适用（基线随当前会话）；扫自己或 global 层照用
   const passBaseline = wsPath === undefined || wsPath === currentWs ? baseline : null
   signal?.throwIfAborted()
-  const pass = await scanPass(deps, data.byId, records, cacheKey(wsPath), wsPath ?? 'global', layerQuarantined(wsPath), layers, llm, passBaseline, now, signal)
+  const pass = await scanPass(deps, data.byId, records, cacheKey(wsPath), wsPath ?? 'global', layerQuarantined(wsPath), layers, llm, passBaseline, now, signal, onUsage)
   signal?.throwIfAborted()
   if (wsPath !== undefined) await syncPromoteCandidates(deps, [wsPath], now)
   const notes = [...pass.notes]
@@ -456,13 +494,15 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     else if (passBaseline === null) notes.push({ code: 'baseline-session-scoped', text: '基线随当前会话，扫描其他 workspace 时垂直冲突检测已跳过' })
   }
 
-  const problemIds = new Set(pass.findings.flatMap(f => f.memoryIds))
+  // 用户忽略的建议不列为发现（语义缓存仍存完整结果：取消忽略后不用重扫就能回来）
+  const { kept: findings, ignored } = applyIgnores(pass.findings, data.ignores, data.byId)
+  const problemIds = new Set(findings.flatMap(f => f.memoryIds))
   const byType: Record<string, number> = {}
-  for (const f of pass.findings) byType[f.type] = (byType[f.type] ?? 0) + 1
+  for (const f of findings) byType[f.type] = (byType[f.type] ?? 0) + 1
   const stats = {
     scanned: records.length,
     clean: records.filter(r => !problemIds.has(r.id)).length,
-    issues: pass.findings.length,
+    issues: findings.length,
     byType,
   }
 
@@ -482,12 +522,13 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     kind: 'single',
     layer: wsPath !== undefined ? 'workspace' : 'global',
     ...(wsPath !== undefined ? { workspacePath: wsPath } : {}),
-    findings: pass.findings,
+    findings,
     pendingDecisions: { created: pass.created, existing: pass.existing, items: pass.decisionItems },
-    stats, promoteCandidates,
+    stats, ignoredCount: ignored.length, promoteCandidates,
     semanticCachedAt: pass.semanticCachedAt,
     notes,
     directoryNotes: [...listingNotes(listing, { includeEmpty: false }), ...data.directoryNotes],
     message: `扫描${scopeLabel} ${stats.scanned} 条，发现 ${stats.issues} 个问题${pass.created > 0 ? `，新增 ${pass.created} 个待决冲突` : ''}${promoteCandidates.items.length > 0 ? `，${allCandidates.length} 条建议提升全局` : ''}${noteSuffix}。清理需用户确认后执行：删除用 memory_forget，冲突裁决用 memory_confirm，提升全局用 memory_promote。`,
+    ...extras(pass.semanticBatches),
   }
 }

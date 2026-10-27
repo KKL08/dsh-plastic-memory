@@ -39,7 +39,7 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import { formatIndexLine } from '../src/index-line.ts'
 import { SnapshotCache } from '../src/runtime.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
+import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
 import { resolveHealthThresholds } from '../src/governance/health-presets.ts'
 import { executeSearch } from '../src/tools/search.ts'
 import { executeSave } from '../src/tools/save.ts'
@@ -197,7 +197,7 @@ const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const fmtIndex = (r: MemoryRecord) => formatIndexLine(r, { passive: registry.get(r.type).recall === 'passive' })
 const newSidecar = (root: string) => new SidecarStore({
   root,
-  schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema },
+  schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema },
   log: quietLog,
 })
 

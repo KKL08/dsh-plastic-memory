@@ -18,7 +18,7 @@ import { executePromote } from '../src/tools/promote.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore, restoreProjection } from '../src/governance/snapshots.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, type MemorySnapshot } from '../src/governance/schema.ts'
+import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type MemorySnapshot } from '../src/governance/schema.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
@@ -61,7 +61,7 @@ const frontmatter = async (path: string) => splitFrontmatter(await readFile(path
 const iso = (ms: number) => new Date(ms).toISOString()
 
 function harness() {
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
   const table = new FileTable({ root, stats: sidecar.recallStats })
   const store = new MemoryStore(table, undefined, sidecar.recallStats)
   const snapshots = new SnapshotStore(sidecar.snapshots)
@@ -108,8 +108,10 @@ describe('票 12 验收：手编检测与恢复比较投影', () => {
     expect(fm.lastConfirmedAt).toBe(iso(mtime))
     expect(fm.updatedAt).toBe(iso(mtime))
 
-    // memory_save update：标记清除，source 指向本次会话
-    const updated = await h.save({ action: 'update', id: 'mem_h', name: '包管理', type: 'preference', scope: 'workspace', content: '包管理用 pnpm，锁文件必须提交', summary: '用 pnpm', sourceMode: 'user-explicit' })
+    // memory_save update：手改过的先拒（手改保护），问过用户带 force 重发后标记清除，source 指向本次会话
+    const args = { action: 'update', id: 'mem_h', name: '包管理', type: 'preference', scope: 'workspace', content: '包管理用 pnpm，锁文件必须提交', summary: '用 pnpm', sourceMode: 'user-explicit' } as const
+    expect(await h.save(args)).toMatchObject({ kind: 'rejected', code: 'hand-edited' })
+    const updated = await h.save({ ...args, force: true })
     expect(updated.kind).toBe('updated')
     const after = await frontmatter(path)
     expect(after).not.toHaveProperty('handEdited')

@@ -24,9 +24,10 @@ export const FAKE_SECRET = {
   google: 'AIza' + fill('TESTONLY', 35),
 } as const
 
-/** 运行时生成的真实私钥（PKCS8 PEM，去掉末尾换行）与它的正文行（BEGIN、END 之间的 base64）。 */
-export function generatePrivateKeyPem(): { pem: string; bodyLines: string[] } {
-  const pem = generateKeyPairSync('ed25519', {
+/** 运行时生成的真实私钥（PKCS8 PEM，去掉末尾换行）与它的正文行（BEGIN、END 之间的 base64）。缺省 ed25519 正文只有一行，rsa 有多行。 */
+export function generatePrivateKeyPem(type: 'ed25519' | 'rsa' = 'ed25519'): { pem: string; bodyLines: string[] } {
+  const pem = generateKeyPairSync(type as 'rsa', {
+    modulusLength: 1024,
     privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
     publicKeyEncoding: { type: 'spki', format: 'pem' },
   }).privateKey.trimEnd()

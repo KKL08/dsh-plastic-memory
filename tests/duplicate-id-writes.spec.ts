@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { join } from 'node:path'
 
 import { executeForget } from '../src/tools/forget.ts'
+import { executeConfirm } from '../src/tools/confirm.ts'
 import { executePromote } from '../src/tools/promote.ts'
 import { executeSnapshotTool } from '../src/tools/snapshot.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
@@ -79,6 +80,38 @@ describe('密钥硬删：可见集合（global + 当前项目）里该 id 的全
     expect(await w.activeIn({ kind: 'workspace', path: ZETA })).toEqual([])
     expect(await w.activeIn({ kind: 'global' })).toEqual([])
     expect(await w.store.get('mem_dup')).toBeUndefined()
+  })
+})
+
+describe('按 id 定位先挑在用副本：一层在用、另一层有更新的已删副本', () => {
+  /** global 那份在用；当前项目那份已删进 .archive/，updatedAt 更新（GUI 按层遗忘过其中一份就是这个状态）。 */
+  function split(content: string) {
+    const w = world()
+    w.seed(w.table.globalDir, 'live.md', glob({ id: 'mem_live', content, updatedAt: 100 }))
+    w.table.seedFile({ dir: w.wsDir(ZETA), fileName: 'live.md', archived: true,
+      record: ws(ZETA, { id: 'mem_live', content: `${content}（已删副本）`, status: 'deleted', deletedAt: 250, updatedAt: 200 }) })
+    return w
+  }
+
+  it('memory_forget 删的是在用那份：含密钥的 global 副本被物理删除', async () => {
+    const w = split(`token ${FAKE_SECRET.sk}`)
+    const r = await executeForget({ ids: ['mem_live'], reason: '泄漏' }, IN_ZETA, w.deps)
+    expect(r.hardDeleted).toEqual(['mem_live'])
+    expect(await w.activeIn({ kind: 'global' })).toEqual([])
+  })
+
+  it('memory_forget 软删的是在用那份', async () => {
+    const w = split('普通约定')
+    const r = await executeForget({ ids: ['mem_live'], reason: '过时' }, IN_ZETA, w.deps)
+    expect(r.forgotten).toEqual(['mem_live'])
+    expect(await w.activeIn({ kind: 'global' })).toEqual([])
+  })
+
+  it('memory_confirm refresh 刷新的是在用那份', async () => {
+    const w = split('普通约定')
+    const r = await executeConfirm({ action: 'refresh', memoryId: 'mem_live' }, IN_ZETA, w.deps)
+    expect(r.kind).toBe('refreshed')
+    expect((await w.activeIn({ kind: 'global' })).map(x => x.lastConfirmedAt)).toEqual([5000])
   })
 })
 

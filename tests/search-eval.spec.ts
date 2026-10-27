@@ -14,12 +14,19 @@ import { expandQueryTerms, matchScore } from '../src/text.ts'
 import { RANKING_FIELDS, TIER_ORDER, substringEligible, type SearchTier } from '../src/search/ranking.ts'
 import { defaultJiebaLoader, resetJieba, tokenizerForQuery, type JiebaLoader } from '../src/search/jieba-segmenter.ts'
 import { executeSearch, type SearchToolDeps } from '../src/tools/search.ts'
-import type { SearchNoteCode } from '../src/contract-codes.ts'
+import { WEAK_SEARCH_NOTE_CODES, type SearchNoteCode } from '../src/contract-codes.ts'
 import { fakeExec } from './helpers/exec.ts'
-import { EVAL_CATEGORIES, EVAL_QUERIES, EVAL_RECORDS, type EvalQuery } from './fixtures/search-eval.ts'
+import {
+  BASELINE_ONLY_CATEGORIES, EVAL_CATEGORIES, EVAL_QUERIES, EVAL_RECORDS, NOTE_ONLY_CATEGORIES, PARAPHRASE_KINDS, STRICT_CATEGORIES,
+  type EvalQuery,
+} from './fixtures/search-eval.ts'
 
 // 评估集回归（语料与查询见 tests/fixtures/search-eval.ts，逐条对比与调参用 scripts/eval-search.ts）。
 // 两层：① 与权重无关的不变量逐条断言；② bigram 与 jieba 两档的 top-1 / top-3 聚合下限，不逐条断言。
+// 锚点类（带标点的字面值）例外：逐条断言第一名，不计入聚合下限。
+// 换说法类（paraphrase）只记基线：断言查询本身没写成字面能命中、两档都能跑出合法指标，不设分数线。
+// 中英双写（bilingual）、长句（long-answerable）与库里没有答案（no-answer、long-no-answer）只评「命中弱」：
+// 有答案的看首条对不对、判弱的有几条，没有答案的必须全部判弱。
 // 跑在 FileTable 临时目录上走 executeSearch，与生产同一条路。
 
 const jiebaProbe = await defaultJiebaLoader.importJieba().then(() => undefined, (err: unknown) => err instanceof Error ? err.message : String(err))
@@ -73,11 +80,12 @@ async function tierOracle(query: string): Promise<(r: MemoryRecord) => SearchTie
   }
 }
 
-const expectedNote = (tiers: SearchTier[]): SearchNoteCode | undefined =>
-  tiers.length === 0 || tiers.includes('all') ? undefined : tiers.includes('partial') ? 'or-fallback' : 'substring-fallback'
+/** 档位决定说明码属于哪一类：有全命中无码；只有子串档 substring-fallback；有部分命中时按首条覆盖度二选一。 */
+const expectedNotes = (tiers: SearchTier[]): readonly (SearchNoteCode | undefined)[] =>
+  tiers.length === 0 || tiers.includes('all') ? [undefined] : tiers.includes('partial') ? ['or-fallback', 'low-coverage'] : ['substring-fallback']
 
 describe('评估语料本身', () => {
-  it('60 到 100 条、四个字段齐全、正文一百到五百字；查询覆盖七类，预期 id 都在语料里', () => {
+  it('60 到 100 条、四个字段齐全、正文一百到五百字；查询覆盖全部类别，预期 id 都在语料里', () => {
     expect(EVAL_RECORDS.length).toBeGreaterThanOrEqual(60)
     expect(EVAL_RECORDS.length).toBeLessThanOrEqual(100)
     expect(new Set(EVAL_RECORDS.map(r => r.id)).size).toBe(EVAL_RECORDS.length)
@@ -125,7 +133,7 @@ describe('不变量（与权重无关）', { timeout: 60_000 }, () => {
           expect(tiers, q.query).not.toContain(undefined)
           const order = (tiers as SearchTier[]).map(t => TIER_ORDER[t])
           expect(order, q.query).toEqual([...order].sort((a, b) => a - b))
-          expect(r.noteCode, q.query).toBe(expectedNote(tiers as SearchTier[]))
+          expect(expectedNotes(tiers as SearchTier[]), q.query).toContain(r.noteCode)
         }
       })
 
@@ -147,10 +155,11 @@ describe('不变量（与权重无关）', { timeout: 60_000 }, () => {
     })
   }
 
-  it('三种说明码在评估语料上的触发：全命中无码；只有部分命中 or-fallback；只有 id 子串 substring-fallback', async () => {
+  it('四种说明码在评估语料上的触发：全命中无码；部分命中按首条覆盖度 or-fallback / low-coverage；只有 id 子串 substring-fallback', async () => {
     useTier('bigram')
     expect((await search('pnpm lockfile')).noteCode).toBeUndefined()
-    expect((await search('pnpm zzqqxx')).noteCode).toBe('or-fallback')
+    expect((await search('pnpm zzqqxx')).noteCode).toBe('low-coverage')
+    expect((await search('记忆文件手编后出处对不上怎么办')).noteCode).toBe('or-fallback')
     // memor 以子串出现在 memory 里，算全命中
     const fieldSub = await search('memor')
     expect(fieldSub.hits.length).toBeGreaterThan(0)
@@ -164,7 +173,7 @@ describe('不变量（与权重无关）', { timeout: 60_000 }, () => {
 
 // ---- 聚合下限 ----
 //
-// 门槛 = 定稿参数下首次跑出的命中数减去余量（bigram 与 jieba 各一组）。48 条查询下，首次结果：
+// 门槛 = 定稿参数下首次跑出的命中数减去余量（bigram 与 jieba 各一组）。只算进门槛的类别（48 条查询），首次结果：
 //   bigram top-1 43、top-3 48；jieba top-1 45、top-3 48。
 // 余量 top-1 留 2 条、top-3 留 1 条：调参或换分词器时允许个别查询换名次，掉得更多说明整体变差，先跑脚本看逐条差异。
 
@@ -179,19 +188,220 @@ function rankOf(q: EvalQuery, ids: string[]): number {
   return i < 0 ? Infinity : i + 1
 }
 
+const GATED_QUERIES = EVAL_QUERIES.filter(q => ![...BASELINE_ONLY_CATEGORIES, ...STRICT_CATEGORIES, ...NOTE_ONLY_CATEGORIES].includes(q.category))
+
 describe('聚合下限', { timeout: 60_000 }, () => {
   for (const tier of ['bigram', 'jieba'] as const) {
-    it.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档 top-1 ≥ ${FLOORS[tier].top1}、top-3 ≥ ${FLOORS[tier].top3}（共 ${EVAL_QUERIES.length} 条）`, async () => {
+    it.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档 top-1 ≥ ${FLOORS[tier].top1}、top-3 ≥ ${FLOORS[tier].top3}（共 ${GATED_QUERIES.length} 条）`, async () => {
       useTier(tier)
       let top1 = 0
       let top3 = 0
-      for (const q of EVAL_QUERIES) {
+      for (const q of GATED_QUERIES) {
         const r = rankOf(q, (await search(q.query)).hits.map(h => h.id))
         if (r === 1) top1++
         if (r <= 3) top3++
       }
       expect(top1).toBeGreaterThanOrEqual(FLOORS[tier].top1)
       expect(top3).toBeGreaterThanOrEqual(FLOORS[tier].top3)
+    })
+  }
+})
+
+// ---- 锚点类：逐条第一名 ----
+//
+// 版本号、路径、带冒号的标识符被分词打散后，只差一个版本号的几条记录同分或分数相近，名次只看确认时间。
+// 字面整词命中排序键让字面含该值的记录在同档内排前，所以每条都要第一名，不留余量。
+
+const ANCHOR_QUERIES = EVAL_QUERIES.filter(q => STRICT_CATEGORIES.includes(q.category))
+
+describe('锚点类（逐条第一名）', { timeout: 60_000 }, () => {
+  it('版本号、路径、带冒号的标识符各有几条，含只差一个版本号的情形', () => {
+    expect(ANCHOR_QUERIES.length).toBeGreaterThanOrEqual(9)
+    expect(ANCHOR_QUERIES.some(q => /\d+\.\d+\.\d+-rc\.\d+/.test(q.query))).toBe(true)
+    expect(ANCHOR_QUERIES.some(q => q.query.includes('/'))).toBe(true)
+    expect(ANCHOR_QUERIES.some(q => q.query.includes(':'))).toBe(true)
+  })
+
+  for (const tier of ['bigram', 'jieba'] as const) {
+    it.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档：每条锚点查询的第一名都是字面含该值的记录`, async () => {
+      useTier(tier)
+      const misses: string[] = []
+      for (const q of ANCHOR_QUERIES) {
+        const first = (await search(q.query)).hits[0]?.id
+        if (first === undefined || !q.relevant.includes(first)) misses.push(`${q.query} → ${first ?? '（空）'}`)
+      }
+      expect(misses).toEqual([])
+    })
+  }
+})
+
+// ---- 换说法类：只记基线 ----
+//
+// 查询先只看记忆的 name 列表写，再对照全文标注相关集合。为了不写成「恰好能命中」，机械检查每条查询的主要实词
+// 都不出现在相关记忆的 name、summary、tags、content 里。
+// 主要实词 = 生产查询分词器（jieba 档，cutForSearch，含它切出的子词）切出的 token，去掉不足两个字符的，
+// 再去掉下面这份疑问、语气、指代类虚词。出现 = 字段分词结果含它，或字段小写原文以子串含它。
+
+const FUNCTION_WORDS = new Set([
+  '怎么', '怎么办', '怎样', '什么', '哪个', '哪些', '多久', '多少', '是否', '要不要', '能不能', '可以',
+  '应该', '一般', '还是', '时候', '我们', '自己', '有没有', '为什么', '如何', '一下',
+])
+
+const PARAPHRASES = EVAL_QUERIES.filter(q => q.category === 'paraphrase')
+
+describe('换说法类（只记基线，不设分数线）', { timeout: 60_000 }, () => {
+  it('15 到 20 条，四种换说法都有；相关记忆分散在不同类型，不挤在几条上', () => {
+    expect(PARAPHRASES.length).toBeGreaterThanOrEqual(15)
+    expect(PARAPHRASES.length).toBeLessThanOrEqual(20)
+    for (const q of PARAPHRASES) {
+      expect(q.paraphrase, q.query).toBeDefined()
+      expect(q.relevant.length, q.query).toBeGreaterThan(0)
+    }
+    expect(new Set(PARAPHRASES.map(q => q.paraphrase))).toEqual(new Set(PARAPHRASE_KINDS))
+    for (const kind of PARAPHRASE_KINDS) expect(PARAPHRASES.filter(q => q.paraphrase === kind).length, kind).toBeGreaterThanOrEqual(3)
+    const relevantIds = PARAPHRASES.flatMap(q => q.relevant)
+    expect(new Set(relevantIds.map(id => byId.get(id)!.type)).size).toBeGreaterThanOrEqual(5)
+    for (const id of new Set(relevantIds)) expect(relevantIds.filter(x => x === id).length, id).toBeLessThanOrEqual(2)
+  })
+
+  it.skipIf(jiebaProbe !== undefined)('每条查询的主要实词都不出现在相关记忆的四个字段里', async () => {
+    useTier('jieba')
+    expect(PARAPHRASES.length).toBeGreaterThan(0)   // 不是空过
+    for (const q of PARAPHRASES) {
+      const tokenize = await tokenizerForQuery(q.query, { log: silent })
+      const content = [...new Set(tokenize(q.query))].filter(t => [...t].length >= 2 && !FUNCTION_WORDS.has(t))
+      expect(content.length, q.query).toBeGreaterThan(0)
+      for (const id of q.relevant) {
+        const r = byId.get(id)!
+        for (const f of RANKING_FIELDS) {
+          const text = f === 'tags' ? r.tags.join(' ') : r[f]
+          const fieldTokens = new Set(tokenize(text))
+          const lower = text.toLowerCase()
+          const leaked = content.filter(t => fieldTokens.has(t) || lower.includes(t))
+          expect(leaked, `${q.query} → ${id}.${f}`).toEqual([])
+        }
+      }
+    }
+  })
+
+  for (const tier of ['bigram', 'jieba'] as const) {
+    it.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档能跑通，top-1、top-3、MRR 是合法数值`, async () => {
+      useTier(tier)
+      let top1 = 0
+      let top3 = 0
+      let mrr = 0
+      for (const q of PARAPHRASES) {
+        const r = rankOf(q, (await search(q.query)).hits.map(h => h.id))
+        if (r === 1) top1++
+        if (r <= 3) top3++
+        mrr += Number.isFinite(r) ? 1 / r : 0
+      }
+      mrr /= PARAPHRASES.length
+      expect(top1).toBeGreaterThanOrEqual(0)
+      expect(top3).toBeGreaterThanOrEqual(top1)
+      expect(top3).toBeLessThanOrEqual(PARAPHRASES.length)
+      expect(Number.isFinite(mrr)).toBe(true)
+      expect(mrr).toBeGreaterThanOrEqual(0)
+      expect(mrr).toBeLessThanOrEqual(1)
+    })
+  }
+})
+
+// ---- 命中弱 ----
+//
+// 判弱的说明码劝模型换词再搜。拿不准时偏向判弱：误判弱只多搜一轮，漏判弱会让模型把错的结果当答案。
+// 所以库里没有答案的必须判弱；首条已经正确却判弱的只设上限。
+// 改判弱口径前（只要没有全命中就判弱）的基线：评估集 93 条非零 token 查询里，bigram 判弱 61 条、其中首条正确 33 条；
+// jieba 判弱 50 条、其中首条正确 24 条。加长句两类后（114 条），按覆盖查询文字四成判弱时：没有答案的长句 bigram 漏判 6 条、
+// jieba 漏判 7 条。改成只数内容字、阈值 0.65 后：两档都不漏判；首条正确却判弱 bigram 5 条（长句）、
+// jieba 3 条（长句 2、换说法 1）。
+// 换语言查：记忆标签里存了另一种语言的别名时，只写一种写法就全命中、不判弱；没存别名时判弱，提示换成另一种语言再搜。
+
+const WEAK_CORRECT_CEILING = 5
+const NO_ANSWER_QUERIES = EVAL_QUERIES.filter(q => q.category !== 'zero-token' && q.relevant.length === 0)
+const isWeak = (code: SearchNoteCode | undefined) => code !== undefined && (WEAK_SEARCH_NOTE_CODES as readonly string[]).includes(code)
+
+describe('斜杠词是普通的词：要字面命中', { timeout: 60_000 }, () => {
+  const textOf = (id: string) => { const r = byId.get(id)!; return [r.id, r.name, r.summary, r.tags.join(' '), r.content].join('\n').toLowerCase() }
+  for (const tier of ['bigram', 'jieba'] as const) {
+    describe.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档`, () => {
+      it('api/v2 按字面锚点排：讲 /api/v2/ 的记录第一', async () => {
+        useTier(tier)
+        expect((await search('api/v2')).hits[0]?.id).toBe('mem_i7p2w4')
+      })
+
+      it('TCP/IP 两个词都要命中：只靠 scripts 里的 ip 子串的记录不算全命中，结果提示命中弱', async () => {
+        useTier(tier)
+        const r = await search('TCP/IP')
+        expect(isWeak(r.noteCode), `${r.noteCode} ${r.hits.map(h => h.id).join(' ')}`).toBe(true)
+      })
+
+      it('src/search 排序：不含 src 的记录不算全命中', async () => {
+        useTier(tier)
+        const tierOf = await tierOracle('src/search 排序')
+        const fullWithoutSrc = EVAL_RECORDS.filter(r => tierOf(r) === 'all' && !textOf(r.id).includes('src')).map(r => r.id)
+        expect(fullWithoutSrc).toEqual([])
+        const r = await search('src/search 排序')
+        if (r.noteCode === undefined) expect(textOf(r.hits[0]!.id)).toContain('src')
+      })
+    })
+  }
+})
+
+describe('命中弱', { timeout: 60_000 }, () => {
+  it('评估集有换语言查（记忆存了别名 / 没存）、库里没有答案、有答案的长句、没有答案的长句几类查询；没有答案的 relevant 为空', () => {
+    expect(EVAL_QUERIES.filter(q => q.category === 'bilingual').length).toBeGreaterThanOrEqual(3)
+    expect(EVAL_QUERIES.filter(q => q.category === 'bilingual-no-alias').length).toBeGreaterThanOrEqual(3)
+    expect(EVAL_QUERIES.some(q => q.query.includes('/') && (NOTE_ONLY_CATEGORIES as readonly string[]).includes(q.category))).toBe(false)
+    expect(EVAL_QUERIES.filter(q => q.category === 'no-answer').length).toBeGreaterThanOrEqual(6)
+    expect(EVAL_QUERIES.filter(q => q.category === 'long-answerable').length).toBeGreaterThanOrEqual(8)
+    expect(EVAL_QUERIES.filter(q => q.category === 'long-no-answer').length).toBeGreaterThanOrEqual(8)
+    for (const q of EVAL_QUERIES.filter(q => q.category === 'no-answer' || q.category === 'long-no-answer')) expect(q.relevant).toEqual([])
+  })
+
+  for (const tier of ['bigram', 'jieba'] as const) {
+    describe.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档`, () => {
+      it('库里没有答案的查询（短词与长句）全部判弱', async () => {
+        useTier(tier)
+        const notWeak: string[] = []
+        for (const q of NO_ANSWER_QUERIES) {
+          const r = await search(q.query)
+          expect(r.hits.length, q.query).toBeGreaterThan(0)   // 有常见词能部分命中，不是空结果
+          if (!isWeak(r.noteCode)) notWeak.push(`${q.query} → ${r.noteCode ?? '无说明码'}`)
+        }
+        expect(notWeak).toEqual([])
+      })
+
+      it('换语言查、记忆标签里存了别名：首条正确，全命中、不出说明', async () => {
+        useTier(tier)
+        const bad: string[] = []
+        for (const q of EVAL_QUERIES.filter(q => q.category === 'bilingual')) {
+          const r = await search(q.query)
+          const first = r.hits[0]?.id
+          if (first === undefined || !q.relevant.includes(first) || r.noteCode !== undefined) bad.push(`${q.query} → ${first ?? '（空）'} ${r.noteCode ?? ''}`)
+        }
+        expect(bad).toEqual([])
+      })
+
+      it('换语言查、记忆没存别名：有部分命中，但不当成全命中，提示命中弱', async () => {
+        useTier(tier)
+        const bad: string[] = []
+        for (const q of EVAL_QUERIES.filter(q => q.category === 'bilingual-no-alias')) {
+          const r = await search(q.query)
+          if (r.hits.length === 0 || !isWeak(r.noteCode)) bad.push(`${q.query} → ${r.hits.length} 条 ${r.noteCode ?? '无说明码'}`)
+        }
+        expect(bad).toEqual([])
+      })
+
+      it(`首条正确却判弱的查询不超过 ${WEAK_CORRECT_CEILING} 条（记忆没存别名的换语言查与库里没有答案的除外）`, async () => {
+        useTier(tier)
+        const weakCorrect: string[] = []
+        for (const q of EVAL_QUERIES.filter(q => q.category !== 'zero-token' && q.category !== 'bilingual-no-alias' && q.relevant.length > 0)) {
+          const r = await search(q.query)
+          if (isWeak(r.noteCode) && rankOf(q, r.hits.map(h => h.id)) === 1) weakCorrect.push(q.query)
+        }
+        expect(weakCorrect.length, weakCorrect.join('、')).toBeLessThanOrEqual(WEAK_CORRECT_CEILING)
+      })
     })
   }
 })

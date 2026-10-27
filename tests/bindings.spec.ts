@@ -76,10 +76,19 @@ describe('memory_save 绑定', () => {
   })
   const legal = { action: 'create', name: '标题', type: 'preference', scope: 'global', content: '内容', summary: '摘要', sourceMode: 'user-explicit' }
 
-  it('tags 的参数说明引导写同义词与中英文别名，让换一种说法的查询也能搜到', () => {
-    const tags = (schemaOf(makeTool()) as { properties: Record<string, { description?: string }> }).properties.tags!
-    expect(tags.description).toContain('同义词')
-    expect(tags.description).toContain('中英文别名')
+  const describedParam = (name: string) => (schemaOf(makeTool()) as { properties: Record<string, { description?: string }> }).properties[name]!.description
+
+  it('content 的参数说明：先写事实或规则，再交代理由或情境，不编理由、不写很快过时的细节', () => {
+    expect(describedParam('content')).toBe('正文。先写事实或规则本身；再用一句交代用户给的理由，或者当时在聊什么（用户没说理由就写情境，不要替用户编理由）。只有不写就会做错的时候，才补一句具体做法。不写使用场景清单和通用注意事项；不写行号、临时路径这类很快过时的细节，改写稳定的位置描述。完整经过可以用 memory_source 回查，不用抄进正文。')
+  })
+
+  it('summary 与 tags 分工：summary 一句话说清讲什么，tags 只写文本里没有的检索词', () => {
+    expect(describedParam('summary')).toBe('一句话说清这条记忆讲什么，显示在索引里，供人和模型判断相关不相关；不复述 name，不堆关键词。')
+    expect(describedParam('tags')).toBe('只写正文、name、summary 里都没出现、但以后可能被拿来搜它的词：同义词、中英文别名、缩写。不写泛化概念。')
+  })
+
+  it('sourceMode 的参数说明逐一定义五种来源，推断链上有一步是推出来的就填 agent-inferred', () => {
+    expect(describedParam('sourceMode')).toBe('信息从哪来，决定置信度上限。user-explicit：用户明说的。agent-action-confirmed：你做的事经用户确认有效，或被采纳。user-behavior：用户反复做出的动作（多次改写、撤销、拒绝同一类做法）；对一次举动揣测动机不算。environment-observed：从文件、命令输出、配置里直接读到的事实。agent-inferred：你自己的推断和解读；只要中间有一步是你推出来的、不是直接看到的，就填它。')
   })
 
   it('(a) 合法参数过、缺必填拒', () => {
@@ -117,13 +126,25 @@ describe('memory_search 绑定', () => {
     return createSearchTool({ store, registry, resolveContext: async () => ({ workspacePath: '/proj', session: { id: 's', lastSeq: 1 } }) })
   }
 
-  it('工具描述教模型怎么下关键词（2 到 4 个实词、中英文两种写法），并鼓励命中弱时换词再搜一次', async () => {
+  it('工具描述开头讲清它管什么、和 grep 怎么分工，再分段教关键词写法与读结果（换行保留），命中弱时换词再搜一次', async () => {
     const tool = await seededTool()
-    expect(tool.description).toContain('2 到 4 个实词')
-    expect(tool.description).toContain('中英文两种写法')
-    expect(tool.description).toContain('换个角度再搜一次')
+    const d = tool.description
+    expect(d.startsWith('查长期记忆用这个工具：想知道某件事有没有记过、记的是什么，或按 id 取一条。\n范围是本项目和全局记忆。')).toBe(true)
+    expect(d).toContain('代码和项目文件用 grep 搜；记忆目录不要用 grep 搜：那里还存着已删除和其他项目的记忆')
+    expect(d).toContain('\n怎么写关键词：\n- 写 2 到 4 个实词。版本号、路径这类原样文字可以直接搜。\n')
+    expect(d).toContain('\n- 优先用开头记忆索引里出现过的说法；用户的说法和索引对不上时，先用你推测的记忆写法搜；命中弱再换用户原话的词搜一次。\n')
+    expect(d).not.toContain('一起带上')
+    expect(d).toContain('- 每个术语只写一种写法，用记忆里最可能出现的那种；同一术语的中文和英文写法不要放进同一次查询。\n\n怎么读结果：\n')
+    expect(d).not.toContain('/ 连')
+    expect(d).toContain('换个角度再搜一次')
+    // 没判弱时只陈述首条覆盖了多少；判弱时说明里会列逐词命中条数
+    expect(d).toContain('没提示命中弱时，排第一的那条含了查询的大部分内容。')
+    expect(d).toContain('开头提示命中弱时，有可列的词就列出各关键词命中几条：先换掉一条都没命中的词，或换同义词、换成另一种语言的写法、减少词数、换个角度再搜一次。')
     const query = (schemaOf(tool) as { properties: Record<string, { description?: string }> }).properties.query!
-    expect(query.description).toContain('建议换词再搜一次')
+    expect(query.description).toContain('每个术语只写一种写法，中英文写法不要同时带上')
+    expect(query.description).not.toContain('/')
+    expect(query.description).toContain('有可列的词时还列出各关键词命中几条')
+    expect(query.description).toContain('建议换词或换成另一种语言的写法再搜一次')
   })
 
   it('(a) 合法参数过、缺必填（query）拒', async () => {

@@ -3,8 +3,8 @@
  * 涉及其他项目时服务端先拒（cross-workspace，什么都没动），卡片里就地写明是哪个项目，用户点「继续处理」才带
  * allowCrossWorkspace 重发。失败把宿主 / 执行器的原话显示在卡片里；条目正在别处处理或刚处理完时交给列表提示（isHandledElsewhere）。
  */
-import { useRef, useState, type ReactNode } from 'react'
-import type { MemoryCommand, MemoryCommandResult } from '../../src/gui/contract.ts'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { detectSecrets, type MemoryCommand, type MemoryCommandResult } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, useT } from '../i18n.tsx'
 import { Button } from '../ui/Button.tsx'
@@ -15,11 +15,23 @@ export type ActionState =
   | { kind: 'busy' }
   | { kind: 'error'; detail: string }
   | { kind: 'cross'; workspacePath: string; command: MemoryCommand }
+  /** forget 的目标含密钥（服务端回 has-secret，什么都没动）：等用户确认后改发 hard-delete，沿用这条命令指明的那一份。 */
+  | { kind: 'secret'; command: Extract<MemoryCommand, { cmd: 'forget' }> }
+  /** 直接改、直接合并的新内容像密钥（服务端回 secret-suspected，什么都没动）：用户确认不是密钥后带 force 重发。 */
+  | { kind: 'suspected'; command: EditCommand }
+
+export type EditCommand = Extract<MemoryCommand, { cmd: 'edit-memory' | 'merge-memories' }>
 
 type Ok = Extract<MemoryCommandResult, { ok: true }>
 
-/** 处理待决项、条目还开着才能做的命令；not-found 对它们只可能是条目已出了待决。 */
-const OPEN_ITEM_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'promote', 'keep-local', 'dismiss-overflow'])
+/**
+ * 条目还开着才能做的命令：处理待决项的，not-found 只可能是条目已出了待决；按记忆 id 提升为全局的，
+ * not-found 只可能是那条记忆已不在那个项目里（别处已提升或删掉）；按记忆 id 留在本项目的，是那条已不是候选（别处已处理）；
+ * 移到项目的同理，是那条已不在全局；忽略建议的，not-found 只可能是涉及的记忆已在别处删掉。
+ */
+const OPEN_ITEM_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set([
+  'resolve', 'promote', 'keep-local', 'dismiss-overflow', 'promote-memory', 'keep-local-memory', 'move-memory', 'ignore-advice',
+])
 
 /**
  * 命令没做任何改动，因为这一条正在别处（别的标签页、宿主进程、体检）处理（claimed），或刚在别处处理完（not-found）。
@@ -39,7 +51,20 @@ export interface ItemAction {
   /** 命令以外的失败（打开文件、写配置）也显示在同一处。 */
   fail(detail: string): void
   confirmCross(): void
+  /** 取消跨项目确认、彻底删除确认或疑似密钥确认。 */
   cancelCross(): void
+  confirmSecret(): void
+  confirmSuspected(): void
+}
+
+/**
+ * 直接改、直接合并的新内容里有没有高危密钥：四个面拼起来查，与服务端同口径。命令文本会进借用会话的日志，
+ * 高危的得在发出去之前拦住；疑似的照常发，由服务端回 secret-suspected 再确认。
+ */
+function hasCriticalSecret(command: MemoryCommand): boolean {
+  if (command.cmd !== 'edit-memory' && command.cmd !== 'merge-memories') return false
+  const { content, name, summary, tags } = command
+  return detectSecrets(`${content}\n${name}\n${summary}\n${tags.join(' ')}`).some(h => h.severity === 'critical')
 }
 
 /** onRefused：isHandledElsewhere 为真时调用，卡片里不再显示原话。 */
@@ -49,6 +74,7 @@ export function useItemAction(session: BorrowedSession, onOk: (command: MemoryCo
   const [state, setState] = useState<ActionState>({ kind: 'idle' })
   const run = (command: MemoryCommand) => {
     if (session.kind !== 'ready') return
+    if (hasCriticalSecret(command)) { setState({ kind: 'error', detail: t('pending.edit.secretCritical') }); return }
     keepFocusInPlace()
     setState({ kind: 'busy' })
     void gateway.execute(session.sessionId, command).then((r) => {
@@ -57,11 +83,21 @@ export function useItemAction(session: BorrowedSession, onOk: (command: MemoryCo
       const workspacePath = r.rejected?.[0]?.workspacePath
       const allowed = 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
       if (r.code === 'cross-workspace' && !allowed && workspacePath !== undefined) setState({ kind: 'cross', workspacePath, command })
+      else if (r.code === 'has-secret' && command.cmd === 'forget') setState({ kind: 'secret', command })
+      else if (r.code === 'secret-suspected' && (command.cmd === 'edit-memory' || command.cmd === 'merge-memories')) setState({ kind: 'suspected', command })
+      // 这几种服务端原话只有中文，界面换成本地文案
+      else if (r.code === 'stale') setState({ kind: 'error', detail: t('pending.edit.stale') })
+      else if (r.code === 'secret-critical') setState({ kind: 'error', detail: t('pending.edit.secretCritical') })
+      else if (r.code === 'target-taken') {
+        const key = command.cmd === 'undo' ? 'pending.move.undoTaken'
+          : command.cmd === 'promote' || command.cmd === 'promote-memory' ? 'pending.promote.taken' : 'pending.move.taken'
+        setState({ kind: 'error', detail: t(key) })
+      }
       else setState({ kind: 'error', detail: r.detail ?? r.code })
     })
   }
   const unavailable = session.kind !== 'ready' ? t('session.none.hint')
-    : state.kind === 'busy' || state.kind === 'cross' ? t('pending.busy') : undefined
+    : state.kind === 'busy' || state.kind === 'cross' || state.kind === 'secret' || state.kind === 'suspected' ? t('pending.busy') : undefined
   return {
     state,
     unavailable,
@@ -71,6 +107,12 @@ export function useItemAction(session: BorrowedSession, onOk: (command: MemoryCo
       if (state.kind === 'cross') run({ ...state.command, allowCrossWorkspace: true } as MemoryCommand)
     },
     cancelCross() { setState({ kind: 'idle' }) },
+    confirmSecret() {
+      if (state.kind === 'secret') run({ ...state.command, cmd: 'hard-delete' })
+    },
+    confirmSuspected() {
+      if (state.kind === 'suspected') run({ ...state.command, force: true })
+    },
   }
 }
 
@@ -85,11 +127,17 @@ function ConfirmGroup({ label, children }: { label: string; children: ReactNode 
 }
 
 /** 跨项目确认行：写明记忆属于哪个项目，「取消」或「继续处理」。待处理卡和全部记忆 / 最近删除的行共用。 */
-export function CrossConfirm({ workspacePath, onCancel, onConfirm }: { workspacePath: string; onCancel: () => void; onConfirm: () => void }) {
+export function CrossConfirm({ workspacePath, isMove = false, onCancel, onConfirm }: {
+  workspacePath: string
+  /** 移到项目：写的是要移去的项目，不是记忆所在的项目。 */
+  isMove?: boolean
+  onCancel: () => void
+  onConfirm: () => void
+}) {
   const t = useT()
   return (
     <ConfirmGroup label={t('pending.cross.confirm')}>
-      <p className="pm-pending-text">{t('pending.cross.body', { name: baseName(workspacePath) })}</p>
+      <p className="pm-pending-text">{t(isMove ? 'pending.cross.moveBody' : 'pending.cross.body', { name: baseName(workspacePath) })}</p>
       <div className="pm-pending-actions">
         {/* 焦点移进确认，停在不改动任何东西的「取消」上 */}
         <Button autoFocus onClick={onCancel}>{t('pending.cancel')}</Button>
@@ -101,21 +149,24 @@ export function CrossConfirm({ workspacePath, onCancel, onConfirm }: { workspace
 
 /**
  * 彻底删除的确认：不进最近删除、不能恢复，快照里的副本也抹掉。待处理的密钥卡点「彻底删除…」时出现；
- * 全部记忆、对话交付卡、右侧栏普通删除含密钥的记忆时服务端回 has-secret（什么都没动），也在原位出现，「彻底删除」改发 hard-delete。
+ * 全部记忆、对话交付卡、右侧栏、待处理的建议整理普通删除含密钥的记忆时服务端回 has-secret（什么都没动），也在原位出现，「彻底删除」改发 hard-delete。
  * 密钥卡标题已写明有密钥，`showTitle={false}`；其余地方用户只点了删除，先补一行「这条记忆里有密钥」说明为什么。
+ * 最近删除里点「彻底删除…」也用它，`body` 换成那里的说明。
  */
-export function SecretDeleteConfirm({ onCancel, onConfirm, unavailable, showTitle = true }: {
+export function SecretDeleteConfirm({ onCancel, onConfirm, unavailable, showTitle = true, body }: {
   onCancel: () => void
   onConfirm: () => void
   /** 「彻底删除」暂不可用的原因（密钥卡没有会话、正在处理时）。 */
   unavailable?: string | undefined
   showTitle?: boolean
+  /** 说明文字，缺省是密钥条目的那句。 */
+  body?: string
 }) {
   const t = useT()
   return (
     <ConfirmGroup label={t('pending.secret.confirmDelete')}>
       {showTitle ? <p className="pm-pending-text pm-pending-confirm-title">{t('pending.secret.title')}</p> : null}
-      <p className="pm-pending-text">{t('pending.secret.confirmBody')}</p>
+      <p className="pm-pending-text">{body ?? t('pending.secret.confirmBody')}</p>
       <div className="pm-pending-actions">
         {/* 默认焦点在「取消」：回车不会手滑删掉 */}
         <Button autoFocus onClick={onCancel}>{t('pending.cancel')}</Button>
@@ -125,19 +176,98 @@ export function SecretDeleteConfirm({ onCancel, onConfirm, unavailable, showTitl
   )
 }
 
-/** CrossConfirm 的样式；待处理卡的说明文字和按钮组也用这两个类。 */
+/**
+ * 普通删除（软删）的原位确认：对话交付卡、右侧栏、记忆查看、待处理的建议整理卡里，删除按钮的位置换成「删除这条？ 删除 · 取消」，点「删除」才删。
+ * 删了还能撤销或去最近删除找回，所以不展开确认块、不用危险样式。取消、Esc、焦点移到这一组以外的控件、在这一组以外按下指针
+ * 都收起，什么都不发。焦点没落到任何控件上不算移出：Safari 等点按钮时不给按钮焦点，「取消」会先失焦到页面上，
+ * 这时收起就点不到「删除」了；切到别的应用也是这样。「取消」排在最后，落在原来按钮的位置上，连点两下也删不掉；焦点进来时也停在它上面。
+ */
+export function SoftDeleteConfirm({ onCancel, onConfirm }: { onCancel: () => void; onConfirm: () => void }) {
+  const t = useT()
+  const ref = useRef<HTMLSpanElement>(null)
+  const questionId = useId()
+  const cancel = useRef(onCancel)
+  cancel.current = onCancel
+  useReturnFocus(ref)
+  useEffect(() => {
+    const doc = ref.current?.ownerDocument
+    if (doc === undefined) return
+    const onPointer = (event: PointerEvent) => {
+      if (!(ref.current?.contains(event.target as Node) ?? false)) cancel.current()
+    }
+    doc.addEventListener('pointerdown', onPointer, true)
+    return () => { doc.removeEventListener('pointerdown', onPointer, true) }
+  }, [])
+  return (
+    <span
+      ref={ref}
+      className="pm-soft-confirm"
+      role="group"
+      aria-labelledby={questionId}
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape') return
+        event.preventDefault()
+        event.stopPropagation()
+        onCancel()
+      }}
+      onBlur={(event) => {
+        const next = event.relatedTarget as Node | null
+        if (next !== null && !event.currentTarget.contains(next)) onCancel()
+      }}
+    >
+      <span id={questionId} className="pm-soft-confirm-text">{t('pending.softDelete.question')}</span>
+      <button type="button" className="pm-link" onClick={onConfirm}>{t('pending.softDelete.confirm')}</button>
+      <i className="pm-sep" aria-hidden="true">·</i>
+      <button type="button" className="pm-link pm-soft-confirm-cancel" autoFocus onClick={onCancel}>{t('pending.cancel')}</button>
+    </span>
+  )
+}
+
+/**
+ * 删除按钮连同它的原位确认：`trigger` 画按钮，点了调 `open` 换成 SoftDeleteConfirm，点「删除」才调 `onDelete`。
+ * 确认开没开记在这个控件自己身上，跟着这一行走：行删掉了、从列表里没了就一起卸载，记忆撤销或恢复回来时是按钮，不会带着没收起的确认抢焦点。
+ */
+export function DeleteWithConfirm({ trigger, onDelete }: { trigger: (open: () => void) => ReactNode; onDelete: () => void }) {
+  const [isOpen, setOpen] = useState(false)
+  if (!isOpen) return <>{trigger(() => { setOpen(true) })}</>
+  return <SoftDeleteConfirm onCancel={() => { setOpen(false) }} onConfirm={() => { setOpen(false); onDelete() }} />
+}
+
+/** CrossConfirm 的样式；待处理卡的说明文字和按钮组也用这两个类。软删确认（SoftDeleteConfirm）的样式也在这里，各处共用。 */
 export const crossConfirmCss = `
 .pm-pending-text { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-pending-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .pm-pending-confirm-title { font-weight: 600; color: var(--pm-text); }
 .pm-pending-confirm { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: var(--dsw-radius-md, 12px); background: var(--pm-bg-block); }
+.pm-soft-confirm {
+  display: inline-flex; flex: none; align-items: center; min-height: 24px; gap: 8px;
+  font-size: 12px; line-height: 1.5; white-space: nowrap; color: var(--pm-text-2);
+}
+.pm-soft-confirm .pm-sep { margin: 0 -2px; }
+.pm-soft-confirm .pm-link { font-size: 12px; }
+.pm-soft-confirm .pm-soft-confirm-cancel { font-weight: 400; color: var(--pm-text-2); }
+.pm-soft-confirm .pm-soft-confirm-cancel:hover { color: var(--pm-text); text-decoration: none; }
 `
 
-/** 动作的反馈：跨项目确认行，或失败原话。 */
+/** 动作的反馈：跨项目确认行、彻底删除确认（删除的记忆含密钥）、疑似密钥确认（直接改的新内容像密钥），或失败原话。 */
 export function ActionFeedback({ action }: { action: ItemAction }) {
   const t = useT()
   const { state } = action
-  if (state.kind === 'cross') return <CrossConfirm workspacePath={state.workspacePath} onCancel={action.cancelCross} onConfirm={action.confirmCross} />
+  if (state.kind === 'cross') {
+    return <CrossConfirm workspacePath={state.workspacePath} isMove={state.command.cmd === 'move-memory'} onCancel={action.cancelCross} onConfirm={action.confirmCross} />
+  }
+  if (state.kind === 'secret') return <SecretDeleteConfirm onCancel={action.cancelCross} onConfirm={action.confirmSecret} />
+  if (state.kind === 'suspected') {
+    return (
+      <ConfirmGroup label={t('pending.edit.saveAnyway')}>
+        <p className="pm-pending-text">{t('pending.edit.secretSuspected')}</p>
+        <div className="pm-pending-actions">
+          <Button autoFocus onClick={action.cancelCross}>{t('pending.cancel')}</Button>
+          <Button onClick={action.confirmSuspected}>{t('pending.edit.saveAnyway')}</Button>
+        </div>
+      </ConfirmGroup>
+    )
+  }
   if (state.kind === 'error') return <p className="pm-pending-error" role="alert">{t('pending.failed', { detail: state.detail })}</p>
   return null
 }

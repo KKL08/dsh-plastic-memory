@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
-import { GUI_VIEW_VERSION, type HealthView, type MemoryCommand, type PendingItem, type PendingView } from '../../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, type AdviceType, type HealthView, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type PendingItem, type PendingView } from '../../src/gui/contract.ts'
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { useGateway, type PluginConfig } from '../gateway.ts'
 import { FLASH_MS } from '../library/shared.tsx'
 import { createNavStore, type NavStore } from '../nav.ts'
-import { memory, NOW, renderInShell } from '../test-utils.tsx'
+import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { PendingTab } from './PendingTab.tsx'
 
 // 待处理 tab：给定一份待处理视图，断言每类卡渲染出什么、点按钮向网关发了什么命令。
@@ -15,21 +15,21 @@ const config: PluginConfig = { snapshotTokenBudget: 4000, snapshotOverflow: 'rel
 
 const A = memory({ id: 'a', content: '测试用真实 Postgres。', sourceMode: 'user-explicit' })
 const B = memory({ id: 'b', content: '测试里 mock 数据库就行。', sourceMode: 'agent-inferred' })
-const horizontal: PendingItem = { kind: 'conflict-horizontal', decisionId: 'd-h', firstSeenAt: 1, summary: '测试里怎么准备数据库，两条记忆互相矛盾', left: A, right: B, preferredId: 'a' }
-const vertical: PendingItem = { kind: 'conflict-vertical', decisionId: 'd-v', firstSeenAt: 2, summary: '包管理器和基线矛盾', memory: memory({ id: 'v', content: '用 npm。' }), baselineRef: 'AGENTS.md：用 pnpm' }
-const promote: PendingItem = { kind: 'promote-candidate', decisionId: 'd-p', firstSeenAt: 3, memory: memory({ id: 'p', content: '所有项目都用 vitest。' }) }
-const secret: PendingItem = { kind: 'secret', memory: memory({ id: 's', content: '部署 token [已隐藏]', filePath: '/m/app/deploy.md' }) }
-const overflow: PendingItem = { kind: 'overflow', decisionId: 'd-o', firstSeenAt: 4, mode: 'relax', tier: 1, workspacePath: '/w/app' }
+const horizontal: PendingItem = { kind: 'conflict-horizontal', level: 'your-call', decisionId: 'd-h', firstSeenAt: 1, summary: '测试里怎么准备数据库，两条记忆互相矛盾', left: A, right: B, preferredId: 'a' }
+const vertical: PendingItem = { kind: 'conflict-vertical', level: 'your-call', decisionId: 'd-v', firstSeenAt: 2, summary: '包管理器和基线矛盾', memory: memory({ id: 'v', content: '用 npm。' }), baselineRef: 'AGENTS.md：用 pnpm' }
+const promote: PendingItem = { kind: 'promote-candidate', level: 'your-call', decisionId: 'd-p', firstSeenAt: 3, memory: memory({ id: 'p', content: '所有项目都用 vitest。' }) }
+const secret: PendingItem = { kind: 'secret', level: 'must-fix', memory: memory({ id: 's', content: '部署 token [已隐藏]', filePath: '/m/app/deploy.md' }) }
+const overflow: PendingItem = { kind: 'overflow', level: 'your-call', decisionId: 'd-o', firstSeenAt: 4, mode: 'relax', tier: 1, workspacePath: '/w/app' }
 const unreadable: PendingItem = {
-  kind: 'unreadable-file', layer: { kind: 'workspace', workspacePath: '/w/app' }, filePath: '/m/app/broken.md', relativePath: 'app/broken.md',
+  kind: 'unreadable-file', level: 'must-fix', layer: { kind: 'workspace', workspacePath: '/w/app' }, filePath: '/m/app/broken.md', relativePath: 'app/broken.md',
   error: 'YAMLException: unexpected end of the stream within a flow collection (2:8)',
 }
 
-const view = (...items: PendingItem[]): PendingView => ({ version: GUI_VIEW_VERSION, dot: 'amber', items, typeLabels: { preference: '行为偏好' } })
+const view = (...items: PendingItem[]): PendingView => ({ version: GUI_VIEW_VERSION, dot: 'amber', items, levelCounts: levelCountsOf(items), typeLabels: { preference: '行为偏好' } })
 const scannedHealth = (at: number | null): HealthView => ({
   version: GUI_VIEW_VERSION,
   governanceEnabled: true,
-  layers: [{ layer: { kind: 'global' }, totalMemories: 1, score: 1, tier: 'green', gate: { secret: false }, issues: [], staleCount: 0, semanticCachedAt: at, overflow: null }],
+  layers: [{ layer: { kind: 'global' }, totalMemories: 1, score: 1, tier: 'green', gate: { secret: false }, issues: [], staleCount: 0, semanticCachedAt: at, overflow: null, ignored: [] }],
 })
 
 function setup(items: PendingItem[], init: FakeGatewayInit = {}, nav: NavStore = createNavStore()) {
@@ -39,13 +39,47 @@ function setup(items: PendingItem[], init: FakeGatewayInit = {}, nav: NavStore =
   return { ...utils, gateway, commands }
 }
 
-describe('待处理：各类卡', () => {
-  it('按视图顺序出卡，密钥在最前', () => {
-    setup([secret, horizontal, vertical, promote, overflow, unreadable])
-    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual([
-      '这条记忆里有密钥', '测试里怎么准备数据库，两条记忆互相矛盾', '包管理器和基线矛盾', '这条适合所有项目', '带入的记忆超出上限', '有个文件读不出来',
+describe('待处理：按级别分组', () => {
+  it('高优问题在前、待你处理在后，组标题带条数；组内按视图顺序出卡', () => {
+    setup([secret, unreadable, horizontal, vertical, promote, overflow])
+    expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['高优问题 2', '待你处理 4'])
+    const mustFix = screen.getByRole('region', { name: '高优问题 2' })
+    expect(within(mustFix).getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['这条记忆里有密钥', '有个文件读不出来'])
+    expect(within(screen.getByRole('region', { name: '待你处理 4' })).getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual([
+      '测试里怎么准备数据库，两条记忆互相矛盾', '包管理器和基线矛盾', '这条适合所有项目', '带入的记忆超出上限',
     ])
   })
+
+  it('密钥标红，读不出的文件同在高优问题组但不标红', () => {
+    setup([secret, unreadable])
+    const mustFix = screen.getByRole('region', { name: '高优问题 2' })
+    const [secretCard, fileCard] = within(mustFix).getAllByRole('article')
+    expect(within(secretCard!).getByRole('img', { name: '有密钥要处理' })).toBeInTheDocument()
+    expect(fileCard!.querySelector('.pm-marker')).toBeNull()
+  })
+
+  it('某一级没有待处理项：整组不画', () => {
+    setup([horizontal])
+    expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['待你处理 1'])
+    expect(screen.queryByRole('region', { name: /高优问题/ })).toBeNull()
+  })
+
+  it('只有高优问题：只画这一组', () => {
+    setup([unreadable])
+    expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['高优问题 1'])
+  })
+
+  it('裁决后结果卡留在原来那一组；组标题的数只算还在等你的', async () => {
+    setup([secret, horizontal, promote])
+    fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
+    await screen.findByText('已按 A')
+    const yourCall = screen.getByRole('region', { name: '待你处理 1' })
+    expect(within(yourCall).getByText('已按 A')).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: '高优问题 1' })).toBeInTheDocument()
+  })
+})
+
+describe('待处理：各类卡', () => {
 
   it('横向冲突：A / B 原文、类型显示名、「决定前 agent 按哪条来」，后果在动手前就写着；三个按钮各发对应 verdict', async () => {
     const { commands } = setup([horizontal])
@@ -146,7 +180,7 @@ describe('待处理：各类卡', () => {
 
   it('超限：「整理记忆 ›」去全部记忆，作用域是这张卡那一层（项目或全局），不发命令', () => {
     const nav = createNavStore()
-    const global: PendingItem = { kind: 'overflow', decisionId: 'd-g', firstSeenAt: 5, mode: 'strict', tier: 0 }
+    const global: PendingItem = { kind: 'overflow', level: 'your-call', decisionId: 'd-g', firstSeenAt: 5, mode: 'strict', tier: 0 }
     const { commands } = setup([overflow, global], {}, nav)
     const [projectLink, globalLink] = screen.getAllByRole('button', { name: '整理记忆 ›' })
     fireEvent.click(projectLink!)
@@ -301,7 +335,7 @@ describe('待处理：别处已经在处理同一条', () => {
     fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
     await screen.findByRole('alert')
     act(() => { gateway.setView('pending', view()) })
-    expect(screen.getByText('没有等你决定的事')).toBeInTheDocument()
+    expect(screen.getByText('目前没有要处理的事')).toBeInTheDocument()
     expect(screen.getByRole('alert')).toHaveTextContent(refused)
   })
 
@@ -317,6 +351,25 @@ describe('待处理：别处已经在处理同一条', () => {
     fireEvent.click(screen.getByRole('button', { name: button }))
     const text = `你对「${title}」的选择没有生效：它正在别处处理，或者刚在别处处理完。`
     expect(await screen.findByRole('alert')).toHaveTextContent(text)
+    act(() => { gateway.setView('pending', view()) })
+    expect(screen.getByRole('alert')).toHaveTextContent(text)
+  })
+
+  it('建议整理「忽略」回 not-found（记忆已在别处删掉）：同样提示，不显示原话', async () => {
+    const bloat: PendingItem = { kind: 'advice', level: 'advice', type: 'bloat', memories: [memory({ id: 'bl', filePath: '/m/app/bl.md', digest: 'sha1:bl' })] }
+    setup([bloat], { respond: command => ({ ok: false, cmd: command.cmd, code: 'not-found', detail: '不存在或已处理：bl' }) })
+    fireEvent.click(screen.getByRole('button', { name: '忽略' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('你对「内容过长」的选择没有生效：它正在别处处理，或者刚在别处处理完。')
+    expect(screen.queryByText(/不存在或已处理/)).toBeNull()
+  })
+
+  it('放错层「提升为全局」回 not-found（别处已提升或删掉）：同样提示，不显示原话', async () => {
+    const misplaced: PendingItem = { kind: 'advice', level: 'advice', type: 'misplaced', memories: [memory({ id: 'mu', filePath: '/m/app/mu.md', digest: 'sha1:mu' })] }
+    const { gateway } = setup([misplaced], { respond: command => ({ ok: false, cmd: command.cmd, code: 'not-found', detail: '不存在或已处理：mu' }) })
+    fireEvent.click(screen.getByRole('button', { name: '提升为全局' }))
+    const text = '你对「放错层」的选择没有生效：它正在别处处理，或者刚在别处处理完。'
+    expect(await screen.findByRole('alert')).toHaveTextContent(text)
+    expect(screen.queryByText(/不存在或已处理/)).toBeNull()
     act(() => { gateway.setView('pending', view()) })
     expect(screen.getByRole('alert')).toHaveTextContent(text)
   })
@@ -437,10 +490,12 @@ describe('待处理：两态与空状态', () => {
     expect(gateway.executed.map(e => e.command.cmd)).toEqual(['resolve'])
   })
 
-  it('待处理为空：一句结论 + 上次体检时间，没有按钮', () => {
+  it('待处理为空：一句结论，说明待处理收什么，再写上次体检时间；不画组标题，没有按钮', () => {
     setup([], { views: { pending: view(), health: scannedHealth(new Date(2026, 9, 15, 9).getTime()) } })
-    expect(screen.getByRole('status')).toHaveTextContent('没有等你决定的事')
+    expect(screen.getByRole('status')).toHaveTextContent('目前没有要处理的事')
+    expect(screen.getByRole('status')).toHaveTextContent('密钥、读不出的文件、互相矛盾的记忆、超限提醒和适合提升为全局的记忆会出现在这里。')
     expect(screen.getByRole('status')).toHaveTextContent('上次体检：10 月 15 日')
+    expect(screen.queryByRole('heading', { level: 2 })).toBeNull()
     expect(screen.queryByRole('button')).toBeNull()
   })
 
@@ -508,6 +563,57 @@ describe('待处理：直达某条记忆', () => {
   })
 })
 
+// 健康页「去处理 ›」带组标识进来：焦点落在那一组的标题上并滚入视野；组已经没有了（处理完）就落在待处理顶部。
+describe('待处理：定位到组', () => {
+  const scrollIntoView = vi.fn()
+  beforeEach(() => { scrollIntoView.mockClear(); Element.prototype.scrollIntoView = scrollIntoView })
+  afterEach(() => { delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView })
+  const advice: PendingItem = { kind: 'advice', level: 'advice', type: 'expired', memories: [memory({ id: 'e1', validTo: NOW - 1 })] }
+  const top = () => document.querySelector('.pm-pending')
+
+  it('三组各自能定位：焦点在组标题上，标题滚入视野', () => {
+    for (const [level, heading] of [['must-fix', '高优问题 1'], ['your-call', '待你处理 1'], ['advice', '建议整理 1']] as const) {
+      const { unmount } = setup([secret, horizontal, advice], {}, createNavStore({ tab: 'pending', level }))
+      const title = screen.getByRole('heading', { level: 2, name: heading })
+      expect(title).toHaveFocus()
+      expect(scrollIntoView.mock.contexts.at(-1)).toBe(title)
+      unmount()
+    }
+  })
+
+  it('那一组已经没有了：焦点落在待处理顶部', () => {
+    setup([secret, advice], {}, createNavStore({ tab: 'pending', level: 'your-call' }))
+    expect(top()).toHaveFocus()
+    expect(scrollIntoView.mock.contexts.at(-1)).toBe(top())
+  })
+
+  it('待处理全空：同样落在顶部（空状态在里面）', () => {
+    setup([], {}, createNavStore({ tab: 'pending', level: 'advice' }))
+    expect(top()).toHaveFocus()
+    expect(top()).toHaveTextContent('目前没有要处理的事')
+  })
+
+  it('视图晚到：到了再定位', () => {
+    const nav = createNavStore({ tab: 'pending', level: 'advice' })
+    const { gateway } = setup([], { views: { pending: { status: 'loading' }, health: scannedHealth(NOW) } }, nav)
+    expect(document.body).toHaveFocus()
+    act(() => { gateway.setView('pending', view(secret, advice)) })
+    expect(screen.getByRole('heading', { level: 2, name: '建议整理 1' })).toHaveFocus()
+  })
+
+  it('只定位一次：视图刷新不再抢焦点；不带组标识进来不动焦点', () => {
+    const nav = createNavStore({ tab: 'pending', level: 'advice' })
+    const { gateway } = setup([secret, advice], {}, nav)
+    const ignore = screen.getByRole('button', { name: '忽略' })
+    ignore.focus()
+    act(() => { gateway.setView('pending', view(secret, horizontal, advice)) })
+    expect(ignore).toHaveFocus()
+    act(() => { nav.update({ tab: 'pending' }) })
+    expect(ignore).toHaveFocus()
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+  })
+})
+
 // —— 键盘（故事 50）：裁决、提升、删除都是原生 button，能 Tab 到；焦点环用宿主令牌（见 ui/basics.spec 的主题检查） ——
 
 describe('键盘', () => {
@@ -522,5 +628,850 @@ describe('键盘', () => {
       button.focus()
       expect(document.activeElement).toBe(button)
     }
+  })
+})
+
+// —— 建议整理（spec「建议整理的动作」）：卡片不着色、动作按问题类型；删除走 forget，含密钥改走彻底删除确认 ——
+
+describe('待处理：建议整理', () => {
+  const advice = (type: AdviceType, id: string, overrides: Partial<MemoryCard> = {}): PendingItem => ({
+    kind: 'advice', level: 'advice', type, memories: [memory({ id, name: `记忆 ${id}`, filePath: `/m/app/${id}.md`, digest: `sha1:${id}`, ...overrides })],
+  })
+  const expired = advice('expired', 'e1', { validTo: NOW - 1 })
+  const stale = advice('stale', 's1', { lastConfirmedAt: new Date(2026, 5, 1).getTime() })
+  const bloat = advice('bloat', 'b1')
+  const orphan = advice('orphan', 'o1')
+  const baselineDup = advice('redundancy', 'rb')
+  const toGlobal = advice('misplaced', 'mu')
+  const toProject = advice('misplaced', 'md', { scope: 'global', workspacePath: undefined, filePath: '/m/global/md.md' })
+  const unclear = advice('unclear', 'u1')
+  const duplicates = [
+    memory({ id: 'r1', content: '左边的内容。', filePath: '/m/app/r1.md', digest: 'sha1:r1' }),
+    memory({ id: 'r2', content: '右边的内容。', filePath: '/m/app/r2.md', digest: 'sha1:r2' }),
+  ]
+  const pair: PendingItem = { kind: 'advice', level: 'advice', type: 'redundancy', memories: duplicates }
+  const layer = { kind: 'workspace', workspacePath: '/w/app' } as const
+  const groupOf = () => screen.getByRole('region', { name: /^建议整理/ })
+  const cardOf = (title: string) => screen.getByRole('heading', { level: 3, name: title }).closest('article')!
+  /** 原位确认里的「删除」。 */
+  const confirmIn = (scope: HTMLElement) => within(within(scope).getByRole('group', { name: '删除这条？' })).getByRole('button', { name: '删除' })
+
+  it('建议整理组排在最后，组名带条数；卡片不着色、不带状态标记', () => {
+    setup([secret, horizontal, expired, stale, bloat, orphan])
+    expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['高优问题 1', '待你处理 1', '建议整理 4'])
+    expect(within(groupOf()).getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual([
+      '已过有效期', '很久没确认', '内容过长', '指向的旧记忆已不在',
+    ])
+    expect(groupOf().querySelector('.pm-marker')).toBeNull()
+  })
+
+  // 「忽略」在标题行右上（DOM 里排在最前），其余在底部一行
+  it.each([
+    ['已过有效期', expired, ['忽略', '删除', '打开文件']],
+    ['很久没确认', stale, ['仍然有效', '删除', '打开文件']],
+    ['内容过长', bloat, ['忽略', '打开文件', '直接改', '让模型改']],
+    ['指向的旧记忆已不在', orphan, ['忽略', '打开文件']],
+    ['内容重复', baselineDup, ['忽略', '删除', '打开文件']],
+    ['放错层', toGlobal, ['忽略', '打开文件', '提升为全局']],
+    ['放错层', toProject, ['忽略', '打开文件', '移到项目…']],
+    ['表述不清', unclear, ['忽略', '打开文件', '直接改', '让模型改']],
+  ] as const)('%s：动作按 spec 表', (title, item, buttons) => {
+    setup([item])
+    expect(cardOf(title).querySelector(`[data-memory-id="${item.kind === 'advice' ? item.memories[0]!.id : ''}"]`)).not.toBeNull()
+    expect(within(cardOf(title)).getAllByRole('button').map(b => b.textContent)).toEqual([...buttons])
+    // 「打开文件」退一步，用幽灵按钮；「忽略」是右上角的淡灰小按钮（同超限卡）；其余照常
+    for (const b of within(cardOf(title)).getAllByRole('button')) {
+      expect(b.classList.contains('pm-btn--ghost')).toBe(b.textContent === '打开文件')
+      expect(b.classList.contains('pm-btn--quiet')).toBe(b.textContent === '忽略')
+      if (b.textContent === '忽略') expect(b.closest('.pm-pending-aside')).not.toBeNull()
+    }
+  })
+
+  it('「忽略」发 ignore-advice（类型 + 每条记忆的层和卡片版本），原位换成结果卡；撤销发 unignore-advice，撤销后回到原卡片', async () => {
+    const { gateway, commands } = setup([bloat])
+    fireEvent.click(within(cardOf('内容过长')).getByRole('button', { name: '忽略' }))
+    await screen.findByText('已忽略')
+    expect(screen.getByText('不再提示，也不再扣分；内容改了会重新检查。可在「健康」里取消忽略。')).toBeInTheDocument()
+    // 视图重写后这一项不在了，结果卡照旧留在原位
+    act(() => { gateway.setView('pending', view()) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
+    const base = { updatedAt: bloat.kind === 'advice' ? bloat.memories[0]!.updatedAt : 0, digest: 'sha1:b1' }
+    expect(commands()).toEqual([
+      { cmd: 'ignore-advice', type: 'bloat', memories: [{ memoryId: 'b1', layer, base }] },
+      { cmd: 'unignore-advice', type: 'bloat', memoryIds: ['b1'] },
+    ])
+    act(() => { gateway.setView('pending', view(bloat)) })
+    expect(within(cardOf('内容过长')).getByRole('button', { name: '忽略' })).toBeInTheDocument()
+    expect(screen.queryByText('已忽略')).toBeNull()
+  })
+
+  it('内容重复的一组：右上一个「忽略」，带上整组的记忆 id', async () => {
+    const { commands } = setup([pair])
+    fireEvent.click(within(cardOf('内容重复')).getByRole('button', { name: '忽略' }))
+    await screen.findByText('已忽略')
+    expect(commands()).toEqual([{ cmd: 'ignore-advice', type: 'redundancy', memories: duplicates.map(m => ({ memoryId: m.id, layer, base: { updatedAt: m.updatedAt, digest: m.digest } })) }])
+  })
+
+  it('说明按情形写：和指令文件重复、该放全局、只和项目有关、表述不清、内容过长', () => {
+    setup([baselineDup, toGlobal, toProject, unclear, bloat])
+    for (const text of [
+      '指令文件（AGENTS.md 等）里已经写了同样的内容，这条可以删掉。删除后 14 天内可在「最近删除」恢复。',
+      '这条看起来对所有项目都适用，现在只放在一个项目里。提升为全局后所有项目都会带入它，14 天内可撤销。',
+      '这条看起来只和某个项目有关，放在全局会被带进每个项目的对话。移到项目后只在那个项目里带入，14 天内可撤销。',
+      '换一个没有上下文的新对话，agent 很难照这条去做。把缺的背景、对象或条件写清楚。原文没写的背景，模型补不上，要你写给它。',
+      '内容很长，带入对话时占用较多。精简成要点更好。',
+    ]) expect(screen.getByText(text)).toBeInTheDocument()
+  })
+
+  it('内容重复的两条在同一张卡上左右并排，各自「删除左边 / 删除右边」「打开文件」；删除发 forget（带层）', async () => {
+    const { gateway, commands } = setup([pair])
+    const card = cardOf('内容重复')
+    expect(screen.getByText('两条说的是同一件事，留一条就够。删掉的那条 14 天内可在「最近删除」恢复。')).toBeInTheDocument()
+    const left = within(card).getByRole('region', { name: '左边这条' })
+    const right = within(card).getByRole('region', { name: '右边这条' })
+    expect(within(left).getByText('左边的内容。')).toBeInTheDocument()
+    expect(within(right).getByText('右边的内容。')).toBeInTheDocument()
+    expect(within(card).getAllByRole('button').map(b => b.textContent)).toEqual(['忽略', '删除左边', '打开文件', '删除右边', '打开文件', '直接合并', '让模型合并'])
+    for (const b of within(card).getAllByRole('button')) expect(b.classList.contains('pm-btn--ghost')).toBe(b.textContent === '打开文件')
+
+    await act(async () => { fireEvent.click(within(right).getByRole('button', { name: '打开文件' })) })
+    expect(gateway.opened).toEqual([{ path: '/m/app/r2.md' }])
+    fireEvent.click(within(right).getByRole('button', { name: '删除右边' }))
+    expect(commands()).toEqual([])
+    fireEvent.click(confirmIn(right))
+    await screen.findByText('已删除')
+    expect(commands()).toEqual([{ cmd: 'forget', memoryId: 'r2', layer }])
+  })
+
+  it('三条以上互相重复：每条一栏，按钮写「删除」，栏名是记忆名', async () => {
+    const { commands } = setup([{ kind: 'advice', level: 'advice', type: 'redundancy', memories: [...duplicates, memory({ id: 'r3', name: '第三条' })] }])
+    const card = cardOf('内容重复')
+    expect(screen.getByText('这几条说的是同一件事，留一条就够。删掉的 14 天内可在「最近删除」恢复。')).toBeInTheDocument()
+    expect(within(card).getAllByRole('button').map(b => b.textContent)).toEqual(['忽略', '删除', '打开文件', '删除', '打开文件', '删除', '打开文件'])
+    const third = within(card).getByRole('region', { name: '第三条' })
+    fireEvent.click(within(third).getByRole('button', { name: '删除' }))
+    fireEvent.click(confirmIn(third))
+    await screen.findByText('已删除')
+    expect(commands()).toEqual([{ cmd: 'forget', memoryId: 'r3', layer }])
+  })
+
+  it('内容重复删掉的那条含密钥：原位改问彻底删除，「彻底删除」发 hard-delete 删的还是那一条', async () => {
+    const { commands } = setup([pair], {
+      respond: command => command.cmd === 'forget'
+        ? { ok: false, cmd: command.cmd, code: 'has-secret' }
+        : { ok: true, cmd: command.cmd, memoryIds: ['r1'] },
+    })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除左边' })) })
+    await act(async () => { fireEvent.click(confirmIn(cardOf('内容重复'))) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '彻底删除' })) })
+    await screen.findByText('已彻底删除')
+    expect(commands()).toEqual([{ cmd: 'forget', memoryId: 'r1', layer }, { cmd: 'hard-delete', memoryId: 'r1', layer }])
+  })
+
+  it('放错层（项目 → 全局）：「提升为全局」按记忆 id 发 promote-memory（带层），结果可撤销，撤销发 undo', async () => {
+    const { commands } = setup([toGlobal], {
+      respond: command => command.cmd === 'promote-memory'
+        ? { ok: true, cmd: command.cmd, decisionId: 'pd_m', memoryIds: ['mu'], snapshotId: 'snap_1' }
+        : { ok: true, cmd: command.cmd },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '提升为全局' }))
+    await screen.findByText('已提升为全局')
+    expect(screen.getByText('所有项目都会带入它，14 天内可撤销。')).toBeInTheDocument()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
+    expect(commands()).toEqual([{ cmd: 'promote-memory', memoryId: 'mu', layer }, { cmd: 'undo', decisionId: 'pd_m' }])
+  })
+
+  it('「仍然有效」发 confirm（带这条记忆的层），原位换成结果卡', async () => {
+    const { commands } = setup([stale])
+    fireEvent.click(screen.getByRole('button', { name: '仍然有效' }))
+    await screen.findByText('已确认仍然有效')
+    expect(commands()).toEqual([{ cmd: 'confirm', memoryId: 's1', layer }])
+    expect(screen.getByText('确认时间已更新，这条不再算作很久没确认。')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
+  })
+
+  it('「删除」先原位确认，点确认里的「删除」才发 forget（带层），结果写可在最近删除恢复', async () => {
+    const { commands } = setup([expired])
+    fireEvent.click(screen.getByRole('button', { name: '删除' }))
+    expect(commands()).toEqual([])
+    fireEvent.click(confirmIn(cardOf('已过有效期')))
+    await screen.findByText('已删除')
+    expect(commands()).toEqual([{ cmd: 'forget', memoryId: 'e1', layer }])
+    expect(screen.getByText('14 天内可在「最近删除」恢复。')).toBeInTheDocument()
+  })
+
+  it('删除含密钥的记忆：forget 回 has-secret（什么都没动），原位出现彻底删除确认；取消不发，「彻底删除」发 hard-delete', async () => {
+    const { commands } = setup([stale], {
+      respond: command => command.cmd === 'forget'
+        ? { ok: false, cmd: command.cmd, code: 'has-secret', detail: '记忆 s1 含密钥，删除后不可恢复，未做任何改动' }
+        : { ok: true, cmd: command.cmd, memoryIds: ['s1'] },
+    })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除' })) })
+    await act(async () => { fireEvent.click(confirmIn(cardOf('很久没确认'))) })
+    const card = cardOf('很久没确认')
+    expect(within(card).getByText('这条记忆里有密钥')).toBeInTheDocument()
+    expect(within(card).getByText('彻底删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeInTheDocument()
+    expect(within(card).getByRole('button', { name: '删除' })).toHaveAttribute('aria-disabled', 'true')
+    expect(within(card).queryByText(/记忆 s1 含密钥/)).toBeNull()
+    fireEvent.click(within(card).getByRole('button', { name: '取消' }))
+    expect(within(card).queryByText('这条记忆里有密钥')).toBeNull()
+
+    await act(async () => { fireEvent.click(within(card).getByRole('button', { name: '删除' })) })
+    await act(async () => { fireEvent.click(confirmIn(card)) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '彻底删除' })) })
+    await screen.findByText('已彻底删除')
+    expect(commands()).toEqual([
+      { cmd: 'forget', memoryId: 's1', layer },
+      { cmd: 'forget', memoryId: 's1', layer },
+      { cmd: 'hard-delete', memoryId: 's1', layer },
+    ])
+  })
+
+  it('建议卡的删除（单条「删除」、成对的「删除左边 / 删除右边」）：第一下不发命令，原位换成「删除这条？ 删除 · 取消」；「取消」、Esc 都收起，什么都不发', async () => {
+    const { commands } = setup([expired, pair])
+    const cases = [
+      { scope: cardOf('已过有效期'), name: '删除' },
+      { scope: within(cardOf('内容重复')).getByRole('region', { name: '左边这条' }), name: '删除左边' },
+      { scope: within(cardOf('内容重复')).getByRole('region', { name: '右边这条' }), name: '删除右边' },
+    ]
+    for (const { scope, name } of cases) {
+      fireEvent.click(within(scope).getByRole('button', { name }))
+      const confirm = within(within(scope).getByRole('group', { name: '删除这条？' }))
+      expect(confirm.getAllByRole('button').map(b => b.textContent)).toEqual(['删除', '取消'])
+      expect(confirm.getByRole('button', { name: '取消' })).toHaveFocus()
+      fireEvent.click(confirm.getByRole('button', { name: '取消' }))
+      expect(within(scope).queryByRole('group', { name: '删除这条？' })).toBeNull()
+      fireEvent.click(within(scope).getByRole('button', { name }))
+      fireEvent.keyDown(within(scope).getByRole('button', { name: '取消' }), { key: 'Escape' })
+      expect(within(scope).queryByRole('group', { name: '删除这条？' })).toBeNull()
+      expect(within(scope).getByRole('button', { name })).toBeInTheDocument()
+    }
+    expect(commands()).toEqual([])
+  })
+
+  it('「打开文件」打开这条记忆的文件；打不开时卡片里说明', async () => {
+    const { gateway } = setup([bloat], { openOk: false })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '打开文件' })) })
+    expect(gateway.opened).toEqual([{ path: '/m/app/b1.md' }])
+    expect(within(cardOf('内容过长')).getByRole('alert')).toHaveTextContent('没能打开文件。')
+  })
+
+  it('组内先显示 5 条，其余收进「展开其余 N 条」；点开后全部显示、按钮收起', () => {
+    const many = Array.from({ length: 7 }, (_, i) => advice('bloat', `b${i}`))
+    setup(many)
+    expect(within(groupOf()).getAllByRole('article')).toHaveLength(5)
+    expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['建议整理 7'])
+    fireEvent.click(screen.getByRole('button', { name: '展开其余 2 条' }))
+    expect(within(groupOf()).getAllByRole('article')).toHaveLength(7)
+    expect(screen.queryByRole('button', { name: /展开其余/ })).toBeNull()
+  })
+
+  it('只折叠建议整理：待你处理超过 5 条也全部显示', () => {
+    const conflicts = Array.from({ length: 6 }, (_, i) => ({ ...horizontal, decisionId: `d${i}`, summary: `冲突 ${i}` }) as PendingItem)
+    setup(conflicts)
+    expect(screen.queryByRole('button', { name: /展开其余/ })).toBeNull()
+    expect(screen.getByText('冲突 5')).toBeInTheDocument()
+  })
+
+  it('直达的记忆在折叠里：这一组自动展开，那张卡高亮', () => {
+    Element.prototype.scrollIntoView = vi.fn()
+    try {
+      const many = Array.from({ length: 7 }, (_, i) => advice('bloat', `b${i}`))
+      setup(many, {}, createNavStore({ tab: 'pending', memoryId: 'b6' }))
+      expect(within(groupOf()).getAllByRole('article')).toHaveLength(7)
+      expect(document.querySelector('[data-memory-id="b6"]')!.closest('.pm-pending-row')).toHaveClass('pm-flash')
+    } finally {
+      delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView
+    }
+  })
+})
+
+describe('待处理：直接改与直接合并', () => {
+  const layer = { kind: 'workspace', workspacePath: '/w/app' } as const
+  const long = `发版流程：${'先跑测试再打包，'.repeat(30)}`
+  const target = memory({ id: 'b1', name: '发版流程', type: 'project', content: long, summary: '发版的步骤', tags: ['发版', 'npm'], digest: 'sha1:b1', updatedAt: 111, filePath: '/m/app/b1.md' })
+  const bloat: PendingItem = { kind: 'advice', level: 'advice', type: 'bloat', memories: [target] }
+  const stale: PendingItem = { kind: 'advice', level: 'advice', type: 'stale', memories: [memory({ id: 's9', name: '很久的', digest: 'sha1:s9' })] }
+  const base = { updatedAt: 111, digest: 'sha1:b1' }
+  const edited = { ok: true as const, cmd: 'edit-memory', decisionId: 'pd_e', memoryIds: ['b1'], snapshotId: 'snap_e', filePath: '/m/app/release.md' }
+  const respondEdit = (command: MemoryCommand): MemoryCommandResult => (command.cmd === 'edit-memory' ? edited : { ok: true, cmd: command.cmd })
+  const startEdit = () => { fireEvent.click(screen.getByRole('button', { name: '直接改' })) }
+  const save = async () => { await act(async () => { fireEvent.click(screen.getByRole('button', { name: '保存' })) }) }
+
+  it('点「直接改」：正文变成预填的编辑框，原来的按钮行收起；保存发 edit-memory（带层和卡片版本），名称、摘要、标签照原样', async () => {
+    const { commands } = setup([bloat], { respond: respondEdit })
+    startEdit()
+    const box = screen.getByRole('textbox', { name: '正文' })
+    expect(box).toHaveValue(long)
+    expect(screen.queryByRole('button', { name: '打开文件' })).toBeNull()
+    expect(screen.queryByRole('textbox', { name: '名称' })).toBeNull()
+    expect(screen.getByRole('button', { name: '取消' })).toHaveClass('pm-btn--ghost')
+    expect(screen.getByRole('button', { name: '保存' })).toHaveClass('pm-btn--primary')
+    const next = '1. 跑测试\n2. 发版'
+    fireEvent.change(box, { target: { value: next } })
+    expect(screen.getByText(`${long.length} 字 → ${next.length} 字`)).toBeInTheDocument()
+    await save()
+    expect(commands()).toEqual([{ cmd: 'edit-memory', memoryId: 'b1', layer, base, content: next, name: '发版流程', summary: '发版的步骤', tags: ['发版', 'npm'] }])
+  })
+
+  it('「更多」展开名称、摘要、标签，底部写明类型改不了；标签点 × 移除、回车添加（空的和重复的不加）；保存带上改过的三项', async () => {
+    const { commands } = setup([bloat], { respond: respondEdit })
+    startEdit()
+    const more = screen.getByRole('button', { name: '更多' })
+    expect(more).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(more)
+    expect(screen.getByRole('button', { name: '收起' })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByText('类型改不了：换类型要先删再记')).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('textbox', { name: '名称' }), { target: { value: '发版步骤' } })
+    fireEvent.change(screen.getByRole('textbox', { name: '摘要' }), { target: { value: '发版前后的固定步骤' } })
+    fireEvent.click(screen.getByRole('button', { name: '移除标签 npm' }))
+    const tagInput = screen.getByRole('textbox', { name: '标签' })
+    for (const value of ['release', '发版', '  ']) {
+      fireEvent.change(tagInput, { target: { value } })
+      fireEvent.keyDown(tagInput, { key: 'Enter' })
+    }
+    expect(screen.getByRole('button', { name: '移除标签 release' })).toBeInTheDocument()
+    await save()
+    expect(commands()).toEqual([{ cmd: 'edit-memory', memoryId: 'b1', layer, base, content: long, name: '发版步骤', summary: '发版前后的固定步骤', tags: ['发版', 'release'] }])
+  })
+
+  it('正文改了、摘要没动：提示摘要还是旧的，不挡保存；点「去改摘要」展开更多并聚焦摘要，改了摘要提示消失', () => {
+    setup([bloat])
+    startEdit()
+    expect(screen.queryByText('正文改了，摘要还是旧的')).toBeNull()
+    fireEvent.change(screen.getByRole('textbox', { name: '正文' }), { target: { value: '短了' } })
+    expect(screen.getByText('正文改了，摘要还是旧的')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '保存' })).not.toHaveAttribute('aria-disabled')
+    fireEvent.click(screen.getByRole('button', { name: '去改摘要' }))
+    const summary = screen.getByRole('textbox', { name: '摘要' })
+    expect(summary).toHaveFocus()
+    fireEvent.change(summary, { target: { value: '新的摘要' } })
+    expect(screen.queryByText('正文改了，摘要还是旧的')).toBeNull()
+  })
+
+  it('正文或名称清空：保存不可用；「取消」收起编辑框、回到原来的卡片，不发命令', () => {
+    const { commands } = setup([bloat])
+    startEdit()
+    fireEvent.change(screen.getByRole('textbox', { name: '正文' }), { target: { value: '  ' } })
+    expect(screen.getByRole('button', { name: '保存' })).toHaveAttribute('aria-disabled', 'true')
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(screen.queryByRole('textbox', { name: '正文' })).toBeNull()
+    expect(screen.getByRole('button', { name: '直接改' })).toBeInTheDocument()
+    expect(commands()).toEqual([])
+  })
+
+  it('保存后卡片收成一行「已修改 · 名称 · 字数变化」；打开文件打开写完后的文件，撤销发 undo，撤销后回到原卡片', async () => {
+    const { commands, gateway } = setup([bloat], { respond: respondEdit })
+    startEdit()
+    fireEvent.change(screen.getByRole('textbox', { name: '正文' }), { target: { value: '跑测试再发' } })
+    fireEvent.click(screen.getByRole('button', { name: '更多' }))
+    fireEvent.change(screen.getByRole('textbox', { name: '名称' }), { target: { value: '发版步骤' } })
+    await save()
+    expect(screen.getByText('已修改')).toBeInTheDocument()
+    expect(screen.getByText(`发版步骤 · ${long.length} 字 → 5 字`)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '撤销' })).toHaveClass('pm-btn--ghost')
+    expect(screen.getByRole('button', { name: '打开文件' })).toHaveClass('pm-btn--secondary')
+    expect(screen.queryByRole('textbox', { name: '正文' })).toBeNull()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '打开文件' })) })
+    expect(gateway.opened).toEqual([{ path: '/m/app/release.md' }])
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
+    expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'pd_e' })
+    expect(await screen.findByRole('button', { name: '直接改' })).toBeInTheDocument()
+  })
+
+  it('含密钥的记忆不给「直接改」「直接合并」', () => {
+    const pair: PendingItem = { kind: 'advice', level: 'advice', type: 'redundancy', memories: [memory({ id: 'x1', digest: 'sha1:x1', hasSecret: true }), memory({ id: 'x2', digest: 'sha1:x2' })] }
+    setup([{ ...bloat, memories: [{ ...target, hasSecret: true }] }, pair])
+    expect(screen.queryByRole('button', { name: '直接改' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '直接合并' })).toBeNull()
+  })
+
+  it('新内容有高危密钥：卡片里写原因，编辑框留着可以接着改', async () => {
+    setup([bloat], { respond: command => ({ ok: false, cmd: command.cmd, code: 'secret-critical', detail: '检测到高危密钥（sk- 系列密钥），未保存' }) })
+    startEdit()
+    await save()
+    expect(screen.getByRole('alert')).toHaveTextContent('内容里有高危密钥，没有保存。改写成不含密钥的说法再存。')
+    expect(screen.getByRole('textbox', { name: '正文' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '保存' })).not.toHaveAttribute('aria-disabled')
+  })
+
+  // 厂商形状的假密钥运行时拼接，源码里不出现完整字面量
+  const criticalKey = 'sk-' + 'TESTONLY'.padEnd(24, 'a')
+
+  it('新内容有高危密钥：本地就拦住，不发命令（命令文本会进借用会话的日志），提示同服务端拦下时', async () => {
+    const { commands } = setup([bloat], { respond: respondEdit })
+    startEdit()
+    fireEvent.change(screen.getByRole('textbox', { name: '正文' }), { target: { value: `发版用 ${criticalKey}` } })
+    await save()
+    expect(commands()).toEqual([])
+    expect(screen.getByRole('alert')).toHaveTextContent('内容里有高危密钥，没有保存。改写成不含密钥的说法再存。')
+    expect(screen.getByRole('textbox', { name: '正文' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '保存' })).not.toHaveAttribute('aria-disabled')
+  })
+
+  it('名称里有高危密钥：同样本地拦住，不发命令', async () => {
+    const { commands } = setup([bloat], { respond: respondEdit })
+    startEdit()
+    fireEvent.click(screen.getByRole('button', { name: '更多' }))
+    fireEvent.change(screen.getByRole('textbox', { name: '名称' }), { target: { value: criticalKey } })
+    await save()
+    expect(commands()).toEqual([])
+    expect(screen.getByRole('alert')).toHaveTextContent('内容里有高危密钥，没有保存。')
+  })
+
+  it('新内容只是像密钥：照常发给服务端，由它回疑似再确认', async () => {
+    const { commands } = setup([bloat], { respond: command => (command.cmd === 'edit-memory' && command.force !== true ? { ok: false, cmd: command.cmd, code: 'secret-suspected' } : edited) })
+    startEdit()
+    fireEvent.change(screen.getByRole('textbox', { name: '正文' }), { target: { value: 'password: abc12345' } })
+    await save()
+    expect(commands().map(c => c.cmd)).toEqual(['edit-memory'])
+    expect(screen.getByText('内容里有像密钥的片段。确定不是密钥再保存。')).toBeInTheDocument()
+  })
+
+  it('新内容像密钥：卡片里再确认一次，「仍然保存」带 force 重发', async () => {
+    const { commands } = setup([bloat], {
+      respond: command => (command.cmd === 'edit-memory' && command.force !== true ? { ok: false, cmd: command.cmd, code: 'secret-suspected' } : edited),
+    })
+    startEdit()
+    await save()
+    expect(screen.getByText('内容里有像密钥的片段。确定不是密钥再保存。')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '保存' })).toHaveAttribute('aria-disabled', 'true')
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '仍然保存' })) })
+    await screen.findByText('已修改')
+    expect(commands().map(c => c.cmd === 'edit-memory' && c.force)).toEqual([undefined, true])
+  })
+
+  it('记忆在卡片加载后被改过：写明刷新后再改', async () => {
+    setup([bloat], { respond: command => ({ ok: false, cmd: command.cmd, code: 'stale', detail: '这条记忆刚被改过' }) })
+    startEdit()
+    await save()
+    expect(screen.getByRole('alert')).toHaveTextContent('这条记忆刚被改过，刷新后再改。')
+  })
+
+  it('保存中只锁这张卡：保存、取消置灰，别的卡照常可用', async () => {
+    setup([bloat, stale], { respond: command => (command.cmd === 'edit-memory' ? new Promise<never>(() => {}) : { ok: true, cmd: command.cmd }) })
+    startEdit()
+    await save()
+    expect(screen.getByRole('button', { name: '保存' })).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getByRole('button', { name: '取消' })).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getByRole('button', { name: '仍然有效' })).not.toHaveAttribute('aria-disabled')
+  })
+
+  it('同卡别的动作在进行：「直接改」置灰', async () => {
+    setup([bloat], { respond: command => (command.cmd === 'ignore-advice' ? new Promise<never>(() => {}) : { ok: true, cmd: command.cmd }) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '忽略' })) })
+    expect(screen.getByRole('button', { name: '直接改' })).toHaveAttribute('aria-disabled', 'true')
+  })
+
+  describe('直接合并', () => {
+    const left = memory({ id: 'r1', name: '翻译腔', content: '避免翻译腔。', summary: '少翻译腔', tags: ['中文'], createdAt: 2, updatedAt: 21, digest: 'sha1:r1' })
+    const right = memory({ id: 'r2', name: '被字句', content: '少用被字句。', summary: '少被字句', tags: ['写作', '中文'], createdAt: 1, updatedAt: 22, digest: 'sha1:r2' })
+    const pairOf = (...memories: MemoryCard[]): PendingItem => ({ kind: 'advice', level: 'advice', type: 'redundancy', memories })
+    const merged = { ok: true as const, cmd: 'merge-memories', decisionId: 'pd_m', memoryIds: ['r2', 'r1'], snapshotId: 'snap_m', filePath: '/m/app/r2.md' }
+
+    it('编辑框预填两条正文（保留的那条在前，空行分隔）；更多里是保留那条的名称、摘要和两条标签的并集；底部写明另一条进最近删除', async () => {
+      const { commands } = setup([pairOf(left, right)], { respond: command => (command.cmd === 'merge-memories' ? merged : { ok: true, cmd: command.cmd }) })
+      fireEvent.click(screen.getByRole('button', { name: '直接合并' }))
+      expect(screen.getByRole('textbox', { name: '正文' })).toHaveValue('少用被字句。\n\n避免翻译腔。')
+      expect(screen.getByText('保存后另一条进最近删除')).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: '删除左边' })).toBeNull()
+      fireEvent.click(screen.getByRole('button', { name: '更多' }))
+      expect(screen.getByRole('textbox', { name: '名称' })).toHaveValue('被字句')
+      expect(screen.getByRole('textbox', { name: '摘要' })).toHaveValue('少被字句')
+      await save()
+      expect(commands()).toEqual([{
+        cmd: 'merge-memories',
+        memories: [{ memoryId: 'r1', layer, base: { updatedAt: 21, digest: 'sha1:r1' } }, { memoryId: 'r2', layer, base: { updatedAt: 22, digest: 'sha1:r2' } }],
+        content: '少用被字句。\n\n避免翻译腔。', name: '被字句', summary: '少被字句', tags: ['写作', '中文'],
+      }])
+      expect(screen.getByText('已合并')).toBeInTheDocument()
+      expect(screen.getByText(`被字句 · 12 字 → 14 字`)).toBeInTheDocument()
+    })
+
+    it('合并后的内容有高危密钥：本地拦住，不发命令', async () => {
+      const { commands } = setup([pairOf(left, right)], { respond: command => (command.cmd === 'merge-memories' ? merged : { ok: true, cmd: command.cmd }) })
+      fireEvent.click(screen.getByRole('button', { name: '直接合并' }))
+      fireEvent.change(screen.getByRole('textbox', { name: '正文' }), { target: { value: `两条合一：${criticalKey}` } })
+      await save()
+      expect(commands()).toEqual([])
+      expect(screen.getByRole('alert')).toHaveTextContent('内容里有高危密钥，没有保存。')
+    })
+
+    it('一条全局一条项目：保留全局那条，预填它的名称', () => {
+      const global = { ...left, scope: 'global', workspacePath: undefined } as MemoryCard
+      setup([pairOf(right, global)])
+      fireEvent.click(screen.getByRole('button', { name: '直接合并' }))
+      expect(screen.getByRole('textbox', { name: '正文' })).toHaveValue('避免翻译腔。\n\n少用被字句。')
+      fireEvent.click(screen.getByRole('button', { name: '更多' }))
+      expect(screen.getByRole('textbox', { name: '名称' })).toHaveValue('翻译腔')
+    })
+  })
+})
+
+describe('待处理：让模型改与让模型合并', () => {
+  const layer = { kind: 'workspace', workspacePath: '/w/app' } as const
+  const target = memory({ id: 'b1', name: '发版流程', type: 'project', content: '先跑测试，再打包，再发版。', summary: '发版的步骤', tags: ['发版'], digest: 'sha1:b1', updatedAt: 111 })
+  const bloat: PendingItem = { kind: 'advice', level: 'advice', type: 'bloat', memories: [target] }
+  const stale: PendingItem = { kind: 'advice', level: 'advice', type: 'stale', memories: [memory({ id: 's9', name: '很久的', digest: 'sha1:s9' })] }
+  const base = { updatedAt: 111, digest: 'sha1:b1' }
+  const drafted = (draft: object): MemoryCommandResult => ({ ok: true, cmd: 'draft-edit', draft: { content: '先跑单测，再发版。', summary: '发版的步骤', ...draft }, model: 'deepseek-v4-flash' } as MemoryCommandResult)
+  const edited = { ok: true as const, cmd: 'edit-memory', decisionId: 'pd_e', memoryIds: ['b1'], snapshotId: 'snap_e', filePath: '/m/app/b1.md' }
+  /** 生成回给定的稿子，其余命令照常成功。 */
+  const respondWith = (draft: object = {}) => (command: MemoryCommand): MemoryCommandResult =>
+    command.cmd === 'draft-edit' ? drafted(draft) : command.cmd === 'edit-memory' ? edited : { ok: true, cmd: command.cmd }
+  const open = (name = '让模型改') => { fireEvent.click(screen.getByRole('button', { name })) }
+  const generate = async () => { await act(async () => { fireEvent.click(screen.getByRole('button', { name: '生成修改' })) }) }
+  const textOf = (pane: string, tag: 'del' | 'ins') => [...screen.getByRole('region', { name: pane }).querySelectorAll(tag)].map(e => e.textContent).join('|')
+
+  it('「让模型改」在「直接改」右边；点开就地写要求，说明按哪类建议默认处理、用哪个模型；「取消」收起，不发命令', () => {
+    const { commands } = setup([bloat], { model: 'deepseek-v4-flash' })
+    expect(within(screen.getByRole('article')).getAllByRole('button').map(b => b.textContent)).toEqual(['忽略', '打开文件', '直接改', '让模型改'])
+    open()
+    expect(screen.getByRole('textbox', { name: '想怎么改？不写也行，会按「内容过长」默认处理' })).toHaveValue('')
+    // 改的过程中右上角的「忽略」收起
+    expect(screen.queryByRole('button', { name: '忽略' })).toBeNull()
+    expect(screen.getByText('用当前模型 deepseek-v4-flash 生成，先给你看结果再决定')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '直接改' })).toBeNull()
+    expect(screen.getByRole('button', { name: '取消' })).toHaveClass('pm-btn--ghost')
+    expect(screen.getByRole('button', { name: '生成修改' })).toHaveClass('pm-btn--primary')
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(screen.getByRole('button', { name: '让模型改' })).toBeInTheDocument()
+    expect(commands()).toEqual([])
+  })
+
+  it('拿不到模型名：提示只写后半句', () => {
+    setup([bloat])
+    open()
+    expect(screen.getByText('先给你看结果再决定')).toBeInTheDocument()
+  })
+
+  it('生成：发 draft-edit（建议类型、层、要求）；结果左右对照，删掉的划线、新增的高亮，下面一行字数变化；这时什么都没写', async () => {
+    const { commands } = setup([bloat], { respond: respondWith() })
+    open()
+    fireEvent.change(screen.getByRole('textbox', { name: /想怎么改/ }), { target: { value: '命令保留原样' } })
+    await generate()
+    expect(commands()).toEqual([{ cmd: 'draft-edit', adviceType: 'bloat', memories: [{ memoryId: 'b1', layer }], request: '命令保留原样' }])
+    expect(textOf('原文', 'del')).toContain('打包')
+    expect(textOf('改后', 'ins')).toContain('单测')
+    expect(textOf('原文', 'ins')).toBe('')
+    expect(textOf('改后', 'del')).toBe('')
+    expect(screen.getByText('13 字 → 9 字')).toBeInTheDocument()
+    expect(screen.getAllByRole('button').slice(-3).map(b => b.textContent)).toEqual(['放弃', '再改改', '应用'])
+  })
+
+  it('要求里有高危密钥：本地拦住，不发 draft-edit，就地写明原因', async () => {
+    const { commands } = setup([bloat], { respond: respondWith() })
+    open()
+    fireEvent.change(screen.getByRole('textbox', { name: /想怎么改/ }), { target: { value: `把 ${'sk-' + 'TESTONLY'.padEnd(24, 'a')} 删掉` } })
+    await generate()
+    expect(commands()).toEqual([])
+    expect(screen.getByRole('alert')).toHaveTextContent('要求里有高危密钥，没有发送。去掉密钥再生成。')
+    expect(screen.getByRole('textbox', { name: /想怎么改/ })).toBeInTheDocument()
+  })
+
+  it('没写要求：draft-edit 不带 request', async () => {
+    const { commands } = setup([bloat], { respond: respondWith() })
+    open()
+    await generate()
+    expect(commands()).toEqual([{ cmd: 'draft-edit', adviceType: 'bloat', memories: [{ memoryId: 'b1', layer }] }])
+  })
+
+  it('摘要、名称、标签变了也对照显示；没变的不显示', async () => {
+    setup([bloat], { respond: respondWith({ summary: '发版两步', name: '发版步骤' }) })
+    open()
+    await generate()
+    const after = screen.getByRole('region', { name: '改后' })
+    expect(within(after).getByText('摘要')).toBeInTheDocument()
+    expect(within(after).getByText('名称')).toBeInTheDocument()
+    expect(within(after).queryByText('标签')).toBeNull()
+    expect(textOf('改后', 'ins')).toContain('两步')
+  })
+
+  it('应用：发 edit-memory（卡片版本 + 改后稿，模型没改的名称、标签沿用原值），之后同直接改：收成一行，可撤销', async () => {
+    const { commands } = setup([bloat], { respond: respondWith({ summary: '发版两步' }) })
+    open()
+    await generate()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '应用' })) })
+    expect(commands().at(-1)).toEqual({ cmd: 'edit-memory', memoryId: 'b1', layer, base, content: '先跑单测，再发版。', name: '发版流程', summary: '发版两步', tags: ['发版'] })
+    expect(screen.getByText('已修改')).toBeInTheDocument()
+    expect(screen.getByText('发版流程 · 13 字 → 9 字')).toBeInTheDocument()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
+    expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'pd_e' })
+  })
+
+  it('「放弃」收起，不写', async () => {
+    const { commands } = setup([bloat], { respond: respondWith() })
+    open()
+    await generate()
+    fireEvent.click(screen.getByRole('button', { name: '放弃' }))
+    expect(screen.getByRole('button', { name: '让模型改' })).toBeInTheDocument()
+    expect(commands().map(c => c.cmd)).toEqual(['draft-edit'])
+  })
+
+  it('再改改：回到输入框，第二次请求带上一稿与新要求', async () => {
+    const { commands } = setup([bloat], { respond: respondWith({ name: '发版步骤' }) })
+    open()
+    await generate()
+    fireEvent.click(screen.getByRole('button', { name: '再改改' }))
+    const box = screen.getByRole('textbox', { name: /想怎么改/ })
+    expect(box).toHaveValue('')
+    fireEvent.change(box, { target: { value: '再短一点' } })
+    await generate()
+    expect(commands().at(-1)).toEqual({
+      cmd: 'draft-edit', adviceType: 'bloat', memories: [{ memoryId: 'b1', layer }], request: '再短一点',
+      previous: { content: '先跑单测，再发版。', summary: '发版的步骤', name: '发版步骤', tags: ['发版'] },
+    })
+  })
+
+  it('生成中只锁这张卡：显示「正在生成修改……」和「停止」，别的卡照常可用', async () => {
+    setup([bloat, stale], { respond: command => (command.cmd === 'draft-edit' ? new Promise<never>(() => {}) : { ok: true, cmd: command.cmd }) })
+    open()
+    await generate()
+    expect(screen.getByText('正在生成修改……')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '停止' })).toHaveClass('pm-btn--ghost')
+    expect(screen.queryByRole('button', { name: '生成修改' })).toBeNull()
+    expect(screen.getByRole('button', { name: '仍然有效' })).not.toHaveAttribute('aria-disabled')
+  })
+
+  it('停止：回到输入框（写的要求还在），之后到达的结果直接丢弃，不显示、不写', async () => {
+    let resolve: (r: MemoryCommandResult) => void = () => {}
+    const { commands } = setup([bloat], {
+      respond: command => (command.cmd === 'draft-edit' ? new Promise<MemoryCommandResult>((r) => { resolve = r }) : { ok: true, cmd: command.cmd }),
+    })
+    open()
+    fireEvent.change(screen.getByRole('textbox', { name: /想怎么改/ }), { target: { value: '短一点' } })
+    await generate()
+    fireEvent.click(screen.getByRole('button', { name: '停止' }))
+    expect(screen.getByRole('textbox', { name: /想怎么改/ })).toHaveValue('短一点')
+    await act(async () => { resolve(drafted({})) })
+    expect(screen.queryByRole('region', { name: '改后' })).toBeNull()
+    expect(screen.getByRole('button', { name: '生成修改' })).toBeInTheDocument()
+    expect(commands().map(c => c.cmd)).toEqual(['draft-edit'])
+  })
+
+  it.each([
+    ['输出不合格式', { ok: false, cmd: 'draft-edit', code: 'llm-invalid-output', detail: '模型的输出不是要求的 JSON 格式' }, '模型返回的内容格式不对，再试一次。'],
+    ['模型报错', { ok: false, cmd: 'draft-edit', code: 'llm-failed', detail: 'rate limited' }, '模型出错了：rate limited'],
+    ['拿不到模型', { ok: false, cmd: 'draft-edit', code: 'llm-unavailable', detail: '借用的会话拿不到模型' }, '拿不到当前会话的模型。'],
+  ] as const)('生成失败（%s）：卡片写原因，可以重试', async (_label, failure, message) => {
+    const replies: MemoryCommandResult[] = [failure as MemoryCommandResult, drafted({})]
+    const { commands } = setup([bloat], { respond: command => (command.cmd === 'draft-edit' ? replies.shift()! : { ok: true, cmd: command.cmd }) })
+    open()
+    await generate()
+    expect(screen.getByRole('alert')).toHaveTextContent(message)
+    await generate()
+    expect(screen.getByRole('region', { name: '改后' })).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(commands().map(c => c.cmd)).toEqual(['draft-edit', 'draft-edit'])
+  })
+
+  it('表述不清也给「让模型改」，默认按「表述不清」处理', async () => {
+    const { commands } = setup([{ ...bloat, type: 'unclear' }], { respond: respondWith() })
+    open()
+    expect(screen.getByRole('textbox', { name: '想怎么改？不写也行，会按「表述不清」默认处理' })).toBeInTheDocument()
+    await generate()
+    expect(commands()[0]).toMatchObject({ cmd: 'draft-edit', adviceType: 'unclear' })
+  })
+
+  it('页面加载时不问模型，点开「让模型改」「让模型合并」才问', () => {
+    const pair: PendingItem = { kind: 'advice', level: 'advice', type: 'redundancy', memories: [memory({ id: 'r1', digest: 'sha1:r1' }), memory({ id: 'r2', digest: 'sha1:r2' })] }
+    const { gateway } = setup([bloat, pair], { model: 'deepseek-v4-flash' })
+    expect(gateway.modelRequests).toEqual([])
+    open()
+    expect(gateway.modelRequests.at(-1)).toBe('s1')
+  })
+
+  it('模型不可用：按钮照常能点；点开后面板里写原因，「生成修改」不可用，不发请求', async () => {
+    const { commands } = setup([bloat], { model: null })
+    expect(screen.getByRole('button', { name: '让模型改' })).not.toHaveAttribute('aria-disabled')
+    open()
+    expect(screen.getByText('拿不到当前会话的模型。')).toBeInTheDocument()
+    expect(screen.queryByText('先给你看结果再决定')).toBeNull()
+    expect(screen.getByRole('button', { name: '生成修改' })).toHaveAttribute('aria-disabled', 'true')
+    await generate()
+    expect(commands()).toEqual([])
+  })
+
+  it('含密钥的记忆：没有「让模型改」「让模型合并」，也不发请求', () => {
+    const pair: PendingItem = { kind: 'advice', level: 'advice', type: 'redundancy', memories: [memory({ id: 'x1', digest: 'sha1:x1', hasSecret: true }), memory({ id: 'x2', digest: 'sha1:x2' })] }
+    const { commands } = setup([{ ...bloat, memories: [{ ...target, hasSecret: true }] }, pair])
+    expect(screen.queryByRole('button', { name: '让模型改' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '让模型合并' })).toBeNull()
+    expect(commands()).toEqual([])
+  })
+
+  describe('让模型合并', () => {
+    const left = memory({ id: 'r1', name: '翻译腔', content: '避免翻译腔。', summary: '少翻译腔', tags: ['中文'], createdAt: 2, updatedAt: 21, digest: 'sha1:r1' })
+    const right = memory({ id: 'r2', name: '被字句', content: '少用被字句。', summary: '少被字句', tags: ['写作', '中文'], createdAt: 1, updatedAt: 22, digest: 'sha1:r2' })
+    const pair: PendingItem = { kind: 'advice', level: 'advice', type: 'redundancy', memories: [left, right] }
+    const merged = { ok: true as const, cmd: 'merge-memories', decisionId: 'pd_m', memoryIds: ['r2', 'r1'], snapshotId: 'snap_m', filePath: '/m/app/r2.md' }
+    const respond = (command: MemoryCommand): MemoryCommandResult => (command.cmd === 'draft-edit'
+      ? { ok: true, cmd: 'draft-edit', draft: { content: '中文写作避免翻译腔，少用被字句。', summary: '中文写作要自然' } }
+      : command.cmd === 'merge-memories' ? merged : { ok: true, cmd: command.cmd })
+
+    it('「让模型合并」在「直接合并」右边；结果左边两条原文、右边合并稿，标明保留哪条的 id，不高亮', async () => {
+      const { commands } = setup([pair], { respond })
+      expect(within(screen.getByRole('article')).getAllByRole('button').slice(-2).map(b => b.textContent)).toEqual(['直接合并', '让模型合并'])
+      open('让模型合并')
+      expect(screen.getByRole('textbox', { name: '想怎么改？不写也行，会按「内容重复」默认处理' })).toBeInTheDocument()
+      await generate()
+      expect(commands()).toEqual([{ cmd: 'draft-edit', adviceType: 'redundancy', memories: [{ memoryId: 'r1', layer }, { memoryId: 'r2', layer }] }])
+      const before = screen.getByRole('region', { name: '两条原文' })
+      expect(within(before).getByText('避免翻译腔。')).toBeInTheDocument()
+      expect(within(before).getByText('少用被字句。')).toBeInTheDocument()
+      // r2 创建较早，按票 08 的规则保留它：它是右边那条
+      const after = screen.getByRole('region', { name: '合并后（保留右边那条的 id）' })
+      expect(within(after).getByText('中文写作避免翻译腔，少用被字句。')).toBeInTheDocument()
+      expect(document.querySelectorAll('.pm-model-compare del, .pm-model-compare ins')).toHaveLength(0)
+      expect(screen.getByText(/应用后左边那条进最近删除，14 天内可恢复/)).toBeInTheDocument()
+    })
+
+    it('应用：发 merge-memories（两条的卡片版本，名称取保留那条、标签取并集），应用后收成「已合并」一行', async () => {
+      const { commands } = setup([pair], { respond })
+      open('让模型合并')
+      await generate()
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: '应用' })) })
+      expect(commands().at(-1)).toEqual({
+        cmd: 'merge-memories',
+        memories: [{ memoryId: 'r1', layer, base: { updatedAt: 21, digest: 'sha1:r1' } }, { memoryId: 'r2', layer, base: { updatedAt: 22, digest: 'sha1:r2' } }],
+        content: '中文写作避免翻译腔，少用被字句。', name: '被字句', summary: '中文写作要自然', tags: ['写作', '中文'],
+      })
+      expect(screen.getByText('已合并')).toBeInTheDocument()
+    })
+  })
+})
+
+// —— 放错层只回答挪不挪：项目 → 全局是提升，全局 → 项目是移到项目（行内选项目） ——
+
+describe('待处理：放错层只给挪层', () => {
+  const toGlobal: PendingItem = { kind: 'advice', level: 'advice', type: 'misplaced', memories: [memory({ id: 'mu', name: '记忆 mu', filePath: '/m/app/mu.md', digest: 'sha1:mu' })] }
+  const toProject: PendingItem = {
+    kind: 'advice', level: 'advice', type: 'misplaced',
+    memories: [memory({ id: 'md', name: '记忆 md', scope: 'global', workspacePath: undefined, filePath: '/m/global/md.md', digest: 'sha1:md' })],
+  }
+  /** 借来的会话带着归属对照：已知项目是 app、blog（两个 cwd 落在 blog）。 */
+  const session = { kind: 'ready', sessionId: 's1', cwd: '/w/app', workspaces: { '/w/app': '/w/app', '/w/blog': '/w/blog', '/w/blog/web': '/w/blog' } } as const
+  /** pageProject：页面作用域的项目，null = 页面在全局。 */
+  function setupMove(items: PendingItem[], init: FakeGatewayInit = {}, pageProject: string | null = '/w/app') {
+    const gateway = createFakeGateway({ session, config, views: { pending: view(...items), health: scannedHealth(NOW) }, ...init })
+    renderInShell(<PendingTab nav={createNavStore()} session={session} workspacePath={pageProject ?? undefined} now={NOW} />, gateway)
+    return { gateway, commands: () => gateway.executed.map(e => e.command) }
+  }
+  const cardOf = () => screen.getByRole('heading', { level: 3, name: '放错层' }).closest('article')!
+  const openPicker = () => { fireEvent.click(within(cardOf()).getByRole('button', { name: '移到项目…' })) }
+
+  it('两个方向都没有「直接改」「让模型改」', () => {
+    setupMove([toGlobal, toProject])
+    for (const card of screen.getAllByRole('article')) {
+      expect(within(card).queryByRole('button', { name: '直接改' })).toBeNull()
+      expect(within(card).queryByRole('button', { name: '让模型改' })).toBeNull()
+    }
+  })
+
+  it('项目 → 全局：「忽略」发 ignore-advice，「打开文件」打开那条记忆的文件', async () => {
+    const { gateway, commands } = setupMove([toGlobal])
+    fireEvent.click(within(cardOf()).getByRole('button', { name: '打开文件' }))
+    expect(gateway.opened).toEqual([{ path: '/m/app/mu.md' }])
+    fireEvent.click(within(cardOf()).getByRole('button', { name: '忽略' }))
+    await screen.findByText('已忽略')
+    expect(commands()).toEqual([{ cmd: 'ignore-advice', type: 'misplaced', memories: [{ memoryId: 'mu', layer: { kind: 'workspace', workspacePath: '/w/app' }, base: { updatedAt: toGlobal.kind === 'advice' ? toGlobal.memories[0]!.updatedAt : 0, digest: 'sha1:mu' } }] }])
+  })
+
+  it('全局 → 项目：点「移到项目…」在卡片里展开已知项目，默认选当前页面的项目；「取消」收起，什么都不发', () => {
+    const { commands } = setupMove([toProject])
+    openPicker()
+    const group = within(cardOf()).getByRole('group', { name: '移到哪个项目' })
+    expect(within(group).getAllByRole('radio').map(r => (r as HTMLInputElement).value)).toEqual(['/w/app', '/w/blog'])
+    expect(within(group).getByRole('radio', { name: /^app/ })).toBeChecked()
+    expect(within(cardOf()).queryByRole('button', { name: '忽略' })).toBeNull()
+    fireEvent.click(within(cardOf()).getByRole('button', { name: '取消' }))
+    expect(within(cardOf()).queryByRole('group', { name: '移到哪个项目' })).toBeNull()
+    expect(within(cardOf()).getByRole('button', { name: '移到项目…' })).toBeInTheDocument()
+    expect(commands()).toEqual([])
+  })
+
+  it('页面在全局：默认选借来的会话所在的项目；全部记忆里有记忆的项目也列出来', () => {
+    setupMove([toProject], {
+      currentWorkspace: '/w/blog',
+      views: {
+        pending: view(toProject), health: scannedHealth(NOW),
+        library: { version: GUI_VIEW_VERSION, layers: [{ layer: { kind: 'global' }, items: [] }, { layer: { kind: 'workspace', workspacePath: '/w/docs' }, items: [] }] } as never,
+      },
+    }, null)
+    openPicker()
+    const group = within(cardOf()).getByRole('group', { name: '移到哪个项目' })
+    expect(within(group).getAllByRole('radio').map(r => (r as HTMLInputElement).value)).toEqual(['/w/blog', '/w/app', '/w/docs'])
+    expect(within(group).getByRole('radio', { name: /^blog/ })).toBeChecked()
+  })
+
+  it('选好项目点「移过去」才发 move-memory；结果卡写「已移到 <项目名>」，撤销发 undo', async () => {
+    const { commands } = setupMove([toProject], {
+      respond: command => command.cmd === 'move-memory'
+        ? { ok: true, cmd: command.cmd, decisionId: 'pd_mv', memoryIds: ['md'], snapshotId: 'snap_1', filePath: '/m/blog/md.md' }
+        : { ok: true, cmd: command.cmd },
+    })
+    openPicker()
+    fireEvent.click(within(cardOf()).getByRole('radio', { name: /^blog/ }))
+    expect(commands()).toEqual([])
+    fireEvent.click(within(cardOf()).getByRole('button', { name: '移过去' }))
+    await screen.findByText('已移到 blog')
+    expect(screen.getByText('只在这个项目里带入，14 天内可撤销。')).toBeInTheDocument()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
+    expect(commands()).toEqual([{ cmd: 'move-memory', memoryId: 'md', workspacePath: '/w/blog' }, { cmd: 'undo', decisionId: 'pd_mv' }])
+  })
+
+  it('目标不是借来的会话所在项目：服务端拒（cross-workspace）→ 行内写明要移去的项目；「继续处理」带 allowCrossWorkspace 重发', async () => {
+    const { commands } = setupMove([toProject], {
+      respond: command => command.cmd === 'move-memory' && command.allowCrossWorkspace !== true
+        ? { ok: false, cmd: command.cmd, code: 'cross-workspace', rejected: [{ id: 'md', workspacePath: '/w/blog' }] }
+        : { ok: true, cmd: command.cmd, decisionId: 'pd_mv' },
+    })
+    openPicker()
+    fireEvent.click(within(cardOf()).getByRole('radio', { name: /^blog/ }))
+    fireEvent.click(within(cardOf()).getByRole('button', { name: '移过去' }))
+    expect(await screen.findByText('要移去的 blog 不是当前项目。确定从这里移过去吗？')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '继续处理' }))
+    await screen.findByText('已移到 blog')
+    expect(commands()).toEqual([
+      { cmd: 'move-memory', memoryId: 'md', workspacePath: '/w/blog' },
+      { cmd: 'move-memory', memoryId: 'md', workspacePath: '/w/blog', allowCrossWorkspace: true },
+    ])
+  })
+
+  it('目标项目已有同一条（target-taken）：卡片里写明没有移动', async () => {
+    setupMove([toProject], { respond: command => ({ ok: false, cmd: command.cmd, code: 'target-taken', detail: '已有' }) })
+    openPicker()
+    fireEvent.click(within(cardOf()).getByRole('button', { name: '移过去' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('这个项目里已经有同一条记忆（也可能在最近删除里），没有移动。')
+  })
+
+  it('别处已移走或删掉（not-found）：卡片外提示没有生效', async () => {
+    setupMove([toProject], { respond: command => ({ ok: false, cmd: command.cmd, code: 'not-found', detail: '不存在或已处理：md' }) })
+    openPicker()
+    fireEvent.click(within(cardOf()).getByRole('button', { name: '移过去' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('你对「放错层」的选择没有生效：它正在别处处理，或者刚在别处处理完。')
+  })
+
+  it('一个已知项目都没有：写明原因，「移过去」不可用', () => {
+    const lonely = { kind: 'ready', sessionId: 's1', cwd: undefined } as const
+    const gateway = createFakeGateway({ session: lonely, config, views: { pending: view(toProject), health: scannedHealth(NOW) } })
+    renderInShell(<PendingTab nav={createNavStore()} session={lonely} workspacePath={undefined} now={NOW} />, gateway)
+    openPicker()
+    expect(within(cardOf()).getByText('还没有已知的项目：在某个项目里开过对话后，它会出现在这里。')).toBeInTheDocument()
+    expect(within(cardOf()).getByRole('button', { name: '移过去' })).toHaveAttribute('aria-disabled', 'true')
+  })
+
+  it('展开时焦点落在选中的项目上', () => {
+    setupMove([toProject])
+    openPicker()
+    expect(within(cardOf()).getByRole('radio', { name: /^app/ })).toHaveFocus()
+  })
+
+  it('一个已知项目都没有：展开时焦点落在「取消」，不随收起的「移到项目…」掉到页面上', () => {
+    const lonely = { kind: 'ready', sessionId: 's1', cwd: undefined } as const
+    const gateway = createFakeGateway({ session: lonely, config, views: { pending: view(toProject), health: scannedHealth(NOW) } })
+    renderInShell(<PendingTab nav={createNavStore()} session={lonely} workspacePath={undefined} now={NOW} />, gateway)
+    openPicker()
+    expect(within(cardOf()).getByRole('button', { name: '取消' })).toHaveFocus()
   })
 })

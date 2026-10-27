@@ -1,3 +1,4 @@
+import { dirname } from 'node:path'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { CodedNote, DirectoryNoteCode } from '../contract-codes.ts'
 
@@ -105,8 +106,9 @@ export interface MemoryTable {
   put(key: string, value: MemoryRecord, hint?: LocateHint, skipIf?: (current: MemoryRecord) => boolean): Promise<boolean>
   /** 锁内 locate（带 hint，同 id 多副本时与调用方读到的那份一致）→ fn(当前) → 写（同 put 的搬家与归档规则）；返回实际写出的记录（deleted 缺 deletedAt 时已补）。 */
   update(key: string, fn: (current: MemoryRecord) => MemoryRecord, hint?: LocateHint): Promise<MemoryRecord>
-  /** 物理删除（含 .archive/ 里的文件）；hint 同 update。可见集合（global + 该记录目录）里同 id 的其余副本一并删除（只认层时只删该目录里的）。 */
-  delete(key: string, hint?: LocateHint): Promise<boolean>
+  /** 物理删除（含 .archive/ 里的文件）；hint 同 update。可见集合（global + 该记录目录）里同 id 的其余副本一并删除（只认层时只删该目录里的）。
+   *  召回统计行只在哪一层都没有这个 id 了才清。skipIf：对锁内定位到的当前文件求值，为真就不删、返回 false。 */
+  delete(key: string, hint?: LocateHint, skipIf?: (current: LocatedFile) => boolean): Promise<boolean>
   /**
    * 维护点（设计稿 §5）：只动给定目录，锁内、幂等。再生索引；顶层非 active 搬 .archive/（.archive/ 里 status 仍为 active
    * 的按位置归一成 deleted）；.archive/ 里 deletedAt 超保留期的物理删除；手建 / 手编文件回写；陈旧 tmp 清理。
@@ -144,4 +146,13 @@ export function resolveLiveFirst<T extends LocatedRecord>(candidates: readonly T
   const liveIds = new Set(live.map(c => c.record.id))
   const chosen = new Map([...live, ...resolveDuplicates(candidates.filter(c => !liveIds.has(c.record.id)), hint)].map(c => [c.record.id, c]))
   return [...new Set(candidates.map(c => c.record.id))].map(id => chosen.get(id)!)
+}
+
+/**
+ * 按 id 定位的同 id 取舍（copies 是同一个 id 的全部候选）：规则同 resolveLiveFirst，先在在用副本里取一份，没有才从其余副本里取。
+ * 位置即作用域：.archive/ 里 status 仍写着 active 的不算在用。
+ */
+export function pickLiveFirst<T extends LocatedRecord>(copies: readonly T[], hint?: LocateHint): T | undefined {
+  const live = copies.filter(c => c.record.status === 'active' && dirname(c.filePath) === c.dir)
+  return resolveDuplicates(live.length > 0 ? live : copies, hint)[0]
 }

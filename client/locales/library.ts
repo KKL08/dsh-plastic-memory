@@ -1,4 +1,4 @@
-/** 「全部记忆」「最近删除」两个 tab 的文案，由 locales.ts 合并进总字典。 */
+/** 「记忆查看」「最近删除」两个 tab 的文案，由 locales.ts 合并进总字典。 */
 
 export const libraryZh = {
   'library.storage.count': '{n} 条记忆，每条一个文件',
@@ -27,10 +27,14 @@ export const libraryZh = {
   'deleted.cause.baseline': '以基线为准时删除',
   'deleted.purge.today': '一天内彻底清除',
   'deleted.purge.days': '{n} 天后彻底清除',
+  'deleted.purge.days.one': '{n} 天后彻底清除',
   'deleted.restore': '恢复',
   'deleted.restoreHint': '恢复后这条冲突会回到待处理',
   'deleted.restored': '已恢复。',
   'deleted.restoredConflict': '已恢复，这条冲突回到了待处理。',
+  'deleted.hardDelete': '彻底删除…',
+  'deleted.hardDeleteConfirm': '现在就彻底删除这条记忆？删除后不能恢复，以前快照里的副本也一起抹掉。',
+  'deleted.hardDeleted': '已彻底删除。',
   'deleted.empty.title': '最近删除为空',
   'deleted.empty.body': '删除的记忆在这里保留 14 天，期间可以恢复，之后彻底清除。含密钥的记忆删除时直接抹掉，不进这里。',
 
@@ -66,10 +70,14 @@ export const libraryEn: Record<keyof typeof libraryZh, string> = {
   'deleted.cause.baseline': 'Deleted when going with the baseline',
   'deleted.purge.today': 'Purged within a day',
   'deleted.purge.days': 'Purged in {n} days',
+  'deleted.purge.days.one': 'Purged in {n} day',
   'deleted.restore': 'Restore',
   'deleted.restoreHint': 'Restoring puts this conflict back in Pending',
   'deleted.restored': 'Restored.',
   'deleted.restoredConflict': 'Restored. The conflict is back in Pending.',
+  'deleted.hardDelete': 'Delete permanently…',
+  'deleted.hardDeleteConfirm': 'Delete this memory permanently now? This cannot be undone, and copies in earlier snapshots are erased too.',
+  'deleted.hardDeleted': 'Deleted permanently.',
   'deleted.empty.title': 'Nothing recently deleted',
   'deleted.empty.body': 'Deleted memories stay here for 14 days and can be restored, then they are purged. Memories containing secrets are erased on delete and never land here.',
 

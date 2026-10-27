@@ -3,9 +3,11 @@ import { join } from 'node:path'
 import type { MemoryStore, MemoryLogger } from '../store.ts'
 import type { KvTable } from '../kv-table.ts'
 import type { TypeRegistry } from '../type-registry.ts'
-import type { PendingDecisionsStore } from '../governance/decisions.ts'
-import type { ScanCacheEntry } from '../governance/schema.ts'
-import type { LayerRef } from '../governance/layer-health.ts'
+import { isModelChange, type PendingDecisionsStore } from '../governance/decisions.ts'
+import type { SnapshotStore } from '../governance/snapshots.ts'
+import type { MemorySnapshot, ScanCacheEntry } from '../governance/schema.ts'
+import { staleIgnores, type AdviceIgnoreStore } from '../governance/advice-ignores.ts'
+import { layerCacheKey, type LayerRef } from '../governance/layer-health.ts'
 import { checkupWorkspaces, listingNotes, prereadLayers } from '../tools/layer-preread.ts'
 import {
   GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, sessionViewFile, workspaceMapViewSchema,
@@ -17,6 +19,10 @@ export interface ViewSourceDeps {
   store: MemoryStore
   decisions: PendingDecisionsStore
   cache: KvTable<ScanCacheEntry>
+  /** 快照表：模型改写、替代的改前那份从这里取；缺省不列 modelChanges。 */
+  snapshots?: Pick<SnapshotStore, 'get'>
+  /** 建议忽略表；缺省按没有忽略算、不做清理。 */
+  ignores?: AdviceIgnoreStore
   registry: TypeRegistry
   memoryRoot: string
   now?: () => number
@@ -24,11 +30,14 @@ export interface ViewSourceDeps {
   isGovernanceEnabled?: () => boolean
   /** 插件本次加载的时刻，写进健康视图（契约 bootedAt）。 */
   bootedAt?: number
+  /** 清理忽略表出错时记一条；缺省 console。 */
+  log?: MemoryLogger
 }
 
 /**
  * 预读 → 四个全局视图。读 global + 全部 workspace 目录（含 .archive/；只剩归档的项目也读，最近删除要用），
  * 健康只列 global + 体检清单，与 memory_health 体检同一批层、同一个预读函数。
+ * 顺带是建议忽略表的清理点：读的是全部层，引用的记忆已不在用（删除、归档、彻底删除）或内容变了的记录在这里删掉。
  */
 export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalViews> {
   const now = deps.now?.() ?? Date.now()
@@ -38,20 +47,46 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
   const healthLayers: LayerRef[] = [{ kind: 'global' }, ...checkupWorkspaces(listing).map(ws)]
   const data = await prereadLayers(deps, readLayers)
   const [open, settled] = await Promise.all([deps.decisions.list(), deps.decisions.listSettled()])
+  let modelChangeSnapshots: Map<string, MemorySnapshot> | undefined
+  if (deps.snapshots !== undefined) {
+    modelChangeSnapshots = new Map()
+    for (const id of new Set(settled.filter(isModelChange).map(e => e.settled?.snapshotId))) {
+      const snap = id === undefined ? undefined : await deps.snapshots.get(id)
+      if (snap !== undefined) modelChangeSnapshots.set(snap.id, snap)
+    }
+  }
+  const notes = listingNotes(listing, { includeEmpty: false })
+  if (deps.ignores !== undefined) {
+    // 有读不出的文件或目录时，byId 里没有的 id 可能只是这次没读到，不按「已不在」清
+    const isComplete = readLayers.every(l => (data.quarantined.get(layerCacheKey(l)) ?? []).length === 0)
+      && ![...notes, ...data.directoryNotes].some(n => n.code === 'marker-missing' || n.code === 'dir-unreadable')
+    // 清理是顺带的：出错只记日志，不挡视图写出（没清掉的记录指纹对不上，本来就不起作用）
+    try {
+      await deps.ignores.remove(staleIgnores(data.ignores, data.byId, { isComplete, before: now }))
+    } catch (err) {
+      (deps.log ?? console).warn('[plastic-memory] 建议忽略表清理失败，下次生成视图再试', err)
+    }
+  }
   return buildGlobalViews({
     now, memoryRoot: deps.memoryRoot, registry: deps.registry, data, readLayers, healthLayers, open, settled,
-    listingNotes: listingNotes(listing, { includeEmpty: false }),
+    listingNotes: notes,
     governanceEnabled: deps.isGovernanceEnabled?.() ?? true,
     ...(deps.bootedAt !== undefined ? { bootedAt: deps.bootedAt } : {}),
+    ...(modelChangeSnapshots !== undefined ? { modelChangeSnapshots } : {}),
   })
 }
 
 /**
  * 视图写入器：把视图写成 `<memoryRoot>/.state/gui/*.json`（tmp + rename 原子替换）。
  * 节流：同一 tick 内的多次请求合并成一次收集、每个受影响的文件只写一遍；写入串行，进行中再来的请求排到下一轮。
+ * 同一个文件两次替换至少隔开 VIEW_REPLACE_GAP_MS：宿主的文件观察对同一文件约 50ms 内的变更只通知第一次，
+ * 紧挨着的第二次替换会被漏掉，浏览器半侧就停在上一版，直到下一次变化或刷新。
  * 视图是派生缓存，写失败只记日志，不影响触发它的操作。
  * 卸载（dispose）后不再写：之后的请求直接返回，排队未开始的丢弃，进行中的那次写完才返回。
  */
+/** 同一视图文件两次替换的最小间隔（ms）。宿主节流窗口约 50ms，文件事件送达还有抖动：实测隔 100ms 仍偶有漏推，150ms 不再漏。 */
+export const VIEW_REPLACE_GAP_MS = 150
+
 export class ViewWriter {
   private readonly dir: string
   private readonly queued = new Set<GlobalViewName>()
@@ -64,10 +99,24 @@ export class ViewWriter {
   private tail: Promise<void> = Promise.resolve()
   private disposed = false
   private readonly log: MemoryLogger
+  private readonly collect: () => Promise<GlobalViews>
+  private readonly now: () => number
+  private readonly sleep: (ms: number) => Promise<void>
+  /** 每个视图文件上次替换的时刻。 */
+  private readonly replacedAt = new Map<string, number>()
 
-  constructor(private readonly opts: { memoryRoot: string; collect: () => Promise<GlobalViews>; log?: MemoryLogger }) {
+  constructor(opts: {
+    memoryRoot: string
+    collect: () => Promise<GlobalViews>
+    log?: MemoryLogger
+    now?: () => number
+    sleep?: (ms: number) => Promise<void>
+  }) {
     this.dir = join(opts.memoryRoot, GUI_VIEW_DIR)
     this.log = opts.log ?? console
+    this.collect = opts.collect
+    this.now = opts.now ?? Date.now
+    this.sleep = opts.sleep ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms)))
   }
 
   /** 请求重写这些全局视图（缺省四个都写）。 */
@@ -91,10 +140,17 @@ export class ViewWriter {
     return this.schedule()
   }
 
-  /** 全量重写入口：不等节流，排在进行中的写入之后立即收集并写出四个全局视图。 */
-  rewriteAll(): Promise<void> {
-    if (this.disposed) return Promise.resolve()
-    return this.enqueue(() => this.writeGlobal(GLOBAL_VIEW_NAMES))
+  /** 全量重写入口：不等节流，排在进行中的写入之后立即收集并写出四个全局视图；返回写出的视图（已卸载或写失败时为 undefined）。 */
+  async rewriteAll(): Promise<GlobalViews | undefined> {
+    if (this.disposed) return undefined
+    let written: GlobalViews | undefined
+    await this.enqueue(async () => { written = await this.writeGlobal(GLOBAL_VIEW_NAMES) })
+    return written
+  }
+
+  /** 只收集、不写视图文件（体检前记下当时的待处理，和体检后比出新增）；收集本身照常清理建议忽略表里失效的记录。 */
+  collectViews(): Promise<GlobalViews> {
+    return this.collect()
   }
 
   /** 插件卸载时调用：此后不再落盘；等进行中的写入结束再返回，免得旧实例的迟到写入盖掉新实例的视图。 */
@@ -129,9 +185,10 @@ export class ViewWriter {
     return run
   }
 
-  private async writeGlobal(names: readonly GlobalViewName[]): Promise<void> {
-    const views = await this.opts.collect()
+  private async writeGlobal(names: readonly GlobalViewName[]): Promise<GlobalViews> {
+    const views = await this.collect()
     for (const name of names) await this.writeFile(GUI_VIEW_FILES[name], views[name])
+    return views
   }
 
   private async writeWorkspaceMap(entries: ReadonlyArray<readonly [string, string]>): Promise<void> {
@@ -159,6 +216,10 @@ export class ViewWriter {
     const path = join(this.dir, fileName)
     const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
     await writeFile(tmp, JSON.stringify(view), 'utf8')
+    const last = this.replacedAt.get(fileName)
+    const wait = last === undefined ? 0 : last + VIEW_REPLACE_GAP_MS - this.now()
+    if (wait > 0) await this.sleep(wait)
     await rename(tmp, path)
+    this.replacedAt.set(fileName, this.now())
   }
 }

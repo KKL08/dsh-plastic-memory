@@ -1,6 +1,7 @@
 import type { MemoryStore } from '../store.ts'
 import type { SnapshotStore, SnapshotDiffEntry } from '../governance/snapshots.ts'
 import type { MemoryRecord } from '../record-schema.ts'
+import { maskSecretSurface } from '../secrets.ts'
 import { crossWorkspaceNote, gateRecords, isVisible, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
 
 export interface SnapshotToolDeps {
@@ -23,9 +24,11 @@ interface CrossWorkspaceFields {
 }
 
 /** 只给 GUI 用的选项，不在工具参数里。isExactLayer：show / restore 按快照里每条记录自己的那一层定位与写回，
- *  不取别层更新的同 id 副本（GUI 恢复页面上那一份）。 */
+ *  不取别层更新的同 id 副本（GUI 恢复页面上那一份）。overwriteIf：给了它就只写现状过了它的记录，快照后被修改过的照样覆盖、
+ *  已删除的也要过它（撤销：现状正是那次写下的内容）。 */
 export interface SnapshotToolOptions {
   isExactLayer?: boolean
+  overwriteIf?: (current: MemoryRecord) => boolean
 }
 
 export type SnapshotToolResult =
@@ -115,7 +118,10 @@ export async function executeSnapshotTool(
   const wsNote = crossWorkspaceNote(rejected, otherWorkspaces)
 
   if (args.action === 'show') {
-    const entries = deps.snapshots.diff(snap, current).filter(e => allowedIds.has(e.id))
+    // 结果会进模型上下文：快照内与现状两份都按注入的口径遮明确密钥（手工编辑或恢复的归档副本可能带着）
+    const entries = deps.snapshots.diff(snap, current).filter(e => allowedIds.has(e.id)).map(e => ({
+      ...e, snapshotted: maskSecretSurface(e.snapshotted), current: e.current && maskSecretSurface(e.current),
+    }))
     const lines = entries.map(e => {
       const state = e.snapshotted.redacted ? '含密钥已物理删除（快照内为脱敏副本，不可恢复）'
         : e.current === undefined ? '当前不存在（已删）'
@@ -131,8 +137,10 @@ export async function executeSnapshotTool(
     snap, [...allowedIds],
     (r, skipIf) => deps.store.put(r, options.isExactLayer === true ? { workspacePath: r.workspacePath, isExactLayer: true } : undefined, skipIf),
     current,
-    args.overwriteChanged ?? false,
-    r => deps.store.hardDelete(r, { isExactLayer: options.isExactLayer === true }),
+    options.overwriteIf ?? args.overwriteChanged ?? false,
+    // 撤回只删刚写回的那一份（快照里这条记录自己的那一层），别层同 id 的副本不是这次恢复写的
+    r => deps.store.hardDelete(r, { isExactLayer: true }),
+    () => deps.now?.() ?? Date.now(),
   )
   const changedCount = skipped.length - redacted.length
   const skippedNote = changedCount > 0

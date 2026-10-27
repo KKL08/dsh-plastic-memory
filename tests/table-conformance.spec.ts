@@ -15,7 +15,7 @@ import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import {
-  memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema,
+  memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema,
   type MemorySnapshot, type PendingDecision,
 } from '../src/governance/schema.ts'
 import { record } from './helpers/record.ts'
@@ -74,7 +74,7 @@ const backends: Backend[] = [
     make: async () => {
       const root = await mkdtemp(join(tmpdir(), 'pm-conf-'))
       const { recallStats: stats } = new SidecarStore({
-        root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema },
+        root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema },
       })
       const t = new FileTable({ root, stats })
       return {
@@ -329,6 +329,17 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect(fromElsewhere!.record.content).toBe('B 的新副本')     // 落到二级：全部 workspace 目录，updatedAt 新者
     expect((await table.locate('mem_dup'))!.record.content).toBe('B 的新副本')  // 无提示同样落到二级
     expect(await table.locate('mem_ghost', { workspacePath: WS_A })).toBeUndefined()
+  })
+
+  it('按 id 定位先挑在用副本：别层更新的已删副本不遮住它；不只认层的软删改的也是在用那份', async () => {
+    await h.seedFile({ dir: h.globalDir, fileName: 'g.md', record: record({ id: 'mem_l', content: 'global 在用', updatedAt: 100 }) })
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'w.md', archived: true,
+      record: ws(WS_A, { id: 'mem_l', content: 'A 已删', status: 'deleted', deletedAt: 250, updatedAt: 200 }) })
+    expect((await table.locate('mem_l', { workspacePath: WS_A }))!.record.content).toBe('global 在用')
+    expect((await store.get('mem_l', { workspacePath: WS_A }))!.status).toBe('active')
+    expect((await table.locate('mem_l', { workspacePath: WS_A, isExactLayer: true }))!.record.content).toBe('A 已删')   // 只认层照旧
+    expect(await store.softDelete({ id: 'mem_l', workspacePath: WS_A })).toBe(true)
+    expect(await store.query({ scope: { kind: 'global' } })).toEqual([])
   })
 
   it('同 id 取舍①：updatedAt 新者优先，压过目录偏好', async () => {

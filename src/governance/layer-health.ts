@@ -1,10 +1,11 @@
 import type { TypeRegistry } from '../type-registry.ts'
 import type { MemoryRecord } from '../record-schema.ts'
-import { dedupKey } from './decisions.ts'
-import type { Finding, PendingDecision, ScanCacheEntry } from './schema.ts'
+import { pairKey } from './decisions.ts'
+import type { AdviceIgnore, Finding, PendingDecision, ScanCacheEntry } from './schema.ts'
 import { FINDING_TYPES } from './schema.ts'
 import { runRuleScan, buildMalformedFindings } from './rule-scan.ts'
 import { computeHealth, type HealthScore } from './scoring.ts'
+import { adviceFingerprint, applyIgnores, type IgnoredAdvice } from './advice-ignores.ts'
 import type { DirectoryNote, LocatedRecord, QuarantineEntry } from '../storage/table.ts'
 
 /** 健康档位的用户面标签（scan 体检行与 health message 共用一份，枚举值仍是 green/amber/red）。 */
@@ -76,6 +77,8 @@ export interface LayerPreread {
   directoryNotes: readonly DirectoryNote[]
   /** 别层同 id 的 active 副本在用、因而没进 byId 的已删副本（每个 id 一份）；评分不用，GUI 的最近删除要列它。 */
   shadowedDeleted: readonly LocatedRecord[]
+  /** 建议忽略表的全部记录：评分前据它剔除被忽略的发现（见 advice-ignores.ts）。 */
+  ignores: readonly AdviceIgnore[]
 }
 
 export interface LayerHealthResult {
@@ -83,9 +86,13 @@ export interface LayerHealthResult {
   records: MemoryRecord[]
   health: HealthScore
   semanticCachedAt: number | null
-  /** 归入本层计分的 findings（规则层实时 + 语义层缓存过滤后），供报告展示。 */
+  /** 归入本层计分的 findings（规则层实时 + 语义层缓存过滤后，已剔除用户忽略的），供报告展示。 */
   ruleFindings: Finding[]
   semanticFindings: Finding[]
+  /** 本层被用户忽略、因而没计分的建议（GUI 健康页「已忽略」、工具输出的条数）。 */
+  ignored: IgnoredAdvice[]
+  /** 超过衰减期未确认的记忆 id（条数即 health.freshness.staleCount），GUI 待处理的「很久没确认」用。 */
+  staleIds: string[]
   /** 本层的全局提升候选数（global 层恒 0）。 */
   promoteCandidates: number
 }
@@ -100,8 +107,10 @@ export interface LayerHealthResult {
  *   跨层条目（如提升到 global 后 ws 残留旧条构成的冗余、global vs ws 冲突）归 ws 层——
  *   它污染的是该 ws 的会话，而 global 桶的输入是 global-only、看不到 ws 侧，
  *   若 ws 层也不计就两层都失明；
- * - conflict 还须仍在待决账本里（dedupKey 匹配）——用户裁决 keep-both/dismiss 后双方记忆都在、
- *   缓存过滤不掉，不对账会出现"刚裁决完分数纹丝不动"的自相矛盾。
+ * - conflict 还须仍在待决账本里（pairKey 匹配，不看 baselineRef 措辞）——用户裁决 keep-both/dismiss 后双方记忆都在、
+ *   缓存过滤不掉，不对账会出现"刚裁决完分数纹丝不动"的自相矛盾；
+ * - 其余语义 findings 涉及的记忆在那次体检之后改过（updatedAt 晚于缓存时间，或指纹与体检时记下的不同）就不计。
+ * 最后剔除用户忽略的建议（指纹仍对得上的），评分公式不动；新鲜度不可忽略。
  */
 export function scoreLayer(deps: LayerHealthDeps, data: LayerPreread, layer: LayerRef, now: number): LayerHealthResult {
   const records = [...data.byId.values()].filter(r => r.status === 'active' && (layer.kind === 'global'
@@ -109,22 +118,36 @@ export function scoreLayer(deps: LayerHealthDeps, data: LayerPreread, layer: Lay
     : r.scope === 'workspace' && r.workspacePath === layer.path))
   const liveIds = new Set(records.map(r => r.id))
 
-  const ruleFindings = runRuleScan(records, id => data.byId.get(id), now)
-  ruleFindings.push(...buildMalformedFindings(data.quarantined.get(layerCacheKey(layer)) ?? []))
+  const ruleScan = runRuleScan(records, id => data.byId.get(id), now)
+  ruleScan.push(...buildMalformedFindings(data.quarantined.get(layerCacheKey(layer)) ?? []))
 
   const cached = data.cache.get(layerCacheKey(layer))
-  const pendingKeys = new Set(data.pending.map(e => dedupKey(e.memoryIds, e.baselineRef)))
+  const pendingKeys = new Set(data.pending.map(pairKey))
   const alive = (id: string) => data.byId.get(id)?.status === 'active'
-  const semanticFindings = (cached?.findings ?? []).filter(f => {
+  // 体检之后改过的记忆，缓存里关于它的结论（重复、放错层、表述不清）已不作数，下次体检再说；冲突走账本指纹，不在此列。
+  // 手改文件不动 updatedAt，靠体检时记下的指纹认出；旧缓存没有指纹，只看 updatedAt
+  const editedSinceScan = (id: string) => {
+    const r = data.byId.get(id)
+    if (cached === undefined || r === undefined) return false
+    const scannedFingerprint = cached.fingerprints?.[id]
+    return r.updatedAt > cached.scannedAt || (scannedFingerprint !== undefined && adviceFingerprint(r) !== scannedFingerprint)
+  }
+  const semanticScan = (cached?.findings ?? []).filter(f => {
     if (f.memoryIds.length === 0) return false
     if (!f.memoryIds.every(alive) || !f.memoryIds.some(id => liveIds.has(id))) return false
-    return f.type !== 'conflict' || pendingKeys.has(dedupKey(f.memoryIds, f.baselineRef))
+    if (f.type === 'conflict') return pendingKeys.has(pairKey(f))
+    return !f.memoryIds.some(editedSinceScan)
   })
+  const rule = applyIgnores(ruleScan, data.ignores, data.byId)
+  const semantic = applyIgnores(semanticScan, data.ignores, data.byId)
+  const ruleFindings = rule.kept
+  const semanticFindings = semantic.kept
 
-  const freshnessRatios = records.flatMap(r => {
+  const freshness = records.flatMap(r => {
     const decayDays = deps.registry.get(r.type).decayDays
-    return decayDays === null ? [] : [(now - r.lastConfirmedAt) / (decayDays * DAY)]
+    return decayDays === null ? [] : [{ id: r.id, ratio: (now - r.lastConfirmedAt) / (decayDays * DAY) }]
   })
+  const freshnessRatios = freshness.map(f => f.ratio)
 
   const health = computeHealth({
     totalMemories: records.length, ruleFindings, semanticFindings, freshnessRatios,
@@ -134,8 +157,21 @@ export function scoreLayer(deps: LayerHealthDeps, data: LayerPreread, layer: Lay
     layer, records, health,
     semanticCachedAt: cached?.scannedAt ?? null,
     ruleFindings, semanticFindings,
+    ignored: [...rule.ignored, ...semantic.ignored],
+    // 与 computeHealth 的 staleCount 同一判据（ratio > 1）
+    staleIds: freshness.filter(f => f.ratio > 1).map(f => f.id),
     promoteCandidates: layer.kind === 'workspace' ? records.filter(r => r.globalCandidate).length : 0,
   }
+}
+
+/** 语义缓存里记下的记忆指纹：各发现涉及、此刻读得到的记忆，按 id（见 ScanCacheEntry.fingerprints）。 */
+export function findingFingerprints(findings: readonly Finding[], byId: ReadonlyMap<string, MemoryRecord>): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const id of new Set(findings.flatMap(f => f.memoryIds))) {
+    const r = byId.get(id)
+    if (r !== undefined) out[id] = adviceFingerprint(r)
+  }
+  return out
 }
 
 /**
@@ -173,6 +209,11 @@ export function issueSummary(result: LayerHealthResult): string {
   return parts.length > 0 ? parts.join('、') : '—'
 }
 
+/** 工具输出里「已忽略」那一行（health、scan 共用）：告诉 agent 这些是用户有意保留的，不要主动去改。 */
+export function ignoredNote(count: number): string | undefined {
+  return count > 0 ? `已忽略 ${count} 条（用户可在记忆页健康里取消）` : undefined
+}
+
 /** 体检行里 scan 与 health 共有的字段。scan 另加 issues；health 另加 semanticCachedAt、promoteCandidates。 */
 export function checkupRowBase(result: LayerHealthResult): {
   layer: 'workspace' | 'global'
@@ -182,6 +223,8 @@ export function checkupRowBase(result: LayerHealthResult): {
   tier: 'green' | 'amber' | 'red'
   gate: { secret: boolean }
   issueSummary: string
+  /** 用户忽略、没计分的建议条数。 */
+  ignoredCount: number
 } {
   return {
     layer: result.layer.kind,
@@ -191,5 +234,6 @@ export function checkupRowBase(result: LayerHealthResult): {
     tier: result.health.tier,
     gate: result.health.gate,
     issueSummary: issueSummary(result),
+    ignoredCount: result.ignored.length,
   }
 }

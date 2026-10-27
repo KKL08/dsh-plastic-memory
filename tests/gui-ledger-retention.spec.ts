@@ -7,7 +7,7 @@ import { SidecarStore } from '../src/storage/sidecar.ts'
 import { MemoryStore } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
+import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
 import { executeConfirm } from '../src/tools/confirm.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import { record } from './helpers/record.ts'
@@ -23,7 +23,7 @@ afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 describe('保留窗口过后连带清理已裁决条目', () => {
   it('败方被维护点清掉的同一截止线上，删一方的条目清掉，两边都留的与窗口内的留着', async () => {
     let clock = T0
-    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
     const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock }), undefined, sidecar.recallStats)
     const decisions = new PendingDecisionsStore(sidecar.pending)
     const snapshots = new SnapshotStore(sidecar.snapshots)
@@ -48,7 +48,7 @@ describe('保留窗口过后连带清理已裁决条目', () => {
   })
 
   it('下一次裁决顺手清扫：不用单独调 sweep', async () => {
-    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
     const decisions = new PendingDecisionsStore(sidecar.pending)
     const old = (await decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '', fingerprint: 'f1' }, T0)).entry
     await decisions.settle(old.id, 'keep-right', T0, { snapshotId: 'snap_old' })
@@ -58,7 +58,7 @@ describe('保留窗口过后连带清理已裁决条目', () => {
   })
 
   it('提升为全局的条目同样过了保留窗口就清掉（快照已过期，不能再撤销）；留在本项目的不动', async () => {
-    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
     const decisions = new PendingDecisionsStore(sidecar.pending)
     const promoted = (await decisions.upsert({ kind: 'promote-candidate', memoryIds: ['mem_p'], summary: '', fingerprint: 'fp' }, T0)).entry
     const local = (await decisions.upsert({ kind: 'promote-candidate', memoryIds: ['mem_q'], summary: '', fingerprint: 'fq' }, T0)).entry

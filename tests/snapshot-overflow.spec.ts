@@ -21,6 +21,40 @@ function tenRecords(): MemoryRecord[] {
   }))
 }
 
+describe('estimateTokens：按字符计价', () => {
+  it('空串为 0', () => {
+    expect(estimateTokens('')).toBe(0)
+  })
+
+  it('纯中文每字 0.6，合计向上取整；整数倍不因浮点误差多进一', () => {
+    expect(estimateTokens('中文记忆')).toBe(3) // 2.4
+    expect(estimateTokens('一二三四五')).toBe(3) // 3.0
+    expect(estimateTokens('字'.repeat(6666))).toBe(4000) // 默认上限约合 6,700 个中文字
+  })
+
+  it('纯英文每个字符 0.3：字母、数字、空白、半角标点都算', () => {
+    expect(estimateTokens('hello world')).toBe(4) // 11 × 0.3 = 3.3
+    expect(estimateTokens('a1 ,.!?\n')).toBe(3) // 8 × 0.3 = 2.4
+    expect(estimateTokens('x'.repeat(10))).toBe(3) // 3.0
+  })
+
+  it('中英混排各按各的计', () => {
+    expect(estimateTokens('用 pnpm 装依赖')).toBe(5) // 4 × 0.6 + 6 × 0.3 = 4.2
+  })
+
+  it('全角标点（CJK 符号与标点、全角形式）按中文计，半角标点按其他字符计', () => {
+    expect(estimateTokens('，。！？「」')).toBe(4) // 6 × 0.6 = 3.6
+    expect(estimateTokens('、〜　（）：')).toBe(4) // U+3001 U+301C U+3000 U+FF08 U+FF09 U+FF1A
+    expect(estimateTokens(',.!?()')).toBe(2) // 6 × 0.3 = 1.8
+  })
+
+  it('与检索同一 CJK 口径：假名、谚文算中文；按码点计，扩展区汉字不算两个', () => {
+    expect(estimateTokens('かなカナ한글')).toBe(4) // 6 × 0.6 = 3.6
+    expect(estimateTokens('𠀀')).toBe(1) // 0.6
+    expect(estimateTokens('😀😀')).toBe(1) // 2 × 0.3 = 0.6
+  })
+})
+
 describe('assembleSnapshot：超出上限两种模式', () => {
   it('自动放宽：预算再小也全部带入，不截断、没有导航图，用量如实超过上限', () => {
     const records = tenRecords()
@@ -67,7 +101,7 @@ describe('assembleSnapshot：按作用域分段的 token', () => {
     expect(r.tokens.global).toBe(estimateTokens(formatIndexLine(g, { passive: false, note: '' })))
     expect(r.tokens.workspace).toBe(estimateTokens(formatIndexLine(w, { passive: false, note: '' })))
     const tail = estimateTokens('\n看全文：用 memory_search 按 id 或关键词查。') + estimateTokens(`\n${MEMORY_AS_DATA_NOTE}`)
-    expect(r.tokens.workspace + r.tokens.global + r.tokens.fixed).toBe(r.usedTokens + estimateTokens(`> ${COMPACTION_ENGINE_NOTE}`) + tail)
+    expect(r.tokens.workspace + r.tokens.global + r.tokens.fixed).toBe(r.usedTokens + estimateTokens(`\n> ${COMPACTION_ENGINE_NOTE}\n`) + tail)
     expect(r.injectedIds.sort()).toEqual(['mem_g', 'mem_w'])
   })
 

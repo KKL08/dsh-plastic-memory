@@ -1,15 +1,15 @@
 // 插件设置页：三组设置的渲染、「我加的类型」弹层必填校验、revision 冻结与冲突提示、非法值、体检关闭时置灰、状态卡。
 import { describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { GUI_VIEW_VERSION, type HealthView, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { GUI_VIEW_VERSION, type HealthView, type LibraryView, type MemoryCommandResult, type PendingView } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createTranslator } from '../i18n.tsx'
 import { en, zh } from '../locales.ts'
-import { memory, NOW, renderInShell } from '../test-utils.tsx'
+import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { PanelShell } from '../ui/PanelShell.tsx'
 import { createFakeConfigForm, DEFAULT_SECTION, type FakeConfigForm } from './config-form.fake.ts'
 import { SettingsPage } from './SettingsPage.tsx'
-import { summarize } from './StatusCard.tsx'
+import { openTarget, summarize } from './StatusCard.tsx'
 
 const t = createTranslator(zh)
 
@@ -20,9 +20,9 @@ const library = (count: number, memoryRoot = '/home/me/.dsh/memories'): LibraryV
 const health = (semanticCachedAt: number | null): HealthView => ({
   version: GUI_VIEW_VERSION,
   governanceEnabled: true,
-  layers: [{ layer: { kind: 'global' }, totalMemories: 1, score: 90, tier: 'green', gate: { secret: false }, issues: [], staleCount: 0, semanticCachedAt, overflow: null }],
+  layers: [{ layer: { kind: 'global' }, totalMemories: 1, score: 90, tier: 'green', gate: { secret: false }, issues: [], staleCount: 0, semanticCachedAt, overflow: null, ignored: [] }],
 })
-const pending = (items: PendingView['items'] = []): PendingView => ({ version: GUI_VIEW_VERSION, dot: 'none', items, typeLabels: {} })
+const pending = (items: PendingView['items'] = []): PendingView => ({ version: GUI_VIEW_VERSION, dot: 'none', items, levelCounts: levelCountsOf(items), typeLabels: {} })
 
 function setup(opts: { value?: Record<string, unknown>; views?: boolean; writable?: boolean } = {}) {
   const form = createFakeConfigForm({ ...(opts.value ? { value: opts.value } : {}), ...(opts.writable === false ? { writable: false } : {}) })
@@ -61,7 +61,7 @@ describe('三组设置的渲染', () => {
   it('怎么用：上限数字、超出上限两种模式的说明、溯源三档', () => {
     setup({ value: section({ snapshotTokenBudget: 6000, snapshotOverflow: 'strict', evidenceLookup: 'active' }) })
     expect(screen.getByLabelText('自动带入的记忆上限（token）')).toHaveValue('6000')
-    expect(screen.getByText(/^默认 4,000。/)).toBeInTheDocument()
+    expect(screen.getByText(/^默认 4,000，/)).toBeInTheDocument()
     expect(tab('超出上限时', '严格按上限')).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByText(/自动放宽：超出的照常带入/)).toBeInTheDocument()
     expect(screen.getByText(/严格按上限：超出的不带入/)).toBeInTheDocument()
@@ -80,7 +80,7 @@ describe('三组设置的渲染', () => {
     expect(screen.getByText('健康分低于 80 分、或冲突等了 3 天以上时提醒你。')).toBeInTheDocument()
     expect(screen.getByText(/插件不再管理这些内容/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '查看最近删除 ›' }))
-    expect(onOpen).toHaveBeenCalledWith('deleted')
+    expect(onOpen).toHaveBeenCalledWith({ tab: 'deleted' })
     expect(screen.getByText('/home/me/.dsh/memories')).toBeInTheDocument()
     expect(screen.queryByRole('textbox', { name: '记忆文件位置' })).toBeNull()
   })
@@ -342,6 +342,24 @@ describe('保存：revision 冻结、冲突、非法值', () => {
   })
 })
 
+describe('上限说明：按字符估算的口径', () => {
+  const description = (input: HTMLElement) => document.getElementById(input.getAttribute('aria-describedby')!)
+
+  it('写明默认 4,000 约合多少字，以及中日韩文字、全角标点与其余字符各按多少估算', () => {
+    setup()
+    const hint = description(screen.getByLabelText('自动带入的记忆上限（token）'))
+    expect(hint).toHaveTextContent('默认 4,000，约合 6,700 个汉字或 13,000 个英文字符：中日韩文字和全角标点每个按 0.6 token 估算，其余字符按 0.3。')
+    expect(hint).toHaveTextContent('对话中检索到的记忆不计入。')
+  })
+
+  it('英文文案同一口径', () => {
+    render(<PanelShell gateway={createFakeGateway()} t={createTranslator(en)}><SettingsPage form={createFakeConfigForm()} onOpenMemoryPage={() => {}} now={NOW} /></PanelShell>)
+    const hint = description(screen.getByLabelText('Auto-loaded memory limit (tokens)'))
+    expect(hint).toHaveTextContent('Default 4,000, about 6,700 Chinese characters or 13,000 English characters: each CJK character or full-width punctuation mark counts as 0.6 tokens, any other character 0.3.')
+    expect(hint).toHaveTextContent("Memories found by search during a chat don't count.")
+  })
+})
+
 describe('用户词典路径', () => {
   const field = () => screen.getByLabelText('用户词典路径')
   /** 输入框经 aria-describedby 关联的说明。 */
@@ -412,12 +430,19 @@ describe('体检关闭时置灰', () => {
 
 describe('状态卡', () => {
   const views = (p = pending(), h = health(NOW), l = library(3)) => ({ pending: p, health: h, library: l })
-  const conflict = { kind: 'conflict-horizontal' as const, decisionId: 'd', firstSeenAt: NOW, summary: 's', left: null, right: null }
-  const unreadable = { kind: 'unreadable-file' as const, layer: { kind: 'global' as const }, filePath: '/f', relativePath: 'f', error: 'e' }
+  const conflict = { kind: 'conflict-horizontal' as const, level: 'your-call' as const, decisionId: 'd', firstSeenAt: NOW, summary: 's', left: null, right: null }
+  const unreadable = { kind: 'unreadable-file' as const, level: 'must-fix' as const, layer: { kind: 'global' as const }, filePath: '/f', relativePath: 'f', error: 'e' }
+
+  it('英文记忆数按单复数：1 memory、3 memories；中文不变', () => {
+    const enT = createTranslator(en)
+    expect(summarize(views(pending(), health(NOW), library(1)), false, NOW, enT).detail).toBe('1 memory')
+    expect(summarize(views(), false, NOW, enT).detail).toBe('3 memories')
+    expect(summarize(views(pending(), health(NOW), library(1)), false, NOW, t).detail).toBe('共 1 条记忆')
+  })
 
   it('结论按优先级：体检关闭 → 密钥 → 等你决定 → 没有记忆 → 没体检 → 良好', () => {
     expect(summarize(views(), false, NOW, t)).toEqual({ conclusion: '体检已关闭', detail: '共 3 条记忆' })
-    expect(summarize(views(pending([{ kind: 'secret', memory: memory() }, conflict])), true, NOW, t).marker).toBe('secret')
+    expect(summarize(views(pending([{ kind: 'secret', level: 'must-fix', memory: memory() }, conflict])), true, NOW, t).marker).toBe('secret')
     expect(summarize(views(pending([conflict, conflict, unreadable])), true, NOW, t))
       .toEqual({ marker: 'pending', conclusion: '有 2 处等你决定', detail: '共 3 条记忆 · 上次体检：刚刚' })
     expect(summarize(views(pending(), health(null), library(0)), true, NOW, t)).toEqual({ conclusion: '还没有记忆' })
@@ -426,11 +451,23 @@ describe('状态卡', () => {
       .toEqual({ marker: 'ok', conclusion: '状态良好', detail: '共 3 条记忆 · 上次体检：10 月 3 日' })
   })
 
+  it('分级后口径不变：「等你决定」只数密钥以外要你拍板的事，不算同在高优问题组的读不出的文件', () => {
+    expect(summarize(views(pending([unreadable, unreadable, conflict])), true, NOW, t).conclusion).toBe('有 1 处等你决定')
+    expect(summarize(views(pending([unreadable])), true, NOW, t)).toEqual({ marker: 'ok', conclusion: '状态良好', detail: '共 3 条记忆 · 上次体检：刚刚' })
+  })
+
+  it('建议整理不算「等你决定」：只有建议时仍是状态良好，「打开记忆页 ›」去健康', () => {
+    const advice = { kind: 'advice' as const, level: 'advice' as const, type: 'stale' as const, memories: [memory()] }
+    expect(summarize(views(pending([advice, advice, conflict])), true, NOW, t).conclusion).toBe('有 1 处等你决定')
+    expect(summarize(views(pending([advice])), true, NOW, t)).toEqual({ marker: 'ok', conclusion: '状态良好', detail: '共 3 条记忆 · 上次体检：刚刚' })
+    expect(openTarget(pending([advice]))).toBe('health')
+  })
+
   it('读视图渲染结论；没有等你决定的事时「打开记忆页 ›」去健康；没有会话时只写一句提示', () => {
     const { onOpen, gateway } = setup()
     expect(screen.getByText('状态良好')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '打开记忆页 ›' }))
-    expect(onOpen).toHaveBeenCalledWith('health')
+    expect(onOpen).toHaveBeenCalledWith({ tab: 'health' })
     act(() => { gateway.setSession({ kind: 'none' }) })
     expect(screen.getByText('开一个会话后这里显示记忆状态')).toBeInTheDocument()
   })
@@ -439,25 +476,94 @@ describe('状态卡', () => {
     const { onOpen, gateway } = setup()
     act(() => { gateway.setView('pending', pending([conflict])) })
     fireEvent.click(screen.getByRole('button', { name: '打开记忆页 ›' }))
-    expect(onOpen).toHaveBeenLastCalledWith('pending')
-    act(() => { gateway.setView('pending', pending([{ kind: 'secret', memory: memory() }])) })
+    expect(onOpen).toHaveBeenLastCalledWith({ tab: 'pending' })
+    act(() => { gateway.setView('pending', pending([{ kind: 'secret', level: 'must-fix', memory: memory() }])) })
     fireEvent.click(screen.getByRole('button', { name: '打开记忆页 ›' }))
-    expect(onOpen).toHaveBeenLastCalledWith('pending')
+    expect(onOpen).toHaveBeenLastCalledWith({ tab: 'pending' })
     act(() => { gateway.setView('pending', pending([unreadable])) })
     fireEvent.click(screen.getByRole('button', { name: '打开记忆页 ›' }))
-    expect(onOpen).toHaveBeenLastCalledWith('health')
+    expect(onOpen).toHaveBeenLastCalledWith({ tab: 'health' })
   })
 })
 
 describe('状态卡「立即体检」', () => {
+  let onOpen = vi.fn()
+  let container: HTMLElement
   function render(init: Parameters<typeof createFakeGateway>[0] = {}, value?: Record<string, unknown>) {
     const gateway = createFakeGateway({ views: { pending: pending(), health: health(NOW), library: library(3) }, ...init })
-    renderInShell(<SettingsPage form={createFakeConfigForm(value ? { value } : {})} onOpenMemoryPage={() => {}} now={NOW} />, gateway)
+    onOpen = vi.fn()
+    container = renderInShell(<SettingsPage form={createFakeConfigForm(value ? { value } : {})} onOpenMemoryPage={onOpen} now={NOW} />, gateway).container
     return gateway
   }
   const button = () => screen.getByRole('button', { name: /立即体检|正在体检|再试一次/ })
+  /** 按钮下面那一行。 */
+  const statusLine = () => container.querySelector('.pm-status-scan')!
+  const scanned = (patch: Partial<Extract<MemoryCommandResult, { ok: true }>> = {}): MemoryCommandResult =>
+    ({ ok: true, cmd: 'scan', notes: [], added: { pending: 0, advice: 0 }, ...patch })
+  async function scan(result: MemoryCommandResult) {
+    render({ respond: () => result })
+    await act(async () => { fireEvent.click(button()) })
+  }
 
-  it('发 /memory scan，体检当前选中会话所在的项目；进行中按钮禁用，完成后写一句', async () => {
+  it('有新增：和页头同一行，链接经导航直达记忆页对应的 tab 和组', async () => {
+    await scan(scanned({ added: { pending: 1, advice: 2, pendingLevel: 'must-fix' } }))
+    // 原地跑：完成后不自动跳走
+    expect(onOpen).not.toHaveBeenCalled()
+    expect(statusLine()).toHaveTextContent(/^体检完成：新增 1 条待处理 ›·新增 2 条建议 ›·查看分数 ›$/)
+    fireEvent.click(screen.getByRole('button', { name: '新增 1 条待处理 ›' }))
+    expect(onOpen).toHaveBeenLastCalledWith({ tab: 'pending', level: 'must-fix' })
+    fireEvent.click(screen.getByRole('button', { name: '新增 2 条建议 ›' }))
+    expect(onOpen).toHaveBeenLastCalledWith({ tab: 'pending', level: 'advice' })
+    fireEvent.click(screen.getByRole('button', { name: '查看分数 ›' }))
+    expect(onOpen).toHaveBeenLastCalledWith({ tab: 'health' })
+  })
+
+  it('新增的待处理分在两组：链接落在待处理顶部（不带组）', async () => {
+    await scan(scanned({ added: { pending: 2, advice: 0 } }))
+    fireEvent.click(screen.getByRole('button', { name: '新增 2 条待处理 ›' }))
+    expect(onOpen).toHaveBeenLastCalledWith({ tab: 'pending' })
+  })
+
+  it('只有建议：没有「待处理」那段', async () => {
+    await scan(scanned({ added: { pending: 0, advice: 1 } }))
+    expect(statusLine()).toHaveTextContent(/^体检完成：新增 1 条建议 ›·查看分数 ›$/)
+  })
+
+  it('没有新增：写没有发现新问题；基线检查被跳过的说明附在后面', async () => {
+    await scan(scanned({ notes: ['baseline-session-scoped'] }))
+    expect(statusLine()).toHaveTextContent(/^没有发现新问题·查看分数 ›这次没有对照本项目的 AGENTS.md 检查冲突/)
+    expect(within(statusLine() as HTMLElement).getAllByRole('button').map(b => b.textContent)).toEqual(['查看分数 ›'])
+  })
+
+  it('内容检查没做完、分了批：说明附在后面', async () => {
+    await scan(scanned({ added: { pending: 1, advice: 0 }, notes: ['semantic-failed', 'semantic-batched'], semanticBatches: 2 }))
+    expect(statusLine()).toHaveTextContent(/^体检完成：新增 1 条待处理 ›·查看分数 ›内容检查没有完成，这次只更新了规则检查。记忆较多，分 2 批检查，不同批之间的冲突和重复可能查不出。$/)
+  })
+
+  it('宿主报了用量：结果行末尾写实际用量；没报就不写', async () => {
+    await scan(scanned({ usageTokens: 12345 }))
+    expect(statusLine()).toHaveTextContent(/^没有发现新问题·查看分数 ›·本次用了约 12,345 token$/)
+    cleanup()
+    await scan(scanned())
+    expect(statusLine()).not.toHaveTextContent(/token/)
+  })
+
+  it('按钮下常驻一行 token 消耗说明；体检关闭、没有可用会话时不写', () => {
+    const gateway = render()
+    expect(container.querySelector('.pm-scan-hint')).toHaveTextContent(/^会用当前对话的模型检查记忆内容，记忆越多，用的 token 越多。$/)
+    act(() => { gateway.setSession({ kind: 'none' }) })
+    expect(container.querySelector('.pm-scan-hint')).toBeNull()
+    cleanup()
+    render({}, section({ governance: { enabled: false, health: { sensitivity: 'standard' }, globalPromoteTarget: 'plugin-global' } }))
+    expect(container.querySelector('.pm-scan-hint')).toBeNull()
+  })
+
+  it('命令回来说体检已关闭：只写体检已关闭', async () => {
+    await scan({ ok: false, cmd: 'scan', code: 'governance-disabled', detail: '体检已关闭，可在插件设置里打开' })
+    expect(statusLine()).toHaveTextContent(/^体检已关闭$/)
+  })
+
+  it('发 /memory scan，体检当前选中会话所在的项目；进行中按钮禁用，完成后写一句（没带新增条数时只写体检完成）', async () => {
     let finish: (r: { ok: true; cmd: 'scan' }) => void = () => {}
     const gateway = render({ currentWorkspace: '/w/app', respond: () => new Promise((resolve) => { finish = resolve }) })
     fireEvent.click(button())

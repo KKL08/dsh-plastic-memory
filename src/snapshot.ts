@@ -4,8 +4,9 @@ import { sourceNote, formatIndexLine } from './index-line.ts'
 import { workspaceDirName, GLOBAL_DIR, INDEX_FILE, ARCHIVE_DIR } from './storage/paths.ts'
 import { EVIDENCE_GUIDANCE, type EvidenceLookupLevel } from './evidence-guidance.ts'
 import { stalenessNote, withinValidity } from './record-freshness.ts'
-import { maskSecrets, maskSecretSurface } from './secrets.ts'
+import { exposedPath, maskSecretSurface } from './secrets.ts'
 import type { OverflowLevel, OverflowMode } from './contract-codes.ts'
+import { CJK } from './search/tokenizer.ts'
 
 export type { OverflowMode }
 
@@ -41,11 +42,18 @@ export function escapePromptBraces(text: string): string {
   return text.replaceAll('{{', `{{${PROMPT_LBRACE_VARIABLE}}}`)
 }
 
-/** 粗略 token 估算：中文字 ×1.5，其余按空白分词 ×1.3。预算是软约束，够用即可。 */
+/** 按中文计价的字符：CJK 文字（与检索同一口径）加全角标点（CJK 符号与标点 U+3000–303F、全角形式 U+FF00–FFEF）。 */
+const CJK_PRICED = new RegExp(String.raw`[${CJK}\u3000-\u303f\uff00-\uffef]`, 'u')
+
+/**
+ * token 估算，快照组装、超限档位、会话视图用量都只走这一个函数。按码点计价：中文字符每个 0.6，
+ * 其余字符（字母、数字、空白、半角标点等）每个 0.3，合计向上取整。系数按 DeepSeek 实际分词校准，
+ * 默认上限 4,000 约合 6,700 个中文字。按十分之一 token 的整数累加，避免 0.6 × 5 这类浮点误差多进一。
+ */
 export function estimateTokens(text: string): number {
-  const cjk = (text.match(/[一-鿿]/g) ?? []).length
-  const words = text.replace(/[一-鿿]/g, ' ').split(/\s+/).filter(Boolean).length
-  return Math.ceil(cjk * 1.5 + words * 1.3)
+  let tenths = 0
+  for (const ch of text) tenths += CJK_PRICED.test(ch) ? 6 : 3
+  return Math.ceil(tenths / 10)
 }
 
 /** 注入排序（设计稿 §6）：confidence 降序 → lastConfirmedAt 降序。recallCount 不参与：被宽泛查询扫到的记忆不该越排越前。 */
@@ -65,8 +73,8 @@ function truncationNav(omitted: ReadonlyArray<{ type: string; records: readonly 
   const lines = [`\n索引未列全：另有 ${total} 条记忆未列出（${omitted.map(o => `${o.type} ${o.records.length} 条`).join('、')}）。`]
   if (topTags.length > 0) lines.push(`高频标签：${topTags.map(([t, n]) => `${t}（${n}）`).join('、')}。`)
   lines.push(indexPaths.length > 0
-    ? `完整索引见 ${indexPaths.join('、')}，或用 memory_search 查询。`
-    : '完整索引见各记忆目录的 MEMORY.md，或用 memory_search 查询。')
+    ? `用 memory_search 查询；要浏览全部条目，完整索引见 ${indexPaths.join('、')}。`
+    : '用 memory_search 查询；要浏览全部条目，完整索引见各记忆目录的 MEMORY.md。')
   return lines.join('\n')
 }
 
@@ -78,6 +86,8 @@ export interface SnapshotUsage {
   usedTokens: number
   /** 带入的记忆 id（core 区在前，再按索引区顺序）。 */
   injectedIds: string[]
+  /** injectedIds 里索引行只带名称和标签、不带摘要的（passive 类型，同 formatIndexLine 的 passive）。 */
+  titleOnlyIds: string[]
   /** 有效记忆里没带入的条数（只有 strict 会截）。 */
   omittedCount: number
 }
@@ -104,7 +114,7 @@ export function assembleSnapshot(deps: {
   workspacePath: string | undefined
   budget: number
   now: number
-  /** 记忆文件根目录（运行时解析）。给出时在快照末尾附一行磁盘路径，让 grep 通道在自定义根下也可发现。 */
+  /** 记忆文件根目录（运行时解析）。给出时在快照末尾列出完整索引的磁盘路径，自定义根下也能按路径 Read 原文件。 */
   memoryRoot?: string
   /** 证据下钻档位（设计 evidence-anchor §4）：给出时在快照末尾拼对应引导文案；缺省不拼（纯测试场景）。 */
   evidenceLookup?: EvidenceLookupLevel
@@ -116,18 +126,18 @@ export function assembleSnapshot(deps: {
   if (visible.length === 0) {
     const broken = deps.quarantinedCount ?? 0
     const text = broken > 0 ? coldStartUnparseableText(broken) : COLD_START_TEXT
-    return { text, coreIds: [], tokens: { workspace: 0, global: 0, fixed: estimateTokens(text) }, usedTokens: 0, injectedIds: [], omittedCount: 0 }
+    return { text, coreIds: [], tokens: { workspace: 0, global: 0, fixed: estimateTokens(text) }, usedTokens: 0, injectedIds: [], titleOnlyIds: [], omittedCount: 0 }
   }
   // 疑似密钥不跳过、不加提示：四个面只把命中片段遮成占位，整条照常注入（id 不动，coreIds 与文件路径照常对应）
   const valid = visible.filter(r => withinValidity(r, now))
   const all = valid.map(r => maskSecretSurface(r))
-  // 文件名由 name 派生，slug 只换分隔符，name 被遮了路径里多半还留着同一段密钥：这条不给路径，看全文走 memory_search。
-  // 手起名的文件名可能自带密钥，路径本身也遮一遍。
+  // 路径口径见 exposedPath：name 被遮的不给路径（看全文走 memory_search），其余遮一遍
   const files = new Map<string, string>()
-  valid.forEach((r, i) => {
+  for (const r of valid) {
     const file = deps.files?.get(r.id)
-    if (file !== undefined && all[i].name === r.name) files.set(r.id, maskSecrets(file))
-  })
+    const path = file === undefined ? undefined : exposedPath(r, file)
+    if (path !== undefined) files.set(r.id, path)
+  }
   // 完整索引入口：只透 global + 当前项目两处（跨项目隔离，见下方磁盘路径尾注）
   const indexPaths = deps.memoryRoot === undefined ? [] : [
     `${deps.memoryRoot}/${GLOBAL_DIR}/${INDEX_FILE}`,
@@ -143,6 +153,7 @@ export function assembleSnapshot(deps: {
   tokens.fixed += estimateTokens(compactionNote)
   const scopeOf = (r: MemoryRecord) => (r.scope === 'global' ? 'global' : 'workspace')
   const injectedIds: string[] = []
+  const titleOnlyIds: string[] = []
   // strict 才有上限；relax 需要多少装多少（core 区、索引区都不截）
   const limit = deps.overflow === 'strict' ? deps.budget : Infinity
 
@@ -184,6 +195,8 @@ export function assembleSnapshot(deps: {
   let exhausted = false
   for (const [type, records] of sortedGroups) {
     const def = registry.get(type)
+    // 索引行带不带摘要：格式器与 titleOnlyIds 共用这一个判据
+    const passive = def.recall === 'passive'
     const sorted = [...records].sort(byConfidenceThenConfirmed)
     // 预算已耗尽：剩余各组不再尝试，整组计入 omitted
     if (exhausted) {
@@ -195,7 +208,7 @@ export function assembleSnapshot(deps: {
     let groupCost = headerCost
     const groupTokens = { workspace: 0, global: 0 }
     for (const r of sorted) {
-      const line = formatIndexLine(r, { passive: def.recall === 'passive', file: files.get(r.id), note: stalenessNote(r, def.decayDays, now) })
+      const line = formatIndexLine(r, { passive, file: files.get(r.id), note: stalenessNote(r, def.decayDays, now) })
       const cost = estimateTokens(line)
       if (used + groupCost + cost > limit) { exhausted = true; break }
       groupLines.push(line)
@@ -213,7 +226,9 @@ export function assembleSnapshot(deps: {
     tokens.fixed += headerCost
     tokens.workspace += groupTokens.workspace
     tokens.global += groupTokens.global
-    injectedIds.push(...sorted.slice(0, groupLines.length - 1).map(r => r.id))
+    const included = sorted.slice(0, groupLines.length - 1).map(r => r.id)
+    injectedIds.push(...included)
+    if (passive) titleOnlyIds.push(...included)
     if (groupLines.length - 1 < sorted.length) omitted.push({ type, records: sorted.slice(groupLines.length - 1) })
   }
   const tailStart = parts.length
@@ -223,10 +238,11 @@ export function assembleSnapshot(deps: {
   // 私有记忆（跨项目泄漏）。跨项目透明可读的只应是 global；别项目记忆除非用户明确给路径才访问。
   if (deps.memoryRoot) {
     const [globalIndex, workspaceIndex] = indexPaths
-    const lines = ['\n完整索引（grep 之前先查它）：', `- 全局记忆：${globalIndex}`]
+    const lines = ['\n完整索引：', `- 全局记忆：${globalIndex}`]
     if (workspaceIndex !== undefined) lines.push(`- 本项目记忆：${workspaceIndex}`)
     lines.push(
-      `看全文：直接 Read 索引行末尾的文件（路径相对 ${deps.memoryRoot}/），或用 memory_search 按 id 或关键词查。`,
+      '',
+      `看全文：用 memory_search 按 id 或关键词查；要看文件原样，再 Read 索引行末尾的文件（路径相对 ${deps.memoryRoot}/）。`,
       `各目录下的 ${ARCHIVE_DIR}/ 是已遗忘、已取代记忆的存放处，日常不要读；只在回看历史时进去。`,
       '其他项目的记忆不在上列——除非用户明确给出该项目路径，否则不要去读别的 workspace 目录。',
     )
@@ -242,6 +258,6 @@ export function assembleSnapshot(deps: {
 
   return {
     text: parts.join('\n'), coreIds: coreIncluded.map(r => r.id),
-    tokens, usedTokens: used, injectedIds, omittedCount: all.length - injectedIds.length,
+    tokens, usedTokens: used, injectedIds, titleOnlyIds, omittedCount: all.length - injectedIds.length,
   }
 }

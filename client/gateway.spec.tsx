@@ -1,14 +1,20 @@
 // 宿主网关：它本身就是进程边界的适配层，这里给它一个假的宿主 ctx（远程调用 + 标准 props），断言它发出的命令与读出的视图。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, renderHook, waitFor } from '@testing-library/react'
-import { GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, type PendingView } from '../src/gui/contract.ts'
+import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
+import { useSyncExternalStore } from 'react'
+import { GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, type PendingItem, type PendingView } from '../src/gui/contract.ts'
 import {
   belongsTo, createHostGateway, decodeExecution, fileAddress, MEMORY_ROOT_CONFIG_KEY, MEMORY_ROOT_KEY, parseView, pickSession, toPluginConfig, viewPath,
   workspaceOf,
 } from './gateway.ts'
 import { createFakeConfigForm, DEFAULT_SECTION } from './settings/config-form.fake.ts'
 import { ENTRY_ID } from './settings/config.ts'
-import { fakeHostContext } from './test-utils.tsx'
+import { createTranslator } from './i18n.tsx'
+import { zh } from './locales.ts'
+import { createNavStore } from './nav.ts'
+import { PendingTab } from './pending/PendingTab.tsx'
+import { fakeHostContext, levelCountsOf, memory } from './test-utils.tsx'
+import { PanelShell } from './ui/PanelShell.tsx'
 import type { ConfigFormSnapshot, HostContext, ResourceSnapshot, SessionListState, SessionSummary, WorkspaceFileStat } from './host.ts'
 
 function summary(id: string, patch: Partial<SessionSummary> = {}): SessionSummary {
@@ -132,12 +138,17 @@ describe('decodeExecution', () => {
 })
 
 describe('parseView', () => {
-  const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], typeLabels: {} }
+  const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], levelCounts: levelCountsOf([]), typeLabels: {} }
   it('合法视图 → ready；版本号不认识 → outdated；结构不对 → error', () => {
     expect(parseView('pending', JSON.stringify(pending))).toEqual({ status: 'ready', data: pending })
     expect(parseView('pending', JSON.stringify({ ...pending, version: GUI_VIEW_VERSION + 1 }))).toEqual({ status: 'outdated' })
     expect(parseView('pending', JSON.stringify({ version: GUI_VIEW_VERSION, dot: 'blue', items: [] })).status).toBe('error')
     expect(parseView('pending', '{').status).toBe('error')
+  })
+
+  it('上一版插件写的待处理视图（版本 3，条目不带级别）→ outdated，交给重新生成，不当成结构错误', () => {
+    const v3 = { version: 3, dot: 'amber', typeLabels: {}, items: [{ kind: 'conflict-horizontal', decisionId: 'd', firstSeenAt: 1, summary: 's', left: null, right: null }] }
+    expect(parseView('pending', JSON.stringify(v3))).toEqual({ status: 'outdated' })
   })
 
   it('视图路径与文件资源地址', () => {
@@ -148,7 +159,7 @@ describe('parseView', () => {
 })
 
 describe('createHostGateway', () => {
-  const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'amber', items: [], typeLabels: {} }
+  const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'amber', items: [], levelCounts: levelCountsOf([]), typeLabels: {} }
   const sessions = list(summary('s1', { cwd: '/w/app', retainedBy: { mainView: 1 } }))
   let executed: string[]
   let resources: Record<string, ResourceSnapshot<WorkspaceFileStat>>
@@ -211,7 +222,7 @@ describe('createHostGateway', () => {
     expect(other.current.of('m3')).toBeUndefined()
   })
 
-  it('读到的视图也进删除状态：在最近删除里、全部记忆里没有在用副本的算软删；两份都没有、视图晚于记下时刻的算彻底删除', async () => {
+  it('读到的视图也进删除状态：在最近删除里、全部记忆里没有在用副本的算软删；两份里都没有、从没出现过的不算彻底删除', async () => {
     localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
     const deletedPath = '/h/memories/.state/gui/deleted.json'
     const libraryPath = '/h/memories/.state/gui/library.json'
@@ -219,7 +230,7 @@ describe('createHostGateway', () => {
     const card = (id: string) => ({ id, name: id, type: 'preference', scope: 'global' as const, summary: '', content: 'x', tags: [], createdAt: 1, updatedAt: 1, lastConfirmedAt: 1, filePath: '' })
     // m8 在别层还有在用的同 id 副本：删掉的那份虽然列在最近删除里，不算删了
     files[deletedPath] = JSON.stringify({ version: GUI_VIEW_VERSION, generatedAt: 5, items: [{ memory: card('m9'), deletedAt: 1, purgeAt: 2 }, { memory: card('m8'), deletedAt: 1, purgeAt: 2 }] })
-    files[libraryPath] = JSON.stringify({ version: GUI_VIEW_VERSION, generatedAt: 5, memoryRoot: '/h/memories', directoryIssues: [], layers: [{ layer: { kind: 'global' }, items: [card('m8')] }] })
+    files[libraryPath] = JSON.stringify({ version: GUI_VIEW_VERSION, generatedAt: 5, memoryRoot: '/h/memories', directoryIssues: [], inactiveIds: [], hasUnreadFiles: false, layers: [{ layer: { kind: 'global' }, items: [card('m8')] }] })
     const gateway = createHostGateway(fakeCtx())(props)
     const { result } = renderHook(() => {
       const session = gateway.useSession(undefined)
@@ -229,9 +240,8 @@ describe('createHostGateway', () => {
     })
     await waitFor(() => { expect(result.current.of('m9')).toBe('soft') })
     expect(result.current.of('m8')).toBeUndefined()
-    // 两份都没有的 m7：视图（同一次收集）晚于记下的时刻才算彻底删除
-    expect(result.current.of('m7', 4)).toBe('hard')
-    expect(result.current.of('m7', 5)).toBeUndefined()
+    // 两份都没有的 m7：本页视图里从没出现过，只是缺席，即使视图晚于记下的时刻也不判彻底删除
+    expect(result.current.of('m7', undefined, 4)).toBeUndefined()
     expect(result.current.of('m7')).toBeUndefined()
   })
 
@@ -258,6 +268,66 @@ describe('createHostGateway', () => {
     resources[address] = { status: 'live', value: { absolutePath: 'x', version: 'v1' }, failure: undefined }
     rerender()
     await waitFor(() => { expect(result.current).toEqual({ status: 'outdated' }) })
+  })
+
+  it('同一份视图几处同时读（每张对话交付卡各挂一个）：每个版本只读一次文件、解析一次，几处拿到同一份', async () => {
+    localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+    const address = fileAddress('s1', pendingPath)
+    resources[address] = { status: 'live', value: { absolutePath: pendingPath, version: 'v1' }, failure: undefined }
+    files[pendingPath] = JSON.stringify(pending)
+    const ctx = fakeCtx()
+    const read = ctx.remote.workspaceFiles.read as ReturnType<typeof vi.fn>
+    const bind = createHostGateway(ctx)
+    const a = bind(props)
+    const b = bind({ ...props })
+    const { result, rerender } = renderHook(() => {
+      const session = a.useSession(undefined)
+      return [a.useView(session, 'pending'), a.useView(session, 'pending'), b.useView(session, 'pending')]
+    })
+    await waitFor(() => { expect(result.current.map(v => v.status)).toEqual(['ready', 'ready', 'ready']) })
+    expect(read.mock.calls.filter(([, path]) => path === pendingPath)).toHaveLength(1)
+    const [first, second, third] = result.current
+    expect(second).toBe(first)
+    expect(third).toBe(first)
+
+    // 新版本：再读一次，仍然只一次
+    files[pendingPath] = JSON.stringify({ ...pending, dot: 'none' })
+    resources[address] = { status: 'live', value: { absolutePath: pendingPath, version: 'v2' }, failure: undefined }
+    rerender()
+    await waitFor(() => { expect(result.current.every(v => v.status === 'ready' && v.data.dot === 'none')).toBe(true) })
+    expect(read.mock.calls.filter(([, path]) => path === pendingPath)).toHaveLength(2)
+  })
+
+  it('宿主没推来新版本（紧挨着的第二次替换被漏掉）：本页的命令成功后照样重读，之后才挂上的视图也拿到新内容', async () => {
+    localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+    // 资源一直停在 v1：服务端重写了 pending.json，宿主却没推新版本
+    resources[fileAddress('s1', pendingPath)] = { status: 'live', value: { absolutePath: pendingPath, version: 'v1' }, failure: undefined }
+    files[pendingPath] = JSON.stringify(pending)
+    const settled: PendingView = { ...pending, dot: 'none' }
+    const ctx = fakeCtx({
+      remote: {
+        commands: {
+          // 命令返回前视图已写好（服务端等视图写完才回结果）
+          execute: vi.fn(async (_sid: string, line: string) => {
+            executed.push(line)
+            const isResolve = line.startsWith('/memory resolve ')
+            if (isResolve) files[pendingPath] = JSON.stringify(settled)
+            const text = JSON.stringify(isResolve ? { ok: true, cmd: 'resolve' } : { ok: false, cmd: 'resolve', code: 'failed' })
+            return { ok: true as const, value: { commandId: 'c', result: { kind: 'success' as const, text } } }
+          }),
+        },
+      },
+    })
+    const bind = createHostGateway(ctx)
+    const sidebar = bind(props)
+    const page = bind({ ...props })
+    const { result: mounted } = renderHook(() => sidebar.useView(sidebar.useSession(undefined), 'pending'))
+    await waitFor(() => { expect(mounted.current).toEqual({ status: 'ready', data: pending }) })
+
+    await act(async () => { await sidebar.execute('s1', { cmd: 'resolve', decisionId: 'd1', verdict: 'keep-left' }) })
+    await waitFor(() => { expect(mounted.current).toEqual({ status: 'ready', data: settled }) })
+    const { result: opened } = renderHook(() => page.useView(page.useSession(undefined), 'pending'))
+    await waitFor(() => { expect(opened.current).toEqual({ status: 'ready', data: settled }) })
   })
 
   it('localStorage 里已有 memoryRoot：不发命令直接订阅', async () => {
@@ -573,6 +643,96 @@ describe('createHostGateway', () => {
       const { result } = renderHook(() => gateway.useCurrentWorkspace())
       expect(result.current).toEqual({ status: 'ready', workspacePath: undefined })
     })
+  })
+
+  describe('借来的会话中途换了（它开始跑一轮，同项目里另一个会话空闲）', () => {
+    const advice: PendingItem = { kind: 'advice', level: 'advice', type: 'unclear', memories: [memory({ id: 'm1', content: '全局都用 pnpm。', digest: 'sha1:m1' })] }
+    const view: PendingView = { ...pending, items: [advice], levelCounts: levelCountsOf([advice]) }
+    const reply = (text: object) => ({ ok: true as const, value: { commandId: 'c', result: { kind: 'success' as const, text: JSON.stringify(text) } } })
+
+    /** 待处理 tab 借 /w/app 的会话：s1 最新，先借它；switchSession 让 s1 开始跑一轮，同项目里空闲的 s2 顶上。 */
+    function setup(execute: (sid: string, line: string) => Promise<ReturnType<typeof reply>>) {
+      localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+      files[pendingPath] = JSON.stringify(view)
+      for (const sid of ['s1', 's2']) resources[fileAddress(sid, pendingPath)] = { status: 'live', value: { absolutePath: pendingPath, version: 'v1' }, failure: undefined }
+      const rows = (running: boolean) => list(summary('s1', { cwd: '/w/app', updatedAt: 2, running, retainedBy: { mainView: 1 } }), summary('s2', { cwd: '/w/app', updatedAt: 1 }))
+      let state = rows(false)
+      const listeners = new Set<() => void>()
+      const subscribe = (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn) } }
+      const useSessions = <S,>(selector: (s: SessionListState) => S) => useSyncExternalStore(subscribe, () => selector(state))
+      const gateway = createHostGateway(fakeCtx({ remote: { commands: { execute: vi.fn(execute) } } }))({ ...props, useSessions })
+      function Page() {
+        return <PendingTab nav={createNavStore()} session={gateway.useSession('/w/app')} workspacePath="/w/app" />
+      }
+      render(<PanelShell gateway={gateway} t={createTranslator(zh)}><Page /></PanelShell>)
+      return {
+        switchSession() {
+          act(() => { state = rows(true); for (const fn of listeners) fn() })
+          // 全局视图不因换会话回到读取中，列表不重挂
+          expect(screen.queryByText('正在读取…')).toBeNull()
+        },
+      }
+    }
+
+    it('「让模型改」生成在途：面板还在，结果回来照常显示', async () => {
+      let finishDraft: (() => void) | undefined
+      const { switchSession } = setup(async (_sid, line) => {
+        if (!line.startsWith('/memory draft-edit')) return reply({ ok: true, cmd: line.split(' ')[1], model: 'deepseek-flash' })
+        await new Promise<void>((resolve) => { finishDraft = resolve })
+        return reply({ ok: true, cmd: 'draft-edit', draft: { content: '本项目用 pnpm。', summary: '包管理器' }, model: 'deepseek-flash' })
+      })
+      fireEvent.click(await screen.findByRole('button', { name: '让模型改' }))
+      fireEvent.click(screen.getByRole('button', { name: '生成修改' }))
+      expect(screen.getByText('正在生成修改……')).toBeInTheDocument()
+      switchSession()
+      expect(screen.getByText('正在生成修改……')).toBeInTheDocument()
+      await act(async () => { finishDraft!() })
+      expect(await screen.findByRole('button', { name: '应用' })).toBeInTheDocument()
+    })
+
+    it('「直接改」改到一半：编辑框和改过的正文都还在', async () => {
+      const { switchSession } = setup(async (_sid, line) => reply({ ok: true, cmd: line.split(' ')[1] }))
+      fireEvent.click(await screen.findByRole('button', { name: '直接改' }))
+      fireEvent.change(screen.getByRole('textbox', { name: '正文' }), { target: { value: '本项目用 pnpm。' } })
+      switchSession()
+      expect(screen.getByRole('textbox', { name: '正文' })).toHaveValue('本项目用 pnpm。')
+    })
+  })
+
+  it('useModel：每个会话在页面里只问一次 model-info，几处同时问也只发一条；拿到模型名就是 ready', async () => {
+    const replies: Record<string, string> = { s1: JSON.stringify({ ok: true, cmd: 'model-info', model: 'deepseek-v4-flash' }) }
+    const execute = vi.fn(async (sid: string, line: string) => {
+      executed.push(`${sid} ${line}`)
+      return { ok: true as const, value: { commandId: 'c', result: { kind: 'success' as const, text: replies[sid]! } } }
+    })
+    const bind = createHostGateway(fakeCtx({ remote: { commands: { execute } } }))
+    const a = bind(props)
+    const b = bind({ ...props })
+    const session = { kind: 'ready', sessionId: 's1', cwd: '/w/app' } as const
+    const { result } = renderHook(() => [a.useModel(session), b.useModel(session)] as const)
+    expect(result.current[0]).toEqual({ status: 'unknown' })
+    await waitFor(() => { expect(result.current).toEqual([{ status: 'ready', model: 'deepseek-v4-flash' }, { status: 'ready', model: 'deepseek-v4-flash' }]) })
+    renderHook(() => a.useModel(session))
+    expect(executed).toEqual(['s1 /memory model-info'])
+  })
+
+  it('useModel：拿不到模型是 unavailable；别的失败（宿主出错、旧插件不认）不当成拿不到，按可用处理；没有会话不问', async () => {
+    const replies: Record<string, string> = {
+      s1: JSON.stringify({ ok: false, cmd: 'model-info', code: 'llm-unavailable' }),
+      s2: JSON.stringify({ ok: false, code: 'invalid-args', detail: 'cmd: Invalid input' }),
+    }
+    const execute = vi.fn(async (sid: string, line: string) => {
+      executed.push(`${sid} ${line}`)
+      return { ok: true as const, value: { commandId: 'c', result: { kind: 'error' as const, text: replies[sid]! } } }
+    })
+    const gateway = createHostGateway(fakeCtx({ remote: { commands: { execute } } }))(props)
+    const { result } = renderHook(() => [
+      gateway.useModel({ kind: 'ready', sessionId: 's1', cwd: undefined }),
+      gateway.useModel({ kind: 'ready', sessionId: 's2', cwd: undefined }),
+      gateway.useModel({ kind: 'none' }),
+    ] as const)
+    await waitFor(() => { expect(result.current).toEqual([{ status: 'unavailable' }, { status: 'ready', model: undefined }, { status: 'unknown' }]) })
+    expect(executed).toEqual(['s1 /memory model-info', 's2 /memory model-info'])
   })
 
   it('openPath：打开只带 path，显示目录带 action: reveal；宿主拒绝或抛错都是 false', async () => {

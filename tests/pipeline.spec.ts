@@ -5,7 +5,9 @@ import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
-import type { MemorySnapshot } from '../src/governance/schema.ts'
+import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
+import { PendingDecisionsStore } from '../src/governance/decisions.ts'
+import { editFingerprint } from '../src/governance/snapshots.ts'
 import { candidate } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 
@@ -291,16 +293,20 @@ describe('runSavePipeline', () => {
     expect(updated.kind).toBe('updated')
   })
 
-  it('B1c: update workspace 记录不拍快照（避免高频写入膨胀快照表）', async () => {
+  it('update workspace 记录同样先拍 pre-update 快照（含旧内容），结果不变：没有警告', async () => {
     const store = new MemoryStore(new InMemoryTable())
     const snaps = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
-    const created = await runSavePipeline(candidate({ scope: 'workspace' }), deps(store))
+    const created = await runSavePipeline(candidate({ scope: 'workspace', content: '旧的项目内容' }), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
     const updated = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, content: '本项目内更新' }),
+      candidate({ action: 'update', id: created.record.id, scope: 'workspace', content: '本项目内更新' }),
       { ...deps(store), snapshots: snaps })
-    expect(updated.kind).toBe('updated')
-    expect(await snaps.list()).toHaveLength(0)
+    if (updated.kind !== 'updated') throw new Error(updated.kind)
+    expect(Object.keys(updated)).not.toContain('warnings')
+    const list = await snaps.list()
+    expect(list).toHaveLength(1)
+    expect(list[0]).toMatchObject({ operation: 'pre-update', memoryIds: [created.record.id] })
+    expect(list[0].data[0]!.content).toBe('旧的项目内容')
   })
 
   // B2：判重级联——实体轴优先，实体为空才落 Dice 兜底
@@ -463,5 +469,172 @@ describe('runSavePipeline', () => {
     )
     if (updated.kind !== 'updated') throw new Error(updated.kind)
     expect(Object.keys(updated)).not.toContain('warnings')
+  })
+})
+
+// 模型改写、替代的兜底：改前先拍快照、记一条可撤销的已结清条目；手改过的记忆不悄悄覆盖
+describe('runSavePipeline：模型改写的兜底', () => {
+  function guarded(store = new MemoryStore(new InMemoryTable())) {
+    const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
+    const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
+    return { store, snapshots, decisions, deps: { ...deps(store), snapshots, decisions, callId: 'call-7' } }
+  }
+  async function seed(store: MemoryStore, partial: object = {}) {
+    const r = await runSavePipeline(candidate({ scope: 'workspace', content: '旧内容', force: true, ...partial }), deps(store))
+    if (r.kind !== 'saved') throw new Error(r.kind)
+    return r.record
+  }
+
+  it('改写：账本记一条已结清的 rewrite，指向改前快照，指纹是写下的内容，带会话与调用', async () => {
+    const e = guarded()
+    const target = await seed(e.store)
+    const r = await runSavePipeline(candidate({ action: 'update', id: target.id, content: '新内容' }), e.deps)
+    if (r.kind !== 'updated') throw new Error(r.kind)
+    const [snap] = await e.snapshots.list()
+    const [entry] = await e.decisions.listSettled()
+    expect(entry).toMatchObject({
+      kind: 'rewrite', memoryIds: [target.id], workspaces: ['/proj'],
+      origin: { sessionId: 's1', callId: 'call-7' },
+      settled: { verdict: 'rewritten', snapshotId: snap!.id },
+    })
+    expect(entry!.fingerprint).toBe(editFingerprint((await e.store.get(target.id))!))
+    // 待处理里看不到它
+    expect(await e.decisions.list()).toEqual([])
+  })
+
+  it('替代：标 superseded 前拍快照（旧记忆原状，可恢复），账本记一条 supersede，指出替代它的那条', async () => {
+    const e = guarded()
+    const old = await seed(e.store, { name: '旧说法' })
+    const r = await runSavePipeline(candidate({ scope: 'workspace', name: '新说法', content: '完全不同的新说法', force: true, supersedes: [old.id] }), e.deps)
+    if (r.kind !== 'saved') throw new Error(r.kind)
+    expect(Object.keys(r)).not.toContain('warnings')
+    expect((await e.store.get(old.id))!.status).toBe('superseded')
+    const [snap] = await e.snapshots.list()
+    expect(snap).toMatchObject({ operation: 'pre-update', memoryIds: [old.id] })
+    expect(snap!.data[0]).toMatchObject({ id: old.id, status: 'active', content: '旧内容' })
+    const [entry] = await e.decisions.listSettled()
+    expect(entry).toMatchObject({
+      kind: 'supersede', memoryIds: [old.id], summary: '旧说法',
+      origin: { sessionId: 's1', callId: 'call-7', by: r.record.id },
+      settled: { verdict: 'superseded', snapshotId: snap!.id },
+    })
+    expect(entry!.fingerprint).toBe(editFingerprint((await e.store.get(old.id))!))
+  })
+
+  it('改写同时替代：一份快照装两条，账本各记一条', async () => {
+    const e = guarded()
+    const target = await seed(e.store, { name: '甲' })
+    const old = await seed(e.store, { name: '乙', content: '另一件事' })
+    const r = await runSavePipeline(candidate({ action: 'update', id: target.id, content: '合并后的内容', supersedes: [old.id] }), e.deps)
+    if (r.kind !== 'updated') throw new Error(r.kind)
+    const snaps = await e.snapshots.list()
+    expect(snaps).toHaveLength(1)
+    expect(new Set(snaps[0]!.memoryIds)).toEqual(new Set([target.id, old.id]))
+    expect((await e.decisions.listSettled()).map(d => d.kind).sort()).toEqual(['rewrite', 'supersede'])
+  })
+
+  it('跨桶、不存在、已是 superseded 的替代目标不拍快照、不记账（结果照旧）', async () => {
+    const e = guarded()
+    const already = await seed(e.store, { name: '早被替代' })
+    await e.store.put({ ...already, status: 'superseded' })
+    await e.store.put({ ...already, id: 'mem_global', scope: 'global', workspacePath: undefined } as never)
+    const r = await runSavePipeline(candidate({ scope: 'workspace', name: '新事实', content: '完全不同的新说法', force: true, supersedes: ['mem_global', 'mem_ghost', already.id] }), e.deps)
+    if (r.kind !== 'saved') throw new Error(r.kind)
+    expect(r.warnings?.map(w => w.code)).toEqual(['cross-bucket-supersede'])
+    expect(await e.snapshots.list()).toEqual([])
+    expect(await e.decisions.listSettled()).toEqual([])
+  })
+
+  it('update 目标手改过：不写入、不拍快照，rejected(hand-edited)，原因带当前内容与 force 指引', async () => {
+    const e = guarded()
+    const target = await seed(e.store)
+    await e.store.put({ ...target, content: '用户手改后的内容', handEdited: true })
+    const r = await runSavePipeline(candidate({ action: 'update', id: target.id, content: '模型想写的' }), e.deps)
+    if (r.kind !== 'rejected') throw new Error(r.kind)
+    expect(r.code).toBe('hand-edited')
+    expect(r.reason).toContain('用户手改后的内容')
+    expect(r.reason).toContain(target.id)
+    expect(r.reason).toContain('force: true')
+    expect((await e.store.get(target.id))!.content).toBe('用户手改后的内容')
+    expect(await e.snapshots.list()).toEqual([])
+    expect(await e.decisions.listSettled()).toEqual([])
+  })
+
+  it('同桶替代目标手改过：新记忆不落盘、旧记忆保持 active', async () => {
+    const e = guarded()
+    const old = await seed(e.store)
+    await e.store.put({ ...old, content: '用户手改后的旧记忆', handEdited: true })
+    const r = await runSavePipeline(candidate({ scope: 'workspace', name: '新说法', content: '完全不同的新说法', force: false, supersedes: [old.id] }), e.deps)
+    expect(r).toMatchObject({ kind: 'rejected', code: 'hand-edited' })
+    if (r.kind === 'rejected') expect(r.reason).toContain('用户手改后的旧记忆')
+    expect((await e.store.get(old.id))!.status).toBe('active')
+    expect(await e.store.query({})).toHaveLength(1)
+  })
+
+  it('替代手改过的记忆、新内容又和它重叠：先拦手改，不回疑似重复（那条回复叫模型带 force 重发，会把手改保护一并跳过）', async () => {
+    const e = guarded()
+    const old = await seed(e.store, { content: '测试统一用 Postgres 16 跑集成测试' })
+    await e.store.put({ ...old, handEdited: true })
+    const r = await runSavePipeline(candidate({ scope: 'workspace', content: '测试统一用 Postgres 17 跑集成测试', supersedes: [old.id] }), e.deps)
+    expect(r).toMatchObject({ kind: 'rejected', code: 'hand-edited' })
+    expect((await e.store.get(old.id))!.status).toBe('active')
+  })
+
+  it('supersedes 里同一个 id 写两遍：只记一条撤销', async () => {
+    const e = guarded()
+    const old = await seed(e.store, { name: '旧说法' })
+    const r = await runSavePipeline(candidate({ scope: 'workspace', name: '新说法', content: '完全不同的新说法', force: true, supersedes: [old.id, old.id] }), e.deps)
+    if (r.kind !== 'saved') throw new Error(r.kind)
+    expect(await e.decisions.listSettled()).toHaveLength(1)
+  })
+
+  it('手改保护先于疑似密钥拦截：问过用户带 force 重发，疑似密钥照旧留警告', async () => {
+    const e = guarded()
+    const target = await seed(e.store)
+    await e.store.put({ ...target, handEdited: true })
+    const r = await runSavePipeline(candidate({ action: 'update', id: target.id, content: '内部约定 api_key: TESTONLY0000000000000' }), e.deps)
+    expect(r).toMatchObject({ kind: 'rejected', code: 'hand-edited' })
+  })
+
+  it('原因里的当前内容遮掉密钥（结果会进模型上下文）', async () => {
+    const e = guarded()
+    const target = await seed(e.store)
+    await e.store.put({ ...target, content: `凭证 ${FAKE_SECRET.github}`, handEdited: true })
+    const r = await runSavePipeline(candidate({ action: 'update', id: target.id, content: '模型想写的' }), e.deps)
+    if (r.kind !== 'rejected') throw new Error(r.kind)
+    expect(r.reason).not.toContain(FAKE_SECRET.github)
+  })
+
+  it('force 改写手改过的记忆：照常写入、拍快照、记账，可撤销', async () => {
+    const e = guarded()
+    const target = await seed(e.store)
+    await e.store.put({ ...target, content: '用户手改后的内容', handEdited: true })
+    const r = await runSavePipeline(candidate({ action: 'update', id: target.id, content: '用户同意后的新内容', force: true }), e.deps)
+    if (r.kind !== 'updated') throw new Error(r.kind)
+    expect(r.record.content).toBe('用户同意后的新内容')
+    const [snap] = await e.snapshots.list()
+    expect(snap!.data[0]).toMatchObject({ content: '用户手改后的内容', handEdited: true })
+    expect((await e.decisions.listSettled())[0]).toMatchObject({ kind: 'rewrite', settled: { snapshotId: snap!.id } })
+  })
+
+  it('force 替代手改过的旧记忆：照常标 superseded、拍快照、记账', async () => {
+    const e = guarded()
+    const old = await seed(e.store)
+    await e.store.put({ ...old, handEdited: true })
+    const r = await runSavePipeline(candidate({ scope: 'workspace', name: '新说法', content: '完全不同的新说法', force: true, supersedes: [old.id] }), e.deps)
+    expect(r.kind).toBe('saved')
+    expect((await e.store.get(old.id))!.status).toBe('superseded')
+    expect((await e.decisions.listSettled())[0]).toMatchObject({ kind: 'supersede', memoryIds: [old.id] })
+  })
+
+  it('没手改过的记忆：结果与不带账本时逐字一致', async () => {
+    const plain = new MemoryStore(new InMemoryTable())
+    const e = guarded()
+    for (const store of [plain, e.store]) await store.put({ ...(await seed(store)), id: 'mem_same', name: '同一条' })
+    const update = candidate({ action: 'update', id: 'mem_same', content: '新内容', scope: 'global' })
+    const a = await runSavePipeline(update, deps(plain))
+    const b = await runSavePipeline(update, e.deps)
+    const strip = (x: typeof a) => x.kind === 'updated' ? { ...x, record: { ...x.record, createdAt: 0, updatedAt: 0, lastConfirmedAt: 0 } } : x
+    expect(strip(b)).toEqual(strip(a))
   })
 })

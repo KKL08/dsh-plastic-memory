@@ -1,20 +1,31 @@
 /**
  * 输入框下方的「记忆」按钮（PRD 5.9 方案 A）：只有图标，不变色、不加点；这个会话没有记忆（会话视图不存在，
  * 或带入与新记都为空）时不渲染。点开的弹层对齐宿主 ContextMeter 弹层的版式：标题行占比 + 约已用 / 上限、
- * 三段作用域条与明细、带入与新记条数、超限行、「查看带入的记忆 ›」。
+ * 三段作用域条与明细、带入与新写入条数（随快照来历写「开始时带入」「重新带入」或「压缩后重新带入」）、超限行、「查看带入的记忆 ›」。
+ * 新写入只数还没进快照、也还在的（删掉的不算）：压缩后进了新快照的算在带入里，和右侧栏同一口径（见 sidebar/session-memories.ts）。
  *
- * 已用 = 会话视图三段（本项目、全局、固定说明）之和，和用量条同一口径；占比 = 已用 / 宿主 contextPressure 投影的
- * contextWindow（宿主公式的分母）；读不到窗口只写「约已用 / 上限」。超限行按计入上限的 usedTokens（服务端是否放宽按它定）。
+ * 「约已用 / 上限」的已用 = 计入上限的 usedTokens，和右侧栏用量条同一口径，超限行也按它（服务端是否放宽按它定）；
+ * 三段条与明细和用量条共用拆分、色段、色块（固定说明里不计上限的部分斜纹）。占比 = 三段之和 / 宿主 contextPressure
+ * 投影的 contextWindow（宿主公式的分母）：不计上限的导航图和尾注也占上下文；读不到窗口只写「约已用 / 上限」。
  * 记忆 token 是插件估算，和宿主计数口径不同，所以一律带「约」。
  */
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
-import type { SessionView } from '../../src/gui/contract.ts'
+import type { SessionView, SnapshotOrigin } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import type { ContextPressureProjection, SessionStandardProps } from '../host.ts'
 import { formatNumber, useT } from '../i18n.tsx'
+import type { LocaleKey } from '../locales.ts'
 import { MemoryIcon } from '../MemoryIcon.tsx'
-import { barScale, relaxedCap } from '../ui/ContextBudgetBar.tsx'
+import { isLiveWrite, sessionCards, writtenSinceSnapshot } from '../sidebar/session-memories.ts'
+import { barScale, budgetParts, BudgetSegments, BudgetSwatch, relaxedCap, shownParts } from '../ui/ContextBudgetBar.tsx'
+
+/** 条数行随快照来历变（和右侧栏用量标题同一口径）。 */
+const COUNTS_LINE: Record<SnapshotOrigin, LocaleKey> = {
+  start: 'composer.counts',
+  resumed: 'composer.countsResumed',
+  compacted: 'composer.countsCompacted',
+}
 
 /** 分割占比句子用的标记，和宿主 ContextMeter 的 READING_SLOT 同法。 */
 const READING_SLOT = '\u0000'
@@ -45,6 +56,8 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
   const gateway = useGateway()
   const session = useMemo<BorrowedSession>(() => ({ kind: 'ready', sessionId, cwd: undefined }), [sessionId])
   const state = gateway.useView(session, 'session')
+  const library = gateway.useView(session, 'library')
+  const deletions = gateway.useDeletions()
   const pressure = useProjection('contextPressure')
   const view = state.status === 'ready' ? state.data : undefined
   const visible = hasSessionMemory(view)
@@ -87,16 +100,12 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
     setPosition({ left, bottom: window.innerHeight - rect.top + 8, width })
   }
 
-  const { workspace, global, fixed } = view.tokens
-  const used = workspace + global + fixed
-  const share = memoryShare(used, pressure)
+  // 全部记忆视图还没读到时只按删除记录数
+  const byId = library.status === 'ready' ? sessionCards(library.data, view.workspacePath).byId : undefined
+  const parts = budgetParts(view)
+  const share = memoryShare(parts.total, pressure)
   const [headBefore = '', headAfter = ''] = t('composer.share', { percent: READING_SLOT }).split(READING_SLOT).map(s => s.trim())
-  const scale = barScale(used, view.usedTokens, view.budget)
-  const rows = [
-    { key: 'workspace', label: t('composer.workspace'), n: workspace },
-    { key: 'global', label: t('composer.global'), n: global },
-    { key: 'fixed', label: t('composer.fixed'), n: fixed },
-  ] as const
+  const scale = barScale(parts.total, parts.counted, view.budget)
   const overflow = view.overflowMode === 'strict'
     ? (view.omittedCount > 0 ? t('composer.truncated', { n: formatNumber(view.omittedCount) }) : null)
     : (view.usedTokens > view.budget
@@ -131,24 +140,28 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
               </>
             )}
             <span className="pm-composer-figures">
-              {t('composer.figures', { used: formatNumber(used), budget: formatNumber(view.budget) })}
+              {t('composer.figures', { used: formatNumber(parts.counted), budget: formatNumber(view.budget) })}
             </span>
           </div>
           <div className="pm-composer-bar">
-            {rows.filter(row => row.n > 0).map(row => (
-              <i key={row.key} className={`pm-composer-seg pm-composer-tint--${row.key}`} style={{ width: `${(row.n / scale) * 100}%` }} />
-            ))}
+            <BudgetSegments parts={parts} scale={scale} />
           </div>
           <dl className="pm-composer-rows">
-            {rows.map(row => (
-              <div key={row.key} className="pm-composer-row">
-                <dt><i className={`pm-composer-swatch pm-composer-tint--${row.key}`} aria-hidden="true" />{row.label}</dt>
-                <dd>{t('composer.approx', { n: formatNumber(row.n) })}</dd>
+            {shownParts(parts).map(key => (
+              <div key={key} className="pm-composer-row">
+                <dt>
+                  <BudgetSwatch part={key} />
+                  {key === 'uncounted' ? t('budget.nameUncounted', { name: t(`budget.part.${key}`) }) : t(`budget.part.${key}`)}
+                </dt>
+                <dd>{t('composer.approx', { n: formatNumber(parts[key]) })}</dd>
               </div>
             ))}
           </dl>
           <div className="pm-composer-line">
-            {t('composer.counts', { injected: formatNumber(view.injectedIds.length), saved: formatNumber(view.savedIds.length) })}
+            {t(COUNTS_LINE[view.origin], {
+              injected: formatNumber(view.injectedIds.length),
+              saved: formatNumber(writtenSinceSnapshot(view).filter(id => isLiveWrite(id, byId, deletions)).length),
+            })}
           </div>
           {overflow === null ? null : (
             <div className="pm-composer-line">
@@ -193,14 +206,10 @@ export const memoryButtonCss = `
 .pm-composer-percent { font-weight: 500; color: var(--pm-text); }
 .pm-composer-figures { margin-left: auto; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--pm-text); }
 .pm-composer-bar { display: flex; gap: 1px; margin: 10px 0 12px; height: 4px; border-radius: 999px; background: var(--pm-track); overflow: hidden; }
-.pm-composer-seg { flex: none; min-width: 2px; height: 100%; border-radius: 1px; background: var(--pm-composer-tint); }
-.pm-composer-swatch { display: inline-block; margin-right: 6px; width: 8px; height: 8px; border-radius: 2px; background: var(--pm-composer-tint); }
-.pm-composer-tint--workspace { --pm-composer-tint: var(--pm-accent); }
-.pm-composer-tint--global { --pm-composer-tint: var(--pm-accent-soft); }
-.pm-composer-tint--fixed { --pm-composer-tint: var(--pm-caption); }
+.pm-composer-bar > .pm-budget-seg { flex: none; min-width: 2px; border-radius: 1px; }
 .pm-composer-rows { margin: 6px 0 0; }
 .pm-composer-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 2px 0; }
-.pm-composer-row dt { color: var(--pm-text-2); }
+.pm-composer-row dt { display: flex; align-items: center; color: var(--pm-text-2); }
 .pm-composer-row dd { margin: 0; font-variant-numeric: tabular-nums; color: var(--pm-text); }
 .pm-composer-line { margin-top: 6px; }
 .pm-composer-open { display: block; margin-top: 8px; }

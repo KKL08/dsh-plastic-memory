@@ -20,9 +20,9 @@ const LEAF_MODULES = new Set([
   'kv-table', 'record-schema', 'output', 'storage/paths', 'storage/table', 'types', 'gui/contract',
   'search/tokenizer', 'search/jieba-segmenter',
 ])
-// search/ranking 与 store 同层：只 import 叶子，被执行器用；分词器与 jieba 切分器留在叶子（只碰 Node 内置，词典路径与日志器由调用方注入）
+// search/ranking、search/coverage 与 store 同层：只 import 叶子，被执行器用；分词器与 jieba 切分器留在叶子（只碰 Node 内置，词典路径与日志器由调用方注入）
 const MEMORY_MODULES = new Set([
-  'pipeline', 'store', 'snapshot', 'runtime', 'type-registry', 'evidence-guidance', 'search/ranking',
+  'pipeline', 'store', 'snapshot', 'runtime', 'type-registry', 'evidence-guidance', 'search/ranking', 'search/coverage',
 ])
 // 接线层：index.ts 与交给 ctx.storageDomain.open 的域定义（只被 index.ts 用）
 const ENTRY_MODULES = new Set(['index', 'domain-spec'])
@@ -31,7 +31,8 @@ const FRAMEWORK_PREFIX = '@deepseek-ai/'
 
 /** 登记在案的例外边。`to` 是 src 下模块路径（不带 .ts）或包名。条目失效（边已消失）测试会提示删掉。 */
 const ALLOWED_EXCEPTIONS: ReadonlyArray<{ from: string; to: string; reason: string }> = [
-  { from: 'pipeline', to: 'governance/snapshots', reason: 'update global 前快照先行（2026-09-01 定）' },
+  { from: 'pipeline', to: 'governance/snapshots', reason: 'update global 前快照先行（2026-09-01 定）；改写、替代都拍，撤销记录按 editFingerprint 记指纹（2026-10-27）' },
+  { from: 'pipeline', to: 'governance/decisions', reason: '模型改写、替代后记一条已结清的撤销记录（2026-10-27 定）' },
 ]
 
 function layerOf(mod: string): LayerName | undefined {

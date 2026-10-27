@@ -3,7 +3,7 @@ import { matchScore } from '../text.ts'
 
 /**
  * 检索排序：查询时现算、不留状态。给定查询 token、候选记录与范围内列出的文件数 N，
- * 给每条候选定档位与分数；调用方（memory_search 执行器）负责排序、截断与说明码。
+ * 给每条候选定档位、字面锚点命中数与分数；调用方（memory_search 执行器）按 compareRanked 排序，再截断、出说明码。
  */
 
 /** 参与打分的字段，按加权顺序。id 不在其中：id 直达与第三档（旧子串匹配 matchScore）另行覆盖。 */
@@ -50,8 +50,17 @@ export const TIER_ORDER: Record<SearchTier, number> = { all: 0, partial: 1, subs
 export interface RankedRecord {
   record: MemoryRecord
   tier: SearchTier
+  /**
+   * 查询有锚点词时是命中的查询 token 数，没有时恒为 0。同档内最先比它：部分命中档里只含一个常见锚点的记录，
+   * 不压过覆盖了大半查询的记录；全命中档里各条相等，不影响排序；没有锚点的查询照旧只按分数排。
+   */
+  coverage: number
+  /** 字面命中的锚点词数（见 anchorTerms），同档内先比覆盖、再比它、再比分数。 */
+  anchorHits: number
   /** all / partial 档是 BM25F 分数（只以子串命中的 token 不贡献词频）；substring 档是旧词项的命中词数。只在同档内可比。 */
   score: number
+  /** 各查询 token 是否命中（下标同 RankInput.tokens，命中口径同档位）；substring 档全为 false。判「命中弱」与逐词命中条数用。 */
+  tokenHits: boolean[]
 }
 
 export interface RankInput {
@@ -59,6 +68,8 @@ export interface RankInput {
   tokens: readonly string[]
   /** 旧词项（expandQueryTerms），只用于第三档。 */
   legacyTerms: readonly string[]
+  /** 锚点词（anchorTerms），缺省没有。 */
+  anchors?: readonly string[]
   /** 解析后的候选（已过 scope / 状态 / types / validTo）。 */
   records: readonly MemoryRecord[]
   /** 范围内顶层列出的记忆文件数（ScopeReadResult.listedCount），作 BM25 的 N。 */
@@ -76,7 +87,9 @@ interface DocStats {
   tf: number[][]
   /** 各字段长度（UTF-16 单元数） */
   len: number[]
-  /** 命中的查询 token 数：任一字段分词含该 token，或任一字段小写原文以子串含它，即计 1 */
+  /** 各查询 token 是否命中：任一字段分词含该 token，或任一字段小写原文以子串含它 */
+  hit: boolean[]
+  /** 命中的查询 token 数 */
   hitCount: number
 }
 
@@ -118,7 +131,54 @@ function collectStats(
     lower ??= texts.map(t => t.toLowerCase())
     hit[i] = lower.some(t => t.includes(tok))
   }
-  return { record, tf, len, hitCount: hit.filter(Boolean).length }
+  return { record, tf, len, hit, hitCount: hit.filter(Boolean).length }
+}
+
+// 与分词器的整词同一个字符集：字母、组合附加符、数字、_、-。整词里出现这之外的字符（. / : 等），分词就会把它打散
+const WORD_CHARS_ONLY = /^[\p{L}\p{M}\p{N}_-]*$/u
+const HAS_ALNUM = /[\p{L}\p{N}]/u
+// 书名号、全角括号、弯引号、反引号只用来包裹行文，全角句读（，。、；：！？…—）只用来断句，都不属于字面值：
+// 《分片上传》、`node:sqlite`、（0.2.1-rc.2）、分片上传，断点续传。和空白一样当分隔
+const WORD_SEPARATORS = /[\s《》〈〉「」『』【】〔〕〖〗［］（）｛｝“”‘’`，。、；：！？…—]+/u
+// 整词首尾的半角句读、括号与引号是行文带进来的：「怎么办?」「(0.2.1-rc.2)」先剥掉再判断
+const EDGE_OPEN = /^[(\[{"']+/u
+const EDGE_CLOSE = /^[)\]}"'.,;!?:]$/u
+const OPENER: Readonly<Record<string, string>> = { ')': '(', ']': '[', '}': '{' }
+
+/**
+ * 剥掉整词首尾的半角句读、括号与引号，但留下属于字面值的两种：紧跟 ASCII 标识符的冒号是命名空间前缀（node:、npm:），
+ * 词里有左括号与之配对的右括号是代码的一部分（arr[0]、foo()）。中文后的冒号照旧剥掉。
+ */
+function trimEdges(word: string): string {
+  let w = word.replace(EDGE_OPEN, '')
+  while (w !== '') {
+    const last = w.at(-1)!
+    const rest = w.slice(0, -1)
+    if (!EDGE_CLOSE.test(last)) break
+    if (last === ':' && /[\w-]$/.test(rest)) break
+    const opener = OPENER[last]
+    if (opener !== undefined && rest.split(opener).length > rest.split(last).length) break
+    w = rest
+  }
+  return w
+}
+
+/**
+ * 锚点词：查询按空白与包裹符号切出的整词（剥掉首尾句读和括号）里，含标点（上面字符集以外的字符）且带字母或数字的那些，小写、去重。
+ * 版本号 0.2.1-rc.2、路径 .archive/、node:sqlite 这类字面值分词后只剩 1-rc、rc 之类的碎片，
+ * 只差一个版本号的几条记录同分；按整词字面比较才分得出。不含标点的整词不算：它们的分词结果已经代表字面，
+ * 再按字面排会让恰好含这串字的记录压过分数更高的记录。
+ */
+export function anchorTerms(query: string): string[] {
+  const words = query.toLowerCase().split(WORD_SEPARATORS).map(trimEdges).filter(w => w !== '' && !WORD_CHARS_ONLY.test(w) && HAS_ALNUM.test(w))
+  return [...new Set(words)]
+}
+
+/** 记录字面含几个锚点词：id、name、summary、tags、content 的小写原文，子串即算。 */
+export function countAnchorHits(record: MemoryRecord, anchors: readonly string[]): number {
+  if (anchors.length === 0) return 0
+  const haystack = [record.id, record.name, record.summary, record.tags.join(' '), record.content].join('\n').toLowerCase()
+  return anchors.filter(a => haystack.includes(a)).length
 }
 
 /** 恒正 idf：小语料下常见词不会取负、不会把命中它的记录往下压。 */
@@ -147,7 +207,7 @@ function bm25f(doc: DocStats, idfs: readonly number[], { k1, b, fields }: Rankin
  * df 按文档粒度在候选集上数：token 是记录原文的子串，被预筛跳过的文件对 df 贡献为零，候选集上数就是精确值。
  * df 只数有词频的文档：只以子串命中的 token 分数为 0，不参与 idf。
  */
-export function rankRecords({ tokens, legacyTerms, records, listedCount, tokenize, params = RANKING_PARAMS }: RankInput): RankedRecord[] {
+export function rankRecords({ tokens, legacyTerms, anchors = [], records, listedCount, tokenize, params = RANKING_PARAMS }: RankInput): RankedRecord[] {
   const tokenIndex = new Map(tokens.map((t, i) => [t, i] as const))
   const eligible = substringEligible(tokens)
   const docs = records.map(r => collectStats(r, tokenIndex, eligible, tokenize))
@@ -161,11 +221,24 @@ export function rankRecords({ tokens, legacyTerms, records, listedCount, tokeniz
   const out: RankedRecord[] = []
   for (const doc of docs) {
     if (tokens.length > 0 && doc.hitCount > 0) {
-      out.push({ record: doc.record, tier: doc.hitCount === tokens.length ? 'all' : 'partial', score: bm25f(doc, idfs, params) })
+      out.push({
+        record: doc.record, tier: doc.hitCount === tokens.length ? 'all' : 'partial', coverage: anchors.length > 0 ? doc.hitCount : 0,
+        anchorHits: countAnchorHits(doc.record, anchors), score: bm25f(doc, idfs, params), tokenHits: doc.hit,
+      })
       continue
     }
     const legacy = legacyTerms.length > 0 ? matchScore(doc.record, legacyTerms as string[]) : 0
-    if (legacy > 0) out.push({ record: doc.record, tier: 'substring', score: legacy })
+    if (legacy > 0) out.push({ record: doc.record, tier: 'substring', coverage: 0, anchorHits: countAnchorHits(doc.record, anchors), score: legacy, tokenHits: doc.hit })
   }
   return out
+}
+
+/** 档 → 覆盖 → 字面锚点命中数 → 分数 → confidence → lastConfirmedAt；档位升序，其余降序。 */
+export function compareRanked(x: RankedRecord, y: RankedRecord): number {
+  return TIER_ORDER[x.tier] - TIER_ORDER[y.tier]
+    || y.coverage - x.coverage
+    || y.anchorHits - x.anchorHits
+    || y.score - x.score
+    || y.record.confidence - x.record.confidence
+    || y.record.lastConfirmedAt - x.record.lastConfirmedAt
 }

@@ -13,8 +13,8 @@ import { createContext, useContext, useEffect, useMemo, useState, useSyncExterna
 import {
   GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, encodeMemoryCommand, sessionViewFile,
   deletedViewSchema, healthViewSchema, libraryViewSchema, pendingViewSchema, sessionViewSchema, workspaceMapViewSchema,
-  memoryCommandResultSchema,
-  type DeletedView, type HealthView, type LibraryView, type MemoryCommand, type MemoryCommandResult,
+  layerOfMemory, memoryCommandResultSchema,
+  type DeletedView, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCard, type MemoryCommand, type MemoryCommandResult,
   type PendingItem, type PendingView, type SessionView, type WorkspaceMapView,
 } from '../src/gui/contract.ts'
 import type {
@@ -72,6 +72,8 @@ export interface MemoryGateway {
   execute(sessionId: string, command: MemoryCommand): Promise<MemoryCommandResult>
   /** hook：删过的记忆（见 createDeletionStore），各处显示同一条记忆时读它。 */
   useDeletions(): Deletions
+  /** hook：借来的会话能不能用模型、用的是哪个（「让模型改」面板的提示与「生成修改」）。打开面板时才问，每个会话在页面里只问一次 model-info。 */
+  useModel(session: BorrowedSession): ModelState
   /** hook：插件配置里界面要用的几项；宿主还没给出（或不服务这份配置）时为 undefined。 */
   useConfig(): PluginConfig | undefined
   /** 写一个配置字段（`configForms.set`，单字段快捷写入）；宿主接受为 true。 */
@@ -81,6 +83,9 @@ export interface MemoryGateway {
   /** 用默认应用打开宿主上的文件，或在文件管理器中显示；宿主接受为 true。 */
   openPath(path: string, action?: 'open' | 'reveal'): Promise<boolean>
 }
+
+/** unknown：还没问到、或没有会话，按可用处理；unavailable：服务端说借来的会话拿不到模型；model 缺省 = 不知道名字。 */
+export type ModelState = { status: 'unknown' } | { status: 'ready'; model: string | undefined } | { status: 'unavailable' }
 
 /** 界面用到的配置项（宿主配置段 `plastic-memory` 的子集，值已按 schema 带上默认值）。 */
 export interface PluginConfig {
@@ -92,48 +97,65 @@ export interface PluginConfig {
 
 /** 删除状态的一份快照：soft 进了最近删除、可恢复；hard 是彻底删除；undefined = 没删或看不出来。 */
 export interface Deletions {
-  /** savedAt：记下这条记忆的时刻；给了才可能按视图判彻底删除（见 createDeletionStore 第 3 条）。 */
-  of(id: string, savedAt?: number): 'soft' | 'hard' | undefined
+  /**
+   * layer：页面上这一份所在的层（同 id 在几层各有一份时各算各的）；不知道层时按 id 判，任一份删了都算。
+   * savedAt：记下这条记忆的时刻；给了才可能按视图判彻底删除（见 createDeletionStore 第 3 条）。
+   */
+  of(id: string, layer?: GuiLayerRef, savedAt?: number): 'soft' | 'hard' | undefined
 }
 
+/** 一份副本的键：id + 层。不知道层时没有键。 */
+function copyKey(id: string, layer: GuiLayerRef | undefined): string | undefined {
+  return layer === undefined ? undefined : JSON.stringify([id, layer.kind === 'global' ? null : layer.workspacePath])
+}
+
+/** 经本网关的一次动作。copy 缺省 = 命令没带层，同 id 各层都算。 */
+interface LocalDeletion { id: string; copy: string | undefined; how: 'soft' | 'hard' | 'restored' }
+
 /**
- * 删除状态，全部记忆、最近删除、右侧栏、对话交付卡显示同一条记忆时都读这一份，删除后不会有的地方还留着删除按钮。三个来源：
+ * 删除状态，全部记忆、最近删除、右侧栏、对话交付卡显示同一条记忆时都读这一份，删除后不会有的地方还留着删除按钮。
+ * 软删与恢复按 id + 层记：同 id 在几层各有一份时，删掉其中一份不影响别层那份的显示。三个来源：
  * 1. 经本网关发出的 forget / hard-delete / restore 成功后记一笔，不等视图刷新。
- * 2. 读到的视图：在最近删除里、全部记忆里又没有在用副本的，算软删（对话里 agent 自己删的也在这里）。别层同 id 副本还在用时
+ * 2. 读到的视图：在最近删除里、全部记忆里同一层又没有在用副本的，算软删（对话里 agent 自己删的也在这里）。别层同 id 副本还在用时
  *    删掉的那份也列在最近删除里，所以要两份视图都读到过才判断。
- * 3. 彻底删除只在证据确凿时判：两份视图出自同一次收集（generatedAt 相同），晚于这条记忆记下的时刻，而两份里都没有它。
- *    视图早于记下的时刻（刚记下、视图还没写）、两份不是同一次收集、旧视图文件没有 generatedAt，都不判。
+ * 3. 彻底删除要有正面证据：本页读到的视图里出现过这条，之后两份视图出自同一次收集（generatedAt 相同）、晚于这条记忆记下的
+ *    时刻，而全部记忆、最近删除、不在用的 id（已取代等）里都没有它，也没有读不全的地方（读不出的文件可能就是它）。
+ *    只是缺席算不知道：从没在视图里出现过（收集落在记下与写盘之间）、视图早于记下的时刻、两份不是同一次收集、
+ *    旧视图文件缺这些字段，都不判。这一条按 id 判。
  * 第 1 条记的软删 / 恢复在视图确认之前优先（视图可能还是动作之前的）：软删要出现在最近删除里、恢复要重新出现在全部记忆里，
  * 确认后去掉，之后以视图为准；有本地记录时不按第 3 条判；
  * 彻底删除一直记着。页面关掉就没了。
  */
 export function createDeletionStore() {
-  /** 经本网关的动作，视图确认前优先。 */
-  const local = new Map<string, 'soft' | 'hard' | 'restored'>()
-  /** 最近一次读到的两份视图：最近删除里的 id、全部记忆里在用的 id，和各自的生成时刻。 */
-  let deleted: { ids: ReadonlySet<string>; at: number | undefined } | undefined
-  let library: { ids: ReadonlySet<string>; at: number | undefined } | undefined
-  /** 视图证明是软删的 id。 */
-  let viewSoft: ReadonlySet<string> = new Set()
+  /** 经本网关的动作，视图确认前优先。键是副本键，命令没带层时是 id；后记的排在后面。 */
+  const local = new Map<string, LocalDeletion>()
+  /** 最近一次读到的两份视图：最近删除里的、全部记忆里在用的（id 与副本键），和各自的生成时刻。 */
+  let deleted: { ids: ReadonlySet<string>; copies: ReadonlySet<string>; at: number | undefined } | undefined
+  /** inactive：不在用的 id；全部记忆视图没给出、或有读不全的地方时为 undefined（判不了彻底删除）。 */
+  let library: { ids: ReadonlySet<string>; copies: ReadonlySet<string>; inactive: ReadonlySet<string> | undefined; at: number | undefined } | undefined
+  /** 本页读到的视图里出现过的 id（在用、最近删除、不在用都算）：判彻底删除的前提。 */
+  const seen = new Set<string>()
+  /** 视图证明是软删的副本键，和不知道层时用的 id。 */
+  let viewSoft: { copies: ReadonlySet<string>; ids: ReadonlySet<string> } = { copies: new Set(), ids: new Set() }
   const listeners = new Set<() => void>()
   const snapshot = (): Deletions => {
-    const known = new Map<string, 'soft' | 'hard'>()
-    for (const id of viewSoft) known.set(id, 'soft')
-    for (const [id, how] of local) {
-      if (how === 'restored') known.delete(id)
-      else known.set(id, how)
-    }
-    const localIds = new Set(local.keys())
+    const mine = [...local.values()].reverse()   // 最近的在前
+    const soft = viewSoft
+    const seenIds = new Set(seen)
     // 两份视图出自同一次收集才拿来判彻底删除
     const at = deleted?.at !== undefined && deleted.at === library?.at ? deleted.at : undefined
     const lib = library
     const del = deleted
     return {
-      of(id, savedAt) {
-        const how = known.get(id)
-        if (how !== undefined || localIds.has(id)) return how
-        if (savedAt === undefined || at === undefined || at <= savedAt || lib === undefined || del === undefined) return undefined
-        return lib.ids.has(id) || del.ids.has(id) ? undefined : 'hard'
+      of(id, layer, savedAt) {
+        const copy = copyKey(id, layer)
+        // 本地记录：知道层时取这一份的，没有再取命令没带层的那笔；不知道层时取这个 id 最近的一笔
+        const own = mine.find(e => e.id === id && (copy === undefined || e.copy === copy))
+          ?? (copy === undefined ? undefined : mine.find(e => e.id === id && e.copy === undefined))
+        if (own !== undefined) return own.how === 'restored' ? undefined : own.how
+        if (copy !== undefined ? soft.copies.has(copy) : soft.ids.has(id)) return 'soft'
+        if (savedAt === undefined || at === undefined || at <= savedAt || lib?.inactive === undefined || del === undefined || !seenIds.has(id)) return undefined
+        return lib.ids.has(id) || del.ids.has(id) || lib.inactive.has(id) ? undefined : 'hard'
       },
     }
   }
@@ -147,19 +169,41 @@ export function createDeletionStore() {
     subscribe(fn: () => void) { listeners.add(fn); return () => { listeners.delete(fn) } },
     record(command: MemoryCommand, result: MemoryCommandResult) {
       if (!result.ok || (command.cmd !== 'forget' && command.cmd !== 'hard-delete' && command.cmd !== 'restore')) return
-      local.set(command.memoryId, command.cmd === 'forget' ? 'soft' : command.cmd === 'hard-delete' ? 'hard' : 'restored')
+      const copy = copyKey(command.memoryId, command.layer)
+      const key = copy ?? command.memoryId
+      local.delete(key)   // 重新排到最后：不知道层时取最近的一笔
+      local.set(key, { id: command.memoryId, copy, how: command.cmd === 'forget' ? 'soft' : command.cmd === 'hard-delete' ? 'hard' : 'restored' })
       publish()
     },
     /** 读到一份最近删除或全部记忆视图：重算视图证明的软删，去掉视图已经确认的本地记录。 */
     settle(view: { name: 'deleted'; data: DeletedView } | { name: 'library'; data: LibraryView }) {
-      if (view.name === 'deleted') deleted = { ids: new Set(view.data.items.map(item => item.memory.id)), at: view.data.generatedAt }
-      else library = { ids: new Set(view.data.layers.flatMap(layer => layer.items.map(memory => memory.id))), at: view.data.generatedAt }
+      const keysOf = (memories: readonly MemoryCard[]) => new Set(memories.flatMap(m => copyKey(m.id, layerOfMemory(m)) ?? []))
+      if (view.name === 'deleted') {
+        const memories = view.data.items.map(item => item.memory)
+        deleted = { ids: new Set(memories.map(m => m.id)), copies: keysOf(memories), at: view.data.generatedAt }
+        for (const id of deleted.ids) seen.add(id)
+      } else {
+        const { inactiveIds, hasUnreadFiles } = view.data
+        const memories = view.data.layers.flatMap(layer => layer.items)
+        library = {
+          ids: new Set(memories.map(m => m.id)),
+          copies: keysOf(memories),
+          inactive: inactiveIds === undefined || hasUnreadFiles !== false ? undefined : new Set(inactiveIds),
+          at: view.data.generatedAt,
+        }
+        for (const id of [...library.ids, ...inactiveIds ?? []]) seen.add(id)
+      }
       if (deleted === undefined || library === undefined) { publish(); return }
-      const active = library.ids
-      viewSoft = new Set([...deleted.ids].filter(id => !active.has(id)))
+      const active = library
+      viewSoft = {
+        copies: new Set([...deleted.copies].filter(copy => !active.copies.has(copy))),
+        ids: new Set([...deleted.ids].filter(id => !active.ids.has(id))),
+      }
       // 视图确认：软删的出现在最近删除里，恢复的重新出现在全部记忆里
-      for (const [id, how] of local) {
-        if ((how === 'soft' && viewSoft.has(id)) || (how === 'restored' && active.has(id) && !viewSoft.has(id))) local.delete(id)
+      for (const [key, e] of local) {
+        const isSoft = e.copy !== undefined ? viewSoft.copies.has(e.copy) : viewSoft.ids.has(e.id)
+        const isActive = e.copy !== undefined ? active.copies.has(e.copy) : active.ids.has(e.id)
+        if ((e.how === 'soft' && isSoft) || (e.how === 'restored' && isActive && !isSoft)) local.delete(key)
       }
       publish()
     },
@@ -437,6 +481,29 @@ function createRootStore(run: RunLine) {
   return store
 }
 
+const MODEL_UNKNOWN: ModelState = Object.freeze({ status: 'unknown' })
+
+/** 各会话的模型：第一次用到时问一次 model-info，几处同时用只发一条，结果记到页面关掉。 */
+function createModelStore(run: RunLine) {
+  const states = new Map<string, ModelState>()
+  const listeners = new Set<() => void>()
+  return {
+    get: (sessionId: string | undefined) => (sessionId === undefined ? undefined : states.get(sessionId)) ?? MODEL_UNKNOWN,
+    subscribe(fn: () => void) { listeners.add(fn); return () => { listeners.delete(fn) } },
+    probe(sessionId: string) {
+      if (states.has(sessionId)) return
+      states.set(sessionId, MODEL_UNKNOWN)
+      void run(sessionId, encodeMemoryCommand({ cmd: 'model-info' })).then((r) => {
+        const result = decodeExecution('model-info', r)
+        // 别的失败（宿主出错、旧插件不认这条命令）不当成拿不到模型：「生成修改」照常可点，真拿不到时生成会写原因
+        states.set(sessionId, result.ok ? { status: 'ready', model: result.model }
+          : result.code === 'llm-unavailable' ? { status: 'unavailable' } : { status: 'ready', model: undefined })
+        for (const fn of listeners) fn()
+      })
+    },
+  }
+}
+
 interface ReadState<V> { key: string; trigger: string; view: ViewState<V> }
 
 /** 网关绑定函数：插槽根组件用自己的标准 props 绑定一份网关。 */
@@ -455,12 +522,43 @@ export function createHostGateway(ctx: HostContext): BindGateway {
     }
   }
   const deletions = createDeletionStore()
+  /**
+   * 本页成功执行的命令次数。命令回结果前服务端已写好视图，但宿主的文件观察会漏掉紧挨着的第二次替换、版本停在上一版，
+   * 所以它也算进读视图的触发：本页的命令一成功，挂着的视图都重读一次。
+   */
+  let succeeded = 0
+  const succeededListeners = new Set<() => void>()
+  const subscribeSucceeded = (fn: () => void) => { succeededListeners.add(fn); return () => { succeededListeners.delete(fn) } }
+  const getSucceeded = () => succeeded
   const execute: MemoryGateway['execute'] = async (sessionId, command) => {
     const result = decodeExecution(command.cmd, await run(sessionId, encodeMemoryCommand(command)))
     deletions.record(command, result)
+    if (result.ok) { succeeded++; for (const fn of succeededListeners) fn() }
     return result
   }
   const root = createRootStore(run)
+  const models = createModelStore(run)
+  /**
+   * 同一份视图文件、同一次触发（版本 + 刷新次数）只读一次、解析一次：几处同时挂着同一视图（每张对话交付卡一个）时共用结果。
+   * 每个文件只留最近一次触发；读失败的不留，下一个来读的再试。
+   */
+  const viewReads = new Map<string, { trigger: string; result: Promise<ViewState<unknown>> }>()
+  const readView = <N extends ViewName>(sessionId: string, path: string, trigger: string, name: N): Promise<ViewState<ViewMap[N]>> => {
+    const cached = viewReads.get(path)
+    if (cached?.trigger === trigger) return cached.result as Promise<ViewState<ViewMap[N]>>
+    const result = ctx.remote.workspaceFiles.read(sessionId, path, {}).then((r): ViewState<ViewMap[N]> => {
+      const view: ViewState<ViewMap[N]> = r.ok
+        ? parseView(name, r.value.text)
+        : r.error.code === 'workspace-file/not-found' ? { status: 'missing' } : { status: 'error', message: `${r.error.code}: ${r.error.message}` }
+      if (view.status === 'ready' && name === 'deleted') deletions.settle({ name, data: view.data as DeletedView })
+      if (view.status === 'ready' && name === 'library') deletions.settle({ name, data: view.data as LibraryView })
+      return view
+    }, (err: unknown): ViewState<ViewMap[N]> => ({ status: 'error', message: String(err) }))
+    const entry = { trigger, result: result as Promise<ViewState<unknown>> }
+    viewReads.set(path, entry)
+    void result.then((view) => { if (view.status === 'error' && viewReads.get(path) === entry) viewReads.delete(path) })
+    return result
+  }
   // configForms 是可选服务：就位时记下，离开时清掉（根上下文没 inject 它，不能直接读）
   let configForms: ConfigFormsService | undefined
   let binding: ConfigBinding | undefined
@@ -494,10 +592,13 @@ export function createHostGateway(ctx: HostContext): BindGateway {
       const version = stat.status === 'live' ? stat.value?.version : undefined
       const isMissing = stat.status === 'failed' && stat.failure?.code === 'workspace-file/not-found'
       useEffect(() => { if (!isPassive && sessionId !== undefined && isMissing) root.ensureViews(sessionId) }, [isPassive, sessionId, isMissing])
-      const key = `${sessionId}\0${path}`
-      // 有版本按版本读，refresh-views 成功后也重读一次（宿主推新版本之前先读到重写的内容）；
+      // 读到的内容按文件认，不按经哪个会话读：借来的会话中途换了（它开始跑一轮、换了更新的会话），全局视图还是同一个文件，
+      // 沿用已读到的内容，不回到读取中（否则整页列表重挂，卡片上正在进行的编辑、生成都丢了）；「这次对话」视图的路径带会话 id，换会话照样重读
+      const key = path ?? ''
+      // 有版本按版本读，refresh-views 或本页的命令成功后也重读一次（宿主推新版本之前、或漏推时先读到重写的内容）；
       // 资源还停在 not-found、但 refresh-views 已写过文件时，按刷新次数直接读一次
-      const trigger = version !== undefined ? `${version}#${rootState.refreshes}` : isMissing && rootState.refreshes > 0 ? `refresh:${rootState.refreshes}` : undefined
+      const commands = useSyncExternalStore(subscribeSucceeded, getSucceeded)
+      const trigger = version !== undefined ? `${version}#${rootState.refreshes}#${commands}` : isMissing && rootState.refreshes > 0 ? `refresh:${rootState.refreshes}` : undefined
       const [read, setRead] = useState<ReadState<ViewMap[N]> | undefined>(undefined)
       const isStillMissing = isMissing && trigger !== undefined && read?.key === key && read.trigger === trigger && read.view.status === 'missing'
       useEffect(() => { if (!isPassive && sessionId !== undefined && isStillMissing) root.revalidate(sessionId) }, [isPassive, sessionId, isStillMissing])
@@ -511,15 +612,7 @@ export function createHostGateway(ctx: HostContext): BindGateway {
       useEffect(() => {
         if (sessionId === undefined || path === undefined || trigger === undefined) return
         let live = true
-        void ctx.remote.workspaceFiles.read(sessionId, path, {}).then((r) => {
-          if (!live) return
-          const view: ViewState<ViewMap[N]> = r.ok
-            ? parseView(name, r.value.text)
-            : r.error.code === 'workspace-file/not-found' ? { status: 'missing' } : { status: 'error', message: `${r.error.code}: ${r.error.message}` }
-          if (view.status === 'ready' && name === 'deleted') deletions.settle({ name, data: view.data as DeletedView })
-          if (view.status === 'ready' && name === 'library') deletions.settle({ name, data: view.data as LibraryView })
-          setRead({ key, trigger, view })
-        }, (err: unknown) => { if (live) setRead({ key, trigger, view: { status: 'error', message: String(err) } }) })
+        void readView(sessionId, path, trigger, name).then((view) => { if (live) setRead({ key, trigger, view }) })
         return () => { live = false }
       }, [sessionId, path, trigger, key, name])
 
@@ -555,6 +648,12 @@ export function createHostGateway(ctx: HostContext): BindGateway {
       execute,
       useDeletions() {
         return useSyncExternalStore(deletions.subscribe, deletions.get)
+      },
+      useModel(session) {
+        const sessionId = session.kind === 'ready' ? session.sessionId : undefined
+        const state = useSyncExternalStore(models.subscribe, () => models.get(sessionId))
+        useEffect(() => { if (sessionId !== undefined) models.probe(sessionId) }, [sessionId])
+        return state
       },
       useConfig() {
         const { get, subscribe } = config()

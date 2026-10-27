@@ -1,17 +1,25 @@
 /**
- * 右侧栏「记忆」tab 正文（DESIGN.md Layout「右侧栏记忆 tab 内容（结构 A）」）。从上到下：
- * 面包屑「本项目 / 项目名」→ 这次对话带入的记忆（用量条）→ 这次对话新记的（可删）→ 带入的记忆（按类型分组，
+ * 右侧栏「记忆」tab 正文（DESIGN.md Layout「右侧栏记忆 tab 内容（结构 A）」）。只讲插件放进上下文的那份快照和这次新写入的，
+ * 对话中 memory_search 搜到的算普通上下文，不列、不计用量。从上到下：
+ * 面包屑「本项目 / 项目名」→ 对话开始时 / 重新 / 压缩后重新带入的记忆（随快照来历换标题，用量条）→ 这次新写入的（可删，
+ * 进了新快照的移到带入的记忆）→ 带入的记忆（按类型分组，组标题标出全文、只带摘要或只带标题；
  * 带入的记忆有待决冲突时冲突卡挂在那条记忆所在组里就地裁决：横向是两条记忆，垂直是记忆对 AGENTS.md 基线）→ 底部一行入口（其余待处理只在这里带数字）。
- * 数据：会话视图（带入 / 新记的 id、用量）、全部记忆视图（按 id 取记忆卡）、待处理视图（冲突与本项目待处理数）、
+ * 数据：会话视图（来历、带入 / 全文 / 只带标题 / 新写入的 id、用量）、全部记忆视图（按 id 取记忆卡）、待处理视图（冲突与本项目待处理数）、
  * 健康视图（bootedAt：插件本次加载时刻）。
  * 四种状态：无记忆、有全局没本项目、正常、frozenAt 早于插件本次加载（重启后未重新带入；视图没带 bootedAt 时不判断）。
  * 刚裁决的冲突在本地留原位可撤销，tab 卸载后收起。
  * 裁决碰上这条冲突正在别处处理或刚处理完（什么都没动）：冲突卡还在时原位说明，那边的结果写进视图、卡片消失后
  * 说明挪到「带入的记忆」上面（没有记忆了就在空状态上面），下一次动作时收起。
- * 新记的含密钥时不能软删（服务端回 has-secret，什么都没动）：原位确认，「彻底删除」发 hard-delete，删后原位留不可恢复的说明，tab 卸载后收起。
+ * 新写入的行尾删除先在原位确认「删除这条？ 删除 · 取消」，点「删除」才发 forget。
+ * 新写入的含密钥时不能软删（服务端回 has-secret，什么都没动）：原位确认，「彻底删除」发 hard-delete，删后原位留不可恢复的说明，tab 卸载后收起。
+ * 新写入的是全局提升候选时就地给「留在本项目」「提升为全局」，处理过的换成结果文字（见 promote-in-place.tsx），不进底部的待处理计数。
+ * 这次对话里模型改写、替代已有记忆的（全部记忆视图的 modelChanges，按会话认领、晚于这份快照的；同一条只列最近那次改写，本次新记的不另列）也列在「这次新写入的」：
+ * 改写的那条带「已改写」、「改前 / 改后」对照与「撤销修改」，替代写「「新」替代了「旧」」与「撤销修改」（见 model-change.tsx）。
  */
 import { useMemo, useRef, useState, type ReactNode } from 'react'
-import { CONFLICT_ACTION_VERDICTS, layerOfMemory, type MemoryCard as MemoryCardData, type MemoryCommand, type PendingItem } from '../../src/gui/contract.ts'
+import {
+  CONFLICT_ACTION_VERDICTS, layerOfMemory, type MemoryCard as MemoryCardData, type MemoryCommand, type ModelChange, type PendingItem, type SnapshotOrigin,
+} from '../../src/gui/contract.ts'
 import { samePath, useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { baseName, formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
@@ -24,8 +32,11 @@ import { ContextBudgetBar } from '../ui/ContextBudgetBar.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { TrashIcon } from '../ui/TrashIcon.tsx'
-import { CrossConfirm, crossConfirmCss, isHandledElsewhere, SecretDeleteConfirm } from '../pending/action.tsx'
+import { CrossConfirm, crossConfirmCss, isHandledElsewhere, DeleteWithConfirm, SecretDeleteConfirm } from '../pending/action.tsx'
+import { promoteInPlaceCss, promotionOf, usePromoteInPlace, type InPlacePromotion } from '../pending/promote-in-place.tsx'
+import { ModelChangeLine, RewrittenChip, modelChangeCss } from '../pending/model-change.tsx'
 import { keepFocusInPlace } from '../ui/focus-return.ts'
+import { isLiveWrite, sessionCards, writtenSinceSnapshot } from './session-memories.ts'
 
 type Conflict = Extract<PendingItem, { kind: 'conflict-horizontal' }>
 type VerticalConflict = Extract<PendingItem, { kind: 'conflict-vertical' }>
@@ -37,6 +48,13 @@ type Ruled =
   | { kind: 'vertical'; decisionId: string; verdict: Verdict; memory: MemoryCardData }
 
 const ruledMemories = (r: Ruled): MemoryCardData[] => r.kind === 'horizontal' ? [r.left, r.right] : [r.memory]
+
+/** 用量标题随快照来历变。 */
+const USAGE_TITLE: Record<SnapshotOrigin, LocaleKey> = {
+  start: 'sidebar.usage.title',
+  resumed: 'sidebar.usage.titleResumed',
+  compacted: 'sidebar.usage.titleCompacted',
+}
 
 type Entry =
   | { kind: 'memory'; memory: MemoryCardData }
@@ -67,6 +85,8 @@ function inWorkspace(item: PendingItem, ws: string): boolean {
     case 'conflict-horizontal': return own(item.left) || own(item.right)
     case 'overflow': return samePath(item.workspacePath, ws)
     case 'unreadable-file': return item.layer.kind === 'workspace' && samePath(item.layer.workspacePath, ws)
+    // 右侧栏这次不分级，建议整理不算进「本项目还有 N 处待处理」
+    case 'advice': return false
   }
 }
 
@@ -82,6 +102,8 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const deletions = gateway.useDeletions()
   const [ruled, setRuled] = useState<readonly Ruled[]>([])
   const [purged, setPurged] = useState<ReadonlySet<string>>(new Set())
+  /** 这里写进了 AGENTS.md 的：项目里那条进了最近删除、离开了视图，按 id 留着那张卡和结果。 */
+  const [wroteAgentsMd, setWroteAgentsMd] = useState<ReadonlyMap<string, MemoryCardData>>(new Map())
   const [secretId, setSecretId] = useState<string | undefined>(undefined)
   // 在途的动作按条（待决项 id / 记忆 id）记：别的动作开始或结束都不让这一条重新可点，同一条冲突不会发出两条相反的裁决。
   // ref 同步拦截，state 只管渲染
@@ -146,20 +168,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
 
   const snapshot = sessionView.status === 'ready' ? sessionView.data : undefined
   const ws = snapshot?.workspacePath ?? cwd
-  const byId = new Map<string, MemoryCardData>()
-  let globalCount = 0
-  let projectCount = 0
-  for (const { layer, items } of library.data.layers) {
-    const isOwn = layer.kind === 'workspace' && ws !== undefined && samePath(layer.workspacePath, ws)
-    if (layer.kind === 'global') globalCount += items.length
-    else if (isOwn) projectCount += items.length
-    // 只收会话看得见的层（global + 本项目）；同 id 两层都有时取服务端会取的那份：updatedAt 新者，相同时本项目优先
-    if (layer.kind !== 'global' && !isOwn) continue
-    for (const item of items) {
-      const current = byId.get(item.id)
-      if (current === undefined || item.updatedAt > current.updatedAt || (item.updatedAt === current.updatedAt && isOwn)) byId.set(item.id, item)
-    }
-  }
+  const { byId, globalCount, projectCount } = sessionCards(library.data, ws)
   // 彻底删除的那条视图里已经没有了，按 id 原位留一行说明（删的是最后一条时留在空状态上面，也是焦点的落点）
   const purgedNote = (id: string) => <p key={id} className="pm-side-hint" tabIndex={-1}>{t('pending.secret.deletedNotice')}</p>
   const refusedNote = <p className="pm-side-error" role="alert" tabIndex={-1}>{t('sidebar.action.refused')}</p>
@@ -184,12 +193,19 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const shown = new Set<string>()
   const groups = new Map<string, Entry[]>()
   const counts = new Map<string, number>()
+  // 每组按带入方式计数：快照按类型决定全文（core 区）、带摘要的索引行还是只带名称和标签的索引行，一组正常只有一种
+  const coreIds = new Set(snapshot?.coreIds ?? [])
+  const titleOnlyIds = new Set(snapshot?.titleOnlyIds ?? [])
+  const fullCounts = new Map<string, number>()
+  const titleCounts = new Map<string, number>()
   const push = (type: string, entry: Entry) => { groups.set(type, [...groups.get(type) ?? [], entry]) }
   for (const id of snapshot?.injectedIds ?? []) {
     const done = ruled.find(r => ruledMemories(r).some(m => m.id === id))
     const memory = byId.get(id) ?? (done === undefined ? undefined : ruledMemories(done).find(m => m.id === id))
     if (memory === undefined) continue
     counts.set(memory.type, (counts.get(memory.type) ?? 0) + 1)
+    if (coreIds.has(id)) fullCounts.set(memory.type, (fullCounts.get(memory.type) ?? 0) + 1)
+    if (titleOnlyIds.has(id)) titleCounts.set(memory.type, (titleCounts.get(memory.type) ?? 0) + 1)
     if (shown.has(id)) continue
     const open = done === undefined
       ? conflicts.find(c => !ruledIds.has(c.decisionId) && (c.left?.id === id || c.right?.id === id))
@@ -213,11 +229,21 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
       shown.add(id)
     }
   }
-  const saved = (snapshot?.savedIds ?? [])
-    .flatMap((id): Array<{ id: string; memory: MemoryCardData | undefined }> => {
-      const memory = byId.get(id)
-      return isPurged(id) ? [{ id, memory: undefined }] : memory === undefined || deletions.of(id) !== undefined ? [] : [{ id, memory }]
-    })
+  // 这次新写入的只列还没进快照、还在的；彻底删除的原位留说明
+  const saved = (snapshot === undefined ? [] : writtenSinceSnapshot(snapshot))
+    .flatMap((id): Array<{ id: string; memory: MemoryCardData | undefined; isWrittenToAgentsMd?: true }> =>
+      wroteAgentsMd.has(id) ? [{ id, memory: wroteAgentsMd.get(id), isWrittenToAgentsMd: true }]
+        : isPurged(id) ? [{ id, memory: undefined }] : isLiveWrite(id, byId, deletions) ? [{ id, memory: byId.get(id) }] : [])
+  // 这次对话里模型改写、替代的：快照冻结之后的（之前的已在这份快照里，同新写入的口径）。
+  // 同一条改写多次只列最近那次；这次对话里新记的那条再被改写不另列，新写入那行已经是它
+  const sessionChanges = snapshot === undefined ? [] : (library.data.modelChanges ?? [])
+    .filter(c => c.sessionId === sessionId && c.at > snapshot.frozenAt)
+  const createdHere = new Set(snapshot?.savedIds ?? [])
+  const latestRewrite = new Map<string, ModelChange>()
+  for (const c of sessionChanges) {
+    if (c.kind === 'rewrite' && c.at >= (latestRewrite.get(c.memoryId)?.at ?? -Infinity)) latestRewrite.set(c.memoryId, c)
+  }
+  const changes = sessionChanges.filter(c => c.kind === 'supersede' || (!createdHere.has(c.memoryId) && latestRewrite.get(c.memoryId) === c))
   const scope = ws === undefined ? undefined : { kind: 'workspace' as const, workspacePath: ws }
   const restPending = ws === undefined || pending.status !== 'ready'
     ? 0
@@ -250,6 +276,16 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
 
   // 会话快照冻结在插件本次加载之前 = 重启后还没重新带入
   const bootedAt = health.status === 'ready' ? health.data.bootedAt : undefined
+  const usageTitle = t(USAGE_TITLE[snapshot?.origin ?? 'start'])
+  // 混着几种带入方式的组不标
+  const depthMark = (type: string) => {
+    const total = counts.get(type) ?? 0
+    const full = fullCounts.get(type) ?? 0
+    const titleOnly = titleCounts.get(type) ?? 0
+    if (full === total) return t('sidebar.groups.full')
+    if (titleOnly === total) return t('sidebar.groups.titleOnly')
+    return full === 0 && titleOnly === 0 ? t('sidebar.groups.summary') : undefined
+  }
   const usage = snapshot === undefined
     ? sessionView.status === 'missing'
       ? <Note title={t('sidebar.noSnapshot.title')}>{t('sidebar.noSnapshot.body')}</Note>
@@ -257,14 +293,17 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     : bootedAt !== undefined && snapshot.frozenAt < bootedAt
       ? <Note title={t('sidebar.stale.title')}>{t('sidebar.stale.body')}</Note>
       : (
-        <ContextBudgetBar
-          count={snapshot.injectedIds.length}
-          budget={snapshot.budget}
-          tokens={snapshot.tokens}
-          limitTokens={snapshot.usedTokens}
-          droppedCount={snapshot.overflowMode === 'strict' ? snapshot.omittedCount : 0}
-          onHandle={() => { openPage({ tab: 'pending', ...(scope === undefined ? {} : { scope }) }) }}
-        />
+        <>
+          <ContextBudgetBar
+            count={snapshot.injectedIds.length}
+            budget={snapshot.budget}
+            tokens={snapshot.tokens}
+            usedTokens={snapshot.usedTokens}
+            droppedCount={snapshot.overflowMode === 'strict' ? snapshot.omittedCount : 0}
+            onHandle={() => { openPage({ tab: 'pending', ...(scope === undefined ? {} : { scope }) }) }}
+          />
+          <p className="pm-side-hint">{t('sidebar.usage.searchNote')}</p>
+        </>
       )
 
   return (
@@ -274,31 +313,63 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
         : null}
       {projectCount === 0 ? <p className="pm-side-crumb-hint">{t('sidebar.globalOnly')}</p> : null}
 
-      <section className="pm-side-usage" aria-label={t('sidebar.usage.title')}>
-        <h2 className="pm-side-title">{t('sidebar.usage.title')}</h2>
+      <section className="pm-side-usage" aria-label={usageTitle}>
+        <h2 className="pm-side-title">{usageTitle}</h2>
         {usage}
       </section>
 
-      {saved.length > 0
+      {saved.length > 0 || changes.length > 0
         ? (
           <section className="pm-side-section" aria-label={t('sidebar.saved.title')}>
-            <h2 className="pm-side-title">{t('sidebar.saved.title')}</h2>
-            {saved.map(({ id, memory }) => memory === undefined
+            <div className="pm-side-section-head">
+              <h2 className="pm-side-title">{t('sidebar.saved.title')}</h2>
+              <p className="pm-side-hint">{t('sidebar.saved.note')}</p>
+            </div>
+            {saved.map(({ id, memory, isWrittenToAgentsMd }) => memory === undefined
               ? purgedNote(id)
-              : (
-                <div key={id} className="pm-side-saved">
-                  <div className="pm-side-saved-card">{card(memory)}</div>
-                  <button
-                    type="button"
-                    className="pm-side-delete"
-                    aria-label={t('sidebar.saved.delete')}
-                    title={t('sidebar.saved.delete')}
-                    aria-disabled={isWaiting(id) || undefined}
-                    onClick={() => { if (!isWaiting(id)) forget(memory) }}
-                  >
-                    <TrashIcon />
-                  </button>
+              : isWrittenToAgentsMd === true
+                ? <SavedRow key={id} session={session} memory={memory} card={card} state="wrote-agents-md">{null}</SavedRow>
+                : (
+                <SavedRow
+                  key={id}
+                  session={session}
+                  memory={memory}
+                  card={card}
+                  onWroteAgentsMd={() => { setWroteAgentsMd(prev => new Map(prev).set(id, memory)) }}
+                >
+                  <DeleteWithConfirm
+                    onDelete={() => { forget(memory) }}
+                    trigger={open => (
+                      <button
+                        type="button"
+                        className="pm-side-delete"
+                        aria-label={t('sidebar.saved.delete')}
+                        title={t('sidebar.saved.delete')}
+                        aria-disabled={isWaiting(id) || undefined}
+                        onClick={() => { if (!isWaiting(id)) open() }}
+                      >
+                        <TrashIcon />
+                      </button>
+                    )}
+                  />
                   {failed(id)}
+                </SavedRow>
+              ))}
+            {changes.map(change => change.kind === 'rewrite'
+              ? (
+                <div key={change.decisionId} className="pm-side-change" data-memory-id={change.memoryId}>
+                  {card(byId.get(change.memoryId) ?? change.before, <RewrittenChip />)}
+                  <ModelChangeLine session={session} change={change} kind="rewrite" after={byId.get(change.memoryId)} />
+                </div>
+              )
+              : (
+                <div key={change.decisionId} className="pm-side-change" data-memory-id={change.memoryId}>
+                  <ModelChangeLine
+                    session={session}
+                    change={change}
+                    kind="supersede"
+                    bySubject={change.by === undefined ? undefined : byId.get(change.by)?.name}
+                  />
                 </div>
               ))}
           </section>
@@ -315,6 +386,12 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
                 <h3 className="pm-side-group-title">
                   {label(type)}{' '}
                   <span className="pm-side-group-count">{formatNumber(counts.get(type) ?? 0)}</span>
+                  {depthMark(type) === undefined ? null : (
+                    <>
+                      {' '}<i className="pm-sep" aria-hidden="true">·</i>
+                      <span className="pm-side-group-depth">{depthMark(type)}</span>
+                    </>
+                  )}
                 </h3>
                 {entries.map((entry) => {
                   if (entry.kind === 'memory') return <div key={entry.memory.id}>{card(entry.memory)}</div>
@@ -374,7 +451,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
           <p className="pm-side-footer">
             {restPending > 0
               ? t('sidebar.footer.pending', { n: formatNumber(restPending) })
-              : t('sidebar.footer.count', { n: formatNumber(projectCount) })}
+              : t(projectCount === 1 ? 'sidebar.footer.count.one' : 'sidebar.footer.count', { n: formatNumber(projectCount) })}
             <i className="pm-sep" aria-hidden="true">·</i>
             <button
               type="button"
@@ -386,6 +463,27 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
           </p>
         )
         : null}
+    </div>
+  )
+}
+
+/** 这次新写入的一行：记忆卡（提升候选带 chip）+ 行尾删除；提升候选的两个动作和结果在卡片下面一行。 */
+function SavedRow({ session, memory, card, state, onWroteAgentsMd, children }: {
+  session: BorrowedSession
+  memory: MemoryCardData
+  card: (memory: MemoryCardData, chip?: ReactNode) => ReactNode
+  /** 提升状态；缺省按全部记忆视图（写进 AGENTS.md 的由上层给）。 */
+  state?: InPlacePromotion
+  onWroteAgentsMd?: () => void
+  /** 行尾删除与它的反馈。 */
+  children: ReactNode
+}) {
+  const promote = usePromoteInPlace(session, memory, layerOfMemory(memory), state ?? promotionOf(memory), onWroteAgentsMd)
+  return (
+    <div className="pm-side-saved" data-memory-id={memory.id}>
+      <div className="pm-side-saved-card">{card(memory, promote.chip)}</div>
+      {children}
+      <div className="pm-side-saved-promote">{promote.controls}</div>
     </div>
   )
 }
@@ -441,7 +539,7 @@ function ViewNote({ state }: { state: ViewState<unknown> }) {
   return <p className="pm-side-hint" role="status">{text}</p>
 }
 
-export const sidebarTabCss = crossConfirmCss + `
+export const sidebarTabCss = crossConfirmCss + promoteInPlaceCss + modelChangeCss + `
 .pm-side-root { height: 100%; min-height: 0; }
 .pm-side {
   height: 100%; min-height: 0; overflow: auto; scrollbar-gutter: stable;
@@ -460,8 +558,17 @@ export const sidebarTabCss = crossConfirmCss + `
 .pm-side-group { display: flex; flex-direction: column; gap: 12px; }
 .pm-side-group-title { margin: 4px 0 0; font-size: 12px; font-weight: 600; line-height: 1.5; color: var(--pm-text-2); }
 .pm-side-group-count { margin-left: 4px; font-weight: 400; color: var(--pm-text-2); }
-.pm-side-saved { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 4px 8px; }
-.pm-side-saved > .pm-side-error { grid-column: 1 / -1; }
+.pm-side-group-title .pm-sep { margin: 0 6px 0 2px; }
+.pm-side-group-depth { font-weight: 400; color: var(--pm-text-2); }
+.pm-side-section-head { display: flex; flex-direction: column; gap: 2px; }
+.pm-side-saved { display: grid; grid-template-columns: minmax(0, 1fr) 24px; align-items: start; gap: 4px 8px; }
+.pm-side-saved > .pm-side-error, .pm-side-saved > .pm-side-saved-promote { grid-column: 1 / -1; }
+.pm-side-saved-promote { display: flex; flex-direction: column; gap: 8px; }
+.pm-side-saved-promote:empty { display: none; }
+.pm-side-change { display: flex; flex-direction: column; gap: 6px; }
+.pm-side-change > .pm-change:only-child { padding-left: 0; }
+/* 侧栏窄，删除确认放不进行尾：换到卡片下面一行靠右，记忆卡不跟着变窄 */
+.pm-side-saved > .pm-soft-confirm { grid-column: 1 / -1; justify-self: end; }
 .pm-side-delete {
   display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0;
   border: 0; border-radius: var(--dsw-radius-sm, 8px); background: transparent; color: var(--pm-text-2); cursor: pointer;

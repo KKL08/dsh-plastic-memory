@@ -12,6 +12,7 @@ export const settingsZh = {
   'settings.status.secret': '有密钥要处理',
   'settings.status.disabled': '体检已关闭',
   'settings.status.count': '共 {n} 条记忆',
+  'settings.status.count.one': '共 {n} 条记忆',
   'settings.status.lastScan': '上次体检：{date}',
   'settings.status.neverScanned': '还没体检过',
   'settings.status.open': '打开记忆页 ›',
@@ -76,7 +77,7 @@ export const settingsZh = {
   'settings.type.error.decay-invalid': '填一个大于 0 的整数，或者留空。',
 
   'settings.budget.label': '自动带入的记忆上限（token）',
-  'settings.budget.hint': '默认 4,000。包括全局和当前项目的记忆，按各类型「怎么召回」的设置带入全文、一行索引或只列名字。对话中检索到的记忆不计入。',
+  'settings.budget.hint': '默认 4,000，约合 6,700 个汉字或 13,000 个英文字符：中日韩文字和全角标点每个按 0.6 token 估算，其余字符按 0.3。包括全局和当前项目的记忆，按各类型「怎么召回」的设置带入全文、一行索引或只列名字。对话中检索到的记忆不计入。',
   'settings.budget.invalid': '填一个大于 0 的整数。',
   'settings.overflow.label': '超出上限时',
   'settings.overflow.relax': '自动放宽',
@@ -147,6 +148,7 @@ export const settingsEn: Record<keyof typeof settingsZh, string> = {
   'settings.status.secret': 'A secret needs attention',
   'settings.status.disabled': 'Checkups are off',
   'settings.status.count': '{n} memories',
+  'settings.status.count.one': '{n} memory',
   'settings.status.lastScan': 'Last checkup: {date}',
   'settings.status.neverScanned': 'Never checked',
   'settings.status.open': 'Open Memory page ›',
@@ -211,7 +213,7 @@ export const settingsEn: Record<keyof typeof settingsZh, string> = {
   'settings.type.error.decay-invalid': 'Enter a whole number above 0, or leave it empty.',
 
   'settings.budget.label': 'Auto-loaded memory limit (tokens)',
-  'settings.budget.hint': "Default 4,000. Covers global and current-project memories, loaded as full text, one index line or just the name, per each type's Recall setting. Memories found by search during a chat don't count.",
+  'settings.budget.hint': "Default 4,000, about 6,700 Chinese characters or 13,000 English characters: each CJK character or full-width punctuation mark counts as 0.6 tokens, any other character 0.3. Covers global and current-project memories, loaded as full text, one index line or just the name, per each type's Recall setting. Memories found by search during a chat don't count.",
   'settings.budget.invalid': 'Enter a whole number above 0.',
   'settings.overflow.label': 'When over the limit',
   'settings.overflow.relax': 'Relax automatically',

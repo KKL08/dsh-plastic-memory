@@ -6,12 +6,19 @@
 export const sidebarZh = {
   'sidebar.tab.title': '记忆',
   'sidebar.guide.title': '记忆',
-  'sidebar.guide.description': '这次对话带入和新记的记忆',
+  'sidebar.guide.description': '这次对话带入和新写入的记忆',
 
   'sidebar.crumb.scope': '本项目 /',
-  'sidebar.usage.title': '这次对话带入的记忆',
-  'sidebar.saved.title': '这次对话新记的',
+  'sidebar.usage.title': '对话开始时带入的记忆',
+  'sidebar.usage.titleResumed': '重新带入的记忆',
+  'sidebar.usage.titleCompacted': '压缩后重新带入的记忆',
+  'sidebar.usage.searchNote': '对话中搜索到的记忆算普通上下文，不计入这里。',
+  'sidebar.saved.title': '这次新写入的',
+  'sidebar.saved.note': '压缩后或下个对话带入',
   'sidebar.groups.title': '带入的记忆',
+  'sidebar.groups.full': '全文',
+  'sidebar.groups.summary': '只带摘要',
+  'sidebar.groups.titleOnly': '只带标题',
   'sidebar.saved.delete': '删除这条记忆',
 
   'sidebar.empty.title': '还没有记忆',
@@ -25,6 +32,7 @@ export const sidebarZh = {
   'sidebar.footer.pending': '本项目还有 {n} 处待处理',
   'sidebar.footer.pendingLink': '在记忆页处理 ›',
   'sidebar.footer.count': '本项目 {n} 条记忆',
+  'sidebar.footer.count.one': '本项目 {n} 条记忆',
   'sidebar.footer.countLink': '在记忆页查看 ›',
 
   'sidebar.ruled.keepA': '已按 A',
@@ -56,12 +64,19 @@ export const sidebarZh = {
 export const sidebarEn: Record<keyof typeof sidebarZh, string> = {
   'sidebar.tab.title': 'Memory',
   'sidebar.guide.title': 'Memory',
-  'sidebar.guide.description': 'Memories this chat brought in and saved',
+  'sidebar.guide.description': 'Memories this chat brought in and wrote',
 
   'sidebar.crumb.scope': 'This project /',
-  'sidebar.usage.title': 'Brought into this chat',
-  'sidebar.saved.title': 'Saved in this chat',
+  'sidebar.usage.title': 'Brought in when the chat started',
+  'sidebar.usage.titleResumed': 'Brought in again',
+  'sidebar.usage.titleCompacted': 'Brought in again after compaction',
+  'sidebar.usage.searchNote': 'Memories found by search during the chat are regular context and do not count here.',
+  'sidebar.saved.title': 'Written in this chat',
+  'sidebar.saved.note': 'Brought in after compaction or in the next chat',
   'sidebar.groups.title': 'Brought-in memories',
+  'sidebar.groups.full': 'Full text',
+  'sidebar.groups.summary': 'Summary only',
+  'sidebar.groups.titleOnly': 'Title only',
   'sidebar.saved.delete': 'Delete this memory',
 
   'sidebar.empty.title': 'No memories yet',
@@ -75,6 +90,7 @@ export const sidebarEn: Record<keyof typeof sidebarZh, string> = {
   'sidebar.footer.pending': '{n} more pending in this project',
   'sidebar.footer.pendingLink': 'Handle on the Memory page ›',
   'sidebar.footer.count': '{n} memories in this project',
+  'sidebar.footer.count.one': '{n} memory in this project',
   'sidebar.footer.countLink': 'View on the Memory page ›',
 
   'sidebar.ruled.keepA': 'Went with A',

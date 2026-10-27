@@ -16,7 +16,8 @@ export const bigramSegmenter: CjkSegmenter = {
 }
 
 // CJK 取汉字、假名、谚文：三者都不靠空格分词，同样需要滑窗或词典切分。
-const CJK = String.raw`\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}`
+/** CJK 文字的字符类片段（放进 [] 里用，需 u 标志）；快照 token 估算沿用同一口径。 */
+export const CJK = String.raw`\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}`
 // 按脚本分段：CJK 连续段，或由「字母、数字、组合附加符、_、-」组成的整词（排除 CJK 字符，否则 abc中文 会粘成一段）。
 // 其余字符（空白、标点、符号）都是分隔符，自然丢弃。
 const SEGMENT = new RegExp(String.raw`([${CJK}]+)|((?:(?![${CJK}])[\p{L}\p{M}\p{N}_-])+)`, 'gu')

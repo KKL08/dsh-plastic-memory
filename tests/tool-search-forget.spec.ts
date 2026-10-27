@@ -62,14 +62,14 @@ describe('executeSearch', () => {
     expect((await stats.get(r.id))!.recallCount).toBe(1)
   })
 
-  it('与注入同口径：明确密钥遮成占位，疑似密钥照原文（用户确认过），文件路径照给', async () => {
+  it('与注入同口径：明确密钥遮成占位，疑似密钥照原文（用户确认过），name 不含密钥时文件路径照给', async () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_key', name: '网关', summary: `网关 key ${FAKE_SECRET.sk}`, content: `部署用 ${FAKE_SECRET.github}，预发库密码: Abc12345` }))
     const result = await executeSearch({ query: '网关' }, fakeExec(), makeSearchDeps(store))
     expect(result.hits[0]).toMatchObject({
       id: 'mem_key', summary: `网关 key ${SECRET_MASK}`, content: `部署用 ${SECRET_MASK}，预发库密码: Abc12345`,
     })
-    expect(result.hits[0].path.length).toBeGreaterThan(0)
+    expect(result.hits[0].path!.length).toBeGreaterThan(0)
     const text = renderSearchResult(result)
     expect(text).not.toContain(FAKE_SECRET.sk)
     expect(text).not.toContain(FAKE_SECRET.github)
@@ -197,8 +197,8 @@ describe('executeSearch：命中多于返回条数时说明总数', () => {
   it('命中弱的说明与截断说明同时出现：两句都在命中列表之前', async () => {
     const store = new MemoryStore(new InMemoryTable())
     await seedMany(store, 3)
-    const r = await executeSearch({ query: '发版条目 zzqqxx', limit: 1 }, fakeExec(), makeSearchDeps(store))
-    expect(r.noteCode).toBe('or-fallback')
+    const r = await executeSearch({ query: '发版条目 周报', limit: 1 }, fakeExec(), makeSearchDeps(store))
+    expect(r.noteCode).toBe('low-coverage')
     expect(r.moreNote).toBe(truncationNote(3, 1, false))
     const head = renderSearchResult(r).split('\n\n')[0]!
     expect(head).toContain(r.note!)

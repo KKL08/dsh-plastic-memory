@@ -10,8 +10,11 @@ import { GLOBAL_DIR, workspaceDirName } from '../src/storage/paths.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
 import { expandQueryTerms, matchScore } from '../src/text.ts'
 import { createTokenizer } from '../src/search/tokenizer.ts'
-import { RANKING_FIELDS, substringEligible } from '../src/search/ranking.ts'
-import { executeSearch, renderSearchResult, OR_FALLBACK_NOTE, SUBSTRING_FALLBACK_NOTE, type SearchToolDeps } from '../src/tools/search.ts'
+import { RANKING_FIELDS, anchorTerms, substringEligible } from '../src/search/ranking.ts'
+import {
+  executeSearch, renderSearchResult, termHitNote, LOW_COVERAGE_NOTE, OR_FALLBACK_NOTE, RETRY_HINT, SUBSTRING_FALLBACK_NOTE,
+  TERM_NOTE_MAX, type SearchToolDeps,
+} from '../src/tools/search.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { SearchNoteCode } from '../src/contract-codes.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
@@ -24,6 +27,7 @@ import { fakeExec } from './helpers/exec.ts'
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const OR_FALLBACK: SearchNoteCode = 'or-fallback'
 const SUBSTRING_FALLBACK: SearchNoteCode = 'substring-fallback'
+const LOW_COVERAGE: SearchNoteCode = 'low-coverage'
 const NO_WORKSPACE: SearchNoteCode = 'no-workspace'
 const tokenize = createTokenizer()
 
@@ -140,6 +144,123 @@ describe('字段权重', () => {
   })
 })
 
+describe('字面锚点：含标点的查询词整词命中排在同档前面', () => {
+  const RELEASE_NOTE = (version: string) => `宿主 ${version} 的已知问题：插件页切换后滚动位置丢失，升级前先看这条。`
+
+  it('只差一个版本号的几条记录：字面含查询版本号的排第一，哪怕它分数一样、确认时间最早', async () => {
+    const store = await seeded([
+      record({ id: 'mem_rc2', name: '已知问题', content: RELEASE_NOTE('0.2.1-rc.2'), lastConfirmedAt: 1 }),
+      record({ id: 'mem_rc1', name: '已知问题', content: RELEASE_NOTE('0.2.1-rc.1'), lastConfirmedAt: 3 }),
+      record({ id: 'mem_old', name: '已知问题', content: RELEASE_NOTE('0.1.1-rc.3'), lastConfirmedAt: 2 }),
+    ])
+    expect((await ids(store, '0.2.1-rc.2'))[0]).toBe('mem_rc2')
+    expect((await ids(store, '0.2.1-rc.1'))[0]).toBe('mem_rc1')
+  })
+
+  it('字面比较不分大小写，tags、summary、正文里的都算；档位仍然优先，同档内锚点命中多的排前', async () => {
+    const store = await seeded([
+      record({ id: 'mem_tag', name: '契约测试', tags: ['host:contract'], content: '宿主契约 host contract 用例', lastConfirmedAt: 1 }),
+      record({ id: 'mem_both', name: '发版检查', summary: '跑 HOST:CONTRACT 与 Host:Smoke', content: '发版前 host contract、host smoke 都要绿', lastConfirmedAt: 1 }),
+      record({ id: 'mem_plain', name: '契约说明', content: 'host 与 contract 的约定，host contract 反复出现，host contract', lastConfirmedAt: 9 }),
+      record({ id: 'mem_partial', name: '只提一半', content: '写着 HOST:Contract 但没有另一个词', lastConfirmedAt: 9 }),
+    ])
+    // smoke 只在 mem_both 出现：它全命中，其余部分命中；部分命中档里字面含 host:contract 的排在只靠分词命中的前面
+    expect(await ids(store, 'host:contract host:smoke')).toEqual(['mem_both', 'mem_tag', 'mem_partial', 'mem_plain'])
+  })
+
+  it('不含标点的整词不参与字面排序：查询「分片上传」时，字面含这四个字但分数低的记录不会被提前', async () => {
+    const store = await seeded([
+      record({
+        id: 'mem_literal', name: '杂记', summary: '一些零碎事项', lastConfirmedAt: 9,
+        content: '周会提到几件事：日志保留三十天，告警阈值下调，分片上传的接口文档还没补，测试环境的证书快过期了。',
+      }),
+      record({
+        id: 'mem_ranked', name: '大文件分片与上传', summary: '先分片，再逐片上传，断了只补缺的分片', lastConfirmedAt: 1,
+        content: '大文件先在客户端分片，每片 5MB，逐片上传，服务端收齐后合并；上传中断时只重传缺的分片，上传进度按已收分片算。',
+      }),
+    ])
+    expect(await ids(store, '分片上传')).toEqual(['mem_ranked', 'mem_literal'])
+  })
+
+  it('整词首尾的句读和括号不算标点：「分片上传？」仍按分数排，字面含这句的记录不会被提前', async () => {
+    const store = await seeded([
+      record({ id: 'mem_literal', name: '杂记', summary: '一些零碎事项', lastConfirmedAt: 9, content: '周会上有人问：分片上传？接口文档还没补。' }),
+      record({
+        id: 'mem_ranked', name: '大文件分片与上传', summary: '先分片，再逐片上传，断了只补缺的分片', lastConfirmedAt: 1,
+        content: '大文件先在客户端分片，每片 5MB，逐片上传，服务端收齐后合并；上传中断时只重传缺的分片，上传进度按已收分片算。',
+      }),
+    ])
+    expect(await ids(store, '分片上传？')).toEqual(['mem_ranked', 'mem_literal'])
+  })
+
+  it('书名号、全角方括号、反引号包着的普通词不算锚点：仍按分数排，字面引用这个写法的记录不会被提前', async () => {
+    const guide = record({
+      id: 'mem_ranked', name: '大文件分片与上传', summary: '先分片，再逐片上传，断了只补缺的分片', lastConfirmedAt: 1,
+      content: '大文件先在客户端分片，每片 5MB，逐片上传，服务端收齐后合并；上传中断时只重传缺的分片，上传进度按已收分片算。',
+    })
+    for (const query of ['《分片上传》', '［分片上传］', '`分片上传`']) {
+      const store = await seeded([
+        record({ id: 'mem_literal', name: '杂记', summary: '一些零碎事项', lastConfirmedAt: 9, content: `周会上有人提到${query}，接口文档还没补。` }),
+        guide,
+      ], fileTable(await mkdtemp(join(root, 'q-'))))
+      expect(await ids(store, query), query).toEqual(['mem_ranked', 'mem_literal'])
+    }
+  })
+
+  it('包裹符号当分隔：剥掉后剩下的整词仍按有没有标点判断锚点', () => {
+    expect(anchorTerms('《分片上传》 ［分片上传］ `分片上传` 【发版】 “回滚” {config}')).toEqual([])
+    expect(anchorTerms('`node:sqlite` 《node:sqlite》的用法 【0.2.1-rc.2】')).toEqual(['node:sqlite', '0.2.1-rc.2'])
+  })
+
+  it('整词中间的中文句读也当分隔：「分片上传，断点续传」不算锚点，字面含这句的记录不会被提前', async () => {
+    const store = await seeded([
+      record({ id: 'mem_literal', name: '杂记', summary: '一些零碎事项', lastConfirmedAt: 9, content: '周会上有人列了两项：分片上传，断点续传，接口文档还没补。' }),
+      record({
+        id: 'mem_ranked', name: '大文件分片与上传', summary: '先分片，再逐片上传，断了靠断点续传补缺的分片', lastConfirmedAt: 1,
+        content: '大文件先在客户端分片，逐片上传；上传中断时按断点续传只重传缺的分片，断点信息存在本地，续传时先比对已收分片。',
+      }),
+    ])
+    expect(await ids(store, '分片上传，断点续传')).toEqual(['mem_ranked', 'mem_literal'])
+    expect(anchorTerms('分片上传，断点续传。node:sqlite、0.2.1-rc.2；a.b！arr[0]？-rc.2：x…y——z')).toEqual(['node:sqlite', '0.2.1-rc.2', 'a.b', 'arr[0]', '-rc.2'])
+  })
+
+  it('ASCII 标识符后紧跟的冒号是命名空间前缀，留在锚点里：「node:」把带前缀的引入指南排在泛讲 Node 的记录前面', async () => {
+    const store = await seeded([
+      record({ id: 'mem_runtime', name: 'Node 运行时', lastConfirmedAt: 9, content: 'node 运行时统一用 22；node 升级前先在 CI 跑一遍，node 版本写在 .nvmrc。' }),
+      record({ id: 'mem_import', name: '内置模块引入', lastConfirmedAt: 1, content: '引入内置模块统一带 node: 前缀，例如 node:fs、node:path。' }),
+    ])
+    expect(await ids(store, 'node:')).toEqual(['mem_import', 'mem_runtime'])
+  })
+
+  it('冒号只在紧跟 ASCII 标识符时保留：中文后的冒号、全角冒号照旧剥掉', () => {
+    expect(anchorTerms('node: npm: file: node:,')).toEqual(['node:', 'npm:', 'file:'])
+    expect(anchorTerms('关于发版： 发版步骤: node：')).toEqual([])
+  })
+
+  it('部分命中档先比命中的查询词数：常见锚点不把覆盖面大得多的记录挤出前十', async () => {
+    const catalogs = Array.from({ length: 11 }, (_, i) => record({
+      id: `mem_cat${i}`, name: `模块清单 ${i}`, lastConfirmedAt: 9,
+      content: `第 ${i} 组内置模块：node:sqlite、node:fs、node:path，按需引入。`,
+    }))
+    const store = await seeded([
+      ...catalogs,
+      record({
+        id: 'mem_guide', name: '事务指南', lastConfirmedAt: 1,
+        content: '在 node 里用 sqlite 时，写操作包进 transaction；出错就 rollback，整批放弃，不留半截数据。',
+      }),
+    ])
+    expect((await ids(store, 'node:sqlite transaction rollback retry'))[0]).toBe('mem_guide')
+  })
+
+  it('括号包着的版本号：去掉首尾括号后按字面排', async () => {
+    const store = await seeded([
+      record({ id: 'mem_rc2', name: '已知问题', content: RELEASE_NOTE('0.2.1-rc.2'), lastConfirmedAt: 1 }),
+      record({ id: 'mem_rc1', name: '已知问题', content: RELEASE_NOTE('0.2.1-rc.1'), lastConfirmedAt: 3 }),
+    ])
+    expect((await ids(store, '（0.2.1-rc.2）'))[0]).toBe('mem_rc2')
+  })
+})
+
 describe('今天靠子串能命中的查询升级后仍命中', () => {
   it('「scope」命中 readScope（驼峰子词）、「memory source」命中 memory_source（下划线子词），都不走子串档', async () => {
     const store = await seeded([
@@ -170,12 +291,12 @@ describe('今天靠子串能命中的查询升级后仍命中', () => {
     const only = await search(await seeded([record({ id: 'mem_xyz123', content: '正文里没有 id' })], fileTable(await mkdtemp(join(root, 'prefix-')))), 'mem_xyz')
     expect(only.hits.map(h => h.id)).toEqual(['mem_xyz123'])
     expect(only.noteCode).toBe(SUBSTRING_FALLBACK)
-    expect(only.note).toBe(SUBSTRING_FALLBACK_NOTE)
+    expect(only.note).toBe(`${SUBSTRING_FALLBACK_NOTE}\n各关键词命中的记忆条数：mem_xyz 0。范围内一条都没命中的：mem_xyz。`)
   })
 })
 
 describe('id 直达与零 token', () => {
-  it('查询 trim 后恰等于某条可见记忆的 id → 该条第一，其余照常；说明码仍按档位算', async () => {
+  it('查询 trim 后恰等于某条可见记忆的 id → 该条第一，其余照常；直达时不附说明', async () => {
     const store = await seeded([
       record({ id: 'mem_target', name: '目标', content: '正文里没有自己的 id', confidence: 0.1 }),
       record({ id: 'mem_mention', name: '提到者', content: 'mem_target 被提到，mem_target 很重要', confidence: 0.9 }),
@@ -183,10 +304,14 @@ describe('id 直达与零 token', () => {
     const r = await search(store, '  mem_target ')
     expect(r.hits.map(h => h.id)).toEqual(['mem_target', 'mem_mention'])
     expect(r.noteCode).toBeUndefined()   // 列表里有全命中记录（mem_mention）
-    // 只有直达那条：它在子串档，说明码照常附上
-    const only = await search(await seeded([record({ id: 'mem_solo', content: '正文' })], fileTable(await mkdtemp(join(root, 'solo-')))), 'mem_solo')
-    expect(only.hits.map(h => h.id)).toEqual(['mem_solo'])
-    expect(only.noteCode).toBe(SUBSTRING_FALLBACK)
+    // 直达那条在子串档、其余只部分命中：要找的就是排第一的这条，不提示命中弱
+    const only = await search(await seeded([
+      record({ id: 'mem_solo', content: '正文' }),
+      record({ id: 'mem_other', content: 'solo 演出安排' }),
+    ], fileTable(await mkdtemp(join(root, 'solo-')))), 'mem_solo')
+    expect(only.hits.map(h => h.id)).toEqual(['mem_solo', 'mem_other'])
+    expect(only.noteCode).toBeUndefined()
+    expect(only.note).toBeUndefined()
   })
 
   it('零 token 查询：不做关键词过滤，按 confidence、lastConfirmedAt 排并受 limit', async () => {
@@ -204,8 +329,8 @@ describe('id 直达与零 token', () => {
   })
 })
 
-describe('说明码：三种触发，互斥、substring 优先', () => {
-  it('有全命中 → 无码；只有部分命中（或部分 + 子串）→ or-fallback；只有 id 子串 → substring-fallback；空 → 无码', async () => {
+describe('说明码：四种触发，互斥、substring 优先', () => {
+  it('有全命中 → 无码；只有部分命中（或部分 + 子串）→ 按首条覆盖度分 or-fallback / low-coverage；只有 id 子串 → substring-fallback；空 → 无码', async () => {
     // lastConfirmedAt 递减：全部落在子串档时三条平分，靠它定顺序
     const store = await seeded([
       record({ id: 'mem_full', content: 'alpha beta', lastConfirmedAt: 3 }),
@@ -217,11 +342,11 @@ describe('说明码：三种触发，互斥、substring 优先', () => {
     expect(full.noteCode).toBeUndefined()
     expect(full.note).toBeUndefined()
 
+    // gamma 是关键词，排第一的也没有它：判弱
     const partial = await search(store, 'alpha beta gamma')
     expect(partial.hits.map(h => h.id)).toEqual(['mem_full', 'mem_part', 'mem_sub'])
-    expect(partial.noteCode).toBe(OR_FALLBACK)
-    expect(partial.note).toBe(OR_FALLBACK_NOTE)
-    expect(OR_FALLBACK_NOTE).toBe('没有同时命中全部关键词的记忆，以下按相关性排序。命中弱，可以换同义词、减少词数或换个角度再搜一次。')
+    expect(partial.noteCode).toBe(LOW_COVERAGE)
+    expect(partial.note!.startsWith(LOW_COVERAGE_NOTE)).toBe(true)
 
     // alph 以子串出现在三条记录的正文里：都算全命中，分数同为 0，按 lastConfirmedAt 排
     const fieldSub = await search(store, 'alph')
@@ -242,7 +367,82 @@ describe('说明码：三种触发，互斥、substring 优先', () => {
       record({ id: 'mem_part', content: 'alpha' }),
       record({ id: 'mem_sub', content: 'alphabet' }),
     ])
-    expect((await search(store, 'alpha beta', { limit: 1 })).noteCode).toBe(OR_FALLBACK)
+    expect((await search(store, 'alpha beta', { limit: 1 })).noteCode).toBe(LOW_COVERAGE)
+  })
+})
+
+describe('命中弱：按排第一的部分命中记录覆盖了多少查询判断', () => {
+  it('斜杠连写不是一组别名：部署/deploy 的两个词都要命中，只含「部署」的记录不算全命中，提示命中弱', async () => {
+    const store = await seeded([
+      record({ id: 'mem_flow', name: '上线流程', content: '部署流程：先上预发再全量' }),
+      record({ id: 'mem_other', name: '无关', content: '与查询无关的内容' }),
+    ])
+    const r = await search(store, '部署/deploy 流程')
+    expect(r.hits.map(h => h.id)).toEqual(['mem_flow'])
+    expect(r.noteCode).toBe(LOW_COVERAGE)
+    expect(r.note!.split('\n')[1]).toBe('各关键词命中的记忆条数：部署 1、deploy 0、流程 1。范围内一条都没命中的：deploy。')
+  })
+
+  it('标签里存了英文别名的中文记忆，只用英文搜也全命中，不出说明', async () => {
+    const store = await seeded([
+      record({ id: 'mem_debounce', name: '搜索框防抖', content: '前端搜索输入框防抖 300 毫秒，回车立即搜', tags: ['frontend', 'debounce'] }),
+      record({ id: 'mem_other', name: '无关', content: '与查询无关的内容' }),
+    ])
+    const r = await search(store, 'debounce')
+    expect(r.hits.map(h => h.id)).toEqual(['mem_debounce'])
+    expect(r.noteCode).toBeUndefined()
+  })
+
+  it('长句中文、首条只缺疑问词这类：or-fallback，如实说明没有全命中，不劝重搜、不列逐词命中', async () => {
+    const store = await seeded([
+      record({ id: 'mem_hand', name: '手编文件后的出处标注', content: '记忆文件被手编过时，出处可能对不上，读取时加标注' }),
+    ])
+    const r = await search(store, '记忆文件手编后出处对不上怎么办')
+    expect(r.hits.map(h => h.id)).toEqual(['mem_hand'])
+    expect(r.noteCode).toBe(OR_FALLBACK)
+    expect(r.note).toBe(OR_FALLBACK_NOTE)
+    expect(OR_FALLBACK_NOTE).toBe('没有记忆同时含全部关键词，以下按相关性排序。')
+    expect(r.note).not.toContain(RETRY_HINT)
+  })
+
+  it('有关键词在范围内一条都没有：low-coverage，劝重搜，再列各关键词命中条数和一条都没命中的词', async () => {
+    const store = await seeded([
+      record({ id: 'mem_tpl', name: '切换模板后立即生效', content: '记忆模板改了不用重启' }),
+      record({ id: 'mem_mail', name: '邮件模板修改', content: '改邮件模板后要重新部署才生效' }),
+    ])
+    const r = await search(store, '周报 模板')
+    expect(r.noteCode).toBe(LOW_COVERAGE)
+    expect(LOW_COVERAGE_NOTE.endsWith(RETRY_HINT)).toBe(true)
+    expect(RETRY_HINT).toBe('命中弱，可以换同义词、换成另一种语言的写法、减少词数或换个角度再搜一次。')
+    expect(r.note).toBe(`${LOW_COVERAGE_NOTE}\n各关键词命中的记忆条数：周报 0、模板 2。范围内一条都没命中的：周报。`)
+    // 说明在命中列表之前
+    expect(renderSearchResult(r).startsWith(r.note!)).toBe(true)
+  })
+
+  it('中英两种写法放进同一次查询：各算一个关键词，首条缺了英文写法就判弱', async () => {
+    const store = await seeded([
+      record({ id: 'mem_debounce', name: '搜索框防抖', content: '前端搜索输入框防抖 300 毫秒，回车立即搜' }),
+    ])
+    const r = await search(store, '防抖 debounce')
+    expect(r.noteCode).toBe(LOW_COVERAGE)
+    expect(r.note!.split('\n')[1]).toBe('各关键词命中的记忆条数：防抖 1、debounce 0。范围内一条都没命中的：debounce。')
+    // 英文词的标签去掉紧挨着的标点
+    const r2 = await search(store, 'debounce（防抖）')
+    expect(r2.note!.split('\n')[1]).toBe('各关键词命中的记忆条数：debounce 0、防抖 1。范围内一条都没命中的：debounce。')
+  })
+
+  it('逐词命中只列整词，超过上限只列前几个再说共几个；一个可数的词都没有（纯数字）就不列这一行', async () => {
+    expect(termHitNote([])).toBeUndefined()
+    const counts = Array.from({ length: TERM_NOTE_MAX + 2 }, (_, i) => ({ label: `词${i}`, count: i % 2 }))
+    const zero = counts.filter(c => c.count === 0).map(c => `${c.label}`)
+    expect(termHitNote(counts)).toBe(
+      `各关键词命中的记忆条数：${counts.slice(0, TERM_NOTE_MAX).map(c => `${c.label} ${c.count}`).join('、')} 等 ${counts.length} 个。`
+      + `范围内一条都没命中的：${zero.join('、')}。`,
+    )
+    const store = await seeded([record({ id: 'mem_num', content: '防抖 300 毫秒' })])
+    const r = await search(store, '300')
+    expect(r.noteCode).toBe(SUBSTRING_FALLBACK)
+    expect(r.note).toBe(SUBSTRING_FALLBACK_NOTE)
   })
 })
 
@@ -280,7 +480,7 @@ describe('不变的行为', { timeout: 15_000 }, () => {
 })
 
 describe('结果形状：命中带文件绝对路径', () => {
-  it('SearchHit.path 恒有值且为绝对路径，指向真实存在的文件（global 与项目目录、关键词与零 token 查询都带）', async () => {
+  it('name 不含密钥时 SearchHit.path 恒有值且为绝对路径，指向真实存在的文件（global 与项目目录、关键词与零 token 查询都带）', async () => {
     const store = await seeded([
       record({ id: 'mem_g', name: '全局条目', content: 'magicword 全局' }),
       record({ id: 'mem_w', name: '项目条目', scope: 'workspace', workspacePath: '/w/proj', content: 'magicword 项目' }),
@@ -289,11 +489,11 @@ describe('结果形状：命中带文件绝对路径', () => {
       const r = await executeSearch({ query }, fakeExec(), deps(store, '/w/proj'))
       expect(r.hits.map(h => h.id).sort()).toEqual(['mem_g', 'mem_w'])
       for (const h of r.hits) {
-        expect(isAbsolute(h.path)).toBe(true)
-        expect(await readFile(h.path, 'utf8')).toContain(`id: ${h.id}`)
+        expect(isAbsolute(h.path!)).toBe(true)
+        expect(await readFile(h.path!, 'utf8')).toContain(`id: ${h.id}`)
       }
-      expect(dirname(r.hits.find(h => h.id === 'mem_g')!.path)).toBe(join(root, GLOBAL_DIR))
-      expect(dirname(r.hits.find(h => h.id === 'mem_w')!.path)).toBe(join(root, workspaceDirName('/w/proj')))
+      expect(dirname(r.hits.find(h => h.id === 'mem_g')!.path!)).toBe(join(root, GLOBAL_DIR))
+      expect(dirname(r.hits.find(h => h.id === 'mem_w')!.path!)).toBe(join(root, workspaceDirName('/w/proj')))
     }
   })
 

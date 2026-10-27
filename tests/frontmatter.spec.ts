@@ -4,6 +4,7 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { FrontmatterError } from '../src/errors.ts'
 import { captureError } from './helpers/errors.ts'
+import { maskDiagnostic } from '../src/secrets.ts'
 
 // 本文件默认造那条"包管理用 pnpm"的 global preference（编解码/去重断言的固定样本）。
 const record = (partial: Partial<MemoryRecord> = {}) => baseRecord({
@@ -84,6 +85,17 @@ describe('malformed 判定', () => {
     const err = captureError(() => splitFrontmatter(raw))
     expect(err).toBeInstanceOf(FrontmatterError)
     expect(err).toMatchObject({ code })
+  })
+
+  it('坏 YAML 的报错只带错误名与行列，不带出错那一行的摘录：长行截掉密钥前缀后遮盖认不出，摘录本身就会漏', () => {
+    // 行超过 80 字符时 yaml 把摘录截成「…」加末尾一段，sk- 前缀被截掉
+    const key = 'sk-proj-' + 'TESTONLY'.padEnd(150, '7')
+    const err = captureError(() => splitFrontmatter(`---\nname: x\napi: "${key}" trailing\n---\n正文`))
+    expect(err).toMatchObject({ code: 'yaml-parse' })
+    const message = maskDiagnostic((err as Error).message)
+    expect(message).not.toContain('TESTONLY77')
+    expect(message).not.toContain('7777777777')
+    expect(message).toContain('第 2 行')
   })
 
   it('eventRange 三元组 → throw', () => {

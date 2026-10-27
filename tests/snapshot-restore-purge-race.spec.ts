@@ -8,7 +8,7 @@ import { STATE_DIR } from '../src/storage/paths.ts'
 import { MemoryStore } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
+import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
 import { executeForget } from '../src/tools/forget.ts'
 import { executeSnapshotTool } from '../src/tools/snapshot.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
@@ -36,7 +36,7 @@ const wsRec = (partial: Partial<MemoryRecord> = {}) => baseRecord({
 
 /** 一个会话的执行器：各自的 store / 快照实例，盘上共用 root。 */
 function session() {
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const decisions = new PendingDecisionsStore(sidecar.pending)

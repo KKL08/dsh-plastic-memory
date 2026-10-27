@@ -186,10 +186,10 @@ const MEMORIES: EvalMemory[] = [
   },
   {
     id: 'mem_m2l5w7', type: 'decision', name: '搜索命中返回全文',
-    summary: 'memory_search 每条命中返回完整正文和文件路径，不截片段',
+    summary: 'memory_search 每条命中返回完整正文，不截片段，并附文件路径',
     tags: ['search', 'design'],
     content: '讨论过搜索结果只返回片段还是全文。片段省 token，但模型经常要再调一次读取才能用，总成本反而更高；'
-      + '记忆正文本来就限制在几百字以内。最后定为返回全文，并在头行末尾附上文件的绝对路径，模型需要上下文时可以直接读文件。片段方案留作以后正文变长时再议。',
+      + '记忆正文本来就限制在几百字以内。最后定为返回全文，并在头行末尾附上文件的绝对路径（名称含密钥的不附），模型需要上下文时可以直接读文件。片段方案留作以后正文变长时再议。',
   },
   {
     id: 'mem_u9z6x3', type: 'knowledge', name: '工作区目录名的算法',
@@ -550,7 +550,7 @@ const MEMORIES: EvalMemory[] = [
   {
     id: 'mem_o1y9b4', type: 'knowledge', name: '零碎笔记',
     summary: '一些随手记下的东西',
-    tags: [],
+    tags: ['reconnect'],
     content: '客户端 WebSocket 断线后的重连要用指数退避：第一次等一秒，之后每次翻倍，最长三十秒，并加随机抖动，'
       + '免得服务重启后所有客户端同一时刻涌回来。重连成功后先补拉断线期间的消息，再恢复实时推送。'
       + '页面不可见时暂停重连，回到前台立即重试一次。',
@@ -597,7 +597,7 @@ const MEMORIES: EvalMemory[] = [
   {
     id: 'mem_v1u7j6', type: 'knowledge', name: '分页组件样式',
     summary: '分页组件的页码与跳转样式',
-    tags: ['frontend', 'design'],
+    tags: ['frontend', 'design', 'pagination'],
     content: '表格下方的分页组件显示首页、上一页、页码、下一页和跳转输入框，页码超过七个时中间用省略号。'
       + '当前页用主色描边，禁用状态的按钮降低透明度。窄屏下只保留上一页、当前页和下一页。组件只负责展示，翻页参数是 offset 还是 cursor 由列表接口决定，组件不关心。每页条数可选 20、50、100。',
   },
@@ -612,7 +612,7 @@ const MEMORIES: EvalMemory[] = [
     id: 'mem_j4n2x6', type: 'knowledge', name: '记忆插件的搜索工具描述',
     summary: '工具描述写清楚什么时候用搜索、什么时候直接读文件',
     tags: ['search', 'prompt'],
-    content: '给模型看的工具描述要说清 memory_search 的行为：按相关性排序，中英文都能搜，每条命中带文件路径。'
+    content: '给模型看的工具描述要说清 memory_search 的行为：按相关性排序，中英文都能搜，命中带文件路径（名称含密钥的不带）。'
       + '描述里不写实现细节，比如用了什么分词、怎么打分；写的是模型能据此做决定的信息：什么时候先搜、搜不到怎么办、'
       + '拿到路径后可以直接读全文。',
   },
@@ -652,6 +652,64 @@ const MEMORIES: EvalMemory[] = [
       + '用户确认后升到 0.9 并刷新确认时间。长期没被确认的推断记忆，体检会建议删除。推断记忆在搜索结果里同样带「推断」标注，排序时同分情况下排在用户明确说过的记忆之后。',
     confidence: 0.5,
   },
+  // ---- 带标点的字面值：版本号、路径、带冒号的标识符；同组记录分词后几乎一样，只差字面值 ----
+  // 三条「已知问题」只差版本号，各字段长度相同、查询词频相同：分词打散版本号后同分，按确认时间分不出目标
+  {
+    id: 'mem_n3s7v2', type: 'knowledge', name: '支付 SDK 3.2.0-rc.2 的已知问题',
+    summary: '3.2.0-rc.2 在预发试过，记下问题和绕行办法，升级前先看',
+    tags: ['payment', 'sdk'],
+    content: '支付 SDK 3.2.0-rc.2 在预发环境接入试过。这一版的问题：回调验签修好了，但退款通知改成批量推送，一次最多二十条。'
+      + '绕行办法：退款回调改成逐条幂等落库，单条失败只重试那一条。正式环境升级前，先在预发把下单、回调、退款完整走一遍，确认对账文件能正常解析。',
+  },
+  {
+    id: 'mem_n5s2v6', type: 'knowledge', name: '支付 SDK 3.1.0-rc.2 的已知问题',
+    summary: '3.1.0-rc.2 在预发试过，记下问题和绕行办法，升级前先看',
+    tags: ['payment', 'sdk'],
+    content: '支付 SDK 3.1.0-rc.2 在预发环境接入试过。这一版的问题：对账文件的编码从 GBK 换成了 UTF-8，旧解析脚本读出乱码。'
+      + '绕行办法：解析前先按文件头判断编码，两种都能读。正式环境升级前，先在预发把下单、回调、退款完整走一遍，确认对账文件能正常解析。',
+  },
+  {
+    id: 'mem_n4s1v8', type: 'knowledge', name: '支付 SDK 3.2.0-rc.1 的已知问题',
+    summary: '3.2.0-rc.1 在预发试过，记下问题和绕行办法，升级前先看',
+    tags: ['payment', 'sdk'],
+    content: '支付 SDK 3.2.0-rc.1 在预发环境接入试过。这一版的问题：回调验签偶发失败，签名串里的时间戳被截成了秒级。'
+      + '绕行办法：验签前把时间戳补齐到毫秒级，或者暂时先停在上一个正式版。正式环境升级前，先在预发把下单、回调、退款完整走一遍，确认对账文件能正常解析。',
+  },
+  {
+    id: 'mem_d2a8h5', type: 'project', name: '设计文档归档',
+    summary: '过时的设计文档移进 docs/archive/，不删除',
+    tags: ['docs', 'archive'],
+    content: '设计文档过时后不删，移进 docs/archive/ 目录，文件名前加上归档日期。archive 下的文档只读，发现里面还有用的段落，就抄回现行文档再改。'
+      + '引用设计文档的地方如果指向了 archive 里的旧版，顺手换成现行文档的链接。',
+  },
+  {
+    id: 'mem_i7p2w4', type: 'knowledge', name: '接口鉴权改用短期令牌',
+    summary: '/api/v2/ 下的接口改用短期令牌鉴权，令牌十五分钟失效',
+    tags: ['api', 'auth'],
+    content: '新版接口统一挂在 /api/v2/ 下，鉴权从长期 API key 改成短期令牌：客户端先用 key 换令牌，令牌十五分钟失效，失效前五分钟可以续。'
+      + '网关只认令牌，不再接受直接带 key 的请求。服务端校验令牌时顺带检查权限范围，越权直接返回 403。',
+  },
+  {
+    id: 'mem_i6p1w9', type: 'project', name: '旧版接口下线计划',
+    summary: '/api/v1/ 在 v2 上线满半年后关闭，之前只修安全漏洞',
+    tags: ['api', 'deprecation'],
+    content: '旧版接口 /api/v1/ 进入只维护状态：只修安全漏洞，不加新功能。v2 上线满半年后关闭 /api/v1/，关闭前一个月在响应头里加下线提示，'
+      + '并给还在调用 v1 的客户逐个发通知。v1 和 v2 的鉴权方式不同，迁移时客户端要先改成换取令牌。',
+  },
+  {
+    id: 'mem_t5d1s3', type: 'procedure', name: '本地测试数据',
+    summary: '用 db:seed 灌一套固定的测试数据，账号和订单都是假的',
+    tags: ['dev', 'database'],
+    content: 'pnpm run db:seed 往本地数据库灌一套固定的测试数据：三个角色各一个账号，外加几十条订单。数据全是假的，可以随便改；想回到初始状态就清掉重灌。'
+      + '新增表时顺手在灌数脚本里补几条样例，别让新人对着空表调试。',
+  },
+  {
+    id: 'mem_t6d9r2', type: 'procedure', name: '本地数据库重置',
+    summary: 'db:reset 清空本地库后重跑迁移和 seed，只能在本地用',
+    tags: ['dev', 'database'],
+    content: 'pnpm run db:reset 会删掉本地数据库里的全部表，重跑迁移，再把 seed 数据灌回去，适合迁移写乱了想从头来的时候。'
+      + '脚本开头检查连接串，指向的不是本机就直接退出，防止误删共享环境的数据。重置后 seed 里的测试账号密码也会恢复成默认值。',
+  },
   // ---- 总览类长记录：一条里提到很多主题，各主题的专门记录才是首选 ----
   {
     id: 'mem_k3d8w2', type: 'project', name: '记忆插件设计总览',
@@ -681,14 +739,14 @@ const MEMORIES: EvalMemory[] = [
     tags: ['search', 'overview'],
     content: '这一版检索的改动：查询先分词，中文默认用词典分词，依赖装不上时退回二字切分；英文与标识符按驼峰、下划线拆成子词。'
       + '打分用 BM25，name、summary、tags、content 分字段加权，idf 取恒正的变体。结果分三档：全命中、部分命中、只有子串命中，'
-      + '档内按分数排，同分按置信度和最近确认时间。没有全命中时附一句说明。每条命中带记忆文件的绝对路径，返回全文不截片段。'
+      + '档内按分数排，同分按置信度和最近确认时间。没有全命中时附一句说明。命中带记忆文件的绝对路径（名称含密钥的不带），返回全文不截片段。'
       + '用户词典通过 userDictionaryPath 配置，追加到主词典。查询恰好等于某个 id 时该条排第一。空查询不过滤，按置信度排序。'
       + '读取走 readScope，按范围读并带预筛词，listedCount 作为 BM25 的文档数。',
   },
   {
     id: 'mem_x2k9m4', type: 'knowledge', name: '互斥锁的用法',
     summary: '进程内并发用互斥锁保护共享状态',
-    tags: ['concurrency', 'node'],
+    tags: ['concurrency', 'node', 'mutex'],
     content: 'Node 是单线程的，但异步操作交错时共享状态仍会被并发修改。进程内用一个基于 Promise 的互斥锁把临界区串起来：'
       + '拿到锁才读改写，结束后释放。锁要配超时，持有方抛错也要在 finally 里释放。'
       + '跨进程的场景用文件锁或数据库的行锁；它和缓存击穿时用的分布式锁是两回事，不要混用一套实现。',
@@ -717,9 +775,35 @@ export const EVAL_RECORDS: MemoryRecord[] = MEMORIES.map((m, i) => ({
 }))
 
 export const EVAL_CATEGORIES = [
-  'short-cjk', 'long-cjk', 'identifier', 'partial-word', 'plain-name', 'id-direct', 'zero-token',
+  'short-cjk', 'long-cjk', 'identifier', 'partial-word', 'plain-name', 'id-direct', 'zero-token', 'anchor', 'paraphrase',
+  'bilingual', 'bilingual-no-alias', 'no-answer', 'long-answerable', 'long-no-answer',
 ] as const
 export type EvalCategory = (typeof EVAL_CATEGORIES)[number]
+
+/** 只记录基线、不进回归门槛的类别：换说法查询量的是字面匹配够不着的地方，分数低是预期。 */
+export const BASELINE_ONLY_CATEGORIES: readonly EvalCategory[] = ['paraphrase']
+
+/**
+ * 逐条设门槛的类别：每条查询两档都必须第一名命中，不计入聚合下限。
+ * 锚点类（带标点的字面值）靠字面整词命中排序键定第一名，结果是确定的，掉一条就是规则坏了，不留余量。
+ */
+export const STRICT_CATEGORIES: readonly EvalCategory[] = ['anchor']
+
+/**
+ * 只用来评估「命中弱」判定的类别，不进排序指标：
+ * - 换语言查（bilingual）：答案记忆用中文写、标签里存了英文别名（memory_save 要求的），查询只写英文：应全命中、不判弱；
+ * - 换语言查、记忆没存别名（bilingual-no-alias）：答案记忆只有中文写法，查询写英文：应判弱，提示换成另一种语言再搜；
+ * - 库里没有答案（no-answer）：查询里有常见词能部分命中，但没有一条记忆讲这件事，relevant 为空；
+ * - 长句提问（long-answerable / long-no-answer）：按日常说话的口气整句提问，前者库里有答案，后者没有（relevant 为空）。
+ */
+export const NOTE_ONLY_CATEGORIES: readonly EvalCategory[] = ['bilingual', 'bilingual-no-alias', 'no-answer', 'long-answerable', 'long-no-answer']
+
+/**
+ * 换说法的四种方式：同义词（自动关机 / 定时关停）、上下位词（数据库 / Postgres）、
+ * 中英混写（热更新 / hot reload）、口语化描述。
+ */
+export const PARAPHRASE_KINDS = ['synonym', 'hypernym', 'mixed-lang', 'colloquial'] as const
+export type ParaphraseKind = (typeof PARAPHRASE_KINDS)[number]
 
 export interface EvalQuery {
   query: string
@@ -729,6 +813,8 @@ export interface EvalQuery {
    * top-1 命中：第一名在其中；top-3 命中：前三名至少一条在其中。
    */
   relevant: readonly string[]
+  /** 仅 paraphrase 类：这条查询用的是哪种换说法。 */
+  paraphrase?: ParaphraseKind
 }
 
 /** 零 token 查询不过滤、按 confidence、lastConfirmedAt 排：预期第一名是数组里最后一条 0.9 的记录。 */
@@ -790,4 +876,79 @@ export const EVAL_QUERIES: readonly EvalQuery[] = [
   // 零 token
   { query: '', category: 'zero-token', relevant: [NEWEST_CONFIDENT] },
   { query: '   ', category: 'zero-token', relevant: [NEWEST_CONFIDENT] },
+  // 锚点：带标点的字面值（版本号、路径、带冒号的标识符），分词会把它打散
+  { query: '3.2.0-rc.2', category: 'anchor', relevant: ['mem_n3s7v2'] },
+  { query: '3.2.0-rc.1', category: 'anchor', relevant: ['mem_n4s1v8'] },
+  { query: '3.1.0-rc.2', category: 'anchor', relevant: ['mem_n5s2v6'] },
+  { query: '支付 SDK 3.2.0-rc.2 已知问题', category: 'anchor', relevant: ['mem_n3s7v2'] },
+  { query: '.archive/', category: 'anchor', relevant: ['mem_p9w3c4'] },
+  { query: 'docs/archive/', category: 'anchor', relevant: ['mem_d2a8h5'] },
+  { query: '/api/v2/', category: 'anchor', relevant: ['mem_i7p2w4'] },
+  { query: '/api/v1/', category: 'anchor', relevant: ['mem_i6p1w9'] },
+  { query: 'db:seed', category: 'anchor', relevant: ['mem_t5d1s3'] },
+  { query: 'db:reset', category: 'anchor', relevant: ['mem_t6d9r2'] },
+  { query: 'host:contract', category: 'anchor', relevant: ['mem_f7o3m5'] },
+  // 换说法：只看 name 列表写查询，再对照全文标注；主要实词不出现在相关记忆的四个字段里（tests/search-eval.spec.ts 检查）。
+  // 只记基线，不进回归门槛。总览类记录（设计总览、新人上手须知）按惯例不算相关。
+  { query: '上云开销超标的通知', category: 'paraphrase', paraphrase: 'synonym', relevant: ['mem_s6j9r8'] },
+  { query: '健康诊断分几挡', category: 'paraphrase', paraphrase: 'synonym', relevant: ['mem_j1u5k8'] },
+  { query: '代码入库说明的书写规范', category: 'paraphrase', paraphrase: 'synonym', relevant: ['mem_f1q5p8'] },
+  { query: '凭据定期更换', category: 'paraphrase', paraphrase: 'synonym', relevant: ['mem_r8f2n5'] },
+  { query: '访问别家仓库的内容需要授权吗', category: 'paraphrase', paraphrase: 'synonym', relevant: ['mem_r4t8b2'] },
+  { query: 'MySQL dump 保存期限', category: 'paraphrase', paraphrase: 'hypernym', relevant: ['mem_b4d8l7'] },
+  { query: 'Node 生态装库用哪家', category: 'paraphrase', paraphrase: 'hypernym', relevant: ['mem_p3n8j4'] },
+  { query: '单测里用 Postgres 实例还是假对象', category: 'paraphrase', paraphrase: 'hypernym', relevant: ['mem_a3c6b8'] },
+  { query: 'Redis 的 key 何时作废', category: 'paraphrase', paraphrase: 'hypernym', relevant: ['mem_e5j2f9', 'mem_l6q8f3'] },
+  { query: 'Vite 还是 webpack', category: 'paraphrase', paraphrase: 'hypernym', relevant: ['mem_y1z8a3'] },
+  { query: 'spawn 出来的程序挂掉后收尾', category: 'paraphrase', paraphrase: 'mixed-lang', relevant: ['mem_p7r1v3'] },
+  { query: '打字时 debounce 延迟设多长', category: 'paraphrase', paraphrase: 'mixed-lang', relevant: ['mem_h5e1m8'] },
+  { query: 'toggle 修改后无需发版即可起效', category: 'paraphrase', paraphrase: 'mixed-lang', relevant: ['mem_c9i5q4'] },
+  { query: 'memory leak 怎么定位', category: 'paraphrase', paraphrase: 'mixed-lang', relevant: ['mem_z7a4k1'] },
+  { query: '输出 verbosity 正式部署设成哪档', category: 'paraphrase', paraphrase: 'mixed-lang', relevant: ['mem_x6r2w9'] },
+  { query: '在自己电脑上把项目跑起来', category: 'paraphrase', paraphrase: 'colloquial', relevant: ['mem_c4h7d5'] },
+  { query: '上下文塞不下了会怎样', category: 'paraphrase', paraphrase: 'colloquial', relevant: ['mem_z3b7g9'] },
+  { query: '找服务端老大对接有什么讲究', category: 'paraphrase', paraphrase: 'colloquial', relevant: ['mem_j8b4t6'] },
+  { query: '视觉稿一般在哪儿看', category: 'paraphrase', paraphrase: 'colloquial', relevant: ['mem_s3y7u1'] },
+  { query: '老条目还靠不靠谱', category: 'paraphrase', paraphrase: 'colloquial', relevant: ['mem_b1h7t4', 'mem_s9h4f2'] },
+  // 换语言查：中文记忆的标签里存了英文别名，查询只写英文（判弱评估用，不进排序指标）
+  { query: 'reconnect', category: 'bilingual', relevant: ['mem_o1y9b4'] },
+  { query: 'mutex', category: 'bilingual', relevant: ['mem_x2k9m4', 'mem_e3t7z5'] },
+  { query: 'pagination', category: 'bilingual', relevant: ['mem_v1u7j6'] },
+  // 换语言查、记忆没存别名：只有中文写法，查询写英文，应判弱（判弱评估用，不进排序指标）
+  { query: 'rotation 密钥', category: 'bilingual-no-alias', relevant: ['mem_r8f2n5'] },
+  { query: 'memory leak', category: 'bilingual-no-alias', relevant: ['mem_z7a4k1'] },
+  { query: 'read replica', category: 'bilingual-no-alias', relevant: ['mem_t2x5w4'] },
+  { query: 'debounce 毫秒', category: 'bilingual-no-alias', relevant: ['mem_h5e1m8'] },
+  // 库里没有答案：有常见词能部分命中，但没有记忆讲这件事（判弱评估用，结果应全部判弱）
+  { query: '数据库 分库分表', category: 'no-answer', relevant: [] },
+  { query: '前端 埋点 上报', category: 'no-answer', relevant: [] },
+  { query: '周报 模板', category: 'no-answer', relevant: [] },
+  { query: 'Python 虚拟环境', category: 'no-answer', relevant: [] },
+  { query: '定时任务 cron 配置', category: 'no-answer', relevant: [] },
+  { query: '灰度发布 监控告警', category: 'no-answer', relevant: [] },
+  { query: '线上报错 Sentry 接入', category: 'no-answer', relevant: [] },
+  { query: '证书 过期 续期', category: 'no-answer', relevant: [] },
+  // 长句提问、库里有答案（判弱评估用，不进排序指标）
+  { query: '接口超时时间设置成多少了', category: 'long-answerable', relevant: ['mem_q9u3x7'] },
+  { query: '数据库备份保留多少天', category: 'long-answerable', relevant: ['mem_b4d8l7'] },
+  { query: '提交信息应该用什么格式写', category: 'long-answerable', relevant: ['mem_f1q5p8'] },
+  { query: '第三方密钥多久轮换一次', category: 'long-answerable', relevant: ['mem_r8f2n5'] },
+  { query: '上传接口每分钟限流多少次', category: 'long-answerable', relevant: ['mem_d3s9i8'] },
+  { query: '登录会话多久会过期', category: 'long-answerable', relevant: ['mem_z5f1o3'] },
+  { query: '功能开关改了以后多久能生效', category: 'long-answerable', relevant: ['mem_c9i5q4'] },
+  { query: '时间在数据库里应该怎么存', category: 'long-answerable', relevant: ['mem_l2n6g4'] },
+  { query: '前端搜索框的防抖设了多少毫秒', category: 'long-answerable', relevant: ['mem_h5e1m8'] },
+  { query: '更新数据的时候先删缓存还是先写库', category: 'long-answerable', relevant: ['mem_e5j2f9'] },
+  { query: '依赖一般多久集中升级一次', category: 'long-answerable', relevant: ['mem_i6t9j2'] },
+  // 长句提问、库里没有答案：常见词能部分命中（判弱评估用，结果应全部判弱）
+  { query: '前端埋点数据怎么上报到服务端', category: 'long-no-answer', relevant: [] },
+  { query: '周报模板应该放在哪个目录', category: 'long-no-answer', relevant: [] },
+  { query: '定时任务的执行时间怎么配置', category: 'long-no-answer', relevant: [] },
+  { query: '生产环境的服务器一共有几台', category: 'long-no-answer', relevant: [] },
+  { query: '移动端推送证书什么时候过期', category: 'long-no-answer', relevant: [] },
+  { query: '图片上传之后要不要压缩', category: 'long-no-answer', relevant: [] },
+  { query: '单元测试覆盖率要求达到多少', category: 'long-no-answer', relevant: [] },
+  { query: '订单表的分库分表规则是什么', category: 'long-no-answer', relevant: [] },
+  { query: '线上日志要保留多少天', category: 'long-no-answer', relevant: [] },
+  { query: '接口文档放在哪个平台上维护', category: 'long-no-answer', relevant: [] },
 ]

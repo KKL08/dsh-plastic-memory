@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { SnapshotStore, SNAPSHOT_RETENTION_MS } from '../src/governance/snapshots.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
 import type { MemorySnapshot } from '../src/governance/schema.ts'
@@ -84,5 +84,80 @@ describe('SnapshotStore.diff / restore', () => {
 
     // diff 也不应把它标成“快照后被修改过”
     expect(s.diff(snap, new Map([['mem_a', softDeleted]]))[0].changedAfterSnapshot).toBe(false)
+  })
+})
+
+describe('SnapshotStore.restore：盘上快照只在写前、写后各读一次', () => {
+  it('恢复多少条都只读两次快照；写后才脱敏的记录统一撤回，计入 redacted，顺序同快照', async () => {
+    const kv = new InMemoryKvTable<MemorySnapshot>()
+    const s = new SnapshotStore(kv)
+    const records = Array.from({ length: 20 }, (_, i) => record({ id: `mem_${String(i).padStart(2, '0')}` }))
+    const snap = await s.capture({ operation: 'manual', description: '大快照', records }, 100)
+    const reads = vi.spyOn(kv, 'get')
+    const discarded: string[] = []
+    const r = await s.restore(snap, undefined, async rec => {
+      if (rec.id === 'mem_03' || rec.id === 'mem_11') await s.redact(new Set([rec.id]))   // 写入的同时别的会话把它彻底删除
+    }, new Map(), false, async rec => { discarded.push(rec.id) })
+    expect(reads).toHaveBeenCalledTimes(2)
+    expect(discarded).toEqual(['mem_03', 'mem_11'])
+    expect(r.redacted).toEqual(['mem_03', 'mem_11'])
+    expect(r.skipped).toEqual(['mem_03', 'mem_11'])
+    expect(r.restored).toEqual(records.map(x => x.id).filter(id => id !== 'mem_03' && id !== 'mem_11'))
+  })
+})
+
+describe('SnapshotStore.restore：恢复途中别处动了快照', () => {
+  it('写入 A 时别的会话彻底删除了 B（先从快照里清掉 B、再删文件）：B 写回后收尾撤回，计入 skipped', async () => {
+    const s = makeStore()
+    const snap = await s.capture({ operation: 'manual', description: 'd', records: [record({ id: 'mem_a' }), record({ id: 'mem_b' })] }, 100)
+    const discarded: string[] = []
+    const r = await s.restore(snap, undefined, async rec => {
+      if (rec.id === 'mem_a') await s.purge(x => x.id === 'mem_b')
+    }, new Map(), false, async rec => { discarded.push(rec.id) })
+    expect(discarded).toEqual(['mem_b'])
+    expect(r.restored).toEqual(['mem_a'])
+    expect(r.skipped).toEqual(['mem_b'])
+    expect(r.redacted).toEqual([])
+  })
+
+  it('写入时整份快照刚过 14 天被清扫：刚写回的留着，不撤回', async () => {
+    const s = makeStore()
+    const clock = { now: 100 + SNAPSHOT_RETENTION_MS - 1 }
+    const snap = await s.capture({ operation: 'pre-forget', description: 'd', records: [record({ id: 'mem_a' })] }, 100)
+    const discarded: string[] = []
+    const r = await s.restore(snap, undefined, async () => {
+      clock.now += 2
+      await s.sweep(clock.now)   // 别的会话这时清扫过期快照
+    }, new Map(), false, async rec => { discarded.push(rec.id) }, () => clock.now)
+    expect(await s.get(snap.id)).toBeUndefined()
+    expect(discarded).toEqual([])
+    expect(r.restored).toEqual(['mem_a'])
+    expect(r.skipped).toEqual([])
+  })
+
+  it('写入时别的会话彻底删除了快照里唯一的一条（快照空了整份删掉）：仍在保留期内，刚写回的撤回', async () => {
+    const s = makeStore()
+    const snap = await s.capture({ operation: 'pre-forget', description: 'd', records: [record({ id: 'mem_a' })] }, 100)
+    const discarded: string[] = []
+    const r = await s.restore(snap, undefined, async () => {
+      await s.purge(x => x.id === 'mem_a')
+    }, new Map(), false, async rec => { discarded.push(rec.id) }, () => 200)
+    expect(await s.get(snap.id)).toBeUndefined()
+    expect(discarded).toEqual(['mem_a'])
+    expect(r.restored).toEqual([])
+    expect(r.skipped).toEqual(['mem_a'])
+  })
+
+  it('后一条写入抛错：已写入的照样收尾复核，写后才脱敏的撤回，再把错误抛出去', async () => {
+    const s = makeStore()
+    const snap = await s.capture({ operation: 'manual', description: 'd', records: [record({ id: 'mem_a' }), record({ id: 'mem_b' })] }, 100)
+    const discarded: string[] = []
+    const failure = new Error('ENOSPC')
+    const restoring = s.restore(snap, undefined, async rec => {
+      if (rec.id === 'mem_a') await s.redact(new Set(['mem_a']))   // 写入 A 的同时别的会话把它彻底删除
+      else throw failure
+    }, new Map(), false, async rec => { discarded.push(rec.id) })
+    await expect(restoring).rejects.toBe(failure)
+    expect(discarded).toEqual(['mem_a'])
   })
 })

@@ -91,6 +91,28 @@ All notable changes to this project are documented here. The format follows
   Chinese, identifiers, partial words, plain names, ids) runs with the tests
   and fails when top-1 or top-3 accuracy drops below a fixed floor, with and
   without the Chinese segmenter.
+  It also holds queries written in the other language from the memory, with
+  and without that spelling among its tags, long questions with and without
+  an answer, and short queries with no answer in the corpus; the tests fail
+  when a query with no answer, or one in the other language that the memory
+  has no tag for, is not flagged as a weak match, or when more than five
+  other queries with a correct top hit are.
+- The checkup buttons on the memory page and the settings status card carry a
+  line saying the checkup uses the current chat's model and that more
+  memories take more tokens. When a checkup finishes, its result line ends
+  with the tokens it actually used, summed from what the host reports for
+  every model call; nothing is shown when the host reports no usage.
+- When the model marks a new memory as fitting every project, the card under
+  that turn and the sidebar's 「这次新写入的」 offer 「提升为全局」 and
+  「留在本项目」 in place, with 「撤销」 next to the outcome, and show the
+  outcome wherever it was decided. When the promotion target is AGENTS.md,
+  the button reads 「写进 AGENTS.md」 and works as it does in 「等你决定」.
+  This adds nothing to the pending list and does not light the nav dot;
+  candidates left alone still reach 「等你决定」 at the next checkup.
+- When the model rewrites or replaces an existing memory, the turn's card and
+  the sidebar's 「这次新写入的」 list show it, with the text before and after,
+  and offer 「撤销修改」 for 14 days. Undo is refused once the memory has been
+  changed again since.
 
 ### Changed
 - Memories that exceed `snapshotTokenBudget` are no longer cut from the
@@ -100,6 +122,19 @@ All notable changes to this project are documented here. The format follows
   the limit or dismiss. Set it to `strict` to keep the previous behaviour, in
   which the index lines stop at the budget; the page then says how many
   memories were left out.
+- Token usage is now estimated per character, calibrated against DeepSeek's
+  tokenizer: each Chinese, Japanese or Korean character or full-width
+  punctuation mark counts as 0.6 tokens, any other character 0.3. The same
+  4,000 default now fits about 6,700 Chinese characters, up from about 2,700.
+  English text is counted per character too, so English-heavy memories now
+  estimate higher and may cross the limit. Existing overflow reminders are
+  recomputed the next time memories are loaded.
+- The content check of a checkup now checks every memory in batches of about
+  30,000 estimated tokens, keeping memories of one type together, instead of
+  only the first 200, so a large library no longer exceeds what a single model
+  call can take. When a layer needs more than one batch the result says so,
+  because a conflict or duplicate between memories in different batches can
+  be missed.
 - Settings changed in the GUI or in `cordis.patch.yml` now apply to running
   conversations at their next step: a new budget or source-lookup level is
   used the next time memories are assembled, a template or custom-type change
@@ -155,18 +190,35 @@ All notable changes to this project are documented here. The format follows
   query word come before those containing only some of them, a word that
   appears as a whole word ranks above one that only appears inside a longer
   word (`scope` in `readScope`), and matches in the name, summary and tags
-  weigh more than matches in the content; a query that is exactly a memory id
-  returns that memory first. The result opens with a note when no returned
-  memory contains every word (`or-fallback`), or when none contains any of
-  them and only a literal match on the query text is left
-  (`substring-fallback`).
+  weigh more than matches in the content; a query that is exactly a memory
+  id returns that memory first, without a note. The result opens with a note
+  when no returned memory contains every keyword (`or-fallback`). It flags a
+  weak match when the top hit also misses a whole keyword or covers less
+  than 65% of the query's content words (`low-coverage`), or when nothing
+  but a literal match on the query text is left (`substring-fallback`); a
+  weak match suggests searching again, for example with the term in the
+  other language, and, when there are words to list, how many memories each
+  keyword matched. Question words and particles in long questions don't
+  count. When unsure it flags: a false flag costs one extra search, a missed
+  one lets the model take a wrong hit for the answer.
 - The `memory_search` tool description now says what the tool does: it ranks
-  by relevance, accepts Chinese and English queries and returns file paths. It
-  also tells the model how to query well (two to four content words, both the
-  Chinese and English form of a term), and when a result opens with a
-  fallback note the note now suggests searching again with synonyms or fewer
-  words. `memory_save` asks for synonyms and bilingual aliases in tags so
-  later searches phrased differently still find the memory.
+  by relevance, accepts Chinese and English queries and returns file paths.
+  It also tells the model how to query well (two to four content words, each
+  term written once, in the form the memory most likely uses, rather than in
+  Chinese and English side by side), and when a result is flagged as a weak
+  match the note suggests searching again with synonyms, the term in the
+  other language or fewer words, starting with the keywords no memory
+  contains. `memory_save` asks for synonyms, bilingual aliases and
+  abbreviations in tags, limited to words the name, summary and content
+  don't already contain, so later searches phrased differently still find
+  the memory.
+- `memory_save` now asks the model to note, next to the rule itself, the
+  reason the user gave or the situation it came up in, so a later session can
+  tell where the rule applies, and to leave out details that go stale
+  quickly, such as line numbers; the summary no longer stacks keywords, and
+  each `sourceMode` value is explained. The checkup now reports a bare
+  one-line conclusion whose scope cannot be told as unclear. Existing
+  memories are not rewritten.
 - Injected index lines now end with the memory's file path (`global/x.md`,
   `<project>/x.md`), so the model can open the full text directly, and the
   prompt ends with a fixed note that memories are background material: they
@@ -209,6 +261,10 @@ All notable changes to this project are documented here. The format follows
   query and a common-word query under both segmenters. Each row passes when
   search is at most 80 ms slower than a reference measured in the same run
   and scoring holds less than 2 MB.
+- The model no longer rewrites or replaces a memory you edited by hand,
+  whether in its file or on the memory page, without asking first:
+  `memory_save` returns the current text and waits for your go-ahead before
+  overwriting.
 
 ### Fixed
 - A memory holding a vendor-format key (such as `sk-`, `ghp_`, an AWS
@@ -236,6 +292,9 @@ All notable changes to this project are documented here. The format follows
   forgetting the memory cannot remove it. Such memories are now refused with
   a message saying why and stay in the project unchanged. Promoting to global
   memory is unaffected.
+- Promoting a project memory to global overwrote the global memory with the
+  same id, if there was one. Such promotions are now refused with a message
+  saying why, and both memories stay as they were.
 - A key quoted in the reason given to `memory_forget`, in a `memory_snapshot`
   description or in a checkup's conflict summary was logged and saved as is,
   so it stayed in the host log, the snapshots and the pending list even after

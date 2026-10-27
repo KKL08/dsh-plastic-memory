@@ -1,9 +1,15 @@
 import { z } from 'zod'
 import { memoryRecordSchema } from '../record-schema.ts'
-import { OVERFLOW_MODES, type DirectoryNoteCode, type ScanNoteCode } from '../contract-codes.ts'
+import { IGNORABLE_ADVICE_TYPES, MODEL_CHANGE_KINDS, OVERFLOW_MODES, type DirectoryNoteCode, type ScanNoteCode } from '../contract-codes.ts'
+
+/** 快照、最近删除的保留窗口（毫秒）：对话卡据此判断模型改写的改前版本是否已过期。 */
+export { RETENTION_MS } from '../retention.ts'
 
 /** 密钥遮盖（缺省与注入、视图同一套规则），浏览器半侧给对话卡里来自工具参数的文字用（带 severity: 'suspected'）。 */
 export { maskSecrets, maskSecretSurface, type MaskOptions } from '../secrets.ts'
+
+/** 密钥检测（与写入管线同一套规则）：浏览器半侧发命令前预检，命令文本会进借用会话的日志，高危密钥不能先发出去。 */
+export { detectSecrets } from '../secrets.ts'
 
 /**
  * GUI 契约（命名契约：视图与命令的标识符只在这一处定义）。服务端 GUI 层与浏览器半侧共用，是叶子：
@@ -13,7 +19,7 @@ export { maskSecrets, maskSecretSurface, type MaskOptions } from '../secrets.ts'
  */
 
 /** 视图 schema 的版本号：视图是派生缓存，形状变了就换号，客户端读到不认识的号按「需要刷新」处理。 */
-export const GUI_VIEW_VERSION = 3
+export const GUI_VIEW_VERSION = 11
 
 /** 视图文件所在目录（相对记忆根目录，POSIX 分隔）。 */
 export const GUI_VIEW_DIR = '.state/gui'
@@ -43,6 +49,13 @@ export type GuiLayerRef = z.infer<typeof layerRefSchema>
 
 const sourceModeSchema = memoryRecordSchema.shape.source.unwrap().shape.sourceMode
 
+/**
+ * 项目记忆在「提升为全局」上的状态：candidate = 模型标了全局提升候选、还没处理（体检关闭时不标）；
+ * kept-local = 用户选了「留在本项目」（账本里结清的那条还在）。已提升的就是全局记忆，不另标。
+ */
+export const MEMORY_PROMOTIONS = ['candidate', 'kept-local'] as const
+export type MemoryPromotion = (typeof MEMORY_PROMOTIONS)[number]
+
 /** 记忆卡：原文 + 类型 · 作用域 · 来源 · 时间。 */
 export const memoryCardSchema = z.object({
   id: z.string(),
@@ -63,6 +76,13 @@ export const memoryCardSchema = z.object({
   handEdited: z.boolean().optional(),
   /** 记忆文件的绝对路径。 */
   filePath: z.string(),
+  /** 名称、摘要、正文的内容摘要（同文件里的 digest 算法）：直接改时连同 updatedAt 带回去，磁盘上对不上就是卡片加载后被改过。
+   *  可缺省：对话卡从工具参数拼出来，没有它。 */
+  digest: z.string().optional(),
+  /** 四个面含密钥（两级都算）：界面上的文字可能是遮盖后的，不给直接改、直接合并。 */
+  hasSecret: z.literal(true).optional(),
+  /** 提升为全局的状态（见 MEMORY_PROMOTIONS）。只在全部记忆视图里给：对话卡片和右侧栏「这次新写入的」据此就地提示。 */
+  promotion: z.enum(MEMORY_PROMOTIONS).optional(),
 })
 export type MemoryCard = z.infer<typeof memoryCardSchema>
 
@@ -72,48 +92,115 @@ export function layerOfMemory(memory: Pick<MemoryCard, 'scope' | 'workspacePath'
   return memory.workspacePath === undefined ? undefined : { kind: 'workspace', workspacePath: memory.workspacePath }
 }
 
+/**
+ * 直接合并时保留哪条：一条全局一条项目时保留全局那条；同层（或两个不同项目）保留创建较早的，同时创建按 id。
+ * 服务端按它决定保留哪条，界面按它预填名称和摘要。
+ */
+export function mergeKeeperIndex(memories: readonly [MergeSide, MergeSide]): 0 | 1 {
+  const [a, b] = memories
+  if (a.scope !== b.scope) return a.scope === 'global' ? 0 : 1
+  if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? 0 : 1
+  return a.id <= b.id ? 0 : 1
+}
+type MergeSide = Pick<MemoryCard, 'id' | 'scope' | 'createdAt'>
+
 // —— 待处理 ——
 
-export const PENDING_ITEM_KINDS = ['secret', 'conflict-horizontal', 'conflict-vertical', 'promote-candidate', 'overflow', 'unreadable-file'] as const
+/**
+ * 待处理项的级别，按显示顺序：高优问题 must-fix（放着会泄露或丢数据）、待你处理 your-call（插件先按稳妥默认办，等你拍板）、
+ * 建议整理 advice（不处理也不出错，整理后体检分更高；不亮左栏圆点、不算进 tab 主数）。
+ * 每个待处理项属于且只属于一级；以后加级别时往这里追加。
+ */
+export const PENDING_LEVELS = ['must-fix', 'your-call', 'advice'] as const
+export type PendingLevel = (typeof PENDING_LEVELS)[number]
+
+/** 按级别排：同一级内的先后即视图里的先后。 */
+export const PENDING_ITEM_KINDS = ['secret', 'unreadable-file', 'conflict-horizontal', 'conflict-vertical', 'promote-candidate', 'overflow', 'advice'] as const
 export type PendingItemKind = (typeof PENDING_ITEM_KINDS)[number]
 
-/** 待处理条目。冲突、提升候选、超限来自待决账本（带 decisionId）；密钥与读不出的文件从预读数据派生，不入账本。
+/** 每类待处理项归哪一级（写死，客户端不另行推导）。 */
+export const PENDING_LEVEL_OF_KIND = {
+  'secret': 'must-fix',
+  'unreadable-file': 'must-fix',
+  'conflict-horizontal': 'your-call',
+  'conflict-vertical': 'your-call',
+  'promote-candidate': 'your-call',
+  'overflow': 'your-call',
+  'advice': 'advice',
+} as const satisfies Record<PendingItemKind, PendingLevel>
+
+/**
+ * 建议整理项的问题类型，按显示顺序。除 stale 外与体检发现（governance/schema.ts FINDING_TYPES）同名：
+ * expired / bloat / orphan 由规则检查实时算；redundancy / misplaced / unclear 取该层上次语义体检的缓存（体检关闭时不出）；
+ * stale = 超过类型衰减期没确认（健康分的新鲜度）。
+ */
+export const ADVICE_TYPES = ['expired', 'bloat', 'redundancy', 'orphan', 'misplaced', 'unclear', 'stale'] as const
+export type AdviceType = (typeof ADVICE_TYPES)[number]
+
+/** 能「忽略」的建议类型：除「很久没确认」外都能（它的出路是「仍然有效」或删除）。名字定义在 contract-codes（治理侧同用）。 */
+export { IGNORABLE_ADVICE_TYPES, type IgnorableAdviceType } from '../contract-codes.ts'
+
+/** 能「让模型改」（内容重复是「让模型合并」）的建议类型：服务端按它给默认要求，界面按它出按钮。放错层不在其中：改写不动层，它只问挪不挪。 */
+export const MODEL_EDIT_ADVICE_TYPES = ['bloat', 'redundancy', 'unclear'] as const satisfies readonly AdviceType[]
+export type ModelEditAdviceType = (typeof MODEL_EDIT_ADVICE_TYPES)[number]
+
+/** 「等你决定」的口径（左栏圆点、设置页状态卡、健康页「待你决定」入口）：密钥与待你处理；读不出的文件、建议整理不算。 */
+export function isAwaitingDecision(item: Pick<PendingItem, 'kind' | 'level'>): boolean {
+  return item.kind === 'secret' || item.level === 'your-call'
+}
+
+const levelOf = <K extends PendingItemKind>(kind: K) => z.literal(PENDING_LEVEL_OF_KIND[kind])
+
+/** 待处理项。冲突、提升候选、超限来自待决账本（带 decisionId）；密钥、读不出的文件与建议整理从预读数据派生，不入账本。
  *  冲突一方定位不到时为 null（账本悬空引用，裁决会报错）。 */
 export const pendingItemSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('secret'), memory: memoryCardSchema }),
+  z.object({ kind: z.literal('secret'), level: levelOf('secret'), memory: memoryCardSchema }),
   z.object({
-    kind: z.literal('conflict-horizontal'), decisionId: z.string(), firstSeenAt: z.number(), summary: z.string(),
+    kind: z.literal('conflict-horizontal'), level: levelOf('conflict-horizontal'), decisionId: z.string(), firstSeenAt: z.number(), summary: z.string(),
     left: memoryCardSchema.nullable(), right: memoryCardSchema.nullable(),
     /** 决定前 agent 按哪条来：快照注入的排序（confidence 降序 → lastConfirmedAt 降序）排在前的一方；两方都找不到时缺省。 */
     preferredId: z.string().optional(),
   }),
   z.object({
-    kind: z.literal('conflict-vertical'), decisionId: z.string(), firstSeenAt: z.number(), summary: z.string(),
+    kind: z.literal('conflict-vertical'), level: levelOf('conflict-vertical'), decisionId: z.string(), firstSeenAt: z.number(), summary: z.string(),
     memory: memoryCardSchema.nullable(), baselineRef: z.string(),
   }),
-  z.object({ kind: z.literal('promote-candidate'), decisionId: z.string(), firstSeenAt: z.number(), memory: memoryCardSchema.nullable() }),
+  z.object({
+    kind: z.literal('promote-candidate'), level: levelOf('promote-candidate'), decisionId: z.string(), firstSeenAt: z.number(),
+    memory: memoryCardSchema.nullable(),
+  }),
   /** 超出上限：relax 第 tier 档（放宽到上限 × (1 + 0.25 × tier)）；strict 用到 95%（tier 为 0）。workspacePath 缺省 = 无项目的会话。 */
   z.object({
-    kind: z.literal('overflow'), decisionId: z.string(), firstSeenAt: z.number(),
+    kind: z.literal('overflow'), level: levelOf('overflow'), decisionId: z.string(), firstSeenAt: z.number(),
     mode: z.enum(OVERFLOW_MODES), tier: z.number().int().nonnegative(), workspacePath: z.string().optional(),
   }),
   z.object({
-    kind: z.literal('unreadable-file'), layer: layerRefSchema,
+    kind: z.literal('unreadable-file'), level: levelOf('unreadable-file'), layer: layerRefSchema,
     filePath: z.string(), relativePath: z.string(),
     /** 解析器原话。 */
     error: z.string(),
   }),
+  /**
+   * 建议整理：每次生成视图时现算，不入账本。身份 = type + 涉及的记忆 id（memories 的 id，成对的按 id 排序）。
+   * redundancy 一般是两条（互相重复）；只有一条时是和指令文件（AGENTS.md 等）重复。其余类型每项一条记忆。
+   */
+  z.object({
+    kind: z.literal('advice'), level: levelOf('advice'), type: z.enum(ADVICE_TYPES),
+    memories: z.array(memoryCardSchema).min(1),
+  }),
 ])
 export type PendingItem = z.infer<typeof pendingItemSchema>
 
-/** 左栏图标圆点：密钥红点盖过琥珀点；读不出的文件不亮点。 */
+/** 左栏图标圆点：密钥红点盖过琥珀点；读不出的文件、建议整理不亮点。 */
 export const PENDING_DOTS = ['none', 'amber', 'red'] as const
 
-/** 待处理（全部层），按 PENDING_ITEM_KINDS 顺序、同类按 firstSeenAt 升序。 */
+/** 待处理（全部层），按 PENDING_ITEM_KINDS 顺序（先按级别）、同类按 firstSeenAt 升序；建议整理按 ADVICE_TYPES、层（global 在前）、名称排。 */
 export const pendingViewSchema = z.object({
   version,
   dot: z.enum(PENDING_DOTS),
   items: z.array(pendingItemSchema),
+  /** 各级的条数（每一级都有，没有为 0）。 */
+  levelCounts: z.record(z.enum(PENDING_LEVELS), z.number().int().nonnegative()),
   /** 类型 id → 显示名（注册表的 label），供记忆卡元信息；认不出的类型显示 id。 */
   typeLabels: z.record(z.string(), z.string()),
 })
@@ -131,7 +218,8 @@ export const RESOLVE_VERDICTS = ['keep-left', 'keep-right', 'keep-both'] as cons
 
 // —— 健康 ——
 
-const overflowLevelSchema = z.object({ mode: z.enum(OVERFLOW_MODES), tier: z.number().int().nonnegative() })
+/** isDismissed：用户已忽略这条超限提醒（账本里已结），待处理里不再有它，健康页照列、不给「去处理 ›」。 */
+const overflowLevelSchema = z.object({ mode: z.enum(OVERFLOW_MODES), tier: z.number().int().nonnegative(), isDismissed: z.boolean() })
 export const healthLayerSchema = z.object({
   layer: layerRefSchema,
   totalMemories: z.number().int().nonnegative(),
@@ -139,14 +227,27 @@ export const healthLayerSchema = z.object({
   score: z.number().nullable(),
   tier: z.enum(['green', 'amber', 'red']),
   gate: z.object({ secret: z.boolean() }),
-  /** 非零的问题类计数（规则检查实时 + 内容检查取上次体检），type 取值见 governance/schema.ts FINDING_TYPES，按其顺序。 */
-  issues: z.array(z.object({ type: z.string(), count: z.number().int().positive() })),
+  /**
+   * 非零的扣分原因计数（规则检查实时 + 内容检查取上次体检），type 取值见 governance/schema.ts FINDING_TYPES，按其顺序。
+   * level 是这类条目在待处理里所在的组，健康页「去处理 ›」按它定位，由服务端按类型写死；
+   * 这类条目此刻不在待处理里时为 null（体检关闭时冲突与语义建议不显示），不给「去处理 ›」。
+   * 超限、很久没确认不在 issues 里，它们的组由客户端按 PENDING_LEVEL_OF_KIND 取。
+   */
+  issues: z.array(z.object({ type: z.string(), count: z.number().int().positive(), level: z.enum(PENDING_LEVELS).nullable() })),
   /** 超过衰退期未确认的条数。 */
   staleCount: z.number().int().nonnegative(),
   /** 内容检查（语义层）上次时间；从没做过为 null。 */
   semanticCachedAt: z.number().nullable(),
   /** 本层会话带入的记忆超出上限（已忽略的也算，忽略只是不再提醒）；列为问题、不扣分。没超为 null。 */
   overflow: overflowLevelSchema.nullable(),
+  /**
+   * 本层被用户忽略、没有计分的建议（issues 里已不含它们），按问题类型、再按第一条记忆名排；条数即长度。
+   * memories 是涉及的记忆（内容重复两条，按 id 排序），名称与摘要已遮盖密钥；取消忽略按 type + 这些 id 发 unignore-advice。
+   */
+  ignored: z.array(z.object({
+    type: z.enum(IGNORABLE_ADVICE_TYPES),
+    memories: z.array(z.object({ id: z.string(), name: z.string(), summary: z.string() })).min(1),
+  })),
 })
 export const healthViewSchema = z.object({
   version,
@@ -180,6 +281,32 @@ export const directoryIssueSchema = z.object({
  */
 const generatedAt = z.number().optional()
 
+export { MODEL_CHANGE_KINDS, type ModelChangeKind } from '../contract-codes.ts'
+
+/** 模型改写、替代此刻能不能撤：undoable 能；changed 之后又被改过（手改、模型再改、删除），不覆盖；undone 已撤销。 */
+export const MODEL_CHANGE_STATES = ['undoable', 'changed', 'undone'] as const
+export type ModelChangeState = (typeof MODEL_CHANGE_STATES)[number]
+
+/**
+ * 模型用 memory_save 改写已有记忆（rewrite）或把旧记忆标成已取代（supersede）的一次改动，撤销按 decisionId 发 undo。
+ * 对话卡按 sessionId + callId 认领自己那次调用的，右侧栏「这次新写入的」按 sessionId 认领。
+ */
+export const modelChangeSchema = z.object({
+  decisionId: z.string(),
+  kind: z.enum(MODEL_CHANGE_KINDS),
+  /** 改写：被改写的那条；替代：被替代的旧记忆。 */
+  memoryId: z.string(),
+  /** 替代：替代它的那条。 */
+  by: z.string().optional(),
+  /** 改前的那份（快照里的），文字已遮盖密钥。 */
+  before: memoryCardSchema,
+  sessionId: z.string(),
+  callId: z.string(),
+  at: z.number(),
+  state: z.enum(MODEL_CHANGE_STATES),
+})
+export type ModelChange = z.infer<typeof modelChangeSchema>
+
 export const libraryViewSchema = z.object({
   version,
   generatedAt,
@@ -189,8 +316,20 @@ export const libraryViewSchema = z.object({
   layers: z.array(z.object({ layer: layerRefSchema, items: z.array(memoryCardSchema) })),
   /** 目录问题：同 id 多份副本、被忽略的字段、缺标记 / 不可读目录。 */
   directoryIssues: z.array(directoryIssueSchema),
+  /**
+   * 判「彻底删除」的正面信号（对话卡用）：这次收集读到、但不在用的记忆 id（已取代、已删，含超出保留期还没清掉的），
+   * 和有没有读不全的地方（读不出的文件、缺标记或不可读的目录，里面可能有任何 id）。一条记忆不在全部记忆、最近删除、
+   * inactiveIds 里，且没有读不全的地方，才算从磁盘上没了。可缺省：升级前写的视图文件没有，缺省时不判彻底删除。
+   */
+  inactiveIds: z.array(z.string()).optional(),
+  hasUnreadFiles: z.boolean().optional(),
   /** 类型 id → 显示名（同待处理视图的 typeLabels），覆盖注册表与本视图出现的类型。可缺省：升级前写的视图文件没有，下次写视图补上。 */
   typeLabels: z.record(z.string(), z.string()).optional(),
+  /**
+   * 保留窗口内模型改写、替代已有记忆的改动，按时间先后。改前快照已清（过了 14 天、彻底删除）的不列：
+   * 对话卡对不上自己那次调用时，按调用时刻判断是不是已超过保留窗口。可缺省，理由同上。
+   */
+  modelChanges: z.array(modelChangeSchema).optional(),
 })
 export type LibraryView = z.infer<typeof libraryViewSchema>
 
@@ -222,6 +361,13 @@ export type DeletedView = z.infer<typeof deletedViewSchema>
 
 // —— 这次对话 ——
 
+/**
+ * 快照的来历：对话开始时首次带入 / 续上已有轮次的会话时重新带入（宿主重启后续上、插件重载）/ 成功压缩后重新带入。
+ * 其他重建（配置热更新、失败的压缩）沿用上一次的来历。
+ */
+export const SNAPSHOT_ORIGINS = ['start', 'resumed', 'compacted'] as const
+export type SnapshotOrigin = typeof SNAPSHOT_ORIGINS[number]
+
 /** 一个会话冻结快照时带入的记忆与用量。token 是插件估算（estimateTokens），界面带「约」。 */
 export const sessionViewSchema = z.object({
   version,
@@ -229,6 +375,9 @@ export const sessionViewSchema = z.object({
   workspacePath: z.string().optional(),
   /** 快照冻结时刻；早于宿主启动时间说明重启后还没重新带入。 */
   frozenAt: z.number(),
+  origin: z.enum(SNAPSHOT_ORIGINS),
+  /** 最近一次成功压缩结束的时刻（宿主事件时间）；origin 为 compacted 时才有。 */
+  compactedAt: z.number().optional(),
   budget: z.number().nonnegative(),
   overflowMode: z.enum(OVERFLOW_MODES),
   /** 三段之和即总用量：本项目、全局、固定说明（标题、附注、导航图、固定尾注）。 */
@@ -236,9 +385,13 @@ export const sessionViewSchema = z.object({
   /** 计入上限的部分（附注、固定尾注与导航图不计）：relax 下超过 budget 即已放宽，strict 下不超过 budget。 */
   usedTokens: z.number().int().nonnegative(),
   injectedIds: z.array(z.string()),
+  /** injectedIds 里带入全文的（core 区）；其余只带了索引行。 */
+  coreIds: z.array(z.string()),
+  /** injectedIds 里索引行只带名称和标签、不带摘要的（passive 类型）；不在这两组里的是带摘要的索引行。 */
+  titleOnlyIds: z.array(z.string()),
   /** 没带入的条数（只有 strict 会截）：「已到上限，N 条没带入」。 */
   omittedCount: z.number().int().nonnegative(),
-  /** 这次对话新记的。 */
+  /** 这次对话新记的（按写入先后）。冻结晚于写入的会同时出现在 injectedIds 里：界面只列在带入的记忆。 */
   savedIds: z.array(z.string()),
 })
 export type SessionView = z.infer<typeof sessionViewSchema>
@@ -265,6 +418,29 @@ const allowCrossWorkspace = z.boolean().optional()
 /** 目标记忆所在的层（见 layerOfMemory）：服务端只动这一份，跨项目门仍按借来的会话判定；缺省按借来的会话定位。 */
 const layer = layerRefSchema.optional()
 
+/** 卡片加载时记忆的版本（MemoryCard 的 updatedAt 与 digest）。 */
+const memoryBaseSchema = z.object({ updatedAt: z.number(), digest: z.string() })
+const mergeRefSchema = z.object({ memoryId: z.string(), layer, base: memoryBaseSchema })
+const draftRefSchema = z.object({ memoryId: z.string(), layer })
+
+/** 「让模型改」的一稿：正文、摘要每次都有；名称、标签缺省 = 模型没改。只在界面和命令之间来回，不落盘。 */
+export const memoryDraftSchema = z.object({
+  content: z.string().min(1),
+  summary: z.string(),
+  name: z.string().min(1).optional(),
+  tags: z.array(z.string()).optional(),
+})
+export type MemoryDraft = z.infer<typeof memoryDraftSchema>
+/** 直接改、直接合并写进去的四个字段；force：疑似密钥经用户确认后放行（高危密钥一律拦）。 */
+const editFields = {
+  content: z.string().min(1),
+  name: z.string().min(1),
+  summary: z.string(),
+  tags: z.array(z.string()),
+  force: z.boolean().optional(),
+  allowCrossWorkspace,
+}
+
 /** 宿主命令名（不带斜杠）。 */
 export const MEMORY_COMMAND_NAME = 'memory'
 
@@ -275,14 +451,74 @@ export const MEMORY_COMMAND_NAME = 'memory'
 export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   z.object({ cmd: z.literal('info') }),
   z.object({ cmd: z.literal('resolve'), decisionId: z.string(), verdict: z.enum(RESOLVE_VERDICTS), allowCrossWorkspace }),
-  /** 撤销一条已裁决条目：去掉 settled，记了快照的按它恢复败方（提升为全局则恢复原位）。 */
+  /** 撤销一条已裁决条目：去掉 settled，记了快照的按它恢复败方（提升为全局则恢复原位）；直接改、移到项目的撤销后条目移出账本；
+   *  模型改写、替代（全部记忆视图的 modelChanges）按改前快照恢复，之后又被改过的回 stale，撤销后条目标已撤销留着。 */
   z.object({ cmd: z.literal('undo'), decisionId: z.string(), allowCrossWorkspace }),
   z.object({ cmd: z.literal('promote'), decisionId: z.string(), target: z.enum(['global', 'agents-md']), allowCrossWorkspace }),
   z.object({ cmd: z.literal('keep-local'), decisionId: z.string(), allowCrossWorkspace }),
+  /**
+   * 按记忆 id 把一条项目记忆提升为全局（建议整理「放错层」）。同 promote：快照先行，在账本里留一条已结清的提升
+   * （记忆已是提升候选时就结清那一条），结果的 decisionId 交给 undo 撤销。isCandidateRequired：就地提升（对话卡片、右侧栏
+   * 「这次新写入的」）只认此刻仍是提升候选的那一份，别处已「留在本项目」的回 not-found。target 同 promote，缺省 global：
+   * agents-md 写进 AGENTS.md、项目里那条软删，插件不再管理它，不留账、不可撤销（结果不带 decisionId）。
+   */
+  z.object({
+    cmd: z.literal('promote-memory'), memoryId: z.string(), layer, isCandidateRequired: z.boolean().optional(),
+    target: z.enum(['global', 'agents-md']).optional(), allowCrossWorkspace,
+  }),
+  /**
+   * 按记忆 id 把一条提升候选留在本项目（对话卡片、右侧栏「这次新写入的」）。同 keep-local：清掉候选标记，在账本里留一条
+   * 已结清的 keep-local（记忆已在等你决定里时就结清那一条），以后体检不再提。不是候选（已提升、已留下、已删）回 not-found。
+   */
+  z.object({ cmd: z.literal('keep-local-memory'), memoryId: z.string(), layer, allowCrossWorkspace }),
+  /**
+   * 把一条全局记忆移到 workspacePath 那个项目（建议整理「放错层」里全局那条，与 promote-memory 对称）：只认全局那一份，
+   * 内容、id、出处、时间戳不动，全局那份不再存在。目标项目已有同 id 的记忆（在用的或最近删除里的）回 target-taken，什么都不动。
+   * 跨项目门按目标项目判。快照先行，在账本里留一条已结清的移动，结果的 decisionId 交给 undo 撤销（搬回全局）。
+   */
+  z.object({ cmd: z.literal('move-memory'), memoryId: z.string(), workspacePath: z.string(), allowCrossWorkspace }),
   z.object({ cmd: z.literal('forget'), memoryId: z.string(), layer, allowCrossWorkspace }),
   z.object({ cmd: z.literal('restore'), memoryId: z.string(), layer, allowCrossWorkspace }),
+  /** 彻底删除：在用的只收含密钥的；最近删除里的不等 14 天到期，连同快照里的副本现在就清掉。 */
   z.object({ cmd: z.literal('hard-delete'), memoryId: z.string(), layer, allowCrossWorkspace }),
+  /** 刷新一条记忆的确认时间（建议整理「很久没确认」的「仍然有效」），内容不动。不受体检开关影响。 */
+  z.object({ cmd: z.literal('confirm'), memoryId: z.string(), layer, allowCrossWorkspace }),
+  /**
+   * 建议整理的「直接改」：正文、名称、摘要、标签换成给定值，updatedAt、lastConfirmedAt 记为当前时间，标手改（模型改写、替代前要先问用户）；
+   * 类型、作用域、出处、有效期、置信度、取代关系、召回统计不动。base 是卡片加载时的版本，磁盘上对不上回 stale，什么都不动。
+   * 新内容含高危密钥回 secret-critical；疑似密钥回 secret-suspected，用户确认后带 force 重发。快照先行（项目记忆也拍），
+   * 在账本里留一条已结清的条目，结果的 decisionId 交给 undo 撤销。
+   */
+  z.object({ cmd: z.literal('edit-memory'), memoryId: z.string(), layer, base: memoryBaseSchema, ...editFields }),
+  /**
+   * 内容重复的「直接合并」：两条里按 mergeKeeperIndex 保留一条，按 edit-memory 的规则改成给定内容；另一条软删进最近删除。
+   * 两条同拍一份快照，undo 把两条都恢复。
+   */
+  z.object({ cmd: z.literal('merge-memories'), memories: z.tuple([mergeRefSchema, mergeRefSchema]), ...editFields }),
+  /** 借来的会话用哪个模型（「让模型改」的按钮与提示）：拿不到回 llm-unavailable；拿到了但不知道名字时 model 缺省。只读。 */
+  z.object({ cmd: z.literal('model-info') }),
+  /**
+   * 「让模型改 / 让模型合并」的生成：一条（合并时两条）记忆按建议类型的默认要求、或用户写的 request，单次调用借来的会话的模型，
+   * 回一稿改后的内容（结果的 draft）。只读：不写记忆、不拍快照、不入账本、不进会话记录；「应用」由界面改发 edit-memory / merge-memories。
+   * previous：「再改改」时的上一稿，模型在它的基础上接着改。含密钥的记忆回 has-secret，原文不发给模型。
+   */
+  z.object({
+    cmd: z.literal('draft-edit'),
+    adviceType: z.enum(MODEL_EDIT_ADVICE_TYPES),
+    memories: z.union([z.tuple([draftRefSchema]), z.tuple([draftRefSchema, draftRefSchema])]),
+    request: z.string().optional(),
+    previous: memoryDraftSchema.optional(),
+  }),
   z.object({ cmd: z.literal('dismiss-overflow'), decisionId: z.string() }),
+  /**
+   * 忽略一条建议整理项：记下这几条记忆的指纹，之后该项不再出现在待处理、不再扣分；建议依据的字段变了就不再算已忽略。
+   * memories 是该项涉及的记忆（内容重复为一组，顺序不论；其余类型恰好一条），每条带卡片上那一份的层和卡片版本：
+   * 只认那一份，版本对不上（卡片加载后被改过）回 stale，不在用回 not-found，都什么都不记。
+   * 不改记忆，所以不过跨项目门、不受体检开关影响；同一项再忽略一次只是刷新记录。
+   */
+  z.object({ cmd: z.literal('ignore-advice'), type: z.enum(IGNORABLE_ADVICE_TYPES), memories: z.array(mergeRefSchema).min(1) }),
+  /** 取消忽略（健康页「已忽略」里的一条，或刚忽略后的撤销）：本来就没忽略也算成功。 */
+  z.object({ cmd: z.literal('unignore-advice'), type: z.enum(IGNORABLE_ADVICE_TYPES), memoryIds: z.array(z.string()).min(1) }),
   z.object({ cmd: z.literal('scan'), workspacePath: z.string().optional() }),
   z.object({ cmd: z.literal('refresh-views') }),
 ])
@@ -322,11 +558,18 @@ export const GUI_ERROR_CODES = [
   'invalid-args',       // 参数不符合 memoryCommandSchema
   'not-found',          // 条目或记忆不存在（可能已处理）
   'cross-workspace',    // 涉及其他项目且未带 allowCrossWorkspace，什么都没动
-  'llm-unavailable',    // 体检拿不到模型
+  'llm-unavailable',    // 体检、让模型改拿不到模型
+  'llm-failed',         // 让模型改：模型报错，detail 带原话
+  'llm-invalid-output', // 让模型改：模型的输出不合要求的格式
   'subagent-readonly',  // 借的会话是子 agent，不可写
-  'governance-disabled', // 体检已关闭：裁决、撤销、提升、留在本项目、体检、忽略超限不可用
-  'has-secret',         // forget 的目标含密钥（任一级），只能彻底删除：什么都没动，界面确认后改发 hard-delete
+  'governance-disabled', // 体检已关闭：裁决、撤销、提升、移到项目、留在本项目、体检、忽略超限不可用
+  'has-secret',         // forget 的目标含密钥（任一级），只能彻底删除：什么都没动，界面确认后改发 hard-delete；
+                        // 直接改、直接合并的目标含密钥（界面上是遮盖后的正文）：什么都没动；让模型改的目标含密钥：不发给模型
+  'stale',              // 直接改、直接合并：记忆在卡片加载后被改过；撤销模型改写、替代：之后又被改过。什么都没动
+  'secret-critical',    // 直接改、直接合并的新内容含高危密钥：什么都没动
+  'secret-suspected',   // 直接改、直接合并的新内容含疑似密钥：什么都没动，用户确认后带 force 重发
   'claimed',            // 待决项正被另一次操作（别的标签页、宿主进程或体检）认领：什么都没动
+  'target-taken',       // 移到项目：目标项目已有同 id 的记忆；撤销移到项目、提升为全局：全局已有同 id 的记忆（含最近删除）。什么都没动
   'failed',             // 执行器报错，detail 带原话
 ] as const
 export type GuiErrorCode = (typeof GUI_ERROR_CODES)[number]
@@ -338,8 +581,31 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     decisionId: z.string().optional(),
     memoryIds: z.array(z.string()).optional(),
     snapshotId: z.string().optional(),
+    /** edit-memory / merge-memories：保留的那条写完后的文件（改了名称时文件名跟着变）；move-memory：移过去之后的文件。 */
+    filePath: z.string().optional(),
+    /** draft-edit：模型给的改后稿。 */
+    draft: memoryDraftSchema.optional(),
+    /** model-info、draft-edit：借来的会话用的模型名；拿不到名字时缺省。 */
+    model: z.string().optional(),
     /** scan：体检的说明码（如 baseline-session-scoped）。 */
     notes: z.array(z.custom<ScanNoteCode>(v => typeof v === 'string')).optional(),
+    /**
+     * scan：本次新增的待处理项条数。新增 = 体检后有、体检前没有（按待处理项的身份比较，只看本次体检覆盖的层），
+     * 不等于「体检查出来的」：体检期间别的会话写入引出的、时间推移刚越过「很久没确认」门槛的也算。
+     * 用户忽略的建议不在待处理里，不算。pending = 高优问题 + 待你处理，advice = 建议整理。
+     * pendingLevel：新增的待处理都在同一组时给出那一组（界面的链接定位到它），分在两组或没有新增时缺省。
+     * 收集视图出错时缺省（体检照常完成）。
+     */
+    added: z.object({
+      pending: z.number().int().nonnegative(), advice: z.number().int().nonnegative(),
+      pendingLevel: z.enum(['must-fix', 'your-call']).optional(),
+    }).optional(),
+    /** scan：本次体检覆盖各层的健康分（与健康视图同值，有密钥的层为 null），按健康视图的层序；与 added 同时缺省。 */
+    scores: z.array(z.object({ layer: layerRefSchema, score: z.number().nullable() })).optional(),
+    /** scan：内容检查分了批时的批数（分批的各层相加），与说明码 semantic-batched 同时出现；不分批时缺省。 */
+    semanticBatches: z.number().int().positive().optional(),
+    /** scan：宿主流 usage 块报的实际用量合计（所有批次、重试、跨项目重复检查）；宿主一次都没报时缺省，不拿估算顶替。 */
+    usageTokens: z.number().int().nonnegative().optional(),
     /** info：记忆根目录、视图目录与各视图文件的绝对路径（session 是发命令的这个会话的视图）、视图版本。 */
     info: z.object({
       memoryRoot: z.string(),

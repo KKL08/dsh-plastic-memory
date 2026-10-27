@@ -1,12 +1,15 @@
-// 「最近删除」tab：对假网关断言每行的清除时刻、裁决来源、恢复命令与空状态。
+// 「最近删除」tab：对假网关断言每行的清除时刻、裁决来源、恢复与彻底删除命令、空状态。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { GUI_VIEW_VERSION, type DeletedView, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
 import type { BorrowedSession } from '../gateway.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createNavStore } from '../nav.ts'
-import { memory, NOW, renderInShell } from '../test-utils.tsx'
+import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { DeletedTab } from './DeletedTab.tsx'
+import { createTranslator } from '../i18n.tsx'
+import { en } from '../locales.ts'
+import { PanelShell } from '../ui/PanelShell.tsx'
 
 const DAY = 24 * 60 * 60 * 1000
 const app = { kind: 'workspace', workspacePath: '/w/app' } as const
@@ -28,11 +31,23 @@ const library: LibraryView = {
   version: GUI_VIEW_VERSION, memoryRoot: '/m', directoryIssues: [],
   layers: [{ layer: app, items: [memory({ id: 'm9', name: 'postgres-in-tests', content: '测试用真实 Postgres' })] }],
 }
-const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], typeLabels: { preference: '行为偏好' } }
+const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], levelCounts: levelCountsOf([]), typeLabels: { preference: '行为偏好' } }
 
 function rowOf(text: string): HTMLElement {
   return screen.getByText(text).closest('li')!
 }
+
+describe('最近删除英文单复数', () => {
+  it('还剩 1 天写 1 day，多天写 days', () => {
+    const view: DeletedView = { version: GUI_VIEW_VERSION, items: [
+      { memory: memory({ id: 'e1', content: 'one day left' }), deletedAt: NOW - 13 * DAY, purgeAt: NOW + 1.5 * DAY },
+      { memory: memory({ id: 'e2', content: 'many days left' }), deletedAt: NOW - 2 * DAY, purgeAt: NOW + 12 * DAY },
+    ] }
+    render(<PanelShell gateway={createFakeGateway({ views: { deleted: view } })} t={createTranslator(en)}><DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} /></PanelShell>)
+    expect(within(rowOf('one day left')).getByText(/Purged in 1 day$/)).toBeInTheDocument()
+    expect(within(rowOf('many days left')).getByText(/Purged in 12 days$/)).toBeInTheDocument()
+  })
+})
 
 describe('最近删除', () => {
   it('只列作用域里的；每行写何时删、多久后彻底清除（客户端按当前时间算）', () => {
@@ -147,6 +162,76 @@ describe('最近删除', () => {
     await act(async () => { fireEvent.click(next) })
     act(() => { gateway.setView('deleted', { version: GUI_VIEW_VERSION, items: [] }) })
     await waitFor(() => { expect(screen.getByText('已恢复。')).toHaveFocus() })
+  })
+
+  describe('彻底删除', () => {
+    const confirmText = '现在就彻底删除这条记忆？删除后不能恢复，以前快照里的副本也一起抹掉。'
+
+    it('「彻底删除…」是 ghost 按钮、在「恢复」左边；点了只在行内展开确认，不发命令，两个按钮都暂不可用；取消后什么都不变', () => {
+      const gateway = createFakeGateway({ views: { deleted } })
+      renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
+      const row = rowOf('用 pnpm 不用 npm')
+      const buttons = within(row.querySelector('.pm-del-actions') as HTMLElement).getAllByRole('button')
+      expect(buttons.map(b => b.textContent)).toEqual(['彻底删除…', '恢复'])
+      // 「彻底删除…」是无边框、次文字色的 ghost 按钮，和「恢复」区分开
+      expect(buttons[0]).toHaveClass('pm-btn--ghost')
+      expect(buttons[1]).not.toHaveClass('pm-btn--ghost')
+
+      fireEvent.click(buttons[0]!)
+      expect(within(row).getByText(confirmText)).toBeInTheDocument()
+      expect(screen.queryByRole('dialog')).toBeNull()
+      expect(gateway.executed).toEqual([])
+      expect(within(row).getByRole('button', { name: '恢复' })).toHaveAttribute('aria-disabled', 'true')
+      expect(within(row).getByRole('button', { name: '彻底删除…' })).toHaveAttribute('aria-disabled', 'true')
+      expect(screen.getAllByText(confirmText)).toHaveLength(1)
+
+      fireEvent.click(within(row).getByRole('button', { name: '取消' }))
+      expect(screen.queryByText(confirmText)).toBeNull()
+      expect(gateway.executed).toEqual([])
+      expect(within(row).getByRole('button', { name: '恢复' })).not.toHaveAttribute('aria-disabled')
+      expect(screen.queryByRole('status')).toBeNull()
+    })
+
+    it('确认后发 /memory hard-delete（带这一份的层），提示已彻底删除', async () => {
+      const gateway = createFakeGateway({ views: { deleted }, respond: command => ({ ok: true, cmd: command.cmd, memoryIds: ['d2'] }) })
+      renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
+      const row = rowOf('测试用 sqlite')
+      fireEvent.click(within(row).getByRole('button', { name: '彻底删除…' }))
+      await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '彻底删除' })) })
+      expect(gateway.executed).toEqual([{ sessionId: 's1', command: { cmd: 'hard-delete', memoryId: 'd2', layer: app } }])
+      expect(screen.queryByText(confirmText)).toBeNull()
+      expect(screen.getByRole('status')).toHaveTextContent('已彻底删除。')
+      expect(screen.queryByText('去最近删除 ›')).toBeNull()
+    })
+
+    it('失败写原因，这一行和「恢复」照旧可用', async () => {
+      const gateway = createFakeGateway({ views: { deleted }, respond: command => ({ ok: false, cmd: command.cmd, code: 'not-found', detail: '不存在或已处理：d1' }) })
+      renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
+      const row = rowOf('用 pnpm 不用 npm')
+      fireEvent.click(within(row).getByRole('button', { name: '彻底删除…' }))
+      await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '彻底删除' })) })
+      expect(screen.getByRole('status')).toHaveTextContent('没有成功：不存在或已处理：d1')
+      expect(within(row).getByRole('button', { name: '恢复' })).not.toHaveAttribute('aria-disabled')
+      expect(within(row).getByRole('button', { name: '彻底删除…' })).not.toHaveAttribute('aria-disabled')
+    })
+
+    it('别的项目里的：服务端拒后在行里确认，「继续处理」带 allowCrossWorkspace 重发', async () => {
+      const gateway = createFakeGateway({
+        views: { deleted },
+        respond: command => 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
+          ? { ok: true, cmd: command.cmd, memoryIds: ['d5'] }
+          : { ok: false, cmd: command.cmd, code: 'cross-workspace', rejected: [{ id: 'd5', workspacePath: '/w/blog' }] },
+      })
+      renderInShell(<DeletedTab nav={createNavStore()} scope={blog} session={session} now={NOW} />, gateway)
+      fireEvent.click(screen.getByRole('button', { name: '彻底删除…' }))
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: '彻底删除' })) })
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: '继续处理' })) })
+      expect(gateway.executed.map(e => e.command)).toEqual([
+        { cmd: 'hard-delete', memoryId: 'd5', layer: blog },
+        { cmd: 'hard-delete', memoryId: 'd5', layer: blog, allowCrossWorkspace: true },
+      ])
+      expect(screen.getByRole('status')).toHaveTextContent('已彻底删除。')
+    })
   })
 
   it('空状态写保留规则和密钥例外', () => {

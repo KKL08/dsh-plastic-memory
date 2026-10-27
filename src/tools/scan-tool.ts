@@ -10,7 +10,7 @@ export function createScanTool(deps: ScanToolDeps): ToolDefinition {
     description: '对记忆库做治理扫描。规则层（密钥泄漏/过期/超长/孤儿引用）免费实时；语义层（冲突/冗余/错位/模糊）'
       + '调用 LLM 深扫，结果按 scope 分桶缓存供 memory_health 使用，发现的冲突自动登记为待决项。'
       + '默认只扫当前项目的可见记忆（global + 本 workspace）。'
-      + '**全库体检（scope="all"）会对每个 workspace 各调一次 LLM，调用前你必须先用 ask_user_question 让用户选择范围**——'
+      + '**全库体检（scope="all"）会对每个 workspace 至少调一次 LLM（记忆多时分批、调用更多），调用前你必须先用 ask_user_question 让用户选择范围**——'
       + '全部 workspace 都扫，还是只扫指定几个（用户勾选的路径传 scopes）。'
       + '扫描只读不清理——清理动作需向用户呈现 findings 并确认后，用 memory_forget / memory_save / memory_confirm 执行。',
     parameters: {

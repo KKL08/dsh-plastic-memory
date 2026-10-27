@@ -8,7 +8,8 @@ import type { ScanCacheEntry } from '../governance/schema.ts'
 import { FINDING_TYPES } from '../governance/schema.ts'
 import type { HealthThresholds } from '../governance/health-presets.ts'
 import { runRuleScan } from '../governance/rule-scan.ts'
-import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, checkupRowBase, type LayerRef, TIER_LABEL } from '../governance/layer-health.ts'
+import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, checkupRowBase, ignoredNote, type LayerRef, TIER_LABEL } from '../governance/layer-health.ts'
+import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import type { DirectoryNote } from '../storage/table.ts'
 import { prereadLayers, listingNotes, checkupWorkspaces, renderDirectoryNotes } from './layer-preread.ts'
 import { decisionWorkspaces, decisionWorkspacesNote } from './workspace-gate.ts'
@@ -23,6 +24,8 @@ export interface HealthToolDeps {
   registry: TypeRegistry
   decisions: PendingDecisionsStore
   cache: KvTable<ScanCacheEntry>
+  /** 建议忽略表：被用户忽略的建议不扣分（与记忆页同口径）。缺省按没有忽略算。 */
+  ignores?: Pick<AdviceIgnoreStore, 'list'>
   /** 触发阈值（由 index.ts 从 sensitivity 预设解析后注入）。 */
   thresholds: HealthThresholds
   /** 当前会话的 workspace（默认口径"当前项目"的来源）。 */
@@ -56,6 +59,8 @@ export interface SingleHealthResult {
     items: Array<{ id: string; memoryIds: string[]; workspaces: string[]; summary: string; overdue: boolean }>
   }
   totalMemories: number
+  /** 用户在记忆页忽略、没有计分的建议条数。 */
+  ignoredCount: number
   /** 本层的全局提升候选数（闲时才进 recommendation 文本，字段常在）。 */
   promoteCandidates: number
   /** workspace 视图下 global 层检出的疑似密钥条数——不计本层分数，但必须报警。 */
@@ -81,6 +86,8 @@ export interface CheckupRow {
   promoteCandidates: number
   /** 供表格"主要问题"列：非零的问题类计数。 */
   issueSummary: string
+  /** 用户忽略、没有计分的建议条数。 */
+  ignoredCount: number
 }
 
 export interface CheckupHealthResult {
@@ -113,6 +120,8 @@ export function renderHealthResult(result: HealthToolResult): string {
       const gateNote = row.gate.secret ? '｜⚠️ 检出密钥' : ''
       lines.push(`- ${name}：${Math.floor(row.score)}/100（${TIER_LABEL[row.tier]}）｜${row.totalMemories} 条｜${row.issueSummary}${gateNote}`)
     }
+    const ignored = ignoredNote(result.rows.reduce((n, row) => n + row.ignoredCount, 0))
+    if (ignored !== undefined) lines.push(ignored)
     for (const c of result.crossLayerConflicts) {
       lines.push(`⚠️ 跨层冲突：global ${c.globalId} 与 ${c.workspaces.length} 个项目存在待决冲突（${c.workspaces.join('、')}）——被多数项目反对的全局规则建议优先裁定（memory_confirm resolve：${c.decisionIds.join('、')}）`)
     }
@@ -131,6 +140,8 @@ export function renderHealthResult(result: HealthToolResult): string {
     + `语义层扣分 ${breakdown.semanticLayer.penalty}（conflict ${breakdown.semanticLayer.conflict} / redundancy ${breakdown.semanticLayer.redundancy} / misplaced ${breakdown.semanticLayer.misplaced} / unclear ${breakdown.semanticLayer.unclear}）；`
     + `新鲜度扣分 ${breakdown.freshness.penalty}（${breakdown.freshness.staleCount} 条超期）`,
   )
+  const ignored = ignoredNote(result.ignoredCount)
+  if (ignored !== undefined) lines.push(ignored)
   if (result.overflow !== null) lines.push(`超出上限（不扣分）：${result.overflow.summary}`)
   if (result.pendingDecisions.items.length > 0) {
     lines.push('待裁决冲突（memory_confirm resolve）：')
@@ -299,6 +310,7 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
       })),
     },
     totalMemories: records.length,
+    ignoredCount: scored.ignored.length,
     promoteCandidates: scored.promoteCandidates,
     globalSecretAlert,
     overflow,

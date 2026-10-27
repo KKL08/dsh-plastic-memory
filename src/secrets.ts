@@ -6,13 +6,29 @@
  * forget 时两级一视同仁：命中任一级即物理删除（tools/forget.ts）。
  */
 export type SecretSeverity = 'critical' | 'suspected'
+
+/**
+ * 私钥块（PEM、PGP）的正则：命中整块（BEGIN 到同名 END），遮盖才盖得住正文。BEGIN 与 END 之间只允许正文行：base64 行、
+ * 「键: 值」头字段行，以及后面还有 base64 行的空行（整块缩进、整块在 Markdown 引用里、行尾带空白都算）。没有这样的 END
+ * （截断的粘贴、散文里提到 BEGIN 头）只到 BEGIN 那一行行尾，再带上紧跟着的正文行；散文里的 BEGIN 头因此只遮这一行，
+ * 不会一路吞到后文真正私钥的 END。
+ */
+function keyBlock(begin: string, end: string): RegExp {
+  // 行首：缩进与引用标记（> 、>> ）
+  const lead = String.raw`[ \t>]*`
+  // 正文行：整行是 base64、或是头字段、或是后面紧跟 base64 行的空行；行尾可以带空白。
+  // 头字段的值止于非空白字符，行尾空白只归后面的 [ \t]*：两段若能吃同一批字符，缺 END 时回溯随行数指数增长。
+  const bodyLine = String.raw`\r?\n${lead}(?:[A-Za-z0-9+/=]+|[A-Za-z][A-Za-z0-9-]*: (?:[^\r\n]*\S)?|(?=\r?\n${lead}[A-Za-z0-9+/=]))[ \t]*(?=\r?\n|$)`
+  return new RegExp(String.raw`${begin}(?:[ \t]*(?:${bodyLine})*\r?\n${lead}${end}|[^\r\n]*(?:${bodyLine})*)`)
+}
+
 export const SECRET_PATTERNS: Array<{ name: string; re: RegExp; severity: SecretSeverity }> = [
   { name: 'sk- 系列密钥（OpenAI/Anthropic 等）', re: /\bsk-[A-Za-z0-9_-]{16,}\b/, severity: 'critical' },
   { name: 'GitHub token（ghp_/gho_ 等）', re: /\bgh[pousr]_[A-Za-z0-9]{20,}\b/, severity: 'critical' },
   { name: 'AWS Access Key', re: /\bAKIA[0-9A-Z]{16}\b/, severity: 'critical' },
   { name: 'JWT', re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/, severity: 'critical' },
-  // 命中整块（BEGIN 到同名 END），遮盖才盖得住正文；没有 END 行（截断的粘贴）算到文本末尾
-  { name: 'PEM 私钥块', re: /-----BEGIN ([A-Z ]*)PRIVATE KEY-----[\s\S]*?(?:-----END \1PRIVATE KEY-----|$)/, severity: 'critical' },
+  { name: 'PEM 私钥块', re: keyBlock('-----BEGIN ([A-Z ]*)PRIVATE KEY-----', String.raw`-----END \1PRIVATE KEY-----`), severity: 'critical' },
+  { name: 'PGP 私钥块', re: keyBlock('-----BEGIN PGP PRIVATE KEY BLOCK-----', '-----END PGP PRIVATE KEY BLOCK-----'), severity: 'critical' },
   { name: 'Slack token', re: /\bxox[baprs]-[A-Za-z0-9-]{8,}\b/, severity: 'critical' },
   { name: 'Google API Key', re: /\bAIza[0-9A-Za-z_-]{35}\b/, severity: 'critical' },
   { name: 'Bearer token', re: /\bBearer\s+[A-Za-z0-9._-]{20,}/, severity: 'critical' },
@@ -132,4 +148,12 @@ export function maskSecretSurface<T extends SecretSurface>(r: T, opts: MaskOptio
   if (spans.length === 0) return r
   const [content, name, summary, ...tags] = segments.map((segment, i) => maskRange(text, spans, starts[i], starts[i] + segment.length))
   return { ...r, content, name, summary, tags }
+}
+
+/**
+ * 记忆文件路径对外的口径（注入、检索、体检说明同口径）：文件名由 name 派生，slug 只换分隔符还会截断，name 被遮了
+ * 路径里多半还留着同一段密钥（截断后的残段规则也认不出），不给路径（undefined）；手起名的文件名可能自带密钥，其余路径遮一遍。
+ */
+export function exposedPath(r: SecretSurface, path: string): string | undefined {
+  return maskSecretSurface(r).name === r.name ? maskSecrets(path) : undefined
 }

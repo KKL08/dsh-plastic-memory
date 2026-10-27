@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach, afterEach } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,9 +7,10 @@ import { SidecarStore } from '../src/storage/sidecar.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { GLOBAL_DIR, STATE_DIR, workspaceDirName } from '../src/storage/paths.ts'
 import { MemoryStore } from '../src/store.ts'
-import { PendingDecisionsStore } from '../src/governance/decisions.ts'
+import { candidateFingerprint, PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
+import { SEVERITY_BY_TYPE, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type Finding, type FindingType } from '../src/governance/schema.ts'
+import { layerCacheKey, type LayerRef } from '../src/governance/layer-health.ts'
 import { resolveHealthThresholds } from '../src/governance/health-presets.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { executeConfirm } from '../src/tools/confirm.ts'
@@ -18,14 +19,15 @@ import { executeHealth } from '../src/tools/health.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import {
   GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, PENDING_ITEM_KINDS, deletedViewSchema, healthViewSchema,
-  libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema, workspaceMapViewSchema, type GlobalViewName,
+  libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema, workspaceMapViewSchema, type GlobalViewName, type PendingItem,
 } from '../src/gui/contract.ts'
 import { buildSessionView } from '../src/gui/views.ts'
-import { ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
+import { VIEW_REPLACE_GAP_MS, ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { FAKE_SECRET, generatePrivateKeyPem } from './helpers/secrets.ts'
+import { SECRET_MASK } from '../src/secrets.ts'
 
 // 视图生成：真实临时目录（FileTable + .state 侧表）+ 账本 → 五种视图 JSON。只断言视图内容，不 mock 自己的模块。
 
@@ -39,13 +41,13 @@ afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
 function harness() {
   let clock = T0
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock }), undefined, sidecar.recallStats)
   const decisions = new PendingDecisionsStore(sidecar.pending)
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const sourceDeps = { store, decisions, cache: sidecar.scanCache, registry, memoryRoot: root, now: () => clock }
   return {
-    store, decisions, snapshots, sourceDeps,
+    store, decisions, snapshots, sourceDeps, cache: sidecar.scanCache,
     setClock: (t: number) => { clock = t },
     views: () => collectGlobalViews(sourceDeps),
     resolve: (decisionId: string, verdict: 'keep-left' | 'keep-right' | 'keep-both') =>
@@ -63,7 +65,7 @@ const w = (partial: Partial<MemoryRecord>) => g({ scope: 'workspace', workspaceP
 const wsDir = () => join(root, workspaceDirName(WS))
 
 describe('待处理视图', () => {
-  it('五类来源按密钥 → 冲突 → 提升候选 → 超限 → 读不出的文件排序；密钥与读不出的文件派生、不入账本', async () => {
+  it('五类来源按密钥 → 读不出的文件 → 冲突 → 提升候选 → 超限排序；密钥与读不出的文件派生、不入账本', async () => {
     const h = harness()
     await h.store.create(g({ id: 'mem_secret', name: '部署凭证', content: `token ${FAKE_SECRET.sk}` }))
     await h.store.create(w({ id: 'mem_a', name: 'A', content: '用 pnpm' }))
@@ -79,19 +81,59 @@ describe('待处理视图', () => {
 
     const { pending } = await h.views()
     expect(pendingViewSchema.parse(pending)).toEqual(pending)
-    expect(pending.items.map(i => i.kind)).toEqual([...PENDING_ITEM_KINDS])
+    expect(pending.items.map(i => i.kind)).toEqual(PENDING_ITEM_KINDS.filter(k => k !== 'advice'))
     expect(pending.dot).toBe('red')
-    const [secret, h1, v1, p1, o1, bad] = pending.items
+    const [secret, bad, h1, v1, p1, o1] = pending.items
     expect(secret.kind === 'secret' && secret.memory.id).toBe('mem_secret')
     expect(JSON.stringify(secret)).not.toContain(FAKE_SECRET.sk)
     expect(h1).toMatchObject({ kind: 'conflict-horizontal', decisionId: horizontal.id, firstSeenAt: 4, left: { id: 'mem_a', content: '用 pnpm' }, right: { id: 'mem_b' } })
     expect(v1).toMatchObject({ kind: 'conflict-vertical', decisionId: vertical.id, baselineRef: 'AGENTS.md：包管理', memory: { id: 'mem_v' } })
     expect(p1).toMatchObject({ kind: 'promote-candidate', decisionId: promote.id, memory: { id: 'mem_p', scope: 'workspace', workspacePath: WS } })
-    expect(o1).toEqual({ kind: 'overflow', decisionId: overflow.id, firstSeenAt: 1, mode: 'relax', tier: 2, workspacePath: WS })
+    expect(o1).toEqual({ kind: 'overflow', level: 'your-call', decisionId: overflow.id, firstSeenAt: 1, mode: 'relax', tier: 2, workspacePath: WS })
     expect(bad).toMatchObject({ kind: 'unreadable-file', layer: { kind: 'workspace', workspacePath: WS }, filePath: join(wsDir(), 'broken.md'), relativePath: `${workspaceDirName(WS)}/broken.md` })
     expect(bad.kind === 'unreadable-file' && bad.error.length).toBeGreaterThan(0)
     // 密钥与读不出的文件没有进账本
     expect((await h.decisions.list()).map(e => e.kind ?? 'conflict').sort()).toEqual(['conflict', 'conflict', 'overflow', 'promote-candidate'])
+  })
+
+  it('每个待处理项带级别：密钥、读不出的文件属高优问题，冲突、提升候选、超限属待你处理；高优问题排在前，视图带各级条数', async () => {
+    const h = harness()
+    await h.store.create(g({ id: 'mem_secret', name: '部署凭证', content: `token ${FAKE_SECRET.sk}` }))
+    await h.store.create(w({ id: 'mem_a', name: 'A', content: '用 pnpm' }))
+    await h.store.create(w({ id: 'mem_b', name: 'B', content: '用 npm' }))
+    await h.store.create(w({ id: 'mem_v', name: 'V', content: '用 yarn' }))
+    await h.store.create(w({ id: 'mem_p', name: 'P', content: '所有项目都用 vitest', globalCandidate: true }))
+    await writeFile(join(wsDir(), 'broken.md'), '---\nname: [\n---\n正文\n')
+    await h.decisions.syncOverflow(WS, { mode: 'relax', tier: 2 }, 1, '超限')
+    await h.decisions.upsert({ kind: 'promote-candidate', memoryIds: ['mem_p'], summary: '', fingerprint: 'c' }, 2)
+    await h.decisions.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '与基线矛盾', fingerprint: 'v' }, 3)
+    await h.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '矛盾', fingerprint: 'h' }, 4)
+
+    const { pending } = await h.views()
+    expect(pendingViewSchema.parse(pending)).toEqual(pending)
+    expect(pending.items.map(i => [i.level, i.kind])).toEqual([
+      ['must-fix', 'secret'], ['must-fix', 'unreadable-file'],
+      ['your-call', 'conflict-horizontal'], ['your-call', 'conflict-vertical'], ['your-call', 'promote-candidate'], ['your-call', 'overflow'],
+    ])
+    expect(pending.levelCounts).toEqual({ 'must-fix': 2, 'your-call': 4, 'advice': 0 })
+  })
+
+  it('没有待处理项：各级条数都是 0', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_a', name: 'A', content: '用 pnpm' }))
+    const { pending } = await h.views()
+    expect(pending.items).toEqual([])
+    expect(pending.levelCounts).toEqual({ 'must-fix': 0, 'your-call': 0, 'advice': 0 })
+  })
+
+  it('读不出的文件：显示用的相对路径遮掉文件名里的密钥，打开用的 filePath 仍是真实路径', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_a', name: 'A', content: '用 pnpm' }))
+    const broken = join(wsDir(), `deploy-${FAKE_SECRET.sk}.md`)
+    await writeFile(broken, '---\nname: [\n---\n正文\n')
+    const { pending } = await h.views()
+    const bad = pending.items.find(i => i.kind === 'unreadable-file')
+    expect(bad).toMatchObject({ filePath: broken, relativePath: `${workspaceDirName(WS)}/deploy-${SECRET_MASK}.md` })
   })
 
   it('PEM 私钥整块遮住：待处理的密钥条目与记忆库视图里都不出现私钥正文', async () => {
@@ -160,17 +202,18 @@ describe('待处理视图：体检关闭', () => {
     await seedAll(h, true)
     const off = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
     expect(pendingViewSchema.parse(off.pending)).toEqual(off.pending)
-    expect(off.pending.items.map(i => i.kind)).toEqual(['secret', 'overflow', 'unreadable-file'])
+    expect(off.pending.items.map(i => i.kind)).toEqual(['secret', 'unreadable-file', 'overflow'])
+    expect(off.pending.levelCounts).toEqual({ 'must-fix': 2, 'your-call': 1, 'advice': 0 })
     expect(off.pending.dot).toBe('red')
     // 账本没动：打开体检后冲突、候选都回来
-    expect((await h.views()).pending.items.map(i => i.kind)).toEqual([...PENDING_ITEM_KINDS].filter(k => k !== 'conflict-vertical'))
+    expect((await h.views()).pending.items.map(i => i.kind)).toEqual(PENDING_ITEM_KINDS.filter(k => k !== 'conflict-vertical' && k !== 'advice'))
   })
 
   it('没有密钥时按剩下的条目亮点：超限提醒能处理所以亮琥珀，只剩读不出的文件则不亮', async () => {
     const h = harness()
     await seedAll(h, false)
     const off = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
-    expect(off.pending.items.map(i => i.kind)).toEqual(['overflow', 'unreadable-file'])
+    expect(off.pending.items.map(i => i.kind)).toEqual(['unreadable-file', 'overflow'])
     expect(off.pending.dot).toBe('amber')
     await h.decisions.syncOverflow(WS, undefined, 4, '超限')
     const calm = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
@@ -196,6 +239,175 @@ describe('待处理视图：提升候选', () => {
     const after = (await h.views()).pending
     expect(after.items).toEqual([])
     expect(after.dot).toBe('none')
+  })
+})
+
+describe('待处理视图：建议整理', () => {
+  const DAY = 86_400_000
+  /** 四类各一条：已过有效期、内容过长、指向的旧记忆已不在、很久没确认（project 类型衰减期 7 天）。 */
+  async function seedAdvice(h: ReturnType<typeof harness>) {
+    await h.store.create(w({ id: 'mem_expired', name: '冻结期', validTo: T0 - 1 }))
+    await h.store.create(w({ id: 'mem_bloat', name: '长文', content: 'x'.repeat(2001) }))
+    await h.store.create(g({ id: 'mem_orphan', name: '新规则', supersedes: ['mem_gone'] }))
+    await h.store.create(w({ id: 'mem_stale', name: '里程碑', type: 'project', lastConfirmedAt: T0 - 8 * DAY }))
+    await h.store.create(w({ id: 'mem_fine', name: '没问题', type: 'project' }))
+  }
+  const adviceOf = (pending: { items: readonly PendingItem[] }) =>
+    pending.items.flatMap(i => i.kind === 'advice' ? [[i.type, i.memories.map(m => m.id)] as const] : [])
+
+  it('四类按身份（类型 + 记忆 id）各出一项，属建议整理、排在最后，视图带建议条数；不亮左栏圆点、不进账本', async () => {
+    const h = harness()
+    await seedAdvice(h)
+    const { pending } = await h.views()
+    expect(pendingViewSchema.parse(pending)).toEqual(pending)
+    expect(adviceOf(pending)).toEqual([
+      ['expired', ['mem_expired']], ['bloat', ['mem_bloat']], ['orphan', ['mem_orphan']], ['stale', ['mem_stale']],
+    ])
+    expect(pending.items.every(i => i.level === 'advice')).toBe(true)
+    expect(pending.items[0]).toMatchObject({ kind: 'advice', level: 'advice', type: 'expired', memories: [{ id: 'mem_expired', validTo: T0 - 1, filePath: expect.stringContaining(workspaceDirName(WS)) }] })
+    expect(pending.levelCounts).toEqual({ 'must-fix': 0, 'your-call': 0, 'advice': 4 })
+    expect(pending.dot).toBe('none')
+    expect(await h.decisions.list()).toEqual([])
+  })
+
+  it('和健康视图同口径：每层的建议条数 = 该层已过有效期、内容过长、旧记忆已不在的扣分条数 + 很久没确认条数', async () => {
+    const h = harness()
+    await seedAdvice(h)
+    const { pending, health } = await h.views()
+    for (const layer of health.layers) {
+      const inLayer = pending.items.filter(i => i.kind === 'advice' && (layer.layer.kind === 'global'
+        ? i.memories[0]!.scope === 'global' : i.memories[0]!.workspacePath === layer.layer.workspacePath))
+      const ruleCount = layer.issues.filter(x => ['expired', 'bloat', 'orphan'].includes(x.type)).reduce((s, x) => s + x.count, 0)
+      expect(inLayer.length).toBe(ruleCount + layer.staleCount)
+    }
+  })
+
+  it('改好后下一次生成视图即消失：延长有效期、精简内容、去掉失效引用、确认仍然有效', async () => {
+    const h = harness()
+    await seedAdvice(h)
+    expect(adviceOf((await h.views()).pending)).toHaveLength(4)
+    const fix = async (id: string, patch: Partial<MemoryRecord>) => { await h.store.put({ ...(await h.store.get(id))!, ...patch }) }
+    await fix('mem_expired', { validTo: T0 + DAY })
+    await fix('mem_bloat', { content: '精简后' })
+    await fix('mem_orphan', { supersedes: [] })
+    const refreshed = await executeConfirm({ action: 'refresh', memoryId: 'mem_stale' }, { workspacePath: WS }, { store: h.store, decisions: h.decisions, snapshots: h.snapshots, now: () => T0 })
+    expect(refreshed.kind).toBe('refreshed')
+    const { pending } = await h.views()
+    expect(pending.items).toEqual([])
+    expect(pending.levelCounts.advice).toBe(0)
+  })
+
+  it('记忆不再 active（删除、被取代）：对应的建议不显示', async () => {
+    const h = harness()
+    await seedAdvice(h)
+    await h.forget(['mem_expired', 'mem_bloat'])
+    await h.store.put({ ...(await h.store.get('mem_stale'))!, status: 'superseded' })
+    expect(adviceOf((await h.views()).pending)).toEqual([['orphan', ['mem_orphan']]])
+  })
+
+  it('同 id 在全局和本项目各一份：按实际在用的那份出一项，不重复', async () => {
+    const h = harness()
+    await h.store.create(g({ id: 'mem_dup', name: '全局那份', validTo: T0 - 1 }))
+    await h.store.create(w({ id: 'mem_dup', name: '本项目那份', validTo: T0 - 1, updatedAt: T0 + 1 }))
+    const advice = (await h.views()).pending.items.filter(i => i.kind === 'advice')
+    expect(advice).toHaveLength(1)
+  })
+
+  it('体检关闭时四类照常显示（不靠模型）', async () => {
+    const h = harness()
+    await seedAdvice(h)
+    const off = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
+    expect(adviceOf(off.pending)).toEqual(adviceOf((await h.views()).pending))
+    expect(adviceOf(off.pending)).toHaveLength(4)
+  })
+
+  it('密钥仍亮红点、冲突仍亮琥珀点，建议整理不改变圆点', async () => {
+    const h = harness()
+    await seedAdvice(h)
+    await h.store.create(w({ id: 'mem_a', name: 'A' }))
+    await h.store.create(w({ id: 'mem_b', name: 'B' }))
+    await h.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '矛盾', fingerprint: 'h' }, 1)
+    expect((await h.views()).pending.dot).toBe('amber')
+  })
+})
+
+describe('待处理视图：建议整理的语义类', () => {
+  const finding = (type: FindingType, memoryIds: string[], extra: Partial<Finding> = {}): Finding =>
+    ({ type, layer: 'semantic', severity: SEVERITY_BY_TYPE[type], memoryIds, summary: '模型的说明', suggestedAction: '', ...extra })
+  /** 写入一层的上次语义体检缓存（体检写的就是这一份）。 */
+  async function cacheLayer(h: ReturnType<typeof harness>, layer: LayerRef, findings: Finding[]) {
+    const key = layerCacheKey(layer)
+    await h.cache.put(key, { id: key, scannedAt: T0, scope: layer.kind === 'global' ? 'global' : layer.path, findings })
+  }
+  const adviceOf = (pending: { items: readonly PendingItem[] }) =>
+    pending.items.flatMap(i => i.kind === 'advice' ? [[i.type, i.memories.map(m => m.id)] as const] : [])
+
+  /** 本项目：一对内容重复、一条和指令文件重复、一条该放全局、一条表述不清、一对冲突；全局：一条该放项目。 */
+  async function seedSemantic(h: ReturnType<typeof harness>) {
+    await h.store.create(w({ id: 'mem_r2', name: 'R 甲' }))
+    await h.store.create(w({ id: 'mem_r1', name: 'R 乙' }))
+    await h.store.create(w({ id: 'mem_rb', name: 'S 基线' }))
+    await h.store.create(w({ id: 'mem_m', name: '该放全局' }))
+    await h.store.create(w({ id: 'mem_u', name: '含糊' }))
+    await h.store.create(g({ id: 'mem_gm', name: '该放项目' }))
+    await cacheLayer(h, { kind: 'workspace', path: WS }, [
+      finding('redundancy', ['mem_r2', 'mem_r1']),
+      finding('redundancy', ['mem_rb'], { baselineRef: 'AGENTS.md：包管理' }),
+      finding('misplaced', ['mem_m']),
+      finding('unclear', ['mem_u']),
+      finding('conflict', ['mem_r1', 'mem_u']),
+    ])
+    await cacheLayer(h, { kind: 'global' }, [finding('misplaced', ['mem_gm'])])
+  }
+
+  it('内容重复、放错层、表述不清从该层上次语义体检的缓存来，按身份各出一项：成对的内容重复一张卡（id 排序）；冲突不进建议整理', async () => {
+    const h = harness()
+    await seedSemantic(h)
+    const { pending } = await h.views()
+    expect(pendingViewSchema.parse(pending)).toEqual(pending)
+    expect(adviceOf(pending)).toEqual([
+      ['redundancy', ['mem_r1', 'mem_r2']], ['redundancy', ['mem_rb']],
+      ['misplaced', ['mem_gm']], ['misplaced', ['mem_m']],
+      ['unclear', ['mem_u']],
+    ])
+    expect(pending.levelCounts).toEqual({ 'must-fix': 0, 'your-call': 0, 'advice': 5 })
+    expect(pending.dot).toBe('none')
+    expect(await h.decisions.list()).toEqual([])
+  })
+
+  it('该层从没做过语义体检（没有缓存）：不出语义类', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_a', name: 'A' }))
+    await cacheLayer(h, { kind: 'global' }, [finding('unclear', ['mem_a'])])
+    expect(adviceOf((await h.views()).pending)).toEqual([])
+  })
+
+  it('体检关闭时语义类不显示，规则类照常显示', async () => {
+    const h = harness()
+    await seedSemantic(h)
+    await h.store.create(w({ id: 'mem_expired', name: '冻结期', validTo: T0 - 1 }))
+    const off = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
+    expect(adviceOf(off.pending)).toEqual([['expired', ['mem_expired']]])
+    expect(off.pending.levelCounts.advice).toBe(1)
+  })
+
+  it('缓存里的发现指向已删、已取代或已不在这一层的记忆：不显示', async () => {
+    const h = harness()
+    await seedSemantic(h)
+    await h.forget(['mem_r2'])
+    await h.store.put({ ...(await h.store.get('mem_u'))!, status: 'superseded' })
+    // 体检之后这条被提升到全局：本项目的缓存还记着它放错层，但它已不在本项目，全局的缓存里也没有它
+    const { workspacePath: _ws, ...moved } = (await h.store.get('mem_m'))!
+    await h.store.put({ ...moved, scope: 'global' }, { workspacePath: WS })
+    expect((await h.store.get('mem_m'))!.scope).toBe('global')
+    expect(adviceOf((await h.views()).pending)).toEqual([['redundancy', ['mem_rb']], ['misplaced', ['mem_gm']]])
+  })
+
+  it('同一身份在两层的缓存里都出现：只出一项', async () => {
+    const h = harness()
+    await seedSemantic(h)
+    await cacheLayer(h, { kind: 'workspace', path: WS }, [finding('misplaced', ['mem_gm', 'mem_m'])])
+    expect(adviceOf((await h.views()).pending)).toEqual([['misplaced', ['mem_gm']], ['misplaced', ['mem_m']]])
   })
 })
 
@@ -241,6 +453,46 @@ describe('全部记忆视图', () => {
     expect(deleted.items.map(i => [i.memory.id, i.memory.name, i.memory.scope, i.memory.filePath])).toEqual([
       ['mem_same', '全局那份', 'global', join(root, GLOBAL_DIR, '.archive', '全局那份.md')],
     ])
+  })
+
+  it('判彻底删除的正面信号：读到但不在用的 id（已取代、已删）列在 inactiveIds；有读不出的文件时 hasUnreadFiles', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_live', name: '在用' }))
+    await h.store.create(w({ id: 'mem_old', name: '被取代', status: 'superseded' }))
+    await h.store.create(g({ id: 'mem_gone', name: '删掉的' }))
+    await h.forget(['mem_gone'])
+    const clean = (await h.views()).library
+    expect(libraryViewSchema.parse(clean)).toEqual(clean)
+    expect([...clean.inactiveIds!].sort()).toEqual(['mem_gone', 'mem_old'])
+    expect(clean.hasUnreadFiles).toBe(false)
+
+    await writeFile(join(wsDir(), 'broken.md'), '---\nname: [\n---\n正文\n')
+    expect((await h.views()).library.hasUnreadFiles).toBe(true)
+  })
+
+  it('提升状态：本项目的提升候选标 candidate，「留在本项目」过的标 kept-local（候选标记又回来、内容变了算 candidate，内容没变仍算 kept-local）；体检关闭时候选不标', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_cand', name: '候选', globalCandidate: true }))
+    await h.store.create(w({ id: 'mem_kept', name: '留下的' }))
+    await h.store.create(w({ id: 'mem_again', name: '又标了', globalCandidate: true }))
+    await h.store.create(w({ id: 'mem_plain', name: '普通' }))
+    await h.store.create(g({ id: 'mem_g', name: '全局' }))
+    // 留下后模型又把同样的内容标成候选：体检按指纹不再提，这里也还是留下了
+    const same = w({ id: 'mem_same', name: '同样内容又标了', globalCandidate: true })
+    await h.store.create(same)
+    for (const [id, fingerprint] of [['mem_kept', 'mem_kept'], ['mem_again', 'mem_again'], ['mem_same', candidateFingerprint(same)]]) {
+      const { entry } = await h.decisions.upsert({ kind: 'promote-candidate', memoryIds: [id!], summary: '', workspaces: [WS], fingerprint }, 1)
+      await h.decisions.settle(entry.id, 'keep-local', 2)
+    }
+    const promotions = (library: Awaited<ReturnType<typeof h.views>>['library']) =>
+      Object.fromEntries(library.layers.flatMap(l => l.items.map(i => [i.id, i.promotion])))
+
+    const { library } = await h.views()
+    expect(libraryViewSchema.parse(library)).toEqual(library)
+    expect(promotions(library)).toEqual({ mem_cand: 'candidate', mem_kept: 'kept-local', mem_again: 'candidate', mem_same: 'kept-local', mem_plain: undefined, mem_g: undefined })
+
+    const off = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
+    expect(promotions(off.library)).toEqual({ mem_cand: undefined, mem_kept: 'kept-local', mem_again: undefined, mem_same: 'kept-local', mem_plain: undefined, mem_g: undefined })
   })
 
   it('typeLabels：注册表的类型和本视图记忆卡里出现的类型 → 显示名，认不出的类型显示 id', async () => {
@@ -313,7 +565,7 @@ describe('视图生成时刻', () => {
 })
 
 describe('健康视图', () => {
-  it('超限列为问题、不扣分：已忽略的仍列出；memory_health 同样报出', async () => {
+  it('超限列为问题、不扣分：已忽略的仍列出（标明已忽略，待处理里没有它）；memory_health 同样报出', async () => {
     const h = harness()
     await h.store.create(w({ id: 'mem_a', name: 'A' }))
     const before = await h.health()
@@ -328,7 +580,7 @@ describe('健康视图', () => {
     expect(healthViewSchema.parse(health)).toEqual(health)
     expect(pending.items).toEqual([])
     const ws = health.layers.find(l => l.layer.kind === 'workspace')!
-    expect(ws.overflow).toEqual({ mode: 'relax', tier: 1 })
+    expect(ws.overflow).toEqual({ mode: 'relax', tier: 1, isDismissed: true })
     expect(health.layers.find(l => l.layer.kind === 'global')!.overflow).toBeNull()
 
     const tool = await h.health()
@@ -348,13 +600,13 @@ describe('健康视图', () => {
 
     const { health } = await h.views()
     expect(healthViewSchema.parse(health)).toEqual(health)
-    expect(health.layers.map(l => [l.layer, l.overflow])).toEqual([[{ kind: 'global' }, { mode: 'strict', tier: 0 }]])
-    expect(health.overflowOnlyLayers).toEqual([{ layer: { kind: 'workspace', workspacePath: WS }, overflow: { mode: 'strict', tier: 0 } }])
+    expect(health.layers.map(l => [l.layer, l.overflow])).toEqual([[{ kind: 'global' }, { mode: 'strict', tier: 0, isDismissed: false }]])
+    expect(health.overflowOnlyLayers).toEqual([{ layer: { kind: 'workspace', workspacePath: WS }, overflow: { mode: 'strict', tier: 0, isDismissed: false } }])
 
     // 项目有了自己的记忆就回到体检清单，不再单列
     await h.store.create(w({ id: 'mem_w', name: '本项目一条' }))
     const again = (await h.views()).health
-    expect(again.layers.find(l => l.layer.kind === 'workspace')!.overflow).toEqual({ mode: 'strict', tier: 0 })
+    expect(again.layers.find(l => l.layer.kind === 'workspace')!.overflow).toEqual({ mode: 'strict', tier: 0, isDismissed: false })
     expect(again.overflowOnlyLayers).toEqual([])
   })
 
@@ -370,9 +622,67 @@ describe('健康视图', () => {
     if (tool.kind !== 'single') throw new Error(tool.kind)
     const ws = health.layers.find(l => l.layer.kind === 'workspace')!
     expect(ws).toMatchObject({ layer: { kind: 'workspace', workspacePath: WS }, totalMemories: 2, score: tool.score, semanticCachedAt: null })
-    expect(ws.issues).toEqual([{ type: 'expired', count: 1 }])
+    expect(ws.issues).toEqual([{ type: 'expired', count: 1, level: 'advice' }])
     const global = health.layers.find(l => l.layer.kind === 'global')!
     expect(global).toMatchObject({ score: null, gate: { secret: true }, issues: [{ type: 'secret', count: 1 }] })
+  })
+  /** 本项目每类扣分原因各至少一条：密钥、过期、读不出的文件、冲突（缓存 + 账本）、内容重复、放错层、表述不清。 */
+  async function seedEveryIssue(h: ReturnType<typeof harness>) {
+    await h.store.create(w({ id: 'mem_s', name: '凭证', content: FAKE_SECRET.github }))
+    await h.store.create(w({ id: 'mem_old', name: '过期', validTo: T0 - 1 }))
+    await h.store.create(w({ id: 'mem_r1', name: 'R 甲' }))
+    await h.store.create(w({ id: 'mem_r2', name: 'R 乙' }))
+    await h.store.create(w({ id: 'mem_u', name: '含糊' }))
+    await h.store.create(w({ id: 'mem_m', name: '该放全局' }))
+    await writeFile(join(wsDir(), 'broken.md'), '---\nname: [\n---\n正文\n')
+    const semantic = (type: FindingType, memoryIds: string[]): Finding =>
+      ({ type, layer: 'semantic', severity: SEVERITY_BY_TYPE[type], memoryIds, summary: 's', suggestedAction: '' })
+    const key = layerCacheKey({ kind: 'workspace', path: WS })
+    await h.cache.put(key, { id: key, scannedAt: T0, scope: WS, findings: [
+      semantic('conflict', ['mem_r1', 'mem_u']), semantic('redundancy', ['mem_r1', 'mem_r2']),
+      semantic('misplaced', ['mem_m']), semantic('unclear', ['mem_u']),
+    ] })
+    // 冲突还须仍在待决账本里才计
+    await h.decisions.upsert({ memoryIds: ['mem_r1', 'mem_u'], summary: '矛盾', fingerprint: 'h' }, 1)
+  }
+  /** 一类扣分原因在待处理视图里以哪种条目出现。 */
+  const showsUp = (type: string) => (item: PendingItem): boolean =>
+    type === 'secret' ? item.kind === 'secret'
+      : type === 'malformed' ? item.kind === 'unreadable-file'
+        : type === 'conflict' ? item.kind === 'conflict-horizontal' || item.kind === 'conflict-vertical'
+          : item.kind === 'advice' && item.type === type
+
+  it('每条扣分原因带待处理里对应的组：密钥、读不出的文件在高优问题，冲突在待你处理，其余在建议整理', async () => {
+    const h = harness()
+    await seedEveryIssue(h)
+    const { health, pending } = await h.views()
+    expect(healthViewSchema.parse(health)).toEqual(health)
+    const ws = health.layers.find(l => l.layer.kind === 'workspace')!
+    expect(ws.issues.map(i => [i.type, i.level])).toEqual([
+      ['secret', 'must-fix'], ['expired', 'advice'], ['malformed', 'must-fix'],
+      ['conflict', 'your-call'], ['redundancy', 'advice'], ['misplaced', 'advice'], ['unclear', 'advice'],
+    ])
+    // 真正的不变式：每类扣分原因的条目确实在待处理视图里、且就在它标的那一组
+    for (const issue of ws.issues) {
+      const items = pending.items.filter(showsUp(issue.type))
+      expect({ type: issue.type, levels: [...new Set(items.map(i => i.level))] }).toEqual({ type: issue.type, levels: [issue.level] })
+    }
+  })
+
+  it('体检关闭：冲突与语义建议不在待处理里，这几类的组为 null；规则类照常带组', async () => {
+    const h = harness()
+    await seedEveryIssue(h)
+    const off = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
+    expect(healthViewSchema.parse(off.health)).toEqual(off.health)
+    const ws = off.health.layers.find(l => l.layer.kind === 'workspace')!
+    expect(ws.issues.map(i => [i.type, i.level])).toEqual([
+      ['secret', 'must-fix'], ['expired', 'advice'], ['malformed', 'must-fix'],
+      ['conflict', null], ['redundancy', null], ['misplaced', null], ['unclear', null],
+    ])
+    for (const issue of ws.issues) {
+      const levels = [...new Set(off.pending.items.filter(showsUp(issue.type)).map(i => i.level))]
+      expect({ type: issue.type, levels }).toEqual({ type: issue.type, levels: issue.level === null ? [] : [issue.level] })
+    }
   })
   it('带体检开关：缺省开启，关闭时 governanceEnabled 为 false（层照常列出）', async () => {
     const h = harness()
@@ -393,13 +703,14 @@ describe('健康视图', () => {
 })
 
 describe('会话视图', () => {
-  it('带 frozenAt 与三段用量，只存时间戳', () => {
+  it('带 frozenAt、来历与三段用量，只存时间戳', () => {
     const view = buildSessionView({
-      sessionId: 's1', workspacePath: WS, frozenAt: T0, budget: 4000, overflowMode: 'strict',
-      tokens: { workspace: 120, global: 80, fixed: 40 }, usedTokens: 210, injectedIds: ['mem_a'], omittedCount: 3, savedIds: [],
+      sessionId: 's1', workspacePath: WS, frozenAt: T0, origin: 'compacted', compactedAt: T0 - 1, budget: 4000, overflowMode: 'strict',
+      tokens: { workspace: 120, global: 80, fixed: 40 }, usedTokens: 210, injectedIds: ['mem_a', 'mem_b'], coreIds: ['mem_a'], titleOnlyIds: [], omittedCount: 3, savedIds: [],
     })
     expect(sessionViewSchema.parse(view)).toEqual(view)
     expect(view.frozenAt).toBe(T0)
+    expect(sessionViewSchema.safeParse({ ...view, origin: 'reloaded' }).success).toBe(false)
   })
 })
 
@@ -427,6 +738,38 @@ describe('视图写入', () => {
     await writer.request(['library'])
     expect(collects).toBe(2)
     expect((await readView('library')).layers[1].items.map((i: { id: string }) => i.id)).toEqual(['mem_a', 'mem_b'])
+  })
+
+  it('同一个视图文件两次替换至少隔开 VIEW_REPLACE_GAP_MS（宿主的文件观察会丢掉约 50ms 内的第二次变更通知）：挨得太近就等够再替换，别的文件不等', async () => {
+    expect(VIEW_REPLACE_GAP_MS).toBe(150)
+    const h = harness()
+    await h.store.create(w({ id: 'mem_a', name: 'A' }))
+    let t = 1_000
+    const sleeps: number[] = []
+    let wake!: () => void
+    const sleep = (ms: number) => { sleeps.push(ms); return new Promise<void>(resolve => { wake = resolve }) }
+    const writer = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews(h.sourceDeps), now: () => t, sleep })
+    const libraryIds = async () => (await readView('library')).layers[1].items.map((i: { id: string }) => i.id)
+
+    await writer.request(['library'])
+    expect(sleeps).toEqual([])
+
+    // 40ms 后又要写：library 等到离上次满 150ms 才替换，等的期间磁盘上还是上一版；pending 没写过，不等
+    t += 40
+    await h.store.create(w({ id: 'mem_b', name: 'B' }))
+    const second = writer.request(['pending', 'library'])
+    await vi.waitFor(() => { expect(sleeps).toEqual([110]) })
+    expect(pendingViewSchema.safeParse(await readView('pending')).success).toBe(true)
+    expect(await libraryIds()).toEqual(['mem_a'])
+    t += 110
+    wake()
+    await second
+    expect(await libraryIds()).toEqual(['mem_a', 'mem_b'])
+
+    // 隔够了就直接写
+    t += VIEW_REPLACE_GAP_MS
+    await writer.request(['library'])
+    expect(sleeps).toEqual([110])
   })
 
   it('全量重写写出四个全局视图，内容合契约', async () => {
@@ -466,8 +809,8 @@ describe('视图写入', () => {
   it('会话视图：同一 tick 内同一会话多次写入合并为最后一份', async () => {
     const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') } })
     const base = {
-      sessionId: 's/1', frozenAt: T0, budget: 4000, overflowMode: 'relax' as const,
-      tokens: { workspace: 1, global: 2, fixed: 3 }, usedTokens: 3, injectedIds: ['mem_a'], omittedCount: 0,
+      sessionId: 's/1', frozenAt: T0, origin: 'start' as const, budget: 4000, overflowMode: 'relax' as const,
+      tokens: { workspace: 1, global: 2, fixed: 3 }, usedTokens: 3, injectedIds: ['mem_a'], coreIds: [], titleOnlyIds: [], omittedCount: 0,
     }
     await Promise.all([
       writer.requestSession(buildSessionView({ ...base, savedIds: [] })),
@@ -478,8 +821,8 @@ describe('视图写入', () => {
   })
 
   const sessionBase = {
-    sessionId: 's/1', frozenAt: T0, budget: 4000, overflowMode: 'relax' as const,
-    tokens: { workspace: 1, global: 2, fixed: 3 }, usedTokens: 3, injectedIds: [], omittedCount: 0, savedIds: [],
+    sessionId: 's/1', frozenAt: T0, origin: 'start' as const, budget: 4000, overflowMode: 'relax' as const,
+    tokens: { workspace: 1, global: 2, fixed: 3 }, usedTokens: 3, injectedIds: [], coreIds: [], titleOnlyIds: [], omittedCount: 0, savedIds: [],
   }
   const listViews = () => readdir(join(root, GUI_VIEW_DIR)).catch(() => [] as string[])
   const nextTicks = async () => { for (let i = 0; i < 3; i++) await new Promise<void>(resolve => setImmediate(resolve)) }

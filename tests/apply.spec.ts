@@ -28,15 +28,16 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { AssembleContext, PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { cacheKey } from '../src/tools/scan.ts'
+import { IN_SNAPSHOT_NOTE } from '../src/tools/search.ts'
 import {
-  memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema,
+  memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema,
   type MemorySnapshot, type PendingDecision, type ScanCacheEntry,
 } from '../src/governance/schema.ts'
 import { baselineProjectionDefinition } from '../src/governance/baseline.ts'
 import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
 import {
   GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_FILE, deletedViewSchema, healthViewSchema, libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema,
-  workspaceMapViewSchema, type LibraryView,
+  workspaceMapViewSchema, type LibraryView, type PendingView,
 } from '../src/gui/contract.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { defaultJiebaLoader } from '../src/search/jieba-segmenter.ts'
@@ -49,6 +50,13 @@ class HostKvTable<T = unknown> {
   keys() { return this.map.keys() }
   async put(key: string, value: T) { this.map.set(key, value) }
   async delete(key: string) { return this.map.delete(key) }
+}
+
+/** 放一条全局记忆：语义检查只在层里有记忆时才调用模型。 */
+async function seedMemory(memoryRoot: string): Promise<string> {
+  await mkdir(join(memoryRoot, 'global'), { recursive: true })
+  await writeFile(join(memoryRoot, 'global', 'seed.md'), encodeRecord(record({ id: 'mem_seed' }), {}), 'utf8')
+  return memoryRoot
 }
 
 /** 本文件建出的全部替身 ctx 的卸载入口：afterEach 先卸载插件、等它的写入收尾，再删临时目录。 */
@@ -166,7 +174,7 @@ afterEach(async () => {
 
 /** 同一 memoryRoot 上的另一个侧表实例：用例经它预置或读回插件落在 .state/ 的数据（文件是唯一真相）。 */
 function sidecarAt(memoryRoot: string) {
-  return new SidecarStore({ root: memoryRoot, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+  return new SidecarStore({ root: memoryRoot, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
 }
 
 describe('apply', () => {
@@ -294,7 +302,7 @@ describe('GUI 命令接线', () => {
       const r = await defs[0]!.handler({ rawInput: line.slice('/memory'.length), agent })
       return { kind: r.kind, body: JSON.parse(r.text!) as Record<string, unknown> }
     }
-    return { memoryRoot, defs, exec }
+    return { memoryRoot, defs, exec, ctx }
   }
 
   it('宿主有 commands：注册一条 memory 命令；第一个会话出现后不等调用就写一遍全局视图（首次打开记忆页要有内容）', async () => {
@@ -322,6 +330,58 @@ describe('GUI 命令接线', () => {
     expect(forgot.body).toMatchObject({ ok: true, cmd: 'forget', memoryIds: ['mem_gone'] })
     const deleted = JSON.parse(await readFile(join(memoryRoot, '.state', 'gui', 'deleted.json'), 'utf8')) as { items: Array<{ memory: { id: string } }> }
     expect(deleted.items.map(i => i.memory.id)).toEqual(['mem_gone'])
+  })
+
+  describe('让模型改：经宿主 llm 服务', () => {
+    // 会话带 provider/model（makeSemanticLlm 三层解析的第二层），模型才解析得到
+    const routed = { session: { header: { id: 'sess-x' }, seq: 1, requestHeader: () => undefined }, options: { provider: 'deepseek', model: 'deepseek-v4-flash' } }
+    async function withMemory() {
+      const t = await withCommands()
+      await mkdir(join(t.memoryRoot, 'global'), { recursive: true })
+      const file = join(t.memoryRoot, 'global', 'long.md')
+      await writeFile(file, encodeRecord(record({ id: 'mem_long', name: '发版流程', content: '先跑测试，再打包，再发版。', summary: '发版步骤' }), {}), 'utf8')
+      const run = async (line: string, agent: unknown = routed) => {
+        const r = await t.defs[0]!.handler({ rawInput: line.slice('/memory'.length), agent })
+        return JSON.parse(r.text!) as Record<string, unknown>
+      }
+      return { ...t, file, run }
+    }
+    const DRAFT_LINE = '/memory draft-edit {"adviceType":"bloat","memories":[{"memoryId":"mem_long","layer":{"kind":"global"}}]}'
+
+    it('model-info 回会话解析出的模型名；会话没有路由时 llm-unavailable，不猜默认模型', async () => {
+      const t = await withMemory()
+      expect(await t.run('/memory model-info')).toEqual({ ok: true, cmd: 'model-info', model: 'deepseek-v4-flash' })
+      expect(await t.run('/memory model-info', { session: { header: { id: 'sess-x' }, seq: 1 } })).toMatchObject({ ok: false, code: 'llm-unavailable' })
+      expect(t.ctx.llmRequests).toEqual([])
+    })
+
+    it('draft-edit 只发一次不进会话的请求（RequestUserInput：只有 role 与 content），只累加 text-delta；记忆文件不动', async () => {
+      const t = await withMemory()
+      const before = await readFile(t.file, 'utf8')
+      t.ctx.llmScript.push([
+        { type: 'reasoning-delta', index: 0, text: '先想想' },
+        { type: 'text-delta', index: 1, text: '{"content":"测试、打包、发版。",' },
+        { type: 'text-delta', index: 1, text: '"summary":"发版三步"}' },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ] as StreamChunk[])
+      expect(await t.run(DRAFT_LINE)).toEqual({ ok: true, cmd: 'draft-edit', draft: { content: '测试、打包、发版。', summary: '发版三步' }, model: 'deepseek-v4-flash' })
+      expect(t.ctx.llmRequests).toHaveLength(1)
+      const [request] = t.ctx.llmRequests
+      expect(request).toMatchObject({ provider: 'deepseek', model: 'deepseek-v4-flash' })
+      expect(request!.messages).toHaveLength(1)
+      expect(Object.keys(request!.messages[0] as object).sort()).toEqual(['content', 'role'])
+      expect(await readFile(t.file, 'utf8')).toBe(before)
+    })
+
+    it('流已吐出合法 JSON 却以 error 收尾：按失败返回（llm-failed），不重试', async () => {
+      const t = await withMemory()
+      t.ctx.llmScript.push([
+        { type: 'text-delta', index: 0, text: '{"content":"短","summary":"短"}' },
+        { type: 'finish', reason: { kind: 'error', failure: { code: 'STREAM_CLOSED', message: 'stream ended before message_stop' } } },
+      ])
+      expect(await t.run(DRAFT_LINE)).toMatchObject({ ok: false, code: 'llm-failed', detail: 'stream ended before message_stop' })
+      expect(t.ctx.llmRequests).toHaveLength(1)
+    })
   })
 
   it('会话归属对照：在会话里执行 /memory 命令时，记下原始 cwd → 服务端解析出的项目（软链接、子目录都按 realpath）', async () => {
@@ -641,7 +701,13 @@ describe('注入链接线', () => {
     })
     // 模拟 compaction-basic：在 next 链里压缩（compaction/end），再交出它的结果
     const compactThen = <T>(result: T) => async () => { onEvent(session, { type: 'compaction/end' }); return result }
-    return { session, def, assembleCtx, assembleOnce, addMemory, preStep, requestError, preStepPayload, requestErrorPayload, compactThen, onEvent }
+    /** 宿主压掉运行时上下文的一次组装：里面没有本插件的条目。 */
+    const assembleWithout = async () => {
+      const assembly: PromptAssembly = { sections: [], contexts: [], tools: [], variables: {} }
+      await middleware(assembly, assembleCtx, async () => assembly)
+    }
+    const recallStats = () => readFile(join(memoryRoot, STATE_DIR, RECALL_STATS_FILE), 'utf8').catch(() => '')
+    return { session, def, assembleCtx, assembleOnce, assembleWithout, recallStats, addMemory, preStep, requestError, preStepPayload, requestErrorPayload, compactThen, onEvent }
   }
 
   it('provider 首轮空串 → 中间件冻结 → provider 回缓存；两次组装之间的刷新拿到上一份（compaction/end 后 provider 回旧快照、下一次中间件回新快照）', async () => {
@@ -751,6 +817,121 @@ describe('注入链接线', () => {
     expect(def.text(assembleCtx)).toBe(t0) // 没压掉旧快照，文本不变，宿主不会追加第二份
     expect(await assembleOnce()).toBe(t0)
   })
+
+  it('冻结过的会话中途被宿主压掉运行时上下文：之后成功压缩，pre-step 与溢出重试都不重建、不计召回', async () => {
+    const { def, assembleCtx, assembleOnce, assembleWithout, recallStats, addMemory, preStep, requestError, preStepPayload, requestErrorPayload, compactThen } = await boot()
+    const t0 = await assembleOnce()
+    await assembleWithout() // persona 中途把 includeRuntimeContext 改成 false
+    await addMemory()
+    const stats = await recallStats()
+    const decision = { kind: 'enter', messages: [] }
+    expect(await preStep(preStepPayload(new AbortController().signal), compactThen(decision))).toBe(decision)
+    const retry = { kind: 'retry' }
+    expect(await requestError(requestErrorPayload(new AbortController().signal), compactThen(retry))).toBe(retry)
+    expect(def.text(assembleCtx)).toBe(t0)
+    expect(await recallStats()).toBe(stats)
+  })
+
+  it('压掉后又恢复带上运行时上下文：成功压缩照常重建', async () => {
+    const { def, assembleCtx, assembleOnce, assembleWithout, addMemory, preStep, preStepPayload, compactThen } = await boot()
+    await assembleOnce()
+    await assembleWithout()
+    const t1 = await assembleOnce()
+    await addMemory()
+    const decision = { kind: 'enter', messages: [] }
+    expect(await preStep(preStepPayload(new AbortController().signal), compactThen(decision))).toBe(decision)
+    expect(def.text(assembleCtx)).toContain('压缩后新增的偏好 zebra')
+    expect(def.text(assembleCtx)).not.toBe(t1)
+  })
+
+  it('快照来历读 turnBoundary 投影：本实例首次冻结时已过了第 1 轮记为重新带入，第 1 轮内记为对话开始时；投影读不到按开始时', async () => {
+    const frozenOrigin = async (get: (name: string) => unknown, sessionId: string) => {
+      const memoryRoot = await makeTmpRoot()
+      const ctx = { ...mockCtx({ commands: { register: () => () => {} } }), get, logger: { info() {}, warn() {}, error() {} } }
+      await apply(ctx as never, new Config({ memoryRoot } as never))
+      const session = { header: { id: sessionId } }
+      const assembleCtx = { scope: { session } } as unknown as AssembleContext
+      const assembly: PromptAssembly = { sections: [], contexts: [{ name: 'plastic-memory', text: '' }], tools: [], variables: {} }
+      await ctx.listeners.get('session/created')!(session)
+      await ctx.listeners.get('system-prompt/assemble')!(assembly, assembleCtx, async () => assembly)
+      const file = join(memoryRoot, GUI_VIEW_DIR, sessionViewFile(sessionId))
+      return vi.waitFor(async () => sessionViewSchema.parse(JSON.parse(await readFile(file, 'utf8'))).origin)
+    }
+    const turn = (lastTurn: number) => (name: string) => name === 'sessionProjections'
+      ? { stateOf: (_s: object, key: string) => (key === 'turnBoundary' ? { openTurnStartSeq: 1, lastTurn } : undefined) }
+      : undefined
+    expect(await frozenOrigin(turn(3), 's-resumed')).toBe('resumed')
+    expect(await frozenOrigin(turn(1), 's-first')).toBe('start')
+    expect(await frozenOrigin(() => { throw new Error('no such service') }, 's-none')).toBe('start')
+  })
+
+  /** 起插件、落一条 core 记忆，返回中间件与按同一 session 对象执行 memory_search 的入口。 */
+  async function bootWithCore() {
+    type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
+    const defs = new Map<string, ToolDef>()
+    const ctx = {
+      ...mockCtx(),
+      tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
+      logger: { info() {}, warn() {}, error() {} },
+    }
+    const memoryRoot = await makeTmpRoot()
+    await mkdir(join(memoryRoot, 'global'), { recursive: true })
+    await writeFile(join(memoryRoot, 'global', 'core.md'),
+      encodeRecord(record({ id: 'mem_core', type: 'preference', content: '测试里不要 mock 数据库' }), {}), 'utf8')
+    await apply(ctx as never, new Config({ memoryRoot } as never))
+    const session = { header: { id: 'sess-1' }, seq: 1, requestHeader: () => undefined }
+    const assembleCtx = { scope: { session } } as unknown as AssembleContext
+    const middleware = ctx.listeners.get('system-prompt/assemble')!
+    const exec = fakeExec({ agent: { session } as unknown as ToolRunContext['agent'] })
+    const search = async () => (await defs.get('memory_search')!.execute({ query: '数据库' }, exec)) as { hits: Array<{ id: string; content: string }> }
+    const recallStats = () => readFile(join(memoryRoot, STATE_DIR, RECALL_STATS_FILE), 'utf8').catch(() => '')
+    return { ctx, session, middleware, assembleCtx, search, recallStats }
+  }
+
+  it('快照进了本会话上下文：memory_search 命中带入全文的 core 记忆时正文换成说明', async () => {
+    const { middleware, assembleCtx, search } = await bootWithCore()
+    const assembly: PromptAssembly = { sections: [], contexts: [{ name: 'plastic-memory', text: '' }], tools: [], variables: {} }
+    await middleware(assembly, assembleCtx, async () => assembly)
+    expect(assembly.contexts[0]!.text).toContain('测试里不要 mock 数据库')
+    expect((await search()).hits[0]!.content).toBe(IN_SNAPSHOT_NOTE)
+  })
+
+  it('宿主压掉运行时上下文（组装里没有本插件的条目）：不冻结快照、不计召回，memory_search 照常给全文', async () => {
+    const { middleware, assembleCtx, search, recallStats } = await bootWithCore()
+    const assembly: PromptAssembly = { sections: [], contexts: [], tools: [], variables: {} }
+    await middleware(assembly, assembleCtx, async () => assembly)
+    expect(await recallStats()).not.toContain('mem_core')
+    expect((await search()).hits[0]!.content).toBe('测试里不要 mock 数据库')
+  })
+
+  /** 压掉运行时上下文的一步：中间件看不到本插件的条目，随后跑 hook 监听；返回检查用的入口。 */
+  async function suppressedStep(runHook: (ctx: Awaited<ReturnType<typeof bootWithCore>>['ctx'], agent: object, signal: AbortSignal) => Promise<void>) {
+    const { ctx, session, middleware, assembleCtx, search, recallStats } = await bootWithCore()
+    const assembly: PromptAssembly = { sections: [], contexts: [], tools: [], variables: {} }
+    await middleware(assembly, assembleCtx, async () => assembly)
+    await runHook(ctx, { session }, new AbortController().signal)
+    return { search, recallStats }
+  }
+
+  it('宿主压掉运行时上下文后，pre-step 也不冻结：不计召回，memory_search 照常给全文', async () => {
+    const decision = { kind: 'enter', messages: [] }
+    const { search, recallStats } = await suppressedStep(async (ctx, agent, signal) => {
+      expect(await ctx.listeners.get('agent/pre-step')!({ agent, messages: [], turn: 1, step: 1, signal }, async () => decision)).toBe(decision)
+    })
+    expect(await recallStats()).not.toContain('mem_core')
+    expect((await search()).hits[0]!.content).toBe('测试里不要 mock 数据库')
+  })
+
+  it('宿主压掉运行时上下文后，溢出重试也不冻结：不计召回，memory_search 照常给全文', async () => {
+    const retry = { kind: 'retry' }
+    const failure = { code: 'CONTEXT_WINDOW_EXCEEDED', message: 'overflow' }
+    const { search, recallStats } = await suppressedStep(async (ctx, agent, signal) => {
+      expect(await ctx.listeners.get('agent/request-error')!(
+        { agent, turn: 1, step: 1, provider: 'deepseek', failure, retryPolicy: undefined, signal }, async () => retry)).toBe(retry)
+    })
+    expect(await recallStats()).not.toContain('mem_core')
+    expect((await search()).hits[0]!.content).toBe('测试里不要 mock 数据库')
+  })
 })
 
 /**
@@ -768,7 +949,7 @@ describe('语义扫描请求形状', () => {
       tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
       logger: { info() {}, warn() {}, error() {} },
     }
-    const memoryRoot = await makeTmpRoot()
+    const memoryRoot = await seedMemory(await makeTmpRoot())
     await apply(ctx as never, new Config({ memoryRoot } as never))
     const cwd = await makeTmpRoot()
     const session = { header: { id: 'sess-1', cwd }, seq: 0, requestHeader: () => undefined }
@@ -781,8 +962,7 @@ describe('语义扫描请求形状', () => {
     const [request] = base.llmRequests
     expect(request).toMatchObject({ provider: 'deepseek', model: 'deepseek-chat' })
     const msg = request!.messages[0]
-    const { user } = buildSemanticPrompt([], null)
-    expect(msg).toEqual({ role: 'user', content: [{ type: 'text', text: user }] })
+    expect(msg).toEqual({ role: 'user', content: [{ type: 'text', text: expect.stringContaining('id=mem_seed') }] })
     expect(msg).not.toHaveProperty('id')
     expect(msg).not.toHaveProperty('source')
   })
@@ -796,7 +976,7 @@ describe('语义扫描请求形状', () => {
       tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
       logger: { info() {}, warn() {}, error() {} },
     }
-    const memoryRoot = await makeTmpRoot()
+    const memoryRoot = await seedMemory(await makeTmpRoot())
     const cwd = await makeTmpRoot()
     const bucket = cacheKey(await realpath(cwd)) // 无 workspaceRegistry 时规范化 cwd 即目录桶
     const prior: ScanCacheEntry = {
@@ -840,7 +1020,7 @@ describe('语义扫描请求形状', () => {
       { type: 'text-delta', index: 0, text: '{"findings":[]}' },
       { type: 'finish', reason: { kind: 'aborted', failure: { code: 'ABORTED', message: 'request aborted' } } },
     ])
-    const memoryRoot = await makeTmpRoot()
+    const memoryRoot = await seedMemory(await makeTmpRoot())
     await apply(ctx as never, new Config({ memoryRoot } as never))
     const cwd = await makeTmpRoot()
     const session = { header: { id: 'sess-1', cwd }, seq: 0, requestHeader: () => undefined }
@@ -850,6 +1030,46 @@ describe('语义扫描请求形状', () => {
     await expect(defs.get('memory_scan')!.execute({ layers: 'semantic' }, exec)).rejects.toMatchObject({ name: 'AbortError' })
     expect(base.llmRequests).toHaveLength(1)
     expect(await sidecarAt(memoryRoot).scanCache.get(cacheKey(await realpath(cwd)))).toBeUndefined()
+  })
+
+  it('用量取每条流最后一个 usage 块，宿主在出错收尾前报了用量的也计入；一次都没报时结果不带用量', async () => {
+    type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
+    const defs = new Map<string, ToolDef>()
+    const base = mockCtx()
+    const ctx = {
+      ...base,
+      tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
+      logger: { info() {}, warn() {}, error() {} },
+    }
+    base.llmScript.push(
+      // 首次：报了用量后断流（error），进重试
+      [
+        { type: 'text-delta', index: 0, text: '{"findings":[]}' },
+        { type: 'usage', usage: { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 3000 } },
+        { type: 'finish', reason: { kind: 'error', failure: { code: 'STREAM_CLOSED', message: 'closed' } } },
+      ],
+      // 重试：两个 usage 块，以最后一个为准
+      [
+        { type: 'text-delta', index: 0, text: '{"findings":[]}' },
+        { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } },
+        { type: 'usage', usage: { inputTokens: 1000, outputTokens: 300, totalTokens: 2600 } },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ],
+    )
+    const memoryRoot = await seedMemory(await makeTmpRoot())
+    await apply(ctx as never, new Config({ memoryRoot } as never))
+    const cwd = await makeTmpRoot()
+    const session = { header: { id: 'sess-1', cwd }, seq: 0, requestHeader: () => undefined }
+    const exec = fakeExec({
+      agent: { session, options: { provider: 'deepseek', model: 'deepseek-chat' } } as unknown as ToolRunContext['agent'],
+    })
+    const metered = await defs.get('memory_scan')!.execute({ layers: 'semantic' }, exec) as { usageTokens?: number }
+    expect(base.llmRequests).toHaveLength(2)
+    expect(metered.usageTokens).toBe(4200 + 2600)
+
+    // 脚本用完回默认流：没有 usage 块
+    const silent = await defs.get('memory_scan')!.execute({ layers: 'semantic' }, exec)
+    expect(silent).not.toHaveProperty('usageTokens')
   })
 })
 
@@ -993,14 +1213,17 @@ describe('AGENTS.md 基线：读 plasticMemoryBaseline 投影', () => {
       logger: { info() {}, warn: (msg: string) => { warnings.push(msg) }, error() {} },
     }
     const warnings: string[] = []
-    await apply(ctx as never, new Config({ memoryRoot: await makeTmpRoot() } as never))
+    await apply(ctx as never, new Config({ memoryRoot: await seedMemory(await makeTmpRoot()) } as never))
     const scan = async (session: object, args: object) => await defs.get('memory_scan')!.execute(args, fakeExec({
       agent: { session, options: { provider: 'deepseek', model: 'deepseek-chat' } } as unknown as ToolRunContext['agent'],
     })) as ScanOut
     return { scan, warnings }
   }
+  /** prompt 里的基线段（记忆列表之前的部分）。 */
   const promptUser = (request: { messages: unknown[] } | undefined) =>
-    (request?.messages[0] as { content: Array<{ text: string }> }).content[0]!.text
+    baselinePart((request?.messages[0] as { content: Array<{ text: string }> }).content[0]!.text)
+  const baselinePart = (user: string) => user.split('\n\n## 记忆列表')[0]!
+  const expectedBaseline = (baseline: string[]) => baselinePart(buildSemanticPrompt([], baseline).user)
 
   it('apply() 注册 plasticMemoryBaseline：checkpoint 读回键、ver 与折叠出的正文', async () => {
     const projections = await hostRegistry()
@@ -1037,7 +1260,7 @@ describe('AGENTS.md 基线：读 plasticMemoryBaseline 投影', () => {
     const { scan } = await boot(base)
     const out = await scan(session, { layers: 'semantic' })
     expect(base.llmRequests).toHaveLength(1)
-    expect(promptUser(base.llmRequests[0])).toBe(buildSemanticPrompt([], ['# AGENTS.md\n不要 mock 数据库']).user)
+    expect(promptUser(base.llmRequests[0])).toBe(expectedBaseline(['# AGENTS.md\n不要 mock 数据库']))
     expect(out.notes?.map(n => n.code) ?? []).not.toContain('baseline-missing')
   })
 
@@ -1051,9 +1274,9 @@ describe('AGENTS.md 基线：读 plasticMemoryBaseline 投影', () => {
     await scan(b, { layers: 'semantic' })
     await scan(a, { layers: 'semantic' })
     expect(base.llmRequests.map(promptUser)).toEqual([
-      buildSemanticPrompt([], ['项目甲：用 pnpm']).user,
-      buildSemanticPrompt([], ['项目乙：用 npm']).user,
-      buildSemanticPrompt([], ['项目甲：用 pnpm']).user,
+      expectedBaseline(['项目甲：用 pnpm']),
+      expectedBaseline(['项目乙：用 npm']),
+      expectedBaseline(['项目甲：用 pnpm']),
     ])
   })
 
@@ -1204,7 +1427,10 @@ describe('配置热生效（loader/volatile-update）', () => {
       await mkdir(join(memoryRoot, 'global'), { recursive: true })
       await writeFile(join(memoryRoot, 'global', `${r!.id}.md`), encodeRecord(record(r), {}), 'utf8')
     }
-    return { memoryRoot, defs, config, assembleOnce, update, tool, exec, save, command, sessionView, putGlobal }
+    /** 宿主压缩结束（成功不带 error，失败带 error）。 */
+    const endCompaction = (time: number, error?: string) => ctx.listeners.get('session/event')!(session,
+      { type: 'compaction/end', time, data: { compactionId: 'cmp_1', turn: 1, ...(error === undefined ? {} : { error }) } })
+    return { memoryRoot, defs, config, assembleOnce, update, tool, exec, save, command, sessionView, putGlobal, endCompaction }
   }
 
   it('改上限、超限处理、溯源档位后，同一会话下一次组装就按新值（不等压缩）', async () => {
@@ -1260,7 +1486,8 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect([...t.defs.keys()].sort()).toEqual(['memory_forget', 'memory_save', 'memory_search', 'memory_snapshot', 'memory_source'])
     for (const line of [
       '/memory resolve {"decisionId":"pd_x","verdict":"keep-left"}', '/memory undo {"decisionId":"pd_x"}',
-      '/memory promote {"decisionId":"pd_x","target":"global"}', '/memory keep-local {"decisionId":"pd_x"}',
+      '/memory promote {"decisionId":"pd_x","target":"global"}', '/memory promote-memory {"memoryId":"mem_keep"}',
+      '/memory keep-local {"decisionId":"pd_x"}',
       '/memory scan',
     ]) {
       expect(await t.command(line)).toMatchObject({ kind: 'error', body: { ok: false, code: 'governance-disabled' } })
@@ -1270,6 +1497,8 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect((await t.command('/memory info')).body).toMatchObject({ ok: true, cmd: 'info' })
     expect((await t.command('/memory refresh-views')).body).toEqual({ ok: true, cmd: 'refresh-views' })
     expect((await t.command('/memory restore {"memoryId":"mem_keep"}')).body).toMatchObject({ ok: false, code: 'not-found' })
+    // 「仍然有效」在体检关闭时照常可用：很久没确认的建议不靠模型，关闭时照样列出
+    expect((await t.command('/memory confirm {"memoryId":"mem_none"}')).body).toMatchObject({ ok: false, code: 'not-found' })
 
     await t.update({ governance: { enabled: true } })
     expect([...t.defs.keys()]).toEqual(expect.arrayContaining(GOVERNANCE_TOOLS))
@@ -1311,6 +1540,27 @@ describe('配置热生效（loader/volatile-update）', () => {
     const saved = await t.save({ type: 'project', name: '冻结到 3 月', content: 'merge freeze 到 3 月 5 日' })
     expect(saved.kind).toBe('saved')
     await t.sessionView(v => expect(v).toEqual({ ...frozen, savedIds: [saved.record!.id] }))
+  })
+
+  it('快照来历：首次冻结是对话开始时；失败的压缩与配置热更新不改；成功压缩后重建是压缩后，压缩前新写入的进了带入', async () => {
+    const t = await setup()
+    await t.putGlobal({ id: 'mem_p', type: 'preference', content: '测试里不要 mock 数据库' })
+    await t.assembleOnce()
+    await t.sessionView(v => expect(v).toMatchObject({ origin: 'start', coreIds: ['mem_p'], injectedIds: ['mem_p'] }))
+    const saved = await t.save({ type: 'project', name: '冻结到 3 月', content: 'merge freeze 到 3 月 5 日' })
+    const id = saved.record!.id
+
+    t.endCompaction(4_000, 'summarizer failed')
+    await t.assembleOnce()
+    await t.update({ evidenceLookup: 'active' })
+    await t.assembleOnce()
+    const unchanged = await t.sessionView(v => expect(v).toMatchObject({ origin: 'start', savedIds: [id] }))
+    expect(unchanged.compactedAt).toBeUndefined()
+
+    t.endCompaction(5_000)
+    await t.assembleOnce()
+    const compacted = await t.sessionView(v => expect(v).toMatchObject({ origin: 'compacted', compactedAt: 5_000, savedIds: [id] }))
+    expect(compacted.injectedIds).toContain(id)
   })
 
   /** 全局视图是旁路写入：等它满足条件。 */
@@ -1363,9 +1613,11 @@ describe('配置热生效（loader/volatile-update）', () => {
     const { entry } = await new PendingDecisionsStore(sidecarAt(t.memoryRoot).pending)
       .upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', fingerprint: 'fp-ab' }, 1)
     await t.command('/memory refresh-views')
-    await globalView(t, 'pending', pendingViewSchema, v => expect(v.items.map(i => i.kind)).toEqual(['conflict-horizontal']))
+    // 这两条的确认时间很早，另有「很久没确认」的建议整理，与账本无关，不看
+    const ledgerKinds = (v: PendingView) => v.items.filter(i => i.kind !== 'advice').map(i => i.kind)
+    await globalView(t, 'pending', pendingViewSchema, v => expect(ledgerKinds(v)).toEqual(['conflict-horizontal']))
     await t.tool('memory_confirm').execute({ action: 'resolve', decisionId: entry.id, verdict: 'keep-both' }, t.exec)
-    await globalView(t, 'pending', pendingViewSchema, v => expect(v.items).toEqual([]))
+    await globalView(t, 'pending', pendingViewSchema, v => expect(ledgerKinds(v)).toEqual([]))
   })
 
   it('调高上限：超限提醒当场按新上限重算（不等下一次组装），用量回到上限以内就了结，视图跟着重写', async () => {
@@ -1386,7 +1638,7 @@ describe('配置热生效（loader/volatile-update）', () => {
     ])
     expect(expected.tier).toBe(1)
     // 会话所在项目自己没有记忆：健康里单列这条超限，档位与待处理一致
-    expect((await readNow('health', healthViewSchema)).overflowOnlyLayers).toEqual([{ layer: { kind: 'workspace', workspacePath }, overflow: expected }])
+    expect((await readNow('health', healthViewSchema)).overflowOnlyLayers).toEqual([{ layer: { kind: 'workspace', workspacePath }, overflow: { ...expected, isDismissed: false } }])
 
     await t.update({ snapshotTokenBudget: usedTokens + 1000 })
     const pending = await readNow('pending', pendingViewSchema)

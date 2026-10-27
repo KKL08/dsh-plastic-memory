@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { PendingDecisionsStore, overflowLevelOf } from '../src/governance/decisions.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
+import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
 import { SnapshotCache, type FrozenSnapshotInfo } from '../src/runtime.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
@@ -24,7 +24,7 @@ beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-overflow-')) })
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
 function ledger() {
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
   return new PendingDecisionsStore(sidecar.pending)
 }
 
@@ -88,6 +88,28 @@ describe('自动放宽：档位提醒', () => {
     expect((await overflowEntries(d)).open.map(overflowLevelOf)).toEqual([{ mode: 'relax', tier: 2 }])
   })
 
+  it('同档用量变了：沿用原条目（id、首次出现时间、忽略状态不变），说明里的数字跟着更新', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await seed(store, 10)
+    const used = (await freeze(store, undefined, 1e9)).usedTokens
+    const d = ledger()
+    await freeze(store, d, used - 1)
+    const [before] = (await overflowEntries(d)).open
+    await d.settle(before.id, 'dismiss', Date.now())
+
+    await seed(store, 1, 'more') // 多一条，用量变了但仍在第 1 档
+    const grown = await freeze(store, d, used - 1)
+    expect(grown.usedTokens).toBeGreaterThan(used)
+    expect(grown.overflowChanged).toBe(true)
+    const { open, settled } = await overflowEntries(d)
+    expect(open).toEqual([])
+    expect(settled).toHaveLength(1)
+    expect(settled[0]).toMatchObject({ id: before.id, firstSeenAt: before.firstSeenAt })
+    expect(overflowLevelOf(settled[0])).toEqual({ mode: 'relax', tier: 1 })
+    expect(settled[0].summary).not.toBe(before.summary)
+    expect(settled[0].summary).toContain(String(grown.usedTokens))
+  })
+
   it('用量降回上限以内：删除条目，再超出时重新提醒', async () => {
     const store = new MemoryStore(new InMemoryTable())
     await seed(store, 10)
@@ -148,6 +170,36 @@ describe('自动放宽：档位提醒', () => {
     const cache = new SnapshotCache({ store, registry, budget: 1, overflowLedger: d })
     await cache.assemble({})
     expect(await overflowEntries(d)).toEqual({ open: [], settled: [] })
+  })
+})
+
+describe('估算口径变了（升级）：已有提醒在下次冻结时重新同步', () => {
+  // 旧版本按旧口径写下的条目：账本里只有档位与说明，不记当时怎么算的；升级后第一次冻结按新口径重算
+  const oldSummary = '带入记忆约 9000 token，超出上限 4000，已自动放宽到 9000'
+
+  it('新口径下回到上限以内：旧提醒删除，不留已忽略的残条', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await seed(store, 10)
+    const used = (await freeze(store, undefined, 1e9)).usedTokens
+    const d = ledger()
+    await d.syncOverflow(WS, { mode: 'relax', tier: 5 }, Date.now(), oldSummary)
+
+    expect((await freeze(store, d, used)).overflowChanged).toBe(true)
+    expect(await overflowEntries(d)).toEqual({ open: [], settled: [] })
+  })
+
+  it('新口径下仍超出：换成新档位，说明里是新口径的用量', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await seed(store, 10)
+    const used = (await freeze(store, undefined, 1e9)).usedTokens
+    const d = ledger()
+    await d.syncOverflow(WS, { mode: 'relax', tier: 5 }, Date.now(), oldSummary)
+
+    await freeze(store, d, used - 1)
+    const { open, settled } = await overflowEntries(d)
+    expect(settled).toEqual([])
+    expect(open.map(overflowLevelOf)).toEqual([{ mode: 'relax', tier: 1 }])
+    expect(open[0].summary).toContain(`带入记忆约 ${used} token，超出上限 ${used - 1}`)
   })
 })
 

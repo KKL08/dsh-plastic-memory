@@ -12,6 +12,14 @@ export type RejectCode =
   | 'schema-invalid'    // 字段校验失败
   | 'secret-critical'   // 明确厂商特征的密钥，拒存不落盘
   | 'secret-suspected'  // 疑似密钥（无厂商特征），未带 force 时拒存；用户确认后带 force: true 重发
+  | 'hand-edited'       // update 目标或同桶 supersedes 目标用户手改过，未带 force 时拒存；问过用户、同意后带 force: true 重发
+
+/**
+ * 模型用 memory_save 改写已有记忆（rewrite）、把同桶旧记忆标成已取代（supersede）时留的撤销记录种类：
+ * 待决账本的条目种类（governance/schema.ts）与 GUI 视图（gui/contract.ts）同用。
+ */
+export const MODEL_CHANGE_KINDS = ['rewrite', 'supersede'] as const
+export type ModelChangeKind = (typeof MODEL_CHANGE_KINDS)[number]
 
 /** 治理工具（forget / confirm / promote / snapshot）按记录的拒绝原因（tools/workspace-gate.ts）。 */
 export type GovernanceRejectCode =
@@ -34,7 +42,7 @@ export type WarningCode =
 export type ScanNoteCode =
   | 'semantic-unavailable'    // layers=full 但拿不到 LLM，只返回规则层
   | 'no-layer-executed'       // layers=semantic 且拿不到 LLM，什么都没跑
-  | 'semantic-truncated'      // 记忆过多，语义层只分析了前 N 条
+  | 'semantic-batched'        // 记忆超出一次调用的 token 预算，语义层分批检查，跨批的成对问题可能漏
   | 'semantic-failed'         // LLM 抛异常或两次输出无法解析，未更新语义缓存
   | 'baseline-missing'        // 未检测到 AGENTS.md 基线，垂直冲突检测未执行
   | 'baseline-session-scoped' // 基线随当前会话，其他 workspace 的垂直冲突检测已跳过
@@ -60,8 +68,12 @@ export type ToolGateCode = 'subagent-readonly' // 子 agent 会话（delegationD
 /** memory_search 的说明性 note（search.ts）。 */
 export type SearchNoteCode =
   | 'no-workspace'        // scope=workspace 但当前会话没有工作目录
-  | 'or-fallback'         // 返回列表里没有同时命中全部查询 token（分词命中或字段子串命中）的记忆，结果按相关性排序（部分命中在前、旧子串匹配命中在后）
-  | 'substring-fallback'  // 返回列表里没有任何 token 命中的记忆，只有旧子串匹配命中的（如 id 前缀）；与 or-fallback 互斥、优先于它
+  | 'or-fallback'         // 返回列表里没有同时命中全部查询 token（分词命中或字段子串命中）的记忆，但排第一的部分命中记录覆盖够（见 low-coverage），结果按相关性排序
+  | 'low-coverage'        // 同上没有全命中，且排第一的部分命中记录缺了整组关键词、或覆盖的查询内容字低于阈值（search/coverage.ts）：命中弱，建议换词再搜，附逐词命中条数
+  | 'substring-fallback'  // 返回列表里没有任何 token 命中的记忆，只有旧子串匹配命中的（如 id 前缀）：命中弱，附逐词命中条数（没有可列的词时不附）；三者互斥、substring 优先；查询恰是某条记忆的 id 时三者都不出
+
+/** 表示命中弱的检索说明码：说明里带换词再搜的建议与逐词命中条数。 */
+export const WEAK_SEARCH_NOTE_CODES = ['low-coverage', 'substring-fallback'] as const satisfies readonly SearchNoteCode[]
 
 /** frontmatter 解析失败的原因（storage/frontmatter.ts）。 */
 export type FrontmatterErrorCode =
@@ -94,3 +106,10 @@ export type OverflowMode = (typeof OVERFLOW_MODES)[number]
 /** 档位：relax 的 tier ≥ 1，上限 × (1 + 0.25 × tier) 是放宽后的天花板；strict 只有一档（用到 95%），tier 恒为 0。
  *  快照组装算出档位、待决账本按档位记超限提醒，两边共用这个形状。 */
 export type OverflowLevel = { mode: OverflowMode; tier: number }
+
+/**
+ * 用户能「忽略」的体检发现类型（GUI 建议整理里除「很久没确认」外的各类，与体检发现同名）。忽略记录存这个值，
+ * 治理侧评分前据它剔除、GUI 命令按它校验；以后加类型往这里追加，旧版本读到不认识的值只是不匹配。
+ */
+export const IGNORABLE_ADVICE_TYPES = ['expired', 'bloat', 'redundancy', 'orphan', 'misplaced', 'unclear'] as const
+export type IgnorableAdviceType = (typeof IGNORABLE_ADVICE_TYPES)[number]

@@ -3,7 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import type { ZodType } from 'zod'
-import type { BatchKvTable, ClaimKvTable, KvTable } from '../kv-table.ts'
+import type { BatchKvTable, CasKvTable, ClaimKvTable, KvTable } from '../kv-table.ts'
 import type { MemoryLogger } from './table.ts'
 import { kvImportMarkerSchema, recallStatsSchema, type KvImportMarker, type RecallStats } from './schema.ts'
 import { STATE_DIR } from './paths.ts'
@@ -17,6 +17,7 @@ import { linkExclusive } from './exclusive-link.ts'
  *   .state/pending/<id>.json        每条一文件
  *   .state/pending/<id>.claim       裁决期间的认领（排他创建，裁决完即删）
  *   .state/scan-cache/<sha1(桶键)>.json
+ *   .state/advice-ignores/<sha1(身份)>.json  建议忽略表，每项一文件
  *   .state/recall-stats.json        整张表一个文件 { [id]: RecallStats }
  *   .state/kv-import.json           旧宿主 KV 导入的完成标记
  *   .state/kv-import.lock           导入期间的跨进程锁，导完即删
@@ -27,7 +28,8 @@ import { linkExclusive } from './exclusive-link.ts'
  *
  * 导入屏障：snapshots / pending / scan-cache 的每个读写方法先 await 一次 memoize 的导入（进程内锁 +
  * 跨进程锁文件内执行，锁内重查标记）。
- * 召回统计不过屏障——导入不碰它，而 FileTable 加载时就要逐条读它，过屏障会把导入拖进 apply。
+ * 召回统计不过屏障——导入不碰它，而 FileTable 加载时就要逐条读它，过屏障会把导入拖进 apply。建议忽略表是旧 KV 之后才有的，
+ * 导入同样不碰它，也不过屏障。
  * 0.3.0 删除导入代码（openLegacyKv、标记、LegacyKvTables）。
  */
 
@@ -38,6 +40,7 @@ export const RECALL_STATS_FILE = 'recall-stats.json'
 const SNAPSHOTS_DIR = 'snapshots'
 const PENDING_DIR = 'pending'
 const SCAN_CACHE_DIR = 'scan-cache'
+const ADVICE_IGNORES_DIR = 'advice-ignores'
 
 /** 持锁期间每隔这么久刷新一次锁的时间戳；超过 STALE 没刷新按残留处理（兜底持锁进程崩溃后 pid 被复用）。 */
 const IMPORT_LOCK_REFRESH_MS = 10_000
@@ -58,10 +61,10 @@ export interface LegacyKvTables {
   discard: () => Promise<void>
 }
 
-export interface SidecarOptions<S, P, C> {
+export interface SidecarOptions<S, P, C, I> {
   /** memoryRoot；侧表住其下 `.state/` */
   root: string
-  schemas: { snapshots: ZodType<S>; pending: ZodType<P>; scanCache: ZodType<C> }
+  schemas: { snapshots: ZodType<S>; pending: ZodType<P>; scanCache: ZodType<C>; adviceIgnores: ZodType<I> }
   /** 惰性读取旧宿主 KV（打开域、取两张表、关域）。只在标记缺失或旧行待清理时、持跨进程锁调用，
    *  每个实例（进程）至多一次。
    *  缺省 = 没有旧 KV 可导，写 source: none 的标记；返回 undefined = 宿主此刻没有 storageDomain（可能只是
@@ -169,7 +172,7 @@ async function breakStaleLock(lockPath: string, held: string): Promise<void> {
 }
 
 /** 每条一个 JSON 文件的表。键从文件内容的 id 还原，所以 put 要求键等于值的 id。 */
-class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T> {
+class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T>, CasKvTable<T> {
   private readonly dir: string
   private readonly fileNameOf: (key: string) => string | undefined
   private readonly schema: ZodType<T>
@@ -243,6 +246,24 @@ class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T> {
     await this.env.ready()
     if (path === undefined) return false
     return this.env.locked(async () => {
+      try {
+        await rm(path)
+        return true
+      } catch (err) {
+        if (errnoCode(err) === 'ENOENT') return false
+        throw err
+      }
+    })
+  }
+
+  /** 写锁内重读再删：与 put 同在进程内的写链上，判定之后本进程刚写入的新值不会被删；跨进程仍是单条 LWW（重读到删除之间别的进程写入的会被删）。 */
+  async deleteIf(key: string, isStill: (current: T) => boolean): Promise<boolean> {
+    const path = this.pathOf(key)
+    await this.env.ready()
+    if (path === undefined) return false
+    return this.env.locked(async () => {
+      const cur = await this.read(path)
+      if (cur === undefined || !isStill(cur)) return false
       try {
         await rm(path)
         return true
@@ -368,21 +389,22 @@ class MapFileTable<T> implements BatchKvTable<T> {
   }
 }
 
-export class SidecarStore<S extends { id: string }, P extends { id: string }, C extends { id: string }> {
+export class SidecarStore<S extends { id: string }, P extends { id: string }, C extends { id: string }, I extends { id: string }> {
   readonly snapshots: KvTable<S>
   readonly pending: ClaimKvTable<P>
   readonly scanCache: KvTable<C>
   readonly recallStats: BatchKvTable<RecallStats>
+  readonly adviceIgnores: CasKvTable<I>
 
   private readonly stateDir: string
-  private readonly opts: SidecarOptions<S, P, C>
+  private readonly opts: SidecarOptions<S, P, C, I>
   private readonly log: MemoryLogger
   private chain: Promise<unknown> = Promise.resolve() // 进程内互斥：侧表写与导入串行化
   private imported: Promise<void> | undefined
   private markerWarned = false // 坏标记每个实例只告警一次（锁外、锁内各读一次）
 
   /** 构造不做 I/O：目录按需在首次写入时建。 */
-  constructor(opts: SidecarOptions<S, P, C>) {
+  constructor(opts: SidecarOptions<S, P, C, I>) {
     this.opts = opts
     this.log = opts.log ?? console
     this.stateDir = join(opts.root, STATE_DIR)
@@ -396,6 +418,7 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
     this.pending = new EntryFileTable(join(this.stateDir, PENDING_DIR), safeKey, opts.schemas.pending, gated)
     this.scanCache = new EntryFileTable(join(this.stateDir, SCAN_CACHE_DIR), sha1, opts.schemas.scanCache, gated)
     this.recallStats = new MapFileTable(join(this.stateDir, RECALL_STATS_FILE), recallStatsSchema, ungated)
+    this.adviceIgnores = new EntryFileTable(join(this.stateDir, ADVICE_IGNORES_DIR), sha1, opts.schemas.adviceIgnores, ungated)
   }
 
   private locked<R>(fn: () => Promise<R>): Promise<R> {

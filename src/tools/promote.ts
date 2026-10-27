@@ -4,7 +4,10 @@ import type { SnapshotStore } from '../governance/snapshots.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { MemorySnapshot } from '../governance/schema.ts'
 import { hasSecret } from '../secrets.ts'
-import { crossWorkspaceNote, gateRecords, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
+import {
+  crossWorkspaceNote, gateRecords, locateCopy,
+  type CopyTarget, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark,
+} from './workspace-gate.ts'
 
 export type PromoteTarget = 'global' | 'agents-md'
 
@@ -15,10 +18,18 @@ export interface PromoteDeps {
   now?: () => number
 }
 
+/** 只给 GUI 用的选项，不在工具参数里，模型传不进来。 */
+export interface PromoteOptions {
+  /** 同 id 多副本时只认这一份（GUI 按页面上那一份、或提升候选所在的项目操作）；缺省按会话 workspace 定位。跨 workspace 门照旧按会话判定。 */
+  target?: CopyTarget
+}
+
 export interface PromoteResult {
   promoted: Array<{ id: string; target: PromoteTarget }>
   dismissed: string[]
   skipped: string[]
+  /** 提升为全局时全局已有同 id 的记忆（在用的或最近删除里的），提升会盖掉它，原样留在项目内。 */
+  taken: string[]
   /** 属于其他项目、因未带 allowCrossWorkspace 被拒的记录。 */
   rejected: CrossWorkspaceRejection[]
   /** 带参数放行、属于其他项目的记录。 */
@@ -41,15 +52,20 @@ export async function executePromote(
   args: { confirmedIds: string[]; target: PromoteTarget; dismiss?: boolean; allowCrossWorkspace?: boolean },
   context: GovernanceContext,
   deps: PromoteDeps,
+  options: PromoteOptions = {},
 ): Promise<PromoteResult> {
   const now = deps.now?.() ?? Date.now()
-  // 预读范围：按 id 逐条两级定位（含非 active，当前 workspace 优先），已删的计入 skipped；
+  // 预读范围：按 id 逐条两级定位（含非 active，当前 workspace 优先；带 target 时只认那一份），已删的计入 skipped；
   // 定位到的再过跨 workspace 门，其他项目的记录不带参数时单独列出、不动
   const promoted: PromoteResult['promoted'] = []
   const skipped: string[] = []
   const located: MemoryRecord[] = []
+  // 指明了副本的按同一层写回（只认层），别层同 id 的副本再新也不改到它头上，也不被当成其余副本清掉
+  const hintOf = (r: MemoryRecord) => options.target === undefined ? undefined : { workspacePath: r.workspacePath, isExactLayer: true }
   for (const id of args.confirmedIds) {
-    const r = await deps.store.get(id, { workspacePath: context.workspacePath })
+    const r = options.target === undefined
+      ? await deps.store.get(id, { workspacePath: context.workspacePath })
+      : await locateCopy(deps.store, id, options.target)
     if (!r || r.status === 'deleted') { skipped.push(id); continue }
     located.push(r)
   }
@@ -70,47 +86,57 @@ export async function executePromote(
     const dismissed: string[] = []
     for (const r of found) {
       // 无损 JSON 不变式：解构剔键而非置 undefined。读到之后被别处删掉的计入 skipped，同预读时就不在
-      if (await deps.store.updateIfLive(r, ({ globalCandidate, ...rest }) => rest)) dismissed.push(r.id)
+      if (await deps.store.updateIfLive(r, ({ globalCandidate, ...rest }) => rest, hintOf(r))) dismissed.push(r.id)
       else skipped.push(r.id)
     }
     const skipNote = skipped.length > 0 ? `（${skipped.length} 条不存在或已删除，见 skipped）` : ''
     return {
-      promoted: [], dismissed, skipped, rejected, otherWorkspaces, snapshotId: null,
+      promoted: [], dismissed, skipped, taken: [], rejected, otherWorkspaces, snapshotId: null,
       message: `已清除 ${dismissed.length} 条提升候选标记，这些记忆保留在项目内，之后不再提示提升。${skipNote}${wsNote}`,
     }
   }
 
-  // 缺失/已删的已计 skipped、其他项目被拒的已计 rejected，都不进快照；found 才是本次实际提升的目标。
+  // 全局已有这个 id（在用的或最近删除里的）：搬过去会盖掉或撞上它，原样留在项目内，什么都不动
+  const taken: string[] = []
+  if (args.target === 'global') {
+    for (const r of found) {
+      if (r.scope === 'workspace' && (await locateCopy(deps.store, r.id, { kind: 'global' })) !== undefined) taken.push(r.id)
+    }
+  }
+  const targets = taken.length === 0 ? found : found.filter(r => !taken.includes(r.id))
+  const takenNote = taken.length > 0 ? `${taken.length} 条全局已有同一条记忆（也可能在最近删除里），提升会盖掉它，已原样保留在项目内，见 taken。` : ''
+
+  // 缺失/已删的已计 skipped、其他项目被拒的已计 rejected、全局已有的已计 taken，都不进快照；targets 才是本次实际提升的目标。
   // 快照先行（对齐 forget/confirm）：global 分支搬家、agents-md 分支软删，都在改动前对整批目标
   // 拍一次快照——否则 agents-md 软删后 14 天 sweep 就不可恢复。无目标时不拍。
   let snapshot: MemorySnapshot | undefined
-  if (found.length > 0) {
+  if (targets.length > 0) {
     snapshot = await deps.snapshots.capture({
       operation: 'pre-promote',
-      description: `提升 ${found.length} 条记忆到 ${args.target} 前`,
-      records: found,
+      description: `提升 ${targets.length} 条记忆到 ${args.target} 前`,
+      records: targets,
     }, now)
   }
 
-  for (const r of found) {
+  for (const r of targets) {
     if (args.target === 'global') {
       // 无损 JSON 不变式：不能把 workspacePath/globalCandidate 置为 undefined 键，解构剔键。
       // 按原记录的 workspace 定位：同 id 多副本时搬走的才是门放行的这份，不是 global 或别的项目的副本
-      if (!(await deps.store.updateIfLive(r, ({ workspacePath, globalCandidate, ...rest }) => ({ ...rest, scope: 'global' })))) {
+      if (!(await deps.store.updateIfLive(r, ({ workspacePath, globalCandidate, ...rest }) => ({ ...rest, scope: 'global' }), hintOf(r)))) {
         skipped.push(r.id)   // 读到之后被别处删掉
         continue
       }
     } else {
       // 两步无法原子：先软删再写 AGENTS.md，append 失败回滚软删——失败方向宁可"没提升"
       // 也不能"两处并存"（原顺序 append 成功+softDelete 失败会双份注入且结果谎报 promoted）。
-      if (!(await deps.store.updateIfLive(r, cur => ({ ...cur, status: 'deleted', updatedAt: Date.now() })))) {
+      if (!(await deps.store.updateIfLive(r, cur => ({ ...cur, status: 'deleted', updatedAt: Date.now() }), hintOf(r)))) {
         skipped.push(r.id)   // 读到之后被别处删掉（软删）：不写 AGENTS.md
         continue
       }
       try {
         await deps.agentsMd.append(`${r.name} — ${r.content}`)
       } catch {
-        await deps.store.put(r)
+        await deps.store.put(r, hintOf(r))
         skipped.push(r.id)
         continue
       }
@@ -120,9 +146,9 @@ export async function executePromote(
 
   const snapNote = snapshot ? ` 已自动快照（${snapshot.id}），14 天内可用 memory_snapshot 恢复。` : ''
   const message = promoted.length === 0
-    ? (secretIds.length > 0 && skipped.length === secretIds.length ? '没有记忆被提升。' : '没有记忆被提升（目标已删除、不存在，或写入失败，见 skipped）。')
+    ? ((secretIds.length > 0 || taken.length > 0) && skipped.length === secretIds.length ? '没有记忆被提升。' : '没有记忆被提升（目标已删除、不存在，或写入失败，见 skipped）。')
     : args.target === 'global'
       ? `已提升 ${promoted.length} 条记忆到全局（插件 global 记忆）。${snapNote}`
       : `已写入 ${promoted.length} 条记忆到 ~/.dsh/AGENTS.md，原项目记忆已归档软删。${snapNote}`
-  return { promoted, dismissed: [], skipped, rejected, otherWorkspaces, snapshotId: snapshot?.id ?? null, message: `${message}${secretNote}${wsNote}` }
+  return { promoted, dismissed: [], skipped, taken, rejected, otherWorkspaces, snapshotId: snapshot?.id ?? null, message: `${message}${secretNote}${takenNote}${wsNote}` }
 }

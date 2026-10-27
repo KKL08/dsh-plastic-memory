@@ -8,7 +8,7 @@ import type { TypeRegistry } from './type-registry.ts'
 import type { EvidenceLookupLevel } from './evidence-guidance.ts'
 import { assembleSnapshot, escapePromptBraces, overflowLevel, type OverflowMode, type SnapshotUsage } from './snapshot.ts'
 import type { OverflowLevel } from './contract-codes.ts'
-import type { SessionView } from './gui/contract.ts'
+import type { SessionView, SnapshotOrigin } from './gui/contract.ts'
 
 /**
  * 快照的预读：global + 当前 workspace 顶层的 active 记录（同 id 按取舍规则留一份，口径同 queryScope 的默认查询），
@@ -30,11 +30,13 @@ export async function prereadSnapshot(store: MemoryStore, workspacePath: string 
 /**
  * session 内冻结的 snapshot 缓存，按 session 隔离（WeakMap）。
  * 构建只发生在 assemble（system-prompt/assemble 中间件调用，异步）：等 workspace 解析落定或超时 →
- * 缓存缺失或已过期则预读可见记录、组装、冻结 → 首次冻结计一次召回 → 维护点（global + 当前 workspace）。同步的 render（context provider）
+ * 缓存缺失或已过期则预读可见记录、组装、冻结 → 带入全文的 core 记忆计召回（每会话每条一次）→ 维护点（global + 当前 workspace）。同步的 render（context provider）
  * 只回缓存，没有缓存回空串；冷启动文案由组装在可见集合为空时产出，provider 不兜底。
- * compaction 结束只标过期（markStale）不清空。压缩在 pre-step 里发生时，index.ts 的 pre-step / request-error 监听
+ * compaction 成功结束只标过期（markCompacted）不清空，失败的不标。压缩在 pre-step 里发生时，index.ts 的 pre-step / request-error 监听
  * 在 next() 之后把重建等完，宿主准入时的同步 provider 已回新快照；两次组装之间若仍有只调 provider 的刷新，
  * 拿到的是上一份、不是空串（并发代次与 HMR 窗口都靠不清空）。
+ * 每次冻结记下快照来历（会话视图的 origin）：首次冻结是对话开始时，会话已有更早的轮时（重启后续上、插件重载）是重新带入；
+ * 成功压缩后的下一次冻结是压缩后；其他重建沿用上一次。
  * workspacePath 走 pull + memoize：render 发现某 session 未解析时触发一次 fire-and-forget 解析
  * （同 session 去重），HMR 后存量 session 也能自愈；session/created 只做 eager 预热（prewarm）。
  * 已知窗口：HMR 后存量 session 缓存为空，首次 provider 回空串，首次中间件补上。
@@ -68,23 +70,31 @@ export interface SnapshotCacheDeps {
   /** 冻结之后调用（会话视图的写入口，接线在 index.ts）。失败只记日志。 */
   onFrozen?: (session: object, info: FrozenSnapshotInfo) => void | Promise<void>
   resolveWorkspace?: (session: object) => Promise<string | undefined>
+  /** 本实例第一次冻结某会话时问一次：会话是否已有更早的轮（是则来历记为重新带入）。缺省按没有。 */
+  hasEarlierTurns?: (session: object) => boolean
   /** 日志注入口，缺省回退 console（见 store.ts MemoryLogger）。 */
   log?: MemoryLogger
 }
 
+/** 冻结快照的来历（会话视图的 origin、compactedAt）。 */
+type Origin = { origin: SnapshotOrigin; compactedAt?: number }
+
 export class SnapshotCache {
-  /** 冻结快照与冻结时的代次；代次落后于 generations 即为过期（仍可被 provider 读到）。 */
-  private cache = new WeakMap<object, { text: string; generation: number }>()
+  /** 冻结快照与冻结时的代次；代次落后于 generations 即为过期（仍可被 provider 读到）。
+   *  core：快照里带入全文的 core 记忆，id → 带入时的正文（检索据此省略重复正文）。 */
+  private cache = new WeakMap<object, { text: string; generation: number; core: ReadonlyMap<string, string>; origin: Origin }>()
+  /** 成功压缩结束、还没被冻结认领的会话 → 压缩结束时刻。下一次冻结的来历记为压缩后，随即清掉。 */
+  private compactions = new WeakMap<object, number>()
   /** 每次 markStale 加一（缺省 0）。构建开始时记下代次，写缓存前核对：中途被标过期的构建结果不进缓存。 */
   private generations = new WeakMap<object, number>()
   /** 全体代次：每次 markAllStale 加一，计入每个会话的代次。 */
   private epoch = 0
   /** 值为 undefined 表示"已解析、无工作目录"（无 cwd 或目录已不存在）；键不存在表示"还没解析完" */
   private workspacePaths = new WeakMap<object, string | undefined>()
-  /** 已计过召回的 session。语义是"每会话计一次"：markStale 不清它，同一 session 多次
-   * 压缩重建不重复计数，否则 recallCount 会从"被多少会话用过"膨胀成"组装过多少次"。
-   * 代价：压缩后重建时新进 core 的记忆不补计召回——可接受。 */
-  private recalled = new WeakSet<object>()
+  /** 每个 session 已计过召回的记忆 id（快照冻结与检索命中共用）。语义是"每会话每条计一次"：
+   * markStale 不清它，压缩重建、重复检索都不重复计数，否则 recallCount 会从"被多少会话用过"膨胀成
+   * "组装、检索过多少次"。随 session 对象回收；进程重启或热重载后从空开始，续上的会话会再计一次。 */
+  private recalled = new WeakMap<object, Set<string>>()
   /** 在途 lazy 解析（按 session memoize 的 Promise）：防同一 session 重发解析，且可被 awaitResolved 等待。 */
   private resolving = new WeakMap<object, Promise<void>>()
 
@@ -130,7 +140,7 @@ export class SnapshotCache {
   }
 
   /** assemble 中间件的入口，返回本次要写进 context 的（已转义）文本。
-   *  解析落定：缓存存在且未过期直接用；否则读盘组装、冻结、每会话首次冻结计召回。
+   *  解析落定：缓存存在且未过期直接用；否则读盘组装、冻结、计召回（每会话每条一次）。
    *  解析超时（或未注入 resolver 且未显式喂）：global-only 临时文本，只给本次用，不冻结、不计召回。
    *  组装失败只记日志，回落到 render（旧快照或空串），不拖垮宿主组装。 */
   async assemble(session: object, timeoutMs = 1500): Promise<string> {
@@ -158,30 +168,37 @@ export class SnapshotCache {
     const deps = { ...this.deps }
     // 预读范围：只读 active，global + 当前 workspace（未解析时 global-only）；同一次读取的隔离文件数给冷启动文案用
     const now = Date.now()
-    const { text, coreIds, ...usage } = assembleSnapshot({ ...deps, ...(await prereadSnapshot(deps.store, workspacePath)), workspacePath, now })
+    const preread = await prereadSnapshot(deps.store, workspacePath)
+    const { text, coreIds, ...usage } = assembleSnapshot({ ...deps, ...preread, workspacePath, now })
     if (!isResolved) return text
     // 构建期间被标过期：这份文本只给本次用，不进缓存、不计召回，下一次中间件按新代次重建
     if (this.generationOf(session) !== generation) return text
     // 同代次的并发构建：先落定的那份为准，保证冻结内容一致
     const landed = this.cache.get(session)
     if (landed && landed.generation === generation) return landed.text
-    this.cache.set(session, { text, generation })
-    if (!this.recalled.has(session)) {
-      this.recalled.add(session)
-      await this.deps.store.markRecalled(coreIds)
-    }
+    const contentOf = new Map(preread.records.map(r => [r.id, r.content]))
+    // 来历：有没认领的成功压缩就是压缩后；否则沿用上一份冻结的；本实例第一次冻结时看会话有没有更早的轮
+    const compactedAt = this.compactions.get(session)
+    const origin: Origin = compactedAt !== undefined ? { origin: 'compacted', compactedAt }
+      : landed?.origin ?? { origin: this.deps.hasEarlierTurns?.(session) ? 'resumed' : 'start' }
+    this.compactions.delete(session)
+    this.cache.set(session, { text, generation, core: new Map(coreIds.map(id => [id, contentOf.get(id)!])), origin })
+    await this.markRecalled(session, coreIds)
     // 快照冻结是维护点之一（设计稿 §5 §6）：对 global + 当前 workspace 做维护；失败只记日志，不拖垮注入
     try {
       await this.deps.store.maintain({ kind: 'visible', workspacePath })
     } catch (err) {
       ;(this.deps.log ?? console).error('[plastic-memory] 记忆目录维护失败:', err)
     }
-    await this.afterFreeze(deps, session, workspacePath, now, usage)
+    await this.afterFreeze(deps, session, workspacePath, now, { ...usage, ...origin, coreIds })
     return text
   }
 
   /** 冻结之后：同步超限提醒、交出会话视图的原料。都是旁路，失败只记日志。 */
-  private async afterFreeze(deps: SnapshotCacheDeps, session: object, workspacePath: string | undefined, now: number, usage: SnapshotUsage): Promise<void> {
+  private async afterFreeze(
+    deps: SnapshotCacheDeps, session: object, workspacePath: string | undefined, now: number,
+    usage: SnapshotUsage & Origin & { coreIds: string[] },
+  ): Promise<void> {
     const { budget, overflowLedger, onFrozen } = deps
     const mode = deps.overflow ?? 'relax'
     let overflowChanged = false
@@ -216,6 +233,21 @@ export class SnapshotCache {
     }
   }
 
+  /** 该会话当前冻结快照（过期的也算，provider 仍回它）里带入全文的 core 记忆；没有冻结快照回 undefined。 */
+  injectedCore(session: object): ReadonlyMap<string, string> | undefined {
+    return this.cache.get(session)?.core
+  }
+
+  /** 计召回：同一 session 里已计过的 id 跳过，其余先记下再写侧表（并发调用也不重复计）。 */
+  async markRecalled(session: object, ids: readonly string[]): Promise<void> {
+    let counted = this.recalled.get(session)
+    if (!counted) this.recalled.set(session, counted = new Set())
+    const fresh = [...new Set(ids)].filter(id => !counted.has(id))
+    if (fresh.length === 0) return
+    for (const id of fresh) counted.add(id)
+    await this.deps.store.markRecalled(fresh)
+  }
+
   /** 同步 provider 的出口：只回冻结缓存（过期的也回），没有缓存回空串。未解析的 session
    *  顺手触发一次自愈解析（HMR 后存量 session 首次 provider 即开始解析），组装留给下一次中间件。 */
   render(session: object): string {
@@ -225,9 +257,15 @@ export class SnapshotCache {
     return ''
   }
 
-  /** compaction 结束：标记过期，不清空缓存（provider 继续回旧快照），也不清召回记录。 */
+  /** compaction 结束：标记过期，不清空缓存（provider 继续回旧快照），也不清召回记录。失败的压缩只走这里，不改来历。 */
   markStale(session: object): void {
     this.generations.set(session, (this.generations.get(session) ?? 0) + 1)
+  }
+
+  /** 压缩成功结束：同 markStale，另记下压缩时刻，下一次冻结的来历是压缩后重新带入。 */
+  markCompacted(session: object, at: number): void {
+    this.compactions.set(session, at)
+    this.markStale(session)
   }
 
   /** 配置热更新：所有会话一起标过期（会话按 WeakMap 存、无法枚举，改为抬全体代次），语义同 markStale。 */

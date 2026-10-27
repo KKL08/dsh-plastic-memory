@@ -18,13 +18,15 @@ import { executeSave } from '../src/tools/save.ts'
 import { executeForget } from '../src/tools/forget.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, type Finding } from '../src/governance/schema.ts'
+import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type Finding } from '../src/governance/schema.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { resolveHealthThresholds } from '../src/governance/health-presets.ts'
 import type { DirectoryNoteCode } from '../src/contract-codes.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
+import { FAKE_SECRET } from './helpers/secrets.ts'
+import { SECRET_MASK } from '../src/secrets.ts'
 
 // 票 09：执行器切到按范围读取与两级定位。全部用真实目录（FileTable + .state 侧表），
 // 只 mock 进程边界（sessionQuery.readEvent）；文件直接写盘模拟用户手编、git、其他进程。
@@ -75,7 +77,7 @@ async function writeRaw(dir: string, fileName: string, text: string, ws?: string
 const handBuilt = (name: string, body: string, type = 'preference') => `---\nname: ${name}\ntype: ${type}\n---\n\n${body}\n`
 
 function harness(opts: { readEvent?: ReadEventFn; now?: number } = {}) {
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
   const table = new FileTable({ root, stats: sidecar.recallStats })
   const store = new MemoryStore(table, undefined, sidecar.recallStats)
   const decisions = new PendingDecisionsStore(sidecar.pending)
@@ -178,6 +180,53 @@ describe('票 09 验收：执行器走按范围读取与两级定位', () => {
     await h.source(deriveFileId(relative(root, join(wsDir(WS), 'hand.md'))))
 
     expect(await treeSnapshot(root)).toEqual(before)
+  })
+
+  it('search 的文件路径与注入同口径：name 含密钥的不给路径，手起名的文件名带密钥的遮掉', async () => {
+    await writeMem(globalDir(), `deploy-${FAKE_SECRET.sk}.md`, rec({ id: 'mem_h', name: '部署说明', content: 'pathalpha 手起名' }))
+    await writeMem(globalDir(), 'gw.md', rec({ id: 'mem_n', name: `网关 ${FAKE_SECRET.github}`, content: 'pathbravo 名字带密钥' }))
+    const h = harness()
+    const named = (await h.search('pathalpha')).hits
+    expect(named.map(x => x.path)).toEqual([join(globalDir(), `deploy-${SECRET_MASK}.md`)])
+    const secretName = await h.search('pathbravo')
+    expect(secretName.hits.map(x => x.id)).toEqual(['mem_n'])
+    expect(secretName.hits[0].path).toBeUndefined()
+    for (const text of [renderSearchResult(secretName), renderSearchResult({ hits: named })]) {
+      expect(text).not.toContain(FAKE_SECRET.sk)
+      expect(text).not.toContain(FAKE_SECRET.github)
+    }
+  })
+
+  it('重复 id 说明里的路径同口径：name 含密钥的那份不给文件名，文件名带密钥的遮掉', async () => {
+    await writeMem(wsDir(WS), 'kept.md', wsRec({ id: 'mem_d', name: `网关 ${FAKE_SECRET.github}`, content: '在用', updatedAt: 500 }), WS)
+    await writeMem(globalDir(), `copy-${FAKE_SECRET.sk}.md`, rec({ id: 'mem_d', name: '网关', content: '副本', updatedAt: 400 }))
+    const h = harness()
+    const r = checkup(await h.health({ scope: 'all' }))
+    const notes = r.directoryNotes.filter(n => n.code === DUPLICATE_ID)
+    expect(notes.map(n => [n.path, n.keptPath])).toEqual([[join(globalDir(), `copy-${SECRET_MASK}.md`), join(wsDir(WS), SECRET_MASK)]])
+    const text = renderHealthResult(r)
+    expect(text).not.toContain(FAKE_SECRET.sk)
+    expect(text).not.toContain(FAKE_SECRET.github)
+  })
+
+  it('保留键、缺标记目录说明里的路径同口径：name 含密钥的给目录加占位，路径带密钥的遮掉', async () => {
+    const reservedBody = (name: string) => `---\nname: ${name}\ntype: preference\nrecallCount: 3\n---\n\n正文\n`
+    await writeRaw(wsDir(WS), 'gw.md', reservedBody(`网关 ${FAKE_SECRET.github}`), WS)
+    await writeRaw(wsDir(WS), `deploy-${FAKE_SECRET.sk}.md`, reservedBody('部署说明'))
+    const stray = join(root, `stray-${FAKE_SECRET.sk}`)
+    await writeMem(stray, 'x.md', rec({ id: 'mem_stray' }))
+    const h = harness()
+    for (const r of [single(await h.health()), checkup(await h.health({ scope: 'all' }))]) {
+      expect(r.directoryNotes.filter(n => n.code === RESERVED_KEYS).map(n => n.path).sort()).toEqual([
+        join(wsDir(WS), SECRET_MASK), join(wsDir(WS), `deploy-${SECRET_MASK}.md`),
+      ].sort())
+      expect(r.directoryNotes.find(n => n.code === MARKER_MISSING)?.path).toBe(join(root, `stray-${SECRET_MASK}`))
+      const text = renderHealthResult(r)
+      expect(JSON.stringify(r.directoryNotes)).not.toContain(FAKE_SECRET.sk)
+      expect(JSON.stringify(r.directoryNotes)).not.toContain(FAKE_SECRET.github)
+      expect(text).not.toContain(FAKE_SECRET.sk)
+      expect(text).not.toContain(FAKE_SECRET.github)
+    }
   })
 
   it('重复 id：search 返回一条且规则正确；副本在另一个项目时 health 报出、不删', async () => {

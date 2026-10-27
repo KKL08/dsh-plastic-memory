@@ -5,11 +5,11 @@ import { GUI_VIEW_VERSION, type PendingView } from '../src/gui/contract.ts'
 import { createFakeGateway } from './gateway.fake.ts'
 import { GatewayProvider } from './gateway.ts'
 import { NavIcon } from './NavIcon.tsx'
-import { memory } from './test-utils.tsx'
+import { memory, levelCountsOf } from './test-utils.tsx'
 
-const promote = { kind: 'promote-candidate', decisionId: 'd1', firstSeenAt: 1, memory: memory() } as const
+const promote = { kind: 'promote-candidate', level: 'your-call', decisionId: 'd1', firstSeenAt: 1, memory: memory() } as const
 const pending = (dot: PendingView['dot'], items: PendingView['items'] = dot === 'none' ? [] : [promote]): PendingView =>
-  ({ version: GUI_VIEW_VERSION, dot, items, typeLabels: {} })
+  ({ version: GUI_VIEW_VERSION, dot, items, levelCounts: levelCountsOf(items), typeLabels: {} })
 
 function setup(view: PendingView | undefined, session: 'ready' | 'none' = 'ready') {
   const gateway = createFakeGateway({
@@ -41,14 +41,14 @@ describe('左栏图标圆点', () => {
   })
 
   it('有密钥：红色小三角盖过琥珀点', () => {
-    const { container, marker } = setup(pending('red', [{ kind: 'secret', memory: memory() }, promote]))
+    const { container, marker } = setup(pending('red', [{ kind: 'secret', level: 'must-fix', memory: memory() }, promote]))
     expect(marker()).toBe('secret')
     expect(container.querySelector('.pm-nav-secret')).not.toBeNull()
     expect(container.querySelector('.pm-nav-dot')).toBeNull()
   })
 
   it('只有读不出的文件（dot = none）、视图没就绪、没有会话：都不亮点，也不挖洞', () => {
-    const unreadable = { kind: 'unreadable-file', layer: { kind: 'global' }, filePath: '/m/x.md', relativePath: 'x.md', error: 'bad' } as const
+    const unreadable = { kind: 'unreadable-file', level: 'must-fix', layer: { kind: 'global' }, filePath: '/m/x.md', relativePath: 'x.md', error: 'bad' } as const
     for (const { container, marker, unmount } of [setup(pending('none', [unreadable])), setup(undefined), setup(pending('amber'), 'none')]) {
       expect(marker()).toBeNull()
       expect(container.querySelector('mask')).toBeNull()

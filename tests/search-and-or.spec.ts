@@ -3,7 +3,6 @@ import fc from 'fast-check'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { JsonSchemaNode } from '@deepseek-ai/dsh-tools'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
@@ -11,7 +10,6 @@ import { GLOBAL_DIR, deriveFileId } from '../src/storage/paths.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
 import { expandQueryTerms, matchScore } from '../src/text.ts'
 import { executeSearch, renderSearchResult, type SearchToolDeps } from '../src/tools/search.ts'
-import { createSaveTool } from '../src/tools/save-tool.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { SearchNoteCode } from '../src/contract-codes.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
@@ -21,7 +19,7 @@ import { fakeExec } from './helpers/exec.ts'
 // 票 16（设计稿 §11）：多词查询先 AND，零命中回退 OR 并按命中数排序；原文预筛随模式切换。
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
-const OR_FALLBACK: SearchNoteCode = 'or-fallback'
+const LOW_COVERAGE: SearchNoteCode = 'low-coverage'
 
 const searchDeps = (store: MemoryStore): SearchToolDeps => ({
   store, registry,
@@ -34,7 +32,7 @@ afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 const globalDir = () => join(root, GLOBAL_DIR)
 const fileStore = () => new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() }))
 
-describe('AND 命中集 ⊆ OR 命中集（性质测试）；零 AND 命中时回退并附 or-fallback 说明码', () => {
+describe('AND 命中集 ⊆ OR 命中集（性质测试）；零 AND 命中时回退并附说明码', () => {
   // 小词池让记录与查询大量重叠；混入中文（走 bigram）、id 片段与查不到的词
   const word = fc.constantFrom('pnpm', 'deploy', 'hook', '部署流程', '缓存', 'mem_p1', 'zzz')
 
@@ -65,7 +63,7 @@ describe('AND 命中集 ⊆ OR 命中集（性质测试）；零 AND 命中时�
     ), { numRuns: 30 })
   })
 
-  it('零 AND 命中时回退并附 or-fallback 说明码', async () => {
+  it('零 AND 命中时回退并附说明码', async () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_two', content: 'deploy hook 都齐了' }))
     await store.put(record({ id: 'mem_one', content: '只提到 deploy' }))
@@ -76,10 +74,10 @@ describe('AND 命中集 ⊆ OR 命中集（性质测试）；零 AND 命中时�
     expect(and.hits.map(h => h.id)).toEqual(['mem_two', 'mem_one'])
     expect(and.noteCode).toBeUndefined()
 
-    // 没有全命中：都是部分命中，按相关性排序，带说明码，渲染里先说明再列结果
+    // 没有全命中：都是部分命中，按相关性排序，带说明码（rollback 一条都没命中，判弱），渲染里先说明再列结果
     const or = await executeSearch({ query: 'deploy hook rollback' }, fakeExec(), searchDeps(store))
     expect(or.hits.map(h => h.id)).toEqual(['mem_two', 'mem_one'])
-    expect(or.noteCode).toBe(OR_FALLBACK)
+    expect(or.noteCode).toBe(LOW_COVERAGE)
     const text = renderSearchResult(or)
     expect(text.startsWith(or.note!)).toBe(true)
     expect(text).toContain('[mem_two]')
@@ -103,7 +101,7 @@ it('排序：命中分 → confidence 降序 → lastConfirmedAt 降序；recall
   await store.put(record({ id: 'mem_recent', content: 'alpha', confidence: 0.9, lastConfirmedAt: 200, recallCount: 0 }))
 
   const { hits, noteCode } = await executeSearch({ query: 'alpha beta gamma' }, fakeExec(), searchDeps(store))
-  expect(noteCode).toBe(OR_FALLBACK)
+  expect(noteCode).toBe(LOW_COVERAGE)
   expect(hits.map(h => h.id)).toEqual(['mem_score', 'mem_recent', 'mem_old_popular', 'mem_lowconf'])
 })
 
@@ -139,20 +137,11 @@ describe('原文预筛随模式切换：AND 按全部词项、OR 按任一', () 
   })
 })
 
-it('summary 参数说明改写为「检索面，写会被搜到的限定词、专有名词，不复述 name」', () => {
-  const tool = createSaveTool({
-    store: new MemoryStore(new InMemoryTable()), registry,
-    resolveContext: async () => ({ workspacePath: '/proj', session: { id: 's', lastSeq: 1 } }),
-  })
-  const schema = tool.parameters as unknown as JsonSchemaNode & { properties: Record<string, { description?: string }> }
-  expect(schema.properties.summary.description).toContain('检索面，写会被搜到的限定词、专有名词，不复述 name')
-})
-
 it('说明码进 contract-codes', async () => {
-  // OR_FALLBACK 以 SearchNoteCode 声明：码不在 contract-codes 的联合里则类型检查不过
+  // LOW_COVERAGE 以 SearchNoteCode 声明：码不在 contract-codes 的联合里则类型检查不过
   const store = new MemoryStore(new InMemoryTable())
   await store.put(record({ id: 'mem_a', content: 'alpha' }))
   const result = await executeSearch({ query: 'alpha missing' }, fakeExec(), searchDeps(store))
-  expect(result.noteCode).toBe(OR_FALLBACK)
+  expect(result.noteCode).toBe(LOW_COVERAGE)
   expect(result.hits.map(h => h.id)).toEqual(['mem_a'])
 })

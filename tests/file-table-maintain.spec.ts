@@ -13,7 +13,7 @@ import { executeHealth } from '../src/tools/health.ts'
 import { prereadLayers } from '../src/tools/layer-preread.ts'
 import { crossLayerConflicts } from '../src/governance/layer-health.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
+import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
 import { resolveHealthThresholds } from '../src/governance/health-presets.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
@@ -160,6 +160,19 @@ describe('维护点动作 ③：.archive/ 里 deletedAt 超 14 天的物理删�
     expect(await mds(archiveOf(globalDir()))).toEqual(['fresh.md', 'sup.md'])
     expect(await stats.get('mem_gone')).toBeUndefined()
     expect(await stats.get('mem_fresh')).toMatchObject({ recallCount: 1 })
+  })
+
+  it('过期清除时别层还有同 id 的在用副本：只删过期文件，召回统计行按 id 一行，留给在用那份', async () => {
+    const now = Date.now()
+    await writeMem(globalDir(), 'live.md', record({ id: 'mem_dup', name: '全局那份' }))
+    await ensureDir(wsDir(), WS)
+    await writeMem(archiveOf(wsDir()), 'old.md', wsRecord({ id: 'mem_dup', name: '项目那份', status: 'deleted', deletedAt: now - DELETED_RETENTION_MS - DAY }))
+    const { table, stats } = open()
+    await stats.put('mem_dup', { id: 'mem_dup', recallCount: 3, lastRecalledAt: now })
+    await table.maintain([wsDir()])
+    expect(await mds(archiveOf(wsDir()))).toEqual([])
+    expect(await mds(globalDir())).toEqual(['live.md'])
+    expect(await stats.get('mem_dup')).toMatchObject({ recallCount: 3 })
   })
 
   it('顶层的 deleted 文件不直接清：先搬进 .archive/（deletedAt 取 mtime），下次维护才按 deletedAt 计窗口', async () => {
@@ -313,7 +326,7 @@ describe('同 id 重复副本只在写该 id 时清理', () => {
 
 describe('快照冻结是维护点', () => {
   function harness() {
-    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
     const table = new FileTable({ root, stats: sidecar.recallStats })
     const store = new MemoryStore(table, undefined, sidecar.recallStats)
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
@@ -376,7 +389,7 @@ describe('memory_health 纯读', () => {
     await writeRaw(globalDir(), INDEX_FILE, '# 手改\n')
     await new Promise(r => setTimeout(r, 5))
     const before = await treeSnapshot(root)
-    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
     const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
     const deps = {
       store, registry, decisions: new PendingDecisionsStore(sidecar.pending), cache: sidecar.scanCache,
@@ -396,7 +409,7 @@ describe('待决账本成员只在仅剩归档的目录里', () => {
     // proj-o 只剩归档：不进体检清单，但它的记录仍是待决条目的一方
     await writeMem(archiveOf(wsDir(OTHER)), 'b.md', wsRecord({ id: 'mem_b', status: 'deleted', deletedAt: now }, OTHER), OTHER)
     await writeFile(join(wsDir(OTHER), WORKSPACE_MARKER), OTHER + '\n')
-    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema } })
+    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
     const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
     const decisions = new PendingDecisionsStore(sidecar.pending)
     await decisions.upsert({ memoryIds: ['mem_g1', 'mem_a'], summary: '' }, now)

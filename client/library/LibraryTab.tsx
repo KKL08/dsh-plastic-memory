@@ -1,7 +1,7 @@
 /**
- * 「全部记忆」tab：页面作用域那一层的记忆卡列表。顶部存储说明（多少条、目录、MEMORY.md 是生成的索引、
- * 模型怎么读到）和目录问题（来自视图，不在这里重算）；行尾打开文件、在访达中显示、删除（软删，提示去最近删除恢复；
- * 含密钥的先确认再彻底删除，不可恢复）。
+ * 「记忆查看」tab：页面作用域那一层的记忆卡列表。顶部存储说明（多少条、目录、MEMORY.md 是生成的索引、
+ * 模型怎么读到）和目录问题（来自视图，不在这里重算）；行尾打开文件、在访达中显示、删除（先原位确认「删除这条？ 删除 · 取消」，
+ * 再软删，提示去最近删除恢复；含密钥的再确认一次彻底删除，不可恢复）。
  */
 import { layerOfMemory, type GuiLayerRef, type LibraryView } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
@@ -10,6 +10,7 @@ import { sameScope, type NavStore } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
+import { DeleteWithConfirm } from '../pending/action.tsx'
 import { FlashRow, useFlashTarget, useRowActions, useTypeLabel, ViewMessage } from './shared.tsx'
 
 function dirName(path: string): string {
@@ -123,14 +124,12 @@ export function LibraryTab({ nav, scope, session, now = Date.now() }: {
                 <div className="pm-row-actions">
                   <Button onClick={() => { void actions.open(memory.filePath) }}>{t('library.openFile')}</Button>
                   <Button onClick={() => { void actions.open(memory.filePath, 'reveal') }}>{t('library.reveal')}</Button>
-                  <Button
-                    unavailable={actions.unavailable(memory.id)}
-                    onClick={() => {
+                  <DeleteWithConfirm
+                    onDelete={() => {
                       void actions.run(memory.id, { cmd: 'forget', memoryId: memory.id, layer: layerOfMemory(memory) }, () => t('library.deletedNotice'))
                     }}
-                  >
-                    {t('library.delete')}
-                  </Button>
+                    trigger={open => <Button unavailable={actions.unavailable(memory.id)} onClick={open}>{t('library.delete')}</Button>}
+                  />
                 </div>
               </FlashRow>
             ))}

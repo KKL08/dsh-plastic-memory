@@ -3,7 +3,7 @@ import type { MemoryRecord } from './record-schema.ts'
 import { RecordNotFoundError } from './errors.ts'
 import { expandQueryTerms, matchScore } from './text.ts'
 import {
-  resolveDuplicates, resolveLiveFirst,
+  pickLiveFirst, resolveLiveFirst,
   type MemoryLogger, type MemoryTable, type LocatedFile, type LocateHint, type ScopeReadOptions, type ScopeReadResult, type KeywordMatch,
   type WorkspaceDirListing, type DirectoryNote, type QuarantineEntry,
 } from './storage/table.ts'
@@ -77,11 +77,11 @@ export class InMemoryTable implements MemoryTable {
     const all = [...this.slots.values()].filter(s => s.record.id === id)
     if (hint?.isExactLayer === true) {
       const ownDir = hint.workspacePath === undefined ? this.globalDir : join(this.root, workspaceDirName(hint.workspacePath))
-      return resolveDuplicates(all.filter(s => s.dir === ownDir), hint)[0]
+      return pickLiveFirst(all.filter(s => s.dir === ownDir), hint)
     }
     const firstLevel = all.filter(s => s.dir === this.globalDir
       || (hint?.workspacePath !== undefined && s.record.scope === 'workspace' && s.record.workspacePath === hint.workspacePath))
-    return resolveDuplicates(firstLevel.length > 0 ? firstLevel : all, hint)[0]
+    return pickLiveFirst(firstLevel.length > 0 ? firstLevel : all, hint)
   }
 
   async listWorkspaceDirs(): Promise<WorkspaceDirListing> {
@@ -153,9 +153,9 @@ export class InMemoryTable implements MemoryTable {
     if (!current) throw new RecordNotFoundError(key)
     return this.place(current, fn(current.record), hint?.isExactLayer === true)
   }
-  async delete(key: string, hint?: LocateHint) {
+  async delete(key: string, hint?: LocateHint, skipIf?: (current: LocatedFile) => boolean) {
     const current = await this.locate(key, hint)
-    if (!current) return false
+    if (!current || skipIf?.(current)) return false
     // 与 FileTable 同语义：可见集合（global + 该记录目录）里同 id 的其余副本一并删除；只认层时只删该目录里的
     for (const s of this.slots.values()) {
       if (s.record.id === key && ((hint?.isExactLayer !== true && s.dir === this.globalDir) || s.dir === current.dir)) this.slots.delete(s.filePath)
@@ -190,6 +190,22 @@ export interface QueryResult {
 /** 删除类方法的选项。 */
 export interface DeleteOptions {
   isExactLayer?: boolean
+  /** 软删的时刻（updatedAt、deletedAt）：调用方有注入的时钟时传它，缺省取当前时间。 */
+  now?: number
+}
+
+/** 位置即作用域（同 readLayer）：.archive/ 里 status 仍写着 active 的按 deleted 看。 */
+function byPosition(found: LocatedFile): MemoryRecord {
+  return found.record.status === 'active' && dirname(found.filePath) !== found.dir ? { ...found.record, status: 'deleted' } : found.record
+}
+
+/**
+ * 软删。给了 now 时 deletedAt 也记成它（已有的不动，保留期从第一次删除算起）；
+ * 缺省时 deletedAt 照旧由表在落盘时补上。
+ */
+function markDeleted(r: MemoryRecord, now: number | undefined): MemoryRecord {
+  if (now === undefined) return { ...r, status: 'deleted', updatedAt: Date.now() }
+  return { ...r, status: 'deleted', updatedAt: now, deletedAt: r.deletedAt ?? now }
 }
 
 /** 按记录自己的 workspace 定位；global 记录没有 workspacePath，只认层时即 global 层。 */
@@ -214,8 +230,7 @@ export class MemoryStore {
    *  位置即作用域（同 readLayer）：.archive/ 里 status 仍写着 active 的按 deleted 返回。 */
   async get(id: string, hint?: LocateHint): Promise<MemoryRecord | undefined> {
     const found = await this.table.locate(id, hint)
-    if (found === undefined) return undefined
-    return found.record.status === 'active' && dirname(found.filePath) !== found.dir ? { ...found.record, status: 'deleted' } : found.record
+    return found === undefined ? undefined : byPosition(found)
   }
   locate(id: string, hint?: LocateHint) { return this.table.locate(id, hint) }
   listWorkspaceDirs() { return this.table.listWorkspaceDirs() }
@@ -229,13 +244,14 @@ export class MemoryStore {
   update(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, fn: (current: MemoryRecord) => MemoryRecord, hint: LocateHint = { workspacePath: record.workspacePath }) {
     return this.table.update(record.id, fn, hint)
   }
-  /** 同 update，但锁内发现记录已不存在或已软删就不写、返回 undefined（工具据此报「不存在或已删除」，不抛错）。 */
-  async updateIfLive(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, fn: (current: MemoryRecord) => MemoryRecord): Promise<MemoryRecord | undefined> {
+  /** 同 update，但锁内发现记录已不存在或已软删就不写、返回 undefined（工具据此报「不存在或已删除」，不抛错）。
+   *  hint 同 update：调用方按层读到的（locateCopy），带只认层提示写回，别层同 id 的副本不动。 */
+  async updateIfLive(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, fn: (current: MemoryRecord) => MemoryRecord, hint?: LocateHint): Promise<MemoryRecord | undefined> {
     try {
       return await this.update(record, r => {
         if (r.status === 'deleted') throw new RecordNotFoundError(r.id)
         return fn(r)
-      })
+      }, hint)
     } catch (err) {
       if (err instanceof RecordNotFoundError) return undefined
       throw err
@@ -245,18 +261,19 @@ export class MemoryStore {
   /**
    * 删除按记录定位：调用方传入它读到并过了门的那条记录，按该记录自己的 workspace 定位（与 put 同约定），
    * 同 id 多副本时改的就是门检查过的那份，不会落到 global 或别的项目的副本上。
-   * hardDelete 物理删除文件（不进 .archive/，不可恢复）：只给密钥硬删用（tools/forget.ts）。
+   * hardDelete 物理删除文件（不进 .archive/，不可恢复）：给密钥硬删（tools/forget.ts）和最近删除里的彻底删除（gui/commands.ts）用。
    * isExactLayer：只认这条记录所在的那一层（见 LocateHint），同可见集合里别层的副本更新也不改到它头上。
+   * skipIf：锁内对将被删的那份求值（位置即作用域，同 get），为真就不删、返回 false。
    */
-  hardDelete(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, opts: DeleteOptions = {}): Promise<boolean> {
-    return this.table.delete(record.id, deleteHint(record, opts))
+  hardDelete(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, opts: DeleteOptions = {}, skipIf?: (current: MemoryRecord) => boolean): Promise<boolean> {
+    return this.table.delete(record.id, deleteHint(record, opts), skipIf && (found => skipIf(byPosition(found))))
   }
 
   async softDelete(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, opts: DeleteOptions = {}): Promise<boolean> {
     const hint = deleteHint(record, opts)
     if (!(await this.table.locate(record.id, hint))) return false
     try {
-      await this.table.update(record.id, r => ({ ...r, status: 'deleted', updatedAt: Date.now() }), hint)
+      await this.table.update(record.id, r => markDeleted(r, opts.now), hint)
     } catch (err) {
       if (err instanceof RecordNotFoundError) return false   // 定位之后被别处删掉
       throw err
@@ -281,14 +298,22 @@ export class MemoryStore {
   /**
    * 只软删（GUI 的 forget）：锁内看到的当前内容含密钥就不动它、回 has-secret，由调用方先问用户；
    * 调用方读过之后另一个会话才写进的密钥也拦得住。定位同 softDelete。
+   * isChanged：锁内看到的当前内容过了它（调用方核对过的版本之后又被改过）就不动它、回 changed。
    */
-  async softDeleteUnlessSecret(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, opts: DeleteOptions = {}): Promise<'deleted' | 'has-secret' | 'missing'> {
+  async softDeleteUnlessSecret(
+    record: Pick<MemoryRecord, 'id' | 'workspacePath'>,
+    opts: DeleteOptions & { isChanged?: (current: MemoryRecord) => boolean } = {},
+  ): Promise<'deleted' | 'has-secret' | 'changed' | 'missing'> {
     const hint = deleteHint(record, opts)
     if (!(await this.table.locate(record.id, hint))) return 'missing'
     try {
       // 走 update 的读改写：写盘前又被改就在新内容上重判，判密钥看的始终是将被覆盖的那份
-      const written = await this.update(record, r => (hasSecret(r) ? r : { ...r, status: 'deleted', updatedAt: Date.now() }), hint)
-      return written.status === 'deleted' ? 'deleted' : 'has-secret'
+      let outcome: 'deleted' | 'has-secret' | 'changed' = 'deleted'
+      await this.update(record, (r) => {
+        outcome = opts.isChanged?.(r) === true ? 'changed' : hasSecret(r) ? 'has-secret' : 'deleted'
+        return outcome === 'deleted' ? markDeleted(r, opts.now) : r
+      }, hint)
+      return outcome
     } catch (err) {
       if (err instanceof RecordNotFoundError) return 'missing'   // 定位之后被别处删掉
       throw err

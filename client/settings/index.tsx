@@ -28,7 +28,7 @@ export function createSettingsCard(ctx: HostContext, configForms: ConfigFormsSer
     if (props.view !== 'page') return null
     return (
       <PanelShell gateway={gateway} t={t} extraCss={SETTINGS_CSS}>
-        <SettingsPage form={form} onOpenMemoryPage={(tab) => { openMemoryPage(ctx, nav, { tab }) }} />
+        <SettingsPage form={form} onOpenMemoryPage={(target) => { openMemoryPage(ctx, nav, target) }} />
       </PanelShell>
     )
   }

@@ -1,8 +1,8 @@
 /**
- * 左栏记忆页的外壳：标题「记忆」+ 作用域下拉，四个 tab（待处理、全部记忆带数；健康、最近删除）。
+ * 左栏记忆页的外壳：标题「记忆」+ 作用域下拉，四个 tab（待处理带数和建议条数、健康、记忆查看带数、最近删除）。
  * 两态：一个会话都没有 → 空态「开一个会话后这里可用」；有会话 → 全功能。
  * 当前视图与作用域在导航 store 里，入口直达时先写 store 再切面板。
- * 不是入口打开的（点左栏图标、宿主恢复上次的面板）按默认落点：待处理有条目落在待处理，为空落在全部记忆（PRD §4 入口③）。
+ * 不是入口打开的（点左栏图标、宿主恢复上次的面板）按默认落点：待处理有条目落在待处理，为空落在记忆查看（PRD §4 入口③）。
  * 右上是「设置」和「体检当前项目」。
  */
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
@@ -56,13 +56,17 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
   add({ kind: 'global' })
 
   const counts: Partial<Record<MemoryTab, number>> = {
-    pending: countOf(pending, data => data.items.length),
+    // 主数只算高优问题和待你处理
+    pending: countOf(pending, data => data.levelCounts['must-fix'] + data.levelCounts['your-call']),
     library: countOf(library, data => data.layers.find(l => sameScope(l.layer, scope))?.items.length ?? 0),
   }
+  // 建议整理单写在主数后面，没有时不写
+  const adviceCount = countOf(pending, data => data.levelCounts.advice) ?? 0
   const tabLabel = (tab: MemoryTab): ReactNode => (
     <>
       {t(TAB_LABEL[tab])}
       {counts[tab] !== undefined ? <span className="pm-tab-count">{formatNumber(counts[tab])}</span> : null}
+      {tab === 'pending' && adviceCount > 0 ? <span className="pm-tab-count">{t('tab.pending.advice', { n: formatNumber(adviceCount) })}</span> : null}
     </>
   )
   const canOpenSettings = useCanOpen(nav, 'settings')
@@ -113,7 +117,7 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
 
 /**
  * 默认落点。挂载时取走入口标记：有就照入口写的目标走；没有就先落在待处理（作用域回到当前项目），
- * 待处理视图到了发现为空再改落全部记忆——只判断一次，用户在这之前动过目标就不改。
+ * 待处理视图到了发现为空再改落记忆查看——只判断一次，用户在这之前动过目标就不改。
  * 页面开着时入口写的目标当场生效，标记随即作废，免得下次从图标进来被误当成入口。
  */
 function useDefaultLanding(nav: NavStore, pending: ViewState<{ items: readonly unknown[] }>): void {

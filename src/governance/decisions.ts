@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import type { ClaimKvTable } from '../kv-table.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { RETENTION_MS } from '../retention.ts'
-import type { OverflowLevel } from '../contract-codes.ts'
+import { MODEL_CHANGE_KINDS, type OverflowLevel } from '../contract-codes.ts'
 import { genId, type PendingDecision, type PendingKind, type SettledVerdict } from './schema.ts'
 
 /** 去重 key：memoryIds 排序拼接 + baselineRef（垂直冲突与横向冲突互不干扰）。 */
@@ -31,9 +31,14 @@ export function kindOf(entry: { kind?: PendingKind }): PendingKind {
   return entry.kind ?? 'conflict'
 }
 
+/** 同一组记忆、同一类冲突（横向 / 垂直）的键，不看 baselineRef 措辞（LLM 自由填写，每次扫描都可能不同）。 */
+export function pairKey(entry: { memoryIds: string[]; baselineRef?: string }): string {
+  return dedupKey(entry.memoryIds) + (entry.baselineRef !== undefined ? '#baseline' : '')
+}
+
 /** 两个条目是否同一种类、指同一组记忆、同一类冲突（横向 / 垂直），不看 baselineRef 措辞。 */
 function samePair(a: KindKeyed, b: KindKeyed): boolean {
-  return kindOf(a) === kindOf(b) && dedupKey(a.memoryIds) === dedupKey(b.memoryIds) && (a.baselineRef !== undefined) === (b.baselineRef !== undefined)
+  return kindOf(a) === kindOf(b) && pairKey(a) === pairKey(b)
 }
 
 /**
@@ -51,9 +56,14 @@ function isDeletionSettled(entry: PendingDecision): boolean {
   return entry.settled !== undefined && verdictLoser(entry, entry.settled.verdict) !== undefined
 }
 
-/** 留作撤销的已裁决条目（删一方、提升为全局）：快照过了保留窗口就无从撤销，由 sweep 清掉。 */
+/** 模型用 memory_save 改写、替代已有记忆留的撤销记录。 */
+export function isModelChange(entry: { kind?: PendingKind }): boolean {
+  return (MODEL_CHANGE_KINDS as readonly PendingKind[]).includes(kindOf(entry))
+}
+
+/** 留作撤销的已裁决条目（删一方、提升为全局、直接改与直接合并、移到项目、模型改写与替代）：快照过了保留窗口就无从撤销，由 sweep 清掉。 */
 function isUndoable(entry: PendingDecision): boolean {
-  return isDeletionSettled(entry) || entry.settled?.verdict === 'promoted'
+  return isDeletionSettled(entry) || entry.settled?.verdict === 'promoted' || kindOf(entry) === 'edit' || kindOf(entry) === 'move' || isModelChange(entry)
 }
 
 /** 超限条目的指纹：relax 为档位号（'1'、'2'…），strict 只有一档。 */
@@ -92,12 +102,16 @@ async function holdsNow(entry: KindKeyed & { workspaces?: string[] }, read: Read
 
 type UpsertInput = { kind?: PendingKind; memoryIds: string[]; baselineRef?: string; summary: string; workspaces?: string[]; fingerprint?: string }
 
-/** 同键再报：更新 summary / workspaces / 指纹，保留 id 与 firstSeenAt。workspaces 与 memoryIds 一一对应，按已有条目的 id 顺序重排。 */
+/**
+ * 同一对再报：更新 summary / baselineRef 措辞 / workspaces / 指纹，保留 id 与 firstSeenAt。
+ * workspaces 与 memoryIds 一一对应，按已有条目的 id 顺序重排。
+ */
 function mergeReport(existing: PendingDecision, input: UpsertInput): PendingDecision {
   const wsById = new Map(input.memoryIds.map((id, i) => [id, input.workspaces?.[i]]))
   const workspaces = input.workspaces !== undefined ? existing.memoryIds.map(id => wsById.get(id) ?? '(未知)') : undefined
   return {
     ...existing, summary: input.summary,
+    ...(input.baselineRef !== undefined ? { baselineRef: input.baselineRef } : {}),
     ...(workspaces !== undefined ? { workspaces } : {}),
     ...(input.fingerprint !== undefined ? { fingerprint: input.fingerprint } : {}),
   }
@@ -154,11 +168,10 @@ export class PendingDecisionsStore {
    */
   async upsert(input: UpsertInput, now: number, read?: ReadMemory): Promise<{ created: boolean; settled?: true; isSkipped?: true; entry: PendingDecision }> {
     const entries = await this.table.list()
-    const key = dedupKey(input.memoryIds, input.baselineRef)
-    // 先看已裁决的同一对，再看未决的同键条目
+    // 先看已裁决的同一对，再看未决的同一对（垂直冲突的 baselineRef 措辞每次扫描都可能不同，不能按它分开，否则每次重扫都多一条）
     const matches = [
       ...entries.filter(([, e]) => e.settled !== undefined && samePair(e, input)),
-      ...entries.filter(([, e]) => e.settled === undefined && kindOf(e) === kindOf(input) && dedupKey(e.memoryIds, e.baselineRef) === key),
+      ...entries.filter(([, e]) => e.settled === undefined && samePair(e, input)),
     ]
     const holds = async () => read === undefined || await holdsNow(input, read)
     for (const [id, seen] of matches) {
@@ -205,9 +218,9 @@ export class PendingDecisionsStore {
   /**
    * 记下裁决。两边都留的靠指纹判断以后变没变：没有指纹的旧条目无从判断，退回直接移除，返回 false。
    * 删一方的留账是为了撤销，不看指纹；snapshotId 是删败方前的快照。fingerprint 给出时换掉条目上的指纹
-   * （「留在本项目」按记忆此刻的内容记，不用上次体检时的）。顺手清扫超出保留窗口的条目。
+   * （「留在本项目」按记忆此刻的内容记，不用上次体检时的）。isBornSettled 见 schema。顺手清扫超出保留窗口的条目。
    */
-  async settle(id: string, verdict: SettledVerdict, now: number, opts: { snapshotId?: string; fingerprint?: string } = {}): Promise<boolean> {
+  async settle(id: string, verdict: SettledVerdict, now: number, opts: { snapshotId?: string; fingerprint?: string; isBornSettled?: true } = {}): Promise<boolean> {
     const entry = await this.table.get(id)
     if (!entry) return false
     if (entry.fingerprint === undefined && opts.fingerprint === undefined && verdictLoser(entry, verdict) === undefined) {
@@ -217,7 +230,7 @@ export class PendingDecisionsStore {
     await this.table.put(id, {
       ...entry,
       ...(opts.fingerprint !== undefined ? { fingerprint: opts.fingerprint } : {}),
-      settled: { verdict, at: now, ...(opts.snapshotId !== undefined ? { snapshotId: opts.snapshotId } : {}) },
+      settled: { verdict, at: now, ...(opts.snapshotId !== undefined ? { snapshotId: opts.snapshotId } : {}), ...(opts.isBornSettled ? { isBornSettled: true as const } : {}) },
     })
     await this.sweep(now)
     return true
@@ -250,7 +263,7 @@ export class PendingDecisionsStore {
 
   /**
    * 快照冻结时同步一个项目的超限提醒（scope：workspace 路径，无项目为 'global'）。每个项目同时只留一条，指纹 = 当前档位：
-   * 同档不动（已忽略的保持忽略，不重报）；进入更高档换一条新的未决条目；回落到没超限删掉，下次超限重新提醒；
+   * 同档沿用原条目、只更新说明里的用量（已忽略的保持忽略，不重报）；进入更高档换一条新的未决条目；回落到没超限删掉，下次超限重新提醒；
    * 从高档降到低档时高档条目删掉、换成低档条目，高档已忽略的低档也算忽略（回落不打扰），再升回高档重新提醒。
    * 换模式（relax ↔ strict）旧条目作废。返回账本是否有变化。
    */
@@ -260,7 +273,20 @@ export class PendingDecisionsStore {
     const current = mine.find(([, e]) => e.fingerprint === fingerprint)
     const stale = mine.filter(entry => entry !== current)
     for (const [key] of stale) await this.table.delete(key)
-    if (level === undefined || current !== undefined) return stale.length > 0
+    if (level === undefined) return stale.length > 0
+    if (current !== undefined) {
+      if (current[1].summary === summary) return stale.length > 0
+      // 认领后重读、只改说明：读账本之后用户可能刚忽略了它（dismiss-overflow 认领着写 settled），不拿旧值盖回未决。
+      // 正被认领的这次不改，下次冻结再同步
+      const [key] = current
+      const claimed = await this.withClaim(key, async () => {
+        const latest = await this.table.get(key)
+        if (latest === undefined || latest.summary === summary) return false
+        await this.table.put(key, { ...latest, summary })
+        return true
+      })
+      return (claimed.isClaimed && claimed.value) || stale.length > 0
+    }
     const dismissedAbove = stale.some(([, e]) => e.settled !== undefined && overflowLevelOf(e).mode === level.mode && overflowLevelOf(e).tier > level.tier)
     const entry: PendingDecision = {
       id: genId('pd'), kind: 'overflow', memoryIds: [], summary, firstSeenAt: now, workspaces: [scope], fingerprint: fingerprint!,
@@ -308,6 +334,28 @@ export class PendingDecisionsStore {
     for (const c of candidates) {
       await this.upsert({ kind: 'promote-candidate', memoryIds: [c.id], summary: c.summary, workspaces: [scope], fingerprint: c.fingerprint }, now, read)
     }
+  }
+
+  /**
+   * 记一条生来就已结清的条目（直接改、直接合并、移到项目、模型改写与替代的撤销记录）：不经过未决，别处读账本时不会把它当待处理。
+   * 同一条记忆改几次就有几条，撤销各自核对指纹；超出保留窗口由 sweep 清掉。
+   */
+  async addSettled(
+    input: { kind: PendingKind; memoryIds: string[]; summary: string; workspaces: string[]; fingerprint: string; origin?: PendingDecision['origin'] },
+    verdict: SettledVerdict, now: number, snapshotId: string,
+  ): Promise<PendingDecision> {
+    const entry: PendingDecision = { id: genId('pd'), ...input, firstSeenAt: now, settled: { verdict, at: now, snapshotId } }
+    await this.table.put(entry.id, entry)
+    await this.sweep(now)
+    return entry
+  }
+
+  /** 模型改写、替代已撤销：条目留到保留窗口结束（对话卡与右侧栏据此显示「已撤销」），不能再撤一次。条目不存在或未结清返回 false。 */
+  async markUndone(id: string): Promise<boolean> {
+    const entry = await this.table.get(id)
+    if (!entry?.settled) return false
+    await this.table.put(id, { ...entry, settled: { ...entry.settled, isUndone: true } })
+    return true
   }
 
   async remove(id: string): Promise<boolean> {

@@ -33,10 +33,11 @@ import { OVERFLOW_MODES, type OverflowMode } from './contract-codes.ts'
 import { resolveHealthThresholds, type HealthSensitivity } from './governance/health-presets.ts'
 import { PendingDecisionsStore, overflowScopeOf } from './governance/decisions.ts'
 import { SnapshotStore } from './governance/snapshots.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from './governance/schema.ts'
+import { AdviceIgnoreStore } from './governance/advice-ignores.ts'
+import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from './governance/schema.ts'
 import type { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { baselineProjectionDefinition, readBaseline } from './governance/baseline.ts'
-import type { SemanticLlm } from './governance/semantic-scan.ts'
+import { reportedTokens, type SemanticLlm } from './governance/semantic-scan.ts'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { createMemoryCommand, type MemoryCommandDefinition } from './gui/commands.ts'
 import { ViewWriter, collectGlobalViews } from './gui/view-writer.ts'
@@ -124,7 +125,7 @@ export async function apply(ctx: Context, config: Config) {
   // storageDomain 未必已挂上。探测落空返回 undefined：不写标记，本进程不再探，下次启动重探。
   const sidecar = new SidecarStore({
     root: memoryRoot,
-    schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema },
+    schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema },
     openLegacyKv: async (): Promise<LegacyKvTables | undefined> => {
       let facility: DomainFacility | undefined
       try {
@@ -172,6 +173,8 @@ export async function apply(ctx: Context, config: Config) {
   const decisions = new PendingDecisionsStore(sidecar.pending)
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const scanCache = sidecar.scanCache
+  // 建议忽略表：健康分、体检、GUI 视图同一份剔除口径
+  const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
   // AGENTS.md 基线投影走可选注册：插件的 inject 不列 sessionProjections（精简 profile 可能没有这个服务），
   // 改在 ctx.inject(['sessionProjections'], …) 里注册，这是宿主 registry 文档（dsh-session-projection README）
   // 给出的保留可选注册的写法。disposer 随 child fiber 走，插件卸载键即消失。服务缺席时插件照常挂载，
@@ -208,7 +211,7 @@ export async function apply(ctx: Context, config: Config) {
   // 超限提醒进待决账本（治理关闭时也记：它是待处理里的提醒，不是体检结果）。
   // 上限、超限处理、溯源档位是 getter：每次构建快照时现读配置（SnapshotCache 一次构建只取一次）。
   const snapshotCache = new SnapshotCache({
-    store, registry, overflowLedger: decisions, memoryRoot, resolveWorkspace, log: ctx.logger,
+    store, registry, overflowLedger: decisions, memoryRoot, resolveWorkspace, hasEarlierTurns, log: ctx.logger,
     get budget() { return config.snapshotTokenBudget.get() },
     get overflow() { return config.snapshotOverflow.get() },
     get evidenceLookup() { return config.evidenceLookup.get() },
@@ -258,10 +261,14 @@ export async function apply(ctx: Context, config: Config) {
     }
     if (!llm?.stream) return null
     return {
-      async complete({ system, user }, signal) {
+      model,
+      async complete({ system, user }, signal, onUsage) {
         // 起步前先看取消：已取消就不发请求，直接抛（signal.reason 通常是 AbortError）。
         signal?.throwIfAborted()
         let out = ''
+        // 宿主在 finish 前发 usage 块（StreamChunk 的 'usage'，各项互不重叠），取最后一个；
+        // 宿主在出错收尾前报了用量的也计入，所以放在 finally 里报
+        let usage: Extract<StreamChunk, { type: 'usage' }> | undefined
         // stream 建立或迭代过程中抛出的错误按 rejected promise 向上传播，
         // 由 runSemanticScan 的调用点捕获降级，这里不吞掉。
         // signal 透传给宿主 GenerateOptions，让在途请求随取消中断。
@@ -272,21 +279,27 @@ export async function apply(ctx: Context, config: Config) {
           signal,
           messages: [{ role: 'user', content: [{ type: 'text', text: user }] }],
         }
-        for await (const chunk of llm.stream!(request)) {
-          if (chunk.type === 'text-delta') out += chunk.text
-          else if (chunk.type === 'finish') {
-            // error/aborted 带 failure，照 compaction-basic summarizer 的 finishError 一律拒绝；
-            // stop、max-tokens 及未来新增的 kind 不算错误，保留已收文本交给解析判定
-            // （与 summarizer 不同，截断的 JSON 解析不过会自然走重试）。
-            const reason = chunk.reason
-            if (reason.kind === 'error') {
-              throw Object.assign(new Error(reason.failure.message), { code: reason.failure.code })
-            }
-            if (reason.kind === 'aborted') {
-              // 宿主报 aborted 时 signal 未必已触发：仍以 AbortError 拒绝，不当成功，也不进重试。
-              throw signal?.reason ?? new DOMException(reason.failure.message, 'AbortError')
+        try {
+          for await (const chunk of llm.stream!(request)) {
+            if (chunk.type === 'text-delta') out += chunk.text
+            else if (chunk.type === 'usage') usage = chunk
+            else if (chunk.type === 'finish') {
+              // error/aborted 带 failure，照 compaction-basic summarizer 的 finishError 一律拒绝；
+              // stop、max-tokens 及未来新增的 kind 不算错误，保留已收文本交给解析判定
+              // （与 summarizer 不同，截断的 JSON 解析不过会自然走重试）。
+              const reason = chunk.reason
+              if (reason.kind === 'error') {
+                throw Object.assign(new Error(reason.failure.message), { code: reason.failure.code })
+              }
+              if (reason.kind === 'aborted') {
+                // 宿主报 aborted 时 signal 未必已触发：仍以 AbortError 拒绝，不当成功，也不进重试。
+                throw signal?.reason ?? new DOMException(reason.failure.message, 'AbortError')
+              }
             }
           }
+        } finally {
+          const tokens = usage === undefined ? undefined : reportedTokens(usage.usage)
+          if (tokens !== undefined) onUsage?.(tokens)
         }
         // 宿主可能在取消时正常结束迭代而不抛——循环收尾再判一次，取消一律抛 AbortError。
         if (signal?.aborted) throw signal.reason ?? new DOMException('memory_scan cancelled', 'AbortError')
@@ -308,7 +321,20 @@ export async function apply(ctx: Context, config: Config) {
         id: session?.header.id ?? 'unknown',
         lastSeq: session ? Math.max(session.seq - 1, 0) : 0,
         turnStartSeq: session ? openTurnStartSeq(session) : 0,
+        // 宿主 session 对象本身：检索按它找本会话的冻结快照、做召回去重
+        ...(session ? { handle: session } : {}),
       },
+    }
+  }
+
+  /** 会话是否已过了第 1 轮：快照本该在第 1 轮冻结，本实例第一次冻结时已是之后的轮，说明是重启后续上或插件重载。
+   *  读 turnBoundary 投影的 lastTurn（宿主按事件增量折叠，不读日志）；服务缺席、投影未注册、读取抛错都按没有。 */
+  function hasEarlierTurns(session: object): boolean {
+    try {
+      const projections = ctx.get('sessionProjections') as SessionProjectionRegistry | undefined
+      return (projections?.stateOf(session as Session, 'turnBoundary')?.lastTurn ?? 0) > 1
+    } catch {
+      return false
     }
   }
 
@@ -391,10 +417,10 @@ export async function apply(ctx: Context, config: Config) {
     },
   }, resolveContext))
   // memory_save 的类型枚举与说明在注册时从类型表生成：模板或自定义类型热更新后注销重注册
-  const registerSave = () => registerWrite(createSaveTool({ store, registry, resolveContext, snapshots, onSaved }))
+  const registerSave = () => registerWrite(createSaveTool({ store, registry, resolveContext, snapshots, decisions, onSaved }))
   let disposeSave = registerSave()
   ctx.tools.register(createSearchTool({
-    store, registry, resolveContext,
+    store, registry, resolveContext, sessionRecall: snapshotCache,
     tokenizer: { userDictionaryPath: () => config.search.userDictionaryPath.get(), log: ctx.logger },
   }))
   registerWrite(createForgetTool({ store, snapshots, decisions, log: ctx.logger, resolveContext }))
@@ -425,13 +451,13 @@ export async function apply(ctx: Context, config: Config) {
       // 基线按触发调用的 session 取（宿主投影 cell 按 session 隔离，防多会话串台）。
       // 扫描会写语义缓存、登记待决冲突，归写工具；health 纯读，不套门
       registerWrite(createScanTool({
-        store, registry, decisions, cache: scanCache,
+        store, registry, decisions, cache: scanCache, ignores,
         getBaseline,
         getLlm,
         resolveContext,
       })),
       ctx.tools.register(createHealthTool({
-        store, registry, decisions, cache: scanCache,
+        store, registry, decisions, cache: scanCache, ignores,
         get thresholds() { return resolveHealthThresholds(config.governance.health.sensitivity.get()) },
         resolveContext,
       })),
@@ -453,14 +479,14 @@ export async function apply(ctx: Context, config: Config) {
     const writer = new ViewWriter({
       memoryRoot, log: ctx.logger,
       collect: () => collectGlobalViews({
-        store, decisions, cache: scanCache, registry, memoryRoot, isGovernanceEnabled: () => config.governance.enabled.get(), bootedAt,
+        store, decisions, snapshots, cache: scanCache, ignores, registry, memoryRoot, isGovernanceEnabled: () => config.governance.enabled.get(), bootedAt, log: ctx.logger,
       }),
     })
     views = writer
     for (const [cwd, workspacePath] of earlyWorkspaces) void writer.requestWorkspace(cwd, workspacePath)
     earlyWorkspaces.clear()
     commands.register(createMemoryCommand({
-      memoryRoot, store, decisions, snapshots, cache: scanCache, registry, agentsMd, views: writer,
+      memoryRoot, store, decisions, snapshots, cache: scanCache, ignores, registry, agentsMd, views: writer,
       resolveContext, getLlm, getBaseline, log: ctx.logger,
       isGovernanceEnabled: () => config.governance.enabled.get(),
     }))
@@ -511,7 +537,7 @@ export async function apply(ctx: Context, config: Config) {
   // 类型图内（该包非直接依赖），故按最小结构签名订阅；运行时事件名只是字符串，行为不受影响。
   const lifecycle = ctx as unknown as {
     on(name: 'session/created', fn: (session: SessionLike) => void): () => void
-    on(name: 'session/event', fn: (session: object, event: { type: string; data?: { error?: string } }) => void): () => void
+    on(name: 'session/event', fn: (session: object, event: { type: string; time?: number; data?: unknown }) => void): () => void
   }
   lifecycle.on('session/created', session => {
     // eager 预热：新 session 不必等首次组装才解析 workspace（HMR 后存量 session 走 render 侧自愈）。
@@ -531,33 +557,43 @@ export async function apply(ctx: Context, config: Config) {
     // 带 error 的结束是失败的压缩（如摘要不比被遮蔽内容小），什么都没遮蔽：旧快照还在可见面上，
     // 这时重建只会让宿主再追加一份、两份并存；阈值附近它几乎每步失败一次，所以只在成功时标过期。
     // error 在事件的 data 里（compaction-basic 以 `{ ...lifecycle, error }` 作为 payload append）。
-    if (event.type === 'compaction/end' && event.data?.error === undefined) snapshotCache.markStale(session)
+    // 成功的压缩记下压缩时刻（markCompacted），下一次冻结记为压缩后重新带入。
+    if (event.type !== 'compaction/end') return
+    if ((event.data as { error?: unknown } | undefined)?.error !== undefined) return
+    snapshotCache.markCompacted(session, typeof event.time === 'number' ? event.time : Date.now())
   })
   // 宿主每一步先 assemble、再跑 agent/pre-step（compaction-basic 在这里压缩），准入时重调同步 provider。
   // 等 next() 返回（压缩已做完）再重建快照，准入时追加的就是新快照，下一步中间件命中缓存、不再追加第二份。
   // prepend 让本监听排在最外层，不依赖插件加载顺序；缓存未过期时 assemble 直接命中。
+  // 只重建中间件冻结过、且最近一次组装里还有本插件条目的会话：宿主压掉运行时上下文时中间件不冻结，这里也不能冻结，
+  // 否则没进上下文的快照会计召回、出会话视图，检索还会把 core 正文换成「已带入」说明。会话中途才压掉的
+  // （persona 的 includeRuntimeContext 改成 false）以前冻结过，只看 injectedCore 拦不住。
+  const lastHadEntry = new WeakMap<object, boolean>()
+  const wasFrozen = (session: object) => lastHadEntry.get(session) === true && snapshotCache.injectedCore(session) !== undefined
   ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
     const decision = await next()
-    if (!signal.aborted) await snapshotCache.assemble(agent.session)
+    if (!signal.aborted && wasFrozen(agent.session)) await snapshotCache.assemble(agent.session)
     return decision
   }, { prepend: true })
   // 溢出恢复：compaction-basic 压缩后返回 retry，同一步重试前宿主同样重调 provider；只在重试时重建。
   // 也要 prepend：compaction-basic 恢复时直接返回 retry、不调 next()，排在它里层就看不到这次重试。
   ctx.on('agent/request-error', async ({ agent, signal }, next) => {
     const action = await next()
-    if (action?.kind === 'retry' && !signal.aborted) await snapshotCache.assemble(agent.session)
+    if (action?.kind === 'retry' && !signal.aborted && wasFrozen(agent.session)) await snapshotCache.assemble(agent.session)
     return action
   }, { prepend: true })
   // 快照只在 assemble waterfall（异步）里构建：宿主在跑 waterfall【之前】就已物化全部 provider 文本，
   // 而同步 provider 只回缓存（首轮为空串）。中间件等 workspace 解析落定后组装或复用冻结快照，
   // 把本插件那条 context 的文本原位替换；解析超时走 global-only 临时文本（不冻结），不阻塞宿主。
+  // 宿主压掉运行时上下文时组装里没有本插件的条目：快照不进模型上下文，就不冻结——不计召回、不出会话视图、
+  // 不同步超限，检索也不会把没带入的正文当成已在上下文里。
   ctx.on('system-prompt/assemble', async (assembly: PromptAssembly, assembleCtx: AssembleContext, next: () => Promise<PromptAssembly>) => {
     const session = (assembleCtx?.scope as { session?: object } | undefined)?.session
-    if (session) {
+    const entries = assembly.contexts.filter(entry => entry.name === 'plastic-memory')
+    if (session) lastHadEntry.set(session, entries.length > 0)
+    if (session && entries.length > 0) {
       const text = await snapshotCache.assemble(session)
-      for (const entry of assembly.contexts) {
-        if (entry.name === 'plastic-memory') entry.text = text
-      }
+      for (const entry of entries) entry.text = text
     }
     return next()
   })

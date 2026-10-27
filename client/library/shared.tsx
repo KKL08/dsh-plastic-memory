@@ -1,5 +1,5 @@
 /**
- * 「全部记忆」「最近删除」共用的几件小东西：视图没就绪时的一行说明、带参数打开时的目标行高亮、
+ * 「记忆查看」「最近删除」共用的几件小东西：视图没就绪时的一行说明、带参数打开时的目标行高亮、
  * 行尾动作的进行中 / 结果提示与跨项目确认、类型显示名。
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -82,7 +82,7 @@ export function FlashRow({ flashing, onFlashEnd, className, children, as: Tag = 
   )
 }
 
-/** purged：含密钥的记忆已彻底删除，不进最近删除，提示里不带去那儿的链接。 */
+/** purged：彻底删除了（含密钥的记忆，或最近删除里的一条），最近删除里没有它，提示里不带去那儿的链接。 */
 export type Notice = { kind: 'ok'; text: string; memoryId: string } | { kind: 'purged'; text: string } | { kind: 'error'; text: string }
 
 type OkText = (result: { decisionId?: string }) => string

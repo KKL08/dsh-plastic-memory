@@ -1,9 +1,10 @@
 /**
  * 「最近删除」tab：页面作用域里 14 天内软删的记忆，每行写何时删、多久后彻底清除；裁决时删掉的标来源
  * （「以「胜方名」为准时删除」，次文字色，不用颜色），恢复按钮旁提示冲突会回到待处理。恢复发 `/memory restore`。
+ * 「彻底删除…」在行内确认一次，确认后发 `/memory hard-delete`，不等到期。
  * 密钥是物理删除，不在这里，空状态写明。
  */
-import { Fragment } from 'react'
+import { Fragment, useState } from 'react'
 import { layerOfMemory, type DeletedView, type GuiLayerRef, type LibraryView } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { formatDay, useT, type Translate } from '../i18n.tsx'
@@ -11,6 +12,7 @@ import type { NavStore } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
+import { SecretDeleteConfirm } from '../pending/action.tsx'
 import { FlashRow, useFlashTarget, useRowActions, useTypeLabel, ViewMessage } from '../library/shared.tsx'
 
 type DeletedItem = DeletedView['items'][number]
@@ -41,7 +43,7 @@ function memoryNames(library: LibraryView | undefined, deleted: DeletedView): Ma
 
 function purgeLabel(purgeAt: number, now: number, t: Translate): string {
   const days = Math.floor((purgeAt - now) / DAY_MS)
-  return days < 1 ? t('deleted.purge.today') : t('deleted.purge.days', { n: days })
+  return days < 1 ? t('deleted.purge.today') : t(days === 1 ? 'deleted.purge.days.one' : 'deleted.purge.days', { n: days })
 }
 
 export function DeletedTab({ nav, scope, session, now = Date.now() }: {
@@ -58,6 +60,8 @@ export function DeletedTab({ nav, scope, session, now = Date.now() }: {
   const { flashId, clear } = useFlashTarget(nav, items.map(item => item.memory.id))
   const actions = useRowActions(session)
   const typeLabel = useTypeLabel(session)
+  /** 正在等彻底删除确认的那一行。 */
+  const [confirming, setConfirming] = useState<string | undefined>(undefined)
   if (view.status !== 'ready') return <ViewMessage state={view} />
   const names = memoryNames(library.status === 'ready' ? library.data : undefined, view.data)
 
@@ -75,6 +79,7 @@ export function DeletedTab({ nav, scope, session, now = Date.now() }: {
                 formatDay(deletedAt, now, t),
                 purgeLabel(purgeAt, now, t),
               ]
+              const unavailable = actions.unavailable(memory.id) ?? (confirming === memory.id ? t('action.busy') : undefined)
               return (
                 <FlashRow key={memory.id} className="pm-list-row" flashing={flashId === memory.id} onFlashEnd={clear}>
                   <div className="pm-del-body">
@@ -88,11 +93,25 @@ export function DeletedTab({ nav, scope, session, now = Date.now() }: {
                       ))}
                     </p>
                     {actions.crossConfirm(memory.id)}
+                    {confirming === memory.id
+                      ? (
+                        <SecretDeleteConfirm
+                          showTitle={false}
+                          body={t('deleted.hardDeleteConfirm')}
+                          onCancel={() => { setConfirming(undefined) }}
+                          onConfirm={() => {
+                            setConfirming(undefined)
+                            void actions.run(memory.id, { cmd: 'hard-delete', memoryId: memory.id, layer: layerOfMemory(memory) }, () => t('deleted.hardDeleted'))
+                          }}
+                        />
+                      )
+                      : null}
                   </div>
                   <div className="pm-row-actions pm-del-actions">
                     {cause !== undefined ? <span className="pm-del-hint">{t('deleted.restoreHint')}</span> : null}
+                    <Button variant="ghost" unavailable={unavailable} onClick={() => { setConfirming(memory.id) }}>{t('deleted.hardDelete')}</Button>
                     <Button
-                      unavailable={actions.unavailable(memory.id)}
+                      unavailable={unavailable}
                       onClick={() => {
                         void actions.run(
                           memory.id,
