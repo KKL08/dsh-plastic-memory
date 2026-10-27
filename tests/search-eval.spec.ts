@@ -322,6 +322,40 @@ const WEAK_CORRECT_CEILING = 5
 const NO_ANSWER_QUERIES = EVAL_QUERIES.filter(q => q.category !== 'zero-token' && q.relevant.length === 0)
 const isWeak = (code: SearchNoteCode | undefined) => code !== undefined && (WEAK_SEARCH_NOTE_CODES as readonly string[]).includes(code)
 
+describe('同一文字的斜杠词是一个词：要字面命中，不按别名组放宽', { timeout: 60_000 }, () => {
+  const textOf = (id: string) => { const r = byId.get(id)!; return [r.id, r.name, r.summary, r.tags.join(' '), r.content].join('\n').toLowerCase() }
+  for (const tier of ['bigram', 'jieba'] as const) {
+    describe.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档`, () => {
+      it('api/v2 按字面锚点排：讲 /api/v2/ 的记录第一', async () => {
+        useTier(tier)
+        expect((await search('api/v2')).hits[0]?.id).toBe('mem_i7p2w4')
+      })
+
+      it('TCP/IP 两个词都要命中：只靠 scripts 里的 ip 子串的记录不算全命中，结果提示命中弱', async () => {
+        useTier(tier)
+        const r = await search('TCP/IP')
+        expect(isWeak(r.noteCode), `${r.noteCode} ${r.hits.map(h => h.id).join(' ')}`).toBe(true)
+      })
+
+      it('src/search 排序：不含 src 的记录不算全命中', async () => {
+        useTier(tier)
+        const tierOf = await tierOracle('src/search 排序')
+        const fullWithoutSrc = EVAL_RECORDS.filter(r => tierOf(r) === 'all' && !textOf(r.id).includes('src')).map(r => r.id)
+        expect(fullWithoutSrc).toEqual([])
+        const r = await search('src/search 排序')
+        if (r.noteCode === undefined) expect(textOf(r.hits[0]!.id)).toContain('src')
+      })
+
+      it('部署/deploy 照旧是别名组：只写了「部署」的记录全命中，不出说明', async () => {
+        useTier(tier)
+        const r = await search('部署/deploy')
+        expect(r.noteCode).toBeUndefined()
+        expect(['mem_d6x2k7', 'mem_w8h3p1']).toContain(r.hits[0]?.id)
+      })
+    })
+  }
+})
+
 describe('命中弱', { timeout: 60_000 }, () => {
   it('评估集有中英双写、库里没有答案、有答案的长句、没有答案的长句四类查询；没有答案的 relevant 为空', () => {
     expect(EVAL_QUERIES.filter(q => q.category === 'bilingual').length).toBeGreaterThanOrEqual(6)

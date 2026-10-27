@@ -1,5 +1,6 @@
 import type { MemoryRecord } from '../record-schema.ts'
 import { matchScore } from '../text.ts'
+import { CJK } from './tokenizer.ts'
 
 /**
  * 检索排序：查询时现算、不留状态。给定查询 token、候选记录与范围内列出的文件数 N，
@@ -145,18 +146,23 @@ const EDGE_PUNCT = /^[(（\[【「『"'“‘]+|[)）\]】」』"'”’.,;:!?�
  * 再按字面排会让恰好含这串字的记录压过分数更高的记录。
  */
 export function anchorTerms(query: string): string[] {
-  const words = query.toLowerCase().split(/\s+/).map(w => w.replace(EDGE_PUNCT, ''))
-    .filter(w => w !== '' && !WORD_CHARS_ONLY.test(w) && HAS_ALNUM.test(w) && aliasForms(w) === undefined)
+  const words = query.toLowerCase().split(/\s+/).map(w => w.replace(EDGE_PUNCT, '')).filter(w => w !== '' && !WORD_CHARS_ONLY.test(w) && HAS_ALNUM.test(w))
   return [...new Set(words)]
 }
 
-/** 别名组最多几个写法；更多的多半是路径。 */
+/** 别名组最多几个写法。 */
 export const ALIAS_MAX_FORMS = 4
+/** 别名组里非中文写法的最少字符数（挡住 部署/x 这类）；中文写法一个字也行（锁/lock）。 */
+export const ALIAS_MIN_LATIN_CHARS = 2
+
+const HAS_CJK = new RegExp(`[${CJK}]`, 'u')
 
 /**
- * 别名组：查询里用 / 连写、不带空格的同一术语的几种写法（部署/deploy、k8s/kubernetes/容器编排），任一写法命中都算。
- * 判定（剥掉首尾句读和括号后）：2 到 ALIAS_MAX_FORMS 段，每段只含字母、数字、_、-，且至少两个字符。
- * 路径、文件名、URL 因此不算：src/gui/contract.ts 带点，/Users/x/y 以 / 开头（首段为空），a/b/c 每段只有一个字符。
+ * 别名组：查询里用 / 连写、不带空格的同一术语的中英几种写法（部署/deploy、部署/deploy/发布），任一写法命中都算。
+ * 判定（剥掉首尾句读和括号后）：2 到 ALIAS_MAX_FORMS 段，每段只含字母、数字、_、-；中文写法至少一个字，
+ * 非中文写法至少 ALIAS_MIN_LATIN_CHARS 个字符；且至少一段含中文、至少一段不含中文。
+ * 只有一种文字的斜杠词不算别名组，照常是一个要字面命中的词、也是字面锚点：路径（src/search、/Users/x/y）、
+ * 仓库名与分支名（owner/repo、fix/compaction-snapshot）、版本（api/v2）、缩写对（TCP/IP、CI/CD）、日期（2026/10/27）。
  * 不是别名组返回 undefined。
  */
 export function aliasForms(word: string): string[] | undefined {
@@ -164,23 +170,44 @@ export function aliasForms(word: string): string[] | undefined {
   if (!w.includes('/')) return undefined
   const forms = w.split('/')
   if (forms.length > ALIAS_MAX_FORMS) return undefined
-  return forms.every(f => [...f].length >= 2 && WORD_CHARS_ONLY.test(f)) ? forms : undefined
+  const cjk = forms.map(f => HAS_CJK.test(f))
+  const wellFormed = forms.every((f, i) => WORD_CHARS_ONLY.test(f) && [...f].length >= (cjk[i] ? 1 : ALIAS_MIN_LATIN_CHARS))
+  return wellFormed && cjk.includes(true) && cjk.includes(false) ? forms : undefined
+}
+
+/** 查询按空白切出的一个词：别名组带各写法的查询 token 下标；其余原样。 */
+export type QueryWord =
+  | { alias: true; forms: { label: string; tokens: number[] }[] }
+  | { alias: false; text: string }
+
+/**
+ * 查询按空白切词，认出别名组（aliasForms）。排序（queryAliasGroups）与命中弱判断（search/coverage.ts）都从这里取，口径一致。
+ * 别名组里没有 token 的写法（纯数字等噪声）去掉，一个写法都不剩的组整个去掉。
+ */
+export function queryWords(query: string, tokens: readonly string[], tokenize: (text: string) => string[]): QueryWord[] {
+  const index = new Map(tokens.map((t, i) => [t, i] as const))
+  const out: QueryWord[] = []
+  for (const word of query.split(/\s+/)) {
+    if (word === '') continue
+    const forms = aliasForms(word)
+    if (forms === undefined) {
+      out.push({ alias: false, text: word })
+      continue
+    }
+    const withTokens = forms
+      .map(label => ({ label, tokens: [...new Set(tokenize(label).map(t => index.get(t)).filter((i): i is number => i !== undefined))] }))
+      .filter(f => f.tokens.length > 0)
+    if (withTokens.length > 0) out.push({ alias: true, forms: withTokens })
+  }
+  return out
 }
 
 /** 各别名组的各写法对应的查询 token 下标。 */
 export type AliasGroups = readonly (readonly (readonly number[])[])[]
 
-/** 查询里的别名组，写法换成查询 token 下标；没有 token 的写法（纯数字等噪声）去掉，一个写法都不剩的组去掉。 */
+/** 查询里的别名组，写法换成查询 token 下标。 */
 export function queryAliasGroups(query: string, tokens: readonly string[], tokenize: (text: string) => string[]): number[][][] {
-  const index = new Map(tokens.map((t, i) => [t, i] as const))
-  const groups: number[][][] = []
-  for (const word of query.split(/\s+/)) {
-    const forms = aliasForms(word)
-    if (forms === undefined) continue
-    const ids = forms.map(f => [...new Set(tokenize(f).map(t => index.get(t)).filter((i): i is number => i !== undefined))]).filter(f => f.length > 0)
-    if (ids.length > 0) groups.push(ids)
-  }
-  return groups
+  return queryWords(query, tokens, tokenize).flatMap(w => (w.alias ? [w.forms.map(f => f.tokens)] : []))
 }
 
 /** 全部关键词命中：每个别名组有一个写法的 token 全命中，且不在任何别名组里的 token 全命中。 */

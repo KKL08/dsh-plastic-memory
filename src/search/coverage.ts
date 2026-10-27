@@ -1,9 +1,9 @@
-import { aliasForms } from './ranking.ts'
+import { queryWords } from './ranking.ts'
 import { CJK } from './tokenizer.ts'
 
 /**
  * 「命中弱」的判断：没有记录同时命中全部查询 token 时，看排第一的那条对上了查询的多少。
- * 查询先按空白切成词：用 / 连写的别名组（见 ranking.ts aliasForms）是一个关键词，任一写法完整出现即算；
+ * 查询先按空白切成词（与排序同一份，见 ranking.ts queryWords）：用 / 连写的别名组是一个关键词，任一写法完整出现即算；
  * 其余的词再按文字种类切开，CJK 连续段去掉虚词后剩下的内容段，其他文字的整词。逐词命中条数也按这套分组数。
  * 纯函数，不碰存储与分词器状态。拿不准时偏向判弱：误判弱只多搜一轮，漏判弱会让模型把错的结果当答案。
  */
@@ -98,14 +98,12 @@ export function groupQueryTerms(query: string, tokens: readonly string[], tokeni
   const index = new Map(tokens.map((t, i) => [t, i] as const))
   const tokenIds = (text: string) => [...new Set(tokenize(text).map(t => index.get(t)).filter((i): i is number => i !== undefined))]
   const groups: TermGroup[] = []
-  for (const word of query.split(/\s+/)) {
-    const forms = aliasForms(word)
-    if (forms !== undefined) {
-      const units = forms.map(label => ({ label, byChar: false, tokens: tokenIds(label) })).filter(u => u.tokens.length > 0)
-      if (units.length > 0) groups.push({ units, keyword: true })
+  for (const word of queryWords(query, tokens, tokenize)) {
+    if (word.alias) {
+      groups.push({ units: word.forms.map(f => ({ label: f.label, byChar: false, tokens: f.tokens })), keyword: true })
       continue
     }
-    for (const [part] of word.matchAll(SCRIPT_RUN)) {
+    for (const [part] of word.text.matchAll(SCRIPT_RUN)) {
       if (IS_CJK.test(part)) {
         const segments = contentSegments(part)
         const n = segments.length === 1 ? [...segments[0]!].length : 0

@@ -363,6 +363,16 @@ describe('命中弱：按排第一的部分命中记录覆盖了多少查询判�
     expect(r2.note!.split('\n')[1]).toBe('各关键词命中的记忆条数：debounce 0、防抖 1。范围内一条都没命中的：debounce。')
   })
 
+  it('单字的中文写法也能组别名：锁/lock 命中只写了「互斥锁」的记录算全命中', async () => {
+    const store = await seeded([
+      record({ id: 'mem_mutex', name: '并发保护', content: '进程内并发用互斥锁保护共享状态' }),
+      record({ id: 'mem_other', name: '无关', content: '与查询无关的内容' }),
+    ])
+    const r = await search(store, '锁/lock')
+    expect(r.hits.map(h => h.id)).toEqual(['mem_mutex'])
+    expect(r.noteCode).toBeUndefined()
+  })
+
   it('逐词命中里别名组按查询里的写法顺序列，含任一写法的记录都算', async () => {
     const store = await seeded([
       record({ id: 'mem_cfg', name: '配置中心', content: '功能开关存在配置中心' }),
@@ -374,13 +384,20 @@ describe('命中弱：按排第一的部分命中记录覆盖了多少查询判�
     expect(r.note!.split('\n')[1]).toBe('各关键词命中的记忆条数：定时任务/cron 2、配置 1。')
   })
 
-  it('别名组的判定：路径、文件名、URL 不算别名组；别名组也不当字面锚点', () => {
+  it('别名组的判定：只有中文写法与非中文写法混写的才算；同一文字的斜杠词（路径、分支名、缩写对、日期）照常是一个词', () => {
     expect(aliasForms('部署/deploy')).toEqual(['部署', 'deploy'])
+    expect(aliasForms('部署/deploy/发布')).toEqual(['部署', 'deploy', '发布'])
     expect(aliasForms('k8s/kubernetes/容器编排')).toEqual(['k8s', 'kubernetes', '容器编排'])
     expect(aliasForms('（部署/deploy）')).toEqual(['部署', 'deploy'])
-    for (const w of ['src/gui/contract.ts', '/Users/x/y', 'a/b/c', 'aa/bb/cc/dd/ee', 'https://x.io/a', 'deploy', '部署/']) expect(aliasForms(w), w).toBeUndefined()
-    // 别名组不是字面锚点；路径照旧是
-    expect(anchorTerms('部署/deploy src/gui/contract.ts')).toEqual(['src/gui/contract.ts'])
+    // 中文写法一个字也行，非中文写法至少两个字符
+    expect(aliasForms('锁/lock')).toEqual(['锁', 'lock'])
+    expect(aliasForms('表/table')).toEqual(['表', 'table'])
+    for (const w of [
+      'src/search', 'owner/repo', 'fix/compaction-snapshot', 'api/v2', 'TCP/IP', 'CI/CD', 'and/or', '2026/10/27', 'k8s/kubernetes',
+      '部署/发布', '部署/x', 'src/gui/contract.ts', '/Users/x/y', 'a/b/c', '部署/deploy/发布/上线/ship', 'https://x.io/a', 'deploy', '部署/',
+    ]) expect(aliasForms(w), w).toBeUndefined()
+    // 斜杠词照旧是字面锚点，别名组也是（记录里几乎不会原样出现，无害）
+    expect(anchorTerms('部署/deploy src/gui/contract.ts api/v2')).toEqual(['部署/deploy', 'src/gui/contract.ts', 'api/v2'])
     expect(isFullMatch([true, false, true], [[[0], [1]]])).toBe(true)
     expect(isFullMatch([false, false, true], [[[0], [1]]])).toBe(false)
     expect(isFullMatch([true, true, false], [[[0], [1]]])).toBe(false)
