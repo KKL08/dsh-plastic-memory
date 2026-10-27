@@ -5,6 +5,9 @@ import type { ComponentType } from 'react'
 import { GUI_VIEW_VERSION, type DeletedView, type LibraryView, type MemoryCommand, type MemoryCommandResult, type SessionView } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createHostGateway } from '../gateway.ts'
+import { createTranslator } from '../i18n.tsx'
+import { en } from '../locales.ts'
+import { PanelShell } from '../ui/PanelShell.tsx'
 import type { SessionListState } from '../host.ts'
 import { createNavStore, PANEL_ID } from '../nav.ts'
 import { fakeHostContext, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
@@ -164,6 +167,19 @@ describe('交付卡默认折叠', () => {
     expect(screen.queryByText('测试里用真实 Postgres。')).toBeNull()
     expect(screen.queryByRole('button', { name: '删除这条记忆' })).toBeNull()
     expect(screen.queryByRole('button', { name: '查看详情 ›' })).toBeNull()
+  })
+
+  it('英文折叠行按条数写单复数：1 条 memory，多条 memories', () => {
+    const inEnglish = (list: SavedMemory[]) => render(
+      <PanelShell gateway={createFakeGateway()} t={createTranslator(en)}>
+        <SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={list} now={NOW} openDetail={() => {}} />
+      </PanelShell>,
+    )
+    const one = inEnglish([named('mem_1', 'Use a real database', 'x')])
+    expect(screen.getByRole('button', { expanded: false })).toHaveTextContent('Remembered 1 new memory this turn: Use a real database')
+    one.unmount()
+    inEnglish(items.map(i => ({ ...i, memory: { ...i.memory, name: 'Use a real database' } })))
+    expect(screen.getByRole('button', { expanded: false })).toHaveTextContent('Remembered 2 new memories this turn: Use a real database')
   })
 
   it('首条名称单行截断：名称单独一段、完整名称在 title 里，样式不换行、超出写省略号；行尾是 ›', () => {

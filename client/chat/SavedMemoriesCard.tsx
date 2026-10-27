@@ -135,7 +135,7 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
             ? <span className="pm-saved-lead">{t('chat.card.title', { count: saved.length })}</span>
             : (
               <>
-                <span className="pm-saved-lead">{t('chat.card.folded', { count: saved.length })}</span>
+                <span className="pm-saved-lead">{t(saved.length === 1 ? 'chat.card.folded.one' : 'chat.card.folded', { count: saved.length })}</span>
                 <span className="pm-saved-first" title={saved[0]?.memory.name}>{saved[0]?.memory.name}</span>
               </>
             )}
