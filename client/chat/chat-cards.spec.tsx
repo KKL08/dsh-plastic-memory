@@ -657,6 +657,18 @@ describe('交付卡：提升候选就地处理', () => {
     expect(row('mem_c').getByText('可提升为全局')).toBeInTheDocument()
   })
 
+  it('全局里已有这条（含最近删除）：原位写「没有提升」的说明，还是候选', async () => {
+    card(createFakeGateway({
+      views: { library: libraryOf([asCandidate, plain.memory]) },
+      respond: command => ({ ok: false, cmd: command.cmd, code: 'target-taken', detail: '服务端原话' }),
+    }))
+    expect(screen.getByRole('button', { expanded: false })).toBeInTheDocument()
+    expand()
+    await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '提升为全局' })) })
+    expect(row('mem_c').getByRole('alert')).toHaveTextContent('没有完成：全局里已经有这条记忆（含最近删除），没有提升。')
+    expect(row('mem_c').getByText('可提升为全局')).toBeInTheDocument()
+  })
+
   it('配置还没读到：同待处理卡，提升按钮暂不可用，「留在本项目」照常', () => {
     const { gateway } = card()
     act(() => { gateway.setConfigValue(undefined) })

@@ -77,7 +77,11 @@ export function useItemAction(session: BorrowedSession, onOk: (command: MemoryCo
       // 这几种服务端原话只有中文，界面换成本地文案
       else if (r.code === 'stale') setState({ kind: 'error', detail: t('pending.edit.stale') })
       else if (r.code === 'secret-critical') setState({ kind: 'error', detail: t('pending.edit.secretCritical') })
-      else if (r.code === 'target-taken') setState({ kind: 'error', detail: t(command.cmd === 'undo' ? 'pending.move.undoTaken' : 'pending.move.taken') })
+      else if (r.code === 'target-taken') {
+        const key = command.cmd === 'undo' ? 'pending.move.undoTaken'
+          : command.cmd === 'promote' || command.cmd === 'promote-memory' ? 'pending.promote.taken' : 'pending.move.taken'
+        setState({ kind: 'error', detail: t(key) })
+      }
       else setState({ kind: 'error', detail: r.detail ?? r.code })
     })
   }
