@@ -49,3 +49,21 @@ export function autoCheckupDue(frequency: AutoCheckupFrequency, lastCheckupAt: n
   const nextCheckupAt = lastCheckupAt + frequency * DAY_MS
   return { nextCheckupAt, isDue: now >= nextCheckupAt }
 }
+
+/** 自动体检没做完后，同一范围隔这么久再试。 */
+export const AUTO_CHECKUP_RETRY_MS = 3_600_000
+/** 连续没做完这么多次后，不再 1 小时一试，等到下一个周期。 */
+export const AUTO_CHECKUP_MAX_FAILURES = 3
+
+/** 连续失败到了上限（第 3、6、9…… 次）：这次之后等到下一个周期。 */
+export function isRetryLimitReached(failures: number): boolean {
+  return failures % AUTO_CHECKUP_MAX_FAILURES === 0
+}
+
+/**
+ * 自动体检第 failures 次连续没做完之后的重试时间：没到上限 1 小时后，到了上限等一个周期（失败时刻加有效频率的天数）。
+ * 下一个周期又没做完，照样 1 小时一试、试满 3 次再等下一个周期。失败不写完成记录，不重新计时。
+ */
+export function autoCheckupRetryAt(failures: number, failedAt: number, frequencyDays: number): number {
+  return failedAt + (isRetryLimitReached(failures) ? frequencyDays * DAY_MS : AUTO_CHECKUP_RETRY_MS)
+}

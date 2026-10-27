@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { resolveAutoCheckup, scopeKey, type AutoCheckupFrequency, type ScopeRef } from '../src/gui/contract.ts'
-import { autoCheckupDue } from '../src/governance/auto-checkups.ts'
+import { AUTO_CHECKUP_MAX_FAILURES, AUTO_CHECKUP_RETRY_MS, autoCheckupDue, autoCheckupRetryAt, isRetryLimitReached } from '../src/governance/auto-checkups.ts'
 
 // 自动体检的纯函数：继承解析（契约，服务端调度和客户端菜单共用）按 spec「自动体检情况表」逐行断言，以 discussion 为例；到期计算（治理层）。
 
@@ -87,5 +87,33 @@ describe('autoCheckupDue：到期计算', () => {
   it('仅手动：从不到期', () => {
     expect(autoCheckupDue('manual', null, NOW)).toEqual({ nextCheckupAt: null, isDue: false })
     expect(autoCheckupDue('manual', NOW - 100 * DAY, NOW)).toEqual({ nextCheckupAt: null, isDue: false })
+  })
+})
+
+describe('autoCheckupRetryAt：自动体检失败后的重试时间', () => {
+  const DAY = 86_400_000
+  const HOUR = 3_600_000
+  const FAILED_AT = 1_700_000_000_000
+
+  it('第 1、2 次连续失败：1 小时后再试', () => {
+    expect(AUTO_CHECKUP_RETRY_MS).toBe(HOUR)
+    expect(autoCheckupRetryAt(1, FAILED_AT, 7)).toBe(FAILED_AT + HOUR)
+    expect(autoCheckupRetryAt(2, FAILED_AT, 7)).toBe(FAILED_AT + HOUR)
+    expect(isRetryLimitReached(1)).toBe(false)
+    expect(isRetryLimitReached(2)).toBe(false)
+  })
+
+  it('连续失败到第 3 次：等到下一个周期（失败时刻加有效频率的天数）', () => {
+    expect(AUTO_CHECKUP_MAX_FAILURES).toBe(3)
+    expect(autoCheckupRetryAt(3, FAILED_AT, 7)).toBe(FAILED_AT + 7 * DAY)
+    expect(autoCheckupRetryAt(3, FAILED_AT, 1)).toBe(FAILED_AT + DAY)
+    expect(isRetryLimitReached(3)).toBe(true)
+  })
+
+  it('下一个周期又失败：这个周期照样 1 小时后再试，第 3 次再等下个周期', () => {
+    expect(autoCheckupRetryAt(4, FAILED_AT, 7)).toBe(FAILED_AT + HOUR)
+    expect(autoCheckupRetryAt(5, FAILED_AT, 7)).toBe(FAILED_AT + HOUR)
+    expect(autoCheckupRetryAt(6, FAILED_AT, 7)).toBe(FAILED_AT + 7 * DAY)
+    expect(isRetryLimitReached(6)).toBe(true)
   })
 })

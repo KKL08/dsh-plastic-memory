@@ -11,6 +11,8 @@ import { GLOBAL_CACHE_KEY, scoreLayer } from '../src/governance/layer-health.ts'
 import { prereadLayers } from '../src/tools/layer-preread.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
+import { MODEL_UNAVAILABLE_HOST_CODES, hostSemanticLlm } from '../src/governance/host-llm.ts'
+import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { InMemoryKvTable, type CasKvTable } from '../src/kv-table.ts'
@@ -847,5 +849,45 @@ describe('体检后手改记忆文件（「打开文件」直接改，frontmatte
     const { redundancy } = await scanned()
     expect(await redundancy()).toBe(1)
     expect(await redundancy()).toBe(1)
+  })
+})
+
+describe('executeScan 模型错误分类（宿主错误码从模型适配层带到说明码）', () => {
+  /** 宿主 llm 服务的替身：按宿主真实的流形状，适配器出错时以带 failure 的 error finish 收尾。 */
+  const failingHost = (code: string, message: string) => hostSemanticLlm({
+    async *stream(): AsyncIterable<StreamChunk> {
+      yield { type: 'finish', reason: { kind: 'error', failure: { code, message } } } as StreamChunk
+    },
+  }, { provider: 'deepseek', model: 'deepseek-v4-flash' })
+
+  it('宿主的未登录、缺凭据错误码：说明码是 model-unavailable，不是 semantic-failed；带上宿主的码和原话；不写完成记录', async () => {
+    // 宿主 0.2.1-rc.2：账号路由 ACCOUNT_SIGN_IN_REQUIRED / ACCOUNT_TOKEN_INVALID，API key 路由 MISSING_CREDENTIAL / INVALID_CREDENTIAL / AUTH（401、403）
+    expect([...MODEL_UNAVAILABLE_HOST_CODES].sort()).toEqual(['ACCOUNT_SIGN_IN_REQUIRED', 'ACCOUNT_TOKEN_INVALID', 'AUTH', 'INVALID_CREDENTIAL', 'MISSING_CREDENTIAL'])
+    for (const code of MODEL_UNAVAILABLE_HOST_CODES) {
+      const checkups = new CheckupRecordStore(new InMemoryKvTable<CheckupRecord>())
+      const deps = makeDeps({ checkups, getLlm: () => failingHost(code, `host says ${code}`) })
+      await deps.store.put(record({ id: 'mem_g' }))
+      const r = await scanSingle({}, deps)
+      expect(r.notes.map(n => n.code)).toContain('model-unavailable')
+      expect(r.notes.map(n => n.code)).not.toContain('semantic-failed')
+      expect(r.notes.find(n => n.code === 'model-unavailable')?.cause).toEqual({ kind: 'model-error', hostCode: code, message: `host says ${code}` })
+      expect(await checkups.list()).toEqual([])
+    }
+  })
+
+  it('其他模型错误（限流、超时）：仍是 semantic-failed，带上宿主的码', async () => {
+    const deps = makeDeps({ getLlm: () => failingHost('RATE_LIMIT', 'too many requests') })
+    await deps.store.put(record({ id: 'mem_g' }))
+    const r = await scanSingle({}, deps)
+    expect(r.notes.map(n => n.code)).toContain('semantic-failed')
+    expect(r.notes.map(n => n.code)).not.toContain('model-unavailable')
+    expect(r.notes.find(n => n.code === 'semantic-failed')?.cause).toEqual({ kind: 'model-error', hostCode: 'RATE_LIMIT', message: 'too many requests' })
+  })
+
+  it('输出解析不了：semantic-failed，原因是解析不了', async () => {
+    const deps = makeDeps({ getLlm: () => ({ complete: async () => '不是 JSON' }) })
+    await deps.store.put(record({ id: 'mem_g' }))
+    const r = await scanSingle({}, deps)
+    expect(r.notes.find(n => n.code === 'semantic-failed')?.cause).toEqual({ kind: 'unparseable' })
   })
 })

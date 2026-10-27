@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { memoryRecordSchema } from '../record-schema.ts'
-import { IGNORABLE_ADVICE_TYPES, MODEL_CHANGE_KINDS, OVERFLOW_MODES, type DirectoryNoteCode, type ScanNoteCode } from '../contract-codes.ts'
+import { CHECKUP_CAUSE_KINDS, IGNORABLE_ADVICE_TYPES, MODEL_CHANGE_KINDS, OVERFLOW_MODES, type DirectoryNoteCode, type ScanNoteCode } from '../contract-codes.ts'
 
 /** 快照、最近删除的保留窗口（毫秒）：对话卡据此判断模型改写的改前版本是否已过期。 */
 export { RETENTION_MS } from '../retention.ts'
@@ -447,13 +447,24 @@ export function resolveAutoCheckup(settings: ReadonlyMap<string, AutoCheckupFreq
   return own === undefined ? { frequency: fallback, isOwn: false } : { frequency: own, isOwn: true }
 }
 
+/**
+ * 自动体检这次没做完、或模型用不了的原因（体检记录表与体检视图共用）。kind 见 CHECKUP_CAUSE_KINDS；
+ * hostCode 是宿主给的错误码（如 ACCOUNT_SIGN_IN_REQUIRED、RATE_LIMIT），宿主给了才有；message 是宿主或体检的原话，界面按 kind 和 hostCode 写说明，原话只作补充。
+ */
+export const checkupCauseSchema = z.object({
+  kind: z.enum(CHECKUP_CAUSE_KINDS),
+  hostCode: z.string().optional(),
+  message: z.string().optional(),
+})
+export type CheckupCause = z.infer<typeof checkupCauseSchema>
+
 /** 体检视图的文件名（在视图目录里，与全局视图并列）。 */
 export const GUI_CHECKUP_VIEW_FILE = 'checkups.json'
 
 /**
- * 体检视图：只写各进程共有的事实（共享的设置表和完成记录），所有窗口看到同一份。在设置改了、体检做完、
+ * 体检视图：只写各进程共有的事实（共享的设置表和体检记录），所有窗口看到同一份。在设置改了、体检做完或没做成、
  * 调度检查发现状态变了（到期了、别的进程写了完成记录）、体检认领和释放时重写，内容没变不重写。
- * 失败与重试（04）、最近一次结果（05）以后加在每个范围上。
+ * 最近一次结果（05）以后加在每个范围上。
  */
 export const checkupViewSchema = z.object({
   version,
@@ -476,6 +487,19 @@ export const checkupViewSchema = z.object({
     isDue: z.boolean(),
     /** 进行中：有体检（任一进程的手动或自动体检）认领着这个范围、认领没过期。agent 的 memory_scan 不认领，不算。 */
     isInProgress: z.boolean(),
+    /**
+     * 自动体检连续没做完（模型调用出错、输出解析不了、体检出错）：次数、下次重试时间、最近一次的原因。
+     * 没到上限时 1 小时后再试；到了上限（isRetryLimitReached）等到下一个周期。到期了但还没到重试时间的不跑。
+     * 这个范围做完一次体检（手动、自动、agent）就清掉；没有为 null。
+     */
+    failure: z.object({
+      count: z.number().int().positive(),
+      retryAt: z.number(),
+      isRetryLimitReached: z.boolean(),
+      cause: checkupCauseSchema,
+    }).nullable(),
+    /** 最近一次自动体检的尝试是「模型用不了」（宿主没有默认模型、未登录、缺凭据）：原因；不是为 null。不算失败，下一次调度检查再试。 */
+    modelUnavailable: checkupCauseSchema.nullable(),
   })),
 })
 export type CheckupView = z.infer<typeof checkupViewSchema>

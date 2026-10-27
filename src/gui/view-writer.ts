@@ -125,7 +125,7 @@ export async function collectCheckupView(deps: CheckupSourceDeps): Promise<Check
   }
   return buildCheckupView({
     now, governanceEnabled: deps.isGovernanceEnabled?.() ?? true, settings, layers,
-    lastCheckupAt: layer => last.get(layer) ?? null, isInProgress: layer => inProgress.has(layer),
+    lastCheckupAt: layer => last.get(layer) ?? null, isInProgress: layer => inProgress.has(layer), record: layer => byKey.get(checkupKey(layer)),
   })
 }
 

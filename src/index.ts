@@ -260,7 +260,7 @@ export async function apply(ctx: Context, config: Config) {
     })
   }
   // 无会话（自动体检）：没有会话可借，用宿主的默认模型选择（agentDefaultModel 的当前选择：新建 agent 用它，
-  // 用户在对话里换模型时它通常跟着变）。可选依赖，每次开跑现读、不缓存；服务缺席或读取抛错就是 null，自动体检不跑。
+  // 用户在对话里换模型时它通常跟着变）。可选依赖，每次开跑现读、不缓存；服务缺席或读取抛错就是 null，自动体检不跑、记「模型用不了」。
   const getDefaultLlm = (): SemanticLlm | null => {
     let route: HostModelRoute | undefined
     try {

@@ -2066,6 +2066,37 @@ describe('scan：上次体检与完成记录', () => {
     expect((await lastCheckups(e))[SESSION_WS]).toBe(NOW)
   })
 
+  it.each([
+    ['ACCOUNT_SIGN_IN_REQUIRED', 'model-unavailable', 'semantic-failed'],
+    ['MISSING_CREDENTIAL', 'model-unavailable', 'semantic-failed'],
+    ['RATE_LIMIT', 'semantic-failed', 'model-unavailable'],
+  ] as const)('借用会话的模型报宿主错误码 %s：说明码是 %s，不是 %s；不写完成记录', async (code, note, other) => {
+    const e = env({ llm: { complete: async () => { throw Object.assign(new Error(`host ${code}`), { code }) } } })
+    await seedLayers(e)
+    const notes = ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS })).notes
+    expect(notes).toContain(note)
+    expect(notes).not.toContain(other)
+    expect(await completedOf(e, SESSION)).toBeUndefined()
+  })
+
+  it('手动体检成功：清掉这个范围自动体检的失败计数和「模型用不了」，体检视图跟着更新', async () => {
+    const e = env({ llm: quiet })
+    await seedLayers(e)
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: { kind: 'all' }, frequency: 1 }))
+    await e.checkups.recordFailure(SESSION, { kind: 'model-error', hostCode: 'RATE_LIMIT', message: 'too many requests' }, NOW - 1000, 1)
+    await e.checkups.recordFailure(SESSION, { kind: 'unparseable' }, NOW - 500, 1)
+    await e.checkups.recordModelUnavailable(GLOBAL, { kind: 'no-default-model' })
+    ok(await e.run({ cmd: 'refresh-views' }))
+    const before = await e.readCheckupView()
+    expect(before.scopes.find(s => s.scope.kind === 'workspace' && s.scope.workspacePath === SESSION_WS)).toMatchObject({
+      failure: { count: 2, retryAt: NOW - 500 + 3_600_000, isRetryLimitReached: false, cause: { kind: 'unparseable' } }, modelUnavailable: null,
+    })
+    expect(before.scopes.find(s => s.scope.kind === 'global')).toMatchObject({ failure: null, modelUnavailable: { kind: 'no-default-model' } })
+    ok(await e.run({ cmd: 'scan' }))
+    const after = await e.readCheckupView()
+    expect(after.scopes.map(s => [s.failure, s.modelUnavailable])).toEqual([[null, null], [null, null], [null, null]])
+  })
+
   it('写完缓存、挂账挂到一半时进程退出：不写完成记录，上次体检仍是之前那次；重跑后每个冲突只有一张卡', async () => {
     let dying = false
     let puts = 0
@@ -2377,8 +2408,8 @@ describe('set-auto-checkup', () => {
     await e.checkups.complete([{ kind: 'global' }], { startedAt: NOW - 2 * DAY, completedAt: NOW - 2 * DAY, by: 'agent' })
     ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 3 }))
     expect((await e.readCheckupView()).scopes).toEqual([
-      { scope: { kind: 'global' }, frequency: 3, isOwn: false, lastCheckupAt: NOW - 2 * DAY, nextCheckupAt: NOW + DAY, isDue: false, isInProgress: false },
-      { scope: DISCUSSION, frequency: 3, isOwn: false, lastCheckupAt: null, nextCheckupAt: null, isDue: true, isInProgress: false },
+      { scope: { kind: 'global' }, frequency: 3, isOwn: false, lastCheckupAt: NOW - 2 * DAY, nextCheckupAt: NOW + DAY, isDue: false, isInProgress: false, failure: null, modelUnavailable: null },
+      { scope: DISCUSSION, frequency: 3, isOwn: false, lastCheckupAt: null, nextCheckupAt: null, isDue: true, isInProgress: false, failure: null, modelUnavailable: null },
     ])
   })
 

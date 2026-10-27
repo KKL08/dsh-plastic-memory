@@ -75,11 +75,14 @@ function fakeTimer(clock: { now: number }) {
   }
 }
 
+/** 假模型这次怎么回：正常回 JSON、回解析不了的文本，或以带宿主错误码的 error finish 收尾。 */
+type HostReply = 'ok' | 'garbage' | { code: string; message: string }
+
 /**
  * 宿主 llm 服务的替身：每次 stream 记下请求，按宿主真实的流形状回一段：文本、usage、以 stop 收尾的 finish。
  * findings 按请求给（缺省没问题）；gate 给出时先等它，期间 signal 中断就按宿主的做法以 aborted 收尾。
  */
-function fakeHostLlm(opts: { findings?: (req: GenerateOptions) => unknown[]; gate?: () => Promise<void> } = {}) {
+function fakeHostLlm(opts: { findings?: (req: GenerateOptions) => unknown[]; gate?: () => Promise<void>; reply?: () => HostReply } = {}) {
   const requests: GenerateOptions[] = []
   let active = 0
   let maxActive = 0
@@ -106,7 +109,13 @@ function fakeHostLlm(opts: { findings?: (req: GenerateOptions) => unknown[]; gat
             return
           }
         }
-        yield { type: 'text-delta', index: 0, text: JSON.stringify({ findings: opts.findings?.(req) ?? [] }) }
+        const reply = opts.reply?.() ?? 'ok'
+        if (typeof reply === 'object') {
+          // 宿主把适配器抛的错折成以 error 收尾的 finish，failure 带宿主错误码
+          yield { type: 'finish', reason: { kind: 'error', failure: reply } } as StreamChunk
+          return
+        }
+        yield { type: 'text-delta', index: 0, text: reply === 'garbage' ? '这不是 JSON' : JSON.stringify({ findings: opts.findings?.(req) ?? [] }) }
         yield { type: 'usage', usage: { inputTokens: 1200, outputTokens: 80 } }
         yield { type: 'finish', reason: { kind: 'stop' } }
       } finally {
@@ -231,7 +240,7 @@ describe('自动体检调度：到期就在后台体检一次', () => {
 
     const view = await e.readView()
     expect(view.scopes.find(s => s.scope.kind === 'workspace')).toEqual({
-      scope: ws(DISCUSSION), frequency: 1, isOwn: true, lastCheckupAt: at, nextCheckupAt: at + DAY, isDue: false, isInProgress: false,
+      scope: ws(DISCUSSION), frequency: 1, isOwn: true, lastCheckupAt: at, nextCheckupAt: at + DAY, isDue: false, isInProgress: false, failure: null, modelUnavailable: null,
     })
 
     await e.advance(3 * AUTO_CHECKUP_INTERVAL_MS)
@@ -313,17 +322,28 @@ describe('自动体检调度：不跑的情况', () => {
     expect((await e.readView()).governanceEnabled).toBe(true)
   })
 
-  it('拿不到宿主默认模型时不跑、不写完成记录；默认模型回来后下一次检查照常跑', async () => {
+  it('拿不到宿主默认模型时不跑、不写完成记录，到期的范围都记「模型用不了」（没有默认模型），不算失败；默认模型回来后下一次检查照常跑', async () => {
     const e = env({ defaultModel: undefined })
     await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.store.create(record({ id: 'mem_a', content: '项目 a 的记忆', scope: 'workspace', workspacePath: OTHER_A }))
+    await e.store.create(record({ id: 'mem_b', content: '项目 b 的记忆', scope: 'workspace', workspacePath: OTHER_B }))
     await e.set({ kind: 'all' }, 1)
+    // 仅手动的范围不到期，不记
+    await e.set(ws(OTHER_B), 'manual')
     e.scheduler.start()
     await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
     expect(e.llm.requests).toEqual([])
     expect(await e.completed()).toEqual({})
+    const view = await e.readView()
+    expect(view.scopes.map(s => [s.scope.kind === 'global' ? 'global' : s.scope.workspacePath, s.modelUnavailable, s.failure, s.isDue])).toEqual([
+      ['global', { kind: 'no-default-model' }, null, true],
+      [OTHER_A, { kind: 'no-default-model' }, null, true],
+      [OTHER_B, null, null, false],
+    ])
     e.route.current = DEFAULT_ROUTE
     await e.advance(AUTO_CHECKUP_INTERVAL_MS)
-    expect(e.llm.requests).toHaveLength(1)
+    expect(e.llm.requests.map(scopeOfRequest)).toEqual(['global', OTHER_A])
+    expect((await e.readView()).scopes.map(s => s.modelUnavailable)).toEqual([null, null, null])
   })
 
   it('插件卸载时取消正在跑的体检：不写缓存和完成记录，下次打开这个范围仍是到期', async () => {
@@ -446,5 +466,154 @@ describe('自动体检调度：按范围认领', () => {
     const status = await collectCheckupView({ store: e.store, checkups: e.checkups, autoCheckups: e.autoCheckups, cache: e.cache, now: () => e.clock.now })
     expect(status.scopes[0]!.lastCheckupAt).toBeGreaterThanOrEqual(lastAfterAuto)
     expect((await e.cache.get('global'))?.scannedAt ?? (await e.cache.list())[0]?.[1].scannedAt).toBeGreaterThanOrEqual(autoStartedAt)
+  })
+})
+
+describe('自动体检调度：失败与重试', () => {
+  /** 一次体检尝试 = 一次调用加内容检查自带的一次重试（两次都不成才算没做完）。 */
+  const ATTEMPT = 2
+  const failureOf = async (e: ReturnType<typeof env>) => (await e.readView()).scopes[0]!.failure
+
+  it('模型调用出错：不写完成记录、不重新计时，体检视图写原因和重试时间；1 小时后再试，连续 3 次后等到下一个周期', async () => {
+    let reply: HostReply = { code: 'RATE_LIMIT', message: 'too many requests' }
+    const e = env({ llm: fakeHostLlm({ reply: () => reply }) })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 7)
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    const firstAt = e.clock.now
+    expect(e.llm.requests).toHaveLength(ATTEMPT)
+    expect(await e.completed()).toEqual({})
+    const cause = { kind: 'model-error', hostCode: 'RATE_LIMIT', message: 'too many requests' }
+    expect((await e.readView()).scopes[0]).toMatchObject({
+      lastCheckupAt: null, isDue: true, modelUnavailable: null,
+      failure: { count: 1, retryAt: firstAt + HOUR, isRetryLimitReached: false, cause },
+    })
+
+    // 1 小时之内的检查不再试
+    await e.advance(5 * AUTO_CHECKUP_INTERVAL_MS)
+    expect(e.llm.requests).toHaveLength(ATTEMPT)
+    // 到了 1 小时：再试，又失败
+    await e.advance(AUTO_CHECKUP_INTERVAL_MS)
+    expect(e.llm.requests).toHaveLength(2 * ATTEMPT)
+    expect(await failureOf(e)).toEqual({ count: 2, retryAt: firstAt + 2 * HOUR, isRetryLimitReached: false, cause })
+    // 第 3 次也失败：等到下一个周期（7 天后）
+    await e.advance(6 * AUTO_CHECKUP_INTERVAL_MS)
+    expect(e.llm.requests).toHaveLength(3 * ATTEMPT)
+    const thirdAt = firstAt + 2 * HOUR
+    expect(await failureOf(e)).toEqual({ count: 3, retryAt: thirdAt + 7 * DAY, isRetryLimitReached: true, cause })
+    await e.advance(7 * DAY - 2 * AUTO_CHECKUP_INTERVAL_MS)
+    expect(e.llm.requests).toHaveLength(3 * ATTEMPT)
+    // 到了下一个周期：再试，这次成了，失败记录清掉
+    reply = 'ok'
+    await e.advance(2 * AUTO_CHECKUP_INTERVAL_MS)
+    expect(e.llm.requests).toHaveLength(3 * ATTEMPT + 1)
+    expect(Object.keys(await e.completed())).toEqual(['global'])
+    expect((await e.readView()).scopes[0]).toMatchObject({ failure: null, modelUnavailable: null, isDue: false })
+  })
+
+  it('模型输出解析不了：按失败算，原因是解析不了', async () => {
+    const e = env({ llm: fakeHostLlm({ reply: () => 'garbage' }) })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    expect(await failureOf(e)).toEqual({ count: 1, retryAt: e.clock.now + HOUR, isRetryLimitReached: false, cause: { kind: 'unparseable' } })
+    expect(await e.completed()).toEqual({})
+  })
+
+  it('一个范围失败不挡别的范围：下一个到期的范围照常查', async () => {
+    const e = env({ llm: fakeHostLlm({ reply: () => 'garbage' }) })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.store.create(record({ id: 'mem_a', content: '项目 a 的记忆', scope: 'workspace', workspacePath: OTHER_A }))
+    await e.set({ kind: 'all' }, 1)
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    expect(e.llm.requests.map(scopeOfRequest)).toEqual(['global', 'global', OTHER_A, OTHER_A])
+    expect((await e.readView()).scopes.map(s => s.failure?.count)).toEqual([1, 1])
+  })
+
+  it('用户手动体检成功后：失败计数清零，重新计时', async () => {
+    const e = env({ llm: fakeHostLlm({ reply: () => ({ code: 'TIMEOUT', message: 'request timed out' }) }) })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    await e.advance(6 * AUTO_CHECKUP_INTERVAL_MS)
+    expect((await failureOf(e))?.count).toBe(2)
+    // 界面手动体检（借用会话的模型）做完：写完成记录
+    const manualAt = e.clock.now
+    await executeScan({ layers: 'full' }, {
+      store: e.store, registry, decisions: e.decisions, cache: e.cache, checkups: e.checkups,
+      getBaseline: () => null, getLlm: () => ({ complete: async () => '{"findings":[]}' }), resolveContext: async () => ({ workspacePath: undefined }), now: () => e.clock.now,
+    }, fakeExec(), { by: 'manual', isGlobalOnly: true })
+    await e.advance(AUTO_CHECKUP_INTERVAL_MS)
+    expect((await e.readView()).scopes[0]).toMatchObject({ failure: null, lastCheckupAt: manualAt, nextCheckupAt: manualAt + DAY, isDue: false })
+    expect((await e.checkups.list())[0]).not.toHaveProperty('failure')
+  })
+})
+
+describe('自动体检调度：模型用不了', () => {
+  it('宿主回未登录：这次不跑、不算失败、不重新计时，到期的范围都记「模型用不了」和原因；下一次检查再试，登录后开始跑', async () => {
+    let reply: HostReply = { code: 'ACCOUNT_SIGN_IN_REQUIRED', message: 'Sign in to DeepSeek to use the account provider.' }
+    const e = env({ llm: fakeHostLlm({ reply: () => reply }) })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.store.create(record({ id: 'mem_a', content: '项目 a 的记忆', scope: 'workspace', workspacePath: OTHER_A }))
+    await e.set({ kind: 'all' }, 1)
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    // 只试了第一个范围：模型用不了，别的范围不再白试
+    expect(e.llm.requests.map(scopeOfRequest).every(s => s === 'global')).toBe(true)
+    const tried = e.llm.requests.length
+    expect(await e.completed()).toEqual({})
+    const cause = { kind: 'model-error', hostCode: 'ACCOUNT_SIGN_IN_REQUIRED', message: 'Sign in to DeepSeek to use the account provider.' }
+    const view = await e.readView()
+    expect(view.scopes.map(s => [s.modelUnavailable, s.failure, s.isDue, s.lastCheckupAt])).toEqual([
+      [cause, null, true, null],
+      [cause, null, true, null],
+    ])
+    // 是体检记录里的事实：另一个进程读到的一样
+    const other = new SidecarStore({ root, schemas })
+    const seen = await collectCheckupView({ store: e.store, checkups: new CheckupRecordStore(other.checkups), autoCheckups: new AutoCheckupSettingStore(other.autoCheckups), cache: other.scanCache, now: () => e.clock.now })
+    expect(seen.scopes.map(s => s.modelUnavailable)).toEqual([cause, cause])
+
+    // 下一次检查（10 分钟后，不等 1 小时）再试
+    await e.advance(AUTO_CHECKUP_INTERVAL_MS)
+    expect(e.llm.requests.length).toBeGreaterThan(tried)
+    expect((await e.readView()).scopes.map(s => s.failure)).toEqual([null, null])
+    // 登录了：下一次检查开始跑，「模型用不了」清掉
+    reply = 'ok'
+    await e.advance(AUTO_CHECKUP_INTERVAL_MS)
+    expect(Object.keys(await e.completed()).sort()).toEqual(['global', OTHER_A].sort())
+    expect((await e.readView()).scopes.map(s => s.modelUnavailable)).toEqual([null, null])
+  })
+
+  it('缺凭据（API key 路由）同样记「模型用不了」', async () => {
+    const e = env({ llm: fakeHostLlm({ reply: () => ({ code: 'MISSING_CREDENTIAL', message: 'llm-deepseek: no API key' }) }) })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    expect((await e.readView()).scopes[0]).toMatchObject({
+      failure: null, modelUnavailable: { kind: 'model-error', hostCode: 'MISSING_CREDENTIAL', message: 'llm-deepseek: no API key' },
+    })
+  })
+
+  it('已经失败过一次的范围遇到模型用不了：不加失败次数，原来的失败记录不动；之后再失败接着数', async () => {
+    let reply: HostReply = { code: 'RATE_LIMIT', message: 'too many requests' }
+    const e = env({ llm: fakeHostLlm({ reply: () => reply }) })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    const failure = (await e.readView()).scopes[0]!.failure
+    expect(failure?.count).toBe(1)
+    reply = { code: 'ACCOUNT_TOKEN_INVALID', message: 'token rejected' }
+    await e.advance(6 * AUTO_CHECKUP_INTERVAL_MS)
+    expect((await e.readView()).scopes[0]).toMatchObject({ failure, modelUnavailable: { kind: 'model-error', hostCode: 'ACCOUNT_TOKEN_INVALID' } })
+    // 模型回来了但调用出错：按失败算，接着上次的次数；「模型用不了」清掉（最近一次尝试不是它了）
+    reply = { code: 'RATE_LIMIT', message: 'too many requests' }
+    await e.advance(AUTO_CHECKUP_INTERVAL_MS)
+    expect((await e.readView()).scopes[0]).toMatchObject({ failure: { count: 2 }, modelUnavailable: null })
   })
 })

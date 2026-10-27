@@ -12,7 +12,8 @@ import { runRuleScan } from '../governance/rule-scan.ts'
 import { byConfidenceThenConfirmed } from '../snapshot.ts'
 import { layerCacheKey, scoreLayer, type LayerPreread, type LayerRef } from '../governance/layer-health.ts'
 import type { IgnoredAdvice } from '../governance/advice-ignores.ts'
-import { autoCheckupDue } from '../governance/auto-checkups.ts'
+import { autoCheckupDue, isRetryLimitReached } from '../governance/auto-checkups.ts'
+import type { CheckupRecord } from '../storage/schema.ts'
 import {
   ADVICE_TYPES, GUI_VIEW_VERSION, PENDING_ITEM_KINDS, PENDING_LEVEL_OF_KIND, PENDING_LEVELS, isAwaitingDecision, layerOfMemory, resolveAutoCheckup,
   type AdviceType, type AutoCheckupFrequency, type CheckupView, type DeletedView, type MemoryPromotion, type GlobalViewName, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCard,
@@ -285,8 +286,9 @@ export function buildHealthView(input: ViewInput): HealthView {
 }
 
 /**
- * 体检视图：每个范围的有效频率（跟随还是单独设置）、上次体检、下次自动体检、是否到期、是否在体检，外加体检开关。
- * layers 是全局加体检清单（与健康视图同一批层、同一顺序）；lastCheckupAt 给出每个范围的上次体检，isInProgress 给出它此刻有没有体检认领着。
+ * 体检视图：每个范围的有效频率（跟随还是单独设置）、上次体检、下次自动体检、是否到期、是否在体检、自动体检的连续失败和「模型用不了」，
+ * 外加体检开关。layers 是全局加体检清单（与健康视图同一批层、同一顺序）；lastCheckupAt 给出每个范围的上次体检，
+ * isInProgress 给出它此刻有没有体检认领着，record 给出它在体检记录表里的那条（没有为 undefined）。
  */
 export function buildCheckupView(input: {
   now: number
@@ -295,6 +297,7 @@ export function buildCheckupView(input: {
   layers: readonly LayerRef[]
   lastCheckupAt: (layer: LayerRef) => number | null
   isInProgress: (layer: LayerRef) => boolean
+  record: (layer: LayerRef) => CheckupRecord | undefined
 }): CheckupView {
   return {
     version: GUI_VIEW_VERSION,
@@ -304,7 +307,12 @@ export function buildCheckupView(input: {
       const scope = toGuiLayer(layer)
       const { frequency, isOwn } = resolveAutoCheckup(input.settings, scope)
       const lastCheckupAt = input.lastCheckupAt(layer)
-      return { scope, frequency, isOwn, lastCheckupAt, ...autoCheckupDue(frequency, lastCheckupAt, input.now), isInProgress: input.isInProgress(layer) }
+      const { failure, modelUnavailable } = input.record(layer) ?? {}
+      return {
+        scope, frequency, isOwn, lastCheckupAt, ...autoCheckupDue(frequency, lastCheckupAt, input.now), isInProgress: input.isInProgress(layer),
+        failure: failure === undefined ? null : { ...failure, isRetryLimitReached: isRetryLimitReached(failure.count) },
+        modelUnavailable: modelUnavailable ?? null,
+      }
     }),
   }
 }

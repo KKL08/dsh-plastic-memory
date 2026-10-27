@@ -8,6 +8,8 @@ import type { CasKvTable } from '../kv-table.ts'
 import type { Finding, ScanCacheEntry } from '../governance/schema.ts'
 import { runRuleScan, buildMalformedFindings } from '../governance/rule-scan.ts'
 import { runSemanticScan, type SemanticLlm } from '../governance/semantic-scan.ts'
+import { isModelUnavailableCode } from '../governance/host-llm.ts'
+import type { CheckupCause } from '../gui/contract.ts'
 import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, checkupRowBase, ignoredNote, findingFingerprints, GLOBAL_CACHE_KEY, type LayerRef, TIER_LABEL } from '../governance/layer-health.ts'
 import { applyIgnores, type AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
@@ -196,8 +198,11 @@ export function renderScanResult(result: ScanToolResult): string {
   return lines.join('\n')
 }
 
-/** 扫描过程的说明条目：code 稳定供程序判断，text 给人/模型看。 */
-export type ScanNote = CodedNote<ScanNoteCode>
+/**
+ * 扫描过程的说明条目：code 稳定供程序判断，text 给人/模型看。
+ * semantic-failed、model-unavailable 带 cause：没做成的原因（宿主错误码一路带到这里），自动体检据它记失败或「模型用不了」。
+ */
+export type ScanNote = CodedNote<ScanNoteCode> & { cause?: CheckupCause }
 
 interface ScanPass {
   findings: Finding[]
@@ -256,7 +261,11 @@ async function scanPass(
         notes.push({ code: 'semantic-batched', text: `${scopeLabel} 记忆较多，语义层分 ${semantic.batches} 批检查，每条都查过，不同批之间的冲突和重复可能查不出` })
       }
       if (semantic.failed) {
-        notes.push({ code: 'semantic-failed', text: '语义分析失败（LLM 调用出错或输出无法解析，已重试一次），本次未更新语义缓存' })
+        const { failure } = semantic
+        // 宿主报未登录、缺凭据：模型用不了，要用户去登录或补凭据，不算内容检查失败
+        notes.push(failure.kind === 'model-error' && isModelUnavailableCode(failure.hostCode)
+          ? { code: 'model-unavailable', text: `模型现在用不了（${failure.message}），本次未更新语义缓存`, cause: failure }
+          : { code: 'semantic-failed', text: '语义分析失败（LLM 调用出错或输出无法解析，已重试一次），本次未更新语义缓存', cause: failure })
       } else {
         findings.push(...semantic.findings)
         // 写缓存前设检查点：取消后不留下半截的语义结果。

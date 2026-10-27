@@ -4,7 +4,7 @@ import type { SemanticLlm } from '../governance/semantic-scan.ts'
 import type { LayerRef } from '../governance/layer-health.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import { executeScan, type ScanToolDeps, type ScanToolResult } from '../tools/scan.ts'
-import type { CheckupView } from './contract.ts'
+import type { CheckupCause, CheckupView } from './contract.ts'
 
 /** 插件启动后等这么久第一次检查（不跟首轮对话抢资源）。 */
 export const AUTO_CHECKUP_FIRST_CHECK_MS = 3 * 60_000
@@ -78,8 +78,8 @@ export async function holdCheckups(checkups: Pick<CheckupRecordStore, 'claim'>, 
 export interface AutoCheckupSchedulerDeps {
   /** 体检执行器里和会话无关的依赖；模型、基线、所属项目由调度器按无会话给。 */
   scan: Omit<ScanToolDeps, 'getLlm' | 'getBaseline' | 'resolveContext' | 'now' | 'checkups'>
-  /** 体检记录表：开跑前按范围认领，体检做完由执行器写完成记录。 */
-  checkups: Pick<CheckupRecordStore, 'list' | 'complete' | 'claim'>
+  /** 体检记录表：开跑前按范围认领，体检做完由执行器写完成记录；没做完记失败，模型用不了记原因。 */
+  checkups: Pick<CheckupRecordStore, 'list' | 'complete' | 'claim' | 'recordFailure' | 'recordModelUnavailable'>
   /** 每个范围此刻的情况（体检视图的内容：有效频率、是否到期，全局在前、项目按路径排序）。每次检查现读，别的进程改的设置也能读到。 */
   status: () => Promise<CheckupView>
   /** 宿主当前的默认模型；拿不到为 null（这次不跑）。每次开跑现读，不缓存。 */
@@ -87,7 +87,7 @@ export interface AutoCheckupSchedulerDeps {
   /** 体检开关（用时读配置）：关着时不跑。 */
   isGovernanceEnabled: () => boolean
   timer: AutoCheckupTimer
-  /** 每次检查读完状态后调用：重写体检视图（到期了、别的进程写了完成记录）。 */
+  /** 每次检查读完状态后、记下「模型用不了」后调用：重写体检视图（到期了、别的进程写了完成记录、模型用不了）。 */
   onChecked?: () => Promise<void>
   /** 认领到、放掉一个范围之后调用：重写体检视图（进行中）。 */
   onClaimChanged?: () => Promise<void>
@@ -104,6 +104,11 @@ export interface AutoCheckupSchedulerDeps {
  * 跨进程：开跑前认领这个范围（与界面手动体检共用，见 holdCheckups），别的进程正在查就跳过；认领到之后重读完成记录，
  * 别的进程刚查过、已经不到期的放掉不跑。持有期间心跳，认领被别的进程接手就取消这次体检、不再提交。
  * 卸载时取消正在跑的体检：执行器在写入检查点前停下，不写完成记录，下次照常到期。
+ *
+ * 没做成的两类，都记进体检记录（各进程共有的事实），不写完成记录、不重新计时：
+ * - 模型用不了（拿不到默认模型，或宿主报未登录、缺凭据）：不算失败，这次检查里到期的范围都记上原因、不再往下试，下一次检查再试；
+ * - 失败（模型调用出错、输出解析不了、体检出错）：连续失败次数加一，1 小时后再试，连续 3 次后等到下一个周期；做完一次体检就清零。
+ * 取消（插件卸载、认领被别的进程接手）两样都不记。
  */
 export class AutoCheckupScheduler {
   private readonly deps: AutoCheckupSchedulerDeps
@@ -174,21 +179,39 @@ export class AutoCheckupScheduler {
       return
     }
     await this.deps.onChecked?.()
-    for (const { scope, isDue } of status.scopes) {
-      if (!isDue) continue
+    const now = this.deps.now()
+    // 到期、且没在等失败后的重试时间的范围
+    const due = status.scopes.filter(s => s.isDue && (s.failure === null || s.failure.retryAt <= now))
+    for (const [i, { scope, frequency }] of due.entries()) {
       if (this.isDisposed || !this.deps.isGovernanceEnabled()) return
       // 每次开跑现读默认模型：用户在两次之间换了模型就用新的
       const llm = this.deps.getDefaultLlm()
-      if (llm === null) {
-        this.log.warn('[plastic-memory] 拿不到宿主的默认模型，自动体检这次不跑，下次检查再试')
-        return
-      }
-      await this.run(scope.kind === 'global' ? { kind: 'global' } : { kind: 'workspace', path: scope.workspacePath }, llm)
+      const outcome = llm === null
+        ? { modelUnavailable: { kind: 'no-default-model' as const } }
+        // 到期的范围频率一定是天数（仅手动从不到期）
+        : await this.run(toLayerRef(scope), llm, frequency === 'manual' ? 0 : frequency)
+      if (outcome === undefined) continue
+      // 模型用不了：别的到期范围不再白试，都记上同一个原因（别的进程正在查的不碰），下一次检查再试
+      this.log.warn('[plastic-memory] 默认模型现在用不了，自动体检这次不跑，下次检查再试', outcome.modelUnavailable)
+      await this.recordModelUnavailable(due.slice(i).filter(s => !s.isInProgress).map(s => toLayerRef(s.scope)), outcome.modelUnavailable)
+      return
     }
   }
 
-  /** 体检一个范围，和手动体检那个范围同口径：项目读全局加本项目、写本项目的缓存；全局只查全局。后台没有会话投影，不查基线。 */
-  private async run(layer: LayerRef, llm: SemanticLlm): Promise<void> {
+  private async recordModelUnavailable(layers: readonly LayerRef[], cause: CheckupCause): Promise<void> {
+    try {
+      for (const layer of layers) await this.deps.checkups.recordModelUnavailable(layer, cause)
+    } catch (err) {
+      this.log.warn('[plastic-memory] 记不下「模型用不了」，下次检查再试', err)
+    }
+    await this.deps.onChecked?.()
+  }
+
+  /**
+   * 体检一个范围，和手动体检那个范围同口径：项目读全局加本项目、写本项目的缓存；全局只查全局。后台没有会话投影，不查基线。
+   * 没做完的记失败（frequencyDays 用来算到了上限后的下一个周期）；碰上模型用不了不记，返回原因交给调用方。
+   */
+  private async run(layer: LayerRef, llm: SemanticLlm, frequencyDays: number): Promise<{ modelUnavailable: CheckupCause } | undefined> {
     const controller = new AbortController()
     this.controller = controller
     let held: Awaited<ReturnType<typeof holdCheckups>> | undefined
@@ -200,7 +223,7 @@ export class AutoCheckupScheduler {
         log: this.log,
       })
       // 别的进程正在查这个范围：跳过；认领到之后别的进程刚查完、已经不到期的，也不跑
-      if ('busy' in held || !(await this.isStillDue(layer))) return
+      if ('busy' in held || !(await this.isStillDue(layer))) return undefined
       const result = await executeScan(
         layer.kind === 'global' ? { layers: 'full' } : { scope: layer.path, layers: 'full' },
         {
@@ -214,21 +237,46 @@ export class AutoCheckupScheduler {
         { signal: controller.signal } as ToolRunContext,
         { by: 'auto', isGlobalOnly: layer.kind === 'global' },
       )
-      if (result.kind === 'error') this.log.warn(`[plastic-memory] 自动体检没做成：${result.message}`)
-      if (!controller.signal.aborted) await this.deps.onScanned?.(layer, result)
+      // 取消（插件卸载、认领被别的进程接手）不算失败：什么都不记，下次检查照常到期；接手的进程会自己查
+      if (controller.signal.aborted) return undefined
+      const unavailable = result.kind === 'error' ? undefined : result.notes.find(n => n.code === 'model-unavailable')
+      if (unavailable !== undefined) return { modelUnavailable: unavailable.cause ?? { kind: 'model-error' } }
+      const failed = result.kind === 'error'
+        ? { kind: 'error' as const, message: result.message }
+        : result.notes.find(n => n.code === 'semantic-failed')?.cause
+      // 释放认领之前记：记录是这个范围的，别的进程这时还接不了手
+      if (failed !== undefined) await this.recordFailure(layer, failed, frequencyDays)
+      await this.deps.onScanned?.(layer, result)
+      return undefined
     } catch (err) {
-      // 取消（插件卸载、认领被接手）不算失败：什么都不记，下次检查照常到期
-      if (!controller.signal.aborted) this.log.warn('[plastic-memory] 自动体检出错，下次检查再试', err)
+      if (controller.signal.aborted) return undefined
+      await this.recordFailure(layer, { kind: 'error', message: err instanceof Error ? err.message : String(err) }, frequencyDays)
+      return undefined
     } finally {
       if (held !== undefined && !('busy' in held)) await held.release()
       this.controller = undefined
     }
   }
 
-  /** 认领到之后重读完成记录：这个范围此刻还到期。 */
+  private async recordFailure(layer: LayerRef, cause: CheckupCause, frequencyDays: number): Promise<void> {
+    this.log.warn('[plastic-memory] 自动体检没做完，稍后再试', cause)
+    try {
+      await this.deps.checkups.recordFailure(layer, cause, this.deps.now(), frequencyDays)
+    } catch (err) {
+      // 记不下也不挡：没有失败记录，下一次检查照常到期再试
+      this.log.warn('[plastic-memory] 记不下自动体检的失败，下次检查再试', err)
+    }
+  }
+
+  /** 认领到之后重读体检记录：这个范围此刻还到期（别的进程刚查完的不到期；别的进程刚记了失败、还没到重试时间的也不跑）。 */
   private async isStillDue(layer: LayerRef): Promise<boolean> {
     const { scopes } = await this.deps.status()
-    return scopes.some(({ scope, isDue }) => isDue
+    const now = this.deps.now()
+    return scopes.some(({ scope, isDue, failure }) => isDue && (failure === null || failure.retryAt <= now)
       && (scope.kind === 'global' ? layer.kind === 'global' : layer.kind === 'workspace' && scope.workspacePath === layer.path))
   }
+}
+
+function toLayerRef(scope: CheckupView['scopes'][number]['scope']): LayerRef {
+  return scope.kind === 'global' ? { kind: 'global' } : { kind: 'workspace', path: scope.workspacePath }
 }

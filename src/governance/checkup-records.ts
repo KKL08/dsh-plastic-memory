@@ -2,7 +2,8 @@ import { isAbsolute } from 'node:path'
 import type { CasKvTable, RefreshableClaim, RefreshableClaimKvTable } from '../kv-table.ts'
 import type { CheckupCompletion, CheckupRecord } from '../storage/schema.ts'
 import type { LayerRef } from './layer-health.ts'
-import { SCOPE_KEYS } from '../gui/contract.ts'
+import { SCOPE_KEYS, type CheckupCause } from '../gui/contract.ts'
+import { autoCheckupRetryAt } from './auto-checkups.ts'
 
 /**
  * 体检记录表：每个范围一条，记这个范围最近一次做完的体检（完成记录），即「上次体检」。
@@ -52,14 +53,38 @@ export class CheckupRecordStore {
     return (await this.table.list()).map(([, r]) => r)
   }
 
-  /** 提交点：给这些范围各写一条完成记录，记录里的其他内容不动；已有记录开始得更晚的范围不写。 */
+  /**
+   * 提交点：给这些范围各写一条完成记录；已有记录开始得更晚的范围不写。这个范围查完了，自动体检的连续失败和「模型用不了」
+   * 一并清掉（手动体检成功后失败计数清零，下次按新的完成记录计时），记录里的其他内容不动。
+   */
   async complete(layers: readonly LayerRef[], completion: CheckupCompletion): Promise<void> {
     for (const layer of layers) {
       const key = checkupKey(layer)
-      await this.table.update(key, cur => cur?.completed !== undefined && cur.completed.startedAt > completion.startedAt
-        ? undefined
-        : { ...cur, id: key, completed: completion })
+      await this.table.update(key, (cur) => {
+        if (cur?.completed !== undefined && cur.completed.startedAt > completion.startedAt) return undefined
+        const { failure: _failure, modelUnavailable: _modelUnavailable, ...rest } = cur ?? { id: key }
+        return { ...rest, id: key, completed: completion }
+      })
     }
+  }
+
+  /**
+   * 自动体检这次没做完（模型调用出错、输出解析不了、体检出错）：连续失败次数加一，按有效频率算下次重试时间（autoCheckupRetryAt）；
+   * 最近一次尝试不再是「模型用不了」。不写完成记录，不重新计时。持有这个范围的认领时调用。
+   */
+  async recordFailure(layer: LayerRef, cause: CheckupCause, failedAt: number, frequencyDays: number): Promise<void> {
+    const key = checkupKey(layer)
+    await this.table.update(key, (cur) => {
+      const { modelUnavailable: _modelUnavailable, ...rest } = cur ?? { id: key }
+      const count = (cur?.failure?.count ?? 0) + 1
+      return { ...rest, id: key, failure: { count, retryAt: autoCheckupRetryAt(count, failedAt, frequencyDays), cause } }
+    })
+  }
+
+  /** 自动体检这次碰上模型用不了（没有默认模型、未登录、缺凭据）：记下原因。不算失败：失败次数和重试时间不动，下一次调度检查再试。 */
+  async recordModelUnavailable(layer: LayerRef, cause: CheckupCause): Promise<void> {
+    const key = checkupKey(layer)
+    await this.table.update(key, cur => ({ ...cur, id: key, modelUnavailable: cause }))
   }
 
   /** 清掉目录已不在的项目的记录（视图生成时调用）；全局等不是项目的键不动。 */

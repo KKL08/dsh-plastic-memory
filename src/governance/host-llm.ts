@@ -13,6 +13,19 @@ export interface HostModelRoute {
 }
 
 /**
+ * 宿主报「模型用不了」的错误码（宿主 0.2.1-rc.2 的模型适配层）：账号路由没登录（ACCOUNT_SIGN_IN_REQUIRED）、
+ * 账号的 token 被服务端拒掉（ACCOUNT_TOKEN_INVALID，宿主随即删掉它，之后就是没登录）；API key 路由没有 key（MISSING_CREDENTIAL）、
+ * key 格式不对（INVALID_CREDENTIAL）、key 被服务端拒掉（AUTH，401/403，填错或已吊销）。这几类要用户去登录或补凭据，
+ * 重试没用，体检记「模型用不了」、不算失败。
+ * 其余错误码（限流、超时、额度、上下文超限、网络……）照旧算失败。
+ */
+export const MODEL_UNAVAILABLE_HOST_CODES = ['ACCOUNT_SIGN_IN_REQUIRED', 'ACCOUNT_TOKEN_INVALID', 'MISSING_CREDENTIAL', 'INVALID_CREDENTIAL', 'AUTH'] as const
+
+export function isModelUnavailableCode(hostCode: string | undefined): boolean {
+  return hostCode !== undefined && (MODEL_UNAVAILABLE_HOST_CODES as readonly string[]).includes(hostCode)
+}
+
+/**
  * 宿主 llm 服务 → 语义层用的模型调用。provider、model 由调用方解析好（借用会话的模型，或无会话时宿主的默认模型），
  * 缺一个、或宿主没有 llm 服务时为 null。
  *
@@ -59,6 +72,7 @@ export function hostSemanticLlm(llm: HostLlmService | undefined, route: HostMode
             // （与 summarizer 不同，截断的 JSON 解析不过会自然走重试）。
             const reason = chunk.reason
             if (reason.kind === 'error') {
+              // 宿主错误码挂在抛出的错误的 code 上，内容检查据它分出「模型用不了」
               throw Object.assign(new Error(reason.failure.message), { code: reason.failure.code })
             }
             if (reason.kind === 'aborted') {
