@@ -120,6 +120,34 @@ describe('SnapshotStore.restore：恢复途中别处动了快照', () => {
     expect(r.redacted).toEqual([])
   })
 
+  it('写入时整份快照刚过 14 天被清扫：刚写回的留着，不撤回', async () => {
+    const s = makeStore()
+    const clock = { now: 100 + SNAPSHOT_RETENTION_MS - 1 }
+    const snap = await s.capture({ operation: 'pre-forget', description: 'd', records: [record({ id: 'mem_a' })] }, 100)
+    const discarded: string[] = []
+    const r = await s.restore(snap, undefined, async () => {
+      clock.now += 2
+      await s.sweep(clock.now)   // 别的会话这时清扫过期快照
+    }, new Map(), false, async rec => { discarded.push(rec.id) }, () => clock.now)
+    expect(await s.get(snap.id)).toBeUndefined()
+    expect(discarded).toEqual([])
+    expect(r.restored).toEqual(['mem_a'])
+    expect(r.skipped).toEqual([])
+  })
+
+  it('写入时别的会话彻底删除了快照里唯一的一条（快照空了整份删掉）：仍在保留期内，刚写回的撤回', async () => {
+    const s = makeStore()
+    const snap = await s.capture({ operation: 'pre-forget', description: 'd', records: [record({ id: 'mem_a' })] }, 100)
+    const discarded: string[] = []
+    const r = await s.restore(snap, undefined, async () => {
+      await s.purge(x => x.id === 'mem_a')
+    }, new Map(), false, async rec => { discarded.push(rec.id) }, () => 200)
+    expect(await s.get(snap.id)).toBeUndefined()
+    expect(discarded).toEqual(['mem_a'])
+    expect(r.restored).toEqual([])
+    expect(r.skipped).toEqual(['mem_a'])
+  })
+
   it('后一条写入抛错：已写入的照样收尾复核，写后才脱敏的撤回，再把错误抛出去', async () => {
     const s = makeStore()
     const snap = await s.capture({ operation: 'manual', description: 'd', records: [record({ id: 'mem_a' }), record({ id: 'mem_b' })] }, 100)

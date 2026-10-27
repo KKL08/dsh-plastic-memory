@@ -190,7 +190,8 @@ async function dispatch(
 
   /** 按快照恢复这些记忆；返回恢复了的 id，或错误结果（快照过期、跨项目被拒、快照后被改过）。 */
   const restoreFrom = async (snapshotId: string, memoryIds: string[], allowCrossWorkspace: boolean | undefined, options: SnapshotToolOptions = {}): Promise<string[] | Err> => {
-    const r = await executeSnapshotTool({ action: 'restore', snapshotId, memoryIds, allowCrossWorkspace }, gov, executorDeps, options)
+    // 时钟现读：恢复收尾要判快照是不是途中刚过期被清扫，用命令开头的时刻判不出来
+    const r = await executeSnapshotTool({ action: 'restore', snapshotId, memoryIds, allowCrossWorkspace }, gov, { ...executorDeps, now: () => deps.now?.() ?? Date.now() }, options)
     if (r.kind === 'error') return fail(cmd, 'not-found', r.message)
     if (r.kind !== 'restored') return fail(cmd, 'failed', r.message)
     if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)

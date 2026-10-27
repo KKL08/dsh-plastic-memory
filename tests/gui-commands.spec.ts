@@ -462,6 +462,24 @@ describe('restore', () => {
     expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
   })
 
+  it('恢复途中那份快照刚过 14 天被别处清扫：刚恢复的记忆留着，不当成被彻底删除', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_f', name: '丁', content: '临期的记忆' }))
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_f' }))
+    e.clock.now = NOW + RETENTION_MS - 1
+    // 写回那一刻时间走过保留窗口，另一个会话顺手清扫了过期快照
+    const put = e.store.put.bind(e.store)
+    e.store.put = async (...args) => {
+      const written = await put(...args)
+      e.clock.now += 2
+      await e.snapshots.sweep(e.clock.now)
+      return written
+    }
+    ok(await e.run({ cmd: 'restore', memoryId: 'mem_f' }))
+    expect(await e.snapshots.list()).toEqual([])
+    expect(await e.store.get('mem_f')).toMatchObject({ status: 'active', content: '临期的记忆' })
+  })
+
   it('还活着的记忆 restore → not-found', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_live' }))

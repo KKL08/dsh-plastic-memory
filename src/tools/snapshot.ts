@@ -140,6 +140,7 @@ export async function executeSnapshotTool(
     options.overwriteIf ?? args.overwriteChanged ?? false,
     // 撤回只删刚写回的那一份（快照里这条记录自己的那一层），别层同 id 的副本不是这次恢复写的
     r => deps.store.hardDelete(r, { isExactLayer: true }),
+    () => deps.now?.() ?? Date.now(),
   )
   const changedCount = skipped.length - redacted.length
   const skippedNote = changedCount > 0
