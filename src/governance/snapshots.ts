@@ -167,7 +167,8 @@ export class SnapshotStore {
    * put 返回 false 即按「快照后被修改」跳过。返回 void 的 put 视为已写入。
    * 密钥硬删先脱敏快照、再删文件（tools/forget.ts），可能发生在别的会话、别的进程，也可能在调用方读出快照之后：
    * 写入前按盘上的这份快照现读一次，已脱敏（或快照已清扫）的不写；全部写完再读一次，仍未脱敏说明对方删文件在后，
-   * 会连这份一起删掉，读到已脱敏的就用 discard 删掉刚写的那份，同样计入 redacted。盘上快照只读这两次，条数多也不逐条重读。
+   * 会连这份一起删掉，读到已脱敏的就用 discard 删掉刚写的那份，同样计入 redacted；条目已从快照里清掉的（最近删除里的彻底删除）
+   * 也 discard，计入 skipped。中途某条写入抛错时，已写入的照样复核完再抛。盘上快照只读这两次，条数多也不逐条重读。
    */
   async restore(
     snapshot: MemorySnapshot,
@@ -183,18 +184,24 @@ export class SnapshotStore {
     const outcomes: Array<'restored' | 'skipped' | 'redacted'> = []
     const onDisk = async () => new Map((await this.table.get(snapshot.id))?.data.map(r => [r.id, r]))
     const before = await onDisk()
-    for (const rec of targets) {
-      const latest = rec.redacted ? rec : before.get(rec.id)
-      if (latest?.redacted) outcomes.push('redacted')
-      else if (latest === undefined || blocks(current.get(rec.id), rec)) outcomes.push('skipped')
-      else outcomes.push((await put(rec, overwriteChanged === true ? undefined : cur => blocks(cur, rec))) === false ? 'skipped' : 'restored')
-    }
-    if (outcomes.includes('restored')) {
-      const after = await onDisk()
-      for (const [i, rec] of targets.entries()) {
-        if (outcomes[i] !== 'restored' || after.get(rec.id)?.redacted !== true) continue
-        await discard(rec)
-        outcomes[i] = 'redacted'
+    try {
+      for (const rec of targets) {
+        const latest = rec.redacted ? rec : before.get(rec.id)
+        if (latest?.redacted) outcomes.push('redacted')
+        else if (latest === undefined || blocks(current.get(rec.id), rec)) outcomes.push('skipped')
+        else outcomes.push((await put(rec, overwriteChanged === true ? undefined : cur => blocks(cur, rec))) === false ? 'skipped' : 'restored')
+      }
+    } finally {
+      // 后面某条写入抛错也要跑：前面已写回的可能正赶上别处的密钥硬删
+      if (outcomes.includes('restored')) {
+        const after = await onDisk()
+        for (const [i, rec] of targets.entries()) {
+          // 开头还在、收尾不在了：恢复途中被彻底删除（快照条目先清、文件后删），刚写回的同样撤回
+          const settled = after.get(rec.id)
+          if (outcomes[i] !== 'restored' || (settled !== undefined && settled.redacted !== true)) continue
+          await discard(rec)
+          outcomes[i] = settled === undefined ? 'skipped' : 'redacted'
+        }
       }
     }
     const idsWhere = (keep: (outcome: (typeof outcomes)[number]) => boolean) => targets.filter((_, i) => keep(outcomes[i]!)).map(r => r.id)

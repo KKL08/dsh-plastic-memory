@@ -105,3 +105,31 @@ describe('SnapshotStore.restore：盘上快照只在写前、写后各读一次'
     expect(r.restored).toEqual(records.map(x => x.id).filter(id => id !== 'mem_03' && id !== 'mem_11'))
   })
 })
+
+describe('SnapshotStore.restore：恢复途中别处动了快照', () => {
+  it('写入 A 时别的会话彻底删除了 B（先从快照里清掉 B、再删文件）：B 写回后收尾撤回，计入 skipped', async () => {
+    const s = makeStore()
+    const snap = await s.capture({ operation: 'manual', description: 'd', records: [record({ id: 'mem_a' }), record({ id: 'mem_b' })] }, 100)
+    const discarded: string[] = []
+    const r = await s.restore(snap, undefined, async rec => {
+      if (rec.id === 'mem_a') await s.purge(x => x.id === 'mem_b')
+    }, new Map(), false, async rec => { discarded.push(rec.id) })
+    expect(discarded).toEqual(['mem_b'])
+    expect(r.restored).toEqual(['mem_a'])
+    expect(r.skipped).toEqual(['mem_b'])
+    expect(r.redacted).toEqual([])
+  })
+
+  it('后一条写入抛错：已写入的照样收尾复核，写后才脱敏的撤回，再把错误抛出去', async () => {
+    const s = makeStore()
+    const snap = await s.capture({ operation: 'manual', description: 'd', records: [record({ id: 'mem_a' }), record({ id: 'mem_b' })] }, 100)
+    const discarded: string[] = []
+    const failure = new Error('ENOSPC')
+    const restoring = s.restore(snap, undefined, async rec => {
+      if (rec.id === 'mem_a') await s.redact(new Set(['mem_a']))   // 写入 A 的同时别的会话把它彻底删除
+      else throw failure
+    }, new Map(), false, async rec => { discarded.push(rec.id) })
+    await expect(restoring).rejects.toBe(failure)
+    expect(discarded).toEqual(['mem_a'])
+  })
+})
