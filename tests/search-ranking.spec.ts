@@ -212,6 +212,19 @@ describe('字面锚点：含标点的查询词整词命中排在同档前面', (
     expect(anchorTerms('`node:sqlite` 《node:sqlite》的用法 【0.2.1-rc.2】')).toEqual(['node:sqlite', '0.2.1-rc.2'])
   })
 
+  it('ASCII 标识符后紧跟的冒号是命名空间前缀，留在锚点里：「node:」把带前缀的引入指南排在泛讲 Node 的记录前面', async () => {
+    const store = await seeded([
+      record({ id: 'mem_runtime', name: 'Node 运行时', lastConfirmedAt: 9, content: 'node 运行时统一用 22；node 升级前先在 CI 跑一遍，node 版本写在 .nvmrc。' }),
+      record({ id: 'mem_import', name: '内置模块引入', lastConfirmedAt: 1, content: '引入内置模块统一带 node: 前缀，例如 node:fs、node:path。' }),
+    ])
+    expect(await ids(store, 'node:')).toEqual(['mem_import', 'mem_runtime'])
+  })
+
+  it('冒号只在紧跟 ASCII 标识符时保留：中文后的冒号、全角冒号照旧剥掉', () => {
+    expect(anchorTerms('node: npm: file: node:,')).toEqual(['node:', 'npm:', 'file:'])
+    expect(anchorTerms('关于发版： 发版步骤: node：')).toEqual([])
+  })
+
   it('部分命中档先比命中的查询词数：常见锚点不把覆盖面大得多的记录挤出前十', async () => {
     const catalogs = Array.from({ length: 11 }, (_, i) => record({
       id: `mem_cat${i}`, name: `模块清单 ${i}`, lastConfirmedAt: 9,
