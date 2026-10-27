@@ -276,8 +276,16 @@ export class PendingDecisionsStore {
     if (level === undefined) return stale.length > 0
     if (current !== undefined) {
       if (current[1].summary === summary) return stale.length > 0
-      await this.table.put(current[0], { ...current[1], summary })
-      return true
+      // 认领后重读、只改说明：读账本之后用户可能刚忽略了它（dismiss-overflow 认领着写 settled），不拿旧值盖回未决。
+      // 正被认领的这次不改，下次冻结再同步
+      const [key] = current
+      const claimed = await this.withClaim(key, async () => {
+        const latest = await this.table.get(key)
+        if (latest === undefined || latest.summary === summary) return false
+        await this.table.put(key, { ...latest, summary })
+        return true
+      })
+      return (claimed.isClaimed && claimed.value) || stale.length > 0
     }
     const dismissedAbove = stale.some(([, e]) => e.settled !== undefined && overflowLevelOf(e).mode === level.mode && overflowLevelOf(e).tier > level.tier)
     const entry: PendingDecision = {

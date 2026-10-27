@@ -65,3 +65,27 @@ describe('PendingDecisionsStore', () => {
     expect(await s.remove(entry.id)).toBe(false)
   })
 })
+
+describe('syncOverflow 与「忽略」交错', () => {
+  it('读完账本之后、写回说明之前用户点了忽略：只改说明，忽略保留', async () => {
+    const table = new InMemoryKvTable<PendingDecision>()
+    const s = new PendingDecisionsStore(table)
+    const level = { mode: 'relax', tier: 1 } as const
+    await s.syncOverflow('/w/app', level, 1, '用量 4100')
+    const [entry] = await s.listOverflow()
+    // 同步读完账本之后，另一个标签页忽略了这条提醒
+    const list = table.list.bind(table)
+    let isRaced = false
+    table.list = async () => {
+      const rows = await list()
+      if (!isRaced) {
+        isRaced = true
+        await new PendingDecisionsStore(table).settle(entry!.id, 'dismiss', 2)
+      }
+      return rows
+    }
+    expect(await s.syncOverflow('/w/app', level, 3, '用量 4200')).toBe(true)
+    const [after] = await s.listOverflow()
+    expect(after).toMatchObject({ id: entry!.id, summary: '用量 4200', settled: { verdict: 'dismiss', at: 2 } })
+  })
+})
