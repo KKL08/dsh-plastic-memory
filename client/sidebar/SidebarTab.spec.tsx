@@ -338,12 +338,29 @@ describe('SidebarTab 这次新写入的：提升候选就地处理', () => {
     await act(async () => { fireEvent.click(row('n1').getByRole('button', { name: '提升为全局' })) })
     await act(async () => { fireEvent.click(row('n3').getByRole('button', { name: '留在本项目' })) })
     expect(gateway.executed.map(e => e.command)).toEqual([
-      { cmd: 'promote-memory', memoryId: 'n1', layer },
+      { cmd: 'promote-memory', memoryId: 'n1', layer, isCandidateRequired: true },
       { cmd: 'keep-local-memory', memoryId: 'n3', layer },
     ])
     expect(row('n1').getByText('已提升为全局')).toBeInTheDocument()
     expect(row('n3').getByText('留在本项目').closest('.pm-chip')).not.toBeNull()
     for (const id of ['n1', 'n3']) expect(row(id).queryByRole('button', { name: '提升为全局' })).toBeNull()
+  })
+
+  it.each([
+    ['提升为全局', '已提升为全局'],
+    ['留在本项目', '留在本项目'],
+  ])('「%s」之后结果文字旁有「撤销」：按这次的 decisionId 发 undo，撤销后回到候选、两个按钮都在', async (button, result) => {
+    const { gateway } = setup(views(cand, plain), command => command.cmd === 'undo'
+      ? { ok: true, cmd: command.cmd, decisionId: command.decisionId, memoryIds: ['n1'] }
+      : { ok: true, cmd: command.cmd, decisionId: 'pd_9', memoryIds: ['n1'] })
+    await act(async () => { fireEvent.click(row('n1').getByRole('button', { name: button })) })
+    expect(row('n1').getByText(result).closest('.pm-mc-meta')).not.toBeNull()
+    await act(async () => { fireEvent.click(row('n1').getByRole('button', { name: '撤销' })) })
+    expect(gateway.executed.map(e => e.command).at(-1)).toEqual({ cmd: 'undo', decisionId: 'pd_9' })
+    expect(row('n1').getByText('可提升为全局')).toBeInTheDocument()
+    expect(row('n1').getByRole('button', { name: '留在本项目' })).toBeInTheDocument()
+    expect(row('n1').getByRole('button', { name: '提升为全局' })).toBeInTheDocument()
+    expect(row('n1').queryByRole('button', { name: '撤销' })).toBeNull()
   })
 
   it('别处（对话卡片、待处理）处理过的按视图换成结果文字：提升了的在全局层，留下的标 kept-local', () => {

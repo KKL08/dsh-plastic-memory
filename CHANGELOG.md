@@ -104,9 +104,10 @@ All notable changes to this project are documented here. The format follows
   every model call; nothing is shown when the host reports no usage.
 - When the model marks a new memory as fitting every project, the card under
   that turn and the sidebar's 「这次新写入的」 offer 「提升为全局」 and
-  「留在本项目」 in place, and show the outcome wherever it was decided. This
-  adds nothing to the pending list and does not light the nav dot; candidates
-  left alone still reach 「等你决定」 at the next checkup.
+  「留在本项目」 in place, with 「撤销」 next to the outcome, and show the
+  outcome wherever it was decided. This adds nothing to the pending list and
+  does not light the nav dot; candidates left alone still reach 「等你决定」 at
+  the next checkup.
 
 ### Changed
 - Memories that exceed `snapshotTokenBudget` are no longer cut from the

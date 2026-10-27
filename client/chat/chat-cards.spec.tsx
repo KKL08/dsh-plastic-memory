@@ -493,11 +493,11 @@ describe('交付卡：提升候选就地处理', () => {
     expect(row('mem_p').queryByRole('button', { name: '提升为全局' })).toBeNull()
   })
 
-  it('「提升为全局」按记忆 id 发 promote-memory（带层），成功后换成结果文字「已提升为全局」，不再有按钮', async () => {
+  it('「提升为全局」按记忆 id 发 promote-memory（带层、只认仍是候选的），成功后换成结果文字「已提升为全局」，不再有按钮', async () => {
     const { gateway } = card()
     expand()
     await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '提升为全局' })) })
-    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'promote-memory', memoryId: 'mem_c', layer }])
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'promote-memory', memoryId: 'mem_c', layer, isCandidateRequired: true }])
     expect(row('mem_c').getByText('已提升为全局')).toBeInTheDocument()
     expect(row('mem_c').queryByRole('button', { name: '提升为全局' })).toBeNull()
     expect(row('mem_c').queryByRole('button', { name: '留在本项目' })).toBeNull()
@@ -553,10 +553,57 @@ describe('交付卡：提升候选就地处理', () => {
     await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '提升为全局' })) })
     await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '继续处理' })) })
     expect(gateway.executed.map(e => e.command)).toEqual([
-      { cmd: 'promote-memory', memoryId: 'mem_c', layer },
-      { cmd: 'promote-memory', memoryId: 'mem_c', layer, allowCrossWorkspace: true },
+      { cmd: 'promote-memory', memoryId: 'mem_c', layer, isCandidateRequired: true },
+      { cmd: 'promote-memory', memoryId: 'mem_c', layer, isCandidateRequired: true, allowCrossWorkspace: true },
     ])
     expect(row('mem_c').getByText('已提升为全局')).toBeInTheDocument()
+  })
+
+  /** 提升、留下回带 decisionId（同服务端），撤销照常成功。 */
+  const decided = (command: MemoryCommand): MemoryCommandResult => command.cmd === 'undo'
+    ? { ok: true, cmd: command.cmd, decisionId: command.decisionId, memoryIds: ['mem_c'] }
+    : { ok: true, cmd: command.cmd, decisionId: 'pd_9', memoryIds: ['mem_c'] }
+
+  it.each([
+    ['提升为全局', '已提升为全局'],
+    ['留在本项目', '留在本项目'],
+  ])('「%s」之后结果文字旁有「撤销」：按这次的 decisionId 发 undo，撤销后回到候选、两个按钮都在', async (button, result) => {
+    const { gateway } = card(createFakeGateway({ views: { library: libraryOf([asCandidate, plain.memory]) }, respond: decided }))
+    expand()
+    await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: button })) })
+    expect(row('mem_c').getByText(result).closest('.pm-mc-meta')).not.toBeNull()
+    await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '撤销' })) })
+    expect(gateway.executed.map(e => e.command).at(-1)).toEqual({ cmd: 'undo', decisionId: 'pd_9' })
+    expect(row('mem_c').getByText('可提升为全局')).toBeInTheDocument()
+    expect(row('mem_c').getByRole('button', { name: '留在本项目' })).toBeInTheDocument()
+    expect(row('mem_c').getByRole('button', { name: '提升为全局' })).toBeInTheDocument()
+    expect(row('mem_c').queryByRole('button', { name: '撤销' })).toBeNull()
+  })
+
+  it('撤销失败：原位写原话，结果文字和「撤销」都还在', async () => {
+    card(createFakeGateway({
+      views: { library: libraryOf([asCandidate, plain.memory]) },
+      respond: command => command.cmd === 'undo' ? { ok: false, cmd: command.cmd, code: 'not-found', detail: '快照已过期' } : decided(command),
+    }))
+    expand()
+    await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '提升为全局' })) })
+    await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '撤销' })) })
+    expect(row('mem_c').getByRole('alert')).toHaveTextContent('没有完成：快照已过期')
+    expect(row('mem_c').getByText('已提升为全局')).toBeInTheDocument()
+    expect(row('mem_c').getByRole('button', { name: '撤销' })).toBeInTheDocument()
+  })
+
+  it('这里处理过之后，视图又变了（别处撤销、模型重新标记）：跟着视图走，不再停在这次的结果', async () => {
+    const { gateway } = card(createFakeGateway({ views: { library: libraryOf([asCandidate, plain.memory]) }, respond: decided }))
+    expand()
+    await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '提升为全局' })) })
+    act(() => { gateway.setView('library', libraryOf([plain.memory], [{ ...cand.memory, scope: 'global', workspacePath: undefined }])) })
+    expect(row('mem_c').getByText('已提升为全局')).toBeInTheDocument()
+    expect(row('mem_c').getByRole('button', { name: '撤销' })).toBeInTheDocument()
+    act(() => { gateway.setView('library', libraryOf([asCandidate, plain.memory])) })
+    expect(row('mem_c').getByText('可提升为全局')).toBeInTheDocument()
+    expect(row('mem_c').getByRole('button', { name: '提升为全局' })).toBeInTheDocument()
+    expect(row('mem_c').queryByRole('button', { name: '撤销' })).toBeNull()
   })
 
   it('英文：折叠行、chip 与两个按钮', () => {
