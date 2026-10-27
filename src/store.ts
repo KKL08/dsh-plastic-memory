@@ -244,13 +244,14 @@ export class MemoryStore {
   update(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, fn: (current: MemoryRecord) => MemoryRecord, hint: LocateHint = { workspacePath: record.workspacePath }) {
     return this.table.update(record.id, fn, hint)
   }
-  /** 同 update，但锁内发现记录已不存在或已软删就不写、返回 undefined（工具据此报「不存在或已删除」，不抛错）。 */
-  async updateIfLive(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, fn: (current: MemoryRecord) => MemoryRecord): Promise<MemoryRecord | undefined> {
+  /** 同 update，但锁内发现记录已不存在或已软删就不写、返回 undefined（工具据此报「不存在或已删除」，不抛错）。
+   *  hint 同 update：调用方按层读到的（locateCopy），带只认层提示写回，别层同 id 的副本不动。 */
+  async updateIfLive(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, fn: (current: MemoryRecord) => MemoryRecord, hint?: LocateHint): Promise<MemoryRecord | undefined> {
     try {
       return await this.update(record, r => {
         if (r.status === 'deleted') throw new RecordNotFoundError(r.id)
         return fn(r)
-      })
+      }, hint)
     } catch (err) {
       if (err instanceof RecordNotFoundError) return undefined
       throw err

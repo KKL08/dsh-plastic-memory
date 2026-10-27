@@ -284,6 +284,9 @@ All notable changes to this project are documented here. The format follows
   forgetting the memory cannot remove it. Such memories are now refused with
   a message saying why and stay in the project unchanged. Promoting to global
   memory is unaffected.
+- Promoting a project memory to global overwrote the global memory with the
+  same id, if there was one. Such promotions are now refused with a message
+  saying why, and both memories stay as they were.
 - A key quoted in the reason given to `memory_forget`, in a `memory_snapshot`
   description or in a checkup's conflict summary was logged and saved as is,
   so it stayed in the host log, the snapshots and the pending list even after
