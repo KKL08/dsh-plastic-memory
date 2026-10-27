@@ -137,17 +137,19 @@ function collectStats(
 // 与分词器的整词同一个字符集：字母、组合附加符、数字、_、-。整词里出现这之外的字符（. / : 等），分词就会把它打散
 const WORD_CHARS_ONLY = /^[\p{L}\p{M}\p{N}_-]*$/u
 const HAS_ALNUM = /[\p{L}\p{N}]/u
-// 整词首尾的句读、括号、引号是行文带进来的，不属于字面值：「怎么办？」「（0.2.1-rc.2）」先剥掉再判断
-const EDGE_PUNCT = /^[(（\[【「『"'“‘]+|[)）\]】」』"'”’.,;:!?。，、；：！？…]+$/gu
+// 书名号、全角括号、弯引号、反引号只用来包裹行文，不属于字面值：《分片上传》、`node:sqlite`、（0.2.1-rc.2）。和空白一样当分隔
+const WORD_SEPARATORS = /[\s《》〈〉「」『』【】〔〕〖〗［］（）｛｝“”‘’`]+/u
+// 整词首尾的句读、半角括号与引号是行文带进来的：「怎么办？」「(0.2.1-rc.2)」先剥掉再判断
+const EDGE_PUNCT = /^[(\[{"']+|[)\]}"'.,;:!?。，、；：！？…]+$/gu
 
 /**
- * 锚点词：查询按空白切出的整词（剥掉首尾句读和括号）里，含标点（上面字符集以外的字符）且带字母或数字的那些，小写、去重。
+ * 锚点词：查询按空白与包裹符号切出的整词（剥掉首尾句读和括号）里，含标点（上面字符集以外的字符）且带字母或数字的那些，小写、去重。
  * 版本号 0.2.1-rc.2、路径 .archive/、node:sqlite 这类字面值分词后只剩 1-rc、rc 之类的碎片，
  * 只差一个版本号的几条记录同分；按整词字面比较才分得出。不含标点的整词不算：它们的分词结果已经代表字面，
  * 再按字面排会让恰好含这串字的记录压过分数更高的记录。
  */
 export function anchorTerms(query: string): string[] {
-  const words = query.toLowerCase().split(/\s+/).map(w => w.replace(EDGE_PUNCT, '')).filter(w => w !== '' && !WORD_CHARS_ONLY.test(w) && HAS_ALNUM.test(w))
+  const words = query.toLowerCase().split(WORD_SEPARATORS).map(w => w.replace(EDGE_PUNCT, '')).filter(w => w !== '' && !WORD_CHARS_ONLY.test(w) && HAS_ALNUM.test(w))
   return [...new Set(words)]
 }
 

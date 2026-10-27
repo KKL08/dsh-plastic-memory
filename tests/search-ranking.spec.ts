@@ -10,7 +10,7 @@ import { GLOBAL_DIR, workspaceDirName } from '../src/storage/paths.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
 import { expandQueryTerms, matchScore } from '../src/text.ts'
 import { createTokenizer } from '../src/search/tokenizer.ts'
-import { RANKING_FIELDS, substringEligible } from '../src/search/ranking.ts'
+import { RANKING_FIELDS, anchorTerms, substringEligible } from '../src/search/ranking.ts'
 import {
   executeSearch, renderSearchResult, termHitNote, LOW_COVERAGE_NOTE, OR_FALLBACK_NOTE, RETRY_HINT, SUBSTRING_FALLBACK_NOTE,
   TERM_NOTE_MAX, type SearchToolDeps,
@@ -191,6 +191,25 @@ describe('字面锚点：含标点的查询词整词命中排在同档前面', (
       }),
     ])
     expect(await ids(store, '分片上传？')).toEqual(['mem_ranked', 'mem_literal'])
+  })
+
+  it('书名号、全角方括号、反引号包着的普通词不算锚点：仍按分数排，字面引用这个写法的记录不会被提前', async () => {
+    const guide = record({
+      id: 'mem_ranked', name: '大文件分片与上传', summary: '先分片，再逐片上传，断了只补缺的分片', lastConfirmedAt: 1,
+      content: '大文件先在客户端分片，每片 5MB，逐片上传，服务端收齐后合并；上传中断时只重传缺的分片，上传进度按已收分片算。',
+    })
+    for (const query of ['《分片上传》', '［分片上传］', '`分片上传`']) {
+      const store = await seeded([
+        record({ id: 'mem_literal', name: '杂记', summary: '一些零碎事项', lastConfirmedAt: 9, content: `周会上有人提到${query}，接口文档还没补。` }),
+        guide,
+      ], fileTable(await mkdtemp(join(root, 'q-'))))
+      expect(await ids(store, query), query).toEqual(['mem_ranked', 'mem_literal'])
+    }
+  })
+
+  it('包裹符号当分隔：剥掉后剩下的整词仍按有没有标点判断锚点', () => {
+    expect(anchorTerms('《分片上传》 ［分片上传］ `分片上传` 【发版】 “回滚” {config}')).toEqual([])
+    expect(anchorTerms('`node:sqlite` 《node:sqlite》的用法 【0.2.1-rc.2】')).toEqual(['node:sqlite', '0.2.1-rc.2'])
   })
 
   it('部分命中档先比命中的查询词数：常见锚点不把覆盖面大得多的记录挤出前十', async () => {
