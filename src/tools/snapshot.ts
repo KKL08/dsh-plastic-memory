@@ -24,8 +24,8 @@ interface CrossWorkspaceFields {
 }
 
 /** 只给 GUI 用的选项，不在工具参数里。isExactLayer：show / restore 按快照里每条记录自己的那一层定位与写回，
- *  不取别层更新的同 id 副本（GUI 恢复页面上那一份）。overwriteIf：快照后被修改过的记录，现状过了它就照样覆盖
- *  （直接改的撤销：现状正是那次写下的内容）。 */
+ *  不取别层更新的同 id 副本（GUI 恢复页面上那一份）。overwriteIf：给了它就只写现状过了它的记录，快照后被修改过的照样覆盖、
+ *  已删除的也要过它（撤销：现状正是那次写下的内容）。 */
 export interface SnapshotToolOptions {
   isExactLayer?: boolean
   overwriteIf?: (current: MemoryRecord) => boolean

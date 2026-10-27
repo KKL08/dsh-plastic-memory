@@ -110,6 +110,15 @@ const allEntries = async (e: ReturnType<typeof env>) => [...await e.decisions.li
 /** 待处理里除建议整理以外的项：夹具记忆的确认时间很早，另有「很久没确认」的建议，与账本无关。 */
 const ledgerItems = (view: { items: readonly PendingItem[] }) => view.items.filter(i => i.kind !== 'advice')
 
+/** 撤销预检之后、写回之前，另一个会话把这条记忆删进最近删除：在写回前插进一次软删。 */
+function forgetBeforePut(e: ReturnType<typeof env>, id: string, workspacePath?: string) {
+  const put = e.store.put.bind(e.store)
+  e.store.put = async (...args) => {
+    if (args[0].id === id) expect(await e.store.softDelete({ id, workspacePath }, { isExactLayer: true, now: e.clock.now })).toBe(true)
+    return put(...args)
+  }
+}
+
 describe('info', () => {
   it('返回 memoryRoot、视图文件绝对路径与契约版本；只建视图目录，不写视图文件（宿主的文件观察不跟踪父目录尚不存在的文件，客户端订阅前目录要先在）', async () => {
     const e = env()
@@ -2167,6 +2176,16 @@ describe('edit-memory（建议整理的直接改）', () => {
     expect((await e.decisions.listSettled()).map(d => d.id)).toEqual([body.decisionId])
   })
 
+  it('撤销预检之后、写回之前被别处删进最近删除：不盖回在用，回 failed', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_gone', content: '旧正文' }))
+    e.clock.now = LATER
+    const body = ok(await e.run(edit('mem_gone', undefined, await baseOf(e, 'mem_gone'))))
+    forgetBeforePut(e, 'mem_gone')
+    expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('failed')
+    expect(await e.store.get('mem_gone')).toMatchObject({ status: 'deleted', content: '新正文' })
+  })
+
   it('卡片加载之后记忆被改过（手改文件、别处更新）：stale，不写盘、不拍快照、不记账', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_s', name: '甲', content: '旧正文', scope: 'workspace', workspacePath: SESSION_WS }))
@@ -2660,6 +2679,26 @@ describe('撤销模型改写、替代（对话卡片、右侧栏「这次新写�
     expect((await e.store.get('mem_old', { workspacePath: SESSION_WS }))!.status).toBe('active')
     expect((await e.store.get(saved.record.id, { workspacePath: SESSION_WS }))!.status).toBe('active')
     expect((await modelChanges(e))?.map(c => c.state)).toEqual(['undone'])
+  })
+
+  it('撤销改写：预检之后、写回之前被别处删进最近删除：不盖回在用，回 stale', async () => {
+    const e = env()
+    await seedMemory(e, 'mem_r', '改前的内容')
+    await save(e, { action: 'update', id: 'mem_r', name: '名-mem_r', content: '模型改写后的' })
+    const entry = await changeOf(e)
+    forgetBeforePut(e, 'mem_r', SESSION_WS)
+    expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('stale')
+    expect(await e.store.get('mem_r', { workspacePath: SESSION_WS })).toMatchObject({ status: 'deleted', content: '模型改写后的' })
+  })
+
+  it('撤销替代：预检之后、写回之前旧记忆被别处删进最近删除：不盖回在用，回 stale', async () => {
+    const e = env()
+    await seedMemory(e, 'mem_old', '旧说法')
+    await save(e, { name: '新说法', content: '完全不同的新说法', supersedes: ['mem_old'] })
+    const entry = await changeOf(e)
+    forgetBeforePut(e, 'mem_old', SESSION_WS)
+    expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('stale')
+    expect((await e.store.get('mem_old', { workspacePath: SESSION_WS }))!.status).toBe('deleted')
   })
 
   it('别层有同 id 的在用副本：视图不拿那份判状态（仍可撤），撤销只动被替代的那一层', async () => {

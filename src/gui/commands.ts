@@ -237,7 +237,12 @@ async function dispatch(
         return fail(cmd, 'failed', `记忆 ${rec.id} 在这次修改之后又被改过，撤销会冲掉之后的改动，未做任何改动`)
       }
     }
-    const r = await restoreFrom(snapshotId, entry.memoryIds, allowCrossWorkspace, { isExactLayer: true, overwriteIf: isOwnWrite })
+    // 写入那一刻按最新内容再核对一次：保留的那条仍在用、仍是那次写下的；其余（合并删掉的那条）内容仍同快照，在最近删除里或已恢复都行
+    const snapshotted = new Map(records.map(r => [r.id, editFingerprint(r)]))
+    const overwriteIf = (r: MemoryRecord) => (r.id === before.id
+      ? r.status === 'active' && isOwnWrite(r)
+      : editFingerprint(r) === snapshotted.get(r.id) || isOwnWrite(r))
+    const r = await restoreFrom(snapshotId, entry.memoryIds, allowCrossWorkspace, { isExactLayer: true, overwriteIf })
     if (isErr(r)) return r
     await deps.decisions.remove(entry.id)
     return { ok: true, cmd, decisionId: entry.id, memoryIds: r, snapshotId }

@@ -161,7 +161,8 @@ export class SnapshotStore {
 
   /**
    * 选择性恢复：ids 为 undefined 恢复全部。快照后被修改过的记录默认跳过（冲突保护），
-   * overwriteChanged=true 才覆盖；给函数时只覆盖它认可的现状（直接改的撤销：现状就是那次写下的内容）。脱敏记录（密钥硬删）一律跳过，计入 skipped 并单列在 redacted。
+   * overwriteChanged=true 才覆盖；给函数时只写它认可的现状（撤销：现状就是那次写下的内容），已删除的也不例外，
+   * 否则预检之后被别处删掉的会被盖回在用。脱敏记录（密钥硬删）一律跳过，计入 skipped 并单列在 redacted。
    * 恢复动作本身只 put 旧数据，不做二次快照。current：调用方预读的现状（同 diff）。
    * 预读之后记录仍可能被别处改动：不覆盖时把冲突判定交给 put 的 skipIf，在写入那一刻按最新内容再判一次；
    * put 返回 false 即按「快照后被修改」跳过。返回 void 的 put 视为已写入。
@@ -182,8 +183,9 @@ export class SnapshotStore {
     now: () => number = Date.now,
   ): Promise<{ restored: string[]; skipped: string[]; redacted: string[] }> {
     const targets = ids ? snapshot.data.filter(r => ids.includes(r.id)) : snapshot.data
-    const blocks = (cur: MemoryRecord | undefined, rec: MemoryRecord) =>
-      isConflicting(cur, rec) && !(typeof overwriteChanged === 'function' ? overwriteChanged(cur!) : overwriteChanged)
+    const blocks = (cur: MemoryRecord | undefined, rec: MemoryRecord) => (typeof overwriteChanged === 'function'
+      ? cur !== undefined && !overwriteChanged(cur)
+      : isConflicting(cur, rec) && !overwriteChanged)
     const outcomes: Array<'restored' | 'skipped' | 'redacted'> = []
     const onDisk = async () => {
       const snap = await this.table.get(snapshot.id)
