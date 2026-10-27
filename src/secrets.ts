@@ -9,13 +9,16 @@ export type SecretSeverity = 'critical' | 'suspected'
 
 /**
  * 私钥块（PEM、PGP）的正则：命中整块（BEGIN 到同名 END），遮盖才盖得住正文。BEGIN 与 END 之间只允许正文行：base64 行、
- * 「键: 值」头字段行，以及后面还有 base64 行的空行（整块缩进也算）。没有这样的 END（截断的粘贴、散文里提到 BEGIN 头）
- * 只到 BEGIN 那一行行尾，再带上紧跟着的正文行；散文里的 BEGIN 头因此只遮这一行，不会一路吞到后文真正私钥的 END。
+ * 「键: 值」头字段行，以及后面还有 base64 行的空行（整块缩进、整块在 Markdown 引用里、行尾带空白都算）。没有这样的 END
+ * （截断的粘贴、散文里提到 BEGIN 头）只到 BEGIN 那一行行尾，再带上紧跟着的正文行；散文里的 BEGIN 头因此只遮这一行，
+ * 不会一路吞到后文真正私钥的 END。
  */
 function keyBlock(begin: string, end: string): RegExp {
-  // 正文行：整行是 base64、或是头字段、或是后面紧跟 base64 行的空行；行首可以缩进
-  const bodyLine = String.raw`\r?\n[ \t]*(?:[A-Za-z0-9+/=]+|[A-Za-z][A-Za-z0-9-]*: [^\r\n]*|(?=\r?\n[ \t]*[A-Za-z0-9+/=]))(?=\r?\n|$)`
-  return new RegExp(String.raw`${begin}(?:[ \t]*(?:${bodyLine})*\r?\n[ \t]*${end}|[^\r\n]*(?:${bodyLine})*)`)
+  // 行首：缩进与引用标记（> 、>> ）
+  const lead = String.raw`[ \t>]*`
+  // 正文行：整行是 base64、或是头字段、或是后面紧跟 base64 行的空行；行尾可以带空白
+  const bodyLine = String.raw`\r?\n${lead}(?:[A-Za-z0-9+/=]+|[A-Za-z][A-Za-z0-9-]*: [^\r\n]*|(?=\r?\n${lead}[A-Za-z0-9+/=]))[ \t]*(?=\r?\n|$)`
+  return new RegExp(String.raw`${begin}(?:[ \t]*(?:${bodyLine})*\r?\n${lead}${end}|[^\r\n]*(?:${bodyLine})*)`)
 }
 
 export const SECRET_PATTERNS: Array<{ name: string; re: RegExp; severity: SecretSeverity }> = [

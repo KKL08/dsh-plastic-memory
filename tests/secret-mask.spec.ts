@@ -111,6 +111,38 @@ describe('PEM 私钥块：从 BEGIN 到对应的 END 整块遮住', () => {
     for (const line of bodyLines) expect(masked).not.toContain(line)
   })
 
+  it('正文行带行尾空白（空格、制表符、CRLF）照样整块遮住', () => {
+    const { pem, bodyLines } = generatePrivateKeyPem('rsa')
+    for (const eol of ['  \n', '\t\n', ' \r\n']) {
+      const padded = pem.split('\n').join(eol)
+      const masked = maskSecrets(`部署机私钥：\n${padded}${eol}用完删掉`)
+      expect(masked).toBe(`部署机私钥：\n${SECRET_MASK}${eol}用完删掉`)
+      for (const line of bodyLines) expect(masked).not.toContain(line)
+    }
+  })
+
+  it('整块在 Markdown 引用里（> 、>> 前缀）照样整块遮住，引用之后的文字原样', () => {
+    const { pem, bodyLines } = generatePrivateKeyPem('rsa')
+    for (const quote of ['> ', '>> ', '>']) {
+      const quoted = pem.split('\n').map(line => `${quote}${line}`).join('\n')
+      const masked = maskSecrets(`部署机私钥：\n${quoted}\n用完删掉`)
+      expect(masked).toBe(`部署机私钥：\n${quote}${SECRET_MASK}\n用完删掉`)
+      for (const line of bodyLines) expect(masked).not.toContain(line)
+    }
+  })
+
+  it('引用里截断的粘贴：紧跟的正文行（含引用里的空行）都遮住，后面的引用文字原样', () => {
+    const lines = pem.split('\n')
+    const truncated = [lines[0], 'Proc-Type: 4,ENCRYPTED', '', ...lines.slice(1, -1)].map(line => `> ${line}`.trimEnd()).join('\n')
+    const masked = maskSecrets(`前文\n${truncated}\n> 用完删掉`)
+    expect(masked).toBe(`前文\n> ${SECRET_MASK}\n> 用完删掉`)
+  })
+
+  it('引用里散文提到 BEGIN 头：只遮到这一行行尾，后面的引用文字原样', () => {
+    const text = `> 以 ${FAKE_SECRET.pem} 开头的文件不要提交\n> 包管理用 pnpm\n> 提交前跑测试`
+    expect(maskSecrets(text)).toBe(`> 以 ${SECRET_MASK}\n> 包管理用 pnpm\n> 提交前跑测试`)
+  })
+
   it('两块私钥各遮各的，中间的文字保留', () => {
     expect(maskSecrets(`A：${pem}\n以及 B：${pem}`)).toBe(`A：${SECRET_MASK}\n以及 B：${SECRET_MASK}`)
   })
@@ -151,5 +183,10 @@ describe('PGP 私钥块：同 PEM，从 BEGIN 到对应的 END 整块遮住', ()
 
   it('截断的粘贴（没有 END 行）遮到正文末尾', () => {
     expect(maskSecrets(`前文\n${[begin, ...body].join('\n')}\n后文`)).toBe(`前文\n${SECRET_MASK}\n后文`)
+  })
+
+  it('引用里、行尾带空格的整块照样整块遮住', () => {
+    const block = [begin, ...body, end].map(line => `> ${line}  `).join('\n')
+    expect(maskSecrets(`签名私钥：\n${block}\n用完删掉`)).toBe(`签名私钥：\n> ${SECRET_MASK}  \n用完删掉`)
   })
 })
