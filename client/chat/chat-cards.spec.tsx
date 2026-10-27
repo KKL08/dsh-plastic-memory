@@ -4,7 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import type { ComponentType } from 'react'
 import { GUI_VIEW_VERSION, type DeletedView, type LibraryView, type MemoryCommand, type MemoryCommandResult, type SessionView } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
-import { createHostGateway } from '../gateway.ts'
+import { createHostGateway, type PluginConfig } from '../gateway.ts'
 import { createTranslator } from '../i18n.tsx'
 import { en } from '../locales.ts'
 import { PanelShell } from '../ui/PanelShell.tsx'
@@ -472,6 +472,10 @@ describe('交付卡', () => {
   })
 })
 
+/** 插件配置，去处按参数。 */
+const configWith = (globalPromoteTarget: PluginConfig['globalPromoteTarget']): PluginConfig =>
+  ({ snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget })
+
 describe('交付卡：提升候选就地处理', () => {
   const WS = '/w/app'
   const named = (id: string, name: string, content: string): SavedMemory => {
@@ -487,7 +491,8 @@ describe('交付卡：提升候选就地处理', () => {
   })
   const asCandidate = { ...cand.memory, promotion: 'candidate' as const }
   const layer = { kind: 'workspace', workspacePath: WS }
-  const card = (gateway = createFakeGateway({ views: { library: libraryOf([asCandidate, plain.memory]) } })) => {
+  const card = (gateway = createFakeGateway({ views: { library: libraryOf([asCandidate, plain.memory]) } }), config: PluginConfig = configWith('plugin-global')) => {
+    gateway.setConfigValue(config)
     const utils = renderInShell(<SavedMemoriesCard sessionId="s1" cwd={WS} saved={[plain, cand]} now={NOW} openDetail={() => {}} />, gateway)
     return { ...utils, gateway }
   }
@@ -622,6 +627,42 @@ describe('交付卡：提升候选就地处理', () => {
     expect(row('mem_c').getByText('可提升为全局')).toBeInTheDocument()
     expect(row('mem_c').getByRole('button', { name: '提升为全局' })).toBeInTheDocument()
     expect(row('mem_c').queryByRole('button', { name: '撤销' })).toBeNull()
+  })
+
+  it('去处配置成写进 AGENTS.md：按钮写「写进 AGENTS.md」，命令带 target；成功后换成「已写进 AGENTS.md」、不给撤销，记忆进了最近删除也不换成「已删除」', async () => {
+    const { gateway } = card(undefined, configWith('agents-md'))
+    expand()
+    expect(row('mem_c').queryByRole('button', { name: '提升为全局' })).toBeNull()
+    await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '写进 AGENTS.md' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'promote-memory', memoryId: 'mem_c', layer, isCandidateRequired: true, target: 'agents-md' }])
+    expect(row('mem_c').getByText('已写进 AGENTS.md').closest('.pm-mc-meta')).not.toBeNull()
+    expect(row('mem_c').queryByRole('button', { name: '撤销' })).toBeNull()
+    // 服务端软删了项目里那条：全部记忆里没了、最近删除里有
+    act(() => {
+      gateway.setView('library', libraryOf([plain.memory]))
+      gateway.setView('deleted', { version: GUI_VIEW_VERSION, items: [{ memory: cand.memory, deletedAt: NOW, purgeAt: NOW + 1 }] })
+    })
+    expect(row('mem_c').getByText('已写进 AGENTS.md')).toBeInTheDocument()
+    expect(screen.queryByText('已删除。14 天内也能在最近删除里找回。')).toBeNull()
+  })
+
+  it('写进 AGENTS.md 遇到含密钥的记忆：原位写服务端原话，还是候选', async () => {
+    card(createFakeGateway({
+      views: { library: libraryOf([asCandidate, plain.memory]) },
+      respond: command => ({ ok: false, cmd: command.cmd, code: 'failed', detail: '含密钥的记忆不能写入 AGENTS.md：mem_c' }),
+    }), configWith('agents-md'))
+    expand()
+    await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '写进 AGENTS.md' })) })
+    expect(row('mem_c').getByRole('alert')).toHaveTextContent('没有完成：含密钥的记忆不能写入 AGENTS.md：mem_c')
+    expect(row('mem_c').getByText('可提升为全局')).toBeInTheDocument()
+  })
+
+  it('配置还没读到：同待处理卡，提升按钮暂不可用，「留在本项目」照常', () => {
+    const { gateway } = card()
+    act(() => { gateway.setConfigValue(undefined) })
+    expand()
+    expect(row('mem_c').getByRole('button', { name: '提升为全局' })).toHaveAttribute('aria-disabled', 'true')
+    expect(row('mem_c').getByRole('button', { name: '留在本项目' })).not.toHaveAttribute('aria-disabled')
   })
 
   it('英文：折叠行、chip 与两个按钮', () => {

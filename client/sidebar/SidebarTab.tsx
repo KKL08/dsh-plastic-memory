@@ -31,7 +31,7 @@ import { EmptyState } from '../ui/EmptyState.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { TrashIcon } from '../ui/TrashIcon.tsx'
 import { CrossConfirm, crossConfirmCss, isHandledElsewhere, DeleteWithConfirm, SecretDeleteConfirm } from '../pending/action.tsx'
-import { promoteInPlaceCss, promotionOf, usePromoteInPlace } from '../pending/promote-in-place.tsx'
+import { promoteInPlaceCss, promotionOf, usePromoteInPlace, type InPlacePromotion } from '../pending/promote-in-place.tsx'
 import { keepFocusInPlace } from '../ui/focus-return.ts'
 import { isLiveWrite, sessionCards, writtenSinceSnapshot } from './session-memories.ts'
 
@@ -99,6 +99,8 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const deletions = gateway.useDeletions()
   const [ruled, setRuled] = useState<readonly Ruled[]>([])
   const [purged, setPurged] = useState<ReadonlySet<string>>(new Set())
+  /** 这里写进了 AGENTS.md 的：项目里那条进了最近删除、离开了视图，按 id 留着那张卡和结果。 */
+  const [wroteAgentsMd, setWroteAgentsMd] = useState<ReadonlyMap<string, MemoryCardData>>(new Map())
   const [secretId, setSecretId] = useState<string | undefined>(undefined)
   // 在途的动作按条（待决项 id / 记忆 id）记：别的动作开始或结束都不让这一条重新可点，同一条冲突不会发出两条相反的裁决。
   // ref 同步拦截，state 只管渲染
@@ -226,8 +228,9 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   }
   // 这次新写入的只列还没进快照、还在的；彻底删除的原位留说明
   const saved = (snapshot === undefined ? [] : writtenSinceSnapshot(snapshot))
-    .flatMap((id): Array<{ id: string; memory: MemoryCardData | undefined }> =>
-      isPurged(id) ? [{ id, memory: undefined }] : isLiveWrite(id, byId, deletions) ? [{ id, memory: byId.get(id) }] : [])
+    .flatMap((id): Array<{ id: string; memory: MemoryCardData | undefined; isWrittenToAgentsMd?: true }> =>
+      wroteAgentsMd.has(id) ? [{ id, memory: wroteAgentsMd.get(id), isWrittenToAgentsMd: true }]
+        : isPurged(id) ? [{ id, memory: undefined }] : isLiveWrite(id, byId, deletions) ? [{ id, memory: byId.get(id) }] : [])
   const scope = ws === undefined ? undefined : { kind: 'workspace' as const, workspacePath: ws }
   const restPending = ws === undefined || pending.status !== 'ready'
     ? 0
@@ -309,10 +312,18 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
               <h2 className="pm-side-title">{t('sidebar.saved.title')}</h2>
               <p className="pm-side-hint">{t('sidebar.saved.note')}</p>
             </div>
-            {saved.map(({ id, memory }) => memory === undefined
+            {saved.map(({ id, memory, isWrittenToAgentsMd }) => memory === undefined
               ? purgedNote(id)
-              : (
-                <SavedRow key={id} session={session} memory={memory} card={card}>
+              : isWrittenToAgentsMd === true
+                ? <SavedRow key={id} session={session} memory={memory} card={card} state="wrote-agents-md">{null}</SavedRow>
+                : (
+                <SavedRow
+                  key={id}
+                  session={session}
+                  memory={memory}
+                  card={card}
+                  onWroteAgentsMd={() => { setWroteAgentsMd(prev => new Map(prev).set(id, memory)) }}
+                >
                   <DeleteWithConfirm
                     onDelete={() => { forget(memory) }}
                     trigger={open => (
@@ -427,14 +438,17 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
 }
 
 /** 这次新写入的一行：记忆卡（提升候选带 chip）+ 行尾删除；提升候选的两个动作和结果在卡片下面一行。 */
-function SavedRow({ session, memory, card, children }: {
+function SavedRow({ session, memory, card, state, onWroteAgentsMd, children }: {
   session: BorrowedSession
   memory: MemoryCardData
   card: (memory: MemoryCardData, chip?: ReactNode) => ReactNode
+  /** 提升状态；缺省按全部记忆视图（写进 AGENTS.md 的由上层给）。 */
+  state?: InPlacePromotion
+  onWroteAgentsMd?: () => void
   /** 行尾删除与它的反馈。 */
   children: ReactNode
 }) {
-  const promote = usePromoteInPlace(session, memory, layerOfMemory(memory), promotionOf(memory))
+  const promote = usePromoteInPlace(session, memory, layerOfMemory(memory), state ?? promotionOf(memory), onWroteAgentsMd)
   return (
     <div className="pm-side-saved" data-memory-id={memory.id}>
       <div className="pm-side-saved-card">{card(memory, promote.chip)}</div>

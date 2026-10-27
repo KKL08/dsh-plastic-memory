@@ -6,6 +6,7 @@ import {
   type HealthView, type LibraryView, type MemoryCard, type PendingItem, type PendingView, type SessionView,
 } from '../../src/gui/contract.ts'
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
+import type { PluginConfig } from '../gateway.ts'
 import { createNavStore, openMemoryPage, PANEL_ID } from '../nav.ts'
 import { memory, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { SidebarTab } from './SidebarTab.tsx'
@@ -54,8 +55,13 @@ const conflict: PendingItem = { kind: 'conflict-horizontal', level: 'your-call',
 const promote: PendingItem = { kind: 'promote-candidate', level: 'your-call', decisionId: 'pd_2', firstSeenAt: 1, memory: proj }
 const vertical: PendingItem = { kind: 'conflict-vertical', level: 'your-call', decisionId: 'pd_v', firstSeenAt: 1, summary: '', memory: proj, baselineRef: 'AGENTS.md：merge freeze' }
 
-function setup(views: FakeGatewayInit['views'], respond?: FakeGatewayInit['respond']) {
-  const gateway = createFakeGateway({ views: { health: health(), ...views }, ...(respond === undefined ? {} : { respond }) })
+/** 插件配置，去处按参数。 */
+function configWith(globalPromoteTarget: PluginConfig['globalPromoteTarget']): PluginConfig {
+  return { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget }
+}
+
+function setup(views: FakeGatewayInit['views'], respond?: FakeGatewayInit['respond'], config: PluginConfig = configWith('plugin-global')) {
+  const gateway = createFakeGateway({ views: { health: health(), ...views }, ...(respond === undefined ? {} : { respond }), config })
   const openPage = vi.fn()
   const utils = renderInShell(<SidebarTab sessionId="s1" workspacePath={WS} openPage={openPage} />, gateway)
   return { ...utils, gateway, openPage }
@@ -400,6 +406,23 @@ describe('SidebarTab 这次新写入的：提升候选就地处理', () => {
     expect(row('n1').getByRole('button', { name: '提升为全局' })).toBeInTheDocument()
     expect(screen.queryByText(/处待处理/)).toBeNull()
     expect(screen.getByText(/本项目 \d+ 条记忆/)).toBeInTheDocument()
+  })
+
+  it('去处配置成写进 AGENTS.md：按钮与命令跟着配置；成功后换成「已写进 AGENTS.md」，记忆离开视图后这一行仍留着结果、不给撤销', async () => {
+    const { gateway } = setup(views(cand, plain), undefined, configWith('agents-md'))
+    expect(row('n1').queryByRole('button', { name: '提升为全局' })).toBeNull()
+    await act(async () => { fireEvent.click(row('n1').getByRole('button', { name: '写进 AGENTS.md' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'promote-memory', memoryId: 'n1', layer, isCandidateRequired: true, target: 'agents-md' }])
+    act(() => { gateway.setView('library', library(pref, proj, glob, plain)) })
+    expect(row('n1').getByText('已写进 AGENTS.md')).toBeInTheDocument()
+    expect(row('n1').queryByRole('button', { name: '撤销' })).toBeNull()
+    expect(row('n1').queryByRole('button', { name: '留在本项目' })).toBeNull()
+  })
+
+  it('配置还没读到：提升按钮暂不可用', () => {
+    const { gateway } = setup(views(cand, plain))
+    act(() => { gateway.setConfigValue(undefined) })
+    expect(row('n1').getByRole('button', { name: '提升为全局' })).toHaveAttribute('aria-disabled', 'true')
   })
 
   it('别处（对话卡片、待处理）处理过的按视图换成结果文字：提升了的在全局层，留下的标 kept-local', () => {

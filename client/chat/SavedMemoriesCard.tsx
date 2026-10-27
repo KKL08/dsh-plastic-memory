@@ -48,7 +48,7 @@ function liveCard(library: LibraryView | undefined, id: string, layer: GuiLayerR
   return find(sameLayer) ?? find(l => l.kind === 'global')
 }
 
-function SavedRow({ session, item, layer, promotion, now, typeLabel, onDetail }: {
+function SavedRow({ session, item, layer, promotion, now, typeLabel, onDetail, onWroteAgentsMd }: {
   session: BorrowedSession & { kind: 'ready' }
   item: SavedMemory
   /** 这条记忆所在的层：删除、撤销、提升、留下都带上它，同 id 别层还在用时也只动这一份。 */
@@ -58,12 +58,15 @@ function SavedRow({ session, item, layer, promotion, now, typeLabel, onDetail }:
   now: number
   typeLabel: (type: string) => string
   onDetail: () => void
+  onWroteAgentsMd: () => void
 }) {
   const t = useT()
   const gateway = useGateway()
   const { sessionId } = session
   const id = item.memory.id
-  const promote = usePromoteInPlace(session, item.memory, layer, promotion)
+  const promote = usePromoteInPlace(session, item.memory, layer, promotion, onWroteAgentsMd)
+  // 写进了 AGENTS.md：项目里那条进了最近删除，这一行留着结果，不再给删除、查看详情
+  const isWrittenToAgentsMd = promotion === 'wrote-agents-md'
   // 记下的时刻取记忆卡上的（结果事件的时间）；没有就用这一行第一次出现的时刻。只有晚于它的视图才拿来判彻底删除
   const [firstSeen] = useState(() => Date.now())
   const savedAt = Number.isFinite(item.memory.updatedAt) && item.memory.updatedAt > 0 ? item.memory.updatedAt : firstSeen
@@ -78,6 +81,16 @@ function SavedRow({ session, item, layer, promotion, now, typeLabel, onDetail }:
     else if (cmd === 'forget' && result.code === 'has-secret') setState({ kind: 'secret' })
     // 撤销失败时那一行还是「已删除」，不另写原因
     else setState(cmd === 'restore' ? { kind: 'idle' } : { kind: 'failed', detail: result.detail ?? result.code })
+  }
+  if (isWrittenToAgentsMd) {
+    return (
+      <div className="pm-saved-row" data-memory-id={id}>
+        <div className="pm-saved-main">
+          <MemoryCard memory={item.memory} now={now} typeLabel={typeLabel(item.memory.type)} chip={promote.chip} />
+          <p className="pm-saved-note">{t('pending.result.wroteAgentsMdBody')}</p>
+        </div>
+      </div>
+    )
   }
   if (how === 'hard') {
     return (
@@ -129,6 +142,8 @@ function SavedRow({ session, item, layer, promotion, now, typeLabel, onDetail }:
 export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: SavedMemoriesCardProps) {
   const t = useT()
   const [isOpen, setOpen] = useState(false)
+  /** 这里写进了 AGENTS.md 的：记忆已离开视图，按 id 留着结果。 */
+  const [wroteAgentsMd, setWroteAgentsMd] = useState<ReadonlySet<string>>(new Set())
   const listId = useId()
   const session = useMemo<BorrowedSession & { kind: 'ready' }>(() => ({ kind: 'ready', sessionId, cwd }), [sessionId, cwd])
   const typeLabel = useTypeLabel(session)
@@ -141,6 +156,7 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
     ?? (workspacePath === undefined ? undefined : { kind: 'workspace', workspacePath })
   // 提升过的按全局那一份写作用域，删除、撤销、查看详情也落在全局
   const current = (item: SavedMemory): { memory: SavedMemory['memory']; promotion: InPlacePromotion | undefined } => {
+    if (wroteAgentsMd.has(item.memory.id)) return { memory: item.memory, promotion: 'wrote-agents-md' }
     const live = liveCard(library.status === 'ready' ? library.data : undefined, item.memory.id, layerOf(item.memory))
     const promotion = promotionOf(live)
     if (promotion !== 'promoted') return { memory: item.memory, promotion }
@@ -185,6 +201,7 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
               now={now}
               typeLabel={typeLabel}
               onDetail={() => { detail(memory) }}
+              onWroteAgentsMd={() => { setWroteAgentsMd(prev => new Set(prev).add(item.memory.id)) }}
             />
           )
         }) : null}
