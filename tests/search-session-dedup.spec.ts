@@ -98,7 +98,7 @@ describe('memory_search：已带入全文的 core 记忆不重复贴正文', () 
     expect((await search('新偏好', session)).hits[0].content).toBe('新偏好 数据库')
 
     cache.markStale(session) // 压缩结束
-    await cache.assemble(session) // 下一次中间件重建
+    await cache.assemble(session) // 下一个发送点重建
     expect((await search('新偏好', session)).hits[0].content).toBe(IN_SNAPSHOT_NOTE)
   })
 })

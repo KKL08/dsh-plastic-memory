@@ -1,6 +1,5 @@
 import z from '@deepseek-ai/schemastery'
 import type { Context, Volatile } from '@deepseek-ai/cordis'
-import type { AssembleContext, PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import type { MemoryTypeDefinition } from './types.ts'
 import { buildTypeRegistry, type TypeRegistry } from './type-registry.ts'
 import { memoryDomainSpec } from './domain-spec.ts'
@@ -28,7 +27,7 @@ import { createSourceTool } from './tools/source-tool.ts'
 import { delegationDepthOf, gateSubagentWrites } from './tools/subagent-gate.ts'
 import type { ReadEventFn } from './tools/source.ts'
 import { SnapshotCache, resolveWorkspacePath } from './runtime.ts'
-import { PROMPT_LBRACE_VARIABLE } from './snapshot.ts'
+import { lastVisibleSnapshot, shouldSendSnapshot, snapshotMessageBody } from './snapshot-message.ts'
 import { OVERFLOW_MODES, type OverflowMode } from './contract-codes.ts'
 import { resolveHealthThresholds, type HealthSensitivity } from './governance/health-presets.ts'
 import { PendingDecisionsStore, overflowScopeOf } from './governance/decisions.ts'
@@ -38,7 +37,7 @@ import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCa
 import type { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { baselineProjectionDefinition, readBaseline } from './governance/baseline.ts'
 import { reportedTokens, type SemanticLlm } from './governance/semantic-scan.ts'
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type GenerateOptions, type StreamChunk, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { createMemoryCommand, type MemoryCommandDefinition } from './gui/commands.ts'
 import { ViewWriter, collectGlobalViews } from './gui/view-writer.ts'
 import { buildSessionView } from './gui/views.ts'
@@ -100,7 +99,7 @@ export const Config = z.object({
 })
 
 export const name = 'dsh-plastic-memory'
-export const inject = ['tools', 'systemPrompt']
+export const inject = ['tools']
 
 /** session/created 回调里用得到的最小 session 结构（真实类型是 dsh-session 的 Session）。 */
 type SessionLike = object & { header?: { id?: string; cwd?: string } }
@@ -540,8 +539,8 @@ export async function apply(ctx: Context, config: Config) {
     on(name: 'session/event', fn: (session: object, event: { type: string; time?: number; data?: unknown }) => void): () => void
   }
   lifecycle.on('session/created', session => {
-    // eager 预热：新 session 不必等首次组装才解析 workspace（HMR 后存量 session 走 render 侧自愈）。
-    // 与 assemble 中间件的解析等待同一份 memoize，不重复解析；只解析不组装，快照仍在首次中间件组装时冻结。
+    // eager 预热：新 session 不必等首次组装才解析 workspace（HMR 后存量 session 由组装入口自愈）。
+    // 与组装入口的解析等待同一份 memoize，不重复解析；只解析不组装，快照仍在首个发送点冻结。
     snapshotCache.prewarm(session)
     // 第一个会话出现时写一遍全局视图（不 await）：浏览器半侧首次打开记忆页要有内容；此时宿主已挂好 storageDomain。
     if (startupViewsPending && views) {
@@ -551,62 +550,56 @@ export async function apply(ctx: Context, config: Config) {
   })
   lifecycle.on('session/event', (session, event) => {
     // 基线由宿主投影随事件折叠（plasticMemoryBaseline），不在这里观察；
-    // 本监听只留 compaction 过期标记——快照按 session 冻结，压缩结束后由下一次组装重建。
-    // 压缩在 pre-step 里发生时，下面的 pre-step / request-error 监听在 next() 之后把重建等完，宿主准入时的同步 provider 已回新快照；
-    // 两次组装之间若仍有只调 provider 的刷新，拿到的是上一份、不是空串（不清空：并发代次与 HMR 窗口靠它）。
+    // 本监听只留 compaction 过期标记——快照按 session 冻结，压缩结束后由下一个发送点重建。
     // 带 error 的结束是失败的压缩（如摘要不比被遮蔽内容小），什么都没遮蔽：旧快照还在可见面上，
-    // 这时重建只会让宿主再追加一份、两份并存；阈值附近它几乎每步失败一次，所以只在成功时标过期。
+    // 这时重建会让下一个发送点再发一份；阈值附近它几乎每步失败一次，所以只在成功时标过期。
     // error 在事件的 data 里（compaction-basic 以 `{ ...lifecycle, error }` 作为 payload append）。
     // 成功的压缩记下压缩时刻（markCompacted），下一次冻结记为压缩后重新带入。
     if (event.type !== 'compaction/end') return
     if ((event.data as { error?: unknown } | undefined)?.error !== undefined) return
     snapshotCache.markCompacted(session, typeof event.time === 'number' ? event.time : Date.now())
   })
-  // 宿主每一步先 assemble、再跑 agent/pre-step（compaction-basic 在这里压缩），准入时重调同步 provider。
-  // 等 next() 返回（压缩已做完）再重建快照，准入时追加的就是新快照，下一步中间件命中缓存、不再追加第二份。
-  // prepend 让本监听排在最外层，不依赖插件加载顺序；缓存未过期时 assemble 直接命中。
-  // 只重建中间件冻结过、且最近一次组装里还有本插件条目的会话：宿主压掉运行时上下文时中间件不冻结，这里也不能冻结，
-  // 否则没进上下文的快照会计召回、出会话视图，检索还会把 core 正文换成「已带入」说明。会话中途才压掉的
-  // （persona 的 includeRuntimeContext 改成 false）以前冻结过，只看 injectedCore 拦不住。
-  const lastHadEntry = new WeakMap<object, boolean>()
-  const wasFrozen = (session: object) => lastHadEntry.get(session) === true && snapshotCache.injectedCore(session) !== undefined
-  ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+  // 快照走本插件自己的 user 消息（source 为 plastic-memory 的 snapshot 形态），不经宿主的运行时上下文：
+  // 那里各插件的段落拼成一条消息，任何一段变了就整条再发一次，本插件没变的快照也跟着多一份；极简模式还会把它整段压掉。
+  // 发送点只有下面两处，组装（冻结、计召回、会话视图）也只在这里发生，所以冻结即模型可见。
+  // 发不发看会话里模型最后能看到的那份快照：组装出的文本与它逐字相同就不发，前缀不动；
+  // 压缩遮蔽了旧快照、记忆改过、配置热更新后，文本不同才补发一份，取代句告诉模型以最新这份为准。
+  const snapshotMessage = async (session: Session): Promise<UserMessage | undefined> => {
+    const text = await snapshotCache.assemble(session)
+    return shouldSendSnapshot(text, lastVisibleSnapshot(session.deriveMessages())) ? createUserMessage(snapshotMessageBody(text)) : undefined
+  }
+  const appendSnapshot = (session: Session, message: UserMessage) => {
+    try {
+      session.append('user/message', message, { surfaceOp: 'append' })
+    } catch (err) {
+      ctx.logger.error('[plastic-memory] 快照消息写入会话失败:', err)
+    }
+  }
+  // pre-step：等 next() 返回（compaction-basic 在里面压缩）再判断，补发的就排在 checkpoint 之后。
+  // 快照必须排在系统提示词之后：宿主的压缩起点、node 0 保护、请求序列化都认定 node 0 是系统提示词，
+  // 而新会话的系统提示词要到 step 里才写，晚于 pre-step。所以分三路：
+  // decision 带消息：快照放进 decision 最前，宿主在 step 里先写系统提示词、再写 decision，快照落在两者之间；
+  // 第 1 步且 decision 为空：宿主这一步本来就不调模型，塞快照会凭空发起一次只有快照的调用，不组装也不发；
+  // 之后的空 decision：系统提示词已在 node 0，直接追加到会话尾部。
+  // prepend 让本监听排在最外层，不依赖插件加载顺序。
+  ctx.on('agent/pre-step', async ({ agent, step, signal }, next) => {
     const decision = await next()
-    if (!signal.aborted && wasFrozen(agent.session)) await snapshotCache.assemble(agent.session)
+    if (decision.kind !== 'enter' || signal.aborted) return decision
+    if (decision.messages.length === 0 && step === 1) return decision
+    const message = await snapshotMessage(agent.session)
+    if (message === undefined) return decision
+    if (decision.messages.length > 0) return { ...decision, messages: [message, ...decision.messages] }
+    appendSnapshot(agent.session, message)
     return decision
   }, { prepend: true })
-  // 溢出恢复：compaction-basic 压缩后返回 retry，同一步重试前宿主同样重调 provider；只在重试时重建。
+  // 溢出恢复：compaction-basic 压缩后返回 retry，同一步重试前不再经过 pre-step；只在重试时补发。
   // 也要 prepend：compaction-basic 恢复时直接返回 retry、不调 next()，排在它里层就看不到这次重试。
   ctx.on('agent/request-error', async ({ agent, signal }, next) => {
     const action = await next()
-    if (action?.kind === 'retry' && !signal.aborted && wasFrozen(agent.session)) await snapshotCache.assemble(agent.session)
+    if (action?.kind === 'retry' && !signal.aborted) {
+      const message = await snapshotMessage(agent.session)
+      if (message !== undefined) appendSnapshot(agent.session, message)
+    }
     return action
   }, { prepend: true })
-  // 快照只在 assemble waterfall（异步）里构建：宿主在跑 waterfall【之前】就已物化全部 provider 文本，
-  // 而同步 provider 只回缓存（首轮为空串）。中间件等 workspace 解析落定后组装或复用冻结快照，
-  // 把本插件那条 context 的文本原位替换；解析超时走 global-only 临时文本（不冻结），不阻塞宿主。
-  // 宿主压掉运行时上下文时组装里没有本插件的条目：快照不进模型上下文，就不冻结——不计召回、不出会话视图、
-  // 不同步超限，检索也不会把没带入的正文当成已在上下文里。
-  ctx.on('system-prompt/assemble', async (assembly: PromptAssembly, assembleCtx: AssembleContext, next: () => Promise<PromptAssembly>) => {
-    const session = (assembleCtx?.scope as { session?: object } | undefined)?.session
-    const entries = assembly.contexts.filter(entry => entry.name === 'plastic-memory')
-    if (session) lastHadEntry.set(session, entries.length > 0)
-    if (session && entries.length > 0) {
-      const text = await snapshotCache.assemble(session)
-      for (const entry of entries) entry.text = text
-    }
-    return next()
-  })
-  // 宿主对 context 文本做 {{变量}} 插值、没有关闭选项，记忆正文又是用户可控内容：
-  // 快照出口把 {{ 转义成对这个变量的引用，由宿主插值还原（见 snapshot.ts escapePromptBraces）。
-  ctx.systemPrompt.variable(PROMPT_LBRACE_VARIABLE, () => '{{')
-  ctx.systemPrompt.context({
-    name: 'plastic-memory',
-    order: 50,
-    // AssembleContext.scope 是发起组装的 Agent，从它拿到所属 session，只回该 session 的冻结快照（无则空串）
-    text: (assembleCtx?: AssembleContext) => {
-      const session = (assembleCtx?.scope as { session?: object } | undefined)?.session
-      return session ? snapshotCache.render(session) : ''
-    },
-  })
 }

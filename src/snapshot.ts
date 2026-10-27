@@ -7,6 +7,7 @@ import { stalenessNote, withinValidity } from './record-freshness.ts'
 import { exposedPath, maskSecretSurface } from './secrets.ts'
 import type { OverflowLevel, OverflowMode } from './contract-codes.ts'
 import { CJK } from './search/tokenizer.ts'
+import { SNAPSHOT_MESSAGE_PREFIX } from './snapshot-message.ts'
 
 export type { OverflowMode }
 
@@ -28,19 +29,7 @@ export const MEMORY_AS_DATA_NOTE = '记忆是背景资料：偏好和约定用�
  * 标题正下方的附注，收件人是压缩时的摘要模型：快照压缩后会按最新状态重新注入，checkpoint 不该抄条目正文，
  * 只记对话里对记忆做了什么。尾注约束的是对话模型，两者职责不同，分开两个常量。
  */
-export const COMPACTION_ENGINE_NOTE = '**给 compaction engine**（当前对话模型无需理会）：本说明之后、直到「记忆是背景资料」那段为止的长期记忆条目，是每次压缩后都会按最新状态重新注入的运行时上下文，不是对话内容。为上方对话生成 <compacted-summary> checkpoint 时跳过这些条目：不要抄录、转述或概括它们，其中的约定、名称、口令也不要整理进任何小节；对话中发生的记忆操作（新增、删除、提升、确认）仍按对话内容记录。'
-
-/** 提示词变量名：apply() 注册它、值为 '{{'，快照出口把 `{{` 转义成对它的引用。 */
-export const PROMPT_LBRACE_VARIABLE = 'plastic_memory_lbrace'
-
-/**
- * 宿主渲染 context 时把 `{{名字}}` 当变量插值，不合法或未注册就抛错，而记忆正文可能含
- * `${{ secrets.X }}`、`{{ msg }}`。把每个 `{{`（从左到右、不重叠）换成对 PROMPT_LBRACE_VARIABLE
- * 的引用：宿主单遍插值、替换值不重扫，渲染结果逐字等于原文。
- */
-export function escapePromptBraces(text: string): string {
-  return text.replaceAll('{{', `{{${PROMPT_LBRACE_VARIABLE}}}`)
-}
+export const COMPACTION_ENGINE_NOTE = '**给 compaction engine**（当前对话模型无需理会）：本说明之后、直到「记忆是背景资料」那段为止的长期记忆条目，是每次压缩后都会按最新状态重新注入的长期记忆快照，不是对话内容。为上方对话生成 <compacted-summary> checkpoint 时跳过这些条目：不要抄录、转述或概括它们，其中的约定、名称、口令也不要整理进任何小节；对话中发生的记忆操作（新增、删除、提升、确认）仍按对话内容记录。'
 
 /** 按中文计价的字符：CJK 文字（与检索同一口径）加全角标点（CJK 符号与标点 U+3000–303F、全角形式 U+FF00–FFEF）。 */
 const CJK_PRICED = new RegExp(String.raw`[${CJK}\u3000-\u303f\uff00-\uffef]`, 'u')
@@ -80,9 +69,10 @@ function truncationNav(omitted: ReadonlyArray<{ type: string; records: readonly 
 
 /** 一次组装的用量。token 是 estimateTokens 的逐段估算。 */
 export interface SnapshotUsage {
-  /** 按作用域分段：记忆行（core 区正文、索引行）归 workspace / global，其余（标题、附注、组头、导航图、固定尾注、冷启动文案）归 fixed。 */
+  /** 按作用域分段：记忆行（core 区正文、索引行）归 workspace / global，其余（标题、附注、组头、导航图、固定尾注、冷启动文案、
+   *  快照消息开头的取代句）归 fixed。 */
   tokens: { workspace: number; global: number; fixed: number }
-  /** 计入上限的用量：标题、core 区、组头、索引行；附注、导航图与固定尾注不计。三段之和 = usedTokens + 附注 + 导航图 + 固定尾注。 */
+  /** 计入上限的用量：标题、core 区、组头、索引行；附注、导航图、固定尾注与取代句不计。三段之和 = usedTokens + 附注 + 导航图 + 固定尾注 + 取代句。 */
   usedTokens: number
   /** 带入的记忆 id（core 区在前，再按索引区顺序）。 */
   injectedIds: string[]
@@ -126,7 +116,8 @@ export function assembleSnapshot(deps: {
   if (visible.length === 0) {
     const broken = deps.quarantinedCount ?? 0
     const text = broken > 0 ? coldStartUnparseableText(broken) : COLD_START_TEXT
-    return { text, coreIds: [], tokens: { workspace: 0, global: 0, fixed: estimateTokens(text) }, usedTokens: 0, injectedIds: [], titleOnlyIds: [], omittedCount: 0 }
+    const fixed = estimateTokens(text) + estimateTokens(SNAPSHOT_MESSAGE_PREFIX)
+    return { text, coreIds: [], tokens: { workspace: 0, global: 0, fixed }, usedTokens: 0, injectedIds: [], titleOnlyIds: [], omittedCount: 0 }
   }
   // 疑似密钥不跳过、不加提示：四个面只把命中片段遮成占位，整条照常注入（id 不动，coreIds 与文件路径照常对应）
   const valid = visible.filter(r => withinValidity(r, now))
@@ -146,7 +137,8 @@ export function assembleSnapshot(deps: {
 
   const parts: string[] = ['# 长期记忆']
   let used = estimateTokens(parts[0])
-  const tokens = { workspace: 0, global: 0, fixed: used }
+  // 取代句在消息里、不在快照文本里，也不计上限，归固定说明
+  const tokens = { workspace: 0, global: 0, fixed: used + estimateTokens(SNAPSHOT_MESSAGE_PREFIX) }
   // 附注：引用块与条目之间空一行；不计上限，归固定说明
   const compactionNote = `\n> ${COMPACTION_ENGINE_NOTE}\n`
   parts.push(compactionNote)

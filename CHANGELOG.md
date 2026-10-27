@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Changed
+- The memory snapshot is now a message of its own instead of a section of
+  the host's shared runtime context; the trajectory view lists it as a
+  separate context row from plastic-memory. A change in another plugin's
+  context section no longer sends a second copy of the snapshot along with
+  it, and minimal mode, which drops the runtime context, now brings
+  memories in as well.
 - The memory snapshot now opens with a short note addressed to the host's
   compaction engine: the entries below it are reinjected after every
   compaction, so the checkpoint should leave their content out and only keep

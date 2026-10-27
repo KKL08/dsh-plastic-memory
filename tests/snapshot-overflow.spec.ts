@@ -6,10 +6,13 @@ import { formatIndexLine } from '../src/index-line.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { DAY } from './helpers/clock.ts'
+import { SNAPSHOT_SUPERSEDE_NOTE } from '../src/snapshot-message.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const NOW = 10 * DAY
 const WS = '/repo/proj'
+/** 快照消息里取代句连同空行的估算：属于消息层，计进固定说明。 */
+const SUPERSEDE_TOKENS = estimateTokens(`${SNAPSHOT_SUPERSEDE_NOTE}\n\n`)
 const record = (partial: Partial<MemoryRecord> = {}) => baseRecord({ createdAt: NOW, updatedAt: NOW, lastConfirmedAt: NOW, ...partial })
 const base = { registry, workspacePath: WS, now: NOW }
 
@@ -94,14 +97,14 @@ describe('assembleSnapshot：超出上限两种模式', () => {
 })
 
 describe('assembleSnapshot：按作用域分段的 token', () => {
-  it('记忆行按作用域归本项目 / 全局，其余（标题、附注、尾注）归固定说明；三段之和 = 预算内用量 + 附注 + 固定尾注', () => {
+  it('记忆行按作用域归本项目 / 全局，其余（标题、附注、尾注、取代句）归固定说明；三段之和 = 预算内用量 + 附注 + 固定尾注 + 取代句', () => {
     const g = record({ id: 'mem_g', scope: 'global', name: '全局条目', summary: '全局摘要' })
     const w = record({ id: 'mem_w', scope: 'workspace', workspacePath: WS, name: '项目条目', summary: '项目摘要内容' })
     const r = assembleSnapshot({ ...base, records: [g, w], budget: 4000 })
     expect(r.tokens.global).toBe(estimateTokens(formatIndexLine(g, { passive: false, note: '' })))
     expect(r.tokens.workspace).toBe(estimateTokens(formatIndexLine(w, { passive: false, note: '' })))
     const tail = estimateTokens('\n看全文：用 memory_search 按 id 或关键词查。') + estimateTokens(`\n${MEMORY_AS_DATA_NOTE}`)
-    expect(r.tokens.workspace + r.tokens.global + r.tokens.fixed).toBe(r.usedTokens + estimateTokens(`\n> ${COMPACTION_ENGINE_NOTE}\n`) + tail)
+    expect(r.tokens.workspace + r.tokens.global + r.tokens.fixed).toBe(r.usedTokens + estimateTokens(`\n> ${COMPACTION_ENGINE_NOTE}\n`) + tail + SUPERSEDE_TOKENS)
     expect(r.injectedIds.sort()).toEqual(['mem_g', 'mem_w'])
   })
 
@@ -113,9 +116,9 @@ describe('assembleSnapshot：按作用域分段的 token', () => {
     expect(r.injectedIds).toEqual(['mem_pref'])
   })
 
-  it('冷启动：只有固定说明', () => {
+  it('冷启动：只有固定说明（文案加取代句）', () => {
     const r = assembleSnapshot({ ...base, records: [], budget: 4000 })
-    expect(r.tokens).toEqual({ workspace: 0, global: 0, fixed: estimateTokens(COLD_START_TEXT) })
+    expect(r.tokens).toEqual({ workspace: 0, global: 0, fixed: estimateTokens(COLD_START_TEXT) + SUPERSEDE_TOKENS })
     expect(r.usedTokens).toBe(0)
     expect(r.injectedIds).toEqual([])
     expect(r.omittedCount).toBe(0)

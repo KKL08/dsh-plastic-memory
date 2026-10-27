@@ -255,7 +255,7 @@ try {
       const s = {}
       snapshotCache.setWorkspacePath(s, currentWs)
       const text = await snapshotCache.assemble(s)
-      if (!text.startsWith('# 长期记忆')) throw new Error('快照没有组装出记忆内容')
+      if (!text?.startsWith('# 长期记忆')) throw new Error('快照没有组装出记忆内容')
     }),
     await bench('memory_search', async () => {
       const r = await executeSearch({ query: `${WORDS[0]} 部署流程` }, exec, { store, registry, resolveContext })
