@@ -162,7 +162,7 @@ export async function executeSearch(
   let ranked: RankedRecord[]
   if (tokens.length === 0 && legacyTerms.length === 0) {
     // 零 token 查询：不做关键词过滤，范围内全部按 confidence、lastConfirmedAt 排
-    ranked = candidates.map(record => ({ record, tier: 'all' as const, anchorHits: 0, score: 0, tokenHits: [] }))
+    ranked = candidates.map(record => ({ record, tier: 'all' as const, coverage: 0, anchorHits: 0, score: 0, tokenHits: [] }))
   } else {
     ranked = rankRecords({ tokens, legacyTerms, anchors: anchorTerms(a.query), records: candidates, listedCount: read.listedCount, tokenize })
   }

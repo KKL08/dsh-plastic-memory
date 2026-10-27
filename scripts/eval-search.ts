@@ -203,11 +203,11 @@ function rankLocal(scoring: Scoring, tokens: readonly string[], legacyTerms: rea
           if (wtf > 0) score += idf[i]! * wtf * (p.k1 + 1) / (wtf + p.k1)
         }
       })
-      out.push({ record: d.record, tier: hitCount === tokens.length ? 'all' : 'partial', anchorHits: countAnchorHits(d.record, anchors), score, tokenHits: d.hit })
+      out.push({ record: d.record, tier: hitCount === tokens.length ? 'all' : 'partial', coverage: anchors.length > 0 ? hitCount : 0, anchorHits: countAnchorHits(d.record, anchors), score, tokenHits: d.hit })
       continue
     }
     const legacy = legacyTerms.length > 0 ? matchScore(d.record, legacyTerms as string[]) : 0
-    if (legacy > 0) out.push({ record: d.record, tier: 'substring', anchorHits: countAnchorHits(d.record, anchors), score: legacy, tokenHits: d.hit })
+    if (legacy > 0) out.push({ record: d.record, tier: 'substring', coverage: 0, anchorHits: countAnchorHits(d.record, anchors), score: legacy, tokenHits: d.hit })
   }
   return out
 }
@@ -222,7 +222,7 @@ function runVariant(v: Variant, queries: readonly EvalQuery[] = EVAL_QUERIES, re
     const anchors = anchorTerms(q.query)
     let ranked: RankedRecord[]
     if (tokens.length === 0 && legacyTerms.length === 0) {
-      ranked = records.map(record => ({ record, tier: 'all' as SearchTier, anchorHits: 0, score: 0, tokenHits: [] }))
+      ranked = records.map(record => ({ record, tier: 'all' as SearchTier, coverage: 0, anchorHits: 0, score: 0, tokenHits: [] }))
     } else if (v.scoring === PRODUCTION_SCORING) {
       ranked = rankRecords({ tokens, legacyTerms, anchors, records, listedCount: records.length, tokenize, params: v.params })
     } else {

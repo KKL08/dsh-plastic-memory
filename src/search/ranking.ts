@@ -50,7 +50,12 @@ export const TIER_ORDER: Record<SearchTier, number> = { all: 0, partial: 1, subs
 export interface RankedRecord {
   record: MemoryRecord
   tier: SearchTier
-  /** 字面命中的锚点词数（见 anchorTerms），同档内先比它、再比分数。 */
+  /**
+   * 查询有锚点词时是命中的查询 token 数，没有时恒为 0。同档内最先比它：部分命中档里只含一个常见锚点的记录，
+   * 不压过覆盖了大半查询的记录；全命中档里各条相等，不影响排序；没有锚点的查询照旧只按分数排。
+   */
+  coverage: number
+  /** 字面命中的锚点词数（见 anchorTerms），同档内先比覆盖、再比它、再比分数。 */
   anchorHits: number
   /** all / partial 档是 BM25F 分数（只以子串命中的 token 不贡献词频）；substring 档是旧词项的命中词数。只在同档内可比。 */
   score: number
@@ -194,20 +199,21 @@ export function rankRecords({ tokens, legacyTerms, anchors = [], records, listed
   for (const doc of docs) {
     if (tokens.length > 0 && doc.hitCount > 0) {
       out.push({
-        record: doc.record, tier: doc.hitCount === tokens.length ? 'all' : 'partial',
+        record: doc.record, tier: doc.hitCount === tokens.length ? 'all' : 'partial', coverage: anchors.length > 0 ? doc.hitCount : 0,
         anchorHits: countAnchorHits(doc.record, anchors), score: bm25f(doc, idfs, params), tokenHits: doc.hit,
       })
       continue
     }
     const legacy = legacyTerms.length > 0 ? matchScore(doc.record, legacyTerms as string[]) : 0
-    if (legacy > 0) out.push({ record: doc.record, tier: 'substring', anchorHits: countAnchorHits(doc.record, anchors), score: legacy, tokenHits: doc.hit })
+    if (legacy > 0) out.push({ record: doc.record, tier: 'substring', coverage: 0, anchorHits: countAnchorHits(doc.record, anchors), score: legacy, tokenHits: doc.hit })
   }
   return out
 }
 
-/** 档 → 字面锚点命中数 → 分数 → confidence → lastConfirmedAt；档位升序，其余降序。 */
+/** 档 → 覆盖 → 字面锚点命中数 → 分数 → confidence → lastConfirmedAt；档位升序，其余降序。 */
 export function compareRanked(x: RankedRecord, y: RankedRecord): number {
   return TIER_ORDER[x.tier] - TIER_ORDER[y.tier]
+    || y.coverage - x.coverage
     || y.anchorHits - x.anchorHits
     || y.score - x.score
     || y.record.confidence - x.record.confidence

@@ -193,6 +193,21 @@ describe('字面锚点：含标点的查询词整词命中排在同档前面', (
     expect(await ids(store, '分片上传？')).toEqual(['mem_ranked', 'mem_literal'])
   })
 
+  it('部分命中档先比命中的查询词数：常见锚点不把覆盖面大得多的记录挤出前十', async () => {
+    const catalogs = Array.from({ length: 11 }, (_, i) => record({
+      id: `mem_cat${i}`, name: `模块清单 ${i}`, lastConfirmedAt: 9,
+      content: `第 ${i} 组内置模块：node:sqlite、node:fs、node:path，按需引入。`,
+    }))
+    const store = await seeded([
+      ...catalogs,
+      record({
+        id: 'mem_guide', name: '事务指南', lastConfirmedAt: 1,
+        content: '在 node 里用 sqlite 时，写操作包进 transaction；出错就 rollback，整批放弃，不留半截数据。',
+      }),
+    ])
+    expect((await ids(store, 'node:sqlite transaction rollback retry'))[0]).toBe('mem_guide')
+  })
+
   it('括号包着的版本号：去掉首尾括号后按字面排', async () => {
     const store = await seeded([
       record({ id: 'mem_rc2', name: '已知问题', content: RELEASE_NOTE('0.2.1-rc.2'), lastConfirmedAt: 1 }),
