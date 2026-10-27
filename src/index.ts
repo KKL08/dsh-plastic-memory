@@ -434,7 +434,7 @@ export async function apply(ctx: Context, config: Config) {
   }
   syncGovernanceTools()
 
-  // GUI（浏览器半侧）的动作通道：/memory 命令走可选注册，旧宿主没有 commands 服务时插件照常挂载、不注册、不报错。
+  // GUI（浏览器半侧）的动作通道：/memory 命令随 commands 服务注册，服务撤下时一并停写视图。
   // 首次视图写入推迟到第一个 session/created（见下方）：apply 期间读账本会触发旧 KV 导入探测，
   // 那时 storageDomain 未必挂上；而没有任何会话时浏览器半侧也读不到视图，早写没有意义。
   // 体检视图与自动体检调度共用的读法：设置表、完成记录、目录清单，不读记忆文件

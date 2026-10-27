@@ -159,10 +159,9 @@ All notable changes to this project are documented here. The format follows
   stays as a settled entry (not counted on the dot) so it can be undone, and
   restoring the losing memory from 「最近删除」 brings the conflict back to the
   pending list exactly once. The deleted memory's row says which memory won.
-- The GUI requires DeepSeek Harness v0.2.1-rc.2 or later. On older supported
-  hosts (v0.1.7-rc.1 and up) the browser bundle registers nothing and the
-  plugin's tools and memory injection work as before; nothing else is
-  affected.
+- Requires DeepSeek Harness v0.2.1-rc.2 or later, the first version whose
+  plugin interface slots the GUI uses. Older hosts refuse to install or start
+  this release; stay on 0.1.1-beta.5 there.
 - Memories are now plain files and nothing else. The Markdown files on disk
   are the only copy: the plugin keeps no table in memory, loads nothing at
   start-up, and reads just the directories an operation needs. A file you

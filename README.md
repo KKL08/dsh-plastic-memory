@@ -4,7 +4,7 @@
 
 ![Version](https://img.shields.io/badge/version-0.2.0--beta.1-yellow)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
-![Platform](https://img.shields.io/badge/platform-DeepSeek%20Harness%20%E2%89%A5v0.1.7--rc.1-4D6BFF)
+![Platform](https://img.shields.io/badge/platform-DeepSeek%20Harness%20%E2%89%A5v0.2.1--rc.2-4D6BFF)
 ![Node](https://img.shields.io/badge/node-%5E22.19.0%20%7C%7C%20%E2%89%A524-339933?logo=node.js&logoColor=white)
 
 **简体中文** | [English](README.en.md)
@@ -91,7 +91,7 @@ dsh plugin --profile web add dsh-plastic-memory@0.1.1-beta.5
 > dsh plugin --profile desktop add dsh-plastic-memory@0.1.1-beta.5
 > ```
 >
-> **运行环境要求**：Node.js `^22.19.0 || >=24`，DeepSeek Harness v0.1.7-rc.1 及以上（目前已验证到 v0.2.1-rc.2）；图形界面要 v0.2.1-rc.2 及以上。
+> **运行环境要求**：Node.js `^22.19.0 || >=24`，DeepSeek Harness v0.2.1-rc.2 及以上。
 > **中文分词**：可选依赖 `@node-rs/jieba`（带各平台预编译二进制）随 npm 安装自动带上，中文检索按词匹配；当前平台装不上时插件照常安装，中文检索退回二字切分，其他功能不受影响。
 > （DeepSeek Harness 仍在预发布阶段，之后还可能出现破坏性更新；升级宿主前请留意本插件当前支持的版本范围，见顶部徽章和 CHANGELOG。）
 >
@@ -121,8 +121,6 @@ dsh plugin --profile web add dsh-plastic-memory@0.1.1-beta.5
 - **插件设置页**（宿主插件管理里的本插件详情）：场景模板、自定义类型（弹层增删改）、带入上限与超出上限的模式、溯源记忆出处、中文分词的用户词典路径、体检开关与灵敏度、全局记忆的去向，外加一张状态卡。保存即写回 profile 的 `cordis.patch.yml`，不用重启。
 
 对话里每次记住东西都有一张可删的卡；左栏图标上的圆点只在有事等你决定时亮（琥珀），发现密钥时变红。
-
-> 界面要求 DeepSeek Harness v0.2.1-rc.2 及以上；更早的受支持宿主（v0.1.7-rc.1 起）工具与注入照常，只是没有界面。
 
 ---
 
