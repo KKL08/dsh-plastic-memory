@@ -298,14 +298,22 @@ export class MemoryStore {
   /**
    * 只软删（GUI 的 forget）：锁内看到的当前内容含密钥就不动它、回 has-secret，由调用方先问用户；
    * 调用方读过之后另一个会话才写进的密钥也拦得住。定位同 softDelete。
+   * isChanged：锁内看到的当前内容过了它（调用方核对过的版本之后又被改过）就不动它、回 changed。
    */
-  async softDeleteUnlessSecret(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, opts: DeleteOptions = {}): Promise<'deleted' | 'has-secret' | 'missing'> {
+  async softDeleteUnlessSecret(
+    record: Pick<MemoryRecord, 'id' | 'workspacePath'>,
+    opts: DeleteOptions & { isChanged?: (current: MemoryRecord) => boolean } = {},
+  ): Promise<'deleted' | 'has-secret' | 'changed' | 'missing'> {
     const hint = deleteHint(record, opts)
     if (!(await this.table.locate(record.id, hint))) return 'missing'
     try {
       // 走 update 的读改写：写盘前又被改就在新内容上重判，判密钥看的始终是将被覆盖的那份
-      const written = await this.update(record, r => (hasSecret(r) ? r : markDeleted(r, opts.now)), hint)
-      return written.status === 'deleted' ? 'deleted' : 'has-secret'
+      let outcome: 'deleted' | 'has-secret' | 'changed' = 'deleted'
+      await this.update(record, (r) => {
+        outcome = opts.isChanged?.(r) === true ? 'changed' : hasSecret(r) ? 'has-secret' : 'deleted'
+        return outcome === 'deleted' ? markDeleted(r, opts.now) : r
+      }, hint)
+      return outcome
     } catch (err) {
       if (err instanceof RecordNotFoundError) return 'missing'   // 定位之后被别处删掉
       throw err

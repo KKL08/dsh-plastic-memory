@@ -2326,6 +2326,42 @@ describe('merge-memories（内容重复的直接合并）', () => {
     expect(await e.snapshots.list()).toEqual([])
   })
 
+  it('核对之后、软删之前另一条被别处改过：整体回 stale，保留的那条退回原样，另一条照旧在用、留着新内容', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_a', content: '甲的正文', createdAt: 1 }))
+    await e.store.create(record({ id: 'mem_b', content: '乙的正文', createdAt: 2 }))
+    const pathA = (await e.store.locate('mem_a'))!.filePath
+    const beforeA = await readFile(pathA, 'utf8')
+    // 快照拍在核对之后：借它插入另一个会话对乙的修改
+    const capture = e.snapshots.capture.bind(e.snapshots)
+    e.snapshots.capture = async (...args) => {
+      const snap = await capture(...args)
+      await e.store.update({ id: 'mem_b' }, r => ({ ...r, content: '乙的第二版', updatedAt: LATER + 5 }))
+      return snap
+    }
+    e.clock.now = LATER
+    expect(err(await merge(e, ['mem_a', 'mem_b'])).code).toBe('stale')
+    expect(await readFile(pathA, 'utf8')).toBe(beforeA)
+    expect(await e.store.get('mem_b')).toMatchObject({ status: 'active', content: '乙的第二版' })
+    expect(await e.decisions.listSettled()).toEqual([])
+  })
+
+  it('撤销前被删的那条在最近删除里的内容和快照不同：拒绝撤销，不拿快照里的旧内容盖掉它', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_a', content: '甲的正文', createdAt: 1 }))
+    await e.store.create(record({ id: 'mem_b', content: '乙的正文', createdAt: 2 }))
+    e.clock.now = LATER
+    const body = ok(await merge(e, ['mem_a', 'mem_b']))
+    // 软删进最近删除的是之后的版本（核对与软删之间被改过）
+    await e.store.update({ id: 'mem_b' }, r => ({ ...r, content: '乙的第二版' }))
+    const filePath = (await e.store.locate('mem_a'))!.filePath
+    const merged = await readFile(filePath, 'utf8')
+
+    expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('failed')
+    expect(await readFile(filePath, 'utf8')).toBe(merged)
+    expect(await e.store.get('mem_b')).toMatchObject({ status: 'deleted', content: '乙的第二版' })
+  })
+
   it('同一条记忆合并两次 → invalid-args', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_a' }))

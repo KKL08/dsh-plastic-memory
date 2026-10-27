@@ -10,7 +10,7 @@ import { RecordNotFoundError } from '../errors.ts'
 import { detectSecrets, hasSecret } from '../secrets.ts'
 import { computeDigest } from '../storage/frontmatter.ts'
 import { candidateFingerprint, isModelChange, kindOf, verdictLoser, type PendingDecisionsStore } from '../governance/decisions.ts'
-import { editFingerprint, isConflicting, type SnapshotStore } from '../governance/snapshots.ts'
+import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
 import type { PendingDecision, ScanCacheEntry, SnapshotRecord } from '../governance/schema.ts'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
@@ -228,11 +228,12 @@ async function dispatch(
     if (current?.status !== 'active' || !isOwnWrite(current)) {
       return fail(cmd, 'failed', `记忆 ${before.id} 在这次修改之后又被改过或已删除，撤销会冲掉之后的改动，未做任何改动`)
     }
-    // 要么全恢复、要么全不动：合并删掉的那条若已从最近删除恢复又改过，恢复会跳过它，保留的那条却已还原，所以先逐条核对
+    // 要么全恢复、要么全不动：合并删掉的那条若已从最近删除恢复又改过，恢复会跳过它，保留的那条却已还原，所以先逐条核对。
+    // 还在最近删除里的也比内容：软删进去的若是快照之后的版本，恢复会拿快照里的旧内容盖掉它
     for (const rec of records) {
       if (rec.id === before.id) continue
       const cur = await deps.store.get(rec.id, { workspacePath: rec.workspacePath, isExactLayer: true })
-      if (isConflicting(cur, rec) && !isOwnWrite(cur!)) {
+      if (cur !== undefined && editFingerprint(cur) !== editFingerprint(rec) && !isOwnWrite(cur)) {
         return fail(cmd, 'failed', `记忆 ${rec.id} 在这次修改之后又被改过，撤销会冲掉之后的改动，未做任何改动`)
       }
     }
@@ -623,22 +624,31 @@ async function dispatch(
       }, now)
       // 出处、类型、作用域、有效期、置信度、取代关系不动：这是用户亲手改的内容，不是借来的会话说的
       const hint = { workspacePath: kept.record.workspacePath, isExactLayer: true }
-      let isWritten = false
+      let mine: MemoryRecord | undefined
       try {
         await deps.store.update(kept.record, (cur) => {
           // 锁内按磁盘上的现状再核对一次：读过之后被改过就原样不写
-          isWritten = cur.status === 'active' && !isStale(cur, kept.base)
-          if (!isWritten) return cur
+          if (cur.status !== 'active' || isStale(cur, kept.base)) return cur
           // 标手改：出处还是原来的会话，「已手编，出处可能不对应」照实；模型之后要改写、替代它得先问用户（同手改文件）
-          return { ...cur, content, name, summary, tags, updatedAt: now, lastConfirmedAt: now, handEdited: true }
+          return (mine = { ...cur, content, name, summary, tags, updatedAt: now, lastConfirmedAt: now, handEdited: true })
         }, hint)
       } catch (error) {
         if (!(error instanceof RecordNotFoundError)) throw error
       }
-      if (!isWritten) return stale()
+      if (mine === undefined) return stale()
       // 另一条走删除的老路：软删进最近删除，账本里指向它的条目一并清掉（同 forget）；快照上面已经拍过。
+      // 锁内再按卡片版本核对一次：核对之后被改过的不删，保留的那条退回改前（之间没被别处再改的话），整体回 stale；
       // 核对之后另一个会话才写进密钥的不删（极少见），这次只算改了保留的那条
-      const isRemoved = removed === undefined || (await deps.store.softDeleteUnlessSecret(removed.record, { isExactLayer: true, now })) !== 'has-secret'
+      const outcome = removed === undefined ? 'deleted'
+        : await deps.store.softDeleteUnlessSecret(removed.record, { isExactLayer: true, now, isChanged: cur => cur.status !== 'active' || isStale(cur, removed.base) })
+      if (outcome === 'changed') {
+        const isMine = (cur: MemoryRecord) => cur.status === 'active' && cur.updatedAt === now && editFingerprint(cur) === editFingerprint(mine!)
+        await deps.store.update(kept.record, cur => (isMine(cur) ? kept.record : cur), hint).catch((error: unknown) => {
+          if (!(error instanceof RecordNotFoundError)) throw error
+        })
+        return stale()
+      }
+      const isRemoved = outcome !== 'has-secret'
       if (removed !== undefined && isRemoved) await deps.decisions.removeByMemoryIds([removed.record.id])
       const written = await deps.store.locate(kept.record.id, hint)
       const memoryIds = removed !== undefined && isRemoved ? [kept.record.id, removed.record.id] : [kept.record.id]
