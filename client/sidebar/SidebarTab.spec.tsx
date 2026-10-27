@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import {
   GUI_VIEW_VERSION,
-  type HealthView, type LibraryView, type MemoryCard, type PendingItem, type PendingView, type SessionView,
+  type HealthView, type LibraryView, type MemoryCard, type ModelChange, type PendingItem, type PendingView, type SessionView,
 } from '../../src/gui/contract.ts'
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import type { PluginConfig } from '../gateway.ts'
@@ -322,6 +322,48 @@ describe('SidebarTab 这次新写入的', () => {
     expect(saved.queryByText('报销截止每月 25 日。')).toBeNull()
     expect(saved.getByText('已彻底删除。如果它是真的凭证，记得去换一个新的。')).toBeInTheDocument()
     expect(screen.queryByText(/14 天/)).toBeNull()
+  })
+})
+
+describe('SidebarTab 这次新写入的：模型改写、替代', () => {
+  const rewritten = memory({ id: 'p1', type: 'preference', content: '测试用 SQLite。' })
+  const newer = memory({ id: 'n1', type: 'preference', name: '测试数据库', content: '测试统一用 SQLite。' })
+  const rewrite: ModelChange = {
+    decisionId: 'pd_r', kind: 'rewrite', memoryId: 'p1', before: pref, sessionId: 's1', callId: 'c1', at: BOOTED + 5, state: 'undoable',
+  }
+  const supersede: ModelChange = {
+    decisionId: 'pd_s', kind: 'supersede', memoryId: 'p2', by: 'n1', before: { ...pref2, name: '旧的测试约定' }, sessionId: 's1', callId: 'c2', at: BOOTED + 6, state: 'undoable',
+  }
+  const withChanges = (changes: ModelChange[], ...items: MemoryCard[]): LibraryView => ({ ...library(rewritten, proj, glob, ...items), modelChanges: changes })
+
+  it('早于这份快照、别的会话的改动不认领（没有新记时这一组只因本会话的改动出现）', () => {
+    const early = { ...rewrite, decisionId: 'pd_e', at: BOOTED }
+    const other = { ...rewrite, decisionId: 'pd_o', sessionId: 's2' }
+    setup({ library: withChanges([early, other]), session: snapshot(), pending: pending() })
+    expect(screen.queryByRole('region', { name: '这次新写入的' })).toBeNull()
+  })
+
+  it('改写：显示改后的那条、带「已改写」，「改前 / 改后 ›」展开对照；「撤销修改」按这次改动发 undo，不用原位确认', async () => {
+    const { gateway } = setup({ library: withChanges([rewrite]), session: snapshot(), pending: pending() })
+    const group = within(screen.getByRole('region', { name: '这次新写入的' }))
+    expect(group.getByText('已改写')).toBeInTheDocument()
+    expect(group.getAllByText('测试用 SQLite。')[0]).toBeVisible()
+    expect(group.getByText('测试用真实 Postgres。')).not.toBeVisible()
+    fireEvent.click(group.getByRole('button', { name: '改前 / 改后 ›' }))
+    expect(group.getByText('测试用真实 Postgres。')).toBeVisible()
+    await act(async () => { fireEvent.click(group.getByRole('button', { name: '撤销修改' })) })
+    expect(gateway.executed).toEqual([{ sessionId: 's1', command: { cmd: 'undo', decisionId: 'pd_r' } }])
+    expect(group.getByText('已撤销')).toBeInTheDocument()
+  })
+
+  it('替代：写「「新」替代了「旧」」，撤销按这次替代发 undo；之后又改过的只写说明', async () => {
+    const { gateway } = setup({ library: withChanges([supersede, { ...rewrite, state: 'changed' }], newer), session: snapshot({ savedIds: ['n1'] }), pending: pending() })
+    const group = within(screen.getByRole('region', { name: '这次新写入的' }))
+    expect(group.getByText('「测试数据库」替代了「旧的测试约定」')).toBeInTheDocument()
+    expect(group.getByText('之后又改过，没法直接撤销')).toBeInTheDocument()
+    expect(group.getAllByRole('button', { name: '撤销修改' })).toHaveLength(1)
+    await act(async () => { fireEvent.click(group.getByRole('button', { name: '撤销修改' })) })
+    expect(gateway.executed).toEqual([{ sessionId: 's1', command: { cmd: 'undo', decisionId: 'pd_s' } }])
   })
 })
 

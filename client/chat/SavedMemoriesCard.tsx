@@ -9,9 +9,12 @@
  * 密钥不会出现在这里：记忆卡在 savedMemoryCard 里已遮盖，口径比视图宽（疑似密钥也遮，见 tool-summary.ts）。
  * 模型标成全局提升候选的（全部记忆视图里的 promotion）：折叠行末尾「· N 条可提升为全局」，展开后那条元信息带「可提升为全局」，
  * 下方「留在本项目」「提升为全局」，处理过的换成结果文字（见 promote-in-place.tsx）。
+ * 模型改写已有记忆（update）的也列在这里：折叠行写「改写了 N 条」，展开后那条元信息带「已改写」，下方「改前 / 改后」对照与「撤销修改」；
+ * 这次调用替代了旧记忆的，那条下方一行「替代了「旧名」」与「撤销修改」，折叠行末尾「· 替代了 N 条旧记忆」（见 model-change.tsx）。
+ * 改动按工具调用 id 认领全部记忆视图的 modelChanges，会话结束后照样认得；视图里没有、且调用已超出保留窗口的改写写「已超过 14 天」。
  */
 import { useId, useMemo, useState } from 'react'
-import { layerOfMemory, type GuiLayerRef, type LibraryView } from '../../src/gui/contract.ts'
+import { RETENTION_MS, layerOfMemory, type GuiLayerRef, type LibraryView, type ModelChange } from '../../src/gui/contract.ts'
 import { samePath, useGateway, type BorrowedSession } from '../gateway.ts'
 import { useT } from '../i18n.tsx'
 import type { NavTarget } from '../nav.ts'
@@ -22,6 +25,7 @@ import { keepFocusInPlace } from '../ui/focus-return.ts'
 import { TrashIcon } from '../ui/TrashIcon.tsx'
 import { crossConfirmCss, DeleteWithConfirm, SecretDeleteConfirm } from '../pending/action.tsx'
 import { promoteInPlaceCss, promotionOf, usePromoteInPlace, type InPlacePromotion } from '../pending/promote-in-place.tsx'
+import { ModelChangeLine, RewrittenChip, modelChangeCss } from '../pending/model-change.tsx'
 import type { SavedMemory } from './saved-turn.ts'
 
 /** 这一行自己的进行中 / 失败 / 等确认；删没删读网关的删除状态（别处删的也算，交付卡卸载重挂也还在）。 */
@@ -48,9 +52,13 @@ function liveCard(library: LibraryView | undefined, id: string, layer: GuiLayerR
   return find(sameLayer) ?? find(l => l.kind === 'global')
 }
 
-function SavedRow({ session, item, layer, promotion, now, typeLabel, onDetail, onWroteAgentsMd }: {
+function SavedRow({ session, item, layer, promotion, rewrite, superseded, now, typeLabel, onDetail, onWroteAgentsMd }: {
   session: BorrowedSession & { kind: 'ready' }
   item: SavedMemory
+  /** 改写的那次改动（视图里认领到的，或已过保留窗口）；新记的没有。 */
+  rewrite: ModelChange | 'expired' | undefined
+  /** 这次调用替代掉的旧记忆。 */
+  superseded: readonly ModelChange[]
   /** 这条记忆所在的层：删除、撤销、提升、留下都带上它，同 id 别层还在用时也只动这一份。 */
   layer: GuiLayerRef | undefined
   /** 提升为全局的状态（全部记忆视图）。 */
@@ -72,6 +80,13 @@ function SavedRow({ session, item, layer, promotion, now, typeLabel, onDetail, o
   const savedAt = Number.isFinite(item.memory.updatedAt) && item.memory.updatedAt > 0 ? item.memory.updatedAt : firstSeen
   const how = gateway.useDeletions().of(id, layer, savedAt)
   const [state, setState] = useState<RowState>({ kind: 'idle' })
+  const chip = <>{item.isUpdate === true ? <RewrittenChip /> : null}{promote.chip}</>
+  const changes = (
+    <>
+      {rewrite !== undefined ? <ModelChangeLine session={session} change={rewrite} kind="rewrite" after={item.memory} /> : null}
+      {superseded.map(c => <ModelChangeLine key={c.decisionId} session={session} change={c} kind="supersede" />)}
+    </>
+  )
   const run = async (cmd: 'forget' | 'restore' | 'hard-delete') => {
     if (state.kind === 'busy') return
     keepFocusInPlace()
@@ -86,7 +101,7 @@ function SavedRow({ session, item, layer, promotion, now, typeLabel, onDetail, o
     return (
       <div className="pm-saved-row" data-memory-id={id}>
         <div className="pm-saved-main">
-          <MemoryCard memory={item.memory} now={now} typeLabel={typeLabel(item.memory.type)} chip={promote.chip} />
+          <MemoryCard memory={item.memory} now={now} typeLabel={typeLabel(item.memory.type)} chip={chip} />
           <p className="pm-saved-note pm-saved-note--meta">{t('pending.result.wroteAgentsMdBody')}</p>
         </div>
       </div>
@@ -110,8 +125,9 @@ function SavedRow({ session, item, layer, promotion, now, typeLabel, onDetail, o
   return (
     <div className="pm-saved-row" data-memory-id={id}>
       <div className="pm-saved-main">
-        <MemoryCard memory={item.memory} now={now} typeLabel={typeLabel(item.memory.type)} chip={promote.chip} />
+        <MemoryCard memory={item.memory} now={now} typeLabel={typeLabel(item.memory.type)} chip={chip} />
         {promote.controls}
+        {changes}
         {state.kind === 'failed' ? <p className="pm-saved-note">{t('chat.card.failed', { detail: state.detail })}</p> : null}
         {state.kind === 'secret'
           ? <SecretDeleteConfirm onCancel={() => { setState({ kind: 'idle' }) }} onConfirm={() => { void run('hard-delete') }} />
@@ -163,7 +179,31 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
     const { workspacePath: _workspacePath, ...rest } = item.memory
     return { memory: { ...rest, scope: 'global' }, promotion }
   }
-  const candidates = saved.filter(item => current(item).promotion === 'candidate').length
+  // 这次调用的改动（按会话 + 调用 id 认领）；改写的作用域以改前那份为准（参数里的可能填错）
+  const modelChanges = library.status === 'ready' ? library.data.modelChanges ?? [] : []
+  const changesOf = (item: SavedMemory) => modelChanges.filter(c => c.sessionId === sessionId && c.callId === item.callId)
+  const rewriteOf = (item: SavedMemory): ModelChange | 'expired' | undefined => {
+    if (item.isUpdate !== true) return undefined
+    const found = changesOf(item).find(c => c.kind === 'rewrite' && c.memoryId === item.memory.id)
+    if (found !== undefined) return found
+    return library.status === 'ready' && now - item.memory.updatedAt > RETENTION_MS ? 'expired' : undefined
+  }
+  const placed = (item: SavedMemory): SavedMemory => {
+    const rewrite = rewriteOf(item)
+    if (rewrite === undefined || rewrite === 'expired') return item
+    const { workspacePath: _workspacePath, ...rest } = item.memory
+    const { scope, workspacePath } = rewrite.before
+    return { ...item, memory: { ...rest, scope, ...(workspacePath !== undefined ? { workspacePath } : {}) } }
+  }
+  const candidates = saved.filter(item => current(placed(item)).promotion === 'candidate').length
+  const rewritten = saved.filter(item => item.isUpdate === true).length
+  const fresh = saved.length - rewritten
+  const supersededCount = saved.reduce((n, item) => n + changesOf(item).filter(c => c.kind === 'supersede').length, 0)
+  const title = fresh === 0 ? t('chat.card.title.rewritten', { count: rewritten })
+    : rewritten === 0 ? t('chat.card.title', { count: saved.length }) : t('chat.card.title.mixed', { count: fresh, rewritten })
+  const folded = fresh === 0 ? t(rewritten === 1 ? 'chat.card.folded.rewritten.one' : 'chat.card.folded.rewritten', { count: rewritten })
+    : rewritten === 0 ? t(saved.length === 1 ? 'chat.card.folded.one' : 'chat.card.folded', { count: saved.length })
+    : t('chat.card.folded.mixed', { count: fresh, rewritten })
   // 全局记忆落在全局；本项目记忆落在会话的工作目录，不知道工作目录时只带 id
   const detail = (memory: SavedMemory['memory']) => {
     const scope: GuiLayerRef | undefined = memory.scope === 'global' ? { kind: 'global' }
@@ -171,17 +211,20 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
     openDetail({ tab: 'library', ...(scope === undefined ? {} : { scope }), memoryId: memory.id })
   }
   return (
-    <section className="pm-saved" data-open={isOpen || undefined} aria-label={t('chat.card.title', { count: saved.length })}>
+    <section className="pm-saved" data-open={isOpen || undefined} aria-label={title}>
       <h3 className="pm-saved-title">
         <button type="button" className="pm-saved-toggle" aria-expanded={isOpen} aria-controls={listId} onClick={() => { setOpen(!isOpen) }}>
           {isOpen
-            ? <span className="pm-saved-lead">{t('chat.card.title', { count: saved.length })}</span>
+            ? <span className="pm-saved-lead">{title}</span>
             : (
               <>
-                <span className="pm-saved-lead">{t(saved.length === 1 ? 'chat.card.folded.one' : 'chat.card.folded', { count: saved.length })}</span>
+                <span className="pm-saved-lead">{folded}</span>
                 <span className="pm-saved-first" title={saved[0]?.memory.name}>{saved[0]?.memory.name}</span>
                 {candidates > 0
                   ? <span className="pm-saved-hint"><i className="pm-sep" aria-hidden="true">·</i>{t('chat.card.folded.promote', { count: candidates })}</span>
+                  : null}
+                {supersededCount > 0
+                  ? <span className="pm-saved-hint"><i className="pm-sep" aria-hidden="true">·</i>{t('chat.card.folded.superseded', { count: supersededCount })}</span>
                   : null}
               </>
             )}
@@ -190,7 +233,7 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
       </h3>
       <div className="pm-saved-list" id={listId} hidden={!isOpen}>
         {isOpen ? saved.map((item) => {
-          const { memory, promotion } = current(item)
+          const { memory, promotion } = current(placed(item))
           return (
             <SavedRow
               key={item.callId}
@@ -198,6 +241,8 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
               item={{ ...item, memory }}
               layer={layerOf(memory)}
               promotion={promotion}
+              rewrite={rewriteOf(item)}
+              superseded={changesOf(item).filter(c => c.kind === 'supersede')}
               now={now}
               typeLabel={typeLabel}
               onDetail={() => { detail(memory) }}
@@ -210,7 +255,7 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
   )
 }
 
-export const savedMemoriesCardCss = crossConfirmCss + promoteInPlaceCss + `
+export const savedMemoriesCardCss = crossConfirmCss + promoteInPlaceCss + modelChangeCss + `
 .pm-saved {
   display: flex; flex-direction: column; gap: 10px; margin: 4px 0; padding: 12px 14px;
   border: 0.5px solid var(--pm-line-card); border-radius: var(--dsw-radius-lg, 16px); background: var(--pm-bg);

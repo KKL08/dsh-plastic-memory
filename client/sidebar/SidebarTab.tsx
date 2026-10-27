@@ -13,6 +13,8 @@
  * 新写入的行尾删除先在原位确认「删除这条？ 删除 · 取消」，点「删除」才发 forget。
  * 新写入的含密钥时不能软删（服务端回 has-secret，什么都没动）：原位确认，「彻底删除」发 hard-delete，删后原位留不可恢复的说明，tab 卸载后收起。
  * 新写入的是全局提升候选时就地给「留在本项目」「提升为全局」，处理过的换成结果文字（见 promote-in-place.tsx），不进底部的待处理计数。
+ * 这次对话里模型改写、替代已有记忆的（全部记忆视图的 modelChanges，按会话认领、晚于这份快照的）也列在「这次新写入的」：
+ * 改写的那条带「已改写」、「改前 / 改后」对照与「撤销修改」，替代写「「新」替代了「旧」」与「撤销修改」（见 model-change.tsx）。
  */
 import { useMemo, useRef, useState, type ReactNode } from 'react'
 import {
@@ -32,6 +34,7 @@ import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { TrashIcon } from '../ui/TrashIcon.tsx'
 import { CrossConfirm, crossConfirmCss, isHandledElsewhere, DeleteWithConfirm, SecretDeleteConfirm } from '../pending/action.tsx'
 import { promoteInPlaceCss, promotionOf, usePromoteInPlace, type InPlacePromotion } from '../pending/promote-in-place.tsx'
+import { ModelChangeLine, RewrittenChip, modelChangeCss } from '../pending/model-change.tsx'
 import { keepFocusInPlace } from '../ui/focus-return.ts'
 import { isLiveWrite, sessionCards, writtenSinceSnapshot } from './session-memories.ts'
 
@@ -231,6 +234,9 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     .flatMap((id): Array<{ id: string; memory: MemoryCardData | undefined; isWrittenToAgentsMd?: true }> =>
       wroteAgentsMd.has(id) ? [{ id, memory: wroteAgentsMd.get(id), isWrittenToAgentsMd: true }]
         : isPurged(id) ? [{ id, memory: undefined }] : isLiveWrite(id, byId, deletions) ? [{ id, memory: byId.get(id) }] : [])
+  // 这次对话里模型改写、替代的：快照冻结之后的（之前的已在这份快照里，同新写入的口径）
+  const changes = snapshot === undefined ? [] : (library.data.modelChanges ?? [])
+    .filter(c => c.sessionId === sessionId && c.at > snapshot.frozenAt)
   const scope = ws === undefined ? undefined : { kind: 'workspace' as const, workspacePath: ws }
   const restPending = ws === undefined || pending.status !== 'ready'
     ? 0
@@ -305,7 +311,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
         {usage}
       </section>
 
-      {saved.length > 0
+      {saved.length > 0 || changes.length > 0
         ? (
           <section className="pm-side-section" aria-label={t('sidebar.saved.title')}>
             <div className="pm-side-section-head">
@@ -341,6 +347,23 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
                   />
                   {failed(id)}
                 </SavedRow>
+              ))}
+            {changes.map(change => change.kind === 'rewrite'
+              ? (
+                <div key={change.decisionId} className="pm-side-change" data-memory-id={change.memoryId}>
+                  {card(byId.get(change.memoryId) ?? change.before, <RewrittenChip />)}
+                  <ModelChangeLine session={session} change={change} kind="rewrite" after={byId.get(change.memoryId)} />
+                </div>
+              )
+              : (
+                <div key={change.decisionId} className="pm-side-change" data-memory-id={change.memoryId}>
+                  <ModelChangeLine
+                    session={session}
+                    change={change}
+                    kind="supersede"
+                    bySubject={change.by === undefined ? undefined : byId.get(change.by)?.name}
+                  />
+                </div>
               ))}
           </section>
         )
@@ -509,7 +532,7 @@ function ViewNote({ state }: { state: ViewState<unknown> }) {
   return <p className="pm-side-hint" role="status">{text}</p>
 }
 
-export const sidebarTabCss = crossConfirmCss + promoteInPlaceCss + `
+export const sidebarTabCss = crossConfirmCss + promoteInPlaceCss + modelChangeCss + `
 .pm-side-root { height: 100%; min-height: 0; }
 .pm-side {
   height: 100%; min-height: 0; overflow: auto; scrollbar-gutter: stable;
@@ -535,6 +558,8 @@ export const sidebarTabCss = crossConfirmCss + promoteInPlaceCss + `
 .pm-side-saved > .pm-side-error, .pm-side-saved > .pm-side-saved-promote { grid-column: 1 / -1; }
 .pm-side-saved-promote { display: flex; flex-direction: column; gap: 8px; }
 .pm-side-saved-promote:empty { display: none; }
+.pm-side-change { display: flex; flex-direction: column; gap: 6px; }
+.pm-side-change > .pm-change:only-child { padding-left: 0; }
 /* 侧栏窄，删除确认放不进行尾：换到卡片下面一行靠右，记忆卡不跟着变窄 */
 .pm-side-saved > .pm-soft-confirm { grid-column: 1 / -1; justify-self: end; }
 .pm-side-delete {

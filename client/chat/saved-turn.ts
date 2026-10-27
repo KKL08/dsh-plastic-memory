@@ -1,11 +1,11 @@
 /**
- * 本轮新记的记忆：照宿主定时任务卡的做法（ui-schedule `schedule-turn.ts`），注册一个只产出 Turn 数据、
- * 不产出视图节点的会话事件 Definition（`ctx.uiConversation.events.register`），把本轮成功的 `memory_save`
+ * 本轮新记、改写的记忆：照宿主定时任务卡的做法（ui-schedule `schedule-turn.ts`），注册一个只产出 Turn 数据、
+ * 不产出视图节点的会话事件 Definition（`ctx.uiConversation.events.register`），把本轮成功的 `memory_save`（新建与 update）
  * 挂到 Turn 上；交付卡在 `conversation.chat.turnTail` 里按 `turn.data` 读。数据从会话日志重放得到，
  * 历史会话、刷新后都一样。宿主类型不引包，按结构手写最小子集（0.2.1-rc.2）。
  */
 import type { MemoryCard } from '../../src/gui/contract.ts'
-import { parseArgs, savedMemoryCard } from './tool-summary.ts'
+import { parseArgs, parseSaveResult, savedMemoryCard } from './tool-summary.ts'
 
 /** Turn 数据的 key，也是 Definition 的 kind。 */
 export const SAVED_TURN_KEY = 'plastic-memory-saved'
@@ -14,7 +14,10 @@ export interface SavedMemory {
   callId: string
   /** 结果事件的 seq，按它截到本轮结束。 */
   seq: number
+  /** 新记的为新内容；改写的为改后的内容（工具参数），作用域由交付卡按视图校正。 */
   memory: MemoryCard
+  /** 这次是改写已有记忆（action: update）；缺省 = 新记。 */
+  isUpdate?: true
 }
 
 export interface SavedTurnData {
@@ -80,7 +83,8 @@ export const savedTurnDefinition: SavedTurnDefinition = {
     const text = message.content.map(b => (b.type === 'text' ? b.text ?? '' : '')).join('\n')
     const memory = savedMemoryCard(parseArgs(argsRaw), text, event.time)
     if (memory === undefined) return state
-    return { ...state, saved: [...state.saved, { callId: String(message.source.callId), seq: event.seq, memory }] }
+    const isUpdate = parseSaveResult(text)?.kind === 'updated'
+    return { ...state, saved: [...state.saved, { callId: String(message.source.callId), seq: event.seq, memory, ...(isUpdate ? { isUpdate: true as const } : {}) }] }
   },
   buildLocationData({ state }, scope, previous) {
     if (scope !== 'turn' || state === undefined || state.saved.length === 0) return null

@@ -66,12 +66,13 @@ function forgottenCount(text: string): number {
 const SOURCE_MODES = ['user-explicit', 'user-behavior', 'environment-observed', 'agent-inferred', 'agent-action-confirmed'] as const
 
 /**
- * 一次成功的新记（kind = saved）→ 记忆卡：id / 类型 / 作用域取结果，原文、名字、来源取参数。
+ * 一次成功的新记（kind = saved）或改写（kind = updated）→ 记忆卡：id / 类型 / 作用域取结果，原文、名字、来源取参数。
+ * 改写的结果只有 id：类型取参数，作用域也先取参数（改写不改作用域，参数可能填错），由交付卡按全部记忆视图校正。
  * 参数是 agent 发的原文，没经过视图的遮盖，这里遮掉密钥片段，疑似密钥也遮（带 force 存下的也不例外）。
  */
 export function savedMemoryCard(args: Args | undefined, resultText: string, time: number): MemoryCard | undefined {
   const result = parseSaveResult(resultText)
-  if (result?.kind !== 'saved' || args === undefined) return undefined
+  if (result === undefined || args === undefined) return undefined
   const sourceMode = SOURCE_MODES.find(mode => mode === args.sourceMode)
   return maskSecretSurface({
     id: result.id,

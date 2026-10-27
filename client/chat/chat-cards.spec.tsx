@@ -1,8 +1,8 @@
 // 对话里的两层卡：九个工具折叠行的摘要、交付卡出现的条件、删除 / 撤销发出的命令、「查看详情」的导航目标。
 import { describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { ComponentType } from 'react'
-import { GUI_VIEW_VERSION, type DeletedView, type LibraryView, type MemoryCommand, type MemoryCommandResult, type SessionView } from '../../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, RETENTION_MS, type DeletedView, type LibraryView, type MemoryCommand, type MemoryCommandResult, type ModelChange, type SessionView } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createHostGateway, type PluginConfig } from '../gateway.ts'
 import { createTranslator } from '../i18n.tsx'
@@ -134,7 +134,7 @@ const res = (seq: number, callId: string, text: string, isError = false): Ev =>
 const turnStart: Ev = { type: 'turn/start', seq: 1, time: NOW, data: { turn: 1 } }
 
 describe('交付卡出现的条件', () => {
-  it('只收本轮成功新记的 memory_save；更新、疑似重复、失败、别的工具都不算', () => {
+  it('只收本轮成功新记、改写的 memory_save（改写的标 isUpdate）；疑似重复、失败、别的工具都不算', () => {
     const data = turnData([
       turnStart,
       call(2, 'c1', 'memory_save', saveArgs), res(3, 'c1', SAVED_TEXT),
@@ -144,9 +144,10 @@ describe('交付卡出现的条件', () => {
       call(10, 'c5', 'memory_search', { query: 'x' }), res(11, 'c5', '已保存记忆 mem_x（a，global）'),
       call(12, 'c6', 'memory_save', { ...saveArgs, scope: 'global', name: '全局' }), res(13, 'c6', '已保存记忆 mem_2（preference，workspace）。'),
     ])
-    expect(data?.saved.map(s => s.memory.id)).toEqual(['mem_1', 'mem_2'])
+    expect(data?.saved.map(s => [s.memory.id, s.isUpdate])).toEqual([['mem_1', undefined], ['mem_0', true], ['mem_2', undefined]])
+    expect(data?.saved[1]!.memory).toMatchObject({ name: saveArgs.name, content: saveArgs.content, scope: 'workspace' })
     // 作用域以服务端结果为准（全局候选可能降级到本项目）
-    expect(data?.saved[1]!.memory).toMatchObject({ name: '全局', scope: 'workspace', content: saveArgs.content, sourceMode: 'user-explicit' })
+    expect(data?.saved[2]!.memory).toMatchObject({ name: '全局', scope: 'workspace', content: saveArgs.content, sourceMode: 'user-explicit' })
   })
 
   it('本轮没有新记时没有 Turn 数据，交付卡不渲染', () => {
@@ -1041,5 +1042,129 @@ describe('注册', () => {
     expand()
     await remove(screen.getAllByRole('button', { name: '删除这条记忆' })[0]!)
     expect(screen.getAllByRole('button', { name: '查看详情 ›' }).map(link => link.closest('[data-memory-id]')?.getAttribute('data-memory-id'))).toEqual(['mem_2'])
+  })
+})
+
+describe('交付卡：模型改写、替代已有记忆', () => {
+  const WS = '/w/app'
+  const rewrite = (overrides: Partial<SavedMemory> = {}): SavedMemory => {
+    const item = saved('mem_r', '改写后的正文')
+    return { ...item, callId: 'call-r', isUpdate: true, memory: { ...item.memory, name: '改写的那条', scope: 'global' }, ...overrides }
+  }
+  const before = (id: string, name: string, content: string) => ({ ...saved(id, content).memory, name, workspacePath: WS })
+  const change = (overrides: Partial<ModelChange> = {}): ModelChange => ({
+    decisionId: 'pd_r', kind: 'rewrite', memoryId: 'mem_r', before: before('mem_r', '改写的那条', '改前的正文'),
+    sessionId: 's1', callId: 'call-r', at: NOW, state: 'undoable', ...overrides,
+  })
+  const supersede = change({ decisionId: 'pd_s', kind: 'supersede', memoryId: 'mem_old', by: 'mem_1', before: before('mem_old', '旧说法', '旧的正文'), callId: 'c-mem_1' })
+  const libraryWith = (changes: ModelChange[]): LibraryView => ({
+    version: GUI_VIEW_VERSION, memoryRoot: '/m', directoryIssues: [], layers: [{ layer: { kind: 'global' }, items: [] }], modelChanges: changes,
+  })
+  const card = (items: SavedMemory[], changes: ModelChange[], respond?: (c: MemoryCommand) => MemoryCommandResult, now = NOW) => {
+    const gateway = createFakeGateway({ views: { library: libraryWith(changes) }, ...(respond !== undefined ? { respond } : {}) })
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd={WS} saved={items} now={now} openDetail={() => {}} />, gateway)
+    return gateway
+  }
+  const row = (id: string) => within(document.querySelector<HTMLElement>(`.pm-saved-row[data-memory-id="${id}"]`)!)
+
+  it('折叠行：只有改写时写「这轮改写了 N 条记忆」；新记与改写都有时两个数都写；替代了旧记忆的末尾加「· 替代了 N 条旧记忆」', () => {
+    card([rewrite()], [change()])
+    expect(screen.getByRole('button', { expanded: false })).toHaveTextContent('这轮改写了 1 条记忆：改写的那条›')
+    cleanup()
+    card([saved('mem_1', '新的'), rewrite()], [change(), supersede])
+    const toggle = screen.getByRole('button', { expanded: false })
+    expect(toggle).toHaveTextContent('这轮记住了 1 条新记忆、改写了 1 条：mem_1·替代了 1 条旧记忆›')
+    fireEvent.click(toggle)
+    expect(toggle).toHaveAccessibleName('这一轮记住了 1 条、改写了 1 条')
+  })
+
+  it('改写那条：元信息带「已改写」，作用域按改前那份；「改前 / 改后 ›」展开对照；新记的没有这些', () => {
+    card([saved('mem_1', '新的'), rewrite()], [change()])
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    expect(row('mem_r').getByText('已改写').closest('.pm-mc-meta')).not.toBeNull()
+    expect(row('mem_r').getByText('本项目')).toBeInTheDocument()
+    const toggle = row('mem_r').getByRole('button', { name: '改前 / 改后 ›' })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(row('mem_r').getByText('改前的正文')).not.toBeVisible()
+    fireEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(row('mem_r').getByText('改前的正文')).toBeVisible()
+    expect(row('mem_r').getAllByText('改写后的正文')).toHaveLength(2)
+    expect(row('mem_1').queryByText('已改写')).toBeNull()
+    expect(row('mem_1').queryByRole('button', { name: '撤销修改' })).toBeNull()
+  })
+
+  it('「撤销修改」按这次改动发 undo（不用原位确认），成功后换成「已撤销」', async () => {
+    const gateway = card([rewrite()], [change()])
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    await act(async () => { fireEvent.click(row('mem_r').getByRole('button', { name: '撤销修改' })) })
+    expect(gateway.executed).toEqual([{ sessionId: 's1', command: { cmd: 'undo', decisionId: 'pd_r' } }])
+    expect(row('mem_r').getByText('已撤销')).toBeInTheDocument()
+    expect(row('mem_r').queryByRole('button', { name: '撤销修改' })).toBeNull()
+  })
+
+  it('之后又改过：视图标 changed，或撤销回 stale，都写「之后又改过，没法直接撤销」、不给按钮', async () => {
+    card([rewrite()], [change({ state: 'changed' })])
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    expect(row('mem_r').getByText('之后又改过，没法直接撤销')).toBeInTheDocument()
+    expect(row('mem_r').queryByRole('button', { name: '撤销修改' })).toBeNull()
+    cleanup()
+    card([rewrite()], [change()], c => ({ ok: false, cmd: c.cmd, code: 'stale', detail: '又改过' }))
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    await act(async () => { fireEvent.click(row('mem_r').getByRole('button', { name: '撤销修改' })) })
+    expect(row('mem_r').getByText('之后又改过，没法直接撤销')).toBeInTheDocument()
+  })
+
+  it('别处撤销过（视图标 undone）：写「已撤销」', () => {
+    card([rewrite()], [change({ state: 'undone' })])
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    expect(row('mem_r').getByText('已撤销')).toBeInTheDocument()
+  })
+
+  it('改前快照过了 14 天（视图里已没有、调用时刻超出保留窗口）：按钮换成说明；还没过的什么都不写（视图可能还没跟上）', () => {
+    card([rewrite()], [], undefined, NOW + RETENTION_MS + 1)
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    expect(row('mem_r').getByText('改前版本已超过 14 天，无法恢复')).toBeInTheDocument()
+    expect(row('mem_r').queryByRole('button', { name: '撤销修改' })).toBeNull()
+    expect(row('mem_r').queryByRole('button', { name: '改前 / 改后 ›' })).toBeNull()
+    cleanup()
+    card([rewrite()], [])
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    expect(row('mem_r').getByText('已改写')).toBeInTheDocument()
+    expect(row('mem_r').queryByText('改前版本已超过 14 天，无法恢复')).toBeNull()
+  })
+
+  it('替代：这次调用那条下方「替代了「旧名」」与「撤销修改」，撤销按这次替代发 undo；别的会话、别的调用的改动不认领', async () => {
+    const otherCall = { ...supersede, decisionId: 'pd_x', callId: 'c-other' }
+    const otherSession = { ...supersede, decisionId: 'pd_y', sessionId: 's2' }
+    const gateway = card([saved('mem_1', '新的')], [supersede, otherCall, otherSession])
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    expect(row('mem_1').getByText('替代了「旧说法」')).toBeInTheDocument()
+    expect(row('mem_1').getAllByRole('button', { name: '撤销修改' })).toHaveLength(1)
+    await act(async () => { fireEvent.click(row('mem_1').getByRole('button', { name: '撤销修改' })) })
+    expect(gateway.executed).toEqual([{ sessionId: 's1', command: { cmd: 'undo', decisionId: 'pd_s' } }])
+  })
+
+  it('撤销失败（别的原因）：原位写原话，按钮还在', async () => {
+    card([rewrite()], [change()], c => ({ ok: false, cmd: c.cmd, code: 'failed', detail: '磁盘满了' }))
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    await act(async () => { fireEvent.click(row('mem_r').getByRole('button', { name: '撤销修改' })) })
+    expect(row('mem_r').getByRole('alert')).toHaveTextContent('没有成功：磁盘满了')
+    expect(row('mem_r').getByRole('button', { name: '撤销修改' })).toBeInTheDocument()
+  })
+
+  it('英文：折叠行、chip、对照与按钮', () => {
+    render(
+      <PanelShell gateway={createFakeGateway({ views: { library: libraryWith([change(), supersede]) } })} t={createTranslator(en)}>
+        <SavedMemoriesCard sessionId="s1" cwd={WS} saved={[saved('mem_1', 'new'), rewrite()]} now={NOW} openDetail={() => {}} />
+      </PanelShell>,
+    )
+    const toggle = screen.getByRole('button', { expanded: false })
+    expect(toggle).toHaveTextContent('Remembered 1 new and rewrote 1 this turn: mem_1·replaced 1 older›')
+    fireEvent.click(toggle)
+    expect(row('mem_r').getByText('Rewritten')).toBeInTheDocument()
+    expect(row('mem_r').getByRole('button', { name: 'Before / after ›' })).toBeInTheDocument()
+    expect(row('mem_1').getByText('Replaced “旧说法”')).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'Undo change' })).toHaveLength(2)
   })
 })
