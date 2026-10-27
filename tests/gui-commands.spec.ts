@@ -934,6 +934,27 @@ describe('最近删除里彻底删除', () => {
     expect((await e.store.get('mem_a'))!.status).toBe('active')
   })
 
+  it('同一份快照里的别的记忆：撤销条目留着，只清指向被抹那条的', async () => {
+    // 一次保存改写 T、同时替代 R1、R2：三条拍进同一份快照，各记一条撤销条目
+    const e = env()
+    const t = record({ id: 'mem_t', name: '改写的', content: '新说法' })
+    const r1 = record({ id: 'mem_r1', name: '被替代一', content: '旧说法一' })
+    const r2 = record({ id: 'mem_r2', name: '被替代二', content: '旧说法二' })
+    for (const r of [t, r1, r2]) await e.store.create(r)
+    const snap = await e.snapshots.capture({ operation: 'pre-update', description: '保存前', records: [t, r1, r2] }, NOW - 1)
+    const settled = async (id: string, kind: 'rewrite' | 'supersede') =>
+      e.decisions.addSettled({ kind, memoryIds: [id], summary: id, workspaces: ['global'], fingerprint: `fp-${id}` }, kind === 'rewrite' ? 'rewritten' : 'superseded', NOW - 1, snap.id)
+    const [et, er1, er2] = [await settled('mem_t', 'rewrite'), await settled('mem_r1', 'supersede'), await settled('mem_r2', 'supersede')]
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_r1', layer: { kind: 'global' } }))
+
+    ok(await e.run({ cmd: 'hard-delete', memoryId: 'mem_r1', layer: { kind: 'global' } }))
+    const left = (await e.decisions.listSettled()).map(d => d.id)
+    expect(left).toContain(et.id)
+    expect(left).toContain(er2.id)
+    expect(left).not.toContain(er1.id)
+    expect((await e.snapshots.list()).find(s => s.id === snap.id)?.memoryIds.sort()).toEqual(['mem_r2', 'mem_t'])
+  })
+
   it('同 id 另一层仍在用的副本不受影响：文件、内容、它在快照里的副本都在；不带层时不会落到它头上', async () => {
     const e = env()
     const layerCopy = async (ws: string | undefined) =>

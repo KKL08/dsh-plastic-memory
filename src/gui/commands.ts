@@ -551,9 +551,12 @@ async function dispatch(
             if ((await locateCopy(deps.store, rec.id, layer)) !== undefined) kept.add(workspaceLabel(r))
           }
           const isPurged = (r: SnapshotRecord) => r.id === rec.id && !kept.has(workspaceLabel(r))
-          // 撤销要靠的那份快照副本马上就没了：裁决条目先清掉，之后恢复不再说冲突会回到待处理
+          // 撤销要靠的那份快照副本马上就没了：指向它的裁决条目先清掉，之后恢复不再说冲突会回到待处理。
+          // 同一份快照里别的记忆的副本还在，它们的撤销条目留着
           const lost = new Set(snapshots.filter(s => s.data.some(isPurged)).map(s => s.id))
-          for (const d of await deps.decisions.listSettled()) if (lost.has(d.settled?.snapshotId ?? '')) await deps.decisions.remove(d.id)
+          for (const d of await deps.decisions.listSettled()) {
+            if (lost.has(d.settled?.snapshotId ?? '') && d.memoryIds.includes(rec.id)) await deps.decisions.remove(d.id)
+          }
           await deps.snapshots.purge(isPurged)
           // 锁内复核：定位之后被别处恢复成在用的，不删
           let isRestored = false
