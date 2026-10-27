@@ -177,28 +177,30 @@ All notable changes to this project are documented here. The format follows
   query word come before those containing only some of them, a word that
   appears as a whole word ranks above one that only appears inside a longer
   word (`scope` in `readScope`), and matches in the name, summary and tags
-  weigh more than matches in the content; a query that is exactly a memory id
-  returns that memory first, without a note. Spellings of one term joined
-  with `/` and no spaces (`部署/deploy`, `k8s/kubernetes`) count as one
-  keyword that a memory matches with any of them; words separated by spaces
-  are always separate keywords. The result opens with a note when no
-  returned memory contains every keyword (`or-fallback`). It flags a weak
-  match when the top hit also misses a whole keyword or covers less than 65%
-  of the query's content words (`low-coverage`), or when nothing but a
-  literal match on the query text is left (`substring-fallback`); a weak
-  match suggests searching again and lists how many memories each keyword
-  matched. Question words and particles in long questions don't count. When
-  unsure it flags: a false flag costs one extra search, a missed one lets
-  the model take a wrong hit for the answer.
+  weigh more than matches in the content; a query that is exactly a memory
+  id returns that memory first, without a note. Chinese and non-Chinese
+  spellings of one term joined with `/` and no spaces (`部署/deploy`,
+  `锁/lock`) count as one keyword that a memory matches with any of them;
+  slash words in a single script, such as paths, `api/v2` or `TCP/IP`, are
+  still matched literally, and words separated by spaces are always separate
+  keywords. The result opens with a note when no returned memory contains
+  every keyword (`or-fallback`). It flags a weak match when the top hit also
+  misses a whole keyword or covers less than 65% of the query's content
+  words (`low-coverage`), or when nothing but a literal match on the query
+  text is left (`substring-fallback`); a weak match suggests searching again
+  and, when there are words to list, how many memories each keyword matched.
+  Question words and particles in long questions don't count. When unsure it
+  flags: a false flag costs one extra search, a missed one lets the model
+  take a wrong hit for the answer.
 - The `memory_search` tool description now says what the tool does: it ranks
-  by relevance, accepts Chinese and English queries and returns file paths. It
-  also tells the model how to query well (two to four content words, with the
-  Chinese, English and other spellings of a term joined by `/`), and when a result is flagged as a
-  weak match the note suggests searching again with synonyms or fewer words,
-  starting with the keywords no memory contains. `memory_save` asks for
-  synonyms, bilingual aliases and abbreviations in tags, limited to words the
-  name, summary and content don't already contain, so later searches phrased
-  differently still find the memory.
+  by relevance, accepts Chinese and English queries and returns file paths.
+  It also tells the model how to query well (two to four content words, with
+  the spellings of one term joined by `/`), and when a result is flagged as
+  a weak match the note suggests searching again with synonyms or fewer
+  words, starting with the keywords no memory contains. `memory_save` asks
+  for synonyms, bilingual aliases and abbreviations in tags, limited to words
+  the name, summary and content don't already contain, so later searches
+  phrased differently still find the memory.
 - `memory_save` now asks the model to note, next to the rule itself, the
   reason the user gave or the situation it came up in, so a later session can
   tell where the rule applies, and to leave out details that go stale
