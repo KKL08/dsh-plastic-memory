@@ -139,7 +139,11 @@ export function buildPendingView(input: ViewInput): PendingView {
       })
     }
   }
-  items.push(...adviceItems(input))
+  // 提升候选和放错层合并：已有提升卡的项目记忆，放错层（项目 → 全局）不另列，扣分照旧（健康分不经这里）
+  const promoting = items.flatMap(i => i.kind === 'promote-candidate' && i.memory !== null ? [i.memory] : [])
+  const isMergedIntoPromote = (i: PendingItem) => i.kind === 'advice' && i.type === 'misplaced'
+    && i.memories.every(m => promoting.some(p => p.id === m.id && p.workspacePath === m.workspacePath && m.scope === 'workspace'))
+  items.push(...adviceItems(input).filter(i => !isMergedIntoPromote(i)))
   // 稳定排序（PENDING_ITEM_KINDS 已按级别排）：同类保持上面的先后（账本按 firstSeenAt）
   const rank = (i: PendingItem) => PENDING_ITEM_KINDS.indexOf(i.kind)
   items.sort((a, b) => rank(a) - rank(b))

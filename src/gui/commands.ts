@@ -9,7 +9,7 @@ import type { MemoryRecord } from '../record-schema.ts'
 import { RecordNotFoundError } from '../errors.ts'
 import { detectSecrets, hasSecret } from '../secrets.ts'
 import { computeDigest } from '../storage/frontmatter.ts'
-import { candidateFingerprint, isModelChange, kindOf, verdictLoser, type PendingDecisionsStore } from '../governance/decisions.ts'
+import { candidateFingerprint, isModelChange, kindOf, verdictLoser, type MisplacedIgnore, type PendingDecisionsStore } from '../governance/decisions.ts'
 import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
 import type { PendingDecision, ScanCacheEntry, SnapshotRecord } from '../governance/schema.ts'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
@@ -326,7 +326,7 @@ async function dispatch(
   }
 
   /** 结清这次提升或留下，返回条目 id。 */
-  type SettleCandidate = (verdict: 'promoted' | 'keep-local', opts: { snapshotId?: string; fingerprint?: string }) => Promise<string>
+  type SettleCandidate = (verdict: 'promoted' | 'keep-local', opts: { snapshotId?: string; fingerprint?: string; misplacedIgnore?: MisplacedIgnore }) => Promise<string>
   /** 写进 AGENTS.md 后插件不再管理它：有条目就移出账本（返回它的 id），没有就什么都不记。 */
   type DropCandidate = () => Promise<string | undefined>
 
@@ -368,7 +368,11 @@ async function dispatch(
   const isProjectMemory = (r: MemoryRecord) => r.status === 'active' && r.scope === 'workspace'
   const isCandidate = (r: MemoryRecord) => isProjectMemory(r) && r.globalCandidate === true
 
-  /** 留在本项目：清掉候选标记，条目按记忆此刻的内容记指纹结清（上次体检后模型改过内容的话，账本里的旧指纹对不上，同内容再被标记会白提示一次）。 */
+  /**
+   * 留在本项目：清掉候选标记，条目按记忆此刻的内容记指纹结清（上次体检后模型改过内容的话，账本里的旧指纹对不上，同内容再被标记会白提示一次）。
+   * 顺带忽略这条记忆的「放错层」（指纹取此刻的记忆）：留下就是定了它放在本项目，可以整理里不再提、不再扣分。原本已经忽略着的不另写；
+   * 写了的记进条目，撤销时只删这一条。
+   */
   const keepLocal = async (
     memoryId: string, workspacePath: string | undefined, allowCrossWorkspace: boolean | undefined, settle: SettleCandidate,
     options: { target?: GuiLayerRef } = {},
@@ -380,7 +384,11 @@ async function dispatch(
     if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
     if (r.dismissed.length === 0) return fail(cmd, 'failed', r.message)
     const current = await deps.store.get(memoryId, { workspacePath })
-    const decisionId = await settle('keep-local', current !== undefined ? { fingerprint: candidateFingerprint(current) } : {})
+    const written = current === undefined ? undefined : await deps.ignores.ignoreIfAbsent('misplaced', [current], now)
+    const decisionId = await settle('keep-local', current === undefined ? {} : {
+      fingerprint: candidateFingerprint(current),
+      ...(written !== undefined ? { misplacedIgnore: { ignoredAt: written.ignoredAt, fingerprint: written.fingerprints[0]! } } : {}),
+    })
     return { ok: true, cmd, decisionId, memoryIds: r.dismissed }
   }
 
@@ -424,6 +432,9 @@ async function dispatch(
         if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
         // 同 keep-local：不是内容编辑，updatedAt 不动
         if (!(await deps.store.updateIfLive(rec, r => ({ ...r, globalCandidate: true })))) return notFound(memoryId)
+        // 留下时顺带写的放错层忽略：忽略表里还是那一条才删，用户之前自己忽略的、之后重新忽略的都不碰
+        const written = entry.settled.misplacedIgnore
+        if (written !== undefined) await deps.ignores.unignoreIfSame('misplaced', [memoryId], { ignoredAt: written.ignoredAt, fingerprints: [written.fingerprint] })
         restored = [memoryId]
       }
       // 就地处理时才记的条目：移出账本，回到没点过的样子；其余回到待处理

@@ -24,6 +24,9 @@ export function candidateFingerprint(record: Pick<MemoryRecord, 'id' | 'name' | 
   return conflictFingerprint([record])
 }
 
+/** 「留在本项目」顺带写的放错层忽略（见 schema settled.misplacedIgnore）。 */
+export type MisplacedIgnore = NonNullable<NonNullable<PendingDecision['settled']>['misplacedIgnore']>
+
 type KindKeyed ={ kind?: PendingKind; memoryIds: string[]; baselineRef?: string }
 
 /** 条目种类，缺省即冲突（旧条目）。 */
@@ -218,9 +221,12 @@ export class PendingDecisionsStore {
   /**
    * 记下裁决。两边都留的靠指纹判断以后变没变：没有指纹的旧条目无从判断，退回直接移除，返回 false。
    * 删一方的留账是为了撤销，不看指纹；snapshotId 是删败方前的快照。fingerprint 给出时换掉条目上的指纹
-   * （「留在本项目」按记忆此刻的内容记，不用上次体检时的）。isBornSettled 见 schema。顺手清扫超出保留窗口的条目。
+   * （「留在本项目」按记忆此刻的内容记，不用上次体检时的）。isBornSettled、misplacedIgnore 见 schema。顺手清扫超出保留窗口的条目。
    */
-  async settle(id: string, verdict: SettledVerdict, now: number, opts: { snapshotId?: string; fingerprint?: string; isBornSettled?: true } = {}): Promise<boolean> {
+  async settle(
+    id: string, verdict: SettledVerdict, now: number,
+    opts: { snapshotId?: string; fingerprint?: string; isBornSettled?: true; misplacedIgnore?: MisplacedIgnore } = {},
+  ): Promise<boolean> {
     const entry = await this.table.get(id)
     if (!entry) return false
     if (entry.fingerprint === undefined && opts.fingerprint === undefined && verdictLoser(entry, verdict) === undefined) {
@@ -230,7 +236,10 @@ export class PendingDecisionsStore {
     await this.table.put(id, {
       ...entry,
       ...(opts.fingerprint !== undefined ? { fingerprint: opts.fingerprint } : {}),
-      settled: { verdict, at: now, ...(opts.snapshotId !== undefined ? { snapshotId: opts.snapshotId } : {}), ...(opts.isBornSettled ? { isBornSettled: true as const } : {}) },
+      settled: {
+        verdict, at: now, ...(opts.snapshotId !== undefined ? { snapshotId: opts.snapshotId } : {}), ...(opts.isBornSettled ? { isBornSettled: true as const } : {}),
+        ...(opts.misplacedIgnore !== undefined ? { misplacedIgnore: opts.misplacedIgnore } : {}),
+      },
     })
     await this.sweep(now)
     return true

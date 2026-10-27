@@ -46,6 +46,8 @@ export const pendingDecisionSchema = z.object({
    * 用户已裁决：条目留作记录。两边都留的指纹不变就不再报；删一方的留着供撤销，snapshotId 是删败方前的快照。
    * isBornSettled：提升候选在等你决定之外就地处理（对话卡片、右侧栏）时账本里还没有它，这条是处理完才记的；
    * 撤销时移出账本、回到没点过的样子，不重开进等你决定。isUndone：模型改写、替代已撤销（见 PENDING_KINDS）。
+   * misplacedIgnore：「留在本项目」顺带写进建议忽略表的那条「放错层」忽略（忽略时间、记忆指纹 adviceFingerprint）；
+   * 记忆原本没有放错层的忽略才写、才记。撤销时只在忽略表里那一条仍是它（时间、指纹都对得上）时才删。旧条目没有此字段，撤销不碰忽略表。
    */
   settled: z.object({
     verdict: z.enum(SETTLED_VERDICTS),
@@ -53,6 +55,7 @@ export const pendingDecisionSchema = z.object({
     snapshotId: z.string().optional(),
     isBornSettled: z.literal(true).optional(),
     isUndone: z.literal(true).optional(),
+    misplacedIgnore: z.object({ ignoredAt: z.number(), fingerprint: z.string() }).optional(),
   }).optional(),
 })
 export type PendingDecision = z.infer<typeof pendingDecisionSchema>
