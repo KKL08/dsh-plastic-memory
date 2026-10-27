@@ -15,10 +15,11 @@ import { captureRejection } from './helpers/errors.ts'
 // 两个宿主进程同时搬同一个 id 的文件：两个 FileTable 实例共用一个记忆根目录，各有各的进程内锁，互不排队。
 // fs 是进程边界：给 link / rm / rename 套一层，在指定路径的调用之前或之后插进另一个实例的整次写入，交错时机确定，不靠 sleep。
 // 不管怎么交错，写之前存在的 id 写完至少还剩一个文件；索引最后列全目录里的记忆。
-type Op = 'link' | 'rm' | 'rename'
-const { hooks, reads } = vi.hoisted(() => ({
+type Op = 'link' | 'rm' | 'rename' | 'copyFile'
+const { hooks, reads, volume } = vi.hoisted(() => ({
   hooks: [] as Array<{ op: string; path: string; when: 'before' | 'after'; run: () => Promise<unknown> }>,
   reads: [] as string[],   // readFile 读过的路径，按调用顺序
+  volume: { isNoHardlink: false },   // 为真时 link 报 ENOTSUP（exFAT/FAT 这类卷），占名退回复制
 }))
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
@@ -30,6 +31,7 @@ vi.mock('node:fs/promises', async importOriginal => {
   }
   const link = vi.fn(async (...args: Parameters<typeof actual.link>) => {
     await fire('link', String(args[1]), 'before')
+    if (volume.isNoHardlink) throw Object.assign(new Error('ENOTSUP: operation not supported, link'), { code: 'ENOTSUP' })
     await actual.link(...args)
     await fire('link', String(args[1]), 'after')
   })
@@ -43,11 +45,16 @@ vi.mock('node:fs/promises', async importOriginal => {
     await actual.rename(...args)
     await fire('rename', String(args[1]), 'after')
   })
+  const copyFile = vi.fn(async (...args: Parameters<typeof actual.copyFile>) => {
+    await fire('copyFile', String(args[1]), 'before')
+    await actual.copyFile(...args)
+    await fire('copyFile', String(args[1]), 'after')
+  })
   const readFile = vi.fn(async (...args: Parameters<typeof actual.readFile>) => {
     reads.push(String(args[0]))
     return actual.readFile(...args)
   })
-  return { ...actual, link, rm, rename, readFile }
+  return { ...actual, link, rm, rename, copyFile, readFile }
 })
 
 /** 在 op 作用到 path 的那次调用之前 / 之后跑一次 run（只触发一次）。 */
@@ -74,6 +81,7 @@ beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-cross-move-')) 
 afterEach(async () => {
   hooks.length = 0
   reads.length = 0
+  volume.isNoHardlink = false
   vi.restoreAllMocks()
   await rm(root, { recursive: true, force: true })
 })
@@ -126,6 +134,15 @@ describe('占名之后、删旧文件之前源文件不见了', () => {
     const source = await seed()
     const b = newTable()
     at('after', 'link', join(globalDir(), '改名后.md'), () => rm(source))
+    expect(await captureRejection(b.update('mem_race', renameByB))).toBeInstanceOf(RecordNotFoundError)
+    expect(await mds(globalDir())).toEqual([])
+  })
+
+  it('卷不支持硬链接、占名退回复制时同样撤回：新文件是复制出来的另一个文件，仍认得出是本轮写的', async () => {
+    volume.isNoHardlink = true
+    const source = await seed()
+    const b = newTable()
+    at('after', 'copyFile', join(globalDir(), '改名后.md'), () => rm(source))
     expect(await captureRejection(b.update('mem_race', renameByB))).toBeInstanceOf(RecordNotFoundError)
     expect(await mds(globalDir())).toEqual([])
   })

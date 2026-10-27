@@ -71,7 +71,7 @@ export interface FileTableOptions {
 interface Slot extends LocatedFile { raw: string; mtimeMs: number }
 /** 写路径的定位结果：取舍出的那份，外加这次定位读到的该 id 全部副本（含它自己）。写盘时只覆盖、只删这些副本里此后没变过的。 */
 interface LocatedSlot extends Slot { copies: readonly Slot[] }
-/** 占名结果：落到的路径，与本轮写下的那个文件的 inode（硬链接或 rename 过去的就是 tmp 的 inode；退回复制时对不上，按别人的文件看）。 */
+/** 占名结果：落到的路径，与本轮写下的那个文件的 inode（硬链接或 rename 过去的就是 tmp 的 inode；退回复制时是复制出的目标自己的）。 */
 interface Claim { path: string; ino: number }
 
 interface ScopeDir { dir: string; loc: FileLocation }
@@ -611,8 +611,8 @@ export class FileTable implements MemoryTable {
         if (isReservedFileName(name)) continue // memory.md ≈ MEMORY.md，索引再生会覆盖它
         const path = join(level, name)
         try {
-          await linkExclusive(tmp, path)
-          return { path, ino }
+          // 退回复制时目标是另一个文件，按目标本身记；硬链接时就是 tmp，不再 stat（此刻目标名可能已被别人 rename 覆盖）
+          return { path, ino: (await linkExclusive(tmp, path)) ? (await stat(path)).ino : ino }
         } catch (err) {
           if (errnoCode(err) !== 'EEXIST') throw err
         }
