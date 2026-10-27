@@ -529,6 +529,27 @@ export function createHostGateway(ctx: HostContext): BindGateway {
   }
   const root = createRootStore(run)
   const models = createModelStore(run)
+  /**
+   * 同一份视图文件、同一次触发（版本 + 刷新次数）只读一次、解析一次：几处同时挂着同一视图（每张对话交付卡一个）时共用结果。
+   * 每个文件只留最近一次触发；读失败的不留，下一个来读的再试。
+   */
+  const viewReads = new Map<string, { trigger: string; result: Promise<ViewState<unknown>> }>()
+  const readView = <N extends ViewName>(sessionId: string, path: string, trigger: string, name: N): Promise<ViewState<ViewMap[N]>> => {
+    const cached = viewReads.get(path)
+    if (cached?.trigger === trigger) return cached.result as Promise<ViewState<ViewMap[N]>>
+    const result = ctx.remote.workspaceFiles.read(sessionId, path, {}).then((r): ViewState<ViewMap[N]> => {
+      const view: ViewState<ViewMap[N]> = r.ok
+        ? parseView(name, r.value.text)
+        : r.error.code === 'workspace-file/not-found' ? { status: 'missing' } : { status: 'error', message: `${r.error.code}: ${r.error.message}` }
+      if (view.status === 'ready' && name === 'deleted') deletions.settle({ name, data: view.data as DeletedView })
+      if (view.status === 'ready' && name === 'library') deletions.settle({ name, data: view.data as LibraryView })
+      return view
+    }, (err: unknown): ViewState<ViewMap[N]> => ({ status: 'error', message: String(err) }))
+    const entry = { trigger, result: result as Promise<ViewState<unknown>> }
+    viewReads.set(path, entry)
+    void result.then((view) => { if (view.status === 'error' && viewReads.get(path) === entry) viewReads.delete(path) })
+    return result
+  }
   // configForms 是可选服务：就位时记下，离开时清掉（根上下文没 inject 它，不能直接读）
   let configForms: ConfigFormsService | undefined
   let binding: ConfigBinding | undefined
@@ -581,15 +602,7 @@ export function createHostGateway(ctx: HostContext): BindGateway {
       useEffect(() => {
         if (sessionId === undefined || path === undefined || trigger === undefined) return
         let live = true
-        void ctx.remote.workspaceFiles.read(sessionId, path, {}).then((r) => {
-          if (!live) return
-          const view: ViewState<ViewMap[N]> = r.ok
-            ? parseView(name, r.value.text)
-            : r.error.code === 'workspace-file/not-found' ? { status: 'missing' } : { status: 'error', message: `${r.error.code}: ${r.error.message}` }
-          if (view.status === 'ready' && name === 'deleted') deletions.settle({ name, data: view.data as DeletedView })
-          if (view.status === 'ready' && name === 'library') deletions.settle({ name, data: view.data as LibraryView })
-          setRead({ key, trigger, view })
-        }, (err: unknown) => { if (live) setRead({ key, trigger, view: { status: 'error', message: String(err) } }) })
+        void readView(sessionId, path, trigger, name).then((view) => { if (live) setRead({ key, trigger, view }) })
         return () => { live = false }
       }, [sessionId, path, trigger, key, name])
 

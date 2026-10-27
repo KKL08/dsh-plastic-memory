@@ -270,6 +270,34 @@ describe('createHostGateway', () => {
     await waitFor(() => { expect(result.current).toEqual({ status: 'outdated' }) })
   })
 
+  it('同一份视图几处同时读（每张对话交付卡各挂一个）：每个版本只读一次文件、解析一次，几处拿到同一份', async () => {
+    localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+    const address = fileAddress('s1', pendingPath)
+    resources[address] = { status: 'live', value: { absolutePath: pendingPath, version: 'v1' }, failure: undefined }
+    files[pendingPath] = JSON.stringify(pending)
+    const ctx = fakeCtx()
+    const read = ctx.remote.workspaceFiles.read as ReturnType<typeof vi.fn>
+    const bind = createHostGateway(ctx)
+    const a = bind(props)
+    const b = bind({ ...props })
+    const { result, rerender } = renderHook(() => {
+      const session = a.useSession(undefined)
+      return [a.useView(session, 'pending'), a.useView(session, 'pending'), b.useView(session, 'pending')]
+    })
+    await waitFor(() => { expect(result.current.map(v => v.status)).toEqual(['ready', 'ready', 'ready']) })
+    expect(read.mock.calls.filter(([, path]) => path === pendingPath)).toHaveLength(1)
+    const [first, second, third] = result.current
+    expect(second).toBe(first)
+    expect(third).toBe(first)
+
+    // 新版本：再读一次，仍然只一次
+    files[pendingPath] = JSON.stringify({ ...pending, dot: 'none' })
+    resources[address] = { status: 'live', value: { absolutePath: pendingPath, version: 'v2' }, failure: undefined }
+    rerender()
+    await waitFor(() => { expect(result.current.every(v => v.status === 'ready' && v.data.dot === 'none')).toBe(true) })
+    expect(read.mock.calls.filter(([, path]) => path === pendingPath)).toHaveLength(2)
+  })
+
   it('localStorage 里已有 memoryRoot：不发命令直接订阅', async () => {
     localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
     resources[fileAddress('s1', pendingPath)] = { status: 'live', value: { absolutePath: 'x', version: 'v2' }, failure: undefined }
