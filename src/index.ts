@@ -565,9 +565,11 @@ export async function apply(ctx: Context, config: Config) {
   // 宿主每一步先 assemble、再跑 agent/pre-step（compaction-basic 在这里压缩），准入时重调同步 provider。
   // 等 next() 返回（压缩已做完）再重建快照，准入时追加的就是新快照，下一步中间件命中缓存、不再追加第二份。
   // prepend 让本监听排在最外层，不依赖插件加载顺序；缓存未过期时 assemble 直接命中。
-  // 只重建中间件冻结过的会话（injectedCore 有值）：宿主压掉运行时上下文时中间件不冻结，这里也不能冻结，
-  // 否则没进上下文的快照会计召回、出会话视图，检索还会把 core 正文换成「已带入」说明。
-  const wasFrozen = (session: object) => snapshotCache.injectedCore(session) !== undefined
+  // 只重建中间件冻结过、且最近一次组装里还有本插件条目的会话：宿主压掉运行时上下文时中间件不冻结，这里也不能冻结，
+  // 否则没进上下文的快照会计召回、出会话视图，检索还会把 core 正文换成「已带入」说明。会话中途才压掉的
+  // （persona 的 includeRuntimeContext 改成 false）以前冻结过，只看 injectedCore 拦不住。
+  const lastHadEntry = new WeakMap<object, boolean>()
+  const wasFrozen = (session: object) => lastHadEntry.get(session) === true && snapshotCache.injectedCore(session) !== undefined
   ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
     const decision = await next()
     if (!signal.aborted && wasFrozen(agent.session)) await snapshotCache.assemble(agent.session)
@@ -588,6 +590,7 @@ export async function apply(ctx: Context, config: Config) {
   ctx.on('system-prompt/assemble', async (assembly: PromptAssembly, assembleCtx: AssembleContext, next: () => Promise<PromptAssembly>) => {
     const session = (assembleCtx?.scope as { session?: object } | undefined)?.session
     const entries = assembly.contexts.filter(entry => entry.name === 'plastic-memory')
+    if (session) lastHadEntry.set(session, entries.length > 0)
     if (session && entries.length > 0) {
       const text = await snapshotCache.assemble(session)
       for (const entry of entries) entry.text = text

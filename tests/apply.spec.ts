@@ -701,7 +701,13 @@ describe('注入链接线', () => {
     })
     // 模拟 compaction-basic：在 next 链里压缩（compaction/end），再交出它的结果
     const compactThen = <T>(result: T) => async () => { onEvent(session, { type: 'compaction/end' }); return result }
-    return { session, def, assembleCtx, assembleOnce, addMemory, preStep, requestError, preStepPayload, requestErrorPayload, compactThen, onEvent }
+    /** 宿主压掉运行时上下文的一次组装：里面没有本插件的条目。 */
+    const assembleWithout = async () => {
+      const assembly: PromptAssembly = { sections: [], contexts: [], tools: [], variables: {} }
+      await middleware(assembly, assembleCtx, async () => assembly)
+    }
+    const recallStats = () => readFile(join(memoryRoot, STATE_DIR, RECALL_STATS_FILE), 'utf8').catch(() => '')
+    return { session, def, assembleCtx, assembleOnce, assembleWithout, recallStats, addMemory, preStep, requestError, preStepPayload, requestErrorPayload, compactThen, onEvent }
   }
 
   it('provider 首轮空串 → 中间件冻结 → provider 回缓存；两次组装之间的刷新拿到上一份（compaction/end 后 provider 回旧快照、下一次中间件回新快照）', async () => {
@@ -810,6 +816,32 @@ describe('注入链接线', () => {
     expect(await preStep(preStepPayload(new AbortController().signal), failThen)).toBe(decision)
     expect(def.text(assembleCtx)).toBe(t0) // 没压掉旧快照，文本不变，宿主不会追加第二份
     expect(await assembleOnce()).toBe(t0)
+  })
+
+  it('冻结过的会话中途被宿主压掉运行时上下文：之后成功压缩，pre-step 与溢出重试都不重建、不计召回', async () => {
+    const { def, assembleCtx, assembleOnce, assembleWithout, recallStats, addMemory, preStep, requestError, preStepPayload, requestErrorPayload, compactThen } = await boot()
+    const t0 = await assembleOnce()
+    await assembleWithout() // persona 中途把 includeRuntimeContext 改成 false
+    await addMemory()
+    const stats = await recallStats()
+    const decision = { kind: 'enter', messages: [] }
+    expect(await preStep(preStepPayload(new AbortController().signal), compactThen(decision))).toBe(decision)
+    const retry = { kind: 'retry' }
+    expect(await requestError(requestErrorPayload(new AbortController().signal), compactThen(retry))).toBe(retry)
+    expect(def.text(assembleCtx)).toBe(t0)
+    expect(await recallStats()).toBe(stats)
+  })
+
+  it('压掉后又恢复带上运行时上下文：成功压缩照常重建', async () => {
+    const { def, assembleCtx, assembleOnce, assembleWithout, addMemory, preStep, preStepPayload, compactThen } = await boot()
+    await assembleOnce()
+    await assembleWithout()
+    const t1 = await assembleOnce()
+    await addMemory()
+    const decision = { kind: 'enter', messages: [] }
+    expect(await preStep(preStepPayload(new AbortController().signal), compactThen(decision))).toBe(decision)
+    expect(def.text(assembleCtx)).toContain('压缩后新增的偏好 zebra')
+    expect(def.text(assembleCtx)).not.toBe(t1)
   })
 
   it('快照来历读 turnBoundary 投影：本实例首次冻结时已过了第 1 轮记为重新带入，第 1 轮内记为对话开始时；投影读不到按开始时', async () => {
