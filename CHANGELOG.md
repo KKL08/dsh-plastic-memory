@@ -92,8 +92,8 @@ All notable changes to this project are documented here. The format follows
   and fails when top-1 or top-3 accuracy drops below a fixed floor, with and
   without the Chinese segmenter.
 - The checkup buttons on the memory page and the settings status card carry a
-  line saying the checkup uses the current chat's model and takes a few
-  tokens. When a checkup finishes, its result line ends with the tokens it
+  line saying the checkup uses the current chat's model and that more
+  memories take more tokens. When a checkup finishes, its result line ends with the tokens it
   actually used, summed from what the host reports for every model call;
   nothing is shown when the host reports no usage.
 
@@ -112,12 +112,12 @@ All notable changes to this project are documented here. The format follows
   English text is counted per character too, so English-heavy memories now
   estimate higher and may cross the limit. Existing overflow reminders are
   recomputed the next time memories are loaded.
-- The content check of a checkup covers every memory, however many or long
-  they are: instead of stopping at the first 200, it sends memories in
-  batches of about 30,000 estimated tokens, keeping memories of one type
-  together, so a large library no longer fails the whole layer. When a layer
-  needs more than one batch the result says so, because a conflict or
-  duplicate between memories in different batches can be missed.
+- The content check of a checkup now checks every memory in batches of about
+  30,000 estimated tokens, keeping memories of one type together, instead of
+  only the first 200, so a large library no longer exceeds what a single model
+  call can take. When a layer needs more than one batch the result says so,
+  because a conflict or duplicate between memories in different batches can
+  be missed.
 - Settings changed in the GUI or in `cordis.patch.yml` now apply to running
   conversations at their next step: a new budget or source-lookup level is
   used the next time memories are assembled, a template or custom-type change

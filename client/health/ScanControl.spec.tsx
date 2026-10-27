@@ -48,10 +48,10 @@ describe('体检当前项目', () => {
 
   it('按钮下常驻一行 token 消耗说明；体检关闭时不写', () => {
     const { unmount } = renderInShell(<MemoryPage nav={createNavStore()} />, createFakeGateway({ currentWorkspace: '/w/app', views: { pending: noPending, health: health() } }))
-    expect(screen.getByText('会用当前对话的模型检查记忆内容，消耗少量 token。')).toHaveClass('pm-scan-hint')
+    expect(screen.getByText('会用当前对话的模型检查记忆内容，记忆越多，用的 token 越多。')).toHaveClass('pm-scan-hint')
     unmount()
     renderPage({ views: { pending: noPending, health: health(false) } })
-    expect(screen.queryByText('会用当前对话的模型检查记忆内容，消耗少量 token。')).toBeNull()
+    expect(screen.queryByText('会用当前对话的模型检查记忆内容，记忆越多，用的 token 越多。')).toBeNull()
   })
 
   it('有待处理时用次按钮，不抢待处理的位置', () => {
@@ -182,7 +182,7 @@ describe('体检当前项目', () => {
         respond: () => scanned({ notes: ['semantic-batched'], semanticBatches: 3, usageTokens: 6800 }),
       })
       const { container } = render(<PanelShell gateway={gateway} t={createTranslator(en)}><MemoryPage nav={createNavStore()} /></PanelShell>)
-      expect(container.querySelector('.pm-scan-hint')).toHaveTextContent('Uses the model of the current chat to check memory content, which takes a few tokens.')
+      expect(container.querySelector('.pm-scan-hint')).toHaveTextContent('Uses this chat\'s model to check memory content; the more memories, the more tokens it uses.')
       await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Check this project' })) })
       expect(container.querySelector('.pm-scan-status')!.textContent).toBe(
         'No new issues found·View scores ›·Used about 6,800 tokens this time'

@@ -541,9 +541,11 @@ describe('状态卡「立即体检」', () => {
     expect(statusLine()).not.toHaveTextContent(/token/)
   })
 
-  it('按钮下常驻一行 token 消耗说明；体检关闭时不写', () => {
-    render()
-    expect(container.querySelector('.pm-scan-hint')).toHaveTextContent(/^会用当前对话的模型检查记忆内容，消耗少量 token。$/)
+  it('按钮下常驻一行 token 消耗说明；体检关闭、没有可用会话时不写', () => {
+    const gateway = render()
+    expect(container.querySelector('.pm-scan-hint')).toHaveTextContent(/^会用当前对话的模型检查记忆内容，记忆越多，用的 token 越多。$/)
+    act(() => { gateway.setSession({ kind: 'none' }) })
+    expect(container.querySelector('.pm-scan-hint')).toBeNull()
     cleanup()
     render({}, section({ governance: { enabled: false, health: { sensitivity: 'standard' }, globalPromoteTarget: 'plugin-global' } }))
     expect(container.querySelector('.pm-scan-hint')).toBeNull()
