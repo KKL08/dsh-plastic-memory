@@ -64,7 +64,7 @@ describe('斜杠词', () => {
     expect(labels(g)).toEqual(['部署', 'deploy'])
     expect(keywords(g)).toEqual([true, true])
     expect(labels(groupsFor('src/gui/contract.ts'))).toEqual(['src/gui/contract.ts'])
-    expect(labels(groupsFor('/Users/x/y'))).toEqual(['Users/x/y'])   // 标签去掉首尾标点
+    expect(labels(groupsFor('/opt/x/y'))).toEqual(['opt/x/y'])   // 标签去掉首尾标点
     expect(labels(groupsFor('a/b/c'))).toEqual([])   // 单字母不是 token
     expect(keywords(groupsFor('src/gui/contract.ts'))).toEqual([true])
   })
