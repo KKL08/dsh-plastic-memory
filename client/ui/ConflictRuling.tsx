@@ -33,6 +33,8 @@ export interface ConflictRulingProps {
   hideScope?: boolean
   /** 记忆在别的项目里时的项目名（见 MemoryCard 的 projectName）。 */
   projectName?: (memory: MemoryCardData) => string | undefined
+  /** 标题后面的附加内容（记忆页「全部」里的范围胶囊）。 */
+  headExtra?: ReactNode
 }
 
 export function ConflictRuling(props: ConflictRulingProps) {
@@ -60,6 +62,7 @@ export function ConflictRuling(props: ConflictRulingProps) {
       <header className="pm-conflict-head">
         <StatusMarker kind="pending" />
         <h3 className="pm-conflict-title">{props.title ?? t('conflict.title')}</h3>
+        {props.headExtra}
       </header>
       {props.note !== undefined ? <p className="pm-conflict-note">{props.note}</p> : null}
       <div className="pm-conflict-sides">
@@ -96,6 +99,7 @@ export interface VerticalConflictRulingProps {
   typeLabel?: (type: string) => string
   hideScope?: boolean
   projectName?: (memory: MemoryCardData) => string | undefined
+  headExtra?: ReactNode
 }
 
 /** 记忆和基线冲突：宽版按钮靠右，窄版按钮一行靠左，后果说明都在按钮下面。 */
@@ -108,6 +112,7 @@ export function VerticalConflictRuling(props: VerticalConflictRulingProps) {
       <header className="pm-conflict-head">
         <StatusMarker kind="pending" />
         <h3 className="pm-conflict-title">{props.title ?? t('conflict.vertical.title')}</h3>
+        {props.headExtra}
       </header>
       <p className="pm-conflict-note">{t('conflict.vertical.baseline')}</p>
       <div className="pm-conflict-single">

@@ -2,7 +2,7 @@
  * 待处理的各类卡（PRD 5.2；建议整理见 spec「建议整理的动作」）与处理后留在原位的结果卡。每张卡动手前写清后果；动作经 useItemAction 发命令，
  * 成功后把结果（Outcome）交给列表，由列表在原位换成结果卡。
  */
-import { useState, type ReactNode } from 'react'
+import { createContext, useContext, useState, type ReactNode } from 'react'
 import {
   CONFLICT_ACTION_VERDICTS, MODEL_EDIT_ADVICE_TYPES, layerOfMemory, mergeKeeperIndex,
   type AdviceType, type GuiLayerRef, type IgnorableAdviceType, type MemoryCard as MemoryCardData, type MemoryCommand, type ModelEditAdviceType, type PendingItem,
@@ -73,7 +73,16 @@ export function bodyOf(text: string): string {
 
 const isMac = () => typeof navigator !== 'undefined' && /mac/i.test(navigator.platform)
 
+/** 「全部」里每张卡标题后的范围名胶囊（条目属于哪些范围）；选了具体范围时为空，不画。由列表按行给出。 */
+export const ItemScopeNames = createContext<readonly string[]>([])
+
 /** focusable：结果卡可以接住焦点（tabIndex=-1），确认收起后原来的按钮没了就落在它上面。 */
+/** 记忆页「全部」里条目标题后的范围胶囊，范围名由 ItemScopeNames 提供。 */
+function ScopeChips() {
+  const scopes = useContext(ItemScopeNames)
+  return <>{scopes.map((name, i) => <span key={i} className="pm-pending-scope"><Chip variant="neutral">{name}</Chip></span>)}</>
+}
+
 function Card({ marker, title, aside, focusable = false, children }: {
   marker?: ReactNode
   title: ReactNode
@@ -86,6 +95,7 @@ function Card({ marker, title, aside, focusable = false, children }: {
       <header className="pm-pending-head">
         {marker}
         <h3 className="pm-pending-title">{title}</h3>
+        <ScopeChips />
         {aside !== undefined ? <div className="pm-pending-aside">{aside}</div> : null}
       </header>
       <div className="pm-pending-body">{children}</div>
@@ -182,6 +192,7 @@ export function HorizontalCard({ item, session, now, typeLabels, onDone, onRefus
         unavailable={action.unavailable}
         typeLabel={type => typeLabels[type] ?? type}
         projectName={projectNameOf(session)}
+        headExtra={<ScopeChips />}
         onRule={(verdict) => { action.run({ cmd: 'resolve', decisionId: item.decisionId, verdict }) }}
       />
       <ActionFeedback action={action} />
@@ -205,6 +216,7 @@ export function VerticalCard({ item, session, now, typeLabels, onDone, onRefused
         unavailable={action.unavailable}
         typeLabel={type => typeLabels[type] ?? type}
         projectName={projectNameOf(session)}
+        headExtra={<ScopeChips />}
         onRule={(verdict) => { action.run({ cmd: 'resolve', decisionId: item.decisionId, verdict }) }}
       />
       <ActionFeedback action={action} />

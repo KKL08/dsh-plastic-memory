@@ -11,7 +11,7 @@ import { createFakeConfigForm, DEFAULT_SECTION } from './settings/config-form.fa
 import { ENTRY_ID } from './settings/config.ts'
 import { createTranslator } from './i18n.tsx'
 import { zh } from './locales.ts'
-import { createNavStore } from './nav.ts'
+import { ALL_SCOPE, createNavStore } from './nav.ts'
 import { PendingTab } from './pending/PendingTab.tsx'
 import { fakeHostContext, levelCountsOf, memory } from './test-utils.tsx'
 import { PanelShell } from './ui/PanelShell.tsx'
@@ -665,7 +665,7 @@ describe('createHostGateway', () => {
       const useSessions = <S,>(selector: (s: SessionListState) => S) => useSyncExternalStore(subscribe, () => selector(state))
       const gateway = createHostGateway(fakeCtx({ remote: { commands: { execute: vi.fn(execute) } } }))({ ...props, useSessions })
       function Page() {
-        return <PendingTab nav={createNavStore()} session={gateway.useSession('/w/app')} workspacePath="/w/app" />
+        return <PendingTab nav={createNavStore()} session={gateway.useSession('/w/app')} scope={ALL_SCOPE} workspacePath="/w/app" />
       }
       render(<PanelShell gateway={gateway} t={createTranslator(zh)}><Page /></PanelShell>)
       return {

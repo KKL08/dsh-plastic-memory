@@ -4,8 +4,9 @@
  * 另管两个依赖宿主可选服务的出口（插件页、右侧栏记忆 tab）：服务在才能用，不能用的入口不画。
  */
 import { useSyncExternalStore } from 'react'
-import type { GuiLayerRef, PendingLevel } from '../src/gui/contract.ts'
+import { sameLayer, type GuiLayerRef, type PendingLevel, type ScopeRef } from '../src/gui/contract.ts'
 import type { HostContext } from './host.ts'
+import { baseName } from './path.ts'
 
 /** 左栏记忆页与左栏图标共用的 id（`main` 插槽的 key = `sidebar.panellist` 的 id）。 */
 export const PANEL_ID = 'plastic-memory'
@@ -16,25 +17,66 @@ export const SIDEBAR_TAB_ID = 'dsh-plastic-memory'
 export const SIDEBAR_TAB_KIND = 'plastic-memory'
 
 /** 两个作用域是否同一层：都是全局，或同一个项目路径。 */
-export function sameScope(a: GuiLayerRef, b: GuiLayerRef): boolean {
-  return a.kind === b.kind && (a.kind === 'global' || (b.kind === 'workspace' && a.workspacePath === b.workspacePath))
+export { sameLayer as sameScope } from '../src/gui/contract.ts'
+
+/** 记忆页的三个视图，按显示顺序：处理、记忆查看、最近删除。标识本身不随显示名变。 */
+export const MEMORY_VIEWS = ['todo', 'library', 'deleted'] as const
+export type MemoryView = (typeof MEMORY_VIEWS)[number]
+
+/** 记忆页左栏选中的范围：全部，或一个作用域（全局、某个项目）。即契约里的范围（ScopeRef）。 */
+export type PageScope = ScopeRef
+export const ALL_SCOPE: PageScope = { kind: 'all' }
+
+export function samePageScope(a: PageScope, b: PageScope): boolean {
+  if (a.kind === 'all' || b.kind === 'all') return a.kind === b.kind
+  return sameLayer(a, b)
 }
 
-/** 显示顺序；标识本身不随显示名变（入口直达按标识写目标）。 */
-export const MEMORY_TABS = ['pending', 'health', 'library', 'deleted'] as const
-export type MemoryTab = (typeof MEMORY_TABS)[number]
+/** 属于这些作用域的条目在不在这个范围里：「全部」包含一切。 */
+export function isInScope(layers: readonly GuiLayerRef[], scope: PageScope): boolean {
+  return scope.kind === 'all' || layers.some(layer => sameLayer(layer, scope))
+}
+
+/** 作用域的显示顺序：全局在前，项目按显示名（路径最后一段）的字母序，同名按路径。左栏和「全部」里的分段都按它。 */
+export function compareLayers(a: GuiLayerRef, b: GuiLayerRef): number {
+  if (a.kind === 'global' || b.kind === 'global') return a.kind === b.kind ? 0 : a.kind === 'global' ? -1 : 1
+  return baseName(a.workspacePath).localeCompare(baseName(b.workspacePath)) || a.workspacePath.localeCompare(b.workspacePath)
+}
 
 export interface NavTarget {
-  tab: MemoryTab
-  /** 缺省 = 当前选中会话所在的项目，没有就是全局。 */
-  scope?: GuiLayerRef
+  view: MemoryView
+  /** 缺省：从对话进来时是那个对话的项目（对话不在项目里时是全局），否则是「全部」。 */
+  scope?: PageScope
   /** 要滚入视野并高亮的记忆。 */
   memoryId?: string
   /**
-   * 待处理 tab 要定位的组（健康页「去处理 ›」）：焦点落在组标题上，组不在了落在待处理顶部。
+   * 处理视图要定位的组：焦点落在组标题上，组不在了落在处理视图顶部。
    * 只对写它的那次导航有效：update 没给出它就清掉，免得切走再切回来又被拉过去。
    */
   level?: PendingLevel
+  /**
+   * 从对话（右侧栏、对话卡、输入框「记忆」按钮）进来。那个对话就是当前选中的会话：它的项目在标题行和左栏标「当前对话」，
+   * 没有记忆也列进左栏。
+   */
+  fromChat?: true
+}
+
+/** 改版前指向四个 tab 的导航目标，照常可用（见 toNavTarget）。缺省作用域按「全部」。 */
+export const LEGACY_TABS = ['pending', 'health', 'library', 'deleted'] as const
+export interface LegacyNavTarget {
+  tab: (typeof LEGACY_TABS)[number]
+  scope?: GuiLayerRef
+  memoryId?: string
+  level?: PendingLevel
+}
+
+const LEGACY_VIEW = { pending: 'todo', health: 'todo', library: 'library', deleted: 'deleted' } as const satisfies Record<LegacyNavTarget['tab'], MemoryView>
+
+/** 旧目标映射：待处理、健康 → 处理（带组的照旧定位到组标题），全部记忆 → 记忆查看，最近删除 → 最近删除。新目标原样返回。 */
+export function toNavTarget(target: NavTarget | LegacyNavTarget): NavTarget {
+  if (!('tab' in target)) return target
+  const { tab, ...rest } = target
+  return { view: LEGACY_VIEW[tab], ...rest }
 }
 
 /** 依赖宿主可选服务的出口：插件页里本插件的配置（pluginNavigation）、当前会话右侧栏的记忆 tab（sidebarRightTabs + sidebarRight）。 */
@@ -45,8 +87,8 @@ export interface NavStore {
   subscribe(fn: () => void): () => void
   /** 整体替换目标。 */
   navigate(target: NavTarget): void
-  /** 入口用：整体替换目标，并记下「这次打开来自入口」（openMemoryPage 先调它再切面板）。 */
-  enter(target: NavTarget): void
+  /** 入口用：整体替换目标（旧目标先映射），并记下「这次打开来自入口」（openMemoryPage 先调它再切面板）。 */
+  enter(target: NavTarget | LegacyNavTarget): void
   /**
    * 取走入口标记（取完即清）。记忆页挂载时据此判断：入口写过目标就照目标走，
    * 没有（点左栏图标、宿主恢复上次的面板）就按默认落点。
@@ -65,7 +107,7 @@ export interface NavStore {
 }
 
 export function createNavStore(
-  initial: NavTarget = { tab: 'pending' },
+  initial: NavTarget = { view: 'todo' },
   opts: { openSettings?: () => void; openSidebarTab?: () => void } = {},
 ): NavStore {
   let target = initial
@@ -78,7 +120,7 @@ export function createNavStore(
     get: () => target,
     subscribe(fn) { listeners.add(fn); return () => { listeners.delete(fn) } },
     navigate: set,
-    enter(next) { entered = true; set(next) },
+    enter(next) { entered = true; set(toNavTarget(next)) },
     takeEntry() { const was = entered; entered = false; return was },
     update(patch) { const { level: _dropped, ...rest } = target; set({ ...rest, ...patch }) },
     openSettings: () => { exits.settings?.() },
@@ -97,8 +139,8 @@ export function useCanOpen(nav: NavStore, exit: HostExit): boolean {
   return useSyncExternalStore(nav.subscribe, () => nav.canOpen(exit))
 }
 
-/** 入口直达记忆页：先写目标，再切面板。 */
-export function openMemoryPage(ctx: Pick<HostContext, 'layout'>, nav: NavStore, target: NavTarget): void {
+/** 入口直达记忆页：先写目标（旧目标先映射），再切面板。 */
+export function openMemoryPage(ctx: Pick<HostContext, 'layout'>, nav: NavStore, target: NavTarget | LegacyNavTarget): void {
   nav.enter(target)
   ctx.layout.selectPanel(PANEL_ID)
 }

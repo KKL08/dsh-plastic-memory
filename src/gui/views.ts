@@ -15,7 +15,8 @@ import type { IgnoredAdvice } from '../governance/advice-ignores.ts'
 import { autoCheckupDue, isRetryLimitReached } from '../governance/auto-checkups.ts'
 import type { CheckupRecord } from '../storage/schema.ts'
 import {
-  ADVICE_TYPES, GUI_VIEW_VERSION, PENDING_ITEM_KINDS, PENDING_LEVEL_OF_KIND, PENDING_LEVELS, isAwaitingDecision, layerOfMemory, resolveAutoCheckup,
+  ADVICE_TYPES, GUI_VIEW_VERSION, PENDING_ITEM_KINDS, PENDING_LEVEL_OF_KIND, PENDING_LEVELS, isAwaitingDecision, resolveAutoCheckup,
+  pendingItemKey, pendingItemScopes, sameLayer,
   type AdviceType, type AutoCheckupFrequency, type CheckupView, type DeletedView, type MemoryPromotion, type GlobalViewName, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCard,
   type MemoryCommandResult, type ModelChange, type PendingItem, type PendingLevel, type PendingView, type SessionView,
 } from './contract.ts'
@@ -182,32 +183,6 @@ function adviceItems(input: ViewInput): PendingItem[] {
   return unique.map(({ type, records }) => ({ kind: 'advice', level: PENDING_LEVEL_OF_KIND.advice, type, memories: records.map(r => card(r, data)) }))
 }
 
-/** 待处理项的身份：账本来的按条目 id；密钥按层 + 记忆 id；读不出的文件按路径；建议整理按类型 + 排序后的记忆 id。 */
-export function pendingItemKey(item: PendingItem): string {
-  switch (item.kind) {
-    case 'secret': return `secret:${item.memory.scope}:${item.memory.workspacePath ?? ''}:${item.memory.id}`
-    case 'unreadable-file': return `unreadable-file:${item.filePath}`
-    case 'advice': return `advice:${item.type}:${item.memories.map(m => m.id).sort().join(',')}`
-    default: return `decision:${item.decisionId}`
-  }
-}
-
-/** 待处理项涉及的层（记忆所在层；超限按会话所属项目）。冲突双方都定位不到时为空。 */
-function layersOfItem(item: PendingItem): GuiLayerRef[] {
-  switch (item.kind) {
-    case 'unreadable-file': return [item.layer]
-    case 'overflow': return [item.workspacePath === undefined ? { kind: 'global' } : { kind: 'workspace', workspacePath: item.workspacePath }]
-    case 'conflict-horizontal': return [item.left, item.right].flatMap(m => m === null ? [] : [layerOfMemory(m)]).filter(l => l !== undefined)
-    case 'advice': return item.memories.map(layerOfMemory).filter(l => l !== undefined)
-    default: {
-      const layer = item.memory === null ? undefined : layerOfMemory(item.memory)
-      return layer === undefined ? [] : [layer]
-    }
-  }
-}
-
-const sameLayer = (a: GuiLayerRef, b: GuiLayerRef) => a.kind === b.kind && (a.kind === 'global' || (b.kind === 'workspace' && a.workspacePath === b.workspacePath))
-
 /**
  * 体检结果（`scan` 命令）：体检后的待处理里有、体检前没有的项按级别计数，以及体检后各层的健康分。
  * covered = 本次体检覆盖的层，'all' 是全库体检；只数、只列涉及这些层的。用户忽略的建议本就不在待处理里，不会算进来。
@@ -219,7 +194,7 @@ export function scanOutcome(
 ): Required<Pick<Extract<MemoryCommandResult, { ok: true }>, 'added' | 'scores'>> {
   const isCovered = (layer: GuiLayerRef) => covered === 'all' || covered.some(c => sameLayer(c, layer))
   const seen = new Set(before.items.map(pendingItemKey))
-  const added = after.pending.items.filter(i => !seen.has(pendingItemKey(i)) && (covered === 'all' || layersOfItem(i).some(isCovered)))
+  const added = after.pending.items.filter(i => !seen.has(pendingItemKey(i)) && (covered === 'all' || pendingItemScopes(i).some(isCovered)))
   const pending = added.filter(i => i.level !== 'advice')
   const levels = [...new Set(pending.map(i => i.level))]
   return {

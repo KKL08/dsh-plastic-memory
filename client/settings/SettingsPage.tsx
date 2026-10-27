@@ -7,7 +7,7 @@ import { useId, useState } from 'react'
 import { useGateway } from '../gateway.ts'
 import { useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
-import type { NavTarget } from '../nav.ts'
+import type { LegacyNavTarget } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { Chip } from '../ui/Chip.tsx'
 import { SegmentedControl } from '../ui/Segmented.tsx'
@@ -28,7 +28,7 @@ const USAGE_FIELDS: ReadonlyArray<keyof SettingsFields> = ['budget', 'overflow',
 export function SettingsPage({ form, onOpenMemoryPage, now }: {
   form: ConfigForm
   /** 经导航 store 直达记忆页的某个 tab（待处理可带要定位的组）。 */
-  onOpenMemoryPage: (target: Pick<NavTarget, 'tab' | 'level'>) => void
+  onOpenMemoryPage: (target: Pick<LegacyNavTarget, 'tab' | 'level'>) => void
   now?: number
 }) {
   const t = useT()

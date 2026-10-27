@@ -29,7 +29,7 @@ function setup({ view, pressure, hasSidebar = true, library }: {
   const gateway = createFakeGateway({ views: { ...(view === undefined ? {} : { session: view }), ...(library === undefined ? {} : { library }) } })
   const ctx = { layout: { selectPanel: vi.fn() } }
   const openSidebarTab = vi.fn()
-  const nav = createNavStore({ tab: 'library' }, hasSidebar ? { openSidebarTab } : {})
+  const nav = createNavStore({ view: 'library' }, hasSidebar ? { openSidebarTab } : {})
   const t = createTranslator(zh)
   const Dock = createComposerDock(ctx, nav, () => gateway, () => t)
   const props: SessionStandardProps = {
@@ -171,7 +171,7 @@ describe('跳转', () => {
     const { ctx, nav } = setup({ view: sessionView({ overflowMode: 'strict', omittedCount: 2 }) })
     openPanel()
     fireEvent.click(screen.getByRole('button', { name: '处理 ›' }))
-    expect(nav.get()).toEqual({ tab: 'pending' })
+    expect(nav.get()).toEqual({ view: 'todo', fromChat: true })
     expect(ctx.layout.selectPanel).toHaveBeenCalledWith(PANEL_ID)
   })
 

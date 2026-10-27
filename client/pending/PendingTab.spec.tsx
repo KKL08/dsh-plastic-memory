@@ -4,7 +4,7 @@ import { GUI_VIEW_VERSION, type AdviceType, type HealthView, type MemoryCard, ty
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { useGateway, type PluginConfig } from '../gateway.ts'
 import { FLASH_MS } from '../library/shared.tsx'
-import { createNavStore, type NavStore } from '../nav.ts'
+import { ALL_SCOPE, createNavStore, type NavStore } from '../nav.ts'
 import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { PendingTab } from './PendingTab.tsx'
 
@@ -34,7 +34,7 @@ const scannedHealth = (at: number | null): HealthView => ({
 
 function setup(items: PendingItem[], init: FakeGatewayInit = {}, nav: NavStore = createNavStore()) {
   const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(...items), health: scannedHealth(NOW) }, ...init })
-  const utils = renderInShell(<PendingTab nav={nav} session={SESSION} workspacePath="/w/app" now={NOW} />, gateway)
+  const utils = renderInShell(<PendingTab nav={nav} session={SESSION} scope={ALL_SCOPE} workspacePath="/w/app" now={NOW} />, gateway)
   const commands = () => gateway.executed.map(e => e.command)
   return { ...utils, gateway, commands }
 }
@@ -169,7 +169,7 @@ describe('待处理：各类卡', () => {
   it('候选是否在别的项目：按会话归属判断（对照里的软链接、项目子目录都算本项目；嵌套子项目里的会话看外层的记忆算别的项目）', () => {
     const check = (session: { kind: 'ready'; sessionId: string; cwd: string; workspaces?: Record<string, string> }, heading: string) => {
       const gateway = createFakeGateway({ session, config, views: { pending: view(promote), health: scannedHealth(NOW) } })
-      const { unmount } = renderInShell(<PendingTab nav={createNavStore()} session={session} workspacePath="/w/app" now={NOW} />, gateway)
+      const { unmount } = renderInShell(<PendingTab nav={createNavStore()} session={session} scope={ALL_SCOPE} workspacePath="/w/app" now={NOW} />, gateway)
       expect(screen.getByRole('heading', { name: heading })).toBeInTheDocument()
       unmount()
     }
@@ -184,9 +184,9 @@ describe('待处理：各类卡', () => {
     const { commands } = setup([overflow, global], {}, nav)
     const [projectLink, globalLink] = screen.getAllByRole('button', { name: '整理记忆 ›' })
     fireEvent.click(projectLink!)
-    expect(nav.get()).toMatchObject({ tab: 'library', scope: { kind: 'workspace', workspacePath: '/w/app' }, memoryId: undefined })
+    expect(nav.get()).toMatchObject({ view: 'library', scope: { kind: 'workspace', workspacePath: '/w/app' }, memoryId: undefined })
     fireEvent.click(globalLink!)
-    expect(nav.get()).toMatchObject({ tab: 'library', scope: { kind: 'global' }, memoryId: undefined })
+    expect(nav.get()).toMatchObject({ view: 'library', scope: { kind: 'global' }, memoryId: undefined })
     expect(commands()).toEqual([])
   })
 
@@ -468,7 +468,7 @@ describe('待处理：确认收起后的键盘焦点', () => {
 describe('待处理：两态与空状态', () => {
   it('没有会话：读不到视图，提示先开会话', () => {
     const gateway = createFakeGateway({ session: { kind: 'none' }, config, views: { pending: view(horizontal) } })
-    renderInShell(<PendingTab nav={createNavStore()} session={{ kind: 'none' }} workspacePath={undefined} now={NOW} />, gateway)
+    renderInShell(<PendingTab nav={createNavStore()} session={{ kind: 'none' }} scope={ALL_SCOPE} workspacePath={undefined} now={NOW} />, gateway)
     expect(screen.getByRole('status')).toHaveTextContent('开一个会话后这里可用')
     expect(screen.queryByRole('button')).toBeNull()
   })
@@ -476,7 +476,7 @@ describe('待处理：两态与空状态', () => {
   it('有结果卡时会话没了：撤销不可用并提示「先开一个会话」', async () => {
     // 和页面一样从网关借会话
     function Tab() {
-      return <PendingTab nav={createNavStore()} session={useGateway().useSession('/w/app')} workspacePath="/w/app" now={NOW} />
+      return <PendingTab nav={createNavStore()} session={useGateway().useSession('/w/app')} scope={ALL_SCOPE} workspacePath="/w/app" now={NOW} />
     }
     const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(horizontal), health: scannedHealth(NOW) } })
     renderInShell(<Tab />, gateway)
@@ -535,7 +535,7 @@ describe('待处理：直达某条记忆', () => {
   const cardOf = (title: string) => screen.getByRole('heading', { level: 3, name: title }).closest('.pm-pending-row')!
 
   it('记忆在横向冲突的 B 方：那张冲突卡高亮并滚入视野，播完收起', () => {
-    const nav = createNavStore({ tab: 'pending', memoryId: 'b' })
+    const nav = createNavStore({ view: 'todo', memoryId: 'b' })
     setup([vertical, horizontal, promote], {}, nav)
     const row = cardOf('测试里怎么准备数据库，两条记忆互相矛盾')
     expect(row).toHaveClass('pm-flash')
@@ -547,17 +547,17 @@ describe('待处理：直达某条记忆', () => {
   })
 
   it('提升候选、垂直冲突、密钥都认它们那条记忆；入口换一条再高亮一次', () => {
-    const nav = createNavStore({ tab: 'pending', memoryId: 'p' })
+    const nav = createNavStore({ view: 'todo', memoryId: 'p' })
     setup([secret, vertical, promote], {}, nav)
     expect(cardOf('这条适合所有项目')).toHaveClass('pm-flash')
-    act(() => { nav.navigate({ tab: 'pending', memoryId: 'v' }) })
+    act(() => { nav.navigate({ view: 'todo', memoryId: 'v' }) })
     expect(cardOf('包管理器和基线矛盾')).toHaveClass('pm-flash')
-    act(() => { nav.navigate({ tab: 'pending', memoryId: 's' }) })
+    act(() => { nav.navigate({ view: 'todo', memoryId: 's' }) })
     expect(cardOf('这条记忆里有密钥')).toHaveClass('pm-flash')
   })
 
   it('目标不在待处理里：不高亮、不滚动', () => {
-    setup([horizontal], {}, createNavStore({ tab: 'pending', memoryId: 'nope' }))
+    setup([horizontal], {}, createNavStore({ view: 'todo', memoryId: 'nope' }))
     expect(document.querySelector('.pm-flash')).toBeNull()
     expect(scrollIntoView).not.toHaveBeenCalled()
   })
@@ -573,7 +573,7 @@ describe('待处理：定位到组', () => {
 
   it('三组各自能定位：焦点在组标题上，标题滚入视野', () => {
     for (const [level, heading] of [['must-fix', '高优问题 1'], ['your-call', '待你处理 1'], ['advice', '建议整理 1']] as const) {
-      const { unmount } = setup([secret, horizontal, advice], {}, createNavStore({ tab: 'pending', level }))
+      const { unmount } = setup([secret, horizontal, advice], {}, createNavStore({ view: 'todo', level }))
       const title = screen.getByRole('heading', { level: 2, name: heading })
       expect(title).toHaveFocus()
       expect(scrollIntoView.mock.contexts.at(-1)).toBe(title)
@@ -582,19 +582,19 @@ describe('待处理：定位到组', () => {
   })
 
   it('那一组已经没有了：焦点落在待处理顶部', () => {
-    setup([secret, advice], {}, createNavStore({ tab: 'pending', level: 'your-call' }))
+    setup([secret, advice], {}, createNavStore({ view: 'todo', level: 'your-call' }))
     expect(top()).toHaveFocus()
     expect(scrollIntoView.mock.contexts.at(-1)).toBe(top())
   })
 
   it('待处理全空：同样落在顶部（空状态在里面）', () => {
-    setup([], {}, createNavStore({ tab: 'pending', level: 'advice' }))
+    setup([], {}, createNavStore({ view: 'todo', level: 'advice' }))
     expect(top()).toHaveFocus()
     expect(top()).toHaveTextContent('目前没有要处理的事')
   })
 
   it('视图晚到：到了再定位', () => {
-    const nav = createNavStore({ tab: 'pending', level: 'advice' })
+    const nav = createNavStore({ view: 'todo', level: 'advice' })
     const { gateway } = setup([], { views: { pending: { status: 'loading' }, health: scannedHealth(NOW) } }, nav)
     expect(document.body).toHaveFocus()
     act(() => { gateway.setView('pending', view(secret, advice)) })
@@ -602,13 +602,13 @@ describe('待处理：定位到组', () => {
   })
 
   it('只定位一次：视图刷新不再抢焦点；不带组标识进来不动焦点', () => {
-    const nav = createNavStore({ tab: 'pending', level: 'advice' })
+    const nav = createNavStore({ view: 'todo', level: 'advice' })
     const { gateway } = setup([secret, advice], {}, nav)
     const ignore = screen.getByRole('button', { name: '忽略' })
     ignore.focus()
     act(() => { gateway.setView('pending', view(secret, horizontal, advice)) })
     expect(ignore).toHaveFocus()
-    act(() => { nav.update({ tab: 'pending' }) })
+    act(() => { nav.update({ view: 'todo' }) })
     expect(ignore).toHaveFocus()
     expect(scrollIntoView).toHaveBeenCalledTimes(1)
   })
@@ -877,7 +877,7 @@ describe('待处理：建议整理', () => {
     Element.prototype.scrollIntoView = vi.fn()
     try {
       const many = Array.from({ length: 7 }, (_, i) => advice('bloat', `b${i}`))
-      setup(many, {}, createNavStore({ tab: 'pending', memoryId: 'b6' }))
+      setup(many, {}, createNavStore({ view: 'todo', memoryId: 'b6' }))
       expect(within(groupOf()).getAllByRole('article')).toHaveLength(7)
       expect(document.querySelector('[data-memory-id="b6"]')!.closest('.pm-pending-row')).toHaveClass('pm-flash')
     } finally {
@@ -1354,7 +1354,7 @@ describe('待处理：放错层只给挪层', () => {
   /** pageProject：页面作用域的项目，null = 页面在全局。 */
   function setupMove(items: PendingItem[], init: FakeGatewayInit = {}, pageProject: string | null = '/w/app') {
     const gateway = createFakeGateway({ session, config, views: { pending: view(...items), health: scannedHealth(NOW) }, ...init })
-    renderInShell(<PendingTab nav={createNavStore()} session={session} workspacePath={pageProject ?? undefined} now={NOW} />, gateway)
+    renderInShell(<PendingTab nav={createNavStore()} session={session} scope={ALL_SCOPE} workspacePath={pageProject ?? undefined} now={NOW} />, gateway)
     return { gateway, commands: () => gateway.executed.map(e => e.command) }
   }
   const cardOf = () => screen.getByRole('heading', { level: 3, name: '放错层' }).closest('article')!
@@ -1455,7 +1455,7 @@ describe('待处理：放错层只给挪层', () => {
   it('一个已知项目都没有：写明原因，「移过去」不可用', () => {
     const lonely = { kind: 'ready', sessionId: 's1', cwd: undefined } as const
     const gateway = createFakeGateway({ session: lonely, config, views: { pending: view(toProject), health: scannedHealth(NOW) } })
-    renderInShell(<PendingTab nav={createNavStore()} session={lonely} workspacePath={undefined} now={NOW} />, gateway)
+    renderInShell(<PendingTab nav={createNavStore()} session={lonely} scope={ALL_SCOPE} workspacePath={undefined} now={NOW} />, gateway)
     openPicker()
     expect(within(cardOf()).getByText('还没有已知的项目：在某个项目里开过对话后，它会出现在这里。')).toBeInTheDocument()
     expect(within(cardOf()).getByRole('button', { name: '移过去' })).toHaveAttribute('aria-disabled', 'true')
@@ -1470,7 +1470,7 @@ describe('待处理：放错层只给挪层', () => {
   it('一个已知项目都没有：展开时焦点落在「取消」，不随收起的「移到项目…」掉到页面上', () => {
     const lonely = { kind: 'ready', sessionId: 's1', cwd: undefined } as const
     const gateway = createFakeGateway({ session: lonely, config, views: { pending: view(toProject), health: scannedHealth(NOW) } })
-    renderInShell(<PendingTab nav={createNavStore()} session={lonely} workspacePath={undefined} now={NOW} />, gateway)
+    renderInShell(<PendingTab nav={createNavStore()} session={lonely} scope={ALL_SCOPE} workspacePath={undefined} now={NOW} />, gateway)
     openPicker()
     expect(within(cardOf()).getByRole('button', { name: '取消' })).toHaveFocus()
   })

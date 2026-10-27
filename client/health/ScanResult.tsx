@@ -11,7 +11,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { MemoryCommandResult } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { formatNumber, useT } from '../i18n.tsx'
-import type { NavTarget } from '../nav.ts'
+import type { LegacyNavTarget } from '../nav.ts'
 
 type Done = Extract<MemoryCommandResult, { ok: true }>
 type ScanFailure = Extract<MemoryCommandResult, { ok: false }>
@@ -60,7 +60,7 @@ const Sep = () => <i className="pm-sep" aria-hidden="true">·</i>
  */
 export function ScanResult({ state, onOpen, off }: {
   state: Extract<ScanState, { kind: 'done' | 'failed' }>
-  onOpen: (target: Pick<NavTarget, 'tab' | 'level'>) => void
+  onOpen: (target: Pick<LegacyNavTarget, 'tab' | 'level'>) => void
   off?: ReactNode
 }) {
   const t = useT()
@@ -69,7 +69,7 @@ export function ScanResult({ state, onOpen, off }: {
     const reason = state.code === 'llm-unavailable' ? t('scan.llmUnavailable') : t('scan.failed', { detail: state.detail ?? state.code })
     return <>{reason} {t('scan.askAgent')}</>
   }
-  const link = (target: Pick<NavTarget, 'tab' | 'level'>, text: string) => <button type="button" className="pm-link" onClick={() => { onOpen(target) }}>{text}</button>
+  const link = (target: Pick<LegacyNavTarget, 'tab' | 'level'>, text: string) => <button type="button" className="pm-link" onClick={() => { onOpen(target) }}>{text}</button>
   const added = state.added
   const parts: ReactNode[] = []
   if (added !== undefined && added.pending > 0) {

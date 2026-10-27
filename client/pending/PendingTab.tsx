@@ -9,34 +9,24 @@
  * 带组标识进来时（健康页「去处理 ›」）焦点落在那一组的标题上，组已不在（处理完了）落在待处理顶部；每次导航只定位一次。
  */
 import { useEffect, useId, useRef, useState, type ReactElement, type ReactNode, type RefObject } from 'react'
-import { PENDING_LEVELS, type HealthView, type LibraryView, type PendingItem, type PendingLevel, type PendingView } from '../../src/gui/contract.ts'
+import { PENDING_LEVELS, pendingItemKey, pendingItemScopes, type HealthView, type LibraryView, type PendingItem, type PendingLevel, type PendingView } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { baseName, formatDay, formatNumber, useT } from '../i18n.tsx'
 import { FlashRow, useFlashTarget } from '../library/shared.tsx'
 import type { LocaleKey } from '../locales.ts'
-import { useCanOpen, useNavTarget, type NavStore, type NavTarget } from '../nav.ts'
+import { isInScope, useCanOpen, useNavTarget, type NavStore, type NavTarget, type PageScope } from '../nav.ts'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { crossConfirmCss } from './action.tsx'
 import { editCss } from './edit.tsx'
 import { modelEditCss } from './model-edit.tsx'
 import { moveCss } from './move.tsx'
 import {
-  AdviceCard, HorizontalCard, OverflowCard, PromoteCard, ResultCard, SecretCard, titleOf, UnreadableCard, VerticalCard, type Outcome,
+  AdviceCard, HorizontalCard, ItemScopeNames, OverflowCard, PromoteCard, ResultCard, SecretCard, titleOf, UnreadableCard, VerticalCard, type Outcome,
 } from './cards.tsx'
 
 /** 建议整理先显示的行数，其余收进「展开其余 N 条」；要紧的两组全部显示。 */
 const GROUP_PREVIEW = 5
 const FOLDED_LEVEL: PendingLevel = 'advice'
-
-/** 条目在视图之间的身份。 */
-function keyOf(item: PendingItem): string {
-  switch (item.kind) {
-    case 'secret': return `secret:${item.memory.id}`
-    case 'unreadable-file': return `file:${item.filePath}`
-    case 'advice': return `advice:${item.type}:${item.memories.map(m => m.id).join(',')}`
-    default: return item.decisionId
-  }
-}
 
 /** 卡里出现的记忆 id（直达高亮用）；超限和读不出的文件不对应某条记忆。 */
 function memoryIdsOf(item: PendingItem): string[] {
@@ -64,10 +54,12 @@ const LEVEL_LABEL = {
 /** 一行：待处理项的卡，或原位的结果卡、没有生效的说明。isItem 的行才算进组标题的条数。 */
 interface Row { key: string; node: ReactElement; level: PendingLevel; isItem: boolean; flashing?: boolean }
 
-export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
+export function PendingTab({ nav, session, scope, workspacePath, now = Date.now() }: {
   nav: NavStore
   session: BorrowedSession
-  /** 页面当前作用域的项目（「体检当前项目」体检它）；全局为 undefined。 */
+  /** 左栏选中的范围：只列属于它的条目；「全部」里每张卡带范围名胶囊。 */
+  scope: PageScope
+  /** 页面当前范围的项目（「移到项目…」默认选它）；全局、全部为 undefined。 */
   workspacePath: string | undefined
   now?: number
 }) {
@@ -86,48 +78,54 @@ export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
   /** 点过「展开其余 N 条」的组。 */
   const [expanded, setExpanded] = useState<ReadonlySet<PendingLevel>>(new Set())
   const done = (next: Recent) => { setRecent(next); setRefused(undefined) }
-  const refuse = (item: PendingItem, index: number) => () => { setRefused({ key: keyOf(item), index, title: titleOf(item, t), level: item.level }) }
+  const refuse = (item: PendingItem, index: number) => () => { setRefused({ key: pendingItemKey(item), index, title: titleOf(item, t), level: item.level }) }
 
-  const viewItems = pending.status === 'ready' ? pending.data.items : []
+  const viewItems = pending.status === 'ready' ? pending.data.items.filter(item => isInScope(pendingItemScopes(item), scope)) : []
+  const scopeNames = (item: PendingItem): readonly string[] =>
+    scope.kind !== 'all' ? [] : pendingItemScopes(item).map(layer => layer.kind === 'global' ? t('scope.global') : baseName(layer.workspacePath))
   const typeLabels = pending.status === 'ready' ? pending.data.typeLabels : {}
   const { flashId, clear } = useFlashTarget(nav, viewItems.flatMap(memoryIdsOf))
   const root = useRef<HTMLDivElement>(null)
   useGroupFocus(nav, root, pending.status === 'ready')
-  const recentKey = recent === undefined ? undefined : keyOf(recent.item)
-  const backInView = recentKey !== undefined && viewItems.some(i => keyOf(i) === recentKey)
+  const recentKey = recent === undefined ? undefined : pendingItemKey(recent.item)
+  const backInView = recentKey !== undefined && viewItems.some(i => pendingItemKey(i) === recentKey)
   // 撤销后视图把条目带回来了：本地那张让位
   useEffect(() => { if (recent?.undone && backInView) setRecent(undefined) }, [recent, backInView])
 
   if (pending.status !== 'ready' && recent === undefined) return <ViewStatus state={pending} />
 
   // 视图还没重写时刚处理的条目仍在里面：先藏起来，原位放结果卡
-  const items = viewItems.filter(i => recent === undefined || recent.undone || keyOf(i) !== recentKey)
+  const items = viewItems.filter(i => recent === undefined || recent.undone || pendingItemKey(i) !== recentKey)
   const rows: Row[] = items.map((item, index) => ({
-    key: keyOf(item),
+    key: pendingItemKey(item),
     level: item.level,
     isItem: true,
     flashing: flashId !== undefined && memoryIdsOf(item).includes(flashId),
-    node: renderCard(item, (outcome) => { done({ item, index, outcome, undone: false }) }, refuse(item, index)),
+    node: <ItemScopeNames.Provider value={scopeNames(item)}>{renderCard(item, (outcome) => { done({ item, index, outcome, undone: false }) }, refuse(item, index))}</ItemScopeNames.Provider>,
   }))
   if (recent !== undefined && !(recent.undone && backInView)) {
     rows.splice(Math.min(recent.index, rows.length), 0, {
       key: `recent:${recentKey}`,
       level: recent.item.level,
       isItem: recent.undone,
-      node: recent.undone
-        // 撤销已生效、视图还没带回来：先按原样显示，可以接着处理
-        ? renderCard(recent.item, (outcome) => { done({ ...recent, outcome, undone: false }) }, refuse(recent.item, recent.index))
-        : (
-          <ResultCard
-            item={recent.item}
-            outcome={recent.outcome}
-            session={session}
-            now={now}
-            typeLabels={typeLabels}
-            onUndone={() => { done({ ...recent, undone: true }) }}
-            onRefused={refuse(recent.item, recent.index)}
-          />
-        ),
+      node: (
+        <ItemScopeNames.Provider value={scopeNames(recent.item)}>
+          {recent.undone
+            // 撤销已生效、视图还没带回来：先按原样显示，可以接着处理
+            ? renderCard(recent.item, (outcome) => { done({ ...recent, outcome, undone: false }) }, refuse(recent.item, recent.index))
+            : (
+              <ResultCard
+                item={recent.item}
+                outcome={recent.outcome}
+                session={session}
+                now={now}
+                typeLabels={typeLabels}
+                onUndone={() => { done({ ...recent, undone: true }) }}
+                onRefused={refuse(recent.item, recent.index)}
+              />
+            )}
+        </ItemScopeNames.Provider>
+      ),
     })
   }
 
@@ -155,7 +153,7 @@ export function PendingTab({ nav, session, workspacePath, now = Date.now() }: {
           item={item}
           {...props}
           budget={config?.snapshotTokenBudget}
-          onCleanup={(scope) => { nav.update({ tab: 'library', scope, memoryId: undefined }) }}
+          onCleanup={(layer) => { nav.update({ view: 'library', scope: layer, memoryId: undefined }) }}
         />
       )
       case 'unreadable-file': return <UnreadableCard item={item} {...props} />
@@ -309,8 +307,9 @@ export const pendingCss = crossConfirmCss + editCss + modelEditCss + moveCss + `
 .pm-pending-row.pm-flash::before { left: 2px; }
 .pm-pending-item { padding: 16px 0 18px; }
 .pm-pending-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
-.pm-pending-title { margin: 0; flex: 1; min-width: 0; font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
+.pm-pending-title { margin: 0; flex: 0 1 auto; min-width: 0; font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
 .pm-pending-aside { margin-left: auto; }
+.pm-pending-scope { display: inline-flex; }
 .pm-pending-body { display: flex; flex-direction: column; gap: 10px; padding-left: 16px; }
 .pm-pending-hint { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-pending-hint .pm-link { margin-left: 8px; font-size: 12px; }

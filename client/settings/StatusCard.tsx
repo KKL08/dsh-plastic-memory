@@ -10,7 +10,7 @@
 import { isAwaitingDecision, type HealthView, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { formatDay, formatNumber, useT, type Translate } from '../i18n.tsx'
-import type { MemoryTab, NavTarget } from '../nav.ts'
+import type { LegacyNavTarget } from '../nav.ts'
 import { ScanResult, useScanCommand } from '../health/ScanResult.tsx'
 import { Button } from '../ui/Button.tsx'
 import { HealthBanner } from '../ui/HealthBanner.tsx'
@@ -45,7 +45,7 @@ function settled<V>(state: ViewState<V>): V | undefined {
 }
 
 /** 有等你决定的事（含密钥；读不出的文件、建议整理不算）时去待处理，否则去健康。还没读到视图时去待处理。 */
-export function openTarget(pending: PendingView | undefined): MemoryTab {
+export function openTarget(pending: PendingView | undefined): LegacyNavTarget['tab'] {
   if (pending === undefined) return 'pending'
   return pending.items.some(isAwaitingDecision) ? 'pending' : 'health'
 }
@@ -62,7 +62,7 @@ function useScan(session: BorrowedSession) {
 export function StatusCard({ governanceEnabled, onOpen, now = Date.now() }: {
   governanceEnabled: boolean
   /** 经导航 store 直达记忆页的某个 tab（待处理可带要定位的组）。 */
-  onOpen: (target: Pick<NavTarget, 'tab' | 'level'>) => void
+  onOpen: (target: Pick<LegacyNavTarget, 'tab' | 'level'>) => void
   now?: number
 }) {
   const t = useT()

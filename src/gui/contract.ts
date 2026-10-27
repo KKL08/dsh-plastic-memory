@@ -191,6 +191,44 @@ export const pendingItemSchema = z.discriminatedUnion('kind', [
 ])
 export type PendingItem = z.infer<typeof pendingItemSchema>
 
+/** 两个作用域是否同一个：都是全局，或同一个项目路径。 */
+export function sameLayer(a: GuiLayerRef, b: GuiLayerRef): boolean {
+  return a.kind === b.kind && (a.kind === 'global' || (b.kind === 'workspace' && a.workspacePath === b.workspacePath))
+}
+
+/**
+ * 待处理项的身份（判新增、「全部」里去重）：账本来的按条目 id；密钥按层 + 记忆 id；读不出的文件按路径；
+ * 建议整理按类型 + 排序后的记忆 id。服务端和客户端共用。
+ */
+export function pendingItemKey(item: PendingItem): string {
+  switch (item.kind) {
+    case 'secret': return `secret:${item.memory.scope}:${item.memory.workspacePath ?? ''}:${item.memory.id}`
+    case 'unreadable-file': return `unreadable-file:${item.filePath}`
+    case 'advice': return `advice:${item.type}:${item.memories.map(m => m.id).sort().join(',')}`
+    default: return `decision:${item.decisionId}`
+  }
+}
+
+/**
+ * 待处理项属于哪些范围（全局或某个项目；「全部」包含一切，不在返回里），不重复，按出现先后。服务端和客户端共用：
+ * 记忆类条目和基线冲突按记忆所在层；冲突按双方各自的层（全局和项目之间的属于两个范围）；超限按它的作用域
+ * （没有项目的会话归全局）；读不出的文件按所在目录；建议整理按涉及记忆各自的层。定位不到层的记忆不算。
+ */
+export function pendingItemScopes(item: PendingItem): GuiLayerRef[] {
+  const layers = ((): Array<GuiLayerRef | undefined> => {
+    switch (item.kind) {
+      case 'unreadable-file': return [item.layer]
+      case 'overflow': return [item.workspacePath === undefined ? { kind: 'global' } : { kind: 'workspace', workspacePath: item.workspacePath }]
+      case 'conflict-horizontal': return [item.left, item.right].map(m => m === null ? undefined : layerOfMemory(m))
+      case 'advice': return item.memories.map(layerOfMemory)
+      default: return [item.memory === null ? undefined : layerOfMemory(item.memory)]
+    }
+  })()
+  const out: GuiLayerRef[] = []
+  for (const layer of layers) if (layer !== undefined && !out.some(l => sameLayer(l, layer))) out.push(layer)
+  return out
+}
+
 /** 左栏图标圆点：密钥红点盖过琥珀点；读不出的文件、建议整理不亮点。 */
 export const PENDING_DOTS = ['none', 'amber', 'red'] as const
 
