@@ -1,9 +1,9 @@
 import { isAbsolute } from 'node:path'
 import type { CasKvTable, RefreshableClaim, RefreshableClaimKvTable } from '../kv-table.ts'
 import type { CheckupCompletion, CheckupRecord } from '../storage/schema.ts'
+import type { ScanCacheEntry } from './schema.ts'
 import type { LayerRef } from './layer-health.ts'
-import { SCOPE_KEYS, type CheckupCause } from '../gui/contract.ts'
-import { autoCheckupRetryAt } from './auto-checkups.ts'
+import { SCOPE_KEYS, type CheckupCause, type CheckupResult } from '../gui/contract.ts'
 
 /**
  * 体检记录表：每个范围一条，记这个范围最近一次做完的体检（完成记录），即「上次体检」。
@@ -69,25 +69,36 @@ export class CheckupRecordStore {
   }
 
   /**
-   * 自动体检这次没做完（模型调用出错、输出解析不了、体检出错）：连续失败次数加一，按有效频率算下次重试时间（autoCheckupRetryAt）；
-   * 最近一次尝试不再是「模型用不了」。不写完成记录，不重新计时。持有这个范围的认领时调用。
+   * 自动体检这次没做完（模型调用出错、输出解析不了、体检出错）：连续失败次数加一，记下失败时刻（重试时间在生成体检视图时
+   * 按当时的有效频率算，用户之后改频率跟着变）；最近一次尝试不再是「模型用不了」。不写完成记录，不重新计时。持有这个范围的认领时调用。
    */
-  async recordFailure(layer: LayerRef, cause: CheckupCause, failedAt: number, frequencyDays: number): Promise<void> {
+  async recordFailure(layer: LayerRef, cause: CheckupCause, failedAt: number): Promise<void> {
     const key = checkupKey(layer)
     await this.table.update(key, (cur) => {
       const { modelUnavailable: _modelUnavailable, ...rest } = cur ?? { id: key }
       const count = (cur?.failure?.count ?? 0) + 1
-      return { ...rest, id: key, failure: { count, retryAt: autoCheckupRetryAt(count, failedAt, frequencyDays), cause } }
+      return { ...rest, id: key, failure: { count, failedAt, cause } }
     })
   }
 
-  /** 自动体检这次碰上模型用不了（没有默认模型、未登录、缺凭据）：记下原因。不算失败：失败次数和重试时间不动，下一次调度检查再试。 */
-  async recordModelUnavailable(layer: LayerRef, cause: CheckupCause): Promise<void> {
+  /**
+   * 自动体检这次碰上模型用不了（没有默认模型、未登录、缺凭据）：记下原因。不算失败：失败次数和重试时间不动，下一次调度检查再试。
+   * since 是这轮检查的开始时间：要记的范围是那时读出来的，之后已经有体检做完（完成时间不早于它）的不记，免得给刚查完的范围记上。
+   */
+  async recordModelUnavailable(layer: LayerRef, cause: CheckupCause, since: number): Promise<void> {
     const key = checkupKey(layer)
-    await this.table.update(key, cur => ({ ...cur, id: key, modelUnavailable: cause }))
+    await this.table.update(key, cur => (cur?.completed !== undefined && cur.completed.completedAt >= since ? undefined : { ...cur, id: key, modelUnavailable: cause }))
   }
 
-  /** 清掉目录已不在的项目的记录（视图生成时调用）；全局等不是项目的键不动。 */
+  /**
+   * 界面手动体检、自动体检结束时记下最近一次结果（键 → 结果，见 gui/views.ts checkupResults），换掉这个键上一次的结果，
+   * 记录里的其他内容不动。键 all 的那条只有结果：没有完成记录、不参与到期、没有失败计数。持有这些范围的认领时调用。
+   */
+  async recordResults(results: ReadonlyArray<{ key: string; result: CheckupResult }>): Promise<void> {
+    for (const { key, result } of results) await this.table.update(key, cur => ({ ...cur, id: key, lastResult: result }))
+  }
+
+  /** 清掉目录已不在的项目的记录（视图生成时调用）；全局、all 等不是项目的键不动。 */
   async removeMissingWorkspaces(workspaces: ReadonlySet<string>): Promise<void> {
     for (const r of await this.list()) {
       if (isAbsolute(r.id) && !workspaces.has(r.id)) await this.table.delete(r.id)
@@ -97,7 +108,9 @@ export class CheckupRecordStore {
 
 /**
  * 一个范围的上次体检：完成记录的完成时间；还没有完成记录（升级前体检过）时暂取内容检查缓存的时间；都没有为 null。
+ * 兜底只认升级前的旧缓存：新执行器写的缓存（isTrackedByCheckups）在提交点之前就写了，被中断的体检会留下它。
  */
-export function lastCheckupAt(record: CheckupRecord | undefined, cachedAt: number | undefined): number | null {
-  return record?.completed?.completedAt ?? cachedAt ?? null
+export function lastCheckupAt(record: CheckupRecord | undefined, cached: Pick<ScanCacheEntry, 'scannedAt' | 'isTrackedByCheckups'> | undefined): number | null {
+  const fallback = cached !== undefined && cached.isTrackedByCheckups !== true ? cached.scannedAt : null
+  return record?.completed?.completedAt ?? fallback
 }

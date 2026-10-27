@@ -12,7 +12,7 @@ import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
 import { layerCacheKey, type LayerRef } from '../governance/layer-health.ts'
 import { checkupWorkspaces, listingNotes, prereadLayers } from '../tools/layer-preread.ts'
 import {
-  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, sessionViewFile, workspaceMapViewSchema,
+  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, SCOPE_KEYS, sessionViewFile, workspaceMapViewSchema,
   type CheckupView, type GlobalViewName, type SessionView, type WorkspaceMapView,
 } from './contract.ts'
 import { GLOBAL_VIEW_NAMES, buildCheckupView, buildGlobalViews, type GlobalViews } from './views.ts'
@@ -120,12 +120,13 @@ export async function collectCheckupView(deps: CheckupSourceDeps): Promise<Check
   const inProgress = new Set<LayerRef>()
   for (const layer of layers) {
     const record = byKey.get(checkupKey(layer))
-    last.set(layer, lastCheckupAt(record, record?.completed === undefined ? (await deps.cache.get(layerCacheKey(layer)))?.scannedAt : undefined))
+    last.set(layer, lastCheckupAt(record, record?.completed === undefined ? await deps.cache.get(layerCacheKey(layer)) : undefined))
     if (await deps.checkups.isInProgress(layer)) inProgress.add(layer)
   }
   return buildCheckupView({
     now, governanceEnabled: deps.isGovernanceEnabled?.() ?? true, settings, layers,
     lastCheckupAt: layer => last.get(layer) ?? null, isInProgress: layer => inProgress.has(layer), record: layer => byKey.get(checkupKey(layer)),
+    allRecord: byKey.get(SCOPE_KEYS.all),
   })
 }
 
@@ -273,10 +274,13 @@ export class ViewWriter {
     this.workspaceMap = next
   }
 
-  /** 磁盘上的旧对照；没有、读不懂（坏 JSON、版本不对）都从空表开始。 */
+  /**
+   * 磁盘上的旧对照；没有、读不懂（坏 JSON、形状不对）都从空表开始。不看版本号，只按 cwds 的形状读：视图版本升级时
+   * 对照的形状没变，整份丢掉会让之前见过的会话都失去归属（写出时照旧写当前版本）。
+   */
   private async readWorkspaceMap(): Promise<Record<string, string>> {
     try {
-      const parsed = workspaceMapViewSchema.safeParse(JSON.parse(await readFile(join(this.dir, GUI_WORKSPACE_MAP_FILE), 'utf8')))
+      const parsed = workspaceMapViewSchema.pick({ cwds: true }).safeParse(JSON.parse(await readFile(join(this.dir, GUI_WORKSPACE_MAP_FILE), 'utf8')))
       return parsed.success ? { ...parsed.data.cwds } : {}
     } catch {
       return {}

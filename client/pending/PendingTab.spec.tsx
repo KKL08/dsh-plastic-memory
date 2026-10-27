@@ -31,7 +31,7 @@ const view = (...items: PendingItem[]): PendingView => ({ version: GUI_VIEW_VERS
 const scannedHealth = (at: number | null): HealthView => ({
   version: GUI_VIEW_VERSION,
   governanceEnabled: true,
-  layers: [{ layer: { kind: 'global' }, totalMemories: 1, score: 1, tier: 'green', gate: { secret: false }, issues: [], staleCount: 0, lastCheckupAt: at, overflow: null, ignored: [] }],
+  layers: [{ layer: { kind: 'global' }, totalMemories: 1, score: 1, tier: 'green', gate: { secret: false }, issues: [], staleCount: 0, lastCheckupAt: at, overflow: null, ignored: [], deductions: { rule: { points: 0, types: [] }, content: { points: 0, types: [] }, freshness: { points: 0, types: [] } } }],
 })
 
 function setup(items: PendingItem[], init: FakeGatewayInit = {}, nav: NavStore = createNavStore()) {
@@ -555,6 +555,7 @@ describe('待处理：两态与空状态', () => {
   it('上次体检按选中的范围取：项目范围只看那个项目，「全部」取最近一次', () => {
     const layer = (l: HealthView['layers'][number]['layer'], at: number | null): HealthView['layers'][number] => ({
       layer: l, totalMemories: 1, score: 1, tier: 'green', gate: { secret: false }, issues: [], staleCount: 0, lastCheckupAt: at, overflow: null, ignored: [],
+      deductions: { rule: { points: 0, types: [] }, content: { points: 0, types: [] }, freshness: { points: 0, types: [] } },
     })
     const health: HealthView = {
       version: GUI_VIEW_VERSION,
@@ -989,6 +990,7 @@ describe('待处理：可以整理', () => {
 describe('可以整理：已忽略', () => {
   const healthLayer = (layer: HealthView['layers'][number]['layer'], ignored: HealthView['layers'][number]['ignored']): HealthView['layers'][number] => ({
     layer, totalMemories: 3, score: 90, tier: 'green', gate: { secret: false }, issues: [], staleCount: 0, lastCheckupAt: NOW, overflow: null, ignored,
+    deductions: { rule: { points: 0, types: [] }, content: { points: 0, types: [] }, freshness: { points: 0, types: [] } },
   })
   const app = { kind: 'workspace', workspacePath: '/w/app' } as const
   const health: HealthView = {

@@ -110,7 +110,7 @@ describe('自动体检：两个宿主进程共用一个记忆根', () => {
     await b.send('idle')
     expect(b.events()).toEqual([])
     const during = await readView()
-    expect(during.scopes).toEqual([{ scope: { kind: 'global' }, frequency: 1, isOwn: false, lastCheckupAt: null, nextCheckupAt: null, isDue: true, isInProgress: true, failure: null, modelUnavailable: null }])
+    expect(during.scopes).toEqual([{ scope: { kind: 'global' }, frequency: 1, isOwn: false, lastCheckupAt: null, nextCheckupAt: null, isDue: true, isInProgress: true, failure: null, modelUnavailable: null, lastResult: null }])
 
     await a.send('open')
     await a.send('idle')
@@ -118,7 +118,7 @@ describe('自动体检：两个宿主进程共用一个记忆根', () => {
     expect(Object.fromEntries((await t.checkups.list()).map(r => [r.id, r.completed]))).toEqual({ global: { startedAt: NOW, completedAt: NOW, by: 'auto' } })
     expect((await t.decisions.list()).map(d => d.memoryIds)).toEqual([])
     const after = await readView()
-    expect(after.scopes).toEqual([{ scope: { kind: 'global' }, frequency: 1, isOwn: false, lastCheckupAt: NOW, nextCheckupAt: NOW + DAY, isDue: false, isInProgress: false, failure: null, modelUnavailable: null }])
+    expect(after.scopes).toEqual([{ scope: { kind: 'global' }, frequency: 1, isOwn: false, lastCheckupAt: NOW, nextCheckupAt: NOW + DAY, isDue: false, isInProgress: false, failure: null, modelUnavailable: null, lastResult: expect.objectContaining({ by: 'auto' }) }])
 
     // b 再查：不到期了，不跑；它重写的体检视图和 a 写的一样
     await b.send('check')

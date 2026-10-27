@@ -160,7 +160,7 @@ export function scoreLayer(deps: LayerHealthDeps, data: LayerPreread, layer: Lay
   })
   return {
     layer, records, health,
-    lastCheckupAt: lastCheckupAt(data.checkups.get(checkupKey(layer)), cached?.scannedAt),
+    lastCheckupAt: lastCheckupAt(data.checkups.get(checkupKey(layer)), cached),
     ruleFindings, semanticFindings,
     ignored: [...rule.ignored, ...semantic.ignored],
     // 与 computeHealth 的 staleCount 同一判据（ratio > 1）

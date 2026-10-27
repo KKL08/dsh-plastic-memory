@@ -23,7 +23,7 @@ import { CheckupRecordStore } from '../../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../../src/governance/auto-checkups.ts'
 import { hostSemanticLlm } from '../../src/governance/host-llm.ts'
 import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../../src/governance/schema.ts'
-import { ViewWriter, collectCheckupView } from '../../src/gui/view-writer.ts'
+import { ViewWriter, collectCheckupView, collectGlobalViews } from '../../src/gui/view-writer.ts'
 import { AutoCheckupScheduler, type AutoCheckupTimer } from '../../src/gui/auto-checkup.ts'
 
 const [root, startArg, findingsArg] = process.argv.slice(2)
@@ -79,9 +79,12 @@ const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, 
 const checkups = new CheckupRecordStore(sidecar.checkups)
 const source = { store, checkups, autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups), cache: sidecar.scanCache, now: () => clock.now }
 const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('这里只写体检视图') }, collectCheckups: () => collectCheckupView(source) })
+const decisions = new PendingDecisionsStore(sidecar.pending)
+const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
 const scheduler = new AutoCheckupScheduler({
-  scan: { store, registry, decisions: new PendingDecisionsStore(sidecar.pending), cache: sidecar.scanCache, ignores: new AdviceIgnoreStore(sidecar.adviceIgnores) },
+  scan: { store, registry, decisions, cache: sidecar.scanCache, ignores },
   checkups,
+  collectPending: async () => (await collectGlobalViews({ store, decisions, cache: sidecar.scanCache, ignores, checkups, registry, memoryRoot: root, now: () => clock.now })).pending,
   status: () => collectCheckupView(source),
   getDefaultLlm: () => hostSemanticLlm(llm, { provider: 'deepseek', model: 'deepseek-v4-flash' }),
   isGovernanceEnabled: () => true,

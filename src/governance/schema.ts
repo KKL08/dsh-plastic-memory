@@ -110,6 +110,11 @@ export const scanCacheSchema = z.object({
   findings: z.array(findingSchema),
   /** 体检时各发现涉及的记忆指纹（adviceFingerprint），按记忆 id：手改文件不动 updatedAt，评分靠它认出体检后改过。旧缓存没有此字段。 */
   fingerprints: z.record(z.string(), z.string()).optional(),
+  /**
+   * 带提交点的执行器写的（这一版起都带 true）：这次体检做没做完以体检记录为准，缓存写了不代表做完（写完缓存、挂账前可能被中断）。
+   * 旧缓存没有此字段，没有完成记录时才拿它的时间当上次体检（见 checkup-records.ts lastCheckupAt）。
+   */
+  isTrackedByCheckups: z.boolean().optional(),
 })
 export type ScanCacheEntry = z.infer<typeof scanCacheSchema>
 

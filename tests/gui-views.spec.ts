@@ -627,8 +627,8 @@ describe('健康视图', () => {
     expect(global).toMatchObject({ score: null, gate: { secret: true }, issues: [{ type: 'secret', count: 1 }] })
   })
   /** 本项目每类扣分原因各至少一条：密钥、过期、读不出的文件、冲突（缓存 + 账本）、内容重复、放错层、表述不清。 */
-  async function seedEveryIssue(h: ReturnType<typeof harness>) {
-    await h.store.create(w({ id: 'mem_s', name: '凭证', content: FAKE_SECRET.github }))
+  async function seedEveryIssue(h: ReturnType<typeof harness>, { withSecret = true } = {}) {
+    if (withSecret) await h.store.create(w({ id: 'mem_s', name: '凭证', content: FAKE_SECRET.github }))
     await h.store.create(w({ id: 'mem_old', name: '过期', validTo: T0 - 1 }))
     await h.store.create(w({ id: 'mem_r1', name: 'R 甲' }))
     await h.store.create(w({ id: 'mem_r2', name: 'R 乙' }))
@@ -684,6 +684,31 @@ describe('健康视图', () => {
       expect({ type: issue.type, levels }).toEqual({ type: issue.type, levels: issue.level === null ? [] : [issue.level] })
     }
   })
+  it('扣分来源：每层带规则检查、内容检查、新鲜度三项扣分和各项此刻有的问题类型；三项相加正好是 100 减分数，分数与 memory_health 相同', async () => {
+    const h = harness()
+    // 不放密钥（有密钥不打分），另加一条超过衰减期没确认的
+    await seedEveryIssue(h, { withSecret: false })
+    await h.store.create(w({ id: 'mem_stale', name: '很久没确认', lastConfirmedAt: T0 - 100 * 86_400_000 }))
+    const { health } = await h.views()
+    expect(healthViewSchema.parse(health)).toEqual(health)
+    const ws = health.layers.find(l => l.layer.kind === 'workspace')!
+    expect(ws.gate.secret).toBe(false)
+    expect(Object.fromEntries(Object.entries(ws.deductions).map(([k, d]) => [k, d.types]))).toEqual({
+      rule: ['expired', 'malformed'],
+      content: ['conflict', 'redundancy', 'misplaced', 'unclear'],
+      freshness: ['stale'],
+    })
+    for (const d of Object.values(ws.deductions)) expect(d.points).toBeGreaterThan(0)
+    const total = ws.deductions.rule.points + ws.deductions.content.points + ws.deductions.freshness.points
+    expect(100 - total).toBeCloseTo(ws.score!, 1)
+    const tool = await h.health()
+    if (tool.kind !== 'single') throw new Error(tool.kind)
+    expect(ws.score).toBe(tool.score)
+    // 没有扣分的层：三项都是 0，没有问题类型
+    const global = health.layers.find(l => l.layer.kind === 'global')!
+    expect(global.deductions).toEqual({ rule: { points: 0, types: [] }, content: { points: 0, types: [] }, freshness: { points: 0, types: [] } })
+  })
+
   it('带体检开关：缺省开启，关闭时 governanceEnabled 为 false（层照常列出）', async () => {
     const h = harness()
     await h.store.create(w({ id: 'mem_a', name: 'A' }))
@@ -797,7 +822,18 @@ describe('视图写入', () => {
     expect((await readMap()).cwds).toEqual({ '/link/app': '/w/app', '/w/app/sub': '/w/app/sub', '/w/app/pkg': '/w/app/pkg' })
   })
 
-  it('会话归属对照：磁盘上的旧文件读不懂（版本不对、坏 JSON）就从空表重来', async () => {
+  it('会话归属对照：视图版本升级后，旧版本号的对照照样读回，写新条目时旧条目还在、按当前版本写出', async () => {
+    const mapPath = join(root, GUI_VIEW_DIR, GUI_WORKSPACE_MAP_FILE)
+    await mkdir(join(root, GUI_VIEW_DIR), { recursive: true })
+    await writeFile(mapPath, JSON.stringify({ version: GUI_VIEW_VERSION - 1, cwds: { '/w/app/sub': '/w/app' } }), 'utf8')
+    const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') } })
+    await writer.requestWorkspace('/w/blog', '/w/blog')
+    expect(workspaceMapViewSchema.parse(JSON.parse(await readFile(mapPath, 'utf8')))).toEqual({
+      version: GUI_VIEW_VERSION, cwds: { '/w/app/sub': '/w/app', '/w/blog': '/w/blog' },
+    })
+  })
+
+  it('会话归属对照：磁盘上的旧文件读不懂（坏 JSON、形状不对）就从空表重来', async () => {
     const mapPath = join(root, GUI_VIEW_DIR, GUI_WORKSPACE_MAP_FILE)
     await mkdir(join(root, GUI_VIEW_DIR), { recursive: true })
     await writeFile(mapPath, '{not json', 'utf8')

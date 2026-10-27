@@ -232,6 +232,21 @@ describe('runSemanticScan', () => {
     expect(out.failed && out.failure).toEqual({ kind: 'model-error', hostCode: 'ACCOUNT_SIGN_IN_REQUIRED', message: 'Sign in to DeepSeek' })
   })
 
+  it('宿主 AUTH 错误不留原话（原话可能回显部分凭据，对齐宿主）：只带错误码', async () => {
+    const llm = { complete: async () => { throw Object.assign(new Error('401 invalid key sk-abcdefghijklmnop1234 rejected'), { code: 'AUTH' }) } }
+    const out = await runSemanticScan([record({ id: 'mem_a' })], null, llm)
+    expect(out.failed && out.failure).toEqual({ kind: 'model-error', hostCode: 'AUTH' })
+  })
+
+  it('其他错误的原话先遮掉疑似密钥再保留', async () => {
+    const llm = { complete: async () => { throw Object.assign(new Error('bad request: api_key=abcdefghijklmnop1234'), { code: 'SERVER' }) } }
+    const out = await runSemanticScan([record({ id: 'mem_a' })], null, llm)
+    const failure = out.failed ? out.failure : undefined
+    expect(failure).toMatchObject({ kind: 'model-error', hostCode: 'SERVER' })
+    expect(failure?.kind === 'model-error' && failure.message).toContain('bad request')
+    expect(JSON.stringify(failure)).not.toContain('abcdefghijklmnop1234')
+  })
+
   it('小库不分批：调用一次、批数 1，结果与模型输出一致（不再按 200 条截断）', async () => {
     const records = Array.from({ length: 250 }, (_, i) => record({ id: `mem_${i}` }))
     const users: string[] = []

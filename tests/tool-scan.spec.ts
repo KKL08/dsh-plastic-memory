@@ -870,9 +870,21 @@ describe('executeScan 模型错误分类（宿主错误码从模型适配层带�
       const r = await scanSingle({}, deps)
       expect(r.notes.map(n => n.code)).toContain('model-unavailable')
       expect(r.notes.map(n => n.code)).not.toContain('semantic-failed')
-      expect(r.notes.find(n => n.code === 'model-unavailable')?.cause).toEqual({ kind: 'model-error', hostCode: code, message: `host says ${code}` })
+      // AUTH 的原话可能回显部分凭据：对齐宿主，不留原话
+      expect(r.notes.find(n => n.code === 'model-unavailable')?.cause).toEqual(code === 'AUTH' ? { kind: 'model-error', hostCode: code } : { kind: 'model-error', hostCode: code, message: `host says ${code}` })
       expect(await checkups.list()).toEqual([])
     }
+  })
+
+  it('AUTH 的原话不进给模型的说明文字和体检记录', async () => {
+    const leaked = 'Incorrect API key provided: sk-abcdefghijklmnop1234'
+    const checkups = new CheckupRecordStore(new InMemoryKvTable<CheckupRecord>())
+    const deps = makeDeps({ checkups, getLlm: () => failingHost('AUTH', leaked) })
+    await deps.store.put(record({ id: 'mem_g' }))
+    const r = await scanSingle({}, deps)
+    expect(r.notes.map(n => n.code)).toContain('model-unavailable')
+    expect(renderScanResult(r)).not.toContain('abcdefghijklmnop1234')
+    expect(JSON.stringify(r)).not.toContain('Incorrect API key')
   })
 
   it('其他模型错误（限流、超时）：仍是 semantic-failed，带上宿主的码', async () => {

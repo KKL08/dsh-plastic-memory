@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { memoryRecordSchema } from '../record-schema.ts'
-import { CHECKUP_CAUSE_KINDS, IGNORABLE_ADVICE_TYPES, MODEL_CHANGE_KINDS, OVERFLOW_MODES, type DirectoryNoteCode, type ScanNoteCode } from '../contract-codes.ts'
+import { CHECKUP_CAUSE_KINDS, CHECKUP_INITIATORS, IGNORABLE_ADVICE_TYPES, MODEL_CHANGE_KINDS, OVERFLOW_MODES, type DirectoryNoteCode, type ScanNoteCode } from '../contract-codes.ts'
 
 /** 快照、最近删除的保留窗口（毫秒）：对话卡据此判断模型改写的改前版本是否已过期。 */
 export { RETENTION_MS } from '../retention.ts'
@@ -19,7 +19,7 @@ export { detectSecrets } from '../secrets.ts'
  */
 
 /** 视图 schema 的版本号：视图是派生缓存，形状变了就换号，客户端读到不认识的号按「需要刷新」处理。 */
-export const GUI_VIEW_VERSION = 11
+export const GUI_VIEW_VERSION = 12
 
 /** 视图文件所在目录（相对记忆根目录，POSIX 分隔）。 */
 export const GUI_VIEW_DIR = '.state/gui'
@@ -256,6 +256,9 @@ export const RESOLVE_VERDICTS = ['keep-left', 'keep-right', 'keep-both'] as cons
 
 // —— 健康 ——
 
+/** 一项扣分：扣了多少分，包含哪些问题类型（扣 0 分时为空）。 */
+const deductionSchema = z.object({ points: z.number().nonnegative(), types: z.array(z.string()) })
+
 /** isDismissed：用户已忽略这条超限提醒（账本里已结），待处理里不再有它，健康页照列、不给「去处理 ›」。 */
 const overflowLevelSchema = z.object({ mode: z.enum(OVERFLOW_MODES), tier: z.number().int().nonnegative(), isDismissed: z.boolean() })
 export const healthLayerSchema = z.object({
@@ -289,6 +292,12 @@ export const healthLayerSchema = z.object({
     type: z.enum(IGNORABLE_ADVICE_TYPES),
     memories: z.array(z.object({ id: z.string(), name: z.string(), summary: z.string() })).min(1),
   })),
+  /**
+   * 扣分来源：评分模块分开算好的三项扣分（规则检查、内容检查、新鲜度，保留两位小数；评分公式不变，没有密钥时 100 减三项即分数），
+   * 以及各项里此刻有的问题类型：规则检查、内容检查的取值见 governance/schema.ts FINDING_TYPES，按其顺序；新鲜度是 stale。
+   * 密钥不扣分（走红线门），不在这里。
+   */
+  deductions: z.object({ rule: deductionSchema, content: deductionSchema, freshness: deductionSchema }),
 })
 export const healthViewSchema = z.object({
   version,
@@ -496,13 +505,45 @@ export const checkupCauseSchema = z.object({
 })
 export type CheckupCause = z.infer<typeof checkupCauseSchema>
 
+/** 体检新增的一组：条目身份（pendingItemKey，按待处理视图里的先后）和条数，pending = 先处理 + 等你决定，advice = 可以整理。 */
+export const checkupAddedSchema = z.object({
+  keys: z.array(z.string()),
+  pending: z.number().int().nonnegative(),
+  advice: z.number().int().nonnegative(),
+})
+export type CheckupAdded = z.infer<typeof checkupAddedSchema>
+
+/**
+ * 一次界面手动体检或自动体检的最近一次结果（体检记录表与体检视图共用）。agent 的 memory_scan 不写。
+ * 新增 = 体检后的待处理里有、体检前没有（只看这次体检覆盖的层，同 scan 命令的 added），按条目属于哪些范围（pendingItemScopes）记：
+ * - 全局、项目的记录：added 是属于这个范围的新增。项目体检会读全局，顺带发现、只属于全局的新增（如两条全局记忆之间的冲突）
+ *   不算进 added，记在 globalAdded（只有项目体检写的结果有）；全局和项目之间的冲突属于两个范围，算项目的。
+ * - 键 all 的记录（「全部」手动体检，见 SCOPE_KEYS）：added 是全部新增，按身份去重；byScope 把新增按所属范围分组
+ *   （跨两个范围的条目两组都有），全局在前、项目按路径，没有新增的范围不列。
+ * 「全部」体检写的各范围结果不带用量：整次体检的用量分不到范围，只记在 all 上。说明码（notes）是这次体检的，各范围同记。
+ */
+export const checkupResultSchema = z.object({
+  /** 体检标识：同一次体检写的各条结果相同。 */
+  checkupId: z.string(),
+  by: z.enum(CHECKUP_INITIATORS).exclude(['agent']),
+  /** 体检做完（写结果）的时刻。 */
+  completedAt: z.number(),
+  added: checkupAddedSchema,
+  globalAdded: checkupAddedSchema.optional(),
+  byScope: z.array(z.object({ scope: layerRefSchema, keys: z.array(z.string()) })).optional(),
+  /** 宿主流 usage 块报的实际用量合计（同 scan 命令的 usageTokens）；宿主一次都没报时缺省。自动体检不经过会话，用量由插件自己记在这里。 */
+  usageTokens: z.number().int().nonnegative().optional(),
+  /** 说明码（如内容检查没做完 semantic-failed、分了批 semantic-batched、基线检查被跳过 baseline-missing），semantic-failed、model-unavailable 带原因。 */
+  notes: z.array(z.object({ code: z.custom<ScanNoteCode>(v => typeof v === 'string'), cause: checkupCauseSchema.optional() })),
+})
+export type CheckupResult = z.infer<typeof checkupResultSchema>
+
 /** 体检视图的文件名（在视图目录里，与全局视图并列）。 */
 export const GUI_CHECKUP_VIEW_FILE = 'checkups.json'
 
 /**
  * 体检视图：只写各进程共有的事实（共享的设置表和体检记录），所有窗口看到同一份。在设置改了、体检做完或没做成、
  * 调度检查发现状态变了（到期了、别的进程写了完成记录）、体检认领和释放时重写，内容没变不重写。
- * 最近一次结果（05）以后加在每个范围上。
  */
 export const checkupViewSchema = z.object({
   version,
@@ -510,6 +551,8 @@ export const checkupViewSchema = z.object({
   governanceEnabled: z.boolean(),
   /** 「全部」的频率，即默认值；没设过为 manual（仅手动）。 */
   defaultFrequency: autoCheckupFrequencySchema,
+  /** 「全部」手动体检的最近一次结果（体检记录表键 all 的那条）；没做过为 null。 */
+  allResult: checkupResultSchema.nullable(),
   /** 全局在前，项目按路径排序（与健康视图同一批层）。 */
   scopes: z.array(z.object({
     scope: layerRefSchema,
@@ -538,6 +581,8 @@ export const checkupViewSchema = z.object({
     }).nullable(),
     /** 最近一次自动体检的尝试是「模型用不了」（宿主没有默认模型、未登录、缺凭据）：原因；不是为 null。不算失败，下一次调度检查再试。 */
     modelUnavailable: checkupCauseSchema.nullable(),
+    /** 这个范围最近一次界面手动或自动体检的结果（「全部」体检也给每个被查的范围写一条）；没有为 null。 */
+    lastResult: checkupResultSchema.nullable(),
   })),
 })
 export type CheckupView = z.infer<typeof checkupViewSchema>

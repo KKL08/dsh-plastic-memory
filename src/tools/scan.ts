@@ -56,6 +56,11 @@ export interface ScanRun {
   by?: CheckupInitiator
   /** 只查全局层：只读写全局层，只写全局的缓存与完成记录；给出时忽略 scope / scopes。 */
   isGlobalOnly?: boolean
+  /**
+   * 全库体检每扫完一层，交出这一层自己的说明：没有基线、这一层的语义层分批 / 没做成、这一层跳过了基线检查等。
+   * 只关乎整次的（跨项目重复没做成）不在里面，只在结果的 notes 里。
+   */
+  onLayerNotes?: (layer: LayerRef, notes: readonly ScanNote[]) => void
 }
 
 export interface SingleScanResult {
@@ -264,7 +269,7 @@ async function scanPass(
         const { failure } = semantic
         // 宿主报未登录、缺凭据：模型用不了，要用户去登录或补凭据，不算内容检查失败
         notes.push(failure.kind === 'model-error' && isModelUnavailableCode(failure.hostCode)
-          ? { code: 'model-unavailable', text: `模型现在用不了（${failure.message}），本次未更新语义缓存`, cause: failure }
+          ? { code: 'model-unavailable', text: `模型现在用不了（${failure.message ?? failure.hostCode}），本次未更新语义缓存`, cause: failure }
           : { code: 'semantic-failed', text: '语义分析失败（LLM 调用出错或输出无法解析，已重试一次），本次未更新语义缓存', cause: failure })
       } else {
         findings.push(...semantic.findings)
@@ -274,6 +279,7 @@ async function scanPass(
         const entry = {
           id: bucket, scannedAt: now, scope: scopeLabel, findings: semantic.findings,
           fingerprints: findingFingerprints(semantic.findings, byId),
+          isTrackedByCheckups: true,
         }
         const isWritten = await deps.cache.update(bucket, cur => (cur !== undefined && cur.scannedAt > now ? undefined : entry))
         semanticCachedAt = isWritten ? now : (await deps.cache.get(bucket))?.scannedAt ?? now
@@ -413,6 +419,9 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     const wsList = args.scopes && args.scopes.length > 0 ? args.scopes : listWorkspaces(data.byId.values())
     const notes: ScanNote[] = []
     if (baseline === null) notes.push({ code: 'baseline-missing', text: '未检测到 AGENTS.md 基线，垂直冲突检测未执行' })
+    // 没有基线对每一层都成立
+    const everyLayer = [...notes]
+    const isVerticalSkippable = llm !== null && layers !== 'rule'
 
     const decisionItems: ScanPass['decisionItems'] = []
     const seenDecisions = new Set<string>()
@@ -438,9 +447,14 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
       signal?.throwIfAborted()
       const visible = active(visibleTo(ws))
       const wsBaseline = ws === currentWs ? baseline : null
-      if (baseline !== null && wsBaseline === null) baselineSkipped++
+      const isBaselineSkipped = baseline !== null && wsBaseline === null
+      if (isBaselineSkipped) baselineSkipped++
       const pass = await scanPass(deps, data.byId, visible, cacheKey(ws), ws, layerQuarantined(ws), layers, llm, wsBaseline, now, signal, onUsage)
       collect(pass)
+      run.onLayerNotes?.({ kind: 'workspace', path: ws }, [
+        ...everyLayer, ...pass.notes,
+        ...(isBaselineSkipped && isVerticalSkippable ? [{ code: 'baseline-session-scoped' as const, text: '基线随当前会话，扫描其他 workspace 时垂直冲突检测已跳过' }] : []),
+      ])
       if (pass.isChecked) checked.push({ kind: 'workspace', path: ws })
       byWorkspace.set(ws, active(r => r.scope === 'workspace' && r.workspacePath === ws))
     }
@@ -449,8 +463,9 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     const globalRecords = active(isGlobal)
     const globalPass = await scanPass(deps, data.byId, globalRecords, GLOBAL_CACHE_KEY, 'global', layerQuarantined(undefined), layers, llm, baseline, now, signal, onUsage)
     collect(globalPass)
+    run.onLayerNotes?.({ kind: 'global' }, [...everyLayer, ...globalPass.notes])
     if (globalPass.isChecked) checked.push({ kind: 'global' })
-    if (baselineSkipped > 0 && llm && layers !== 'rule') {
+    if (baselineSkipped > 0 && isVerticalSkippable) {
       notes.push({ code: 'baseline-session-scoped', text: `基线随当前会话，${baselineSkipped} 个其他 workspace 的垂直冲突检测已跳过` })
     }
     signal?.throwIfAborted()

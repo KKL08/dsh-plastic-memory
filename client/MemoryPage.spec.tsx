@@ -42,6 +42,7 @@ function healthLayer(layer: GuiLayerRef, score: number | null, tier: 'green' | '
   return {
     layer, totalMemories, score, tier, gate: { secret: score === null }, issues: [], staleCount: 0,
     lastCheckupAt: NOW - 86_400_000, overflow: null, ignored: [],
+    deductions: { rule: { points: 0, types: [] }, content: { points: 0, types: [] }, freshness: { points: 0, types: [] } },
   }
 }
 const health: HealthView = {

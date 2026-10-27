@@ -14,11 +14,11 @@ import { CheckupRecordStore, checkupKey } from '../src/governance/checkup-record
 import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
 import { hostSemanticLlm, type HostModelRoute } from '../src/governance/host-llm.ts'
 import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
-import type { LayerRef } from '../src/governance/layer-health.ts'
+import { GLOBAL_CACHE_KEY, type LayerRef } from '../src/governance/layer-health.ts'
 import type { ScanToolResult } from '../src/tools/scan.ts'
-import { ViewWriter, collectCheckupView } from '../src/gui/view-writer.ts'
+import { ViewWriter, collectCheckupView, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { AUTO_CHECKUP_FIRST_CHECK_MS, AUTO_CHECKUP_INTERVAL_MS, CHECKUP_CLAIM_REFRESH_MS, AutoCheckupScheduler, type AutoCheckupTimer } from '../src/gui/auto-checkup.ts'
-import { GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, checkupViewSchema, type AutoCheckupFrequency, type CheckupView, type ScopeRef } from '../src/gui/contract.ts'
+import { GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, checkupViewSchema, pendingItemKey, type AutoCheckupFrequency, type CheckupView, type ScopeRef } from '../src/gui/contract.ts'
 import { executeScan } from '../src/tools/scan.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { fakeExec } from './helpers/exec.ts'
@@ -148,9 +148,12 @@ function env(opts: {
   const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('这里只写体检视图') }, collectCheckups: () => collectCheckupView(source) })
   const timers = fakeTimer(clock)
   const scanned: Array<{ layer: LayerRef; result: ScanToolResult }> = []
+  const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
+  const collectPending = async () => (await collectGlobalViews({ store, decisions, cache, ignores, checkups, registry, memoryRoot: root, now: () => clock.now })).pending
   const scheduler = new AutoCheckupScheduler({
-    scan: { store, registry, decisions, cache, ignores: new AdviceIgnoreStore(sidecar.adviceIgnores) },
+    scan: { store, registry, decisions, cache, ignores },
     checkups,
+    collectPending,
     status: opts.wrapStatus?.(() => collectCheckupView(source)) ?? (() => collectCheckupView(source)),
     // 每次开跑现读宿主默认模型（假的那份可以在用例中途改）
     getDefaultLlm: () => hostSemanticLlm(llm, route.current),
@@ -168,7 +171,8 @@ function env(opts: {
   const readView = async () => checkupViewSchema.parse(JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_CHECKUP_VIEW_FILE), 'utf8')))
   /** 推进时间并等这次检查（含它跑的体检）做完。 */
   const advance = async (ms: number) => { timers.advance(ms); await scheduler.whenIdle() }
-  return { clock, store, decisions, checkups, autoCheckups, cache, llm, governance, route, timers, scheduler, scanned, set, completed, readView, advance, sidecar }
+  const lastResultOf = async (key: string) => (await checkups.list()).find(r => r.id === key)?.lastResult
+  return { clock, store, decisions, checkups, autoCheckups, cache, llm, governance, route, timers, scheduler, scanned, set, completed, readView, advance, sidecar, collectPending, lastResultOf }
 }
 
 const ws = (path: string) => ({ kind: 'workspace' as const, workspacePath: path })
@@ -241,10 +245,37 @@ describe('自动体检调度：到期就在后台体检一次', () => {
     const view = await e.readView()
     expect(view.scopes.find(s => s.scope.kind === 'workspace')).toEqual({
       scope: ws(DISCUSSION), frequency: 1, isOwn: true, lastCheckupAt: at, nextCheckupAt: at + DAY, isDue: false, isInProgress: false, failure: null, modelUnavailable: null,
+      lastResult: expect.objectContaining({ by: 'auto' }),
     })
 
     await e.advance(3 * AUTO_CHECKUP_INTERVAL_MS)
     expect(e.llm.requests).toHaveLength(1)
+  })
+
+  it('自动体检写最近一次结果：发起方自动、新增身份与条数、用量取宿主流 usage 报的数；不写键 all 的那条', async () => {
+    const llm = fakeHostLlm({ findings: () => [{ type: 'conflict', memoryIds: ['mem_x', 'mem_y'], summary: '端口说法矛盾', suggestedAction: '请裁决' }] })
+    const e = env({ llm })
+    await e.store.create(record({ id: 'mem_x', name: '端口甲', content: 'discussion 的记忆：端口 3000', scope: 'workspace', workspacePath: DISCUSSION }))
+    await e.store.create(record({ id: 'mem_y', name: '端口乙', content: 'discussion 的记忆：端口 4000', scope: 'workspace', workspacePath: DISCUSSION }))
+    await e.set(ws(DISCUSSION), 1)
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    const conflict = (await e.collectPending()).items.find(i => i.kind === 'conflict-horizontal')!
+    const at = NOW + AUTO_CHECKUP_FIRST_CHECK_MS
+    const result = await e.lastResultOf(checkupKey({ kind: 'workspace', path: DISCUSSION }))
+    expect(result).toEqual({
+      checkupId: expect.any(String), by: 'auto', completedAt: at,
+      added: { keys: [pendingItemKey(conflict)], pending: 1, advice: 0 },
+      globalAdded: { keys: [], pending: 0, advice: 0 },
+      // 宿主流的 usage 块：输入 1200 + 输出 80，一次调用
+      usageTokens: 1280,
+      notes: [{ code: 'baseline-missing' }],
+    })
+    expect(e.llm.requests).toHaveLength(1)
+    const view = await e.readView()
+    expect(view.scopes.find(s => s.scope.kind === 'workspace')!.lastResult).toEqual(result)
+    expect(view.allResult).toBeNull()
+    expect(await e.lastResultOf('all')).toBeUndefined()
   })
 
   it('dsh 关着时错过了好几个周期：打开后补跑一次，不按错过的次数连跑', async () => {
@@ -512,6 +543,21 @@ describe('自动体检调度：失败与重试', () => {
     expect((await e.readView()).scopes[0]).toMatchObject({ failure: null, modelUnavailable: null, isDue: false })
   })
 
+  it('没做完的自动体检不写结果：最近一次结果仍是上一次做完的那次', async () => {
+    let reply: HostReply = 'ok'
+    const e = env({ llm: fakeHostLlm({ reply: () => reply }) })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    const done = await e.lastResultOf('global')
+    expect(done).toMatchObject({ by: 'auto' })
+    reply = { code: 'RATE_LIMIT', message: 'too many requests' }
+    await e.advance(DAY)
+    expect((await failureOf(e))?.count).toBe(1)
+    expect(await e.lastResultOf('global')).toEqual(done)
+  })
+
   it('模型输出解析不了：按失败算，原因是解析不了', async () => {
     const e = env({ llm: fakeHostLlm({ reply: () => 'garbage' }) })
     await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
@@ -550,6 +596,71 @@ describe('自动体检调度：失败与重试', () => {
     await e.advance(AUTO_CHECKUP_INTERVAL_MS)
     expect((await e.readView()).scopes[0]).toMatchObject({ failure: null, lastCheckupAt: manualAt, nextCheckupAt: manualAt + DAY, isDue: false })
     expect((await e.checkups.list())[0]).not.toHaveProperty('failure')
+  })
+})
+
+describe('自动体检调度：重试时间按当前频率算', () => {
+  it('连续失败到上限后把频率从每 30 天改成每天：重试时间跟着变成失败时刻加 1 天，到点就再试', async () => {
+    const e = env({ llm: fakeHostLlm({ reply: () => ({ code: 'RATE_LIMIT', message: 'too many requests' }) }) })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 30)
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    await e.advance(6 * AUTO_CHECKUP_INTERVAL_MS)
+    await e.advance(6 * AUTO_CHECKUP_INTERVAL_MS)
+    const thirdAt = NOW + AUTO_CHECKUP_FIRST_CHECK_MS + 2 * HOUR
+    expect((await e.readView()).scopes[0]!.failure).toMatchObject({ count: 3, retryAt: thirdAt + 30 * DAY, isRetryLimitReached: true })
+    const tried = e.llm.requests.length
+    await e.set({ kind: 'all' }, 1)
+    await e.advance(AUTO_CHECKUP_INTERVAL_MS)
+    expect((await e.readView()).scopes[0]!.failure).toMatchObject({ count: 3, retryAt: thirdAt + DAY })
+    expect(e.llm.requests).toHaveLength(tried)
+    await e.advance(DAY)
+    expect(e.llm.requests.length).toBeGreaterThan(tried)
+  })
+})
+
+describe('自动体检调度：上次体检的兜底（没有完成记录时取缓存时间）', () => {
+  /** 这时刻两个视图里全局的上次体检：体检视图（调度器据它判到期）和健康视图。 */
+  const lastOf = async (e: ReturnType<typeof env>) => {
+    const now = () => e.clock.now
+    const checkup = (await collectCheckupView({ store: e.store, checkups: e.checkups, autoCheckups: e.autoCheckups, cache: e.cache, now })).scopes[0]!
+    const { health } = await collectGlobalViews({ store: e.store, decisions: e.decisions, cache: e.cache, ignores: new AdviceIgnoreStore(e.sidecar.adviceIgnores), checkups: e.checkups, registry, memoryRoot: root, now })
+    return { checkup: [checkup.lastCheckupAt, checkup.isDue], health: health.layers[0]!.lastCheckupAt }
+  }
+
+  it('从没完成过的范围：执行器写完缓存、在提交点前取消，仍到期、上次体检仍是没体检过，调度器照常去查', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    const controller = new AbortController()
+    // 缓存写完就取消：执行器停在挂账前的检查点，不写完成记录
+    const cache = new Proxy(e.cache, {
+      get(target, prop) {
+        if (prop === 'update') return async (...args: Parameters<typeof target.update>) => { const r = await target.update(...args); controller.abort(); return r }
+        const value = Reflect.get(target, prop) as unknown
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    await executeScan({ layers: 'full' }, {
+      store: e.store, registry, decisions: e.decisions, cache, checkups: e.checkups,
+      getBaseline: () => null, getLlm: () => ({ complete: async () => '{"findings":[]}' }), resolveContext: async () => ({ workspacePath: undefined }), now: () => e.clock.now,
+    }, { ...fakeExec(), signal: controller.signal }, { by: 'auto', isGlobalOnly: true }).catch(() => undefined)
+    expect(await e.cache.list()).toHaveLength(1)
+    expect(await e.completed()).toEqual({})
+    expect(await lastOf(e)).toEqual({ checkup: [null, true], health: null })
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    expect(e.llm.requests).toHaveLength(1)
+  })
+
+  it('升级前的旧缓存（没有标记）：照旧当上次体检', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    const at = NOW - HOUR
+    await e.cache.put(GLOBAL_CACHE_KEY, { id: GLOBAL_CACHE_KEY, scannedAt: at, scope: 'global', findings: [] })
+    expect(await lastOf(e)).toEqual({ checkup: [at, false], health: at })
   })
 })
 
@@ -597,6 +708,55 @@ describe('自动体检调度：模型用不了', () => {
     expect((await e.readView()).scopes[0]).toMatchObject({
       failure: null, modelUnavailable: { kind: 'model-error', hostCode: 'MISSING_CREDENTIAL', message: 'llm-deepseek: no API key' },
     })
+  })
+
+  it('本轮开头读到要查的范围，模型用不了时它已被别处查完（完成在本轮开始之后）：不给它记「模型用不了」', async () => {
+    let open!: () => void
+    const gate = new Promise<void>(resolve => { open = resolve })
+    const llm = fakeHostLlm({ gate: () => gate, reply: () => ({ code: 'ACCOUNT_SIGN_IN_REQUIRED', message: 'Sign in' }) })
+    const e = env({ llm })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.store.create(record({ id: 'mem_a', content: '项目 a 的记忆', scope: 'workspace', workspacePath: OTHER_A }))
+    await e.set({ kind: 'all' }, 1)
+    e.scheduler.start()
+    e.timers.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    await llm.nthStarted(1)
+    // 全局还在等模型时，别处（agent 体检不认领）把项目 a 查完了
+    const at = e.clock.now
+    await e.checkups.complete([{ kind: 'workspace', path: OTHER_A }], { startedAt: at, completedAt: at, by: 'agent' })
+    open()
+    await e.scheduler.whenIdle()
+    const records = Object.fromEntries((await e.checkups.list()).map(r => [r.id, r]))
+    expect(records['global']?.modelUnavailable).toMatchObject({ hostCode: 'ACCOUNT_SIGN_IN_REQUIRED' })
+    expect(records[OTHER_A]).not.toHaveProperty('modelUnavailable')
+    expect(records[OTHER_A]?.completed).toEqual({ startedAt: at, completedAt: at, by: 'agent' })
+  })
+
+  it('key 被拒（AUTH）：原话可能回显部分凭据，不进体检记录和体检视图，只留错误码', async () => {
+    const e = env({ llm: fakeHostLlm({ reply: () => ({ code: 'AUTH', message: 'Incorrect API key provided: sk-abcdefghijklmnop1234' }) }) })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    expect((await e.readView()).scopes[0]!.modelUnavailable).toEqual({ kind: 'model-error', hostCode: 'AUTH' })
+    const files = [join(root, GUI_VIEW_DIR, GUI_CHECKUP_VIEW_FILE), join(root, '.state', 'checkups', `${createHash('sha1').update('global').digest('hex')}.json`)]
+    for (const file of files) {
+      const text = await readFile(file, 'utf8')
+      expect(text).not.toContain('abcdefghijklmnop1234')
+      expect(text).not.toContain('Incorrect API key')
+    }
+  })
+
+  it('其他错误的原话带疑似密钥：记进失败原因前遮掉', async () => {
+    const e = env({ llm: fakeHostLlm({ reply: () => ({ code: 'RATE_LIMIT', message: 'slow down, token=sk-abcdefghijklmnop1234' }) }) })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    const cause = (await e.readView()).scopes[0]!.failure?.cause
+    expect(cause).toMatchObject({ kind: 'model-error', hostCode: 'RATE_LIMIT' })
+    expect(cause?.message).toContain('slow down')
+    expect(cause?.message).not.toContain('abcdefghijklmnop1234')
   })
 
   it('已经失败过一次的范围遇到模型用不了：不加失败次数，原来的失败记录不动；之后再失败接着数', async () => {

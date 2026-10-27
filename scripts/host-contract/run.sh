@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # R1 host contract: boot a fresh, real dsh host with the packed plugin and a
 # sibling verify plugin that drives the nine memory_* tools through the real
-# ctx.tools with synthetic sessions. No LLM is needed for H1–H9; H10/H11 run
-# only when DEEPSEEK_API_KEY is set and the host can pick a default model,
-# otherwise they are reported as SKIPPED. Before booting, the installed package's
+# ctx.tools with synthetic sessions. No LLM is needed for H1–H9; H10/H11 and
+# the real auto checkup H17 run only when DEEPSEEK_API_KEY is set and the host
+# can pick a default model, otherwise they are reported as SKIPPED. With a key, a
+# third boot swaps in an invalid key for H18 (AUTH errors leave no raw host text
+# in plugin output); without one H18 is SKIPPED. Before booting, the installed package's
 # browser half is checked key-free (scripts/host-contract/verify-client.ts).
 # Never touches ~/.dsh.
 #
 #   scripts/host-contract/run.sh              run (temp dir removed on exit)
 #   HOST_SMOKE_KEEP=1 ...                     keep the temp dir (logs, DSH_HOME) — with a key set,
 #                                             the kept dir holds an owner-only .credentials.yaml
-#   DEEPSEEK_API_KEY=... ...                  enable the two semantic-layer cases
+#   DEEPSEEK_API_KEY=... ...                  enable the semantic-layer and auto-checkup cases
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 # Schema version of $DSH_HOME/.credentials.yaml understood by the pinned host
@@ -69,19 +71,38 @@ if [ ! -f "$RESULTS2" ]; then
   grep -iE "error|fatal" "$LOGS/restart.log" | head -n 10 >&2 || true
   exit 1
 fi
+# Third boot (H18, only with a key): same isolated home, credentials swapped for a
+# well-formed key the provider rejects (401 → AUTH). Generated here, never a real key.
+RESULTS3="$TMP/results-bad-key.json"
+code3=0
+if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+  STEP=bad-key
+  ( umask 077; printf 'version: %s\nrefs:\n  DEEPSEEK_API_KEY: "%s"\nrecords: {}\n' "$CREDENTIALS_SCHEMA_VERSION" "host-contract-invalid-key-$RANDOM$RANDOM" > "$HOMEDIR/.credentials.yaml" )
+  chmod 600 "$HOMEDIR/.credentials.yaml"
+  set +e
+  env DSH_HOME="$HOMEDIR" HOST_CONTRACT_OUT="$RESULTS3" HOST_CONTRACT_PHASE=bad-key "$DSH" --profile host --patch "$PATCH" >"$LOGS/bad-key.log" 2>&1
+  code3=$?
+  set -e
+  if [ ! -f "$RESULTS3" ]; then
+    echo "$HOST_TAG: bad-key host exited ($code3) without results; bad-key.log errors:" >&2
+    grep -iE "error|fatal" "$LOGS/bad-key.log" | head -n 10 >&2 || true
+    exit 1
+  fi
+fi
 node -e '
 const fs = require("fs");
-const r = [...JSON.parse(fs.readFileSync(process.argv[1], "utf8")), ...JSON.parse(fs.readFileSync(process.argv[2], "utf8"))];
+const r = process.argv.slice(1).filter(f => fs.existsSync(f)).flatMap(f => JSON.parse(fs.readFileSync(f, "utf8")));
 for (const o of r) console.log(`${o.ok ? (o.skipped ? "SKIP" : "PASS") : "FAIL"}  ${o.id}  ${o.detail}`);
 const fails = r.filter(o => !o.ok).length, skips = r.filter(o => o.skipped).length;
 console.log(`host-contract: ${r.length - fails - skips} passed, ${skips} skipped, ${fails} failed`);
 process.exit(fails ? 1 : 0);
-' "$RESULTS" "$RESULTS2"
+' "$RESULTS" "$RESULTS2" "$RESULTS3"
 # The verify plugin exits the host with 0 only when every case passed; a host that
 # wrote the results and then died on shutdown must not be reported as PASS.
-if [ "$code" -ne 0 ] || [ "$code2" -ne 0 ]; then
-  echo "$HOST_TAG: host exited (first=$code restart=$code2) after writing results; log tails:" >&2
+if [ "$code" -ne 0 ] || [ "$code2" -ne 0 ] || [ "$code3" -ne 0 ]; then
+  echo "$HOST_TAG: host exited (first=$code restart=$code2 bad-key=$code3) after writing results; log tails:" >&2
   tail -n 20 "$LOGS/boot.log" "$LOGS/restart.log" >&2
+  [ ! -f "$LOGS/bad-key.log" ] || tail -n 20 "$LOGS/bad-key.log" >&2
   exit 1
 fi
 host_assert_isolated

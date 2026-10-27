@@ -1,6 +1,6 @@
 import type { MemoryRecord } from '../record-schema.ts'
 import { SEVERITY_BY_TYPE, type Finding } from './schema.ts'
-import { maskSecretSurface, maskSecrets } from '../secrets.ts'
+import { maskDiagnostic, maskSecretSurface, maskSecrets } from '../secrets.ts'
 import { estimateTokens } from '../snapshot.ts'
 
 /** 语义层的 LLM 抽象：纯逻辑只依赖这个接口，真机接线在 index.ts。 */
@@ -211,9 +211,10 @@ export function parseSemanticFindings(raw: string, knownIds: Set<string>): Findi
 /**
  * 语义层没做成的原因（最后一次尝试的）：模型调用抛错（带上错误的原话，宿主给了错误码时带上 hostCode），或输出解析不了。
  * 错误码不在这里吞掉：内容检查据它分出「模型用不了」（tools/scan.ts）。
+ * 原话之后会进体检记录、视图和给模型的说明文字：AUTH 的原话可能回显部分凭据，对齐宿主不留（没有 message）；其余先遮掉疑似密钥。
  */
 export type SemanticFailure =
-  | { kind: 'model-error'; hostCode?: string; message: string }
+  | { kind: 'model-error'; hostCode?: string; message?: string }
   | { kind: 'unparseable' }
 
 /** 抛出的错误自带的错误码（宿主适配层挂在 code 上的字符串），没有为 undefined。 */
@@ -224,7 +225,8 @@ function errorCode(err: unknown): string | undefined {
 
 function modelError(err: unknown): SemanticFailure {
   const hostCode = errorCode(err)
-  return { kind: 'model-error', ...(hostCode !== undefined ? { hostCode } : {}), message: err instanceof Error ? err.message : String(err) }
+  if (hostCode === 'AUTH') return { kind: 'model-error', hostCode }
+  return { kind: 'model-error', ...(hostCode !== undefined ? { hostCode } : {}), message: maskDiagnostic(err instanceof Error ? err.message : String(err)) }
 }
 
 /**

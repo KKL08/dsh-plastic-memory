@@ -11,15 +11,15 @@ import { detectSecrets, hasSecret } from '../secrets.ts'
 import { computeDigest } from '../storage/frontmatter.ts'
 import { candidateFingerprint, isModelChange, kindOf, verdictLoser, type MisplacedIgnore, type PendingDecisionsStore } from '../governance/decisions.ts'
 import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
-import type { PendingDecision, ScanCacheEntry, SnapshotRecord } from '../governance/schema.ts'
+import { genId, type PendingDecision, type ScanCacheEntry, type SnapshotRecord } from '../governance/schema.ts'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
-import type { CheckupRecordStore } from '../governance/checkup-records.ts'
+import { checkupKey, type CheckupRecordStore } from '../governance/checkup-records.ts'
 import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
 import { executeConfirm } from '../tools/confirm.ts'
 import { executeForget } from '../tools/forget.ts'
 import { executePromote } from '../tools/promote.ts'
-import { executeScan } from '../tools/scan.ts'
+import { executeScan, type ScanNote } from '../tools/scan.ts'
 import { executeSnapshotTool, type SnapshotToolOptions } from '../tools/snapshot.ts'
 import {
   crossWorkspaceNote, gateRecords, isCopyOf, locateCopy, workspaceLabel, type CrossWorkspaceRejection, type GovernanceContext,
@@ -33,7 +33,7 @@ import { generateDraft } from './model-draft.ts'
 import { holdCheckups, processInterval, type IntervalTimer } from './auto-checkup.ts'
 import { checkupWorkspaces } from '../tools/layer-preread.ts'
 import type { LayerRef } from '../governance/layer-health.ts'
-import { scanOutcome } from './views.ts'
+import { checkupResults, scanOutcome, type CheckupTarget } from './views.ts'
 
 /**
  * `/memory` 人类命令（GUI 的动作通道）：解析契约参数 → 调现有执行器 → 返回契约 JSON 文本。
@@ -749,7 +749,9 @@ async function dispatch(
       })
       if ('busy' in held) return fail(cmd, 'busy', `${held.busy.kind === 'global' ? '全局' : held.busy.path} 正在体检，查完再来`)
       try {
-        return await scanHeld(deps, command, { ...exec, signal: controller.signal }, now)
+        const target: CheckupTarget = isGlobalOnly ? { kind: 'global' }
+          : command.workspacePath !== undefined ? { kind: 'workspace', path: command.workspacePath } : { kind: 'all', layers }
+        return await scanHeld(deps, command, target, { ...exec, signal: controller.signal }, now)
       } catch (err) {
         // 认领中途被别的进程接手：执行器在写入检查点前停下了，这次没提交
         if (controller.signal.aborted) return fail(cmd, 'busy', '体检中途被别的进程接手，这次没有提交')
@@ -776,10 +778,14 @@ async function dispatch(
   }
 }
 
-/** 认领到范围之后的界面手动体检：前后各收集一次待处理比出新增，体检完给覆盖到的范围写完成记录（发起方界面手动）。 */
+/**
+ * 认领到范围之后的界面手动体检：前后各收集一次待处理比出新增，体检完给覆盖到的范围写完成记录（发起方界面手动），
+ * 再给被查的范围（「全部」另加键 all）记下最近一次结果。
+ */
 async function scanHeld(
   deps: MemoryCommandDeps,
   command: Extract<MemoryCommand, { cmd: 'scan' }>,
+  target: CheckupTarget,
   exec: ToolRunContext,
   now: number,
 ): Promise<MemoryCommandResult> {
@@ -792,6 +798,8 @@ async function scanHeld(
   // 体检前的待处理，和体检后比出新增
   const before = (await collect())?.pending
   const isGlobalOnly = command.layer !== undefined
+  // 「全部」体检时各范围自己的说明，结果按范围记它们；整次合并的只记在 all 上
+  const layerNotes = new Map<string, readonly ScanNote[]>()
   // 时钟现读：完成记录的完成时间是体检做完的时刻，不是命令开始的时刻
   const r = await executeScan(
     { scope: command.workspacePath ?? 'all', layers: 'full' },
@@ -799,11 +807,23 @@ async function scanHeld(
       store: deps.store, registry: deps.registry, decisions: deps.decisions, cache: deps.cache, checkups: deps.checkups,
       getBaseline: deps.getBaseline, getLlm: deps.getLlm, resolveContext: deps.resolveContext, now: () => deps.now?.() ?? Date.now(),
     },
-    exec, { by: 'manual', isGlobalOnly },
+    exec, { by: 'manual', isGlobalOnly, onLayerNotes: (layer, notes) => { layerNotes.set(checkupKey(layer), notes) } },
   )
   await deps.decisions.sweep(now)
   const after = await deps.views.rewriteAll() ?? (before === undefined ? undefined : await collect())
   if (r.kind === 'error') return fail(cmd, 'failed', r.message)
+  // 最近一次结果：比不出新增（收集视图出错）就不记；认领已被别的进程接手的不记，免得盖掉接手的那次。
+  // 体检这时已经提交，记不下结果只记日志，不把做完的体检报成失败（和自动体检同一步一样）
+  if (before !== undefined && after !== undefined && exec.signal?.aborted !== true) {
+    try {
+      await deps.checkups.recordResults(checkupResults(before, after.pending, {
+        target, checkupId: genId('ck'), by: 'manual', completedAt: deps.now?.() ?? Date.now(), notes: r.notes, layerNotes,
+        ...(r.usageTokens !== undefined ? { usageTokens: r.usageTokens } : {}),
+      }))
+    } catch (err) {
+      (deps.log ?? console).warn('[plastic-memory] 记不下手动体检的结果', err)
+    }
+  }
   // 判新增的覆盖层：项目体检读的是本项目的可见集合（全局 + 本项目），只查全局是全局层，全库体检是全部层
   const covered = isGlobalOnly ? [{ kind: 'global' as const }]
     : command.workspacePath === undefined ? 'all' : [{ kind: 'global' as const }, { kind: 'workspace' as const, workspacePath: command.workspacePath }]

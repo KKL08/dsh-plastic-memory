@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { CHECKUP_INITIATORS } from '../contract-codes.ts'
-import { autoCheckupFrequencySchema, checkupCauseSchema } from '../gui/contract.ts'
+import { autoCheckupFrequencySchema, checkupCauseSchema, checkupResultSchema } from '../gui/contract.ts'
 
 /** 易变召回统计的侧表行（`.state/recall-stats.json` 里的一条，见 storage/sidecar.ts）。
  *  文件永不承载这两个字段——否则每次 search 命中都产生文件 diff（git 噪音）。 */
@@ -26,11 +26,12 @@ export type KvImportMarker = z.infer<typeof kvImportMarkerSchema>
 
 /**
  * 体检记录表的一行（`.state/checkups/<sha1(id)>.json`，见 storage/sidecar.ts），每个范围一条。id 是范围键：
- * `global` 或项目的绝对路径（见 governance/checkup-records.ts checkupKey）。
+ * `global` 或项目的绝对路径（见 governance/checkup-records.ts checkupKey）；另有键 `all` 的一条，只有 lastResult。
  * completed 是完成记录：这个范围最近一次做完的体检（规则检查和内容检查都写完：缓存、账本、提升候选），即「上次体检」。
  * 还没有做完过的范围没有它。
  * failure 是自动体检的连续失败（次数、下次重试时间、最近一次的原因），modelUnavailable 是最近一次自动体检的尝试碰上模型用不了的原因；
  * 都由调度器写，这个范围写完成记录时一并清掉（见 governance/checkup-records.ts）。
+ * lastResult 是最近一次界面手动或自动体检的结果（见 gui/contract.ts checkupResultSchema），写完成记录、记失败都不动它。
  */
 export const checkupRecordSchema = z.object({
   id: z.string(),
@@ -39,12 +40,14 @@ export const checkupRecordSchema = z.object({
     completedAt: z.number(),
     by: z.enum(CHECKUP_INITIATORS),
   }).optional(),
+  /** 自动体检连续没做完：次数、最近一次失败的时刻、原因。重试时间不存，生成体检视图时按当时的有效频率现算（见 gui/views.ts）。 */
   failure: z.object({
     count: z.number().int().positive(),
-    retryAt: z.number(),
+    failedAt: z.number(),
     cause: checkupCauseSchema,
   }).optional(),
   modelUnavailable: checkupCauseSchema.optional(),
+  lastResult: checkupResultSchema.optional(),
 })
 export type CheckupRecord = z.infer<typeof checkupRecordSchema>
 export type CheckupCompletion = NonNullable<CheckupRecord['completed']>

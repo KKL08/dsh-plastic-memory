@@ -12,12 +12,15 @@ import { runRuleScan } from '../governance/rule-scan.ts'
 import { byConfidenceThenConfirmed } from '../snapshot.ts'
 import { layerCacheKey, scoreLayer, type LayerPreread, type LayerRef } from '../governance/layer-health.ts'
 import type { IgnoredAdvice } from '../governance/advice-ignores.ts'
-import { autoCheckupDue, isRetryLimitReached } from '../governance/auto-checkups.ts'
+import { autoCheckupDue, autoCheckupRetryAt, isRetryLimitReached } from '../governance/auto-checkups.ts'
+import { checkupKey } from '../governance/checkup-records.ts'
+import { RULE_PENALTY_TYPES, SEMANTIC_NOISE_TYPES } from '../governance/scoring.ts'
 import type { CheckupRecord } from '../storage/schema.ts'
+import type { ScanNoteCode } from '../contract-codes.ts'
 import {
-  ADVICE_TYPES, GUI_VIEW_VERSION, PENDING_ITEM_KINDS, PENDING_LEVEL_OF_KIND, PENDING_LEVELS, isAwaitingDecision, resolveAutoCheckup,
+  ADVICE_TYPES, GUI_VIEW_VERSION, PENDING_ITEM_KINDS, PENDING_LEVEL_OF_KIND, PENDING_LEVELS, SCOPE_KEYS, isAwaitingDecision, resolveAutoCheckup,
   pendingItemKey, pendingItemScopes, sameLayer,
-  type AdviceType, type AutoCheckupFrequency, type CheckupView, type DeletedView, type MemoryPromotion, type GlobalViewName, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCard,
+  type AdviceType, type AutoCheckupFrequency, type CheckupAdded, type CheckupCause, type CheckupResult, type CheckupView, type DeletedView, type MemoryPromotion, type GlobalViewName, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCard,
   type MemoryCommandResult, type ModelChange, type PendingItem, type PendingLevel, type PendingView, type SessionView,
 } from './contract.ts'
 
@@ -197,8 +200,7 @@ export function scanOutcome(
   covered: readonly GuiLayerRef[] | 'all',
 ): Required<Pick<Extract<MemoryCommandResult, { ok: true }>, 'added' | 'scores'>> {
   const isCovered = (layer: GuiLayerRef) => covered === 'all' || covered.some(c => sameLayer(c, layer))
-  const seen = new Set(before.items.map(pendingItemKey))
-  const added = after.pending.items.filter(i => !seen.has(pendingItemKey(i)) && (covered === 'all' || pendingItemScopes(i).some(isCovered)))
+  const added = addedItems(before, after.pending, covered)
   const pending = added.filter(i => i.level !== 'advice')
   const levels = [...new Set(pending.map(i => i.level))]
   return {
@@ -208,6 +210,71 @@ export function scanOutcome(
     },
     scores: after.health.layers.filter(l => isCovered(l.layer)).map(l => ({ layer: l.layer, score: l.score })),
   }
+}
+
+/** 体检新增的待处理项：体检后有、体检前没有（按身份比较），且属于本次体检覆盖的层（'all' 是全部层），按体检后视图里的先后。 */
+function addedItems(before: PendingView, after: PendingView, covered: readonly GuiLayerRef[] | 'all'): PendingItem[] {
+  const seen = new Set(before.items.map(pendingItemKey))
+  return after.items.filter(i => !seen.has(pendingItemKey(i)) && (covered === 'all' || pendingItemScopes(i).some(l => covered.some(c => sameLayer(c, l)))))
+}
+
+function addedOf(items: readonly PendingItem[]): CheckupAdded {
+  const pending = items.filter(i => i.level !== 'advice').length
+  return { keys: items.map(pendingItemKey), pending, advice: items.length - pending }
+}
+
+/** 体检的目标：只查全局、某个项目，或全部（layers 是这次被查的每个范围）。 */
+export type CheckupTarget = { kind: 'global' } | { kind: 'workspace'; path: string } | { kind: 'all'; layers: readonly LayerRef[] }
+
+/**
+ * 一次界面手动体检或自动体检的最近一次结果，按范围给出要写进体检记录表的各条（键 → 结果）；字段口径见 contract.ts checkupResultSchema。
+ * 判新增的覆盖层同 scan 命令：全局是全局层，项目是全局加本项目，全部是所有层。说明只留说明码和原因（文字是给模型看的）。
+ */
+export function checkupResults(before: PendingView, after: PendingView, run: {
+  target: CheckupTarget
+  checkupId: string
+  by: CheckupResult['by']
+  completedAt: number
+  usageTokens?: number
+  notes: ReadonlyArray<{ code: ScanNoteCode; cause?: CheckupCause }>
+  /** 「全部」体检时各范围自己的说明（键同体检记录表）；没给的范围用整次的 notes。 */
+  layerNotes?: ReadonlyMap<string, ReadonlyArray<{ code: ScanNoteCode; cause?: CheckupCause }>>
+}): Array<{ key: string; result: CheckupResult }> {
+  const { target } = run
+  const toNotes = (notes: typeof run.notes) => notes.map(n => ({ code: n.code, ...(n.cause !== undefined ? { cause: n.cause } : {}) }))
+  const base = { checkupId: run.checkupId, by: run.by, completedAt: run.completedAt, notes: toNotes(run.notes) }
+  const usage = run.usageTokens !== undefined ? { usageTokens: run.usageTokens } : {}
+  const belongsTo = (layer: GuiLayerRef) => (i: PendingItem) => pendingItemScopes(i).some(s => sameLayer(s, layer))
+  if (target.kind === 'global') {
+    const added = addedItems(before, after, [{ kind: 'global' }])
+    return [{ key: SCOPE_KEYS.global, result: { ...base, added: addedOf(added), ...usage } }]
+  }
+  if (target.kind === 'workspace') {
+    const own = toGuiLayer(target)
+    const added = addedItems(before, after, [{ kind: 'global' }, own])
+    // 项目体检读全局：顺带发现、只属于全局的新增记在全局名下，不算本项目的
+    const result = { ...base, added: addedOf(added.filter(belongsTo(own))), globalAdded: addedOf(added.filter(i => !belongsTo(own)(i))), ...usage }
+    return [{ key: target.path, result }]
+  }
+  const added = [...new Map(addedItems(before, after, 'all').map(i => [pendingItemKey(i), i])).values()]
+  const groups = new Map<string, { scope: GuiLayerRef; keys: string[] }>()
+  for (const item of added) {
+    for (const scope of pendingItemScopes(item)) {
+      const id = scope.kind === 'global' ? '' : scope.workspacePath
+      const group = groups.get(id) ?? { scope, keys: [] }
+      group.keys.push(pendingItemKey(item))
+      groups.set(id, group)
+    }
+  }
+  // 全局（id 为空串）在前，项目按路径
+  const byScope = [...groups.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([, g]) => g)
+  return [
+    ...target.layers.map(layer => {
+      const own = run.layerNotes?.get(checkupKey(layer))
+      return { key: checkupKey(layer), result: { ...base, ...(own !== undefined ? { notes: toNotes(own) } : {}), added: addedOf(added.filter(belongsTo(toGuiLayer(layer)))) } }
+    }),
+    { key: SCOPE_KEYS.all, result: { ...base, added: addedOf(added), byScope, ...usage } },
+  ]
 }
 
 /** 注册表里的类型加上视图里出现的类型（切模板后旧模板的、认不出的），读时 get 给显示名。 */
@@ -254,6 +321,7 @@ export function buildHealthView(input: ViewInput): HealthView {
         lastCheckupAt: r.lastCheckupAt,
         overflow: overflowOfLayer(overflow, layer),
         ignored: ignoredOfLayer(r.ignored, input.data),
+        deductions: deductionsOf(r.health),
       }
     }),
     overflowOnlyLayers: [...new Set(overflow.map(overflowScopeOf))]
@@ -264,10 +332,21 @@ export function buildHealthView(input: ViewInput): HealthView {
   }
 }
 
+/** 扣分来源：评分模块已分开算好的三项扣分，各带此刻有的问题类型（按 FINDING_TYPES 的顺序）。 */
+function deductionsOf(health: ReturnType<typeof scoreLayer>['health']): HealthView['layers'][number]['deductions'] {
+  const round = (points: number) => Math.round(points * 100) / 100
+  const present = (types: readonly FindingType[]) => FINDING_TYPES.filter(t => types.includes(t) && health.counts[t] > 0)
+  return {
+    rule: { points: round(health.rulePenalty), types: present(RULE_PENALTY_TYPES) },
+    content: { points: round(health.semanticPenalty), types: present(['conflict', ...SEMANTIC_NOISE_TYPES]) },
+    freshness: { points: round(health.freshness.penalty), types: health.freshness.staleCount > 0 ? ['stale'] : [] },
+  }
+}
+
 /**
  * 体检视图：每个范围的有效频率（跟随还是单独设置）、上次体检、下次自动体检、是否到期、是否在体检、自动体检的连续失败和「模型用不了」，
  * 外加体检开关。layers 是全局加体检清单（与健康视图同一批层、同一顺序）；lastCheckupAt 给出每个范围的上次体检，
- * isInProgress 给出它此刻有没有体检认领着，record 给出它在体检记录表里的那条（没有为 undefined）。
+ * isInProgress 给出它此刻有没有体检认领着，record 给出它在体检记录表里的那条（没有为 undefined）；allRecord 是键 all 的那条。
  */
 export function buildCheckupView(input: {
   now: number
@@ -277,20 +356,27 @@ export function buildCheckupView(input: {
   lastCheckupAt: (layer: LayerRef) => number | null
   isInProgress: (layer: LayerRef) => boolean
   record: (layer: LayerRef) => CheckupRecord | undefined
+  allRecord: CheckupRecord | undefined
 }): CheckupView {
   return {
     version: GUI_VIEW_VERSION,
     governanceEnabled: input.governanceEnabled,
     defaultFrequency: resolveAutoCheckup(input.settings, { kind: 'all' }).frequency,
+    allResult: input.allRecord?.lastResult ?? null,
     scopes: input.layers.map(layer => {
       const scope = toGuiLayer(layer)
       const { frequency, isOwn } = resolveAutoCheckup(input.settings, scope)
       const lastCheckupAt = input.lastCheckupAt(layer)
-      const { failure, modelUnavailable } = input.record(layer) ?? {}
+      const { failure, modelUnavailable, lastResult } = input.record(layer) ?? {}
       return {
         scope, frequency, isOwn, lastCheckupAt, ...autoCheckupDue(frequency, lastCheckupAt, input.now), isInProgress: input.isInProgress(layer),
-        failure: failure === undefined ? null : { ...failure, isRetryLimitReached: isRetryLimitReached(failure.count) },
+        // 重试时间按此刻的有效频率现算；仅手动时不会自动重试（不到期），按 0 天算，界面也不显示
+        failure: failure === undefined ? null : {
+          count: failure.count, retryAt: autoCheckupRetryAt(failure.count, failure.failedAt, frequency === 'manual' ? 0 : frequency),
+          isRetryLimitReached: isRetryLimitReached(failure.count), cause: failure.cause,
+        },
         modelUnavailable: modelUnavailable ?? null,
+        lastResult: lastResult ?? null,
       }
     }),
   }

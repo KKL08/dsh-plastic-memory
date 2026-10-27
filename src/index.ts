@@ -439,13 +439,15 @@ export async function apply(ctx: Context, config: Config) {
   // 那时 storageDomain 未必挂上；而没有任何会话时浏览器半侧也读不到视图，早写没有意义。
   // 体检视图与自动体检调度共用的读法：设置表、完成记录、目录清单，不读记忆文件
   const checkupSource = { store, checkups, autoCheckups, cache: scanCache, isGovernanceEnabled: () => config.governance.enabled.get() }
+  // 四个全局视图的收集：视图写入器与自动体检（体检前后比出新增）共用
+  const collectViews = () => collectGlobalViews({
+    store, decisions, snapshots, cache: scanCache, ignores, checkups, autoCheckups, registry, memoryRoot, isGovernanceEnabled: () => config.governance.enabled.get(), bootedAt, log: ctx.logger,
+  })
   ctx.inject(['commands'], child => {
     const commands = (child as unknown as { commands: { register(def: MemoryCommandDefinition): () => void } }).commands
     const writer = new ViewWriter({
       memoryRoot, log: ctx.logger,
-      collect: () => collectGlobalViews({
-        store, decisions, snapshots, cache: scanCache, ignores, checkups, autoCheckups, registry, memoryRoot, isGovernanceEnabled: () => config.governance.enabled.get(), bootedAt, log: ctx.logger,
-      }),
+      collect: collectViews,
       collectCheckups: () => collectCheckupView(checkupSource),
     })
     views = writer
@@ -473,6 +475,7 @@ export async function apply(ctx: Context, config: Config) {
     const created = new AutoCheckupScheduler({
       scan: { store, registry, decisions, cache: scanCache, ignores },
       checkups,
+      collectPending: async () => (await collectViews()).pending,
       status: () => collectCheckupView(checkupSource),
       getDefaultLlm,
       isGovernanceEnabled: () => config.governance.enabled.get(),
