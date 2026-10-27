@@ -137,11 +137,31 @@ function collectStats(
 // 与分词器的整词同一个字符集：字母、组合附加符、数字、_、-。整词里出现这之外的字符（. / : 等），分词就会把它打散
 const WORD_CHARS_ONLY = /^[\p{L}\p{M}\p{N}_-]*$/u
 const HAS_ALNUM = /[\p{L}\p{N}]/u
-// 书名号、全角括号、弯引号、反引号只用来包裹行文，不属于字面值：《分片上传》、`node:sqlite`、（0.2.1-rc.2）。和空白一样当分隔
-const WORD_SEPARATORS = /[\s《》〈〉「」『』【】〔〕〖〗［］（）｛｝“”‘’`]+/u
-// 整词首尾的句读、半角括号与引号是行文带进来的：「怎么办？」「(0.2.1-rc.2)」先剥掉再判断。
-// 紧跟 ASCII 标识符的半角冒号是命名空间前缀（node:、npm:），不剥；中文后的冒号、全角冒号照旧剥掉
-const EDGE_PUNCT = /^[(\[{"']+|(?:[)\]}"'.,;!?。，、；：！？…]|(?<![\w-]):)+$/gu
+// 书名号、全角括号、弯引号、反引号只用来包裹行文，全角句读（，。、；：！？…—）只用来断句，都不属于字面值：
+// 《分片上传》、`node:sqlite`、（0.2.1-rc.2）、分片上传，断点续传。和空白一样当分隔
+const WORD_SEPARATORS = /[\s《》〈〉「」『』【】〔〕〖〗［］（）｛｝“”‘’`，。、；：！？…—]+/u
+// 整词首尾的半角句读、括号与引号是行文带进来的：「怎么办?」「(0.2.1-rc.2)」先剥掉再判断
+const EDGE_OPEN = /^[(\[{"']+/u
+const EDGE_CLOSE = /^[)\]}"'.,;!?:]$/u
+const OPENER: Readonly<Record<string, string>> = { ')': '(', ']': '[', '}': '{' }
+
+/**
+ * 剥掉整词首尾的半角句读、括号与引号，但留下属于字面值的两种：紧跟 ASCII 标识符的冒号是命名空间前缀（node:、npm:），
+ * 词里有左括号与之配对的右括号是代码的一部分（arr[0]、foo()）。中文后的冒号照旧剥掉。
+ */
+function trimEdges(word: string): string {
+  let w = word.replace(EDGE_OPEN, '')
+  while (w !== '') {
+    const last = w.at(-1)!
+    const rest = w.slice(0, -1)
+    if (!EDGE_CLOSE.test(last)) break
+    if (last === ':' && /[\w-]$/.test(rest)) break
+    const opener = OPENER[last]
+    if (opener !== undefined && rest.split(opener).length > rest.split(last).length) break
+    w = rest
+  }
+  return w
+}
 
 /**
  * 锚点词：查询按空白与包裹符号切出的整词（剥掉首尾句读和括号）里，含标点（上面字符集以外的字符）且带字母或数字的那些，小写、去重。
@@ -150,7 +170,7 @@ const EDGE_PUNCT = /^[(\[{"']+|(?:[)\]}"'.,;!?。，、；：！？…]|(?<![\w-
  * 再按字面排会让恰好含这串字的记录压过分数更高的记录。
  */
 export function anchorTerms(query: string): string[] {
-  const words = query.toLowerCase().split(WORD_SEPARATORS).map(w => w.replace(EDGE_PUNCT, '')).filter(w => w !== '' && !WORD_CHARS_ONLY.test(w) && HAS_ALNUM.test(w))
+  const words = query.toLowerCase().split(WORD_SEPARATORS).map(trimEdges).filter(w => w !== '' && !WORD_CHARS_ONLY.test(w) && HAS_ALNUM.test(w))
   return [...new Set(words)]
 }
 

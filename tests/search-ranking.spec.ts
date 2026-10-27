@@ -212,6 +212,18 @@ describe('字面锚点：含标点的查询词整词命中排在同档前面', (
     expect(anchorTerms('`node:sqlite` 《node:sqlite》的用法 【0.2.1-rc.2】')).toEqual(['node:sqlite', '0.2.1-rc.2'])
   })
 
+  it('整词中间的中文句读也当分隔：「分片上传，断点续传」不算锚点，字面含这句的记录不会被提前', async () => {
+    const store = await seeded([
+      record({ id: 'mem_literal', name: '杂记', summary: '一些零碎事项', lastConfirmedAt: 9, content: '周会上有人列了两项：分片上传，断点续传，接口文档还没补。' }),
+      record({
+        id: 'mem_ranked', name: '大文件分片与上传', summary: '先分片，再逐片上传，断了靠断点续传补缺的分片', lastConfirmedAt: 1,
+        content: '大文件先在客户端分片，逐片上传；上传中断时按断点续传只重传缺的分片，断点信息存在本地，续传时先比对已收分片。',
+      }),
+    ])
+    expect(await ids(store, '分片上传，断点续传')).toEqual(['mem_ranked', 'mem_literal'])
+    expect(anchorTerms('分片上传，断点续传。node:sqlite、0.2.1-rc.2；a.b！arr[0]？-rc.2：x…y——z')).toEqual(['node:sqlite', '0.2.1-rc.2', 'a.b', 'arr[0]', '-rc.2'])
+  })
+
   it('ASCII 标识符后紧跟的冒号是命名空间前缀，留在锚点里：「node:」把带前缀的引入指南排在泛讲 Node 的记录前面', async () => {
     const store = await seeded([
       record({ id: 'mem_runtime', name: 'Node 运行时', lastConfirmedAt: 9, content: 'node 运行时统一用 22；node 升级前先在 CI 跑一遍，node 版本写在 .nvmrc。' }),
