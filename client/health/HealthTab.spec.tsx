@@ -1,11 +1,14 @@
 // 健康 tab：按层三段（分数与结论、问题、上次体检时间）、密钥不打分、超限列为问题不扣分、从没体检过、体检关闭、已忽略。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { GUI_VIEW_VERSION, type HealthView, type PendingView } from '../../src/gui/contract.ts'
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { createNavStore } from '../nav.ts'
 import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { HealthTab } from './HealthTab.tsx'
+import { createTranslator } from '../i18n.tsx'
+import { en } from '../locales.ts'
+import { PanelShell } from '../ui/PanelShell.tsx'
 
 const WS = { kind: 'workspace', workspacePath: '/w/app' } as const
 const session = { kind: 'ready', sessionId: 's1', cwd: '/w/app' } as const
@@ -26,6 +29,23 @@ function renderTab(view: HealthView, opts: { scope?: typeof WS | { kind: 'global
 
 beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(NOW) })
 afterEach(() => { vi.useRealTimers() })
+
+describe('健康 tab 英文单复数', () => {
+  const renderEn = (view: HealthView) => {
+    const gateway = createFakeGateway({ session, views: { health: view } })
+    return render(<PanelShell gateway={gateway} t={createTranslator(en)}><HealthTab session={session} scope={WS} nav={createNavStore()} /></PanelShell>)
+  }
+
+  it('1 条记忆、1 条久未确认用单数，多条用复数', () => {
+    const { unmount } = renderEn(health([layer({ totalMemories: 1, staleCount: 1 })]))
+    expect(screen.getByText('1 memory')).toBeInTheDocument()
+    expect(screen.getByText(/^1 not confirmed in a long time and may be outdated; it is flagged when brought into a chat/)).toBeInTheDocument()
+    unmount()
+    renderEn(health([layer({ totalMemories: 12, staleCount: 2 })]))
+    expect(screen.getByText('12 memories')).toBeInTheDocument()
+    expect(screen.getByText(/^2 not confirmed in a long time and may be outdated; they are flagged/)).toBeInTheDocument()
+  })
+})
 
 describe('健康 tab', () => {
   it('按层三段：结论行写条数、分数与结论词，下一行上次体检时间，下面是问题；看项目时本项目在前、全局在后', () => {

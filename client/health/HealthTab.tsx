@@ -91,7 +91,7 @@ function noticeRows(overflow: OverflowLevel | null, staleCount: number, t: Trans
     const text = overflow.mode === 'relax' ? t('health.overflow.relax', { percent: overflow.tier * 25 }) : t('health.overflow.strict')
     rows.push({ key: 'overflow', text, level: overflow.isDismissed ? null : PENDING_LEVEL_OF_KIND['overflow'] })
   }
-  if (staleCount > 0) rows.push({ key: 'stale', text: t('health.stale', { n: formatNumber(staleCount) }), level: PENDING_LEVEL_OF_KIND['advice'] })
+  if (staleCount > 0) rows.push({ key: 'stale', text: t(staleCount === 1 ? 'health.stale.one' : 'health.stale', { n: formatNumber(staleCount) }), level: PENDING_LEVEL_OF_KIND['advice'] })
   return rows
 }
 
@@ -169,7 +169,7 @@ function LayerHealth({ layer, data, overflowOnly, now, session, onHandle }: {
     <section className="pm-health-layer" aria-label={name}>
       <HealthBanner
         marker={data.gate.secret ? 'secret' : data.tier === 'green' && data.semanticCachedAt !== null ? 'ok' : undefined}
-        conclusion={<Dotted parts={[name, t('health.count', { n: formatNumber(data.totalMemories) }), scorePart]} />}
+        conclusion={<Dotted parts={[name, t(data.totalMemories === 1 ? 'health.count.one' : 'health.count', { n: formatNumber(data.totalMemories) }), scorePart]} />}
         detail={data.semanticCachedAt === null ? t('health.neverScanned') : t('health.lastScan', { date: formatDay(data.semanticCachedAt, now, t) })}
       />
       <RowSection

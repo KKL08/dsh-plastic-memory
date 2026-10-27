@@ -43,7 +43,7 @@ function memoryNames(library: LibraryView | undefined, deleted: DeletedView): Ma
 
 function purgeLabel(purgeAt: number, now: number, t: Translate): string {
   const days = Math.floor((purgeAt - now) / DAY_MS)
-  return days < 1 ? t('deleted.purge.today') : t('deleted.purge.days', { n: days })
+  return days < 1 ? t('deleted.purge.today') : t(days === 1 ? 'deleted.purge.days.one' : 'deleted.purge.days', { n: days })
 }
 
 export function DeletedTab({ nav, scope, session, now = Date.now() }: {

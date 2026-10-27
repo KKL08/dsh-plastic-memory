@@ -433,6 +433,13 @@ describe('状态卡', () => {
   const conflict = { kind: 'conflict-horizontal' as const, level: 'your-call' as const, decisionId: 'd', firstSeenAt: NOW, summary: 's', left: null, right: null }
   const unreadable = { kind: 'unreadable-file' as const, level: 'must-fix' as const, layer: { kind: 'global' as const }, filePath: '/f', relativePath: 'f', error: 'e' }
 
+  it('英文记忆数按单复数：1 memory、3 memories；中文不变', () => {
+    const enT = createTranslator(en)
+    expect(summarize(views(pending(), health(NOW), library(1)), false, NOW, enT).detail).toBe('1 memory')
+    expect(summarize(views(), false, NOW, enT).detail).toBe('3 memories')
+    expect(summarize(views(pending(), health(NOW), library(1)), false, NOW, t).detail).toBe('共 1 条记忆')
+  })
+
   it('结论按优先级：体检关闭 → 密钥 → 等你决定 → 没有记忆 → 没体检 → 良好', () => {
     expect(summarize(views(), false, NOW, t)).toEqual({ conclusion: '体检已关闭', detail: '共 3 条记忆' })
     expect(summarize(views(pending([{ kind: 'secret', level: 'must-fix', memory: memory() }, conflict])), true, NOW, t).marker).toBe('secret')
