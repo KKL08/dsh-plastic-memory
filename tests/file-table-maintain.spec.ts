@@ -375,7 +375,7 @@ describe('快照冻结是维护点', () => {
     h.cache.setWorkspacePath(s, WS)
     const text = await h.cache.assemble(s)
     expect(text).toContain('有效 正文')
-    expect(h.cache.render(s)).toBe(text)
+    expect(h.cache.injectedCore(s)).toBeDefined()
     expect(h.log.error).toHaveBeenCalledTimes(1)
   })
 })

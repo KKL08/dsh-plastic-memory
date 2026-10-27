@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { assembleSnapshot, estimateTokens, COLD_START_TEXT, coldStartUnparseableText, escapePromptBraces, PROMPT_LBRACE_VARIABLE, MEMORY_AS_DATA_NOTE, COMPACTION_ENGINE_NOTE } from '../src/snapshot.ts'
+import { assembleSnapshot, estimateTokens, COLD_START_TEXT, coldStartUnparseableText, MEMORY_AS_DATA_NOTE, COMPACTION_ENGINE_NOTE } from '../src/snapshot.ts'
+import { SNAPSHOT_SUPERSEDE_NOTE } from '../src/snapshot-message.ts'
 import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
@@ -9,7 +10,6 @@ import { record as baseRecord } from './helpers/record.ts'
 import { DAY } from './helpers/clock.ts'
 import { STALENESS_NOTE } from '../src/record-freshness.ts'
 import { formatIndexLine } from '../src/index-line.ts'
-import { renderViaHost } from './helpers/render-via-host.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
 import { FAKE_SECRET, generatePrivateKeyPem } from './helpers/secrets.ts'
 
@@ -375,6 +375,9 @@ describe('快照标题下的压缩引擎附注', () => {
 
   it('关键词锁定：点名 compaction engine 与 <compacted-summary>，以「记忆是背景资料」为界，保留记忆操作；不出现产品名', () => {
     expect(COMPACTION_ENGINE_NOTE).toContain('compaction engine')
+    // 快照是本插件自己的消息，不再是运行时上下文
+    expect(COMPACTION_ENGINE_NOTE).toContain('长期记忆快照')
+    expect(COMPACTION_ENGINE_NOTE).not.toContain('运行时上下文')
     expect(COMPACTION_ENGINE_NOTE).toContain('<compacted-summary>')
     expect(COMPACTION_ENGINE_NOTE).toContain('「记忆是背景资料」')
     expect(COMPACTION_ENGINE_NOTE).toContain('新增、删除、提升、确认')
@@ -395,19 +398,20 @@ describe('快照标题下的压缩引擎附注', () => {
     expect(MEMORY_AS_DATA_NOTE).toMatch(/这里没有的记忆[^。；]*已删除/)
   })
 
-  it('用量口径：附注只进 tokens.fixed，usedTokens 不计；core 区预算恰好够标题 + 一条 core 时仍装得下', () => {
+  it('用量口径：附注与取代句只进 tokens.fixed，usedTokens 不计；core 区预算恰好够标题 + 一条 core 时仍装得下', () => {
     const line = '- [mem_core]【记忆·行为偏好】不要 mock 数据库'
     const used = estimateTokens('# 长期记忆') + estimateTokens(line)
     // core 区占预算一半：预算取两倍，core 区上限恰好等于标题 + 这一行
     const r = assembleSnapshot({ ...base, records: [core], budget: 2 * used, overflow: 'strict' })
     expect(r.injectedIds).toEqual(['mem_core'])
     expect(r.usedTokens).toBe(used)
-    // 块：标题、附注、core 行、全文引导、固定尾注；fixed 扣掉附注后等于没有附注时的口径（标题 + 两段尾注）
+    // 块：标题、附注、core 行、全文引导、固定尾注；fixed 扣掉附注与取代句后等于两者都没有时的口径（标题 + 两段尾注）
     const blocks = r.text.split('\n\n')
     expect(blocks[2]).toBe(line)
-    // 按组装时各段的原样计：附注带前后换行，两段尾注带前导换行（换行也计价）
+    // 按组装时各段的原样计：附注带前后换行，两段尾注带前导换行；取代句在消息里带两个换行接快照正文（换行也计价）
     const noteTokens = estimateTokens(`\n> ${COMPACTION_ENGINE_NOTE}\n`)
-    expect(r.tokens.fixed - noteTokens).toBe(estimateTokens('# 长期记忆') + estimateTokens(`\n${blocks[3]}`) + estimateTokens(`\n${blocks[4]}`))
+    const supersedeTokens = estimateTokens(`${SNAPSHOT_SUPERSEDE_NOTE}\n\n`)
+    expect(r.tokens.fixed - noteTokens - supersedeTokens).toBe(estimateTokens('# 长期记忆') + estimateTokens(`\n${blocks[3]}`) + estimateTokens(`\n${blocks[4]}`))
     expect(r.tokens.workspace + r.tokens.global).toBe(estimateTokens(line))
   })
 
@@ -417,56 +421,15 @@ describe('快照标题下的压缩引擎附注', () => {
     expect(assembleSnapshot({ ...base, records: [] }).text).toBe(COLD_START_TEXT)
     expect(assembleSnapshot({ ...base, records: [], quarantinedCount: 2 }).text).toBe(coldStartUnparseableText(2))
   })
-})
 
-describe('escapePromptBraces', () => {
-  const LB = `{{${PROMPT_LBRACE_VARIABLE}}}`
-
-  it('无花括号原样返回', () => {
-    expect(escapePromptBraces('不要 mock 数据库')).toBe('不要 mock 数据库')
-  })
-
-  it('{{ msg }} 的 {{ 换成变量引用', () => {
-    expect(escapePromptBraces('{{ msg }}')).toBe(`${LB} msg }}`)
-  })
-
-  it('CI 的 ${{ secrets.NPM_TOKEN }} 同理', () => {
-    expect(escapePromptBraces('token: ${{ secrets.NPM_TOKEN }}')).toBe(`token: $${LB} secrets.NPM_TOKEN }}`)
-  })
-
-  it('{{{ 按从左到右不重叠替换', () => {
-    expect(escapePromptBraces('{{{')).toBe(`${LB}{`)
-  })
-
-  it('只有 }} 不动', () => {
-    expect(escapePromptBraces('a }} b }}')).toBe('a }} b }}')
-  })
-
-  it('多处 {{ 全部替换', () => {
-    expect(escapePromptBraces('{{a}} 和 {{ b }} 还有 {{')).toBe(`${LB}a}} 和 ${LB} b }} 还有 ${LB}`)
-  })
-})
-
-// 宿主真实渲染往返：转义后的文本经宿主插值（变量值 '{{'）还原，必须逐字等于原文。
-describe('escapePromptBraces × 宿主 renderContextSections 往返', () => {
-  const inputs = [
-    '不要 mock 数据库',
-    '{{ msg }}',
-    'token: ${{ secrets.NPM_TOKEN }}',
-    '{{{',
-    'a }} b }}',
-    '{{a}} 和 {{ b }} 还有 {{',
-    `字面变量 {{${PROMPT_LBRACE_VARIABLE}}} 不能被还原两次`,
-    `# 长期记忆\n\n> ${COMPACTION_ENGINE_NOTE}\n\n- [mem_x]【记忆·行为偏好】正文`, // 附注的 >、**、尖括号不参与插值
-  ]
-  for (const input of inputs) {
-    it(`往返无损：${JSON.stringify(input)}`, () => {
-      expect(renderViaHost(escapePromptBraces(input))).toBe(input)
-    })
-  }
-
-  it('对照组：不转义时宿主对 {{ msg }} 抛错（宿主放宽后此例会红，届时可评估删掉转义）', () => {
-    expect(() => renderViaHost('{{ msg }}')).toThrow(/malformed prompt variable reference/)
+  it('冷启动也是一条快照消息：取代句照样计进 tokens.fixed，按字数估算（中文 0.6、换行 0.3）', () => {
+    const supersedeTokens = estimateTokens(`${SNAPSHOT_SUPERSEDE_NOTE}\n\n`)
+    // 15 个中文字符（含句号）9.0、两个换行 0.6，向上取整
+    expect(supersedeTokens).toBe(10)
+    expect(assembleSnapshot({ ...base, records: [] }).tokens).toEqual({ workspace: 0, global: 0, fixed: estimateTokens(COLD_START_TEXT) + supersedeTokens })
+    const broken = assembleSnapshot({ ...base, records: [], quarantinedCount: 2 })
+    expect(broken.tokens.fixed).toBe(estimateTokens(coldStartUnparseableText(2)) + supersedeTokens)
+    expect(broken.usedTokens).toBe(0)
   })
 })
 

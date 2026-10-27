@@ -5,10 +5,9 @@ import { join } from 'node:path'
 import { SnapshotCache, resolveWorkspacePath, type FrozenSnapshotInfo } from '../src/runtime.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
-import { COLD_START_TEXT, PROMPT_LBRACE_VARIABLE, assembleSnapshot } from '../src/snapshot.ts'
+import { COLD_START_TEXT, assembleSnapshot } from '../src/snapshot.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
-import { renderViaHost } from './helpers/render-via-host.ts'
 import { workspaceDirName } from '../src/storage/paths.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
@@ -20,24 +19,27 @@ function makeCache(store = new MemoryStore(new InMemoryTable())) {
   return { store, cache: new SnapshotCache({ store, registry, budget: 4000 }) }
 }
 
-describe('SnapshotCache', () => {
-  it('中间件组装前 provider 返回空串（不是冷启动文案），不 markRecalled', () => {
-    const { store, cache } = makeCache()
-    const spy = vi.spyOn(store, 'markRecalled')
-    const session = {}
-    expect(cache.render(session)).toBe('')
-    expect(spy).not.toHaveBeenCalled()
-  })
+/** 冻结快照里带入全文的 core id（排序后）；没有冻结快照回 undefined。 */
+const frozenCore = (cache: SnapshotCache, session: object) => {
+  const core = cache.injectedCore(session)
+  return core && [...core.keys()].sort()
+}
 
-  it('中间件首次组装后 provider 返回缓存文本（与中间件写入的文本逐字相同）', async () => {
+describe('SnapshotCache', () => {
+  it('首次组装才冻结，不先计召回；之后再组装命中缓存，不读盘，回同一份文本', async () => {
     const { store, cache } = makeCache()
+    const recalled = vi.spyOn(store, 'markRecalled')
     await store.put(record({ id: 'mem_core', type: 'preference', content: '不要 mock 数据库' }))
     const session = {}
     cache.setWorkspacePath(session, undefined)
-    expect(cache.render(session)).toBe('')
+    expect(frozenCore(cache, session)).toBeUndefined()
+    expect(recalled).not.toHaveBeenCalled()
     const injected = await cache.assemble(session)
     expect(injected).toContain('不要 mock 数据库')
-    expect(cache.render(session)).toBe(injected)
+    expect(frozenCore(cache, session)).toEqual(['mem_core'])
+    const reads = vi.spyOn(store, 'readLayer')
+    expect(await cache.assemble(session)).toBe(injected)
+    expect(reads).not.toHaveBeenCalled()
   })
 
   it('workspacePath 未解析时，assemble 返回非空 global-only 临时文本（不含 workspace 记忆），不冻结不 markRecalled', async () => {
@@ -50,14 +52,14 @@ describe('SnapshotCache', () => {
     const first = await cache.assemble(session) // 未注入 resolver、未显式喂：按未解析组装临时文本
     expect(first).toContain('不要 mock 数据库')
     expect(first).not.toContain('仅本仓库生效的偏好')
-    expect(cache.render(session)).toBe('') // 临时文本只进本次 entry，不进缓存
+    expect(frozenCore(cache, session)).toBeUndefined() // 临时文本只给本次用，不进缓存
     expect(spy).not.toHaveBeenCalled()
 
-    // 未冻结：workspace 解析完成后下一次中间件拿到完整版
+    // 未冻结：workspace 解析完成后下一次组装拿到完整版
     cache.setWorkspacePath(session, '/repo')
     const second = await cache.assemble(session)
     expect(second).toContain('仅本仓库生效的偏好')
-    expect(cache.render(session)).toBe(second)
+    expect(frozenCore(cache, session)).toEqual(['mem_global', 'mem_ws'])
     expect(spy).toHaveBeenCalledTimes(1)
   })
 
@@ -76,25 +78,23 @@ describe('SnapshotCache', () => {
     // 冻结：后续写入新记忆，同一 session 仍返回旧快照，不重新组装，也不再计召回
     await store.put(record({ id: 'mem_new', type: 'preference', content: '另一条偏好' }))
     expect(await cache.assemble(session)).toBe(text)
-    expect(cache.render(session)).toBe(text)
     expect(spy).toHaveBeenCalledTimes(1)
   })
 
-  it('两次组装之间的刷新拿到上一份：markStale 后 provider 仍返回旧快照，下一次组装返回新快照', async () => {
+  it('markStale 只标过期不清空：下一次组装前冻结内容仍是上一份，组装后换成新快照', async () => {
     const { store, cache } = makeCache()
     await store.put(record({ id: 'mem_old', type: 'preference', content: '旧偏好' }))
     const session = {}
     cache.setWorkspacePath(session, undefined)
-    const before = await cache.assemble(session)
+    await cache.assemble(session)
 
     await store.put(record({ id: 'mem_new', type: 'preference', content: '压缩后新增的偏好' }))
     cache.markStale(session)
-    // 两次组装之间只调同步 provider 的刷新：拿到上一份快照，不是空串
-    expect(cache.render(session)).toBe(before)
+    expect(frozenCore(cache, session)).toEqual(['mem_old'])
 
     const after = await cache.assemble(session)
     expect(after).toContain('压缩后新增的偏好')
-    expect(cache.render(session)).toBe(after)
+    expect(frozenCore(cache, session)).toEqual(['mem_new', 'mem_old'])
   })
 
   it('同一会话多次压缩，召回只计一次', async () => {
@@ -113,20 +113,19 @@ describe('SnapshotCache', () => {
     expect(spy).toHaveBeenCalledTimes(1)
   })
 
-  it('空库：冷启动文案由组装产出并进缓存（provider 不兜底）', async () => {
+  it('空库：冷启动文案由组装产出并冻结', async () => {
     const { cache } = makeCache()
     const session = {}
-    expect(cache.render(session)).toBe('')
     cache.setWorkspacePath(session, undefined)
     expect(await cache.assemble(session)).toBe(COLD_START_TEXT)
-    expect(cache.render(session)).toBe(COLD_START_TEXT)
+    expect(frozenCore(cache, session)).toEqual([])
   })
 
-  it('空库 + 未解析：global-only 临时文本是冷启动文案，provider 仍为空串', async () => {
+  it('空库 + 未解析：global-only 临时文本是冷启动文案，不冻结', async () => {
     const { cache } = makeCache()
     const session = {}
     expect(await cache.assemble(session)).toBe(COLD_START_TEXT)
-    expect(cache.render(session)).toBe('')
+    expect(frozenCore(cache, session)).toBeUndefined()
   })
 
   it('markStale 后按最新状态重新组装', async () => {
@@ -136,13 +135,12 @@ describe('SnapshotCache', () => {
     expect(await cache.assemble(session)).toBe(COLD_START_TEXT) // 冻结冷启动文案
     await store.put(record({ id: 'mem_new', type: 'preference', content: '不要 mock 数据库' }))
     cache.markStale(session)
-    expect(cache.render(session)).toBe(COLD_START_TEXT) // 过期不清空
     const text = await cache.assemble(session)
     expect(text).not.toBe(COLD_START_TEXT)
     expect(text).toContain('不要 mock 数据库')
   })
 
-  it('构建竞态：预读挂起期间被标过期，失效前组装的文本不写进缓存，下一次中间件重建并冻结', async () => {
+  it('构建竞态：预读挂起期间被标过期，失效前的文本作废，按新代次重建、冻结后返回', async () => {
     const { store, cache } = makeCache()
     const spy = vi.spyOn(store, 'markRecalled')
     await store.put(record({ id: 'mem_before', type: 'preference', content: '失效前的偏好' }))
@@ -167,27 +165,45 @@ describe('SnapshotCache', () => {
     await store.put(record({ id: 'mem_after', type: 'preference', content: '压缩后的偏好' }))
     cache.markStale(session) // 构建期间碰上 compaction
     release()
-    const stale = await pending
 
-    // 本次 entry 可以用这份文本，但它不得进缓存，也不计召回
-    expect(stale).toContain('失效前的偏好')
-    expect(stale).not.toContain('压缩后的偏好')
-    expect(cache.render(session)).toBe('')
-    expect(spy).not.toHaveBeenCalled()
-
-    // 下一次中间件按最新状态重建、冻结、首次计召回
-    const fresh = await cache.assemble(session)
+    // 返回的就是冻结的那份：按最新状态重建，首次计召回
+    const fresh = await pending
     expect(fresh).toContain('压缩后的偏好')
-    expect(cache.render(session)).toBe(fresh)
+    expect(frozenCore(cache, session)).toEqual(['mem_after', 'mem_before'])
     expect(spy).toHaveBeenCalledTimes(1)
+    expect(await cache.assemble(session)).toBe(fresh)
   })
 
-  it('构建竞态：已冻结的会话重建期间再次被标过期，provider 继续回上一份快照而非失效前的重建结果', async () => {
+  it('构建连续被标过期到重试上限：这次不给文本、不冻结、不计召回；下一次组装照常冻结', async () => {
+    const { store, cache } = makeCache()
+    const spy = vi.spyOn(store, 'markRecalled')
+    await store.put(record({ id: 'mem_a', type: 'preference', content: '偏好' }))
+    const session = {}
+    cache.setWorkspacePath(session, undefined)
+    const readLayer = store.readLayer.bind(store)
+    let reads = 0
+    const churn = vi.spyOn(store, 'readLayer').mockImplementation(async (...args) => {
+      reads++
+      cache.markAllStale() // 每次预读都碰上配置热更新
+      return readLayer(...args)
+    })
+
+    expect(await cache.assemble(session)).toBeUndefined()
+    expect(reads).toBe(3)
+    expect(frozenCore(cache, session)).toBeUndefined()
+    expect(spy).not.toHaveBeenCalled()
+
+    churn.mockRestore()
+    expect(await cache.assemble(session)).toContain('偏好')
+    expect(frozenCore(cache, session)).toEqual(['mem_a'])
+  })
+
+  it('构建竞态：已冻结的会话重建期间再次被标过期，失效前的重建结果不冻结，返回的是按最新状态重建、冻结的那份', async () => {
     const { store, cache } = makeCache()
     await store.put(record({ id: 'mem_a', type: 'preference', content: '第一版偏好' }))
     const session = {}
     cache.setWorkspacePath(session, undefined)
-    const first = await cache.assemble(session)
+    await cache.assemble(session)
 
     await store.put(record({ id: 'mem_b', type: 'preference', content: '第二版偏好' }))
     cache.markStale(session)
@@ -209,13 +225,10 @@ describe('SnapshotCache', () => {
     await store.put(record({ id: 'mem_c', type: 'preference', content: '第三版偏好' }))
     cache.markStale(session)
     release()
-    const discarded = await pending
-    expect(discarded).toContain('第二版偏好')
-    expect(cache.render(session)).toBe(first) // 被丢弃的重建结果没覆盖缓存
-
-    const latest = await cache.assemble(session)
+    const latest = await pending
     expect(latest).toContain('第三版偏好')
-    expect(cache.render(session)).toBe(latest)
+    expect(frozenCore(cache, session)).toEqual(['mem_a', 'mem_b', 'mem_c'])
+    expect(await cache.assemble(session)).toBe(latest)
   })
 
   it('构造 memoryRoot 时，临时文本与冻结快照都含磁盘路径行（⑧×D1）', async () => {
@@ -237,18 +250,18 @@ describe('SnapshotCache', () => {
     const cache = new SnapshotCache({ store, registry, budget: 4000, memoryRoot: '/home/.dsh/memories' })
     const session = {}
     cache.setWorkspacePath(session, '/repo')
-    const lines = (await cache.assemble(session)).split('\n')
+    const lines = (await cache.assemble(session))!.split('\n')
     expect(lines).toContain('- [mem_g] 网关限流（阈值 80） · global/网关限流.md')
     expect(lines).toContain(`- [mem_w] 发布节奏（周四发布） · ${workspaceDirName('/repo')}/发布节奏.md`)
   })
 
-  it('HMR 已知窗口：新建缓存实例对存量 session 首次 provider 为空串并触发解析；首次中间件补上，解析落定后冻结完整版', async () => {
+  it('HMR 已知窗口：新建缓存实例对存量 session 首次组装触发解析；没落定先给临时文本，落定后冻结完整版', async () => {
     const store = new MemoryStore(new InMemoryTable())
     const spy = vi.spyOn(store, 'markRecalled')
     await store.put(record({ id: 'mem_global', type: 'preference', content: '不要 mock 数据库' }))
     await store.put(record({ id: 'mem_ws', type: 'preference', scope: 'workspace', workspacePath: '/repo', content: '仅本仓库生效的偏好' }))
 
-    // 模拟热重载后的新实例：没经过任何 session/created，仅靠 provider 侧自愈解析 workspace
+    // 模拟热重载后的新实例：没经过任何 session/created，靠组装入口自愈解析 workspace
     let calls = 0
     let release!: () => void
     const gate = new Promise<void>(r => { release = r })
@@ -258,9 +271,7 @@ describe('SnapshotCache', () => {
     })
     const session = { header: { cwd: '/repo' } }
 
-    // 已知窗口：缓存为空，首次同步 provider 回空串（同时触发自愈解析）
-    expect(cache.render(session)).toBe('')
-    // 首次中间件：解析未落定（超时放行），global-only 临时文本补上，不含 workspace 记忆、不计召回
+    // 首次组装触发解析；解析未落定（超时放行），global-only 临时文本补上，不含 workspace 记忆、不计召回
     const first = await cache.assemble(session, 0)
     expect(first).toContain('不要 mock 数据库')
     expect(first).not.toContain('仅本仓库生效的偏好')
@@ -277,7 +288,6 @@ describe('SnapshotCache', () => {
     expect(spy).toHaveBeenCalledTimes(1)
     // 冻结：后续组装返回同一快照，不再计召回
     expect(await cache.assemble(session)).toBe(second)
-    expect(cache.render(session)).toBe(second)
     expect(spy).toHaveBeenCalledTimes(1)
   })
 
@@ -296,14 +306,14 @@ describe('SnapshotCache', () => {
     expect(await cache.assemble(session)).toContain('仅本仓库生效的偏好')
   })
 
-  it('awaitResolved 只等解析：落定后不组装，provider 仍为空串', async () => {
+  it('awaitResolved 只等解析：落定后不组装、不冻结', async () => {
     const { store } = makeCache()
     const spy = vi.spyOn(store, 'readLayer')
     const cache = new SnapshotCache({ store, registry, budget: 4000, resolveWorkspace: async () => '/repo' })
     const session = { header: { cwd: '/repo' } }
     await cache.awaitResolved(session)
     expect(spy).not.toHaveBeenCalled()
-    expect(cache.render(session)).toBe('')
+    expect(frozenCore(cache, session)).toBeUndefined()
   })
 
   it('assemble：解析悬挂时超时放行，走 global-only 临时文本，不冻结、不计召回', async () => {
@@ -319,28 +329,30 @@ describe('SnapshotCache', () => {
     const text = await cache.assemble(session, 30)
     expect(text).toContain('全局条目')
     expect(text).not.toContain('仅本仓库生效的偏好')
-    expect(cache.render(session)).toBe('')
+    expect(frozenCore(cache, session)).toBeUndefined()
     expect(spy).not.toHaveBeenCalled()
   })
 
-  it('组装失败只记日志：有旧快照回旧快照，没有回空串，不抛', async () => {
+  it('组装失败只记日志、回 undefined，不抛；已冻结的旧快照留着不动', async () => {
     const { store } = makeCache()
+    await store.put(record({ id: 'mem_core', type: 'preference', content: '不要 mock 数据库' }))
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
     const cache = new SnapshotCache({ store, registry, budget: 4000, log })
     const session = {}
     cache.setWorkspacePath(session, undefined)
     vi.spyOn(store, 'readLayer').mockRejectedValueOnce(new Error('boom'))
-    expect(await cache.assemble(session)).toBe('')
+    expect(await cache.assemble(session)).toBeUndefined()
     expect(log.error).toHaveBeenCalledTimes(1)
 
-    const frozen = await cache.assemble(session)
+    await cache.assemble(session)
     cache.markStale(session)
     vi.spyOn(store, 'readLayer').mockRejectedValueOnce(new Error('boom'))
-    expect(await cache.assemble(session)).toBe(frozen)
+    expect(await cache.assemble(session)).toBeUndefined()
     expect(log.error).toHaveBeenCalledTimes(2)
+    expect(frozenCore(cache, session)).toEqual(['mem_core'])
   })
 
-  it('在途解析去重：同一 session 连续两次 render 只触发一次 resolveWorkspace', () => {
+  it('在途解析去重：同一 session 连续两次预热只触发一次 resolveWorkspace', () => {
     const { store } = makeCache()
     let calls = 0
     const cache = new SnapshotCache({
@@ -348,8 +360,8 @@ describe('SnapshotCache', () => {
       resolveWorkspace: async () => { calls++; return '/repo' },
     })
     const session = { header: { cwd: '/repo' } }
-    cache.render(session)
-    cache.render(session)
+    cache.prewarm(session)
+    cache.prewarm(session)
     expect(calls).toBe(1)
   })
 
@@ -377,8 +389,8 @@ describe('SnapshotCache', () => {
     const b = {}
     cache.setWorkspacePath(a, undefined)
     expect(await cache.assemble(a)).toBe(COLD_START_TEXT)
-    // b 未经中间件组装，provider 不受 a 的缓存影响
-    expect(cache.render(b)).toBe('')
+    // b 没组装过，不受 a 的缓存影响
+    expect(frozenCore(cache, b)).toBeUndefined()
   })
 })
 
@@ -433,7 +445,7 @@ describe('SnapshotCache 快照来历', () => {
     expect(last().compactedAt).toBeUndefined()
   })
 
-  it('构建期间碰上成功压缩：这次的结果不冻结，压缩记到下一次冻结', async () => {
+  it('构建期间碰上成功压缩：作废这次结果，重建冻结时认领压缩，来历是压缩后', async () => {
     const { store, cache, session, frozen, last } = makeTracked()
     await cache.assemble(session)
     let release!: () => void
@@ -448,12 +460,11 @@ describe('SnapshotCache 快照来历', () => {
     cache.markCompacted(session, 7_000)
     release()
     await building
-    expect(frozen).toHaveLength(1)
-    await cache.assemble(session)
+    expect(frozen).toHaveLength(2)
     expect(last()).toMatchObject({ origin: 'compacted', compactedAt: 7_000 })
   })
 
-  it('构建被之后的 markStale / markAllStale 作废：没认领的压缩留到下一次真正冻结', async () => {
+  it('构建被之后的 markStale / markAllStale 作废：重建冻结时认领之前没认领的压缩', async () => {
     for (const invalidate of [(c: SnapshotCache, s: object) => { c.markStale(s) }, (c: SnapshotCache) => { c.markAllStale() }]) {
       const { store, cache, session, frozen, last } = makeTracked()
       await cache.assemble(session)
@@ -469,8 +480,7 @@ describe('SnapshotCache 快照来历', () => {
       invalidate(cache, session) // 压缩之后的重建还没落定，又被标过期
       release()
       await building
-      expect(frozen).toHaveLength(1)
-      await cache.assemble(session)
+      expect(frozen).toHaveLength(2)
       expect(last()).toMatchObject({ origin: 'compacted', compactedAt: 8_000 })
     }
   })
@@ -508,14 +518,12 @@ describe('SnapshotCache 快照来历', () => {
   })
 })
 
-// 快照的两个出口（中间件写入的 assemble 返回值、同步 provider 的 render）在临时文本、完整组装、缓存命中、
-// 过期重建四条路径上都要转义且只转义一次。判据用宿主真实渲染往返：转义文本经宿主插值还原后逐字等于 assembleSnapshot 的原文。
-describe('SnapshotCache 出口转义 {{', () => {
-  it('临时文本 → 完整 → 命中 → 过期重建，四步都经宿主还原为原文，召回只计一次', async () => {
+// 快照走自有消息，不经宿主模板插值：临时文本、完整组装、缓存命中、过期重建四条路径都回 assembleSnapshot 的原文，`{{` 原样保留。
+describe('SnapshotCache 出口是原文', () => {
+  it('临时文本 → 完整 → 命中 → 过期重建，四步都逐字等于原文，召回只计一次', async () => {
     const { store, cache } = makeCache()
     const spy = vi.spyOn(store, 'markRecalled')
     await store.put(record({ id: 'mem_vue', type: 'preference', content: 'Vue 模板写 {{ msg }}' }))
-    await store.put(record({ id: 'mem_lit', type: 'preference', content: `字面 {{${PROMPT_LBRACE_VARIABLE}}} 探测二次转义` }))
     await store.put(record({ id: 'mem_ci', type: 'preference', scope: 'workspace', workspacePath: '/repo', content: 'CI 用 ${{ secrets.NPM_TOKEN }}' }))
     const raw = async (workspacePath: string | undefined) => assembleSnapshot({
       records: await store.query({ scope: { kind: 'visible', workspacePath } }),
@@ -524,27 +532,22 @@ describe('SnapshotCache 出口转义 {{', () => {
     const session = {}
 
     // ① workspace 未解析：global-only 临时文本
-    const fallback = await cache.assemble(session)
     const fallbackRaw = await raw(undefined)
     expect(fallbackRaw).toContain('{{ msg }}')
-    expect(fallback).not.toBe(fallbackRaw)
-    expect(renderViaHost(fallback)).toBe(fallbackRaw)
+    expect(await cache.assemble(session)).toBe(fallbackRaw)
 
     // ② 解析落定：完整组装并写缓存
     cache.setWorkspacePath(session, '/repo')
-    const full = await cache.assemble(session)
     const fullRaw = await raw('/repo')
     expect(fullRaw).toContain('${{ secrets.NPM_TOKEN }}')
-    expect(renderViaHost(full)).toBe(fullRaw)
+    expect(await cache.assemble(session)).toBe(fullRaw)
 
-    // ③ 缓存命中：中间件与 provider 都与 ② 逐字相同（仍是转义后的文本，不是缓存里的原文）
-    expect(await cache.assemble(session)).toBe(full)
-    expect(cache.render(session)).toBe(full)
+    // ③ 缓存命中
+    expect(await cache.assemble(session)).toBe(fullRaw)
 
-    // ④ 过期重建：provider 回旧快照，重建结果仍经宿主还原为原文
+    // ④ 过期重建
     cache.markStale(session)
-    expect(renderViaHost(cache.render(session))).toBe(fullRaw)
-    expect(renderViaHost(await cache.assemble(session))).toBe(fullRaw)
+    expect(await cache.assemble(session)).toBe(fullRaw)
 
     expect(spy).toHaveBeenCalledTimes(1)
   })

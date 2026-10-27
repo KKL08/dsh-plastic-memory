@@ -3,11 +3,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { AssembleContext, PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
-import type { StreamChunk } from '@deepseek-ai/dsh-llm'
+import { Session, SESSION_FORMAT_VERSION, type SessionId } from '@deepseek-ai/dsh-session'
+import { createSystemMessage, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { apply, Config } from '../src/index.ts'
 import type { ToolGateCode } from '../src/contract-codes.ts'
 import { delegationDepthOf } from '../src/tools/subagent-gate.ts'
+import { lastVisibleSnapshot } from '../src/snapshot-message.ts'
 import { fakeExec } from './helpers/exec.ts'
 
 // 子 agent 只读门（票 15）：宿主子 agent 会话的 header 带 delegationDepth（父深度 + 1），主会话缺省。
@@ -44,11 +45,10 @@ async function treeSnapshot(dir: string, prefix = ''): Promise<Record<string, nu
   return out
 }
 
-/** 起插件：最小宿主 ctx（工具注册、提示词、事件、llm 与 sessionQuery 服务），留住注册后的工具定义。 */
+/** 起插件：最小宿主 ctx（工具注册、事件、llm 与 sessionQuery 服务），留住注册后的工具定义。 */
 async function boot() {
   const defs = new Map<string, ToolDef>()
   const listeners = new Map<string, (...args: unknown[]) => unknown>()
-  const contextTexts = new Map<string, (assembleCtx?: AssembleContext) => string>()
   const llm = {
     async *stream(): AsyncIterable<StreamChunk> {
       yield { type: 'text-delta', index: 0, text: '{"findings":[]}' }
@@ -58,10 +58,6 @@ async function boot() {
   const sessionQuery = { readEvent: async () => ({ events: [], startSeq: 0, endSeq: 0 }) }
   const ctx = {
     tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
-    systemPrompt: {
-      context: (c: { name: string; text: (assembleCtx?: AssembleContext) => string }) => { contextTexts.set(c.name, c.text); return () => {} },
-      variable: () => () => {},
-    },
     on: (event: string, fn: (...args: unknown[]) => unknown) => { listeners.set(event, fn); return () => {} },
     get: (name: string) => (name === 'llm' ? llm : name === 'sessionQuery' ? sessionQuery : undefined),
     inject: () => () => {},
@@ -79,11 +75,16 @@ async function boot() {
   const execAt = (delegationDepth?: number) =>
     fakeExec({ agent: { session: session(delegationDepth), options: { provider: 'p', model: 'm' } } as unknown as ToolRunContext['agent'] })
   const call = (tool: string, args: unknown, delegationDepth?: number) => defs.get(tool)!.execute(args, execAt(delegationDepth))
+  /** 宿主真会话走一次第 2 步的 pre-step（空决定），取会话里最后一份可见快照。 */
   const assemble = async (delegationDepth?: number) => {
-    const assembleCtx = { scope: { session: session(delegationDepth) } } as unknown as AssembleContext
-    const assembly: PromptAssembly = { sections: [], contexts: [{ name: 'plastic-memory', text: '' }], tools: [], variables: {} }
-    await listeners.get('system-prompt/assemble')!(assembly, assembleCtx, async () => assembly)
-    return assembly.contexts[0]!.text
+    const id = (delegationDepth === undefined ? 'sess-main' : `sess-d${delegationDepth}`) as SessionId
+    const hostSession = Session.create(id, [], {
+      version: SESSION_FORMAT_VERSION, id, createdAt: 0, isSeeded: false, cwd, ...(delegationDepth === undefined ? {} : { delegationDepth }),
+    })
+    hostSession.append('system/message', { turn: 1, step: 1, message: createSystemMessage('系统提示词') }, { surfaceOp: 'append' })
+    const payload = { agent: { session: hostSession }, messages: [], turn: 1, step: 2, signal: new AbortController().signal }
+    await listeners.get('agent/pre-step')!(payload, async () => ({ kind: 'enter', messages: [] }))
+    return lastVisibleSnapshot(hostSession.deriveMessages()) ?? ''
   }
   return { defs, memoryRoot, call, assemble }
 }

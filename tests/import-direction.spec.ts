@@ -22,7 +22,7 @@ const LEAF_MODULES = new Set([
 ])
 // search/ranking、search/coverage 与 store 同层：只 import 叶子，被执行器用；分词器与 jieba 切分器留在叶子（只碰 Node 内置，词典路径与日志器由调用方注入）
 const MEMORY_MODULES = new Set([
-  'pipeline', 'store', 'snapshot', 'runtime', 'type-registry', 'evidence-guidance', 'search/ranking', 'search/coverage',
+  'pipeline', 'store', 'snapshot', 'snapshot-message', 'runtime', 'type-registry', 'evidence-guidance', 'search/ranking', 'search/coverage',
 ])
 // 接线层：index.ts 与交给 ctx.storageDomain.open 的域定义（只被 index.ts 用）
 const ENTRY_MODULES = new Set(['index', 'domain-spec'])

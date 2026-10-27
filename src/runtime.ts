@@ -6,7 +6,7 @@ import { resolveLiveFirst } from './storage/table.ts'
 import { memoryRelativePath } from './storage/paths.ts'
 import type { TypeRegistry } from './type-registry.ts'
 import type { EvidenceLookupLevel } from './evidence-guidance.ts'
-import { assembleSnapshot, escapePromptBraces, overflowLevel, type OverflowMode, type SnapshotUsage } from './snapshot.ts'
+import { assembleSnapshot, overflowLevel, type OverflowMode, type SnapshotUsage } from './snapshot.ts'
 import type { OverflowLevel } from './contract-codes.ts'
 import type { SessionView, SnapshotOrigin } from './gui/contract.ts'
 
@@ -29,18 +29,16 @@ export async function prereadSnapshot(store: MemoryStore, workspacePath: string 
 
 /**
  * session 内冻结的 snapshot 缓存，按 session 隔离（WeakMap）。
- * 构建只发生在 assemble（system-prompt/assemble 中间件调用，异步）：等 workspace 解析落定或超时 →
- * 缓存缺失或已过期则预读可见记录、组装、冻结 → 带入全文的 core 记忆计召回（每会话每条一次）→ 维护点（global + 当前 workspace）。同步的 render（context provider）
- * 只回缓存，没有缓存回空串；冷启动文案由组装在可见集合为空时产出，provider 不兜底。
- * compaction 成功结束只标过期（markCompacted）不清空，失败的不标。压缩在 pre-step 里发生时，index.ts 的 pre-step / request-error 监听
- * 在 next() 之后把重建等完，宿主准入时的同步 provider 已回新快照；两次组装之间若仍有只调 provider 的刷新，
- * 拿到的是上一份、不是空串（并发代次与 HMR 窗口都靠不清空）。
+ * 构建只发生在 assemble（index.ts 的发送点调用：pre-step、request-error 重试）：等 workspace 解析落定或超时 →
+ * 缓存缺失或已过期则预读可见记录、组装、冻结 → 带入全文的 core 记忆计召回（每会话每条一次）→ 维护点（global + 当前 workspace）。
+ * 冷启动文案由组装在可见集合为空时产出。发送点只在需要时调 assemble，冻结即等于模型可见。
+ * compaction 成功结束只标过期（markCompacted）不清空，失败的不标；过期的冻结内容留到下一次组装覆盖，期间 injectedCore 照常可读，
+ * 中途被作废的构建也不会覆盖它（见 build 的代次核对）。
  * 每次冻结记下快照来历（会话视图的 origin）：首次冻结是对话开始时，会话已有更早的轮时（重启后续上、插件重载）是重新带入；
  * 成功压缩后的下一次冻结是压缩后；其他重建沿用上一次。
- * workspacePath 走 pull + memoize：render 发现某 session 未解析时触发一次 fire-and-forget 解析
- * （同 session 去重），HMR 后存量 session 也能自愈；session/created 只做 eager 预热（prewarm）。
- * 已知窗口：HMR 后存量 session 缓存为空，首次 provider 回空串，首次中间件补上。
- * 缓存存原文；render 与 assemble 在出口统一转义 `{{`，每条路径都只转义一次。
+ * workspacePath 走 pull + memoize：assemble 发现某 session 未解析时触发一次解析并限时等待（同 session 去重），
+ * HMR 后存量 session 也能自愈；session/created 只做 eager 预热（prewarm）。
+ * 缓存存原文，出口不转义：快照走自有消息，不经宿主模板插值。
  */
 /** 超限提醒的账本（PendingDecisionsStore 满足它）：按项目同步当前档位，返回账本是否有变化。 */
 export interface OverflowLedger {
@@ -80,7 +78,7 @@ export interface SnapshotCacheDeps {
 type Origin = { origin: SnapshotOrigin; compactedAt?: number }
 
 export class SnapshotCache {
-  /** 冻结快照与冻结时的代次；代次落后于 generations 即为过期（仍可被 provider 读到）。
+  /** 冻结快照与冻结时的代次；代次落后于 generations 即为过期（下一次组装才覆盖）。
    *  core：快照里带入全文的 core 记忆，id → 带入时的正文（检索据此省略重复正文）。 */
   private cache = new WeakMap<object, { text: string; generation: number; core: ReadonlyMap<string, string>; origin: Origin }>()
   /** 成功压缩结束、还没被冻结认领的会话 → 压缩结束时刻。下一次冻结的来历记为压缩后，随即清掉。 */
@@ -125,7 +123,7 @@ export class SnapshotCache {
   }
 
   /** session/created 的 eager 预热：只触发 workspace 解析（与 awaitResolved 共用同一份 memoize），
-   *  不组装——快照仍在首次中间件组装时冻结。 */
+   *  不组装——快照仍在首个发送点组装时冻结。 */
   prewarm(session: object): void {
     this.ensureResolving(session)
   }
@@ -139,17 +137,18 @@ export class SnapshotCache {
     clearTimeout(timer)
   }
 
-  /** assemble 中间件的入口，返回本次要写进 context 的（已转义）文本。
+  /** 发送点的入口，返回本次的快照文本（原文）。
    *  解析落定：缓存存在且未过期直接用；否则读盘组装、冻结、计召回（每会话每条一次）。
    *  解析超时（或未注入 resolver 且未显式喂）：global-only 临时文本，只给本次用，不冻结、不计召回。
-   *  组装失败只记日志，回落到 render（旧快照或空串），不拖垮宿主组装。 */
-  async assemble(session: object, timeoutMs = 1500): Promise<string> {
+   *  组装失败只记日志、回 undefined（这次不发），已冻结的旧快照不动，不拖垮宿主这一步。
+   *  构建期间被标过期就按新代次重建，连续作废到上限回 undefined（这次不发），保证发出去的都冻结过。 */
+  async assemble(session: object, timeoutMs = 1500): Promise<string | undefined> {
     await this.awaitResolved(session, timeoutMs)
     try {
-      return escapePromptBraces(await this.build(session))
+      return await this.build(session)
     } catch (err) {
       ;(this.deps.log ?? console).error('[plastic-memory] 快照组装失败:', err)
-      return this.render(session)
+      return undefined
     }
   }
 
@@ -158,7 +157,7 @@ export class SnapshotCache {
     return (this.generations.get(session) ?? 0) + this.epoch
   }
 
-  private async build(session: object): Promise<string> {
+  private async build(session: object, retries = 2): Promise<string | undefined> {
     const generation = this.generationOf(session)
     const cached = this.cache.get(session)
     if (cached && cached.generation === generation) return cached.text
@@ -171,8 +170,9 @@ export class SnapshotCache {
     const preread = await prereadSnapshot(deps.store, workspacePath)
     const { text, coreIds, ...usage } = assembleSnapshot({ ...deps, ...preread, workspacePath, now })
     if (!isResolved) return text
-    // 构建期间被标过期：这份文本只给本次用，不进缓存、不计召回，下一次中间件按新代次重建
-    if (this.generationOf(session) !== generation) return text
+    // 构建期间被标过期（压缩、配置热更新）：这份作废，按新代次重建，冻结后再交出去，模型看到的就是冻结的那份。
+    // 连续作废到上限还不稳定，这次不给文本，下一个发送点再来；不交出没冻结的文本
+    if (this.generationOf(session) !== generation) return retries > 0 ? this.build(session, retries - 1) : undefined
     // 同代次的并发构建：先落定的那份为准，保证冻结内容一致
     const landed = this.cache.get(session)
     if (landed && landed.generation === generation) return landed.text
@@ -233,7 +233,7 @@ export class SnapshotCache {
     }
   }
 
-  /** 该会话当前冻结快照（过期的也算，provider 仍回它）里带入全文的 core 记忆；没有冻结快照回 undefined。 */
+  /** 该会话当前冻结快照（过期的也算，下一次组装前它仍是模型最后看到的那份）里带入全文的 core 记忆；没有冻结快照回 undefined。 */
   injectedCore(session: object): ReadonlyMap<string, string> | undefined {
     return this.cache.get(session)?.core
   }
@@ -248,16 +248,7 @@ export class SnapshotCache {
     await this.deps.store.markRecalled(fresh)
   }
 
-  /** 同步 provider 的出口：只回冻结缓存（过期的也回），没有缓存回空串。未解析的 session
-   *  顺手触发一次自愈解析（HMR 后存量 session 首次 provider 即开始解析），组装留给下一次中间件。 */
-  render(session: object): string {
-    const cached = this.cache.get(session)
-    if (cached !== undefined) return escapePromptBraces(cached.text)
-    if (!this.workspacePaths.has(session)) this.ensureResolving(session)
-    return ''
-  }
-
-  /** compaction 结束：标记过期，不清空缓存（provider 继续回旧快照），也不清召回记录。失败的压缩只走这里，不改来历。 */
+  /** compaction 结束：标记过期，不清空缓存，也不清召回记录。失败的压缩只走这里，不改来历。 */
   markStale(session: object): void {
     this.generations.set(session, (this.generations.get(session) ?? 0) + 1)
   }
