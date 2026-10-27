@@ -634,7 +634,7 @@ describe('runSavePipeline：模型改写的兜底', () => {
     const update = candidate({ action: 'update', id: 'mem_same', content: '新内容', scope: 'global' })
     const a = await runSavePipeline(update, deps(plain))
     const b = await runSavePipeline(update, e.deps)
-    const strip = (x: typeof a) => x.kind === 'updated' ? { ...x, record: { ...x.record, updatedAt: 0, lastConfirmedAt: 0 } } : x
+    const strip = (x: typeof a) => x.kind === 'updated' ? { ...x, record: { ...x.record, createdAt: 0, updatedAt: 0, lastConfirmedAt: 0 } } : x
     expect(strip(b)).toEqual(strip(a))
   })
 })
