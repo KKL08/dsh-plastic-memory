@@ -350,6 +350,7 @@ export function buildLibraryView(input: ViewInput): LibraryView {
 /**
  * 保留窗口内模型改写、替代的改动（对话卡、右侧栏「这次新写入的」）：改前那份取快照，快照已清或只剩脱敏副本的不列。
  * 能不能撤按记忆此刻的样子判：改写的那条仍在用、替代的那条仍是已取代，且内容还是那次写下的（指纹对得上），同撤销命令的核对。
+ * 预读每个 id 只留一份（在用副本优先）：留下的不在改前那份的层里时看不到那一层的现状，先给按钮，由撤销命令按那一层核对；哪一层都没有了算之后又改过。
  */
 function modelChangesOf(input: ViewInput, snapshots: ReadonlyMap<string, MemorySnapshot>): ModelChange[] {
   const cutoff = input.now - RETENTION_MS
@@ -361,7 +362,10 @@ function modelChangesOf(input: ViewInput, snapshots: ReadonlyMap<string, MemoryS
     if (before === undefined || before.redacted === true) return []
     const kind = kindOf(e) === 'rewrite' ? 'rewrite' : 'supersede'
     const current = input.data.byId.get(memoryId)
-    const isOwnWrite = current !== undefined && current.status === (kind === 'rewrite' ? 'active' : 'superseded') && editFingerprint(current) === e.fingerprint
+    const isSameLayer = current !== undefined && current.scope === before.scope
+      && (before.scope !== 'workspace' || current.workspacePath === before.workspacePath)
+    const isOwnWrite = current !== undefined && (!isSameLayer
+      || (current.status === (kind === 'rewrite' ? 'active' : 'superseded') && editFingerprint(current) === e.fingerprint))
     return [{
       decisionId: e.id, kind, memoryId,
       ...(e.origin.by !== undefined ? { by: e.origin.by } : {}),

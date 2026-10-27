@@ -2587,6 +2587,26 @@ describe('撤销模型改写、替代（对话卡片、右侧栏「这次新写�
     expect((await modelChanges(e))?.map(c => c.state)).toEqual(['undone'])
   })
 
+  it('别层有同 id 的在用副本：视图不拿那份判状态（仍可撤），撤销只动被替代的那一层', async () => {
+    const e = env()
+    await seedMemory(e, 'mem_old', '旧说法')
+    await save(e, { name: '新说法', content: '完全不同的新说法', supersedes: ['mem_old'] })
+    await e.store.create(record({ id: 'mem_old', name: '全局那份', content: '全局的另一份', scope: 'global' }))
+    const entry = await changeOf(e)
+    expect((await modelChanges(e))?.map(c => c.state)).toEqual(['undoable'])
+    ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+    expect((await e.store.get('mem_old', { workspacePath: SESSION_WS, isExactLayer: true }))!.status).toBe('active')
+    expect((await e.store.get('mem_old', { isExactLayer: true }))!.content).toBe('全局的另一份')
+  })
+
+  it('改写的那条之后被彻底删除（哪一层都没有了）：视图标 changed', async () => {
+    const e = env()
+    await seedMemory(e, 'mem_r', '改前的内容')
+    await save(e, { action: 'update', id: 'mem_r', name: '名-mem_r', content: '模型改写后的' })
+    await e.store.hardDelete({ id: 'mem_r', workspacePath: SESSION_WS }, { isExactLayer: true })
+    expect((await modelChanges(e))?.map(c => c.state)).toEqual(['changed'])
+  })
+
   it('替代之后旧记忆又被改过或删了：不复活，回 stale', async () => {
     const e = env()
     await seedMemory(e, 'mem_old', '旧说法')
