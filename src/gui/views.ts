@@ -13,7 +13,7 @@ import { layerCacheKey, scoreLayer, type LayerPreread, type LayerRef } from '../
 import type { IgnoredAdvice } from '../governance/advice-ignores.ts'
 import {
   ADVICE_TYPES, GUI_VIEW_VERSION, PENDING_ITEM_KINDS, PENDING_LEVEL_OF_KIND, PENDING_LEVELS, isAwaitingDecision, layerOfMemory,
-  type AdviceType, type DeletedView, type GlobalViewName, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCard,
+  type AdviceType, type DeletedView, type MemoryPromotion, type GlobalViewName, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCard,
   type MemoryCommandResult, type PendingItem, type PendingLevel, type PendingView, type SessionView,
 } from './contract.ts'
 
@@ -301,10 +301,29 @@ function overflowOfLayer(entries: readonly PendingDecision[], layer: LayerRef): 
 }
 
 /** 全部记忆：按层列 active 记忆；空的项目层不列，global 总在。目录问题不含 dir-empty（那不是问题）。 */
+/** 项目记忆的提升状态：带候选标记的是候选（体检关闭时不标，同待处理）；没有标记、账本里有它「留在本项目」的已结清条目的是留下了。 */
+function promotionReader(input: ViewInput): (r: MemoryRecord) => MemoryPromotion | undefined {
+  const keptLocal = new Set(input.settled
+    .filter(e => kindOf(e) === 'promote-candidate' && e.settled?.verdict === 'keep-local')
+    .map(e => `${e.memoryIds[0]}\0${e.workspaces?.[0]}`))
+  return (r) => {
+    if (r.scope !== 'workspace') return undefined
+    if (r.globalCandidate) return input.governanceEnabled ? 'candidate' : undefined
+    return keptLocal.has(`${r.id}\0${r.workspacePath}`) ? 'kept-local' : undefined
+  }
+}
+
 export function buildLibraryView(input: ViewInput): LibraryView {
   const active = activeRecords(input.data)
+  const promotionOf = promotionReader(input)
   const layers = input.readLayers
-    .map(layer => ({ layer: toGuiLayer(layer), items: active.filter(r => inLayer(r, layer)).map(r => card(r, input.data)) }))
+    .map(layer => ({
+      layer: toGuiLayer(layer),
+      items: active.filter(r => inLayer(r, layer)).map((r) => {
+        const promotion = promotionOf(r)
+        return promotion === undefined ? card(r, input.data) : { ...card(r, input.data), promotion }
+      }),
+    }))
     .filter(l => l.layer.kind === 'global' || l.items.length > 0)
   const directoryIssues = [...input.listingNotes, ...input.data.directoryNotes]
     .filter(n => n.code !== 'dir-empty')

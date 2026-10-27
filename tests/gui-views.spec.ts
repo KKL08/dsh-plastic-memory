@@ -470,6 +470,28 @@ describe('全部记忆视图', () => {
     expect((await h.views()).library.hasUnreadFiles).toBe(true)
   })
 
+  it('提升状态：本项目的提升候选标 candidate，「留在本项目」过的标 kept-local（候选标记又回来时算 candidate）；体检关闭时候选不标', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_cand', name: '候选', globalCandidate: true }))
+    await h.store.create(w({ id: 'mem_kept', name: '留下的' }))
+    await h.store.create(w({ id: 'mem_again', name: '又标了', globalCandidate: true }))
+    await h.store.create(w({ id: 'mem_plain', name: '普通' }))
+    await h.store.create(g({ id: 'mem_g', name: '全局' }))
+    for (const id of ['mem_kept', 'mem_again']) {
+      const { entry } = await h.decisions.upsert({ kind: 'promote-candidate', memoryIds: [id], summary: '', workspaces: [WS], fingerprint: id }, 1)
+      await h.decisions.settle(entry.id, 'keep-local', 2)
+    }
+    const promotions = (library: Awaited<ReturnType<typeof h.views>>['library']) =>
+      Object.fromEntries(library.layers.flatMap(l => l.items.map(i => [i.id, i.promotion])))
+
+    const { library } = await h.views()
+    expect(libraryViewSchema.parse(library)).toEqual(library)
+    expect(promotions(library)).toEqual({ mem_cand: 'candidate', mem_kept: 'kept-local', mem_again: 'candidate', mem_plain: undefined, mem_g: undefined })
+
+    const off = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
+    expect(promotions(off.library)).toEqual({ mem_cand: undefined, mem_kept: 'kept-local', mem_again: undefined, mem_plain: undefined, mem_g: undefined })
+  })
+
   it('typeLabels：注册表的类型和本视图记忆卡里出现的类型 → 显示名，认不出的类型显示 id', async () => {
     const h = harness()
     await h.store.create(w({ id: 'mem_a', name: 'A', type: 'decision' }))

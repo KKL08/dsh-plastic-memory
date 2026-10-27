@@ -13,7 +13,7 @@ export { maskSecrets, maskSecretSurface, type MaskOptions } from '../secrets.ts'
  */
 
 /** 视图 schema 的版本号：视图是派生缓存，形状变了就换号，客户端读到不认识的号按「需要刷新」处理。 */
-export const GUI_VIEW_VERSION = 9
+export const GUI_VIEW_VERSION = 10
 
 /** 视图文件所在目录（相对记忆根目录，POSIX 分隔）。 */
 export const GUI_VIEW_DIR = '.state/gui'
@@ -43,6 +43,13 @@ export type GuiLayerRef = z.infer<typeof layerRefSchema>
 
 const sourceModeSchema = memoryRecordSchema.shape.source.unwrap().shape.sourceMode
 
+/**
+ * 项目记忆在「提升为全局」上的状态：candidate = 模型标了全局提升候选、还没处理（体检关闭时不标）；
+ * kept-local = 用户选了「留在本项目」（账本里结清的那条还在）。已提升的就是全局记忆，不另标。
+ */
+export const MEMORY_PROMOTIONS = ['candidate', 'kept-local'] as const
+export type MemoryPromotion = (typeof MEMORY_PROMOTIONS)[number]
+
 /** 记忆卡：原文 + 类型 · 作用域 · 来源 · 时间。 */
 export const memoryCardSchema = z.object({
   id: z.string(),
@@ -68,6 +75,8 @@ export const memoryCardSchema = z.object({
   digest: z.string().optional(),
   /** 四个面含密钥（两级都算）：界面上的文字可能是遮盖后的，不给直接改、直接合并。 */
   hasSecret: z.literal(true).optional(),
+  /** 提升为全局的状态（见 MEMORY_PROMOTIONS）。只在全部记忆视图里给：对话卡片和右侧栏「这次新写入的」据此就地提示。 */
+  promotion: z.enum(MEMORY_PROMOTIONS).optional(),
 })
 export type MemoryCard = z.infer<typeof memoryCardSchema>
 
@@ -414,6 +423,11 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
    * （记忆已是提升候选时就结清那一条），结果的 decisionId 交给 undo 撤销。
    */
   z.object({ cmd: z.literal('promote-memory'), memoryId: z.string(), layer, allowCrossWorkspace }),
+  /**
+   * 按记忆 id 把一条提升候选留在本项目（对话卡片、右侧栏「这次新写入的」）。同 keep-local：清掉候选标记，在账本里留一条
+   * 已结清的 keep-local（记忆已在等你决定里时就结清那一条），以后体检不再提。不是候选（已提升、已留下、已删）回 not-found。
+   */
+  z.object({ cmd: z.literal('keep-local-memory'), memoryId: z.string(), layer, allowCrossWorkspace }),
   /**
    * 把一条全局记忆移到 workspacePath 那个项目（建议整理「放错层」里全局那条，与 promote-memory 对称）：只认全局那一份，
    * 内容、id、出处、时间戳不动，全局那份不再存在。目标项目已有同 id 的记忆（在用的或最近删除里的）回 target-taken，什么都不动。

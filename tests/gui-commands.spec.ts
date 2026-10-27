@@ -1241,6 +1241,140 @@ describe('promote-memory（建议整理「放错层」的提升为全局）', ()
   })
 })
 
+describe('就地提升（对话卡片、右侧栏「这次新写入的」）：promote-memory 与 keep-local-memory', () => {
+  const quietLlm: SemanticLlm = { complete: async () => '{"findings":[]}' }
+  const wsLayer = { kind: 'workspace', workspacePath: SESSION_WS } as const
+
+  /** 模型以 scope: global 新记一条：管线降级为本项目 + globalCandidate，不经体检，账本里什么都没有。 */
+  async function saveCandidate(e: ReturnType<typeof env>, name = '戊', content = '所有项目都用 vitest') {
+    const saved = await runSavePipeline(candidate({ name, content, summary: content }), {
+      store: e.store, registry, workspacePath: SESSION_WS, session: { id: 'sess-1', lastSeq: 1 },
+    })
+    if (saved.kind !== 'saved') throw new Error(saved.kind)
+    expect(saved.record.globalCandidate).toBe(true)
+    return saved.record.id
+  }
+  const pendingView = async (e: ReturnType<typeof env>) => pendingViewSchema.parse(await e.readView('pending'))
+  const candidateIds = async (e: ReturnType<typeof env>) =>
+    (await pendingView(e)).items.flatMap(i => i.kind === 'promote-candidate' && i.memory !== null ? [i.memory.id] : [])
+
+  it('保存候选不写账本；没处理的，体检照旧同步成「等你决定」里的提升候选', async () => {
+    const e = env({ llm: quietLlm })
+    const memoryId = await saveCandidate(e)
+    expect(await allEntries(e)).toEqual([])
+    ok(await e.run({ cmd: 'scan' }))
+    expect(await candidateIds(e)).toEqual([memoryId])
+  })
+
+  it('留在本项目：清掉候选标记、账本里只留一条已结清的 keep-local，待处理与圆点不变；之后体检也不再提', async () => {
+    const e = env({ llm: quietLlm })
+    const memoryId = await saveCandidate(e)
+    const body = ok(await e.run({ cmd: 'keep-local-memory', memoryId, layer: wsLayer }))
+    expect(body).toMatchObject({ cmd: 'keep-local-memory', memoryIds: [memoryId] })
+    const rec = (await e.store.get(memoryId))!
+    expect([rec.scope, rec.workspacePath, rec.globalCandidate]).toEqual(['workspace', SESSION_WS, undefined])
+    expect(await e.decisions.list()).toEqual([])
+    expect((await e.decisions.listSettled()).map(d => [d.id, d.kind, d.memoryIds, d.settled?.verdict])).toEqual([[body.decisionId, 'promote-candidate', [memoryId], 'keep-local']])
+    const view = await pendingView(e)
+    expect([ledgerItems(view), view.dot]).toEqual([[], 'none'])
+    // 全部记忆视图把它标成「留在本项目」，两处据此换成结果文字
+    const library = libraryViewSchema.parse(await e.readView('library'))
+    expect(library.layers.flatMap(l => l.items).find(i => i.id === memoryId)?.promotion).toBe('kept-local')
+
+    ok(await e.run({ cmd: 'scan' }))
+    expect(await candidateIds(e)).toEqual([])
+    // 模型又把同样的内容标成全局：按「留在本项目」的指纹，体检也不再提
+    await e.store.put({ ...(await e.store.get(memoryId))!, globalCandidate: true })
+    ok(await e.run({ cmd: 'scan' }))
+    expect(await candidateIds(e)).toEqual([])
+  })
+
+  it('提升为全局：记忆变 global，账本里只留一条已结清的提升，待处理与圆点不变；之后体检也不再提', async () => {
+    const e = env({ llm: quietLlm })
+    const memoryId = await saveCandidate(e)
+    const body = ok(await e.run({ cmd: 'promote-memory', memoryId, layer: wsLayer }))
+    expect((await e.store.get(memoryId))!.scope).toBe('global')
+    expect(await e.decisions.list()).toEqual([])
+    expect((await e.decisions.listSettled()).map(d => [d.id, d.settled?.verdict])).toEqual([[body.decisionId, 'promoted']])
+    const view = await pendingView(e)
+    expect([ledgerItems(view), view.dot]).toEqual([[], 'none'])
+    ok(await e.run({ cmd: 'scan' }))
+    expect(await candidateIds(e)).toEqual([])
+  })
+
+  it('体检已把它挂进等你决定：就地处理结清的是那一条，待处理里随之消失', async () => {
+    const e = env({ llm: quietLlm })
+    const memoryId = await saveCandidate(e)
+    ok(await e.run({ cmd: 'scan' }))
+    const [open] = await e.decisions.list()
+    const body = ok(await e.run({ cmd: 'keep-local-memory', memoryId, layer: wsLayer }))
+    expect(body.decisionId).toBe(open!.id)
+    expect((await e.decisions.listSettled()).map(d => [d.id, d.settled?.verdict])).toEqual([[open!.id, 'keep-local']])
+    expect(await candidateIds(e)).toEqual([])
+  })
+
+  it.each([
+    ['keep-local-memory'],
+    ['promote-memory'],
+  ] as const)('%s：等你决定里的那一条正被别处处理（认领中）→ claimed，什么都不动', async (cmd) => {
+    const e = env({ llm: quietLlm })
+    const memoryId = await saveCandidate(e)
+    ok(await e.run({ cmd: 'scan' }))
+    const [open] = await e.decisions.list()
+    let result: MemoryCommandResult | undefined
+    await e.decisions.withClaim(open!.id, async () => { result = await e.run({ cmd, memoryId, layer: wsLayer }) })
+    expect(err(result!).code).toBe('claimed')
+    const rec = (await e.store.get(memoryId))!
+    expect([rec.scope, rec.globalCandidate]).toEqual(['workspace', true])
+    expect(await e.decisions.list()).toEqual([open])
+    expect(await e.decisions.listSettled()).toEqual([])
+  })
+
+  it('别处已处理：提升过的再「留在本项目」、留下过的再「留在本项目」→ not-found，什么都不动', async () => {
+    const e = env()
+    const promotedId = await saveCandidate(e)
+    ok(await e.run({ cmd: 'promote-memory', memoryId: promotedId, layer: wsLayer }))
+    expect(err(await e.run({ cmd: 'keep-local-memory', memoryId: promotedId, layer: wsLayer })).code).toBe('not-found')
+    expect((await e.store.get(promotedId))!.scope).toBe('global')
+
+    const keptId = await saveCandidate(e, '己', '提交信息一律写英文')
+    ok(await e.run({ cmd: 'keep-local-memory', memoryId: keptId, layer: wsLayer }))
+    expect(err(await e.run({ cmd: 'keep-local-memory', memoryId: keptId, layer: wsLayer })).code).toBe('not-found')
+    expect((await e.decisions.listSettled()).map(d => d.settled?.verdict)).toEqual(['promoted', 'keep-local'])
+    expect(await e.decisions.list()).toEqual([])
+  })
+
+  it('keep-local-memory：不是候选、全局的、已删的、不存在的 → not-found，账本不动', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_plain', name: '普通', scope: 'workspace', workspacePath: SESSION_WS }))
+    await e.store.create(record({ id: 'mem_g', name: '全局的' }))
+    await e.store.create(record({ id: 'mem_d', name: '删掉的', scope: 'workspace', workspacePath: SESSION_WS, globalCandidate: true }))
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_d' }))
+    for (const memoryId of ['mem_plain', 'mem_g', 'mem_d', 'mem_none']) {
+      expect(err(await e.run({ cmd: 'keep-local-memory', memoryId, layer: wsLayer })).code).toBe('not-found')
+    }
+    expect(await allEntries(e)).toEqual([])
+  })
+
+  it('别的项目的候选：先回 cross-workspace（账本不留东西），带 allowCrossWorkspace 才留下', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_o', name: '别处的', scope: 'workspace', workspacePath: OTHER_WS, globalCandidate: true }))
+    const other = { kind: 'workspace', workspacePath: OTHER_WS } as const
+    expect(err(await e.run({ cmd: 'keep-local-memory', memoryId: 'mem_o', layer: other }))).toMatchObject({ code: 'cross-workspace', rejected: [{ id: 'mem_o', workspacePath: OTHER_WS }] })
+    expect((await e.store.get('mem_o'))!.globalCandidate).toBe(true)
+    expect(await allEntries(e)).toEqual([])
+    ok(await e.run({ cmd: 'keep-local-memory', memoryId: 'mem_o', layer: other, allowCrossWorkspace: true }))
+    expect((await e.store.get('mem_o'))!.globalCandidate).toBeUndefined()
+  })
+
+  it('体检关闭时 keep-local-memory 同 keep-local：governance-disabled，什么都不动', async () => {
+    const e = env({ governanceEnabled: false })
+    const memoryId = await saveCandidate(e)
+    expect(err(await e.run({ cmd: 'keep-local-memory', memoryId, layer: wsLayer })).code).toBe('governance-disabled')
+    expect((await e.store.get(memoryId))!.globalCandidate).toBe(true)
+  })
+})
+
 describe('move-memory（建议整理「放错层」的移到项目）', () => {
   /** 模型把全局的 mem_g 判为放错层（只和某个项目有关）。 */
   const misplacedLlm: SemanticLlm = { complete: async () => JSON.stringify({ findings: [{ type: 'misplaced', memoryIds: ['mem_g'], summary: '只和一个项目有关' }] }) }

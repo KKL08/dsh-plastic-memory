@@ -78,7 +78,7 @@ export interface MemoryCommandDefinition {
  *  refresh-views 不受开关影响，撤销直接改、直接合并的 undo 也不受（见 isEditUndo）。 */
 // dismiss-overflow 不在此列：超限提醒在体检关闭时照样入账，忽略它不属于治理动作；
 // ignore-advice / unignore-advice 同理：规则类建议在体检关闭时照样列出，忽略只是用户的处置
-const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'undo', 'promote', 'promote-memory', 'move-memory', 'keep-local', 'scan'])
+const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'undo', 'promote', 'promote-memory', 'move-memory', 'keep-local', 'keep-local-memory', 'scan'])
 
 /** 不写任何东西的子命令：成功后也不重写视图。 */
 const READ_ONLY_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['draft-edit'])
@@ -276,6 +276,42 @@ async function dispatch(
     return { ok: true, cmd, decisionId: entry.id, memoryIds: [memoryId], ...(snapshotId !== undefined ? { snapshotId } : {}) }
   }
 
+  /**
+   * 按记忆 id 提升或留在本项目：先认领这条记忆的提升候选条目（还没有就记一条），和待处理卡、体检、另一处的就地处理互斥；
+   * 认领后按记忆此刻的状态重新核对再做。没做成时，这次记下的条目删掉，不留在待处理里。
+   */
+  const onCandidateEntry = async (
+    memoryId: string, layer: GuiLayerRef | undefined, isEligible: (r: MemoryRecord) => boolean,
+    act: (rec: MemoryRecord, entry: PendingDecision) => Promise<MemoryCommandResult>,
+  ): Promise<MemoryCommandResult> => {
+    const seen = await locate(memoryId, layer)
+    if (!seen || !isEligible(seen)) return notFound(memoryId)
+    const { entry, created, isSkipped } = await deps.decisions.upsert(
+      { kind: 'promote-candidate', memoryIds: [seen.id], summary: seen.summary, workspaces: [seen.workspacePath!], fingerprint: candidateFingerprint(seen) }, now,
+    )
+    const claimed = isSkipped ? { isClaimed: false as const } : await deps.decisions.withClaim(entry.id, async () => {
+      const rec = await locate(memoryId, layer)
+      const result = rec && isEligible(rec) ? await act(rec, entry) : notFound(memoryId)
+      if (!result.ok && created) await deps.decisions.remove(entry.id)
+      return result
+    })
+    return claimed.isClaimed ? claimed.value : fail(cmd, 'claimed', `待决项 ${entry.id} 正在被另一次操作处理，未做任何改动`)
+  }
+  const isProjectMemory = (r: MemoryRecord) => r.status === 'active' && r.scope === 'workspace'
+
+  /** 留在本项目：清掉候选标记，条目按记忆此刻的内容记指纹结清（上次体检后模型改过内容的话，账本里的旧指纹对不上，同内容再被标记会白提示一次）。 */
+  const keepLocal = async (entry: PendingDecision, allowCrossWorkspace: boolean | undefined, options: { target?: GuiLayerRef } = {}): Promise<MemoryCommandResult> => {
+    const r = await executePromote(
+      { confirmedIds: entry.memoryIds.slice(0, 1), target: 'global', dismiss: true, allowCrossWorkspace },
+      gov, { store: deps.store, agentsMd: deps.agentsMd, snapshots: deps.snapshots, now: () => now }, options,
+    )
+    if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
+    if (r.dismissed.length === 0) return fail(cmd, 'failed', r.message)
+    const current = await deps.store.get(entry.memoryIds[0]!, { workspacePath: entry.workspaces?.[0] })
+    await deps.decisions.settle(entry.id, 'keep-local', now, current !== undefined ? { fingerprint: candidateFingerprint(current) } : {})
+    return { ok: true, cmd, decisionId: entry.id, memoryIds: r.dismissed }
+  }
+
   switch (command.cmd) {
     case 'resolve': {
       if (!(await deps.decisions.get(command.decisionId))) return notFound(command.decisionId)
@@ -376,23 +412,25 @@ async function dispatch(
     }
 
     case 'promote-memory': {
-      // 只提升指明的那一份、且它此刻仍在项目里：已提升、已删、不存在的什么都不动
-      const rec = await locate(command.memoryId, command.layer)
-      if (!rec || rec.status !== 'active' || rec.scope !== 'workspace') return notFound(command.memoryId)
-      const r = await executePromote(
-        { confirmedIds: [rec.id], target: 'global', allowCrossWorkspace: command.allowCrossWorkspace },
-        gov, { store: deps.store, agentsMd: deps.agentsMd, snapshots: deps.snapshots, now: () => now },
-        { target: { kind: 'workspace', workspacePath: rec.workspacePath! } },
-      )
-      if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
-      if (r.promoted.length === 0) return fail(cmd, 'failed', r.message)
+      // 只提升指明的那一份、且它此刻仍在项目里：已提升、已删、不存在的什么都不动。
       // 和 promote 一样留账供 14 天内撤销：按提升候选记（同一条记忆已是候选时沿用、结清那一条），撤销走 undo
-      const { entry } = await deps.decisions.upsert(
-        { kind: 'promote-candidate', memoryIds: [rec.id], summary: rec.summary, workspaces: [rec.workspacePath!], fingerprint: candidateFingerprint(rec) }, now,
-      )
-      await deps.decisions.settle(entry.id, 'promoted', now, r.snapshotId !== null ? { snapshotId: r.snapshotId } : {})
-      return { ok: true, cmd, decisionId: entry.id, memoryIds: r.promoted.map(p => p.id), ...(r.snapshotId !== null ? { snapshotId: r.snapshotId } : {}) }
+      return await onCandidateEntry(command.memoryId, command.layer, isProjectMemory, async (rec, entry) => {
+        const r = await executePromote(
+          { confirmedIds: [rec.id], target: 'global', allowCrossWorkspace: command.allowCrossWorkspace },
+          gov, { store: deps.store, agentsMd: deps.agentsMd, snapshots: deps.snapshots, now: () => now },
+          { target: { kind: 'workspace', workspacePath: rec.workspacePath! } },
+        )
+        if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
+        if (r.promoted.length === 0) return fail(cmd, 'failed', r.message)
+        await deps.decisions.settle(entry.id, 'promoted', now, r.snapshotId !== null ? { snapshotId: r.snapshotId } : {})
+        return { ok: true, cmd, decisionId: entry.id, memoryIds: r.promoted.map(p => p.id), ...(r.snapshotId !== null ? { snapshotId: r.snapshotId } : {}) }
+      })
     }
+
+    case 'keep-local-memory':
+      // 只认此刻仍是候选的那一份：已提升、已留下、已删的什么都不动
+      return await onCandidateEntry(command.memoryId, command.layer, r => isProjectMemory(r) && r.globalCandidate === true, (rec, entry) =>
+        keepLocal(entry, command.allowCrossWorkspace, { target: { kind: 'workspace', workspacePath: rec.workspacePath! } }))
 
     case 'move-memory': {
       const { memoryId } = command
@@ -431,16 +469,7 @@ async function dispatch(
     case 'keep-local': {
       const entry = await openEntryOfKind(command.decisionId, 'promote-candidate')
       if (isErr(entry)) return entry
-      const r = await executePromote(
-        { confirmedIds: entry.memoryIds.slice(0, 1), target: 'global', dismiss: true, allowCrossWorkspace: command.allowCrossWorkspace },
-        gov, { store: deps.store, agentsMd: deps.agentsMd, snapshots: deps.snapshots, now: () => now },
-      )
-      if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
-      if (r.dismissed.length === 0) return fail(cmd, 'failed', r.message)
-      // 指纹按记忆此刻的内容记：上次体检后模型改过内容的话，账本里的旧指纹对不上，同内容再被标记会白提示一次
-      const current = await deps.store.get(entry.memoryIds[0]!)
-      await deps.decisions.settle(entry.id, 'keep-local', now, current !== undefined ? { fingerprint: candidateFingerprint(current) } : {})
-      return { ok: true, cmd, decisionId: entry.id, memoryIds: r.dismissed }
+      return await keepLocal(entry, command.allowCrossWorkspace)
     }
 
     case 'forget':
