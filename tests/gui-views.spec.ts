@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach, afterEach } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -22,7 +22,7 @@ import {
   libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema, workspaceMapViewSchema, type GlobalViewName, type PendingItem,
 } from '../src/gui/contract.ts'
 import { buildSessionView } from '../src/gui/views.ts'
-import { ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
+import { VIEW_REPLACE_GAP_MS, ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
@@ -738,6 +738,38 @@ describe('视图写入', () => {
     await writer.request(['library'])
     expect(collects).toBe(2)
     expect((await readView('library')).layers[1].items.map((i: { id: string }) => i.id)).toEqual(['mem_a', 'mem_b'])
+  })
+
+  it('同一个视图文件两次替换至少隔开 VIEW_REPLACE_GAP_MS（宿主的文件观察会丢掉约 50ms 内的第二次变更通知）：挨得太近就等够再替换，别的文件不等', async () => {
+    expect(VIEW_REPLACE_GAP_MS).toBe(150)
+    const h = harness()
+    await h.store.create(w({ id: 'mem_a', name: 'A' }))
+    let t = 1_000
+    const sleeps: number[] = []
+    let wake!: () => void
+    const sleep = (ms: number) => { sleeps.push(ms); return new Promise<void>(resolve => { wake = resolve }) }
+    const writer = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews(h.sourceDeps), now: () => t, sleep })
+    const libraryIds = async () => (await readView('library')).layers[1].items.map((i: { id: string }) => i.id)
+
+    await writer.request(['library'])
+    expect(sleeps).toEqual([])
+
+    // 40ms 后又要写：library 等到离上次满 150ms 才替换，等的期间磁盘上还是上一版；pending 没写过，不等
+    t += 40
+    await h.store.create(w({ id: 'mem_b', name: 'B' }))
+    const second = writer.request(['pending', 'library'])
+    await vi.waitFor(() => { expect(sleeps).toEqual([110]) })
+    expect(pendingViewSchema.safeParse(await readView('pending')).success).toBe(true)
+    expect(await libraryIds()).toEqual(['mem_a'])
+    t += 110
+    wake()
+    await second
+    expect(await libraryIds()).toEqual(['mem_a', 'mem_b'])
+
+    // 隔够了就直接写
+    t += VIEW_REPLACE_GAP_MS
+    await writer.request(['library'])
+    expect(sleeps).toEqual([110])
   })
 
   it('全量重写写出四个全局视图，内容合契约', async () => {

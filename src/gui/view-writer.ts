@@ -79,9 +79,14 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
 /**
  * 视图写入器：把视图写成 `<memoryRoot>/.state/gui/*.json`（tmp + rename 原子替换）。
  * 节流：同一 tick 内的多次请求合并成一次收集、每个受影响的文件只写一遍；写入串行，进行中再来的请求排到下一轮。
+ * 同一个文件两次替换至少隔开 VIEW_REPLACE_GAP_MS：宿主的文件观察对同一文件约 50ms 内的变更只通知第一次，
+ * 紧挨着的第二次替换会被漏掉，浏览器半侧就停在上一版，直到下一次变化或刷新。
  * 视图是派生缓存，写失败只记日志，不影响触发它的操作。
  * 卸载（dispose）后不再写：之后的请求直接返回，排队未开始的丢弃，进行中的那次写完才返回。
  */
+/** 同一视图文件两次替换的最小间隔（ms）。宿主节流窗口约 50ms，文件事件送达还有抖动：实测隔 100ms 仍偶有漏推，150ms 不再漏。 */
+export const VIEW_REPLACE_GAP_MS = 150
+
 export class ViewWriter {
   private readonly dir: string
   private readonly queued = new Set<GlobalViewName>()
@@ -95,11 +100,23 @@ export class ViewWriter {
   private disposed = false
   private readonly log: MemoryLogger
   private readonly collect: () => Promise<GlobalViews>
+  private readonly now: () => number
+  private readonly sleep: (ms: number) => Promise<void>
+  /** 每个视图文件上次替换的时刻。 */
+  private readonly replacedAt = new Map<string, number>()
 
-  constructor(opts: { memoryRoot: string; collect: () => Promise<GlobalViews>; log?: MemoryLogger }) {
+  constructor(opts: {
+    memoryRoot: string
+    collect: () => Promise<GlobalViews>
+    log?: MemoryLogger
+    now?: () => number
+    sleep?: (ms: number) => Promise<void>
+  }) {
     this.dir = join(opts.memoryRoot, GUI_VIEW_DIR)
     this.log = opts.log ?? console
     this.collect = opts.collect
+    this.now = opts.now ?? Date.now
+    this.sleep = opts.sleep ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms)))
   }
 
   /** 请求重写这些全局视图（缺省四个都写）。 */
@@ -199,6 +216,10 @@ export class ViewWriter {
     const path = join(this.dir, fileName)
     const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
     await writeFile(tmp, JSON.stringify(view), 'utf8')
+    const last = this.replacedAt.get(fileName)
+    const wait = last === undefined ? 0 : last + VIEW_REPLACE_GAP_MS - this.now()
+    if (wait > 0) await this.sleep(wait)
     await rename(tmp, path)
+    this.replacedAt.set(fileName, this.now())
   }
 }
