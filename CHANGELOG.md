@@ -5,6 +5,31 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/) with pre-release tags while the host
 (DeepSeek Harness) is itself in pre-release.
 
+## [Unreleased]
+
+### Changed
+- The memory snapshot now opens with a short note addressed to the host's
+  compaction engine: the entries below it are reinjected after every
+  compaction, so the checkpoint should leave their content out and only keep
+  what the conversation did with memories (saved, deleted, promoted,
+  confirmed). Before, a compaction summary could copy memory entries into
+  the checkpoint, where they stayed as a second, stale copy. The closing
+  note for the model now also says that where a compaction summary and the
+  snapshot disagree about a memory, the snapshot wins, and that a memory the
+  summary mentions but the snapshot no longer lists has been deleted or
+  rewritten.
+
+### Fixed
+- After a compaction on DeepSeek Harness 0.2.1-rc.2, the step that compacted
+  injected the old snapshot again and the next step added the fresh one,
+  leaving two snapshots in the conversation. The snapshot is now rebuilt in
+  the compacting step itself, so the conversation carries exactly one, up to
+  date, snapshot after each automatic or manual compaction. A compaction
+  attempt that fails (for example because the summary would not be smaller
+  than what it replaces) no longer triggers a snapshot refresh either, since
+  nothing was removed and a refresh would only add a second copy next to
+  the old one.
+
 ## [0.2.0-beta.1] - 2026-10-25
 
 ### Added
