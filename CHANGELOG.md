@@ -7,16 +7,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-### Added
-- When the model rewrites or replaces an existing memory, the turn's card and
-  the sidebar's 「这次新写入的」 list show it, with the text before and after,
-  and offer 「撤销修改」 for 14 days. Undo is refused once the memory has been
-  changed again since.
-
 ### Changed
-- The model no longer rewrites or replaces a memory you edited by hand without
-  asking first: `memory_save` returns the current text and waits for your
-  go-ahead before overwriting.
 - The memory snapshot now opens with a short note addressed to the host's
   compaction engine: the entries below it are reinjected after every
   compaction, so the checkpoint should leave their content out and only keep
@@ -118,6 +109,10 @@ All notable changes to this project are documented here. The format follows
   the button reads 「写进 AGENTS.md」 and works as it does in 「等你决定」.
   This adds nothing to the pending list and does not light the nav dot;
   candidates left alone still reach 「等你决定」 at the next checkup.
+- When the model rewrites or replaces an existing memory, the turn's card and
+  the sidebar's 「这次新写入的」 list show it, with the text before and after,
+  and offer 「撤销修改」 for 14 days. Undo is refused once the memory has been
+  changed again since.
 
 ### Changed
 - Memories that exceed `snapshotTokenBudget` are no longer cut from the
@@ -266,6 +261,10 @@ All notable changes to this project are documented here. The format follows
   query and a common-word query under both segmenters. Each row passes when
   search is at most 80 ms slower than a reference measured in the same run
   and scoring holds less than 2 MB.
+- The model no longer rewrites or replaces a memory you edited by hand,
+  whether in its file or on the memory page, without asking first:
+  `memory_save` returns the current text and waits for your go-ahead before
+  overwriting.
 
 ### Fixed
 - A memory holding a vendor-format key (such as `sk-`, `ghp_`, an AWS
