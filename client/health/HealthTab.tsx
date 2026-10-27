@@ -298,4 +298,5 @@ export const healthCss = `
 .pm-scan-status, .pm-scan-hint { margin: 0; max-width: 420px; text-align: right; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-scan-status:empty { display: none; }
 .pm-scan-note { display: block; }
+.pm-scan-usage { white-space: nowrap; }
 `

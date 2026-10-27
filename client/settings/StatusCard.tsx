@@ -108,4 +108,5 @@ export const statusCardCss = `
 .pm-status-scan, .pm-status-actions .pm-scan-hint { margin: 0; max-width: 360px; text-align: right; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-status-scan:empty { display: none; }
 .pm-status-scan .pm-scan-note { display: block; }
+.pm-status-scan .pm-scan-usage { white-space: nowrap; }
 `

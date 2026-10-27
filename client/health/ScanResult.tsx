@@ -84,7 +84,8 @@ export function ScanResult({ state, onOpen, off }: {
           </>
         )}
       {state.usageTokens !== undefined
-        ? <>{added === undefined ? null : <Sep />}{t('scan.usage', { n: formatNumber(state.usageTokens) })}</>
+        // 用量连同前面的分隔点不拆行：放不下时整段折到下一行
+        ? <span className="pm-scan-usage">{added === undefined ? null : <Sep />}{t('scan.usage', { n: formatNumber(state.usageTokens) })}</span>
         : null}
       {state.notes.includes('semantic-failed') ? <span className="pm-scan-note">{t('scan.note.semanticFailed')}</span> : null}
       {state.notes.includes('semantic-batched') && state.semanticBatches !== undefined
