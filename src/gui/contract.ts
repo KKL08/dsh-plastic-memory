@@ -420,9 +420,10 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   z.object({ cmd: z.literal('keep-local'), decisionId: z.string(), allowCrossWorkspace }),
   /**
    * 按记忆 id 把一条项目记忆提升为全局（建议整理「放错层」）。同 promote：快照先行，在账本里留一条已结清的提升
-   * （记忆已是提升候选时就结清那一条），结果的 decisionId 交给 undo 撤销。
+   * （记忆已是提升候选时就结清那一条），结果的 decisionId 交给 undo 撤销。isCandidateRequired：就地提升（对话卡片、右侧栏
+   * 「这次新写入的」）只认此刻仍是提升候选的那一份，别处已「留在本项目」的回 not-found。
    */
-  z.object({ cmd: z.literal('promote-memory'), memoryId: z.string(), layer, allowCrossWorkspace }),
+  z.object({ cmd: z.literal('promote-memory'), memoryId: z.string(), layer, isCandidateRequired: z.boolean().optional(), allowCrossWorkspace }),
   /**
    * 按记忆 id 把一条提升候选留在本项目（对话卡片、右侧栏「这次新写入的」）。同 keep-local：清掉候选标记，在账本里留一条
    * 已结清的 keep-local（记忆已在等你决定里时就结清那一条），以后体检不再提。不是候选（已提升、已留下、已删）回 not-found。

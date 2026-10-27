@@ -1344,6 +1344,41 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
     expect(await e.decisions.list()).toEqual([])
   })
 
+  it('就地提升只认此刻仍是候选的：别处已「留在本项目」后再点「提升为全局」→ not-found，记忆不动、结论还是留在本项目', async () => {
+    const e = env()
+    const memoryId = await saveCandidate(e)
+    const kept = ok(await e.run({ cmd: 'keep-local-memory', memoryId, layer: wsLayer }))
+    expect(err(await e.run({ cmd: 'promote-memory', memoryId, layer: wsLayer, isCandidateRequired: true })).code).toBe('not-found')
+    const rec = (await e.store.get(memoryId))!
+    expect([rec.scope, rec.workspacePath]).toEqual(['workspace', SESSION_WS])
+    expect((await e.decisions.listSettled()).map(d => [d.id, d.settled?.verdict])).toEqual([[kept.decisionId, 'keep-local']])
+  })
+
+  it('不带 isCandidateRequired 的 promote-memory（建议整理「放错层」）照旧：不是候选也提升', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_plain', name: '普通', scope: 'workspace', workspacePath: SESSION_WS }))
+    expect(err(await e.run({ cmd: 'promote-memory', memoryId: 'mem_plain', layer: wsLayer, isCandidateRequired: true })).code).toBe('not-found')
+    ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_plain', layer: wsLayer }))
+    expect((await e.store.get('mem_plain'))!.scope).toBe('global')
+  })
+
+  it.each([
+    ['keep-local-memory', 'keep-local'],
+    ['promote-memory', 'promoted'],
+  ] as const)('%s：账本里还没有它的条目时先做再记账，期间体检清掉条目也不会丢撤销记录', async (cmd, verdict) => {
+    const e = env()
+    const memoryId = await saveCandidate(e)
+    // 模拟体检在记账与认领之间把没挂账的条目清掉：认领任何条目之前先删掉它
+    const claim = e.decisions.withClaim.bind(e.decisions)
+    e.decisions.withClaim = async (id, fn) => { await e.decisions.remove(id); return await claim(id, fn) }
+    const body = ok(await e.run({ cmd, memoryId, layer: wsLayer }))
+    expect((await e.decisions.listSettled()).map(d => [d.id, d.settled?.verdict])).toEqual([[body.decisionId, verdict]])
+    e.decisions.withClaim = claim
+    ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
+    const rec = (await e.store.get(memoryId))!
+    expect([rec.scope, rec.globalCandidate]).toEqual(['workspace', true])
+  })
+
   it('keep-local-memory：不是候选、全局的、已删的、不存在的 → not-found，账本不动', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_plain', name: '普通', scope: 'workspace', workspacePath: SESSION_WS }))
