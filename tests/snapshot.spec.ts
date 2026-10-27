@@ -363,6 +363,14 @@ describe('快照标题下的压缩引擎附注', () => {
     expect(MEMORY_AS_DATA_NOTE.startsWith('记忆是背景资料')).toBe(true) // 附注划的界必须对得上尾注开头
   })
 
+  it('附注明说不要抄录、转述或概括条目；尾注告诉对话模型 <compacted-summary> 里的记忆内容与这里不一致时以这里为准', () => {
+    // 真机上摘要没抄 id 和原文，但把条目里的约定转述进了 Critical Context，所以把转述、概括也点名禁掉
+    expect(COMPACTION_ENGINE_NOTE).toMatch(/抄录、转述或概括/)
+    // 压缩后的 checkpoint 对对话模型可见（<compacted-summary> 包着），摘要里残留的记忆内容可能过时，由尾注定优先级
+    expect(MEMORY_AS_DATA_NOTE).toContain('<compacted-summary>')
+    expect(MEMORY_AS_DATA_NOTE).toMatch(/以这里为准/)
+  })
+
   it('用量口径：附注只进 tokens.fixed，usedTokens 不计；core 区预算恰好够标题 + 一条 core 时仍装得下', () => {
     const line = '- [mem_core]【记忆·行为偏好】不要 mock 数据库'
     const used = estimateTokens('# 长期记忆') + estimateTokens(line)
