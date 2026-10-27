@@ -3,8 +3,9 @@ import { join } from 'node:path'
 import type { MemoryStore, MemoryLogger } from '../store.ts'
 import type { KvTable } from '../kv-table.ts'
 import type { TypeRegistry } from '../type-registry.ts'
-import type { PendingDecisionsStore } from '../governance/decisions.ts'
-import type { ScanCacheEntry } from '../governance/schema.ts'
+import { isModelChange, type PendingDecisionsStore } from '../governance/decisions.ts'
+import type { SnapshotStore } from '../governance/snapshots.ts'
+import type { MemorySnapshot, ScanCacheEntry } from '../governance/schema.ts'
 import { staleIgnores, type AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import { layerCacheKey, type LayerRef } from '../governance/layer-health.ts'
 import { checkupWorkspaces, listingNotes, prereadLayers } from '../tools/layer-preread.ts'
@@ -18,6 +19,8 @@ export interface ViewSourceDeps {
   store: MemoryStore
   decisions: PendingDecisionsStore
   cache: KvTable<ScanCacheEntry>
+  /** 快照表：模型改写、替代的改前那份从这里取；缺省不列 modelChanges。 */
+  snapshots?: Pick<SnapshotStore, 'get'>
   /** 建议忽略表；缺省按没有忽略算、不做清理。 */
   ignores?: AdviceIgnoreStore
   registry: TypeRegistry
@@ -44,6 +47,14 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
   const healthLayers: LayerRef[] = [{ kind: 'global' }, ...checkupWorkspaces(listing).map(ws)]
   const data = await prereadLayers(deps, readLayers)
   const [open, settled] = await Promise.all([deps.decisions.list(), deps.decisions.listSettled()])
+  let modelChangeSnapshots: Map<string, MemorySnapshot> | undefined
+  if (deps.snapshots !== undefined) {
+    modelChangeSnapshots = new Map()
+    for (const id of new Set(settled.filter(isModelChange).map(e => e.settled?.snapshotId))) {
+      const snap = id === undefined ? undefined : await deps.snapshots.get(id)
+      if (snap !== undefined) modelChangeSnapshots.set(snap.id, snap)
+    }
+  }
   const notes = listingNotes(listing, { includeEmpty: false })
   if (deps.ignores !== undefined) {
     // 有读不出的文件或目录时，byId 里没有的 id 可能只是这次没读到，不按「已不在」清
@@ -61,6 +72,7 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
     listingNotes: notes,
     governanceEnabled: deps.isGovernanceEnabled?.() ?? true,
     ...(deps.bootedAt !== undefined ? { bootedAt: deps.bootedAt } : {}),
+    ...(modelChangeSnapshots !== undefined ? { modelChangeSnapshots } : {}),
   })
 }
 

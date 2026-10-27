@@ -1,6 +1,9 @@
 import { z } from 'zod'
 import { memoryRecordSchema } from '../record-schema.ts'
-import { IGNORABLE_ADVICE_TYPES, OVERFLOW_MODES, type DirectoryNoteCode, type ScanNoteCode } from '../contract-codes.ts'
+import { IGNORABLE_ADVICE_TYPES, MODEL_CHANGE_KINDS, OVERFLOW_MODES, type DirectoryNoteCode, type ScanNoteCode } from '../contract-codes.ts'
+
+/** 快照、最近删除的保留窗口（毫秒）：对话卡据此判断模型改写的改前版本是否已过期。 */
+export { RETENTION_MS } from '../retention.ts'
 
 /** 密钥遮盖（缺省与注入、视图同一套规则），浏览器半侧给对话卡里来自工具参数的文字用（带 severity: 'suspected'）。 */
 export { maskSecrets, maskSecretSurface, type MaskOptions } from '../secrets.ts'
@@ -13,7 +16,7 @@ export { maskSecrets, maskSecretSurface, type MaskOptions } from '../secrets.ts'
  */
 
 /** 视图 schema 的版本号：视图是派生缓存，形状变了就换号，客户端读到不认识的号按「需要刷新」处理。 */
-export const GUI_VIEW_VERSION = 10
+export const GUI_VIEW_VERSION = 11
 
 /** 视图文件所在目录（相对记忆根目录，POSIX 分隔）。 */
 export const GUI_VIEW_DIR = '.state/gui'
@@ -275,6 +278,32 @@ export const directoryIssueSchema = z.object({
  */
 const generatedAt = z.number().optional()
 
+export { MODEL_CHANGE_KINDS, type ModelChangeKind } from '../contract-codes.ts'
+
+/** 模型改写、替代此刻能不能撤：undoable 能；changed 之后又被改过（手改、模型再改、删除），不覆盖；undone 已撤销。 */
+export const MODEL_CHANGE_STATES = ['undoable', 'changed', 'undone'] as const
+export type ModelChangeState = (typeof MODEL_CHANGE_STATES)[number]
+
+/**
+ * 模型用 memory_save 改写已有记忆（rewrite）或把旧记忆标成已取代（supersede）的一次改动，撤销按 decisionId 发 undo。
+ * 对话卡按 sessionId + callId 认领自己那次调用的，右侧栏「这次新写入的」按 sessionId 认领。
+ */
+export const modelChangeSchema = z.object({
+  decisionId: z.string(),
+  kind: z.enum(MODEL_CHANGE_KINDS),
+  /** 改写：被改写的那条；替代：被替代的旧记忆。 */
+  memoryId: z.string(),
+  /** 替代：替代它的那条。 */
+  by: z.string().optional(),
+  /** 改前的那份（快照里的），文字已遮盖密钥。 */
+  before: memoryCardSchema,
+  sessionId: z.string(),
+  callId: z.string(),
+  at: z.number(),
+  state: z.enum(MODEL_CHANGE_STATES),
+})
+export type ModelChange = z.infer<typeof modelChangeSchema>
+
 export const libraryViewSchema = z.object({
   version,
   generatedAt,
@@ -293,6 +322,11 @@ export const libraryViewSchema = z.object({
   hasUnreadFiles: z.boolean().optional(),
   /** 类型 id → 显示名（同待处理视图的 typeLabels），覆盖注册表与本视图出现的类型。可缺省：升级前写的视图文件没有，下次写视图补上。 */
   typeLabels: z.record(z.string(), z.string()).optional(),
+  /**
+   * 保留窗口内模型改写、替代已有记忆的改动，按时间先后。改前快照已清（过了 14 天、彻底删除）的不列：
+   * 对话卡对不上自己那次调用时，按调用时刻判断是不是已超过保留窗口。可缺省，理由同上。
+   */
+  modelChanges: z.array(modelChangeSchema).optional(),
 })
 export type LibraryView = z.infer<typeof libraryViewSchema>
 
@@ -414,7 +448,8 @@ export const MEMORY_COMMAND_NAME = 'memory'
 export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   z.object({ cmd: z.literal('info') }),
   z.object({ cmd: z.literal('resolve'), decisionId: z.string(), verdict: z.enum(RESOLVE_VERDICTS), allowCrossWorkspace }),
-  /** 撤销一条已裁决条目：去掉 settled，记了快照的按它恢复败方（提升为全局则恢复原位）；直接改、移到项目的撤销后条目移出账本。 */
+  /** 撤销一条已裁决条目：去掉 settled，记了快照的按它恢复败方（提升为全局则恢复原位）；直接改、移到项目的撤销后条目移出账本；
+   *  模型改写、替代（全部记忆视图的 modelChanges）按改前快照恢复，之后又被改过的回 stale，撤销后条目标已撤销留着。 */
   z.object({ cmd: z.literal('undo'), decisionId: z.string(), allowCrossWorkspace }),
   z.object({ cmd: z.literal('promote'), decisionId: z.string(), target: z.enum(['global', 'agents-md']), allowCrossWorkspace }),
   z.object({ cmd: z.literal('keep-local'), decisionId: z.string(), allowCrossWorkspace }),
@@ -527,7 +562,7 @@ export const GUI_ERROR_CODES = [
   'governance-disabled', // 体检已关闭：裁决、撤销、提升、移到项目、留在本项目、体检、忽略超限不可用
   'has-secret',         // forget 的目标含密钥（任一级），只能彻底删除：什么都没动，界面确认后改发 hard-delete；
                         // 直接改、直接合并的目标含密钥（界面上是遮盖后的正文）：什么都没动；让模型改的目标含密钥：不发给模型
-  'stale',              // 直接改、直接合并：记忆在卡片加载后被改过，什么都没动
+  'stale',              // 直接改、直接合并：记忆在卡片加载后被改过；撤销模型改写、替代：之后又被改过。什么都没动
   'secret-critical',    // 直接改、直接合并的新内容含高危密钥：什么都没动
   'secret-suspected',   // 直接改、直接合并的新内容含疑似密钥：什么都没动，用户确认后带 force 重发
   'claimed',            // 待决项正被另一次操作（别的标签页、宿主进程或体检）认领：什么都没动

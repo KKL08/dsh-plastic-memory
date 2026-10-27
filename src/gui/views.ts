@@ -5,8 +5,9 @@ import type { DirectoryNote } from '../storage/table.ts'
 import { RETENTION_MS } from '../retention.ts'
 import { hasSecret, maskSecretSurface, maskSecrets } from '../secrets.ts'
 import { computeDigest } from '../storage/frontmatter.ts'
-import { FINDING_TYPES, type FindingType, type PendingDecision } from '../governance/schema.ts'
-import { candidateFingerprint, kindOf, overflowLevelOf, overflowScopeOf, verdictLoser } from '../governance/decisions.ts'
+import { FINDING_TYPES, type FindingType, type MemorySnapshot, type PendingDecision } from '../governance/schema.ts'
+import { candidateFingerprint, isModelChange, kindOf, overflowLevelOf, overflowScopeOf, verdictLoser } from '../governance/decisions.ts'
+import { editFingerprint } from '../governance/snapshots.ts'
 import { runRuleScan } from '../governance/rule-scan.ts'
 import { byConfidenceThenConfirmed } from '../snapshot.ts'
 import { layerCacheKey, scoreLayer, type LayerPreread, type LayerRef } from '../governance/layer-health.ts'
@@ -14,7 +15,7 @@ import type { IgnoredAdvice } from '../governance/advice-ignores.ts'
 import {
   ADVICE_TYPES, GUI_VIEW_VERSION, PENDING_ITEM_KINDS, PENDING_LEVEL_OF_KIND, PENDING_LEVELS, isAwaitingDecision, layerOfMemory,
   type AdviceType, type DeletedView, type MemoryPromotion, type GlobalViewName, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCard,
-  type MemoryCommandResult, type PendingItem, type PendingLevel, type PendingView, type SessionView,
+  type MemoryCommandResult, type ModelChange, type PendingItem, type PendingLevel, type PendingView, type SessionView,
 } from './contract.ts'
 
 /**
@@ -40,6 +41,8 @@ export interface ViewInput {
   governanceEnabled: boolean
   /** 插件本次加载的时刻；缺省不写进视图。 */
   bootedAt?: number
+  /** 模型改写、替代的改前快照（按快照 id）；缺省不列 modelChanges。 */
+  modelChangeSnapshots?: ReadonlyMap<string, MemorySnapshot>
 }
 
 export type GlobalViews = { pending: PendingView; health: HealthView; library: LibraryView; deleted: DeletedView }
@@ -340,7 +343,33 @@ export function buildLibraryView(input: ViewInput): LibraryView {
   return {
     version: GUI_VIEW_VERSION, generatedAt: input.now, memoryRoot: input.memoryRoot, layers, directoryIssues,
     inactiveIds, hasUnreadFiles, typeLabels: typeLabelsOfView,
+    ...(input.modelChangeSnapshots !== undefined ? { modelChanges: modelChangesOf(input, input.modelChangeSnapshots) } : {}),
   }
+}
+
+/**
+ * 保留窗口内模型改写、替代的改动（对话卡、右侧栏「这次新写入的」）：改前那份取快照，快照已清或只剩脱敏副本的不列。
+ * 能不能撤按记忆此刻的样子判：改写的那条仍在用、替代的那条仍是已取代，且内容还是那次写下的（指纹对得上），同撤销命令的核对。
+ */
+function modelChangesOf(input: ViewInput, snapshots: ReadonlyMap<string, MemorySnapshot>): ModelChange[] {
+  const cutoff = input.now - RETENTION_MS
+  return input.settled.flatMap((e): ModelChange[] => {
+    const settled = e.settled!
+    if (!isModelChange(e) || e.origin === undefined || settled.at < cutoff || settled.snapshotId === undefined) return []
+    const memoryId = e.memoryIds[0]!
+    const before = snapshots.get(settled.snapshotId)?.data.find(r => r.id === memoryId)
+    if (before === undefined || before.redacted === true) return []
+    const kind = kindOf(e) === 'rewrite' ? 'rewrite' : 'supersede'
+    const current = input.data.byId.get(memoryId)
+    const isOwnWrite = current !== undefined && current.status === (kind === 'rewrite' ? 'active' : 'superseded') && editFingerprint(current) === e.fingerprint
+    return [{
+      decisionId: e.id, kind, memoryId,
+      ...(e.origin.by !== undefined ? { by: e.origin.by } : {}),
+      before: card(before, input.data),
+      sessionId: e.origin.sessionId, callId: e.origin.callId, at: settled.at,
+      state: settled.isUndone === true ? 'undone' : isOwnWrite ? 'undoable' : 'changed',
+    }]
+  })
 }
 
 /** 最近删除：保留窗口内软删的记忆；裁决删掉的从已裁决条目找来源（同一条记忆被多次裁决取最近的）。 */

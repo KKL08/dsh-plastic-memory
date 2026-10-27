@@ -64,7 +64,7 @@ function env(opts: EnvOpts = {}) {
   const decisions = new PendingDecisionsStore(opts.wrapPending?.(sidecar.pending) ?? sidecar.pending)
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const cache = sidecar.scanCache
-  const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, cache, registry, memoryRoot: root, now: () => clock.now }) })
+  const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, snapshots, cache, registry, memoryRoot: root, now: () => clock.now }) })
   const command = createMemoryCommand({
     memoryRoot: root, store, decisions, snapshots, cache, ignores: new AdviceIgnoreStore(sidecar.adviceIgnores), registry, views: opts.wrapViews?.(views) ?? views,
     ...(opts.log !== undefined ? { log: opts.log } : {}),
@@ -2508,5 +2508,107 @@ describe('draft-edit（让模型改、让模型合并的生成）', () => {
     expect(err(await e.run(draftOf('mem_l'))).code).toBe('not-found')
     expect(err(await e.run(draftOf('mem_nope'))).code).toBe('not-found')
     expect(prompts).toEqual([])
+  })
+})
+
+describe('撤销模型改写、替代（对话卡片、右侧栏「这次新写入的」）', () => {
+  const seedMemory = (e: ReturnType<typeof env>, id: string, content: string) =>
+    e.store.create(record({ id, name: `名-${id}`, content, scope: 'workspace', workspacePath: SESSION_WS }))
+  /** 模型在借来的会话里调 memory_save（与生产同一条管线，带快照与账本）。 */
+  const save = (e: ReturnType<typeof env>, partial: object) => runSavePipeline(
+    candidate({ scope: 'workspace', force: true, ...partial }),
+    { store: e.store, registry, workspacePath: SESSION_WS, session: { id: 'sess-1', lastSeq: 1 }, snapshots: e.snapshots, decisions: e.decisions, callId: 'call-1' },
+  )
+  const changeOf = async (e: ReturnType<typeof env>) => (await e.decisions.listSettled()).find(d => d.kind === 'rewrite' || d.kind === 'supersede')!
+  const modelChanges = async (e: ReturnType<typeof env>) => {
+    await e.run({ cmd: 'refresh-views' })
+    return libraryViewSchema.parse(await e.readView('library')).modelChanges
+  }
+
+  it('撤销改写：按改前快照恢复，条目标已撤销留着，视图显示 undone；再撤一次什么都不动', async () => {
+    const e = env()
+    await seedMemory(e, 'mem_r', '改前的内容')
+    expect((await save(e, { action: 'update', id: 'mem_r', name: '名-mem_r', content: '模型改写后的' })).kind).toBe('updated')
+    const entry = await changeOf(e)
+    expect(await modelChanges(e)).toEqual([expect.objectContaining({
+      decisionId: entry.id, kind: 'rewrite', memoryId: 'mem_r', sessionId: 'sess-1', callId: 'call-1', state: 'undoable',
+      before: expect.objectContaining({ id: 'mem_r', content: '改前的内容', workspacePath: SESSION_WS }),
+    })])
+
+    const undone = ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+    expect(undone.memoryIds).toEqual(['mem_r'])
+    expect((await e.store.get('mem_r', { workspacePath: SESSION_WS }))!.content).toBe('改前的内容')
+    expect((await e.decisions.listSettled()).find(d => d.id === entry.id)?.settled?.isUndone).toBe(true)
+    expect((await modelChanges(e))?.map(c => c.state)).toEqual(['undone'])
+    expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('not-found')
+    expect((await e.store.get('mem_r', { workspacePath: SESSION_WS }))!.content).toBe('改前的内容')
+  })
+
+  it.each([
+    ['用户手改', async (e: ReturnType<typeof env>) => { await e.store.update({ id: 'mem_r', workspacePath: SESSION_WS }, r => ({ ...r, content: '用户又改的' })) }],
+    ['模型再改', async (e: ReturnType<typeof env>) => { await save(e, { action: 'update', id: 'mem_r', name: '名-mem_r', content: '用户又改的' }) }],
+  ] as const)('改写之后又被改过（%s）：不覆盖，回 stale，视图显示 changed', async (_label, changeAgain) => {
+    const e = env()
+    await seedMemory(e, 'mem_r', '改前的内容')
+    await save(e, { action: 'update', id: 'mem_r', name: '名-mem_r', content: '模型改写后的' })
+    const entry = (await e.decisions.listSettled())[0]!
+    await changeAgain(e)
+    expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('stale')
+    expect((await e.store.get('mem_r', { workspacePath: SESSION_WS }))!.content).toBe('用户又改的')
+    expect((await modelChanges(e))?.find(c => c.decisionId === entry.id)?.state).toBe('changed')
+  })
+
+  it('撤销替代：旧记忆恢复成有效，新的那条保留', async () => {
+    const e = env()
+    await seedMemory(e, 'mem_old', '旧说法')
+    const saved = await save(e, { name: '新说法', content: '完全不同的新说法', supersedes: ['mem_old'] })
+    if (saved.kind !== 'saved') throw new Error(saved.kind)
+    expect((await e.store.get('mem_old', { workspacePath: SESSION_WS }))!.status).toBe('superseded')
+    const entry = await changeOf(e)
+    expect(await modelChanges(e)).toEqual([expect.objectContaining({
+      kind: 'supersede', memoryId: 'mem_old', by: saved.record.id, state: 'undoable', before: expect.objectContaining({ content: '旧说法' }),
+    })])
+
+    ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+    expect((await e.store.get('mem_old', { workspacePath: SESSION_WS }))!.status).toBe('active')
+    expect((await e.store.get(saved.record.id, { workspacePath: SESSION_WS }))!.status).toBe('active')
+    expect((await modelChanges(e))?.map(c => c.state)).toEqual(['undone'])
+  })
+
+  it('替代之后旧记忆又被改过或删了：不复活，回 stale', async () => {
+    const e = env()
+    await seedMemory(e, 'mem_old', '旧说法')
+    await save(e, { name: '新说法', content: '完全不同的新说法', supersedes: ['mem_old'] })
+    const entry = await changeOf(e)
+    await e.store.update({ id: 'mem_old', workspacePath: SESSION_WS }, r => ({ ...r, content: '之后手改的' }))
+    expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('stale')
+    expect((await e.store.get('mem_old', { workspacePath: SESSION_WS }))!.status).toBe('superseded')
+    expect((await modelChanges(e))?.[0]?.state).toBe('changed')
+  })
+
+  it('改前快照已过保留窗口：撤销回 not-found，视图不再列它', async () => {
+    const e = env()
+    await seedMemory(e, 'mem_r', '改前的内容')
+    await save(e, { action: 'update', id: 'mem_r', name: '名-mem_r', content: '模型改写后的' })
+    const entry = await changeOf(e)
+    e.clock.now = Date.now() + RETENTION_MS + 1000
+    expect(await modelChanges(e)).toEqual([])
+    expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('not-found')
+    expect((await e.store.get('mem_r', { workspacePath: SESSION_WS }))!.content).toBe('模型改写后的')
+  })
+
+  it('体检关闭也能撤销（撤的是模型的写入，不是治理动作）', async () => {
+    const e = env({ governanceEnabled: false })
+    await seedMemory(e, 'mem_r', '改前的内容')
+    await save(e, { action: 'update', id: 'mem_r', name: '名-mem_r', content: '模型改写后的' })
+    ok(await e.run({ cmd: 'undo', decisionId: (await changeOf(e)).id }))
+    expect((await e.store.get('mem_r', { workspacePath: SESSION_WS }))!.content).toBe('改前的内容')
+  })
+
+  it('改前内容在视图里遮盖密钥', async () => {
+    const e = env()
+    await seedMemory(e, 'mem_r', `凭证 ${FAKE_SECRET.github}`)
+    await save(e, { action: 'update', id: 'mem_r', name: '名-mem_r', content: '换成了指针' })
+    expect(JSON.stringify(await modelChanges(e))).not.toContain(FAKE_SECRET.github)
   })
 })

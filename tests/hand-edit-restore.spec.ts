@@ -108,8 +108,10 @@ describe('票 12 验收：手编检测与恢复比较投影', () => {
     expect(fm.lastConfirmedAt).toBe(iso(mtime))
     expect(fm.updatedAt).toBe(iso(mtime))
 
-    // memory_save update：标记清除，source 指向本次会话
-    const updated = await h.save({ action: 'update', id: 'mem_h', name: '包管理', type: 'preference', scope: 'workspace', content: '包管理用 pnpm，锁文件必须提交', summary: '用 pnpm', sourceMode: 'user-explicit' })
+    // memory_save update：手改过的先拒（手改保护），问过用户带 force 重发后标记清除，source 指向本次会话
+    const args = { action: 'update', id: 'mem_h', name: '包管理', type: 'preference', scope: 'workspace', content: '包管理用 pnpm，锁文件必须提交', summary: '用 pnpm', sourceMode: 'user-explicit' } as const
+    expect(await h.save(args)).toMatchObject({ kind: 'rejected', code: 'hand-edited' })
+    const updated = await h.save({ ...args, force: true })
     expect(updated.kind).toBe('updated')
     const after = await frontmatter(path)
     expect(after).not.toHaveProperty('handEdited')

@@ -9,7 +9,7 @@ import type { MemoryRecord } from '../record-schema.ts'
 import { RecordNotFoundError } from '../errors.ts'
 import { detectSecrets, hasSecret } from '../secrets.ts'
 import { computeDigest } from '../storage/frontmatter.ts'
-import { candidateFingerprint, kindOf, verdictLoser, type PendingDecisionsStore } from '../governance/decisions.ts'
+import { candidateFingerprint, isModelChange, kindOf, verdictLoser, type PendingDecisionsStore } from '../governance/decisions.ts'
 import { editFingerprint, isConflicting, type SnapshotStore } from '../governance/snapshots.ts'
 import type { PendingDecision, ScanCacheEntry, SnapshotRecord } from '../governance/schema.ts'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
@@ -75,7 +75,7 @@ export interface MemoryCommandDefinition {
 }
 
 /** 依赖体检开关的子命令（对应四个治理工具的能力）；forget / restore / hard-delete / confirm / edit-memory / merge-memories /
- *  refresh-views 不受开关影响，撤销直接改、直接合并的 undo 也不受（见 isEditUndo）。 */
+ *  refresh-views 不受开关影响，撤销直接改、直接合并、模型改写与替代的 undo 也不受（见 isEditUndo）。 */
 // dismiss-overflow 不在此列：超限提醒在体检关闭时照样入账，忽略它不属于治理动作；
 // ignore-advice / unignore-advice 同理：规则类建议在体检关闭时照样列出，忽略只是用户的处置
 const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'undo', 'promote', 'promote-memory', 'move-memory', 'keep-local', 'keep-local-memory', 'scan'])
@@ -147,9 +147,9 @@ function candidateCopy(entry: PendingDecision): { target?: GuiLayerRef } {
   return workspacePath === undefined || workspacePath === 'global' ? {} : { target: { kind: 'workspace', workspacePath } }
 }
 
-/** 撤销的是直接改、直接合并：改本身不受体检开关影响，撤销也不受。 */
+/** 撤销的是直接改、直接合并、模型改写与替代：改本身不受体检开关影响，撤销也不受。 */
 async function isEditUndo(decisions: PendingDecisionsStore, command: MemoryCommand): Promise<boolean> {
-  return command.cmd === 'undo' && (await decisions.listSettled()).some(d => d.id === command.decisionId && kindOf(d) === 'edit')
+  return command.cmd === 'undo' && (await decisions.listSettled()).some(d => d.id === command.decisionId && (kindOf(d) === 'edit' || isModelChange(d)))
 }
 
 /** 记忆和卡片加载时的版本对不上：updatedAt 变了（插件写过），或名称、摘要、正文的摘要变了（手改过文件）。 */
@@ -238,6 +238,31 @@ async function dispatch(
     const r = await restoreFrom(snapshotId, entry.memoryIds, allowCrossWorkspace, { isExactLayer: true, overwriteIf: isOwnWrite })
     if (isErr(r)) return r
     await deps.decisions.remove(entry.id)
+    return { ok: true, cmd, decisionId: entry.id, memoryIds: r, snapshotId }
+  }
+
+  /**
+   * 撤销模型改写、替代（对话卡片、右侧栏「这次新写入的」）：改写的那条仍在用、替代的那条仍是已取代，且内容还是那次写下的，
+   * 才按改前的快照恢复它（替代的旧记忆回到在用，替代它的那条不动）；之后被手改、模型再改或删掉的不覆盖，回 stale。
+   * 撤销后条目标已撤销、留到保留窗口结束，界面据此显示「已撤销」；已撤销的不能再撤。
+   */
+  const undoModelChange = async (entry: PendingDecision, allowCrossWorkspace: boolean | undefined): Promise<MemoryCommandResult> => {
+    const snapshotId = entry.settled?.snapshotId
+    const snapshot = snapshotId === undefined ? undefined : await deps.snapshots.get(snapshotId)
+    const before = snapshot?.data.find(r => r.id === entry.memoryIds[0])
+    if (entry.settled?.isUndone === true) return notFound(`${entry.id}（已撤销）`)
+    if (snapshotId === undefined || before === undefined) return notFound(`${entry.id} 改前的快照（可能已超过 14 天）`)
+    const { rejected } = gateRecords([before], gov, allowCrossWorkspace)
+    if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
+    const status = kindOf(entry) === 'rewrite' ? 'active' : 'superseded'
+    const isOwnWrite = (r: MemoryRecord) => r.status === status && editFingerprint(r) === entry.fingerprint
+    const current = await deps.store.get(before.id, { workspacePath: before.workspacePath, isExactLayer: true })
+    const changed = () => fail(cmd, 'stale', `记忆 ${before.id} 在这次修改之后又被改过或已删除，撤销会冲掉之后的改动，未做任何改动`)
+    if (current === undefined || !isOwnWrite(current)) return changed()
+    // 写入那一刻按最新内容再核对一次：之间被改过的跳过，什么都没写
+    const r = await restoreFrom(snapshotId, [before.id], allowCrossWorkspace, { isExactLayer: true, overwriteIf: isOwnWrite })
+    if (isErr(r)) return r.code === 'failed' ? changed() : r
+    await deps.decisions.markUndone(entry.id)
     return { ok: true, cmd, decisionId: entry.id, memoryIds: r, snapshotId }
   }
 
@@ -349,6 +374,7 @@ async function dispatch(
       const entry = await settledEntry(command.decisionId)
       if (!entry?.settled) return notFound(command.decisionId)
       if (kindOf(entry) === 'edit') return await undoEdit(entry, command.allowCrossWorkspace)
+      if (isModelChange(entry)) return await undoModelChange(entry, command.allowCrossWorkspace)
       if (kindOf(entry) === 'move') return await undoMove(entry, command.allowCrossWorkspace)
       const { verdict, snapshotId } = entry.settled
       const loser = verdictLoser(entry, verdict)
