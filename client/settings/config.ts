@@ -61,7 +61,6 @@ export interface SettingsFields {
   budget: string
   overflow: (typeof OVERFLOW_MODES)[number]
   evidence: (typeof EVIDENCE_LEVELS)[number]
-  governance: boolean
   sensitivity: (typeof SENSITIVITIES)[number]
   promoteTarget: (typeof PROMOTE_TARGETS)[number]
   /** 用户词典路径，空串 = 未设（只用内置词典）。 */
@@ -74,7 +73,6 @@ const PATHS: Record<Exclude<keyof SettingsFields, 'customTypes'>, string[]> = {
   budget: ['snapshotTokenBudget'],
   overflow: ['snapshotOverflow'],
   evidence: ['evidenceLookup'],
-  governance: ['governance', 'enabled'],
   sensitivity: ['governance', 'health', 'sensitivity'],
   promoteTarget: ['governance', 'globalPromoteTarget'],
   userDictionary: ['search', 'userDictionaryPath'],
@@ -82,7 +80,7 @@ const PATHS: Record<Exclude<keyof SettingsFields, 'customTypes'>, string[]> = {
 
 const DEFAULTS: SettingsFields = {
   template: 'coding', customTypes: {}, budget: '4000', overflow: 'relax', evidence: 'strict',
-  governance: true, sensitivity: 'normal', promoteTarget: 'plugin-global', userDictionary: '',
+  sensitivity: 'normal', promoteTarget: 'plugin-global', userDictionary: '',
 }
 
 function at(value: unknown, path: readonly string[]): unknown {
@@ -101,7 +99,6 @@ function oneOf<T extends string>(choices: readonly T[], value: unknown, fallback
 /** 配置段 → 表单字段。宿主给的是解析过的值，取不到时回落到 schema 默认值。 */
 export function fieldsOf(section: unknown): SettingsFields {
   const budget = at(section, PATHS.budget)
-  const enabled = at(section, PATHS.governance)
   const types = at(section, ['customTypes'])
   const dictionary = at(section, PATHS.userDictionary)
   return {
@@ -110,11 +107,15 @@ export function fieldsOf(section: unknown): SettingsFields {
     budget: typeof budget === 'number' ? String(budget) : DEFAULTS.budget,
     overflow: oneOf(OVERFLOW_MODES, at(section, PATHS.overflow), DEFAULTS.overflow),
     evidence: oneOf(EVIDENCE_LEVELS, at(section, PATHS.evidence), DEFAULTS.evidence),
-    governance: typeof enabled === 'boolean' ? enabled : DEFAULTS.governance,
     sensitivity: oneOf(SENSITIVITIES, at(section, PATHS.sensitivity), DEFAULTS.sensitivity),
     promoteTarget: oneOf(PROMOTE_TARGETS, at(section, PATHS.promoteTarget), DEFAULTS.promoteTarget),
     userDictionary: typeof dictionary === 'string' ? dictionary : DEFAULTS.userDictionary,
   }
+}
+
+/** 体检开关 `governance.enabled`：只在配置文件里改，设置页只读它来置灰依赖体检的项。取不到时按 schema 默认开着。 */
+export function governanceEnabled(section: unknown): boolean {
+  return at(section, ['governance', 'enabled']) !== false
 }
 
 /** 配置里写的 memoryRoot（空 = 默认位置）。 */

@@ -96,7 +96,7 @@ export interface NavStore {
   takeEntry(): boolean
   /** 页内用：只改给出的字段；组定位（level）不沿用。 */
   update(patch: Partial<NavTarget>): void
-  /** 跳到宿主插件页里本插件的配置（「去设置里打开 ›」）；出口不可用时什么都不做。 */
+  /** 跳到宿主插件页里本插件的配置（记忆页的「设置」）；出口不可用时什么都不做。 */
   openSettings(): void
   /** 打开当前会话右侧栏的记忆 tab；出口不可用时什么都不做。 */
   openSidebarTab(): void

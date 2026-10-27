@@ -1,6 +1,6 @@
 /**
  * 体检横幅（DESIGN.md「Health Banner」）：浅灰底、圆角 16px、不描边——用色块和设置卡片的描边区分「状态」与「设置」。
- * 左边状态标记 + 一句结论，下面一行最近体检时间；右边动作（「立即体检」「打开记忆页」）。
+ * 左边状态标记 + 一句结论，下面一行最近体检时间；右边动作（设置页状态卡只有「打开记忆页 ›」）。
  */
 import type { ReactNode } from 'react'
 import { StatusMarker, type MarkerKind } from './StatusMarker.tsx'

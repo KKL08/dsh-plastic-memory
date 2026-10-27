@@ -569,24 +569,16 @@ describe('待处理：两态与空状态', () => {
     expect(screen.getByRole('status')).toHaveTextContent('上次体检 10 月 16 日')
   })
 
-  it('体检关闭：「去设置里打开 ›」是唯一能点的，打开插件设置页', () => {
-    const openSettings = vi.fn()
-    setup([], { views: { pending: view(), health: { ...scannedHealth(NOW), governanceEnabled: false } } }, createNavStore(undefined, { openSettings }))
-    expect(screen.getByRole('status')).toHaveTextContent('体检已关闭')
-    expect(screen.getAllByRole('button').map(b => b.textContent)).toEqual(['去设置里打开 ›'])
-    fireEvent.click(screen.getByRole('button', { name: '去设置里打开 ›' }))
-    expect(openSettings).toHaveBeenCalledTimes(1)
-  })
-
-  it('体检关闭、宿主没有插件页导航：只有说明，不画「去设置里打开 ›」', () => {
-    setup([], { views: { pending: view(), health: { ...scannedHealth(NOW), governanceEnabled: false } } })
-    expect(screen.getByRole('status')).toHaveTextContent('体检已关闭')
+  it('配置文件关掉体检：写明在配置文件里关闭，没有可点的东西（界面上不提供打开体检）', () => {
+    setup([], { views: { pending: view(), health: { ...scannedHealth(NOW), governanceEnabled: false } } }, createNavStore(undefined, { openSettings: vi.fn() }))
+    expect(screen.getByRole('status')).toHaveTextContent('体检已在配置文件里关闭')
+    expect(screen.getByRole('status')).toHaveTextContent('governance.enabled')
     expect(screen.queryByRole('button')).toBeNull()
   })
 
   it('体检开关以健康视图为准（和健康 tab、页头一致），不看插件配置', () => {
     setup([], { config: { ...config, governanceEnabled: false } })
-    expect(screen.getByRole('status')).not.toHaveTextContent('体检已关闭')
+    expect(screen.getByRole('status')).not.toHaveTextContent('体检已在配置文件里关闭')
   })
 })
 

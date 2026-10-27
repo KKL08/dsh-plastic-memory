@@ -5,7 +5,7 @@
  * 动作碰上这一条正在别处处理或刚处理完（什么都没动）：在原位留一行说明，那边的结果写进视图、卡片消失后也还在，
  * 列表空了就留在空状态上面；之后哪张卡做成了一件事就收起。
  * 留下的只剩结果卡时，组上方写「都处理完了」。「可以整理」组底部是这个范围的「已忽略 N 条」，展开逐条取消忽略。
- * 空状态两种：体检关闭（「去设置里打开 ›」）、三组都空（写上次体检时间，不放体检按钮）；已忽略那一行跟在空状态下面。
+ * 空状态两种：配置文件关掉体检（写明在配置文件里改，界面上不提供打开）、三组都空（写上次体检时间，不放体检按钮）；已忽略那一行跟在空状态下面。
  * 入口带记忆 id 打开时，含这条记忆的卡（冲突任一方、提升候选、密钥）滚入视野并高亮一次。
  * 带组标识进来时（健康页「去处理 ›」）焦点落在那一组的标题上，组已不在（处理完了）落在待处理顶部；每次导航只定位一次。
  */
@@ -15,7 +15,7 @@ import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { baseName, formatDay, formatNumber, useT } from '../i18n.tsx'
 import { FlashRow, useFlashTarget } from '../library/shared.tsx'
 import type { LocaleKey } from '../locales.ts'
-import { compareLayers, isInScope, useCanOpen, useNavTarget, type NavStore, type NavTarget, type PageScope } from '../nav.ts'
+import { compareLayers, isInScope, useNavTarget, type NavStore, type NavTarget, type PageScope } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { Chip } from '../ui/Chip.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
@@ -179,7 +179,6 @@ export function PendingTab({ nav, session, scope, workspacePath, now = Date.now(
           <>
             {refusedRow?.node}
             <PendingEmpty
-              nav={nav}
               isOff={health.status === 'ready' && !health.data.governanceEnabled}
               lastCheckupAt={health.status === 'ready' ? lastScanAt(healthLayers) : undefined}
               now={now}
@@ -337,27 +336,15 @@ function lastScanAt(layers: HealthView['layers']): number | null {
  * 三组都空。体检开关取健康视图（和状态条同一来源），视图还没到时按开着处理、不写上次体检。
  * 不放体检按钮：体检入口在标题行。
  */
-function PendingEmpty({ nav, isOff, lastCheckupAt, now }: {
-  nav: NavStore
+function PendingEmpty({ isOff, lastCheckupAt, now }: {
   isOff: boolean
   /** 这个范围的上次体检；null = 从没体检过，undefined = 健康视图还没到。 */
   lastCheckupAt: number | null | undefined
   now: number
 }) {
   const t = useT()
-  const canOpenSettings = useCanOpen(nav, 'settings')
 
-  if (isOff) {
-    return (
-      <EmptyState
-        variant="daily"
-        title={t('pending.off.title')}
-        action={canOpenSettings ? <button type="button" className="pm-pending-link" onClick={() => { nav.openSettings() }}>{t('pending.off.action')}</button> : undefined}
-      >
-        {t('pending.off.body')}
-      </EmptyState>
-    )
-  }
+  if (isOff) return <EmptyState variant="daily" title={t('pending.off.title')}>{t('pending.off.body')}</EmptyState>
   return (
     <EmptyState variant="daily" title={t('pending.empty.title')}>
       {lastCheckupAt === undefined ? undefined
@@ -420,7 +407,6 @@ export const pendingCss = crossConfirmCss + editCss + modelEditCss + moveCss + `
   width: 96px; height: 28px; padding: 0 8px; font: inherit; font-size: 13px; color: var(--pm-text); background: var(--pm-bg);
   border: .5px solid var(--pm-line-input); border-radius: var(--dsw-radius-md, 12px);
 }
-.pm-pending-link { padding: 0; border: 0; background: none; font: inherit; font-size: 13px; font-weight: 600; color: var(--pm-text); cursor: pointer; }
 .pm-pending-more {
   align-self: flex-start; margin-top: 4px; padding: 6px 0; border: 0; background: none;
   font: inherit; font-size: 13px; color: var(--pm-text-2); cursor: pointer;

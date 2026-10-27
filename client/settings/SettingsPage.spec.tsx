@@ -1,7 +1,7 @@
-// 插件设置页：三组设置的渲染、「我加的类型」弹层必填校验、revision 冻结与冲突提示、非法值、体检关闭时置灰、状态卡。
+// 插件设置页：三组设置的渲染、「我加的类型」弹层必填校验、revision 冻结与冲突提示、非法值、配置文件关掉体检时置灰、状态卡。
 import { describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { GUI_VIEW_VERSION, type HealthView, type LibraryView, type MemoryCommandResult, type PendingView } from '../../src/gui/contract.ts'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { GUI_VIEW_VERSION, type HealthView, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createTranslator } from '../i18n.tsx'
 import { en, zh } from '../locales.ts'
@@ -9,7 +9,7 @@ import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { PanelShell } from '../ui/PanelShell.tsx'
 import { createFakeConfigForm, DEFAULT_SECTION, type FakeConfigForm } from './config-form.fake.ts'
 import { SettingsPage } from './SettingsPage.tsx'
-import { openTarget, summarize } from './StatusCard.tsx'
+import { summarize } from './StatusCard.tsx'
 
 const t = createTranslator(zh)
 
@@ -70,11 +70,13 @@ describe('三组设置的渲染', () => {
     expect(tab('溯源记忆出处', '遇到矛盾或高风险时')).toBeInTheDocument()
   })
 
-  it('怎么管：体检开关、自动体检禁用带「规划中」、灵敏度说明带数值、AGENTS.md 说明插件不再管理、最近删除入口、memoryRoot 只读', () => {
+  it('怎么管：没有体检开关和自动体检占位；灵敏度说明带数值、AGENTS.md 说明插件不再管理、最近删除入口、memoryRoot 只读', () => {
     const { onOpen } = setup({ value: section({ governance: { enabled: true, health: { sensitivity: 'conservative' }, globalPromoteTarget: 'agents-md' } }) })
-    expect(screen.getByRole('switch', { name: '记忆体检' })).toHaveAttribute('aria-checked', 'true')
-    expect(screen.getByText('规划中')).toBeInTheDocument()
-    for (const name of ['关闭', '每天', '每 7 天']) expect(tab('自动体检', name)).toBeDisabled()
+    expect(screen.queryByRole('switch')).toBeNull()
+    expect(screen.queryByText('记忆体检')).toBeNull()
+    expect(screen.queryByText('规划中')).toBeNull()
+    expect(screen.queryByRole('tablist', { name: '自动体检' })).toBeNull()
+    expect(screen.queryByText('体检已在配置文件里关闭')).toBeNull()
     expect(screen.getByText('健康分低于 60 分、或冲突等了 14 天以上时提醒你。')).toBeInTheDocument()
     fireEvent.click(tab('提醒的灵敏度', '积极'))
     expect(screen.getByText('健康分低于 80 分、或冲突等了 3 天以上时提醒你。')).toBeInTheDocument()
@@ -232,13 +234,13 @@ describe('保存：revision 冻结、冲突、非法值', () => {
     const { form } = setup()
     fireEvent.click(tab('场景模板', '办公'))
     fireEvent.change(screen.getByLabelText('自动带入的记忆上限（token）'), { target: { value: '5000' } })
-    fireEvent.click(screen.getByRole('switch', { name: '记忆体检' }))
+    fireEvent.click(tab('提醒的灵敏度', '积极'))
     fireEvent.click(save())
     const items = within(confirmDialog()).getAllByRole('listitem').map(el => el.textContent)
     expect(items).toEqual([
       '场景模板：编码 → 办公',
       '自动带入的记忆上限（token）：4000 → 5000',
-      '记忆体检：开 → 关',
+      '提醒的灵敏度：标准 → 积极',
     ])
     fireEvent.click(within(confirmDialog()).getByRole('button', { name: '取消' }))
     expect(screen.queryByRole('dialog')).toBeNull()
@@ -272,7 +274,7 @@ describe('保存：revision 冻结、冲突、非法值', () => {
     expect(save()).toBeDisabled()
     fireEvent.click(tab('超出上限时', '严格按上限'))
     fireEvent.change(screen.getByLabelText('自动带入的记忆上限（token）'), { target: { value: '5000' } })
-    fireEvent.click(screen.getByRole('switch', { name: '记忆体检' }))
+    fireEvent.click(tab('提醒的灵敏度', '积极'))
     expect(screen.getByText('已有对话的下一条消息会重新载入记忆，多消耗一些 token。')).toBeInTheDocument()
     await clickSave(form)
     expect(form.calls).toEqual([{
@@ -280,7 +282,7 @@ describe('保存：revision 冻结、冲突、非法值', () => {
       ops: [
         { op: 'set', path: ['snapshotTokenBudget'], value: 5000 },
         { op: 'set', path: ['snapshotOverflow'], value: 'strict' },
-        { op: 'set', path: ['governance', 'enabled'], value: false },
+        { op: 'set', path: ['governance', 'health', 'sensitivity'], value: 'proactive' },
       ],
     }])
     await waitFor(() => { expect(save()).toBeDisabled() })
@@ -338,7 +340,7 @@ describe('保存：revision 冻结、冲突、非法值', () => {
     setup({ writable: false })
     expect(screen.getByText('当前配置是只读的，改不了。')).toBeInTheDocument()
     expect(tab('场景模板', '办公')).toBeDisabled()
-    expect(screen.getByRole('switch', { name: '记忆体检' })).toBeDisabled()
+    expect(tab('提醒的灵敏度', '积极')).toBeDisabled()
   })
 })
 
@@ -411,20 +413,35 @@ describe('用户词典路径', () => {
   })
 })
 
-describe('体检关闭时置灰', () => {
-  it('自动体检、灵敏度、跨项目去向置灰保留；打开后后两项可用', () => {
-    setup({ value: section({ governance: { enabled: false, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global' } }) })
-    const disabledGroups = ['自动体检', '提醒的灵敏度', '跨项目的记忆放到']
-    for (const group of disabledGroups) {
+describe('配置文件关掉体检时置灰', () => {
+  const off = (enabled: boolean) => section({ governance: { enabled, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global' } })
+
+  it('灵敏度、跨项目去向置灰保留，说明都写「体检已在配置文件里关闭」；界面上没有能打开它的开关', () => {
+    setup({ value: off(false) })
+    for (const group of ['提醒的灵敏度', '跨项目的记忆放到']) {
       const list = screen.getByRole('tablist', { name: group })
       for (const button of within(list).getAllByRole('tab')) expect(button).toBeDisabled()
-      expect(list.closest('.pm-setting')).toHaveClass('pm-setting--disabled')
+      const item = list.closest('.pm-setting')!
+      expect(item).toHaveClass('pm-setting--disabled')
+      expect(item.querySelector('.pm-setting-hint')).toHaveTextContent(/^体检已在配置文件里关闭$/)
     }
-    expect(screen.getByText('健康分低于 70 分、或冲突等了 7 天以上时提醒你。')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('switch', { name: '记忆体检' }))
+    expect(screen.queryByRole('switch')).toBeNull()
+    // 不依赖体检的项照常可改
+    expect(tab('场景模板', '办公')).toBeEnabled()
+  })
+
+  it('别处在配置文件里打开体检后，两项恢复可用、说明换回原文', () => {
+    const { form } = setup({ value: off(false) })
+    act(() => { form.externalChange([{ op: 'set', path: ['governance', 'enabled'], value: true }]) })
     expect(tab('提醒的灵敏度', '积极')).toBeEnabled()
     expect(tab('跨项目的记忆放到', 'AGENTS.md')).toBeEnabled()
-    expect(tab('自动体检', '每天')).toBeDisabled()
+    expect(screen.getByText('健康分低于 70 分、或冲突等了 7 天以上时提醒你。')).toBeInTheDocument()
+    expect(screen.queryByText('体检已在配置文件里关闭')).toBeNull()
+  })
+
+  it('英文文案同一口径', () => {
+    const enT = createTranslator(en)
+    expect(enT('settings.governanceOff')).toBe('Checkups are turned off in the config file')
   })
 })
 
@@ -440,8 +457,8 @@ describe('状态卡', () => {
     expect(summarize(views(pending(), health(NOW), library(1)), false, NOW, t).detail).toBe('共 1 条记忆')
   })
 
-  it('结论按优先级：体检关闭 → 密钥 → 等你决定 → 没有记忆 → 没体检 → 良好', () => {
-    expect(summarize(views(), false, NOW, t)).toEqual({ conclusion: '体检已关闭', detail: '共 3 条记忆' })
+  it('结论按优先级：配置文件关掉体检 → 密钥 → 等你决定 → 没有记忆 → 没体检 → 良好', () => {
+    expect(summarize(views(), false, NOW, t)).toEqual({ conclusion: '体检已在配置文件里关闭', detail: '共 3 条记忆' })
     expect(summarize(views(pending([{ kind: 'secret', level: 'must-fix', memory: memory() }, conflict])), true, NOW, t).marker).toBe('secret')
     expect(summarize(views(pending([conflict, conflict, unreadable])), true, NOW, t))
       .toEqual({ marker: 'pending', conclusion: '有 2 处等你决定', detail: '共 3 条记忆 · 上次体检：刚刚' })
@@ -456,156 +473,38 @@ describe('状态卡', () => {
     expect(summarize(views(pending([unreadable])), true, NOW, t)).toEqual({ marker: 'ok', conclusion: '状态良好', detail: '共 3 条记忆 · 上次体检：刚刚' })
   })
 
-  it('建议整理不算「等你决定」：只有建议时仍是状态良好，「打开记忆页 ›」去健康', () => {
+  it('建议整理不算「等你决定」：只有建议时仍是状态良好', () => {
     const advice = { kind: 'advice' as const, level: 'advice' as const, type: 'stale' as const, memories: [memory()] }
     expect(summarize(views(pending([advice, advice, conflict])), true, NOW, t).conclusion).toBe('有 1 处等你决定')
     expect(summarize(views(pending([advice])), true, NOW, t)).toEqual({ marker: 'ok', conclusion: '状态良好', detail: '共 3 条记忆 · 上次体检：刚刚' })
-    expect(openTarget(pending([advice]))).toBe('health')
   })
 
-  it('读视图渲染结论；没有等你决定的事时「打开记忆页 ›」去健康；没有会话时只写一句提示', () => {
+  it('只有结论、条数和上次体检、「打开记忆页 ›」：没有「立即体检」、token 说明和体检结果行', () => {
+    const { container } = setup()
+    const banner = container.querySelector('.pm-banner') as HTMLElement
+    expect(within(banner).getByText('状态良好')).toBeInTheDocument()
+    expect(within(banner).getByText('共 3 条记忆 · 上次体检：刚刚')).toBeInTheDocument()
+    expect(within(banner).getAllByRole('button').map(b => b.textContent)).toEqual(['打开记忆页 ›'])
+    expect(screen.queryByRole('button', { name: /立即体检|正在体检|再试一次/ })).toBeNull()
+    expect(banner).not.toHaveTextContent(/token/)
+    expect(within(banner).queryByRole('status')).toBeNull()
+  })
+
+  it('「打开记忆页 ›」落在「全部」的处理视图，不管有没有等你决定的事', () => {
     const { onOpen, gateway } = setup()
-    expect(screen.getByText('状态良好')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '打开记忆页 ›' }))
-    expect(onOpen).toHaveBeenCalledWith({ tab: 'health' })
-    act(() => { gateway.setSession({ kind: 'none' }) })
-    expect(screen.getByText('开一个会话后这里显示记忆状态')).toBeInTheDocument()
-  })
-
-  it('有等你决定的事（含密钥）时「打开记忆页 ›」去待处理；只有读不出的文件仍去健康', () => {
-    const { onOpen, gateway } = setup()
+    expect(onOpen).toHaveBeenLastCalledWith({ view: 'todo', scope: { kind: 'all' } })
     act(() => { gateway.setView('pending', pending([conflict])) })
     fireEvent.click(screen.getByRole('button', { name: '打开记忆页 ›' }))
-    expect(onOpen).toHaveBeenLastCalledWith({ tab: 'pending' })
-    act(() => { gateway.setView('pending', pending([{ kind: 'secret', level: 'must-fix', memory: memory() }])) })
-    fireEvent.click(screen.getByRole('button', { name: '打开记忆页 ›' }))
-    expect(onOpen).toHaveBeenLastCalledWith({ tab: 'pending' })
-    act(() => { gateway.setView('pending', pending([unreadable])) })
-    fireEvent.click(screen.getByRole('button', { name: '打开记忆页 ›' }))
-    expect(onOpen).toHaveBeenLastCalledWith({ tab: 'health' })
-  })
-})
-
-describe('状态卡「立即体检」', () => {
-  let onOpen = vi.fn()
-  let container: HTMLElement
-  function render(init: Parameters<typeof createFakeGateway>[0] = {}, value?: Record<string, unknown>) {
-    const gateway = createFakeGateway({ views: { pending: pending(), health: health(NOW), library: library(3) }, ...init })
-    onOpen = vi.fn()
-    container = renderInShell(<SettingsPage form={createFakeConfigForm(value ? { value } : {})} onOpenMemoryPage={onOpen} now={NOW} />, gateway).container
-    return gateway
-  }
-  const button = () => screen.getByRole('button', { name: /立即体检|正在体检|再试一次/ })
-  /** 按钮下面那一行。 */
-  const statusLine = () => container.querySelector('.pm-status-scan')!
-  const scanned = (patch: Partial<Extract<MemoryCommandResult, { ok: true }>> = {}): MemoryCommandResult =>
-    ({ ok: true, cmd: 'scan', notes: [], added: { pending: 0, advice: 0 }, ...patch })
-  async function scan(result: MemoryCommandResult) {
-    render({ respond: () => result })
-    await act(async () => { fireEvent.click(button()) })
-  }
-
-  it('有新增：和页头同一行，链接经导航直达记忆页对应的 tab 和组', async () => {
-    await scan(scanned({ added: { pending: 1, advice: 2, pendingLevel: 'must-fix' } }))
-    // 原地跑：完成后不自动跳走
-    expect(onOpen).not.toHaveBeenCalled()
-    expect(statusLine()).toHaveTextContent(/^体检完成：新增 1 条待处理 ›·新增 2 条建议 ›·查看分数 ›$/)
-    fireEvent.click(screen.getByRole('button', { name: '新增 1 条待处理 ›' }))
-    expect(onOpen).toHaveBeenLastCalledWith({ tab: 'pending', level: 'must-fix' })
-    fireEvent.click(screen.getByRole('button', { name: '新增 2 条建议 ›' }))
-    expect(onOpen).toHaveBeenLastCalledWith({ tab: 'pending', level: 'advice' })
-    fireEvent.click(screen.getByRole('button', { name: '查看分数 ›' }))
-    expect(onOpen).toHaveBeenLastCalledWith({ tab: 'health' })
+    expect(onOpen).toHaveBeenLastCalledWith({ view: 'todo', scope: { kind: 'all' } })
   })
 
-  it('新增的待处理分在两组：链接落在待处理顶部（不带组）', async () => {
-    await scan(scanned({ added: { pending: 2, advice: 0 } }))
-    fireEvent.click(screen.getByRole('button', { name: '新增 2 条待处理 ›' }))
-    expect(onOpen).toHaveBeenLastCalledWith({ tab: 'pending' })
-  })
-
-  it('只有建议：没有「待处理」那段', async () => {
-    await scan(scanned({ added: { pending: 0, advice: 1 } }))
-    expect(statusLine()).toHaveTextContent(/^体检完成：新增 1 条建议 ›·查看分数 ›$/)
-  })
-
-  it('没有新增：写没有发现新问题；基线检查被跳过的说明附在后面', async () => {
-    await scan(scanned({ notes: ['baseline-session-scoped'] }))
-    expect(statusLine()).toHaveTextContent(/^没有发现新问题·查看分数 ›这次没有对照本项目的 AGENTS.md 检查冲突/)
-    expect(within(statusLine() as HTMLElement).getAllByRole('button').map(b => b.textContent)).toEqual(['查看分数 ›'])
-  })
-
-  it('内容检查没做完、分了批：说明附在后面', async () => {
-    await scan(scanned({ added: { pending: 1, advice: 0 }, notes: ['semantic-failed', 'semantic-batched'], semanticBatches: 2 }))
-    expect(statusLine()).toHaveTextContent(/^体检完成：新增 1 条待处理 ›·查看分数 ›内容检查没有完成，这次只更新了规则检查。记忆较多，分 2 批检查，不同批之间的冲突和重复可能查不出。$/)
-  })
-
-  it('宿主报了用量：结果行末尾写实际用量；没报就不写', async () => {
-    await scan(scanned({ usageTokens: 12345 }))
-    expect(statusLine()).toHaveTextContent(/^没有发现新问题·查看分数 ›·本次用了约 12,345 token$/)
-    cleanup()
-    await scan(scanned())
-    expect(statusLine()).not.toHaveTextContent(/token/)
-  })
-
-  it('按钮下常驻一行 token 消耗说明；体检关闭、没有可用会话时不写', () => {
-    const gateway = render()
-    expect(container.querySelector('.pm-scan-hint')).toHaveTextContent(/^会用当前对话的模型检查记忆内容，记忆越多，用的 token 越多。$/)
+  it('结论取配置文件里的体检开关；没有会话时只写一句提示', () => {
+    const { gateway } = setup({ value: section({ governance: { enabled: false, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global' } }) })
+    expect(screen.getAllByText('体检已在配置文件里关闭')[0]).toHaveClass('pm-banner-title')
     act(() => { gateway.setSession({ kind: 'none' }) })
-    expect(container.querySelector('.pm-scan-hint')).toBeNull()
-    cleanup()
-    render({}, section({ governance: { enabled: false, health: { sensitivity: 'standard' }, globalPromoteTarget: 'plugin-global' } }))
-    expect(container.querySelector('.pm-scan-hint')).toBeNull()
-  })
-
-  it('命令回来说体检已关闭：只写体检已关闭', async () => {
-    await scan({ ok: false, cmd: 'scan', code: 'governance-disabled', detail: '体检已关闭，可在插件设置里打开' })
-    expect(statusLine()).toHaveTextContent(/^体检已关闭$/)
-  })
-
-  it('发 /memory scan，体检当前选中会话所在的项目；进行中按钮禁用，完成后写一句（没带新增条数时只写体检完成）', async () => {
-    let finish: (r: { ok: true; cmd: 'scan' }) => void = () => {}
-    const gateway = render({ currentWorkspace: '/w/app', respond: () => new Promise((resolve) => { finish = resolve }) })
-    fireEvent.click(button())
-    expect(gateway.executed).toEqual([{ sessionId: 'fake-session', command: { cmd: 'scan', workspacePath: '/w/app' } }])
-    expect(button()).toHaveTextContent('正在体检…')
-    expect(button()).toBeDisabled()
-    await act(async () => { finish({ ok: true, cmd: 'scan' }) })
-    expect(button()).toHaveTextContent('立即体检')
-    expect(screen.getByText('体检完成。')).toBeInTheDocument()
-  })
-
-  it('范围正在别处体检（命令回 busy）：按钮显示「体检中…」并禁用，不报错；别处体检完、视图更新后恢复', async () => {
-    const gateway = render({ respond: () => ({ ok: false, cmd: 'scan', code: 'busy', detail: '全局 正在体检，查完再来' }) })
-    await act(async () => { fireEvent.click(button()) })
-    expect(screen.getByRole('button', { name: '体检中…' })).toBeDisabled()
-    expect(statusLine()).toHaveTextContent(/^$/)
-    act(() => { gateway.setView('health', health(NOW + 1)) })
-    expect(button()).toHaveTextContent('立即体检')
-    expect(button()).not.toBeDisabled()
-  })
-
-  it('插件页没有选中的会话时体检全部层', async () => {
-    const gateway = render()
-    await act(async () => { fireEvent.click(button()) })
-    expect(gateway.executed[0]!.command).toEqual({ cmd: 'scan' })
-  })
-
-  it('失败：原位写原因并提示在对话里让 agent 体检，按钮变「再试一次」', async () => {
-    render({ respond: () => ({ ok: false, cmd: 'scan', code: 'llm-unavailable', detail: 'x' }) })
-    await act(async () => { fireEvent.click(button()) })
-    expect(screen.getByText(/借用的会话拿不到模型/)).toHaveTextContent('可以在对话里让 agent 体检。')
-    expect(button()).toHaveTextContent('再试一次')
-  })
-
-  it('体检关闭或没有会话：按钮不可用，点了不发命令', () => {
-    const gateway = render({}, section({ governance: { enabled: false, health: { sensitivity: 'standard' }, globalPromoteTarget: 'plugin-global' } }))
-    expect(button()).toHaveAttribute('aria-disabled', 'true')
-    fireEvent.click(button())
-    act(() => { gateway.setSession({ kind: 'none' }) })
-    expect(button()).toHaveAttribute('aria-disabled', 'true')
-    fireEvent.click(button())
-    expect(gateway.executed).toEqual([])
+    expect(screen.getByText('开一个会话后这里显示记忆状态')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '打开记忆页 ›' })).toBeInTheDocument()
   })
 })
 

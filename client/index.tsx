@@ -48,7 +48,7 @@ export function apply(ctx: HostContext): void {
   ctx.locale.register(NS, { zh, en })
   const t = ctx.locale.bind(NS)
   const nav = createNavStore()
-  // 宿主有插件页导航才有「设置」「去设置里打开 ›」
+  // 宿主有插件页导航才有「设置」
   ctx.inject(['pluginNavigation'], (scope) => {
     scope.effect(() => {
       nav.provide('settings', () => { scope.pluginNavigation.openBundle(PACKAGE_NAME) })

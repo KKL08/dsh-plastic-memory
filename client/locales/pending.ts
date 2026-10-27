@@ -29,9 +29,8 @@ export const pendingZh = {
   'pending.ignored.show': '查看',
   'pending.ignored.hide': '收起',
   'pending.ignored.unignore': '取消忽略',
-  'pending.off.title': '体检已关闭',
-  'pending.off.body': '打开后这里会列出冲突、提升候选和超出上限的提醒。密钥和读不出的文件照常提示。',
-  'pending.off.action': '去设置里打开 ›',
+  'pending.off.title': '体检已在配置文件里关闭',
+  'pending.off.body': '在配置文件里把 governance.enabled 改回 true，这里就会列出冲突、提升候选和超出上限的提醒。密钥和读不出的文件照常提示。',
 
   'pending.secret.title': '这条记忆里有密钥',
   'pending.secret.body': '原文已打码。不是密钥的话，打开文件改写那一段，下次就不再提示。',
@@ -216,9 +215,8 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.ignored.show': 'Show',
   'pending.ignored.hide': 'Hide',
   'pending.ignored.unignore': 'Unignore',
-  'pending.off.title': 'Checkups are off',
-  'pending.off.body': 'Turn them on to see conflicts, promotion candidates, and over-limit reminders here. Secrets and unreadable files are still shown.',
-  'pending.off.action': 'Turn on in Settings ›',
+  'pending.off.title': 'Checkups are turned off in the config file',
+  'pending.off.body': 'Set governance.enabled back to true in the config file to see conflicts, promotion candidates, and over-limit reminders here. Secrets and unreadable files are still shown.',
 
   'pending.secret.title': 'This memory contains a secret',
   'pending.secret.body': 'The original is masked. If it is not a secret, open the file and rewrite that part; it will not be flagged again.',
