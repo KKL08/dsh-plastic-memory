@@ -625,8 +625,8 @@ async function dispatch(
           // 锁内按磁盘上的现状再核对一次：读过之后被改过就原样不写
           isWritten = cur.status === 'active' && !isStale(cur, kept.base)
           if (!isWritten) return cur
-          const { handEdited: _handEdited, ...rest } = cur
-          return { ...rest, content, name, summary, tags, updatedAt: now, lastConfirmedAt: now }
+          // 标手改：出处还是原来的会话，「已手编，出处可能不对应」照实；模型之后要改写、替代它得先问用户（同手改文件）
+          return { ...cur, content, name, summary, tags, updatedAt: now, lastConfirmedAt: now, handEdited: true }
         }, hint)
       } catch (error) {
         if (!(error instanceof RecordNotFoundError)) throw error

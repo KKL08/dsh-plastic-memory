@@ -2041,14 +2041,14 @@ describe('edit-memory（建议整理的直接改）', () => {
     cmd: 'edit-memory', memoryId, layer: layerOf(workspacePath), base, content: '新正文', name: '新名称', summary: '新摘要', tags: ['新标签'], ...fields,
   })
 
-  it('文件里 content / name / summary / tags 是新值；updatedAt、lastConfirmedAt 刷新，digest 重算，手编标记清除，索引行重写；其余字段一概不动', async () => {
+  it('文件里 content / name / summary / tags 是新值；updatedAt、lastConfirmedAt 刷新，digest 重算，标手改（模型改写前要先问用户），索引行重写；其余字段一概不动', async () => {
     const e = env()
     const original = record({
       id: 'mem_e', name: '发版流程', type: 'project', scope: 'workspace', workspacePath: SESSION_WS,
       content: '旧正文', summary: '旧摘要', tags: ['发版'],
       source: { sessionId: 'sess-old', eventRange: [3, 9], sourceMode: 'user-behavior' },
       createdAt: 100, updatedAt: 200, lastConfirmedAt: 300, validFrom: 50, validTo: Date.UTC(2100, 0, 1),
-      confidence: 0.7, supersedes: ['mem_older'], handEdited: true, recallCount: 4, lastRecalledAt: 500,
+      confidence: 0.7, supersedes: ['mem_older'], recallCount: 4, lastRecalledAt: 500,
     })
     await e.store.create(original)
     const base = await baseOf(e, 'mem_e')
@@ -2058,7 +2058,7 @@ describe('edit-memory（建议整理的直接改）', () => {
     const after = (await e.store.get('mem_e', { workspacePath: SESSION_WS }))!
     expect([after.content, after.name, after.summary, after.tags]).toEqual(['新正文', '发版步骤', '新摘要', ['发版', 'npm']])
     expect([after.updatedAt, after.lastConfirmedAt]).toEqual([LATER, LATER])
-    expect(after.handEdited).toBeUndefined()
+    expect(after.handEdited).toBe(true)
     const changed = ['content', 'name', 'summary', 'tags', 'updatedAt', 'lastConfirmedAt', 'handEdited'] as const
     const rest = (r: typeof original) => Object.fromEntries(Object.entries(r).filter(([k]) => !(changed as readonly string[]).includes(k)))
     expect(rest(after)).toEqual(rest(original))
@@ -2067,7 +2067,7 @@ describe('edit-memory（建议整理的直接改）', () => {
     expect(body.filePath).toBe(path)
     const fm = splitFrontmatter(await readFile(path, 'utf8')).data
     expect(fm.digest).toBe(computeDigest('发版步骤', '新摘要', '新正文'))
-    expect(fm).not.toHaveProperty('handEdited')
+    expect(fm.handEdited).toBe(true)
     const index = await readFile(join(dirname(path), INDEX_FILE), 'utf8')
     expect(index).toContain('新摘要')
     expect(index).not.toContain('旧摘要')
@@ -2096,6 +2096,17 @@ describe('edit-memory（建议整理的直接改）', () => {
     expect(await fileOf(e, 'mem_u', workspacePath)).toBe(path)
     expect(await readFile(path, 'utf8')).toBe(before)
     expect(await allEntries(e)).toEqual([])
+  })
+
+  it('改过之后模型不带 force 改写这条：hand-edited 拒绝，文件不动', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_g', name: '甲', content: '旧正文', scope: 'workspace', workspacePath: SESSION_WS }))
+    ok(await e.run(edit('mem_g', SESSION_WS, await baseOf(e, 'mem_g'))))
+    const r = await runSavePipeline(candidate({ action: 'update', id: 'mem_g', scope: 'workspace', content: '模型想写的' }), {
+      store: e.store, registry, workspacePath: SESSION_WS, session: { id: 'sess-1', lastSeq: 1 }, snapshots: e.snapshots, decisions: e.decisions,
+    })
+    expect(r).toMatchObject({ kind: 'rejected', code: 'hand-edited' })
+    expect((await e.store.get('mem_g', { workspacePath: SESSION_WS }))!.content).toBe('新正文')
   })
 
   it('体检关闭时照样能改、能撤销', async () => {
@@ -2246,6 +2257,7 @@ describe('merge-memories（内容重复的直接合并）', () => {
     expect(body.memoryIds).toEqual([keptId, removedId])
     const kept = (await e.store.get(keptId, { workspacePath: ws(keptId), isExactLayer: true }))!
     expect([kept.status, kept.content, kept.name, kept.summary, kept.tags, kept.updatedAt]).toEqual(['active', '合并后的正文', '合并后', '合并摘要', ['甲', '乙'], LATER])
+    expect(kept.handEdited).toBe(true)
     const removed = (await e.store.get(removedId, { workspacePath: ws(removedId), isExactLayer: true }))!
     // 删除时刻用注入的时钟，最近删除的保留期才算得准
     expect([removed.status, removed.updatedAt, removed.deletedAt]).toEqual(['deleted', LATER, LATER])
