@@ -36,11 +36,16 @@ export const pendingDecisionSchema = z.object({
   /** 冲突：最近一次扫描时双方的内容指纹（垂直冲突含基线），见 conflictFingerprint；提升候选：记忆内容指纹；超限：档位号；
    *  直接改、移到项目：写完后的内容指纹。旧条目没有此字段。 */
   fingerprint: z.string().optional(),
-  /** 用户已裁决：条目留作记录。两边都留的指纹不变就不再报；删一方的留着供撤销，snapshotId 是删败方前的快照。 */
+  /**
+   * 用户已裁决：条目留作记录。两边都留的指纹不变就不再报；删一方的留着供撤销，snapshotId 是删败方前的快照。
+   * isBornSettled：提升候选在等你决定之外就地处理（对话卡片、右侧栏）时账本里还没有它，这条是处理完才记的；
+   * 撤销时移出账本、回到没点过的样子，不重开进等你决定。
+   */
   settled: z.object({
     verdict: z.enum(SETTLED_VERDICTS),
     at: z.number(),
     snapshotId: z.string().optional(),
+    isBornSettled: z.literal(true).optional(),
   }).optional(),
 })
 export type PendingDecision = z.infer<typeof pendingDecisionSchema>

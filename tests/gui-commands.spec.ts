@@ -1379,6 +1379,34 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
     expect([rec.scope, rec.globalCandidate]).toEqual(['workspace', true])
   })
 
+  it.each([
+    ['keep-local-memory'],
+    ['promote-memory'],
+  ] as const)('就地%s后就地撤销（点之前账本里没有它）：记忆回到候选、账本里的那条移除，不进等你决定、不亮圆点；之后体检照旧同步', async (cmd) => {
+    const e = env({ llm: quietLlm })
+    const memoryId = await saveCandidate(e)
+    const body = ok(await e.run(cmd === 'promote-memory' ? { cmd, memoryId, layer: wsLayer, isCandidateRequired: true } : { cmd, memoryId, layer: wsLayer }))
+    ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
+    const rec = (await e.store.get(memoryId))!
+    expect([rec.scope, rec.workspacePath, rec.globalCandidate]).toEqual(['workspace', SESSION_WS, true])
+    expect(await allEntries(e)).toEqual([])
+    const view = await pendingView(e)
+    expect([ledgerItems(view), view.dot]).toEqual([[], 'none'])
+    ok(await e.run({ cmd: 'scan' }))
+    expect(await candidateIds(e)).toEqual([memoryId])
+  })
+
+  it('就地处理的是体检已挂进等你决定的那条：撤销照旧重开那一条（点之前它就在等你决定里）', async () => {
+    const e = env({ llm: quietLlm })
+    const memoryId = await saveCandidate(e)
+    ok(await e.run({ cmd: 'scan' }))
+    const [open] = await e.decisions.list()
+    const body = ok(await e.run({ cmd: 'keep-local-memory', memoryId, layer: wsLayer }))
+    ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
+    expect((await e.decisions.list()).map(d => d.id)).toEqual([open!.id])
+    expect(await candidateIds(e)).toEqual([memoryId])
+  })
+
   it('keep-local-memory：不是候选、全局的、已删的、不存在的 → not-found，账本不动', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_plain', name: '普通', scope: 'workspace', workspacePath: SESSION_WS }))

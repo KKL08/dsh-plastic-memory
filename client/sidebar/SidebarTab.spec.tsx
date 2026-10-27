@@ -363,6 +363,22 @@ describe('SidebarTab 这次新写入的：提升候选就地处理', () => {
     expect(row('n1').queryByRole('button', { name: '撤销' })).toBeNull()
   })
 
+  it('新写入的候选就地提升再撤销：只发提升与撤销两条命令，底部不出现「还有 N 处待处理」', async () => {
+    const { gateway } = setup(views(cand, plain), command => command.cmd === 'undo'
+      ? { ok: true, cmd: command.cmd, decisionId: command.decisionId, memoryIds: ['n1'] }
+      : { ok: true, cmd: command.cmd, decisionId: 'pd_9', memoryIds: ['n1'] })
+    await act(async () => { fireEvent.click(row('n1').getByRole('button', { name: '提升为全局' })) })
+    act(() => { gateway.setView('library', library(pref, proj, glob, { ...cand, scope: 'global', workspacePath: undefined, promotion: undefined }, plain)) })
+    await act(async () => { fireEvent.click(row('n1').getByRole('button', { name: '撤销' })) })
+    // 服务端撤销后：记忆回到候选，账本里那条移除（待处理视图照旧为空）
+    act(() => { gateway.setView('library', library(pref, proj, glob, cand, plain)) })
+    act(() => { gateway.setView('pending', pending()) })
+    expect(gateway.executed.map(e => e.command.cmd)).toEqual(['promote-memory', 'undo'])
+    expect(row('n1').getByRole('button', { name: '提升为全局' })).toBeInTheDocument()
+    expect(screen.queryByText(/处待处理/)).toBeNull()
+    expect(screen.getByText(/本项目 \d+ 条记忆/)).toBeInTheDocument()
+  })
+
   it('别处（对话卡片、待处理）处理过的按视图换成结果文字：提升了的在全局层，留下的标 kept-local', () => {
     const promoted = { ...cand, scope: 'global' as const, workspacePath: undefined, promotion: undefined }
     const kept = memory({ id: 'n3', type: 'knowledge', content: '文档用中文。', promotion: 'kept-local' })

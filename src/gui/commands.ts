@@ -282,10 +282,10 @@ async function dispatch(
   /**
    * 按记忆 id 提升或留在本项目。等你决定里已有它的提升候选条目：先认领那一条，和待处理卡、体检、另一处的就地处理互斥，
    * 认领后条目仍未决、记忆仍符合条件才做，做完结清那一条。还没有条目：直接做，做成之后才记一条已结清的，
-   * 账本里不留没做成的条目，体检也清不掉一条还没记的。
+   * 账本里不留没做成的条目，体检也清不掉一条还没记的。isInPlace（对话卡片、右侧栏）时这样新记的条目标 isBornSettled，撤销时移出账本。
    */
   const onCandidateEntry = async (
-    memoryId: string, layer: GuiLayerRef | undefined, isEligible: (r: MemoryRecord) => boolean,
+    memoryId: string, layer: GuiLayerRef | undefined, isEligible: (r: MemoryRecord) => boolean, isInPlace: boolean,
     act: (rec: MemoryRecord, settle: SettleCandidate) => Promise<MemoryCommandResult>,
   ): Promise<MemoryCommandResult> => {
     const seen = await locate(memoryId, layer)
@@ -294,10 +294,10 @@ async function dispatch(
       .find(e => kindOf(e) === 'promote-candidate' && e.memoryIds[0] === seen.id && e.workspaces?.[0] === seen.workspacePath)
     if (open === undefined) {
       return await act(seen, async (verdict, opts) => {
-        const { entry } = await deps.decisions.upsert(
+        const { entry, created } = await deps.decisions.upsert(
           { kind: 'promote-candidate', memoryIds: [seen.id], summary: seen.summary, workspaces: [seen.workspacePath!], fingerprint: candidateFingerprint(seen) }, now,
         )
-        await deps.decisions.settle(entry.id, verdict, now, opts)
+        await deps.decisions.settle(entry.id, verdict, now, created && isInPlace ? { ...opts, isBornSettled: true } : opts)
         return entry.id
       })
     }
@@ -371,7 +371,9 @@ async function dispatch(
         if (!(await deps.store.updateIfLive(rec, r => ({ ...r, globalCandidate: true })))) return notFound(memoryId)
         restored = [memoryId]
       }
-      await deps.decisions.unsettle(entry.id)
+      // 就地处理时才记的条目：移出账本，回到没点过的样子；其余回到待处理
+      if (entry.settled.isBornSettled === true) await deps.decisions.remove(entry.id)
+      else await deps.decisions.unsettle(entry.id)
       return { ok: true, cmd, decisionId: entry.id, memoryIds: restored, ...(snapshotId !== undefined ? { snapshotId } : {}) }
     }
 
@@ -432,7 +434,8 @@ async function dispatch(
     case 'promote-memory': {
       // 只提升指明的那一份、且它此刻仍在项目里：已提升、已删、不存在的什么都不动；就地提升（isCandidateRequired）还要它此刻仍是候选，
       // 别处刚「留在本项目」的不再提升。和 promote 一样留账供 14 天内撤销：按提升候选记（已在等你决定里时结清那一条），撤销走 undo
-      return await onCandidateEntry(command.memoryId, command.layer, command.isCandidateRequired === true ? isCandidate : isProjectMemory, async (rec, settle) => {
+      const isInPlace = command.isCandidateRequired === true
+      return await onCandidateEntry(command.memoryId, command.layer, isInPlace ? isCandidate : isProjectMemory, isInPlace, async (rec, settle) => {
         const r = await executePromote(
           { confirmedIds: [rec.id], target: 'global', allowCrossWorkspace: command.allowCrossWorkspace },
           gov, { store: deps.store, agentsMd: deps.agentsMd, snapshots: deps.snapshots, now: () => now },
@@ -447,7 +450,7 @@ async function dispatch(
 
     case 'keep-local-memory':
       // 只认此刻仍是候选的那一份：已提升、已留下、已删的什么都不动
-      return await onCandidateEntry(command.memoryId, command.layer, isCandidate, (rec, settle) =>
+      return await onCandidateEntry(command.memoryId, command.layer, isCandidate, true, (rec, settle) =>
         keepLocal(rec.id, rec.workspacePath, command.allowCrossWorkspace, settle, { target: { kind: 'workspace', workspacePath: rec.workspacePath! } }))
 
     case 'move-memory': {
