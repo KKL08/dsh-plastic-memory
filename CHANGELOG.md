@@ -7,7 +7,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- When the model rewrites or replaces an existing memory, the turn's card and
+  the sidebar's 「这次新写入的」 list show it, with the text before and after,
+  and offer 「撤销修改」 for 14 days. Undo is refused once the memory has been
+  changed again since.
+
 ### Changed
+- The model no longer rewrites or replaces a memory you edited by hand without
+  asking first: `memory_save` returns the current text and waits for your
+  go-ahead before overwriting.
 - The memory snapshot now opens with a short note addressed to the host's
   compaction engine: the entries below it are reinjected after every
   compaction, so the checkpoint should leave their content out and only keep
