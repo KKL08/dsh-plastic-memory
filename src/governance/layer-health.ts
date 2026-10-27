@@ -5,7 +5,7 @@ import type { AdviceIgnore, Finding, PendingDecision, ScanCacheEntry } from './s
 import { FINDING_TYPES } from './schema.ts'
 import { runRuleScan, buildMalformedFindings } from './rule-scan.ts'
 import { computeHealth, type HealthScore } from './scoring.ts'
-import { applyIgnores, type IgnoredAdvice } from './advice-ignores.ts'
+import { adviceFingerprint, applyIgnores, type IgnoredAdvice } from './advice-ignores.ts'
 import type { DirectoryNote, LocatedRecord, QuarantineEntry } from '../storage/table.ts'
 
 /** 健康档位的用户面标签（scan 体检行与 health message 共用一份，枚举值仍是 green/amber/red）。 */
@@ -109,7 +109,7 @@ export interface LayerHealthResult {
  *   若 ws 层也不计就两层都失明；
  * - conflict 还须仍在待决账本里（pairKey 匹配，不看 baselineRef 措辞）——用户裁决 keep-both/dismiss 后双方记忆都在、
  *   缓存过滤不掉，不对账会出现"刚裁决完分数纹丝不动"的自相矛盾；
- * - 其余语义 findings 涉及的记忆在那次体检之后改过（updatedAt 晚于缓存时间）就不计。
+ * - 其余语义 findings 涉及的记忆在那次体检之后改过（updatedAt 晚于缓存时间，或指纹与体检时记下的不同）就不计。
  * 最后剔除用户忽略的建议（指纹仍对得上的），评分公式不动；新鲜度不可忽略。
  */
 export function scoreLayer(deps: LayerHealthDeps, data: LayerPreread, layer: LayerRef, now: number): LayerHealthResult {
@@ -124,8 +124,14 @@ export function scoreLayer(deps: LayerHealthDeps, data: LayerPreread, layer: Lay
   const cached = data.cache.get(layerCacheKey(layer))
   const pendingKeys = new Set(data.pending.map(pairKey))
   const alive = (id: string) => data.byId.get(id)?.status === 'active'
-  // 体检之后改过的记忆，缓存里关于它的结论（重复、放错层、表述不清）已不作数，下次体检再说；冲突走账本指纹，不在此列
-  const editedSinceScan = (id: string) => cached !== undefined && (data.byId.get(id)?.updatedAt ?? 0) > cached.scannedAt
+  // 体检之后改过的记忆，缓存里关于它的结论（重复、放错层、表述不清）已不作数，下次体检再说；冲突走账本指纹，不在此列。
+  // 手改文件不动 updatedAt，靠体检时记下的指纹认出；旧缓存没有指纹，只看 updatedAt
+  const editedSinceScan = (id: string) => {
+    const r = data.byId.get(id)
+    if (cached === undefined || r === undefined) return false
+    const scannedFingerprint = cached.fingerprints?.[id]
+    return r.updatedAt > cached.scannedAt || (scannedFingerprint !== undefined && adviceFingerprint(r) !== scannedFingerprint)
+  }
   const semanticScan = (cached?.findings ?? []).filter(f => {
     if (f.memoryIds.length === 0) return false
     if (!f.memoryIds.every(alive) || !f.memoryIds.some(id => liveIds.has(id))) return false
@@ -156,6 +162,16 @@ export function scoreLayer(deps: LayerHealthDeps, data: LayerPreread, layer: Lay
     staleIds: freshness.filter(f => f.ratio > 1).map(f => f.id),
     promoteCandidates: layer.kind === 'workspace' ? records.filter(r => r.globalCandidate).length : 0,
   }
+}
+
+/** 语义缓存里记下的记忆指纹：各发现涉及、此刻读得到的记忆，按 id（见 ScanCacheEntry.fingerprints）。 */
+export function findingFingerprints(findings: readonly Finding[], byId: ReadonlyMap<string, MemoryRecord>): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const id of new Set(findings.flatMap(f => f.memoryIds))) {
+    const r = byId.get(id)
+    if (r !== undefined) out[id] = adviceFingerprint(r)
+  }
+  return out
 }
 
 /**

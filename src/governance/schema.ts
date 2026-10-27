@@ -98,6 +98,8 @@ export const scanCacheSchema = z.object({
   scannedAt: z.number(),
   scope: z.string(), // workspacePath 或 'all'
   findings: z.array(findingSchema),
+  /** 体检时各发现涉及的记忆指纹（adviceFingerprint），按记忆 id：手改文件不动 updatedAt，评分靠它认出体检后改过。旧缓存没有此字段。 */
+  fingerprints: z.record(z.string(), z.string()).optional(),
 })
 export type ScanCacheEntry = z.infer<typeof scanCacheSchema>
 

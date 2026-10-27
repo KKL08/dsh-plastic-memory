@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
@@ -7,7 +7,9 @@ import { GLOBAL_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/p
 import type { RecallStats } from '../src/storage/schema.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { executeScan, cacheKey, renderScanResult, type ScanToolDeps, type ScanArgs, type SingleScanResult } from '../src/tools/scan.ts'
-import { GLOBAL_CACHE_KEY } from '../src/governance/layer-health.ts'
+import { GLOBAL_CACHE_KEY, scoreLayer } from '../src/governance/layer-health.ts'
+import { prereadLayers } from '../src/tools/layer-preread.ts'
+import { encodeRecord } from '../src/storage/frontmatter.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
@@ -739,5 +741,39 @@ describe('executeScan 提升候选入账', () => {
     await deps.store.put(record({ id: 'mem_b1', scope: 'workspace', workspacePath: '/proj-b', status: 'deleted', deletedAt: 9000 }))
     await executeScan({ scopes: ['/proj-a'], layers: 'rule' }, deps, fakeExec())
     expect((await candidates(deps)).map(d => d.memoryIds[0]).sort()).toEqual(['mem_a1', 'mem_b1'])
+  })
+})
+
+describe('体检后手改记忆文件（「打开文件」直接改，frontmatter 的 updatedAt 不动）', () => {
+  const redundancyLlm = {
+    complete: async () => JSON.stringify({
+      findings: [{ type: 'redundancy', memoryIds: ['mem_a', 'mem_b'], summary: '说的是一回事', suggestedAction: '删一条' }],
+    }),
+  }
+
+  async function scanned() {
+    const { root, store } = await fileBackedStore({
+      [`${GLOBAL_DIR}/a.md`]: encodeRecord(record({ id: 'mem_a', name: '甲', content: '包管理用 pnpm' }), {}),
+      [`${GLOBAL_DIR}/b.md`]: encodeRecord(record({ id: 'mem_b', name: '乙', content: '统一用 pnpm 装依赖' }), {}),
+    })
+    const deps = makeDeps({ store, getLlm: (_exec: unknown) => redundancyLlm })
+    await scanSingle({}, deps)
+    const redundancy = async () => scoreLayer(deps, await prereadLayers(deps, [{ kind: 'global' }], undefined), { kind: 'global' }, 9000)
+      .health.counts.redundancy
+    return { root, redundancy }
+  }
+
+  it('改了其中一条的正文：那次体检的重复建议不再计', async () => {
+    const { root, redundancy } = await scanned()
+    expect(await redundancy()).toBe(1)
+    const path = join(root, GLOBAL_DIR, 'b.md')
+    await writeFile(path, (await readFile(path, 'utf8')).replace('统一用 pnpm 装依赖', 'CI 里缓存 node_modules'))
+    expect(await redundancy()).toBe(0)
+  })
+
+  it('两条都没改：重复建议照常计', async () => {
+    const { redundancy } = await scanned()
+    expect(await redundancy()).toBe(1)
+    expect(await redundancy()).toBe(1)
   })
 })

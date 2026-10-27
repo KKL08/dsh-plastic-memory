@@ -8,7 +8,7 @@ import type { KvTable } from '../kv-table.ts'
 import type { Finding, ScanCacheEntry } from '../governance/schema.ts'
 import { runRuleScan, buildMalformedFindings } from '../governance/rule-scan.ts'
 import { runSemanticScan, type SemanticLlm } from '../governance/semantic-scan.ts'
-import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, checkupRowBase, ignoredNote, GLOBAL_CACHE_KEY, type LayerRef, TIER_LABEL } from '../governance/layer-health.ts'
+import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, checkupRowBase, ignoredNote, findingFingerprints, GLOBAL_CACHE_KEY, type LayerRef, TIER_LABEL } from '../governance/layer-health.ts'
 import { applyIgnores, type AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import { prereadLayers, listingNotes, checkupWorkspaces, renderDirectoryNotes } from './layer-preread.ts'
 import type { DirectoryNote } from '../storage/table.ts'
@@ -247,7 +247,10 @@ async function scanPass(
         findings.push(...semantic.findings)
         // 写缓存前设检查点：取消后不留下半截的语义结果。
         signal?.throwIfAborted()
-        await deps.cache.put(bucket, { id: bucket, scannedAt: now, scope: scopeLabel, findings: semantic.findings })
+        await deps.cache.put(bucket, {
+          id: bucket, scannedAt: now, scope: scopeLabel, findings: semantic.findings,
+          fingerprints: findingFingerprints(semantic.findings, byId),
+        })
         semanticCachedAt = now
       }
     }

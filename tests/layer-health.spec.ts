@@ -141,3 +141,16 @@ describe('scoreLayer 归属规则', () => {
     expect((await score(deps, { kind: 'global' }, 200)).promoteCandidates).toBe(0)
   })
 })
+
+describe('scoreLayer 体检后改过的记忆', () => {
+  it('旧缓存（没有记忆指纹）：仍按 updatedAt 是否晚于体检时间判断', async () => {
+    const deps = makeDeps()
+    await deps.store.put(record({ id: 'mem_a', updatedAt: 50 }))
+    await deps.store.put(record({ id: 'mem_b', updatedAt: 150 }))
+    await deps.cache.put(GLOBAL_CACHE_KEY, {
+      id: GLOBAL_CACHE_KEY, scannedAt: 100, scope: 'global',
+      findings: [semantic('unclear', ['mem_a']), semantic('unclear', ['mem_b'])],
+    })
+    expect((await score(deps, { kind: 'global' }, 200)).semanticFindings.map(f => f.memoryIds)).toEqual([['mem_a']])
+  })
+})
