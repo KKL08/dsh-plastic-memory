@@ -13,12 +13,12 @@
  * 新写入的行尾删除先在原位确认「删除这条？ 删除 · 取消」，点「删除」才发 forget。
  * 新写入的含密钥时不能软删（服务端回 has-secret，什么都没动）：原位确认，「彻底删除」发 hard-delete，删后原位留不可恢复的说明，tab 卸载后收起。
  * 新写入的是全局提升候选时就地给「留在本项目」「提升为全局」，处理过的换成结果文字（见 promote-in-place.tsx），不进底部的待处理计数。
- * 这次对话里模型改写、替代已有记忆的（全部记忆视图的 modelChanges，按会话认领、晚于这份快照的）也列在「这次新写入的」：
+ * 这次对话里模型改写、替代已有记忆的（全部记忆视图的 modelChanges，按会话认领、晚于这份快照的；同一条只列最近那次改写，本次新记的不另列）也列在「这次新写入的」：
  * 改写的那条带「已改写」、「改前 / 改后」对照与「撤销修改」，替代写「「新」替代了「旧」」与「撤销修改」（见 model-change.tsx）。
  */
 import { useMemo, useRef, useState, type ReactNode } from 'react'
 import {
-  CONFLICT_ACTION_VERDICTS, layerOfMemory, type MemoryCard as MemoryCardData, type MemoryCommand, type PendingItem, type SnapshotOrigin,
+  CONFLICT_ACTION_VERDICTS, layerOfMemory, type MemoryCard as MemoryCardData, type MemoryCommand, type ModelChange, type PendingItem, type SnapshotOrigin,
 } from '../../src/gui/contract.ts'
 import { samePath, useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { baseName, formatNumber, useT, type Translate } from '../i18n.tsx'
@@ -234,9 +234,16 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     .flatMap((id): Array<{ id: string; memory: MemoryCardData | undefined; isWrittenToAgentsMd?: true }> =>
       wroteAgentsMd.has(id) ? [{ id, memory: wroteAgentsMd.get(id), isWrittenToAgentsMd: true }]
         : isPurged(id) ? [{ id, memory: undefined }] : isLiveWrite(id, byId, deletions) ? [{ id, memory: byId.get(id) }] : [])
-  // 这次对话里模型改写、替代的：快照冻结之后的（之前的已在这份快照里，同新写入的口径）
-  const changes = snapshot === undefined ? [] : (library.data.modelChanges ?? [])
+  // 这次对话里模型改写、替代的：快照冻结之后的（之前的已在这份快照里，同新写入的口径）。
+  // 同一条改写多次只列最近那次；这次对话里新记的那条再被改写不另列，新写入那行已经是它
+  const sessionChanges = snapshot === undefined ? [] : (library.data.modelChanges ?? [])
     .filter(c => c.sessionId === sessionId && c.at > snapshot.frozenAt)
+  const createdHere = new Set(snapshot?.savedIds ?? [])
+  const latestRewrite = new Map<string, ModelChange>()
+  for (const c of sessionChanges) {
+    if (c.kind === 'rewrite' && c.at >= (latestRewrite.get(c.memoryId)?.at ?? -Infinity)) latestRewrite.set(c.memoryId, c)
+  }
+  const changes = sessionChanges.filter(c => c.kind === 'supersede' || (!createdHere.has(c.memoryId) && latestRewrite.get(c.memoryId) === c))
   const scope = ws === undefined ? undefined : { kind: 'workspace' as const, workspacePath: ws }
   const restPending = ws === undefined || pending.status !== 'ready'
     ? 0

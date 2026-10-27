@@ -356,6 +356,17 @@ describe('SidebarTab 这次新写入的：模型改写、替代', () => {
     expect(group.getByText('已撤销')).toBeInTheDocument()
   })
 
+  it('同一条改写了几次只列最近那次；这次对话里新记的那条又被改写，不另列（新写入那行已经是它）', () => {
+    const first = { ...rewrite, decisionId: 'pd_r1', at: BOOTED + 5, state: 'changed' as const }
+    const latest = { ...rewrite, decisionId: 'pd_r2', callId: 'c3', at: BOOTED + 9 }
+    const ofNew = { ...rewrite, decisionId: 'pd_n', memoryId: 'n1', before: newer, at: BOOTED + 7 }
+    setup({ library: withChanges([latest, first, ofNew], newer), session: snapshot({ savedIds: ['n1'] }), pending: pending() })
+    const group = within(screen.getByRole('region', { name: '这次新写入的' }))
+    expect(group.getAllByText('已改写')).toHaveLength(1)
+    expect(group.getAllByRole('button', { name: '撤销修改' })).toHaveLength(1)
+    expect(group.queryByText('之后又改过，没法直接撤销')).toBeNull()
+  })
+
   it('替代：写「「新」替代了「旧」」，撤销按这次替代发 undo；之后又改过的只写说明', async () => {
     const { gateway } = setup({ library: withChanges([supersede, { ...rewrite, state: 'changed' }], newer), session: snapshot({ savedIds: ['n1'] }), pending: pending() })
     const group = within(screen.getByRole('region', { name: '这次新写入的' }))
