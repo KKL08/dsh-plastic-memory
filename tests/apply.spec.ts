@@ -641,7 +641,7 @@ describe('注入链接线', () => {
     })
     // 模拟 compaction-basic：在 next 链里压缩（compaction/end），再交出它的结果
     const compactThen = <T>(result: T) => async () => { onEvent(session, { type: 'compaction/end' }); return result }
-    return { session, def, assembleCtx, assembleOnce, addMemory, preStep, requestError, preStepPayload, requestErrorPayload, compactThen }
+    return { session, def, assembleCtx, assembleOnce, addMemory, preStep, requestError, preStepPayload, requestErrorPayload, compactThen, onEvent }
   }
 
   it('provider 首轮空串 → 中间件冻结 → provider 回缓存；两次组装之间的刷新拿到上一份（compaction/end 后 provider 回旧快照、下一次中间件回新快照）', async () => {
@@ -735,6 +735,21 @@ describe('注入链接线', () => {
     await addMemory()
     expect(await requestError(requestErrorPayload(new AbortController().signal), compactThen(undefined))).toBeUndefined()
     expect(def.text(assembleCtx)).toBe(t0)
+  })
+
+  it('失败的压缩（compaction/end 带 error，什么都没遮蔽）不标过期：pre-step 后 provider 与下一次中间件仍回冻结快照', async () => {
+    const { session, def, assembleCtx, assembleOnce, addMemory, preStep, preStepPayload, onEvent } = await boot()
+    const t0 = await assembleOnce()
+    await addMemory()
+    const decision = { kind: 'enter', messages: [] }
+    const failThen = async () => {
+      // 宿主把 error 放在事件的 data 里（compaction-basic region.ts：session.append('compaction/end', { ...lifecycle, error })）
+      onEvent(session, { type: 'compaction/end', data: { error: 'summary is not smaller than the shadowed content' } })
+      return decision
+    }
+    expect(await preStep(preStepPayload(new AbortController().signal), failThen)).toBe(decision)
+    expect(def.text(assembleCtx)).toBe(t0) // 没压掉旧快照，文本不变，宿主不会追加第二份
+    expect(await assembleOnce()).toBe(t0)
   })
 })
 
