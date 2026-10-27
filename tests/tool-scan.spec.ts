@@ -13,7 +13,9 @@ import { encodeRecord } from '../src/storage/frontmatter.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
+import { InMemoryKvTable, type CasKvTable } from '../src/kv-table.ts'
+import { CheckupRecordStore, checkupKey } from '../src/governance/checkup-records.ts'
+import type { CheckupRecord } from '../src/storage/schema.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { PendingDecision, ScanCacheEntry } from '../src/governance/schema.ts'
 import { record } from './helpers/record.ts'
@@ -564,6 +566,76 @@ describe('renderScanResult', () => {
     const r = await scanSingle({ scope: '/a', layers: 'rule' }, makeDeps({ store }))
     expect(r.promoteCandidates.items).toEqual([])
     expect(renderScanResult(r)).not.toContain('建议提升全局')
+  })
+})
+
+describe('executeScan 完成记录（上次体检）', () => {
+  const quiet: SemanticLlm = { complete: async () => JSON.stringify({ findings: [] }) }
+  function withCheckups(overrides?: Partial<ScanToolDeps>) {
+    const checkups = new CheckupRecordStore(new InMemoryKvTable<CheckupRecord>())
+    return { checkups, deps: makeDeps({ checkups, getLlm: () => quiet, ...overrides }) }
+  }
+  const completed = async (checkups: CheckupRecordStore) =>
+    Object.fromEntries((await checkups.list()).map(r => [r.id, r.completed]))
+
+  it('memory_scan 做完内容检查：给扫的范围写发起方为 agent 的完成记录；输出和没有记录表时一样', async () => {
+    let clock = 9000
+    const { checkups, deps } = withCheckups({ now: () => clock, getLlm: () => ({ complete: async () => { clock = 9500; return '{"findings":[]}' } }) })
+    const plain = makeDeps({ getLlm: () => quiet })
+    for (const d of [deps, plain]) await d.store.put(record({ id: 'mem_p', scope: 'workspace', workspacePath: '/proj' }))
+    const r = await executeScan({ scope: '/proj' }, deps, fakeExec())
+    expect(await completed(checkups)).toEqual({ [checkupKey({ kind: 'workspace', path: '/proj' })]: { startedAt: 9000, completedAt: 9500, by: 'agent' } })
+    expect(r).toEqual(await executeScan({ scope: '/proj' }, plain, fakeExec()))
+  })
+
+  it('没有项目的会话扫的是全局层：写全局的完成记录', async () => {
+    const { checkups, deps } = withCheckups()
+    await deps.store.put(record({ id: 'mem_g' }))
+    await executeScan({}, deps, fakeExec())
+    expect(await completed(checkups)).toEqual({ [checkupKey({ kind: 'global' })]: { startedAt: 9000, completedAt: 9000, by: 'agent' } })
+  })
+
+  it('全库体检：全局和每个项目各写一条；内容检查失败的那一层不写', async () => {
+    const { checkups, deps } = withCheckups({
+      getLlm: () => ({ complete: async ({ user }) => { if (user.includes('mem_b')) throw new Error('模型报错'); return '{"findings":[]}' } }),
+    })
+    await deps.store.put(record({ id: 'mem_g' }))
+    await deps.store.put(record({ id: 'mem_a', scope: 'workspace', workspacePath: '/proj-a' }))
+    await deps.store.put(record({ id: 'mem_b', scope: 'workspace', workspacePath: '/proj-b' }))
+    await executeScan({ scope: 'all' }, deps, fakeExec())
+    expect(Object.keys(await completed(checkups)).sort()).toEqual([checkupKey({ kind: 'global' }), checkupKey({ kind: 'workspace', path: '/proj-a' })].sort())
+  })
+
+  it.each([
+    ['只跑规则检查', { layers: 'rule' as const }, quiet],
+    ['只跑内容检查（没跑规则检查）', { layers: 'semantic' as const }, quiet],
+    ['内容检查失败', {}, { complete: async () => { throw new Error('模型报错') } }],
+  ])('%s：不写完成记录', async (_name, args, llm) => {
+    const { checkups, deps } = withCheckups({ getLlm: () => llm })
+    await deps.store.put(record({ id: 'mem_g' }))
+    await executeScan(args, deps, fakeExec())
+    expect(await checkups.list()).toEqual([])
+  })
+
+  it('拿不到模型：不写完成记录', async () => {
+    const { checkups, deps } = withCheckups({ getLlm: () => null })
+    await deps.store.put(record({ id: 'mem_g' }))
+    await executeScan({}, deps, fakeExec())
+    expect(await checkups.list()).toEqual([])
+  })
+
+  it('写完缓存后取消：抛出取消，不写完成记录', async () => {
+    const controller = new AbortController()
+    const cache = new InMemoryKvTable<ScanCacheEntry>()
+    const aborting: CasKvTable<ScanCacheEntry> = {
+      get: k => cache.get(k), list: () => cache.list(), put: (k, v) => cache.put(k, v), delete: k => cache.delete(k), deleteIf: (k, f) => cache.deleteIf(k, f),
+      update: async (k, fn) => { const written = await cache.update(k, fn); controller.abort(); return written },
+    }
+    const { checkups, deps } = withCheckups({ cache: aborting })
+    await deps.store.put(record({ id: 'mem_g' }))
+    await expect(executeScan({}, deps, fakeExec({ signal: controller.signal }))).rejects.toThrow()
+    expect(await cache.list()).toHaveLength(1)
+    expect(await checkups.list()).toEqual([])
   })
 })
 

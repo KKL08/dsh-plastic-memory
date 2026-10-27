@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import type { ZodType } from 'zod'
 import type { BatchKvTable, CasKvTable, ClaimKvTable, KvTable } from '../kv-table.ts'
 import type { MemoryLogger } from './table.ts'
-import { kvImportMarkerSchema, recallStatsSchema, type KvImportMarker, type RecallStats } from './schema.ts'
+import { checkupRecordSchema, kvImportMarkerSchema, recallStatsSchema, type CheckupRecord, type KvImportMarker, type RecallStats } from './schema.ts'
 import { STATE_DIR } from './paths.ts'
 import { linkExclusive } from './exclusive-link.ts'
 
@@ -18,6 +18,7 @@ import { linkExclusive } from './exclusive-link.ts'
  *   .state/pending/<id>.claim       裁决期间的认领（排他创建，裁决完即删）
  *   .state/scan-cache/<sha1(桶键)>.json
  *   .state/advice-ignores/<sha1(身份)>.json  建议忽略表，每项一文件
+ *   .state/checkups/<sha1(范围键)>.json       体检记录表，每个范围一文件
  *   .state/recall-stats.json        整张表一个文件 { [id]: RecallStats }
  *   .state/kv-import.json           旧宿主 KV 导入的完成标记
  *   .state/kv-import.lock           导入期间的跨进程锁，导完即删
@@ -28,8 +29,8 @@ import { linkExclusive } from './exclusive-link.ts'
  *
  * 导入屏障：snapshots / pending / scan-cache 的每个读写方法先 await 一次 memoize 的导入（进程内锁 +
  * 跨进程锁文件内执行，锁内重查标记）。
- * 召回统计不过屏障——导入不碰它，而 FileTable 加载时就要逐条读它，过屏障会把导入拖进 apply。建议忽略表是旧 KV 之后才有的，
- * 导入同样不碰它，也不过屏障。
+ * 召回统计不过屏障——导入不碰它，而 FileTable 加载时就要逐条读它，过屏障会把导入拖进 apply。建议忽略表、体检记录表是旧 KV 之后才有的，
+ * 导入同样不碰它们，也不过屏障。
  * 0.3.0 删除导入代码（openLegacyKv、标记、LegacyKvTables）。
  */
 
@@ -41,6 +42,7 @@ const SNAPSHOTS_DIR = 'snapshots'
 const PENDING_DIR = 'pending'
 const SCAN_CACHE_DIR = 'scan-cache'
 const ADVICE_IGNORES_DIR = 'advice-ignores'
+const CHECKUPS_DIR = 'checkups'
 
 /** 持锁期间每隔这么久刷新一次锁的时间戳；超过 STALE 没刷新按残留处理（兜底持锁进程崩溃后 pid 被复用）。 */
 const IMPORT_LOCK_REFRESH_MS = 10_000
@@ -274,6 +276,21 @@ class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T>, CasKv
     })
   }
 
+  /** 写锁内重读再写：与 put 同在进程内的写链上，判定之后本进程刚写入的新值不会被旧值盖掉；跨进程仍是单条 LWW。 */
+  async update(key: string, fn: (current: T | undefined) => T | undefined): Promise<boolean> {
+    const path = this.pathOf(key)
+    if (path === undefined) throw new Error(`侧表键不能当文件名：${key}`)
+    await this.env.ready()
+    return this.env.locked(async () => {
+      const next = fn(await this.read(path))
+      if (next === undefined) return false
+      if (next.id !== key) throw new Error(`侧表键必须等于值的 id：key=${key} id=${next.id}`)
+      await mkdir(this.dir, { recursive: true })
+      await atomicWrite(path, JSON.stringify(next))
+      return true
+    })
+  }
+
   /** 排他创建条目旁的 `<名>.claim`（list 只认 .json，不当条目）。已被占用且持有进程已退出或超时的按残留清掉，再试一次。
    *  释放只删自己的认领：被当成残留清掉、别人又认领了时不误删。不能当文件名的键不会有条目，不用认领，直接放行。 */
   async claim(key: string): Promise<(() => Promise<void>) | undefined> {
@@ -392,9 +409,10 @@ class MapFileTable<T> implements BatchKvTable<T> {
 export class SidecarStore<S extends { id: string }, P extends { id: string }, C extends { id: string }, I extends { id: string }> {
   readonly snapshots: KvTable<S>
   readonly pending: ClaimKvTable<P>
-  readonly scanCache: KvTable<C>
+  readonly scanCache: CasKvTable<C>
   readonly recallStats: BatchKvTable<RecallStats>
   readonly adviceIgnores: CasKvTable<I>
+  readonly checkups: CasKvTable<CheckupRecord>
 
   private readonly stateDir: string
   private readonly opts: SidecarOptions<S, P, C, I>
@@ -419,6 +437,7 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
     this.scanCache = new EntryFileTable(join(this.stateDir, SCAN_CACHE_DIR), sha1, opts.schemas.scanCache, gated)
     this.recallStats = new MapFileTable(join(this.stateDir, RECALL_STATS_FILE), recallStatsSchema, ungated)
     this.adviceIgnores = new EntryFileTable(join(this.stateDir, ADVICE_IGNORES_DIR), sha1, opts.schemas.adviceIgnores, ungated)
+    this.checkups = new EntryFileTable(join(this.stateDir, CHECKUPS_DIR), sha1, checkupRecordSchema, ungated)
   }
 
   private locked<R>(fn: () => Promise<R>): Promise<R> {

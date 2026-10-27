@@ -2,7 +2,7 @@ import { mkdir } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryLogger, MemoryStore } from '../store.ts'
-import type { KvTable } from '../kv-table.ts'
+import type { CasKvTable } from '../kv-table.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { AgentsMdWriter } from '../storage/agents-md.ts'
 import type { MemoryRecord } from '../record-schema.ts'
@@ -14,6 +14,7 @@ import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
 import type { PendingDecision, ScanCacheEntry, SnapshotRecord } from '../governance/schema.ts'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
+import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import { executeConfirm } from '../tools/confirm.ts'
 import { executeForget } from '../tools/forget.ts'
 import { executePromote } from '../tools/promote.ts'
@@ -41,7 +42,9 @@ export interface MemoryCommandDeps {
   store: MemoryStore
   decisions: PendingDecisionsStore
   snapshots: SnapshotStore
-  cache: KvTable<ScanCacheEntry>
+  cache: CasKvTable<ScanCacheEntry>
+  /** 体检记录表：scan 做完给覆盖到的范围写完成记录（发起方界面手动）。 */
+  checkups: CheckupRecordStore
   /** 建议忽略表（ignore-advice / unignore-advice 写它）。 */
   ignores: AdviceIgnoreStore
   registry: TypeRegistry
@@ -714,10 +717,14 @@ async function dispatch(
       })
       // 体检前的待处理，和体检后比出新增
       const before = (await collect())?.pending
+      // 时钟现读：完成记录的完成时间是体检做完的时刻，不是命令开始的时刻
       const r = await executeScan(
         { scope: command.workspacePath ?? 'all', layers: 'full' },
-        { store: deps.store, registry: deps.registry, decisions: deps.decisions, cache: deps.cache, getBaseline: deps.getBaseline, getLlm: deps.getLlm, resolveContext: deps.resolveContext, now: () => now },
-        exec,
+        {
+          store: deps.store, registry: deps.registry, decisions: deps.decisions, cache: deps.cache, checkups: deps.checkups,
+          getBaseline: deps.getBaseline, getLlm: deps.getLlm, resolveContext: deps.resolveContext, now: () => deps.now?.() ?? Date.now(),
+        },
+        exec, { by: 'manual' },
       )
       await deps.decisions.sweep(now)
       const after = await deps.views.rewriteAll() ?? (before === undefined ? undefined : await collect())

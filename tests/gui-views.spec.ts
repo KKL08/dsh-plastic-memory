@@ -610,7 +610,7 @@ describe('健康视图', () => {
     expect(again.overflowOnlyLayers).toEqual([])
   })
 
-  it('复用治理评分：与 memory_health 同分；从没体检过 semanticCachedAt 为 null；有密钥的层不打分', async () => {
+  it('复用治理评分：与 memory_health 同分；从没体检过 lastCheckupAt 为 null；有密钥的层不打分', async () => {
     const h = harness()
     await h.store.create(w({ id: 'mem_a', name: 'A' }))
     await h.store.create(w({ id: 'mem_old', name: '过期', validTo: T0 - 1 }))
@@ -621,7 +621,7 @@ describe('健康视图', () => {
     const tool = await h.health()
     if (tool.kind !== 'single') throw new Error(tool.kind)
     const ws = health.layers.find(l => l.layer.kind === 'workspace')!
-    expect(ws).toMatchObject({ layer: { kind: 'workspace', workspacePath: WS }, totalMemories: 2, score: tool.score, semanticCachedAt: null })
+    expect(ws).toMatchObject({ layer: { kind: 'workspace', workspacePath: WS }, totalMemories: 2, score: tool.score, lastCheckupAt: null })
     expect(ws.issues).toEqual([{ type: 'expired', count: 1, level: 'advice' }])
     const global = health.layers.find(l => l.layer.kind === 'global')!
     expect(global).toMatchObject({ score: null, gate: { secret: true }, issues: [{ type: 'secret', count: 1 }] })

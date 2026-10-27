@@ -270,7 +270,7 @@ export function buildHealthView(input: ViewInput): HealthView {
         gate: r.health.gate,
         issues: FINDING_TYPES.filter(t => r.health.counts[t] > 0).map(type => ({ type, count: r.health.counts[type], level: levelOf(type) })),
         staleCount: r.health.freshness.staleCount,
-        semanticCachedAt: r.semanticCachedAt,
+        lastCheckupAt: r.lastCheckupAt,
         overflow: overflowOfLayer(overflow, layer),
         ignored: ignoredOfLayer(r.ignored, input.data),
       }

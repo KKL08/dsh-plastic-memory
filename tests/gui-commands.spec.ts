@@ -12,6 +12,7 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
+import { CheckupRecordStore, checkupKey } from '../src/governance/checkup-records.ts'
 import { REDACTED_PLACEHOLDER, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type PendingDecision } from '../src/governance/schema.ts'
 import type { ClaimKvTable } from '../src/kv-table.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
@@ -26,6 +27,8 @@ import {
 import { runSavePipeline } from '../src/pipeline.ts'
 import { executeForget } from '../src/tools/forget.ts'
 import { executeSnapshotTool } from '../src/tools/snapshot.ts'
+import { cacheKey, executeScan } from '../src/tools/scan.ts'
+import { fakeExec } from './helpers/exec.ts'
 import { candidate, record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 
@@ -64,9 +67,10 @@ function env(opts: EnvOpts = {}) {
   const decisions = new PendingDecisionsStore(opts.wrapPending?.(sidecar.pending) ?? sidecar.pending)
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const cache = sidecar.scanCache
-  const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, snapshots, cache, registry, memoryRoot: root, now: () => clock.now }) })
+  const checkups = new CheckupRecordStore(sidecar.checkups)
+  const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, snapshots, cache, checkups, registry, memoryRoot: root, now: () => clock.now }) })
   const command = createMemoryCommand({
-    memoryRoot: root, store, decisions, snapshots, cache, ignores: new AdviceIgnoreStore(sidecar.adviceIgnores), registry, views: opts.wrapViews?.(views) ?? views,
+    memoryRoot: root, store, decisions, snapshots, cache, checkups, ignores: new AdviceIgnoreStore(sidecar.adviceIgnores), registry, views: opts.wrapViews?.(views) ?? views,
     ...(opts.log !== undefined ? { log: opts.log } : {}),
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),
     resolveContext: async () => ({ workspacePath: 'workspacePath' in opts ? opts.workspacePath : SESSION_WS, delegationDepth: opts.delegationDepth ?? 0, session: { id: 'sess-1' } }),
@@ -85,7 +89,7 @@ function env(opts: EnvOpts = {}) {
   }
   const run = (c: MemoryCommand) => runRaw(encodeMemoryCommand(c).slice(`/${MEMORY_COMMAND_NAME}`.length))
   const readView = async (name: keyof typeof GUI_VIEW_FILES) => JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES[name]), 'utf8')) as unknown
-  return { store, decisions, snapshots, cache, stats: sidecar.recallStats, command, run, runRaw, readView, clock }
+  return { store, decisions, snapshots, cache, checkups, stats: sidecar.recallStats, command, run, runRaw, readView, clock }
 }
 
 type Ok = Extract<MemoryCommandResult, { ok: true }>
@@ -1967,6 +1971,145 @@ describe('scan', () => {
       expect(body.scores).toEqual(await healthScores(e))
       expect(body.scores).toHaveLength(3)
     })
+  })
+})
+
+describe('scan：上次体检与完成记录', () => {
+  const OTHER = { kind: 'workspace' as const, path: OTHER_WS }
+  const SESSION = { kind: 'workspace' as const, path: SESSION_WS }
+  const GLOBAL = { kind: 'global' as const }
+  const answering = (findings: () => object[]): SemanticLlm => ({ complete: async () => JSON.stringify({ findings: findings() }) })
+  const quiet = answering(() => [])
+  /** 体检记录表里这个范围的完成记录；没有为 undefined。 */
+  const completedOf = async (e: ReturnType<typeof env>, layer: Parameters<typeof checkupKey>[0]) =>
+    (await e.checkups.list()).find(r => r.id === checkupKey(layer))?.completed
+  /** 健康视图里各层的上次体检，按层：global 记作 'global'，项目记作路径。 */
+  const lastCheckups = async (e: ReturnType<typeof env>) => Object.fromEntries(healthViewSchema.parse(await e.readView('health')).layers
+    .map(l => [l.layer.kind === 'global' ? 'global' : l.layer.workspacePath, l.lastCheckupAt]))
+  const healthOf = async (e: ReturnType<typeof env>, kind: 'global') =>
+    healthViewSchema.parse(await e.readView('health')).layers.find(l => l.layer.kind === kind)!
+  async function seedLayers(e: ReturnType<typeof env>) {
+    await e.store.create(record({ id: 'mem_g', name: '全局', content: '回答用中文' }))
+    await e.store.create(record({ id: 'mem_s', name: '本项目', content: '用 pnpm', scope: 'workspace', workspacePath: SESSION_WS }))
+    await e.store.create(record({ id: 'mem_o', name: '别的项目', content: '用 npm', scope: 'workspace', workspacePath: OTHER_WS }))
+  }
+
+  it('项目体检：只给本项目写完成记录（发起方界面手动、开始与完成时间）和缓存；全局的分数与上次体检不变', async () => {
+    const e = env({ llm: answering(() => [{ type: 'unclear', memoryIds: ['mem_g'], summary: '说得不清楚' }]) })
+    await seedLayers(e)
+    ok(await e.run({ cmd: 'refresh-views' }))
+    const globalBefore = await healthOf(e, 'global')
+    e.clock.now = NOW + 1000
+    ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW + 1000, completedAt: NOW + 1000, by: 'manual' })
+    expect(await completedOf(e, GLOBAL)).toBeUndefined()
+    expect((await e.cache.list()).map(([key]) => key)).toEqual([cacheKey(SESSION_WS)])
+    const globalAfter = await healthOf(e, 'global')
+    expect(globalAfter.score).toBe(globalBefore.score)
+    expect(globalAfter.lastCheckupAt).toBeNull()
+    expect(await lastCheckups(e)).toEqual({ global: null, [SESSION_WS]: NOW + 1000, [OTHER_WS]: null })
+  })
+
+  it('全部体检：全局和每个项目都写完成记录，健康视图里的上次体检都更新', async () => {
+    const e = env({ llm: quiet })
+    await seedLayers(e)
+    ok(await e.run({ cmd: 'scan' }))
+    for (const layer of [GLOBAL, SESSION, OTHER]) expect(await completedOf(e, layer)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
+    expect(await lastCheckups(e)).toEqual({ global: NOW, [SESSION_WS]: NOW, [OTHER_WS]: NOW })
+  })
+
+  it('内容检查失败：不写完成记录，上次体检仍是之前那次', async () => {
+    let failing = false
+    const e = env({ llm: { complete: async () => { if (failing) throw new Error('模型报错'); return '{"findings":[]}' } } })
+    await seedLayers(e)
+    ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    failing = true
+    e.clock.now = NOW + 1000
+    expect(ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS })).notes).toContain('semantic-failed')
+    expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
+    expect((await lastCheckups(e))[SESSION_WS]).toBe(NOW)
+  })
+
+  it('写完缓存、挂账挂到一半时进程退出：不写完成记录，上次体检仍是之前那次；重跑后每个冲突只有一张卡', async () => {
+    let dying = false
+    let puts = 0
+    const e = env({
+      llm: answering(() => [
+        { type: 'conflict', memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', suggestedAction: '裁决' },
+        { type: 'conflict', memoryIds: ['mem_c', 'mem_d'], summary: '测试框架矛盾', suggestedAction: '裁决' },
+      ]),
+      // 第二个冲突挂账时进程没了（第一个已挂上）
+      wrapPending: table => ({
+        get: k => table.get(k), list: () => table.list(), delete: k => table.delete(k), claim: k => table.claim(k),
+        put: async (k, v) => { if (dying && ++puts === 2) throw new Error('进程退出'); return table.put(k, v) },
+      }),
+    })
+    const scoped = { scope: 'workspace' as const, workspacePath: SESSION_WS }
+    for (const [id, content] of [['mem_a', '用 pnpm'], ['mem_b', '用 npm'], ['mem_c', '用 vitest'], ['mem_d', '用 jest']]) {
+      await e.store.create(record({ id, name: id, content, ...scoped }))
+    }
+    const seeded = await e.decisions.list()
+    expect(seeded).toEqual([])
+    // 之前做完过一次（那时模型什么都没报）
+    const earlier = env({ llm: quiet })
+    ok(await earlier.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    dying = true
+    e.clock.now = NOW + 1000
+    expect(err(await e.run({ cmd: 'scan', workspacePath: SESSION_WS })).code).toBe('failed')
+    expect((await e.cache.get(cacheKey(SESSION_WS)))?.scannedAt).toBe(NOW + 1000)
+    expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect((await lastCheckups(e))[SESSION_WS]).toBe(NOW)
+    dying = false
+    e.clock.now = NOW + 2000
+    ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW + 2000, completedAt: NOW + 2000, by: 'manual' })
+    const cards = ledgerItems(pendingViewSchema.parse(await e.readView('pending')))
+    expect(cards.map(i => i.kind)).toEqual(['conflict-horizontal', 'conflict-horizontal'])
+    expect(await e.decisions.list()).toHaveLength(2)
+  })
+
+  it('两次体检重叠：开始得早、结束得晚的 agent 体检不让上次体检和缓存往回退', async () => {
+    let release!: () => void
+    const gate = new Promise<void>(r => { release = r })
+    // 先开始的 agent 体检：模型卡住，等界面体检做完再返回，报的发现也不同
+    const slow: SemanticLlm = { complete: async () => { await gate; return JSON.stringify({ findings: [{ type: 'unclear', memoryIds: ['mem_s'], summary: '旧结论' }] }) } }
+    const e = env({ llm: quiet })
+    await seedLayers(e)
+    e.clock.now = NOW + 1000
+    const late = executeScan({ scope: SESSION_WS }, {
+      store: e.store, registry, decisions: e.decisions, cache: e.cache, checkups: e.checkups,
+      getBaseline: () => null, getLlm: () => slow, resolveContext: async () => ({ workspacePath: SESSION_WS }), now: () => e.clock.now,
+    }, fakeExec())
+    e.clock.now = NOW + 2000
+    ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    e.clock.now = NOW + 3000
+    release()
+    expect((await late).kind).toBe('single')
+    expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW + 2000, completedAt: NOW + 2000, by: 'manual' })
+    const cached = await e.cache.get(cacheKey(SESSION_WS))
+    expect(cached).toMatchObject({ scannedAt: NOW + 2000, findings: [] })
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect((await lastCheckups(e))[SESSION_WS]).toBe(NOW + 2000)
+  })
+
+  it('升级后还没有完成记录：上次体检取内容检查缓存的时间；有了完成记录就取完成记录', async () => {
+    const e = env({ llm: quiet })
+    await seedLayers(e)
+    await e.cache.put(cacheKey(SESSION_WS), { id: cacheKey(SESSION_WS), scannedAt: NOW - 5000, scope: SESSION_WS, findings: [] })
+    await e.cache.put(cacheKey(OTHER_WS), { id: cacheKey(OTHER_WS), scannedAt: NOW - 5000, scope: OTHER_WS, findings: [] })
+    await e.checkups.complete([OTHER], { startedAt: NOW - 4000, completedAt: NOW - 3000, by: 'agent' })
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect(await lastCheckups(e)).toEqual({ global: null, [SESSION_WS]: NOW - 5000, [OTHER_WS]: NOW - 3000 })
+  })
+
+  it('项目目录不在了：它的完成记录在视图生成时清掉，其余的留着', async () => {
+    const e = env({ llm: quiet })
+    await seedLayers(e)
+    const GONE = { kind: 'workspace' as const, path: '/tmp/pm-cmd-gone' }
+    await e.checkups.complete([GLOBAL, SESSION, GONE], { startedAt: NOW, completedAt: NOW, by: 'manual' })
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect((await e.checkups.list()).map(r => r.id).sort()).toEqual([checkupKey(GLOBAL), checkupKey(SESSION)].sort())
   })
 })
 

@@ -26,7 +26,7 @@ export function summarize(
 ): Status {
   const count = views.library.layers.reduce((sum, layer) => sum + layer.items.length, 0)
   const scannedAt = views.health.layers.reduce<number | null>(
-    (latest, layer) => layer.semanticCachedAt !== null && (latest === null || layer.semanticCachedAt > latest) ? layer.semanticCachedAt : latest, null)
+    (latest, layer) => layer.lastCheckupAt !== null && (latest === null || layer.lastCheckupAt > latest) ? layer.lastCheckupAt : latest, null)
   const countText = t(count === 1 ? 'settings.status.count.one' : 'settings.status.count', { n: formatNumber(count) })
   if (!governanceEnabled) return { conclusion: t('settings.status.disabled'), detail: countText }
   const detail = `${countText} · ${scannedAt === null ? t('settings.status.neverScanned') : t('settings.status.lastScan', { date: formatDay(scannedAt, now, t) })}`

@@ -162,15 +162,15 @@ function LayerHealth({ layer, data, overflowOnly, now, session, onHandle }: {
   // 从没体检过不显示分数：只有规则检查的分数会让人误以为体检过了
   const scorePart = data.score === null
     ? t('health.secretGate')
-    : data.semanticCachedAt === null
+    : data.lastCheckupAt === null
       ? t('health.unscored')
       : <Dotted parts={[t('health.score', { score: formatNumber(data.score) }), t(`health.tier.${data.tier}`)]} />
   return (
     <section className="pm-health-layer" aria-label={name}>
       <HealthBanner
-        marker={data.gate.secret ? 'secret' : data.tier === 'green' && data.semanticCachedAt !== null ? 'ok' : undefined}
+        marker={data.gate.secret ? 'secret' : data.tier === 'green' && data.lastCheckupAt !== null ? 'ok' : undefined}
         conclusion={<Dotted parts={[name, t(data.totalMemories === 1 ? 'health.count.one' : 'health.count', { n: formatNumber(data.totalMemories) }), scorePart]} />}
-        detail={data.semanticCachedAt === null ? t('health.neverScanned') : t('health.lastScan', { date: formatDay(data.semanticCachedAt, now, t) })}
+        detail={data.lastCheckupAt === null ? t('health.neverScanned') : t('health.lastScan', { date: formatDay(data.lastCheckupAt, now, t) })}
       />
       <RowSection
         title={t('health.issues')}
@@ -258,7 +258,7 @@ export function HealthTab({ session, scope, nav }: { session: BorrowedSession; s
     )
   }
 
-  const neverScanned = rows.every(r => r.data === undefined || r.data.semanticCachedAt === null)
+  const neverScanned = rows.every(r => r.data === undefined || r.data.lastCheckupAt === null)
   return (
     <div className="pm-health">
       {body}

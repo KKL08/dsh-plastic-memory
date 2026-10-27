@@ -7,6 +7,8 @@ import { runRuleScan, buildMalformedFindings } from './rule-scan.ts'
 import { computeHealth, type HealthScore } from './scoring.ts'
 import { adviceFingerprint, applyIgnores, type IgnoredAdvice } from './advice-ignores.ts'
 import type { DirectoryNote, LocatedRecord, QuarantineEntry } from '../storage/table.ts'
+import type { CheckupRecord } from '../storage/schema.ts'
+import { checkupKey, lastCheckupAt } from './checkup-records.ts'
 
 /** 健康档位的用户面标签（scan 体检行与 health message 共用一份，枚举值仍是 green/amber/red）。 */
 export const TIER_LABEL = { green: '绿色', amber: '黄色', red: '红色' } as const
@@ -79,13 +81,16 @@ export interface LayerPreread {
   shadowedDeleted: readonly LocatedRecord[]
   /** 建议忽略表的全部记录：评分前据它剔除被忽略的发现（见 advice-ignores.ts）。 */
   ignores: readonly AdviceIgnore[]
+  /** 体检记录表，键为范围键（checkupKey）：上次体检取它的完成记录。 */
+  checkups: ReadonlyMap<string, CheckupRecord>
 }
 
 export interface LayerHealthResult {
   layer: LayerRef
   records: MemoryRecord[]
   health: HealthScore
-  semanticCachedAt: number | null
+  /** 上次体检（见 checkup-records.ts lastCheckupAt）；从没体检过为 null。 */
+  lastCheckupAt: number | null
   /** 归入本层计分的 findings（规则层实时 + 语义层缓存过滤后，已剔除用户忽略的），供报告展示。 */
   ruleFindings: Finding[]
   semanticFindings: Finding[]
@@ -155,7 +160,7 @@ export function scoreLayer(deps: LayerHealthDeps, data: LayerPreread, layer: Lay
   })
   return {
     layer, records, health,
-    semanticCachedAt: cached?.scannedAt ?? null,
+    lastCheckupAt: lastCheckupAt(data.checkups.get(checkupKey(layer)), cached?.scannedAt),
     ruleFindings, semanticFindings,
     ignored: [...rule.ignored, ...semantic.ignored],
     // 与 computeHealth 的 staleCount 同一判据（ratio > 1）
@@ -214,7 +219,7 @@ export function ignoredNote(count: number): string | undefined {
   return count > 0 ? `已忽略 ${count} 条（用户可在记忆页健康里取消）` : undefined
 }
 
-/** 体检行里 scan 与 health 共有的字段。scan 另加 issues；health 另加 semanticCachedAt、promoteCandidates。 */
+/** 体检行里 scan 与 health 共有的字段。scan 另加 issues；health 另加上次体检、promoteCandidates。 */
 export function checkupRowBase(result: LayerHealthResult): {
   layer: 'workspace' | 'global'
   workspacePath?: string

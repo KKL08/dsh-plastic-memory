@@ -49,6 +49,13 @@ export type ScanNoteCode =
   | 'cross-ws-failed'         // 跨项目重复分析失败，退用实体聚类保底
   | 'conflicts-settled'       // 有冲突此前裁决为两边都留、双方未改，本次不再列出
 
+/**
+ * 体检完成记录的发起方（体检记录表，storage/schema.ts）：manual = 界面手动（记忆页的 `/memory scan`），auto = 自动体检，
+ * agent = agent 调 memory_scan。
+ */
+export const CHECKUP_INITIATORS = ['manual', 'auto', 'agent'] as const
+export type CheckupInitiator = (typeof CHECKUP_INITIATORS)[number]
+
 /** memory_health 建议的分层并列结构（health.ts）：独占层单元素，行动项层多元素，无事为空数组。 */
 export type HealthRecommendationKind =
   | 'secret'                  // 本层红线门：检出密钥（独占）

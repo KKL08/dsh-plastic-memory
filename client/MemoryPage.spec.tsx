@@ -186,7 +186,7 @@ describe('记忆页外壳', () => {
       version: GUI_VIEW_VERSION, governanceEnabled: true,
       layers: [{
         layer: { kind: 'workspace', workspacePath: '/w/app' }, totalMemories: 1, score: 90, tier: 'green', gate: { secret: false },
-        issues: [{ type: 'expired', count: 1, level: 'advice' }], staleCount: 0, semanticCachedAt: 1, overflow: null, ignored: [],
+        issues: [{ type: 'expired', count: 1, level: 'advice' }], staleCount: 0, lastCheckupAt: 1, overflow: null, ignored: [],
       }],
     }
     const expired: PendingView['items'][number] = { kind: 'advice', level: 'advice', type: 'expired', memories: [memory({ id: 'e1' })] }

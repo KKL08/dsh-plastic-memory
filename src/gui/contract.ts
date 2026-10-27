@@ -236,8 +236,11 @@ export const healthLayerSchema = z.object({
   issues: z.array(z.object({ type: z.string(), count: z.number().int().positive(), level: z.enum(PENDING_LEVELS).nullable() })),
   /** 超过衰退期未确认的条数。 */
   staleCount: z.number().int().nonnegative(),
-  /** 内容检查（语义层）上次时间；从没做过为 null。 */
-  semanticCachedAt: z.number().nullable(),
+  /**
+   * 上次体检：本层最近一次体检完成记录的完成时间（规则检查和内容检查都写完才算）；还没有完成记录（升级前体检过）时
+   * 暂取内容检查缓存的时间；从没体检过为 null。
+   */
+  lastCheckupAt: z.number().nullable(),
   /** 本层会话带入的记忆超出上限（已忽略的也算，忽略只是不再提醒）；列为问题、不扣分。没超为 null。 */
   overflow: overflowLevelSchema.nullable(),
   /**

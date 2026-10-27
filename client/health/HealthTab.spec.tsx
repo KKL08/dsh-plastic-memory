@@ -16,7 +16,7 @@ type Layer = HealthView['layers'][number]
 
 const layer = (overrides: Partial<Layer> = {}): Layer => ({
   layer: WS, totalMemories: 12, score: 86, tier: 'green', gate: { secret: false },
-  issues: [], staleCount: 0, semanticCachedAt: new Date(2026, 9, 15).getTime(), overflow: null, ignored: [],
+  issues: [], staleCount: 0, lastCheckupAt: new Date(2026, 9, 15).getTime(), overflow: null, ignored: [],
   ...overrides,
 })
 const health = (layers: Layer[], governanceEnabled = true): HealthView => ({ version: GUI_VIEW_VERSION, governanceEnabled, layers })
@@ -119,7 +119,7 @@ describe('健康 tab', () => {
   })
 
   it('从没体检过：不显示分数，时间行写内容检查还没做过，下面给空状态（没有按钮）', () => {
-    renderTab(health([layer({ semanticCachedAt: null, score: 100 }), layer({ layer: { kind: 'global' }, semanticCachedAt: null })]))
+    renderTab(health([layer({ lastCheckupAt: null, score: 100 }), layer({ layer: { kind: 'global' }, lastCheckupAt: null })]))
     const ws = screen.getByRole('region', { name: '本项目' })
     expect(ws).toHaveTextContent('本项目·12 条·还没体检过，体检后打分')
     expect(ws).not.toHaveTextContent('100 分')

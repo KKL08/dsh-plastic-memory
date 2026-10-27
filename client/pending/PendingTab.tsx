@@ -250,7 +250,7 @@ function ViewStatus({ state }: { state: Exclude<ViewState<PendingView>, { status
 
 /** 最近一次内容检查（语义层体检）的时间；一层都没做过为 null。 */
 function lastScanAt(health: HealthView): number | null {
-  const times = health.layers.map(l => l.semanticCachedAt).filter((v): v is number => v !== null)
+  const times = health.layers.map(l => l.lastCheckupAt).filter((v): v is number => v !== null)
   return times.length === 0 ? null : Math.max(...times)
 }
 

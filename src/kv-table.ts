@@ -13,10 +13,13 @@ export interface ClaimKvTable<T> extends KvTable<T> {
   claim(key: string): Promise<(() => Promise<void>) | undefined>
 }
 
-/** 带条件删除的 KV：建议忽略表的清理用。在表的写锁内重读，当前值仍满足条件才删——判定之后别处刚写入的新值不会被删掉。 */
+/** 带条件写删的 KV：建议忽略表的清理、扫描缓存与体检记录的「不回退」写入用。在表的写锁内重读，按当前值决定写不写、删不删——
+ *  判定之后本进程别处刚写入的新值不会被盖掉或删掉。 */
 export interface CasKvTable<T> extends KvTable<T> {
   /** 删掉 key，前提是此刻它还在、且 isStill(当前值) 为真；删了返回 true。 */
   deleteIf(key: string, isStill: (current: T) => boolean): Promise<boolean>
+  /** 读改写：对此刻的值（没有为 undefined）求 fn，返回值写回（其 id 须等于 key）；fn 返回 undefined 就不写。写了返回 true。 */
+  update(key: string, fn: (current: T | undefined) => T | undefined): Promise<boolean>
 }
 
 export class InMemoryKvTable<T> implements ClaimKvTable<T>, CasKvTable<T> {
@@ -29,6 +32,12 @@ export class InMemoryKvTable<T> implements ClaimKvTable<T>, CasKvTable<T> {
   async deleteIf(key: string, isStill: (current: T) => boolean) {
     const cur = this.map.get(key)
     return cur !== undefined && isStill(cur) && this.map.delete(key)
+  }
+  async update(key: string, fn: (current: T | undefined) => T | undefined) {
+    const next = fn(this.map.get(key))
+    if (next === undefined) return false
+    this.map.set(key, next)
+    return true
   }
   async claim(key: string) {
     if (this.claimed.has(key)) return undefined
