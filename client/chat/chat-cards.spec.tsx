@@ -207,8 +207,11 @@ describe('交付卡删除的原位确认', () => {
     const trash = screen.getByRole('button', { name: '删除这条记忆' })
     trash.focus()
     await act(async () => { fireEvent.click(trash) })
-    const confirm = within(screen.getByRole('group', { name: QUESTION }))
-    expect(confirm.getByText(QUESTION)).toBeInTheDocument()
+    const group = screen.getByRole('group', { name: QUESTION })
+    const confirm = within(group)
+    // 组名指向那句问话，不另写一份 aria-label
+    expect(group).not.toHaveAttribute('aria-label')
+    expect(group.getAttribute('aria-labelledby')).toBe(confirm.getByText(QUESTION).id)
     expect(confirm.getAllByRole('button').map(b => b.textContent)).toEqual(['删除', '取消'])
     expect(confirm.getByRole('button', { name: '取消' })).toHaveFocus()
     expect(screen.queryByRole('button', { name: '删除这条记忆' })).toBeNull()
@@ -239,6 +242,45 @@ describe('交付卡删除的原位确认', () => {
     act(() => { screen.getByRole('button', { name: '别处' }).focus() })
     expect(screen.queryByRole('group', { name: QUESTION })).toBeNull()
     expect(screen.getByRole('button', { name: '别处' })).toHaveFocus()
+    expect(screen.getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
+    expect(gateway.executed).toEqual([])
+  })
+})
+
+describe('交付卡删除确认：鼠标与指针', () => {
+  const QUESTION = '删除这条？'
+  const open = async () => {
+    expand()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除这条记忆' })) })
+    return within(screen.getByRole('group', { name: QUESTION }))
+  }
+
+  it('鼠标点「删除」时浏览器不把焦点给按钮（Safari）：「取消」失焦到页面上不收起，点击照常发 forget', async () => {
+    // 真浏览器里焦点掉到 body 时文档仍有焦点
+    const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+    try {
+      const { gateway } = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} />)
+      const confirm = await open()
+      const ok = confirm.getByRole('button', { name: '删除' })
+      fireEvent.pointerDown(ok)
+      fireEvent.mouseDown(ok)
+      act(() => { confirm.getByRole('button', { name: '取消' }).blur() })
+      expect(screen.getByRole('group', { name: QUESTION })).toBeInTheDocument()
+      await act(async () => { fireEvent.click(ok) })
+      expect(gateway.executed.map(e => e.command.cmd)).toEqual(['forget'])
+    } finally {
+      hasFocus.mockRestore()
+    }
+  })
+
+  it('在确认以外按下指针就收起，什么都不发；在确认里按下（问话、按钮）不收', async () => {
+    const { gateway } = renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} />)
+    const confirm = await open()
+    fireEvent.pointerDown(confirm.getByText(QUESTION))
+    fireEvent.pointerDown(confirm.getByRole('button', { name: '删除' }))
+    expect(screen.getByRole('group', { name: QUESTION })).toBeInTheDocument()
+    fireEvent.pointerDown(screen.getByText('原文'))
+    expect(screen.queryByRole('group', { name: QUESTION })).toBeNull()
     expect(screen.getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
     expect(gateway.executed).toEqual([])
   })

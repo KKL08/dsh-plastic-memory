@@ -3,7 +3,7 @@
  * 涉及其他项目时服务端先拒（cross-workspace，什么都没动），卡片里就地写明是哪个项目，用户点「继续处理」才带
  * allowCrossWorkspace 重发。失败把宿主 / 执行器的原话显示在卡片里；条目正在别处处理或刚处理完时交给列表提示（isHandledElsewhere）。
  */
-import { useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import type { MemoryCommand, MemoryCommandResult } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, useT } from '../i18n.tsx'
@@ -161,19 +161,32 @@ export function SecretDeleteConfirm({ onCancel, onConfirm, unavailable, showTitl
 
 /**
  * 普通删除（软删）的原位确认：对话交付卡、右侧栏、记忆查看里，删除按钮的位置换成「删除这条？ 删除 · 取消」，点「删除」才删。
- * 删了还能撤销或去最近删除找回，所以不展开确认块、不用危险样式。取消、Esc、焦点移出这一组都收起，什么都不发；
- * 窗口失焦（切到别的应用）不算移出。「取消」排在最后，落在原来按钮的位置上，连点两下也删不掉；焦点进来时也停在它上面。
+ * 删了还能撤销或去最近删除找回，所以不展开确认块、不用危险样式。取消、Esc、焦点移到这一组以外的控件、在这一组以外按下指针
+ * 都收起，什么都不发。焦点没落到任何控件上不算移出：Safari 等点按钮时不给按钮焦点，「取消」会先失焦到页面上，
+ * 这时收起就点不到「删除」了；切到别的应用也是这样。「取消」排在最后，落在原来按钮的位置上，连点两下也删不掉；焦点进来时也停在它上面。
  */
 export function SoftDeleteConfirm({ onCancel, onConfirm }: { onCancel: () => void; onConfirm: () => void }) {
   const t = useT()
   const ref = useRef<HTMLSpanElement>(null)
+  const questionId = useId()
+  const cancel = useRef(onCancel)
+  cancel.current = onCancel
   useReturnFocus(ref)
+  useEffect(() => {
+    const doc = ref.current?.ownerDocument
+    if (doc === undefined) return
+    const onPointer = (event: PointerEvent) => {
+      if (!(ref.current?.contains(event.target as Node) ?? false)) cancel.current()
+    }
+    doc.addEventListener('pointerdown', onPointer, true)
+    return () => { doc.removeEventListener('pointerdown', onPointer, true) }
+  }, [])
   return (
     <span
       ref={ref}
       className="pm-soft-confirm"
       role="group"
-      aria-label={t('pending.softDelete.question')}
+      aria-labelledby={questionId}
       onKeyDown={(event) => {
         if (event.key !== 'Escape') return
         event.preventDefault()
@@ -182,11 +195,10 @@ export function SoftDeleteConfirm({ onCancel, onConfirm }: { onCancel: () => voi
       }}
       onBlur={(event) => {
         const next = event.relatedTarget as Node | null
-        // 焦点没落到任何控件上：点了空白处（文档仍有焦点）才收起，切到别的应用不收
-        if (next === null ? event.currentTarget.ownerDocument.hasFocus() : !event.currentTarget.contains(next)) onCancel()
+        if (next !== null && !event.currentTarget.contains(next)) onCancel()
       }}
     >
-      <span className="pm-soft-confirm-text">{t('pending.softDelete.question')}</span>
+      <span id={questionId} className="pm-soft-confirm-text">{t('pending.softDelete.question')}</span>
       <button type="button" className="pm-link" onClick={onConfirm}>{t('pending.softDelete.confirm')}</button>
       <i className="pm-sep" aria-hidden="true">·</i>
       <button type="button" className="pm-link pm-soft-confirm-cancel" autoFocus onClick={onCancel}>{t('pending.cancel')}</button>
