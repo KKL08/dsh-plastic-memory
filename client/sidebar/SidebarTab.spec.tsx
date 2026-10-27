@@ -249,6 +249,19 @@ describe('SidebarTab 这次新写入的', () => {
     expect(screen.queryByText('报销截止每月 25 日。')).toBeNull()
   })
 
+  it('确认开着时这条从列表里没了（别处删了）：再回来时是垃圾桶，不带着没收起的确认', async () => {
+    const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
+    const { gateway } = setup({ library: library(pref, proj, glob, fresh), session: snapshot({ savedIds: ['n1'] }), pending: pending() })
+    await act(async () => { fireEvent.click(within(screen.getByRole('region', { name: '这次新写入的' })).getByRole('button', { name: '删除这条记忆' })) })
+    expect(screen.getByRole('group', { name: '删除这条？' })).toBeInTheDocument()
+    act(() => { gateway.setView('library', library(pref, proj, glob)) })
+    expect(screen.queryByRole('region', { name: '这次新写入的' })).toBeNull()
+    act(() => { gateway.setView('library', library(pref, proj, glob, fresh)) })
+    const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
+    expect(saved.queryByRole('group', { name: '删除这条？' })).toBeNull()
+    expect(saved.getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
+  })
+
   it('点垃圾桶不直接删：原位换成「删除这条？ 删除 · 取消」，焦点在「取消」；「取消」、Esc、焦点移走都收起，什么都不发', async () => {
     const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
     const { gateway } = setup({ library: library(pref, proj, glob, fresh), session: snapshot({ savedIds: ['n1'] }), pending: pending() })

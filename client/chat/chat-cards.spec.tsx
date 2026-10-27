@@ -494,6 +494,21 @@ describe('交付卡与其他界面共用删除状态', () => {
     expect(chatCard().queryByRole('button', { name: '删除这条记忆' })).toBeNull()
   })
 
+  it('确认开着时别处删了这条：撤销回来后是垃圾桶，不带着没收起的确认', async () => {
+    const gateway = createFakeGateway({ views: { library: libraryView() } })
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd={WS} saved={[fresh()]} now={NOW} openDetail={() => {}} />, gateway)
+    expand(chatCard())
+    await act(async () => { fireEvent.click(chatCard().getByRole('button', { name: '删除这条记忆' })) })
+    expect(chatCard().getByRole('group', { name: '删除这条？' })).toBeInTheDocument()
+    act(() => {
+      gateway.setView('library', { ...libraryView(), layers: [{ layer: { kind: 'workspace' as const, workspacePath: WS }, items: [] }] })
+      gateway.setView('deleted', { version: GUI_VIEW_VERSION, items: [{ memory: fresh().memory, deletedAt: NOW, purgeAt: NOW + 1 }] })
+    })
+    await act(async () => { fireEvent.click(chatCard().getByRole('button', { name: '撤销' })) })
+    expect(chatCard().queryByRole('group', { name: '删除这条？' })).toBeNull()
+    expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
+  })
+
   it('对话里 agent 自己删掉（最近删除视图里有这条）：交付卡换成「已删除」可撤销；撤销后视图还没刷新也不弹回去', async () => {
     const gateway = createFakeGateway({ views: { library: libraryView() } })
     renderInShell(<SavedMemoriesCard sessionId="s1" cwd={WS} saved={[fresh()]} now={NOW} openDetail={() => {}} />, gateway)

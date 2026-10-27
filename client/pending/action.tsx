@@ -206,6 +206,16 @@ export function SoftDeleteConfirm({ onCancel, onConfirm }: { onCancel: () => voi
   )
 }
 
+/**
+ * 删除按钮连同它的原位确认：`trigger` 画按钮，点了调 `open` 换成 SoftDeleteConfirm，点「删除」才调 `onDelete`。
+ * 确认开没开记在这个控件自己身上，跟着这一行走：行删掉了、从列表里没了就一起卸载，记忆撤销或恢复回来时是按钮，不会带着没收起的确认抢焦点。
+ */
+export function DeleteWithConfirm({ trigger, onDelete }: { trigger: (open: () => void) => ReactNode; onDelete: () => void }) {
+  const [isOpen, setOpen] = useState(false)
+  if (!isOpen) return <>{trigger(() => { setOpen(true) })}</>
+  return <SoftDeleteConfirm onCancel={() => { setOpen(false) }} onConfirm={() => { setOpen(false); onDelete() }} />
+}
+
 /** CrossConfirm 的样式；待处理卡的说明文字和按钮组也用这两个类。软删确认（SoftDeleteConfirm）的样式也在这里，三处共用。 */
 export const crossConfirmCss = `
 .pm-pending-text { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }

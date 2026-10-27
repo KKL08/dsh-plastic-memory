@@ -104,6 +104,19 @@ describe('全部记忆', () => {
     expect(nav.get()).toEqual({ tab: 'deleted', memoryId: 'a2' })
   })
 
+  it('确认开着时这一行从列表里没了（别处删了）：再回来时是「删除」按钮，不带着没收起的确认', async () => {
+    const gateway = createFakeGateway({ views: { library: library() } })
+    renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
+    await act(async () => { fireEvent.click(within(rowOf('提交前跑 typecheck')).getByRole('button', { name: '删除' })) })
+    expect(screen.getByRole('group', { name: '删除这条？' })).toBeInTheDocument()
+    const without = library()
+    act(() => { gateway.setView('library', { ...without, layers: without.layers.map(l => ({ ...l, items: l.items.filter(m => m.id !== 'a2') })) }) })
+    expect(screen.queryByText('提交前跑 typecheck')).toBeNull()
+    act(() => { gateway.setView('library', library()) })
+    expect(within(rowOf('提交前跑 typecheck')).queryByRole('group', { name: '删除这条？' })).toBeNull()
+    expect(within(rowOf('提交前跑 typecheck')).getByRole('button', { name: '删除' })).toBeInTheDocument()
+  })
+
   it('点「删除」不直接删：原位换成「删除这条？ 删除 · 取消」，焦点在「取消」；「取消」、Esc、焦点移走都收起，什么都不发', async () => {
     const gateway = createFakeGateway({ views: { library: library() } })
     renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)

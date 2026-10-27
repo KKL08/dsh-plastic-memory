@@ -18,7 +18,7 @@ import { useTypeLabel } from '../library/shared.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { keepFocusInPlace } from '../ui/focus-return.ts'
 import { TrashIcon } from '../ui/TrashIcon.tsx'
-import { crossConfirmCss, SecretDeleteConfirm, SoftDeleteConfirm } from '../pending/action.tsx'
+import { crossConfirmCss, DeleteWithConfirm, SecretDeleteConfirm } from '../pending/action.tsx'
 import type { SavedMemory } from './saved-turn.ts'
 
 /** 这一行自己的进行中 / 失败 / 等确认；删没删读网关的删除状态（别处删的也算，交付卡卸载重挂也还在）。 */
@@ -54,7 +54,6 @@ function SavedRow({ sessionId, item, layer, now, typeLabel, onDetail }: {
   const savedAt = Number.isFinite(item.memory.updatedAt) && item.memory.updatedAt > 0 ? item.memory.updatedAt : firstSeen
   const how = gateway.useDeletions().of(id, layer, savedAt)
   const [state, setState] = useState<RowState>({ kind: 'idle' })
-  const [isConfirming, setConfirming] = useState(false)
   const run = async (cmd: 'forget' | 'restore' | 'hard-delete') => {
     if (state.kind === 'busy') return
     keepFocusInPlace()
@@ -92,20 +91,21 @@ function SavedRow({ sessionId, item, layer, now, typeLabel, onDetail }: {
           <button type="button" className="pm-link" onClick={onDetail}>{t('chat.card.detail')}</button>
         </div>
       </div>
-      {isConfirming
-        ? <SoftDeleteConfirm onCancel={() => { setConfirming(false) }} onConfirm={() => { setConfirming(false); void run('forget') }} />
-        : (
+      <DeleteWithConfirm
+        onDelete={() => { void run('forget') }}
+        trigger={open => (
           <button
             type="button"
             className="pm-icon-btn"
             aria-label={t('chat.card.delete')}
             title={t('chat.card.delete')}
             aria-disabled={state.kind === 'busy' || state.kind === 'secret' || undefined}
-            onClick={() => { if (state.kind !== 'busy' && state.kind !== 'secret') setConfirming(true) }}
+            onClick={() => { if (state.kind !== 'busy' && state.kind !== 'secret') open() }}
           >
             <TrashIcon />
           </button>
         )}
+      />
     </div>
   )
 }

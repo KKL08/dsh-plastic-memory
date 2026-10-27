@@ -3,7 +3,6 @@
  * 模型怎么读到）和目录问题（来自视图，不在这里重算）；行尾打开文件、在访达中显示、删除（先原位确认「删除这条？ 删除 · 取消」，
  * 再软删，提示去最近删除恢复；含密钥的再确认一次彻底删除，不可恢复）。
  */
-import { useState } from 'react'
 import { layerOfMemory, type GuiLayerRef, type LibraryView } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { formatNumber, useT, type Translate } from '../i18n.tsx'
@@ -11,7 +10,7 @@ import { sameScope, type NavStore } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
-import { SoftDeleteConfirm } from '../pending/action.tsx'
+import { DeleteWithConfirm } from '../pending/action.tsx'
 import { FlashRow, useFlashTarget, useRowActions, useTypeLabel, ViewMessage } from './shared.tsx'
 
 function dirName(path: string): string {
@@ -60,8 +59,6 @@ export function LibraryTab({ nav, scope, session, now = Date.now() }: {
   const { flashId, clear } = useFlashTarget(nav, items.map(m => m.id))
   const actions = useRowActions(session)
   const typeLabel = useTypeLabel(session)
-  /** 等用户确认普通删除的那一行。 */
-  const [confirmId, setConfirmId] = useState<string | undefined>(undefined)
   if (view.status !== 'ready') return <ViewMessage state={view} />
 
   const data = view.data
@@ -127,21 +124,12 @@ export function LibraryTab({ nav, scope, session, now = Date.now() }: {
                 <div className="pm-row-actions">
                   <Button onClick={() => { void actions.open(memory.filePath) }}>{t('library.openFile')}</Button>
                   <Button onClick={() => { void actions.open(memory.filePath, 'reveal') }}>{t('library.reveal')}</Button>
-                  {confirmId === memory.id
-                    ? (
-                      <SoftDeleteConfirm
-                        onCancel={() => { setConfirmId(prev => (prev === memory.id ? undefined : prev)) }}
-                        onConfirm={() => {
-                          setConfirmId(undefined)
-                          void actions.run(memory.id, { cmd: 'forget', memoryId: memory.id, layer: layerOfMemory(memory) }, () => t('library.deletedNotice'))
-                        }}
-                      />
-                    )
-                    : (
-                      <Button unavailable={actions.unavailable(memory.id)} onClick={() => { setConfirmId(memory.id) }}>
-                        {t('library.delete')}
-                      </Button>
-                    )}
+                  <DeleteWithConfirm
+                    onDelete={() => {
+                      void actions.run(memory.id, { cmd: 'forget', memoryId: memory.id, layer: layerOfMemory(memory) }, () => t('library.deletedNotice'))
+                    }}
+                    trigger={open => <Button unavailable={actions.unavailable(memory.id)} onClick={open}>{t('library.delete')}</Button>}
+                  />
                 </div>
               </FlashRow>
             ))}

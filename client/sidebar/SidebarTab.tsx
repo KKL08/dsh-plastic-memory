@@ -29,7 +29,7 @@ import { ContextBudgetBar } from '../ui/ContextBudgetBar.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { TrashIcon } from '../ui/TrashIcon.tsx'
-import { CrossConfirm, crossConfirmCss, isHandledElsewhere, SecretDeleteConfirm, SoftDeleteConfirm } from '../pending/action.tsx'
+import { CrossConfirm, crossConfirmCss, isHandledElsewhere, DeleteWithConfirm, SecretDeleteConfirm } from '../pending/action.tsx'
 import { keepFocusInPlace } from '../ui/focus-return.ts'
 import { isLiveWrite, sessionCards, writtenSinceSnapshot } from './session-memories.ts'
 
@@ -98,8 +98,6 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const [ruled, setRuled] = useState<readonly Ruled[]>([])
   const [purged, setPurged] = useState<ReadonlySet<string>>(new Set())
   const [secretId, setSecretId] = useState<string | undefined>(undefined)
-  /** 等用户确认普通删除的那条新写入。 */
-  const [confirmId, setConfirmId] = useState<string | undefined>(undefined)
   // 在途的动作按条（待决项 id / 记忆 id）记：别的动作开始或结束都不让这一条重新可点，同一条冲突不会发出两条相反的裁决。
   // ref 同步拦截，state 只管渲染
   const inFlight = useRef(new Set<string>())
@@ -314,25 +312,21 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
               : (
                 <div key={id} className="pm-side-saved">
                   <div className="pm-side-saved-card">{card(memory)}</div>
-                  {confirmId === id
-                    ? (
-                      <SoftDeleteConfirm
-                        onCancel={() => { setConfirmId(prev => (prev === id ? undefined : prev)) }}
-                        onConfirm={() => { setConfirmId(undefined); forget(memory) }}
-                      />
-                    )
-                    : (
+                  <DeleteWithConfirm
+                    onDelete={() => { forget(memory) }}
+                    trigger={open => (
                       <button
                         type="button"
                         className="pm-side-delete"
                         aria-label={t('sidebar.saved.delete')}
                         title={t('sidebar.saved.delete')}
                         aria-disabled={isWaiting(id) || undefined}
-                        onClick={() => { if (!isWaiting(id)) setConfirmId(id) }}
+                        onClick={() => { if (!isWaiting(id)) open() }}
                       >
                         <TrashIcon />
                       </button>
                     )}
+                  />
                   {failed(id)}
                 </div>
               ))}
