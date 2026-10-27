@@ -278,6 +278,8 @@ async function dispatch(
 
   /** 结清这次提升或留下，返回条目 id。 */
   type SettleCandidate = (verdict: 'promoted' | 'keep-local', opts: { snapshotId?: string; fingerprint?: string }) => Promise<string>
+  /** 写进 AGENTS.md 后插件不再管理它：有条目就移出账本（返回它的 id），没有就什么都不记。 */
+  type DropCandidate = () => Promise<string | undefined>
 
   /**
    * 按记忆 id 提升或留在本项目。等你决定里已有它的提升候选条目：先认领那一条，和待处理卡、体检、另一处的就地处理互斥，
@@ -286,7 +288,7 @@ async function dispatch(
    */
   const onCandidateEntry = async (
     memoryId: string, layer: GuiLayerRef | undefined, isEligible: (r: MemoryRecord) => boolean, isInPlace: boolean,
-    act: (rec: MemoryRecord, settle: SettleCandidate) => Promise<MemoryCommandResult>,
+    act: (rec: MemoryRecord, settle: SettleCandidate, drop: DropCandidate) => Promise<MemoryCommandResult>,
   ): Promise<MemoryCommandResult> => {
     const seen = await locate(memoryId, layer)
     if (!seen || !isEligible(seen)) return notFound(memoryId)
@@ -299,13 +301,16 @@ async function dispatch(
         )
         await deps.decisions.settle(entry.id, verdict, now, created && isInPlace ? { ...opts, isBornSettled: true } : opts)
         return entry.id
-      })
+      }, async () => undefined)
     }
     const claimed = await deps.decisions.withClaim(open.id, async () => {
       const rec = await locate(memoryId, layer)
       if ((await deps.decisions.get(open.id)) === undefined || !rec || !isEligible(rec)) return notFound(memoryId)
       return await act(rec, async (verdict, opts) => {
         await deps.decisions.settle(open.id, verdict, now, opts)
+        return open.id
+      }, async () => {
+        await deps.decisions.remove(open.id)
         return open.id
       })
     })
@@ -433,18 +438,20 @@ async function dispatch(
 
     case 'promote-memory': {
       // 只提升指明的那一份、且它此刻仍在项目里：已提升、已删、不存在的什么都不动；就地提升（isCandidateRequired）还要它此刻仍是候选，
-      // 别处刚「留在本项目」的不再提升。和 promote 一样留账供 14 天内撤销：按提升候选记（已在等你决定里时结清那一条），撤销走 undo
+      // 别处刚「留在本项目」的不再提升。去处同 promote：提升为全局留账供 14 天内撤销（按提升候选记，已在等你决定里时结清那一条），撤销走 undo；
+      // 写进 AGENTS.md（含密钥的不写，回 failed）后插件不再管理它，条目移出账本
       const isInPlace = command.isCandidateRequired === true
-      return await onCandidateEntry(command.memoryId, command.layer, isInPlace ? isCandidate : isProjectMemory, isInPlace, async (rec, settle) => {
+      const target = command.target ?? 'global'
+      return await onCandidateEntry(command.memoryId, command.layer, isInPlace ? isCandidate : isProjectMemory, isInPlace, async (rec, settle, drop) => {
         const r = await executePromote(
-          { confirmedIds: [rec.id], target: 'global', allowCrossWorkspace: command.allowCrossWorkspace },
+          { confirmedIds: [rec.id], target, allowCrossWorkspace: command.allowCrossWorkspace },
           gov, { store: deps.store, agentsMd: deps.agentsMd, snapshots: deps.snapshots, now: () => now },
           { target: { kind: 'workspace', workspacePath: rec.workspacePath! } },
         )
         if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
         if (r.promoted.length === 0) return fail(cmd, 'failed', r.message)
-        const decisionId = await settle('promoted', r.snapshotId !== null ? { snapshotId: r.snapshotId } : {})
-        return { ok: true, cmd, decisionId, memoryIds: r.promoted.map(p => p.id), ...(r.snapshotId !== null ? { snapshotId: r.snapshotId } : {}) }
+        const decisionId = target === 'global' ? await settle('promoted', r.snapshotId !== null ? { snapshotId: r.snapshotId } : {}) : await drop()
+        return { ok: true, cmd, ...(decisionId !== undefined ? { decisionId } : {}), memoryIds: r.promoted.map(p => p.id), ...(r.snapshotId !== null ? { snapshotId: r.snapshotId } : {}) }
       })
     }
 

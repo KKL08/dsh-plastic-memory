@@ -1407,6 +1407,45 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
     expect(await candidateIds(e)).toEqual([memoryId])
   })
 
+  it('配置为写进 AGENTS.md 时就地提升同等待处理卡：写进 AGENTS.md、项目里那条软删（快照先行），账本不留东西、不进等你决定；最近删除里能找回', async () => {
+    const e = env({ llm: quietLlm })
+    const memoryId = await saveCandidate(e)
+    const body = ok(await e.run({ cmd: 'promote-memory', memoryId, layer: wsLayer, isCandidateRequired: true, target: 'agents-md' }))
+    expect(body.memoryIds).toEqual([memoryId])
+    expect(await readFile(join(root, 'AGENTS.md'), 'utf8')).toContain('所有项目都用 vitest')
+    expect((await e.store.get(memoryId))!.status).toBe('deleted')
+    expect((await e.snapshots.list()).flatMap(s => s.memoryIds)).toEqual([memoryId])
+    // 写进 AGENTS.md 后插件不再管理它：同待处理卡，账本不留可撤销的条目
+    expect(await allEntries(e)).toEqual([])
+    const view = await pendingView(e)
+    expect([ledgerItems(view), view.dot]).toEqual([[], 'none'])
+    ok(await e.run({ cmd: 'restore', memoryId, layer: wsLayer }))
+    expect((await e.store.get(memoryId))!.status).toBe('active')
+  })
+
+  it('写进 AGENTS.md：体检已把它挂进等你决定的，那一条移出账本', async () => {
+    const e = env({ llm: quietLlm })
+    const memoryId = await saveCandidate(e)
+    ok(await e.run({ cmd: 'scan' }))
+    expect(await candidateIds(e)).toEqual([memoryId])
+    ok(await e.run({ cmd: 'promote-memory', memoryId, layer: wsLayer, isCandidateRequired: true, target: 'agents-md' }))
+    expect(await allEntries(e)).toEqual([])
+    expect(await candidateIds(e)).toEqual([])
+  })
+
+  it('写进 AGENTS.md：含密钥的记忆同待处理卡回 failed 并说明原因，什么都不动', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_sec', name: '部署凭证', content: `token ${FAKE_SECRET.sk}`, scope: 'workspace', workspacePath: SESSION_WS, globalCandidate: true }))
+    const body = err(await e.run({ cmd: 'promote-memory', memoryId: 'mem_sec', layer: wsLayer, isCandidateRequired: true, target: 'agents-md' }))
+    expect(body.code).toBe('failed')
+    expect(body.detail).toContain('含密钥的记忆不能写入 AGENTS.md')
+    await expect(stat(join(root, 'AGENTS.md'))).rejects.toThrow()
+    const rec = (await e.store.get('mem_sec'))!
+    expect([rec.status, rec.globalCandidate]).toEqual(['active', true])
+    expect(await allEntries(e)).toEqual([])
+    expect(await e.snapshots.list()).toEqual([])
+  })
+
   it('keep-local-memory：不是候选、全局的、已删的、不存在的 → not-found，账本不动', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_plain', name: '普通', scope: 'workspace', workspacePath: SESSION_WS }))
