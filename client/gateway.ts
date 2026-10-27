@@ -522,9 +522,18 @@ export function createHostGateway(ctx: HostContext): BindGateway {
     }
   }
   const deletions = createDeletionStore()
+  /**
+   * 本页成功执行的命令次数。命令回结果前服务端已写好视图，但宿主的文件观察会漏掉紧挨着的第二次替换、版本停在上一版，
+   * 所以它也算进读视图的触发：本页的命令一成功，挂着的视图都重读一次。
+   */
+  let succeeded = 0
+  const succeededListeners = new Set<() => void>()
+  const subscribeSucceeded = (fn: () => void) => { succeededListeners.add(fn); return () => { succeededListeners.delete(fn) } }
+  const getSucceeded = () => succeeded
   const execute: MemoryGateway['execute'] = async (sessionId, command) => {
     const result = decodeExecution(command.cmd, await run(sessionId, encodeMemoryCommand(command)))
     deletions.record(command, result)
+    if (result.ok) { succeeded++; for (const fn of succeededListeners) fn() }
     return result
   }
   const root = createRootStore(run)
@@ -586,9 +595,10 @@ export function createHostGateway(ctx: HostContext): BindGateway {
       // 读到的内容按文件认，不按经哪个会话读：借来的会话中途换了（它开始跑一轮、换了更新的会话），全局视图还是同一个文件，
       // 沿用已读到的内容，不回到读取中（否则整页列表重挂，卡片上正在进行的编辑、生成都丢了）；「这次对话」视图的路径带会话 id，换会话照样重读
       const key = path ?? ''
-      // 有版本按版本读，refresh-views 成功后也重读一次（宿主推新版本之前先读到重写的内容）；
+      // 有版本按版本读，refresh-views 或本页的命令成功后也重读一次（宿主推新版本之前、或漏推时先读到重写的内容）；
       // 资源还停在 not-found、但 refresh-views 已写过文件时，按刷新次数直接读一次
-      const trigger = version !== undefined ? `${version}#${rootState.refreshes}` : isMissing && rootState.refreshes > 0 ? `refresh:${rootState.refreshes}` : undefined
+      const commands = useSyncExternalStore(subscribeSucceeded, getSucceeded)
+      const trigger = version !== undefined ? `${version}#${rootState.refreshes}#${commands}` : isMissing && rootState.refreshes > 0 ? `refresh:${rootState.refreshes}` : undefined
       const [read, setRead] = useState<ReadState<ViewMap[N]> | undefined>(undefined)
       const isStillMissing = isMissing && trigger !== undefined && read?.key === key && read.trigger === trigger && read.view.status === 'missing'
       useEffect(() => { if (!isPassive && sessionId !== undefined && isStillMissing) root.revalidate(sessionId) }, [isPassive, sessionId, isStillMissing])

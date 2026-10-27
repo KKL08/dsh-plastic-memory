@@ -298,6 +298,38 @@ describe('createHostGateway', () => {
     expect(read.mock.calls.filter(([, path]) => path === pendingPath)).toHaveLength(2)
   })
 
+  it('宿主没推来新版本（紧挨着的第二次替换被漏掉）：本页的命令成功后照样重读，之后才挂上的视图也拿到新内容', async () => {
+    localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+    // 资源一直停在 v1：服务端重写了 pending.json，宿主却没推新版本
+    resources[fileAddress('s1', pendingPath)] = { status: 'live', value: { absolutePath: pendingPath, version: 'v1' }, failure: undefined }
+    files[pendingPath] = JSON.stringify(pending)
+    const settled: PendingView = { ...pending, dot: 'none' }
+    const ctx = fakeCtx({
+      remote: {
+        commands: {
+          // 命令返回前视图已写好（服务端等视图写完才回结果）
+          execute: vi.fn(async (_sid: string, line: string) => {
+            executed.push(line)
+            const isResolve = line.startsWith('/memory resolve ')
+            if (isResolve) files[pendingPath] = JSON.stringify(settled)
+            const text = JSON.stringify(isResolve ? { ok: true, cmd: 'resolve' } : { ok: false, cmd: 'resolve', code: 'failed' })
+            return { ok: true as const, value: { commandId: 'c', result: { kind: 'success' as const, text } } }
+          }),
+        },
+      },
+    })
+    const bind = createHostGateway(ctx)
+    const sidebar = bind(props)
+    const page = bind({ ...props })
+    const { result: mounted } = renderHook(() => sidebar.useView(sidebar.useSession(undefined), 'pending'))
+    await waitFor(() => { expect(mounted.current).toEqual({ status: 'ready', data: pending }) })
+
+    await act(async () => { await sidebar.execute('s1', { cmd: 'resolve', decisionId: 'd1', verdict: 'keep-left' }) })
+    await waitFor(() => { expect(mounted.current).toEqual({ status: 'ready', data: settled }) })
+    const { result: opened } = renderHook(() => page.useView(page.useSession(undefined), 'pending'))
+    await waitFor(() => { expect(opened.current).toEqual({ status: 'ready', data: settled }) })
+  })
+
   it('localStorage 里已有 memoryRoot：不发命令直接订阅', async () => {
     localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
     resources[fileAddress('s1', pendingPath)] = { status: 'live', value: { absolutePath: 'x', version: 'v2' }, failure: undefined }
