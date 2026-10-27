@@ -565,16 +565,19 @@ export async function apply(ctx: Context, config: Config) {
   // 宿主每一步先 assemble、再跑 agent/pre-step（compaction-basic 在这里压缩），准入时重调同步 provider。
   // 等 next() 返回（压缩已做完）再重建快照，准入时追加的就是新快照，下一步中间件命中缓存、不再追加第二份。
   // prepend 让本监听排在最外层，不依赖插件加载顺序；缓存未过期时 assemble 直接命中。
+  // 只重建中间件冻结过的会话（injectedCore 有值）：宿主压掉运行时上下文时中间件不冻结，这里也不能冻结，
+  // 否则没进上下文的快照会计召回、出会话视图，检索还会把 core 正文换成「已带入」说明。
+  const wasFrozen = (session: object) => snapshotCache.injectedCore(session) !== undefined
   ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
     const decision = await next()
-    if (!signal.aborted) await snapshotCache.assemble(agent.session)
+    if (!signal.aborted && wasFrozen(agent.session)) await snapshotCache.assemble(agent.session)
     return decision
   }, { prepend: true })
   // 溢出恢复：compaction-basic 压缩后返回 retry，同一步重试前宿主同样重调 provider；只在重试时重建。
   // 也要 prepend：compaction-basic 恢复时直接返回 retry、不调 next()，排在它里层就看不到这次重试。
   ctx.on('agent/request-error', async ({ agent, signal }, next) => {
     const action = await next()
-    if (action?.kind === 'retry' && !signal.aborted) await snapshotCache.assemble(agent.session)
+    if (action?.kind === 'retry' && !signal.aborted && wasFrozen(agent.session)) await snapshotCache.assemble(agent.session)
     return action
   }, { prepend: true })
   // 快照只在 assemble waterfall（异步）里构建：宿主在跑 waterfall【之前】就已物化全部 provider 文本，

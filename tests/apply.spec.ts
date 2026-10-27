@@ -853,7 +853,7 @@ describe('注入链接线', () => {
     const exec = fakeExec({ agent: { session } as unknown as ToolRunContext['agent'] })
     const search = async () => (await defs.get('memory_search')!.execute({ query: '数据库' }, exec)) as { hits: Array<{ id: string; content: string }> }
     const recallStats = () => readFile(join(memoryRoot, STATE_DIR, RECALL_STATS_FILE), 'utf8').catch(() => '')
-    return { middleware, assembleCtx, search, recallStats }
+    return { ctx, session, middleware, assembleCtx, search, recallStats }
   }
 
   it('快照进了本会话上下文：memory_search 命中带入全文的 core 记忆时正文换成说明', async () => {
@@ -868,6 +868,35 @@ describe('注入链接线', () => {
     const { middleware, assembleCtx, search, recallStats } = await bootWithCore()
     const assembly: PromptAssembly = { sections: [], contexts: [], tools: [], variables: {} }
     await middleware(assembly, assembleCtx, async () => assembly)
+    expect(await recallStats()).not.toContain('mem_core')
+    expect((await search()).hits[0]!.content).toBe('测试里不要 mock 数据库')
+  })
+
+  /** 压掉运行时上下文的一步：中间件看不到本插件的条目，随后跑 hook 监听；返回检查用的入口。 */
+  async function suppressedStep(runHook: (ctx: Awaited<ReturnType<typeof bootWithCore>>['ctx'], agent: object, signal: AbortSignal) => Promise<void>) {
+    const { ctx, session, middleware, assembleCtx, search, recallStats } = await bootWithCore()
+    const assembly: PromptAssembly = { sections: [], contexts: [], tools: [], variables: {} }
+    await middleware(assembly, assembleCtx, async () => assembly)
+    await runHook(ctx, { session }, new AbortController().signal)
+    return { search, recallStats }
+  }
+
+  it('宿主压掉运行时上下文后，pre-step 也不冻结：不计召回，memory_search 照常给全文', async () => {
+    const decision = { kind: 'enter', messages: [] }
+    const { search, recallStats } = await suppressedStep(async (ctx, agent, signal) => {
+      expect(await ctx.listeners.get('agent/pre-step')!({ agent, messages: [], turn: 1, step: 1, signal }, async () => decision)).toBe(decision)
+    })
+    expect(await recallStats()).not.toContain('mem_core')
+    expect((await search()).hits[0]!.content).toBe('测试里不要 mock 数据库')
+  })
+
+  it('宿主压掉运行时上下文后，溢出重试也不冻结：不计召回，memory_search 照常给全文', async () => {
+    const retry = { kind: 'retry' }
+    const failure = { code: 'CONTEXT_WINDOW_EXCEEDED', message: 'overflow' }
+    const { search, recallStats } = await suppressedStep(async (ctx, agent, signal) => {
+      expect(await ctx.listeners.get('agent/request-error')!(
+        { agent, turn: 1, step: 1, provider: 'deepseek', failure, retryPolicy: undefined, signal }, async () => retry)).toBe(retry)
+    })
     expect(await recallStats()).not.toContain('mem_core')
     expect((await search()).hits[0]!.content).toBe('测试里不要 mock 数据库')
   })
