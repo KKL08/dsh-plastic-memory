@@ -454,6 +454,126 @@ describe('交付卡', () => {
   })
 })
 
+describe('交付卡：提升候选就地处理', () => {
+  const WS = '/w/app'
+  const named = (id: string, name: string, content: string): SavedMemory => {
+    const item = saved(id, content)
+    return { ...item, memory: { ...item.memory, name, workspacePath: WS } }
+  }
+  const cand = named('mem_c', '都用 vitest', '所有项目都用 vitest。')
+  const plain = named('mem_p', '提交信息用英文', '提交信息写英文。')
+  /** 全部记忆视图：这几条在本项目，按 promotion 标状态；global 里的同 id 表示已提升。 */
+  const libraryOf = (project: SavedMemory['memory'][], global: SavedMemory['memory'][] = []): LibraryView => ({
+    version: GUI_VIEW_VERSION, memoryRoot: '/m', directoryIssues: [],
+    layers: [{ layer: { kind: 'global' }, items: global }, { layer: { kind: 'workspace', workspacePath: WS }, items: project }],
+  })
+  const asCandidate = { ...cand.memory, promotion: 'candidate' as const }
+  const layer = { kind: 'workspace', workspacePath: WS }
+  const card = (gateway = createFakeGateway({ views: { library: libraryOf([asCandidate, plain.memory]) } })) => {
+    const utils = renderInShell(<SavedMemoriesCard sessionId="s1" cwd={WS} saved={[plain, cand]} now={NOW} openDetail={() => {}} />, gateway)
+    return { ...utils, gateway }
+  }
+  const row = (id: string) => within(document.querySelector<HTMLElement>(`.pm-saved-row[data-memory-id="${id}"]`)!)
+
+  it('折叠行末尾加「· N 条可提升为全局」（按全部记忆视图里还是候选的数）；没有候选时不加', () => {
+    const { unmount } = card()
+    const toggle = screen.getByRole('button', { expanded: false })
+    expect(toggle).toHaveTextContent('这轮记住了 2 条新记忆：提交信息用英文·1 条可提升为全局›')
+    unmount()
+    card(createFakeGateway({ views: { library: libraryOf([cand.memory, plain.memory]) } }))
+    expect(screen.getByRole('button', { expanded: false })).not.toHaveTextContent('可提升为全局')
+  })
+
+  it('展开后候选那条的元信息带「可提升为全局」，下方「留在本项目」「提升为全局」；不是候选的没有', () => {
+    card()
+    expand()
+    expect(row('mem_c').getByText('可提升为全局').closest('.pm-mc-meta')).not.toBeNull()
+    expect(row('mem_c').getAllByRole('button').map(b => b.textContent)).toEqual(['留在本项目', '提升为全局', '查看详情 ›', ''])
+    expect(row('mem_p').queryByText('可提升为全局')).toBeNull()
+    expect(row('mem_p').queryByRole('button', { name: '提升为全局' })).toBeNull()
+  })
+
+  it('「提升为全局」按记忆 id 发 promote-memory（带层），成功后换成结果文字「已提升为全局」，不再有按钮', async () => {
+    const { gateway } = card()
+    expand()
+    await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '提升为全局' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'promote-memory', memoryId: 'mem_c', layer }])
+    expect(row('mem_c').getByText('已提升为全局')).toBeInTheDocument()
+    expect(row('mem_c').queryByRole('button', { name: '提升为全局' })).toBeNull()
+    expect(row('mem_c').queryByRole('button', { name: '留在本项目' })).toBeNull()
+  })
+
+  it('「留在本项目」发 keep-local-memory（带层），成功后换成结果文字「留在本项目」', async () => {
+    const { gateway } = card()
+    expand()
+    await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '留在本项目' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'keep-local-memory', memoryId: 'mem_c', layer }])
+    expect(row('mem_c').getByText('留在本项目').closest('.pm-chip')).not.toBeNull()
+    expect(row('mem_c').queryByRole('button', { name: '留在本项目' })).toBeNull()
+  })
+
+  it('别处（右侧栏、待处理）处理过的按视图换成结果文字：提升了的在全局层，留下的标 kept-local；折叠行不再数它们', () => {
+    const gateway = createFakeGateway({ views: { library: libraryOf([plain.memory], [{ ...cand.memory, scope: 'global', workspacePath: undefined }]) } })
+    const { unmount } = card(gateway)
+    expect(screen.getByRole('button', { expanded: false })).not.toHaveTextContent('可提升为全局')
+    expand()
+    expect(row('mem_c').getByText('已提升为全局')).toBeInTheDocument()
+    expect(row('mem_c').queryByRole('button', { name: '提升为全局' })).toBeNull()
+    // 作用域按全局那一份写，删除也落在全局
+    expect(document.querySelector('.pm-saved-row[data-memory-id="mem_c"] .pm-mc-meta')).toHaveTextContent(/^preference·全局·/)
+    unmount()
+    card(createFakeGateway({ views: { library: libraryOf([{ ...cand.memory, promotion: 'kept-local' }, plain.memory]) } }))
+    expand()
+    expect(row('mem_c').getByText('留在本项目')).toBeInTheDocument()
+    expect(row('mem_c').queryByRole('button', { name: '提升为全局' })).toBeNull()
+  })
+
+  it('别处正在处理或刚处理完（claimed / not-found）：原位写「没有生效」，用户看得出自己的选择没算数', async () => {
+    const { gateway } = card(createFakeGateway({
+      views: { library: libraryOf([asCandidate, plain.memory]) },
+      respond: command => ({ ok: false, cmd: command.cmd, code: 'claimed' }),
+    }))
+    expand()
+    await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '留在本项目' })) })
+    expect(row('mem_c').getByRole('alert')).toHaveTextContent('你对「都用 vitest」的选择没有生效：它正在别处处理，或者刚在别处处理完。')
+    // 那边的结果写进视图后换成结果文字，说明还留着
+    act(() => { gateway.setView('library', libraryOf([plain.memory], [{ ...cand.memory, scope: 'global', workspacePath: undefined }])) })
+    expect(row('mem_c').getByText('已提升为全局')).toBeInTheDocument()
+    expect(row('mem_c').getByRole('alert')).toBeInTheDocument()
+  })
+
+  it('属于别的项目时服务端先拒：原位跨项目确认，「继续处理」带 allowCrossWorkspace 重发', async () => {
+    const { gateway } = card(createFakeGateway({
+      views: { library: libraryOf([asCandidate, plain.memory]) },
+      respond: command => 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
+        ? { ok: true, cmd: command.cmd, memoryIds: ['mem_c'] }
+        : { ok: false, cmd: command.cmd, code: 'cross-workspace', rejected: [{ id: 'mem_c', workspacePath: '/w/other' }] },
+    }))
+    expand()
+    await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '提升为全局' })) })
+    await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '继续处理' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([
+      { cmd: 'promote-memory', memoryId: 'mem_c', layer },
+      { cmd: 'promote-memory', memoryId: 'mem_c', layer, allowCrossWorkspace: true },
+    ])
+    expect(row('mem_c').getByText('已提升为全局')).toBeInTheDocument()
+  })
+
+  it('英文：折叠行、chip 与两个按钮', () => {
+    render(
+      <PanelShell gateway={createFakeGateway({ views: { library: libraryOf([asCandidate, plain.memory]) } })} t={createTranslator(en)}>
+        <SavedMemoriesCard sessionId="s1" cwd={WS} saved={[plain, cand]} now={NOW} openDetail={() => {}} />
+      </PanelShell>,
+    )
+    const toggle = screen.getByRole('button', { expanded: false })
+    expect(toggle).toHaveTextContent('1 could become global')
+    fireEvent.click(toggle)
+    expect(row('mem_c').getByText('Could become global')).toBeInTheDocument()
+    expect(row('mem_c').getByRole('button', { name: 'Keep in this project' })).toBeInTheDocument()
+    expect(row('mem_c').getByRole('button', { name: 'Make global' })).toBeInTheDocument()
+  })
+})
+
 describe('交付卡与其他界面共用删除状态', () => {
   const WS = '/w/app'
   const fresh = (): SavedMemory => ({

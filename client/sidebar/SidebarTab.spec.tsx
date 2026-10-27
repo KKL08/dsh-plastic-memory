@@ -316,6 +316,55 @@ describe('SidebarTab 这次新写入的', () => {
   })
 })
 
+describe('SidebarTab 这次新写入的：提升候选就地处理', () => {
+  const cand = memory({ id: 'n1', type: 'knowledge', content: '所有项目都用 vitest。', promotion: 'candidate' })
+  const plain = memory({ id: 'n2', type: 'knowledge', content: '提交信息写英文。' })
+  const layer = { kind: 'workspace', workspacePath: WS }
+  const views = (...items: MemoryCard[]) => ({ library: library(pref, proj, glob, ...items), session: snapshot({ savedIds: items.map(m => m.id) }), pending: pending() })
+  const row = (id: string) => within(document.querySelector<HTMLElement>(`.pm-side-saved[data-memory-id="${id}"]`)!)
+
+  it('候选那条带「可提升为全局」和「留在本项目」「提升为全局」；不是候选的没有', () => {
+    setup(views(cand, plain))
+    expect(row('n1').getByText('可提升为全局').closest('.pm-mc-meta')).not.toBeNull()
+    expect(row('n1').getByRole('button', { name: '留在本项目' })).toBeInTheDocument()
+    expect(row('n1').getByRole('button', { name: '提升为全局' })).toBeInTheDocument()
+    expect(row('n2').queryByText('可提升为全局')).toBeNull()
+    expect(row('n2').queryByRole('button', { name: '提升为全局' })).toBeNull()
+  })
+
+  it('「提升为全局」发 promote-memory、「留在本项目」发 keep-local-memory（带层），成功后换成结果文字、不再有按钮', async () => {
+    const other = memory({ id: 'n3', type: 'knowledge', content: '文档用中文。', promotion: 'candidate' })
+    const { gateway } = setup(views(cand, other))
+    await act(async () => { fireEvent.click(row('n1').getByRole('button', { name: '提升为全局' })) })
+    await act(async () => { fireEvent.click(row('n3').getByRole('button', { name: '留在本项目' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([
+      { cmd: 'promote-memory', memoryId: 'n1', layer },
+      { cmd: 'keep-local-memory', memoryId: 'n3', layer },
+    ])
+    expect(row('n1').getByText('已提升为全局')).toBeInTheDocument()
+    expect(row('n3').getByText('留在本项目').closest('.pm-chip')).not.toBeNull()
+    for (const id of ['n1', 'n3']) expect(row(id).queryByRole('button', { name: '提升为全局' })).toBeNull()
+  })
+
+  it('别处（对话卡片、待处理）处理过的按视图换成结果文字：提升了的在全局层，留下的标 kept-local', () => {
+    const promoted = { ...cand, scope: 'global' as const, workspacePath: undefined, promotion: undefined }
+    const kept = memory({ id: 'n3', type: 'knowledge', content: '文档用中文。', promotion: 'kept-local' })
+    setup(views(promoted, kept))
+    expect(row('n1').getByText('已提升为全局')).toBeInTheDocument()
+    expect(row('n3').getByText('留在本项目')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '提升为全局' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '留在本项目' })).toBeNull()
+  })
+
+  it('别处正在处理或刚处理完：原位写「没有生效」', async () => {
+    setup(views(cand), command => ({ ok: false, cmd: command.cmd, code: 'not-found' }))
+    for (const name of ['提升为全局', '留在本项目']) {
+      await act(async () => { fireEvent.click(row('n1').getByRole('button', { name })) })
+      expect(row('n1').getByRole('alert')).toHaveTextContent(`你对「${cand.name}」的选择没有生效：它正在别处处理，或者刚在别处处理完。`)
+    }
+  })
+})
+
 describe('SidebarTab 同 id 的多份副本', () => {
   const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。', updatedAt: 100 })
   const withLayers = (...extra: LibraryView['layers']) => {

@@ -12,6 +12,7 @@
  * 说明挪到「带入的记忆」上面（没有记忆了就在空状态上面），下一次动作时收起。
  * 新写入的行尾删除先在原位确认「删除这条？ 删除 · 取消」，点「删除」才发 forget。
  * 新写入的含密钥时不能软删（服务端回 has-secret，什么都没动）：原位确认，「彻底删除」发 hard-delete，删后原位留不可恢复的说明，tab 卸载后收起。
+ * 新写入的是全局提升候选时就地给「留在本项目」「提升为全局」，处理过的换成结果文字（见 promote-in-place.tsx），不进底部的待处理计数。
  */
 import { useMemo, useRef, useState, type ReactNode } from 'react'
 import {
@@ -30,6 +31,7 @@ import { EmptyState } from '../ui/EmptyState.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { TrashIcon } from '../ui/TrashIcon.tsx'
 import { CrossConfirm, crossConfirmCss, isHandledElsewhere, DeleteWithConfirm, SecretDeleteConfirm } from '../pending/action.tsx'
+import { promoteInPlaceCss, promotionOf, usePromoteInPlace } from '../pending/promote-in-place.tsx'
 import { keepFocusInPlace } from '../ui/focus-return.ts'
 import { isLiveWrite, sessionCards, writtenSinceSnapshot } from './session-memories.ts'
 
@@ -310,8 +312,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
             {saved.map(({ id, memory }) => memory === undefined
               ? purgedNote(id)
               : (
-                <div key={id} className="pm-side-saved">
-                  <div className="pm-side-saved-card">{card(memory)}</div>
+                <SavedRow key={id} session={session} memory={memory} card={card}>
                   <DeleteWithConfirm
                     onDelete={() => { forget(memory) }}
                     trigger={open => (
@@ -328,7 +329,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
                     )}
                   />
                   {failed(id)}
-                </div>
+                </SavedRow>
               ))}
           </section>
         )
@@ -425,6 +426,24 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   )
 }
 
+/** 这次新写入的一行：记忆卡（提升候选带 chip）+ 行尾删除；提升候选的两个动作和结果在卡片下面一行。 */
+function SavedRow({ session, memory, card, children }: {
+  session: BorrowedSession
+  memory: MemoryCardData
+  card: (memory: MemoryCardData, chip?: ReactNode) => ReactNode
+  /** 行尾删除与它的反馈。 */
+  children: ReactNode
+}) {
+  const promote = usePromoteInPlace(session, memory, layerOfMemory(memory), promotionOf(memory))
+  return (
+    <div className="pm-side-saved" data-memory-id={memory.id}>
+      <div className="pm-side-saved-card">{card(memory, promote.chip)}</div>
+      {children}
+      <div className="pm-side-saved-promote">{promote.controls}</div>
+    </div>
+  )
+}
+
 /** 刚裁决完：留下的那条带「已按 A」（基线冲突：「已保留这条记忆」，按基线则不留卡），下面一行后果 +「撤销」。 */
 function RuledCard({ ruled, card, busy, onUndo }: {
   ruled: Ruled
@@ -476,7 +495,7 @@ function ViewNote({ state }: { state: ViewState<unknown> }) {
   return <p className="pm-side-hint" role="status">{text}</p>
 }
 
-export const sidebarTabCss = crossConfirmCss + `
+export const sidebarTabCss = crossConfirmCss + promoteInPlaceCss + `
 .pm-side-root { height: 100%; min-height: 0; }
 .pm-side {
   height: 100%; min-height: 0; overflow: auto; scrollbar-gutter: stable;
@@ -499,7 +518,9 @@ export const sidebarTabCss = crossConfirmCss + `
 .pm-side-group-depth { font-weight: 400; color: var(--pm-text-2); }
 .pm-side-section-head { display: flex; flex-direction: column; gap: 2px; }
 .pm-side-saved { display: grid; grid-template-columns: minmax(0, 1fr) 24px; align-items: start; gap: 4px 8px; }
-.pm-side-saved > .pm-side-error { grid-column: 1 / -1; }
+.pm-side-saved > .pm-side-error, .pm-side-saved > .pm-side-saved-promote { grid-column: 1 / -1; }
+.pm-side-saved-promote { display: flex; flex-direction: column; gap: 8px; }
+.pm-side-saved-promote:empty { display: none; }
 /* 侧栏窄，删除确认放不进行尾：换到卡片下面一行靠右，记忆卡不跟着变窄 */
 .pm-side-saved > .pm-soft-confirm { grid-column: 1 / -1; justify-self: end; }
 .pm-side-delete {

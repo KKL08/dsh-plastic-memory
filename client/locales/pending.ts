@@ -53,6 +53,7 @@ export const pendingZh = {
   'pending.promote.globalNote': '提升后所有项目都会带入它，14 天内可撤销。',
   'pending.promote.agentsMdNote': '之后由你自己维护：插件不再体检它，它也不会过期。',
   'pending.promote.keepLocal': '留在本项目',
+  'pending.promote.candidate': '可提升为全局',
   'pending.promote.configLoading': '正在读取设置…',
 
   'pending.overflow.title': '带入的记忆超出上限',
@@ -232,6 +233,7 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.promote.globalNote': 'Every project will bring it in. You can undo within 14 days.',
   'pending.promote.agentsMdNote': 'You maintain it from then on: the plugin stops checking it and it never expires.',
   'pending.promote.keepLocal': 'Keep in this project',
+  'pending.promote.candidate': 'Could become global',
   'pending.promote.configLoading': 'Reading settings…',
 
   'pending.overflow.title': 'Memories brought in exceed the limit',
