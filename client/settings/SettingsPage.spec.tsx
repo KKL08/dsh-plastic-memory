@@ -82,7 +82,7 @@ describe('三组设置的渲染', () => {
     expect(screen.getByText('健康分低于 80 分、或冲突等了 3 天以上时提醒你。')).toBeInTheDocument()
     expect(screen.getByText(/插件不再管理这些内容/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '查看最近删除 ›' }))
-    expect(onOpen).toHaveBeenCalledWith({ tab: 'deleted' })
+    expect(onOpen).toHaveBeenCalledWith({ view: 'deleted', scope: { kind: 'all' } })
     expect(screen.getByText('/home/me/.dsh/memories')).toBeInTheDocument()
     expect(screen.queryByRole('textbox', { name: '记忆文件位置' })).toBeNull()
   })

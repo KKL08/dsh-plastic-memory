@@ -5,8 +5,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { layerOfMemory, sameLayer, type GuiLayerRef, type MemoryCard, type MemoryCommand } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
-import { baseName, formatNumber, useT } from '../i18n.tsx'
-import { compareLayers, useNavTarget, type NavStore, type NavTarget } from '../nav.ts'
+import { formatNumber, useT } from '../i18n.tsx'
+import { compareLayers, scopeName, useNavTarget, type NavStore, type NavTarget } from '../nav.ts'
 import { CrossConfirm, crossConfirmCss, SecretDeleteConfirm } from '../pending/action.tsx'
 import { keepFocusInPlace } from '../ui/focus-return.ts'
 
@@ -71,7 +71,7 @@ export function LayerHeading({ layer, count }: { layer: GuiLayerRef; count: numb
   const t = useT()
   return (
     <h3 className="pm-layer-heading">
-      {layer.kind === 'global' ? t('scope.global') : baseName(layer.workspacePath)}
+      {scopeName(layer, t)}
       <span className="pm-layer-count">{formatNumber(count)}</span>
     </h3>
   )
@@ -105,32 +105,52 @@ export function useFlashTarget(nav: NavStore, ids: readonly string[]): { flashId
 /** 高亮动画时长：播完收起高亮类，下次导航到同一条才能重播。 */
 export const FLASH_MS = 1800
 
-/** 高亮行：开始高亮时滚入视野，FLASH_MS 后回调收起。列表行是 li，待处理的卡是 div。 */
-export function FlashRow({ flashing, onFlashEnd, className, children, as: Tag = 'li' }: {
+function prefersReducedMotion(): boolean {
+  return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+}
+
+/**
+ * 高亮行：开始高亮时滚入视野，FLASH_MS 后回调收起。列表行是 li，待处理的卡是 div。
+ * takesFocus：高亮时这一行接住焦点（状态条结果行的链接跳过来的）；系统减弱动态效果时不闪，改成焦点描边。
+ * 描边跟着焦点走、不跟闪烁计时：这一行拿着焦点就在，焦点离开才去掉（闪完就消失的描边等于没给）。
+ */
+export function FlashRow({ flashing, onFlashEnd, className, children, as: Tag = 'li', takesFocus = false }: {
   flashing: boolean
   onFlashEnd: () => void
   className: string
   children: ReactNode
   as?: 'li' | 'div'
+  takesFocus?: boolean
 }) {
   const ref = useRef<HTMLLIElement & HTMLDivElement>(null)
   const end = useRef(onFlashEnd)
   end.current = onFlashEnd
+  const [isRinged, setRinged] = useState(false)
   useEffect(() => {
     if (!flashing) return
     ref.current?.scrollIntoView?.({ block: 'center' })
+    if (takesFocus) {
+      ref.current?.focus({ preventScroll: true })
+      if (prefersReducedMotion()) setRinged(true)
+    }
     const timer = setTimeout(() => { end.current() }, FLASH_MS)
     return () => { clearTimeout(timer) }
   }, [flashing])
+  const highlight = isRinged ? 'pm-flash-ring' : flashing ? 'pm-flash' : undefined
   return (
-    <Tag ref={ref} className={flashing ? `${className} pm-flash` : className}>
+    <Tag
+      ref={ref}
+      className={highlight === undefined ? className : `${className} ${highlight}`}
+      tabIndex={takesFocus ? -1 : undefined}
+      onBlur={isRinged ? (event) => { if (event.target === event.currentTarget) setRinged(false) } : undefined}
+    >
       {children}
     </Tag>
   )
 }
 
 /** purged：彻底删除了（含密钥的记忆，或最近删除里的一条），最近删除里没有它，提示里不带去那儿的链接。 */
-export type Notice = { kind: 'ok'; text: string; memoryId: string } | { kind: 'purged'; text: string } | { kind: 'error'; text: string }
+export type Notice = { kind: 'ok'; text: string } | { kind: 'purged'; text: string } | { kind: 'error'; text: string }
 
 /** 成功后的提示；null = 不提示，结果由调用方原位画（onOk）。 */
 type OkText = ((result: { decisionId?: string }) => string) | null
@@ -181,7 +201,7 @@ export function useRowActions(session: BorrowedSession) {
     if (result.ok) onOk?.()
     setNotice(!result.ok ? { kind: 'error', text: t('action.failed', { detail: result.detail ?? result.code }) }
       : okText === null ? undefined
-      : command.cmd === 'hard-delete' ? { kind: 'purged', text: okText(result) } : { kind: 'ok', text: okText(result), memoryId })
+      : command.cmd === 'hard-delete' ? { kind: 'purged', text: okText(result) } : { kind: 'ok', text: okText(result) })
   }
   return {
     notice,
@@ -263,4 +283,5 @@ export const sharedTabCss = crossConfirmCss + `
 }
 @keyframes pm-flash { 0%, 60% { background: var(--pm-accent-tint); } 100% { background: transparent; } }
 @keyframes pm-flash-bar { 0%, 60% { opacity: 1; } 100% { opacity: 0; } }
+.pm-root .pm-flash-ring { outline: var(--dsw-focus-ring-width, 2px) solid var(--pm-focus); outline-offset: 2px; }
 `

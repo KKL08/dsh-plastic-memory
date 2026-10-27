@@ -52,12 +52,12 @@ describe('applySettings', () => {
     expect(container).toBeEmptyDOMElement()
   })
 
-  it('最近删除入口先写导航目标再切到记忆页', () => {
+  it('最近删除入口先写导航目标（「全部」的最近删除）再切到记忆页', () => {
     const { registered, selectPanel, nav } = setup()
     const Card = registered[0]!.component
     render(<Card {...props} view="page" />)
     fireEvent.click(screen.getByRole('button', { name: '查看最近删除 ›' }))
-    expect(nav.get()).toEqual({ view: 'deleted' })
+    expect(nav.get()).toEqual({ view: 'deleted', scope: { kind: 'all' } })
     expect(selectPanel).toHaveBeenCalledWith(PANEL_ID)
   })
 

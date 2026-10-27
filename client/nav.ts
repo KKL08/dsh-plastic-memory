@@ -6,6 +6,7 @@
 import { useSyncExternalStore } from 'react'
 import { sameLayer, type GuiLayerRef, type PendingLevel, type ScopeRef } from '../src/gui/contract.ts'
 import type { HostContext } from './host.ts'
+import type { Translate } from './i18n.tsx'
 import { baseName } from './path.ts'
 
 /** 左栏记忆页与左栏图标共用的 id（`main` 插槽的 key = `sidebar.panellist` 的 id）。 */
@@ -15,9 +16,6 @@ export const PANEL_ID = 'plastic-memory'
 export const SIDEBAR_TAB_ID = 'dsh-plastic-memory'
 /** 右侧栏记忆 tab 的类型名（`openTab` 认它）。 */
 export const SIDEBAR_TAB_KIND = 'plastic-memory'
-
-/** 两个作用域是否同一层：都是全局，或同一个项目路径。 */
-export { sameLayer as sameScope } from '../src/gui/contract.ts'
 
 /** 记忆页的三个视图，按显示顺序：处理、记忆查看、最近删除。标识本身不随显示名变。 */
 export const MEMORY_VIEWS = ['todo', 'library', 'deleted'] as const
@@ -43,6 +41,11 @@ export function compareLayers(a: GuiLayerRef, b: GuiLayerRef): number {
   return baseName(a.workspacePath).localeCompare(baseName(b.workspacePath)) || a.workspacePath.localeCompare(b.workspacePath)
 }
 
+/** 范围的显示名：「全部」、「全局」，项目写目录名（路径最后一段）。左栏、标题行、状态条、范围标签都用它。 */
+export function scopeName(scope: PageScope, t: Translate): string {
+  return scope.kind === 'all' ? t('scope.all') : scope.kind === 'global' ? t('scope.global') : baseName(scope.workspacePath)
+}
+
 export interface NavTarget {
   view: MemoryView
   /** 缺省：从对话进来时是那个对话的项目（对话不在项目里时是全局），否则是「全部」。 */
@@ -55,11 +58,18 @@ export interface NavTarget {
    */
   level?: PendingLevel
   /**
+   * 处理视图要跳到的第一条带「新」的条目（状态条结果行的链接）：todo = 先处理或等你决定里的，advice = 可以整理里的，any = 不限。
+   * 滚到视野中间、闪一次并接住焦点；没有带「新」的落在处理视图顶部。和 level 一样只对写它的那次导航有效。
+   */
+  newItem?: NewItemJump
+  /**
    * 从对话（右侧栏、对话卡、输入框「记忆」按钮）进来。那个对话就是当前选中的会话：它的项目在标题行和左栏标「当前对话」，
    * 没有记忆也列进左栏。
    */
   fromChat?: true
 }
+
+export type NewItemJump = 'todo' | 'advice' | 'any'
 
 /** 改版前指向四个 tab 的导航目标，照常可用（见 toNavTarget）。缺省作用域按「全部」。 */
 export const LEGACY_TABS = ['pending', 'health', 'library', 'deleted'] as const
@@ -94,7 +104,7 @@ export interface NavStore {
    * 没有（点左栏图标、宿主恢复上次的面板）就按默认落点。
    */
   takeEntry(): boolean
-  /** 页内用：只改给出的字段；组定位（level）不沿用。 */
+  /** 页内用：只改给出的字段；组定位（level）和跳到「新」（newItem）不沿用。 */
   update(patch: Partial<NavTarget>): void
   /** 跳到宿主插件页里本插件的配置（记忆页的「设置」）；出口不可用时什么都不做。 */
   openSettings(): void
@@ -122,7 +132,7 @@ export function createNavStore(
     navigate: set,
     enter(next) { entered = true; set(toNavTarget(next)) },
     takeEntry() { const was = entered; entered = false; return was },
-    update(patch) { const { level: _dropped, ...rest } = target; set({ ...rest, ...patch }) },
+    update(patch) { const { level: _level, newItem: _newItem, ...rest } = target; set({ ...rest, ...patch }) },
     openSettings: () => { exits.settings?.() },
     openSidebarTab: () => { exits.sidebarTab?.() },
     canOpen: exit => exits[exit] !== undefined,

@@ -8,28 +8,30 @@
  */
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ChangeEvent, type KeyboardEvent, type MutableRefObject, type ReactNode } from 'react'
 import {
-  layerOfMemory, pendingItemKey, pendingItemScopes, sameLayer,
-  type DeletedView, type GuiLayerRef, type HealthView, type LibraryView, type PendingView,
+  layerOfMemory, pendingItemKey, pendingItemScopes, sameLayer, scopeKey,
+  type DeletedView, type GuiLayerRef, type LibraryView, type PendingView,
 } from '../src/gui/contract.ts'
 import { useGateway, type ViewState } from './gateway.ts'
-import { baseName, formatNumber, useT, type Translate } from './i18n.tsx'
+import { formatNumber, useT, type Translate } from './i18n.tsx'
 import {
-  ALL_SCOPE, MEMORY_VIEWS, compareLayers, isInScope, samePageScope, useCanOpen, useNavTarget,
+  ALL_SCOPE, MEMORY_VIEWS, compareLayers, isInScope, samePageScope, scopeName, useCanOpen, useNavTarget,
   type MemoryView, type NavStore, type NavTarget, type PageScope,
 } from './nav.ts'
 import { PendingTab } from './pending/PendingTab.tsx'
+import { useCheckupRuns } from './checkup/runs.ts'
+import { useVisitSeen } from './checkup/seen.ts'
+import { scoreOf, StatusBar, statusBarCss } from './checkup/StatusBar.tsx'
+import { TitleControls, titleControlsCss } from './checkup/TitleControls.tsx'
 import { Button } from './ui/Button.tsx'
 import { Chip } from './ui/Chip.tsx'
 import { EmptyState } from './ui/EmptyState.tsx'
-import { StatusMarker, type MarkerKind } from './ui/StatusMarker.tsx'
+import { StatusMarker } from './ui/StatusMarker.tsx'
 import { DeletedTab, deletedTabCss } from './deleted/DeletedTab.tsx'
 import { LibraryTab, libraryTabCss } from './library/LibraryTab.tsx'
 import { sharedTabCss } from './library/shared.tsx'
 import { SegmentedTabs, type SegmentedTab } from './ui/Segmented.tsx'
 
 const VIEW_LABEL = { todo: 'tab.todo', library: 'tab.library', deleted: 'tab.deleted' } as const satisfies Record<MemoryView, string>
-
-type HealthLayer = HealthView['layers'][number]
 
 /** 一个范围里的件数：todo = 先处理加等你决定，advice = 可以整理；按条目身份去重。 */
 interface TodoCount { todo: number; advice: number; hasSecret: boolean }
@@ -67,26 +69,9 @@ function listScopes(library: LibraryView | undefined, deleted: DeletedView | und
   return [{ kind: 'global' }, ...projects]
 }
 
-function scopeKey(scope: PageScope): string {
-  return scope.kind === 'workspace' ? `workspace:${scope.workspacePath}` : scope.kind
-}
-
-function scopeName(scope: PageScope, t: Translate): string {
-  return scope.kind === 'all' ? t('scope.all') : scope.kind === 'global' ? t('scope.global') : baseName(scope.workspacePath)
-}
-
 function allSub(projects: number, t: Translate): string {
   return t(projects === 1 ? 'scope.all.sub.one' : 'scope.all.sub', { n: formatNumber(projects) })
 }
-
-/** 分数能不能写：有密钥不打分；从没体检过也不写，只有规则检查的分数会让人误以为体检过了。 */
-function scoreOf(layer: HealthLayer | undefined): number | 'secret' | undefined {
-  if (layer === undefined) return undefined
-  if (layer.gate.secret || layer.score === null) return 'secret'
-  return layer.lastCheckupAt === null ? undefined : layer.score
-}
-
-const TIER_MARKER = { green: 'ok', amber: 'pending', red: 'error' } as const satisfies Record<HealthLayer['tier'], MarkerKind>
 
 export function MemoryPage({ nav }: { nav: NavStore }) {
   const t = useT()
@@ -103,7 +88,11 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
   const library = dataOf(gateway.useView(session, 'library'))
   const deleted = dataOf(gateway.useView(session, 'deleted'))
   const health = dataOf(gateway.useView(session, 'health'))
+  const checkups = dataOf(gateway.useView(session, 'checkups'))
   const pending = dataOf(pendingState)
+  const runs = useCheckupRuns(session, checkups)
+  // 「新」和结果行按这次停留进入范围时的记录显示：换范围、重开页面才算离开，同一范围里切视图不算
+  const seen = useVisitSeen(resolved === undefined ? '' : scopeKey(resolved))
   const tabsId = useId()
   const entry = useLanding(nav)
   useChatLanding(nav, entry, target, resolved, pending)
@@ -147,6 +136,10 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
     value: view, label: tabLabel(view), id: `${tabsId}-${view}`, panelId: `${tabsId}-${view}-panel`,
   })) as [SegmentedTab<MemoryView>, ...SegmentedTab<MemoryView>[]]
   const layerHealth = scope.kind === 'all' ? undefined : health?.layers.find(l => sameLayer(l.layer, scope))
+  const isGovernanceEnabled = (checkups ?? health)?.governanceEnabled !== false
+  // 「全部」体检实际会查的项目数（有活跃记忆的项目，健康视图和体检视图同一批层）；左栏还列只剩最近删除、只有待处理的项目，不算
+  const checkupLayers = health?.layers.map(l => l.layer) ?? checkups?.scopes.map(s => s.scope)
+  const checkupProjectCount = checkupLayers?.filter(l => l.kind === 'workspace').length ?? projectCount
 
   return (
     <div className="pm-page-frame">
@@ -162,7 +155,8 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
               if (s.kind === 'all') return { sub: allSub(projectCount, t), count }
               const layer = library?.layers.find(l => sameLayer(l.layer, s))
               const n = layer?.items.length ?? 0
-              const score = scoreOf(health?.layers.find(l => sameLayer(l.layer, s)))
+              // 体检在配置文件里关了：只写条数，不打分（和状态条一致）
+              const score = isGovernanceEnabled ? scoreOf(health?.layers.find(l => sameLayer(l.layer, s))) : undefined
               const parts = [t(n === 1 ? 'rail.count.one' : 'rail.count', { n: formatNumber(n) })]
               if (score === 'secret') parts.push(t('rail.unscored'))
               else if (score !== undefined) parts.push(t('health.score', { score: formatNumber(score) }))
@@ -197,15 +191,41 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
                 {scope.kind === 'all' ? allSub(projectCount, t) : scope.kind === 'global' ? t('scope.global.sub') : scope.workspacePath}
               </span>
             </div>
-            {/* 右边留给作用于这个范围的「自动体检」「立即体检」 */}
-            <div className="pm-head-actions" />
+            <div className="pm-head-actions">
+              <TitleControls
+                scope={scope}
+                session={session}
+                runs={runs}
+                checkups={checkups}
+                isGovernanceEnabled={isGovernanceEnabled}
+                projectCount={checkupProjectCount}
+                isEmpty={libraryCount === 0}
+              />
+            </div>
           </header>
-          {scope.kind !== 'all' && layerHealth !== undefined ? <ScopeStatus layer={layerHealth} /> : null}
+          {health !== undefined && (scope.kind === 'all' || layerHealth !== undefined)
+            ? (
+              <StatusBar
+                key={scopeKey(scope)}
+                scope={scope}
+                view={target.view}
+                nav={nav}
+                runs={runs}
+                seen={seen}
+                health={health}
+                checkups={checkups}
+                isGovernanceEnabled={isGovernanceEnabled}
+                memoryCount={libraryCount ?? (scope.kind === 'all' ? health.layers : [layerHealth!]).reduce((n, l) => n + l.totalMemories, 0)}
+                projectCount={projectCount}
+                needs={scopes.map(s => ({ scope: s, ...countTodo(pending, s) }))}
+              />
+            )
+            : null}
           <SegmentedTabs label={t('tabs.label')} items={items} value={target.view} onChange={(view) => { nav.update({ view, memoryId: undefined }) }} />
           <div role="tabpanel" id={`${tabsId}-${target.view}-panel`} aria-labelledby={`${tabsId}-${target.view}`} className="pm-page-panel">
             {target.view === 'todo'
               // 按范围给 key：换范围就收起上一个范围刚处理的结果卡和说明
-              ? <PendingTab key={scopeKey(scope)} nav={nav} session={session} scope={scope} workspacePath={scope.kind === 'workspace' ? scope.workspacePath : undefined} />
+              ? <PendingTab key={scopeKey(scope)} nav={nav} session={session} scope={scope} seen={seen} workspacePath={scope.kind === 'workspace' ? scope.workspacePath : undefined} />
               : target.view === 'library'
                 ? <LibraryTab nav={nav} scope={scope} session={session} />
                 : <DeletedTab nav={nav} scope={scope} session={session} />}
@@ -356,33 +376,6 @@ function ScopeRail({ scopes, selected, onSelect, row }: {
   )
 }
 
-/** 状态条首行：有密钥红三角、不打分；否则分档圆点加分数和分档文字；从没体检过不写分数。 */
-function ScopeStatus({ layer }: { layer: HealthLayer }) {
-  const t = useT()
-  const score = scoreOf(layer)
-  return (
-    <section className="pm-status" aria-label={t('status.label')}>
-      <p className="pm-status-line">
-        {score === 'secret'
-          ? (
-            <>
-              <span className="pm-status-mark"><StatusMarker kind="secret" /></span>
-              {t('status.unscored')}<i className="pm-sep" aria-hidden="true">·</i><span className="pm-status-soft">{t('status.secretFirst')}</span>
-            </>
-          )
-          : score === undefined
-            ? <span className="pm-status-soft">{t('health.unscored')}</span>
-            : (
-              <>
-                <span className="pm-status-mark"><StatusMarker kind={TIER_MARKER[layer.tier]} /></span>
-                {t('health.score', { score: formatNumber(score) })}<i className="pm-sep" aria-hidden="true">·</i><span className="pm-status-soft">{t(`health.tier.${layer.tier}`)}</span>
-              </>
-            )}
-      </p>
-    </section>
-  )
-}
-
 export const memoryPageCss = `
 /* 宿主中栏是纵向 flex：根要占满中栏、允许压缩，页面里的滚动区才有固定高度可滚。 */
 .pm-root--page { flex: 1 1 0; height: 100%; min-height: 0; }
@@ -442,16 +435,16 @@ export const memoryPageCss = `
   .pm-narrow { display: flex; }
   .pm-main { padding: calc(16px + var(--dsh-frame-top-clearance, 0px)) 16px 40px; }
 }
-.pm-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.pm-head-main { min-width: 0; display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; }
+.pm-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; }
+/* 主区窄到放不下范围名和两个控件时，控件折到下一行靠右；再窄（「保存失败」提示也在时）动作区里接着折行，不撑出横向滚动 */
+.pm-head-main { flex: 1 1 200px; min-width: 0; display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; }
 .pm-head-title { margin: 0; font-size: 20px; font-weight: 600; line-height: 28px; color: var(--pm-text); }
 .pm-head-path { min-width: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pm-head-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.pm-status { display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; border-radius: var(--dsw-radius-lg, 16px); background: var(--pm-bg-block); }
-.pm-status-line { display: flex; align-items: center; margin: 0; font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
-.pm-status-mark { display: inline-flex; justify-content: center; width: 14px; margin-right: 8px; }
-.pm-status-soft { font-weight: 400; }
+.pm-head-actions {
+  display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px;
+  min-width: 0; max-width: 100%; margin-left: auto;
+}
 .pm-tab-count { font-weight: 400; color: var(--pm-text-2); }
 .pm-page-panel { min-height: 0; }
 .pm-page-placeholder { margin: 24px 0; text-align: center; font-size: 12px; color: var(--pm-text-2); }
-` + sharedTabCss + libraryTabCss + deletedTabCss
+` + titleControlsCss + statusBarCss + sharedTabCss + libraryTabCss + deletedTabCss

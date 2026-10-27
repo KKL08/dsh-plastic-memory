@@ -84,6 +84,13 @@ describe('左栏范围', () => {
     ])
   })
 
+  it('配置文件关掉体检：副行只写条数，不写分数', () => {
+    open({ view: 'todo' }, createFakeGateway({ currentWorkspace: '/w/app', views: { ...views, health: { ...health, governanceEnabled: false } } }))
+    expect(rail().getAllByRole('button').map(b => rowParts(b).sub)).toEqual([
+      '3 个项目和全局', '1 条', '2 条', '0 条', '1 条',
+    ])
+  })
+
   it('有事要处理的行带标记和件数：密钥红三角，其余琥珀圆点；读屏念「N 件待处理」，含密钥时说明；「全部」按条目去重', () => {
     open()
     const marker = (name: string) => railRow(name).querySelector('.pm-marker')?.getAttribute('class') ?? ''
@@ -171,9 +178,10 @@ describe('标题行与状态条', () => {
     expect(within(panel()).getByRole('heading', { level: 2 })).toHaveTextContent('先处理')
   })
 
-  it('「全部」这一版不画状态条', () => {
+  it('「全部」的状态条不打总分', () => {
     open()
-    expect(statusBar()).toBeNull()
+    expect(statusBar()).toBeInTheDocument()
+    expect(statusBar()).not.toHaveTextContent(/\d+ 分/)
   })
 })
 

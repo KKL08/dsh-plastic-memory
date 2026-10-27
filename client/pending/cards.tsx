@@ -77,13 +77,23 @@ const isMac = () => typeof navigator !== 'undefined' && /mac/i.test(navigator.pl
 /** 「全部」里每张卡标题后的范围名胶囊（条目属于哪些范围）；选了具体范围时为空，不画。由列表按行给出。 */
 export const ItemScopeNames = createContext<readonly string[]>([])
 
-/** focusable：结果卡可以接住焦点（tabIndex=-1），确认收起后原来的按钮没了就落在它上面。 */
-/** 记忆页「全部」里条目标题后的范围胶囊，范围名由 ItemScopeNames 提供。 */
+/** 这张卡是最近一次体检新增、这一趟还算「新」的：标题后先跟「新」胶囊。由列表按行给出。 */
+export const ItemIsNew = createContext(false)
+
+/** 记忆页处理视图里条目标题后的胶囊：「新」（ItemIsNew）在前，「全部」里的范围名（ItemScopeNames）在后。 */
 function ScopeChips() {
+  const t = useT()
   const scopes = useContext(ItemScopeNames)
-  return <>{scopes.map((name, i) => <span key={i} className="pm-pending-scope"><Chip variant="neutral">{name}</Chip></span>)}</>
+  const isNew = useContext(ItemIsNew)
+  return (
+    <>
+      {isNew ? <span className="pm-pending-scope"><Chip variant="neutral">{t('pending.new')}</Chip></span> : null}
+      {scopes.map((name, i) => <span key={i} className="pm-pending-scope"><Chip variant="neutral">{name}</Chip></span>)}
+    </>
+  )
 }
 
+/** focusable：结果卡可以接住焦点（tabIndex=-1），确认收起后原来的按钮没了就落在它上面。 */
 function Card({ marker, title, aside, focusable = false, children }: {
   marker?: ReactNode
   title: ReactNode

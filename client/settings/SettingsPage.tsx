@@ -8,7 +8,7 @@ import { useId, useState } from 'react'
 import { useGateway } from '../gateway.ts'
 import { useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
-import type { LegacyNavTarget, NavTarget } from '../nav.ts'
+import { ALL_SCOPE, type NavTarget } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { SegmentedControl } from '../ui/Segmented.tsx'
 import { SettingsForm, SettingsGroupCard, SettingsItem } from '../ui/Settings.tsx'
@@ -26,7 +26,7 @@ const USAGE_FIELDS: ReadonlyArray<keyof SettingsFields> = ['budget', 'overflow',
 export function SettingsPage({ form, onOpenMemoryPage, now }: {
   form: ConfigForm
   /** 经导航 store 直达记忆页：状态卡给范围加视图，最近删除入口给旧目标。 */
-  onOpenMemoryPage: (target: NavTarget | Pick<LegacyNavTarget, 'tab'>) => void
+  onOpenMemoryPage: (target: NavTarget) => void
   now?: number
 }) {
   const t = useT()
@@ -152,7 +152,7 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
             />
           </SettingsItem>
           <SettingsItem label={t('settings.deleted.label')} hint={t('settings.deleted.hint')}>
-            <button type="button" className="pm-link" onClick={() => { onOpenMemoryPage({ tab: 'deleted' }) }}>{t('settings.deleted.open')}</button>
+            <button type="button" className="pm-link" onClick={() => { onOpenMemoryPage({ view: 'deleted', scope: ALL_SCOPE }) }}>{t('settings.deleted.open')}</button>
           </SettingsItem>
           <SettingsItem label={t('settings.root.label')} hint={t('settings.root.hint')}>
             <MemoryRoot configured={configuredRoot(snapshot.value)} />

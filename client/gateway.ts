@@ -11,10 +11,10 @@
  */
 import { createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import {
-  GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, encodeMemoryCommand, sessionViewFile,
-  deletedViewSchema, healthViewSchema, libraryViewSchema, pendingViewSchema, sessionViewSchema, workspaceMapViewSchema,
+  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, encodeMemoryCommand, sessionViewFile,
+  checkupViewSchema, deletedViewSchema, healthViewSchema, libraryViewSchema, pendingViewSchema, sessionViewSchema, workspaceMapViewSchema,
   layerOfMemory, memoryCommandResultSchema,
-  type DeletedView, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCard, type MemoryCommand, type MemoryCommandResult,
+  type CheckupView, type DeletedView, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCard, type MemoryCommand, type MemoryCommandResult,
   type PendingItem, type PendingView, type SessionView, type WorkspaceMapView,
 } from '../src/gui/contract.ts'
 import type {
@@ -27,6 +27,8 @@ export interface ViewMap {
   health: HealthView
   library: LibraryView
   deleted: DeletedView
+  /** 体检视图：各范围的自动体检设置、进行中、上次与下次体检（所有窗口共用一份）。 */
+  checkups: CheckupView
   /** 借来的那个会话自己的「这次对话」视图。 */
   session: SessionView
   /** 会话归属对照（原始 cwd → 服务端解析出的项目）。 */
@@ -325,6 +327,7 @@ const SCHEMAS = {
   health: healthViewSchema,
   library: libraryViewSchema,
   deleted: deletedViewSchema,
+  checkups: checkupViewSchema,
   session: sessionViewSchema,
   workspaces: workspaceMapViewSchema,
 } as const
@@ -343,7 +346,8 @@ export function parseView<N extends ViewName>(name: N, text: string): ViewState<
 
 /** 视图文件的绝对路径。 */
 export function viewPath(memoryRoot: string, name: ViewName, sessionId: string): string {
-  const file = name === 'session' ? sessionViewFile(sessionId) : name === 'workspaces' ? GUI_WORKSPACE_MAP_FILE : GUI_VIEW_FILES[name]
+  const file = name === 'session' ? sessionViewFile(sessionId) : name === 'workspaces' ? GUI_WORKSPACE_MAP_FILE
+    : name === 'checkups' ? GUI_CHECKUP_VIEW_FILE : GUI_VIEW_FILES[name]
   return `${memoryRoot.replace(/[\\/]+$/, '')}/${GUI_VIEW_DIR}/${file}`
 }
 
@@ -602,9 +606,9 @@ export function createHostGateway(ctx: HostContext): BindGateway {
       const [read, setRead] = useState<ReadState<ViewMap[N]> | undefined>(undefined)
       const isStillMissing = isMissing && trigger !== undefined && read?.key === key && read.trigger === trigger && read.view.status === 'missing'
       useEffect(() => { if (!isPassive && sessionId !== undefined && isStillMissing) root.revalidate(sessionId) }, [isPassive, sessionId, isStillMissing])
-      // 版本不认识（旧插件写的、或刷新前留下的）：refresh-views 只重写四个全局视图，这几个请服务端重写一次，
+      // 版本不认识（旧插件写的、或刷新前留下的）：refresh-views 只重写四个全局视图和体检视图，这几个请服务端重写一次，
       // 这次页面里已全量重写过就不再发；重写完重读，仍不认识才显示过时。不轮询
-      const isRegenerable = !isPassive && name in GUI_VIEW_FILES
+      const isRegenerable = !isPassive && (name in GUI_VIEW_FILES || name === 'checkups')
       const isOutdated = read !== undefined && read.key === key && read.view.status === 'outdated'
       useEffect(() => { if (isRegenerable && sessionId !== undefined && isOutdated) root.ensureViews(sessionId) }, [isRegenerable, sessionId, isOutdated])
       const isAwaitingRewrite = isRegenerable && isOutdated

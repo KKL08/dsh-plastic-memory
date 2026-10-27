@@ -8,14 +8,18 @@
  * 空状态两种：配置文件关掉体检（写明在配置文件里改，界面上不提供打开）、三组都空（写上次体检时间，不放体检按钮）；已忽略那一行跟在空状态下面。
  * 入口带记忆 id 打开时，含这条记忆的卡（冲突任一方、提升候选、密钥）滚入视野并高亮一次。
  * 带组标识进来时（健康页「去处理 ›」）焦点落在那一组的标题上，组已不在（处理完了）落在待处理顶部；每次导航只定位一次。
+ * 「新」：最近一次界面手动或自动体检新增、这一趟进来时还没显示过的条目，标题后带「新」、排在组内最前（记录见 checkup/seen.ts）。
+ * 按进入这个范围时读的记录标（记忆页给出，同一范围里切视图不重读）；显示出来的随即记下，换范围再回来就不标了。
+ * 带 newItem 进来时（状态条结果行的链接）跳到第一条带「新」的条目：滚到视野中间、闪一次、接住焦点；没有就落在顶部。
  */
 import { useEffect, useId, useRef, useState, type ReactElement, type ReactNode, type RefObject } from 'react'
 import { PENDING_LEVELS, pendingItemKey, pendingItemScopes, type GuiLayerRef, type HealthView, type LibraryView, type PendingItem, type PendingLevel, type PendingView } from '../../src/gui/contract.ts'
+import { isNewItem, markSeen, newItemIndex, readSeen, type Seen } from '../checkup/seen.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { baseName, formatDay, formatNumber, useT } from '../i18n.tsx'
 import { FlashRow, useFlashTarget } from '../library/shared.tsx'
 import type { LocaleKey } from '../locales.ts'
-import { compareLayers, isInScope, useNavTarget, type NavStore, type NavTarget, type PageScope } from '../nav.ts'
+import { compareLayers, isInScope, scopeName, useNavTarget, type NavStore, type NavTarget, type NewItemJump, type PageScope } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { Chip } from '../ui/Chip.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
@@ -25,7 +29,7 @@ import { editCss } from './edit.tsx'
 import { modelEditCss } from './model-edit.tsx'
 import { moveCss } from './move.tsx'
 import {
-  AdviceCard, adviceTitle, HorizontalCard, ItemScopeNames, OverflowCard, PromoteCard, ResultCard, SecretCard, titleOf, UnreadableCard, VerticalCard, type Outcome,
+  AdviceCard, adviceTitle, HorizontalCard, ItemIsNew, ItemScopeNames, OverflowCard, PromoteCard, ResultCard, SecretCard, titleOf, UnreadableCard, VerticalCard, type Outcome,
 } from './cards.tsx'
 
 /** 建议整理先显示的行数，其余收进「展开其余 N 条」；要紧的两组全部显示。 */
@@ -55,16 +59,25 @@ const LEVEL_LABEL = {
   'advice': 'pending.level.advice',
 } as const satisfies Record<PendingLevel, LocaleKey>
 
-/** 一行：待处理项的卡，或原位的结果卡、没有生效的说明。isItem 的行才算进组标题的条数。 */
-interface Row { key: string; node: ReactElement; level: PendingLevel; isItem: boolean; flashing?: boolean }
+/** 一行：待处理项的卡，或原位的结果卡、没有生效的说明。isItem 的行才算进组标题的条数；isNew 的行带「新」。 */
+interface Row { key: string; node: ReactElement; level: PendingLevel; isItem: boolean; isNew?: boolean; flashing?: boolean }
 
-export function PendingTab({ nav, session, scope, workspacePath, now = Date.now() }: {
+/** 结果行链接跳到的组：等你决定那条链接管先处理和等你决定，可以整理那条只管可以整理。 */
+const JUMP_LEVELS = {
+  todo: ['must-fix', 'your-call'],
+  advice: ['advice'],
+  any: PENDING_LEVELS,
+} as const satisfies Record<NewItemJump, readonly PendingLevel[]>
+
+export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen, now = Date.now() }: {
   nav: NavStore
   session: BorrowedSession
   /** 左栏选中的范围：只列属于它的条目；「全部」里每张卡带范围名胶囊。 */
   scope: PageScope
   /** 页面当前范围的项目（「移到项目…」默认选它）；全局、全部为 undefined。 */
   workspacePath: string | undefined
+  /** 进入这个范围时读的「显示过」记录；不给时按挂载时读的。 */
+  seen?: Seen
   now?: number
 }) {
   const t = useT()
@@ -72,6 +85,8 @@ export function PendingTab({ nav, session, scope, workspacePath, now = Date.now(
   const pending = gateway.useView(session, 'pending')
   const health = gateway.useView(session, 'health')
   const library = gateway.useView(session, 'library')
+  const checkupState = gateway.useView(session, 'checkups')
+  const checkups = checkupState.status === 'ready' ? checkupState.data : undefined
   const current = gateway.useCurrentWorkspace()
   const config = gateway.useConfig()
   // 「移到项目…」默认选当前页面的项目，页面在全局时选借来的会话所在的项目
@@ -81,11 +96,26 @@ export function PendingTab({ nav, session, scope, workspacePath, now = Date.now(
   const [refused, setRefused] = useState<Refused | undefined>(undefined)
   /** 点过「展开其余 N 条」的组。 */
   const [expanded, setExpanded] = useState<ReadonlySet<PendingLevel>>(new Set())
+  const [mountSeen] = useState(readSeen)
+  const seen = visitSeen ?? mountSeen
+  const newIndex = newItemIndex(checkups)
+  const isNew = (item: PendingItem) => isNewItem(newIndex, seen, pendingItemKey(item))
+  /** 这次渲染里显示出来的「新」条目，渲染后记下。 */
+  const shownNew = useRef<string[]>([])
+  shownNew.current = []
+  useEffect(() => {
+    if (checkups === undefined) return
+    markSeen(checkups, shownNew.current.flatMap(key => (newIndex.get(key) ?? []).map(checkupId => ({ checkupId, keys: [key] }))))
+  })
   const done = (next: Recent) => { setRecent(next); setRefused(undefined) }
   const refuse = (item: PendingItem, index: number) => () => { setRefused({ key: pendingItemKey(item), index, title: titleOf(item, t), level: item.level }) }
 
-  const viewItems = pending.status === 'ready' ? pending.data.items.filter(item => isInScope(pendingItemScopes(item), scope)) : []
-  const layerName = (layer: GuiLayerRef) => layer.kind === 'global' ? t('scope.global') : baseName(layer.workspacePath)
+  // 带「新」的排在组内最前（各组按级别分开画，整体稳定排序即可）
+  const viewItems = (pending.status === 'ready' ? pending.data.items.filter(item => isInScope(pendingItemScopes(item), scope)) : [])
+    .map(item => ({ item, isNew: isNew(item) }))
+    .sort((a, b) => Number(b.isNew) - Number(a.isNew))
+    .map(({ item }) => item)
+  const layerName = (layer: GuiLayerRef) => scopeName(layer, t)
   const scopeNames = (item: PendingItem): readonly string[] => scope.kind !== 'all' ? [] : pendingItemScopes(item).map(layerName)
   const healthLayers = health.status === 'ready' ? health.data.layers.filter(l => isInScope([l.layer], scope)) : []
   const ignored = [...healthLayers].sort((a, b) => compareLayers(a.layer, b.layer))
@@ -95,6 +125,11 @@ export function PendingTab({ nav, session, scope, workspacePath, now = Date.now(
   const { flashId, clear } = useFlashTarget(nav, viewItems.flatMap(memoryIdsOf))
   const root = useRef<HTMLDivElement>(null)
   useGroupFocus(nav, root, pending.status === 'ready')
+  const jump = useNewItemJump(nav, root, pending.status === 'ready' && checkupState.status !== 'loading', (to) => {
+    const levels: readonly PendingLevel[] = JUMP_LEVELS[to]
+    const hit = levels.flatMap(level => viewItems.filter(item => item.level === level && isNew(item)))[0]
+    return hit === undefined ? undefined : pendingItemKey(hit)
+  })
   const recentKey = recent === undefined ? undefined : pendingItemKey(recent.item)
   const backInView = recentKey !== undefined && viewItems.some(i => pendingItemKey(i) === recentKey)
   // 撤销后视图把条目带回来了：本地那张让位
@@ -104,13 +139,22 @@ export function PendingTab({ nav, session, scope, workspacePath, now = Date.now(
 
   // 视图还没重写时刚处理的条目仍在里面：先藏起来，原位放结果卡
   const items = viewItems.filter(i => recent === undefined || recent.undone || pendingItemKey(i) !== recentKey)
-  const rows: Row[] = items.map((item, index) => ({
-    key: pendingItemKey(item),
-    level: item.level,
-    isItem: true,
-    flashing: flashId !== undefined && memoryIdsOf(item).includes(flashId),
-    node: <ItemScopeNames.Provider value={scopeNames(item)}>{renderCard(item, (outcome) => { done({ item, index, outcome, undone: false }) }, refuse(item, index))}</ItemScopeNames.Provider>,
-  }))
+  const rows: Row[] = items.map((item, index) => {
+    const key = pendingItemKey(item)
+    const isNewRow = isNew(item)
+    return {
+      key,
+      level: item.level,
+      isItem: true,
+      isNew: isNewRow,
+      flashing: (flashId !== undefined && memoryIdsOf(item).includes(flashId)) || (jump.isFlashing && jump.key === key),
+      node: (
+        <ItemIsNew.Provider value={isNewRow}>
+          <ItemScopeNames.Provider value={scopeNames(item)}>{renderCard(item, (outcome) => { done({ item, index, outcome, undone: false }) }, refuse(item, index))}</ItemScopeNames.Provider>
+        </ItemIsNew.Provider>
+      ),
+    }
+  })
   if (recent !== undefined && !(recent.undone && backInView)) {
     rows.splice(Math.min(recent.index, rows.length), 0, {
       key: `recent:${recentKey}`,
@@ -193,11 +237,21 @@ export function PendingTab({ nav, session, scope, workspacePath, now = Date.now(
               const group = rows.filter(row => row.level === level)
               const isOpen = level !== FOLDED_LEVEL || expanded.has(level) || group.slice(GROUP_PREVIEW).some(row => row.flashing === true)
               const shown = isOpen ? group : group.slice(0, GROUP_PREVIEW)
+              for (const row of shown) if (row.isNew === true) shownNew.current.push(row.key)
               const tail = level === 'advice' ? ignoredBlock : null
               return group.length === 0 && tail === null ? null : (
                 <PendingGroup key={level} level={level} count={group.filter(row => row.isItem).length}>
                   {shown.map(row => (
-                    <FlashRow key={row.key} as="div" className="pm-pending-row" flashing={row.flashing ?? false} onFlashEnd={clear}>{row.node}</FlashRow>
+                    <FlashRow
+                      key={row.key}
+                      as="div"
+                      className="pm-pending-row"
+                      flashing={row.flashing ?? false}
+                      takesFocus={row.key === jump.key}
+                      onFlashEnd={() => { clear(); jump.end() }}
+                    >
+                      {row.node}
+                    </FlashRow>
                   ))}
                   {shown.length < group.length
                     ? (
@@ -230,6 +284,31 @@ function useGroupFocus(nav: NavStore, root: RefObject<HTMLDivElement | null>, is
     spot.focus({ preventScroll: true })
     spot.scrollIntoView?.({ block: 'start' })
   }, [target, isReady, root])
+}
+
+/**
+ * 导航目标带 newItem 时跳一次：firstNew 给出那一类里第一条带「新」的条目，它闪一次并接住焦点（key 留着，焦点不因闪完而丢）；
+ * 没有就落在处理视图顶部。按目标对象认「一次」；视图还没到就等它到。
+ */
+function useNewItemJump(
+  nav: NavStore,
+  root: RefObject<HTMLDivElement | null>,
+  isReady: boolean,
+  firstNew: (to: NewItemJump) => string | undefined,
+): { key: string | undefined; isFlashing: boolean; end: () => void } {
+  const target = useNavTarget(nav)
+  const handled = useRef<NavTarget | undefined>(undefined)
+  const [key, setKey] = useState<string | undefined>(undefined)
+  const [isFlashing, setFlashing] = useState(false)
+  useEffect(() => {
+    if (target.newItem === undefined || !isReady || handled.current === target) return
+    handled.current = target
+    const hit = firstNew(target.newItem)
+    setKey(hit)
+    setFlashing(hit !== undefined)
+    if (hit === undefined) root.current?.focus({ preventScroll: true })
+  })
+  return { key, isFlashing, end: () => { setFlashing(false) } }
 }
 
 /**

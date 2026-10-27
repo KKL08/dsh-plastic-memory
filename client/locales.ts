@@ -8,6 +8,7 @@ import { composerEn, composerZh } from './locales/composer.ts'
 import { libraryEn, libraryZh } from './locales/library.ts'
 import { chatEn, chatZh } from './locales/chat.ts'
 import { healthEn, healthZh } from './locales/health.ts'
+import { checkupEn, checkupZh } from './locales/checkup.ts'
 import { sidebarEn, sidebarZh } from './locales/sidebar.ts'
 import { settingsEn, settingsZh } from './locales/settings.ts'
 
@@ -59,6 +60,7 @@ export const zh = {
   'time.justNow': '刚刚',
   'time.monthDay': '{month} 月 {day} 日',
   'time.yearMonthDay': '{year} 年 {month} 月 {day} 日',
+  'time.dayTime': '{date} {time}',
 
   'source.user-explicit': '你明确说的',
   'source.user-behavior': '从你的做法看出',
@@ -114,6 +116,7 @@ export const zh = {
   ...libraryZh,
   ...chatZh,
   ...healthZh,
+  ...checkupZh,
   ...pendingZh,
   ...sidebarZh,
   ...settingsZh,
@@ -166,6 +169,7 @@ export const en: Record<LocaleKey, string> = {
   'time.justNow': 'Just now',
   'time.monthDay': '{monthName} {day}',
   'time.yearMonthDay': '{monthName} {day}, {year}',
+  'time.dayTime': '{date}, {time}',
 
   'source.user-explicit': 'You said so',
   'source.user-behavior': 'From what you did',
@@ -220,6 +224,7 @@ export const en: Record<LocaleKey, string> = {
   ...libraryEn,
   ...chatEn,
   ...healthEn,
+  ...checkupEn,
   ...pendingEn,
   ...sidebarEn,
   ...settingsEn,

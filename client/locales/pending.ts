@@ -18,6 +18,7 @@ export const pendingZh = {
   'pending.level.your-call': '等你决定',
   'pending.level.advice': '可以整理',
   'pending.level.advice.note': '处理或忽略后不再扣分',
+  'pending.new': '新',
   'pending.more': '展开其余 {n} 条',
   'pending.allDone': '都处理完了，agent 之后按你的决定来。',
 
@@ -204,6 +205,7 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.level.your-call': 'Waiting on you',
   'pending.level.advice': 'Suggested cleanup',
   'pending.level.advice.note': 'No score penalty once handled or ignored',
+  'pending.new': 'New',
   'pending.more': 'Show {n} more',
   'pending.allDone': 'All handled. The agent follows your decisions from here.',
 
