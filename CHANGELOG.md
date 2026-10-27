@@ -91,10 +91,12 @@ All notable changes to this project are documented here. The format follows
   Chinese, identifiers, partial words, plain names, ids) runs with the tests
   and fails when top-1 or top-3 accuracy drops below a fixed floor, with and
   without the Chinese segmenter.
-  It also holds bilingual queries, long questions with and without an
-  answer, and short queries with no answer in the corpus; the tests fail
-  when a query with no answer is not flagged as a weak match, or when more
-  than five queries with a correct top hit are (bilingual ones excluded).
+  It also holds queries written in the other language from the memory, with
+  and without that spelling among its tags, long questions with and without
+  an answer, and short queries with no answer in the corpus; the tests fail
+  when a query with no answer, or one in the other language that the memory
+  has no tag for, is not flagged as a weak match, or when more than five
+  other queries with a correct top hit are.
 - The checkup buttons on the memory page and the settings status card carry a
   line saying the checkup uses the current chat's model and that more
   memories take more tokens. When a checkup finishes, its result line ends
@@ -178,29 +180,27 @@ All notable changes to this project are documented here. The format follows
   appears as a whole word ranks above one that only appears inside a longer
   word (`scope` in `readScope`), and matches in the name, summary and tags
   weigh more than matches in the content; a query that is exactly a memory
-  id returns that memory first, without a note. Chinese and non-Chinese
-  spellings of one term joined with `/` and no spaces (`部署/deploy`,
-  `锁/lock`) count as one keyword that a memory matches with any of them;
-  slash words in a single script, such as paths, `api/v2` or `TCP/IP`, are
-  still matched literally, and words separated by spaces are always separate
-  keywords. The result opens with a note when no returned memory contains
-  every keyword (`or-fallback`). It flags a weak match when the top hit also
-  misses a whole keyword or covers less than 65% of the query's content
-  words (`low-coverage`), or when nothing but a literal match on the query
-  text is left (`substring-fallback`); a weak match suggests searching again
-  and, when there are words to list, how many memories each keyword matched.
-  Question words and particles in long questions don't count. When unsure it
-  flags: a false flag costs one extra search, a missed one lets the model
-  take a wrong hit for the answer.
+  id returns that memory first, without a note. The result opens with a note
+  when no returned memory contains every keyword (`or-fallback`). It flags a
+  weak match when the top hit also misses a whole keyword or covers less
+  than 65% of the query's content words (`low-coverage`), or when nothing
+  but a literal match on the query text is left (`substring-fallback`); a
+  weak match suggests searching again, for example with the term in the
+  other language, and, when there are words to list, how many memories each
+  keyword matched. Question words and particles in long questions don't
+  count. When unsure it flags: a false flag costs one extra search, a missed
+  one lets the model take a wrong hit for the answer.
 - The `memory_search` tool description now says what the tool does: it ranks
   by relevance, accepts Chinese and English queries and returns file paths.
-  It also tells the model how to query well (two to four content words, with
-  the spellings of one term joined by `/`), and when a result is flagged as
-  a weak match the note suggests searching again with synonyms or fewer
-  words, starting with the keywords no memory contains. `memory_save` asks
-  for synonyms, bilingual aliases and abbreviations in tags, limited to words
-  the name, summary and content don't already contain, so later searches
-  phrased differently still find the memory.
+  It also tells the model how to query well (two to four content words, each
+  term written once, in the form the memory most likely uses, rather than in
+  Chinese and English side by side), and when a result is flagged as a weak
+  match the note suggests searching again with synonyms, the term in the
+  other language or fewer words, starting with the keywords no memory
+  contains. `memory_save` asks for synonyms, bilingual aliases and
+  abbreviations in tags, limited to words the name, summary and content
+  don't already contain, so later searches phrased differently still find
+  the memory.
 - `memory_save` now asks the model to note, next to the rule itself, the
   reason the user gave or the situation it came up in, so a later session can
   tell where the rule applies, and to leave out details that go stale

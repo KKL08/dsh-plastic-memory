@@ -132,15 +132,17 @@ describe('memory_search 绑定', () => {
     expect(d.startsWith('查长期记忆用这个工具：想知道某件事有没有记过、记的是什么，或按 id 取一条。\n范围是本项目和全局记忆。')).toBe(true)
     expect(d).toContain('代码和项目文件用 grep 搜；记忆目录不要用 grep 搜：那里还存着已删除和其他项目的记忆')
     expect(d).toContain('\n怎么写关键词：\n- 写 2 到 4 个实词。版本号、路径这类原样文字可以直接搜。\n')
-    expect(d).toContain('- 同一术语的不同写法（中英文、缩写、同义词）用 / 连起来写，写法内不带空格，如 部署/deploy；任一写法命中都算。空格分开的是不同的关键词。\n\n怎么读结果：\n')
+    expect(d).toContain('- 每个术语只写一种写法，用记忆里最可能出现的那种；同一术语的中文和英文写法不要放进同一次查询。\n\n怎么读结果：\n')
+    expect(d).not.toContain('/ 连')
     expect(d).toContain('换个角度再搜一次')
     // 没判弱时只陈述首条覆盖了多少；判弱时说明里会列逐词命中条数
     expect(d).toContain('没提示命中弱时，排第一的那条含了查询的大部分内容。')
-    expect(d).toContain('开头提示命中弱时，有可列的词就列出各关键词命中几条')
+    expect(d).toContain('开头提示命中弱时，有可列的词就列出各关键词命中几条：先换掉一条都没命中的词，或换同义词、换成另一种语言的写法、减少词数、换个角度再搜一次。')
     const query = (schemaOf(tool) as { properties: Record<string, { description?: string }> }).properties.query!
-    expect(query.description).toContain('同一术语的几种写法用 / 连写、写法内不带空格（如 部署/deploy），任一写法命中都算')
+    expect(query.description).toContain('每个术语只写一种写法，中英文写法不要同时带上')
+    expect(query.description).not.toContain('/')
     expect(query.description).toContain('有可列的词时还列出各关键词命中几条')
-    expect(query.description).toContain('建议换词再搜一次')
+    expect(query.description).toContain('建议换词或换成另一种语言的写法再搜一次')
   })
 
   it('(a) 合法参数过、缺必填（query）拒', async () => {
