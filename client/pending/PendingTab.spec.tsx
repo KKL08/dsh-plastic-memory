@@ -995,6 +995,39 @@ describe('待处理：直接改与直接合并', () => {
     expect(screen.getByRole('button', { name: '保存' })).not.toHaveAttribute('aria-disabled')
   })
 
+  // 厂商形状的假密钥运行时拼接，源码里不出现完整字面量
+  const criticalKey = 'sk-' + 'TESTONLY'.padEnd(24, 'a')
+
+  it('新内容有高危密钥：本地就拦住，不发命令（命令文本会进借用会话的日志），提示同服务端拦下时', async () => {
+    const { commands } = setup([bloat], { respond: respondEdit })
+    startEdit()
+    fireEvent.change(screen.getByRole('textbox', { name: '正文' }), { target: { value: `发版用 ${criticalKey}` } })
+    await save()
+    expect(commands()).toEqual([])
+    expect(screen.getByRole('alert')).toHaveTextContent('内容里有高危密钥，没有保存。改写成不含密钥的说法再存。')
+    expect(screen.getByRole('textbox', { name: '正文' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '保存' })).not.toHaveAttribute('aria-disabled')
+  })
+
+  it('名称里有高危密钥：同样本地拦住，不发命令', async () => {
+    const { commands } = setup([bloat], { respond: respondEdit })
+    startEdit()
+    fireEvent.click(screen.getByRole('button', { name: '更多' }))
+    fireEvent.change(screen.getByRole('textbox', { name: '名称' }), { target: { value: criticalKey } })
+    await save()
+    expect(commands()).toEqual([])
+    expect(screen.getByRole('alert')).toHaveTextContent('内容里有高危密钥，没有保存。')
+  })
+
+  it('新内容只是像密钥：照常发给服务端，由它回疑似再确认', async () => {
+    const { commands } = setup([bloat], { respond: command => (command.cmd === 'edit-memory' && command.force !== true ? { ok: false, cmd: command.cmd, code: 'secret-suspected' } : edited) })
+    startEdit()
+    fireEvent.change(screen.getByRole('textbox', { name: '正文' }), { target: { value: 'password: abc12345' } })
+    await save()
+    expect(commands().map(c => c.cmd)).toEqual(['edit-memory'])
+    expect(screen.getByText('内容里有像密钥的片段。确定不是密钥再保存。')).toBeInTheDocument()
+  })
+
   it('新内容像密钥：卡片里再确认一次，「仍然保存」带 force 重发', async () => {
     const { commands } = setup([bloat], {
       respond: command => (command.cmd === 'edit-memory' && command.force !== true ? { ok: false, cmd: command.cmd, code: 'secret-suspected' } : edited),
@@ -1053,6 +1086,15 @@ describe('待处理：直接改与直接合并', () => {
       }])
       expect(screen.getByText('已合并')).toBeInTheDocument()
       expect(screen.getByText(`被字句 · 12 字 → 14 字`)).toBeInTheDocument()
+    })
+
+    it('合并后的内容有高危密钥：本地拦住，不发命令', async () => {
+      const { commands } = setup([pairOf(left, right)], { respond: command => (command.cmd === 'merge-memories' ? merged : { ok: true, cmd: command.cmd }) })
+      fireEvent.click(screen.getByRole('button', { name: '直接合并' }))
+      fireEvent.change(screen.getByRole('textbox', { name: '正文' }), { target: { value: `两条合一：${criticalKey}` } })
+      await save()
+      expect(commands()).toEqual([])
+      expect(screen.getByRole('alert')).toHaveTextContent('内容里有高危密钥，没有保存。')
     })
 
     it('一条全局一条项目：保留全局那条，预填它的名称', () => {
@@ -1115,6 +1157,16 @@ describe('待处理：让模型改与让模型合并', () => {
     expect(textOf('改后', 'del')).toBe('')
     expect(screen.getByText('13 字 → 9 字')).toBeInTheDocument()
     expect(screen.getAllByRole('button').slice(-3).map(b => b.textContent)).toEqual(['放弃', '再改改', '应用'])
+  })
+
+  it('要求里有高危密钥：本地拦住，不发 draft-edit，就地写明原因', async () => {
+    const { commands } = setup([bloat], { respond: respondWith() })
+    open()
+    fireEvent.change(screen.getByRole('textbox', { name: /想怎么改/ }), { target: { value: `把 ${'sk-' + 'TESTONLY'.padEnd(24, 'a')} 删掉` } })
+    await generate()
+    expect(commands()).toEqual([])
+    expect(screen.getByRole('alert')).toHaveTextContent('要求里有高危密钥，没有发送。去掉密钥再生成。')
+    expect(screen.getByRole('textbox', { name: /想怎么改/ })).toBeInTheDocument()
   })
 
   it('没写要求：draft-edit 不带 request', async () => {

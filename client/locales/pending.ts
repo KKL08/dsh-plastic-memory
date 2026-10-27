@@ -150,6 +150,7 @@ export const pendingZh = {
   'pending.model.unavailable': '拿不到当前会话的模型。',
   'pending.model.failed': '模型出错了：{detail}',
   'pending.model.invalid': '模型返回的内容格式不对，再试一次。',
+  'pending.model.secretCritical': '要求里有高危密钥，没有发送。去掉密钥再生成。',
 
   'pending.result.keptA': '已按 A',
   'pending.result.keptB': '已按 B',
@@ -331,6 +332,7 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.model.unavailable': 'The current session has no model available.',
   'pending.model.failed': 'The model returned an error: {detail}',
   'pending.model.invalid': 'The model’s reply was not in the expected format. Try again.',
+  'pending.model.secretCritical': 'The request contains a high-risk secret, so it was not sent. Remove the secret, then generate again.',
 
   'pending.result.keptA': 'Went with A',
   'pending.result.keptB': 'Went with B',

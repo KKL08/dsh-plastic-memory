@@ -6,7 +6,7 @@
  */
 import { diffWords, type Change } from 'diff'
 import { Fragment, useEffect, useId, useRef, useState } from 'react'
-import { layerOfMemory, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type ModelEditAdviceType } from '../../src/gui/contract.ts'
+import { detectSecrets, layerOfMemory, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type ModelEditAdviceType } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ModelState } from '../gateway.ts'
 import { formatNumber, useT, type Translate } from '../i18n.tsx'
 import { Button } from '../ui/Button.tsx'
@@ -72,8 +72,10 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
 
   const generate = () => {
     if (session.kind !== 'ready') return
-    const mine = ++seq.current
     const text = request.trim()
+    // 命令文本会进借用会话的日志：要求里有高危密钥就不发
+    if (detectSecrets(text).some(h => h.severity === 'critical')) { setPhase({ kind: 'ask', error: t('pending.model.secretCritical') }); return }
+    const mine = ++seq.current
     const command: DraftCommand = {
       cmd: 'draft-edit',
       adviceType,

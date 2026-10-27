@@ -4,7 +4,7 @@
  * allowCrossWorkspace 重发。失败把宿主 / 执行器的原话显示在卡片里；条目正在别处处理或刚处理完时交给列表提示（isHandledElsewhere）。
  */
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
-import type { MemoryCommand, MemoryCommandResult } from '../../src/gui/contract.ts'
+import { detectSecrets, type MemoryCommand, type MemoryCommandResult } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, useT } from '../i18n.tsx'
 import { Button } from '../ui/Button.tsx'
@@ -57,6 +57,16 @@ export interface ItemAction {
   confirmSuspected(): void
 }
 
+/**
+ * 直接改、直接合并的新内容里有没有高危密钥：四个面拼起来查，与服务端同口径。命令文本会进借用会话的日志，
+ * 高危的得在发出去之前拦住；疑似的照常发，由服务端回 secret-suspected 再确认。
+ */
+function hasCriticalSecret(command: MemoryCommand): boolean {
+  if (command.cmd !== 'edit-memory' && command.cmd !== 'merge-memories') return false
+  const { content, name, summary, tags } = command
+  return detectSecrets(`${content}\n${name}\n${summary}\n${tags.join(' ')}`).some(h => h.severity === 'critical')
+}
+
 /** onRefused：isHandledElsewhere 为真时调用，卡片里不再显示原话。 */
 export function useItemAction(session: BorrowedSession, onOk: (command: MemoryCommand, result: Ok) => void, onRefused?: () => void): ItemAction {
   const t = useT()
@@ -64,6 +74,7 @@ export function useItemAction(session: BorrowedSession, onOk: (command: MemoryCo
   const [state, setState] = useState<ActionState>({ kind: 'idle' })
   const run = (command: MemoryCommand) => {
     if (session.kind !== 'ready') return
+    if (hasCriticalSecret(command)) { setState({ kind: 'error', detail: t('pending.edit.secretCritical') }); return }
     keepFocusInPlace()
     setState({ kind: 'busy' })
     void gateway.execute(session.sessionId, command).then((r) => {

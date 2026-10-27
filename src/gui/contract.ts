@@ -8,6 +8,9 @@ export { RETENTION_MS } from '../retention.ts'
 /** 密钥遮盖（缺省与注入、视图同一套规则），浏览器半侧给对话卡里来自工具参数的文字用（带 severity: 'suspected'）。 */
 export { maskSecrets, maskSecretSurface, type MaskOptions } from '../secrets.ts'
 
+/** 密钥检测（与写入管线同一套规则）：浏览器半侧发命令前预检，命令文本会进借用会话的日志，高危密钥不能先发出去。 */
+export { detectSecrets } from '../secrets.ts'
+
 /**
  * GUI 契约（命名契约：视图与命令的标识符只在这一处定义）。服务端 GUI 层与浏览器半侧共用，是叶子：
  * 只 import zod 与其他叶子，且必须能在浏览器里运行（不碰 node:*）。
