@@ -25,15 +25,17 @@ export function RewrittenChip() {
 
 /**
  * 一次改动的就地说明与撤销。change 为 'expired' 时只写过期说明（对话卡认不出自己那次改动、调用时刻已超出保留窗口）。
- * after：改写后的那份（对话卡取工具参数，右侧栏取全部记忆视图），改前 / 改后对照用；bySubject：右侧栏替代行写明是谁替代的。
+ * after：改写后的那份（对话卡取工具参数，右侧栏取全部记忆视图），改前 / 改后对照用；bySubject：右侧栏替代行写明是谁替代的；
+ * count：过期的替代不知道旧记忆叫什么，按条数写。
  */
-export function ModelChangeLine({ session, change, kind, after, bySubject }: {
+export function ModelChangeLine({ session, change, kind, after, bySubject, count = 1 }: {
   session: BorrowedSession
   change: ModelChange | 'expired'
   /** change 为 'expired' 时这是哪一种改动。 */
   kind: ModelChange['kind']
   after?: MemoryCard | undefined
   bySubject?: string | undefined
+  count?: number
 }) {
   const t = useT()
   const gateway = useGateway()
@@ -65,7 +67,7 @@ export function ModelChangeLine({ session, change, kind, after, bySubject }: {
       </Button>
     )
     : <span className="pm-change-note" role="status">{t(shown === 'undone' ? 'chat.change.undone' : shown === 'changed' ? 'chat.change.changed' : 'chat.change.expired')}</span>
-  const subject = before === undefined ? undefined
+  const subject = before === undefined ? t(count === 1 ? 'chat.change.supersededOlder.one' : 'chat.change.supersededOlder', { count })
     : bySubject === undefined ? t('chat.change.superseded', { name: before.name }) : t('chat.change.supersededBy', { by: bySubject, name: before.name })
   return (
     <div className="pm-change" data-change={kind}>

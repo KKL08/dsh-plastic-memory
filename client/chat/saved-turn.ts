@@ -18,6 +18,8 @@ export interface SavedMemory {
   memory: MemoryCard
   /** 这次是改写已有记忆（action: update）；缺省 = 新记。 */
   isUpdate?: true
+  /** 参数里要替代的旧记忆 id（去重）；视图里认不出这次替代（已过保留窗口）时交付卡据此写过期说明。 */
+  supersedes?: readonly string[]
 }
 
 export interface SavedTurnData {
@@ -55,6 +57,10 @@ export interface SavedTurnDefinition {
     { kind: 'turn'; turn: number; key: string; value: SavedTurnData } | null
 }
 
+/** 参数里的 supersedes：只认字符串数组，去重。 */
+const supersedesOf = (value: unknown): string[] =>
+  Array.isArray(value) ? [...new Set(value.filter((id): id is string => typeof id === 'string'))] : []
+
 const turnOf = (event: EventLike) => String((event.data as { turn: number }).turn)
 
 export const savedTurnDefinition: SavedTurnDefinition = {
@@ -81,10 +87,19 @@ export const savedTurnDefinition: SavedTurnDefinition = {
     const argsRaw = state.calls.get(String(message.source.callId))
     if (argsRaw === undefined || message.isError === true) return state
     const text = message.content.map(b => (b.type === 'text' ? b.text ?? '' : '')).join('\n')
-    const memory = savedMemoryCard(parseArgs(argsRaw), text, event.time)
+    const args = parseArgs(argsRaw)
+    const memory = savedMemoryCard(args, text, event.time)
     if (memory === undefined) return state
     const isUpdate = parseSaveResult(text)?.kind === 'updated'
-    return { ...state, saved: [...state.saved, { callId: String(message.source.callId), seq: event.seq, memory, ...(isUpdate ? { isUpdate: true as const } : {}) }] }
+    const supersedes = supersedesOf(args?.supersedes)
+    return {
+      ...state,
+      saved: [...state.saved, {
+        callId: String(message.source.callId), seq: event.seq, memory,
+        ...(isUpdate ? { isUpdate: true as const } : {}),
+        ...(supersedes.length > 0 ? { supersedes } : {}),
+      }],
+    }
   },
   buildLocationData({ state }, scope, previous) {
     if (scope !== 'turn' || state === undefined || state.saved.length === 0) return null

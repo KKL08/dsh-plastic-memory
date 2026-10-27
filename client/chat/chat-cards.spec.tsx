@@ -150,6 +150,16 @@ describe('交付卡出现的条件', () => {
     expect(data?.saved[2]!.memory).toMatchObject({ name: '全局', scope: 'workspace', content: saveArgs.content, sourceMode: 'user-explicit' })
   })
 
+  it('参数里的 supersedes 去重后带上（交付卡在视图里认不出这次替代时用）；没有或不是字符串数组时不带', () => {
+    const data = turnData([
+      turnStart,
+      call(2, 'c1', 'memory_save', { ...saveArgs, supersedes: ['mem_a', 'mem_a', 'mem_b'] }), res(3, 'c1', SAVED_TEXT),
+      call(4, 'c2', 'memory_save', { ...saveArgs, supersedes: 'mem_a' }), res(5, 'c2', SAVED_TEXT),
+      call(6, 'c3', 'memory_save', { ...saveArgs, supersedes: [] }), res(7, 'c3', SAVED_TEXT),
+    ])
+    expect(data?.saved.map(s => s.supersedes)).toEqual([['mem_a', 'mem_b'], undefined, undefined])
+  })
+
   it('本轮没有新记时没有 Turn 数据，交付卡不渲染', () => {
     expect(turnData([turnStart, call(2, 'c1', 'memory_search', { query: 'x' }), res(3, 'c1', '没有匹配的记忆。')])).toBeUndefined()
   })
@@ -1143,6 +1153,21 @@ describe('交付卡：模型改写、替代已有记忆', () => {
     expect(row('mem_1').getAllByRole('button', { name: '撤销修改' })).toHaveLength(1)
     await act(async () => { fireEvent.click(row('mem_1').getByRole('button', { name: '撤销修改' })) })
     expect(gateway.executed).toEqual([{ sessionId: 's1', command: { cmd: 'undo', decisionId: 'pd_s' } }])
+  })
+
+  it('替代的改前快照过了 14 天（视图里已没有）：按参数里的 supersedes 写「替代了 N 条旧记忆」与过期说明，折叠行照样计数；没过的不写', () => {
+    const replacing = { ...saved('mem_1', '新的'), supersedes: ['mem_a', 'mem_b'] }
+    card([replacing], [], undefined, NOW + RETENTION_MS + 1)
+    const toggle = screen.getByRole('button', { expanded: false })
+    expect(toggle).toHaveTextContent('替代了 2 条旧记忆')
+    fireEvent.click(toggle)
+    expect(row('mem_1').getByText('替代了 2 条旧记忆')).toBeInTheDocument()
+    expect(row('mem_1').getByText('改前版本已超过 14 天，无法恢复')).toBeInTheDocument()
+    expect(row('mem_1').queryByRole('button', { name: '撤销修改' })).toBeNull()
+    cleanup()
+    card([replacing], [])
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    expect(row('mem_1').queryByText('改前版本已超过 14 天，无法恢复')).toBeNull()
   })
 
   it('撤销失败（别的原因）：原位写原话，按钮还在', async () => {

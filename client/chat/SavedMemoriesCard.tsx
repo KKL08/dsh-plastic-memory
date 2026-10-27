@@ -52,13 +52,15 @@ function liveCard(library: LibraryView | undefined, id: string, layer: GuiLayerR
   return find(sameLayer) ?? find(l => l.kind === 'global')
 }
 
-function SavedRow({ session, item, layer, promotion, rewrite, superseded, now, typeLabel, onDetail, onWroteAgentsMd }: {
+function SavedRow({ session, item, layer, promotion, rewrite, superseded, expiredSupersedes, now, typeLabel, onDetail, onWroteAgentsMd }: {
   session: BorrowedSession & { kind: 'ready' }
   item: SavedMemory
   /** 改写的那次改动（视图里认领到的，或已过保留窗口）；新记的没有。 */
   rewrite: ModelChange | 'expired' | undefined
   /** 这次调用替代掉的旧记忆。 */
   superseded: readonly ModelChange[]
+  /** 视图里认不出、已过保留窗口的替代条数（取参数里的 supersedes）：写一行过期说明。 */
+  expiredSupersedes: number
   /** 这条记忆所在的层：删除、撤销、提升、留下都带上它，同 id 别层还在用时也只动这一份。 */
   layer: GuiLayerRef | undefined
   /** 提升为全局的状态（全部记忆视图）。 */
@@ -85,6 +87,7 @@ function SavedRow({ session, item, layer, promotion, rewrite, superseded, now, t
     <>
       {rewrite !== undefined ? <ModelChangeLine session={session} change={rewrite} kind="rewrite" after={item.memory} /> : null}
       {superseded.map(c => <ModelChangeLine key={c.decisionId} session={session} change={c} kind="supersede" />)}
+      {expiredSupersedes > 0 ? <ModelChangeLine session={session} change="expired" kind="supersede" count={expiredSupersedes} /> : null}
     </>
   )
   const run = async (cmd: 'forget' | 'restore' | 'hard-delete') => {
@@ -198,7 +201,11 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
   const candidates = saved.filter(item => current(placed(item)).promotion === 'candidate').length
   const rewritten = saved.filter(item => item.isUpdate === true).length
   const fresh = saved.length - rewritten
-  const supersededCount = saved.reduce((n, item) => n + changesOf(item).filter(c => c.kind === 'supersede').length, 0)
+  // 替代：视图里认得出的按条目；认不出（改前快照已过保留窗口、条目随之清掉）的按参数里的 supersedes 计
+  const expiredSupersedesOf = (item: SavedMemory): number =>
+    item.supersedes === undefined || library.status !== 'ready' || changesOf(item).some(c => c.kind === 'supersede')
+      || now - item.memory.updatedAt <= RETENTION_MS ? 0 : item.supersedes.length
+  const supersededCount = saved.reduce((n, item) => n + changesOf(item).filter(c => c.kind === 'supersede').length + expiredSupersedesOf(item), 0)
   const title = fresh === 0 ? t('chat.card.title.rewritten', { count: rewritten })
     : rewritten === 0 ? t('chat.card.title', { count: saved.length }) : t('chat.card.title.mixed', { count: fresh, rewritten })
   const folded = fresh === 0 ? t(rewritten === 1 ? 'chat.card.folded.rewritten.one' : 'chat.card.folded.rewritten', { count: rewritten })
@@ -243,6 +250,7 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
               promotion={promotion}
               rewrite={rewriteOf(item)}
               superseded={changesOf(item).filter(c => c.kind === 'supersede')}
+              expiredSupersedes={expiredSupersedesOf(item)}
               now={now}
               typeLabel={typeLabel}
               onDetail={() => { detail(memory) }}
