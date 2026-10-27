@@ -103,6 +103,19 @@ describe('体检当前项目', () => {
     expect(screen.getByRole('button', { name: '再试一次' })).toBeInTheDocument()
   })
 
+  it('这个范围正在别处体检（命令回 busy）：按钮显示「体检中…」并禁用，不报错；别处体检完、视图更新后恢复', async () => {
+    const { gateway, statusLine } = renderPage({ respond: () => ({ ok: false, cmd: 'scan', code: 'busy', detail: '/w/app 正在体检，查完再来' }) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '体检当前项目' })) })
+    const busy = screen.getByRole('button', { name: '体检中…' })
+    expect(busy).toBeDisabled()
+    expect(statusLine()).toHaveTextContent(/^$/)
+    fireEvent.click(busy)
+    expect(gateway.executed).toHaveLength(1)
+    // 别处的体检做完会重写视图
+    act(() => { gateway.setView('health', health()) })
+    expect(screen.getByRole('button', { name: '体检当前项目' })).not.toBeDisabled()
+  })
+
   it('体检关闭：按钮不可用、点了不发命令，给「去设置里打开 ›」', () => {
     const { gateway, openSettings } = renderPage({ views: { pending: noPending, health: health(false) } })
     const button = screen.getByRole('button', { name: '体检当前项目' })

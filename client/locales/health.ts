@@ -3,6 +3,7 @@
 export const healthZh = {
   'scan.button': '体检当前项目',
   'scan.running': '正在体检当前项目…',
+  'scan.busy': '体检中…',
   'scan.runningHint': '可以先做别的',
   'scan.done': '体检完成。',
   'scan.retry': '再试一次',
@@ -74,6 +75,7 @@ export type HealthLocaleKey = keyof typeof healthZh
 export const healthEn: Record<HealthLocaleKey, string> = {
   'scan.button': 'Check this project',
   'scan.running': 'Checking this project…',
+  'scan.busy': 'Checkup in progress…',
   'scan.runningHint': 'Feel free to do something else',
   'scan.done': 'Checkup finished.',
   'scan.retry': 'Try again',

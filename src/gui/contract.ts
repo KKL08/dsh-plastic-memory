@@ -452,8 +452,8 @@ export const GUI_CHECKUP_VIEW_FILE = 'checkups.json'
 
 /**
  * 体检视图：只写各进程共有的事实（共享的设置表和完成记录），所有窗口看到同一份。在设置改了、体检做完、
- * 调度检查发现状态变了（到期了、别的进程写了完成记录）时重写，内容没变不重写。
- * 进行中（03）、失败与重试（04）、最近一次结果（05）以后加在每个范围上。
+ * 调度检查发现状态变了（到期了、别的进程写了完成记录）、体检认领和释放时重写，内容没变不重写。
+ * 失败与重试（04）、最近一次结果（05）以后加在每个范围上。
  */
 export const checkupViewSchema = z.object({
   version,
@@ -474,6 +474,8 @@ export const checkupViewSchema = z.object({
     nextCheckupAt: z.number().nullable(),
     /** 已到期：有效频率不是仅手动，且从没体检过或已到下次自动体检的时间。 */
     isDue: z.boolean(),
+    /** 进行中：有体检（任一进程的手动或自动体检）认领着这个范围、认领没过期。agent 的 memory_scan 不认领，不算。 */
+    isInProgress: z.boolean(),
   })),
 })
 export type CheckupView = z.infer<typeof checkupViewSchema>
@@ -649,6 +651,8 @@ export const GUI_ERROR_CODES = [
   'secret-critical',    // 直接改、直接合并的新内容含高危密钥：什么都没动
   'secret-suspected',   // 直接改、直接合并的新内容含疑似密钥：什么都没动，用户确认后带 force 重发
   'claimed',            // 待决项正被另一次操作（别的标签页、宿主进程或体检）认领：什么都没动
+  'busy',               // 体检：范围正在体检（别的体检认领着、没过期；「全部」有一个范围认领不到也算），或体检中途认领被别的进程接手。
+                        // 没认领到时什么都没动；中途被接手的这次不再提交。和待决项的 claimed 是两回事
   'target-taken',       // 移到项目：目标项目已有同 id 的记忆；撤销移到项目、提升为全局：全局已有同 id 的记忆（含最近删除）。什么都没动
   'failed',             // 执行器报错，detail 带原话
 ] as const

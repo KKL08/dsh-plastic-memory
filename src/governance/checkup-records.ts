@@ -1,5 +1,5 @@
 import { isAbsolute } from 'node:path'
-import type { CasKvTable } from '../kv-table.ts'
+import type { CasKvTable, RefreshableClaim, RefreshableClaimKvTable } from '../kv-table.ts'
 import type { CheckupCompletion, CheckupRecord } from '../storage/schema.ts'
 import type { LayerRef } from './layer-health.ts'
 import { SCOPE_KEYS } from '../gui/contract.ts'
@@ -9,6 +9,9 @@ import { SCOPE_KEYS } from '../gui/contract.ts'
  * 体检执行器在一次体检全部写完（缓存、账本、提升候选）之后才写它，这是体检的提交点：中途取消或进程退出时不写，下次照常算没查完。
  * 完成记录按开始时间「不回退」：要写的这次开始得比已有记录早，就保留已有的，开始得早、结束得晚的体检盖不掉更新的结果。
  * 表由接线层注入（storage/sidecar.ts 的 checkups），和缓存、忽略表同一种做法。
+ *
+ * 按范围认领：界面手动体检和自动体检开跑前认领这些范围（认领文件在记录旁边，跨进程互斥），同一个范围同时只体检一次；
+ * 「进行中」不存进记录，就是认领还在、没过期。agent 的 memory_scan 不认领，靠完成记录和缓存的「不回退」兜底。
  */
 
 /** 范围键：全局为 `global`，项目为它的绝对路径。 */
@@ -17,10 +20,32 @@ export function checkupKey(layer: LayerRef): string {
 }
 
 export class CheckupRecordStore {
-  private readonly table: CasKvTable<CheckupRecord>
+  private readonly table: CasKvTable<CheckupRecord> & RefreshableClaimKvTable<CheckupRecord>
 
-  constructor(table: CasKvTable<CheckupRecord>) {
+  constructor(table: CasKvTable<CheckupRecord> & RefreshableClaimKvTable<CheckupRecord>) {
     this.table = table
+  }
+
+  /**
+   * 认领这些范围：全部认领到才算，返回各自的认领（持有者要定时刷新，见 gui/auto-checkup.ts holdCheckups）；
+   * 有一个认领不到就把已认领的立刻放掉，返回那个正在体检的范围。
+   */
+  async claim(layers: readonly LayerRef[]): Promise<{ claims: RefreshableClaim[] } | { busy: LayerRef }> {
+    const claims: RefreshableClaim[] = []
+    for (const layer of layers) {
+      const claim = await this.table.claimRefreshable(checkupKey(layer))
+      if (claim === undefined) {
+        for (const held of claims) await held.release()
+        return { busy: layer }
+      }
+      claims.push(claim)
+    }
+    return { claims }
+  }
+
+  /** 这个范围此刻在体检：有体检认领着它，认领没过期。 */
+  isInProgress(layer: LayerRef): Promise<boolean> {
+    return this.table.isClaimed(checkupKey(layer))
   }
 
   async list(): Promise<CheckupRecord[]> {

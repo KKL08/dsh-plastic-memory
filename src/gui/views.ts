@@ -285,8 +285,8 @@ export function buildHealthView(input: ViewInput): HealthView {
 }
 
 /**
- * 体检视图：每个范围的有效频率（跟随还是单独设置）、上次体检、下次自动体检、是否到期，外加体检开关。
- * layers 是全局加体检清单（与健康视图同一批层、同一顺序）；lastCheckupAt 给出每个范围的上次体检。
+ * 体检视图：每个范围的有效频率（跟随还是单独设置）、上次体检、下次自动体检、是否到期、是否在体检，外加体检开关。
+ * layers 是全局加体检清单（与健康视图同一批层、同一顺序）；lastCheckupAt 给出每个范围的上次体检，isInProgress 给出它此刻有没有体检认领着。
  */
 export function buildCheckupView(input: {
   now: number
@@ -294,6 +294,7 @@ export function buildCheckupView(input: {
   settings: ReadonlyMap<string, AutoCheckupFrequency>
   layers: readonly LayerRef[]
   lastCheckupAt: (layer: LayerRef) => number | null
+  isInProgress: (layer: LayerRef) => boolean
 }): CheckupView {
   return {
     version: GUI_VIEW_VERSION,
@@ -303,7 +304,7 @@ export function buildCheckupView(input: {
       const scope = toGuiLayer(layer)
       const { frequency, isOwn } = resolveAutoCheckup(input.settings, scope)
       const lastCheckupAt = input.lastCheckupAt(layer)
-      return { scope, frequency, isOwn, lastCheckupAt, ...autoCheckupDue(frequency, lastCheckupAt, input.now) }
+      return { scope, frequency, isOwn, lastCheckupAt, ...autoCheckupDue(frequency, lastCheckupAt, input.now), isInProgress: input.isInProgress(layer) }
     }),
   }
 }

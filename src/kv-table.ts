@@ -13,6 +13,21 @@ export interface ClaimKvTable<T> extends KvTable<T> {
   claim(key: string): Promise<(() => Promise<void>) | undefined>
 }
 
+/** 一次带心跳的认领：持有者定时 refresh，把认领时间刷新成此刻；认领已不是自己的（被当成残留清掉、别人接手了）
+ *  就什么都不写、返回 false。release 只删自己的认领。 */
+export interface RefreshableClaim {
+  refresh(): Promise<boolean>
+  release(): Promise<void>
+}
+
+/** 带心跳认领的 KV：体检记录表用，同一个范围同时只体检一次。一次体检可能跑几分钟，持有者要刷新，久不刷新算残留。 */
+export interface RefreshableClaimKvTable<T> extends KvTable<T> {
+  /** 认领 key：拿到返回认领；已被别人持有返回 undefined，不等待。 */
+  claimRefreshable(key: string): Promise<RefreshableClaim | undefined>
+  /** key 此刻是否被认领着（持有者还在、也没超时不刷新）。 */
+  isClaimed(key: string): Promise<boolean>
+}
+
 /** 带条件写删的 KV：建议忽略表的清理、扫描缓存与体检记录的「不回退」写入用。在表的写锁内重读，按当前值决定写不写、删不删——
  *  判定之后本进程别处刚写入的新值不会被盖掉或删掉。 */
 export interface CasKvTable<T> extends KvTable<T> {
@@ -22,9 +37,9 @@ export interface CasKvTable<T> extends KvTable<T> {
   update(key: string, fn: (current: T | undefined) => T | undefined): Promise<boolean>
 }
 
-export class InMemoryKvTable<T> implements ClaimKvTable<T>, CasKvTable<T> {
+export class InMemoryKvTable<T> implements ClaimKvTable<T>, CasKvTable<T>, RefreshableClaimKvTable<T> {
   private map = new Map<string, T>()
-  private claimed = new Set<string>()
+  private claimed = new Map<string, symbol>()
   async get(key: string) { return this.map.get(key) }
   async list() { return [...this.map.entries()] }
   async put(key: string, value: T) { this.map.set(key, value) }
@@ -40,10 +55,18 @@ export class InMemoryKvTable<T> implements ClaimKvTable<T>, CasKvTable<T> {
     return true
   }
   async claim(key: string) {
-    if (this.claimed.has(key)) return undefined
-    this.claimed.add(key)
-    return async () => { this.claimed.delete(key) }
+    return (await this.claimRefreshable(key))?.release
   }
+  async claimRefreshable(key: string) {
+    if (this.claimed.has(key)) return undefined
+    const token = Symbol(key)
+    this.claimed.set(key, token)
+    return {
+      refresh: async () => this.claimed.get(key) === token,
+      release: async () => { if (this.claimed.get(key) === token) this.claimed.delete(key) },
+    }
+  }
+  async isClaimed(key: string) { return this.claimed.has(key) }
 }
 
 /** 带批量写的 KV：只给召回统计用（单文件表，一次 markRecalled 只该换一次文件）。KvTable 本身不加批量。 */

@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -16,8 +17,11 @@ import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCa
 import type { LayerRef } from '../src/governance/layer-health.ts'
 import type { ScanToolResult } from '../src/tools/scan.ts'
 import { ViewWriter, collectCheckupView } from '../src/gui/view-writer.ts'
-import { AUTO_CHECKUP_FIRST_CHECK_MS, AUTO_CHECKUP_INTERVAL_MS, AutoCheckupScheduler, type AutoCheckupTimer } from '../src/gui/auto-checkup.ts'
-import { GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, checkupViewSchema, type AutoCheckupFrequency, type ScopeRef } from '../src/gui/contract.ts'
+import { AUTO_CHECKUP_FIRST_CHECK_MS, AUTO_CHECKUP_INTERVAL_MS, CHECKUP_CLAIM_REFRESH_MS, AutoCheckupScheduler, type AutoCheckupTimer } from '../src/gui/auto-checkup.ts'
+import { GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, checkupViewSchema, type AutoCheckupFrequency, type CheckupView, type ScopeRef } from '../src/gui/contract.ts'
+import { executeScan } from '../src/tools/scan.ts'
+import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
+import { fakeExec } from './helpers/exec.ts'
 import { record } from './helpers/record.ts'
 import { DAY, NOW } from './helpers/clock.ts'
 
@@ -112,9 +116,16 @@ function fakeHostLlm(opts: { findings?: (req: GenerateOptions) => unknown[]; gat
   }
 }
 
-function env(opts: { llm?: ReturnType<typeof fakeHostLlm>; defaultModel?: HostModelRoute | undefined; governanceEnabled?: boolean } = {}) {
+function env(opts: {
+  llm?: ReturnType<typeof fakeHostLlm>
+  defaultModel?: HostModelRoute | undefined
+  governanceEnabled?: boolean
+  /** 包一层调度器读状态（在读完之后插入别的进程的动作）。 */
+  wrapStatus?: (read: () => Promise<CheckupView>) => () => Promise<CheckupView>
+} = {}) {
   const clock = { now: NOW }
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
+  // 侧表也用这个时钟：认领的时间和是否残留按它算
+  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }, now: () => clock.now })
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now }), undefined, sidecar.recallStats)
   const decisions = new PendingDecisionsStore(sidecar.pending)
   const checkups = new CheckupRecordStore(sidecar.checkups)
@@ -129,13 +140,15 @@ function env(opts: { llm?: ReturnType<typeof fakeHostLlm>; defaultModel?: HostMo
   const timers = fakeTimer(clock)
   const scanned: Array<{ layer: LayerRef; result: ScanToolResult }> = []
   const scheduler = new AutoCheckupScheduler({
-    scan: { store, registry, decisions, cache, ignores: new AdviceIgnoreStore(sidecar.adviceIgnores), checkups },
-    status: () => collectCheckupView(source),
+    scan: { store, registry, decisions, cache, ignores: new AdviceIgnoreStore(sidecar.adviceIgnores) },
+    checkups,
+    status: opts.wrapStatus?.(() => collectCheckupView(source)) ?? (() => collectCheckupView(source)),
     // 每次开跑现读宿主默认模型（假的那份可以在用例中途改）
     getDefaultLlm: () => hostSemanticLlm(llm, route.current),
     isGovernanceEnabled: () => governance.isEnabled,
     timer: timers.timer,
     onChecked: () => writer.requestCheckups(),
+    onClaimChanged: () => writer.requestCheckups(),
     // 接线层在这里重写视图（含体检视图）
     onScanned: async (layer, result) => { scanned.push({ layer, result }); await writer.requestCheckups() },
     now: () => clock.now,
@@ -150,6 +163,10 @@ function env(opts: { llm?: ReturnType<typeof fakeHostLlm>; defaultModel?: HostMo
 }
 
 const ws = (path: string) => ({ kind: 'workspace' as const, workspacePath: path })
+const schemas = { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }
+/** 范围的认领文件（体检记录旁边）。 */
+const claimFile = (key: string) => join(root, '.state', 'checkups', `${createHash('sha1').update(key).digest('hex')}.claim`)
+const readClaim = async (key: string) => JSON.parse(await readFile(claimFile(key), 'utf8')) as { pid: number; at: number; id: string }
 /** 这次请求查的是哪个范围：项目体检的输入是全局加本项目，全局体检只有全局记忆。 */
 const scopeOfRequest = (req: GenerateOptions) => {
   const text = JSON.stringify(req.messages)
@@ -214,7 +231,7 @@ describe('自动体检调度：到期就在后台体检一次', () => {
 
     const view = await e.readView()
     expect(view.scopes.find(s => s.scope.kind === 'workspace')).toEqual({
-      scope: ws(DISCUSSION), frequency: 1, isOwn: true, lastCheckupAt: at, nextCheckupAt: at + DAY, isDue: false,
+      scope: ws(DISCUSSION), frequency: 1, isOwn: true, lastCheckupAt: at, nextCheckupAt: at + DAY, isDue: false, isInProgress: false,
     })
 
     await e.advance(3 * AUTO_CHECKUP_INTERVAL_MS)
@@ -324,5 +341,110 @@ describe('自动体检调度：不跑的情况', () => {
     // 下次打开：仍是到期
     const status = await collectCheckupView({ store: e.store, checkups: e.checkups, autoCheckups: e.autoCheckups, cache: e.cache, now: () => e.clock.now })
     expect(status.scopes[0]).toMatchObject({ scope: { kind: 'global' }, isDue: true, lastCheckupAt: null })
+  })
+})
+
+describe('自动体检调度：按范围认领', () => {
+  it('别的进程正在体检这个范围（认领着）：跳过它、不调模型，下一个到期的范围照常查', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.store.create(record({ id: 'mem_a', content: '项目 a 的记忆', scope: 'workspace', workspacePath: OTHER_A }))
+    await e.set({ kind: 'all' }, 1)
+    e.scheduler.start()
+    e.timers.advance(AUTO_CHECKUP_FIRST_CHECK_MS - 1000)
+    // 另一个宿主进程：同一个记忆根上的另一份侧表，检查前一秒认领了全局
+    const other = new CheckupRecordStore(new SidecarStore({ root, schemas, now: () => e.clock.now }).checkups)
+    const held = await other.claim([{ kind: 'global' }])
+    expect('claims' in held).toBe(true)
+    await e.advance(1000)
+    expect(e.llm.requests.map(scopeOfRequest)).toEqual([OTHER_A])
+    expect(Object.keys(await e.completed())).toEqual([OTHER_A])
+    // 别的进程的认领原样留着；体检视图写它在进行中
+    expect(await other.isInProgress({ kind: 'global' })).toBe(true)
+    expect((await e.readView()).scopes.map(s => [s.scope.kind, s.isInProgress])).toEqual([['global', true], ['workspace', false]])
+  })
+
+  it('认领到之后重读完成记录：别的进程刚查完、已经不到期的，放掉认领不跑', async () => {
+    const other = new CheckupRecordStore(new SidecarStore({ root, schemas }).checkups)
+    let reads = 0
+    const e = env({
+      // 第一次读状态之后、认领之前，别的进程把全局查完了
+      wrapStatus: read => async () => {
+        const status = await read()
+        if (++reads === 1) await other.complete([{ kind: 'global' }], { startedAt: NOW, completedAt: NOW, by: 'auto' })
+        return status
+      },
+    })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    expect(reads).toBe(2)
+    expect(e.llm.requests).toEqual([])
+    expect(await e.completed()).toEqual({ global: { startedAt: NOW, completedAt: NOW, by: 'auto' } })
+    expect(await other.isInProgress({ kind: 'global' })).toBe(false)
+  })
+
+  it('持有期间用宿主计时服务每 10 秒刷新认领时间，体检视图写进行中；做完停掉心跳、放掉认领', async () => {
+    let open!: () => void
+    const llm = fakeHostLlm({ gate: () => new Promise<void>(resolve => { open = resolve }) })
+    const e = env({ llm })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    e.scheduler.start()
+    e.timers.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    await llm.nthStarted(1)
+    const startedAt = e.clock.now
+    expect(CHECKUP_CLAIM_REFRESH_MS).toBe(10_000)
+    expect(e.timers.live()).toContainEqual([CHECKUP_CLAIM_REFRESH_MS, CHECKUP_CLAIM_REFRESH_MS])
+    expect(await readClaim('global')).toMatchObject({ pid: process.pid, at: startedAt })
+    expect((await e.readView()).scopes[0]).toMatchObject({ scope: { kind: 'global' }, isInProgress: true })
+    e.timers.advance(CHECKUP_CLAIM_REFRESH_MS)
+    await vi.waitFor(async () => { expect((await readClaim('global')).at).toBe(startedAt + CHECKUP_CLAIM_REFRESH_MS) })
+    open()
+    await e.scheduler.whenIdle()
+    expect(e.timers.live()).toEqual([[AUTO_CHECKUP_INTERVAL_MS - CHECKUP_CLAIM_REFRESH_MS, AUTO_CHECKUP_INTERVAL_MS]])
+    await expect(readFile(claimFile('global'), 'utf8')).rejects.toThrow()
+    expect((await e.readView()).scopes[0]).toMatchObject({ scope: { kind: 'global' }, isInProgress: false })
+  })
+
+  it('agent 在自动体检进行中调 memory_scan：不认领、不被挡，照常回结果；它比自动体检晚结束，上次体检不往回退', async () => {
+    let openAuto!: () => void
+    const llm = fakeHostLlm({ gate: () => new Promise<void>(resolve => { openAuto = resolve }) })
+    const e = env({ llm })
+    await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))
+    await e.set({ kind: 'all' }, 1)
+    e.scheduler.start()
+    e.timers.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    await llm.nthStarted(1)
+    const autoStartedAt = e.clock.now
+    // agent 的 memory_scan 在自动体检进行中开始
+    let openAgent!: () => void
+    let agentCalled!: () => void
+    const agentStarted = new Promise<void>(resolve => { agentCalled = resolve })
+    const agentGate = new Promise<void>(resolve => { openAgent = resolve })
+    const agentLlm: SemanticLlm = { complete: async () => { agentCalled(); await agentGate; return '{"findings":[]}' } }
+    e.clock.now = autoStartedAt + 1000
+    const agent = executeScan({}, {
+      store: e.store, registry, decisions: e.decisions, cache: e.cache, checkups: e.checkups,
+      getBaseline: () => null, getLlm: () => agentLlm, resolveContext: async () => ({ workspacePath: undefined }), now: () => e.clock.now,
+    }, fakeExec())
+    await agentStarted
+    expect(await e.checkups.isInProgress({ kind: 'global' })).toBe(true)
+    // 自动体检先结束
+    e.clock.now = autoStartedAt + 2000
+    openAuto()
+    await e.scheduler.whenIdle()
+    const lastAfterAuto = (await e.readView()).scopes[0]!.lastCheckupAt!
+    expect(lastAfterAuto).toBe(autoStartedAt + 2000)
+    // agent 后结束
+    e.clock.now = autoStartedAt + 3000
+    openAgent()
+    const result = await agent
+    expect(result.kind).toBe('single')
+    expect(await e.completed()).toEqual({ global: { startedAt: autoStartedAt + 1000, completedAt: autoStartedAt + 3000, by: 'agent' } })
+    const status = await collectCheckupView({ store: e.store, checkups: e.checkups, autoCheckups: e.autoCheckups, cache: e.cache, now: () => e.clock.now })
+    expect(status.scopes[0]!.lastCheckupAt).toBeGreaterThanOrEqual(lastAfterAuto)
+    expect((await e.cache.get('global'))?.scannedAt ?? (await e.cache.list())[0]?.[1].scannedAt).toBeGreaterThanOrEqual(autoStartedAt)
   })
 })

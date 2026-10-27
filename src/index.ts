@@ -471,12 +471,14 @@ export async function apply(ctx: Context, config: Config) {
   ctx.inject(['timer'], child => {
     const timer = child as unknown as AutoCheckupTimer
     const created = new AutoCheckupScheduler({
-      scan: { store, registry, decisions, cache: scanCache, ignores, checkups },
+      scan: { store, registry, decisions, cache: scanCache, ignores },
+      checkups,
       status: () => collectCheckupView(checkupSource),
       getDefaultLlm,
       isGovernanceEnabled: () => config.governance.enabled.get(),
       timer: { timeout: (callback, delayMs) => timer.timeout(callback, delayMs), interval: (callback, delayMs) => timer.interval(callback, delayMs) },
       onChecked: async () => { await views?.requestCheckups() },
+      onClaimChanged: async () => { await views?.requestCheckups() },
       // 自动体检挂了账、写了完成记录：待处理、健康和体检视图都重写
       onScanned: async () => { await views?.request() },
       now: () => Date.now(),

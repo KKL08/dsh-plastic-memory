@@ -31,7 +31,7 @@ export function ScanControl({ session, workspacePath, hasPending, nav, leading }
   const openSettings = canOpenSettings
     ? <><i className="pm-sep" aria-hidden="true">·</i><button type="button" className="pm-link" onClick={() => { nav.openSettings() }}>{t('scan.openSettings')}</button></>
     : null
-  const isRunning = state.kind === 'running'
+  const isRunning = state.kind === 'running' || state.kind === 'busy'
   let status: ReactNode = null
   if (isOff) {
     status = <>{t('scan.off')}{openSettings}</>
@@ -51,7 +51,7 @@ export function ScanControl({ session, workspacePath, hasPending, nav, leading }
           unavailable={isOff ? t('scan.off') : undefined}
           onClick={() => { run(workspacePath) }}
         >
-          {isRunning ? t('scan.running') : state.kind === 'failed' ? t('scan.retry') : t('scan.button')}
+          {state.kind === 'busy' ? t('scan.busy') : isRunning ? t('scan.running') : state.kind === 'failed' ? t('scan.retry') : t('scan.button')}
         </Button>
       </div>
       {isOff ? null : <p className="pm-scan-hint">{t('scan.hint')}</p>}

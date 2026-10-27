@@ -77,7 +77,7 @@ export function StatusCard({ governanceEnabled, onOpen, now = Date.now() }: {
       ? summarize({ pending, health, library }, governanceEnabled, now, t)
       : { conclusion: t('settings.status.loading') }
   const scan = useScan(session)
-  const isRunning = scan.state.kind === 'running'
+  const isRunning = scan.state.kind === 'running' || scan.state.kind === 'busy'
   const unavailable = !governanceEnabled ? t('scan.off') : session.kind === 'none' ? t('session.none.hint') : undefined
   return (
     <HealthBanner
@@ -88,7 +88,7 @@ export function StatusCard({ governanceEnabled, onOpen, now = Date.now() }: {
         <div className="pm-status-actions">
           <div className="pm-status-buttons">
             <Button disabled={isRunning} unavailable={unavailable} onClick={scan.run}>
-              {isRunning ? t('settings.status.scanning') : scan.state.kind === 'failed' ? t('scan.retry') : t('settings.status.scan')}
+              {scan.state.kind === 'busy' ? t('scan.busy') : isRunning ? t('settings.status.scanning') : scan.state.kind === 'failed' ? t('scan.retry') : t('settings.status.scan')}
             </Button>
             <button type="button" className="pm-link" onClick={() => { onOpen({ tab: openTarget(pending) }) }}>{t('settings.status.open')}</button>
           </div>

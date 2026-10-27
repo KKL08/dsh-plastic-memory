@@ -575,6 +575,16 @@ describe('状态卡「立即体检」', () => {
     expect(screen.getByText('体检完成。')).toBeInTheDocument()
   })
 
+  it('范围正在别处体检（命令回 busy）：按钮显示「体检中…」并禁用，不报错；别处体检完、视图更新后恢复', async () => {
+    const gateway = render({ respond: () => ({ ok: false, cmd: 'scan', code: 'busy', detail: '全局 正在体检，查完再来' }) })
+    await act(async () => { fireEvent.click(button()) })
+    expect(screen.getByRole('button', { name: '体检中…' })).toBeDisabled()
+    expect(statusLine()).toHaveTextContent(/^$/)
+    act(() => { gateway.setView('health', health(NOW + 1)) })
+    expect(button()).toHaveTextContent('立即体检')
+    expect(button()).not.toBeDisabled()
+  })
+
   it('插件页没有选中的会话时体检全部层', async () => {
     const gateway = render()
     await act(async () => { fireEvent.click(button()) })

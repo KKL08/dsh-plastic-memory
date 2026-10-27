@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { createHash } from 'node:crypto'
 import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
@@ -58,11 +59,14 @@ interface EnvOpts {
   /** 包一层视图写入器（模拟收集、写入出错）。 */
   wrapViews?: (writer: ViewWriter) => Pick<ViewWriter, 'request' | 'rewriteAll' | 'collectViews' | 'requestCheckups'>
   log?: MemoryLogger
+  /** 认领心跳的计时（缺省真实 setInterval）。 */
+  heartbeat?: (callback: () => void, delayMs: number) => () => void
 }
 
 function env(opts: EnvOpts = {}) {
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
   const clock = { now: opts.now ?? NOW }
+  // 侧表也用这个时钟：认领的时间和是否残留按它算
+  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }, now: () => clock.now })
   // 表和命令用同一个时钟：软删记的时刻和最近删除的保留期清扫才对得上
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now }), undefined, sidecar.recallStats)
   const decisions = new PendingDecisionsStore(opts.wrapPending?.(sidecar.pending) ?? sidecar.pending)
@@ -81,6 +85,7 @@ function env(opts: EnvOpts = {}) {
     memoryRoot: root, store, decisions, snapshots, cache, checkups, autoCheckups, ignores: new AdviceIgnoreStore(sidecar.adviceIgnores), registry, views: opts.wrapViews?.(views) ?? views,
     onAutoCheckupChanged: () => { autoCheckupChanges.count++ },
     ...(opts.log !== undefined ? { log: opts.log } : {}),
+    ...(opts.heartbeat !== undefined ? { heartbeat: opts.heartbeat } : {}),
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),
     resolveContext: async () => ({ workspacePath: 'workspacePath' in opts ? opts.workspacePath : SESSION_WS, delegationDepth: opts.delegationDepth ?? 0, session: { id: 'sess-1' } }),
     getLlm: () => (opts.llm === undefined ? null : opts.llm),
@@ -2144,6 +2149,150 @@ describe('scan：上次体检与完成记录', () => {
   })
 })
 
+describe('scan：按范围认领', () => {
+  const GLOBAL = { kind: 'global' as const }
+  const SESSION = { kind: 'workspace' as const, path: SESSION_WS }
+  const OTHER = { kind: 'workspace' as const, path: OTHER_WS }
+  /** 同一个记忆根上的另一个宿主进程：另一份侧表（同一个时钟）。 */
+  const otherProcess = (e: ReturnType<typeof env>) => new SidecarStore({
+    root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }, now: () => e.clock.now,
+  }).checkups
+  async function seedLayers(e: ReturnType<typeof env>) {
+    await e.store.create(record({ id: 'mem_g', name: '全局', content: '回答用中文' }))
+    await e.store.create(record({ id: 'mem_s', name: '本项目', content: '用 pnpm', scope: 'workspace', workspacePath: SESSION_WS }))
+    await e.store.create(record({ id: 'mem_o', name: '别的项目', content: '用 npm', scope: 'workspace', workspacePath: OTHER_WS }))
+  }
+  /** 记下调用次数；gate 给出时等它开了再回（不理会取消信号：模型在认领丢了之后才回来）。 */
+  function countingLlm(opts: { gate?: Promise<void>; findings?: object[] } = {}) {
+    const calls: string[] = []
+    let onCall: (() => void) | undefined
+    const called = new Promise<void>(resolve => { onCall = resolve })
+    const llm: SemanticLlm = {
+      complete: async (input) => {
+        calls.push(input.user)
+        onCall?.()
+        if (opts.gate !== undefined) await opts.gate
+        return JSON.stringify({ findings: opts.findings ?? [] })
+      },
+    }
+    return { llm, calls, called }
+  }
+  const inProgress = async (e: ReturnType<typeof env>) => Object.fromEntries((await e.readCheckupView()).scopes
+    .map(s => [s.scope.kind === 'global' ? 'global' : s.scope.workspacePath, s.isInProgress]))
+
+  it('范围正在体检（别的进程认领着）时手动体检回 busy：不调模型、不写缓存和完成记录；别的范围照常体检', async () => {
+    const m = countingLlm()
+    const e = env({ llm: m.llm })
+    await seedLayers(e)
+    const other = otherProcess(e)
+    const heldGlobal = await other.claimRefreshable(checkupKey(GLOBAL))
+    const heldSession = await other.claimRefreshable(checkupKey(SESSION))
+    const busy = err(await e.run({ cmd: 'scan', layer: { kind: 'global' } }))
+    expect(busy.code).toBe('busy')
+    expect(busy.detail).toContain('全局')
+    expect(err(await e.run({ cmd: 'scan', workspacePath: SESSION_WS })).code).toBe('busy')
+    expect(m.calls).toEqual([])
+    expect(await e.cache.list()).toEqual([])
+    expect(await e.checkups.list()).toEqual([])
+    // 别的进程的认领原样留着
+    expect(await other.isClaimed(checkupKey(GLOBAL))).toBe(true)
+    expect(await other.isClaimed(checkupKey(SESSION))).toBe(true)
+    ok(await e.run({ cmd: 'scan', workspacePath: OTHER_WS }))
+    expect(m.calls).toHaveLength(1)
+    await heldGlobal!.release()
+    await heldSession!.release()
+    ok(await e.run({ cmd: 'scan', layer: { kind: 'global' } }))
+  })
+
+  it('「全部」要认领所有范围：有一个认领不到就整个回 busy，已认领的范围立刻放掉', async () => {
+    const m = countingLlm()
+    const e = env({ llm: m.llm })
+    await seedLayers(e)
+    const other = otherProcess(e)
+    const held = await other.claimRefreshable(checkupKey(OTHER))
+    expect(err(await e.run({ cmd: 'scan' })).code).toBe('busy')
+    expect(m.calls).toEqual([])
+    expect(await e.checkups.list()).toEqual([])
+    // 全局和本项目没被这次留着：别的进程马上就能认领
+    for (const layer of [GLOBAL, SESSION]) {
+      const again = await other.claimRefreshable(checkupKey(layer))
+      expect(again, checkupKey(layer)).toBeDefined()
+      await again!.release()
+    }
+    expect(await other.isClaimed(checkupKey(OTHER))).toBe(true)
+    await held!.release()
+    ok(await e.run({ cmd: 'scan' }))
+    expect(m.calls.length).toBeGreaterThan(0)
+  })
+
+  it('体检进行中：体检视图里这个范围「进行中」，别的进程认领不到；做完放掉认领，视图回到不在进行中', async () => {
+    let open!: () => void
+    const m = countingLlm({ gate: new Promise<void>(resolve => { open = resolve }) })
+    const e = env({ llm: m.llm })
+    await seedLayers(e)
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect(await inProgress(e)).toEqual({ global: false, [SESSION_WS]: false, [OTHER_WS]: false })
+    const running = e.run({ cmd: 'scan', workspacePath: SESSION_WS })
+    await m.called
+    expect(await inProgress(e)).toEqual({ global: false, [SESSION_WS]: true, [OTHER_WS]: false })
+    expect(await otherProcess(e).claimRefreshable(checkupKey(SESSION))).toBeUndefined()
+    open()
+    ok(await running)
+    expect(await inProgress(e)).toEqual({ global: false, [SESSION_WS]: false, [OTHER_WS]: false })
+    expect(await otherProcess(e).isClaimed(checkupKey(SESSION))).toBe(false)
+  })
+
+  it('认领期间每 10 秒刷新一次；心跳发现认领已被别人接手：这次不再提交（不写缓存、不挂账、不写完成记录），回 busy', async () => {
+    const beats: Array<{ callback: () => void; delayMs: number; isLive: boolean }> = []
+    const heartbeat = (callback: () => void, delayMs: number) => {
+      const beat = { callback, delayMs, isLive: true }
+      beats.push(beat)
+      return () => { beat.isLive = false }
+    }
+    let open!: () => void
+    const m = countingLlm({
+      gate: new Promise<void>(resolve => { open = resolve }),
+      findings: [{ type: 'conflict', memoryIds: ['mem_s', 'mem_s2'], summary: '包管理器矛盾', suggestedAction: '裁决' }],
+    })
+    const infos: string[] = []
+    const e = env({ llm: m.llm, heartbeat, log: { info: (msg: string) => { infos.push(msg) }, warn() {}, error() {} } })
+    await seedLayers(e)
+    await e.store.create(record({ id: 'mem_s2', name: '本项目二', content: '用 yarn', scope: 'workspace', workspacePath: SESSION_WS }))
+    const running = e.run({ cmd: 'scan', workspacePath: SESSION_WS })
+    await m.called
+    expect(beats.map(b => [b.delayMs, b.isLive])).toEqual([[10_000, true]])
+    const claimFile = join(root, STATE_DIR, 'checkups', `${createHash('sha1').update(SESSION_WS).digest('hex')}.claim`)
+    const claimAt = async () => (JSON.parse(await readFile(claimFile, 'utf8')) as { at: number }).at
+    expect(await claimAt()).toBe(NOW)
+    e.clock.now = NOW + 10_000
+    beats[0]!.callback()
+    await vi.waitFor(async () => { expect(await claimAt()).toBe(NOW + 10_000) })
+    // 别的进程把它当残留清掉、接手了
+    await rm(claimFile)
+    const taker = await otherProcess(e).claimRefreshable(checkupKey(SESSION))
+    expect(taker).toBeDefined()
+    beats[0]!.callback()
+    await vi.waitFor(() => { expect(infos.some(m => m.includes('被别的进程接手'))).toBe(true) })
+    // 模型在认领丢了之后才回来
+    open()
+    expect(err(await running).code).toBe('busy')
+    expect(await e.cache.list()).toEqual([])
+    expect(await e.decisions.list()).toEqual([])
+    expect(await e.checkups.list()).toEqual([])
+    expect(beats[0]!.isLive).toBe(false)
+    // 接手者的认领没被旧持有者删掉
+    expect(await otherProcess(e).isClaimed(checkupKey(SESSION))).toBe(true)
+    await taker!.release()
+  })
+
+  it('待决项被别的操作认领时仍回 claimed，不是 busy', async () => {
+    const e = env()
+    const entry = await seedPair(e)
+    const release = await e.decisions.withClaim(entry.id, async () => err(await e.run({ cmd: 'undo', decisionId: entry.id })))
+    expect(release.isClaimed && release.value.code).toBe('claimed')
+  })
+})
+
 describe('set-auto-checkup', () => {
   const ALL = { kind: 'all' as const }
   const DISCUSSION = { kind: 'workspace' as const, workspacePath: '/work/discussion' }
@@ -2228,8 +2377,8 @@ describe('set-auto-checkup', () => {
     await e.checkups.complete([{ kind: 'global' }], { startedAt: NOW - 2 * DAY, completedAt: NOW - 2 * DAY, by: 'agent' })
     ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 3 }))
     expect((await e.readCheckupView()).scopes).toEqual([
-      { scope: { kind: 'global' }, frequency: 3, isOwn: false, lastCheckupAt: NOW - 2 * DAY, nextCheckupAt: NOW + DAY, isDue: false },
-      { scope: DISCUSSION, frequency: 3, isOwn: false, lastCheckupAt: null, nextCheckupAt: null, isDue: true },
+      { scope: { kind: 'global' }, frequency: 3, isOwn: false, lastCheckupAt: NOW - 2 * DAY, nextCheckupAt: NOW + DAY, isDue: false, isInProgress: false },
+      { scope: DISCUSSION, frequency: 3, isOwn: false, lastCheckupAt: null, nextCheckupAt: null, isDue: true, isInProgress: false },
     ])
   })
 

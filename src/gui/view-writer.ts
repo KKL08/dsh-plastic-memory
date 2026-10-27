@@ -100,7 +100,7 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
 
 export interface CheckupSourceDeps {
   store: Pick<MemoryStore, 'listWorkspaceDirs'>
-  checkups: Pick<CheckupRecordStore, 'list'>
+  checkups: Pick<CheckupRecordStore, 'list' | 'isInProgress'>
   autoCheckups: Pick<AutoCheckupSettingStore, 'read'>
   /** 语义缓存：还没有完成记录（升级前体检过）的范围，上次体检暂取缓存的时间。 */
   cache: KvTable<ScanCacheEntry>
@@ -109,7 +109,7 @@ export interface CheckupSourceDeps {
   now?: () => number
 }
 
-/** 体检视图：只读目录清单、两张小侧表和各范围缓存的时间，不读记忆文件，调度器每次检查都可以读。 */
+/** 体检视图：只读目录清单、两张小侧表、各范围的认领文件和缓存的时间，不读记忆文件，调度器每次检查都可以读。 */
 export async function collectCheckupView(deps: CheckupSourceDeps): Promise<CheckupView> {
   const now = deps.now?.() ?? Date.now()
   const listing = await deps.store.listWorkspaceDirs()
@@ -117,12 +117,15 @@ export async function collectCheckupView(deps: CheckupSourceDeps): Promise<Check
   const [settings, records] = await Promise.all([deps.autoCheckups.read(), deps.checkups.list()])
   const byKey = new Map(records.map(r => [r.id, r]))
   const last = new Map<LayerRef, number | null>()
+  const inProgress = new Set<LayerRef>()
   for (const layer of layers) {
     const record = byKey.get(checkupKey(layer))
     last.set(layer, lastCheckupAt(record, record?.completed === undefined ? (await deps.cache.get(layerCacheKey(layer)))?.scannedAt : undefined))
+    if (await deps.checkups.isInProgress(layer)) inProgress.add(layer)
   }
   return buildCheckupView({
-    now, governanceEnabled: deps.isGovernanceEnabled?.() ?? true, settings, layers, lastCheckupAt: layer => last.get(layer) ?? null,
+    now, governanceEnabled: deps.isGovernanceEnabled?.() ?? true, settings, layers,
+    lastCheckupAt: layer => last.get(layer) ?? null, isInProgress: layer => inProgress.has(layer),
   })
 }
 

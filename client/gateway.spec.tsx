@@ -126,6 +126,9 @@ describe('decodeExecution', () => {
     expect(ok).toEqual({ ok: true, cmd: 'undo', decisionId: 'd1' })
     const err = decodeExecution('forget', { ok: true, value: { commandId: 'c', result: { kind: 'error', text: '{"ok":false,"cmd":"forget","code":"not-found"}' } } })
     expect(err).toEqual({ ok: false, cmd: 'forget', code: 'not-found' })
+    // 范围正在体检：busy 是契约里的码，不折成 failed
+    const busy = decodeExecution('scan', { ok: true, value: { commandId: 'c', result: { kind: 'error', text: '{"ok":false,"cmd":"scan","code":"busy","detail":"全局 正在体检，查完再来"}' } } })
+    expect(busy).toEqual({ ok: false, cmd: 'scan', code: 'busy', detail: '全局 正在体检，查完再来' })
   })
 
   it('宿主失败、无结果、非契约文本都折成 failed，原话进 detail', () => {

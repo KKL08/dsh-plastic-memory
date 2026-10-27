@@ -30,6 +30,9 @@ import {
 } from './contract.ts'
 import type { ViewWriter } from './view-writer.ts'
 import { generateDraft } from './model-draft.ts'
+import { holdCheckups, processInterval, type IntervalTimer } from './auto-checkup.ts'
+import { checkupWorkspaces } from '../tools/layer-preread.ts'
+import type { LayerRef } from '../governance/layer-health.ts'
 import { scanOutcome } from './views.ts'
 
 /**
@@ -50,6 +53,8 @@ export interface MemoryCommandDeps {
   autoCheckups: AutoCheckupSettingStore
   /** set-auto-checkup 写完设置表、重写体检视图后调用：本进程的自动体检调度立刻重算。缺省不通知（没有调度器）。 */
   onAutoCheckupChanged?: () => void
+  /** scan 持有范围认领期间的心跳计时；缺省用进程自己的 setInterval。 */
+  heartbeat?: IntervalTimer
   /** 建议忽略表（ignore-advice / unignore-advice 写它）。 */
   ignores: AdviceIgnoreStore
   registry: TypeRegistry
@@ -719,37 +724,28 @@ async function dispatch(
     case 'scan': {
       // 在借来的会话的 agent 上解析模型，拿不到就不扫（只跑规则层会让界面以为体检做完了）
       if (deps.getLlm(exec) === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型，可在对话里让 agent 体检')
-      // 新增条数与分数是附带的：收集视图出错只记日志、结果里不带它们，不挡体检本身，也不把做完的体检报成失败
-      const collect = () => deps.views.collectViews().catch((err: unknown) => {
-        (deps.log ?? console).warn('[plastic-memory] 体检结果的视图收集失败，这次不给新增条数与分数', err)
-        return undefined
-      })
-      // 体检前的待处理，和体检后比出新增
-      const before = (await collect())?.pending
       const isGlobalOnly = command.layer !== undefined
-      // 时钟现读：完成记录的完成时间是体检做完的时刻，不是命令开始的时刻
-      const r = await executeScan(
-        { scope: command.workspacePath ?? 'all', layers: 'full' },
-        {
-          store: deps.store, registry: deps.registry, decisions: deps.decisions, cache: deps.cache, checkups: deps.checkups,
-          getBaseline: deps.getBaseline, getLlm: deps.getLlm, resolveContext: deps.resolveContext, now: () => deps.now?.() ?? Date.now(),
-        },
-        exec, { by: 'manual', isGlobalOnly },
-      )
-      await deps.decisions.sweep(now)
-      const after = await deps.views.rewriteAll() ?? (before === undefined ? undefined : await collect())
-      if (r.kind === 'error') return fail(cmd, 'failed', r.message)
-      // 判新增的覆盖层：项目体检读的是本项目的可见集合（全局 + 本项目），只查全局是全局层，全库体检是全部层
-      const covered = isGlobalOnly ? [{ kind: 'global' as const }]
-        : command.workspacePath === undefined ? 'all' : [{ kind: 'global' as const }, { kind: 'workspace' as const, workspacePath: command.workspacePath }]
-      const notes = r.notes.map(n => n.code)
-      const extras = {
-        ...(r.semanticBatches !== undefined ? { semanticBatches: r.semanticBatches } : {}),
-        ...(r.usageTokens !== undefined ? { usageTokens: r.usageTokens } : {}),
+      // 开跑前认领要查的范围（和自动体检共用一套认领）：正在体检就回 busy；「全部」要认领全局和每个项目，有一个认领不到整个回 busy
+      const layers: LayerRef[] = isGlobalOnly ? [{ kind: 'global' }]
+        : command.workspacePath !== undefined ? [{ kind: 'workspace', path: command.workspacePath }]
+        : [{ kind: 'global' }, ...checkupWorkspaces(await deps.store.listWorkspaceDirs()).map(path => ({ kind: 'workspace' as const, path }))]
+      const controller = new AbortController()
+      const held = await holdCheckups(deps.checkups, layers, {
+        interval: deps.heartbeat ?? processInterval,
+        onLost: () => { controller.abort(new DOMException('checkup claim taken over', 'AbortError')) },
+        onChange: () => deps.views.requestCheckups(),
+        log: deps.log ?? console,
+      })
+      if ('busy' in held) return fail(cmd, 'busy', `${held.busy.kind === 'global' ? '全局' : held.busy.path} 正在体检，查完再来`)
+      try {
+        return await scanHeld(deps, command, { ...exec, signal: controller.signal }, now)
+      } catch (err) {
+        // 认领中途被别的进程接手：执行器在写入检查点前停下了，这次没提交
+        if (controller.signal.aborted) return fail(cmd, 'busy', '体检中途被别的进程接手，这次没有提交')
+        throw err
+      } finally {
+        await held.release()
       }
-      return before === undefined || after === undefined
-        ? { ok: true, cmd, notes, ...extras }
-        : { ok: true, cmd, notes, ...extras, ...scanOutcome(before, after, covered) }
     }
 
     case 'set-auto-checkup': {
@@ -767,4 +763,45 @@ async function dispatch(
       await deps.views.rewriteAll()
       return { ok: true, cmd }
   }
+}
+
+/** 认领到范围之后的界面手动体检：前后各收集一次待处理比出新增，体检完给覆盖到的范围写完成记录（发起方界面手动）。 */
+async function scanHeld(
+  deps: MemoryCommandDeps,
+  command: Extract<MemoryCommand, { cmd: 'scan' }>,
+  exec: ToolRunContext,
+  now: number,
+): Promise<MemoryCommandResult> {
+  const { cmd } = command
+  // 新增条数与分数是附带的：收集视图出错只记日志、结果里不带它们，不挡体检本身，也不把做完的体检报成失败
+  const collect = () => deps.views.collectViews().catch((err: unknown) => {
+    (deps.log ?? console).warn('[plastic-memory] 体检结果的视图收集失败，这次不给新增条数与分数', err)
+    return undefined
+  })
+  // 体检前的待处理，和体检后比出新增
+  const before = (await collect())?.pending
+  const isGlobalOnly = command.layer !== undefined
+  // 时钟现读：完成记录的完成时间是体检做完的时刻，不是命令开始的时刻
+  const r = await executeScan(
+    { scope: command.workspacePath ?? 'all', layers: 'full' },
+    {
+      store: deps.store, registry: deps.registry, decisions: deps.decisions, cache: deps.cache, checkups: deps.checkups,
+      getBaseline: deps.getBaseline, getLlm: deps.getLlm, resolveContext: deps.resolveContext, now: () => deps.now?.() ?? Date.now(),
+    },
+    exec, { by: 'manual', isGlobalOnly },
+  )
+  await deps.decisions.sweep(now)
+  const after = await deps.views.rewriteAll() ?? (before === undefined ? undefined : await collect())
+  if (r.kind === 'error') return fail(cmd, 'failed', r.message)
+  // 判新增的覆盖层：项目体检读的是本项目的可见集合（全局 + 本项目），只查全局是全局层，全库体检是全部层
+  const covered = isGlobalOnly ? [{ kind: 'global' as const }]
+    : command.workspacePath === undefined ? 'all' : [{ kind: 'global' as const }, { kind: 'workspace' as const, workspacePath: command.workspacePath }]
+  const notes = r.notes.map(n => n.code)
+  const extras = {
+    ...(r.semanticBatches !== undefined ? { semanticBatches: r.semanticBatches } : {}),
+    ...(r.usageTokens !== undefined ? { usageTokens: r.usageTokens } : {}),
+  }
+  return before === undefined || after === undefined
+    ? { ok: true, cmd, notes, ...extras }
+    : { ok: true, cmd, notes, ...extras, ...scanOutcome(before, after, covered) }
 }

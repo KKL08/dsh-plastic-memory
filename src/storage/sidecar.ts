@@ -3,7 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import type { ZodType } from 'zod'
-import type { BatchKvTable, CasKvTable, ClaimKvTable, KvTable } from '../kv-table.ts'
+import type { BatchKvTable, CasKvTable, ClaimKvTable, KvTable, RefreshableClaim, RefreshableClaimKvTable } from '../kv-table.ts'
 import type { MemoryLogger } from './table.ts'
 import { autoCheckupSettingSchema, checkupRecordSchema, kvImportMarkerSchema, recallStatsSchema, type AutoCheckupSetting, type CheckupRecord, type KvImportMarker, type RecallStats } from './schema.ts'
 import { STATE_DIR } from './paths.ts'
@@ -19,13 +19,15 @@ import { linkExclusive } from './exclusive-link.ts'
  *   .state/scan-cache/<sha1(桶键)>.json
  *   .state/advice-ignores/<sha1(身份)>.json  建议忽略表，每项一文件
  *   .state/checkups/<sha1(范围键)>.json       体检记录表，每个范围一文件
+ *   .state/checkups/<sha1(范围键)>.claim      这个范围体检期间的认领（排他创建，持有者定时刷新，体检完即删）
  *   .state/auto-checkups/<sha1(范围键)>.json  自动体检设置表，每个范围一文件
  *   .state/recall-stats.json        整张表一个文件 { [id]: RecallStats }
  *   .state/kv-import.json           旧宿主 KV 导入的完成标记
  *   .state/kv-import.lock           导入期间的跨进程锁，导完即删
  *
  * 写都是 tmp + rename 原子写，进程内经一条 Promise 链串行；读不加锁。侧表读写跨进程单条 LWW，
- * 旧 KV 导入用锁文件跨进程串行，裁决用条目旁的认领文件跨进程互斥（同一条待决项同时只许一次裁决）。
+ * 旧 KV 导入用锁文件跨进程串行，裁决用条目旁的认领文件跨进程互斥（同一条待决项同时只许一次裁决），
+ * 体检同样按范围认领（同一个范围同时只体检一次）。
  * 坏文件跳过并记日志，不抛。条目 schema 由接线层注入（storage 不 import governance）。
  *
  * 导入屏障：snapshots / pending / scan-cache 的每个读写方法先 await 一次 memoize 的导入（进程内锁 +
@@ -50,7 +52,8 @@ const AUTO_CHECKUPS_DIR = 'auto-checkups'
 const IMPORT_LOCK_REFRESH_MS = 10_000
 const IMPORT_LOCK_STALE_MS = 60_000
 const IMPORT_LOCK_POLL_MS = 50
-/** 认领不刷新：一次裁决远用不了这么久，超过按残留处理（持有进程崩溃后 pid 被复用）。 */
+/** 认领超过这么久没刷新按残留处理（持有进程崩溃后 pid 被复用）。待决项的认领不刷新：一次裁决远用不了这么久；
+ *  体检的认领由持有者定时刷新（gui/auto-checkup.ts）。 */
 const CLAIM_STALE_MS = 60_000
 
 /** 能直接当文件名的键（genId 产出的 snap_ / pd_ id 都满足）；其余一律不落盘，防路径穿越。 */
@@ -176,7 +179,7 @@ async function breakStaleLock(lockPath: string, held: string): Promise<void> {
 }
 
 /** 每条一个 JSON 文件的表。键从文件内容的 id 还原，所以 put 要求键等于值的 id。 */
-class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T>, CasKvTable<T> {
+class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T>, CasKvTable<T>, RefreshableClaimKvTable<T> {
   private readonly dir: string
   private readonly fileNameOf: (key: string) => string | undefined
   private readonly schema: ZodType<T>
@@ -296,15 +299,27 @@ class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T>, CasKv
   /** 排他创建条目旁的 `<名>.claim`（list 只认 .json，不当条目）。已被占用且持有进程已退出或超时的按残留清掉，再试一次。
    *  释放只删自己的认领：被当成残留清掉、别人又认领了时不误删。不能当文件名的键不会有条目，不用认领，直接放行。 */
   async claim(key: string): Promise<(() => Promise<void>) | undefined> {
-    const name = this.fileNameOf(key)
-    if (name === undefined) return async () => {}
-    const path = join(this.dir, `${name}.claim`)
+    return (await this.claimRefreshable(key))?.release
+  }
+
+  /** 同 claim，另给刷新：把认领时间改成此刻，持有者定时刷新就不会被当成残留。认领文件已不是自己的就不写、返回 false。 */
+  async claimRefreshable(key: string): Promise<RefreshableClaim | undefined> {
+    const path = this.claimPathOf(key)
+    if (path === undefined) return { refresh: async () => true, release: async () => {} }
     await this.env.ready()
     await mkdir(this.dir, { recursive: true })
     const id = Math.random().toString(36).slice(2)
+    const claimText = () => JSON.stringify({ pid: process.pid, at: this.env.now(), id })
     for (let attempt = 0; attempt < 2; attempt++) {
-      if (await createExclusive(path, JSON.stringify({ pid: process.pid, at: this.env.now(), id }))) {
-        return async () => { if (await lockOwner(path) === id) await rm(path, { force: true }) }
+      if (await createExclusive(path, claimText())) {
+        return {
+          refresh: async () => {
+            if (await lockOwner(path) !== id) return false
+            await atomicWrite(path, claimText())
+            return true
+          },
+          release: async () => { if (await lockOwner(path) === id) await rm(path, { force: true }) },
+        }
       }
       let held: string
       try {
@@ -314,10 +329,27 @@ class EntryFileTable<T extends { id: string }> implements ClaimKvTable<T>, CasKv
         throw err
       }
       if (!isStaleLock(held, this.env.now(), CLAIM_STALE_MS)) return undefined
-      this.env.log.warn(`[plastic-memory] 待决项认领残留（持有进程已退出或超时），清理后重试：${path}`)
+      this.env.log.warn(`[plastic-memory] 认领残留（持有进程已退出或超时），清理后重试：${path}`)
       await breakStaleLock(path, held)
     }
     return undefined
+  }
+
+  /** 认领文件在、持有进程还在、也没超时不刷新。 */
+  async isClaimed(key: string): Promise<boolean> {
+    const path = this.claimPathOf(key)
+    if (path === undefined) return false
+    try {
+      return !isStaleLock(await readFile(path, 'utf8'), this.env.now(), CLAIM_STALE_MS)
+    } catch (err) {
+      if (errnoCode(err) === 'ENOENT') return false
+      throw err
+    }
+  }
+
+  private claimPathOf(key: string): string | undefined {
+    const name = this.fileNameOf(key)
+    return name === undefined ? undefined : join(this.dir, `${name}.claim`)
   }
 }
 
@@ -414,7 +446,7 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
   readonly scanCache: CasKvTable<C>
   readonly recallStats: BatchKvTable<RecallStats>
   readonly adviceIgnores: CasKvTable<I>
-  readonly checkups: CasKvTable<CheckupRecord>
+  readonly checkups: CasKvTable<CheckupRecord> & RefreshableClaimKvTable<CheckupRecord>
   readonly autoCheckups: KvTable<AutoCheckupSetting>
 
   private readonly stateDir: string
