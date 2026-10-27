@@ -66,6 +66,8 @@ function mockCtx(opts: { projections?: SessionProjectionRegistry; registerProjec
   const contextDefs: Array<{ name: string; order: number; text: (assembleCtx?: AssembleContext) => string }> = []
   const variables = new Map<string, (assembleCtx: AssembleContext) => string | undefined>()
   const listeners = new Map<string, (...args: unknown[]) => unknown>()
+  // ctx.on 的第三参数（cordis EventOptions，如 prepend）按事件名记下，没传的不记
+  const listenerOptions = new Map<string, unknown>()
   // 假 llm：记下每次 stream 收到的请求对象；每次调用从 llmScript 取一段 chunk 序列，
   // 脚本用完回默认序列——语义扫描能解析的空结果，以 stop 收尾（宿主每条流都以 finish 结束）。
   const llmRequests: Array<{ messages: unknown[] }> = []
@@ -100,13 +102,17 @@ function mockCtx(opts: { projections?: SessionProjectionRegistry; registerProjec
   const dispose = async () => { for (const d of disposers.splice(0).reverse()) await d() }
   liveCtxs.push(dispose)
   return {
-    registered, contexts, contextDefs, variables, listeners, llmRequests, llmScript, tables, domain,
+    registered, contexts, contextDefs, variables, listeners, listenerOptions, llmRequests, llmScript, tables, domain,
     tools: { register: (def: { name: string }) => { registered.push(def.name); return () => { registered.splice(registered.indexOf(def.name), 1) } } },
     systemPrompt: {
       context: (c: (typeof contextDefs)[number]) => { contexts.push(c.name); contextDefs.push(c); return () => {} },
       variable: (name: string, provider: (assembleCtx: AssembleContext) => string | undefined) => { variables.set(name, provider); return () => {} },
     },
-    on: (event: string, fn: (...args: unknown[]) => unknown) => { listeners.set(event, fn); return () => {} },
+    on: (event: string, fn: (...args: unknown[]) => unknown, options?: unknown) => {
+      listeners.set(event, fn)
+      if (options !== undefined) listenerOptions.set(event, options)
+      return () => {}
+    },
     effect: (fn: () => unknown) => { fn() },
     // 按服务名分发：'llm' 给上面的假 llm，'sessionProjections' 给 opts.projections，'storageDomain'
     // 按 opts.storageDomain 给旧 KV 域；其余（如 resolveWorkspacePath 的 workspaceRegistry）一律
@@ -189,11 +195,16 @@ describe('apply', () => {
     expect(ctx.registered.sort()).toEqual(['memory_forget', 'memory_save', 'memory_search', 'memory_snapshot', 'memory_source'])
   })
 
-  it('监听 session/created、session/event、system-prompt/assemble（首轮竞态等待）与 loader/volatile-update（配置热生效）', async () => {
+  it('监听 session/created、session/event、system-prompt/assemble（首轮竞态等待）、loader/volatile-update（配置热生效）与 agent/pre-step、agent/request-error（压缩那一步重建快照）', async () => {
     const ctx = mockCtx()
     const memoryRoot = await makeTmpRoot()
     await apply(ctx as never, new Config({ memoryRoot } as never))
-    expect([...ctx.listeners.keys()].sort()).toEqual(['loader/volatile-update', 'session/created', 'session/event', 'system-prompt/assemble'])
+    expect([...ctx.listeners.keys()].sort()).toEqual([
+      'agent/pre-step', 'agent/request-error', 'loader/volatile-update', 'session/created', 'session/event', 'system-prompt/assemble',
+    ])
+    // 两个监听都排在最外层：next() 返回时压缩已经做完；compaction-basic 恢复时返回 retry 不调 next()，里层看不到
+    expect(ctx.listenerOptions.get('agent/pre-step')).toEqual({ prepend: true })
+    expect(ctx.listenerOptions.get('agent/request-error')).toEqual({ prepend: true })
   })
 
   it('Fix 1 回归：ctx.get 对任意服务名抛错也不拖垮插件加载，九个工具照常注册', async () => {
@@ -591,10 +602,49 @@ describe('快照 {{ 转义接线', () => {
 
 /**
  * 注入链接线（spec「注入链」）：快照只在 system-prompt/assemble 中间件里构建；同步 provider 只回缓存、
- * 无缓存回空串；compaction/end 只标过期，provider 仍回旧快照，下一次中间件重建。
+ * 无缓存回空串；compaction/end 只标过期。压缩发生在 agent/pre-step 或 agent/request-error 里时，
+ * 监听在 next() 之后把重建等完，准入时 provider 已回新快照；两次组装之间的刷新拿到上一份。
  */
 describe('注入链接线', () => {
-  it('provider 首轮空串 → 中间件冻结 → provider 回缓存；compaction/end 后 provider 回旧快照、下一次中间件回新快照', async () => {
+  /** 起插件、预置一条旧记忆；addMemory 外部落一条新记忆并经工具入口刷新进内存（注入路径本身不刷新）。 */
+  async function boot() {
+    type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
+    const defs = new Map<string, ToolDef>()
+    const ctx = { ...mockCtx(), tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } } }
+    const memoryRoot = await makeTmpRoot()
+    await mkdir(join(memoryRoot, 'global'), { recursive: true })
+    await writeFile(join(memoryRoot, 'global', 'old.md'),
+      encodeRecord(record({ id: 'mem_old', type: 'preference', content: '压缩前就有的偏好' }), {}), 'utf8')
+    await apply(ctx as never, new Config({ memoryRoot } as never))
+
+    const session = { header: { id: 'sess-1' } } // 无 cwd：解析落定为"无工作目录"，走正常冻结路径
+    const agent = { session } // agent.session 与 assembleCtx.scope.session 是同一个实例
+    const assembleCtx = { scope: { session } } as unknown as AssembleContext
+    const def = ctx.contextDefs.find(c => c.name === 'plastic-memory')!
+    const middleware = ctx.listeners.get('system-prompt/assemble')!
+    const onEvent = ctx.listeners.get('session/event')!
+    const assembleOnce = async () => {
+      const assembly: PromptAssembly = { sections: [], contexts: [{ name: 'plastic-memory', text: def.text(assembleCtx) }], tools: [], variables: {} }
+      await middleware(assembly, assembleCtx, async () => assembly)
+      return assembly.contexts[0]!.text
+    }
+    const addMemory = async () => {
+      await writeFile(join(memoryRoot, 'global', 'new.md'),
+        encodeRecord(record({ id: 'mem_new', type: 'preference', content: '压缩后新增的偏好 zebra' }), {}), 'utf8')
+      await defs.get('memory_search')!.execute({ query: 'zebra' }, fakeExec())
+    }
+    const preStep = ctx.listeners.get('agent/pre-step')!
+    const requestError = ctx.listeners.get('agent/request-error')!
+    const preStepPayload = (signal: AbortSignal) => ({ agent, messages: [], turn: 1, step: 2, signal })
+    const requestErrorPayload = (signal: AbortSignal) => ({
+      agent, turn: 1, step: 2, provider: 'deepseek', failure: { code: 'CONTEXT_WINDOW_EXCEEDED', message: 'overflow' }, retryPolicy: undefined, signal,
+    })
+    // 模拟 compaction-basic：在 next 链里压缩（compaction/end），再交出它的结果
+    const compactThen = <T>(result: T) => async () => { onEvent(session, { type: 'compaction/end' }); return result }
+    return { session, def, assembleCtx, assembleOnce, addMemory, preStep, requestError, preStepPayload, requestErrorPayload, compactThen, onEvent }
+  }
+
+  it('provider 首轮空串 → 中间件冻结 → provider 回缓存；两次组装之间的刷新拿到上一份（compaction/end 后 provider 回旧快照、下一次中间件回新快照）', async () => {
     type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
     const defs = new Map<string, ToolDef>()
     const ctx = { ...mockCtx(), tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } } }
@@ -627,10 +677,79 @@ describe('注入链接线', () => {
     expect(await assembleOnce()).toBe(first) // 未压缩：仍是冻结快照
 
     onEvent(session, { type: 'compaction/end' })
-    expect(def.text(assembleCtx)).toBe(first) // admission refresh 只调 provider：拿到上一份快照
+    expect(def.text(assembleCtx)).toBe(first) // 两次组装之间只调 provider 的刷新：拿到上一份快照
     const rebuilt = await assembleOnce()
     expect(rebuilt).toContain('压缩后新增的偏好 zebra')
     expect(def.text(assembleCtx)).toBe(rebuilt)
+  })
+
+  it('压缩发生在 pre-step 里（宿主 0.2.1-rc.2 顺序）：监听返回时已重建，准入时 provider 回新快照，下一次中间件文本不变', async () => {
+    const { def, assembleCtx, assembleOnce, addMemory, preStep, preStepPayload, compactThen } = await boot()
+    const t0 = await assembleOnce() // 本步 assemble：中间件给出旧快照
+    await addMemory()
+
+    const decision = { kind: 'enter', messages: [] }
+    expect(await preStep(preStepPayload(new AbortController().signal), compactThen(decision))).toBe(decision)
+    const admitted = def.text(assembleCtx) // 准入时宿主重调同步 provider
+    expect(admitted).toContain('压缩后新增的偏好 zebra')
+    expect(admitted).not.toBe(t0)
+    expect(await assembleOnce()).toBe(admitted) // 下一步中间件命中缓存，宿主不再追加一份
+  })
+
+  it('pre-step 不吞 decision：reject、带 startsRequestSeries 的 decision 原样返回', async () => {
+    const { preStep, preStepPayload, compactThen, assembleOnce } = await boot()
+    await assembleOnce()
+    const signal = new AbortController().signal
+    const reject = { kind: 'reject' }
+    expect(await preStep(preStepPayload(signal), compactThen(reject))).toBe(reject)
+    const series = { kind: 'enter', messages: [], startsRequestSeries: true }
+    expect(await preStep(preStepPayload(signal), compactThen(series))).toBe(series)
+  })
+
+  it('pre-step 的 signal 已中止：decision 原样返回，不重建（provider 仍回旧快照）', async () => {
+    const { def, assembleCtx, assembleOnce, addMemory, preStep, preStepPayload, compactThen } = await boot()
+    const t0 = await assembleOnce()
+    await addMemory()
+    const controller = new AbortController()
+    controller.abort()
+    const decision = { kind: 'enter', messages: [] }
+    expect(await preStep(preStepPayload(controller.signal), compactThen(decision))).toBe(decision)
+    expect(def.text(assembleCtx)).toBe(t0)
+  })
+
+  it('溢出恢复：request-error 的 next 返回 retry（压缩已发生）时重建，返回值原样透传，重试准入时 provider 回新快照', async () => {
+    const { def, assembleCtx, assembleOnce, addMemory, requestError, requestErrorPayload, compactThen } = await boot()
+    const t0 = await assembleOnce()
+    await addMemory()
+    const retry = { kind: 'retry' }
+    expect(await requestError(requestErrorPayload(new AbortController().signal), compactThen(retry))).toBe(retry)
+    const admitted = def.text(assembleCtx)
+    expect(admitted).toContain('压缩后新增的偏好 zebra')
+    expect(admitted).not.toBe(t0)
+    expect(await assembleOnce()).toBe(admitted)
+  })
+
+  it('request-error 的 next 返回 undefined（不重试）：返回 undefined，不重建（provider 仍回旧快照）', async () => {
+    const { def, assembleCtx, assembleOnce, addMemory, requestError, requestErrorPayload, compactThen } = await boot()
+    const t0 = await assembleOnce()
+    await addMemory()
+    expect(await requestError(requestErrorPayload(new AbortController().signal), compactThen(undefined))).toBeUndefined()
+    expect(def.text(assembleCtx)).toBe(t0)
+  })
+
+  it('失败的压缩（compaction/end 带 error，什么都没遮蔽）不标过期：pre-step 后 provider 与下一次中间件仍回冻结快照', async () => {
+    const { session, def, assembleCtx, assembleOnce, addMemory, preStep, preStepPayload, onEvent } = await boot()
+    const t0 = await assembleOnce()
+    await addMemory()
+    const decision = { kind: 'enter', messages: [] }
+    const failThen = async () => {
+      // 宿主把 error 放在事件的 data 里（compaction-basic region.ts：session.append('compaction/end', { ...lifecycle, error })）
+      onEvent(session, { type: 'compaction/end', data: { error: 'summary is not smaller than the shadowed content' } })
+      return decision
+    }
+    expect(await preStep(preStepPayload(new AbortController().signal), failThen)).toBe(decision)
+    expect(def.text(assembleCtx)).toBe(t0) // 没压掉旧快照，文本不变，宿主不会追加第二份
+    expect(await assembleOnce()).toBe(t0)
   })
 })
 

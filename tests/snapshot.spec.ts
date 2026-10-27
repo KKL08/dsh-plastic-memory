@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { assembleSnapshot, estimateTokens, COLD_START_TEXT, escapePromptBraces, PROMPT_LBRACE_VARIABLE, MEMORY_AS_DATA_NOTE } from '../src/snapshot.ts'
+import { assembleSnapshot, estimateTokens, COLD_START_TEXT, coldStartUnparseableText, escapePromptBraces, PROMPT_LBRACE_VARIABLE, MEMORY_AS_DATA_NOTE, COMPACTION_ENGINE_NOTE } from '../src/snapshot.ts'
 import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
@@ -339,6 +339,66 @@ describe('票 17 索引与引导', () => {
   })
 })
 
+// 标题正下方给压缩引擎的附注：摘要模型生成 checkpoint 时跳过记忆条目，快照压缩后会按最新状态重新注入。
+describe('快照标题下的压缩引擎附注', () => {
+  const base = { registry, workspacePath: undefined, budget: 4000, now: 10 * DAY }
+  const core = record({ id: 'mem_core', type: 'preference', content: '不要 mock 数据库' })
+
+  it('结构：首行标题，第二块是附注引用块，其后空一行接第一条条目', () => {
+    const { text } = assembleSnapshot({ ...base, records: [core] })
+    const blocks = text.split('\n\n')
+    expect(text.split('\n')[0]).toBe('# 长期记忆')
+    expect(blocks[0]).toBe('# 长期记忆')
+    expect(blocks[1]).toMatch(/^> \*\*给 compaction engine\*\*/)
+    expect(blocks[1]).toBe(`> ${COMPACTION_ENGINE_NOTE}`)
+    expect(blocks[2]).toMatch(/^- \[mem_core\]/)
+  })
+
+  it('关键词锁定：点名 compaction engine 与 <compacted-summary>，以「记忆是背景资料」为界，保留记忆操作；不出现产品名', () => {
+    expect(COMPACTION_ENGINE_NOTE).toContain('compaction engine')
+    expect(COMPACTION_ENGINE_NOTE).toContain('<compacted-summary>')
+    expect(COMPACTION_ENGINE_NOTE).toContain('「记忆是背景资料」')
+    expect(COMPACTION_ENGINE_NOTE).toContain('新增、删除、提升、确认')
+    expect(COMPACTION_ENGINE_NOTE).not.toMatch(/plastic/i)
+    expect(MEMORY_AS_DATA_NOTE.startsWith('记忆是背景资料')).toBe(true) // 附注划的界必须对得上尾注开头
+  })
+
+  it('附注明说不要抄录、转述或概括条目；尾注告诉对话模型 <compacted-summary> 里的记忆内容与这里不一致时以这里为准', () => {
+    // 真机上摘要没抄 id 和原文，但把条目里的约定转述进了 Critical Context，所以把转述、概括也点名禁掉
+    expect(COMPACTION_ENGINE_NOTE).toMatch(/抄录、转述或概括/)
+    // 压缩后的 checkpoint 对对话模型可见（<compacted-summary> 包着），摘要里残留的记忆内容可能过时，由尾注定优先级
+    expect(MEMORY_AS_DATA_NOTE).toContain('<compacted-summary>')
+    expect(MEMORY_AS_DATA_NOTE).toMatch(/以这里为准/)
+  })
+
+  it('尾注还要盖住「摘要里有、这里没有」：那不是不一致，是已删除或已改写，模型不该把它当现存记忆', () => {
+    // 「不一致以这里为准」只管两边都有的条目；用户删掉的记忆在摘要里还可能留着转述，得明说它已不存在
+    expect(MEMORY_AS_DATA_NOTE).toMatch(/这里没有的记忆[^。；]*已删除/)
+  })
+
+  it('用量口径：附注只进 tokens.fixed，usedTokens 不计；core 区预算恰好够标题 + 一条 core 时仍装得下', () => {
+    const line = '- [mem_core]【记忆·行为偏好】不要 mock 数据库'
+    const used = estimateTokens('# 长期记忆') + estimateTokens(line)
+    // core 区占预算一半：预算取两倍，core 区上限恰好等于标题 + 这一行
+    const r = assembleSnapshot({ ...base, records: [core], budget: 2 * used, overflow: 'strict' })
+    expect(r.injectedIds).toEqual(['mem_core'])
+    expect(r.usedTokens).toBe(used)
+    // 块：标题、附注、core 行、全文引导、固定尾注；fixed 扣掉附注后等于没有附注时的口径（标题 + 两段尾注）
+    const blocks = r.text.split('\n\n')
+    expect(blocks[2]).toBe(line)
+    const noteTokens = estimateTokens(`> ${COMPACTION_ENGINE_NOTE}`)
+    expect(r.tokens.fixed - noteTokens).toBe(estimateTokens('# 长期记忆') + estimateTokens(blocks[3]) + estimateTokens(blocks[4]))
+    expect(r.tokens.workspace + r.tokens.global).toBe(estimateTokens(line))
+  })
+
+  it('冷启动两种文案不带附注', () => {
+    expect(COLD_START_TEXT).not.toContain('compaction engine')
+    expect(coldStartUnparseableText(2)).not.toContain('compaction engine')
+    expect(assembleSnapshot({ ...base, records: [] }).text).toBe(COLD_START_TEXT)
+    expect(assembleSnapshot({ ...base, records: [], quarantinedCount: 2 }).text).toBe(coldStartUnparseableText(2))
+  })
+})
+
 describe('escapePromptBraces', () => {
   const LB = `{{${PROMPT_LBRACE_VARIABLE}}}`
 
@@ -377,6 +437,7 @@ describe('escapePromptBraces × 宿主 renderContextSections 往返', () => {
     'a }} b }}',
     '{{a}} 和 {{ b }} 还有 {{',
     `字面变量 {{${PROMPT_LBRACE_VARIABLE}}} 不能被还原两次`,
+    `# 长期记忆\n\n> ${COMPACTION_ENGINE_NOTE}\n\n- [mem_x]【记忆·行为偏好】正文`, // 附注的 >、**、尖括号不参与插值
   ]
   for (const input of inputs) {
     it(`往返无损：${JSON.stringify(input)}`, () => {

@@ -32,7 +32,9 @@ export async function prereadSnapshot(store: MemoryStore, workspacePath: string 
  * 构建只发生在 assemble（system-prompt/assemble 中间件调用，异步）：等 workspace 解析落定或超时 →
  * 缓存缺失或已过期则预读可见记录、组装、冻结 → 首次冻结计一次召回 → 维护点（global + 当前 workspace）。同步的 render（context provider）
  * 只回缓存，没有缓存回空串；冷启动文案由组装在可见集合为空时产出，provider 不兜底。
- * compaction 结束只标过期（markStale）不清空：宿主只调同步 provider 的 admission refresh 拿到上一份快照。
+ * compaction 结束只标过期（markStale）不清空。压缩在 pre-step 里发生时，index.ts 的 pre-step / request-error 监听
+ * 在 next() 之后把重建等完，宿主准入时的同步 provider 已回新快照；两次组装之间若仍有只调 provider 的刷新，
+ * 拿到的是上一份、不是空串（并发代次与 HMR 窗口都靠不清空）。
  * workspacePath 走 pull + memoize：render 发现某 session 未解析时触发一次 fire-and-forget 解析
  * （同 session 去重），HMR 后存量 session 也能自愈；session/created 只做 eager 预热（prewarm）。
  * 已知窗口：HMR 后存量 session 缓存为空，首次 provider 回空串，首次中间件补上。
