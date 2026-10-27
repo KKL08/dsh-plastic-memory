@@ -15,7 +15,7 @@ import { Chip } from '../ui/Chip.tsx'
 import { ConflictRuling, VerticalConflictRuling } from '../ui/ConflictRuling.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { StatusMarker } from '../ui/StatusMarker.tsx'
-import { ActionFeedback, SecretDeleteConfirm, useItemAction, type EditCommand, type ItemAction } from './action.tsx'
+import { ActionFeedback, DeleteWithConfirm, SecretDeleteConfirm, useItemAction, type EditCommand, type ItemAction } from './action.tsx'
 import { EditPanel, type EditDraft } from './edit.tsx'
 import { ModelEditPanel } from './model-edit.tsx'
 import { MovePanel } from './move.tsx'
@@ -403,7 +403,7 @@ function charsBefore(memories: readonly MemoryCardData[], command: EditCommand):
 }
 
 /**
- * 建议整理卡：不着色、不带状态标记。删除走 forget（进最近删除），含密钥时原位改问彻底删除；
+ * 建议整理卡：不着色、不带状态标记。删除先原位确认「删除这条？ 删除 · 取消」，再走 forget（进最近删除），含密钥时原位改问彻底删除；
  * 提升为全局按记忆 id 发 promote-memory，结果和提升候选一样可撤销；移到项目在卡片里选好项目再发 move-memory，同样可撤销。
  * 直接改在卡片里换出编辑框，保存发 edit-memory，同样可撤销；
  * 让模型改在卡片里展开生成与对照，应用同样发 edit-memory。借来的会话拿不到模型时，面板里写原因、「生成修改」置灰。
@@ -443,7 +443,13 @@ export function AdviceCard(props: CardProps<'advice'> & {
     const open = () => { void gateway.openPath(memory.filePath, 'open').then((ok) => { if (!ok) action.fail(t('pending.openFailed')) }) }
     return {
       confirm: <Button key="confirm" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'confirm', memoryId: memory.id, layer }) }}>{t('pending.advice.confirm')}</Button>,
-      delete: <Button key="delete" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'forget', memoryId: memory.id, layer }) }}>{deleteLabel}</Button>,
+      delete: (
+        <DeleteWithConfirm
+          key="delete"
+          onDelete={() => { action.run({ cmd: 'forget', memoryId: memory.id, layer }) }}
+          trigger={open => <Button unavailable={action.unavailable} onClick={open}>{deleteLabel}</Button>}
+        />
+      ),
       promote: <Button key="promote" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'promote-memory', memoryId: memory.id, layer }) }}>{t('pending.promote.global')}</Button>,
       move: <Button key="move" unavailable={action.unavailable} onClick={() => { setMoving(true) }}>{t('pending.move.move')}</Button>,
       open: <Button key="open" variant="ghost" onClick={open}>{t('pending.advice.open')}</Button>,

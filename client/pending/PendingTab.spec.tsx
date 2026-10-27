@@ -653,6 +653,8 @@ describe('待处理：建议整理', () => {
   const layer = { kind: 'workspace', workspacePath: '/w/app' } as const
   const groupOf = () => screen.getByRole('region', { name: /^建议整理/ })
   const cardOf = (title: string) => screen.getByRole('heading', { level: 3, name: title }).closest('article')!
+  /** 原位确认里的「删除」。 */
+  const confirmIn = (scope: HTMLElement) => within(within(scope).getByRole('group', { name: '删除这条？' })).getByRole('button', { name: '删除' })
 
   it('建议整理组排在最后，组名带条数；卡片不着色、不带状态标记', () => {
     setup([secret, horizontal, expired, stale, bloat, orphan])
@@ -735,6 +737,8 @@ describe('待处理：建议整理', () => {
     await act(async () => { fireEvent.click(within(right).getByRole('button', { name: '打开文件' })) })
     expect(gateway.opened).toEqual([{ path: '/m/app/r2.md' }])
     fireEvent.click(within(right).getByRole('button', { name: '删除右边' }))
+    expect(commands()).toEqual([])
+    fireEvent.click(confirmIn(right))
     await screen.findByText('已删除')
     expect(commands()).toEqual([{ cmd: 'forget', memoryId: 'r2', layer }])
   })
@@ -744,7 +748,9 @@ describe('待处理：建议整理', () => {
     const card = cardOf('内容重复')
     expect(screen.getByText('这几条说的是同一件事，留一条就够。删掉的 14 天内可在「最近删除」恢复。')).toBeInTheDocument()
     expect(within(card).getAllByRole('button').map(b => b.textContent)).toEqual(['忽略', '删除', '打开文件', '删除', '打开文件', '删除', '打开文件'])
-    fireEvent.click(within(within(card).getByRole('region', { name: '第三条' })).getByRole('button', { name: '删除' }))
+    const third = within(card).getByRole('region', { name: '第三条' })
+    fireEvent.click(within(third).getByRole('button', { name: '删除' }))
+    fireEvent.click(confirmIn(third))
     await screen.findByText('已删除')
     expect(commands()).toEqual([{ cmd: 'forget', memoryId: 'r3', layer }])
   })
@@ -756,6 +762,7 @@ describe('待处理：建议整理', () => {
         : { ok: true, cmd: command.cmd, memoryIds: ['r1'] },
     })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除左边' })) })
+    await act(async () => { fireEvent.click(confirmIn(cardOf('内容重复'))) })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '彻底删除' })) })
     await screen.findByText('已彻底删除')
     expect(commands()).toEqual([{ cmd: 'forget', memoryId: 'r1', layer }, { cmd: 'hard-delete', memoryId: 'r1', layer }])
@@ -783,9 +790,11 @@ describe('待处理：建议整理', () => {
     expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
   })
 
-  it('「删除」发 forget（带层），结果写可在最近删除恢复', async () => {
+  it('「删除」先原位确认，点确认里的「删除」才发 forget（带层），结果写可在最近删除恢复', async () => {
     const { commands } = setup([expired])
     fireEvent.click(screen.getByRole('button', { name: '删除' }))
+    expect(commands()).toEqual([])
+    fireEvent.click(confirmIn(cardOf('已过有效期')))
     await screen.findByText('已删除')
     expect(commands()).toEqual([{ cmd: 'forget', memoryId: 'e1', layer }])
     expect(screen.getByText('14 天内可在「最近删除」恢复。')).toBeInTheDocument()
@@ -798,6 +807,7 @@ describe('待处理：建议整理', () => {
         : { ok: true, cmd: command.cmd, memoryIds: ['s1'] },
     })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除' })) })
+    await act(async () => { fireEvent.click(confirmIn(cardOf('很久没确认'))) })
     const card = cardOf('很久没确认')
     expect(within(card).getByText('这条记忆里有密钥')).toBeInTheDocument()
     expect(within(card).getByText('彻底删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeInTheDocument()
@@ -807,6 +817,7 @@ describe('待处理：建议整理', () => {
     expect(within(card).queryByText('这条记忆里有密钥')).toBeNull()
 
     await act(async () => { fireEvent.click(within(card).getByRole('button', { name: '删除' })) })
+    await act(async () => { fireEvent.click(confirmIn(card)) })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '彻底删除' })) })
     await screen.findByText('已彻底删除')
     expect(commands()).toEqual([
@@ -814,6 +825,28 @@ describe('待处理：建议整理', () => {
       { cmd: 'forget', memoryId: 's1', layer },
       { cmd: 'hard-delete', memoryId: 's1', layer },
     ])
+  })
+
+  it('建议卡的删除（单条「删除」、成对的「删除左边 / 删除右边」）：第一下不发命令，原位换成「删除这条？ 删除 · 取消」；「取消」、Esc 都收起，什么都不发', async () => {
+    const { commands } = setup([expired, pair])
+    const cases = [
+      { scope: cardOf('已过有效期'), name: '删除' },
+      { scope: within(cardOf('内容重复')).getByRole('region', { name: '左边这条' }), name: '删除左边' },
+      { scope: within(cardOf('内容重复')).getByRole('region', { name: '右边这条' }), name: '删除右边' },
+    ]
+    for (const { scope, name } of cases) {
+      fireEvent.click(within(scope).getByRole('button', { name }))
+      const confirm = within(within(scope).getByRole('group', { name: '删除这条？' }))
+      expect(confirm.getAllByRole('button').map(b => b.textContent)).toEqual(['删除', '取消'])
+      expect(confirm.getByRole('button', { name: '取消' })).toHaveFocus()
+      fireEvent.click(confirm.getByRole('button', { name: '取消' }))
+      expect(within(scope).queryByRole('group', { name: '删除这条？' })).toBeNull()
+      fireEvent.click(within(scope).getByRole('button', { name }))
+      fireEvent.keyDown(within(scope).getByRole('button', { name: '取消' }), { key: 'Escape' })
+      expect(within(scope).queryByRole('group', { name: '删除这条？' })).toBeNull()
+      expect(within(scope).getByRole('button', { name })).toBeInTheDocument()
+    }
+    expect(commands()).toEqual([])
   })
 
   it('「打开文件」打开这条记忆的文件；打不开时卡片里说明', async () => {

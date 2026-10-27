@@ -160,7 +160,7 @@ export function SecretDeleteConfirm({ onCancel, onConfirm, unavailable, showTitl
 }
 
 /**
- * 普通删除（软删）的原位确认：对话交付卡、右侧栏、记忆查看里，删除按钮的位置换成「删除这条？ 删除 · 取消」，点「删除」才删。
+ * 普通删除（软删）的原位确认：对话交付卡、右侧栏、记忆查看、待处理的建议整理卡里，删除按钮的位置换成「删除这条？ 删除 · 取消」，点「删除」才删。
  * 删了还能撤销或去最近删除找回，所以不展开确认块、不用危险样式。取消、Esc、焦点移到这一组以外的控件、在这一组以外按下指针
  * 都收起，什么都不发。焦点没落到任何控件上不算移出：Safari 等点按钮时不给按钮焦点，「取消」会先失焦到页面上，
  * 这时收起就点不到「删除」了；切到别的应用也是这样。「取消」排在最后，落在原来按钮的位置上，连点两下也删不掉；焦点进来时也停在它上面。
@@ -216,7 +216,7 @@ export function DeleteWithConfirm({ trigger, onDelete }: { trigger: (open: () =>
   return <SoftDeleteConfirm onCancel={() => { setOpen(false) }} onConfirm={() => { setOpen(false); onDelete() }} />
 }
 
-/** CrossConfirm 的样式；待处理卡的说明文字和按钮组也用这两个类。软删确认（SoftDeleteConfirm）的样式也在这里，三处共用。 */
+/** CrossConfirm 的样式；待处理卡的说明文字和按钮组也用这两个类。软删确认（SoftDeleteConfirm）的样式也在这里，各处共用。 */
 export const crossConfirmCss = `
 .pm-pending-text { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-pending-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
