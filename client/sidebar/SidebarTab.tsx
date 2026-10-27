@@ -410,7 +410,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
           <p className="pm-side-footer">
             {restPending > 0
               ? t('sidebar.footer.pending', { n: formatNumber(restPending) })
-              : t('sidebar.footer.count', { n: formatNumber(projectCount) })}
+              : t(projectCount === 1 ? 'sidebar.footer.count.one' : 'sidebar.footer.count', { n: formatNumber(projectCount) })}
             <i className="pm-sep" aria-hidden="true">·</i>
             <button
               type="button"

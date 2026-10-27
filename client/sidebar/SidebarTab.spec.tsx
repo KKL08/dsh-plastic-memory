@@ -1,6 +1,6 @@
 // 右侧栏「记忆」tab：四种状态、用量条口径与两种超限、就地裁决与撤销、新记的实时增加、底部入口跳转。全部对内存假网关。
 import { describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import {
   GUI_VIEW_VERSION,
   type HealthView, type LibraryView, type MemoryCard, type PendingItem, type PendingView, type SessionView,
@@ -9,6 +9,9 @@ import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { createNavStore, openMemoryPage, PANEL_ID } from '../nav.ts'
 import { memory, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { SidebarTab } from './SidebarTab.tsx'
+import { createTranslator } from '../i18n.tsx'
+import { en } from '../locales.ts'
+import { PanelShell } from '../ui/PanelShell.tsx'
 
 const WS = '/w/app'
 /** 插件本次加载时刻（健康视图的 bootedAt）。 */
@@ -313,6 +316,26 @@ describe('SidebarTab 这次新写入的', () => {
     expect(saved.queryByText('报销截止每月 25 日。')).toBeNull()
     expect(saved.getByText('已彻底删除。如果它是真的凭证，记得去换一个新的。')).toBeInTheDocument()
     expect(screen.queryByText(/14 天/)).toBeNull()
+  })
+})
+
+describe('SidebarTab 英文单复数', () => {
+  it('本项目只有 1 条、只带入 1 条时用单数，多条用复数', () => {
+    const gateway = createFakeGateway({ views: { health: health(), library: library(pref, glob), session: snapshot({ injectedIds: ['p1'] }), pending: pending() } })
+    const { unmount } = render(<PanelShell gateway={gateway} t={createTranslator(en)}><SidebarTab sessionId="s1" workspacePath={WS} openPage={vi.fn()} /></PanelShell>)
+    expect(screen.getByText(/^1 memory in this project/)).toBeInTheDocument()
+    expect(screen.getByText(/^1 memory · ~/)).toBeInTheDocument()
+    unmount()
+    const many = createFakeGateway({ views: { health: health(), library: library(pref, proj, glob), session: snapshot(), pending: pending() } })
+    render(<PanelShell gateway={many} t={createTranslator(en)}><SidebarTab sessionId="s1" workspacePath={WS} openPage={vi.fn()} /></PanelShell>)
+    expect(screen.getByText(/^2 memories in this project/)).toBeInTheDocument()
+    expect(screen.getByText(/^3 memories · ~/)).toBeInTheDocument()
+  })
+
+  it('中文：1 条也照旧', () => {
+    setup({ library: library(pref, glob), session: snapshot({ injectedIds: ['p1'] }), pending: pending() })
+    expect(screen.getByText(/^本项目 1 条记忆/)).toBeInTheDocument()
+    expect(screen.getByText(/^1 条 · 约/)).toBeInTheDocument()
   })
 })
 

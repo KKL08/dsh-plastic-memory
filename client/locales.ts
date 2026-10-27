@@ -71,6 +71,7 @@ export const zh = {
   'conflict.vertical.consequence': '以基线为准会删掉这条记忆，14 天内可恢复。保留这条记忆：基线和记忆都不变时不再报。',
 
   'budget.summary': '{count} 条 · 约 {used} / {budget}',
+  'budget.summary.one': '{count} 条 · 约 {used} / {budget}',
   // 图例与输入框弹层明细共用：色块 + 名称 + 数字；固定说明只剩不计上限的导航图与尾注，标题单列
   'budget.part.workspace': '本项目',
   'budget.part.global': '全局',
@@ -159,6 +160,7 @@ export const en: Record<LocaleKey, string> = {
   'conflict.vertical.consequence': 'Going with the baseline deletes this memory; it can be restored within 14 days. Keep this memory: not reported again while neither changes.',
 
   'budget.summary': '{count} memories · ~{used} / {budget}',
+  'budget.summary.one': '{count} memory · ~{used} / {budget}',
   'budget.part.workspace': 'This project',
   'budget.part.global': 'Global',
   'budget.part.headings': 'Headings',

@@ -82,6 +82,24 @@ describe('折叠行：对齐宿主通用工具行，只换摘要', () => {
     expect(rowSummary(result('memory_scan', {}, '拿不到模型\n详情', true))).toBe('拿不到模型')
   })
 
+  it('英文按单复数：删 1 条、体检 1 个项目用单数，中文不变', () => {
+    const enSummary = (props: MemoryToolViewProps) => {
+      const { container, unmount } = render(<PanelShell gateway={createFakeGateway()} t={createTranslator(en)}><MemoryToolRow {...props} hostT={hostT} /></PanelShell>)
+      const text = container.querySelector('.pm-tr-summary')?.textContent ?? ''
+      unmount()
+      return text
+    }
+    const forgetRunning = (ids: string[]): MemoryToolViewProps => ({ toolName: 'memory_forget', useDisclosure: disclosure(), phase: 'start', block: { argsRaw: JSON.stringify({ ids, reason: 'x' }) } })
+    expect(enSummary(forgetRunning(['mem_1']))).toBe('Deleting 1 memory')
+    expect(enSummary(forgetRunning(['mem_1', 'mem_2']))).toBe('Deleting 2 memories')
+    expect(enSummary(result('memory_forget', { ids: ['mem_1'], reason: 'x' }, '已遗忘 1 条记忆。'))).toBe('Deleted 1 memory')
+    expect(enSummary(result('memory_forget', { ids: ['mem_1', 'mem_2'], reason: 'x' }, '已遗忘 2 条记忆。'))).toBe('Deleted 2 memories')
+    expect(enSummary(result('memory_scan', { scopes: ['/w/a'] }, 'ok'))).toMatch(/ 1 project$/)
+    expect(enSummary(result('memory_scan', { scopes: ['/w/a', '/w/b'] }, 'ok'))).toMatch(/ 2 projects$/)
+    expect(rowSummary(result('memory_forget', { ids: ['mem_1'], reason: 'x' }, '已遗忘 1 条记忆。'))).toBe('已删除 1 条记忆')
+    expect(rowSummary(result('memory_scan', { scopes: ['/w/a'] }, 'ok'))).toBe('体检 1 个项目')
+  })
+
   it('点开后是宿主的输入 / 输出块', () => {
     let expanded = false
     const props: MemoryToolViewProps = { ...result('memory_save', saveArgs, SAVED_TEXT), useDisclosure: () => ({ expanded, toggle: () => { expanded = !expanded } }) }

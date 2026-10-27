@@ -32,6 +32,7 @@ export const sidebarZh = {
   'sidebar.footer.pending': '本项目还有 {n} 处待处理',
   'sidebar.footer.pendingLink': '在记忆页处理 ›',
   'sidebar.footer.count': '本项目 {n} 条记忆',
+  'sidebar.footer.count.one': '本项目 {n} 条记忆',
   'sidebar.footer.countLink': '在记忆页查看 ›',
 
   'sidebar.ruled.keepA': '已按 A',
@@ -89,6 +90,7 @@ export const sidebarEn: Record<keyof typeof sidebarZh, string> = {
   'sidebar.footer.pending': '{n} more pending in this project',
   'sidebar.footer.pendingLink': 'Handle on the Memory page ›',
   'sidebar.footer.count': '{n} memories in this project',
+  'sidebar.footer.count.one': '{n} memory in this project',
   'sidebar.footer.countLink': 'View on the Memory page ›',
 
   'sidebar.ruled.keepA': 'Went with A',

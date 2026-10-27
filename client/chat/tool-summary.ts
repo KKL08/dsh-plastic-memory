@@ -91,7 +91,7 @@ export function savedMemoryCard(args: Args | undefined, resultText: string, time
 
 function scopeSummary(args: Args): Summary {
   const scopes = list(args.scopes).filter(s => typeof s === 'string')
-  if (scopes.length > 0) return { key: 'chat.scope.paths', params: { count: scopes.length } }
+  if (scopes.length > 0) return { key: scopes.length === 1 ? 'chat.scope.paths.one' : 'chat.scope.paths', params: { count: scopes.length } }
   const scope = str(args.scope)
   if (scope === '') return { key: 'chat.scope.workspace' }
   if (scope === 'all') return { key: 'chat.scope.all' }
@@ -118,9 +118,12 @@ export function toolSummary(toolName: MemoryToolName, args: Args | undefined, re
       return count === 0 ? { key: 'chat.tool.search.none', params: { query } } : { key: 'chat.tool.search.found', params: { count, query } }
     }
     case 'memory_forget': {
-      if (resultText === null) return { key: 'chat.tool.forget.running', params: { count: list(args.ids).length } }
+      if (resultText === null) {
+        const ids = list(args.ids).length
+        return { key: ids === 1 ? 'chat.tool.forget.running.one' : 'chat.tool.forget.running', params: { count: ids } }
+      }
       const count = forgottenCount(resultText)
-      return count === 0 ? { key: 'chat.tool.forget.none' } : { key: 'chat.tool.forget.done', params: { count } }
+      return count === 0 ? { key: 'chat.tool.forget.none' } : { key: count === 1 ? 'chat.tool.forget.done.one' : 'chat.tool.forget.done', params: { count } }
     }
     case 'memory_snapshot': {
       const action = str(args.action)

@@ -94,7 +94,7 @@ export function ContextBudgetBar({ count, budget, tokens, usedTokens, droppedCou
   return (
     <div className="pm-budget">
       <div className="pm-budget-summary">
-        {t('budget.summary', { count: formatNumber(count), used: formatNumber(parts.counted), budget: formatNumber(budget) })}
+        {t(count === 1 ? 'budget.summary.one' : 'budget.summary', { count: formatNumber(count), used: formatNumber(parts.counted), budget: formatNumber(budget) })}
       </div>
       <div
         className="pm-budget-bar"
