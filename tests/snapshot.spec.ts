@@ -371,6 +371,11 @@ describe('快照标题下的压缩引擎附注', () => {
     expect(MEMORY_AS_DATA_NOTE).toMatch(/以这里为准/)
   })
 
+  it('尾注还要盖住「摘要里有、这里没有」：那不是不一致，是已删除或已改写，模型不该把它当现存记忆', () => {
+    // 「不一致以这里为准」只管两边都有的条目；用户删掉的记忆在摘要里还可能留着转述，得明说它已不存在
+    expect(MEMORY_AS_DATA_NOTE).toMatch(/这里没有的记忆[^。；]*已删除/)
+  })
+
   it('用量口径：附注只进 tokens.fixed，usedTokens 不计；core 区预算恰好够标题 + 一条 core 时仍装得下', () => {
     const line = '- [mem_core]【记忆·行为偏好】不要 mock 数据库'
     const used = estimateTokens('# 长期记忆') + estimateTokens(line)
