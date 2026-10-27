@@ -132,6 +132,8 @@ describe('memory_search 绑定', () => {
     expect(d.startsWith('查长期记忆用这个工具：想知道某件事有没有记过、记的是什么，或按 id 取一条。\n范围是本项目和全局记忆。')).toBe(true)
     expect(d).toContain('代码和项目文件用 grep 搜；记忆目录不要用 grep 搜：那里还存着已删除和其他项目的记忆')
     expect(d).toContain('\n怎么写关键词：\n- 写 2 到 4 个实词。版本号、路径这类原样文字可以直接搜。\n')
+    expect(d).toContain('\n- 优先用开头记忆索引里出现过的说法；用户的说法和索引对不上时，先用你推测的记忆写法搜；命中弱再换用户原话的词搜一次。\n')
+    expect(d).not.toContain('一起带上')
     expect(d).toContain('- 每个术语只写一种写法，用记忆里最可能出现的那种；同一术语的中文和英文写法不要放进同一次查询。\n\n怎么读结果：\n')
     expect(d).not.toContain('/ 连')
     expect(d).toContain('换个角度再搜一次')
