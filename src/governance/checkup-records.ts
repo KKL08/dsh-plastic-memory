@@ -2,6 +2,7 @@ import { isAbsolute } from 'node:path'
 import type { CasKvTable } from '../kv-table.ts'
 import type { CheckupCompletion, CheckupRecord } from '../storage/schema.ts'
 import type { LayerRef } from './layer-health.ts'
+import { SCOPE_KEYS } from '../gui/contract.ts'
 
 /**
  * 体检记录表：每个范围一条，记这个范围最近一次做完的体检（完成记录），即「上次体检」。
@@ -10,11 +11,9 @@ import type { LayerRef } from './layer-health.ts'
  * 表由接线层注入（storage/sidecar.ts 的 checkups），和缓存、忽略表同一种做法。
  */
 
-const GLOBAL_KEY = 'global'
-
 /** 范围键：全局为 `global`，项目为它的绝对路径。 */
 export function checkupKey(layer: LayerRef): string {
-  return layer.kind === 'global' ? GLOBAL_KEY : layer.path
+  return layer.kind === 'global' ? SCOPE_KEYS.global : layer.path
 }
 
 export class CheckupRecordStore {

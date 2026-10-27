@@ -13,15 +13,16 @@ import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
 import { CheckupRecordStore, checkupKey } from '../src/governance/checkup-records.ts'
+import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
 import { REDACTED_PLACEHOLDER, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type PendingDecision } from '../src/governance/schema.ts'
 import type { ClaimKvTable } from '../src/kv-table.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
-import { ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
+import { ViewWriter, collectCheckupView, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../src/gui/commands.ts'
 import {
-  GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, encodeMemoryCommand, sessionViewFile,
-  deletedViewSchema, healthViewSchema, layerOfMemory, libraryViewSchema, memoryCommandResultSchema, pendingViewSchema,
+  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, encodeMemoryCommand, sessionViewFile,
+  checkupViewSchema, deletedViewSchema, healthViewSchema, layerOfMemory, libraryViewSchema, memoryCommandResultSchema, pendingViewSchema,
   type MemoryCommand, type MemoryCommandResult, type PendingItem,
 } from '../src/gui/contract.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
@@ -55,7 +56,7 @@ interface EnvOpts {
   /** 体检开关；缺省视为开启。 */
   governanceEnabled?: boolean
   /** 包一层视图写入器（模拟收集、写入出错）。 */
-  wrapViews?: (writer: ViewWriter) => Pick<ViewWriter, 'request' | 'rewriteAll' | 'collectViews'>
+  wrapViews?: (writer: ViewWriter) => Pick<ViewWriter, 'request' | 'rewriteAll' | 'collectViews' | 'requestCheckups'>
   log?: MemoryLogger
 }
 
@@ -68,9 +69,17 @@ function env(opts: EnvOpts = {}) {
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const cache = sidecar.scanCache
   const checkups = new CheckupRecordStore(sidecar.checkups)
-  const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, snapshots, cache, checkups, registry, memoryRoot: root, now: () => clock.now }) })
+  const autoCheckups = new AutoCheckupSettingStore(sidecar.autoCheckups)
+  const views = new ViewWriter({
+    memoryRoot: root,
+    collect: () => collectGlobalViews({ store, decisions, snapshots, cache, checkups, autoCheckups, registry, memoryRoot: root, now: () => clock.now }),
+    collectCheckups: () => collectCheckupView({ store, checkups, autoCheckups, cache, now: () => clock.now, ...(opts.governanceEnabled !== undefined ? { isGovernanceEnabled: () => opts.governanceEnabled! } : {}) }),
+  })
+  // 本进程调度器收到的「设置改了」通知次数
+  const autoCheckupChanges = { count: 0 }
   const command = createMemoryCommand({
-    memoryRoot: root, store, decisions, snapshots, cache, checkups, ignores: new AdviceIgnoreStore(sidecar.adviceIgnores), registry, views: opts.wrapViews?.(views) ?? views,
+    memoryRoot: root, store, decisions, snapshots, cache, checkups, autoCheckups, ignores: new AdviceIgnoreStore(sidecar.adviceIgnores), registry, views: opts.wrapViews?.(views) ?? views,
+    onAutoCheckupChanged: () => { autoCheckupChanges.count++ },
     ...(opts.log !== undefined ? { log: opts.log } : {}),
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),
     resolveContext: async () => ({ workspacePath: 'workspacePath' in opts ? opts.workspacePath : SESSION_WS, delegationDepth: opts.delegationDepth ?? 0, session: { id: 'sess-1' } }),
@@ -89,7 +98,8 @@ function env(opts: EnvOpts = {}) {
   }
   const run = (c: MemoryCommand) => runRaw(encodeMemoryCommand(c).slice(`/${MEMORY_COMMAND_NAME}`.length))
   const readView = async (name: keyof typeof GUI_VIEW_FILES) => JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES[name]), 'utf8')) as unknown
-  return { store, decisions, snapshots, cache, checkups, stats: sidecar.recallStats, command, run, runRaw, readView, clock }
+  const readCheckupView = async () => checkupViewSchema.parse(JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_CHECKUP_VIEW_FILE), 'utf8')))
+  return { store, decisions, snapshots, cache, checkups, autoCheckups, autoCheckupChanges, stats: sidecar.recallStats, command, run, runRaw, readView, readCheckupView, clock }
 }
 
 type Ok = Extract<MemoryCommandResult, { ok: true }>
@@ -134,6 +144,7 @@ describe('info', () => {
       views: {
         pending: join(dir, GUI_VIEW_FILES.pending), health: join(dir, GUI_VIEW_FILES.health),
         library: join(dir, GUI_VIEW_FILES.library), deleted: join(dir, GUI_VIEW_FILES.deleted),
+        checkups: join(dir, GUI_CHECKUP_VIEW_FILE),
         session: join(dir, sessionViewFile('sess-1')),
       },
       version: GUI_VIEW_VERSION,
@@ -1904,7 +1915,7 @@ describe('scan', () => {
       const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
       const e = env({
         llm: answering(() => [conflict]), log,
-        wrapViews: w => ({ request: () => w.request(), rewriteAll: () => w.rewriteAll(), collectViews: () => Promise.reject(new Error('读不出')) }),
+        wrapViews: w => ({ request: () => w.request(), rewriteAll: () => w.rewriteAll(), requestCheckups: () => w.requestCheckups(), collectViews: () => Promise.reject(new Error('读不出')) }),
       })
       await seedFour(e)
       const body = ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
@@ -1923,6 +1934,7 @@ describe('scan', () => {
         wrapViews: w => ({
           request: () => w.request(),
           rewriteAll: async () => undefined,
+          requestCheckups: () => w.requestCheckups(),
           collectViews: () => (++collects === 1 ? w.collectViews() : Promise.reject(new Error('读不出'))),
         }),
       })
@@ -2008,6 +2020,25 @@ describe('scan：上次体检与完成记录', () => {
     expect(globalAfter.score).toBe(globalBefore.score)
     expect(globalAfter.lastCheckupAt).toBeNull()
     expect(await lastCheckups(e)).toEqual({ global: null, [SESSION_WS]: NOW + 1000, [OTHER_WS]: null })
+  })
+
+  it('只查全局：只读写全局层，只写全局的缓存与完成记录；结果只给全局的分数', async () => {
+    const seen: string[] = []
+    const e = env({ llm: { complete: async (input) => { seen.push(JSON.stringify(input)); return '{"findings":[]}' } } })
+    await seedLayers(e)
+    const body = ok(await e.run({ cmd: 'scan', layer: { kind: 'global' } }))
+    expect(seen.join('\n')).toContain('mem_g')
+    expect(seen.join('\n')).not.toContain('mem_s')
+    expect((await e.cache.list()).map(([key]) => key)).toEqual([cacheKey(undefined)])
+    expect(await completedOf(e, GLOBAL)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
+    expect(await completedOf(e, SESSION)).toBeUndefined()
+    expect(body.scores!.map(s => s.layer)).toEqual([{ kind: 'global' }])
+    expect(await lastCheckups(e)).toEqual({ global: NOW, [SESSION_WS]: null, [OTHER_WS]: null })
+  })
+
+  it('只查全局与项目路径不能同时给', async () => {
+    const e = env({ llm: quiet })
+    expect(err(await e.run({ cmd: 'scan', layer: { kind: 'global' }, workspacePath: SESSION_WS } as MemoryCommand)).code).toBe('invalid-args')
   })
 
   it('全部体检：全局和每个项目都写完成记录，健康视图里的上次体检都更新', async () => {
@@ -2110,6 +2141,107 @@ describe('scan：上次体检与完成记录', () => {
     await e.checkups.complete([GLOBAL, SESSION, GONE], { startedAt: NOW, completedAt: NOW, by: 'manual' })
     ok(await e.run({ cmd: 'refresh-views' }))
     expect((await e.checkups.list()).map(r => r.id).sort()).toEqual([checkupKey(GLOBAL), checkupKey(SESSION)].sort())
+  })
+})
+
+describe('set-auto-checkup', () => {
+  const ALL = { kind: 'all' as const }
+  const DISCUSSION = { kind: 'workspace' as const, workspacePath: '/work/discussion' }
+  const settings = async (e: ReturnType<typeof env>) => Object.fromEntries(await e.autoCheckups.read())
+
+  it('选具体值写设置表（和默认值相同也写），「跟随」删掉这一条；每次都通知本进程的调度重算', async () => {
+    const e = env()
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 7 }))
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: DISCUSSION, frequency: 7 }))
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: { kind: 'global' }, frequency: 'manual' }))
+    expect(await settings(e)).toEqual({ all: 7, '/work/discussion': 7, global: 'manual' })
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: DISCUSSION, frequency: 'follow' }))
+    expect(await settings(e)).toEqual({ all: 7, global: 'manual' })
+    // 本来就在跟随时再选「跟随」也算成功
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: DISCUSSION, frequency: 'follow' }))
+    expect(e.autoCheckupChanges.count).toBe(5)
+  })
+
+  it('「全部」选仅手动是写一条 manual，不是删掉', async () => {
+    const e = env()
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 'manual' }))
+    expect(await settings(e)).toEqual({ all: 'manual' })
+  })
+
+  it.each([
+    ['「全部」没有可跟随的', ' set-auto-checkup {"scope":{"kind":"all"},"frequency":"follow"}'],
+    ['天数小于 1', ' set-auto-checkup {"scope":{"kind":"all"},"frequency":0}'],
+    ['天数大于 90', ' set-auto-checkup {"scope":{"kind":"global"},"frequency":91}'],
+    ['天数不是整数', ' set-auto-checkup {"scope":{"kind":"global"},"frequency":1.5}'],
+    ['未知取值', ' set-auto-checkup {"scope":{"kind":"global"},"frequency":"daily"}'],
+    ['项目路径不是绝对路径', ' set-auto-checkup {"scope":{"kind":"workspace","workspacePath":"discussion"},"frequency":1}'],
+  ])('%s → invalid-args，设置表不动、不通知调度', async (_label, raw) => {
+    const e = env()
+    expect(err(await e.runRaw(raw)).code).toBe('invalid-args')
+    expect(await settings(e)).toEqual({})
+    expect(e.autoCheckupChanges.count).toBe(0)
+  })
+
+  it('体检开关关着时也能改设置（只是调度不跑），体检视图写明开关关着', async () => {
+    const e = env({ governanceEnabled: false })
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 1 }))
+    expect(await settings(e)).toEqual({ all: 1 })
+    expect((await e.readCheckupView()).governanceEnabled).toBe(false)
+  })
+
+  it('写完立刻重写体检视图（别的全局视图不重写）：按「自动体检情况表」逐行，各范围的有效频率和跟随 / 单独设置', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_g', name: '全局' }))
+    await e.store.create(record({ id: 'mem_d', name: '讨论', scope: 'workspace', workspacePath: '/work/discussion' }))
+    await e.store.create(record({ id: 'mem_o', name: '其他', scope: 'workspace', workspacePath: '/work/other' }))
+    const rows = async () => {
+      const view = await e.readCheckupView()
+      return [view.defaultFrequency, ...view.scopes.map(s => `${s.scope.kind === 'workspace' ? s.scope.workspacePath : 'global'} ${s.frequency}${s.isOwn ? ' 单独' : ''}`)]
+    }
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 'manual' }))
+    expect(await rows()).toEqual(['manual', 'global manual', '/work/discussion manual', '/work/other manual'])
+    await expect(stat(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES.pending))).rejects.toMatchObject({ code: 'ENOENT' })
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 7 }))
+    expect(await rows()).toEqual([7, 'global 7', '/work/discussion 7', '/work/other 7'])
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: DISCUSSION, frequency: 1 }))
+    expect(await rows()).toEqual([7, 'global 7', '/work/discussion 1 单独', '/work/other 7'])
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 'manual' }))
+    expect(await rows()).toEqual(['manual', 'global manual', '/work/discussion 1 单独', '/work/other manual'])
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: DISCUSSION, frequency: 'follow' }))
+    expect(await rows()).toEqual(['manual', 'global manual', '/work/discussion manual', '/work/other manual'])
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 7 }))
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: DISCUSSION, frequency: 7 }))
+    expect(await rows()).toEqual([7, 'global 7', '/work/discussion 7 单独', '/work/other 7'])
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 1 }))
+    expect(await rows()).toEqual([1, 'global 1', '/work/discussion 7 单独', '/work/other 1'])
+    // 新加一个项目：跟随「全部」当前的值；重启插件（新的侧表与写入器实例）后照旧
+    await e.store.create(record({ id: 'mem_n', name: '新', scope: 'workspace', workspacePath: '/work/new' }))
+    ok(await env().run({ cmd: 'refresh-views' }))
+    expect(await rows()).toEqual([1, 'global 1', '/work/discussion 7 单独', '/work/new 1', '/work/other 1'])
+  })
+
+  it('体检视图的上次、下次和到期：按完成记录算；从没体检过的开了自动体检就算到期', async () => {
+    const DAY = 86_400_000
+    const e = env()
+    await e.store.create(record({ id: 'mem_g', name: '全局' }))
+    await e.store.create(record({ id: 'mem_d', name: '讨论', scope: 'workspace', workspacePath: '/work/discussion' }))
+    await e.checkups.complete([{ kind: 'global' }], { startedAt: NOW - 2 * DAY, completedAt: NOW - 2 * DAY, by: 'agent' })
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 3 }))
+    expect((await e.readCheckupView()).scopes).toEqual([
+      { scope: { kind: 'global' }, frequency: 3, isOwn: false, lastCheckupAt: NOW - 2 * DAY, nextCheckupAt: NOW + DAY, isDue: false },
+      { scope: DISCUSSION, frequency: 3, isOwn: false, lastCheckupAt: null, nextCheckupAt: null, isDue: true },
+    ])
+  })
+
+  it('项目目录不在了，它的设置在视图生成时清掉（全部、全局不动）', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_s', scope: 'workspace', workspacePath: SESSION_WS }))
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 7 }))
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: { kind: 'global' }, frequency: 1 }))
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: { kind: 'workspace', workspacePath: SESSION_WS }, frequency: 1 }))
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: { kind: 'workspace', workspacePath: '/tmp/pm-cmd-gone' }, frequency: 1 }))
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect(await settings(e)).toEqual({ all: 7, global: 1, [SESSION_WS]: 1 })
   })
 })
 

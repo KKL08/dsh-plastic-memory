@@ -49,9 +49,11 @@ export interface ScanArgs {
   layers?: 'rule' | 'semantic' | 'full'
 }
 
-/** 不来自工具参数的调用方式：谁发起的（写进完成记录）。缺省是 agent 调 memory_scan。 */
+/** 不来自工具参数的调用方式：谁发起的（写进完成记录），以及「只查全局」。缺省是 agent 调 memory_scan。 */
 export interface ScanRun {
   by?: CheckupInitiator
+  /** 只查全局层：只读写全局层，只写全局的缓存与完成记录；给出时忽略 scope / scopes。 */
+  isGlobalOnly?: boolean
 }
 
 export interface SingleScanResult {
@@ -346,11 +348,11 @@ async function syncPromoteCandidates(
  * memory_scan：只读+报告。副作用仅两处——语义结果写 scan_cache；conflict 与提升候选进 pending_decisions。
  * 清理动作由模型经用户确认后调 forget/save 执行。
  * 默认口径=当前 workspace 的可见集合（global + 本项目）；scope='all' 或 scopes 列表进入
- * 全库体检：逐 workspace 独立扫描计分 + global 层专项（缺口检测、跨层冲突聚合）。
+ * 全库体检：逐 workspace 独立扫描计分 + global 层专项（缺口检测、跨层冲突聚合）。run.isGlobalOnly 只查全局层（记忆页的全局体检）。
  * 提交点：缓存、账本、提升候选都写完之后，给规则检查和内容检查都做完的每一层写完成记录（上次体检）；没走到这一步就不算做完。
  */
 export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: ToolRunContext, run: ScanRun = {}): Promise<ScanToolResult> {
-  const args = rawArgs
+  const args: ScanArgs = run.isGlobalOnly ? (rawArgs.layers !== undefined ? { layers: rawArgs.layers } : {}) : rawArgs
   const layers = args.layers ?? 'full'
   // 用户取消信号（宿主 exec.signal 契约）：每个语义调用透传，各写入前设检查点。
   const signal = exec?.signal
@@ -381,8 +383,8 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     const invalid = validateScopePaths(checkupWorkspaces(listing), currentWs, requested)
     if (invalid !== null) return { kind: 'error', message: invalid }
   }
-  // 单层模式的目标：显式路径 > 当前会话 workspace > global 层（无 workspace 会话）
-  const wsPath = args.scope ?? currentWs
+  // 单层模式的目标：只查全局 > 显式路径 > 当前会话 workspace > global 层（无 workspace 会话）
+  const wsPath = run.isGlobalOnly ? undefined : args.scope ?? currentWs
   // 预读范围：与 memory_health 共用 prereadLayers——目标层（含 .archive/）的全部状态记录、层外引用按 id 定位、
   // 待决账本、语义缓存、按层归档的隔离文件。体检读 global + 所选 workspace；单层读可见集合（global + 本项目）。
   // 扫描输入（active 的可见集合 / 本层集合）从这份预读里筛

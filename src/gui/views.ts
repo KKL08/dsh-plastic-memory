@@ -12,9 +12,10 @@ import { runRuleScan } from '../governance/rule-scan.ts'
 import { byConfidenceThenConfirmed } from '../snapshot.ts'
 import { layerCacheKey, scoreLayer, type LayerPreread, type LayerRef } from '../governance/layer-health.ts'
 import type { IgnoredAdvice } from '../governance/advice-ignores.ts'
+import { autoCheckupDue } from '../governance/auto-checkups.ts'
 import {
-  ADVICE_TYPES, GUI_VIEW_VERSION, PENDING_ITEM_KINDS, PENDING_LEVEL_OF_KIND, PENDING_LEVELS, isAwaitingDecision, layerOfMemory,
-  type AdviceType, type DeletedView, type MemoryPromotion, type GlobalViewName, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCard,
+  ADVICE_TYPES, GUI_VIEW_VERSION, PENDING_ITEM_KINDS, PENDING_LEVEL_OF_KIND, PENDING_LEVELS, isAwaitingDecision, layerOfMemory, resolveAutoCheckup,
+  type AdviceType, type AutoCheckupFrequency, type CheckupView, type DeletedView, type MemoryPromotion, type GlobalViewName, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCard,
   type MemoryCommandResult, type ModelChange, type PendingItem, type PendingLevel, type PendingView, type SessionView,
 } from './contract.ts'
 
@@ -280,6 +281,30 @@ export function buildHealthView(input: ViewInput): HealthView {
         && !input.healthLayers.some(l => l.kind === 'workspace' && l.path === scope))
       .sort()
       .map(path => ({ layer: { kind: 'workspace' as const, workspacePath: path }, overflow: overflowOfLayer(overflow, { kind: 'workspace', path })! })),
+  }
+}
+
+/**
+ * 体检视图：每个范围的有效频率（跟随还是单独设置）、上次体检、下次自动体检、是否到期，外加体检开关。
+ * layers 是全局加体检清单（与健康视图同一批层、同一顺序）；lastCheckupAt 给出每个范围的上次体检。
+ */
+export function buildCheckupView(input: {
+  now: number
+  governanceEnabled: boolean
+  settings: ReadonlyMap<string, AutoCheckupFrequency>
+  layers: readonly LayerRef[]
+  lastCheckupAt: (layer: LayerRef) => number | null
+}): CheckupView {
+  return {
+    version: GUI_VIEW_VERSION,
+    governanceEnabled: input.governanceEnabled,
+    defaultFrequency: resolveAutoCheckup(input.settings, { kind: 'all' }).frequency,
+    scopes: input.layers.map(layer => {
+      const scope = toGuiLayer(layer)
+      const { frequency, isOwn } = resolveAutoCheckup(input.settings, scope)
+      const lastCheckupAt = input.lastCheckupAt(layer)
+      return { scope, frequency, isOwn, lastCheckupAt, ...autoCheckupDue(frequency, lastCheckupAt, input.now) }
+    }),
   }
 }
 

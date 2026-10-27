@@ -15,6 +15,7 @@ import type { PendingDecision, ScanCacheEntry, SnapshotRecord } from '../governa
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
+import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
 import { executeConfirm } from '../tools/confirm.ts'
 import { executeForget } from '../tools/forget.ts'
 import { executePromote } from '../tools/promote.ts'
@@ -24,7 +25,7 @@ import {
   crossWorkspaceNote, gateRecords, isCopyOf, locateCopy, workspaceLabel, type CrossWorkspaceRejection, type GovernanceContext,
 } from '../tools/workspace-gate.ts'
 import {
-  GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, layerOfMemory, mergeKeeperIndex, parseMemoryCommand, sessionViewFile,
+  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, layerOfMemory, mergeKeeperIndex, parseMemoryCommand, sessionViewFile,
   type GuiErrorCode, type GuiLayerRef, type MemoryCommand, type MemoryCommandResult,
 } from './contract.ts'
 import type { ViewWriter } from './view-writer.ts'
@@ -45,11 +46,15 @@ export interface MemoryCommandDeps {
   cache: CasKvTable<ScanCacheEntry>
   /** 体检记录表：scan 做完给覆盖到的范围写完成记录（发起方界面手动）。 */
   checkups: CheckupRecordStore
+  /** 自动体检设置表（set-auto-checkup 写它）。 */
+  autoCheckups: AutoCheckupSettingStore
+  /** set-auto-checkup 写完设置表、重写体检视图后调用：本进程的自动体检调度立刻重算。缺省不通知（没有调度器）。 */
+  onAutoCheckupChanged?: () => void
   /** 建议忽略表（ignore-advice / unignore-advice 写它）。 */
   ignores: AdviceIgnoreStore
   registry: TypeRegistry
   agentsMd: AgentsMdWriter
-  views: Pick<ViewWriter, 'request' | 'rewriteAll' | 'collectViews'>
+  views: Pick<ViewWriter, 'request' | 'rewriteAll' | 'collectViews' | 'requestCheckups'>
   /** 借来的会话 → workspace、子 agent 深度、会话 id（与工具共用接线层的同一个解析函数，exec 只带 agent）。 */
   resolveContext: (exec: ToolRunContext) => Promise<{ workspacePath: string | undefined; delegationDepth: number; session: { id: string } }>
   /** 在借来的会话的 agent 上解析模型；null = 拿不到。 */
@@ -85,6 +90,9 @@ const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve
 
 /** 不写任何东西的子命令：成功后也不重写视图。 */
 const READ_ONLY_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['draft-edit'])
+
+/** 自己写视图的子命令：成功后不再按常规重写全部视图。 */
+const SELF_WRITING_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['scan', 'refresh-views', 'set-auto-checkup'])
 
 /** 改待决项的子命令，先认领条目再执行，同一条同时只跑一个（resolve 由执行器 executeConfirm 自己认领）。 */
 const CLAIMED_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['undo', 'promote', 'keep-local', 'dismiss-overflow'])
@@ -139,8 +147,8 @@ async function run(deps: MemoryCommandDeps, invocation: MemoryCommandInvocation)
   } else {
     result = await dispatch(deps, command, gov, exec, now)
   }
-  // scan / refresh-views 自己做全量重写
-  if (result.ok && command.cmd !== 'scan' && command.cmd !== 'refresh-views' && !READ_ONLY_COMMANDS.has(command.cmd)) await deps.views.request()
+  // scan / refresh-views 自己做全量重写，set-auto-checkup 只重写体检视图
+  if (result.ok && !SELF_WRITING_COMMANDS.has(command.cmd) && !READ_ONLY_COMMANDS.has(command.cmd)) await deps.views.request()
   return result
 }
 
@@ -173,6 +181,7 @@ async function info(deps: MemoryCommandDeps, sessionId: string): Promise<Ok> {
       views: {
         pending: at(GUI_VIEW_FILES.pending), health: at(GUI_VIEW_FILES.health),
         library: at(GUI_VIEW_FILES.library), deleted: at(GUI_VIEW_FILES.deleted),
+        checkups: at(GUI_CHECKUP_VIEW_FILE),
         ...(sessionId !== 'unknown' ? { session: at(sessionViewFile(sessionId)) } : {}),
       },
       version: GUI_VIEW_VERSION,
@@ -717,6 +726,7 @@ async function dispatch(
       })
       // 体检前的待处理，和体检后比出新增
       const before = (await collect())?.pending
+      const isGlobalOnly = command.layer !== undefined
       // 时钟现读：完成记录的完成时间是体检做完的时刻，不是命令开始的时刻
       const r = await executeScan(
         { scope: command.workspacePath ?? 'all', layers: 'full' },
@@ -724,13 +734,14 @@ async function dispatch(
           store: deps.store, registry: deps.registry, decisions: deps.decisions, cache: deps.cache, checkups: deps.checkups,
           getBaseline: deps.getBaseline, getLlm: deps.getLlm, resolveContext: deps.resolveContext, now: () => deps.now?.() ?? Date.now(),
         },
-        exec, { by: 'manual' },
+        exec, { by: 'manual', isGlobalOnly },
       )
       await deps.decisions.sweep(now)
       const after = await deps.views.rewriteAll() ?? (before === undefined ? undefined : await collect())
       if (r.kind === 'error') return fail(cmd, 'failed', r.message)
-      // 项目体检读的是本项目的可见集合（全局 + 本项目），全库体检是全部层
-      const covered = command.workspacePath === undefined ? 'all' : [{ kind: 'global' as const }, { kind: 'workspace' as const, workspacePath: command.workspacePath }]
+      // 判新增的覆盖层：项目体检读的是本项目的可见集合（全局 + 本项目），只查全局是全局层，全库体检是全部层
+      const covered = isGlobalOnly ? [{ kind: 'global' as const }]
+        : command.workspacePath === undefined ? 'all' : [{ kind: 'global' as const }, { kind: 'workspace' as const, workspacePath: command.workspacePath }]
       const notes = r.notes.map(n => n.code)
       const extras = {
         ...(r.semanticBatches !== undefined ? { semanticBatches: r.semanticBatches } : {}),
@@ -739,6 +750,16 @@ async function dispatch(
       return before === undefined || after === undefined
         ? { ok: true, cmd, notes, ...extras }
         : { ok: true, cmd, notes, ...extras, ...scanOutcome(before, after, covered) }
+    }
+
+    case 'set-auto-checkup': {
+      if (command.scope.kind === 'workspace' && !isAbsolute(command.scope.workspacePath)) {
+        return fail(cmd, 'invalid-args', `项目路径必须是绝对路径：${command.scope.workspacePath}`)
+      }
+      await deps.autoCheckups.set(command.scope, command.frequency)
+      await deps.views.requestCheckups()
+      deps.onAutoCheckupChanged?.()
+      return { ok: true, cmd }
     }
 
     case 'refresh-views':

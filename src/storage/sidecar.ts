@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import type { ZodType } from 'zod'
 import type { BatchKvTable, CasKvTable, ClaimKvTable, KvTable } from '../kv-table.ts'
 import type { MemoryLogger } from './table.ts'
-import { checkupRecordSchema, kvImportMarkerSchema, recallStatsSchema, type CheckupRecord, type KvImportMarker, type RecallStats } from './schema.ts'
+import { autoCheckupSettingSchema, checkupRecordSchema, kvImportMarkerSchema, recallStatsSchema, type AutoCheckupSetting, type CheckupRecord, type KvImportMarker, type RecallStats } from './schema.ts'
 import { STATE_DIR } from './paths.ts'
 import { linkExclusive } from './exclusive-link.ts'
 
@@ -19,6 +19,7 @@ import { linkExclusive } from './exclusive-link.ts'
  *   .state/scan-cache/<sha1(桶键)>.json
  *   .state/advice-ignores/<sha1(身份)>.json  建议忽略表，每项一文件
  *   .state/checkups/<sha1(范围键)>.json       体检记录表，每个范围一文件
+ *   .state/auto-checkups/<sha1(范围键)>.json  自动体检设置表，每个范围一文件
  *   .state/recall-stats.json        整张表一个文件 { [id]: RecallStats }
  *   .state/kv-import.json           旧宿主 KV 导入的完成标记
  *   .state/kv-import.lock           导入期间的跨进程锁，导完即删
@@ -29,7 +30,7 @@ import { linkExclusive } from './exclusive-link.ts'
  *
  * 导入屏障：snapshots / pending / scan-cache 的每个读写方法先 await 一次 memoize 的导入（进程内锁 +
  * 跨进程锁文件内执行，锁内重查标记）。
- * 召回统计不过屏障——导入不碰它，而 FileTable 加载时就要逐条读它，过屏障会把导入拖进 apply。建议忽略表、体检记录表是旧 KV 之后才有的，
+ * 召回统计不过屏障——导入不碰它，而 FileTable 加载时就要逐条读它，过屏障会把导入拖进 apply。建议忽略表、体检记录表、自动体检设置表是旧 KV 之后才有的，
  * 导入同样不碰它们，也不过屏障。
  * 0.3.0 删除导入代码（openLegacyKv、标记、LegacyKvTables）。
  */
@@ -43,6 +44,7 @@ const PENDING_DIR = 'pending'
 const SCAN_CACHE_DIR = 'scan-cache'
 const ADVICE_IGNORES_DIR = 'advice-ignores'
 const CHECKUPS_DIR = 'checkups'
+const AUTO_CHECKUPS_DIR = 'auto-checkups'
 
 /** 持锁期间每隔这么久刷新一次锁的时间戳；超过 STALE 没刷新按残留处理（兜底持锁进程崩溃后 pid 被复用）。 */
 const IMPORT_LOCK_REFRESH_MS = 10_000
@@ -413,6 +415,7 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
   readonly recallStats: BatchKvTable<RecallStats>
   readonly adviceIgnores: CasKvTable<I>
   readonly checkups: CasKvTable<CheckupRecord>
+  readonly autoCheckups: KvTable<AutoCheckupSetting>
 
   private readonly stateDir: string
   private readonly opts: SidecarOptions<S, P, C, I>
@@ -438,6 +441,7 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
     this.recallStats = new MapFileTable(join(this.stateDir, RECALL_STATS_FILE), recallStatsSchema, ungated)
     this.adviceIgnores = new EntryFileTable(join(this.stateDir, ADVICE_IGNORES_DIR), sha1, opts.schemas.adviceIgnores, ungated)
     this.checkups = new EntryFileTable(join(this.stateDir, CHECKUPS_DIR), sha1, checkupRecordSchema, ungated)
+    this.autoCheckups = new EntryFileTable(join(this.stateDir, AUTO_CHECKUPS_DIR), sha1, autoCheckupSettingSchema, ungated)
   }
 
   private locked<R>(fn: () => Promise<R>): Promise<R> {

@@ -415,6 +415,69 @@ export const workspaceMapViewSchema = z.object({
 })
 export type WorkspaceMapView = z.infer<typeof workspaceMapViewSchema>
 
+// —— 自动体检 ——
+
+/** 范围键：「全部」、全局，项目用它的绝对路径（scopeKey）。自动体检设置表、体检记录表按它存。 */
+export const SCOPE_KEYS = { all: 'all', global: 'global' } as const
+
+/** 范围：记忆页左栏选中的对象。「全部」是所有作用域的合称，本身不是作用域、不单独体检，自动体检的默认值记在它上面。 */
+export const scopeRefSchema = z.discriminatedUnion('kind', [z.object({ kind: z.literal('all') }), ...layerRefSchema.options])
+export type ScopeRef = z.infer<typeof scopeRefSchema>
+
+export function scopeKey(scope: ScopeRef): string {
+  return scope.kind === 'workspace' ? scope.workspacePath : SCOPE_KEYS[scope.kind]
+}
+
+/** 自动体检「每 N 天」的上限。 */
+export const AUTO_CHECKUP_MAX_DAYS = 90
+/** 自动体检频率：manual = 仅手动；整数 N = 每 N 天（1 即每天），1–AUTO_CHECKUP_MAX_DAYS。 */
+export const autoCheckupFrequencySchema = z.union([z.literal('manual'), z.number().int().min(1).max(AUTO_CHECKUP_MAX_DAYS)])
+export type AutoCheckupFrequency = z.infer<typeof autoCheckupFrequencySchema>
+/** set-auto-checkup 的「跟随」：删掉这个范围的设置，改回跟随「全部」。 */
+export const AUTO_CHECKUP_FOLLOW = 'follow'
+
+/**
+ * 自动体检的继承解析：settings 是设置表的内容（范围键 → 设了的频率）。「全部」的值是默认值，没设就是仅手动；
+ * 全局和项目没有条目时跟随它，有条目就是单独设置（值和默认值相同也算），之后改「全部」它不跟。
+ */
+export function resolveAutoCheckup(settings: ReadonlyMap<string, AutoCheckupFrequency>, scope: ScopeRef): { frequency: AutoCheckupFrequency; isOwn: boolean } {
+  const fallback = settings.get(SCOPE_KEYS.all) ?? 'manual'
+  if (scope.kind === 'all') return { frequency: fallback, isOwn: false }
+  const own = settings.get(scopeKey(scope))
+  return own === undefined ? { frequency: fallback, isOwn: false } : { frequency: own, isOwn: true }
+}
+
+/** 体检视图的文件名（在视图目录里，与全局视图并列）。 */
+export const GUI_CHECKUP_VIEW_FILE = 'checkups.json'
+
+/**
+ * 体检视图：只写各进程共有的事实（共享的设置表和完成记录），所有窗口看到同一份。在设置改了、体检做完、
+ * 调度检查发现状态变了（到期了、别的进程写了完成记录）时重写，内容没变不重写。
+ * 进行中（03）、失败与重试（04）、最近一次结果（05）以后加在每个范围上。
+ */
+export const checkupViewSchema = z.object({
+  version,
+  /** 体检开关（本进程的配置，几个进程不一致时以后写的为准）：关着时自动体检不跑。 */
+  governanceEnabled: z.boolean(),
+  /** 「全部」的频率，即默认值；没设过为 manual（仅手动）。 */
+  defaultFrequency: autoCheckupFrequencySchema,
+  /** 全局在前，项目按路径排序（与健康视图同一批层）。 */
+  scopes: z.array(z.object({
+    scope: layerRefSchema,
+    /** 有效频率（见 resolveAutoCheckup）。 */
+    frequency: autoCheckupFrequencySchema,
+    /** 单独设置；false = 跟随「全部」。 */
+    isOwn: z.boolean(),
+    /** 上次体检：最近一次体检完成记录的完成时间（升级前体检过、还没有完成记录的取内容检查缓存的时间）；从没体检过为 null。 */
+    lastCheckupAt: z.number().nullable(),
+    /** 下次自动体检：上次体检加有效频率的天数；仅手动、从没体检过为 null。 */
+    nextCheckupAt: z.number().nullable(),
+    /** 已到期：有效频率不是仅手动，且从没体检过或已到下次自动体检的时间。 */
+    isDue: z.boolean(),
+  })),
+})
+export type CheckupView = z.infer<typeof checkupViewSchema>
+
 // —— 命令 ——
 
 const allowCrossWorkspace = z.boolean().optional()
@@ -522,7 +585,21 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   z.object({ cmd: z.literal('ignore-advice'), type: z.enum(IGNORABLE_ADVICE_TYPES), memories: z.array(mergeRefSchema).min(1) }),
   /** 取消忽略（健康页「已忽略」里的一条，或刚忽略后的撤销）：本来就没忽略也算成功。 */
   z.object({ cmd: z.literal('unignore-advice'), type: z.enum(IGNORABLE_ADVICE_TYPES), memoryIds: z.array(z.string()).min(1) }),
-  z.object({ cmd: z.literal('scan'), workspacePath: z.string().optional() }),
+  /**
+   * 体检，目标三选一：不带参数 = 全部（逐个查每个项目，再单独查一遍全局）；workspacePath = 这个项目（读全局加本项目、
+   * 只写本项目的缓存）；layer = 全局（只查全局层、只写全局的缓存）。两者不能同时给。体检完给覆盖到的每个范围写完成记录（发起方界面手动）。
+   */
+  z.object({ cmd: z.literal('scan'), workspacePath: z.string().optional(), layer: z.object({ kind: z.literal('global') }).optional() })
+    .refine(c => c.workspacePath === undefined || c.layer === undefined, { message: 'workspacePath 与 layer 只能给一个' }),
+  /**
+   * 改一个范围的自动体检频率：具体值（manual 或 1–90 天）写进自动体检设置表，和「全部」的值相同也写（算单独设置）；
+   * follow 删掉这个范围的设置、改回跟随「全部」（「全部」没有可跟随的，不收 follow）。项目路径要是绝对路径。不受体检开关影响。
+   */
+  z.object({
+    cmd: z.literal('set-auto-checkup'),
+    scope: scopeRefSchema,
+    frequency: z.union([autoCheckupFrequencySchema, z.literal(AUTO_CHECKUP_FOLLOW)]),
+  }).refine(c => c.scope.kind !== 'all' || c.frequency !== AUTO_CHECKUP_FOLLOW, { message: '「全部」没有可跟随的范围' }),
   z.object({ cmd: z.literal('refresh-views') }),
 ])
 export type MemoryCommand = z.infer<typeof memoryCommandSchema>
@@ -609,11 +686,11 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     semanticBatches: z.number().int().positive().optional(),
     /** scan：宿主流 usage 块报的实际用量合计（所有批次、重试、跨项目重复检查）；宿主一次都没报时缺省，不拿估算顶替。 */
     usageTokens: z.number().int().nonnegative().optional(),
-    /** info：记忆根目录、视图目录与各视图文件的绝对路径（session 是发命令的这个会话的视图）、视图版本。 */
+    /** info：记忆根目录、视图目录与各视图文件的绝对路径（checkups 是体检视图，session 是发命令的这个会话的视图）、视图版本。 */
     info: z.object({
       memoryRoot: z.string(),
       viewDir: z.string(),
-      views: z.object({ pending: z.string(), health: z.string(), library: z.string(), deleted: z.string(), session: z.string().optional() }),
+      views: z.object({ pending: z.string(), health: z.string(), library: z.string(), deleted: z.string(), checkups: z.string().optional(), session: z.string().optional() }),
       version: z.number(),
     }).optional(),
   }),

@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { CHECKUP_INITIATORS } from '../contract-codes.ts'
+import { autoCheckupFrequencySchema } from '../gui/contract.ts'
 
 /** 易变召回统计的侧表行（`.state/recall-stats.json` 里的一条，见 storage/sidecar.ts）。
  *  文件永不承载这两个字段——否则每次 search 命中都产生文件 diff（git 噪音）。 */
@@ -39,3 +40,14 @@ export const checkupRecordSchema = z.object({
 })
 export type CheckupRecord = z.infer<typeof checkupRecordSchema>
 export type CheckupCompletion = NonNullable<CheckupRecord['completed']>
+
+/**
+ * 自动体检设置表的一行（`.state/auto-checkups/<sha1(id)>.json`，见 storage/sidecar.ts），一个范围一条。id 是范围键：
+ * `all`（「全部」的默认值）、`global` 或项目的绝对路径（见 gui/contract.ts scopeKey）。frequency 是 manual 或 1–90 天。
+ * 没有某个范围的条目 = 跟随 `all`；没有 `all` = 仅手动，所以表空着就是全部仅手动。
+ */
+export const autoCheckupSettingSchema = z.object({
+  id: z.string(),
+  frequency: autoCheckupFrequencySchema,
+})
+export type AutoCheckupSetting = z.infer<typeof autoCheckupSettingSchema>
