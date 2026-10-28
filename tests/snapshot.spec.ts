@@ -262,7 +262,7 @@ describe('票 17 索引与引导', () => {
       expect(text).toContain(`${ROOT}/global/MEMORY.md`)
       expect(text).toContain(`${ROOT}/${workspaceDirName(WS)}/MEMORY.md`)
       expect(text).toContain(`\n完整索引：\n- 全局记忆：${ROOT}/global/MEMORY.md\n- 本项目记忆：`)
-      expect(text).toContain(`MEMORY.md\n\n看全文：用 memory_search 按 id 或关键词查；要看文件原样，再 Read 索引行末尾的文件（路径相对 ${ROOT}/）。`)
+      expect(text).toContain(`MEMORY.md\n\n看记忆全文：用 memory_search 按 id 或关键词查；要看文件原样，再 Read 索引行末尾的文件（路径相对 ${ROOT}/）。`)
       expect(text).not.toContain('grep')
       expect(text).toMatch(/\.archive\/[^\n]*已遗忘、已取代[^\n]*日常不要读/)
       expect(text).toMatch(/其他项目/)
@@ -368,26 +368,24 @@ describe('快照标题下的压缩引擎附注', () => {
     const blocks = text.split('\n\n')
     expect(text.split('\n')[0]).toBe('# 长期记忆')
     expect(blocks[0]).toBe('# 长期记忆')
-    expect(blocks[1]).toMatch(/^> \*\*给 compaction engine\*\*/)
+    expect(blocks[1]).toMatch(/^> \*\*压缩说明\*\*/)
     expect(blocks[1]).toBe(`> ${COMPACTION_ENGINE_NOTE}`)
     expect(blocks[2]).toMatch(/^- \[mem_core\]/)
   })
 
-  it('关键词锁定：点名 compaction engine 与 <compacted-summary>，以「记忆是背景资料」为界，保留记忆操作；不出现产品名', () => {
-    expect(COMPACTION_ENGINE_NOTE).toContain('compaction engine')
-    // 快照是本插件自己的消息，不再是运行时上下文
-    expect(COMPACTION_ENGINE_NOTE).toContain('长期记忆快照')
-    expect(COMPACTION_ENGINE_NOTE).not.toContain('运行时上下文')
-    expect(COMPACTION_ENGINE_NOTE).toContain('<compacted-summary>')
-    expect(COMPACTION_ENGINE_NOTE).toContain('「记忆是背景资料」')
+  it('关键词锁定：按「compaction engine 压缩对话时」写条件，保留记忆操作，明说平时照常使用；不出现产品名', () => {
+    // 压缩时读这段的就是对话模型本身：宿主重放对话后追加的指令让它「acting as a compaction engine」，
+    // 所以按这个身份写条件，不能写成「对话模型无需理会」
+    expect(COMPACTION_ENGINE_NOTE).toContain('当 compaction engine 压缩对话时')
+    expect(COMPACTION_ENGINE_NOTE).toContain('不要写进摘要')
     expect(COMPACTION_ENGINE_NOTE).toContain('新增、删除、提升、确认')
+    expect(COMPACTION_ENGINE_NOTE).toContain('平时对话照常使用这些记忆')
+    expect(COMPACTION_ENGINE_NOTE).not.toContain('无需理会')
+    expect(COMPACTION_ENGINE_NOTE).not.toContain('运行时上下文')
     expect(COMPACTION_ENGINE_NOTE).not.toMatch(/plastic/i)
-    expect(MEMORY_AS_DATA_NOTE.startsWith('记忆是背景资料')).toBe(true) // 附注划的界必须对得上尾注开头
   })
 
-  it('附注明说不要抄录、转述或概括条目；尾注告诉对话模型 <compacted-summary> 里的记忆内容与这里不一致时以这里为准', () => {
-    // 真机上摘要没抄 id 和原文，但把条目里的约定转述进了 Critical Context，所以把转述、概括也点名禁掉
-    expect(COMPACTION_ENGINE_NOTE).toMatch(/抄录、转述或概括/)
+  it('尾注告诉对话模型 <compacted-summary> 里的记忆内容与这里不一致时以这里为准', () => {
     // 压缩后的 checkpoint 对对话模型可见（<compacted-summary> 包着），摘要里残留的记忆内容可能过时，由尾注定优先级
     expect(MEMORY_AS_DATA_NOTE).toContain('<compacted-summary>')
     expect(MEMORY_AS_DATA_NOTE).toMatch(/以这里为准/)
@@ -416,8 +414,8 @@ describe('快照标题下的压缩引擎附注', () => {
   })
 
   it('冷启动两种文案不带附注', () => {
-    expect(COLD_START_TEXT).not.toContain('compaction engine')
-    expect(coldStartUnparseableText(2)).not.toContain('compaction engine')
+    expect(COLD_START_TEXT).not.toContain('压缩说明')
+    expect(coldStartUnparseableText(2)).not.toContain('压缩说明')
     expect(assembleSnapshot({ ...base, records: [] }).text).toBe(COLD_START_TEXT)
     expect(assembleSnapshot({ ...base, records: [], quarantinedCount: 2 }).text).toBe(coldStartUnparseableText(2))
   })
