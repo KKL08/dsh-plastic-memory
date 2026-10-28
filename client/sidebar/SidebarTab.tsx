@@ -300,7 +300,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
             tokens={snapshot.tokens}
             usedTokens={snapshot.usedTokens}
             droppedCount={snapshot.overflowMode === 'strict' ? snapshot.omittedCount : 0}
-            onHandle={() => { openPage({ tab: 'pending', ...(scope === undefined ? {} : { scope }) }) }}
+            onHandle={() => { openPage({ view: 'todo', ...(scope === undefined ? {} : { scope }), fromChat: true }) }}
           />
           <p className="pm-side-hint">{t('sidebar.usage.searchNote')}</p>
         </>
@@ -456,7 +456,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
             <button
               type="button"
               className="pm-link"
-              onClick={() => { openPage({ tab: restPending > 0 ? 'pending' : 'library', scope }) }}
+              onClick={() => { openPage({ view: restPending > 0 ? 'todo' : 'library', scope, fromChat: true }) }}
             >
               {t(restPending > 0 ? 'sidebar.footer.pendingLink' : 'sidebar.footer.countLink')}
             </button>

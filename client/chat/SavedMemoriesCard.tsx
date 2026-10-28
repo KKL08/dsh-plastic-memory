@@ -211,11 +211,10 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
   const folded = fresh === 0 ? t(rewritten === 1 ? 'chat.card.folded.rewritten.one' : 'chat.card.folded.rewritten', { count: rewritten })
     : rewritten === 0 ? t(saved.length === 1 ? 'chat.card.folded.one' : 'chat.card.folded', { count: saved.length })
     : t('chat.card.folded.mixed', { count: fresh, rewritten })
-  // 全局记忆落在全局；本项目记忆落在会话的工作目录，不知道工作目录时只带 id
+  // 和删除、撤销同一个层：全局记忆落在全局；本项目记忆落在服务端给会话定的项目（cwd 可能是项目子目录），都不知道时只带 id
   const detail = (memory: SavedMemory['memory']) => {
-    const scope: GuiLayerRef | undefined = memory.scope === 'global' ? { kind: 'global' }
-      : cwd === undefined ? undefined : { kind: 'workspace', workspacePath: cwd }
-    openDetail({ tab: 'library', ...(scope === undefined ? {} : { scope }), memoryId: memory.id })
+    const scope = layerOf(memory)
+    openDetail({ view: 'library', ...(scope === undefined ? {} : { scope }), memoryId: memory.id, fromChat: true })
   }
   return (
     <section className="pm-saved" data-open={isOpen || undefined} aria-label={title}>

@@ -24,11 +24,12 @@ describe('PanelShell 样式', () => {
     )
   })
 
-  it('暗色跟 body[data-ds-dark-theme] 换银藤三档；类名都带 pm- 前缀；不写 font-family', () => {
+  it('暗色跟 body[data-ds-dark-theme] 换银藤三档；类名都带 pm- 前缀；不写 font-family（等宽字只借宿主 --dsw-font-mono）', () => {
     expect(PM_CSS).toMatch(/body\[data-ds-dark-theme\] \.pm-root \{[^}]*--pm-accent: #B0A8CB;[^}]*--pm-accent-tint: #27252C;[^}]*--pm-accent-soft: #645F77;/)
     const classes = (PM_CSS + memoryPageCss).match(/\.[a-z][\w-]*/gi) ?? []
     expect(classes.filter(c => !c.startsWith('.pm-'))).toEqual([])
-    expect(PM_CSS + memoryPageCss).not.toMatch(/font-family|monospace/)
+    const mono = 'font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)'
+    expect((PM_CSS + memoryPageCss).split(mono).join('')).not.toMatch(/font-family|monospace/)
   })
 })
 

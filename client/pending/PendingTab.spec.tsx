@@ -4,7 +4,7 @@ import { GUI_VIEW_VERSION, type AdviceType, type HealthView, type MemoryCard, ty
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { useGateway, type PluginConfig } from '../gateway.ts'
 import { FLASH_MS } from '../library/shared.tsx'
-import { createNavStore, type NavStore } from '../nav.ts'
+import { ALL_SCOPE, createNavStore, type NavStore, type PageScope } from '../nav.ts'
 import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { PendingTab } from './PendingTab.tsx'
 
@@ -25,34 +25,36 @@ const unreadable: PendingItem = {
   error: 'YAMLException: unexpected end of the stream within a flow collection (2:8)',
 }
 
+const tidy: PendingItem = { kind: 'advice', level: 'advice', type: 'bloat', memories: [memory({ id: 't1', name: '很长的一条', digest: 'sha1:t1', filePath: '/m/app/t1.md' })] }
+
 const view = (...items: PendingItem[]): PendingView => ({ version: GUI_VIEW_VERSION, dot: 'amber', items, levelCounts: levelCountsOf(items), typeLabels: { preference: '行为偏好' } })
 const scannedHealth = (at: number | null): HealthView => ({
   version: GUI_VIEW_VERSION,
   governanceEnabled: true,
-  layers: [{ layer: { kind: 'global' }, totalMemories: 1, score: 1, tier: 'green', gate: { secret: false }, issues: [], staleCount: 0, semanticCachedAt: at, overflow: null, ignored: [] }],
+  layers: [{ layer: { kind: 'global' }, totalMemories: 1, score: 1, tier: 'green', gate: { secret: false }, issues: [], staleCount: 0, lastCheckupAt: at, overflow: null, ignored: [], deductions: { rule: { points: 0, types: [] }, content: { points: 0, types: [] }, freshness: { points: 0, types: [] } } }],
 })
 
 function setup(items: PendingItem[], init: FakeGatewayInit = {}, nav: NavStore = createNavStore()) {
   const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(...items), health: scannedHealth(NOW) }, ...init })
-  const utils = renderInShell(<PendingTab nav={nav} session={SESSION} workspacePath="/w/app" now={NOW} />, gateway)
+  const utils = renderInShell(<PendingTab nav={nav} session={SESSION} scope={ALL_SCOPE} workspacePath="/w/app" now={NOW} />, gateway)
   const commands = () => gateway.executed.map(e => e.command)
   return { ...utils, gateway, commands }
 }
 
 describe('待处理：按级别分组', () => {
-  it('高优问题在前、待你处理在后，组标题带条数；组内按视图顺序出卡', () => {
+  it('先处理在前、等你决定在后，组标题带条数；组内按视图顺序出卡', () => {
     setup([secret, unreadable, horizontal, vertical, promote, overflow])
-    expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['高优问题 2', '待你处理 4'])
-    const mustFix = screen.getByRole('region', { name: '高优问题 2' })
+    expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['先处理 2', '等你决定 4'])
+    const mustFix = screen.getByRole('region', { name: '先处理 2' })
     expect(within(mustFix).getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['这条记忆里有密钥', '有个文件读不出来'])
-    expect(within(screen.getByRole('region', { name: '待你处理 4' })).getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual([
+    expect(within(screen.getByRole('region', { name: '等你决定 4' })).getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual([
       '测试里怎么准备数据库，两条记忆互相矛盾', '包管理器和基线矛盾', '这条适合所有项目', '带入的记忆超出上限',
     ])
   })
 
-  it('密钥标红，读不出的文件同在高优问题组但不标红', () => {
+  it('密钥标红，读不出的文件同在先处理组但不标红', () => {
     setup([secret, unreadable])
-    const mustFix = screen.getByRole('region', { name: '高优问题 2' })
+    const mustFix = screen.getByRole('region', { name: '先处理 2' })
     const [secretCard, fileCard] = within(mustFix).getAllByRole('article')
     expect(within(secretCard!).getByRole('img', { name: '有密钥要处理' })).toBeInTheDocument()
     expect(fileCard!.querySelector('.pm-marker')).toBeNull()
@@ -60,40 +62,80 @@ describe('待处理：按级别分组', () => {
 
   it('某一级没有待处理项：整组不画', () => {
     setup([horizontal])
-    expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['待你处理 1'])
-    expect(screen.queryByRole('region', { name: /高优问题/ })).toBeNull()
+    expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['等你决定 1'])
+    expect(screen.queryByRole('region', { name: /先处理/ })).toBeNull()
   })
 
-  it('只有高优问题：只画这一组', () => {
+  it('只有先处理：只画这一组', () => {
     setup([unreadable])
-    expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['高优问题 1'])
+    expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['先处理 1'])
+  })
+
+  it('三组按「先处理 / 等你决定 / 可以整理」排；「可以整理」标题后写「· 处理或忽略后不再扣分」，另两组不写', () => {
+    setup([secret, horizontal, tidy])
+    expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['先处理 1', '等你决定 1', '可以整理 1'])
+    expect(screen.getAllByText('处理或忽略后不再扣分')).toHaveLength(1)
+    const note = screen.getByText('处理或忽略后不再扣分')
+    expect(note.closest('section')).toBe(screen.getByRole('region', { name: /^可以整理/ }))
+  })
+
+  it('全部处理完：组上方写「都处理完了，agent 之后按你的决定来。」，结果卡还在原位', async () => {
+    const { gateway } = setup([horizontal, tidy])
+    expect(screen.queryByText('都处理完了，agent 之后按你的决定来。')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
+    await screen.findByText('已按 A')
+    act(() => { gateway.setView('pending', view(tidy)) })
+    // 还剩一条可以整理：不算处理完
+    expect(screen.queryByText('都处理完了，agent 之后按你的决定来。')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '忽略' }))
+    await screen.findByText('已忽略')
+    const done = screen.getByText('都处理完了，agent 之后按你的决定来。')
+    // 在第一组上面
+    expect(done.compareDocumentPosition(screen.getAllByRole('heading', { level: 2 })[0]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.getByRole('button', { name: '撤销' })).toBeInTheDocument()
   })
 
   it('裁决后结果卡留在原来那一组；组标题的数只算还在等你的', async () => {
     setup([secret, horizontal, promote])
     fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
     await screen.findByText('已按 A')
-    const yourCall = screen.getByRole('region', { name: '待你处理 1' })
+    const yourCall = screen.getByRole('region', { name: '等你决定 1' })
     expect(within(yourCall).getByText('已按 A')).toBeInTheDocument()
-    expect(screen.getByRole('region', { name: '高优问题 1' })).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: '先处理 1' })).toBeInTheDocument()
   })
 })
 
 describe('待处理：各类卡', () => {
 
-  it('横向冲突：A / B 原文、类型显示名、「决定前 agent 按哪条来」，后果在动手前就写着；三个按钮各发对应 verdict', async () => {
+  it('横向冲突：A / B 原文、类型显示名，各自卡底写选它会删掉哪条；三个按钮各发对应 verdict', async () => {
     const { commands } = setup([horizontal])
-    expect(screen.getByText('决定前 agent 按你明确说过的 A 来。')).toBeInTheDocument()
-    expect(within(screen.getByRole('region', { name: '记忆 A' })).getByText('测试用真实 Postgres。')).toBeInTheDocument()
-    expect(within(screen.getByRole('region', { name: '记忆 A' })).getByText('行为偏好')).toBeInTheDocument()
-    expect(screen.getByText(/以 A 为准会删掉 B，以 B 为准会删掉 A，14 天内可恢复。都保留：以后体检不再把它们当冲突。/)).toBeInTheDocument()
+    const a = screen.getByRole('region', { name: '记忆 A' })
+    expect(within(a).getByText('测试用真实 Postgres。')).toBeInTheDocument()
+    expect(within(a).getByText('行为偏好')).toBeInTheDocument()
+    expect(within(a).getByText('B 会删掉，14 天内可恢复')).toBeInTheDocument()
+    expect(within(screen.getByRole('region', { name: '记忆 B' })).getByText('A 会删掉，14 天内可恢复')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '以 B 为准' }))
     await waitFor(() => { expect(commands()).toEqual([{ cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-right' }]) })
   })
 
+  it('横向冲突：「都保留」并进普通动作行，左边写决定前按哪条、都保留的后果；裁决不加确认，结果带撤销', async () => {
+    const { commands } = setup([horizontal])
+    const keepBoth = screen.getByRole('button', { name: '都保留' })
+    const row = keepBoth.closest('.pm-conflict-row')!
+    expect(row).not.toBeNull()
+    expect(row).toHaveTextContent('决定之前，agent 按你明确说过的 A 来做。两条都对就选都保留，以后不再算冲突。')
+    expect(row.querySelectorAll('button')).toHaveLength(1)
+    expect(document.querySelector('.pm-keep-line')).toBeNull()
+    fireEvent.click(keepBoth)
+    await screen.findByText('以后体检不再把它们当冲突。')
+    expect(screen.queryByRole('group')).toBeNull()
+    expect(commands()).toEqual([{ cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-both' }])
+    expect(screen.getByRole('button', { name: '撤销' })).toBeInTheDocument()
+  })
+
   it('偏好方不是你明确说过的：只写按哪条', () => {
     setup([{ ...horizontal, preferredId: 'b' } as PendingItem])
-    expect(screen.getByText('决定前 agent 按 B 来。')).toBeInTheDocument()
+    expect(screen.getByText(/决定之前，agent 按 B 来做。/)).toBeInTheDocument()
   })
 
   it('垂直冲突：写明基线不会被删除；「以基线为准」= keep-right、「保留这条记忆」= keep-left', async () => {
@@ -169,7 +211,7 @@ describe('待处理：各类卡', () => {
   it('候选是否在别的项目：按会话归属判断（对照里的软链接、项目子目录都算本项目；嵌套子项目里的会话看外层的记忆算别的项目）', () => {
     const check = (session: { kind: 'ready'; sessionId: string; cwd: string; workspaces?: Record<string, string> }, heading: string) => {
       const gateway = createFakeGateway({ session, config, views: { pending: view(promote), health: scannedHealth(NOW) } })
-      const { unmount } = renderInShell(<PendingTab nav={createNavStore()} session={session} workspacePath="/w/app" now={NOW} />, gateway)
+      const { unmount } = renderInShell(<PendingTab nav={createNavStore()} session={session} scope={ALL_SCOPE} workspacePath="/w/app" now={NOW} />, gateway)
       expect(screen.getByRole('heading', { name: heading })).toBeInTheDocument()
       unmount()
     }
@@ -184,9 +226,9 @@ describe('待处理：各类卡', () => {
     const { commands } = setup([overflow, global], {}, nav)
     const [projectLink, globalLink] = screen.getAllByRole('button', { name: '整理记忆 ›' })
     fireEvent.click(projectLink!)
-    expect(nav.get()).toMatchObject({ tab: 'library', scope: { kind: 'workspace', workspacePath: '/w/app' }, memoryId: undefined })
+    expect(nav.get()).toMatchObject({ view: 'library', scope: { kind: 'workspace', workspacePath: '/w/app' }, memoryId: undefined })
     fireEvent.click(globalLink!)
-    expect(nav.get()).toMatchObject({ tab: 'library', scope: { kind: 'global' }, memoryId: undefined })
+    expect(nav.get()).toMatchObject({ view: 'library', scope: { kind: 'global' }, memoryId: undefined })
     expect(commands()).toEqual([])
   })
 
@@ -197,6 +239,10 @@ describe('待处理：各类卡', () => {
     fireEvent.click(screen.getByRole('button', { name: '忽略' }))
     await screen.findByText('已忽略')
     expect(commands()).toEqual([{ cmd: 'dismiss-overflow', decisionId: 'd-o' }])
+    // 忽略的提醒可撤销：撤销发 undo，提醒卡回来
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
+    expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'd-o' })
+    expect(screen.getByRole('button', { name: '忽略' })).toBeInTheDocument()
   })
 
   it('超限：「调高上限」走单字段配置写入，默认填下一档；不比当前上限大的值不写', async () => {
@@ -335,7 +381,7 @@ describe('待处理：别处已经在处理同一条', () => {
     fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
     await screen.findByRole('alert')
     act(() => { gateway.setView('pending', view()) })
-    expect(screen.getByText('目前没有要处理的事')).toBeInTheDocument()
+    expect(screen.getByText('没有要处理的事')).toBeInTheDocument()
     expect(screen.getByRole('alert')).toHaveTextContent(refused)
   })
 
@@ -355,7 +401,7 @@ describe('待处理：别处已经在处理同一条', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(text)
   })
 
-  it('建议整理「忽略」回 not-found（记忆已在别处删掉）：同样提示，不显示原话', async () => {
+  it('可以整理「忽略」回 not-found（记忆已在别处删掉）：同样提示，不显示原话', async () => {
     const bloat: PendingItem = { kind: 'advice', level: 'advice', type: 'bloat', memories: [memory({ id: 'bl', filePath: '/m/app/bl.md', digest: 'sha1:bl' })] }
     setup([bloat], { respond: command => ({ ok: false, cmd: command.cmd, code: 'not-found', detail: '不存在或已处理：bl' }) })
     fireEvent.click(screen.getByRole('button', { name: '忽略' }))
@@ -436,6 +482,21 @@ describe('待处理：确认收起后的键盘焦点', () => {
     await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
   })
 
+  it('视图先于命令结果刷新（宿主先推了新版本）：卡片留在原位、焦点不动，结果回来后换成结果卡，焦点落到「撤销」', async () => {
+    let answer: (() => void) | undefined
+    const { gateway } = setup([promote, vertical], {
+      respond: command => new Promise((resolve) => { answer = () => { resolve({ ok: true, cmd: command.cmd }) } }),
+    })
+    const button = screen.getByRole('button', { name: '提升为全局' })
+    await press(button)
+    act(() => { gateway.setView('pending', view(vertical)) })
+    expect(button).toHaveFocus()
+    expect(screen.getByRole('heading', { level: 2, name: '等你决定 2' })).toBeInTheDocument()
+    await act(async () => { answer?.() })
+    await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
+    expect(screen.getAllByRole('article')[0]).toHaveTextContent('撤销')
+  })
+
   it('密钥卡：「取消」回到「彻底删除…」；确认删除后落到原位的结果卡上', async () => {
     setup([secret, promote])
     await press(screen.getByRole('button', { name: '彻底删除…' }))
@@ -468,7 +529,7 @@ describe('待处理：确认收起后的键盘焦点', () => {
 describe('待处理：两态与空状态', () => {
   it('没有会话：读不到视图，提示先开会话', () => {
     const gateway = createFakeGateway({ session: { kind: 'none' }, config, views: { pending: view(horizontal) } })
-    renderInShell(<PendingTab nav={createNavStore()} session={{ kind: 'none' }} workspacePath={undefined} now={NOW} />, gateway)
+    renderInShell(<PendingTab nav={createNavStore()} session={{ kind: 'none' }} scope={ALL_SCOPE} workspacePath={undefined} now={NOW} />, gateway)
     expect(screen.getByRole('status')).toHaveTextContent('开一个会话后这里可用')
     expect(screen.queryByRole('button')).toBeNull()
   })
@@ -476,7 +537,7 @@ describe('待处理：两态与空状态', () => {
   it('有结果卡时会话没了：撤销不可用并提示「先开一个会话」', async () => {
     // 和页面一样从网关借会话
     function Tab() {
-      return <PendingTab nav={createNavStore()} session={useGateway().useSession('/w/app')} workspacePath="/w/app" now={NOW} />
+      return <PendingTab nav={createNavStore()} session={useGateway().useSession('/w/app')} scope={ALL_SCOPE} workspacePath="/w/app" now={NOW} />
     }
     const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(horizontal), health: scannedHealth(NOW) } })
     renderInShell(<Tab />, gateway)
@@ -490,40 +551,50 @@ describe('待处理：两态与空状态', () => {
     expect(gateway.executed.map(e => e.command.cmd)).toEqual(['resolve'])
   })
 
-  it('待处理为空：一句结论，说明待处理收什么，再写上次体检时间；不画组标题，没有按钮', () => {
+  it('三组都空：「没有要处理的事」加上次体检时间，不画组标题，没有体检按钮', () => {
     setup([], { views: { pending: view(), health: scannedHealth(new Date(2026, 9, 15, 9).getTime()) } })
-    expect(screen.getByRole('status')).toHaveTextContent('目前没有要处理的事')
-    expect(screen.getByRole('status')).toHaveTextContent('密钥、读不出的文件、互相矛盾的记忆、超限提醒和适合提升为全局的记忆会出现在这里。')
-    expect(screen.getByRole('status')).toHaveTextContent('上次体检：10 月 15 日')
+    expect(screen.getByRole('status')).toHaveTextContent('没有要处理的事')
+    expect(screen.getByRole('status')).toHaveTextContent('上次体检 10 月 15 日。新的冲突和建议会出现在这里。')
     expect(screen.queryByRole('heading', { level: 2 })).toBeNull()
     expect(screen.queryByRole('button')).toBeNull()
   })
 
-  it('从没体检过：只说明体检是什么，不放按钮（「体检当前项目」在页头）', () => {
+  it('三组都空、从没体检过：写「还没体检过」，不提体检按钮，也不放按钮', () => {
     setup([], { views: { pending: view(), health: scannedHealth(null) } })
-    expect(screen.getByRole('status')).toHaveTextContent('还没做过体检')
-    expect(screen.getByRole('status')).toHaveTextContent('点右上角「体检当前项目」开始')
+    expect(screen.getByRole('status')).toHaveTextContent('没有要处理的事')
+    expect(screen.getByRole('status')).toHaveTextContent('还没体检过。新的冲突和建议会出现在这里。')
+    expect(screen.getByRole('status')).not.toHaveTextContent('体检当前项目')
     expect(screen.queryByRole('button')).toBeNull()
   })
 
-  it('体检关闭：「去设置里打开 ›」是唯一能点的，打开插件设置页', () => {
-    const openSettings = vi.fn()
-    setup([], { views: { pending: view(), health: { ...scannedHealth(NOW), governanceEnabled: false } } }, createNavStore(undefined, { openSettings }))
-    expect(screen.getByRole('status')).toHaveTextContent('体检已关闭')
-    expect(screen.getAllByRole('button').map(b => b.textContent)).toEqual(['去设置里打开 ›'])
-    fireEvent.click(screen.getByRole('button', { name: '去设置里打开 ›' }))
-    expect(openSettings).toHaveBeenCalledTimes(1)
+  it('上次体检按选中的范围取：项目范围只看那个项目，「全部」取最近一次', () => {
+    const layer = (l: HealthView['layers'][number]['layer'], at: number | null): HealthView['layers'][number] => ({
+      layer: l, totalMemories: 1, score: 1, tier: 'green', gate: { secret: false }, issues: [], staleCount: 0, lastCheckupAt: at, overflow: null, ignored: [],
+      deductions: { rule: { points: 0, types: [] }, content: { points: 0, types: [] }, freshness: { points: 0, types: [] } },
+    })
+    const health: HealthView = {
+      version: GUI_VIEW_VERSION,
+      governanceEnabled: true,
+      layers: [layer({ kind: 'global' }, new Date(2026, 9, 16, 9).getTime()), layer({ kind: 'workspace', workspacePath: '/w/app' }, new Date(2026, 9, 3, 9).getTime())],
+    }
+    const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(), health } })
+    const { unmount } = renderInShell(<PendingTab nav={createNavStore()} session={SESSION} scope={{ kind: 'workspace', workspacePath: '/w/app' }} workspacePath="/w/app" now={NOW} />, gateway)
+    expect(screen.getByRole('status')).toHaveTextContent('上次体检 10 月 3 日')
+    unmount()
+    renderInShell(<PendingTab nav={createNavStore()} session={SESSION} scope={ALL_SCOPE} workspacePath={undefined} now={NOW} />, gateway)
+    expect(screen.getByRole('status')).toHaveTextContent('上次体检 10 月 16 日')
   })
 
-  it('体检关闭、宿主没有插件页导航：只有说明，不画「去设置里打开 ›」', () => {
-    setup([], { views: { pending: view(), health: { ...scannedHealth(NOW), governanceEnabled: false } } })
-    expect(screen.getByRole('status')).toHaveTextContent('体检已关闭')
+  it('配置文件关掉体检：写明在配置文件里关闭，没有可点的东西（界面上不提供打开体检）', () => {
+    setup([], { views: { pending: view(), health: { ...scannedHealth(NOW), governanceEnabled: false } } }, createNavStore(undefined, { openSettings: vi.fn() }))
+    expect(screen.getByRole('status')).toHaveTextContent('体检已在配置文件里关闭')
+    expect(screen.getByRole('status')).toHaveTextContent('governance.enabled')
     expect(screen.queryByRole('button')).toBeNull()
   })
 
   it('体检开关以健康视图为准（和健康 tab、页头一致），不看插件配置', () => {
     setup([], { config: { ...config, governanceEnabled: false } })
-    expect(screen.getByRole('status')).not.toHaveTextContent('体检已关闭')
+    expect(screen.getByRole('status')).not.toHaveTextContent('体检已在配置文件里关闭')
   })
 })
 
@@ -535,7 +606,7 @@ describe('待处理：直达某条记忆', () => {
   const cardOf = (title: string) => screen.getByRole('heading', { level: 3, name: title }).closest('.pm-pending-row')!
 
   it('记忆在横向冲突的 B 方：那张冲突卡高亮并滚入视野，播完收起', () => {
-    const nav = createNavStore({ tab: 'pending', memoryId: 'b' })
+    const nav = createNavStore({ view: 'todo', memoryId: 'b' })
     setup([vertical, horizontal, promote], {}, nav)
     const row = cardOf('测试里怎么准备数据库，两条记忆互相矛盾')
     expect(row).toHaveClass('pm-flash')
@@ -547,17 +618,17 @@ describe('待处理：直达某条记忆', () => {
   })
 
   it('提升候选、垂直冲突、密钥都认它们那条记忆；入口换一条再高亮一次', () => {
-    const nav = createNavStore({ tab: 'pending', memoryId: 'p' })
+    const nav = createNavStore({ view: 'todo', memoryId: 'p' })
     setup([secret, vertical, promote], {}, nav)
     expect(cardOf('这条适合所有项目')).toHaveClass('pm-flash')
-    act(() => { nav.navigate({ tab: 'pending', memoryId: 'v' }) })
+    act(() => { nav.navigate({ view: 'todo', memoryId: 'v' }) })
     expect(cardOf('包管理器和基线矛盾')).toHaveClass('pm-flash')
-    act(() => { nav.navigate({ tab: 'pending', memoryId: 's' }) })
+    act(() => { nav.navigate({ view: 'todo', memoryId: 's' }) })
     expect(cardOf('这条记忆里有密钥')).toHaveClass('pm-flash')
   })
 
   it('目标不在待处理里：不高亮、不滚动', () => {
-    setup([horizontal], {}, createNavStore({ tab: 'pending', memoryId: 'nope' }))
+    setup([horizontal], {}, createNavStore({ view: 'todo', memoryId: 'nope' }))
     expect(document.querySelector('.pm-flash')).toBeNull()
     expect(scrollIntoView).not.toHaveBeenCalled()
   })
@@ -572,8 +643,8 @@ describe('待处理：定位到组', () => {
   const top = () => document.querySelector('.pm-pending')
 
   it('三组各自能定位：焦点在组标题上，标题滚入视野', () => {
-    for (const [level, heading] of [['must-fix', '高优问题 1'], ['your-call', '待你处理 1'], ['advice', '建议整理 1']] as const) {
-      const { unmount } = setup([secret, horizontal, advice], {}, createNavStore({ tab: 'pending', level }))
+    for (const [level, heading] of [['must-fix', '先处理 1'], ['your-call', '等你决定 1'], ['advice', '可以整理 1']] as const) {
+      const { unmount } = setup([secret, horizontal, advice], {}, createNavStore({ view: 'todo', level }))
       const title = screen.getByRole('heading', { level: 2, name: heading })
       expect(title).toHaveFocus()
       expect(scrollIntoView.mock.contexts.at(-1)).toBe(title)
@@ -582,33 +653,33 @@ describe('待处理：定位到组', () => {
   })
 
   it('那一组已经没有了：焦点落在待处理顶部', () => {
-    setup([secret, advice], {}, createNavStore({ tab: 'pending', level: 'your-call' }))
+    setup([secret, advice], {}, createNavStore({ view: 'todo', level: 'your-call' }))
     expect(top()).toHaveFocus()
     expect(scrollIntoView.mock.contexts.at(-1)).toBe(top())
   })
 
   it('待处理全空：同样落在顶部（空状态在里面）', () => {
-    setup([], {}, createNavStore({ tab: 'pending', level: 'advice' }))
+    setup([], {}, createNavStore({ view: 'todo', level: 'advice' }))
     expect(top()).toHaveFocus()
-    expect(top()).toHaveTextContent('目前没有要处理的事')
+    expect(top()).toHaveTextContent('没有要处理的事')
   })
 
   it('视图晚到：到了再定位', () => {
-    const nav = createNavStore({ tab: 'pending', level: 'advice' })
+    const nav = createNavStore({ view: 'todo', level: 'advice' })
     const { gateway } = setup([], { views: { pending: { status: 'loading' }, health: scannedHealth(NOW) } }, nav)
     expect(document.body).toHaveFocus()
     act(() => { gateway.setView('pending', view(secret, advice)) })
-    expect(screen.getByRole('heading', { level: 2, name: '建议整理 1' })).toHaveFocus()
+    expect(screen.getByRole('heading', { level: 2, name: '可以整理 1' })).toHaveFocus()
   })
 
   it('只定位一次：视图刷新不再抢焦点；不带组标识进来不动焦点', () => {
-    const nav = createNavStore({ tab: 'pending', level: 'advice' })
+    const nav = createNavStore({ view: 'todo', level: 'advice' })
     const { gateway } = setup([secret, advice], {}, nav)
     const ignore = screen.getByRole('button', { name: '忽略' })
     ignore.focus()
     act(() => { gateway.setView('pending', view(secret, horizontal, advice)) })
     expect(ignore).toHaveFocus()
-    act(() => { nav.update({ tab: 'pending' }) })
+    act(() => { nav.update({ view: 'todo' }) })
     expect(ignore).toHaveFocus()
     expect(scrollIntoView).toHaveBeenCalledTimes(1)
   })
@@ -631,9 +702,9 @@ describe('键盘', () => {
   })
 })
 
-// —— 建议整理（spec「建议整理的动作」）：卡片不着色、动作按问题类型；删除走 forget，含密钥改走彻底删除确认 ——
+// —— 可以整理（spec「可以整理的动作」）：卡片不着色、动作按问题类型；删除走 forget，含密钥改走彻底删除确认 ——
 
-describe('待处理：建议整理', () => {
+describe('待处理：可以整理', () => {
   const advice = (type: AdviceType, id: string, overrides: Partial<MemoryCard> = {}): PendingItem => ({
     kind: 'advice', level: 'advice', type, memories: [memory({ id, name: `记忆 ${id}`, filePath: `/m/app/${id}.md`, digest: `sha1:${id}`, ...overrides })],
   })
@@ -651,39 +722,39 @@ describe('待处理：建议整理', () => {
   ]
   const pair: PendingItem = { kind: 'advice', level: 'advice', type: 'redundancy', memories: duplicates }
   const layer = { kind: 'workspace', workspacePath: '/w/app' } as const
-  const groupOf = () => screen.getByRole('region', { name: /^建议整理/ })
+  const groupOf = () => screen.getByRole('region', { name: /^可以整理/ })
   const cardOf = (title: string) => screen.getByRole('heading', { level: 3, name: title }).closest('article')!
   /** 原位确认里的「删除」。 */
   const confirmIn = (scope: HTMLElement) => within(within(scope).getByRole('group', { name: '删除这条？' })).getByRole('button', { name: '删除' })
 
-  it('建议整理组排在最后，组名带条数；卡片不着色、不带状态标记', () => {
+  it('可以整理组排在最后，组名带条数；卡片不着色、不带状态标记', () => {
     setup([secret, horizontal, expired, stale, bloat, orphan])
-    expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['高优问题 1', '待你处理 1', '建议整理 4'])
+    expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['先处理 1', '等你决定 1', '可以整理 4'])
     expect(within(groupOf()).getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual([
       '已过有效期', '很久没确认', '内容过长', '指向的旧记忆已不在',
     ])
     expect(groupOf().querySelector('.pm-marker')).toBeNull()
   })
 
-  // 「忽略」在标题行右上（DOM 里排在最前），其余在底部一行
+  // 动作行：退一步的幽灵按钮（「忽略」「打开文件」）排在最左，推荐的在最右
   it.each([
-    ['已过有效期', expired, ['忽略', '删除', '打开文件']],
-    ['很久没确认', stale, ['仍然有效', '删除', '打开文件']],
+    ['已过有效期', expired, ['忽略', '打开文件', '删除']],
+    ['很久没确认', stale, ['打开文件', '删除', '仍然有效']],
     ['内容过长', bloat, ['忽略', '打开文件', '直接改', '让模型改']],
     ['指向的旧记忆已不在', orphan, ['忽略', '打开文件']],
-    ['内容重复', baselineDup, ['忽略', '删除', '打开文件']],
+    ['内容重复', baselineDup, ['忽略', '打开文件', '删除']],
     ['放错层', toGlobal, ['忽略', '打开文件', '提升为全局']],
     ['放错层', toProject, ['忽略', '打开文件', '移到项目…']],
     ['表述不清', unclear, ['忽略', '打开文件', '直接改', '让模型改']],
-  ] as const)('%s：动作按 spec 表', (title, item, buttons) => {
+  ] as const)('%s：动作按 spec 表，「忽略」是动作行最左的幽灵按钮', (title, item, buttons) => {
     setup([item])
     expect(cardOf(title).querySelector(`[data-memory-id="${item.kind === 'advice' ? item.memories[0]!.id : ''}"]`)).not.toBeNull()
     expect(within(cardOf(title)).getAllByRole('button').map(b => b.textContent)).toEqual([...buttons])
-    // 「打开文件」退一步，用幽灵按钮；「忽略」是右上角的淡灰小按钮（同超限卡）；其余照常
+    const row = cardOf(title).querySelector('.pm-pending-actions')!
+    expect([...row.querySelectorAll('button')].map(b => b.textContent)).toEqual([...buttons])
     for (const b of within(cardOf(title)).getAllByRole('button')) {
-      expect(b.classList.contains('pm-btn--ghost')).toBe(b.textContent === '打开文件')
-      expect(b.classList.contains('pm-btn--quiet')).toBe(b.textContent === '忽略')
-      if (b.textContent === '忽略') expect(b.closest('.pm-pending-aside')).not.toBeNull()
+      expect(b.classList.contains('pm-btn--ghost')).toBe(b.textContent === '打开文件' || b.textContent === '忽略')
+      expect(b.classList.contains('pm-btn--quiet')).toBe(false)
     }
   })
 
@@ -691,7 +762,7 @@ describe('待处理：建议整理', () => {
     const { gateway, commands } = setup([bloat])
     fireEvent.click(within(cardOf('内容过长')).getByRole('button', { name: '忽略' }))
     await screen.findByText('已忽略')
-    expect(screen.getByText('不再提示，也不再扣分；内容改了会重新检查。可在「健康」里取消忽略。')).toBeInTheDocument()
+    expect(screen.getByText('不再提示，也不再扣分；内容改了会重新检查。')).toBeInTheDocument()
     // 视图重写后这一项不在了，结果卡照旧留在原位
     act(() => { gateway.setView('pending', view()) })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
@@ -705,9 +776,20 @@ describe('待处理：建议整理', () => {
     expect(screen.queryByText('已忽略')).toBeNull()
   })
 
-  it('内容重复的一组：右上一个「忽略」，带上整组的记忆 id', async () => {
+  it('内容重复的一对：两侧动作行都是「打开文件」（幽灵）在左、删除在右', () => {
+    setup([pair])
+    const sides = [...cardOf('内容重复').querySelectorAll('.pm-pending-advice-side .pm-pending-actions')]
+    expect(sides.map(row => [...row.querySelectorAll('button')].map(b => b.textContent))).toEqual([
+      ['打开文件', '删除左边'], ['打开文件', '删除右边'],
+    ])
+  })
+
+  it('内容重复的一组：底部动作行最左一个「忽略」（幽灵），带上整组的记忆 id', async () => {
     const { commands } = setup([pair])
-    fireEvent.click(within(cardOf('内容重复')).getByRole('button', { name: '忽略' }))
+    const ignore = within(cardOf('内容重复')).getByRole('button', { name: '忽略' })
+    expect(ignore).toHaveClass('pm-btn--ghost')
+    expect(ignore.parentElement!.firstElementChild).toBe(ignore)
+    fireEvent.click(ignore)
     await screen.findByText('已忽略')
     expect(commands()).toEqual([{ cmd: 'ignore-advice', type: 'redundancy', memories: duplicates.map(m => ({ memoryId: m.id, layer, base: { updatedAt: m.updatedAt, digest: m.digest } })) }])
   })
@@ -731,8 +813,8 @@ describe('待处理：建议整理', () => {
     const right = within(card).getByRole('region', { name: '右边这条' })
     expect(within(left).getByText('左边的内容。')).toBeInTheDocument()
     expect(within(right).getByText('右边的内容。')).toBeInTheDocument()
-    expect(within(card).getAllByRole('button').map(b => b.textContent)).toEqual(['忽略', '删除左边', '打开文件', '删除右边', '打开文件', '直接合并', '让模型合并'])
-    for (const b of within(card).getAllByRole('button')) expect(b.classList.contains('pm-btn--ghost')).toBe(b.textContent === '打开文件')
+    expect(within(card).getAllByRole('button').map(b => b.textContent)).toEqual(['打开文件', '删除左边', '打开文件', '删除右边', '忽略', '直接合并', '让模型合并'])
+    for (const b of within(card).getAllByRole('button')) expect(b.classList.contains('pm-btn--ghost')).toBe(b.textContent === '打开文件' || b.textContent === '忽略')
 
     await act(async () => { fireEvent.click(within(right).getByRole('button', { name: '打开文件' })) })
     expect(gateway.opened).toEqual([{ path: '/m/app/r2.md' }])
@@ -747,7 +829,7 @@ describe('待处理：建议整理', () => {
     const { commands } = setup([{ kind: 'advice', level: 'advice', type: 'redundancy', memories: [...duplicates, memory({ id: 'r3', name: '第三条' })] }])
     const card = cardOf('内容重复')
     expect(screen.getByText('这几条说的是同一件事，留一条就够。删掉的 14 天内可在「最近删除」恢复。')).toBeInTheDocument()
-    expect(within(card).getAllByRole('button').map(b => b.textContent)).toEqual(['忽略', '删除', '打开文件', '删除', '打开文件', '删除', '打开文件'])
+    expect(within(card).getAllByRole('button').map(b => b.textContent)).toEqual(['打开文件', '删除', '打开文件', '删除', '打开文件', '删除', '忽略'])
     const third = within(card).getByRole('region', { name: '第三条' })
     fireEvent.click(within(third).getByRole('button', { name: '删除' }))
     fireEvent.click(confirmIn(third))
@@ -800,6 +882,27 @@ describe('待处理：建议整理', () => {
     expect(screen.getByText('14 天内可在「最近删除」恢复。')).toBeInTheDocument()
   })
 
+  it('删除后结果行可撤销：撤销发 restore（带层），卡片回来、按钮照旧', async () => {
+    const { gateway, commands } = setup([expired, pair])
+    fireEvent.click(within(cardOf('已过有效期')).getByRole('button', { name: '删除' }))
+    fireEvent.click(confirmIn(cardOf('已过有效期')))
+    await screen.findByText('已删除')
+    act(() => { gateway.setView('pending', view(pair)) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
+    expect(within(cardOf('已过有效期')).getByRole('button', { name: '删除' })).toBeInTheDocument()
+    // 成对的那张删右边：撤销恢复的是右边那条
+    fireEvent.click(screen.getByRole('button', { name: '删除右边' }))
+    fireEvent.click(confirmIn(within(cardOf('内容重复')).getByRole('region', { name: '右边这条' })))
+    await screen.findByText('已删除')
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
+    expect(commands()).toEqual([
+      { cmd: 'forget', memoryId: 'e1', layer },
+      { cmd: 'restore', memoryId: 'e1', layer },
+      { cmd: 'forget', memoryId: 'r2', layer },
+      { cmd: 'restore', memoryId: 'r2', layer },
+    ])
+  })
+
   it('删除含密钥的记忆：forget 回 has-secret（什么都没动），原位出现彻底删除确认；取消不发，「彻底删除」发 hard-delete', async () => {
     const { commands } = setup([stale], {
       respond: command => command.cmd === 'forget'
@@ -849,6 +952,19 @@ describe('待处理：建议整理', () => {
     expect(commands()).toEqual([])
   })
 
+  it('建议卡的删除确认：焦点移到别的控件、在确认区外按下指针都收起，什么都不发', () => {
+    const { commands } = setup([expired, bloat])
+    const card = cardOf('已过有效期')
+    fireEvent.click(within(card).getByRole('button', { name: '删除' }))
+    const other = within(cardOf('内容过长')).getByRole('button', { name: '打开文件' })
+    fireEvent.blur(within(card).getByRole('button', { name: '取消' }), { relatedTarget: other })
+    expect(within(card).queryByRole('group', { name: '删除这条？' })).toBeNull()
+    fireEvent.click(within(card).getByRole('button', { name: '删除' }))
+    fireEvent.pointerDown(cardOf('内容过长'))
+    expect(within(card).queryByRole('group', { name: '删除这条？' })).toBeNull()
+    expect(commands()).toEqual([])
+  })
+
   it('「打开文件」打开这条记忆的文件；打不开时卡片里说明', async () => {
     const { gateway } = setup([bloat], { openOk: false })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '打开文件' })) })
@@ -860,13 +976,13 @@ describe('待处理：建议整理', () => {
     const many = Array.from({ length: 7 }, (_, i) => advice('bloat', `b${i}`))
     setup(many)
     expect(within(groupOf()).getAllByRole('article')).toHaveLength(5)
-    expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['建议整理 7'])
+    expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['可以整理 7'])
     fireEvent.click(screen.getByRole('button', { name: '展开其余 2 条' }))
     expect(within(groupOf()).getAllByRole('article')).toHaveLength(7)
     expect(screen.queryByRole('button', { name: /展开其余/ })).toBeNull()
   })
 
-  it('只折叠建议整理：待你处理超过 5 条也全部显示', () => {
+  it('只折叠可以整理：等你决定超过 5 条也全部显示', () => {
     const conflicts = Array.from({ length: 6 }, (_, i) => ({ ...horizontal, decisionId: `d${i}`, summary: `冲突 ${i}` }) as PendingItem)
     setup(conflicts)
     expect(screen.queryByRole('button', { name: /展开其余/ })).toBeNull()
@@ -877,12 +993,91 @@ describe('待处理：建议整理', () => {
     Element.prototype.scrollIntoView = vi.fn()
     try {
       const many = Array.from({ length: 7 }, (_, i) => advice('bloat', `b${i}`))
-      setup(many, {}, createNavStore({ tab: 'pending', memoryId: 'b6' }))
+      setup(many, {}, createNavStore({ view: 'todo', memoryId: 'b6' }))
       expect(within(groupOf()).getAllByRole('article')).toHaveLength(7)
       expect(document.querySelector('[data-memory-id="b6"]')!.closest('.pm-pending-row')).toHaveClass('pm-flash')
     } finally {
       delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView
     }
+  })
+})
+
+describe('可以整理：已忽略', () => {
+  const healthLayer = (layer: HealthView['layers'][number]['layer'], ignored: HealthView['layers'][number]['ignored']): HealthView['layers'][number] => ({
+    layer, totalMemories: 3, score: 90, tier: 'green', gate: { secret: false }, issues: [], staleCount: 0, lastCheckupAt: NOW, overflow: null, ignored,
+    deductions: { rule: { points: 0, types: [] }, content: { points: 0, types: [] }, freshness: { points: 0, types: [] } },
+  })
+  const app = { kind: 'workspace', workspacePath: '/w/app' } as const
+  const health: HealthView = {
+    version: GUI_VIEW_VERSION,
+    governanceEnabled: true,
+    layers: [
+      healthLayer({ kind: 'global' }, [{ type: 'unclear', memories: [{ id: 'g1', name: '模糊那条', summary: '' }] }]),
+      healthLayer(app, [
+        { type: 'bloat', memories: [{ id: 'i1', name: '太长那条', summary: '' }] },
+        { type: 'redundancy', memories: [{ id: 'i2', name: '甲', summary: '' }, { id: 'i3', name: '乙', summary: '' }] },
+      ]),
+    ],
+  }
+  function render(items: PendingItem[], scope: PageScope) {
+    const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(...items), health } })
+    renderInShell(<PendingTab nav={createNavStore()} session={SESSION} scope={scope} workspacePath={scope.kind === 'workspace' ? scope.workspacePath : undefined} now={NOW} />, gateway)
+    return { gateway, commands: () => gateway.executed.map(e => e.command) }
+  }
+  const ignoredList = () => screen.getByRole('list', { name: /^已忽略/ })
+
+  it('「可以整理」组底部一行「已忽略 N 条 查看」，默认收起；只算这个范围的', () => {
+    render([tidy], app)
+    const group = screen.getByRole('region', { name: /^可以整理/ })
+    expect(within(group).getByText('已忽略 2 条')).toBeInTheDocument()
+    const toggle = within(group).getByRole('button', { name: '查看' })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('list', { name: /^已忽略/ })).toBeNull()
+    // 在组里最后
+    expect(group.lastElementChild).toContainElement(toggle)
+  })
+
+  it('展开逐条写问题类型和记忆名，每条「取消忽略」发 unignore-advice（类型 + 全部记忆 id）', async () => {
+    const { commands } = render([tidy], app)
+    fireEvent.click(screen.getByRole('button', { name: '查看' }))
+    expect(screen.getByRole('button', { name: '收起' })).toHaveAttribute('aria-expanded', 'true')
+    const rows = within(ignoredList()).getAllByRole('listitem')
+    expect(rows.map(r => r.textContent)).toEqual(['内容过长 · 太长那条取消忽略', '内容重复 · 甲 · 乙取消忽略'])
+    await act(async () => { fireEvent.click(within(rows[1]!).getByRole('button', { name: '取消忽略' })) })
+    expect(commands()).toEqual([{ cmd: 'unignore-advice', type: 'redundancy', memoryIds: ['i2', 'i3'] }])
+  })
+
+  it('「全部」里列所有范围的，每条带范围胶囊', () => {
+    render([tidy], ALL_SCOPE)
+    expect(screen.getByText('已忽略 3 条')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '查看' }))
+    const rows = within(ignoredList()).getAllByRole('listitem')
+    expect(rows.map(r => r.querySelector('.pm-chip')?.textContent)).toEqual(['全局', 'app', 'app'])
+  })
+
+  it('选了具体范围不带范围胶囊', () => {
+    render([tidy], app)
+    fireEvent.click(screen.getByRole('button', { name: '查看' }))
+    expect(ignoredList().querySelector('.pm-chip')).toBeNull()
+  })
+
+  it('这个范围没有忽略过：不画这一行', () => {
+    render([tidy], { kind: 'workspace', workspacePath: '/w/other' })
+    expect(screen.queryByText(/^已忽略/)).toBeNull()
+  })
+
+  it('没有可以整理的条目、别的组有：「可以整理」组只画已忽略这一行', () => {
+    render([horizontal], app)
+    const group = screen.getByRole('region', { name: /^可以整理/ })
+    expect(within(group).getByText('已忽略 2 条')).toBeInTheDocument()
+    expect(within(group).queryByRole('article')).toBeNull()
+  })
+
+  it('三组都空：照常是空状态，已忽略那一行跟在下面', () => {
+    render([], app)
+    expect(screen.getByRole('status')).toHaveTextContent('没有要处理的事')
+    expect(screen.getByText('已忽略 2 条')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { level: 2 })).toBeNull()
   })
 })
 
@@ -1354,7 +1549,7 @@ describe('待处理：放错层只给挪层', () => {
   /** pageProject：页面作用域的项目，null = 页面在全局。 */
   function setupMove(items: PendingItem[], init: FakeGatewayInit = {}, pageProject: string | null = '/w/app') {
     const gateway = createFakeGateway({ session, config, views: { pending: view(...items), health: scannedHealth(NOW) }, ...init })
-    renderInShell(<PendingTab nav={createNavStore()} session={session} workspacePath={pageProject ?? undefined} now={NOW} />, gateway)
+    renderInShell(<PendingTab nav={createNavStore()} session={session} scope={ALL_SCOPE} workspacePath={pageProject ?? undefined} now={NOW} />, gateway)
     return { gateway, commands: () => gateway.executed.map(e => e.command) }
   }
   const cardOf = () => screen.getByRole('heading', { level: 3, name: '放错层' }).closest('article')!
@@ -1455,7 +1650,7 @@ describe('待处理：放错层只给挪层', () => {
   it('一个已知项目都没有：写明原因，「移过去」不可用', () => {
     const lonely = { kind: 'ready', sessionId: 's1', cwd: undefined } as const
     const gateway = createFakeGateway({ session: lonely, config, views: { pending: view(toProject), health: scannedHealth(NOW) } })
-    renderInShell(<PendingTab nav={createNavStore()} session={lonely} workspacePath={undefined} now={NOW} />, gateway)
+    renderInShell(<PendingTab nav={createNavStore()} session={lonely} scope={ALL_SCOPE} workspacePath={undefined} now={NOW} />, gateway)
     openPicker()
     expect(within(cardOf()).getByText('还没有已知的项目：在某个项目里开过对话后，它会出现在这里。')).toBeInTheDocument()
     expect(within(cardOf()).getByRole('button', { name: '移过去' })).toHaveAttribute('aria-disabled', 'true')
@@ -1470,7 +1665,7 @@ describe('待处理：放错层只给挪层', () => {
   it('一个已知项目都没有：展开时焦点落在「取消」，不随收起的「移到项目…」掉到页面上', () => {
     const lonely = { kind: 'ready', sessionId: 's1', cwd: undefined } as const
     const gateway = createFakeGateway({ session: lonely, config, views: { pending: view(toProject), health: scannedHealth(NOW) } })
-    renderInShell(<PendingTab nav={createNavStore()} session={lonely} workspacePath={undefined} now={NOW} />, gateway)
+    renderInShell(<PendingTab nav={createNavStore()} session={lonely} scope={ALL_SCOPE} workspacePath={undefined} now={NOW} />, gateway)
     openPicker()
     expect(within(cardOf()).getByRole('button', { name: '取消' })).toHaveFocus()
   })

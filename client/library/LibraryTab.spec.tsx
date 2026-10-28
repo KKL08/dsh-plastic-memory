@@ -37,13 +37,43 @@ async function remove(row: HTMLElement) {
 }
 
 describe('全部记忆', () => {
-  it('列出作用域那一层的记忆卡；顶部存储说明写条数、目录、MEMORY.md 是生成的索引、模型怎么读到', () => {
+  it('列出范围里的记忆卡；搜索框下一行存储说明「每条一个文件 · 目录 · 打开目录」，完整路径在 title 里', () => {
     renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: library() } }))
     expect(screen.getAllByRole('listitem').map(li => li.querySelector('.pm-mc-text')?.textContent))
       .toEqual(['测试里不要 mock 数据库，用 testcontainers 起真实 Postgres。', '提交前跑 typecheck'])
-    expect(screen.getByText('2 条记忆，每条一个文件')).toBeInTheDocument()
-    expect(screen.getByText('/m/app-1')).toBeInTheDocument()
-    expect(screen.getByText(/MEMORY\.md 是插件生成的索引，手改会被覆盖。/)).toHaveTextContent('agent 需要细节时再读文件')
+    expect(screen.getByRole('searchbox', { name: '搜索记忆' })).toHaveAttribute('placeholder', '搜索记忆原文')
+    const storage = document.querySelector('.pm-lib-storage')!
+    expect(storage).toHaveTextContent(/^每条一个文件\s*·\s*\/m\/app-1\s*打开目录$/)
+    expect(within(storage as HTMLElement).getByText('/m/app-1')).toHaveAttribute('title', '/m/app-1')
+    expect(screen.queryByText(/MEMORY\.md/)).toBeNull()
+  })
+
+  it('全局写全局目录；「全部」不写存储说明，按层分段，段标题写层名和条数', () => {
+    const { unmount } = renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'global' }} session={session} now={NOW} />, createFakeGateway({ views: { library: library() } }))
+    expect(document.querySelector('.pm-lib-storage')).toHaveTextContent('/m/global')
+    expect(screen.queryByRole('heading', { level: 3 })).toBeNull()
+    unmount()
+    renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'all' }} session={session} now={NOW} />, createFakeGateway({ views: { library: library() } }))
+    expect(document.querySelector('.pm-lib-storage')).toBeNull()
+    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['全局1', 'app2', 'blog1'])
+    expect(screen.getAllByRole('listitem')).toHaveLength(4)
+  })
+
+  it('搜索按名称、摘要、正文和标签筛（不分大小写）；都不匹配时说没找到', () => {
+    renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'all' }} session={session} now={NOW} />, createFakeGateway({ views: { library: library() } }))
+    fireEvent.change(screen.getByRole('searchbox', { name: '搜索记忆' }), { target: { value: 'TYPECHECK' } })
+    expect(screen.getAllByRole('listitem').map(li => li.querySelector('.pm-mc-text')?.textContent)).toEqual(['提交前跑 typecheck'])
+    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['app1'])
+    fireEvent.change(screen.getByRole('searchbox', { name: '搜索记忆' }), { target: { value: '没有这种东西' } })
+    expect(screen.queryByRole('list')).toBeNull()
+    expect(screen.getByRole('status')).toHaveTextContent('没有找到匹配的记忆')
+  })
+
+  it('行尾先是「删除」（幽灵按钮），再是「打开文件」；没有「在访达中显示」', () => {
+    renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: library() } }))
+    const buttons = within(rowOf('提交前跑 typecheck')).getAllByRole('button')
+    expect(buttons.map(b => b.textContent)).toEqual(['删除', '打开文件'])
+    expect(buttons[0]).toHaveClass('pm-btn--ghost')
   })
 
   it('类型写显示名（待处理视图的 typeLabels）；认不出的类型写 id', () => {
@@ -77,14 +107,13 @@ describe('全部记忆', () => {
     ])
   })
 
-  it('打开文件、在访达中显示、打开目录都走宿主 openWorkspacePath；宿主拒绝时提示', async () => {
+  it('打开文件、打开目录都走宿主 openWorkspacePath；宿主拒绝时提示', async () => {
     const gateway = createFakeGateway({ views: { library: library() } })
     renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
     const row = rowOf('提交前跑 typecheck')
     await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '打开文件' })) })
-    await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '在访达中显示' })) })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '打开目录' })) })
-    expect(gateway.opened).toEqual([{ path: '/m/app-1/a2.md' }, { path: '/m/app-1/a2.md', action: 'reveal' }, { path: '/m/app-1' }])
+    expect(gateway.opened).toEqual([{ path: '/m/app-1/a2.md' }, { path: '/m/app-1' }])
     expect(gateway.executed).toEqual([])
 
     const refusing = createFakeGateway({ views: { library: library() }, openOk: false })
@@ -93,15 +122,46 @@ describe('全部记忆', () => {
     expect(screen.getByRole('status')).toHaveTextContent('没能打开，宿主拒绝了这个路径。')
   })
 
-  it('删除发 /memory forget（软删），提示 14 天内可在最近删除恢复，链接跳到最近删除那一条', async () => {
+  it('删除发 /memory forget（软删），这一行原位换成结果行，视图刷新后还在原处；「撤销」发 restore，没有去最近删除的链接', async () => {
     const gateway = createFakeGateway({ views: { library: library() } })
-    const nav = createNavStore({ tab: 'library' })
-    renderInShell(<LibraryTab nav={nav} scope={app} session={session} now={NOW} />, gateway)
+    renderInShell(<LibraryTab nav={createNavStore({ view: 'library' })} scope={app} session={session} now={NOW} />, gateway)
     await remove(rowOf('提交前跑 typecheck'))
     expect(gateway.executed).toEqual([{ sessionId: 's1', command: { cmd: 'forget', memoryId: 'a2', layer: app } }])
-    expect(screen.getByRole('status')).toHaveTextContent('已删除，14 天内可在「最近删除」恢复。')
-    fireEvent.click(screen.getByRole('button', { name: '去最近删除 ›' }))
-    expect(nav.get()).toEqual({ tab: 'deleted', memoryId: 'a2' })
+    const result = () => screen.getAllByRole('listitem')[1]!
+    expect(result()).toHaveTextContent('已删除，14 天内可在「最近删除」找回。')
+    expect(screen.queryByRole('button', { name: '去最近删除 ›' })).toBeNull()
+
+    const without = library()
+    act(() => { gateway.setView('library', { ...without, layers: without.layers.map(l => ({ ...l, items: l.items.filter(m => m.id !== 'a2') })) }) })
+    expect(screen.getAllByRole('listitem')).toHaveLength(2)
+    expect(result()).toHaveTextContent('已删除，14 天内可在「最近删除」找回。')
+    await act(async () => { fireEvent.click(within(result()).getByRole('button', { name: '撤销' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([
+      { cmd: 'forget', memoryId: 'a2', layer: app },
+      { cmd: 'restore', memoryId: 'a2', layer: app },
+    ])
+    expect(screen.queryByText('已删除，14 天内可在「最近删除」找回。')).toBeNull()
+    expect(within(result()).getByRole('button', { name: '删除' })).toBeInTheDocument()
+  })
+
+  it('删掉一个项目的最后一条：视图里这一层没了，结果行照样留在原位、能撤销；「全部」里段标题也还在', async () => {
+    const onlyBlog = library({ layers: [{ layer: { kind: 'global' }, items: [memory({ id: 'g1', scope: 'global', workspacePath: undefined, content: '回答用中文' })] }, { layer: blog, items: [memory({ id: 'b1', workspacePath: '/w/blog', content: '博客用 Astro' })] }] })
+    const blogGone = library({ layers: [onlyBlog.layers[0]!] })
+    for (const scope of [blog, { kind: 'all' } as const]) {
+      const gateway = createFakeGateway({ views: { library: onlyBlog } })
+      const { unmount } = renderInShell(<LibraryTab nav={createNavStore()} scope={scope} session={session} now={NOW} />, gateway)
+      await remove(rowOf('博客用 Astro'))
+      act(() => { gateway.setView('library', blogGone) })
+      expect(rowOf('博客用 Astro')).toHaveTextContent('已删除，14 天内可在「最近删除」找回。')
+      if (scope.kind === 'all') expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['全局1', 'blog1'])
+      await act(async () => { fireEvent.click(within(rowOf('博客用 Astro')).getByRole('button', { name: '撤销' })) })
+      expect(gateway.executed.map(e => e.command)).toEqual([
+        { cmd: 'forget', memoryId: 'b1', layer: blog },
+        { cmd: 'restore', memoryId: 'b1', layer: blog },
+      ])
+      expect(within(rowOf('博客用 Astro')).getByRole('button', { name: '删除' })).toBeInTheDocument()
+      unmount()
+    }
   })
 
   it('确认开着时这一行从列表里没了（别处删了）：再回来时是「删除」按钮，不带着没收起的确认', async () => {
@@ -117,7 +177,7 @@ describe('全部记忆', () => {
     expect(within(rowOf('提交前跑 typecheck')).getByRole('button', { name: '删除' })).toBeInTheDocument()
   })
 
-  it('点「删除」不直接删：原位换成「删除这条？ 删除 · 取消」，焦点在「取消」；「取消」、Esc、焦点移走都收起，什么都不发', async () => {
+  it('点「删除」不直接删：原位换成「删除这条？ 删除 · 取消」，焦点在「取消」；「取消」、Esc、焦点移走、点别处都收起，什么都不发', async () => {
     const gateway = createFakeGateway({ views: { library: library() } })
     renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
     const row = within(rowOf('提交前跑 typecheck'))
@@ -138,6 +198,9 @@ describe('全部记忆', () => {
     expect(row.queryByRole('group', { name: '删除这条？' })).toBeNull()
     await open()
     act(() => { row.getByRole('button', { name: '打开文件' }).focus() })
+    expect(row.queryByRole('group', { name: '删除这条？' })).toBeNull()
+    await open()
+    act(() => { fireEvent.pointerDown(screen.getByRole('searchbox', { name: '搜索记忆' })) })
     expect(row.queryByRole('group', { name: '删除这条？' })).toBeNull()
     expect(row.getByRole('button', { name: '删除' })).toBeInTheDocument()
     expect(gateway.executed).toEqual([])
@@ -171,7 +234,6 @@ describe('全部记忆', () => {
     expect(screen.queryByText('彻底删除后不进最近删除、不能恢复，以前快照里的副本也会抹掉。')).toBeNull()
     expect(screen.getByRole('status')).toHaveTextContent('已彻底删除。如果它是真的凭证，记得去换一个新的。')
     expect(screen.queryByText(/14 天/)).toBeNull()
-    expect(screen.queryByRole('button', { name: '去最近删除 ›' })).toBeNull()
   })
 
   it('删别的项目里的记忆：服务端拒（cross-workspace）后在行里确认，「继续处理」才带 allowCrossWorkspace 重发；失败显示原话', async () => {
@@ -247,7 +309,7 @@ describe('全部记忆', () => {
     const { unmount } = renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'global' }} session={session} now={NOW} />, createFakeGateway({ views: { library: empty } }))
     expect(screen.getByRole('status')).toHaveClass('pm-empty--first')
     expect(screen.getByRole('status')).toHaveTextContent('还没有记忆')
-    expect(screen.queryByText(/条记忆，每条一个文件/)).toBeNull()
+    expect(document.querySelector('.pm-lib-storage')).toBeNull()
     unmount()
 
     renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'workspace', workspacePath: '/w/none' }} session={session} now={NOW} />, createFakeGateway({ views: { library: library() } }))
@@ -282,16 +344,30 @@ describe('全部记忆', () => {
       await press(delOf(text))
     }
 
-    it('普通删除：确认后这一行没了，焦点落到下一行的「删除」；删的是最后一条时落到提示里', async () => {
+    it('普通删除：确认后这一行换成结果行，焦点落在它的「撤销」上；视图刷新后焦点不动', async () => {
       const gateway = createFakeGateway({ views: { library: library() } })
       renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
       await pressRemove(A1)
+      const undo = () => within(screen.getAllByRole('listitem')[0]!).getByRole('button', { name: '撤销' })
+      await waitFor(() => { expect(undo()).toHaveFocus() })
       act(() => { gateway.setView('library', library({ layers: [{ layer: app, items: [memory({ id: 'a2', content: '提交前跑 typecheck' })] }] })) })
-      await waitFor(() => { expect(delOf('提交前跑 typecheck')).toHaveFocus() })
+      expect(undo()).toHaveFocus()
+    })
 
-      await pressRemove('提交前跑 typecheck')
-      act(() => { gateway.setView('library', library({ layers: [{ layer: app, items: [] }, { layer: { kind: 'global' }, items: [memory({ id: 'g1' })] }] })) })
-      await waitFor(() => { expect(screen.getByText('已删除，14 天内可在「最近删除」恢复。')).toContainElement(document.activeElement as HTMLElement) })
+    it('视图先于命令结果刷新（宿主先推了新版本）：这一行留在原位，结果回来后换成结果行，焦点照样落在「撤销」上', async () => {
+      let answer: (() => void) | undefined
+      const gateway = createFakeGateway({
+        views: { library: library() },
+        respond: command => new Promise((resolve) => { answer = () => { resolve({ ok: true, cmd: command.cmd }) } }),
+      })
+      renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
+      await pressRemove(A1)
+      await waitFor(() => { expect(delOf(A1)).toHaveFocus() })
+      act(() => { gateway.setView('library', library({ layers: [{ layer: app, items: [memory({ id: 'a2', content: '提交前跑 typecheck' })] }] })) })
+      expect(delOf(A1)).toHaveFocus()
+      await act(async () => { answer?.() })
+      await waitFor(() => { expect(within(rowOf(A1)).getByRole('button', { name: '撤销' })).toHaveFocus() })
+      expect(screen.getAllByRole('listitem')[0]).toBe(rowOf(A1))
     })
 
     it('含密钥确认点「取消」：焦点回到这一行的「删除」', async () => {
@@ -329,7 +405,7 @@ describe('全部记忆', () => {
       await waitFor(() => { expect(delOf(A1)).toHaveFocus() })
     })
 
-    it('跨项目确认：「取消」回到「删除」；「继续处理」先回到「删除」，删掉后落到下一行', async () => {
+    it('跨项目确认：「取消」回到「删除」；「继续处理」删掉后这一行换成结果行，焦点落在「撤销」上', async () => {
       const gateway = createFakeGateway({
         views: { library: library() },
         respond: command => 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
@@ -343,9 +419,8 @@ describe('全部记忆', () => {
 
       await pressRemove(A1)
       await press(screen.getByRole('button', { name: '继续处理' }))
-      await waitFor(() => { expect(delOf(A1)).toHaveFocus() })
-      act(() => { gateway.setView('library', library({ layers: [{ layer: app, items: [memory({ id: 'a2', content: '提交前跑 typecheck' })] }] })) })
-      await waitFor(() => { expect(within(rowOf('提交前跑 typecheck')).getByRole('button', { name: '删除' })).toHaveFocus() })
+      await waitFor(() => { expect(within(rowOf(A1)).getByRole('button', { name: '撤销' })).toHaveFocus() })
+      expect(rowOf(A1)).toHaveTextContent('已删除，14 天内可在「最近删除」找回。')
     })
   })
 
@@ -356,7 +431,7 @@ describe('全部记忆', () => {
 
     it('目标行滚入视野并高亮一次；视图刷新不重播，播完收起，入口再导航一次会重播', () => {
       const gateway = createFakeGateway({ views: { library: library() } })
-      const nav = createNavStore({ tab: 'library', scope: app, memoryId: 'a2' })
+      const nav = createNavStore({ view: 'library', scope: app, memoryId: 'a2' })
       renderInShell(<LibraryTab nav={nav} scope={app} session={session} now={NOW} />, gateway)
       const row = rowOf('提交前跑 typecheck')
       expect(row).toHaveClass('pm-flash')
@@ -369,14 +444,14 @@ describe('全部记忆', () => {
       act(() => { vi.advanceTimersByTime(FLASH_MS) })
       expect(row).not.toHaveClass('pm-flash')
 
-      act(() => { nav.navigate({ tab: 'library', scope: app, memoryId: 'a2' }) })
+      act(() => { nav.navigate({ view: 'library', scope: app, memoryId: 'a2' }) })
       expect(rowOf('提交前跑 typecheck')).toHaveClass('pm-flash')
       expect(scrollIntoView).toHaveBeenCalledTimes(2)
     })
 
     it('目标行视图晚到时，到了再高亮', () => {
       const gateway = createFakeGateway({ views: { library: { status: 'loading' } } })
-      renderInShell(<LibraryTab nav={createNavStore({ tab: 'library', memoryId: 'a1' })} scope={app} session={session} now={NOW} />, gateway)
+      renderInShell(<LibraryTab nav={createNavStore({ view: 'library', memoryId: 'a1' })} scope={app} session={session} now={NOW} />, gateway)
       expect(scrollIntoView).not.toHaveBeenCalled()
       act(() => { gateway.setView('library', library()) })
       expect(rowOf('测试里不要 mock 数据库，用 testcontainers 起真实 Postgres。')).toHaveClass('pm-flash')

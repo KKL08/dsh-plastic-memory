@@ -541,3 +541,66 @@ describe('SidecarStore：KV 导入协议', () => {
     }
   })
 })
+
+describe('体检记录表的认领（带心跳）', () => {
+  const claimPath = (key: string) => join(state, 'checkups', `${createHash('sha1').update(key).digest('hex')}.claim`)
+  const readClaim = async (key: string) => JSON.parse(await readFile(claimPath(key), 'utf8')) as { pid: number; at: number; id: string }
+
+  it('认领文件在体检记录旁边，写进程号、时间和随机标识；持有期间别的实例认领不到，isClaimed 为真', async () => {
+    const clock = { now: 1000 }
+    const a = new SidecarStore({ root, schemas, now: () => clock.now })
+    const b = new SidecarStore({ root, schemas, now: () => clock.now })
+    expect(await b.checkups.isClaimed('global')).toBe(false)
+    const held = await a.checkups.claimRefreshable('global')
+    expect(held).toBeDefined()
+    expect(await readClaim('global')).toMatchObject({ pid: process.pid, at: 1000, id: expect.any(String) })
+    expect(await b.checkups.claimRefreshable('global')).toBeUndefined()
+    expect(await b.checkups.isClaimed('global')).toBe(true)
+    // 认领文件不当条目读
+    expect(await b.checkups.list()).toEqual([])
+    await held!.release()
+    expect(await b.checkups.isClaimed('global')).toBe(false)
+    expect(await b.checkups.claimRefreshable('global')).toBeDefined()
+  })
+
+  it('刷新把认领时间改成此刻：一直刷新就不会被当成残留；60 秒没刷新算残留，别的实例可以接手', async () => {
+    const clock = { now: 0 }
+    const a = new SidecarStore({ root, schemas, now: () => clock.now })
+    const b = new SidecarStore({ root, schemas, now: () => clock.now })
+    const held = await a.checkups.claimRefreshable('global')
+    clock.now = 50_000
+    expect(await held!.refresh()).toBe(true)
+    expect((await readClaim('global')).at).toBe(50_000)
+    clock.now = 100_000
+    expect(await b.checkups.isClaimed('global')).toBe(true)
+    expect(await b.checkups.claimRefreshable('global')).toBeUndefined()
+    clock.now = 110_001
+    expect(await b.checkups.isClaimed('global')).toBe(false)
+    expect(await b.checkups.claimRefreshable('global')).toBeDefined()
+  })
+
+  it('被接手后：旧持有者刷新发现不是自己的了，返回 false、不改别人的认领；释放也只删自己的', async () => {
+    const clock = { now: 0 }
+    const a = new SidecarStore({ root, schemas, now: () => clock.now })
+    const b = new SidecarStore({ root, schemas, now: () => clock.now })
+    const old = await a.checkups.claimRefreshable('global')
+    clock.now = 61_000
+    const taker = await b.checkups.claimRefreshable('global')
+    expect(taker).toBeDefined()
+    const takerClaim = await readClaim('global')
+    expect(await old!.refresh()).toBe(false)
+    expect(await readClaim('global')).toEqual(takerClaim)
+    await old!.release()
+    expect(await readClaim('global')).toEqual(takerClaim)
+    await taker!.release()
+    expect(await a.checkups.isClaimed('global')).toBe(false)
+  })
+
+  it('认领文件被清掉后再刷新：返回 false，不把认领写回来', async () => {
+    const a = new SidecarStore({ root, schemas })
+    const held = await a.checkups.claimRefreshable('global')
+    await rm(claimPath('global'))
+    expect(await held!.refresh()).toBe(false)
+    expect(await a.checkups.isClaimed('global')).toBe(false)
+  })
+})

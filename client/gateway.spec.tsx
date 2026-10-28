@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
 import { useSyncExternalStore } from 'react'
-import { GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, type PendingItem, type PendingView } from '../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, type CheckupView, type PendingItem, type PendingView } from '../src/gui/contract.ts'
 import {
   belongsTo, createHostGateway, decodeExecution, fileAddress, MEMORY_ROOT_CONFIG_KEY, MEMORY_ROOT_KEY, parseView, pickSession, toPluginConfig, viewPath,
   workspaceOf,
@@ -11,7 +11,7 @@ import { createFakeConfigForm, DEFAULT_SECTION } from './settings/config-form.fa
 import { ENTRY_ID } from './settings/config.ts'
 import { createTranslator } from './i18n.tsx'
 import { zh } from './locales.ts'
-import { createNavStore } from './nav.ts'
+import { ALL_SCOPE, createNavStore } from './nav.ts'
 import { PendingTab } from './pending/PendingTab.tsx'
 import { fakeHostContext, levelCountsOf, memory } from './test-utils.tsx'
 import { PanelShell } from './ui/PanelShell.tsx'
@@ -126,6 +126,9 @@ describe('decodeExecution', () => {
     expect(ok).toEqual({ ok: true, cmd: 'undo', decisionId: 'd1' })
     const err = decodeExecution('forget', { ok: true, value: { commandId: 'c', result: { kind: 'error', text: '{"ok":false,"cmd":"forget","code":"not-found"}' } } })
     expect(err).toEqual({ ok: false, cmd: 'forget', code: 'not-found' })
+    // 范围正在体检：busy 是契约里的码，不折成 failed
+    const busy = decodeExecution('scan', { ok: true, value: { commandId: 'c', result: { kind: 'error', text: '{"ok":false,"cmd":"scan","code":"busy","detail":"全局 正在体检，查完再来"}' } } })
+    expect(busy).toEqual({ ok: false, cmd: 'scan', code: 'busy', detail: '全局 正在体检，查完再来' })
   })
 
   it('宿主失败、无结果、非契约文本都折成 failed，原话进 detail', () => {
@@ -151,9 +154,17 @@ describe('parseView', () => {
     expect(parseView('pending', JSON.stringify(v3))).toEqual({ status: 'outdated' })
   })
 
+  it('体检视图按契约校验：合法 → ready；缺字段 → error；版本不认识 → outdated', () => {
+    const checkups: CheckupView = { version: GUI_VIEW_VERSION, governanceEnabled: true, defaultFrequency: 7, allResult: null, scopes: [] }
+    expect(parseView('checkups', JSON.stringify(checkups))).toEqual({ status: 'ready', data: checkups })
+    expect(parseView('checkups', JSON.stringify({ version: GUI_VIEW_VERSION, governanceEnabled: true })).status).toBe('error')
+    expect(parseView('checkups', JSON.stringify({ ...checkups, version: GUI_VIEW_VERSION - 1 }))).toEqual({ status: 'outdated' })
+  })
+
   it('视图路径与文件资源地址', () => {
     expect(viewPath('/h/memories/', 'pending', 's1')).toBe('/h/memories/.state/gui/pending.json')
     expect(viewPath('/h/memories', 'session', 's 1')).toBe('/h/memories/.state/gui/session-s%201.json')
+    expect(viewPath('/h/memories', 'checkups', 's1')).toBe('/h/memories/.state/gui/checkups.json')
     expect(fileAddress('s1', '/h/m/a b.json')).toBe('dsh-resource://file/session/s1//h/m/a%20b.json')
   })
 })
@@ -338,6 +349,25 @@ describe('createHostGateway', () => {
     const { result } = renderHook(() => gateway.useView(gateway.useSession(undefined), 'pending'))
     await waitFor(() => { expect(result.current.status).toBe('ready') })
     expect(executed).toEqual([])
+  })
+
+  it('体检视图：读 checkups.json；版本不认识时同样请服务端重写一次再读', async () => {
+    localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+    const checkupsPath = '/h/memories/.state/gui/checkups.json'
+    const checkups: CheckupView = { version: GUI_VIEW_VERSION, governanceEnabled: true, defaultFrequency: 'manual', allResult: null, scopes: [] }
+    resources[fileAddress('s1', checkupsPath)] = { status: 'live', value: { absolutePath: checkupsPath, version: 'v1' }, failure: undefined }
+    files[checkupsPath] = JSON.stringify({ ...checkups, version: GUI_VIEW_VERSION - 1 })
+    const ctx = fakeCtx()
+    const execute = ctx.remote.commands.execute as ReturnType<typeof vi.fn>
+    const ok = execute.getMockImplementation()!
+    execute.mockImplementation(async (sid: string, line: string) => {
+      if (line === '/memory refresh-views') files[checkupsPath] = JSON.stringify(checkups)
+      return ok(sid, line)
+    })
+    const gateway = createHostGateway(ctx)(props)
+    const { result } = renderHook(() => gateway.useView(gateway.useSession(undefined), 'checkups'))
+    await waitFor(() => { expect(result.current).toEqual({ status: 'ready', data: checkups }) })
+    expect(executed).toEqual(['/memory refresh-views'])
   })
 
   describe('缓存了根、视图文件版本不认识（旧插件写的）', () => {
@@ -662,7 +692,7 @@ describe('createHostGateway', () => {
       const useSessions = <S,>(selector: (s: SessionListState) => S) => useSyncExternalStore(subscribe, () => selector(state))
       const gateway = createHostGateway(fakeCtx({ remote: { commands: { execute: vi.fn(execute) } } }))({ ...props, useSessions })
       function Page() {
-        return <PendingTab nav={createNavStore()} session={gateway.useSession('/w/app')} workspacePath="/w/app" />
+        return <PendingTab nav={createNavStore()} session={gateway.useSession('/w/app')} scope={ALL_SCOPE} workspacePath="/w/app" />
       }
       render(<PanelShell gateway={gateway} t={createTranslator(zh)}><Page /></PanelShell>)
       return {

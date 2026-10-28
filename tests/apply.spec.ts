@@ -35,10 +35,12 @@ import {
 import { baselineProjectionDefinition } from '../src/governance/baseline.ts'
 import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
 import {
-  GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_FILE, deletedViewSchema, healthViewSchema, libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema,
+  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_FILE, deletedViewSchema, healthViewSchema, libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema,
   workspaceMapViewSchema, type LibraryView, type PendingView,
 } from '../src/gui/contract.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
+import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
+import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
 import { defaultJiebaLoader } from '../src/search/jieba-segmenter.ts'
 
 /** 宿主 storageDomain 表的替身（@deepseek-ai/dsh-storage-domain KvTable 的形状）：读同步、写异步。 */
@@ -66,7 +68,13 @@ const liveCtxs: Array<() => Promise<void>> = []
  * ctx.inject(deps, cb)：依赖齐了才同步回调、把服务放进 child；registerProjection=false 模拟回调始终没触发。
  * 回调返回的 disposer 记下来，dispose() 仿插件卸载逆序逐个 await。
  */
-function mockCtx(opts: { projections?: SessionProjectionRegistry; registerProjection?: boolean; storageDomain?: boolean; commands?: { register(def: unknown): () => void } } = {}) {
+function mockCtx(opts: {
+  projections?: SessionProjectionRegistry; registerProjection?: boolean; storageDomain?: boolean; commands?: { register(def: unknown): () => void }
+  /** 宿主计时服务（ctx.inject(['timer'], …) 的 child 上的 timeout / interval）；缺省服务缺席。 */
+  timer?: { timeout(callback: () => void, delayMs: number): () => void; interval(callback: () => void, delayMs: number): () => void }
+  /** 宿主默认模型选择（ctx.get('agentDefaultModel')）；缺省服务缺席。 */
+  agentDefaultModel?: { currentSelection(): { provider: string; model: string } }
+} = {}) {
   const registered: string[] = []
   const listeners = new Map<string, (...args: unknown[]) => unknown>()
   // ctx.on 的第三参数（cordis EventOptions，如 prepend）按事件名记下，没传的不记
@@ -119,7 +127,8 @@ function mockCtx(opts: { projections?: SessionProjectionRegistry; registerProjec
     get: (name: string) => (name === 'llm' ? llm
       : name === 'sessionProjections' ? opts.projections
         : name === 'storageDomain' && opts.storageDomain === true ? storageDomain
-          : undefined),
+          : name === 'agentDefaultModel' ? opts.agentDefaultModel
+            : undefined),
     // 按依赖名分发，像 cordis 一样只在依赖的服务都在时才回调
     inject: (deps: string[], callback: (child: Record<string, unknown>) => unknown) => {
       const collect = (dispose: unknown) => { if (typeof dispose === 'function') disposers.push(dispose as () => unknown) }
@@ -127,6 +136,7 @@ function mockCtx(opts: { projections?: SessionProjectionRegistry; registerProjec
         collect(callback({ sessionProjections: opts.projections }))
       }
       if (deps.includes('commands') && opts.commands !== undefined) collect(callback({ commands: opts.commands }))
+      if (deps.includes('timer') && opts.timer !== undefined) collect(callback({ timeout: opts.timer.timeout, interval: opts.timer.interval }))
       return () => {}
     },
     dispose,
@@ -423,7 +433,7 @@ describe('GUI 命令接线', () => {
     await Promise.resolve()
     await ctx.dispose()
     const atDispose = await guiFiles()
-    expect(atDispose.map(([name]) => name).sort()).toEqual(Object.values(GUI_VIEW_FILES).sort())
+    expect(atDispose.map(([name]) => name).sort()).toEqual([...Object.values(GUI_VIEW_FILES), GUI_CHECKUP_VIEW_FILE].sort())
     // 卸载后的事件不再写视图
     ctx.listeners.get('session/created')!({ header: { id: 'sess-late' } })
     await rewriting
@@ -471,6 +481,68 @@ describe('GUI 命令接线', () => {
  * 侧表落文件与旧 KV 导入（spec「侧表」、测试第 4 层）：storageDomain 退出必需注入，只在首次侧表访问时
  * 经 ctx.get 探测、惰性打开旧域导入 snapshots 与 pending；apply 期间 .state/ 不出现。
  */
+/** 自动体检：宿主有计时服务时创建调度器；没有会话，用宿主默认模型；插件卸载时停。 */
+describe('自动体检接线', () => {
+  const DEFAULT_ROUTE = { provider: 'deepseek', model: 'deepseek-v4-pro' }
+  function fakeTimer() {
+    const timers: Array<{ delayMs: number; every: boolean; callback: () => void; isLive: boolean }> = []
+    const add = (every: boolean) => (callback: () => void, delayMs: number) => {
+      const t = { delayMs, every, callback, isLive: true }
+      timers.push(t)
+      return () => { t.isLive = false }
+    }
+    return { timers, timeout: add(false), interval: add(true) }
+  }
+
+  it('到期的范围在后台体检：不借会话，用宿主当前的默认模型，写自动体检的完成记录；卸载后定时器停掉', async () => {
+    const memoryRoot = await seedMemory(await makeTmpRoot())
+    const sidecar = sidecarAt(memoryRoot)
+    await new AutoCheckupSettingStore(sidecar.autoCheckups).set({ kind: 'all' }, 1)
+    const timer = fakeTimer()
+    const ctx = mockCtx({ timer, agentDefaultModel: { currentSelection: () => DEFAULT_ROUTE } })
+    await apply({ ...ctx, logger: { info() {}, warn() {}, error() {} } } as never, new Config({ memoryRoot } as never))
+    // 启动后 3 分钟第一次检查
+    const first = timer.timers.find(t => !t.every)!
+    expect(first.delayMs).toBe(3 * 60_000)
+    // 到点：一次性定时器触发后就不在了
+    first.isLive = false
+    first.callback()
+    await vi.waitFor(async () => expect((await new CheckupRecordStore(sidecar.checkups).list()).map(r => r.completed?.by)).toEqual(['auto']))
+    expect(ctx.llmRequests).toHaveLength(1)
+    expect(ctx.llmRequests[0]).toMatchObject(DEFAULT_ROUTE)
+    expect(ctx.llmRequests[0]).not.toHaveProperty('sessionId')
+    // 完成记录由执行器写；之后还要重写视图、放掉认领，认领的心跳停了只剩每 10 分钟的检查
+    await vi.waitFor(() => expect(timer.timers.filter(t => t.isLive).map(t => [t.delayMs, t.every])).toEqual([[10 * 60_000, true]]))
+    await ctx.dispose()
+    expect(timer.timers.filter(t => t.isLive)).toEqual([])
+  })
+
+  it('没有计时服务的宿主：不创建调度器，插件照常挂载', async () => {
+    const memoryRoot = await seedMemory(await makeTmpRoot())
+    await new AutoCheckupSettingStore(sidecarAt(memoryRoot).autoCheckups).set({ kind: 'all' }, 1)
+    const ctx = mockCtx({ agentDefaultModel: { currentSelection: () => DEFAULT_ROUTE } })
+    await apply(ctx as never, new Config({ memoryRoot } as never))
+    expect(ctx.registered).toContain('memory_scan')
+    expect(ctx.llmRequests).toEqual([])
+  })
+
+  it('有会话的手动体检照旧用借用会话的模型：会话解析不出模型时回 llm-unavailable，不改用默认模型', async () => {
+    const memoryRoot = await seedMemory(await makeTmpRoot())
+    const defs: Array<{ handler(inv: { rawInput: string; agent: unknown }): Promise<{ text?: string }> }> = []
+    const ctx = mockCtx({
+      commands: { register: (def) => { defs.push(def as (typeof defs)[number]); return () => {} } },
+      agentDefaultModel: { currentSelection: () => DEFAULT_ROUTE },
+    })
+    await apply({ ...ctx, logger: { info() {}, warn() {}, error() {} } } as never, new Config({ memoryRoot } as never))
+    const scan = async (agent: unknown) => JSON.parse((await defs[0]!.handler({ rawInput: ' scan {"layer":{"kind":"global"}}', agent })).text!) as Record<string, unknown>
+    expect(await scan({ session: { header: { id: 'sess-x' }, seq: 1 } })).toMatchObject({ ok: false, code: 'llm-unavailable' })
+    expect(ctx.llmRequests).toEqual([])
+    const routed = { session: { header: { id: 'sess-x' }, seq: 1, requestHeader: () => undefined }, options: { provider: 'deepseek', model: 'deepseek-v4-flash' } }
+    expect(await scan(routed)).toMatchObject({ ok: true, cmd: 'scan' })
+    expect(ctx.llmRequests[0]).toMatchObject({ provider: 'deepseek', model: 'deepseek-v4-flash' })
+  })
+})
+
 describe('侧表与旧 KV 导入接线', () => {
   type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
   function withTools(base: ReturnType<typeof mockCtx>) {

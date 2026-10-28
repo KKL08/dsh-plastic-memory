@@ -7,13 +7,15 @@ import { isModelChange, type PendingDecisionsStore } from '../governance/decisio
 import type { SnapshotStore } from '../governance/snapshots.ts'
 import type { MemorySnapshot, ScanCacheEntry } from '../governance/schema.ts'
 import { staleIgnores, type AdviceIgnoreStore } from '../governance/advice-ignores.ts'
+import { checkupKey, lastCheckupAt, type CheckupRecordStore } from '../governance/checkup-records.ts'
+import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
 import { layerCacheKey, type LayerRef } from '../governance/layer-health.ts'
 import { checkupWorkspaces, listingNotes, prereadLayers } from '../tools/layer-preread.ts'
 import {
-  GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, sessionViewFile, workspaceMapViewSchema,
-  type GlobalViewName, type SessionView, type WorkspaceMapView,
+  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, SCOPE_KEYS, sessionViewFile, workspaceMapViewSchema,
+  type CheckupView, type GlobalViewName, type SessionView, type WorkspaceMapView,
 } from './contract.ts'
-import { GLOBAL_VIEW_NAMES, buildGlobalViews, type GlobalViews } from './views.ts'
+import { GLOBAL_VIEW_NAMES, buildCheckupView, buildGlobalViews, type GlobalViews } from './views.ts'
 
 export interface ViewSourceDeps {
   store: MemoryStore
@@ -23,6 +25,10 @@ export interface ViewSourceDeps {
   snapshots?: Pick<SnapshotStore, 'get'>
   /** 建议忽略表；缺省按没有忽略算、不做清理。 */
   ignores?: AdviceIgnoreStore
+  /** 体检记录表：健康视图的上次体检取它的完成记录；缺省按没有完成记录算、不做清理。 */
+  checkups?: CheckupRecordStore
+  /** 自动体检设置表：项目目录不在了，它的设置在这里清掉；缺省不做清理。 */
+  autoCheckups?: AutoCheckupSettingStore
   registry: TypeRegistry
   memoryRoot: string
   now?: () => number
@@ -37,7 +43,8 @@ export interface ViewSourceDeps {
 /**
  * 预读 → 四个全局视图。读 global + 全部 workspace 目录（含 .archive/；只剩归档的项目也读，最近删除要用），
  * 健康只列 global + 体检清单，与 memory_health 体检同一批层、同一个预读函数。
- * 顺带是建议忽略表的清理点：读的是全部层，引用的记忆已不在用（删除、归档、彻底删除）或内容变了的记录在这里删掉。
+ * 顺带是建议忽略表的清理点：读的是全部层，引用的记忆已不在用（删除、归档、彻底删除）或内容变了的记录在这里删掉；
+ * 也是体检记录表、自动体检设置表的清理点：项目目录不在了，它的记录和设置在这里删掉。
  */
 export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalViews> {
   const now = deps.now?.() ?? Date.now()
@@ -56,6 +63,21 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
     }
   }
   const notes = listingNotes(listing, { includeEmpty: false })
+  // 有缺标记或读不出的目录时，项目可能只是这次没认出来，不按「目录不在了」清它的体检记录
+  const isListingComplete = !notes.some(n => n.code === 'marker-missing' || n.code === 'dir-unreadable')
+  if (isListingComplete) {
+    const present = new Set(listing.entries.map(e => e.workspacePath))
+    try {
+      await deps.checkups?.removeMissingWorkspaces(present)
+    } catch (err) {
+      (deps.log ?? console).warn('[plastic-memory] 体检记录表清理失败，下次生成视图再试', err)
+    }
+    try {
+      await deps.autoCheckups?.removeMissingWorkspaces(present)
+    } catch (err) {
+      (deps.log ?? console).warn('[plastic-memory] 自动体检设置表清理失败，下次生成视图再试', err)
+    }
+  }
   if (deps.ignores !== undefined) {
     // 有读不出的文件或目录时，byId 里没有的 id 可能只是这次没读到，不按「已不在」清
     const isComplete = readLayers.every(l => (data.quarantined.get(layerCacheKey(l)) ?? []).length === 0)
@@ -73,6 +95,38 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
     governanceEnabled: deps.isGovernanceEnabled?.() ?? true,
     ...(deps.bootedAt !== undefined ? { bootedAt: deps.bootedAt } : {}),
     ...(modelChangeSnapshots !== undefined ? { modelChangeSnapshots } : {}),
+  })
+}
+
+export interface CheckupSourceDeps {
+  store: Pick<MemoryStore, 'listWorkspaceDirs'>
+  checkups: Pick<CheckupRecordStore, 'list' | 'isInProgress'>
+  autoCheckups: Pick<AutoCheckupSettingStore, 'read'>
+  /** 语义缓存：还没有完成记录（升级前体检过）的范围，上次体检暂取缓存的时间。 */
+  cache: KvTable<ScanCacheEntry>
+  /** 体检开关（用时读配置）；缺省视为开启。 */
+  isGovernanceEnabled?: () => boolean
+  now?: () => number
+}
+
+/** 体检视图：只读目录清单、两张小侧表、各范围的认领文件和缓存的时间，不读记忆文件，调度器每次检查都可以读。 */
+export async function collectCheckupView(deps: CheckupSourceDeps): Promise<CheckupView> {
+  const now = deps.now?.() ?? Date.now()
+  const listing = await deps.store.listWorkspaceDirs()
+  const layers: LayerRef[] = [{ kind: 'global' }, ...checkupWorkspaces(listing).map(path => ({ kind: 'workspace' as const, path }))]
+  const [settings, records] = await Promise.all([deps.autoCheckups.read(), deps.checkups.list()])
+  const byKey = new Map(records.map(r => [r.id, r]))
+  const last = new Map<LayerRef, number | null>()
+  const inProgress = new Set<LayerRef>()
+  for (const layer of layers) {
+    const record = byKey.get(checkupKey(layer))
+    last.set(layer, lastCheckupAt(record, record?.completed === undefined ? await deps.cache.get(layerCacheKey(layer)) : undefined))
+    if (await deps.checkups.isInProgress(layer)) inProgress.add(layer)
+  }
+  return buildCheckupView({
+    now, governanceEnabled: deps.isGovernanceEnabled?.() ?? true, settings, layers,
+    lastCheckupAt: layer => last.get(layer) ?? null, isInProgress: layer => inProgress.has(layer), record: layer => byKey.get(checkupKey(layer)),
+    allRecord: byKey.get(SCOPE_KEYS.all),
   })
 }
 
@@ -100,14 +154,17 @@ export class ViewWriter {
   private disposed = false
   private readonly log: MemoryLogger
   private readonly collect: () => Promise<GlobalViews>
+  private readonly collectCheckups: (() => Promise<CheckupView>) | undefined
   private readonly now: () => number
   private readonly sleep: (ms: number) => Promise<void>
   /** 每个视图文件上次替换的时刻。 */
   private readonly replacedAt = new Map<string, number>()
 
+  /** collectCheckups：体检视图的收集；缺省不写体检视图。 */
   constructor(opts: {
     memoryRoot: string
     collect: () => Promise<GlobalViews>
+    collectCheckups?: () => Promise<CheckupView>
     log?: MemoryLogger
     now?: () => number
     sleep?: (ms: number) => Promise<void>
@@ -115,11 +172,18 @@ export class ViewWriter {
     this.dir = join(opts.memoryRoot, GUI_VIEW_DIR)
     this.log = opts.log ?? console
     this.collect = opts.collect
+    this.collectCheckups = opts.collectCheckups
     this.now = opts.now ?? Date.now
     this.sleep = opts.sleep ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms)))
   }
 
-  /** 请求重写这些全局视图（缺省四个都写）。 */
+  /** 只重写体检视图（设置改了、调度检查时）：不等节流，排在进行中的写入之后；内容和磁盘上的一样就不写。 */
+  requestCheckups(): Promise<void> {
+    if (this.disposed) return Promise.resolve()
+    return this.enqueue(() => this.writeCheckups())
+  }
+
+  /** 请求重写这些全局视图（缺省四个都写；写健康视图时体检视图跟着重写）。 */
   request(views: readonly GlobalViewName[] = GLOBAL_VIEW_NAMES): Promise<void> {
     if (this.disposed) return Promise.resolve()
     for (const v of views) this.queued.add(v)
@@ -188,7 +252,16 @@ export class ViewWriter {
   private async writeGlobal(names: readonly GlobalViewName[]): Promise<GlobalViews> {
     const views = await this.collect()
     for (const name of names) await this.writeFile(GUI_VIEW_FILES[name], views[name])
+    // 上次体检和健康视图同源：写健康视图的时机（体检、写工具、配置热更新、刷新）体检视图也跟着重写
+    if (names.includes('health')) await this.writeCheckups()
     return views
+  }
+
+  private async writeCheckups(): Promise<void> {
+    if (this.collectCheckups === undefined) return
+    const text = JSON.stringify(await this.collectCheckups())
+    const current = await readFile(join(this.dir, GUI_CHECKUP_VIEW_FILE), 'utf8').catch(() => undefined)
+    if (current !== text) await this.writeText(GUI_CHECKUP_VIEW_FILE, text)
   }
 
   private async writeWorkspaceMap(entries: ReadonlyArray<readonly [string, string]>): Promise<void> {
@@ -201,10 +274,13 @@ export class ViewWriter {
     this.workspaceMap = next
   }
 
-  /** 磁盘上的旧对照；没有、读不懂（坏 JSON、版本不对）都从空表开始。 */
+  /**
+   * 磁盘上的旧对照；没有、读不懂（坏 JSON、形状不对）都从空表开始。不看版本号，只按 cwds 的形状读：视图版本升级时
+   * 对照的形状没变，整份丢掉会让之前见过的会话都失去归属（写出时照旧写当前版本）。
+   */
   private async readWorkspaceMap(): Promise<Record<string, string>> {
     try {
-      const parsed = workspaceMapViewSchema.safeParse(JSON.parse(await readFile(join(this.dir, GUI_WORKSPACE_MAP_FILE), 'utf8')))
+      const parsed = workspaceMapViewSchema.pick({ cwds: true }).safeParse(JSON.parse(await readFile(join(this.dir, GUI_WORKSPACE_MAP_FILE), 'utf8')))
       return parsed.success ? { ...parsed.data.cwds } : {}
     } catch {
       return {}
@@ -212,10 +288,14 @@ export class ViewWriter {
   }
 
   private async writeFile(fileName: string, view: unknown): Promise<void> {
+    await this.writeText(fileName, JSON.stringify(view))
+  }
+
+  private async writeText(fileName: string, text: string): Promise<void> {
     await mkdir(this.dir, { recursive: true })
     const path = join(this.dir, fileName)
     const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
-    await writeFile(tmp, JSON.stringify(view), 'utf8')
+    await writeFile(tmp, text, 'utf8')
     const last = this.replacedAt.get(fileName)
     const wait = last === undefined ? 0 : last + VIEW_REPLACE_GAP_MS - this.now()
     if (wait > 0) await this.sleep(wait)

@@ -11,9 +11,13 @@ import { GLOBAL_CACHE_KEY, scoreLayer } from '../src/governance/layer-health.ts'
 import { prereadLayers } from '../src/tools/layer-preread.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
+import { MODEL_UNAVAILABLE_HOST_CODES, hostSemanticLlm } from '../src/governance/host-llm.ts'
+import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
+import { InMemoryKvTable, type CasKvTable } from '../src/kv-table.ts'
+import { CheckupRecordStore, checkupKey } from '../src/governance/checkup-records.ts'
+import type { CheckupRecord } from '../src/storage/schema.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { PendingDecision, ScanCacheEntry } from '../src/governance/schema.ts'
 import { record } from './helpers/record.ts'
@@ -567,6 +571,76 @@ describe('renderScanResult', () => {
   })
 })
 
+describe('executeScan 完成记录（上次体检）', () => {
+  const quiet: SemanticLlm = { complete: async () => JSON.stringify({ findings: [] }) }
+  function withCheckups(overrides?: Partial<ScanToolDeps>) {
+    const checkups = new CheckupRecordStore(new InMemoryKvTable<CheckupRecord>())
+    return { checkups, deps: makeDeps({ checkups, getLlm: () => quiet, ...overrides }) }
+  }
+  const completed = async (checkups: CheckupRecordStore) =>
+    Object.fromEntries((await checkups.list()).map(r => [r.id, r.completed]))
+
+  it('memory_scan 做完内容检查：给扫的范围写发起方为 agent 的完成记录；输出和没有记录表时一样', async () => {
+    let clock = 9000
+    const { checkups, deps } = withCheckups({ now: () => clock, getLlm: () => ({ complete: async () => { clock = 9500; return '{"findings":[]}' } }) })
+    const plain = makeDeps({ getLlm: () => quiet })
+    for (const d of [deps, plain]) await d.store.put(record({ id: 'mem_p', scope: 'workspace', workspacePath: '/proj' }))
+    const r = await executeScan({ scope: '/proj' }, deps, fakeExec())
+    expect(await completed(checkups)).toEqual({ [checkupKey({ kind: 'workspace', path: '/proj' })]: { startedAt: 9000, completedAt: 9500, by: 'agent' } })
+    expect(r).toEqual(await executeScan({ scope: '/proj' }, plain, fakeExec()))
+  })
+
+  it('没有项目的会话扫的是全局层：写全局的完成记录', async () => {
+    const { checkups, deps } = withCheckups()
+    await deps.store.put(record({ id: 'mem_g' }))
+    await executeScan({}, deps, fakeExec())
+    expect(await completed(checkups)).toEqual({ [checkupKey({ kind: 'global' })]: { startedAt: 9000, completedAt: 9000, by: 'agent' } })
+  })
+
+  it('全库体检：全局和每个项目各写一条；内容检查失败的那一层不写', async () => {
+    const { checkups, deps } = withCheckups({
+      getLlm: () => ({ complete: async ({ user }) => { if (user.includes('mem_b')) throw new Error('模型报错'); return '{"findings":[]}' } }),
+    })
+    await deps.store.put(record({ id: 'mem_g' }))
+    await deps.store.put(record({ id: 'mem_a', scope: 'workspace', workspacePath: '/proj-a' }))
+    await deps.store.put(record({ id: 'mem_b', scope: 'workspace', workspacePath: '/proj-b' }))
+    await executeScan({ scope: 'all' }, deps, fakeExec())
+    expect(Object.keys(await completed(checkups)).sort()).toEqual([checkupKey({ kind: 'global' }), checkupKey({ kind: 'workspace', path: '/proj-a' })].sort())
+  })
+
+  it.each([
+    ['只跑规则检查', { layers: 'rule' as const }, quiet],
+    ['只跑内容检查（没跑规则检查）', { layers: 'semantic' as const }, quiet],
+    ['内容检查失败', {}, { complete: async () => { throw new Error('模型报错') } }],
+  ])('%s：不写完成记录', async (_name, args, llm) => {
+    const { checkups, deps } = withCheckups({ getLlm: () => llm })
+    await deps.store.put(record({ id: 'mem_g' }))
+    await executeScan(args, deps, fakeExec())
+    expect(await checkups.list()).toEqual([])
+  })
+
+  it('拿不到模型：不写完成记录', async () => {
+    const { checkups, deps } = withCheckups({ getLlm: () => null })
+    await deps.store.put(record({ id: 'mem_g' }))
+    await executeScan({}, deps, fakeExec())
+    expect(await checkups.list()).toEqual([])
+  })
+
+  it('写完缓存后取消：抛出取消，不写完成记录', async () => {
+    const controller = new AbortController()
+    const cache = new InMemoryKvTable<ScanCacheEntry>()
+    const aborting: CasKvTable<ScanCacheEntry> = {
+      get: k => cache.get(k), list: () => cache.list(), put: (k, v) => cache.put(k, v), delete: k => cache.delete(k), deleteIf: (k, f) => cache.deleteIf(k, f),
+      update: async (k, fn) => { const written = await cache.update(k, fn); controller.abort(); return written },
+    }
+    const { checkups, deps } = withCheckups({ cache: aborting })
+    await deps.store.put(record({ id: 'mem_g' }))
+    await expect(executeScan({}, deps, fakeExec({ signal: controller.signal }))).rejects.toThrow()
+    expect(await cache.list()).toHaveLength(1)
+    expect(await checkups.list()).toEqual([])
+  })
+})
+
 describe('executeScan scope 校验', () => {
   it('scope 传记忆目录名等未知值：报错并列出已知 workspace 路径，不静默扫错层', async () => {
     const deps = makeDeps({ resolveContext: async () => ({ workspacePath: '/proj' }) })
@@ -775,5 +849,57 @@ describe('体检后手改记忆文件（「打开文件」直接改，frontmatte
     const { redundancy } = await scanned()
     expect(await redundancy()).toBe(1)
     expect(await redundancy()).toBe(1)
+  })
+})
+
+describe('executeScan 模型错误分类（宿主错误码从模型适配层带到说明码）', () => {
+  /** 宿主 llm 服务的替身：按宿主真实的流形状，适配器出错时以带 failure 的 error finish 收尾。 */
+  const failingHost = (code: string, message: string) => hostSemanticLlm({
+    async *stream(): AsyncIterable<StreamChunk> {
+      yield { type: 'finish', reason: { kind: 'error', failure: { code, message } } } as StreamChunk
+    },
+  }, { provider: 'deepseek', model: 'deepseek-v4-flash' })
+
+  it('宿主的未登录、缺凭据错误码：说明码是 model-unavailable，不是 semantic-failed；带上宿主的码和原话；不写完成记录', async () => {
+    // 宿主 0.2.1-rc.2：账号路由 ACCOUNT_SIGN_IN_REQUIRED / ACCOUNT_TOKEN_INVALID，API key 路由 MISSING_CREDENTIAL / INVALID_CREDENTIAL / AUTH（401、403）
+    expect([...MODEL_UNAVAILABLE_HOST_CODES].sort()).toEqual(['ACCOUNT_SIGN_IN_REQUIRED', 'ACCOUNT_TOKEN_INVALID', 'AUTH', 'INVALID_CREDENTIAL', 'MISSING_CREDENTIAL'])
+    for (const code of MODEL_UNAVAILABLE_HOST_CODES) {
+      const checkups = new CheckupRecordStore(new InMemoryKvTable<CheckupRecord>())
+      const deps = makeDeps({ checkups, getLlm: () => failingHost(code, `host says ${code}`) })
+      await deps.store.put(record({ id: 'mem_g' }))
+      const r = await scanSingle({}, deps)
+      expect(r.notes.map(n => n.code)).toContain('model-unavailable')
+      expect(r.notes.map(n => n.code)).not.toContain('semantic-failed')
+      // AUTH 的原话可能回显部分凭据：对齐宿主，不留原话
+      expect(r.notes.find(n => n.code === 'model-unavailable')?.cause).toEqual(code === 'AUTH' ? { kind: 'model-error', hostCode: code } : { kind: 'model-error', hostCode: code, message: `host says ${code}` })
+      expect(await checkups.list()).toEqual([])
+    }
+  })
+
+  it('AUTH 的原话不进给模型的说明文字和体检记录', async () => {
+    const leaked = 'Incorrect API key provided: sk-abcdefghijklmnop1234'
+    const checkups = new CheckupRecordStore(new InMemoryKvTable<CheckupRecord>())
+    const deps = makeDeps({ checkups, getLlm: () => failingHost('AUTH', leaked) })
+    await deps.store.put(record({ id: 'mem_g' }))
+    const r = await scanSingle({}, deps)
+    expect(r.notes.map(n => n.code)).toContain('model-unavailable')
+    expect(renderScanResult(r)).not.toContain('abcdefghijklmnop1234')
+    expect(JSON.stringify(r)).not.toContain('Incorrect API key')
+  })
+
+  it('其他模型错误（限流、超时）：仍是 semantic-failed，带上宿主的码', async () => {
+    const deps = makeDeps({ getLlm: () => failingHost('RATE_LIMIT', 'too many requests') })
+    await deps.store.put(record({ id: 'mem_g' }))
+    const r = await scanSingle({}, deps)
+    expect(r.notes.map(n => n.code)).toContain('semantic-failed')
+    expect(r.notes.map(n => n.code)).not.toContain('model-unavailable')
+    expect(r.notes.find(n => n.code === 'semantic-failed')?.cause).toEqual({ kind: 'model-error', hostCode: 'RATE_LIMIT', message: 'too many requests' })
+  })
+
+  it('输出解析不了：semantic-failed，原因是解析不了', async () => {
+    const deps = makeDeps({ getLlm: () => ({ complete: async () => '不是 JSON' }) })
+    await deps.store.put(record({ id: 'mem_g' }))
+    const r = await scanSingle({}, deps)
+    expect(r.notes.find(n => n.code === 'semantic-failed')?.cause).toEqual({ kind: 'unparseable' })
   })
 })

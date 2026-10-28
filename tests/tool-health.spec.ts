@@ -11,6 +11,9 @@ import { executeHealth, renderHealthResult, type HealthToolDeps, type HealthArgs
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
+import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
+import type { AutoCheckupSetting, CheckupRecord } from '../src/storage/schema.ts'
+import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { PendingDecision, ScanCacheEntry, Finding } from '../src/governance/schema.ts'
 import { record } from './helpers/record.ts'
@@ -96,6 +99,42 @@ describe('executeHealth 单层视图', () => {
     const r = await runSingle({}, deps)
     expect(r.recommendationKinds).toContain('semantic-stale')
     expect(r.recommendationKinds).not.toContain('semantic-never-scanned')
+  })
+
+  it('上次体检取完成记录：缓存很旧、完成记录在期限内时不提醒重新扫描，「基于 N 天前」按完成记录算', async () => {
+    const now = 100 * DAY
+    const checkups = new CheckupRecordStore(new InMemoryKvTable<CheckupRecord>())
+    const deps = { ...makeDeps(now), checkups }
+    await deps.store.put(record({ id: 'mem_a' }))
+    await deps.cache.put('cache_global', { id: 'cache_global', scannedAt: now - 30 * DAY, scope: 'global', findings: [] })
+    await checkups.complete([{ kind: 'global' }], { startedAt: now - 2 * DAY - 1000, completedAt: now - 2 * DAY, by: 'agent' })
+    const r = await runSingle({}, deps)
+    expect(r.recommendationKinds).not.toContain('semantic-stale')
+    expect(r.breakdown.semanticLayer.cachedAt).toBe(now - 2 * DAY)
+    expect(r.message).toContain('2 天前')
+    const all = await executeHealth({ scope: 'all' }, deps, fakeExec())
+    expect(all.kind === 'checkup' && all.rows[0]!.semanticCachedAt).toBe(now - 2 * DAY)
+  })
+
+  it('自动体检开着的范围不提醒「语义扫描已是 N 天前」；仅手动（含跟随仅手动）的范围照旧提醒', async () => {
+    const now = 100 * DAY
+    const sidecar = new InMemoryKvTable<AutoCheckupSetting>()
+    const autoCheckups = new AutoCheckupSettingStore(sidecar)
+    const deps = { ...makeDeps(now, '/proj'), autoCheckups }
+    await deps.store.put(record({ id: 'mem_ws', scope: 'workspace', workspacePath: '/proj' }))
+    await deps.store.put(record({ id: 'mem_g' }))
+    for (const key of ['cache_global', 'cache_/proj']) await deps.cache.put(key, { id: key, scannedAt: now - 30 * DAY, scope: key, findings: [] })
+    // 「全部」每 7 天、全局单独设成仅手动
+    await autoCheckups.set({ kind: 'all' }, 7)
+    await autoCheckups.set({ kind: 'global' }, 'manual')
+    const project = await runSingle({}, deps)
+    expect(project.recommendationKinds).not.toContain('semantic-stale')
+    expect(project.recommendation).not.toContain('语义扫描已是')
+    const global = await runSingle({}, { ...deps, resolveContext: async () => ({ workspacePath: undefined }) })
+    expect(global.recommendationKinds).toContain('semantic-stale')
+    // 改回什么都没设：项目跟随仅手动，照旧提醒
+    await autoCheckups.set({ kind: 'all' }, 'manual')
+    expect((await runSingle({}, deps)).recommendationKinds).toContain('semantic-stale')
   })
 
   it('红线门：本层 secret 直接判死——tier 强制红、score 压进红区', async () => {

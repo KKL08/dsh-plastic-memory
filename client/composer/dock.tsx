@@ -32,7 +32,7 @@ export function createComposerDock(
           sessionId={props.sessionId}
           useProjection={props.useProjection}
           onOpenTab={canOpenTab ? () => { nav.openSidebarTab() } : undefined}
-          onHandle={() => { openMemoryPage(ctx, nav, { tab: 'pending' }) }}
+          onHandle={() => { openMemoryPage(ctx, nav, { view: 'todo', fromChat: true }) }}
         />
       </PanelShell>
     )

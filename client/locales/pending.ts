@@ -14,19 +14,24 @@ export const pendingZh = {
   'pending.openFailed': '没能打开文件。',
   'pending.refused': '你对「{title}」的选择没有生效：它正在别处处理，或者刚在别处处理完。',
 
-  'pending.level.must-fix': '高优问题',
-  'pending.level.your-call': '待你处理',
-  'pending.level.advice': '建议整理',
+  'pending.level.must-fix': '先处理',
+  'pending.level.your-call': '等你决定',
+  'pending.level.advice': '可以整理',
+  'pending.level.advice.note': '处理或忽略后不再扣分',
+  'pending.new': '新',
   'pending.more': '展开其余 {n} 条',
+  'pending.allDone': '都处理完了，agent 之后按你的决定来。',
 
-  'pending.empty.title': '目前没有要处理的事',
-  'pending.empty.body': '密钥、读不出的文件、互相矛盾的记忆、超限提醒和适合提升为全局的记忆会出现在这里。',
-  'pending.empty.lastScan': '上次体检：{date}',
-  'pending.never.title': '还没做过体检',
-  'pending.never.body': '体检会找出互相矛盾的记忆和适合提升为全局的记忆，结果列在这里。点右上角「体检当前项目」开始。',
-  'pending.off.title': '体检已关闭',
-  'pending.off.body': '打开后这里会列出冲突、提升候选和超出上限的提醒。密钥和读不出的文件照常提示。',
-  'pending.off.action': '去设置里打开 ›',
+  'pending.empty.title': '没有要处理的事',
+  'pending.empty.lastScan': '上次体检 {date}。新的冲突和建议会出现在这里。',
+  'pending.empty.never': '还没体检过。新的冲突和建议会出现在这里。',
+
+  'pending.ignored.count': '已忽略 {n} 条',
+  'pending.ignored.show': '查看',
+  'pending.ignored.hide': '收起',
+  'pending.ignored.unignore': '取消忽略',
+  'pending.off.title': '体检已在配置文件里关闭',
+  'pending.off.body': '在配置文件里把 governance.enabled 改回 true，这里就会列出冲突、提升候选和超出上限的提醒。密钥和读不出的文件照常提示。',
 
   'pending.secret.title': '这条记忆里有密钥',
   'pending.secret.body': '原文已打码。不是密钥的话，打开文件改写那一段，下次就不再提示。',
@@ -41,8 +46,8 @@ export const pendingZh = {
   'pending.secret.deletedBody': '如果它是真的凭证，记得去换一个新的。',
   'pending.secret.deletedNotice': '已彻底删除。如果它是真的凭证，记得去换一个新的。',
 
-  'pending.conflict.preferred': '决定前 agent 按 {side} 来。',
-  'pending.conflict.preferredExplicit': '决定前 agent 按你明确说过的 {side} 来。',
+  'pending.conflict.preferred': '决定之前，agent 按 {side} 来做。',
+  'pending.conflict.preferredExplicit': '决定之前，agent 按你明确说过的 {side} 来做。',
 
 
   'pending.promote.title': '这条适合所有项目',
@@ -179,7 +184,7 @@ export const pendingZh = {
   'pending.result.edited': '已修改',
   'pending.result.merged': '已合并',
   'pending.result.ignored': '已忽略',
-  'pending.result.ignoredBody': '不再提示，也不再扣分；内容改了会重新检查。可在「健康」里取消忽略。',
+  'pending.result.ignoredBody': '不再提示，也不再扣分；内容改了会重新检查。',
 } as const
 
 export const pendingEn: Record<keyof typeof pendingZh, string> = {
@@ -199,16 +204,21 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.level.must-fix': 'High priority',
   'pending.level.your-call': 'Waiting on you',
   'pending.level.advice': 'Suggested cleanup',
+  'pending.level.advice.note': 'No score penalty once handled or ignored',
+  'pending.new': 'New',
   'pending.more': 'Show {n} more',
+  'pending.allDone': 'All handled. The agent follows your decisions from here.',
 
-  'pending.empty.title': 'Nothing to handle right now',
-  'pending.empty.body': 'Secrets, unreadable files, conflicting memories, over-limit reminders and memories worth making global show up here.',
-  'pending.empty.lastScan': 'Last checkup: {date}',
-  'pending.never.title': 'No checkup yet',
-  'pending.never.body': 'A checkup finds memories that contradict each other and memories worth making global, and lists them here. Start one with “Check this project” in the top right.',
-  'pending.off.title': 'Checkups are off',
-  'pending.off.body': 'Turn them on to see conflicts, promotion candidates, and over-limit reminders here. Secrets and unreadable files are still shown.',
-  'pending.off.action': 'Turn on in Settings ›',
+  'pending.empty.title': 'Nothing to handle',
+  'pending.empty.lastScan': 'Last checkup {date}. New conflicts and suggestions show up here.',
+  'pending.empty.never': 'No checkup yet. New conflicts and suggestions show up here.',
+
+  'pending.ignored.count': '{n} ignored',
+  'pending.ignored.show': 'Show',
+  'pending.ignored.hide': 'Hide',
+  'pending.ignored.unignore': 'Unignore',
+  'pending.off.title': 'Checkups are turned off in the config file',
+  'pending.off.body': 'Set governance.enabled back to true in the config file to see conflicts, promotion candidates, and over-limit reminders here. Secrets and unreadable files are still shown.',
 
   'pending.secret.title': 'This memory contains a secret',
   'pending.secret.body': 'The original is masked. If it is not a secret, open the file and rewrite that part; it will not be flagged again.',
@@ -361,5 +371,5 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.result.edited': 'Edited',
   'pending.result.merged': 'Merged',
   'pending.result.ignored': 'Ignored',
-  'pending.result.ignoredBody': 'No more reminders and no score penalty; it is checked again if the content changes. You can unignore it under Health.',
+  'pending.result.ignoredBody': 'No more reminders and no score penalty; it is checked again if the content changes.',
 }

@@ -103,13 +103,25 @@ export class AdviceIgnoreStore {
 
   /** 记下这一项（records 是此刻在用的记忆）；同一项再忽略一次覆盖成新的指纹和时间。 */
   async ignore(type: IgnorableAdviceType, records: readonly MemoryRecord[], now: number): Promise<AdviceIgnore> {
-    const sorted = [...records].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-    const entry: AdviceIgnore = {
-      id: adviceIdentity(type, sorted.map(r => r.id)), type,
-      memoryIds: sorted.map(r => r.id), fingerprints: sorted.map(adviceFingerprint), ignoredAt: now,
-    }
+    const entry = toEntry(type, records, now)
     await this.table.put(entry.id, entry)
     return entry
+  }
+
+  /**
+   * 这一项还没有算数的忽略（没有记录，或记录的指纹对不上此刻的记忆）时记下，返回写下的那条；已经忽略着的不动，返回 undefined。
+   * 判断和写在同一次读改写里：判断之后别处刚写下的忽略不会被盖掉。
+   */
+  async ignoreIfAbsent(type: IgnorableAdviceType, records: readonly MemoryRecord[], now: number): Promise<AdviceIgnore | undefined> {
+    const entry = toEntry(type, records, now)
+    const isWritten = await this.table.update(entry.id, current =>
+      current !== undefined && current.fingerprints.join(',') === entry.fingerprints.join(',') ? undefined : entry)
+    return isWritten ? entry : undefined
+  }
+
+  /** 只在此刻的记录仍是 written 那一条（忽略时间、指纹都没变）时取消忽略：之后重新忽略过的、已取消的不动。 */
+  async unignoreIfSame(type: string, memoryIds: readonly string[], written: Pick<AdviceIgnore, 'ignoredAt' | 'fingerprints'>): Promise<boolean> {
+    return this.deleteIfSame(adviceIdentity(type, memoryIds), written)
   }
 
   /** 取消忽略；本来就没有返回 false。 */
@@ -119,8 +131,18 @@ export class AdviceIgnoreStore {
 
   /** 清理点删掉判定过时的记录：只删此刻仍是判定时那一版的（忽略时间、指纹都没变），期间重新忽略写下的新记录留着。 */
   async remove(entries: readonly AdviceIgnore[]): Promise<void> {
-    for (const e of entries) {
-      await this.table.deleteIf(e.id, cur => cur.ignoredAt === e.ignoredAt && cur.fingerprints.join(',') === e.fingerprints.join(','))
-    }
+    for (const e of entries) await this.deleteIfSame(e.id, e)
+  }
+
+  private deleteIfSame(id: string, e: Pick<AdviceIgnore, 'ignoredAt' | 'fingerprints'>): Promise<boolean> {
+    return this.table.deleteIf(id, cur => cur.ignoredAt === e.ignoredAt && cur.fingerprints.join(',') === e.fingerprints.join(','))
+  }
+}
+
+function toEntry(type: IgnorableAdviceType, records: readonly MemoryRecord[], now: number): AdviceIgnore {
+  const sorted = [...records].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  return {
+    id: adviceIdentity(type, sorted.map(r => r.id)), type,
+    memoryIds: sorted.map(r => r.id), fingerprints: sorted.map(adviceFingerprint), ignoredAt: now,
   }
 }
