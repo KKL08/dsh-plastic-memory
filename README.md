@@ -76,15 +76,19 @@
 
 ## 📦 安装
 
+> **0.2.0 即将发布，含破坏性更新**：要求最低 DeepSeek Harness v0.2.1-rc.2。建议等 0.2.0 发布后再正式使用；目前只能安装旧版本，仅供体验基本功能（记忆的保存、检索和自动注入），图形界面等新功能以 0.2.0 为准。之后升级到 0.2.0 时，已有记忆原地沿用，待处理事项自动迁移。
+
+旧版本 0.1.1-beta.5：
+
 ```bash
-dsh plugin --profile web add dsh-plastic-memory@0.2.0-beta.1
+dsh plugin --profile web add dsh-plastic-memory@0.1.1-beta.5
 ```
 
 > 把 `web` 换成你的目标 Profile 名即可（若该 Profile 不存在则自动创建）。安装后插件声明将自动写入该 Profile 的 `cordis.patch.yml`，重启该 Profile 后生效。插件以预构建产物发布到 npm，安装不需要构建授权。  
 > **桌面版**：先打开一次 DeepSeek Harness 桌面版，让它建好自己的 Profile，然后完全退出，在终端运行下面这条，再重新打开桌面版。`dsh` 命令用 npm 装的或桌面版自带的都可以。
 >
 > ```bash
-> dsh plugin --profile desktop add dsh-plastic-memory@0.2.0-beta.1
+> dsh plugin --profile desktop add dsh-plastic-memory@0.1.1-beta.5
 > ```
 >
 > **运行环境要求**：Node.js `^22.19.0 || >=24`，DeepSeek Harness v0.1.7-rc.1 及以上（目前已验证到 v0.2.1-rc.2）；图形界面要 v0.2.1-rc.2 及以上。
