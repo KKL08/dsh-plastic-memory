@@ -2143,6 +2143,47 @@ describe('scan：上次体检与完成记录', () => {
     expect(await lastCheckups(e)).toEqual({ global: NOW, [SESSION_WS]: NOW, [OTHER_WS]: NOW })
   })
 
+  describe('「全部」只查开跑时认领到的范围：认领之后才建的项目不查、不写完成记录', () => {
+    const LATE = { kind: 'workspace' as const, path: '/tmp/pm-cmd-late' }
+    /** 认领之后、体检读库之前（体检前收集待处理的那一刻）新建一个项目。 */
+    const envWithLateProject = () => {
+      let isCreated = false
+      const e: ReturnType<typeof env> = env({
+        llm: quiet,
+        wrapViews: w => ({
+          request: () => w.request(), rewriteAll: () => w.rewriteAll(), requestCheckups: () => w.requestCheckups(),
+          collectViews: async () => {
+            if (!isCreated) {
+              isCreated = true
+              await e.store.create(record({ id: 'mem_late', name: '后来的', content: '用 bun', scope: 'workspace', workspacePath: LATE.path }))
+            }
+            return w.collectViews()
+          },
+        }),
+      })
+      return e
+    }
+    const allResultOf = async (e: ReturnType<typeof env>) => (await e.checkups.list()).find(r => r.id === 'all')?.lastResult
+
+    it('有项目：只查认领到的全局和项目', async () => {
+      const e = envWithLateProject()
+      await seedLayers(e)
+      ok(await e.run({ cmd: 'scan' }))
+      for (const layer of [GLOBAL, SESSION, OTHER]) expect(await completedOf(e, layer)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
+      expect(await completedOf(e, LATE)).toBeUndefined()
+      expect(await allResultOf(e)).toMatchObject({ by: 'manual', completedAt: NOW })
+    })
+
+    it('还没有项目：只查全局，结果仍记在「全部」名下', async () => {
+      const e = envWithLateProject()
+      await e.store.create(record({ id: 'mem_g', name: '全局', content: '回答用中文' }))
+      ok(await e.run({ cmd: 'scan' }))
+      expect(await completedOf(e, GLOBAL)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
+      expect(await completedOf(e, LATE)).toBeUndefined()
+      expect(await allResultOf(e)).toMatchObject({ by: 'manual', completedAt: NOW })
+    })
+  })
+
   it('内容检查失败：不写完成记录，上次体检仍是之前那次', async () => {
     let failing = false
     const e = env({ llm: { complete: async () => { if (failing) throw new Error('模型报错'); return '{"findings":[]}' } } })

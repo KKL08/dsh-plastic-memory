@@ -805,14 +805,16 @@ async function scanHeld(
   const isGlobalOnly = command.layer !== undefined
   // 「全部」体检时各范围自己的说明，结果按范围记它们；整次合并的只记在 all 上
   const layerNotes = new Map<string, readonly ScanNote[]>()
+  // 「全部」只查认领到的项目：执行器自己再枚举会把认领之后才建的项目也查了。一个项目都没有时只查全局（空 scopes 不是全库）
+  const scopes = target.kind === 'all' ? target.layers.flatMap(l => (l.kind === 'workspace' ? [l.path] : [])) : undefined
   // 时钟现读：完成记录的完成时间是体检做完的时刻，不是命令开始的时刻
   const r = await executeScan(
-    { scope: command.workspacePath ?? 'all', layers: 'full' },
+    scopes !== undefined ? { scopes, layers: 'full' } : { ...(command.workspacePath !== undefined ? { scope: command.workspacePath } : {}), layers: 'full' },
     {
       store: deps.store, registry: deps.registry, decisions: deps.decisions, cache: deps.cache, checkups: deps.checkups,
       getBaseline: deps.getBaseline, getLlm: deps.getLlm, resolveContext: deps.resolveContext, now: () => deps.now?.() ?? Date.now(),
     },
-    exec, { by: 'manual', isGlobalOnly, onLayerNotes: (layer, notes) => { layerNotes.set(checkupKey(layer), notes) } },
+    exec, { by: 'manual', isGlobalOnly: isGlobalOnly || scopes?.length === 0, onLayerNotes: (layer, notes) => { layerNotes.set(checkupKey(layer), notes) } },
   )
   await deps.decisions.sweep(now)
   const after = await deps.views.rewriteAll() ?? (before === undefined ? undefined : await collect())
