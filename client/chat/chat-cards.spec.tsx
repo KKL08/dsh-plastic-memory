@@ -6,7 +6,7 @@ import { GUI_VIEW_VERSION, RETENTION_MS, type DeletedView, type LibraryView, typ
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createHostGateway, type PluginConfig } from '../gateway.ts'
 import { createTranslator } from '../i18n.tsx'
-import { en } from '../locales.ts'
+import { en, zh } from '../locales.ts'
 import { PanelShell } from '../ui/PanelShell.tsx'
 import type { SessionListState } from '../host.ts'
 import { createNavStore, PANEL_ID } from '../nav.ts'
@@ -196,6 +196,24 @@ describe('交付卡默认折叠', () => {
     expect(screen.queryByText('测试里用真实 Postgres。')).toBeNull()
     expect(screen.queryByRole('button', { name: '删除这条记忆' })).toBeNull()
     expect(screen.queryByRole('button', { name: '查看详情 ›' })).toBeNull()
+  })
+
+  it('对话进行中刚出现的卡带入场动效，同一轮再记一条时数字跟着变；翻历史时的卡不动', () => {
+    const gateway = createFakeGateway()
+    const card = (list: SavedMemory[], now: number) => (
+      <PanelShell gateway={gateway} t={createTranslator(zh)}>
+        <SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={list} now={now} openDetail={() => {}} />
+      </PanelShell>
+    )
+    const live = render(card([items[0]!], NOW + 1000))
+    expect(live.container.querySelector('.pm-saved')).toHaveClass('pm-saved--enter')
+    expect(live.container.querySelector('.pm-roll')).toHaveTextContent(/^1$/)
+    live.rerender(card(items, NOW + 3000))
+    expect(screen.getByRole('button', { name: '这轮记住了 2 条新记忆：测试不 mock 数据库' })).toBeInTheDocument()
+    expect(live.container.querySelector('.pm-roll')!.firstElementChild).toHaveTextContent(/^2$/)
+    live.unmount()
+    const history = render(card(items, NOW + 60_000))
+    expect(history.container.querySelector('.pm-saved')).not.toHaveClass('pm-saved--enter')
   })
 
   it('英文折叠行按条数写单复数：1 条 memory，多条 memories', () => {
@@ -1096,6 +1114,8 @@ describe('交付卡：模型改写、替代已有记忆', () => {
     card([saved('mem_1', '新的'), rewrite()], [change(), supersede])
     const toggle = screen.getByRole('button', { expanded: false })
     expect(toggle).toHaveTextContent('这轮记住了 1 条新记忆、改写了 1 条：mem_1·替代了 1 条旧记忆›')
+    // 新记与改写混在一句里时数字不滚，照普通文案换
+    expect(toggle.querySelector('.pm-roll')).toBeNull()
     fireEvent.click(toggle)
     expect(toggle).toHaveAccessibleName('这一轮记住了 1 条、改写了 1 条')
   })

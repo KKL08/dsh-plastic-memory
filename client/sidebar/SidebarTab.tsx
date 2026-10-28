@@ -31,6 +31,7 @@ import { ConflictRuling, VerticalConflictRuling } from '../ui/ConflictRuling.tsx
 import { ContextBudgetBar } from '../ui/ContextBudgetBar.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
+import { Arrival, useArrivals } from '../ui/motion.tsx'
 import { TrashIcon } from '../ui/TrashIcon.tsx'
 import { CrossConfirm, crossConfirmCss, isHandledElsewhere, DeleteWithConfirm, SecretDeleteConfirm } from '../pending/action.tsx'
 import { promoteInPlaceCss, promotionOf, usePromoteInPlace, type InPlacePromotion } from '../pending/promote-in-place.tsx'
@@ -163,6 +164,8 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     void run(memoryId, { cmd: 'hard-delete', memoryId, layer: memory && layerOfMemory(memory) }, () => {})
   }
   const isPurged = (id: string) => purged.has(id) && deletions.of(id) === 'hard'
+
+  const arrivals = useArrivals(sessionView.status === 'ready' ? writtenSinceSnapshot(sessionView.data) : undefined, sessionId)
 
   if (library.status !== 'ready') return <div className="pm-side"><ViewNote state={library} /></div>
 
@@ -325,36 +328,40 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
               <h2 className="pm-side-title">{t('sidebar.saved.title')}</h2>
               <p className="pm-side-hint">{t('sidebar.saved.note')}</p>
             </div>
-            {saved.map(({ id, memory, isWrittenToAgentsMd }) => memory === undefined
-              ? purgedNote(id)
-              : isWrittenToAgentsMd === true
-                ? <SavedRow key={id} session={session} memory={memory} card={card} state="wrote-agents-md">{null}</SavedRow>
-                : (
-                <SavedRow
-                  key={id}
-                  session={session}
-                  memory={memory}
-                  card={card}
-                  onWroteAgentsMd={() => { setWroteAgentsMd(prev => new Map(prev).set(id, memory)) }}
-                >
-                  <DeleteWithConfirm
-                    onDelete={() => { forget(memory) }}
-                    trigger={open => (
-                      <button
-                        type="button"
-                        className="pm-side-delete"
-                        aria-label={t('sidebar.saved.delete')}
-                        title={t('sidebar.saved.delete')}
-                        aria-disabled={isWaiting(id) || undefined}
-                        onClick={() => { if (!isWaiting(id)) open() }}
-                      >
-                        <TrashIcon />
-                      </button>
-                    )}
-                  />
-                  {failed(id)}
-                </SavedRow>
-              ))}
+            {saved.map(({ id, memory, isWrittenToAgentsMd }) => {
+              const row = memory === undefined
+                ? purgedNote(id)
+                : isWrittenToAgentsMd === true
+                  ? <SavedRow key={id} session={session} memory={memory} card={card} state="wrote-agents-md">{null}</SavedRow>
+                  : (
+                  <SavedRow
+                    key={id}
+                    session={session}
+                    memory={memory}
+                    card={card}
+                    onWroteAgentsMd={() => { setWroteAgentsMd(prev => new Map(prev).set(id, memory)) }}
+                  >
+                    <DeleteWithConfirm
+                      onDelete={() => { forget(memory) }}
+                      trigger={open => (
+                        <button
+                          type="button"
+                          className="pm-side-delete"
+                          aria-label={t('sidebar.saved.delete')}
+                          title={t('sidebar.saved.delete')}
+                          aria-disabled={isWaiting(id) || undefined}
+                          onClick={() => { if (!isWaiting(id)) open() }}
+                        >
+                          <TrashIcon />
+                        </button>
+                      )}
+                    />
+                    {failed(id)}
+                  </SavedRow>
+                )
+              // 对话里刚写入的：撑开位置落进来，银藤浅底亮一下
+              return <Arrival key={id} arrivals={arrivals} id={id} highlight>{row}</Arrival>
+            })}
             {changes.map(change => change.kind === 'rewrite'
               ? (
                 <div key={change.decisionId} className="pm-side-change" data-memory-id={change.memoryId}>
@@ -554,7 +561,7 @@ export const sidebarTabCss = crossConfirmCss + promoteInPlaceCss + modelChangeCs
 .pm-side-usage > .pm-budget { display: contents; }
 .pm-side-usage .pm-budget-summary { grid-column: 2; grid-row: 1; }
 .pm-side-usage .pm-budget-bar, .pm-side-usage .pm-budget-legend, .pm-side-usage > .pm-side-note, .pm-side-usage > .pm-side-hint { grid-column: 1 / -1; }
-.pm-side-section { display: flex; flex-direction: column; gap: 12px; }
+.pm-side-section { display: flex; flex-direction: column; gap: 12px; --pm-arrive-gap: 12px; }
 .pm-side-group { display: flex; flex-direction: column; gap: 12px; }
 .pm-side-group-title { margin: 4px 0 0; font-size: 12px; font-weight: 600; line-height: 1.5; color: var(--pm-text-2); }
 .pm-side-group-count { margin-left: 4px; font-weight: 400; color: var(--pm-text-2); }

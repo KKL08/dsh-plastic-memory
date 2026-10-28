@@ -544,3 +544,14 @@ describe('英文界面', () => {
     expect(within(rowOf('This fits every project')).getByText('New')).toBeInTheDocument()
   })
 })
+
+describe('动效', () => {
+  it('分数放在滚动数字里，体检改了分数时跟着换；结果行挂上后才标 data-live（之后出现的行才淡入）', () => {
+    const { gateway } = open(APP)
+    const roll = () => bar().querySelector<HTMLElement>('.pm-roll')!
+    expect(roll().firstElementChild).toHaveTextContent(/^90$/)
+    act(() => { gateway.setView('health', health({ app: { score: 76 } })) })
+    expect(roll().firstElementChild).toHaveTextContent(/^76$/)
+    expect(live()).toHaveAttribute('data-live')
+  })
+})
