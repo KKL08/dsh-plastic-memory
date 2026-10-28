@@ -38,28 +38,42 @@ function rowOf(text: string): HTMLElement {
 }
 
 describe('最近删除英文单复数', () => {
-  it('还剩 1 天写 1 day，多天写 days', () => {
+  it('还剩 1 天写 1 day，多天写 days；不到一天单独写', () => {
     const view: DeletedView = { version: GUI_VIEW_VERSION, items: [
       { memory: memory({ id: 'e1', content: 'one day left' }), deletedAt: NOW - 13 * DAY, purgeAt: NOW + 1.5 * DAY },
       { memory: memory({ id: 'e2', content: 'many days left' }), deletedAt: NOW - 2 * DAY, purgeAt: NOW + 12 * DAY },
+      { memory: memory({ id: 'e3', content: 'hours left' }), deletedAt: NOW - 14 * DAY, purgeAt: NOW + DAY / 2 },
     ] }
     render(<PanelShell gateway={createFakeGateway({ views: { deleted: view } })} t={createTranslator(en)}><DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} /></PanelShell>)
-    expect(within(rowOf('one day left')).getByText(/Purged in 1 day$/)).toBeInTheDocument()
-    expect(within(rowOf('many days left')).getByText(/Purged in 12 days$/)).toBeInTheDocument()
+    expect(within(rowOf('one day left')).getByText('1 day left')).toBeInTheDocument()
+    expect(within(rowOf('many days left')).getByText('12 days left')).toBeInTheDocument()
+    expect(within(rowOf('hours left')).getByText('Less than a day left')).toBeInTheDocument()
   })
 })
 
 describe('最近删除', () => {
-  it('只列作用域里的；每行写何时删、多久后彻底清除（客户端按当前时间算）', () => {
+  it('只列范围里的；搜索框下一行写保留规则；每行写何时删，行尾依次是「还能恢复 N 天 · 彻底删除… · 恢复」', () => {
     renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { deleted } }))
     expect(screen.getAllByRole('listitem')).toHaveLength(4)
     expect(screen.queryByText('博客用 Astro')).toBeNull()
-    expect(rowOf('用 pnpm 不用 npm').querySelector('.pm-del-meta')).toHaveTextContent('已删除·10 月 15 日·12 天后彻底清除')
-    expect(rowOf('测试用 sqlite').querySelector('.pm-del-meta')).toHaveTextContent('一天内彻底清除')
+    expect(screen.getByRole('searchbox', { name: '搜索已删除的记忆' })).toBeInTheDocument()
+    expect(screen.getByText('删除的记忆保留 14 天，期间可以恢复。')).toBeInTheDocument()
+    expect(rowOf('用 pnpm 不用 npm').querySelector('.pm-del-meta')).toHaveTextContent(/^已删除·10 月 15 日$/)
+    const tail = rowOf('用 pnpm 不用 npm').querySelector('.pm-row-actions')!
+    expect(tail).toHaveTextContent(/^还能恢复 12 天彻底删除…恢复$/)
+    expect(rowOf('测试用 sqlite').querySelector('.pm-row-actions')).toHaveTextContent(/^还能恢复不到 1 天/)
     expect(within(rowOf('用 pnpm 不用 npm')).queryByText('恢复后这条冲突会回到待处理')).toBeNull()
   })
 
-  it('裁决删掉的标来源，写出胜方的名字（全部记忆或最近删除里找；次文字色的元信息行，不用 chip），恢复按钮旁提示冲突会回到待处理', () => {
+  it('「全部」按层分段，段标题写层名和条数；搜索按内容筛', () => {
+    renderInShell(<DeletedTab nav={createNavStore()} scope={{ kind: 'all' }} session={session} now={NOW} />, createFakeGateway({ views: { deleted } }))
+    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['app4', 'blog1'])
+    fireEvent.change(screen.getByRole('searchbox', { name: '搜索已删除的记忆' }), { target: { value: 'astro' } })
+    expect(screen.getAllByRole('listitem').map(li => li.querySelector('.pm-mc-text')?.textContent)).toEqual(['博客用 Astro'])
+    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['blog1'])
+  })
+
+  it('裁决删掉的标来源，写出胜方的名字（全部记忆或最近删除里找；次文字色的元信息行，不用 chip），元信息下一行提示恢复后冲突会回到待处理', () => {
     renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { deleted, library } }))
     const a = rowOf('测试用 sqlite')
     expect(a.querySelector('.pm-del-meta')).toHaveTextContent(/^以「postgres-in-tests」为准时删除/)
@@ -249,7 +263,7 @@ describe('最近删除', () => {
     afterEach(() => { delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView })
 
     it('目标行滚入视野并高亮一次', () => {
-      renderInShell(<DeletedTab nav={createNavStore({ tab: 'deleted', memoryId: 'd1' })} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { deleted } }))
+      renderInShell(<DeletedTab nav={createNavStore({ view: 'deleted', memoryId: 'd1' })} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { deleted } }))
       expect(rowOf('用 pnpm 不用 npm')).toHaveClass('pm-flash')
       expect(screen.getAllByRole('listitem').filter(li => li.classList.contains('pm-flash'))).toHaveLength(1)
       expect(scrollIntoView).toHaveBeenCalledTimes(1)

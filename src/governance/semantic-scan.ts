@@ -1,6 +1,6 @@
 import type { MemoryRecord } from '../record-schema.ts'
 import { SEVERITY_BY_TYPE, type Finding } from './schema.ts'
-import { maskSecretSurface, maskSecrets } from '../secrets.ts'
+import { maskDiagnostic, maskSecretSurface, maskSecrets } from '../secrets.ts'
 import { estimateTokens } from '../snapshot.ts'
 
 /** 语义层的 LLM 抽象：纯逻辑只依赖这个接口，真机接线在 index.ts。 */
@@ -209,10 +209,31 @@ export function parseSemanticFindings(raw: string, knownIds: Set<string>): Findi
 }
 
 /**
+ * 语义层没做成的原因（最后一次尝试的）：模型调用抛错（带上错误的原话，宿主给了错误码时带上 hostCode），或输出解析不了。
+ * 错误码不在这里吞掉：内容检查据它分出「模型用不了」（tools/scan.ts）。
+ * 原话之后会进体检记录、视图和给模型的说明文字：AUTH 的原话可能回显部分凭据，对齐宿主不留（没有 message）；其余先遮掉疑似密钥。
+ */
+export type SemanticFailure =
+  | { kind: 'model-error'; hostCode?: string; message?: string }
+  | { kind: 'unparseable' }
+
+/** 抛出的错误自带的错误码（宿主适配层挂在 code 上的字符串），没有为 undefined。 */
+function errorCode(err: unknown): string | undefined {
+  const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined
+  return typeof code === 'string' && code.length > 0 ? code : undefined
+}
+
+function modelError(err: unknown): SemanticFailure {
+  const hostCode = errorCode(err)
+  if (hostCode === 'AUTH') return { kind: 'model-error', hostCode }
+  return { kind: 'model-error', ...(hostCode !== undefined ? { hostCode } : {}), message: maskDiagnostic(err instanceof Error ? err.message : String(err)) }
+}
+
+/**
  * 语义层扫描：按 token 预算分批（planSemanticBatches），每批一次调用，解析失败带提示重试一次。
  * 单条就能判的问题每条都覆盖；成对的（冲突、重复）只在同一批里检出。任一批两次都失败，整层按失败返回
- * （failed:true、不交出别批的结果，也不再发后面的批）。各批结果合并去重。batches 是批数，不分批时为 1；
- * 没有记忆时为 0，不调用模型，按没有发现的成功扫描返回。
+ * （failed:true、不交出别批的结果，也不再发后面的批，failure 是这一批最后一次尝试没做成的原因）。各批结果合并去重。
+ * batches 是批数，不分批时为 1；没有记忆时为 0，不调用模型，按没有发现的成功扫描返回。
  */
 export async function runSemanticScan(
   records: MemoryRecord[],
@@ -220,13 +241,13 @@ export async function runSemanticScan(
   llm: SemanticLlm,
   signal?: AbortSignal,
   onUsage?: (tokens: number) => void,
-): Promise<{ findings: Finding[]; failed: boolean; batches: number }> {
+): Promise<{ findings: Finding[]; failed: false; batches: number } | { findings: Finding[]; failed: true; batches: number; failure: SemanticFailure }> {
   const batches = planSemanticBatches(records)
   const findings: Finding[] = []
   const seen = new Set<string>()
   for (const batch of batches) {
     const found = await scanBatch(batch, baseline, llm, signal, onUsage)
-    if (found === null) return { findings: [], failed: true, batches: batches.length }
+    if (!Array.isArray(found)) return { findings: [], failed: true, batches: batches.length, failure: found }
     for (const f of found) {
       const key = `${f.type}|${[...f.memoryIds].sort().join('+')}|${f.baselineRef ?? ''}`
       if (seen.has(key)) continue
@@ -237,14 +258,14 @@ export async function runSemanticScan(
   return { findings, failed: false, batches: batches.length }
 }
 
-/** 一批的调用：解析失败带提示重试一次，两次都不行返回 null。 */
+/** 一批的调用：解析失败带提示重试一次，两次都不行返回重试那次没做成的原因。 */
 async function scanBatch(
   records: MemoryRecord[],
   baseline: readonly string[] | null,
   llm: SemanticLlm,
   signal: AbortSignal | undefined,
   onUsage: ((tokens: number) => void) | undefined,
-): Promise<Finding[] | null> {
+): Promise<Finding[] | SemanticFailure> {
   const knownIds = new Set(records.map(r => r.id))
   const prompt = buildSemanticPrompt(records, baseline)
 
@@ -262,13 +283,14 @@ async function scanBatch(
   if (first !== null) return first
 
   // 同上：重试调用本身也可能抛，与"重试输出仍无法解析"同等降级为失败。
-  let retryRaw: string | null = null
+  let retryRaw: string
   try {
     retryRaw = await llm.complete({ system: prompt.system, user: `${prompt.user}\n\n上次输出无法解析，请只输出 JSON。` }, signal, onUsage)
   } catch (err) {
     // 同首次：取消直接抛，不吞成失败
     if (isAbort(err, signal)) throw err
-    // 两次都失败，落到下面返回 null
+    // 两次都失败：原因带上错误码交给调用方
+    return modelError(err)
   }
-  return retryRaw === null ? null : parseSemanticFindings(retryRaw, knownIds)
+  return parseSemanticFindings(retryRaw, knownIds) ?? { kind: 'unparseable' }
 }

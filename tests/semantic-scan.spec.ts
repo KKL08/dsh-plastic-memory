@@ -210,18 +210,41 @@ describe('runSemanticScan', () => {
     expect(calls[1]).toContain('只输出 JSON')
   })
 
-  it('两次都失败返回 failed:true 空 findings', async () => {
+  it('两次都失败返回 failed:true 空 findings，原因是输出解析不了', async () => {
     const llm = { complete: async () => '不是 JSON' }
     const out = await runSemanticScan([record({ id: 'mem_a' })], null, llm)
     expect(out.failed).toBe(true)
     expect(out.findings).toEqual([])
+    expect(out.failed && out.failure).toEqual({ kind: 'unparseable' })
   })
 
-  it('LLM 调用抛异常时降级为 failed，不向上抛', async () => {
+  it('LLM 调用抛异常时降级为 failed，不向上抛；原因带上错误的原话', async () => {
     const llm = { complete: async () => { throw new Error('rate limited') } }
     const out = await runSemanticScan([record({ id: 'mem_a' })], null, llm)
     expect(out.failed).toBe(true)
     expect(out.findings).toEqual([])
+    expect(out.failed && out.failure).toEqual({ kind: 'model-error', message: 'rate limited' })
+  })
+
+  it('模型调用抛出的错误带宿主错误码：码一路保留到结果里，不在半路吞掉', async () => {
+    const llm = { complete: async () => { throw Object.assign(new Error('Sign in to DeepSeek'), { code: 'ACCOUNT_SIGN_IN_REQUIRED' }) } }
+    const out = await runSemanticScan([record({ id: 'mem_a' })], null, llm)
+    expect(out.failed && out.failure).toEqual({ kind: 'model-error', hostCode: 'ACCOUNT_SIGN_IN_REQUIRED', message: 'Sign in to DeepSeek' })
+  })
+
+  it('宿主 AUTH 错误不留原话（原话可能回显部分凭据，对齐宿主）：只带错误码', async () => {
+    const llm = { complete: async () => { throw Object.assign(new Error('401 invalid key sk-abcdefghijklmnop1234 rejected'), { code: 'AUTH' }) } }
+    const out = await runSemanticScan([record({ id: 'mem_a' })], null, llm)
+    expect(out.failed && out.failure).toEqual({ kind: 'model-error', hostCode: 'AUTH' })
+  })
+
+  it('其他错误的原话先遮掉疑似密钥再保留', async () => {
+    const llm = { complete: async () => { throw Object.assign(new Error('bad request: api_key=abcdefghijklmnop1234'), { code: 'SERVER' }) } }
+    const out = await runSemanticScan([record({ id: 'mem_a' })], null, llm)
+    const failure = out.failed ? out.failure : undefined
+    expect(failure).toMatchObject({ kind: 'model-error', hostCode: 'SERVER' })
+    expect(failure?.kind === 'model-error' && failure.message).toContain('bad request')
+    expect(JSON.stringify(failure)).not.toContain('abcdefghijklmnop1234')
   })
 
   it('小库不分批：调用一次、批数 1，结果与模型输出一致（不再按 200 条截断）', async () => {

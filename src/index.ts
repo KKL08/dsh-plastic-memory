@@ -33,13 +33,17 @@ import { resolveHealthThresholds, type HealthSensitivity } from './governance/he
 import { PendingDecisionsStore, overflowScopeOf } from './governance/decisions.ts'
 import { SnapshotStore } from './governance/snapshots.ts'
 import { AdviceIgnoreStore } from './governance/advice-ignores.ts'
+import { CheckupRecordStore } from './governance/checkup-records.ts'
+import { AutoCheckupSettingStore } from './governance/auto-checkups.ts'
 import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from './governance/schema.ts'
 import type { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { baselineProjectionDefinition, readBaseline } from './governance/baseline.ts'
-import { reportedTokens, type SemanticLlm } from './governance/semantic-scan.ts'
-import { createUserMessage, type GenerateOptions, type StreamChunk, type UserMessage } from '@deepseek-ai/dsh-llm'
+import type { SemanticLlm } from './governance/semantic-scan.ts'
+import { hostSemanticLlm, type HostLlmService, type HostModelRoute } from './governance/host-llm.ts'
+import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { createMemoryCommand, type MemoryCommandDefinition } from './gui/commands.ts'
-import { ViewWriter, collectGlobalViews } from './gui/view-writer.ts'
+import { ViewWriter, collectCheckupView, collectGlobalViews } from './gui/view-writer.ts'
+import { AutoCheckupScheduler, type AutoCheckupTimer } from './gui/auto-checkup.ts'
 import { buildSessionView } from './gui/views.ts'
 import type { SessionView } from './gui/contract.ts'
 
@@ -174,6 +178,10 @@ export async function apply(ctx: Context, config: Config) {
   const scanCache = sidecar.scanCache
   // 建议忽略表：健康分、体检、GUI 视图同一份剔除口径
   const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
+  // 体检记录表：体检做完写完成记录（上次体检），健康分、GUI 视图从它读
+  const checkups = new CheckupRecordStore(sidecar.checkups)
+  // 自动体检设置表：记忆页经 /memory set-auto-checkup 改，几个宿主进程共用一份
+  const autoCheckups = new AutoCheckupSettingStore(sidecar.autoCheckups)
   // AGENTS.md 基线投影走可选注册：插件的 inject 不列 sessionProjections（精简 profile 可能没有这个服务），
   // 改在 ctx.inject(['sessionProjections'], …) 里注册，这是宿主 registry 文档（dsh-session-projection README）
   // 给出的保留可选注册的写法。disposer 随 child fiber 走，插件卸载键即消失。服务缺席时插件照常挂载，
@@ -181,6 +189,8 @@ export async function apply(ctx: Context, config: Config) {
   ctx.inject(['sessionProjections'], child => void child.sessionProjections.register(baselineProjectionDefinition))
   // GUI 视图写入器：宿主有 commands 服务（GUI 半侧可用）时才有，见下方 ctx.inject(['commands'], …)
   let views: ViewWriter | undefined
+  // 自动体检调度器：宿主有计时服务时才有，见下方 ctx.inject(['timer'], …)
+  let scheduler: AutoCheckupScheduler | undefined
   // 会话归属对照（契约 GUI_WORKSPACE_MAP_FILE）：每次解析都记一笔原始 cwd → 项目；写入器就位前解析到的先留着，就位时补记
   const earlyWorkspaces = new Map<string, string>()
   const resolveCwd = async (cwd: string | undefined) => {
@@ -225,86 +235,40 @@ export async function apply(ctx: Context, config: Config) {
     },
   })
 
-  // 语义层 LLM：per-call 构建（provider/model 只能从触发调用的 agent 上拿到，插件加载时没有）。
-  // 用 ctx.get 而非属性访问——cordis 的 Context 是 proxy，未 inject 的服务名走属性访问会抛错
+  // 语义层模型：按调用构建（provider/model 只能在调用时解析，插件加载时没有），模型调用本身由 governance/host-llm.ts 适配宿主流。
+  // 服务一律经 ctx.get 探测而非属性访问——cordis 的 Context 是 proxy，未 inject 的服务名走属性访问会抛错
   // （cannot get property "llm" without inject）；ctx.get 是安全查找，未注册老实返回 undefined
   // （cordis reflect.ts _getImpl），下面的 try/catch 只是对宿主行为变化的防御。
-  // ⚠️ 真机验证确认的 dsh llm 契约（packages/llm/llm）：
-  //   1) LlmRuntime.stream(options: GenerateOptions) 的 provider/model 是必填 string，没有"用会话当前模型"的默认值；
-  //      三层解析顺序对齐宿主 compaction 摘要器的做法：
-  //      session.requestHeader()?.config（最近一次路由请求的配置）→ agent.options.provider/model；
-  //      两者都拿不到（provider 或 model 缺失）就返回 null，语义层降级，绝不猜默认模型。
-  //   2) StreamChunk 是判别联合，text-delta 和 reasoning-delta 都带 .text——开启推理时
-  //      （本环境 DeepSeek-V4-Flash High effort）若不按 type 过滤会把思维链拼进输出，导致 JSON 解析失败。
-  //      只累加 type === 'text-delta' 的 chunk。每条流以 finish chunk 收尾：适配器中途抛错会被宿主
-  //      折成 finish.reason.kind === 'error'（或 'aborted'），此时即使已收到可解析的文本也按失败处理。
-  //   3) 只发一次、不进会话的辅助请求用宿主的 RequestUserInput：只有 role 与 content（ContentBlock[]），
-  //      没有 id/source——宿主 0.1.7 起 Auto Review 与 compaction 摘要器同款。请求对象标注为
-  //      GenerateOptions，形状由编译器校验。
+  const probe = <T>(name: string): T | undefined => {
+    try {
+      return ctx.get(name) as T | undefined
+    } catch {
+      return undefined
+    }
+  }
+  // 有会话（memory_scan、借用会话的 /memory 命令）：用这个会话的模型。解析顺序对齐宿主 compaction 摘要器：
+  // session.requestHeader()?.config（最近一次路由请求的配置）→ agent.options.provider/model；拿不到就是 null，
+  // 体检和「让模型改」回 llm-unavailable，不改用默认模型——用户在那个会话里选的模型才是这次该用的。
   const makeSemanticLlm = (input: {
     session?: { requestHeader?: () => { config?: { provider?: string; model?: string } } | undefined }
     agentOptions?: { provider?: string; model?: string }
   }): SemanticLlm | null => {
-    // 三层解析本体只看 session/agentOptions 两个形状，exec 形状知识留在调用点的小 helper 里。
     const routed = input.session?.requestHeader?.()?.config
-    const provider = routed?.provider ?? input.agentOptions?.provider
-    const model = routed?.model ?? input.agentOptions?.model
-    if (!provider || !model) return null
-
-    let llm: { stream?: (req: GenerateOptions) => AsyncIterable<StreamChunk> } | undefined
+    return hostSemanticLlm(probe<HostLlmService>('llm'), {
+      provider: routed?.provider ?? input.agentOptions?.provider,
+      model: routed?.model ?? input.agentOptions?.model,
+    })
+  }
+  // 无会话（自动体检）：没有会话可借，用宿主的默认模型选择（agentDefaultModel 的当前选择：新建 agent 用它，
+  // 用户在对话里换模型时它通常跟着变）。可选依赖，每次开跑现读、不缓存；服务缺席或读取抛错就是 null，自动体检不跑、记「模型用不了」。
+  const getDefaultLlm = (): SemanticLlm | null => {
+    let route: HostModelRoute | undefined
     try {
-      llm = ctx.get('llm') as typeof llm
+      route = probe<{ currentSelection(): HostModelRoute }>('agentDefaultModel')?.currentSelection()
     } catch {
-      // ctx.get 按 cordis 现契约不抛（安全查找）；防御宿主行为变化，异常一律按"拿不到 LLM"降级
       return null
     }
-    if (!llm?.stream) return null
-    return {
-      model,
-      async complete({ system, user }, signal, onUsage) {
-        // 起步前先看取消：已取消就不发请求，直接抛（signal.reason 通常是 AbortError）。
-        signal?.throwIfAborted()
-        let out = ''
-        // 宿主在 finish 前发 usage 块（StreamChunk 的 'usage'，各项互不重叠），取最后一个；
-        // 宿主在出错收尾前报了用量的也计入，所以放在 finally 里报
-        let usage: Extract<StreamChunk, { type: 'usage' }> | undefined
-        // stream 建立或迭代过程中抛出的错误按 rejected promise 向上传播，
-        // 由 runSemanticScan 的调用点捕获降级，这里不吞掉。
-        // signal 透传给宿主 GenerateOptions，让在途请求随取消中断。
-        const request: GenerateOptions = {
-          provider,
-          model,
-          system,
-          signal,
-          messages: [{ role: 'user', content: [{ type: 'text', text: user }] }],
-        }
-        try {
-          for await (const chunk of llm.stream!(request)) {
-            if (chunk.type === 'text-delta') out += chunk.text
-            else if (chunk.type === 'usage') usage = chunk
-            else if (chunk.type === 'finish') {
-              // error/aborted 带 failure，照 compaction-basic summarizer 的 finishError 一律拒绝；
-              // stop、max-tokens 及未来新增的 kind 不算错误，保留已收文本交给解析判定
-              // （与 summarizer 不同，截断的 JSON 解析不过会自然走重试）。
-              const reason = chunk.reason
-              if (reason.kind === 'error') {
-                throw Object.assign(new Error(reason.failure.message), { code: reason.failure.code })
-              }
-              if (reason.kind === 'aborted') {
-                // 宿主报 aborted 时 signal 未必已触发：仍以 AbortError 拒绝，不当成功，也不进重试。
-                throw signal?.reason ?? new DOMException(reason.failure.message, 'AbortError')
-              }
-            }
-          }
-        } finally {
-          const tokens = usage === undefined ? undefined : reportedTokens(usage.usage)
-          if (tokens !== undefined) onUsage?.(tokens)
-        }
-        // 宿主可能在取消时正常结束迭代而不抛——循环收尾再判一次，取消一律抛 AbortError。
-        if (signal?.aborted) throw signal.reason ?? new DOMException('memory_scan cancelled', 'AbortError')
-        return out
-      },
-    }
+    return hostSemanticLlm(probe<HostLlmService>('llm'), route)
   }
 
   // 工具执行上下文：从 exec.agent.session 取 session、workspace 与子 agent 深度（header.delegationDepth）。证据锚的两个数都走宿主
@@ -450,13 +414,13 @@ export async function apply(ctx: Context, config: Config) {
       // 基线按触发调用的 session 取（宿主投影 cell 按 session 隔离，防多会话串台）。
       // 扫描会写语义缓存、登记待决冲突，归写工具；health 纯读，不套门
       registerWrite(createScanTool({
-        store, registry, decisions, cache: scanCache, ignores,
+        store, registry, decisions, cache: scanCache, ignores, checkups,
         getBaseline,
         getLlm,
         resolveContext,
       })),
       ctx.tools.register(createHealthTool({
-        store, registry, decisions, cache: scanCache, ignores,
+        store, registry, decisions, cache: scanCache, ignores, checkups, autoCheckups,
         get thresholds() { return resolveHealthThresholds(config.governance.health.sensitivity.get()) },
         resolveContext,
       })),
@@ -473,19 +437,25 @@ export async function apply(ctx: Context, config: Config) {
   // GUI（浏览器半侧）的动作通道：/memory 命令走可选注册，旧宿主没有 commands 服务时插件照常挂载、不注册、不报错。
   // 首次视图写入推迟到第一个 session/created（见下方）：apply 期间读账本会触发旧 KV 导入探测，
   // 那时 storageDomain 未必挂上；而没有任何会话时浏览器半侧也读不到视图，早写没有意义。
+  // 体检视图与自动体检调度共用的读法：设置表、完成记录、目录清单，不读记忆文件
+  const checkupSource = { store, checkups, autoCheckups, cache: scanCache, isGovernanceEnabled: () => config.governance.enabled.get() }
+  // 四个全局视图的收集：视图写入器与自动体检（体检前后比出新增）共用
+  const collectViews = () => collectGlobalViews({
+    store, decisions, snapshots, cache: scanCache, ignores, checkups, autoCheckups, registry, memoryRoot, isGovernanceEnabled: () => config.governance.enabled.get(), bootedAt, log: ctx.logger,
+  })
   ctx.inject(['commands'], child => {
     const commands = (child as unknown as { commands: { register(def: MemoryCommandDefinition): () => void } }).commands
     const writer = new ViewWriter({
       memoryRoot, log: ctx.logger,
-      collect: () => collectGlobalViews({
-        store, decisions, snapshots, cache: scanCache, ignores, registry, memoryRoot, isGovernanceEnabled: () => config.governance.enabled.get(), bootedAt, log: ctx.logger,
-      }),
+      collect: collectViews,
+      collectCheckups: () => collectCheckupView(checkupSource),
     })
     views = writer
     for (const [cwd, workspacePath] of earlyWorkspaces) void writer.requestWorkspace(cwd, workspacePath)
     earlyWorkspaces.clear()
     commands.register(createMemoryCommand({
-      memoryRoot, store, decisions, snapshots, cache: scanCache, ignores, registry, agentsMd, views: writer,
+      memoryRoot, store, decisions, snapshots, cache: scanCache, checkups, autoCheckups, ignores, registry, agentsMd, views: writer,
+      onAutoCheckupChanged: () => void scheduler?.recheck(),
       resolveContext, getLlm, getBaseline, log: ctx.logger,
       isGovernanceEnabled: () => config.governance.enabled.get(),
     }))
@@ -497,6 +467,33 @@ export async function apply(ctx: Context, config: Config) {
     }
   })
   let startupViewsPending = true
+
+  // 自动体检调度：宿主有计时服务时才有（可选注册，同 commands）。计时器挂在 child 上，插件卸载时宿主停掉它们；
+  // disposer 再取消正在跑的体检并等它收尾。无会话，用宿主默认模型（getDefaultLlm）。
+  ctx.inject(['timer'], child => {
+    const timer = child as unknown as AutoCheckupTimer
+    const created = new AutoCheckupScheduler({
+      scan: { store, registry, decisions, cache: scanCache, ignores },
+      checkups,
+      collectPending: async () => (await collectViews()).pending,
+      status: () => collectCheckupView(checkupSource),
+      getDefaultLlm,
+      isGovernanceEnabled: () => config.governance.enabled.get(),
+      timer: { timeout: (callback, delayMs) => timer.timeout(callback, delayMs), interval: (callback, delayMs) => timer.interval(callback, delayMs) },
+      onChecked: async () => { await views?.requestCheckups() },
+      onClaimChanged: async () => { await views?.requestCheckups() },
+      // 自动体检挂了账、写了完成记录：待处理、健康和体检视图都重写
+      onScanned: async () => { await views?.request() },
+      now: () => Date.now(),
+      log: ctx.logger,
+    })
+    scheduler = created
+    created.start()
+    return async () => {
+      if (scheduler === created) scheduler = undefined
+      await created.dispose()
+    }
+  })
 
   // 配置热生效：宿主只在 volatile 字段变化时发本事件（载荷是变化路径，如 [['governance', 'enabled']]），已提交的新值经 .get() 读到。
   // 所有会话的快照标过期（宿主每一步都组装，同一轮的下一步就按新配置重建），按变化项重注册工具，最后重写视图。
@@ -529,6 +526,8 @@ export async function apply(ctx: Context, config: Config) {
       }
     }
     await views?.rewriteAll()
+    // 体检开关变了：自动体检立刻重算（打开时到期的范围马上开始查）
+    if (changed('governance.enabled')) void scheduler?.recheck()
   })
 
   // frozen snapshot：按 session 隔离缓存，session/created 异步解析 workspace，compaction 结束标过期、下一次组装重建。

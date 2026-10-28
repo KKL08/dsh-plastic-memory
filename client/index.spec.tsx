@@ -42,23 +42,23 @@ describe('apply', () => {
     for (const service of ['sidebarRight', 'sidebarRightTabs', 'pluginNavigation', 'configForms']) expect(inject).not.toContain(service)
   })
 
-  it('宿主有插件页导航：记忆页页头「设置」跳插件页里本插件的详情', () => {
+  it('宿主有插件页导航：记忆页左栏底部「插件设置」跳插件页里本插件的详情', () => {
     const { registered, ctx } = setup()
     const Page = registered.find(r => r.options.name === 'main')!.component as ComponentType<RootStandardProps>
     render(<Page {...props({ ids: ['s1'], byId: { s1: { id: 's1', displayTitle: 's1', running: false, updatedAt: 1, retainedBy: {} } }, phase: 'ready' })} />)
-    fireEvent.click(screen.getByRole('button', { name: '设置' }))
+    fireEvent.click(screen.getByRole('button', { name: '插件设置' }))
     expect(ctx.pluginNavigation!.openBundle).toHaveBeenCalledWith(PACKAGE_NAME)
   })
 
-  it('宿主缺可选服务：记忆页照常注册，不注册右侧栏 tab 与设置页，也不画「设置」', () => {
+  it('宿主缺可选服务：记忆页照常注册，不注册右侧栏 tab 与设置页，也不画「插件设置」', () => {
     const { registered } = setup({ sidebarRight: undefined, sidebarRightTabs: undefined, pluginNavigation: undefined, configForms: undefined })
     expect(registered.map(r => r.options.name)).toEqual(expect.arrayContaining(['main', 'sidebar.panellist', 'conversation.composer.dock']))
     expect(registered.map(r => r.options.name)).not.toContain('sidebar.right.pane.tab')
     expect(registered.map(r => r.options.name)).not.toContain('plugins.bundle.config')
     const Page = registered.find(r => r.options.name === 'main')!.component as ComponentType<RootStandardProps>
     render(<Page {...props({ ids: ['s1'], byId: { s1: { id: 's1', displayTitle: 's1', running: false, updatedAt: 1, retainedBy: {} } }, phase: 'ready' })} />)
-    expect(screen.getAllByRole('tab')).toHaveLength(4)
-    expect(screen.queryByRole('button', { name: '设置' })).toBeNull()
+    expect(screen.getAllByRole('tab')).toHaveLength(3)
+    expect(screen.queryByRole('button', { name: '插件设置' })).toBeNull()
   })
 
   it('左栏图标与记忆页同 id，图标名称走 locale', () => {
@@ -70,14 +70,14 @@ describe('apply', () => {
     expect((icon.options.label as () => string)()).toBe('记忆')
   })
 
-  it('记忆页接宿主 props：没有会话显示空态，有会话显示 tab', () => {
+  it('记忆页接宿主 props：没有会话显示空态，有会话显示三个视图', () => {
     const { registered } = setup()
     const Page = registered.find(r => r.options.name === 'main')!.component as ComponentType<RootStandardProps>
     const { unmount } = render(<Page {...props({ ids: [], byId: {}, phase: 'ready' })} />)
     expect(screen.getByText('开一个会话后这里可用')).toBeInTheDocument()
     unmount()
     render(<Page {...props({ ids: ['s1'], byId: { s1: { id: 's1', displayTitle: 's1', running: false, updatedAt: 1, retainedBy: {} } }, phase: 'ready' })} />)
-    expect(screen.getAllByRole('tab')).toHaveLength(4)
+    expect(screen.getAllByRole('tab')).toHaveLength(3)
   })
 
   it('左栏图标接宿主 {size, active} + 根作用域 props；没有会话时只画图标、不亮点', () => {

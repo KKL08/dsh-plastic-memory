@@ -25,6 +25,11 @@ export const NOISE_CAPS: Record<Exclude<FindingType, 'secret' | 'conflict'>, num
 export const GLOBAL_MISPLACED_CAP = 10
 export const FRESHNESS_CAP = 15
 
+/** 规则检查扣分（rulePenalty）包含的问题类型。 */
+export const RULE_PENALTY_TYPES = ['expired', 'bloat', 'orphan', 'malformed'] as const
+/** 内容检查扣分（semanticPenalty）除冲突外包含的问题类型：冲突计条扣分，这几类按噪音进度。 */
+export const SEMANTIC_NOISE_TYPES = ['redundancy', 'misplaced', 'unclear'] as const
+
 /**
  * 噪音进度双轴满格线："条数够多、占比也够高，这类问题才算大"。
  * 两轴取小是早期到中后期连续过渡的机关：小库占比虚高由条数轴按住（1 条不吓人），
@@ -74,8 +79,8 @@ export function computeHealth(input: HealthInput): HealthScore {
 
   const conflictPenalty = Math.min(CONFLICT_CAP, counts.conflict * CONFLICT_UNIT)
   // rule/semantic 的划分沿用 finding 的产出层；secret 不进扣分算术（走红线门）
-  const rulePenalty = (['expired', 'bloat', 'orphan', 'malformed'] as const).reduce((s, t) => s + noisePenalty(t), 0)
-  const semanticPenalty = conflictPenalty + (['redundancy', 'misplaced', 'unclear'] as const).reduce((s, t) => s + noisePenalty(t), 0)
+  const rulePenalty = RULE_PENALTY_TYPES.reduce((s, t) => s + noisePenalty(t), 0)
+  const semanticPenalty = conflictPenalty + SEMANTIC_NOISE_TYPES.reduce((s, t) => s + noisePenalty(t), 0)
 
   // 新鲜度当第八类噪音：超期条数走同一进度公式（深度不加权——超 1 天和超 10 倍都算 1 条，
   // 引导动作一样是 confirm/update；avgRatio 仅供展示）

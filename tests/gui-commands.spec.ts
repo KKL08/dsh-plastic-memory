@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { createHash } from 'node:crypto'
 import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
@@ -12,20 +13,24 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
+import { CheckupRecordStore, checkupKey } from '../src/governance/checkup-records.ts'
+import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
 import { REDACTED_PLACEHOLDER, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type PendingDecision } from '../src/governance/schema.ts'
 import type { ClaimKvTable } from '../src/kv-table.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
-import { ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
+import { ViewWriter, collectCheckupView, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../src/gui/commands.ts'
 import {
-  GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, encodeMemoryCommand, sessionViewFile,
-  deletedViewSchema, healthViewSchema, layerOfMemory, libraryViewSchema, memoryCommandResultSchema, pendingViewSchema,
+  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, encodeMemoryCommand, sessionViewFile,
+  checkupViewSchema, deletedViewSchema, healthViewSchema, layerOfMemory, libraryViewSchema, memoryCommandResultSchema, pendingItemKey, pendingViewSchema,
   type MemoryCommand, type MemoryCommandResult, type PendingItem,
 } from '../src/gui/contract.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
 import { executeForget } from '../src/tools/forget.ts'
 import { executeSnapshotTool } from '../src/tools/snapshot.ts'
+import { cacheKey, executeScan } from '../src/tools/scan.ts'
+import { fakeExec } from './helpers/exec.ts'
 import { candidate, record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 
@@ -52,22 +57,35 @@ interface EnvOpts {
   /** 体检开关；缺省视为开启。 */
   governanceEnabled?: boolean
   /** 包一层视图写入器（模拟收集、写入出错）。 */
-  wrapViews?: (writer: ViewWriter) => Pick<ViewWriter, 'request' | 'rewriteAll' | 'collectViews'>
+  wrapViews?: (writer: ViewWriter) => Pick<ViewWriter, 'request' | 'rewriteAll' | 'collectViews' | 'requestCheckups'>
   log?: MemoryLogger
+  /** 认领心跳的计时（缺省真实 setInterval）。 */
+  heartbeat?: (callback: () => void, delayMs: number) => () => void
 }
 
 function env(opts: EnvOpts = {}) {
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
   const clock = { now: opts.now ?? NOW }
+  // 侧表也用这个时钟：认领的时间和是否残留按它算
+  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }, now: () => clock.now })
   // 表和命令用同一个时钟：软删记的时刻和最近删除的保留期清扫才对得上
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now }), undefined, sidecar.recallStats)
   const decisions = new PendingDecisionsStore(opts.wrapPending?.(sidecar.pending) ?? sidecar.pending)
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const cache = sidecar.scanCache
-  const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, snapshots, cache, registry, memoryRoot: root, now: () => clock.now }) })
+  const checkups = new CheckupRecordStore(sidecar.checkups)
+  const autoCheckups = new AutoCheckupSettingStore(sidecar.autoCheckups)
+  const views = new ViewWriter({
+    memoryRoot: root,
+    collect: () => collectGlobalViews({ store, decisions, snapshots, cache, checkups, autoCheckups, registry, memoryRoot: root, now: () => clock.now }),
+    collectCheckups: () => collectCheckupView({ store, checkups, autoCheckups, cache, now: () => clock.now, ...(opts.governanceEnabled !== undefined ? { isGovernanceEnabled: () => opts.governanceEnabled! } : {}) }),
+  })
+  // 本进程调度器收到的「设置改了」通知次数
+  const autoCheckupChanges = { count: 0 }
   const command = createMemoryCommand({
-    memoryRoot: root, store, decisions, snapshots, cache, ignores: new AdviceIgnoreStore(sidecar.adviceIgnores), registry, views: opts.wrapViews?.(views) ?? views,
+    memoryRoot: root, store, decisions, snapshots, cache, checkups, autoCheckups, ignores: new AdviceIgnoreStore(sidecar.adviceIgnores), registry, views: opts.wrapViews?.(views) ?? views,
+    onAutoCheckupChanged: () => { autoCheckupChanges.count++ },
     ...(opts.log !== undefined ? { log: opts.log } : {}),
+    ...(opts.heartbeat !== undefined ? { heartbeat: opts.heartbeat } : {}),
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),
     resolveContext: async () => ({ workspacePath: 'workspacePath' in opts ? opts.workspacePath : SESSION_WS, delegationDepth: opts.delegationDepth ?? 0, session: { id: 'sess-1' } }),
     getLlm: () => (opts.llm === undefined ? null : opts.llm),
@@ -85,7 +103,8 @@ function env(opts: EnvOpts = {}) {
   }
   const run = (c: MemoryCommand) => runRaw(encodeMemoryCommand(c).slice(`/${MEMORY_COMMAND_NAME}`.length))
   const readView = async (name: keyof typeof GUI_VIEW_FILES) => JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES[name]), 'utf8')) as unknown
-  return { store, decisions, snapshots, cache, stats: sidecar.recallStats, command, run, runRaw, readView, clock }
+  const readCheckupView = async () => checkupViewSchema.parse(JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_CHECKUP_VIEW_FILE), 'utf8')))
+  return { store, decisions, snapshots, cache, checkups, autoCheckups, autoCheckupChanges, stats: sidecar.recallStats, command, run, runRaw, readView, readCheckupView, clock }
 }
 
 type Ok = Extract<MemoryCommandResult, { ok: true }>
@@ -130,6 +149,7 @@ describe('info', () => {
       views: {
         pending: join(dir, GUI_VIEW_FILES.pending), health: join(dir, GUI_VIEW_FILES.health),
         library: join(dir, GUI_VIEW_FILES.library), deleted: join(dir, GUI_VIEW_FILES.deleted),
+        checkups: join(dir, GUI_CHECKUP_VIEW_FILE),
         session: join(dir, sessionViewFile('sess-1')),
       },
       version: GUI_VIEW_VERSION,
@@ -1218,6 +1238,15 @@ describe('提升候选与超限', () => {
     ok(await e.run({ cmd: 'dismiss-overflow', decisionId: entry.id }))
     expect((await e.decisions.listSettled()).map(d => [d.id, d.settled?.verdict])).toEqual([[entry.id, 'dismiss']])
   })
+
+  it('undo 忽略过的超限提醒：回到未决，同一条条目', async () => {
+    const e = env()
+    const { entry } = await e.decisions.upsert({ kind: 'overflow', memoryIds: [], summary: '超出上限', fingerprint: '1' }, 1)
+    ok(await e.run({ cmd: 'dismiss-overflow', decisionId: entry.id }))
+    ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+    expect(await e.decisions.listSettled()).toEqual([])
+    expect((await e.decisions.list()).map(d => d.id)).toEqual([entry.id])
+  })
 })
 
 describe('promote-memory（建议整理「放错层」的提升为全局）', () => {
@@ -1900,7 +1929,7 @@ describe('scan', () => {
       const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
       const e = env({
         llm: answering(() => [conflict]), log,
-        wrapViews: w => ({ request: () => w.request(), rewriteAll: () => w.rewriteAll(), collectViews: () => Promise.reject(new Error('读不出')) }),
+        wrapViews: w => ({ request: () => w.request(), rewriteAll: () => w.rewriteAll(), requestCheckups: () => w.requestCheckups(), collectViews: () => Promise.reject(new Error('读不出')) }),
       })
       await seedFour(e)
       const body = ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
@@ -1908,6 +1937,17 @@ describe('scan', () => {
       expect(body).not.toHaveProperty('added')
       expect(body).not.toHaveProperty('scores')
       expect(await e.decisions.list()).toHaveLength(1)
+      expect(log.warn).toHaveBeenCalledTimes(1)
+    })
+
+    it('体检提交之后记最近一次结果出错：命令照常回 ok，记一条日志', async () => {
+      const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+      const e = env({ llm: answering(() => [conflict]), log })
+      await seedFour(e)
+      vi.spyOn(e.checkups, 'recordResults').mockRejectedValue(new Error('写不进'))
+      const body = ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+      expect(body.added).toMatchObject({ pending: 1, advice: 0 })
+      expect((await e.checkups.list()).find(r => r.id === SESSION_WS)?.completed).toMatchObject({ by: 'manual' })
       expect(log.warn).toHaveBeenCalledTimes(1)
     })
 
@@ -1919,6 +1959,7 @@ describe('scan', () => {
         wrapViews: w => ({
           request: () => w.request(),
           rewriteAll: async () => undefined,
+          requestCheckups: () => w.requestCheckups(),
           collectViews: () => (++collects === 1 ? w.collectViews() : Promise.reject(new Error('读不出'))),
         }),
       })
@@ -1967,6 +2008,632 @@ describe('scan', () => {
       expect(body.scores).toEqual(await healthScores(e))
       expect(body.scores).toHaveLength(3)
     })
+  })
+})
+
+describe('scan：上次体检与完成记录', () => {
+  const OTHER = { kind: 'workspace' as const, path: OTHER_WS }
+  const SESSION = { kind: 'workspace' as const, path: SESSION_WS }
+  const GLOBAL = { kind: 'global' as const }
+  const answering = (findings: () => object[]): SemanticLlm => ({ complete: async () => JSON.stringify({ findings: findings() }) })
+  const quiet = answering(() => [])
+  /** 体检记录表里这个范围的完成记录；没有为 undefined。 */
+  const completedOf = async (e: ReturnType<typeof env>, layer: Parameters<typeof checkupKey>[0]) =>
+    (await e.checkups.list()).find(r => r.id === checkupKey(layer))?.completed
+  /** 健康视图里各层的上次体检，按层：global 记作 'global'，项目记作路径。 */
+  const lastCheckups = async (e: ReturnType<typeof env>) => Object.fromEntries(healthViewSchema.parse(await e.readView('health')).layers
+    .map(l => [l.layer.kind === 'global' ? 'global' : l.layer.workspacePath, l.lastCheckupAt]))
+  const healthOf = async (e: ReturnType<typeof env>, kind: 'global') =>
+    healthViewSchema.parse(await e.readView('health')).layers.find(l => l.layer.kind === kind)!
+  async function seedLayers(e: ReturnType<typeof env>) {
+    await e.store.create(record({ id: 'mem_g', name: '全局', content: '回答用中文' }))
+    await e.store.create(record({ id: 'mem_s', name: '本项目', content: '用 pnpm', scope: 'workspace', workspacePath: SESSION_WS }))
+    await e.store.create(record({ id: 'mem_o', name: '别的项目', content: '用 npm', scope: 'workspace', workspacePath: OTHER_WS }))
+  }
+
+  it('项目体检：只给本项目写完成记录（发起方界面手动、开始与完成时间）和缓存；全局的分数与上次体检不变', async () => {
+    const e = env({ llm: answering(() => [{ type: 'unclear', memoryIds: ['mem_g'], summary: '说得不清楚' }]) })
+    await seedLayers(e)
+    ok(await e.run({ cmd: 'refresh-views' }))
+    const globalBefore = await healthOf(e, 'global')
+    e.clock.now = NOW + 1000
+    ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW + 1000, completedAt: NOW + 1000, by: 'manual' })
+    expect(await completedOf(e, GLOBAL)).toBeUndefined()
+    expect((await e.cache.list()).map(([key]) => key)).toEqual([cacheKey(SESSION_WS)])
+    const globalAfter = await healthOf(e, 'global')
+    expect(globalAfter.score).toBe(globalBefore.score)
+    expect(globalAfter.lastCheckupAt).toBeNull()
+    expect(await lastCheckups(e)).toEqual({ global: null, [SESSION_WS]: NOW + 1000, [OTHER_WS]: null })
+  })
+
+  it('只查全局：只读写全局层，只写全局的缓存与完成记录；结果只给全局的分数', async () => {
+    const seen: string[] = []
+    const e = env({ llm: { complete: async (input) => { seen.push(JSON.stringify(input)); return '{"findings":[]}' } } })
+    await seedLayers(e)
+    const body = ok(await e.run({ cmd: 'scan', layer: { kind: 'global' } }))
+    expect(seen.join('\n')).toContain('mem_g')
+    expect(seen.join('\n')).not.toContain('mem_s')
+    expect((await e.cache.list()).map(([key]) => key)).toEqual([cacheKey(undefined)])
+    expect(await completedOf(e, GLOBAL)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
+    expect(await completedOf(e, SESSION)).toBeUndefined()
+    expect(body.scores!.map(s => s.layer)).toEqual([{ kind: 'global' }])
+    expect(await lastCheckups(e)).toEqual({ global: NOW, [SESSION_WS]: null, [OTHER_WS]: null })
+  })
+
+  it('只查全局与项目路径不能同时给', async () => {
+    const e = env({ llm: quiet })
+    expect(err(await e.run({ cmd: 'scan', layer: { kind: 'global' }, workspacePath: SESSION_WS } as MemoryCommand)).code).toBe('invalid-args')
+  })
+
+  it('全部体检：全局和每个项目都写完成记录，健康视图里的上次体检都更新', async () => {
+    const e = env({ llm: quiet })
+    await seedLayers(e)
+    ok(await e.run({ cmd: 'scan' }))
+    for (const layer of [GLOBAL, SESSION, OTHER]) expect(await completedOf(e, layer)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
+    expect(await lastCheckups(e)).toEqual({ global: NOW, [SESSION_WS]: NOW, [OTHER_WS]: NOW })
+  })
+
+  it('内容检查失败：不写完成记录，上次体检仍是之前那次', async () => {
+    let failing = false
+    const e = env({ llm: { complete: async () => { if (failing) throw new Error('模型报错'); return '{"findings":[]}' } } })
+    await seedLayers(e)
+    ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    failing = true
+    e.clock.now = NOW + 1000
+    expect(ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS })).notes).toContain('semantic-failed')
+    expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
+    expect((await lastCheckups(e))[SESSION_WS]).toBe(NOW)
+  })
+
+  it.each([
+    ['ACCOUNT_SIGN_IN_REQUIRED', 'model-unavailable', 'semantic-failed'],
+    ['MISSING_CREDENTIAL', 'model-unavailable', 'semantic-failed'],
+    ['RATE_LIMIT', 'semantic-failed', 'model-unavailable'],
+  ] as const)('借用会话的模型报宿主错误码 %s：说明码是 %s，不是 %s；不写完成记录', async (code, note, other) => {
+    const e = env({ llm: { complete: async () => { throw Object.assign(new Error(`host ${code}`), { code }) } } })
+    await seedLayers(e)
+    const notes = ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS })).notes
+    expect(notes).toContain(note)
+    expect(notes).not.toContain(other)
+    expect(await completedOf(e, SESSION)).toBeUndefined()
+  })
+
+  it('手动体检成功：清掉这个范围自动体检的失败计数和「模型用不了」，体检视图跟着更新', async () => {
+    const e = env({ llm: quiet })
+    await seedLayers(e)
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: { kind: 'all' }, frequency: 1 }))
+    await e.checkups.recordFailure(SESSION, { kind: 'model-error', hostCode: 'RATE_LIMIT', message: 'too many requests' }, NOW - 1000)
+    await e.checkups.recordFailure(SESSION, { kind: 'unparseable' }, NOW - 500)
+    await e.checkups.recordModelUnavailable(GLOBAL, { kind: 'no-default-model' }, NOW)
+    ok(await e.run({ cmd: 'refresh-views' }))
+    const before = await e.readCheckupView()
+    expect(before.scopes.find(s => s.scope.kind === 'workspace' && s.scope.workspacePath === SESSION_WS)).toMatchObject({
+      failure: { count: 2, retryAt: NOW - 500 + 3_600_000, isRetryLimitReached: false, cause: { kind: 'unparseable' } }, modelUnavailable: null,
+    })
+    expect(before.scopes.find(s => s.scope.kind === 'global')).toMatchObject({ failure: null, modelUnavailable: { kind: 'no-default-model' } })
+    ok(await e.run({ cmd: 'scan' }))
+    const after = await e.readCheckupView()
+    expect(after.scopes.map(s => [s.failure, s.modelUnavailable])).toEqual([[null, null], [null, null], [null, null]])
+  })
+
+  it('写完缓存、挂账挂到一半时进程退出：不写完成记录，上次体检仍是之前那次；重跑后每个冲突只有一张卡', async () => {
+    let dying = false
+    let puts = 0
+    const e = env({
+      llm: answering(() => [
+        { type: 'conflict', memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', suggestedAction: '裁决' },
+        { type: 'conflict', memoryIds: ['mem_c', 'mem_d'], summary: '测试框架矛盾', suggestedAction: '裁决' },
+      ]),
+      // 第二个冲突挂账时进程没了（第一个已挂上）
+      wrapPending: table => ({
+        get: k => table.get(k), list: () => table.list(), delete: k => table.delete(k), claim: k => table.claim(k),
+        put: async (k, v) => { if (dying && ++puts === 2) throw new Error('进程退出'); return table.put(k, v) },
+      }),
+    })
+    const scoped = { scope: 'workspace' as const, workspacePath: SESSION_WS }
+    for (const [id, content] of [['mem_a', '用 pnpm'], ['mem_b', '用 npm'], ['mem_c', '用 vitest'], ['mem_d', '用 jest']]) {
+      await e.store.create(record({ id, name: id, content, ...scoped }))
+    }
+    const seeded = await e.decisions.list()
+    expect(seeded).toEqual([])
+    // 之前做完过一次（那时模型什么都没报）
+    const earlier = env({ llm: quiet })
+    ok(await earlier.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    dying = true
+    e.clock.now = NOW + 1000
+    expect(err(await e.run({ cmd: 'scan', workspacePath: SESSION_WS })).code).toBe('failed')
+    expect((await e.cache.get(cacheKey(SESSION_WS)))?.scannedAt).toBe(NOW + 1000)
+    expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect((await lastCheckups(e))[SESSION_WS]).toBe(NOW)
+    dying = false
+    e.clock.now = NOW + 2000
+    ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW + 2000, completedAt: NOW + 2000, by: 'manual' })
+    const cards = ledgerItems(pendingViewSchema.parse(await e.readView('pending')))
+    expect(cards.map(i => i.kind)).toEqual(['conflict-horizontal', 'conflict-horizontal'])
+    expect(await e.decisions.list()).toHaveLength(2)
+  })
+
+  it('两次体检重叠：开始得早、结束得晚的 agent 体检不让上次体检和缓存往回退', async () => {
+    let release!: () => void
+    const gate = new Promise<void>(r => { release = r })
+    // 先开始的 agent 体检：模型卡住，等界面体检做完再返回，报的发现也不同
+    const slow: SemanticLlm = { complete: async () => { await gate; return JSON.stringify({ findings: [{ type: 'unclear', memoryIds: ['mem_s'], summary: '旧结论' }] }) } }
+    const e = env({ llm: quiet })
+    await seedLayers(e)
+    e.clock.now = NOW + 1000
+    const late = executeScan({ scope: SESSION_WS }, {
+      store: e.store, registry, decisions: e.decisions, cache: e.cache, checkups: e.checkups,
+      getBaseline: () => null, getLlm: () => slow, resolveContext: async () => ({ workspacePath: SESSION_WS }), now: () => e.clock.now,
+    }, fakeExec())
+    e.clock.now = NOW + 2000
+    ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    e.clock.now = NOW + 3000
+    release()
+    expect((await late).kind).toBe('single')
+    expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW + 2000, completedAt: NOW + 2000, by: 'manual' })
+    const cached = await e.cache.get(cacheKey(SESSION_WS))
+    expect(cached).toMatchObject({ scannedAt: NOW + 2000, findings: [] })
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect((await lastCheckups(e))[SESSION_WS]).toBe(NOW + 2000)
+  })
+
+  it('升级后还没有完成记录：上次体检取内容检查缓存的时间；有了完成记录就取完成记录', async () => {
+    const e = env({ llm: quiet })
+    await seedLayers(e)
+    await e.cache.put(cacheKey(SESSION_WS), { id: cacheKey(SESSION_WS), scannedAt: NOW - 5000, scope: SESSION_WS, findings: [] })
+    await e.cache.put(cacheKey(OTHER_WS), { id: cacheKey(OTHER_WS), scannedAt: NOW - 5000, scope: OTHER_WS, findings: [] })
+    await e.checkups.complete([OTHER], { startedAt: NOW - 4000, completedAt: NOW - 3000, by: 'agent' })
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect(await lastCheckups(e)).toEqual({ global: null, [SESSION_WS]: NOW - 5000, [OTHER_WS]: NOW - 3000 })
+  })
+
+  it('项目目录不在了：它的完成记录在视图生成时清掉，其余的留着', async () => {
+    const e = env({ llm: quiet })
+    await seedLayers(e)
+    const GONE = { kind: 'workspace' as const, path: '/tmp/pm-cmd-gone' }
+    await e.checkups.complete([GLOBAL, SESSION, GONE], { startedAt: NOW, completedAt: NOW, by: 'manual' })
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect((await e.checkups.list()).map(r => r.id).sort()).toEqual([checkupKey(GLOBAL), checkupKey(SESSION)].sort())
+  })
+})
+
+describe('scan：最近一次结果', () => {
+  const GLOBAL = { kind: 'global' as const }
+  const SESSION = { kind: 'workspace' as const, path: SESSION_WS }
+  const OTHER = { kind: 'workspace' as const, path: OTHER_WS }
+  const globalConflict = { type: 'conflict', memoryIds: ['mem_g1', 'mem_g2'], summary: '回答语言矛盾', suggestedAction: '裁决' }
+  const crossConflict = { type: 'conflict', memoryIds: ['mem_g1', 'mem_s1'], summary: '全局和本项目矛盾', suggestedAction: '裁决' }
+  const redundancy = { type: 'redundancy', memoryIds: ['mem_s1', 'mem_s2'], summary: '说的是一件事' }
+  const otherUnclear = { type: 'unclear', memoryIds: ['mem_o'], summary: '说得不清楚' }
+  /**
+   * 模型只报这次输入里有的记忆之间的发现（项目体检的输入是全局加本项目，全局体检只有全局）；每次调用宿主报 usage 个 token，
+   * 不给 usage 就是宿主没报。
+   */
+  const answering = (findings: object[], usage?: number) => {
+    const calls = { count: 0 }
+    const llm: SemanticLlm = {
+      complete: async (input, _signal, onUsage) => {
+        calls.count++
+        if (usage !== undefined) onUsage?.(usage)
+        const text = JSON.stringify(input)
+        return JSON.stringify({ findings: findings.filter(f => (f as { memoryIds: string[] }).memoryIds.every(id => text.includes(id))) })
+      },
+    }
+    return { llm, calls }
+  }
+  async function seed(e: ReturnType<typeof env>) {
+    await e.store.create(record({ id: 'mem_g1', name: '全局甲', content: '回答用中文' }))
+    await e.store.create(record({ id: 'mem_g2', name: '全局乙', content: '回答用英文' }))
+    await e.store.create(record({ id: 'mem_s1', name: '本项目甲', content: '测试用 vitest', scope: 'workspace', workspacePath: SESSION_WS }))
+    await e.store.create(record({ id: 'mem_s2', name: '本项目乙', content: '单测跑 vitest', scope: 'workspace', workspacePath: SESSION_WS }))
+    await e.store.create(record({ id: 'mem_o', name: '别的项目', content: '那个配置', scope: 'workspace', workspacePath: OTHER_WS }))
+  }
+  const recordOf = async (e: ReturnType<typeof env>, key: string) => (await e.checkups.list()).find(r => r.id === key)
+  const resultOf = async (e: ReturnType<typeof env>, layer: Parameters<typeof checkupKey>[0]) => (await recordOf(e, checkupKey(layer)))?.lastResult
+  /** 待处理视图里某类条目的身份。 */
+  const keyOf = async (e: ReturnType<typeof env>, pick: (i: PendingItem) => boolean) => {
+    const items = pendingViewSchema.parse(await e.readView('pending')).items.filter(pick)
+    expect(items).toHaveLength(1)
+    return pendingItemKey(items[0]!)
+  }
+  const conflictOf = (a: string, b: string) => (i: PendingItem) => i.kind === 'conflict-horizontal' && i.left?.id === a && i.right?.id === b
+  const adviceOf = (type: string) => (i: PendingItem) => i.kind === 'advice' && i.type === type
+  const sorted = (keys: readonly string[]) => [...keys].sort()
+
+  it('项目体检：记下体检标识、属于本项目的新增身份与条数（等你决定、可以整理分开）、宿主报的用量、说明码；全局自己的记录不动', async () => {
+    const { llm, calls } = answering([crossConflict, redundancy], 300)
+    const e = env({ llm })
+    await seed(e)
+    const body = ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    const result = await resultOf(e, SESSION)
+    expect(result).toEqual({
+      checkupId: expect.any(String), by: 'manual', completedAt: NOW,
+      added: { keys: [await keyOf(e, conflictOf('mem_g1', 'mem_s1')), await keyOf(e, adviceOf('redundancy'))], pending: 1, advice: 1 },
+      globalAdded: { keys: [], pending: 0, advice: 0 },
+      usageTokens: calls.count * 300,
+      notes: [{ code: 'baseline-missing' }],
+    })
+    expect(result!.checkupId).not.toBe('')
+    // 和命令结果同一套新增
+    expect(body.added).toMatchObject({ pending: result!.added.pending, advice: result!.added.advice })
+    expect(await resultOf(e, GLOBAL)).toBeUndefined()
+    expect(await recordOf(e, 'all')).toBeUndefined()
+  })
+
+  it('新增归属：项目体检顺带发现两条全局记忆之间的冲突，项目的新增里不算它，记在全局名下；全局和本项目之间的冲突算本项目的', async () => {
+    const e = env({ llm: answering([globalConflict, crossConflict]).llm })
+    await seed(e)
+    const body = ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    const result = (await resultOf(e, SESSION))!
+    expect(result.added).toEqual({ keys: [await keyOf(e, conflictOf('mem_g1', 'mem_s1'))], pending: 1, advice: 0 })
+    expect(result.globalAdded).toEqual({ keys: [await keyOf(e, conflictOf('mem_g1', 'mem_g2'))], pending: 1, advice: 0 })
+    // 命令结果的新增条数口径不变：项目体检覆盖全局加本项目，两张冲突卡都算
+    expect(body.added).toMatchObject({ pending: 2 })
+  })
+
+  it('全部体检：每个被查的范围各写自己的结果（同一个体检标识），另写键 all 的一条（新增按身份去重、按所属范围分组，带用量和说明），all 没有完成记录和失败计数', async () => {
+    const { llm, calls } = answering([globalConflict, crossConflict, redundancy, otherUnclear], 100)
+    const e = env({ llm })
+    await seed(e)
+    ok(await e.run({ cmd: 'scan' }))
+    const gc = await keyOf(e, conflictOf('mem_g1', 'mem_g2'))
+    const cc = await keyOf(e, conflictOf('mem_g1', 'mem_s1'))
+    const red = await keyOf(e, adviceOf('redundancy'))
+    const unclear = await keyOf(e, adviceOf('unclear'))
+    const [global, session, other] = await Promise.all([GLOBAL, SESSION, OTHER].map(l => resultOf(e, l)))
+    const all = (await recordOf(e, 'all'))!
+    const checkupId = all.lastResult!.checkupId
+    // 说明码各记各的范围（没有基线对每个范围都成立）；跨项目重复这类整次的只在 all 上
+    for (const r of [global, session, other]) expect(r).toMatchObject({ checkupId, by: 'manual', completedAt: NOW, notes: [{ code: 'baseline-missing' }] })
+    // 用量是整次体检的，只记在 all 上
+    for (const r of [global, session, other]) expect(r).not.toHaveProperty('usageTokens')
+    expect({ ...global!.added, keys: sorted(global!.added.keys) }).toEqual({ keys: sorted([gc, cc]), pending: 2, advice: 0 })
+    expect(session!.added).toEqual({ keys: [cc, red], pending: 1, advice: 1 })
+    expect(other!.added).toEqual({ keys: [unclear], pending: 0, advice: 1 })
+    // 全局和本项目之间的冲突在 all 里只算一次
+    expect(all).toEqual({
+      id: 'all',
+      lastResult: {
+        checkupId, by: 'manual', completedAt: NOW,
+        added: { keys: expect.any(Array), pending: 2, advice: 2 },
+        byScope: [
+          { scope: { kind: 'global' }, keys: expect.any(Array) },
+          // 项目按路径排
+          { scope: { kind: 'workspace', workspacePath: OTHER_WS }, keys: [unclear] },
+          { scope: { kind: 'workspace', workspacePath: SESSION_WS }, keys: [cc, red] },
+        ],
+        usageTokens: calls.count * 100,
+        notes: expect.arrayContaining([{ code: 'baseline-missing' }]),
+      },
+    })
+    expect(sorted(all.lastResult!.added.keys)).toEqual(sorted([gc, cc, red, unclear]))
+    expect(sorted(all.lastResult!.byScope![0]!.keys)).toEqual(sorted([gc, cc]))
+    // 体检视图：各范围带自己的最近一次结果，「全部」的结果单独一项；all 不是体检视图里的范围、不参与到期
+    const view = await e.readCheckupView()
+    expect(view.allResult).toEqual(all.lastResult)
+    expect(view.scopes.map(s => [s.scope, s.lastResult])).toEqual([
+      [{ kind: 'global' }, global], [{ kind: 'workspace', workspacePath: OTHER_WS }, other], [{ kind: 'workspace', workspacePath: SESSION_WS }, session],
+    ])
+  })
+
+  it('全部体检的说明码按范围给：一个范围内容检查没做完，别的范围不带；跳过基线检查只记在被跳过的范围；整次的合并记在 all', async () => {
+    // 输入里有别的项目的记忆就输出无法解析（这个项目的内容检查和跨项目重复都没做成），其余照常
+    const llm: SemanticLlm = { complete: async (input) => JSON.stringify(input).includes('mem_o') ? 'not json' : '{"findings":[]}' }
+    const e = env({ llm, baseline: ['用 pnpm'] })
+    await seed(e)
+    ok(await e.run({ cmd: 'scan' }))
+    const codes = async (layer: Parameters<typeof checkupKey>[0]) => (await resultOf(e, layer))!.notes.map(n => n.code)
+    expect(await codes(SESSION)).toEqual([])
+    expect(await codes(GLOBAL)).toEqual([])
+    expect(await codes(OTHER)).toEqual(['semantic-failed', 'baseline-session-scoped'])
+    expect((await recordOf(e, 'all'))!.lastResult!.notes.map(n => n.code).sort())
+      .toEqual(['baseline-session-scoped', 'cross-ws-failed', 'semantic-failed'])
+  })
+
+  it('再体检一次：最近一次结果换成新的体检标识，没有新增', async () => {
+    const e = env({ llm: answering([crossConflict]).llm })
+    await seed(e)
+    ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    const first = (await resultOf(e, SESSION))!
+    e.clock.now = NOW + 1000
+    ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    const second = (await resultOf(e, SESSION))!
+    expect(second.checkupId).not.toBe(first.checkupId)
+    expect(second).toMatchObject({ completedAt: NOW + 1000, added: { keys: [], pending: 0, advice: 0 } })
+  })
+
+  it('agent 体检（memory_scan）只写完成记录、不写结果：之前的最近一次结果原样留着', async () => {
+    const { llm } = answering([crossConflict])
+    const e = env({ llm })
+    await seed(e)
+    ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    const before = await resultOf(e, SESSION)
+    e.clock.now = NOW + 1000
+    await executeScan({ scope: OTHER_WS }, {
+      store: e.store, registry, decisions: e.decisions, cache: e.cache, checkups: e.checkups,
+      getBaseline: () => null, getLlm: () => llm, resolveContext: async () => ({ workspacePath: SESSION_WS }), now: () => e.clock.now,
+    }, fakeExec())
+    await executeScan({ scope: SESSION_WS }, {
+      store: e.store, registry, decisions: e.decisions, cache: e.cache, checkups: e.checkups,
+      getBaseline: () => null, getLlm: () => llm, resolveContext: async () => ({ workspacePath: SESSION_WS }), now: () => e.clock.now,
+    }, fakeExec())
+    expect(await recordOf(e, checkupKey(OTHER))).toEqual({ id: checkupKey(OTHER), completed: { startedAt: NOW + 1000, completedAt: NOW + 1000, by: 'agent' } })
+    expect((await recordOf(e, checkupKey(SESSION)))).toMatchObject({ completed: { by: 'agent' }, lastResult: before })
+  })
+
+  it('内容检查没做完也写结果：说明码带原因（宿主错误码），不写完成记录', async () => {
+    const e = env({ llm: { complete: async () => { throw Object.assign(new Error('too many requests'), { code: 'RATE_LIMIT' }) } } })
+    await seed(e)
+    ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    const r = (await recordOf(e, checkupKey(SESSION)))!
+    expect(r.completed).toBeUndefined()
+    expect(r.lastResult!.notes).toContainEqual({ code: 'semantic-failed', cause: expect.objectContaining({ kind: 'model-error', hostCode: 'RATE_LIMIT' }) })
+    expect(r.lastResult).not.toHaveProperty('usageTokens')
+  })
+
+  it('说明码：分了批、基线检查被跳过（查的不是借来的会话所在的项目）', async () => {
+    const e = env({ llm: answering([]).llm, baseline: ['用 pnpm'] })
+    for (let i = 0; i < 6; i++) await e.store.create(record({ id: `mem_big${i}`, name: `大${i}`, content: '记'.repeat(10_000), scope: 'workspace', workspacePath: OTHER_WS }))
+    ok(await e.run({ cmd: 'scan', workspacePath: OTHER_WS }))
+    expect((await resultOf(e, OTHER))!.notes.map(n => n.code)).toEqual(expect.arrayContaining(['semantic-batched', 'baseline-session-scoped']))
+  })
+
+  it('体检前收集视图出错：比不出新增，这次不写结果', async () => {
+    const e = env({
+      llm: answering([crossConflict]).llm, log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      wrapViews: w => ({ request: () => w.request(), rewriteAll: () => w.rewriteAll(), requestCheckups: () => w.requestCheckups(), collectViews: () => Promise.reject(new Error('读不出')) }),
+    })
+    await seed(e)
+    ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    expect(await resultOf(e, SESSION)).toBeUndefined()
+  })
+})
+
+describe('scan：按范围认领', () => {
+  const GLOBAL = { kind: 'global' as const }
+  const SESSION = { kind: 'workspace' as const, path: SESSION_WS }
+  const OTHER = { kind: 'workspace' as const, path: OTHER_WS }
+  /** 同一个记忆根上的另一个宿主进程：另一份侧表（同一个时钟）。 */
+  const otherProcess = (e: ReturnType<typeof env>) => new SidecarStore({
+    root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }, now: () => e.clock.now,
+  }).checkups
+  async function seedLayers(e: ReturnType<typeof env>) {
+    await e.store.create(record({ id: 'mem_g', name: '全局', content: '回答用中文' }))
+    await e.store.create(record({ id: 'mem_s', name: '本项目', content: '用 pnpm', scope: 'workspace', workspacePath: SESSION_WS }))
+    await e.store.create(record({ id: 'mem_o', name: '别的项目', content: '用 npm', scope: 'workspace', workspacePath: OTHER_WS }))
+  }
+  /** 记下调用次数；gate 给出时等它开了再回（不理会取消信号：模型在认领丢了之后才回来）。 */
+  function countingLlm(opts: { gate?: Promise<void>; findings?: object[] } = {}) {
+    const calls: string[] = []
+    let onCall: (() => void) | undefined
+    const called = new Promise<void>(resolve => { onCall = resolve })
+    const llm: SemanticLlm = {
+      complete: async (input) => {
+        calls.push(input.user)
+        onCall?.()
+        if (opts.gate !== undefined) await opts.gate
+        return JSON.stringify({ findings: opts.findings ?? [] })
+      },
+    }
+    return { llm, calls, called }
+  }
+  const inProgress = async (e: ReturnType<typeof env>) => Object.fromEntries((await e.readCheckupView()).scopes
+    .map(s => [s.scope.kind === 'global' ? 'global' : s.scope.workspacePath, s.isInProgress]))
+
+  it('范围正在体检（别的进程认领着）时手动体检回 busy：不调模型、不写缓存和完成记录；别的范围照常体检', async () => {
+    const m = countingLlm()
+    const e = env({ llm: m.llm })
+    await seedLayers(e)
+    const other = otherProcess(e)
+    const heldGlobal = await other.claimRefreshable(checkupKey(GLOBAL))
+    const heldSession = await other.claimRefreshable(checkupKey(SESSION))
+    const busy = err(await e.run({ cmd: 'scan', layer: { kind: 'global' } }))
+    expect(busy.code).toBe('busy')
+    expect(busy.detail).toContain('全局')
+    expect(err(await e.run({ cmd: 'scan', workspacePath: SESSION_WS })).code).toBe('busy')
+    expect(m.calls).toEqual([])
+    expect(await e.cache.list()).toEqual([])
+    expect(await e.checkups.list()).toEqual([])
+    // 别的进程的认领原样留着
+    expect(await other.isClaimed(checkupKey(GLOBAL))).toBe(true)
+    expect(await other.isClaimed(checkupKey(SESSION))).toBe(true)
+    ok(await e.run({ cmd: 'scan', workspacePath: OTHER_WS }))
+    expect(m.calls).toHaveLength(1)
+    await heldGlobal!.release()
+    await heldSession!.release()
+    ok(await e.run({ cmd: 'scan', layer: { kind: 'global' } }))
+  })
+
+  it('「全部」要认领所有范围：有一个认领不到就整个回 busy，已认领的范围立刻放掉', async () => {
+    const m = countingLlm()
+    const e = env({ llm: m.llm })
+    await seedLayers(e)
+    const other = otherProcess(e)
+    const held = await other.claimRefreshable(checkupKey(OTHER))
+    expect(err(await e.run({ cmd: 'scan' })).code).toBe('busy')
+    expect(m.calls).toEqual([])
+    expect(await e.checkups.list()).toEqual([])
+    // 全局和本项目没被这次留着：别的进程马上就能认领
+    for (const layer of [GLOBAL, SESSION]) {
+      const again = await other.claimRefreshable(checkupKey(layer))
+      expect(again, checkupKey(layer)).toBeDefined()
+      await again!.release()
+    }
+    expect(await other.isClaimed(checkupKey(OTHER))).toBe(true)
+    await held!.release()
+    ok(await e.run({ cmd: 'scan' }))
+    expect(m.calls.length).toBeGreaterThan(0)
+  })
+
+  it('体检进行中：体检视图里这个范围「进行中」，别的进程认领不到；做完放掉认领，视图回到不在进行中', async () => {
+    let open!: () => void
+    const m = countingLlm({ gate: new Promise<void>(resolve => { open = resolve }) })
+    const e = env({ llm: m.llm })
+    await seedLayers(e)
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect(await inProgress(e)).toEqual({ global: false, [SESSION_WS]: false, [OTHER_WS]: false })
+    const running = e.run({ cmd: 'scan', workspacePath: SESSION_WS })
+    await m.called
+    expect(await inProgress(e)).toEqual({ global: false, [SESSION_WS]: true, [OTHER_WS]: false })
+    expect(await otherProcess(e).claimRefreshable(checkupKey(SESSION))).toBeUndefined()
+    open()
+    ok(await running)
+    expect(await inProgress(e)).toEqual({ global: false, [SESSION_WS]: false, [OTHER_WS]: false })
+    expect(await otherProcess(e).isClaimed(checkupKey(SESSION))).toBe(false)
+  })
+
+  it('认领期间每 10 秒刷新一次；心跳发现认领已被别人接手：这次不再提交（不写缓存、不挂账、不写完成记录），回 busy', async () => {
+    const beats: Array<{ callback: () => void; delayMs: number; isLive: boolean }> = []
+    const heartbeat = (callback: () => void, delayMs: number) => {
+      const beat = { callback, delayMs, isLive: true }
+      beats.push(beat)
+      return () => { beat.isLive = false }
+    }
+    let open!: () => void
+    const m = countingLlm({
+      gate: new Promise<void>(resolve => { open = resolve }),
+      findings: [{ type: 'conflict', memoryIds: ['mem_s', 'mem_s2'], summary: '包管理器矛盾', suggestedAction: '裁决' }],
+    })
+    const infos: string[] = []
+    const e = env({ llm: m.llm, heartbeat, log: { info: (msg: string) => { infos.push(msg) }, warn() {}, error() {} } })
+    await seedLayers(e)
+    await e.store.create(record({ id: 'mem_s2', name: '本项目二', content: '用 yarn', scope: 'workspace', workspacePath: SESSION_WS }))
+    const running = e.run({ cmd: 'scan', workspacePath: SESSION_WS })
+    await m.called
+    expect(beats.map(b => [b.delayMs, b.isLive])).toEqual([[10_000, true]])
+    const claimFile = join(root, STATE_DIR, 'checkups', `${createHash('sha1').update(SESSION_WS).digest('hex')}.claim`)
+    const claimAt = async () => (JSON.parse(await readFile(claimFile, 'utf8')) as { at: number }).at
+    expect(await claimAt()).toBe(NOW)
+    e.clock.now = NOW + 10_000
+    beats[0]!.callback()
+    await vi.waitFor(async () => { expect(await claimAt()).toBe(NOW + 10_000) })
+    // 别的进程把它当残留清掉、接手了
+    await rm(claimFile)
+    const taker = await otherProcess(e).claimRefreshable(checkupKey(SESSION))
+    expect(taker).toBeDefined()
+    beats[0]!.callback()
+    await vi.waitFor(() => { expect(infos.some(m => m.includes('被别的进程接手'))).toBe(true) })
+    // 模型在认领丢了之后才回来
+    open()
+    expect(err(await running).code).toBe('busy')
+    expect(await e.cache.list()).toEqual([])
+    expect(await e.decisions.list()).toEqual([])
+    expect(await e.checkups.list()).toEqual([])
+    expect(beats[0]!.isLive).toBe(false)
+    // 接手者的认领没被旧持有者删掉
+    expect(await otherProcess(e).isClaimed(checkupKey(SESSION))).toBe(true)
+    await taker!.release()
+  })
+
+  it('待决项被别的操作认领时仍回 claimed，不是 busy', async () => {
+    const e = env()
+    const entry = await seedPair(e)
+    const release = await e.decisions.withClaim(entry.id, async () => err(await e.run({ cmd: 'undo', decisionId: entry.id })))
+    expect(release.isClaimed && release.value.code).toBe('claimed')
+  })
+})
+
+describe('set-auto-checkup', () => {
+  const ALL = { kind: 'all' as const }
+  const DISCUSSION = { kind: 'workspace' as const, workspacePath: '/work/discussion' }
+  const settings = async (e: ReturnType<typeof env>) => Object.fromEntries(await e.autoCheckups.read())
+
+  it('选具体值写设置表（和默认值相同也写），「跟随」删掉这一条；每次都通知本进程的调度重算', async () => {
+    const e = env()
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 7 }))
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: DISCUSSION, frequency: 7 }))
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: { kind: 'global' }, frequency: 'manual' }))
+    expect(await settings(e)).toEqual({ all: 7, '/work/discussion': 7, global: 'manual' })
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: DISCUSSION, frequency: 'follow' }))
+    expect(await settings(e)).toEqual({ all: 7, global: 'manual' })
+    // 本来就在跟随时再选「跟随」也算成功
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: DISCUSSION, frequency: 'follow' }))
+    expect(e.autoCheckupChanges.count).toBe(5)
+  })
+
+  it('「全部」选仅手动是写一条 manual，不是删掉', async () => {
+    const e = env()
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 'manual' }))
+    expect(await settings(e)).toEqual({ all: 'manual' })
+  })
+
+  it.each([
+    ['「全部」没有可跟随的', ' set-auto-checkup {"scope":{"kind":"all"},"frequency":"follow"}'],
+    ['天数小于 1', ' set-auto-checkup {"scope":{"kind":"all"},"frequency":0}'],
+    ['天数大于 90', ' set-auto-checkup {"scope":{"kind":"global"},"frequency":91}'],
+    ['天数不是整数', ' set-auto-checkup {"scope":{"kind":"global"},"frequency":1.5}'],
+    ['未知取值', ' set-auto-checkup {"scope":{"kind":"global"},"frequency":"daily"}'],
+    ['项目路径不是绝对路径', ' set-auto-checkup {"scope":{"kind":"workspace","workspacePath":"discussion"},"frequency":1}'],
+  ])('%s → invalid-args，设置表不动、不通知调度', async (_label, raw) => {
+    const e = env()
+    expect(err(await e.runRaw(raw)).code).toBe('invalid-args')
+    expect(await settings(e)).toEqual({})
+    expect(e.autoCheckupChanges.count).toBe(0)
+  })
+
+  it('体检开关关着时也能改设置（只是调度不跑），体检视图写明开关关着', async () => {
+    const e = env({ governanceEnabled: false })
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 1 }))
+    expect(await settings(e)).toEqual({ all: 1 })
+    expect((await e.readCheckupView()).governanceEnabled).toBe(false)
+  })
+
+  it('写完立刻重写体检视图（别的全局视图不重写）：按「自动体检情况表」逐行，各范围的有效频率和跟随 / 单独设置', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_g', name: '全局' }))
+    await e.store.create(record({ id: 'mem_d', name: '讨论', scope: 'workspace', workspacePath: '/work/discussion' }))
+    await e.store.create(record({ id: 'mem_o', name: '其他', scope: 'workspace', workspacePath: '/work/other' }))
+    const rows = async () => {
+      const view = await e.readCheckupView()
+      return [view.defaultFrequency, ...view.scopes.map(s => `${s.scope.kind === 'workspace' ? s.scope.workspacePath : 'global'} ${s.frequency}${s.isOwn ? ' 单独' : ''}`)]
+    }
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 'manual' }))
+    expect(await rows()).toEqual(['manual', 'global manual', '/work/discussion manual', '/work/other manual'])
+    await expect(stat(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES.pending))).rejects.toMatchObject({ code: 'ENOENT' })
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 7 }))
+    expect(await rows()).toEqual([7, 'global 7', '/work/discussion 7', '/work/other 7'])
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: DISCUSSION, frequency: 1 }))
+    expect(await rows()).toEqual([7, 'global 7', '/work/discussion 1 单独', '/work/other 7'])
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 'manual' }))
+    expect(await rows()).toEqual(['manual', 'global manual', '/work/discussion 1 单独', '/work/other manual'])
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: DISCUSSION, frequency: 'follow' }))
+    expect(await rows()).toEqual(['manual', 'global manual', '/work/discussion manual', '/work/other manual'])
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 7 }))
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: DISCUSSION, frequency: 7 }))
+    expect(await rows()).toEqual([7, 'global 7', '/work/discussion 7 单独', '/work/other 7'])
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 1 }))
+    expect(await rows()).toEqual([1, 'global 1', '/work/discussion 7 单独', '/work/other 1'])
+    // 新加一个项目：跟随「全部」当前的值；重启插件（新的侧表与写入器实例）后照旧
+    await e.store.create(record({ id: 'mem_n', name: '新', scope: 'workspace', workspacePath: '/work/new' }))
+    ok(await env().run({ cmd: 'refresh-views' }))
+    expect(await rows()).toEqual([1, 'global 1', '/work/discussion 7 单独', '/work/new 1', '/work/other 1'])
+  })
+
+  it('体检视图的上次、下次和到期：按完成记录算；从没体检过的开了自动体检就算到期', async () => {
+    const DAY = 86_400_000
+    const e = env()
+    await e.store.create(record({ id: 'mem_g', name: '全局' }))
+    await e.store.create(record({ id: 'mem_d', name: '讨论', scope: 'workspace', workspacePath: '/work/discussion' }))
+    await e.checkups.complete([{ kind: 'global' }], { startedAt: NOW - 2 * DAY, completedAt: NOW - 2 * DAY, by: 'agent' })
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 3 }))
+    expect((await e.readCheckupView()).scopes).toEqual([
+      { scope: { kind: 'global' }, frequency: 3, isOwn: false, lastCheckupAt: NOW - 2 * DAY, nextCheckupAt: NOW + DAY, isDue: false, isInProgress: false, failure: null, modelUnavailable: null, lastResult: null },
+      { scope: DISCUSSION, frequency: 3, isOwn: false, lastCheckupAt: null, nextCheckupAt: null, isDue: true, isInProgress: false, failure: null, modelUnavailable: null, lastResult: null },
+    ])
+  })
+
+  it('项目目录不在了，它的设置在视图生成时清掉（全部、全局不动）', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_s', scope: 'workspace', workspacePath: SESSION_WS }))
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: ALL, frequency: 7 }))
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: { kind: 'global' }, frequency: 1 }))
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: { kind: 'workspace', workspacePath: SESSION_WS }, frequency: 1 }))
+    ok(await e.run({ cmd: 'set-auto-checkup', scope: { kind: 'workspace', workspacePath: '/tmp/pm-cmd-gone' }, frequency: 1 }))
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect(await settings(e)).toEqual({ all: 7, global: 1, [SESSION_WS]: 1 })
   })
 })
 
@@ -2031,6 +2698,20 @@ describe('refresh-views', () => {
     for (const name of Object.keys(GUI_VIEW_FILES) as Array<keyof typeof GUI_VIEW_FILES>) {
       expect((await e.readView(name)) as { version: number }).toMatchObject({ version: GUI_VIEW_VERSION })
     }
+  })
+
+  it('视图版本 12：开着旧页面的升级后，磁盘上旧版本（11）的全局视图和体检视图经 refresh-views 按新版本重新生成', async () => {
+    expect(GUI_VIEW_VERSION).toBe(12)
+    const e = env()
+    await seedPair(e)
+    await mkdir(join(root, GUI_VIEW_DIR), { recursive: true })
+    for (const file of [...Object.values(GUI_VIEW_FILES), GUI_CHECKUP_VIEW_FILE]) await writeFile(join(root, GUI_VIEW_DIR, file), JSON.stringify({ version: 11 }))
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect(pendingViewSchema.parse(await e.readView('pending')).version).toBe(12)
+    expect(healthViewSchema.parse(await e.readView('health')).version).toBe(12)
+    expect(libraryViewSchema.parse(await e.readView('library')).version).toBe(12)
+    expect(deletedViewSchema.parse(await e.readView('deleted')).version).toBe(12)
+    expect((await e.readCheckupView()).version).toBe(12)
   })
 
   it('磁盘上是旧版（版本 4，没有建议整理）的待处理视图：按新版本重写，各级条数带上建议整理', async () => {

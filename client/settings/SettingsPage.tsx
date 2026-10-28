@@ -1,34 +1,32 @@
 /**
  * 插件设置页（plugins.bundle.config）：状态卡 + 三组设置「记什么 · 怎么用 · 怎么管」+ 保存行。
  * 插件名、简介、版本由宿主插件页的页头画（locale/*.json 的 meta 与 package.json 的 version），这里不重复。
- * 改动先暂存，点保存先弹窗列出改了哪几项，确认后一次提交（useSettingsDraft）；体检关闭时依赖它的三项置灰保留，不隐藏。
+ * 改动先暂存，点保存先弹窗列出改了哪几项，确认后一次提交（useSettingsDraft）。
+ * 体检开关 `governance.enabled` 只在配置文件里改，界面上不放；配置文件关掉体检时依赖它的两项置灰保留、说明换成原因，不隐藏。
  */
 import { useId, useState } from 'react'
 import { useGateway } from '../gateway.ts'
 import { useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
-import type { NavTarget } from '../nav.ts'
+import { ALL_SCOPE, type NavTarget } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
-import { Chip } from '../ui/Chip.tsx'
 import { SegmentedControl } from '../ui/Segmented.tsx'
 import { SettingsForm, SettingsGroupCard, SettingsItem } from '../ui/Settings.tsx'
 import {
   EVIDENCE_LEVELS, OVERFLOW_MODES, PROMOTE_TARGETS, SENSITIVITIES, SENSITIVITY_NUMBERS, TEMPLATES, configuredRoot, customTypeChanges,
-  droppedTypes, parsePositiveInt, type ConfigForm, type SettingsFields,
+  droppedTypes, governanceEnabled, parsePositiveInt, type ConfigForm, type SettingsFields,
 } from './config.ts'
-import { Dialog, Switch, TextField } from './controls.tsx'
+import { Dialog, TextField } from './controls.tsx'
 import { CustomTypeList } from './CustomTypes.tsx'
 import { StatusCard } from './StatusCard.tsx'
 import { useSettingsDraft } from './useSettingsDraft.ts'
-
-const AUTO_CHECKUP = ['off', 'daily', 'weekly'] as const
 
 const USAGE_FIELDS: ReadonlyArray<keyof SettingsFields> = ['budget', 'overflow', 'evidence']
 
 export function SettingsPage({ form, onOpenMemoryPage, now }: {
   form: ConfigForm
-  /** 经导航 store 直达记忆页的某个 tab（待处理可带要定位的组）。 */
-  onOpenMemoryPage: (target: Pick<NavTarget, 'tab' | 'level'>) => void
+  /** 经导航 store 直达记忆页：状态卡给范围加视图，最近删除入口给旧目标。 */
+  onOpenMemoryPage: (target: NavTarget) => void
   now?: number
 }) {
   const t = useT()
@@ -39,7 +37,8 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
   if (snapshot.status === 'loading') return <p className="pm-form-note" role="status">{t('settings.loading')}</p>
 
   const locked = !snapshot.writable || draft.saving
-  const governanceOff = !f.governance
+  const governanceOn = governanceEnabled(snapshot.value)
+  const offHint = t('settings.governanceOff')
   const budgetInvalid = f.budget !== saved.budget && parsePositiveInt(f.budget) === undefined
   const sensitivity = SENSITIVITY_NUMBERS[f.sensitivity]
   const templateHint = t(`settings.template.hint.${f.template}`)
@@ -47,7 +46,7 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
 
   return (
     <div className="pm-settings">
-      <StatusCard governanceEnabled={saved.governance} onOpen={onOpenMemoryPage} {...(now !== undefined ? { now } : {})} />
+      <StatusCard governanceEnabled={governanceOn} onOpen={onOpenMemoryPage} {...(now !== undefined ? { now } : {})} />
       <SettingsForm
         state={{
           available: snapshot.status === 'ready', writable: snapshot.writable, dirty: draft.dirty,
@@ -124,53 +123,36 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
         </SettingsGroupCard>
 
         <SettingsGroupCard title={t('settings.group.manage')}>
-          <SettingsItem label={t('settings.governance.label')} hint={t('settings.governance.hint')}>
-            <Switch label={t('settings.governance.label')} checked={f.governance} disabled={locked} onChange={(governance) => { edit({ governance }) }} />
-          </SettingsItem>
-          <SettingsItem
-            label={<>{t('settings.auto.label')} <Chip variant="neutral">{t('settings.auto.planned')}</Chip></>}
-            hint={t('settings.auto.hint')}
-            disabled
-          >
-            <SegmentedControl
-              id={`${id}-auto`}
-              label={t('settings.auto.label')}
-              value="off"
-              options={AUTO_CHECKUP.map(v => ({ value: v, label: t(`settings.auto.${v}`) }))}
-              disabled
-              onChange={() => {}}
-            />
-          </SettingsItem>
           <SettingsItem
             label={t('settings.sensitivity.label')}
-            hint={t('settings.sensitivity.hint', { score: sensitivity.score, days: sensitivity.days })}
-            disabled={governanceOff}
+            hint={governanceOn ? t('settings.sensitivity.hint', { score: sensitivity.score, days: sensitivity.days }) : offHint}
+            disabled={!governanceOn}
           >
             <SegmentedControl
               id={`${id}-sensitivity`}
               label={t('settings.sensitivity.label')}
               value={f.sensitivity}
               options={SENSITIVITIES.map(v => ({ value: v, label: t(`settings.sensitivity.${v}`) }))}
-              disabled={locked || governanceOff}
+              disabled={locked || !governanceOn}
               onChange={(next) => { edit({ sensitivity: next }) }}
             />
           </SettingsItem>
           <SettingsItem
             label={t('settings.target.label')}
-            hint={f.promoteTarget === 'agents-md' ? t('settings.target.agentsHint') : t('settings.target.pluginHint')}
-            disabled={governanceOff}
+            hint={!governanceOn ? offHint : f.promoteTarget === 'agents-md' ? t('settings.target.agentsHint') : t('settings.target.pluginHint')}
+            disabled={!governanceOn}
           >
             <SegmentedControl
               id={`${id}-target`}
               label={t('settings.target.label')}
               value={f.promoteTarget}
               options={PROMOTE_TARGETS.map(v => ({ value: v, label: t(`settings.target.${v}`) }))}
-              disabled={locked || governanceOff}
+              disabled={locked || !governanceOn}
               onChange={(promoteTarget) => { edit({ promoteTarget }) }}
             />
           </SettingsItem>
           <SettingsItem label={t('settings.deleted.label')} hint={t('settings.deleted.hint')}>
-            <button type="button" className="pm-link" onClick={() => { onOpenMemoryPage({ tab: 'deleted' }) }}>{t('settings.deleted.open')}</button>
+            <button type="button" className="pm-link" onClick={() => { onOpenMemoryPage({ view: 'deleted', scope: ALL_SCOPE }) }}>{t('settings.deleted.open')}</button>
           </SettingsItem>
           <SettingsItem label={t('settings.root.label')} hint={t('settings.root.hint')}>
             <MemoryRoot configured={configuredRoot(snapshot.value)} />
@@ -222,7 +204,6 @@ const FIELD_LABELS: Record<keyof SettingsFields, LocaleKey> = {
   budget: 'settings.budget.label',
   overflow: 'settings.overflow.label',
   evidence: 'settings.evidence.label',
-  governance: 'settings.governance.label',
   sensitivity: 'settings.sensitivity.label',
   promoteTarget: 'settings.target.label',
   userDictionary: 'settings.dictionary.label',
@@ -234,7 +215,6 @@ function valueText(t: Translate, key: Exclude<keyof SettingsFields, 'customTypes
     case 'budget': return String(parsePositiveInt(fields.budget) ?? fields.budget)
     case 'overflow': return t(`settings.overflow.${fields.overflow}`)
     case 'evidence': return t(`settings.evidence.${fields.evidence}`)
-    case 'governance': return t(fields.governance ? 'settings.confirm.on' : 'settings.confirm.off')
     case 'sensitivity': return t(`settings.sensitivity.${fields.sensitivity}`)
     case 'promoteTarget': return t(`settings.target.${fields.promoteTarget}`)
     case 'userDictionary': return fields.userDictionary.trim() || t('settings.dictionary.unset')

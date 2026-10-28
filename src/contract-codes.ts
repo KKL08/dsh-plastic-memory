@@ -44,10 +44,25 @@ export type ScanNoteCode =
   | 'no-layer-executed'       // layers=semantic 且拿不到 LLM，什么都没跑
   | 'semantic-batched'        // 记忆超出一次调用的 token 预算，语义层分批检查，跨批的成对问题可能漏
   | 'semantic-failed'         // LLM 抛异常或两次输出无法解析，未更新语义缓存
+  | 'model-unavailable'       // 模型用不了：宿主报未登录或缺凭据（governance/host-llm.ts MODEL_UNAVAILABLE_HOST_CODES），未更新语义缓存；不算失败
   | 'baseline-missing'        // 未检测到 AGENTS.md 基线，垂直冲突检测未执行
   | 'baseline-session-scoped' // 基线随当前会话，其他 workspace 的垂直冲突检测已跳过
   | 'cross-ws-failed'         // 跨项目重复分析失败，退用实体聚类保底
   | 'conflicts-settled'       // 有冲突此前裁决为两边都留、双方未改，本次不再列出
+
+/**
+ * 体检完成记录的发起方（体检记录表，storage/schema.ts）：manual = 界面手动（记忆页的 `/memory scan`），auto = 自动体检，
+ * agent = agent 调 memory_scan。
+ */
+export const CHECKUP_INITIATORS = ['manual', 'auto', 'agent'] as const
+export type CheckupInitiator = (typeof CHECKUP_INITIATORS)[number]
+
+/**
+ * 自动体检这次没做完、或模型用不了的原因（体检记录表与体检视图）：no-default-model = 宿主没有可用的默认模型选择，
+ * model-error = 模型调用出错（宿主给了错误码时带上），unparseable = 模型输出两次都解析不了，error = 体检本身出错。
+ */
+export const CHECKUP_CAUSE_KINDS = ['no-default-model', 'model-error', 'unparseable', 'error'] as const
+export type CheckupCauseKind = (typeof CHECKUP_CAUSE_KINDS)[number]
 
 /** memory_health 建议的分层并列结构（health.ts）：独占层单元素，行动项层多元素，无事为空数组。 */
 export type HealthRecommendationKind =

@@ -50,5 +50,14 @@ export function formatDay(ms: number, now: number, t: Translate): string {
   return d.getFullYear() === new Date(now).getFullYear() ? t('time.monthDay', params) : t('time.yearMonthDay', params)
 }
 
+/** 日期加 24 小时制的时刻：「10 月 28 日 14:00」，跨年带年份。对齐宿主定时任务的时刻写法。按本机时区。 */
+export function formatDayTime(ms: number, now: number, t: Translate): string {
+  const d = new Date(ms)
+  const params = { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate(), monthName: MONTH_NAME.format(d) }
+  const date = d.getFullYear() === new Date(now).getFullYear() ? t('time.monthDay', params) : t('time.yearMonthDay', params)
+  const time = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  return t('time.dayTime', { date, time })
+}
+
 /** 路径最后一段（项目名）。 */
 export { baseName } from './path.ts'

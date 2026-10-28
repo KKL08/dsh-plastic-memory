@@ -10,6 +10,8 @@ import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
+import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
+import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
 import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
 import { resolveHealthThresholds } from '../src/governance/health-presets.ts'
 import { BLOAT_THRESHOLD } from '../src/governance/rule-scan.ts'
@@ -53,7 +55,7 @@ function env(opts: { llm?: SemanticLlm } = {}) {
   const resolveContext = async () => ({ workspacePath: WS, delegationDepth: 0, session: { id: 'sess-1' } })
   const getLlm = () => opts.llm ?? null
   const command = createMemoryCommand({
-    memoryRoot: root, store, decisions, snapshots, cache, ignores, registry, views,
+    memoryRoot: root, store, decisions, snapshots, cache, checkups: new CheckupRecordStore(sidecar.checkups), autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups), ignores, registry, views,
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),
     resolveContext, getLlm, getBaseline: () => null, now: () => NOW,
   })
