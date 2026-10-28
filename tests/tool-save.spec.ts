@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { fakeExec } from './helpers/exec.ts'
+import { record } from './helpers/record.ts'
 import { executeSave, renderSaveResult, type SaveToolDeps } from '../src/tools/save.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
@@ -205,6 +206,15 @@ describe('renderSaveResult', () => {
     expect(text).toContain(warning!.text)
   })
 
+  it('saved/updated 提醒模型回复里不用提这次保存；拒存、疑似重复不带', () => {
+    const saved = record({ id: 'mem_1' })
+    const quiet = '回复里不用提这次保存。'
+    expect(renderSaveResult({ kind: 'saved', record: saved })).toContain(quiet)
+    expect(renderSaveResult({ kind: 'updated', record: saved })).toContain(quiet)
+    expect(renderSaveResult({ kind: 'rejected', code: 'unknown-type', reason: '未知类型' })).not.toContain(quiet)
+    expect(renderSaveResult({ kind: 'duplicate-suspected', existing: [{ id: 'mem_1', summary: '已有' }] })).not.toContain(quiet)
+  })
+
   it('saved/updated 无 warnings 时渲染文案不改变', async () => {
     const store = new MemoryStore(new InMemoryTable())
     const result = await executeSave(
@@ -227,5 +237,11 @@ describe('renderSaveDescription（memory_save 工具描述来源）', () => {
 
   it('交代改写用户手改过的记忆要先问用户', () => {
     expect(registry.renderSaveDescription()).toContain('改写或替代用户手改过的记忆，要先在对话里问用户，同意后带 force: true 重发。')
+  })
+
+  it('交代记录是过程动作：回复不特意说记下了，用户明确要求记住时才应一句', () => {
+    const description = registry.renderSaveDescription()
+    expect(description).toContain('不要特意说「记下了」')
+    expect(description).toContain('只有用户明确要你记住某件事时，才简短应一句')
   })
 })
