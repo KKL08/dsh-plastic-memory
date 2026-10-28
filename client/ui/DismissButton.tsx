@@ -34,14 +34,15 @@ export const dismissButtonCss = `
   height: 24px; min-width: 24px; padding: 0 7px; border: 0; border-radius: var(--dsw-radius-sm, 8px);
   font: inherit; font-size: 12px; font-weight: 400; line-height: 1; white-space: nowrap;
   background: transparent; color: var(--pm-text-2); cursor: pointer;
-  transition: color .15s ease-out;
+  clip-path: inset(0 0 0 calc(100% - 24px) round var(--dsw-radius-sm, 8px));
+  transition: color .15s ease-out, clip-path .2s cubic-bezier(0.23, 1, 0.32, 1);
 }
 .pm-dismiss::before { content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; transition: background-color .15s ease-out; }
-.pm-dismiss-label { display: inline-block; max-width: 0; overflow: hidden; opacity: 0; transition: max-width .2s ease-out, opacity .15s ease-out, margin .2s ease-out; }
+.pm-dismiss-label { margin-right: 4px; opacity: 0; transition: opacity .15s ease-out; }
 /* 键盘聚焦时不可用也展开出字（整体半透明），不只剩一个淡淡的叉 */
-:is(.pm-dismiss:hover:not([aria-disabled='true']), .pm-dismiss:focus-visible) { background: var(--pm-bg); color: var(--pm-text); }
+:is(.pm-dismiss:hover:not([aria-disabled='true']), .pm-dismiss:focus-visible) { background: var(--pm-bg); color: var(--pm-text); clip-path: inset(-4px round calc(var(--dsw-radius-sm, 8px) + 4px)); }
 :is(.pm-dismiss:hover:not([aria-disabled='true']), .pm-dismiss:focus-visible)::before { background: var(--pm-hover); }
-:is(.pm-dismiss:hover:not([aria-disabled='true']), .pm-dismiss:focus-visible) .pm-dismiss-label { max-width: 10em; opacity: 1; margin-right: 4px; }
+:is(.pm-dismiss:hover:not([aria-disabled='true']), .pm-dismiss:focus-visible) .pm-dismiss-label { opacity: 1; }
 .pm-dismiss[aria-disabled='true'] { opacity: .4; cursor: default; }
 @media (prefers-reduced-motion: reduce) { .pm-dismiss, .pm-dismiss::before, .pm-dismiss-label { transition: none; } }
 `

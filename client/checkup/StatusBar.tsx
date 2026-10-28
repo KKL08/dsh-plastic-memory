@@ -404,7 +404,9 @@ export const statusBarCss = `
 .pm-status-deductions { list-style: none; display: flex; flex-direction: column; gap: 2px; margin-left: 22px; padding: 6px 0 0; border-top: .5px solid var(--pm-line); }
 .pm-status-result { display: flex; flex-direction: column; gap: 2px; color: var(--pm-text); }
 /* 结果行一直在 DOM 里（aria-live 要先在场），空着时不占状态条的行距 */
+.pm-status-why svg { transition: transform 120ms ease; }
 .pm-status-result:empty { margin-top: -6px; }
+@media (prefers-reduced-motion: reduce) { .pm-status-why svg { transition: none; } }
 .pm-status-result-line { margin: 0; }
 .pm-status-soft-line { color: var(--pm-text-2); }
 .pm-status-result .pm-link { font-size: 12px; }

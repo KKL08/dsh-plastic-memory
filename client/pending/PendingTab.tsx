@@ -468,7 +468,9 @@ export const pendingCss = crossConfirmCss + editCss + modelEditCss + moveCss + `
 .pm-ignored-toggle[aria-expanded='true'] svg { transform: rotate(180deg); }
 .pm-ignored-list { margin: 8px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
 .pm-ignored-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.pm-ignored-toggle svg { transition: transform 120ms ease; }
 .pm-ignored-text { min-width: 0; overflow-wrap: anywhere; }
+@media (prefers-reduced-motion: reduce) { .pm-ignored-toggle svg { transition: none; } }
 .pm-ignored-undo { margin-left: auto; padding: 2px 10px; font-size: 12px; }
 .pm-ignored-row .pm-pending-error { flex-basis: 100%; margin: 0; }
 .pm-pending-advice-memories .pm-mc-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
@@ -498,6 +500,9 @@ export const pendingCss = crossConfirmCss + editCss + modelEditCss + moveCss + `
 .pm-pending-undo { font-weight: 600; }
 .pm-pending-path { margin: 0; font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 12px; color: var(--pm-text); overflow-wrap: anywhere; }
 .pm-pending-error-text {
+.pm-pending-item--result { transition: opacity 120ms ease-out; }
+@starting-style { .pm-pending-item--result { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .pm-pending-item--result { transition: none; } }
   margin: 0; padding: 8px 12px; border-radius: var(--dsw-radius-sm, 8px); background: var(--pm-bg-block);
   font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 12px; line-height: 1.5;
   color: var(--pm-text); white-space: pre-wrap; overflow-wrap: anywhere;

@@ -275,7 +275,7 @@ export const savedMemoriesCardCss = crossConfirmCss + promoteInPlaceCss + modelC
 .pm-saved-lead { flex: none; white-space: pre; }
 .pm-saved-first { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; color: var(--pm-text-2); }
 .pm-saved-hint { flex: none; font-weight: 400; color: var(--pm-text-2); white-space: nowrap; }
-.pm-saved-chevron { flex: none; margin-left: auto; padding-left: 8px; font-weight: 400; color: var(--pm-text-2); transition: transform 150ms ease; }
+.pm-saved-chevron { flex: none; margin-left: auto; padding-left: 8px; font-weight: 400; color: var(--pm-text-2); transition: transform 120ms ease; }
 .pm-saved[data-open] .pm-saved-chevron { transform: rotate(90deg); }
 .pm-saved-toggle:hover .pm-saved-chevron, .pm-saved-toggle:hover .pm-saved-first, .pm-saved-toggle:hover .pm-saved-hint { color: var(--pm-text); }
 .pm-saved-list[hidden] { display: none; }
@@ -291,6 +291,7 @@ export const savedMemoriesCardCss = crossConfirmCss + promoteInPlaceCss + modelC
 }
 .pm-icon-btn svg { width: 14px; height: 14px; }
 .pm-icon-btn:hover:not([aria-disabled='true']) { background: var(--pm-hover); color: var(--pm-text); }
+@media (prefers-reduced-motion: reduce) { .pm-saved-chevron { transition: none; } }
 .pm-icon-btn[aria-disabled='true'] { opacity: .4; cursor: default; }
 .pm-saved-foot { display: flex; justify-content: flex-end; }
 .pm-saved-foot .pm-link { font-size: 12px; font-weight: 400; color: var(--pm-text-2); }
