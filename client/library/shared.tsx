@@ -9,6 +9,7 @@ import { formatNumber, useT } from '../i18n.tsx'
 import { compareLayers, scopeName, useNavTarget, type NavStore, type NavTarget } from '../nav.ts'
 import { CrossConfirm, crossConfirmCss, SecretDeleteConfirm } from '../pending/action.tsx'
 import { keepFocusInPlace } from '../ui/focus-return.ts'
+import { prefersReducedMotion } from '../ui/motion.tsx'
 
 type LabelledView = ViewState<{ typeLabels?: Readonly<Record<string, string>> }>
 
@@ -104,10 +105,6 @@ export function useFlashTarget(nav: NavStore, ids: readonly string[]): { flashId
 
 /** 高亮动画时长：播完收起高亮类，下次导航到同一条才能重播。 */
 export const FLASH_MS = 1800
-
-function prefersReducedMotion(): boolean {
-  return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-}
 
 /**
  * 高亮行：开始高亮时滚入视野，FLASH_MS 后回调收起。列表行是 li，待处理的卡是 div。

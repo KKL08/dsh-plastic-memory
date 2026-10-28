@@ -95,15 +95,17 @@ function ScopeChips() {
 }
 
 /** focusable：结果卡可以接住焦点（tabIndex=-1），确认收起后原来的按钮没了就落在它上面。 */
-function Card({ marker, title, aside, focusable = false, children }: {
+function Card({ marker, title, aside, focusable = false, isResult = false, children }: {
   marker?: ReactNode
   title: ReactNode
   aside?: ReactNode
   focusable?: boolean
+  isResult?: boolean
   children: ReactNode
 }) {
+  const className = ['pm-pending-item', marker !== undefined && 'pm-pending-item--marked', isResult && 'pm-pending-item--result'].filter(Boolean).join(' ')
   return (
-    <article className={marker === undefined ? 'pm-pending-item' : 'pm-pending-item pm-pending-item--marked'} tabIndex={focusable ? -1 : undefined}>
+    <article className={className} tabIndex={focusable ? -1 : undefined}>
       <header className="pm-pending-head">
         {marker !== undefined ? <span className="pm-pending-mark">{marker}</span> : null}
         <h3 className="pm-pending-title">{title}</h3>
@@ -700,7 +702,7 @@ export function ResultCard({ item, outcome, session, now, typeLabels, onUndone, 
     : undoId !== undefined ? { cmd: 'undo', decisionId: undoId } : undefined
   const chip = <Chip variant="result">{copy.chip}</Chip>
   return (
-    <Card marker={item.kind === 'advice' ? undefined : <StatusMarker kind="done" />} title={titleOf(item, t)} focusable>
+    <Card marker={item.kind === 'advice' ? undefined : <StatusMarker kind="done" />} title={titleOf(item, t)} focusable isResult>
       {copy.memory ? <MemoryOf session={session} memory={copy.memory} now={now} typeLabels={typeLabels} chip={chip} /> : <div>{chip}</div>}
       <div className="pm-pending-result">
         <p className="pm-pending-text">{copy.body}</p>
@@ -731,7 +733,7 @@ function EditedRow({ item, outcome, action }: {
   }
   const undoId = outcome.decisionId
   return (
-    <article className="pm-pending-item" tabIndex={-1}>
+    <article className="pm-pending-item pm-pending-item--result" tabIndex={-1}>
       <div className="pm-pending-done">
         <Chip variant="result">{t(outcome.kind === 'edited' ? 'pending.result.edited' : 'pending.result.merged')}</Chip>
         <span className="pm-pending-done-text">

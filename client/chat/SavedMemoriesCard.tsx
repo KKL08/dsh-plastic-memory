@@ -21,12 +21,16 @@ import type { NavTarget } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { useTypeLabel } from '../library/shared.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
+import { withRollingNumber } from '../ui/motion.tsx'
 import { keepFocusInPlace } from '../ui/focus-return.ts'
 import { TrashIcon } from '../ui/TrashIcon.tsx'
 import { crossConfirmCss, DeleteWithConfirm, SecretDeleteConfirm } from '../pending/action.tsx'
 import { promoteInPlaceCss, promotionOf, usePromoteInPlace, type InPlacePromotion } from '../pending/promote-in-place.tsx'
 import { ModelChangeLine, RewrittenChip, modelChangeCss } from '../pending/model-change.tsx'
 import type { SavedMemory } from './saved-turn.ts'
+
+/** 卡片挂上时最近一条记下不超过这么久，算对话进行中刚出现的；翻历史时的卡都更早。 */
+const LIVE_MS = 10_000
 
 /** 这一行自己的进行中 / 失败 / 等确认；删没删读网关的删除状态（别处删的也算，交付卡卸载重挂也还在）。 */
 type RowState =
@@ -164,6 +168,8 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
   /** 这里写进了 AGENTS.md 的：记忆已离开视图，按 id 留着结果。 */
   const [wroteAgentsMd, setWroteAgentsMd] = useState<ReadonlySet<string>>(new Set())
   const listId = useId()
+  // 对话进行中刚出现的卡淡入上浮；翻历史时一屏卡片同时挂上，不动
+  const [isLive] = useState(() => saved.some(item => now - item.memory.updatedAt < LIVE_MS))
   const session = useMemo<BorrowedSession & { kind: 'ready' }>(() => ({ kind: 'ready', sessionId, cwd }), [sessionId, cwd])
   const typeLabel = useTypeLabel(session)
   const gateway = useGateway()
@@ -211,20 +217,25 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
   const folded = fresh === 0 ? t(rewritten === 1 ? 'chat.card.folded.rewritten.one' : 'chat.card.folded.rewritten', { count: rewritten })
     : rewritten === 0 ? t(saved.length === 1 ? 'chat.card.folded.one' : 'chat.card.folded', { count: saved.length })
     : t('chat.card.folded.mixed', { count: fresh, rewritten })
+  // 只有新记的时候数字滚动（同一轮又记下一条）；混着改写的句子有两个数，照常换
+  const counted = (key: 'chat.card.title' | 'chat.card.folded' | 'chat.card.folded.one') =>
+    withRollingNumber(slot => t(key, { count: slot }), saved.length, String(saved.length))
+  const titleNode = fresh > 0 && rewritten === 0 ? counted('chat.card.title') : title
+  const foldedNode = fresh > 0 && rewritten === 0 ? counted(saved.length === 1 ? 'chat.card.folded.one' : 'chat.card.folded') : folded
   // 和删除、撤销同一个层：全局记忆落在全局；本项目记忆落在服务端给会话定的项目（cwd 可能是项目子目录），都不知道时只带 id
   const detail = (memory: SavedMemory['memory']) => {
     const scope = layerOf(memory)
     openDetail({ view: 'library', ...(scope === undefined ? {} : { scope }), memoryId: memory.id, fromChat: true })
   }
   return (
-    <section className="pm-saved" data-open={isOpen || undefined} aria-label={title}>
+    <section className={isLive ? 'pm-saved pm-saved--enter' : 'pm-saved'} data-open={isOpen || undefined} aria-label={title}>
       <h3 className="pm-saved-title">
         <button type="button" className="pm-saved-toggle" aria-expanded={isOpen} aria-controls={listId} onClick={() => { setOpen(!isOpen) }}>
           {isOpen
-            ? <span className="pm-saved-lead">{title}</span>
+            ? <span className="pm-saved-lead">{titleNode}</span>
             : (
               <>
-                <span className="pm-saved-lead">{folded}</span>
+                <span className="pm-saved-lead">{foldedNode}</span>
                 <span className="pm-saved-first" title={saved[0]?.memory.name}>{saved[0]?.memory.name}</span>
                 {candidates > 0
                   ? <span className="pm-saved-hint"><i className="pm-sep" aria-hidden="true">·</i>{t('chat.card.folded.promote', { count: candidates })}</span>
@@ -267,6 +278,9 @@ export const savedMemoriesCardCss = crossConfirmCss + promoteInPlaceCss + modelC
   display: flex; flex-direction: column; gap: 10px; margin: 4px 0; padding: 12px 14px;
   border: 0.5px solid var(--pm-line-card); border-radius: var(--dsw-radius-lg, 16px); background: var(--pm-bg);
 }
+.pm-saved--enter { transition: opacity 200ms ease-out, transform 200ms cubic-bezier(0.23, 1, 0.32, 1); }
+@starting-style { .pm-saved--enter { opacity: 0; transform: translateY(4px); } }
+@media (prefers-reduced-motion: reduce) { .pm-saved--enter { transition: none; } }
 .pm-saved-title { margin: 0; font-size: 13px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
 .pm-saved-toggle {
   display: flex; align-items: baseline; width: 100%; min-width: 0; padding: 0; border: 0; background: none;
@@ -275,8 +289,9 @@ export const savedMemoriesCardCss = crossConfirmCss + promoteInPlaceCss + modelC
 .pm-saved-lead { flex: none; white-space: pre; }
 .pm-saved-first { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; color: var(--pm-text-2); }
 .pm-saved-hint { flex: none; font-weight: 400; color: var(--pm-text-2); white-space: nowrap; }
-.pm-saved-chevron { flex: none; margin-left: auto; padding-left: 8px; font-weight: 400; color: var(--pm-text-2); transition: transform 150ms ease; }
+.pm-saved-chevron { flex: none; margin-left: auto; padding-left: 8px; font-weight: 400; color: var(--pm-text-2); transition: transform 120ms ease; }
 .pm-saved[data-open] .pm-saved-chevron { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .pm-saved-chevron { transition: none; } }
 .pm-saved-toggle:hover .pm-saved-chevron, .pm-saved-toggle:hover .pm-saved-first, .pm-saved-toggle:hover .pm-saved-hint { color: var(--pm-text); }
 .pm-saved-list[hidden] { display: none; }
 .pm-saved-list { display: flex; flex-direction: column; gap: 12px; }

@@ -244,6 +244,19 @@ describe('SidebarTab 快照来历与分组', () => {
 })
 
 describe('SidebarTab 这次新写入的', () => {
+  it('对话里新写入的一行带入场动效和银藤高亮；打开右侧栏时已有的不带', () => {
+    const earlier = memory({ id: 'n0', type: 'knowledge', content: '周五不发版。' })
+    const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
+    const { gateway } = setup({ library: library(pref, proj, glob, earlier), session: snapshot({ savedIds: ['n0'] }), pending: pending() })
+    expect(screen.getByText('周五不发版。').closest('.pm-arrive')).toBeNull()
+    act(() => {
+      gateway.setView('library', library(pref, proj, glob, earlier, fresh))
+      gateway.setView('session', snapshot({ savedIds: ['n0', 'n1'] }))
+    })
+    expect(screen.getByText('报销截止每月 25 日。').closest('.pm-arrive')).toHaveClass('pm-arrive--highlight')
+    expect(screen.getByText('周五不发版。').closest('.pm-arrive')).toBeNull()
+  })
+
   it('memory_save 后会话视图版本变化，新记的实时增加；行尾删除发 forget', async () => {
     const { gateway } = setup({ library: library(pref, proj, glob), session: snapshot(), pending: pending() })
     expect(screen.queryByText('这次新写入的')).toBeNull()

@@ -9,7 +9,7 @@
  *   本窗口的手动体检没做成写原因。「全部」写「全部」手动体检的结果，另把没看过的自动体检结果按范围合计成一行。
  * 进行中和手动体检没做成读标题行同一份 useCheckupRuns。
  */
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { isValidElement, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import {
   sameLayer, scopeKey, SCOPE_KEYS,
   type CheckupCause, type CheckupResult, type CheckupView, type GuiLayerRef, type HealthView,
@@ -17,6 +17,7 @@ import {
 import { baseName, formatDay, formatDayTime, formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
 import { allScopesSub, scopeName, type MemoryView, type NavStore, type NewItemJump, type PageScope } from '../nav.ts'
+import { useHeightTransition, withRollingNumber } from '../ui/motion.tsx'
 import { StatusMarker, type MarkerKind } from '../ui/StatusMarker.tsx'
 import type { CheckupRuns, RunFailure } from './runs.ts'
 import { checkupResults, isResultSeen, markSeen, type Seen, type SeenMark } from './seen.ts'
@@ -194,7 +195,7 @@ function ScopeStatus({ layer, entry, count, now, result }: {
             : (
               <>
                 <span className="pm-status-mark"><StatusMarker kind={TIER_MARKER[layer.tier]} /></span>
-                {t('health.score', { score: formatNumber(score) })}<Sep /><span className="pm-status-soft">{t(`health.tier.${layer.tier}`)}</span>
+                {withRollingNumber(slot => t('health.score', { score: slot }), score, formatNumber(score))}<Sep /><span className="pm-status-soft">{t(`health.tier.${layer.tier}`)}</span>
               </>
             )}
       </p>
@@ -290,6 +291,9 @@ function ResultRow({ scope, isTodoView, nav, runs, seen, checkups, now }: {
   const t = useT()
   const shown = useRef<SeenMark[]>([])
   shown.current = []
+  // 「正在体检」换成结果、结果收起时高度跟着过渡；挂载之后才出现的行淡入
+  const box = useRef<HTMLDivElement>(null)
+  useEffect(() => { box.current?.setAttribute('data-live', '') }, [])
   useEffect(() => {
     if (isTodoView && checkups !== undefined) markSeen(checkups, shown.current)
   })
@@ -385,7 +389,8 @@ function ResultRow({ scope, isTodoView, nav, runs, seen, checkups, now }: {
     return [head, ...notes]
   }
 
-  return <div className="pm-status-result" aria-live="polite">{lines}</div>
+  useHeightTransition(box, lines.map(line => (isValidElement(line) ? line.key : '')).join('|'))
+  return <div ref={box} className="pm-status-result" aria-live="polite">{lines}</div>
 }
 
 export const statusBarCss = `
@@ -399,13 +404,18 @@ export const statusBarCss = `
   font: inherit; color: var(--pm-text-2); cursor: pointer;
 }
 .pm-status-why:hover { color: var(--pm-text); }
+.pm-status-why svg { transition: transform 120ms ease; }
 .pm-status-why[aria-expanded='true'] svg { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) { .pm-status-why svg { transition: none; } }
 .pm-status--plain :is(.pm-status-meta, .pm-status-result) { padding-left: 0; }
 .pm-status-deductions { list-style: none; display: flex; flex-direction: column; gap: 2px; margin-left: 22px; padding: 6px 0 0; border-top: .5px solid var(--pm-line); }
 .pm-status-result { display: flex; flex-direction: column; gap: 2px; color: var(--pm-text); }
 /* 结果行一直在 DOM 里（aria-live 要先在场），空着时不占状态条的行距 */
 .pm-status-result:empty { margin-top: -6px; }
 .pm-status-result-line { margin: 0; }
+.pm-status-result[data-live] .pm-status-result-line { transition: opacity 200ms ease-out; }
+@starting-style { .pm-status-result[data-live] .pm-status-result-line { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .pm-status-result[data-live] .pm-status-result-line { transition: none; } }
 .pm-status-soft-line { color: var(--pm-text-2); }
 .pm-status-result .pm-link { font-size: 12px; }
 .pm-status-usage { white-space: nowrap; }

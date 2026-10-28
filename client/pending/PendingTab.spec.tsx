@@ -42,6 +42,25 @@ function setup(items: PendingItem[], init: FakeGatewayInit = {}, nav: NavStore =
 }
 
 describe('待处理：按级别分组', () => {
+  it('页面开着时新来的条目带入场动效（撑开再落进来），打开时已有的不带', () => {
+    const { gateway } = setup([horizontal])
+    const arrivalOf = (title: string) => screen.getByRole('heading', { level: 3, name: title }).closest('.pm-pending-row')!.querySelector(':scope > .pm-arrive > .pm-arrive-body > article')
+    expect(arrivalOf('测试里怎么准备数据库，两条记忆互相矛盾')).toBeNull()
+    act(() => { gateway.setView('pending', view(secret, horizontal)) })
+    expect(arrivalOf('这条记忆里有密钥')).not.toBeNull()
+    expect(arrivalOf('测试里怎么准备数据库，两条记忆互相矛盾')).toBeNull()
+  })
+
+  it('新来的卡命令进行中、视图先刷新掉它：卡片不重挂，按钮仍是进行中', async () => {
+    const { gateway } = setup([secret], { respond: () => new Promise<never>(() => {}) })
+    act(() => { gateway.setView('pending', view(secret, horizontal)) })
+    const card = screen.getByRole('heading', { level: 3, name: '测试里怎么准备数据库，两条记忆互相矛盾' }).closest('article')!
+    await act(async () => { fireEvent.click(within(card).getByRole('button', { name: '以 A 为准' })) })
+    act(() => { gateway.setView('pending', view(secret)) })
+    const after = screen.getByRole('heading', { level: 3, name: '测试里怎么准备数据库，两条记忆互相矛盾' }).closest('article')!
+    expect(after).toBe(card)
+  })
+
   it('先处理在前、等你决定在后，组标题带条数；组内按视图顺序出卡', () => {
     setup([secret, unreadable, horizontal, vertical, promote, overflow])
     expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['先处理 2', '等你决定 4'])
@@ -97,6 +116,8 @@ describe('待处理：按级别分组', () => {
 
   it('裁决后结果卡留在原来那一组；组标题的数只算还在等你的', async () => {
     setup([secret, horizontal, promote])
+    // 没处理过的卡不带结果卡的淡入
+    expect(document.querySelector('.pm-pending-item--result')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
     await screen.findByText('已按 A')
     const yourCall = screen.getByRole('region', { name: '等你决定 1' })
@@ -104,6 +125,7 @@ describe('待处理：按级别分组', () => {
     expect(screen.getByRole('region', { name: '先处理 1' })).toBeInTheDocument()
     // 标记列不空出来：处理完换成灰圆点，标题不往左跳
     expect(within(yourCall).getByText('已按 A').closest('article')!.querySelector('.pm-pending-head .pm-marker--done')).not.toBeNull()
+    expect(within(yourCall).getByText('已按 A').closest('article')).toHaveClass('pm-pending-item--result')
   })
 })
 

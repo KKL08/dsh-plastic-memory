@@ -23,6 +23,7 @@ import { compareLayers, isInScope, scopeName, useNavTarget, type NavStore, type 
 import { Button } from '../ui/Button.tsx'
 import { Chip } from '../ui/Chip.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
+import { Arrival, useArrivals } from '../ui/motion.tsx'
 import { StatusMarker } from '../ui/StatusMarker.tsx'
 import { ActionFeedback, crossConfirmCss, ItemSending, useItemAction } from './action.tsx'
 import { editCss } from './edit.tsx'
@@ -132,6 +133,8 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
     const hit = levels.flatMap(level => viewItems.filter(item => item.level === level && isNew(item)))[0]
     return hit === undefined ? undefined : pendingItemKey(hit)
   })
+  // 体检、对话在页面开着时带来的新条目：撑开位置再落进来
+  const arrivals = useArrivals(pending.status === 'ready' ? viewItems.map(pendingItemKey) : undefined)
   const recentKey = recent === undefined ? undefined : pendingItemKey(recent.item)
   const backInView = recentKey !== undefined && viewItems.some(i => pendingItemKey(i) === recentKey)
   // 撤销后视图把条目带回来了：本地那张让位
@@ -268,7 +271,7 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
                       takesFocus={row.key === jump.key}
                       onFlashEnd={() => { clear(); jump.end() }}
                     >
-                      {row.node}
+                      <Arrival arrivals={arrivals} id={row.key}>{row.node}</Arrival>
                     </FlashRow>
                   ))}
                   {shown.length < group.length
@@ -465,7 +468,9 @@ export const pendingCss = crossConfirmCss + editCss + modelEditCss + moveCss + `
   display: inline-flex; align-items: center; gap: 2px; padding: 0; border: 0; background: none;
   font: inherit; font-size: 12px; font-weight: 600; color: var(--pm-text); cursor: pointer;
 }
+.pm-ignored-toggle svg { transition: transform 120ms ease; }
 .pm-ignored-toggle[aria-expanded='true'] svg { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) { .pm-ignored-toggle svg { transition: none; } }
 .pm-ignored-list { margin: 8px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
 .pm-ignored-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
 .pm-ignored-text { min-width: 0; overflow-wrap: anywhere; }
@@ -495,6 +500,9 @@ export const pendingCss = crossConfirmCss + editCss + modelEditCss + moveCss + `
 .pm-pending-refused { margin: 0; padding: 12px 0; font-size: 12px; line-height: 1.5; color: var(--pm-text); }
 .pm-pending-result { display: flex; align-items: center; gap: 12px; }
 .pm-pending-result .pm-pending-text { flex: 1; }
+.pm-pending-item--result { transition: opacity 120ms ease-out; }
+@starting-style { .pm-pending-item--result { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .pm-pending-item--result { transition: none; } }
 .pm-pending-undo { font-weight: 600; }
 .pm-pending-path { margin: 0; font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 12px; color: var(--pm-text); overflow-wrap: anywhere; }
 .pm-pending-error-text {

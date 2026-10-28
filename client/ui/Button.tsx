@@ -45,4 +45,10 @@ export const buttonCss = `
 .pm-btn--danger { color: var(--pm-error); border-color: color-mix(in srgb, var(--pm-error) 35%, transparent); }
 .pm-btn--ghost { border-color: transparent; background: transparent; color: var(--pm-text-2); }
 .pm-btn:disabled, .pm-btn[aria-disabled='true'] { opacity: .4; cursor: default; }
+/* 按下：主按钮轻轻一缩（减少动态效果时不缩），其余按钮底色加深 */
+@media (prefers-reduced-motion: no-preference) {
+  .pm-btn--primary { transition: transform 160ms ease-out; }
+  .pm-btn--primary:active:not(:disabled):not([aria-disabled='true']) { transform: scale(0.97); }
+}
+.pm-btn:not(.pm-btn--primary):active:not(:disabled):not([aria-disabled='true']) { background: var(--pm-pressed); }
 `
