@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Changed
+- Saving a memory no longer turns into the reply: the model answers what
+  you said instead of announcing "noted" or quoting memory ids, since the
+  chat card already shows what was saved. It still acknowledges briefly
+  when you explicitly ask it to remember something.
 - The memory snapshot is now a message of its own instead of a section of
   the host's shared runtime context; the trajectory view lists it as a
   separate context row from plastic-memory. A change in another plugin's
