@@ -3,7 +3,7 @@
  * 涉及其他项目时服务端先拒（cross-workspace，什么都没动），卡片里就地写明是哪个项目，用户点「继续处理」才带
  * allowCrossWorkspace 重发。失败把宿主 / 执行器的原话显示在卡片里；条目正在别处处理或刚处理完时交给列表提示（isHandledElsewhere）。
  */
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { detectSecrets, type MemoryCommand, type MemoryCommandResult } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, useT } from '../i18n.tsx'
@@ -67,17 +67,26 @@ function hasCriticalSecret(command: MemoryCommand): boolean {
   return detectSecrets(`${content}\n${name}\n${summary}\n${tags.join(' ')}`).some(h => h.severity === 'critical')
 }
 
+/**
+ * 这张卡的命令发出了（true）、结果回来了（false）。列表借它在命令进行中把卡片留在原位：宿主可能先推来没有这一条的视图，
+ * 卡片一卸载焦点就丢了。结果回来时先报 false 再调 onOk，两次更新同一批渲染。
+ */
+export const ItemSending = createContext<(isSending: boolean) => void>(() => {})
+
 /** onRefused：isHandledElsewhere 为真时调用，卡片里不再显示原话。 */
 export function useItemAction(session: BorrowedSession, onOk: (command: MemoryCommand, result: Ok) => void, onRefused?: () => void): ItemAction {
   const t = useT()
   const gateway = useGateway()
   const [state, setState] = useState<ActionState>({ kind: 'idle' })
+  const onSending = useContext(ItemSending)
   const run = (command: MemoryCommand) => {
     if (session.kind !== 'ready') return
     if (hasCriticalSecret(command)) { setState({ kind: 'error', detail: t('pending.edit.secretCritical') }); return }
     keepFocusInPlace()
     setState({ kind: 'busy' })
+    onSending(true)
     void gateway.execute(session.sessionId, command).then((r) => {
+      onSending(false)
       if (r.ok) { setState({ kind: 'idle' }); onOk(command, r); return }
       if (onRefused !== undefined && isHandledElsewhere(command, r)) { setState({ kind: 'idle' }); onRefused(); return }
       const workspacePath = r.rejected?.[0]?.workspacePath

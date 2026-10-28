@@ -13,7 +13,7 @@ export interface EmptyStateProps {
   title: ReactNode
   /** 说明从哪来 / 会发生什么。 */
   children?: ReactNode
-  /** 最多一个动作（按钮或「去设置里打开 ›」）。 */
+  /** 最多一个动作（按钮或链接）。 */
   action?: ReactNode
   /** daily 的图标，缺省用记忆图标。 */
   icon?: ReactNode

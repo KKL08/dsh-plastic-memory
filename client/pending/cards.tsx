@@ -2,7 +2,7 @@
  * 待处理的各类卡（PRD 5.2；建议整理见 spec「建议整理的动作」）与处理后留在原位的结果卡。每张卡动手前写清后果；动作经 useItemAction 发命令，
  * 成功后把结果（Outcome）交给列表，由列表在原位换成结果卡。
  */
-import { useState, type ReactNode } from 'react'
+import { createContext, useContext, useState, type ReactNode } from 'react'
 import {
   CONFLICT_ACTION_VERDICTS, MODEL_EDIT_ADVICE_TYPES, layerOfMemory, mergeKeeperIndex,
   type AdviceType, type GuiLayerRef, type IgnorableAdviceType, type MemoryCard as MemoryCardData, type MemoryCommand, type ModelEditAdviceType, type PendingItem,
@@ -35,7 +35,8 @@ export type Outcome =
   | { kind: 'dismissed' }
   | { kind: 'raised'; budget: number }
   | { kind: 'confirmed' }
-  | { kind: 'deleted' }
+  /** 软删进了最近删除：撤销发 restore，带删的那一份。 */
+  | { kind: 'deleted'; memoryId: string; layer: GuiLayerRef | undefined }
   /** 建议整理的忽略：撤销发 unignore-advice，带同样的类型和记忆 id。 */
   | { kind: 'ignored'; type: IgnorableAdviceType; memoryIds: string[] }
   /** 直接改、直接合并：结果行写名称和字数变化；filePath 是写完后的文件（改了名称文件名会跟着变）。 */
@@ -73,6 +74,25 @@ export function bodyOf(text: string): string {
 
 const isMac = () => typeof navigator !== 'undefined' && /mac/i.test(navigator.platform)
 
+/** 「全部」里每张卡标题后的范围名胶囊（条目属于哪些范围）；选了具体范围时为空，不画。由列表按行给出。 */
+export const ItemScopeNames = createContext<readonly string[]>([])
+
+/** 这张卡是最近一次体检新增、这一趟还算「新」的：标题后先跟「新」胶囊。由列表按行给出。 */
+export const ItemIsNew = createContext(false)
+
+/** 记忆页处理视图里条目标题后的胶囊：「新」（ItemIsNew）在前，「全部」里的范围名（ItemScopeNames）在后。 */
+function ScopeChips() {
+  const t = useT()
+  const scopes = useContext(ItemScopeNames)
+  const isNew = useContext(ItemIsNew)
+  return (
+    <>
+      {isNew ? <span className="pm-pending-scope"><Chip variant="neutral">{t('pending.new')}</Chip></span> : null}
+      {scopes.map((name, i) => <span key={i} className="pm-pending-scope"><Chip variant="neutral">{name}</Chip></span>)}
+    </>
+  )
+}
+
 /** focusable：结果卡可以接住焦点（tabIndex=-1），确认收起后原来的按钮没了就落在它上面。 */
 function Card({ marker, title, aside, focusable = false, children }: {
   marker?: ReactNode
@@ -86,6 +106,7 @@ function Card({ marker, title, aside, focusable = false, children }: {
       <header className="pm-pending-head">
         {marker}
         <h3 className="pm-pending-title">{title}</h3>
+        <ScopeChips />
         {aside !== undefined ? <div className="pm-pending-aside">{aside}</div> : null}
       </header>
       <div className="pm-pending-body">{children}</div>
@@ -182,6 +203,7 @@ export function HorizontalCard({ item, session, now, typeLabels, onDone, onRefus
         unavailable={action.unavailable}
         typeLabel={type => typeLabels[type] ?? type}
         projectName={projectNameOf(session)}
+        headExtra={<ScopeChips />}
         onRule={(verdict) => { action.run({ cmd: 'resolve', decisionId: item.decisionId, verdict }) }}
       />
       <ActionFeedback action={action} />
@@ -205,6 +227,7 @@ export function VerticalCard({ item, session, now, typeLabels, onDone, onRefused
         unavailable={action.unavailable}
         typeLabel={type => typeLabels[type] ?? type}
         projectName={projectNameOf(session)}
+        headExtra={<ScopeChips />}
         onRule={(verdict) => { action.run({ cmd: 'resolve', decisionId: item.decisionId, verdict }) }}
       />
       <ActionFeedback action={action} />
@@ -357,31 +380,37 @@ export function UnreadableCard({ item, session }: CardProps<'unreadable-file'>) 
 type AdviceAction = 'confirm' | 'delete' | 'promote' | 'move' | 'open' | 'edit' | 'model' | 'ignore'
 
 /**
- * 每类建议的标题、动手前的说明和动作（按 spec 表）。按钮顺序即显示顺序；「忽略」不进底部一行，放标题行右上（淡灰小按钮，同超限卡）。
+ * 每类建议的标题、动手前的说明和动作（按 spec 表）。按钮顺序即显示顺序：退一步的幽灵按钮（「忽略」「打开文件」）排在最左，
+ * 推荐的排在最右。
  * 内容重复这里是只有一条（和指令文件重复）的写法，两条以上见 AdviceGroupCard；放错层这里是项目 → 全局，全局那条见 MISPLACED_TO_PROJECT。
  */
 const ADVICE_COPY = {
-  expired: { title: 'pending.advice.expired.title', body: 'pending.advice.expired.body', actions: ['delete', 'open', 'ignore'] },
+  expired: { title: 'pending.advice.expired.title', body: 'pending.advice.expired.body', actions: ['ignore', 'open', 'delete'] },
   // 很久没确认不给忽略：它的出路是「仍然有效」或删除
-  stale: { title: 'pending.advice.stale.title', body: 'pending.advice.stale.body', actions: ['confirm', 'delete', 'open'] },
-  bloat: { title: 'pending.advice.bloat.title', body: 'pending.advice.bloat.body', actions: ['open', 'edit', 'model', 'ignore'] },
-  redundancy: { title: 'pending.advice.redundancy.title', body: 'pending.advice.redundancy.baselineBody', actions: ['delete', 'open', 'ignore'] },
-  orphan: { title: 'pending.advice.orphan.title', body: 'pending.advice.orphan.body', actions: ['open', 'ignore'] },
+  stale: { title: 'pending.advice.stale.title', body: 'pending.advice.stale.body', actions: ['open', 'delete', 'confirm'] },
+  bloat: { title: 'pending.advice.bloat.title', body: 'pending.advice.bloat.body', actions: ['ignore', 'open', 'edit', 'model'] },
+  redundancy: { title: 'pending.advice.redundancy.title', body: 'pending.advice.redundancy.baselineBody', actions: ['ignore', 'open', 'delete'] },
+  orphan: { title: 'pending.advice.orphan.title', body: 'pending.advice.orphan.body', actions: ['ignore', 'open'] },
   // 放错层只回答挪不挪：改写不动层
-  misplaced: { title: 'pending.advice.misplaced.title', body: 'pending.advice.misplaced.toGlobalBody', actions: ['open', 'promote', 'ignore'] },
-  unclear: { title: 'pending.advice.unclear.title', body: 'pending.advice.unclear.body', actions: ['open', 'edit', 'model', 'ignore'] },
+  misplaced: { title: 'pending.advice.misplaced.title', body: 'pending.advice.misplaced.toGlobalBody', actions: ['ignore', 'open', 'promote'] },
+  unclear: { title: 'pending.advice.unclear.title', body: 'pending.advice.unclear.body', actions: ['ignore', 'open', 'edit', 'model'] },
 } as const satisfies Record<AdviceType, { title: LocaleKey; body: LocaleKey; actions: readonly AdviceAction[] }>
 
-/** 放错层里全局那条（该放项目）：「移到项目…」在卡片里选项目，和提升为全局对称。 */
-const MISPLACED_TO_PROJECT = { body: 'pending.advice.misplaced.toProjectBody', actions: ['open', 'move', 'ignore'] } as const
+/** 问题类型的显示名（卡片标题、已忽略列表）。 */
+export function adviceTitle(type: AdviceType, t: Translate): string {
+  return t(ADVICE_COPY[type].title)
+}
 
-/** 右上角的「忽略」：发 ignore-advice，带这一项的类型和全部记忆（内容重复是整组），每条带卡片上那一份的层和卡片版本。 */
+/** 放错层里全局那条（该放项目）：「移到项目…」在卡片里选项目，和提升为全局对称。 */
+const MISPLACED_TO_PROJECT = { body: 'pending.advice.misplaced.toProjectBody', actions: ['ignore', 'open', 'move'] } as const
+
+/** 动作行最左的「忽略」（幽灵按钮）：发 ignore-advice，带这一项的类型和全部记忆（内容重复是整组），每条带卡片上那一份的层和卡片版本。 */
 function IgnoreButton({ item, action }: { item: Item<'advice'>; action: ItemAction }) {
   const t = useT()
   if (item.type === 'stale') return null
   const memories = item.memories.map(m => ({ memoryId: m.id, layer: layerOfMemory(m), base: baseOf(m) }))
   const command: MemoryCommand = { cmd: 'ignore-advice', type: item.type, memories }
-  return <Button variant="quiet" unavailable={action.unavailable} onClick={() => { action.run(command) }}>{t('pending.advice.ignore')}</Button>
+  return <Button variant="ghost" unavailable={action.unavailable} onClick={() => { action.run(command) }}>{t('pending.advice.ignore')}</Button>
 }
 
 /**
@@ -419,7 +448,7 @@ export function AdviceCard(props: CardProps<'advice'> & {
   const gateway = useGateway()
   const action = useItemAction(session, (command, result) => {
     if (command.cmd === 'confirm') onDone({ kind: 'confirmed' })
-    if (command.cmd === 'forget') onDone({ kind: 'deleted' })
+    if (command.cmd === 'forget') onDone({ kind: 'deleted', memoryId: command.memoryId, layer: command.layer })
     if (command.cmd === 'hard-delete') onDone({ kind: 'hard-deleted' })
     if (command.cmd === 'promote-memory') onDone({ kind: 'promoted', target: 'global', decisionId: result.decisionId })
     if (command.cmd === 'move-memory') onDone({ kind: 'moved', workspacePath: command.workspacePath, decisionId: result.decisionId, filePath: result.filePath })
@@ -459,7 +488,7 @@ export function AdviceCard(props: CardProps<'advice'> & {
       model: isEditable(memory)
         ? <Button key="model" unavailable={action.unavailable} onClick={() => { setModelEditing(true) }}>{t('pending.model.edit')}</Button>
         : null,
-      ignore: null,
+      ignore: <IgnoreButton key="ignore" item={item} action={action} />,
     }
   }
   if (item.type === 'redundancy' && item.memories.length > 1) {
@@ -468,9 +497,8 @@ export function AdviceCard(props: CardProps<'advice'> & {
   const [memory] = item.memories
   const copy = item.type === 'misplaced' && memory.scope === 'global' ? { ...ADVICE_COPY.misplaced, ...MISPLACED_TO_PROJECT } : ADVICE_COPY[item.type]
   const buttons = buttonsOf(memory)
-  const isIgnorable = (copy.actions as readonly AdviceAction[]).includes('ignore')
   return (
-    <Card title={t(copy.title)} aside={isIgnorable && !isEditing && !isModelEditing && !isMoving ? <IgnoreButton item={item} action={action} /> : undefined}>
+    <Card title={t(copy.title)}>
       {isMoving
         ? (
           <>
@@ -556,7 +584,7 @@ function AdviceGroupCard({ item, session, now, typeLabels, action, buttonsOf }: 
     { label: 'pending.advice.redundancy.right', delete: 'pending.advice.redundancy.deleteRight' },
   ] as const
   return (
-    <Card title={t('pending.advice.redundancy.title')} aside={isMerging || isModelMerging ? undefined : <IgnoreButton item={item} action={action} />}>
+    <Card title={t('pending.advice.redundancy.title')}>
       <div className="pm-pending-advice-memories pm-pending-advice-group">
         {item.memories.map((m, i) => {
           const side = isPair ? sides[i] : undefined
@@ -564,7 +592,7 @@ function AdviceGroupCard({ item, session, now, typeLabels, action, buttonsOf }: 
           return (
             <section key={m.id} className="pm-pending-advice-side" aria-label={side === undefined ? m.name : t(side.label)}>
               <MemoryOf session={session} memory={m} now={now} typeLabels={typeLabels} />
-              {isMerging || isModelMerging ? null : <div className="pm-pending-actions">{buttons.delete}{buttons.open}</div>}
+              {isMerging || isModelMerging ? null : <div className="pm-pending-actions">{buttons.open}{buttons.delete}</div>}
             </section>
           )
         })}
@@ -597,14 +625,17 @@ function AdviceGroupCard({ item, session, now, typeLabels, action, buttonsOf }: 
           : (
             <>
               <p className="pm-pending-text">{t(isPair ? 'pending.advice.redundancy.body' : 'pending.advice.redundancy.manyBody')}</p>
-              {pair !== undefined
-                ? (
-                  <div className="pm-pending-actions">
-                    <Button unavailable={action.unavailable} onClick={() => { setMerging(true) }}>{t('pending.edit.merge')}</Button>
-                    <Button unavailable={action.unavailable} onClick={() => { setModelMerging(true) }}>{t('pending.model.merge')}</Button>
-                  </div>
-                )
-                : null}
+              <div className="pm-pending-actions">
+                <IgnoreButton item={item} action={action} />
+                {pair !== undefined
+                  ? (
+                    <>
+                      <Button unavailable={action.unavailable} onClick={() => { setMerging(true) }}>{t('pending.edit.merge')}</Button>
+                      <Button unavailable={action.unavailable} onClick={() => { setModelMerging(true) }}>{t('pending.model.merge')}</Button>
+                    </>
+                  )
+                  : null}
+              </div>
             </>
           )}
       <ActionFeedback action={action} />
@@ -641,10 +672,10 @@ function resultCopy(item: PendingItem, outcome: Outcome, t: Translate): ResultCo
     }
     case 'kept-local': return { memory, chip: t('pending.result.keptLocal'), body: t('pending.result.keptLocalBody'), undoable: true }
     case 'hard-deleted': return { chip: t('pending.secret.deleted'), body: t('pending.secret.deletedBody'), undoable: false }
-    case 'dismissed': return { chip: t('pending.result.dismissed'), body: t('pending.result.dismissedBody'), undoable: false }
+    case 'dismissed': return { chip: t('pending.result.dismissed'), body: t('pending.result.dismissedBody'), undoable: true }
     case 'raised': return { chip: t('pending.result.raised', { budget: formatNumber(outcome.budget) }), body: t('pending.overflow.raiseHint'), undoable: false }
     case 'confirmed': return { memory, chip: t('pending.result.confirmed'), body: t('pending.result.confirmedBody'), undoable: false }
-    case 'deleted': return { chip: t('pending.result.deleted'), body: t('pending.result.deletedBody'), undoable: false }
+    case 'deleted': return { chip: t('pending.result.deleted'), body: t('pending.result.deletedBody'), undoable: true }
     case 'ignored': return { memory, chip: t('pending.result.ignored'), body: t('pending.result.ignoredBody'), undoable: true }
     case 'resolved': throw new Error(`resolved outcome on ${item.kind}`)
     case 'edited': case 'merged': throw new Error(`${outcome.kind} outcome renders as EditedRow`)
@@ -665,9 +696,10 @@ export function ResultCard({ item, outcome, session, now, typeLabels, onUndone, 
   if (outcome.kind === 'edited' || outcome.kind === 'merged') return <EditedRow item={item} outcome={outcome} action={action} />
   const copy = resultCopy(item, outcome, t)
   const undoId = 'decisionId' in item ? item.decisionId : outcome.kind === 'promoted' || outcome.kind === 'moved' ? outcome.decisionId : undefined
-  // 忽略不进账本，撤销就是取消忽略；其余撤销按账本条目
+  // 忽略不进账本，撤销就是取消忽略；删除进了最近删除，撤销就是恢复那一份；其余撤销按账本条目
   const undo: MemoryCommand | undefined = !copy.undoable ? undefined
     : outcome.kind === 'ignored' ? { cmd: 'unignore-advice', type: outcome.type, memoryIds: outcome.memoryIds }
+    : outcome.kind === 'deleted' ? { cmd: 'restore', memoryId: outcome.memoryId, layer: outcome.layer }
     : undoId !== undefined ? { cmd: 'undo', decisionId: undoId } : undefined
   const chip = <Chip variant="result">{copy.chip}</Chip>
   return (
@@ -677,7 +709,7 @@ export function ResultCard({ item, outcome, session, now, typeLabels, onUndone, 
         <p className="pm-pending-text">{copy.body}</p>
         {undo !== undefined
           ? (
-            <Button className="pm-pending-undo" unavailable={action.unavailable} onClick={() => { action.run(undo) }}>
+            <Button variant="ghost" className="pm-pending-undo" unavailable={action.unavailable} onClick={() => { action.run(undo) }}>
               {t('pending.undo')}
             </Button>
           )

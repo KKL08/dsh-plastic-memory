@@ -368,6 +368,18 @@ describe('交付卡', () => {
     ])
   })
 
+  it('本项目记忆的「查看详情」落在服务端给会话定的项目（会话 cwd 是项目子目录时不落到子目录）', () => {
+    const session: SessionView = {
+      version: GUI_VIEW_VERSION, sessionId: 's1', workspacePath: '/w/app', frozenAt: 2, origin: 'start', budget: 4000, overflowMode: 'relax',
+      tokens: { workspace: 0, global: 0, fixed: 0 }, usedTokens: 0, injectedIds: [], coreIds: [], titleOnlyIds: [], omittedCount: 0, savedIds: [],
+    }
+    const openDetail = vi.fn()
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app/packages/web" saved={[saved('mem_w', '提交前跑测试')]} now={NOW} openDetail={openDetail} />, createFakeGateway({ views: { session } }))
+    expand()
+    fireEvent.click(screen.getByRole('button', { name: '查看详情 ›' }))
+    expect(openDetail).toHaveBeenCalledWith({ view: 'library', scope: { kind: 'workspace', workspacePath: '/w/app' }, memoryId: 'mem_w', fromChat: true })
+  })
+
   it('全局记忆：删除与撤销都带上全局层，服务端只动全局那一份', async () => {
     const gateway = createFakeGateway()
     renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_g', '回答用中文', 'global')]} now={NOW} openDetail={() => {}} />, gateway)
@@ -1041,10 +1053,10 @@ describe('注册', () => {
     expect(links).toHaveLength(3)
     expect(links.map(link => link.closest('[data-memory-id]')?.getAttribute('data-memory-id'))).toEqual(['mem_1', 'mem_g', 'mem_2'])
     fireEvent.click(links[2]!)
-    expect(nav.get()).toEqual({ tab: 'library', scope: { kind: 'workspace', workspacePath: '/w/app' }, memoryId: 'mem_2' })
+    expect(nav.get()).toEqual({ view: 'library', scope: { kind: 'workspace', workspacePath: '/w/app' }, memoryId: 'mem_2', fromChat: true })
     expect(ctx.layout.selectPanel).toHaveBeenCalledWith(PANEL_ID)
     fireEvent.click(links[1]!)
-    expect(nav.get()).toEqual({ tab: 'library', scope: { kind: 'global' }, memoryId: 'mem_g' })
+    expect(nav.get()).toEqual({ view: 'library', scope: { kind: 'global' }, memoryId: 'mem_g', fromChat: true })
   })
 
   it('删掉的那条不再有「查看详情 ›」', async () => {

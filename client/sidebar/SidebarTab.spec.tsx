@@ -104,7 +104,7 @@ describe('SidebarTab 四种状态', () => {
     expect(screen.queryByText(/处待处理/)).toBeNull()
     expect(screen.getByText(/本项目 2 条记忆/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '在记忆页查看 ›' }))
-    expect(openPage).toHaveBeenCalledWith({ tab: 'library', scope: { kind: 'workspace', workspacePath: WS } })
+    expect(openPage).toHaveBeenCalledWith({ view: 'library', scope: { kind: 'workspace', workspacePath: WS }, fromChat: true })
   })
 
   it('frozenAt 早于插件本次加载（健康视图 bootedAt）：写「重启后未重新带入」，不画过时的用量条', () => {
@@ -158,7 +158,7 @@ describe('SidebarTab 用量条', () => {
     expect(screen.getByText('3 条 · 约 4,000 / 4,000')).toBeInTheDocument()
     expect(screen.getByText(/已到上限，2 条没带入/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '处理 ›' }))
-    expect(openPage).toHaveBeenCalledWith({ tab: 'pending', scope: { kind: 'workspace', workspacePath: WS } })
+    expect(openPage).toHaveBeenCalledWith({ view: 'todo', scope: { kind: 'workspace', workspacePath: WS }, fromChat: true })
   })
 
   it('自动放宽：计入上限的用量超过上限时写「已放宽到 N」', () => {
@@ -736,7 +736,7 @@ describe('SidebarTab 底部入口', () => {
         pending: pending(conflict, promote),
       },
     })
-    const nav = createNavStore({ tab: 'library' })
+    const nav = createNavStore({ view: 'library' })
     const layout = { selectPanel: vi.fn() }
     renderInShell(
       <SidebarTab sessionId="s1" workspacePath={WS} openPage={(target) => { openMemoryPage({ layout }, nav, target) }} />,
@@ -744,7 +744,7 @@ describe('SidebarTab 底部入口', () => {
     )
     expect(screen.getByText(/本项目还有 1 处待处理/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '在记忆页处理 ›' }))
-    expect(nav.get()).toEqual({ tab: 'pending', scope: { kind: 'workspace', workspacePath: WS } })
+    expect(nav.get()).toEqual({ view: 'todo', scope: { kind: 'workspace', workspacePath: WS }, fromChat: true })
     expect(layout.selectPanel).toHaveBeenCalledWith(PANEL_ID)
   })
 })

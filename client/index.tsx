@@ -9,7 +9,6 @@ import { createHostGateway, GatewayProvider, type BindGateway } from './gateway.
 import type { HostContext, RootStandardProps } from './host.ts'
 import { useHostTranslate } from './i18n.tsx'
 import { en, NS, zh } from './locales.ts'
-import { healthCss } from './health/HealthTab.tsx'
 import { MemoryPage, memoryPageCss } from './MemoryPage.tsx'
 import { NavIcon } from './NavIcon.tsx'
 import { createNavStore, PANEL_ID, type NavStore } from './nav.ts'
@@ -30,7 +29,7 @@ function createMainPanel(ctx: HostContext, nav: NavStore, bind: BindGateway) {
     const gateway = useMemo(() => bind(props), [props.useSessions, props.useResource])
     const t = useHostTranslate(ctx.locale, NS)
     return (
-      <PanelShell gateway={gateway} t={t} extraCss={memoryPageCss + healthCss}>
+      <PanelShell gateway={gateway} t={t} className="pm-root--page" extraCss={memoryPageCss}>
         <MemoryPage nav={nav} />
       </PanelShell>
     )
@@ -49,7 +48,7 @@ export function apply(ctx: HostContext): void {
   ctx.locale.register(NS, { zh, en })
   const t = ctx.locale.bind(NS)
   const nav = createNavStore()
-  // 宿主有插件页导航才有「设置」「去设置里打开 ›」
+  // 宿主有插件页导航才有「设置」
   ctx.inject(['pluginNavigation'], (scope) => {
     scope.effect(() => {
       nav.provide('settings', () => { scope.pluginNavigation.openBundle(PACKAGE_NAME) })

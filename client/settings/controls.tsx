@@ -1,30 +1,9 @@
 /**
  * 设置页用到的宿主控件对齐版（标记与 CSS 对齐宿主 0.2.1-rc.2 ui-primitives，技能禁止外部插件 require 它）：
- * Switch（Switch.tsx）、文本输入（settings-form/fields 的 .input / .invalid）、Dialog（Modal.tsx 的居中弹层）。
+ * 文本输入（settings-form/fields 的 .input / .invalid）、Dialog（Modal.tsx 的居中弹层）。
  */
 import { useEffect, useRef, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-
-export function Switch({ checked, onChange, label, disabled = false }: {
-  checked: boolean
-  onChange: (next: boolean) => void
-  label: string
-  disabled?: boolean
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      disabled={disabled}
-      className="pm-switch"
-      onClick={() => { onChange(!checked) }}
-    >
-      <span className="pm-switch-thumb" />
-    </button>
-  )
-}
 
 /** 文本输入；`error` 非空时描红并在下方就地写原因（替换说明）。 */
 export function TextField({ id, value, onChange, error, hint, multiline = false, readOnly = false, disabled = false, inputMode }: {
@@ -115,19 +94,6 @@ export function Dialog({ title, closeLabel, onClose, footer, children }: {
 }
 
 export const controlsCss = `
-.pm-switch {
-  position: relative; flex: 0 0 auto; width: 36px; height: 20px; padding: 2px; border: 0; border-radius: 999px;
-  background: var(--dsw-alias-border-l3); cursor: pointer;
-}
-.pm-switch[aria-checked='true'] { background: var(--dsw-alias-brand-primary); }
-.pm-switch:disabled { cursor: default; opacity: .5; }
-.pm-switch-thumb {
-  display: block; width: 16px; height: 16px; border-radius: 50%;
-  background: var(--dsw-alias-label-primary-foreground); transition: transform 120ms ease;
-}
-.pm-switch[aria-checked='false'] .pm-switch-thumb { background: var(--dsw-alias-switch-thumb); }
-.pm-switch[aria-checked='true'] .pm-switch-thumb { transform: translateX(16px); }
-
 .pm-input {
   width: 100%; max-width: 320px; height: 34px; padding: 0 12px; border: .5px solid var(--pm-line-input);
   border-radius: var(--dsw-radius-md, 12px); background: var(--pm-bg-raised); font: inherit; font-size: 13px; line-height: 1.5; color: var(--pm-text);
@@ -158,5 +124,4 @@ export const controlsCss = `
 .pm-dialog-body { min-height: 0; overflow: auto; scrollbar-gutter: stable; padding: 0 24px; display: flex; flex-direction: column; gap: 14px; }
 .pm-dialog-footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 0 24px; }
 .pm-field { display: flex; flex-direction: column; gap: 6px; }
-@media (prefers-reduced-motion: reduce) { .pm-switch-thumb { transition: none; } }
 `

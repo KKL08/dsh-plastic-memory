@@ -6,10 +6,12 @@
  * 证据锚悬空降级（H9a 把落盘记录的 sessionId 改成不存在的会话）、真会话下钻（H9b 读回原文）、
  * 当轮锚来自宿主 turnBoundary 投影（H13）、外部直接写进记忆目录的文件出现在新会话第一步的快照消息里（H15）、
  * 宿主 grep 工具搜记忆根目录时顶层命中、.archive/ 不命中（H16）。
- * 有 DEEPSEEK_API_KEY 且宿主能选出默认模型时再跑语义扫描与取消两项，否则标 SKIPPED。
+ * 有 DEEPSEEK_API_KEY 且宿主能选出默认模型时再跑语义扫描与取消两项、以及一次真实的自动体检（H17：无会话、宿主默认模型），否则标 SKIPPED。
  * run.sh 随后用同一个 DSH_HOME 再起一次宿主（HOST_CONTRACT_PHASE=restart）：第一趟把
  * 恢复的记录 id 写进交接文件，第二趟跑 H12，证明恢复结果过了进程重启仍可读；H14 第一趟建持久化会话、
  * 写入完整 AGENTS.md 基线，第二趟照宿主恢复配方重开，证明基线投影过了重启仍在。
+ * 有 key 时 run.sh 再把凭据换成无效 key 起第三趟（HOST_CONTRACT_PHASE=bad-key）跑 H18：宿主报 AUTH，
+ * 扫描结果和体检视图只记 hostCode、不带宿主原话；没有 key 时第一趟把 H18 标 SKIPPED。
  *
  * 只用可擦除的 TypeScript 语法（engines 要求的 Node 22.19+/24 原生 strip-types 直接加载，不需要构建）。
  */
@@ -84,6 +86,27 @@ const H14_PROBE = 'H14 基线探针：重启宿主后 AGENTS.md 基线必须仍�
 /** H14 第一趟的结论随交接文件带到第二趟，由第二趟合成一条结果（整条用例只出一行）。 */
 interface H14Handoff { ok: boolean; skipped?: boolean; detail: string; sessionId?: string }
 
+/** 宿主 commands 服务的最小契约：按整行执行插件命令（同界面发 `/memory …`）。agent 只当作用域键和写命令生命周期事件的会话。 */
+type Commands = {
+  execute(agent: unknown, line: string, attachments: readonly unknown[], signal: AbortSignal): Promise<{ result: { kind: string; text?: string } } | undefined>
+}
+/** 宿主 llm 服务的最小契约：H18 直调一次拿宿主给的原始错误（码与原话），再比对插件的输出里有没有原话。 */
+type LlmService = { stream(req: unknown): AsyncIterable<{ type: string; reason?: { kind: string; failure?: { code?: string; message?: string } } }> }
+type CheckupCauseShape = { kind: string; hostCode?: string; message?: string }
+/** 体检视图里一个范围的最小形状（与 src/gui/contract.ts 的 checkupViewSchema 同步）。 */
+type CheckupScopeShape = {
+  scope: { kind: string; workspacePath?: string }
+  lastCheckupAt: number | null
+  failure: { cause: CheckupCauseShape } | null
+  modelUnavailable: CheckupCauseShape | null
+  lastResult: { by: string; notes: Array<{ code: string }> } | null
+}
+/** 体检视图文件（与 src/gui/contract.ts 的 GUI_VIEW_DIR、GUI_CHECKUP_VIEW_FILE 同步）。 */
+const CHECKUP_VIEW_PATH = ['.state', 'gui', 'checkups.json']
+/** 等自动体检出结果的上限：H17 要真调一次模型，H18 只等一次被拒的请求。 */
+const AUTO_CHECKUP_WAIT_MS = 180_000
+const AUTO_CHECKUP_POLL_MS = 500
+
 /** 第一趟写、第二趟读的交接内容：重启后要重新读取的记录与它所属的 workspace；H14 第一趟的结论与会话 id。 */
 interface Handoff { savedId: string; wsA: string; snapshotId: string | undefined; h14: H14Handoff | undefined }
 
@@ -151,6 +174,102 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       const exec: Exec = { agent: { session, options: {} }, signal: new AbortController().signal }
       const r = await call('memory_scan', { scope: 'all' }, exec) as { kind: string; notes?: Array<{ code: string }> }
       return { kind: r.kind, missing: (r.notes ?? []).some(n => n.code === 'baseline-missing') }
+    }
+
+    // 语义层用例的前提：凭证 + 宿主可选默认模型（agentDefaultModel，自动体检无会话时也用它）
+    const readDefaultModel = (): ModelOpts => {
+      try {
+        const dm = ctx.get('agentDefaultModel') as { currentSelection?: () => ModelOpts } | undefined
+        return dm?.currentSelection?.() ?? {}
+      } catch { return {} /* 无默认模型服务 */ }
+    }
+    const hasKey = !!process.env.DEEPSEEK_API_KEY
+
+    /**
+     * 打开一个项目的自动体检（每天），走界面同一条路：宿主 commands 服务执行 `/memory set-auto-checkup`，
+     * 插件写设置表后立刻重算调度，从没体检过的项目马上到期，后台无会话、用宿主默认模型去查。
+     * 会话只是命令借来写生命周期事件、解析项目的，体检本身不经过它。返回 undefined 表示命令成功，否则是原因。
+     */
+    const enableAutoCheckup = async (workspacePath: string): Promise<string | undefined> => {
+      const commands = ctx.get('commands') as Commands | undefined
+      if (!commands) return '宿主缺 commands 服务'
+      if (!ctx.get('timer')) return '宿主缺 timer 服务（插件的自动体检调度挂在它上面）'
+      const agent = { session: sessions.create(undefined, { meta: { cwd: workspacePath } }), options: {} }
+      const line = `/memory set-auto-checkup ${JSON.stringify({ scope: { kind: 'workspace', workspacePath }, frequency: 1 })}`
+      const r = await commands.execute(agent, line, [], new AbortController().signal)
+      if (r === undefined) return '/memory 命令没有注册'
+      return r.result.kind === 'success' ? undefined : `set-auto-checkup → ${r.result.kind}: ${r.result.text}`
+    }
+    const checkupViewPath = join(memoriesRoot, ...CHECKUP_VIEW_PATH)
+    /** 体检视图里这个项目的那一项；视图还没写出来或正在替换时为 undefined。 */
+    const readCheckupScope = (workspacePath: string): CheckupScopeShape | undefined => {
+      try {
+        const view = JSON.parse(readFileSync(checkupViewPath, 'utf8')) as { scopes: CheckupScopeShape[] }
+        return view.scopes.find(s => s.scope.kind === 'workspace' && s.scope.workspacePath === workspacePath)
+      } catch { return undefined }
+    }
+    /** 等这个项目的自动体检有了结局：做完（lastResult.by === 'auto'）、没做完（failure）或模型用不了（modelUnavailable）。超时返回 undefined。 */
+    const waitAutoCheckup = async (workspacePath: string): Promise<CheckupScopeShape | undefined> => {
+      const deadline = Date.now() + AUTO_CHECKUP_WAIT_MS
+      while (Date.now() < deadline) {
+        const s = readCheckupScope(workspacePath)
+        if (s !== undefined && (s.lastResult?.by === 'auto' || s.failure !== null || s.modelUnavailable !== null)) return s
+        await new Promise(resolve => setTimeout(resolve, AUTO_CHECKUP_POLL_MS))
+      }
+      return undefined
+    }
+    const seedMemories = async (ws: string, label: string) => {
+      for (const [n, c] of [[`${label}-1`, '部署统一跑 deploy.sh'], [`${label}-2`, '单测不 mock 数据库'], [`${label}-3`, '提交信息用英文祈使句']]) {
+        await call('memory_save', { action: 'create', name: n, summary: c, content: c, ...MEMORY_BASE }, mkExec(ws))
+      }
+    }
+
+    if (process.env.HOST_CONTRACT_PHASE === 'bad-key') {
+      // 第三趟（只在有 key 时跑）：run.sh 把同一 DSH_HOME 的凭据换成一个格式合法、但服务端不认的 key。
+      // 宿主把 401 归为 AUTH；它的原话可能回显部分凭据，插件对齐宿主不留原话：
+      // 给模型的扫描结果（memory_scan）和自动体检写的体检视图里，都只有 model-unavailable + hostCode AUTH。
+      await attempt('H18-AUTH-ERROR-MASKED', async () => {
+        const sel = readDefaultModel()
+        if (!sel.provider || !sel.model) return { ok: false, detail: `换成无效 key 后宿主未选出默认模型（agentDefaultModel.currentSelection → ${JSON.stringify(sel)}）` }
+        // 先直调宿主 llm 一次，拿到它给的错误码和原话：前提是宿主确实报 AUTH，原话用来比对插件输出里没有它
+        const llm = ctx.get('llm') as LlmService | undefined
+        if (!llm) return { ok: false, detail: '宿主缺 llm 服务' }
+        let raw: { code?: string; message?: string } = {}
+        try {
+          for await (const chunk of llm.stream({ provider: sel.provider, model: sel.model, system: 'ping', messages: [{ role: 'user', content: [{ type: 'text', text: 'ping' }] }] })) {
+            if (chunk.type === 'finish' && chunk.reason?.kind === 'error') raw = { ...chunk.reason.failure }
+          }
+        } catch (e) {
+          raw = { code: (e as { code?: string }).code, message: e instanceof Error ? e.message : String(e) }
+        }
+        if (raw.code !== 'AUTH') return { ok: false, detail: `前提不成立：无效 key 下宿主报的错误码是 ${raw.code ?? '（无）'}，不是 AUTH` }
+        const rawText = raw.message ?? ''
+        const leaks = (text: string) => rawText !== '' && text.includes(rawText)
+        const isMaskedAuth = (cause: CheckupCauseShape | undefined) => cause?.kind === 'model-error' && cause.hostCode === 'AUTH' && cause.message === undefined
+
+        // memory_scan：语义层被拒，说明码 model-unavailable，原因只带 hostCode
+        const wsD = mkWs('d')
+        await seedMemories(wsD, 'd')
+        const scan = await call('memory_scan', { layers: 'full' }, mkExec(wsD, sel)) as { notes?: Array<{ code: string; cause?: CheckupCauseShape }> }
+        const scanNote = (scan.notes ?? []).find(n => n.code === 'model-unavailable')
+        const scanOk = isMaskedAuth(scanNote?.cause) && !leaks(JSON.stringify(scan))
+
+        // 自动体检：同一个无效 key，体检视图记「模型用不了」，原因只带 hostCode，整份视图里没有原话
+        const wsE = mkWs('e')
+        await seedMemories(wsE, 'e')
+        const enabled = await enableAutoCheckup(wsE)
+        if (enabled !== undefined) return { ok: false, detail: `scan: note=${JSON.stringify(scanNote)} | auto: ${enabled}` }
+        const auto = await waitAutoCheckup(wsE)
+        const viewText = existsSync(checkupViewPath) ? readFileSync(checkupViewPath, 'utf8') : ''
+        const autoOk = auto !== undefined && isMaskedAuth(auto.modelUnavailable ?? undefined) && !leaks(viewText)
+        return {
+          ok: scanOk && autoOk,
+          detail: `raw: code=${raw.code} messageLength=${rawText.length} | scan: note=${JSON.stringify(scanNote)} rawInOutput=${leaks(JSON.stringify(scan))}`
+            + ` | auto: ${auto === undefined ? `${AUTO_CHECKUP_WAIT_MS / 1000}s 内没有结局` : `modelUnavailable=${JSON.stringify(auto.modelUnavailable)} failure=${JSON.stringify(auto.failure)} rawInView=${leaks(viewText)}`}`,
+        }
+      })
+      finish()
+      return
     }
 
     if (process.env.HOST_CONTRACT_PHASE === 'restart') {
@@ -440,12 +559,7 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
     })().catch((e: unknown): H14Handoff => ({ ok: false, detail: `异常: ${e instanceof Error ? e.stack ?? e.message : String(e)}` }))
 
     // 语义层两项：需要凭证 + 宿主可选默认模型
-    let sel: { provider?: string; model?: string } = {}
-    try {
-      const dm = ctx.get('agentDefaultModel') as { currentSelection?: () => { provider?: string; model?: string } } | undefined
-      sel = dm?.currentSelection?.() ?? {}
-    } catch { /* 无默认模型服务 */ }
-    const hasKey = !!process.env.DEEPSEEK_API_KEY
+    const sel = readDefaultModel()
     const llmReady = hasKey && !!sel.provider && !!sel.model
     // 有 key 却选不出默认模型是宿主契约变了（agentDefaultModel 服务改名/消失），必须响亮失败，
     // 不能悄悄 SKIP 让绿色结果少验一段
@@ -476,6 +590,24 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       const codes = (r.notes ?? []).map(n => n.code)
       return { ok: r.kind === 'single' && typeof r.semanticCachedAt === 'number' && !codes.includes('semantic-failed') && !codes.includes('semantic-unavailable'), detail: `kind=${r.kind} cachedAt=${r.semanticCachedAt} notes=${codes.join(',')}` }
     })
+    // 自动体检真跑一次：无会话，模型由插件自己经宿主 agentDefaultModel 选（这里的 sel 只用来判前提），
+    // 和后台定时体检同一条路径（调度器认领范围、全库扫描、写完成记录和最近一次结果），体检视图里记成自动体检做完
+    await attempt('H17-AUTO-CHECKUP-DEFAULT-MODEL', async () => {
+      const gate = semanticGate(); if (gate) return gate
+      const wsC = mkWs('c')
+      await seedMemories(wsC, 'c')
+      const enabled = await enableAutoCheckup(wsC)
+      if (enabled !== undefined) return { ok: false, detail: enabled }
+      const s = await waitAutoCheckup(wsC)
+      if (s === undefined) return { ok: false, detail: `${AUTO_CHECKUP_WAIT_MS / 1000}s 内自动体检没有结局` }
+      const codes = (s.lastResult?.notes ?? []).map(n => n.code)
+      return {
+        ok: s.lastResult?.by === 'auto' && s.lastCheckupAt !== null && s.failure === null && s.modelUnavailable === null && !codes.includes('semantic-failed'),
+        detail: `by=${s.lastResult?.by} lastCheckupAt=${s.lastCheckupAt} failure=${JSON.stringify(s.failure?.cause ?? null)} modelUnavailable=${JSON.stringify(s.modelUnavailable)} notes=${codes.join(',')}`,
+      }
+    })
+    // H18 在第三趟（凭据换成无效 key）跑；没有 key 时第三趟不起，结果在这里标 SKIPPED
+    if (!hasKey) push({ id: 'H18-AUTH-ERROR-MASKED', ok: true, skipped: true, detail: 'SKIPPED: 无 DEEPSEEK_API_KEY' })
     // 交接给第二趟（重启验证）：恢复过的记录 id、它的 workspace、H7 拍的快照 id
     if (handoffPath) writeFileSync(handoffPath, JSON.stringify({ savedId, wsA, snapshotId, h14 } satisfies Handoff))
   } catch (e) {

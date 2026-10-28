@@ -3,6 +3,7 @@ import { kindOf, type PendingDecisionsStore } from '../governance/decisions.ts'
 import type { KvTable } from '../kv-table.ts'
 import type { ScanCacheEntry } from '../governance/schema.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
+import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import { layerCacheKey, type LayerPreread, type LayerRef } from '../governance/layer-health.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { dirname, join } from 'node:path'
@@ -15,10 +16,11 @@ import { resolveDuplicates, resolveLiveFirst, type DirectoryNote, type LocatedRe
  * 缓存过滤要核对记录是否存活。层外的引用（取代链与语义缓存里指向其他层的 id，如提升到 global 后
  * global 记录的 supersedes 指向 workspace 旧条）按 id 两级定位，不整库预读。
  * 隔离条目按读到它的层归档（malformed 按所在目录归层）；同 id 多文件按取舍规则留一份（active 副本优先），其余副本报目录级说明、不删。
- * 另取待决账本里的全部未决冲突、语义缓存全部条目、建议忽略表全部记录（缺省没有忽略表，按没有忽略算）。
+ * 另取待决账本里的全部未决冲突、语义缓存全部条目、建议忽略表全部记录（缺省没有忽略表，按没有忽略算）、
+ * 体检记录表全部记录（缺省按没有完成记录算，上次体检取缓存时间）。
  */
 export async function prereadLayers(
-  deps: { store: MemoryStore; decisions: PendingDecisionsStore; cache: KvTable<ScanCacheEntry>; ignores?: Pick<AdviceIgnoreStore, 'list'> },
+  deps: { store: MemoryStore; decisions: PendingDecisionsStore; cache: KvTable<ScanCacheEntry>; ignores?: Pick<AdviceIgnoreStore, 'list'>; checkups?: Pick<CheckupRecordStore, 'list'> },
   layers: readonly LayerRef[],
   /** 当前 workspace：同 id 取舍与跨层定位的提示。 */
   workspacePath?: string,
@@ -65,7 +67,8 @@ export async function prereadLayers(
   }
 
   const ignores = (await deps.ignores?.list()) ?? []
-  return { byId, filePaths, pending, cache, quarantined, directoryNotes, shadowedDeleted, ignores }
+  const checkups = new Map(((await deps.checkups?.list()) ?? []).map(r => [r.id, r]))
+  return { byId, filePaths, pending, cache, quarantined, directoryNotes, shadowedDeleted, ignores, checkups }
 }
 
 /** 记忆文件路径与注入同口径（exposedPath）：name 含密钥的那份只给所在目录、文件名换成占位，其余路径遮一遍。 */

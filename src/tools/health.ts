@@ -10,6 +10,9 @@ import type { HealthThresholds } from '../governance/health-presets.ts'
 import { runRuleScan } from '../governance/rule-scan.ts'
 import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, checkupRowBase, ignoredNote, type LayerRef, TIER_LABEL } from '../governance/layer-health.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
+import type { CheckupRecordStore } from '../governance/checkup-records.ts'
+import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
+import { resolveAutoCheckup } from '../gui/contract.ts'
 import type { DirectoryNote } from '../storage/table.ts'
 import { prereadLayers, listingNotes, checkupWorkspaces, renderDirectoryNotes } from './layer-preread.ts'
 import { decisionWorkspaces, decisionWorkspacesNote } from './workspace-gate.ts'
@@ -26,6 +29,10 @@ export interface HealthToolDeps {
   cache: KvTable<ScanCacheEntry>
   /** 建议忽略表：被用户忽略的建议不扣分（与记忆页同口径）。缺省按没有忽略算。 */
   ignores?: Pick<AdviceIgnoreStore, 'list'>
+  /** 体检记录表：上次体检取它的完成记录。缺省按没有完成记录算（取语义缓存的时间）。 */
+  checkups?: Pick<CheckupRecordStore, 'list'>
+  /** 自动体检设置表：自动体检开着的范围不提醒语义扫描过旧（插件会按时自己查）。缺省按全部仅手动算。 */
+  autoCheckups?: Pick<AutoCheckupSettingStore, 'read'>
   /** 触发阈值（由 index.ts 从 sensitivity 预设解析后注入）。 */
   thresholds: HealthThresholds
   /** 当前会话的 workspace（默认口径"当前项目"的来源）。 */
@@ -82,6 +89,7 @@ export interface CheckupRow {
   score: number
   tier: 'green' | 'amber' | 'red'
   gate: { secret: boolean }
+  /** 上次体检（完成记录；升级前体检过、还没有完成记录的取语义缓存时间）。 */
   semanticCachedAt: number | null
   promoteCandidates: number
   /** 供表格"主要问题"列：非零的问题类计数。 */
@@ -176,7 +184,7 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
     const scored = layers.map(l => scoreLayer(deps, data, l, now))
     const rows: CheckupRow[] = scored.map(r => ({
       ...checkupRowBase(r),
-      semanticCachedAt: r.semanticCachedAt,
+      semanticCachedAt: r.lastCheckupAt,
       promoteCandidates: r.promoteCandidates,
     }))
 
@@ -207,9 +215,14 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
   // 单层：目标层 + global（workspace 视图要兜住 global 层的密钥，待决项也看 global 一侧）
   const data = await prereadLayers(deps, layer.kind === 'workspace' ? [layer, { kind: 'global' }] : [layer], wsPath)
   const scored = scoreLayer(deps, data, layer, now)
-  const { health, records, semanticCachedAt } = scored
+  const { health, records } = scored
   const globalActive = [...data.byId.values()].filter(r => r.status === 'active' && r.scope === 'global')
-  const cachedAt = semanticCachedAt
+  // 语义部分的时间按上次体检算（完成记录），不按缓存
+  const cachedAt = scored.lastCheckupAt
+  // 这个范围开着自动体检：插件会按时自己查，不再提醒「语义扫描已是 N 天前」
+  const isAutoCheckup = deps.autoCheckups !== undefined
+    && resolveAutoCheckup(await deps.autoCheckups.read(), layer.kind === 'global' ? { kind: 'global' } : { kind: 'workspace', workspacePath: layer.path }).frequency !== 'manual'
+  const isSemanticStale = cachedAt !== null && !isAutoCheckup && now - cachedAt > th.scanStaleDays * DAY
 
   // workspace 视图必须兜住 global 层的密钥——它在本会话同样生效，但归属（与修复责任）在 global 层，
   // 不计本层分数，走报警 + recommendation 置顶
@@ -248,9 +261,9 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
     if (overflow !== null) recommendationKinds.push('budget-overflow')
     if (overflow !== null) actions.push(`${overflow.summary}（不扣分），建议整理记忆或调高 snapshotTokenBudget`)
     if (cachedAt === null) recommendationKinds.push('semantic-never-scanned')
-    else if (now - cachedAt > th.scanStaleDays * DAY) recommendationKinds.push('semantic-stale')
+    else if (isSemanticStale) recommendationKinds.push('semantic-stale')
     if (cachedAt === null) actions.push('尚未做过语义扫描，建议首次运行 memory_scan')
-    else if (now - cachedAt > th.scanStaleDays * DAY) actions.push(`语义扫描已是 ${Math.floor((now - cachedAt) / DAY)} 天前，建议重新运行 memory_scan`)
+    else if (isSemanticStale) actions.push(`语义扫描已是 ${Math.floor((now - cachedAt) / DAY)} 天前，建议重新运行 memory_scan`)
     if (health.freshness.staleCount > 0) recommendationKinds.push('freshness-stale')
     if (health.freshness.staleCount > 0) actions.push(`${health.freshness.staleCount} 条记忆超过衰退期，建议用 memory_confirm 确认或更新`)
     if (health.score < th.actionScoreThreshold) recommendationKinds.push('score-below-threshold')
