@@ -38,6 +38,32 @@ describe('apply', () => {
     expect(register).toHaveBeenCalledWith(NS, { zh, en })
   })
 
+  it('停用再启用（同一页面里卸载后重新 apply）：字典随插件卸载撤掉，第二次 apply 照常注册', () => {
+    // 宿主 locale 同一命名空间同一语言只许一个占用者，重复注册抛错；register 返回的撤销函数要由插件自己挂到 effect 上
+    const owned = new Set<string>()
+    const register = vi.fn((ns: string, dicts: Record<string, Record<string, string>>) => {
+      const keys = Object.keys(dicts).map(lang => `${ns}/${lang}`)
+      for (const key of keys) if (owned.has(key)) throw new Error(`locale namespace "${ns}" already has locale "${key}"`)
+      for (const key of keys) owned.add(key)
+      return () => { for (const key of keys) owned.delete(key) }
+    })
+    const lifecycle = () => {
+      const disposers: Array<() => void> = []
+      const ctx = fakeHostContext({
+        effect: (execute: () => () => void) => { disposers.push(execute()) },
+        locale: { register, bind: () => createTranslator(zh) as (key: string) => string, getSnapshot: () => 0, subscribe: () => () => {} },
+      })
+      return { ctx, dispose: () => { for (const dispose of disposers.splice(0).reverse()) dispose() } }
+    }
+    const first = lifecycle()
+    apply(first.ctx)
+    first.dispose()
+    expect(owned.size).toBe(0)
+    const second = lifecycle()
+    expect(() => apply(second.ctx)).not.toThrow()
+    expect(register).toHaveBeenCalledTimes(2)
+  })
+
   it('右侧栏、插件页导航、配置表单是可选服务，不进 inject（缺了插件照常加载）', () => {
     for (const service of ['sidebarRight', 'sidebarRightTabs', 'pluginNavigation', 'configForms']) expect(inject).not.toContain(service)
   })
