@@ -103,7 +103,7 @@ describe('assembleSnapshot：按作用域分段的 token', () => {
     const r = assembleSnapshot({ ...base, records: [g, w], budget: 4000 })
     expect(r.tokens.global).toBe(estimateTokens(formatIndexLine(g, { passive: false, note: '' })))
     expect(r.tokens.workspace).toBe(estimateTokens(formatIndexLine(w, { passive: false, note: '' })))
-    const tail = estimateTokens('\n看全文：用 memory_search 按 id 或关键词查。') + estimateTokens(`\n${MEMORY_AS_DATA_NOTE}`)
+    const tail = estimateTokens('\n看记忆全文：用 memory_search 按 id 或关键词查。') + estimateTokens(`\n${MEMORY_AS_DATA_NOTE}`)
     expect(r.tokens.workspace + r.tokens.global + r.tokens.fixed).toBe(r.usedTokens + estimateTokens(`\n> ${COMPACTION_ENGINE_NOTE}\n`) + tail + SUPERSEDE_TOKENS)
     expect(r.injectedIds.sort()).toEqual(['mem_g', 'mem_w'])
   })
