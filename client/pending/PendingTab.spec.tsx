@@ -930,25 +930,24 @@ describe('待处理：可以整理', () => {
     ])
   })
 
-  it('建议卡的删除（单条「删除」、成对的「删除左边 / 删除右边」）：第一下不发命令，原位换成「删除这条？ 删除 · 取消」；「取消」、Esc 都收起，什么都不发', async () => {
+  // 三个场景各自一例：合在一个用例里单例耗时贴着 5 秒上限
+  it.each([
+    ['删除', () => cardOf('已过有效期')],
+    ['删除左边', () => within(cardOf('内容重复')).getByRole('region', { name: '左边这条' })],
+    ['删除右边', () => within(cardOf('内容重复')).getByRole('region', { name: '右边这条' })],
+  ] as const)('建议卡的「%s」：第一下不发命令，原位换成「删除这条？ 删除 · 取消」；「取消」、Esc 都收起，什么都不发', (name, scopeOf) => {
     const { commands } = setup([expired, pair])
-    const cases = [
-      { scope: cardOf('已过有效期'), name: '删除' },
-      { scope: within(cardOf('内容重复')).getByRole('region', { name: '左边这条' }), name: '删除左边' },
-      { scope: within(cardOf('内容重复')).getByRole('region', { name: '右边这条' }), name: '删除右边' },
-    ]
-    for (const { scope, name } of cases) {
-      fireEvent.click(within(scope).getByRole('button', { name }))
-      const confirm = within(within(scope).getByRole('group', { name: '删除这条？' }))
-      expect(confirm.getAllByRole('button').map(b => b.textContent)).toEqual(['删除', '取消'])
-      expect(confirm.getByRole('button', { name: '取消' })).toHaveFocus()
-      fireEvent.click(confirm.getByRole('button', { name: '取消' }))
-      expect(within(scope).queryByRole('group', { name: '删除这条？' })).toBeNull()
-      fireEvent.click(within(scope).getByRole('button', { name }))
-      fireEvent.keyDown(within(scope).getByRole('button', { name: '取消' }), { key: 'Escape' })
-      expect(within(scope).queryByRole('group', { name: '删除这条？' })).toBeNull()
-      expect(within(scope).getByRole('button', { name })).toBeInTheDocument()
-    }
+    const scope = scopeOf()
+    fireEvent.click(within(scope).getByRole('button', { name }))
+    const confirm = within(within(scope).getByRole('group', { name: '删除这条？' }))
+    expect(confirm.getAllByRole('button').map(b => b.textContent)).toEqual(['删除', '取消'])
+    expect(confirm.getByRole('button', { name: '取消' })).toHaveFocus()
+    fireEvent.click(confirm.getByRole('button', { name: '取消' }))
+    expect(within(scope).queryByRole('group', { name: '删除这条？' })).toBeNull()
+    fireEvent.click(within(scope).getByRole('button', { name }))
+    fireEvent.keyDown(within(scope).getByRole('button', { name: '取消' }), { key: 'Escape' })
+    expect(within(scope).queryByRole('group', { name: '删除这条？' })).toBeNull()
+    expect(within(scope).getByRole('button', { name })).toBeInTheDocument()
     expect(commands()).toEqual([])
   })
 
