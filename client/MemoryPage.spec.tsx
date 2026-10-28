@@ -84,6 +84,20 @@ describe('左栏范围', () => {
     ])
   })
 
+  it('一个项目都没有：「全部」的副行、标题行和状态条都写「只有全局」，不写「0 个项目」', () => {
+    const globalOnly = {
+      pending: { ...pending, dot: 'none' as const, items: [], levelCounts: levelCountsOf([]) },
+      library: { ...library, layers: [{ layer: GLOBAL, items: [g1] }] },
+      deleted: { ...deleted, items: [] },
+      health: { ...health, layers: [healthLayer(GLOBAL, 85, 'green')] },
+    }
+    open({ view: 'todo', scope: { kind: 'all' } }, createFakeGateway({ views: globalOnly }))
+    expect(rowParts(railRow('全部')).sub).toBe('只有全局')
+    expect(document.querySelector('.pm-head-title')!.parentElement).toHaveTextContent('只有全局')
+    expect(screen.getByRole('region', { name: '记忆状况' })).toHaveTextContent('只有全局，共 1 条记忆')
+    expect(document.body).not.toHaveTextContent('0 个项目')
+  })
+
   it('配置文件关掉体检：副行只写条数，不写分数', () => {
     open({ view: 'todo' }, createFakeGateway({ currentWorkspace: '/w/app', views: { ...views, health: { ...health, governanceEnabled: false } } }))
     expect(rail().getAllByRole('button').map(b => rowParts(b).sub)).toEqual([
@@ -231,10 +245,10 @@ describe('视图切换与按范围筛选', () => {
 
   it('换范围：上一个范围刚处理的结果卡不跟过来，也不写「都处理完了」', async () => {
     open({ view: 'todo', scope: GLOBAL })
-    fireEvent.click(within(panel()).getByRole('button', { name: '忽略' }))
-    await within(panel()).findByText('已忽略')
+    fireEvent.click(within(panel()).getByRole('button', { name: '不再提醒' }))
+    await within(panel()).findByText('不再扣分；内容改了会重新提醒。')
     fireEvent.click(railRow('blog'))
-    expect(within(panel()).queryByText('已忽略')).toBeNull()
+    expect(within(panel()).queryByText('不再扣分；内容改了会重新提醒。')).toBeNull()
     expect(within(panel()).queryByRole('button', { name: '撤销' })).toBeNull()
     expect(within(panel()).queryByText('都处理完了，agent 之后按你的决定来。')).toBeNull()
   })

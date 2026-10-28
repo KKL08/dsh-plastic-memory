@@ -1,9 +1,9 @@
 /**
  * 状态标记（DESIGN.md「Status Marker」）：琥珀圆点 = 等你决定；红色小三角 = 有密钥（换形状照顾色弱）；
- * 绿色小圆点 = 运行中 / 良好；红色小圆点只给分数「有问题」那一档（分数旁的分档圆点：良好绿、需要留意琥珀、有问题红）。琥珀对白底只有 2.15:1，所以调用方要在同一行写清状态文字；
+ * 绿色小圆点 = 运行中 / 良好；标注灰圆点 = 处理视图里已处理的条目；红色小圆点只给分数「有问题」那一档（分数旁的分档圆点：良好绿、需要留意琥珀、有问题红）。琥珀对白底只有 2.15:1，所以调用方要在同一行写清状态文字；
  * 传 label 时标记自己也带无障碍名称，不传则只是装饰。左栏图标上的抠洞版本在 MemoryIcon.tsx。
  */
-export type MarkerKind = 'pending' | 'secret' | 'ok' | 'error'
+export type MarkerKind = 'pending' | 'secret' | 'ok' | 'error' | 'done'
 
 export function StatusMarker({ kind, size = 'page', label }: { kind: MarkerKind; size?: 'nav' | 'page'; label?: string }) {
   const a11y = label === undefined ? { 'aria-hidden': true } : { role: 'img', 'aria-label': label }
@@ -26,4 +26,5 @@ export const statusMarkerCss = `
 .pm-marker--pending { background: var(--pm-warn); }
 .pm-marker--ok { background: var(--pm-success); }
 .pm-marker--error { background: var(--pm-error); }
+.pm-marker--done { background: var(--pm-caption); }
 `

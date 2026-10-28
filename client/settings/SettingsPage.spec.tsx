@@ -134,7 +134,7 @@ describe('三组设置的渲染', () => {
     expect(screen.getByRole('status')).toHaveTextContent('正在读取配置…')
     unmount()
     renderInShell(<SettingsPage form={createFakeConfigForm({ status: 'unavailable' })} onOpenMemoryPage={() => {}} />)
-    expect(screen.getByText('宿主暂时没有提供这份配置。')).toBeInTheDocument()
+    expect(screen.getByText('DeepSeek Harness 暂时没有提供这份配置。')).toBeInTheDocument()
   })
 })
 
@@ -514,7 +514,7 @@ describe('记忆文件位置「在访达中显示」', () => {
     renderInShell(<SettingsPage form={createFakeConfigForm()} onOpenMemoryPage={() => {}} now={NOW} />, gateway)
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '在访达中显示' })) })
     expect(gateway.opened).toEqual([{ path: '/home/me/.dsh/memories', action: 'reveal' }])
-    expect(screen.getByText('没能打开，宿主拒绝了这个路径。')).toBeInTheDocument()
+    expect(screen.getByText('没能打开，DeepSeek Harness 拒绝了这个路径。')).toBeInTheDocument()
   })
 
   it('还不知道路径时没有这个按钮', () => {

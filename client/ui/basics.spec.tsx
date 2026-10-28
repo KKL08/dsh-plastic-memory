@@ -1,9 +1,10 @@
-// 小组件的渲染测试：按钮、状态标记、chip、体检横幅、空状态。
+// 小组件的渲染测试：按钮、不再提醒的叉、状态标记、chip、体检横幅、空状态。
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, screen } from '@testing-library/react'
 import { Button, buttonCss } from './Button.tsx'
 import { themeCss } from './theme.ts'
 import { Chip } from './Chip.tsx'
+import { DismissButton } from './DismissButton.tsx'
 import { EmptyState } from './EmptyState.tsx'
 import { HealthBanner } from './HealthBanner.tsx'
 import { StatusMarker } from './StatusMarker.tsx'
@@ -35,6 +36,30 @@ describe('Button', () => {
     rerender(<Button onClick={onClick}>体检</Button>)
     fireEvent.click(screen.getByRole('button', { name: '体检' }))
     expect(onClick).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('DismissButton', () => {
+  it('读屏名称是展开后的字，叉本身不念；点击回调', () => {
+    const onClick = vi.fn()
+    renderInShell(<DismissButton label="不再提醒" onClick={onClick} />)
+    const button = screen.getByRole('button', { name: '不再提醒' })
+    expect(button).toHaveClass('pm-dismiss')
+    expect(button.querySelector('.pm-dismiss-label')).toHaveAttribute('aria-hidden', 'true')
+    expect(button).not.toHaveAttribute('aria-disabled')
+    fireEvent.click(button)
+    expect(onClick).toHaveBeenCalledTimes(1)
+  })
+
+  it('unavailable：aria-disabled + 提示，仍可聚焦，点击被吞', () => {
+    const onClick = vi.fn()
+    renderInShell(<DismissButton label="不再提醒" unavailable="正在处理上一步" onClick={onClick} />)
+    const button = screen.getByRole('button', { name: '不再提醒' })
+    expect(button).toHaveAttribute('aria-disabled', 'true')
+    expect(button).toHaveAttribute('title', '正在处理上一步')
+    expect(button).toBeEnabled()
+    fireEvent.click(button)
+    expect(onClick).not.toHaveBeenCalled()
   })
 })
 

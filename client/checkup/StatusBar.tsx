@@ -16,7 +16,7 @@ import {
 } from '../../src/gui/contract.ts'
 import { baseName, formatDay, formatDayTime, formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
-import { scopeName, type MemoryView, type NavStore, type NewItemJump, type PageScope } from '../nav.ts'
+import { allScopesSub, scopeName, type MemoryView, type NavStore, type NewItemJump, type PageScope } from '../nav.ts'
 import { StatusMarker, type MarkerKind } from '../ui/StatusMarker.tsx'
 import type { CheckupRuns, RunFailure } from './runs.ts'
 import { checkupResults, isResultSeen, markSeen, type Seen, type SeenMark } from './seen.ts'
@@ -115,7 +115,7 @@ export function StatusBar({ scope, view, nav, runs, seen, health, checkups, isGo
   const now = Date.now()
   const count = t(memoryCount === 1 ? 'checkup.status.count.one' : 'checkup.status.count', { n: formatNumber(memoryCount) })
   const allCount = () => t(memoryCount === 1 ? 'checkup.status.all.count.one' : 'checkup.status.all.count', {
-    scopes: t(projectCount === 1 ? 'scope.all.sub.one' : 'scope.all.sub', { n: formatNumber(projectCount) }),
+    scopes: allScopesSub(projectCount, t),
     n: formatNumber(memoryCount),
   })
 
@@ -177,8 +177,10 @@ function ScopeStatus({ layer, entry, count, now, result }: {
     )
   }
   const deductions = layer === undefined ? [] : DEDUCTIONS.filter(d => layer.deductions[d].points > 0)
+  // 首行没有标记（还没打分）时，下面几行不缩进去对一个不存在的标记
+  const isPlain = score !== 'secret' && (score === undefined || layer === undefined)
   return (
-    <section className="pm-status" aria-label={t('status.label')}>
+    <section className={isPlain ? 'pm-status pm-status--plain' : 'pm-status'} aria-label={t('status.label')}>
       <p className="pm-status-line">
         {score === 'secret'
           ? (
@@ -398,6 +400,7 @@ export const statusBarCss = `
 }
 .pm-status-why:hover { color: var(--pm-text); }
 .pm-status-why[aria-expanded='true'] svg { transform: rotate(180deg); }
+.pm-status--plain :is(.pm-status-meta, .pm-status-result) { padding-left: 0; }
 .pm-status-deductions { list-style: none; display: flex; flex-direction: column; gap: 2px; margin-left: 22px; padding: 6px 0 0; border-top: .5px solid var(--pm-line); }
 .pm-status-result { display: flex; flex-direction: column; gap: 2px; color: var(--pm-text); }
 /* 结果行一直在 DOM 里（aria-live 要先在场），空着时不占状态条的行距 */
