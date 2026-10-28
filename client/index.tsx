@@ -45,7 +45,8 @@ function createNavIcon(bind: BindGateway) {
 }
 
 export function apply(ctx: HostContext): void {
-  ctx.locale.register(NS, { zh, en })
+  // 字典登记在宿主 locale 服务上，不随本插件卸载：撤销函数挂进 effect，停用再启用时第二次 apply 才不会撞上旧字典
+  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'plastic-memory: dictionaries')
   const t = ctx.locale.bind(NS)
   const nav = createNavStore()
   // 宿主有插件页导航才有「设置」

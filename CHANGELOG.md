@@ -30,6 +30,10 @@ All notable changes to this project are documented here. The format follows
   rewritten.
 
 ### Fixed
+- Turning plastic-memory off and back on in the plugin page left its
+  interface missing (the Memory entry in the left sidebar, the right sidebar
+  tab, the composer button and the settings card) until the app restarted.
+  The interface now comes back as soon as the plugin is turned on again.
 - After a compaction on DeepSeek Harness 0.2.1-rc.2, the step that compacted
   injected the old snapshot again and the next step added the fresh one,
   leaving two snapshots in the conversation. The snapshot is now rebuilt in
