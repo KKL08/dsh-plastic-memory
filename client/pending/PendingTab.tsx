@@ -4,8 +4,8 @@
  * 撤销成功后等视图把条目带回来，再去掉本地那张。离开页面、换范围就收起。
  * 动作碰上这一条正在别处处理或刚处理完（什么都没动）：在原位留一行说明，那边的结果写进视图、卡片消失后也还在，
  * 列表空了就留在空状态上面；之后哪张卡做成了一件事就收起。
- * 留下的只剩结果卡时，组上方写「都处理完了」。「可以整理」组底部是这个范围的「已忽略 N 条」，展开逐条取消忽略。
- * 空状态两种：配置文件关掉体检（写明在配置文件里改，界面上不提供打开）、三组都空（写上次体检时间，不放体检按钮）；已忽略那一行跟在空状态下面。
+ * 留下的只剩结果卡时，组上方写「都处理完了」。「可以整理」组底部是这个范围的「不再提醒的 N 条」，展开逐条恢复提醒。
+ * 空状态两种：配置文件关掉体检（写明在配置文件里改，界面上不提供打开）、三组都空（写上次体检时间，不放体检按钮）；「不再提醒的 N 条」那一行跟在空状态下面。
  * 入口带记忆 id 打开时，含这条记忆的卡（冲突任一方、提升候选、密钥）滚入视野并高亮一次。
  * 带组标识进来时（健康页「去处理 ›」）焦点落在那一组的标题上，组已不在（处理完了）落在待处理顶部；每次导航只定位一次。
  * 「新」：最近一次界面手动或自动体检新增、这一趟进来时还没显示过的条目，标题后带「新」、排在组内最前（记录见 checkup/seen.ts）。
@@ -363,7 +363,7 @@ function PendingGroup({ level, count, children }: { level: PendingLevel; count: 
 
 type IgnoredItem = HealthView['layers'][number]['ignored'][number]
 
-/** 已忽略的一条：问题类型 · 记忆名（「全部」里带范围胶囊），「取消忽略」发 unignore-advice；成功后视图重写，这一条随之消失。 */
+/** 不再提醒的一条：问题类型 · 记忆名（「全部」里带范围胶囊），「恢复提醒」发 unignore-advice；成功后视图重写，这一条随之消失。 */
 function IgnoredRow({ item, scopeName, session }: { item: IgnoredItem; scopeName: string | undefined; session: BorrowedSession }) {
   const t = useT()
   const action = useItemAction(session, () => {})
@@ -384,7 +384,7 @@ function IgnoredRow({ item, scopeName, session }: { item: IgnoredItem; scopeName
   )
 }
 
-/** 「已忽略 N 条 查看 ⌄」：默认收起，展开逐条列出。数据取健康视图里这个范围各层的已忽略。 */
+/** 「不再提醒的 N 条 查看 ⌄」：默认收起，展开逐条列出。数据取健康视图里这个范围各层的已忽略。 */
 function Ignored({ entries, session }: { entries: ReadonlyArray<{ item: IgnoredItem; scopeName: string | undefined }>; session: BorrowedSession }) {
   const t = useT()
   const [isOpen, setOpen] = useState(false)
@@ -480,11 +480,15 @@ export const pendingCss = crossConfirmCss + editCss + modelEditCss + moveCss + `
 .pm-pending-row.pm-flash { margin-inline: -12px; padding-inline: 12px; border-radius: 10px; }
 .pm-pending-row.pm-flash::before { left: 2px; }
 .pm-pending-item { padding: 16px 0 18px; }
-.pm-pending-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.pm-pending-head { display: flex; align-items: center; gap: 8px; min-height: 24px; margin-bottom: 12px; }
+/* 标记列 14px（密钥三角的宽度）：圆点、三角、灰点的标题都从 22px 起，和状态条的缩进一致 */
+.pm-pending-mark { display: inline-flex; justify-content: center; flex: 0 0 14px; }
 .pm-pending-title { margin: 0; flex: 0 1 auto; min-width: 0; font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
-.pm-pending-aside { margin-left: auto; }
+/* 标题折成两行时叉仍在右上角 */
+.pm-pending-aside { position: relative; flex: 0 0 24px; align-self: flex-start; height: 24px; margin-left: auto; }
 .pm-pending-scope { display: inline-flex; }
 .pm-pending-body { display: flex; flex-direction: column; gap: 10px; padding-left: 16px; }
+.pm-pending-item--marked .pm-pending-body { padding-left: 22px; }
 .pm-pending-hint { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-pending-hint .pm-link { margin-left: 8px; font-size: 12px; }
 .pm-pending-error { margin: 6px 0 0; font-size: 12px; line-height: 1.5; color: var(--pm-text); }

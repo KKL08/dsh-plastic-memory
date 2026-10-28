@@ -65,7 +65,7 @@ export function ConflictRuling(props: ConflictRulingProps) {
   return (
     <article className={`pm-conflict pm-conflict--${props.layout}`}>
       <header className="pm-conflict-head">
-        <StatusMarker kind="pending" />
+        <span className="pm-conflict-mark"><StatusMarker kind="pending" /></span>
         <h3 className="pm-conflict-title">{props.title ?? t('conflict.title')}</h3>
         {props.headExtra}
       </header>
@@ -115,7 +115,7 @@ export function VerticalConflictRuling(props: VerticalConflictRulingProps) {
   return (
     <article className={`pm-conflict pm-conflict--${props.layout} pm-conflict--vertical`}>
       <header className="pm-conflict-head">
-        <StatusMarker kind="pending" />
+        <span className="pm-conflict-mark"><StatusMarker kind="pending" /></span>
         <h3 className="pm-conflict-title">{props.title ?? t('conflict.vertical.title')}</h3>
         {props.headExtra}
       </header>
@@ -138,10 +138,14 @@ export function VerticalConflictRuling(props: VerticalConflictRulingProps) {
 export const conflictRulingCss = `
 .pm-conflict { padding-bottom: 18px; }
 .pm-conflict-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+/* 记忆页（宽版）的标记列和处理视图其他卡片一样 14px，标题和下面各段都从 22px 起；侧栏窄版不变 */
+.pm-conflict-mark { display: inline-flex; }
+.pm-conflict--wide .pm-conflict-mark { justify-content: center; flex: 0 0 14px; }
+.pm-conflict--wide .pm-conflict-note { margin-left: 22px; }
 .pm-conflict-title { margin: 0; font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
 .pm-conflict-note { margin: -6px 0 12px 16px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-conflict-sides { display: flex; flex-direction: column; gap: 12px; }
-.pm-conflict--wide .pm-conflict-sides { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; padding-left: 16px; }
+.pm-conflict--wide .pm-conflict-sides { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; padding-left: 22px; }
 .pm-conflict-side { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
 .pm-conflict-body { display: flex; flex-direction: column; gap: 10px; flex: 1; min-width: 0; }
 .pm-conflict-missing { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
@@ -153,7 +157,7 @@ export const conflictRulingCss = `
 .pm-conflict--wide .pm-conflict-side { align-items: stretch; padding: 12px 14px; border: .5px solid var(--pm-line-card); border-radius: var(--dsw-radius-lg, 16px); }
 .pm-conflict-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: auto; }
 .pm-conflict-loses { min-width: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
-.pm-conflict-row { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 12px; padding-left: 16px; }
+.pm-conflict-row { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 12px; padding-left: 22px; }
 .pm-conflict-hint { flex: 1; min-width: 0; margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 /* A / B 改成上下排：记忆页窄屏（pm-page 720px 以下），或主区（pm-main，不含左栏）内容宽 640px 以下。
    并排时每边至少约 300px，放得下「以 A 为准」和「B 会删掉，14 天内可恢复」 */
@@ -162,8 +166,8 @@ export const conflictRulingCss = `
 .pm-conflict-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .pm-conflict-consequence { margin: 6px 0 0; font-size: 12px; line-height: 1.6; color: var(--pm-text-2); }
 .pm-conflict-single { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.pm-conflict--wide .pm-conflict-single { padding-left: 16px; }
+.pm-conflict--wide .pm-conflict-single { padding-left: 22px; }
 .pm-conflict-baseline { margin: 0; padding-left: 14px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); overflow-wrap: anywhere; }
 .pm-conflict--vertical.pm-conflict--wide .pm-conflict-buttons { justify-content: flex-end; }
-.pm-conflict--vertical.pm-conflict--wide .pm-conflict-consequence { padding-left: 16px; }
+.pm-conflict--vertical.pm-conflict--wide .pm-conflict-consequence { padding-left: 22px; }
 `

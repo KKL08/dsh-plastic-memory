@@ -10,7 +10,7 @@ describe('ConflictRuling', () => {
   it('标题带琥珀圆点，A / B 各一张记忆卡', () => {
     const { container } = renderInShell(<ConflictRuling layout="narrow" left={left} right={right} now={NOW} onRule={() => {}} />)
     expect(screen.getByRole('heading', { name: '两条记忆互相矛盾，等你决定' })).toBeInTheDocument()
-    expect(container.querySelector('.pm-conflict-head .pm-marker--pending')).not.toBeNull()
+    expect(container.querySelector('.pm-conflict-head > .pm-conflict-mark > .pm-marker--pending')).not.toBeNull()
     expect(within(screen.getByRole('region', { name: '记忆 A' })).getByText('测试用真实 Postgres。')).toBeInTheDocument()
     expect(within(screen.getByRole('region', { name: '记忆 B' })).getByText('测试里 mock 数据库就行。')).toBeInTheDocument()
   })
@@ -75,7 +75,7 @@ describe('VerticalConflictRuling', () => {
     const onRule = vi.fn()
     const { container } = renderInShell(<VerticalConflictRuling layout="narrow" memory={left} baselineRef="AGENTS.md：用 pnpm" now={NOW} onRule={onRule} />)
     expect(screen.getByRole('heading', { name: '这条记忆和基线矛盾，等你决定' })).toBeInTheDocument()
-    expect(container.querySelector('.pm-conflict-head .pm-marker--pending')).not.toBeNull()
+    expect(container.querySelector('.pm-conflict-head > .pm-conflict-mark > .pm-marker--pending')).not.toBeNull()
     expect(screen.getByText('AGENTS.md 是基线，不会被删除。')).toBeInTheDocument()
     expect(screen.getByText('基线：AGENTS.md：用 pnpm')).toBeInTheDocument()
     expect(screen.getByText('测试用真实 Postgres。')).toBeInTheDocument()
