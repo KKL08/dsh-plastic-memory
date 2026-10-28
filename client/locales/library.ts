@@ -40,12 +40,12 @@ export const libraryZh = {
   'deleted.hardDelete': '彻底删除…',
   'deleted.hardDeleteConfirm': '现在就彻底删除这条记忆？删除后不能恢复，以前快照里的副本也一起抹掉。',
   'deleted.hardDeleted': '已彻底删除。',
-  'deleted.empty.title': '最近删除为空',
+  'deleted.empty.title': '最近没有删除过记忆',
   'deleted.empty.body': '删除的记忆在这里保留 14 天，期间可以恢复，之后彻底清除。含密钥的记忆删除时直接抹掉，不进这里。',
 
   'action.busy': '正在处理…',
   'action.failed': '没有成功：{detail}',
-  'action.openFailed': '没能打开，宿主拒绝了这个路径。',
+  'action.openFailed': '没能打开，DeepSeek Harness 拒绝了这个路径。',
 } as const
 
 export const libraryEn: Record<keyof typeof libraryZh, string> = {
@@ -93,5 +93,5 @@ export const libraryEn: Record<keyof typeof libraryZh, string> = {
 
   'action.busy': 'Working…',
   'action.failed': 'Did not work: {detail}',
-  'action.openFailed': 'Could not open it; the host refused this path.',
+  'action.openFailed': 'Could not open it; DeepSeek Harness refused this path.',
 }

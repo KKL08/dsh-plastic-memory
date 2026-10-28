@@ -6,7 +6,7 @@
 import { useSyncExternalStore } from 'react'
 import { sameLayer, type GuiLayerRef, type PendingLevel, type ScopeRef } from '../src/gui/contract.ts'
 import type { HostContext } from './host.ts'
-import type { Translate } from './i18n.tsx'
+import { formatNumber, type Translate } from './i18n.tsx'
 import { baseName } from './path.ts'
 
 /** 左栏记忆页与左栏图标共用的 id（`main` 插槽的 key = `sidebar.panellist` 的 id）。 */
@@ -44,6 +44,12 @@ export function compareLayers(a: GuiLayerRef, b: GuiLayerRef): number {
 /** 范围的显示名：「全部」、「全局」，项目写目录名（路径最后一段）。左栏、标题行、状态条、范围标签都用它。 */
 export function scopeName(scope: PageScope, t: Translate): string {
   return scope.kind === 'all' ? t('scope.all') : scope.kind === 'global' ? t('scope.global') : baseName(scope.workspacePath)
+}
+
+/** 「全部」包含什么：「3 个项目和全局」；一个项目都没有时写「只有全局」，不写「0 个项目」。 */
+export function allScopesSub(projects: number, t: Translate): string {
+  if (projects === 0) return t('scope.all.sub.none')
+  return t(projects === 1 ? 'scope.all.sub.one' : 'scope.all.sub', { n: formatNumber(projects) })
 }
 
 export interface NavTarget {

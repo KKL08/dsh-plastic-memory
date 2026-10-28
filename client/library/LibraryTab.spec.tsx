@@ -119,7 +119,7 @@ describe('全部记忆', () => {
     const refusing = createFakeGateway({ views: { library: library() }, openOk: false })
     renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'global' }} session={session} now={NOW} />, refusing)
     await act(async () => { fireEvent.click(within(rowOf('回答用中文')).getByRole('button', { name: '打开文件' })) })
-    expect(screen.getByRole('status')).toHaveTextContent('没能打开，宿主拒绝了这个路径。')
+    expect(screen.getByRole('status')).toHaveTextContent('没能打开，DeepSeek Harness 拒绝了这个路径。')
   })
 
   it('删除发 /memory forget（软删），这一行原位换成结果行，视图刷新后还在原处；「撤销」发 restore，没有去最近删除的链接', async () => {

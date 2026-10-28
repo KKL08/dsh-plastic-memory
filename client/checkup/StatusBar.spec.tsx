@@ -140,6 +140,8 @@ describe('状态条第二行', () => {
       views: { health: health({ app: { lastCheckupAt: null } }), checkups: checkups({ scopes: { '/w/app': { lastCheckupAt: null } } }) },
     })
     expect(second()).toHaveTextContent(/^2 条记忆$/)
+    // 首行没有标记：下面几行不再缩进去对一个不存在的标记
+    expect(screen.getByRole('region', { name: '记忆状况' })).toHaveClass('pm-status--plain')
   })
 
   it('「分数怎么来的」展开三行里只列扣分不为 0 的项，写扣几分和包括哪些问题', () => {

@@ -26,7 +26,7 @@ describe('SettingsForm', () => {
     expect(screen.getByText('当前配置是只读的，改不了。')).toBeInTheDocument()
     expect(screen.getByText('没有保存成功，再试一次。')).toBeInTheDocument()
     rerender(<SettingsForm state={state({ available: false })} onSave={() => {}} onDiscard={() => {}}><span>控件</span></SettingsForm>)
-    expect(screen.getByRole('status')).toHaveTextContent('宿主暂时没有提供这份配置。')
+    expect(screen.getByRole('status')).toHaveTextContent('DeepSeek Harness 暂时没有提供这份配置。')
     expect(screen.queryByText('控件')).toBeNull()
   })
 

@@ -14,7 +14,7 @@ import {
 import { useGateway, type ViewState } from './gateway.ts'
 import { formatNumber, useT, type Translate } from './i18n.tsx'
 import {
-  ALL_SCOPE, MEMORY_VIEWS, compareLayers, isInScope, samePageScope, scopeName, useCanOpen, useNavTarget,
+  ALL_SCOPE, MEMORY_VIEWS, allScopesSub, compareLayers, isInScope, samePageScope, scopeName, useCanOpen, useNavTarget,
   type MemoryView, type NavStore, type NavTarget, type PageScope,
 } from './nav.ts'
 import { PendingTab } from './pending/PendingTab.tsx'
@@ -67,10 +67,6 @@ function listScopes(library: LibraryView | undefined, deleted: DeletedView | und
   for (const item of pending?.items ?? []) for (const layer of pendingItemScopes(item)) if (layer.kind === 'workspace') paths.add(layer.workspacePath)
   const projects = [...paths].map((workspacePath): GuiLayerRef => ({ kind: 'workspace', workspacePath })).sort(compareLayers)
   return [{ kind: 'global' }, ...projects]
-}
-
-function allSub(projects: number, t: Translate): string {
-  return t(projects === 1 ? 'scope.all.sub.one' : 'scope.all.sub', { n: formatNumber(projects) })
 }
 
 export function MemoryPage({ nav }: { nav: NavStore }) {
@@ -152,7 +148,7 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
             onSelect={select}
             row={(s) => {
               const count = countTodo(pending, s)
-              if (s.kind === 'all') return { sub: allSub(projectCount, t), count }
+              if (s.kind === 'all') return { sub: allScopesSub(projectCount, t), count }
               const layer = library?.layers.find(l => sameLayer(l.layer, s))
               const n = layer?.items.length ?? 0
               // 体检在配置文件里关了：只写条数，不打分（和状态条一致）
@@ -188,7 +184,7 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
               <h2 className="pm-head-title">{scopeName(scope, t)}</h2>
               {isChat(scope) ? <Chip variant="neutral">{t('scope.currentChat')}</Chip> : null}
               <span className="pm-head-path" title={scope.kind === 'workspace' ? scope.workspacePath : undefined}>
-                {scope.kind === 'all' ? allSub(projectCount, t) : scope.kind === 'global' ? t('scope.global.sub') : scope.workspacePath}
+                {scope.kind === 'all' ? allScopesSub(projectCount, t) : scope.kind === 'global' ? t('scope.global.sub') : scope.workspacePath}
               </span>
             </div>
             <div className="pm-head-actions">
@@ -382,7 +378,7 @@ export const memoryPageCss = `
 /* 顶部留白都加上宿主窗口顶带的下沉量（对齐宿主入口页；普通浏览器里为 0），侧栏收起时内容不压在红绿灯和侧栏开关下。 */
 .pm-page-frame { height: 100%; min-height: 0; container: pm-page / inline-size; background: var(--pm-bg); }
 .pm-page { height: 100%; min-height: 0; display: grid; grid-template-columns: 240px minmax(0, 1fr); background: var(--pm-bg); }
-.pm-page--empty { display: flex; flex-direction: column; gap: 16px; padding: calc(20px + var(--dsh-frame-top-clearance, 0px)) 32px 48px; overflow: auto; }
+.pm-page--empty { display: flex; flex-direction: column; gap: 16px; padding: calc(20px + var(--dsh-frame-top-clearance, 0px)) 32px 48px; overflow: auto; scrollbar-gutter: stable; }
 .pm-page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .pm-page-title { margin: 0; font-size: 20px; font-weight: 600; line-height: 28px; color: var(--pm-text); }
 .pm-rail {

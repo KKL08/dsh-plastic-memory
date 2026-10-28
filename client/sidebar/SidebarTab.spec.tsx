@@ -110,6 +110,7 @@ describe('SidebarTab 四种状态', () => {
   it('frozenAt 早于插件本次加载（健康视图 bootedAt）：写「重启后未重新带入」，不画过时的用量条', () => {
     const { container } = setup({ library: library(pref, proj, glob), session: snapshot({ frozenAt: BOOTED - 1 }), pending: pending() })
     expect(screen.getByText('重启后未重新带入')).toBeInTheDocument()
+    expect(screen.getByText(/^DeepSeek Harness 重启过，.*下方「带入的记忆」是重启前带入的/)).toBeInTheDocument()
     expect(container.querySelector('.pm-budget')).toBeNull()
   })
 

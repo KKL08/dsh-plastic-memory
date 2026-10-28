@@ -123,7 +123,7 @@ export function DeletedTab({ nav, scope, session, now = Date.now() }: {
   return (
     <div className="pm-del">
       <SearchBox label={t('deleted.search.label')} placeholder={t('deleted.search.placeholder')} value={query} onChange={setQuery} />
-      <p className="pm-del-note">{t('deleted.note')}</p>
+      {scopeItems.length > 0 ? <p className="pm-del-note">{t('deleted.note')}</p> : null}
       {actions.notice !== undefined ? <p className="pm-notice" role="status" tabIndex={-1}>{actions.notice.text}</p> : null}
       {items.length === 0
         ? scopeItems.length > 0

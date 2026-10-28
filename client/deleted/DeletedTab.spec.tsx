@@ -157,7 +157,7 @@ describe('最近删除', () => {
     confirm.focus()
     await act(async () => { fireEvent.click(confirm) })
     act(() => { gateway.setView('deleted', { version: GUI_VIEW_VERSION, items: [] }) })
-    expect(screen.getByText('最近删除为空')).toBeInTheDocument()
+    expect(screen.getByText('最近没有删除过记忆')).toBeInTheDocument()
     const notice = screen.getByText('已恢复，这条冲突回到了待处理。')
     await waitFor(() => { expect(notice).toHaveFocus() })
   })
@@ -248,11 +248,12 @@ describe('最近删除', () => {
     })
   })
 
-  it('空状态写保留规则和密钥例外', () => {
+  it('空状态写保留规则和密钥例外，上面不再重复保留规则那行', () => {
     renderInShell(<DeletedTab nav={createNavStore()} scope={{ kind: 'global' }} session={session} now={NOW} />, createFakeGateway({ views: { deleted } }))
     const empty = screen.getByRole('status')
     expect(empty).toHaveClass('pm-empty--daily')
-    expect(empty).toHaveTextContent('最近删除为空')
+    expect(screen.queryByText('删除的记忆保留 14 天，期间可以恢复。')).toBeNull()
+    expect(empty).toHaveTextContent('最近没有删除过记忆')
     expect(empty).toHaveTextContent('保留 14 天')
     expect(empty).toHaveTextContent('含密钥的记忆删除时直接抹掉，不进这里。')
   })

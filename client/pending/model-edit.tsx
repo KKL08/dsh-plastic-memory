@@ -214,7 +214,7 @@ export const modelEditCss = `
 .pm-model-compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 @container (max-width: 520px) { .pm-model-compare { grid-template-columns: minmax(0, 1fr); } }
 .pm-model-pane { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.pm-model-pane-title { margin: 0; font-size: 12px; font-weight: 500; line-height: 1.5; color: var(--pm-text-3); }
+.pm-model-pane-title { margin: 0; font-size: 12px; font-weight: 600; line-height: 1.5; color: var(--pm-text-3); }
 .pm-model-body {
   display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: var(--dsw-radius-sm, 8px);
   background: var(--pm-bg); border: .5px solid var(--pm-line-card);
