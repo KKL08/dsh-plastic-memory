@@ -8,9 +8,9 @@ import { SidecarStore } from '../src/storage/sidecar.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
 import { computeDigest, encodeRecord, splitFrontmatter } from '../src/storage/frontmatter.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE, STATE_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
-import { MemoryStore, type MemoryLogger } from '../src/store.ts'
+import { InMemoryTable, MemoryStore, type MemoryLogger, type MemoryTable } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
-import { PendingDecisionsStore } from '../src/governance/decisions.ts'
+import { PendingDecisionsStore, candidateFingerprint } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
 import { CheckupRecordStore, checkupKey } from '../src/governance/checkup-records.ts'
@@ -30,7 +30,9 @@ import { runSavePipeline } from '../src/pipeline.ts'
 import { executeForget } from '../src/tools/forget.ts'
 import { executeSnapshotTool } from '../src/tools/snapshot.ts'
 import { cacheKey, executeScan } from '../src/tools/scan.ts'
+import { locateCopy } from '../src/tools/workspace-gate.ts'
 import { fakeExec } from './helpers/exec.ts'
+import type { MemoryRecord } from '../src/record-schema.ts'
 import { candidate, record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 
@@ -61,6 +63,8 @@ interface EnvOpts {
   log?: MemoryLogger
   /** 认领心跳的计时（缺省真实 setInterval）。 */
   heartbeat?: (callback: () => void, delayMs: number) => () => void
+  /** 记忆表（缺省真实临时目录上的 FileTable）。 */
+  table?: MemoryTable
 }
 
 function env(opts: EnvOpts = {}) {
@@ -68,7 +72,7 @@ function env(opts: EnvOpts = {}) {
   // 侧表也用这个时钟：认领的时间和是否残留按它算
   const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }, now: () => clock.now })
   // 表和命令用同一个时钟：软删记的时刻和最近删除的保留期清扫才对得上
-  const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now }), undefined, sidecar.recallStats)
+  const store = new MemoryStore(opts.table ?? new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now }), undefined, sidecar.recallStats)
   const decisions = new PendingDecisionsStore(opts.wrapPending?.(sidecar.pending) ?? sidecar.pending)
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const cache = sidecar.scanCache
@@ -1570,6 +1574,71 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
     const memoryId = await saveCandidate(e)
     expect(err(await e.run({ cmd: 'keep-local-memory', memoryId, layer: wsLayer })).code).toBe('governance-disabled')
     expect((await e.store.get(memoryId))!.globalCandidate).toBe(true)
+  })
+})
+
+// 同一个 id 在本项目和全局各有一份在用的：「留在本项目」和它的撤销读写都只认项目那一份，全局那份一字不动。
+// 两种表都跑，两份各自较新时各跑一遍（不带层的定位按「在用、较新」挑，正好把两种挑法都走到）。
+describe.each([
+  { name: 'FileTable', inMemory: false },
+  { name: 'InMemoryTable', inMemory: true },
+])('留在本项目与撤销只认项目那一份（同 id 两层并存）：$name', ({ inMemory }) => {
+  const wsLayer = { kind: 'workspace', workspacePath: SESSION_WS } as const
+  const copy = (partial: Partial<MemoryRecord>) => record({ id: 'mem_dup', type: 'preference', createdAt: 1, lastConfirmedAt: 1, ...partial })
+
+  describe.each([
+    { newer: '全局', globalAt: NOW - 1000, projectAt: NOW - 2000 },
+    { newer: '项目', globalAt: NOW - 2000, projectAt: NOW - 1000 },
+  ])('$newer那份较新', ({ globalAt, projectAt }) => {
+    const globalCopy = copy({ name: '全局那份', content: '全局那份的正文', updatedAt: globalAt })
+    const projectCopy = copy({ name: '项目那份', content: '项目那份的正文', scope: 'workspace', workspacePath: SESSION_WS, globalCandidate: true, updatedAt: projectAt })
+
+    async function setup() {
+      const table = inMemory ? new InMemoryTable(root) : undefined
+      const e = env({ ...(table !== undefined ? { table } : {}) })
+      for (const r of [globalCopy, projectCopy]) {
+        // 内存表的 create 会清掉同 id 的其余副本：直接放进虚拟目录
+        if (table !== undefined) table.seedFile({ dir: join(root, r.scope === 'global' ? GLOBAL_DIR : workspaceDirName(r.workspacePath!)), fileName: `${r.name}.md`, record: r })
+        else await e.store.create(r)
+      }
+      expect(await locateCopy(e.store, 'mem_dup', { kind: 'global' })).toBeDefined()
+      expect(await locateCopy(e.store, 'mem_dup', wsLayer)).toBeDefined()
+      return e
+    }
+    async function expectGlobalUntouched(e: ReturnType<typeof env>) {
+      const g = await locateCopy(e.store, 'mem_dup', { kind: 'global' })
+      expect(g).toMatchObject({ status: 'active', name: '全局那份', content: '全局那份的正文', updatedAt: globalAt })
+      expect(g!.globalCandidate).toBeUndefined()
+    }
+    const projectNow = async (e: ReturnType<typeof env>) => locateCopy(e.store, 'mem_dup', wsLayer)
+
+    it('就地留下：清的是项目那份，账本指纹记项目那份；撤销把标记放回项目那份', async () => {
+      const e = await setup()
+      const body = ok(await e.run({ cmd: 'keep-local-memory', memoryId: 'mem_dup', layer: wsLayer }))
+      expect((await projectNow(e))!.globalCandidate).toBeUndefined()
+      await expectGlobalUntouched(e)
+      const settled = (await e.decisions.listSettled()).find(d => d.id === body.decisionId)!
+      expect(settled.fingerprint).toBe(candidateFingerprint(projectCopy))
+
+      ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
+      expect(await projectNow(e)).toMatchObject({ status: 'active', content: '项目那份的正文', globalCandidate: true })
+      await expectGlobalUntouched(e)
+    })
+
+    it('从「等你决定」留下：同样只动项目那一份；撤销后条目回到待处理', async () => {
+      const e = await setup()
+      const { entry } = await e.decisions.upsert({
+        kind: 'promote-candidate', memoryIds: ['mem_dup'], summary: projectCopy.summary, workspaces: [SESSION_WS], fingerprint: candidateFingerprint(projectCopy),
+      }, NOW)
+      ok(await e.run({ cmd: 'keep-local', decisionId: entry.id }))
+      expect((await projectNow(e))!.globalCandidate).toBeUndefined()
+      await expectGlobalUntouched(e)
+
+      ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+      expect(await projectNow(e)).toMatchObject({ status: 'active', content: '项目那份的正文', globalCandidate: true })
+      await expectGlobalUntouched(e)
+      expect((await e.decisions.list()).map(d => d.id)).toEqual([entry.id])
+    })
   })
 })
 

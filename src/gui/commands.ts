@@ -383,7 +383,8 @@ async function dispatch(
     )
     if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
     if (r.dismissed.length === 0) return fail(cmd, 'failed', r.message)
-    const current = await deps.store.get(memoryId, { workspacePath })
+    // 只认刚清掉标记的那一层：别层同 id 的副本不算它
+    const current = await deps.store.get(memoryId, { workspacePath, isExactLayer: true })
     const written = current === undefined ? undefined : await deps.ignores.ignoreIfAbsent('misplaced', [current], now)
     const decisionId = await settle('keep-local', current === undefined ? {} : {
       fingerprint: candidateFingerprint(current),
@@ -426,12 +427,14 @@ async function dispatch(
       if (verdict === 'keep-local') {
         // 「留在本项目」清掉了候选标记、没拍快照：撤销时把标记放回去，否则条目回到待处理也找不到候选
         const memoryId = entry.memoryIds[0] ?? ''
-        const rec = await deps.store.get(memoryId, { workspacePath: entry.workspaces?.[0] ?? gov.workspacePath })
+        // 只认留下的那一层：不带层定位会挑到别层同 id 的副本，写回时还会清掉其余副本
+        const workspacePath = entry.workspaces?.[0] ?? gov.workspacePath
+        const rec = workspacePath === undefined ? undefined : await locateCopy(deps.store, memoryId, { kind: 'workspace', workspacePath })
         if (!rec || rec.status !== 'active') return notFound(memoryId)
         const { rejected } = gateRecords([rec], gov, command.allowCrossWorkspace)
         if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
         // 同 keep-local：不是内容编辑，updatedAt 不动
-        if (!(await deps.store.updateIfLive(rec, r => ({ ...r, globalCandidate: true })))) return notFound(memoryId)
+        if (!(await deps.store.updateIfLive(rec, r => ({ ...r, globalCandidate: true }), { workspacePath, isExactLayer: true }))) return notFound(memoryId)
         // 留下时顺带写的放错层忽略：忽略表里还是那一条才删，用户之前自己忽略的、之后重新忽略的都不碰
         const written = entry.settled.misplacedIgnore
         if (written !== undefined) await deps.ignores.unignoreIfSame('misplaced', [memoryId], { ignoredAt: written.ignoredAt, fingerprints: [written.fingerprint] })
@@ -560,10 +563,12 @@ async function dispatch(
     case 'keep-local': {
       const entry = await openEntryOfKind(command.decisionId, 'promote-candidate')
       if (isErr(entry)) return entry
-      return await keepLocal(entry.memoryIds[0]!, entry.workspaces?.[0], command.allowCrossWorkspace, async (verdict, opts) => {
+      const workspacePath = entry.workspaces?.[0]
+      // 同就地留下：只认候选所在的那一层
+      return await keepLocal(entry.memoryIds[0]!, workspacePath, command.allowCrossWorkspace, async (verdict, opts) => {
         await deps.decisions.settle(entry.id, verdict, now, opts)
         return entry.id
-      })
+      }, workspacePath === undefined ? {} : { target: { kind: 'workspace', workspacePath } })
     }
 
     case 'forget':
