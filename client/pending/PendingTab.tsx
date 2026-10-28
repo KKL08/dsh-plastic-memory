@@ -24,7 +24,7 @@ import { Button } from '../ui/Button.tsx'
 import { Chip } from '../ui/Chip.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { StatusMarker } from '../ui/StatusMarker.tsx'
-import { ActionFeedback, crossConfirmCss, useItemAction } from './action.tsx'
+import { ActionFeedback, crossConfirmCss, ItemSending, useItemAction } from './action.tsx'
 import { editCss } from './edit.tsx'
 import { modelEditCss } from './model-edit.tsx'
 import { moveCss } from './move.tsx'
@@ -94,6 +94,8 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
   const projects = knownProjects(defaultProject, session, library.status === 'ready' ? library.data : undefined)
   const [recent, setRecent] = useState<Recent | undefined>(undefined)
   const [refused, setRefused] = useState<Refused | undefined>(undefined)
+  /** 命令正在进行中的卡（按条目 key）：视图先刷新掉它时留在原位。index 同 Recent。 */
+  const [sending, setSending] = useState<ReadonlyMap<string, { item: PendingItem; index: number }>>(new Map())
   /** 点过「展开其余 N 条」的组。 */
   const [expanded, setExpanded] = useState<ReadonlySet<PendingLevel>>(new Set())
   const [mountSeen] = useState(readSeen)
@@ -139,9 +141,17 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
 
   // 视图还没重写时刚处理的条目仍在里面：先藏起来，原位放结果卡
   const items = viewItems.filter(i => recent === undefined || recent.undone || pendingItemKey(i) !== recentKey)
-  const rows: Row[] = items.map((item, index) => {
+  const cardRow = (item: PendingItem, index: number): Row => {
     const key = pendingItemKey(item)
     const isNewRow = isNew(item)
+    const onSending = (isSending: boolean) => {
+      setSending((prev) => {
+        const next = new Map(prev)
+        if (isSending) next.set(key, { item, index })
+        else next.delete(key)
+        return next
+      })
+    }
     return {
       key,
       level: item.level,
@@ -149,12 +159,20 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
       isNew: isNewRow,
       flashing: (flashId !== undefined && memoryIdsOf(item).includes(flashId)) || (jump.isFlashing && jump.key === key),
       node: (
-        <ItemIsNew.Provider value={isNewRow}>
-          <ItemScopeNames.Provider value={scopeNames(item)}>{renderCard(item, (outcome) => { done({ item, index, outcome, undone: false }) }, refuse(item, index))}</ItemScopeNames.Provider>
-        </ItemIsNew.Provider>
+        <ItemSending.Provider value={onSending}>
+          <ItemIsNew.Provider value={isNewRow}>
+            <ItemScopeNames.Provider value={scopeNames(item)}>{renderCard(item, (outcome) => { done({ item, index, outcome, undone: false }) }, refuse(item, index))}</ItemScopeNames.Provider>
+          </ItemIsNew.Provider>
+        </ItemSending.Provider>
       ),
     }
-  })
+  }
+  const rows: Row[] = items.map(cardRow)
+  // 命令还在进行中、视图已经没有它的卡：同一个 key 留在原位，卡片不重挂，焦点不丢
+  for (const { item, index } of sending.values()) {
+    const key = pendingItemKey(item)
+    if (key !== recentKey && !items.some(i => pendingItemKey(i) === key)) rows.splice(Math.min(index, rows.length), 0, cardRow(item, index))
+  }
   if (recent !== undefined && !(recent.undone && backInView)) {
     rows.splice(Math.min(recent.index, rows.length), 0, {
       key: `recent:${recentKey}`,

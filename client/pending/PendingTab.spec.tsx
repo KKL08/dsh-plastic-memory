@@ -482,6 +482,21 @@ describe('待处理：确认收起后的键盘焦点', () => {
     await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
   })
 
+  it('视图先于命令结果刷新（宿主先推了新版本）：卡片留在原位、焦点不动，结果回来后换成结果卡，焦点落到「撤销」', async () => {
+    let answer: (() => void) | undefined
+    const { gateway } = setup([promote, vertical], {
+      respond: command => new Promise((resolve) => { answer = () => { resolve({ ok: true, cmd: command.cmd }) } }),
+    })
+    const button = screen.getByRole('button', { name: '提升为全局' })
+    await press(button)
+    act(() => { gateway.setView('pending', view(vertical)) })
+    expect(button).toHaveFocus()
+    expect(screen.getByRole('heading', { level: 2, name: '等你决定 2' })).toBeInTheDocument()
+    await act(async () => { answer?.() })
+    await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
+    expect(screen.getAllByRole('article')[0]).toHaveTextContent('撤销')
+  })
+
   it('密钥卡：「取消」回到「彻底删除…」；确认删除后落到原位的结果卡上', async () => {
     setup([secret, promote])
     await press(screen.getByRole('button', { name: '彻底删除…' }))
