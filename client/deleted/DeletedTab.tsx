@@ -42,9 +42,12 @@ function memoryNames(library: LibraryView | undefined, deleted: DeletedView): Ma
   return names
 }
 
+/** 剩余不足 1 天单独写，否则按天向上取整：刚删除的写 14 天，和「保留 14 天」对得上。 */
 function leftLabel(purgeAt: number, now: number, t: Translate): string {
-  const days = Math.floor((purgeAt - now) / DAY_MS)
-  return days < 1 ? t('deleted.left.today') : t(days === 1 ? 'deleted.left.days.one' : 'deleted.left.days', { n: days })
+  const left = (purgeAt - now) / DAY_MS
+  if (left < 1) return t('deleted.left.today')
+  const days = Math.ceil(left)
+  return t(days === 1 ? 'deleted.left.days.one' : 'deleted.left.days', { n: days })
 }
 
 export function DeletedTab({ nav, scope, session, now = Date.now() }: {

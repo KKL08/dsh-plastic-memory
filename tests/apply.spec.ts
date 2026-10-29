@@ -43,6 +43,21 @@ import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
 import { defaultJiebaLoader } from '../src/search/jieba-segmenter.ts'
 
+// 进程边界的观察：fsTrace.on 期间记下插件对 node:fs、node:fs/promises 的每次调用（函数名 + 第一个参数）。平时原样透传。
+const { fsTrace } = vi.hoisted(() => ({ fsTrace: { on: false, calls: [] as string[] } }))
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<Record<string, unknown>>()
+  return Object.fromEntries(Object.entries(actual).map(([key, value]) => [key, typeof value === 'function' && /^[a-z]/.test(key)
+    ? (...args: unknown[]) => { if (fsTrace.on) fsTrace.calls.push(`fs/promises.${key}(${String(args[0])})`); return (value as (...a: unknown[]) => unknown)(...args) }
+    : value]))
+})
+vi.mock('node:fs', async importOriginal => {
+  const actual = await importOriginal<Record<string, unknown>>()
+  return Object.fromEntries(Object.entries(actual).map(([key, value]) => [key, typeof value === 'function' && /^[a-z]/.test(key)
+    ? (...args: unknown[]) => { if (fsTrace.on) fsTrace.calls.push(`fs.${key}(${String(args[0])})`); return (value as (...a: unknown[]) => unknown)(...args) }
+    : value]))
+})
+
 /** 宿主 storageDomain 表的替身（@deepseek-ai/dsh-storage-domain KvTable 的形状）：读同步、写异步。 */
 class HostKvTable<T = unknown> {
   private map = new Map<string, T>()
@@ -276,6 +291,40 @@ describe('apply', () => {
     // 钉住 root 真的来自 config：经注册后的 memory_search 读到 config 指定目录里的好记忆，坏文件不碍事
     const out = await defs.get('memory_search')!.execute({ query: 'zebra' }, fakeExec()) as { hits: Array<{ id: string }> }
     expect(out.hits.map(h => h.id)).toEqual(['mem_good'])
+  })
+
+  it('加载期零磁盘 I/O：带齐 commands、计时、旧 KV 域时，apply 及其随后排进队列的工作都不读、不列、不写文件；第一次工具调用才碰磁盘', async () => {
+    type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
+    const defs = new Map<string, ToolDef>()
+    const base = mockCtx({
+      storageDomain: true,
+      commands: { register: () => () => {} },
+      timer: { timeout: () => () => {}, interval: () => () => {} },
+    })
+    const ctx = { ...base, tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } }, logger: { info() {}, warn() {}, error() {} } }
+    const memoryRoot = await seedMemory(await makeTmpRoot())
+    await mkdir(join(memoryRoot, STATE_DIR), { recursive: true })
+    await writeFile(join(memoryRoot, STATE_DIR, RECALL_STATS_FILE), '{}', 'utf8')
+
+    fsTrace.calls = []
+    fsTrace.on = true
+    try {
+      await apply(ctx as never, new Config({ memoryRoot } as never))
+      // apply 里不 await 就排出去的工作也算加载期：让微任务与一轮 I/O 回调跑完
+      for (let i = 0; i < 3; i++) await new Promise<void>(resolve => { setImmediate(resolve) })
+    } finally {
+      fsTrace.on = false
+    }
+    expect(fsTrace.calls).toEqual([])
+
+    // 观察本身是灵的：第一次工具调用就读到了记忆目录
+    fsTrace.on = true
+    try {
+      await defs.get('memory_search')!.execute({ query: '内容' }, fakeExec())
+    } finally {
+      fsTrace.on = false
+    }
+    expect(fsTrace.calls.some(c => c.includes(memoryRoot))).toBe(true)
   })
 })
 
@@ -540,6 +589,36 @@ describe('自动体检接线', () => {
     const routed = { session: { header: { id: 'sess-x' }, seq: 1, requestHeader: () => undefined }, options: { provider: 'deepseek', model: 'deepseek-v4-flash' } }
     expect(await scan(routed)).toMatchObject({ ok: true, cmd: 'scan' })
     expect(ctx.llmRequests[0]).toMatchObject({ provider: 'deepseek', model: 'deepseek-v4-flash' })
+  })
+
+  it('界面全库体检：两个会话各自路由到不同模型，用的是发命令那个会话的模型；全局与各项目的记忆都交给内容检查', async () => {
+    const memoryRoot = await seedMemory(await makeTmpRoot())
+    for (const [ws, id] of [['/tmp/pm-wire-proj-a', 'mem_wire_a'], ['/tmp/pm-wire-proj-b', 'mem_wire_b']] as const) {
+      const dir = join(memoryRoot, workspaceDirName(ws))
+      await mkdir(dir, { recursive: true })
+      await writeFile(join(dir, WORKSPACE_MARKER), ws, 'utf8')
+      await writeFile(join(dir, `${id}.md`), encodeRecord(record({ id, scope: 'workspace', workspacePath: ws }), {}), 'utf8')
+    }
+    const defs: Array<{ handler(inv: { rawInput: string; agent: unknown }): Promise<{ text?: string }> }> = []
+    const ctx = mockCtx({
+      commands: { register: (def) => { defs.push(def as (typeof defs)[number]); return () => {} } },
+      agentDefaultModel: { currentSelection: () => DEFAULT_ROUTE },
+    })
+    await apply({ ...ctx, logger: { info() {}, warn() {}, error() {} } } as never, new Config({ memoryRoot } as never))
+    const agentOn = (sessionId: string, model: string) =>
+      ({ session: { header: { id: sessionId }, seq: 1, requestHeader: () => undefined }, options: { provider: 'deepseek', model } })
+    const scan = async (agent: unknown) => JSON.parse((await defs[0]!.handler({ rawInput: ' scan {}', agent })).text!) as Record<string, unknown>
+
+    expect(await scan(agentOn('sess-a', 'deepseek-v4-flash'))).toMatchObject({ ok: true, cmd: 'scan' })
+    expect(ctx.llmRequests.length).toBeGreaterThan(0)
+    expect(ctx.llmRequests.every(r => (r as { model?: string }).model === 'deepseek-v4-flash')).toBe(true)
+    const sent = JSON.stringify(ctx.llmRequests)
+    for (const id of ['mem_seed', 'mem_wire_a', 'mem_wire_b']) expect(sent).toContain(id)
+
+    const before = ctx.llmRequests.length
+    expect(await scan(agentOn('sess-b', 'deepseek-v4-pro'))).toMatchObject({ ok: true, cmd: 'scan' })
+    expect(ctx.llmRequests.length).toBeGreaterThan(before)
+    expect(ctx.llmRequests.slice(before).every(r => (r as { model?: string }).model === 'deepseek-v4-pro')).toBe(true)
   })
 })
 
@@ -880,6 +959,51 @@ describe('注入链接线', () => {
     controller.abort()
     const hello: Decision = { kind: 'enter', messages: [userSaid('你好')] }
     expect(await t.step(session, 1, { decision: hello, signal: controller.signal })).toBe(hello)
+  })
+
+  /** 一个已经写过系统提示词和用户消息、可见历史里还没有快照的会话：之后的空 decision 会直接追加快照。 */
+  const sessionWithoutSnapshot = () => {
+    const session = hostSession('sess-1')
+    session.append('system/message', { turn: 1, step: 1, message: createSystemMessage('系统提示词') }, { surfaceOp: 'append' })
+    session.append('user/message', userSaid('你好'), { surfaceOp: 'append' })
+    return session
+  }
+
+  it('pre-step 的 signal 已中止、本来会直接追加快照的那一步：不组装、不写会话、不计召回，decision 原样返回；之后没中止的步照常发', async () => {
+    const t = await boot()
+    const session = sessionWithoutSnapshot()
+    const nodesBefore = [...session.surface.nodes]
+    const statsBefore = await t.recallStats()
+    const controller = new AbortController()
+    controller.abort()
+    const empty: Decision = { kind: 'enter', messages: [] }
+    const readLayer = vi.spyOn(MemoryStore.prototype, 'readLayer')
+    try {
+      // 直接调监听：测试台的 step 遇到中止会自己提前返回，看不出插件做没做
+      expect(await t.preStep({ agent: { session }, messages: [], turn: 1, step: 2, signal: controller.signal }, async () => empty)).toBe(empty)
+      expect(readLayer).not.toHaveBeenCalled()
+    } finally {
+      readLayer.mockRestore()
+    }
+    expect(session.surface.nodes).toEqual(nodesBefore)
+    expect(await t.recallStats()).toBe(statsBefore)
+
+    await t.step(session, 3, { decision: empty })
+    expect(visibleSnapshots(session)).toEqual([expect.stringContaining('压缩前就有的偏好')])
+  })
+
+  it('pre-step 拿到 reject：可见历史里没有快照、本来该发的时候也不发，不组装，reject 原样返回', async () => {
+    const t = await boot()
+    const session = sessionWithoutSnapshot()
+    const reject: Decision = { kind: 'reject' }
+    const readLayer = vi.spyOn(MemoryStore.prototype, 'readLayer')
+    try {
+      expect(await t.step(session, 2, { decision: reject })).toBe(reject)
+      expect(readLayer).not.toHaveBeenCalled()
+    } finally {
+      readLayer.mockRestore()
+    }
+    expect(visibleSnapshots(session)).toEqual([])
   })
 
   it('组装失败：这一步不发、只记日志；下一个发送点恢复后发', async () => {
@@ -1519,7 +1643,9 @@ describe('配置热生效（loader/volatile-update）', () => {
     /** 宿主压缩结束（成功不带 error，失败带 error）。 */
     const endCompaction = (time: number, error?: string) => ctx.listeners.get('session/event')!(session,
       { type: 'compaction/end', time, data: { compactionId: 'cmp_1', turn: 1, ...(error === undefined ? {} : { error }) } })
-    return { memoryRoot, defs, config, assembleOnce, update, tool, exec, save, command, sessionView, putGlobal, endCompaction }
+    /** 会话里一共发过几份快照消息（含已被后来那份取代的）。 */
+    const snapshotCount = () => session.deriveMessages().filter(m => m.source.kind === SNAPSHOT_SOURCE_KIND).length
+    return { memoryRoot, defs, config, assembleOnce, snapshotCount, update, tool, exec, save, command, sessionView, putGlobal, endCompaction }
   }
 
   it('改上限、超限处理、溯源档位后，同一会话下一次组装就按新值（不等压缩）', async () => {
@@ -1539,6 +1665,25 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect(second).not.toContain('- [mem_k]') // 严格按 1.5 token 的上限：这条装不下
     // 上限是 number（配置就是 number），会话视图原样带出
     await t.sessionView(v => expect(v).toMatchObject({ budget: 1.5, overflowMode: 'strict', injectedIds: [], omittedCount: 1 }))
+  })
+
+  it('热更新后组装出的文本没变就不发：只在文本变了时恰好多一份', async () => {
+    const t = await setup()
+    await t.putGlobal({ id: 'mem_k', type: 'knowledge', name: '报销截止', content: '报销截止每月 25 日', summary: '报销截止日' })
+    const first = await t.assembleOnce()
+    expect(t.snapshotCount()).toBe(1)
+
+    // 放宽上限：这条本来就装得下，文本不变；会话视图换成新上限，说明这次热更新确实重新组装过
+    expect(await t.update({ snapshotTokenBudget: 8000 })).toEqual([['snapshotTokenBudget']])
+    expect(await t.assembleOnce()).toBe(first)
+    await t.sessionView(v => expect(v).toMatchObject({ budget: 8000, injectedIds: ['mem_k'] }))
+    expect(t.snapshotCount()).toBe(1)
+
+    expect(await t.update({ snapshotTokenBudget: 8000, evidenceLookup: 'active' })).toEqual([['evidenceLookup']])
+    expect(await t.assembleOnce()).toContain(EVIDENCE_GUIDANCE.active)
+    expect(t.snapshotCount()).toBe(2)
+    expect(await t.assembleOnce()).toContain(EVIDENCE_GUIDANCE.active)
+    expect(t.snapshotCount()).toBe(2)
   })
 
   it('改模板与自定义类型：memory_save 重注册（类型枚举重算），写时只认新模板，带入按新类型定义', async () => {
@@ -1563,6 +1708,20 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect(switched).toContain('## 可复用流程（procedure）\n- [mem_proc] 发版流程（发版步骤）')
     await expect(t.save({ type: 'procedure', name: '流程', content: '旧模板的类型' })).rejects.toThrow(/type/)
     expect(await t.save({ type: 'decision', name: '定了用 A', content: '周会定了选型用 A 方案' })).toMatchObject({ kind: 'saved' })
+  })
+
+  it('热更新加了自定义类型：不重启，立刻能用这个新类型 memory_save，记录落盘、类型就是它', async () => {
+    const t = await setup()
+    await expect(t.save({ type: 'regulation', name: '合规', content: '某条合规' })).rejects.toThrow(/type/)
+    await t.update({ customTypes: { regulation } })
+    const saved = await t.save({ type: 'regulation', name: '数据出境', content: '数据出境要先过安全评估' })
+    expect(saved).toMatchObject({ kind: 'saved' })
+    const files = (await readdir(t.memoryRoot, { recursive: true })).filter(f => f.endsWith('.md') && !f.startsWith('.state'))
+    const texts = await Promise.all(files.map(f => readFile(join(t.memoryRoot, f), 'utf8')))
+    const written = texts.find(text => text.includes(`id: ${saved.record!.id}`))
+    expect(written).toBeDefined()
+    expect(written).toMatch(/^type: regulation$/m)
+    expect(written).toContain('数据出境要先过安全评估')
   })
 
   it('关闭体检：四个治理工具注销、治理类子命令返回 governance-disabled、其余照常；重开后恢复，记忆不变', async () => {
@@ -1600,6 +1759,20 @@ describe('配置热生效（loader/volatile-update）', () => {
     await rm(join(t.memoryRoot, GUI_VIEW_DIR), { recursive: true })
     await t.update({ governance: { health: { sensitivity: 'proactive' } } })
     for (const file of Object.values(GUI_VIEW_FILES)) await stat(join(t.memoryRoot, GUI_VIEW_DIR, file))
+  })
+
+  it('配置热更新一次：每个全局视图文件恰好替换一次（在文件系统边界数 rename）', async () => {
+    const t = await setup()
+    const viewDir = join(t.memoryRoot, GUI_VIEW_DIR)
+    fsTrace.calls = []
+    fsTrace.on = true
+    try {
+      await t.update({ governance: { health: { sensitivity: 'proactive' } } })
+    } finally {
+      fsTrace.on = false
+    }
+    const replaced = (file: string) => fsTrace.calls.filter(c => c.startsWith(`fs/promises.rename(${join(viewDir, file)}.tmp-`)).length
+    expect(Object.fromEntries(Object.values(GUI_VIEW_FILES).map(f => [f, replaced(f)]))).toEqual(Object.fromEntries(Object.values(GUI_VIEW_FILES).map(f => [f, 1])))
   })
 
   // 观察切法：查询「插件记忆」，记录只写了「插件的记忆」。只用主词典时查询切成 插件 / 记忆，记录全命中；

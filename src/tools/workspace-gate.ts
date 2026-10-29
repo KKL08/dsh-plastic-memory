@@ -54,6 +54,32 @@ export async function locateCopy(store: Pick<MemoryStore, 'get'>, id: string, ta
   return record !== undefined && isCopyOf(record, target) ? record : undefined
 }
 
+/** 记录所在的层；项目记忆缺 workspacePath 时为 undefined。 */
+export function copyTargetOf(record: Pick<MemoryRecord, 'scope' | 'workspacePath'>): CopyTarget | undefined {
+  if (record.scope === 'global') return { kind: 'global' }
+  return record.workspacePath === undefined ? undefined : { kind: 'workspace', workspacePath: record.workspacePath }
+}
+
+/**
+ * 只动 target 那一份时，快照里哪些同 id 记录算它的历史：target 层的，加上别层里那一层此刻已定位不到这个 id（含归档）的——
+ * 那是这条记忆搬层（提升、移到项目）之前留下的。别层还有这个 id 的，是那一份自己的历史，不算。
+ * 先按层算好保留集合，返回的谓词是同步的（快照表在串行化的重写里用）。
+ */
+export async function copyHistory(
+  store: Pick<MemoryStore, 'get'>, records: Iterable<Located>, ids: ReadonlySet<string>, target: CopyTarget,
+): Promise<(record: Located) => boolean> {
+  const key = (r: Located) => `${r.id}\0${workspaceLabel(r)}`
+  const kept = new Set<string>()
+  const checked = new Set<string>()
+  for (const r of records) {
+    if (!ids.has(r.id) || isCopyOf(r, target) || checked.has(key(r))) continue
+    checked.add(key(r))
+    const layer = copyTargetOf(r)
+    if (layer !== undefined && (await locateCopy(store, r.id, layer)) !== undefined) kept.add(key(r))
+  }
+  return r => ids.has(r.id) && !kept.has(key(r))
+}
+
 /** 记录所属 workspace 的标签：global 记忆为 'global'（待决账本的 workspaces 字段同口径）。 */
 export function workspaceLabel(record: Pick<MemoryRecord, 'scope' | 'workspacePath'> | undefined): string {
   if (record === undefined) return '(未知)'

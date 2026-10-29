@@ -395,7 +395,7 @@ describe('SnapshotCache', () => {
 })
 
 // 快照来历（会话视图的 origin）：首次冻结是对话开始时；成功压缩后的下一次冻结是压缩后重新带入；
-// 其他重建（失败的压缩、配置热更新）沿用上一次的来历。
+// 其他重建（失败的压缩、配置热更新）文本变了（会补发）是对话中重新带入，没变就沿用上一次的来历。
 describe('SnapshotCache 快照来历', () => {
   function makeTracked(hasEarlierTurns?: (session: object) => boolean) {
     const store = new MemoryStore(new InMemoryTable())
@@ -443,6 +443,24 @@ describe('SnapshotCache 快照来历', () => {
     expect(frozen).toHaveLength(3)
     expect(frozen.map(f => f.origin)).toEqual(['start', 'start', 'start'])
     expect(last().compactedAt).toBeUndefined()
+  })
+
+  it('非压缩的重建补发了新快照（文本变了）：来历是对话中重新带入；之后文本不变的重建沿用，成功压缩照旧改成压缩后', async () => {
+    const { store, cache, session, frozen, last } = makeTracked(() => true)
+    await cache.assemble(session)
+    expect(last().origin).toBe('resumed')
+    await store.put(record({ id: 'mem_new', type: 'preference', content: '提交前跑测试' }))
+    cache.markAllStale() // 配置热更新：记忆也变了，新文本会补发
+    await cache.assemble(session)
+    expect(last().origin).toBe('refreshed')
+    expect(last().compactedAt).toBeUndefined()
+    cache.markAllStale()
+    await cache.assemble(session)
+    expect(last().origin).toBe('refreshed')
+    cache.markCompacted(session, 9_000)
+    await cache.assemble(session)
+    expect(last()).toMatchObject({ origin: 'compacted', compactedAt: 9_000 })
+    expect(frozen).toHaveLength(4)
   })
 
   it('构建期间碰上成功压缩：作废这次结果，重建冻结时认领压缩，来历是压缩后', async () => {

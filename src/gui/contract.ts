@@ -79,7 +79,7 @@ export const memoryCardSchema = z.object({
   /** 名称、摘要、正文的内容摘要（同文件里的 digest 算法）：直接改时连同 updatedAt 带回去，磁盘上对不上就是卡片加载后被改过。
    *  可缺省：对话卡从工具参数拼出来，没有它。 */
   digest: z.string().optional(),
-  /** 四个面含密钥（两级都算）：界面上的文字可能是遮盖后的，不给直接改、直接合并。 */
+  /** 四个面含高危密钥（只看高危，与界面遮盖同口径）：界面上的文字是遮盖后的，不给直接改、直接合并。 */
   hasSecret: z.literal(true).optional(),
   /** 提升为全局的状态（见 MEMORY_PROMOTIONS）。只在全部记忆视图里给：对话卡片和右侧栏「这次新写入的」据此就地提示。 */
   promotion: z.enum(MEMORY_PROMOTIONS).optional(),
@@ -412,10 +412,10 @@ export type DeletedView = z.infer<typeof deletedViewSchema>
 // —— 这次对话 ——
 
 /**
- * 快照的来历：对话开始时首次带入 / 续上已有轮次的会话时重新带入（宿主重启后续上、插件重载）/ 成功压缩后重新带入。
- * 其他重建（配置热更新、失败的压缩）沿用上一次的来历。
+ * 快照的来历：对话开始时首次带入 / 续上已有轮次的会话时重新带入（宿主重启后续上、插件重载）/ 成功压缩后重新带入 /
+ * 对话中其他重建（配置热更新、失败的压缩）补发了新快照。其他重建文本没变（不补发）时沿用上一次的来历。
  */
-export const SNAPSHOT_ORIGINS = ['start', 'resumed', 'compacted'] as const
+export const SNAPSHOT_ORIGINS = ['start', 'resumed', 'compacted', 'refreshed'] as const
 export type SnapshotOrigin = typeof SNAPSHOT_ORIGINS[number]
 
 /** 一个会话冻结快照时带入的记忆与用量。token 是插件估算（estimateTokens），界面带「约」。 */
@@ -774,6 +774,11 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     snapshotId: z.string().optional(),
     /** edit-memory / merge-memories：保留的那条写完后的文件（改了名称时文件名跟着变）；move-memory：移过去之后的文件。 */
     filePath: z.string().optional(),
+    /**
+     * resolve 两边都留：条目没有指纹（升级前导入的）、也现算不出（垂直冲突借来的会话拿不到基线），结论没记下、条目已移出账本，
+     * 下次体检同一对还会报，也没有可撤销的条目。
+     */
+    isUnrecorded: z.literal(true).optional(),
     /** draft-edit：模型给的改后稿。 */
     draft: memoryDraftSchema.optional(),
     /** model-info、draft-edit：借来的会话用的模型名；拿不到名字时缺省。 */

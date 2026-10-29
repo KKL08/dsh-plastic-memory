@@ -113,10 +113,11 @@ export class SnapshotStore {
 
   /**
    * 密钥硬删：所有含这些 id 的快照里把该记录脱敏（redactRecord），同快照的其他记录不动。
+   * isCopy：只删了一层的那份时只认那一层的副本，别层同 id 副本的快照不动；缺省不分层。
    * 每个快照经侧表 put 原子重写（tmp + rename）；内容没变的（不含这些 id、或已脱敏过）不写。
    */
-  redact(ids: ReadonlySet<string>): Promise<void> {
-    return this.serialize(() => this.redactNow(ids))
+  redact(ids: ReadonlySet<string>, isCopy: (r: SnapshotRecord) => boolean = () => true): Promise<void> {
+    return this.serialize(() => this.redactNow(r => ids.has(r.id) && isCopy(r)))
   }
 
   /**
@@ -140,10 +141,10 @@ export class SnapshotStore {
     return run
   }
 
-  private async redactNow(ids: ReadonlySet<string>): Promise<void> {
+  private async redactNow(isHit: (r: SnapshotRecord) => boolean): Promise<void> {
     for (const [, snap] of await this.table.list()) {
-      if (!snap.data.some(r => ids.has(r.id))) continue
-      const data = snap.data.map(r => (ids.has(r.id) ? redactRecord(r) : r))
+      if (!snap.data.some(isHit)) continue
+      const data = snap.data.map(r => (isHit(r) ? redactRecord(r) : r))
       // 说明一并遮：早先的快照落盘时还没遮过
       const description = maskDescription(snap.description)
       if (description !== snap.description || !isDeepStrictEqual(data, snap.data)) await this.table.put(snap.id, { ...snap, description, data })

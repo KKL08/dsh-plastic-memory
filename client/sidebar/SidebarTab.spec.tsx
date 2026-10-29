@@ -107,16 +107,16 @@ describe('SidebarTab 四种状态', () => {
     expect(openPage).toHaveBeenCalledWith({ view: 'library', scope: { kind: 'workspace', workspacePath: WS }, fromChat: true })
   })
 
-  it('frozenAt 早于插件本次加载（健康视图 bootedAt）：写「重启后未重新带入」，不画过时的用量条', () => {
+  it('frozenAt 早于插件本次加载（健康视图 bootedAt）：写「重启前带入的记忆」（快照一直在对话里），不画过时的用量条', () => {
     const { container } = setup({ library: library(pref, proj, glob), session: snapshot({ frozenAt: BOOTED - 1 }), pending: pending() })
-    expect(screen.getByText('重启后未重新带入')).toBeInTheDocument()
-    expect(screen.getByText(/^DeepSeek Harness 重启过，.*下方「带入的记忆」是重启前带入的/)).toBeInTheDocument()
+    expect(screen.getByText('重启前带入的记忆')).toBeInTheDocument()
+    expect(screen.getByText('DeepSeek Harness 重启过，对话里仍是重启前带入的这份记忆。继续对话后这里会更新；记忆有变化时会补发最新的一份。')).toBeInTheDocument()
     expect(container.querySelector('.pm-budget')).toBeNull()
   })
 
   it('健康视图没带 bootedAt：判断不了是否重启过，照常画用量条', () => {
     const { container } = setup({ library: library(pref, proj, glob), session: snapshot({ frozenAt: BOOTED - 1 }), pending: pending(), health: health(null) })
-    expect(screen.queryByText('重启后未重新带入')).toBeNull()
+    expect(screen.queryByText('重启前带入的记忆')).toBeNull()
     expect(container.querySelector('.pm-budget')).not.toBeNull()
   })
 
@@ -200,6 +200,12 @@ describe('SidebarTab 快照来历与分组', () => {
     setup({ library: library(pref, proj, glob), session: snapshot({ origin: 'resumed' }), pending: pending() })
     const usage = within(screen.getByRole('region', { name: '重新带入的记忆' }))
     expect(usage.getByText('对话中搜索到的记忆算普通上下文，不计入这里。')).toBeInTheDocument()
+    expect(screen.queryByText('对话开始时带入的记忆')).toBeNull()
+  })
+
+  it('对话中补发了新快照（配置热更新、记忆变了）：标题写「对话中重新带入的记忆」', () => {
+    setup({ library: library(pref, proj, glob), session: snapshot({ origin: 'refreshed' }), pending: pending() })
+    expect(screen.getByRole('region', { name: '对话中重新带入的记忆' })).toBeInTheDocument()
     expect(screen.queryByText('对话开始时带入的记忆')).toBeNull()
   })
 
@@ -678,6 +684,19 @@ describe('SidebarTab 跨项目确认', () => {
     expect(gateway.executed.map(e => e.command).at(-1)).toEqual({ cmd: 'resolve', decisionId: 'pd_1', verdict: 'keep-both', allowCrossWorkspace: true })
     expect(screen.getByText('以后体检不再把它们当冲突。')).toBeInTheDocument()
     expect(screen.queryByText(/属于 blog 项目/)).toBeNull()
+  })
+})
+
+describe('SidebarTab 裁决结论没记下', () => {
+  it('结果带 isUnrecorded（升级前导入、缺指纹的冲突）：写下次体检可能还会报，不给撤销', async () => {
+    setup(
+      { library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending(conflict) },
+      command => ({ ok: true, cmd: command.cmd, decisionId: 'pd_1', isUnrecorded: true }),
+    )
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '都保留' })) })
+    expect(screen.getByText('这次的决定没能记下，下次体检可能还会报。')).toBeInTheDocument()
+    expect(screen.queryByText('以后体检不再把它们当冲突。')).toBeNull()
+    expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
   })
 })
 

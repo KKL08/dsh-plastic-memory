@@ -304,9 +304,9 @@ describe('待处理：各类卡', () => {
   })
 
   it('命令失败：原话显示在卡片里', async () => {
-    setup([promote], { respond: () => ({ ok: false, code: 'governance-disabled', detail: '体检已关闭，可在插件设置里打开' }) })
+    setup([promote], { respond: () => ({ ok: false, code: 'governance-disabled', detail: '体检已关闭，可在配置文件里把 governance.enabled 改成 true 打开' }) })
     fireEvent.click(screen.getByRole('button', { name: '提升为全局' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('没有完成：体检已关闭，可在插件设置里打开')
+    expect(await screen.findByRole('alert')).toHaveTextContent('没有完成：体检已关闭，可在配置文件里把 governance.enabled 改成 true 打开')
   })
 })
 
@@ -379,6 +379,15 @@ describe('待处理：裁决后结果留原位、撤销', () => {
     await screen.findByText('以后体检不再把它们当冲突。')
     fireEvent.click(screen.getByRole('button', { name: '撤销' }))
     await waitFor(() => { expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'd-h' }) })
+  })
+
+  it('结论没记下（isUnrecorded，升级前导入、缺基线的冲突）：结果写下次体检可能还会报，不给撤销', async () => {
+    setup([vertical], { respond: command => ({ ok: true, cmd: command.cmd, decisionId: 'd-v', isUnrecorded: true }) })
+    fireEvent.click(screen.getByRole('button', { name: '保留这条记忆' }))
+    await screen.findByText('已保留这条记忆')
+    expect(screen.getByText('这次的决定没能记下，下次体检可能还会报。')).toBeInTheDocument()
+    expect(screen.queryByText('基线和记忆都不变时不再报。')).toBeNull()
+    expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
   })
 })
 
@@ -762,6 +771,10 @@ describe('待处理：可以整理', () => {
       '已过有效期', '很久没确认', '内容过长', '指向的旧记忆已不在',
     ])
     expect(groupOf().querySelector('.pm-marker')).toBeNull()
+    // 卡片只带中性的基础样式类，没有标记、着色一类的修饰类
+    const cards = within(groupOf()).getAllByRole('article')
+    expect(cards).toHaveLength(4)
+    for (const card of cards) expect([...card.classList]).toEqual(['pm-pending-item'])
   })
 
   // 动作行：退一步的幽灵按钮（「忽略」「打开文件」）排在最左，推荐的在最右
@@ -1206,6 +1219,9 @@ describe('待处理：直接改与直接合并', () => {
   it('含密钥的记忆不给「直接改」「直接合并」', () => {
     const pair: PendingItem = { kind: 'advice', level: 'advice', type: 'redundancy', memories: [memory({ id: 'x1', digest: 'sha1:x1', hasSecret: true }), memory({ id: 'x2', digest: 'sha1:x2' })] }
     setup([{ ...bloat, memories: [{ ...target, hasSecret: true }] }, pair])
+    // 两张卡确实渲染出来了（各有「打开文件」），否定断言才有意义
+    const cards = ['内容过长', '内容重复'].map(title => screen.getByRole('heading', { level: 3, name: title }).closest('article')!)
+    for (const card of cards) expect(within(card).getAllByRole('button', { name: '打开文件' }).length).toBeGreaterThan(0)
     expect(screen.queryByRole('button', { name: '直接改' })).toBeNull()
     expect(screen.queryByRole('button', { name: '直接合并' })).toBeNull()
   })
@@ -1519,6 +1535,9 @@ describe('待处理：让模型改与让模型合并', () => {
   it('含密钥的记忆：没有「让模型改」「让模型合并」，也不发请求', () => {
     const pair: PendingItem = { kind: 'advice', level: 'advice', type: 'redundancy', memories: [memory({ id: 'x1', digest: 'sha1:x1', hasSecret: true }), memory({ id: 'x2', digest: 'sha1:x2' })] }
     const { commands } = setup([{ ...bloat, memories: [{ ...target, hasSecret: true }] }, pair])
+    // 两张卡确实渲染出来了（各有「打开文件」），否定断言才有意义
+    const cards = ['内容过长', '内容重复'].map(title => screen.getByRole('heading', { level: 3, name: title }).closest('article')!)
+    for (const card of cards) expect(within(card).getAllByRole('button', { name: '打开文件' }).length).toBeGreaterThan(0)
     expect(screen.queryByRole('button', { name: '让模型改' })).toBeNull()
     expect(screen.queryByRole('button', { name: '让模型合并' })).toBeNull()
     expect(commands()).toEqual([])

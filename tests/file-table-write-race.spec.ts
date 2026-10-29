@@ -26,7 +26,11 @@ import { captureRejection } from './helpers/errors.ts'
 // 写路径锁内 locate 之后、写盘之前，别的宿主进程或用户改了这个文件：update 要在新内容上重算，put 要基于新的
 // 位置与附加字段重写，都不能拿旧读数盖掉新内容。fs 是进程边界：只给 readFile 套一层，在指定路径第 n 次读完
 // 之后用真实 writeFile 换掉内容（与 file-table-maintain-race.spec.ts 同法）。
-const { triggers } = vi.hoisted(() => ({ triggers: new Map<string, { afterRead: number; reads: number; text: string }>() }))
+// writeGate：让一次写临时文件停在半路直到放行，用来把写锁占住。
+const { triggers, writeGate } = vi.hoisted(() => ({
+  triggers: new Map<string, { afterRead: number; reads: number; text: string }>(),
+  writeGate: { current: undefined as { match: (path: string) => boolean; entered: () => void; release: Promise<void> } | undefined },
+}))
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
   const readFile = vi.fn(async (...args: Parameters<typeof actual.readFile>) => {
@@ -38,7 +42,16 @@ vi.mock('node:fs/promises', async importOriginal => {
     }
     return out
   })
-  return { ...actual, readFile }
+  const writeFile = vi.fn(async (...args: Parameters<typeof actual.writeFile>) => {
+    const g = writeGate.current
+    if (g !== undefined && g.match(String(args[0]))) {
+      writeGate.current = undefined
+      g.entered()
+      await g.release
+    }
+    return actual.writeFile(...args)
+  })
+  return { ...actual, readFile, writeFile }
 })
 
 /** 让 path 在第 afterRead 次被读完之后换成 text（只触发一次）。 */
@@ -55,6 +68,7 @@ let root: string
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-write-race-')) })
 afterEach(async () => {
   triggers.clear()
+  writeGate.current = undefined
   vi.restoreAllMocks()
   await rm(root, { recursive: true, force: true })
 })
@@ -83,6 +97,30 @@ describe('update：locate 之后文件被改，在新内容上重算再写', () 
     expect(seen).toEqual(['旧正文', '并发改的'])
     const fm = splitFrontmatter(await readFile(path, 'utf8'))
     expect(fm.body).toContain('并发改的')
+    expect(fm.data.summary).toBe('fn 改的摘要')
+  })
+
+  it('等锁期间文件被外部改了：update 拿到锁之后才读，fn 只被调一次、见到的就是外部改过的内容', async () => {
+    const path = await seed('竞态.md', record())
+    await seed('占锁.md', record({ id: 'mem_hold', name: '占锁' }))
+    const t = newTable()
+    let entered!: () => void
+    const isEntered = new Promise<void>(resolve => { entered = resolve })
+    let release!: () => void
+    writeGate.current = { match: p => p.startsWith(join(globalDir(), '占锁.md.tmp-')), entered, release: new Promise<void>(resolve => { release = resolve }) }
+    const holding = t.update('mem_hold', r => ({ ...r, content: '占锁的写' }))
+    await isEntered // 写锁被占着
+
+    const seen: string[] = []
+    const waiting = t.update('mem_race', r => { seen.push(r.content); return { ...r, summary: 'fn 改的摘要' } })
+    await writeFile(path, encodeRecord(record({ content: '等锁时外部改的' }), {}), 'utf8')
+    release()
+    await holding
+    await waiting
+
+    expect(seen).toEqual(['等锁时外部改的'])
+    const fm = splitFrontmatter(await readFile(path, 'utf8'))
+    expect(fm.body).toContain('等锁时外部改的')
     expect(fm.data.summary).toBe('fn 改的摘要')
   })
 

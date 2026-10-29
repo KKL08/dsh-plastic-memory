@@ -35,7 +35,7 @@ describe('查询切词', () => {
     expect(contentSegments('是不是')).toEqual([])
   })
 
-  it('去掉虚词后 2 到 4 字的中文词是关键词；分出多段或更长的按句子看，各段只计入覆盖度', () => {
+  it('去掉虚词后 2 到 4 字的中文词是关键词；分出多段或更长的按句子看，各段只计入覆盖度（问的那段除外）', () => {
     const g1 = groupsFor('缓存击穿 互斥锁')
     expect(labels(g1)).toEqual(['缓存击穿', '互斥锁'])
     expect(keywords(g1)).toEqual([true, true])
@@ -45,11 +45,22 @@ describe('查询切词', () => {
     const g3 = groupsFor('定时任务的执行时间怎么配置')
     expect(labels(g3)).toEqual(['定时任务', '执行时间', '配置'])
     expect(keywords(g3)).toEqual([false, false, false])
+    // 分出多段时，紧跟着疑问词（可带「是」）的那段是问的东西，长度合适就是关键词
+    const g5 = groupsFor('数据库连接池的密码是什么')
+    expect(labels(g5)).toEqual(['数据库连接池', '密码'])
+    expect(keywords(g5)).toEqual([false, true])
+    expect(keywords(groupsFor('部署脚本的超时是多少'))).toEqual([false, true])
+    expect(keywords(groupsFor('登录会话多久会过期'))).toEqual([true, false])
     // 剥掉虚词后只剩一段、长度合适，照样是关键词；只有虚词的段整个略过
     const g4 = groupsFor('模板 怎么热生效 吗')
     expect(labels(g4)).toEqual(['模板', '热生效'])
     expect(keywords(g4)).toEqual([true, true])
     expect(KEYWORD_MAX_CJK_CHARS).toBe(4)
+  })
+
+  it('英文虚词（冠词、介词、助动词、疑问词）同中文虚词：不算关键词，也不计入覆盖度', () => {
+    expect(labels(groupsFor('cache invalidation with Redis'))).toEqual(['cache', 'invalidation', 'Redis'])
+    expect(labels(groupsFor('How do I deploy to the staging server?'))).toEqual(['deploy', 'staging', 'server'])
   })
 
   it('英文词的标签去掉首尾标点；不产生 token 的词（纯数字、标点）跳过', () => {
@@ -105,11 +116,29 @@ describe('首条覆盖度判弱', () => {
     expect(judge('周报模板应该放在哪个目录', '邮件模板放在 templates 目录').weak).toBe(true)
   })
 
+  it('「X 的 Y 是什么」：问的那个词 Y 是关键词，首条话题对上、缺了 Y 就判弱', () => {
+    const v1 = judge('数据库连接池的密码是什么', '数据库连接池使用固定上限，最大连接数为 20。')
+    expect(v1.missingKeywords.map(labelOf)).toEqual(['密码'])
+    expect(v1.weak).toBe(true)
+    const v2 = judge('部署脚本的超时是多少', '部署脚本在 CI 里运行，失败时自动重试一次。')
+    expect(v2.missingKeywords.map(labelOf)).toEqual(['超时'])
+    expect(v2.weak).toBe(true)
+    // 首条写着 Y：不判弱
+    expect(judge('数据库连接池的密码是什么', '数据库连接池的密码放在密钥管理里，不写进配置').weak).toBe(false)
+  })
+
   it('关键词整个没在首条出现，即使其余都在也判弱：库里没有答案的查询', () => {
     const v = judge('证书 过期 续期', '登录会话七天过期，活跃时自动续期')
     expect(v.coverage).toBeGreaterThanOrEqual(WEAK_COVERAGE_BELOW)
     expect(v.missingKeywords.map(labelOf)).toEqual(['证书'])
     expect(v.weak).toBe(true)
+  })
+
+  it('英文查询里的介词、冠词没在首条出现，实词都在：不判弱', () => {
+    expect(judge('cache invalidation with Redis', 'Cache invalidation: Redis keys are deleted after each write').weak).toBe(false)
+    expect(judge('deploy to staging', 'Deploy staging builds from the release branch').weak).toBe(false)
+    // 实词缺了照样判弱
+    expect(judge('deploy to staging', 'Deploy production builds from the release branch').weak).toBe(true)
   })
 
   it('中文通用词加英文产品名：产品名没出现就判弱', () => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { posix } from 'node:path'
+import { zh as clientZh } from '../client/locales.ts'
 
 // 依赖方向守门：叶子 ← storage ← 记忆层 ← governance ← tools 执行器 ← GUI 层（gui/*）← tools 绑定层 ← 接线层（index.ts、domain-spec）。
 // 每层只能 import 本层及更低层（GUI 层可 import 执行器、不 import 绑定层，执行器不 import GUI 层）；框架包（@deepseek-ai/*）的运行时 import 只许绑定层与接线层
@@ -181,5 +182,51 @@ describe('import 方向：GUI 两条边', () => {
       violations.push(`${e.from} → ${e.spec}`)
     }
     expect(violations).toEqual([])
+  })
+})
+
+describe('治理层只经 KvTable 接口用侧表', () => {
+  it('governance/* 不 import 存储实现（sidecar、file-table）；对 storage/* 的引用全是 type-only，换存储后端只换实现', () => {
+    const violations = edges
+      .map(e => ({ ...e, to: resolveRelative(e.from, e.spec) }))
+      .filter(e => layerOf(e.from) === 'governance' && e.to !== undefined && e.to.startsWith('storage/'))
+      .filter(e => e.to === 'storage/sidecar' || e.to === 'storage/file-table' || !e.isTypeOnly)
+      .map(e => `${e.from} → ${e.to}${e.isTypeOnly ? '（type）' : ''}`)
+    expect(violations).toEqual([])
+    // 忽略表就是这样接进来的：只认 kv-table 的接口
+    expect(edges.filter(e => e.from === 'governance/advice-ignores').map(e => resolveRelative(e.from, e.spec) ?? e.spec)
+      .filter(to => to.startsWith('storage/') || to === 'kv-table')).toEqual(['kv-table'])
+  })
+})
+
+describe('client/ 不留无引用的代码与文案', () => {
+  const isSpec = (f: string) => /\.spec\.tsx?$/.test(f)
+  /** 构建入口（scripts/build-client.ts）与测试配置（vitest.config.ts 的 setupFiles）直接引用、不经 import 的文件。 */
+  const ROOTS = new Set(['client/index.tsx', 'client/test-setup.ts'])
+  const importedBy = (keep: (from: string) => boolean) => new Set(clientEdges
+    .filter(e => keep(e.from))
+    .map(e => resolveRelative(e.from, e.spec)?.replace(/\.tsx?$/, ''))
+    .filter((to): to is string => to !== undefined && to.startsWith('client/')))
+
+  it('每个非测试模块都被别的产品代码 import；测试辅助（*.fake、test-*）都被某个测试用到', () => {
+    const byProduct = importedBy(from => !isSpec(from))
+    const bySpec = importedBy(isSpec)
+    const isTestHelper = (f: string) => /(\.fake\.tsx?|\/test-[^/]+\.tsx?)$/.test(f)
+    const orphans = CLIENT_FILES.map(f => `client/${f}`)
+      .filter(f => !isSpec(f) && !ROOTS.has(f))
+      .filter(f => {
+        const mod = f.replace(/\.tsx?$/, '')
+        return isTestHelper(f) ? !bySpec.has(mod) && !byProduct.has(mod) : !byProduct.has(mod)
+      })
+    expect(orphans).toEqual([])
+  })
+
+  it('每条界面文案键都有引用：字面出现，或由带前缀的模板串拼出（如 `budget.part.${key}`）', () => {
+    const source = CLIENT_FILES.filter(f => !isSpec(f) && !f.startsWith('locales'))
+      .map(f => readFileSync(`${CLIENT_DIR}${f}`, 'utf8')).join('\n')
+    const isReferenced = (key: string) => ["'", '"', '`'].some(q => source.includes(`${q}${key}${q}`))
+      || [...key.matchAll(/\./g)].some(m => source.includes(`\`${key.slice(0, m.index + 1)}\${`))
+    expect(Object.keys(clientZh).length).toBeGreaterThan(0)
+    expect(Object.keys(clientZh).filter(key => !isReferenced(key))).toEqual([])
   })
 })

@@ -1,9 +1,10 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { MemoryStore, MemoryLogger } from '../store.ts'
 import type { KvTable } from '../kv-table.ts'
+import type { LocatedRecord } from '../storage/table.ts'
 import type { TypeRegistry } from '../type-registry.ts'
-import { isModelChange, type PendingDecisionsStore } from '../governance/decisions.ts'
+import { isModelChange, kindOf, type PendingDecisionsStore } from '../governance/decisions.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
 import type { MemorySnapshot, ScanCacheEntry } from '../governance/schema.ts'
 import { staleIgnores, type AdviceIgnoreStore } from '../governance/advice-ignores.ts'
@@ -62,6 +63,16 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
       if (snap !== undefined) modelChangeSnapshots.set(snap.id, snap)
     }
   }
+  // 提升候选按条目所在的项目取那一份（与提升命令定位同一份）：预读每个 id 只留一份，同 id 在别的项目也有时可能是那份
+  const candidateCopies = new Map<string, LocatedRecord>()
+  for (const e of open) {
+    const workspacePath = e.workspaces?.[0]
+    const r = data.byId.get(e.memoryIds[0] ?? '')
+    if (kindOf(e) !== 'promote-candidate' || workspacePath === undefined || workspacePath === 'global' || r === undefined) continue
+    if (r.scope === 'workspace' && r.workspacePath === workspacePath) continue
+    const hit = await deps.store.locate(r.id, { workspacePath, isExactLayer: true })
+    if (hit !== undefined && dirname(hit.filePath) === hit.dir) candidateCopies.set(e.id, { record: hit.record, filePath: hit.filePath, dir: hit.dir })
+  }
   const notes = listingNotes(listing, { includeEmpty: false })
   // 有缺标记或读不出的目录时，项目可能只是这次没认出来，不按「目录不在了」清它的体检记录
   const isListingComplete = !notes.some(n => n.code === 'marker-missing' || n.code === 'dir-unreadable')
@@ -95,6 +106,7 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
     governanceEnabled: deps.isGovernanceEnabled?.() ?? true,
     ...(deps.bootedAt !== undefined ? { bootedAt: deps.bootedAt } : {}),
     ...(modelChangeSnapshots !== undefined ? { modelChangeSnapshots } : {}),
+    candidateCopies,
   })
 }
 
@@ -265,25 +277,29 @@ export class ViewWriter {
   }
 
   private async writeWorkspaceMap(entries: ReadonlyArray<readonly [string, string]>): Promise<void> {
-    const map = this.workspaceMap ?? await this.readWorkspaceMap()
+    // 磁盘上是旧版本号的：客户端按版本认，不认就退回原始 cwd，内容没变也重写一次
+    const onDisk = this.workspaceMap === undefined ? await this.readWorkspaceMap() : undefined
+    const map = this.workspaceMap ?? onDisk!.cwds
     const next = { ...map }
     for (const [cwd, workspacePath] of entries) next[cwd] = workspacePath
-    if (entries.every(([cwd, workspacePath]) => map[cwd] === workspacePath)) { this.workspaceMap = next; return }
+    if (onDisk?.isOutdated !== true && entries.every(([cwd, workspacePath]) => map[cwd] === workspacePath)) { this.workspaceMap = next; return }
     const view: WorkspaceMapView = { version: GUI_VIEW_VERSION, cwds: next }
     await this.writeFile(GUI_WORKSPACE_MAP_FILE, view)
     this.workspaceMap = next
   }
 
   /**
-   * 磁盘上的旧对照；没有、读不懂（坏 JSON、形状不对）都从空表开始。不看版本号，只按 cwds 的形状读：视图版本升级时
-   * 对照的形状没变，整份丢掉会让之前见过的会话都失去归属（写出时照旧写当前版本）。
+   * 磁盘上的旧对照；没有、读不懂（坏 JSON、形状不对）都从空表开始。读时不看版本号，只按 cwds 的形状读：视图版本升级时
+   * 对照的形状没变，整份丢掉会让之前见过的会话都失去归属（写出时照旧写当前版本）。isOutdated：读到了、但版本号不是当前的。
    */
-  private async readWorkspaceMap(): Promise<Record<string, string>> {
+  private async readWorkspaceMap(): Promise<{ cwds: Record<string, string>; isOutdated: boolean }> {
     try {
-      const parsed = workspaceMapViewSchema.pick({ cwds: true }).safeParse(JSON.parse(await readFile(join(this.dir, GUI_WORKSPACE_MAP_FILE), 'utf8')))
-      return parsed.success ? { ...parsed.data.cwds } : {}
+      const json: unknown = JSON.parse(await readFile(join(this.dir, GUI_WORKSPACE_MAP_FILE), 'utf8'))
+      const parsed = workspaceMapViewSchema.pick({ cwds: true }).safeParse(json)
+      const isOutdated = (json as { version?: unknown } | null)?.version !== GUI_VIEW_VERSION
+      return parsed.success ? { cwds: { ...parsed.data.cwds }, isOutdated } : { cwds: {}, isOutdated: false }
     } catch {
-      return {}
+      return { cwds: {}, isOutdated: false }
     }
   }
 

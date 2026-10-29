@@ -200,6 +200,28 @@ describe('立即体检：体检中…', () => {
     expect(runButton()).not.toHaveAttribute('aria-disabled')
   })
 
+  it('体检中切到别的视图 tab、别的范围：完成后（含带新增的结果推来）停在用户切到的地方，不被带回发起体检的范围或处理视图', async () => {
+    const run = deferred()
+    const { nav, gateway } = open(APP, { respond: () => run.promise })
+    fireEvent.click(runButton())
+    // 同一范围先去别的视图 tab，按钮仍是体检中
+    fireEvent.click(screen.getByRole('tab', { name: /^记忆查看/ }))
+    expect(screen.getByRole('tab', { name: /^记忆查看/ })).toHaveAttribute('aria-selected', 'true')
+    expect(runButton()).toHaveTextContent('体检中…')
+    pick('blog')
+    fireEvent.click(screen.getByRole('tab', { name: /^最近删除/ }))
+    const where = { view: nav.get().view, scope: nav.get().scope }
+    expect(where).toEqual({ view: 'deleted', scope: BLOG })
+
+    await act(async () => { run.resolve({ ok: true, cmd: 'scan' }) })
+    const added = { checkupId: 'ck-new', by: 'manual' as const, completedAt: NOW, added: { keys: ['k1'], pending: 1, advice: 0 }, notes: [] }
+    const done = checkups()
+    act(() => { gateway.setView('checkups', { ...done, scopes: done.scopes.map(s => (s.scope.kind === 'workspace' && s.scope.workspacePath === '/w/app' ? { ...s, lastResult: added } : s)) }) })
+    expect({ view: nav.get().view, scope: nav.get().scope }).toEqual(where)
+    expect(screen.getByRole('tab', { name: /^最近删除/ })).toHaveAttribute('aria-selected', 'true')
+    expect(rail().getByRole('button', { name: /^blog/ })).toHaveAttribute('aria-current', 'true')
+  })
+
   it('本窗口发起「全部」：各范围的按钮也显示「体检中…」', () => {
     const run = deferred()
     open({ kind: 'all' }, { respond: () => run.promise })

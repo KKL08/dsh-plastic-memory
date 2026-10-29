@@ -40,7 +40,7 @@ function rowOf(text: string): HTMLElement {
 describe('最近删除英文单复数', () => {
   it('还剩 1 天写 1 day，多天写 days；不到一天单独写', () => {
     const view: DeletedView = { version: GUI_VIEW_VERSION, items: [
-      { memory: memory({ id: 'e1', content: 'one day left' }), deletedAt: NOW - 13 * DAY, purgeAt: NOW + 1.5 * DAY },
+      { memory: memory({ id: 'e1', content: 'one day left' }), deletedAt: NOW - 13 * DAY, purgeAt: NOW + DAY },
       { memory: memory({ id: 'e2', content: 'many days left' }), deletedAt: NOW - 2 * DAY, purgeAt: NOW + 12 * DAY },
       { memory: memory({ id: 'e3', content: 'hours left' }), deletedAt: NOW - 14 * DAY, purgeAt: NOW + DAY / 2 },
     ] }
@@ -48,6 +48,20 @@ describe('最近删除英文单复数', () => {
     expect(within(rowOf('one day left')).getByText('1 day left')).toBeInTheDocument()
     expect(within(rowOf('many days left')).getByText('12 days left')).toBeInTheDocument()
     expect(within(rowOf('hours left')).getByText('Less than a day left')).toBeInTheDocument()
+  })
+})
+
+describe('最近删除剩余天数', () => {
+  it('按天向上取整：刚删除的写「还能恢复 14 天」（和保留 14 天对得上），剩 1.5 天写 2 天，不到 1 天单独写', () => {
+    const view: DeletedView = { version: GUI_VIEW_VERSION, items: [
+      { memory: memory({ id: 'f1', content: 'just deleted' }), deletedAt: NOW - 60_000, purgeAt: NOW + 14 * DAY - 60_000 },
+      { memory: memory({ id: 'f2', content: 'a day and a half' }), deletedAt: NOW - 12.5 * DAY, purgeAt: NOW + 1.5 * DAY },
+      { memory: memory({ id: 'f3', content: 'hours' }), deletedAt: NOW - 13.9 * DAY, purgeAt: NOW + 0.1 * DAY },
+    ] }
+    renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { deleted: view } }))
+    expect(within(rowOf('just deleted')).getByText('还能恢复 14 天')).toBeInTheDocument()
+    expect(within(rowOf('a day and a half')).getByText('还能恢复 2 天')).toBeInTheDocument()
+    expect(within(rowOf('hours')).getByText('还能恢复不到 1 天')).toBeInTheDocument()
   })
 })
 

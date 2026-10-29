@@ -341,6 +341,30 @@ describe('createHostGateway', () => {
     await waitFor(() => { expect(opened.current).toEqual({ status: 'ready', data: settled }) })
   })
 
+  it('资源一直停在 not-found（新装后首次打开，视图目录当时还不存在）：refresh-views 后读到内容，本页命令成功后照样重读', async () => {
+    resources[fileAddress('s1', pendingPath)] = { status: 'failed', value: undefined, failure: { code: 'workspace-file/not-found', message: '' } }
+    const settled: PendingView = { ...pending, dot: 'none' }
+    const base = fakeCtx()
+    const ctx = fakeCtx({
+      remote: {
+        commands: {
+          execute: vi.fn(async (sid: string, line: string) => {
+            if (!line.startsWith('/memory resolve ')) return base.remote.commands.execute(sid, line, [])
+            executed.push(line)
+            files[pendingPath] = JSON.stringify(settled)
+            return { ok: true as const, value: { commandId: 'c', result: { kind: 'success' as const, text: JSON.stringify({ ok: true, cmd: 'resolve' }) } } }
+          }),
+        },
+      },
+    })
+    const gateway = createHostGateway(ctx)(props)
+    const { result } = renderHook(() => gateway.useView(gateway.useSession('/w/app'), 'pending'))
+    await waitFor(() => { expect(result.current).toEqual({ status: 'ready', data: pending }) })
+
+    await act(async () => { await gateway.execute('s1', { cmd: 'resolve', decisionId: 'd1', verdict: 'keep-left' }) })
+    await waitFor(() => { expect(result.current).toEqual({ status: 'ready', data: settled }) })
+  })
+
   it('localStorage 里已有 memoryRoot：不发命令直接订阅', async () => {
     localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
     resources[fileAddress('s1', pendingPath)] = { status: 'live', value: { absolutePath: 'x', version: 'v2' }, failure: undefined }

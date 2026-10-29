@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach, afterEach } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import fc from 'fast-check'
 import { chmod, mkdir, mkdtemp, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -6,15 +6,41 @@ import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { resolveDuplicates, type LocatedRecord } from '../src/storage/table.ts'
-import { ARCHIVE_DIR, GLOBAL_DIR, STATE_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
+import { ARCHIVE_DIR, GLOBAL_DIR, STATE_DIR, WORKSPACE_MARKER, deriveFileId, workspaceDirName } from '../src/storage/paths.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
 import { matchScore } from '../src/text.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
+import { MemoryStore } from '../src/store.ts'
 
 // 读侧内核：磁盘是唯一真相、读路径零写入、
 // 预筛是超集、加载期零 I/O。只测 FileTable；双后端一致的语义在 table-conformance.spec.ts。
+
+// 进程边界的闸门：让一次写临时文件停在半路，直到测试放行（看写锁被占着时读路径等不等）。没有闸门时原样透传。
+// reads：tracing 期间记下 readFile 读过的路径（看定位读了哪些文件的内容）。
+const { gate, reads } = vi.hoisted(() => ({
+  gate: { current: undefined as { match: (path: string) => boolean; entered: () => void; release: Promise<void> } | undefined },
+  reads: { tracing: false, paths: [] as string[] },
+}))
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  const readFile = vi.fn(async (...args: Parameters<typeof actual.readFile>) => {
+    if (reads.tracing) reads.paths.push(String(args[0]))
+    return actual.readFile(...args)
+  })
+  const writeFile = vi.fn(async (...args: Parameters<typeof actual.writeFile>) => {
+    const g = gate.current
+    if (g !== undefined && g.match(String(args[0]))) {
+      gate.current = undefined
+      g.entered()
+      await g.release
+    }
+    return actual.writeFile(...args)
+  })
+  return { ...actual, readFile, writeFile }
+})
+afterEach(() => { gate.current = undefined; reads.tracing = false; reads.paths = [] })
 
 const record = (partial: Partial<MemoryRecord> = {}) => baseRecord({
   id: 'mem_abc', name: '包管理用 pnpm', type: 'preference',
@@ -125,6 +151,51 @@ describe('读路径零写入', () => {
 
     expect(await treeSnapshot(root)).toEqual(before)
     expect(Object.keys(before)).not.toContain(STATE_DIR)
+  })
+})
+
+describe('读路径不加锁', () => {
+  it('写路径持锁、停在写临时文件的半路时，locate / readScope / listWorkspaceDirs 与 MemoryStore 的 get、readLayer 照常返回旧内容，不排在写锁后面', async () => {
+    const table = open()
+    const store = new MemoryStore(table)
+    const ws = '/home/dev/proj-lock'
+    const r = record({ id: 'mem_lock', name: '锁', scope: 'workspace', workspacePath: ws, content: '旧正文' })
+    await table.create(r)
+
+    let entered!: () => void
+    const isEntered = new Promise<void>(resolve => { entered = resolve })
+    let release!: () => void
+    gate.current = { match: path => path.startsWith(join(wsDir(ws), '锁.md.tmp-')), entered, release: new Promise<void>(resolve => { release = resolve }) }
+    const writing = table.update('mem_lock', cur => ({ ...cur, content: '新正文', updatedAt: cur.updatedAt + 1 }), { workspacePath: ws })
+    await isEntered // 写路径已在锁内、停在写临时文件之前
+
+    // 读路径都不等这把锁：写还没放行，它们就都返回了，读到的是旧内容
+    expect((await table.locate('mem_lock', { workspacePath: ws }))?.record.content).toBe('旧正文')
+    expect((await table.readScope([wsDir(ws)])).records.map(l => l.record.content)).toEqual(['旧正文'])
+    expect((await table.listWorkspaceDirs()).entries.map(e => e.workspacePath)).toEqual([ws])
+    expect((await store.get('mem_lock', { workspacePath: ws }))?.content).toBe('旧正文')
+    expect((await store.readLayer({ kind: 'workspace', path: ws })).records.map(l => l.record.content)).toEqual(['旧正文'])
+
+    release()
+    await writing
+    expect((await store.get('mem_lock', { workspacePath: ws }))?.content).toBe('新正文')
+  })
+})
+
+describe('派生 id 定位', () => {
+  it('还没写回 id 的手建文件：按路径重算哈希认出目标，目标文件只为解析读一次，不先读它的内容来找 id', async () => {
+    const { id: _id, ...noId } = record({ name: '手建', type: 'knowledge', content: '手写的正文' })
+    await seedGlobal('手建.md', noId as MemoryRecord)
+    await seedGlobal('别的.md', record({ id: 'mem_other', name: '别的' }))
+    const target = join(globalDir(), '手建.md')
+    const derived = deriveFileId(`${GLOBAL_DIR}/手建.md`)
+    const table = open()
+    reads.tracing = true
+    const hit = await table.locate(derived)
+    reads.tracing = false
+    expect(hit?.filePath).toBe(target)
+    expect(hit?.record).toMatchObject({ id: derived, name: '手建', content: '手写的正文' })
+    expect(reads.paths.filter(p => p === target)).toHaveLength(1)
   })
 })
 

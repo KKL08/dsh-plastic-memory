@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach, afterEach } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
@@ -27,6 +27,34 @@ import { SECRET_MASK } from '../src/secrets.ts'
 // 含密钥的记忆被遗忘时立即物理删除，所有快照里不留明文，且不破坏快照里的其他记录；
 // 疑似密钥保存时被拦下确认。
 // forget 场景全部用真实目录（FileTable + .state 侧表）。
+
+// 进程边界的失败注入：写快照重写的临时文件写到一半失败、或临时文件写完后 rename 失败（只触发一次）。
+// 不设故障时原样透传。
+type FsFault = { op: 'writeFile'; when: (path: string) => boolean } | { op: 'rename'; when: (from: string, to: string) => boolean }
+const { faults } = vi.hoisted(() => ({ faults: { next: undefined as FsFault | undefined } }))
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  const injected = () => Object.assign(new Error('ENOSPC: injected failure'), { code: 'ENOSPC' })
+  const writeFile = vi.fn(async (...args: Parameters<typeof actual.writeFile>) => {
+    const fault = faults.next
+    if (fault?.op === 'writeFile' && fault.when(String(args[0]))) {
+      faults.next = undefined
+      await actual.writeFile(args[0], String(args[1]).slice(0, Math.floor(String(args[1]).length / 2)), 'utf8')
+      throw injected()
+    }
+    return actual.writeFile(...args)
+  })
+  const rename = vi.fn(async (...args: Parameters<typeof actual.rename>) => {
+    const fault = faults.next
+    if (fault?.op === 'rename' && fault.when(String(args[0]), String(args[1]))) {
+      faults.next = undefined
+      throw injected()
+    }
+    return actual.rename(...args)
+  })
+  return { ...actual, writeFile, rename }
+})
+afterEach(() => { faults.next = undefined })
 
 const WS = '/home/dev/proj-s1'
 const SECRET_CRITICAL: RejectCode = 'secret-critical'
@@ -159,7 +187,7 @@ describe('密钥硬删', () => {
     expect((await readdir(snapDir())).filter(n => n.includes('.tmp-'))).toEqual([])
   })
 
-  it('验收场景：含三条记录的手动快照，硬删其中一条后另两条字节级不变、show 与 diff 正常、restore 恢复另两条并把脱敏那条计入 skipped 且说明已硬删；除被删文件外记忆目录目录项与 mtime 不变；重写中途失败只会是旧版或新版', async () => {
+  it('验收场景：含三条记录的手动快照，硬删其中一条后另两条字节级不变、show 与 diff 正常、restore 恢复另两条并把脱敏那条计入 skipped 且说明已硬删；除被删文件外记忆目录目录项与 mtime 不变；重写中途失败（临时文件写到一半、rename 失败）快照文件仍是完整旧版', async () => {
     const h = harness()
     await h.store.create(wsRec({ id: 'mem_x', name: '测试框架', content: '用 vitest' }))
     await h.store.create(wsRec({ id: 'mem_y', name: '提交语言', content: 'commit 用英文' }))
@@ -172,6 +200,30 @@ describe('密钥硬删', () => {
     const before = await mtimes()
     expect(before.has(zFile)).toBe(true)
     const inoBefore = (await stat(join(snapDir(), `${manual.snapshotId}.json`))).ino
+
+    // 重写中途失败：临时文件写到一半失败、临时文件写完后 rename 失败。forget 报错，快照文件逐字节仍是完整旧版，
+    // 被删文件也还在（先脱敏、后删文件），重跑 forget 即可
+    const snapPath = join(snapDir(), `${manual.snapshotId}.json`)
+    const oldBytes = await readFile(snapPath)
+    const midwayFaults: FsFault[] = [
+      { op: 'writeFile', when: path => path.startsWith(`${snapPath}.tmp-`) },
+      { op: 'rename', when: (_from, to) => to === snapPath },
+    ]
+    for (const fault of midwayFaults) {
+      faults.next = fault
+      await expect(h.forget(['mem_z'])).rejects.toThrow('injected failure')
+      expect(faults.next).toBeUndefined() // 故障确实在重写这份快照时触发
+      expect(await readFile(snapPath)).toEqual(oldBytes)
+      expect((await h.store.get('mem_z', { workspacePath: WS }))?.status).toBe('active')
+    }
+    // 两次失败各留下一个临时文件（写到一半的、没能改名的），都不当成快照；里面是脱敏后的新版，不含明文
+    const halfWritten = (await readdir(snapDir())).filter(n => n.includes('.tmp-'))
+    expect(halfWritten).toHaveLength(2)
+    for (const name of halfWritten) {
+      expect(name.startsWith(`${manual.snapshotId}.json.tmp-`)).toBe(true)
+      expect(await readFile(join(snapDir(), name), 'utf8')).not.toContain(SUSPECTED_TEXT)
+    }
+    expect((await h.snapshots.list()).find(s => s.id === manual.snapshotId)?.data.map(r => r.id)).toEqual(['mem_x', 'mem_y', 'mem_z'])
 
     const forgot = await h.forget(['mem_z'])
     expect(forgot.hardDeleted).toEqual(['mem_z'])
@@ -191,7 +243,7 @@ describe('密钥硬删', () => {
     expect(await rawRecordJson(manual.snapshotId, 'mem_y')).toBe(yBefore)
     expect(memorySnapshotSchema.safeParse((await rawSnapshot(manual.snapshotId)).json).success).toBe(true)
     expect((await stat(join(snapDir(), `${manual.snapshotId}.json`))).ino).not.toBe(inoBefore)
-    expect((await readdir(snapDir())).filter(n => n.includes('.tmp-'))).toEqual([])
+    expect((await readdir(snapDir())).filter(n => n.includes('.tmp-'))).toEqual(halfWritten)
 
     // show / diff 正常
     const shown = await h.snapshot({ action: 'show', snapshotId: manual.snapshotId })
@@ -200,6 +252,12 @@ describe('密钥硬删', () => {
     expect(shown.entries.filter(e => e.changedAfterSnapshot)).toEqual([])
     expect(shown.entries.find(e => e.id === 'mem_z')!.current).toBeUndefined()
     expect(shown.message).toContain('mem_z')
+
+    // 先把另两条软删（搬进 .archive/），restore 才是真的写回
+    const soft = await h.forget(['mem_x', 'mem_y'], '误删')
+    expect(soft.forgotten).toEqual(['mem_x', 'mem_y'])
+    expect(soft.hardDeleted).toEqual([])
+    for (const id of ['mem_x', 'mem_y']) expect((await h.store.get(id, { workspacePath: WS }))?.status).toBe('deleted')
 
     // restore：恢复另两条，脱敏那条计入 skipped 且说明已硬删，不把占位文本恢复成记忆
     const restored = await h.snapshot({ action: 'restore', snapshotId: manual.snapshotId })
@@ -210,6 +268,11 @@ describe('密钥硬删', () => {
     expect(restored.message).toContain('mem_z')
     expect(await h.store.get('mem_z', { workspacePath: WS })).toBeUndefined()
     expect(await allMemoryText()).not.toContain(REDACTED_PLACEHOLDER)
+    // 换一个新的存储实例回读：正文、状态与快照里一致，文件回到 workspace 顶层，.archive/ 里没有留副本
+    const fresh = harness()
+    expect(await fresh.store.get('mem_x', { workspacePath: WS })).toMatchObject({ name: '测试框架', content: '用 vitest', status: 'active' })
+    expect(await fresh.store.get('mem_y', { workspacePath: WS })).toMatchObject({ name: '提交语言', content: 'commit 用英文', status: 'active' })
+    expect((await listTree(wsDir())).filter(p => p.endsWith('.md') && p !== INDEX_FILE)).toEqual(['提交语言.md', '测试框架.md'])
     // overwriteChanged 也不恢复脱敏记录
     const forced = await h.snapshot({ action: 'restore', snapshotId: manual.snapshotId, overwriteChanged: true })
     if (forced.kind !== 'restored') throw new Error(forced.kind)

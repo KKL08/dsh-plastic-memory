@@ -2,6 +2,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { fileURLToPath } from 'node:url'
 import { MemoryStore } from '../src/store.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
@@ -173,14 +176,25 @@ describe('不变量（与权重无关）', { timeout: 60_000 }, () => {
 
 // ---- 聚合下限 ----
 //
-// 门槛 = 定稿参数下首次跑出的命中数减去余量（bigram 与 jieba 各一组）。只算进门槛的类别（48 条查询），首次结果：
-//   bigram top-1 43、top-3 48；jieba top-1 45、top-3 48。
-// 余量 top-1 留 2 条、top-3 留 1 条：调参或换分词器时允许个别查询换名次，掉得更多说明整体变差，先跑脚本看逐条差异。
+// 门槛就是本版（0.2.0）定稿参数下跑出的命中数，作为基线：只设下限、允许变好，掉一条就失败。
+// 只算进门槛的类别（48 条查询）：bigram top-1 43、top-3 48；jieba top-1 45、top-3 48。
+// 七个类别各自也按本版结果设下限，聚合数不变但类别之间此消彼长时同样能看出来。
+// 调参或换分词器后某条掉了名次，先跑 scripts/eval-search.ts 看逐条差异，确认是有意的取舍再改基线。
 
 interface Floor { top1: number; top3: number }
 const FLOORS: Record<'bigram' | 'jieba', Floor> = {
-  bigram: { top1: 41, top3: 47 },
-  jieba: { top1: 43, top3: 47 },
+  bigram: { top1: 43, top3: 48 },
+  jieba: { top1: 45, top3: 48 },
+}
+const CATEGORY_FLOORS: Record<'bigram' | 'jieba', Partial<Record<EvalQuery['category'], Floor>>> = {
+  bigram: {
+    'short-cjk': { top1: 9, top3: 11 }, 'long-cjk': { top1: 14, top3: 14 }, identifier: { top1: 5, top3: 5 },
+    'partial-word': { top1: 7, top3: 8 }, 'plain-name': { top1: 4, top3: 6 }, 'id-direct': { top1: 2, top3: 2 }, 'zero-token': { top1: 2, top3: 2 },
+  },
+  jieba: {
+    'short-cjk': { top1: 10, top3: 11 }, 'long-cjk': { top1: 14, top3: 14 }, identifier: { top1: 5, top3: 5 },
+    'partial-word': { top1: 7, top3: 8 }, 'plain-name': { top1: 5, top3: 6 }, 'id-direct': { top1: 2, top3: 2 }, 'zero-token': { top1: 2, top3: 2 },
+  },
 }
 
 function rankOf(q: EvalQuery, ids: string[]): number {
@@ -192,17 +206,27 @@ const GATED_QUERIES = EVAL_QUERIES.filter(q => ![...BASELINE_ONLY_CATEGORIES, ..
 
 describe('聚合下限', { timeout: 60_000 }, () => {
   for (const tier of ['bigram', 'jieba'] as const) {
-    it.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档 top-1 ≥ ${FLOORS[tier].top1}、top-3 ≥ ${FLOORS[tier].top3}（共 ${GATED_QUERIES.length} 条）`, async () => {
+    it.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档 top-1 ≥ ${FLOORS[tier].top1}、top-3 ≥ ${FLOORS[tier].top3}（共 ${GATED_QUERIES.length} 条），七个类别各自不低于本版结果`, async () => {
       useTier(tier)
       let top1 = 0
       let top3 = 0
+      const perCategory = new Map<string, Floor>()
       for (const q of GATED_QUERIES) {
         const r = rankOf(q, (await search(q.query)).hits.map(h => h.id))
-        if (r === 1) top1++
-        if (r <= 3) top3++
+        const c = perCategory.get(q.category) ?? { top1: 0, top3: 0 }
+        if (r === 1) { top1++; c.top1++ }
+        if (r <= 3) { top3++; c.top3++ }
+        perCategory.set(q.category, c)
       }
       expect(top1).toBeGreaterThanOrEqual(FLOORS[tier].top1)
       expect(top3).toBeGreaterThanOrEqual(FLOORS[tier].top3)
+      // 七个类别都有基线，没有漏的、也没有多出来没设基线的
+      expect([...perCategory.keys()].sort()).toEqual(Object.keys(CATEGORY_FLOORS[tier]).sort())
+      for (const [category, floor] of Object.entries(CATEGORY_FLOORS[tier])) {
+        const got = perCategory.get(category)!
+        expect(got.top1, `${category} top-1`).toBeGreaterThanOrEqual(floor!.top1)
+        expect(got.top3, `${category} top-3`).toBeGreaterThanOrEqual(floor!.top3)
+      }
     })
   }
 })
@@ -404,4 +428,29 @@ describe('命中弱', { timeout: 60_000 }, () => {
       })
     })
   }
+})
+
+describe('评估脚本 scripts/eval-search.ts --brief 的输出', () => {
+  const SCRIPT = fileURLToPath(new URL('../scripts/eval-search.ts', import.meta.url))
+  const METRICS = /^top-1 \d+\/\d+ {2}top-3 \d+\/\d+ {2}MRR \d\.\d{3}/
+
+  it('每种分词一行总览，下面按类别分行（换说法类单独成行、注明只记基线）；不打印调参对照', async () => {
+    const { stdout } = await promisify(execFile)(process.execPath, [SCRIPT, '--brief'], { maxBuffer: 16 * 1024 * 1024 })
+    const lines = stdout.split('\n')
+    const tiers = jiebaProbe === undefined ? ['bigram', 'jieba'] : ['bigram']
+    for (const tier of tiers) {
+      const at = lines.findIndex(l => l.startsWith(`${tier.padEnd(8)} top-1 `))
+      expect(at, `${tier} 总览行`).toBeGreaterThan(-1)
+      expect(lines[at]!.slice(9)).toMatch(METRICS)
+      const rows = lines.slice(at + 1, at + 1 + EVAL_CATEGORIES.length)
+      expect(rows.map(l => l.trim().split(/\s+/)[0])).toEqual([...EVAL_CATEGORIES])
+      for (const row of rows) expect(row.trim().replace(/^\S+\s+/, '')).toMatch(METRICS)
+      const baseline = rows.filter(l => BASELINE_ONLY_CATEGORIES.includes(l.trim().split(/\s+/)[0] as never))
+      expect(baseline.length).toBeGreaterThan(0)
+      for (const row of baseline) expect(row).toContain('只记基线')
+    }
+    expect(lines.filter(l => l.startsWith('## ')).map(l => l.split('（')[0]!.split('：')[0])).toEqual(
+      jiebaProbe === undefined ? ['## 两档指标', '## 逐条差异', '## 命中弱'] : ['## 两档指标', '## 命中弱'],
+    )
+  }, 60_000)
 })

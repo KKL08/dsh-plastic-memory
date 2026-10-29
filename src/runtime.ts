@@ -177,10 +177,12 @@ export class SnapshotCache {
     const landed = this.cache.get(session)
     if (landed && landed.generation === generation) return landed.text
     const contentOf = new Map(preread.records.map(r => [r.id, r.content]))
-    // 来历：有没认领的成功压缩就是压缩后；否则沿用上一份冻结的；本实例第一次冻结时看会话有没有更早的轮
+    // 来历：有没认领的成功压缩就是压缩后；其他重建文本变了（发送点会补发）是对话中重新带入，没变就沿用上一份冻结的；
+    // 本实例第一次冻结时看会话有没有更早的轮
     const compactedAt = this.compactions.get(session)
     const origin: Origin = compactedAt !== undefined ? { origin: 'compacted', compactedAt }
-      : landed?.origin ?? { origin: this.deps.hasEarlierTurns?.(session) ? 'resumed' : 'start' }
+      : landed === undefined ? { origin: this.deps.hasEarlierTurns?.(session) ? 'resumed' : 'start' }
+        : landed.text === text ? landed.origin : { origin: 'refreshed' }
     this.compactions.delete(session)
     this.cache.set(session, { text, generation, core: new Map(coreIds.map(id => [id, contentOf.get(id)!])), origin })
     await this.markRecalled(session, coreIds)

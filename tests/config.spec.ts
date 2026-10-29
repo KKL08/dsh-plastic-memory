@@ -14,6 +14,26 @@ describe('Config schema', () => {
     expect(value.governance.enabled.get()).toBe(true)
   })
 
+  it('空配置解析后的完整默认值逐字段锁住：加了字段或改了默认值都要在这里显式改', () => {
+    // volatile 引用取 .get() 的当前值，其余原样；undefined 的可选项（如用户词典路径）不出现
+    const plain = (v: unknown): unknown => {
+      if (v === null || typeof v !== 'object') return v
+      if (typeof (v as { get?: unknown }).get === 'function') return plain((v as { get(): unknown }).get())
+      return Object.fromEntries(Object.entries(v).filter(([, x]) => x !== undefined).map(([k, x]) => [k, plain(x)]))
+    }
+    expect(plain(new Config({} as never))).toEqual({
+      writeMode: 'proactive',
+      snapshotTokenBudget: 4000,
+      snapshotOverflow: 'relax',
+      evidenceLookup: 'strict',
+      template: 'coding',
+      customTypes: {},
+      governance: { enabled: true, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global' },
+      search: {},
+      memoryRoot: '',
+    })
+  })
+
   it('进 GUI 的字段是 volatile 引用（用时 .get()），writeMode 与 memoryRoot 不是', () => {
     const value = new Config({} as never)
     const refs = [

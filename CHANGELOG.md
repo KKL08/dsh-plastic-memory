@@ -42,6 +42,8 @@ All notable changes to this project are documented here. The format follows
   snapshot disagree about a memory, the snapshot wins, and that a memory the
   summary mentions but the snapshot no longer lists has been deleted or
   rewritten.
+- CI's package check now also requires `README.md` and `README.en.md` in
+  the published package.
 
 ### Fixed
 - Turning plastic-memory off and back on in the plugin page left its
@@ -57,6 +59,48 @@ All notable changes to this project are documented here. The format follows
   than what it replaces) no longer triggers a snapshot refresh either, since
   nothing was removed and a refresh would only add a second copy next to
   the old one.
+- Hard-deleting one copy of a memory that also exists in another layer
+  (global and a project, or two projects) no longer clears the other copy's
+  undo history, and no longer marks its snapshots as holding a secret, which
+  made restoring that copy fail. When a memory is hard-deleted because of a
+  secret, snapshots taken before it was promoted or moved are still redacted.
+- Choosing "Keep both" on a conflict carried over from 0.1.x, before the
+  first checkup after upgrading, is now remembered: the next checkup no
+  longer reports the same pair, and Undo works. When a decision cannot be
+  recorded, the result says the next checkup may report it again and offers
+  no Undo.
+- When the same memory exists in two projects, the saved-memories card in a
+  chat promotes the copy it shows, not the other one.
+- In chats started before the upgrade from a subfolder or a symlinked path,
+  delete, promote and view on the saved-memories card find the memory again.
+- Memories flagged only as a possible secret can be edited on the memory
+  page and handed to the model for a rewrite again; only memories that
+  clearly contain a secret stay read-only there. A merge whose removed memory holds
+  a secret is refused before anything changes, instead of updating the kept
+  memory first.
+- After DeepSeek Harness restarts, the memory tab in the right sidebar says
+  the chat still carries the memories brought in before the restart, instead
+  of saying none had been brought in. When memories are sent again mid-chat
+  because settings or memories changed, the tab and the composer button say
+  so instead of "brought in at chat start".
+- Recently deleted rounds the remaining days up, so a memory deleted a
+  moment ago shows 14 days left instead of 13.
+- Private key blocks whose lines start or end with a no-break space or a
+  full-width space, as text copied from web pages or typed with a Chinese
+  input method often does, are masked whole. Before, only the BEGIN line
+  was masked and the key body could show in snapshots and search results.
+- `memory_search` marks the top hit as weak when a question like
+  "数据库连接池的密码是什么" matches the topic but not the thing asked for,
+  so the model searches again instead of answering from an unrelated
+  memory. English articles, prepositions and auxiliaries such as "to" or
+  "with" no longer make an otherwise matching top hit look weak.
+- On a fresh install, the memory page updates after you delete a memory or
+  handle a card even if it was opened before its data files existed.
+  Before, it kept showing the old list until reloaded.
+- With checkups turned off, the error now points to `governance.enabled` in
+  the config file, and the note about ignored findings points to "Don't
+  remind me" in the memory page's To do view, instead of places that no
+  longer exist.
 
 ## [0.2.0-beta.1] - 2026-10-25
 

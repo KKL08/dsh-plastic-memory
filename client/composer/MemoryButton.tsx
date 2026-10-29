@@ -25,6 +25,7 @@ const COUNTS_LINE: Record<SnapshotOrigin, LocaleKey> = {
   start: 'composer.counts',
   resumed: 'composer.countsResumed',
   compacted: 'composer.countsCompacted',
+  refreshed: 'composer.countsRefreshed',
 }
 
 /** 分割占比句子用的标记，和宿主 ContextMeter 的 READING_SLOT 同法。 */

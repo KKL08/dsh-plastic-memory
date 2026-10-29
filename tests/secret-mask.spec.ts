@@ -189,6 +189,37 @@ describe('PGP 私钥块：同 PEM，从 BEGIN 到对应的 END 整块遮住', ()
     const block = [begin, ...body, end].map(line => `> ${line}  `).join('\n')
     expect(maskSecrets(`签名私钥：\n${block}\n用完删掉`)).toBe(`签名私钥：\n> ${SECRET_MASK}  \n用完删掉`)
   })
+
+  for (const [desc, ws] of [['NBSP', '\u00A0'], ['全角空格', '\u3000']] as const) {
+    it(`每行行首带${desc}（头字段行、base64 行都有）：照样整块遮住，正文不露`, () => {
+      const block = [begin, ...body, end].map(line => `${ws}${line}`).join('\n')
+      const masked = maskSecrets(`签名私钥：\n${block}\n用完删掉`)
+      expect(masked).toBe(`签名私钥：\n${ws}${SECRET_MASK}\n用完删掉`)
+      expect(masked).not.toContain(body[2])
+    })
+
+    it(`截断的粘贴、行首带${desc}：紧跟的头字段行和 base64 行都遮住`, () => {
+      const lines = [begin, ...body].map(line => `${ws}${line}`)
+      expect(maskSecrets(`前文\n${lines.join('\n')}\n后文`)).toBe(`前文\n${ws}${SECRET_MASK}\n后文`)
+    })
+  }
+
+  // 网页、富文本复制来的 NBSP，中文输入法打出的全角空格，换页符
+  for (const [desc, ws] of [['NBSP', '\u00A0'], ['全角空格', '\u3000'], ['换页符', '\f']] as const) {
+    it(`头字段行尾带${desc}：照样整块遮住，正文不露`, () => {
+      const block = [begin, `Version: TESTONLY${ws}`, ...body.slice(1), end].join('\n')
+      const masked = maskSecrets(`签名私钥：\n${block}\n用完删掉`)
+      expect(masked).toBe(`签名私钥：\n${SECRET_MASK}\n用完删掉`)
+      expect(masked).not.toContain(body[2])
+    })
+
+    it(`base64 正文行行尾带${desc}：照样整块遮住，后面的正文不露`, () => {
+      const block = [begin, body[0], body[1], `${body[2]}${ws}`, body[3], end].join('\n')
+      const masked = maskSecrets(`签名私钥：\n${block}\n用完删掉`)
+      expect(masked).toBe(`签名私钥：\n${SECRET_MASK}\n用完删掉`)
+      expect(masked).not.toContain(body[3])
+    })
+  }
 })
 
 describe('私钥块正则：行尾带空白的头字段、没有 END 行时不回溯爆炸', () => {
@@ -196,7 +227,7 @@ describe('私钥块正则：行尾带空白的头字段、没有 END 行时不�
   const headers = (trailing: string) => `Note: something here${trailing}\n`.repeat(30)
 
   for (const [label, begin] of [['PEM', FAKE_SECRET.pem], ['PGP', pgpBegin]] as const) {
-    for (const [desc, trailing] of [['一个空格', ' '], ['两个空格', '  ']] as const) {
+    for (const [desc, trailing] of [['一个空格', ' '], ['两个空格', '  '], ['NBSP', '\u00A0'], ['全角空格', '\u3000 ']] as const) {
       it(`${label}：BEGIN 后 30 行头字段、行尾${desc}，检测在 50ms 内完成，头字段照样遮住`, () => {
         const text = `前文\n${begin}\n${headers(trailing)}（后面省略）`
         const t = performance.now()
@@ -205,5 +236,13 @@ describe('私钥块正则：行尾带空白的头字段、没有 END 行时不�
         expect(maskSecrets(text)).toBe(`前文\n${SECRET_MASK}\n（后面省略）`)
       })
     }
+
+    it(`${label}：BEGIN 后 30 行头字段、行首行尾都是 NBSP，检测在 50ms 内完成，头字段照样遮住`, () => {
+      const text = `前文\n${begin}\n${`\u00A0Note: something here\u00A0\n`.repeat(30)}（后面省略）`
+      const t = performance.now()
+      expect(detectSecrets(text)).toEqual([{ name: `${label} 私钥块`, severity: 'critical' }])
+      expect(performance.now() - t).toBeLessThan(50)
+      expect(maskSecrets(text)).toBe(`前文\n${SECRET_MASK}\n（后面省略）`)
+    })
   }
 })

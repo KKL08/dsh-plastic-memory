@@ -15,7 +15,7 @@
  */
 import { useId, useMemo, useState } from 'react'
 import { RETENTION_MS, layerOfMemory, type GuiLayerRef, type LibraryView, type ModelChange } from '../../src/gui/contract.ts'
-import { samePath, useGateway, type BorrowedSession } from '../gateway.ts'
+import { samePath, useGateway, workspaceOf, type BorrowedSession } from '../gateway.ts'
 import { useT } from '../i18n.tsx'
 import type { NavTarget } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
@@ -173,10 +173,13 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
   const session = useMemo<BorrowedSession & { kind: 'ready' }>(() => ({ kind: 'ready', sessionId, cwd }), [sessionId, cwd])
   const typeLabel = useTypeLabel(session)
   const gateway = useGateway()
-  // 本项目记忆的层：工具结果里没有项目路径，取服务端给这个会话定的项目（会话视图），还没有时退回会话的工作目录
+  // 本项目记忆的层：工具结果里没有项目路径，取服务端给这个会话定的项目（会话视图）；没有会话视图的旧对话
+  // 按归属对照定（cwd 是子目录、软链路径时也落到项目上）
   const sessionView = gateway.useView(session, 'session')
+  const workspaceMap = gateway.useView(session, 'workspaces')
   const library = gateway.useView(session, 'library')
-  const workspacePath = (sessionView.status === 'ready' ? sessionView.data.workspacePath : undefined) ?? cwd
+  const workspacePath = (sessionView.status === 'ready' ? sessionView.data.workspacePath : undefined)
+    ?? workspaceOf(cwd, workspaceMap.status === 'ready' ? workspaceMap.data.cwds : {})
   const layerOf = (memory: SavedMemory['memory']): GuiLayerRef | undefined => layerOfMemory(memory)
     ?? (workspacePath === undefined ? undefined : { kind: 'workspace', workspacePath })
   // 提升过的按全局那一份写作用域，删除、撤销、查看详情也落在全局

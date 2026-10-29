@@ -600,9 +600,9 @@ export function createHostGateway(ctx: HostContext): BindGateway {
       // 沿用已读到的内容，不回到读取中（否则整页列表重挂，卡片上正在进行的编辑、生成都丢了）；「这次对话」视图的路径带会话 id，换会话照样重读
       const key = path ?? ''
       // 有版本按版本读，refresh-views 或本页的命令成功后也重读一次（宿主推新版本之前、或漏推时先读到重写的内容）；
-      // 资源还停在 not-found、但 refresh-views 已写过文件时，按刷新次数直接读一次
+      // 资源还停在 not-found、但 refresh-views 已写过文件时，按刷新次数直接读一次；宿主之后未必再推版本，命令成功后同样重读
       const commands = useSyncExternalStore(subscribeSucceeded, getSucceeded)
-      const trigger = version !== undefined ? `${version}#${rootState.refreshes}#${commands}` : isMissing && rootState.refreshes > 0 ? `refresh:${rootState.refreshes}` : undefined
+      const trigger = version !== undefined ? `${version}#${rootState.refreshes}#${commands}` : isMissing && rootState.refreshes > 0 ? `refresh:${rootState.refreshes}#${commands}` : undefined
       const [read, setRead] = useState<ReadState<ViewMap[N]> | undefined>(undefined)
       const isStillMissing = isMissing && trigger !== undefined && read?.key === key && read.trigger === trigger && read.view.status === 'missing'
       useEffect(() => { if (!isPassive && sessionId !== undefined && isStillMissing) root.revalidate(sessionId) }, [isPassive, sessionId, isStillMissing])

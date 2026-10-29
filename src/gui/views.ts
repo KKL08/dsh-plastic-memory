@@ -1,9 +1,9 @@
 import { relative, sep } from 'node:path'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { TypeRegistry } from '../type-registry.ts'
-import type { DirectoryNote } from '../storage/table.ts'
+import type { DirectoryNote, LocatedRecord } from '../storage/table.ts'
 import { RETENTION_MS } from '../retention.ts'
-import { hasSecret, maskSecretSurface, maskSecrets } from '../secrets.ts'
+import { hasCriticalSecret, maskSecretSurface, maskSecrets } from '../secrets.ts'
 import { computeDigest } from '../storage/frontmatter.ts'
 import { FINDING_TYPES, type FindingType, type MemorySnapshot, type PendingDecision } from '../governance/schema.ts'
 import { candidateFingerprint, isModelChange, kindOf, overflowLevelOf, overflowScopeOf, verdictLoser } from '../governance/decisions.ts'
@@ -49,6 +49,8 @@ export interface ViewInput {
   bootedAt?: number
   /** 模型改写、替代的改前快照（按快照 id）；缺省不列 modelChanges。 */
   modelChangeSnapshots?: ReadonlyMap<string, MemorySnapshot>
+  /** 提升候选条目所在项目的那一份（按条目 id），只列 data.byId 取到的是别层副本的；缺省按 byId。 */
+  candidateCopies?: ReadonlyMap<string, LocatedRecord>
 }
 
 export type GlobalViews = { pending: PendingView; health: HealthView; library: LibraryView; deleted: DeletedView }
@@ -88,7 +90,8 @@ function card(r: MemoryRecord, data: LayerPreread, filePath = data.filePaths.get
     ...(r.handEdited ? { handEdited: true } : {}),
     filePath,
     digest: computeDigest(r.name, r.summary, r.content),
-    ...(hasSecret(r) ? { hasSecret: true as const } : {}),
+    // 与遮盖同口径只看高危：疑似的界面上是原文，照着改不会写回占位文字
+    ...(hasCriticalSecret(r) ? { hasSecret: true as const } : {}),
   }
 }
 
@@ -115,9 +118,15 @@ export function buildPendingView(input: ViewInput): PendingView {
     const base = { decisionId: e.id, firstSeenAt: e.firstSeenAt }
     const kind = kindOf(e)
     if (kind === 'promote-candidate') {
-      // 记忆已不是本项目候选（模型直接 memory_promote、标记被清、记忆没了）：旧条目不显示，下次体检清掉
-      const r = data.byId.get(e.memoryIds[0] ?? '')
-      if (r?.status === 'active' && r.scope === 'workspace' && r.globalCandidate) items.push({ kind, level: PENDING_LEVEL_OF_KIND[kind], ...base, memory: card(r, data) })
+      // 记忆已不是本项目候选（模型直接 memory_promote、标记被清、记忆没了）：旧条目不显示，下次体检清掉。
+      // 取条目所在项目的那一份（提升命令定位的就是它），同 id 别的项目那份不算
+      const copy = input.candidateCopies?.get(e.id)
+      const r = copy?.record ?? data.byId.get(e.memoryIds[0] ?? '')
+      const workspacePath = e.workspaces?.[0]
+      const isOwnCopy = workspacePath === undefined || workspacePath === 'global' || r?.workspacePath === workspacePath
+      if (r?.status === 'active' && r.scope === 'workspace' && r.globalCandidate && isOwnCopy) {
+        items.push({ kind, level: PENDING_LEVEL_OF_KIND[kind], ...base, memory: card(r, data, copy?.filePath) })
+      }
     }
     else if (kind === 'overflow') {
       const scope = overflowScopeOf(e)

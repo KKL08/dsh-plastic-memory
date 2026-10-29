@@ -29,6 +29,14 @@ import { fakeExec } from './helpers/exec.ts'
 import { FAKE_SECRET, generatePrivateKeyPem } from './helpers/secrets.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
 
+// 进程边界：记下每次 rename 的目标路径（视图写入是 tmp + rename，一次 rename 就是一次文件替换）。其余原样透传。
+const { renames } = vi.hoisted(() => ({ renames: [] as string[] }))
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  const rename = async (...args: Parameters<typeof actual.rename>) => { renames.push(String(args[1])); return actual.rename(...args) }
+  return { ...actual, rename }
+})
+
 // 视图生成：真实临时目录（FileTable + .state 侧表）+ 账本 → 五种视图 JSON。只断言视图内容，不 mock 自己的模块。
 
 const WS = '/home/dev/proj-a'
@@ -439,6 +447,17 @@ describe('全部记忆视图', () => {
     expect(library.directoryIssues.find(i => i.code === 'duplicate-id')).toEqual({ code: 'duplicate-id', path: dup, keptPath: join(root, GLOBAL_DIR, '全局一条.md') })
   })
 
+  it('hasSecret 只标高危密钥：用户确认存下的疑似密钥照原文显示，不标（不挡就地编辑）', async () => {
+    const h = harness()
+    await h.store.create(g({ id: 'mem_crit', name: '部署凭证', content: `token ${FAKE_SECRET.sk}` }))
+    await h.store.create(g({ id: 'mem_sus', name: '测试库', content: '测试库 api_key: TESTONLY0000000000000000' }))
+    const { library } = await h.views()
+    const items = library.layers[0].items
+    expect(items.find(i => i.id === 'mem_crit')!.hasSecret).toBe(true)
+    expect(items.find(i => i.id === 'mem_sus')).toMatchObject({ content: '测试库 api_key: TESTONLY0000000000000000' })
+    expect(items.find(i => i.id === 'mem_sus')!.hasSecret).toBeUndefined()
+  })
+
   it('同 id 在 global 与本项目各一份：删掉 global 那份后本项目这份照常列出；删掉的那份进最近删除，不算同 id 副本', async () => {
     const h = harness()
     await h.store.create(g({ id: 'mem_same', name: '全局那份' }))
@@ -755,8 +774,12 @@ describe('视图写入', () => {
     await h.store.create(w({ id: 'mem_a', name: 'A' }))
     let collects = 0
     const writer = new ViewWriter({ memoryRoot: root, collect: () => { collects++; return collectGlobalViews(h.sourceDeps) } })
+    renames.length = 0
     await Promise.all([writer.request(['pending']), writer.request(['library']), writer.request(['pending'])])
     expect(collects).toBe(1)
+    // 文件系统边界：两个受影响的文件各替换一次，没受影响的不写
+    const viewPath = (name: GlobalViewName) => join(root, GUI_VIEW_DIR, GUI_VIEW_FILES[name])
+    expect(renames.filter(p => p.startsWith(join(root, GUI_VIEW_DIR))).sort()).toEqual([viewPath('library'), viewPath('pending')].sort())
     expect(pendingViewSchema.parse(await readView('pending')).items).toEqual([])
     expect(libraryViewSchema.parse(await readView('library')).layers[1].items.map((i: { id: string }) => i.id)).toEqual(['mem_a'])
     await expect(readFile(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES.health), 'utf8')).rejects.toThrow()
@@ -833,6 +856,15 @@ describe('视图写入', () => {
     expect(workspaceMapViewSchema.parse(JSON.parse(await readFile(mapPath, 'utf8')))).toEqual({
       version: GUI_VIEW_VERSION, cwds: { '/w/app/sub': '/w/app', '/w/blog': '/w/blog' },
     })
+  })
+
+  it('会话归属对照：旧版本号的对照里已有同样的条目，也按当前版本重写一次（客户端按版本认，不重写就一直退回原始 cwd）', async () => {
+    const mapPath = join(root, GUI_VIEW_DIR, GUI_WORKSPACE_MAP_FILE)
+    await mkdir(join(root, GUI_VIEW_DIR), { recursive: true })
+    await writeFile(mapPath, JSON.stringify({ version: GUI_VIEW_VERSION - 1, cwds: { '/w/app/sub': '/w/app' } }), 'utf8')
+    const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') } })
+    await writer.requestWorkspace('/w/app/sub', '/w/app')
+    expect(workspaceMapViewSchema.parse(JSON.parse(await readFile(mapPath, 'utf8')))).toEqual({ version: GUI_VIEW_VERSION, cwds: { '/w/app/sub': '/w/app' } })
   })
 
   it('会话归属对照：磁盘上的旧文件读不懂（坏 JSON、形状不对）就从空表重来', async () => {

@@ -12,6 +12,39 @@ import {
 } from '../src/governance/schema.ts'
 import { record } from './helpers/record.ts'
 
+// 进程边界的失败注入与观察：记录写文件 / 改名的路径，按条件让一次 writeFile（写到一半）或 rename 失败。
+// 不设故障时原样透传。
+type FsFault = { op: 'writeFile' | 'rename'; target: string }
+const { fsLog } = vi.hoisted(() => ({
+  fsLog: { fault: undefined as FsFault | undefined, writes: [] as string[], renames: [] as Array<[string, string]> },
+}))
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  const injected = () => Object.assign(new Error('ENOSPC: injected failure'), { code: 'ENOSPC' })
+  const writeFile = vi.fn(async (...args: Parameters<typeof actual.writeFile>) => {
+    const path = String(args[0])
+    fsLog.writes.push(path)
+    const fault = fsLog.fault
+    if (fault?.op === 'writeFile' && path.startsWith(`${fault.target}.tmp-`)) {
+      fsLog.fault = undefined
+      await actual.writeFile(path, String(args[1]).slice(0, Math.floor(String(args[1]).length / 2)), 'utf8')
+      throw injected()
+    }
+    return actual.writeFile(...args)
+  })
+  const rename = vi.fn(async (...args: Parameters<typeof actual.rename>) => {
+    fsLog.renames.push([String(args[0]), String(args[1])])
+    const fault = fsLog.fault
+    if (fault?.op === 'rename' && String(args[1]) === fault.target) {
+      fsLog.fault = undefined
+      throw injected()
+    }
+    return actual.rename(...args)
+  })
+  return { ...actual, writeFile, rename }
+})
+afterEach(() => { fsLog.fault = undefined; fsLog.writes = []; fsLog.renames = [] })
+
 const schemas = { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }
 
 function snap(id: string, partial: Partial<MemorySnapshot> = {}): MemorySnapshot {
@@ -130,7 +163,7 @@ describe('SidecarStore：四张表落 .state/', () => {
     expect((await a.recallStats.get('mem_a'))?.recallCount).toBe(5)
   })
 
-  it('原子写：并发写入后没有 tmp 残留，单文件表的并发 put 不丢条目（进程内串行）', async () => {
+  it('并发写入后没有 tmp 残留，单文件表的并发 put 不丢条目（进程内串行）', async () => {
     const s = new SidecarStore({ root, schemas })
     await Promise.all([
       ...Array.from({ length: 10 }, (_, i) => s.snapshots.put(`snap_${i}`, snap(`snap_${i}`))),
@@ -145,6 +178,62 @@ describe('SidecarStore：四张表落 .state/', () => {
     expect(files.filter(f => f.startsWith('scan-cache/'))).toHaveLength(10)
     expect(await s.recallStats.list()).toHaveLength(10)
   })
+
+  type Store = SidecarStore<MemorySnapshot, PendingDecision, ScanCacheEntry, { id: string }>
+  const sha1 = (key: string) => createHash('sha1').update(key).digest('hex')
+  /** 四张侧表各一组：先写旧值，再覆盖成新值；file 是这条落盘的文件，read 用另一个实例（另一个读者）读回。 */
+  const tables: Array<{ name: string; file: () => string; write: (s: Store, version: 'old' | 'new') => Promise<void>; read: (s: Store) => Promise<unknown> }> = [
+    {
+      name: 'snapshots', file: () => join(state, 'snapshots', 'snap_1.json'),
+      write: (s, v) => s.snapshots.put('snap_1', snap('snap_1', { description: `${v} 版说明` })),
+      read: s => s.snapshots.get('snap_1'),
+    },
+    {
+      name: 'pending', file: () => join(state, 'pending', 'pd_1.json'),
+      write: (s, v) => s.pending.put('pd_1', pd('pd_1', { summary: `${v} 版摘要` })),
+      read: s => s.pending.get('pd_1'),
+    },
+    {
+      name: 'scan-cache', file: () => join(state, 'scan-cache', `${sha1('/proj')}.json`),
+      write: (s, v) => s.scanCache.put('/proj', { ...cacheEntry('/proj'), scannedAt: v === 'old' ? 1 : 2 }),
+      read: s => s.scanCache.get('/proj'),
+    },
+    {
+      name: 'recall-stats', file: () => join(state, RECALL_STATS_FILE),
+      write: (s, v) => s.recallStats.put('mem_a', { id: 'mem_a', recallCount: v === 'old' ? 1 : 2, lastRecalledAt: null }),
+      read: s => s.recallStats.list(),
+    },
+  ]
+
+  it.each(tables.flatMap(t => (['writeFile', 'rename'] as const).map(op => ({ ...t, op }))))(
+    '原子写（$name）：覆盖已有数据时 $op 失败，读者只看到完整旧值；写入走临时文件 + rename，不原地覆盖',
+    async ({ file, write, read, op }) => {
+      const writer = new SidecarStore({ root, schemas })
+      await write(writer, 'old')
+      const oldBytes = await readFile(file())
+      const oldValue = await read(new SidecarStore({ root, schemas }))
+      expect(oldValue).toBeDefined()
+
+      fsLog.writes = []
+      fsLog.renames = []
+      fsLog.fault = { op, target: file() }
+      await expect(write(writer, 'new')).rejects.toThrow('injected failure')
+      expect(fsLog.fault).toBeUndefined() // 故障确实在这一次覆盖写里触发
+      // 没有直接写目标文件；写的是它旁边的临时文件
+      expect(fsLog.writes).not.toContain(file())
+      expect(fsLog.writes.some(p => p.startsWith(`${file()}.tmp-`))).toBe(true)
+      expect(await readFile(file())).toEqual(oldBytes)
+      expect(await read(new SidecarStore({ root, schemas }))).toEqual(oldValue)
+
+      // 同一实例下一次写照常成功，经临时文件 rename 成目标文件
+      fsLog.renames = []
+      await write(writer, 'new')
+      expect(fsLog.renames).toHaveLength(1)
+      expect(fsLog.renames[0]![0].startsWith(`${file()}.tmp-`)).toBe(true)
+      expect(fsLog.renames[0]![1]).toBe(file())
+      expect(await read(new SidecarStore({ root, schemas }))).not.toEqual(oldValue)
+    },
+  )
 
   it('坏 JSON 与不合 schema 的文件跳过并记日志，不抛；在途 tmp 文件不当成条目', async () => {
     const { warns, log } = makeLog()

@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { FileTable } from '../src/storage/file-table.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
 import { extractEntities } from '../src/text.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
@@ -6,6 +10,7 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
 import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
+import type { RecallStats } from '../src/storage/schema.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { editFingerprint } from '../src/governance/snapshots.ts'
 import { candidate } from './helpers/record.ts'
@@ -482,6 +487,27 @@ describe('runSavePipeline：有效期', () => {
     if (r.kind !== 'saved') throw new Error(r.kind)
     expect(r.record.validFrom).toBe(local(2026, 10, 1, 14, 37))
     expect(r.record.validTo).toBe(local(2026, 11, 5, 14, 37))
+  })
+
+  it.each([
+    ['带时分', { validFrom: '2026-11-01 09:30', validTo: '2026-11-05 18:00' }, () => [local(2026, 11, 1, 9, 30), local(2026, 11, 5, 18, 0)]],
+    ['只有日期', { validFrom: '2026-10-01', validTo: '2026-11-05' }, () => [local(2026, 10, 1, 14, 37), local(2026, 11, 5, 14, 37)]],
+  ] as const)('落库毫秒正确（%s）：从 store 回读、重新打开文件存储再读，两个字段都是换算后的毫秒', async (_label, partial, expected) => {
+    const [from, to] = expected()
+    const memory = new MemoryStore(new InMemoryTable())
+    const inMemory = await save(partial, memory)
+    if (inMemory.kind !== 'saved') throw new Error(inMemory.kind)
+    expect(await memory.get(inMemory.record.id, { workspacePath: '/proj' })).toMatchObject({ validFrom: from, validTo: to })
+
+    const root = await mkdtemp(join(tmpdir(), 'pm-validity-'))
+    try {
+      const open = () => new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>(), now: () => NOW }))
+      const saved = await save(partial, open())
+      if (saved.kind !== 'saved') throw new Error(saved.kind)
+      expect(await open().get(saved.record.id, { workspacePath: '/proj' })).toMatchObject({ validFrom: from, validTo: to })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('只给 validTo（截止时间）：validFrom 记写入时刻（到分钟）', async () => {
