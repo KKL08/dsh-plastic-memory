@@ -70,14 +70,16 @@ const FakeJieba: JiebaClass = {
   },
 }
 
-/** 可注入的假加载器，计数 import 与主词典读取次数。 */
+/** 可注入的假加载器，计数 import 与主词典读取次数；instances 数 withDict 建了几个分词器实例。 */
 function fakeLoader(opts: { importError?: Error; mainDictionaryError?: Error } = {}) {
   const calls = { importJieba: 0, readMainDictionary: 0 }
+  const instances = { count: 0 }
+  const Counted: JiebaClass = { withDict(dict) { instances.count++; return FakeJieba.withDict(dict) } }
   const loader: JiebaLoader = {
     async importJieba() {
       calls.importJieba++
       if (opts.importError) throw opts.importError
-      return FakeJieba
+      return Counted
     },
     readMainDictionary() {
       calls.readMainDictionary++
@@ -85,7 +87,7 @@ function fakeLoader(opts: { importError?: Error; mainDictionaryError?: Error } =
       return Buffer.from('宿主 3 n\n插件 3 n\n配置 3 n\n表单 3 n\n')
     },
   }
-  return { loader, calls }
+  return { loader, calls, instances }
 }
 
 function codedError(message: string, code: string): Error {
@@ -159,6 +161,24 @@ describe('jieba 档：懒加载与单例（注入加载器）', () => {
     const second = await executeSearch({ query: '宿主插件' }, fakeExec(), deps)
     expect(first.hits.map(h => h.id)).toEqual(['mem_host'])
     expect(second.hits.map(h => h.id)).toEqual(['mem_host'])
+    expect(calls).toEqual({ importJieba: 1, readMainDictionary: 1 })
+  })
+
+  it('一个进程只建一个分词器实例：不同会话各自的依赖、并发的首次搜索、之后的搜索都共用它', async () => {
+    const { loader, calls, instances } = fakeLoader()
+    resetJieba(loader)
+    const session = (id: string, workspacePath?: string): SearchToolDeps => {
+      const store = new MemoryStore(new InMemoryTable())
+      return { store, registry, resolveContext: async () => ({ workspacePath, session: { id, lastSeq: 1 } }) }
+    }
+    const sessions = [session('s-a'), session('s-b', '/home/dev/proj-a'), session('s-c', '/home/dev/proj-b')]
+    for (const deps of sessions) await deps.store.put(record({ id: 'mem_host', content: '宿主插件页的配置表单' }))
+
+    const firsts = await Promise.all(sessions.map(deps => executeSearch({ query: '配置表单' }, fakeExec(), deps)))
+    for (const r of firsts) expect(r.hits.map(h => h.id)).toEqual(['mem_host'])
+    for (const deps of sessions) await executeSearch({ query: '宿主插件' }, fakeExec(), deps)
+
+    expect(instances.count).toBe(1)
     expect(calls).toEqual({ importJieba: 1, readMainDictionary: 1 })
   })
 
