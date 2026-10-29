@@ -29,6 +29,14 @@ import { fakeExec } from './helpers/exec.ts'
 import { FAKE_SECRET, generatePrivateKeyPem } from './helpers/secrets.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
 
+// 进程边界：记下每次 rename 的目标路径（视图写入是 tmp + rename，一次 rename 就是一次文件替换）。其余原样透传。
+const { renames } = vi.hoisted(() => ({ renames: [] as string[] }))
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  const rename = async (...args: Parameters<typeof actual.rename>) => { renames.push(String(args[1])); return actual.rename(...args) }
+  return { ...actual, rename }
+})
+
 // 视图生成：真实临时目录（FileTable + .state 侧表）+ 账本 → 五种视图 JSON。只断言视图内容，不 mock 自己的模块。
 
 const WS = '/home/dev/proj-a'
@@ -766,8 +774,12 @@ describe('视图写入', () => {
     await h.store.create(w({ id: 'mem_a', name: 'A' }))
     let collects = 0
     const writer = new ViewWriter({ memoryRoot: root, collect: () => { collects++; return collectGlobalViews(h.sourceDeps) } })
+    renames.length = 0
     await Promise.all([writer.request(['pending']), writer.request(['library']), writer.request(['pending'])])
     expect(collects).toBe(1)
+    // 文件系统边界：两个受影响的文件各替换一次，没受影响的不写
+    const viewPath = (name: GlobalViewName) => join(root, GUI_VIEW_DIR, GUI_VIEW_FILES[name])
+    expect(renames.filter(p => p.startsWith(join(root, GUI_VIEW_DIR))).sort()).toEqual([viewPath('library'), viewPath('pending')].sort())
     expect(pendingViewSchema.parse(await readView('pending')).items).toEqual([])
     expect(libraryViewSchema.parse(await readView('library')).layers[1].items.map((i: { id: string }) => i.id)).toEqual(['mem_a'])
     await expect(readFile(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES.health), 'utf8')).rejects.toThrow()

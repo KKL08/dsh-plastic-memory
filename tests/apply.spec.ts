@@ -1717,6 +1717,20 @@ describe('配置热生效（loader/volatile-update）', () => {
     for (const file of Object.values(GUI_VIEW_FILES)) await stat(join(t.memoryRoot, GUI_VIEW_DIR, file))
   })
 
+  it('配置热更新一次：每个全局视图文件恰好替换一次（在文件系统边界数 rename）', async () => {
+    const t = await setup()
+    const viewDir = join(t.memoryRoot, GUI_VIEW_DIR)
+    fsTrace.calls = []
+    fsTrace.on = true
+    try {
+      await t.update({ governance: { health: { sensitivity: 'proactive' } } })
+    } finally {
+      fsTrace.on = false
+    }
+    const replaced = (file: string) => fsTrace.calls.filter(c => c.startsWith(`fs/promises.rename(${join(viewDir, file)}.tmp-`)).length
+    expect(Object.fromEntries(Object.values(GUI_VIEW_FILES).map(f => [f, replaced(f)]))).toEqual(Object.fromEntries(Object.values(GUI_VIEW_FILES).map(f => [f, 1])))
+  })
+
   // 观察切法：查询「插件记忆」，记录只写了「插件的记忆」。只用主词典时查询切成 插件 / 记忆，记录全命中；
   // 用户词典加了「插件记忆」后查询多出这个整词，记录只部分命中，结果带 or-fallback。
   it.skipIf(!hasRealJieba)('改 search.userDictionaryPath：下一次 memory_search 按新词典切分，清空回到只用主词典', async () => {
