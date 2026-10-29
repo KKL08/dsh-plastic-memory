@@ -1613,7 +1613,9 @@ describe('配置热生效（loader/volatile-update）', () => {
     /** 宿主压缩结束（成功不带 error，失败带 error）。 */
     const endCompaction = (time: number, error?: string) => ctx.listeners.get('session/event')!(session,
       { type: 'compaction/end', time, data: { compactionId: 'cmp_1', turn: 1, ...(error === undefined ? {} : { error }) } })
-    return { memoryRoot, defs, config, assembleOnce, update, tool, exec, save, command, sessionView, putGlobal, endCompaction }
+    /** 会话里一共发过几份快照消息（含已被后来那份取代的）。 */
+    const snapshotCount = () => session.deriveMessages().filter(m => m.source.kind === SNAPSHOT_SOURCE_KIND).length
+    return { memoryRoot, defs, config, assembleOnce, snapshotCount, update, tool, exec, save, command, sessionView, putGlobal, endCompaction }
   }
 
   it('改上限、超限处理、溯源档位后，同一会话下一次组装就按新值（不等压缩）', async () => {
@@ -1633,6 +1635,25 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect(second).not.toContain('- [mem_k]') // 严格按 1.5 token 的上限：这条装不下
     // 上限是 number（配置就是 number），会话视图原样带出
     await t.sessionView(v => expect(v).toMatchObject({ budget: 1.5, overflowMode: 'strict', injectedIds: [], omittedCount: 1 }))
+  })
+
+  it('热更新后组装出的文本没变就不发：只在文本变了时恰好多一份', async () => {
+    const t = await setup()
+    await t.putGlobal({ id: 'mem_k', type: 'knowledge', name: '报销截止', content: '报销截止每月 25 日', summary: '报销截止日' })
+    const first = await t.assembleOnce()
+    expect(t.snapshotCount()).toBe(1)
+
+    // 放宽上限：这条本来就装得下，文本不变；会话视图换成新上限，说明这次热更新确实重新组装过
+    expect(await t.update({ snapshotTokenBudget: 8000 })).toEqual([['snapshotTokenBudget']])
+    expect(await t.assembleOnce()).toBe(first)
+    await t.sessionView(v => expect(v).toMatchObject({ budget: 8000, injectedIds: ['mem_k'] }))
+    expect(t.snapshotCount()).toBe(1)
+
+    expect(await t.update({ snapshotTokenBudget: 8000, evidenceLookup: 'active' })).toEqual([['evidenceLookup']])
+    expect(await t.assembleOnce()).toContain(EVIDENCE_GUIDANCE.active)
+    expect(t.snapshotCount()).toBe(2)
+    expect(await t.assembleOnce()).toContain(EVIDENCE_GUIDANCE.active)
+    expect(t.snapshotCount()).toBe(2)
   })
 
   it('改模板与自定义类型：memory_save 重注册（类型枚举重算），写时只认新模板，带入按新类型定义', async () => {
