@@ -784,6 +784,52 @@ async function dispatch(
       return { ok: true, cmd }
     }
 
+    case 'migrate-type': {
+      const listing = await deps.store.listWorkspaceDirs()
+      const layers: GuiLayerRef[] = [{ kind: 'global' }, ...[...new Set(listing.entries.map(e => e.workspacePath))].sort().map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
+      let migrated = 0
+      let skippedSecrets = 0
+      const failures: string[] = []
+      for (const layer of layers) {
+        const workspacePath = layer.kind === 'workspace' ? layer.workspacePath : undefined
+        const read = await deps.store.readLayer(layer.kind === 'global' ? layer : { kind: 'workspace', path: layer.workspacePath }, { includeArchive: true })
+        const matched = read.records.map(l => l.record).filter(r => r.type === command.from)
+        if (command.action === 'retype') {
+          for (const r of matched) {
+            // 锁内复核：读到之后被别处改了类型的不动；只改类型，更新、确认时间照旧（不改衰退计时）
+            let isChanged = false
+            try {
+              await deps.store.update(r, current => {
+                if (current.type !== command.from) return current
+                isChanged = true
+                return { ...current, type: command.to! }
+              }, { workspacePath, isExactLayer: true })
+            } catch (error) {
+              failures.push(`${r.id}：${error instanceof Error ? error.message : String(error)}`)
+              continue
+            }
+            if (isChanged) migrated++
+          }
+          continue
+        }
+        const ids = matched.filter(r => r.status === 'active').map(r => r.id)
+        if (ids.length === 0) continue
+        const r = await executeForget(
+          { ids, reason: `用户在设置页删除或改名类型 ${command.from}`, allowCrossWorkspace: true },
+          gov, executorDeps, { isSoftOnly: true, target: layer },
+        )
+        migrated += r.forgotten.length
+        skippedSecrets += r.skippedSecrets?.length ?? 0
+        if (!r.ok && r.forgotten.length === 0 && (r.skippedSecrets?.length ?? 0) === 0) failures.push(r.message)
+      }
+      if (failures.length > 0) {
+        // 已经改了的照样重写视图（成功时由 runMemoryCommand 统一重写）
+        if (migrated > 0) await deps.views.request()
+        return fail(cmd, 'failed', `${failures.length} 处没处理成功，可以重试：${failures.join('；')}`)
+      }
+      return { ok: true, cmd, migrated, ...(command.action === 'forget' ? { skippedSecrets } : {}) }
+    }
+
     case 'refresh-views':
       await deps.decisions.sweep(now)
       await deps.views.rewriteAll()
