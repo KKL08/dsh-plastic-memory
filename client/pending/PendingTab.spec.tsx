@@ -227,9 +227,9 @@ describe('待处理：各类卡', () => {
     const { container } = setup([other, cross])
     const metas = [...container.querySelectorAll('.pm-mc-meta')].map(el => el.textContent)
     expect(metas).toHaveLength(3)
-    expect(metas[0]).toMatch(/·blog·/)
-    expect(metas[1]).toMatch(/·本项目·/)
-    expect(metas[2]).toMatch(/·blog·/)
+    expect(metas[0]).toMatch(/^行为偏好blog你/)
+    expect(metas[1]).toMatch(/^行为偏好本项目你/)
+    expect(metas[2]).toMatch(/^行为偏好blog你/)
   })
 
   it('候选是否在别的项目：按会话归属判断（对照里的软链接、项目子目录都算本项目；嵌套子项目里的会话看外层的记忆算别的项目）', () => {

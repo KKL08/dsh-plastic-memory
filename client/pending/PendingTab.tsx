@@ -23,6 +23,7 @@ import { compareLayers, isInScope, scopeName, useNavTarget, type NavStore, type 
 import { Button } from '../ui/Button.tsx'
 import { Chip } from '../ui/Chip.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
+import { Icon } from '../ui/Icon.tsx'
 import { Arrival, useArrivals } from '../ui/motion.tsx'
 import { StatusMarker } from '../ui/StatusMarker.tsx'
 import { ActionFeedback, crossConfirmCss, ItemSending, useItemAction } from './action.tsx'
@@ -399,9 +400,7 @@ function Ignored({ entries, session }: { entries: ReadonlyArray<{ item: IgnoredI
         <span>{label}</span>
         <button type="button" className="pm-ignored-toggle" aria-expanded={isOpen} aria-controls={listId} onClick={() => { setOpen(!isOpen) }}>
           {t(isOpen ? 'pending.ignored.hide' : 'pending.ignored.show')}
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M7 10l5 5 5-5" />
-          </svg>
+          <Icon name="chevronDownMedium" size={12} />
         </button>
       </p>
       {isOpen
@@ -498,8 +497,6 @@ export const pendingCss = crossConfirmCss + editCss + modelEditCss + moveCss + `
 .pm-pending-hint .pm-link { margin-left: 8px; font-size: 12px; }
 .pm-pending-error { margin: 6px 0 0; font-size: 12px; line-height: 1.5; color: var(--pm-text); }
 .pm-pending-refused { margin: 0; padding: 12px 0; font-size: 12px; line-height: 1.5; color: var(--pm-text); }
-.pm-pending-result { display: flex; align-items: center; gap: 12px; }
-.pm-pending-result .pm-pending-text { flex: 1; }
 .pm-pending-item--result { transition: opacity 120ms ease-out; }
 @starting-style { .pm-pending-item--result { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .pm-pending-item--result { transition: none; } }

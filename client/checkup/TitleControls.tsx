@@ -17,6 +17,7 @@ import { baseName, formatNumber, useT, type Translate } from '../i18n.tsx'
 import { scopeName, type PageScope } from '../nav.ts'
 import { parsePositiveInt } from '../settings/config.ts'
 import { Button } from '../ui/Button.tsx'
+import { Icon } from '../ui/Icon.tsx'
 import type { CheckupRuns } from './runs.ts'
 
 /** 「每 N 天」输入框起始的天数（当前不是每 N 天时）。 */
@@ -312,9 +313,7 @@ function AutoCheckup({ scope, session, view }: { scope: PageScope; session: Borr
       >
         <span className="pm-auto-label">{t('checkup.auto')}</span>
         <span className="pm-auto-value">{value}</span>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <path d="M8 9l4-4 4 4M8 15l4 4 4-4" />
-        </svg>
+        <Icon name="chevronsUpDown" size={14} />
       </button>
       {isOpen
         ? (
@@ -405,7 +404,7 @@ function Check({ isChecked }: { isChecked: boolean }) {
   return (
     <span className="pm-auto-check" aria-hidden="true">
       {isChecked
-        ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
+        ? <Icon name="check" size={14} />
         : null}
     </span>
   )

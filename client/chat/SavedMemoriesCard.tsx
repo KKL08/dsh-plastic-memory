@@ -20,13 +20,13 @@ import { useT } from '../i18n.tsx'
 import type { NavTarget } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { useTypeLabel } from '../library/shared.tsx'
+import { Icon } from '../ui/Icon.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { withRollingNumber } from '../ui/motion.tsx'
 import { keepFocusInPlace } from '../ui/focus-return.ts'
-import { TrashIcon } from '../ui/TrashIcon.tsx'
 import { crossConfirmCss, DeleteWithConfirm, SecretDeleteConfirm } from '../pending/action.tsx'
 import { promoteInPlaceCss, promotionOf, usePromoteInPlace, type InPlacePromotion } from '../pending/promote-in-place.tsx'
-import { ModelChangeLine, RewrittenChip, modelChangeCss } from '../pending/model-change.tsx'
+import { ModelChangeLine, modelChangeCss } from '../pending/model-change.tsx'
 import type { SavedMemory } from './saved-turn.ts'
 
 /** 卡片挂上时最近一条记下不超过这么久，算对话进行中刚出现的；翻历史时的卡都更早。 */
@@ -86,7 +86,6 @@ function SavedRow({ session, item, layer, promotion, rewrite, superseded, expire
   const savedAt = Number.isFinite(item.memory.updatedAt) && item.memory.updatedAt > 0 ? item.memory.updatedAt : firstSeen
   const how = gateway.useDeletions().of(id, layer, savedAt)
   const [state, setState] = useState<RowState>({ kind: 'idle' })
-  const chip = <>{item.isUpdate === true ? <RewrittenChip /> : null}{promote.chip}</>
   const changes = (
     <>
       {rewrite !== undefined ? <ModelChangeLine session={session} change={rewrite} kind="rewrite" after={item.memory} /> : null}
@@ -108,8 +107,8 @@ function SavedRow({ session, item, layer, promotion, rewrite, superseded, expire
     return (
       <div className="pm-saved-row" data-memory-id={id}>
         <div className="pm-saved-main">
-          <MemoryCard memory={item.memory} now={now} typeLabel={typeLabel(item.memory.type)} chip={chip} />
-          <p className="pm-saved-note pm-saved-note--meta">{t('pending.result.wroteAgentsMdBody')}</p>
+          <MemoryCard memory={item.memory} now={now} typeLabel={typeLabel(item.memory.type)} />
+          {promote}
         </div>
       </div>
     )
@@ -132,8 +131,8 @@ function SavedRow({ session, item, layer, promotion, rewrite, superseded, expire
   return (
     <div className="pm-saved-row" data-memory-id={id}>
       <div className="pm-saved-main">
-        <MemoryCard memory={item.memory} now={now} typeLabel={typeLabel(item.memory.type)} chip={chip} />
-        {promote.controls}
+        <MemoryCard memory={item.memory} now={now} typeLabel={typeLabel(item.memory.type)} />
+        {promote}
         {changes}
         {state.kind === 'failed' ? <p className="pm-saved-note">{t('chat.card.failed', { detail: state.detail })}</p> : null}
         {state.kind === 'secret'
@@ -154,7 +153,7 @@ function SavedRow({ session, item, layer, promotion, rewrite, superseded, expire
             aria-disabled={state.kind === 'busy' || state.kind === 'secret' || undefined}
             onClick={() => { if (state.kind !== 'busy' && state.kind !== 'secret') open() }}
           >
-            <TrashIcon />
+            <Icon name="trash" size={14} />
           </button>
         )}
       />
@@ -302,7 +301,6 @@ export const savedMemoriesCardCss = crossConfirmCss + promoteInPlaceCss + modelC
 .pm-saved-row--deleted { align-items: center; justify-content: space-between; }
 .pm-saved-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .pm-saved-note { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
-.pm-saved-note--meta { padding-left: 14px; }
 .pm-icon-btn {
   flex: none; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px;
   padding: 0; border: 0; border-radius: var(--dsw-radius-sm, 8px); background: none; color: var(--pm-text-2); cursor: pointer;

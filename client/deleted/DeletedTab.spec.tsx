@@ -91,7 +91,7 @@ describe('最近删除', () => {
     renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { deleted, library } }))
     const a = rowOf('测试用 sqlite')
     expect(a.querySelector('.pm-del-meta')).toHaveTextContent(/^以「postgres-in-tests」为准时删除/)
-    expect(a.querySelector('.pm-chip')).toBeNull()
+    expect(a.querySelector('.pm-del-meta .pm-chip')).toBeNull()
     expect(within(a).getByText('恢复后这条冲突会回到待处理')).toHaveClass('pm-del-hint')
     expect(rowOf('缩进用 tab').querySelector('.pm-del-meta')).toHaveTextContent(/^以「pnpm-only」为准时删除·刚刚/)
     expect(rowOf('分支直接推 main').querySelector('.pm-del-meta')).toHaveTextContent(/^以基线为准时删除/)

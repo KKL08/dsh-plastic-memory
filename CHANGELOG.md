@@ -44,6 +44,15 @@ All notable changes to this project are documented here. The format follows
   rewritten.
 - CI's package check now also requires `README.md` and `README.en.md` in
   the published package.
+- Memory cards are easier to scan: the type is a tag, and scope, source
+  and date each get an icon from DeepSeek Harness's icon set. The source
+  icon tells apart you, the agent and the environment.
+- Wherever you decide on a memory, a suggestion below it says why you are
+  asked and what each choice does, always above the buttons. Once you
+  decide, a result line with undo takes its place. "Could become global"
+  and "Rewritten" moved out of the memory's details into these lines, and
+  conflict cards that explained each choice below their buttons now do so
+  above them.
 
 ### Fixed
 - Turning plastic-memory off and back on in the plugin page left its

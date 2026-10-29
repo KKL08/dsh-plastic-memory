@@ -3,7 +3,7 @@
  * 三个按钮「以 A 为准 / 以 B 为准 / 都保留」，按钮到 verdict 的映射取契约 CONFLICT_ACTION_VERDICTS。
  * - 宽版（记忆页）：A、B 各一张描边卡并排，卡底左边写选它会删掉哪条、右边是按钮；两卡下面是普通动作行，
  *   左边说明决定前 agent 按哪条来、都保留的后果，右边「都保留」；
- * - 窄版（右侧栏）：三个按钮一行，后果说明在按钮下面。
+ * - 窄版（右侧栏）：后果说明进建议区（「说明」），下面三个按钮一行。
  * 任一方定位不到（视图里为 null）时裁决会报错，三个按钮都不可用。裁决后的结果态在待处理票里做。
  * 记忆和基线（AGENTS.md）冲突用 VerticalConflictRuling：同一套标题与后果说明，只有一张记忆卡，
  * 按钮「以基线为准 / 保留这条记忆」，并写明基线不会被删除。
@@ -11,6 +11,7 @@
 import type { ReactNode } from 'react'
 import { CONFLICT_ACTION_VERDICTS, type MemoryCard as MemoryCardData } from '../../src/gui/contract.ts'
 import { useT } from '../i18n.tsx'
+import { AdviceNote } from './Advice.tsx'
 import { Button } from './Button.tsx'
 import { MemoryCard } from './MemoryCard.tsx'
 import { StatusMarker } from './StatusMarker.tsx'
@@ -83,8 +84,8 @@ export function ConflictRuling(props: ConflictRulingProps) {
         )
         : (
           <>
+            <div className="pm-conflict-advice"><AdviceNote label="note">{t('conflict.consequence')}</AdviceNote></div>
             <div className="pm-conflict-buttons">{keepA}{keepB}{keepBoth}</div>
-            <p className="pm-conflict-consequence">{t('conflict.consequence')}</p>
           </>
         )}
     </article>
@@ -107,7 +108,7 @@ export interface VerticalConflictRulingProps {
   headExtra?: ReactNode
 }
 
-/** 记忆和基线冲突：宽版按钮靠右，窄版按钮一行靠左，后果说明都在按钮下面。 */
+/** 记忆和基线冲突：后果说明进建议区（「说明」），在按钮上面；宽版按钮靠右，窄版按钮一行靠左。 */
 export function VerticalConflictRuling(props: VerticalConflictRulingProps) {
   const t = useT()
   const { vertical } = CONFLICT_ACTION_VERDICTS
@@ -126,11 +127,11 @@ export function VerticalConflictRuling(props: VerticalConflictRulingProps) {
           : <MemoryCard memory={props.memory} now={props.now} typeLabel={props.typeLabel?.(props.memory.type)} hideScope={props.hideScope} projectName={props.projectName?.(props.memory)} />}
         <p className="pm-conflict-baseline">{t('conflict.vertical.baselineRef', { ref: props.baselineRef })}</p>
       </div>
+      <div className="pm-conflict-advice"><AdviceNote label="note">{t('conflict.vertical.consequence')}</AdviceNote></div>
       <div className="pm-conflict-buttons">
         <Button unavailable={unavailable} onClick={() => { props.onRule(vertical.keepBaseline) }}>{t('conflict.vertical.keepBaseline')}</Button>
         <Button unavailable={unavailable} onClick={() => { props.onRule(vertical.keepMemory) }}>{t('conflict.vertical.keepMemory')}</Button>
       </div>
-      <p className="pm-conflict-consequence">{t('conflict.vertical.consequence')}</p>
     </article>
   )
 }
@@ -164,10 +165,10 @@ export const conflictRulingCss = `
 @container pm-page (max-width: 720px) { .pm-conflict--wide .pm-conflict-sides { grid-template-columns: minmax(0, 1fr); } }
 @container pm-main (max-width: 640px) { .pm-conflict--wide .pm-conflict-sides { grid-template-columns: minmax(0, 1fr); } }
 .pm-conflict-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-.pm-conflict-consequence { margin: 6px 0 0; font-size: 12px; line-height: 1.6; color: var(--pm-text-2); }
+.pm-conflict-advice { margin-top: 12px; }
 .pm-conflict-single { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .pm-conflict--wide .pm-conflict-single { padding-left: 22px; }
 .pm-conflict-baseline { margin: 0; padding-left: 14px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); overflow-wrap: anywhere; }
 .pm-conflict--vertical.pm-conflict--wide .pm-conflict-buttons { justify-content: flex-end; }
-.pm-conflict--vertical.pm-conflict--wide .pm-conflict-consequence { padding-left: 22px; }
+.pm-conflict--vertical.pm-conflict--wide .pm-conflict-advice { padding-left: 22px; }
 `

@@ -5,6 +5,7 @@
 import type { ReactNode } from 'react'
 import { GatewayProvider, type MemoryGateway } from '../gateway.ts'
 import { TranslateProvider, type Translate } from '../i18n.tsx'
+import { adviceCss } from './Advice.tsx'
 import { buttonCss } from './Button.tsx'
 import { chipCss } from './Chip.tsx'
 import { conflictRulingCss } from './ConflictRuling.tsx'
@@ -20,7 +21,7 @@ import { statusMarkerCss } from './StatusMarker.tsx'
 import { themeCss } from './theme.ts'
 
 export const PM_CSS = [
-  themeCss, buttonCss, chipCss, statusMarkerCss, memoryCardCss, conflictRulingCss, contextBudgetBarCss,
+  themeCss, buttonCss, chipCss, statusMarkerCss, memoryCardCss, adviceCss, conflictRulingCss, contextBudgetBarCss,
   dismissButtonCss, emptyStateCss, healthBannerCss, motionCss, segmentedCss, settingsCss,
 ].join('')
 

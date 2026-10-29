@@ -1,8 +1,9 @@
-// 小组件的渲染测试：按钮、不再提醒的叉、状态标记、chip、体检横幅、空状态。
+// 小组件的渲染测试：按钮、不再提醒的叉、状态标记、chip、建议区与结果行、体检横幅、空状态。
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, screen } from '@testing-library/react'
 import { Button, buttonCss } from './Button.tsx'
 import { themeCss } from './theme.ts'
+import { AdviceNote, ResultLine, adviceCss } from './Advice.tsx'
 import { Chip } from './Chip.tsx'
 import { DismissButton } from './DismissButton.tsx'
 import { EmptyState } from './EmptyState.tsx'
@@ -140,5 +141,33 @@ describe('焦点环（故事 50）', () => {
     expect(themeCss).toMatch(/:focus-visible\s*\{\s*outline: var\(--dsw-focus-ring-width, 2px\) solid var\(--pm-focus\);\s*outline-offset: 2px;/)
     expect(themeCss).toContain('--pm-focus: var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary))')
     for (const css of [themeCss, buttonCss]) expect(css).not.toMatch(/outline:\s*(none|0)/)
+  })
+})
+
+describe('建议区与结果行', () => {
+  it('建议区：加粗的「建议」开头，后面一段说明；冲突裁决写「说明」', () => {
+    const { container } = renderInShell(<><AdviceNote>这条看起来对所有项目都适用。</AdviceNote><AdviceNote label="note">以基线为准会删掉这条记忆。</AdviceNote></>)
+    const notes = [...container.querySelectorAll('.pm-advice')]
+    expect(notes.map(n => n.querySelector('.pm-advice-label')!.textContent)).toEqual(['建议', '说明'])
+    expect(notes[0]!.querySelector('.pm-advice-text')).toHaveTextContent('这条看起来对所有项目都适用。')
+  })
+
+  it('结果行：结果 chip、一句后果、撤销排成一行', () => {
+    const { container } = renderInShell(<ResultLine chip="已提升为全局" undo={<button type="button">撤销</button>}>所有项目都会带入它。</ResultLine>)
+    const line = container.querySelector('.pm-result-line')!
+    expect([...line.children].map(c => c.textContent)).toEqual(['已提升为全局', '所有项目都会带入它。', '撤销'])
+    expect(line.firstElementChild).toHaveClass('pm-chip--result')
+  })
+
+  it('细线由调用方决定：只有前面没有记忆卡时才不画，不看在容器里排第几', () => {
+    const { container } = renderInShell(<>
+      <div><AdviceNote>包在一层里的建议。</AdviceNote></div>
+      <div><ResultLine chip="已按 A">包在一层里的结果。</ResultLine></div>
+      <ResultLine chip="已保留基线" isStandalone>卡片没留下。</ResultLine>
+    </>)
+    const lines = [...container.querySelectorAll('.pm-advice, .pm-result-line')]
+    expect(lines.map(l => l.classList.contains('pm-result-line--standalone'))).toEqual([false, false, true])
+    // jsdom 算不出带 var() 的 border 简写，这里直接看规则：去掉细线只认修饰类，不按位置
+    expect(adviceCss).not.toMatch(/:first-child|:only-child|:first-of-type/)
   })
 })

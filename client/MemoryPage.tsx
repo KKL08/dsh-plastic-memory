@@ -25,6 +25,7 @@ import { TitleControls, titleControlsCss } from './checkup/TitleControls.tsx'
 import { Button } from './ui/Button.tsx'
 import { Chip } from './ui/Chip.tsx'
 import { EmptyState } from './ui/EmptyState.tsx'
+import { Icon } from './ui/Icon.tsx'
 import { StatusMarker } from './ui/StatusMarker.tsx'
 import { DeletedTab, deletedTabCss } from './deleted/DeletedTab.tsx'
 import { LibraryTab, libraryTabCss } from './library/LibraryTab.tsx'
@@ -165,7 +166,7 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
               <div className="pm-rail-foot">
                 <button type="button" className="pm-rail-settings" onClick={() => { nav.openSettings() }}>
                   {t('rail.settings')}
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+                  <Icon name="chevronRight" />
                 </button>
               </div>
             )

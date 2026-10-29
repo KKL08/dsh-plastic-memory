@@ -366,7 +366,7 @@ describe('SidebarTab 这次新写入的：模型改写、替代', () => {
   it('改写：显示改后的那条、带「已改写」，「改前 / 改后 ›」展开对照；「撤销修改」按这次改动发 undo，不用原位确认', async () => {
     const { gateway } = setup({ library: withChanges([rewrite]), session: snapshot(), pending: pending() })
     const group = within(screen.getByRole('region', { name: '这次新写入的' }))
-    expect(group.getByText('已改写')).toBeInTheDocument()
+    expect(group.getByText('已改写').closest('.pm-change-head')).not.toBeNull()
     expect(group.getAllByText('测试用 SQLite。')[0]).toBeVisible()
     expect(group.getByText('测试用真实 Postgres。')).not.toBeVisible()
     fireEvent.click(group.getByRole('button', { name: '改前 / 改后 ›' }))
@@ -425,12 +425,13 @@ describe('SidebarTab 这次新写入的：提升候选就地处理', () => {
   const views = (...items: MemoryCard[]) => ({ library: library(pref, proj, glob, ...items), session: snapshot({ savedIds: items.map(m => m.id) }), pending: pending() })
   const row = (id: string) => within(document.querySelector<HTMLElement>(`.pm-side-saved[data-memory-id="${id}"]`)!)
 
-  it('候选那条带「可提升为全局」和「留在本项目」「提升为全局」；不是候选的没有', () => {
+  it('候选那条下方是建议区（来由和后果）和「留在本项目」「提升为全局」，元信息行不挂状态；不是候选的没有', () => {
     setup(views(cand, plain))
-    expect(row('n1').getByText('可提升为全局').closest('.pm-mc-meta')).not.toBeNull()
+    expect(row('n1').getByText(/^这条看起来适合所有项目。/).closest('.pm-advice')).not.toBeNull()
+    expect(row('n1').queryByText('可提升为全局')).toBeNull()
     expect(row('n1').getByRole('button', { name: '留在本项目' })).toBeInTheDocument()
     expect(row('n1').getByRole('button', { name: '提升为全局' })).toBeInTheDocument()
-    expect(row('n2').queryByText('可提升为全局')).toBeNull()
+    expect(row('n2').queryByText(/这条看起来适合所有项目/)).toBeNull()
     expect(row('n2').queryByRole('button', { name: '提升为全局' })).toBeNull()
   })
 
@@ -444,7 +445,7 @@ describe('SidebarTab 这次新写入的：提升候选就地处理', () => {
       { cmd: 'keep-local-memory', memoryId: 'n3', layer },
     ])
     expect(row('n1').getByText('已提升为全局')).toBeInTheDocument()
-    expect(row('n3').getByText('留在本项目').closest('.pm-chip')).not.toBeNull()
+    expect(row('n3').getByText('留在本项目').closest('.pm-result-line')).toHaveTextContent('留在本项目以后不再提示这条。')
     for (const id of ['n1', 'n3']) expect(row(id).queryByRole('button', { name: '提升为全局' })).toBeNull()
   })
 
@@ -456,10 +457,10 @@ describe('SidebarTab 这次新写入的：提升候选就地处理', () => {
       ? { ok: true, cmd: command.cmd, decisionId: command.decisionId, memoryIds: ['n1'] }
       : { ok: true, cmd: command.cmd, decisionId: 'pd_9', memoryIds: ['n1'] })
     await act(async () => { fireEvent.click(row('n1').getByRole('button', { name: button })) })
-    expect(row('n1').getByText(result).closest('.pm-mc-meta')).not.toBeNull()
+    expect(row('n1').getByText(result).closest('.pm-result-line')).not.toBeNull()
     await act(async () => { fireEvent.click(row('n1').getByRole('button', { name: '撤销' })) })
     expect(gateway.executed.map(e => e.command).at(-1)).toEqual({ cmd: 'undo', decisionId: 'pd_9' })
-    expect(row('n1').getByText('可提升为全局')).toBeInTheDocument()
+    expect(row('n1').getByText(/^这条看起来适合所有项目。/)).toBeInTheDocument()
     expect(row('n1').getByRole('button', { name: '留在本项目' })).toBeInTheDocument()
     expect(row('n1').getByRole('button', { name: '提升为全局' })).toBeInTheDocument()
     expect(row('n1').queryByRole('button', { name: '撤销' })).toBeNull()
@@ -706,8 +707,8 @@ describe('SidebarTab 冲突对方在别的项目', () => {
     const { container } = setup({ library: library(pref, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending({ ...conflict, right: other } as PendingItem) })
     const metas = [...container.querySelectorAll('.pm-conflict .pm-mc-meta')].map(el => el.textContent)
     expect(metas).toHaveLength(2)
-    expect(metas[0]).toMatch(/·本项目·/)
-    expect(metas[1]).toMatch(/·blog·/)
+    expect(metas[0]).toMatch(/本项目你/)
+    expect(metas[1]).toMatch(/blog你/)
   })
 
   it('两方都在本项目：照旧不写作用域（面包屑已经交代）', () => {

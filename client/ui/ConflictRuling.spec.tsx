@@ -24,12 +24,11 @@ describe('ConflictRuling', () => {
     expect(onRule.mock.calls).toEqual([['keep-left'], ['keep-right'], ['keep-both']])
   })
 
-  it('窄版：三个按钮一行，后果说明在按钮下面', () => {
+  it('窄版：后果说明进建议区（「说明」），下面三个按钮一行', () => {
     const { container } = renderInShell(<ConflictRuling layout="narrow" left={left} right={right} now={NOW} onRule={() => {}} />)
     const row = container.querySelector('.pm-conflict-buttons')!
     expect(row.querySelectorAll('button')).toHaveLength(3)
-    expect(row.nextElementSibling).toHaveClass('pm-conflict-consequence')
-    expect(row.nextElementSibling).toHaveTextContent('14 天内可恢复')
+    expect(row.previousElementSibling).toHaveTextContent(/^说明.*14 天内可恢复/)
   })
 
   it('宽版：A、B 各一张卡，卡底写选它的后果和按钮；「都保留」在两卡下面的普通动作行，左边是说明', () => {
@@ -45,7 +44,7 @@ describe('ConflictRuling', () => {
     expect(row).toHaveTextContent('决定之前，agent 按 A 来做。两条都对就选都保留，以后不再算冲突。')
     // 说明已写在卡底和动作行里，不再重复整段后果
     expect(container.querySelector('.pm-conflict-note')).toBeNull()
-    expect(container.querySelector('.pm-conflict-consequence')).toBeNull()
+    expect(container.querySelector('.pm-advice')).toBeNull()
   })
 
   it('一方找不到：显示说明，三个按钮都不可用且不发裁决', () => {
@@ -84,7 +83,7 @@ describe('VerticalConflictRuling', () => {
     expect(onRule.mock.calls).toEqual([['keep-right'], ['keep-left']])
     const row = container.querySelector('.pm-conflict-buttons')!
     expect(row.querySelectorAll('button')).toHaveLength(2)
-    expect(row.nextElementSibling).toHaveTextContent('以基线为准会删掉这条记忆')
+    expect(row.previousElementSibling).toHaveTextContent(/^说明以基线为准会删掉这条记忆/)
   })
 
   it('记忆找不到：显示说明，两个按钮都不可用', () => {
