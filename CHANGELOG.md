@@ -85,6 +85,22 @@ All notable changes to this project are documented here. The format follows
   so instead of "brought in at chat start".
 - Recently deleted rounds the remaining days up, so a memory deleted a
   moment ago shows 14 days left instead of 13.
+- Private key blocks whose lines start or end with a no-break space or a
+  full-width space, as text copied from web pages or typed with a Chinese
+  input method often does, are masked whole. Before, only the BEGIN line
+  was masked and the key body could show in snapshots and search results.
+- `memory_search` marks the top hit as weak when a question like
+  "数据库连接池的密码是什么" matches the topic but not the thing asked for,
+  so the model searches again instead of answering from an unrelated
+  memory. English articles, prepositions and auxiliaries such as "to" or
+  "with" no longer make an otherwise matching top hit look weak.
+- On a fresh install, the memory page updates after you delete a memory or
+  handle a card even if it was opened before its data files existed.
+  Before, it kept showing the old list until reloaded.
+- With checkups turned off, the error now points to `governance.enabled` in
+  the config file, and the note about ignored findings points to "Don't
+  remind me" in the memory page's To do view, instead of places that no
+  longer exist.
 
 ## [0.2.0-beta.1] - 2026-10-25
 
