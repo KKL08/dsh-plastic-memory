@@ -13,7 +13,10 @@ import { CJK } from './tokenizer.ts'
  */
 export const WEAK_COVERAGE_BELOW = 0.65
 
-/** 去掉虚词后 2 到这个字数的 CJK 词按关键词看（术语多在四字以内）；更长的按句子看，各内容段只计入覆盖度。 */
+/**
+ * 去掉虚词后 2 到这个字数的 CJK 词按关键词看（术语多在四字以内）；更长的按句子看，各内容段只计入覆盖度，
+ * 紧跟疑问词的那段除外（见 ASKED_AFTER）。
+ */
 export const KEYWORD_MAX_CJK_CHARS = 4
 
 /**
@@ -26,6 +29,12 @@ export const FUNCTION_WORDS = [
   '怎么', '怎样', '什么', '哪个', '哪些', '哪里', '哪儿', '如何', '应该', '需要', '是否', '可以', '一下', '一般', '还是', '多少', '多久',
   '的', '了', '吗', '呢', '吧', '啊', '呀', '么', '在', '是',
 ] as const
+
+/**
+ * 句子里紧跟着这些疑问词（前面可带「是」）的内容段是问的东西：「数据库连接池的密码是什么」的「密码」、「部署脚本的超时是多少」的「超时」。
+ * 首条话题对上却没有它，多半没答到点子上，所以按关键词看。只认紧跟的，句中其余短段（「侧栏里」「算出来」）照旧只计入覆盖度。
+ */
+const ASKED_AFTER = /^是?(?:什么|多少|多久|哪个|哪些|哪里|哪儿)/
 
 /** 查询里的一个词：一个非 CJK 词，或 CJK 词去掉虚词后的一个内容段。 */
 export interface QueryUnit {
@@ -40,7 +49,7 @@ export interface QueryUnit {
 export interface TermGroup {
   /** 一个词。 */
   units: QueryUnit[]
-  /** 关键词组：非 CJK 词、去掉虚词后 2 到 KEYWORD_MAX_CJK_CHARS 字的 CJK 词。整组没在首条出现就判弱；其余只计入覆盖度。 */
+  /** 关键词组：非 CJK 词、去掉虚词后 2 到 KEYWORD_MAX_CJK_CHARS 字的 CJK 词（句子里只算问的那段）。整组没在首条出现就判弱；其余只计入覆盖度。 */
   keyword: boolean
 }
 
@@ -100,9 +109,13 @@ export function groupQueryTerms(query: string, tokens: readonly string[], tokeni
     for (const [part] of word.matchAll(SCRIPT_RUN)) {
       if (IS_CJK.test(part)) {
         const segments = contentSegments(part)
-        const n = segments.length === 1 ? [...segments[0]!].length : 0
-        const keyword = n >= 2 && n <= KEYWORD_MAX_CJK_CHARS
-        for (const label of segments) groups.push({ units: [{ label, byChar: true, tokens: [] }], keyword })
+        let rest = part
+        for (const label of segments) {
+          rest = rest.slice(rest.indexOf(label) + label.length)
+          const n = [...label].length
+          const isAsked = ASKED_AFTER.test(rest)
+          groups.push({ units: [{ label, byChar: true, tokens: [] }], keyword: n >= 2 && n <= KEYWORD_MAX_CJK_CHARS && (segments.length === 1 || isAsked) })
+        }
         continue
       }
       const ids = tokenIds(part)
