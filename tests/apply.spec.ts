@@ -1710,6 +1710,20 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect(await t.save({ type: 'decision', name: '定了用 A', content: '周会定了选型用 A 方案' })).toMatchObject({ kind: 'saved' })
   })
 
+  it('热更新加了自定义类型：不重启，立刻能用这个新类型 memory_save，记录落盘、类型就是它', async () => {
+    const t = await setup()
+    await expect(t.save({ type: 'regulation', name: '合规', content: '某条合规' })).rejects.toThrow(/type/)
+    await t.update({ customTypes: { regulation } })
+    const saved = await t.save({ type: 'regulation', name: '数据出境', content: '数据出境要先过安全评估' })
+    expect(saved).toMatchObject({ kind: 'saved' })
+    const files = (await readdir(t.memoryRoot, { recursive: true })).filter(f => f.endsWith('.md') && !f.startsWith('.state'))
+    const texts = await Promise.all(files.map(f => readFile(join(t.memoryRoot, f), 'utf8')))
+    const written = texts.find(text => text.includes(`id: ${saved.record!.id}`))
+    expect(written).toBeDefined()
+    expect(written).toMatch(/^type: regulation$/m)
+    expect(written).toContain('数据出境要先过安全评估')
+  })
+
   it('关闭体检：四个治理工具注销、治理类子命令返回 governance-disabled、其余照常；重开后恢复，记忆不变', async () => {
     const t = await setup()
     await t.putGlobal({ id: 'mem_keep', content: '一直都在的记忆' })
