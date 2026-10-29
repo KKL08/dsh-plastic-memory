@@ -383,7 +383,8 @@ async function dispatch(
     )
     if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
     if (r.dismissed.length === 0) return fail(cmd, 'failed', r.message)
-    const current = await deps.store.get(memoryId, { workspacePath })
+    // 只认刚清掉标记的那一层：别层同 id 的副本不算它
+    const current = await deps.store.get(memoryId, { workspacePath, isExactLayer: true })
     const written = current === undefined ? undefined : await deps.ignores.ignoreIfAbsent('misplaced', [current], now)
     const decisionId = await settle('keep-local', current === undefined ? {} : {
       fingerprint: candidateFingerprint(current),
@@ -426,12 +427,14 @@ async function dispatch(
       if (verdict === 'keep-local') {
         // 「留在本项目」清掉了候选标记、没拍快照：撤销时把标记放回去，否则条目回到待处理也找不到候选
         const memoryId = entry.memoryIds[0] ?? ''
-        const rec = await deps.store.get(memoryId, { workspacePath: entry.workspaces?.[0] ?? gov.workspacePath })
+        // 只认留下的那一层：不带层定位会挑到别层同 id 的副本，写回时还会清掉其余副本
+        const workspacePath = entry.workspaces?.[0] ?? gov.workspacePath
+        const rec = workspacePath === undefined ? undefined : await locateCopy(deps.store, memoryId, { kind: 'workspace', workspacePath })
         if (!rec || rec.status !== 'active') return notFound(memoryId)
         const { rejected } = gateRecords([rec], gov, command.allowCrossWorkspace)
         if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
         // 同 keep-local：不是内容编辑，updatedAt 不动
-        if (!(await deps.store.updateIfLive(rec, r => ({ ...r, globalCandidate: true })))) return notFound(memoryId)
+        if (!(await deps.store.updateIfLive(rec, r => ({ ...r, globalCandidate: true }), { workspacePath, isExactLayer: true }))) return notFound(memoryId)
         // 留下时顺带写的放错层忽略：忽略表里还是那一条才删，用户之前自己忽略的、之后重新忽略的都不碰
         const written = entry.settled.misplacedIgnore
         if (written !== undefined) await deps.ignores.unignoreIfSame('misplaced', [memoryId], { ignoredAt: written.ignoredAt, fingerprints: [written.fingerprint] })
@@ -560,10 +563,12 @@ async function dispatch(
     case 'keep-local': {
       const entry = await openEntryOfKind(command.decisionId, 'promote-candidate')
       if (isErr(entry)) return entry
-      return await keepLocal(entry.memoryIds[0]!, entry.workspaces?.[0], command.allowCrossWorkspace, async (verdict, opts) => {
+      const workspacePath = entry.workspaces?.[0]
+      // 同就地留下：只认候选所在的那一层
+      return await keepLocal(entry.memoryIds[0]!, workspacePath, command.allowCrossWorkspace, async (verdict, opts) => {
         await deps.decisions.settle(entry.id, verdict, now, opts)
         return entry.id
-      })
+      }, workspacePath === undefined ? {} : { target: { kind: 'workspace', workspacePath } })
     }
 
     case 'forget':
@@ -800,14 +805,16 @@ async function scanHeld(
   const isGlobalOnly = command.layer !== undefined
   // 「全部」体检时各范围自己的说明，结果按范围记它们；整次合并的只记在 all 上
   const layerNotes = new Map<string, readonly ScanNote[]>()
+  // 「全部」只查认领到的项目：执行器自己再枚举会把认领之后才建的项目也查了。一个项目都没有时只查全局（空 scopes 不是全库）
+  const scopes = target.kind === 'all' ? target.layers.flatMap(l => (l.kind === 'workspace' ? [l.path] : [])) : undefined
   // 时钟现读：完成记录的完成时间是体检做完的时刻，不是命令开始的时刻
   const r = await executeScan(
-    { scope: command.workspacePath ?? 'all', layers: 'full' },
+    scopes !== undefined ? { scopes, layers: 'full' } : { ...(command.workspacePath !== undefined ? { scope: command.workspacePath } : {}), layers: 'full' },
     {
       store: deps.store, registry: deps.registry, decisions: deps.decisions, cache: deps.cache, checkups: deps.checkups,
       getBaseline: deps.getBaseline, getLlm: deps.getLlm, resolveContext: deps.resolveContext, now: () => deps.now?.() ?? Date.now(),
     },
-    exec, { by: 'manual', isGlobalOnly, onLayerNotes: (layer, notes) => { layerNotes.set(checkupKey(layer), notes) } },
+    exec, { by: 'manual', isGlobalOnly: isGlobalOnly || scopes?.length === 0, onLayerNotes: (layer, notes) => { layerNotes.set(checkupKey(layer), notes) } },
   )
   await deps.decisions.sweep(now)
   const after = await deps.views.rewriteAll() ?? (before === undefined ? undefined : await collect())
