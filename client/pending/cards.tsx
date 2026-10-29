@@ -26,7 +26,8 @@ type Verdict = 'keep-left' | 'keep-right' | 'keep-both'
 
 /** 一次动作的结果，结果卡按它写文案、决定能不能撤销。 */
 export type Outcome =
-  | { kind: 'resolved'; verdict: Verdict }
+  /** isUnrecorded：两边都留但结论没记下（见命令结果 isUnrecorded），没有可撤销的条目。 */
+  | { kind: 'resolved'; verdict: Verdict; isUnrecorded?: true }
   /** decisionId：撤销用的账本条目（按记忆 id 提升时由命令结果带回；提升候选用条目自己的）。 */
   | { kind: 'promoted'; target: 'global' | 'agents-md'; decisionId?: string }
   /** 全局记忆移到了 workspacePath 那个项目；decisionId 是撤销用的账本条目，filePath 是移过去之后的文件。 */
@@ -186,8 +187,8 @@ export function SecretCard({ item, session, now, typeLabels, onDone }: CardProps
 
 export function HorizontalCard({ item, session, now, typeLabels, onDone, onRefused }: CardProps<'conflict-horizontal'>) {
   const t = useT()
-  const action = useItemAction(session, (command) => {
-    if (command.cmd === 'resolve') onDone({ kind: 'resolved', verdict: command.verdict })
+  const action = useItemAction(session, (command, result) => {
+    if (command.cmd === 'resolve') onDone({ kind: 'resolved', verdict: command.verdict, ...(result.isUnrecorded ? { isUnrecorded: true } : {}) })
   }, onRefused)
   const preferred = item.preferredId === undefined ? undefined
     : item.left?.id === item.preferredId ? { side: 'A', memory: item.left }
@@ -216,8 +217,8 @@ export function HorizontalCard({ item, session, now, typeLabels, onDone, onRefus
 
 export function VerticalCard({ item, session, now, typeLabels, onDone, onRefused }: CardProps<'conflict-vertical'>) {
   const t = useT()
-  const action = useItemAction(session, (command) => {
-    if (command.cmd === 'resolve') onDone({ kind: 'resolved', verdict: command.verdict })
+  const action = useItemAction(session, (command, result) => {
+    if (command.cmd === 'resolve') onDone({ kind: 'resolved', verdict: command.verdict, ...(result.isUnrecorded ? { isUnrecorded: true } : {}) })
   }, onRefused)
   return (
     <div className="pm-pending-item">
@@ -650,12 +651,14 @@ function resultCopy(item: PendingItem, outcome: Outcome, t: Translate): ResultCo
   if (outcome.kind === 'resolved' && item.kind === 'conflict-horizontal') {
     if (outcome.verdict === 'keep-left') return { memory: item.left, chip: t('pending.result.keptA'), body: t('pending.result.deletedSide', { side: 'B' }), undoable: true }
     if (outcome.verdict === 'keep-right') return { memory: item.right, chip: t('pending.result.keptB'), body: t('pending.result.deletedSide', { side: 'A' }), undoable: true }
+    if (outcome.isUnrecorded) return { chip: t('pending.result.keptBoth'), body: t('pending.result.unrecordedBody'), undoable: false }
     return { chip: t('pending.result.keptBoth'), body: t('pending.result.keptBothBody'), undoable: true }
   }
   if (outcome.kind === 'resolved' && item.kind === 'conflict-vertical') {
-    return outcome.verdict === CONFLICT_ACTION_VERDICTS.vertical.keepBaseline
-      ? { chip: t('pending.result.followedBaseline'), body: t('pending.result.followedBaselineBody'), undoable: true }
-      : { memory: item.memory, chip: t('pending.result.keptMemory'), body: t('pending.result.keptMemoryBody'), undoable: true }
+    if (outcome.verdict === CONFLICT_ACTION_VERDICTS.vertical.keepBaseline) {
+      return { chip: t('pending.result.followedBaseline'), body: t('pending.result.followedBaselineBody'), undoable: true }
+    }
+    return { memory: item.memory, chip: t('pending.result.keptMemory'), body: t(outcome.isUnrecorded ? 'pending.result.unrecordedBody' : 'pending.result.keptMemoryBody'), undoable: outcome.isUnrecorded !== true }
   }
   const memory = 'memory' in item ? item.memory : item.kind === 'advice' ? item.memories[0] : undefined
   switch (outcome.kind) {

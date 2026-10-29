@@ -1,5 +1,5 @@
 import type { MemoryStore } from '../store.ts'
-import { kindOf, verdictLoser, type PendingDecisionsStore } from '../governance/decisions.ts'
+import { conflictFingerprint, kindOf, verdictLoser, type PendingDecisionsStore } from '../governance/decisions.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { DecisionRejectCode, GovernanceRejectCode } from '../contract-codes.ts'
@@ -21,12 +21,17 @@ export type ConfirmArgs =
 export interface ConfirmOptions {
   /** refresh 时同 id 多副本只认这一份（GUI 按页面上那一份操作）；缺省按会话 workspace 定位。跨 workspace 门照旧按会话判定。 */
   target?: CopyTarget
+  /** resolve 时垂直冲突的条目没有指纹，两边都留要现算指纹用的基线（GUI 从借来的会话取）。 */
+  baseline?: readonly string[]
 }
 
-/** otherWorkspaces：带参数放行、属于其他项目的记录；error 带 code 时 rejected 列出被拒记录。 */
+/**
+ * otherWorkspaces：带参数放行、属于其他项目的记录；error 带 code 时 rejected 列出被拒记录。
+ * isUnrecorded：两边都留，但条目没有指纹、也现算不出（垂直冲突缺基线，或记忆属于别的项目、会话的基线不是它的），结论没记下，条目已移出账本。
+ */
 export type ConfirmResult =
   | { kind: 'refreshed'; memoryId: string; lastConfirmedAt: number; otherWorkspaces: OtherWorkspaceMark[]; message: string }
-  | { kind: 'resolved'; decisionId: string; verdict: string; actions: string[]; alsoCleared: number; otherWorkspaces: OtherWorkspaceMark[]; message: string }
+  | { kind: 'resolved'; decisionId: string; verdict: string; actions: string[]; alsoCleared: number; otherWorkspaces: OtherWorkspaceMark[]; isUnrecorded?: true; message: string }
   | { kind: 'error'; code?: GovernanceRejectCode | DecisionRejectCode; rejected?: CrossWorkspaceRejection[]; message: string }
 
 /**
@@ -69,7 +74,7 @@ export async function executeConfirm(
   }
 
   // 先认领条目再裁决：两条相反的裁决同时到（两个标签页、两个宿主进程），只让一条删败方，另一条什么都不动
-  const claimed = await deps.decisions.withClaim(args.decisionId, () => resolveClaimed(args, context, deps, now, locate))
+  const claimed = await deps.decisions.withClaim(args.decisionId, () => resolveClaimed(args, context, deps, now, locate, options.baseline))
   if (!claimed.isClaimed) {
     return { kind: 'error', code: 'claimed', message: `待决项 ${args.decisionId} 正在被另一次裁决处理，未做任何改动。` }
   }
@@ -83,6 +88,7 @@ async function resolveClaimed(
   deps: ConfirmToolDeps,
   now: number,
   locate: (id: string) => Promise<MemoryRecord | undefined>,
+  baseline: readonly string[] | undefined,
 ): Promise<ConfirmResult> {
   const entry = await deps.decisions.get(args.decisionId)
   if (!entry) {
@@ -126,6 +132,7 @@ async function resolveClaimed(
 
   const actions: string[] = []
   let alsoCleared = 0
+  let isUnrecorded = false
   if (vertical && args.verdict === 'keep-left') actions.push(`保留记忆 ${entry.memoryIds[0]}（用户确认 override ${entry.baselineRef}）`)
 
   if (toDelete && toDelete.status !== 'deleted') {
@@ -150,14 +157,34 @@ async function resolveClaimed(
     if (args.verdict === 'keep-both') actions.push('两条并存（用户确认不冲突）')
     if (args.verdict === 'dismiss') actions.push('标记为误报')
     // 两边都留（keep-both / dismiss / 垂直 keep-left）：记下裁决，双方内容不变时体检不再报。
-    // 败方早已删除的删一方裁决同样记下（没有快照可恢复）
-    if (await deps.decisions.settle(entry.id, args.verdict, now) && loserId === undefined) {
-      actions.push('以后体检不再报这一对，除非其中一条（或基线）被改写')
-    }
+    // 败方早已删除的删一方裁决同样记下（没有快照可恢复）。
+    // 升级前导入的条目没有指纹：按双方此刻的内容现算（同体检），垂直冲突拿不到它所在项目的基线时算不出，只能移出账本
+    const fingerprint = entry.fingerprint !== undefined || loserId !== undefined ? undefined : currentFingerprint(entry, members, baseline, context.workspacePath)
+    if (await deps.decisions.settle(entry.id, args.verdict, now, fingerprint !== undefined ? { fingerprint } : {})) {
+      if (loserId === undefined) actions.push('以后体检不再报这一对，除非其中一条（或基线）被改写')
+    } else isUnrecorded = true
   }
 
   return {
-    kind: 'resolved', decisionId: entry.id, verdict: args.verdict, actions, alsoCleared, otherWorkspaces,
+    kind: 'resolved', decisionId: entry.id, verdict: args.verdict, actions, alsoCleared, otherWorkspaces, ...(isUnrecorded ? { isUnrecorded: true as const } : {}),
     message: `冲突已裁决（${args.verdict}）：${actions.join('；')}${crossWorkspaceNote([], otherWorkspaces)}`,
   }
+}
+
+/**
+ * 冲突双方此刻的内容指纹（同体检挂账时算的）；有一方定位不到、或垂直冲突没有基线时为 undefined。
+ * 基线随会话：记忆属于别的项目时会话的基线不是它的（体检扫别的项目也跳过垂直冲突），同样算不出。
+ */
+function currentFingerprint(
+  entry: { memoryIds: string[]; baselineRef?: string },
+  members: ReadonlyMap<string, MemoryRecord>,
+  baseline: readonly string[] | undefined,
+  sessionWorkspace: string | undefined,
+): string | undefined {
+  const records = entry.memoryIds.flatMap(id => members.get(id) ?? [])
+  if (records.length !== entry.memoryIds.length) return undefined
+  if (entry.baselineRef === undefined) return conflictFingerprint(records)
+  const ws = records[0]!.scope === 'workspace' ? records[0]!.workspacePath : undefined
+  if (baseline === undefined || (ws !== undefined && ws !== sessionWorkspace)) return undefined
+  return conflictFingerprint(records, baseline)
 }

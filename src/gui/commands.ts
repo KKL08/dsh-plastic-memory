@@ -396,8 +396,14 @@ async function dispatch(
   switch (command.cmd) {
     case 'resolve': {
       if (!(await deps.decisions.get(command.decisionId))) return notFound(command.decisionId)
-      const r = await executeConfirm({ action: 'resolve', decisionId: command.decisionId, verdict: command.verdict, allowCrossWorkspace: command.allowCrossWorkspace }, gov, executorDeps)
+      // 升级前导入的垂直冲突没有指纹，两边都留时要按基线现算
+      const baseline = deps.getBaseline(exec)
+      const r = await executeConfirm(
+        { action: 'resolve', decisionId: command.decisionId, verdict: command.verdict, allowCrossWorkspace: command.allowCrossWorkspace },
+        gov, executorDeps, baseline !== null ? { baseline } : {},
+      )
       if (r.kind === 'error') return r.code === 'cross-workspace' ? fail(cmd, 'cross-workspace', r.message, r.rejected) : fail(cmd, r.code ?? 'failed', r.message)
+      if (r.kind === 'resolved' && r.isUnrecorded) return { ok: true, cmd, decisionId: command.decisionId, isUnrecorded: true }
       const snapshotId = (await settledEntry(command.decisionId))?.settled?.snapshotId
       return { ok: true, cmd, decisionId: command.decisionId, ...(snapshotId !== undefined ? { snapshotId } : {}) }
     }

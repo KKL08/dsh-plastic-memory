@@ -681,6 +681,19 @@ describe('SidebarTab 跨项目确认', () => {
   })
 })
 
+describe('SidebarTab 裁决结论没记下', () => {
+  it('结果带 isUnrecorded（升级前导入、缺指纹的冲突）：写下次体检可能还会报，不给撤销', async () => {
+    setup(
+      { library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending(conflict) },
+      command => ({ ok: true, cmd: command.cmd, decisionId: 'pd_1', isUnrecorded: true }),
+    )
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '都保留' })) })
+    expect(screen.getByText('这次的决定没能记下，下次体检可能还会报。')).toBeInTheDocument()
+    expect(screen.queryByText('以后体检不再把它们当冲突。')).toBeNull()
+    expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
+  })
+})
+
 describe('SidebarTab 冲突对方在别的项目', () => {
   it('那一方的元信息写项目名；本项目这一方写「本项目」，不再两边都不写作用域', () => {
     const other = memory({ id: 'p2', type: 'preference', workspacePath: '/w/blog', content: '测试里 mock 数据库就行。' })

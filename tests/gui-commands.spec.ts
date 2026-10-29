@@ -10,7 +10,7 @@ import { computeDigest, encodeRecord, splitFrontmatter } from '../src/storage/fr
 import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE, STATE_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
 import { InMemoryTable, MemoryStore, type MemoryLogger, type MemoryTable } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
-import { PendingDecisionsStore, candidateFingerprint } from '../src/governance/decisions.ts'
+import { PendingDecisionsStore, candidateFingerprint, conflictFingerprint } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
 import { CheckupRecordStore, checkupKey } from '../src/governance/checkup-records.ts'
@@ -246,6 +246,63 @@ describe('resolve 与 undo', () => {
     expect((await e.store.get('mem_a'))!.status).toBe('active')
     expect((await e.store.get('mem_b'))!.status).toBe('active')
     expect(await e.snapshots.list()).toEqual([])
+  })
+
+  it('没有指纹的条目（升级前导入的）两边都留：按双方此刻的内容现算指纹记下，体检同一对不再挂账，可以撤销', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_a', name: '甲', content: '用 pnpm' }))
+    await e.store.create(record({ id: 'mem_b', name: '乙', content: '用 npm' }))
+    const { entry } = await e.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾' }, 1)
+    const body = ok(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-both' }))
+    expect(body.isUnrecorded).toBeUndefined()
+    const fingerprint = conflictFingerprint([(await e.store.get('mem_a'))!, (await e.store.get('mem_b'))!])
+    expect((await e.decisions.listSettled()).map(d => [d.id, d.settled?.verdict, d.fingerprint])).toEqual([[entry.id, 'keep-both', fingerprint]])
+    expect((await e.decisions.upsert({ memoryIds: ['mem_b', 'mem_a'], summary: '再报', fingerprint }, 2)).settled).toBe(true)
+
+    // 真跑一次体检：模型再报同一对冲突，沿用已裁决的结论，不挂新账
+    const llm = { complete: async () => JSON.stringify({ findings: [{ type: 'conflict', memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', suggestedAction: '裁决' }] }) }
+    const scanned = await executeScan({}, {
+      store: e.store, registry, decisions: e.decisions, cache: e.cache, checkups: e.checkups,
+      getBaseline: () => null, getLlm: () => llm, resolveContext: async () => ({ workspacePath: undefined }), now: () => e.clock.now,
+    }, fakeExec())
+    if (scanned.kind !== 'single') throw new Error(`expected single, got ${scanned.kind}`)
+    expect(scanned.pendingDecisions.created).toBe(0)
+    expect(scanned.notes.map(n => n.code)).toContain('conflicts-settled')
+    expect(await e.decisions.list()).toEqual([])
+    expect((await e.decisions.listSettled()).map(d => [d.id, d.fingerprint])).toEqual([[entry.id, fingerprint]])
+
+    ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+    expect((await e.decisions.list()).map(d => d.id)).toEqual([entry.id])
+  })
+
+  it('没有指纹的垂直冲突保留记忆：拿得到基线时现算指纹记下；拿不到时结果标 isUnrecorded，条目移出账本', async () => {
+    const withBaseline = env({ baseline: ['包管理统一用 pnpm'] })
+    await withBaseline.store.create(record({ id: 'mem_v', name: '丙', content: '用 yarn' }))
+    const { entry } = await withBaseline.decisions.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '与基线矛盾' }, 1)
+    expect(ok(await withBaseline.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' })).isUnrecorded).toBeUndefined()
+    const fingerprint = conflictFingerprint([(await withBaseline.store.get('mem_v'))!], ['包管理统一用 pnpm'])
+    expect((await withBaseline.decisions.listSettled()).map(d => [d.id, d.fingerprint])).toEqual([[entry.id, fingerprint]])
+
+    await rm(root, { recursive: true, force: true })
+    const noBaseline = env()
+    await noBaseline.store.create(record({ id: 'mem_v', name: '丙', content: '用 yarn' }))
+    const again = (await noBaseline.decisions.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '与基线矛盾' }, 1)).entry
+    expect(ok(await noBaseline.run({ cmd: 'resolve', decisionId: again.id, verdict: 'keep-left' })).isUnrecorded).toBe(true)
+    expect(await allEntries(noBaseline)).toEqual([])
+    expect((await noBaseline.store.get('mem_v'))!.status).toBe('active')
+  })
+
+  it('没有指纹的垂直冲突，记忆属于别的项目（跨项目确认后裁决）：会话的基线不是它的，不现算，结果标 isUnrecorded、不能撤销', async () => {
+    const e = env({ baseline: ['包管理统一用 pnpm'] })
+    await e.store.create(record({ id: 'mem_v', name: '丙', content: '用 yarn', scope: 'workspace', workspacePath: OTHER_WS }))
+    const { entry } = await e.decisions.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '与基线矛盾' }, 1)
+    expect(err(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' })).code).toBe('cross-workspace')
+    const body = ok(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left', allowCrossWorkspace: true }))
+    expect(body.isUnrecorded).toBe(true)
+    expect(body.snapshotId).toBeUndefined()
+    expect(await allEntries(e)).toEqual([])
+    expect((await e.store.get('mem_v', { workspacePath: OTHER_WS, isExactLayer: true }))!.status).toBe('active')
+    expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('not-found')
   })
 
   it('undo 一条未裁决的条目 → not-found', async () => {

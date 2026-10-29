@@ -774,6 +774,11 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     snapshotId: z.string().optional(),
     /** edit-memory / merge-memories：保留的那条写完后的文件（改了名称时文件名跟着变）；move-memory：移过去之后的文件。 */
     filePath: z.string().optional(),
+    /**
+     * resolve 两边都留：条目没有指纹（升级前导入的）、也现算不出（垂直冲突借来的会话拿不到基线），结论没记下、条目已移出账本，
+     * 下次体检同一对还会报，也没有可撤销的条目。
+     */
+    isUnrecorded: z.literal(true).optional(),
     /** draft-edit：模型给的改后稿。 */
     draft: memoryDraftSchema.optional(),
     /** model-info、draft-edit：借来的会话用的模型名；拿不到名字时缺省。 */

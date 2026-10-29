@@ -380,6 +380,15 @@ describe('待处理：裁决后结果留原位、撤销', () => {
     fireEvent.click(screen.getByRole('button', { name: '撤销' }))
     await waitFor(() => { expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'd-h' }) })
   })
+
+  it('结论没记下（isUnrecorded，升级前导入、缺基线的冲突）：结果写下次体检可能还会报，不给撤销', async () => {
+    setup([vertical], { respond: command => ({ ok: true, cmd: command.cmd, decisionId: 'd-v', isUnrecorded: true }) })
+    fireEvent.click(screen.getByRole('button', { name: '保留这条记忆' }))
+    await screen.findByText('已保留这条记忆')
+    expect(screen.getByText('这次的决定没能记下，下次体检可能还会报。')).toBeInTheDocument()
+    expect(screen.queryByText('基线和记忆都不变时不再报。')).toBeNull()
+    expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
+  })
 })
 
 describe('待处理：别处已经在处理同一条', () => {

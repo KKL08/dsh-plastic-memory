@@ -18,7 +18,7 @@
  */
 import { useMemo, useRef, useState, type ReactNode } from 'react'
 import {
-  CONFLICT_ACTION_VERDICTS, layerOfMemory, type MemoryCard as MemoryCardData, type MemoryCommand, type ModelChange, type PendingItem, type SnapshotOrigin,
+  CONFLICT_ACTION_VERDICTS, layerOfMemory, type MemoryCard as MemoryCardData, type MemoryCommand, type MemoryCommandResult, type ModelChange, type PendingItem, type SnapshotOrigin,
 } from '../../src/gui/contract.ts'
 import { samePath, useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { baseName, formatNumber, useT, type Translate } from '../i18n.tsx'
@@ -43,10 +43,15 @@ type Conflict = Extract<PendingItem, { kind: 'conflict-horizontal' }>
 type VerticalConflict = Extract<PendingItem, { kind: 'conflict-vertical' }>
 type Verdict = 'keep-left' | 'keep-right' | 'keep-both'
 
-/** 刚裁决的冲突：记忆的快照留着，被删后仍能原位显示。 */
+/**
+ * 刚裁决的冲突：记忆的快照留着，被删后仍能原位显示。isUnrecorded：两边都留但结论没记下（见命令结果 isUnrecorded），
+ * 没有可撤销的条目。
+ */
 type Ruled =
-  | { kind: 'horizontal'; decisionId: string; verdict: Verdict; left: MemoryCardData; right: MemoryCardData }
-  | { kind: 'vertical'; decisionId: string; verdict: Verdict; memory: MemoryCardData }
+  | { kind: 'horizontal'; decisionId: string; verdict: Verdict; left: MemoryCardData; right: MemoryCardData; isUnrecorded?: true }
+  | { kind: 'vertical'; decisionId: string; verdict: Verdict; memory: MemoryCardData; isUnrecorded?: true }
+
+type Ok = Extract<MemoryCommandResult, { ok: true }>
 
 const ruledMemories = (r: Ruled): MemoryCardData[] => r.kind === 'horizontal' ? [r.left, r.right] : [r.memory]
 
@@ -114,9 +119,9 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   /** 没有生效的那次裁决或撤销（待决项 id）。 */
   const [refused, setRefused] = useState<string | undefined>(undefined)
   // 涉及其他项目时服务端先拒（什么都没动），和待处理卡同一套：原位确认，「继续处理」才带 allowCrossWorkspace 重发
-  const [cross, setCross] = useState<{ id: string; workspacePath: string; command: MemoryCommand; onOk: () => void } | undefined>(undefined)
+  const [cross, setCross] = useState<{ id: string; workspacePath: string; command: MemoryCommand; onOk: (result: Ok) => void } | undefined>(undefined)
 
-  const run = async (id: string, command: MemoryCommand, onOk: () => void) => {
+  const run = async (id: string, command: MemoryCommand, onOk: (result: Ok) => void) => {
     if (inFlight.current.has(id)) return
     inFlight.current.add(id)
     keepFocusInPlace()
@@ -128,7 +133,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     const result = await gateway.execute(sessionId, command)
     inFlight.current.delete(id)
     setBusy(new Set(inFlight.current))
-    if (result.ok) { onOk(); return }
+    if (result.ok) { onOk(result); return }
     const workspacePath = result.rejected?.[0]?.workspacePath
     const isAllowed = 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
     if (result.code === 'cross-workspace' && !isAllowed && workspacePath !== undefined) setCross({ id, workspacePath, command, onOk })
@@ -139,15 +144,15 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const rule = (item: Conflict, verdict: Verdict) => {
     const { left, right } = item
     if (left === null || right === null) return
-    void run(item.decisionId, { cmd: 'resolve', decisionId: item.decisionId, verdict }, () => {
-      setRuled(prev => [...prev, { kind: 'horizontal', decisionId: item.decisionId, verdict, left, right }])
+    void run(item.decisionId, { cmd: 'resolve', decisionId: item.decisionId, verdict }, (result) => {
+      setRuled(prev => [...prev, { kind: 'horizontal', decisionId: item.decisionId, verdict, left, right, ...(result.isUnrecorded ? { isUnrecorded: true } : {}) }])
     })
   }
   const ruleVertical = (item: VerticalConflict, verdict: Verdict) => {
     const { memory } = item
     if (memory === null) return
-    void run(item.decisionId, { cmd: 'resolve', decisionId: item.decisionId, verdict }, () => {
-      setRuled(prev => [...prev, { kind: 'vertical', decisionId: item.decisionId, verdict, memory }])
+    void run(item.decisionId, { cmd: 'resolve', decisionId: item.decisionId, verdict }, (result) => {
+      setRuled(prev => [...prev, { kind: 'vertical', decisionId: item.decisionId, verdict, memory, ...(result.isUnrecorded ? { isUnrecorded: true } : {}) }])
     })
   }
   const undo = (decisionId: string) => {
@@ -508,8 +513,8 @@ function RuledCard({ ruled, card, busy, onUndo }: {
   const chipKey = ruled.kind === 'vertical'
     ? isBaseline ? 'sidebar.ruled.keepBaseline' : 'sidebar.ruled.keepMemory'
     : verdict === 'keep-left' ? 'sidebar.ruled.keepA' : verdict === 'keep-right' ? 'sidebar.ruled.keepB' : 'sidebar.ruled.keepBoth'
-  const noteKey = ruled.kind === 'vertical'
-    ? isBaseline ? 'sidebar.ruled.deletedMemory' : 'sidebar.ruled.keptMemory'
+  const noteKey = ruled.isUnrecorded ? 'sidebar.ruled.unrecorded'
+    : ruled.kind === 'vertical' ? isBaseline ? 'sidebar.ruled.deletedMemory' : 'sidebar.ruled.keptMemory'
     : verdict === 'keep-left' ? 'sidebar.ruled.deletedB' : verdict === 'keep-right' ? 'sidebar.ruled.deletedA' : 'sidebar.ruled.keptBoth'
   const kept = ruled.kind === 'vertical' ? isBaseline ? [] : [ruled.memory]
     : verdict === 'keep-left' ? [ruled.left] : verdict === 'keep-right' ? [ruled.right] : [ruled.left, ruled.right]
@@ -520,9 +525,13 @@ function RuledCard({ ruled, card, busy, onUndo }: {
       {kept.map((memory, i) => <div key={memory.id}>{card(memory, i === 0 ? chip : undefined)}</div>)}
       <p className="pm-side-ruled-note">
         {t(noteKey)}
-        <button type="button" className="pm-link" aria-disabled={busy || undefined} onClick={() => { if (!busy) onUndo() }}>
-          {t('sidebar.ruled.undo')}
-        </button>
+        {ruled.isUnrecorded
+          ? null
+          : (
+            <button type="button" className="pm-link" aria-disabled={busy || undefined} onClick={() => { if (!busy) onUndo() }}>
+              {t('sidebar.ruled.undo')}
+            </button>
+          )}
       </p>
     </article>
   )
