@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach, afterEach } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import fc from 'fast-check'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -11,6 +11,10 @@ import { expandQueryTerms, matchScore } from '../src/text.ts'
 import { createTokenizer } from '../src/search/tokenizer.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import { record } from './helpers/record.ts'
+import { fakeExec } from './helpers/exec.ts'
+import { MemoryStore } from '../src/store.ts'
+import { executeSearch } from '../src/tools/search.ts'
+import { buildTypeRegistry } from '../src/type-registry.ts'
 
 // 读取层 prefactor：any 模式预筛接任意一组子串词项（检索会传新 token ∪ 旧词项），列出文件数与预筛无关。
 
@@ -79,5 +83,42 @@ describe('FileTable 的 listedCount 口径', () => {
     expect(r.quarantined.map(q => q.path)).toEqual([join(gdir, 'bad.md')])
     expect(r.listedCount).toBe(4)   // hit / skip / proj / bad
     expect((await t.readScope([gdir])).listedCount).toBe(4)
+  })
+})
+
+describe('检索传给读取层的预筛词不含单字母与纯数字', () => {
+  const isNoise = (t: string) => /^\p{N}+$/u.test(t) || /^[a-z]$/i.test(t)
+
+  it('查询含单字母或纯数字时整次不预筛（靠它们命中的记录照样找得到）；不含时传 any 模式预筛，词里没有这两类', async () => {
+    const gdir = join(root, GLOBAL_DIR)
+    await mkdir(gdir)
+    await writeFile(join(gdir, 'a.md'), encodeRecord(record({ id: 'mem_pn', name: 'pnpm 约定', content: '包管理用 pnpm' }), {}))
+    await writeFile(join(gdir, 'b.md'), encodeRecord(record({ id: 'mem_v7', name: '运行时版本', content: 'Node 22 起步' }), {}))
+    const store = new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() }))
+    const readLayer = vi.spyOn(store, 'readLayer')
+    const deps = {
+      store, registry: buildTypeRegistry({ template: 'coding', customTypes: {} }),
+      resolveContext: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }),
+    }
+
+    const prefilterOf = async (query: string) => {
+      readLayer.mockClear()
+      const result = await executeSearch({ query }, fakeExec(), deps)
+      expect(readLayer).toHaveBeenCalledTimes(1)
+      return { opts: readLayer.mock.calls[0]![1] ?? {}, ids: result.hits.map(h => h.id) }
+    }
+
+    const plain = await prefilterOf('pnpm 约定')
+    expect(plain.opts.prefilterMatch).toBe('any')
+    expect(plain.opts.prefilterTerms?.length).toBeGreaterThan(0)
+    expect(plain.opts.prefilterTerms!.filter(isNoise)).toEqual([])
+
+    for (const query of ['pnpm 22', 'pnpm x', 'v 22']) {
+      const { opts } = await prefilterOf(query)
+      expect(opts.prefilterTerms).toBeUndefined()
+      expect(opts.prefilterMatch).toBeUndefined()
+    }
+    // 只靠纯数字命中的那条照样找得到
+    expect((await prefilterOf('pnpm 22')).ids).toContain('mem_v7')
   })
 })

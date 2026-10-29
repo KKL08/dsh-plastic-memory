@@ -10,7 +10,7 @@ import { GLOBAL_DIR, workspaceDirName } from '../src/storage/paths.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
 import { expandQueryTerms, matchScore } from '../src/text.ts'
 import { createTokenizer } from '../src/search/tokenizer.ts'
-import { RANKING_FIELDS, anchorTerms, substringEligible } from '../src/search/ranking.ts'
+import { RANKING_FIELDS, RANKING_PARAMS, anchorTerms, rankRecords, substringEligible, type RankingParams } from '../src/search/ranking.ts'
 import {
   executeSearch, renderSearchResult, termHitNote, LOW_COVERAGE_NOTE, OR_FALLBACK_NOTE, RETRY_HINT, SUBSTRING_FALLBACK_NOTE,
   TERM_NOTE_MAX, type SearchToolDeps,
@@ -141,6 +141,32 @@ describe('字段权重', () => {
       }),
     ])
     expect(await ids(store, 'deploy')).toEqual(['mem_body', 'mem_name_only'])
+  })
+})
+
+describe('排序常量集中在 RANKING_PARAMS 一处', () => {
+  const tokenize = createTokenizer()
+  // 每个字段都含查询词、长度各不相同，任何一个参数变了分数都会变
+  const doc = record({ id: 'mem_k', name: 'deploy 脚本', summary: 'deploy 流程说明与回滚步骤', tags: ['deploy', 'ops'], content: 'deploy 前先跑测试，'.repeat(6) })
+  const other = record({ id: 'mem_o', name: '无关', summary: '别的事', content: '与查询无关的内容' })
+  const scoreWith = (params?: RankingParams) =>
+    rankRecords({ tokens: ['deploy'], legacyTerms: ['deploy'], records: [doc, other], listedCount: 2, tokenize, ...(params ? { params } : {}) })
+      .find(r => r.record.id === 'mem_k')!.score
+
+  it('缺省参数就是 RANKING_PARAMS；k1、b 与每个字段的权重、平均长度都从它取（改一个分数就变，没有散落在别处的同名常量）', () => {
+    const base = scoreWith()
+    expect(base).toBeGreaterThan(0)
+    expect(scoreWith(RANKING_PARAMS)).toBe(base)
+    const tweaked: Array<[string, RankingParams]> = [
+      ['k1', { ...RANKING_PARAMS, k1: RANKING_PARAMS.k1 * 2 }],
+      ['b', { ...RANKING_PARAMS, b: RANKING_PARAMS.b / 2 }],
+      ...RANKING_FIELDS.flatMap((f): Array<[string, RankingParams]> => [
+        [`${f}.weight`, { ...RANKING_PARAMS, fields: { ...RANKING_PARAMS.fields, [f]: { ...RANKING_PARAMS.fields[f], weight: RANKING_PARAMS.fields[f].weight + 1 } } }],
+        [`${f}.avgLength`, { ...RANKING_PARAMS, fields: { ...RANKING_PARAMS.fields, [f]: { ...RANKING_PARAMS.fields[f], avgLength: RANKING_PARAMS.fields[f].avgLength * 3 } } }],
+      ]),
+    ]
+    const unchanged = tweaked.filter(([, params]) => scoreWith(params) === base).map(([name]) => name)
+    expect(unchanged).toEqual([])
   })
 })
 
