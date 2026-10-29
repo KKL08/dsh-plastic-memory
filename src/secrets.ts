@@ -14,12 +14,14 @@ export type SecretSeverity = 'critical' | 'suspected'
  * 不会一路吞到后文真正私钥的 END。
  */
 function keyBlock(begin: string, end: string): RegExp {
-  // 行首：缩进与引用标记（> 、>> ）
-  const lead = String.raw`[ \t>]*`
+  // 行首：缩进与引用标记（> 、>> ）。缩进和行尾空白一样认换行以外的任何空白（含复制来的 NBSP、全角空格）：
+  // 只认空格和 tab 时这一行对不上，整块退回只遮 BEGIN 行
+  const lead = String.raw`(?:[^\S\r\n]|>)*`
+  const trail = String.raw`[^\S\r\n]*`
   // 正文行：整行是 base64、或是头字段、或是后面紧跟 base64 行的空行；行尾可以带空白。
-  // 头字段的值止于非空白字符，行尾空白只归后面的 [ \t]*：两段若能吃同一批字符，缺 END 时回溯随行数指数增长。
-  const bodyLine = String.raw`\r?\n${lead}(?:[A-Za-z0-9+/=]+|[A-Za-z][A-Za-z0-9-]*: (?:[^\r\n]*\S)?|(?=\r?\n${lead}[A-Za-z0-9+/=]))[ \t]*(?=\r?\n|$)`
-  return new RegExp(String.raw`${begin}(?:[ \t]*(?:${bodyLine})*\r?\n${lead}${end}|[^\r\n]*(?:${bodyLine})*)`)
+  // 头字段的值止于非空白字符，行尾空白只归后面的 trail：两段若能吃同一批字符，缺 END 时回溯随行数指数增长。
+  const bodyLine = String.raw`\r?\n${lead}(?:[A-Za-z0-9+/=]+|[A-Za-z][A-Za-z0-9-]*: (?:[^\r\n]*\S)?|(?=\r?\n${lead}[A-Za-z0-9+/=]))${trail}(?=\r?\n|$)`
+  return new RegExp(String.raw`${begin}(?:${trail}(?:${bodyLine})*\r?\n${lead}${end}|[^\r\n]*(?:${bodyLine})*)`)
 }
 
 export const SECRET_PATTERNS: Array<{ name: string; re: RegExp; severity: SecretSeverity }> = [
