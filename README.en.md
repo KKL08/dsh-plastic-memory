@@ -4,7 +4,7 @@
 
 ![Version](https://img.shields.io/badge/version-0.2.0--beta.1-yellow)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
-![Platform](https://img.shields.io/badge/platform-DeepSeek%20Harness%20%E2%89%A5v0.1.7--rc.1-4D6BFF)
+![Platform](https://img.shields.io/badge/platform-DeepSeek%20Harness%20%E2%89%A5v0.2.1--rc.2-4D6BFF)
 ![Node](https://img.shields.io/badge/node-%5E22.19.0%20%7C%7C%20%E2%89%A524-339933?logo=node.js&logoColor=white)
 
 [简体中文](README.md) | **English**
@@ -91,7 +91,7 @@ dsh plugin --profile web add dsh-plastic-memory@0.1.1-beta.5
 > dsh plugin --profile desktop add dsh-plastic-memory@0.1.1-beta.5
 > ```
 >
-> **Requirements:** Node.js `^22.19.0 || >=24`, DeepSeek Harness v0.1.7-rc.1 or later (verified up to v0.2.1-rc.2); the graphical interface needs v0.2.1-rc.2 or later.
+> **Requirements:** Node.js `^22.19.0 || >=24`, DeepSeek Harness v0.2.1-rc.2 or later.
 > **Chinese word segmentation:** the optional dependency `@node-rs/jieba` (prebuilt binaries for each platform) is installed automatically with the npm package, so Chinese queries match by word. If it cannot be installed on your platform, the plugin still installs, Chinese search falls back to two-character segments, and nothing else is affected.
 > (DeepSeek Harness is still in pre-release and may ship further breaking changes; before upgrading the host, check the version range this plugin currently supports, see the badge at the top and the CHANGELOG.)
 >
@@ -121,8 +121,6 @@ Once installed, nothing requires YAML. Three surfaces live inside the host's web
 - **The plugin's settings page** (its entry in the host's plugin manager): scenario template, custom types (add, edit, remove in a dialog), context budget and overflow mode, source lookup, the user dictionary path for Chinese word segmentation, checkup switch and sensitivity, where global promotions go, plus a status card. Saving writes the profile's `cordis.patch.yml` and takes effect without a restart.
 
 Every turn in which the model saved a memory gets a card with a delete button; the dot on the left-nav icon lights amber only when something waits for your decision, and turns red when a secret was found.
-
-> The interface requires DeepSeek Harness v0.2.1-rc.2 or later. On earlier supported hosts (v0.1.7-rc.1 and up) the tools and memory injection work as before, without the interface.
 
 ---
 

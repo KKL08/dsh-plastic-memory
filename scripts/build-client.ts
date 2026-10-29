@@ -30,9 +30,7 @@ export const HOST_MODULES = [
 const pkgName = (JSON.parse(readFileSync(`${REPO}package.json`, 'utf8')) as { name: string }).name
 
 // CJS 产物引用自由变量 module / exports / require，由头部在 factory 作用域里提供。
-// 宿主的 require 在共享模块表里找不到名字时同步抛错（旧宿主的表里没有 zod）：先逐个探一遍，
-// 缺任何一个就返回空插件——GUI 只支持带全这组运行时的宿主，旧宿主上静默不注册、服务端照常。
-const banner = `window.__ModuleLoader__.load({\n  id: ${JSON.stringify(pkgName)},\n  factory(require) {\n    var hostModules = ${JSON.stringify(HOST_MODULES)};\n    for (var i = 0; i < hostModules.length; i++) {\n      try { require(hostModules[i]); } catch (e) { return { inject: [], apply: function () {} }; }\n    }\n    var module = { exports: {} };\n    var exports = module.exports;`
+const banner = `window.__ModuleLoader__.load({\n  id: ${JSON.stringify(pkgName)},\n  factory(require) {\n    var module = { exports: {} };\n    var exports = module.exports;`
 const footer = '    return module.exports;\n  }\n});'
 
 function options(outfile: string): BuildOptions {

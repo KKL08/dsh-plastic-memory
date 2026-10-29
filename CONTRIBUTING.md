@@ -72,10 +72,11 @@ The plugin supports a range of DeepSeek Harness versions, not just the newest.
 - **Pin.** The `@deepseek-ai/*` dev dependencies pin the version the plugin is
   built against (`0.2.1-rc.2` today); local checks and the `check` CI job run
   on it.
-- **Floor.** The four `@deepseek-ai/dsh-*` peer dependencies declare the oldest
-  supported host (`>=0.1.7-rc.1`), with no upper bound. Hosts from 0.1.7 on
-  check these ranges when a plugin is installed and started; like pnpm, they
-  compare with pre-releases included, so `0.2.1-alpha.1` satisfies the range.
+- **Floor.** The three `@deepseek-ai/dsh-*` peer dependencies declare the oldest
+  supported host (`>=0.2.1-rc.2`, the first host with the interface slots the
+  GUI needs), with no upper bound. The host checks these ranges when a plugin
+  is installed and started; like pnpm, it compares with pre-releases
+  included, so `0.2.2-alpha.2` satisfies the range.
   `@deepseek-ai/cordis` and `@deepseek-ai/schemastery` stay `*` because the
   host only checks `dsh-*` peers. The `host-floor` CI job rewrites the dev
   dependencies to the floor with `node scripts/use-host.cjs` and runs the same
