@@ -127,7 +127,7 @@ it('KV JSON 顶层缺 tables.memories 时直接抛错（信封损坏，不当作
 const makeRecord = (id: string, name: string, overrides: Partial<MemoryRecord> = {}) =>
   record({ id, name, content: `${id} 的内容`, summary: `${id} 摘要`, ...overrides })
 
-it('可选键在场时无损往返（validFrom/validTo/supersedes 走 ISO 编解码），deleted 状态记录也还原', async () => {
+it('可选键在场时无损往返（validFrom/validTo 走本机时间、整分钟无损，supersedes 原样），deleted 状态记录也还原', async () => {
   // 真实备份数据里存在带 validTo 和 status: deleted 的记录——这两条编解码路径必须被钉住。
   const now = Date.now() // deleted 且新鲜（14 天内）：写路径的清扫不应清它
   const kv = kvJson({

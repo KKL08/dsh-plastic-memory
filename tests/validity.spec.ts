@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { formatValidity, parseValidityInput } from '../src/validity.ts'
+import { formatValidity, parseValidityInput, roundValidity } from '../src/validity.ts'
 
 // 有效期按本机时区解释与展示。期望值用 new Date(年, 月, 日, 时, 分) 在同一时区里算，结果与机器时区无关；
 // 「不是 UTC」的那几条单独固定到东八区，免得在 UTC 机器上恒真。
@@ -50,6 +50,34 @@ describe('parseValidityInput', () => {
 
   it('闰年 2 月 29 日存在', () => {
     expect(parseValidityInput('2028-02-29 08:00', WRITE_AT)).toEqual({ ok: true, ms: local(2028, 2, 29, 8, 0) })
+  })
+})
+
+describe('roundValidity', () => {
+  const minute = local(2026, 10, 29, 15, 0)
+  it('不在整分钟上的值向外取整：validTo 进到下一分钟、validFrom 退到本分钟，有效期只会变长', () => {
+    expect(roundValidity('validTo', minute + 1)).toBe(minute + 60_000)
+    expect(roundValidity('validTo', minute + 59_999)).toBe(minute + 60_000)
+    expect(roundValidity('validFrom', minute + 59_999)).toBe(minute)
+    expect(roundValidity('validFrom', minute + 1)).toBe(minute)
+  })
+
+  it('整分钟的值不变', () => {
+    expect(roundValidity('validTo', minute)).toBe(minute)
+    expect(roundValidity('validFrom', minute)).toBe(minute)
+  })
+
+  it('validTo 向上取整不越过 9999 年末：越过就保留原值（ISO 写法 10000 年读不回来）', () => {
+    const last = Date.parse('9999-12-31T23:59:59.999Z')
+    expect(roundValidity('validTo', last)).toBe(last)
+    expect(roundValidity('validTo', last - 30_000)).toBe(last - 30_000)
+    expect(roundValidity('validTo', Date.parse('9999-12-31T23:58:30.000Z'))).toBe(Date.parse('9999-12-31T23:59:00.000Z'))
+  })
+
+  it('取整结果再取整不变（读写两侧用同一个函数，不会来回改）', () => {
+    for (const ms of [minute + 1, Date.parse('9999-12-31T23:59:59.999Z'), Date.parse('0001-01-01T00:00:00.000Z'), -2_000_000_000_123]) {
+      for (const key of ['validFrom', 'validTo'] as const) expect(roundValidity(key, roundValidity(key, ms))).toBe(roundValidity(key, ms))
+    }
   })
 })
 

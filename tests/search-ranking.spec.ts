@@ -451,7 +451,7 @@ describe('不变的行为', { timeout: 15_000 }, () => {
   it('validTo 已过期的不进结果；types、limit 上限 50 照旧', async () => {
     const now = Date.now()
     const store = await seeded([
-      record({ id: 'mem_dead', content: 'magicword 过期', validTo: now - 1000 }),
+      record({ id: 'mem_dead', content: 'magicword 过期', validTo: now - 60_000 }),
       record({ id: 'mem_ok', content: 'magicword 有效' }),
       record({ id: 'mem_pref', type: 'preference', content: 'magicword 偏好' }),
     ])

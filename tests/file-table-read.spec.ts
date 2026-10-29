@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 import fc from 'fast-check'
-import { chmod, mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
@@ -41,6 +41,20 @@ async function seedWorkspace(wsPath: string, name: string, r: MemoryRecord, dir 
   await writeFile(join(dir, WORKSPACE_MARKER), wsPath + '\n')
   await writeFile(join(dir, name), encodeRecord(r, {}))
 }
+
+describe('手写有效期的纯日期', () => {
+  it('validTo 只写日期：时分取文件 mtime 的本机时分，反复读结果不变', async () => {
+    await mkdir(globalDir(), { recursive: true })
+    const path = join(globalDir(), 'freeze.md')
+    await writeFile(path, '---\nname: 发布冻结\ntype: knowledge\nvalidTo: 2099-11-05\n---\n\n冻结期内不发版')
+    const mtime = new Date(2099, 9, 29, 14, 37, 20)
+    await utimes(path, mtime, mtime)
+    const t = open()
+    const first = (await t.readScope([globalDir()])).records[0]!.record
+    expect(first.validTo).toBe(new Date(2099, 10, 5, 14, 37).getTime())
+    expect((await t.readScope([globalDir()])).records[0]!.record.validTo).toBe(first.validTo)
+  })
+})
 
 describe('外部写入立即可见：没有任何刷新调用', () => {
   it('写文件 → readScope 看到；改文件 → 新内容；删文件 → 消失', async () => {

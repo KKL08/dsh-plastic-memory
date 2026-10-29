@@ -32,6 +32,21 @@ export function parseValidityInput(value: unknown, now: number): ValidityParse {
   return ms === undefined ? { ok: false, code: 'validity-nonexistent' } : { ok: true, ms }
 }
 
+const MINUTE_MS = 60_000
+/** 文件里读得回来的最晚时刻：再往后的 ISO 写法是 +010000 年，读取不认。 */
+const LAST_READABLE_MS = Date.parse('9999-12-31T23:59:59.999Z')
+
+/**
+ * 有效期按分钟存（文件里写到分钟）：不在整分钟上的毫秒向外取整，validFrom 退到本分钟、validTo 进到下一分钟，
+ * 有效期只会变长、不会提前过期。旧版本写的毫秒在读取、写回、快照比对时都按这条规则取整，几处看到的值一致。
+ * validTo 进位会越过 9999 年末时保留原值。结果再取整不变。
+ */
+export function roundValidity(key: 'validFrom' | 'validTo', ms: number): number {
+  if (key === 'validFrom') return Math.floor(ms / MINUTE_MS) * MINUTE_MS
+  const up = Math.ceil(ms / MINUTE_MS) * MINUTE_MS
+  return up > LAST_READABLE_MS ? ms : up
+}
+
 /** 毫秒 → 本机时间 YYYY-MM-DD HH:mm（秒以下舍去）。 */
 export function formatValidity(ms: number): string {
   const at = new Date(ms)

@@ -23,6 +23,7 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
+import { formatValidity } from '../src/validity.ts'
 
 // 票 12：手编检测与恢复比较投影（docs/design-storage-file-is-memory.md §2、§13）。
 // 全部用真实目录（FileTable + .state 侧表）；文件直接改盘模拟用户手编。
@@ -127,13 +128,16 @@ describe('票 12 验收：手编检测与恢复比较投影', () => {
     expect(Object.keys(restoreProjection(wsRec())).sort()).toEqual([
       'confidence', 'content', 'name', 'source', 'summary', 'supersedes', 'tags', 'type', 'validFrom', 'validTo',
     ])
-    const base = wsRec({ id: 'mem_p', content: '第一行\n第二行', validFrom: 10, validTo: 20, supersedes: ['mem_x'] })
+    const MIN = 60_000   // 有效期按分钟比（文件里写到分钟）
+    const base = wsRec({ id: 'mem_p', content: '第一行\n第二行', validFrom: 10 * MIN, validTo: 20 * MIN, supersedes: ['mem_x'] })
     const same = (a: MemoryRecord) => isDeepStrictEqual(restoreProjection(a), restoreProjection(base))
     expect(same({ ...base, updatedAt: 9, lastConfirmedAt: 9, status: 'superseded', handEdited: true, recallCount: 7, scope: 'global', workspacePath: undefined })).toBe(true)
     expect(same({ ...base, content: base.content.replace(/\n/g, '\r\n') })).toBe(true)
+    // 旧版本快照里不在整分钟上的有效期：按向外取整后比，和转换后的文件视为相同
+    expect(same({ ...base, validFrom: 10 * MIN + 59_999, validTo: 20 * MIN - 59_999 })).toBe(true)
     const changes: Array<Partial<MemoryRecord>> = [
       { name: '别名' }, { type: 'knowledge' }, { tags: ['新'] }, { summary: '新摘要' }, { content: '新正文' },
-      { validFrom: 11 }, { validTo: 21 }, { confidence: 0.5 }, { supersedes: ['mem_y'] },
+      { validFrom: 11 * MIN }, { validTo: 21 * MIN }, { confidence: 0.5 }, { supersedes: ['mem_y'] },
       { source: { sessionId: 's-other', eventRange: [1, 2], sourceMode: 'user-explicit' } },
     ]
     for (const c of changes) expect(same({ ...base, ...c }), JSON.stringify(c)).toBe(false)
@@ -168,7 +172,7 @@ describe('票 12 验收：手编检测与恢复比较投影', () => {
     // 立即手编（updatedAt 不动，同一毫秒内也要判出）
     await handEdit(paths.body, '原正文', '手改后的正文')
     await handEdit(paths.tags, '- old-tag', '- new-tag')
-    await handEdit(paths.validTo, '2099-01-01T00:00:00.000Z', '2098-01-01T00:00:00.000Z')
+    await handEdit(paths.validTo, `validTo: ${formatValidity(Date.parse('2099-01-01T00:00:00.000Z'))}`, `validTo: ${formatValidity(Date.parse('2098-01-01T00:00:00.000Z'))}`)
     const editedTexts = await Promise.all([paths.body, paths.tags, paths.validTo].map(p => readFile(p, 'utf8')))
 
     const r = restored(await h.snapshot({ action: 'restore', snapshotId: created.snapshotId }))
@@ -195,6 +199,38 @@ describe('票 12 验收：手编检测与恢复比较投影', () => {
     const r2 = restored(await h.snapshot({ action: 'restore', snapshotId: 'snap_legacy' }))
     expect(r2.skipped).toEqual(['mem_old_a'])
     expect(r2.restored).toEqual(['mem_old_b'])
+  })
+
+  it('旧版本写的有效期（UTC 毫秒 ISO、不在整分钟上）：快照、转换、恢复都精确，不误判成「快照后被修改」', async () => {
+    const h = harness()
+    const raw = { validFrom: Date.parse('2099-01-01T09:30:45.000Z'), validTo: Date.parse('2099-02-01T18:00:00.123Z') }
+    const legacy = (r: MemoryRecord) => encodeRecord(r, {})
+      .replace(/^validFrom: .*$/m, `validFrom: ${iso(r.validFrom!)}`)
+      .replace(/^validTo: .*$/m, `validTo: ${iso(r.validTo!)}`)
+    // 升级前留在 .state 里的旧快照：记录里还是原始毫秒
+    const before = wsRec({ id: 'mem_old_v', name: '旧有效期', content: '升级前的正文', ...raw })
+    const path = await writeMem('old-v.md', before)
+    await writeFile(path, legacy(before))
+    const preUpgrade: MemorySnapshot = {
+      id: 'snap_pre_upgrade', createdAt: Date.now() - DAY, operation: 'manual', description: '升级前',
+      memoryIds: [before.id], data: [before],
+    }
+    await mkdir(join(root, STATE_DIR, 'snapshots'), { recursive: true })
+    await writeFile(join(root, STATE_DIR, 'snapshots', 'snap_pre_upgrade.json'), JSON.stringify(preUpgrade))
+    // 升级后读旧文件时拍的快照
+    const created = await h.snapshot({ action: 'create', memoryIds: [before.id] })
+    if (created.kind !== 'created') throw new Error(created.kind)
+
+    await h.assemble()   // 快照冻结 = 维护点：旧文件改写成本机时间
+    const convertedText = await readFile(path, 'utf8')
+    expect(convertedText).toContain(`validTo: ${formatValidity(Date.parse('2099-02-01T18:01:00.000Z'))}`)
+
+    for (const snapshotId of [created.snapshotId, 'snap_pre_upgrade']) {
+      const r = restored(await h.snapshot({ action: 'restore', snapshotId }))
+      expect(r.restored).toEqual([before.id])
+      expect(r.skipped).toEqual([])
+      expect(await readFile(path, 'utf8')).toBe(convertedText)
+    }
   })
 
   it('confirm refresh / promote dismiss 不改 updatedAt 的特殊处理保持不动', async () => {

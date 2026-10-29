@@ -5,6 +5,7 @@ import type { KvTable } from '../kv-table.ts'
 import { REDACTED_PLACEHOLDER, genId, type MemorySnapshot, type SnapshotRecord } from './schema.ts'
 import { RETENTION_MS } from '../retention.ts'
 import { maskSecrets, secretFields } from '../secrets.ts'
+import { roundValidity } from '../validity.ts'
 
 /** 保留窗口：与软删清扫共用 retention.ts 的单一来源（两者必须一致）。 */
 export const SNAPSHOT_RETENTION_MS = RETENTION_MS
@@ -25,7 +26,10 @@ export function restoreProjection(r: MemoryRecord) {
   return {
     name: r.name, type: r.type, tags: r.tags, summary: r.summary,
     content: r.content.replace(/\r\n/g, '\n'),
-    validFrom: r.validFrom, validTo: r.validTo, confidence: r.confidence, supersedes: r.supersedes,
+    // 有效期按文件里的分钟比：旧版本快照里不在整分钟上的毫秒，和转换后的文件读出来的值视为相同
+    validFrom: r.validFrom === undefined ? undefined : roundValidity('validFrom', r.validFrom),
+    validTo: r.validTo === undefined ? undefined : roundValidity('validTo', r.validTo),
+    confidence: r.confidence, supersedes: r.supersedes,
     source: r.source && { sessionId: r.source.sessionId, eventRange: r.source.eventRange, sourceMode: r.source.sourceMode },
   }
 }

@@ -118,7 +118,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
       tags: ['pnpm', '环境'], content: '在 macOS 上配置 pnpm 环境变量的方法',
       summary: '全局 pnpm 环境配置摘要',
       createdAt: NOW, updatedAt: NOW, lastConfirmedAt: NOW,
-      validTo: NOW + 86_400_000, supersedes: ['mem_old_placeholder'],
+      validTo: NOW - (NOW % 60_000) + 86_400_000, supersedes: ['mem_old_placeholder'],   // 有效期在文件里写到分钟：取整分钟才逐字段相等
     })
     const recA = record({
       id: 'mem_ws_a', name: 'workspace-a-memory', type: 'project', scope: 'workspace',

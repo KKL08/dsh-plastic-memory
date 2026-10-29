@@ -5,11 +5,19 @@ import { memoryRecordSchema, CONFIDENCE_BY_SOURCE, type MemoryRecord } from '../
 import type { CodedNote, DirectoryNoteCode } from '../contract-codes.ts'
 import type { QuarantineEntry } from './table.ts'
 import { deriveFileId } from './paths.ts'
+import { formatValidity, localDateAt, roundValidity } from '../validity.ts'
 
 /** 保留键：位置由目录表达、正文即 content、召回统计住 .state/（契约表见 docs/design-storage-file-is-memory.md §2）。 */
 const RESERVED_KEYS = new Set(['scope', 'workspacePath', 'recallCount', 'lastRecalledAt', 'content'])
-/** 时间戳字段：文件面 ISO 8601（写出 UTC 毫秒），内存面 epoch ms。 */
+/** 时间戳字段：文件面 ISO 8601（写出 UTC 毫秒；有效期键例外，见 VALIDITY_KEYS），内存面 epoch ms。 */
 const TIME_KEYS = new Set(['createdAt', 'updatedAt', 'lastConfirmedAt', 'deletedAt', 'validFrom', 'validTo'])
+/**
+ * 有效期键：写出本机时间 YYYY-MM-DD HH:mm，用户打开文件能直接看懂、照着改（其余时间键的毫秒要给事件排先后，仍写 UTC 毫秒 ISO）。
+ * 读取认所有时间键的写法，旧版本的毫秒按分钟向外取整（roundValidity），维护点的重新 encode 回写即把旧文件转成新写法。
+ * 纯日期取文件 mtime 的本机时分（与 memory_save 只写日期时补写入时刻同一语义）；读目录总带 mtime，不带时（直接解码）按 UTC 零点。
+ */
+const VALIDITY_KEYS = new Set(['validFrom', 'validTo'])
+const isValidityKey = (k: string): k is 'validFrom' | 'validTo' => VALIDITY_KEYS.has(k)
 /** 手建文件缺这三个时间戳时取文件 mtime。 */
 const MTIME_DEFAULT_KEYS = ['createdAt', 'updatedAt', 'lastConfirmedAt'] as const
 /** 无 source（手编/无出处）时的缺省置信度：按用户亲写的档位。 */
@@ -23,7 +31,7 @@ const FILE_KEY_ORDER = [
 const KNOWN_FILE_KEYS = new Set<string>(FILE_KEY_ORDER)
 
 /**
- * 时间戳可接受的 ISO 形态：纯日期（按 UTC 零点）；日期时间（T 或空格分隔，秒、毫秒可省），带 Z 或偏移按其时区，
+ * 时间戳可接受的 ISO 形态：纯日期（按 UTC 零点；有效期键见 VALIDITY_KEYS）；日期时间（T 或空格分隔，秒、毫秒可省），带 Z 或偏移按其时区，
  * 不带时区按本地时间——手写文件最常见的写法，小时级歧义不影响陈旧度判断。
  */
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/
@@ -98,16 +106,24 @@ export function digestMismatch(fileDigest: unknown, r: Pick<MemoryRecord, 'name'
     && fileDigest !== computeDigest(r.name, r.summary, r.content)
 }
 
-function parseTimestamp(key: string, value: unknown): number {
+function parseTimestamp(key: string, value: unknown, mtimeMs: number | undefined): number {
   if (typeof value === 'number') {
     if (Number.isFinite(value)) return value                       // 数字毫秒（epoch ms）
     throw new FrontmatterError('timestamp-parse', `时间戳无法解析：${key}=${value}`)
   }
   const text = String(value)
-  const m = DATE_RE.exec(text) ?? DATETIME_RE.exec(text)
+  const date = DATE_RE.exec(text)
+  const m = date ?? DATETIME_RE.exec(text)
   if (!m) throw new FrontmatterError('timestamp-format', `时间戳格式不认识（接受 YYYY-MM-DD、ISO 8601 日期时间、数字毫秒）：${key}=${text}`)
   // Date.parse 会把 2026-02-30 静默滚成 3 月 2 日：先核对日历日期存在
   const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])]
+  if (date && VALIDITY_KEYS.has(key) && mtimeMs !== undefined) {
+    // 有效期的纯日期：时分取用户写下它的时刻（文件 mtime，本机时间）；同一文件反复读结果不变
+    const at = new Date(mtimeMs)
+    const ms = localDateAt(y, mo, d, at.getHours(), at.getMinutes())
+    if (ms === undefined) throw new FrontmatterError('timestamp-parse', `时间戳无法解析：${key}=${text}`)
+    return ms
+  }
   const day = new Date(Date.UTC(y, mo - 1, d))
   const ms = Date.parse(text.replace(' ', 'T'))   // ES 规范：无偏移的日期时间按本地时间
   if (day.getUTCMonth() !== mo - 1 || day.getUTCDate() !== d || !Number.isFinite(ms)) {
@@ -126,7 +142,9 @@ export function decodeRecord(parsed: ParsedMemoryFile, loc: FileLocation, opts: 
     else extras[k] = v
   }
   for (const k of TIME_KEYS) {
-    if (src[k] !== undefined) src[k] = parseTimestamp(k, src[k])
+    if (src[k] === undefined) continue
+    const ms = parseTimestamp(k, src[k], opts.mtimeMs)
+    src[k] = isValidityKey(k) ? roundValidity(k, ms) : ms
   }
   for (const k of MTIME_DEFAULT_KEYS) {
     if (src[k] === undefined && opts.mtimeMs !== undefined) src[k] = opts.mtimeMs
@@ -167,13 +185,26 @@ export function decodeFile(raw: string, ctx: { path: string; loc: FileLocation }
   }
 }
 
+/**
+ * 有效期写出：本机写法读回来恰好是原值才写它；否则（年份不是四位、夏令时回拨时重复的那一小时、历史上偏移不是整分钟的时区）
+ * 写 UTC ISO——读取认它、读回分毫不差，维护点不会来回改写。
+ */
+function encodeValidity(key: 'validFrom' | 'validTo', ms: number): string {
+  const value = roundValidity(key, ms)
+  const text = formatValidity(value)
+  let back: number | undefined
+  try { back = roundValidity(key, parseTimestamp(key, text, undefined)) } catch { back = undefined }
+  return back === value ? text : new Date(value).toISOString()
+}
+
 export function encodeRecord(record: MemoryRecord, extras: Record<string, unknown>): string {
   const fm: Record<string, unknown> = {}
   for (const k of FILE_KEY_ORDER) {
     if (k === 'digest') { fm.digest = computeDigest(record.name, record.summary, record.content); continue }
     const v = (record as unknown as Record<string, unknown>)[k]
     if (v === undefined) continue                     // 可选键缺省 = 键不存在
-    fm[k] = TIME_KEYS.has(k) ? new Date(v as number).toISOString() : v
+    fm[k] = isValidityKey(k) ? encodeValidity(k, v as number)
+      : TIME_KEYS.has(k) ? new Date(v as number).toISOString() : v
   }
   for (const [k, v] of Object.entries(extras)) {
     if (!KNOWN_FILE_KEYS.has(k) && !RESERVED_KEYS.has(k)) fm[k] = v  // schema 键胜出

@@ -15,12 +15,12 @@ const record = (partial: Partial<MemoryRecord> = {}) => baseRecord({
 })
 
 describe('往返', () => {
-  it('encode → split → decode 逐字段相等（毫秒时间戳无损）', () => {
+  it('encode → split → decode 逐字段相等（毫秒时间戳无损；有效期写到分钟，validTo 向上取整）', () => {
     const r = record({ scope: 'workspace', workspacePath: '/home/dev/example-project', validTo: 1754784000123 })
     const text = encodeRecord(r, {})
     const back = decodeRecord(splitFrontmatter(text), { scope: 'workspace', workspacePath: '/home/dev/example-project' })
     // 易变字段不进文件：decode 注入默认值
-    expect(back.record).toEqual({ ...r, recallCount: 0, lastRecalledAt: null })
+    expect(back.record).toEqual({ ...r, validTo: 1754784060000, recallCount: 0, lastRecalledAt: null })
     expect(back.record.updatedAt).toBe(1787166413362) // 毫秒精度是 isConflicting 的硬前提
   })
 
