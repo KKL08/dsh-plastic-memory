@@ -386,6 +386,15 @@ describe('交付卡', () => {
     ])
   })
 
+  it('没有会话视图的旧对话：按归属对照定项目（cwd 是项目子目录时不拿子目录拼层）', async () => {
+    const gateway = createFakeGateway({ views: { workspaces: { version: GUI_VIEW_VERSION, cwds: { '/w/app/packages/web': '/w/app' } } } })
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app/packages/web" saved={[saved('mem_w', '提交前跑测试')]} now={NOW} openDetail={() => {}} />, gateway)
+    expand()
+    await remove(screen.getByRole('button', { name: '删除这条记忆' }))
+    await screen.findByText('已删除。14 天内也能在最近删除里找回。')
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'mem_w', layer: { kind: 'workspace', workspacePath: '/w/app' } }])
+  })
+
   it('本项目记忆的「查看详情」落在服务端给会话定的项目（会话 cwd 是项目子目录时不落到子目录）', () => {
     const session: SessionView = {
       version: GUI_VIEW_VERSION, sessionId: 's1', workspacePath: '/w/app', frozenAt: 2, origin: 'start', budget: 4000, overflowMode: 'relax',
