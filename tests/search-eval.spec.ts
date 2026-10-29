@@ -2,6 +2,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { fileURLToPath } from 'node:url'
 import { MemoryStore } from '../src/store.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
@@ -404,4 +407,29 @@ describe('命中弱', { timeout: 60_000 }, () => {
       })
     })
   }
+})
+
+describe('评估脚本 scripts/eval-search.ts --brief 的输出', () => {
+  const SCRIPT = fileURLToPath(new URL('../scripts/eval-search.ts', import.meta.url))
+  const METRICS = /^top-1 \d+\/\d+ {2}top-3 \d+\/\d+ {2}MRR \d\.\d{3}/
+
+  it('每种分词一行总览，下面按类别分行（换说法类单独成行、注明只记基线）；不打印调参对照', async () => {
+    const { stdout } = await promisify(execFile)(process.execPath, [SCRIPT, '--brief'], { maxBuffer: 16 * 1024 * 1024 })
+    const lines = stdout.split('\n')
+    const tiers = jiebaProbe === undefined ? ['bigram', 'jieba'] : ['bigram']
+    for (const tier of tiers) {
+      const at = lines.findIndex(l => l.startsWith(`${tier.padEnd(8)} top-1 `))
+      expect(at, `${tier} 总览行`).toBeGreaterThan(-1)
+      expect(lines[at]!.slice(9)).toMatch(METRICS)
+      const rows = lines.slice(at + 1, at + 1 + EVAL_CATEGORIES.length)
+      expect(rows.map(l => l.trim().split(/\s+/)[0])).toEqual([...EVAL_CATEGORIES])
+      for (const row of rows) expect(row.trim().replace(/^\S+\s+/, '')).toMatch(METRICS)
+      const baseline = rows.filter(l => BASELINE_ONLY_CATEGORIES.includes(l.trim().split(/\s+/)[0] as never))
+      expect(baseline.length).toBeGreaterThan(0)
+      for (const row of baseline) expect(row).toContain('只记基线')
+    }
+    expect(lines.filter(l => l.startsWith('## ')).map(l => l.split('（')[0]!.split('：')[0])).toEqual(
+      jiebaProbe === undefined ? ['## 两档指标', '## 逐条差异', '## 命中弱'] : ['## 两档指标', '## 命中弱'],
+    )
+  }, 60_000)
 })
