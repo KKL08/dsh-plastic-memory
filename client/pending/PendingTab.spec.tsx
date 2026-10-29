@@ -1219,6 +1219,9 @@ describe('待处理：直接改与直接合并', () => {
   it('含密钥的记忆不给「直接改」「直接合并」', () => {
     const pair: PendingItem = { kind: 'advice', level: 'advice', type: 'redundancy', memories: [memory({ id: 'x1', digest: 'sha1:x1', hasSecret: true }), memory({ id: 'x2', digest: 'sha1:x2' })] }
     setup([{ ...bloat, memories: [{ ...target, hasSecret: true }] }, pair])
+    // 两张卡确实渲染出来了（各有「打开文件」），否定断言才有意义
+    const cards = ['内容过长', '内容重复'].map(title => screen.getByRole('heading', { level: 3, name: title }).closest('article')!)
+    for (const card of cards) expect(within(card).getAllByRole('button', { name: '打开文件' }).length).toBeGreaterThan(0)
     expect(screen.queryByRole('button', { name: '直接改' })).toBeNull()
     expect(screen.queryByRole('button', { name: '直接合并' })).toBeNull()
   })
@@ -1532,6 +1535,9 @@ describe('待处理：让模型改与让模型合并', () => {
   it('含密钥的记忆：没有「让模型改」「让模型合并」，也不发请求', () => {
     const pair: PendingItem = { kind: 'advice', level: 'advice', type: 'redundancy', memories: [memory({ id: 'x1', digest: 'sha1:x1', hasSecret: true }), memory({ id: 'x2', digest: 'sha1:x2' })] }
     const { commands } = setup([{ ...bloat, memories: [{ ...target, hasSecret: true }] }, pair])
+    // 两张卡确实渲染出来了（各有「打开文件」），否定断言才有意义
+    const cards = ['内容过长', '内容重复'].map(title => screen.getByRole('heading', { level: 3, name: title }).closest('article')!)
+    for (const card of cards) expect(within(card).getAllByRole('button', { name: '打开文件' }).length).toBeGreaterThan(0)
     expect(screen.queryByRole('button', { name: '让模型改' })).toBeNull()
     expect(screen.queryByRole('button', { name: '让模型合并' })).toBeNull()
     expect(commands()).toEqual([])
