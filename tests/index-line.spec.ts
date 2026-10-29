@@ -3,7 +3,7 @@ import { formatIndexLine, INFERENCE_NOTE } from '../src/index-line.ts'
 import { STALENESS_NOTE } from '../src/record-freshness.ts'
 import { record } from './helpers/record.ts'
 
-// 票 17 验收①：索引行末尾带文件名，MEMORY.md 与注入同一个格式器（docs/design-storage-file-is-memory.md §11）。
+// 索引行末尾带文件名，MEMORY.md 与注入同一个格式器。
 describe('MEMORY.md 行与注入索引行末尾带文件名（同源格式，passive 不带 summary；磁盘侧不带陈旧度，注入侧带）', () => {
   const inferred = { sessionId: 's', eventRange: [0, 1] as [number, number], sourceMode: 'agent-inferred' as const }
 

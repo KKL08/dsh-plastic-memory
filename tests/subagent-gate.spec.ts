@@ -11,7 +11,7 @@ import { delegationDepthOf } from '../src/tools/subagent-gate.ts'
 import { lastVisibleSnapshot } from '../src/snapshot-message.ts'
 import { fakeExec } from './helpers/exec.ts'
 
-// 子 agent 只读门（票 15）：宿主子 agent 会话的 header 带 delegationDepth（父深度 + 1），主会话缺省。
+// 子 agent 只读门：宿主子 agent 会话的 header 带 delegationDepth（父深度 + 1），主会话缺省。
 // 经 apply() 注册后的真实工具定义走一遍，宿主对象只按最小结构伪造（进程边界）。
 
 const SUBAGENT_READONLY: ToolGateCode = 'subagent-readonly'

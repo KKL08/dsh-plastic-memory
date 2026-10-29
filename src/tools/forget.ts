@@ -53,7 +53,7 @@ export interface ForgetResult {
 
 /**
  * memory_forget（批量）：快照先行 → 逐条软删 → 清理待决账本悬空引用。
- * 含密钥的目标（任一级，docs/design-storage-file-is-memory.md §10）走硬删：本次快照里直接存脱敏版，
+ * 含密钥的目标（任一级）走硬删：本次快照里直接存脱敏版，
  * 既有快照先脱敏再物理删除文件——中途失败时文件还在，重跑 forget 即可，不会留下「文件已删、快照仍有明文」。
  * 不依赖任何 dsh 框架包，测试直接调它。
  */
@@ -99,7 +99,7 @@ export async function executeForget(
     }
   }
 
-  // 快照先行（docs/p1-governance-health-design.md §6）：删除前把受影响记录的完整状态存进 snapshots 表
+  // 快照先行：删除前把受影响记录的完整状态存进 snapshots 表
   const secretIds = new Set(found.filter(hasSecret).map(r => r.id))
   const snapshot = await deps.snapshots.capture({
     operation: 'pre-forget',

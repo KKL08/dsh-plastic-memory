@@ -25,7 +25,7 @@ import { record as baseRecord } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { formatValidity } from '../src/validity.ts'
 
-// 票 12：手编检测与恢复比较投影（docs/design-storage-file-is-memory.md §2、§13）。
+// 手编检测与恢复比较投影。
 // 全部用真实目录（FileTable + .state 侧表）；文件直接改盘模拟用户手编。
 
 const WS = '/home/dev/proj-h'
@@ -87,7 +87,7 @@ function restored<T extends { kind: string }>(r: T): Extract<T, { kind: 'restore
   return r as Extract<T, { kind: 'restored' }>
 }
 
-describe('票 12 验收：手编检测与恢复比较投影', () => {
+describe('手编检测与恢复比较投影', () => {
   it('改正文不改 frontmatter → 渲染带手编标注；维护点后文件里 handEdited: true、lastConfirmedAt 等于 mtime；memory_save update 后标记清除且 source 更新', async () => {
     const path = await writeMem('pnpm.md', wsRec({ id: 'mem_h', name: '包管理', summary: '用 pnpm', content: '包管理用 pnpm' }))
     await handEdit(path, '包管理用 pnpm', '包管理用 pnpm，锁文件必须提交')

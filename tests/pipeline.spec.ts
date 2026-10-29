@@ -55,7 +55,7 @@ describe('runSavePipeline', () => {
     expect(result.record.source).toEqual({ sessionId: 's1', eventRange: [0, 42], sourceMode: 'user-explicit' })
   })
 
-  // 真锚（设计 evidence-anchor §3）：eventRange = [当轮 turn/start, save 时刻]，绑定层机械填充
+  // 证据锚（这条记忆出自会话的哪段事件）：eventRange = [当轮 turn/start, save 时刻]，绑定层机械填充
   it('session 带 turnStartSeq 时 eventRange 用真实当轮区间', async () => {
     const result = await runSavePipeline(candidate(), { ...deps(), session: { id: 's1', lastSeq: 42, turnStartSeq: 37 } })
     if (result.kind !== 'saved') throw new Error(result.kind)

@@ -1,7 +1,7 @@
 export type EvidenceLookupLevel = 'off' | 'strict' | 'active'
 
 /**
- * 证据下钻引导（设计 docs/design-evidence-anchor.md §4）：按 evidenceLookup 档位选一段拼进注入快照。
+ * 证据下钻引导：按 evidenceLookup 档位选一段拼进注入快照。
  * 铁规矩：三段文案各自自包含、禁止互相引用——运行时只有一段在场，跨段引用是悬空的。
  */
 export const EVIDENCE_GUIDANCE: Record<EvidenceLookupLevel, string> = {

@@ -184,7 +184,7 @@ export class SnapshotCache {
     this.compactions.delete(session)
     this.cache.set(session, { text, generation, core: new Map(coreIds.map(id => [id, contentOf.get(id)!])), origin })
     await this.markRecalled(session, coreIds)
-    // 快照冻结是维护点之一（设计稿 §5 §6）：对 global + 当前 workspace 做维护；失败只记日志，不拖垮注入
+    // 快照冻结是两个维护点之一（另一个在写路径末尾；读路径不写盘，索引再生、归档搬家只能在这两处做）：对 global + 当前 workspace 做维护；失败只记日志，不拖垮注入
     try {
       await this.deps.store.maintain({ kind: 'visible', workspacePath })
     } catch (err) {

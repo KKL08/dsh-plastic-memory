@@ -10,7 +10,7 @@ import { STATE_DIR } from './paths.ts'
 import { linkExclusive } from './exclusive-link.ts'
 
 /**
- * 侧表文件存储（设计稿 docs/design-storage-file-is-memory.md §1 §7 §8）：快照、待决账本、扫描缓存、
+ * 侧表文件存储：快照、待决账本、扫描缓存、
  * 召回统计住 `<memoryRoot>/.state/`，跨进程可见。
  *
  *   .state/snapshots/<id>.json      每条一文件

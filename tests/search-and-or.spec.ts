@@ -16,7 +16,7 @@ import type { RecallStats } from '../src/storage/schema.ts'
 import { record } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
 
-// 票 16（设计稿 §11）：多词查询先 AND，零命中回退 OR 并按命中数排序；原文预筛随模式切换。
+// 多词查询先 AND，零命中回退 OR 并按命中数排序；原文预筛随模式切换。
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const LOW_COVERAGE: SearchNoteCode = 'low-coverage'

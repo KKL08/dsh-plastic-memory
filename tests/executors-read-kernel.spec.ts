@@ -28,7 +28,7 @@ import { fakeExec } from './helpers/exec.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
 
-// 票 09：执行器切到按范围读取与两级定位。全部用真实目录（FileTable + .state 侧表），
+// 执行器切到按范围读取与两级定位。全部用真实目录（FileTable + .state 侧表），
 // 只 mock 进程边界（sessionQuery.readEvent）；文件直接写盘模拟用户手编、git、其他进程。
 
 const WS = '/home/dev/proj-a'
@@ -133,7 +133,7 @@ function checkup<T extends { kind: string }>(r: T): Extract<T, { kind: 'checkup'
   return r as Extract<T, { kind: 'checkup' }>
 }
 
-describe('票 09 验收：执行器走按范围读取与两级定位', () => {
+describe('执行器走按范围读取与两级定位', () => {
   it('外部写入可见：进程跑过一次操作后直接写 / 改 / 删文件，下一次 search、快照组装、health 都反映新状态，不经任何刷新', async () => {
     const h = harness()
     await ensureDir(wsDir(WS), WS)

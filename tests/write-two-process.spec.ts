@@ -11,7 +11,7 @@ import { FileTable } from '../src/storage/file-table.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 
-// 测试第 5 层：两个真实 Node 进程同时写同一个记忆目录（设计稿 §5 §8：rename 只覆盖同一记录自己的文件，
+// 测试第 5 层：两个真实 Node 进程同时写同一个记忆目录（rename 只覆盖同一记录自己的文件，
 // 所以两个进程写同名异 id 的记录两条都存活）。子进程用 Node 内置类型剥离直接跑 .ts，起跑靠 stdin 握手同步。
 
 const WORKER = fileURLToPath(new URL('./helpers/write-worker.ts', import.meta.url))

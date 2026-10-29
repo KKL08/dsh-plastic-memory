@@ -106,7 +106,7 @@ function frontmatterOf(raw: string): string {
 }
 
 /**
- * 文件表：磁盘是唯一真相，进程里不常驻记忆表（设计稿 §0）。构造不做 I/O；每个操作读它涉及的目录。
+ * 文件表：磁盘是唯一真相，进程里不常驻记忆表。构造不做 I/O；每个操作读它涉及的目录。
  * 读路径不加锁、不写盘；写路径经一条 Promise 链串行，锁内先 locate 重读磁盘再应用修改（外部编辑不丢）；create 是例外：新 id 不定位，排他占名。
  * 锁只管本进程：写盘前复核文件原文仍是 locate 读到的那份，被别的进程或用户改过就重新 locate、重算后再写。
  * 记忆目录的维护只有两处入口：写路径末尾（被写的目录）与 maintain（快照冻结时由调用方对 global + 当前 workspace 调用），都走同一把锁。
@@ -382,7 +382,7 @@ export class FileTable implements MemoryTable {
   }
 
   /**
-   * 维护点（设计稿 §5；锁内，只动给定目录，幂等）。每个目录读顶层 + .archive/ 一遍，逐文件：
+   * 维护点（写路径末尾与快照冻结时调用；锁内，只动给定目录，幂等）。每个目录读顶层 + .archive/ 一遍，逐文件：
    *  - .archive/ 里 status 仍为 active 的按位置归一成 deleted（位置即作用域，不搬回顶层）；deleted 缺 deletedAt 用 mtime 补
    *  - ③ .archive/ 里 deletedAt 超保留期的物理删除，哪层都没有这个 id 了才清召回统计行（superseded 不清）
    *  - ④ 手建 / 手编回写：digest 认识且不匹配 → handEdited、updatedAt 与 lastConfirmedAt 取 mtime；缺 id / 缺 digest / 时间戳形态 /
@@ -465,7 +465,7 @@ export class FileTable implements MemoryTable {
   }
 
   /**
-   * 写该 id 之后清掉可见集合（global + 该记录所在目录，含各自 .archive/）里的其余副本；其他项目的副本不动（ARCHITECTURE.md ⑥-6d）；只认层的写只清该目录。
+   * 写该 id 之后清掉可见集合（global + 该记录所在目录，含各自 .archive/）里的其余副本；其他项目的副本不动；只认层的写只清该目录。
    * 给了 known（写路径传 locate 读到的副本）就只删其中此后没变过的：读之后才出现或被改过的是别的进程刚写的，两边都删对方的副本会一份不剩，
    * 留下的同 id 副本由读路径取舍、下一次写清掉。不给（删除路径）就当场扫、全删。
    */
@@ -506,8 +506,8 @@ export class FileTable implements MemoryTable {
   /** 索引全文：只由传入的 active 记录决定。 */
   private indexText(active: readonly LocatedRecord[]): string {
     // 缺省格式器与注入侧同源（src/index-line.ts）。磁盘索引不带陈旧度：静态文件里的
-    // 时间相对标注会随时间失真（设计稿 §6 登记的有意偏离）。
-    // 行末带同目录的实际文件名（设计稿 §11），模型拿到即可 Read，不用再 grep id。
+    // 时间相对标注会随时间失真，所以这里有意和注入侧不同。
+    // 行末带同目录的实际文件名，模型拿到即可 Read，不用再 grep id。
     const fmt = this.opts.formatIndexLine ?? ((r: MemoryRecord, file: string) => formatIndexLine(r, { passive: false, file }))
     // 索引行序必须确定：readdir 序跨设备不确定，多设备同步下会造成索引文件 churn。
     // 按 name 排序（不用 localeCompare——locale 依赖环境），name 相同用 id 决胜。
@@ -593,7 +593,7 @@ export class FileTable implements MemoryTable {
   }
 
   /**
-   * 排他占名并写入（设计稿 §5；ARCHITECTURE.md ⑥-2 撞名追加 id 片段）。完整内容先进 tmp，再 link 到候选名：目标名原子出现
+   * 排他占名并写入（撞名时追加 id 片段）。完整内容先进 tmp，再 link 到候选名：目标名原子出现
    * 且内容完整，没有"先建空文件再填"的窗口，崩溃最多留下 tmp（维护点清）。卷不支持硬链接时 linkExclusive 退回排他复制，
    * 排他不变，只是不再原子。EEXIST 表示名被占——占着的是同一记录自己的
    * 文件（崩溃残留、同 id 副本）才允许 rename 覆盖，否则换下一个候选：基础名 → id 片段名 → 全 id 名（按构造只属于本记录，
@@ -630,7 +630,7 @@ export class FileTable implements MemoryTable {
   }
 
   /**
-   * 写路径（锁内，设计稿 §5）：选目录（scope；workspace 目录不存在则 mkdir + 写标记）→ 选层（status 离开 active 进
+   * 写路径（锁内）：选目录（scope；workspace 目录不存在则 mkdir + 写标记）→ 选层（status 离开 active 进
    * .archive/，deleted 缺 deletedAt 补 now；回到 active 搬回顶层）→ 编码 → 已定位到自己文件且目录、层、slug 都没变就原地
    * tmp + rename 覆盖，否则排他占名 → 搬家删旧 → 清可见集合里该 id 的其余副本 → 本目录（搬家时两个）维护点。返回实际写出的记录。
    * 覆盖、占名、删旧之前都复核 prev 的原文，变了抛 StaleReadError（占名后才发现的先撤回新文件），由调用方重来。
@@ -700,7 +700,7 @@ export class FileTable implements MemoryTable {
     // put 是整条替换：值由调用方给定，重来时只换新的位置、附加字段与召回统计，不重算内容；skipIf 每轮按新读数重判
     return this.locked(() => this.withFreshLocate(key, hint, async prev => {
       if (prev !== undefined && skipIf?.(prev.record)) return false
-      // put 不承载召回统计（设计稿 §2：召回统计只住 .state/recall-stats.json，快照恢复不恢复它）。召回统计
+      // put 不承载召回统计（召回统计只住 .state/recall-stats.json，快照恢复不恢复它）。召回统计
       // 由 MemoryStore.markRecalled 直写侧表；prev 在时以侧表现值为准，restore 旧记录不回退 sidecar。
       const next = prev
         ? { ...value, recallCount: prev.record.recallCount, lastRecalledAt: prev.record.lastRecalledAt }

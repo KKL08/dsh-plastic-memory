@@ -40,7 +40,7 @@ export type SnapshotToolResult =
   | { kind: 'error'; message: string }
 
 /**
- * memory_snapshot（docs/p1-governance-health-design.md §6 恢复流程的工具面）：create 手动快照 / list 清单 /
+ * memory_snapshot（快照恢复流程的工具面）：create 手动快照 / list 清单 /
  * show 对比 / restore 选择性恢复。restore 冲突保护：快照后被修改过的记录默认跳过。
  */
 export async function executeSnapshotTool(

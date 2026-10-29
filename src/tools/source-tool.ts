@@ -8,7 +8,7 @@ export interface SourceToolBindingDeps extends SourceToolDeps {
 }
 
 /**
- * memory_source 绑定（设计 docs/design-evidence-anchor.md §5）：回查某条记忆的原始出处窗口。
+ * memory_source 绑定：回查某条记忆的原始出处窗口。
  * 何时该调由注入快照里的档位文案（EVIDENCE_GUIDANCE）引导，工具描述只说能力不说姿态——
  * 姿态归档位管，写进描述会让 off 档的"不鼓励"失效。
  */

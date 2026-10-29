@@ -10,7 +10,7 @@ export interface SnapshotToolBindingDeps extends SnapshotToolDeps {
 
 /**
  * 把 memory_snapshot 接到 dsh 框架上。测试只测 snapshot.ts 纯逻辑，
- * 本文件由 typecheck + 真机冒烟保证（docs/p1-verification.md）。
+ * 本文件由 typecheck + 真机冒烟保证。
  */
 export function createSnapshotTool(deps: SnapshotToolBindingDeps): ToolDefinition {
   return defineTool({

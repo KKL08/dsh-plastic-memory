@@ -34,7 +34,7 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
 
-// 票 14（S2）：治理动作只有在用户明确选择「全局整理」后才能跨项目。
+// 治理动作只有在用户明确选择「全局整理」后才能跨项目。
 // 场景统一为：会话在项目 A，B 是另一个项目；global 记忆对任何会话都可见。
 
 const A = '/home/dev/proj-a'

@@ -48,7 +48,7 @@ describe('FileTable 写侧', () => {
     const before = (await stat(join(root, GLOBAL_DIR, 'a.md'))).mtimeMs
     await t.update('mem_a', r => ({ ...r, recallCount: r.recallCount + 1, lastRecalledAt: 123 }))
     const after = (await stat(join(root, GLOBAL_DIR, 'a.md'))).mtimeMs
-    expect(after).toBe(before)                       // §4 核心命题
+    expect(after).toBe(before)                       // 召回统计只进侧表，不重写文件
     expect(((await t.locate('mem_a'))?.record)!.recallCount).toBe(1)      // 内存与 sidecar 已更新
   })
 
@@ -245,7 +245,7 @@ describe('FileTable 撞名检查看得见磁盘（终审 I1：隔离文件不可
   })
 })
 
-describe('票 10：写路径内核（锁内定位、排他占名、搬家与归档）', () => {
+describe('写路径内核（锁内定位、排他占名、搬家与归档）', () => {
   const mds = async (dir: string) => (await readdir(dir).catch(() => [] as string[])).filter(n => n.endsWith('.md') && n !== 'MEMORY.md').sort()
   const tmps = async (dir: string) => (await readdir(dir).catch(() => [] as string[])).filter(n => n.includes('.tmp-'))
   const globalDir = () => join(root, GLOBAL_DIR)
@@ -336,7 +336,7 @@ describe('票 10：写路径内核（锁内定位、排他占名、搬家与归�
     expect(await t.locate('mem_s')).toBeUndefined()
   })
 
-  it('顶层 deleted 文件搬进 .archive/ 后 listWorkspaceDirs 的 hasActiveTopLevel 自然收敛（票 09 转来）', async () => {
+  it('顶层 deleted 文件搬进 .archive/ 后 listWorkspaceDirs 的 hasActiveTopLevel 自然收敛', async () => {
     const t = await load()
     await t.create(wsRecord({ id: 'mem_only', name: '唯一' }))
     expect((await t.listWorkspaceDirs()).entries).toEqual([{ workspacePath: WS, dir: wsDir(), hasActiveTopLevel: true }])

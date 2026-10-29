@@ -222,7 +222,7 @@ export async function runSavePipeline(
   }
 
   // 4. 持久化（写入前必须过 schema——KvTable.put 不校验，脏记录会让下次 domain open 整库拒载）
-  // 真锚（设计 evidence-anchor §3）：eventRange = [当轮 turn/start, save 时刻]，两个数都是机械事实。
+  // 证据锚（这条记忆出自会话的哪段事件）：eventRange = [当轮 turn/start, save 时刻]，两个数都是机械事实。
   // 模型上下文里没有 seq 标注，任何模型填的区间都是编造——锚只能由绑定层填。
   const anchorStart = Math.min(session.turnStartSeq ?? 0, session.lastSeq)
   const source = { sessionId: session.id, eventRange: [anchorStart, session.lastSeq] as [number, number], sourceMode: candidate.sourceMode }

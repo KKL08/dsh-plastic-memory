@@ -18,7 +18,7 @@ export interface SnapshotDiffEntry {
 }
 
 /**
- * 恢复比较投影（docs/design-storage-file-is-memory.md §13）：判「快照后被修改」只比这些内容字段，
+ * 恢复比较投影：判「快照后被修改」只比这些内容字段，
  * 不含时间戳、status、handEdited、位置与召回统计，也不读文件里的 digest——手改后立即恢复也能判出，
  * 没有 digest 的旧快照同样能比。正文 CRLF 归一为 LF（与 digest 一致，换行风格不算修改）。
  */
@@ -49,7 +49,7 @@ export function isConflicting(current: MemoryRecord | undefined, snapshotted: Me
 }
 
 /**
- * 密钥硬删的快照脱敏（docs/design-storage-file-is-memory.md §10）：命中密钥的字段换成占位文本，打 redacted 标记，
+ * 密钥硬删的快照脱敏（含密钥的记忆被遗忘后，快照里也不能留明文）：命中密钥的字段换成占位文本，打 redacted 标记，
  * 其余字段原样。按这份记录自己的内容检测——旧版本可能还没贴密钥，那就只打标记（记忆已物理删除，不再可恢复）。
  */
 export function redactRecord(r: SnapshotRecord): SnapshotRecord {
@@ -65,7 +65,7 @@ export function redactRecord(r: SnapshotRecord): SnapshotRecord {
 const maskDescription = (text: string) => maskSecrets(text, { severity: 'suspected' })
 
 /**
- * 记忆快照（docs/p1-governance-health-design.md §6）：只管记忆数据的可恢复性，操作审计走 dsh session log。
+ * 记忆快照：只管记忆数据的可恢复性，操作审计走 dsh session log。
  * 只存受影响记录，非全量。
  */
 export class SnapshotStore {
@@ -112,7 +112,7 @@ export class SnapshotStore {
   }
 
   /**
-   * 密钥硬删（ARCHITECTURE.md ⑥-6c）：所有含这些 id 的快照里把该记录脱敏（redactRecord），同快照的其他记录不动。
+   * 密钥硬删：所有含这些 id 的快照里把该记录脱敏（redactRecord），同快照的其他记录不动。
    * 每个快照经侧表 put 原子重写（tmp + rename）；内容没变的（不含这些 id、或已脱敏过）不写。
    */
   redact(ids: ReadonlySet<string>): Promise<void> {

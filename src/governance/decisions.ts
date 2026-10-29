@@ -121,7 +121,7 @@ function mergeReport(existing: PendingDecision, input: UpsertInput): PendingDeci
 }
 
 /**
- * pending-decisions 待决账本（docs/p1-governance-health-design.md §4）。种类见 kind：冲突（缺省）、提升候选、超限提醒。
+ * pending-decisions 待决账本：等用户裁决的事项。种类见 kind：冲突（缺省）、提升候选、超限提醒。
  * 裁决一律标 settled 留在账本里：两边都留的（含提升候选「留在本项目」、超限「忽略」），指纹不变时不再挂账，
  * 指纹变了（任一方改写、基线变了、换了档位）旧结论作废、按新条目重报；删掉一方的记下快照 id 供撤销，
  * 同一对再被扫到（败方回来了）就回到待处理，败方超出保留窗口后由 sweep 清掉。

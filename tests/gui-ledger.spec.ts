@@ -7,7 +7,7 @@ import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
 import { record } from './helpers/record.ts'
 
-// 账本侧表的 GUI 兼容扩展（ARCHITECTURE.md ⑥-7）：kind、settled.snapshotId、删一方的裁决留账、GUI 条目带指纹。
+// 账本侧表的 GUI 兼容扩展：kind、settled.snapshotId、删一方的裁决留账、GUI 条目带指纹。
 // 真实临时目录 + 文件侧表。保留窗口的连带清理见 gui-ledger-retention.spec.ts。
 
 let root: string

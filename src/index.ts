@@ -58,7 +58,7 @@ export interface Config {
   snapshotTokenBudget: Volatile<number>
   /** 带入量超过 snapshotTokenBudget 时：relax 自动放宽（需要多少带多少，每进一档 25% 提醒一次）、strict 严格按上限（截断，95% 提醒）。 */
   snapshotOverflow: Volatile<OverflowMode>
-  /** 证据下钻档位（docs/design-evidence-anchor.md §4）：off 不鼓励回查原始轨迹、strict 仅硬信号、active 开放路标式引导。 */
+  /** 证据下钻档位（模型什么时候回查记忆出处的原始对话）：off 不鼓励回查原始轨迹、strict 仅硬信号、active 开放路标式引导。 */
   evidenceLookup: Volatile<'off' | 'strict' | 'active'>
   template: Volatile<'coding' | 'office' | 'custom'>
   customTypes: Volatile<Record<string, Omit<MemoryTypeDefinition, 'name'>>>
@@ -170,7 +170,7 @@ export async function apply(ctx: Context, config: Config) {
     formatIndexLine: (r, file) => formatIndexLine(r, { passive: registry.get(r.type).recall === 'passive', file }),
     log: ctx.logger,
   })
-  // 加载期零 I/O：FileTable 构造不碰磁盘，每个操作读它涉及的目录（设计稿 §0）
+  // 加载期零 I/O：FileTable 构造不碰磁盘，每个操作读它涉及的目录（磁盘是唯一真相，外部改动下次操作就能看到）
   const store = new MemoryStore(fileTable, ctx.logger, sidecar.recallStats)
   // forget 的快照先行与待决账本清理需要这两个存储，治理关闭时也接线
   const decisions = new PendingDecisionsStore(sidecar.pending)

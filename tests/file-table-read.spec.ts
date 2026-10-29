@@ -13,7 +13,7 @@ import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 
-// 票 08 读侧内核（docs/design-storage-file-is-memory.md §0 §3 §4）：磁盘是唯一真相、读路径零写入、
+// 读侧内核：磁盘是唯一真相、读路径零写入、
 // 预筛是超集、加载期零 I/O。只测 FileTable；双后端一致的语义在 table-conformance.spec.ts。
 
 const record = (partial: Partial<MemoryRecord> = {}) => baseRecord({

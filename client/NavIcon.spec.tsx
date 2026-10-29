@@ -22,7 +22,7 @@ function setup(view: PendingView | undefined, session: 'ready' | 'none' = 'ready
 }
 
 describe('左栏图标圆点', () => {
-  it('图标是设计稿定的鲸尾出水线稿：尾叶、尾柄、水波三笔', () => {
+  it('图标是鲸尾出水线稿：尾叶、尾柄、水波三笔', () => {
     const { container } = setup(undefined)
     const paths = [...container.querySelectorAll('path')].map(el => el.getAttribute('d') ?? '')
     expect(paths).toHaveLength(3)

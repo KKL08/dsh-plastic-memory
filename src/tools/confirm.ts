@@ -30,7 +30,7 @@ export type ConfirmResult =
   | { kind: 'error'; code?: GovernanceRejectCode | DecisionRejectCode; rejected?: CrossWorkspaceRejection[]; message: string }
 
 /**
- * memory_confirm（docs/p1-governance-health-design.md §7.1）：refresh 刷新新鲜度；resolve 裁决待决冲突。
+ * memory_confirm：refresh 刷新新鲜度；resolve 裁决待决冲突。
  * verdict 约定：横向冲突 left=memoryIds[0]、right=memoryIds[1]；
  * 垂直冲突（有 baselineRef）left=记忆、right=基线（基线不可删，keep-right 意为记忆过时删除）。
  */
@@ -129,7 +129,7 @@ async function resolveClaimed(
   if (vertical && args.verdict === 'keep-left') actions.push(`保留记忆 ${entry.memoryIds[0]}（用户确认 override ${entry.baselineRef}）`)
 
   if (toDelete && toDelete.status !== 'deleted') {
-    // 快照先行（docs/p1-governance-health-design.md §6），再软删
+    // 先存快照再软删，误操作可以恢复
     const snapshot = await deps.snapshots.capture({
       operation: 'pre-resolve',
       description: `裁决冲突 ${entry.id}（${args.verdict}）删除败方前`,

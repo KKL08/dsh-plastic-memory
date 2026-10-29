@@ -22,7 +22,7 @@ import { record as baseRecord } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { formatIndexLine } from '../src/index-line.ts'
 
-// 票 11：维护点（docs/design-storage-file-is-memory.md §5）。只测 FileTable 专属的磁盘效应；
+// 维护点（写路径末尾与快照冻结时的目录整理）。只测 FileTable 专属的磁盘效应；
 // 双后端一致的语义在 table-conformance.spec.ts。全部用真实目录，不 mock 自己的模块。
 
 const DAY = 86_400_000
