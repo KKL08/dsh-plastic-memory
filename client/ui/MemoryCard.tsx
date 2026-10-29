@@ -1,12 +1,23 @@
 /**
  * 记忆卡（DESIGN.md「Memory Card」，招牌组件）：两行。
- * 第一行记忆原文，左边 2px 银藤竖线；第二行元信息「类型 · 作用域 · 来源 · 时间」，caption 色的点分隔，
+ * 第一行记忆原文，左边 2px 银藤竖线；第二行元信息：类型是浅灰胶囊（类型可自定义，配不了各自的图标），
+ * 作用域、来源、时间各带一个宿主图标，不再用点分隔。来源图标只分是谁：你、agent、环境，无出处不画。
  * 状态 chip 放最后、最多一个。不套外框和阴影；已过期的原文改次文字色，元信息加「不再带入对话」。
  * 记忆文字进视图前服务端已遮盖密钥片段，这里原样显示。
  */
-import { Fragment, type ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import type { MemoryCard as MemoryCardData } from '../../src/gui/contract.ts'
 import { formatDay, useT } from '../i18n.tsx'
+import { Chip } from './Chip.tsx'
+import { Icon, type IconName } from './Icon.tsx'
+
+const SOURCE_ICON: Record<NonNullable<MemoryCardData['sourceMode']>, IconName> = {
+  'user-explicit': 'user',
+  'user-behavior': 'user',
+  'agent-inferred': 'sparkle',
+  'agent-action-confirmed': 'sparkle',
+  'environment-observed': 'code',
+}
 
 export interface MemoryCardProps {
   memory: MemoryCardData
@@ -25,21 +36,18 @@ export interface MemoryCardProps {
 export function MemoryCard({ memory, now, typeLabel, hideScope = false, projectName, chip }: MemoryCardProps) {
   const t = useT()
   const expired = memory.validTo !== undefined && memory.validTo <= now
-  const meta: string[] = [typeLabel ?? memory.type]
-  if (!hideScope) meta.push(memory.scope === 'global' ? t('scope.global') : projectName ?? t('scope.workspace'))
-  meta.push(t(memory.sourceMode === undefined ? 'source.none' : `source.${memory.sourceMode}`))
-  meta.push(formatDay(memory.updatedAt, now, t))
-  if (expired) meta.push(t('memory.expired'))
+  const item = (icon: IconName | undefined, text: string) => (
+    <span className="pm-mc-item">{icon === undefined ? null : <Icon name={icon} size={13} />}{text}</span>
+  )
   return (
     <div className={expired ? 'pm-mc pm-mc--expired' : 'pm-mc'} data-memory-id={memory.id}>
       <p className="pm-mc-text">{memory.content}</p>
       <div className="pm-mc-meta">
-        {meta.map((item, i) => (
-          <Fragment key={i}>
-            {i > 0 ? <i className="pm-sep" aria-hidden="true">·</i> : null}
-            <span>{item}</span>
-          </Fragment>
-        ))}
+        <Chip variant="neutral">{typeLabel ?? memory.type}</Chip>
+        {hideScope ? null : memory.scope === 'global' ? item('globe', t('scope.global')) : item('folder', projectName ?? t('scope.workspace'))}
+        {item(memory.sourceMode === undefined ? undefined : SOURCE_ICON[memory.sourceMode], t(memory.sourceMode === undefined ? 'source.none' : `source.${memory.sourceMode}`))}
+        {item('clock', formatDay(memory.updatedAt, now, t))}
+        {expired ? <span className="pm-mc-item">{t('memory.expired')}</span> : null}
         {chip}
       </div>
     </div>
@@ -55,8 +63,11 @@ export const memoryCardCss = `
 }
 .pm-mc--expired .pm-mc-text { color: var(--pm-text-2); }
 .pm-mc-meta {
-  display: flex; flex-wrap: wrap; align-items: center; padding-left: 14px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; padding-left: 14px;
   font-size: 12px; line-height: 1.5; color: var(--pm-text-2);
 }
-.pm-mc-meta .pm-chip { margin-left: 8px; }
+.pm-mc-item { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.pm-mc-item svg { flex-shrink: 0; }
+/* 自定义类型名可能很长：窄侧栏里允许折行，不撑出横向滚动 */
+.pm-mc-meta .pm-chip { flex-shrink: 1; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 `

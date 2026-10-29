@@ -593,7 +593,7 @@ describe('交付卡：提升候选就地处理', () => {
     expect(row('mem_c').getByText('已提升为全局')).toBeInTheDocument()
     expect(row('mem_c').queryByRole('button', { name: '提升为全局' })).toBeNull()
     // 作用域按全局那一份写，删除也落在全局
-    expect(document.querySelector('.pm-saved-row[data-memory-id="mem_c"] .pm-mc-meta')).toHaveTextContent(/^preference·全局·/)
+    expect(document.querySelector('.pm-saved-row[data-memory-id="mem_c"] .pm-mc-meta')).toHaveTextContent(/^preference全局/)
     unmount()
     card(createFakeGateway({ views: { library: libraryOf([{ ...cand.memory, promotion: 'kept-local' }, plain.memory]) } }))
     expand()

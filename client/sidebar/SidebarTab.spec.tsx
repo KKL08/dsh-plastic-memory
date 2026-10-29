@@ -706,8 +706,8 @@ describe('SidebarTab 冲突对方在别的项目', () => {
     const { container } = setup({ library: library(pref, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending({ ...conflict, right: other } as PendingItem) })
     const metas = [...container.querySelectorAll('.pm-conflict .pm-mc-meta')].map(el => el.textContent)
     expect(metas).toHaveLength(2)
-    expect(metas[0]).toMatch(/·本项目·/)
-    expect(metas[1]).toMatch(/·blog·/)
+    expect(metas[0]).toMatch(/本项目你/)
+    expect(metas[1]).toMatch(/blog你/)
   })
 
   it('两方都在本项目：照旧不写作用域（面包屑已经交代）', () => {

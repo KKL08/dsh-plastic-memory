@@ -43,7 +43,8 @@
     "locale",
     "assets/icon.svg",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "dependencies": {
     "yaml": "^2.9.0",
@@ -102,7 +103,8 @@
     "host:contract": "bash scripts/host-contract/run.sh",
     "bench:storage": "node scripts/bench-storage.ts",
     "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build",
-    "build:client": "node scripts/build-client.ts"
+    "build:client": "node scripts/build-client.ts",
+    "icons:sync": "node scripts/sync-host-icons.ts"
   },
   "packageManager": "pnpm@11.22.0",
   "optionalDependencies": {
