@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { chmod, mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { createInterface } from 'node:readline'
+import { fileURLToPath } from 'node:url'
 import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { STATE_DIR } from '../src/storage/paths.ts'
@@ -15,7 +19,7 @@ import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
 import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
 import { resolveHealthThresholds } from '../src/governance/health-presets.ts'
 import { BLOAT_THRESHOLD } from '../src/governance/rule-scan.ts'
-import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type Finding } from '../src/governance/schema.ts'
+import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type AdviceIgnore, type Finding } from '../src/governance/schema.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import { computeDigest } from '../src/storage/frontmatter.ts'
@@ -367,4 +371,63 @@ describe('视图版本', () => {
     await seedBloat(e)
     expect((await e.health()).version).toBe(GUI_VIEW_VERSION)
   })
+})
+
+describe('两个进程', () => {
+  const WORKER = fileURLToPath(new URL('./helpers/gui-command-worker.ts', import.meta.url))
+
+  /** 起一个常驻的界面命令进程（Node 内置类型剥离直接跑 .ts）；command 发一条 /memory 命令、等它回一行结果。 */
+  function startWorker(tag: string) {
+    const child = spawn(process.execPath, [WORKER, root, WS, tag, String(NOW)], { stdio: ['pipe', 'pipe', 'inherit'] })
+    const lines = createInterface({ input: child.stdout! })[Symbol.asyncIterator]()
+    const exited = once(child, 'exit') as Promise<[number | null, NodeJS.Signals | null]>
+    const nextLine = async () => {
+      const { value, done } = await lines.next()
+      if (done) throw new Error(`worker ${tag} closed stdout early (exit ${(await exited)[0]})`)
+      return value as string
+    }
+    const call = async (cmd: object) => {
+      child.stdin!.write(`${JSON.stringify(cmd)}\n`)
+      return JSON.parse(await nextLine()) as unknown
+    }
+    const command = async (c: MemoryCommand) =>
+      memoryCommandResultSchema.parse(await call({ op: 'command', raw: encodeMemoryCommand(c).slice(`/${MEMORY_COMMAND_NAME}`.length) }))
+    const ignoreList = async () => await call({ op: 'ignores' }) as AdviceIgnore[]
+    return { child, nextLine, command, ignoreList, exited }
+  }
+
+  it('同时开着两个进程：一个忽略、取消忽略，另一个刷新视图后看到同样的待处理、已忽略列表和忽略记录', async () => {
+    const e = env()
+    await seedBloat(e)
+    const a = startWorker('a')
+    const b = startWorker('b')
+    try {
+      expect(await Promise.all([a.nextLine(), b.nextLine()])).toEqual(['ready', 'ready'])
+      // B 先读到旧状态
+      ok(await b.command({ cmd: 'refresh-views' }))
+      expect(await adviceOf(e)).toEqual(['bloat:mem_long'])
+      expect(await b.ignoreList()).toEqual([])
+
+      // A 照界面的做法忽略：卡片上的层和版本取自磁盘上的待处理视图
+      const item = (await e.pending()).items.find(i => i.kind === 'advice' && i.type === 'bloat')
+      if (item?.kind !== 'advice') throw new Error('待处理里没有过长那一项')
+      ok(await a.command({ cmd: 'ignore-advice', type: 'bloat', memories: item.memories.map(m => ({ memoryId: m.id, layer: layerOfMemory(m), base: { updatedAt: m.updatedAt, digest: m.digest! } })) }))
+
+      ok(await b.command({ cmd: 'refresh-views' }))
+      expect(await adviceOf(e)).toEqual([])
+      expect((await wsLayerOf(e)).ignored).toEqual([{ type: 'bloat', memories: [{ id: 'mem_long', name: '长的', summary: '摘要' }] }])
+      expect((await b.ignoreList()).map(i => i.memoryIds)).toEqual([['mem_long']])
+
+      ok(await a.command({ cmd: 'unignore-advice', type: 'bloat', memoryIds: ['mem_long'] }))
+      ok(await b.command({ cmd: 'refresh-views' }))
+      expect(await adviceOf(e)).toEqual(['bloat:mem_long'])
+      expect((await wsLayerOf(e)).ignored).toEqual([])
+      expect(await b.ignoreList()).toEqual([])
+      expect(await ignoreFiles()).toEqual([])
+    } finally {
+      a.child.stdin!.end()
+      b.child.stdin!.end()
+    }
+    expect((await Promise.all([a.exited, b.exited])).map(([code]) => code)).toEqual([0, 0])
+  }, 30_000)
 })
