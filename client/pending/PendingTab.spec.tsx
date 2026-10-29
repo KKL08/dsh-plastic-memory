@@ -131,24 +131,22 @@ describe('待处理：按级别分组', () => {
 
 describe('待处理：各类卡', () => {
 
-  it('横向冲突：A / B 原文、类型显示名，各自卡底写选它会删掉哪条；三个按钮各发对应 verdict', async () => {
+  it('横向冲突：A / B 原文、类型显示名；三个按钮各发对应 verdict', async () => {
     const { commands } = setup([horizontal])
     const a = screen.getByRole('region', { name: '记忆 A' })
     expect(within(a).getByText('测试用真实 Postgres。')).toBeInTheDocument()
     expect(within(a).getByText('行为偏好')).toBeInTheDocument()
-    expect(within(a).getByText('B 会删掉，14 天内可恢复')).toBeInTheDocument()
-    expect(within(screen.getByRole('region', { name: '记忆 B' })).getByText('A 会删掉，14 天内可恢复')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '以 B 为准' }))
     await waitFor(() => { expect(commands()).toEqual([{ cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-right' }]) })
   })
 
-  it('横向冲突：「都保留」并进普通动作行，左边写决定前按哪条、都保留的后果；裁决不加确认，结果带撤销', async () => {
+  it('横向冲突：三个按钮一排，上面「说明」写三种后果，决定前按哪条写在标题下；裁决不加确认，结果带撤销', async () => {
     const { commands } = setup([horizontal])
     const keepBoth = screen.getByRole('button', { name: '都保留' })
-    const row = keepBoth.closest('.pm-conflict-row')!
-    expect(row).not.toBeNull()
-    expect(row).toHaveTextContent('决定之前，agent 按你明确说过的 A 来做。两条都对就选都保留，以后不再算冲突。')
-    expect(row.querySelectorAll('button')).toHaveLength(1)
+    const row = keepBoth.closest('.pm-conflict-buttons')!
+    expect([...row.querySelectorAll('button')].map(b => b.textContent)).toEqual(['以 A 为准', '以 B 为准', '都保留'])
+    expect(row.previousElementSibling).toHaveTextContent(/^说明.*14 天内可恢复/)
+    expect(screen.getByText('决定之前，agent 按你明确说过的 A 来做。')).toBeInTheDocument()
     expect(document.querySelector('.pm-keep-line')).toBeNull()
     fireEvent.click(keepBoth)
     await screen.findByText('以后体检不再把它们当冲突。')
