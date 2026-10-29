@@ -1,6 +1,7 @@
 import type { MemoryRecord } from '../record-schema.ts'
 import { SEVERITY_BY_TYPE, type Finding } from './schema.ts'
 import { detectSecrets, maskDiagnostic } from '../secrets.ts'
+import { withinValidity } from '../record-freshness.ts'
 import { VALIDITY_DATE_FORMAT, VALIDITY_FORMAT, formatValidity } from '../validity.ts'
 
 export const BLOAT_THRESHOLD = 2000
@@ -27,7 +28,7 @@ export function runRuleScan(
         suggestedAction: '确认后用 memory_forget 删除（memory_forget 会立即物理删除，不进 14 天回收），并轮换泄漏的凭证',
       })
     }
-    if (r.validTo !== undefined && r.validTo < now) {
+    if (r.validTo !== undefined && !withinValidity(r, now)) {
       findings.push({
         type: 'expired', layer: 'rule', severity: SEVERITY_BY_TYPE.expired,
         memoryIds: [r.id],

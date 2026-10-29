@@ -16,7 +16,10 @@ export function stalenessNote(r: MemoryRecord, decayDays: number | null, now: nu
   return days > decayDays ? STALENESS_NOTE(days) : ''
 }
 
-/** validTo 是模型显式声明的失效时间：过了就不该再进注入和检索——治理扫描仍可见（按 status 查询），由 expired finding 引导清理。 */
+/**
+ * validTo 是模型显式声明的失效时间：到点就不该再进注入和检索——治理扫描仍可见（按 status 查询），由 expired finding 引导清理。
+ * 到点即过期（validTo <= now），与写入时拒存、GUI 卡片同一口径。
+ */
 export function withinValidity(r: MemoryRecord, now: number): boolean {
-  return r.validTo === undefined || r.validTo >= now
+  return r.validTo === undefined || r.validTo > now
 }

@@ -51,7 +51,7 @@ describe('stalenessNote', () => {
 
 // withinValidity 边缘案例（每条一个 it）：
 // 1. validTo === undefined：无失效时间，恒有效。
-// 2. validTo === now：边界，用 >= 判定 → 仍有效。
+// 2. validTo === now：边界，到点即过期（与写入时「validTo 不晚于现在就拒」、GUI 卡片同一口径）→ 无效。
 // 3. validTo < now：已过失效时间 → 无效。
 // 4. validTo > now：尚未失效 → 有效。
 describe('withinValidity', () => {
@@ -59,8 +59,8 @@ describe('withinValidity', () => {
     expect(withinValidity(record({}), T0)).toBe(true)
   })
 
-  it('validTo 恰等于 now：仍有效（边界用 >=）', () => {
-    expect(withinValidity(record({ validTo: T0 }), T0)).toBe(true)
+  it('validTo 恰等于 now：已失效（到点即过期）', () => {
+    expect(withinValidity(record({ validTo: T0 }), T0)).toBe(false)
   })
 
   it('validTo 早于 now：已失效', () => {

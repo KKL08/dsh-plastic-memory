@@ -41,13 +41,14 @@ describe('detectSecrets', () => {
 describe('runRuleScan', () => {
   const lookup = (map: Map<string, MemoryRecord>) => (id: string) => map.get(id)
 
-  it('expired：validTo 早于 now 才报', () => {
+  it('expired：validTo 不晚于 now 就报（到点即过期）', () => {
     const a = record({ id: 'mem_a', validTo: 100 })
     const b = record({ id: 'mem_b', validTo: 300 })
     const c = record({ id: 'mem_c' }) // 无 validTo 永不过期
-    const findings = runRuleScan([a, b, c], () => undefined, 200)
+    const d = record({ id: 'mem_d', validTo: 200 }) // 恰在 now
+    const findings = runRuleScan([a, b, c, d], () => undefined, 200)
     const expired = findings.filter(f => f.type === 'expired')
-    expect(expired.map(f => f.memoryIds[0])).toEqual(['mem_a'])
+    expect(expired.map(f => f.memoryIds[0])).toEqual(['mem_a', 'mem_d'])
     expect(expired[0].layer).toBe('rule')
     expect(expired[0].severity).toBe('warning')
   })
