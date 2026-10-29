@@ -771,6 +771,10 @@ describe('待处理：可以整理', () => {
       '已过有效期', '很久没确认', '内容过长', '指向的旧记忆已不在',
     ])
     expect(groupOf().querySelector('.pm-marker')).toBeNull()
+    // 卡片只带中性的基础样式类，没有标记、着色一类的修饰类
+    const cards = within(groupOf()).getAllByRole('article')
+    expect(cards).toHaveLength(4)
+    for (const card of cards) expect([...card.classList]).toEqual(['pm-pending-item'])
   })
 
   // 动作行：退一步的幽灵按钮（「忽略」「打开文件」）排在最左，推荐的在最右
