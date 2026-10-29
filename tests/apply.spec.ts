@@ -931,6 +931,51 @@ describe('注入链接线', () => {
     expect(await t.step(session, 1, { decision: hello, signal: controller.signal })).toBe(hello)
   })
 
+  /** 一个已经写过系统提示词和用户消息、可见历史里还没有快照的会话：之后的空 decision 会直接追加快照。 */
+  const sessionWithoutSnapshot = () => {
+    const session = hostSession('sess-1')
+    session.append('system/message', { turn: 1, step: 1, message: createSystemMessage('系统提示词') }, { surfaceOp: 'append' })
+    session.append('user/message', userSaid('你好'), { surfaceOp: 'append' })
+    return session
+  }
+
+  it('pre-step 的 signal 已中止、本来会直接追加快照的那一步：不组装、不写会话、不计召回，decision 原样返回；之后没中止的步照常发', async () => {
+    const t = await boot()
+    const session = sessionWithoutSnapshot()
+    const nodesBefore = [...session.surface.nodes]
+    const statsBefore = await t.recallStats()
+    const controller = new AbortController()
+    controller.abort()
+    const empty: Decision = { kind: 'enter', messages: [] }
+    const readLayer = vi.spyOn(MemoryStore.prototype, 'readLayer')
+    try {
+      // 直接调监听：测试台的 step 遇到中止会自己提前返回，看不出插件做没做
+      expect(await t.preStep({ agent: { session }, messages: [], turn: 1, step: 2, signal: controller.signal }, async () => empty)).toBe(empty)
+      expect(readLayer).not.toHaveBeenCalled()
+    } finally {
+      readLayer.mockRestore()
+    }
+    expect(session.surface.nodes).toEqual(nodesBefore)
+    expect(await t.recallStats()).toBe(statsBefore)
+
+    await t.step(session, 3, { decision: empty })
+    expect(visibleSnapshots(session)).toEqual([expect.stringContaining('压缩前就有的偏好')])
+  })
+
+  it('pre-step 拿到 reject：可见历史里没有快照、本来该发的时候也不发，不组装，reject 原样返回', async () => {
+    const t = await boot()
+    const session = sessionWithoutSnapshot()
+    const reject: Decision = { kind: 'reject' }
+    const readLayer = vi.spyOn(MemoryStore.prototype, 'readLayer')
+    try {
+      expect(await t.step(session, 2, { decision: reject })).toBe(reject)
+      expect(readLayer).not.toHaveBeenCalled()
+    } finally {
+      readLayer.mockRestore()
+    }
+    expect(visibleSnapshots(session)).toEqual([])
+  })
+
   it('组装失败：这一步不发、只记日志；下一个发送点恢复后发', async () => {
     const t = await boot()
     const session = hostSession('sess-1')
