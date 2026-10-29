@@ -2245,6 +2245,30 @@ describe('scan：上次体检与完成记录', () => {
     expect(await lastCheckups(e)).toEqual({ global: null, [SESSION_WS]: NOW + 1000, [OTHER_WS]: null })
   })
 
+  it('项目体检拿全局记忆来比较：模型收到全局与本项目的记忆、收不到别的项目，跨层冲突照常进待处理', async () => {
+    const seen: string[] = []
+    // 只有同时看到全局和本项目那两条时才报跨层冲突：输入少了哪一方，就不会有这条结果
+    const e = env({ llm: { complete: async (input) => {
+      const text = JSON.stringify(input)
+      seen.push(text)
+      const findings = text.includes('mem_g') && text.includes('mem_s')
+        ? [{ type: 'conflict', memoryIds: ['mem_s', 'mem_g'], summary: '回答语言与包管理说法矛盾', suggestedAction: '裁决' }]
+        : []
+      return JSON.stringify({ findings })
+    } } })
+    await seedLayers(e)
+    ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    expect(seen.length).toBeGreaterThan(0)
+    expect(seen.join('\n')).toContain('mem_g')
+    expect(seen.join('\n')).toContain('mem_s')
+    expect(seen.join('\n')).not.toContain('mem_o')
+    const [entry, ...rest] = await e.decisions.list()
+    expect(rest).toEqual([])
+    expect([...entry!.memoryIds].sort()).toEqual(['mem_g', 'mem_s'])
+    expect(entry!.workspaces).toEqual(expect.arrayContaining([SESSION_WS, 'global']))
+    expect(ledgerItems(pendingViewSchema.parse(await e.readView('pending'))).map(i => i.kind)).toEqual(['conflict-horizontal'])
+  })
+
   it('只查全局：只读写全局层，只写全局的缓存与完成记录；结果只给全局的分数', async () => {
     const seen: string[] = []
     const e = env({ llm: { complete: async (input) => { seen.push(JSON.stringify(input)); return '{"findings":[]}' } } })
