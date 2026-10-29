@@ -282,6 +282,19 @@ describe('执行器走按范围读取与两级定位', () => {
     expect(forgot.missing).toEqual([])
   })
 
+  it('维护点之前：手建文件还没写回 id 时，第一个动作就用派生 id forget，也能定位并删掉', async () => {
+    const file = await writeRaw(globalDir(), 'h4.md', handBuilt('手建四', '格式探针 先遗忘'))
+    const h = harness()
+    const id = deriveFileId(relative(root, file))
+    expect((await h.search('先遗忘')).hits.map(x => x.id)).toEqual([id])
+    // 前提：search 不做维护，文件里仍没有 id 行，forget 只能靠派生 id 定位
+    expect(await readFile(file, 'utf8')).not.toMatch(/^id:/m)
+
+    const forgot = await h.forget([id])
+    expect(forgot).toMatchObject({ forgotten: [id], missing: [] })
+    expect((await h.search('先遗忘')).hits).toEqual([])
+  })
+
   it('隔离条目按所在目录归层出 malformed finding；缺标记 / 不可读目录、含保留键的文件在 health / scan 结果里列出', async () => {
     await writeMem(wsDir(WS), 'ok.md', wsRec({ id: 'mem_ok' }), WS)
     const wsBad = await writeRaw(wsDir(WS), 'bad.md', '没有 frontmatter\n')
