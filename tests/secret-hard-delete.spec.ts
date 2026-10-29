@@ -24,8 +24,8 @@ import { record as baseRecord, candidate } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
 
-// 票 13（S1）：含密钥的记忆被遗忘时立即物理删除，所有快照里不留明文，且不破坏快照里的其他记录；
-// 疑似密钥保存时被拦下确认（docs/design-storage-file-is-memory.md §10，ARCHITECTURE.md ⑥-6c）。
+// 含密钥的记忆被遗忘时立即物理删除，所有快照里不留明文，且不破坏快照里的其他记录；
+// 疑似密钥保存时被拦下确认。
 // forget 场景全部用真实目录（FileTable + .state 侧表）。
 
 const WS = '/home/dev/proj-s1'
@@ -95,7 +95,7 @@ async function allMemoryText(): Promise<string> {
   return texts.join('\n')
 }
 
-describe('票 13 验收：S1 密钥硬删', () => {
+describe('密钥硬删', () => {
   it('forget 对每条目标跑密钥检测，命中任一级 → 物理删除文件（顶层与 .archive/ 都没有），结果注明硬删条目', async () => {
     const h = harness()
     const inContent = wsRec({ id: 'mem_c', name: '正文带密钥', content: `部署用 ${FAKE_SECRET.sk}` })

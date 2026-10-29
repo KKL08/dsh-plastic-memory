@@ -1544,7 +1544,7 @@ describe('待处理：让模型改与让模型合并', () => {
       const before = screen.getByRole('region', { name: '两条原文' })
       expect(within(before).getByText('避免翻译腔。')).toBeInTheDocument()
       expect(within(before).getByText('少用被字句。')).toBeInTheDocument()
-      // r2 创建较早，按票 08 的规则保留它：它是右边那条
+      // r2 创建较早，同层合并保留创建较早的那条：它是右边那条
       const after = screen.getByRole('region', { name: '合并后（保留右边那条的 id）' })
       expect(within(after).getByText('中文写作避免翻译腔，少用被字句。')).toBeInTheDocument()
       expect(document.querySelectorAll('.pm-model-compare del, .pm-model-compare ins')).toHaveLength(0)

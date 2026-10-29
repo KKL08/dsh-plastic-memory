@@ -9,7 +9,7 @@ import { FrontmatterError } from '../src/errors.ts'
 import { formatValidity } from '../src/validity.ts'
 import { captureError } from './helpers/errors.ts'
 
-// 0.2.0 文件契约（docs/design-storage-file-is-memory.md §2）：手建文件放宽、派生 id、时间戳放宽、
+// 0.2.0 文件契约：手建文件放宽、派生 id、时间戳放宽、
 // digest / handEdited / deletedAt、固定键序、保留键说明、不抛的隔离包装。
 
 const MTIME = Date.UTC(2026, 9, 1, 8, 30, 0, 123)

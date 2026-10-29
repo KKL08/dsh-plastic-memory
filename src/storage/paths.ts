@@ -7,7 +7,7 @@ export const INDEX_FILE = 'MEMORY.md'
 export const GLOBAL_DIR = 'global'
 /** 侧表目录（storage/sidecar.ts），不是 workspace 目录 */
 export const STATE_DIR = '.state'
-/** 每个记忆目录下的归档子目录：deleted / superseded 的文件住这里（设计稿 §1）。 */
+/** 每个记忆目录下的归档子目录：deleted / superseded 的文件住这里。隐藏目录不会被宿主 grep 工具搜到，已遗忘的内容不出现在搜索结果里。 */
 export const ARCHIVE_DIR = '.archive'
 
 export function resolveMemoryRoot(configured: string): string {
@@ -71,7 +71,7 @@ export function workspaceDirName(workspacePath: string): string {
 
 /**
  * 手建文件（frontmatter 缺 id）的确定性派生 id：`mem_f` + sha1(相对 memoryRoot 的 POSIX 路径，大小写保留)[:10]。
- * 会进 supersedes、账本和快照——算法是难撤销契约（ARCHITECTURE.md ⑥-4），改了旧引用就断。
+ * 会进 supersedes、账本和快照——算法是难撤销契约，改了旧引用就断。
  */
 export function deriveFileId(relPath: string): string {
   const posix = relPath.split(sep).join('/')

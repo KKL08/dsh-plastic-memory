@@ -46,7 +46,7 @@ export function estimateTokens(text: string): number {
   return Math.ceil(tenths / 10)
 }
 
-/** 注入排序（设计稿 §6）：confidence 降序 → lastConfirmedAt 降序。recallCount 不参与：被宽泛查询扫到的记忆不该越排越前。 */
+/** 注入排序：confidence 降序 → lastConfirmedAt 降序。recallCount 不参与：被宽泛查询扫到的记忆不该越排越前。 */
 export function byConfidenceThenConfirmed(a: MemoryRecord, b: MemoryRecord): number {
   return b.confidence - a.confidence || b.lastConfirmedAt - a.lastConfirmedAt
 }
@@ -107,7 +107,7 @@ export function assembleSnapshot(deps: {
   now: number
   /** 记忆文件根目录（运行时解析）。给出时在快照末尾列出完整索引的磁盘路径，自定义根下也能按路径 Read 原文件。 */
   memoryRoot?: string
-  /** 证据下钻档位（设计 evidence-anchor §4）：给出时在快照末尾拼对应引导文案；缺省不拼（纯测试场景）。 */
+  /** 证据下钻档位：给出时在快照末尾拼对应引导文案；缺省不拼（纯测试场景）。 */
   evidenceLookup?: EvidenceLookupLevel
   /** 超出上限时：relax（缺省）需要多少带多少，strict 按优先级装入、超出的截掉。 */
   overflow?: OverflowMode

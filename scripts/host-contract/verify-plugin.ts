@@ -501,7 +501,7 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
     })
 
     // H16 宿主 grep 工具搜记忆根目录：.archive/ 是隐藏目录，宿主 grep 基于 ripgrep 且不传 --hidden，所以顶层文件命中、
-    // 归档文件不命中——设计稿 §1 把"隐藏目录挡住 grep"作为归档不可见的依据，这里在真机复核。grep 工具不在 ctx.tools 里则 SKIPPED。
+    // 归档文件不命中——归档不可见靠的是宿主 grep 工具不搜隐藏目录，这里在真机复核。grep 工具不在 ctx.tools 里则 SKIPPED。
     await attempt('H16-GREP-SKIPS-ARCHIVE', async () => {
       if (tools.get('grep') === undefined) return { ok: true, skipped: true, detail: 'SKIPPED: 宿主没有注册 grep 工具' }
       const dir = readdirSync(memoriesRoot).map(d => join(memoriesRoot, d))

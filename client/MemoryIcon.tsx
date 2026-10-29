@@ -3,7 +3,7 @@ import { useId } from 'react'
 /** 图标上的状态标记：琥珀圆点 = 等你决定；红色小三角 = 有密钥（盖过琥珀点）。 */
 export type IconMarker = 'pending' | 'secret'
 
-// 标记的位置和挖洞范围取设计稿 Foundations「状态标记」（24 栅格，按 18px 导航图标定）：
+// 标记的位置和挖洞范围按 24 栅格、18px 导航图标定：
 // 圆点贴右上角，挖洞比圆点大一圈，留出约 1.5px 空隙；三角同理，挖洞用加粗描边扩出空隙。
 const DOT = { cx: 20.4, cy: 3.6, r: 4.4, holeR: 6.4 }
 const TRIANGLE = 'M20.5 -1.2L26.2 8.6H14.8Z'

@@ -7,7 +7,7 @@ import type { QuarantineEntry } from './table.ts'
 import { deriveFileId } from './paths.ts'
 import { formatValidity, localDateAt, roundValidity } from '../validity.ts'
 
-/** 保留键：位置由目录表达、正文即 content、召回统计住 .state/（契约表见 docs/design-storage-file-is-memory.md §2）。 */
+/** 保留键：位置由目录表达、正文即 content、召回统计住 .state/。 */
 const RESERVED_KEYS = new Set(['scope', 'workspacePath', 'recallCount', 'lastRecalledAt', 'content'])
 /** 时间戳字段：文件面 ISO 8601（写出 UTC 毫秒；有效期键例外，见 VALIDITY_KEYS），内存面 epoch ms。 */
 const TIME_KEYS = new Set(['createdAt', 'updatedAt', 'lastConfirmedAt', 'deletedAt', 'validFrom', 'validTo'])
@@ -37,7 +37,7 @@ const KNOWN_FILE_KEYS = new Set<string>(FILE_KEY_ORDER)
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/
 const DATETIME_RE = /^(\d{4})-(\d{2})-(\d{2})[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?$/
 
-/** digest 算法版本前缀：换算法必须换前缀，旧前缀按缺省（未知）处理（ARCHITECTURE.md ⑥-6a）。 */
+/** digest 算法版本前缀：换算法必须换前缀，旧前缀按缺省（未知）处理。 */
 const DIGEST_PREFIX = 'd1:'
 
 export interface ParsedMemoryFile { data: Record<string, unknown>; body: string }

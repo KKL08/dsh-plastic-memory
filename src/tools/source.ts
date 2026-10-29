@@ -1,7 +1,7 @@
 import type { MemoryStore } from '../store.ts'
 import { HAND_EDITED_NOTE } from '../index-line.ts'
 
-/** ctx.sessionQuery.readEvent 的最小契约（真机验证：2026-08-28 探针，docs/design-evidence-anchor.md §2） */
+/** ctx.sessionQuery.readEvent 的最小契约（2026-08-28 真机探针核实） */
 export interface ReadEventFn {
   (request: { sessionId: string; seq: number; before?: number; after?: number }): Promise<{
     session?: { id?: string; createdAt?: number; cwd?: string }
@@ -58,7 +58,7 @@ export function extractEventText(event: RawEvent): { role: string; text: string 
 }
 
 /**
- * memory_source 纯逻辑（docs/design-evidence-anchor.md §5）：memoryId → store 取锚 → readEvent 单点+窗口 → 紧凑渲染。
+ * memory_source 纯逻辑：memoryId → store 取锚 → readEvent 单点+窗口 → 紧凑渲染。
  * 锚在工具内部解析，模型构造不出任意 sessionId+seq；可读位置被记忆库枚举死。
  */
 export async function executeSource(

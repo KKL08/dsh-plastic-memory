@@ -1163,7 +1163,7 @@ describe('语义扫描请求形状', () => {
 })
 
 /**
- * 证据锚（设计 evidence-anchor §3）在宿主 0.1.5 上的读法：起点来自 agent-loop 注册的 turnBoundary
+ * 证据锚（这条记忆出自会话的哪段事件）在宿主 0.1.5 上的读法：起点来自 agent-loop 注册的 turnBoundary
  * 投影（openTurnStartSeq = 当轮 turn/start 的 seq），终点是 session.seq - 1。投影是宿主
  * 按事件增量折叠的状态，插件按调用经 ctx.get('sessionProjections') 探测，缺席一律退回整会话锚。
  * 这里用 apply 注册后的真 ToolDefinition 走一遍 memory_save，只看落到记录上的 eventRange。

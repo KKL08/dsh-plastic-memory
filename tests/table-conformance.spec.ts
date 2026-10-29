@@ -204,7 +204,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect(row).toMatchObject({ id: rec.id, recallCount: 3 })
     expect(row!.lastRecalledAt).not.toBeNull()
 
-    // 设计稿 §7 核心命题：召回统计只走侧表，文件本体不重写——mtime 不变
+    // 召回统计只走侧表，文件本体不重写——mtime 不变
     if (filePath) {
       const after = (await stat(filePath)).mtimeMs
       expect(after).toBe(before)
@@ -290,7 +290,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect(((await table.locate(rec.id))?.record)!.status).toBe('active') // FileTable：重载后复活仍成立
   })
 
-  it('put 不承载召回统计：restore 旧记录不回退 recallCount/lastRecalledAt（设计稿 §3 登记语义）', async () => {
+  it('put 不承载召回统计：restore 旧记录不回退 recallCount/lastRecalledAt', async () => {
     const r = record({ id: 'mem_vol', name: '统计保持' })
     await table.put('mem_vol', r)
     await table.update('mem_vol', c => ({ ...c, recallCount: 7, lastRecalledAt: 1787200000000 }))
@@ -309,7 +309,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
   })
 
 
-  // —— 票 08：按范围读取、两级定位、取舍（docs/design-storage-file-is-memory.md §3 §4）——
+  // —— 按范围读取、两级定位、取舍 ——
 
   const WS_A = '/home/dev/proj-a'
   const WS_B = '/home/dev/proj-b'
@@ -511,7 +511,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect((await table.locate('mem_b'))!.record.status).toBe('deleted')
   })
 
-  // —— 票 10：写路径内核（docs/design-storage-file-is-memory.md §3 §5）——
+  // —— 写路径内核 ——
 
   const topLevel = async (dir: string) =>
     (await table.readScope([dir], { includeArchive: true })).records.map(r => [r.record.id, r.filePath] as const)
@@ -574,7 +574,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect(await table.delete('mem_gone')).toBe(false)
   })
 
-  // —— 票 11：维护点（docs/design-storage-file-is-memory.md §5）——
+  // —— 维护点 ——
 
   it('maintain：顶层非 active 文件搬进 .archive/（deleted 补 deletedAt，superseded 不补）；active 留在顶层', async () => {
     const dir = h.wsDir(WS_A)

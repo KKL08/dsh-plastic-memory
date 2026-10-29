@@ -229,8 +229,8 @@ describe('assembleSnapshot', () => {
   })
 })
 
-// 票 17：索引与引导（docs/design-storage-file-is-memory.md §6 §11）。验收标准逐条对应 describe 名。
-describe('票 17 索引与引导', () => {
+// 索引与引导。
+describe('索引与引导', () => {
   const ROOT = '/home/.dsh/memories'
   const WS = '/repo/myproj'
   const base = { registry, workspacePath: undefined, budget: 4000, now: 10 * DAY }

@@ -86,7 +86,7 @@ export interface WorkspaceDirListing {
 }
 
 /**
- * 记忆表：磁盘是唯一真相，进程里不常驻记忆表（设计稿 §0 §3）。读方法不加锁、不写盘；写方法在实现内串行。
+ * 记忆表：磁盘是唯一真相，进程里不常驻记忆表。读方法不加锁、不写盘；写方法在实现内串行。
  * `dirs` 用绝对目录路径标识（global 用 global 目录）；InMemoryTable 用同一套目录名（storage/paths），语义是按 scope 过滤。
  * 执行器的读法只有三种：按范围 readScope、按 id locate、listWorkspaceDirs 枚举。
  */
@@ -110,7 +110,7 @@ export interface MemoryTable {
    *  召回统计行只在哪一层都没有这个 id 了才清。skipIf：对锁内定位到的当前文件求值，为真就不删、返回 false。 */
   delete(key: string, hint?: LocateHint, skipIf?: (current: LocatedFile) => boolean): Promise<boolean>
   /**
-   * 维护点（设计稿 §5）：只动给定目录，锁内、幂等。再生索引；顶层非 active 搬 .archive/（.archive/ 里 status 仍为 active
+   * 维护点（写路径末尾与快照冻结时调用）：只动给定目录，锁内、幂等。再生索引；顶层非 active 搬 .archive/（.archive/ 里 status 仍为 active
    * 的按位置归一成 deleted）；.archive/ 里 deletedAt 超保留期的物理删除；手建 / 手编文件回写；陈旧 tmp 清理。
    * 写路径末尾对被写的目录自动调用；快照冻结时由调用方对 global + 当前 workspace 调用。不删同 id 副本。
    */
@@ -118,7 +118,7 @@ export interface MemoryTable {
 }
 
 /**
- * 同 id 多文件的取舍（ARCHITECTURE.md ⑥-6d）：updatedAt 新者 → 提示的 workspace 目录 → global → 其他项目 → 文件路径字典序。
+ * 同 id 多文件的取舍：updatedAt 新者 → 提示的 workspace 目录 → global → 其他项目 → 文件路径字典序。
  * 只在内存取舍，不动磁盘。返回每个 id 一份，保持首次出现的顺序。
  */
 export function resolveDuplicates<T extends LocatedRecord>(candidates: readonly T[], hint?: LocateHint): T[] {

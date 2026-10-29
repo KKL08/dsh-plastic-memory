@@ -8,7 +8,7 @@ export function genId(prefix: string): string {
 }
 
 /**
- * 账本条目的种类。缺省 = conflict（旧条目没有此字段）；promote-candidate、overflow 是 GUI 加的提醒（ARCHITECTURE.md ⑥-7）；
+ * 账本条目的种类。缺省 = conflict（旧条目没有此字段）；promote-candidate、overflow 是 GUI 加的提醒；
  * edit 是 GUI 直接改、直接合并留的撤销记录，move 是把全局记忆移到项目留的撤销记录：两者都生来就已结清，撤销时移出账本，不进待处理。
  * rewrite、supersede 是模型用 memory_save 改写、替代已有记忆留的撤销记录：同样生来就已结清、不进待处理；撤销后标 isUndone 留到保留窗口结束，
  * 对话卡与右侧栏据此显示「已撤销」。
@@ -64,7 +64,7 @@ export type PendingDecision = z.infer<typeof pendingDecisionSchema>
 export const REDACTED_PLACEHOLDER = '[redacted: secret]'
 
 /** 快照里的记录：记忆记录 + 脱敏标记。redacted: true = 该记忆因含密钥已物理删除，命中字段已换成占位文本，
- *  restore 跳过；脱敏不可逆（ARCHITECTURE.md ⑥-6c）。缺省 = 未脱敏，旧快照照常解析。 */
+ *  restore 跳过；脱敏不可逆。缺省 = 未脱敏，旧快照照常解析。 */
 export const snapshotRecordSchema = memoryRecordSchema.extend({
   redacted: z.literal(true).optional(),
 })

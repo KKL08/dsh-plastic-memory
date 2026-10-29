@@ -10,7 +10,7 @@ export interface ForgetToolBindingDeps extends ForgetToolDeps {
 
 /**
  * 把 memory_forget 工具接到 dsh 框架上。纯逻辑在 forget.ts，不依赖框架包，测试直接测它；
- * 本文件由 typecheck + 真机验证保证（docs/p1-verification.md）。
+ * 本文件由 typecheck + 真机验证保证。
  */
 export function createForgetTool(deps: ForgetToolBindingDeps): ToolDefinition {
   return defineTool({

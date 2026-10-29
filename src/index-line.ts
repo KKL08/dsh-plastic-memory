@@ -15,7 +15,7 @@ export function sourceNote(r: MemoryRecord): string {
 }
 
 /**
- * 索引行：MEMORY.md 与注入索引同一个格式器（设计稿 §11）。
+ * 索引行：MEMORY.md 与注入索引同一个格式器，两处写法保持一致。
  * file：行末的文件引用，MEMORY.md 给同目录文件名，注入给相对记忆根目录的路径（注入混排 global 与本项目两个目录）。
  * note：注入侧的陈旧度标注，放在文件名之前，让文件名始终在行末；磁盘索引不传。
  */
