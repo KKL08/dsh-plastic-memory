@@ -412,10 +412,10 @@ export type DeletedView = z.infer<typeof deletedViewSchema>
 // —— 这次对话 ——
 
 /**
- * 快照的来历：对话开始时首次带入 / 续上已有轮次的会话时重新带入（宿主重启后续上、插件重载）/ 成功压缩后重新带入。
- * 其他重建（配置热更新、失败的压缩）沿用上一次的来历。
+ * 快照的来历：对话开始时首次带入 / 续上已有轮次的会话时重新带入（宿主重启后续上、插件重载）/ 成功压缩后重新带入 /
+ * 对话中其他重建（配置热更新、失败的压缩）补发了新快照。其他重建文本没变（不补发）时沿用上一次的来历。
  */
-export const SNAPSHOT_ORIGINS = ['start', 'resumed', 'compacted'] as const
+export const SNAPSHOT_ORIGINS = ['start', 'resumed', 'compacted', 'refreshed'] as const
 export type SnapshotOrigin = typeof SNAPSHOT_ORIGINS[number]
 
 /** 一个会话冻结快照时带入的记忆与用量。token 是插件估算（estimateTokens），界面带「约」。 */

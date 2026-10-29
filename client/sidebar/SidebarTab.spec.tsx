@@ -203,6 +203,12 @@ describe('SidebarTab 快照来历与分组', () => {
     expect(screen.queryByText('对话开始时带入的记忆')).toBeNull()
   })
 
+  it('对话中补发了新快照（配置热更新、记忆变了）：标题写「对话中重新带入的记忆」', () => {
+    setup({ library: library(pref, proj, glob), session: snapshot({ origin: 'refreshed' }), pending: pending() })
+    expect(screen.getByRole('region', { name: '对话中重新带入的记忆' })).toBeInTheDocument()
+    expect(screen.queryByText('对话开始时带入的记忆')).toBeNull()
+  })
+
   it('带入的记忆按组标出全文（core 区）与只带摘要（索引行）', () => {
     const { container } = setup({ library: library(pref, proj, glob), session: snapshot(), pending: pending() })
     const marks = [...container.querySelectorAll('.pm-side-group-title')].map(h => h.textContent)

@@ -60,6 +60,7 @@ const USAGE_TITLE: Record<SnapshotOrigin, LocaleKey> = {
   start: 'sidebar.usage.title',
   resumed: 'sidebar.usage.titleResumed',
   compacted: 'sidebar.usage.titleCompacted',
+  refreshed: 'sidebar.usage.titleRefreshed',
 }
 
 type Entry =
