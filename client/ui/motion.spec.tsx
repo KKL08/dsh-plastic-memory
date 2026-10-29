@@ -2,6 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, render, renderHook, screen } from '@testing-library/react'
 import { useRef, useState } from 'react'
 import { Arrival, RollingNumber, useArrivals, useHeightTransition, withRollingNumber, type Arrivals } from './motion.tsx'
+import { savedMemoriesCardCss } from '../chat/SavedMemoriesCard.tsx'
+import { statusBarCss } from '../checkup/StatusBar.tsx'
+import { pendingCss } from '../pending/PendingTab.tsx'
 
 /** jsdom 没有 Element.animate：换成记录调用的假实现，测完还原。 */
 function stubAnimate() {
@@ -121,6 +124,9 @@ describe('RollingNumber', () => {
 })
 
 describe('useHeightTransition', () => {
+  // 断言失败也要还原：matchMedia 的替身不能漏到后面的用例
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
+
   function Box({ contentKey, tick }: { contentKey: string; tick: number }) {
     const ref = useRef<HTMLDivElement>(null)
     useHeightTransition(ref, contentKey)
@@ -142,6 +148,19 @@ describe('useHeightTransition', () => {
     vi.restoreAllMocks()
   })
 
+  it('减少动态效果时：内容换了也不做高度过渡', () => {
+    const calls = stubAnimate()
+    vi.stubGlobal('matchMedia', (query: string) => ({ matches: query === '(prefers-reduced-motion: reduce)' }))
+    let height = 40
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(() => ({ height } as DOMRect))
+    const { rerender } = render(<Box contentKey="" tick={0} />)
+    height = 18
+    rerender(<Box contentKey="running" tick={1} />)
+    height = 60
+    rerender(<Box contentKey="done" tick={2} />)
+    expect(calls).toHaveLength(0)
+  })
+
   it('没有 animate 时什么都不做（不报错）', () => {
     function Toggle() {
       const [key, setKey] = useState('a')
@@ -152,5 +171,48 @@ describe('useHeightTransition', () => {
     render(<Toggle />)
     act(() => { screen.getByText('a').click() })
     expect(screen.getByText('b')).toBeInTheDocument()
+  })
+})
+
+/** 把组件导出的 CSS 串拆成规则：选择器列表、声明体、所在的 @media（顶层为空串）。只认本仓库 CSS 串用到的写法。 */
+function cssRules(css: string, media = ''): Array<{ media: string; selectors: string[]; body: string }> {
+  const out: Array<{ media: string; selectors: string[]; body: string }> = []
+  let i = 0
+  for (;;) {
+    const open = css.indexOf('{', i)
+    if (open < 0) return out
+    const prelude = css.slice(i, open).replace(/\/\*[\s\S]*?\*\//g, '').trim()
+    let depth = 1
+    let j = open + 1
+    for (; depth > 0 && j < css.length; j++) {
+      if (css[j] === '{') depth++
+      else if (css[j] === '}') depth--
+    }
+    const inner = css.slice(open + 1, j - 1)
+    if (prelude.startsWith('@media')) out.push(...cssRules(inner, prelude))
+    else if (!prelude.startsWith('@')) out.push({ media, selectors: prelude.split(',').map(sel => sel.trim()), body: inner.trim() })
+    i = j
+  }
+}
+const REDUCE = '@media (prefers-reduced-motion: reduce)'
+const bodiesOf = (css: string, selector: string, media: string) =>
+  cssRules(css).filter(r => r.media === media && r.selectors.includes(selector)).map(r => r.body)
+
+describe('展开箭头的转动（CSS）', () => {
+  it.each([
+    ['对话卡「这轮记住了」', savedMemoriesCardCss, '.pm-saved-chevron'],
+    ['状态条「分数怎么来的」', statusBarCss, '.pm-status-why svg'],
+    ['待处理「不再提醒的 N 条」', pendingCss, '.pm-ignored-toggle svg'],
+  ])('%s：transform 120ms ease，减少动态效果时去掉过渡', (_name, css, selector) => {
+    expect(bodiesOf(css, selector, '').some(body => /(^|;)\s*transition:\s*transform 120ms ease\s*(;|$)/.test(body))).toBe(true)
+    expect(bodiesOf(css, selector, REDUCE).some(body => /(^|;)\s*transition:\s*none\s*(;|$)/.test(body))).toBe(true)
+  })
+})
+
+describe('状态条结果行淡入（CSS）', () => {
+  it('挂上之后出现的行淡入 200ms；减少动态效果时没有淡入', () => {
+    const line = '.pm-status-result[data-live] .pm-status-result-line'
+    expect(bodiesOf(statusBarCss, line, '').some(body => /transition:\s*opacity 200ms ease-out/.test(body))).toBe(true)
+    expect(bodiesOf(statusBarCss, line, REDUCE).some(body => /transition:\s*none/.test(body))).toBe(true)
   })
 })
