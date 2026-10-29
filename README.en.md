@@ -50,7 +50,7 @@ LLM agents face a strikingly similar challenge: stale, contradictory, redundant,
 ## ✨ Key Features
 
 - **Typed & extensible memory**  
-  Five built-in types — `profile`, `preference`, `knowledge`, `project`, `reference` — covering identity, habits, domain knowledge, project decisions, and external resources. Custom types are also supported (experimental).
+  Five built-in types — `profile`, `preference`, `knowledge`, `project`, `reference` — covering identity, habits, domain knowledge, project decisions, and external resources. Add your own types and combine them into scenes that decide which types get saved.
 - **Strict workspace isolation & write protection**  
   Workspace memories are physically isolated; global memories are shared read-only across projects. The model cannot write to the global scope directly — any promotion from workspace to global must be explicitly approved by the user, preventing uncontrolled rule sprawl.
 - **Built-in governance**  
@@ -118,7 +118,7 @@ Once installed, nothing requires YAML. Three surfaces live inside the host's web
 
 - **The 「记忆」 (Memory) page in the left nav**: four tabs. *Pending* lists what waits for your decision — conflicts found by a checkup, memories worth promoting to global, budget overflows, secrets, files that failed to parse — and each item is handled in place (pick the winning side, undo, promote or keep local, delete a secret for good). *All memories* browses by project or global, opens the file or shows it in Finder, deletes. *Health* shows each layer's score and issues, with a "check this project" button in the header. *Recently deleted* restores anything removed in the last 14 days and says which memory won when a ruling deleted it. The page does not need a running conversation: it borrows an idle session of the current project to run its commands, and shows an empty state when no session exists yet.
 - **A 「记忆」 tab in the right sidebar**: which memories this conversation brought in, how much of the context they use, what the model saved during the conversation; conflicts among the injected memories can be ruled right there.
-- **The plugin's settings page** (its entry in the host's plugin manager): scenario template, custom types (add, edit, remove in a dialog), context budget and overflow mode, source lookup, the user dictionary path for Chinese word segmentation, checkup switch and sensitivity, where global promotions go, plus a status card. Saving writes the profile's `cordis.patch.yml` and takes effect without a restart.
+- **The plugin's settings page** (its entry in the host's plugin manager): scenes (pick the current scene; add, edit, remove scenes; add, edit, remove custom types in the scene dialog), context budget and overflow mode, source lookup, checkup switch and sensitivity, where global promotions go, plus a status card. Saving writes the profile's `cordis.patch.yml` and takes effect without a restart.
 
 Every turn in which the model saved a memory gets a card with a delete button; the dot on the left-nav icon lights amber only when something waits for your decision, and turns red when a secret was found.
 
@@ -142,13 +142,18 @@ Five built-in types cover the most common interaction scenarios:
 
 
 
-### Presets
+### Scenes
 
-Presets extend the base five with domain-specific types:
+A scene decides which types of memory the model can add, picked from the type pool: the base five, two preset types (`procedure` for reusable standard operating procedures, `decision` for decisions and commitments: who decided what, who promised whom what), and your own custom types.
 
-- `coding` (default) — adds `procedure` (reusable standard operating procedures).
-- `office` — adds `decision` (meeting resolutions) / `commitment` (action items) / `person` (team member profiles).
-- `custom` — keeps only the five built-in types; everything else is user-defined in config (experimental, subject to refinement).
+- General (`custom`) — the base five, fixed; it cannot be edited or removed.
+- Coding (`coding`, default) — the base five + `procedure`.
+- Office (`office`) — the base five + `decision`.
+- Your own scenes — created on the settings page, starting from the base five, which you can untick.
+
+Coding and Office can be edited or removed. Each scene holds 1 to 8 types, and you can have up to 5 scenes besides General. One scene is current at a time, shared by the whole profile. Switching scenes only affects new memories: existing memories of any type in the pool are still injected and searchable.
+
+The old Office template's `commitment` merged into `decision`, and `person` was removed. Existing memories of these two types are still read, but new ones can no longer be added.
 
 
 
@@ -168,7 +173,7 @@ Control how each memory type appears in the context window:
 
 ### Defining Custom Types
 
-Declare them under the `customTypes` config key (names must not collide with the five built-ins):
+Create them in the scene dialog on the settings page, or declare them under the `customTypes` config key (names must not collide with the five built-ins). Custom types join the type pool and are used for new memories once ticked into a scene. On the settings page, when you rename a type that already has memories, they can follow the new name or move to Recently deleted; when you remove one, you can keep its memories or move them to Recently deleted:
 
 ```yaml
 customTypes:
@@ -179,7 +184,14 @@ customTypes:
     recall: search
     governancePriority: low
     decayDays: 90
+scenes:
+  scene-mh2k9x:
+    label: Teamwork
+    types: [profile, preference, knowledge, project, reference, decision, ritual]
+template: scene-mh2k9x
 ```
+
+`decayDays` is the decay period: a memory not confirmed within that many days is only marked as possibly outdated and stays valid; `null` means it never decays.
 
 ---
 
@@ -267,13 +279,14 @@ Adjust `plastic-memory` settings in the profile's `cordis.patch.yml`:
 | `snapshotTokenBudget`              | `4000`              | Token limit for memories loaded automatically into each chat; search results don't count |
 | `snapshotOverflow`                 | `'relax'`           | Over budget: `relax` injects everything and reports each 25 % step / `strict` cuts index lines and says how many were left out |
 | `evidenceLookup`                   | `'strict'`          | Provenance mode: `off` / `strict` (prompt on strong signals only) / `active` (proactive guidance) |
-| `template`                         | `'coding'`          | Scene template: `coding` / `office` / `custom`                                          |
-| `customTypes`                      | `{}`                | Custom memory type definitions                                                           |
+| `template`                         | `'coding'`          | Current scene: `custom` (General) / `coding` / `office` / the id of a scene you created  |
+| `customTypes`                      | `{}`                | Custom memory type definitions, added to the type pool                                   |
+| `scenes`                           | Coding and Office   | Scene definitions: `label` is the name, `types` the types it includes (1 to 8). General is fixed and not listed here |
 | `governance.enabled`               | `true`              | Enable the governance layer (health checks, scoring, promotion)                          |
 | `governance.health.sensitivity`    | `'normal'`          | Health alert sensitivity: `conservative` / `normal` / `proactive`                        |
 | `governance.globalPromoteTarget`   | `'plugin-global'`   | Promotion target: `plugin-global` (plugin's global scope) or `agents-md` (`~/.dsh/AGENTS.md`) |
 | `memoryRoot`                       | `''`                | Storage root path; defaults to `${DSH_HOME:-~/.dsh}/memories`                            |
-| `search.userDictionaryPath`        | unset               | User dictionary path (the field of the same name on the settings page): added on top of the built-in dictionary, applied from the next search. Must be an absolute path; one entry per line as `word frequency tag`, the frequency is required and entries without it have no effect, for example `插件记忆 10 n`. Has no effect unless `@node-rs/jieba` is installed |
+| `search.userDictionaryPath`        | unset               | User dictionary path (config file only): added on top of the built-in dictionary, applied from the next search. Must be an absolute path; one entry per line as `word frequency tag`, the frequency is required and entries without it have no effect, for example `插件记忆 10 n`. Has no effect unless `@node-rs/jieba` is installed |
 
 
 ---

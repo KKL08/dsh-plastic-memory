@@ -50,7 +50,7 @@
 ## ✨ 核心特性
 
 - 🗂️ **记忆分类与可扩展**  
-内置 `profile` / `preference` / `knowledge` / `project` / `reference` 五类，覆盖身份、习惯、知识、项目决策与资源指南，分类保存、按需召回。同时支持扩展自定义分类（测试功能）。
+内置 `profile` / `preference` / `knowledge` / `project` / `reference` 五类，覆盖身份、习惯、知识、项目决策与资源指南，分类保存、按需召回。还能自定义类型，按场景组合要记哪几类。
 - 🛡️ **严格的工作区隔离与写入保护**  
 工作区（Workspace）记忆相互物理隔离，互不可见；全局（Global）记忆跨项目只读共享。模型无权直接写入全局域，任何项目记忆提升到全局必须由用户确认，避免全局规则无序扩张与污染。
 - 🩺 **内建多层治理体系（Governance）**  
@@ -118,7 +118,7 @@ dsh plugin --profile web add dsh-plastic-memory@0.1.1-beta.5
 
 - **左栏「记忆」页**：四个 tab。「待处理」列出等你拍板的事——体检发现的冲突、适合提升为全局的记忆、超出上限的提醒、密钥、读不出的文件，每一项就地处理（以哪条为准、撤销、提升或留在本项目、彻底删除密钥）；「全部记忆」按项目 / 全局浏览、打开文件或在访达中显示、删除；「健康」看每一层的分数和问题，右上「体检当前项目」随时体检；「最近删除」找回 14 天内删掉的记忆，被裁决删掉的会标明以哪条为准。页面不要求正在对话，它借用当前项目的一个空闲会话执行命令；一个会话都没有时只显示空态。
 - **右侧栏「记忆」tab**：这次对话带入了哪些记忆、占了多少上下文、模型新记了什么；带入的记忆之间有冲突可以就地裁决。
-- **插件设置页**（宿主插件管理里的本插件详情）：场景模板、自定义类型（弹层增删改）、带入上限与超出上限的模式、溯源记忆出处、中文分词的用户词典路径、体检开关与灵敏度、全局记忆的去向，外加一张状态卡。保存即写回 profile 的 `cordis.patch.yml`，不用重启。
+- **插件设置页**（宿主插件管理里的本插件详情）：场景（选当前场景，新建、编辑、删除场景，在场景弹层里增删改自定义类型）、带入上限与超出上限的模式、溯源记忆出处、体检开关与灵敏度、全局记忆的去向，外加一张状态卡。保存即写回 profile 的 `cordis.patch.yml`，不用重启。
 
 对话里每次记住东西都有一张可删的卡；左栏图标上的圆点只在有事等你决定时亮（琥珀），发现密钥时变红。
 
@@ -142,13 +142,18 @@ dsh plugin --profile web add dsh-plastic-memory@0.1.1-beta.5
 
 
 
-### 场景扩展模板
+### 场景
 
-通过配置模板可在基础 5 类之上追加领域专用类型：
+场景决定模型能新增哪几类记忆，从类型池里挑选。类型池包括基础 5 类、两个预设类型（`procedure` 可复用的标准操作流程、`decision` 决定与承诺：谁定了什么、谁答应了谁什么），以及你自定义的类型。
 
-- `coding`（默认）：追加 `procedure`（可复用的标准操作流程）。
-- `office`：追加 `decision`（会议决议）/ `commitment`（待办承诺）/ `person`（团队人员画像）。
-- `custom`：仅保留 5 类核心内置类型，其余完全由用户在配置中自定义声明（测试中，后续会进一步优化）。
+- 通用（`custom`）：固定基础 5 类，不能编辑、删除。
+- 编码（`coding`，默认）：基础 5 类 + `procedure`。
+- 办公（`office`）：基础 5 类 + `decision`。
+- 自己建的场景：在设置页新建，默认勾上基础 5 类，可以去掉。
+
+编码、办公可以增减类型，也可以删除。每个场景 1 到 8 类，通用以外最多建 5 个场景。同一时间只有一个当前场景，整个 profile 共用。切换场景只影响新增：类型池里所有类型的已有记忆照常带入、能搜到。
+
+旧版办公模板的 `commitment`（承诺）并进了 `decision`，`person`（人物）已移除。这两类已有的记忆照常读取，但不能再新增。
 
 
 
@@ -168,7 +173,7 @@ dsh plugin --profile web add dsh-plastic-memory@0.1.1-beta.5
 
 ### 自定义类型定义
 
-在配置项 `customTypes` 中声明（名称不能与内置 5 类冲突）：
+在设置页的场景弹层里新建，或在配置项 `customTypes` 中声明（名称不能与内置 5 类冲突）。自定义类型进入类型池，勾进某个场景后才用来新增记忆。在设置页里改英文名时，已存过的记忆可以跟着改名或移到最近删除；删除类型时可以保留这些记忆，或移到最近删除：
 
 ```yaml
 customTypes:
@@ -179,7 +184,14 @@ customTypes:
     recall: search
     governancePriority: low
     decayDays: 90
+scenes:
+  scene-mh2k9x:
+    label: 团队协作
+    types: [profile, preference, knowledge, project, reference, decision, ritual]
+template: scene-mh2k9x
 ```
+
+`decayDays` 是衰退天数：超过这个天数没确认的记忆只标为可能过时，不会失效；`null` 表示不衰退。
 
 ---
 
@@ -267,13 +279,14 @@ customTypes:
 | `snapshotTokenBudget`            | `4000`            | 每次对话自动带入记忆的 token 上限，对话中检索到的不计入                  |
 | `snapshotOverflow`               | `'relax'`         | 超出上限时：`relax` 全部带入并按 25% 一档提醒 / `strict` 截断索引行并提示漏掉几条          |
 | `evidenceLookup`                 | `'strict'`        | 证据溯源模式：`off`（关闭） / `strict`（仅强信号提示） / `active`（主动引导）         |
-| `template`                       | `'coding'`        | 预设场景模板：`coding` / `office` / `custom`                        |
-| `customTypes`                    | `{}`              | 自定义记忆类型定义字典                                                  |
+| `template`                       | `'coding'`        | 当前场景：`custom`（通用）/ `coding` / `office` / 自己建的场景 id      |
+| `customTypes`                    | `{}`              | 自定义记忆类型定义字典，进入类型池                                       |
+| `scenes`                         | 编码、办公两项          | 场景定义：`label` 场景名、`types` 包含的类型（1 到 8 类）。通用场景固定，不写在这里 |
 | `governance.enabled`             | `true`            | 是否启用主动治理层（体检、健康分、提权）                                         |
 | `governance.health.sensitivity`  | `'normal'`        | 健康警报灵敏度：`conservative` / `normal` / `proactive`              |
 | `governance.globalPromoteTarget` | `'plugin-global'` | 提权目标：`plugin-global`（插件全局域）或 `agents-md`（`~/.dsh/AGENTS.md`） |
 | `memoryRoot`                     | `''`              | 存储根路径，缺省为 `${DSH_HOME:-~/.dsh}/memories`                     |
-| `search.userDictionaryPath`      | 不设                | 用户词典路径（设置页同名字段）：追加在内置词典之上，改了下一次搜索生效。要填绝对路径；每行「词 词频 词性」，词频必填，不带词频的词条不生效，例如 `插件记忆 10 n`。没装 `@node-rs/jieba` 时不生效 |
+| `search.userDictionaryPath`      | 不设                | 用户词典路径（只能在配置文件里改）：追加在内置词典之上，改了下一次搜索生效。要填绝对路径；每行「词 词频 词性」，词频必填，不带词频的词条不生效，例如 `插件记忆 10 n`。没装 `@node-rs/jieba` 时不生效 |
 
 
 ---
