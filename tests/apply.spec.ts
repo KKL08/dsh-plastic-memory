@@ -43,6 +43,21 @@ import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
 import { defaultJiebaLoader } from '../src/search/jieba-segmenter.ts'
 
+// 进程边界的观察：fsTrace.on 期间记下插件对 node:fs、node:fs/promises 的每次调用（函数名 + 第一个参数）。平时原样透传。
+const { fsTrace } = vi.hoisted(() => ({ fsTrace: { on: false, calls: [] as string[] } }))
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<Record<string, unknown>>()
+  return Object.fromEntries(Object.entries(actual).map(([key, value]) => [key, typeof value === 'function' && /^[a-z]/.test(key)
+    ? (...args: unknown[]) => { if (fsTrace.on) fsTrace.calls.push(`fs/promises.${key}(${String(args[0])})`); return (value as (...a: unknown[]) => unknown)(...args) }
+    : value]))
+})
+vi.mock('node:fs', async importOriginal => {
+  const actual = await importOriginal<Record<string, unknown>>()
+  return Object.fromEntries(Object.entries(actual).map(([key, value]) => [key, typeof value === 'function' && /^[a-z]/.test(key)
+    ? (...args: unknown[]) => { if (fsTrace.on) fsTrace.calls.push(`fs.${key}(${String(args[0])})`); return (value as (...a: unknown[]) => unknown)(...args) }
+    : value]))
+})
+
 /** 宿主 storageDomain 表的替身（@deepseek-ai/dsh-storage-domain KvTable 的形状）：读同步、写异步。 */
 class HostKvTable<T = unknown> {
   private map = new Map<string, T>()
@@ -276,6 +291,40 @@ describe('apply', () => {
     // 钉住 root 真的来自 config：经注册后的 memory_search 读到 config 指定目录里的好记忆，坏文件不碍事
     const out = await defs.get('memory_search')!.execute({ query: 'zebra' }, fakeExec()) as { hits: Array<{ id: string }> }
     expect(out.hits.map(h => h.id)).toEqual(['mem_good'])
+  })
+
+  it('加载期零磁盘 I/O：带齐 commands、计时、旧 KV 域时，apply 及其随后排进队列的工作都不读、不列、不写文件；第一次工具调用才碰磁盘', async () => {
+    type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
+    const defs = new Map<string, ToolDef>()
+    const base = mockCtx({
+      storageDomain: true,
+      commands: { register: () => () => {} },
+      timer: { timeout: () => () => {}, interval: () => () => {} },
+    })
+    const ctx = { ...base, tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } }, logger: { info() {}, warn() {}, error() {} } }
+    const memoryRoot = await seedMemory(await makeTmpRoot())
+    await mkdir(join(memoryRoot, STATE_DIR), { recursive: true })
+    await writeFile(join(memoryRoot, STATE_DIR, RECALL_STATS_FILE), '{}', 'utf8')
+
+    fsTrace.calls = []
+    fsTrace.on = true
+    try {
+      await apply(ctx as never, new Config({ memoryRoot } as never))
+      // apply 里不 await 就排出去的工作也算加载期：让微任务与一轮 I/O 回调跑完
+      for (let i = 0; i < 3; i++) await new Promise<void>(resolve => { setImmediate(resolve) })
+    } finally {
+      fsTrace.on = false
+    }
+    expect(fsTrace.calls).toEqual([])
+
+    // 观察本身是灵的：第一次工具调用就读到了记忆目录
+    fsTrace.on = true
+    try {
+      await defs.get('memory_search')!.execute({ query: '内容' }, fakeExec())
+    } finally {
+      fsTrace.on = false
+    }
+    expect(fsTrace.calls.some(c => c.includes(memoryRoot))).toBe(true)
   })
 })
 
