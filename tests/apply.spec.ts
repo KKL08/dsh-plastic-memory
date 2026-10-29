@@ -24,7 +24,7 @@ import { MemoryStore } from '../src/store.ts'
 import { overflowLevel } from '../src/snapshot.ts'
 import { SNAPSHOT_SOURCE_KIND, lastVisibleSnapshot, snapshotTextOf } from '../src/snapshot-message.ts'
 import { FileTable } from '../src/storage/file-table.ts'
-import { buildTypeRegistry } from '../src/type-registry.ts'
+import { buildTypeRegistry, BUILTIN_TYPES, PRESET_SCENES } from '../src/type-registry.ts'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { cacheKey } from '../src/tools/scan.ts'
 import { IN_SNAPSHOT_NOTE } from '../src/tools/search.ts'
@@ -269,6 +269,20 @@ describe('apply', () => {
     // 该用例在 buildTypeRegistry 阶段就抛错，FileTable 根本没构造——传 memoryRoot 只是
     // 确保就算未来实现顺序调整，也不会有路径意外落到默认值指向的真实 ~/.dsh/memories。
     await expect(apply(mockCtx() as never, config)).rejects.toThrow(TypeRegistryError)
+  })
+
+  it('场景配置写错（指向不存在的场景）时加载不失败，按通用运行并打警告', async () => {
+    type ToolDef = { name: string; parameters: { properties: { type?: { enum?: string[] } } } }
+    const defs = new Map<string, ToolDef>()
+    const warnings: string[] = []
+    const ctx = {
+      ...mockCtx(),
+      tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
+      logger: { info() {}, warn: (msg: string) => { warnings.push(msg) }, error() {} },
+    }
+    await apply(ctx as never, new Config({ memoryRoot: await makeTmpRoot(), template: 'scene-9' } as never))
+    expect(defs.get('memory_save')!.parameters.properties.type!.enum).toEqual(BUILTIN_TYPES.map(t => t.name))
+    expect(warnings.join('\n')).toContain('scene-9')
   })
 
   it('磁盘上有坏 md（无 frontmatter）时 apply 仍正常完成且加载期零 I/O（插件加载不受记忆坏文件影响）', async () => {
@@ -1686,7 +1700,7 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect(t.snapshotCount()).toBe(2)
   })
 
-  it('改模板与自定义类型：memory_save 重注册（类型枚举重算），写时只认新模板，带入按新类型定义', async () => {
+  it('改场景与自定义类型：memory_save 重注册（类型枚举重算），写时只认新场景，带入按类型池定义', async () => {
     const t = await setup()
     await t.putGlobal({ id: 'mem_reg', type: 'regulation', content: '数据出境要先过安全评估', summary: '数据出境' })
     const saveDef = t.tool('memory_save')
@@ -1695,25 +1709,28 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect(await t.assembleOnce()).not.toContain('【记忆·合规要求】')
     await expect(t.save({ type: 'regulation', name: '合规', content: '某条合规' })).rejects.toThrow(/type/) // 宿主按枚举校验参数
 
-    expect(await t.update({ template: 'office', customTypes: { regulation } })).toEqual([['template'], ['customTypes']])
+    const scenes = { ...PRESET_SCENES, 'scene-1': { label: '合规', types: ['preference', 'decision', 'regulation'] } }
+    expect(await t.update({ template: 'scene-1', customTypes: { regulation }, scenes })).toEqual([['template'], ['customTypes'], ['scenes']])
     const resaved = t.tool('memory_save')
     expect(resaved).not.toBe(saveDef)
-    expect(resaved.parameters.properties.type!.enum).toEqual(expect.arrayContaining(['decision', 'commitment', 'person', 'regulation']))
-    expect(resaved.parameters.properties.type!.enum).not.toContain('procedure')
+    expect(resaved.parameters.properties.type!.enum).toEqual(['preference', 'decision', 'regulation'])
     expect(resaved.description).toContain('regulation（合规要求）')
-    // 自定义类型是常驻（core）：下一次组装就以完整正文带入；旧模板独有类型的记忆照常带入，分组名不退化
+    // 自定义类型是常驻（core）：下一次组装就以完整正文带入；旧场景独有类型的记忆照常带入，分组名不退化
     await t.putGlobal({ id: 'mem_proc', type: 'procedure', name: '发版流程', summary: '发版步骤' })
     const switched = await t.assembleOnce()
     expect(switched).toContain('【记忆·合规要求】数据出境要先过安全评估')
     expect(switched).toContain('## 可复用流程（procedure）\n- [mem_proc] 发版流程（发版步骤）')
-    await expect(t.save({ type: 'procedure', name: '流程', content: '旧模板的类型' })).rejects.toThrow(/type/)
+    await expect(t.save({ type: 'procedure', name: '流程', content: '旧场景的类型' })).rejects.toThrow(/type/)
+    await expect(t.save({ type: 'profile', name: '画像', content: '场景去掉的通用类型' })).rejects.toThrow(/type/)
     expect(await t.save({ type: 'decision', name: '定了用 A', content: '周会定了选型用 A 方案' })).toMatchObject({ kind: 'saved' })
   })
 
-  it('热更新加了自定义类型：不重启，立刻能用这个新类型 memory_save，记录落盘、类型就是它', async () => {
+  it('自定义类型只加进类型池不生效；勾进当前场景后不重启就能 memory_save', async () => {
     const t = await setup()
-    await expect(t.save({ type: 'regulation', name: '合规', content: '某条合规' })).rejects.toThrow(/type/)
     await t.update({ customTypes: { regulation } })
+    await expect(t.save({ type: 'regulation', name: '合规', content: '某条合规' })).rejects.toThrow(/type/)
+    expect(await t.update({ customTypes: { regulation }, scenes: { ...PRESET_SCENES, coding: { label: '编码', types: [...PRESET_SCENES.coding.types, 'regulation'] } } }))
+      .toEqual([['scenes']])
     const saved = await t.save({ type: 'regulation', name: '数据出境', content: '数据出境要先过安全评估' })
     expect(saved).toMatchObject({ kind: 'saved' })
     const files = (await readdir(t.memoryRoot, { recursive: true })).filter(f => f.endsWith('.md') && !f.startsWith('.state'))
@@ -1722,6 +1739,14 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect(written).toBeDefined()
     expect(written).toMatch(/^type: regulation$/m)
     expect(written).toContain('数据出境要先过安全评估')
+  })
+
+  it('退役的承诺记忆照常按原定义带入（常驻、中文名），但办公场景不能再新增', async () => {
+    const t = await setup({ template: 'office' })
+    await t.putGlobal({ id: 'mem_promise', type: 'commitment', content: '周五前给客户回方案', summary: '周五回方案' })
+    expect(await t.assembleOnce()).toContain('【记忆·承诺】周五前给客户回方案')
+    expect(t.tool('memory_save').parameters.properties.type!.enum).not.toContain('commitment')
+    await expect(t.save({ type: 'commitment', name: '承诺', content: '下周交付' })).rejects.toThrow(/type/)
   })
 
   it('关闭体检：四个治理工具注销、治理类子命令返回 governance-disabled、其余照常；重开后恢复，记忆不变', async () => {

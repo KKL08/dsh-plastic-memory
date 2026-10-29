@@ -41,13 +41,17 @@ const TABBABLE = 'a[href], button:not(:disabled), input:not(:disabled), select:n
 /**
  * 居中弹层：挂到 body，Esc 与点遮罩关闭，打开时聚焦第一个输入框（没有就第一个控件），关闭后焦点回到打开它的元素。
  * aria-modal：Tab / Shift+Tab 在弹层里循环，焦点跑到外面时 Tab 拉回第一个控件。
+ * 给了 onBack 时标题左边多一个「‹ 返回」：同一个弹层换内容（场景弹层里的类型表单），不叠第二层。
+ * 换内容时用 key 重挂，打开时的聚焦随之重来。
  */
-export function Dialog({ title, closeLabel, onClose, footer, children }: {
+export function Dialog({ title, closeLabel, onClose, footer, children, onBack, backLabel }: {
   title: string
   closeLabel: string
   onClose: () => void
   footer: ReactNode
   children: ReactNode
+  onBack?: (() => void) | undefined
+  backLabel?: string
 }) {
   const dialog = useRef<HTMLDivElement>(null)
   const close = useRef(onClose)
@@ -81,7 +85,10 @@ export function Dialog({ title, closeLabel, onClose, footer, children }: {
       <div className="pm-dialog-mask" aria-hidden="true" onClick={() => { close.current() }} />
       <div ref={dialog} className="pm-dialog" role="dialog" aria-modal="true" aria-label={title}>
         <div className="pm-dialog-header">
-          <h2 className="pm-dialog-title">{title}</h2>
+          <h2 className="pm-dialog-title">
+            {onBack !== undefined ? <button type="button" className="pm-dialog-back" onClick={onBack}>{backLabel}</button> : null}
+            {title}
+          </h2>
           <button type="button" className="pm-dialog-close" aria-label={closeLabel} onClick={() => { close.current() }}>
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true"><path d="m3.5 3.5 7 7m0-7-7 7" /></svg>
           </button>
@@ -121,6 +128,11 @@ export const controlsCss = `
   border-radius: var(--dsw-radius-sm, 8px); background: transparent; color: var(--pm-text-2); cursor: pointer;
 }
 .pm-dialog-close:hover { background: var(--pm-hover); }
+.pm-dialog-back {
+  margin-right: 6px; padding: 0; border: 0; background: none; font: inherit; font-size: 13px; font-weight: 400;
+  color: var(--pm-text-2); cursor: pointer;
+}
+.pm-dialog-back:hover { color: var(--pm-text); }
 .pm-dialog-body { min-height: 0; overflow: auto; scrollbar-gutter: stable; padding: 0 24px; display: flex; flex-direction: column; gap: 14px; }
 .pm-dialog-footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 0 24px; }
 .pm-field { display: flex; flex-direction: column; gap: 6px; }

@@ -132,3 +132,10 @@ export type OverflowLevel = { mode: OverflowMode; tier: number }
  */
 export const IGNORABLE_ADVICE_TYPES = ['expired', 'bloat', 'redundancy', 'orphan', 'misplaced', 'unclear'] as const
 export type IgnorableAdviceType = (typeof IGNORABLE_ADVICE_TYPES)[number]
+
+/** 通用场景的 id。沿用旧模板值 custom（已在公开配置里，改名是破坏性变更），界面上叫「通用」，固定内置五类。 */
+export const GENERAL_SCENE = 'custom'
+/** 每个场景最多几类（含通用五类）。 */
+export const SCENE_MAX_TYPES = 8
+/** 通用以外最多几个场景（编码、办公也算）。 */
+export const MAX_SCENES = 5

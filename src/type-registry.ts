@@ -1,9 +1,19 @@
 import type { MemoryTypeDefinition } from './types.ts'
 import { TypeRegistryError } from './errors.ts'
+import { GENERAL_SCENE, SCENE_MAX_TYPES } from './contract-codes.ts'
+
+/** 场景：从类型池里挑的一组类型（含通用类型），顺序无意义，类型表按类型池顺序排。 */
+export interface SceneConfig {
+  label: string
+  types: readonly string[]
+}
 
 export interface TypeRegistryConfig {
+  /** 当前场景 id：GENERAL_SCENE（通用）或 scenes 的键。 */
   template: string
   customTypes: Record<string, Omit<MemoryTypeDefinition, 'name'>>
+  /** 不传时为出厂的编码、办公两项（同配置 schema 默认值）。 */
+  scenes?: Readonly<Record<string, SceneConfig>>
 }
 
 export const BUILTIN_TYPES: readonly MemoryTypeDefinition[] = [
@@ -14,20 +24,25 @@ export const BUILTIN_TYPES: readonly MemoryTypeDefinition[] = [
   { name: 'reference', label: '参考引用', description: '外部资源的位置指针，回答「去哪找」。例：「pipeline bugs 在 Linear 的 INGEST 项目」', whenToSave: '用户指明某个资源固定在哪找', recall: 'passive', decayDays: null, governancePriority: 'medium' },
 ]
 
-export const TEMPLATES: Record<string, readonly MemoryTypeDefinition[]> = {
-  coding: [
-    { name: 'procedure', label: '可复用流程', description: '经多次验证的工作流程或操作步骤。一次成功不算，反复验证过才存', whenToSave: '一套流程反复验证有效、值得复用（一次成功不算）；做完一件复杂事后把踩过的坑和验证过的做法沉淀', recall: 'search', decayDays: 90, governancePriority: 'medium' },
-  ],
-  office: [
-    { name: 'decision', label: '决定', description: '谁在什么时候决定了什么，依据是什么', whenToSave: '谁在什么时候定了什么、依据是什么', recall: 'search', decayDays: 30, governancePriority: 'high' },
-    { name: 'commitment', label: '承诺', description: '谁答应了什么、面向谁、截止时间', whenToSave: '谁答应了什么、面向谁、截止什么时候', recall: 'core', decayDays: 14, governancePriority: 'high' },
-    { name: 'person', label: '人物', description: '协作者的角色、沟通偏好、负责范围', whenToSave: '协作者的角色、沟通偏好、负责范围', recall: 'search', decayDays: null, governancePriority: 'medium' },
-  ],
-  // companion 模板 P2
-}
+/** 预设类型：编码、办公出厂场景各带一类，自定义场景也能勾选。 */
+export const PRESET_TYPES: readonly MemoryTypeDefinition[] = [
+  { name: 'procedure', label: '可复用流程', description: '经多次验证的工作流程或操作步骤。一次成功不算，反复验证过才存', whenToSave: '一套流程反复验证有效、值得复用（一次成功不算）；做完一件复杂事后把踩过的坑和验证过的做法沉淀', recall: 'search', decayDays: 90, governancePriority: 'medium' },
+  { name: 'decision', label: '决定', description: '谁在什么时候决定了什么、依据是什么；谁答应了谁什么、截止什么时候', whenToSave: '谁在什么时候定了什么、依据是什么；谁答应了谁什么、截止什么时候', recall: 'search', decayDays: 30, governancePriority: 'high' },
+]
 
-/** 全部模板的类型按名索引：读时 fallback 用。 */
-const ANY_TEMPLATE_TYPE = new Map(Object.values(TEMPLATES).flat().map(t => [t.name, t]))
+/** 退役类型：0.1.x 办公模板的承诺（并进决定）、人物。已有记忆按原定义读，任何场景都不能再新增；自建同名类型就是新类型，旧记忆按新定义读。 */
+export const RETIRED_TYPES: readonly MemoryTypeDefinition[] = [
+  { name: 'commitment', label: '承诺', description: '谁答应了什么、面向谁、截止时间', whenToSave: '谁答应了什么、面向谁、截止什么时候', recall: 'core', decayDays: 14, governancePriority: 'high' },
+  { name: 'person', label: '人物', description: '协作者的角色、沟通偏好、负责范围', whenToSave: '协作者的角色、沟通偏好、负责范围', recall: 'search', decayDays: null, governancePriority: 'medium' },
+]
+
+const BUILTIN_NAMES = BUILTIN_TYPES.map(t => t.name)
+
+/** 编码、办公的出厂组成，也是配置 scenes 的默认值。 */
+export const PRESET_SCENES: Record<'coding' | 'office', { label: string; types: string[] }> = {
+  coding: { label: '编码', types: [...BUILTIN_NAMES, 'procedure'] },
+  office: { label: '办公', types: [...BUILTIN_NAMES, 'decision'] },
+}
 
 export const FALLBACK_POLICY: Omit<MemoryTypeDefinition, 'name' | 'label' | 'description'> = {
   whenToSave: '跨会话可能还有用、未来的你会因此做得更好', recall: 'search', decayDays: 90, governancePriority: 'high',
@@ -50,6 +65,11 @@ export interface TypeRegistry {
   renderSaveDescription(): string
 }
 
+/** buildTypeRegistry 的结果：类型表本身，外加场景配置有问题时的警告（由调用方打日志）。 */
+export interface BuiltTypeRegistry extends TypeRegistry {
+  readonly warnings: readonly string[]
+}
+
 export function assertNoBuiltinCollision(types: readonly MemoryTypeDefinition[], origin: string): void {
   for (const t of types) {
     if (BUILTIN_TYPES.some(b => b.name === t.name)) {
@@ -58,30 +78,52 @@ export function assertNoBuiltinCollision(types: readonly MemoryTypeDefinition[],
   }
 }
 
-export function buildTypeRegistry(config: TypeRegistryConfig): TypeRegistry {
-  const map = new Map<string, MemoryTypeDefinition>()
-  for (const t of BUILTIN_TYPES) map.set(t.name, t)
-
-  const templateTypes = TEMPLATES[config.template] ?? []
-  assertNoBuiltinCollision(templateTypes, '模板')
-  for (const t of templateTypes) map.set(t.name, t)
-
+export function buildTypeRegistry(config: TypeRegistryConfig): BuiltTypeRegistry {
   const customTypes = Object.entries(config.customTypes).map(([name, def]) => ({ name, ...def }))
   assertNoBuiltinCollision(customTypes, '自定义')
-  for (const t of customTypes) map.set(t.name, t)
+
+  // 类型池：内置 → 预设 → 自建（自建与预设、退役同名时覆盖，兼容老配置）
+  const pool = new Map<string, MemoryTypeDefinition>()
+  for (const t of [...BUILTIN_TYPES, ...PRESET_TYPES]) pool.set(t.name, t)
+  const retired = new Map(RETIRED_TYPES.map(t => [t.name, t]))
+  for (const t of customTypes) {
+    pool.set(t.name, t)
+    retired.delete(t.name)
+  }
+
+  const warnings: string[] = []
+  const general = () => BUILTIN_TYPES.map(t => t.name)
+  const pickScene = (): string[] => {
+    if (config.template === GENERAL_SCENE) return general()
+    const scenes: Readonly<Record<string, SceneConfig>> = config.scenes ?? PRESET_SCENES
+    const scene = Object.hasOwn(scenes, config.template) ? scenes[config.template] : undefined
+    if (scene === undefined) {
+      warnings.push(`场景 "${config.template}" 不存在，按通用场景运行`)
+      return general()
+    }
+    const skipped = scene.types.filter(name => !pool.has(name))
+    if (skipped.length > 0) warnings.push(`场景 "${config.template}" 里的类型 ${skipped.join('、')} 不存在或已退役，已跳过`)
+    const picked = [...pool.keys()].filter(name => scene.types.includes(name))
+    if (picked.length === 0) {
+      warnings.push(`场景 "${config.template}" 没有可用的类型，按通用场景运行`)
+      return general()
+    }
+    if (picked.length > SCENE_MAX_TYPES) {
+      warnings.push(`场景 "${config.template}" 超过 ${SCENE_MAX_TYPES} 类，只用前 ${SCENE_MAX_TYPES} 类`)
+      return picked.slice(0, SCENE_MAX_TYPES)
+    }
+    return picked
+  }
+  const map = new Map(pickScene().map(name => [name, pool.get(name)!]))
 
   return {
-    // 读时认得所有模板的类型（切模板后旧模板的记忆照常带入、能搜到），写时 has 仍只认当前模板
-    get: name => map.get(name) ?? ANY_TEMPLATE_TYPE.get(name) ?? { name, label: name, description: '', ...FALLBACK_POLICY },
+    warnings,
+    // 读时认得类型池和退役类型（切场景、退役后已有记忆照常带入、能搜到），写时 has 只认当前场景
+    get: name => map.get(name) ?? pool.get(name) ?? retired.get(name) ?? { name, label: name, description: '', ...FALLBACK_POLICY },
     has: name => map.has(name),
     all: () => [...map.values()],
     renderSaveDescription() {
-      const types = [...map.values()]
-      const trim = types.length > 15
-      const lines = types.map(t =>
-        trim && t.governancePriority === 'low'
-          ? `- ${t.name}（${t.label}）`
-          : `- ${t.name}（${t.label}）：${t.whenToSave}`)
+      const lines = [...map.values()].map(t => `- ${t.name}（${t.label}）：${t.whenToSave}`)
       return `${SAVE_GUIDE}\n\n各类型何时记：\n${lines.join('\n')}`
     },
   }

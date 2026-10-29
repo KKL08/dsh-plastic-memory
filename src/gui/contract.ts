@@ -333,6 +333,9 @@ const generatedAt = z.number().optional()
 
 export { MODEL_CHANGE_KINDS, type ModelChangeKind } from '../contract-codes.ts'
 
+/** 场景：通用场景 id、每个场景的类型上限、通用以外的场景个数上限（设置页用）。 */
+export { GENERAL_SCENE, MAX_SCENES, SCENE_MAX_TYPES } from '../contract-codes.ts'
+
 /** 模型改写、替代此刻能不能撤：undoable 能；changed 之后又被改过（手改、模型再改、删除），不覆盖；undone 已撤销。 */
 export const MODEL_CHANGE_STATES = ['undoable', 'changed', 'undone'] as const
 export type ModelChangeState = (typeof MODEL_CHANGE_STATES)[number]

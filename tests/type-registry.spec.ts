@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { assertNoBuiltinCollision, buildTypeRegistry, BUILTIN_TYPES } from '../src/type-registry.ts'
+import { assertNoBuiltinCollision, buildTypeRegistry, BUILTIN_TYPES, PRESET_SCENES } from '../src/type-registry.ts'
+import { GENERAL_SCENE, SCENE_MAX_TYPES } from '../src/contract-codes.ts'
 import { TypeRegistryError } from '../src/errors.ts'
 import { captureError } from './helpers/errors.ts'
 
@@ -50,14 +51,14 @@ describe('buildTypeRegistry', () => {
     expect(policy.decayDays).toBe(90)
   })
 
-  it('切模板后读时认得其他模板的类型（label、decayDays 不退化），写时仍只认当前模板', () => {
+  it('切场景后读时认得类型池里的类型（label、decayDays 不退化），写时仍只认当前场景', () => {
     const office = buildTypeRegistry({ template: 'office', customTypes: {} })
     expect(office.get('procedure')).toMatchObject({ label: '可复用流程', decayDays: 90, recall: 'search', governancePriority: 'medium' })
     expect(office.has('procedure')).toBe(false)
     expect(office.all().map(t => t.name)).not.toContain('procedure')
     const coding = buildTypeRegistry(base)
-    expect(coding.get('commitment')).toMatchObject({ label: '承诺', decayDays: 14, recall: 'core' })
-    expect(coding.has('commitment')).toBe(false)
+    expect(coding.get('decision')).toMatchObject({ label: '决定', decayDays: 30, recall: 'search' })
+    expect(coding.has('decision')).toBe(false)
   })
 
   it('renderSaveDescription 通用层含守门句/γ/推断低置信/隐私负向 + 全部类型', () => {
@@ -78,17 +79,104 @@ describe('buildTypeRegistry', () => {
     expect(coding).toMatch(/决策变更|变更/)   // project：决策变更
     expect(coding).toMatch(/procedure（可复用流程）：.*反复验证/) // procedure 零覆盖修复
     const office = buildTypeRegistry({ template: 'office', customTypes: {} }).renderSaveDescription()
-    expect(office).toMatch(/commitment（承诺）：.*答应/) // commitment 零覆盖修复
-    expect(office).toContain('person（人物）')           // person 零覆盖修复
+    expect(office).toMatch(/decision（决定）：.*依据.*答应/) // 承诺并进决定
   })
 
-  it('类型超过 15 个时低优先级类型的 whenToSave 裁剪为仅 label', () => {
-    const customTypes = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [
-      `extra${i}`,
-      { label: `扩展${i}`, description: `desc${i}`, whenToSave: `这段触发说明不该出现${i}`, recall: 'search' as const, decayDays: null, governancePriority: 'low' as const },
-    ]))
-    const text = buildTypeRegistry({ template: 'coding', customTypes }).renderSaveDescription()
-    expect(text).toContain('extra0（扩展0）')
-    expect(text).not.toContain('这段触发说明不该出现0')
+})
+
+const term = { label: '术语', description: '领域术语', whenToSave: '出现新术语', recall: 'search' as const, decayDays: null, governancePriority: 'medium' as const }
+
+describe('场景', () => {
+  it('不写 scenes 时编码、办公按出厂组成：通用五类 + 各一类预设', () => {
+    expect(buildTypeRegistry(base).all().map(t => t.name)).toEqual([...BUILTIN_TYPES.map(t => t.name), 'procedure'])
+    expect(buildTypeRegistry({ template: 'office', customTypes: {} }).all().map(t => t.name))
+      .toEqual([...BUILTIN_TYPES.map(t => t.name), 'decision'])
+    expect(PRESET_SCENES.coding.types).toEqual([...BUILTIN_TYPES.map(t => t.name), 'procedure'])
+  })
+
+  it('通用场景（custom）只有内置五类，scenes 里写了 custom 也忽略', () => {
+    const registry = buildTypeRegistry({ template: GENERAL_SCENE, customTypes: {}, scenes: { custom: { label: '假', types: ['procedure'] } } })
+    expect(registry.all().map(t => t.name)).toEqual(BUILTIN_TYPES.map(t => t.name))
+    expect(registry.warnings).toEqual([])
+  })
+
+  it('自定义场景：按类型池顺序挑类型，可去掉通用类型；去掉的仍能读、不能写', () => {
+    const registry = buildTypeRegistry({
+      template: 'scene-1',
+      customTypes: { 'domain-term': term },
+      scenes: { 'scene-1': { label: '写作', types: ['domain-term', 'decision', 'reference', 'preference'] } },
+    })
+    expect(registry.all().map(t => t.name)).toEqual(['preference', 'reference', 'decision', 'domain-term'])
+    expect(registry.has('profile')).toBe(false)
+    expect(registry.get('profile').label).toBe('用户画像')
+    expect(registry.warnings).toEqual([])
+  })
+
+  it('自建类型不在当前场景时不能写，但读时认得原定义（不走兜底）', () => {
+    const registry = buildTypeRegistry({ template: 'coding', customTypes: { 'domain-term': term } })
+    expect(registry.has('domain-term')).toBe(false)
+    expect(registry.get('domain-term')).toMatchObject({ label: '术语', decayDays: null, recall: 'search' })
+  })
+
+  it('template 指向不存在的场景时按通用运行，并给出警告', () => {
+    const registry = buildTypeRegistry({ template: 'scene-9', customTypes: {} })
+    expect(registry.all().map(t => t.name)).toEqual(BUILTIN_TYPES.map(t => t.name))
+    expect(registry.warnings).toHaveLength(1)
+    expect(registry.warnings[0]).toContain('scene-9')
+  })
+
+  it(`场景超过 ${SCENE_MAX_TYPES} 类时按类型池顺序取前 ${SCENE_MAX_TYPES} 类，并给出警告`, () => {
+    const extra = Object.fromEntries(['a-one', 'a-two', 'a-three'].map(n => [n, { ...term, label: n }]))
+    const registry = buildTypeRegistry({
+      template: 'scene-1', customTypes: extra,
+      scenes: { 'scene-1': { label: '满', types: ['a-three', 'a-two', 'a-one', 'decision', 'procedure', ...BUILTIN_TYPES.map(t => t.name)] } },
+    })
+    expect(registry.all().map(t => t.name)).toEqual([...BUILTIN_TYPES.map(t => t.name), 'procedure', 'decision', 'a-one'])
+    expect(registry.warnings).toHaveLength(1)
+  })
+
+  it('场景里的退役类型和未知类型跳过并警告；跳过后一类不剩按通用运行', () => {
+    const partial = buildTypeRegistry({
+      template: 'scene-1', customTypes: {},
+      scenes: { 'scene-1': { label: '旧办公', types: ['profile', 'commitment', 'person', 'ghost'] } },
+    })
+    expect(partial.all().map(t => t.name)).toEqual(['profile'])
+    expect(partial.has('commitment')).toBe(false)
+    expect(partial.warnings.join('\n')).toMatch(/commitment[\s\S]*ghost|ghost[\s\S]*commitment/)
+
+    const empty = buildTypeRegistry({
+      template: 'scene-1', customTypes: {},
+      scenes: { 'scene-1': { label: '空', types: ['person', 'ghost'] } },
+    })
+    expect(empty.all().map(t => t.name)).toEqual(BUILTIN_TYPES.map(t => t.name))
+    expect(empty.warnings.length).toBeGreaterThan(0)
+  })
+
+  it('退役的承诺、人物读时按原定义，任何场景都不能新增', () => {
+    const registry = buildTypeRegistry({ template: 'office', customTypes: {} })
+    expect(registry.get('commitment')).toMatchObject({ label: '承诺', recall: 'core', decayDays: 14, governancePriority: 'high' })
+    expect(registry.get('person')).toMatchObject({ label: '人物', recall: 'search', decayDays: null })
+    expect(registry.has('commitment')).toBe(false)
+    expect(registry.has('person')).toBe(false)
+    expect(registry.renderSaveDescription()).not.toContain('commitment')
+  })
+
+  it('自建类型和退役类型同名就是新类型：可勾进场景、可写，旧记忆按新定义读；删掉后回落到退役定义', () => {
+    const mine = { ...term, label: '我的承诺', recall: 'search' as const, decayDays: 60 }
+    const withCustom = buildTypeRegistry({
+      template: 'scene-1', customTypes: { commitment: mine },
+      scenes: { 'scene-1': { label: '跟进', types: ['preference', 'commitment'] } },
+    })
+    expect(withCustom.has('commitment')).toBe(true)
+    expect(withCustom.get('commitment')).toMatchObject({ label: '我的承诺', decayDays: 60 })
+    expect(withCustom.warnings).toEqual([])
+    const removed = buildTypeRegistry({ template: 'custom', customTypes: {} })
+    expect(removed.get('commitment')).toMatchObject({ label: '承诺', decayDays: 14 })
+  })
+
+  it('删掉预设场景后指向它的 template 按通用运行', () => {
+    const registry = buildTypeRegistry({ template: 'coding', customTypes: {}, scenes: { office: PRESET_SCENES.office } })
+    expect(registry.all().map(t => t.name)).toEqual(BUILTIN_TYPES.map(t => t.name))
+    expect(registry.warnings).toHaveLength(1)
   })
 })

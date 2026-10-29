@@ -2,22 +2,28 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { parse } from 'yaml'
-import { BUILTIN_TYPE_NAMES, ENTRY_ID, PACKAGE_NAME, SENSITIVITY_NUMBERS, TEMPLATE_TYPES, TEMPLATES as CLIENT_TEMPLATES, buildOps, fieldsOf } from '../client/settings/config.ts'
+import {
+  BUILTIN_TYPE_NAMES, ENTRY_ID, PACKAGE_NAME, PRESET_SCENES as CLIENT_PRESET_SCENES, PRESET_TYPE_NAMES, RETIRED_TYPE_NAMES, SENSITIVITY_NUMBERS,
+  buildOps, fieldsOf,
+} from '../client/settings/config.ts'
 import { applyOps } from '../client/settings/config-form.fake.ts'
 import { Config } from '../src/index.ts'
 import { SENSITIVITY_PRESETS } from '../src/governance/health-presets.ts'
-import { BUILTIN_TYPES, TEMPLATES } from '../src/type-registry.ts'
+import { BUILTIN_TYPES, PRESET_SCENES, PRESET_TYPES, RETIRED_TYPES } from '../src/type-registry.ts'
 
 describe('设置页手抄的服务端常量', () => {
   it('内置类型名与 BUILTIN_TYPES 一致', () => {
     expect([...BUILTIN_TYPE_NAMES].sort()).toEqual(BUILTIN_TYPES.map(t => t.name).sort())
   })
 
-  it('每个模板在通用五类之外多出的类型与 TEMPLATES 一致', () => {
-    for (const name of Object.keys(TEMPLATES)) expect(CLIENT_TEMPLATES).toContain(name)
-    for (const name of CLIENT_TEMPLATES) {
-      expect([...TEMPLATE_TYPES[name]]).toEqual((TEMPLATES[name] ?? []).map(t => t.name))
-    }
+  it('预设类型、退役类型名单与 PRESET_TYPES、RETIRED_TYPES 一致', () => {
+    expect([...PRESET_TYPE_NAMES]).toEqual(PRESET_TYPES.map(t => t.name))
+    expect([...RETIRED_TYPE_NAMES]).toEqual(RETIRED_TYPES.map(t => t.name))
+  })
+
+  it('编码、办公的出厂组成与 PRESET_SCENES 一致，也是 Config 里 scenes 的默认值', () => {
+    expect(CLIENT_PRESET_SCENES).toEqual(PRESET_SCENES)
+    expect(fieldsOf({ scenes: new Config({} as never).scenes.get() }).scenes).toEqual(PRESET_SCENES)
   })
 
   it('灵敏度说明里的数值与预设一致', () => {
@@ -34,17 +40,18 @@ describe('设置页手抄的服务端常量', () => {
     expect(pkg.name).toBe(PACKAGE_NAME)
   })
 
-  it('用户词典路径字段写进 Config 的 search.userDictionaryPath；默认未设、表单显示为空，清空回到未设', () => {
-    expect(new Config({} as never).search.userDictionaryPath.get()).toBeUndefined()
-    const empty = fieldsOf({})
-    expect(empty.userDictionary).toBe('')
+  it('场景写进 Config：删掉的出厂场景保存后不被默认值补回，新建的场景原样读回', () => {
+    const saved = fieldsOf({})
+    const draft = { ...saved, template: 'scene-1', scenes: { coding: saved.scenes.coding!, 'scene-1': { label: '写作', types: ['preference'] } } }
+    const written = applyOps({ scenes: structuredClone(PRESET_SCENES) }, buildOps(saved, draft)!)
+    const config = new Config(written as never)
+    expect(config.template.get()).toBe('scene-1')
+    expect(Object.keys(config.scenes.get())).toEqual(['coding', 'scene-1'])
+  })
 
-    const written = applyOps({}, buildOps(empty, { ...empty, userDictionary: '/opt/dict/domain.txt' })!)
-    expect(new Config(written as never).search.userDictionaryPath.get()).toBe('/opt/dict/domain.txt')
-    const saved = fieldsOf(written)
-    expect(saved.userDictionary).toBe('/opt/dict/domain.txt')
-
-    const cleared = applyOps(written, buildOps(saved, { ...saved, userDictionary: '' })!)
-    expect(new Config(cleared as never).search.userDictionaryPath.get()).toBeUndefined()
+  it('设置页不读写用户词典路径：保存别的项时不会把配置文件里的路径写回或清掉', () => {
+    const section = { search: { userDictionaryPath: '/opt/dict/domain.txt' } }
+    const saved = fieldsOf(section)
+    expect(buildOps(saved, { ...saved, budget: '5000' })).toEqual([{ op: 'set', path: ['snapshotTokenBudget'], value: 5000 }])
   })
 })
