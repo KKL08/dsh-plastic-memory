@@ -132,7 +132,7 @@ export const PENDING_LEVEL_OF_KIND = {
 /**
  * 建议整理项的问题类型，按显示顺序。除 stale 外与体检发现（governance/schema.ts FINDING_TYPES）同名：
  * expired / bloat / orphan 由规则检查实时算；redundancy / misplaced / unclear 取该层上次语义体检的缓存（体检关闭时不出）；
- * stale = 超过类型衰减期没确认（健康分的新鲜度）。
+ * stale = 超过类型衰退期没确认（健康分的新鲜度）。
  */
 export const ADVICE_TYPES = ['expired', 'bloat', 'redundancy', 'orphan', 'misplaced', 'unclear', 'stale'] as const
 export type AdviceType = (typeof ADVICE_TYPES)[number]

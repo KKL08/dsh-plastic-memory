@@ -3,7 +3,7 @@ import type { MemoryRecord } from './record-schema.ts'
 const DAY_MS = 86_400_000
 
 /**
- * 陈旧度标注（注入侧与 search 结果共用）：超过类型衰减期未确认的记忆，行尾提示模型
+ * 陈旧度标注（注入侧与 search 结果共用）：超过类型衰退期未确认的记忆，行尾提示模型
  * 引用前存疑、必要时向用户确认。只在渲染时计算、不落 status——磁盘索引有意不带
  * （静态文件里的时间相对标注会随时间失真），因此不能进 formatIndexLine。
  */

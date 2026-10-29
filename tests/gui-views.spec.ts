@@ -254,7 +254,7 @@ describe('待处理视图：提升候选', () => {
 
 describe('待处理视图：建议整理', () => {
   const DAY = 86_400_000
-  /** 四类各一条：已过有效期、内容过长、指向的旧记忆已不在、很久没确认（project 类型衰减期 7 天）。 */
+  /** 四类各一条：已过有效期、内容过长、指向的旧记忆已不在、很久没确认（project 类型衰退期 7 天）。 */
   async function seedAdvice(h: ReturnType<typeof harness>) {
     await h.store.create(w({ id: 'mem_expired', name: '冻结期', validTo: EXPIRED_AT }))
     await h.store.create(w({ id: 'mem_bloat', name: '长文', content: 'x'.repeat(2001) }))
@@ -707,7 +707,7 @@ describe('健康视图', () => {
   })
   it('扣分来源：每层带规则检查、内容检查、新鲜度三项扣分和各项此刻有的问题类型；三项相加正好是 100 减分数，分数与 memory_health 相同', async () => {
     const h = harness()
-    // 不放密钥（有密钥不打分），另加一条超过衰减期没确认的
+    // 不放密钥（有密钥不打分），另加一条超过衰退期没确认的
     await seedEveryIssue(h, { withSecret: false })
     await h.store.create(w({ id: 'mem_stale', name: '很久没确认', lastConfirmedAt: T0 - 100 * 86_400_000 }))
     const { health } = await h.views()

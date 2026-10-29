@@ -103,7 +103,7 @@ describe('维护点动作 ①：再生 MEMORY.md', () => {
 })
 
 describe('MEMORY.md 行与注入索引行末尾带文件名（同源格式，passive 不带 summary；磁盘侧不带陈旧度，注入侧带）', () => {
-  it('MEMORY.md 行以 · 磁盘上的实际文件名收尾；超过衰减期也不带陈旧度', async () => {
+  it('MEMORY.md 行以 · 磁盘上的实际文件名收尾；超过衰退期也不带陈旧度', async () => {
     // project 衰减 7 天，lastConfirmedAt 远在过去；手起的文件名与 slug(name) 不同，索引照实写磁盘文件名
     const r = record({ id: 'mem_gw', name: '网关路由表', type: 'project', summary: '路由表', tags: ['gateway'] })
     await writeMem(globalDir(), '网关路由表-手写.md', r)
