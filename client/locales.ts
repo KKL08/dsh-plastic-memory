@@ -73,6 +73,9 @@ export const zh = {
 
   'marker.secret': '有密钥要处理',
 
+  'advice.label': '建议',
+  'advice.label.note': '说明',
+
   'conflict.title': '两条记忆互相矛盾，等你决定',
   'conflict.side': '记忆 {side}',
   'conflict.keepA': '以 A 为准',
@@ -182,6 +185,9 @@ export const en: Record<LocaleKey, string> = {
   'memory.expired': 'No longer brought into chats',
 
   'marker.secret': 'A secret needs attention',
+
+  'advice.label': 'Suggestion',
+  'advice.label.note': 'Note',
 
   'conflict.title': 'Two memories contradict each other',
   'conflict.side': 'Memory {side}',

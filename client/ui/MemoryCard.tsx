@@ -2,10 +2,9 @@
  * 记忆卡（DESIGN.md「Memory Card」，招牌组件）：两行。
  * 第一行记忆原文，左边 2px 银藤竖线；第二行元信息：类型是浅灰胶囊（类型可自定义，配不了各自的图标），
  * 作用域、来源、时间各带一个宿主图标，不再用点分隔。来源图标只分是谁：你、agent、环境，无出处不画。
- * 状态 chip 放最后、最多一个。不套外框和阴影；已过期的原文改次文字色，元信息加「不再带入对话」。
+ * 元信息行只放属性，状态和结果放在卡片下面的建议区、结果行（Advice.tsx）。不套外框和阴影；已过期的原文改次文字色，元信息加「不再带入对话」。
  * 记忆文字进视图前服务端已遮盖密钥片段，这里原样显示。
  */
-import type { ReactNode } from 'react'
 import type { MemoryCard as MemoryCardData } from '../../src/gui/contract.ts'
 import { formatDay, useT } from '../i18n.tsx'
 import { Chip } from './Chip.tsx'
@@ -29,11 +28,9 @@ export interface MemoryCardProps {
   hideScope?: boolean
   /** 记忆不在借来的会话所在项目里时，作用域写这个项目名，不写「本项目」。 */
   projectName?: string | undefined
-  /** 末尾的状态 chip，最多一个。 */
-  chip?: ReactNode
 }
 
-export function MemoryCard({ memory, now, typeLabel, hideScope = false, projectName, chip }: MemoryCardProps) {
+export function MemoryCard({ memory, now, typeLabel, hideScope = false, projectName }: MemoryCardProps) {
   const t = useT()
   const expired = memory.validTo !== undefined && memory.validTo <= now
   const item = (icon: IconName | undefined, text: string) => (
@@ -48,7 +45,6 @@ export function MemoryCard({ memory, now, typeLabel, hideScope = false, projectN
         {item(memory.sourceMode === undefined ? undefined : SOURCE_ICON[memory.sourceMode], t(memory.sourceMode === undefined ? 'source.none' : `source.${memory.sourceMode}`))}
         {item('clock', formatDay(memory.updatedAt, now, t))}
         {expired ? <span className="pm-mc-item">{t('memory.expired')}</span> : null}
-        {chip}
       </div>
     </div>
   )

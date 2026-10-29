@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { screen } from '@testing-library/react'
 import { MemoryCard } from './MemoryCard.tsx'
-import { Chip } from './Chip.tsx'
 import { memory, NOW, renderInShell } from '../test-utils.tsx'
 import type { MemoryCard as MemoryCardData } from '../../src/gui/contract.ts'
 
@@ -52,14 +51,5 @@ describe('MemoryCard', () => {
     const { container } = renderInShell(<MemoryCard memory={memory({ validTo: NOW - 1 })} now={NOW} />)
     expect(container.querySelector('.pm-mc')).toHaveClass('pm-mc--expired')
     expect(screen.getByText('不再带入对话')).toBeInTheDocument()
-  })
-
-  it('状态 chip 放在元信息最后', () => {
-    const { container } = renderInShell(
-      <MemoryCard memory={memory()} now={NOW} chip={<Chip variant="status" tone="warn">有冲突</Chip>} />,
-    )
-    const meta = container.querySelector('.pm-mc-meta')!
-    expect(meta.lastElementChild).toHaveTextContent('有冲突')
-    expect(meta.lastElementChild).toHaveClass('pm-chip', 'pm-chip--warn')
   })
 })

@@ -10,6 +10,7 @@ import {
 import { belongsTo, useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, formatDay, formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
+import { AdviceNote, ResultLine } from '../ui/Advice.tsx'
 import { Button } from '../ui/Button.tsx'
 import { Chip } from '../ui/Chip.tsx'
 import { ConflictRuling, VerticalConflictRuling } from '../ui/ConflictRuling.tsx'
@@ -118,14 +119,13 @@ function Card({ marker, title, aside, focusable = false, isResult = false, child
   )
 }
 
-function MemoryOf({ memory, session, now, typeLabels, chip }: {
+function MemoryOf({ memory, session, now, typeLabels }: {
   memory: MemoryCardData
   session: BorrowedSession
   now: number
   typeLabels: Readonly<Record<string, string>>
-  chip?: ReactNode
 }) {
-  return <MemoryCard memory={memory} now={now} typeLabel={typeLabels[memory.type]} projectName={projectNameOf(session)(memory)} chip={chip} />
+  return <MemoryCard memory={memory} now={now} typeLabel={typeLabels[memory.type]} projectName={projectNameOf(session)(memory)} />
 }
 
 export function titleOf(item: PendingItem, t: Translate): string {
@@ -159,7 +159,7 @@ export function SecretCard({ item, session, now, typeLabels, onDone }: CardProps
     <Card marker={<StatusMarker kind="secret" label={t('marker.secret')} />} title={t('pending.secret.title')}>
       <MemoryOf session={session} memory={typeof revealed === 'string' ? { ...memory, content: revealed } : memory} now={now} typeLabels={typeLabels} />
       {revealed === null ? <p className="pm-pending-text">{t('pending.secret.readFailed')}</p> : null}
-      <p className="pm-pending-text">{t('pending.secret.body')}</p>
+      <AdviceNote>{t('pending.secret.body')}</AdviceNote>
       {confirming
         ? (
           <SecretDeleteConfirm
@@ -263,7 +263,7 @@ export function PromoteCard({ item, session, now, typeLabels, onDone, onRefused,
         ? <p className="pm-pending-text">{t('conflict.missing')}</p>
         : <MemoryOf session={session} memory={item.memory} now={now} typeLabels={typeLabels} />}
       {promoteTarget !== undefined
-        ? <p className="pm-pending-text">{t(promoteTarget === 'agents-md' ? 'pending.promote.agentsMdNote' : 'pending.promote.globalNote')}</p>
+        ? <AdviceNote>{t(promoteTarget === 'agents-md' ? 'pending.promote.agentsMdNote' : 'pending.promote.globalNote')}</AdviceNote>
         : null}
       <div className="pm-pending-actions">
         <Button unavailable={unavailable} onClick={() => { action.run({ cmd: 'keep-local', decisionId: item.decisionId }) }}>
@@ -543,7 +543,7 @@ export function AdviceCard(props: CardProps<'advice'> & {
           : (
             <>
               <div className="pm-pending-advice-memories">{item.memories.map(m => <MemoryOf key={m.id} session={session} memory={m} now={now} typeLabels={typeLabels} />)}</div>
-              <p className="pm-pending-text">{t(copy.body, { date: formatDay(memory.lastConfirmedAt, now, t) })}</p>
+              <AdviceNote>{t(copy.body, { date: formatDay(memory.lastConfirmedAt, now, t) })}</AdviceNote>
               <div className="pm-pending-actions">{copy.actions.map(a => buttons[a])}</div>
             </>
           )}
@@ -625,7 +625,7 @@ function AdviceGroupCard({ item, session, now, typeLabels, action, buttonsOf }: 
           )
           : (
             <>
-              <p className="pm-pending-text">{t(isPair ? 'pending.advice.redundancy.body' : 'pending.advice.redundancy.manyBody')}</p>
+              <AdviceNote>{t(isPair ? 'pending.advice.redundancy.body' : 'pending.advice.redundancy.manyBody')}</AdviceNote>
               <div className="pm-pending-actions">
                 {pair !== undefined
                   ? (
@@ -703,20 +703,22 @@ export function ResultCard({ item, outcome, session, now, typeLabels, onUndone, 
     : outcome.kind === 'ignored' ? { cmd: 'unignore-advice', type: outcome.type, memoryIds: outcome.memoryIds }
     : outcome.kind === 'deleted' ? { cmd: 'restore', memoryId: outcome.memoryId, layer: outcome.layer }
     : undoId !== undefined ? { cmd: 'undo', decisionId: undoId } : undefined
-  const chip = <Chip variant="result">{copy.chip}</Chip>
   return (
     <Card marker={item.kind === 'advice' ? undefined : <StatusMarker kind="done" />} title={titleOf(item, t)} focusable isResult>
-      {copy.memory ? <MemoryOf session={session} memory={copy.memory} now={now} typeLabels={typeLabels} chip={chip} /> : <div>{chip}</div>}
-      <div className="pm-pending-result">
-        <p className="pm-pending-text">{copy.body}</p>
-        {undo !== undefined
+      {copy.memory ? <MemoryOf session={session} memory={copy.memory} now={now} typeLabels={typeLabels} /> : null}
+      <ResultLine
+        chip={copy.chip}
+        isStandalone={!copy.memory}
+        undo={undo !== undefined
           ? (
             <Button variant="ghost" className="pm-pending-undo" unavailable={action.unavailable} onClick={() => { action.run(undo) }}>
               {t('pending.undo')}
             </Button>
           )
-          : null}
-      </div>
+          : undefined}
+      >
+        {copy.body}
+      </ResultLine>
       <ActionFeedback action={action} />
     </Card>
   )

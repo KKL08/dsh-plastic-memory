@@ -557,12 +557,13 @@ describe('交付卡：提升候选就地处理', () => {
     expect(screen.getByRole('button', { expanded: false })).not.toHaveTextContent('可提升为全局')
   })
 
-  it('展开后候选那条的元信息带「可提升为全局」，下方「留在本项目」「提升为全局」；不是候选的没有', () => {
+  it('展开后候选那条下方是建议区和「留在本项目」「提升为全局」，元信息行不挂状态；不是候选的没有', () => {
     card()
     expand()
-    expect(row('mem_c').getByText('可提升为全局').closest('.pm-mc-meta')).not.toBeNull()
+    expect(row('mem_c').getByText(/^这条看起来适合所有项目。/).closest('.pm-advice')).not.toBeNull()
+    expect(row('mem_c').queryByText('可提升为全局')).toBeNull()
     expect(row('mem_c').getAllByRole('button').map(b => b.textContent)).toEqual(['留在本项目', '提升为全局', '查看详情 ›', ''])
-    expect(row('mem_p').queryByText('可提升为全局')).toBeNull()
+    expect(row('mem_p').queryByText(/这条看起来适合所有项目/)).toBeNull()
     expect(row('mem_p').queryByRole('button', { name: '提升为全局' })).toBeNull()
   })
 
@@ -581,7 +582,7 @@ describe('交付卡：提升候选就地处理', () => {
     expand()
     await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '留在本项目' })) })
     expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'keep-local-memory', memoryId: 'mem_c', layer }])
-    expect(row('mem_c').getByText('留在本项目').closest('.pm-chip')).not.toBeNull()
+    expect(row('mem_c').getByText('留在本项目').closest('.pm-result-line')).toHaveTextContent('留在本项目以后不再提示这条。')
     expect(row('mem_c').queryByRole('button', { name: '留在本项目' })).toBeNull()
   })
 
@@ -644,10 +645,10 @@ describe('交付卡：提升候选就地处理', () => {
     const { gateway } = card(createFakeGateway({ views: { library: libraryOf([asCandidate, plain.memory]) }, respond: decided }))
     expand()
     await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: button })) })
-    expect(row('mem_c').getByText(result).closest('.pm-mc-meta')).not.toBeNull()
+    expect(row('mem_c').getByText(result).closest('.pm-result-line')).not.toBeNull()
     await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '撤销' })) })
     expect(gateway.executed.map(e => e.command).at(-1)).toEqual({ cmd: 'undo', decisionId: 'pd_9' })
-    expect(row('mem_c').getByText('可提升为全局')).toBeInTheDocument()
+    expect(row('mem_c').getByText(/^这条看起来适合所有项目。/)).toBeInTheDocument()
     expect(row('mem_c').getByRole('button', { name: '留在本项目' })).toBeInTheDocument()
     expect(row('mem_c').getByRole('button', { name: '提升为全局' })).toBeInTheDocument()
     expect(row('mem_c').queryByRole('button', { name: '撤销' })).toBeNull()
@@ -674,7 +675,7 @@ describe('交付卡：提升候选就地处理', () => {
     expect(row('mem_c').getByText('已提升为全局')).toBeInTheDocument()
     expect(row('mem_c').getByRole('button', { name: '撤销' })).toBeInTheDocument()
     act(() => { gateway.setView('library', libraryOf([asCandidate, plain.memory])) })
-    expect(row('mem_c').getByText('可提升为全局')).toBeInTheDocument()
+    expect(row('mem_c').getByText(/^这条看起来适合所有项目。/)).toBeInTheDocument()
     expect(row('mem_c').getByRole('button', { name: '提升为全局' })).toBeInTheDocument()
     expect(row('mem_c').queryByRole('button', { name: '撤销' })).toBeNull()
   })
@@ -685,7 +686,7 @@ describe('交付卡：提升候选就地处理', () => {
     expect(row('mem_c').queryByRole('button', { name: '提升为全局' })).toBeNull()
     await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '写进 AGENTS.md' })) })
     expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'promote-memory', memoryId: 'mem_c', layer, isCandidateRequired: true, target: 'agents-md' }])
-    expect(row('mem_c').getByText('已写进 AGENTS.md').closest('.pm-mc-meta')).not.toBeNull()
+    expect(row('mem_c').getByText('已写进 AGENTS.md').closest('.pm-result-line')).not.toBeNull()
     expect(row('mem_c').queryByRole('button', { name: '撤销' })).toBeNull()
     // 服务端软删了项目里那条：全部记忆里没了、最近删除里有
     act(() => {
@@ -704,7 +705,7 @@ describe('交付卡：提升候选就地处理', () => {
     expand()
     await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '写进 AGENTS.md' })) })
     expect(row('mem_c').getByRole('alert')).toHaveTextContent('没有完成：含密钥的记忆不能写入 AGENTS.md：mem_c')
-    expect(row('mem_c').getByText('可提升为全局')).toBeInTheDocument()
+    expect(row('mem_c').getByText(/^这条看起来适合所有项目。/)).toBeInTheDocument()
   })
 
   it('全局里已有这条（含最近删除）：原位写「没有提升」的说明，还是候选', async () => {
@@ -716,7 +717,7 @@ describe('交付卡：提升候选就地处理', () => {
     expand()
     await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '提升为全局' })) })
     expect(row('mem_c').getByRole('alert')).toHaveTextContent('没有完成：全局里已经有这条记忆（含最近删除），没有提升。')
-    expect(row('mem_c').getByText('可提升为全局')).toBeInTheDocument()
+    expect(row('mem_c').getByText(/^这条看起来适合所有项目。/)).toBeInTheDocument()
   })
 
   it('配置还没读到：同待处理卡，提升按钮暂不可用，「留在本项目」照常', () => {
@@ -727,7 +728,7 @@ describe('交付卡：提升候选就地处理', () => {
     expect(row('mem_c').getByRole('button', { name: '留在本项目' })).not.toHaveAttribute('aria-disabled')
   })
 
-  it('英文：折叠行、chip 与两个按钮', () => {
+  it('英文：折叠行、建议区与两个按钮', () => {
     render(
       <PanelShell gateway={createFakeGateway({ views: { library: libraryOf([asCandidate, plain.memory]) } })} t={createTranslator(en)}>
         <SavedMemoriesCard sessionId="s1" cwd={WS} saved={[plain, cand]} now={NOW} openDetail={() => {}} />
@@ -736,7 +737,7 @@ describe('交付卡：提升候选就地处理', () => {
     const toggle = screen.getByRole('button', { expanded: false })
     expect(toggle).toHaveTextContent('1 could become global')
     fireEvent.click(toggle)
-    expect(row('mem_c').getByText('Could become global')).toBeInTheDocument()
+    expect(row('mem_c').getByText(/^This looks useful to every project\./)).toBeInTheDocument()
     expect(row('mem_c').getByRole('button', { name: 'Keep in this project' })).toBeInTheDocument()
     expect(row('mem_c').getByRole('button', { name: 'Make global' })).toBeInTheDocument()
   })
@@ -1129,10 +1130,10 @@ describe('交付卡：模型改写、替代已有记忆', () => {
     expect(toggle).toHaveAccessibleName('这一轮记住了 1 条、改写了 1 条')
   })
 
-  it('改写那条：元信息带「已改写」，作用域按改前那份；「改前 / 改后 ›」展开对照；新记的没有这些', () => {
+  it('改写那条：改动行开头写「已改写」（元信息行只放属性），作用域按改前那份；「改前 / 改后 ›」展开对照；新记的没有这些', () => {
     card([saved('mem_1', '新的'), rewrite()], [change()])
     fireEvent.click(screen.getByRole('button', { expanded: false }))
-    expect(row('mem_r').getByText('已改写').closest('.pm-mc-meta')).not.toBeNull()
+    expect(row('mem_r').getByText('已改写').closest('.pm-change-head')).not.toBeNull()
     expect(row('mem_r').getByText('本项目')).toBeInTheDocument()
     const toggle = row('mem_r').getByRole('button', { name: '改前 / 改后 ›' })
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
@@ -1181,7 +1182,7 @@ describe('交付卡：模型改写、替代已有记忆', () => {
     cleanup()
     card([rewrite()], [])
     fireEvent.click(screen.getByRole('button', { expanded: false }))
-    expect(row('mem_r').getByText('已改写')).toBeInTheDocument()
+    expect(row('mem_r').getByText('改写后的正文')).toBeInTheDocument()
     expect(row('mem_r').queryByText('改前版本已超过 14 天，无法恢复')).toBeNull()
   })
 

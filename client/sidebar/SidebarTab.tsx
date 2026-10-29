@@ -26,7 +26,7 @@ import type { LocaleKey } from '../locales.ts'
 import { sidebarZh } from '../locales/sidebar.ts'
 import type { NavTarget } from '../nav.ts'
 import { mergeTypeLabels } from '../library/shared.tsx'
-import { Chip } from '../ui/Chip.tsx'
+import { ResultLine } from '../ui/Advice.tsx'
 import { ConflictRuling, VerticalConflictRuling } from '../ui/ConflictRuling.tsx'
 import { ContextBudgetBar } from '../ui/ContextBudgetBar.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
@@ -35,7 +35,7 @@ import { Arrival, useArrivals } from '../ui/motion.tsx'
 import { TrashIcon } from '../ui/TrashIcon.tsx'
 import { CrossConfirm, crossConfirmCss, isHandledElsewhere, DeleteWithConfirm, SecretDeleteConfirm } from '../pending/action.tsx'
 import { promoteInPlaceCss, promotionOf, usePromoteInPlace, type InPlacePromotion } from '../pending/promote-in-place.tsx'
-import { ModelChangeLine, RewrittenChip, modelChangeCss } from '../pending/model-change.tsx'
+import { ModelChangeLine, modelChangeCss } from '../pending/model-change.tsx'
 import { keepFocusInPlace } from '../ui/focus-return.ts'
 import { isLiveWrite, sessionCards, writtenSinceSnapshot } from './session-memories.ts'
 
@@ -258,8 +258,8 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     ? 0
     : pending.data.items.filter(item => inWorkspace(item, ws) && !('decisionId' in item && (inline.has(item.decisionId) || ruledIds.has(item.decisionId)))).length
   const now = Date.now()
-  const card = (memory: MemoryCardData, chip?: ReactNode) => (
-    <MemoryCard memory={memory} now={now} typeLabel={label(memory.type)} hideScope={memory.scope === 'workspace'} chip={chip} />
+  const card = (memory: MemoryCardData) => (
+    <MemoryCard memory={memory} now={now} typeLabel={label(memory.type)} hideScope={memory.scope === 'workspace'} />
   )
   const failed = (id: string) => {
     if (secretId === id) return <SecretDeleteConfirm onCancel={() => { setSecretId(undefined) }} onConfirm={() => { hardDelete(id, byId.get(id)) }} />
@@ -371,7 +371,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
             {changes.map(change => change.kind === 'rewrite'
               ? (
                 <div key={change.decisionId} className="pm-side-change" data-memory-id={change.memoryId}>
-                  {card(byId.get(change.memoryId) ?? change.before, <RewrittenChip />)}
+                  {card(byId.get(change.memoryId) ?? change.before)}
                   <ModelChangeLine session={session} change={change} kind="rewrite" after={byId.get(change.memoryId)} />
                 </div>
               )
@@ -480,11 +480,11 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   )
 }
 
-/** 这次新写入的一行：记忆卡（提升候选带 chip）+ 行尾删除；提升候选的两个动作和结果在卡片下面一行。 */
+/** 这次新写入的一行：记忆卡 + 行尾删除；提升候选的建议区和两个动作（处理过换成结果行）在卡片下面。 */
 function SavedRow({ session, memory, card, state, onWroteAgentsMd, children }: {
   session: BorrowedSession
   memory: MemoryCardData
-  card: (memory: MemoryCardData, chip?: ReactNode) => ReactNode
+  card: (memory: MemoryCardData) => ReactNode
   /** 提升状态；缺省按全部记忆视图（写进 AGENTS.md 的由上层给）。 */
   state?: InPlacePromotion
   onWroteAgentsMd?: () => void
@@ -494,17 +494,17 @@ function SavedRow({ session, memory, card, state, onWroteAgentsMd, children }: {
   const promote = usePromoteInPlace(session, memory, layerOfMemory(memory), state ?? promotionOf(memory), onWroteAgentsMd)
   return (
     <div className="pm-side-saved" data-memory-id={memory.id}>
-      <div className="pm-side-saved-card">{card(memory, promote.chip)}</div>
+      <div className="pm-side-saved-card">{card(memory)}</div>
       {children}
-      <div className="pm-side-saved-promote">{promote.controls}</div>
+      <div className="pm-side-saved-promote">{promote}</div>
     </div>
   )
 }
 
-/** 刚裁决完：留下的那条带「已按 A」（基线冲突：「已保留这条记忆」，按基线则不留卡），下面一行后果 +「撤销」。 */
+/** 刚裁决完：留下的卡（按基线则不留卡），下面结果行「已按 A」（基线冲突：「已保留这条记忆」）+ 后果 +「撤销」。 */
 function RuledCard({ ruled, card, busy, onUndo }: {
   ruled: Ruled
-  card: (memory: MemoryCardData, chip?: ReactNode) => ReactNode
+  card: (memory: MemoryCardData) => ReactNode
   busy: boolean
   onUndo: () => void
 }) {
@@ -519,21 +519,22 @@ function RuledCard({ ruled, card, busy, onUndo }: {
     : verdict === 'keep-left' ? 'sidebar.ruled.deletedB' : verdict === 'keep-right' ? 'sidebar.ruled.deletedA' : 'sidebar.ruled.keptBoth'
   const kept = ruled.kind === 'vertical' ? isBaseline ? [] : [ruled.memory]
     : verdict === 'keep-left' ? [ruled.left] : verdict === 'keep-right' ? [ruled.right] : [ruled.left, ruled.right]
-  const chip = <Chip variant="result">{t(chipKey)}</Chip>
   return (
     <article className="pm-side-ruled">
-      {kept.length === 0 ? <div>{chip}</div> : null}
-      {kept.map((memory, i) => <div key={memory.id}>{card(memory, i === 0 ? chip : undefined)}</div>)}
-      <p className="pm-side-ruled-note">
-        {t(noteKey)}
-        {ruled.isUnrecorded
-          ? null
+      {kept.map(memory => <div key={memory.id}>{card(memory)}</div>)}
+      <ResultLine
+        chip={t(chipKey)}
+        isStandalone={kept.length === 0}
+        undo={ruled.isUnrecorded
+          ? undefined
           : (
             <button type="button" className="pm-link" aria-disabled={busy || undefined} onClick={() => { if (!busy) onUndo() }}>
               {t('sidebar.ruled.undo')}
             </button>
           )}
-      </p>
+      >
+        {t(noteKey)}
+      </ResultLine>
     </article>
   )
 }
@@ -599,8 +600,6 @@ export const sidebarTabCss = crossConfirmCss + promoteInPlaceCss + modelChangeCs
 .pm-side .pm-conflict-buttons { flex-wrap: nowrap; }
 .pm-side .pm-conflict-buttons .pm-btn { padding: 5px 10px; }
 .pm-side-ruled { display: flex; flex-direction: column; gap: 10px; }
-.pm-side-ruled-note { margin: 0; padding-left: 14px; font-size: 12px; line-height: 1.6; color: var(--pm-text-2); }
-.pm-side-ruled-note .pm-link { margin-left: 8px; font-size: 12px; }
 .pm-link[aria-disabled='true'] { opacity: .4; cursor: default; }
 .pm-side-note { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: var(--dsw-radius-md, 12px); background: var(--pm-bg-block); }
 .pm-side-note-title { margin: 0; font-size: 13px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }

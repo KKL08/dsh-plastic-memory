@@ -498,8 +498,6 @@ export const pendingCss = crossConfirmCss + editCss + modelEditCss + moveCss + `
 .pm-pending-hint .pm-link { margin-left: 8px; font-size: 12px; }
 .pm-pending-error { margin: 6px 0 0; font-size: 12px; line-height: 1.5; color: var(--pm-text); }
 .pm-pending-refused { margin: 0; padding: 12px 0; font-size: 12px; line-height: 1.5; color: var(--pm-text); }
-.pm-pending-result { display: flex; align-items: center; gap: 12px; }
-.pm-pending-result .pm-pending-text { flex: 1; }
 .pm-pending-item--result { transition: opacity 120ms ease-out; }
 @starting-style { .pm-pending-item--result { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .pm-pending-item--result { transition: none; } }
