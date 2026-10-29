@@ -3,7 +3,9 @@ import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, screen } from '@testing-library/react'
 import { Button, buttonCss } from './Button.tsx'
 import { themeCss } from './theme.ts'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { AdviceNote, ResultLine, adviceCss } from './Advice.tsx'
+import { Icon } from './Icon.tsx'
 import { Chip } from './Chip.tsx'
 import { DismissButton } from './DismissButton.tsx'
 import { EmptyState } from './EmptyState.tsx'
@@ -159,15 +161,20 @@ describe('建议区与结果行', () => {
     expect(line.firstElementChild).toHaveClass('pm-chip--result')
   })
 
-  it('细线由调用方决定：只有前面没有记忆卡时才不画，不看在容器里排第几', () => {
+  it('建议区靠开头的图标认出来，不画细线：建议是灯泡、说明是信息图标；结果行靠结果 chip，也不画线', () => {
     const { container } = renderInShell(<>
-      <div><AdviceNote>包在一层里的建议。</AdviceNote></div>
-      <div><ResultLine chip="已按 A">包在一层里的结果。</ResultLine></div>
-      <ResultLine chip="已保留基线" isStandalone>卡片没留下。</ResultLine>
+      <AdviceNote>提升后所有项目都会带入它。</AdviceNote>
+      <AdviceNote label="note">以 A 为准会删掉 B。</AdviceNote>
+      <ResultLine chip="已按 A">B 已删除。</ResultLine>
     </>)
-    const lines = [...container.querySelectorAll('.pm-advice, .pm-result-line')]
-    expect(lines.map(l => l.classList.contains('pm-result-line--standalone'))).toEqual([false, false, true])
-    // jsdom 算不出带 var() 的 border 简写，这里直接看规则：去掉细线只认修饰类，不按位置
-    expect(adviceCss).not.toMatch(/:first-child|:only-child|:first-of-type/)
+    const icons = [...container.querySelectorAll('.pm-advice')].map(n => n.firstElementChild!)
+    expect(icons.map(i => i.tagName.toLowerCase())).toEqual(['svg', 'svg'])
+    const info = renderToStaticMarkup(<Icon name="info" />).replace(/^<svg[^>]*>|<\/svg>$/g, '')
+    // 宿主图标集里没有灯泡，按同一规格自己画的
+    expect(icons[0]).toHaveAttribute('viewBox', '0 0 16 16')
+    expect(icons[0]!.innerHTML).not.toBe(info)
+    expect(icons[1]!.innerHTML).toBe(info)
+    expect(container.querySelector('.pm-result-line svg')).toBeNull()
+    expect(adviceCss).not.toMatch(/border/)
   })
 })

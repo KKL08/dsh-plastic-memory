@@ -50,9 +50,10 @@ All notable changes to this project are documented here. The format follows
 - Wherever you decide on a memory, a suggestion below it says why you are
   asked and what each choice does, always above the buttons. Once you
   decide, a result line with undo takes its place. "Could become global"
-  and "Rewritten" moved out of the memory's details into these lines, and
-  conflict cards that explained each choice below their buttons now do so
-  above them.
+  and "Rewritten" moved out of the memory's details into these lines.
+  Conflict cards on the memory page and in the sidebar share one layout:
+  the two memories, a note on what each choice does, then the three
+  choices together in one row.
 
 ### Fixed
 - Turning plastic-memory off and back on in the plugin page left its

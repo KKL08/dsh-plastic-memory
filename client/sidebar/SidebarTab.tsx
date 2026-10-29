@@ -524,7 +524,6 @@ function RuledCard({ ruled, card, busy, onUndo }: {
       {kept.map(memory => <div key={memory.id}>{card(memory)}</div>)}
       <ResultLine
         chip={t(chipKey)}
-        isStandalone={kept.length === 0}
         undo={ruled.isUnrecorded
           ? undefined
           : (

@@ -31,20 +31,14 @@ describe('ConflictRuling', () => {
     expect(row.previousElementSibling).toHaveTextContent(/^说明.*14 天内可恢复/)
   })
 
-  it('宽版：A、B 各一张卡，卡底写选它的后果和按钮；「都保留」在两卡下面的普通动作行，左边是说明', () => {
+  it('宽版：A、B 两张卡只放记忆；下面和窄版一样是「说明」加一排三个平级按钮，默认行为写在标题下', () => {
     const { container } = renderInShell(<ConflictRuling layout="wide" left={left} right={right} now={NOW} note="决定之前，agent 按 A 来做。" onRule={() => {}} />)
-    const a = screen.getByRole('region', { name: '记忆 A' })
-    expect(within(a).getByRole('button', { name: '以 A 为准' })).toBeInTheDocument()
-    expect(within(a).getByText('B 会删掉，14 天内可恢复')).toBeInTheDocument()
-    expect(within(screen.getByRole('region', { name: '记忆 B' })).getByRole('button', { name: '以 B 为准' })).toBeInTheDocument()
-    expect(container.querySelector('.pm-keep-line')).toBeNull()
-    const row = container.querySelector('.pm-conflict-row')!
-    expect(row.previousElementSibling).toHaveClass('pm-conflict-sides')
-    expect([...row.querySelectorAll('button')].map(b => b.textContent)).toEqual(['都保留'])
-    expect(row).toHaveTextContent('决定之前，agent 按 A 来做。两条都对就选都保留，以后不再算冲突。')
-    // 说明已写在卡底和动作行里，不再重复整段后果
-    expect(container.querySelector('.pm-conflict-note')).toBeNull()
-    expect(container.querySelector('.pm-advice')).toBeNull()
+    for (const name of ['记忆 A', '记忆 B']) expect(within(screen.getByRole('region', { name })).queryByRole('button')).toBeNull()
+    expect(screen.queryByText('B 会删掉，14 天内可恢复')).toBeNull()
+    const row = container.querySelector('.pm-conflict-buttons')!
+    expect([...row.querySelectorAll('button')].map(b => b.textContent)).toEqual(['以 A 为准', '以 B 为准', '都保留'])
+    expect(row.previousElementSibling).toHaveTextContent(/^说明.*14 天内可恢复/)
+    expect(container.querySelector('.pm-conflict-note')).toHaveTextContent('决定之前，agent 按 A 来做。')
   })
 
   it('一方找不到：显示说明，三个按钮都不可用且不发裁决', () => {
