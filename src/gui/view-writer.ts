@@ -1,9 +1,10 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { MemoryStore, MemoryLogger } from '../store.ts'
 import type { KvTable } from '../kv-table.ts'
+import type { LocatedRecord } from '../storage/table.ts'
 import type { TypeRegistry } from '../type-registry.ts'
-import { isModelChange, type PendingDecisionsStore } from '../governance/decisions.ts'
+import { isModelChange, kindOf, type PendingDecisionsStore } from '../governance/decisions.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
 import type { MemorySnapshot, ScanCacheEntry } from '../governance/schema.ts'
 import { staleIgnores, type AdviceIgnoreStore } from '../governance/advice-ignores.ts'
@@ -62,6 +63,16 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
       if (snap !== undefined) modelChangeSnapshots.set(snap.id, snap)
     }
   }
+  // 提升候选按条目所在的项目取那一份（与提升命令定位同一份）：预读每个 id 只留一份，同 id 在别的项目也有时可能是那份
+  const candidateCopies = new Map<string, LocatedRecord>()
+  for (const e of open) {
+    const workspacePath = e.workspaces?.[0]
+    const r = data.byId.get(e.memoryIds[0] ?? '')
+    if (kindOf(e) !== 'promote-candidate' || workspacePath === undefined || workspacePath === 'global' || r === undefined) continue
+    if (r.scope === 'workspace' && r.workspacePath === workspacePath) continue
+    const hit = await deps.store.locate(r.id, { workspacePath, isExactLayer: true })
+    if (hit !== undefined && dirname(hit.filePath) === hit.dir) candidateCopies.set(e.id, { record: hit.record, filePath: hit.filePath, dir: hit.dir })
+  }
   const notes = listingNotes(listing, { includeEmpty: false })
   // 有缺标记或读不出的目录时，项目可能只是这次没认出来，不按「目录不在了」清它的体检记录
   const isListingComplete = !notes.some(n => n.code === 'marker-missing' || n.code === 'dir-unreadable')
@@ -95,6 +106,7 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
     governanceEnabled: deps.isGovernanceEnabled?.() ?? true,
     ...(deps.bootedAt !== undefined ? { bootedAt: deps.bootedAt } : {}),
     ...(modelChangeSnapshots !== undefined ? { modelChangeSnapshots } : {}),
+    candidateCopies,
   })
 }
 

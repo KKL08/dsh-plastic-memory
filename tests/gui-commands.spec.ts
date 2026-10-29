@@ -2011,6 +2011,18 @@ describe('同 id 在会话项目和别的项目各有一份时提升', () => {
     expect((await copyIn(e, { kind: 'global' }))?.name).toBe('别的项目那份')
     expect((await copyIn(e, { kind: 'workspace', path: SESSION_WS }))?.name).toBe('本项目那份')
   })
+
+  it.each([OTHER_WS, SESSION_WS])('两份都是候选：待处理的提升卡显示条目所在项目（%s）那一份，与提升命令动的是同一份', async (ws) => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_dup', name: '本项目那份', scope: 'workspace', workspacePath: SESSION_WS, globalCandidate: true }))
+    await e.store.create(record({ id: 'mem_dup', name: '别的项目那份', scope: 'workspace', workspacePath: OTHER_WS, globalCandidate: true }))
+    await e.decisions.upsert({ kind: 'promote-candidate', memoryIds: ['mem_dup'], summary: '候选', workspaces: [ws], fingerprint: 'fp' }, 1)
+    ok(await e.run({ cmd: 'refresh-views' }))
+    const cards = pendingViewSchema.parse(await e.readView('pending')).items.flatMap(i => (i.kind === 'promote-candidate' && i.memory !== null ? [i.memory] : []))
+    expect(cards.map(m => [m.name, m.workspacePath, dirname(m.filePath)])).toEqual([
+      [ws === OTHER_WS ? '别的项目那份' : '本项目那份', ws, join(root, workspaceDirName(ws))],
+    ])
+  })
 })
 
 describe('scan', () => {
