@@ -3,6 +3,7 @@ import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { PipelineResult } from '../pipeline.ts'
 import { executeSave, renderSaveResult, type SaveToolDeps } from './save.ts'
 import { toToolOutput } from './output.ts'
+import { VALIDITY_DATE_FORMAT, VALIDITY_FORMAT } from '../validity.ts'
 
 /**
  * 把 memory_save 工具接到 dsh 框架上。纯逻辑在 save.ts，不依赖框架包，测试直接测它；
@@ -26,8 +27,8 @@ export function createSaveTool(deps: SaveToolDeps): ToolDefinition {
       sourceMode: { type: 'string', enum: ['user-explicit', 'user-behavior', 'environment-observed', 'agent-inferred', 'agent-action-confirmed'], required: true, description: '信息从哪来，决定置信度上限。user-explicit：用户明说的。agent-action-confirmed：你做的事经用户确认有效，或被采纳。user-behavior：用户反复做出的动作（多次改写、撤销、拒绝同一类做法）；对一次举动揣测动机不算。environment-observed：从文件、命令输出、配置里直接读到的事实。agent-inferred：你自己的推断和解读；只要中间有一步是你推出来的、不是直接看到的，就填它。' },
       confidence: { type: 'number', description: '取值 0–1（0.9=确定，0.5=推测）。越界会被夹到边界、不报错，所以想表达低置信就填小值，别填 0 以上的整数' },
       supersedes: { type: 'array', items: { type: 'string' } },
-      validFrom: { type: 'number', description: '生效起始（epoch ms），有明确时效的记忆才填' },
-      validTo: { type: 'number', description: '失效截止（epoch ms）' },
+      validFrom: { type: 'string', description: `生效起始，本机时间。只有用户说了从什么时候开始才填；只有截止时间的，填 validTo 就够。用户说了具体时刻写 "${VALIDITY_FORMAT}"，没说就只写日期 "${VALIDITY_DATE_FORMAT}"，插件补上现在的时分。` },
+      validTo: { type: 'string', description: `失效截止，本机时间。只有用户明确给了截止时间，或信息本身有确定的到期日（一次活动、临时方案）才填，其余不填。用户说了具体时刻写 "${VALIDITY_FORMAT}"（如「今天下午三点前」写 "2026-10-29 15:00"），没说就只写日期 "${VALIDITY_DATE_FORMAT}"，插件补上现在的时分；截止在今天的必须写时刻。必须晚于现在和 validFrom。到点后这条记忆不再带入新对话，也搜不到；已带入当前对话的，到下个会话或上下文压缩后才去掉。` },
       force: { type: 'boolean', description: '跳过结构去重、疑似密钥拦截与手改保护（用户已确认）' },
     },
     output: {

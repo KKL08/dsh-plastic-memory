@@ -9,6 +9,7 @@ import { detectSecrets, maskSecretSurface } from './secrets.ts'
 import { RecordNotFoundError } from './errors.ts'
 import { extractEntities, textSimilarity, DUPLICATE_SIMILARITY_THRESHOLD } from './text.ts'
 import { toToolOutput } from './output.ts'
+import { VALIDITY_DATE_FORMAT, VALIDITY_FORMAT, formatValidity, parseValidityInput } from './validity.ts'
 
 export interface SaveCandidate {
   action: 'create' | 'update'
@@ -22,8 +23,9 @@ export interface SaveCandidate {
   sourceMode: SourceMode
   confidence?: number
   supersedes?: string[]
-  validFrom?: number
-  validTo?: number
+  /** 本机时间 YYYY-MM-DD HH:mm，或 YYYY-MM-DD（补写入时刻的时分）；落库前换算成毫秒（validity.ts）。 */
+  validFrom?: string
+  validTo?: string
   force?: boolean
 }
 
@@ -46,6 +48,53 @@ export type SaveWarning = CodedNote<WarningCode>
  */
 function pruneUndefined(record: MemoryRecord): MemoryRecord {
   return toToolOutput(record) as unknown as MemoryRecord
+}
+
+type ValidityKey = 'validFrom' | 'validTo'
+
+/**
+ * 有效期入参换算与校验。传了的照写（只有日期补写入时刻的时分）；只传 validTo（截止时间）时起点沿用 target 的，
+ * 没有就记写入时刻（到分钟）；没传的 update 保留 target 值，create 不加。validTo 不晚于现在、不晚于 validFrom 都拒——
+ * 后者按生效的两个值比，只在这次传了有效期时查。
+ */
+function resolveValidity(
+  candidate: SaveCandidate,
+  target: MemoryRecord | undefined,
+  now: number,
+): { validFrom?: number; validTo?: number } | { code: RejectCode; reason: string } {
+  const given: Partial<Record<ValidityKey, number>> = {}
+  for (const key of ['validFrom', 'validTo'] as const) {
+    const value: unknown = candidate[key]
+    if (value === undefined) continue
+    const parsed = parseValidityInput(value, now)
+    if (!parsed.ok) {
+      const shown = `${key}=${JSON.stringify(value)}`
+      return {
+        code: parsed.code,
+        reason: parsed.code === 'validity-format'
+          ? `${shown} 格式不对。有效期写本机时间 "${VALIDITY_FORMAT}"（如 "2026-11-05 18:00"）；用户没说具体时刻就只写日期 "${VALIDITY_DATE_FORMAT}"，时分由插件补成现在。不带秒、不带时区、不写数字。改好后重发。`
+          : `${shown} 的日期或时刻不存在，核对后重发。`,
+      }
+    }
+    given[key] = parsed.ms
+  }
+  if (given.validTo !== undefined && given.validTo <= now) {
+    return {
+      code: 'validity-past',
+      reason: `validTo=${formatValidity(given.validTo)} 不晚于现在（${formatValidity(now)}），存下就已过期。核对用户说的截止时间（年份、上午下午）后重发；截止在当天的，写出具体时刻 "${VALIDITY_FORMAT}"——只写日期会把时分补成现在。`,
+    }
+  }
+  const validFrom = given.validFrom ?? target?.validFrom ?? (given.validTo !== undefined ? new Date(now).setSeconds(0, 0) : undefined)
+  const validTo = given.validTo ?? target?.validTo
+  const isGiven = given.validFrom !== undefined || given.validTo !== undefined
+  if (isGiven && validFrom !== undefined && validTo !== undefined && validTo <= validFrom) {
+    const kept = (key: ValidityKey) => given[key] === undefined ? '（原记忆的）' : ''
+    return {
+      code: 'validity-reversed',
+      reason: `validTo=${formatValidity(validTo)}${kept('validTo')} 不晚于 validFrom=${formatValidity(validFrom)}${kept('validFrom')}，有效期为空。核对两个时间后重发。`,
+    }
+  }
+  return { validFrom, validTo }
 }
 
 export async function runSavePipeline(
@@ -111,6 +160,10 @@ export async function runSavePipeline(
       globalCandidate = true
     }
   }
+
+  // 有效期：换算成毫秒并校验，不合格的拒存、告诉模型怎么改；两个都没传时取值与以往一致（update 保留原值）
+  const validity = resolveValidity(candidate, target, now)
+  if ('code' in validity) return { kind: 'rejected', ...validity }
 
   // 本次要标 superseded 的旧记忆：目标必须与本次写入记录同桶——跨桶替代会绕过用户确认闸、无快照、无复活路径，
   // 不同桶的目标跳过不置 superseded，仅给一条警告（见下方 6）。目标不存在维持静默跳过。
@@ -182,9 +235,9 @@ export async function runSavePipeline(
       content: candidate.content, summary: candidate.summary,
       source, confidence,
       // 可选字段统一"不传即保留"：update 是内容编辑，不重传 validTo 就清掉时效窗口
-      // 会让有时效的记忆变成永不过期
-      validFrom: candidate.validFrom ?? target!.validFrom,
-      validTo: candidate.validTo ?? target!.validTo,
+      // 会让有时效的记忆变成永不过期（有效期的回退在 resolveValidity 里）
+      validFrom: validity.validFrom,
+      validTo: validity.validTo,
       updatedAt: now, lastConfirmedAt: now,
       supersedes: candidate.supersedes ?? target!.supersedes,
       globalCandidate: globalCandidate || target!.globalCandidate,
@@ -199,7 +252,7 @@ export async function runSavePipeline(
       tags: candidate.tags, content: candidate.content, summary: candidate.summary,
       source, createdAt: now, updatedAt: now, lastConfirmedAt: now,
       lastRecalledAt: null, recallCount: 0,
-      validFrom: candidate.validFrom, validTo: candidate.validTo,
+      validFrom: validity.validFrom, validTo: validity.validTo,
       status: 'active', confidence, supersedes: candidate.supersedes,
       globalCandidate,
     }
