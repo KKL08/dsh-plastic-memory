@@ -52,6 +52,14 @@ describe('runRuleScan', () => {
     expect(expired[0].severity).toBe('warning')
   })
 
+  it('expired 的说明按本机时间 YYYY-MM-DD HH:mm 写有效期，不打毫秒；建议动作写清用新格式延长', () => {
+    const validTo = new Date(2026, 9, 28, 18, 5).getTime()
+    const [f] = runRuleScan([record({ id: 'mem_a', validTo })], () => undefined, validTo + 1).filter(x => x.type === 'expired')
+    expect(f!.summary).toBe('已过有效期（validTo=2026-10-28 18:05）')
+    expect(f!.summary).not.toContain(String(validTo))
+    expect(f!.suggestedAction).toBe('向用户确认：仍然有效就用 memory_save 延长 validTo（写 "YYYY-MM-DD HH:mm"，用户只给了日期就写 "YYYY-MM-DD"）；已经失效就用 memory_forget 归档')
+  })
+
   it('bloat：content 超过阈值才报', () => {
     const fat = record({ id: 'mem_fat', content: 'x'.repeat(BLOAT_THRESHOLD + 1) })
     const slim = record({ id: 'mem_slim', content: 'x'.repeat(BLOAT_THRESHOLD) })
