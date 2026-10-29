@@ -708,7 +708,6 @@ export function ResultCard({ item, outcome, session, now, typeLabels, onUndone, 
       {copy.memory ? <MemoryOf session={session} memory={copy.memory} now={now} typeLabels={typeLabels} /> : null}
       <ResultLine
         chip={copy.chip}
-        isStandalone={!copy.memory}
         undo={undo !== undefined
           ? (
             <Button variant="ghost" className="pm-pending-undo" unavailable={action.unavailable} onClick={() => { action.run(undo) }}>
