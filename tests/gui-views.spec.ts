@@ -846,6 +846,15 @@ describe('视图写入', () => {
     })
   })
 
+  it('会话归属对照：旧版本号的对照里已有同样的条目，也按当前版本重写一次（客户端按版本认，不重写就一直退回原始 cwd）', async () => {
+    const mapPath = join(root, GUI_VIEW_DIR, GUI_WORKSPACE_MAP_FILE)
+    await mkdir(join(root, GUI_VIEW_DIR), { recursive: true })
+    await writeFile(mapPath, JSON.stringify({ version: GUI_VIEW_VERSION - 1, cwds: { '/w/app/sub': '/w/app' } }), 'utf8')
+    const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') } })
+    await writer.requestWorkspace('/w/app/sub', '/w/app')
+    expect(workspaceMapViewSchema.parse(JSON.parse(await readFile(mapPath, 'utf8')))).toEqual({ version: GUI_VIEW_VERSION, cwds: { '/w/app/sub': '/w/app' } })
+  })
+
   it('会话归属对照：磁盘上的旧文件读不懂（坏 JSON、形状不对）就从空表重来', async () => {
     const mapPath = join(root, GUI_VIEW_DIR, GUI_WORKSPACE_MAP_FILE)
     await mkdir(join(root, GUI_VIEW_DIR), { recursive: true })

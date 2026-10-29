@@ -277,25 +277,29 @@ export class ViewWriter {
   }
 
   private async writeWorkspaceMap(entries: ReadonlyArray<readonly [string, string]>): Promise<void> {
-    const map = this.workspaceMap ?? await this.readWorkspaceMap()
+    // 磁盘上是旧版本号的：客户端按版本认，不认就退回原始 cwd，内容没变也重写一次
+    const onDisk = this.workspaceMap === undefined ? await this.readWorkspaceMap() : undefined
+    const map = this.workspaceMap ?? onDisk!.cwds
     const next = { ...map }
     for (const [cwd, workspacePath] of entries) next[cwd] = workspacePath
-    if (entries.every(([cwd, workspacePath]) => map[cwd] === workspacePath)) { this.workspaceMap = next; return }
+    if (onDisk?.isOutdated !== true && entries.every(([cwd, workspacePath]) => map[cwd] === workspacePath)) { this.workspaceMap = next; return }
     const view: WorkspaceMapView = { version: GUI_VIEW_VERSION, cwds: next }
     await this.writeFile(GUI_WORKSPACE_MAP_FILE, view)
     this.workspaceMap = next
   }
 
   /**
-   * 磁盘上的旧对照；没有、读不懂（坏 JSON、形状不对）都从空表开始。不看版本号，只按 cwds 的形状读：视图版本升级时
-   * 对照的形状没变，整份丢掉会让之前见过的会话都失去归属（写出时照旧写当前版本）。
+   * 磁盘上的旧对照；没有、读不懂（坏 JSON、形状不对）都从空表开始。读时不看版本号，只按 cwds 的形状读：视图版本升级时
+   * 对照的形状没变，整份丢掉会让之前见过的会话都失去归属（写出时照旧写当前版本）。isOutdated：读到了、但版本号不是当前的。
    */
-  private async readWorkspaceMap(): Promise<Record<string, string>> {
+  private async readWorkspaceMap(): Promise<{ cwds: Record<string, string>; isOutdated: boolean }> {
     try {
-      const parsed = workspaceMapViewSchema.pick({ cwds: true }).safeParse(JSON.parse(await readFile(join(this.dir, GUI_WORKSPACE_MAP_FILE), 'utf8')))
-      return parsed.success ? { ...parsed.data.cwds } : {}
+      const json: unknown = JSON.parse(await readFile(join(this.dir, GUI_WORKSPACE_MAP_FILE), 'utf8'))
+      const parsed = workspaceMapViewSchema.pick({ cwds: true }).safeParse(json)
+      const isOutdated = (json as { version?: unknown } | null)?.version !== GUI_VIEW_VERSION
+      return parsed.success ? { cwds: { ...parsed.data.cwds }, isOutdated } : { cwds: {}, isOutdated: false }
     } catch {
-      return {}
+      return { cwds: {}, isOutdated: false }
     }
   }
 
