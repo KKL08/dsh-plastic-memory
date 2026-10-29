@@ -16,7 +16,7 @@ type LayerName = keyof typeof LAYER
 
 // 共享契约（record-schema、contract-codes、kv-table、storage/table、storage/paths）归叶子
 const LEAF_MODULES = new Set([
-  'text', 'secrets', 'record-freshness', 'retention', 'contract-codes', 'index-line', 'errors',
+  'text', 'secrets', 'record-freshness', 'validity', 'retention', 'contract-codes', 'index-line', 'errors',
   'kv-table', 'record-schema', 'output', 'storage/paths', 'storage/table', 'types', 'gui/contract',
   'search/tokenizer', 'search/jieba-segmenter',
 ])

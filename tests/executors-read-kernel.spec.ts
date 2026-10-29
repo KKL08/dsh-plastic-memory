@@ -357,6 +357,30 @@ describe('票 09 验收：执行器走按范围读取与两级定位', () => {
     expect(expired!.suggestedAction).toContain('memory_forget')
   })
 
+  it('memory_save 写的截止时间：到点前照常注入、检索；到点后新会话不带、搜不到，体检按 YYYY-MM-DD HH:mm 报过期', async () => {
+    const saveAt = new Date(2099, 9, 29, 9, 0).getTime()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(saveAt)
+      const h = harness()
+      const saved = await h.save({ action: 'create', name: '冻结期', type: 'project', scope: 'workspace', content: '冻结期 探针正文 不发版', summary: '冻结期不发版', sourceMode: 'user-explicit', validTo: '2099-10-29 15:00' })
+      if (saved.kind !== 'saved') throw new Error(saved.kind)
+      const validTo = new Date(2099, 9, 29, 15, 0).getTime()
+      expect(saved.record).toMatchObject({ validFrom: saveAt, validTo })
+      expect((await h.search('探针正文')).hits.map(x => x.id)).toEqual([saved.record.id])
+      expect(await h.assemble()).toContain('冻结期不发版')
+
+      vi.setSystemTime(validTo + 60_000)
+      expect((await h.search('探针正文')).hits).toEqual([])
+      expect(await h.assemble()).not.toContain('冻结期不发版')
+      const text = renderScanResult(await h.scan())
+      expect(text).toContain('已过有效期（validTo=2099-10-29 15:00）')
+      expect(text).not.toContain(String(validTo))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('handEdited 记录渲染带「已手编，出处可能不对应」，memory_source 对无 source 返回「无出处」', async () => {
     const edited = wsRec({ id: 'mem_edit', name: '手编探针', content: '原文', source: { sessionId: 'sess-1', eventRange: [3, 4], sourceMode: 'agent-inferred' } })
     const path = await writeMem(wsDir(WS), 'edit.md', edited, WS)

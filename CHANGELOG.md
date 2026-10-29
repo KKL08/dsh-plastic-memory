@@ -8,6 +8,20 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Changed
+- `memory_save` takes `validFrom` and `validTo` as local `YYYY-MM-DD HH:mm`,
+  or just a date when no time was given, which then gets the time of saving.
+  Models often got the old epoch milliseconds wrong, saving memories that had
+  already expired. A deadline alone starts at the time of saving; an
+  impossible date, a deadline that has passed, or one before `validFrom` is
+  rejected with a reason so the model can correct it. `memory_health` shows
+  expired dates in the same format.
+- Memory files show `validFrom` and `validTo` in local time as
+  `YYYY-MM-DD HH:mm`, the same form `memory_save` takes, so you can read and
+  edit them directly. Existing files are converted at the next write or
+  session start; a value that was not on a whole minute is rounded outward
+  (start down, end up), so no memory expires earlier than before. A date
+  alone takes the hour and minute of the file's modification time. Versions
+  before 0.2.0 cannot read files with these keys in the new form.
 - Saving a memory no longer turns into the reply: the model answers what
   you said instead of announcing "noted" or quoting memory ids, since the
   chat card already shows what was saved. It still acknowledges briefly

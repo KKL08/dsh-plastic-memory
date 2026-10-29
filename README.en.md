@@ -247,7 +247,7 @@ Index lines end with the file name, so the model can open the full text directly
 - **Create**: a `.md` file whose frontmatter has at least `name` and `type`; the body is the memory. `id`, timestamps, `tags`, `summary` and `confidence` may be omitted and are filled in on the next write or session start (the `id` is derived from the file path and then stays with the file).
 - **Timestamps**: `2026-09-01`, `2026-09-01T08:30:00Z` and offsets are all accepted; missing ones default to the file's modification time.
 - **Edit**: after a hand edit the memory is marked as hand-edited and `memory_source` warns that the provenance may no longer match; updating it with `memory_save` clears the mark.
-- **Expiry**: a memory whose `validTo` has passed stays in place but is neither injected nor searched; `memory_health` suggests extending it or forgetting it.
+- **Expiry**: `validFrom` / `validTo` appear in the file in local time, such as `2026-11-05 18:00`; edit them in the same form. A date alone takes the hour and minute of the file's modification time. Files written by older versions in UTC are converted automatically at the next write or session start. A memory whose `validTo` has passed stays in place but is neither injected nor searched; `memory_health` suggests extending it or forgetting it.
 - **Recovery**: a memory forgotten by mistake sits in `.archive/`; restore it with `memory_snapshot`, or move the file back up one level and set `status` to `active`.
 - **Malformed files** are quarantined individually and never block other memories; `memory_health` and `memory_scan` list them, and a fix takes effect immediately.
 - `MEMORY.md` is generated; do not edit it by hand.

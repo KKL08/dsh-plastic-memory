@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { runSavePipeline } from '../src/pipeline.ts'
 import { extractEntities } from '../src/text.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
@@ -425,21 +425,6 @@ describe('runSavePipeline', () => {
     expect(other.kind).toBe('saved')
   })
 
-  it('update 不传 validFrom/validTo 时保留 target 值（与 supersedes 同款回退），传新值则覆盖', async () => {
-    const store = new MemoryStore(new InMemoryTable())
-    const created = await runSavePipeline(candidate({ scope: 'workspace', validFrom: 100, validTo: 900 }), deps(store))
-    if (created.kind !== 'saved') throw new Error(created.kind)
-    const kept = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, content: '例行内容更新' }), deps(store))
-    if (kept.kind !== 'updated') throw new Error(kept.kind)
-    expect(kept.record.validFrom).toBe(100)
-    expect(kept.record.validTo).toBe(900)
-    const overridden = await runSavePipeline(
-      candidate({ action: 'update', id: created.record.id, validTo: 1800 }), deps(store))
-    if (overridden.kind !== 'updated') throw new Error(overridden.kind)
-    expect(overridden.record.validTo).toBe(1800)
-  })
-
   // 密钥检测覆盖全部外泄面：summary 进注入索引、name 进文件名、tags 进索引行
   it('高危密钥只出现在 summary 时同样拦截不落盘', async () => {
     const store = new MemoryStore(new InMemoryTable())
@@ -469,6 +454,143 @@ describe('runSavePipeline', () => {
     )
     if (updated.kind !== 'updated') throw new Error(updated.kind)
     expect(Object.keys(updated)).not.toContain('warnings')
+  })
+})
+
+// 有效期：入参 YYYY-MM-DD HH:mm 或 YYYY-MM-DD（本机时间），只有日期时补写入时刻的时分；内部存毫秒。
+// 期望值用 new Date(年, 月, 日, 时, 分) 在同一时区里算，与机器时区无关；写入时刻固定。
+describe('runSavePipeline：有效期', () => {
+  const local = (y: number, mo: number, d: number, h = 0, mi = 0) => new Date(y, mo - 1, d, h, mi).getTime()
+  const NOW = local(2026, 10, 29, 14, 37) + 20_500   // 写入时刻 2026-10-29 14:37:20.5
+  const WRITE_MINUTE = local(2026, 10, 29, 14, 37)
+  beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(NOW) })
+  afterEach(() => { vi.useRealTimers() })
+
+  async function save(partial: object, store = new MemoryStore(new InMemoryTable())) {
+    return runSavePipeline(candidate({ scope: 'workspace', ...partial }), deps(store))
+  }
+
+  it('两个都给且带时分：照写换算成毫秒', async () => {
+    const r = await save({ validFrom: '2026-11-01 09:30', validTo: '2026-11-05 18:00' })
+    if (r.kind !== 'saved') throw new Error(r.kind)
+    expect(r.record.validFrom).toBe(local(2026, 11, 1, 9, 30))
+    expect(r.record.validTo).toBe(local(2026, 11, 5, 18, 0))
+  })
+
+  it('只有日期：两个都补写入时刻的时分', async () => {
+    const r = await save({ validFrom: '2026-10-01', validTo: '2026-11-05' })
+    if (r.kind !== 'saved') throw new Error(r.kind)
+    expect(r.record.validFrom).toBe(local(2026, 10, 1, 14, 37))
+    expect(r.record.validTo).toBe(local(2026, 11, 5, 14, 37))
+  })
+
+  it('只给 validTo（截止时间）：validFrom 记写入时刻（到分钟）', async () => {
+    const r = await save({ validTo: '2026-11-05 18:00' })
+    if (r.kind !== 'saved') throw new Error(r.kind)
+    expect(r.record.validFrom).toBe(WRITE_MINUTE)
+    expect(r.record.validTo).toBe(local(2026, 11, 5, 18, 0))
+  })
+
+  it('只给 validFrom：不加 validTo（不限期），已过去的 validFrom 也收', async () => {
+    const r = await save({ validFrom: '2026-01-01' })
+    if (r.kind !== 'saved') throw new Error(r.kind)
+    expect(r.record.validFrom).toBe(local(2026, 1, 1, 14, 37))
+    expect('validTo' in r.record).toBe(false)
+  })
+
+  it('两个都不给：记录里不出现这两个键', async () => {
+    const r = await save({})
+    if (r.kind !== 'saved') throw new Error(r.kind)
+    expect('validFrom' in r.record).toBe(false)
+    expect('validTo' in r.record).toBe(false)
+  })
+
+  it.each([
+    ['数字毫秒', { validTo: local(2026, 11, 5) }, 'validity-format', 'validTo'],
+    ['带秒', { validTo: '2026-11-05 18:00:00' }, 'validity-format', 'validTo'],
+    ['ISO', { validFrom: '2026-11-01T09:30:00Z' }, 'validity-format', 'validFrom'],
+    ['2 月 30 日', { validTo: '2027-02-30 10:00' }, 'validity-nonexistent', 'validTo'],
+    ['25 点', { validFrom: '2026-11-01 25:00' }, 'validity-nonexistent', 'validFrom'],
+    ['validTo 已过去', { validTo: '2026-10-28 23:00' }, 'validity-past', 'validTo'],
+    ['validTo 恰是写入那一分钟', { validTo: '2026-10-29 14:37' }, 'validity-past', 'validTo'],
+    ['validTo 只写今天的日期（补上的时分就是现在）', { validTo: '2026-10-29' }, 'validity-past', 'validTo'],
+    ['validTo 早于 validFrom', { validFrom: '2026-11-05 10:00', validTo: '2026-11-04 10:00' }, 'validity-reversed', 'validTo'],
+    ['validTo 等于 validFrom', { validFrom: '2026-11-05 10:00', validTo: '2026-11-05 10:00' }, 'validity-reversed', 'validTo'],
+  ])('拒存不落盘：%s', async (_label, partial, code, key) => {
+    const store = new MemoryStore(new InMemoryTable())
+    const r = await save(partial, store)
+    expect(r).toMatchObject({ kind: 'rejected', code })
+    if (r.kind !== 'rejected') throw new Error(r.kind)
+    expect(r.reason).toContain(key)
+    expect((await store.query({})).length).toBe(0)
+  })
+
+  it('拒存原因告诉模型怎么改：格式给出两种写法，过期给出现在时间并提示当天截止要写时分', async () => {
+    const format = await save({ validTo: 1793203200000 })
+    if (format.kind !== 'rejected') throw new Error(format.kind)
+    expect(format.reason).toContain('YYYY-MM-DD HH:mm')
+    expect(format.reason).toContain('YYYY-MM-DD')
+    const past = await save({ validTo: '2026-10-29' })
+    if (past.kind !== 'rejected') throw new Error(past.kind)
+    expect(past.reason).toContain('2026-10-29 14:37')
+    expect(past.reason).toContain('当天')
+  })
+
+  it('update 不传：保留 target 的两个值，与 supersedes 同款回退', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    const created = await save({ validFrom: '2026-11-01 09:30', validTo: '2026-11-05 18:00' }, store)
+    if (created.kind !== 'saved') throw new Error(created.kind)
+    const kept = await runSavePipeline(candidate({ action: 'update', id: created.record.id, content: '例行内容更新' }), deps(store))
+    if (kept.kind !== 'updated') throw new Error(kept.kind)
+    expect(kept.record.validFrom).toBe(local(2026, 11, 1, 9, 30))
+    expect(kept.record.validTo).toBe(local(2026, 11, 5, 18, 0))
+  })
+
+  it('update 只传 validTo：target 有 validFrom 就保留，没有才记写入时刻', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    const withFrom = await save({ validFrom: '2026-11-01 09:30' }, store)
+    const bare = await save({ name: '另一条', content: '完全不同的另一件事', summary: '另一条' }, store)
+    if (withFrom.kind !== 'saved' || bare.kind !== 'saved') throw new Error('setup')
+    const a = await runSavePipeline(candidate({ action: 'update', id: withFrom.record.id, validTo: '2026-12-01 00:00' }), deps(store))
+    const b = await runSavePipeline(candidate({ action: 'update', id: bare.record.id, validTo: '2026-12-01' }), deps(store))
+    if (a.kind !== 'updated' || b.kind !== 'updated') throw new Error('update')
+    expect(a.record).toMatchObject({ validFrom: local(2026, 11, 1, 9, 30), validTo: local(2026, 12, 1, 0, 0) })
+    expect(b.record).toMatchObject({ validFrom: WRITE_MINUTE, validTo: local(2026, 12, 1, 14, 37) })
+  })
+
+  it('update 只传 validFrom：保留 target 的 validTo；新起点不早于它时拒、不改盘', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    const created = await save({ validTo: '2026-11-05 18:00' }, store)
+    if (created.kind !== 'saved') throw new Error(created.kind)
+    const moved = await runSavePipeline(candidate({ action: 'update', id: created.record.id, validFrom: '2026-11-01 09:30' }), deps(store))
+    if (moved.kind !== 'updated') throw new Error(moved.kind)
+    expect(moved.record).toMatchObject({ validFrom: local(2026, 11, 1, 9, 30), validTo: local(2026, 11, 5, 18, 0) })
+    const reversed = await runSavePipeline(candidate({ action: 'update', id: created.record.id, validFrom: '2026-11-06 09:00' }), deps(store))
+    expect(reversed).toMatchObject({ kind: 'rejected', code: 'validity-reversed' })
+    expect((await store.get(created.record.id))?.validFrom).toBe(local(2026, 11, 1, 9, 30))
+  })
+
+  it('target 存着倒挂的有效期（validTo 不晚于 validFrom，如手改出来的），update 不传这两个参数：照常更新、原值保留', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    const created = await save({}, store)
+    if (created.kind !== 'saved') throw new Error(created.kind)
+    const reversed = { validFrom: local(2026, 11, 5, 18, 0), validTo: local(2026, 11, 1, 9, 30) }
+    await store.put({ ...created.record, ...reversed })
+    const r = await runSavePipeline(candidate({ action: 'update', id: created.record.id, content: '例行内容更新' }), deps(store))
+    if (r.kind !== 'updated') throw new Error(r.kind)
+    expect(r.record).toMatchObject(reversed)
+  })
+
+  it('update 传了已过去的 validTo 照样拒；target 自己已过期但这次不传有效期，照常更新', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    const created = await save({ validTo: '2026-11-05 18:00' }, store)
+    if (created.kind !== 'saved') throw new Error(created.kind)
+    const past = await runSavePipeline(candidate({ action: 'update', id: created.record.id, validTo: '2026-10-01 00:00' }), deps(store))
+    expect(past).toMatchObject({ kind: 'rejected', code: 'validity-past' })
+    vi.setSystemTime(local(2026, 11, 6))   // target 过期之后
+    const touched = await runSavePipeline(candidate({ action: 'update', id: created.record.id, content: '过期后改正文' }), deps(store))
+    if (touched.kind !== 'updated') throw new Error(touched.kind)
+    expect(touched.record.validTo).toBe(local(2026, 11, 5, 18, 0))
   })
 })
 

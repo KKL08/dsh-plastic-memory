@@ -151,11 +151,11 @@ describe('忽略与取消忽略', () => {
     ok(await e.run({ cmd: 'refresh-views' }))
     expect(await adviceOf(e)).toEqual(['bloat:mem_long'])
 
-    await e.store.create(record({ id: 'mem_exp', name: '过期的', content: '短', scope: 'workspace', workspacePath: WS, validTo: NOW - 10 }))
+    await e.store.create(record({ id: 'mem_exp', name: '过期的', content: '短', scope: 'workspace', workspacePath: WS, validTo: NOW - 10 * 60_000 }))
     ok(await e.run({ cmd: 'refresh-views' }))
     ok(await e.ignore('expired', ['mem_exp']))
     const exp = (await e.store.get('mem_exp', { workspacePath: WS }))!
-    await e.store.update(exp, cur => ({ ...cur, validTo: NOW - 5 }))
+    await e.store.update(exp, cur => ({ ...cur, validTo: NOW - 5 * 60_000 }))
     ok(await e.run({ cmd: 'refresh-views' }))
     expect(await adviceOf(e)).toContain('expired:mem_exp')
 

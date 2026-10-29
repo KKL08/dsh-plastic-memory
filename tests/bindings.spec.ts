@@ -91,6 +91,17 @@ describe('memory_save 绑定', () => {
     expect(describedParam('sourceMode')).toBe('信息从哪来，决定置信度上限。user-explicit：用户明说的。agent-action-confirmed：你做的事经用户确认有效，或被采纳。user-behavior：用户反复做出的动作（多次改写、撤销、拒绝同一类做法）；对一次举动揣测动机不算。environment-observed：从文件、命令输出、配置里直接读到的事实。agent-inferred：你自己的推断和解读；只要中间有一步是你推出来的、不是直接看到的，就填它。')
   })
 
+  it('有效期的参数说明：什么时候填、两种写法、时分由插件补、到点后的效果', () => {
+    expect(describedParam('validFrom')).toBe('生效起始，本机时间。只有用户说了从什么时候开始才填；只有截止时间的，填 validTo 就够。用户说了具体时刻写 "YYYY-MM-DD HH:mm"，没说就只写日期 "YYYY-MM-DD"，插件补上现在的时分。')
+    expect(describedParam('validTo')).toBe('失效截止，本机时间。只有用户明确给了截止时间，或信息本身有确定的到期日（一次活动、临时方案）才填，其余不填。用户说了具体时刻写 "YYYY-MM-DD HH:mm"（如「今天下午三点前」写 "2026-10-29 15:00"），没说就只写日期 "YYYY-MM-DD"，插件补上现在的时分；截止在今天的必须写时刻。必须晚于现在和 validFrom。到点后这条记忆不再带入新对话，也搜不到；已带入当前对话的，到下个会话或上下文压缩后才去掉。')
+  })
+
+  it('有效期参数是字符串：数字毫秒在 schema 层就不收', () => {
+    const schema = schemaOf(makeTool())
+    expect(validateJsonSchemaValue(schema, { ...legal, validFrom: '2026-11-01', validTo: '2099-11-05 18:00' })).toEqual([])
+    expect(validateJsonSchemaValue(schema, { ...legal, validTo: 4_102_444_800_000 }).length).toBeGreaterThan(0)
+  })
+
   it('(a) 合法参数过、缺必填拒', () => {
     const tool = makeTool()
     expect(validateJsonSchemaValue(schemaOf(tool), legal)).toEqual([])

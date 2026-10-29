@@ -242,6 +242,109 @@ describe('维护点动作 ④：手建 / 手编文件回写', () => {
   })
 })
 
+describe('维护点动作 ④：旧版本写的有效期改写成本机时间', () => {
+  // 旧版本把 validFrom / validTo 写成 UTC 毫秒 ISO，毫秒可以不在整分钟上；现在写本机时间 YYYY-MM-DD HH:mm。
+  // 迁移就是维护点的重新 encode 回写：validTo 进到下一分钟、validFrom 退到本分钟（有效期只会变长）。
+  const minute = new Date(2099, 10, 5, 18, 0).getTime()
+  const legacy = (r: MemoryRecord) => encodeRecord(r, {})
+    .replace(/^validFrom: .*$/m, `validFrom: ${iso(r.validFrom!)}`)
+    .replace(/^validTo: .*$/m, `validTo: ${iso(r.validTo!)}`)
+  const converted = (r: MemoryRecord) => encodeRecord(r, {})
+    .replace(/^validFrom: .*$/m, 'validFrom: 2099-11-01 09:30')
+    .replace(/^validTo: .*$/m, 'validTo: 2099-11-05 18:01')
+  const old = (partial: Partial<MemoryRecord>) => record({
+    validFrom: new Date(2099, 10, 1, 9, 30).getTime() + 45_000, validTo: minute + 123, ...partial,
+  })
+
+  it('顶层与 .archive/ 的旧文件：只改这两行，其余逐字节不动（时间戳、digest、正文）、不标手编；第二次维护零写入', async () => {
+    const top = old({ id: 'mem_top', name: '冻结期', content: '冻结期内不发版\n第二行' })
+    const archived = old({ id: 'mem_arc', name: '旧冻结期', status: 'deleted', deletedAt: Date.now() - DAY })
+    const topPath = await writeRaw(wsDir(), '冻结期.md', legacy(top), WS)
+    const arcPath = await writeRaw(archiveOf(wsDir()), '旧冻结期.md', legacy(archived))
+    const { table } = open()
+    await table.maintain([wsDir()])
+    expect(await readFile(topPath, 'utf8')).toBe(converted(top))
+    expect(await readFile(arcPath, 'utf8')).toBe(converted(archived))
+    const fm = await frontmatter(topPath)
+    expect(fm).not.toHaveProperty('handEdited')
+    expect(fm.updatedAt).toBe(iso(top.updatedAt))
+    expect(fm.lastConfirmedAt).toBe(iso(top.lastConfirmedAt))
+    expect(fm.digest).toBe(computeDigest(top.name, top.summary, top.content))
+    await new Promise(r => setTimeout(r, 5))
+    const before = await treeSnapshot(root)
+    await table.maintain([wsDir()])
+    expect(await treeSnapshot(root)).toEqual(before)
+  })
+
+  it('转换前后读到的值相同：旧文件读出来就按同样规则取整，转换不改变任何读方看到的有效期', async () => {
+    const path = await writeRaw(wsDir(), '冻结期.md', legacy(old({ id: 'mem_top', name: '冻结期' })), WS)
+    const { table } = open()
+    const before = (await table.locate('mem_top'))!.record
+    expect(before).toMatchObject({ validFrom: new Date(2099, 10, 1, 9, 30).getTime(), validTo: minute + 60_000 })
+    await table.maintain([wsDir()])
+    expect(await readFile(path, 'utf8')).toContain('\nvalidTo: 2099-11-05 18:01\n')
+    expect((await table.locate('mem_top'))!.record).toEqual(before)
+  })
+
+  it('转换之后手改正文照样判出手编；转换本身不算手编', async () => {
+    const path = await writeRaw(wsDir(), '冻结期.md', legacy(old({ id: 'mem_top', name: '冻结期', content: '原文' })), WS)
+    const { table } = open()
+    await table.maintain([wsDir()])
+    expect((await table.locate('mem_top'))!.record.handEdited).toBeUndefined()
+    await writeFile(path, (await readFile(path, 'utf8')).replace('原文', '用户改过的正文'))
+    expect((await table.locate('mem_top'))!.record.handEdited).toBe(true)
+    await table.maintain([wsDir()])
+    expect((await frontmatter(path)).handEdited).toBe(true)
+  })
+})
+
+// 本机写法 YYYY-MM-DD HH:mm 读回来不等于原值时（9999 年末向上取整越界、0001 年、夏令时回拨那一小时、
+// 历史上偏移不是整分钟的时区），改写 UTC ISO：文件始终读得回来，validTo 不提前、validFrom 不推后，再维护零写入。
+describe.each(['Asia/Shanghai', 'UTC', 'America/New_York', 'Africa/Monrovia'])('维护点转换有效期的边界（时区 %s）', (zone) => {
+  const saved = process.env.TZ
+  beforeEach(() => { process.env.TZ = zone })
+  afterEach(() => { if (saved === undefined) delete process.env.TZ; else process.env.TZ = saved })
+
+  const cases: Array<[string, 'validFrom' | 'validTo', string]> = [
+    ['9999 年末 ISO', 'validTo', '9999-12-31T23:59:59.999Z'],
+    ['9999 年末数字毫秒', 'validTo', '253402300799999'],
+    ['0001 年', 'validFrom', '0001-01-01T00:00:00Z'],
+    ['纽约夏令时回拨的那一小时', 'validTo', '2026-11-01T06:30:00Z'],
+    ['上海 1901 年前（地方平时）', 'validFrom', '1850-06-01T00:00:00Z'],
+    ['蒙罗维亚 1972 年前（偏移不是整分钟）', 'validFrom', '1960-06-01T00:00:00Z'],
+    ['蒙罗维亚 1972 年前的截止', 'validTo', '1960-06-01T00:00:30Z'],
+    ['平常的值', 'validTo', '2099-11-05T10:00:00.123Z'],
+  ]
+
+  it.each(cases)('%s（%s）：维护后读得回来、不提前过期，再维护零写入', async (_label, key, value) => {
+    const raw = /^\d+$/.test(value) ? Number(value) : Date.parse(value)
+    const path = await writeRaw(globalDir(), 'edge.md', `---\nid: mem_edge\nname: 边界\ntype: knowledge\ncreatedAt: 2026-01-01T00:00:00.000Z\nupdatedAt: 2026-01-01T00:00:00.000Z\nlastConfirmedAt: 2026-01-01T00:00:00.000Z\n${key}: ${value}\n---\n\n正文\n`)
+    const { table } = open()
+    const read = async () => {
+      const r = await table.readScope([globalDir()])
+      expect(r.quarantined).toEqual([])
+      return r.records[0]!.record[key]!
+    }
+    const before = await read()
+    if (key === 'validTo') expect(before).toBeGreaterThanOrEqual(raw)
+    else expect(before).toBeLessThanOrEqual(raw)
+    await table.maintain([globalDir()])
+    expect(await read()).toBe(before)
+    const text = await readFile(path, 'utf8')
+    await table.maintain([globalDir()])
+    expect(await readFile(path, 'utf8')).toBe(text)
+  })
+
+  it('当代的本机时间照旧写成 YYYY-MM-DD HH:mm', async () => {
+    const path = await writeMem(globalDir(), 'now.md', record({ id: 'mem_now', validFrom: new Date(2026, 9, 29, 9, 30).getTime(), validTo: new Date(2026, 11, 31, 18, 0).getTime() }))
+    const { table } = open()
+    await table.maintain([globalDir()])
+    const text = await readFile(path, 'utf8')
+    expect(text).toContain('\nvalidFrom: 2026-10-29 09:30\n')
+    expect(text).toContain('\nvalidTo: 2026-12-31 18:00\n')
+  })
+})
+
 describe('维护点动作 ⑤：陈旧 tmp 清理', () => {
   it('本进程 pid 的残留与超 60 秒的残留被删，他进程的新鲜残留不动', async () => {
     await writeMem(globalDir(), 'a.md', record({ id: 'mem_a' }))

@@ -33,6 +33,8 @@ import { SECRET_MASK } from '../src/secrets.ts'
 
 const WS = '/home/dev/proj-a'
 const T0 = 1_700_000_000_000
+/** 已过期的有效期：T0 之前的整分钟（有效期在文件里写到分钟，不在整分钟上的会向后取整）。 */
+const EXPIRED_AT = T0 - (T0 % 60_000) - 60_000
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 
 let root: string
@@ -246,7 +248,7 @@ describe('待处理视图：建议整理', () => {
   const DAY = 86_400_000
   /** 四类各一条：已过有效期、内容过长、指向的旧记忆已不在、很久没确认（project 类型衰减期 7 天）。 */
   async function seedAdvice(h: ReturnType<typeof harness>) {
-    await h.store.create(w({ id: 'mem_expired', name: '冻结期', validTo: T0 - 1 }))
+    await h.store.create(w({ id: 'mem_expired', name: '冻结期', validTo: EXPIRED_AT }))
     await h.store.create(w({ id: 'mem_bloat', name: '长文', content: 'x'.repeat(2001) }))
     await h.store.create(g({ id: 'mem_orphan', name: '新规则', supersedes: ['mem_gone'] }))
     await h.store.create(w({ id: 'mem_stale', name: '里程碑', type: 'project', lastConfirmedAt: T0 - 8 * DAY }))
@@ -264,7 +266,7 @@ describe('待处理视图：建议整理', () => {
       ['expired', ['mem_expired']], ['bloat', ['mem_bloat']], ['orphan', ['mem_orphan']], ['stale', ['mem_stale']],
     ])
     expect(pending.items.every(i => i.level === 'advice')).toBe(true)
-    expect(pending.items[0]).toMatchObject({ kind: 'advice', level: 'advice', type: 'expired', memories: [{ id: 'mem_expired', validTo: T0 - 1, filePath: expect.stringContaining(workspaceDirName(WS)) }] })
+    expect(pending.items[0]).toMatchObject({ kind: 'advice', level: 'advice', type: 'expired', memories: [{ id: 'mem_expired', validTo: EXPIRED_AT, filePath: expect.stringContaining(workspaceDirName(WS)) }] })
     expect(pending.levelCounts).toEqual({ 'must-fix': 0, 'your-call': 0, 'advice': 4 })
     expect(pending.dot).toBe('none')
     expect(await h.decisions.list()).toEqual([])
@@ -307,8 +309,8 @@ describe('待处理视图：建议整理', () => {
 
   it('同 id 在全局和本项目各一份：按实际在用的那份出一项，不重复', async () => {
     const h = harness()
-    await h.store.create(g({ id: 'mem_dup', name: '全局那份', validTo: T0 - 1 }))
-    await h.store.create(w({ id: 'mem_dup', name: '本项目那份', validTo: T0 - 1, updatedAt: T0 + 1 }))
+    await h.store.create(g({ id: 'mem_dup', name: '全局那份', validTo: EXPIRED_AT }))
+    await h.store.create(w({ id: 'mem_dup', name: '本项目那份', validTo: EXPIRED_AT, updatedAt: T0 + 1 }))
     const advice = (await h.views()).pending.items.filter(i => i.kind === 'advice')
     expect(advice).toHaveLength(1)
   })
@@ -385,7 +387,7 @@ describe('待处理视图：建议整理的语义类', () => {
   it('体检关闭时语义类不显示，规则类照常显示', async () => {
     const h = harness()
     await seedSemantic(h)
-    await h.store.create(w({ id: 'mem_expired', name: '冻结期', validTo: T0 - 1 }))
+    await h.store.create(w({ id: 'mem_expired', name: '冻结期', validTo: EXPIRED_AT }))
     const off = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
     expect(adviceOf(off.pending)).toEqual([['expired', ['mem_expired']]])
     expect(off.pending.levelCounts.advice).toBe(1)
@@ -613,7 +615,7 @@ describe('健康视图', () => {
   it('复用治理评分：与 memory_health 同分；从没体检过 lastCheckupAt 为 null；有密钥的层不打分', async () => {
     const h = harness()
     await h.store.create(w({ id: 'mem_a', name: 'A' }))
-    await h.store.create(w({ id: 'mem_old', name: '过期', validTo: T0 - 1 }))
+    await h.store.create(w({ id: 'mem_old', name: '过期', validTo: EXPIRED_AT }))
     await h.store.create(g({ id: 'mem_s', name: '凭证', content: FAKE_SECRET.github }))
 
     const { health } = await h.views()
@@ -629,7 +631,7 @@ describe('健康视图', () => {
   /** 本项目每类扣分原因各至少一条：密钥、过期、读不出的文件、冲突（缓存 + 账本）、内容重复、放错层、表述不清。 */
   async function seedEveryIssue(h: ReturnType<typeof harness>, { withSecret = true } = {}) {
     if (withSecret) await h.store.create(w({ id: 'mem_s', name: '凭证', content: FAKE_SECRET.github }))
-    await h.store.create(w({ id: 'mem_old', name: '过期', validTo: T0 - 1 }))
+    await h.store.create(w({ id: 'mem_old', name: '过期', validTo: EXPIRED_AT }))
     await h.store.create(w({ id: 'mem_r1', name: 'R 甲' }))
     await h.store.create(w({ id: 'mem_r2', name: 'R 乙' }))
     await h.store.create(w({ id: 'mem_u', name: '含糊' }))

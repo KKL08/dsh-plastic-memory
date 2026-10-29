@@ -2886,7 +2886,7 @@ describe('edit-memory（建议整理的直接改）', () => {
       id: 'mem_e', name: '发版流程', type: 'project', scope: 'workspace', workspacePath: SESSION_WS,
       content: '旧正文', summary: '旧摘要', tags: ['发版'],
       source: { sessionId: 'sess-old', eventRange: [3, 9], sourceMode: 'user-behavior' },
-      createdAt: 100, updatedAt: 200, lastConfirmedAt: 300, validFrom: 50, validTo: Date.UTC(2100, 0, 1),
+      createdAt: 100, updatedAt: 200, lastConfirmedAt: 300, validFrom: 60_000, validTo: Date.UTC(2100, 0, 1),
       confidence: 0.7, supersedes: ['mem_older'], recallCount: 4, lastRecalledAt: 500,
     })
     await e.store.create(original)
@@ -3421,6 +3421,26 @@ describe('撤销模型改写、替代（对话卡片、右侧栏「这次新写�
     await e.run({ cmd: 'refresh-views' })
     return libraryViewSchema.parse(await e.readView('library')).modelChanges
   }
+
+  it('改写旧版本写的记忆（有效期是不在整分钟上的 UTC 毫秒 ISO）：撤销照常可撤，恢复出取整后的有效期', async () => {
+    const e = env()
+    const raw = { validFrom: Date.parse('2099-01-01T09:30:45.000Z'), validTo: Date.parse('2099-02-01T18:00:00.123Z') }
+    await seedMemory(e, 'mem_v', '改前的内容')
+    const dir = join(root, workspaceDirName(SESSION_WS))
+    const path = join(dir, (await readdir(dir)).find(n => n.startsWith('名-mem_v'))!)
+    const legacy = encodeRecord({ ...(await e.store.get('mem_v', { workspacePath: SESSION_WS }))!, ...raw }, {})
+      .replace(/^validFrom: .*$/m, `validFrom: ${new Date(raw.validFrom).toISOString()}`)
+      .replace(/^validTo: .*$/m, `validTo: ${new Date(raw.validTo).toISOString()}`)
+    await writeFile(path, legacy)
+    expect((await save(e, { action: 'update', id: 'mem_v', name: '名-mem_v', content: '模型改写后的' })).kind).toBe('updated')
+    const entry = await changeOf(e)
+    expect(await modelChanges(e)).toEqual([expect.objectContaining({ decisionId: entry.id, state: 'undoable' })])
+
+    ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+    const back = (await e.store.get('mem_v', { workspacePath: SESSION_WS }))!
+    expect(back).toMatchObject({ content: '改前的内容', validFrom: Date.parse('2099-01-01T09:30:00.000Z'), validTo: Date.parse('2099-02-01T18:01:00.000Z') })
+    expect((await e.decisions.listSettled()).find(d => d.id === entry.id)?.settled?.isUndone).toBe(true)
+  })
 
   it('撤销改写：按改前快照恢复，条目标已撤销留着，视图显示 undone；再撤一次什么都不动', async () => {
     const e = env()

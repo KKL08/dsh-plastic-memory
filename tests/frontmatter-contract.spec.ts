@@ -6,6 +6,7 @@ import { deriveFileId } from '../src/storage/paths.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { FrontmatterError } from '../src/errors.ts'
+import { formatValidity } from '../src/validity.ts'
 import { captureError } from './helpers/errors.ts'
 
 // 0.2.0 文件契约（docs/design-storage-file-is-memory.md §2）：手建文件放宽、派生 id、时间戳放宽、
@@ -107,10 +108,9 @@ describe('时间戳读取放宽、写出归一', () => {
     ['无时区日期时间（按本地时间）', '2026-08-19T10:00:00', new Date(2026, 7, 19, 10).getTime()],
     ['空格分隔、无秒、无时区（按本地时间）', '2026-08-19 10:00', new Date(2026, 7, 19, 10).getTime()],
   ])('%s：%s', (_label, text, ms) => {
-    const raw = `---\nname: n\ntype: knowledge\ncreatedAt: ${text}\nvalidFrom: ${text}\ndeletedAt: ${text}\n---\n\nc`
+    const raw = `---\nname: n\ntype: knowledge\ncreatedAt: ${text}\ndeletedAt: ${text}\n---\n\nc`
     const { record: r } = decodeRaw(raw)
     expect(r.createdAt).toBe(ms)
-    expect(r.validFrom).toBe(ms)
     expect(r.deletedAt).toBe(ms)
   })
 
@@ -131,6 +131,70 @@ describe('时间戳读取放宽、写出归一', () => {
     expect(text).toContain('createdAt: 2026-08-19T02:00:00.000Z')
     expect(text).toContain('deletedAt: 2026-08-20T00:00:00.000Z')
     expect(text).toContain(`updatedAt: ${new Date(MTIME).toISOString()}`)
+  })
+})
+
+// 有效期（validFrom / validTo）与工具同一写法：本机时间 YYYY-MM-DD HH:mm；纯日期取文件 mtime 的本机时分（用户写下它的时刻）。
+// 期望值用 new Date(年, 月, 日, 时, 分) 在同一时区里算，与机器时区无关。
+describe('有效期键的读取', () => {
+  const mtimeAt = new Date(MTIME)
+  const local = (y: number, mo: number, d: number, h: number, mi: number) => new Date(y, mo - 1, d, h, mi).getTime()
+  const decodeValidity = (text: string, opts?: { relPath?: string; mtimeMs?: number }) =>
+    decodeRaw(`---\nname: n\ntype: knowledge\nvalidFrom: ${text}\nvalidTo: ${text}\n---\n\nc`, opts).record
+
+  it.each([
+    ['日期 + 时分（本机时间）', '2026-08-19 15:00', local(2026, 8, 19, 15, 0), local(2026, 8, 19, 15, 0)],
+    ['纯日期：取文件 mtime 的本机时分', '2026-08-19', local(2026, 8, 19, mtimeAt.getHours(), mtimeAt.getMinutes()), local(2026, 8, 19, mtimeAt.getHours(), mtimeAt.getMinutes())],
+    ['带偏移', '2026-08-19T10:00:00+08:00', Date.UTC(2026, 7, 19, 2), Date.UTC(2026, 7, 19, 2)],
+    // 旧版本写的毫秒不在整分钟上：读出来就按分钟向外取整（validFrom 退、validTo 进），与写回文件的值一致，有效期只会变长
+    ['旧文件的 UTC 毫秒 ISO', '2026-08-19T10:00:00.123Z', Date.UTC(2026, 7, 19, 10, 0), Date.UTC(2026, 7, 19, 10, 1)],
+    ['数字毫秒', '1787166413362', Math.floor(1787166413362 / 60_000) * 60_000, Math.ceil(1787166413362 / 60_000) * 60_000],
+  ])('%s：%s', (_label, text, fromMs, toMs) => {
+    const r = decodeValidity(text)
+    expect(r.validFrom).toBe(fromMs)
+    expect(r.validTo).toBe(toMs)
+  })
+
+  it('同一个文件反复读，纯日期换算的结果不变', () => {
+    expect(decodeValidity('2026-08-19').validTo).toBe(decodeValidity('2026-08-19').validTo)
+  })
+
+  it('纯日期只给有效期键补时分：createdAt 等其他时间键照旧按 UTC 零点', () => {
+    const { record: r } = decodeRaw('---\nname: n\ntype: knowledge\ncreatedAt: 2026-08-19\nvalidTo: 2026-08-19\n---\n\nc')
+    expect(r.createdAt).toBe(Date.UTC(2026, 7, 19))
+    expect(r.validTo).toBe(local(2026, 8, 19, mtimeAt.getHours(), mtimeAt.getMinutes()))
+  })
+
+  it('不存在的纯日期照旧隔离（timestamp-parse）', () => {
+    expect(captureError(() => decodeValidity('2026-02-30'))).toMatchObject({ code: 'timestamp-parse' })
+  })
+
+})
+
+describe('有效期键的写出', () => {
+  const local = (y: number, mo: number, d: number, h: number, mi: number) => new Date(y, mo - 1, d, h, mi).getTime()
+
+  it('写成本机时间 YYYY-MM-DD HH:mm，用户打开文件能直接看懂、照着改；其他时间键仍是 UTC 毫秒 ISO', () => {
+    const text = encodeRecord(record({ validFrom: local(2026, 8, 19, 9, 30), validTo: local(2026, 8, 20, 18, 0), deletedAt: 1787166413362 }), {})
+    expect(text).toContain('\nvalidFrom: 2026-08-19 09:30\n')
+    expect(text).toContain('\nvalidTo: 2026-08-20 18:00\n')
+    expect(text).toContain('\ncreatedAt: 2026-08-19T')
+    expect(text).toContain(`\ndeletedAt: ${new Date(1787166413362).toISOString()}\n`)
+  })
+
+  it('不在整分钟上的毫秒向外取整：validTo 进到下一分钟、validFrom 退到本分钟', () => {
+    const text = encodeRecord(record({ validFrom: local(2026, 8, 19, 9, 30) + 59_999, validTo: local(2026, 8, 20, 18, 0) + 1 }), {})
+    expect(text).toContain('\nvalidFrom: 2026-08-19 09:30\n')
+    expect(text).toContain('\nvalidTo: 2026-08-20 18:01\n')
+  })
+
+  it('写出再读回值不变，再写一次逐字节相同', () => {
+    const r = record({ validFrom: local(2026, 8, 19, 9, 30), validTo: local(2026, 8, 20, 18, 0) })
+    const text = encodeRecord(r, {})
+    const back = decodeRaw(text).record
+    expect(back.validFrom).toBe(r.validFrom)
+    expect(back.validTo).toBe(r.validTo)
+    expect(encodeRecord(back, {})).toBe(text)
   })
 })
 
@@ -302,7 +366,7 @@ describe('0.1.x 旧文件往返', () => {
     const first = decodeRecord(splitFrontmatter(legacy(ts)), { scope: 'workspace', workspacePath: '/repo' }, { relPath: 'repo-1/x.md', mtimeMs: MTIME })
     expect(first.record).toMatchObject({
       id: 'mem_legacy01', confidence: 0.5, createdAt: 1754784000123, updatedAt: 1754784000456,
-      lastConfirmedAt: 1754784000789, validTo: 1760000000000, supersedes: ['mem_older'], globalCandidate: true,
+      lastConfirmedAt: 1754784000789, validTo: 1760000040000, supersedes: ['mem_older'], globalCandidate: true,
       source: { sessionId: 'sess-old', eventRange: [3, 9], sourceMode: 'agent-inferred' },
       content: '集成测试必须连真实数据库，不 mock。',
     })
@@ -312,6 +376,7 @@ describe('0.1.x 旧文件往返', () => {
     const rewritten = encodeRecord(first.record, first.extras)
     expect(rewritten).toContain(`digest: ${computeDigest(first.record.name, first.record.summary, first.record.content)}`)
     expect(rewritten).toContain('createdAt: 2025-08-10T00:00:00.123Z')
+    expect(rewritten).toContain(`validTo: ${formatValidity(1760000040000)}\n`)   // 1760000000000 不在整分钟上，进到下一分钟
     const second = decodeRecord(splitFrontmatter(rewritten), { scope: 'workspace', workspacePath: '/repo' }, { relPath: 'repo-1/x.md', mtimeMs: MTIME + 1 })
     expect(second.record).toEqual(first.record)
     expect(second.extras).toEqual(first.extras)

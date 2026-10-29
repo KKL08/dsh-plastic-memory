@@ -41,15 +41,24 @@ describe('detectSecrets', () => {
 describe('runRuleScan', () => {
   const lookup = (map: Map<string, MemoryRecord>) => (id: string) => map.get(id)
 
-  it('expired：validTo 早于 now 才报', () => {
+  it('expired：validTo 不晚于 now 就报（到点即过期）', () => {
     const a = record({ id: 'mem_a', validTo: 100 })
     const b = record({ id: 'mem_b', validTo: 300 })
     const c = record({ id: 'mem_c' }) // 无 validTo 永不过期
-    const findings = runRuleScan([a, b, c], () => undefined, 200)
+    const d = record({ id: 'mem_d', validTo: 200 }) // 恰在 now
+    const findings = runRuleScan([a, b, c, d], () => undefined, 200)
     const expired = findings.filter(f => f.type === 'expired')
-    expect(expired.map(f => f.memoryIds[0])).toEqual(['mem_a'])
+    expect(expired.map(f => f.memoryIds[0])).toEqual(['mem_a', 'mem_d'])
     expect(expired[0].layer).toBe('rule')
     expect(expired[0].severity).toBe('warning')
+  })
+
+  it('expired 的说明按本机时间 YYYY-MM-DD HH:mm 写有效期，不打毫秒；建议动作写清用新格式延长', () => {
+    const validTo = new Date(2026, 9, 28, 18, 5).getTime()
+    const [f] = runRuleScan([record({ id: 'mem_a', validTo })], () => undefined, validTo + 1).filter(x => x.type === 'expired')
+    expect(f!.summary).toBe('已过有效期（validTo=2026-10-28 18:05）')
+    expect(f!.summary).not.toContain(String(validTo))
+    expect(f!.suggestedAction).toBe('向用户确认：仍然有效就用 memory_save 延长 validTo（写 "YYYY-MM-DD HH:mm"，用户只给了日期就写 "YYYY-MM-DD"）；已经失效就用 memory_forget 归档')
   })
 
   it('bloat：content 超过阈值才报', () => {
