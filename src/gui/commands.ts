@@ -22,10 +22,10 @@ import { executePromote } from '../tools/promote.ts'
 import { executeScan, type ScanNote } from '../tools/scan.ts'
 import { executeSnapshotTool, type SnapshotToolOptions } from '../tools/snapshot.ts'
 import {
-  crossWorkspaceNote, gateRecords, isCopyOf, locateCopy, workspaceLabel, type CrossWorkspaceRejection, type GovernanceContext,
+  copyHistory, copyTargetOf, crossWorkspaceNote, gateRecords, isCopyOf, locateCopy, workspaceLabel, type CrossWorkspaceRejection, type GovernanceContext,
 } from '../tools/workspace-gate.ts'
 import {
-  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, layerOfMemory, mergeKeeperIndex, parseMemoryCommand, sessionViewFile,
+  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, mergeKeeperIndex, parseMemoryCommand, sessionViewFile,
   type GuiErrorCode, type GuiLayerRef, type MemoryCommand, type MemoryCommandResult,
 } from './contract.ts'
 import type { ViewWriter } from './view-writer.ts'
@@ -584,13 +584,10 @@ async function dispatch(
           if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
           // 别层还有这个 id 的副本时，快照里那一层的副本是它的历史，留着
           const snapshots = await deps.snapshots.list()
-          const kept = new Set<string>()
-          for (const r of snapshots.flatMap(s => s.data)) {
-            const layer = layerOfMemory(r)
-            if (r.id !== rec.id || layer === undefined || isCopyOf(rec, layer) || kept.has(workspaceLabel(r))) continue
-            if ((await locateCopy(deps.store, rec.id, layer)) !== undefined) kept.add(workspaceLabel(r))
-          }
-          const isPurged = (r: SnapshotRecord) => r.id === rec.id && !kept.has(workspaceLabel(r))
+          const target = copyTargetOf(rec)
+          const isPurged: (r: SnapshotRecord) => boolean = target === undefined
+            ? r => r.id === rec.id
+            : await copyHistory(deps.store, snapshots.flatMap(s => s.data), new Set([rec.id]), target)
           // 撤销要靠的那份快照副本马上就没了：指向它的裁决条目先清掉，之后恢复不再说冲突会回到待处理。
           // 同一份快照里别的记忆的副本还在，它们的撤销条目留着
           const lost = new Set(snapshots.filter(s => s.data.some(isPurged)).map(s => s.id))

@@ -745,6 +745,37 @@ describe('同 id 在两个项目里各有一份', () => {
     expect((await copyIn(e, SESSION_WS))!.status).toBe('active')
   })
 
+  it('forget 指明一份：账本里指向这个 id 的条目留着（别的项目那份还在），哪层都只剩这一份时才清', async () => {
+    const e = env()
+    await seedCopies(e)
+    await e.store.create(record({ id: 'mem_y', scope: 'workspace', workspacePath: OTHER_WS }))
+    const entry = (await e.decisions.upsert({ memoryIds: ['mem_dup', 'mem_y'], summary: '别的项目那份的冲突', fingerprint: 'fp-dup', workspaces: [OTHER_WS, OTHER_WS] }, 1)).entry
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: own }))
+    expect(await allEntries(e)).toEqual([entry])
+
+    // 只此一份的：照旧清掉指向它的条目
+    await e.store.create(record({ id: 'mem_solo', scope: 'workspace', workspacePath: SESSION_WS }))
+    await e.decisions.upsert({ memoryIds: ['mem_solo', 'mem_y'], summary: '只此一份', fingerprint: 'fp-solo' }, 1)
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_solo', layer: own }))
+    expect(await allEntries(e)).toEqual([entry])
+  })
+
+  it('hard-delete 指明含密钥的一份：只脱敏这一层在快照里的副本，别的项目那份的快照照常能恢复', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_dup', name: '本项目那份', content: `token ${FAKE_SECRET.sk}`, scope: 'workspace', workspacePath: SESSION_WS }))
+    await e.store.create(record({ id: 'mem_dup', name: '别的项目那份', content: '普通内容', scope: 'workspace', workspacePath: OTHER_WS }))
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: other, allowCrossWorkspace: true }))
+    const snap = (await e.snapshots.list())[0]!
+    expect(snap.data[0]).toMatchObject({ name: '别的项目那份', workspacePath: OTHER_WS })
+
+    ok(await e.run({ cmd: 'hard-delete', memoryId: 'mem_dup', layer: own }))
+    expect(await copyIn(e, SESSION_WS)).toBeUndefined()
+    expect((await e.snapshots.get(snap.id))!.data[0]).toMatchObject({ name: '别的项目那份', content: '普通内容' })
+    expect((await e.snapshots.get(snap.id))!.data[0]!.redacted).toBeUndefined()
+    ok(await e.run({ cmd: 'restore', memoryId: 'mem_dup', layer: other, allowCrossWorkspace: true }))
+    expect(await copyIn(e, OTHER_WS)).toMatchObject({ name: '别的项目那份', status: 'active' })
+  })
+
   it('指明的那一层没有这个 id：not-found，不落到别的副本上', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_dup', scope: 'workspace', workspacePath: SESSION_WS }))
@@ -771,6 +802,35 @@ describe('同 id 在两个项目里各有一份', () => {
     expect((await copyIn(e, undefined))!.status).toBe('active')
     expect((await copyIn(e, OTHER_WS))!.status).toBe('active')
     expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
+  })
+})
+
+describe('搬层之后按层硬删含密钥的记忆：搬层之前的快照也脱敏', () => {
+  // 提升、移到项目后原层已没有这个 id：快照里原层那份是这条记忆自己的历史，不是别层副本的
+  const expectAllRedacted = async (e: ReturnType<typeof env>, id: string) => {
+    const hits = (await e.snapshots.list()).flatMap(s => s.data.filter(r => r.id === id).map(r => [s.operation, r.redacted === true, JSON.stringify(r).includes(FAKE_SECRET.sk)]))
+    expect(hits.length).toBeGreaterThanOrEqual(2)
+    for (const [operation, isRedacted, hasPlain] of hits) expect([operation, isRedacted, hasPlain]).toEqual([operation, true, false])
+  }
+
+  it('提升到全局后在全局那份上硬删：提升前（项目层）的快照记录也脱敏', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_ps', name: '部署凭证', content: `token ${FAKE_SECRET.sk}`, scope: 'workspace', workspacePath: SESSION_WS }))
+    ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_ps', layer: { kind: 'workspace', workspacePath: SESSION_WS } }))
+    expect((await e.store.get('mem_ps'))!.scope).toBe('global')
+    ok(await e.run({ cmd: 'hard-delete', memoryId: 'mem_ps', layer: { kind: 'global' } }))
+    expect(await e.store.get('mem_ps')).toBeUndefined()
+    await expectAllRedacted(e, 'mem_ps')
+  })
+
+  it('移到项目后在项目那份上硬删：移动前（全局层）的快照记录也脱敏', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_ms', name: '部署凭证', content: `token ${FAKE_SECRET.sk}` }))
+    ok(await e.run({ cmd: 'move-memory', memoryId: 'mem_ms', workspacePath: SESSION_WS }))
+    expect((await e.store.get('mem_ms'))!.scope).toBe('workspace')
+    ok(await e.run({ cmd: 'hard-delete', memoryId: 'mem_ms', layer: { kind: 'workspace', workspacePath: SESSION_WS } }))
+    expect(await e.store.get('mem_ms')).toBeUndefined()
+    await expectAllRedacted(e, 'mem_ms')
   })
 })
 

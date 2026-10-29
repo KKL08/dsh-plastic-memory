@@ -5,7 +5,7 @@ import type { MemoryRecord } from '../record-schema.ts'
 import { redactRecord } from '../governance/snapshots.ts'
 import { hasSecret, maskSecrets } from '../secrets.ts'
 import {
-  crossWorkspaceNote, gateRecords, locateCopy,
+  copyHistory, crossWorkspaceNote, gateRecords, locateCopy,
   type CopyTarget, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark,
 } from './workspace-gate.ts'
 
@@ -106,7 +106,12 @@ export async function executeForget(
     description: `遗忘 ${found.length} 条记忆前（原因：${reason}）`,
     records: found.map(r => (secretIds.has(r.id) ? redactRecord(r) : r)),
   }, now)
-  if (secretIds.size > 0) await deps.snapshots.redact(secretIds)
+  // 指明了副本：快照里只脱敏它的历史（含搬层之前的），别层还在的同 id 副本的历史不动
+  const target = options.target
+  const historyOf = async (ids: ReadonlySet<string>) => (target === undefined
+    ? () => true
+    : await copyHistory(deps.store, (await deps.snapshots.list()).flatMap(s => s.data), ids, target))
+  if (secretIds.size > 0) await deps.snapshots.redact(secretIds, await historyOf(secretIds))
 
   const forgotten: string[] = []
   const hardDeleted: string[] = []
@@ -134,10 +139,13 @@ export async function executeForget(
   }
   if (lateSecrets.length > 0) {
     // 改走硬删，同样先脱敏所有快照（含本次这份）再物理删除
-    await deps.snapshots.redact(new Set(lateSecrets.map(r => r.id)))
+    const lateIds = new Set(lateSecrets.map(r => r.id))
+    await deps.snapshots.redact(lateIds, await historyOf(lateIds))
     for (const record of lateSecrets) await purge(record)
   }
-  await deps.decisions.removeByMemoryIds(forgotten)
+  // 账本按 id 记：指明了副本时，别层还有这个 id 就是它的条目，留着（同最近删除里的彻底删除）
+  const cleared = target === undefined ? forgotten : await withoutOtherCopies(deps.store, forgotten, target)
+  await deps.decisions.removeByMemoryIds(cleared)
 
   ;(deps.log ?? console).info(`[plastic-memory] 遗忘 ${forgotten.length} 条记忆（${forgotten.join('、')}），其中硬删 ${hardDeleted.length} 条，原因：${reason}`)
   const missingNote = missing.length > 0 ? `；未找到：${missing.join('、')}` : ''
@@ -149,4 +157,20 @@ export async function executeForget(
     ok: true, forgotten, hardDeleted, missing, rejected, otherWorkspaces, snapshotId: snapshot.id, ...softOnlyFields(),
     message: `已遗忘 ${forgotten.length} 条记忆${missingNote}。${hardNote}${restoreNote}${secretNote()}${wsNote}`,
   }
+}
+
+/** 除 target 那一层外哪层都没有（含归档）的 id。 */
+async function withoutOtherCopies(store: MemoryStore, ids: readonly string[], target: CopyTarget): Promise<string[]> {
+  if (ids.length === 0) return []
+  const workspaces = (await store.listWorkspaceDirs()).entries.map(e => e.workspacePath)
+  const others: CopyTarget[] = [
+    ...(target.kind === 'global' ? [] : [{ kind: 'global' } as const]),
+    ...workspaces.filter(ws => target.kind === 'global' || ws !== target.workspacePath).map(workspacePath => ({ kind: 'workspace' as const, workspacePath })),
+  ]
+  const result: string[] = []
+  for (const id of ids) {
+    const copies = await Promise.all(others.map(layer => locateCopy(store, id, layer)))
+    if (copies.every(c => c === undefined)) result.push(id)
+  }
+  return result
 }
