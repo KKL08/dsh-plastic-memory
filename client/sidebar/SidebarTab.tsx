@@ -30,9 +30,9 @@ import { ResultLine } from '../ui/Advice.tsx'
 import { ConflictRuling, VerticalConflictRuling } from '../ui/ConflictRuling.tsx'
 import { ContextBudgetBar } from '../ui/ContextBudgetBar.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
+import { Icon } from '../ui/Icon.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { Arrival, useArrivals } from '../ui/motion.tsx'
-import { TrashIcon } from '../ui/TrashIcon.tsx'
 import { CrossConfirm, crossConfirmCss, isHandledElsewhere, DeleteWithConfirm, SecretDeleteConfirm } from '../pending/action.tsx'
 import { promoteInPlaceCss, promotionOf, usePromoteInPlace, type InPlacePromotion } from '../pending/promote-in-place.tsx'
 import { ModelChangeLine, modelChangeCss } from '../pending/model-change.tsx'
@@ -358,7 +358,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
                           aria-disabled={isWaiting(id) || undefined}
                           onClick={() => { if (!isWaiting(id)) open() }}
                         >
-                          <TrashIcon />
+                          <Icon name="trash" size={14} />
                         </button>
                       )}
                     />

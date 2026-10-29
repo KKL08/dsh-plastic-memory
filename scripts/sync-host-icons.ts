@@ -35,11 +35,11 @@ export const HOST_ICONS = {
   globe: 'IconGlobeOutlineRegular',
   clock: 'IconClockOutlineRegular',
   search: 'IconSearchOutlineRegular',
-  settings: 'IconSettingsOutlineRegular',
   check: 'IconCheckOutlineMedium',
   chevronDown: 'IconChevronDownOutlineRegular',
   chevronDownMedium: 'IconChevronDownOutlineMedium',
   chevronUp: 'IconChevronUpOutlineRegular',
+  chevronRight: 'IconChevronRightOutlineRegular',
   chevronsUpDown: 'IconChevronsUpDownOutlineRegular',
   trash: 'IconTrashOutlineRegular',
 } as const

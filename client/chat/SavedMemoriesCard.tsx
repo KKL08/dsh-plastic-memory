@@ -20,10 +20,10 @@ import { useT } from '../i18n.tsx'
 import type { NavTarget } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { useTypeLabel } from '../library/shared.tsx'
+import { Icon } from '../ui/Icon.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { withRollingNumber } from '../ui/motion.tsx'
 import { keepFocusInPlace } from '../ui/focus-return.ts'
-import { TrashIcon } from '../ui/TrashIcon.tsx'
 import { crossConfirmCss, DeleteWithConfirm, SecretDeleteConfirm } from '../pending/action.tsx'
 import { promoteInPlaceCss, promotionOf, usePromoteInPlace, type InPlacePromotion } from '../pending/promote-in-place.tsx'
 import { ModelChangeLine, modelChangeCss } from '../pending/model-change.tsx'
@@ -153,7 +153,7 @@ function SavedRow({ session, item, layer, promotion, rewrite, superseded, expire
             aria-disabled={state.kind === 'busy' || state.kind === 'secret' || undefined}
             onClick={() => { if (state.kind !== 'busy' && state.kind !== 'secret') open() }}
           >
-            <TrashIcon />
+            <Icon name="trash" size={14} />
           </button>
         )}
       />

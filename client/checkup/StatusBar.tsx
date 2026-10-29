@@ -17,6 +17,7 @@ import {
 import { baseName, formatDay, formatDayTime, formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
 import { allScopesSub, scopeName, type MemoryView, type NavStore, type NewItemJump, type PageScope } from '../nav.ts'
+import { Icon } from '../ui/Icon.tsx'
 import { useHeightTransition, withRollingNumber } from '../ui/motion.tsx'
 import { StatusMarker, type MarkerKind } from '../ui/StatusMarker.tsx'
 import type { CheckupRuns, RunFailure } from './runs.ts'
@@ -171,9 +172,7 @@ function ScopeStatus({ layer, entry, count, now, result }: {
     meta.push(
       <button type="button" className="pm-status-why" aria-expanded={isWhyOpen} aria-controls={isWhyOpen ? whyId : undefined} onClick={() => { setWhyOpen(!isWhyOpen) }}>
         {t('checkup.status.why')}
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <path d="M7 10l5 5 5-5" />
-        </svg>
+        <Icon name="chevronDownMedium" size={12} />
       </button>,
     )
   }

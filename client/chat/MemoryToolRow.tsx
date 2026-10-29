@@ -9,6 +9,7 @@
 import { useMemo, type KeyboardEvent } from 'react'
 import { maskSecrets, type MaskOptions } from '../../src/gui/contract.ts'
 import { useT } from '../i18n.tsx'
+import { Icon } from '../ui/Icon.tsx'
 import { parseArgs, toolSummary, type MemoryToolName } from './tool-summary.ts'
 
 const CARD_MASK: MaskOptions = { severity: 'suspected' }
@@ -55,26 +56,6 @@ const firstLine = (text: string) => text.split('\n', 1)[0]!
 const STATUS_KEY: Partial<Record<RowState, string>> = {
   preparing: 'row.preparing', running: 'row.running', error: 'row.failed', stopped: 'row.stopped',
 }
-
-const SparkleIcon = () => (
-  <svg width={16} height={16} viewBox="0 0 16 16" fill="none" aria-hidden="true" strokeWidth={1}>
-    <path d="M5.875 3C5.875 6.33333 7.54167 8 10.875 8C7.54167 8 5.875 9.66667 5.875 13C5.875 9.66667 4.20833 8 0.875 8C4.20833 8 5.875 6.33333 5.875 3Z" stroke="currentColor" />
-    <path d="M12.375 1.55823C12.375 3.39156 13.2917 4.30823 15.125 4.30823C13.2917 4.30823 12.375 5.22489 12.375 7.05823C12.375 5.22489 11.4583 4.30823 9.625 4.30823C11.4583 4.30823 12.375 3.39156 12.375 1.55823Z" stroke="currentColor" />
-    <path d="M12.375 10.4418C12.375 11.7751 13.0417 12.4418 14.375 12.4418C13.0417 12.4418 12.375 13.1084 12.375 14.4418C12.375 13.1084 11.7083 12.4418 10.375 12.4418C11.7083 12.4418 12.375 11.7751 12.375 10.4418Z" stroke="currentColor" />
-  </svg>
-)
-
-const ChevronDown = ({ className }: { className?: string }) => (
-  <svg width={14} height={14} className={className} viewBox="0 0 16 16" fill="none" aria-hidden="true" strokeWidth={1}>
-    <path d="M4 6L7.29289 9.29289C7.68342 9.68342 8.31658 9.68342 8.70711 9.29289L12 6" stroke="currentColor" />
-  </svg>
-)
-
-const ChevronUp = () => (
-  <svg width={14} height={14} viewBox="0 0 16 16" fill="none" aria-hidden="true" strokeWidth={1}>
-    <path d="M12 10L8.70711 6.70711C8.31658 6.31658 7.68342 6.31658 7.29289 6.70711L4 10" stroke="currentColor" />
-  </svg>
-)
 
 export function MemoryToolRow(props: MemoryToolViewProps & { hostT: HostTranslate }) {
   const { toolName, useDisclosure, inspect, hostT } = props
@@ -123,12 +104,12 @@ export function MemoryToolRow(props: MemoryToolViewProps & { hostT: HostTranslat
           onKeyDown={expandable ? onKeyDown : undefined}
         >
           <span className="pm-tr-leading">
-            {open ? <ChevronUp /> : expandable ? (
+            {open ? <Icon name="chevronUp" size={14} /> : expandable ? (
               <>
-                <span className="pm-tr-icon-idle"><SparkleIcon /></span>
-                <ChevronDown className="pm-tr-chevron-hover" />
+                <span className="pm-tr-icon-idle"><Icon name="sparkle" /></span>
+                <Icon name="chevronDown" size={14} className="pm-tr-chevron-hover" />
               </>
-            ) : <SparkleIcon />}
+            ) : <Icon name="sparkle" />}
           </span>
           <span className="pm-tr-content">
             <span className="pm-tr-title">{title}</span>
