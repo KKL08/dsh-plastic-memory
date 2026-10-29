@@ -110,4 +110,45 @@ describe('体检聚合：scan 与 health 对同一层同口径（提取前先钉
     expect(h.crossLayerConflicts).toEqual(expected)
     expect(s.crossLayerConflicts).toEqual(expected)
   })
+
+  it('分数：memory_scan 写完缓存与账本后，memory_health 对每一层给出同一评分与分档（全库与单层都一致）', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
+    const cache = new InMemoryKvTable<ScanCacheEntry>()
+
+    // global：超期 knowledge、语义缓存里的冲突（账本里有）与表述不清
+    await store.put(record({ id: 'mem_g1', type: 'preference' }))
+    await store.put(record({ id: 'mem_g2', type: 'knowledge', lastConfirmedAt: 1 }))
+    await store.put(record({ id: 'mem_g3', type: 'preference' }))
+    await cache.put(GLOBAL_CACHE_KEY, {
+      id: GLOBAL_CACHE_KEY, scannedAt: 1, scope: 'global',
+      findings: [semantic('conflict', ['mem_g1', 'mem_g3']), semantic('unclear', ['mem_g2'])],
+    })
+    await decisions.upsert({ memoryIds: ['mem_g1', 'mem_g3'], summary: '' }, 1)
+    // /p：超长正文、超期、已删除的一条（不计分）；/q：干净的一条
+    await store.put(record({ id: 'mem_p1', type: 'preference', scope: 'workspace', workspacePath: '/p', content: '长'.repeat(2500) }))
+    await store.put(record({ id: 'mem_p2', type: 'knowledge', scope: 'workspace', workspacePath: '/p', lastConfirmedAt: 1 }))
+    await store.put(record({ id: 'mem_p3', type: 'preference', scope: 'workspace', workspacePath: '/p', status: 'deleted' }))
+    await store.put(record({ id: 'mem_q1', type: 'preference', scope: 'workspace', workspacePath: '/q' }))
+
+    const { scanDeps, healthDeps } = sharedDeps(store, decisions, cache)
+    const s = await executeScan({ scope: 'all' }, scanDeps, fakeExec())
+    const h = await executeHealth({ scope: 'all' }, healthDeps, fakeExec())
+    if (h.kind !== 'checkup' || s.kind !== 'checkup') throw new Error('expected checkup')
+
+    const pick = (rows: Array<{ layer: string; workspacePath?: string; score: number; tier: string }>) =>
+      rows.map(r => ({ layer: r.layer, workspacePath: r.workspacePath, score: r.score, tier: r.tier }))
+    expect(pick(s.rows).map(r => r.workspacePath)).toEqual([undefined, '/p', '/q'])
+    expect(pick(h.rows)).toEqual(pick(s.rows))
+    // 三层分数各不相同：确实在比各层自己的评分，不是都满分
+    expect(new Set(s.rows.map(r => r.score)).size).toBe(3)
+
+    // 单层 memory_health 与体检表里同一层同分（单层结果保留两位小数）
+    for (const row of s.rows) {
+      const single = await executeHealth(row.workspacePath === undefined ? {} : { scope: row.workspacePath }, healthDeps, fakeExec())
+      if (single.kind !== 'single') throw new Error(single.kind)
+      expect(single.score).toBe(Math.round(row.score * 100) / 100)
+      expect(single.tier).toBe(row.tier)
+    }
+  })
 })
