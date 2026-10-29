@@ -590,6 +590,36 @@ describe('自动体检接线', () => {
     expect(await scan(routed)).toMatchObject({ ok: true, cmd: 'scan' })
     expect(ctx.llmRequests[0]).toMatchObject({ provider: 'deepseek', model: 'deepseek-v4-flash' })
   })
+
+  it('界面全库体检：两个会话各自路由到不同模型，用的是发命令那个会话的模型；全局与各项目的记忆都交给内容检查', async () => {
+    const memoryRoot = await seedMemory(await makeTmpRoot())
+    for (const [ws, id] of [['/tmp/pm-wire-proj-a', 'mem_wire_a'], ['/tmp/pm-wire-proj-b', 'mem_wire_b']] as const) {
+      const dir = join(memoryRoot, workspaceDirName(ws))
+      await mkdir(dir, { recursive: true })
+      await writeFile(join(dir, WORKSPACE_MARKER), ws, 'utf8')
+      await writeFile(join(dir, `${id}.md`), encodeRecord(record({ id, scope: 'workspace', workspacePath: ws }), {}), 'utf8')
+    }
+    const defs: Array<{ handler(inv: { rawInput: string; agent: unknown }): Promise<{ text?: string }> }> = []
+    const ctx = mockCtx({
+      commands: { register: (def) => { defs.push(def as (typeof defs)[number]); return () => {} } },
+      agentDefaultModel: { currentSelection: () => DEFAULT_ROUTE },
+    })
+    await apply({ ...ctx, logger: { info() {}, warn() {}, error() {} } } as never, new Config({ memoryRoot } as never))
+    const agentOn = (sessionId: string, model: string) =>
+      ({ session: { header: { id: sessionId }, seq: 1, requestHeader: () => undefined }, options: { provider: 'deepseek', model } })
+    const scan = async (agent: unknown) => JSON.parse((await defs[0]!.handler({ rawInput: ' scan {}', agent })).text!) as Record<string, unknown>
+
+    expect(await scan(agentOn('sess-a', 'deepseek-v4-flash'))).toMatchObject({ ok: true, cmd: 'scan' })
+    expect(ctx.llmRequests.length).toBeGreaterThan(0)
+    expect(ctx.llmRequests.every(r => (r as { model?: string }).model === 'deepseek-v4-flash')).toBe(true)
+    const sent = JSON.stringify(ctx.llmRequests)
+    for (const id of ['mem_seed', 'mem_wire_a', 'mem_wire_b']) expect(sent).toContain(id)
+
+    const before = ctx.llmRequests.length
+    expect(await scan(agentOn('sess-b', 'deepseek-v4-pro'))).toMatchObject({ ok: true, cmd: 'scan' })
+    expect(ctx.llmRequests.length).toBeGreaterThan(before)
+    expect(ctx.llmRequests.slice(before).every(r => (r as { model?: string }).model === 'deepseek-v4-pro')).toBe(true)
+  })
 })
 
 describe('侧表与旧 KV 导入接线', () => {
