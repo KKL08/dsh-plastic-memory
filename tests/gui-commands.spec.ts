@@ -3653,6 +3653,31 @@ describe('撤销模型改写、替代（对话卡片、右侧栏「这次新写�
     expect((await modelChanges(e))?.map(c => c.state)).toEqual(['undone'])
   })
 
+  it.each([
+    ['改写', 'update'],
+    ['替代', 'supersede'],
+  ] as const)('force %s手改过的记忆后撤销：内容、状态、手改标记都回到改前；替代时新写的那条保留', async (_label, kind) => {
+    const e = env()
+    await seedMemory(e, 'mem_h', '改前的内容')
+    await e.store.update({ id: 'mem_h', workspacePath: SESSION_WS }, r => ({ ...r, content: '用户手改后的内容', handEdited: true }))
+    const before = (await e.store.get('mem_h', { workspacePath: SESSION_WS }))!
+    expect(before).toMatchObject({ content: '用户手改后的内容', status: 'active', handEdited: true })
+
+    const saved = kind === 'update'
+      ? await save(e, { action: 'update', id: 'mem_h', name: '名-mem_h', content: '用户同意后的新内容' })
+      : await save(e, { name: '新说法', content: '完全不同的新说法', supersedes: ['mem_h'] })
+    expect(saved.kind).toBe(kind === 'update' ? 'updated' : 'saved')
+    const changed = (await e.store.get('mem_h', { workspacePath: SESSION_WS }))!
+    expect(kind === 'update' ? changed.content : changed.status).toBe(kind === 'update' ? '用户同意后的新内容' : 'superseded')
+
+    const entry = await changeOf(e)
+    ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+    const back = (await e.store.get('mem_h', { workspacePath: SESSION_WS }))!
+    expect(back).toMatchObject({ content: '用户手改后的内容', status: 'active', handEdited: true })
+    if (saved.kind === 'saved') expect((await e.store.get(saved.record.id, { workspacePath: SESSION_WS }))).toMatchObject({ status: 'active', content: '完全不同的新说法' })
+    expect((await modelChanges(e))?.map(c => c.state)).toEqual(['undone'])
+  })
+
   it('撤销改写：预检之后、写回之前被别处删进最近删除：不盖回在用，回 stale', async () => {
     const e = env()
     await seedMemory(e, 'mem_r', '改前的内容')
