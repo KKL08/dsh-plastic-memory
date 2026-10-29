@@ -282,7 +282,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     m.scope === 'workspace' && m.workspacePath !== undefined && !samePath(m.workspacePath, ws) ? baseName(m.workspacePath) : undefined
   const isOwnSide = (m: MemoryCardData | null) => m === null || m.scope === 'workspace' && projectName(m) === undefined
 
-  // 会话快照冻结在插件本次加载之前 = 重启后还没重新带入
+  // 会话快照冻结在插件本次加载之前 = 对话里还是重启前带入的那份
   const bootedAt = health.status === 'ready' ? health.data.bootedAt : undefined
   const usageTitle = t(USAGE_TITLE[snapshot?.origin ?? 'start'])
   // 混着几种带入方式的组不标

@@ -26,8 +26,8 @@ export const sidebarZh = {
   'sidebar.globalOnly': '本项目还没有记忆，这次带入的都是全局记忆。',
   'sidebar.noSnapshot.title': '这次对话还没带入记忆',
   'sidebar.noSnapshot.body': '发出第一条消息后，这里会列出带入的记忆和用量。',
-  'sidebar.stale.title': '重启后未重新带入',
-  'sidebar.stale.body': 'DeepSeek Harness 重启过，这次对话还没重新带入记忆，继续对话后这里会更新。下方「带入的记忆」是重启前带入的。',
+  'sidebar.stale.title': '重启前带入的记忆',
+  'sidebar.stale.body': 'DeepSeek Harness 重启过，对话里仍是重启前带入的这份记忆。继续对话后这里会更新；记忆有变化时会补发最新的一份。',
 
   'sidebar.footer.pending': '本项目还有 {n} 处待处理',
   'sidebar.footer.pendingLink': '在记忆页处理 ›',
@@ -85,8 +85,8 @@ export const sidebarEn: Record<keyof typeof sidebarZh, string> = {
   'sidebar.globalOnly': 'This project has no memories yet. Everything brought in is global.',
   'sidebar.noSnapshot.title': 'Nothing brought into this chat yet',
   'sidebar.noSnapshot.body': 'After the first message, this tab lists the memories brought in and how much they use.',
-  'sidebar.stale.title': 'Not brought in again since the restart',
-  'sidebar.stale.body': 'DeepSeek Harness restarted and this chat has not brought memories in again. This updates once the chat continues. "Brought-in memories" below shows what was brought in before the restart.',
+  'sidebar.stale.title': 'Memories from before the restart',
+  'sidebar.stale.body': 'DeepSeek Harness restarted. This chat still has the memories brought in before the restart. This tab updates when the chat continues, and the latest set is sent if they changed.',
 
   'sidebar.footer.pending': '{n} more pending in this project',
   'sidebar.footer.pendingLink': 'Handle on the Memory page ›',
