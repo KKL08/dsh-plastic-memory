@@ -58,6 +58,11 @@ describe('查询切词', () => {
     expect(KEYWORD_MAX_CJK_CHARS).toBe(4)
   })
 
+  it('英文虚词（冠词、介词、助动词、疑问词）同中文虚词：不算关键词，也不计入覆盖度', () => {
+    expect(labels(groupsFor('cache invalidation with Redis'))).toEqual(['cache', 'invalidation', 'Redis'])
+    expect(labels(groupsFor('How do I deploy to the staging server?'))).toEqual(['deploy', 'staging', 'server'])
+  })
+
   it('英文词的标签去掉首尾标点；不产生 token 的词（纯数字、标点）跳过', () => {
     expect(labels(groupsFor('deploy（部署）'))).toEqual(['deploy', '部署'])
     expect(labels(groupsFor('偶发 502 负载均衡'))).toEqual(['偶发', '负载均衡'])
@@ -127,6 +132,13 @@ describe('首条覆盖度判弱', () => {
     expect(v.coverage).toBeGreaterThanOrEqual(WEAK_COVERAGE_BELOW)
     expect(v.missingKeywords.map(labelOf)).toEqual(['证书'])
     expect(v.weak).toBe(true)
+  })
+
+  it('英文查询里的介词、冠词没在首条出现，实词都在：不判弱', () => {
+    expect(judge('cache invalidation with Redis', 'Cache invalidation: Redis keys are deleted after each write').weak).toBe(false)
+    expect(judge('deploy to staging', 'Deploy staging builds from the release branch').weak).toBe(false)
+    // 实词缺了照样判弱
+    expect(judge('deploy to staging', 'Deploy production builds from the release branch').weak).toBe(true)
   })
 
   it('中文通用词加英文产品名：产品名没出现就判弱', () => {

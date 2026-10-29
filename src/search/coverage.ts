@@ -30,6 +30,14 @@ export const FUNCTION_WORDS = [
   '的', '了', '吗', '呢', '吧', '啊', '呀', '么', '在', '是',
 ] as const
 
+/** 英文虚词（冠词、介词、助动词、疑问词），同中文虚词：不算查询内容，也不计入覆盖度。按小写比较。 */
+const ENGLISH_FUNCTION_WORDS: ReadonlySet<string> = new Set([
+  'a', 'an', 'the',
+  'about', 'after', 'at', 'before', 'between', 'by', 'for', 'from', 'in', 'into', 'of', 'on', 'onto', 'over', 'per', 'to', 'under', 'via', 'with', 'within', 'without',
+  'am', 'are', 'be', 'been', 'being', 'can', 'could', 'did', 'do', 'does', 'had', 'has', 'have', 'is', 'may', 'might', 'must', 'shall', 'should', 'was', 'were', 'will', 'would',
+  'how', 'what', 'when', 'where', 'which', 'who', 'whom', 'whose', 'why',
+])
+
 /**
  * 句子里紧跟着这些疑问词（前面可带「是」）的内容段是问的东西：「数据库连接池的密码是什么」的「密码」、「部署脚本的超时是多少」的「超时」。
  * 首条话题对上却没有它，多半没答到点子上，所以按关键词看。只认紧跟的，句中其余短段（「侧栏里」「算出来」）照旧只计入覆盖度。
@@ -99,7 +107,7 @@ const isFull = (unit: QueryUnit, tokens: readonly string[], hits: readonly boole
 
 /**
  * 查询切词。tokens 是执行器清洗后的查询 token（去重、剔除噪声），tokenize 是查询与记录共用的分词器。
- * 不产生 token 的词（纯数字、标点）和只有虚词的 CJK 段剔掉。
+ * 不产生 token 的词（纯数字、标点）、英文虚词和只有虚词的 CJK 段剔掉。
  */
 export function groupQueryTerms(query: string, tokens: readonly string[], tokenize: (text: string) => string[]): TermGroup[] {
   const index = new Map(tokens.map((t, i) => [t, i] as const))
@@ -118,8 +126,10 @@ export function groupQueryTerms(query: string, tokens: readonly string[], tokeni
         }
         continue
       }
+      const label = part.replace(EDGE_PUNCT, '')
+      if (ENGLISH_FUNCTION_WORDS.has(label.toLowerCase())) continue
       const ids = tokenIds(part)
-      if (ids.length > 0) groups.push({ units: [{ label: part.replace(EDGE_PUNCT, ''), byChar: false, tokens: ids }], keyword: true })
+      if (ids.length > 0) groups.push({ units: [{ label, byChar: false, tokens: ids }], keyword: true })
     }
   }
   return groups
