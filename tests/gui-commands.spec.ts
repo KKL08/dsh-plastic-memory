@@ -3156,6 +3156,15 @@ describe('edit-memory（建议整理的直接改）', () => {
     expect(await e.snapshots.list()).toEqual([])
   })
 
+  it('原记忆只含确认存下的疑似密钥（界面上是原文）：照常改，新内容仍带疑似密钥时同样要 force', async () => {
+    const e = env()
+    const content = '测试库 api_key: TESTONLY0000000000000000'
+    await e.store.create(record({ id: 'mem_sq', content }))
+    const next = `${content}，只在本地用`
+    ok(await e.run(edit('mem_sq', undefined, await baseOf(e, 'mem_sq'), { content: next, force: true })))
+    expect((await e.store.get('mem_sq'))!.content).toBe(next)
+  })
+
   it('别的项目的记忆：先要 allowCrossWorkspace，带上才改', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_o', content: '旧正文', scope: 'workspace', workspacePath: OTHER_WS }))
@@ -3299,6 +3308,21 @@ describe('merge-memories（内容重复的直接合并）', () => {
     expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('failed')
     expect(await readFile(filePath, 'utf8')).toBe(merged)
     expect(await e.store.get('mem_b')).toMatchObject({ status: 'deleted', content: '乙的第二版' })
+  })
+
+  it('要删掉的那条含疑似密钥（软删不了）：入口就拒绝 has-secret，两条都原样、不拍快照、不记账', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_a', content: '甲的正文', createdAt: 1 }))
+    await e.store.create(record({ id: 'mem_b', content: '内部约定 api_key: TESTONLY0000000000000', createdAt: 2 }))
+    const both = async () => Promise.all(['mem_a', 'mem_b'].map(async id => (await e.store.locate(id))!))
+    const before = await both()
+    e.clock.now = LATER
+    const body = err(await merge(e, ['mem_a', 'mem_b']))
+    expect(body.code).toBe('has-secret')
+    expect(body.detail).toContain('mem_b')
+    expect(await both()).toEqual(before)
+    expect(await e.snapshots.list()).toEqual([])
+    expect(await allEntries(e)).toEqual([])
   })
 
   it('同一条记忆合并两次 → invalid-args', async () => {
@@ -3518,6 +3542,14 @@ describe('draft-edit（让模型改、让模型合并的生成）', () => {
     await seedLong(e, { content: `部署用 ${FAKE_SECRET.sk}` })
     expect(err(await e.run(draftOf('mem_l'))).code).toBe('has-secret')
     expect(prompts).toEqual([])
+  })
+
+  it('只含确认存下的疑似密钥：照常发给模型（同注入，疑似的不遮）', async () => {
+    const { llm, prompts } = scripted(answer({ content: '短', summary: '短' }))
+    const e = env({ llm })
+    await seedLong(e, { content: '测试库 api_key: TESTONLY0000000000000000，正文很长很长' })
+    ok(await e.run(draftOf('mem_l')))
+    expect(prompts).toHaveLength(1)
   })
 
   it('拿不到模型：llm-unavailable', async () => {

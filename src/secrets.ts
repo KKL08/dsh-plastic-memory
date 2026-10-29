@@ -57,6 +57,11 @@ export function hasSecret(r: SecretSurface): boolean {
   return detectSecrets(SECRET_FIELDS.map(f => fieldText(r, f)).join('\n')).length > 0
 }
 
+/** 四个面里有没有高危（critical）密钥：注入、视图只遮这一级，疑似的写入时已由用户确认放行、照原文出现。 */
+export function hasCriticalSecret(r: SecretSurface): boolean {
+  return detectSecrets(SECRET_FIELDS.map(f => fieldText(r, f)).join('\n')).some(h => h.severity === 'critical')
+}
+
 /** 命中密钥的字段。只在跨字段拼接时才命中（单个字段都不命中）的，四个面全算命中。 */
 export function secretFields(r: SecretSurface): SecretField[] {
   const hit = SECRET_FIELDS.filter(f => detectSecrets(fieldText(r, f)).length > 0)

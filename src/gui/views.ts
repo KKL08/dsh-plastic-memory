@@ -3,7 +3,7 @@ import type { MemoryRecord } from '../record-schema.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { DirectoryNote, LocatedRecord } from '../storage/table.ts'
 import { RETENTION_MS } from '../retention.ts'
-import { hasSecret, maskSecretSurface, maskSecrets } from '../secrets.ts'
+import { hasCriticalSecret, maskSecretSurface, maskSecrets } from '../secrets.ts'
 import { computeDigest } from '../storage/frontmatter.ts'
 import { FINDING_TYPES, type FindingType, type MemorySnapshot, type PendingDecision } from '../governance/schema.ts'
 import { candidateFingerprint, isModelChange, kindOf, overflowLevelOf, overflowScopeOf, verdictLoser } from '../governance/decisions.ts'
@@ -90,7 +90,8 @@ function card(r: MemoryRecord, data: LayerPreread, filePath = data.filePaths.get
     ...(r.handEdited ? { handEdited: true } : {}),
     filePath,
     digest: computeDigest(r.name, r.summary, r.content),
-    ...(hasSecret(r) ? { hasSecret: true as const } : {}),
+    // 与遮盖同口径只看高危：疑似的界面上是原文，照着改不会写回占位文字
+    ...(hasCriticalSecret(r) ? { hasSecret: true as const } : {}),
   }
 }
 

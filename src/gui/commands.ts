@@ -7,7 +7,7 @@ import type { TypeRegistry } from '../type-registry.ts'
 import type { AgentsMdWriter } from '../storage/agents-md.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { RecordNotFoundError } from '../errors.ts'
-import { detectSecrets, hasSecret } from '../secrets.ts'
+import { detectSecrets, hasCriticalSecret, hasSecret } from '../secrets.ts'
 import { computeDigest } from '../storage/frontmatter.ts'
 import { candidateFingerprint, isModelChange, kindOf, verdictLoser, type MisplacedIgnore, type PendingDecisionsStore } from '../governance/decisions.ts'
 import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
@@ -644,7 +644,8 @@ async function dispatch(
       const targets = refs.map((ref, i) => ({ record: records[i]!, base: ref.base }))
       const { rejected } = gateRecords(targets.map(t => t.record), gov, command.allowCrossWorkspace)
       if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
-      if (targets.some(t => hasSecret(t.record))) return fail(cmd, 'has-secret', '含密钥的记忆不能在这里改：界面上是遮盖后的正文，保存会把占位文字写回去。未做任何改动')
+      // 界面只遮高危密钥：确认存下的疑似密钥是原文，照常改
+      if (targets.some(t => hasCriticalSecret(t.record))) return fail(cmd, 'has-secret', '含密钥的记忆不能在这里改：界面上是遮盖后的正文，保存会把占位文字写回去。未做任何改动')
       const stale = () => fail(cmd, 'stale', '这条记忆刚被改过，刷新后再改。未做任何改动')
       if (targets.some(t => isStale(t.record, t.base))) return stale()
       // 与 memory_save 同口径：四个面一起查，高危直接拦，疑似等用户确认
@@ -657,6 +658,10 @@ async function dispatch(
       const keepAt = targets.length === 2 ? mergeKeeperIndex([targets[0]!.record, targets[1]!.record]) : 0
       const kept = targets[keepAt]!
       const removed = targets.length === 2 ? targets[1 - keepAt]! : undefined
+      // 另一条要软删：含密钥（疑似也算，同软删的口径）的软删不了，先拦下，免得保留的那条改了、另一条却删不掉
+      if (removed !== undefined && hasSecret(removed.record)) {
+        return fail(cmd, 'has-secret', `合并要删掉的那条（${removed.record.id}）含密钥，删除后不可恢复，不能在这里合并：先彻底删除它，或手改文件去掉密钥。未做任何改动`)
+      }
       // 快照先行，项目记忆也拍（memory_save 只给全局拍），否则撤销无从兑现；合并的两条同拍一份
       const snapshot = await deps.snapshots.capture({
         operation: 'pre-update',
@@ -706,8 +711,8 @@ async function dispatch(
       if (refs.length === 2 && refs[0].memoryId === refs[1]!.memoryId) return fail(cmd, 'invalid-args', `要合并的两条是同一条记忆：${refs[0].memoryId}`)
       const records = await Promise.all(refs.map(ref => locate(ref.memoryId, ref.layer)))
       if (!records.every(r => r?.status === 'active')) return notFound(refs.map(ref => ref.memoryId).join('、'))
-      // 原文不发给模型：明确密钥和疑似密钥都算
-      if (records.some(r => hasSecret(r!))) return fail(cmd, 'has-secret', '含密钥的记忆不发给模型。未做任何改动')
+      // 高危密钥的原文不发给模型；确认存下的疑似密钥同注入，照原文发
+      if (records.some(r => hasCriticalSecret(r!))) return fail(cmd, 'has-secret', '含密钥的记忆不发给模型。未做任何改动')
       const llm = deps.getLlm(exec)
       if (llm === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型')
       const r = await generateDraft({ adviceType: command.adviceType, records: records.map(rec => rec!), request: command.request, previous: command.previous }, llm)

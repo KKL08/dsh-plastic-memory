@@ -439,6 +439,17 @@ describe('全部记忆视图', () => {
     expect(library.directoryIssues.find(i => i.code === 'duplicate-id')).toEqual({ code: 'duplicate-id', path: dup, keptPath: join(root, GLOBAL_DIR, '全局一条.md') })
   })
 
+  it('hasSecret 只标高危密钥：用户确认存下的疑似密钥照原文显示，不标（不挡就地编辑）', async () => {
+    const h = harness()
+    await h.store.create(g({ id: 'mem_crit', name: '部署凭证', content: `token ${FAKE_SECRET.sk}` }))
+    await h.store.create(g({ id: 'mem_sus', name: '测试库', content: '测试库 api_key: TESTONLY0000000000000000' }))
+    const { library } = await h.views()
+    const items = library.layers[0].items
+    expect(items.find(i => i.id === 'mem_crit')!.hasSecret).toBe(true)
+    expect(items.find(i => i.id === 'mem_sus')).toMatchObject({ content: '测试库 api_key: TESTONLY0000000000000000' })
+    expect(items.find(i => i.id === 'mem_sus')!.hasSecret).toBeUndefined()
+  })
+
   it('同 id 在 global 与本项目各一份：删掉 global 那份后本项目这份照常列出；删掉的那份进最近删除，不算同 id 副本', async () => {
     const h = harness()
     await h.store.create(g({ id: 'mem_same', name: '全局那份' }))
