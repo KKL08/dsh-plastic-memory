@@ -216,7 +216,7 @@ export function issueSummary(result: LayerHealthResult): string {
 
 /** 工具输出里「已忽略」那一行（health、scan 共用）：告诉 agent 这些是用户有意保留的，不要主动去改。 */
 export function ignoredNote(count: number): string | undefined {
-  return count > 0 ? `已忽略 ${count} 条（用户可在记忆页健康里取消）` : undefined
+  return count > 0 ? `已忽略 ${count} 条（用户可在记忆页「处理」视图的「不再提醒」里恢复）` : undefined
 }
 
 /** 体检行里 scan 与 health 共有的字段。scan 另加 issues；health 另加上次体检、promoteCandidates。 */

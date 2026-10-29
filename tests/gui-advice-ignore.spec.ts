@@ -305,10 +305,10 @@ describe('agent 工具认忽略', () => {
     expect(r.score).toBeGreaterThan(plain.score)
     expect(r.breakdown.ruleLayer.bloat).toBe(0)
     expect(r.ignoredCount).toBe(1)
-    expect(renderHealthResult(r)).toContain('已忽略 1 条（用户可在记忆页健康里取消）')
+    expect(renderHealthResult(r)).toContain('已忽略 1 条（用户可在记忆页「处理」视图的「不再提醒」里恢复）')
     const all = await e.healthTool('all') as CheckupHealthResult
     expect(all.rows.find(row => row.workspacePath === WS)).toMatchObject({ score: r.score, ignoredCount: 1 })
-    expect(renderHealthResult(all)).toContain('已忽略 1 条（用户可在记忆页健康里取消）')
+    expect(renderHealthResult(all)).toContain('已忽略 1 条（用户可在记忆页「处理」视图的「不再提醒」里恢复）')
   })
 
   it('memory_scan：已忽略的不列为发现，输出注明已忽略条数；体检表的分数与界面一致', async () => {
@@ -321,11 +321,11 @@ describe('agent 工具认忽略', () => {
     expect(r.ignoredCount).toBe(1)
     const text = renderScanResult(r)
     expect(text).not.toContain('bloat mem_long')
-    expect(text).toContain('已忽略 1 条（用户可在记忆页健康里取消）')
+    expect(text).toContain('已忽略 1 条（用户可在记忆页「处理」视图的「不再提醒」里恢复）')
     const all = await e.scanTool({ scope: 'all' })
     if (all.kind !== 'checkup') throw new Error(all.kind)
     expect(all.rows.find(row => row.workspacePath === WS)).toMatchObject({ score: (await wsLayerOf(e)).score, issues: 0, ignoredCount: 1 })
-    expect(renderScanResult(all)).toContain('已忽略 1 条（用户可在记忆页健康里取消）')
+    expect(renderScanResult(all)).toContain('已忽略 1 条（用户可在记忆页「处理」视图的「不再提醒」里恢复）')
   })
 })
 

@@ -139,7 +139,7 @@ async function run(deps: MemoryCommandDeps, invocation: MemoryCommandInvocation)
     return llm === null ? fail(command.cmd, 'llm-unavailable', '借用的会话拿不到模型') : { ok: true, cmd: command.cmd, ...(llm.model !== undefined ? { model: llm.model } : {}) }
   }
   if (GOVERNANCE_COMMANDS.has(command.cmd) && deps.isGovernanceEnabled?.() === false && !(await isEditUndo(deps.decisions, command))) {
-    return fail(command.cmd, 'governance-disabled', '体检已关闭，可在插件设置里打开')
+    return fail(command.cmd, 'governance-disabled', '体检已关闭，可在配置文件里把 governance.enabled 改成 true 打开')
   }
   if (context.delegationDepth > 0) return fail(command.cmd, 'subagent-readonly', '借用的会话是子 agent，记忆只读')
   const now = deps.now?.() ?? Date.now()

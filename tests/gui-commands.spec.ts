@@ -1689,7 +1689,10 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
   it('体检关闭时 keep-local-memory 同 keep-local：governance-disabled，什么都不动', async () => {
     const e = env({ governanceEnabled: false })
     const memoryId = await saveCandidate(e)
-    expect(err(await e.run({ cmd: 'keep-local-memory', memoryId, layer: wsLayer })).code).toBe('governance-disabled')
+    const refused = err(await e.run({ cmd: 'keep-local-memory', memoryId, layer: wsLayer }))
+    expect(refused.code).toBe('governance-disabled')
+    // 设置页只读这个开关，打开它要改配置文件
+    expect(refused.detail).toBe('体检已关闭，可在配置文件里把 governance.enabled 改成 true 打开')
     expect((await e.store.get(memoryId))!.globalCandidate).toBe(true)
   })
 })

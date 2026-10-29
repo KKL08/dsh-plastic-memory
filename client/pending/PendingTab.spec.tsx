@@ -304,9 +304,9 @@ describe('待处理：各类卡', () => {
   })
 
   it('命令失败：原话显示在卡片里', async () => {
-    setup([promote], { respond: () => ({ ok: false, code: 'governance-disabled', detail: '体检已关闭，可在插件设置里打开' }) })
+    setup([promote], { respond: () => ({ ok: false, code: 'governance-disabled', detail: '体检已关闭，可在配置文件里把 governance.enabled 改成 true 打开' }) })
     fireEvent.click(screen.getByRole('button', { name: '提升为全局' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('没有完成：体检已关闭，可在插件设置里打开')
+    expect(await screen.findByRole('alert')).toHaveTextContent('没有完成：体检已关闭，可在配置文件里把 governance.enabled 改成 true 打开')
   })
 })
 
