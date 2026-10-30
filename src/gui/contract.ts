@@ -132,7 +132,7 @@ export const PENDING_LEVEL_OF_KIND = {
 /**
  * 建议整理项的问题类型，按显示顺序。除 stale 外与体检发现（governance/schema.ts FINDING_TYPES）同名：
  * expired / bloat / orphan 由规则检查实时算；redundancy / misplaced / unclear 取该层上次语义体检的缓存（体检关闭时不出）；
- * stale = 超过类型衰减期没确认（健康分的新鲜度）。
+ * stale = 超过类型衰退期没确认（健康分的新鲜度）。
  */
 export const ADVICE_TYPES = ['expired', 'bloat', 'redundancy', 'orphan', 'misplaced', 'unclear', 'stale'] as const
 export type AdviceType = (typeof ADVICE_TYPES)[number]
@@ -332,6 +332,9 @@ export const directoryIssueSchema = z.object({
 const generatedAt = z.number().optional()
 
 export { MODEL_CHANGE_KINDS, type ModelChangeKind } from '../contract-codes.ts'
+
+/** 场景：通用场景 id、每个场景的类型上限、通用以外的场景个数上限（设置页用）。 */
+export { GENERAL_SCENE, MAX_SCENES, SCENE_MAX_TYPES } from '../contract-codes.ts'
 
 /** 模型改写、替代此刻能不能撤：undoable 能；changed 之后又被改过（手改、模型再改、删除），不覆盖；undone 已撤销。 */
 export const MODEL_CHANGE_STATES = ['undoable', 'changed', 'undone'] as const
@@ -590,6 +593,8 @@ export type CheckupView = z.infer<typeof checkupViewSchema>
 // —— 命令 ——
 
 const allowCrossWorkspace = z.boolean().optional()
+/** 记忆类型的英文名：小写字母和连字符（同 types.ts 的类型标识约定、设置页的校验）。 */
+const typeNameSchema = z.string().regex(/^[a-z]+(?:-[a-z]+)*$/)
 /** 目标记忆所在的层（见 layerOfMemory）：服务端只动这一份，跨项目门仍按借来的会话判定；缺省按借来的会话定位。 */
 const layer = layerRefSchema.optional()
 
@@ -710,6 +715,13 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
     frequency: z.union([autoCheckupFrequencySchema, z.literal(AUTO_CHECKUP_FOLLOW)]),
   }).refine(c => c.scope.kind !== 'all' || c.frequency !== AUTO_CHECKUP_FOLLOW, { message: '「全部」没有可跟随的范围' }),
   z.object({ cmd: z.literal('refresh-views') }),
+  /**
+   * 设置页改名或删除自建类型时处理已有记忆（全库：全局和所有项目，等同 allowCrossWorkspace）。retype 把这一类的记忆
+   * （在用的和最近删除里的）改成 to，不刷新更新、确认时间；forget 把在用的这一类移到最近删除，含密钥的不动、计数返回。
+   * 重复执行只处理还是 from 的记忆。from 不限格式：配置文件里手写的类型名也要能迁走。
+   */
+  z.object({ cmd: z.literal('migrate-type'), from: z.string().min(1), action: z.enum(['retype', 'forget']), to: typeNameSchema.optional() })
+    .refine(c => (c.action === 'retype') === (c.to !== undefined), { message: 'retype 要带 to，forget 不带' }),
 ])
 export type MemoryCommand = z.infer<typeof memoryCommandSchema>
 export type MemoryCommandName = MemoryCommand['cmd']
@@ -802,6 +814,10 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     semanticBatches: z.number().int().positive().optional(),
     /** scan：宿主流 usage 块报的实际用量合计（所有批次、重试、跨项目重复检查）；宿主一次都没报时缺省，不拿估算顶替。 */
     usageTokens: z.number().int().nonnegative().optional(),
+    /** migrate-type：这次改了类型或移到最近删除的条数。 */
+    migrated: z.number().int().nonnegative().optional(),
+    /** migrate-type forget：含密钥、没有移动的条数。 */
+    skippedSecrets: z.number().int().nonnegative().optional(),
     /** info：记忆根目录、视图目录与各视图文件的绝对路径（checkups 是体检视图，session 是发命令的这个会话的视图）、视图版本。 */
     info: z.object({
       memoryRoot: z.string(),

@@ -54,6 +54,38 @@ All notable changes to this project are documented here. The format follows
   Conflict cards on the memory page and in the sidebar share one layout:
   the two memories, a note on what each choice does, then the three
   choices together in one row.
+- Scenes replace the three fixed templates. A scene is the set of memory
+  types the model can add, picked from a type pool: the five built-in types,
+  the presets `procedure` and `decision`, and your custom types. General
+  (`template: custom`) stays fixed to the five built-in types; Coding and
+  Office can now be edited or removed, and you can create up to five scenes
+  besides General, each with 1 to 8 types. Scenes are stored under the new
+  `scenes` key, and `template` names the current one. Switching scenes only
+  changes what can be added; existing memories of every type in the pool
+  are still injected and searchable.
+- Custom types no longer apply in every scene: they join the type pool and
+  are used once ticked into a scene. After upgrading, the current scene stays
+  the same and no config is migrated. If you used `template: custom`
+  together with `customTypes`, your custom types can no longer be added,
+  because General is fixed; create a scene on the settings page with the
+  built-in types and your custom types, and switch to it.
+- Office now adds only `decision`, which also covers commitments (who
+  promised whom what, by when); the model often could not tell the two
+  apart. `commitment` and `person` are retired: existing memories of these
+  types are still read with their original names and decay periods, but no
+  scene can add new ones. A custom type with one of these names is a new
+  type, and the old memories are read with its definition.
+- Custom types are managed inside the scene dialog on the settings page, and
+  their English name can now be changed. When a renamed or removed type
+  already has memories, you choose whether they follow the new name or move
+  to Recently deleted; removing a type can also keep its memories. The
+  memories are moved after the settings are saved, with a retry if some
+  could not be moved. Memories that contain secrets are not moved to
+  Recently deleted and are counted separately.
+- The settings page no longer shows the user dictionary path;
+  `search.userDictionaryPath` in `cordis.patch.yml` still works. The
+  per-type "Expires after (days)" field is now "Decay after (days)", since
+  passing it only marks a memory as possibly outdated.
 
 ### Fixed
 - Turning plastic-memory off and back on in the plugin page left its

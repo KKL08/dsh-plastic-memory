@@ -12,12 +12,12 @@ import { openMemoryPage, type NavStore } from '../nav.ts'
 import { PanelShell } from '../ui/PanelShell.tsx'
 import { ENTRY_ID, PACKAGE_NAME, type ConfigForm } from './config.ts'
 import { controlsCss } from './controls.tsx'
-import { customTypesCss } from './CustomTypes.tsx'
+import { scenesCss } from './Scenes.tsx'
 import { SettingsPage, settingsPageCss } from './SettingsPage.tsx'
 
 export type ConfigFormsService = NonNullable<HostContext['configForms']>
 
-const SETTINGS_CSS = controlsCss + customTypesCss + settingsPageCss
+const SETTINGS_CSS = controlsCss + scenesCss + settingsPageCss
 
 export function createSettingsCard(ctx: HostContext, configForms: ConfigFormsService, nav: NavStore, bind: BindGateway, useTranslate: () => Translate) {
   return function PlasticMemorySettings(props: RootStandardProps & { view?: 'summary' | 'page' }) {

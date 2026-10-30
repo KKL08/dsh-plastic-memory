@@ -1,7 +1,7 @@
 import z from '@deepseek-ai/schemastery'
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import type { MemoryTypeDefinition } from './types.ts'
-import { buildTypeRegistry, type TypeRegistry } from './type-registry.ts'
+import { buildTypeRegistry, PRESET_SCENES, type SceneConfig, type TypeRegistry } from './type-registry.ts'
 import { memoryDomainSpec } from './domain-spec.ts'
 import { MemoryStore } from './store.ts'
 import { FileTable } from './storage/file-table.ts'
@@ -60,8 +60,12 @@ export interface Config {
   snapshotOverflow: Volatile<OverflowMode>
   /** 证据下钻档位（模型什么时候回查记忆出处的原始对话）：off 不鼓励回查原始轨迹、strict 仅硬信号、active 开放路标式引导。 */
   evidenceLookup: Volatile<'off' | 'strict' | 'active'>
-  template: Volatile<'coding' | 'office' | 'custom'>
+  /** 当前场景 id：custom（通用，沿用旧模板值）/ coding / office / 自定义场景 id。 */
+  template: Volatile<string>
+  /** 类型池里的自建类型；勾进场景才会用来新增记忆。 */
   customTypes: Volatile<Record<string, Omit<MemoryTypeDefinition, 'name'>>>
+  /** 编码、办公与自定义场景（通用场景固定内置五类，不在这里）。 */
+  scenes: Volatile<Record<string, SceneConfig>>
   governance: {
     enabled: Volatile<boolean>
     health: { sensitivity: Volatile<HealthSensitivity> }
@@ -80,7 +84,7 @@ export const Config = z.object({
   snapshotTokenBudget: z.number().default(4000).volatile(),
   snapshotOverflow: z.union(OVERFLOW_MODES).default('relax').volatile(),
   evidenceLookup: z.union(['off', 'strict', 'active'] as const).default('strict').volatile(),
-  template: z.union(['coding', 'office', 'custom'] as const).default('coding').volatile(),
+  template: z.string().default('coding').volatile(),
   customTypes: z.dict(z.object({
     label: z.string().required(),
     description: z.string().required(),
@@ -89,6 +93,10 @@ export const Config = z.object({
     decayDays: z.union([z.number(), z.const(null)]).default(null),
     governancePriority: z.union(['high', 'medium', 'low'] as const).required(),
   })).default({}).volatile(),
+  scenes: z.dict(z.object({
+    label: z.string().required(),
+    types: z.array(z.string()).required(),
+  })).default(PRESET_SCENES).volatile(),
   governance: z.object({
     enabled: z.boolean().default(true).volatile(),
     health: z.object({
@@ -111,8 +119,13 @@ type SessionLike = object & { header?: { id?: string; cwd?: string } }
 export async function apply(ctx: Context, config: Config) {
   // 插件本次加载的时刻：健康视图带给浏览器半侧，判断冻结快照是否早于这次启动
   const bootedAt = Date.now()
-  // 类型表随 template / customTypes 热更新重建；各处拿到的是转发到当前表的同一个对象
-  const buildRegistry = () => buildTypeRegistry({ template: config.template.get(), customTypes: config.customTypes.get() })
+  // 类型表随 template / customTypes / scenes 热更新重建；各处拿到的是转发到当前表的同一个对象。
+  // 场景配置写错只警告（按通用或截断运行），不让插件加载失败
+  const buildRegistry = () => {
+    const built = buildTypeRegistry({ template: config.template.get(), customTypes: config.customTypes.get(), scenes: config.scenes.get() })
+    for (const warning of built.warnings) ctx.logger.warn(`[plastic-memory] ${warning}`)
+    return built
+  }
   let currentRegistry = buildRegistry() // 重名内置类型在这里抛错，加载即失败
   const registry: TypeRegistry = {
     get: name => currentRegistry.get(name),
@@ -503,7 +516,7 @@ export async function apply(ctx: Context, config: Config) {
   }
   loaderEvents.on('loader/volatile-update', async paths => {
     const changed = (...keys: string[]) => paths.some(path => keys.includes(path.join('.')))
-    if (changed('template', 'customTypes')) {
+    if (changed('template', 'customTypes', 'scenes')) {
       try {
         currentRegistry = buildRegistry()
         disposeSave()

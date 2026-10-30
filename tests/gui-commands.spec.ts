@@ -3782,3 +3782,85 @@ describe('撤销模型改写、替代（对话卡片、右侧栏「这次新写�
     expect(JSON.stringify(await modelChanges(e))).not.toContain(FAKE_SECRET.github)
   })
 })
+
+describe('migrate-type', () => {
+  const OTHER = { scope: 'workspace' as const, workspacePath: OTHER_WS }
+  const SESSION = { scope: 'workspace' as const, workspacePath: SESSION_WS }
+  const typeOf = async (e: ReturnType<typeof env>, id: string, workspacePath?: string) =>
+    (await e.store.get(id, { workspacePath, isExactLayer: true }))?.type
+
+  it('retype：全局和所有项目里这一类的记忆（含最近删除里的）都改成新名字，别的类型不动；重跑只处理剩下的', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_g', type: 'domain-term' }))
+    await e.store.create(record({ id: 'mem_s', type: 'domain-term', ...SESSION }))
+    await e.store.create(record({ id: 'mem_o', type: 'domain-term', ...OTHER }))
+    await e.store.create(record({ id: 'mem_del', type: 'domain-term', ...OTHER }))
+    expect(await e.store.softDelete({ id: 'mem_del', workspacePath: OTHER_WS }, { isExactLayer: true, now: NOW })).toBe(true)
+    await e.store.create(record({ id: 'mem_k', type: 'knowledge' }))
+
+    const body = ok(await e.run({ cmd: 'migrate-type', from: 'domain-term', action: 'retype', to: 'glossary' }))
+    expect(body.migrated).toBe(4)
+    for (const [id, ws] of [['mem_g'], ['mem_s', SESSION_WS], ['mem_o', OTHER_WS], ['mem_del', OTHER_WS]] as const) {
+      expect(await typeOf(e, id, ws)).toBe('glossary')
+    }
+    expect((await e.store.get('mem_del', { workspacePath: OTHER_WS, isExactLayer: true }))?.status).toBe('deleted')
+    expect(await typeOf(e, 'mem_k')).toBe('knowledge')
+    const library = libraryViewSchema.parse(await e.readView('library'))
+    expect(library.layers.flatMap(l => l.items).filter(m => m.type === 'glossary')).toHaveLength(3)
+
+    expect(ok(await e.run({ cmd: 'migrate-type', from: 'domain-term', action: 'retype', to: 'glossary' })).migrated).toBe(0)
+  })
+
+  it('retype 不刷新确认时间和更新时间（不改衰退计时）', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_t', type: 'domain-term', updatedAt: 5, lastConfirmedAt: 7 }))
+    ok(await e.run({ cmd: 'migrate-type', from: 'domain-term', action: 'retype', to: 'glossary' }))
+    expect(await e.store.get('mem_t')).toMatchObject({ type: 'glossary', updatedAt: 5, lastConfirmedAt: 7 })
+  })
+
+  it('forget：在用的这一类记忆移到最近删除（跨项目也动），含密钥的不动并计数，别的类型不动', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_g', type: 'client' }))
+    await e.store.create(record({ id: 'mem_o', type: 'client', ...OTHER }))
+    await e.store.create(record({ id: 'mem_sec', type: 'client', content: `连接串 ${FAKE_SECRET.sk}` }))
+    await e.store.create(record({ id: 'mem_k', type: 'knowledge' }))
+
+    const body = ok(await e.run({ cmd: 'migrate-type', from: 'client', action: 'forget' }))
+    expect(body.migrated).toBe(2)
+    expect(body.skippedSecrets).toBe(1)
+    expect((await e.store.get('mem_g', { isExactLayer: true }))?.status).toBe('deleted')
+    expect((await e.store.get('mem_o', { workspacePath: OTHER_WS, isExactLayer: true }))?.status).toBe('deleted')
+    expect((await e.store.get('mem_sec'))?.status).toBe('active')
+    expect((await e.store.get('mem_k'))?.status).toBe('active')
+    const deleted = deletedViewSchema.parse(await e.readView('deleted'))
+    expect(deleted.items.map(i => i.memory.id).sort()).toEqual(['mem_g', 'mem_o'])
+  })
+
+  it('部分记忆没改成时回 failed，已改的照样重写视图', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_a', type: 'domain-term' }))
+    await e.store.create(record({ id: 'mem_b', type: 'domain-term' }))
+    const update = e.store.update.bind(e.store)
+    e.store.update = (async (r, ...rest) => {
+      if (r.id === 'mem_b') throw new Error('磁盘满了')
+      return update(r, ...rest)
+    }) as typeof e.store.update
+    expect(err(await e.run({ cmd: 'migrate-type', from: 'domain-term', action: 'retype', to: 'glossary' })).code).toBe('failed')
+    const library = libraryViewSchema.parse(await e.readView('library'))
+    expect(library.layers.flatMap(l => l.items).map(m => [m.id, m.type]).sort()).toEqual([['mem_a', 'glossary'], ['mem_b', 'domain-term']])
+  })
+
+  it('配置文件里手写的类型名（不合设置页格式）也能迁走；新名字仍按格式校验', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_n', type: 'meeting_note' }))
+    expect(ok(await e.run({ cmd: 'migrate-type', from: 'meeting_note', action: 'retype', to: 'meeting-note' })).migrated).toBe(1)
+    expect(err(await e.runRaw(' migrate-type {"from":"meeting-note","action":"retype","to":"Meeting Note"}')).code).toBe('invalid-args')
+  })
+
+  it('参数：retype 要带 to；子 agent 会话只读', async () => {
+    const e = env()
+    expect(err(await e.runRaw(' migrate-type {"from":"domain-term","action":"retype"}')).code).toBe('invalid-args')
+    const sub = env({ delegationDepth: 1 })
+    expect(err(await sub.run({ cmd: 'migrate-type', from: 'domain-term', action: 'forget' })).code).toBe('subagent-readonly')
+  })
+})

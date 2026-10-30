@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
 
 import { Config } from '../src/index.ts'
+import { PRESET_SCENES } from '../src/type-registry.ts'
 
 describe('Config schema', () => {
   it('空对象得到全部默认值', () => {
@@ -18,6 +19,7 @@ describe('Config schema', () => {
     // volatile 引用取 .get() 的当前值，其余原样；undefined 的可选项（如用户词典路径）不出现
     const plain = (v: unknown): unknown => {
       if (v === null || typeof v !== 'object') return v
+      if (Array.isArray(v)) return v.map(plain)
       if (typeof (v as { get?: unknown }).get === 'function') return plain((v as { get(): unknown }).get())
       return Object.fromEntries(Object.entries(v).filter(([, x]) => x !== undefined).map(([k, x]) => [k, plain(x)]))
     }
@@ -28,6 +30,7 @@ describe('Config schema', () => {
       evidenceLookup: 'strict',
       template: 'coding',
       customTypes: {},
+      scenes: PRESET_SCENES,
       governance: { enabled: true, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global' },
       search: {},
       memoryRoot: '',
@@ -37,7 +40,7 @@ describe('Config schema', () => {
   it('进 GUI 的字段是 volatile 引用（用时 .get()），writeMode 与 memoryRoot 不是', () => {
     const value = new Config({} as never)
     const refs = [
-      value.template, value.customTypes, value.snapshotTokenBudget, value.snapshotOverflow, value.evidenceLookup,
+      value.template, value.customTypes, value.scenes, value.snapshotTokenBudget, value.snapshotOverflow, value.evidenceLookup,
       value.governance.enabled, value.governance.health.sensitivity, value.governance.globalPromoteTarget,
     ]
     for (const ref of refs) expect(typeof ref.get).toBe('function')
@@ -45,6 +48,13 @@ describe('Config schema', () => {
     expect(value.customTypes.get()).toEqual({})
     expect(value.writeMode).toBe('proactive')
     expect(value.memoryRoot).toBe('')
+  })
+
+  it('template 接受任意场景 id；scenes 显式给出时不补回出厂的编码、办公', () => {
+    const value = new Config({ template: 'scene-1', scenes: { 'scene-1': { label: '写作', types: ['preference'] } } } as never)
+    expect(value.template.get()).toBe('scene-1')
+    expect(value.scenes.get()).toEqual({ 'scene-1': { label: '写作', types: ['preference'] } })
+    expect(new Config({ scenes: {} } as never).scenes.get()).toEqual({})
   })
 
   it('非法 writeMode 抛错', () => {

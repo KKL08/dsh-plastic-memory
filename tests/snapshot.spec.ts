@@ -70,7 +70,7 @@ describe('assembleSnapshot', () => {
     expect(withoutRoot.text).not.toContain('MEMORY.md')
   })
 
-  it('超过衰减期未确认的记忆，注入行尾带陈旧度标注；期内不带', async () => {
+  it('超过衰退期未确认的记忆，注入行尾带陈旧度标注；期内不带', async () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_p', type: 'project', lastConfirmedAt: 0, summary: '冻结到三月' }))          // project 衰减 7 天，now=10 天 → 超期
     await store.put(record({ id: 'mem_fresh', type: 'project', lastConfirmedAt: 9 * DAY, summary: '新决定' }))    // 1 天前确认 → 期内

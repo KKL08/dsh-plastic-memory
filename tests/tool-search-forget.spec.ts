@@ -75,7 +75,7 @@ describe('executeSearch', () => {
     expect(text).not.toContain(FAKE_SECRET.github)
   })
 
-  it('超过衰减期未确认的命中带陈旧度标注', async () => {
+  it('超过衰退期未确认的命中带陈旧度标注', async () => {
     const store = new MemoryStore(new InMemoryTable())
     const r = await seed(store, '老知识')
     await store.put({ ...(await store.get(r.id))!, lastConfirmedAt: Date.now() - 100 * 86_400_000 }) // knowledge 衰减 90 天

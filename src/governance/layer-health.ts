@@ -96,7 +96,7 @@ export interface LayerHealthResult {
   semanticFindings: Finding[]
   /** 本层被用户忽略、因而没计分的建议（GUI 健康页「已忽略」、工具输出的条数）。 */
   ignored: IgnoredAdvice[]
-  /** 超过衰减期未确认的记忆 id（条数即 health.freshness.staleCount），GUI 待处理的「很久没确认」用。 */
+  /** 超过衰退期未确认的记忆 id（条数即 health.freshness.staleCount），GUI 待处理的「很久没确认」用。 */
   staleIds: string[]
   /** 本层的全局提升候选数（global 层恒 0）。 */
   promoteCandidates: number
