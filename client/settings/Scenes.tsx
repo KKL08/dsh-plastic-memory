@@ -356,13 +356,24 @@ function SceneDialog({ mode, fields, saved, migrations: initialMigrations, count
       const result = validateTypeDraft(form.draft, takenFor(original))
       const choose = (action: MigrationAction['action']) => { if (result.ok) rename(original, result.name, result.type, action) }
       footer = (
-        <div className="pm-scene-ask" role="group" aria-label={t('settings.type.retype')}>
+        // 焦点落在「取消」（原来的「确定」被换掉了）；Esc 只收起这一问，不关弹层
+        <div
+          className="pm-scene-ask"
+          role="group"
+          aria-label={t('settings.type.retype')}
+          onKeyDown={(event) => {
+            if (event.key !== 'Escape') return
+            event.preventDefault()
+            event.stopPropagation()
+            setView({ ...form, isAsking: false })
+          }}
+        >
           <p className="pm-scene-ask-text">
             {n !== undefined ? t('settings.type.renameAsk', { label: label(original), n }) : t('settings.type.renameAskUnknown', { label: label(original) })}
           </p>
           {!canMigrate ? <p className="pm-setting-hint">{t('settings.type.noSession')}</p> : null}
           <div className="pm-scene-ask-actions">
-            <Button onClick={() => { setView({ ...form, isAsking: false }) }}>{t('settings.sceneDialog.cancel')}</Button>
+            <Button autoFocus onClick={() => { setView({ ...form, isAsking: false }) }}>{t('settings.sceneDialog.cancel')}</Button>
             <Button disabled={!canMigrate} onClick={() => { choose('forget') }}>{t('settings.type.forget')}</Button>
             <Button variant="primary" disabled={!canMigrate} onClick={() => { choose('retype') }}>{t('settings.type.retype')}</Button>
           </div>

@@ -80,6 +80,8 @@ export function droppedTypes(saved: SettingsFields, draft: SettingsFields, migra
   const next = new Set(sceneTypes(draft, draft.template))
   return sceneTypes(saved, saved.template).filter((name) => {
     const m = migrations[name]
+    // 要移到最近删除的不算：说明里写的「已有的仍会带入」对它不成立，去向由确认框的迁移行写
+    if (m?.action === 'forget') return false
     return !next.has(m?.action === 'retype' ? m.to : name)
   })
 }

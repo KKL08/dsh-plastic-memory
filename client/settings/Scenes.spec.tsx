@@ -328,6 +328,36 @@ describe('改名与删除：已有记忆怎么办', () => {
     expect(gateway.executed[0]!.command).toEqual({ cmd: 'migrate-type', from: 'domain-term', action: 'retype', to: 'glossary' })
   })
 
+  it('改名时问旧记忆怎么办：焦点在「取消」；Esc 只收起这一问，表单和改了的英文名都还在', () => {
+    setup({ value: pool, memories: ['domain-term'] })
+    fireEvent.click(button('术语'))
+    const f = dialog('编辑类型')
+    fireEvent.change(within(f).getByLabelText('英文名'), { target: { value: 'glossary' } })
+    fireEvent.click(button('确定', f))
+    expect(button('取消', f)).toHaveFocus()
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(dialog('编辑类型')).toBeInTheDocument()
+    expect(within(f).queryByRole('button', { name: '跟着改名' })).toBeNull()
+    expect(within(f).getByLabelText('英文名')).toHaveValue('glossary')
+  })
+
+  it('删掉当前场景里的类型：选移到最近删除时，说明不再写已有的仍会带入；选保留记忆时照写', () => {
+    const removeTerm = (choice: string) => {
+      fireEvent.click(button('管理 ›'))
+      const m = dialog('我加的类型')
+      fireEvent.click(button('删除 术语', m))
+      fireEvent.click(button(choice, m))
+      fireEvent.click(button('完成', m))
+    }
+    const first = setup({ value: pool, memories: ['domain-term'] })
+    removeTerm('移到最近删除')
+    expect(screen.queryByText(/不再新增「术语」/)).toBeNull()
+    first.unmount()
+    setup({ value: pool, memories: ['domain-term'] })
+    removeTerm('保留记忆')
+    expect(screen.getByText(/保存后不再新增「术语」类记忆，已有的仍会带入、能搜到/)).toBeInTheDocument()
+  })
+
   it('删除时写明别的场景也在用；存过记忆的二选一，移到最近删除在保存后执行，含密钥的单独提示', async () => {
     const { form, gateway } = setup({
       value: pool, memories: ['client'],
