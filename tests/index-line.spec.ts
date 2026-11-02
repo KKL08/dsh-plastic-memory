@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatIndexLine, INFERENCE_NOTE } from '../src/index-line.ts'
+import { formatIndexLine, sourceNote, DELEGATED_PENDING_NOTE, HAND_EDITED_NOTE, INFERENCE_NOTE } from '../src/index-line.ts'
 import { STALENESS_NOTE } from '../src/record-freshness.ts'
 import { record } from './helpers/record.ts'
 
@@ -22,5 +22,29 @@ describe('MEMORY.md 行与注入索引行末尾带文件名（同源格式，pas
     const r = record({ id: 'mem_old', name: '旧决定', summary: '摘要' })
     expect(formatIndexLine(r, { passive: false, file: 'global/旧决定.md', note: STALENESS_NOTE(30) }))
       .toBe(`- [mem_old] 旧决定（摘要）${STALENESS_NOTE(30)} · global/旧决定.md`)
+  })
+})
+
+// 三种标注只显示一个：已手编 → 子 agent 写入未确认 → 模型推断
+describe('来源标注的优先级', () => {
+  const inferred = { sessionId: 's', eventRange: [0, 1] as [number, number], sourceMode: 'agent-inferred' as const }
+  const pending = { sessionId: 'sub', depth: 1, parentSessionId: 'main' }
+
+  it('待确认记录带「（子 agent 写入，未确认）」，压过模型推断；已手编再压过它', () => {
+    expect(DELEGATED_PENDING_NOTE).toBe('（子 agent 写入，未确认）')
+    expect(sourceNote(record({ delegation: pending, source: inferred }))).toBe(DELEGATED_PENDING_NOTE)
+    expect(sourceNote(record({ delegation: pending, source: inferred, handEdited: true }))).toBe(HAND_EDITED_NOTE)
+    expect(sourceNote(record({ source: inferred }))).toBe(INFERENCE_NOTE)
+  })
+
+  it('已升档的子 agent 记录不再带待确认标注，按出处回到推断或无标注', () => {
+    const reviewed = { ...pending, reviewed: { by: 'main' as const, at: 1 } }
+    expect(sourceNote(record({ delegation: reviewed, source: inferred }))).toBe(INFERENCE_NOTE)
+    expect(sourceNote(record({ delegation: reviewed }))).toBe('')
+  })
+
+  it('索引行（MEMORY.md 与注入共用）里待确认标注只出现一次，落在文件名之前', () => {
+    const r = record({ id: 'mem_sub', name: '子级观察', summary: '摘要', delegation: pending, source: inferred })
+    expect(formatIndexLine(r, { passive: false, file: '子级观察.md' })).toBe(`- [mem_sub] 子级观察（摘要）${DELEGATED_PENDING_NOTE} · 子级观察.md`)
   })
 })

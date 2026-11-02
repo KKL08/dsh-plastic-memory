@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { screen } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import { MemoryCard } from './MemoryCard.tsx'
+import { PanelShell } from './PanelShell.tsx'
+import { createFakeGateway } from '../gateway.fake.ts'
+import { createTranslator } from '../i18n.tsx'
+import { en } from '../locales.ts'
 import { memory, NOW, renderInShell } from '../test-utils.tsx'
 import type { MemoryCard as MemoryCardData } from '../../src/gui/contract.ts'
 
@@ -45,6 +49,31 @@ describe('MemoryCard', () => {
     renderInShell(<MemoryCard memory={memory({ updatedAt: new Date(2025, 11, 3).getTime() })} now={NOW} hideScope />)
     expect(screen.queryByText('本项目')).toBeNull()
     expect(screen.getByText('2025 年 12 月 3 日')).toBeInTheDocument()
+  })
+
+  it('子 agent 写入的记忆：元信息在时间后面写第几层和是否确认；普通记忆不写', () => {
+    const metaOf = (delegation: MemoryCardData['delegation']) => {
+      const { container, unmount } = renderInShell(<MemoryCard memory={memory(delegation === undefined ? {} : { delegation })} now={NOW} typeLabel="行为偏好" />)
+      const texts = [...container.querySelector('.pm-mc-meta')!.children].map(s => s.textContent)
+      unmount()
+      return texts
+    }
+    expect(metaOf({ depth: 1 })).toEqual(['行为偏好', '本项目', '你明确说的', '9 月 12 日', '子 agent 写入 · 第 1 层 · 待确认'])
+    expect(metaOf({ depth: 2, reviewed: 'main' })).toEqual(['行为偏好', '本项目', '你明确说的', '9 月 12 日', '子 agent 写入 · 第 2 层 · 主会话已接受'])
+    expect(metaOf({ depth: 3, reviewed: 'user' })).toEqual(['行为偏好', '本项目', '你明确说的', '9 月 12 日', '子 agent 写入 · 第 3 层 · 用户已改'])
+    expect(metaOf(undefined)).toEqual(['行为偏好', '本项目', '你明确说的', '9 月 12 日'])
+  })
+
+  it('子 agent 标注的英文文案', () => {
+    const textOf = (delegation: MemoryCardData['delegation']) => {
+      const { container, unmount } = render(<PanelShell gateway={createFakeGateway()} t={createTranslator(en)}><MemoryCard memory={memory({ delegation })} now={NOW} /></PanelShell>)
+      const text = container.querySelector('.pm-mc-meta')!.lastElementChild!.textContent
+      unmount()
+      return text
+    }
+    expect(textOf({ depth: 1 })).toBe('Written by a subagent · level 1 · pending review')
+    expect(textOf({ depth: 2, reviewed: 'main' })).toBe('Written by a subagent · level 2 · accepted by the main session')
+    expect(textOf({ depth: 2, reviewed: 'user' })).toBe('Written by a subagent · level 2 · edited by you')
   })
 
   it('已过期：原文改次文字色（pm-mc--expired），元信息写「不再带入对话」', () => {

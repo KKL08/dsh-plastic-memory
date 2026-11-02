@@ -193,6 +193,20 @@ template: scene-mh2k9x
 
 `decayDays` is the decay period: a memory not confirmed within that many days is only marked as possibly outdated and stays valid; `null` means it never decays.
 
+### Memories Written by Subagents
+
+Subagents that DeepSeek Harness delegates to (including the ones they delegate to in turn) can also save memories with `memory_save`. These memories start out pending: they stay in the current project, are not injected into the main session, rank after all other memories in search, and are marked as written by a subagent and unconfirmed in index lines and search results. The subagent reports what it saved in its reply, and the main session decides what happens to it:
+
+- Accept: `memory_confirm` with the `accept-subagent` action; from then on it is injected and searched like the project's other memories.
+- Rewrite: `memory_save update`, which accepts it as well.
+- Drop: `memory_forget`.
+
+What the main session leaves alone stays pending. You don't need to go through them one by one: when the main session thinks one should be global, it shows up among the promotion candidates under Pending as usual. Memory cards also show "Written by a subagent · level N · pending review" ("accepted by the main session" or "edited by you" once accepted), and editing or promoting a pending memory directly on the memory page accepts it.
+
+Subagents can only write `knowledge` and `project` memories, and only types the current scene includes; the source (`sourceMode`) can only be observed or inferred. They cannot use `supersedes` or `force`, and can only update pending memories their own session saved. Each subagent session creates at most `subagent.maxSavesPerSession` memories (default 10). Subagent writing follows the governance switch: with `governance.enabled` set to `false`, subagent sessions stay read-only.
+
+**Known limitations:** these rules only bind tool calls. A subagent with file tools that edits the files in the memory directory directly is not bound by them, and a child process started with the DeepSeek Harness SDK that also loads this plugin is treated as a main session.
+
 ---
 
 
@@ -222,10 +236,10 @@ template: scene-mh2k9x
 | ---------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `memory_health`  | **Health score (0–100):** assess overall memory library quality; also lists quarantined files that failed to parse and directory problems (duplicate ids, missing `.workspace` marker, …) |
 | `memory_scan`    | Deep audit — rule layer (secret leaks, oversized entries, orphaned refs, corrupt files); semantic layer (conflicts, redundancies) calls LLM on demand |
-| `memory_confirm` | **Freshness refresh & triage:** reaffirm stale memories to extend their lifecycle, or arbitrate conflict scan results |
+| `memory_confirm` | **Freshness refresh & triage:** reaffirm stale memories to extend their lifecycle, arbitrate conflict scan results, or accept a pending memory a subagent saved |
 | `memory_promote` | **Scope promotion:** elevate validated workspace memories to global or sync to `AGENTS.md` — **requires explicit user approval** |
 
-Governance tools act on global and current-workspace memories only; pass `allowCrossWorkspace: true` to touch other projects' memories (when the user explicitly asks for a library-wide clean-up). Sub-agent sessions (tasks the host delegates) are read-only: `memory_search`, `memory_source` and `memory_health` work, every writing tool (including `memory_scan`) is refused, and memories are still injected as usual.
+Governance tools act on global and current-workspace memories only; pass `allowCrossWorkspace: true` to touch other projects' memories (when the user explicitly asks for a library-wide clean-up). In subagent sessions, `memory_search` and `memory_health` work as usual, `memory_source` only traces memories whose source is that session, `memory_save` writes under the rules in "Memories Written by Subagents", every other writing tool (including `memory_scan` and `memory_confirm`) is refused, and memories are still injected as usual.
 
 
 ---
@@ -285,6 +299,7 @@ Adjust `plastic-memory` settings in the profile's `cordis.patch.yml`:
 | `governance.enabled`               | `true`              | Enable the governance layer (health checks, scoring, promotion)                          |
 | `governance.health.sensitivity`    | `'normal'`          | Health alert sensitivity: `conservative` / `normal` / `proactive`                        |
 | `governance.globalPromoteTarget`   | `'plugin-global'`   | Promotion target: `plugin-global` (plugin's global scope) or `agents-md` (`~/.dsh/AGENTS.md`) |
+| `subagent.maxSavesPerSession`      | `10`                | How many memories each subagent session can create (config file only); applied from the next save |
 | `memoryRoot`                       | `''`                | Storage root path; defaults to `${DSH_HOME:-~/.dsh}/memories`                            |
 | `search.userDictionaryPath`        | unset               | User dictionary path (config file only): added on top of the built-in dictionary, applied from the next search. Must be an absolute path; one entry per line as `word frequency tag`, the frequency is required and entries without it have no effect, for example `插件记忆 10 n`. Has no effect unless `@node-rs/jieba` is installed |
 

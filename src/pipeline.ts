@@ -1,6 +1,6 @@
 import type { MemoryRecord, SourceMode } from './record-schema.ts'
 import type { CodedNote, RejectCode, WarningCode } from './contract-codes.ts'
-import { CONFIDENCE_BY_SOURCE, memoryRecordSchema } from './record-schema.ts'
+import { ALREADY_REVIEWED_REASON, CONFIDENCE_BY_SOURCE, NOT_DELEGATED_REASON, isPendingDelegated, memoryRecordSchema } from './record-schema.ts'
 import type { MemoryStore } from './store.ts'
 import type { TypeRegistry } from './type-registry.ts'
 import type { PendingDecisionsStore } from './governance/decisions.ts'
@@ -29,10 +29,22 @@ export interface SaveCandidate {
   force?: boolean
 }
 
+/**
+ * 子 agent 会话的委派上下文：深度、直接父会话取自宿主 header，根会话沿父链解析（解析不到缺省），
+ * mode 现读宿主 subagent 投影、不落盘。只来自宿主，不来自工具参数；主会话没有这一块。
+ */
+export interface SaveDelegation {
+  depth: number
+  parentSessionId: string
+  rootSessionId?: string
+  mode: 'one-shot' | 'continuable'
+}
+
 export type PipelineResult =
   | { kind: 'saved'; record: MemoryRecord; warnings?: SaveWarning[] }
   | { kind: 'updated'; record: MemoryRecord; warnings?: SaveWarning[] }
-  | { kind: 'duplicate-suspected'; existing: Array<{ id: string; summary: string }> }
+  /** isFromSubagent：子 agent 撞上主档，改不了也不能 force，结果文案改为让它向委派方说明分歧。 */
+  | { kind: 'duplicate-suspected'; existing: Array<{ id: string; summary: string }>; isFromSubagent?: true }
   | { kind: 'rejected'; code: RejectCode; reason: string }
 
 /** 保存成功但要提醒模型/用户的事：code 稳定、text 可改。 */
@@ -97,8 +109,92 @@ function resolveValidity(
   return { validFrom, validTo }
 }
 
+type PipelineDeps = Parameters<typeof runSavePipeline>[1]
+
+/** 子 agent 能用的依据：它收到的指令来自委派方，用户明说、用户行为、经用户确认的动作都无从谈起。 */
+const SUBAGENT_SOURCE_MODES: readonly SourceMode[] = ['environment-observed', 'agent-inferred']
+/** 子 agent 能写的类型（还要在当前场景里）：事实，和观察到的项目状态。 */
+const SUBAGENT_TYPES = ['knowledge', 'project']
+/** 每个子会话最多新建几条：配置项 subagent.maxSavesPerSession 的缺省值，工具说明照它写。 */
+export const SUBAGENT_MAX_SAVES_DEFAULT = 10
+
+/** 子 agent 改不了这条记录的原因；是本会话创建、还没升档、还在本项目的返回 undefined。已删除的由调用处先拦。 */
+function notOwnPending(target: MemoryRecord, sessionId: string): string | undefined {
+  if (target.delegation === undefined) return NOT_DELEGATED_REASON
+  if (target.delegation.sessionId !== sessionId) return '是别的子会话存的'
+  if (!isPendingDelegated(target)) return ALREADY_REVIEWED_REASON
+  if (target.scope !== 'workspace') return '已经提升为全局'
+  if (target.status === 'superseded') return '已经被取代了'
+  return undefined
+}
+
+/**
+ * 子 agent 写入约束：主会话不经过这里。一个判断块、一个拒绝码 subagent-restricted，原因按条写明怎么改或带回主会话。
+ * 顺序固定：scope 降级（只警告）→ 依据 → 类型 → supersedes / force → update 归属 → create 配额，同时犯多条时报最前的。
+ * 通过时返回降级后的候选与警告，后面的管线照常走。
+ */
+async function checkSubagentWrite(
+  input: SaveCandidate,
+  deps: PipelineDeps,
+): Promise<{ candidate: SaveCandidate; warnings: SaveWarning[] } | { code: RejectCode; reason: string }> {
+  const warnings: SaveWarning[] = []
+  let candidate = input
+  // 子 agent 没有提升候选的通道：global 直接落当前项目，提不提全局由主会话决定
+  if (candidate.scope === 'global') {
+    candidate = { ...candidate, scope: 'workspace' }
+    warnings.push({ code: 'subagent-scope-local', text: '子 agent 写的记忆只能放本项目，要提全局由主会话决定' })
+  }
+  if (!SUBAGENT_SOURCE_MODES.includes(candidate.sourceMode)) {
+    return {
+      code: 'subagent-restricted',
+      reason: `sourceMode=${candidate.sourceMode} 子 agent 用不了：子 agent 收到的指令来自委派方，不算用户明说；按观察（environment-observed）或推断（agent-inferred）重发。`,
+    }
+  }
+  const writable = SUBAGENT_TYPES.filter(t => deps.registry.has(t))
+  if (!writable.includes(candidate.type)) {
+    const shown = writable.length > 0 ? `当前场景里能写：${writable.join('、')}` : '当前场景里两类都没有'
+    return {
+      code: 'subagent-restricted',
+      reason: `子 agent 只能写 knowledge、project 两类，且要在当前场景里（${shown}）；"${candidate.type}" 不行，这件事带回主会话。`,
+    }
+  }
+  if ((candidate.supersedes ?? []).length > 0) {
+    return { code: 'subagent-restricted', reason: '子 agent 不能用 supersedes 替代旧记忆；去掉 supersedes 重发，要替代哪条带回主会话。' }
+  }
+  // force 放行的三道检查（去重、手改保护、疑似密钥）都要用户点头，子 agent 问不到用户
+  if (candidate.force) {
+    return {
+      code: 'subagent-restricted',
+      reason: '子 agent 不能带 force：去重、手改保护、疑似密钥三道检查子 agent 都过不去。撞重复就另存或放弃，疑似密钥一律不存；去掉 force 重发。',
+    }
+  }
+  // update 只改本会话存下、还没升档的；目标不存在或已删除的也拒（不交给 target-missing：其间被恢复成主档就会放过去）。
+  // 写入时在存储锁内按最新读数再判一次（见下方 put 的 skipIf），其间被接受、删除、提升的不覆盖
+  if (candidate.action === 'update' && candidate.id !== undefined) {
+    const target = await deps.store.get(candidate.id, { workspacePath: deps.workspacePath })
+    if (target === undefined || target.status === 'deleted') {
+      return { code: 'subagent-restricted', reason: `要改的记忆 ${candidate.id} 不存在或已删除，带回主会话。` }
+    }
+    const why = notOwnPending(target, deps.session.id)
+    if (why !== undefined) {
+      return { code: 'subagent-restricted', reason: `子 agent 只能改本会话存下、还没被接受的记忆；${candidate.id} ${why}。要改的内容带回主会话。` }
+    }
+  }
+  // 新建配额：现数本会话创建的记录（在用含已过期、已取代都算，删了就释放），不加锁、不另存计数。
+  // 软限制：串行调用不超，同一子会话并行调用可能多存一两条。无工作目录的 create 交给后面的 no-workspace
+  if (candidate.action === 'create' && deps.workspacePath !== undefined) {
+    const max = deps.maxSubagentSaves ?? SUBAGENT_MAX_SAVES_DEFAULT
+    const mine = await deps.store.query({ scope: { kind: 'workspace', path: deps.workspacePath }, status: ['active', 'superseded'] })
+    const count = mine.filter(r => r.delegation?.sessionId === deps.session.id).length
+    if (count >= max) {
+      return { code: 'subagent-restricted', reason: `本会话已存 ${count} 条，到了每个子会话 ${max} 条的上限；其余带回主会话。` }
+    }
+  }
+  return { candidate, warnings }
+}
+
 export async function runSavePipeline(
-  candidate: SaveCandidate,
+  input: SaveCandidate,
   deps: {
     store: MemoryStore
     registry: TypeRegistry
@@ -112,10 +208,19 @@ export async function runSavePipeline(
     decisions?: PendingDecisionsStore
     /** 这次 memory_save 的工具调用 id，记进撤销记录，对话卡按它认领。 */
     callId?: string
+    /** 子 agent 会话的委派上下文；新建的记录据此带 delegation（待确认）。 */
+    delegation?: SaveDelegation
+    /** 子会话新建配额（配置 subagent.maxSavesPerSession，调用时现读），缺省 SUBAGENT_MAX_SAVES_DEFAULT。 */
+    maxSubagentSaves?: number
   },
 ): Promise<PipelineResult> {
   const { store, registry, session } = deps
   const now = Date.now()
+
+  // 0. 子 agent 写入约束（主会话没有 delegation，原样往下走）
+  const subagent = deps.delegation ? await checkSubagentWrite(input, deps) : { candidate: input, warnings: [] }
+  if ('code' in subagent) return { kind: 'rejected', ...subagent }
+  const { candidate } = subagent
 
   // 1. 格式校验
   if (!registry.has(candidate.type)) {
@@ -192,7 +297,10 @@ export async function runSavePipeline(
     return {
       kind: 'rejected',
       code: 'hand-edited',
-      reason: `${current.join('\n\n')}\n未保存。先在对话里问用户要不要改写，用户同意后带 force: true 重发。`,
+      // 子 agent 问不到用户、也不能带 force（见 checkSubagentWrite），不给 force 指引
+      reason: deps.delegation
+        ? `${current.join('\n\n')}\n未保存。这条记忆用户手改过，子 agent 改不了，带回主会话。`
+        : `${current.join('\n\n')}\n未保存。先在对话里问用户要不要改写，用户同意后带 force: true 重发。`,
     }
   }
 
@@ -211,13 +319,15 @@ export async function runSavePipeline(
       scope: { kind: 'workspace', path: deps.workspacePath! }, // create 必有 workspace 桶（前置已拒无 cwd）
       status: ['active'],
     })
-    const hits = peers.filter(p => {
+    // 子 agent 只和主档比：待确认记录之间的分歧留给主会话接受时裁决，两条并存
+    const hits = peers.filter(p => !(deps.delegation && isPendingDelegated(p))).filter(p => {
       const peerText = `${p.content}\n${p.summary}`
       if (entities.length > 0) return extractEntities(peerText).some(e => entities.includes(e))
       return textSimilarity(text, peerText) >= DUPLICATE_SIMILARITY_THRESHOLD
     })
     if (hits.length > 0) {
-      return { kind: 'duplicate-suspected', existing: hits.map(h => ({ id: h.id, summary: h.summary })) }
+      const existing = hits.map(h => ({ id: h.id, summary: h.summary }))
+      return deps.delegation ? { kind: 'duplicate-suspected', existing, isFromSubagent: true } : { kind: 'duplicate-suspected', existing }
     }
   }
 
@@ -243,6 +353,11 @@ export async function runSavePipeline(
       globalCandidate: globalCandidate || target!.globalCandidate,
       // 内容由本次会话重写，出处随之对应：清除手编标记（pruneUndefined 剔键）
       handEdited: undefined,
+      // 创建者四个字段永不改。子 agent 改写：内容仍是子级写的，reviewed 一律去掉（回到待确认）；
+      // 主会话改写待确认记录即升档：reviewed 缺省时补 main，已有的（用户改过、早先接受过）不动
+      delegation: deps.delegation
+        ? target!.delegation && { ...target!.delegation, reviewed: undefined }
+        : target!.delegation && { ...target!.delegation, reviewed: target!.delegation.reviewed ?? { by: 'main', at: now } },
     }
   } else {
     record = {
@@ -255,6 +370,11 @@ export async function runSavePipeline(
       validFrom: validity.validFrom, validTo: validity.validTo,
       status: 'active', confidence, supersedes: candidate.supersedes,
       globalCandidate,
+      // 子 agent 新建：创建者信息由宿主上下文填，不带 reviewed 即待确认（mode 不落盘）
+      delegation: deps.delegation && {
+        sessionId: session.id, depth: deps.delegation.depth, parentSessionId: deps.delegation.parentSessionId,
+        rootSessionId: deps.delegation.rootSessionId,
+      },
     }
   }
   const parsed = memoryRecordSchema.safeParse(record)
@@ -278,7 +398,9 @@ export async function runSavePipeline(
     return {
       kind: 'rejected',
       code: 'secret-suspected',
-      reason: `检测到疑似密钥（${suspected.map(h => h.name).join('、')}），未保存。是密钥就改写成不含密钥的指针再存；向用户确认不是密钥后，带 force: true 重发。`,
+      reason: deps.delegation
+        ? `检测到疑似密钥（${suspected.map(h => h.name).join('、')}），未保存。疑似密钥一律不存：改写成不含密钥的指针再存，不是密钥的带回主会话。`
+        : `检测到疑似密钥（${suspected.map(h => h.name).join('、')}），未保存。是密钥就改写成不含密钥的指针再存；向用户确认不是密钥后，带 force: true 重发。`,
     }
   }
 
@@ -296,9 +418,13 @@ export async function runSavePipeline(
   const updateSnapshotId = candidate.action === 'update' && target!.scope === 'global' ? snapshot?.id : undefined
 
   const clean = pruneUndefined(parsed.data)
-  // 新 id 不定位（create 排他占名）；update 走 put：锁内定位旧文件，scope 没变就原地覆盖
-  if (candidate.action === 'update') await store.put(clean)
-  else await store.create(clean)
+  // 新 id 不定位（create 排他占名）；update 走 put：锁内定位旧文件，scope 没变就原地覆盖。
+  // 子 agent 改写在锁内按最新读数重判归属：检查之后被接受、删除、提升的不写
+  if (candidate.action === 'create') await store.create(clean)
+  else if (!deps.delegation) await store.put(clean)
+  else if (!await store.put(clean, undefined, current => current.status !== 'active' || notOwnPending(current, session.id) !== undefined)) {
+    return { kind: 'rejected', code: 'subagent-restricted', reason: `记忆 ${clean.id} 在读取之后被改过（可能已被接受、删除或提升为全局），这次没写；要改的内容带回主会话。` }
+  }
 
   // 6. supersedes 处理：同桶目标置 superseded，跨桶的跳过并给警告（见上方 replaced）。
   let crossBucketSupersede = false
@@ -344,6 +470,7 @@ export async function runSavePipeline(
     : { kind: 'saved' as const, record: clean }
 
   const warnings: SaveWarning[] = [
+    ...subagent.warnings,
     ...scopeWarnings,
     ...(crossBucketSupersede
       ? [{ code: 'cross-bucket-supersede' as const, text: '跨桶替代不允许：supersedes 目标不在本次写入的记忆桶内，已跳过不置 superseded。global 记忆的矛盾走 memory_scan 的冲突裁决，跨层提升合并走 memory_promote' }]

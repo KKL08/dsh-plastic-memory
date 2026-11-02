@@ -5,7 +5,7 @@ import type { MemoryLogger, MemoryStore } from '../store.ts'
 import type { CasKvTable } from '../kv-table.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { AgentsMdWriter } from '../storage/agents-md.ts'
-import type { MemoryRecord } from '../record-schema.ts'
+import { isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
 import { RecordNotFoundError } from '../errors.ts'
 import { detectSecrets, hasCriticalSecret, hasSecret } from '../secrets.ts'
 import { computeDigest } from '../storage/frontmatter.ts'
@@ -496,7 +496,7 @@ async function dispatch(
       if (isErr(entry)) return entry
       const r = await executePromote(
         { confirmedIds: entry.memoryIds.slice(0, 1), target: command.target, allowCrossWorkspace: command.allowCrossWorkspace },
-        gov, { store: deps.store, agentsMd: deps.agentsMd, snapshots: deps.snapshots, now: () => now }, candidateCopy(entry),
+        gov, { store: deps.store, agentsMd: deps.agentsMd, snapshots: deps.snapshots, now: () => now }, { ...candidateCopy(entry), reviewedBy: 'user' },
       )
       if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
       if (r.taken.length > 0) return fail(cmd, 'target-taken', r.message)
@@ -517,7 +517,7 @@ async function dispatch(
         const r = await executePromote(
           { confirmedIds: [rec.id], target, allowCrossWorkspace: command.allowCrossWorkspace },
           gov, { store: deps.store, agentsMd: deps.agentsMd, snapshots: deps.snapshots, now: () => now },
-          { target: { kind: 'workspace', workspacePath: rec.workspacePath! } },
+          { target: { kind: 'workspace', workspacePath: rec.workspacePath! }, reviewedBy: 'user' },
         )
         if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
         if (r.taken.length > 0) return fail(cmd, 'target-taken', r.message)
@@ -676,7 +676,9 @@ async function dispatch(
           // 锁内按磁盘上的现状再核对一次：读过之后被改过就原样不写
           if (cur.status !== 'active' || isStale(cur, kept.base)) return cur
           // 标手改：出处还是原来的会话，「已手编，出处可能不对应」照实；模型之后要改写、替代它得先问用户（同手改文件）
-          return (mine = { ...cur, content, name, summary, tags, updatedAt: now, lastConfirmedAt: now, handEdited: true })
+          // 子 agent 写的待确认记录：用户亲手改过就算升档；已升档的不改写升档来源
+          const delegation = isPendingDelegated(cur) ? { delegation: { ...cur.delegation!, reviewed: { by: 'user' as const, at: now } } } : {}
+          return (mine = { ...cur, content, name, summary, tags, updatedAt: now, lastConfirmedAt: now, handEdited: true, ...delegation })
         }, hint)
       } catch (error) {
         if (!(error instanceof RecordNotFoundError)) throw error

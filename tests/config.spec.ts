@@ -33,6 +33,7 @@ describe('Config schema', () => {
       scenes: PRESET_SCENES,
       governance: { enabled: true, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global' },
       search: {},
+      subagent: { maxSavesPerSession: 10 },
       memoryRoot: '',
     })
   })
@@ -42,6 +43,7 @@ describe('Config schema', () => {
     const refs = [
       value.template, value.customTypes, value.scenes, value.snapshotTokenBudget, value.snapshotOverflow, value.evidenceLookup,
       value.governance.enabled, value.governance.health.sensitivity, value.governance.globalPromoteTarget,
+      value.subagent.maxSavesPerSession,
     ]
     for (const ref of refs) expect(typeof ref.get).toBe('function')
     expect(value.governance.globalPromoteTarget.get()).toBe('plugin-global')
@@ -82,6 +84,12 @@ describe('Config schema', () => {
       },
     } as never)
     expect(value.customTypes.get().regulation!.decayDays).toBeNull()
+  })
+
+  it('subagent.maxSavesPerSession 默认 10，YAML 可配', () => {
+    expect(new Config({} as never).subagent.maxSavesPerSession.get()).toBe(10)
+    expect(new Config(parse('subagent:\n  maxSavesPerSession: 3\n') as never).subagent.maxSavesPerSession.get()).toBe(3)
+    expect(() => new Config({ subagent: { maxSavesPerSession: 'many' } } as never)).toThrow()
   })
 
   it('search.userDictionaryPath 可选、volatile，YAML 可配', () => {

@@ -1,8 +1,9 @@
 import type { MemoryStore } from '../store.ts'
 import { conflictFingerprint, kindOf, verdictLoser, type PendingDecisionsStore } from '../governance/decisions.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
-import type { MemoryRecord } from '../record-schema.ts'
-import type { DecisionRejectCode, GovernanceRejectCode } from '../contract-codes.ts'
+import { ALREADY_REVIEWED_REASON, NOT_DELEGATED_REASON, isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
+import type { AcceptRejectCode, DecisionRejectCode, GovernanceRejectCode } from '../contract-codes.ts'
+import { RecordNotFoundError } from '../errors.ts'
 import { crossWorkspaceNote, gateRecords, locateCopy, type CopyTarget, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
 
 export interface ConfirmToolDeps {
@@ -16,6 +17,7 @@ export interface ConfirmToolDeps {
 export type ConfirmArgs =
   | { action: 'refresh'; memoryId: string; allowCrossWorkspace?: boolean }
   | { action: 'resolve'; decisionId: string; verdict: 'keep-left' | 'keep-right' | 'keep-both' | 'dismiss'; allowCrossWorkspace?: boolean }
+  | { action: 'accept-subagent'; memoryId: string; allowCrossWorkspace?: boolean }
 
 /** 只给 GUI 用的选项，不在工具参数里，模型传不进来。 */
 export interface ConfirmOptions {
@@ -30,15 +32,27 @@ export interface ConfirmOptions {
  * isUnrecorded：两边都留，但条目没有指纹、也现算不出（垂直冲突缺基线，或记忆属于别的项目、会话的基线不是它的），结论没记下，条目已移出账本。
  */
 export type ConfirmResult =
+  | SettleResult
+  | { kind: 'accepted'; memoryId: string; lastConfirmedAt: number; otherWorkspaces: OtherWorkspaceMark[]; message: string }
+  | ConfirmError<AcceptRejectCode>
+
+/** refresh、resolve 的结果，不带 accept-subagent 的拒绝码（GUI 只调这两个动作）。 */
+export type SettleResult =
   | { kind: 'refreshed'; memoryId: string; lastConfirmedAt: number; otherWorkspaces: OtherWorkspaceMark[]; message: string }
   | { kind: 'resolved'; decisionId: string; verdict: string; actions: string[]; alsoCleared: number; otherWorkspaces: OtherWorkspaceMark[]; isUnrecorded?: true; message: string }
-  | { kind: 'error'; code?: GovernanceRejectCode | DecisionRejectCode; rejected?: CrossWorkspaceRejection[]; message: string }
+  | ConfirmError<GovernanceRejectCode | DecisionRejectCode>
+
+type ConfirmError<C extends string> = { kind: 'error'; code?: C; rejected?: CrossWorkspaceRejection[]; message: string }
 
 /**
- * memory_confirm：refresh 刷新新鲜度；resolve 裁决待决冲突。
+ * memory_confirm：refresh 刷新新鲜度；resolve 裁决待决冲突；accept-subagent 把子 agent 存的待确认记录接受为本项目主档。
  * verdict 约定：横向冲突 left=memoryIds[0]、right=memoryIds[1]；
  * 垂直冲突（有 baselineRef）left=记忆、right=基线（基线不可删，keep-right 意为记忆过时删除）。
  */
+export async function executeConfirm(
+  rawArgs: Exclude<ConfirmArgs, { action: 'accept-subagent' }>, context: GovernanceContext, deps: ConfirmToolDeps, options?: ConfirmOptions,
+): Promise<SettleResult>
+export async function executeConfirm(rawArgs: unknown, context: GovernanceContext, deps: ConfirmToolDeps, options?: ConfirmOptions): Promise<ConfirmResult>
 export async function executeConfirm(
   rawArgs: unknown,
   context: GovernanceContext,
@@ -73,12 +87,64 @@ export async function executeConfirm(
     }
   }
 
+  if (args.action === 'accept-subagent') return acceptSubagent(args, context, deps, now, locate)
+
   // 先认领条目再裁决：两条相反的裁决同时到（两个标签页、两个宿主进程），只让一条删败方，另一条什么都不动
   const claimed = await deps.decisions.withClaim(args.decisionId, () => resolveClaimed(args, context, deps, now, locate, options.baseline))
   if (!claimed.isClaimed) {
     return { kind: 'error', code: 'claimed', message: `待决项 ${args.decisionId} 正在被另一次裁决处理，未做任何改动。` }
   }
   return claimed.value
+}
+
+/** 锁内发现目标不是在用的待确认记录：不写盘，带着原因退出 store.update。 */
+class NotPendingError extends Error {}
+
+/** 目标为什么不能接受；是在用的待确认记录返回 undefined。 */
+function notPendingReason(record: MemoryRecord): string | undefined {
+  if (record.status === 'deleted') return '已删除'
+  if (record.status === 'superseded') return '已被取代'
+  if (record.delegation === undefined) return NOT_DELEGATED_REASON
+  if (!isPendingDelegated(record)) return record.delegation.reviewed?.by === 'user' ? '用户已经改过' : ALREADY_REVIEWED_REASON
+  return undefined
+}
+
+/**
+ * accept-subagent：只写 reviewed（by main）和 lastConfirmedAt，其余字段含 validTo 不动（不延长有效期）。
+ * 状态在 store.update 锁内按磁盘上的当前内容判，读到之后被删、被取代、被接受的都不写。不入账本、不拍快照：
+ * 内容没变，要撤就删。
+ */
+async function acceptSubagent(
+  args: Extract<ConfirmArgs, { action: 'accept-subagent' }>,
+  context: GovernanceContext,
+  deps: ConfirmToolDeps,
+  now: number,
+  locate: (id: string) => Promise<MemoryRecord | undefined>,
+): Promise<ConfirmResult> {
+  const target = await locate(args.memoryId)
+  if (!target) return { kind: 'error', message: `记忆不存在：${args.memoryId}` }
+  const { rejected, otherWorkspaces } = gateRecords([target], context, args.allowCrossWorkspace)
+  if (rejected.length > 0) {
+    return { kind: 'error', code: 'cross-workspace', rejected, message: `未接受记忆 ${args.memoryId}。${crossWorkspaceNote(rejected, [])}` }
+  }
+  try {
+    await deps.store.update(target, (cur) => {
+      const why = notPendingReason(cur)
+      if (why !== undefined) throw new NotPendingError(why)
+      return { ...cur, lastConfirmedAt: now, delegation: { ...cur.delegation!, reviewed: { by: 'main', at: now } } }
+    })
+  } catch (err) {
+    if (err instanceof RecordNotFoundError) return { kind: 'error', message: `记忆不存在：${args.memoryId}` }
+    if (!(err instanceof NotPendingError)) throw err
+    return {
+      kind: 'error', code: 'not-subagent-pending',
+      message: `记忆 ${args.memoryId} ${err.message}，不是待确认的子 agent 记忆，未做改动。accept-subagent 只接受子 agent 存的、还在用的待确认记忆。`,
+    }
+  }
+  return {
+    kind: 'accepted', memoryId: args.memoryId, lastConfirmedAt: now, otherWorkspaces,
+    message: `已接受子 agent 存的记忆 ${args.memoryId}，不再待确认，和本项目其他记忆一样注入、检索。${crossWorkspaceNote([], otherWorkspaces)}`,
+  }
 }
 
 /** 持有认领时裁决：条目在认领之后重读，刚被别人裁决完的这里读不到。 */

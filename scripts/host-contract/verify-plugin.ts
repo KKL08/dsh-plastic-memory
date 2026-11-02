@@ -5,7 +5,8 @@
  * 会话/工作目录解析、落盘布局、规则层/语义层 note 码、快照回路、提升候选 dismiss、
  * 证据锚悬空降级（H9a 把落盘记录的 sessionId 改成不存在的会话）、真会话下钻（H9b 读回原文）、
  * 当轮锚来自宿主 turnBoundary 投影（H13）、外部直接写进记忆目录的文件出现在新会话第一步的快照消息里（H15）、
- * 宿主 grep 工具搜记忆根目录时顶层命中、.archive/ 不命中（H16）。
+ * 宿主 grep 工具搜记忆根目录时顶层命中、.archive/ 不命中（H16）、
+ * 带委派 header 的真子会话存入待确认记忆、检索排在主档后、溯源只限自己的会话、父会话接受后进新会话的注入（H19）。
  * 有 DEEPSEEK_API_KEY 且宿主能选出默认模型时再跑语义扫描与取消两项、以及一次真实的自动体检（H17：无会话、宿主默认模型），否则标 SKIPPED。
  * run.sh 随后用同一个 DSH_HOME 再起一次宿主（HOST_CONTRACT_PHASE=restart）：第一趟把
  * 恢复的记录 id 写进交接文件，第二趟跑 H12，证明恢复结果过了进程重启仍可读；H14 第一趟建持久化会话、
@@ -21,7 +22,7 @@ import { existsSync, readdirSync, readFileSync, mkdtempSync, mkdirSync, realpath
 import { isAbsolute, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
-import { createSystemMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createSystemMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Context } from '@deepseek-ai/cordis'
 
 export const name = 'dsh-plastic-memory-host-contract'
@@ -32,11 +33,11 @@ type ModelOpts = { provider?: string; model?: string }
 type Exec = { agent: { session: unknown; options: ModelOpts }; signal: AbortSignal }
 type ToolDef = { execute(args: unknown, exec: unknown): Promise<unknown> }
 type Tools = { get(name: string): ToolDef | undefined; schemas(): Array<{ name: string }> }
-/** 宿主 SessionStore 的最小契约：只用到 create（建真 Session，会话 id 由宿主分配）。 */
-type Sessions = { create(id?: string, options?: { meta?: { cwd?: string } }): SessionLike }
+/** 宿主 SessionStore 的最小契约：只用到 create（建真 Session，会话 id 由宿主分配）。H19 用 meta 的委派 header 建子会话（宿主 childSessionMeta 写的同两项）。 */
+type Sessions = { create(id?: string, options?: { meta?: { cwd?: string; delegationDepth?: number; parentSession?: string } }): SessionLike }
 /** 宿主 Session 的最小契约：resolveContext 读 header；H9b 用 append 落一条用户消息；H15 读可见历史。 */
 type SessionLike = {
-  header: { id: string; cwd?: string }; seq: number
+  header: { id: string; cwd?: string; delegationDepth?: number; parentSession?: string }; seq: number
   append(type: string, data: unknown, opts?: unknown): { seq: number }
   deriveMessages(): Array<{ source: { kind: string } }>
 }
@@ -518,6 +519,68 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       const topHit = paths.some(p => p.endsWith('h16-top.md'))
       const archiveHit = paths.some(p => p.includes('.archive'))
       return { ok: topHit && !archiveHit, detail: `topHit=${topHit} archiveHit=${archiveHit} matches=${JSON.stringify(paths)}` }
+    })
+
+    // H19 真子会话写入待确认记忆：宿主真 Session 带委派 header（delegationDepth 1、parentSession 指向父会话，宿主 childSessionMeta
+    // 写的同两项），不经 subagents 服务派发。子会话先落一轮里的一条宿主 tool/result（agent-loop 同款 createToolResultMessage），再存一条：
+    // 文件带 delegation、根会话经宿主 sessionQuery 解析到父会话 → 父会话检索时排在主档之后、带待确认标注 → 子会话溯源自己的记录读到
+    // 工具结果原文、溯源父会话的记录回 subagent-restricted → 接受前新会话第一步的快照不带它，父会话 accept-subagent 后带。
+    await attempt('H19-SUBAGENT-PENDING-LIFECYCLE', async () => {
+      const agents = ctx.get('agents') as Agents | undefined
+      if (!agents) return { ok: false, detail: 'agents service unavailable' }
+      const ws = mkWs('h19')
+      const parent = sessions.create(undefined, { meta: { cwd: ws } })
+      const child = sessions.create(undefined, { meta: { cwd: ws, delegationDepth: 1, parentSession: parent.header.id } })
+      const execOf = (session: SessionLike): Exec => ({ agent: { session, options: {} }, signal: new AbortController().signal })
+      /** 新会话第一步的快照消息正文（同 H15 的走法），用完销毁。 */
+      const firstStepSnapshot = async (): Promise<string> => {
+        const handle = await agents.create({ sessionId: `h19-${Math.random().toString(36).slice(2, 8)}`, meta: { cwd: ws } })
+        try {
+          const bus = ctx as unknown as { waterfall(name: string, ...args: unknown[]): Promise<unknown> }
+          const said = createUserMessage({ content: [{ type: 'text', text: 'H19 用户消息' }], source: { kind: 'user' } })
+          const decision = await bus.waterfall('agent/pre-step', { agent: handle.agent, messages: [said], turn: 1, step: 1, signal: new AbortController().signal },
+            async () => ({ kind: 'enter', messages: [said] })) as DecisionLike
+          return (decision.messages ?? []).filter(m => m.source.kind === 'plastic-memory').flatMap(m => m.content.map(b => b.text ?? '')).join('\n')
+        } finally {
+          await handle.dispose()
+        }
+      }
+
+      const token = `H19PROBE${Math.random().toString(36).slice(2, 8)}`
+      const observed = `H19 工具结果：${token} 在 main 上跑 pnpm test 会挂`
+      child.append('turn/start', { turn: 1 })
+      child.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: 'h19-call' as never, content: [{ type: 'text', text: observed }], isError: false }) }, { surfaceOp: 'append' })
+      type Saved = { kind: string; record?: { id: string; delegation?: { sessionId: string; depth: number; parentSessionId: string; rootSessionId?: string } } }
+      const saved = await call('memory_save', { action: 'create', name: 'h19-child', summary: '子会话观察', content: `子会话看到 ${token}「主干测试会挂」`, type: 'knowledge', scope: 'workspace', sourceMode: 'environment-observed', tags: [] }, execOf(child)) as Saved
+      if (saved.kind !== 'saved' || !saved.record) return { ok: false, detail: `child save kind=${saved.kind}` }
+      const id = saved.record.id
+      const file = readMemoryFile(id) ?? ''
+      const block = /^delegation:\n((?: {2}.*\n)+)/m.exec(file)?.[1] ?? ''
+      const fileOk = block.includes(`sessionId: ${child.header.id}`) && block.includes('depth: 1') && block.includes(`parentSessionId: ${parent.header.id}`)
+        && block.includes(`rootSessionId: ${parent.header.id}`) && !block.includes('reviewed')
+
+      const settled = await call('memory_save', { action: 'create', name: 'h19-main', summary: '主会话记下', content: `主会话记下 ${token}「主档」`, ...MEMORY_BASE }, execOf(parent)) as Saved
+      const searched = await call('memory_search', { query: token }, execOf(parent)) as { hits?: Array<{ id: string; sourceNote: string }> }
+      const order = (searched.hits ?? []).map(h => h.id)
+      const pendingHit = (searched.hits ?? []).find(h => h.id === id)
+      const searchOk = order.length === 2 && order[0] === settled.record?.id && order[1] === id && (pendingHit?.sourceNote ?? '').includes('子 agent 写入，未确认')
+
+      const own = await call('memory_source', { memoryId: id }, execOf(child)) as { kind: string; lines?: string[] }
+      const ownOk = own.kind === 'ok' && (own.lines ?? []).some(l => l.includes(observed) && l.includes('tool:'))
+      const other = await call('memory_source', { memoryId: settled.record?.id }, execOf(child)) as { kind: string; code?: string }
+      const otherOk = other.kind === 'rejected' && other.code === 'subagent-restricted'
+
+      const beforeAccept = await firstStepSnapshot()
+      const accepted = await call('memory_confirm', { action: 'accept-subagent', memoryId: id }, execOf(parent)) as { kind: string }
+      const reviewedOnDisk = /^delegation:\n(?: {2}.*\n)*? {2}reviewed:\n {4}by: main\n/m.test(readMemoryFile(id) ?? '')
+      const afterAccept = await firstStepSnapshot()
+      const injectOk = !beforeAccept.includes(id) && afterAccept.includes(id)
+      return {
+        ok: fileOk && searchOk && ownOk && otherOk && accepted.kind === 'accepted' && reviewedOnDisk && injectOk,
+        detail: `file.delegation=${JSON.stringify(block.trim())} fileOk=${fileOk} | search order=${JSON.stringify(order)} pendingNote=${pendingHit?.sourceNote} | `
+          + `source own=${own.kind} hasToolResult=${ownOk} other=${other.kind}/${other.code} | accept=${accepted.kind} reviewedOnDisk=${reviewedOnDisk} | `
+          + `injected before=${beforeAccept.includes(id)} after=${afterAccept.includes(id)}`,
+      }
     })
 
     // H14 第一趟：照 agent-loop 的建会话配方造一个持久化的真会话（prepare → create 写句柄 → enter + announce，

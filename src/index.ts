@@ -13,6 +13,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 // dsh-agent 的类型增广把 turnBoundary 键登记进投影状态表；stateOf(session, 'turnBoundary') 因此按宿主真实键表校验。
 import type {} from '@deepseek-ai/dsh-agent'
 import type { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
+import { SUBAGENT_MAX_SAVES_DEFAULT, type SaveDelegation } from './pipeline.ts'
 import { createSaveTool } from './tools/save-tool.ts'
 import { createSearchTool } from './tools/search-tool.ts'
 import { createForgetTool } from './tools/forget-tool.ts'
@@ -24,7 +25,7 @@ import type { PromoteTarget } from './tools/promote.ts'
 import { createAgentsMdWriter, agentsMdPath } from './storage/agents-md.ts'
 import { createSnapshotTool } from './tools/snapshot-tool.ts'
 import { createSourceTool } from './tools/source-tool.ts'
-import { delegationDepthOf, gateSubagentWrites } from './tools/subagent-gate.ts'
+import { delegationDepthOf, gateSubagentWrites, resolveRootSessionId, subagentModeOf, type DelegationHeader } from './tools/subagent-gate.ts'
 import type { ReadEventFn } from './tools/source.ts'
 import { SnapshotCache, resolveWorkspacePath } from './runtime.ts'
 import { lastVisibleSnapshot, shouldSendSnapshot, snapshotMessageBody } from './snapshot-message.ts'
@@ -75,6 +76,10 @@ export interface Config {
     /** jieba 用户词典（每行「词 词频 词性」）的绝对路径，追加在主词典之上；不设只用主词典。改了下一次搜索生效。 */
     userDictionaryPath: Volatile<string | undefined>
   }
+  subagent: {
+    /** 每个子会话最多新建几条记忆（只拦 create，按本会话已存条数现数）。设置页不露，配置文件可改；改了下一次保存生效。 */
+    maxSavesPerSession: Volatile<number>
+  }
   /** 记忆文件根目录，缺省解析到 ${DSH_HOME:-~/.dsh}/memories（storage/paths.ts） */
   memoryRoot: string
 }
@@ -107,6 +112,9 @@ export const Config = z.object({
   search: z.object({
     userDictionaryPath: z.string().volatile(),
   }),
+  subagent: z.object({
+    maxSavesPerSession: z.number().default(SUBAGENT_MAX_SAVES_DEFAULT).volatile(),
+  }),
   memoryRoot: z.string().default(''),
 })
 
@@ -114,7 +122,7 @@ export const name = 'dsh-plastic-memory'
 export const inject = ['tools']
 
 /** session/created 回调里用得到的最小 session 结构（真实类型是 dsh-session 的 Session）。 */
-type SessionLike = object & { header?: { id?: string; cwd?: string } }
+type SessionLike = object & { header?: { id?: string; cwd?: string; delegationDepth?: number; parentSession?: string } }
 
 export async function apply(ctx: Context, config: Config) {
   // 插件本次加载的时刻：健康视图带给浏览器半侧，判断冻结快照是否早于这次启动
@@ -237,6 +245,11 @@ export async function apply(ctx: Context, config: Config) {
     get budget() { return config.snapshotTokenBudget.get() },
     get overflow() { return config.snapshotOverflow.get() },
     get evidenceLookup() { return config.evidenceLookup.get() },
+    // 持久型子会话的注入带上它自己创建的待确认记录；主会话、一次性子会话不带（mode 每次构建现读 subagent 投影）
+    ownSessionIdOf: session => {
+      const s = session as Session
+      return delegationDepthOf(s) >= 1 && sessionModeOf(s) === 'continuable' ? s.header.id : undefined
+    },
     onFrozen: (session, { overflowChanged, ...info }) => {
       const sessionId = (session as SessionLike).header?.id
       if (views === undefined || sessionId === undefined) return
@@ -288,11 +301,19 @@ export async function apply(ctx: Context, config: Config) {
   // 0.1.5 起的明码标价读法（Session 不再暴露整份事件数组）：终点 = session.seq - 1（seq 是下一条
   // 事件的位置，O(1)）；起点 = agent-loop 注册的 turnBoundary 投影里的 openTurnStartSeq
   // （当轮 turn/start 的 seq，宿主按事件增量折叠，不重扫日志）。
+  // 子 agent 会话（深度 ≥ 1）另带委派上下文：直接父会话取 header.parentSession（深度 0 的会话也可能带它，那是用户 fork，不算委派），
+  // mode 现读 subagent 投影。全部来自宿主，不来自工具参数。
   async function resolveContext(exec: ToolRunContext) {
     const session = exec.agent?.session
+    rememberHeader(session?.header)
+    const delegationDepth = delegationDepthOf(session)
+    const delegation: SaveDelegation | undefined = session && delegationDepth >= 1
+      ? { depth: delegationDepth, parentSessionId: session.header.parentSession ?? 'unknown', mode: sessionModeOf(session) }
+      : undefined
     return {
       workspacePath: await resolveCwd(session?.header.cwd),
-      delegationDepth: delegationDepthOf(session),
+      delegationDepth,
+      ...(delegation ? { delegation } : {}),
       session: {
         id: session?.header.id ?? 'unknown',
         lastSeq: session ? Math.max(session.seq - 1, 0) : 0,
@@ -341,6 +362,48 @@ export async function apply(ctx: Context, config: Config) {
     return 0
   }
 
+  // 进程内见过的会话 header（委派三项宿主写入后不变）：根会话解析先查这里，查不到再问 sessionQuery
+  const knownHeaders = new Map<string, DelegationHeader>()
+  function rememberHeader(header: SessionLike['header']) {
+    if (header?.id === undefined) return
+    knownHeaders.set(header.id, { id: header.id, delegationDepth: header.delegationDepth, parentSession: header.parentSession })
+  }
+  /** 一个会话的 header：缓存优先，再问 sessionQuery（filterSessions 按 id，只读 header、不读事件）。
+   *  服务缺席、宿主没有这个方法、查无此会话、查询抛错都返回 undefined（根会话留空）。sessionQuery 按调用探测，同 memory_source。 */
+  async function lookupHeader(id: string): Promise<DelegationHeader | undefined> {
+    const known = knownHeaders.get(id)
+    if (known !== undefined) return known
+    type HeaderQuery = { filterSessions?(filters: ReadonlyArray<{ kind: 'id'; values: readonly string[] }>): Promise<Array<{ header: DelegationHeader }>> }
+    try {
+      const records = await probe<HeaderQuery>('sessionQuery')?.filterSessions?.([{ kind: 'id', values: [id] }])
+      const header = records?.find(r => r.header.id === id)?.header
+      rememberHeader(header)
+      return header
+    } catch {
+      return undefined
+    }
+  }
+  /** memory_save 的上下文：子会话再沿父链解析根会话（只有保存才读祖先 header，其余工具不读）。 */
+  async function resolveSaveContext(exec: ToolRunContext) {
+    const context = await resolveContext(exec)
+    const header = exec.agent?.session?.header
+    if (context.delegation === undefined || header === undefined) return context
+    const rootSessionId = await resolveRootSessionId(header, lookupHeader)
+    return rootSessionId === undefined ? context : { ...context, delegation: { ...context.delegation, rootSessionId } }
+  }
+
+  /** 子会话的 mode（一次性 / 持久型）：sessionProjections 按调用经 probe 探测（惯例同 openTurnStartSeq），
+   *  读不到按一次性，每个 session 第一次退化打 warn。 */
+  const modeFallbackWarned = new WeakSet<Session>()
+  function sessionModeOf(session: Session): SaveDelegation['mode'] {
+    const { mode, fallback } = subagentModeOf(probe<SessionProjectionRegistry>('sessionProjections'), session)
+    if (fallback !== undefined && !modeFallbackWarned.has(session)) {
+      modeFallbackWarned.add(session)
+      ctx.logger.warn(`subagent projection unavailable for session "${session.header.id}", treating it as one-shot: ${fallback}`)
+    }
+    return mode
+  }
+
   /** 该 session 当前生效的指令正文（按事件顺序）；null = 没有生效指令，或服务缺席、键未注册、读取抛错
    *  （垂直冲突检测跳过，扫描打 baseline-missing）。探测惯例同 openTurnStartSeq。
    *  状态里的形状漂移按 session 对象、每个 seq 只 warn 一次（插件重载后对历史漂移会再 warn 一次）；
@@ -380,9 +443,9 @@ export async function apply(ctx: Context, config: Config) {
   // memory_promote 与 /memory promote 共用一个写入器（进程内串行）
   const agentsMd = createAgentsMdWriter(agentsMdPath())
 
-  // 子 agent 只读门：写入与治理工具在注册处统一套门，子 agent 会话（delegationDepth ≥ 1）调用即拒。
+  // 子 agent 只读门：写入与治理工具在注册处统一套门，子 agent 会话（delegationDepth ≥ 1）调用即拒；allowSubagent 给出放行条件的才放行。
   // 门内的执行结束后（成功、失败都算，失败前可能已写了一部分）请求重写全局视图：模型改了记忆或账本，记忆页跟着变
-  const registerWrite = (tool: ToolDefinition) => ctx.tools.register(gateSubagentWrites({
+  const registerWrite = (tool: ToolDefinition, allowSubagent?: () => boolean) => ctx.tools.register(gateSubagentWrites({
     ...tool,
     execute: async (args, exec) => {
       try {
@@ -391,9 +454,18 @@ export async function apply(ctx: Context, config: Config) {
         void views?.request()
       }
     },
-  }, resolveContext))
-  // memory_save 的类型枚举与说明在注册时从类型表生成：模板或自定义类型热更新后注销重注册
-  const registerSave = () => registerWrite(createSaveTool({ store, registry, resolveContext, snapshots, decisions, onSaved }))
+  }, resolveContext, allowSubagent))
+  // memory_save 的类型枚举与说明在注册时从类型表生成：模板或自定义类型热更新后注销重注册。
+  // 子 agent 写入随治理开关：待确认记录的接受入口 memory_confirm 随开关注册，关着时子 agent 照旧只读（每次调用现读）；
+  // 说明里的子 agent 段按注册时的开关写，开关热更新时也重注册
+  const allowSubagentSave = () => config.governance.enabled.get()
+  const registerSave = () => registerWrite(
+    createSaveTool({
+      store, registry, resolveContext: resolveSaveContext, snapshots, decisions, onSaved,
+      maxSubagentSaves: () => config.subagent.maxSavesPerSession.get(),
+    }, { allowSubagent: allowSubagentSave() }),
+    allowSubagentSave,
+  )
   let disposeSave = registerSave()
   ctx.tools.register(createSearchTool({
     store, registry, resolveContext, sessionRecall: snapshotCache,
@@ -526,7 +598,11 @@ export async function apply(ctx: Context, config: Config) {
         ctx.logger.error('[plastic-memory] 类型配置热更新失败，沿用原类型表:', err)
       }
     }
-    if (changed('governance.enabled')) syncGovernanceTools()
+    if (changed('governance.enabled')) {
+      syncGovernanceTools()
+      disposeSave()
+      disposeSave = registerSave()
+    }
     // search.userDictionaryPath 不用在这里处理：memory_search 每次现读路径，变了下一次搜索就重建分词实例
     snapshotCache.markAllStale()
     // 改了上限或超限处理：已有的超限提醒按新配置当场重算（调高上限后不再提醒，档位按新上限算），重写视图时就是新结果
@@ -554,6 +630,7 @@ export async function apply(ctx: Context, config: Config) {
     // eager 预热：新 session 不必等首次组装才解析 workspace（HMR 后存量 session 由组装入口自愈）。
     // 与组装入口的解析等待同一份 memoize，不重复解析；只解析不组装，快照仍在首个发送点冻结。
     snapshotCache.prewarm(session)
+    rememberHeader(session.header)
     // 第一个会话出现时写一遍全局视图（不 await）：浏览器半侧首次打开记忆页要有内容；此时宿主已挂好 storageDomain。
     if (startupViewsPending && views) {
       startupViewsPending = false

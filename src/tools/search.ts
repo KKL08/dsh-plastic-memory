@@ -5,7 +5,7 @@ import { expandQueryTerms } from '../text.ts'
 import { resolveLiveFirst } from '../storage/table.ts'
 import { tokenizerForQuery, type QueryTokenizerOptions } from '../search/jieba-segmenter.ts'
 import { CJK } from '../search/tokenizer.ts'
-import { anchorTerms, compareRanked, rankRecords, type RankedRecord, type SearchTier } from '../search/ranking.ts'
+import { anchorTerms, compareRanked, pendingLast, rankRecords, type RankedRecord, type SearchTier } from '../search/ranking.ts'
 import { groupQueryTerms, judgeTopHit, termHitCounts, type TermHitCount } from '../search/coverage.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import { sourceNote } from '../index-line.ts'
@@ -166,7 +166,8 @@ export async function executeSearch(
   } else {
     ranked = rankRecords({ tokens, legacyTerms, anchors: anchorTerms(a.query), records: candidates, listedCount: read.listedCount, tokenize })
   }
-  ranked.sort(compareRanked)
+  // 主档在前、待确认在后（深度浅的在前），再截断：主档命中不足 limit 时待确认才露出
+  ranked = pendingLast(ranked.sort(compareRanked))
   // id 直达：查询恰等于某条可见记忆的 id，该条排第一
   const directId = a.query.trim()
   const direct = ranked.findIndex(e => e.record.id === directId)

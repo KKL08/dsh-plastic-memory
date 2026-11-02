@@ -13,6 +13,9 @@ describe('对话卡解析的文本格式与服务端渲染器一致', () => {
     const saved = record({ id: 'mem_abc', type: 'preference', scope: 'workspace' })
     expect(parseSaveResult(renderSaveResult({ kind: 'saved', record: saved }))).toEqual({ kind: 'saved', id: 'mem_abc', type: 'preference', scope: 'workspace' })
     expect(parseSaveResult(renderSaveResult({ kind: 'updated', record: saved }))).toEqual({ kind: 'updated', id: 'mem_abc' })
+    // 子 agent 存下的待确认记录同一个首行格式
+    const pending = record({ id: 'mem_sub', type: 'knowledge', scope: 'workspace', delegation: { sessionId: 's-child', depth: 1, parentSessionId: 's-main' } })
+    expect(parseSaveResult(renderSaveResult({ kind: 'saved', record: pending }))).toEqual({ kind: 'saved', id: 'mem_sub', type: 'knowledge', scope: 'workspace' })
     expect(parseSaveResult(renderSaveResult({ kind: 'rejected', code: 'unknown-type', reason: '未知类型' }))).toBeUndefined()
     expect(parseSaveResult(renderSaveResult({ kind: 'duplicate-suspected', existing: [saved] }))).toBeUndefined()
   })

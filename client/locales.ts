@@ -70,6 +70,9 @@ export const zh = {
   'source.agent-action-confirmed': 'agent 操作后确认',
   'source.none': '无出处',
   'memory.expired': '不再带入对话',
+  'memory.delegated.pending': '子 agent 写入 · 第 {depth} 层 · 待确认',
+  'memory.delegated.main': '子 agent 写入 · 第 {depth} 层 · 主会话已接受',
+  'memory.delegated.user': '子 agent 写入 · 第 {depth} 层 · 用户已改',
 
   'marker.secret': '有密钥要处理',
 
@@ -181,6 +184,9 @@ export const en: Record<LocaleKey, string> = {
   'source.agent-action-confirmed': 'Confirmed after an agent action',
   'source.none': 'No source',
   'memory.expired': 'No longer brought into chats',
+  'memory.delegated.pending': 'Written by a subagent · level {depth} · pending review',
+  'memory.delegated.main': 'Written by a subagent · level {depth} · accepted by the main session',
+  'memory.delegated.user': 'Written by a subagent · level {depth} · edited by you',
 
   'marker.secret': 'A secret needs attention',
 

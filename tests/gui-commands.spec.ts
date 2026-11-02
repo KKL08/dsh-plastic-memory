@@ -1437,6 +1437,16 @@ describe('promote-memory（建议整理「放错层」的提升为全局）', ()
     ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_o', layer: wsLayer(OTHER_WS), allowCrossWorkspace: true }))
     expect((await e.store.get('mem_o'))!.scope).toBe('global')
   })
+
+  it('提升待确认的子 agent 记忆算用户升档：写 reviewed user 与提升的时刻，创建者字段不动', async () => {
+    const e = env()
+    const creator = { sessionId: 'sess-sub', depth: 1, parentSessionId: 'sess-1' }
+    await e.store.create(record({ id: 'mem_p', scope: 'workspace', workspacePath: SESSION_WS, delegation: creator }))
+    ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_p', layer: wsLayer(SESSION_WS) }))
+    const after = (await e.store.get('mem_p'))!
+    expect(after.scope).toBe('global')
+    expect(after.delegation).toEqual({ ...creator, reviewed: { by: 'user', at: NOW } })
+  })
 })
 
 describe('就地提升（对话卡片、右侧栏「这次新写入的」）：promote-memory 与 keep-local-memory', () => {
@@ -2966,18 +2976,18 @@ describe('refresh-views', () => {
     }
   })
 
-  it('视图版本 12：开着旧页面的升级后，磁盘上旧版本（11）的全局视图和体检视图经 refresh-views 按新版本重新生成', async () => {
-    expect(GUI_VIEW_VERSION).toBe(12)
+  it('视图版本 13：开着旧页面的升级后，磁盘上旧版本（12）的全局视图和体检视图经 refresh-views 按新版本重新生成', async () => {
+    expect(GUI_VIEW_VERSION).toBe(13)
     const e = env()
     await seedPair(e)
     await mkdir(join(root, GUI_VIEW_DIR), { recursive: true })
-    for (const file of [...Object.values(GUI_VIEW_FILES), GUI_CHECKUP_VIEW_FILE]) await writeFile(join(root, GUI_VIEW_DIR, file), JSON.stringify({ version: 11 }))
+    for (const file of [...Object.values(GUI_VIEW_FILES), GUI_CHECKUP_VIEW_FILE]) await writeFile(join(root, GUI_VIEW_DIR, file), JSON.stringify({ version: 12 }))
     ok(await e.run({ cmd: 'refresh-views' }))
-    expect(pendingViewSchema.parse(await e.readView('pending')).version).toBe(12)
-    expect(healthViewSchema.parse(await e.readView('health')).version).toBe(12)
-    expect(libraryViewSchema.parse(await e.readView('library')).version).toBe(12)
-    expect(deletedViewSchema.parse(await e.readView('deleted')).version).toBe(12)
-    expect((await e.readCheckupView()).version).toBe(12)
+    expect(pendingViewSchema.parse(await e.readView('pending')).version).toBe(13)
+    expect(healthViewSchema.parse(await e.readView('health')).version).toBe(13)
+    expect(libraryViewSchema.parse(await e.readView('library')).version).toBe(13)
+    expect(deletedViewSchema.parse(await e.readView('deleted')).version).toBe(13)
+    expect((await e.readCheckupView()).version).toBe(13)
   })
 
   it('磁盘上是旧版（版本 4，没有建议整理）的待处理视图：按新版本重写，各级条数带上建议整理', async () => {
@@ -3102,6 +3112,47 @@ describe('edit-memory（建议整理的直接改）', () => {
     })
     expect(r).toMatchObject({ kind: 'rejected', code: 'hand-edited' })
     expect((await e.store.get('mem_g', { workspacePath: SESSION_WS }))!.content).toBe('新正文')
+  })
+
+  describe('子 agent 写入的记忆', () => {
+    const creator = { sessionId: 'sess-sub', depth: 2, parentSessionId: 'sess-parent', rootSessionId: 'sess-root' }
+
+    it('直接改待确认的记录算用户升档：写 reviewed user 与改的时刻，创建者字段不动', async () => {
+      const e = env()
+      await e.store.create(record({ id: 'mem_p', content: '旧正文', scope: 'workspace', workspacePath: SESSION_WS, delegation: creator }))
+      const base = await baseOf(e, 'mem_p')
+      e.clock.now = LATER
+      ok(await e.run(edit('mem_p', SESSION_WS, base)))
+      const after = (await e.store.get('mem_p', { workspacePath: SESSION_WS }))!
+      expect(after.content).toBe('新正文')
+      expect(after.delegation).toEqual({ ...creator, reviewed: { by: 'user', at: LATER } })
+    })
+
+    it.each([
+      ['主会话已接受', { ...creator, reviewed: { by: 'main' as const, at: 50 } }],
+      ['用户已改过', { ...creator, reviewed: { by: 'user' as const, at: 50 } }],
+      ['普通记录', undefined],
+    ])('%s：直接改不碰 delegation', async (_label, delegation) => {
+      const e = env()
+      await e.store.create(record({ id: 'mem_r', content: '旧正文', scope: 'workspace', workspacePath: SESSION_WS, ...(delegation !== undefined ? { delegation } : {}) }))
+      const base = await baseOf(e, 'mem_r')
+      e.clock.now = LATER
+      ok(await e.run(edit('mem_r', SESSION_WS, base)))
+      const after = (await e.store.get('mem_r', { workspacePath: SESSION_WS }))!
+      expect(after.content).toBe('新正文')
+      expect(after.delegation).toEqual(delegation)
+    })
+
+    it('借的会话是子 agent：直接改仍是 subagent-readonly，待确认不变', async () => {
+      const e = env({ delegationDepth: 1 })
+      const r = record({ id: 'mem_s', content: '旧正文', scope: 'workspace', workspacePath: SESSION_WS, delegation: creator })
+      await e.store.create(r)
+      // 子会话里 refresh-views 也只读，卡片版本按文件里的算
+      const base = { updatedAt: r.updatedAt, digest: computeDigest(r.name, r.summary, r.content) }
+      expect(err(await e.run(edit('mem_s', SESSION_WS, base))).code).toBe('subagent-readonly')
+      const after = (await e.store.get('mem_s', { workspacePath: SESSION_WS }))!
+      expect([after.content, after.delegation]).toEqual(['旧正文', creator])
+    })
   })
 
   it('体检关闭时照样能改、能撤销', async () => {
@@ -3386,6 +3437,19 @@ describe('merge-memories（内容重复的直接合并）', () => {
     expect(await readFile(filePath, 'utf8')).toBe(merged)
     expect([(await e.store.get('mem_b'))!.status, (await e.store.get('mem_b'))!.content]).toEqual(['active', '乙恢复后又改的'])
     expect((await e.decisions.listSettled()).map(d => d.id)).toEqual([body.decisionId])
+  })
+
+  it('保留的那条是待确认的子 agent 记忆：合并算用户升档，写 reviewed user，另一条照常进最近删除', async () => {
+    const e = env()
+    const creator = { sessionId: 'sess-sub', depth: 1, parentSessionId: 'sess-1' }
+    await e.store.create(record({ id: 'mem_a', content: '甲的正文', createdAt: 1, delegation: creator }))
+    await e.store.create(record({ id: 'mem_b', content: '乙的正文', createdAt: 2 }))
+    e.clock.now = LATER
+    const body = ok(await merge(e, ['mem_a', 'mem_b']))
+    expect(body.memoryIds).toEqual(['mem_a', 'mem_b'])
+    const kept = (await e.store.get('mem_a'))!
+    expect([kept.content, kept.delegation]).toEqual(['合并后的正文', { ...creator, reviewed: { by: 'user', at: LATER } }])
+    expect((await e.store.get('mem_b'))!.status).toBe('deleted')
   })
 })
 

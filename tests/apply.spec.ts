@@ -1089,6 +1089,31 @@ describe('注入链接线', () => {
     expect(visibleSnapshots(fork)).toHaveLength(1)
   })
 
+  it('待确认记录：持久型子会话的快照带自己创建的，不带兄弟的；一次性子会话与主会话都不带（mode 现读 subagent 投影）', async () => {
+    const delegated = (sessionId: string) => ({ sessionId, depth: 1, parentSessionId: 'sess-1' })
+    const memories = [
+      { id: 'mem_main', type: 'preference', content: '主会话的偏好' },
+      { id: 'mem_mine', type: 'preference', content: '子级自己存的偏好', delegation: delegated('sess-sub') },
+      { id: 'mem_sib', type: 'preference', content: '兄弟子级存的偏好', delegation: delegated('sess-sib') },
+    ]
+    const snapshotOf = async (mode: 'continuable' | 'one-shot', session: Session) => {
+      const projections = { stateOf: (_s: object, key: string) => (key === 'subagent' ? { identity: { mode, seq: 0 } } : undefined) }
+      const t = await boot({ memories, get: name => (name === 'sessionProjections' ? projections : undefined) })
+      await t.step(session, 1, { messages: [userSaid('子任务')] })
+      return visibleSnapshots(session)[0]!
+    }
+    const continuable = await snapshotOf('continuable', hostSession('sess-sub', { delegationDepth: 1, parentSession: 'sess-1' as SessionId }))
+    expect(continuable).toContain('主会话的偏好')
+    expect(continuable).toContain('子级自己存的偏好')
+    expect(continuable).not.toContain('兄弟子级存的偏好')
+    const oneShot = await snapshotOf('one-shot', hostSession('sess-sub', { delegationDepth: 1, parentSession: 'sess-1' as SessionId }))
+    expect(oneShot).toContain('主会话的偏好')
+    expect(oneShot).not.toContain('子级自己存的偏好')
+    // 主会话：投影即使给出持久型身份也不看（深度 0 不是子会话）
+    const main = await snapshotOf('continuable', hostSession('sess-sub'))
+    expect(main).not.toContain('子级自己存的偏好')
+  })
+
   it('冻结只发生在发送点：第一步空 decision 不冻结、不计召回，检索照常给全文；发出之后计召回一次，检索换成说明', async () => {
     const t = await boot({ memories: [{ id: 'mem_core', type: 'preference', content: '测试里不要 mock 数据库' }] })
     const session = hostSession('sess-1')
@@ -1295,6 +1320,166 @@ describe('语义扫描请求形状', () => {
     // 脚本用完回默认流：没有 usage 块
     const silent = await defs.get('memory_scan')!.execute({ layers: 'semantic' }, exec)
     expect(silent).not.toHaveProperty('usageTokens')
+  })
+})
+
+/**
+ * 子 agent 的委派信息（spec 第 10–15 条）：深度、直接父会话取自宿主 header，mode 现读宿主 subagent 投影。
+ * 会话是宿主真 Session；sessionProjections、sessionQuery 是进程边界上的替身。
+ */
+describe('子 agent 委派信息', () => {
+  type ToolDef = { name: string; parameters: { properties: Record<string, unknown> }; execute(args: unknown, exec: unknown): Promise<unknown> }
+  type SaveOut = { kind: string; record: { id: string; delegation?: Record<string, unknown> }; code?: string }
+  const SAVE_ARGS = { action: 'create', type: 'knowledge', scope: 'workspace', sourceMode: 'environment-observed', tags: [] }
+
+  async function boot(o: { projections?: unknown; sessionQuery?: unknown } = {}) {
+    const defs = new Map<string, ToolDef>()
+    const warnings: string[] = []
+    const base = mockCtx()
+    const ctx = {
+      ...base,
+      tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
+      get: (name: string) => (name === 'sessionProjections' ? o.projections : name === 'sessionQuery' ? o.sessionQuery : undefined),
+      logger: { info() {}, warn: (msg: string) => { warnings.push(msg) }, error() {} },
+    }
+    const memoryRoot = await makeTmpRoot()
+    const cwd = await makeTmpRoot() // resolveWorkspacePath 走 realpath，cwd 必须真实存在
+    await apply(ctx as never, new Config({ memoryRoot } as never))
+    const session = (id: string, header: { delegationDepth?: number; parentSession?: string } = {}) =>
+      hostSession(id, { cwd, ...header } as Parameters<typeof hostSession>[1])
+    const save = async (s: Session, name: string, extra: object = {}) => await defs.get('memory_save')!.execute(
+      { ...SAVE_ARGS, name, summary: `${name}摘要`, content: `子会话里看到「${name}」`, ...extra }, // 引号短语是实体：各条互不撞重复
+      fakeExec({ agent: { session: s, options: {} } as unknown as ToolRunContext['agent'] }),
+    ) as SaveOut
+    /** 只看 subagent 投影的退化告警（证据锚读 turnBoundary 的告警另有用例）。 */
+    const modeWarnings = () => warnings.filter(w => w.includes('subagent projection'))
+    return { defs, session, save, modeWarnings, created: (s: Session) => base.listeners.get('session/created')!(s) }
+  }
+  const projectionWith = (subagent: unknown) => ({ stateOf: (_s: object, key: string) => (key === 'subagent' ? subagent : undefined) })
+
+  it('深度 1：delegation 带创建者会话、深度、直接父会话', async () => {
+    const t = await boot()
+    const out = await t.save(t.session('sess-child', { delegationDepth: 1, parentSession: 'sess-main' }), '子观察')
+    expect(out.kind).toBe('saved')
+    expect(out.record.delegation).toMatchObject({ sessionId: 'sess-child', depth: 1, parentSessionId: 'sess-main' })
+  })
+
+  it('用户 fork 的主会话（深度 0 带 parentSession）不算委派，记录不带 delegation，也不读 subagent 投影', async () => {
+    const t = await boot()
+    const out = await t.save(t.session('sess-fork', { parentSession: 'sess-main' }), 'fork 观察')
+    expect(out.kind).toBe('saved')
+    expect(out.record.delegation).toBeUndefined()
+    expect(t.modeWarnings()).toEqual([])
+  })
+
+  it('mode：投影给出 identity 或 {} 时不告警；投影未注册、服务缺席按一次性，每个会话告警一次', async () => {
+    for (const subagent of [{ identity: { mode: 'continuable', label: 'reviewer', seq: 0 } }, { identity: { mode: 'one-shot', seq: 0 } }, {}]) {
+      const t = await boot({ projections: projectionWith(subagent) })
+      expect((await t.save(t.session('sess-child', { delegationDepth: 1, parentSession: 'sess-main' }), '有投影')).kind).toBe('saved')
+      expect(t.modeWarnings()).toEqual([])
+    }
+    for (const [projections, reason] of [[projectionWith(undefined), 'not registered'], [undefined, 'service is absent']] as const) {
+      const t = await boot({ projections })
+      const child = t.session('sess-child', { delegationDepth: 1, parentSession: 'sess-main' })
+      expect((await t.save(child, '无投影一')).kind).toBe('saved')
+      expect((await t.save(child, '无投影二')).kind).toBe('saved')
+      expect(t.modeWarnings()).toHaveLength(1)
+      expect(t.modeWarnings()[0]).toContain('sess-child')
+      expect(t.modeWarnings()[0]).toContain('one-shot')
+      expect(t.modeWarnings()[0]).toContain(reason)
+    }
+  })
+
+  /** sessionQuery 替身：filterSessions 按 id 给出 header（宿主 SessionRecord 形状），记下问过哪些 id；readEvent 记次数（不该被调）。 */
+  function fakeQuery(headers: Array<{ id: string; delegationDepth?: number; parentSession?: string }>) {
+    const asked: string[] = []
+    const reads: unknown[] = []
+    return {
+      asked, reads,
+      filterSessions: async (filters: Array<{ kind: string; values: string[] }>) => {
+        const ids = filters.find(f => f.kind === 'id')?.values ?? []
+        asked.push(...ids)
+        return headers.filter(h => ids.includes(h.id))
+          .map(h => ({ header: { version: SESSION_FORMAT_VERSION, createdAt: 0, isSeeded: false, ...h }, live: false, persisted: true }))
+      },
+      readEvent: async (request: unknown) => { reads.push(request); return { events: [] } },
+    }
+  }
+
+  it('三层嵌套：深度 1、2、3 各存一条，深度、直接父会话逐层正确，根都是主会话；只读 header 不读事件', async () => {
+    const query = fakeQuery([
+      { id: 'sess-main' },
+      { id: 'sess-d1', delegationDepth: 1, parentSession: 'sess-main' },
+      { id: 'sess-d2', delegationDepth: 2, parentSession: 'sess-d1' },
+    ])
+    const t = await boot({ sessionQuery: query })
+    const chain = [['sess-d1', 'sess-main'], ['sess-d2', 'sess-d1'], ['sess-d3', 'sess-d2']] as const
+    for (const [i, [id, parent]] of chain.entries()) {
+      const out = await t.save(t.session(id, { delegationDepth: i + 1, parentSession: parent }), `第${i + 1}层观察`)
+      expect(out.kind).toBe('saved')
+      expect(out.record.delegation).toEqual({ sessionId: id, depth: i + 1, parentSessionId: parent, rootSessionId: 'sess-main' })
+    }
+    expect(query.reads).toEqual([])
+  })
+
+  it('用户 fork 出来的主会话是它自己那棵树的根，不再往上走', async () => {
+    const query = fakeQuery([{ id: 'sess-orig' }, { id: 'sess-fork', parentSession: 'sess-orig' }])
+    const t = await boot({ sessionQuery: query })
+    const out = await t.save(t.session('sess-child', { delegationDepth: 1, parentSession: 'sess-fork' }), 'fork 下的子观察')
+    expect(out.record.delegation).toMatchObject({ parentSessionId: 'sess-fork', rootSessionId: 'sess-fork' })
+    expect(query.asked).toEqual(['sess-fork'])
+  })
+
+  it('进程内见过的会话走缓存，不问 sessionQuery', async () => {
+    const query = fakeQuery([])
+    const t = await boot({ sessionQuery: query })
+    t.created(t.session('sess-main'))
+    const d1 = await t.save(t.session('sess-d1', { delegationDepth: 1, parentSession: 'sess-main' }), '一层')
+    const d2 = await t.save(t.session('sess-d2', { delegationDepth: 2, parentSession: 'sess-d1' }), '两层') // sess-d1 刚调过工具
+    expect(d1.record.delegation).toMatchObject({ rootSessionId: 'sess-main' })
+    expect(d2.record.delegation).toMatchObject({ rootSessionId: 'sess-main' })
+    expect(query.asked).toEqual([])
+  })
+
+  it('任一跳读不到（查无此会话、查询抛错、服务缺席、宿主没有 filterSessions）：记录照存，rootSessionId 缺省', async () => {
+    const services: unknown[] = [
+      fakeQuery([{ id: 'sess-d1', delegationDepth: 1, parentSession: 'sess-gone' }]), // 第二跳断
+      { filterSessions: async () => { throw new Error('persistence listing failed') } },
+      undefined,
+      { readEvent: async () => ({ events: [] }) },
+    ]
+    for (const sessionQuery of services) {
+      const t = await boot({ sessionQuery })
+      const out = await t.save(t.session('sess-d2', { delegationDepth: 2, parentSession: 'sess-d1' }), '链断了')
+      expect(out.kind).toBe('saved')
+      expect(out.record.delegation).toEqual({ sessionId: 'sess-d2', depth: 2, parentSessionId: 'sess-d1' })
+    }
+  })
+
+  it('最多走「深度」跳：父链深度不降（宿主数据异常）时停下，rootSessionId 缺省', async () => {
+    const query = fakeQuery([
+      { id: 'sess-p', delegationDepth: 1, parentSession: 'sess-q' },
+      { id: 'sess-q', delegationDepth: 1, parentSession: 'sess-p' },
+    ])
+    const t = await boot({ sessionQuery: query })
+    const out = await t.save(t.session('sess-child', { delegationDepth: 1, parentSession: 'sess-p' }), '环')
+    expect(out.kind).toBe('saved')
+    expect(out.record.delegation).not.toHaveProperty('rootSessionId')
+    expect(query.asked).toEqual(['sess-p'])
+  })
+
+  it('memory_save 的参数里没有委派字段；模型传了同名字段被忽略，委派信息只认宿主 header', async () => {
+    const t = await boot()
+    const params = Object.keys(t.defs.get('memory_save')!.parameters.properties)
+    expect(params.filter(p => /deleg|parent|root|depth|session/i.test(p))).toEqual([])
+
+    const forged = { delegation: { sessionId: 'sess-x', depth: 9, parentSessionId: 'sess-y', reviewed: { by: 'main', at: 1 } }, delegationDepth: 0, parentSession: 'sess-y' }
+    const main = await t.save(t.session('sess-main'), '主会话伪造', forged)
+    expect(main.kind).toBe('saved')
+    expect(main.record.delegation).toBeUndefined()
+    const child = await t.save(t.session('sess-child', { delegationDepth: 1, parentSession: 'sess-main' }), '子会话伪造', forged)
+    // sess-main 刚调过工具，根会话从缓存解析
+    expect(child.record.delegation).toEqual({ sessionId: 'sess-child', depth: 1, parentSessionId: 'sess-main', rootSessionId: 'sess-main' })
   })
 })
 

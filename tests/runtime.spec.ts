@@ -394,6 +394,57 @@ describe('SnapshotCache', () => {
   })
 })
 
+// 子 agent 写入的待确认记录：持久型子会话的注入带上自己创建的，生效时机同主会话自存的记录（下一次重建）；一次性子会话与主会话不带
+describe('SnapshotCache × 待确认记录', () => {
+  const pending = (sessionId: string, partial: Partial<MemoryRecord>) =>
+    record({ type: 'preference', delegation: { sessionId, depth: 1, parentSessionId: 'main' }, ...partial })
+  // 宿主会话的最小形状：header.id 是会话 id；哪个会话是持久型子会话由 ownSessionIdOf 决定（接线在 index.ts）
+  const session = (id: string) => ({ header: { id } })
+  function makeDelegatingCache(continuable: ReadonlySet<string>) {
+    const store = new MemoryStore(new InMemoryTable())
+    const cache = new SnapshotCache({
+      store, registry, budget: 4000,
+      ownSessionIdOf: s => {
+        const id = (s as { header: { id: string } }).header.id
+        return continuable.has(id) ? id : undefined
+      },
+    })
+    return { store, cache }
+  }
+
+  it('持久型子会话：已冻结的快照不因保存刷新，标过期重建后带上自己的待确认记录，不带兄弟子会话的', async () => {
+    const { store, cache } = makeDelegatingCache(new Set(['sub-a', 'sub-b']))
+    await store.put(record({ id: 'mem_main', type: 'preference', content: '主会话的偏好' }))
+    const sub = session('sub-a')
+    cache.setWorkspacePath(sub, undefined)
+    const frozen = await cache.assemble(sub)
+    expect(frozen).toContain('主会话的偏好')
+
+    await store.put(pending('sub-a', { id: 'mem_mine', content: '自己存的偏好' }))
+    await store.put(pending('sub-b', { id: 'mem_sib', content: '兄弟存的偏好' }))
+    expect(await cache.assemble(sub)).toBe(frozen)
+
+    cache.markStale(sub)
+    const rebuilt = await cache.assemble(sub)
+    expect(rebuilt).toContain('自己存的偏好')
+    expect(rebuilt).not.toContain('兄弟存的偏好')
+    expect(frozenCore(cache, sub)).toEqual(['mem_main', 'mem_mine'])
+  })
+
+  it('一次性子会话与主会话：重建后也不带任何待确认记录', async () => {
+    const { store, cache } = makeDelegatingCache(new Set())
+    await store.put(record({ id: 'mem_main', type: 'preference', content: '主会话的偏好' }))
+    await store.put(pending('sub-once', { id: 'mem_once', content: '一次性子级存的偏好' }))
+    for (const s of [session('sub-once'), session('main')]) {
+      cache.setWorkspacePath(s, undefined)
+      cache.markStale(s)
+      const text = await cache.assemble(s)
+      expect(text).toContain('主会话的偏好')
+      expect(text).not.toContain('一次性子级存的偏好')
+    }
+  })
+})
+
 // 快照来历（会话视图的 origin）：首次冻结是对话开始时；成功压缩后的下一次冻结是压缩后重新带入；
 // 其他重建（失败的压缩、配置热更新）文本变了（会补发）是对话中重新带入，没变就沿用上一次的来历。
 describe('SnapshotCache 快照来历', () => {

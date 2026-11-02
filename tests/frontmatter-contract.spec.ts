@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
+import { stringify as stringifyYaml } from 'yaml'
 import { join } from 'node:path'
 import { splitFrontmatter, decodeRecord, encodeRecord, decodeFile, computeDigest } from '../src/storage/frontmatter.ts'
 import { deriveFileId } from '../src/storage/paths.ts'
@@ -7,6 +8,7 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { FrontmatterError } from '../src/errors.ts'
 import { formatValidity } from '../src/validity.ts'
+import { isPendingDelegated } from '../src/record-schema.ts'
 import { captureError } from './helpers/errors.ts'
 
 // 0.2.0 文件契约：手建文件放宽、派生 id、时间戳放宽、
@@ -282,6 +284,84 @@ describe('写出键顺序固定', () => {
   it('无 source 时不写 source 键', () => {
     const r = decodeRaw('---\nname: n\ntype: knowledge\n---\n\nc').record
     expect(Object.keys(splitFrontmatter(encodeRecord(r, {})).data)).not.toContain('source')
+  })
+})
+
+describe('delegation 编解码', () => {
+  const creator = { sessionId: 'child-2', depth: 2, parentSessionId: 'child-1', rootSessionId: 'main' }
+  const AT = Date.UTC(2026, 10, 2, 8, 0, 0, 0)
+
+  it('手写的委派块：解析后待确认；reviewed 写了就是主档；没有这块的仍是主档', () => {
+    const head = '---\nname: n\ntype: knowledge\n'
+    const block = 'delegation:\n  sessionId: child-1\n  depth: 1\n  parentSessionId: main\n'
+    const pending = decodeRaw(`${head}${block}---\n\nc`).record
+    expect(pending.delegation).toEqual({ sessionId: 'child-1', depth: 1, parentSessionId: 'main' })
+    expect(isPendingDelegated(pending)).toBe(true)
+    const reviewed = decodeRaw(`${head}${block}  reviewed:\n    by: user\n    at: 2026-11-02T08:00:00.000Z\n---\n\nc`).record
+    expect(reviewed.delegation?.reviewed).toEqual({ by: 'user', at: AT })
+    expect(isPendingDelegated(reviewed)).toBe(false)
+    expect(isPendingDelegated(decodeRaw(`${head}---\n\nc`).record)).toBe(false)
+  })
+
+  it('保存 → 读文件 → 重新解析：创建者四个字段与两种 reviewed 原样', () => {
+    for (const delegation of [creator, { ...creator, reviewed: { by: 'user' as const, at: AT } }, { ...creator, reviewed: { by: 'main' as const, at: AT + 1 } }]) {
+      const r = record({ delegation })
+      expect(decodeRaw(encodeRecord(r, {})).record).toEqual({ ...r, recallCount: 0, lastRecalledAt: null })
+    }
+    const pending = decodeRaw(encodeRecord(record({ delegation: creator }), {})).record
+    expect(isPendingDelegated(pending)).toBe(true)
+  })
+
+  it('rootSessionId 缺省照样往返，不补值', () => {
+    const { rootSessionId: _, ...noRoot } = creator
+    const back = decodeRaw(encodeRecord(record({ delegation: noRoot }), {})).record
+    expect(back.delegation).toEqual(noRoot)
+  })
+
+  it('reviewed.at 在文件里和其他时间键一样写 UTC 毫秒 ISO；读取也认数字毫秒', () => {
+    const fm = splitFrontmatter(encodeRecord(record({ delegation: { ...creator, reviewed: { by: 'main', at: AT } } }), {})).data
+    expect(fm.delegation).toEqual({ ...creator, reviewed: { by: 'main', at: '2026-11-02T08:00:00.000Z' } })
+    const raw = '---\nname: n\ntype: knowledge\ndelegation:\n  sessionId: c\n  depth: 1\n  parentSessionId: p\n  reviewed:\n    by: main\n    at: 1793606400000\n---\n\nc'
+    expect(decodeRaw(raw).record.delegation?.reviewed?.at).toBe(1793606400000)
+  })
+
+  it('digest 不含它：同样内容带不带 delegation、升没升档，digest 相同', () => {
+    const digestOf = (r: MemoryRecord) => splitFrontmatter(encodeRecord(r, {})).data.digest
+    const plain = digestOf(record({}))
+    expect(digestOf(record({ delegation: creator }))).toBe(plain)
+    expect(digestOf(record({ delegation: { ...creator, reviewed: { by: 'user', at: AT } } }))).toBe(plain)
+  })
+
+  it('改了委派块不算手编', () => {
+    const text = encodeRecord(record({ delegation: creator }), {}).replace('depth: 2', 'depth: 3')
+    expect(decodeRaw(text).record.handEdited).toBeUndefined()
+  })
+
+  it('键序：排在 handEdited 之后、digest 之前；不在 extras 里', () => {
+    const text = encodeRecord(record({ handEdited: true, delegation: creator }), { zeta: 1 })
+    const keys = Object.keys(splitFrontmatter(text).data)
+    expect(keys.slice(-4)).toEqual(['handEdited', 'delegation', 'digest', 'zeta'])
+    expect(decodeRaw(text).extras).toEqual({ zeta: 1 })
+  })
+
+  it('旧版不认识这个键时走 extras：嵌套块原样写回；写在 digest 之后的委派块新版读回仍是待确认、不算手编', () => {
+    const fromNew = splitFrontmatter(encodeRecord(record({ delegation: creator }), {}))
+    const { delegation, ...known } = fromNew.data
+    // 旧版的编码器与当前同一段代码，只是白名单里没有这个键：未知顶层键整块进 extras、写在已知键之后
+    const unknownKey = 'futureBlock'
+    const viaExtras = decodeRaw(encodeRecord(record({}), { [unknownKey]: delegation })).extras
+    expect(viaExtras).toEqual({ [unknownKey]: creator })
+    const oldWrite = `---\n${stringifyYaml({ ...known, delegation })}---\n\n${fromNew.body}\n`
+    const back = decodeRaw(oldWrite).record
+    expect(back.delegation).toEqual(creator)
+    expect(isPendingDelegated(back)).toBe(true)
+    expect(back.handEdited).toBeUndefined()
+  })
+
+  it('非法的委派块（depth 0）整条隔离，不悄悄当主档', () => {
+    const raw = '---\nname: n\ntype: knowledge\ndelegation:\n  sessionId: c\n  depth: 0\n  parentSessionId: p\n---\n\nc'
+    const out = decodeFile(raw, { path: '/x.md', loc: GLOBAL, relPath: 'global/x.md', mtimeMs: MTIME })
+    expect(out.ok).toBe(false)
   })
 })
 

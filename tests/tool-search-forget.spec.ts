@@ -101,6 +101,17 @@ describe('executeForget（P1 批量版）', () => {
     expect(result.snapshotId).toBe(snaps[0].id)
   })
 
+  it('子 agent 存的待确认记录照旧：先快照后软删，快照里带着委派信息', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    const delegation = { sessionId: 'sess-child', depth: 1, parentSessionId: 'sess-main' }
+    await store.put(record({ id: 'mem_p', scope: 'workspace', workspacePath: '/proj', delegation }))
+    const deps = makeForgetDeps(store)
+    const result = await executeForget({ ids: ['mem_p'], reason: '子 agent 的观察不对' }, { workspacePath: '/proj' }, deps)
+    expect(result.forgotten).toEqual(['mem_p'])
+    expect((await store.get('mem_p', { workspacePath: '/proj' }))!.status).toBe('deleted')
+    expect((await deps.snapshots.list())[0].data[0].delegation).toEqual(delegation)
+  })
+
   it('批量遗忘：一个快照包含全部受影响记忆', async () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_a' }))

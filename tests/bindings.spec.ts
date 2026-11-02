@@ -261,6 +261,18 @@ describe('memory_promote 绑定', () => {
     const result = await tool.execute({ ids: ['mem_p'] }, exec)
     expectRenderClean(tool, { ids: ['mem_p'] }, result)
   })
+
+  it('提升待确认的子 agent 记忆：reviewed 记为 main', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await store.put(record({ id: 'mem_s', scope: 'workspace', workspacePath: '/proj', globalCandidate: true, delegation: { sessionId: 'sess-child', depth: 1, parentSessionId: 'sess-main' } }))
+    const tool = createPromoteTool({
+      store, agentsMd: { append: async () => {} } as never,
+      snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), defaultTarget: 'global', now: () => NOW,
+      resolveContext: async () => ({ workspacePath: '/proj' }),
+    })
+    await tool.execute({ ids: ['mem_s'] }, exec)
+    expect((await store.get('mem_s'))!.delegation?.reviewed).toEqual({ by: 'main', at: NOW })
+  })
 })
 
 // ---------------------------------------------------------------------------

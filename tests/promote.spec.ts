@@ -146,6 +146,42 @@ describe('executePromote', () => {
     expect(r.skipped).toEqual(['mem_ghost'])
   })
 
+  it('target=global：提升待确认的子 agent 记忆即升档，reviewed 按调用方记 user 或 main；已接受的、主会话的不动', async () => {
+    const NOW = 9_000
+    const creator = { sessionId: 'sess-child', depth: 1, parentSessionId: 'sess-main' }
+    for (const by of ['user', 'main'] as const) {
+      const store = new MemoryStore(new InMemoryTable())
+      await store.put(record({ id: 'mem_p', delegation: creator }))
+      await store.put(record({ id: 'mem_r', delegation: { ...creator, reviewed: { by: 'main', at: 5 } } }))
+      await store.put(record({ id: 'mem_m' }))
+      const r = await executePromote({ confirmedIds: ['mem_p', 'mem_r', 'mem_m'], target: 'global' }, { workspacePath: '/proj' },
+        { store, agentsMd: fakeAgentsMd().writer, snapshots: makeSnapshots(), now: () => NOW }, { reviewedBy: by })
+      expect(r.promoted.map(p => p.id), by).toEqual(['mem_p', 'mem_r', 'mem_m'])
+      expect((await store.get('mem_p'))!.delegation, by).toEqual({ ...creator, reviewed: { by, at: NOW } })
+      expect((await store.get('mem_r'))!.delegation, by).toEqual({ ...creator, reviewed: { by: 'main', at: 5 } })
+      expect((await store.get('mem_m'))!.delegation, by).toBeUndefined()
+    }
+  })
+
+  it('target=agents-md：提升待确认的子 agent 记忆同样升档，软删的记录带 reviewed，恢复后不再是待确认', async () => {
+    const NOW = 9_000
+    const creator = { sessionId: 'sess-child', depth: 1, parentSessionId: 'sess-main' }
+    for (const by of ['user', 'main'] as const) {
+      const store = new MemoryStore(new InMemoryTable())
+      await store.put(record({ id: 'mem_p', delegation: creator }))
+      await store.put(record({ id: 'mem_m' }))
+      const { writer, lines } = fakeAgentsMd()
+      const r = await executePromote({ confirmedIds: ['mem_p', 'mem_m'], target: 'agents-md' }, { workspacePath: '/proj' },
+        { store, agentsMd: writer, snapshots: makeSnapshots(), now: () => NOW }, { reviewedBy: by })
+      expect(r.promoted.map(p => p.id), by).toEqual(['mem_p', 'mem_m'])
+      expect(lines, by).toHaveLength(2)
+      const p = (await store.get('mem_p'))!
+      expect(p.status, by).toBe('deleted')
+      expect(p.delegation, by).toEqual({ ...creator, reviewed: { by, at: NOW } })
+      expect((await store.get('mem_m'))!.delegation, by).toBeUndefined()
+    }
+  })
+
   it('只处理 confirmedIds 里的（未确认的不动）', async () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_a' }))

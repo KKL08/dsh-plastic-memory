@@ -26,7 +26,7 @@ const HAND_WRITTEN_CONFIDENCE = 0.9
 const FILE_KEY_ORDER = [
   'id', 'name', 'type', 'tags', 'status', 'confidence', 'source',
   'createdAt', 'updatedAt', 'lastConfirmedAt', 'deletedAt', 'validFrom', 'validTo',
-  'supersedes', 'summary', 'globalCandidate', 'handEdited', 'digest',
+  'supersedes', 'summary', 'globalCandidate', 'handEdited', 'delegation', 'digest',
 ] as const
 const KNOWN_FILE_KEYS = new Set<string>(FILE_KEY_ORDER)
 
@@ -146,6 +146,7 @@ export function decodeRecord(parsed: ParsedMemoryFile, loc: FileLocation, opts: 
     const ms = parseTimestamp(k, src[k], opts.mtimeMs)
     src[k] = isValidityKey(k) ? roundValidity(k, ms) : ms
   }
+  if (src.delegation !== undefined) src.delegation = mapReviewedAt(src.delegation, at => parseTimestamp('delegation.reviewed.at', at, undefined))
   for (const k of MTIME_DEFAULT_KEYS) {
     if (src[k] === undefined && opts.mtimeMs !== undefined) src[k] = opts.mtimeMs
   }
@@ -176,6 +177,16 @@ export function decodeRecord(parsed: ParsedMemoryFile, loc: FileLocation, opts: 
   return { record, extras, notes }
 }
 
+/**
+ * 委派块里唯一的时间戳 reviewed.at：文件面同其他时间键写 UTC 毫秒 ISO，内存面 epoch ms。
+ * 形状不对的原样返回，交给 schema 报错；不改动传入的对象（它来自解析结果或记录本身）。
+ */
+function mapReviewedAt(delegation: unknown, map: (at: unknown) => unknown): unknown {
+  if (!isObject(delegation) || !isObject(delegation.reviewed) || delegation.reviewed.at === undefined) return delegation
+  return { ...delegation, reviewed: { ...delegation.reviewed, at: map(delegation.reviewed.at) } }
+}
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
+
 /** 不抛的读取入口：围栏、YAML、schema、时间戳任一失败都收成隔离条目。 */
 export function decodeFile(raw: string, ctx: { path: string; loc: FileLocation } & DecodeOptions): DecodeOutcome {
   try {
@@ -204,7 +215,8 @@ export function encodeRecord(record: MemoryRecord, extras: Record<string, unknow
     const v = (record as unknown as Record<string, unknown>)[k]
     if (v === undefined) continue                     // 可选键缺省 = 键不存在
     fm[k] = isValidityKey(k) ? encodeValidity(k, v as number)
-      : TIME_KEYS.has(k) ? new Date(v as number).toISOString() : v
+      : TIME_KEYS.has(k) ? new Date(v as number).toISOString()
+      : k === 'delegation' ? mapReviewedAt(v, at => new Date(at as number).toISOString()) : v
   }
   for (const [k, v] of Object.entries(extras)) {
     if (!KNOWN_FILE_KEYS.has(k) && !RESERVED_KEYS.has(k)) fm[k] = v  // schema 键胜出

@@ -23,6 +23,18 @@ const userEvent = (seq: number, text: string) => ({
   data: { inserted: [{ role: 'user', content: [{ type: 'text', text }] }] },
 })
 
+/** 宿主 tool/result 事件的真实形状：agent-loop 把 createToolResultMessage 的结果放进 data.message（对齐宿主）。 */
+const toolResultEvent = (seq: number, text: string) => ({
+  type: 'tool/result', seq, time: 0,
+  data: {
+    turn: 1, step: 2,
+    message: {
+      id: `msg-${seq}`, role: 'tool', source: { kind: 'tool', callId: `call-${seq}` }, toolCallId: `call-${seq}`,
+      content: [{ type: 'text', text }], isError: false,
+    },
+  },
+})
+
 describe('executeSource', () => {
   const ctx = { workspacePath: '/proj' as string | undefined }
 
@@ -93,11 +105,159 @@ describe('executeSource', () => {
   })
 })
 
+describe('executeSource 在子 agent 会话里', () => {
+  // 子会话 sess-child（深度 1，父为 sess-main）；context.delegation 来自宿主 header，存在即子会话
+  const child = {
+    workspacePath: '/proj' as string | undefined,
+    session: { id: 'sess-child' },
+    delegation: { depth: 1, parentSessionId: 'sess-main', mode: 'one-shot' as const },
+  }
+
+  it('出处在别的会话（含主会话）的记录 → subagent-restricted，不读事件；原因让模型带回主会话查', async () => {
+    const store = await storeWith(
+      record({ id: 'mem_main' }),
+      record({ id: 'mem_sibling', source: { sessionId: 'sess-sibling', eventRange: [3, 8], sourceMode: 'agent-inferred' } }),
+    )
+    const readEvent: ReadEventFn = vi.fn()
+    for (const memoryId of ['mem_main', 'mem_sibling']) {
+      const result = await executeSource({ memoryId }, child, { store, getReadEvent: () => readEvent })
+      expect(result, memoryId).toEqual({
+        kind: 'rejected', memoryId, code: 'subagent-restricted', reason: '这条记忆的出处在别的会话，带回主会话查',
+      })
+      expect(renderSourceResult(result)).toContain('这条记忆的出处在别的会话，带回主会话查')
+    }
+    expect(readEvent).not.toHaveBeenCalled()
+  })
+
+  it('没有出处的手写记录同样不在本会话 → subagent-restricted', async () => {
+    const { source: _s, ...handWritten } = record({})
+    const store = await storeWith(handWritten)
+    const result = await executeSource({ memoryId: 'mem_a' }, child, { store, getReadEvent: () => null })
+    expect(result).toMatchObject({ kind: 'rejected', code: 'subagent-restricted' })
+  })
+
+  it('出处是本会话的记录照常回查', async () => {
+    const store = await storeWith(record({ source: { sessionId: 'sess-child', eventRange: [37, 42], sourceMode: 'agent-inferred' } }))
+    const readEvent: ReadEventFn = vi.fn().mockResolvedValue({ events: [], startSeq: 37, endSeq: 42 })
+    const result = await executeSource({ memoryId: 'mem_a' }, child, { store, getReadEvent: () => readEvent })
+    expect(result.kind).toBe('ok')
+  })
+
+  it('主会话（无 delegation）查别的会话的记录不受限', async () => {
+    const store = await storeWith(record({}))
+    const readEvent: ReadEventFn = vi.fn().mockResolvedValue({ events: [], startSeq: 35, endSeq: 42 })
+    const main = { workspacePath: '/proj', session: { id: 'sess-main' } }
+    expect((await executeSource({ memoryId: 'mem_a' }, main, { store, getReadEvent: () => readEvent })).kind).toBe('ok')
+  })
+})
+
+/**
+ * 假 sessionQuery.readEvent：按宿主的开窗规则从一段日志里切窗口——[seq - before, seq + after] 闭区间、含目标事件、
+ * 两端夹在日志范围内（对齐宿主 session-query）。调用参数照常记录。
+ */
+function logReader(log: Array<{ type: string; seq: number; data?: unknown }>) {
+  return vi.fn<ReadEventFn>(async ({ seq, before = 0, after = 0 }) => {
+    const startSeq = Math.max(0, seq - before)
+    const endSeq = Math.min(log.length - 1, seq + after)
+    return { target: log[seq], events: log.slice(startSeq, endSeq + 1), startSeq, endSeq }
+  })
+}
+
+describe('executeSource 的开窗方向', () => {
+  const child = {
+    workspacePath: '/proj' as string | undefined,
+    session: { id: 'sess-child' },
+    delegation: { depth: 1, parentSessionId: 'sess-main', mode: 'one-shot' as const },
+  }
+  const delegation = (sessionId: string) => ({ sessionId, depth: 1, parentSessionId: 'sess-main' })
+
+  /**
+   * fork 型子会话的日志：seq 0–5 是继承来的父会话前缀，子级本轮从 seq 6 的 turn/start 开始——
+   * 委派指令、读文件的工具调用与结果，seq 10 是 memory_save 的调用（保存点）。
+   */
+  const forkLog = [
+    { type: 'turn/start', seq: 0, data: { turn: 1 } },
+    userEvent(1, '父会话：用户说的私事，子级不该读到'),
+    { type: 'tool/call', seq: 2, data: { turn: 1, step: 1, callId: 'c0', name: 'read', arguments: {} } },
+    toolResultEvent(3, '父会话的工具结果'),
+    { type: 'turn/end', seq: 4, data: { turn: 1 } },
+    userEvent(5, '父会话：去查一下测试框架'),
+    { type: 'turn/start', seq: 6, data: { turn: 2 } },
+    userEvent(7, '委派指令：查测试框架版本'),
+    { type: 'tool/call', seq: 8, data: { turn: 2, step: 1, callId: 'c1', name: 'read', arguments: { path: 'package.json' } } },
+    toolResultEvent(9, 'devDependencies: vitest 3.2.7'),
+    { type: 'tool/call', seq: 10, data: { turn: 2, step: 2, callId: 'c2', name: 'memory_save', arguments: {} } },
+    toolResultEvent(11, '已存入，待主会话确认'),
+  ]
+  const childRecord = (partial: Partial<MemoryRecord> = {}) => record({
+    id: 'mem_child', type: 'knowledge',
+    source: { sessionId: 'sess-child', eventRange: [6, 10], sourceMode: 'environment-observed' },
+    delegation: delegation('sess-child'), ...partial,
+  })
+
+  it('子会话创建的记录：从保存点往前开到本轮起点、往后一条，输出含工具结果文本', async () => {
+    const store = await storeWith(childRecord())
+    const readEvent = logReader(forkLog)
+    const result = await executeSource({ memoryId: 'mem_child' }, child, { store, getReadEvent: () => readEvent })
+    if (result.kind !== 'ok') throw new Error(result.kind)
+    expect(readEvent).toHaveBeenCalledWith({ sessionId: 'sess-child', seq: 10, before: 4, after: 1 })
+    expect(result.lines).toContain('- [9] tool: devDependencies: vitest 3.2.7')
+    expect(result.lines).toContain('- [7] user: 委派指令：查测试框架版本')
+    expect(result.range).toEqual([6, 11])
+  })
+
+  it('fork 型子会话：窗口不越过本轮起点，读不到继承的父会话事件', async () => {
+    const store = await storeWith(childRecord())
+    for (const window of [undefined, 24]) {
+      const result = await executeSource({ memoryId: 'mem_child', window }, child, { store, getReadEvent: () => logReader(forkLog) })
+      if (result.kind !== 'ok') throw new Error(result.kind)
+      const text = renderSourceResult(result)
+      expect(text, String(window)).not.toContain('父会话')
+      expect(result.range[0], String(window)).toBe(6)
+    }
+  })
+
+  it('window 收窄往前开的条数；本轮再长也封顶 24', async () => {
+    const store = await storeWith(childRecord({ source: { sessionId: 'sess-child', eventRange: [6, 90], sourceMode: 'agent-inferred' } }))
+    const readEvent: ReadEventFn = vi.fn().mockResolvedValue({ events: [] })
+    const deps = { store, getReadEvent: () => readEvent }
+    await executeSource({ memoryId: 'mem_child', window: 5 }, child, deps)
+    await executeSource({ memoryId: 'mem_child' }, child, deps)
+    await executeSource({ memoryId: 'mem_child', window: 99 }, child, deps)
+    expect(vi.mocked(readEvent).mock.calls.map(([req]) => req.before)).toEqual([5, 24, 24])
+    expect(vi.mocked(readEvent).mock.calls.every(([req]) => req.seq === 90 && req.after === 1)).toBe(true)
+  })
+
+  it('主会话查子会话创建的记录同样往前开（方向看记录，不看谁在查）', async () => {
+    const store = await storeWith(childRecord())
+    const readEvent = logReader(forkLog)
+    const main = { workspacePath: '/proj', session: { id: 'sess-main' } }
+    await executeSource({ memoryId: 'mem_child' }, main, { store, getReadEvent: () => readEvent })
+    expect(readEvent).toHaveBeenCalledWith({ sessionId: 'sess-child', seq: 10, before: 4, after: 1 })
+  })
+
+  it('主会话改写过的子会话记录：锚已换成主会话的，照旧从本轮起点往后开', async () => {
+    const store = await storeWith(childRecord({ source: { sessionId: 'sess-main', eventRange: [37, 42], sourceMode: 'user-explicit' } }))
+    const readEvent: ReadEventFn = vi.fn().mockResolvedValue({ events: [], startSeq: 35, endSeq: 42 })
+    const main = { workspacePath: '/proj', session: { id: 'sess-main' } }
+    await executeSource({ memoryId: 'mem_child' }, main, { store, getReadEvent: () => readEvent })
+    expect(readEvent).toHaveBeenCalledWith({ sessionId: 'sess-main', seq: 37, before: 2, after: 5 })
+  })
+})
+
 describe('extractEventText', () => {
   it('inbox 事件提取角色与文本；结构事件返回 null', () => {
     expect(extractEventText(userEvent(3, 'hi'))).toEqual({ role: 'user', text: 'hi' })
     expect(extractEventText({ type: 'turn/start', seq: 4, data: { turn: 1 } })).toBeNull()
     expect(extractEventText({ type: 'sandbox/mode', seq: 1 })).toBeNull()
+  })
+
+  it('宿主 tool/result 事件：取 data.message.content 的文本块，角色标 tool', () => {
+    expect(extractEventText(toolResultEvent(9, '读到 package.json：vitest 3.2.7'))).toEqual({ role: 'tool', text: '读到 package.json：vitest 3.2.7' })
+    // 只有非文本块的工具结果算结构事件
+    const imageOnly = toolResultEvent(10, '')
+    ;(imageOnly.data.message as { content: unknown[] }).content = [{ type: 'image', mediaType: 'image/png', data: 'AAAA' }]
+    expect(extractEventText(imageOnly)).toBeNull()
   })
 })
 

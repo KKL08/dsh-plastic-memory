@@ -1,19 +1,27 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import type { PipelineResult } from '../pipeline.ts'
+import { SUBAGENT_MAX_SAVES_DEFAULT, type PipelineResult } from '../pipeline.ts'
 import { executeSave, renderSaveResult, type SaveToolDeps } from './save.ts'
 import { toToolOutput } from './output.ts'
 import { VALIDITY_DATE_FORMAT, VALIDITY_FORMAT } from '../validity.ts'
 
 /**
- * 把 memory_save 工具接到 dsh 框架上。纯逻辑在 save.ts，不依赖框架包，测试直接测它；
- * 本文件由 typecheck + 真机验证保证。
+ * 子 agent 会话里的写入规则（工具说明只有一份，各会话共用，所以写成条件段）。
+ * 子 agent 收到的是委派方裁剪过的任务，存下的记录先待确认，由委派方决定去留。
+ * 配额写缺省值和配置项名，不写现值：改配额不用重注册工具，超额时拒绝原因里带实际上限。
  */
-export function createSaveTool(deps: SaveToolDeps): ToolDefinition {
+const SUBAGENT_RULES = `子 agent 会话里：只能新建 knowledge、project 两类，且要在当前场景里；project 只记观察到的项目状态，不记决定和目标。每个子会话新建有上限（默认 ${SUBAGENT_MAX_SAVES_DEFAULT} 条，可在配置 subagent.maxSavesPerSession 改）。存下的记录是待确认，不进主会话注入；存完在回复里报出 id 和摘要，由委派方决定接受、改写或丢弃。`
+
+/**
+ * 把 memory_save 工具接到 dsh 框架上。纯逻辑在 save.ts，不依赖框架包，测试直接测它；
+ * 本文件由 typecheck + 真机验证保证。allowSubagent 为真时说明带子 agent 规则段（子 agent 写入随治理开关，见 index.ts）。
+ */
+export function createSaveTool(deps: SaveToolDeps, options: { allowSubagent?: boolean } = {}): ToolDefinition {
   const typeNames = deps.registry.all().map(t => t.name)
+  const description = deps.registry.renderSaveDescription()
   return defineTool({
     name: 'memory_save',
-    description: deps.registry.renderSaveDescription(),
+    description: options.allowSubagent ? `${description}\n${SUBAGENT_RULES}` : description,
     parameters: {
       // dsh 参数 DSL：漏写 required: true 即为可选，必填字段一个都不能漏
       action: { type: 'string', enum: ['create', 'update'], required: true },

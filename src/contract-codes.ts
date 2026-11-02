@@ -17,6 +17,7 @@ export type RejectCode =
   | 'validity-nonexistent' // validFrom / validTo 的日期或时刻不存在（2 月 30 日、25:00）
   | 'validity-past'        // validTo 不晚于当前时间，存下即过期
   | 'validity-reversed'    // validTo 不晚于 validFrom，有效期为空
+  | 'subagent-restricted'  // 子 agent 会话（delegationDepth ≥ 1）越过写入约束：依据、类型、替代、force、改写归属、新建配额，原因按条区分
 
 /**
  * 模型用 memory_save 改写已有记忆（rewrite）、把同桶旧记忆标成已取代（supersede）时留的撤销记录种类：
@@ -34,6 +35,10 @@ export type DecisionRejectCode =
   | 'claimed'           // 条目正被另一次裁决或体检认领
   | 'not-found'         // 条目不存在：已被裁决，或涉及的记忆已删除
 
+/** memory_confirm accept-subagent 什么都没动的原因（tools/confirm.ts）。 */
+export type AcceptRejectCode =
+  | 'not-subagent-pending' // 目标不是在用的待确认记录：主档（主会话写的、手建的）、已接受、已删除、已取代
+
 /** memory_save 成功但附带的警告（pipeline.ts）。 */
 export type WarningCode =
   | 'update-global-candidate' // update 填 global：scope 不变，标记为提升候选
@@ -41,6 +46,7 @@ export type WarningCode =
   | 'cross-bucket-supersede'  // supersedes 目标不在本次写入的记忆桶内，跳过
   | 'auto-snapshot'           // 更新 global 记忆前已自动快照
   | 'secret-suspected'        // 疑似密钥（无厂商特征），带 force: true 放行落盘，仍建议改写
+  | 'subagent-scope-local'    // 子 agent 填 global：落当前项目、不标提升候选
 
 /** memory_scan 的说明性 note（scan.ts）。 */
 export type ScanNoteCode =
@@ -83,6 +89,9 @@ export type HealthRecommendationKind =
 
 /** 注册处统一拦截的工具门拒绝码（tools/subagent-gate.ts）。 */
 export type ToolGateCode = 'subagent-readonly' // 子 agent 会话（delegationDepth ≥ 1）不可写
+
+/** memory_source 拒绝回查的原因（tools/source.ts）。 */
+export type SourceRejectCode = Extract<RejectCode, 'subagent-restricted'> // 子 agent 会话只能回查出处是本会话的记录，码与写入门共用一处定义
 
 /** memory_search 的说明性 note（search.ts）。 */
 export type SearchNoteCode =

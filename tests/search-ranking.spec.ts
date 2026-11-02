@@ -16,6 +16,7 @@ import {
   TERM_NOTE_MAX, type SearchToolDeps,
 } from '../src/tools/search.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
+import { DELEGATED_PENDING_NOTE } from '../src/index-line.ts'
 import type { SearchNoteCode } from '../src/contract-codes.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
@@ -352,6 +353,54 @@ describe('id 直达与零 token', () => {
       expect(r.noteCode).toBeUndefined()
     }
     expect(await ids(store, '', { limit: 2 })).toEqual(['mem_new', 'mem_old'])
+  })
+})
+
+// 子 agent 写入的待确认记录排在主档之后：主档按现有排序排完，待确认段深度浅的在前、同深度保持现有排序，拼接后取前 limit
+describe('两段排序：主档在前，待确认在后', () => {
+  const pending = (depth: number, partial: Partial<MemoryRecord>) =>
+    record({ delegation: { sessionId: `sub-${depth}`, depth, parentSessionId: 'main' }, ...partial })
+
+  it('待确认记录分数再高也排在主档之后；主档命中满 limit 时不露出，不足时按深度补位', async () => {
+    const store = await seeded([
+      // 待确认的命中比主档强（name、content 都命中、置信度更高），仍排后
+      pending(2, { id: 'mem_d2', name: '部署流程', content: '部署流程 部署流程', confidence: 0.9 }),
+      pending(1, { id: 'mem_d1', name: '部署流程', content: '部署流程', confidence: 0.5 }),
+      pending(1, { id: 'mem_d1b', name: '部署流程', content: '部署流程 部署流程', confidence: 0.9 }),
+      record({ id: 'mem_main', name: '其他', content: '部署流程', confidence: 0.3 }),
+      // 已升档的子 agent 记录属于主档
+      record({ id: 'mem_reviewed', name: '其他条目', content: '部署流程', confidence: 0.2, delegation: { sessionId: 'sub-1', depth: 1, parentSessionId: 'main', reviewed: { by: 'main', at: 1 } } }),
+    ])
+    expect(await ids(store, '部署流程')).toEqual(['mem_main', 'mem_reviewed', 'mem_d1b', 'mem_d1', 'mem_d2'])
+    expect(await ids(store, '部署流程', { limit: 2 })).toEqual(['mem_main', 'mem_reviewed'])
+    expect(await ids(store, '部署流程', { limit: 3 })).toEqual(['mem_main', 'mem_reviewed', 'mem_d1b'])
+  })
+
+  it('零 token 查询同样两段', async () => {
+    const store = await seeded([
+      pending(2, { id: 'mem_d2', confidence: 0.9 }),
+      pending(1, { id: 'mem_d1', confidence: 0.4 }),
+      record({ id: 'mem_main', confidence: 0.3 }),
+    ])
+    expect(await ids(store, '')).toEqual(['mem_main', 'mem_d1', 'mem_d2'])
+    expect(await ids(store, '', { limit: 1 })).toEqual(['mem_main'])
+  })
+
+  it('id 直达仍置顶：查询待确认记录的 id，它排第一', async () => {
+    const store = await seeded([
+      pending(1, { id: 'mem_pend', content: '正文' }),
+      record({ id: 'mem_mention', content: 'mem_pend 被提到' }),
+    ])
+    expect(await ids(store, 'mem_pend')).toEqual(['mem_pend', 'mem_mention'])
+  })
+
+  it('检索结果里待确认记录带「（子 agent 写入，未确认）」，主档不带', async () => {
+    const store = await seeded([
+      pending(1, { id: 'mem_pend', content: '部署流程' }),
+      record({ id: 'mem_main', content: '部署流程' }),
+    ])
+    const notes = Object.fromEntries((await search(store, '部署流程')).hits.map(h => [h.id, h.sourceNote]))
+    expect(notes).toEqual({ mem_main: '', mem_pend: DELEGATED_PENDING_NOTE })
   })
 })
 
