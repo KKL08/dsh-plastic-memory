@@ -1,4 +1,4 @@
-import type { MemoryRecord } from '../record-schema.ts'
+import { isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
 import { matchScore } from '../text.ts'
 
 /**
@@ -241,4 +241,15 @@ export function compareRanked(x: RankedRecord, y: RankedRecord): number {
     || y.score - x.score
     || y.record.confidence - x.record.confidence
     || y.record.lastConfirmedAt - x.record.lastConfirmedAt
+}
+
+/**
+ * 两段：主档在前，子 agent 写入的待确认记录在后。调用方先按 compareRanked 排好，这里只切段：
+ * 待确认段按委派深度升序（深度浅的在前），同深度保持传入顺序。拼接后由调用方截断，主档命中满 limit 时待确认不露出。
+ */
+export function pendingLast(ranked: readonly RankedRecord[]): RankedRecord[] {
+  const pending = ranked.filter(e => isPendingDelegated(e.record))
+  if (pending.length === 0) return [...ranked]
+  const settled = ranked.filter(e => !isPendingDelegated(e.record))
+  return [...settled, ...pending.sort((x, y) => x.record.delegation!.depth - y.record.delegation!.depth)]
 }
