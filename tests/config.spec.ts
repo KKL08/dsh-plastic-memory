@@ -31,6 +31,7 @@ describe('Config schema', () => {
       template: 'coding',
       customTypes: {},
       scenes: PRESET_SCENES,
+      removedPresetTypes: [],
       governance: { enabled: true, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global' },
       search: {},
       subagent: { maxSavesPerSession: 10 },
@@ -42,7 +43,7 @@ describe('Config schema', () => {
   it('进 GUI 的字段是 volatile 引用（用时 .get()），writeMode 与 memoryRoot 不是', () => {
     const value = new Config({} as never)
     const refs = [
-      value.template, value.customTypes, value.scenes, value.snapshotTokenBudget, value.snapshotOverflow, value.evidenceLookup,
+      value.template, value.customTypes, value.scenes, value.removedPresetTypes, value.snapshotTokenBudget, value.snapshotOverflow, value.evidenceLookup,
       value.governance.enabled, value.governance.health.sensitivity, value.governance.globalPromoteTarget,
       value.subagent.maxSavesPerSession, value.accent,
     ]

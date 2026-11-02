@@ -33,6 +33,13 @@ All notable changes to this project are documented here. The format follows
   vine used so far, the default) or Blue Whale, which follows the DeepSeek
   Harness brand blue in light and dark mode. It is stored as `accent` and
   applies to every memory panel as soon as it is saved.
+- The preset types `procedure` and `decision` can be edited and removed on
+  the settings page, and restored later. A removed preset gets no new
+  memories, while existing ones are still injected and searchable. Removed
+  presets are stored in the new `removedPresetTypes` key; an edited preset
+  is an entry of the same name under `customTypes`, as before.
+- The base five types can be viewed on the settings page: their full
+  definitions, read-only.
 
 ### Changed
 - In a subagent session, `memory_source` only traces memories whose source
@@ -114,8 +121,11 @@ All notable changes to this project are documented here. The format follows
   types are still read with their original names and decay periods, but no
   scene can add new ones. A custom type with one of these names is a new
   type, and the old memories are read with its definition.
-- Custom types are managed inside the scene dialog on the settings page, and
-  their English name can now be changed. When a renamed or removed type
+- The settings page lists every type in the pool under Memory types,
+  grouped as the base five, presets and your own, with the scenes that use
+  it and how many memories it has. Custom types are created, edited and
+  removed there or in the scene dialog, and their English name can now be
+  changed. When a renamed or removed type
   already has memories, you choose whether they follow the new name or move
   to Recently deleted; removing a type can also keep its memories. The
   memories are moved after the settings are saved, with a retry if some

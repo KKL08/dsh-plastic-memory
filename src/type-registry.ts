@@ -14,6 +14,8 @@ export interface TypeRegistryConfig {
   customTypes: Record<string, Omit<MemoryTypeDefinition, 'name'>>
   /** 不传时为出厂的编码、办公两项（同配置 schema 默认值）。 */
   scenes?: Readonly<Record<string, SceneConfig>>
+  /** 删掉的预设类型：不进类型池，和退役类型一样只供读取。 */
+  removedPresetTypes?: readonly string[]
 }
 
 export const BUILTIN_TYPES: readonly MemoryTypeDefinition[] = [
@@ -82,16 +84,27 @@ export function buildTypeRegistry(config: TypeRegistryConfig): BuiltTypeRegistry
   const customTypes = Object.entries(config.customTypes).map(([name, def]) => ({ name, ...def }))
   assertNoBuiltinCollision(customTypes, '自定义')
 
-  // 类型池：内置 → 预设 → 自建（自建与预设、退役同名时覆盖，兼容老配置）
+  const warnings: string[] = []
+  const removedNames = config.removedPresetTypes ?? []
+  const unknown = removedNames.filter(name => !PRESET_TYPES.some(t => t.name === name))
+  if (unknown.length > 0) warnings.push(`removedPresetTypes 里的 ${unknown.join('、')} 不是预设类型，已忽略`)
+  const removed = PRESET_TYPES.filter(t => removedNames.includes(t.name))
+
+  // 类型池：内置 → 预设 → 自建（自建与预设同名 = 改过的预设，与退役同名 = 新类型）。删掉的预设只供读取，同名自建不生效
   const pool = new Map<string, MemoryTypeDefinition>()
-  for (const t of [...BUILTIN_TYPES, ...PRESET_TYPES]) pool.set(t.name, t)
-  const retired = new Map(RETIRED_TYPES.map(t => [t.name, t]))
+  for (const t of [...BUILTIN_TYPES, ...PRESET_TYPES]) {
+    if (!removed.includes(t)) pool.set(t.name, t)
+  }
+  const retired = new Map([...RETIRED_TYPES, ...removed].map(t => [t.name, t]))
   for (const t of customTypes) {
+    if (removed.some(r => r.name === t.name)) {
+      warnings.push(`预设类型 "${t.name}" 已删除，customTypes 里的同名定义不生效`)
+      continue
+    }
     pool.set(t.name, t)
     retired.delete(t.name)
   }
 
-  const warnings: string[] = []
   const general = () => BUILTIN_TYPES.map(t => t.name)
   const pickScene = (): string[] => {
     if (config.template === GENERAL_SCENE) return general()
@@ -102,7 +115,7 @@ export function buildTypeRegistry(config: TypeRegistryConfig): BuiltTypeRegistry
       return general()
     }
     const skipped = scene.types.filter(name => !pool.has(name))
-    if (skipped.length > 0) warnings.push(`场景 "${config.template}" 里的类型 ${skipped.join('、')} 不存在或已退役，已跳过`)
+    if (skipped.length > 0) warnings.push(`场景 "${config.template}" 里的类型 ${skipped.join('、')} 不存在、已退役或已删除，已跳过`)
     const picked = [...pool.keys()].filter(name => scene.types.includes(name))
     if (picked.length === 0) {
       warnings.push(`场景 "${config.template}" 没有可用的类型，按通用场景运行`)

@@ -67,6 +67,8 @@ export interface Config {
   customTypes: Volatile<Record<string, Omit<MemoryTypeDefinition, 'name'>>>
   /** 编码、办公与自定义场景（通用场景固定内置五类，不在这里）。 */
   scenes: Volatile<Record<string, SceneConfig>>
+  /** 删掉的预设类型：不进类型池，已有记忆按出厂定义读。改过的预设是 customTypes 里的同名一项。 */
+  removedPresetTypes: Volatile<string[]>
   governance: {
     enabled: Volatile<boolean>
     health: { sensitivity: Volatile<HealthSensitivity> }
@@ -104,6 +106,8 @@ export const Config = z.object({
     label: z.string().required(),
     types: z.array(z.string()).required(),
   })).default(PRESET_SCENES).volatile(),
+  // 不用 union 校验名字：预设名单以后变了，老配置照样能加载（类型表忽略不认识的并警告）
+  removedPresetTypes: z.array(z.string()).default([]).volatile(),
   governance: z.object({
     enabled: z.boolean().default(true).volatile(),
     health: z.object({
@@ -130,10 +134,13 @@ type SessionLike = object & { header?: { id?: string; cwd?: string; delegationDe
 export async function apply(ctx: Context, config: Config) {
   // 插件本次加载的时刻：健康视图带给浏览器半侧，判断冻结快照是否早于这次启动
   const bootedAt = Date.now()
-  // 类型表随 template / customTypes / scenes 热更新重建；各处拿到的是转发到当前表的同一个对象。
+  // 类型表随 template / customTypes / scenes / removedPresetTypes 热更新重建；各处拿到的是转发到当前表的同一个对象。
   // 场景配置写错只警告（按通用或截断运行），不让插件加载失败
   const buildRegistry = () => {
-    const built = buildTypeRegistry({ template: config.template.get(), customTypes: config.customTypes.get(), scenes: config.scenes.get() })
+    const built = buildTypeRegistry({
+      template: config.template.get(), customTypes: config.customTypes.get(), scenes: config.scenes.get(),
+      removedPresetTypes: config.removedPresetTypes.get(),
+    })
     for (const warning of built.warnings) ctx.logger.warn(`[plastic-memory] ${warning}`)
     return built
   }
@@ -591,7 +598,7 @@ export async function apply(ctx: Context, config: Config) {
   }
   loaderEvents.on('loader/volatile-update', async paths => {
     const changed = (...keys: string[]) => paths.some(path => keys.includes(path.join('.')))
-    if (changed('template', 'customTypes', 'scenes')) {
+    if (changed('template', 'customTypes', 'scenes', 'removedPresetTypes')) {
       try {
         currentRegistry = buildRegistry()
         disposeSave()

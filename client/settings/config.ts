@@ -29,6 +29,66 @@ export const PRESET_TYPE_NAMES = ['procedure', 'decision'] as const
 /** 退役类型：旧记忆照常读，不能再新增，类型清单里不出现（src/type-registry.ts RETIRED_TYPES，镜像测试守一致）。 */
 export const RETIRED_TYPE_NAMES = ['commitment', 'person'] as const
 
+export type PresetTypeName = (typeof PRESET_TYPE_NAMES)[number]
+
+export function isPresetType(name: string): name is PresetTypeName {
+  return (PRESET_TYPE_NAMES as readonly string[]).includes(name)
+}
+
+/**
+ * 通用五类、预设两类的出厂定义（src/type-registry.ts BUILTIN_TYPES、PRESET_TYPES，镜像测试守一致）：
+ * 通用类型「查看」、编辑预设时预填、判断预设改没改过。文字是模型看到的原文，不随界面语言变。
+ */
+export const TYPE_DEFINITIONS: Readonly<Record<(typeof BUILTIN_TYPE_NAMES)[number] | PresetTypeName, CustomType>> = {
+  profile: {
+    label: '用户画像',
+    description: '用户的身份、角色、能力和知识水平。例：「用户是数据工程师，Go 熟练，React 刚上手」',
+    whenToSave: '用户透露身份、角色、常用技术栈或熟练度',
+    recall: 'core', decayDays: null, governancePriority: 'low',
+  },
+  preference: {
+    label: '行为偏好',
+    description: '用户纠正过的做法、确认过的习惯。例：「测试里不要 mock 数据库」',
+    whenToSave: '用户纠正你的做法、确认某个习惯，或明说「记住」「下次别这样」',
+    recall: 'core', decayDays: null, governancePriority: 'medium',
+  },
+  knowledge: {
+    label: '事实与经验',
+    description: '不随项目结束而失效的客观事实、规则、工具行为。例：「报销截止每月 25 日」「keychain 报错是本地问题不是授权失效」',
+    whenToSave: '确认了不随项目失效的事实、规则、工具行为；用户贴来的报错栈/接口结构/schema，记里面的事实本身而非「用户贴了个东西」',
+    recall: 'search', decayDays: 90, governancePriority: 'high',
+  },
+  project: {
+    label: '项目信息',
+    description: '绑定项目生命周期的状态、决策、进展。例：「merge freeze 到 3 月 5 日」',
+    whenToSave: '确立目标、里程碑达成、决策变更（连旧状态一起记）、关键进展推进',
+    recall: 'search', decayDays: 7, governancePriority: 'high',
+  },
+  reference: {
+    label: '参考引用',
+    description: '外部资源的位置指针，回答「去哪找」。例：「pipeline bugs 在 Linear 的 INGEST 项目」',
+    whenToSave: '用户指明某个资源固定在哪找',
+    recall: 'passive', decayDays: null, governancePriority: 'medium',
+  },
+  procedure: {
+    label: '可复用流程',
+    description: '经多次验证的工作流程或操作步骤。一次成功不算，反复验证过才存',
+    whenToSave: '一套流程反复验证有效、值得复用（一次成功不算）；做完一件复杂事后把踩过的坑和验证过的做法沉淀',
+    recall: 'search', decayDays: 90, governancePriority: 'medium',
+  },
+  decision: {
+    label: '决定',
+    description: '谁在什么时候决定了什么、依据是什么；谁答应了谁什么、截止什么时候',
+    whenToSave: '谁在什么时候定了什么、依据是什么；谁答应了谁什么、截止什么时候',
+    recall: 'search', decayDays: 30, governancePriority: 'high',
+  },
+}
+
+/** 预设改过没有：customTypes 里有同名一项、且和出厂定义不同（「已改」标记、「恢复默认」据此显示）。 */
+export function isPresetTypeEdited(name: string, customTypes: Readonly<Record<string, CustomType>>): boolean {
+  return isPresetType(name) && Object.hasOwn(customTypes, name) && !sameType(customTypes[name], TYPE_DEFINITIONS[name])
+}
+
 /** 场景：名字 + 组成（含通用类型，顺序无意义，按类型池顺序排）。 */
 export interface Scene {
   label: string
@@ -51,24 +111,39 @@ function sameSet(a: readonly string[], b: readonly string[]): boolean {
   return set.size === new Set(b).size && b.every(x => set.has(x))
 }
 
-/** 编码、办公改过没有：组成和出厂组成的集合不同（「已改」标记、「恢复默认」据此显示）。 */
-export function isPresetEdited(id: string, scene: Scene): boolean {
-  return isPresetScene(id) && !sameSet(scene.types, PRESET_SCENES[id].types)
+/** 编码、办公的出厂组成，去掉已删的预设类型（恢复默认写回的就是它）。 */
+export function presetSceneTypes(id: PresetSceneId, removedPresets: readonly string[]): string[] {
+  return PRESET_SCENES[id].types.filter(name => !removedPresets.includes(name))
 }
 
-/** 类型池，按池顺序：内置五类 → 预设两类 → 自建类型（和预设同名的自建类型占预设的位置）。 */
-export function typePool(customTypes: Readonly<Record<string, unknown>>): string[] {
+/**
+ * 编码、办公改过没有：两边都去掉已删的预设后，组成和出厂组成的集合不同（「已改」标记、「恢复默认」据此显示）。
+ * 配置文件里手写删掉预设时，场景可能还列着它（服务端跳过不用），不算改过。
+ */
+export function isPresetEdited(id: string, scene: Scene, removedPresets: readonly string[] = []): boolean {
+  return isPresetScene(id) && !sameSet(scene.types.filter(name => !removedPresets.includes(name)), presetSceneTypes(id, removedPresets))
+}
+
+/**
+ * 类型池，按池顺序：内置五类 → 预设两类 → 自建类型。和预设同名的一项是改过的预设，占预设的位置；
+ * 删掉的预设不在池里（同名一项也不算，同服务端）。
+ */
+export function typePool(customTypes: Readonly<Record<string, unknown>>, removedPresets: readonly string[] = []): string[] {
   const fixed: readonly string[] = [...BUILTIN_TYPE_NAMES, ...PRESET_TYPE_NAMES]
-  return [...fixed, ...Object.keys(customTypes).filter(name => !fixed.includes(name))]
+  return [
+    ...fixed.filter(name => !removedPresets.includes(name)),
+    ...Object.keys(customTypes).filter(name => !fixed.includes(name)),
+  ]
 }
 
 /**
  * 场景实际生效的类型，同服务端解析（src/type-registry.ts buildTypeRegistry）：取组成与类型池的交集、按池顺序、超过上限截断；
  * 通用、不存在的场景、交集为空都按通用五类。
  */
-export function sceneTypes(fields: Pick<SettingsFields, 'scenes' | 'customTypes'>, id: string): string[] {
+export function sceneTypes(fields: Pick<SettingsFields, 'scenes' | 'customTypes'> & Partial<Pick<SettingsFields, 'removedPresets'>>, id: string): string[] {
   const scene = id === GENERAL_SCENE || !Object.hasOwn(fields.scenes, id) ? undefined : fields.scenes[id]
-  const picked = scene === undefined ? [] : typePool(fields.customTypes).filter(name => scene.types.includes(name)).slice(0, SCENE_MAX_TYPES)
+  const pool = typePool(fields.customTypes, fields.removedPresets)
+  const picked = scene === undefined ? [] : pool.filter(name => scene.types.includes(name)).slice(0, SCENE_MAX_TYPES)
   return picked.length > 0 ? picked : [...BUILTIN_TYPE_NAMES]
 }
 
@@ -187,21 +262,36 @@ export function pendingNames(migrations: Migrations, name?: string): string[] {
 }
 
 /** 自建类型改名：保持在列表里的位置，场景组成里一并换成新名字。 */
-export function renameType(pool: Pick<SettingsFields, 'scenes' | 'customTypes'>, from: string, to: string, type: CustomType):
-  Pick<SettingsFields, 'scenes' | 'customTypes'> {
+export function renameType<P extends Pick<SettingsFields, 'scenes' | 'customTypes'>>(pool: P, from: string, to: string, type: CustomType): P {
   const customTypes = Object.fromEntries(Object.entries(pool.customTypes).map(([name, t]) => name === from ? [to, type] : [name, t]))
   const scenes = Object.fromEntries(Object.entries(pool.scenes).map(([id, scene]) =>
     [id, scene.types.includes(from) ? { ...scene, types: scene.types.map(name => name === from ? to : name) } : scene]))
-  return { scenes, customTypes }
+  return { ...pool, scenes, customTypes }
 }
 
-/** 删掉自建类型，场景组成里一并去掉。 */
-export function removeType(pool: Pick<SettingsFields, 'scenes' | 'customTypes'>, name: string): Pick<SettingsFields, 'scenes' | 'customTypes'> {
+/** 删掉一类，场景组成里一并去掉。预设类型还要记进 removedPresets，改过的定义一并丢掉。 */
+export function removeType<P extends Pool>(pool: P, name: string): P {
   const { [name]: _removed, ...customTypes } = pool.customTypes
   const scenes = Object.fromEntries(Object.entries(pool.scenes).map(([id, scene]) =>
     [id, scene.types.includes(name) ? { ...scene, types: scene.types.filter(n => n !== name) } : scene]))
-  return { scenes, customTypes }
+  const removedPresets = isPresetType(name) && !pool.removedPresets.includes(name) ? [...pool.removedPresets, name] : pool.removedPresets
+  return { ...pool, scenes, customTypes, removedPresets }
 }
+
+/**
+ * 恢复删掉的预设：用出厂定义，场景不自动勾回；这次删除时选的「移到最近删除」一并撤销。
+ * 配置文件里手写删除时可能残留同名定义、场景里还列着它，一并去掉，免得恢复后旧定义生效、场景自动勾回。
+ */
+export function restorePresetType<P extends Pool>(pool: P, migrations: Migrations, name: string): { pool: P; migrations: Migrations } {
+  const { [name]: _forget, ...rest } = migrations
+  const { [name]: _stale, ...customTypes } = pool.customTypes
+  const scenes = Object.fromEntries(Object.entries(pool.scenes).map(([id, scene]) =>
+    [id, scene.types.includes(name) ? { ...scene, types: scene.types.filter(n => n !== name) } : scene]))
+  return { pool: { ...pool, scenes, customTypes, removedPresets: pool.removedPresets.filter(n => n !== name) }, migrations: rest }
+}
+
+/** 类型池那几项字段：场景组成、自建类型（含改过的预设）、删掉的预设。 */
+export type Pool = Pick<SettingsFields, 'scenes' | 'customTypes' | 'removedPresets'>
 
 export const OVERFLOW_MODES = ['relax', 'strict'] as const
 export const EVIDENCE_LEVELS = ['off', 'strict', 'active'] as const
@@ -231,7 +321,10 @@ export interface SettingsFields {
   /** 当前场景 id。 */
   template: string
   scenes: Record<string, Scene>
+  /** 自建类型，和预设同名的一项是改过的预设。 */
   customTypes: Record<string, CustomType>
+  /** 删掉的预设类型（配置里的 removedPresetTypes），按预设顺序。 */
+  removedPresets: string[]
   budget: string
   overflow: (typeof OVERFLOW_MODES)[number]
   evidence: (typeof EVIDENCE_LEVELS)[number]
@@ -240,8 +333,8 @@ export interface SettingsFields {
   accent: (typeof ACCENTS)[number]
 }
 
-/** 各字段在配置段里的路径（scenes、customTypes 按键逐条写，见 buildOps）。用户词典路径不进表单：只在配置文件或对话里改。 */
-const PATHS: Record<Exclude<keyof SettingsFields, 'scenes' | 'customTypes'>, string[]> = {
+/** 各字段在配置段里的路径（scenes、customTypes 按键逐条写，removedPresets 整段写，见 buildOps）。用户词典路径不进表单：只在配置文件或对话里改。 */
+const PATHS: Record<Exclude<keyof SettingsFields, 'scenes' | 'customTypes' | 'removedPresets'>, string[]> = {
   template: ['template'],
   budget: ['snapshotTokenBudget'],
   overflow: ['snapshotOverflow'],
@@ -252,7 +345,7 @@ const PATHS: Record<Exclude<keyof SettingsFields, 'scenes' | 'customTypes'>, str
 }
 
 const DEFAULTS: SettingsFields = {
-  template: 'coding', scenes: PRESET_SCENES, customTypes: {}, budget: '4000', overflow: 'relax', evidence: 'strict',
+  template: 'coding', scenes: PRESET_SCENES, customTypes: {}, removedPresets: [], budget: '4000', overflow: 'relax', evidence: 'strict',
   sensitivity: 'normal', promoteTarget: 'plugin-global', accent: 'ella',
 }
 
@@ -282,6 +375,11 @@ function scenesOf(value: unknown): Record<string, Scene> {
   return scenes
 }
 
+/** 配置段里的 removedPresetTypes：只认预设名（别的服务端也忽略），去重、按预设顺序。 */
+function removedPresetsOf(value: unknown): string[] {
+  return Array.isArray(value) ? PRESET_TYPE_NAMES.filter(name => value.includes(name)) : []
+}
+
 /**
  * 配置段 → 表单字段。宿主给的是解析过的值，取不到时回落到 schema 默认值。
  * 当前场景指向不存在的场景时服务端按通用运行，这里也显示通用。
@@ -296,6 +394,7 @@ export function fieldsOf(section: unknown): SettingsFields {
       : template === GENERAL_SCENE || Object.hasOwn(scenes, template) ? template : GENERAL_SCENE,
     scenes,
     customTypes: typeof types === 'object' && types !== null ? types as Record<string, CustomType> : {},
+    removedPresets: removedPresetsOf(at(section, ['removedPresetTypes'])),
     budget: typeof budget === 'number' ? String(budget) : DEFAULTS.budget,
     overflow: oneOf(OVERFLOW_MODES, at(section, PATHS.overflow), DEFAULTS.overflow),
     evidence: oneOf(EVIDENCE_LEVELS, at(section, PATHS.evidence), DEFAULTS.evidence),
@@ -352,6 +451,9 @@ export function buildOps(saved: SettingsFields, draft: SettingsFields): ConfigPa
   for (const name of Object.keys(saved.customTypes)) {
     if (!(name in draft.customTypes)) ops.push({ op: 'unset', path: ['customTypes', name] })
   }
+  if (!sameSet(saved.removedPresets, draft.removedPresets)) {
+    ops.push({ op: 'set', path: ['removedPresetTypes'], value: PRESET_TYPE_NAMES.filter(name => draft.removedPresets.includes(name)) })
+  }
   const scenes = sceneChanges(saved.scenes, draft.scenes)
   for (const id of [...scenes.added, ...scenes.edited]) {
     ops.push({ op: 'set', path: ['scenes', id], value: { label: draft.scenes[id]!.label, types: [...draft.scenes[id]!.types] } })
@@ -360,17 +462,37 @@ export function buildOps(saved: SettingsFields, draft: SettingsFields): ConfigPa
   return ops
 }
 
-/** 自定义类型的改动，按中文名汇总（保存确认弹窗用）：修改、新增取草稿里的名字，删除取已存的。 */
+/** 自建类型的改动，按中文名汇总（保存确认弹窗用）：修改、新增取草稿里的名字，删除取已存的。改过的预设不算，见 presetTypeChanges。 */
 export function customTypeChanges(saved: SettingsFields['customTypes'], draft: SettingsFields['customTypes']):
   { added: string[]; edited: string[]; removed: string[] } {
   const added: string[] = []
   const edited: string[] = []
   for (const [name, type] of Object.entries(draft)) {
+    if (isPresetType(name)) continue
     if (!(name in saved)) added.push(type.label)
     else if (!sameType(saved[name], type)) edited.push(type.label)
   }
-  const removed = Object.entries(saved).filter(([name]) => !(name in draft)).map(([, type]) => type.label)
+  const removed = Object.entries(saved).filter(([name]) => !isPresetType(name) && !(name in draft)).map(([, type]) => type.label)
   return { added, edited, removed }
+}
+
+/** 预设类型的改动（英文名，保存确认弹窗用）：改了定义、恢复默认、删除、恢复。删掉和恢复的不再算改没改定义。 */
+export function presetTypeChanges(saved: Pool, draft: Pool): { edited: string[]; reset: string[]; removed: string[]; restored: string[] } {
+  const parts = { edited: [] as string[], reset: [] as string[], removed: [] as string[], restored: [] as string[] }
+  for (const name of PRESET_TYPE_NAMES) {
+    const wasRemoved = saved.removedPresets.includes(name)
+    const isRemoved = draft.removedPresets.includes(name)
+    if (isRemoved !== wasRemoved) {
+      (isRemoved ? parts.removed : parts.restored).push(name)
+      continue
+    }
+    if (isRemoved) continue
+    const before = isPresetTypeEdited(name, saved.customTypes)
+    const after = isPresetTypeEdited(name, draft.customTypes)
+    if (after && (!before || !sameType(saved.customTypes[name], draft.customTypes[name]))) parts.edited.push(name)
+    else if (before && !after) parts.reset.push(name)
+  }
+  return parts
 }
 
 // —— 自定义类型 ——
@@ -386,7 +508,7 @@ export interface CustomTypeDraft {
   decayDays: string
 }
 
-export type CustomTypeError = 'required' | 'name-format' | 'name-builtin' | 'name-taken' | 'name-pending' | 'label-taken' | 'decay-invalid'
+export type CustomTypeError = 'required' | 'name-format' | 'name-builtin' | 'name-removed-preset' | 'name-taken' | 'name-pending' | 'label-taken' | 'decay-invalid'
 
 /** 新增类型的初始草稿：召回方式、治理优先级预选「搜索」「中」，分段控件打开就有选中项（2026-10-25 用户定）。 */
 export const EMPTY_TYPE_DRAFT: CustomTypeDraft = {
@@ -400,16 +522,19 @@ export function draftOf(name: string, type: CustomType): CustomTypeDraft {
 /**
  * 校验类型表单草稿。英文名：小写字母和连字符（types.ts 的类型标识符约定），不与内置类型、taken.names 重名，
  * 不占用迁移中的原名（旧记忆保存后才迁走）；中文名去掉首尾空白后不与 taken.labels 重复。退役类型不算重名：同名自建就是新类型。
- * @param taken names：预设和其他自建类型的英文名（编辑已有的、和预设同名的老类型时不含预设）；labels：类型池里其他类型的中文名；
- *   pending：迁移中的原名（见 pendingNames）。
+ * @param taken names：预设和其他自建类型的英文名（编辑预设时不含它自己）；labels：类型池里其他类型的中文名（含删掉的预设）；
+ *   pending：迁移中的原名（见 pendingNames）；removedPresets：删掉的预设（名字仍占着，单独提示能恢复）。
  */
-export function validateTypeDraft(draft: CustomTypeDraft, taken: { names: readonly string[]; labels: readonly string[]; pending?: readonly string[] }):
+export function validateTypeDraft(draft: CustomTypeDraft, taken: {
+  names: readonly string[]; labels: readonly string[]; pending?: readonly string[]; removedPresets?: readonly string[]
+}):
   { ok: true; name: string; type: CustomType } | { ok: false; errors: Partial<Record<keyof CustomTypeDraft, CustomTypeError>> } {
   const errors: Partial<Record<keyof CustomTypeDraft, CustomTypeError>> = {}
   const name = draft.name.trim()
   if (name === '') errors.name = 'required'
   else if (!/^[a-z]+(?:-[a-z]+)*$/.test(name)) errors.name = 'name-format'
   else if ((BUILTIN_TYPE_NAMES as readonly string[]).includes(name)) errors.name = 'name-builtin'
+  else if (taken.removedPresets?.includes(name) === true) errors.name = 'name-removed-preset'
   else if (taken.names.includes(name)) errors.name = 'name-taken'
   else if (taken.pending?.includes(name) === true) errors.name = 'name-pending'
   if (draft.label.trim() !== '' && taken.labels.some(label => label.trim() === draft.label.trim())) errors.label = 'label-taken'

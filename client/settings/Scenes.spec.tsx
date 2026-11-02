@@ -1,11 +1,11 @@
-// 设置页「场景」一项（spec-custom-scenes 故事 1–27）：场景列表、场景弹层、类型表单与管理视图、改名与删除的迁移。
+// 设置页「记什么」：场景列表、记忆类型列表、场景弹层、类型表单、改名与删除的迁移。
 import { describe, expect, it } from 'vitest'
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { GUI_VIEW_VERSION, type DeletedView, type LibraryView, type MemoryCommand, type MemoryCommandResult } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { memory, NOW, renderInShell } from '../test-utils.tsx'
 import { createFakeConfigForm, DEFAULT_SECTION, type FakeConfigForm } from './config-form.fake.ts'
-import { nextSceneId } from './config.ts'
+import { nextSceneId, TYPE_DEFINITIONS } from './config.ts'
 import { SettingsPage } from './SettingsPage.tsx'
 
 const term = { label: '术语', description: 'd', whenToSave: 'w', recall: 'search', decayDays: null, governancePriority: 'medium' }
@@ -45,6 +45,12 @@ const button = (name: string, scope: HTMLElement = document.body) => within(scop
 const dialog = (name: string) => screen.getByRole('dialog', { name })
 const check = (scope: HTMLElement, name: string) => within(scope).getByRole('checkbox', { name })
 const confirmLines = () => within(dialog('保存这些改动？')).getAllByRole('listitem').map(el => el.textContent)
+const typesRegion = () => screen.getByRole('region', { name: '记忆类型' })
+/** 记忆类型卡（三组里任一组），按开头的中文名找。 */
+const typeRow = (label: string) => within(typesRegion()).getAllByRole('listitem').find(el => el.textContent!.startsWith(label))!
+/** 记忆类型的一组卡（通用五类、预设、我加的）上的标题。 */
+const typeTitles = (group: string) => within(within(typesRegion()).getByRole('list', { name: group })).getAllByRole('listitem')
+  .map(el => el.querySelector('.pm-tile-title')!.textContent)
 
 async function clickSave(form: FakeConfigForm) {
   const before = form.calls.length
@@ -72,15 +78,25 @@ describe('场景列表', () => {
     expect(button('编辑场景 写作')).toBeInTheDocument()
   })
 
-  it('选中另一个场景并保存，写 template；说明写当前场景带入几类，少掉的类型列出来', async () => {
+  it('选中另一个场景并保存，写 template；页面上不写说明，少掉的类型在确认框里写明', async () => {
     const { form } = setup()
-    expect(screen.getByText('当前：编码。带入和新增这 6 类记忆。')).toBeInTheDocument()
     fireEvent.click(radio('通用'))
-    expect(screen.getByText('当前：通用。带入和新增这 5 类记忆。保存后不再新增「可复用流程」类记忆，已有的仍会带入、能搜到。')).toBeInTheDocument()
     fireEvent.click(radio('办公'))
-    expect(screen.getByText(/保存后不再新增「可复用流程」类记忆/)).toBeInTheDocument()
-    await clickSave(form)
+    expect(screen.queryByText(/不再新增/)).toBeNull()
+    fireEvent.click(button('保存'))
+    expect(confirmLines()).toEqual(['当前场景：编码 → 办公'])
+    expect(within(dialog('保存这些改动？')).getByText('保存后不再新增「可复用流程」类记忆，已有的仍会带入、能搜到。')).toBeInTheDocument()
+    await act(async () => { fireEvent.click(button('保存', dialog('保存这些改动？'))) })
+    await waitFor(() => { expect(form.calls).toHaveLength(1) })
     expect(form.calls[0]!.ops).toEqual([{ op: 'set', path: ['template'], value: 'office' }])
+  })
+
+  it('换场景没有少掉的类型时，确认框不写这句', () => {
+    setup({ value: { template: 'custom' } })
+    fireEvent.click(radio('编码'))
+    fireEvent.click(button('保存'))
+    expect(confirmLines()).toEqual(['当前场景：通用 → 编码'])
+    expect(within(dialog('保存这些改动？')).queryByText(/不再新增/)).toBeNull()
   })
 
   it('配置里当前场景指向不存在的场景时显示通用', () => {
@@ -114,10 +130,10 @@ describe('场景列表', () => {
     expect(form.calls[0]!.ops).toEqual([{ op: 'set', path: ['template'], value: 'custom' }, { op: 'unset', path: ['scenes', 'coding'] }])
   })
 
-  it('通用以外最多 5 个场景：旁边写还能建几个，满了按钮置灰', () => {
+  it('通用以外最多 5 个场景：新建按钮上写还能建几个，满了按钮置灰', () => {
     const scene = (label: string) => ({ label, types: ['profile'] })
     setup({ value: { scenes: { coding: scene('编码'), office: scene('办公'), a: scene('a'), b: scene('b') } } })
-    expect(screen.getByText('还能建 1 个')).toBeInTheDocument()
+    expect(button('新建场景')).toHaveAccessibleDescription('还能建 1 个')
     fireEvent.click(button('删除场景 a'))
     fireEvent.click(button('删除'))
     expect(screen.getByText('还能建 2 个')).toBeInTheDocument()
@@ -197,7 +213,7 @@ describe('场景弹层', () => {
     expect(check(dialog('编辑场景'), '术语')).toBeChecked()
     fireEvent.click(button('取消', dialog('编辑场景')))
     expect(screen.queryByRole('dialog')).toBeNull()
-    expect(screen.getByText('还没有自己加的类型')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '编辑 术语' })).toBeNull()
     expect(button('保存')).toBeDisabled()
   })
 
@@ -252,18 +268,65 @@ describe('场景弹层', () => {
     fireEvent.click(button('‹ 返回', f))
     expect(dialog('新建场景')).toBeInTheDocument()
   })
+
+  it('预设改了中文名，出厂中文名仍算占用：「恢复默认」后不会和新建的类型重名', () => {
+    setup({ value: { customTypes: { procedure: { ...TYPE_DEFINITIONS.procedure, label: '我的流程' } } } })
+    fireEvent.click(button('新建场景'))
+    fireEvent.click(button('＋ 新建类型', dialog('新建场景')))
+    const f = dialog('新建类型')
+    fireEvent.click(button('确定', f))
+    fireEvent.change(within(f).getByLabelText('中文名'), { target: { value: '可复用流程' } })
+    expect(within(f).getByText('已经有叫「可复用流程」的类型了。')).toBeInTheDocument()
+    fireEvent.change(within(f).getByLabelText('中文名'), { target: { value: '我的流程' } })
+    expect(within(f).getByText('已经有叫「我的流程」的类型了。')).toBeInTheDocument()
+  })
 })
 
-describe('我加的类型：一览行与管理视图', () => {
-  it('一览行列出类型名、带「管理 ›」；没有时写一句', () => {
-    setup()
-    expect(screen.getByText('还没有自己加的类型')).toBeInTheDocument()
-    expect(button('管理 ›')).toBeInTheDocument()
+describe('记忆类型列表', () => {
+  const pool = {
+    customTypes: { 'domain-term': term, client },
+    scenes: { coding: { label: '编码', types: [...GENERAL, 'domain-term'] }, office: { label: '办公', types: [...GENERAL, 'decision'] } },
+  }
+
+  it('类型卡分三组，写哪些场景在用、存了几条；通用只有查看，预设、我加的有编辑、删除，我加的带英文名', () => {
+    setup({ value: pool, memories: ['domain-term', 'domain-term', 'profile'], deletedMemories: ['domain-term'] })
+    expect(typeTitles('通用五类')).toEqual(['用户画像', '行为偏好', '事实与经验', '项目信息', '参考引用'])
+    expect(typeTitles('预设')).toEqual(['可复用流程', '决定'])
+    expect(typeTitles('我加的')).toEqual(['术语', '客户名'])
+    expect(within(typeRow('用户画像')).getByText('通用、编码、办公在用 · 1 条记忆')).toBeInTheDocument()
+    expect(within(typeRow('可复用流程')).getByText('没有场景在用 · 0 条记忆')).toBeInTheDocument()
+    expect(within(typeRow('决定')).getByText('办公在用 · 0 条记忆')).toBeInTheDocument()
+    expect(within(typeRow('术语')).getByText('domain-term')).toBeInTheDocument()
+    expect(within(typeRow('术语')).getByText('编码在用 · 3 条记忆')).toBeInTheDocument()
+    expect(within(typeRow('客户名')).getByText('没有场景在用 · 0 条记忆')).toBeInTheDocument()
+    expect(within(typeRow('用户画像')).getAllByRole('button').map(el => el.getAttribute('aria-label'))).toEqual(['查看 用户画像'])
+    expect(within(typeRow('决定')).getAllByRole('button').map(el => el.getAttribute('aria-label'))).toEqual(['编辑 决定', '删除 决定'])
+    expect(within(typeRow('决定')).queryByText('decision')).toBeNull()
+    expect(button('编辑 术语', typeRow('术语'))).toBeInTheDocument()
+    expect(button('删除 客户名', typeRow('客户名'))).toBeInTheDocument()
   })
 
-  it('点一览行里的类型名直接打开表单：没有「‹ 返回」，确定后直接进页面草稿', async () => {
+  it('条数读不到时只写哪些场景在用', () => {
+    setup({ value: pool, isLibraryLoading: true })
+    expect(within(typeRow('术语')).getByText('编码在用')).toBeInTheDocument()
+  })
+
+  it('新建类型直接打开表单：没有「‹ 返回」，确定后进页面草稿，不勾进任何场景', async () => {
+    const { form } = setup()
+    fireEvent.click(button('新建类型'))
+    const f = dialog('新建类型')
+    expect(within(f).queryByRole('button', { name: '‹ 返回' })).toBeNull()
+    fillType(f, { label: '术语', name: 'domain-term' })
+    fireEvent.click(button('确定', f))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(within(typeRow('术语')).getByText('没有场景在用 · 0 条记忆')).toBeInTheDocument()
+    await clickSave(form)
+    expect(form.calls[0]!.ops).toEqual([{ op: 'set', path: ['customTypes', 'domain-term'], value: term }])
+  })
+
+  it('编辑直接打开表单：没有「‹ 返回」，确定后直接进页面草稿', async () => {
     const { form } = setup({ value: { customTypes: { 'domain-term': term } } })
-    fireEvent.click(button('术语'))
+    fireEvent.click(button('编辑 术语'))
     const f = dialog('编辑类型')
     expect(within(f).queryByRole('button', { name: '‹ 返回' })).toBeNull()
     fireEvent.change(within(f).getByLabelText('衰退天数'), { target: { value: '30' } })
@@ -273,23 +336,168 @@ describe('我加的类型：一览行与管理视图', () => {
     expect(form.calls[0]!.ops).toEqual([{ op: 'set', path: ['customTypes', 'domain-term'], value: { ...term, decayDays: 30 } }])
   })
 
-  it('管理视图：每行写哪些场景在用和存了几条记忆；新建、删除后「完成」并进草稿', async () => {
-    const { form } = setup({
-      value: { customTypes: { 'domain-term': term, client }, scenes: { coding: { label: '编码', types: [...GENERAL, 'domain-term'] }, office: { label: '办公', types: [...GENERAL, 'decision'] } } },
-      memories: ['domain-term', 'domain-term'], deletedMemories: ['domain-term'],
-    })
-    fireEvent.click(button('管理 ›'))
-    const m = dialog('我加的类型')
-    expect(within(m).getByText('所有场景共用。要用某一类，在场景的「编辑」里勾上。')).toBeInTheDocument()
-    expect(within(m).getByText('编码在用 · 3 条记忆')).toBeInTheDocument()
-    expect(within(m).getByText('没有场景在用 · 0 条记忆')).toBeInTheDocument()
-    expect(within(m).queryByRole('checkbox')).toBeNull()
-    fireEvent.click(button('删除 客户名', m))
-    expect(within(m).getByText('删除「客户名」？')).toBeInTheDocument()
-    fireEvent.click(button('删除', m))
-    fireEvent.click(button('完成', dialog('我加的类型')))
+  it('删除走行内确认：写明哪些场景在用；取消收起，确认后进草稿', async () => {
+    const { form } = setup({ value: pool })
+    fireEvent.click(button('删除 术语'))
+    expect(within(typeRow('术语')).getByText('删除「术语」？编码在用，会一起去掉。')).toBeInTheDocument()
+    fireEvent.click(button('取消', typeRow('术语')))
+    expect(screen.queryByText(/^删除「术语」？/)).toBeNull()
+    fireEvent.click(button('删除 客户名'))
+    fireEvent.click(button('删除', typeRow('客户名')))
+    expect(within(typesRegion()).queryByText('客户名')).toBeNull()
     await clickSave(form)
     expect(form.calls[0]!.ops).toEqual([{ op: 'unset', path: ['customTypes', 'client'] }])
+  })
+})
+
+describe('通用、预设类型', () => {
+  const edited = { ...TYPE_DEFINITIONS.procedure, decayDays: 60 }
+
+  it('查看通用类型：只读弹层写出定义原文，没有输入框，关闭就收起', () => {
+    setup()
+    fireEvent.click(button('查看 用户画像'))
+    const f = dialog('用户画像')
+    expect(within(f).getByText('profile')).toBeInTheDocument()
+    expect(within(f).getByText(TYPE_DEFINITIONS.profile.whenToSave)).toBeInTheDocument()
+    expect(within(f).getByText('常驻')).toBeInTheDocument()
+    expect(within(f).getByText('不衰退')).toBeInTheDocument()
+    expect(within(f).queryByRole('textbox')).toBeNull()
+    expect(within(f).queryByRole('button', { name: '确定' })).toBeNull()
+    fireEvent.click(within(f).getAllByRole('button', { name: '关闭' }).at(-1)!)
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('编辑预设：预填出厂定义、英文名不能改；改了标「已改」，保存写同名 customTypes', async () => {
+    const { form } = setup()
+    fireEvent.click(button('编辑 可复用流程'))
+    const f = dialog('编辑类型')
+    expect(within(f).getByLabelText('中文名')).toHaveValue('可复用流程')
+    expect(within(f).getByLabelText('英文名')).toHaveValue('procedure')
+    expect(within(f).getByLabelText('英文名')).toHaveAttribute('readonly')
+    fireEvent.change(within(f).getByLabelText('衰退天数'), { target: { value: '60' } })
+    fireEvent.click(button('确定', f))
+    expect(within(typeRow('可复用流程')).getByText('已改')).toBeInTheDocument()
+    expect(button('可复用流程恢复默认', typeRow('可复用流程'))).toBeInTheDocument()
+    fireEvent.click(button('保存'))
+    expect(confirmLines()).toEqual(['预设类型：修改「可复用流程」'])
+    fireEvent.click(button('取消', dialog('保存这些改动？')))
+    await clickSave(form)
+    expect(form.calls[0]!.ops).toEqual([{ op: 'set', path: ['customTypes', 'procedure'], value: edited }])
+  })
+
+  it('改过的预设点恢复默认：去掉改动，保存时 unset 同名 customTypes', async () => {
+    const { form } = setup({ value: { customTypes: { procedure: edited } } })
+    expect(within(typeRow('可复用流程')).getByText('已改')).toBeInTheDocument()
+    fireEvent.click(button('可复用流程恢复默认'))
+    expect(within(typeRow('可复用流程')).queryByText('已改')).toBeNull()
+    fireEvent.click(button('保存'))
+    expect(confirmLines()).toEqual(['预设类型：恢复默认「可复用流程」'])
+    fireEvent.click(button('取消', dialog('保存这些改动？')))
+    await clickSave(form)
+    expect(form.calls[0]!.ops).toEqual([{ op: 'unset', path: ['customTypes', 'procedure'] }])
+  })
+
+  it('编辑预设改回和出厂一样：等于恢复默认', async () => {
+    const { form } = setup({ value: { customTypes: { procedure: edited } } })
+    fireEvent.click(button('编辑 可复用流程'))
+    fireEvent.change(within(dialog('编辑类型')).getByLabelText('衰退天数'), { target: { value: '90' } })
+    fireEvent.click(button('确定', dialog('编辑类型')))
+    expect(within(typeRow('可复用流程')).queryByText('已改')).toBeNull()
+    await clickSave(form)
+    expect(form.calls[0]!.ops).toEqual([{ op: 'unset', path: ['customTypes', 'procedure'] }])
+  })
+
+  it('删除预设：原位确认、从场景里去掉；卡换成「已删除」一行，编码不算改过；保存写 removedPresetTypes', async () => {
+    const { form } = setup({ memories: [] })
+    fireEvent.click(button('删除 可复用流程'))
+    expect(within(typeRow('可复用流程')).getByText('删除「可复用流程」？编码在用，会一起去掉。')).toBeInTheDocument()
+    fireEvent.click(button('删除', typeRow('可复用流程')))
+    expect(typeTitles('预设')).toEqual(['决定'])
+    expect(within(typesRegion()).getByText('已删除：可复用流程')).toBeInTheDocument()
+    expect(radio('编码')).toHaveAccessibleDescription('通用五类')
+    expect(within(radio('编码').closest('li')!).queryByText('已改')).toBeNull()
+    fireEvent.click(button('保存'))
+    expect(confirmLines()).toEqual(['场景：修改「编码」', '预设类型：删除「可复用流程」'])
+    fireEvent.click(button('取消', dialog('保存这些改动？')))
+    await clickSave(form)
+    expect(form.calls[0]!.ops).toEqual([
+      { op: 'set', path: ['removedPresetTypes'], value: ['procedure'] },
+      { op: 'set', path: ['scenes', 'coding'], value: { label: '编码', types: GENERAL } },
+    ])
+  })
+
+  it('恢复预设：回到预设组、用出厂定义；删除时选的移到最近删除一并撤销，场景不自动勾回', async () => {
+    const { form } = setup({ memories: ['decision'] })
+    fireEvent.click(button('删除 决定'))
+    fireEvent.click(button('移到最近删除', typeRow('决定')))
+    fireEvent.click(button('恢复 决定'))
+    expect(typeTitles('预设')).toEqual(['可复用流程', '决定'])
+    expect(within(typesRegion()).queryByText(/^已删除/)).toBeNull()
+    expect(within(radio('办公').closest('li')!).getByText('已改')).toBeInTheDocument()
+    fireEvent.click(button('保存'))
+    expect(confirmLines()).toEqual(['场景：修改「办公」'])
+    fireEvent.click(button('取消', dialog('保存这些改动？')))
+    await clickSave(form)
+    expect(form.calls[0]!.ops).toEqual([{ op: 'set', path: ['scenes', 'office'], value: { label: '办公', types: GENERAL } }])
+  })
+
+  it('配置里删掉的预设：卡片不出现，恢复后保存写回空列表；编码点恢复默认勾回', async () => {
+    const { form } = setup({ value: { removedPresetTypes: ['procedure'], scenes: { coding: { label: '编码', types: GENERAL }, office: { label: '办公', types: [...GENERAL, 'decision'] } } } })
+    expect(within(radio('编码').closest('li')!).queryByText('已改')).toBeNull()
+    fireEvent.click(button('恢复 可复用流程'))
+    fireEvent.click(button('编码恢复默认'))
+    expect(radio('编码')).toHaveAccessibleDescription('通用五类 + 可复用流程')
+    await clickSave(form)
+    expect(form.calls[0]!.ops).toEqual([
+      { op: 'set', path: ['removedPresetTypes'], value: [] },
+      { op: 'set', path: ['scenes', 'coding'], value: { label: '编码', types: [...GENERAL, 'procedure'] } },
+    ])
+  })
+
+  it('类型卡原位确认收起后焦点不丢：取消回到「删除」，删掉回到组标题，恢复落到恢复的那张卡', () => {
+    setup({ memories: [] })
+    fireEvent.click(button('删除 决定'))
+    fireEvent.click(button('取消', typeRow('决定')))
+    expect(button('删除 决定')).toHaveFocus()
+    fireEvent.click(button('删除 决定'))
+    fireEvent.keyDown(button('取消', typeRow('决定')), { key: 'Escape' })
+    expect(button('删除 决定')).toHaveFocus()
+    fireEvent.click(button('删除 决定'))
+    fireEvent.click(button('删除', typeRow('决定')))
+    expect(within(typesRegion()).getByRole('heading', { name: '预设' })).toHaveFocus()
+    fireEvent.click(button('恢复 决定'))
+    expect(button('编辑 决定')).toHaveFocus()
+  })
+
+  it('场景弹层里删类型：取消回到这一行的「删除」，删掉后落到「新建类型」', () => {
+    setup({ value: { customTypes: { term }, scenes: { coding: { label: '编码', types: [...GENERAL, 'term'] }, office: { label: '办公', types: [...GENERAL, 'decision'] } } } })
+    fireEvent.click(button('编辑场景 编码'))
+    const d = dialog('编辑场景')
+    const confirm = () => within(d).getByRole('group', { name: /^删除「术语」/ })
+    fireEvent.click(button('删除 术语', d))
+    fireEvent.click(button('取消', confirm()))
+    expect(button('删除 术语', d)).toHaveFocus()
+    fireEvent.click(button('删除 术语', d))
+    fireEvent.click(button('删除', confirm()))
+    expect(button('＋ 新建类型', d)).toHaveFocus()
+  })
+
+  it('新建类型用了已删的预设英文名：提示在预设里恢复', () => {
+    setup({ value: { removedPresetTypes: ['decision'] } })
+    fireEvent.click(button('新建类型'))
+    const f = dialog('新建类型')
+    fillType(f, { label: '决策', name: 'decision' })
+    fireEvent.click(button('确定', f))
+    expect(within(f).getByText('这是已删除的预设类型，在预设里点「恢复」就能用。')).toBeInTheDocument()
+  })
+
+  it('场景弹层：改过的预设留在预设组、显示改过的名字，删掉的不出现', () => {
+    setup({ value: { customTypes: { procedure: { ...edited, label: '我的流程' } }, removedPresetTypes: ['decision'] } })
+    fireEvent.click(button('编辑场景 编码'))
+    const f = dialog('编辑场景')
+    const preset = within(f).getByRole('group', { name: '预设' })
+    expect(within(preset).getAllByRole('checkbox').map(el => el.closest('div')!.textContent)).toEqual(['我的流程'])
+    expect(within(within(f).getByRole('group', { name: '我加的（所有场景共用）' })).queryAllByRole('checkbox')).toEqual([])
   })
 })
 
@@ -298,7 +506,7 @@ describe('改名与删除：已有记忆怎么办', () => {
 
   it('没存过记忆的类型直接改名，场景组成跟着换', async () => {
     const { form, gateway } = setup({ value: pool })
-    fireEvent.click(button('术语'))
+    fireEvent.click(button('编辑 术语'))
     fireEvent.change(within(dialog('编辑类型')).getByLabelText('英文名'), { target: { value: 'glossary' } })
     fireEvent.click(button('确定', dialog('编辑类型')))
     expect(screen.queryByRole('dialog')).toBeNull()
@@ -313,7 +521,7 @@ describe('改名与删除：已有记忆怎么办', () => {
 
   it('存过记忆的改名先二选一；跟着改名在保存时先写配置、再迁移', async () => {
     const { form, gateway } = setup({ value: pool, memories: ['domain-term', 'domain-term'] })
-    fireEvent.click(button('术语'))
+    fireEvent.click(button('编辑 术语'))
     const f = dialog('编辑类型')
     fireEvent.change(within(f).getByLabelText('英文名'), { target: { value: 'glossary' } })
     fireEvent.click(button('确定', f))
@@ -330,7 +538,7 @@ describe('改名与删除：已有记忆怎么办', () => {
 
   it('改名时问旧记忆怎么办：焦点在「取消」；Esc 只收起这一问，表单和改了的英文名都还在', () => {
     setup({ value: pool, memories: ['domain-term'] })
-    fireEvent.click(button('术语'))
+    fireEvent.click(button('编辑 术语'))
     const f = dialog('编辑类型')
     fireEvent.change(within(f).getByLabelText('英文名'), { target: { value: 'glossary' } })
     fireEvent.click(button('确定', f))
@@ -341,21 +549,19 @@ describe('改名与删除：已有记忆怎么办', () => {
     expect(within(f).getByLabelText('英文名')).toHaveValue('glossary')
   })
 
-  it('删掉当前场景里的类型：选移到最近删除时，说明不再写已有的仍会带入；选保留记忆时照写', () => {
+  it('删掉当前场景里的类型：选移到最近删除时，确认框不写已有的仍会带入；选保留记忆时照写', () => {
     const removeTerm = (choice: string) => {
-      fireEvent.click(button('管理 ›'))
-      const m = dialog('我加的类型')
-      fireEvent.click(button('删除 术语', m))
-      fireEvent.click(button(choice, m))
-      fireEvent.click(button('完成', m))
+      fireEvent.click(button('删除 术语'))
+      fireEvent.click(button(choice, typeRow('术语')))
+      fireEvent.click(button('保存'))
     }
     const first = setup({ value: pool, memories: ['domain-term'] })
     removeTerm('移到最近删除')
-    expect(screen.queryByText(/不再新增「术语」/)).toBeNull()
+    expect(within(dialog('保存这些改动？')).queryByText(/不再新增「术语」/)).toBeNull()
     first.unmount()
     setup({ value: pool, memories: ['domain-term'] })
     removeTerm('保留记忆')
-    expect(screen.getByText(/保存后不再新增「术语」类记忆，已有的仍会带入、能搜到/)).toBeInTheDocument()
+    expect(within(dialog('保存这些改动？')).getByText('保存后不再新增「术语」类记忆，已有的仍会带入、能搜到。')).toBeInTheDocument()
   })
 
   it('删除时写明别的场景也在用；存过记忆的二选一，移到最近删除在保存后执行，含密钥的单独提示', async () => {
@@ -381,11 +587,9 @@ describe('改名与删除：已有记忆怎么办', () => {
 
   it('删掉会让别的场景一类不剩时不给删，原位提示', () => {
     setup({ value: { ...pool, scenes: { ...pool.scenes, 'scene-1': { label: '写作', types: ['client'] } } } })
-    fireEvent.click(button('管理 ›'))
-    const m = dialog('我加的类型')
-    fireEvent.click(button('删除 客户名', m))
-    expect(within(m).getByText('「写作」只剩这一类，先给它加别的类型再删。')).toBeInTheDocument()
-    expect(within(m).queryByRole('button', { name: '保留记忆' })).toBeNull()
+    fireEvent.click(button('删除 客户名'))
+    expect(within(typeRow('客户名')).getByText('「写作」只剩这一类，先给它加别的类型再删。')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '保留记忆' })).toBeNull()
   })
 
   it('迁移失败时提示配置已保存、可以重试；重试只发还没做完的', async () => {
@@ -394,7 +598,7 @@ describe('改名与删除：已有记忆怎么办', () => {
       value: pool, memories: ['domain-term'],
       respond: command => fails ? { ok: false, cmd: command.cmd, code: 'failed', message: 'x' } as never : { ok: true, cmd: command.cmd, migrated: 1 },
     })
-    fireEvent.click(button('术语'))
+    fireEvent.click(button('编辑 术语'))
     fireEvent.change(within(dialog('编辑类型')).getByLabelText('英文名'), { target: { value: 'glossary' } })
     fireEvent.click(button('确定', dialog('编辑类型')))
     fireEvent.click(button('跟着改名', dialog('编辑类型')))
@@ -411,7 +615,7 @@ describe('改名与删除：已有记忆怎么办', () => {
 
   it('有会话但条数还没读到：按存过记忆处理，选跟着改名照样记下迁移、保存后执行', async () => {
     const { form, gateway } = setup({ value: pool, isLibraryLoading: true })
-    fireEvent.click(button('术语'))
+    fireEvent.click(button('编辑 术语'))
     const f = dialog('编辑类型')
     fireEvent.change(within(f).getByLabelText('英文名'), { target: { value: 'glossary' } })
     fireEvent.click(button('确定', f))
@@ -427,15 +631,13 @@ describe('改名与删除：已有记忆怎么办', () => {
 
   it('改名跟着改之后又删掉、选保留记忆：记忆留在原名下，不迁移；确认框写删除', async () => {
     const { form, gateway } = setup({ value: pool, memories: ['domain-term'] })
-    fireEvent.click(button('管理 ›'))
-    const m = dialog('我加的类型')
-    fireEvent.click(button('编辑 术语', m))
-    fireEvent.change(within(m).getByLabelText('英文名'), { target: { value: 'glossary' } })
-    fireEvent.click(button('确定', m))
-    fireEvent.click(button('跟着改名', m))
-    fireEvent.click(button('删除 术语', m))
-    fireEvent.click(button('保留记忆', m))
-    fireEvent.click(button('完成', m))
+    fireEvent.click(button('编辑 术语'))
+    const f = dialog('编辑类型')
+    fireEvent.change(within(f).getByLabelText('英文名'), { target: { value: 'glossary' } })
+    fireEvent.click(button('确定', f))
+    fireEvent.click(button('跟着改名', f))
+    fireEvent.click(button('删除 术语'))
+    fireEvent.click(button('保留记忆', typeRow('术语')))
     fireEvent.click(button('保存'))
     expect(confirmLines()).toEqual(['场景：修改「编码」', '我加的类型：删除「术语」'])
     await act(async () => { fireEvent.click(button('保存', dialog('保存这些改动？'))) })
@@ -449,7 +651,7 @@ describe('改名与删除：已有记忆怎么办', () => {
       value: pool, memories: ['domain-term'],
       respond: command => fails ? { ok: false, cmd: command.cmd, code: 'failed', message: 'x' } as never : { ok: true, cmd: command.cmd, migrated: 1 },
     })
-    fireEvent.click(button('术语'))
+    fireEvent.click(button('编辑 术语'))
     fireEvent.change(within(dialog('编辑类型')).getByLabelText('英文名'), { target: { value: 'glossary' } })
     fireEvent.click(button('确定', dialog('编辑类型')))
     fireEvent.click(button('跟着改名', dialog('编辑类型')))
@@ -467,7 +669,7 @@ describe('改名与删除：已有记忆怎么办', () => {
 
   it('没有会话时：迁移选项置灰并说明，条数读不到按存过记忆处理；保留记忆照常能删', () => {
     setup({ value: pool, hasSession: false })
-    fireEvent.click(button('术语'))
+    fireEvent.click(button('编辑 术语'))
     const f = dialog('编辑类型')
     fireEvent.change(within(f).getByLabelText('英文名'), { target: { value: 'glossary' } })
     fireEvent.click(button('确定', f))
@@ -477,11 +679,11 @@ describe('改名与删除：已有记忆怎么办', () => {
     expect(button('移到最近删除', f)).toBeDisabled()
     fireEvent.click(button('取消', f))
     fireEvent.click(button('取消', dialog('编辑类型')))
-    fireEvent.click(button('管理 ›'))
-    const m = dialog('我加的类型')
-    fireEvent.click(button('删除 术语', m))
-    expect(within(m).getByText('删除「术语」？编码在用，会一起去掉。可能存过记忆。')).toBeInTheDocument()
-    expect(button('移到最近删除', m)).toBeDisabled()
-    expect(button('保留记忆', m)).toBeEnabled()
+    fireEvent.click(button('删除 术语'))
+    const row = typeRow('术语')
+    expect(within(row).getByText('删除「术语」？编码在用，会一起去掉。可能存过记忆。')).toBeInTheDocument()
+    expect(within(row).getByText('开一个会话后才能处理已有记忆。')).toBeInTheDocument()
+    expect(button('移到最近删除', row)).toBeDisabled()
+    expect(button('保留记忆', row)).toBeEnabled()
   })
 })

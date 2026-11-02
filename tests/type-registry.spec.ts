@@ -180,3 +180,42 @@ describe('场景', () => {
     expect(registry.warnings).toHaveLength(1)
   })
 })
+
+describe('删掉的预设类型', () => {
+  it('不进类型池，场景里列了也跳过并警告；读时按出厂定义（和退役类型一样）', () => {
+    const registry = buildTypeRegistry({ template: 'coding', customTypes: {}, removedPresetTypes: ['procedure'] })
+    expect(registry.all().map(t => t.name)).toEqual(BUILTIN_TYPES.map(t => t.name))
+    expect(registry.has('procedure')).toBe(false)
+    expect(registry.get('procedure')).toMatchObject({ label: '可复用流程', recall: 'search', decayDays: 90 })
+    expect(registry.warnings.join('\n')).toContain('procedure')
+    expect(registry.renderSaveDescription()).not.toContain('procedure')
+  })
+
+  it('同名的 customTypes 不生效（按删掉处理）并警告', () => {
+    const mine = { ...term, label: '我的决定', decayDays: 60 }
+    const registry = buildTypeRegistry({
+      template: 'scene-1', customTypes: { decision: mine }, removedPresetTypes: ['decision'],
+      scenes: { 'scene-1': { label: '跟进', types: ['preference', 'decision'] } },
+    })
+    expect(registry.has('decision')).toBe(false)
+    expect(registry.get('decision')).toMatchObject({ label: '决定', decayDays: 30 })
+    expect(registry.warnings.join('\n')).toMatch(/decision/)
+  })
+
+  it('不是预设类型的名字忽略并警告，内置、自建照常', () => {
+    const registry = buildTypeRegistry({
+      template: 'scene-1', customTypes: { term }, removedPresetTypes: ['profile', 'term', 'ghost'],
+      scenes: { 'scene-1': { label: '写作', types: ['profile', 'term'] } },
+    })
+    expect(registry.all().map(t => t.name)).toEqual(['profile', 'term'])
+    expect(registry.warnings.join('\n')).toMatch(/profile[\s\S]*term[\s\S]*ghost/)
+  })
+
+  it('没删的预设照常：改过的（同名 customTypes）按改过的定义', () => {
+    const mine = { ...term, label: '我的流程' }
+    const registry = buildTypeRegistry({ template: 'coding', customTypes: { procedure: mine }, removedPresetTypes: ['decision'] })
+    expect(registry.has('procedure')).toBe(true)
+    expect(registry.get('procedure')).toMatchObject({ label: '我的流程' })
+    expect(registry.warnings).toEqual([])
+  })
+})

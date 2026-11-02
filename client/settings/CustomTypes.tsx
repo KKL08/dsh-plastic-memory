@@ -1,7 +1,7 @@
 /**
- * 自建类型的表单视图：场景弹层、类型管理视图里换上的那一屏（不叠第二层弹窗），状态由弹层持有（Scenes.tsx）。
+ * 自建类型的表单视图：场景弹层里换上的那一屏（不叠第二层弹窗），从记忆类型列表打开时是弹层唯一的内容；状态由弹层持有（Scenes.tsx）。
  * 字段按 schema 全给：中文名、英文名、说明、什么时候记必填，怎么召回、治理优先级预选「搜索」「中」，衰退天数可空。
- * 英文名可以改：存过记忆的，改名时由弹层问旧记忆怎么办（跟着改名 / 移到最近删除）。
+ * 英文名可以改：存过记忆的，改名时由弹层问旧记忆怎么办（跟着改名 / 移到最近删除）。编辑预设时英文名锁定。
  */
 import { useId } from 'react'
 import { useT } from '../i18n.tsx'
@@ -14,16 +14,21 @@ const ERROR_KEY: Record<CustomTypeError, LocaleKey> = {
   'required': 'settings.type.error.required',
   'name-format': 'settings.type.error.name-format',
   'name-builtin': 'settings.type.error.name-builtin',
+  'name-removed-preset': 'settings.type.error.name-removed-preset',
   'name-taken': 'settings.type.error.name-taken',
   'name-pending': 'settings.type.error.name-pending',
   'label-taken': 'settings.type.error.label-taken',
   'decay-invalid': 'settings.type.error.decay-invalid',
 }
 
-/** @param errors 第一次点「确定」之后才给，之前只显示说明。 */
-export function TypeFormFields({ draft, errors, onChange }: {
+/**
+ * @param errors 第一次点「确定」之后才给，之前只显示说明。
+ * @param isNameLocked 编辑预设：英文名只读。
+ */
+export function TypeFormFields({ draft, errors, isNameLocked = false, onChange }: {
   draft: CustomTypeDraft
   errors: Partial<Record<keyof CustomTypeDraft, CustomTypeError>> | undefined
+  isNameLocked?: boolean
   onChange: (patch: Partial<CustomTypeDraft>) => void
 }) {
   const t = useT()
@@ -32,7 +37,7 @@ export function TypeFormFields({ draft, errors, onChange }: {
     const code = errors?.[field]
     return code === undefined ? undefined : t(ERROR_KEY[code], { label: draft.label.trim() })
   }
-  const field = (key: 'label' | 'name' | 'description' | 'whenToSave' | 'decayDays', labelKey: LocaleKey, hintKey: LocaleKey, extra: { multiline?: boolean; inputMode?: 'numeric' } = {}) => (
+  const field = (key: 'label' | 'name' | 'description' | 'whenToSave' | 'decayDays', labelKey: LocaleKey, hintKey: LocaleKey, extra: { multiline?: boolean; inputMode?: 'numeric'; readOnly?: boolean } = {}) => (
     <div className="pm-field">
       <label className="pm-setting-label" htmlFor={`${id}-${key}`}>{t(labelKey)}</label>
       <TextField id={`${id}-${key}`} value={draft[key]} onChange={(text) => { onChange({ [key]: text }) }} error={errorOf(key)} hint={t(hintKey)} {...extra} />
@@ -57,7 +62,7 @@ export function TypeFormFields({ draft, errors, onChange }: {
   return (
     <>
       {field('label', 'settings.type.label', 'settings.type.labelHint')}
-      {field('name', 'settings.type.name', 'settings.type.nameHint')}
+      {field('name', 'settings.type.name', isNameLocked ? 'settings.type.nameLocked' : 'settings.type.nameHint', { readOnly: isNameLocked })}
       {field('description', 'settings.type.description', 'settings.type.descriptionHint', { multiline: true })}
       {field('whenToSave', 'settings.type.whenToSave', 'settings.type.whenToSaveHint', { multiline: true })}
       {choice('recall', 'settings.type.recall', 'settings.type.recallHint', RECALL_MODES, v => `settings.type.recall.${v}` as LocaleKey)}

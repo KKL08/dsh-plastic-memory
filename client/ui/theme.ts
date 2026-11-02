@@ -11,11 +11,13 @@ export const themeCss = `
   --pm-text-3: var(--dsw-alias-label-tertiary);
   --pm-caption: var(--dsw-alias-label-caption);
   --pm-bg: var(--dsw-alias-bg-layer-1);
+  --pm-bg-page: var(--dsw-alias-bg-base);
   --pm-bg-raised: var(--dsw-alias-bg-layer-3);
   --pm-bg-block: var(--dsw-alias-bg-module-platform);
   --pm-line: var(--dsw-alias-border-l2);
   --pm-line-card: var(--dsw-alias-border-l3);
   --pm-line-input: var(--dsw-alias-border-l4);
+  --pm-line-selected: var(--dsw-static-neutral-bluish-400);
   --pm-line-soft: color-mix(in srgb, var(--dsw-alias-border-l2) 80%, transparent);
   --pm-hover: var(--dsw-alias-interactive-bg-hover);
   --pm-pressed: var(--dsw-alias-interactive-bg-active);

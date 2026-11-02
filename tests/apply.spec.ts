@@ -1908,6 +1908,17 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect(await t.save({ type: 'decision', name: '定了用 A', content: '周会定了选型用 A 方案' })).toMatchObject({ kind: 'saved' })
   })
 
+  it('删掉预设类型：memory_save 重注册、不能再新增；已有记忆照常带入，分组名按出厂定义', async () => {
+    const t = await setup()
+    await t.putGlobal({ id: 'mem_proc', type: 'procedure', name: '发版流程', summary: '发版步骤' })
+    expect(await t.update({ removedPresetTypes: ['procedure'] })).toEqual([['removedPresetTypes']])
+    expect(t.tool('memory_save').parameters.properties.type!.enum).not.toContain('procedure')
+    await expect(t.save({ type: 'procedure', name: '流程', content: '删掉的预设' })).rejects.toThrow(/type/)
+    expect(await t.assembleOnce()).toContain('## 可复用流程（procedure）\n- [mem_proc] 发版流程（发版步骤）')
+    await t.update({ removedPresetTypes: [] })
+    expect(t.tool('memory_save').parameters.properties.type!.enum).toContain('procedure')
+  })
+
   it('自定义类型只加进类型池不生效；勾进当前场景后不重启就能 memory_save', async () => {
     const t = await setup()
     await t.update({ customTypes: { regulation } })
