@@ -505,3 +505,51 @@ describe('assembleSnapshot × 密钥遮盖', () => {
     expect(text).not.toContain(SECRET_MASK)
   })
 })
+
+// 子 agent 写入的待确认记录：主会话不注入；持久型子会话只带自己创建的
+describe('assembleSnapshot × 待确认记录', () => {
+  const base = { registry, workspacePath: undefined, budget: 4000, now: 10 * DAY }
+  const pending = (sessionId: string, partial: Partial<MemoryRecord> = {}) =>
+    record({ delegation: { sessionId, depth: 1, parentSessionId: 'main' }, ...partial })
+  const settled = [
+    record({ id: 'mem_core', type: 'preference', content: '不要 mock 数据库' }),
+    record({ id: 'mem_k', name: '报销', summary: '报销截止每月 25 日' }),
+    // 已升档的子 agent 记录是主档，照常注入
+    record({ id: 'mem_reviewed', name: '已升档', delegation: { sessionId: 'sub-a', depth: 1, parentSessionId: 'main', reviewed: { by: 'main', at: 1 } } }),
+  ]
+  const mine = [
+    pending('sub-a', { id: 'mem_pend_core', type: 'preference', content: '子级写的偏好' }),
+    pending('sub-a', { id: 'mem_pend_k', name: '子级知识', summary: '子级写的摘要' }),
+  ]
+  const sibling = pending('sub-b', { id: 'mem_sib', name: '兄弟知识', summary: '兄弟写的摘要' })
+
+  it('主会话：待确认记录不进 core 区、不进索引区，不计预算与省略数', () => {
+    const without = assembleSnapshot({ ...base, records: settled })
+    const withPending = assembleSnapshot({ ...base, records: [...settled, ...mine, sibling] })
+    expect(withPending.text).toBe(without.text)
+    expect(withPending.text).not.toContain('子级写的偏好')
+    expect(withPending.text).not.toContain('mem_pend_k')
+    expect(withPending.injectedIds).toEqual(without.injectedIds)
+    expect(withPending.injectedIds).toContain('mem_reviewed')
+    expect(withPending.usedTokens).toBe(without.usedTokens)
+    expect(withPending.omittedCount).toBe(0)
+  })
+
+  it('strict 截断时，被过滤的待确认记录也不进省略数', () => {
+    const many = [1, 2, 3].map(i => record({ id: `mem_s${i}`, summary: '一段较长的摘要文字'.repeat(4) }))
+    const without = assembleSnapshot({ ...base, records: many, budget: 60, overflow: 'strict' })
+    const withPending = assembleSnapshot({ ...base, records: [...many, ...mine], budget: 60, overflow: 'strict' })
+    expect(without.omittedCount).toBeGreaterThan(0)
+    expect(withPending.omittedCount).toBe(without.omittedCount)
+    expect(withPending.text).toBe(without.text)
+  })
+
+  it('持久型子会话（给出 ownSessionId）：带上自己创建的待确认记录，不带兄弟子会话的', () => {
+    const r = assembleSnapshot({ ...base, records: [...settled, ...mine, sibling], ownSessionId: 'sub-a' })
+    expect(r.text).toMatch(/\[mem_pend_core\]【记忆·[^】]+】子级写的偏好/)
+    expect(r.text).toContain('[mem_pend_k] 子级知识')
+    expect(r.text).not.toContain('mem_sib')
+    expect(r.injectedIds).toEqual(expect.arrayContaining(['mem_pend_core', 'mem_pend_k', 'mem_core', 'mem_k', 'mem_reviewed']))
+    expect(r.omittedCount).toBe(0)
+  })
+})

@@ -238,6 +238,11 @@ export async function apply(ctx: Context, config: Config) {
     get budget() { return config.snapshotTokenBudget.get() },
     get overflow() { return config.snapshotOverflow.get() },
     get evidenceLookup() { return config.evidenceLookup.get() },
+    // 持久型子会话的注入带上它自己创建的待确认记录；主会话、一次性子会话不带（mode 每次构建现读 subagent 投影）
+    ownSessionIdOf: session => {
+      const s = session as Session
+      return delegationDepthOf(s) >= 1 && sessionModeOf(s) === 'continuable' ? s.header.id : undefined
+    },
     onFrozen: (session, { overflowChanged, ...info }) => {
       const sessionId = (session as SessionLike).header?.id
       if (views === undefined || sessionId === undefined) return

@@ -72,6 +72,8 @@ export interface SnapshotCacheDeps {
   hasEarlierTurns?: (session: object) => boolean
   /** 日志注入口，缺省回退 console（见 store.ts MemoryLogger）。 */
   log?: MemoryLogger
+  /** 会话是持久型子会话时回它自己的会话 id（注入带上它创建的待确认记录），主会话、一次性子会话回 undefined。每次构建现问；缺省都按 undefined。 */
+  ownSessionIdOf?: (session: object) => string | undefined
 }
 
 /** 冻结快照的来历（会话视图的 origin、compactedAt）。 */
@@ -168,7 +170,7 @@ export class SnapshotCache {
     // 预读范围：只读 active，global + 当前 workspace（未解析时 global-only）；同一次读取的隔离文件数给冷启动文案用
     const now = Date.now()
     const preread = await prereadSnapshot(deps.store, workspacePath)
-    const { text, coreIds, ...usage } = assembleSnapshot({ ...deps, ...preread, workspacePath, now })
+    const { text, coreIds, ...usage } = assembleSnapshot({ ...deps, ...preread, workspacePath, now, ownSessionId: deps.ownSessionIdOf?.(session) })
     if (!isResolved) return text
     // 构建期间被标过期（压缩、配置热更新）：这份作废，按新代次重建，冻结后再交出去，模型看到的就是冻结的那份。
     // 连续作废到上限还不稳定，这次不给文本，下一个发送点再来；不交出没冻结的文本

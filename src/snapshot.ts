@@ -1,4 +1,4 @@
-import type { MemoryRecord } from './record-schema.ts'
+import { isPendingDelegated, type MemoryRecord } from './record-schema.ts'
 import type { TypeRegistry } from './type-registry.ts'
 import { sourceNote, formatIndexLine } from './index-line.ts'
 import { workspaceDirName, GLOBAL_DIR, INDEX_FILE, ARCHIVE_DIR } from './storage/paths.ts'
@@ -111,9 +111,12 @@ export function assembleSnapshot(deps: {
   evidenceLookup?: EvidenceLookupLevel
   /** 超出上限时：relax（缺省）需要多少带多少，strict 按优先级装入、超出的截掉。 */
   overflow?: OverflowMode
+  /** 持久型子会话自己的会话 id：它创建的待确认记录照常注入。缺省（主会话、一次性子会话）一条待确认记录都不带。 */
+  ownSessionId?: string
 }): { text: string; coreIds: string[] } & SnapshotUsage {
   const { registry, now } = deps
-  const visible = deps.records
+  // 待确认记录（子 agent 写入、还没升档）不归这次注入：在这里滤掉，不进预算、不进省略数，冷启动也按滤后的判
+  const visible = deps.records.filter(r => !isPendingDelegated(r) || r.delegation!.sessionId === deps.ownSessionId)
   if (visible.length === 0) {
     const broken = deps.quarantinedCount ?? 0
     const text = broken > 0 ? coldStartUnparseableText(broken) : COLD_START_TEXT

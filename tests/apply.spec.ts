@@ -1089,6 +1089,31 @@ describe('注入链接线', () => {
     expect(visibleSnapshots(fork)).toHaveLength(1)
   })
 
+  it('待确认记录：持久型子会话的快照带自己创建的，不带兄弟的；一次性子会话与主会话都不带（mode 现读 subagent 投影）', async () => {
+    const delegated = (sessionId: string) => ({ sessionId, depth: 1, parentSessionId: 'sess-1' })
+    const memories = [
+      { id: 'mem_main', type: 'preference', content: '主会话的偏好' },
+      { id: 'mem_mine', type: 'preference', content: '子级自己存的偏好', delegation: delegated('sess-sub') },
+      { id: 'mem_sib', type: 'preference', content: '兄弟子级存的偏好', delegation: delegated('sess-sib') },
+    ]
+    const snapshotOf = async (mode: 'continuable' | 'one-shot', session: Session) => {
+      const projections = { stateOf: (_s: object, key: string) => (key === 'subagent' ? { identity: { mode, seq: 0 } } : undefined) }
+      const t = await boot({ memories, get: name => (name === 'sessionProjections' ? projections : undefined) })
+      await t.step(session, 1, { messages: [userSaid('子任务')] })
+      return visibleSnapshots(session)[0]!
+    }
+    const continuable = await snapshotOf('continuable', hostSession('sess-sub', { delegationDepth: 1, parentSession: 'sess-1' as SessionId }))
+    expect(continuable).toContain('主会话的偏好')
+    expect(continuable).toContain('子级自己存的偏好')
+    expect(continuable).not.toContain('兄弟子级存的偏好')
+    const oneShot = await snapshotOf('one-shot', hostSession('sess-sub', { delegationDepth: 1, parentSession: 'sess-1' as SessionId }))
+    expect(oneShot).toContain('主会话的偏好')
+    expect(oneShot).not.toContain('子级自己存的偏好')
+    // 主会话：投影即使给出持久型身份也不看（深度 0 不是子会话）
+    const main = await snapshotOf('continuable', hostSession('sess-sub'))
+    expect(main).not.toContain('子级自己存的偏好')
+  })
+
   it('冻结只发生在发送点：第一步空 decision 不冻结、不计召回，检索照常给全文；发出之后计召回一次，检索换成说明', async () => {
     const t = await boot({ memories: [{ id: 'mem_core', type: 'preference', content: '测试里不要 mock 数据库' }] })
     const session = hostSession('sess-1')
