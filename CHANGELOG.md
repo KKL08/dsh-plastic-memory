@@ -143,6 +143,11 @@ All notable changes to this project are documented here. The format follows
   the config file, and the note about ignored findings points to "Don't
   remind me" in the memory page's To do view, instead of places that no
   longer exist.
+- `pnpm lint` (oxlint) joins CI and the contributor checklist. Besides the
+  default correctness rules it keeps the pure logic free of runtime imports
+  from the host packages, so it stays testable without a host, and
+  `scripts/check-public-wording.sh` keeps external tool names and credits out
+  of public text.
 
 ## [0.2.0-beta.1] - 2026-10-25
 
