@@ -300,6 +300,7 @@ DeepSeek Harness 派出的子 agent（包括子 agent 再往下派的）也能�
 | `governance.health.sensitivity`  | `'normal'`        | 健康警报灵敏度：`conservative` / `normal` / `proactive`              |
 | `governance.globalPromoteTarget` | `'plugin-global'` | 提权目标：`plugin-global`（插件全局域）或 `agents-md`（`~/.dsh/AGENTS.md`） |
 | `subagent.maxSavesPerSession`    | `10`              | 每个子 agent 会话最多新建几条记忆（只能在配置文件里改），改了下一次保存生效 |
+| `accent`                         | `'ella'`          | 界面主题色：`ella`（艾拉主题色）/ `blue-whale`（大肥鱼主题色，跟随 DeepSeek Harness 品牌蓝） |
 | `memoryRoot`                     | `''`              | 存储根路径，缺省为 `${DSH_HOME:-~/.dsh}/memories`                     |
 | `search.userDictionaryPath`      | 不设                | 用户词典路径（只能在配置文件里改）：追加在内置词典之上，改了下一次搜索生效。要填绝对路径；每行「词 词频 词性」，词频必填，不带词频的词条不生效，例如 `插件记忆 10 n`。没装 `@node-rs/jieba` 时不生效 |
 

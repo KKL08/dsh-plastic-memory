@@ -29,6 +29,10 @@ All notable changes to this project are documented here. The format follows
   whether they are pending, accepted by the main session or edited by you.
   Editing or promoting a pending memory on the memory page accepts it, and
   so does promoting it with `memory_promote`.
+- Settings gain an Appearance group with a theme color: Ella (the silver
+  vine used so far, the default) or Blue Whale, which follows the DeepSeek
+  Harness brand blue in light and dark mode. It is stored as `accent` and
+  applies to every memory panel as soon as it is saved.
 
 ### Changed
 - In a subagent session, `memory_source` only traces memories whose source

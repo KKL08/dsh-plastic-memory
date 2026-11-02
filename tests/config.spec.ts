@@ -34,6 +34,7 @@ describe('Config schema', () => {
       governance: { enabled: true, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global' },
       search: {},
       subagent: { maxSavesPerSession: 10 },
+      accent: 'ella',
       memoryRoot: '',
     })
   })
@@ -43,7 +44,7 @@ describe('Config schema', () => {
     const refs = [
       value.template, value.customTypes, value.scenes, value.snapshotTokenBudget, value.snapshotOverflow, value.evidenceLookup,
       value.governance.enabled, value.governance.health.sensitivity, value.governance.globalPromoteTarget,
-      value.subagent.maxSavesPerSession,
+      value.subagent.maxSavesPerSession, value.accent,
     ]
     for (const ref of refs) expect(typeof ref.get).toBe('function')
     expect(value.governance.globalPromoteTarget.get()).toBe('plugin-global')

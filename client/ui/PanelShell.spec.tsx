@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { render } from '@testing-library/react'
+import { act, render } from '@testing-library/react'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createTranslator } from '../i18n.tsx'
 import { en, zh } from '../locales.ts'
 import { memoryPageCss } from '../MemoryPage.tsx'
+import { Dialog } from '../settings/controls.tsx'
 import { PanelShell, PM_CSS } from './PanelShell.tsx'
 
 describe('PanelShell 样式', () => {
@@ -30,6 +31,33 @@ describe('PanelShell 样式', () => {
     expect(classes.filter(c => !c.startsWith('.pm-'))).toEqual([])
     const mono = 'font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)'
     expect((PM_CSS + memoryPageCss).split(mono).join('')).not.toMatch(/font-family|monospace/)
+  })
+})
+
+describe('主题色', () => {
+  const config = { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget: 'plugin-global' } as const
+
+  it('跟着配置切换：插槽根和传送出去的弹窗根都带上主题色；配置还没读到时不带', () => {
+    const gateway = createFakeGateway()
+    const { container } = render(
+      <PanelShell gateway={gateway} t={createTranslator(zh)}>
+        <Dialog title="t" closeLabel="关闭" onClose={() => {}} footer={null}><span /></Dialog>
+      </PanelShell>,
+    )
+    const roots = () => [container.querySelector('.pm-root')!, document.querySelector('.pm-dialog-root')!]
+    expect(roots().map(el => el.getAttribute('data-pm-accent'))).toEqual([null, null])
+    act(() => { gateway.setConfigValue({ ...config, accent: 'blue-whale' }) })
+    expect(roots().map(el => el.getAttribute('data-pm-accent'))).toEqual(['blue-whale', 'blue-whale'])
+    act(() => { gateway.setConfigValue({ ...config, accent: 'ella' }) })
+    expect(roots().map(el => el.getAttribute('data-pm-accent'))).toEqual(['ella', 'ella'])
+  })
+
+  it('大肥鱼主题色借宿主的品牌蓝令牌，亮暗都压过银藤', () => {
+    const rule = /\.pm-root\[data-pm-accent='blue-whale'\],\s*body\[data-ds-dark-theme\] \.pm-root\[data-pm-accent='blue-whale'\] \{([^}]*)\}/.exec(PM_CSS)
+    expect(rule?.[1]).toMatch(/--pm-accent: var\(--dsw-alias-state-business-primary\);/)
+    expect(rule?.[1]).toMatch(/--pm-accent-tint: var\(--dsw-alias-state-business-tertiary\);/)
+    expect(rule?.[1]).toMatch(/--pm-accent-soft: color-mix\(in srgb, var\(--dsw-alias-state-business-primary\) \d+%, var\(--pm-bg\)\);/)
+    expect(PM_CSS.indexOf(rule![0])).toBeGreaterThan(PM_CSS.indexOf('body[data-ds-dark-theme] .pm-root {'))
   })
 })
 

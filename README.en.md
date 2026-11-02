@@ -300,6 +300,7 @@ Adjust `plastic-memory` settings in the profile's `cordis.patch.yml`:
 | `governance.health.sensitivity`    | `'normal'`          | Health alert sensitivity: `conservative` / `normal` / `proactive`                        |
 | `governance.globalPromoteTarget`   | `'plugin-global'`   | Promotion target: `plugin-global` (plugin's global scope) or `agents-md` (`~/.dsh/AGENTS.md`) |
 | `subagent.maxSavesPerSession`      | `10`                | How many memories each subagent session can create (config file only); applied from the next save |
+| `accent`                           | `'ella'`            | Theme color for the memory panels: `ella` / `blue-whale` (follows the DeepSeek Harness brand blue) |
 | `memoryRoot`                       | `''`                | Storage root path; defaults to `${DSH_HOME:-~/.dsh}/memories`                            |
 | `search.userDictionaryPath`        | unset               | User dictionary path (config file only): added on top of the built-in dictionary, applied from the next search. Must be an absolute path; one entry per line as `word frequency tag`, the frequency is required and entries without it have no effect, for example `插件记忆 10 n`. Has no effect unless `@node-rs/jieba` is installed |
 

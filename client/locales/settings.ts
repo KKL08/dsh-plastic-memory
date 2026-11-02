@@ -19,6 +19,11 @@ export const settingsZh = {
   'settings.group.what': '记什么',
   'settings.group.how': '怎么用',
   'settings.group.manage': '怎么管',
+  'settings.group.look': '外观',
+
+  'settings.accent.label': '主题色',
+  'settings.accent.ella': '艾拉主题色',
+  'settings.accent.blue-whale': '大肥鱼主题色',
 
   'settings.scene.label': '场景',
   'settings.scene.custom': '通用',
@@ -200,6 +205,11 @@ export const settingsEn: Record<keyof typeof settingsZh, string> = {
   'settings.group.what': 'What to remember',
   'settings.group.how': 'How to use',
   'settings.group.manage': 'How to manage',
+  'settings.group.look': 'Appearance',
+
+  'settings.accent.label': 'Theme color',
+  'settings.accent.ella': 'Ella',
+  'settings.accent.blue-whale': 'Blue Whale',
 
   'settings.scene.label': 'Scene',
   'settings.scene.custom': 'General',

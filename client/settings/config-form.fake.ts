@@ -32,7 +32,7 @@ export function applyOps(value: Record<string, unknown>, ops: readonly ConfigPat
 
 export const DEFAULT_SECTION = {
   writeMode: 'proactive', snapshotTokenBudget: 4000, snapshotOverflow: 'relax', evidenceLookup: 'strict', template: 'coding',
-  customTypes: {}, governance: { enabled: true, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global' }, search: {}, memoryRoot: '',
+  customTypes: {}, governance: { enabled: true, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global' }, search: {}, accent: 'ella', memoryRoot: '',
 }
 
 export function createFakeConfigForm(init: Partial<ConfigFormSnapshot> & { value?: Record<string, unknown> } = {}): FakeConfigForm {

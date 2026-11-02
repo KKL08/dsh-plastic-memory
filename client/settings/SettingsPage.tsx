@@ -1,5 +1,5 @@
 /**
- * 插件设置页（plugins.bundle.config）：状态卡 + 三组设置「记什么 · 怎么用 · 怎么管」+ 保存行。
+ * 插件设置页（plugins.bundle.config）：状态卡 + 四组设置「记什么 · 怎么用 · 怎么管 · 外观」+ 保存行。
  * 插件名、简介、版本由宿主插件页的页头画（locale/*.json 的 meta 与 package.json 的 version），这里不重复。
  * 改动先暂存，点保存先弹窗列出改了哪几项，确认后一次提交（useSettingsDraft）。
  * 体检开关 `governance.enabled` 只在配置文件里改，界面上不放；配置文件关掉体检时依赖它的两项置灰保留、说明换成原因，不隐藏。
@@ -14,7 +14,7 @@ import { Button } from '../ui/Button.tsx'
 import { SegmentedControl } from '../ui/Segmented.tsx'
 import { SettingsForm, SettingsGroupCard, SettingsItem } from '../ui/Settings.tsx'
 import {
-  EVIDENCE_LEVELS, OVERFLOW_MODES, PROMOTE_TARGETS, SENSITIVITIES, SENSITIVITY_NUMBERS, configuredRoot, customTypeChanges,
+  ACCENTS, EVIDENCE_LEVELS, OVERFLOW_MODES, PROMOTE_TARGETS, SENSITIVITIES, SENSITIVITY_NUMBERS, configuredRoot, customTypeChanges,
   governanceEnabled, parsePositiveInt, sceneChanges, type ConfigForm, type Migrations, type SettingsFields,
 } from './config.ts'
 import { Dialog, TextField } from './controls.tsx'
@@ -153,6 +153,19 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
           </SettingsItem>
         </SettingsGroupCard>
 
+        <SettingsGroupCard title={t('settings.group.look')}>
+          <SettingsItem label={t('settings.accent.label')}>
+            <SegmentedControl
+              id={`${id}-accent`}
+              label={t('settings.accent.label')}
+              value={f.accent}
+              options={ACCENTS.map(v => ({ value: v, label: t(`settings.accent.${v}`) }))}
+              disabled={locked}
+              onChange={(accent) => { edit({ accent }) }}
+            />
+          </SettingsItem>
+        </SettingsGroupCard>
+
         {USAGE_FIELDS.some(key => draft.changed.has(key)) ? <p className="pm-form-note pm-settings-note">{t('settings.usage.reloadNote')}</p> : null}
         {draft.outcome === 'conflict'
           ? (
@@ -197,6 +210,7 @@ const FIELD_LABELS: Record<keyof SettingsFields, LocaleKey> = {
   evidence: 'settings.evidence.label',
   sensitivity: 'settings.sensitivity.label',
   promoteTarget: 'settings.target.label',
+  accent: 'settings.accent.label',
 }
 
 function valueText(t: Translate, key: Exclude<keyof SettingsFields, 'scenes' | 'customTypes'>, fields: SettingsFields): string {
@@ -207,6 +221,7 @@ function valueText(t: Translate, key: Exclude<keyof SettingsFields, 'scenes' | '
     case 'evidence': return t(`settings.evidence.${fields.evidence}`)
     case 'sensitivity': return t(`settings.sensitivity.${fields.sensitivity}`)
     case 'promoteTarget': return t(`settings.target.${fields.promoteTarget}`)
+    case 'accent': return t(`settings.accent.${fields.accent}`)
   }
 }
 

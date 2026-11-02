@@ -1,7 +1,8 @@
 // 设置页的居中弹层：aria-modal 弹层把键盘焦点关在里面，Esc 关闭，关闭后焦点回到打开它的按钮。
 import { describe, expect, it } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, screen } from '@testing-library/react'
 import { useState } from 'react'
+import { renderInShell } from '../test-utils.tsx'
 import { Dialog } from './controls.tsx'
 
 function Harness() {
@@ -22,7 +23,7 @@ function Harness() {
 }
 
 function openDialog() {
-  render(<Harness />)
+  renderInShell(<Harness />)
   const opener = screen.getByRole('button', { name: '打开' })
   opener.focus()
   fireEvent.click(opener)

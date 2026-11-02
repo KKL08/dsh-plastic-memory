@@ -2,6 +2,7 @@
  * 主题令牌（DESIGN.md「The Borrowed Palette Rule」）：颜色一律 `--pm-*`，指向宿主 `--dsw-alias-*`；
  * 银藤三档是唯一的颜色字面量。暗色跟 `body[data-ds-dark-theme]`，借来的令牌宿主已经换好，只需换银藤。
  * 宿主 10 款皮肤都通过覆盖 `--dsw-alias-*` 生效，这里自动跟随。
+ * 大肥鱼主题色（`data-pm-accent='blue-whale'`）把这三档换成宿主品牌蓝：亮暗由宿主令牌自己换，选择器带上暗色那条以压过银藤暗色。
  */
 export const themeCss = `
 .pm-root {
@@ -35,6 +36,12 @@ body[data-ds-dark-theme] .pm-root {
   --pm-accent: #B0A8CB;
   --pm-accent-tint: #27252C;
   --pm-accent-soft: #645F77;
+}
+.pm-root[data-pm-accent='blue-whale'],
+body[data-ds-dark-theme] .pm-root[data-pm-accent='blue-whale'] {
+  --pm-accent: var(--dsw-alias-state-business-primary);
+  --pm-accent-tint: var(--dsw-alias-state-business-tertiary);
+  --pm-accent-soft: color-mix(in srgb, var(--dsw-alias-state-business-primary) 50%, var(--pm-bg));
 }
 .pm-root *, .pm-root *::before, .pm-root *::after { box-sizing: border-box; }
 .pm-root :is(button, [role='option'], [tabindex]):focus-visible {

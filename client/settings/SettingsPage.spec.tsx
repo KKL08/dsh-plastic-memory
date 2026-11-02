@@ -87,6 +87,19 @@ describe('三组设置的渲染', () => {
     expect(screen.queryByRole('textbox', { name: '记忆文件位置' })).toBeNull()
   })
 
+  it('外观：主题色两档，默认艾拉主题色；改成大肥鱼主题色确认后写 accent', async () => {
+    const { form } = setup()
+    expect(screen.getByRole('heading', { name: '外观' })).toBeInTheDocument()
+    expect(tab('主题色', '艾拉主题色')).toHaveAttribute('aria-selected', 'true')
+    fireEvent.click(tab('主题色', '大肥鱼主题色'))
+    fireEvent.click(save())
+    expect(within(confirmDialog()).getAllByRole('listitem').map(el => el.textContent)).toEqual(['主题色：艾拉主题色 → 大肥鱼主题色'])
+    await act(async () => { fireEvent.click(within(confirmDialog()).getByRole('button', { name: '保存' })) })
+    await waitFor(() => { expect(form.calls).toHaveLength(1) })
+    expect(form.calls[0]!.ops).toEqual([{ op: 'set', path: ['accent'], value: 'blue-whale' }])
+    expect(screen.queryByText(/重新载入记忆/)).toBeNull()
+  })
+
   it('还没读到视图时 memoryRoot 显示配置值，都没有就提示开会话', () => {
     const { unmount } = setup({ views: false, value: section({ memoryRoot: '/data/mem' }) })
     expect(screen.getByText('/data/mem')).toBeInTheDocument()

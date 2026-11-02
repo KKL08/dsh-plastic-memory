@@ -46,7 +46,7 @@ import { createMemoryCommand, type MemoryCommandDefinition } from './gui/command
 import { ViewWriter, collectCheckupView, collectGlobalViews } from './gui/view-writer.ts'
 import { AutoCheckupScheduler, type AutoCheckupTimer } from './gui/auto-checkup.ts'
 import { buildSessionView } from './gui/views.ts'
-import type { SessionView } from './gui/contract.ts'
+import { ACCENTS, type Accent, type SessionView } from './gui/contract.ts'
 
 /**
  * 进 GUI 的字段标 `.volatile()`：插件页或 yaml 改了它们，宿主 Loader 把新值写进运行中的引用、发 `loader/volatile-update`，
@@ -80,6 +80,8 @@ export interface Config {
     /** 每个子会话最多新建几条记忆（只拦 create，按本会话已存条数现数）。设置页不露，配置文件可改；改了下一次保存生效。 */
     maxSavesPerSession: Volatile<number>
   }
+  /** 界面主题色（服务端不读，只供设置页写、各面板读）。 */
+  accent: Volatile<Accent>
   /** 记忆文件根目录，缺省解析到 ${DSH_HOME:-~/.dsh}/memories（storage/paths.ts） */
   memoryRoot: string
 }
@@ -115,6 +117,7 @@ export const Config = z.object({
   subagent: z.object({
     maxSavesPerSession: z.number().default(SUBAGENT_MAX_SAVES_DEFAULT).volatile(),
   }),
+  accent: z.union(ACCENTS).default('ella').volatile(),
   memoryRoot: z.string().default(''),
 })
 

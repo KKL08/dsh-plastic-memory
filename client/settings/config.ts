@@ -18,9 +18,9 @@ export type { ConfigForm, ConfigFormSnapshot, ConfigPathOp } from '../host.ts'
 
 // —— 配置段 ——
 
-import { GENERAL_SCENE, MAX_SCENES, SCENE_MAX_TYPES } from '../../src/gui/contract.ts'
+import { ACCENTS, GENERAL_SCENE, MAX_SCENES, SCENE_MAX_TYPES } from '../../src/gui/contract.ts'
 
-export { GENERAL_SCENE, MAX_SCENES, SCENE_MAX_TYPES }
+export { ACCENTS, GENERAL_SCENE, MAX_SCENES, SCENE_MAX_TYPES }
 
 /** 内置五类的英文名，也是通用场景的组成（src/type-registry.ts BUILTIN_TYPES，tests/client-settings-mirror.spec.ts 守一致）。自定义类型不能重名。 */
 export const BUILTIN_TYPE_NAMES = ['profile', 'preference', 'knowledge', 'project', 'reference'] as const
@@ -237,6 +237,7 @@ export interface SettingsFields {
   evidence: (typeof EVIDENCE_LEVELS)[number]
   sensitivity: (typeof SENSITIVITIES)[number]
   promoteTarget: (typeof PROMOTE_TARGETS)[number]
+  accent: (typeof ACCENTS)[number]
 }
 
 /** 各字段在配置段里的路径（scenes、customTypes 按键逐条写，见 buildOps）。用户词典路径不进表单：只在配置文件或对话里改。 */
@@ -247,11 +248,12 @@ const PATHS: Record<Exclude<keyof SettingsFields, 'scenes' | 'customTypes'>, str
   evidence: ['evidenceLookup'],
   sensitivity: ['governance', 'health', 'sensitivity'],
   promoteTarget: ['governance', 'globalPromoteTarget'],
+  accent: ['accent'],
 }
 
 const DEFAULTS: SettingsFields = {
   template: 'coding', scenes: PRESET_SCENES, customTypes: {}, budget: '4000', overflow: 'relax', evidence: 'strict',
-  sensitivity: 'normal', promoteTarget: 'plugin-global',
+  sensitivity: 'normal', promoteTarget: 'plugin-global', accent: 'ella',
 }
 
 function at(value: unknown, path: readonly string[]): unknown {
@@ -299,6 +301,7 @@ export function fieldsOf(section: unknown): SettingsFields {
     evidence: oneOf(EVIDENCE_LEVELS, at(section, PATHS.evidence), DEFAULTS.evidence),
     sensitivity: oneOf(SENSITIVITIES, at(section, PATHS.sensitivity), DEFAULTS.sensitivity),
     promoteTarget: oneOf(PROMOTE_TARGETS, at(section, PATHS.promoteTarget), DEFAULTS.promoteTarget),
+    accent: oneOf(ACCENTS, at(section, PATHS.accent), DEFAULTS.accent),
   }
 }
 

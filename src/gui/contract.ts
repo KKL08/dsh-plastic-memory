@@ -50,6 +50,10 @@ export type GuiLayerRef = z.infer<typeof layerRefSchema>
 const sourceModeSchema = memoryRecordSchema.shape.source.unwrap().shape.sourceMode
 const reviewedBySchema = memoryRecordSchema.shape.delegation.unwrap().shape.reviewed.unwrap().shape.by
 
+/** 界面主题色：ella 艾拉主题色（银藤）、blue-whale 大肥鱼主题色（借宿主品牌蓝）。只影响界面强调色。 */
+export const ACCENTS = ['ella', 'blue-whale'] as const
+export type Accent = (typeof ACCENTS)[number]
+
 /**
  * 项目记忆在「提升为全局」上的状态：candidate = 模型标了全局提升候选、还没处理（体检关闭时不标）；
  * kept-local = 用户选了「留在本项目」（账本里结清的那条还在）。已提升的就是全局记忆，不另标。
