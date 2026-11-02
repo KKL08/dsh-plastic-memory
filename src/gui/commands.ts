@@ -496,7 +496,7 @@ async function dispatch(
       if (isErr(entry)) return entry
       const r = await executePromote(
         { confirmedIds: entry.memoryIds.slice(0, 1), target: command.target, allowCrossWorkspace: command.allowCrossWorkspace },
-        gov, { store: deps.store, agentsMd: deps.agentsMd, snapshots: deps.snapshots, now: () => now }, candidateCopy(entry),
+        gov, { store: deps.store, agentsMd: deps.agentsMd, snapshots: deps.snapshots, now: () => now }, { ...candidateCopy(entry), reviewedBy: 'user' },
       )
       if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
       if (r.taken.length > 0) return fail(cmd, 'target-taken', r.message)
@@ -517,7 +517,7 @@ async function dispatch(
         const r = await executePromote(
           { confirmedIds: [rec.id], target, allowCrossWorkspace: command.allowCrossWorkspace },
           gov, { store: deps.store, agentsMd: deps.agentsMd, snapshots: deps.snapshots, now: () => now },
-          { target: { kind: 'workspace', workspacePath: rec.workspacePath! } },
+          { target: { kind: 'workspace', workspacePath: rec.workspacePath! }, reviewedBy: 'user' },
         )
         if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
         if (r.taken.length > 0) return fail(cmd, 'target-taken', r.message)

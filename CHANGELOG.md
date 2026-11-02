@@ -27,7 +27,8 @@ All notable changes to this project are documented here. The format follows
   memory cards label them as below.
 - Memory cards label memories written by a subagent with their level and
   whether they are pending, accepted by the main session or edited by you.
-  Editing a pending memory on the memory page accepts it.
+  Editing or promoting a pending memory on the memory page accepts it, and
+  so does promoting it with `memory_promote`.
 
 ### Changed
 - In a subagent session, `memory_source` only traces memories whose source

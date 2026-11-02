@@ -1437,6 +1437,16 @@ describe('promote-memory（建议整理「放错层」的提升为全局）', ()
     ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_o', layer: wsLayer(OTHER_WS), allowCrossWorkspace: true }))
     expect((await e.store.get('mem_o'))!.scope).toBe('global')
   })
+
+  it('提升待确认的子 agent 记忆算用户升档：写 reviewed user 与提升的时刻，创建者字段不动', async () => {
+    const e = env()
+    const creator = { sessionId: 'sess-sub', depth: 1, parentSessionId: 'sess-1' }
+    await e.store.create(record({ id: 'mem_p', scope: 'workspace', workspacePath: SESSION_WS, delegation: creator }))
+    ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_p', layer: wsLayer(SESSION_WS) }))
+    const after = (await e.store.get('mem_p'))!
+    expect(after.scope).toBe('global')
+    expect(after.delegation).toEqual({ ...creator, reviewed: { by: 'user', at: NOW } })
+  })
 })
 
 describe('就地提升（对话卡片、右侧栏「这次新写入的」）：promote-memory 与 keep-local-memory', () => {

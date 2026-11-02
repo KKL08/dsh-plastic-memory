@@ -1,7 +1,7 @@
 import type { MemoryStore } from '../store.ts'
 import type { AgentsMdWriter } from '../storage/agents-md.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
-import type { MemoryRecord } from '../record-schema.ts'
+import { isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
 import type { MemorySnapshot } from '../governance/schema.ts'
 import { hasSecret } from '../secrets.ts'
 import {
@@ -18,10 +18,12 @@ export interface PromoteDeps {
   now?: () => number
 }
 
-/** 只给 GUI 用的选项，不在工具参数里，模型传不进来。 */
+/** 调用方给的选项，不在工具参数里，模型传不进来。 */
 export interface PromoteOptions {
   /** 同 id 多副本时只认这一份（GUI 按页面上那一份、或提升候选所在的项目操作）；缺省按会话 workspace 定位。跨 workspace 门照旧按会话判定。 */
   target?: CopyTarget
+  /** 提升待确认的子 agent 记忆为全局即升档，reviewed 记谁：GUI 记 user，memory_promote 记 main；缺省 main。 */
+  reviewedBy?: 'user' | 'main'
 }
 
 export interface PromoteResult {
@@ -45,6 +47,7 @@ export interface PromoteResult {
  * （工具内部弹窗会被 web 会话拒绝，见 promote-tool.ts），纯逻辑不弹窗，便于测。
  * - target=global：scope 改 global（FileTable persist 检测目录变化自动搬家），清除候选标记。
  * - target=agents-md：内容写进 ~/.dsh/AGENTS.md 专属区块，原项目记忆软删（已脱离插件治理，避免重复）。
+ * - 两种 target 下，待确认的子 agent 记忆都同时升档（reviewed 记 options.reviewedBy）。
  *   含密钥（critical 或 force 放行的 suspected）的记录拒绝写入，原样留在项目内，计入 skipped。
  * - dismiss=true：用户明确不想提升，只清除候选标记、记忆留在项目内，忽略 target。
  */
@@ -118,18 +121,24 @@ export async function executePromote(
     }, now)
   }
 
+  // 待确认的子 agent 记忆提升即升档（两种 target 都算）：global 不让一条谁都看不到的待确认记录落在全局，
+  // agents-md 的软删记录从最近删除恢复后也不该回到待确认——正文已经进了 AGENTS.md。
+  const review = (r: MemoryRecord): MemoryRecord => isPendingDelegated(r)
+    ? { ...r, delegation: { ...r.delegation!, reviewed: { by: options.reviewedBy ?? 'main', at: now } } }
+    : r
   for (const r of targets) {
     if (args.target === 'global') {
       // 无损 JSON 不变式：不能把 workspacePath/globalCandidate 置为 undefined 键，解构剔键。
       // 按原记录的 workspace 定位：同 id 多副本时搬走的才是门放行的这份，不是 global 或别的项目的副本
-      if (!(await deps.store.updateIfLive(r, ({ workspacePath, globalCandidate, ...rest }) => ({ ...rest, scope: 'global' }), hintOf(r)))) {
+      const promote = ({ workspacePath, globalCandidate, ...rest }: MemoryRecord): MemoryRecord => review({ ...rest, scope: 'global' })
+      if (!(await deps.store.updateIfLive(r, promote, hintOf(r)))) {
         skipped.push(r.id)   // 读到之后被别处删掉
         continue
       }
     } else {
       // 两步无法原子：先软删再写 AGENTS.md，append 失败回滚软删——失败方向宁可"没提升"
       // 也不能"两处并存"（原顺序 append 成功+softDelete 失败会双份注入且结果谎报 promoted）。
-      if (!(await deps.store.updateIfLive(r, cur => ({ ...cur, status: 'deleted', updatedAt: Date.now() }), hintOf(r)))) {
+      if (!(await deps.store.updateIfLive(r, cur => review({ ...cur, status: 'deleted', updatedAt: Date.now() }), hintOf(r)))) {
         skipped.push(r.id)   // 读到之后被别处删掉（软删）：不写 AGENTS.md
         continue
       }

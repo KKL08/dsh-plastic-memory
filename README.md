@@ -201,7 +201,7 @@ DeepSeek Harness 派出的子 agent（包括子 agent 再往下派的）也能�
 - 改写：`memory_save update`，改完同样算接受；
 - 丢弃：`memory_forget`。
 
-主会话不处理的，一直待确认。你不用逐条过目：主会话觉得某条该进全局时，它照常出现在「待处理」的提升候选里；记忆卡上也会显示「子 agent 写入 · 第 N 层 · 待确认」（接受后是「主会话已接受」或「用户已改」），在记忆页直接改一条待确认记忆也算接受。
+主会话不处理的，一直待确认。你不用逐条过目：主会话觉得某条该进全局时，它照常出现在「待处理」的提升候选里；记忆卡上也会显示「子 agent 写入 · 第 N 层 · 待确认」（接受后是「主会话已接受」或「用户已改」），在记忆页直接改或提升一条待确认记忆也算接受。
 
 子 agent 只能写 `knowledge`、`project` 两类（还要在当前场景里），依据（`sourceMode`）只能是观察或推断，不能用 `supersedes`、`force`，只能改自己这个会话存下、还没被接受的。每个子 agent 会话最多新建 `subagent.maxSavesPerSession` 条（默认 10）。子 agent 写入跟着治理开关走：`governance.enabled` 为 `false` 时，子 agent 会话照旧只读。
 

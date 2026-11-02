@@ -201,7 +201,7 @@ Subagents that DeepSeek Harness delegates to (including the ones they delegate t
 - Rewrite: `memory_save update`, which accepts it as well.
 - Drop: `memory_forget`.
 
-What the main session leaves alone stays pending. You don't need to go through them one by one: when the main session thinks one should be global, it shows up among the promotion candidates under Pending as usual. Memory cards also show "Written by a subagent · level N · pending review" ("accepted by the main session" or "edited by you" once accepted), and editing a pending memory directly on the memory page accepts it.
+What the main session leaves alone stays pending. You don't need to go through them one by one: when the main session thinks one should be global, it shows up among the promotion candidates under Pending as usual. Memory cards also show "Written by a subagent · level N · pending review" ("accepted by the main session" or "edited by you" once accepted), and editing or promoting a pending memory directly on the memory page accepts it.
 
 Subagents can only write `knowledge` and `project` memories, and only types the current scene includes; the source (`sourceMode`) can only be observed or inferred. They cannot use `supersedes` or `force`, and can only update pending memories their own session saved. Each subagent session creates at most `subagent.maxSavesPerSession` memories (default 10). Subagent writing follows the governance switch: with `governance.enabled` set to `false`, subagent sessions stay read-only.
 

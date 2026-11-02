@@ -33,7 +33,7 @@ export function createPromoteTool(deps: PromoteToolDeps): ToolDefinition {
     execute: async (args, exec) => {
       const target: PromoteTarget = args.target ?? deps.defaultTarget
       const context = await deps.resolveContext(exec)
-      return toToolOutput(await executePromote({ confirmedIds: args.ids, target, dismiss: args.dismiss, allowCrossWorkspace: args.allowCrossWorkspace }, context, deps))
+      return toToolOutput(await executePromote({ confirmedIds: args.ids, target, dismiss: args.dismiss, allowCrossWorkspace: args.allowCrossWorkspace }, context, deps, { reviewedBy: 'main' }))
     },
   })
 }
