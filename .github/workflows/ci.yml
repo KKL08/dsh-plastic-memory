@@ -24,6 +24,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
+      - run: pnpm lint
       - run: pnpm test
       - run: pnpm build
       - name: Published files stay on the whitelist
@@ -57,6 +58,7 @@ jobs:
       - run: node scripts/use-host.cjs
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm typecheck
+      - run: pnpm lint
       - run: pnpm test
       - name: Cache the floor dsh host
         uses: actions/cache@v4
