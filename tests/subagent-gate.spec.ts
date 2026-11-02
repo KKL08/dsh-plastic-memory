@@ -215,10 +215,37 @@ describe('子 agent 只读门', () => {
         expect(out.message, tool).toContain('把要记的事实或治理动作带回主会话')
         expect(def.output.render({}, out)[0]!.text, tool).toBe(out.message)
       }
-      for (const tool of ['memory_search', 'memory_source']) {
+      for (const tool of ['memory_search', 'memory_source', 'memory_health'].filter(t => h.defs.has(t))) {
         expect(h.defs.get(tool)!.description, tool).not.toContain('带回主会话')
       }
     }
+  })
+})
+
+/** memory_save 说明里的子 agent 规则段（spec 第 4 条）：能写哪两类、project 只记观察到的状态、配额、存入即待确认、回复里报出来。 */
+function expectSubagentRules(description: string) {
+  expect(description).toContain('子 agent 会话里')
+  expect(description).toMatch(/knowledge.*project/)
+  expect(description).toContain('不记决定和目标')
+  expect(description).toContain('10 条')
+  expect(description).toContain('待确认')
+  expect(description).toContain('在回复里报')
+}
+
+describe('memory_save 的子 agent 规则段', () => {
+  it('治理开启：说明带规则段，不再写「不可用」；治理关闭：写「不可用」、不带规则段；热切换后说明跟着换', async () => {
+    const h = await boot()
+    const on = h.defs.get('memory_save')!.description
+    expectSubagentRules(on)
+    expect(on).not.toContain(SUBAGENT_READONLY)
+
+    await h.setGovernance(false)
+    const off = h.defs.get('memory_save')!.description
+    expect(off).toContain(`子 agent 会话里不可用（返回 ${SUBAGENT_READONLY}）`)
+    expect(off).not.toContain('不记决定和目标')
+
+    await h.setGovernance(true)
+    expect(h.defs.get('memory_save')!.description).toBe(on)
   })
 })
 
@@ -232,6 +259,9 @@ describe('子 agent 写入随治理开关', () => {
     expect(record.scope).toBe('workspace')
     expect(record.delegation).toEqual({ sessionId: 'sess-d1', depth: 1, parentSessionId: 'sess-main' })
     expect(isPendingDelegated(record)).toBe(true)
+    // 模型看到的结果：id、摘要、待确认、报给委派方
+    const text = h.defs.get('memory_save')!.output.render({}, out)[0]!.text!
+    for (const part of [out.record.id, '子代理观察', '待确认', '在回复里报给委派方']) expect(text).toContain(part)
   })
 
   it('主会话（深度 0 或缺省）保存不带 delegation', async () => {

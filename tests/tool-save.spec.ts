@@ -141,6 +141,39 @@ describe('renderSaveResult', () => {
     expect(text).toContain('workspace') // scope=global 在有 workspace 时降级为候选
   })
 
+  it('子 agent 存下的待确认记录：文案写明待确认、不进主会话注入，含 id 与摘要，并叫它在回复里报给委派方', () => {
+    const pending = record({ id: 'mem_sub', type: 'knowledge', scope: 'workspace', summary: 'main 上 pnpm test 会挂', delegation: { sessionId: 's-child', depth: 1, parentSessionId: 's-main' } })
+    const text = renderSaveResult({ kind: 'saved', record: pending })
+    expect(text).toContain('mem_sub')
+    expect(text).toContain('main 上 pnpm test 会挂')
+    expect(text).toContain('待确认')
+    expect(text).toContain('不进主会话注入')
+    expect(text).toContain('在回复里报给委派方')
+    expect(text).toContain('接受、改写或丢弃')
+    expect(text).not.toContain('回复里不用提这次保存')
+    // 主会话的保存照旧：不提委派方
+    expect(renderSaveResult({ kind: 'saved', record: record({ id: 'mem_main' }) })).not.toContain('委派方')
+  })
+
+  it('待确认文案把摘要嵌进句子：摘要自带句末句号时不拼出「。。」', () => {
+    const pending = record({ id: 'mem_sub', type: 'knowledge', scope: 'workspace', summary: '端口 3000 被占用。', delegation: { sessionId: 's-child', depth: 1, parentSessionId: 's-main' } })
+    const text = renderSaveResult({ kind: 'saved', record: pending })
+    expect(text).toContain('已存为待确认：端口 3000 被占用。不进主会话注入')
+    expect(text).not.toContain('。。')
+  })
+
+  it('子 agent 改写自己的待确认记录：文案写明仍待确认，含 id 与摘要，叫它报给委派方', () => {
+    const pending = record({ id: 'mem_sub', type: 'knowledge', scope: 'workspace', summary: 'main 上 pnpm test 会挂', delegation: { sessionId: 's-child', depth: 1, parentSessionId: 's-main' } })
+    const text = renderSaveResult({ kind: 'updated', record: pending })
+    expect(text.startsWith('已更新记忆 mem_sub')).toBe(true)
+    expect(text).toContain('main 上 pnpm test 会挂')
+    expect(text).toContain('仍待确认')
+    expect(text).toContain('在回复里报给委派方')
+    expect(text).not.toContain('回复里不用提这次保存')
+    // 主会话改写照旧
+    expect(renderSaveResult({ kind: 'updated', record: record({ id: 'mem_main' }) })).not.toContain('委派方')
+  })
+
   it('updated 文案含 id', async () => {
     const store = new MemoryStore(new InMemoryTable())
     const deps = makeDeps(store)

@@ -1365,6 +1365,84 @@ describe('子 agent 委派信息', () => {
     }
   })
 
+  /** sessionQuery 替身：filterSessions 按 id 给出 header（宿主 SessionRecord 形状），记下问过哪些 id；readEvent 记次数（不该被调）。 */
+  function fakeQuery(headers: Array<{ id: string; delegationDepth?: number; parentSession?: string }>) {
+    const asked: string[] = []
+    const reads: unknown[] = []
+    return {
+      asked, reads,
+      filterSessions: async (filters: Array<{ kind: string; values: string[] }>) => {
+        const ids = filters.find(f => f.kind === 'id')?.values ?? []
+        asked.push(...ids)
+        return headers.filter(h => ids.includes(h.id))
+          .map(h => ({ header: { version: SESSION_FORMAT_VERSION, createdAt: 0, isSeeded: false, ...h }, live: false, persisted: true }))
+      },
+      readEvent: async (request: unknown) => { reads.push(request); return { events: [] } },
+    }
+  }
+
+  it('三层嵌套：深度 1、2、3 各存一条，深度、直接父会话逐层正确，根都是主会话；只读 header 不读事件', async () => {
+    const query = fakeQuery([
+      { id: 'sess-main' },
+      { id: 'sess-d1', delegationDepth: 1, parentSession: 'sess-main' },
+      { id: 'sess-d2', delegationDepth: 2, parentSession: 'sess-d1' },
+    ])
+    const t = await boot({ sessionQuery: query })
+    const chain = [['sess-d1', 'sess-main'], ['sess-d2', 'sess-d1'], ['sess-d3', 'sess-d2']] as const
+    for (const [i, [id, parent]] of chain.entries()) {
+      const out = await t.save(t.session(id, { delegationDepth: i + 1, parentSession: parent }), `第${i + 1}层观察`)
+      expect(out.kind).toBe('saved')
+      expect(out.record.delegation).toEqual({ sessionId: id, depth: i + 1, parentSessionId: parent, rootSessionId: 'sess-main' })
+    }
+    expect(query.reads).toEqual([])
+  })
+
+  it('用户 fork 出来的主会话是它自己那棵树的根，不再往上走', async () => {
+    const query = fakeQuery([{ id: 'sess-orig' }, { id: 'sess-fork', parentSession: 'sess-orig' }])
+    const t = await boot({ sessionQuery: query })
+    const out = await t.save(t.session('sess-child', { delegationDepth: 1, parentSession: 'sess-fork' }), 'fork 下的子观察')
+    expect(out.record.delegation).toMatchObject({ parentSessionId: 'sess-fork', rootSessionId: 'sess-fork' })
+    expect(query.asked).toEqual(['sess-fork'])
+  })
+
+  it('进程内见过的会话走缓存，不问 sessionQuery', async () => {
+    const query = fakeQuery([])
+    const t = await boot({ sessionQuery: query })
+    t.created(t.session('sess-main'))
+    const d1 = await t.save(t.session('sess-d1', { delegationDepth: 1, parentSession: 'sess-main' }), '一层')
+    const d2 = await t.save(t.session('sess-d2', { delegationDepth: 2, parentSession: 'sess-d1' }), '两层') // sess-d1 刚调过工具
+    expect(d1.record.delegation).toMatchObject({ rootSessionId: 'sess-main' })
+    expect(d2.record.delegation).toMatchObject({ rootSessionId: 'sess-main' })
+    expect(query.asked).toEqual([])
+  })
+
+  it('任一跳读不到（查无此会话、查询抛错、服务缺席、宿主没有 filterSessions）：记录照存，rootSessionId 缺省', async () => {
+    const services: unknown[] = [
+      fakeQuery([{ id: 'sess-d1', delegationDepth: 1, parentSession: 'sess-gone' }]), // 第二跳断
+      { filterSessions: async () => { throw new Error('persistence listing failed') } },
+      undefined,
+      { readEvent: async () => ({ events: [] }) },
+    ]
+    for (const sessionQuery of services) {
+      const t = await boot({ sessionQuery })
+      const out = await t.save(t.session('sess-d2', { delegationDepth: 2, parentSession: 'sess-d1' }), '链断了')
+      expect(out.kind).toBe('saved')
+      expect(out.record.delegation).toEqual({ sessionId: 'sess-d2', depth: 2, parentSessionId: 'sess-d1' })
+    }
+  })
+
+  it('最多走「深度」跳：父链深度不降（宿主数据异常）时停下，rootSessionId 缺省', async () => {
+    const query = fakeQuery([
+      { id: 'sess-p', delegationDepth: 1, parentSession: 'sess-q' },
+      { id: 'sess-q', delegationDepth: 1, parentSession: 'sess-p' },
+    ])
+    const t = await boot({ sessionQuery: query })
+    const out = await t.save(t.session('sess-child', { delegationDepth: 1, parentSession: 'sess-p' }), '环')
+    expect(out.kind).toBe('saved')
+    expect(out.record.delegation).not.toHaveProperty('rootSessionId')
+    expect(query.asked).toEqual(['sess-p'])
+  })
+
   it('memory_save 的参数里没有委派字段；模型传了同名字段被忽略，委派信息只认宿主 header', async () => {
     const t = await boot()
     const params = Object.keys(t.defs.get('memory_save')!.parameters.properties)
@@ -1375,7 +1453,8 @@ describe('子 agent 委派信息', () => {
     expect(main.kind).toBe('saved')
     expect(main.record.delegation).toBeUndefined()
     const child = await t.save(t.session('sess-child', { delegationDepth: 1, parentSession: 'sess-main' }), '子会话伪造', forged)
-    expect(child.record.delegation).toEqual({ sessionId: 'sess-child', depth: 1, parentSessionId: 'sess-main' })
+    // sess-main 刚调过工具，根会话从缓存解析
+    expect(child.record.delegation).toEqual({ sessionId: 'sess-child', depth: 1, parentSessionId: 'sess-main', rootSessionId: 'sess-main' })
   })
 })
 

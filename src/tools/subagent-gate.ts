@@ -33,6 +33,32 @@ export function delegationDepthOf(session: { header: { delegationDepth?: number 
   return session?.header.delegationDepth ?? 0
 }
 
+/** 宿主会话 header 里根会话解析用到的三项（宿主写入后不变）。 */
+export interface DelegationHeader {
+  id: string
+  delegationDepth?: number
+  parentSession?: string
+}
+
+/**
+ * 根会话：沿 parentSession 往上走，遇到深度为 0（或缺省）的会话即停，它就是根——用户 fork 出来的主会话也在这里停，
+ * 是它自己那棵树的根。最多走 start 的深度那么多跳；任何一跳读不到、或走满仍没到深度 0，返回 undefined（记录照存、不带根）。
+ */
+export async function resolveRootSessionId(
+  start: DelegationHeader,
+  lookup: (id: string) => Promise<DelegationHeader | undefined>,
+): Promise<string | undefined> {
+  let current = start
+  for (let hop = 0; hop < delegationDepthOf({ header: start }); hop++) {
+    if (current.parentSession === undefined) return undefined
+    const parent = await lookup(current.parentSession)
+    if (parent === undefined) return undefined
+    if (delegationDepthOf({ header: parent }) < 1) return parent.id
+    current = parent
+  }
+  return undefined
+}
+
 /**
  * 子会话是一次性还是持久型：读宿主 subagent 投影的 identity.mode，不读日志、不落盘。没有 identity（{}）按一次性；
  * 服务缺席、投影未注册、读取抛错也按一次性，fallback 写明原因（由调用方决定怎么留痕）。

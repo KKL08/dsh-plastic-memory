@@ -25,7 +25,7 @@ import type { PromoteTarget } from './tools/promote.ts'
 import { createAgentsMdWriter, agentsMdPath } from './storage/agents-md.ts'
 import { createSnapshotTool } from './tools/snapshot-tool.ts'
 import { createSourceTool } from './tools/source-tool.ts'
-import { delegationDepthOf, gateSubagentWrites, subagentModeOf } from './tools/subagent-gate.ts'
+import { delegationDepthOf, gateSubagentWrites, resolveRootSessionId, subagentModeOf, type DelegationHeader } from './tools/subagent-gate.ts'
 import type { ReadEventFn } from './tools/source.ts'
 import { SnapshotCache, resolveWorkspacePath } from './runtime.ts'
 import { lastVisibleSnapshot, shouldSendSnapshot, snapshotMessageBody } from './snapshot-message.ts'
@@ -115,7 +115,7 @@ export const name = 'dsh-plastic-memory'
 export const inject = ['tools']
 
 /** session/created 回调里用得到的最小 session 结构（真实类型是 dsh-session 的 Session）。 */
-type SessionLike = object & { header?: { id?: string; cwd?: string } }
+type SessionLike = object & { header?: { id?: string; cwd?: string; delegationDepth?: number; parentSession?: string } }
 
 export async function apply(ctx: Context, config: Config) {
   // 插件本次加载的时刻：健康视图带给浏览器半侧，判断冻结快照是否早于这次启动
@@ -293,6 +293,7 @@ export async function apply(ctx: Context, config: Config) {
   // mode 现读 subagent 投影。全部来自宿主，不来自工具参数。
   async function resolveContext(exec: ToolRunContext) {
     const session = exec.agent?.session
+    rememberHeader(session?.header)
     const delegationDepth = delegationDepthOf(session)
     const delegation: SaveDelegation | undefined = session && delegationDepth >= 1
       ? { depth: delegationDepth, parentSessionId: session.header.parentSession ?? 'unknown', mode: sessionModeOf(session) }
@@ -347,6 +348,36 @@ export async function apply(ctx: Context, config: Config) {
       ctx.logger.warn(`turnBoundary projection unavailable for session "${session.header.id}", anchoring the whole session: ${reason}`)
     }
     return 0
+  }
+
+  // 进程内见过的会话 header（委派三项宿主写入后不变）：根会话解析先查这里，查不到再问 sessionQuery
+  const knownHeaders = new Map<string, DelegationHeader>()
+  function rememberHeader(header: SessionLike['header']) {
+    if (header?.id === undefined) return
+    knownHeaders.set(header.id, { id: header.id, delegationDepth: header.delegationDepth, parentSession: header.parentSession })
+  }
+  /** 一个会话的 header：缓存优先，再问 sessionQuery（filterSessions 按 id，只读 header、不读事件）。
+   *  服务缺席、宿主没有这个方法、查无此会话、查询抛错都返回 undefined（根会话留空）。sessionQuery 按调用探测，同 memory_source。 */
+  async function lookupHeader(id: string): Promise<DelegationHeader | undefined> {
+    const known = knownHeaders.get(id)
+    if (known !== undefined) return known
+    type HeaderQuery = { filterSessions?(filters: ReadonlyArray<{ kind: 'id'; values: readonly string[] }>): Promise<Array<{ header: DelegationHeader }>> }
+    try {
+      const records = await probe<HeaderQuery>('sessionQuery')?.filterSessions?.([{ kind: 'id', values: [id] }])
+      const header = records?.find(r => r.header.id === id)?.header
+      rememberHeader(header)
+      return header
+    } catch {
+      return undefined
+    }
+  }
+  /** memory_save 的上下文：子会话再沿父链解析根会话（只有保存才读祖先 header，其余工具不读）。 */
+  async function resolveSaveContext(exec: ToolRunContext) {
+    const context = await resolveContext(exec)
+    const header = exec.agent?.session?.header
+    if (context.delegation === undefined || header === undefined) return context
+    const rootSessionId = await resolveRootSessionId(header, lookupHeader)
+    return rootSessionId === undefined ? context : { ...context, delegation: { ...context.delegation, rootSessionId } }
   }
 
   /** 子会话的 mode（一次性 / 持久型）：sessionProjections 按调用经 probe 探测（惯例同 openTurnStartSeq），
@@ -415,9 +446,10 @@ export async function apply(ctx: Context, config: Config) {
   // memory_save 的类型枚举与说明在注册时从类型表生成：模板或自定义类型热更新后注销重注册。
   // 子 agent 写入随治理开关：待确认记录的接受入口 memory_confirm 随开关注册，关着时子 agent 照旧只读（每次调用现读）；
   // 说明里的子 agent 段按注册时的开关写，开关热更新时也重注册
+  const allowSubagentSave = () => config.governance.enabled.get()
   const registerSave = () => registerWrite(
-    createSaveTool({ store, registry, resolveContext, snapshots, decisions, onSaved }),
-    () => config.governance.enabled.get(),
+    createSaveTool({ store, registry, resolveContext: resolveSaveContext, snapshots, decisions, onSaved }, { allowSubagent: allowSubagentSave() }),
+    allowSubagentSave,
   )
   let disposeSave = registerSave()
   ctx.tools.register(createSearchTool({
@@ -583,6 +615,7 @@ export async function apply(ctx: Context, config: Config) {
     // eager 预热：新 session 不必等首次组装才解析 workspace（HMR 后存量 session 由组装入口自愈）。
     // 与组装入口的解析等待同一份 memoize，不重复解析；只解析不组装，快照仍在首个发送点冻结。
     snapshotCache.prewarm(session)
+    rememberHeader(session.header)
     // 第一个会话出现时写一遍全局视图（不 await）：浏览器半侧首次打开记忆页要有内容；此时宿主已挂好 storageDomain。
     if (startupViewsPending && views) {
       startupViewsPending = false
