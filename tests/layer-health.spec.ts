@@ -142,6 +142,25 @@ describe('scoreLayer 归属规则', () => {
   })
 })
 
+// 子 agent 写入的待确认记录在健康分里和普通记录一样可见：计入总数、规则发现与语义发现
+describe('scoreLayer × 待确认记录', () => {
+  const delegation = { sessionId: 'sub', depth: 1, parentSessionId: 'main' }
+
+  it('待确认记录计入本层记录、规则发现与语义发现', async () => {
+    const deps = makeDeps()
+    await deps.store.put(record({ id: 'mem_p1', scope: 'workspace', workspacePath: '/p', delegation, validTo: 100 }))
+    await deps.store.put(record({ id: 'mem_p2', scope: 'workspace', workspacePath: '/p', delegation }))
+    await deps.cache.put('cache_/p', {
+      id: 'cache_/p', scannedAt: 100, scope: '/p',
+      findings: [semantic('redundancy', ['mem_p1', 'mem_p2'])],
+    })
+    const r = await score(deps, { kind: 'workspace', path: '/p' }, 200)
+    expect(r.records.map(x => x.id).sort()).toEqual(['mem_p1', 'mem_p2'])
+    expect(r.health.counts.expired).toBe(1)
+    expect(r.health.counts.redundancy).toBe(1)
+  })
+})
+
 describe('scoreLayer 体检后改过的记忆', () => {
   it('旧缓存（没有记忆指纹）：仍按 updatedAt 是否晚于体检时间判断', async () => {
     const deps = makeDeps()

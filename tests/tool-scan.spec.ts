@@ -285,6 +285,43 @@ describe('executeScan 单层模式', () => {
   })
 })
 
+// 子 agent 写入的待确认记录在体检里和普通记录一样可见；两条待确认记录的分歧由语义层的成对冲突检测列出（同一批里才检得出）
+describe('executeScan × 待确认记录', () => {
+  const pending = (id: string, content: string, partial: Parameters<typeof record>[0] = {}) =>
+    record({ id, content, delegation: { sessionId: `sub-${id}`, depth: 1, parentSessionId: 'main' }, ...partial })
+
+  it('规则层：待确认记录照常扫描、照常报问题', async () => {
+    const deps = makeDeps()
+    await deps.store.put(pending('mem_exp', '过期的观察', { validTo: 100 }))
+    await deps.store.put(pending('mem_ok', '有效的观察'))
+    const r = await scanSingle({ layers: 'rule' }, deps)
+    expect(r.stats.scanned).toBe(2)
+    expect(r.findings.map(f => [f.type, f.memoryIds[0]])).toEqual([['expired', 'mem_exp']])
+  })
+
+  it('语义层：两条待确认记录进同一批模型输入，模型报的冲突照常落待决账本', async () => {
+    const users: string[] = []
+    const deps = makeDeps({
+      getLlm: (_exec: unknown) => ({
+        complete: async ({ user }) => {
+          users.push(user)
+          return JSON.stringify({ findings: [{ type: 'conflict', memoryIds: ['mem_a', 'mem_b'], summary: '两个子级说法相反', suggestedAction: '请裁决' }] })
+        },
+      }),
+    })
+    await deps.store.put(pending('mem_a', '构建用 pnpm'))
+    await deps.store.put(pending('mem_b', '构建用 npm'))
+    const r = await scanSingle({ layers: 'semantic' }, deps)
+    expect(users).toHaveLength(1)
+    expect(users[0]).toContain('id=mem_a')
+    expect(users[0]).toContain('id=mem_b')
+    expect(r.pendingDecisions.created).toBe(1)
+    const [decision] = await deps.decisions.list()
+    expect([...decision!.memoryIds].sort()).toEqual(['mem_a', 'mem_b'])
+    expect(decision!.summary).toBe('两个子级说法相反')
+  })
+})
+
 describe('executeScan 全库体检', () => {
   /** 语义扫描与跨项目重复分析共用一个 llm：按 prompt 特征分流。 */
   const checkupLlm = {

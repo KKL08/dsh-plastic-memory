@@ -16,6 +16,7 @@ import {
   TERM_NOTE_MAX, type SearchToolDeps,
 } from '../src/tools/search.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
+import { DELEGATED_PENDING_NOTE } from '../src/index-line.ts'
 import type { SearchNoteCode } from '../src/contract-codes.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
@@ -391,6 +392,15 @@ describe('两段排序：主档在前，待确认在后', () => {
       record({ id: 'mem_mention', content: 'mem_pend 被提到' }),
     ])
     expect(await ids(store, 'mem_pend')).toEqual(['mem_pend', 'mem_mention'])
+  })
+
+  it('检索结果里待确认记录带「（子 agent 写入，未确认）」，主档不带', async () => {
+    const store = await seeded([
+      pending(1, { id: 'mem_pend', content: '部署流程' }),
+      record({ id: 'mem_main', content: '部署流程' }),
+    ])
+    const notes = Object.fromEntries((await search(store, '部署流程')).hits.map(h => [h.id, h.sourceNote]))
+    expect(notes).toEqual({ mem_main: '', mem_pend: DELEGATED_PENDING_NOTE })
   })
 })
 
