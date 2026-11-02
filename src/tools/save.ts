@@ -29,6 +29,8 @@ export interface SaveToolDeps {
   decisions?: PendingDecisionsStore
   /** 新建成功后调用（会话视图的 savedIds：右侧栏「这次新写入的」，接线在 index.ts）。 */
   onSaved?: (sessionId: string, memoryId: string) => void
+  /** 子会话新建配额（配置 subagent.maxSavesPerSession），每次调用现读；缺省按管线的默认值。 */
+  maxSubagentSaves?: () => number
 }
 
 /** 成功保存、改写时附在第一行末：记录是过程动作，界面已展示写入的记忆，回复里不必再报。 */
@@ -55,9 +57,13 @@ export function renderSaveResult(result: PipelineResult): string {
         ? `已更新记忆 ${result.record.id}。仍待确认：${summaryClause(result.record.summary)}。不进主会话注入；在回复里报给委派方（id 和摘要），由它决定接受、改写或丢弃。`
         : `已更新记忆 ${result.record.id}。${QUIET_NOTE}`
       break
-    case 'duplicate-suspected':
-      text = `这个主题可能已有记忆：\n${result.existing.map(e => `- ${e.id}：${e.summary}`).join('\n')}\n如需修改已有记忆，用 action=update 和对应 id 重发；确认是新信息就加 force=true 重发。`
+    case 'duplicate-suspected': {
+      const listed = `这个主题可能已有记忆：\n${result.existing.map(e => `- ${e.id}：${e.summary}`).join('\n')}`
+      text = result.isFromSubagent
+        ? `${listed}\n未保存。这些不是待确认记录，子 agent 改不了；看法不同就在回复里向委派方说明分歧（带上这些 id），由它决定。`
+        : `${listed}\n如需修改已有记忆，用 action=update 和对应 id 重发；确认是新信息就加 force=true 重发。`
       break
+    }
     case 'rejected':
       text = `未保存：${result.reason}`
       break
@@ -95,6 +101,7 @@ export async function executeSave(
     callId: String(exec.callId ?? ''),
     // 委派信息只从上下文来：args 里同名字段不进候选、也不传到这里
     delegation: context.delegation,
+    maxSubagentSaves: deps.maxSubagentSaves?.(),
   })
   if (result.kind === 'saved') deps.onSaved?.(context.session.id, result.record.id)
   return result

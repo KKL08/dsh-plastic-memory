@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
+import { renderSaveResult } from '../src/tools/save.ts'
 import { extractEntities } from '../src/text.ts'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
@@ -13,7 +14,7 @@ import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.t
 import type { RecallStats } from '../src/storage/schema.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { editFingerprint } from '../src/governance/snapshots.ts'
-import { candidate } from './helpers/record.ts'
+import { candidate, record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
@@ -878,5 +879,194 @@ describe('runSavePipeline：子 agent 写入约束', () => {
     const r = await runSavePipeline(candidate({ type: 'preference', sourceMode: 'user-explicit', force: true }), deps())
     expect(r).toMatchObject({ kind: 'saved', record: { scope: 'workspace', globalCandidate: true } })
     if (r.kind === 'saved') expect(r.record.delegation).toBeUndefined()
+  })
+
+  /** 当前项目里的一条记录；by 给出创建者：主会话（无 delegation）、本会话或别的子会话、已升档。 */
+  const owned = (id: string, by: 'main' | 'self' | 'other' | 'self-reviewed') => record({
+    id, type: 'knowledge', scope: 'workspace', workspacePath: '/proj', name: id, content: `「${id}」的旧内容`, summary: `${id} 旧摘要`,
+    source: { sessionId: by === 'main' ? 'sess-main' : 'sess-x', eventRange: [0, 1], sourceMode: 'environment-observed' },
+    ...(by === 'main' ? {} : {
+      delegation: {
+        sessionId: by === 'other' ? 'sess-other' : CHILD.id, depth: 1, parentSessionId: 'sess-main', rootSessionId: 'sess-main',
+        ...(by === 'self-reviewed' ? { reviewed: { by: 'main' as const, at: 5 } } : {}),
+      },
+    }),
+  })
+
+  it('update 只改本会话创建、还没升档的：创建者字段不变、reviewed 为空、证据锚换成这次的', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await store.put(owned('mem_self', 'self'))
+    const r = await runSavePipeline(childCandidate({ action: 'update', id: 'mem_self', sourceMode: 'agent-inferred', content: '改过的观察' }), childDeps(store))
+    if (r.kind !== 'updated') throw new Error(r.kind)
+    expect(r.record.content).toBe('改过的观察')
+    expect(r.record.delegation).toEqual({ sessionId: CHILD.id, depth: 1, parentSessionId: 'sess-main', rootSessionId: 'sess-main' })
+    expect(r.record.source).toEqual({ sessionId: CHILD.id, eventRange: [4, 9], sourceMode: 'agent-inferred' })
+    expect((await store.get('mem_self'))!.delegation).toEqual(r.record.delegation)
+  })
+
+  it('update 主会话的、别的子会话的、已升档的回 subagent-restricted，原因说明是哪种，记录不动', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    const cases: Array<[string, 'main' | 'other' | 'self-reviewed', string]> = [
+      ['mem_main', 'main', '是主会话写的或用户手建的'],
+      ['mem_other', 'other', '是别的子会话存的'],
+      ['mem_reviewed', 'self-reviewed', '已经被接受了'],
+    ]
+    for (const [id, by] of cases) await store.put(owned(id, by))
+    for (const [id, , why] of cases) {
+      const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', id, content: '子 agent 想改成这样' }), childDeps(store)))
+      expect(reason, id).toBe(`子 agent 只能改本会话存下、还没被接受的记忆；${id} ${why}。要改的内容带回主会话。`)
+      expect((await store.get(id))!.content, id).toBe(`「${id}」的旧内容`)
+    }
+  })
+
+  it('update 目标不存在或已删除回 subagent-restricted，不落到 target-missing', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await store.put(owned('mem_self', 'self'))
+    await store.softDelete((await store.get('mem_self'))!)
+    for (const id of ['mem_none', 'mem_self']) {
+      const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', id, content: '子 agent 想改成这样' }), childDeps(store)))
+      expect(reason, id).toBe(`要改的记忆 ${id} 不存在或已删除，带回主会话。`)
+    }
+    expect((await store.get('mem_self'))!.content).toBe('「mem_self」的旧内容')
+  })
+
+  it('update 已提升为全局的待确认记录回 subagent-restricted，全局记录不动', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await store.put({ ...owned('mem_g', 'self'), scope: 'global', workspacePath: undefined })
+    const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', id: 'mem_g', content: '子 agent 想改成这样' }), childDeps(store)))
+    expect(reason).toBe('子 agent 只能改本会话存下、还没被接受的记忆；mem_g 已经提升为全局。要改的内容带回主会话。')
+    expect((await store.get('mem_g'))!.content).toBe('「mem_g」的旧内容')
+  })
+
+  it('检查时读到已删除、之后被恢复成主会话的记录：照样拒，子级内容不会变成主档', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    const main = owned('mem_main', 'main')
+    await store.put(main)
+    vi.spyOn(store, 'get').mockResolvedValueOnce({ ...main, status: 'deleted' })
+    await restricted(runSavePipeline(childCandidate({ action: 'update', id: 'mem_main', content: '子 agent 想改成这样' }), childDeps(store)))
+    expect((await store.get('mem_main'))!.content).toBe('「mem_main」的旧内容')
+  })
+
+  it('检查之后、写入之前记录被接受、提升或删除：锁内重判后不写，回 subagent-restricted', async () => {
+    type Rec = ReturnType<typeof owned>
+    const changes: Array<[string, (r: Rec) => Rec]> = [
+      ['accepted', r => ({ ...r, delegation: { ...r.delegation!, reviewed: { by: 'main', at: 8 } } })],
+      ['promoted', r => ({ ...r, scope: 'global', workspacePath: undefined })],
+      ['deleted', r => ({ ...r, status: 'deleted' })],
+    ]
+    for (const [label, change] of changes) {
+      const store = new MemoryStore(new InMemoryTable())
+      await store.put(owned('mem_self', 'self'))
+      const realPut = store.put.bind(store)
+      vi.spyOn(store, 'put').mockImplementationOnce(async (r, hint, skipIf) => {
+        const current = (await store.get('mem_self'))!
+        await realPut(change(current), { workspacePath: current.workspacePath })
+        return realPut(r, hint, skipIf)
+      })
+      const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', id: 'mem_self', content: '子 agent 想改成这样' }), childDeps(store)))
+      expect(reason, label).toBe('记忆 mem_self 在读取之后被改过（可能已被接受、删除或提升为全局），这次没写；要改的内容带回主会话。')
+      expect((await store.get('mem_self'))!.content, label).toBe('「mem_self」的旧内容')
+    }
+  })
+
+  it('update 用户手改过的待确认记录：原因不提 force，说明子 agent 改不了', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await store.put({ ...owned('mem_self', 'self'), handEdited: true })
+    const r = await runSavePipeline(childCandidate({ action: 'update', id: 'mem_self', content: '子 agent 想改成这样' }), childDeps(store))
+    if (r.kind !== 'rejected') throw new Error(r.kind)
+    expect(r.code).toBe('hand-edited')
+    expect(r.reason).toContain('这条记忆用户手改过，子 agent 改不了，带回主会话')
+    expect(r.reason).not.toContain('force')
+  })
+
+  it('疑似密钥：原因不提 force，写明疑似密钥一律不存', async () => {
+    const r = await runSavePipeline(childCandidate({ tags: ['api_key: TESTONLY0000000000000'] }), childDeps())
+    if (r.kind !== 'rejected') throw new Error(r.kind)
+    expect(r.code).toBe('secret-suspected')
+    expect(r.reason).toContain('疑似密钥一律不存')
+    expect(r.reason).not.toContain('force')
+  })
+
+  it('归属检查排在 supersedes / force 之后：改别人的记录又带 force，报 force', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await store.put(owned('mem_main', 'main'))
+    expect(await restricted(runSavePipeline(childCandidate({ action: 'update', id: 'mem_main', force: true }), childDeps(store)))).toContain('force')
+  })
+
+  it('去重只比主档：撞主会话写的、已升档的回 duplicate-suspected 并列出，提示向委派方说明分歧', async () => {
+    for (const by of ['main', 'self-reviewed'] as const) {
+      const store = new MemoryStore(new InMemoryTable())
+      await store.put({ ...owned('mem_kept', by), content: '`pnpm test` 在 main 上是绿的' })
+      const r = await runSavePipeline(childCandidate({ content: '`pnpm test` 在 main 上会挂' }), childDeps(store))
+      expect(r, by).toEqual({ kind: 'duplicate-suspected', existing: [{ id: 'mem_kept', summary: 'mem_kept 旧摘要' }], isFromSubagent: true })
+      const text = renderSaveResult(r)
+      expect(text).toContain('- mem_kept：mem_kept 旧摘要')
+      expect(text).toContain('在回复里向委派方说明分歧')
+      expect(text).not.toContain('force')
+    }
+  })
+
+  it('去重不比待确认：撞别的子会话（或本会话）存的待确认记录照常存，两条并存', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await store.put({ ...owned('mem_peer', 'other'), content: '`pnpm test` 在 main 上是绿的' })
+    const r = await runSavePipeline(childCandidate({ content: '`pnpm test` 在 main 上会挂' }), childDeps(store))
+    if (r.kind !== 'saved') throw new Error(r.kind)
+    const active = await store.query({ scope: { kind: 'workspace', path: '/proj' } })
+    expect(active.map(x => x.id).sort()).toEqual([r.record.id, 'mem_peer'].sort())
+  })
+
+  /** 子会话连续新建 n 条（待确认之间不去重，同一内容也各自落一条），返回最后一次的结果。 */
+  const createMany = async (n: number, d: ReturnType<typeof childDeps>) => {
+    let last: Awaited<ReturnType<typeof runSavePipeline>> | undefined
+    for (let i = 0; i < n; i++) last = await runSavePipeline(childCandidate({ name: `观察${i}` }), d)
+    return last!
+  }
+
+  it('每会话新建配额默认 10：第 11 条回 subagent-restricted，原因含已存条数', async () => {
+    const d = childDeps()
+    expect((await createMany(10, d)).kind).toBe('saved')
+    expect(await restricted(runSavePipeline(childCandidate({ name: '第 11 条' }), d)))
+      .toBe('本会话已存 10 条，到了每个子会话 10 条的上限；其余带回主会话。')
+  })
+
+  it('配额按配置值；删一条释放额度；已取代、已过期的仍占额度', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    const d = childDeps(store, { maxSubagentSaves: 3 })
+    expect((await createMany(3, d)).kind).toBe('saved')
+    expect(await restricted(runSavePipeline(childCandidate({ name: '第 4 条' }), d))).toContain('本会话已存 3 条')
+
+    const [first, second, third] = await store.query({ scope: { kind: 'workspace', path: '/proj' } })
+    await store.softDelete(first!)
+    expect((await runSavePipeline(childCandidate({ name: '删后再存' }), d)).kind).toBe('saved')
+
+    await store.update(second!, r => ({ ...r, status: 'superseded' }))
+    await store.put({ ...third!, validTo: 1 })   // 早已过期，仍是 active
+    expect(await restricted(runSavePipeline(childCandidate({ name: '又一条' }), d))).toContain('本会话已存 3 条')
+  })
+
+  it('配额只拦 create：到了上限 update 自己的待确认记录照常', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    const d = childDeps(store, { maxSubagentSaves: 1 })
+    const saved = await createMany(1, d)
+    if (saved.kind !== 'saved') throw new Error(saved.kind)
+    expect((await runSavePipeline(childCandidate({ action: 'update', id: saved.record.id, content: '改一下' }), d)).kind).toBe('updated')
+  })
+
+  it('并行子级各算各的：别的子会话、主会话的记录不占本会话额度', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await store.put(owned('mem_other', 'other'))
+    await store.put(owned('mem_main', 'main'))
+    const d = childDeps(store, { maxSubagentSaves: 1 })
+    expect((await runSavePipeline(childCandidate({ content: '`vitest` 跑得动' }), d)).kind).toBe('saved')
+    const sibling = { ...d, session: { id: 'sess-other-2', lastSeq: 3 } }
+    expect((await runSavePipeline(childCandidate({ content: '`tsc` 跑得动' }), sibling)).kind).toBe('saved')
+  })
+
+  it('主会话的去重不变：撞待确认记录照旧 duplicate-suspected，提示 force 重发', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await store.put({ ...owned('mem_peer', 'other'), content: '`pnpm test` 在 main 上是绿的' })
+    const r = await runSavePipeline(candidate({ type: 'knowledge', scope: 'workspace', content: '`pnpm test` 在 main 上会挂' }), deps(store))
+    expect(r).toEqual({ kind: 'duplicate-suspected', existing: [{ id: 'mem_peer', summary: 'mem_peer 旧摘要' }] })
+    expect(renderSaveResult(r)).toContain('force=true')
   })
 })

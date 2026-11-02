@@ -107,7 +107,13 @@ async function boot(opts: { governance?: boolean } = {}) {
     ref[Symbol.for('cosmokit.volatile.write')]!(enabled)
     await listeners.get('loader/volatile-update')!([['governance', 'enabled']])
   }
-  return { defs, memoryRoot, call, assemble, setGovernance }
+  /** 子会话新建配额热更新：同上，写入新值后发 loader/volatile-update。 */
+  const setMaxSaves = async (n: number) => {
+    const ref = config.subagent.maxSavesPerSession as unknown as Record<symbol, (v: unknown) => void>
+    ref[Symbol.for('cosmokit.volatile.write')]!(n)
+    await listeners.get('loader/volatile-update')!([['subagent', 'maxSavesPerSession']])
+  }
+  return { defs, memoryRoot, call, assemble, setGovernance, setMaxSaves }
 }
 
 /** 从磁盘读回一条记录（不经插件内存）：在 memoryRoot 下按 id 找文件并解码，返回记录与所在目录。 */
@@ -231,7 +237,7 @@ function expectSubagentRules(description: string) {
   expect(description).toContain('子 agent 会话里')
   expect(description).toMatch(/knowledge.*project/)
   expect(description).toContain('不记决定和目标')
-  expect(description).toContain('10 条')
+  expect(description).toContain('默认 10 条，可在配置 subagent.maxSavesPerSession 改')
   expect(description).toContain('待确认')
   expect(description).toContain('在回复里报')
 }
@@ -290,6 +296,19 @@ describe('子 agent 写入随治理开关', () => {
 
     await h.setGovernance(false)
     expect(await h.call('memory_save', childSaveArgs('又想存的', '子代理的另一条事实'), 1)).toMatchObject({ code: SUBAGENT_READONLY })
+  })
+
+  it('新建配额按配置现读：改成 1 后下一次调用即生效，工具说明不变', async () => {
+    const h = await boot()
+    const description = h.defs.get('memory_save')!.description
+    await h.setMaxSaves(1)
+    expect((await h.call('memory_save', childSaveArgs('第一条', '子代理看到「第一条」'), 1) as Saved).kind).toBe('saved')
+    const over = await h.call('memory_save', childSaveArgs('第二条', '子代理看到「第二条」'), 1) as Gated & { reason: string }
+    expect(over).toMatchObject({ kind: 'rejected', code: 'subagent-restricted' })
+    expect(over.reason).toContain('本会话已存 1 条')
+    expect(h.defs.get('memory_save')!.description).toBe(description)
+    await h.setMaxSaves(2)
+    expect((await h.call('memory_save', childSaveArgs('第二条', '子代理看到「第二条」'), 1) as Saved).kind).toBe('saved')
   })
 
   it('治理开启时其余写工具在子会话里仍 subagent-readonly（深度 1、2）', async () => {

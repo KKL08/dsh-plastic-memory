@@ -13,7 +13,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 // dsh-agent 的类型增广把 turnBoundary 键登记进投影状态表；stateOf(session, 'turnBoundary') 因此按宿主真实键表校验。
 import type {} from '@deepseek-ai/dsh-agent'
 import type { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
-import type { SaveDelegation } from './pipeline.ts'
+import { SUBAGENT_MAX_SAVES_DEFAULT, type SaveDelegation } from './pipeline.ts'
 import { createSaveTool } from './tools/save-tool.ts'
 import { createSearchTool } from './tools/search-tool.ts'
 import { createForgetTool } from './tools/forget-tool.ts'
@@ -76,6 +76,10 @@ export interface Config {
     /** jieba 用户词典（每行「词 词频 词性」）的绝对路径，追加在主词典之上；不设只用主词典。改了下一次搜索生效。 */
     userDictionaryPath: Volatile<string | undefined>
   }
+  subagent: {
+    /** 每个子会话最多新建几条记忆（只拦 create，按本会话已存条数现数）。设置页不露，配置文件可改；改了下一次保存生效。 */
+    maxSavesPerSession: Volatile<number>
+  }
   /** 记忆文件根目录，缺省解析到 ${DSH_HOME:-~/.dsh}/memories（storage/paths.ts） */
   memoryRoot: string
 }
@@ -107,6 +111,9 @@ export const Config = z.object({
   }),
   search: z.object({
     userDictionaryPath: z.string().volatile(),
+  }),
+  subagent: z.object({
+    maxSavesPerSession: z.number().default(SUBAGENT_MAX_SAVES_DEFAULT).volatile(),
   }),
   memoryRoot: z.string().default(''),
 })
@@ -453,7 +460,10 @@ export async function apply(ctx: Context, config: Config) {
   // 说明里的子 agent 段按注册时的开关写，开关热更新时也重注册
   const allowSubagentSave = () => config.governance.enabled.get()
   const registerSave = () => registerWrite(
-    createSaveTool({ store, registry, resolveContext: resolveSaveContext, snapshots, decisions, onSaved }, { allowSubagent: allowSubagentSave() }),
+    createSaveTool({
+      store, registry, resolveContext: resolveSaveContext, snapshots, decisions, onSaved,
+      maxSubagentSaves: () => config.subagent.maxSavesPerSession.get(),
+    }, { allowSubagent: allowSubagentSave() }),
     allowSubagentSave,
   )
   let disposeSave = registerSave()

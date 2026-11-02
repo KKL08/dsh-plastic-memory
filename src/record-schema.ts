@@ -51,6 +51,9 @@ export type MemoryRecord = z.infer<typeof memoryRecordSchema>
 export function isPendingDelegated(record: Pick<MemoryRecord, 'delegation'>): boolean {
   return record.delegation !== undefined && record.delegation.reviewed === undefined
 }
+/** 记录不是待确认的两种原因：子 agent 改写（pipeline.ts）、主会话接受（tools/confirm.ts）的拒绝原因共用。 */
+export const NOT_DELEGATED_REASON = '是主会话写的或用户手建的'
+export const ALREADY_REVIEWED_REASON = '已经被接受了'
 export type SourceMode = NonNullable<MemoryRecord['source']>['sourceMode']
 
 export const CONFIDENCE_BY_SOURCE = {
