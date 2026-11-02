@@ -17,7 +17,7 @@ import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgn
 import { resolveHealthThresholds } from '../src/governance/health-presets.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
-import type { MemoryRecord } from '../src/record-schema.ts'
+import { isPendingDelegated, type MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { formatIndexLine } from '../src/index-line.ts'
@@ -238,6 +238,36 @@ describe('维护点动作 ④：手建 / 手编文件回写', () => {
     await new Promise(r => setTimeout(r, 5))
     const before = await treeSnapshot(root)
     await table.maintain([globalDir(), wsDir()])
+    expect(await treeSnapshot(root)).toEqual(before)
+  })
+})
+
+describe('维护点回写带着委派块', () => {
+  it('手写的委派块（缺 digest 触发回写）：回写后文件里仍在，读回仍是待确认；第二次维护零写入', async () => {
+    const path = await writeRaw(globalDir(), 'sub.md',
+      '---\nname: 子级写的\ntype: preference\ndelegation:\n  sessionId: child\n  depth: 1\n  parentSessionId: main\n---\n\n正文\n')
+    const { table } = open()
+    await table.maintain([globalDir()])
+    const fm = await frontmatter(path)
+    expect(fm.digest).toBe(computeDigest('子级写的', '', '正文'))
+    expect(fm.delegation).toEqual({ sessionId: 'child', depth: 1, parentSessionId: 'main' })
+    const hit = (await table.locate(fm.id as string))!.record
+    expect(isPendingDelegated(hit)).toBe(true)
+    await new Promise(r => setTimeout(r, 5))
+    const before = await treeSnapshot(root)
+    await table.maintain([globalDir()])
+    expect(await treeSnapshot(root)).toEqual(before)
+  })
+
+  it('插件写出的带 reviewed 的记录：update 保留整块，稳态零写入', async () => {
+    const delegation = { sessionId: 'child', depth: 2, parentSessionId: 'mid', rootSessionId: 'main', reviewed: { by: 'main' as const, at: 1_700_000_100_000 } }
+    const { table } = open()
+    await table.create(record({ id: 'mem_d', delegation }))
+    await table.update('mem_d', r => ({ ...r, content: '改写', updatedAt: Date.now() }))
+    expect((await table.locate('mem_d'))!.record.delegation).toEqual(delegation)
+    await new Promise(r => setTimeout(r, 5))
+    const before = await treeSnapshot(root)
+    await table.maintain([globalDir()])
     expect(await treeSnapshot(root)).toEqual(before)
   })
 })

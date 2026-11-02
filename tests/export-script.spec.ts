@@ -6,7 +6,7 @@ import { exportMemories } from '../scripts/export-kv-memories.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
-import type { MemoryRecord } from '../src/record-schema.ts'
+import { isPendingDelegated, type MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
 
 let root: string
@@ -199,4 +199,27 @@ it('名字 slug 为保留名 memory 时避让（APFS 上 memory.md 会与索引 
   expect(files).toContain(`memory-${'mem_rsv'.slice(-6)}.md`)
   const t = await load(root) // 记录仍在、未被隔离
   expect(((await t.locate('mem_rsv'))?.record)!.content).toBe('mem_rsv 的内容')
+})
+
+it('委派块随导出落盘：创建者字段与 reviewed 原样，读回按 reviewed 判待确认', async () => {
+  const base = {
+    type: 'knowledge', scope: 'global', tags: [], content: '正文', summary: '摘要',
+    source: { sessionId: 'child', eventRange: [3, 9], sourceMode: 'environment-observed' },
+    createdAt: 1787166378210, updatedAt: 1787166378210, lastConfirmedAt: 1787166378210,
+    lastRecalledAt: null, recallCount: 0, status: 'active', confidence: 0.8,
+  }
+  const pending = { sessionId: 'child', depth: 1, parentSessionId: 'main', rootSessionId: 'main' }
+  const reviewed = { ...pending, reviewed: { by: 'main', at: 1787166400000 } }
+  const result = await exportMemories(kvJson({
+    mem_p: { ...base, id: 'mem_p', name: '待确认', delegation: pending },
+    mem_r: { ...base, id: 'mem_r', name: '已接受', delegation: reviewed },
+  }), root)
+  expect(result).toEqual({ exported: 2, skipped: [] })
+  const t = await load(root)
+  const p = (await t.locate('mem_p'))!.record
+  const r = (await t.locate('mem_r'))!.record
+  expect(p.delegation).toEqual(pending)
+  expect(r.delegation).toEqual(reviewed)
+  expect(isPendingDelegated(p)).toBe(true)
+  expect(isPendingDelegated(r)).toBe(false)
 })

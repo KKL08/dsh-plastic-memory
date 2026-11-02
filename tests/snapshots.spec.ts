@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { SnapshotStore, SNAPSHOT_RETENTION_MS } from '../src/governance/snapshots.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
-import type { MemorySnapshot } from '../src/governance/schema.ts'
-import type { MemoryRecord } from '../src/record-schema.ts'
+import { memorySnapshotSchema, type MemorySnapshot } from '../src/governance/schema.ts'
+import { isPendingDelegated, type MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
 
 function makeStore() {
@@ -159,5 +159,31 @@ describe('SnapshotStore.restore：恢复途中别处动了快照', () => {
     }, new Map(), false, async rec => { discarded.push(rec.id) })
     await expect(restoring).rejects.toBe(failure)
     expect(discarded).toEqual(['mem_a'])
+  })
+})
+
+describe('快照带着委派块', () => {
+  const creator = { sessionId: 'child', depth: 1, parentSessionId: 'main', rootSessionId: 'main' }
+
+  it('拍快照：落盘的 JSON 按快照 schema 读回，delegation 原样（含 reviewed）', async () => {
+    const s = makeStore()
+    const reviewed = record({ id: 'mem_r', delegation: { ...creator, reviewed: { by: 'user', at: 7 } } })
+    const pending = record({ id: 'mem_p', delegation: creator })
+    const snap = await s.capture({ operation: 'manual', description: 'd', records: [reviewed, pending] }, 100)
+    const back = memorySnapshotSchema.parse(JSON.parse(JSON.stringify(snap)))   // 侧表读回时走这份 schema
+    expect(back.data.map(r => r.delegation)).toEqual([reviewed.delegation, pending.delegation])
+  })
+
+  it('恢复升档前的快照：委派块不进恢复比较，默认即可恢复，写回的记录重新是待确认', async () => {
+    const s = makeStore()
+    const before = record({ id: 'mem_a', delegation: creator, updatedAt: 50 })
+    const snap = await s.capture({ operation: 'pre-update', description: 'd', records: [before] }, 100)
+    const promoted = { ...before, delegation: { ...creator, reviewed: { by: 'main' as const, at: 150 } }, updatedAt: 150, lastConfirmedAt: 150 }
+    expect(isPendingDelegated(promoted)).toBe(false)
+    const written: MemoryRecord[] = []
+    const r = await s.restore(snap, undefined, async rec => { written.push(rec) }, new Map([['mem_a', promoted]]), false, noDiscard)
+    expect(r.restored).toEqual(['mem_a'])
+    expect(written[0].delegation).toEqual(creator)
+    expect(isPendingDelegated(written[0])).toBe(true)
   })
 })

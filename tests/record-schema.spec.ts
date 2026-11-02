@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { memoryRecordSchema, CONFIDENCE_BY_SOURCE } from '../src/record-schema.ts'
+import { memoryRecordSchema, CONFIDENCE_BY_SOURCE, isPendingDelegated } from '../src/record-schema.ts'
+import { record } from './helpers/record.ts'
 
 const valid = {
   id: 'mem_abc', name: 'mock 禁令', type: 'preference', scope: 'global', tags: [],
@@ -45,5 +46,36 @@ describe('status 枚举收敛', () => {
     for (const gone of ['stale', 'expired']) {
       expect(memoryRecordSchema.safeParse({ ...base, status: gone }).success).toBe(false)
     }
+  })
+})
+
+describe('isPendingDelegated：待确认 = delegation 存在且 reviewed 缺省', () => {
+  const delegation = { sessionId: 'child', depth: 1, parentSessionId: 'main' }
+  it('无 delegation：主档', () => {
+    expect(isPendingDelegated(record())).toBe(false)
+  })
+  it('有 delegation、无 reviewed：待确认', () => {
+    expect(isPendingDelegated(record({ delegation }))).toBe(true)
+  })
+  it('reviewed.by 为 user 或 main：主档', () => {
+    expect(isPendingDelegated(record({ delegation: { ...delegation, reviewed: { by: 'user', at: 5 } } }))).toBe(false)
+    expect(isPendingDelegated(record({ delegation: { ...delegation, reviewed: { by: 'main', at: 5 } } }))).toBe(false)
+  })
+  it('只看这两个字段：已删除、已取代的仍按 delegation 判', () => {
+    expect(isPendingDelegated(record({ delegation, status: 'deleted' }))).toBe(true)
+    expect(isPendingDelegated(record({ delegation, status: 'superseded' }))).toBe(true)
+  })
+})
+
+describe('delegation 结构', () => {
+  const ok = { sessionId: 'child', depth: 2, parentSessionId: 'mid', rootSessionId: 'main' }
+  it('rootSessionId、reviewed 可缺省', () => {
+    expect(memoryRecordSchema.safeParse({ ...valid, delegation: { sessionId: 'c', depth: 1, parentSessionId: 'p' } }).success).toBe(true)
+    expect(memoryRecordSchema.parse({ ...valid, delegation: ok }).delegation).toEqual(ok)
+  })
+  it('depth 必须是 ≥ 1 的整数；reviewed.by 只认 user / main', () => {
+    expect(memoryRecordSchema.safeParse({ ...valid, delegation: { ...ok, depth: 0 } }).success).toBe(false)
+    expect(memoryRecordSchema.safeParse({ ...valid, delegation: { ...ok, depth: 1.5 } }).success).toBe(false)
+    expect(memoryRecordSchema.safeParse({ ...valid, delegation: { ...ok, reviewed: { by: 'checkup', at: 1 } } }).success).toBe(false)
   })
 })
