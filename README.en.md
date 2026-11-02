@@ -133,11 +133,11 @@ Five built-in types cover the most common interaction scenarios:
 
 | Type         | Purpose                                                      |
 | ------------ | ------------------------------------------------------------ |
-| `profile`    | User identity, professional role, and skill set              |
-| `preference` | Corrected and confirmed guidelines, behavioral habits        |
-| `knowledge`  | General facts, domain rules, and conventions that outlast any single project |
-| `project`    | Ephemeral state and decisions tied to the current project lifecycle |
-| `reference`  | Pointers to external systems and resources                   |
+| `profile`    | User identity, background, location, interests, and skill set |
+| `preference` | Requirements and habits the user stated, corrected, or confirmed |
+| `knowledge`  | Confirmed facts, rules, and lessons that will matter again   |
+| `project`    | Current state and plans of ongoing projects or personal matters |
+| `reference`  | Where to find documents, files, and resources                |
 
 
 
@@ -183,6 +183,7 @@ customTypes:
     label: Team Rituals
     description: Recurring team processes and ceremonies
     whenToSave: When the user mentions a regularly scheduled process or ceremony
+    howToUse: Follow the recorded schedule and conventions when planning related work
     recall: search
     governancePriority: low
     decayDays: 90
@@ -193,7 +194,7 @@ scenes:
 template: scene-mh2k9x
 ```
 
-`decayDays` is the decay period: a memory not confirmed within that many days is only marked as possibly outdated and stays valid; `null` means it never decays.
+`description` and `whenToSave` are written for the model: when saving, it uses them to decide which type a memory belongs to and how to write it. `howToUse` is optional and says how to use these memories once they are brought into a chat; the model gets it along with the memories. `decayDays` is the decay period: a memory not confirmed within that many days is only marked as possibly outdated and stays valid; `null` means it never decays.
 
 ### Memories Written by Subagents
 

@@ -98,6 +98,7 @@ export const Config = z.object({
     label: z.string().required(),
     description: z.string().required(),
     whenToSave: z.string().required(),
+    howToUse: z.string(),
     recall: z.union(['core', 'search', 'passive'] as const).required(),
     decayDays: z.union([z.number(), z.const(null)]).default(null),
     governancePriority: z.union(['high', 'medium', 'low'] as const).required(),

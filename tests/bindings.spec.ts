@@ -78,8 +78,12 @@ describe('memory_save 绑定', () => {
 
   const describedParam = (name: string) => (schemaOf(makeTool()) as { properties: Record<string, { description?: string }> }).properties[name]!.description
 
-  it('content 的参数说明：先写事实或规则，再交代理由或情境，不编理由、不写很快过时的细节', () => {
-    expect(describedParam('content')).toBe('正文。先写事实或规则本身；再用一句交代用户给的理由，或者当时在聊什么（用户没说理由就写情境，不要替用户编理由）。只有不写就会做错的时候，才补一句具体做法。不写使用场景清单和通用注意事项；不写行号、临时路径这类很快过时的细节，改写稳定的位置描述。完整经过可以用 memory_source 回查，不用抄进正文。')
+  it('content 的参数说明：按类型的正文写法、陈述句标明主体、只写有依据的内容、具体名称和数值照写、不写很快过时的细节', () => {
+    expect(describedParam('content')).toBe('正文。按所选类型说明里的「正文」写法组织（类型说明没写正文写法的，写清事实和它的依据或情境），写成陈述句并标明主体（「用户要求…」「项目定了…」），日后读到时能和用户当下的话分开；只写对话或资料里有依据的内容，不替用户编理由；原话里的人名、地名、数字和单位照写，不概括成类别。不写使用场景清单和通用注意事项；不写行号、临时路径这类很快过时的细节，改写稳定的位置描述。完整经过可以用 memory_source 回查，不用抄进正文。')
+  })
+
+  it('supersedes 的参数说明：填被取代的旧记忆 id，和 update 分工', () => {
+    expect(describedParam('supersedes')).toBe('被这条新记忆取代的旧记忆 id（action=create 时用）。旧的随即失效、不再带入；旧说法要留档时用它，只是补充或改正同一条用 action=update。')
   })
 
   it('summary 与 tags 分工：summary 一句话说清讲什么，tags 只写文本里没有的检索词', () => {

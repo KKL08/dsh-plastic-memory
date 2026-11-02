@@ -133,11 +133,11 @@ dsh plugin --profile web add dsh-plastic-memory@0.1.1-beta.5
 
 | 类型 (`Type`)  | 说明                   |
 | ------------ | -------------------- |
-| `profile`    | 用户的个人身份、专业角色与能力画像    |
-| `preference` | 经过纠正与确认的准则、行为习惯      |
-| `knowledge`  | 跨越项目周期的通用事实、业务常识与规则  |
-| `project`    | 与当前项目生命周期强相关的临时状态与决策 |
-| `reference`  | 外部系统与资源的索引           |
+| `profile`    | 用户的身份、背景、所在地、兴趣与能力画像 |
+| `preference` | 用户提出、纠正或确认过的做事要求与习惯 |
+| `knowledge`  | 经过确认、以后还会用到的事实、规则与经验 |
+| `project`    | 进行中的项目或个人事项的当前状态与安排 |
+| `reference`  | 资料、文件与资源该去哪里找         |
 
 
 
@@ -183,6 +183,7 @@ customTypes:
     label: 团队仪式
     description: 定期执行的团队流程与规范
     whenToSave: 用户提到固定周期执行的流程或仪式时
+    howToUse: 安排相关工作时按记下的周期和规范来
     recall: search
     governancePriority: low
     decayDays: 90
@@ -193,7 +194,7 @@ scenes:
 template: scene-mh2k9x
 ```
 
-`decayDays` 是衰退天数：超过这个天数没确认的记忆只标为可能过时，不会失效；`null` 表示不衰退。
+`description`、`whenToSave` 写给模型看：保存记忆时，模型按它们判断这条该归哪一类、怎么写。`howToUse` 选填，写这类记忆带入对话后怎么用，和记忆一起交给模型。`decayDays` 是衰退天数：超过这个天数没确认的记忆只标为可能过时，不会失效；`null` 表示不衰退。
 
 ### 子 agent 写的记忆
 

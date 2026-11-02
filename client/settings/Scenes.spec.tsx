@@ -324,6 +324,18 @@ describe('记忆类型列表', () => {
     expect(form.calls[0]!.ops).toEqual([{ op: 'set', path: ['customTypes', 'domain-term'], value: term }])
   })
 
+  it('「怎么用」选填：新建时不填照样能确定；填了就写进 customTypes', async () => {
+    const { form } = setup()
+    fireEvent.click(button('新建类型'))
+    const f = dialog('新建类型')
+    expect(within(f).getByLabelText('带入后怎么用')).toHaveValue('')
+    fillType(f, { label: '术语', name: 'domain-term' })
+    fireEvent.change(within(f).getByLabelText('带入后怎么用'), { target: { value: '遇到这个词时按记下的含义理解' } })
+    fireEvent.click(button('确定', f))
+    await clickSave(form)
+    expect(form.calls[0]!.ops).toEqual([{ op: 'set', path: ['customTypes', 'domain-term'], value: { ...term, howToUse: '遇到这个词时按记下的含义理解' } }])
+  })
+
   it('编辑直接打开表单：没有「‹ 返回」，确定后直接进页面草稿', async () => {
     const { form } = setup({ value: { customTypes: { 'domain-term': term } } })
     fireEvent.click(button('编辑 术语'))
@@ -359,6 +371,8 @@ describe('通用、预设类型', () => {
     const f = dialog('用户画像')
     expect(within(f).getByText('profile')).toBeInTheDocument()
     expect(within(f).getByText(TYPE_DEFINITIONS.profile.whenToSave)).toBeInTheDocument()
+    expect(within(f).getByText('带入后怎么用')).toBeInTheDocument()
+    expect(within(f).getByText(TYPE_DEFINITIONS.profile.howToUse!)).toBeInTheDocument()
     expect(within(f).getByText('常驻')).toBeInTheDocument()
     expect(within(f).getByText('不衰退')).toBeInTheDocument()
     expect(within(f).queryByRole('textbox')).toBeNull()

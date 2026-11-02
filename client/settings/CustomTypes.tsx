@@ -37,7 +37,7 @@ export function TypeFormFields({ draft, errors, isNameLocked = false, onChange }
     const code = errors?.[field]
     return code === undefined ? undefined : t(ERROR_KEY[code], { label: draft.label.trim() })
   }
-  const field = (key: 'label' | 'name' | 'description' | 'whenToSave' | 'decayDays', labelKey: LocaleKey, hintKey: LocaleKey, extra: { multiline?: boolean; inputMode?: 'numeric'; readOnly?: boolean } = {}) => (
+  const field = (key: 'label' | 'name' | 'description' | 'whenToSave' | 'howToUse' | 'decayDays', labelKey: LocaleKey, hintKey: LocaleKey, extra: { multiline?: boolean; inputMode?: 'numeric'; readOnly?: boolean } = {}) => (
     <div className="pm-field">
       <label className="pm-setting-label" htmlFor={`${id}-${key}`}>{t(labelKey)}</label>
       <TextField id={`${id}-${key}`} value={draft[key]} onChange={(text) => { onChange({ [key]: text }) }} error={errorOf(key)} hint={t(hintKey)} {...extra} />
@@ -65,6 +65,7 @@ export function TypeFormFields({ draft, errors, isNameLocked = false, onChange }
       {field('name', 'settings.type.name', isNameLocked ? 'settings.type.nameLocked' : 'settings.type.nameHint', { readOnly: isNameLocked })}
       {field('description', 'settings.type.description', 'settings.type.descriptionHint', { multiline: true })}
       {field('whenToSave', 'settings.type.whenToSave', 'settings.type.whenToSaveHint', { multiline: true })}
+      {field('howToUse', 'settings.type.howToUse', 'settings.type.howToUseHint', { multiline: true })}
       {choice('recall', 'settings.type.recall', 'settings.type.recallHint', RECALL_MODES, v => `settings.type.recall.${v}` as LocaleKey)}
       {choice('governancePriority', 'settings.type.priority', 'settings.type.priorityHint', PRIORITIES, v => `settings.type.priority.${v}` as LocaleKey)}
       {field('decayDays', 'settings.type.decayDays', 'settings.type.decayDaysHint', { inputMode: 'numeric' })}

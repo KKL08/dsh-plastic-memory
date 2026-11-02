@@ -88,6 +88,17 @@ describe('Config schema', () => {
     expect(value.customTypes.get().regulation!.decayDays).toBeNull()
   })
 
+  it('自定义类型的 howToUse 选填：写了原样读回，不写就没有这一项', () => {
+    const value = new Config({
+      customTypes: {
+        regulation: { label: '合规要求', description: '行业法规', whenToSave: '出现合规要求时', howToUse: '起草对外文件时逐条对照', recall: 'core', decayDays: null, governancePriority: 'low' },
+        term: { label: '术语', description: 'd', whenToSave: 'w', recall: 'search', governancePriority: 'medium' },
+      },
+    } as never)
+    expect(value.customTypes.get().regulation!.howToUse).toBe('起草对外文件时逐条对照')
+    expect(value.customTypes.get().term!.howToUse).toBeUndefined()
+  })
+
   it('subagent.maxSavesPerSession 默认 10，YAML 可配', () => {
     expect(new Config({} as never).subagent.maxSavesPerSession.get()).toBe(10)
     expect(new Config(parse('subagent:\n  maxSavesPerSession: 3\n') as never).subagent.maxSavesPerSession.get()).toBe(3)

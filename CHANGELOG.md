@@ -40,8 +40,21 @@ All notable changes to this project are documented here. The format follows
   is an entry of the same name under `customTypes`, as before.
 - The base five types can be viewed on the settings page: their full
   definitions, read-only.
+- Custom types take an optional `howToUse`: how the model should use these
+  memories once they are brought into a chat. The settings page form has a
+  matching field.
 
 ### Changed
+- The model gets a fuller picture of each memory type. When saving, it
+  sees what each type holds, how to write it and an example, next to when
+  to save it; a custom type's `description` is now part of this too. The
+  memory snapshot ends with how to use each type it brought in. Memories
+  are written as statements that name whose requirement or fact they are,
+  so a remembered preference reads as background, not as an instruction.
+- The built-in types reach beyond work: `profile` covers habits and family
+  circumstances, `project` covers ongoing personal matters, `knowledge`
+  keeps any confirmed fact that will matter again, and `reference` can
+  point to where things are kept or whom to ask.
 - In a subagent session, `memory_source` only traces memories whose source
   is that session. For memories a subagent still owns, it reads back from
   the save point instead of forward from the start of the turn: a

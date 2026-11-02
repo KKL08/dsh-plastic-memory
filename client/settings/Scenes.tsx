@@ -572,6 +572,7 @@ function TypeView({ name, onClose }: { name: DefinedType; onClose: () => void })
     ['settings.type.name', <code className="pm-scene-code">{name}</code>],
     ['settings.type.description', def.description],
     ['settings.type.whenToSave', def.whenToSave],
+    ['settings.type.howToUse', def.howToUse],
     ['settings.type.recall', t(`settings.type.recall.${def.recall}`)],
     ['settings.type.priority', t(`settings.type.priority.${def.governancePriority}`)],
     ['settings.type.decayDays', def.decayDays === null ? t('settings.type.noDecay') : String(def.decayDays)],

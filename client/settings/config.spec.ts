@@ -136,6 +136,13 @@ describe('类型表单校验', () => {
     expect(validateTypeDraft({ ...filled, name: 'commitment' }, { names: ['procedure', 'decision'], labels: [] })).toMatchObject({ ok: true, name: 'commitment' })
   })
 
+  it('「怎么用」选填：空着不写进类型，填了去掉首尾空白写进去', () => {
+    expect(EMPTY_TYPE_DRAFT.howToUse).toBe('')
+    const blank = validateTypeDraft({ ...filled, howToUse: '  ' }, { names: [], labels: [] })
+    expect(blank.ok && blank.type).toEqual({ label: '术语', description: 'd', whenToSave: 'w', recall: 'search', decayDays: null, governancePriority: 'medium' })
+    const used = validateTypeDraft({ ...filled, howToUse: ' 遇到这个词时按记下的含义理解 ' }, { names: [], labels: [] })
+    expect(used.ok && used.type.howToUse).toBe('遇到这个词时按记下的含义理解')
+  })
 })
 
 describe('预设类型：改、删、恢复', () => {
@@ -154,6 +161,8 @@ describe('预设类型：改、删、恢复', () => {
     expect(isPresetTypeEdited('procedure', {})).toBe(false)
     expect(isPresetTypeEdited('procedure', { procedure: { ...TYPE_DEFINITIONS.procedure } })).toBe(false)
     expect(isPresetTypeEdited('procedure', { procedure: edited })).toBe(true)
+    const { howToUse: _cleared, ...withoutUsage } = TYPE_DEFINITIONS.procedure
+    expect(isPresetTypeEdited('procedure', { procedure: withoutUsage })).toBe(true)
     expect(isPresetTypeEdited('term', { term })).toBe(false)
   })
 
