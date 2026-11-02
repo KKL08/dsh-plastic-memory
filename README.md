@@ -193,6 +193,20 @@ template: scene-mh2k9x
 
 `decayDays` 是衰退天数：超过这个天数没确认的记忆只标为可能过时，不会失效；`null` 表示不衰退。
 
+### 子 agent 写的记忆
+
+DeepSeek Harness 派出的子 agent（包括子 agent 再往下派的）也能用 `memory_save` 存记忆。这些记忆先是待确认：只落当前项目，不带入主会话，检索时排在其他记忆之后，索引行和检索结果里标「（子 agent 写入，未确认）」。子 agent 存完会在回复里报出来，由主会话决定去留：
+
+- 接受：`memory_confirm` 的 `accept-subagent` 动作，之后和本项目其他记忆一样带入、检索；
+- 改写：`memory_save update`，改完同样算接受；
+- 丢弃：`memory_forget`。
+
+主会话不处理的，一直待确认。你不用逐条过目：主会话觉得某条该进全局时，它照常出现在「待处理」的提升候选里；记忆卡上也会显示「子 agent 写入 · 第 N 层 · 待确认」（接受后是「主会话已接受」或「用户已改」），在记忆页直接改一条待确认记忆也算接受。
+
+子 agent 只能写 `knowledge`、`project` 两类（还要在当前场景里），依据（`sourceMode`）只能是观察或推断，不能用 `supersedes`、`force`，只能改自己这个会话存下、还没被接受的。每个子 agent 会话最多新建 `subagent.maxSavesPerSession` 条（默认 10）。子 agent 写入跟着治理开关走：`governance.enabled` 为 `false` 时，子 agent 会话照旧只读。
+
+**已知限制**：这些规则只约束工具调用。子 agent 带文件工具、直接改记忆目录里的文件时，不受这些规则约束；用 DeepSeek Harness SDK 启动的子进程如果也装了本插件，会被当成主会话。
+
 ---
 
 
@@ -222,10 +236,10 @@ template: scene-mh2k9x
 | ---------------- | -------------------------------------------------------------------- |
 | `memory_health`  | **健康度评分（0–100）**：评估全库记忆质量；同时列出解析不了被隔离的文件和目录问题（重复 id、缺 `.workspace` 标记等） |
 | `memory_scan`    | 全库深度体检：规则层（密钥泄露、超长、孤立引用、破损文件）；语义层（冲突、冗余）按需调用 LLM                     |
-| `memory_confirm` | **保质期刷新与处置决策**：确认陈旧记忆的置信度以延长生命周期，或对冲突扫描结果进行人工仲裁                       |
+| `memory_confirm` | **保质期刷新与处置决策**：确认陈旧记忆的置信度以延长生命周期，或对冲突扫描结果进行人工仲裁，或接受子 agent 存的待确认记忆 |
 | `memory_promote` | **记忆提权流转**：将验证过的项目专属记忆提升至全局（Global）或同步至 `AGENTS.md`，**必须由用户明确指令确认** |
 
-治理工具默认只处理全局和当前项目的记忆，要动其他项目的记忆需带 `allowCrossWorkspace: true`（用户明确要做全局整理时）。子 agent 会话（宿主派生的子任务）只能读：`memory_search`、`memory_source`、`memory_health` 可用，其余写工具（含 `memory_scan`）一律拒绝，记忆照常注入。
+治理工具默认只处理全局和当前项目的记忆，要动其他项目的记忆需带 `allowCrossWorkspace: true`（用户明确要做全局整理时）。子 agent 会话里，`memory_search`、`memory_health` 照常可用，`memory_source` 只能回查出处在本会话的记忆，`memory_save` 按「子 agent 写的记忆」一节的规则写入，其余写工具（含 `memory_scan`、`memory_confirm`）一律拒绝；记忆照常注入。
 
 
 ---
@@ -285,6 +299,7 @@ template: scene-mh2k9x
 | `governance.enabled`             | `true`            | 是否启用主动治理层（体检、健康分、提权）                                         |
 | `governance.health.sensitivity`  | `'normal'`        | 健康警报灵敏度：`conservative` / `normal` / `proactive`              |
 | `governance.globalPromoteTarget` | `'plugin-global'` | 提权目标：`plugin-global`（插件全局域）或 `agents-md`（`~/.dsh/AGENTS.md`） |
+| `subagent.maxSavesPerSession`    | `10`              | 每个子 agent 会话最多新建几条记忆（只能在配置文件里改），改了下一次保存生效 |
 | `memoryRoot`                     | `''`              | 存储根路径，缺省为 `${DSH_HOME:-~/.dsh}/memories`                     |
 | `search.userDictionaryPath`      | 不设                | 用户词典路径（只能在配置文件里改）：追加在内置词典之上，改了下一次搜索生效。要填绝对路径；每行「词 词频 词性」，词频必填，不带词频的词条不生效，例如 `插件记忆 10 n`。没装 `@node-rs/jieba` 时不生效 |
 

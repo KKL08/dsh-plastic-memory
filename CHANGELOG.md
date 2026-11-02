@@ -7,7 +7,41 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Subagent sessions can save memories with `memory_save` while governance
+  is on. What they save lands in the current project as pending: it is not
+  injected into the main session, ranks after other memories in search, and
+  is marked as unconfirmed in index lines and search results. Each memory
+  records the session that wrote it, its delegation depth, and the parent
+  and root sessions, so a wrong memory can be traced to the task behind it.
+- Subagents can only write `knowledge` and `project` memories the current
+  scene includes, as observed or inferred, without `supersedes` or `force`,
+  and can only update pending memories their own session saved.
+  `subagent.maxSavesPerSession` (default 10) caps how many each subagent
+  session can create.
+- `memory_confirm` gains the `accept-subagent` action: the main session
+  accepts a pending memory, which is then injected and searched like any
+  other; rewriting it with `memory_save update` accepts it too. You don't
+  have to go through them one by one: one reaches the usual promotion
+  candidates only when the main session thinks it should be global, and
+  memory cards label them as below.
+- Memory cards label memories written by a subagent with their level and
+  whether they are pending, accepted by the main session or edited by you.
+  Editing a pending memory on the memory page accepts it.
+
 ### Changed
+- In a subagent session, `memory_source` only traces memories whose source
+  is that session. For memories a subagent still owns, it reads back from
+  the save point instead of forward from the start of the turn: a
+  subagent's task is often a single turn, and reading forward only showed
+  the instruction it was given.
+- `memory_source` output now includes tool results for every memory, so the
+  evidence shows what the agent read, not only the messages around it.
+- Earlier plugin versions read a memory written by a subagent as an
+  ordinary one and keep its `delegation` field when they write the file
+  back; after upgrading again it is pending as before.
+- `host:contract` now also checks subagent writes on a real child session:
+  saving, search order, `memory_source` and acceptance by the parent.
 - `memory_save` takes `validFrom` and `validTo` as local `YYYY-MM-DD HH:mm`,
   or just a date when no time was given, which then gets the time of saving.
   Models often got the old epoch milliseconds wrong, saving memories that had
