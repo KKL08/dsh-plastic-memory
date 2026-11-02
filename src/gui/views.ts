@@ -88,6 +88,9 @@ function card(r: MemoryRecord, data: LayerPreread, filePath = data.filePaths.get
     createdAt: r.createdAt, updatedAt: r.updatedAt, lastConfirmedAt: r.lastConfirmedAt,
     ...(r.validTo !== undefined ? { validTo: r.validTo } : {}),
     ...(r.handEdited ? { handEdited: true } : {}),
+    ...(r.delegation !== undefined
+      ? { delegation: { depth: r.delegation.depth, ...(r.delegation.reviewed !== undefined ? { reviewed: r.delegation.reviewed.by } : {}) } }
+      : {}),
     filePath,
     digest: computeDigest(r.name, r.summary, r.content),
     // 与遮盖同口径只看高危：疑似的界面上是原文，照着改不会写回占位文字

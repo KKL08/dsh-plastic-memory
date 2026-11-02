@@ -19,7 +19,7 @@ export { detectSecrets } from '../secrets.ts'
  */
 
 /** 视图 schema 的版本号：视图是派生缓存，形状变了就换号，客户端读到不认识的号按「需要刷新」处理。 */
-export const GUI_VIEW_VERSION = 12
+export const GUI_VIEW_VERSION = 13
 
 /** 视图文件所在目录（相对记忆根目录，POSIX 分隔）。 */
 export const GUI_VIEW_DIR = '.state/gui'
@@ -48,6 +48,7 @@ export const layerRefSchema = z.discriminatedUnion('kind', [
 export type GuiLayerRef = z.infer<typeof layerRefSchema>
 
 const sourceModeSchema = memoryRecordSchema.shape.source.unwrap().shape.sourceMode
+const reviewedBySchema = memoryRecordSchema.shape.delegation.unwrap().shape.reviewed.unwrap().shape.by
 
 /**
  * 项目记忆在「提升为全局」上的状态：candidate = 模型标了全局提升候选、还没处理（体检关闭时不标）；
@@ -74,6 +75,8 @@ export const memoryCardSchema = z.object({
   lastConfirmedAt: z.number(),
   validTo: z.number().optional(),
   handEdited: z.boolean().optional(),
+  /** 子 agent 写入的记忆：第几层子 agent 建的，谁升的档（缺省 = 待确认）。普通记忆不带。 */
+  delegation: z.object({ depth: z.number().int().min(1), reviewed: reviewedBySchema.optional() }).optional(),
   /** 记忆文件的绝对路径。 */
   filePath: z.string(),
   /** 名称、摘要、正文的内容摘要（同文件里的 digest 算法）：直接改时连同 updatedAt 带回去，磁盘上对不上就是卡片加载后被改过。

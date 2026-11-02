@@ -136,6 +136,15 @@ describe('待处理视图', () => {
     expect(pending.levelCounts).toEqual({ 'must-fix': 0, 'your-call': 0, 'advice': 0 })
   })
 
+  it('子 agent 写入、待确认的记忆不进待处理：不出条目、不亮点', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_sub', name: '子 agent 写的', content: '用 pnpm', delegation: { sessionId: 'sub', depth: 1, parentSessionId: 'parent' } }))
+    const { pending } = await h.views()
+    expect(pending.items).toEqual([])
+    expect(pending.levelCounts).toEqual({ 'must-fix': 0, 'your-call': 0, 'advice': 0 })
+    expect(pending.dot).toBe('none')
+  })
+
   it('读不出的文件：显示用的相对路径遮掉文件名里的密钥，打开用的 filePath 仍是真实路径', async () => {
     const h = harness()
     await h.store.create(w({ id: 'mem_a', name: 'A', content: '用 pnpm' }))
@@ -514,6 +523,22 @@ describe('全部记忆视图', () => {
 
     const off = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
     expect(promotions(off.library)).toEqual({ mem_cand: undefined, mem_kept: 'kept-local', mem_again: undefined, mem_same: 'kept-local', mem_plain: undefined, mem_g: undefined })
+  })
+
+  it('子 agent 写入的记忆：卡片带层数和升档来源（待确认不带 reviewed），普通记忆不带 delegation', async () => {
+    const h = harness()
+    const delegation = { sessionId: 'sub', depth: 2, parentSessionId: 'parent', rootSessionId: 'root' }
+    await h.store.create(w({ id: 'mem_pending', name: '待确认', delegation }))
+    await h.store.create(w({ id: 'mem_main', name: '主会话接受', delegation: { ...delegation, depth: 1, reviewed: { by: 'main', at: T0 } } }))
+    await h.store.create(w({ id: 'mem_user', name: '用户改过', delegation: { ...delegation, reviewed: { by: 'user', at: T0 } } }))
+    await h.store.create(w({ id: 'mem_plain', name: '普通' }))
+    const { library } = await h.views()
+    expect(libraryViewSchema.parse(library)).toEqual(library)
+    const items = Object.fromEntries(library.layers.flatMap(l => l.items.map(i => [i.id, i])))
+    expect(items.mem_pending!.delegation).toEqual({ depth: 2 })
+    expect(items.mem_main!.delegation).toEqual({ depth: 1, reviewed: 'main' })
+    expect(items.mem_user!.delegation).toEqual({ depth: 2, reviewed: 'user' })
+    expect(items.mem_plain).not.toHaveProperty('delegation')
   })
 
   it('typeLabels：注册表的类型和本视图记忆卡里出现的类型 → 显示名，认不出的类型显示 id', async () => {
