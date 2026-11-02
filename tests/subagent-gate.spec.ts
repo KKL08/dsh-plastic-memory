@@ -127,6 +127,8 @@ async function readBack(memoryRoot: string, id: string): Promise<{ record: Memor
 const saveArgs = (name: string, content: string) => ({
   action: 'create', name, summary: name, content, type: 'knowledge', scope: 'workspace', sourceMode: 'user-explicit', tags: [], force: true,
 })
+/** 子 agent 能存的形状：依据是观察所得、不带 force（写入约束见 tests/pipeline.spec.ts）。 */
+const childSaveArgs = (name: string, content: string) => ({ ...saveArgs(name, content), sourceMode: 'environment-observed', force: false })
 type Saved = { kind: string; record: { id: string } }
 type Gated = { kind: string; code: string; message: string }
 
@@ -254,7 +256,7 @@ describe('memory_save 的子 agent 规则段', () => {
 describe('子 agent 写入随治理开关', () => {
   it('治理开启：子会话新建一条，落当前项目目录，文件带 delegation，读回仍是待确认', async () => {
     const h = await boot()
-    const out = await h.call('memory_save', saveArgs('子代理观察', '子代理看到 main 上 pnpm test 会挂'), 1) as Saved
+    const out = await h.call('memory_save', childSaveArgs('子代理观察', '子代理看到 main 上 pnpm test 会挂'), 1) as Saved
     expect(out.kind).toBe('saved')
     const { record, dir } = await readBack(h.memoryRoot, out.record.id)
     expect(dir).not.toBe('global')
@@ -278,16 +280,16 @@ describe('子 agent 写入随治理开关', () => {
     const h = await boot({ governance: false })
     await h.call('memory_save', saveArgs('主会话垫底', '先让目录存在')) // 主会话照常
     const before = await treeSnapshot(h.memoryRoot)
-    expect(await h.call('memory_save', saveArgs('子代理想存的', '子代理的新事实'), 1)).toMatchObject({ kind: 'rejected', code: SUBAGENT_READONLY })
+    expect(await h.call('memory_save', childSaveArgs('子代理想存的', '子代理的新事实'), 1)).toMatchObject({ kind: 'rejected', code: SUBAGENT_READONLY })
     expect(await treeSnapshot(h.memoryRoot)).toEqual(before)
 
     await h.setGovernance(true)
-    const out = await h.call('memory_save', saveArgs('子代理想存的', '子代理的新事实'), 1) as Saved
+    const out = await h.call('memory_save', childSaveArgs('子代理想存的', '子代理的新事实'), 1) as Saved
     expect(out.kind).toBe('saved')
     expect(isPendingDelegated((await readBack(h.memoryRoot, out.record.id)).record)).toBe(true)
 
     await h.setGovernance(false)
-    expect(await h.call('memory_save', saveArgs('又想存的', '子代理的另一条事实'), 1)).toMatchObject({ code: SUBAGENT_READONLY })
+    expect(await h.call('memory_save', childSaveArgs('又想存的', '子代理的另一条事实'), 1)).toMatchObject({ code: SUBAGENT_READONLY })
   })
 
   it('治理开启时其余写工具在子会话里仍 subagent-readonly（深度 1、2）', async () => {

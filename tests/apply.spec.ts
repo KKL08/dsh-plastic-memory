@@ -1330,7 +1330,7 @@ describe('语义扫描请求形状', () => {
 describe('子 agent 委派信息', () => {
   type ToolDef = { name: string; parameters: { properties: Record<string, unknown> }; execute(args: unknown, exec: unknown): Promise<unknown> }
   type SaveOut = { kind: string; record: { id: string; delegation?: Record<string, unknown> }; code?: string }
-  const SAVE_ARGS = { action: 'create', type: 'knowledge', scope: 'workspace', sourceMode: 'environment-observed', tags: [], force: true }
+  const SAVE_ARGS = { action: 'create', type: 'knowledge', scope: 'workspace', sourceMode: 'environment-observed', tags: [] }
 
   async function boot(o: { projections?: unknown; sessionQuery?: unknown } = {}) {
     const defs = new Map<string, ToolDef>()
@@ -1348,7 +1348,7 @@ describe('子 agent 委派信息', () => {
     const session = (id: string, header: { delegationDepth?: number; parentSession?: string } = {}) =>
       hostSession(id, { cwd, ...header } as Parameters<typeof hostSession>[1])
     const save = async (s: Session, name: string, extra: object = {}) => await defs.get('memory_save')!.execute(
-      { ...SAVE_ARGS, name, summary: `${name}摘要`, content: `${name}：子会话里看到的事实`, ...extra },
+      { ...SAVE_ARGS, name, summary: `${name}摘要`, content: `子会话里看到「${name}」`, ...extra }, // 引号短语是实体：各条互不撞重复
       fakeExec({ agent: { session: s, options: {} } as unknown as ToolRunContext['agent'] }),
     ) as SaveOut
     /** 只看 subagent 投影的退化告警（证据锚读 turnBoundary 的告警另有用例）。 */

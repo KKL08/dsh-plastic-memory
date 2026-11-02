@@ -786,3 +786,97 @@ describe('runSavePipeline：模型改写的兜底', () => {
     expect(strip(b)).toEqual(strip(a))
   })
 })
+
+/**
+ * 子 agent 写入约束（spec 第 2–7、9 条）：委派上下文由宿主填，管线最前一个判断块，拒绝码统一 subagent-restricted。
+ * 候选默认取子 agent 能存的形状（knowledge、workspace、观察所得），各用例只改要犯的那一条。
+ */
+describe('runSavePipeline：子 agent 写入约束', () => {
+  const CHILD = { id: 'sess-child', lastSeq: 9, turnStartSeq: 4 }
+  const delegation = { depth: 1, parentSessionId: 'sess-main', rootSessionId: 'sess-main', mode: 'one-shot' as const }
+  const childDeps = (store = new MemoryStore(new InMemoryTable()), extra: object = {}) =>
+    ({ store, registry, workspacePath: '/proj' as string | undefined, session: CHILD, delegation, ...extra })
+  const childCandidate = (partial: object = {}) => candidate({
+    type: 'knowledge', scope: 'workspace', sourceMode: 'environment-observed',
+    name: '子观察', content: 'main 上 pnpm test 会挂', summary: 'main 测试会挂', ...partial,
+  })
+  const restricted = async (result: Promise<unknown>) => {
+    const r = await result as { kind: string; code?: string; reason?: string }
+    expect(r).toMatchObject({ kind: 'rejected', code: 'subagent-restricted' })
+    return r.reason!
+  }
+
+  it('传 global：落当前项目、不打 globalCandidate，结果带警告', async () => {
+    const r = await runSavePipeline(childCandidate({ scope: 'global' }), childDeps())
+    if (r.kind !== 'saved') throw new Error(r.kind)
+    expect(r.record).toMatchObject({ scope: 'workspace', workspacePath: '/proj' })
+    expect(r.record.globalCandidate).toBeUndefined()
+    expect(r.warnings).toEqual([{ code: 'subagent-scope-local', text: '子 agent 写的记忆只能放本项目，要提全局由主会话决定' }])
+  })
+
+  it('sourceMode 只收观察、推断：其余三种回 subagent-restricted，原因写明按观察或推断重发', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    for (const sourceMode of ['user-explicit', 'user-behavior', 'agent-action-confirmed']) {
+      const reason = await restricted(runSavePipeline(childCandidate({ sourceMode }), childDeps(store)))
+      expect(reason).toBe(`sourceMode=${sourceMode} 子 agent 用不了：子 agent 收到的指令来自委派方，不算用户明说；按观察（environment-observed）或推断（agent-inferred）重发。`)
+    }
+    expect(await store.query({ scope: { kind: 'workspace', path: '/proj' } })).toEqual([])
+    for (const sourceMode of ['environment-observed', 'agent-inferred']) {
+      expect((await runSavePipeline(childCandidate({ sourceMode }), childDeps())).kind).toBe('saved')
+    }
+  })
+
+  it('类型只收当前场景里的 knowledge、project：其他内置、预设、自建类型和不在场景里的 knowledge 回 subagent-restricted', async () => {
+    const custom = buildTypeRegistry({
+      template: 'scene-1',
+      customTypes: { regulation: { label: '合规', description: '法规', whenToSave: '出现法规时', recall: 'search', decayDays: null, governancePriority: 'low' } },
+      scenes: { 'scene-1': { label: '写作', types: ['project', 'decision', 'regulation'] } },
+    })
+    const cases: Array<[string, typeof registry, string]> = [
+      ['preference', registry, '当前场景里能写：knowledge、project'],
+      ['procedure', registry, '当前场景里能写：knowledge、project'],   // 编码场景里的预设类型
+      ['decision', custom, '当前场景里能写：project'],
+      ['regulation', custom, '当前场景里能写：project'],               // 自建类型
+      ['knowledge', custom, '当前场景里能写：project'],                // 内置但不在当前场景
+    ]
+    for (const [type, reg, allowed] of cases) {
+      const reason = await restricted(runSavePipeline(childCandidate({ type }), { ...childDeps(), registry: reg }))
+      expect(reason, type).toBe(`子 agent 只能写 knowledge、project 两类，且要在当前场景里（${allowed}）；"${type}" 不行，这件事带回主会话。`)
+    }
+    const none = buildTypeRegistry({ template: 'scene-1', customTypes: {}, scenes: { 'scene-1': { label: '写作', types: ['preference'] } } })
+    expect(await restricted(runSavePipeline(childCandidate(), { ...childDeps(), registry: none })))
+      .toBe('子 agent 只能写 knowledge、project 两类，且要在当前场景里（当前场景里两类都没有）；"knowledge" 不行，这件事带回主会话。')
+    expect((await runSavePipeline(childCandidate({ type: 'project' }), { ...childDeps(), registry: custom })).kind).toBe('saved')
+  })
+
+  it('非空 supersedes 或 force: true 回 subagent-restricted；空 supersedes、force: false 照常', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    const old = await runSavePipeline(candidate({ scope: 'workspace', type: 'knowledge' }), deps(store))   // 主会话的一条，给 supersedes 一个真实目标
+    if (old.kind !== 'saved') throw new Error(old.kind)
+    expect(await restricted(runSavePipeline(childCandidate({ supersedes: [old.record.id] }), childDeps(store))))
+      .toBe('子 agent 不能用 supersedes 替代旧记忆；去掉 supersedes 重发，要替代哪条带回主会话。')
+    expect(await restricted(runSavePipeline(childCandidate({ force: true }), childDeps(store))))
+      .toBe('子 agent 不能带 force：去重、手改保护、疑似密钥三道检查子 agent 都过不去。撞重复就另存或放弃，疑似密钥一律不存；去掉 force 重发。')
+    expect((await store.get(old.record.id))!.status).toBe('active')
+    expect((await runSavePipeline(childCandidate({ supersedes: [], force: false }), childDeps(store))).kind).toBe('saved')
+  })
+
+  it('同时犯多条时按 sourceMode → 类型 → supersedes → force 的顺序报最前一条', async () => {
+    const all = { sourceMode: 'user-explicit', type: 'preference', supersedes: ['mem_x'], force: true }
+    const steps: Array<[object, string]> = [
+      [all, 'sourceMode='],
+      [{ ...all, sourceMode: 'agent-inferred' }, '只能写 knowledge、project'],
+      [{ ...all, sourceMode: 'agent-inferred', type: 'project' }, 'supersedes'],
+      [{ ...all, sourceMode: 'agent-inferred', type: 'project', supersedes: undefined }, 'force'],
+    ]
+    for (const [partial, lead] of steps) {
+      expect(await restricted(runSavePipeline(childCandidate({ scope: 'global', ...partial }), childDeps()))).toContain(lead)
+    }
+  })
+
+  it('主会话不经过这些约束：同样的参数照旧存下', async () => {
+    const r = await runSavePipeline(candidate({ type: 'preference', sourceMode: 'user-explicit', force: true }), deps())
+    expect(r).toMatchObject({ kind: 'saved', record: { scope: 'workspace', globalCandidate: true } })
+    if (r.kind === 'saved') expect(r.record.delegation).toBeUndefined()
+  })
+})

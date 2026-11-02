@@ -108,8 +108,58 @@ function resolveValidity(
   return { validFrom, validTo }
 }
 
+type PipelineDeps = Parameters<typeof runSavePipeline>[1]
+
+/** 子 agent 能用的依据：它收到的指令来自委派方，用户明说、用户行为、经用户确认的动作都无从谈起。 */
+const SUBAGENT_SOURCE_MODES: readonly SourceMode[] = ['environment-observed', 'agent-inferred']
+/** 子 agent 能写的类型（还要在当前场景里）：事实，和观察到的项目状态。 */
+const SUBAGENT_TYPES = ['knowledge', 'project']
+
+/**
+ * 子 agent 写入约束：主会话不经过这里。一个判断块、一个拒绝码 subagent-restricted，原因按条写明怎么改或带回主会话。
+ * 顺序固定：scope 降级（只警告）→ 依据 → 类型 → supersedes / force → update 归属 → create 配额，同时犯多条时报最前的。
+ * 通过时返回降级后的候选与警告，后面的管线照常走。
+ */
+async function checkSubagentWrite(
+  input: SaveCandidate,
+  deps: PipelineDeps,
+): Promise<{ candidate: SaveCandidate; warnings: SaveWarning[] } | { code: RejectCode; reason: string }> {
+  const warnings: SaveWarning[] = []
+  let candidate = input
+  // 子 agent 没有提升候选的通道：global 直接落当前项目，提不提全局由主会话决定
+  if (candidate.scope === 'global') {
+    candidate = { ...candidate, scope: 'workspace' }
+    warnings.push({ code: 'subagent-scope-local', text: '子 agent 写的记忆只能放本项目，要提全局由主会话决定' })
+  }
+  if (!SUBAGENT_SOURCE_MODES.includes(candidate.sourceMode)) {
+    return {
+      code: 'subagent-restricted',
+      reason: `sourceMode=${candidate.sourceMode} 子 agent 用不了：子 agent 收到的指令来自委派方，不算用户明说；按观察（environment-observed）或推断（agent-inferred）重发。`,
+    }
+  }
+  const writable = SUBAGENT_TYPES.filter(t => deps.registry.has(t))
+  if (!writable.includes(candidate.type)) {
+    const shown = writable.length > 0 ? `当前场景里能写：${writable.join('、')}` : '当前场景里两类都没有'
+    return {
+      code: 'subagent-restricted',
+      reason: `子 agent 只能写 knowledge、project 两类，且要在当前场景里（${shown}）；"${candidate.type}" 不行，这件事带回主会话。`,
+    }
+  }
+  if ((candidate.supersedes ?? []).length > 0) {
+    return { code: 'subagent-restricted', reason: '子 agent 不能用 supersedes 替代旧记忆；去掉 supersedes 重发，要替代哪条带回主会话。' }
+  }
+  // force 放行的三道检查（去重、手改保护、疑似密钥）都要用户点头，子 agent 问不到用户
+  if (candidate.force) {
+    return {
+      code: 'subagent-restricted',
+      reason: '子 agent 不能带 force：去重、手改保护、疑似密钥三道检查子 agent 都过不去。撞重复就另存或放弃，疑似密钥一律不存；去掉 force 重发。',
+    }
+  }
+  return { candidate, warnings }
+}
+
 export async function runSavePipeline(
-  candidate: SaveCandidate,
+  input: SaveCandidate,
   deps: {
     store: MemoryStore
     registry: TypeRegistry
@@ -129,6 +179,11 @@ export async function runSavePipeline(
 ): Promise<PipelineResult> {
   const { store, registry, session } = deps
   const now = Date.now()
+
+  // 0. 子 agent 写入约束（主会话没有 delegation，原样往下走）
+  const subagent = deps.delegation ? await checkSubagentWrite(input, deps) : { candidate: input, warnings: [] }
+  if ('code' in subagent) return { kind: 'rejected', ...subagent }
+  const { candidate } = subagent
 
   // 1. 格式校验
   if (!registry.has(candidate.type)) {
@@ -362,6 +417,7 @@ export async function runSavePipeline(
     : { kind: 'saved' as const, record: clean }
 
   const warnings: SaveWarning[] = [
+    ...subagent.warnings,
     ...scopeWarnings,
     ...(crossBucketSupersede
       ? [{ code: 'cross-bucket-supersede' as const, text: '跨桶替代不允许：supersedes 目标不在本次写入的记忆桶内，已跳过不置 superseded。global 记忆的矛盾走 memory_scan 的冲突裁决，跨层提升合并走 memory_promote' }]
