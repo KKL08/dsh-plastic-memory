@@ -1299,6 +1299,87 @@ describe('语义扫描请求形状', () => {
 })
 
 /**
+ * 子 agent 的委派信息（spec 第 10–15 条）：深度、直接父会话取自宿主 header，mode 现读宿主 subagent 投影。
+ * 会话是宿主真 Session；sessionProjections、sessionQuery 是进程边界上的替身。
+ */
+describe('子 agent 委派信息', () => {
+  type ToolDef = { name: string; parameters: { properties: Record<string, unknown> }; execute(args: unknown, exec: unknown): Promise<unknown> }
+  type SaveOut = { kind: string; record: { id: string; delegation?: Record<string, unknown> }; code?: string }
+  const SAVE_ARGS = { action: 'create', type: 'knowledge', scope: 'workspace', sourceMode: 'environment-observed', tags: [], force: true }
+
+  async function boot(o: { projections?: unknown; sessionQuery?: unknown } = {}) {
+    const defs = new Map<string, ToolDef>()
+    const warnings: string[] = []
+    const base = mockCtx()
+    const ctx = {
+      ...base,
+      tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
+      get: (name: string) => (name === 'sessionProjections' ? o.projections : name === 'sessionQuery' ? o.sessionQuery : undefined),
+      logger: { info() {}, warn: (msg: string) => { warnings.push(msg) }, error() {} },
+    }
+    const memoryRoot = await makeTmpRoot()
+    const cwd = await makeTmpRoot() // resolveWorkspacePath 走 realpath，cwd 必须真实存在
+    await apply(ctx as never, new Config({ memoryRoot } as never))
+    const session = (id: string, header: { delegationDepth?: number; parentSession?: string } = {}) =>
+      hostSession(id, { cwd, ...header } as Parameters<typeof hostSession>[1])
+    const save = async (s: Session, name: string, extra: object = {}) => await defs.get('memory_save')!.execute(
+      { ...SAVE_ARGS, name, summary: `${name}摘要`, content: `${name}：子会话里看到的事实`, ...extra },
+      fakeExec({ agent: { session: s, options: {} } as unknown as ToolRunContext['agent'] }),
+    ) as SaveOut
+    /** 只看 subagent 投影的退化告警（证据锚读 turnBoundary 的告警另有用例）。 */
+    const modeWarnings = () => warnings.filter(w => w.includes('subagent projection'))
+    return { defs, session, save, modeWarnings, created: (s: Session) => base.listeners.get('session/created')!(s) }
+  }
+  const projectionWith = (subagent: unknown) => ({ stateOf: (_s: object, key: string) => (key === 'subagent' ? subagent : undefined) })
+
+  it('深度 1：delegation 带创建者会话、深度、直接父会话', async () => {
+    const t = await boot()
+    const out = await t.save(t.session('sess-child', { delegationDepth: 1, parentSession: 'sess-main' }), '子观察')
+    expect(out.kind).toBe('saved')
+    expect(out.record.delegation).toMatchObject({ sessionId: 'sess-child', depth: 1, parentSessionId: 'sess-main' })
+  })
+
+  it('用户 fork 的主会话（深度 0 带 parentSession）不算委派，记录不带 delegation，也不读 subagent 投影', async () => {
+    const t = await boot()
+    const out = await t.save(t.session('sess-fork', { parentSession: 'sess-main' }), 'fork 观察')
+    expect(out.kind).toBe('saved')
+    expect(out.record.delegation).toBeUndefined()
+    expect(t.modeWarnings()).toEqual([])
+  })
+
+  it('mode：投影给出 identity 或 {} 时不告警；投影未注册、服务缺席按一次性，每个会话告警一次', async () => {
+    for (const subagent of [{ identity: { mode: 'continuable', label: 'reviewer', seq: 0 } }, { identity: { mode: 'one-shot', seq: 0 } }, {}]) {
+      const t = await boot({ projections: projectionWith(subagent) })
+      expect((await t.save(t.session('sess-child', { delegationDepth: 1, parentSession: 'sess-main' }), '有投影')).kind).toBe('saved')
+      expect(t.modeWarnings()).toEqual([])
+    }
+    for (const [projections, reason] of [[projectionWith(undefined), 'not registered'], [undefined, 'service is absent']] as const) {
+      const t = await boot({ projections })
+      const child = t.session('sess-child', { delegationDepth: 1, parentSession: 'sess-main' })
+      expect((await t.save(child, '无投影一')).kind).toBe('saved')
+      expect((await t.save(child, '无投影二')).kind).toBe('saved')
+      expect(t.modeWarnings()).toHaveLength(1)
+      expect(t.modeWarnings()[0]).toContain('sess-child')
+      expect(t.modeWarnings()[0]).toContain('one-shot')
+      expect(t.modeWarnings()[0]).toContain(reason)
+    }
+  })
+
+  it('memory_save 的参数里没有委派字段；模型传了同名字段被忽略，委派信息只认宿主 header', async () => {
+    const t = await boot()
+    const params = Object.keys(t.defs.get('memory_save')!.parameters.properties)
+    expect(params.filter(p => /deleg|parent|root|depth|session/i.test(p))).toEqual([])
+
+    const forged = { delegation: { sessionId: 'sess-x', depth: 9, parentSessionId: 'sess-y', reviewed: { by: 'main', at: 1 } }, delegationDepth: 0, parentSession: 'sess-y' }
+    const main = await t.save(t.session('sess-main'), '主会话伪造', forged)
+    expect(main.kind).toBe('saved')
+    expect(main.record.delegation).toBeUndefined()
+    const child = await t.save(t.session('sess-child', { delegationDepth: 1, parentSession: 'sess-main' }), '子会话伪造', forged)
+    expect(child.record.delegation).toEqual({ sessionId: 'sess-child', depth: 1, parentSessionId: 'sess-main' })
+  })
+})
+
+/**
  * 证据锚（这条记忆出自会话的哪段事件）在宿主 0.1.5 上的读法：起点来自 agent-loop 注册的 turnBoundary
  * 投影（openTurnStartSeq = 当轮 turn/start 的 seq），终点是 session.seq - 1。投影是宿主
  * 按事件增量折叠的状态，插件按调用经 ctx.get('sessionProjections') 探测，缺席一律退回整会话锚。

@@ -13,6 +13,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 // dsh-agent 的类型增广把 turnBoundary 键登记进投影状态表；stateOf(session, 'turnBoundary') 因此按宿主真实键表校验。
 import type {} from '@deepseek-ai/dsh-agent'
 import type { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
+import type { SaveDelegation } from './pipeline.ts'
 import { createSaveTool } from './tools/save-tool.ts'
 import { createSearchTool } from './tools/search-tool.ts'
 import { createForgetTool } from './tools/forget-tool.ts'
@@ -24,7 +25,7 @@ import type { PromoteTarget } from './tools/promote.ts'
 import { createAgentsMdWriter, agentsMdPath } from './storage/agents-md.ts'
 import { createSnapshotTool } from './tools/snapshot-tool.ts'
 import { createSourceTool } from './tools/source-tool.ts'
-import { delegationDepthOf, gateSubagentWrites } from './tools/subagent-gate.ts'
+import { delegationDepthOf, gateSubagentWrites, subagentModeOf } from './tools/subagent-gate.ts'
 import type { ReadEventFn } from './tools/source.ts'
 import { SnapshotCache, resolveWorkspacePath } from './runtime.ts'
 import { lastVisibleSnapshot, shouldSendSnapshot, snapshotMessageBody } from './snapshot-message.ts'
@@ -288,11 +289,18 @@ export async function apply(ctx: Context, config: Config) {
   // 0.1.5 起的明码标价读法（Session 不再暴露整份事件数组）：终点 = session.seq - 1（seq 是下一条
   // 事件的位置，O(1)）；起点 = agent-loop 注册的 turnBoundary 投影里的 openTurnStartSeq
   // （当轮 turn/start 的 seq，宿主按事件增量折叠，不重扫日志）。
+  // 子 agent 会话（深度 ≥ 1）另带委派上下文：直接父会话取 header.parentSession（深度 0 的会话也可能带它，那是用户 fork，不算委派），
+  // mode 现读 subagent 投影。全部来自宿主，不来自工具参数。
   async function resolveContext(exec: ToolRunContext) {
     const session = exec.agent?.session
+    const delegationDepth = delegationDepthOf(session)
+    const delegation: SaveDelegation | undefined = session && delegationDepth >= 1
+      ? { depth: delegationDepth, parentSessionId: session.header.parentSession ?? 'unknown', mode: sessionModeOf(session) }
+      : undefined
     return {
       workspacePath: await resolveCwd(session?.header.cwd),
-      delegationDepth: delegationDepthOf(session),
+      delegationDepth,
+      ...(delegation ? { delegation } : {}),
       session: {
         id: session?.header.id ?? 'unknown',
         lastSeq: session ? Math.max(session.seq - 1, 0) : 0,
@@ -341,6 +349,18 @@ export async function apply(ctx: Context, config: Config) {
     return 0
   }
 
+  /** 子会话的 mode（一次性 / 持久型）：sessionProjections 按调用经 probe 探测（惯例同 openTurnStartSeq），
+   *  读不到按一次性，每个 session 第一次退化打 warn。 */
+  const modeFallbackWarned = new WeakSet<Session>()
+  function sessionModeOf(session: Session): SaveDelegation['mode'] {
+    const { mode, fallback } = subagentModeOf(probe<SessionProjectionRegistry>('sessionProjections'), session)
+    if (fallback !== undefined && !modeFallbackWarned.has(session)) {
+      modeFallbackWarned.add(session)
+      ctx.logger.warn(`subagent projection unavailable for session "${session.header.id}", treating it as one-shot: ${fallback}`)
+    }
+    return mode
+  }
+
   /** 该 session 当前生效的指令正文（按事件顺序）；null = 没有生效指令，或服务缺席、键未注册、读取抛错
    *  （垂直冲突检测跳过，扫描打 baseline-missing）。探测惯例同 openTurnStartSeq。
    *  状态里的形状漂移按 session 对象、每个 seq 只 warn 一次（插件重载后对历史漂移会再 warn 一次）；
@@ -380,9 +400,9 @@ export async function apply(ctx: Context, config: Config) {
   // memory_promote 与 /memory promote 共用一个写入器（进程内串行）
   const agentsMd = createAgentsMdWriter(agentsMdPath())
 
-  // 子 agent 只读门：写入与治理工具在注册处统一套门，子 agent 会话（delegationDepth ≥ 1）调用即拒。
+  // 子 agent 只读门：写入与治理工具在注册处统一套门，子 agent 会话（delegationDepth ≥ 1）调用即拒；allowSubagent 给出放行条件的才放行。
   // 门内的执行结束后（成功、失败都算，失败前可能已写了一部分）请求重写全局视图：模型改了记忆或账本，记忆页跟着变
-  const registerWrite = (tool: ToolDefinition) => ctx.tools.register(gateSubagentWrites({
+  const registerWrite = (tool: ToolDefinition, allowSubagent?: () => boolean) => ctx.tools.register(gateSubagentWrites({
     ...tool,
     execute: async (args, exec) => {
       try {
@@ -391,9 +411,14 @@ export async function apply(ctx: Context, config: Config) {
         void views?.request()
       }
     },
-  }, resolveContext))
-  // memory_save 的类型枚举与说明在注册时从类型表生成：模板或自定义类型热更新后注销重注册
-  const registerSave = () => registerWrite(createSaveTool({ store, registry, resolveContext, snapshots, decisions, onSaved }))
+  }, resolveContext, allowSubagent))
+  // memory_save 的类型枚举与说明在注册时从类型表生成：模板或自定义类型热更新后注销重注册。
+  // 子 agent 写入随治理开关：待确认记录的接受入口 memory_confirm 随开关注册，关着时子 agent 照旧只读（每次调用现读）；
+  // 说明里的子 agent 段按注册时的开关写，开关热更新时也重注册
+  const registerSave = () => registerWrite(
+    createSaveTool({ store, registry, resolveContext, snapshots, decisions, onSaved }),
+    () => config.governance.enabled.get(),
+  )
   let disposeSave = registerSave()
   ctx.tools.register(createSearchTool({
     store, registry, resolveContext, sessionRecall: snapshotCache,
@@ -526,7 +551,11 @@ export async function apply(ctx: Context, config: Config) {
         ctx.logger.error('[plastic-memory] 类型配置热更新失败，沿用原类型表:', err)
       }
     }
-    if (changed('governance.enabled')) syncGovernanceTools()
+    if (changed('governance.enabled')) {
+      syncGovernanceTools()
+      disposeSave()
+      disposeSave = registerSave()
+    }
     // search.userDictionaryPath 不用在这里处理：memory_search 每次现读路径，变了下一次搜索就重建分词实例
     snapshotCache.markAllStale()
     // 改了上限或超限处理：已有的超限提醒按新配置当场重算（调高上限后不再提醒，档位按新上限算），重写视图时就是新结果

@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, stat } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -7,8 +7,10 @@ import { Session, SESSION_FORMAT_VERSION, type SessionId } from '@deepseek-ai/ds
 import { createSystemMessage, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { apply, Config } from '../src/index.ts'
 import type { ToolGateCode } from '../src/contract-codes.ts'
-import { delegationDepthOf } from '../src/tools/subagent-gate.ts'
+import { delegationDepthOf, subagentModeOf } from '../src/tools/subagent-gate.ts'
 import { lastVisibleSnapshot } from '../src/snapshot-message.ts'
+import { decodeFile } from '../src/storage/frontmatter.ts'
+import { isPendingDelegated, type MemoryRecord } from '../src/record-schema.ts'
 import { fakeExec } from './helpers/exec.ts'
 
 // 子 agent 只读门：宿主子 agent 会话的 header 带 delegationDepth（父深度 + 1），主会话缺省。
@@ -45,8 +47,8 @@ async function treeSnapshot(dir: string, prefix = ''): Promise<Record<string, nu
   return out
 }
 
-/** 起插件：最小宿主 ctx（工具注册、事件、llm 与 sessionQuery 服务），留住注册后的工具定义。 */
-async function boot() {
+/** 起插件：最小宿主 ctx（工具注册、事件、llm 与 sessionQuery 服务），留住注册后的工具定义。governance 缺省开启。 */
+async function boot(opts: { governance?: boolean } = {}) {
   const defs = new Map<string, ToolDef>()
   const listeners = new Map<string, (...args: unknown[]) => unknown>()
   const llm = {
@@ -57,7 +59,14 @@ async function boot() {
   }
   const sessionQuery = { readEvent: async () => ({ events: [], startSeq: 0, endSeq: 0 }) }
   const ctx = {
-    tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
+    // 同名重复注册在宿主里直接抛错：重注册必须先注销
+    tools: {
+      register: (def: ToolDef) => {
+        if (defs.has(def.name)) throw new Error(`tool "${def.name}" already registered`)
+        defs.set(def.name, def)
+        return () => { defs.delete(def.name) }
+      },
+    },
     on: (event: string, fn: (...args: unknown[]) => unknown) => { listeners.set(event, fn); return () => {} },
     get: (name: string) => (name === 'llm' ? llm : name === 'sessionQuery' ? sessionQuery : undefined),
     inject: () => () => {},
@@ -65,10 +74,16 @@ async function boot() {
   }
   const memoryRoot = await makeTmp()
   const cwd = await makeTmp() // resolveWorkspacePath 走 realpath，cwd 必须真实存在
-  await apply(ctx as never, new Config({ memoryRoot } as never))
+  const config = new Config({ memoryRoot, governance: { enabled: opts.governance ?? true } } as never)
+  await apply(ctx as never, config)
 
+  // 子会话的 parentSession 指向上一层（深度 1 的父会话是 sess-main）
+  const parentOf = (depth: number) => (depth <= 1 ? 'sess-main' : `sess-d${depth - 1}`)
   const session = (delegationDepth?: number) => ({
-    header: { id: delegationDepth === undefined ? 'sess-main' : `sess-d${delegationDepth}`, cwd, ...(delegationDepth === undefined ? {} : { delegationDepth }) },
+    header: {
+      id: delegationDepth === undefined ? 'sess-main' : `sess-d${delegationDepth}`, cwd,
+      ...(delegationDepth === undefined ? {} : { delegationDepth, ...(delegationDepth >= 1 ? { parentSession: parentOf(delegationDepth) } : {}) }),
+    },
     seq: 3,
     requestHeader: () => undefined,
   })
@@ -86,7 +101,27 @@ async function boot() {
     await listeners.get('agent/pre-step')!(payload, async () => ({ kind: 'enter', messages: [] }))
     return lastVisibleSnapshot(hostSession.deriveMessages()) ?? ''
   }
-  return { defs, memoryRoot, call, assemble }
+  /** 治理开关热切换：Loader 写入新值后发 loader/volatile-update（同宿主），等监听器跑完。 */
+  const setGovernance = async (enabled: boolean) => {
+    const ref = config.governance.enabled as unknown as Record<symbol, (v: unknown) => void>
+    ref[Symbol.for('cosmokit.volatile.write')]!(enabled)
+    await listeners.get('loader/volatile-update')!([['governance', 'enabled']])
+  }
+  return { defs, memoryRoot, call, assemble, setGovernance }
+}
+
+/** 从磁盘读回一条记录（不经插件内存）：在 memoryRoot 下按 id 找文件并解码，返回记录与所在目录。 */
+async function readBack(memoryRoot: string, id: string): Promise<{ record: MemoryRecord; dir: string }> {
+  for (const dir of await readdir(memoryRoot)) {
+    if (dir.startsWith('.')) continue
+    for (const file of await readdir(join(memoryRoot, dir))) {
+      if (!file.endsWith('.md') || file === 'MEMORY.md') continue
+      const path = join(memoryRoot, dir, file)
+      const decoded = decodeFile(await readFile(path, 'utf8'), { path, loc: dir === 'global' ? { scope: 'global' } : { scope: 'workspace', workspacePath: '/ws' } })
+      if (decoded.ok && decoded.record.id === id) return { record: decoded.record, dir }
+    }
+  }
+  throw new Error(`记录 ${id} 不在磁盘上`)
 }
 
 const saveArgs = (name: string, content: string) => ({
@@ -113,13 +148,25 @@ describe('子 agent 只读门', () => {
     expect(delegationDepthOf({ header: { delegationDepth: 2 } })).toBe(2)
   })
 
-  it('depth 为 1 时五个写工具返回 subagent-readonly，磁盘零变化；search、source、快照组装照常', async () => {
+  it('一次性 / 持久型现读宿主 subagent 投影的 identity.mode；读不到按一次性并说明原因', () => {
+    const session = Session.create('sess-d1' as SessionId, [], { version: SESSION_FORMAT_VERSION, id: 'sess-d1' as SessionId, createdAt: 0, isSeeded: false, delegationDepth: 1 })
+    const registry = (state: unknown) => ({ stateOf: (_s: unknown, key: string) => (key === 'subagent' ? state : undefined) }) as never
+    expect(subagentModeOf(registry({ identity: { mode: 'continuable', label: 'reviewer', seq: 0 } }), session)).toEqual({ mode: 'continuable' })
+    expect(subagentModeOf(registry({ identity: { mode: 'one-shot', seq: 0 } }), session)).toEqual({ mode: 'one-shot' })
+    // 没有有效描述符：宿主给 {}，是正常状态，不算退化
+    expect(subagentModeOf(registry({}), session)).toEqual({ mode: 'one-shot' })
+    expect(subagentModeOf(registry(undefined), session)).toEqual({ mode: 'one-shot', fallback: 'subagent projection is not registered' })
+    expect(subagentModeOf(undefined, session)).toEqual({ mode: 'one-shot', fallback: 'sessionProjections service is absent' })
+    const throwing = { stateOf: () => { throw new Error('projection exploded') } } as never
+    expect(subagentModeOf(throwing, session).fallback).toContain('projection exploded')
+  })
+
+  it('depth 为 1 时 memory_save 以外的写工具返回 subagent-readonly，磁盘零变化；search、source、快照组装照常', async () => {
     const h = await boot()
     const { id, snapshotId } = await seed(h)
     const before = await treeSnapshot(h.memoryRoot)
 
     const attempts: Array<[string, unknown]> = [
-      ['memory_save', saveArgs('子代理想存的', '子代理的新事实')],
       ['memory_forget', { ids: [id], reason: '子代理想删' }],
       ['memory_confirm', { action: 'refresh', memoryId: id }],
       ['memory_promote', { ids: [id] }],
@@ -132,7 +179,7 @@ describe('子 agent 只读门', () => {
       expect(out, tool).toMatchObject({ kind: 'rejected', code: SUBAGENT_READONLY })
     }
     // 更深的子 agent 同样拒
-    expect(await h.call('memory_save', saveArgs('孙代理想存的', '孙代理的新事实'), 2)).toMatchObject({ code: SUBAGENT_READONLY })
+    expect(await h.call('memory_forget', { ids: [id], reason: '孙代理想删' }, 2)).toMatchObject({ code: SUBAGENT_READONLY })
     expect(await treeSnapshot(h.memoryRoot)).toEqual(before)
 
     const search = await h.call('memory_search', { query: 'zebra' }, 1) as { hits: Array<{ id: string }> }
@@ -155,16 +202,74 @@ describe('子 agent 只读门', () => {
   })
 
   it('工具说明或拒绝消息提示「把要记的事实或治理动作带回主会话」', async () => {
-    const h = await boot()
-    for (const tool of WRITE_TOOLS) {
-      const def = h.defs.get(tool)!
-      expect(def.description, tool).toContain('带回主会话')
-      const out = await h.call(tool, {}, 1) as Gated
-      expect(out.message, tool).toContain('把要记的事实或治理动作带回主会话')
-      expect(def.output.render({}, out)[0]!.text, tool).toBe(out.message)
+    // memory_save 只在治理关闭时封住，单独在关闭的实例上查
+    const cases: Array<[Awaited<ReturnType<typeof boot>>, readonly string[]]> = [
+      [await boot(), WRITE_TOOLS.filter(t => t !== 'memory_save')],
+      [await boot({ governance: false }), ['memory_save', 'memory_forget', 'memory_snapshot']],
+    ]
+    for (const [h, tools] of cases) {
+      for (const tool of tools) {
+        const def = h.defs.get(tool)!
+        expect(def.description, tool).toContain('带回主会话')
+        const out = await h.call(tool, {}, 1) as Gated
+        expect(out.message, tool).toContain('把要记的事实或治理动作带回主会话')
+        expect(def.output.render({}, out)[0]!.text, tool).toBe(out.message)
+      }
+      for (const tool of ['memory_search', 'memory_source']) {
+        expect(h.defs.get(tool)!.description, tool).not.toContain('带回主会话')
+      }
     }
-    for (const tool of ['memory_search', 'memory_source', 'memory_health']) {
-      expect(h.defs.get(tool)!.description, tool).not.toContain('带回主会话')
+  })
+})
+
+describe('子 agent 写入随治理开关', () => {
+  it('治理开启：子会话新建一条，落当前项目目录，文件带 delegation，读回仍是待确认', async () => {
+    const h = await boot()
+    const out = await h.call('memory_save', saveArgs('子代理观察', '子代理看到 main 上 pnpm test 会挂'), 1) as Saved
+    expect(out.kind).toBe('saved')
+    const { record, dir } = await readBack(h.memoryRoot, out.record.id)
+    expect(dir).not.toBe('global')
+    expect(record.scope).toBe('workspace')
+    expect(record.delegation).toEqual({ sessionId: 'sess-d1', depth: 1, parentSessionId: 'sess-main' })
+    expect(isPendingDelegated(record)).toBe(true)
+  })
+
+  it('主会话（深度 0 或缺省）保存不带 delegation', async () => {
+    for (const depth of [undefined, 0]) {
+      const h = await boot()
+      const out = await h.call('memory_save', saveArgs('主会话', '主会话的事实'), depth) as Saved
+      expect((await readBack(h.memoryRoot, out.record.id)).record.delegation).toBeUndefined()
+    }
+  })
+
+  it('治理关闭：子会话 memory_save 回 subagent-readonly、磁盘不动；开启后下一次调用放行，再关闭又封住', async () => {
+    const h = await boot({ governance: false })
+    await h.call('memory_save', saveArgs('主会话垫底', '先让目录存在')) // 主会话照常
+    const before = await treeSnapshot(h.memoryRoot)
+    expect(await h.call('memory_save', saveArgs('子代理想存的', '子代理的新事实'), 1)).toMatchObject({ kind: 'rejected', code: SUBAGENT_READONLY })
+    expect(await treeSnapshot(h.memoryRoot)).toEqual(before)
+
+    await h.setGovernance(true)
+    const out = await h.call('memory_save', saveArgs('子代理想存的', '子代理的新事实'), 1) as Saved
+    expect(out.kind).toBe('saved')
+    expect(isPendingDelegated((await readBack(h.memoryRoot, out.record.id)).record)).toBe(true)
+
+    await h.setGovernance(false)
+    expect(await h.call('memory_save', saveArgs('又想存的', '子代理的另一条事实'), 1)).toMatchObject({ code: SUBAGENT_READONLY })
+  })
+
+  it('治理开启时其余写工具在子会话里仍 subagent-readonly（深度 1、2）', async () => {
+    const h = await boot()
+    const { id, snapshotId } = await seed(h)
+    const attempts: Array<[string, unknown]> = [
+      ['memory_forget', { ids: [id], reason: '子代理想删' }],
+      ['memory_snapshot', { action: 'restore', snapshotId }],
+      ['memory_confirm', { action: 'refresh', memoryId: id }],
+      ['memory_scan', {}],
+      ['memory_promote', { ids: [id] }],
+    ]
+    for (const [tool, args] of attempts) {
+      for (const depth of [1, 2]) expect(await h.call(tool, args, depth), `${tool}@${depth}`).toMatchObject({ code: SUBAGENT_READONLY })
     }
   })
 })

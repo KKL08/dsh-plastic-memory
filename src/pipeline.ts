@@ -29,6 +29,17 @@ export interface SaveCandidate {
   force?: boolean
 }
 
+/**
+ * 子 agent 会话的委派上下文：深度、直接父会话取自宿主 header，根会话沿父链解析（解析不到缺省），
+ * mode 现读宿主 subagent 投影、不落盘。只来自宿主，不来自工具参数；主会话没有这一块。
+ */
+export interface SaveDelegation {
+  depth: number
+  parentSessionId: string
+  rootSessionId?: string
+  mode: 'one-shot' | 'continuable'
+}
+
 export type PipelineResult =
   | { kind: 'saved'; record: MemoryRecord; warnings?: SaveWarning[] }
   | { kind: 'updated'; record: MemoryRecord; warnings?: SaveWarning[] }
@@ -112,6 +123,8 @@ export async function runSavePipeline(
     decisions?: PendingDecisionsStore
     /** 这次 memory_save 的工具调用 id，记进撤销记录，对话卡按它认领。 */
     callId?: string
+    /** 子 agent 会话的委派上下文；新建的记录据此带 delegation（待确认）。 */
+    delegation?: SaveDelegation
   },
 ): Promise<PipelineResult> {
   const { store, registry, session } = deps
@@ -255,6 +268,11 @@ export async function runSavePipeline(
       validFrom: validity.validFrom, validTo: validity.validTo,
       status: 'active', confidence, supersedes: candidate.supersedes,
       globalCandidate,
+      // 子 agent 新建：创建者信息由宿主上下文填，不带 reviewed 即待确认（mode 不落盘）
+      delegation: deps.delegation && {
+        sessionId: session.id, depth: deps.delegation.depth, parentSessionId: deps.delegation.parentSessionId,
+        rootSessionId: deps.delegation.rootSessionId,
+      },
     }
   }
   const parsed = memoryRecordSchema.safeParse(record)

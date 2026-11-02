@@ -3,13 +3,15 @@ import type { MemoryStore } from '../store.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
 import type { PendingDecisionsStore } from '../governance/decisions.ts'
-import { runSavePipeline, type PipelineResult, type SaveCandidate } from '../pipeline.ts'
+import { runSavePipeline, type PipelineResult, type SaveCandidate, type SaveDelegation } from '../pipeline.ts'
 
 /** memory_save 运行时需要的会话上下文，由框架绑定层的 resolveContext 提供。 */
 export interface SaveContext {
   workspacePath: string | undefined
   /** turnStartSeq 是证据锚的起点（当轮 turn/start 的 seq）；缺省时管线回退整会话锚。 */
   session: { id: string; lastSeq: number; turnStartSeq?: number }
+  /** 子 agent 会话（delegationDepth ≥ 1）才有，由宿主 header 与投影填；主会话缺省。 */
+  delegation?: SaveDelegation
 }
 
 /** memory_save 的入参：schema 里 tags 可选，落库前归一化成 SaveCandidate（tags 必填）。 */
@@ -79,6 +81,8 @@ export async function executeSave(
     snapshots: deps.snapshots,
     decisions: deps.decisions,
     callId: String(exec.callId ?? ''),
+    // 委派信息只从上下文来：args 里同名字段不进候选、也不传到这里
+    delegation: context.delegation,
   })
   if (result.kind === 'saved') deps.onSaved?.(context.session.id, result.record.id)
   return result
