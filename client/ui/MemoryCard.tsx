@@ -3,6 +3,7 @@
  * 第一行记忆原文，左边 2px 银藤竖线；第二行元信息：类型是浅灰胶囊（类型可自定义，配不了各自的图标），
  * 作用域、来源、时间各带一个宿主图标，不再用点分隔。来源图标只分是谁：你、agent、环境，无出处不画。
  * 元信息行只放属性，状态和结果放在卡片下面的建议区、结果行（Advice.tsx）。不套外框和阴影；已过期的原文改次文字色，元信息加「不再带入对话」。
+ * 子 agent 写入的记忆在时间后面写第几层、待确认还是谁升的档，和「不再带入对话」一样是次文字，不另配颜色和图标。
  * 记忆文字进视图前服务端已遮盖密钥片段，这里原样显示。
  */
 import type { MemoryCard as MemoryCardData } from '../../src/gui/contract.ts'
@@ -44,6 +45,7 @@ export function MemoryCard({ memory, now, typeLabel, hideScope = false, projectN
         {hideScope ? null : memory.scope === 'global' ? item('globe', t('scope.global')) : item('folder', projectName ?? t('scope.workspace'))}
         {item(memory.sourceMode === undefined ? undefined : SOURCE_ICON[memory.sourceMode], t(memory.sourceMode === undefined ? 'source.none' : `source.${memory.sourceMode}`))}
         {item('clock', formatDay(memory.updatedAt, now, t))}
+        {memory.delegation === undefined ? null : item(undefined, t(`memory.delegated.${memory.delegation.reviewed ?? 'pending'}`, { depth: memory.delegation.depth }))}
         {expired ? <span className="pm-mc-item">{t('memory.expired')}</span> : null}
       </div>
     </div>
