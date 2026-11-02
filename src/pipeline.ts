@@ -354,10 +354,10 @@ export async function runSavePipeline(
       // 内容由本次会话重写，出处随之对应：清除手编标记（pruneUndefined 剔键）
       handEdited: undefined,
       // 创建者四个字段永不改。子 agent 改写：内容仍是子级写的，reviewed 一律去掉（回到待确认）；
-      // 主会话改写：原样继承，升档时补 reviewed 的处理放在这一支
+      // 主会话改写待确认记录即升档：reviewed 缺省时补 main，已有的（用户改过、早先接受过）不动
       delegation: deps.delegation
         ? target!.delegation && { ...target!.delegation, reviewed: undefined }
-        : target!.delegation,
+        : target!.delegation && { ...target!.delegation, reviewed: target!.delegation.reviewed ?? { by: 'main', at: now } },
     }
   } else {
     record = {

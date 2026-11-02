@@ -1069,4 +1069,52 @@ describe('runSavePipeline：子 agent 写入约束', () => {
     expect(r).toEqual({ kind: 'duplicate-suspected', existing: [{ id: 'mem_peer', summary: 'mem_peer 旧摘要' }] })
     expect(renderSaveResult(r)).toContain('force=true')
   })
+
+  describe('主会话处理待确认记录', () => {
+    const NOW = 7_000_000
+    beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(NOW) })
+    afterEach(() => { vi.useRealTimers() })
+    const CREATOR = { sessionId: CHILD.id, depth: 1, parentSessionId: 'sess-main', rootSessionId: 'sess-main' }
+    const mainUpdate = (id: string) => candidate({ action: 'update', id, type: 'knowledge', scope: 'workspace', sourceMode: 'agent-inferred', content: '主会话改写后的内容' })
+
+    it('update 待确认记录即接受：reviewed 补 main 与当前时间，创建者四个字段原样，证据锚换成主会话这次的', async () => {
+      const store = new MemoryStore(new InMemoryTable())
+      await store.put(owned('mem_p', 'self'))
+      const r = await runSavePipeline(mainUpdate('mem_p'), deps(store))
+      if (r.kind !== 'updated') throw new Error(r.kind)
+      expect(r.record.delegation).toEqual({ ...CREATOR, reviewed: { by: 'main', at: NOW } })
+      expect(r.record.source).toEqual({ sessionId: 's1', eventRange: [0, 42], sourceMode: 'agent-inferred' })
+      expect((await store.get('mem_p'))!.delegation).toEqual(r.record.delegation)
+    })
+
+    it('目标已接受的 reviewed 不动：用户改过的不被 main 覆写，主会话早先接受的保留原时刻', async () => {
+      const cases: Array<{ by: 'user' | 'main'; at: number }> = [{ by: 'user', at: 3 }, { by: 'main', at: 5 }]
+      for (const reviewed of cases) {
+        const store = new MemoryStore(new InMemoryTable())
+        await store.put({ ...owned('mem_p', 'self'), delegation: { ...CREATOR, reviewed } })
+        const r = await runSavePipeline(mainUpdate('mem_p'), deps(store))
+        if (r.kind !== 'updated') throw new Error(r.kind)
+        expect(r.record.delegation, reviewed.by).toEqual({ ...CREATOR, reviewed })
+      }
+    })
+
+    it('主会话自己的记录 update 后仍不带 delegation', async () => {
+      const store = new MemoryStore(new InMemoryTable())
+      await store.put(owned('mem_main', 'main'))
+      const r = await runSavePipeline(mainUpdate('mem_main'), deps(store))
+      if (r.kind !== 'updated') throw new Error(r.kind)
+      expect(r.record.delegation).toBeUndefined()
+    })
+
+    it('supersedes 待确认记录照旧：目标置 superseded，创建者信息不动、仍未接受', async () => {
+      const store = new MemoryStore(new InMemoryTable())
+      const before = owned('mem_p', 'self')
+      await store.put(before)
+      const r = await runSavePipeline(candidate({ type: 'knowledge', scope: 'workspace', name: '新说法', content: '完全不同的新说法', supersedes: ['mem_p'] }), deps(store))
+      expect(r.kind).toBe('saved')
+      const old = (await store.get('mem_p'))!
+      expect(old.status).toBe('superseded')
+      expect(old.delegation).toEqual(before.delegation)
+    })
+  })
 })
