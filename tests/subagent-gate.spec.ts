@@ -161,7 +161,7 @@ describe('子 agent 只读门', () => {
     expect(subagentModeOf(throwing, session).fallback).toContain('projection exploded')
   })
 
-  it('depth 为 1 时 memory_save 以外的写工具返回 subagent-readonly，磁盘零变化；search、source、快照组装照常', async () => {
+  it('depth 为 1 时 memory_save 以外的写工具返回 subagent-readonly，磁盘零变化；search、source、快照组装不经这道门', async () => {
     const h = await boot()
     const { id, snapshotId } = await seed(h)
     const before = await treeSnapshot(h.memoryRoot)
@@ -184,7 +184,9 @@ describe('子 agent 只读门', () => {
 
     const search = await h.call('memory_search', { query: 'zebra' }, 1) as { hits: Array<{ id: string }> }
     expect(search.hits.map(x => x.id)).toEqual([id])
-    expect(await h.call('memory_source', { memoryId: id }, 1)).toMatchObject({ kind: 'ok', memoryId: id })
+    // source 不经只读门；出处在主会话的记录由溯源自己的会话限制拒绝（委派信息经注册处的 resolveContext 带到）
+    expect(await h.call('memory_source', { memoryId: id }, 1)).toMatchObject({ kind: 'rejected', code: 'subagent-restricted', memoryId: id })
+    expect(await h.call('memory_source', { memoryId: id })).toMatchObject({ kind: 'ok', memoryId: id })
     expect(await h.call('memory_health', {}, 1)).not.toMatchObject({ code: SUBAGENT_READONLY })
     expect(await h.assemble(1)).toContain(`[${id}] 子代理门探针`)
   })

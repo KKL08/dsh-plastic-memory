@@ -4,7 +4,7 @@ import { executeSource, renderSourceResult, type SourceToolDeps, type SourceResu
 import { toToolOutput } from './output.ts'
 
 export interface SourceToolBindingDeps extends SourceToolDeps {
-  resolveContext: (exec: ToolRunContext) => Promise<{ workspacePath: string | undefined }>
+  resolveContext: (exec: ToolRunContext) => Promise<Parameters<typeof executeSource>[1]>
 }
 
 /**
@@ -24,7 +24,7 @@ export function createSourceTool(deps: SourceToolBindingDeps): ToolDefinition {
     ].join(''),
     parameters: {
       memoryId: { type: 'string', required: true, description: '要回查的记忆 id（快照/搜索结果里的 mem_ 开头 id）' },
-      window: { type: 'number', description: '从记忆产生的当轮起点向后读取的事件条数，缺省覆盖当轮对话，上限 24' },
+      window: { type: 'number', description: '读取的事件条数，缺省覆盖记忆产生的当轮对话，上限 24' },
     },
     output: {
       schema: { type: 'json' },
