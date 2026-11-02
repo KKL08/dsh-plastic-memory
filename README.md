@@ -297,7 +297,7 @@ template: scene-mh2k9x
 
 ```bash
 pnpm install --frozen-lockfile
-pnpm typecheck && pnpm test && pnpm build
+pnpm typecheck && pnpm lint && pnpm test && pnpm build
 pnpm host:smoke      # 把打包产物装进全新的 dsh 宿主，验证安装与加载（无需 API Key）
 pnpm host:contract   # 在该宿主里驱动九个工具，验证宿主契约（无需 API Key；提供 Key 时额外运行语义层两项）
 ```

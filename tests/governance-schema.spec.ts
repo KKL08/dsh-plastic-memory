@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  genId, pendingDecisionSchema, memorySnapshotSchema, findingSchema,
+  genId, pendingDecisionSchema, memorySnapshotSchema,
   scanCacheSchema, SEVERITY_BY_TYPE, FINDING_TYPES,
 } from '../src/governance/schema.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'

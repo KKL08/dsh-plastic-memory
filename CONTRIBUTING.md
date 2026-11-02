@@ -15,10 +15,14 @@ pinned in `package.json` → `packageManager`; `corepack enable` picks it up).
 git clone https://github.com/KKL08/dsh-plastic-memory.git
 cd dsh-plastic-memory
 pnpm install --frozen-lockfile
-pnpm typecheck && pnpm test && pnpm build
+pnpm typecheck && pnpm lint && pnpm test && pnpm build
 ```
 
 `pnpm build` compiles `src/` to `lib/` (git-ignored; that is what npm ships).
+`pnpm lint` runs oxlint. One rule is project-specific: files outside the
+binding layer (`src/index.ts`, `src/tools/*-tool.ts`, `src/domain-spec.ts`) may
+only `import type` from the `@deepseek-ai/*` packages, so the pure logic stays
+unit-testable without a host.
 Dev dependencies, including the `@deepseek-ai/*` host packages, come from npm at
 the exact versions the plugin is built against — no checkout of the host is
 needed.

@@ -1,0 +1,38 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": [],
+  "categories": {
+    "correctness": "error"
+  },
+  "env": {
+    "builtin": true
+  },
+  "rules": {
+    "no-unused-vars": ["error", { "ignoreRestSiblings": true, "argsIgnorePattern": "^_", "varsIgnorePattern": "^_", "caughtErrorsIgnorePattern": "^_" }],
+    "no-restricted-imports": ["error", {
+      "patterns": [{
+        "group": ["@deepseek-ai/*"],
+        "allowTypeImports": true,
+        "message": "纯逻辑层只能 import type 框架包；运行时依赖只在绑定层（src/index.ts、src/tools/*-tool.ts、src/domain-spec.ts）"
+      }]
+    }]
+  },
+  "ignorePatterns": [
+    "lib/**",
+    "node_modules/**",
+    "coverage/**",
+    "e2e/**",
+    "docs/**",
+    "**/*.config.ts"
+  ],
+  "overrides": [
+    {
+      "files": ["src/index.ts", "src/tools/*-tool.ts", "src/domain-spec.ts", "client/**", "tests/**", "scripts/**"],
+      "rules": { "no-restricted-imports": "off" }
+    },
+    {
+      "files": ["tests/**", "client/**/*.spec.tsx"],
+      "rules": { "no-unsafe-optional-chaining": "off" }
+    }
+  ]
+}

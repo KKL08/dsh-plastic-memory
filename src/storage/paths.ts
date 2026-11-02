@@ -48,7 +48,7 @@ export function isWorkspaceDirName(dirName: string): boolean {
 export function slugifyName(name: string): string {
   // 截断后再去一次尾部连字符：slice 可能恰好落在分隔符位而重新露出 '-'，不去掉则 slug
   // 不幂等（slug(slug(x)) !== slug(x)）且文件名以 '-' 结尾。
-  const s = name.trim().replace(/[\/\\:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/g, '')
+  const s = name.trim().replace(/[/\\:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/g, '')
   // 以 ._ / .# 开头的名字去掉开头的点：同伴生文件形态的文件解析不出时读侧静默跳过，用户手编坏了就无从发现。
   // 去点后以 _ / # 开头，不会再命中这条，也不露出新的连字符，幂等不变。
   const t = isCompanionLikeFileName(s) ? s.slice(1) : s

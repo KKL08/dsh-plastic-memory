@@ -12,7 +12,7 @@ import {
   type DeletedView, type GuiLayerRef, type LibraryView, type PendingView,
 } from '../src/gui/contract.ts'
 import { useGateway, type ViewState } from './gateway.ts'
-import { formatNumber, useT, type Translate } from './i18n.tsx'
+import { formatNumber, useT } from './i18n.tsx'
 import {
   ALL_SCOPE, MEMORY_VIEWS, allScopesSub, compareLayers, isInScope, samePageScope, scopeName, useCanOpen, useNavTarget,
   type MemoryView, type NavStore, type NavTarget, type PageScope,

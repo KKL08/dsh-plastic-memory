@@ -12,7 +12,6 @@ import { createSystemMessage, createUserMessage, type MessageSourceMap, type Use
 
 // 真实 dsh-tools / dsh-storage-domain 包已从 npm 装好，此处不 mock 任何框架包。
 import { apply, Config, inject } from '../src/index.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import { SidecarStore, STATE_DIR, KV_IMPORT_MARKER, RECALL_STATS_FILE } from '../src/storage/sidecar.ts'
 import { kvImportMarkerSchema } from '../src/storage/schema.ts'
 import { WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
@@ -23,8 +22,7 @@ import { record } from './helpers/record.ts'
 import { MemoryStore } from '../src/store.ts'
 import { overflowLevel } from '../src/snapshot.ts'
 import { SNAPSHOT_SOURCE_KIND, lastVisibleSnapshot, snapshotTextOf } from '../src/snapshot-message.ts'
-import { FileTable } from '../src/storage/file-table.ts'
-import { buildTypeRegistry, BUILTIN_TYPES, PRESET_SCENES } from '../src/type-registry.ts'
+import { BUILTIN_TYPES, PRESET_SCENES } from '../src/type-registry.ts'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { cacheKey } from '../src/tools/scan.ts'
 import { IN_SNAPSHOT_NOTE } from '../src/tools/search.ts'

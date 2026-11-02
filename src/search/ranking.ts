@@ -141,7 +141,7 @@ const HAS_ALNUM = /[\p{L}\p{N}]/u
 // 《分片上传》、`node:sqlite`、（0.2.1-rc.2）、分片上传，断点续传。和空白一样当分隔
 const WORD_SEPARATORS = /[\s《》〈〉「」『』【】〔〕〖〗［］（）｛｝“”‘’`，。、；：！？…—]+/u
 // 整词首尾的半角句读、括号与引号是行文带进来的：「怎么办?」「(0.2.1-rc.2)」先剥掉再判断
-const EDGE_OPEN = /^[(\[{"']+/u
+const EDGE_OPEN = /^[([{"']+/u
 const EDGE_CLOSE = /^[)\]}"'.,;!?:]$/u
 const OPENER: Readonly<Record<string, string>> = { ')': '(', ']': '[', '}': '{' }
 

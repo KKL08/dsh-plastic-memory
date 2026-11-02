@@ -297,7 +297,7 @@ Adjust `plastic-memory` settings in the profile's `cordis.patch.yml`:
 
 ```bash
 pnpm install --frozen-lockfile
-pnpm typecheck && pnpm test && pnpm build
+pnpm typecheck && pnpm lint && pnpm test && pnpm build
 pnpm host:smoke      # Install the build artifact into a clean dsh host to verify installation and loading (no API key required)
 pnpm host:contract   # Run all nine tools against the host to verify contract compliance (no API key required; with a key, two additional semantic-layer checks run)
 ```
