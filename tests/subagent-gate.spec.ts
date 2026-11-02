@@ -326,3 +326,50 @@ describe('子 agent 写入随治理开关', () => {
     }
   })
 })
+
+describe('memory_confirm accept-subagent 经注册处', () => {
+  /** 子会话存一条待确认记录，返回它的 id。 */
+  async function childSaved(h: Awaited<ReturnType<typeof boot>>) {
+    const out = await h.call('memory_save', childSaveArgs('子代理观察', '子代理看到 `vitest` 跑得动'), 1) as Saved
+    expect(out.kind).toBe('saved')
+    return out.record.id
+  }
+
+  it('子会话（深度 1、2）调 accept-subagent 回 subagent-readonly，磁盘不动', async () => {
+    const h = await boot()
+    const id = await childSaved(h)
+    const before = await treeSnapshot(h.memoryRoot)
+    for (const depth of [1, 2]) {
+      expect(await h.call('memory_confirm', { action: 'accept-subagent', memoryId: id }, depth), `depth ${depth}`).toMatchObject({ kind: 'rejected', code: SUBAGENT_READONLY })
+    }
+    expect(await treeSnapshot(h.memoryRoot)).toEqual(before)
+    expect(isPendingDelegated((await readBack(h.memoryRoot, id)).record)).toBe(true)
+  })
+
+  it('主会话接受后文件里 reviewed 记 main、创建者不变；再 update scope global 照旧进提升候选', async () => {
+    const h = await boot()
+    const id = await childSaved(h)
+    const accepted = await h.call('memory_confirm', { action: 'accept-subagent', memoryId: id }) as { kind: string; message: string }
+    expect(accepted.kind).toBe('accepted')
+    expect(h.defs.get('memory_confirm')!.output.render({}, accepted)[0]!.text).toBe(accepted.message)
+    const { record } = await readBack(h.memoryRoot, id)
+    expect(record.delegation).toMatchObject({ sessionId: 'sess-d1', depth: 1, parentSessionId: 'sess-main', reviewed: { by: 'main' } })
+    expect(isPendingDelegated(record)).toBe(false)
+
+    const updated = await h.call('memory_save', { ...saveArgs('子代理观察', '子代理看到 `vitest` 跑得动'), action: 'update', id, scope: 'global', force: false }) as Saved & { warnings?: Array<{ code: string }> }
+    expect(updated.kind).toBe('updated')
+    expect(updated.warnings?.map(w => w.code)).toEqual(['update-global-candidate'])
+    const after = (await readBack(h.memoryRoot, id)).record
+    expect(after).toMatchObject({ scope: 'workspace', globalCandidate: true })
+    expect(after.delegation).toEqual(record.delegation)
+  })
+
+  it('工具说明三个动作各一句，action 枚举含 accept-subagent', async () => {
+    const h = await boot()
+    const def = h.defs.get('memory_confirm')! as ToolDef & { parameters: { properties: { action: { enum: string[] } } } }
+    expect(def.parameters.properties.action.enum).toEqual(['refresh', 'resolve', 'accept-subagent'])
+    expect(def.description).toContain('action=refresh 确认某条记忆仍然准确')
+    expect(def.description).toContain('action=resolve 裁决 memory_scan 发现的待决冲突')
+    expect(def.description).toContain('action=accept-subagent 接受子 agent 存的待确认记忆，接受后和本项目其他记忆一样注入、检索')
+  })
+})
