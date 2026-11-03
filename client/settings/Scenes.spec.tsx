@@ -483,6 +483,13 @@ describe('通用、预设类型', () => {
     expect(button('编辑 决定')).toHaveFocus()
   })
 
+  it('删场景时取消：焦点回到这张场景卡的「删除」', () => {
+    setup()
+    fireEvent.click(button('删除场景 编码'))
+    fireEvent.click(button('取消', radio('编码').closest('li')!))
+    expect(button('删除场景 编码')).toHaveFocus()
+  })
+
   it('场景弹层里删类型：取消回到这一行的「删除」，删掉后落到「新建类型」', () => {
     setup({ value: { customTypes: { term }, scenes: { coding: { label: '编码', types: [...GENERAL, 'term'] }, office: { label: '办公', types: [...GENERAL, 'decision'] } } } })
     fireEvent.click(button('编辑场景 编码'))

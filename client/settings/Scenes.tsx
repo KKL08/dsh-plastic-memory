@@ -146,7 +146,7 @@ export function SceneSection({ fields, saved, migrations, counts, canMigrate, di
                     question={t(isSelected ? 'settings.scene.removeCurrent' : 'settings.scene.removeQuestion', { name })}
                     actions={[{ label: t('settings.scene.removeConfirm'), onClick: () => { removeScene(sceneId) } }]}
                     cancelLabel={t('settings.scene.cancel')}
-                    onCancel={() => { setRemoving(undefined) }}
+                    onCancel={() => { setRemoving(undefined); focusNext(`remove:scene:${sceneId}`) }}
                   />
                 )
                 : (
@@ -161,7 +161,7 @@ export function SceneSection({ fields, saved, migrations, counts, canMigrate, di
                       : null}
                     <Button variant="quiet" disabled={disabled} aria-label={t('settings.scene.editAria', { name })}
                       onClick={() => { openDialog({ kind: 'scene', id: sceneId }) }}>{t('settings.scene.edit')}</Button>
-                    <Button variant="quiet" disabled={disabled} aria-label={t('settings.scene.removeAria', { name })}
+                    <Button variant="quiet" disabled={disabled} aria-label={t('settings.scene.removeAria', { name })} {...focusKey(`remove:scene:${sceneId}`)}
                       onClick={() => { setRemoving({ kind: 'scene', id: sceneId }) }}>{t('settings.scene.remove')}</Button>
                   </>
                 )}
