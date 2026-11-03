@@ -374,24 +374,41 @@ describe('子 agent 记忆的生命周期', () => {
     }
   }
 
-  /** 随机序列至少走到过的结果：子会话存入与改写自己的、主会话接受 / 改写 / 删除、用户直接改、维护回写、快照恢复真的写回了记录。 */
+  /** 每次都要查到的结果：子会话存入与改写自己的、主会话接受 / 改写 / 删除、用户直接改、维护回写、快照恢复真的写回了记录。 */
   const REACHED = [
     'child-save:saved', 'child-update:updated', 'child-accept:rejected', 'child-forget:rejected',
     'main-accept:accepted', 'main-update:updated', 'main-forget:true', 'user-edit:success', 'maintain:rewritten', 'restore:restored-true',
   ]
+  /** 依次走到 REACHED 每种结果的固定序列，两条不变量每次都先查它，再查随机序列；随机碰到快照恢复写回的概率只有约 2%，不能靠它凑。 */
+  const KNOWN: Op[] = [
+    { kind: 'child-save', who: 1 },
+    { kind: 'child-update', who: 1, target: 0 },
+    { kind: 'child-accept', who: 1, target: 0 },
+    { kind: 'child-forget', who: 1, target: 0 },
+    { kind: 'snapshot' },
+    { kind: 'main-update', target: 0 },
+    { kind: 'restore', snap: 0, overwrite: true },
+    { kind: 'main-accept', target: 0 },
+    { kind: 'user-edit', target: 0 },
+    { kind: 'maintain', target: 0 },
+    { kind: 'main-forget', target: 0 },
+  ]
+  /** 随机序列照旧 200 条；examples 算在 numRuns 里，所以加上固定序列的条数。 */
+  const runs = { numRuns: 201, examples: [[KNOWN]] as [Op[]][] }
+  const outcomesOf = (sequence: Op[], known: Set<string>) => (sequence === KNOWN ? known : new Set<string>())
 
   // INVARIANT：没有主会话或用户参与的操作，不会让任何记录从待确认变成主档——操作后已升档的子 agent 记录，操作前就已升档、升档信息不变。
   it('无人参与的操作不会把待确认记录升成主档', async () => {
     const outcomes = new Set<string>()
     await fc.assert(fc.asyncProperty(ops, async sequence => {
-      await runSequence(sequence, outcomes, (op, before, after) => {
+      await runSequence(sequence, outcomesOf(sequence, outcomes), (op, before, after) => {
         if (!isUnattended(op)) return
         for (const [id, { record }] of after) {
           if (record.delegation === undefined || isPendingDelegated(record)) continue
           expect(before.get(id)?.record.delegation?.reviewed, `${op.kind} 让 ${id} 升了档`).toEqual(record.delegation.reviewed)
         }
       })
-    }), { numRuns: 200 })
+    }), runs)
     expect([...outcomes]).toEqual(expect.arrayContaining(REACHED))
   }, 120_000)
 
@@ -403,7 +420,7 @@ describe('子 agent 记忆的生命周期', () => {
     }
     await fc.assert(fc.asyncProperty(ops, async sequence => {
       const creators = new Map<string, unknown>()
-      await runSequence(sequence, outcomes, (op, _before, after) => {
+      await runSequence(sequence, outcomesOf(sequence, outcomes), (op, _before, after) => {
         for (const [id, { record }] of after) {
           if (!creators.has(id)) {
             if (record.delegation !== undefined) creators.set(id, creatorOf(record))
@@ -412,7 +429,7 @@ describe('子 agent 记忆的生命周期', () => {
           expect(creatorOf(record), `${op.kind} 改了 ${id} 的创建者`).toEqual(creators.get(id))
         }
       })
-    }), { numRuns: 200 })
+    }), runs)
     expect([...outcomes]).toEqual(expect.arrayContaining(REACHED))
   }, 120_000)
 })
