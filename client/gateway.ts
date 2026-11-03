@@ -550,6 +550,8 @@ export function createHostGateway(ctx: HostContext): BindGateway {
    * 每个文件只留最近一次触发；读失败的不留，下一个来读的再试。
    */
   const viewReads = new Map<string, { trigger: string; result: Promise<ViewState<unknown>> }>()
+  /** 每个视图文件最近读到的可用内容：后挂上的（切视图、换范围时重挂的列表）第一帧就拿它画，不先闪读取中，同时照常按当前版本读。 */
+  const lastReads = new Map<string, ReadState<unknown>>()
   const readView = <N extends ViewName>(sessionId: string, path: string, trigger: string, name: N): Promise<ViewState<ViewMap[N]>> => {
     const cached = viewReads.get(path)
     if (cached?.trigger === trigger) return cached.result as Promise<ViewState<ViewMap[N]>>
@@ -559,6 +561,8 @@ export function createHostGateway(ctx: HostContext): BindGateway {
         : r.error.code === 'workspace-file/not-found' ? { status: 'missing' } : { status: 'error', message: `${r.error.code}: ${r.error.message}` }
       if (view.status === 'ready' && name === 'deleted') deletions.settle({ name, data: view.data as DeletedView })
       if (view.status === 'ready' && name === 'library') deletions.settle({ name, data: view.data as LibraryView })
+      if (view.status === 'ready') lastReads.set(path, { key: path, trigger, view })
+      else lastReads.delete(path)
       return view
     }, (err: unknown): ViewState<ViewMap[N]> => ({ status: 'error', message: String(err) }))
     const entry = { trigger, result: result as Promise<ViewState<unknown>> }
@@ -606,7 +610,7 @@ export function createHostGateway(ctx: HostContext): BindGateway {
       // 资源还停在 not-found、但 refresh-views 已写过文件时，按刷新次数直接读一次；宿主之后未必再推版本，命令成功后同样重读
       const commands = useSyncExternalStore(subscribeSucceeded, getSucceeded)
       const trigger = version !== undefined ? `${version}#${rootState.refreshes}#${commands}` : isMissing && rootState.refreshes > 0 ? `refresh:${rootState.refreshes}#${commands}` : undefined
-      const [read, setRead] = useState<ReadState<ViewMap[N]> | undefined>(undefined)
+      const [read, setRead] = useState(() => (path === undefined ? undefined : lastReads.get(path)) as ReadState<ViewMap[N]> | undefined)
       const isStillMissing = isMissing && trigger !== undefined && read?.key === key && read.trigger === trigger && read.view.status === 'missing'
       useEffect(() => { if (!isPassive && sessionId !== undefined && isStillMissing) root.revalidate(sessionId) }, [isPassive, sessionId, isStillMissing])
       // 版本不认识（旧插件写的、或刷新前留下的）：refresh-views 只重写四个全局视图和体检视图，这几个请服务端重写一次，
