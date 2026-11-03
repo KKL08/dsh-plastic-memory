@@ -296,6 +296,13 @@ function typeLabels(registry: TypeRegistry, present: Iterable<string | undefined
   return Object.fromEntries([...types].map(name => [name, registry.get(name).label]))
 }
 
+/** 类型组的顺序：当前场景按注册表顺序，视图里出现的其他类型按 id 排在后面。 */
+function typeOrder(registry: TypeRegistry, present: Iterable<string>): string[] {
+  const scene = registry.all().map(t => t.name)
+  const others = [...new Set(present)].filter(name => !scene.includes(name)).sort()
+  return [...scene, ...others]
+}
+
 /** 扣分原因在待处理里对应的组（按它在待处理里以哪种待处理项出现）：读不出的文件即隔离区的 malformed，冲突走账本，其余是建议整理。 */
 const ISSUE_LEVEL = {
   secret: PENDING_LEVEL_OF_KIND['secret'],
@@ -446,14 +453,15 @@ export function buildLibraryView(input: ViewInput): LibraryView {
   const directoryIssues = [...input.listingNotes, ...input.data.directoryNotes]
     .filter(n => n.code !== 'dir-empty')
     .map(n => ({ code: n.code, path: n.path, ...(n.keys !== undefined ? { keys: n.keys } : {}), ...(n.keptPath !== undefined ? { keptPath: n.keptPath } : {}) }))
-  const typeLabelsOfView = typeLabels(input.registry, layers.flatMap(l => l.items.map(m => m.type)))
+  const presentTypes = layers.flatMap(l => l.items.map(m => m.type))
+  const typeLabelsOfView = typeLabels(input.registry, presentTypes)
   // byId 每个 id 一份（在用副本优先）：不在用的就是这个 id 没有在用副本
   const inactiveIds = [...input.data.byId.values()].filter(r => r.status !== 'active').map(r => r.id)
   const hasUnreadFiles = input.readLayers.some(l => (input.data.quarantined.get(layerCacheKey(l)) ?? []).length > 0)
     || directoryIssues.some(i => i.code === 'marker-missing' || i.code === 'dir-unreadable')
   return {
     version: GUI_VIEW_VERSION, generatedAt: input.now, memoryRoot: input.memoryRoot, layers, directoryIssues,
-    inactiveIds, hasUnreadFiles, typeLabels: typeLabelsOfView,
+    inactiveIds, hasUnreadFiles, typeLabels: typeLabelsOfView, typeOrder: typeOrder(input.registry, presentTypes),
     ...(input.modelChangeSnapshots !== undefined ? { modelChanges: modelChangesOf(input, input.modelChangeSnapshots) } : {}),
   }
 }
