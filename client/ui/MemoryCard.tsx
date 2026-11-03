@@ -6,6 +6,7 @@
  * 子 agent 写入的记忆在时间后面写第几层、待确认还是谁升的档，和「不再带入对话」一样是次文字，不另配颜色和图标。
  * 记忆文字进视图前服务端已遮盖密钥片段，这里原样显示。
  */
+import type { ReactNode } from 'react'
 import type { MemoryCard as MemoryCardData } from '../../src/gui/contract.ts'
 import { formatDay, useT } from '../i18n.tsx'
 import { Chip } from './Chip.tsx'
@@ -25,13 +26,17 @@ export interface MemoryCardProps {
   now: number
   /** 类型的显示名；视图只给类型 id，名字由调用方查（缺省显示 id）。 */
   typeLabel?: string
+  /** 页面已经交代过类型时不重复（记忆查看里按类型分的组）。 */
+  hideType?: boolean
   /** 页面已经交代过作用域时不重复（例如右侧栏里不写「本项目」）。 */
   hideScope?: boolean
+  /** 作用域的位置换成这个（「全部」里的下钻链接）；给了就不看 hideScope。 */
+  scopeSlot?: ReactNode
   /** 记忆不在借来的会话所在项目里时，作用域写这个项目名，不写「本项目」。 */
   projectName?: string | undefined
 }
 
-export function MemoryCard({ memory, now, typeLabel, hideScope = false, projectName }: MemoryCardProps) {
+export function MemoryCard({ memory, now, typeLabel, hideType = false, hideScope = false, scopeSlot, projectName }: MemoryCardProps) {
   const t = useT()
   const expired = memory.validTo !== undefined && memory.validTo <= now
   const item = (icon: IconName | undefined, text: string) => (
@@ -41,8 +46,8 @@ export function MemoryCard({ memory, now, typeLabel, hideScope = false, projectN
     <div className={expired ? 'pm-mc pm-mc--expired' : 'pm-mc'} data-memory-id={memory.id}>
       <p className="pm-mc-text">{memory.content}</p>
       <div className="pm-mc-meta">
-        <Chip variant="neutral">{typeLabel ?? memory.type}</Chip>
-        {hideScope ? null : memory.scope === 'global' ? item('globe', t('scope.global')) : item('folder', projectName ?? t('scope.workspace'))}
+        {hideType ? null : <Chip variant="neutral">{typeLabel ?? memory.type}</Chip>}
+        {scopeSlot !== undefined ? scopeSlot : hideScope ? null : memory.scope === 'global' ? item('globe', t('scope.global')) : item('folder', projectName ?? t('scope.workspace'))}
         {item(memory.sourceMode === undefined ? undefined : SOURCE_ICON[memory.sourceMode], t(memory.sourceMode === undefined ? 'source.none' : `source.${memory.sourceMode}`))}
         {item('clock', formatDay(memory.updatedAt, now, t))}
         {memory.delegation === undefined ? null : item(undefined, t(`memory.delegated.${memory.delegation.reviewed ?? 'pending'}`, { depth: memory.delegation.depth }))}

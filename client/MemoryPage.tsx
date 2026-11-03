@@ -5,8 +5,9 @@
  * 落点：不是入口打开的（点左栏图标、宿主恢复上次的面板）落在「全部」的处理视图；从对话进来没写范围的落在那个对话的项目，
  * 只说「去处理」而项目既没有待处理也没有可以整理时改落记忆查看。
  * 容器窄于 720px 时左栏收起，换成「范围」下拉和「其他范围还有 N 件待处理 ›」（两套都在 DOM 里，由容器查询切换）。
+ * 这次打开期间记着记忆查看、最近删除里各组的折叠状态和每个「范围|视图」滚到哪，离开记忆页就没了。
  */
-import { useEffect, useId, useLayoutEffect, useRef, useState, type ChangeEvent, type KeyboardEvent, type MutableRefObject, type ReactNode } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ChangeEvent, type KeyboardEvent, type MutableRefObject, type ReactNode, type RefObject } from 'react'
 import {
   layerOfMemory, pendingItemKey, pendingItemScopes, sameLayer, scopeKey,
   type DeletedView, type GuiLayerRef, type LibraryView, type PendingView,
@@ -29,6 +30,7 @@ import { Icon } from './ui/Icon.tsx'
 import { StatusMarker } from './ui/StatusMarker.tsx'
 import { DeletedTab, deletedTabCss } from './deleted/DeletedTab.tsx'
 import { LibraryTab, libraryTabCss } from './library/LibraryTab.tsx'
+import { groupsCss, type FoldMemory } from './library/groups.tsx'
 import { sharedTabCss } from './library/shared.tsx'
 import { SegmentedTabs, type SegmentedTab } from './ui/Segmented.tsx'
 
@@ -94,6 +96,16 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
   const entry = useLanding(nav)
   useChatLanding(nav, entry, target, resolved, pending)
   const canOpenSettings = useCanOpen(nav, 'settings')
+  const [fold] = useState<FoldMemory>(() => new Map())
+  const scroll = useScrollMemory(
+    resolved === undefined ? '' : `${target.view}|${scopeKey(resolved)}`,
+    target.memoryId !== undefined || target.level !== undefined || target.newItem !== undefined,
+  )
+  // 旧目标「全部」带着记忆（改版前的入口）：落到这条记忆自己的范围，查不到的留在「全部」
+  const ownScope = resolved?.kind === 'all' && target.view === 'library' && target.memoryId !== undefined
+    ? library?.layers.find(l => l.items.some(m => m.id === target.memoryId))?.layer
+    : undefined
+  useLayoutEffect(() => { if (ownScope !== undefined) nav.update({ scope: ownScope }) })
 
   if (session.kind === 'none') {
     return (
@@ -172,7 +184,7 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
             )
             : null}
         </aside>
-        <main className="pm-main">
+        <main ref={scroll.ref} className="pm-main" onScroll={scroll.onScroll}>
           <NarrowScope
             scopes={[ALL_SCOPE, ...scopes]}
             selected={scope}
@@ -223,9 +235,12 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
             {target.view === 'todo'
               // 按范围给 key：换范围就收起上一个范围刚处理的结果卡和说明
               ? <PendingTab key={scopeKey(scope)} nav={nav} session={session} scope={scope} seen={seen} workspacePath={scope.kind === 'workspace' ? scope.workspacePath : undefined} />
-              : target.view === 'library'
-                ? <LibraryTab nav={nav} scope={scope} session={session} />
-                : <DeletedTab nav={nav} scope={scope} session={session} />}
+              // 换范围同样重挂：搜索、刚删的结果行、直达高亮不跟过来；折叠状态在 fold 里，还在
+              : ownScope !== undefined
+                ? null
+                : target.view === 'library'
+                  ? <LibraryTab key={scopeKey(scope)} nav={nav} scope={scope} session={session} fold={fold} />
+                  : <DeletedTab key={scopeKey(scope)} nav={nav} scope={scope} session={session} fold={fold} />}
           </div>
         </main>
       </div>
@@ -250,6 +265,21 @@ function useLanding(nav: NavStore): MutableRefObject<NavTarget | undefined> {
     return drain
   }, [nav])
   return entry
+}
+
+/**
+ * 主区的滚动位置按「视图|范围」记：换过去时还原那里上次离开时的位置，没去过的从顶部开始（下钻后点左栏「全部」回到原处）。
+ * 带着记忆、组或「新」过来的不还原，滚动交给目标。离开时的位置在滚动时随手记下：换过去之后内容变短、浏览器收紧的那一下不算。
+ */
+function useScrollMemory(key: string, isJump: boolean): { ref: RefObject<HTMLElement>; onScroll: () => void } {
+  const ref = useRef<HTMLElement>(null)
+  const saved = useRef(new Map<string, number>())
+  const current = useRef(key)
+  current.current = key
+  useLayoutEffect(() => {
+    if (ref.current !== null && !isJump) ref.current.scrollTop = saved.current.get(key) ?? 0
+  }, [key])
+  return { ref, onScroll: () => { if (ref.current !== null) saved.current.set(current.current, ref.current.scrollTop) } }
 }
 
 /**
@@ -444,4 +474,4 @@ export const memoryPageCss = `
 .pm-tab-count { font-weight: 400; color: var(--pm-text-2); }
 .pm-page-panel { min-height: 0; }
 .pm-page-placeholder { margin: 24px 0; text-align: center; font-size: 12px; color: var(--pm-text-2); }
-` + titleControlsCss + statusBarCss + sharedTabCss + libraryTabCss + deletedTabCss
+` + titleControlsCss + statusBarCss + sharedTabCss + groupsCss + libraryTabCss + deletedTabCss

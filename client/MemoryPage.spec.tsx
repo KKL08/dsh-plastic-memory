@@ -346,6 +346,70 @@ describe('落点与旧导航目标', () => {
   })
 })
 
+describe('记忆查看：落点、折叠与滚动', () => {
+  const groupToggle = (title: string) => within(panel()).getByRole('button', { name: new RegExp(`^${title}\\d`) })
+  const main = () => document.querySelector<HTMLElement>('.pm-main')!
+  const scrollTo = (top: number) => { main().scrollTop = top; fireEvent.scroll(main()) }
+
+  it('旧目标「全部」带记忆：落到这条记忆所在的范围，高亮那一行；查不到的留在「全部」', () => {
+    const { nav } = open({ tab: 'library', memoryId: 'a2' })
+    expect(nav.get().scope).toEqual(APP)
+    expect(railRow('app')).toHaveAttribute('aria-current', 'true')
+    expect(within(panel()).getAllByRole('listitem').filter(li => li.classList.contains('pm-flash'))).toHaveLength(1)
+    cleanup()
+    const { nav: other } = open({ tab: 'library', memoryId: 'gone' })
+    expect(other.get().scope).toBeUndefined()
+    expect(railRow('全部')).toHaveAttribute('aria-current', 'true')
+  })
+
+  it('折叠状态切到处理再切回来、换范围再回来都还在；换范围清空搜索', () => {
+    open({ view: 'library', scope: APP })
+    fireEvent.click(groupToggle('preference'))
+    fireEvent.click(tab(/^处理/))
+    fireEvent.click(tab(/^记忆查看/))
+    expect(groupToggle('preference')).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.change(within(panel()).getByRole('searchbox', { name: '搜索记忆' }), { target: { value: '没有这种东西' } })
+    fireEvent.click(railRow('全局'))
+    fireEvent.click(railRow('app'))
+    expect(within(panel()).getByRole('searchbox', { name: '搜索记忆' })).toHaveValue('')
+    expect(groupToggle('preference')).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('换范围、切视图再回来，滚动位置还原；没来过的从顶部开始', () => {
+    open({ view: 'library', scope: APP })
+    scrollTo(300)
+    fireEvent.click(railRow('全局'))
+    expect(main().scrollTop).toBe(0)
+    scrollTo(50)
+    fireEvent.click(railRow('app'))
+    expect(main().scrollTop).toBe(300)
+    fireEvent.click(tab(/^最近删除/))
+    expect(main().scrollTop).toBe(0)
+    fireEvent.click(tab(/^记忆查看/))
+    expect(main().scrollTop).toBe(300)
+    fireEvent.click(railRow('全局'))
+    expect(main().scrollTop).toBe(50)
+  })
+
+  it('在「全部」点卡片上的范围名：落到那个范围的记忆查看，那一行高亮并接住焦点，不还原那个范围上次的滚动；点左栏「全部」回到原处', () => {
+    open({ view: 'library', scope: APP })
+    scrollTo(80)
+    fireEvent.click(railRow('全部'))
+    fireEvent.click(groupToggle('更早'))
+    scrollTo(200)
+    fireEvent.click(within(panel()).getAllByRole('button', { name: '到「app」查看这条' })[1]!)
+    expect(railRow('app')).toHaveAttribute('aria-current', 'true')
+    expect(tab(/^记忆查看/)).toHaveAttribute('aria-selected', 'true')
+    const flashing = within(panel()).getAllByRole('listitem').filter(li => li.classList.contains('pm-flash'))
+    expect(flashing).toHaveLength(1)
+    expect(flashing[0]).toHaveFocus()
+    expect(main().scrollTop).toBe(200)
+    fireEvent.click(railRow('全部'))
+    expect(main().scrollTop).toBe(200)
+    expect(groupToggle('更早')).toHaveAttribute('aria-expanded', 'true')
+  })
+})
+
 describe('窄屏', () => {
   const select = () => screen.getByRole('combobox', { name: '范围' })
 

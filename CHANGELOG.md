@@ -148,6 +148,15 @@ All notable changes to this project are documented here. The format follows
   `search.userDictionaryPath` in `cordis.patch.yml` still works. The
   per-type "Expires after (days)" field is now "Decay after (days)", since
   passing it only marks a memory as possibly outdated.
+- The memory view groups a project's or the global memories by type, in
+  the current scene's order, and shows the first three of each type with
+  the rest one click away. All lists memories by when they last changed:
+  the last 24 hours, 3 days, 7 days, and earlier (folded). Each card there
+  names its scope, which opens that scope with the memory highlighted.
+- Recently deleted is grouped by the day a memory was deleted: today, the
+  last 7 days, and earlier. While the memory page stays open, it keeps
+  which groups you folded and where you scrolled in each view and scope,
+  and switching views no longer flashes a loading line.
 
 ### Fixed
 - Turning plastic-memory off and back on in the plugin page left its

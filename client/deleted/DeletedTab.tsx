@@ -1,19 +1,21 @@
 /**
- * 「最近删除」：选中范围里 14 天内软删的记忆。搜索框 → 一行保留规则 → 列表，「全部」里按层分段。每行写何时删；裁决时删掉的标来源
+ * 「最近删除」：选中范围里 14 天内软删的记忆。搜索框 → 一行保留规则 → 列表，按删除那天分「今天 / 近 7 天 / 更早」三段，
+ * 都默认展开、不截断（截断会把快到期的藏起来），「全部」里卡片写范围名。每行写何时删；裁决时删掉的标来源
  * （「以「胜方名」为准时删除」，次文字色，不用颜色），下一行提示恢复后冲突会回到待处理。行尾「还能恢复 N 天 · 彻底删除… · 恢复」：
  * 恢复发 `/memory restore`；「彻底删除…」在行内确认一次，确认后发 `/memory hard-delete`，不等到期。
  * 密钥是物理删除，不在这里，空状态写明。
  */
 import { Fragment, useState } from 'react'
-import { layerOfMemory, type DeletedView, type LibraryView } from '../../src/gui/contract.ts'
+import { layerOfMemory, scopeKey, type DeletedView, type LibraryView } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
-import { formatDay, useT, type Translate } from '../i18n.tsx'
+import { baseName, formatDay, useT, type Translate } from '../i18n.tsx'
 import { isInScope, type NavStore, type PageScope } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { SecretDeleteConfirm } from '../pending/action.tsx'
-import { FlashRow, groupByLayer, LayerHeading, matchesQuery, SearchBox, useFlashTarget, useRowActions, useTypeLabel, ViewMessage } from '../library/shared.tsx'
+import { bucketize, DELETED_BUCKETS, deletedBucketOf, MemoryGroup, useFold, type FoldMemory } from '../library/groups.tsx'
+import { FlashRow, matchesQuery, SearchBox, useFlashTarget, useRowActions, useTypeLabel, ViewMessage } from '../library/shared.tsx'
 
 type DeletedItem = DeletedView['items'][number]
 
@@ -50,10 +52,12 @@ function leftLabel(purgeAt: number, now: number, t: Translate): string {
   return t(days === 1 ? 'deleted.left.days.one' : 'deleted.left.days', { n: days })
 }
 
-export function DeletedTab({ nav, scope, session, now = Date.now() }: {
+export function DeletedTab({ nav, scope, session, fold, now = Date.now() }: {
   nav: NavStore
   scope: PageScope
   session: BorrowedSession
+  /** 折叠状态：记忆页持有，这次打开期间保留；不给时用自己的一份。 */
+  fold?: FoldMemory
   now?: number
 }) {
   const t = useT()
@@ -63,21 +67,35 @@ export function DeletedTab({ nav, scope, session, now = Date.now() }: {
   const [query, setQuery] = useState('')
   const scopeItems = view.status === 'ready' ? view.data.items.filter(item => inScope(item, scope)) : []
   const items = scopeItems.filter(item => matchesQuery(item.memory, query))
-  const { flashId, clear } = useFlashTarget(nav, items.map(item => item.memory.id))
+  const { flashId, revealId, clear } = useFlashTarget(nav, items.map(item => item.memory.id))
   const actions = useRowActions(session)
   const typeLabel = useTypeLabel(session)
   /** 正在等彻底删除确认的那一行。 */
   const [confirming, setConfirming] = useState<string | undefined>(undefined)
+  const isSearching = query.trim() !== ''
+  const folds = useFold(fold, `deleted|${scopeKey(scope)}`, isSearching)
   if (view.status !== 'ready') return <ViewMessage state={view} />
   const names = memoryNames(library.status === 'ready' ? library.data : undefined, view.data)
+  // 高亮播完：目标所在的段记成展开，免得那一行在眼前缩回去
+  const endFlash = () => {
+    const target = items.find(item => item.memory.id === flashId)
+    if (target !== undefined) folds.remember(deletedBucketOf(target.deletedAt, now), { isOpen: true })
+    clear()
+  }
 
   const row = ({ memory, deletedAt, purgeAt, cause }: DeletedItem) => {
     const meta = [cause !== undefined ? causeLabel(cause, names, t) : t('deleted.label'), formatDay(deletedAt, now, t)]
     const unavailable = actions.unavailable(memory.id) ?? (confirming === memory.id ? t('action.busy') : undefined)
     return (
-      <FlashRow key={memory.id} className="pm-list-row" flashing={flashId === memory.id} onFlashEnd={clear}>
+      <FlashRow key={memory.id} className="pm-list-row" flashing={flashId === memory.id} onFlashEnd={endFlash}>
         <div className="pm-del-body">
-          <MemoryCard memory={memory} now={now} typeLabel={typeLabel(memory.type)} hideScope />
+          <MemoryCard
+            memory={memory}
+            now={now}
+            typeLabel={typeLabel(memory.type)}
+            hideScope={scope.kind !== 'all'}
+            projectName={memory.workspacePath === undefined ? undefined : baseName(memory.workspacePath)}
+          />
           <p className="pm-del-meta">
             {meta.map((text, i) => (
               <Fragment key={i}>
@@ -132,14 +150,26 @@ export function DeletedTab({ nav, scope, session, now = Date.now() }: {
         ? scopeItems.length > 0
           ? <EmptyState variant="daily" title={t('deleted.search.none')} />
           : <EmptyState variant="daily" title={t('deleted.empty.title')}>{t('deleted.empty.body')}</EmptyState>
-        : scope.kind === 'all'
-          ? groupByLayer(items, item => item.memory).map(section => (
-            <section key={section.layer.kind === 'global' ? 'global' : section.layer.workspacePath} className="pm-del-section">
-              <LayerHeading layer={section.layer} count={section.items.length} />
-              <ul className="pm-list">{section.items.map(row)}</ul>
-            </section>
-          ))
-          : <ul className="pm-list">{items.map(row)}</ul>}
+        : (
+          <div className="pm-memgroups">
+            {bucketize(items, DELETED_BUCKETS, item => deletedBucketOf(item.deletedAt, now)).map(({ key, items: rows }) => {
+              const isRevealing = rows.some(item => item.memory.id === revealId)
+              const isOpen = isRevealing || folds.isOpen(key, true)
+              return (
+                <MemoryGroup
+                  key={key}
+                  title={t(`deleted.when.${key}`)}
+                  count={rows.length}
+                  now={now}
+                  isOpen={isOpen}
+                  onToggle={() => { if (isRevealing) clear(); folds.toggle(key, isOpen) }}
+                >
+                  {rows.map(row)}
+                </MemoryGroup>
+              )
+            })}
+          </div>
+        )}
     </div>
   )
 }
@@ -153,5 +183,4 @@ export const deletedTabCss = `
 .pm-del-note { margin: 0; padding: 0 16px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-del-hint { margin: 0; padding-left: 14px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-del-left { font-size: 12px; line-height: 1.5; color: var(--pm-text-2); white-space: nowrap; }
-.pm-del-section { display: flex; flex-direction: column; }
 `

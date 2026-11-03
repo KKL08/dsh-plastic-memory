@@ -7,6 +7,7 @@ import { createFakeGateway } from '../gateway.fake.ts'
 import { createNavStore } from '../nav.ts'
 import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { DeletedTab } from './DeletedTab.tsx'
+import { FLASH_MS } from '../library/shared.tsx'
 import { createTranslator } from '../i18n.tsx'
 import { en } from '../locales.ts'
 import { PanelShell } from '../ui/PanelShell.tsx'
@@ -79,12 +80,55 @@ describe('最近删除', () => {
     expect(within(rowOf('用 pnpm 不用 npm')).queryByText('恢复后这条冲突会回到待处理')).toBeNull()
   })
 
-  it('「全部」按层分段，段标题写层名和条数；搜索按内容筛', () => {
+  it('「全部」按删除那天分「今天 / 近 7 天 / 更早 · 7 天内彻底删除」三段，都展开；卡片写范围名；搜索按内容筛', () => {
     renderInShell(<DeletedTab nav={createNavStore()} scope={{ kind: 'all' }} session={session} now={NOW} />, createFakeGateway({ views: { deleted } }))
-    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['app4', 'blog1'])
+    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['今天3', '近 7 天1', '更早 · 7 天内彻底删除1'])
+    expect(screen.getAllByRole('listitem')).toHaveLength(5)
+    expect(rowOf('博客用 Astro').querySelector('.pm-mc-meta')).toHaveTextContent('blog')
+    expect(rowOf('用 pnpm 不用 npm').querySelector('.pm-mc-meta')).toHaveTextContent('app')
     fireEvent.change(screen.getByRole('searchbox', { name: '搜索已删除的记忆' }), { target: { value: 'astro' } })
     expect(screen.getAllByRole('listitem').map(li => li.querySelector('.pm-mc-text')?.textContent)).toEqual(['博客用 Astro'])
-    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['blog1'])
+    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['今天1'])
+  })
+
+  it('单个范围同样按删除那天分段，卡片不写范围；段里条数再多也不截断', () => {
+    const many: DeletedView = { version: GUI_VIEW_VERSION, items: [1, 2, 3, 4, 5].map(n => ({ memory: memory({ id: `w${n}`, content: `删了 ${n} 天` }), deletedAt: NOW - n * DAY, purgeAt: NOW + (14 - n) * DAY })) }
+    renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { deleted: many } }))
+    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['近 7 天5'])
+    expect(screen.getAllByRole('listitem')).toHaveLength(5)
+    expect(screen.queryByRole('button', { name: /展开其余/ })).toBeNull()
+    expect(rowOf('删了 1 天').querySelector('.pm-mc-meta')).not.toHaveTextContent(/本项目|app/)
+  })
+
+  it('点段标题收起、再展开；折叠状态记在记忆页给的那一份里，重挂还在', () => {
+    const fold = new Map()
+    const gateway = createFakeGateway({ views: { deleted } })
+    const { unmount } = renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} fold={fold} now={NOW} />, gateway)
+    const toggle = () => screen.getByRole('button', { name: /^今天\d/ })
+    fireEvent.click(toggle())
+    expect(toggle()).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText('缩进用 tab')).toBeNull()
+    unmount()
+    renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} fold={fold} now={NOW} />, gateway)
+    expect(toggle()).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(toggle())
+    expect(rowOf('缩进用 tab')).toBeInTheDocument()
+  })
+
+  it('直达的那一条在收起的段里：段展开、那一行高亮；高亮播完段照样展开着', () => {
+    vi.useFakeTimers()
+    Element.prototype.scrollIntoView = vi.fn()
+    try {
+      const fold = new Map([[`deleted|${app.workspacePath}|week`, { isOpen: false }]])
+      renderInShell(<DeletedTab nav={createNavStore({ view: 'deleted', scope: app, memoryId: 'd1' })} scope={app} session={session} fold={fold} now={NOW} />, createFakeGateway({ views: { deleted } }))
+      expect(rowOf('用 pnpm 不用 npm')).toHaveClass('pm-flash')
+      act(() => { vi.advanceTimersByTime(FLASH_MS) })
+      expect(rowOf('用 pnpm 不用 npm')).not.toHaveClass('pm-flash')
+      expect(screen.getByRole('button', { name: /^近 7 天\d/ })).toHaveAttribute('aria-expanded', 'true')
+    } finally {
+      delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView
+      vi.useRealTimers()
+    }
   })
 
   it('裁决删掉的标来源，写出胜方的名字（全部记忆或最近删除里找；次文字色的元信息行，不用 chip），元信息下一行提示恢复后冲突会回到待处理', () => {
