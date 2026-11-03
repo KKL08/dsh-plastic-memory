@@ -1,7 +1,7 @@
 /**
- * 插件设置页（plugins.bundle.config）：状态卡 + 三组设置「记什么 · 怎么用 · 怎么管」+ 保存行。
+ * 插件设置页（plugins.bundle.config）：状态卡 + 四组设置「记什么 · 怎么用 · 怎么管 · 外观」+ 保存行。
  * 插件名、简介、版本由宿主插件页的页头画（locale/*.json 的 meta 与 package.json 的 version），这里不重复。
- * 改动先暂存，点保存先弹窗列出改了哪几项，确认后一次提交（useSettingsDraft）。
+ * 改动先暂存，保存行吸在可视区底部、写还有几项没保存；点保存先弹窗列出改了哪几项和保存后的影响（不再新增哪几类、已开着的对话重新带入记忆），确认后一次提交（useSettingsDraft）。
  * 体检开关 `governance.enabled` 只在配置文件里改，界面上不放；配置文件关掉体检时依赖它的两项置灰保留、说明换成原因，不隐藏。
  */
 import { useId, useState } from 'react'
@@ -12,13 +12,13 @@ import type { LocaleKey } from '../locales.ts'
 import { ALL_SCOPE, type NavTarget } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { SegmentedControl } from '../ui/Segmented.tsx'
-import { SettingsForm, SettingsGroupCard, SettingsItem } from '../ui/Settings.tsx'
+import { SettingsForm, SettingsGroup, SettingsGroupCard, SettingsItem } from '../ui/Settings.tsx'
 import {
-  EVIDENCE_LEVELS, OVERFLOW_MODES, PROMOTE_TARGETS, SENSITIVITIES, SENSITIVITY_NUMBERS, configuredRoot, customTypeChanges,
-  governanceEnabled, parsePositiveInt, sceneChanges, type ConfigForm, type Migrations, type SettingsFields,
+  ACCENTS, EVIDENCE_LEVELS, OVERFLOW_MODES, PROMOTE_TARGETS, SENSITIVITIES, SENSITIVITY_NUMBERS, configuredRoot, customTypeChanges, presetTypeChanges,
+  droppedTypes, governanceEnabled, parsePositiveInt, sceneChanges, type ConfigForm, type Migrations, type SettingsFields,
 } from './config.ts'
 import { Dialog, TextField } from './controls.tsx'
-import { SceneSection, sceneLabel, typeNames } from './Scenes.tsx'
+import { SceneSection, sceneLabel, typeLabel, typeNames } from './Scenes.tsx'
 import { StatusCard } from './StatusCard.tsx'
 import { useSettingsDraft, type MigrateType } from './useSettingsDraft.ts'
 
@@ -52,6 +52,13 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
   const offHint = t('settings.governanceOff')
   const budgetInvalid = f.budget !== saved.budget && parsePositiveInt(f.budget) === undefined
   const sensitivity = SENSITIVITY_NUMBERS[f.sensitivity]
+  const dropped = droppedTypes(saved, f, draft.migrations)
+  /** 确认框里改动列表下面的影响：不再新增哪几类、已开着的对话重新带入记忆。 */
+  const effects = [
+    ...(dropped.length > 0 ? [t('settings.scene.dropHint', { types: typeNames(t, dropped.map(n => typeLabel(t, n, saved.customTypes))) })] : []),
+    ...(USAGE_FIELDS.some(key => draft.changed.has(key)) ? [t('settings.usage.reloadNote')] : []),
+  ]
+  const changes = draft.dirty ? changeLines(t, saved, f, draft.changed, draft.migrations, counts) : []
 
   return (
     <div className="pm-settings">
@@ -61,23 +68,22 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
           available: snapshot.status === 'ready', writable: snapshot.writable, dirty: draft.dirty,
           invalid: draft.invalid, saving: draft.saving, failed: draft.outcome === 'failed',
         }}
+        pending={changes.length > 0 ? t('settings.unsaved', { n: changes.length }) : undefined}
         onSave={() => { setConfirming(true) }}
         onDiscard={draft.discard}
       >
-        <SettingsGroupCard title={t('settings.group.what')}>
-          <SettingsItem label={t('settings.scene.label')}>
-            <SceneSection
-              fields={f}
-              saved={saved}
-              migrations={draft.migrations}
-              counts={counts}
-              canMigrate={session.kind === 'ready'}
-              disabled={locked}
-              now={() => now ?? Date.now()}
-              onChange={edit}
-            />
-          </SettingsItem>
-        </SettingsGroupCard>
+        <SettingsGroup title={t('settings.group.what')}>
+          <SceneSection
+            fields={f}
+            saved={saved}
+            migrations={draft.migrations}
+            counts={counts}
+            canMigrate={session.kind === 'ready'}
+            disabled={locked}
+            now={() => now ?? Date.now()}
+            onChange={edit}
+          />
+        </SettingsGroup>
 
         <SettingsGroupCard title={t('settings.group.how')}>
           <SettingsItem label={t('settings.budget.label')} htmlFor={`${id}-budget`}>
@@ -153,7 +159,19 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
           </SettingsItem>
         </SettingsGroupCard>
 
-        {USAGE_FIELDS.some(key => draft.changed.has(key)) ? <p className="pm-form-note pm-settings-note">{t('settings.usage.reloadNote')}</p> : null}
+        <SettingsGroupCard title={t('settings.group.look')}>
+          <SettingsItem label={t('settings.accent.label')}>
+            <SegmentedControl
+              id={`${id}-accent`}
+              label={t('settings.accent.label')}
+              value={f.accent}
+              options={ACCENTS.map(v => ({ value: v, label: t(`settings.accent.${v}`) }))}
+              disabled={locked}
+              onChange={(accent) => { edit({ accent }) }}
+            />
+          </SettingsItem>
+        </SettingsGroupCard>
+
         {draft.outcome === 'conflict'
           ? (
             <div className="pm-settings-conflict" role="alert">
@@ -178,8 +196,9 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
             )}
           >
             <ul className="pm-settings-changes">
-              {changeLines(t, saved, f, draft.changed, draft.migrations, counts).map(line => <li key={line}>{line}</li>)}
+              {changes.map(line => <li key={line}>{line}</li>)}
             </ul>
+            {effects.length > 0 ? <div className="pm-settings-effects">{effects.map(text => <p key={text}>{text}</p>)}</div> : null}
           </Dialog>
         )
         : null}
@@ -191,15 +210,17 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
 const FIELD_LABELS: Record<keyof SettingsFields, LocaleKey> = {
   template: 'settings.confirm.current',
   scenes: 'settings.confirm.scenes',
+  removedPresets: 'settings.confirm.presets',
   customTypes: 'settings.types.label',
   budget: 'settings.budget.label',
   overflow: 'settings.overflow.label',
   evidence: 'settings.evidence.label',
   sensitivity: 'settings.sensitivity.label',
   promoteTarget: 'settings.target.label',
+  accent: 'settings.accent.label',
 }
 
-function valueText(t: Translate, key: Exclude<keyof SettingsFields, 'scenes' | 'customTypes'>, fields: SettingsFields): string {
+function valueText(t: Translate, key: Exclude<keyof SettingsFields, 'scenes' | 'customTypes' | 'removedPresets'>, fields: SettingsFields): string {
   switch (key) {
     case 'template': return sceneLabel(t, fields.template, fields.scenes)
     case 'budget': return String(parsePositiveInt(fields.budget) ?? fields.budget)
@@ -207,22 +228,33 @@ function valueText(t: Translate, key: Exclude<keyof SettingsFields, 'scenes' | '
     case 'evidence': return t(`settings.evidence.${fields.evidence}`)
     case 'sensitivity': return t(`settings.sensitivity.${fields.sensitivity}`)
     case 'promoteTarget': return t(`settings.target.${fields.promoteTarget}`)
+    case 'accent': return t(`settings.accent.${fields.accent}`)
   }
 }
 
-/** 新增、修改、删除三段汇总（名字已转成界面上的叫法）。 */
-function partsText(t: Translate, parts: { added: string[]; edited: string[]; removed: string[] }): string {
-  return (['added', 'edited', 'removed'] as const)
-    .filter(kind => parts[kind].length > 0)
-    .map(kind => t(`settings.confirm.${kind}`, { names: typeNames(t, parts[kind]) }))
+/** 新增、修改、恢复默认、删除、恢复几段汇总（名字已转成界面上的叫法）。 */
+function partsText(t: Translate, parts: Partial<Record<'added' | 'edited' | 'reset' | 'removed' | 'restored', string[]>>): string {
+  return (['added', 'edited', 'reset', 'removed', 'restored'] as const)
+    .filter(kind => (parts[kind]?.length ?? 0) > 0)
+    .map(kind => t(`settings.confirm.${kind}`, { names: typeNames(t, parts[kind]!) }))
     .join(t('settings.confirm.partSep'))
 }
 
 function changeLines(t: Translate, saved: SettingsFields, fields: SettingsFields, changed: ReadonlySet<keyof SettingsFields>,
   migrations: Migrations, counts: ReadonlyMap<string, number> | undefined): string[] {
-  const lines = (Object.keys(FIELD_LABELS) as (keyof SettingsFields)[]).filter(key => changed.has(key)).map((key) => {
+  // 改过的预设存在 customTypes 里，所以 customTypes 变了也要看预设那一行
+  const isChanged = (key: keyof SettingsFields) => changed.has(key) || (key === 'removedPresets' && changed.has('customTypes'))
+  const lines = (Object.keys(FIELD_LABELS) as (keyof SettingsFields)[]).filter(isChanged).map((key) => {
     let change: string
-    if (key === 'customTypes') {
+    if (key === 'removedPresets') {
+      const parts = presetTypeChanges(saved, fields)
+      change = partsText(t, {
+        edited: parts.edited.map(n => typeLabel(t, n, fields.customTypes)),
+        reset: parts.reset.map(n => typeLabel(t, n, saved.customTypes)),
+        removed: parts.removed.map(n => typeLabel(t, n, saved.customTypes)),
+        restored: parts.restored.map(n => typeLabel(t, n, {})),
+      })
+    } else if (key === 'customTypes') {
       // 跟着改名的那一对由迁移行写，不再写成「新增」「删除」
       const moved = Object.entries(migrations).flatMap(([from, m]) => m.action === 'retype' ? [from, m.to] : [])
       const without = (types: SettingsFields['customTypes']) => Object.fromEntries(Object.entries(types).filter(([name]) => !moved.includes(name)))
@@ -241,7 +273,7 @@ function changeLines(t: Translate, saved: SettingsFields, fields: SettingsFields
   }).filter(line => line !== '')
   for (const [from, m] of Object.entries(migrations)) {
     // 上次没迁完的：配置里已经是新名字，取新名字的中文名
-    const label = saved.customTypes[from]?.label ?? (m.action === 'retype' ? fields.customTypes[m.to]?.label : undefined) ?? from
+    const label = saved.customTypes[from]?.label ?? (m.action === 'retype' ? fields.customTypes[m.to]?.label : undefined) ?? typeLabel(t, from, {})
     const n = counts?.get(from)
     if (m.action === 'forget') lines.push(t('settings.confirm.forget', { label }))
     else lines.push(n === undefined ? t('settings.confirm.retypeUnknown', { label, to: m.to }) : t('settings.confirm.retype', { label, to: m.to, n }))
@@ -307,6 +339,8 @@ export const settingsPageCss = `
 .pm-settings { display: flex; flex-direction: column; gap: 32px; }
 .pm-settings-note { margin: 16px 0 0; }
 .pm-settings-changes { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.6; color: var(--pm-text); }
+.pm-settings-effects { display: flex; flex-direction: column; gap: 6px; }
+.pm-settings-effects p { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-settings-conflict { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
 .pm-settings-conflict p { flex: 1; min-width: 0; margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text); }
 .pm-settings-root { display: flex; align-self: stretch; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }

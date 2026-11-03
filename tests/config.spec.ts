@@ -31,9 +31,11 @@ describe('Config schema', () => {
       template: 'coding',
       customTypes: {},
       scenes: PRESET_SCENES,
+      removedPresetTypes: [],
       governance: { enabled: true, health: { sensitivity: 'normal' }, globalPromoteTarget: 'plugin-global' },
       search: {},
       subagent: { maxSavesPerSession: 10 },
+      accent: 'ella',
       memoryRoot: '',
     })
   })
@@ -41,9 +43,9 @@ describe('Config schema', () => {
   it('进 GUI 的字段是 volatile 引用（用时 .get()），writeMode 与 memoryRoot 不是', () => {
     const value = new Config({} as never)
     const refs = [
-      value.template, value.customTypes, value.scenes, value.snapshotTokenBudget, value.snapshotOverflow, value.evidenceLookup,
+      value.template, value.customTypes, value.scenes, value.removedPresetTypes, value.snapshotTokenBudget, value.snapshotOverflow, value.evidenceLookup,
       value.governance.enabled, value.governance.health.sensitivity, value.governance.globalPromoteTarget,
-      value.subagent.maxSavesPerSession,
+      value.subagent.maxSavesPerSession, value.accent,
     ]
     for (const ref of refs) expect(typeof ref.get).toBe('function')
     expect(value.governance.globalPromoteTarget.get()).toBe('plugin-global')
@@ -84,6 +86,17 @@ describe('Config schema', () => {
       },
     } as never)
     expect(value.customTypes.get().regulation!.decayDays).toBeNull()
+  })
+
+  it('自定义类型的 howToUse 选填：写了原样读回，不写就没有这一项', () => {
+    const value = new Config({
+      customTypes: {
+        regulation: { label: '合规要求', description: '行业法规', whenToSave: '出现合规要求时', howToUse: '起草对外文件时逐条对照', recall: 'core', decayDays: null, governancePriority: 'low' },
+        term: { label: '术语', description: 'd', whenToSave: 'w', recall: 'search', governancePriority: 'medium' },
+      },
+    } as never)
+    expect(value.customTypes.get().regulation!.howToUse).toBe('起草对外文件时逐条对照')
+    expect(value.customTypes.get().term!.howToUse).toBeUndefined()
   })
 
   it('subagent.maxSavesPerSession 默认 10，YAML 可配', () => {

@@ -1,23 +1,27 @@
 /**
- * 「场景」一项：场景单选列表、新建场景、当前场景的说明、「我加的类型」一览行，和场景弹层。
- * 弹层是一个 Dialog，换三种内容：勾选（场景名 + 类型清单）、类型表单、类型管理。弹层是一次事务：里面的改动
- * （勾选、新建 / 改 / 删类型、类型迁移）先留在弹层里，「确定」「完成」时一起并进页面草稿，「取消」、Esc、关闭全部撤销。
- * 通用场景不能编辑；「管理 ›」和「新建场景」里始终能管理类型。
+ * 「记什么」的两组小卡和场景弹层（卡片网格同宿主设置页的 Agent 预设：卡身是选择区，操作放在细线下的卡脚，新建是网格下的虚线条）：
+ * - 场景：单选卡，点卡身切换；通用场景不能编辑，没有卡脚。
+ * - 记忆类型：类型池里每一类一张卡，写哪些场景在用、存了几条，分三组：通用五类只能查看（只读弹层）；预设能编辑（英文名不变）、
+ *   恢复默认、删除，删掉的在组末一行、能恢复；我加的能编辑、删除。删除都是原位确认，确认后直接改草稿。
+ * 场景弹层是一个 Dialog，换两种内容：勾选（场景名 + 类型清单）、类型表单。弹层是一次事务：里面的改动
+ * （勾选、新建 / 改 / 删类型、类型迁移）先留在弹层里，「确定」时一起并进页面草稿，「取消」、Esc、关闭全部撤销。
+ * 从记忆类型列表打开的只有类型表单，确定后直接并进页面草稿。换场景、删类型后不再新增哪几类，由保存确认框写（SettingsPage）。
  */
 import { Fragment, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
 import { Button } from '../ui/Button.tsx'
 import {
-  BUILTIN_TYPE_NAMES, EMPTY_TYPE_DRAFT, GENERAL_SCENE, MAX_SCENES, PRESET_SCENES, PRESET_TYPE_NAMES, RETIRED_TYPE_NAMES, SCENE_MAX_TYPES,
-  draftOf, droppedTypes, forgetMigrations, isPresetEdited, keepMigrations, isPresetScene, memoryCountOf, nextSceneId, pendingNames, removeType,
-  renameMigrations, renameType, sceneTypes, scenesUsing, validateSceneDraft, validateTypeDraft,
-  type CustomType, type CustomTypeDraft, type MigrationAction, type Migrations, type Scene, type SettingsFields,
+  BUILTIN_TYPE_NAMES, EMPTY_TYPE_DRAFT, GENERAL_SCENE, MAX_SCENES, PRESET_TYPE_NAMES, RETIRED_TYPE_NAMES, SCENE_MAX_TYPES, TYPE_DEFINITIONS,
+  draftOf, forgetMigrations, isPresetEdited, isPresetScene, isPresetType, isPresetTypeEdited, keepMigrations, memoryCountOf, nextSceneId,
+  pendingNames, presetSceneTypes, removeType, renameMigrations, renameType, restorePresetType, sceneTypes, scenesUsing, validateSceneDraft,
+  validateTypeDraft, type CustomType, type CustomTypeDraft, type MigrationAction, type Migrations, type Pool, type Scene, type SettingsFields,
 } from './config.ts'
+import { Icon } from '../ui/Icon.tsx'
 import { Dialog, TextField } from './controls.tsx'
 import { TypeFormFields } from './CustomTypes.tsx'
 
-type Pool = Pick<SettingsFields, 'scenes' | 'customTypes'>
+type DefinedType = keyof typeof TYPE_DEFINITIONS
 
 const KNOWN_TYPES: ReadonlySet<string> = new Set([...BUILTIN_TYPE_NAMES, ...PRESET_TYPE_NAMES, ...RETIRED_TYPE_NAMES])
 const BUILTIN: readonly string[] = BUILTIN_TYPE_NAMES
@@ -48,7 +52,38 @@ function typesSummary(t: Translate, names: readonly string[], customTypes: Reado
   return [...parts, ...names.filter(n => !BUILTIN.includes(n)).map(label)].join(t('settings.scene.groupSep'))
 }
 
-type DialogMode = { kind: 'scene'; id?: string } | { kind: 'manage' } | { kind: 'type'; name: string }
+/** 类型在不在类型池里（通用五类、没删的预设、我加的）；场景组成里可能留着已经删掉的名字。 */
+function isPooled(pool: Pool, name: string): boolean {
+  if (isPresetType(name)) return !pool.removedPresets.includes(name)
+  return BUILTIN.includes(name) || Object.hasOwn(pool.customTypes, name)
+}
+
+/** 只取类型池那几项，交给 onChange 当补丁。 */
+function poolOf(fields: Pool): Pool {
+  return { scenes: fields.scenes, customTypes: fields.customTypes, removedPresets: fields.removedPresets }
+}
+
+/** 预设和我加的类型现在的定义（改过的预设取改过的）。 */
+function definitionOf(customTypes: Pool['customTypes'], name: string): CustomType {
+  return Object.hasOwn(customTypes, name) ? customTypes[name]! : TYPE_DEFINITIONS[name as DefinedType]
+}
+
+/** 这一类名下的记忆条数（含改名迁过来的）；读不到时 undefined。 */
+function countOf(name: string, migrations: Migrations, counts: ReadonlyMap<string, number> | undefined): number | undefined {
+  return counts === undefined ? undefined : memoryCountOf(name, migrations, counts)
+}
+
+/** 条数读不到时：预设、配置里已有的类型、或有记忆改名迁到它的，按存过记忆处理；这次新建的没有。 */
+function hasMemories(name: string, saved: SettingsFields, migrations: Migrations, counts: ReadonlyMap<string, number> | undefined): boolean {
+  const n = countOf(name, migrations, counts)
+  if (n !== undefined) return n > 0
+  return isPresetType(name) || Object.hasOwn(saved.customTypes, name) || Object.values(migrations).some(m => m.action === 'retype' && m.to === name)
+}
+
+/** 页面上一次只开一个原位确认：删场景或删类型。 */
+type Removing = { kind: 'scene' | 'type'; id: string }
+
+type DialogMode = { kind: 'scene'; id?: string } | { kind: 'type'; name?: string } | { kind: 'view'; name: DefinedType }
 
 export function SceneSection({ fields, saved, migrations, counts, canMigrate, disabled, now, onChange }: {
   fields: SettingsFields
@@ -65,103 +100,193 @@ export function SceneSection({ fields, saved, migrations, counts, canMigrate, di
   const t = useT()
   const id = useId()
   const [dialog, setDialog] = useState<DialogMode | undefined>(undefined)
-  const [removing, setRemoving] = useState<string | undefined>(undefined)
+  const [removing, setRemoving] = useState<Removing | undefined>(undefined)
+  const [focusNext, focusKey] = useFocusNext()
   const ids = Object.keys(fields.scenes)
+  const sceneIds = [GENERAL_SCENE, ...ids]
   const remaining = Math.max(0, MAX_SCENES - ids.length)
-  const hint = t('settings.scene.hint', { name: sceneLabel(t, fields.template, fields.scenes), n: sceneTypes(fields, fields.template).length })
-  const dropped = droppedTypes(saved, fields, migrations)
-  const customNames = Object.keys(fields.customTypes)
+  const isRemoving = (kind: Removing['kind'], key: string) => removing?.kind === kind && removing.id === key
+  const openDialog = (mode: DialogMode) => { setRemoving(undefined); setDialog(mode) }
 
   const removeScene = (sceneId: string) => {
     const { [sceneId]: _removed, ...scenes } = fields.scenes
     setRemoving(undefined)
     onChange({ scenes, ...(fields.template === sceneId ? { template: GENERAL_SCENE } : {}) })
   }
-  const row = (sceneId: string) => {
+  const sceneTile = (sceneId: string) => {
     const name = sceneLabel(t, sceneId, fields.scenes)
     const isSelected = fields.template === sceneId
     const scene = sceneId === GENERAL_SCENE ? undefined : fields.scenes[sceneId]
-    const isEdited = scene !== undefined && isPresetEdited(sceneId, scene)
+    const isEdited = scene !== undefined && isPresetEdited(sceneId, scene, fields.removedPresets)
     const types = sceneTypes(fields, sceneId)
-    const radioId = `${id}-${sceneId}`
+    const detailId = `${id}-${sceneId}-types`
     return (
-      <li key={sceneId} className={isSelected ? 'pm-scene pm-scene--selected' : 'pm-scene'}>
-        <input
-          type="radio" id={radioId} name={`${id}-scene`} className="pm-scene-radio" checked={isSelected} disabled={disabled}
-          aria-label={name} aria-describedby={`${radioId}-types`}
-          onChange={() => { onChange({ template: sceneId }) }}
-        />
-        <label className="pm-scene-text" htmlFor={radioId}>
-          <span className="pm-scene-name">{name}{isEdited ? <span className="pm-scene-tag">{t('settings.scene.edited')}</span> : null}</span>
-          <span className="pm-scene-types" id={`${radioId}-types`}>
+      <li key={sceneId} className={isSelected ? 'pm-tile pm-tile--selected' : 'pm-tile'}>
+        <label className="pm-tile-main">
+          <input
+            type="radio" name={`${id}-scene`} className="pm-tile-radio" checked={isSelected} disabled={disabled}
+            aria-label={name} aria-describedby={detailId}
+            onChange={() => { onChange({ template: sceneId }) }}
+          />
+          <span className="pm-tile-head">
+            <span className="pm-tile-title">{name}</span>
+            {isEdited ? <span className="pm-scene-tag">{t('settings.scene.edited')}</span> : null}
+          </span>
+          <span className="pm-tile-detail" id={detailId}>
             {sceneId === GENERAL_SCENE ? types.map(n => typeLabel(t, n, fields.customTypes)).join(t('settings.scene.listSep')) : typesSummary(t, types, fields.customTypes)}
           </span>
         </label>
         {scene === undefined
           ? null
-          : removing === sceneId
-            ? (
-              <LinkConfirm
-                question={t(isSelected ? 'settings.scene.removeCurrent' : 'settings.scene.removeQuestion', { name })}
-                actions={[{ label: t('settings.scene.removeConfirm'), onClick: () => { removeScene(sceneId) } }]}
-                cancelLabel={t('settings.scene.cancel')}
-                onCancel={() => { setRemoving(undefined) }}
-              />
-            )
-            : (
-              <span className="pm-scene-actions">
-                {isEdited && isPresetScene(sceneId)
-                  ? (
-                    <Button variant="quiet" disabled={disabled} aria-label={t('settings.scene.resetAria', { name })}
-                      onClick={() => { onChange({ scenes: { ...fields.scenes, [sceneId]: { ...scene, types: [...PRESET_SCENES[sceneId].types] } } }) }}>
-                      {t('settings.scene.reset')}
-                    </Button>
-                  )
-                  : null}
-                <Button variant="quiet" disabled={disabled} aria-label={t('settings.scene.editAria', { name })}
-                  onClick={() => { setDialog({ kind: 'scene', id: sceneId }) }}>{t('settings.scene.edit')}</Button>
-                <Button variant="quiet" disabled={disabled} aria-label={t('settings.scene.removeAria', { name })}
-                  onClick={() => { setRemoving(sceneId) }}>{t('settings.scene.remove')}</Button>
-              </span>
-            )}
+          : (
+            <div className="pm-tile-foot">
+              {isRemoving('scene', sceneId)
+                ? (
+                  <LinkConfirm
+                    question={t(isSelected ? 'settings.scene.removeCurrent' : 'settings.scene.removeQuestion', { name })}
+                    actions={[{ label: t('settings.scene.removeConfirm'), onClick: () => { removeScene(sceneId) } }]}
+                    cancelLabel={t('settings.scene.cancel')}
+                    onCancel={() => { setRemoving(undefined); focusNext(`remove:scene:${sceneId}`) }}
+                  />
+                )
+                : (
+                  <>
+                    {isEdited && isPresetScene(sceneId)
+                      ? (
+                        <Button variant="quiet" disabled={disabled} aria-label={t('settings.scene.resetAria', { name })}
+                          onClick={() => { onChange({ scenes: { ...fields.scenes, [sceneId]: { ...scene, types: presetSceneTypes(sceneId, fields.removedPresets) } } }) }}>
+                          {t('settings.scene.reset')}
+                        </Button>
+                      )
+                      : null}
+                    <Button variant="quiet" disabled={disabled} aria-label={t('settings.scene.editAria', { name })}
+                      onClick={() => { openDialog({ kind: 'scene', id: sceneId }) }}>{t('settings.scene.edit')}</Button>
+                    <Button variant="quiet" disabled={disabled} aria-label={t('settings.scene.removeAria', { name })} {...focusKey(`remove:scene:${sceneId}`)}
+                      onClick={() => { setRemoving({ kind: 'scene', id: sceneId }) }}>{t('settings.scene.remove')}</Button>
+                  </>
+                )}
+            </div>
+          )}
       </li>
     )
   }
 
+  const typeTile = (name: string) => {
+    const label = typeLabel(t, name, fields.customTypes)
+    const isBuiltin = BUILTIN.includes(name)
+    const isPreset = isPresetType(name)
+    const isEdited = isPresetTypeEdited(name, fields.customTypes)
+    const users = sceneIds.filter(sid => sceneTypes(fields, sid).includes(name)).map(sid => sceneLabel(t, sid, fields.scenes))
+    const usage = users.length > 0 ? t('settings.types.usedBy', { names: users.join(t('settings.scene.listSep')) }) : t('settings.types.unused')
+    const n = countOf(name, migrations, counts)
+    const resetPreset = () => {
+      const { [name]: _edited, ...customTypes } = fields.customTypes
+      onChange({ customTypes })
+    }
+    let foot: ReactNode
+    if (isBuiltin) {
+      foot = (
+        <Button variant="quiet" disabled={disabled} aria-label={t('settings.types.viewAria', { name: label })}
+          onClick={() => { openDialog({ kind: 'view', name: name as DefinedType }) }}>{t('settings.types.view')}</Button>
+      )
+    } else if (isRemoving('type', name)) {
+      foot = (
+        <TypeRemoveConfirm
+          name={name} pool={fields} saved={saved} migrations={migrations} counts={counts} canMigrate={canMigrate}
+          onRemove={(action) => {
+            setRemoving(undefined)
+            onChange(removeType(poolOf(fields), name), action === 'forget' ? forgetMigrations(migrations, name, counts) : keepMigrations(migrations, name))
+            focusNext(`group:${isPreset ? 'preset' : 'custom'}`)
+          }}
+          onCancel={() => { setRemoving(undefined); focusNext(`remove:type:${name}`) }}
+        />
+      )
+    } else {
+      foot = (
+        <>
+          {isEdited
+            ? (
+              <Button variant="quiet" disabled={disabled} aria-label={t('settings.scene.resetAria', { name: label })} onClick={resetPreset}>
+                {t('settings.scene.reset')}
+              </Button>
+            )
+            : null}
+          <Button variant="quiet" disabled={disabled} aria-label={t('settings.types.editAria', { name: label })} {...focusKey(`edit:type:${name}`)}
+            onClick={() => { openDialog({ kind: 'type', name }) }}>{t('settings.types.edit')}</Button>
+          <Button variant="quiet" disabled={disabled} aria-label={t('settings.types.removeAria', { name: label })} {...focusKey(`remove:type:${name}`)}
+            onClick={() => { setRemoving({ kind: 'type', id: name }) }}>{t('settings.types.remove')}</Button>
+        </>
+      )
+    }
+    return (
+      <li key={name} className="pm-tile">
+        <div className="pm-tile-main">
+          <span className="pm-tile-head">
+            <span className="pm-tile-title">{label}</span>
+            {isEdited ? <span className="pm-scene-tag">{t('settings.scene.edited')}</span> : null}
+            {!isBuiltin && !isPreset ? <code className="pm-scene-code pm-tile-code" title={name}>{name}</code> : null}
+          </span>
+          <span className="pm-tile-detail">{n !== undefined ? `${usage} · ${t('settings.types.count', { n })}` : usage}</span>
+        </div>
+        <div className="pm-tile-foot">{foot}</div>
+      </li>
+    )
+  }
+  /** 一组类型卡：小标题 + 网格（一张都没有时不出网格），后面接这一组的附加行。 */
+  const typeGroup = (group: 'general' | 'preset' | 'custom', names: readonly string[], extra: ReactNode = null) => (
+    <div className="pm-tile-group">
+      <h4 className="pm-tile-group-title" id={`${id}-types-${group}`} tabIndex={-1} {...focusKey(`group:${group}`)}>{t(`settings.types.group.${group}`)}</h4>
+      {names.length > 0 ? <ul className="pm-tiles" aria-labelledby={`${id}-types-${group}`}>{names.map(typeTile)}</ul> : null}
+      {extra}
+    </div>
+  )
+  const restorePreset = (name: string) => {
+    const restored = restorePresetType(poolOf(fields), migrations, name)
+    onChange(restored.pool, restored.migrations)
+    focusNext(`edit:type:${name}`)
+  }
+
   return (
-    <div className="pm-scenes">
-      <ul className="pm-scene-list" role="radiogroup" aria-label={t('settings.scene.label')}>
-        {[GENERAL_SCENE, ...ids].map(row)}
-      </ul>
-      <div className="pm-scene-add">
-        <Button disabled={disabled || remaining === 0} onClick={() => { setDialog({ kind: 'scene' }) }}>{t('settings.scene.add')}</Button>
-        <span className="pm-setting-hint">{t('settings.scene.remaining', { n: remaining })}</span>
-      </div>
-      <p className="pm-setting-hint">
-        {dropped.length > 0
-          ? t('settings.scene.hintChanged', { hint, drop: t('settings.scene.dropHint', { types: typeNames(t, dropped.map(n => typeLabel(t, n, saved.customTypes))) }) })
-          : hint}
-      </p>
-      <p className="pm-scene-overview">
-        {customNames.length > 0
-          ? (
-            <>
-              {t('settings.types.overview')}
-              {customNames.map((name, i) => (
-                <Fragment key={name}>
-                  {i > 0 ? t('settings.scene.listSep') : null}
-                  <button type="button" className="pm-scene-type-link" disabled={disabled} onClick={() => { setDialog({ kind: 'type', name }) }}>
-                    {fields.customTypes[name]!.label}
-                  </button>
-                </Fragment>
-              ))}
-              <span className="pm-scene-meta">{t('settings.types.shared')}</span>
-            </>
+    <>
+      <section className="pm-subgroup">
+        <h3 className="pm-subgroup-title" id={`${id}-scenes`}>{t('settings.scene.label')}</h3>
+        <ul className="pm-tiles" role="radiogroup" aria-labelledby={`${id}-scenes`}>
+          {sceneIds.map(sceneTile)}
+        </ul>
+        <button
+          type="button" className="pm-tile-add" disabled={disabled || remaining === 0}
+          aria-label={t('settings.scene.add')} aria-describedby={`${id}-remaining`}
+          onClick={() => { openDialog({ kind: 'scene' }) }}
+        >
+          <Icon name="plus" size={14} />
+          {t('settings.scene.add')}
+          <span className="pm-tile-add-note" id={`${id}-remaining`}>{t('settings.scene.remaining', { n: remaining })}</span>
+        </button>
+      </section>
+      <section className="pm-subgroup" aria-labelledby={`${id}-types`}>
+        <h3 className="pm-subgroup-title" id={`${id}-types`}>{t('settings.types.title')}</h3>
+        <p className="pm-subgroup-hint">{t('settings.types.intro')}</p>
+        {typeGroup('general', BUILTIN)}
+        {typeGroup('preset', PRESET_TYPE_NAMES.filter(name => !fields.removedPresets.includes(name)), fields.removedPresets.map((name) => {
+          const label = typeLabel(t, name, {})
+          return (
+            <p key={name} className="pm-tile-removed">
+              <span>{t('settings.types.removedLine', { label })}</span>
+              <i className="pm-sep" aria-hidden="true">·</i>
+              <button type="button" className="pm-link" disabled={disabled} aria-label={t('settings.types.restoreAria', { name: label })}
+                onClick={() => { restorePreset(name) }}>{t('settings.types.restore')}</button>
+            </p>
           )
-          : <span className="pm-scene-meta">{t('settings.types.none')}</span>}
-        <button type="button" className="pm-link pm-scene-manage" disabled={disabled} onClick={() => { setDialog({ kind: 'manage' }) }}>{t('settings.types.manage')}</button>
-      </p>
-      {dialog !== undefined
+        }))}
+        {typeGroup('custom', Object.keys(fields.customTypes).filter(name => !isPresetType(name)), (
+          <button type="button" className="pm-tile-add" disabled={disabled} onClick={() => { openDialog({ kind: 'type' }) }}>
+            <Icon name="plus" size={14} />
+            {t('settings.types.create')}
+          </button>
+        ))}
+      </section>
+      {dialog?.kind === 'view' ? <TypeView name={dialog.name} onClose={() => { setDialog(undefined) }} /> : null}
+      {dialog !== undefined && dialog.kind !== 'view'
         ? (
           <SceneDialog
             mode={dialog}
@@ -176,20 +301,19 @@ export function SceneSection({ fields, saved, migrations, counts, canMigrate, di
           />
         )
         : null}
-    </div>
+    </>
   )
 }
 
 type View =
   | { kind: 'pick' }
-  | { kind: 'manage' }
   /** original：编辑的类型原来的英文名，新建时 undefined；isAsking：改名时正在问旧记忆怎么办。 */
   | { kind: 'form'; original: string | undefined; draft: CustomTypeDraft; attempted: boolean; isAsking: boolean }
 
 type FormView = Extract<View, { kind: 'form' }>
 
 function SceneDialog({ mode, fields, saved, migrations: initialMigrations, counts, canMigrate, now, onCancel, onCommit }: {
-  mode: DialogMode
+  mode: Exclude<DialogMode, { kind: 'view' }>
   fields: SettingsFields
   saved: SettingsFields
   migrations: Migrations
@@ -204,10 +328,10 @@ function SceneDialog({ mode, fields, saved, migrations: initialMigrations, count
   const editingId = mode.kind === 'scene' ? mode.id : undefined
   const isPreset = editingId !== undefined && isPresetScene(editingId)
   const formFor = (customTypes: Pool['customTypes'], name?: string): FormView => ({
-    kind: 'form', original: name, draft: name === undefined ? EMPTY_TYPE_DRAFT : draftOf(name, customTypes[name]!), attempted: false, isAsking: false,
+    kind: 'form', original: name, draft: name === undefined ? EMPTY_TYPE_DRAFT : draftOf(name, definitionOf(customTypes, name)), attempted: false, isAsking: false,
   })
-  const home: View = mode.kind === 'manage' ? { kind: 'manage' } : { kind: 'pick' }
-  const [pool, setPool] = useState<Pool>({ scenes: fields.scenes, customTypes: fields.customTypes })
+  const home: View = { kind: 'pick' }
+  const [pool, setPool] = useState<Pool>(() => poolOf(fields))
   const [migrations, setMigrations] = useState(initialMigrations)
   const [scene, setScene] = useState<Scene>(() => editingId !== undefined
     ? { label: fields.scenes[editingId]!.label, types: [...fields.scenes[editingId]!.types] }
@@ -215,6 +339,7 @@ function SceneDialog({ mode, fields, saved, migrations: initialMigrations, count
   const [isSceneAttempted, setSceneAttempted] = useState(false)
   const [view, setView] = useState<View>(() => mode.kind === 'type' ? formFor(fields.customTypes, mode.name) : home)
   const [removing, setRemoving] = useState<string | undefined>(undefined)
+  const [focusNext, focusKey] = useFocusNext()
   const [notice, setNotice] = useState<string | undefined>(undefined)
 
   // 换内容后聚焦新内容的第一个输入框（打开时由 Dialog 聚焦）
@@ -227,18 +352,10 @@ function SceneDialog({ mode, fields, saved, migrations: initialMigrations, count
     ;(items.find(el => el.matches('input:not([type=checkbox]), textarea')) ?? items[0])?.focus()
   }, [viewKey])
 
-  const isPooled = (name: string) => BUILTIN.includes(name) || (PRESET_TYPE_NAMES as readonly string[]).includes(name) || Object.hasOwn(pool.customTypes, name)
-  const selected = scene.types.filter(isPooled)
+  const selected = scene.types.filter(name => isPooled(pool, name))
   const isFull = selected.length >= SCENE_MAX_TYPES
   const label = (name: string) => typeLabel(t, name, pool.customTypes)
   const sceneName = (sid: string) => sceneLabel(t, sid, pool.scenes)
-  const countOf = (name: string): number | undefined => counts === undefined ? undefined : memoryCountOf(name, migrations, counts)
-  /** 条数读不到时：配置里已有的类型、或有记忆改名迁到它的，按存过记忆处理；这次弹层里新建的没有。 */
-  const hasMemories = (name: string): boolean => {
-    const n = countOf(name)
-    if (n !== undefined) return n > 0
-    return Object.hasOwn(saved.customTypes, name) || Object.values(migrations).some(m => m.action === 'retype' && m.to === name)
-  }
 
   const finishForm = (nextPool: Pool, nextScene: Scene, nextMigrations: Migrations) => {
     if (mode.kind === 'type') { onCommit(nextPool, nextMigrations); return }
@@ -255,12 +372,14 @@ function SceneDialog({ mode, fields, saved, migrations: initialMigrations, count
     )
   }
   const takenFor = (original: string | undefined) => ({
-    names: [...PRESET_TYPE_NAMES.filter(n => n !== original), ...Object.keys(pool.customTypes).filter(n => n !== original)],
+    names: [...PRESET_TYPE_NAMES.filter(n => n !== original), ...Object.keys(pool.customTypes).filter(n => n !== original && !isPresetType(n))],
+    // 预设改了中文名，出厂中文名仍算占用：「恢复默认」后才不会和别的类型重名
     labels: [
-      ...[...BUILTIN, ...PRESET_TYPE_NAMES].filter(n => !Object.hasOwn(pool.customTypes, n)).map(label),
+      ...[...BUILTIN, ...PRESET_TYPE_NAMES].filter(n => n !== original).map(n => typeLabel(t, n, {})),
       ...Object.entries(pool.customTypes).filter(([n]) => n !== original).map(([, type]) => type.label),
     ],
     pending: pendingNames(migrations, original),
+    removedPresets: pool.removedPresets,
   })
   const confirmForm = (form: FormView) => {
     const result = validateTypeDraft(form.draft, takenFor(form.original))
@@ -271,64 +390,39 @@ function SceneDialog({ mode, fields, saved, migrations: initialMigrations, count
       if (mode.kind === 'scene' && isFull) setNotice(t('settings.sceneDialog.full', { max: SCENE_MAX_TYPES, name: type.label }))
       finishForm({ ...pool, customTypes: { ...pool.customTypes, [name]: type } }, isPicked ? { ...scene, types: [...scene.types, name] } : scene, migrations)
     } else if (name === form.original) {
-      finishForm({ ...pool, customTypes: { ...pool.customTypes, [name]: type } }, scene, migrations)
-    } else if (!hasMemories(form.original)) {
+      // 预设改回和出厂定义一样的，等于恢复默认：去掉同名一项
+      const { [name]: _old, ...others } = pool.customTypes
+      const isDefault = isPresetType(name) && !isPresetTypeEdited(name, { [name]: type })
+      finishForm({ ...pool, customTypes: isDefault ? others : { ...pool.customTypes, [name]: type } }, scene, migrations)
+    } else if (!hasMemories(form.original, saved, migrations, counts)) {
       rename(form.original, name, type)
     } else {
       setView({ ...form, isAsking: true })
     }
   }
 
-  /** 删掉它会让哪个别的场景一类不剩（正在编辑的场景不算，至少一类由确定时的校验管）。 */
-  const emptiedBy = (name: string) => Object.entries(pool.scenes)
-    .find(([sid, s]) => sid !== editingId && s.types.includes(name) && s.types.filter(n => n !== name && isPooled(n)).length === 0)?.[0]
   const remove = (name: string, action: 'keep' | 'forget') => {
     setPool(removeType(pool, name))
     setScene({ ...scene, types: scene.types.filter(n => n !== name) })
     setMigrations(action === 'forget' ? forgetMigrations(migrations, name, counts) : keepMigrations(migrations, name))
     setRemoving(undefined)
+    focusNext('add-type')
   }
-  const removeConfirm = (name: string) => {
-    const blocking = emptiedBy(name)
-    if (blocking !== undefined) {
-      return (
-        <LinkConfirm question={t('settings.type.removeBlocked', { scene: sceneName(blocking) })} actions={[]}
-          cancelLabel={t('settings.scene.cancel')} onCancel={() => { setRemoving(undefined) }} block />
-      )
-    }
-    const users = scenesUsing(pool.scenes, name).filter(sid => sid !== editingId).map(sceneName)
-    const n = countOf(name)
-    const isUsed = hasMemories(name)
-    const text = [
-      t('settings.type.removeQuestion', { label: label(name) }),
-      users.length > 0 ? t(mode.kind === 'scene' ? 'settings.type.removeAlsoUsed' : 'settings.type.removeUsed', { scenes: users.join(t('settings.scene.listSep')) }) : '',
-      isUsed ? n !== undefined ? t('settings.type.removeMemories', { n }) : t('settings.type.removeMemoriesUnknown') : '',
-    ].join('')
-    return (
-      <LinkConfirm
-        question={text}
-        note={isUsed && !canMigrate ? t('settings.type.noSession') : undefined}
-        actions={isUsed
-          ? [
-            { label: t('settings.type.keep'), onClick: () => { remove(name, 'keep') } },
-            { label: t('settings.type.forget'), onClick: () => { remove(name, 'forget') }, disabled: !canMigrate },
-          ]
-          : [{ label: t('settings.type.removeConfirm'), onClick: () => { remove(name, 'keep') } }]}
-        cancelLabel={t('settings.scene.cancel')}
-        onCancel={() => { setRemoving(undefined) }}
-        block
-      />
-    )
-  }
+  const removeConfirm = (name: string) => (
+    <TypeRemoveConfirm
+      name={name} pool={pool} saved={saved} migrations={migrations} counts={counts} canMigrate={canMigrate} editingScene={{ id: editingId }} block
+      onRemove={(action) => { remove(name, action) }} onCancel={() => { setRemoving(undefined); focusNext(`remove:${name}`) }}
+    />
+  )
   const typeActions = (name: string) => (
     <span className="pm-scene-actions">
       <Button variant="quiet" aria-label={t('settings.types.editAria', { name: label(name) })}
         onClick={() => { setRemoving(undefined); setView(formFor(pool.customTypes, name)) }}>{t('settings.types.edit')}</Button>
-      <Button variant="quiet" aria-label={t('settings.types.removeAria', { name: label(name) })}
+      <Button variant="quiet" aria-label={t('settings.types.removeAria', { name: label(name) })} {...focusKey(`remove:${name}`)}
         onClick={() => { setRemoving(name) }}>{t('settings.types.remove')}</Button>
     </span>
   )
-  const addType = <button type="button" className="pm-link pm-scene-add-type" onClick={() => { setRemoving(undefined); setNotice(undefined); setView(formFor(pool.customTypes)) }}>{t('settings.types.add')}</button>
+  const addType = <button type="button" className="pm-link pm-scene-add-type" {...focusKey('add-type')} onClick={() => { setRemoving(undefined); setNotice(undefined); setView(formFor(pool.customTypes)) }}>{t('settings.types.add')}</button>
 
   const confirmScene = () => {
     const others = [t('settings.scene.custom'), ...Object.keys(pool.scenes).filter(sid => sid !== editingId).map(sceneName)]
@@ -349,10 +443,10 @@ function SceneDialog({ mode, fields, saved, migrations: initialMigrations, count
     const back = mode.kind === 'type' ? onCancel : () => { setView(home) }
     title = t(form.original === undefined ? 'settings.type.addTitle' : 'settings.type.editTitle')
     onBack = mode.kind === 'type' ? undefined : back
-    content = <TypeFormFields draft={form.draft} errors={errors} onChange={set} />
+    content = <TypeFormFields draft={form.draft} errors={errors} isNameLocked={form.original !== undefined && isPresetType(form.original)} onChange={set} />
     if (form.isAsking && form.original !== undefined) {
       const original = form.original
-      const n = countOf(original)
+      const n = countOf(original, migrations, counts)
       const result = validateTypeDraft(form.draft, takenFor(original))
       const choose = (action: MigrationAction['action']) => { if (result.ok) rename(original, result.name, result.type, action) }
       footer = (
@@ -391,41 +485,6 @@ function SceneDialog({ mode, fields, saved, migrations: initialMigrations, count
         </>
       )
     }
-  } else if (view.kind === 'manage') {
-    title = t('settings.types.manageTitle')
-    const names = Object.keys(pool.customTypes)
-    content = (
-      <>
-        <p className="pm-setting-hint">{t('settings.types.manageIntro')}</p>
-        <div className="pm-scene-group">
-          {names.map((name) => {
-            const users = scenesUsing(pool.scenes, name).map(sceneName)
-            const n = countOf(name)
-            return (
-              <Fragment key={name}>
-                <div className="pm-scene-check">
-                  <span className="pm-scene-check-label">{label(name)}</span>
-                  <code className="pm-scene-code">{name}</code>
-                  <span className="pm-scene-meta">
-                    {users.length > 0 ? t('settings.types.usedBy', { names: users.join(t('settings.scene.listSep')) }) : t('settings.types.unused')}
-                    {n !== undefined ? ` · ${t('settings.types.count', { n })}` : ''}
-                  </span>
-                  {typeActions(name)}
-                </div>
-                {removing === name ? removeConfirm(name) : null}
-              </Fragment>
-            )
-          })}
-          {addType}
-        </div>
-      </>
-    )
-    footer = (
-      <>
-        <Button onClick={onCancel}>{t('settings.sceneDialog.cancel')}</Button>
-        <Button variant="primary" onClick={() => { onCommit(pool, migrations) }}>{t('settings.types.done')}</Button>
-      </>
-    )
   } else {
     title = t(editingId === undefined ? 'settings.sceneDialog.addTitle' : 'settings.sceneDialog.editTitle')
     const sceneErrors = isSceneAttempted ? (() => {
@@ -452,7 +511,7 @@ function SceneDialog({ mode, fields, saved, migrations: initialMigrations, count
         </Fragment>
       )
     }
-    const presets = PRESET_TYPE_NAMES.filter(n => !Object.hasOwn(pool.customTypes, n))
+    const presets = PRESET_TYPE_NAMES.filter(n => !pool.removedPresets.includes(n))
     content = (
       <>
         {isPreset
@@ -481,7 +540,7 @@ function SceneDialog({ mode, fields, saved, migrations: initialMigrations, count
           : null}
         <div className="pm-scene-group" role="group" aria-label={t('settings.sceneDialog.custom')}>
           <div className="pm-scene-group-head"><span>{t('settings.sceneDialog.custom')}</span></div>
-          {Object.keys(pool.customTypes).map(name => check(name, true))}
+          {Object.keys(pool.customTypes).filter(name => !isPresetType(name)).map(name => check(name, true))}
           {addType}
         </div>
         {notice !== undefined ? <p className="pm-setting-hint" role="status">{notice}</p> : null}
@@ -504,9 +563,103 @@ function SceneDialog({ mode, fields, saved, migrations: initialMigrations, count
   )
 }
 
+/** 通用类型的只读弹层：逐项写出定义原文（模型看到的就是这些），只有关闭。 */
+function TypeView({ name, onClose }: { name: DefinedType; onClose: () => void }) {
+  const t = useT()
+  const def = TYPE_DEFINITIONS[name]
+  const rows: ReadonlyArray<[LocaleKey, ReactNode]> = [
+    ['settings.type.label', def.label],
+    ['settings.type.name', <code className="pm-scene-code">{name}</code>],
+    ['settings.type.description', def.description],
+    ['settings.type.whenToSave', def.whenToSave],
+    ['settings.type.howToUse', def.howToUse],
+    ['settings.type.recall', t(`settings.type.recall.${def.recall}`)],
+    ['settings.type.priority', t(`settings.type.priority.${def.governancePriority}`)],
+    ['settings.type.decayDays', def.decayDays === null ? t('settings.type.noDecay') : String(def.decayDays)],
+  ]
+  return (
+    <Dialog
+      title={typeLabel(t, name, {})} closeLabel={t('settings.sceneDialog.close')} onClose={onClose}
+      footer={<Button onClick={onClose}>{t('settings.sceneDialog.close')}</Button>}
+    >
+      <dl className="pm-type-view">
+        {rows.map(([key, value]) => <div key={key}><dt>{t(key)}</dt><dd>{value}</dd></div>)}
+      </dl>
+    </Dialog>
+  )
+}
+
+/**
+ * 删一个预设或我加的类型的原位确认：写明还有哪些场景在用、存过几条记忆；存过记忆的二选一（保留记忆 / 移到最近删除），
+ * 删掉会让某个场景一类不剩时不给删。
+ * @param editingScene 在场景弹层里删时给：id 是正在编辑的场景（新建时 undefined），它不算进「在用」，至少一类由弹层确定时的校验管。
+ * @param block 整块显示在行下面（弹层的类型清单里）；页面上放在卡脚里，不用。
+ */
+function TypeRemoveConfirm({ name, pool, saved, migrations, counts, canMigrate, editingScene, block = false, onRemove, onCancel }: {
+  name: string
+  pool: Pool
+  saved: SettingsFields
+  migrations: Migrations
+  counts: ReadonlyMap<string, number> | undefined
+  canMigrate: boolean
+  editingScene?: { id: string | undefined }
+  block?: boolean
+  onRemove: (action: 'keep' | 'forget') => void
+  onCancel: () => void
+}) {
+  const t = useT()
+  const sceneName = (sid: string) => sceneLabel(t, sid, pool.scenes)
+  const others = Object.entries(pool.scenes).filter(([sid]) => sid !== editingScene?.id)
+  const blocking = others.find(([, s]) => s.types.includes(name) && s.types.filter(n => n !== name && isPooled(pool, n)).length === 0)?.[0]
+  if (blocking !== undefined) {
+    return (
+      <LinkConfirm question={t('settings.type.removeBlocked', { scene: sceneName(blocking) })} actions={[]}
+        cancelLabel={t('settings.scene.cancel')} onCancel={onCancel} block={block} />
+    )
+  }
+  const users = scenesUsing(Object.fromEntries(others), name).map(sceneName)
+  const n = countOf(name, migrations, counts)
+  const isUsed = hasMemories(name, saved, migrations, counts)
+  const text = [
+    t('settings.type.removeQuestion', { label: typeLabel(t, name, pool.customTypes) }),
+    users.length > 0 ? t(editingScene !== undefined ? 'settings.type.removeAlsoUsed' : 'settings.type.removeUsed', { scenes: users.join(t('settings.scene.listSep')) }) : '',
+    isUsed ? n !== undefined ? t('settings.type.removeMemories', { n }) : t('settings.type.removeMemoriesUnknown') : '',
+  ].join('')
+  return (
+    <LinkConfirm
+      question={text}
+      note={isUsed && !canMigrate ? t('settings.type.noSession') : undefined}
+      actions={isUsed
+        ? [
+          { label: t('settings.type.keep'), onClick: () => { onRemove('keep') } },
+          { label: t('settings.type.forget'), onClick: () => { onRemove('forget') }, disabled: !canMigrate },
+        ]
+        : [{ label: t('settings.type.removeConfirm'), onClick: () => { onRemove('keep') } }]}
+      cancelLabel={t('settings.scene.cancel')}
+      onCancel={onCancel}
+      block={block}
+    />
+  )
+}
+
+/**
+ * 原位确认收起、所在的行消失后，焦点会掉回页面顶部：点的时候记下接着聚焦谁（focusKey 标在那个元素上），渲染完再聚焦。
+ */
+function useFocusNext(): [(key: string) => void, (key: string) => { 'data-focus': string }] {
+  const prefix = useId()
+  const pending = useRef<string | undefined>(undefined)
+  useEffect(() => {
+    const key = pending.current
+    if (key === undefined) return
+    pending.current = undefined
+    ;[...document.querySelectorAll<HTMLElement>('[data-focus]')].find(el => el.dataset.focus === key)?.focus()
+  })
+  return [key => { pending.current = `${prefix}${key}` }, key => ({ 'data-focus': `${prefix}${key}` })]
+}
+
 /**
  * 原位确认，链接样式（同记忆删除的「删除 · 取消」）：问句、动作、取消；Esc 取消且不关掉外层弹层。
- * block：整块显示在行下面（删类型时文字长）。
+ * block：整块显示在行下面（弹层里删类型时文字长）；不给时占满所在的一行（卡脚）。
  */
 function LinkConfirm({ question, note, actions, cancelLabel, onCancel, block = false }: {
   question: string
@@ -545,28 +698,9 @@ function LinkConfirm({ question, note, actions, cancelLabel, onCancel, block = f
 }
 
 export const scenesCss = `
-.pm-scenes { display: flex; flex-direction: column; align-self: stretch; gap: 10px; }
-.pm-scene-list { margin: 0; padding: 0; list-style: none; border: .5px solid var(--pm-line-card); border-radius: var(--dsw-radius-md, 12px); overflow: hidden; }
-.pm-scene { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; }
-.pm-scene + .pm-scene { border-top: .5px solid var(--pm-line); }
-.pm-scene--selected { background: var(--pm-bg-block); }
-.pm-scene-radio { flex: none; margin: 3px 0 0; accent-color: var(--pm-text); }
-.pm-scene-text { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 2px; cursor: pointer; }
-.pm-scene-name { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; line-height: 1.5; color: var(--pm-text); }
-.pm-scene-tag { padding: 0 7px; border-radius: 999px; background: var(--pm-bg-block); font-size: 11px; font-weight: 400; line-height: 18px; color: var(--pm-text-2); }
-.pm-scene--selected .pm-scene-tag { background: var(--pm-bg); }
-.pm-scene-types { font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
+.pm-scene-tag { flex: none; padding: 0 7px; border-radius: 999px; background: var(--pm-hover); font-size: 11px; font-weight: 400; line-height: 18px; color: var(--pm-text-2); }
 .pm-scene-actions { margin-left: auto; display: inline-flex; flex: none; gap: 4px; }
-.pm-scene-add { display: flex; align-items: center; gap: 8px; }
-.pm-scene-overview { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 2px; margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
-.pm-scene-type-link {
-  padding: 0; border: 0; background: none; font: inherit; color: var(--pm-text); cursor: pointer;
-  text-decoration: underline; text-decoration-color: var(--pm-line-input); text-underline-offset: 3px;
-}
-.pm-scene-type-link:disabled { cursor: default; color: var(--pm-text-3); }
 .pm-scene-meta { margin-left: 6px; font-size: 12px; line-height: 1.5; color: var(--pm-text-3); }
-.pm-scene-overview > .pm-scene-meta:first-child { margin-left: 0; }
-.pm-scenes .pm-scene-manage { margin-left: 12px; font-size: 12px; }
 .pm-scene-view { display: flex; flex-direction: column; gap: 14px; }
 .pm-scene-group { display: flex; flex-direction: column; }
 .pm-scene-group-head { display: flex; justify-content: space-between; margin-bottom: 4px; font-size: 12px; font-weight: 600; line-height: 1.5; color: var(--pm-text-2); }
@@ -575,15 +709,31 @@ export const scenesCss = `
 .pm-scene-check input { flex: none; margin: 0; accent-color: var(--pm-text); }
 .pm-scene-check input:disabled + label { color: var(--pm-text-3); }
 .pm-scene-check-label { font-size: 13px; line-height: 1.5; color: var(--pm-text); }
-.pm-scene-check .pm-scene-meta { margin-left: 0; }
 .pm-scene-code { font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 12px; color: var(--pm-text-3); }
+.pm-tile-code { margin-left: auto; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pm-subgroup-hint + .pm-tile-group { margin-top: 12px; }
+.pm-tile-group + .pm-tile-group { margin-top: 16px; }
+.pm-tile-group-title { margin: 0 0 8px; padding-left: 16px; font-size: 12px; font-weight: 500; line-height: 1.5; color: var(--pm-text-2); }
+/* 删掉一张卡后焦点落在组标题上（只供读屏和键盘接着走），不画焦点框 */
+.pm-tile-group-title:focus { outline: none; }
+.pm-tile-removed { display: flex; align-items: center; gap: 6px; margin: 8px 0 0; padding-left: 16px; font-size: 12px; line-height: 1.5; color: var(--pm-text-3); }
+.pm-tile-group-title + .pm-tile-removed { margin-top: 0; }
+.pm-tile-removed + .pm-tile-removed { margin-top: 4px; }
+/* 卡片区里的链接要压过设置页的 .pm-settings .pm-link（13px，后加载） */
+.pm-tile-group .pm-tile-removed .pm-link { font-size: 12px; }
+.pm-tile-removed .pm-sep { margin: 0; }
+.pm-type-view { display: flex; flex-direction: column; gap: 12px; margin: 0; }
+.pm-type-view div { display: flex; flex-direction: column; gap: 2px; }
+.pm-type-view dt { font-size: 12px; font-weight: 500; line-height: 1.5; color: var(--pm-text-2); }
+.pm-type-view dd { margin: 0; font-size: 13px; line-height: 1.5; color: var(--pm-text); }
 .pm-scene-add-type { align-self: flex-start; margin-top: 4px; font-size: 13px; }
 .pm-scene-foot-note { margin-right: auto; font-size: 12px; line-height: 1.5; color: var(--pm-text-3); }
-.pm-scene-confirm { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-left: auto; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
-.pm-scene-confirm--block { display: flex; margin: 2px 0 6px 23px; padding: 8px 12px; border-radius: var(--dsw-radius-md, 12px); background: var(--pm-bg-block); }
+.pm-scene-confirm { display: flex; flex: 1; min-width: 0; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
+.pm-scene-confirm--block { flex-basis: 100%; padding: 8px 12px; border-radius: var(--dsw-radius-md, 12px); background: var(--pm-bg-block); }
+.pm-scene-group .pm-scene-confirm--block { margin: 2px 0 6px 23px; }
 .pm-scene-confirm-note { flex-basis: 100%; color: var(--pm-text-3); }
 .pm-scene-confirm-actions { display: inline-flex; align-items: center; gap: 8px; }
-.pm-scene-confirm .pm-link { font-size: 12px; }
+.pm-scene-confirm .pm-link, .pm-tile .pm-scene-confirm .pm-link { font-size: 12px; }
 .pm-scene-confirm .pm-link:disabled { color: var(--pm-text-3); cursor: default; text-decoration: none; }
 .pm-scene-confirm .pm-sep { margin: 0 -2px; font-style: normal; }
 .pm-scene-confirm .pm-scene-confirm-cancel { font-weight: 400; color: var(--pm-text-2); }

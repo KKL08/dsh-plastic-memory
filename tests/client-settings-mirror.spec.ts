@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { parse } from 'yaml'
 import {
   BUILTIN_TYPE_NAMES, ENTRY_ID, PACKAGE_NAME, PRESET_SCENES as CLIENT_PRESET_SCENES, PRESET_TYPE_NAMES, RETIRED_TYPE_NAMES, SENSITIVITY_NUMBERS,
-  buildOps, fieldsOf,
+  TYPE_DEFINITIONS, buildOps, fieldsOf, removeType,
 } from '../client/settings/config.ts'
 import { applyOps } from '../client/settings/config-form.fake.ts'
 import { Config } from '../src/index.ts'
@@ -19,6 +19,11 @@ describe('设置页手抄的服务端常量', () => {
   it('预设类型、退役类型名单与 PRESET_TYPES、RETIRED_TYPES 一致', () => {
     expect([...PRESET_TYPE_NAMES]).toEqual(PRESET_TYPES.map(t => t.name))
     expect([...RETIRED_TYPE_NAMES]).toEqual(RETIRED_TYPES.map(t => t.name))
+  })
+
+  it('通用五类、预设两类的出厂定义与 BUILTIN_TYPES、PRESET_TYPES 逐字段一致', () => {
+    const server = Object.fromEntries([...BUILTIN_TYPES, ...PRESET_TYPES].map(({ name, ...def }) => [name, def]))
+    expect(TYPE_DEFINITIONS).toEqual(server)
   })
 
   it('编码、办公的出厂组成与 PRESET_SCENES 一致，也是 Config 里 scenes 的默认值', () => {
@@ -47,6 +52,15 @@ describe('设置页手抄的服务端常量', () => {
     const config = new Config(written as never)
     expect(config.template.get()).toBe('scene-1')
     expect(Object.keys(config.scenes.get())).toEqual(['coding', 'scene-1'])
+  })
+
+  it('删预设写进 Config：removedPresetTypes 原样读回，改过的定义去掉，类型表不再有它', () => {
+    const saved = fieldsOf({ customTypes: { decision: { ...TYPE_DEFINITIONS.decision, decayDays: 60 } } })
+    const written = applyOps({ customTypes: { decision: { ...TYPE_DEFINITIONS.decision, decayDays: 60 } } }, buildOps(saved, removeType(saved, 'decision'))!)
+    const config = new Config(written as never)
+    expect(config.removedPresetTypes.get()).toEqual(['decision'])
+    expect(config.customTypes.get()).toEqual({})
+    expect(fieldsOf(written).removedPresets).toEqual(['decision'])
   })
 
   it('设置页不读写用户词典路径：保存别的项时不会把配置文件里的路径写回或清掉', () => {

@@ -48,19 +48,22 @@ async function clickSave(form: FakeConfigForm) {
 }
 
 describe('三组设置的渲染', () => {
-  it('记什么：场景单选列表、我加的类型一览', () => {
+  it('记什么：场景、记忆类型各一张列表，页面上不写当前场景的说明', () => {
     setup({ value: section({ template: 'office', customTypes: { 'domain-term': { label: '术语', description: 'd', whenToSave: 'w', recall: 'search', decayDays: null, governancePriority: 'medium' } } }) })
     expect(screen.getByRole('heading', { name: '记什么' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: '场景' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: '记忆类型' })).toBeInTheDocument()
     expect(radio('办公')).toBeChecked()
     expect(radio('编码')).not.toBeChecked()
     expect(radio('通用')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '术语' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '管理 ›' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '编辑 术语' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '管理 ›' })).toBeNull()
+    expect(screen.queryByText(/^当前：/)).toBeNull()
   })
 
   it('怎么用：上限数字、超出上限两种模式的说明、溯源三档', () => {
     setup({ value: section({ snapshotTokenBudget: 6000, snapshotOverflow: 'strict', evidenceLookup: 'active' }) })
-    expect(screen.getByLabelText('自动带入的记忆上限（token）')).toHaveValue('6000')
+    expect(screen.getByLabelText('对话开始时自动带入的记忆上限（token）')).toHaveValue('6000')
     expect(screen.getByText(/^默认 4,000，/)).toBeInTheDocument()
     expect(tab('超出上限时', '严格按上限')).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByText(/自动放宽：超出的照常带入/)).toBeInTheDocument()
@@ -87,6 +90,20 @@ describe('三组设置的渲染', () => {
     expect(screen.queryByRole('textbox', { name: '记忆文件位置' })).toBeNull()
   })
 
+  it('外观：主题色两档，默认艾拉主题色；改成大肥鱼主题色确认后写 accent', async () => {
+    const { form } = setup()
+    expect(screen.getByRole('heading', { name: '外观' })).toBeInTheDocument()
+    expect(tab('主题色', '艾拉主题色')).toHaveAttribute('aria-selected', 'true')
+    fireEvent.click(tab('主题色', '大肥鱼主题色'))
+    fireEvent.click(save())
+    expect(within(confirmDialog()).getAllByRole('listitem').map(el => el.textContent)).toEqual(['主题色：艾拉主题色 → 大肥鱼主题色'])
+    expect(within(confirmDialog()).queryByText(/重新带入记忆/)).toBeNull()
+    await act(async () => { fireEvent.click(within(confirmDialog()).getByRole('button', { name: '保存' })) })
+    await waitFor(() => { expect(form.calls).toHaveLength(1) })
+    expect(form.calls[0]!.ops).toEqual([{ op: 'set', path: ['accent'], value: 'blue-whale' }])
+    expect(screen.queryByText(/重新带入记忆/)).toBeNull()
+  })
+
   it('还没读到视图时 memoryRoot 显示配置值，都没有就提示开会话', () => {
     const { unmount } = setup({ views: false, value: section({ memoryRoot: '/data/mem' }) })
     expect(screen.getByText('/data/mem')).toBeInTheDocument()
@@ -109,15 +126,17 @@ describe('保存：revision 冻结、冲突、非法值', () => {
   it('点保存先弹窗列出改了哪几项（名称：旧值 → 新值），取消不提交、草稿保留', () => {
     const { form } = setup()
     fireEvent.click(radio('办公'))
-    fireEvent.change(screen.getByLabelText('自动带入的记忆上限（token）'), { target: { value: '5000' } })
+    fireEvent.change(screen.getByLabelText('对话开始时自动带入的记忆上限（token）'), { target: { value: '5000' } })
     fireEvent.click(tab('提醒的灵敏度', '积极'))
     fireEvent.click(save())
     const items = within(confirmDialog()).getAllByRole('listitem').map(el => el.textContent)
     expect(items).toEqual([
       '当前场景：编码 → 办公',
-      '自动带入的记忆上限（token）：4000 → 5000',
+      '对话开始时自动带入的记忆上限（token）：4000 → 5000',
       '提醒的灵敏度：标准 → 积极',
     ])
+    expect(within(confirmDialog()).getByText('保存后不再新增「可复用流程」类记忆，已有的仍会带入、能搜到。')).toBeInTheDocument()
+    expect(within(confirmDialog()).getByText('保存后，已开着的对话发下一条消息时会重新带入记忆，这条消息多用一些 token。')).toBeInTheDocument()
     fireEvent.click(within(confirmDialog()).getByRole('button', { name: '取消' }))
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(form.calls).toHaveLength(0)
@@ -129,9 +148,9 @@ describe('保存：revision 冻结、冲突、非法值', () => {
     const { form } = setup()
     expect(save()).toBeDisabled()
     fireEvent.click(tab('超出上限时', '严格按上限'))
-    fireEvent.change(screen.getByLabelText('自动带入的记忆上限（token）'), { target: { value: '5000' } })
+    fireEvent.change(screen.getByLabelText('对话开始时自动带入的记忆上限（token）'), { target: { value: '5000' } })
     fireEvent.click(tab('提醒的灵敏度', '积极'))
-    expect(screen.getByText('已有对话的下一条消息会重新载入记忆，多消耗一些 token。')).toBeInTheDocument()
+    expect(screen.queryByText(/重新带入记忆/)).toBeNull()
     await clickSave(form)
     expect(form.calls).toEqual([{
       expectedRevision: 1,
@@ -143,7 +162,18 @@ describe('保存：revision 冻结、冲突、非法值', () => {
     }])
     await waitFor(() => { expect(save()).toBeDisabled() })
     expect(form.value.snapshotTokenBudget).toBe(5000)
-    expect(screen.queryByText(/重新载入记忆/)).toBeNull()
+    expect(screen.queryByText(/重新带入记忆/)).toBeNull()
+  })
+
+  it('保存行写还有几项改动没保存（和确认框的行数一致），没有改动时不写', async () => {
+    const { form } = setup()
+    expect(screen.queryByText(/项改动未保存/)).toBeNull()
+    fireEvent.click(radio('办公'))
+    expect(save()).toHaveAccessibleDescription('1 项改动未保存')
+    fireEvent.click(tab('提醒的灵敏度', '积极'))
+    expect(screen.getByText('2 项改动未保存')).toBeInTheDocument()
+    await clickSave(form)
+    await waitFor(() => { expect(screen.queryByText(/项改动未保存/)).toBeNull() })
   })
 
   it('编辑中别处改了配置：保存仍带冻结的 revision，被拒后提示冲突、锁住保存；载入最新配置后按新 revision 再改', async () => {
@@ -169,7 +199,7 @@ describe('保存：revision 冻结、冲突、非法值', () => {
 
   it('非法上限就地标红、不提交', () => {
     const { form } = setup()
-    const input = screen.getByLabelText('自动带入的记忆上限（token）')
+    const input = screen.getByLabelText('对话开始时自动带入的记忆上限（token）')
     for (const bad of ['-5', '0', '3.5', 'abc', '']) {
       fireEvent.change(input, { target: { value: bad } })
       expect(input).toHaveAttribute('aria-invalid', 'true')
@@ -201,20 +231,22 @@ describe('保存：revision 冻结、冲突、非法值', () => {
   })
 })
 
-describe('上限说明：按字符估算的口径', () => {
+describe('上限说明：默认值约合多少字', () => {
   const description = (input: HTMLElement) => document.getElementById(input.getAttribute('aria-describedby')!)
 
-  it('写明默认 4,000 约合多少字，以及中日韩文字、全角标点与其余字符各按多少估算', () => {
+  it('写明默认 4,000 约合多少字，不展开按字符换算的口径', () => {
     setup()
-    const hint = description(screen.getByLabelText('自动带入的记忆上限（token）'))
-    expect(hint).toHaveTextContent('默认 4,000，约合 6,700 个汉字或 13,000 个英文字符：中日韩文字和全角标点每个按 0.6 token 估算，其余字符按 0.3。')
+    const hint = description(screen.getByLabelText('对话开始时自动带入的记忆上限（token）'))
+    expect(hint).toHaveTextContent('默认 4,000，约合 6,700 个汉字或 13,000 个英文字符。')
+    expect(hint).not.toHaveTextContent('0.6 token')
     expect(hint).toHaveTextContent('对话中检索到的记忆不计入。')
   })
 
   it('英文文案同一口径', () => {
     render(<PanelShell gateway={createFakeGateway()} t={createTranslator(en)}><SettingsPage form={createFakeConfigForm()} onOpenMemoryPage={() => {}} now={NOW} /></PanelShell>)
-    const hint = description(screen.getByLabelText('Auto-loaded memory limit (tokens)'))
-    expect(hint).toHaveTextContent('Default 4,000, about 6,700 Chinese characters or 13,000 English characters: each CJK character or full-width punctuation mark counts as 0.6 tokens, any other character 0.3.')
+    const hint = description(screen.getByLabelText('Limit for memories auto-loaded at chat start (tokens)'))
+    expect(hint).toHaveTextContent('Default 4,000, about 6,700 Chinese characters or 13,000 English characters.')
+    expect(hint).not.toHaveTextContent('0.6 tokens')
     expect(hint).toHaveTextContent("Memories found by search during a chat don't count.")
   })
 })
@@ -223,7 +255,7 @@ describe('用户词典路径', () => {
   it('设置页不再显示这一项；保存别的项时不写回、不清掉配置文件里的路径', async () => {
     const { form } = setup({ value: section({ search: { userDictionaryPath: '/opt/dict/domain.txt' } }) })
     expect(screen.queryByText('用户词典路径')).toBeNull()
-    fireEvent.change(screen.getByLabelText('自动带入的记忆上限（token）'), { target: { value: '5000' } })
+    fireEvent.change(screen.getByLabelText('对话开始时自动带入的记忆上限（token）'), { target: { value: '5000' } })
     await clickSave(form)
     expect(form.calls[0]!.ops).toEqual([{ op: 'set', path: ['snapshotTokenBudget'], value: 5000 }])
     expect(form.value.search).toEqual({ userDictionaryPath: '/opt/dict/domain.txt' })

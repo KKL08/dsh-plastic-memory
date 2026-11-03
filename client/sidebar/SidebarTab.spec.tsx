@@ -57,7 +57,7 @@ const vertical: PendingItem = { kind: 'conflict-vertical', level: 'your-call', d
 
 /** 插件配置，去处按参数。 */
 function configWith(globalPromoteTarget: PluginConfig['globalPromoteTarget']): PluginConfig {
-  return { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget }
+  return { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget, accent: 'ella' }
 }
 
 function setup(views: FakeGatewayInit['views'], respond?: FakeGatewayInit['respond'], config: PluginConfig = configWith('plugin-global')) {

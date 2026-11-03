@@ -11,7 +11,7 @@ import { PendingTab } from './PendingTab.tsx'
 // 待处理 tab：给定一份待处理视图，断言每类卡渲染出什么、点按钮向网关发了什么命令。
 
 const SESSION = { kind: 'ready', sessionId: 's1', cwd: '/w/app' } as const
-const config: PluginConfig = { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget: 'plugin-global' }
+const config: PluginConfig = { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget: 'plugin-global', accent: 'ella' }
 
 const A = memory({ id: 'a', content: '测试用真实 Postgres。', sourceMode: 'user-explicit' })
 const B = memory({ id: 'b', content: '测试里 mock 数据库就行。', sourceMode: 'agent-inferred' })

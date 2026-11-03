@@ -118,7 +118,7 @@ dsh plugin --profile web add dsh-plastic-memory@0.1.1-beta.5
 
 - **左栏「记忆」页**：四个 tab。「待处理」列出等你拍板的事——体检发现的冲突、适合提升为全局的记忆、超出上限的提醒、密钥、读不出的文件，每一项就地处理（以哪条为准、撤销、提升或留在本项目、彻底删除密钥）；「全部记忆」按项目 / 全局浏览、打开文件或在访达中显示、删除；「健康」看每一层的分数和问题，右上「体检当前项目」随时体检；「最近删除」找回 14 天内删掉的记忆，被裁决删掉的会标明以哪条为准。页面不要求正在对话，它借用当前项目的一个空闲会话执行命令；一个会话都没有时只显示空态。
 - **右侧栏「记忆」tab**：这次对话带入了哪些记忆、占了多少上下文、模型新记了什么；带入的记忆之间有冲突可以就地裁决。
-- **插件设置页**（宿主插件管理里的本插件详情）：场景（选当前场景，新建、编辑、删除场景，在场景弹层里增删改自定义类型）、带入上限与超出上限的模式、溯源记忆出处、体检开关与灵敏度、全局记忆的去向，外加一张状态卡。保存即写回 profile 的 `cordis.patch.yml`，不用重启。
+- **插件设置页**（宿主插件管理里的本插件详情）：场景（选当前场景，新建、编辑、删除场景）、记忆类型（查看基础 5 类，改、删、恢复预设类型，增删改自定义类型）、带入上限与超出上限的模式、溯源记忆出处、体检开关与灵敏度、全局记忆的去向，外加一张状态卡。保存即写回 profile 的 `cordis.patch.yml`，不用重启。
 
 对话里每次记住东西都有一张可删的卡；左栏图标上的圆点只在有事等你决定时亮（琥珀），发现密钥时变红。
 
@@ -133,11 +133,11 @@ dsh plugin --profile web add dsh-plastic-memory@0.1.1-beta.5
 
 | 类型 (`Type`)  | 说明                   |
 | ------------ | -------------------- |
-| `profile`    | 用户的个人身份、专业角色与能力画像    |
-| `preference` | 经过纠正与确认的准则、行为习惯      |
-| `knowledge`  | 跨越项目周期的通用事实、业务常识与规则  |
-| `project`    | 与当前项目生命周期强相关的临时状态与决策 |
-| `reference`  | 外部系统与资源的索引           |
+| `profile`    | 用户的身份、背景、所在地、兴趣与能力画像 |
+| `preference` | 用户提出、纠正或确认过的做事要求与习惯 |
+| `knowledge`  | 经过确认、以后还会用到的事实、规则与经验 |
+| `project`    | 进行中的项目或个人事项的当前状态与安排 |
+| `reference`  | 资料、文件与资源该去哪里找         |
 
 
 
@@ -152,6 +152,8 @@ dsh plugin --profile web add dsh-plastic-memory@0.1.1-beta.5
 - 自己建的场景：在设置页新建，默认勾上基础 5 类，可以去掉。
 
 编码、办公可以增减类型，也可以删除。每个场景 1 到 8 类，通用以外最多建 5 个场景。同一时间只有一个当前场景，整个 profile 共用。切换场景只影响新增：类型池里所有类型的已有记忆照常带入、能搜到。
+
+基础 5 类固定，设置页里只能查看定义。两个预设类型可以改定义（英文名不变），也可以删除：删掉的不再新增，已有记忆照常读取，之后能在设置页恢复。改过的预设存成 `customTypes` 里的同名一项，删掉的列在 `removedPresetTypes` 里。
 
 旧版办公模板的 `commitment`（承诺）并进了 `decision`，`person`（人物）已移除。这两类已有的记忆照常读取，但不能再新增。
 
@@ -181,6 +183,7 @@ customTypes:
     label: 团队仪式
     description: 定期执行的团队流程与规范
     whenToSave: 用户提到固定周期执行的流程或仪式时
+    howToUse: 安排相关工作时按记下的周期和规范来
     recall: search
     governancePriority: low
     decayDays: 90
@@ -191,7 +194,7 @@ scenes:
 template: scene-mh2k9x
 ```
 
-`decayDays` 是衰退天数：超过这个天数没确认的记忆只标为可能过时，不会失效；`null` 表示不衰退。
+`description`、`whenToSave` 写给模型看：保存记忆时，模型按它们判断这条该归哪一类、怎么写。`howToUse` 选填，写这类记忆带入对话后怎么用，和记忆一起交给模型。`decayDays` 是衰退天数：超过这个天数没确认的记忆只标为可能过时，不会失效；`null` 表示不衰退。
 
 ### 子 agent 写的记忆
 
@@ -296,10 +299,12 @@ DeepSeek Harness 派出的子 agent（包括子 agent 再往下派的）也能�
 | `template`                       | `'coding'`        | 当前场景：`custom`（通用）/ `coding` / `office` / 自己建的场景 id      |
 | `customTypes`                    | `{}`              | 自定义记忆类型定义字典，进入类型池                                       |
 | `scenes`                         | 编码、办公两项          | 场景定义：`label` 场景名、`types` 包含的类型（1 到 8 类）。通用场景固定，不写在这里 |
+| `removedPresetTypes`             | `[]`              | 删掉的预设类型（`procedure`、`decision`）：不再新增，已有记忆照常读取          |
 | `governance.enabled`             | `true`            | 是否启用主动治理层（体检、健康分、提权）                                         |
 | `governance.health.sensitivity`  | `'normal'`        | 健康警报灵敏度：`conservative` / `normal` / `proactive`              |
 | `governance.globalPromoteTarget` | `'plugin-global'` | 提权目标：`plugin-global`（插件全局域）或 `agents-md`（`~/.dsh/AGENTS.md`） |
 | `subagent.maxSavesPerSession`    | `10`              | 每个子 agent 会话最多新建几条记忆（只能在配置文件里改），改了下一次保存生效 |
+| `accent`                         | `'ella'`          | 界面主题色：`ella`（艾拉主题色）/ `blue-whale`（大肥鱼主题色，跟随 DeepSeek Harness 品牌蓝） |
 | `memoryRoot`                     | `''`              | 存储根路径，缺省为 `${DSH_HOME:-~/.dsh}/memories`                     |
 | `search.userDictionaryPath`      | 不设                | 用户词典路径（只能在配置文件里改）：追加在内置词典之上，改了下一次搜索生效。要填绝对路径；每行「词 词频 词性」，词频必填，不带词频的词条不生效，例如 `插件记忆 10 n`。没装 `@node-rs/jieba` 时不生效 |
 

@@ -1883,6 +1883,24 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect(t.snapshotCount()).toBe(2)
   })
 
+  it('改主题色、提升路径、体检灵敏度这类不进快照的设置：冻结快照不重建；改进快照的设置才重建', async () => {
+    const t = await setup()
+    await t.putGlobal({ id: 'mem_k', type: 'knowledge', name: '报销截止', content: '报销截止每月 25 日', summary: '报销截止日' })
+    const first = await t.assembleOnce()
+    // 盘上新增一条记忆（绕过 memory_save，不标过期）：快照只有重建时才会带上它
+    await t.putGlobal({ id: 'mem_new', type: 'knowledge', name: '差旅标准', content: '差旅住宿每晚不超过 500 元', summary: '差旅标准' })
+
+    expect(await t.update({
+      accent: 'blue-whale',
+      governance: { globalPromoteTarget: 'agents-md', health: { sensitivity: 'proactive' } },
+      subagent: { maxSavesPerSession: 9 },
+    })).toEqual([['governance', 'health', 'sensitivity'], ['governance', 'globalPromoteTarget'], ['subagent', 'maxSavesPerSession'], ['accent']])
+    expect(await t.assembleOnce()).toBe(first)
+
+    await t.update({ accent: 'blue-whale', governance: { globalPromoteTarget: 'agents-md', health: { sensitivity: 'proactive' } }, subagent: { maxSavesPerSession: 9 }, evidenceLookup: 'active' })
+    expect(await t.assembleOnce()).toContain('mem_new')
+  })
+
   it('改场景与自定义类型：memory_save 重注册（类型枚举重算），写时只认新场景，带入按类型池定义', async () => {
     const t = await setup()
     await t.putGlobal({ id: 'mem_reg', type: 'regulation', content: '数据出境要先过安全评估', summary: '数据出境' })
@@ -1906,6 +1924,17 @@ describe('配置热生效（loader/volatile-update）', () => {
     await expect(t.save({ type: 'procedure', name: '流程', content: '旧场景的类型' })).rejects.toThrow(/type/)
     await expect(t.save({ type: 'profile', name: '画像', content: '场景去掉的通用类型' })).rejects.toThrow(/type/)
     expect(await t.save({ type: 'decision', name: '定了用 A', content: '周会定了选型用 A 方案' })).toMatchObject({ kind: 'saved' })
+  })
+
+  it('删掉预设类型：memory_save 重注册、不能再新增；已有记忆照常带入，分组名按出厂定义', async () => {
+    const t = await setup()
+    await t.putGlobal({ id: 'mem_proc', type: 'procedure', name: '发版流程', summary: '发版步骤' })
+    expect(await t.update({ removedPresetTypes: ['procedure'] })).toEqual([['removedPresetTypes']])
+    expect(t.tool('memory_save').parameters.properties.type!.enum).not.toContain('procedure')
+    await expect(t.save({ type: 'procedure', name: '流程', content: '删掉的预设' })).rejects.toThrow(/type/)
+    expect(await t.assembleOnce()).toContain('## 可复用流程（procedure）\n- [mem_proc] 发版流程（发版步骤）')
+    await t.update({ removedPresetTypes: [] })
+    expect(t.tool('memory_save').parameters.properties.type!.enum).toContain('procedure')
   })
 
   it('自定义类型只加进类型池不生效；勾进当前场景后不重启就能 memory_save', async () => {

@@ -13,8 +13,8 @@ import { createContext, useContext, useEffect, useMemo, useState, useSyncExterna
 import {
   GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, encodeMemoryCommand, sessionViewFile,
   checkupViewSchema, deletedViewSchema, healthViewSchema, libraryViewSchema, pendingViewSchema, sessionViewSchema, workspaceMapViewSchema,
-  layerOfMemory, memoryCommandResultSchema,
-  type CheckupView, type DeletedView, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCard, type MemoryCommand, type MemoryCommandResult,
+  ACCENTS, layerOfMemory, memoryCommandResultSchema,
+  type Accent, type CheckupView, type DeletedView, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCard, type MemoryCommand, type MemoryCommandResult,
   type PendingItem, type PendingView, type SessionView, type WorkspaceMapView,
 } from '../src/gui/contract.ts'
 import type {
@@ -95,6 +95,7 @@ export interface PluginConfig {
   snapshotOverflow: Extract<PendingItem, { kind: 'overflow' }>['mode']
   governanceEnabled: boolean
   globalPromoteTarget: 'plugin-global' | 'agents-md'
+  accent: Accent
 }
 
 /** 删除状态的一份快照：soft 进了最近删除、可恢复；hard 是彻底删除；undefined = 没删或看不出来。 */
@@ -360,11 +361,13 @@ export function fileAddress(sessionId: string, path: string): string {
 /** 宿主配置段（schema 解析后的值）→ 界面用到的几项；结构不对为 undefined。 */
 export function toPluginConfig(value: unknown): PluginConfig | undefined {
   if (typeof value !== 'object' || value === null) return undefined
-  const v = value as { snapshotTokenBudget?: unknown; snapshotOverflow?: unknown; governance?: { enabled?: unknown; globalPromoteTarget?: unknown } }
+  const v = value as { snapshotTokenBudget?: unknown; snapshotOverflow?: unknown; governance?: { enabled?: unknown; globalPromoteTarget?: unknown }; accent?: unknown }
   const g = v.governance
   if (typeof v.snapshotTokenBudget !== 'number' || (v.snapshotOverflow !== 'relax' && v.snapshotOverflow !== 'strict')
     || typeof g?.enabled !== 'boolean' || (g.globalPromoteTarget !== 'plugin-global' && g.globalPromoteTarget !== 'agents-md')) return undefined
-  return { snapshotTokenBudget: v.snapshotTokenBudget, snapshotOverflow: v.snapshotOverflow, governanceEnabled: g.enabled, globalPromoteTarget: g.globalPromoteTarget }
+  // 主题色只管外观：取不到或不认识时按艾拉主题色，不让整份配置作废
+  const accent = ACCENTS.find(a => a === v.accent) ?? 'ella'
+  return { snapshotTokenBudget: v.snapshotTokenBudget, snapshotOverflow: v.snapshotOverflow, governanceEnabled: g.enabled, globalPromoteTarget: g.globalPromoteTarget, accent }
 }
 
 // —— 宿主实现 ——

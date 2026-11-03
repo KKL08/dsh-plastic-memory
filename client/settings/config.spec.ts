@@ -1,9 +1,10 @@
 // 设置页配置模型的纯函数：场景的解析与写入、场景 id、类型迁移的合并、类型表单校验。
 import { describe, expect, it } from 'vitest'
 import {
-  BUILTIN_TYPE_NAMES, EMPTY_TYPE_DRAFT, GENERAL_SCENE, PRESET_SCENES, buildOps, droppedTypes, fieldsOf, forgetMigrations, isPresetEdited,
-  keepMigrations, memoryCountOf, nextSceneId, pendingNames, removeType, renameMigrations, renameType, sceneChanges, sceneTypes, validateSceneDraft,
-  validateTypeDraft, type CustomType, type SettingsFields,
+  BUILTIN_TYPE_NAMES, EMPTY_TYPE_DRAFT, GENERAL_SCENE, PRESET_SCENES, TYPE_DEFINITIONS, buildOps, customTypeChanges, droppedTypes, fieldsOf,
+  forgetMigrations, isPresetEdited, isPresetTypeEdited, keepMigrations, memoryCountOf, nextSceneId, pendingNames, presetSceneTypes, presetTypeChanges,
+  removeType, renameMigrations, renameType, restorePresetType, sceneChanges, sceneTypes, typePool, validateSceneDraft, validateTypeDraft,
+  type CustomType, type SettingsFields,
 } from './config.ts'
 
 const term: CustomType = { label: '术语', description: 'd', whenToSave: 'w', recall: 'search', decayDays: null, governancePriority: 'medium' }
@@ -85,11 +86,11 @@ describe('类型改名、删除与迁移', () => {
   const counts = new Map([['term', 12], ['client', 3]])
 
   it('改名时场景组成一并换成新名字，列表位置不变；删除时从场景里去掉', () => {
-    const pool = { customTypes: { term, client: { ...term, label: '客户名' } }, scenes: { office: { label: '办公', types: ['decision', 'term'] } } }
+    const pool = { customTypes: { term, client: { ...term, label: '客户名' } }, scenes: { office: { label: '办公', types: ['decision', 'term'] } }, removedPresets: [] }
     const renamed = renameType(pool, 'term', 'glossary', term)
     expect(Object.keys(renamed.customTypes)).toEqual(['glossary', 'client'])
     expect(renamed.scenes.office!.types).toEqual(['decision', 'glossary'])
-    expect(removeType(pool, 'term')).toEqual({ customTypes: { client: { ...term, label: '客户名' } }, scenes: { office: { label: '办公', types: ['decision'] } } })
+    expect(removeType(pool, 'term')).toEqual({ customTypes: { client: { ...term, label: '客户名' } }, scenes: { office: { label: '办公', types: ['decision'] } }, removedPresets: [] })
   })
 
   it('跟着改名：条数归到新名字；改回原名时迁移去掉', () => {
@@ -133,5 +134,95 @@ describe('类型表单校验', () => {
     expect(validateTypeDraft({ ...filled, name: 'decision' }, { names: ['procedure', 'decision'], labels: [] })).toEqual({ ok: false, errors: { name: 'name-taken' } })
     expect(validateTypeDraft({ ...filled, name: 'term' }, { names: [], labels: [], pending: ['term'] })).toEqual({ ok: false, errors: { name: 'name-pending' } })
     expect(validateTypeDraft({ ...filled, name: 'commitment' }, { names: ['procedure', 'decision'], labels: [] })).toMatchObject({ ok: true, name: 'commitment' })
+  })
+
+  it('「怎么用」选填：空着不写进类型，填了去掉首尾空白写进去', () => {
+    expect(EMPTY_TYPE_DRAFT.howToUse).toBe('')
+    const blank = validateTypeDraft({ ...filled, howToUse: '  ' }, { names: [], labels: [] })
+    expect(blank.ok && blank.type).toEqual({ label: '术语', description: 'd', whenToSave: 'w', recall: 'search', decayDays: null, governancePriority: 'medium' })
+    const used = validateTypeDraft({ ...filled, howToUse: ' 遇到这个词时按记下的含义理解 ' }, { names: [], labels: [] })
+    expect(used.ok && used.type.howToUse).toBe('遇到这个词时按记下的含义理解')
+  })
+})
+
+describe('预设类型：改、删、恢复', () => {
+  const edited: CustomType = { ...TYPE_DEFINITIONS.procedure, label: '我的流程' }
+
+  it('removedPresetTypes 只认预设名、去重；删掉的预设不进类型池，场景里列了也不生效', () => {
+    const fields = fieldsOf({ removedPresetTypes: ['decision', 'profile', 'decision', 'ghost'] })
+    expect(fields.removedPresets).toEqual(['decision'])
+    expect(fieldsOf({}).removedPresets).toEqual([])
+    expect(typePool({ decision: term, term }, ['decision'])).toEqual([...BUILTIN_TYPE_NAMES, 'procedure', 'term'])
+    const scenes = { office: PRESET_SCENES.office }
+    expect(sceneTypes({ scenes, customTypes: {}, removedPresets: ['decision'] }, 'office')).toEqual([...BUILTIN_TYPE_NAMES])
+  })
+
+  it('同名 customTypes 和出厂定义不同才算改过', () => {
+    expect(isPresetTypeEdited('procedure', {})).toBe(false)
+    expect(isPresetTypeEdited('procedure', { procedure: { ...TYPE_DEFINITIONS.procedure } })).toBe(false)
+    expect(isPresetTypeEdited('procedure', { procedure: edited })).toBe(true)
+    const { howToUse: _cleared, ...withoutUsage } = TYPE_DEFINITIONS.procedure
+    expect(isPresetTypeEdited('procedure', { procedure: withoutUsage })).toBe(true)
+    expect(isPresetTypeEdited('term', { term })).toBe(false)
+  })
+
+  it('删预设：从场景里去掉、改动丢掉、名字记进 removedPresets；写配置是整段 set', () => {
+    const saved = base({ customTypes: { procedure: edited } })
+    const removed = { ...saved, ...removeType(saved, 'procedure') }
+    expect(removed.removedPresets).toEqual(['procedure'])
+    expect(removed.customTypes).toEqual({})
+    expect(removed.scenes.coding!.types).not.toContain('procedure')
+    expect(buildOps(saved, removed)).toEqual(expect.arrayContaining([
+      { op: 'unset', path: ['customTypes', 'procedure'] },
+      { op: 'set', path: ['removedPresetTypes'], value: ['procedure'] },
+    ]))
+    // 删自建类型不碰 removedPresets
+    expect(removeType(base({ customTypes: { term } }), 'term').removedPresets).toEqual([])
+  })
+
+  it('恢复预设：从 removedPresets 去掉，删除时选的移到最近删除一并撤销，场景不自动勾回', () => {
+    const saved = base({ removedPresets: ['decision', 'procedure'] })
+    const { pool, migrations } = restorePresetType(saved, { decision: { action: 'forget' }, term: { action: 'forget' } }, 'decision')
+    expect(pool.removedPresets).toEqual(['procedure'])
+    expect(migrations).toEqual({ term: { action: 'forget' } })
+    // 配置文件里只写了 removedPresetTypes、场景走默认值时，办公还列着 decision：恢复后不能因此自动勾回
+    expect(pool.scenes.office!.types).toEqual([...BUILTIN_TYPE_NAMES])
+    expect(pool.scenes.coding).toBe(saved.scenes.coding)
+  })
+
+  it('恢复预设：配置里残留的同名定义一并去掉，回到出厂定义', () => {
+    const saved = base({ removedPresets: ['procedure'], customTypes: { procedure: { ...TYPE_DEFINITIONS.procedure, label: '旧流程' }, term } })
+    const { pool } = restorePresetType(saved, {}, 'procedure')
+    expect(pool.customTypes).toEqual({ term })
+    expect(buildOps(saved, { ...saved, ...pool })).toEqual(expect.arrayContaining([{ op: 'unset', path: ['customTypes', 'procedure'] }]))
+  })
+
+  it('配置文件里手写删掉预设、场景还列着它：编码、办公不算改过', () => {
+    const fields = fieldsOf({ removedPresetTypes: ['procedure'] })
+    expect(isPresetEdited('coding', fields.scenes.coding!, fields.removedPresets)).toBe(false)
+    expect(isPresetEdited('coding', { label: '编码', types: ['procedure', 'profile'] }, ['procedure'])).toBe(true)
+  })
+
+  it('编码、办公的出厂组成先去掉已删的预设再比、再恢复默认', () => {
+    expect(presetSceneTypes('coding', ['procedure'])).toEqual([...BUILTIN_TYPE_NAMES])
+    expect(isPresetEdited('coding', { label: '编码', types: [...BUILTIN_TYPE_NAMES] }, ['procedure'])).toBe(false)
+    expect(isPresetEdited('coding', { label: '编码', types: [...BUILTIN_TYPE_NAMES] }, [])).toBe(true)
+  })
+
+  it('保存确认的汇总：预设单独一组（改过、恢复默认、删除、恢复），我加的不含预设', () => {
+    const saved = base({ customTypes: { procedure: edited, term }, removedPresets: ['decision'] })
+    const draft = base({ customTypes: { term, glossary: term }, removedPresets: [] })
+    expect(presetTypeChanges(saved, draft)).toEqual({ edited: [], reset: ['procedure'], removed: [], restored: ['decision'] })
+    expect(presetTypeChanges(base(), { ...base(), customTypes: { decision: { ...TYPE_DEFINITIONS.decision, decayDays: 60 } } }))
+      .toEqual({ edited: ['decision'], reset: [], removed: [], restored: [] })
+    const deleted = { ...saved, ...removeType(saved, 'procedure') }
+    expect(presetTypeChanges(saved, deleted)).toEqual({ edited: [], reset: [], removed: ['procedure'], restored: [] })
+    expect(customTypeChanges(saved.customTypes, draft.customTypes)).toEqual({ added: ['术语'], edited: [], removed: [] })
+  })
+
+  it('新建类型用了已删的预设名：单独提示（不是重名）', () => {
+    const draft = { ...EMPTY_TYPE_DRAFT, name: 'decision', label: '决策', description: 'd', whenToSave: 'w' }
+    const result = validateTypeDraft(draft, { names: ['procedure', 'decision'], labels: [], removedPresets: ['decision'] })
+    expect(result).toMatchObject({ ok: false, errors: { name: 'name-removed-preset' } })
   })
 })

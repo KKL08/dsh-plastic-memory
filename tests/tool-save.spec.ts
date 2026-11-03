@@ -262,9 +262,9 @@ describe('renderSaveResult', () => {
 })
 
 describe('renderSaveDescription（memory_save 工具描述来源）', () => {
-  it('含通用引导层与各类型何时记清单', () => {
+  it('含通用引导层与各类型记什么、什么时候记', () => {
     const description = registry.renderSaveDescription()
-    expect(description).toContain('各类型何时记')
+    expect(description).toContain('各类型记什么、什么时候记')
     expect(description).toContain('preference')
   })
 
@@ -275,6 +275,20 @@ describe('renderSaveDescription（memory_save 工具描述来源）', () => {
   it('交代记录是过程动作：回复不特意说记下了，用户明确要求记住时才应一句', () => {
     const description = registry.renderSaveDescription()
     expect(description).toContain('不要特意说「记下了」')
-    expect(description).toContain('只有用户明确要你记住某件事时，才简短应一句')
+    expect(description).toContain('只在这时简短应一句')
+  })
+
+  it('update 与 supersedes 分工：旧说法要留档时新建一条、supersedes 填旧的 id', () => {
+    expect(registry.renderSaveDescription()).toContain('更新已有记忆传 action=update 和目标 id，别重复新增；旧说法要留档时（比如决定改了），新建一条、supersedes 填旧记忆的 id。')
+  })
+
+  it('用户要求记住时记内容本身，不记「用户让我记」这个动作', () => {
+    expect(registry.renderSaveDescription()).toContain('按最贴合的类型马上记下内容本身')
+  })
+
+  it('相对时间换成具体日期；确定不了的保留原来的精度，不编日期', () => {
+    const description = registry.renderSaveDescription()
+    expect(description).toContain('落库时换成具体日期')
+    expect(description).toContain('确定不了具体日期的保留原来的精度')
   })
 })

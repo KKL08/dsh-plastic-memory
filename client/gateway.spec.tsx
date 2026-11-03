@@ -801,7 +801,7 @@ describe('createHostGateway', () => {
   })
 
   it('配置：按 entryId 取表单，ready 时折成界面用的几项；setConfig 走单字段 set', async () => {
-    const value = { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governance: { enabled: true, globalPromoteTarget: 'agents-md' } }
+    const value = { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governance: { enabled: true, globalPromoteTarget: 'agents-md' }, accent: 'blue-whale' }
     let snapshot: ConfigFormSnapshot = { status: 'loading', value: undefined, revision: undefined, writable: true }
     const listeners = new Set<() => void>()
     const set = vi.fn(async () => true)
@@ -810,7 +810,7 @@ describe('createHostGateway', () => {
     const { result } = renderHook(() => gateway.useConfig())
     expect(result.current).toBeUndefined()
     act(() => { snapshot = { status: 'ready', value, revision: 1, writable: true }; for (const fn of listeners) fn() })
-    expect(result.current).toEqual({ snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget: 'agents-md' })
+    expect(result.current).toEqual({ snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget: 'agents-md', accent: 'blue-whale' })
     expect(get).toHaveBeenCalledWith(ENTRY_ID)
     expect(await gateway.setConfig('snapshotTokenBudget', 5000)).toBe(true)
     expect(set).toHaveBeenCalledWith('snapshotTokenBudget', 5000)
@@ -821,6 +821,12 @@ describe('createHostGateway', () => {
     expect(renderHook(() => gateway.useConfig()).result.current).toBeUndefined()
     expect(await gateway.setConfig('snapshotTokenBudget', 5000)).toBe(false)
     expect(toPluginConfig({ snapshotTokenBudget: '4000' })).toBeUndefined()
+  })
+
+  it('主题色取不到或不认识时按艾拉主题色，不连累其余几项', () => {
+    const base = { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governance: { enabled: true, globalPromoteTarget: 'plugin-global' } }
+    expect(toPluginConfig(base)?.accent).toBe('ella')
+    expect(toPluginConfig({ ...base, accent: 'neon' })?.accent).toBe('ella')
   })
 
   it('打开文件 / 在文件管理器中显示走 session.openWorkspacePath；读文件走 workspaceFiles', async () => {

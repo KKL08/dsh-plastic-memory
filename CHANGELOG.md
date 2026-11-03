@@ -29,8 +29,32 @@ All notable changes to this project are documented here. The format follows
   whether they are pending, accepted by the main session or edited by you.
   Editing or promoting a pending memory on the memory page accepts it, and
   so does promoting it with `memory_promote`.
+- Settings gain an Appearance group with a theme color: Ella (the silver
+  vine used so far, the default) or Blue Whale, which follows the DeepSeek
+  Harness brand blue in light and dark mode. It is stored as `accent` and
+  applies to every memory panel as soon as it is saved.
+- The preset types `procedure` and `decision` can be edited and removed on
+  the settings page, and restored later. A removed preset gets no new
+  memories, while existing ones are still injected and searchable. Removed
+  presets are stored in the new `removedPresetTypes` key; an edited preset
+  is an entry of the same name under `customTypes`, as before.
+- The base five types can be viewed on the settings page: their full
+  definitions, read-only.
+- Custom types take an optional `howToUse`: how the model should use these
+  memories once they are brought into a chat. The settings page form has a
+  matching field.
 
 ### Changed
+- The model gets a fuller picture of each memory type. When saving, it
+  sees what each type holds, how to write it and an example, next to when
+  to save it; a custom type's `description` is now part of this too. The
+  memory snapshot ends with how to use each type it brought in. Memories
+  are written as statements that name whose requirement or fact they are,
+  so a remembered preference reads as background, not as an instruction.
+- The built-in types reach beyond work: `profile` covers habits and family
+  circumstances, `project` covers ongoing personal matters, `knowledge`
+  keeps any confirmed fact that will matter again, and `reference` can
+  point to where things are kept or whom to ask.
 - In a subagent session, `memory_source` only traces memories whose source
   is that session. For memories a subagent still owns, it reads back from
   the save point instead of forward from the start of the turn: a
@@ -110,8 +134,11 @@ All notable changes to this project are documented here. The format follows
   types are still read with their original names and decay periods, but no
   scene can add new ones. A custom type with one of these names is a new
   type, and the old memories are read with its definition.
-- Custom types are managed inside the scene dialog on the settings page, and
-  their English name can now be changed. When a renamed or removed type
+- The settings page lists every type in the pool under Memory types,
+  grouped as the base five, presets and your own, with the scenes that use
+  it and how many memories it has. Custom types are created, edited and
+  removed there or in the scene dialog, and their English name can now be
+  changed. When a renamed or removed type
   already has memories, you choose whether they follow the new name or move
   to Recently deleted; removing a type can also keep its memories. The
   memories are moved after the settings are saved, with a retry if some
@@ -160,6 +187,10 @@ All notable changes to this project are documented here. The format follows
   of saying none had been brought in. When memories are sent again mid-chat
   because settings or memories changed, the tab and the composer button say
   so instead of "brought in at chat start".
+- Changing a setting the memory snapshot doesn't use, such as checkup
+  sensitivity or where promoted memories go, no longer refreshes the
+  snapshot in every open chat. Only settings that shape it do: the scene and
+  types, the token budget and overflow handling, and evidence lookup.
 - Recently deleted rounds the remaining days up, so a memory deleted a
   moment ago shows 14 days left instead of 13.
 - Private key blocks whose lines start or end with a no-break space or a

@@ -55,6 +55,7 @@ export interface MemoryButtonProps extends Pick<SessionStandardProps, 'sessionId
 export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: MemoryButtonProps) {
   const t = useT()
   const gateway = useGateway()
+  const accent = gateway.useConfig()?.accent
   const session = useMemo<BorrowedSession>(() => ({ kind: 'ready', sessionId, cwd: undefined }), [sessionId])
   const state = gateway.useView(session, 'session')
   const library = gateway.useView(session, 'library')
@@ -131,7 +132,7 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
         <MemoryIcon size={14} />
       </button>
       {open && createPortal(
-        <div ref={panelRef} className="pm-root pm-composer-panel" style={position!} role="dialog" aria-label={t('composer.dialog')}>
+        <div ref={panelRef} className="pm-root pm-composer-panel" style={position!} role="dialog" aria-label={t('composer.dialog')} data-pm-accent={accent}>
           <div className="pm-composer-header">
             {share === null ? null : (
               <>

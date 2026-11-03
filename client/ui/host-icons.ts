@@ -1,5 +1,5 @@
 /**
- * 宿主图标集（@deepseek-ai/dsh-client-ui-primitives@0.2.1-rc.2，MIT，见 THIRD_PARTY_NOTICES.md）里本插件用到的图标。
+ * 宿主图标集（@deepseek-ai/dsh-client-ui-primitives@0.2.1-rc.5，MIT，见 THIRD_PARTY_NOTICES.md）里本插件用到的图标。
  * 由 scripts/sync-host-icons.ts 生成，不要手改；组件见 Icon.tsx。
  */
 export const HOST_ICON_DATA = {
@@ -337,6 +337,27 @@ export const HOST_ICON_DATA = {
         "tag": "path",
         "attrs": {
           "d": "M9.55054 6.98926V11.1238",
+          "stroke": "currentColor"
+        }
+      }
+    ]
+  },
+  "plus": {
+    "viewBox": "0 0 16 16",
+    "strokeWidth": "1",
+    "root": {},
+    "shapes": [
+      {
+        "tag": "path",
+        "attrs": {
+          "d": "M8 2V14",
+          "stroke": "currentColor"
+        }
+      },
+      {
+        "tag": "path",
+        "attrs": {
+          "d": "M2 8H14",
           "stroke": "currentColor"
         }
       }

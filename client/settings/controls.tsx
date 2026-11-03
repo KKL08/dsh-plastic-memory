@@ -4,6 +4,7 @@
  */
 import { useEffect, useRef, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
+import { useGateway } from '../gateway.ts'
 
 /** 文本输入；`error` 非空时描红并在下方就地写原因（替换说明）。 */
 export function TextField({ id, value, onChange, error, hint, multiline = false, readOnly = false, disabled = false, inputMode }: {
@@ -53,6 +54,7 @@ export function Dialog({ title, closeLabel, onClose, footer, children, onBack, b
   onBack?: (() => void) | undefined
   backLabel?: string
 }) {
+  const accent = useGateway().useConfig()?.accent
   const dialog = useRef<HTMLDivElement>(null)
   const close = useRef(onClose)
   close.current = onClose
@@ -81,7 +83,7 @@ export function Dialog({ title, closeLabel, onClose, footer, children, onBack, b
     return () => { document.removeEventListener('keydown', onKey); opener?.focus?.() }
   }, [])
   return createPortal((
-    <div className="pm-root pm-dialog-root" role="presentation">
+    <div className="pm-root pm-dialog-root" role="presentation" data-pm-accent={accent}>
       <div className="pm-dialog-mask" aria-hidden="true" onClick={() => { close.current() }} />
       <div ref={dialog} className="pm-dialog" role="dialog" aria-modal="true" aria-label={title}>
         <div className="pm-dialog-header">

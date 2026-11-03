@@ -118,7 +118,7 @@ Once installed, nothing requires YAML. Three surfaces live inside the host's web
 
 - **The 「记忆」 (Memory) page in the left nav**: four tabs. *Pending* lists what waits for your decision — conflicts found by a checkup, memories worth promoting to global, budget overflows, secrets, files that failed to parse — and each item is handled in place (pick the winning side, undo, promote or keep local, delete a secret for good). *All memories* browses by project or global, opens the file or shows it in Finder, deletes. *Health* shows each layer's score and issues, with a "check this project" button in the header. *Recently deleted* restores anything removed in the last 14 days and says which memory won when a ruling deleted it. The page does not need a running conversation: it borrows an idle session of the current project to run its commands, and shows an empty state when no session exists yet.
 - **A 「记忆」 tab in the right sidebar**: which memories this conversation brought in, how much of the context they use, what the model saved during the conversation; conflicts among the injected memories can be ruled right there.
-- **The plugin's settings page** (its entry in the host's plugin manager): scenes (pick the current scene; add, edit, remove scenes; add, edit, remove custom types in the scene dialog), context budget and overflow mode, source lookup, checkup switch and sensitivity, where global promotions go, plus a status card. Saving writes the profile's `cordis.patch.yml` and takes effect without a restart.
+- **The plugin's settings page** (its entry in the host's plugin manager): scenes (pick the current scene; add, edit, remove scenes), memory types (view the base five; edit, remove and restore the preset types; add, edit, remove custom types), context budget and overflow mode, source lookup, checkup switch and sensitivity, where global promotions go, plus a status card. Saving writes the profile's `cordis.patch.yml` and takes effect without a restart.
 
 Every turn in which the model saved a memory gets a card with a delete button; the dot on the left-nav icon lights amber only when something waits for your decision, and turns red when a secret was found.
 
@@ -133,11 +133,11 @@ Five built-in types cover the most common interaction scenarios:
 
 | Type         | Purpose                                                      |
 | ------------ | ------------------------------------------------------------ |
-| `profile`    | User identity, professional role, and skill set              |
-| `preference` | Corrected and confirmed guidelines, behavioral habits        |
-| `knowledge`  | General facts, domain rules, and conventions that outlast any single project |
-| `project`    | Ephemeral state and decisions tied to the current project lifecycle |
-| `reference`  | Pointers to external systems and resources                   |
+| `profile`    | User identity, background, location, interests, and skill set |
+| `preference` | Requirements and habits the user stated, corrected, or confirmed |
+| `knowledge`  | Confirmed facts, rules, and lessons that will matter again   |
+| `project`    | Current state and plans of ongoing projects or personal matters |
+| `reference`  | Where to find documents, files, and resources                |
 
 
 
@@ -152,6 +152,8 @@ A scene decides which types of memory the model can add, picked from the type po
 - Your own scenes — created on the settings page, starting from the base five, which you can untick.
 
 Coding and Office can be edited or removed. Each scene holds 1 to 8 types, and you can have up to 5 scenes besides General. One scene is current at a time, shared by the whole profile. Switching scenes only affects new memories: existing memories of any type in the pool are still injected and searchable.
+
+The base five are fixed; the settings page only shows their definitions. The two preset types can be edited (their identifiers stay the same) or removed: a removed preset gets no new memories, its existing ones are still read, and you can restore it on the settings page later. An edited preset is stored as an entry of the same name under `customTypes`; removed ones are listed in `removedPresetTypes`.
 
 The old Office template's `commitment` merged into `decision`, and `person` was removed. Existing memories of these two types are still read, but new ones can no longer be added.
 
@@ -181,6 +183,7 @@ customTypes:
     label: Team Rituals
     description: Recurring team processes and ceremonies
     whenToSave: When the user mentions a regularly scheduled process or ceremony
+    howToUse: Follow the recorded schedule and conventions when planning related work
     recall: search
     governancePriority: low
     decayDays: 90
@@ -191,7 +194,7 @@ scenes:
 template: scene-mh2k9x
 ```
 
-`decayDays` is the decay period: a memory not confirmed within that many days is only marked as possibly outdated and stays valid; `null` means it never decays.
+`description` and `whenToSave` are written for the model: when saving, it uses them to decide which type a memory belongs to and how to write it. `howToUse` is optional and says how to use these memories once they are brought into a chat; the model gets it along with the memories. `decayDays` is the decay period: a memory not confirmed within that many days is only marked as possibly outdated and stays valid; `null` means it never decays.
 
 ### Memories Written by Subagents
 
@@ -296,10 +299,12 @@ Adjust `plastic-memory` settings in the profile's `cordis.patch.yml`:
 | `template`                         | `'coding'`          | Current scene: `custom` (General) / `coding` / `office` / the id of a scene you created  |
 | `customTypes`                      | `{}`                | Custom memory type definitions, added to the type pool                                   |
 | `scenes`                           | Coding and Office   | Scene definitions: `label` is the name, `types` the types it includes (1 to 8). General is fixed and not listed here |
+| `removedPresetTypes`               | `[]`                | Removed preset types (`procedure`, `decision`): no new memories, existing ones are still read |
 | `governance.enabled`               | `true`              | Enable the governance layer (health checks, scoring, promotion)                          |
 | `governance.health.sensitivity`    | `'normal'`          | Health alert sensitivity: `conservative` / `normal` / `proactive`                        |
 | `governance.globalPromoteTarget`   | `'plugin-global'`   | Promotion target: `plugin-global` (plugin's global scope) or `agents-md` (`~/.dsh/AGENTS.md`) |
 | `subagent.maxSavesPerSession`      | `10`                | How many memories each subagent session can create (config file only); applied from the next save |
+| `accent`                           | `'ella'`            | Theme color for the memory panels: `ella` / `blue-whale` (follows the DeepSeek Harness brand blue) |
 | `memoryRoot`                       | `''`                | Storage root path; defaults to `${DSH_HOME:-~/.dsh}/memories`                            |
 | `search.userDictionaryPath`        | unset               | User dictionary path (config file only): added on top of the built-in dictionary, applied from the next search. Must be an absolute path; one entry per line as `word frequency tag`, the frequency is required and entries without it have no effect, for example `插件记忆 10 n`. Has no effect unless `@node-rs/jieba` is installed |
 

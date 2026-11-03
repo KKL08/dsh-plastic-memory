@@ -524,7 +524,7 @@ describe('交付卡', () => {
 
 /** 插件配置，去处按参数。 */
 const configWith = (globalPromoteTarget: PluginConfig['globalPromoteTarget']): PluginConfig =>
-  ({ snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget })
+  ({ snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget, accent: 'ella' })
 
 describe('交付卡：提升候选就地处理', () => {
   const WS = '/w/app'

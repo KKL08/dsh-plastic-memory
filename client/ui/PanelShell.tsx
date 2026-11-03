@@ -1,6 +1,7 @@
 /**
  * 插槽根的外壳：提供网关与翻译函数，套上 `.pm-root`（令牌在它上面定义），并随组件渲染一个 `<style>`——
  * 卸载即移除，不往 document.head 里留东西。每个插槽根各套一层；同时挂多个插槽时样式重复几份，内容相同、无副作用。
+ * 主题色挂在根上（`data-pm-accent`）；传送到别处的弹层自己另起 `.pm-root`，也要带上它。
  */
 import type { ReactNode } from 'react'
 import { GatewayProvider, type MemoryGateway } from '../gateway.ts'
@@ -36,7 +37,7 @@ export function PanelShell({ gateway, t, className, children, extraCss = '' }: {
   return (
     <GatewayProvider value={gateway}>
       <TranslateProvider value={t}>
-        <div className={className === undefined ? 'pm-root' : `pm-root ${className}`}>
+        <div className={className === undefined ? 'pm-root' : `pm-root ${className}`} data-pm-accent={gateway.useConfig()?.accent}>
           <style data-plastic-memory="">{PM_CSS + extraCss}</style>
           {children}
         </div>
