@@ -615,7 +615,10 @@ export async function apply(ctx: Context, config: Config) {
       disposeSave = registerSave()
     }
     // search.userDictionaryPath 不用在这里处理：memory_search 每次现读路径，变了下一次搜索就重建分词实例
-    snapshotCache.markAllStale()
+    // 只有组装快照时读的字段变了才让冻结快照过期；主题色、提升路径、体检灵敏度这类改了不重建
+    if (changed('template', 'customTypes', 'scenes', 'removedPresetTypes', 'snapshotTokenBudget', 'snapshotOverflow', 'evidenceLookup')) {
+      snapshotCache.markAllStale()
+    }
     // 改了上限或超限处理：已有的超限提醒按新配置当场重算（调高上限后不再提醒，档位按新上限算），重写视图时就是新结果
     if (changed('snapshotTokenBudget', 'snapshotOverflow')) {
       try {

@@ -187,6 +187,10 @@ All notable changes to this project are documented here. The format follows
   of saying none had been brought in. When memories are sent again mid-chat
   because settings or memories changed, the tab and the composer button say
   so instead of "brought in at chat start".
+- Changing a setting the memory snapshot doesn't use, such as checkup
+  sensitivity or where promoted memories go, no longer refreshes the
+  snapshot in every open chat. Only settings that shape it do: the scene and
+  types, the token budget and overflow handling, and evidence lookup.
 - Recently deleted rounds the remaining days up, so a memory deleted a
   moment ago shows 14 days left instead of 13.
 - Private key blocks whose lines start or end with a no-break space or a

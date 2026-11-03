@@ -1883,6 +1883,24 @@ describe('配置热生效（loader/volatile-update）', () => {
     expect(t.snapshotCount()).toBe(2)
   })
 
+  it('改主题色、提升路径、体检灵敏度这类不进快照的设置：冻结快照不重建；改进快照的设置才重建', async () => {
+    const t = await setup()
+    await t.putGlobal({ id: 'mem_k', type: 'knowledge', name: '报销截止', content: '报销截止每月 25 日', summary: '报销截止日' })
+    const first = await t.assembleOnce()
+    // 盘上新增一条记忆（绕过 memory_save，不标过期）：快照只有重建时才会带上它
+    await t.putGlobal({ id: 'mem_new', type: 'knowledge', name: '差旅标准', content: '差旅住宿每晚不超过 500 元', summary: '差旅标准' })
+
+    expect(await t.update({
+      accent: 'blue-whale',
+      governance: { globalPromoteTarget: 'agents-md', health: { sensitivity: 'proactive' } },
+      subagent: { maxSavesPerSession: 9 },
+    })).toEqual([['governance', 'health', 'sensitivity'], ['governance', 'globalPromoteTarget'], ['subagent', 'maxSavesPerSession'], ['accent']])
+    expect(await t.assembleOnce()).toBe(first)
+
+    await t.update({ accent: 'blue-whale', governance: { globalPromoteTarget: 'agents-md', health: { sensitivity: 'proactive' } }, subagent: { maxSavesPerSession: 9 }, evidenceLookup: 'active' })
+    expect(await t.assembleOnce()).toContain('mem_new')
+  })
+
   it('改场景与自定义类型：memory_save 重注册（类型枚举重算），写时只认新场景，带入按类型池定义', async () => {
     const t = await setup()
     await t.putGlobal({ id: 'mem_reg', type: 'regulation', content: '数据出境要先过安全评估', summary: '数据出境' })
