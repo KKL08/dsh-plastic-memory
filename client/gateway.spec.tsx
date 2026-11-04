@@ -309,6 +309,26 @@ describe('createHostGateway', () => {
     expect(read.mock.calls.filter(([, path]) => path === pendingPath)).toHaveLength(2)
   })
 
+  it('同一份视图后挂上的（切视图、换范围时重挂的列表）：第一帧就是已读到的内容，不先闪读取中；文件没了不拿旧内容顶上', async () => {
+    localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+    const address = fileAddress('s1', pendingPath)
+    resources[address] = { status: 'live', value: { absolutePath: pendingPath, version: 'v1' }, failure: undefined }
+    files[pendingPath] = JSON.stringify(pending)
+    const gateway = createHostGateway(fakeCtx())(props)
+    const { result: page } = renderHook(() => gateway.useView(gateway.useSession(undefined), 'pending'))
+    await waitFor(() => { expect(page.current.status).toBe('ready') })
+    const firstFrame = () => {
+      const frames: string[] = []
+      renderHook(() => { frames.push(gateway.useView(gateway.useSession(undefined), 'pending').status) })
+      return frames[0]
+    }
+    expect(firstFrame()).toBe('ready')
+
+    delete files[pendingPath]
+    resources[address] = { status: 'failed', value: undefined, failure: { code: 'workspace-file/not-found', message: '' } }
+    expect(firstFrame()).toBe('missing')
+  })
+
   it('宿主没推来新版本（紧挨着的第二次替换被漏掉）：本页的命令成功后照样重读，之后才挂上的视图也拿到新内容', async () => {
     localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
     // 资源一直停在 v1：服务端重写了 pending.json，宿主却没推新版本

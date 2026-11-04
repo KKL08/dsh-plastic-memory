@@ -3,10 +3,10 @@
  * 行尾动作的进行中 / 结果提示与跨项目确认、类型显示名。
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { layerOfMemory, sameLayer, type GuiLayerRef, type MemoryCard, type MemoryCommand } from '../../src/gui/contract.ts'
+import type { MemoryCard, MemoryCommand } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
-import { formatNumber, useT } from '../i18n.tsx'
-import { compareLayers, scopeName, useNavTarget, type NavStore, type NavTarget } from '../nav.ts'
+import { useT } from '../i18n.tsx'
+import { useNavTarget, type NavStore, type NavTarget } from '../nav.ts'
 import { CrossConfirm, crossConfirmCss, SecretDeleteConfirm } from '../pending/action.tsx'
 import { keepFocusInPlace } from '../ui/focus-return.ts'
 import { Icon } from '../ui/Icon.tsx'
@@ -53,30 +53,6 @@ export function matchesQuery(memory: MemoryCard, query: string): boolean {
   return [memory.name, memory.summary, memory.content, ...memory.tags].some(text => text.toLowerCase().includes(q))
 }
 
-/** 按记忆所在层分段，段按 compareLayers 排；定位不到层的记忆不列。 */
-export function groupByLayer<T>(items: readonly T[], memoryOf: (item: T) => MemoryCard): Array<{ layer: GuiLayerRef; items: T[] }> {
-  const groups: Array<{ layer: GuiLayerRef; items: T[] }> = []
-  for (const item of items) {
-    const layer = layerOfMemory(memoryOf(item))
-    if (layer === undefined) continue
-    const group = groups.find(g => sameLayer(g.layer, layer))
-    if (group !== undefined) group.items.push(item)
-    else groups.push({ layer, items: [item] })
-  }
-  return groups.sort((a, b) => compareLayers(a.layer, b.layer))
-}
-
-/** 「全部」里的段标题：层名 600，条数 400。 */
-export function LayerHeading({ layer, count }: { layer: GuiLayerRef; count: number }) {
-  const t = useT()
-  return (
-    <h3 className="pm-layer-heading">
-      {scopeName(layer, t)}
-      <span className="pm-layer-count">{formatNumber(count)}</span>
-    </h3>
-  )
-}
-
 /** 视图不是 ready 时的一行说明；idle（没有会话）由页面壳的空态负责，这里不画。 */
 export function ViewMessage({ state }: { state: Exclude<ViewState<unknown>, { status: 'ready' }> }) {
   const t = useT()
@@ -88,8 +64,11 @@ export function ViewMessage({ state }: { state: Exclude<ViewState<unknown>, { st
 /**
  * 导航目标带 memoryId 且这一行在列表里时，高亮它一次并滚入视野。按目标对象认「一次」：
  * 视图刷新不重播，入口再导航一次（新目标）会重播。
+ * revealId 是正在高亮或马上要高亮的那一条：所在的组据此在同一次渲染里展开，高亮开始时那一行已经在 DOM 里。
+ * targetId 是导航目标那一条（在列表里时）：高亮播完它仍可接焦点，焦点不会因为去掉 tabindex 掉到页面上。
+ * 高亮中途那一条不在列表里了（被搜索滤掉）：高亮就此收起，免得行回来时重播、抢走焦点。
  */
-export function useFlashTarget(nav: NavStore, ids: readonly string[]): { flashId: string | undefined; clear: () => void } {
+export function useFlashTarget(nav: NavStore, ids: readonly string[]): { flashId: string | undefined; revealId: string | undefined; targetId: string | undefined; clear: () => void } {
   const target = useNavTarget(nav)
   const present = target.memoryId !== undefined && ids.includes(target.memoryId)
   const handled = useRef<NavTarget | undefined>(undefined)
@@ -99,7 +78,10 @@ export function useFlashTarget(nav: NavStore, ids: readonly string[]): { flashId
     handled.current = target
     setFlashId(target.memoryId)
   }, [target, present])
-  return { flashId, clear: () => { setFlashId(undefined) } }
+  const isGone = flashId !== undefined && !ids.includes(flashId)
+  useEffect(() => { if (isGone) setFlashId(undefined) }, [isGone])
+  const upcoming = present && handled.current !== target ? target.memoryId : undefined
+  return { flashId, revealId: flashId ?? upcoming, targetId: present ? target.memoryId : undefined, clear: () => { setFlashId(undefined) } }
 }
 
 /** 高亮动画时长：播完收起高亮类，下次导航到同一条才能重播。 */
@@ -253,8 +235,6 @@ export const sharedTabCss = crossConfirmCss + `
 }
 .pm-search input::placeholder { color: var(--pm-text-3); }
 .pm-search:focus-within { outline: var(--dsw-focus-ring-width, 2px) solid var(--pm-focus); outline-offset: 0; }
-.pm-layer-heading { margin: 8px 0 0; padding: 0 16px; font-size: 12px; font-weight: 600; line-height: 1.5; color: var(--pm-text-2); }
-.pm-layer-count { margin-left: 6px; font-weight: 400; }
 .pm-tab-message { margin: 24px 0; text-align: center; font-size: 12px; color: var(--pm-text-2); }
 .pm-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; container-type: inline-size; }

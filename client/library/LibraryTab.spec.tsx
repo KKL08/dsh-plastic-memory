@@ -1,17 +1,20 @@
 // 「全部记忆」tab：对假网关断言渲染出什么、每个动作发出了哪条命令或宿主调用。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
-import { GUI_VIEW_VERSION, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, scopeKey, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
 import type { BorrowedSession } from '../gateway.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createNavStore } from '../nav.ts'
 import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { LibraryTab } from './LibraryTab.tsx'
+import type { FoldMemory } from './groups.tsx'
 import { FLASH_MS } from './shared.tsx'
 
 const app = { kind: 'workspace', workspacePath: '/w/app' } as const
 const blog = { kind: 'workspace', workspacePath: '/w/blog' } as const
 const session: BorrowedSession = { kind: 'ready', sessionId: 's1', cwd: '/w/app' }
+const HOUR = 60 * 60 * 1000
+const DAY = 24 * HOUR
 
 function library(patch: Partial<LibraryView> = {}): LibraryView {
   return {
@@ -24,6 +27,42 @@ function library(patch: Partial<LibraryView> = {}): LibraryView {
     directoryIssues: [],
     ...patch,
   }
+}
+
+/** 一个项目按类型分组：偏好 1 条，事实与经验 5 条（第 4、5 条收在「展开其余」里），退役的人物 1 条。 */
+function typed(): LibraryView {
+  const k = (n: number) => memory({ id: `k${n}`, type: 'knowledge', content: `经验 ${n}`, updatedAt: NOW - n * HOUR })
+  return library({
+    layers: [{ layer: app, items: [memory({ id: 'p1', type: 'person', content: '人物 1', updatedAt: NOW - 10 * DAY }), k(1), k(2), k(3), k(4), k(5), memory({ id: 'f1', type: 'preference', content: '偏好 1', updatedAt: NOW - 30 * DAY })] }],
+    typeOrder: ['preference', 'knowledge', 'person'],
+    typeLabels: { preference: '行为偏好', knowledge: '事实与经验', person: '人物' },
+  })
+}
+
+/** 跨范围、不同新旧：24 小时内 1 条，近 3 天 1 条，近 7 天 4 条，更早 1 条。 */
+function recent(): LibraryView {
+  return library({
+    layers: [
+      { layer: { kind: 'global' }, items: [memory({ id: 'g1', scope: 'global', workspacePath: undefined, content: '回答用中文', updatedAt: NOW - 100 * HOUR })] },
+      { layer: app, items: [memory({ id: 'a1', content: '刚记的', updatedAt: NOW - HOUR }), memory({ id: 'a2', content: '前天改的', updatedAt: NOW - 30 * HOUR }), memory({ id: 'a3', content: '上个月的', updatedAt: NOW - 30 * DAY })] },
+      { layer: blog, items: ['b1', 'b2', 'b3'].map((id, i) => memory({ id, workspacePath: '/w/blog', content: `博客 ${id}`, updatedAt: NOW - (120 + i) * HOUR })) },
+    ],
+  })
+}
+
+/** 列表里每行的记忆原文。 */
+function texts(within_: HTMLElement | Document = document): string[] {
+  return [...within_.querySelectorAll('.pm-list > li .pm-mc-text')].map(p => p.textContent ?? '')
+}
+
+/** 组标题按钮（名字以类型或时间段开头）。 */
+function groupToggle(title: string): HTMLElement {
+  return screen.getByRole('button', { name: new RegExp(`^${title}\\d`) })
+}
+
+/** 组体：组标题 aria-controls 指的那一块。 */
+function groupBody(title: string): HTMLElement {
+  return document.getElementById(groupToggle(title).getAttribute('aria-controls')!)!
 }
 
 function rowOf(text: string): HTMLElement {
@@ -48,22 +87,25 @@ describe('全部记忆', () => {
     expect(screen.queryByText(/MEMORY\.md/)).toBeNull()
   })
 
-  it('全局写全局目录；「全部」不写存储说明，按层分段，段标题写层名和条数', () => {
+  it('全局写全局目录、按类型分组；「全部」不写存储说明，跨范围按更新时间分段，7 天前的收在「更早」里并说一句', () => {
     const { unmount } = renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'global' }} session={session} now={NOW} />, createFakeGateway({ views: { library: library() } }))
     expect(document.querySelector('.pm-lib-storage')).toHaveTextContent('/m/global')
-    expect(screen.queryByRole('heading', { level: 3 })).toBeNull()
+    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['preference1'])
+    expect(screen.queryByText('最近 7 天没有新记或改动的记忆。')).toBeNull()
     unmount()
     renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'all' }} session={session} now={NOW} />, createFakeGateway({ views: { library: library() } }))
     expect(document.querySelector('.pm-lib-storage')).toBeNull()
-    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['全局1', 'app2', 'blog1'])
-    expect(screen.getAllByRole('listitem')).toHaveLength(4)
+    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['更早4'])
+    expect(screen.getByRole('button', { name: '更早4' })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryAllByRole('listitem')).toHaveLength(0)
+    expect(screen.getByText('最近 7 天没有新记或改动的记忆。')).toBeInTheDocument()
   })
 
   it('搜索按名称、摘要、正文和标签筛（不分大小写）；都不匹配时说没找到', () => {
     renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'all' }} session={session} now={NOW} />, createFakeGateway({ views: { library: library() } }))
     fireEvent.change(screen.getByRole('searchbox', { name: '搜索记忆' }), { target: { value: 'TYPECHECK' } })
     expect(screen.getAllByRole('listitem').map(li => li.querySelector('.pm-mc-text')?.textContent)).toEqual(['提交前跑 typecheck'])
-    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['app1'])
+    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['更早1'])
     fireEvent.change(screen.getByRole('searchbox', { name: '搜索记忆' }), { target: { value: '没有这种东西' } })
     expect(screen.queryByRole('list')).toBeNull()
     expect(screen.getByRole('status')).toHaveTextContent('没有找到匹配的记忆')
@@ -76,18 +118,25 @@ describe('全部记忆', () => {
     expect(buttons[0]).toHaveClass('pm-btn--ghost')
   })
 
-  it('类型写显示名（待处理视图的 typeLabels）；认不出的类型写 id', () => {
-    const view = library({ layers: [{ layer: app, items: [memory({ id: 'a1' }), memory({ id: 'a2', type: 'mystery', content: '提交前跑 typecheck' })] }] })
+  it('类型写显示名（待处理视图的 typeLabels），认不出的类型写 id：单个范围写在组标题上、卡片不再写；「全部」写在卡片上', () => {
+    const view = library({
+      layers: [{ layer: app, items: [memory({ id: 'a1', updatedAt: NOW - HOUR }), memory({ id: 'a2', type: 'mystery', content: '提交前跑 typecheck', updatedAt: NOW - 2 * HOUR })] }],
+      typeOrder: ['preference'],
+    })
     const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], levelCounts: levelCountsOf([]), typeLabels: { preference: '行为偏好' } }
-    renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: view, pending } }))
-    expect(screen.getAllByRole('listitem').map(li => li.querySelector('.pm-mc-meta span')?.textContent)).toEqual(['行为偏好', 'mystery'])
+    const { unmount } = renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: view, pending } }))
+    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['行为偏好1', 'mystery1'])
+    expect(document.querySelector('.pm-mc-meta .pm-chip')).toBeNull()
+    unmount()
+    renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'all' }} session={session} now={NOW} />, createFakeGateway({ views: { library: view, pending } }))
+    expect(screen.getAllByRole('listitem').map(li => li.querySelector('.pm-mc-meta .pm-chip')?.textContent)).toEqual(['行为偏好', 'mystery'])
   })
 
   it('待处理视图没有这个类型时，用全部记忆视图自带的 typeLabels', () => {
     const view = library({ layers: [{ layer: app, items: [memory({ id: 'a1', type: 'domain-term' })] }], typeLabels: { 'domain-term': '术语' } })
     const pending: PendingView = { version: GUI_VIEW_VERSION, dot: 'none', items: [], levelCounts: levelCountsOf([]), typeLabels: {} }
     renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: view, pending } }))
-    expect(screen.getByRole('listitem').querySelector('.pm-mc-meta span')).toHaveTextContent('术语')
+    expect(screen.getByRole('heading', { level: 3 })).toHaveTextContent('术语1')
   })
 
   it('目录问题来自视图，灰色一行一条，路径相对存储目录', () => {
@@ -144,8 +193,8 @@ describe('全部记忆', () => {
     expect(within(result()).getByRole('button', { name: '删除' })).toBeInTheDocument()
   })
 
-  it('删掉一个项目的最后一条：视图里这一层没了，结果行照样留在原位、能撤销；「全部」里段标题也还在', async () => {
-    const onlyBlog = library({ layers: [{ layer: { kind: 'global' }, items: [memory({ id: 'g1', scope: 'global', workspacePath: undefined, content: '回答用中文' })] }, { layer: blog, items: [memory({ id: 'b1', workspacePath: '/w/blog', content: '博客用 Astro' })] }] })
+  it('删掉一个项目的最后一条：视图里这一层没了，结果行照样留在原位、能撤销；组标题也还在', async () => {
+    const onlyBlog = library({ layers: [{ layer: { kind: 'global' }, items: [memory({ id: 'g1', scope: 'global', workspacePath: undefined, content: '回答用中文' })] }, { layer: blog, items: [memory({ id: 'b1', workspacePath: '/w/blog', content: '博客用 Astro', updatedAt: NOW - HOUR })] }] })
     const blogGone = library({ layers: [onlyBlog.layers[0]!] })
     for (const scope of [blog, { kind: 'all' } as const]) {
       const gateway = createFakeGateway({ views: { library: onlyBlog } })
@@ -153,7 +202,7 @@ describe('全部记忆', () => {
       await remove(rowOf('博客用 Astro'))
       act(() => { gateway.setView('library', blogGone) })
       expect(rowOf('博客用 Astro')).toHaveTextContent('已删除，14 天内可在「最近删除」找回。')
-      if (scope.kind === 'all') expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['全局1', 'blog1'])
+      expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(scope.kind === 'all' ? ['24 小时内1', '更早1'] : ['preference1'])
       await act(async () => { fireEvent.click(within(rowOf('博客用 Astro')).getByRole('button', { name: '撤销' })) })
       expect(gateway.executed.map(e => e.command)).toEqual([
         { cmd: 'forget', memoryId: 'b1', layer: blog },
@@ -424,6 +473,117 @@ describe('全部记忆', () => {
     })
   })
 
+  describe('单个范围按类型分组', () => {
+    const scrollIntoView = vi.fn()
+    beforeEach(() => { scrollIntoView.mockClear(); Element.prototype.scrollIntoView = scrollIntoView })
+    afterEach(() => { delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView })
+
+    it('组按 typeOrder 排、退役类型在后，标题写类型和条数；每组先露 3 条（新的在前），其余收在「展开其余 N 条」里', () => {
+      renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: typed() } }))
+      expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['行为偏好1', '事实与经验5', '人物1'])
+      expect(texts(groupBody('事实与经验'))).toEqual(['经验 1', '经验 2', '经验 3'])
+      expect(within(groupBody('事实与经验')).getByRole('button', { name: '展开其余 2 条' })).toBeInTheDocument()
+      expect(within(groupBody('行为偏好')).queryByRole('button', { name: /展开其余|收起到/ })).toBeNull()
+    })
+
+    it('点组标题收起、再展开：aria-expanded 翻转，收起时组体藏起来、标题写最近一次更新；只有点标题展开的组体带撑开动效', () => {
+      renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: typed() } }))
+      const toggle = groupToggle('事实与经验')
+      expect(toggle).toHaveAttribute('aria-expanded', 'true')
+      expect(groupBody('事实与经验').querySelector('.pm-arrive')).toBeNull()
+      fireEvent.click(toggle)
+      expect(toggle).toHaveAttribute('aria-expanded', 'false')
+      expect(groupBody('事实与经验')).not.toBeVisible()
+      expect(toggle).toHaveTextContent('事实与经验5最近 10 月 17 日')
+      fireEvent.click(toggle)
+      expect(toggle).toHaveAttribute('aria-expanded', 'true')
+      expect(toggle).toHaveTextContent(/^事实与经验5$/)
+      expect(groupBody('事实与经验').querySelector('.pm-arrive')).not.toBeNull()
+      expect(groupBody('行为偏好').querySelector('.pm-arrive')).toBeNull()
+    })
+
+    it('「展开其余」露出全部、焦点落在新露出的第一条，不播撑开；「收起到 3 条」收回，组标题滚进视野、焦点回到标题', () => {
+      renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: typed() } }))
+      fireEvent.click(screen.getByRole('button', { name: '展开其余 2 条' }))
+      expect(texts(groupBody('事实与经验'))).toEqual(['经验 1', '经验 2', '经验 3', '经验 4', '经验 5'])
+      expect(rowOf('经验 4')).toHaveFocus()
+      expect(rowOf('经验 5')).not.toHaveAttribute('tabindex')
+      // 行只在接住焦点期间可聚焦：焦点走了，鼠标点它的正文不再把焦点落到整行
+      act(() => { groupToggle('事实与经验').focus() })
+      expect(rowOf('经验 4')).not.toHaveAttribute('tabindex')
+      expect(groupBody('事实与经验').querySelector('.pm-arrive')).toBeNull()
+      fireEvent.click(screen.getByRole('button', { name: '收起到 3 条' }))
+      expect(texts(groupBody('事实与经验'))).toEqual(['经验 1', '经验 2', '经验 3'])
+      expect(groupToggle('事实与经验')).toHaveFocus()
+      expect(scrollIntoView.mock.contexts.at(-1)).toBe(groupToggle('事实与经验'))
+      expect(scrollIntoView).toHaveBeenLastCalledWith({ block: 'nearest' })
+    })
+
+    it('搜索时组都展开、不截断，搜索里点标题只收起这一次；清空搜索回到原来的折叠状态', () => {
+      renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: typed() } }))
+      fireEvent.click(groupToggle('人物'))
+      const search = screen.getByRole('searchbox', { name: '搜索记忆' })
+      fireEvent.change(search, { target: { value: '经验' } })
+      expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['事实与经验5'])
+      expect(texts()).toHaveLength(5)
+      expect(screen.queryByRole('button', { name: /展开其余|收起到/ })).toBeNull()
+      fireEvent.change(search, { target: { value: '人物' } })
+      expect(groupToggle('人物')).toHaveAttribute('aria-expanded', 'true')
+      fireEvent.change(search, { target: { value: '1' } })
+      fireEvent.click(groupToggle('事实与经验'))
+      expect(groupToggle('事实与经验')).toHaveAttribute('aria-expanded', 'false')
+      fireEvent.change(search, { target: { value: '' } })
+      expect(groupToggle('人物')).toHaveAttribute('aria-expanded', 'false')
+      expect(groupToggle('事实与经验')).toHaveAttribute('aria-expanded', 'true')
+      expect(texts(groupBody('事实与经验'))).toHaveLength(3)
+    })
+
+    it('折叠状态记在记忆页给的那一份里：切走再回来（重挂）还在，另一个范围不受影响', () => {
+      const fold: FoldMemory = new Map()
+      const gateway = createFakeGateway({ views: { library: typed() } })
+      const { unmount } = renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} fold={fold} now={NOW} />, gateway)
+      fireEvent.click(groupToggle('行为偏好'))
+      fireEvent.click(screen.getByRole('button', { name: '展开其余 2 条' }))
+      unmount()
+      const { unmount: unmountAgain } = renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} fold={fold} now={NOW} />, gateway)
+      expect(groupToggle('行为偏好')).toHaveAttribute('aria-expanded', 'false')
+      expect(texts(groupBody('事实与经验'))).toHaveLength(5)
+      expect(groupBody('事实与经验').querySelector('.pm-arrive')).toBeNull()
+      unmountAgain()
+      renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'workspace', workspacePath: '/w/app2' }} session={session} fold={fold} now={NOW} />, gateway)
+      expect([...fold.keys()].every(key => key.startsWith(`library|${scopeKey(app)}|`))).toBe(true)
+    })
+  })
+
+  describe('「全部」跨范围按时间', () => {
+    it('分「24 小时内 / 近 3 天 / 近 7 天 / 更早」四段，新的在前，都不截断；「更早」默认收起；卡片写类型和范围名', () => {
+      renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'all' }} session={session} now={NOW} />, createFakeGateway({ views: { library: recent() } }))
+      expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['24 小时内1', '近 3 天1', '近 7 天4', '更早1'])
+      expect(texts()).toEqual(['刚记的', '前天改的', '回答用中文', '博客 b1', '博客 b2', '博客 b3'])
+      expect(groupToggle('更早')).toHaveAttribute('aria-expanded', 'false')
+      expect(screen.queryByRole('button', { name: /展开其余/ })).toBeNull()
+      expect(screen.queryByText('最近 7 天没有新记或改动的记忆。')).toBeNull()
+      const row = rowOf('博客 b1')
+      expect(row.querySelector('.pm-chip')).toHaveTextContent('preference')
+      expect(within(row).getByRole('button', { name: '到「blog」查看这条' })).toHaveTextContent('blog›')
+      expect(within(rowOf('回答用中文')).getByRole('button', { name: '到「全局」查看这条' })).toBeInTheDocument()
+    })
+
+    it('搜索时四段都展开，「更早」也展开', () => {
+      renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'all' }} session={session} now={NOW} />, createFakeGateway({ views: { library: recent() } }))
+      fireEvent.change(screen.getByRole('searchbox', { name: '搜索记忆' }), { target: { value: '上个月' } })
+      expect(groupToggle('更早')).toHaveAttribute('aria-expanded', 'true')
+      expect(texts()).toEqual(['上个月的'])
+    })
+
+    it('点卡片上的范围名：落到那个范围、带上这条记忆，视图不变', () => {
+      const nav = createNavStore({ view: 'library', scope: { kind: 'all' } })
+      renderInShell(<LibraryTab nav={nav} scope={{ kind: 'all' }} session={session} now={NOW} />, createFakeGateway({ views: { library: recent() } }))
+      fireEvent.click(within(rowOf('博客 b2')).getByRole('button', { name: '到「blog」查看这条' }))
+      expect(nav.get()).toEqual({ view: 'library', scope: blog, memoryId: 'b2' })
+    })
+  })
+
   describe('带 memoryId 打开', () => {
     const scrollIntoView = vi.fn()
     beforeEach(() => { vi.useFakeTimers(); scrollIntoView.mockClear(); Element.prototype.scrollIntoView = scrollIntoView })
@@ -447,6 +607,55 @@ describe('全部记忆', () => {
       act(() => { nav.navigate({ view: 'library', scope: app, memoryId: 'a2' }) })
       expect(rowOf('提交前跑 typecheck')).toHaveClass('pm-flash')
       expect(scrollIntoView).toHaveBeenCalledTimes(2)
+    })
+
+    it('目标在收起的组、第 4 条以后：同一次渲染里展开组和其余，高亮那一行并接住焦点；高亮播完组照样展开着', () => {
+      const fold: FoldMemory = new Map([[`library|${scopeKey(app)}|type:knowledge`, { isOpen: false }]])
+      const nav = createNavStore({ view: 'library', scope: app, memoryId: 'k5' })
+      renderInShell(<LibraryTab nav={nav} scope={app} session={session} fold={fold} now={NOW} />, createFakeGateway({ views: { library: typed() } }))
+      const row = rowOf('经验 5')
+      expect(row).toHaveClass('pm-flash')
+      expect(row).toHaveFocus()
+      expect(scrollIntoView.mock.contexts[0]).toBe(row)
+      expect(groupBody('事实与经验').querySelector('.pm-arrive')).toBeNull()
+      act(() => { vi.advanceTimersByTime(FLASH_MS) })
+      expect(row).not.toHaveClass('pm-flash')
+      expect(row).toHaveFocus()
+      expect(rowOf('经验 4')).not.toHaveAttribute('tabindex')
+      expect(groupToggle('事实与经验')).toHaveAttribute('aria-expanded', 'true')
+      expect(texts(groupBody('事实与经验'))).toHaveLength(5)
+      expect(fold.get(`library|${scopeKey(app)}|type:knowledge`)).toEqual({ isOpen: true, isFull: true })
+    })
+
+    it('高亮期间目标行被搜索滤掉：高亮就此结束；清空搜索后不重播，不抢搜索框的焦点', () => {
+      const nav = createNavStore({ view: 'library', scope: app, memoryId: 'k2' })
+      renderInShell(<LibraryTab nav={nav} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: typed() } }))
+      const search = screen.getByRole('searchbox', { name: '搜索记忆' })
+      act(() => { search.focus() })
+      fireEvent.change(search, { target: { value: '经验 1' } })
+      fireEvent.change(search, { target: { value: '' } })
+      expect(rowOf('经验 2')).not.toHaveClass('pm-flash')
+      expect(search).toHaveFocus()
+      expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    })
+
+    it('高亮期间删掉目标行（第 4 条以后）：高亮结束，结果行和撤销留在眼前；撤销后行回来不重播', async () => {
+      const nav = createNavStore({ view: 'library', scope: app, memoryId: 'k5' })
+      renderInShell(<LibraryTab nav={nav} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: typed() } }))
+      await remove(rowOf('经验 5'))
+      const undo = within(rowOf('经验 5')).getByRole('button', { name: '撤销' })
+      expect(texts(groupBody('事实与经验'))).toHaveLength(5)
+      await act(async () => { fireEvent.click(undo) })
+      expect(rowOf('经验 5')).not.toHaveClass('pm-flash')
+      expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    })
+
+    it('高亮期间点组标题收起：组收起，高亮一起结束', () => {
+      const nav = createNavStore({ view: 'library', scope: app, memoryId: 'k5' })
+      renderInShell(<LibraryTab nav={nav} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: typed() } }))
+      fireEvent.click(groupToggle('事实与经验'))
+      expect(groupToggle('事实与经验')).toHaveAttribute('aria-expanded', 'false')
+      expect(document.querySelector('.pm-flash')).toBeNull()
     })
 
     it('目标行视图晚到时，到了再高亮', () => {

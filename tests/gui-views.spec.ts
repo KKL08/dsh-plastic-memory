@@ -549,6 +549,17 @@ describe('全部记忆视图', () => {
     expect(libraryViewSchema.parse(library)).toEqual(library)
     expect(library.typeLabels).toMatchObject({ preference: '行为偏好', decision: '决定', mystery: 'mystery' })
   })
+
+  it('typeOrder：当前场景的类型按注册表顺序在前，本视图里出现的其他类型（退役、切场景前的、认不出的）按 id 排在后面', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_a', name: 'A', type: 'procedure' }))
+    await h.store.create(w({ id: 'mem_b', name: 'B', type: 'person' }))
+    await h.store.create(g({ id: 'mem_c', name: 'C', type: 'mystery' }))
+    await h.store.create(g({ id: 'mem_d', name: 'D', type: 'decision' }))
+    const { library } = await h.views()
+    expect(libraryViewSchema.parse(library)).toEqual(library)
+    expect(library.typeOrder).toEqual(['profile', 'preference', 'knowledge', 'project', 'reference', 'procedure', 'decision', 'mystery', 'person'])
+  })
 })
 
 describe('最近删除视图', () => {
