@@ -817,6 +817,17 @@ describe('同 id 在两个项目里各有一份', () => {
     expect(await allEntries(e)).toEqual([entry])
   })
 
+  it('forget 指明一份：别的项目那份只在最近删除里，同样算还有副本，账本里指向这个 id 的条目留着', async () => {
+    const e = env()
+    await seedCopies(e)
+    expect(await e.store.softDelete({ id: 'mem_dup', workspacePath: OTHER_WS }, { isExactLayer: true, now: e.clock.now })).toBe(true)
+    await e.store.create(record({ id: 'mem_y', scope: 'workspace', workspacePath: SESSION_WS }))
+    const entry = (await e.decisions.upsert({ memoryIds: ['mem_dup', 'mem_y'], summary: '同 id 的冲突', fingerprint: 'fp-dup' }, 1)).entry
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: own }))
+    expect((await copyIn(e, OTHER_WS))!.status).toBe('deleted')
+    expect(await allEntries(e)).toEqual([entry])
+  })
+
   it('hard-delete 指明含密钥的一份：只脱敏这一层在快照里的副本，别的项目那份的快照照常能恢复', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_dup', name: '本项目那份', content: `token ${FAKE_SECRET.sk}`, scope: 'workspace', workspacePath: SESSION_WS }))
@@ -2035,6 +2046,16 @@ describe('同 id 在会话项目和别的项目各有一份时提升', () => {
     expect(cards.map(m => [m.name, m.workspacePath, dirname(m.filePath)])).toEqual([
       [ws === OTHER_WS ? '别的项目那份' : '本项目那份', ws, join(root, workspaceDirName(ws))],
     ])
+  })
+
+  it('条目所在项目那份在最近删除里、别的项目那份仍是在用的候选：不出这张提升卡，也不拿别的项目那份顶上', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_dup', name: '本项目那份', scope: 'workspace', workspacePath: SESSION_WS, globalCandidate: true }))
+    await e.store.create(record({ id: 'mem_dup', name: '别的项目那份', scope: 'workspace', workspacePath: OTHER_WS, globalCandidate: true }))
+    await e.decisions.upsert({ kind: 'promote-candidate', memoryIds: ['mem_dup'], summary: '候选', workspaces: [SESSION_WS], fingerprint: 'fp' }, 1)
+    expect(await e.store.softDelete({ id: 'mem_dup', workspacePath: SESSION_WS }, { isExactLayer: true, now: e.clock.now })).toBe(true)
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect(pendingViewSchema.parse(await e.readView('pending')).items.filter(i => i.kind === 'promote-candidate')).toEqual([])
   })
 })
 
