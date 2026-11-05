@@ -15,10 +15,10 @@ export const TIER_LABEL = { green: '绿色', amber: '黄色', red: '红色' } as
 
 const DAY = 86_400_000
 
-/** 评分层引用：workspace 层按项目目录桶，global 层单列。 */
+/** 评分层引用：workspace 层按项目目录划分，global 层单列。 */
 export type LayerRef = { kind: 'workspace'; path: string } | { kind: 'global' }
 
-/** global 层的语义缓存桶。workspace 桶沿用 cache_<路径>（路径是绝对路径，不会与字面量撞名）。 */
+/** global 层的语义缓存键。workspace 层沿用 cache_<路径>（路径是绝对路径，不会与字面量撞名）。 */
 export const GLOBAL_CACHE_KEY = 'cache_global'
 
 export function layerCacheKey(layer: LayerRef): string {
@@ -71,7 +71,7 @@ export interface LayerPreread {
   filePaths: ReadonlyMap<string, string>
   /** 待决账本（按 firstSeenAt 升序）。 */
   pending: readonly PendingDecision[]
-  /** 语义扫描缓存，键为缓存桶。 */
+  /** 语义扫描缓存，按缓存键索引。 */
   cache: ReadonlyMap<string, ScanCacheEntry>
   /** 解析失败的记忆文件，按读到它的层归档（键为 layerCacheKey）。 */
   quarantined: ReadonlyMap<string, readonly QuarantineEntry[]>
@@ -110,7 +110,7 @@ export interface LayerHealthResult {
  * - 语义 findings（噪音与 conflict 同一谓词）计"全员存活且任一方属于本层"的条目：
  *   纯 global 的发现不算进 ws 层分数（否则同一条 global 问题会在 N 个 workspace 重复扣分）；
  *   跨层条目（如提升到 global 后 ws 残留旧条构成的冗余、global vs ws 冲突）归 ws 层——
- *   它污染的是该 ws 的会话，而 global 桶的输入是 global-only、看不到 ws 侧，
+ *   它污染的是该 ws 的会话，而 global 层语义扫描的输入是 global-only、看不到 ws 侧，
  *   若 ws 层也不计就两层都失明；
  * - conflict 还须仍在待决账本里（pairKey 匹配，不看 baselineRef 措辞）——用户裁决 keep-both/dismiss 后双方记忆都在、
  *   缓存过滤不掉，不对账会出现"刚裁决完分数纹丝不动"的自相矛盾；

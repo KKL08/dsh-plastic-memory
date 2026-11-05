@@ -97,6 +97,7 @@ describe('runSavePipeline', () => {
     const result = await runSavePipeline(candidate({ scope: 'workspace' }), { ...deps(), workspacePath: undefined })
     if (result.kind !== 'rejected') throw new Error(result.kind)
     expect(result).toMatchObject({ kind: 'rejected', code: 'no-workspace' })
+    expect(result.reason).not.toContain('桶')   // PA-19
   })
 
   it('模型填 global（有 workspace）降级 workspace + globalCandidate（无 global 直写通道）', async () => {
@@ -107,7 +108,7 @@ describe('runSavePipeline', () => {
     expect(result.record.globalCandidate).toBe(true)
   })
 
-  it('填 global 且无 workspacePath 时同样拒存（global 直写必须过提升闸，无桶可降级）', async () => {
+  it('填 global 且无 workspacePath 时同样拒存（global 直写必须过提升闸，没有作用域可降级）', async () => {
     const result = await runSavePipeline(candidate({ scope: 'global' }), { ...deps(), workspacePath: undefined })
     expect(result).toMatchObject({ kind: 'rejected', code: 'no-workspace' })
   })
@@ -248,7 +249,7 @@ describe('runSavePipeline', () => {
     expect((await runSavePipeline({ ...suspected, force: true }, deps(store))).kind).toBe('saved')
   })
 
-  // B1a：supersedes 目标必须与本次写入记录同桶
+  // B1a：supersedes 目标必须与本次写入记录同属一个作用域
   it('B1a: workspace 保存 supersedes 指向 global 记录 → global 保持 active 且给警告', async () => {
     const store = new MemoryStore(new InMemoryTable())
     // 放一条 global 记录（模拟 promote 后）
@@ -261,6 +262,7 @@ describe('runSavePipeline', () => {
     if (saved.kind !== 'saved') throw new Error(saved.kind)
     expect((await store.get('mem_global'))!.status).toBe('active')
     expect(saved.warnings?.map(w => w.code)).toContain('cross-bucket-supersede')
+    expect(saved.warnings?.find(w => w.code === 'cross-bucket-supersede')?.text).not.toContain('桶')   // PA-19 稳定码不变、文字不说「桶」
   })
 
   it('B1a: 同 workspace 目标仍正常置 superseded（回归）', async () => {
@@ -718,7 +720,7 @@ describe('runSavePipeline：模型改写的兜底', () => {
     expect((await e.decisions.listSettled()).map(d => d.kind).sort()).toEqual(['rewrite', 'supersede'])
   })
 
-  it('跨桶、不存在、已是 superseded 的替代目标不拍快照、不记账（结果照旧）', async () => {
+  it('跨作用域、不存在、已是 superseded 的替代目标不拍快照、不记账（结果照旧）', async () => {
     const e = guarded()
     const already = await seed(e.store, { name: '早被替代' })
     await e.store.put({ ...already, status: 'superseded' })
@@ -745,7 +747,7 @@ describe('runSavePipeline：模型改写的兜底', () => {
     expect(await e.decisions.listSettled()).toEqual([])
   })
 
-  it('同桶替代目标手改过：新记忆不落盘、旧记忆保持 active', async () => {
+  it('同作用域替代目标手改过：新记忆不落盘、旧记忆保持 active', async () => {
     const e = guarded()
     const old = await seed(e.store)
     await e.store.put({ ...old, content: '用户手改后的旧记忆', handEdited: true })

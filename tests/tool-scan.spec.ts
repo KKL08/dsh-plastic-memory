@@ -105,7 +105,7 @@ describe('executeScan 单层模式', () => {
     expect(r.notes.map(n => n.code)).toContain('semantic-failed')
   })
 
-  it('layers=full：语义层结果写缓存（global 层桶）、conflict 进待决账本', async () => {
+  it('layers=full：语义层结果写缓存（global 层缓存键）、conflict 进待决账本', async () => {
     const deps = makeDeps({ getLlm: (_exec: unknown) => conflictLlm })
     await deps.store.put(record({ id: 'mem_a', content: '用 pnpm' }))
     await deps.store.put(record({ id: 'mem_b', content: '用 npm' }))
@@ -293,7 +293,7 @@ describe('executeScan 单层模式', () => {
     expect(renderScanResult(r)).not.toMatch(/6800|6,800|token/)
   })
 
-  it('cacheKey：workspace 路径分桶，缺省落 global 层桶', () => {
+  it('cacheKey：workspace 按路径分别取键，缺省落 global 层缓存键', () => {
     expect(cacheKey('/proj')).toBe('cache_/proj')
     expect(cacheKey(undefined)).toBe(GLOBAL_CACHE_KEY)
   })
@@ -351,7 +351,7 @@ describe('executeScan 全库体检', () => {
     await deps.store.put(record({ id: 'mem_g1' }))
   }
 
-  it('scopes 列表：逐 workspace + global 各自扫描计分，语义缓存写各自桶', async () => {
+  it('scopes 列表：逐 workspace + global 各自扫描计分，语义缓存按作用域分别写', async () => {
     const deps = makeDeps({ getLlm: (_exec: unknown) => checkupLlm })
     await seedTwoWs(deps)
     const r = await executeScan({ scopes: ['/proj-a', '/proj-b'] }, deps, fakeExec())
@@ -486,7 +486,7 @@ describe('executeScan 全库体检', () => {
     expect(r.findings.find(f => f.type === 'malformed')!.summary).toContain('bad.md')
   })
 
-  it('体检的 created/existing 从去重后的待决项派生：同一垂直冲突多桶复扫不虚增', async () => {
+  it('体检的 created/existing 从去重后的待决项派生：同一垂直冲突在多个作用域重复扫到不虚增', async () => {
     const verticalLlm = {
       complete: async ({ user }: { system: string; user: string }) =>
         user.includes('mem_g1')
@@ -497,7 +497,7 @@ describe('executeScan 全库体检', () => {
     await seedTwoWs(deps)
     const first = await executeScan({ scope: 'all' }, deps, fakeExec())
     if (first.kind !== 'checkup') throw new Error(first.kind)
-    // mem_g1 在两个 ws 的 visible 桶与 global 桶各被发现一次，dedupKey 收敛为一条
+    // mem_g1 在两个 ws 的 visible 集合与 global 层各被发现一次，dedupKey 收敛为一条
     expect(first.pendingDecisions.items).toHaveLength(1)
     expect(first.pendingDecisions.created).toBe(1)
     expect(first.pendingDecisions.existing).toBe(0)
@@ -507,7 +507,7 @@ describe('executeScan 全库体检', () => {
     expect(second.pendingDecisions.existing).toBe(1)
   })
 
-  it('体检收尾清理孤儿语义缓存桶：废弃 workspace 与历史遗留键被删，现存桶保留', async () => {
+  it('体检收尾清理孤儿语义缓存：废弃 workspace 与历史遗留键被删，现存的保留', async () => {
     const deps = makeDeps()
     await seedTwoWs(deps)
     await deps.cache.put('cache_/gone-ws', { id: 'cache_/gone-ws', scannedAt: 1, scope: '/gone-ws', findings: [] })

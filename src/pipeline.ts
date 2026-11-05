@@ -288,10 +288,10 @@ export async function runSavePipeline(
       scopeWarnings.push({ code: 'update-scope-kept', text: `scope 不随更新变更，记忆保持 ${target.scope}` })
     }
   } else {
-    // workspacePath 缺失说明会话连 cwd 都没有（runtime 对有 cwd 的会话总能给出目录兜底桶）：
-    // workspace 桶不存在，落 global 又会绕过用户确认闸，两头无路可落，新建一律拒存。
+    // workspacePath 缺失说明会话连 cwd 都没有（runtime 对有 cwd 的会话总能用目录兜底作用域）：
+    // 没有 workspace 作用域，落 global 又会绕过用户确认闸，两头无路可落，新建一律拒存。
     if (deps.workspacePath === undefined) {
-      return { kind: 'rejected', code: 'no-workspace', reason: '当前会话没有工作目录，记忆无处归属：workspace 桶不存在，global 写入必须经用户确认的提升流程。请在有工作目录的会话里保存。' }
+      return { kind: 'rejected', code: 'no-workspace', reason: '当前会话没有工作目录，记忆无处归属：没有 workspace 作用域，global 写入必须经用户确认的提升流程。请在有工作目录的会话里保存。' }
     }
     if (candidate.scope === 'global') {
       scope = 'workspace'
@@ -303,20 +303,20 @@ export async function runSavePipeline(
   const validity = resolveValidity(candidate, target, now)
   if ('code' in validity) return { kind: 'rejected', ...validity }
 
-  // 本次要标 superseded 的旧记忆：目标必须与本次写入记录同桶——跨桶替代会绕过用户确认闸、无快照、无复活路径，
-  // 不同桶的目标跳过不置 superseded，仅给一条警告。目标不存在维持静默跳过；只替代在用的，已删除的留在最近删除、
-  // 照常过期清走，已被取代的原样不动。本次写入记录的桶此时已定：update 继承目标，create 落当前项目（global 已降级为候选）。
-  const bucket = candidate.action === 'update'
+  // 本次要标 superseded 的旧记忆：目标必须与本次写入记录同属一个作用域——跨作用域替代会绕过用户确认闸、无快照、无复活路径，
+  // 作用域不同的目标跳过不置 superseded，仅给一条警告。目标不存在维持静默跳过；只替代在用的，已删除的留在最近删除、
+  // 照常过期清走，已被取代的原样不动。本次写入记录的作用域此时已定：update 继承目标，create 落当前项目（global 已降级为候选）。
+  const writeScope = candidate.action === 'update'
     ? { scope: target!.scope, workspacePath: target!.workspacePath }
     : { scope, workspacePath: scope === 'workspace' ? deps.workspacePath : undefined }
-  const sameBucket = (old: MemoryRecord) => old.scope === bucket.scope
-    && (bucket.scope !== 'workspace' || old.workspacePath === bucket.workspacePath)
+  const isSameScope = (old: MemoryRecord) => old.scope === writeScope.scope
+    && (writeScope.scope !== 'workspace' || old.workspacePath === writeScope.workspacePath)
   const replaced: MemoryRecord[] = []
-  let crossBucketSupersede = false
+  let hasCrossScopeSupersede = false
   for (const oldId of new Set(candidate.supersedes ?? [])) {
     const old = await store.get(oldId, { workspacePath: deps.workspacePath })
     if (old === undefined || old.id === target?.id) continue
-    if (!sameBucket(old)) crossBucketSupersede = true
+    if (!isSameScope(old)) hasCrossScopeSupersede = true
     else if (old.status === 'active') replaced.push(old)
   }
 
@@ -351,7 +351,7 @@ export async function runSavePipeline(
     const entities = extractEntities(text)
     const peers = await store.query({
       types: [candidate.type],
-      scope: { kind: 'workspace', path: deps.workspacePath! }, // create 必有 workspace 桶（前置已拒无 cwd）
+      scope: { kind: 'workspace', path: deps.workspacePath! }, // create 必有 workspace 作用域（前置已拒无 cwd）
       status: ['active'],
     })
     // 子 agent 只和主档比：待确认记录之间的分歧留给主会话接受时裁决，两条并存
@@ -468,14 +468,14 @@ export async function runSavePipeline(
     if (!await store.put(clean, undefined, isChangedSinceRead)) return changedAfterRead(clean.id, seen.current, deps.delegation !== undefined)
   }
 
-  // 6. supersedes 处理：读到时在用的同桶目标置 superseded（见上方 replaced）；锁内再看一次，其间被删除、被取代、
-  // 被改写或搬到别的桶的不动
+  // 6. supersedes 处理：读到时在用的同作用域目标置 superseded（见上方 replaced）；锁内再看一次，其间被删除、被取代、
+  // 被改写或搬到别的作用域的不动
   const superseded: MemoryRecord[] = []
   for (const old of replaced) {
     try {
       await store.update(old, (r) => {
         // 抛出即不写（同 updateIfLive）
-        if (r.status !== 'active' || r.updatedAt !== old.updatedAt || !sameBucket(r)) throw new RecordNotFoundError(r.id)
+        if (r.status !== 'active' || r.updatedAt !== old.updatedAt || !isSameScope(r)) throw new RecordNotFoundError(r.id)
         return { ...r, status: 'superseded', updatedAt: now }
       })
       superseded.push(old)
@@ -512,8 +512,8 @@ export async function runSavePipeline(
   const warnings: SaveWarning[] = [
     ...subagent.warnings,
     ...scopeWarnings,
-    ...(crossBucketSupersede
-      ? [{ code: 'cross-bucket-supersede' as const, text: '跨桶替代不允许：supersedes 目标不在本次写入的记忆桶内，已跳过不置 superseded。global 记忆的矛盾走 memory_scan 的冲突裁决，跨层提升合并走 memory_promote' }]
+    ...(hasCrossScopeSupersede
+      ? [{ code: 'cross-bucket-supersede' as const, text: '不允许跨作用域替代：supersedes 目标和本次写入的记忆不在同一作用域，已跳过不置 superseded。global 记忆的矛盾走 memory_scan 的冲突裁决，跨层提升合并走 memory_promote' }]
       : []),
     ...(updateSnapshotId
       ? [{ code: 'auto-snapshot' as const, text: `已自动快照（${updateSnapshotId}），14 天内可用 memory_snapshot 恢复` }]

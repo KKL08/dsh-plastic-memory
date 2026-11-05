@@ -277,7 +277,7 @@ export function belongsTo(cwd: string | undefined, workspacePath: string | undef
   return deepest !== undefined && samePath(deepest, workspacePath)
 }
 
-/** 会话所属的项目：对照里有就用它，其次包含 cwd 的最深的已知项目，都没有时是原始 cwd（服务端也拿 cwd 本身当桶）。 */
+/** 会话所属的项目：对照里有就用它，其次包含 cwd 的最深的已知项目，都没有时是原始 cwd（服务端也拿 cwd 本身当作用域）。 */
 export function workspaceOf(cwd: string | undefined, map: WorkspaceMap): string | undefined {
   if (cwd === undefined) return undefined
   return lookup(map, cwd) ?? deepestContaining(cwd, Object.values(map)) ?? cwd

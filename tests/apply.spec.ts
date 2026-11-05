@@ -241,6 +241,15 @@ describe('apply', () => {
     ])
   })
 
+  it('PA-19 九个工具的描述与参数说明里不出现「桶」', async () => {
+    type ToolDef = { name: string; description: string; parameters: unknown }
+    const defs = new Map<string, ToolDef>()
+    const ctx = { ...mockCtx(), tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } } }
+    await apply(ctx as never, new Config({ memoryRoot: await makeTmpRoot() } as never))
+    expect(defs.size).toBe(9)
+    for (const def of defs.values()) expect(JSON.stringify([def.description, def.parameters]), def.name).not.toContain('桶')
+  })
+
   it('接线集成：apply 注册后的 memory_search 能看见之后外部新写入的文件（每次调用直接读目录）', async () => {
     // 留住真实 ToolDefinition，经注册后的 execute 走一遍：apply 之后外部落盘的记忆必须能被检索到。
     type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
@@ -1228,16 +1237,16 @@ describe('语义扫描请求形状', () => {
     }
     const memoryRoot = await seedMemory(await makeTmpRoot())
     const cwd = await makeTmpRoot()
-    const bucket = cacheKey(await realpath(cwd)) // 无 workspaceRegistry 时规范化 cwd 即目录桶
+    const cacheId = cacheKey(await realpath(cwd)) // 无 workspaceRegistry 时规范化 cwd 即目录作用域
     const prior: ScanCacheEntry = {
-      id: bucket, scannedAt: 1, scope: await realpath(cwd),
+      id: cacheId, scannedAt: 1, scope: await realpath(cwd),
       findings: [{
         type: 'conflict', layer: 'semantic', severity: 'critical', memoryIds: ['mem_a', 'mem_b'],
         summary: '先前缓存的冲突', suggestedAction: '裁决',
       }],
     }
     const cache = sidecarAt(memoryRoot).scanCache
-    await cache.put(bucket, prior)
+    await cache.put(cacheId, prior)
     // 首次与重试都是：先吐完整 JSON，再以 error 终止（DeepSeek 适配器在 message_stop 前断流）
     const brokenStream = (): StreamChunk[] => [
       { type: 'text-delta', index: 0, text: '{"findings":[]}' },
@@ -1254,7 +1263,7 @@ describe('语义扫描请求形状', () => {
 
     expect(base.llmRequests).toHaveLength(2)
     expect(out.notes?.map(n => n.code)).toContain('semantic-failed')
-    expect(await cache.get(bucket)).toEqual(prior)
+    expect(await cache.get(cacheId)).toEqual(prior)
   })
 
   it('流以 aborted 收尾而 signal 未触发：按取消拒绝（AbortError、不重试），不当成功', async () => {

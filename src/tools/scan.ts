@@ -229,7 +229,7 @@ async function scanPass(
   deps: ScanToolDeps,
   byId: ReadonlyMap<string, MemoryRecord>,
   records: MemoryRecord[],
-  bucket: string,
+  cacheId: string,
   scopeLabel: string,
   quarantined: readonly { path: string; error: string }[],
   layers: 'rule' | 'semantic' | 'full',
@@ -248,7 +248,7 @@ async function scanPass(
     findings.push(...buildMalformedFindings(quarantined))
   }
 
-  let semanticCachedAt: number | null = (await deps.cache.get(bucket))?.scannedAt ?? null
+  let semanticCachedAt: number | null = (await deps.cache.get(cacheId))?.scannedAt ?? null
   if (layers === 'semantic' || layers === 'full') {
     if (!llm) {
       notes.push(layers === 'semantic'
@@ -278,12 +278,12 @@ async function scanPass(
         signal?.throwIfAborted()
         // 不回退：别的扫描开始得比这次晚、已经写过的，留着它的
         const entry = {
-          id: bucket, scannedAt: now, scope: scopeLabel, findings: semantic.findings,
+          id: cacheId, scannedAt: now, scope: scopeLabel, findings: semantic.findings,
           fingerprints: findingFingerprints(semantic.findings, byId),
           isTrackedByCheckups: true,
         }
-        const isWritten = await deps.cache.update(bucket, cur => (cur !== undefined && cur.scannedAt > now ? undefined : entry))
-        semanticCachedAt = isWritten ? now : (await deps.cache.get(bucket))?.scannedAt ?? now
+        const isWritten = await deps.cache.update(cacheId, cur => (cur !== undefined && cur.scannedAt > now ? undefined : entry))
+        semanticCachedAt = isWritten ? now : (await deps.cache.get(cacheId))?.scannedAt ?? now
         isSemanticDone = true
       }
     }
@@ -438,7 +438,7 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     }
 
     // 每个 workspace 独立扫描：输入是该 ws 的可见集合（含 global，跨层冲突要在同一 prompt 里才可判），
-    // 缓存写各自桶；分数由 scoreLayer 按归属规则计算（纯 global 噪音不进 ws 层分数）
+    // 语义缓存按作用域分别写；分数由 scoreLayer 按归属规则计算（纯 global 噪音不进 ws 层分数）
     // 基线是当前会话的指令内容（含本项目 CLAUDE.md），拿它去判其他 workspace 的垂直冲突
     // 会误判——只对当前会话所属 ws 和 global 层生效，其余 ws 跳过垂直检测并如实说明
     const byWorkspace = new Map<string, MemoryRecord[]>()
@@ -459,7 +459,7 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
       if (pass.isChecked) checked.push({ kind: 'workspace', path: ws })
       byWorkspace.set(ws, active(r => r.scope === 'workspace' && r.workspacePath === ws))
     }
-    // global 层：global-only 输入，独立桶
+    // global 层：global-only 输入，单独一个缓存键
     signal?.throwIfAborted()
     const globalRecords = active(isGlobal)
     const globalPass = await scanPass(deps, data.byId, globalRecords, GLOBAL_CACHE_KEY, 'global', layerQuarantined(undefined), layers, llm, baseline, now, signal, onUsage)
@@ -514,8 +514,8 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
       }
     }
 
-    // 体检收尾：清理孤儿语义缓存桶（废弃 workspace 的、历史遗留键）——体检本就是全库视角，
-    // 天然的清扫时机；合法桶按"库里现存的全部 workspace"算，不受本次 scopes 子集影响
+    // 体检收尾：清理孤儿语义缓存条目（废弃 workspace 的、历史遗留键）——体检本就是全库视角，
+    // 天然的清扫时机；合法缓存键按"库里现存的全部 workspace"算，不受本次 scopes 子集影响
     signal?.throwIfAborted()
     const validKeys = new Set([GLOBAL_CACHE_KEY, ...checkupWorkspaces(listing).map(ws => cacheKey(ws))])
     for (const key of scored.cache.keys()) {
