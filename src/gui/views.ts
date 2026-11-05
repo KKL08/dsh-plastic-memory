@@ -166,7 +166,7 @@ export function buildPendingView(input: ViewInput): PendingView {
     : items.some(isAwaitingDecision) ? 'amber' : 'none'
   const cards = items.flatMap(i => i.kind === 'conflict-horizontal' ? [i.left, i.right] : i.kind === 'advice' ? i.memories : 'memory' in i ? [i.memory] : [])
   const levelCounts = Object.fromEntries(PENDING_LEVELS.map(level => [level, items.filter(i => i.level === level).length])) as PendingView['levelCounts']
-  return { version: GUI_VIEW_VERSION, dot, items, levelCounts, typeLabels: typeLabels(input.registry, cards.map(m => m?.type)) }
+  return { version: GUI_VIEW_VERSION, generatedAt: input.now, dot, items, levelCounts, typeLabels: typeLabels(input.registry, cards.map(m => m?.type)) }
 }
 
 /** 语义体检来的建议类型：内容重复整组一项，放错层、表述不清每条记忆一项。 */
@@ -307,6 +307,7 @@ function typeOrder(registry: TypeRegistry, present: Iterable<string>): string[] 
 export function buildHealthView(input: ViewInput): HealthView {
   return {
     version: GUI_VIEW_VERSION,
+    generatedAt: input.now,
     governanceEnabled: input.governanceEnabled,
     ...(input.bootedAt !== undefined ? { bootedAt: input.bootedAt } : {}),
     layers: input.healthLayers.map(layer => {
@@ -354,6 +355,7 @@ export function buildCheckupView(input: {
 }): CheckupView {
   return {
     version: GUI_VIEW_VERSION,
+    generatedAt: input.now,
     governanceEnabled: input.governanceEnabled,
     defaultFrequency: resolveAutoCheckup(input.settings, { kind: 'all' }).frequency,
     allResult: input.allRecord?.lastResult ?? null,

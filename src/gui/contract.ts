@@ -39,6 +39,14 @@ export function sessionViewFile(sessionId: string): string {
 
 const version = z.literal(GUI_VIEW_VERSION)
 
+/**
+ * 视图生成时刻（毫秒，写入方进程的时钟）：这次收集开始、读记忆文件之前取，四个全局视图和体检视图都带，同一次收集写出的相同。
+ * 在它之前写下的记忆一定反映在视图里（对话卡按全部记忆与最近删除两份视图的这个时刻判彻底删除）。写入器替换文件前读盘上那份，
+ * 盘上的更晚就不写，几个进程同开时早收集、晚写完的旧视图不盖掉新的；盘上缺它、或它晚于当前时刻（时钟往回调过）按 0 算。
+ * 可缺省：升级前写的视图文件、界面测试手搭的视图没有它。
+ */
+const generatedAt = z.number().optional()
+
 // —— 共用片段 ——
 
 export const layerRefSchema = z.discriminatedUnion('kind', [
@@ -242,6 +250,7 @@ export const PENDING_DOTS = ['none', 'amber', 'red'] as const
 /** 待处理（全部层），按 PENDING_ITEM_KINDS 顺序（先按级别）、同类按 firstSeenAt 升序；建议整理按 ADVICE_TYPES、层（global 在前）、名称排。 */
 export const pendingViewSchema = z.object({
   version,
+  generatedAt,
   dot: z.enum(PENDING_DOTS),
   items: z.array(pendingItemSchema),
   /** 各级的条数（每一级都有，没有为 0）。 */
@@ -297,6 +306,7 @@ export const healthLayerSchema = z.object({
 })
 export const healthViewSchema = z.object({
   version,
+  generatedAt,
   /** 体检开关（governance.enabled）：关闭时界面置灰健康内容、「体检当前项目」不可用。 */
   governanceEnabled: z.boolean(),
   /** 插件本次加载的时刻（epoch ms）：会话快照的 frozenAt 早于它就是「重启后未重新带入」；浏览器半侧拿不到宿主进程时间，从这里读。 */
@@ -316,11 +326,6 @@ export const directoryIssueSchema = z.object({
   /** duplicate-id：读取时用的那份（path 是没用上的副本）。 */
   keptPath: z.string().optional(),
 })
-/**
- * 视图生成时刻（毫秒）：这次收集开始、读记忆文件之前取，同一次收集写出的全部记忆与最近删除视图相同。
- * 在它之前写下的记忆一定反映在视图里。可缺省：之前写出的视图文件没有它。
- */
-const generatedAt = z.number().optional()
 
 export { MODEL_CHANGE_KINDS, type ModelChangeKind } from '../contract-codes.ts'
 
@@ -546,6 +551,7 @@ export const GUI_CHECKUP_VIEW_FILE = 'checkups.json'
  */
 export const checkupViewSchema = z.object({
   version,
+  generatedAt,
   /** 体检开关（本进程的配置，几个进程不一致时以后写的为准）：关着时自动体检不跑。 */
   governanceEnabled: z.boolean(),
   /** 「全部」的频率，即默认值；没设过为 manual（仅手动）。 */
