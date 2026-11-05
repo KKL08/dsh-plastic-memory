@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
-import { readFile, writeFile, mkdir, readdir } from 'node:fs/promises'
+import { chmod, readFile, writeFile, mkdir, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { agentsMdPath, createAgentsMdWriter } from '../src/storage/agents-md.ts'
@@ -45,6 +45,19 @@ describe('createAgentsMdWriter.append', () => {
     expect(text).toContain('手写规则一条')
     const inner = text.slice(text.indexOf('<!-- dsh-memory:start -->'), text.indexOf('<!-- dsh-memory:end -->'))
     expect(inner).toContain('- 测试不 mock 数据库')
+  })
+
+  it('PA-04 读取报权限错误：append 失败，文件原文一字不变、不留 .tmp- 残留', async () => {
+    const original = '# 用户手写区\n不能丢的内容\n'
+    await writeFile(file, original, 'utf8')
+    await chmod(file, 0o000)
+    try {
+      await expect(createAgentsMdWriter(file).append('一条记忆')).rejects.toMatchObject({ code: 'EACCES' })
+    } finally {
+      await chmod(file, 0o644)
+    }
+    expect(await readFile(file, 'utf8')).toBe(original)
+    expect((await readdir(dir)).some(n => n.includes('.tmp-'))).toBe(false)
   })
 
   it('同内容再 append 不重复（幂等）', async () => {

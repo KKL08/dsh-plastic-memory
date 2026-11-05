@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { executePromote } from '../src/tools/promote.ts'
@@ -257,5 +257,24 @@ describe('executePromote × 真实 AgentsMdWriter', () => {
     await executePromote({ confirmedIds: ['mem_short'], target: 'agents-md' }, { workspacePath: '/proj' }, deps)
     const text = await readFile(join(dir, 'AGENTS.md'), 'utf8')
     expect(text.split('\n').filter(l => l.startsWith('- 包管理 — '))).toHaveLength(2)
+  })
+
+  it('PA-04 AGENTS.md 读取报权限错误：提升失败、记忆仍 active，文件原文一字不变', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await store.put(record({ id: 'mem_ro', name: '偏好', content: '用 pnpm' }))
+    const file = join(dir, 'AGENTS.md')
+    const original = '# 用户手写\n别动这段\n'
+    await writeFile(file, original, 'utf8')
+    await chmod(file, 0o000)
+    let r: Awaited<ReturnType<typeof executePromote>>
+    try {
+      r = await executePromote({ confirmedIds: ['mem_ro'], target: 'agents-md' }, { workspacePath: '/proj' }, { store, agentsMd: createAgentsMdWriter(file), snapshots: makeSnapshots() })
+    } finally {
+      await chmod(file, 0o644)
+    }
+    expect(r.promoted).toEqual([])
+    expect(r.skipped).toEqual(['mem_ro'])
+    expect((await store.get('mem_ro'))!.status).toBe('active')
+    expect(await readFile(file, 'utf8')).toBe(original)
   })
 })

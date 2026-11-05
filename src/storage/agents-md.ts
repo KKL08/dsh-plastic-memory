@@ -42,7 +42,12 @@ async function appendInner(filePath: string, line: string): Promise<void> {
     .replace(/\s*\n\s*/g, ' ').trim()
   const entry = `- ${sanitized}`
   let existing = ''
-  try { existing = await readFile(filePath, 'utf8') } catch { /* 文件不存在，按空处理 */ }
+  try {
+    existing = await readFile(filePath, 'utf8')
+  } catch (err) {
+    // 只有文件不存在才按空处理；读不出来（权限等）按空写会拿托管区块整份盖掉用户内容
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+  }
 
   const startIdx = existing.indexOf(BLOCK_START)
   const endIdx = existing.indexOf(BLOCK_END)

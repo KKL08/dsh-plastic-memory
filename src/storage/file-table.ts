@@ -39,6 +39,9 @@ const INDEX_ROUNDS = 3
 /** 写前复核发现 locate 之后文件被改：本轮写作废，由 update / put 重新 locate 再来（只在本文件内流转）。 */
 class StaleReadError extends Error {}
 
+/** 候选文件名都被别的 id 占着：不覆盖。写路径原样抛给调用方；维护点搬家时跳过这一个文件。 */
+class NameTakenError extends Error {}
+
 /** frontmatter 里的 id 行：允许引号与两侧空白，行尾的 \r（CRLF 文件）被 \s* 吃掉。 */
 const ID_LINE_RE = /^id:\s*["']?([^"'\s]+)["']?\s*$/m
 /** frontmatter 里的 digest 行（维护点判手编：认识且不匹配才把时间戳取 mtime）；形态同 id 行。 */
@@ -427,6 +430,7 @@ export class FileTable implements MemoryTable {
             claim = await this.claimAndWrite(record, archive, text, slots.filter(s => s.record.id === record.id), basename(slot.filePath, '.md'))
           } catch (err) {
             if (err instanceof StaleReadError) continue   // 归档名被别的进程刚写的同 id 文件占着：本轮跳过，下次维护再处理
+            if (err instanceof NameTakenError) continue   // 归档名都被别的 id 占着：留在顶层（非 active 不进索引），等用户腾出名字
             throw err
           }
           if (claim.path.toLowerCase() !== slot.filePath.toLowerCase()) {
@@ -596,8 +600,8 @@ export class FileTable implements MemoryTable {
    * 排他占名并写入（撞名时追加 id 片段）。完整内容先进 tmp，再 link 到候选名：目标名原子出现
    * 且内容完整，没有"先建空文件再填"的窗口，崩溃最多留下 tmp（维护点清）。卷不支持硬链接时 linkExclusive 退回排他复制，
    * 排他不变，只是不再原子。EEXIST 表示名被占——占着的是同一记录自己的
-   * 文件（崩溃残留、同 id 副本）才允许 rename 覆盖，否则换下一个候选：基础名 → id 片段名 → 全 id 名（按构造只属于本记录，
-   * 被别的 id 占着也覆盖）。两个进程写同名异 id 的记录因此两条都存活；隔离文件、缺标记目录里的文件也不会被同 slug 写入静默覆盖。
+   * 文件（崩溃残留、同 id 副本）才允许 rename 覆盖，否则换下一个候选：基础名 → id 片段名 → 全 id 名。全 id 名也被别的 id
+   * 占着（手建、改过 id 的文件）就抛错，不覆盖。两个进程写同名异 id 的记录因此两条都存活；隔离文件、缺标记目录里的文件也不会被同 slug 写入静默覆盖。
    * 同 id 的文件也只覆盖 known 里读到、此后没变过的那份：读之后才出现或被改过的是别的进程刚落的盘，覆盖会丢掉对方的修改，
    * 抛 StaleReadError 让调用方重读再来。
    */
@@ -620,10 +624,12 @@ export class FileTable implements MemoryTable {
         if (onDisk?.id === record.id) {
           if (!known.some(k => k.filePath.toLowerCase() === path.toLowerCase() && k.raw === onDisk.raw)) throw new StaleReadError()
         } else if (name !== fullIdName) continue
+        // 文件名由 name 派生、可能带密钥，报错只给目录和占着的 id
+        else if (onDisk !== null) throw new NameTakenError(`候选文件名都被别的记忆占着，没有写入：${dirname(path)}（占着的 id：${onDisk.id}）`)
         await rename(tmp, path)
         return { path, ino }
       }
-      throw new Error(`unreachable: ${fullIdName}`)   // 全 id 名不会是保留名，循环必在它那里返回
+      throw new Error(`unreachable: ${fullIdName}`)   // 全 id 名不会是保留名，循环必在它那里返回或抛错
     } finally {
       await rm(tmp, { force: true })   // 占名成功后 tmp 仍在（link 多出的名字或复制的源）；rename 过的已不存在
     }

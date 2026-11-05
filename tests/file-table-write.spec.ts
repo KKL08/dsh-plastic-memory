@@ -265,6 +265,29 @@ describe('写路径内核（锁内定位、排他占名、搬家与归档）', (
     expect(await tmps(globalDir())).toEqual([])
   })
 
+  it('PA-05 三个候选名都被别的 id 占着：写入抛错，占着全 id 名的那条文件不变', async () => {
+    await seedGlobal('同名.md', record({ id: 'mem_other1', name: '同名', content: '别人的 ①' }))
+    await seedGlobal(`同名-${'mem_new'.slice(-6)}.md`, record({ id: 'mem_other2', name: '同名', content: '别人的 ②' }))
+    await seedGlobal('同名-mem_new.md', record({ id: 'mem_other3', name: '同名', content: '手建的 ③' }))
+    const before = await readFile(join(globalDir(), '同名-mem_new.md'), 'utf8')
+    const t = await load()
+    await expect(t.create(record({ id: 'mem_new', name: '同名', content: '新来的' }))).rejects.toThrow('mem_other3')
+    expect(await readFile(join(globalDir(), '同名-mem_new.md'), 'utf8')).toBe(before)
+    expect(await mds(globalDir())).toHaveLength(3)
+    expect(await tmps(globalDir())).toEqual([])
+  })
+
+  it('PA-05 三个候选名都被占着时的报错只给目录和占着的 id，不带由 name 派生的文件名（name 里可能有密钥）', async () => {
+    await seedGlobal('同名.md', record({ id: 'mem_other1', name: '同名' }))
+    await seedGlobal(`同名-${'mem_new'.slice(-6)}.md`, record({ id: 'mem_other2', name: '同名' }))
+    await seedGlobal('同名-mem_new.md', record({ id: 'mem_other3', name: '同名' }))
+    const t = await load()
+    const error = await t.create(record({ id: 'mem_new', name: '同名' })).then(() => undefined, (e: unknown) => e as Error)
+    expect(error?.message).toContain(globalDir())
+    expect(error?.message).toContain('mem_other3')
+    expect(error?.message).not.toContain('同名')
+  })
+
   it('create 之后 locate 能按 id 找到，内容逐字段相等', async () => {
     const t = await load()
     const r = wsRecord({ id: 'mem_cr', name: '新建', content: '新建正文', updatedAt: 5 })
