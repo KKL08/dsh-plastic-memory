@@ -8,7 +8,7 @@ export function createHealthTool(deps: HealthToolDeps): ToolDefinition {
   return defineTool({
     name: 'memory_health',
     description: '查看记忆库健康分（0-100，绿/黄/红三档；检出密钥直接红线判定）。纯读取零成本：'
-      + '规则层实时算，语义层用上次 memory_scan 的缓存（按 scope 分桶），另含新鲜度轴与待决冲突提醒。'
+      + '规则层实时算，语义层用上次 memory_scan 的缓存（按作用域分别缓存），另含新鲜度轴与待决冲突提醒。'
       + '默认看当前项目（分母是本项目自身规模）；scope="all" 输出各 workspace 分数表 + global 层，'
       + '免 LLM 调用、无需向用户确认。用户问记忆状况、或长时间未治理时调用。',
     parameters: {

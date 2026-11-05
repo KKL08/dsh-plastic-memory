@@ -404,6 +404,7 @@ async function dispatch(
       )
       if (r.kind === 'error') return r.code === 'cross-workspace' ? fail(cmd, 'cross-workspace', r.message, r.rejected) : fail(cmd, r.code ?? 'failed', r.message)
       if (r.kind === 'resolved' && r.isUnrecorded) return { ok: true, cmd, decisionId: command.decisionId, isUnrecorded: true }
+      if (r.kind === 'resolved' && r.isHardDeleted) return { ok: true, cmd, decisionId: command.decisionId, isHardDeleted: true }
       const snapshotId = (await settledEntry(command.decisionId))?.settled?.snapshotId
       return { ok: true, cmd, decisionId: command.decisionId, ...(snapshotId !== undefined ? { snapshotId } : {}) }
     }
@@ -715,6 +716,10 @@ async function dispatch(
       if (!records.every(r => r?.status === 'active')) return notFound(refs.map(ref => ref.memoryId).join('、'))
       // 高危密钥的原文不发给模型；确认存下的疑似密钥同注入，照原文发
       if (records.some(r => hasCriticalSecret(r!))) return fail(cmd, 'has-secret', '含密钥的记忆不发给模型。未做任何改动')
+      // 要求和上一稿同样进提示词；上一稿是模型回的原样，不遮，命中高危就整次不发
+      const previous = command.previous
+      const asked = [command.request ?? '', ...(previous !== undefined ? [previous.content, previous.name ?? '', previous.summary, ...(previous.tags ?? [])] : [])]
+      if (detectSecrets(asked.join('\n')).some(h => h.severity === 'critical')) return fail(cmd, 'secret-critical', '要求或上一稿里有高危密钥，不发给模型。未做任何改动')
       const llm = deps.getLlm(exec)
       if (llm === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型')
       const r = await generateDraft({ adviceType: command.adviceType, records: records.map(rec => rec!), request: command.request, previous: command.previous }, llm)
@@ -816,9 +821,10 @@ async function dispatch(
         }
         const ids = matched.filter(r => r.status === 'active').map(r => r.id)
         if (ids.length === 0) continue
+        // 锁内复核：收集之后被别处改成别的类型的不删（同 retype）
         const r = await executeForget(
           { ids, reason: `用户在设置页删除或改名类型 ${command.from}`, allowCrossWorkspace: true },
-          gov, executorDeps, { isSoftOnly: true, target: layer },
+          gov, executorDeps, { isSoftOnly: true, target: layer, isChanged: current => current.type !== command.from },
         )
         migrated += r.forgotten.length
         skippedSecrets += r.skippedSecrets?.length ?? 0

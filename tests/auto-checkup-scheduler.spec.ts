@@ -145,7 +145,7 @@ function env(opts: {
   // 宿主默认模型选择的当前值（用例中途可以改）
   const route = { current: 'defaultModel' in opts ? opts.defaultModel : DEFAULT_ROUTE }
   const source = { store, checkups, autoCheckups, cache, isGovernanceEnabled: () => governance.isEnabled, now: () => clock.now }
-  const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('这里只写体检视图') }, collectCheckups: () => collectCheckupView(source) })
+  const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('这里只写体检视图') }, collectCheckups: () => collectCheckupView(source), now: () => clock.now, sleep: async () => {} })
   const timers = fakeTimer(clock)
   const scanned: Array<{ layer: LayerRef; result: ScanToolResult }> = []
   const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)

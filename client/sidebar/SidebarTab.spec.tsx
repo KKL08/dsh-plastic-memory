@@ -701,6 +701,20 @@ describe('SidebarTab 裁决结论没记下', () => {
   })
 })
 
+describe('SidebarTab 裁决删掉的一方含密钥', () => {
+  it('PA-11 结果带 isHardDeleted：写已彻底删除、提醒换凭证，不给撤销', async () => {
+    setup(
+      { library: library(pref, { ...pref2, hasSecret: true }, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending({ ...conflict, right: { ...pref2, hasSecret: true } } as PendingItem) },
+      command => ({ ok: true, cmd: command.cmd, decisionId: 'pd_1', isHardDeleted: true }),
+    )
+    expect(screen.getByText(/以 A 为准，B 含密钥，将彻底删除、不可恢复/)).toBeInTheDocument()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '以 A 为准' })) })
+    expect(screen.getByText('B 含密钥，已彻底删除。如果它是真的凭证，记得去换一个新的。')).toBeInTheDocument()
+    expect(screen.queryByText('B 已删除，14 天内可恢复。')).toBeNull()
+    expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
+  })
+})
+
 describe('SidebarTab 冲突对方在别的项目', () => {
   it('那一方的元信息写项目名；本项目这一方写「本项目」，不再两边都不写作用域', () => {
     const other = memory({ id: 'p2', type: 'preference', workspacePath: '/w/blog', content: '测试里 mock 数据库就行。' })

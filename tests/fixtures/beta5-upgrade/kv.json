@@ -1,0 +1,655 @@
+{
+  "snapshots": [
+    [
+      "snap_mw3wctw3nxr17t",
+      {
+        "id": "snap_mw3wctw3nxr17t",
+        "createdAt": "@T+69",
+        "operation": "pre-promote",
+        "description": "提升 4 条记忆到 global 前",
+        "memoryIds": [
+          "mem_mw3wctv5ndq8ic",
+          "mem_mw3wctvbo4rrwb",
+          "mem_mw3wctvinxf9hb",
+          "mem_mw3wctvp1us397"
+        ],
+        "data": [
+          {
+            "id": "mem_mw3wctv5ndq8ic",
+            "name": "回复语言",
+            "type": "preference",
+            "scope": "workspace",
+            "workspacePath": "{{PROJECT}}",
+            "tags": [
+              "language"
+            ],
+            "content": "回复用中文",
+            "summary": "回复用中文",
+            "source": {
+              "sessionId": "sess_project",
+              "eventRange": [
+                0,
+                29
+              ],
+              "sourceMode": "user-explicit"
+            },
+            "createdAt": "@T+35",
+            "updatedAt": "@T+35",
+            "lastConfirmedAt": "@T+35",
+            "lastRecalledAt": null,
+            "recallCount": 0,
+            "status": "active",
+            "confidence": 0.9,
+            "globalCandidate": true
+          },
+          {
+            "id": "mem_mw3wctvbo4rrwb",
+            "name": "缩进两个空格",
+            "type": "preference",
+            "scope": "workspace",
+            "workspacePath": "{{PROJECT}}",
+            "tags": [
+              "indent-global"
+            ],
+            "content": "代码缩进用两个空格",
+            "summary": "缩进两个空格",
+            "source": {
+              "sessionId": "sess_project",
+              "eventRange": [
+                0,
+                34
+              ],
+              "sourceMode": "user-explicit"
+            },
+            "createdAt": "@T+41",
+            "updatedAt": "@T+41",
+            "lastConfirmedAt": "@T+41",
+            "lastRecalledAt": null,
+            "recallCount": 0,
+            "status": "active",
+            "confidence": 0.9,
+            "globalCandidate": true
+          },
+          {
+            "id": "mem_mw3wctvinxf9hb",
+            "name": "包管理器",
+            "type": "preference",
+            "scope": "workspace",
+            "workspacePath": "{{PROJECT}}",
+            "tags": [
+              "pnpm"
+            ],
+            "content": "包管理器用 pnpm",
+            "summary": "包管理器用 pnpm",
+            "source": {
+              "sessionId": "sess_project",
+              "eventRange": [
+                0,
+                39
+              ],
+              "sourceMode": "user-explicit"
+            },
+            "createdAt": "@T+48",
+            "updatedAt": "@T+48",
+            "lastConfirmedAt": "@T+48",
+            "lastRecalledAt": null,
+            "recallCount": 0,
+            "status": "active",
+            "confidence": 0.9,
+            "globalCandidate": true
+          },
+          {
+            "id": "mem_mw3wctvp1us397",
+            "name": "包管理器旧习惯",
+            "type": "preference",
+            "scope": "workspace",
+            "workspacePath": "{{PROJECT}}",
+            "tags": [
+              "npm"
+            ],
+            "content": "包管理器用 npm，不用 pnpm",
+            "summary": "包管理器用 npm",
+            "source": {
+              "sessionId": "sess_project",
+              "eventRange": [
+                0,
+                44
+              ],
+              "sourceMode": "user-explicit"
+            },
+            "createdAt": "@T+55",
+            "updatedAt": "@T+55",
+            "lastConfirmedAt": "@T+55",
+            "lastRecalledAt": null,
+            "recallCount": 0,
+            "status": "active",
+            "confidence": 0.9,
+            "globalCandidate": true
+          }
+        ]
+      }
+    ],
+    [
+      "snap_mw3wctwd5s6r4w",
+      {
+        "id": "snap_mw3wctwd5s6r4w",
+        "createdAt": "@T+79",
+        "operation": "pre-update",
+        "description": "更新全局记忆 mem_mw3wctv5ndq8ic 前",
+        "memoryIds": [
+          "mem_mw3wctv5ndq8ic"
+        ],
+        "data": [
+          {
+            "id": "mem_mw3wctv5ndq8ic",
+            "name": "回复语言",
+            "type": "preference",
+            "scope": "global",
+            "tags": [
+              "language"
+            ],
+            "content": "回复用中文",
+            "summary": "回复用中文",
+            "source": {
+              "sessionId": "sess_project",
+              "eventRange": [
+                0,
+                29
+              ],
+              "sourceMode": "user-explicit"
+            },
+            "createdAt": "@T+35",
+            "updatedAt": "@T+35",
+            "lastConfirmedAt": "@T+35",
+            "lastRecalledAt": null,
+            "recallCount": 0,
+            "status": "active",
+            "confidence": 0.9
+          }
+        ]
+      }
+    ],
+    [
+      "snap_mw3wctwke08fhc",
+      {
+        "id": "snap_mw3wctwke08fhc",
+        "createdAt": "@T+86",
+        "operation": "manual",
+        "description": "手动快照：整理前",
+        "memoryIds": [
+          "mem_mw3wctugcyhk5b",
+          "mem_mw3wctuqsau0p4",
+          "mem_mw3wctuy5blwl5",
+          "mem_mw3wctv5ndq8ic",
+          "mem_mw3wctvbo4rrwb",
+          "mem_mw3wctvinxf9hb",
+          "mem_mw3wctvp1us397",
+          "mem_mw3wctvwgjhcyk"
+        ],
+        "data": [
+          {
+            "id": "mem_mw3wctugcyhk5b",
+            "name": "测试框架",
+            "type": "project",
+            "scope": "workspace",
+            "workspacePath": "{{PROJECT}}",
+            "tags": [
+              "vitest"
+            ],
+            "content": "本项目测试用 vitest，命令 pnpm test",
+            "summary": "测试用 vitest",
+            "source": {
+              "sessionId": "sess_project",
+              "eventRange": [
+                0,
+                14
+              ],
+              "sourceMode": "user-explicit"
+            },
+            "createdAt": "@T+10",
+            "updatedAt": "@T+10",
+            "lastConfirmedAt": "@T+10",
+            "lastRecalledAt": null,
+            "recallCount": 0,
+            "status": "active",
+            "confidence": 0.9
+          },
+          {
+            "id": "mem_mw3wctuqsau0p4",
+            "name": "缩进风格",
+            "type": "preference",
+            "scope": "workspace",
+            "workspacePath": "{{PROJECT}}",
+            "tags": [
+              "indent"
+            ],
+            "content": "本项目缩进用 tab",
+            "summary": "缩进用 tab",
+            "source": {
+              "sessionId": "sess_project",
+              "eventRange": [
+                0,
+                19
+              ],
+              "sourceMode": "user-explicit"
+            },
+            "createdAt": "@T+20",
+            "updatedAt": "@T+20",
+            "lastConfirmedAt": "@T+20",
+            "lastRecalledAt": null,
+            "recallCount": 0,
+            "status": "active",
+            "confidence": 0.9
+          },
+          {
+            "id": "mem_mw3wctuy5blwl5",
+            "name": "提交规范",
+            "type": "preference",
+            "scope": "workspace",
+            "workspacePath": "{{PROJECT}}",
+            "tags": [
+              "git"
+            ],
+            "content": "提交信息不加句号",
+            "summary": "提交信息不加句号",
+            "source": {
+              "sessionId": "sess_project",
+              "eventRange": [
+                0,
+                24
+              ],
+              "sourceMode": "user-explicit"
+            },
+            "createdAt": "@T+28",
+            "updatedAt": "@T+28",
+            "lastConfirmedAt": "@T+28",
+            "lastRecalledAt": null,
+            "recallCount": 0,
+            "status": "active",
+            "confidence": 0.9
+          },
+          {
+            "id": "mem_mw3wctv5ndq8ic",
+            "name": "回复语言",
+            "type": "preference",
+            "scope": "global",
+            "tags": [
+              "language"
+            ],
+            "content": "回复用简体中文",
+            "summary": "回复用简体中文",
+            "source": {
+              "sessionId": "sess_project",
+              "eventRange": [
+                0,
+                59
+              ],
+              "sourceMode": "user-explicit"
+            },
+            "createdAt": "@T+35",
+            "updatedAt": "@T+79",
+            "lastConfirmedAt": "@T+79",
+            "lastRecalledAt": null,
+            "recallCount": 0,
+            "status": "active",
+            "confidence": 0.9
+          },
+          {
+            "id": "mem_mw3wctvbo4rrwb",
+            "name": "缩进两个空格",
+            "type": "preference",
+            "scope": "global",
+            "tags": [
+              "indent-global"
+            ],
+            "content": "代码缩进用两个空格",
+            "summary": "缩进两个空格",
+            "source": {
+              "sessionId": "sess_project",
+              "eventRange": [
+                0,
+                34
+              ],
+              "sourceMode": "user-explicit"
+            },
+            "createdAt": "@T+41",
+            "updatedAt": "@T+41",
+            "lastConfirmedAt": "@T+41",
+            "lastRecalledAt": null,
+            "recallCount": 0,
+            "status": "active",
+            "confidence": 0.9
+          },
+          {
+            "id": "mem_mw3wctvinxf9hb",
+            "name": "包管理器",
+            "type": "preference",
+            "scope": "global",
+            "tags": [
+              "pnpm"
+            ],
+            "content": "包管理器用 pnpm",
+            "summary": "包管理器用 pnpm",
+            "source": {
+              "sessionId": "sess_project",
+              "eventRange": [
+                0,
+                39
+              ],
+              "sourceMode": "user-explicit"
+            },
+            "createdAt": "@T+48",
+            "updatedAt": "@T+48",
+            "lastConfirmedAt": "@T+48",
+            "lastRecalledAt": null,
+            "recallCount": 0,
+            "status": "active",
+            "confidence": 0.9
+          },
+          {
+            "id": "mem_mw3wctvp1us397",
+            "name": "包管理器旧习惯",
+            "type": "preference",
+            "scope": "global",
+            "tags": [
+              "npm"
+            ],
+            "content": "包管理器用 npm，不用 pnpm",
+            "summary": "包管理器用 npm",
+            "source": {
+              "sessionId": "sess_project",
+              "eventRange": [
+                0,
+                44
+              ],
+              "sourceMode": "user-explicit"
+            },
+            "createdAt": "@T+55",
+            "updatedAt": "@T+55",
+            "lastConfirmedAt": "@T+55",
+            "lastRecalledAt": null,
+            "recallCount": 0,
+            "status": "active",
+            "confidence": 0.9
+          },
+          {
+            "id": "mem_mw3wctvwgjhcyk",
+            "name": "编辑器",
+            "type": "preference",
+            "scope": "workspace",
+            "workspacePath": "{{PROJECT}}",
+            "tags": [
+              "vscode"
+            ],
+            "content": "编辑器用 VS Code",
+            "summary": "编辑器用 VS Code",
+            "source": {
+              "sessionId": "sess_project",
+              "eventRange": [
+                0,
+                49
+              ],
+              "sourceMode": "user-explicit"
+            },
+            "createdAt": "@T+62",
+            "updatedAt": "@T+62",
+            "lastConfirmedAt": "@T+62",
+            "lastRecalledAt": null,
+            "recallCount": 0,
+            "status": "active",
+            "confidence": 0.9,
+            "globalCandidate": true
+          }
+        ]
+      }
+    ],
+    [
+      "snap_mw3wctwqduz3eq",
+      {
+        "id": "snap_mw3wctwqduz3eq",
+        "createdAt": "@T+92",
+        "operation": "pre-forget",
+        "description": "遗忘 1 条记忆前（原因：规范已写进 CONTRIBUTING）",
+        "memoryIds": [
+          "mem_mw3wctuy5blwl5"
+        ],
+        "data": [
+          {
+            "id": "mem_mw3wctuy5blwl5",
+            "name": "提交规范",
+            "type": "preference",
+            "scope": "workspace",
+            "workspacePath": "{{PROJECT}}",
+            "tags": [
+              "git"
+            ],
+            "content": "提交信息不加句号",
+            "summary": "提交信息不加句号",
+            "source": {
+              "sessionId": "sess_project",
+              "eventRange": [
+                0,
+                24
+              ],
+              "sourceMode": "user-explicit"
+            },
+            "createdAt": "@T+28",
+            "updatedAt": "@T+28",
+            "lastConfirmedAt": "@T+28",
+            "lastRecalledAt": null,
+            "recallCount": 0,
+            "status": "active",
+            "confidence": 0.9
+          }
+        ]
+      }
+    ],
+    [
+      "snap_mw3wcty547yagh",
+      {
+        "id": "snap_mw3wcty547yagh",
+        "createdAt": "@T+143",
+        "operation": "pre-resolve",
+        "description": "裁决冲突 pd_mw3wctxzfmpf2s（keep-left）删除败方前",
+        "memoryIds": [
+          "mem_mw3wctxs21znbc"
+        ],
+        "data": [
+          {
+            "id": "mem_mw3wctxs21znbc",
+            "name": "旧测试框架",
+            "type": "project",
+            "scope": "workspace",
+            "workspacePath": "{{PROJECT}}",
+            "tags": [
+              "jest"
+            ],
+            "content": "本项目测试用 jest",
+            "summary": "测试用 jest",
+            "source": {
+              "sessionId": "sess_project",
+              "eventRange": [
+                0,
+                99
+              ],
+              "sourceMode": "user-explicit"
+            },
+            "createdAt": "@T+130",
+            "updatedAt": "@T+130",
+            "lastConfirmedAt": "@T+130",
+            "lastRecalledAt": null,
+            "recallCount": 0,
+            "status": "active",
+            "confidence": 0.9
+          }
+        ]
+      }
+    ]
+  ],
+  "pending_decisions": [
+    [
+      "pd_mw3wctxgr9cb7e",
+      {
+        "id": "pd_mw3wctxgr9cb7e",
+        "memoryIds": [
+          "mem_mw3wctvinxf9hb",
+          "mem_mw3wctvp1us397"
+        ],
+        "summary": "全局记忆对包管理器的说法互相矛盾（全局层复查）",
+        "firstSeenAt": "@T+117"
+      }
+    ],
+    [
+      "pd_mw3wctxgx3680y",
+      {
+        "id": "pd_mw3wctxgx3680y",
+        "memoryIds": [
+          "mem_mw3wctuqsau0p4",
+          "mem_mw3wctvbo4rrwb"
+        ],
+        "summary": "项目缩进用 tab，与全局两个空格矛盾",
+        "firstSeenAt": "@T+117"
+      }
+    ],
+    [
+      "pd_mw3wctxg6159t5",
+      {
+        "id": "pd_mw3wctxg6159t5",
+        "memoryIds": [
+          "mem_mw3wctugcyhk5b"
+        ],
+        "baselineRef": "AGENTS.md：测试命令用 pnpm test:unit",
+        "summary": "测试命令与 AGENTS.md 写的不一致",
+        "firstSeenAt": "@T+117"
+      }
+    ]
+  ],
+  "recall_stats": [
+    [
+      "mem_mw3wctugcyhk5b",
+      {
+        "id": "mem_mw3wctugcyhk5b",
+        "recallCount": 2,
+        "lastRecalledAt": "@T+105"
+      }
+    ],
+    [
+      "mem_mw3wctuqsau0p4",
+      {
+        "id": "mem_mw3wctuqsau0p4",
+        "recallCount": 1,
+        "lastRecalledAt": "@T+111"
+      }
+    ],
+    [
+      "mem_mw3wctuy5blwl5",
+      {
+        "id": "mem_mw3wctuy5blwl5",
+        "recallCount": 0,
+        "lastRecalledAt": null
+      }
+    ],
+    [
+      "mem_mw3wctv5ndq8ic",
+      {
+        "id": "mem_mw3wctv5ndq8ic",
+        "recallCount": 0,
+        "lastRecalledAt": null
+      }
+    ],
+    [
+      "mem_mw3wctvbo4rrwb",
+      {
+        "id": "mem_mw3wctvbo4rrwb",
+        "recallCount": 1,
+        "lastRecalledAt": "@T+111"
+      }
+    ],
+    [
+      "mem_mw3wctvinxf9hb",
+      {
+        "id": "mem_mw3wctvinxf9hb",
+        "recallCount": 1,
+        "lastRecalledAt": "@T+105"
+      }
+    ],
+    [
+      "mem_mw3wctvp1us397",
+      {
+        "id": "mem_mw3wctvp1us397",
+        "recallCount": 1,
+        "lastRecalledAt": "@T+105"
+      }
+    ],
+    [
+      "mem_mw3wctvwgjhcyk",
+      {
+        "id": "mem_mw3wctvwgjhcyk",
+        "recallCount": 0,
+        "lastRecalledAt": null
+      }
+    ],
+    [
+      "mem_mw3wctxs21znbc",
+      {
+        "id": "mem_mw3wctxs21znbc",
+        "recallCount": 0,
+        "lastRecalledAt": null
+      }
+    ]
+  ],
+  "scan_cache": [
+    [
+      "cache_{{PROJECT}}",
+      {
+        "id": "cache_{{PROJECT}}",
+        "scannedAt": "@T+137",
+        "scope": "{{PROJECT}}",
+        "findings": [
+          {
+            "type": "conflict",
+            "layer": "semantic",
+            "severity": "critical",
+            "memoryIds": [
+              "mem_mw3wctugcyhk5b",
+              "mem_mw3wctxs21znbc"
+            ],
+            "summary": "测试框架说法矛盾",
+            "suggestedAction": "保留 vitest"
+          }
+        ]
+      }
+    ],
+    [
+      "cache_global",
+      {
+        "id": "cache_global",
+        "scannedAt": "@T+124",
+        "scope": "global",
+        "findings": [
+          {
+            "type": "conflict",
+            "layer": "semantic",
+            "severity": "critical",
+            "memoryIds": [
+              "mem_mw3wctvinxf9hb",
+              "mem_mw3wctvp1us397"
+            ],
+            "summary": "全局记忆对包管理器的说法互相矛盾（全局层复查）",
+            "suggestedAction": "保留 pnpm 那条"
+          },
+          {
+            "type": "unclear",
+            "layer": "semantic",
+            "severity": "info",
+            "memoryIds": [
+              "mem_mw3wctvbo4rrwb"
+            ],
+            "summary": "没说适用哪些语言",
+            "suggestedAction": "补充适用范围"
+          }
+        ]
+      }
+    ]
+  ]
+}

@@ -45,13 +45,15 @@ type Verdict = 'keep-left' | 'keep-right' | 'keep-both'
 
 /**
  * 刚裁决的冲突：记忆的快照留着，被删后仍能原位显示。isUnrecorded：两边都留但结论没记下（见命令结果 isUnrecorded），
- * 没有可撤销的条目。
+ * 没有可撤销的条目。isHardDeleted：败方含密钥、已彻底删除，同样没有撤销。
  */
+type Outcome = { isUnrecorded?: true; isHardDeleted?: true }
 type Ruled =
-  | { kind: 'horizontal'; decisionId: string; verdict: Verdict; left: MemoryCardData; right: MemoryCardData; isUnrecorded?: true }
-  | { kind: 'vertical'; decisionId: string; verdict: Verdict; memory: MemoryCardData; isUnrecorded?: true }
+  | { kind: 'horizontal'; decisionId: string; verdict: Verdict; left: MemoryCardData; right: MemoryCardData } & Outcome
+  | { kind: 'vertical'; decisionId: string; verdict: Verdict; memory: MemoryCardData } & Outcome
 
 type Ok = Extract<MemoryCommandResult, { ok: true }>
+const outcomeOf = (result: Ok): Outcome => ({ ...(result.isUnrecorded ? { isUnrecorded: true } : {}), ...(result.isHardDeleted ? { isHardDeleted: true } : {}) })
 
 const ruledMemories = (r: Ruled): MemoryCardData[] => r.kind === 'horizontal' ? [r.left, r.right] : [r.memory]
 
@@ -146,14 +148,14 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     const { left, right } = item
     if (left === null || right === null) return
     void run(item.decisionId, { cmd: 'resolve', decisionId: item.decisionId, verdict }, (result) => {
-      setRuled(prev => [...prev, { kind: 'horizontal', decisionId: item.decisionId, verdict, left, right, ...(result.isUnrecorded ? { isUnrecorded: true } : {}) }])
+      setRuled(prev => [...prev, { kind: 'horizontal', decisionId: item.decisionId, verdict, left, right, ...outcomeOf(result) }])
     })
   }
   const ruleVertical = (item: VerticalConflict, verdict: Verdict) => {
     const { memory } = item
     if (memory === null) return
     void run(item.decisionId, { cmd: 'resolve', decisionId: item.decisionId, verdict }, (result) => {
-      setRuled(prev => [...prev, { kind: 'vertical', decisionId: item.decisionId, verdict, memory, ...(result.isUnrecorded ? { isUnrecorded: true } : {}) }])
+      setRuled(prev => [...prev, { kind: 'vertical', decisionId: item.decisionId, verdict, memory, ...outcomeOf(result) }])
     })
   }
   const undo = (decisionId: string) => {
@@ -514,9 +516,10 @@ function RuledCard({ ruled, card, busy, onUndo }: {
   const chipKey = ruled.kind === 'vertical'
     ? isBaseline ? 'sidebar.ruled.keepBaseline' : 'sidebar.ruled.keepMemory'
     : verdict === 'keep-left' ? 'sidebar.ruled.keepA' : verdict === 'keep-right' ? 'sidebar.ruled.keepB' : 'sidebar.ruled.keepBoth'
-  const noteKey = ruled.isUnrecorded ? 'sidebar.ruled.unrecorded'
-    : ruled.kind === 'vertical' ? isBaseline ? 'sidebar.ruled.deletedMemory' : 'sidebar.ruled.keptMemory'
-    : verdict === 'keep-left' ? 'sidebar.ruled.deletedB' : verdict === 'keep-right' ? 'sidebar.ruled.deletedA' : 'sidebar.ruled.keptBoth'
+  const note = ruled.isUnrecorded ? t('sidebar.ruled.unrecorded')
+    : ruled.isHardDeleted ? ruled.kind === 'vertical' ? t('conflict.purgedMemory') : t('conflict.purgedSide', { side: verdict === 'keep-left' ? 'B' : 'A' })
+    : t(ruled.kind === 'vertical' ? isBaseline ? 'sidebar.ruled.deletedMemory' : 'sidebar.ruled.keptMemory'
+      : verdict === 'keep-left' ? 'sidebar.ruled.deletedB' : verdict === 'keep-right' ? 'sidebar.ruled.deletedA' : 'sidebar.ruled.keptBoth')
   const kept = ruled.kind === 'vertical' ? isBaseline ? [] : [ruled.memory]
     : verdict === 'keep-left' ? [ruled.left] : verdict === 'keep-right' ? [ruled.right] : [ruled.left, ruled.right]
   return (
@@ -524,7 +527,7 @@ function RuledCard({ ruled, card, busy, onUndo }: {
       {kept.map(memory => <div key={memory.id}>{card(memory)}</div>)}
       <ResultLine
         chip={t(chipKey)}
-        undo={ruled.isUnrecorded
+        undo={ruled.isUnrecorded || ruled.isHardDeleted
           ? undefined
           : (
             <button type="button" className="pm-link" aria-disabled={busy || undefined} onClick={() => { if (!busy) onUndo() }}>
@@ -532,7 +535,7 @@ function RuledCard({ ruled, card, busy, onUndo }: {
             </button>
           )}
       >
-        {t(noteKey)}
+        {note}
       </ResultLine>
     </article>
   )

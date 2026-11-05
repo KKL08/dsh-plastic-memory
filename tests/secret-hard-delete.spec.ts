@@ -14,6 +14,7 @@ import {
 import { runRuleScan } from '../src/governance/rule-scan.ts'
 import { executeForget } from '../src/tools/forget.ts'
 import { executeSnapshotTool } from '../src/tools/snapshot.ts'
+import { goneCopies } from '../src/tools/workspace-gate.ts'
 import { createSaveTool } from '../src/tools/save-tool.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
@@ -79,7 +80,8 @@ const wsRec = (partial: Partial<MemoryRecord> = {}) => baseRecord({
 function harness() {
   const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
-  const snapshots = new SnapshotStore(sidecar.snapshots)
+  // 同接线层：快照落盘后按副本复核
+  const snapshots = new SnapshotStore(sidecar.snapshots, { findGone: goneCopies(store) })
   const decisions = new PendingDecisionsStore(sidecar.pending)
   return {
     store, snapshots, sidecar,
@@ -282,7 +284,7 @@ describe('密钥硬删', () => {
 
   it('save：critical 仍拒绝；suspected 拒绝并返回 secret-suspected，force: true 放行并保留警告；force 工具说明含「疑似密钥拦截」（后来又加了手改保护）', async () => {
     const store = new MemoryStore(new InMemoryTable())
-    const deps = { store, registry, workspacePath: WS, session: { id: 's', lastSeq: 1 } }
+    const deps = { store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), workspacePath: WS, session: { id: 's', lastSeq: 1 } }
 
     const critical = await runSavePipeline(candidate({ scope: 'workspace', content: `密钥 ${FAKE_SECRET.sk}` }), deps)
     expect(critical).toMatchObject({ kind: 'rejected', code: SECRET_CRITICAL })
@@ -304,7 +306,7 @@ describe('密钥硬删', () => {
     if (updated.kind !== 'updated') throw new Error(updated.kind)
     expect(updated.warnings?.map(w => w.code)).toEqual([SECRET_SUSPECTED_WARNING])
 
-    const tool = createSaveTool({ store, registry, resolveContext: async () => ({ workspacePath: WS, session: { id: 's', lastSeq: 1 } }) })
+    const tool = createSaveTool({ store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), resolveContext: async () => ({ workspacePath: WS, session: { id: 's', lastSeq: 1 } }) })
     const params = (tool.parameters as unknown as { properties: Record<string, { description?: string }> }).properties
     expect(params.force.description).toBe('跳过结构去重、疑似密钥拦截与手改保护（用户已确认）')
   })
@@ -319,7 +321,7 @@ describe('密钥硬删', () => {
   it('稳定码进 contract-codes，测试断常量不断文案', async () => {
     // RejectCode / WarningCode 两边都收 secret-suspected：不带 force 是拒绝码，带 force 是警告码
     const store = new MemoryStore(new InMemoryTable())
-    const deps = { store, registry, workspacePath: WS, session: { id: 's', lastSeq: 1 } }
+    const deps = { store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), workspacePath: WS, session: { id: 's', lastSeq: 1 } }
     const rejected = await runSavePipeline(candidate({ scope: 'workspace', summary: SUSPECTED_TEXT }), deps)
     if (rejected.kind !== 'rejected') throw new Error(rejected.kind)
     expect(rejected.code).toBe(SECRET_SUSPECTED_REJECT)
@@ -356,6 +358,134 @@ describe('forget 读过之后另一个会话才写进密钥', () => {
       expect(text).not.toContain(FAKE_SECRET.sk)
       expect(json.data.find(r => r.id === 'mem_late')!.redacted).toBe(true)
     }
+  })
+})
+
+describe('PA-08：拍快照与彻底删除同一条含密钥的记忆交错', () => {
+  const secret = () => wsRec({ id: 'mem_key', name: '部署凭证', content: `token ${FAKE_SECRET.sk}` })
+
+  it('PA-08 手动快照读完记录、落盘之前，另一个进程彻底删除了这条：落盘后的快照里它已脱敏，不能恢复出明文', async () => {
+    const a = harness()
+    const b = harness()   // 同一目录上的另一个进程
+    await a.store.create(secret())
+    const capture = a.snapshots.capture.bind(a.snapshots)
+    a.snapshots.capture = async (input, now) => {
+      // 记录已读完、还没落盘：对方先脱敏盘上所有快照（这份还不在）、再删文件
+      expect((await b.forget(['mem_key'])).hardDeleted).toEqual(['mem_key'])
+      return capture(input, now)
+    }
+
+    const created = await a.snapshot({ action: 'create', memoryIds: ['mem_key'] })
+    if (created.kind !== 'created') throw new Error(created.kind)
+
+    const { text, json } = await rawSnapshot(created.snapshotId)
+    expect(text).not.toContain(FAKE_SECRET.sk)
+    expect(json.data.find(r => r.id === 'mem_key')!.redacted).toBe(true)
+    const restored = await a.snapshot({ action: 'restore', snapshotId: created.snapshotId })
+    if (restored.kind !== 'restored') throw new Error(restored.kind)
+    expect(restored.redacted).toEqual(['mem_key'])
+    expect(await a.store.get('mem_key', { workspacePath: WS })).toBeUndefined()
+  })
+
+  it('PA-08 对方扫快照在这份落盘之前、删文件在这边复核之后：对方删完再扫一遍，这份也脱敏', async () => {
+    const a = harness()
+    const b = harness()
+    await a.store.create(secret())
+    // 对方脱敏完、删文件之前停住，等这边拍完（落盘、复核时记录还在）再放行
+    let reachDelete!: () => void
+    const reached = new Promise<void>(resolve => { reachDelete = resolve })
+    let releaseDelete!: () => void
+    const released = new Promise<void>(resolve => { releaseDelete = resolve })
+    const hardDelete = b.store.hardDelete.bind(b.store)
+    b.store.hardDelete = async (...args) => {
+      reachDelete()
+      await released
+      return hardDelete(...args)
+    }
+    let forgetting: ReturnType<typeof b.forget> | undefined
+    const capture = a.snapshots.capture.bind(a.snapshots)
+    a.snapshots.capture = async (input, now) => {
+      forgetting = b.forget(['mem_key'])
+      await reached
+      return capture(input, now)
+    }
+
+    const created = await a.snapshot({ action: 'create', memoryIds: ['mem_key'] })
+    if (created.kind !== 'created') throw new Error(created.kind)
+    expect((await rawSnapshot(created.snapshotId)).text).toContain(FAKE_SECRET.sk)   // 复核时记录还在
+    releaseDelete()
+    expect((await forgetting!).hardDeleted).toEqual(['mem_key'])
+
+    const { text, json } = await rawSnapshot(created.snapshotId)
+    expect(text).not.toContain(FAKE_SECRET.sk)
+    expect(json.data.find(r => r.id === 'mem_key')!.redacted).toBe(true)
+  })
+
+  it('PA-08 复核算完、写回之前，另一个进程彻底删除了同一份快照里另一条含密钥的：写回之后再查一遍，那条也脱敏', async () => {
+    const a = harness()
+    const b = harness()
+    await a.store.create(wsRec({ id: 'mem_plain', name: '部署说明', content: '用 CI 部署' }))
+    await a.store.create(secret())
+    // 复核第一次：mem_plain 已被彻底删除；算完要脱敏的、写回之前，对方把 mem_key 也彻底删除（脱敏盘上的快照、删文件）
+    const findGone = goneCopies(a.store)
+    let isFirst = true
+    const snapshots = new SnapshotStore(a.sidecar.snapshots, {
+      findGone: async records => {
+        if (!isFirst) return findGone(records)
+        isFirst = false
+        expect(await b.store.hardDelete({ id: 'mem_plain', workspacePath: WS })).toBe(true)
+        const gone = await findGone(records)
+        expect((await b.forget(['mem_key'])).hardDeleted).toEqual(['mem_key'])
+        return gone
+      },
+    })
+
+    const created = await executeSnapshotTool({ action: 'create', memoryIds: ['mem_plain', 'mem_key'] }, { workspacePath: WS }, { store: a.store, snapshots })
+    if (created.kind !== 'created') throw new Error(created.kind)
+
+    const { text, json } = await rawSnapshot(created.snapshotId)
+    expect(text).not.toContain(FAKE_SECRET.sk)
+    expect(json.data.map(r => [r.id, r.redacted])).toEqual([['mem_plain', true], ['mem_key', true]])
+  })
+
+  it('PA-08 forget 拍的快照同样复核：读完要遗忘的记录之后另一个进程把其中一条彻底删除，落盘后的快照里它已脱敏', async () => {
+    const a = harness()
+    const b = harness()
+    // 读的时候不含密钥：这边按软删走、快照里存原文；对方随后贴进密钥并彻底删除
+    await a.store.create(wsRec({ id: 'mem_late', name: '部署说明', content: '用 CI 部署' }))
+    const capture = a.snapshots.capture.bind(a.snapshots)
+    a.snapshots.capture = async (input, now) => {
+      const edited = await b.store.update({ id: 'mem_late', workspacePath: WS }, r => ({ ...r, content: `用 CI 部署，token ${FAKE_SECRET.sk}` }))
+      expect(edited.content).toContain(FAKE_SECRET.sk)
+      expect((await b.forget(['mem_late'])).hardDeleted).toEqual(['mem_late'])
+      return capture(input, now)
+    }
+
+    const result = await a.forget(['mem_late'])
+
+    expect(result.forgotten).toEqual([])
+    expect(result.missing).toEqual([])
+    expect((await rawSnapshot(result.snapshotId!)).json.data.find(r => r.id === 'mem_late')!.redacted).toBe(true)
+  })
+})
+
+describe('PA-12：一个字段自己命中、另一份密钥横跨两个字段', () => {
+  it('PA-12 彻底删除后快照里两份都已脱敏，没命中的字段原样', async () => {
+    const h = harness()
+    // 正文自己命中 sk-；summary 末尾的 Bearer 和第一个标签拼起来才命中
+    const rec = wsRec({ id: 'mem_two', name: '网关', summary: '认证头 Bearer', tags: ['TESTONLYabcdefghijklmnop', '运维'], content: `key ${FAKE_SECRET.sk}` })
+    await h.store.create(rec)
+    const manual = await h.snapshot({ action: 'create', memoryIds: ['mem_two'] })
+    if (manual.kind !== 'created') throw new Error(manual.kind)
+
+    expect((await h.forget(['mem_two'])).hardDeleted).toEqual(['mem_two'])
+
+    const { text, json } = await rawSnapshot(manual.snapshotId)
+    expect(text).not.toContain(FAKE_SECRET.sk)
+    expect(text).not.toContain('TESTONLYabcdefghijklmnop')
+    expect(json.data.find(r => r.id === 'mem_two')).toMatchObject({
+      redacted: true, name: '网关', content: REDACTED_PLACEHOLDER, summary: REDACTED_PLACEHOLDER, tags: [REDACTED_PLACEHOLDER],
+    })
   })
 })
 

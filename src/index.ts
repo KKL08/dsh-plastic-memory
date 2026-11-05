@@ -26,6 +26,7 @@ import { createAgentsMdWriter, agentsMdPath } from './storage/agents-md.ts'
 import { createSnapshotTool } from './tools/snapshot-tool.ts'
 import { createSourceTool } from './tools/source-tool.ts'
 import { delegationDepthOf, gateSubagentWrites, resolveRootSessionId, subagentModeOf, type DelegationHeader } from './tools/subagent-gate.ts'
+import { goneCopies } from './tools/workspace-gate.ts'
 import type { ReadEventFn } from './tools/source.ts'
 import { SnapshotCache, resolveWorkspacePath } from './runtime.ts'
 import { lastVisibleSnapshot, shouldSendSnapshot, snapshotMessageBody } from './snapshot-message.ts'
@@ -206,7 +207,8 @@ export async function apply(ctx: Context, config: Config) {
   const store = new MemoryStore(fileTable, ctx.logger, sidecar.recallStats)
   // forget 的快照先行与待决账本清理需要这两个存储，治理关闭时也接线
   const decisions = new PendingDecisionsStore(sidecar.pending)
-  const snapshots = new SnapshotStore(sidecar.snapshots)
+  // 拍完快照落盘后复核：读完记录之后被彻底删除的那份在快照里脱敏
+  const snapshots = new SnapshotStore(sidecar.snapshots, { findGone: goneCopies(store) })
   const scanCache = sidecar.scanCache
   // 建议忽略表：健康分、体检、GUI 视图同一份剔除口径
   const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
@@ -506,7 +508,7 @@ export async function apply(ctx: Context, config: Config) {
     for (const dispose of governanceTools.splice(0)) dispose()
     if (!config.governance.enabled.get()) return
     governanceTools = [
-      registerWrite(createConfirmTool({ store, decisions, snapshots, resolveContext })),
+      registerWrite(createConfirmTool({ store, decisions, snapshots, log: ctx.logger, resolveContext })),
       // 基线按触发调用的 session 取（宿主投影 cell 按 session 隔离，防多会话串台）。
       // 扫描会写语义缓存、登记待决冲突，归写工具；health 纯读，不套门
       registerWrite(createScanTool({

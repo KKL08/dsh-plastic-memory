@@ -379,6 +379,15 @@ describe('待处理：裁决后结果留原位、撤销', () => {
     await waitFor(() => { expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'd-h' }) })
   })
 
+  it('PA-11 败方含密钥被彻底删除（isHardDeleted）：结果写已彻底删除、提醒换凭证，不给撤销', async () => {
+    setup([{ ...horizontal, right: { ...B, hasSecret: true } } as PendingItem], { respond: command => ({ ok: true, cmd: command.cmd, decisionId: 'd-h', isHardDeleted: true }) })
+    expect(screen.getByText(/以 A 为准，B 含密钥，将彻底删除、不可恢复/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
+    await screen.findByText('B 含密钥，已彻底删除。如果它是真的凭证，记得去换一个新的。')
+    expect(screen.queryByText('B 已删除，14 天内可恢复。')).toBeNull()
+    expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
+  })
+
   it('结论没记下（isUnrecorded，升级前导入、缺基线的冲突）：结果写下次体检可能还会报，不给撤销', async () => {
     setup([vertical], { respond: command => ({ ok: true, cmd: command.cmd, decisionId: 'd-v', isUnrecorded: true }) })
     fireEvent.click(screen.getByRole('button', { name: '保留这条记忆' }))

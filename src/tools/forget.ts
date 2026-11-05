@@ -2,6 +2,7 @@ import type { MemoryStore, MemoryLogger } from '../store.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
 import type { PendingDecisionsStore } from '../governance/decisions.ts'
 import type { MemoryRecord } from '../record-schema.ts'
+import type { MemorySnapshot } from '../governance/schema.ts'
 import { redactRecord } from '../governance/snapshots.ts'
 import { hasSecret, maskSecrets } from '../secrets.ts'
 import {
@@ -32,6 +33,14 @@ export interface ForgetOptions {
   isSoftOnly?: boolean
   /** 同 id 多副本时只认这一份（GUI 按页面上那一份操作）；缺省按会话 workspace 定位。跨 workspace 门照旧按会话判定。 */
   target?: CopyTarget
+  /** 删除时锁内看到的当前内容过了它就不删（不计入 forgotten）：调用方按某个条件收集的 id，收集之后被改得不再符合的留着。 */
+  isChanged?: (current: MemoryRecord) => boolean
+  /** 末尾按记忆 id 清账本时留下这一条（裁决冲突删败方：本次的条目要结清、留着撤销）。 */
+  keepDecisionId?: string
+  /** 快照的操作名，缺省 pre-forget。 */
+  operation?: MemorySnapshot['operation']
+  /** 哪些记录算含密钥、要物理删除，缺省两级都算；裁决冲突只认高危，只含疑似的败方照常软删、可以撤销。 */
+  isSecret?: (record: MemoryRecord) => boolean
 }
 
 export interface ForgetResult {
@@ -47,14 +56,16 @@ export interface ForgetResult {
   /** 带参数放行、属于其他项目的记录（已遗忘）。 */
   otherWorkspaces: OtherWorkspaceMark[]
   snapshotId: string | null
+  /** 顺带移出账本的待处理条目数（已结清的、keepDecisionId 那条不算）。 */
+  clearedDecisions: number
   /** 只在 isSoftOnly 时出现：含密钥、没有动的 id。 */
   skippedSecrets?: string[]
 }
 
 /**
  * memory_forget（批量）：快照先行 → 逐条软删 → 清理待决账本悬空引用。
- * 含密钥的目标（任一级）走硬删：本次快照里直接存脱敏版，
- * 既有快照先脱敏再物理删除文件——中途失败时文件还在，重跑 forget 即可，不会留下「文件已删、快照仍有明文」。
+ * 含密钥的目标（缺省任一级，口径见 isSecret）走硬删：本次快照里直接存脱敏版，
+ * 既有快照先脱敏再物理删除文件——中途失败时文件还在，重跑 forget 即可，不会留下「文件已删、快照仍有明文」；删完再扫一遍快照。
  * 不依赖任何 dsh 框架包，测试直接调它。
  */
 export async function executeForget(
@@ -85,24 +96,25 @@ export async function executeForget(
   }
   const { allowed, rejected, otherWorkspaces } = gateRecords(located, context, args.allowCrossWorkspace)
   const wsNote = crossWorkspaceNote(rejected, otherWorkspaces)
+  const isSecret = options.isSecret ?? hasSecret
   // 只软删：这次读到含密钥的不进快照、不删，交回调用方；删除时锁内再看一次（见下）
-  const skippedSecrets = options.isSoftOnly === true ? allowed.filter(hasSecret).map(r => r.id) : []
-  const found = options.isSoftOnly === true ? allowed.filter(r => !hasSecret(r)) : allowed
+  const skippedSecrets = options.isSoftOnly === true ? allowed.filter(isSecret).map(r => r.id) : []
+  const found = options.isSoftOnly === true ? allowed.filter(r => !isSecret(r)) : allowed
   const softOnlyFields = () => (options.isSoftOnly === true ? { skippedSecrets } : {})
   const secretNote = () => (skippedSecrets.length > 0 ? `${skippedSecrets.length} 条含密钥（${skippedSecrets.join('、')}），只能彻底删除，未做改动。` : '')
 
   if (found.length === 0) {
     const missingText = missing.length > 0 ? `没有找到可遗忘的记忆（${missing.join('、')}），可能 id 有误或已删除。` : '没有遗忘任何记忆。'
     return {
-      ok: false, forgotten: [], hardDeleted: [], missing, rejected, otherWorkspaces, snapshotId: null, ...softOnlyFields(),
+      ok: false, forgotten: [], hardDeleted: [], missing, rejected, otherWorkspaces, snapshotId: null, clearedDecisions: 0, ...softOnlyFields(),
       message: `${missingText}${secretNote()}${wsNote}`,
     }
   }
 
   // 快照先行：删除前把受影响记录的完整状态存进 snapshots 表
-  const secretIds = new Set(found.filter(hasSecret).map(r => r.id))
+  const secretIds = new Set(found.filter(isSecret).map(r => r.id))
   const snapshot = await deps.snapshots.capture({
-    operation: 'pre-forget',
+    operation: options.operation ?? 'pre-forget',
     description: `遗忘 ${found.length} 条记忆前（原因：${reason}）`,
     records: found.map(r => (secretIds.has(r.id) ? redactRecord(r) : r)),
   }, now)
@@ -118,7 +130,7 @@ export async function executeForget(
   // 指明了副本：删的时候也只认那一层，与定位同口径
   const deleteOpts = { isExactLayer: options.target !== undefined }
   const purge = async (record: MemoryRecord) => {
-    if (await deps.store.hardDelete(record, deleteOpts)) {
+    if (await deps.store.hardDelete(record, deleteOpts, options.isChanged)) {
       forgotten.push(record.id)
       hardDeleted.push(record.id)
     }
@@ -130,7 +142,7 @@ export async function executeForget(
       await purge(record)
       continue
     }
-    const outcome = await deps.store.softDeleteUnlessSecret(record, deleteOpts)
+    const outcome = await deps.store.softDeleteUnlessSecret(record, { ...deleteOpts, isChanged: options.isChanged, isSecret })
     if (outcome === 'deleted') forgotten.push(record.id)
     else if (outcome === 'has-secret') {
       if (options.isSoftOnly === true) skippedSecrets.push(record.id)   // 只软删：照样交回调用方
@@ -143,9 +155,14 @@ export async function executeForget(
     await deps.snapshots.redact(lateIds, await historyOf(lateIds))
     for (const record of lateSecrets) await purge(record)
   }
+  // 删完再扫一遍：别的会话读完记录、在上面脱敏之后才落盘的快照，它落盘后复核时文件还在，两边都没脱敏到（见 SnapshotStore.capture）
+  if (hardDeleted.length > 0) {
+    const purged = new Set(hardDeleted)
+    await deps.snapshots.redact(purged, await historyOf(purged))
+  }
   // 账本按 id 记：指明了副本时，别层还有这个 id 就是它的条目，留着（同最近删除里的彻底删除）
   const cleared = target === undefined ? forgotten : await withoutOtherCopies(deps.store, forgotten, target)
-  await deps.decisions.removeByMemoryIds(cleared)
+  const clearedDecisions = await deps.decisions.removeByMemoryIds(cleared, options.keepDecisionId)
 
   ;(deps.log ?? console).info(`[plastic-memory] 遗忘 ${forgotten.length} 条记忆（${forgotten.join('、')}），其中硬删 ${hardDeleted.length} 条，原因：${reason}`)
   const missingNote = missing.length > 0 ? `；未找到：${missing.join('、')}` : ''
@@ -154,7 +171,7 @@ export async function executeForget(
     : ''
   const restoreNote = hardDeleted.length < forgotten.length ? `已自动快照（${snapshot.id}），14 天内可用 memory_snapshot 恢复。` : ''
   return {
-    ok: true, forgotten, hardDeleted, missing, rejected, otherWorkspaces, snapshotId: snapshot.id, ...softOnlyFields(),
+    ok: true, forgotten, hardDeleted, missing, rejected, otherWorkspaces, snapshotId: snapshot.id, clearedDecisions, ...softOnlyFields(),
     message: `已遗忘 ${forgotten.length} 条记忆${missingNote}。${hardNote}${restoreNote}${secretNote()}${wsNote}`,
   }
 }

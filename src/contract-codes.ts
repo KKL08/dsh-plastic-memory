@@ -6,13 +6,13 @@
 /** memory_save 拒存原因（pipeline.ts）。 */
 export type RejectCode =
   | 'unknown-type'      // 类型不在注册表
-  | 'target-missing'    // update 目标不存在或已删除
+  | 'target-missing'    // update 目标不存在或已删除；或这次保存期间被别处删掉、改写（内部子码 changed-after-read，见 pipeline.ts）
   | 'cross-workspace'   // update 指向其他 workspace 的记忆
   | 'no-workspace'      // 无工作目录的会话 create（无处归属）
   | 'schema-invalid'    // 字段校验失败
   | 'secret-critical'   // 明确厂商特征的密钥，拒存不落盘
   | 'secret-suspected'  // 疑似密钥（无厂商特征），未带 force 时拒存；用户确认后带 force: true 重发
-  | 'hand-edited'       // update 目标或同桶 supersedes 目标用户手改过，未带 force 时拒存；问过用户、同意后带 force: true 重发
+  | 'hand-edited'       // update 目标或同作用域 supersedes 目标用户手改过，未带 force 时拒存；问过用户、同意后带 force: true 重发。这次保存期间才被手改的带 force 也拒（内部子码 changed-after-read）
   | 'validity-format'      // validFrom / validTo 不是 YYYY-MM-DD HH:mm 或 YYYY-MM-DD（validity.ts）
   | 'validity-nonexistent' // validFrom / validTo 的日期或时刻不存在（2 月 30 日、25:00）
   | 'validity-past'        // validTo 不晚于当前时间，存下即过期
@@ -20,7 +20,7 @@ export type RejectCode =
   | 'subagent-restricted'  // 子 agent 会话（delegationDepth ≥ 1）越过写入约束：依据、类型、替代、force、改写归属、新建配额，原因按条区分
 
 /**
- * 模型用 memory_save 改写已有记忆（rewrite）、把同桶旧记忆标成已取代（supersede）时留的撤销记录种类：
+ * 模型用 memory_save 改写已有记忆（rewrite）、把同作用域旧记忆标成已取代（supersede）时留的撤销记录种类：
  * 待决账本的条目种类（governance/schema.ts）与 GUI 视图（gui/contract.ts）同用。
  */
 export const MODEL_CHANGE_KINDS = ['rewrite', 'supersede'] as const
@@ -43,7 +43,7 @@ export type AcceptRejectCode =
 export type WarningCode =
   | 'update-global-candidate' // update 填 global：scope 不变，标记为提升候选
   | 'update-scope-kept'       // update 填了与目标不同的 scope：保持原 scope
-  | 'cross-bucket-supersede'  // supersedes 目标不在本次写入的记忆桶内，跳过
+  | 'cross-bucket-supersede'  // supersedes 目标和本次写入的记忆不在同一作用域，跳过
   | 'auto-snapshot'           // 更新 global 记忆前已自动快照
   | 'secret-suspected'        // 疑似密钥（无厂商特征），带 force: true 放行落盘，仍建议改写
   | 'subagent-scope-local'    // 子 agent 填 global：落当前项目、不标提升候选

@@ -16,12 +16,13 @@ import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { editFingerprint } from '../src/governance/snapshots.ts'
 import { candidate, record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
+import { SECRET_MASK } from '../src/secrets.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const session = { id: 's1', lastSeq: 42 }
 
 function deps(store = new MemoryStore(new InMemoryTable())) {
-  return { store, registry, workspacePath: '/proj' as string | undefined, session }
+  return { store, registry, workspacePath: '/proj' as string | undefined, session, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()) }
 }
 
 describe('extractEntities', () => {
@@ -96,6 +97,7 @@ describe('runSavePipeline', () => {
     const result = await runSavePipeline(candidate({ scope: 'workspace' }), { ...deps(), workspacePath: undefined })
     if (result.kind !== 'rejected') throw new Error(result.kind)
     expect(result).toMatchObject({ kind: 'rejected', code: 'no-workspace' })
+    expect(result.reason).not.toContain('桶')   // PA-19
   })
 
   it('模型填 global（有 workspace）降级 workspace + globalCandidate（无 global 直写通道）', async () => {
@@ -106,7 +108,7 @@ describe('runSavePipeline', () => {
     expect(result.record.globalCandidate).toBe(true)
   })
 
-  it('填 global 且无 workspacePath 时同样拒存（global 直写必须过提升闸，无桶可降级）', async () => {
+  it('填 global 且无 workspacePath 时同样拒存（global 直写必须过提升闸，没有作用域可降级）', async () => {
     const result = await runSavePipeline(candidate({ scope: 'global' }), { ...deps(), workspacePath: undefined })
     expect(result).toMatchObject({ kind: 'rejected', code: 'no-workspace' })
   })
@@ -176,6 +178,18 @@ describe('runSavePipeline', () => {
     expect(forced.kind).toBe('saved')
   })
 
+  it('PA-10 去重提示里已有记忆的摘要手改进高危密钥：只给遮盖后的文字', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await store.put(record({
+      id: 'mem_handedit', type: 'preference', scope: 'workspace', workspacePath: '/proj',
+      content: '认证逻辑在 `src/auth.ts`', summary: `认证入口 ${FAKE_SECRET.sk}`, handEdited: true,
+    }))
+    const dup = await runSavePipeline(candidate({ content: '`src/auth.ts` 负责认证' }), deps(store))
+    if (dup.kind !== 'duplicate-suspected') throw new Error(dup.kind)
+    expect(dup.existing).toEqual([{ id: 'mem_handedit', summary: `认证入口 ${SECRET_MASK}` }])
+    expect(renderSaveResult(dup)).not.toContain(FAKE_SECRET.sk)
+  })
+
   it('update 保留 createdAt、刷新 lastConfirmedAt', async () => {
     const store = new MemoryStore(new InMemoryTable())
     const first = await runSavePipeline(candidate(), deps(store))
@@ -212,7 +226,30 @@ describe('runSavePipeline', () => {
     expect((await store.get(old.record.id))!.status).toBe('superseded')
   })
 
-  // B1a：supersedes 目标必须与本次写入记录同桶
+  it('PA-01：替代目标里有已删除的：它仍是已删除、仍在最近删除、deletedAt 不变；同批在用的目标照常变成被取代', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    const gone = await runSavePipeline(candidate({ name: '删掉的', content: '删掉的说法' }), deps(store))
+    const live = await runSavePipeline(candidate({ name: '在用的', content: '在用的说法', force: true }), deps(store))
+    if (gone.kind !== 'saved' || live.kind !== 'saved') throw new Error('seed')
+    await store.softDelete(gone.record, { now: 1_000 })
+    const r = await runSavePipeline(candidate({ content: '完全不同的新说法', force: true, supersedes: [gone.record.id, live.record.id] }), deps(store))
+    expect(r.kind).toBe('saved')
+    expect(await store.get(gone.record.id)).toMatchObject({ status: 'deleted', deletedAt: 1_000 })
+    expect((await store.query({ status: ['deleted'] })).map(m => m.id)).toEqual([gone.record.id])
+    expect((await store.get(live.record.id))!.status).toBe('superseded')
+  })
+
+  it('PA-13：supersedes 里含高危密钥时拒存、不落盘；疑似密钥要 force', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    const critical = await runSavePipeline(candidate({ supersedes: [FAKE_SECRET.sk] }), deps(store))
+    expect(critical).toMatchObject({ kind: 'rejected', code: 'secret-critical' })
+    expect(await store.query({ status: ['active', 'superseded', 'deleted'] })).toEqual([])
+    const suspected = candidate({ supersedes: ['password=hunter2hunter2'] })
+    expect(await runSavePipeline(suspected, deps(store))).toMatchObject({ kind: 'rejected', code: 'secret-suspected' })
+    expect((await runSavePipeline({ ...suspected, force: true }, deps(store))).kind).toBe('saved')
+  })
+
+  // B1a：supersedes 目标必须与本次写入记录同属一个作用域
   it('B1a: workspace 保存 supersedes 指向 global 记录 → global 保持 active 且给警告', async () => {
     const store = new MemoryStore(new InMemoryTable())
     // 放一条 global 记录（模拟 promote 后）
@@ -225,6 +262,7 @@ describe('runSavePipeline', () => {
     if (saved.kind !== 'saved') throw new Error(saved.kind)
     expect((await store.get('mem_global'))!.status).toBe('active')
     expect(saved.warnings?.map(w => w.code)).toContain('cross-bucket-supersede')
+    expect(saved.warnings?.find(w => w.code === 'cross-bucket-supersede')?.text).not.toContain('桶')   // PA-19 稳定码不变、文字不说「桶」
   })
 
   it('B1a: 同 workspace 目标仍正常置 superseded（回归）', async () => {
@@ -682,7 +720,7 @@ describe('runSavePipeline：模型改写的兜底', () => {
     expect((await e.decisions.listSettled()).map(d => d.kind).sort()).toEqual(['rewrite', 'supersede'])
   })
 
-  it('跨桶、不存在、已是 superseded 的替代目标不拍快照、不记账（结果照旧）', async () => {
+  it('跨作用域、不存在、已是 superseded 的替代目标不拍快照、不记账（结果照旧）', async () => {
     const e = guarded()
     const already = await seed(e.store, { name: '早被替代' })
     await e.store.put({ ...already, status: 'superseded' })
@@ -709,7 +747,7 @@ describe('runSavePipeline：模型改写的兜底', () => {
     expect(await e.decisions.listSettled()).toEqual([])
   })
 
-  it('同桶替代目标手改过：新记忆不落盘、旧记忆保持 active', async () => {
+  it('同作用域替代目标手改过：新记忆不落盘、旧记忆保持 active', async () => {
     const e = guarded()
     const old = await seed(e.store)
     await e.store.put({ ...old, content: '用户手改后的旧记忆', handEdited: true })
@@ -796,7 +834,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   const CHILD = { id: 'sess-child', lastSeq: 9, turnStartSeq: 4 }
   const delegation = { depth: 1, parentSessionId: 'sess-main', rootSessionId: 'sess-main', mode: 'one-shot' as const }
   const childDeps = (store = new MemoryStore(new InMemoryTable()), extra: object = {}) =>
-    ({ store, registry, workspacePath: '/proj' as string | undefined, session: CHILD, delegation, ...extra })
+    ({ store, registry, workspacePath: '/proj' as string | undefined, session: CHILD, delegation, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), ...extra })
   const childCandidate = (partial: object = {}) => candidate({
     type: 'knowledge', scope: 'workspace', sourceMode: 'environment-observed',
     name: '子观察', content: 'main 上 pnpm test 会挂', summary: 'main 测试会挂', ...partial,

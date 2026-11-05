@@ -5,6 +5,7 @@
  * - 宽版（记忆页）：A、B 各一张描边卡并排，卡里只放记忆；按钮靠右，和其它卡的动作行对齐；
  * - 窄版（右侧栏）：A、B 上下排，按钮一行靠左。
  * 任一方定位不到（视图里为 null）时裁决会报错，三个按钮都不可用。裁决后的结果态在待处理票里做。
+ * 败方含高危密钥（hasSecret）时裁决会彻底删除它：后果说明里那一句换成「将彻底删除、不可恢复」。
  * 记忆和基线（AGENTS.md）冲突用 VerticalConflictRuling：同一套标题与后果说明，只有一张记忆卡，
  * 按钮「以基线为准 / 保留这条记忆」，并写明基线不会被删除。
  */
@@ -43,6 +44,10 @@ export function ConflictRuling(props: ConflictRulingProps) {
   const t = useT()
   const { horizontal } = CONFLICT_ACTION_VERDICTS
   const unavailable = props.unavailable ?? (props.left === null || props.right === null ? t('conflict.missingHint') : undefined)
+  const isSecretA = props.left?.hasSecret === true
+  const isSecretB = props.right?.hasSecret === true
+  const consequence = isSecretA && isSecretB ? 'conflict.consequence.secretBoth'
+    : isSecretA ? 'conflict.consequence.secretA' : isSecretB ? 'conflict.consequence.secretB' : 'conflict.consequence'
   const side = (letter: 'A' | 'B', memory: MemoryCardData | null) => (
     <section className="pm-conflict-side" aria-label={t('conflict.side', { side: letter })}>
       <span className="pm-ab" aria-hidden="true">{letter}</span>
@@ -66,7 +71,7 @@ export function ConflictRuling(props: ConflictRulingProps) {
         {side('A', props.left)}
         {side('B', props.right)}
       </div>
-      <div className="pm-conflict-advice"><AdviceNote label="note">{t('conflict.consequence')}</AdviceNote></div>
+      <div className="pm-conflict-advice"><AdviceNote label="note">{t(consequence)}</AdviceNote></div>
       <div className="pm-conflict-buttons">
         <Button unavailable={unavailable} onClick={() => { props.onRule(horizontal.keepA) }}>{t('conflict.keepA')}</Button>
         <Button unavailable={unavailable} onClick={() => { props.onRule(horizontal.keepB) }}>{t('conflict.keepB')}</Button>
@@ -111,7 +116,7 @@ export function VerticalConflictRuling(props: VerticalConflictRulingProps) {
           : <MemoryCard memory={props.memory} now={props.now} typeLabel={props.typeLabel?.(props.memory.type)} hideScope={props.hideScope} projectName={props.projectName?.(props.memory)} />}
         <p className="pm-conflict-baseline">{t('conflict.vertical.baselineRef', { ref: props.baselineRef })}</p>
       </div>
-      <div className="pm-conflict-advice"><AdviceNote label="note">{t('conflict.vertical.consequence')}</AdviceNote></div>
+      <div className="pm-conflict-advice"><AdviceNote label="note">{t(props.memory?.hasSecret === true ? 'conflict.vertical.consequence.secret' : 'conflict.vertical.consequence')}</AdviceNote></div>
       <div className="pm-conflict-buttons">
         <Button unavailable={unavailable} onClick={() => { props.onRule(vertical.keepBaseline) }}>{t('conflict.vertical.keepBaseline')}</Button>
         <Button unavailable={unavailable} onClick={() => { props.onRule(vertical.keepMemory) }}>{t('conflict.vertical.keepMemory')}</Button>

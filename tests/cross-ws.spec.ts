@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { findEntityDuplicates, buildCrossWsPrompt, parseCrossWsResult, runCrossWsScan, CROSS_WS_LIMIT } from '../src/governance/cross-ws.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
+import { FAKE_SECRET } from './helpers/secrets.ts'
+import { SECRET_MASK } from '../src/secrets.ts'
 
 // 本文件默认造 workspace 层记忆。
 const record = (partial: Partial<MemoryRecord> = {}) => baseRecord({ scope: 'workspace', ...partial })
@@ -31,6 +33,16 @@ describe('findEntityDuplicates（实体聚类保底）', () => {
     expect(dup.length).toBe(CROSS_WS_LIMIT)
     expect(dup.every(d => d.topic !== 'solo')).toBe(true)
   })
+
+  it('PA-10 实体保底：两个项目里写着同一个高危密钥，主题和建议只给遮盖后的文字', () => {
+    const byWs = new Map([
+      ['/a', [record({ content: `部署用 \`${FAKE_SECRET.github}\`` })]],
+      ['/b', [record({ content: `这里也用 \`${FAKE_SECRET.github}\`` })]],
+    ])
+    const [dup] = findEntityDuplicates(byWs, [])
+    expect(dup).toMatchObject({ topic: SECRET_MASK, workspaces: ['/a', '/b'] })
+    expect(JSON.stringify(dup)).not.toContain(FAKE_SECRET.github)
+  })
 })
 
 describe('buildCrossWsPrompt / parseCrossWsResult', () => {
@@ -40,6 +52,15 @@ describe('buildCrossWsPrompt / parseCrossWsResult', () => {
     expect(p.user).toContain('## 项目 /a')
     expect(p.user).toContain('摘要甲')
     expect(p.user).toContain('（空）')
+  })
+
+  it('PA-10 摘要手改进高危密钥：发给模型的提示词里只有遮盖后的文字', () => {
+    const byWs = new Map([['/a', [record({ summary: `项目甲 ${FAKE_SECRET.aws}` })]]])
+    const p = buildCrossWsPrompt(byWs, [record({ scope: 'global', summary: `全局 ${FAKE_SECRET.slack}` })])
+    expect(p.user).toContain(`项目甲 ${SECRET_MASK}`)
+    expect(p.user).toContain(`全局 ${SECRET_MASK}`)
+    expect(p.user).not.toContain(FAKE_SECRET.aws)
+    expect(p.user).not.toContain(FAKE_SECRET.slack)
   })
 
   it('解析：未知 workspace 剔除、少于 2 个 ws 的条目丢弃、整体坏 JSON 返回 null', () => {

@@ -16,7 +16,7 @@ import { linkExclusive } from './exclusive-link.ts'
  *   .state/snapshots/<id>.json      每条一文件
  *   .state/pending/<id>.json        每条一文件
  *   .state/pending/<id>.claim       裁决期间的认领（排他创建，裁决完即删）
- *   .state/scan-cache/<sha1(桶键)>.json
+ *   .state/scan-cache/<sha1(缓存键)>.json
  *   .state/advice-ignores/<sha1(身份)>.json  建议忽略表，每项一文件
  *   .state/checkups/<sha1(范围键)>.json       体检记录表，每个范围一文件
  *   .state/checkups/<sha1(范围键)>.claim      这个范围体检期间的认领（排他创建，持有者定时刷新，体检完即删）

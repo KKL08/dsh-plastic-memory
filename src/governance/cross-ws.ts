@@ -1,5 +1,6 @@
 import type { MemoryRecord } from '../record-schema.ts'
 import { extractEntities } from '../text.ts'
+import { maskSecrets, maskSecretSurface } from '../secrets.ts'
 import { isAbort, type SemanticLlm } from './semantic-scan.ts'
 
 /** 跨项目重复主题：多个 workspace 各自记了同一件事而 global 缺位——"该全局"的行为证据。 */
@@ -36,11 +37,15 @@ export function findEntityDuplicates(
     .filter(([, wsSet]) => wsSet.size >= 2)
     .sort((a, b) => b[1].size - a[1].size)
     .slice(0, CROSS_WS_LIMIT)
-    .map(([entity, wsSet]) => ({
-      topic: entity,
-      workspaces: [...wsSet].sort(),
-      suggestion: `疑似跨项目重复（实体「${entity}」出现在 ${wsSet.size} 个项目），若确属通用可提炼一条 global 记忆`,
-    }))
+    .map(([entity, wsSet]) => {
+      // 实体取自原文，可能就是密钥：聚类照原文，进报告前和注入同口径遮掉高危
+      const shown = maskSecrets(entity)
+      return {
+        topic: shown,
+        workspaces: [...wsSet].sort(),
+        suggestion: `疑似跨项目重复（实体「${shown}」出现在 ${wsSet.size} 个项目），若确属通用可提炼一条 global 记忆`,
+      }
+    })
 }
 
 const SYSTEM_PROMPT = `你是记忆库治理审查员。给出的是多个项目（workspace）各自的记忆摘要清单和全局（global）记忆清单。
@@ -50,15 +55,18 @@ const SYSTEM_PROMPT = `你是记忆库治理审查员。给出的是多个项目
 {"duplicates":[{"topic":"一句话概括主题","workspaces":["路径1","路径2"],"suggestion":"建议提炼成怎样的一条 global 记忆"}]}
 没有发现输出 {"duplicates":[]}`
 
+// 摘要可能被手改进密钥，发给模型前和注入同口径遮掉高危
+const summaryLine = (r: MemoryRecord): string => `- ${maskSecretSurface(r).summary}`
+
 export function buildCrossWsPrompt(
   byWorkspace: ReadonlyMap<string, readonly MemoryRecord[]>,
   globalRecords: readonly MemoryRecord[],
 ): { system: string; user: string } {
   const sections: string[] = []
   for (const [ws, records] of byWorkspace) {
-    sections.push(`## 项目 ${ws}（${records.length} 条）\n${records.map(r => `- ${r.summary}`).join('\n')}`)
+    sections.push(`## 项目 ${ws}（${records.length} 条）\n${records.map(summaryLine).join('\n')}`)
   }
-  sections.push(`## global（${globalRecords.length} 条）\n${globalRecords.length > 0 ? globalRecords.map(r => `- ${r.summary}`).join('\n') : '（空）'}`)
+  sections.push(`## global（${globalRecords.length} 条）\n${globalRecords.length > 0 ? globalRecords.map(summaryLine).join('\n') : '（空）'}`)
   return { system: SYSTEM_PROMPT, user: sections.join('\n\n') }
 }
 

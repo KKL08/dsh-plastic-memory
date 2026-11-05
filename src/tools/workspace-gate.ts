@@ -61,6 +61,32 @@ export function copyTargetOf(record: Pick<MemoryRecord, 'scope' | 'workspacePath
 }
 
 /**
+ * records 里此刻在各自那一层已经不在了（任何状态都没有，即被彻底删除）的那些副本。每层整读一次（含归档），
+ * 不逐条定位：按 id 定位要扫整层，一份快照几百条时成了平方级；缺 workspacePath 的按 id 两级定位。
+ * 接线层把它交给 SnapshotStore，拍完快照落盘后复核（见 SnapshotStore.capture）。
+ */
+export const goneCopies = (store: Pick<MemoryStore, 'get' | 'readLayer'>) => async <T extends Located>(records: readonly T[]): Promise<Set<T>> => {
+  const present = new Map<string, Set<string>>()   // 层标签 → 盘上有的 id
+  const gone = new Set<T>()
+  for (const r of records) {
+    const layer = copyTargetOf(r)
+    if (layer === undefined) {
+      if ((await store.get(r.id)) === undefined) gone.add(r)
+      continue
+    }
+    const label = workspaceLabel(r)
+    let ids = present.get(label)
+    if (ids === undefined) {
+      const read = await store.readLayer(layer.kind === 'global' ? layer : { kind: 'workspace', path: layer.workspacePath }, { includeArchive: true })
+      ids = new Set(read.records.map(l => l.record.id))
+      present.set(label, ids)
+    }
+    if (!ids.has(r.id)) gone.add(r)
+  }
+  return gone
+}
+
+/**
  * 只动 target 那一份时，快照里哪些同 id 记录算它的历史：target 层的，加上别层里那一层此刻已定位不到这个 id（含归档）的——
  * 那是这条记忆搬层（提升、移到项目）之前留下的。别层还有这个 id 的，是那一份自己的历史，不算。
  * 先按层算好保留集合，返回的谓词是同步的（快照表在串行化的重写里用）。

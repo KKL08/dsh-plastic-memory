@@ -51,7 +51,7 @@ function env() {
   const cache = sidecar.scanCache
   const checkups = new CheckupRecordStore(sidecar.checkups)
   const autoCheckups = new AutoCheckupSettingStore(sidecar.autoCheckups)
-  const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, snapshots, cache, checkups, autoCheckups, ignores, registry, memoryRoot: root, now: () => clock.now }) })
+  const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, snapshots, cache, checkups, autoCheckups, ignores, registry, memoryRoot: root, now: () => clock.now }), now: () => clock.now, sleep: async () => {} })
   const command = createMemoryCommand({
     memoryRoot: root, store, decisions, snapshots, cache, checkups, autoCheckups, ignores, registry, views,
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),

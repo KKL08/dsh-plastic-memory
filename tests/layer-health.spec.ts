@@ -53,7 +53,7 @@ describe('listWorkspaces', () => {
 })
 
 describe('layerCacheKey', () => {
-  it('workspace 桶按路径，global 层独立桶', () => {
+  it('workspace 按路径取缓存键，global 层单独一个', () => {
     expect(layerCacheKey({ kind: 'workspace', path: '/p' })).toBe('cache_/p')
     expect(layerCacheKey({ kind: 'global' })).toBe(GLOBAL_CACHE_KEY)
   })
@@ -66,13 +66,13 @@ describe('scoreLayer 归属规则', () => {
     await deps.store.put(record({ id: 'mem_w2', scope: 'workspace', workspacePath: '/p' }))
     await deps.store.put(record({ id: 'mem_g1' }))
     await deps.store.put(record({ id: 'mem_g2' }))
-    // ws 桶的语义输入是 visible（含 global），缓存里混着三类发现
+    // ws 层的语义输入是 visible（含 global），缓存里混着三类发现
     await deps.cache.put('cache_/p', {
       id: 'cache_/p', scannedAt: 100, scope: '/p',
       findings: [
         semantic('redundancy', ['mem_w1', 'mem_w2']),   // 纯 ws → 计
         semantic('redundancy', ['mem_g1', 'mem_g2']),   // 纯 global → 不计（global 层自己算）
-        semantic('unclear', ['mem_w1', 'mem_g1']),      // 跨层 → 归 ws 层（global 桶看不到 ws 侧，此处不计则两层失明）
+        semantic('unclear', ['mem_w1', 'mem_g1']),      // 跨层 → 归 ws 层（global 层看不到 ws 侧，此处不计则两层失明）
         semantic('unclear', ['mem_w2', 'mem_gone']),    // 引用已消失记忆 → 不计（全员存活不满足）
       ],
     })
@@ -97,7 +97,7 @@ describe('scoreLayer 归属规则', () => {
     expect((await score(deps, { kind: 'workspace', path: '/p' }, 200)).health.counts.conflict).toBe(1)
   })
 
-  it('global 层用 global-only 集合与独立桶，misplaced 走重 cap', async () => {
+  it('global 层用 global-only 集合与单独的缓存键，misplaced 走重 cap', async () => {
     const deps = makeDeps()
     for (const id of ['mem_g1', 'mem_g2', 'mem_g3']) await deps.store.put(record({ id }))
     await deps.store.put(record({ id: 'mem_w', scope: 'workspace', workspacePath: '/p' }))

@@ -71,7 +71,7 @@ function expectRenderClean(tool: ToolDefinition, args: unknown, value: unknown):
 // ---------------------------------------------------------------------------
 describe('memory_save 绑定', () => {
   const makeTool = (store = new MemoryStore(new InMemoryTable())) => createSaveTool({
-    store, registry,
+    store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
     resolveContext: async () => ({ workspacePath: '/proj', session: { id: 's', lastSeq: 1 } }),
   })
   const legal = { action: 'create', name: '标题', type: 'preference', scope: 'global', content: '内容', summary: '摘要', sourceMode: 'user-explicit' }
@@ -136,7 +136,7 @@ describe('memory_search 绑定', () => {
     const r = await runSavePipeline({
       action: 'create', name: '认证位置', type: 'knowledge', scope: 'workspace',
       content: '认证逻辑在 src/auth.ts', summary: 'auth 位置', tags: ['auth'], sourceMode: 'user-explicit', force: true,
-    }, { store, registry, workspacePath: '/proj', session: { id: 's', lastSeq: 1 } })
+    }, { store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), workspacePath: '/proj', session: { id: 's', lastSeq: 1 } })
     if (r.kind !== 'saved') throw new Error(r.kind)
     return createSearchTool({ store, registry, resolveContext: async () => ({ workspacePath: '/proj', session: { id: 's', lastSeq: 1 } }) })
   }

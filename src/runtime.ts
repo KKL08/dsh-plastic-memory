@@ -274,10 +274,10 @@ export class SnapshotCache {
  * 1) cwd（realpath 规范化后）精确命中注册 workspace，归属该 workspace；
  * 2) 逐级向上探测祖先目录——registry.resolveByPath 只做精确规范路径匹配、不解析子树，
  *    没有这步，在项目子目录里开的会话会解析不到所属 workspace；
- * 3) 都不中则用规范化后的 cwd 本身当目录桶。dsh 的 Ungrouped 会话（cwd 不属任何注册
+ * 3) 都不中则用规范化后的 cwd 本身当目录作用域。dsh 的 Ungrouped 会话（cwd 不属任何注册
  *    workspace）是一等状态，没注册不等于没有项目边界——落 global 会跨项目污染，还会让
  *    global 直写闸（依赖 workspacePath 存在才降级为候选）随之蒸发。将来该目录注册成
- *    workspace，realpath 一致，桶自动接上。
+ *    workspace，realpath 一致，记忆自动接上。
  * 返回 undefined 仅当 cwd 缺失或目录已不存在（此时 memory_save 拒存，见 pipeline）。
  */
 export async function resolveWorkspacePath(

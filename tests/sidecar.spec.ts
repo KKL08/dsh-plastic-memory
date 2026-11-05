@@ -114,7 +114,7 @@ describe('SidecarStore：四张表落 .state/', () => {
     expect(await s.pending.list()).toEqual([['pd_a', pd('pd_a', { summary: '改过' })]])
   })
 
-  it('scan-cache：文件名是 sha1(桶键)，list 还原原始桶键', async () => {
+  it('scan-cache：文件名是 sha1(缓存键)，list 还原原始缓存键', async () => {
     const s = new SidecarStore({ root, schemas })
     const key = 'cache_/home/dev/proj'
     await s.scanCache.put(key, cacheEntry(key))

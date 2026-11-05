@@ -78,7 +78,7 @@ const sidecar = new SidecarStore({
 const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now }), undefined, sidecar.recallStats)
 const checkups = new CheckupRecordStore(sidecar.checkups)
 const source = { store, checkups, autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups), cache: sidecar.scanCache, now: () => clock.now }
-const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('这里只写体检视图') }, collectCheckups: () => collectCheckupView(source) })
+const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('这里只写体检视图') }, collectCheckups: () => collectCheckupView(source), now: () => clock.now, sleep: async () => {} })
 const decisions = new PendingDecisionsStore(sidecar.pending)
 const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
 const scheduler = new AutoCheckupScheduler({

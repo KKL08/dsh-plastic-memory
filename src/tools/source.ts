@@ -1,6 +1,7 @@
 import type { MemoryStore } from '../store.ts'
 import type { SourceRejectCode } from '../contract-codes.ts'
 import { HAND_EDITED_NOTE } from '../index-line.ts'
+import { maskSecretSurface } from '../secrets.ts'
 
 /** ctx.sessionQuery.readEvent 的最小契约（2026-08-28 真机探针核实） */
 export interface ReadEventFn {
@@ -27,7 +28,7 @@ export interface SourceToolDeps {
 }
 
 export type SourceResult =
-  | { kind: 'ok'; memoryId: string; sessionId: string; range: [number, number]; lines: string[]; skipped: number; handEdited?: true }
+  | { kind: 'ok'; memoryId: string; name: string; sessionId: string; range: [number, number]; lines: string[]; skipped: number; handEdited?: true }
   | { kind: 'not-found'; memoryId: string }
   | { kind: 'no-source'; memoryId: string }
   | { kind: 'forbidden'; memoryId: string }
@@ -126,13 +127,13 @@ export async function executeSource(
     lines.push(`- [${ev.seq}] ${extracted.role}: ${text}`)
   }
   return {
-    kind: 'ok', memoryId: args.memoryId, sessionId: source.sessionId,
+    kind: 'ok', memoryId: args.memoryId, name: maskSecretSurface(record).name, sessionId: source.sessionId,
     range: [win.startSeq ?? start, win.endSeq ?? end], lines, skipped,
     ...(record.handEdited ? { handEdited: true as const } : {}),
   }
 }
 
-export function renderSourceResult(result: SourceResult, memoryName?: string): string {
+export function renderSourceResult(result: SourceResult): string {
   switch (result.kind) {
     case 'not-found':
       return `记忆不存在或已删除：${result.memoryId}`
@@ -145,7 +146,7 @@ export function renderSourceResult(result: SourceResult, memoryName?: string): s
     case 'unavailable':
       return `原始证据不可用（${result.reason}）。请把该记忆当作先验使用，并在结论中标注这一点存在不确定性。`
     case 'ok': {
-      const head = `记忆 ${result.memoryId}${memoryName ? `（${memoryName}）` : ''} 源自会话 ${result.sessionId} 的 seq ${result.range[0]}–${result.range[1]}：`
+      const head = `记忆 ${result.memoryId}（${result.name}）源自会话 ${result.sessionId} 的 seq ${result.range[0]}–${result.range[1]}：`
       const body = result.lines.length > 0 ? result.lines.join('\n') : '（该窗口内没有可读的对话文本）'
       const tail = result.skipped > 0 ? `（另有 ${result.skipped} 个结构事件未显示）` : ''
       const edited = result.handEdited ? `注意：这条记忆${HAND_EDITED_NOTE}——保存后被手工改过，下面的对话可能已不是现在内容的来源。` : ''

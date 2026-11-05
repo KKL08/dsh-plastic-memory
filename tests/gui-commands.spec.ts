@@ -82,6 +82,8 @@ function env(opts: EnvOpts = {}) {
     memoryRoot: root,
     collect: () => collectGlobalViews({ store, decisions, snapshots, cache, checkups, autoCheckups, registry, memoryRoot: root, now: () => clock.now }),
     collectCheckups: () => collectCheckupView({ store, checkups, autoCheckups, cache, now: () => clock.now, ...(opts.governanceEnabled !== undefined ? { isGovernanceEnabled: () => opts.governanceEnabled! } : {}) }),
+    // 替换间隔按测试时钟算、不真等：节流本身由视图测试单独覆盖
+    now: () => clock.now, sleep: async () => {},
   })
   // 本进程调度器收到的「设置改了」通知次数
   const autoCheckupChanges = { count: 0 }
@@ -221,6 +223,64 @@ describe('resolve 与 undo', () => {
     const pending = pendingViewSchema.parse(await e.readView('pending'))
     expect(ledgerItems(pending).map(i => [i.kind, 'decisionId' in i ? i.decisionId : undefined])).toEqual([['conflict-horizontal', entry.id]])
     expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
+  })
+
+  it('PA-11 败方不含密钥：照旧软删、记快照、可撤销；本次条目留在账本里，别的引用败方的条目清掉', async () => {
+    const e = env()
+    const entry = await seedPair(e)
+    await e.store.create(record({ id: 'mem_c', name: '丙', content: '用 yarn' }))
+    const other = (await e.decisions.upsert({ memoryIds: ['mem_b', 'mem_c'], summary: '另一条', fingerprint: 'fp-bc' }, 2)).entry
+
+    const body = ok(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' }))
+
+    expect(body.isHardDeleted).toBeUndefined()
+    expect(body.snapshotId).toBeDefined()
+    expect((await e.store.get('mem_b'))!.status).toBe('deleted')
+    expect((await e.decisions.listSettled()).map(d => [d.id, d.settled?.snapshotId])).toEqual([[entry.id, body.snapshotId]])
+    expect((await allEntries(e)).map(d => d.id)).not.toContain(other.id)
+    ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+    expect((await e.store.get('mem_b'))!.status).toBe('active')
+  })
+
+  it('PA-11 败方含密钥：物理删除、所有快照里已脱敏、不在最近删除；结果标明彻底删除，条目移出账本、没有撤销', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_a', name: '甲', content: '用 pnpm' }))
+    await e.store.create(record({ id: 'mem_b', name: '乙', content: `用 npm，token ${FAKE_SECRET.sk}` }))
+    const entry = (await e.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', fingerprint: 'fp-ab' }, 1)).entry
+    const earlier = await executeSnapshotTool({ action: 'create', memoryIds: ['mem_b'] }, { workspacePath: SESSION_WS }, { store: e.store, snapshots: e.snapshots })
+    if (earlier.kind !== 'created') throw new Error(earlier.kind)
+
+    const body = ok(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' }))
+
+    expect(body.isHardDeleted).toBe(true)
+    expect(body.snapshotId).toBeUndefined()
+    expect(await e.store.get('mem_b')).toBeUndefined()
+    expect((await e.store.get('mem_a'))!.status).toBe('active')
+    const snapshots = await e.snapshots.list()
+    expect(snapshots.length).toBeGreaterThan(1)
+    for (const snap of snapshots) {
+      expect(JSON.stringify(snap)).not.toContain(FAKE_SECRET.sk)
+      expect(snap.data.find(r => r.id === 'mem_b')!.redacted).toBe(true)
+    }
+    expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
+    expect(await allEntries(e)).toEqual([])
+    expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('not-found')
+  })
+
+  it('PA-11 败方只含疑似密钥（用户确认存下的）：照常软删、记快照、可撤销', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_a', name: '甲', content: '用 pnpm' }))
+    await e.store.create(record({ id: 'mem_b', name: '乙', content: '用 npm，password: TESTONLY99' }))
+    const entry = (await e.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', fingerprint: 'fp-ab' }, 1)).entry
+
+    const body = ok(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' }))
+
+    expect(body.isHardDeleted).toBeUndefined()
+    expect(body.snapshotId).toBeDefined()
+    expect((await e.store.get('mem_b'))!.status).toBe('deleted')
+    expect((await e.decisions.listSettled()).map(d => d.id)).toEqual([entry.id])
+    ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+    expect((await e.store.get('mem_b'))!.content).toBe('用 npm，password: TESTONLY99')
   })
 
   it('垂直 keep-right（以基线为准）：删记忆；undo 后记忆回来、冲突回到待处理', async () => {
@@ -817,6 +877,17 @@ describe('同 id 在两个项目里各有一份', () => {
     expect(await allEntries(e)).toEqual([entry])
   })
 
+  it('forget 指明一份：别的项目那份只在最近删除里，同样算还有副本，账本里指向这个 id 的条目留着', async () => {
+    const e = env()
+    await seedCopies(e)
+    expect(await e.store.softDelete({ id: 'mem_dup', workspacePath: OTHER_WS }, { isExactLayer: true, now: e.clock.now })).toBe(true)
+    await e.store.create(record({ id: 'mem_y', scope: 'workspace', workspacePath: SESSION_WS }))
+    const entry = (await e.decisions.upsert({ memoryIds: ['mem_dup', 'mem_y'], summary: '同 id 的冲突', fingerprint: 'fp-dup' }, 1)).entry
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: own }))
+    expect((await copyIn(e, OTHER_WS))!.status).toBe('deleted')
+    expect(await allEntries(e)).toEqual([entry])
+  })
+
   it('hard-delete 指明含密钥的一份：只脱敏这一层在快照里的副本，别的项目那份的快照照常能恢复', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_dup', name: '本项目那份', content: `token ${FAKE_SECRET.sk}`, scope: 'workspace', workspacePath: SESSION_WS }))
@@ -1211,7 +1282,7 @@ describe('提升候选与超限', () => {
   /** 真实路径：模型以 scope: global 保存 → 管线降级为本项目 + globalCandidate → 体检把它挂进账本 → 待处理视图里出现。 */
   async function seedCandidate(e: ReturnType<typeof env>) {
     const saved = await runSavePipeline(candidate({ name: '戊', content: '所有项目都用 vitest', summary: '都用 vitest' }), {
-      store: e.store, registry, workspacePath: SESSION_WS, session: { id: 'sess-1', lastSeq: 1 },
+      store: e.store, snapshots: e.snapshots, registry, workspacePath: SESSION_WS, session: { id: 'sess-1', lastSeq: 1 },
     })
     if (saved.kind !== 'saved') throw new Error(saved.kind)
     expect([saved.record.scope, saved.record.workspacePath, saved.record.globalCandidate]).toEqual(['workspace', SESSION_WS, true])
@@ -1279,7 +1350,7 @@ describe('提升候选与超限', () => {
     expect((await e.decisions.listSettled()).map(d => d.id)).toEqual([decisionId])
 
     const updated = await runSavePipeline(candidate({ action: 'update', id: memoryId, name: '戊', content: '所有项目都用 vitest，覆盖率不设门槛', summary: '都用 vitest' }), {
-      store: e.store, registry, workspacePath: SESSION_WS, session: { id: 'sess-1', lastSeq: 2 },
+      store: e.store, snapshots: e.snapshots, registry, workspacePath: SESSION_WS, session: { id: 'sess-1', lastSeq: 2 },
     })
     expect(updated.kind).toBe('updated')
     expect((await e.store.get(memoryId))!.globalCandidate).toBe(true)
@@ -1456,7 +1527,7 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
   /** 模型以 scope: global 新记一条：管线降级为本项目 + globalCandidate，不经体检，账本里什么都没有。 */
   async function saveCandidate(e: ReturnType<typeof env>, name = '戊', content = '所有项目都用 vitest') {
     const saved = await runSavePipeline(candidate({ name, content, summary: content }), {
-      store: e.store, registry, workspacePath: SESSION_WS, session: { id: 'sess-1', lastSeq: 1 },
+      store: e.store, snapshots: e.snapshots, registry, workspacePath: SESSION_WS, session: { id: 'sess-1', lastSeq: 1 },
     })
     if (saved.kind !== 'saved') throw new Error(saved.kind)
     expect(saved.record.globalCandidate).toBe(true)
@@ -2035,6 +2106,16 @@ describe('同 id 在会话项目和别的项目各有一份时提升', () => {
     expect(cards.map(m => [m.name, m.workspacePath, dirname(m.filePath)])).toEqual([
       [ws === OTHER_WS ? '别的项目那份' : '本项目那份', ws, join(root, workspaceDirName(ws))],
     ])
+  })
+
+  it('条目所在项目那份在最近删除里、别的项目那份仍是在用的候选：不出这张提升卡，也不拿别的项目那份顶上', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_dup', name: '本项目那份', scope: 'workspace', workspacePath: SESSION_WS, globalCandidate: true }))
+    await e.store.create(record({ id: 'mem_dup', name: '别的项目那份', scope: 'workspace', workspacePath: OTHER_WS, globalCandidate: true }))
+    await e.decisions.upsert({ kind: 'promote-candidate', memoryIds: ['mem_dup'], summary: '候选', workspaces: [SESSION_WS], fingerprint: 'fp' }, 1)
+    expect(await e.store.softDelete({ id: 'mem_dup', workspacePath: SESSION_WS }, { isExactLayer: true, now: e.clock.now })).toBe(true)
+    ok(await e.run({ cmd: 'refresh-views' }))
+    expect(pendingViewSchema.parse(await e.readView('pending')).items.filter(i => i.kind === 'promote-candidate')).toEqual([])
   })
 })
 
@@ -3635,6 +3716,26 @@ describe('draft-edit（让模型改、让模型合并的生成）', () => {
     expect(prompts).toEqual([])
   })
 
+  it('PA-14 要求或上一稿含高危密钥：secret-critical，模型没有被调用', async () => {
+    const { llm, prompts } = scripted(answer({ content: '短', summary: '短' }))
+    const e = env({ llm })
+    await seedLong(e)
+    const draft = { content: '1. 跑测试', summary: '发版' }
+    expect(err(await e.run(draftOf('mem_l', { request: `改短，密钥 ${FAKE_SECRET.sk} 别丢` }))).code).toBe('secret-critical')
+    for (const previous of [
+      { ...draft, content: `1. 跑测试，token ${FAKE_SECRET.github}` },
+      { ...draft, summary: `发版 ${FAKE_SECRET.aws}` },
+      { ...draft, name: `发版 ${FAKE_SECRET.slack}` },
+      { ...draft, tags: [FAKE_SECRET.google] },
+    ]) {
+      expect(err(await e.run(draftOf('mem_l', { previous }))).code).toBe('secret-critical')
+    }
+    expect(prompts).toEqual([])
+    // 疑似级照常发（同记忆本身：疑似的不遮）
+    ok(await e.run(draftOf('mem_l', { request: '改短，api_key: TESTONLY0000000000000000 保留' })))
+    expect(prompts).toHaveLength(1)
+  })
+
   it('只含确认存下的疑似密钥：照常发给模型（同注入，疑似的不遮）', async () => {
     const { llm, prompts } = scripted(answer({ content: '短', summary: '短' }))
     const e = env({ llm })
@@ -3898,6 +3999,24 @@ describe('migrate-type', () => {
     expect((await e.store.get('mem_k'))?.status).toBe('active')
     const deleted = deletedViewSchema.parse(await e.readView('deleted'))
     expect(deleted.items.map(i => i.memory.id).sort()).toEqual(['mem_g', 'mem_o'])
+  })
+
+  it('PA-03 forget：收集完要删的 id 之后其中一条被改成别的类型：这条不被软删，其余照删', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_a', type: 'client' }))
+    await e.store.create(record({ id: 'mem_b', type: 'client' }))
+    // 删到 mem_b 时（锁外的定位已经做完），另一个会话先把它改成别的类型
+    const softDelete = e.store.softDeleteUnlessSecret.bind(e.store)
+    e.store.softDeleteUnlessSecret = (async (r, ...rest) => {
+      if (r.id === 'mem_b') await e.store.update(r, cur => ({ ...cur, type: 'knowledge' }))
+      return softDelete(r, ...rest)
+    }) as typeof e.store.softDeleteUnlessSecret
+
+    const body = ok(await e.run({ cmd: 'migrate-type', from: 'client', action: 'forget' }))
+
+    expect(body.migrated).toBe(1)
+    expect((await e.store.get('mem_a'))?.status).toBe('deleted')
+    expect(await e.store.get('mem_b')).toMatchObject({ status: 'active', type: 'knowledge' })
   })
 
   it('部分记忆没改成时回 failed，已改的照样重写视图', async () => {

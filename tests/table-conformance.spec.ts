@@ -219,7 +219,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
   it('pipeline create/update/supersedes 全路径行为一致', async () => {
     const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
     const session = { id: 'sess-1', lastSeq: 5 }
-    const deps = { store, registry, workspacePath: '/home/dev/conformance-proj' as string | undefined, session }
+    const deps = { store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), workspacePath: '/home/dev/conformance-proj' as string | undefined, session }
 
     const created = await runSavePipeline({
       action: 'create', name: '流程A', type: 'procedure', scope: 'global',
@@ -306,6 +306,17 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
       expect(reloaded.recallCount).toBe(7)      // sidecar 一致：重载前后同值
       expect(reloaded.lastRecalledAt).toBe(1787200000000)
     }
+  })
+
+  it('put 的 skipIf 收到锁内定位到的当前记录，定位不到时收到 undefined；为真就不写、返回 false', async () => {
+    const seen: Array<string | undefined> = []
+    const skipMissing = (c: { summary: string } | undefined) => { seen.push(c?.summary); return c === undefined }
+    expect(await table.put('mem_skip', record({ id: 'mem_skip', summary: '新建' }), undefined, skipMissing)).toBe(false)
+    expect(await table.locate('mem_skip')).toBeUndefined()
+    await table.put('mem_skip', record({ id: 'mem_skip', summary: '原样' }))
+    expect(await table.put('mem_skip', record({ id: 'mem_skip', summary: '改后' }), undefined, skipMissing)).toBe(true)
+    expect((await table.locate('mem_skip'))!.record.summary).toBe('改后')
+    expect(seen).toEqual([undefined, '原样'])
   })
 
 

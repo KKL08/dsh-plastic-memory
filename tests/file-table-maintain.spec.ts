@@ -144,6 +144,22 @@ describe('维护点动作 ②：顶层非 active 文件搬 .archive/', () => {
     expect(await readFile(join(archiveOf(globalDir()), '同名.md'), 'utf8')).toContain('早先归档的')
     expect((await table.locate('mem_new'))!.record.content).toBe('后来手改的')
   })
+
+  it('PA-05 .archive/ 里三个候选名都被别的 id 占着：这条留在顶层、本轮跳过，别的文件照常维护', async () => {
+    const now = Date.now()
+    const archive = archiveOf(globalDir())
+    await writeMem(archive, '同名.md', record({ id: 'mem_o1', name: '同名', status: 'deleted', deletedAt: now }))
+    await writeMem(archive, `同名-${'mem_new'.slice(-6)}.md`, record({ id: 'mem_o2', name: '同名', status: 'deleted', deletedAt: now }))
+    await writeMem(archive, '同名-mem_new.md', record({ id: 'mem_o3', name: '同名', status: 'deleted', deletedAt: now }))
+    const taken = await readFile(join(archive, '同名-mem_new.md'), 'utf8')
+    await writeMem(globalDir(), '同名.md', record({ id: 'mem_new', name: '同名', status: 'deleted' }))
+    await writeMem(globalDir(), '别的.md', record({ id: 'mem_other', name: '别的', status: 'deleted' }))
+    const { table } = open()
+    await table.maintain([globalDir()])
+    expect(await mds(globalDir())).toEqual(['同名.md'])
+    expect(await readFile(join(archive, '同名-mem_new.md'), 'utf8')).toBe(taken)
+    expect(await mds(archive)).toContain('别的.md')
+  })
 })
 
 describe('维护点动作 ③：.archive/ 里 deletedAt 超 14 天的物理删除', () => {

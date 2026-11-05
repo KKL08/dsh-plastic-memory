@@ -20,7 +20,9 @@ import { CheckupRecordStore, checkupKey } from '../src/governance/checkup-record
 import type { CheckupRecord } from '../src/storage/schema.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { PendingDecision, ScanCacheEntry } from '../src/governance/schema.ts'
+import { SECRET_MASK } from '../src/secrets.ts'
 import { record } from './helpers/record.ts'
+import { FAKE_SECRET } from './helpers/secrets.ts'
 
 function makeDeps(overrides?: Partial<ScanToolDeps>): ScanToolDeps {
   return {
@@ -103,7 +105,7 @@ describe('executeScan 单层模式', () => {
     expect(r.notes.map(n => n.code)).toContain('semantic-failed')
   })
 
-  it('layers=full：语义层结果写缓存（global 层桶）、conflict 进待决账本', async () => {
+  it('layers=full：语义层结果写缓存（global 层缓存键）、conflict 进待决账本', async () => {
     const deps = makeDeps({ getLlm: (_exec: unknown) => conflictLlm })
     await deps.store.put(record({ id: 'mem_a', content: '用 pnpm' }))
     await deps.store.put(record({ id: 'mem_b', content: '用 npm' }))
@@ -179,6 +181,18 @@ describe('executeScan 单层模式', () => {
     // malformed 无对应记录，memoryIds 为空，不进 problemIds——mem_ok 仍算 clean
     expect(r.stats.clean).toBe(1)
     expect(r.stats.issues).toBe(1)
+  })
+
+  it('PA-13：手建文件的 supersedes 里写着密钥：孤儿说明遮盖它，扫描结果和渲染文字里都没有明文', async () => {
+    const { store } = await fileBackedStore({
+      [`${GLOBAL_DIR}/hand.md`]: encodeRecord(record({ id: 'mem_hand', supersedes: [FAKE_SECRET.sk, 'password=hunter2hunter2'] }), {}),
+    })
+    const r = await scanSingle({ layers: 'rule' }, makeDeps({ store }))
+    const orphan = r.findings.find(f => f.type === 'orphan')
+    expect(orphan?.summary).toContain(SECRET_MASK)
+    const shown = JSON.stringify(r) + renderScanResult(r)
+    expect(shown).not.toContain(FAKE_SECRET.sk)
+    expect(shown).not.toContain('hunter2hunter2')
   })
 
   it('layers=semantic 且无 llm 时如实说明未执行任何检测', async () => {
@@ -279,7 +293,7 @@ describe('executeScan 单层模式', () => {
     expect(renderScanResult(r)).not.toMatch(/6800|6,800|token/)
   })
 
-  it('cacheKey：workspace 路径分桶，缺省落 global 层桶', () => {
+  it('cacheKey：workspace 按路径分别取键，缺省落 global 层缓存键', () => {
     expect(cacheKey('/proj')).toBe('cache_/proj')
     expect(cacheKey(undefined)).toBe(GLOBAL_CACHE_KEY)
   })
@@ -337,7 +351,7 @@ describe('executeScan 全库体检', () => {
     await deps.store.put(record({ id: 'mem_g1' }))
   }
 
-  it('scopes 列表：逐 workspace + global 各自扫描计分，语义缓存写各自桶', async () => {
+  it('scopes 列表：逐 workspace + global 各自扫描计分，语义缓存按作用域分别写', async () => {
     const deps = makeDeps({ getLlm: (_exec: unknown) => checkupLlm })
     await seedTwoWs(deps)
     const r = await executeScan({ scopes: ['/proj-a', '/proj-b'] }, deps, fakeExec())
@@ -416,6 +430,15 @@ describe('executeScan 全库体检', () => {
     expect(r.duplicates.items[0].workspaces).toEqual(['/proj-a', '/proj-b'])
   })
 
+  it('PA-10 全量体检：提升候选的摘要手改进高危密钥，按项目聚合的候选只给遮盖后的文字', async () => {
+    const deps = makeDeps()
+    await deps.store.put(record({ id: 'mem_c', scope: 'workspace', workspacePath: '/proj-a', globalCandidate: true, summary: `候选 ${FAKE_SECRET.github}`, handEdited: true }))
+    const r = await executeScan({ scope: 'all', layers: 'rule' }, deps, fakeExec())
+    if (r.kind !== 'checkup') throw new Error(r.kind)
+    expect(r.promoteCandidates.byWorkspace).toEqual([{ workspacePath: '/proj-a', items: [{ id: 'mem_c', summary: `候选 ${SECRET_MASK}` }] }])
+    expect(renderScanResult(r)).not.toContain(FAKE_SECRET.github)
+  })
+
   it('无 LLM 时跨项目重复退用实体聚类保底（疑似级）', async () => {
     const deps = makeDeps()
     await seedTwoWs(deps)
@@ -463,7 +486,7 @@ describe('executeScan 全库体检', () => {
     expect(r.findings.find(f => f.type === 'malformed')!.summary).toContain('bad.md')
   })
 
-  it('体检的 created/existing 从去重后的待决项派生：同一垂直冲突多桶复扫不虚增', async () => {
+  it('体检的 created/existing 从去重后的待决项派生：同一垂直冲突在多个作用域重复扫到不虚增', async () => {
     const verticalLlm = {
       complete: async ({ user }: { system: string; user: string }) =>
         user.includes('mem_g1')
@@ -474,7 +497,7 @@ describe('executeScan 全库体检', () => {
     await seedTwoWs(deps)
     const first = await executeScan({ scope: 'all' }, deps, fakeExec())
     if (first.kind !== 'checkup') throw new Error(first.kind)
-    // mem_g1 在两个 ws 的 visible 桶与 global 桶各被发现一次，dedupKey 收敛为一条
+    // mem_g1 在两个 ws 的 visible 集合与 global 层各被发现一次，dedupKey 收敛为一条
     expect(first.pendingDecisions.items).toHaveLength(1)
     expect(first.pendingDecisions.created).toBe(1)
     expect(first.pendingDecisions.existing).toBe(0)
@@ -484,7 +507,7 @@ describe('executeScan 全库体检', () => {
     expect(second.pendingDecisions.existing).toBe(1)
   })
 
-  it('体检收尾清理孤儿语义缓存桶：废弃 workspace 与历史遗留键被删，现存桶保留', async () => {
+  it('体检收尾清理孤儿语义缓存：废弃 workspace 与历史遗留键被删，现存的保留', async () => {
     const deps = makeDeps()
     await seedTwoWs(deps)
     await deps.cache.put('cache_/gone-ws', { id: 'cache_/gone-ws', scannedAt: 1, scope: '/gone-ws', findings: [] })
@@ -597,6 +620,14 @@ describe('renderScanResult', () => {
     expect(text).toContain('memory_promote')
     expect(text).toContain(`另有 ${r.promoteCandidates.more} 条`) // 折叠计数取自结构化 more
     expect(text).toMatch(/memory_source.*出生语境|出生语境.*memory_source/)  // 提升前核验提示
+  })
+
+  it('PA-10 提升候选的摘要手改进高危密钥：体检报告只给遮盖后的文字', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await store.put(record({ id: 'mem_c', scope: 'workspace', workspacePath: '/a', globalCandidate: true, summary: `候选 ${FAKE_SECRET.github}`, handEdited: true }))
+    const r = await scanSingle({ scope: '/a', layers: 'rule' }, makeDeps({ store }))
+    expect(r.promoteCandidates.items).toEqual([{ id: 'mem_c', summary: `候选 ${SECRET_MASK}` }])
+    expect(renderScanResult(r)).not.toContain(FAKE_SECRET.github)
   })
 
   it('无 globalCandidate 时 promoteCandidates 为空、不渲染建议段', async () => {

@@ -645,7 +645,7 @@ describe('resolveWorkspacePath', () => {
     expect(await resolveWorkspacePath(ctx, '/definitely/not/a/real/dir')).toBeUndefined()
   })
 
-  it('workspaceRegistry 缺席时退用规范化 cwd 当目录桶（Ungrouped 会话不落 global）', async () => {
+  it('workspaceRegistry 缺席时退用规范化 cwd 当目录作用域（Ungrouped 会话不落 global）', async () => {
     const ctx = { get: () => undefined }
     expect(await resolveWorkspacePath(ctx, tmpRoot)).toBe(tmpReal)
   })
@@ -660,7 +660,7 @@ describe('resolveWorkspacePath', () => {
     expect(await resolveWorkspacePath(ctx, join(tmpRoot, 'sub', 'deep'))).toBe(tmpReal)
   })
 
-  it('resolveByPath 抛错时落到目录兜底桶而非 undefined', async () => {
+  it('resolveByPath 抛错时落到兜底的目录作用域而非 undefined', async () => {
     const ctx = { get: () => ({ resolveByPath: async () => { throw new Error('boom') } }) }
     expect(await resolveWorkspacePath(ctx, tmpRoot)).toBe(tmpReal)
   })

@@ -23,8 +23,8 @@ export interface SaveToolDeps {
   store: MemoryStore
   registry: TypeRegistry
   resolveContext(exec: ToolRunContext): Promise<SaveContext>
-  /** 改写、替代前拍快照用（快照先行）；生产接线传入已有实例，测试可缺省。 */
-  snapshots?: SnapshotStore
+  /** 改写、替代前拍快照用（快照先行）；必填，测试传内存实现。 */
+  snapshots: SnapshotStore
   /** 改写、替代后记撤销记录（对话卡、右侧栏的「撤销修改」）；生产接线传入已有实例，测试可缺省。 */
   decisions?: PendingDecisionsStore
   /** 新建成功后调用（会话视图的 savedIds：右侧栏「这次新写入的」，接线在 index.ts）。 */
@@ -93,7 +93,7 @@ export async function executeSave(
     store: deps.store,
     registry: deps.registry,
     // 无条件传真实 workspace 上下文：pipeline 要靠它判断 global 是否降级为候选（scope=global 时
-    // 也需要知道当前有没有 workspace 桶）。global 记忆最终不带 workspacePath 由 pipeline 组装时归 undefined。
+    // 也需要知道当前有没有 workspace 作用域）。global 记忆最终不带 workspacePath 由 pipeline 组装时归 undefined。
     workspacePath: context.workspacePath,
     session: context.session,
     snapshots: deps.snapshots,
