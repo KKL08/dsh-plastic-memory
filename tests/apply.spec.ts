@@ -33,7 +33,7 @@ import {
 import { baselineProjectionDefinition } from '../src/governance/baseline.ts'
 import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
 import {
-  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_FILE, deletedViewSchema, healthViewSchema, libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema,
+  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_FILE, deletedViewSchema, libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema,
   workspaceMapViewSchema, type LibraryView, type PendingView,
 } from '../src/gui/contract.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
@@ -2154,14 +2154,10 @@ describe('配置热生效（loader/volatile-update）', () => {
       expect.objectContaining({ kind: 'overflow', mode: 'relax', tier: expected.tier, workspacePath }),
     ])
     expect(expected.tier).toBe(1)
-    // 会话所在项目自己没有记忆：健康里单列这条超限，档位与待处理一致
-    expect((await readNow('health', healthViewSchema)).overflowOnlyLayers).toEqual([{ layer: { kind: 'workspace', workspacePath }, overflow: { ...expected, isDismissed: false } }])
 
     await t.update({ snapshotTokenBudget: usedTokens + 1000 })
     const pending = await readNow('pending', pendingViewSchema)
     expect([pending.items, pending.dot]).toEqual([[], 'none'])
-    const health = await readNow('health', healthViewSchema)
-    expect([health.layers.map(l => l.overflow).filter(o => o !== null), health.overflowOnlyLayers]).toEqual([[], []])
     expect(await new PendingDecisionsStore(sidecarAt(t.memoryRoot).pending).listOverflow()).toEqual([])
   })
 })

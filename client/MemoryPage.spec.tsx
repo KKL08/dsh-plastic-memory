@@ -40,8 +40,8 @@ const deleted: DeletedView = { version: GUI_VIEW_VERSION, items: [{ memory: b1, 
 
 function healthLayer(layer: GuiLayerRef, score: number | null, tier: 'green' | 'amber' | 'red', totalMemories = 1): HealthView['layers'][number] {
   return {
-    layer, totalMemories, score, tier, gate: { secret: score === null }, issues: [], staleCount: 0,
-    lastCheckupAt: NOW - 86_400_000, overflow: null, ignored: [],
+    layer, totalMemories, score, tier, gate: { secret: score === null }, issues: [],
+    lastCheckupAt: NOW - 86_400_000, ignored: [],
     deductions: { rule: { points: 0, types: [] }, content: { points: 0, types: [] }, freshness: { points: 0, types: [] } },
   }
 }

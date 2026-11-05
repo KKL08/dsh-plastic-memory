@@ -289,7 +289,7 @@ describe('待处理视图：建议整理', () => {
     expect(await h.decisions.list()).toEqual([])
   })
 
-  it('和健康视图同口径：每层的建议条数 = 该层已过有效期、内容过长、旧记忆已不在的扣分条数 + 很久没确认条数', async () => {
+  it('和健康视图同口径：每层已过有效期、内容过长、旧记忆已不在的建议条数 = 该层这几类的扣分条数；有没有很久没确认的与新鲜度扣分一致', async () => {
     const h = harness()
     await seedAdvice(h)
     const { pending, health } = await h.views()
@@ -297,7 +297,8 @@ describe('待处理视图：建议整理', () => {
       const inLayer = pending.items.filter(i => i.kind === 'advice' && (layer.layer.kind === 'global'
         ? i.memories[0]!.scope === 'global' : i.memories[0]!.workspacePath === layer.layer.workspacePath))
       const ruleCount = layer.issues.filter(x => ['expired', 'bloat', 'orphan'].includes(x.type)).reduce((s, x) => s + x.count, 0)
-      expect(inLayer.length).toBe(ruleCount + layer.staleCount)
+      expect(inLayer.filter(i => i.kind === 'advice' && i.type !== 'stale')).toHaveLength(ruleCount)
+      expect(inLayer.some(i => i.kind === 'advice' && i.type === 'stale')).toBe(layer.deductions.freshness.types.includes('stale'))
     }
   })
 
@@ -622,7 +623,7 @@ describe('视图生成时刻', () => {
 })
 
 describe('健康视图', () => {
-  it('超限列为问题、不扣分：已忽略的仍列出（标明已忽略，待处理里没有它）；memory_health 同样报出', async () => {
+  it('超限不扣分：已忽略的不在待处理里；memory_health 照样报出', async () => {
     const h = harness()
     await h.store.create(w({ id: 'mem_a', name: 'A' }))
     const before = await h.health()
@@ -637,8 +638,6 @@ describe('健康视图', () => {
     expect(healthViewSchema.parse(health)).toEqual(health)
     expect(pending.items).toEqual([])
     const ws = health.layers.find(l => l.layer.kind === 'workspace')!
-    expect(ws.overflow).toEqual({ mode: 'relax', tier: 1, isDismissed: true })
-    expect(health.layers.find(l => l.layer.kind === 'global')!.overflow).toBeNull()
 
     const tool = await h.health()
     if (tool.kind !== 'single') throw new Error(tool.kind)
@@ -647,24 +646,6 @@ describe('健康视图', () => {
     expect(tool.overflow).toEqual({ mode: 'relax', tier: 1, summary: '带入记忆约 4100 token，超出上限 4000，已自动放宽到 5000' })
     expect(tool.recommendationKinds).toContain('budget-overflow')
     expect(tool.message).toContain('超出上限')
-  })
-
-  it('超限的项目自己没有记忆（不在体检清单里）：单列在 overflowOnlyLayers，只带超限档位，不编层统计；global 照常', async () => {
-    const h = harness()
-    await h.store.create(g({ id: 'mem_g', name: '全局一条' }))
-    await h.decisions.syncOverflow(WS, { mode: 'strict', tier: 0 }, T0, '超限')
-    await h.decisions.syncOverflow('global', { mode: 'strict', tier: 0 }, T0, '超限')
-
-    const { health } = await h.views()
-    expect(healthViewSchema.parse(health)).toEqual(health)
-    expect(health.layers.map(l => [l.layer, l.overflow])).toEqual([[{ kind: 'global' }, { mode: 'strict', tier: 0, isDismissed: false }]])
-    expect(health.overflowOnlyLayers).toEqual([{ layer: { kind: 'workspace', workspacePath: WS }, overflow: { mode: 'strict', tier: 0, isDismissed: false } }])
-
-    // 项目有了自己的记忆就回到体检清单，不再单列
-    await h.store.create(w({ id: 'mem_w', name: '本项目一条' }))
-    const again = (await h.views()).health
-    expect(again.layers.find(l => l.layer.kind === 'workspace')!.overflow).toEqual({ mode: 'strict', tier: 0, isDismissed: false })
-    expect(again.overflowOnlyLayers).toEqual([])
   })
 
   it('复用治理评分：与 memory_health 同分；从没体检过 lastCheckupAt 为 null；有密钥的层不打分', async () => {
@@ -679,7 +660,7 @@ describe('健康视图', () => {
     if (tool.kind !== 'single') throw new Error(tool.kind)
     const ws = health.layers.find(l => l.layer.kind === 'workspace')!
     expect(ws).toMatchObject({ layer: { kind: 'workspace', workspacePath: WS }, totalMemories: 2, score: tool.score, lastCheckupAt: null })
-    expect(ws.issues).toEqual([{ type: 'expired', count: 1, level: 'advice' }])
+    expect(ws.issues).toEqual([{ type: 'expired', count: 1 }])
     const global = health.layers.find(l => l.layer.kind === 'global')!
     expect(global).toMatchObject({ score: null, gate: { secret: true }, issues: [{ type: 'secret', count: 1 }] })
   })
@@ -702,45 +683,6 @@ describe('健康视图', () => {
     // 冲突还须仍在待决账本里才计
     await h.decisions.upsert({ memoryIds: ['mem_r1', 'mem_u'], summary: '矛盾', fingerprint: 'h' }, 1)
   }
-  /** 一类扣分原因在待处理视图里以哪种条目出现。 */
-  const showsUp = (type: string) => (item: PendingItem): boolean =>
-    type === 'secret' ? item.kind === 'secret'
-      : type === 'malformed' ? item.kind === 'unreadable-file'
-        : type === 'conflict' ? item.kind === 'conflict-horizontal' || item.kind === 'conflict-vertical'
-          : item.kind === 'advice' && item.type === type
-
-  it('每条扣分原因带待处理里对应的组：密钥、读不出的文件在高优问题，冲突在待你处理，其余在建议整理', async () => {
-    const h = harness()
-    await seedEveryIssue(h)
-    const { health, pending } = await h.views()
-    expect(healthViewSchema.parse(health)).toEqual(health)
-    const ws = health.layers.find(l => l.layer.kind === 'workspace')!
-    expect(ws.issues.map(i => [i.type, i.level])).toEqual([
-      ['secret', 'must-fix'], ['expired', 'advice'], ['malformed', 'must-fix'],
-      ['conflict', 'your-call'], ['redundancy', 'advice'], ['misplaced', 'advice'], ['unclear', 'advice'],
-    ])
-    // 真正的不变式：每类扣分原因的条目确实在待处理视图里、且就在它标的那一组
-    for (const issue of ws.issues) {
-      const items = pending.items.filter(showsUp(issue.type))
-      expect({ type: issue.type, levels: [...new Set(items.map(i => i.level))] }).toEqual({ type: issue.type, levels: [issue.level] })
-    }
-  })
-
-  it('体检关闭：冲突与语义建议不在待处理里，这几类的组为 null；规则类照常带组', async () => {
-    const h = harness()
-    await seedEveryIssue(h)
-    const off = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
-    expect(healthViewSchema.parse(off.health)).toEqual(off.health)
-    const ws = off.health.layers.find(l => l.layer.kind === 'workspace')!
-    expect(ws.issues.map(i => [i.type, i.level])).toEqual([
-      ['secret', 'must-fix'], ['expired', 'advice'], ['malformed', 'must-fix'],
-      ['conflict', null], ['redundancy', null], ['misplaced', null], ['unclear', null],
-    ])
-    for (const issue of ws.issues) {
-      const levels = [...new Set(off.pending.items.filter(showsUp(issue.type)).map(i => i.level))]
-      expect({ type: issue.type, levels }).toEqual({ type: issue.type, levels: issue.level === null ? [] : [issue.level] })
-    }
-  })
   it('扣分来源：每层带规则检查、内容检查、新鲜度三项扣分和各项此刻有的问题类型；三项相加正好是 100 减分数，分数与 memory_health 相同', async () => {
     const h = harness()
     // 不放密钥（有密钥不打分），另加一条超过衰退期没确认的
@@ -964,6 +906,20 @@ describe('视图写入', () => {
     await nextTicks()
     expect(collects).toBe(1)
     expect((await listViews()).sort()).toEqual(Object.values(GUI_VIEW_FILES).sort())
+  })
+
+  it('PA-16 视图版本为 14，健康视图不含健康页拆掉后的残留字段', async () => {
+    expect(GUI_VIEW_VERSION).toBe(14)
+    const h = harness()
+    await h.store.create(w({ id: 'mem_old', name: '过期', validTo: EXPIRED_AT }))
+    await h.decisions.syncOverflow(WS, { mode: 'relax', tier: 1 }, T0, '超限')
+    await new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews(h.sourceDeps), ...noWait }).rewriteAll()
+    const health = await readView('health')
+    expect(health).not.toHaveProperty('overflowOnlyLayers')
+    for (const layer of health.layers) {
+      expect(Object.keys(layer).sort()).toEqual(['deductions', 'gate', 'ignored', 'issues', 'lastCheckupAt', 'layer', 'score', 'tier', 'totalMemories'])
+      for (const issue of layer.issues) expect(Object.keys(issue).sort()).toEqual(['count', 'type'])
+    }
   })
 
   it('卸载：同一 tick 内刚请求、还没开始的写入整批丢弃', async () => {

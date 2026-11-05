@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { memoryRecordSchema } from '../record-schema.ts'
-import { CHECKUP_CAUSE_KINDS, CHECKUP_INITIATORS, IGNORABLE_ADVICE_TYPES, MODEL_CHANGE_KINDS, OVERFLOW_MODES, type DirectoryNoteCode, type ScanNoteCode } from '../contract-codes.ts'
+import { CHECKUP_CAUSE_KINDS, CHECKUP_INITIATORS, DIRECTORY_NOTE_CODES, IGNORABLE_ADVICE_TYPES, MODEL_CHANGE_KINDS, OVERFLOW_MODES, SCAN_NOTE_CODES } from '../contract-codes.ts'
 
 /** 快照、最近删除的保留窗口（毫秒）：对话卡据此判断模型改写的改前版本是否已过期。 */
 export { RETENTION_MS } from '../retention.ts'
@@ -19,7 +19,7 @@ export { detectSecrets } from '../secrets.ts'
  */
 
 /** 视图 schema 的版本号：视图是派生缓存，形状变了就换号，客户端读到不认识的号按「需要刷新」处理。 */
-export const GUI_VIEW_VERSION = 13
+export const GUI_VIEW_VERSION = 14
 
 /** 视图文件所在目录（相对记忆根目录，POSIX 分隔）。 */
 export const GUI_VIEW_DIR = '.state/gui'
@@ -266,8 +266,6 @@ export const RESOLVE_VERDICTS = ['keep-left', 'keep-right', 'keep-both'] as cons
 /** 一项扣分：扣了多少分，包含哪些问题类型（扣 0 分时为空）。 */
 const deductionSchema = z.object({ points: z.number().nonnegative(), types: z.array(z.string()) })
 
-/** isDismissed：用户已忽略这条超限提醒（账本里已结），待处理里不再有它，健康页照列、不给「去处理 ›」。 */
-const overflowLevelSchema = z.object({ mode: z.enum(OVERFLOW_MODES), tier: z.number().int().nonnegative(), isDismissed: z.boolean() })
 export const healthLayerSchema = z.object({
   layer: layerRefSchema,
   totalMemories: z.number().int().nonnegative(),
@@ -275,22 +273,13 @@ export const healthLayerSchema = z.object({
   score: z.number().nullable(),
   tier: z.enum(['green', 'amber', 'red']),
   gate: z.object({ secret: z.boolean() }),
-  /**
-   * 非零的扣分原因计数（规则检查实时 + 内容检查取上次体检），type 取值见 governance/schema.ts FINDING_TYPES，按其顺序。
-   * level 是这类条目在待处理里所在的组，健康页「去处理 ›」按它定位，由服务端按类型写死；
-   * 这类条目此刻不在待处理里时为 null（体检关闭时冲突与语义建议不显示），不给「去处理 ›」。
-   * 超限、很久没确认不在 issues 里，它们的组由客户端按 PENDING_LEVEL_OF_KIND 取。
-   */
-  issues: z.array(z.object({ type: z.string(), count: z.number().int().positive(), level: z.enum(PENDING_LEVELS).nullable() })),
-  /** 超过衰退期未确认的条数。 */
-  staleCount: z.number().int().nonnegative(),
+  /** 非零的扣分原因计数（规则检查实时 + 内容检查取上次体检），type 取值见 governance/schema.ts FINDING_TYPES，按其顺序。 */
+  issues: z.array(z.object({ type: z.string(), count: z.number().int().positive() })),
   /**
    * 上次体检：本层最近一次体检完成记录的完成时间（规则检查和内容检查都写完才算）；还没有完成记录（升级前体检过）时
    * 暂取内容检查缓存的时间；从没体检过为 null。
    */
   lastCheckupAt: z.number().nullable(),
-  /** 本层会话带入的记忆超出上限（已忽略的也算，忽略只是不再提醒）；列为问题、不扣分。没超为 null。 */
-  overflow: overflowLevelSchema.nullable(),
   /**
    * 本层被用户忽略、没有计分的建议（issues 里已不含它们），按问题类型、再按第一条记忆名排；条数即长度。
    * memories 是涉及的记忆（内容重复两条，按 id 排序），名称与摘要已遮盖密钥；取消忽略按 type + 这些 id 发 unignore-advice。
@@ -313,18 +302,13 @@ export const healthViewSchema = z.object({
   /** 插件本次加载的时刻（epoch ms）：会话快照的 frozenAt 早于它就是「重启后未重新带入」；浏览器半侧拿不到宿主进程时间，从这里读。 */
   bootedAt: z.number().optional(),
   layers: z.array(healthLayerSchema),
-  /**
-   * 有超限提醒、但自己没有记忆因而不在 layers 里的项目（会话在这个项目里，带入的全是 global 记忆）：只列超限档位，
-   * 没有记忆可打分，不给分数与问题计数。按路径排序。可缺省：升级前写的视图文件没有，下次写视图补上。
-   */
-  overflowOnlyLayers: z.array(z.object({ layer: layerRefSchema, overflow: overflowLevelSchema })).optional(),
 })
 export type HealthView = z.infer<typeof healthViewSchema>
 
 // —— 全部记忆 ——
 
 export const directoryIssueSchema = z.object({
-  code: z.custom<DirectoryNoteCode>(v => typeof v === 'string'),
+  code: z.enum(DIRECTORY_NOTE_CODES),
   /** 涉及的文件或目录的绝对路径。 */
   path: z.string(),
   /** reserved-keys：被忽略的键。 */
@@ -549,7 +533,7 @@ export const checkupResultSchema = z.object({
   /** 宿主流 usage 块报的实际用量合计（同 scan 命令的 usageTokens）；宿主一次都没报时缺省。自动体检不经过会话，用量由插件自己记在这里。 */
   usageTokens: z.number().int().nonnegative().optional(),
   /** 说明码（如内容检查没做完 semantic-failed、分了批 semantic-batched、基线检查被跳过 baseline-missing），semantic-failed、model-unavailable 带原因。 */
-  notes: z.array(z.object({ code: z.custom<ScanNoteCode>(v => typeof v === 'string'), cause: checkupCauseSchema.optional() })),
+  notes: z.array(z.object({ code: z.enum(SCAN_NOTE_CODES), cause: checkupCauseSchema.optional() })),
 })
 export type CheckupResult = z.infer<typeof checkupResultSchema>
 
@@ -811,7 +795,7 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     /** model-info、draft-edit：借来的会话用的模型名；拿不到名字时缺省。 */
     model: z.string().optional(),
     /** scan：体检的说明码（如 baseline-session-scoped）。 */
-    notes: z.array(z.custom<ScanNoteCode>(v => typeof v === 'string')).optional(),
+    notes: z.array(z.enum(SCAN_NOTE_CODES)).optional(),
     /**
      * scan：本次新增的待处理项条数。新增 = 体检后有、体检前没有（按待处理项的身份比较，只看本次体检覆盖的层），
      * 不等于「体检查出来的」：体检期间别的会话写入引出的、时间推移刚越过「很久没确认」门槛的也算。

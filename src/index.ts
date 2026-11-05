@@ -134,7 +134,7 @@ export const inject = ['tools']
 type SessionLike = object & { header?: { id?: string; cwd?: string; delegationDepth?: number; parentSession?: string } }
 
 export async function apply(ctx: Context, config: Config) {
-  // 插件本次加载的时刻：健康视图带给浏览器半侧，判断冻结快照是否早于这次启动
+  // 插件本次加载的时刻：健康视图带给右侧栏，判断冻结快照是否早于这次启动
   const bootedAt = Date.now()
   // 类型表随 template / customTypes / scenes / removedPresetTypes 热更新重建；各处拿到的是转发到当前表的同一个对象。
   // 场景配置写错只警告（按通用或截断运行），不让插件加载失败

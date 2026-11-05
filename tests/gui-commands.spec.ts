@@ -3057,18 +3057,18 @@ describe('refresh-views', () => {
     }
   })
 
-  it('视图版本 13：开着旧页面的升级后，磁盘上旧版本（12）的全局视图和体检视图经 refresh-views 按新版本重新生成', async () => {
-    expect(GUI_VIEW_VERSION).toBe(13)
+  it('视图版本 14：开着旧页面的升级后，磁盘上旧版本（13）的全局视图和体检视图经 refresh-views 按新版本重新生成', async () => {
+    expect(GUI_VIEW_VERSION).toBe(14)
     const e = env()
     await seedPair(e)
     await mkdir(join(root, GUI_VIEW_DIR), { recursive: true })
-    for (const file of [...Object.values(GUI_VIEW_FILES), GUI_CHECKUP_VIEW_FILE]) await writeFile(join(root, GUI_VIEW_DIR, file), JSON.stringify({ version: 12 }))
+    for (const file of [...Object.values(GUI_VIEW_FILES), GUI_CHECKUP_VIEW_FILE]) await writeFile(join(root, GUI_VIEW_DIR, file), JSON.stringify({ version: 13 }))
     ok(await e.run({ cmd: 'refresh-views' }))
-    expect(pendingViewSchema.parse(await e.readView('pending')).version).toBe(13)
-    expect(healthViewSchema.parse(await e.readView('health')).version).toBe(13)
-    expect(libraryViewSchema.parse(await e.readView('library')).version).toBe(13)
-    expect(deletedViewSchema.parse(await e.readView('deleted')).version).toBe(13)
-    expect((await e.readCheckupView()).version).toBe(13)
+    expect(pendingViewSchema.parse(await e.readView('pending')).version).toBe(14)
+    expect(healthViewSchema.parse(await e.readView('health')).version).toBe(14)
+    expect(libraryViewSchema.parse(await e.readView('library')).version).toBe(14)
+    expect(deletedViewSchema.parse(await e.readView('deleted')).version).toBe(14)
+    expect((await e.readCheckupView()).version).toBe(14)
   })
 
   it('磁盘上是旧版（版本 4，没有建议整理）的待处理视图：按新版本重写，各级条数带上建议整理', async () => {

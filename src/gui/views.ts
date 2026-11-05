@@ -21,7 +21,7 @@ import {
   ADVICE_TYPES, GUI_VIEW_VERSION, PENDING_ITEM_KINDS, PENDING_LEVEL_OF_KIND, PENDING_LEVELS, SCOPE_KEYS, isAwaitingDecision, resolveAutoCheckup,
   pendingItemKey, pendingItemScopes, sameLayer,
   type AdviceType, type AutoCheckupFrequency, type CheckupAdded, type CheckupCause, type CheckupResult, type CheckupView, type DeletedView, type MemoryPromotion, type GlobalViewName, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCard,
-  type MemoryCommandResult, type ModelChange, type PendingItem, type PendingLevel, type PendingView, type SessionView,
+  type MemoryCommandResult, type ModelChange, type PendingItem, type PendingView, type SessionView,
 } from './contract.ts'
 
 /**
@@ -303,26 +303,8 @@ function typeOrder(registry: TypeRegistry, present: Iterable<string>): string[] 
   return [...scene, ...others]
 }
 
-/** 扣分原因在待处理里对应的组（按它在待处理里以哪种待处理项出现）：读不出的文件即隔离区的 malformed，冲突走账本，其余是建议整理。 */
-const ISSUE_LEVEL = {
-  secret: PENDING_LEVEL_OF_KIND['secret'],
-  malformed: PENDING_LEVEL_OF_KIND['unreadable-file'],
-  conflict: PENDING_LEVEL_OF_KIND['conflict-horizontal'],
-  expired: PENDING_LEVEL_OF_KIND['advice'],
-  bloat: PENDING_LEVEL_OF_KIND['advice'],
-  orphan: PENDING_LEVEL_OF_KIND['advice'],
-  redundancy: PENDING_LEVEL_OF_KIND['advice'],
-  misplaced: PENDING_LEVEL_OF_KIND['advice'],
-  unclear: PENDING_LEVEL_OF_KIND['advice'],
-} as const satisfies Record<FindingType, PendingLevel>
-
-/** 健康：每层复用 scoreLayer（与 memory_health / memory_scan 同分，同样剔除用户忽略的建议，另列在 ignored）；有密钥的层不打分。超限另列（不扣分）；
- *  自己没有记忆、不在体检清单里的项目有超限提醒时，单列进 overflowOnlyLayers（只有档位，不打分）。 */
+/** 健康：每层复用 scoreLayer（与 memory_health / memory_scan 同分，同样剔除用户忽略的建议，另列在 ignored）；有密钥的层不打分。 */
 export function buildHealthView(input: ViewInput): HealthView {
-  const overflow = [...input.open, ...input.settled].filter(e => kindOf(e) === 'overflow')
-  // 体检关闭时冲突与语义建议不进待处理（见 buildPendingView）：这几类没有去处
-  const levelOf = (type: FindingType): PendingLevel | null =>
-    !input.governanceEnabled && (type === 'conflict' || SEMANTIC_ADVICE_TYPES.has(type as AdviceType)) ? null : ISSUE_LEVEL[type]
   return {
     version: GUI_VIEW_VERSION,
     governanceEnabled: input.governanceEnabled,
@@ -335,19 +317,12 @@ export function buildHealthView(input: ViewInput): HealthView {
         score: r.health.gate.secret ? null : Math.round(r.health.score * 100) / 100,
         tier: r.health.tier,
         gate: r.health.gate,
-        issues: FINDING_TYPES.filter(t => r.health.counts[t] > 0).map(type => ({ type, count: r.health.counts[type], level: levelOf(type) })),
-        staleCount: r.health.freshness.staleCount,
+        issues: FINDING_TYPES.filter(t => r.health.counts[t] > 0).map(type => ({ type, count: r.health.counts[type] })),
         lastCheckupAt: r.lastCheckupAt,
-        overflow: overflowOfLayer(overflow, layer),
         ignored: ignoredOfLayer(r.ignored, input.data),
         deductions: deductionsOf(r.health),
       }
     }),
-    overflowOnlyLayers: [...new Set(overflow.map(overflowScopeOf))]
-      .filter((scope): scope is string => scope !== undefined && scope !== 'global'
-        && !input.healthLayers.some(l => l.kind === 'workspace' && l.path === scope))
-      .sort()
-      .map(path => ({ layer: { kind: 'workspace' as const, workspacePath: path }, overflow: overflowOfLayer(overflow, { kind: 'workspace', path })! })),
   }
 }
 
@@ -413,12 +388,6 @@ function ignoredOfLayer(ignored: readonly IgnoredAdvice[], data: LayerPreread): 
     }))
     .sort((a, b) => ADVICE_TYPES.indexOf(a.type) - ADVICE_TYPES.indexOf(b.type)
       || (a.memories[0]!.name < b.memories[0]!.name ? -1 : a.memories[0]!.name > b.memories[0]!.name ? 1 : 0))
-}
-
-/** 超限按会话所属项目记账（无项目的会话记在 global），与健康分层同口径。 */
-function overflowOfLayer(entries: readonly PendingDecision[], layer: LayerRef): HealthView['layers'][number]['overflow'] {
-  const e = entries.find(o => overflowScopeOf(o) === (layer.kind === 'global' ? 'global' : layer.path))
-  return e === undefined ? null : { ...overflowLevelOf(e), isDismissed: e.settled !== undefined }
 }
 
 /**
