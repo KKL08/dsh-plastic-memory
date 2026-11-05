@@ -181,7 +181,7 @@ export class SnapshotStore {
   async restore(
     snapshot: MemorySnapshot,
     ids: string[] | undefined,
-    put: (record: MemoryRecord, skipIf?: (current: MemoryRecord) => boolean) => Promise<boolean | void>,
+    put: (record: MemoryRecord, skipIf?: (current: MemoryRecord | undefined) => boolean) => Promise<boolean | void>,
     current: ReadonlyMap<string, MemoryRecord>,
     overwriteChanged: boolean | ((current: MemoryRecord) => boolean),
     discard: (record: MemoryRecord) => Promise<unknown>,

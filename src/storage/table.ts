@@ -29,6 +29,11 @@ export interface LocatedRecord { record: MemoryRecord; filePath: string; dir: st
 /** 定位结果：比 LocatedRecord 多带 extras（未知 frontmatter 键，写回时保留）。 */
 export interface LocatedFile extends LocatedRecord { extras: Record<string, unknown> }
 
+/** 位置即作用域（同 readLayer）：.archive/ 里 status 仍写着 active 的按 deleted 看。 */
+export function byPosition(found: LocatedFile): MemoryRecord {
+  return found.record.status === 'active' && dirname(found.filePath) !== found.dir ? { ...found.record, status: 'deleted' } : found.record
+}
+
 /** 多词关键词的匹配模式：all = 全部词项命中，any = 任一词项命中。 */
 export type KeywordMatch = 'all' | 'any'
 
@@ -102,8 +107,9 @@ export interface MemoryTable {
   create(record: MemoryRecord): Promise<void>
   /** 锁内 locate（hint 缺省取 value 自己的 workspace；跨 scope 搬家时调用方传原记录的 workspace，定位到的才是要搬的那份）→ 写；
    *  scope / workspacePath 变化时搬家删旧；status 离开 active 时文件进 .archive/，回到 active 搬回顶层。
-   *  skipIf：对锁内定位到的当前记录求值，为真就不写、返回 false（调用方锁外预读过的条件在这里按最新内容再判一次）。 */
-  put(key: string, value: MemoryRecord, hint?: LocateHint, skipIf?: (current: MemoryRecord) => boolean): Promise<boolean>
+   *  skipIf：对锁内定位到的当前记录求值（按位置看，同 byPosition；定位不到时传 undefined），为真就不写、返回 false
+   *  （调用方锁外预读过的条件在这里按最新内容再判一次）。 */
+  put(key: string, value: MemoryRecord, hint?: LocateHint, skipIf?: (current: MemoryRecord | undefined) => boolean): Promise<boolean>
   /** 锁内 locate（带 hint，同 id 多副本时与调用方读到的那份一致）→ fn(当前) → 写（同 put 的搬家与归档规则）；返回实际写出的记录（deleted 缺 deletedAt 时已补）。 */
   update(key: string, fn: (current: MemoryRecord) => MemoryRecord, hint?: LocateHint): Promise<MemoryRecord>
   /** 物理删除（含 .archive/ 里的文件）；hint 同 update。可见集合（global + 该记录目录）里同 id 的其余副本一并删除（只认层时只删该目录里的）。

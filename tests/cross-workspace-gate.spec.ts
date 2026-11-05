@@ -470,7 +470,7 @@ describe('memory_save update 的 cross-workspace 与 memory_source 的 forbidden
   const ctx = async () => ({ workspacePath: A as string | undefined, session: { id: 's', lastSeq: 1 } })
 
   it('memory_save / memory_source 的参数 schema 里没有 allowCrossWorkspace', () => {
-    const save = createSaveTool({ store: w.store, registry, resolveContext: ctx })
+    const save = createSaveTool({ store: w.store, snapshots: w.snapshots, registry, resolveContext: ctx })
     const source = createSourceTool({ store: w.store, resolveContext: ctx, getReadEvent: () => null })
     for (const tool of [save, source]) {
       const schema = schemaOf(tool) as { properties: Record<string, unknown> }
@@ -485,7 +485,7 @@ describe('memory_save update 的 cross-workspace 与 memory_source 的 forbidden
       action: 'update' as const, id: 'mem_b', name: '条目', type: 'knowledge', scope: 'workspace' as const,
       content: '改写', summary: '摘要', sourceMode: 'user-explicit' as const, allowCrossWorkspace: true,
     }
-    const r = await executeSave(args, exec, { store: w2.store, registry, resolveContext: ctx })
+    const r = await executeSave(args, exec, { store: w2.store, snapshots: w2.snapshots, registry, resolveContext: ctx })
     expect(r).toMatchObject({ kind: 'rejected', code: SAVE_CROSS })
     expect((await w2.store.get('mem_b'))!.content).toBe('原文')
   })

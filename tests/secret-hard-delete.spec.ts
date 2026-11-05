@@ -282,7 +282,7 @@ describe('密钥硬删', () => {
 
   it('save：critical 仍拒绝；suspected 拒绝并返回 secret-suspected，force: true 放行并保留警告；force 工具说明含「疑似密钥拦截」（后来又加了手改保护）', async () => {
     const store = new MemoryStore(new InMemoryTable())
-    const deps = { store, registry, workspacePath: WS, session: { id: 's', lastSeq: 1 } }
+    const deps = { store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), workspacePath: WS, session: { id: 's', lastSeq: 1 } }
 
     const critical = await runSavePipeline(candidate({ scope: 'workspace', content: `密钥 ${FAKE_SECRET.sk}` }), deps)
     expect(critical).toMatchObject({ kind: 'rejected', code: SECRET_CRITICAL })
@@ -304,7 +304,7 @@ describe('密钥硬删', () => {
     if (updated.kind !== 'updated') throw new Error(updated.kind)
     expect(updated.warnings?.map(w => w.code)).toEqual([SECRET_SUSPECTED_WARNING])
 
-    const tool = createSaveTool({ store, registry, resolveContext: async () => ({ workspacePath: WS, session: { id: 's', lastSeq: 1 } }) })
+    const tool = createSaveTool({ store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), resolveContext: async () => ({ workspacePath: WS, session: { id: 's', lastSeq: 1 } }) })
     const params = (tool.parameters as unknown as { properties: Record<string, { description?: string }> }).properties
     expect(params.force.description).toBe('跳过结构去重、疑似密钥拦截与手改保护（用户已确认）')
   })
@@ -319,7 +319,7 @@ describe('密钥硬删', () => {
   it('稳定码进 contract-codes，测试断常量不断文案', async () => {
     // RejectCode / WarningCode 两边都收 secret-suspected：不带 force 是拒绝码，带 force 是警告码
     const store = new MemoryStore(new InMemoryTable())
-    const deps = { store, registry, workspacePath: WS, session: { id: 's', lastSeq: 1 } }
+    const deps = { store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), workspacePath: WS, session: { id: 's', lastSeq: 1 } }
     const rejected = await runSavePipeline(candidate({ scope: 'workspace', summary: SUSPECTED_TEXT }), deps)
     if (rejected.kind !== 'rejected') throw new Error(rejected.kind)
     expect(rejected.code).toBe(SECRET_SUSPECTED_REJECT)

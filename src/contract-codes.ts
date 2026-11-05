@@ -6,13 +6,13 @@
 /** memory_save 拒存原因（pipeline.ts）。 */
 export type RejectCode =
   | 'unknown-type'      // 类型不在注册表
-  | 'target-missing'    // update 目标不存在或已删除
+  | 'target-missing'    // update 目标不存在或已删除；或这次保存期间被别处删掉、改写（内部子码 changed-after-read，见 pipeline.ts）
   | 'cross-workspace'   // update 指向其他 workspace 的记忆
   | 'no-workspace'      // 无工作目录的会话 create（无处归属）
   | 'schema-invalid'    // 字段校验失败
   | 'secret-critical'   // 明确厂商特征的密钥，拒存不落盘
   | 'secret-suspected'  // 疑似密钥（无厂商特征），未带 force 时拒存；用户确认后带 force: true 重发
-  | 'hand-edited'       // update 目标或同桶 supersedes 目标用户手改过，未带 force 时拒存；问过用户、同意后带 force: true 重发
+  | 'hand-edited'       // update 目标或同桶 supersedes 目标用户手改过，未带 force 时拒存；问过用户、同意后带 force: true 重发。这次保存期间才被手改的带 force 也拒（内部子码 changed-after-read）
   | 'validity-format'      // validFrom / validTo 不是 YYYY-MM-DD HH:mm 或 YYYY-MM-DD（validity.ts）
   | 'validity-nonexistent' // validFrom / validTo 的日期或时刻不存在（2 月 30 日、25:00）
   | 'validity-past'        // validTo 不晚于当前时间，存下即过期

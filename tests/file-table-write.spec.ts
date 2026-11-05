@@ -352,7 +352,7 @@ describe('写路径内核（锁内定位、排他占名、搬家与归档）', (
     const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
     const victim = wsRecord({ id: 'mem_victim', name: '待遗忘', content: '会被遗忘' })
     await t.create(victim)
-    const saveDeps = (id: string) => ({ store, registry, workspacePath: WS, session: { id, lastSeq: 3 } })
+    const saveDeps = (id: string) => ({ store, registry, snapshots, workspacePath: WS, session: { id, lastSeq: 3 } })
     const save = (sessionId: string, i: number) => runSavePipeline({
       action: 'create', name: `并发-${sessionId}`, type: 'knowledge', scope: 'workspace',
       content: `会话 ${sessionId} 第 ${i} 条`, summary: `${sessionId}-${i}`, tags: [], sourceMode: 'user-explicit', force: true,

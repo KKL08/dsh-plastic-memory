@@ -3,7 +3,7 @@ import { ConcurrentModificationError, RecordNotFoundError } from '../errors.ts'
 import { basename, dirname, join, relative } from 'node:path'
 import type { MemoryRecord } from '../record-schema.ts'
 import {
-  resolveDuplicates, pickLiveFirst,
+  byPosition, resolveDuplicates, pickLiveFirst,
   type MemoryTable, type MemoryLogger, type DirectoryNote, type QuarantineEntry, type LocatedFile, type LocatedRecord,
   type LocateHint, type ScopeReadOptions, type ScopeReadResult, type WorkspaceDirListing, type KeywordMatch,
 } from './table.ts'
@@ -696,10 +696,10 @@ export class FileTable implements MemoryTable {
     await this.locked(async () => { await this.persist(record.id, undefined, record) })
   }
 
-  async put(key: string, value: MemoryRecord, hint: LocateHint = { workspacePath: value.workspacePath }, skipIf?: (current: MemoryRecord) => boolean): Promise<boolean> {
+  async put(key: string, value: MemoryRecord, hint: LocateHint = { workspacePath: value.workspacePath }, skipIf?: (current: MemoryRecord | undefined) => boolean): Promise<boolean> {
     // put 是整条替换：值由调用方给定，重来时只换新的位置、附加字段与召回统计，不重算内容；skipIf 每轮按新读数重判
     return this.locked(() => this.withFreshLocate(key, hint, async prev => {
-      if (prev !== undefined && skipIf?.(prev.record)) return false
+      if (skipIf?.(prev && byPosition(prev))) return false
       // put 不承载召回统计（召回统计只住 .state/recall-stats.json，快照恢复不恢复它）。召回统计
       // 由 MemoryStore.markRecalled 直写侧表；prev 在时以侧表现值为准，restore 旧记录不回退 sidecar。
       const next = prev

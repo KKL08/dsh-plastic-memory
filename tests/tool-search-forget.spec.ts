@@ -30,7 +30,7 @@ async function seed(store: MemoryStore, content: string, confidence = 0.9) {
     action: 'create', name: content.slice(0, 6), type: 'knowledge', scope: 'workspace',
     content, summary: content.slice(0, 10),
     tags: [], sourceMode: 'user-explicit', confidence, force: true,
-  }, { store, registry, workspacePath: '/proj', session })
+  }, { store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), workspacePath: '/proj', session })
   if (r.kind !== 'saved') throw new Error(r.kind)
   return r.record
 }

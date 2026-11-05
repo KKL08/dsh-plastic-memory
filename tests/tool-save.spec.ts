@@ -15,6 +15,7 @@ function makeDeps(store = new MemoryStore(new InMemoryTable())): SaveToolDeps {
   return {
     store,
     registry,
+    snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
     resolveContext: async () => ({ workspacePath: '/proj', session: { id: 's1', lastSeq: 3 } }),
   }
 }

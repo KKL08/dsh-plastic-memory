@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util'
 import type { MemoryRecord, SourceMode } from './record-schema.ts'
 import type { CodedNote, RejectCode, WarningCode } from './contract-codes.ts'
 import { ALREADY_REVIEWED_REASON, CONFIDENCE_BY_SOURCE, NOT_DELEGATED_REASON, isPendingDelegated, memoryRecordSchema } from './record-schema.ts'
@@ -45,7 +46,13 @@ export type PipelineResult =
   | { kind: 'updated'; record: MemoryRecord; warnings?: SaveWarning[] }
   /** isFromSubagent：子 agent 撞上主档，改不了也不能 force，结果文案改为让它向委派方说明分歧。 */
   | { kind: 'duplicate-suspected'; existing: Array<{ id: string; summary: string }>; isFromSubagent?: true }
-  | { kind: 'rejected'; code: RejectCode; reason: string }
+  | { kind: 'rejected'; code: RejectCode; reason: string; subcode?: SaveRejectSubcode }
+
+/**
+ * 同一个拒绝码下再分的内部子码：只给测试和日志区分分支，不是工具契约的稳定标识符（稳定码见 contract-codes.ts）。
+ * changed-after-read：update 读到目标之后、写入之前，目标被别处改过或删掉了，这次没写。
+ */
+export type SaveRejectSubcode = 'changed-after-read'
 
 /** 保存成功但要提醒模型/用户的事：code 稳定、text 可改。 */
 export type SaveWarning = CodedNote<WarningCode>
@@ -118,6 +125,26 @@ const SUBAGENT_TYPES = ['knowledge', 'project']
 /** 每个子会话最多新建几条：配置项 subagent.maxSavesPerSession 的缺省值，工具说明照它写。 */
 export const SUBAGENT_MAX_SAVES_DEFAULT = 10
 
+/**
+ * update 写入那一刻发现目标在读到之后被改过：按目标此刻的样子回拒绝。原因会进模型上下文，当前内容按注入的口径遮明确密钥。
+ * 子 agent 照旧回 subagent-restricted、带回主会话；主会话目标此刻带手改标记的回 hand-edited，其余（删掉、被别的会话改写、
+ * 提升、取代）回 target-missing。
+ */
+function changedAfterRead(id: string, current: MemoryRecord | undefined, isFromSubagent: boolean): PipelineResult {
+  if (isFromSubagent) {
+    return { kind: 'rejected', code: 'subagent-restricted', reason: `记忆 ${id} 在读取之后被改过（可能已被接受、删除或提升为全局），这次没写；要改的内容带回主会话。` }
+  }
+  const subcode = 'changed-after-read'
+  if (current === undefined || current.status === 'deleted') {
+    return { kind: 'rejected', code: 'target-missing', subcode, reason: `更新目标 ${id} 在这次保存期间被删除了，未保存。` }
+  }
+  const masked = maskSecretSurface(current)
+  const shown = `记忆 ${id}（${masked.name}）在这次保存期间被改过，当前内容是：\n${masked.content}\n未保存。`
+  return current.handEdited
+    ? { kind: 'rejected', code: 'hand-edited', subcode, reason: `${shown}用户刚手改过它：先在对话里问用户要不要改写，用户同意后带 force: true 重发。` }
+    : { kind: 'rejected', code: 'target-missing', subcode, reason: `${shown}按当前内容重新组织要改的部分，再用 action=update 重发。` }
+}
+
 /** 子 agent 改不了这条记录的原因；是本会话创建、还没升档、还在本项目的返回 undefined。已删除的由调用处先拦。 */
 function notOwnPending(target: MemoryRecord, sessionId: string): string | undefined {
   if (target.delegation === undefined) return NOT_DELEGATED_REASON
@@ -126,6 +153,13 @@ function notOwnPending(target: MemoryRecord, sessionId: string): string | undefi
   if (target.scope !== 'workspace') return '已经提升为全局'
   if (target.status === 'superseded') return '已经被取代了'
   return undefined
+}
+
+/** 召回统计之外整条相等。update 锁内复核用：清候选标记、搬作用域这类改动不碰 updatedAt，也要算改过。 */
+function isSameRecord(a: MemoryRecord, b: MemoryRecord): boolean {
+  const { recallCount: _ra, lastRecalledAt: _la, ...restA } = a
+  const { recallCount: _rb, lastRecalledAt: _lb, ...restB } = b
+  return isDeepStrictEqual(restA, restB)
 }
 
 /**
@@ -201,9 +235,8 @@ export async function runSavePipeline(
     workspacePath: string | undefined
     /** turnStartSeq：触发本次保存的当轮 turn/start 事件 seq（绑定层机械回找），缺省 0（整会话兜底）。 */
     session: { id: string; lastSeq: number; turnStartSeq?: number }
-    /** 改写（update）、替代（supersedes）前拍快照用（快照先行，对齐 forget 的可恢复性）；缺省则跳过快照，
-     *  仅测试场景可缺省，生产接线必须传。 */
-    snapshots?: SnapshotStore
+    /** 改写（update）、替代（supersedes）前拍快照用（快照先行，对齐 forget 的可恢复性）。必填：漏接线时编译就报错，测试传内存实现。 */
+    snapshots: SnapshotStore
     /** 改写、替代后记一条已结清的撤销记录（对话卡、右侧栏据此显示与撤销）；要和 snapshots 一起给，缺省不记。 */
     decisions?: PendingDecisionsStore
     /** 这次 memory_save 的工具调用 id，记进撤销记录，对话卡按它认领。 */
@@ -271,18 +304,20 @@ export async function runSavePipeline(
   if ('code' in validity) return { kind: 'rejected', ...validity }
 
   // 本次要标 superseded 的旧记忆：目标必须与本次写入记录同桶——跨桶替代会绕过用户确认闸、无快照、无复活路径，
-  // 不同桶的目标跳过不置 superseded，仅给一条警告（见下方 6）。目标不存在维持静默跳过。
-  // 本次写入记录的桶此时已定：update 继承目标，create 落当前项目（global 已降级为候选）。
+  // 不同桶的目标跳过不置 superseded，仅给一条警告。目标不存在维持静默跳过；只替代在用的，已删除的留在最近删除、
+  // 照常过期清走，已被取代的原样不动。本次写入记录的桶此时已定：update 继承目标，create 落当前项目（global 已降级为候选）。
   const bucket = candidate.action === 'update'
     ? { scope: target!.scope, workspacePath: target!.workspacePath }
     : { scope, workspacePath: scope === 'workspace' ? deps.workspacePath : undefined }
   const sameBucket = (old: MemoryRecord) => old.scope === bucket.scope
     && (bucket.scope !== 'workspace' || old.workspacePath === bucket.workspacePath)
-  const supersedeIds = [...new Set(candidate.supersedes ?? [])]
   const replaced: MemoryRecord[] = []
-  for (const oldId of supersedeIds) {
+  let crossBucketSupersede = false
+  for (const oldId of new Set(candidate.supersedes ?? [])) {
     const old = await store.get(oldId, { workspacePath: deps.workspacePath })
-    if (old?.status === 'active' && old.id !== target?.id && sameBucket(old)) replaced.push(old)
+    if (old === undefined || old.id === target?.id) continue
+    if (!sameBucket(old)) crossBucketSupersede = true
+    else if (old.status === 'active') replaced.push(old)
   }
 
   // 手改保护：用户手改过的记忆不被模型悄悄覆盖或替代。和结构去重、疑似密钥同一个放行口（force），放在两者之前：
@@ -383,8 +418,9 @@ export async function runSavePipeline(
   }
 
   // 5. 写盘前 secret 检查：高危（明确厂商特征）直接拦截、不落盘；疑似拦下待确认，force 放行并保留警告。
-  // summary 进注入索引、name 进文件名、tags 进索引行——密钥藏在哪个字段都会外泄，四个面一起查。
-  const secretHits = detectSecrets(`${candidate.content}\n${candidate.name}\n${candidate.summary}\n${candidate.tags.join(' ')}`)
+  // summary 进注入索引、name 进文件名、tags 进索引行——密钥藏在哪个字段都会外泄，四个面一起查；
+  // supersedes 落进文件、体检的孤儿说明会把它引出来，一并查。
+  const secretHits = detectSecrets(`${candidate.content}\n${candidate.name}\n${candidate.summary}\n${candidate.tags.join(' ')}\n${(candidate.supersedes ?? []).join(' ')}`)
   const critical = secretHits.filter(h => h.severity === 'critical')
   if (critical.length > 0) {
     return {
@@ -407,7 +443,7 @@ export async function runSavePipeline(
   // 改写、替代前拍快照（快照先行）：forget 有 14 天快照，update 覆盖旧内容、supersedes 让旧记忆失效却无恢复手段是
   // 不对称的。global、workspace 目标都拍，改写的目标与要替代的旧记忆同拍一份；对话卡与右侧栏的「撤销修改」按它恢复。
   const changed = [...(candidate.action === 'update' ? [target!] : []), ...replaced]
-  const snapshot = changed.length > 0 && deps.snapshots
+  const snapshot = changed.length > 0
     ? await deps.snapshots.capture({
       operation: 'pre-update',
       description: candidate.action === 'update' ? `更新记忆 ${target!.id} 前` : `替代记忆 ${replaced.map(r => r.id).join('、')} 前`,
@@ -419,28 +455,32 @@ export async function runSavePipeline(
 
   const clean = pruneUndefined(parsed.data)
   // 新 id 不定位（create 排他占名）；update 走 put：锁内定位旧文件，scope 没变就原地覆盖。
-  // 子 agent 改写在锁内按最新读数重判归属：检查之后被接受、删除、提升的不写
+  // 锁内复核：读到目标之后它又被改过（召回统计之外有字段不同，按位置看已归档，或已不在可见集合里）就不写——界面直接改、
+  // 别的会话改写、删除、归档、提升、清候选标记夹在读和写之间时，整条替换会把它们盖掉。只删了本层、定位落到别层同 id 副本的，
+  // 作用域不同同样拦下。子 agent 改写的归属已按读到的目标判过，其间被接受、提升的在这里一并拦下
   if (candidate.action === 'create') await store.create(clean)
-  else if (!deps.delegation) await store.put(clean)
-  else if (!await store.put(clean, undefined, current => current.status !== 'active' || notOwnPending(current, session.id) !== undefined)) {
-    return { kind: 'rejected', code: 'subagent-restricted', reason: `记忆 ${clean.id} 在读取之后被改过（可能已被接受、删除或提升为全局），这次没写；要改的内容带回主会话。` }
+  else {
+    const seen: { current?: MemoryRecord } = {}
+    const isChangedSinceRead = (current: MemoryRecord | undefined) => {
+      seen.current = current
+      return current === undefined || !isSameRecord(current, target!)
+    }
+    if (!await store.put(clean, undefined, isChangedSinceRead)) return changedAfterRead(clean.id, seen.current, deps.delegation !== undefined)
   }
 
-  // 6. supersedes 处理：同桶目标置 superseded，跨桶的跳过并给警告（见上方 replaced）。
-  let crossBucketSupersede = false
+  // 6. supersedes 处理：读到时在用的同桶目标置 superseded（见上方 replaced）；锁内再看一次，其间被删除、被取代、
+  // 被改写或搬到别的桶的不动
   const superseded: MemoryRecord[] = []
-  for (const oldId of supersedeIds) {
-    const old = await store.get(oldId, { workspacePath: deps.workspacePath })
-    if (!old || old.id === clean.id) continue
-    if (!sameBucket(old)) {
-      crossBucketSupersede = true
-      continue
-    }
+  for (const old of replaced) {
     try {
-      await store.update(old, r => ({ ...r, status: 'superseded', updatedAt: now }))
-      if (replaced.some(r => r.id === old.id)) superseded.push(old)
+      await store.update(old, (r) => {
+        // 抛出即不写（同 updateIfLive）
+        if (r.status !== 'active' || r.updatedAt !== old.updatedAt || !sameBucket(r)) throw new RecordNotFoundError(r.id)
+        return { ...r, status: 'superseded', updatedAt: now }
+      })
+      superseded.push(old)
     } catch (err) {
-      if (!(err instanceof RecordNotFoundError)) throw err   // 读到之后被别处删掉：同目标不存在，静默跳过
+      if (!(err instanceof RecordNotFoundError)) throw err   // 读到之后被别处动过：静默跳过
     }
   }
 

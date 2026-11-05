@@ -52,7 +52,8 @@ export function runRuleScan(
       findings.push({
         type: 'orphan', layer: 'rule', severity: SEVERITY_BY_TYPE.orphan,
         memoryIds: [r.id],
-        summary: `supersedes 指向已删/不存在的记录：${orphanRefs.join('、')}`,
+        // 引用串原样来自文件（手建文件可能写进任何东西），按诊断口径遮
+        summary: maskDiagnostic(`supersedes 指向已删/不存在的记录：${orphanRefs.join('、')}`),
         suggestedAction: '用 memory_save 更新该记忆，移除失效的 supersedes 引用',
       })
     }

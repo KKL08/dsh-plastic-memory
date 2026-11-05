@@ -20,7 +20,9 @@ import { CheckupRecordStore, checkupKey } from '../src/governance/checkup-record
 import type { CheckupRecord } from '../src/storage/schema.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { PendingDecision, ScanCacheEntry } from '../src/governance/schema.ts'
+import { SECRET_MASK } from '../src/secrets.ts'
 import { record } from './helpers/record.ts'
+import { FAKE_SECRET } from './helpers/secrets.ts'
 
 function makeDeps(overrides?: Partial<ScanToolDeps>): ScanToolDeps {
   return {
@@ -179,6 +181,18 @@ describe('executeScan 单层模式', () => {
     // malformed 无对应记录，memoryIds 为空，不进 problemIds——mem_ok 仍算 clean
     expect(r.stats.clean).toBe(1)
     expect(r.stats.issues).toBe(1)
+  })
+
+  it('PA-13：手建文件的 supersedes 里写着密钥：孤儿说明遮盖它，扫描结果和渲染文字里都没有明文', async () => {
+    const { store } = await fileBackedStore({
+      [`${GLOBAL_DIR}/hand.md`]: encodeRecord(record({ id: 'mem_hand', supersedes: [FAKE_SECRET.sk, 'password=hunter2hunter2'] }), {}),
+    })
+    const r = await scanSingle({ layers: 'rule' }, makeDeps({ store }))
+    const orphan = r.findings.find(f => f.type === 'orphan')
+    expect(orphan?.summary).toContain(SECRET_MASK)
+    const shown = JSON.stringify(r) + renderScanResult(r)
+    expect(shown).not.toContain(FAKE_SECRET.sk)
+    expect(shown).not.toContain('hunter2hunter2')
   })
 
   it('layers=semantic 且无 llm 时如实说明未执行任何检测', async () => {

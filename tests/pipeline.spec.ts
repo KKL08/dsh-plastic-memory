@@ -21,7 +21,7 @@ const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const session = { id: 's1', lastSeq: 42 }
 
 function deps(store = new MemoryStore(new InMemoryTable())) {
-  return { store, registry, workspacePath: '/proj' as string | undefined, session }
+  return { store, registry, workspacePath: '/proj' as string | undefined, session, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()) }
 }
 
 describe('extractEntities', () => {
@@ -210,6 +210,29 @@ describe('runSavePipeline', () => {
     if (old.kind !== 'saved') throw new Error(old.kind)
     await runSavePipeline(candidate({ content: '完全不同的新说法', force: true, supersedes: [old.record.id] }), deps(store))
     expect((await store.get(old.record.id))!.status).toBe('superseded')
+  })
+
+  it('PA-01：替代目标里有已删除的：它仍是已删除、仍在最近删除、deletedAt 不变；同批在用的目标照常变成被取代', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    const gone = await runSavePipeline(candidate({ name: '删掉的', content: '删掉的说法' }), deps(store))
+    const live = await runSavePipeline(candidate({ name: '在用的', content: '在用的说法', force: true }), deps(store))
+    if (gone.kind !== 'saved' || live.kind !== 'saved') throw new Error('seed')
+    await store.softDelete(gone.record, { now: 1_000 })
+    const r = await runSavePipeline(candidate({ content: '完全不同的新说法', force: true, supersedes: [gone.record.id, live.record.id] }), deps(store))
+    expect(r.kind).toBe('saved')
+    expect(await store.get(gone.record.id)).toMatchObject({ status: 'deleted', deletedAt: 1_000 })
+    expect((await store.query({ status: ['deleted'] })).map(m => m.id)).toEqual([gone.record.id])
+    expect((await store.get(live.record.id))!.status).toBe('superseded')
+  })
+
+  it('PA-13：supersedes 里含高危密钥时拒存、不落盘；疑似密钥要 force', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    const critical = await runSavePipeline(candidate({ supersedes: [FAKE_SECRET.sk] }), deps(store))
+    expect(critical).toMatchObject({ kind: 'rejected', code: 'secret-critical' })
+    expect(await store.query({ status: ['active', 'superseded', 'deleted'] })).toEqual([])
+    const suspected = candidate({ supersedes: ['password=hunter2hunter2'] })
+    expect(await runSavePipeline(suspected, deps(store))).toMatchObject({ kind: 'rejected', code: 'secret-suspected' })
+    expect((await runSavePipeline({ ...suspected, force: true }, deps(store))).kind).toBe('saved')
   })
 
   // B1a：supersedes 目标必须与本次写入记录同桶
@@ -796,7 +819,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   const CHILD = { id: 'sess-child', lastSeq: 9, turnStartSeq: 4 }
   const delegation = { depth: 1, parentSessionId: 'sess-main', rootSessionId: 'sess-main', mode: 'one-shot' as const }
   const childDeps = (store = new MemoryStore(new InMemoryTable()), extra: object = {}) =>
-    ({ store, registry, workspacePath: '/proj' as string | undefined, session: CHILD, delegation, ...extra })
+    ({ store, registry, workspacePath: '/proj' as string | undefined, session: CHILD, delegation, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), ...extra })
   const childCandidate = (partial: object = {}) => candidate({
     type: 'knowledge', scope: 'workspace', sourceMode: 'environment-observed',
     name: '子观察', content: 'main 上 pnpm test 会挂', summary: 'main 测试会挂', ...partial,

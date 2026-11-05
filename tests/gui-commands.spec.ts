@@ -1224,7 +1224,7 @@ describe('提升候选与超限', () => {
   /** 真实路径：模型以 scope: global 保存 → 管线降级为本项目 + globalCandidate → 体检把它挂进账本 → 待处理视图里出现。 */
   async function seedCandidate(e: ReturnType<typeof env>) {
     const saved = await runSavePipeline(candidate({ name: '戊', content: '所有项目都用 vitest', summary: '都用 vitest' }), {
-      store: e.store, registry, workspacePath: SESSION_WS, session: { id: 'sess-1', lastSeq: 1 },
+      store: e.store, snapshots: e.snapshots, registry, workspacePath: SESSION_WS, session: { id: 'sess-1', lastSeq: 1 },
     })
     if (saved.kind !== 'saved') throw new Error(saved.kind)
     expect([saved.record.scope, saved.record.workspacePath, saved.record.globalCandidate]).toEqual(['workspace', SESSION_WS, true])
@@ -1292,7 +1292,7 @@ describe('提升候选与超限', () => {
     expect((await e.decisions.listSettled()).map(d => d.id)).toEqual([decisionId])
 
     const updated = await runSavePipeline(candidate({ action: 'update', id: memoryId, name: '戊', content: '所有项目都用 vitest，覆盖率不设门槛', summary: '都用 vitest' }), {
-      store: e.store, registry, workspacePath: SESSION_WS, session: { id: 'sess-1', lastSeq: 2 },
+      store: e.store, snapshots: e.snapshots, registry, workspacePath: SESSION_WS, session: { id: 'sess-1', lastSeq: 2 },
     })
     expect(updated.kind).toBe('updated')
     expect((await e.store.get(memoryId))!.globalCandidate).toBe(true)
@@ -1469,7 +1469,7 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
   /** 模型以 scope: global 新记一条：管线降级为本项目 + globalCandidate，不经体检，账本里什么都没有。 */
   async function saveCandidate(e: ReturnType<typeof env>, name = '戊', content = '所有项目都用 vitest') {
     const saved = await runSavePipeline(candidate({ name, content, summary: content }), {
-      store: e.store, registry, workspacePath: SESSION_WS, session: { id: 'sess-1', lastSeq: 1 },
+      store: e.store, snapshots: e.snapshots, registry, workspacePath: SESSION_WS, session: { id: 'sess-1', lastSeq: 1 },
     })
     if (saved.kind !== 'saved') throw new Error(saved.kind)
     expect(saved.record.globalCandidate).toBe(true)

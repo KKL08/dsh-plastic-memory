@@ -39,6 +39,7 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import { formatIndexLine } from '../src/index-line.ts'
 import { SnapshotCache } from '../src/runtime.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
+import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
 import { resolveHealthThresholds } from '../src/governance/health-presets.ts'
 import { executeSearch } from '../src/tools/search.ts'
@@ -224,6 +225,7 @@ try {
   const fileTable = new FileTable({ root, stats: sidecar.recallStats, formatIndexLine: fmtIndex, log: quietLog })
   const store = new MemoryStore(fileTable, quietLog, sidecar.recallStats)
   const decisions = new PendingDecisionsStore(sidecar.pending)
+  const snapshots = new SnapshotStore(sidecar.snapshots)
   const exec = { signal: new AbortController().signal } as ToolRunContext
   const session = { id: 'bench-session', lastSeq: 10, turnStartSeq: 5 }
   const resolveContext = async () => ({ workspacePath: currentWs, session })
@@ -267,7 +269,7 @@ try {
       const r = await executeSave({
         action: 'create', name: `bench-save-${round + 1}-${words[0]}`, type: 'knowledge', scope: 'workspace',
         content: words.join(' '), summary: words.slice(0, 2).join(' '), sourceMode: 'user-explicit',
-      }, exec, { store, registry, resolveContext })
+      }, exec, { store, registry, snapshots, resolveContext })
       if (r.kind !== 'saved') throw new Error(`memory_save 未落盘：${r.kind}`)
     }),
     await bench('memory_save（update）', async round => {
@@ -275,7 +277,7 @@ try {
       const r = await executeSave({
         action: 'update', id: target.id, name: target.name, type: target.type, scope: 'workspace',
         content: `${target.content}（第 ${round + 2} 次更新）`, summary: target.summary, sourceMode: 'user-explicit',
-      }, exec, { store, registry, resolveContext })
+      }, exec, { store, registry, snapshots, resolveContext })
       if (r.kind !== 'updated') throw new Error(`update 未落盘：${r.kind}`)
     }),
     await bench('memory_health 单层（当前项目）', async () => {

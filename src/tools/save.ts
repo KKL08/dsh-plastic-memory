@@ -23,8 +23,8 @@ export interface SaveToolDeps {
   store: MemoryStore
   registry: TypeRegistry
   resolveContext(exec: ToolRunContext): Promise<SaveContext>
-  /** 改写、替代前拍快照用（快照先行）；生产接线传入已有实例，测试可缺省。 */
-  snapshots?: SnapshotStore
+  /** 改写、替代前拍快照用（快照先行）；必填，测试传内存实现。 */
+  snapshots: SnapshotStore
   /** 改写、替代后记撤销记录（对话卡、右侧栏的「撤销修改」）；生产接线传入已有实例，测试可缺省。 */
   decisions?: PendingDecisionsStore
   /** 新建成功后调用（会话视图的 savedIds：右侧栏「这次新写入的」，接线在 index.ts）。 */
