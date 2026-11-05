@@ -64,10 +64,19 @@ export function hasCriticalSecret(r: SecretSurface): boolean {
   return detectSecrets(SECRET_FIELDS.map(f => fieldText(r, f)).join('\n')).some(h => h.severity === 'critical')
 }
 
-/** 命中密钥的字段。只在跨字段拼接时才命中（单个字段都不命中）的，四个面全算命中。 */
+/**
+ * 命中密钥的字段（两级都算，同 hasSecret）：自身命中的，加上被跨字段命中区间覆盖到的。区间与 maskSecretSurface 同一套算法。
+ * 区间落不进任何字段、却仍判为含密钥时（兜底），四个面全算命中。
+ */
 export function secretFields(r: SecretSurface): SecretField[] {
-  const hit = SECRET_FIELDS.filter(f => detectSecrets(fieldText(r, f)).length > 0)
-  return hit.length === 0 && hasSecret(r) ? [...SECRET_FIELDS] : hit
+  const { segments, starts, spans } = surfaceSpans(r, { severity: 'suspected' })
+  const hit = new Set<SecretField>()
+  segments.forEach((segment, i) => {
+    const from = starts[i]
+    const to = from + segment.length
+    if (spans.some(([a, b]) => a < to && b > from)) hit.add(SECRET_FIELDS[Math.min(i, 3)])   // 第 4 段起都是标签
+  })
+  return hit.size === 0 && hasSecret(r) ? [...SECRET_FIELDS] : SECRET_FIELDS.filter(f => hit.has(f))
 }
 
 /** 注入时遮盖命中片段用的占位文本。 */
@@ -136,11 +145,12 @@ export function maskDiagnostic(text: string): string {
 }
 
 /**
- * 四个面按片段遮盖。先按单个字段找命中、各遮各的；再在与 hasSecret 同口径的拼接文本上找起点不在任何字段自身命中里的
- * 区间（跨字段拼接才命中的），各字段落在区间里的部分各换一个占位。字段内起头、一路延伸到文本末尾的命中
- * （截断的私钥）因此只遮到本字段末尾。没有命中原样返回同一个对象。
+ * 四个面的命中区间，坐标在与 hasSecret 同口径的拼接文本上。先按单个字段找命中；再在拼接文本上找没有整段落在某个字段自身命中里的
+ * 区间（跨字段拼接才命中、或从字段自身命中延伸进下一个字段的，如 BEGIN 行在 name、正文在 summary 的私钥）。
+ * 截断的私钥后面的字段恰好像正文行时会被一并遮住，宁多遮不漏。
+ * segments 依次是正文、name、summary 和每个标签，starts 是各段在拼接文本里的起点。
  */
-export function maskSecretSurface<T extends SecretSurface>(r: T, opts: MaskOptions = {}): T {
+function surfaceSpans(r: SecretSurface, opts: MaskOptions): { text: string; segments: string[]; starts: number[]; spans: Span[] } {
   const segments = [r.content, r.name, r.summary, ...r.tags]
   const starts: number[] = []
   let text = ''
@@ -150,8 +160,13 @@ export function maskSecretSurface<T extends SecretSurface>(r: T, opts: MaskOptio
     text += segment
   })
   const own = segments.flatMap((segment, i) => secretSpans(segment, opts).map(([a, b]): Span => [starts[i] + a, starts[i] + b]))
-  const cross = rawSpans(text, opts).filter(([a]) => !own.some(([start, end]) => a >= start && a < end))
-  const spans = mergeSpans([...own, ...cross])
+  const cross = rawSpans(text, opts).filter(([a, b]) => !own.some(([start, end]) => a >= start && b <= end))
+  return { text, segments, starts, spans: mergeSpans([...own, ...cross]) }
+}
+
+/** 四个面按片段遮盖：各字段落在命中区间（见 surfaceSpans）里的部分各换一个占位。没有命中原样返回同一个对象。 */
+export function maskSecretSurface<T extends SecretSurface>(r: T, opts: MaskOptions = {}): T {
+  const { text, segments, starts, spans } = surfaceSpans(r, opts)
   if (spans.length === 0) return r
   const [content, name, summary, ...tags] = segments.map((segment, i) => maskRange(text, spans, starts[i], starts[i] + segment.length))
   return { ...r, content, name, summary, tags }

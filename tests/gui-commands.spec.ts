@@ -225,6 +225,64 @@ describe('resolve 与 undo', () => {
     expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
   })
 
+  it('PA-11 败方不含密钥：照旧软删、记快照、可撤销；本次条目留在账本里，别的引用败方的条目清掉', async () => {
+    const e = env()
+    const entry = await seedPair(e)
+    await e.store.create(record({ id: 'mem_c', name: '丙', content: '用 yarn' }))
+    const other = (await e.decisions.upsert({ memoryIds: ['mem_b', 'mem_c'], summary: '另一条', fingerprint: 'fp-bc' }, 2)).entry
+
+    const body = ok(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' }))
+
+    expect(body.isHardDeleted).toBeUndefined()
+    expect(body.snapshotId).toBeDefined()
+    expect((await e.store.get('mem_b'))!.status).toBe('deleted')
+    expect((await e.decisions.listSettled()).map(d => [d.id, d.settled?.snapshotId])).toEqual([[entry.id, body.snapshotId]])
+    expect((await allEntries(e)).map(d => d.id)).not.toContain(other.id)
+    ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+    expect((await e.store.get('mem_b'))!.status).toBe('active')
+  })
+
+  it('PA-11 败方含密钥：物理删除、所有快照里已脱敏、不在最近删除；结果标明彻底删除，条目移出账本、没有撤销', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_a', name: '甲', content: '用 pnpm' }))
+    await e.store.create(record({ id: 'mem_b', name: '乙', content: `用 npm，token ${FAKE_SECRET.sk}` }))
+    const entry = (await e.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', fingerprint: 'fp-ab' }, 1)).entry
+    const earlier = await executeSnapshotTool({ action: 'create', memoryIds: ['mem_b'] }, { workspacePath: SESSION_WS }, { store: e.store, snapshots: e.snapshots })
+    if (earlier.kind !== 'created') throw new Error(earlier.kind)
+
+    const body = ok(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' }))
+
+    expect(body.isHardDeleted).toBe(true)
+    expect(body.snapshotId).toBeUndefined()
+    expect(await e.store.get('mem_b')).toBeUndefined()
+    expect((await e.store.get('mem_a'))!.status).toBe('active')
+    const snapshots = await e.snapshots.list()
+    expect(snapshots.length).toBeGreaterThan(1)
+    for (const snap of snapshots) {
+      expect(JSON.stringify(snap)).not.toContain(FAKE_SECRET.sk)
+      expect(snap.data.find(r => r.id === 'mem_b')!.redacted).toBe(true)
+    }
+    expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
+    expect(await allEntries(e)).toEqual([])
+    expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('not-found')
+  })
+
+  it('PA-11 败方只含疑似密钥（用户确认存下的）：照常软删、记快照、可撤销', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_a', name: '甲', content: '用 pnpm' }))
+    await e.store.create(record({ id: 'mem_b', name: '乙', content: '用 npm，password: TESTONLY99' }))
+    const entry = (await e.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', fingerprint: 'fp-ab' }, 1)).entry
+
+    const body = ok(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' }))
+
+    expect(body.isHardDeleted).toBeUndefined()
+    expect(body.snapshotId).toBeDefined()
+    expect((await e.store.get('mem_b'))!.status).toBe('deleted')
+    expect((await e.decisions.listSettled()).map(d => d.id)).toEqual([entry.id])
+    ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+    expect((await e.store.get('mem_b'))!.content).toBe('用 npm，password: TESTONLY99')
+  })
+
   it('垂直 keep-right（以基线为准）：删记忆；undo 后记忆回来、冲突回到待处理', async () => {
     const e = env()
     const entry = await seedVertical(e)
@@ -3921,6 +3979,24 @@ describe('migrate-type', () => {
     expect((await e.store.get('mem_k'))?.status).toBe('active')
     const deleted = deletedViewSchema.parse(await e.readView('deleted'))
     expect(deleted.items.map(i => i.memory.id).sort()).toEqual(['mem_g', 'mem_o'])
+  })
+
+  it('PA-03 forget：收集完要删的 id 之后其中一条被改成别的类型：这条不被软删，其余照删', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_a', type: 'client' }))
+    await e.store.create(record({ id: 'mem_b', type: 'client' }))
+    // 删到 mem_b 时（锁外的定位已经做完），另一个会话先把它改成别的类型
+    const softDelete = e.store.softDeleteUnlessSecret.bind(e.store)
+    e.store.softDeleteUnlessSecret = (async (r, ...rest) => {
+      if (r.id === 'mem_b') await e.store.update(r, cur => ({ ...cur, type: 'knowledge' }))
+      return softDelete(r, ...rest)
+    }) as typeof e.store.softDeleteUnlessSecret
+
+    const body = ok(await e.run({ cmd: 'migrate-type', from: 'client', action: 'forget' }))
+
+    expect(body.migrated).toBe(1)
+    expect((await e.store.get('mem_a'))?.status).toBe('deleted')
+    expect(await e.store.get('mem_b')).toMatchObject({ status: 'active', type: 'knowledge' })
   })
 
   it('部分记忆没改成时回 failed，已改的照样重写视图', async () => {

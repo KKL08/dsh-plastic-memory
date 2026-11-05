@@ -63,6 +63,32 @@ describe('ConflictRuling', () => {
   })
 })
 
+describe('ConflictRuling 败方含密钥', () => {
+  const advice = (container: HTMLElement) => container.querySelector('.pm-conflict-buttons')!.previousElementSibling
+
+  it('PA-11 B 含密钥：以 A 为准那一句写 B 将彻底删除、不可恢复，以 B 为准照旧可恢复', () => {
+    const { container } = renderInShell(<ConflictRuling layout="narrow" left={left} right={{ ...right, hasSecret: true }} now={NOW} onRule={() => {}} />)
+    expect(advice(container)).toHaveTextContent('以 A 为准，B 含密钥，将彻底删除、不可恢复；以 B 为准会删掉 A，14 天内可恢复。')
+  })
+
+  it('PA-11 A 含密钥：以 B 为准那一句写 A 将彻底删除、不可恢复', () => {
+    const { container } = renderInShell(<ConflictRuling layout="wide" left={{ ...left, hasSecret: true }} right={right} now={NOW} onRule={() => {}} />)
+    expect(advice(container)).toHaveTextContent('以 A 为准会删掉 B，14 天内可恢复；以 B 为准，A 含密钥，将彻底删除、不可恢复。')
+  })
+
+  it('PA-11 两条都含密钥：不管以哪条为准，另一条都将彻底删除、不可恢复', () => {
+    const { container } = renderInShell(<ConflictRuling layout="narrow" left={{ ...left, hasSecret: true }} right={{ ...right, hasSecret: true }} now={NOW} onRule={() => {}} />)
+    expect(advice(container)).toHaveTextContent('不管以哪条为准，另一条都将彻底删除、不可恢复')
+    expect(advice(container)).not.toHaveTextContent('14 天内可恢复')
+  })
+
+  it('PA-11 基线冲突里记忆含密钥：以基线为准，它将彻底删除、不可恢复', () => {
+    const { container } = renderInShell(<VerticalConflictRuling layout="narrow" memory={{ ...left, hasSecret: true }} baselineRef="AGENTS.md：用 pnpm" now={NOW} onRule={() => {}} />)
+    expect(advice(container)).toHaveTextContent('以基线为准，它将彻底删除、不可恢复')
+    expect(advice(container)).not.toHaveTextContent('14 天内可恢复')
+  })
+})
+
 describe('VerticalConflictRuling', () => {
   it('写明基线不会被删除和基线出处；「以基线为准」= keep-right、「保留这条记忆」= keep-left', () => {
     const onRule = vi.fn()

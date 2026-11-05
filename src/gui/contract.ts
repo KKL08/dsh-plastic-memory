@@ -803,6 +803,8 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
      * 下次体检同一对还会报，也没有可撤销的条目。
      */
     isUnrecorded: z.literal(true).optional(),
+    /** resolve 删一方：败方含高危密钥，已物理删除、不可恢复，条目已移出账本，没有可撤销的条目。 */
+    isHardDeleted: z.literal(true).optional(),
     /** draft-edit：模型给的改后稿。 */
     draft: memoryDraftSchema.optional(),
     /** model-info、draft-edit：借来的会话用的模型名；拿不到名字时缺省。 */

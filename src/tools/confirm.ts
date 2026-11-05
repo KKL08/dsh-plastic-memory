@@ -1,16 +1,20 @@
-import type { MemoryStore } from '../store.ts'
+import type { MemoryLogger, MemoryStore } from '../store.ts'
 import { conflictFingerprint, kindOf, verdictLoser, type PendingDecisionsStore } from '../governance/decisions.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
 import { ALREADY_REVIEWED_REASON, NOT_DELEGATED_REASON, isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
 import type { AcceptRejectCode, DecisionRejectCode, GovernanceRejectCode } from '../contract-codes.ts'
 import { RecordNotFoundError } from '../errors.ts'
 import { crossWorkspaceNote, gateRecords, locateCopy, type CopyTarget, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
+import { executeForget } from './forget.ts'
+import { hasCriticalSecret } from '../secrets.ts'
 
 export interface ConfirmToolDeps {
   store: MemoryStore
   decisions: PendingDecisionsStore
   snapshots: SnapshotStore
   now?: () => number
+  /** 日志注入口（裁决删败方走 forget，它记删除日志），缺省回退 console。 */
+  log?: MemoryLogger
 }
 
 /** allowCrossWorkspace：用户明确选择「全局整理」时才为 true，放行其他项目的记录（见 workspace-gate.ts）。 */
@@ -30,6 +34,7 @@ export interface ConfirmOptions {
 /**
  * otherWorkspaces：带参数放行、属于其他项目的记录；error 带 code 时 rejected 列出被拒记录。
  * isUnrecorded：两边都留，但条目没有指纹、也现算不出（垂直冲突缺基线，或记忆属于别的项目、会话的基线不是它的），结论没记下，条目已移出账本。
+ * isHardDeleted：败方含高危密钥，已物理删除、不可恢复，条目已移出账本，没有撤销。
  */
 export type ConfirmResult =
   | SettleResult
@@ -39,7 +44,10 @@ export type ConfirmResult =
 /** refresh、resolve 的结果，不带 accept-subagent 的拒绝码（GUI 只调这两个动作）。 */
 export type SettleResult =
   | { kind: 'refreshed'; memoryId: string; lastConfirmedAt: number; otherWorkspaces: OtherWorkspaceMark[]; message: string }
-  | { kind: 'resolved'; decisionId: string; verdict: string; actions: string[]; alsoCleared: number; otherWorkspaces: OtherWorkspaceMark[]; isUnrecorded?: true; message: string }
+  | {
+    kind: 'resolved'; decisionId: string; verdict: string; actions: string[]; alsoCleared: number; otherWorkspaces: OtherWorkspaceMark[]
+    isUnrecorded?: true; isHardDeleted?: true; message: string
+  }
   | ConfirmError<GovernanceRejectCode | DecisionRejectCode>
 
 type ConfirmError<C extends string> = { kind: 'error'; code?: C; rejected?: CrossWorkspaceRejection[]; message: string }
@@ -199,22 +207,31 @@ async function resolveClaimed(
   const actions: string[] = []
   let alsoCleared = 0
   let isUnrecorded = false
+  let isHardDeleted = false
   if (vertical && args.verdict === 'keep-left') actions.push(`保留记忆 ${entry.memoryIds[0]}（用户确认 override ${entry.baselineRef}）`)
 
   if (toDelete && toDelete.status !== 'deleted') {
-    // 先存快照再软删，误操作可以恢复
-    const snapshot = await deps.snapshots.capture({
-      operation: 'pre-resolve',
-      description: `裁决冲突 ${entry.id}（${args.verdict}）删除败方前`,
-      records: [toDelete],
-    }, now)
-    await deps.store.softDelete(toDelete)
-    actions.push(`已删除败方记忆 ${toDelete.id}（快照 ${snapshot.id}）`)
-    // 条目标 settled 留在账本里并记下快照 id，供撤销（撤销 = 去掉 settled、按快照恢复败方）
-    await deps.decisions.settle(entry.id, args.verdict, now, { snapshotId: snapshot.id })
-    // 该记忆的一方已被删除，可能还挂在其他待决项上——这些冲突已无法再裁决，一并清理（当前条目除外，
-    // 返回值只统计"额外"清理的条目）。但不能悄悄发生：把清理数量报进 actions，让用户知道有条目被顺带处理
-    alsoCleared = await deps.decisions.removeByMemoryIds([toDelete.id], entry.id)
+    // 走 forget 的同一条路：先拍快照；含高危密钥的物理删除、所有快照里脱敏，其余（含只有疑似密钥的，用户存的时候确认过）软删、误操作可以恢复。
+    // 该记忆的一方删掉后，可能还挂在其他待决项上——这些冲突已无法再裁决，forget 一并清理（本次条目留着，
+    // clearedDecisions 只统计「额外」清理的条目）。但不能悄悄发生：把清理数量报进 actions，让用户知道有条目被顺带处理
+    const forgot = await executeForget(
+      { ids: [toDelete.id], reason: `裁决冲突 ${entry.id}（${args.verdict}）删除败方`, allowCrossWorkspace: args.allowCrossWorkspace },
+      context, { ...deps, now: () => now }, { keepDecisionId: entry.id, operation: 'pre-resolve', isSecret: hasCriticalSecret },
+    )
+    if (!forgot.forgotten.includes(toDelete.id)) {
+      return { kind: 'error', message: `败方记忆 ${toDelete.id} 没有删掉：${forgot.message}待决项 ${entry.id} 保留在账本里，可以重试。` }
+    }
+    alsoCleared = forgot.clearedDecisions
+    if (forgot.hardDeleted.includes(toDelete.id)) {
+      // 物理删除撤不回来：条目不留，界面上也不给撤销
+      isHardDeleted = true
+      await deps.decisions.remove(entry.id)
+      actions.push(`败方记忆 ${toDelete.id} 含高危密钥，已物理删除，不进 14 天回收、不可恢复，快照里的副本已脱敏；请轮换泄漏的凭证`)
+    } else {
+      actions.push(`已删除败方记忆 ${toDelete.id}（快照 ${forgot.snapshotId}）`)
+      // 条目标 settled 留在账本里并记下快照 id，供撤销（撤销 = 去掉 settled、按快照恢复败方）
+      await deps.decisions.settle(entry.id, args.verdict, now, { snapshotId: forgot.snapshotId! })
+    }
     if (alsoCleared > 0) {
       actions.push(`另清理 ${alsoCleared} 条同样引用该记忆的待决冲突（其一方已删除，无法再裁决）`)
     }
@@ -232,7 +249,8 @@ async function resolveClaimed(
   }
 
   return {
-    kind: 'resolved', decisionId: entry.id, verdict: args.verdict, actions, alsoCleared, otherWorkspaces, ...(isUnrecorded ? { isUnrecorded: true as const } : {}),
+    kind: 'resolved', decisionId: entry.id, verdict: args.verdict, actions, alsoCleared, otherWorkspaces,
+    ...(isUnrecorded ? { isUnrecorded: true as const } : {}), ...(isHardDeleted ? { isHardDeleted: true as const } : {}),
     message: `冲突已裁决（${args.verdict}）：${actions.join('；')}${crossWorkspaceNote([], otherWorkspaces)}`,
   }
 }

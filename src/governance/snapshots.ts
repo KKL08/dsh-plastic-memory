@@ -68,15 +68,30 @@ const maskDescription = (text: string) => maskSecrets(text, { severity: 'suspect
  * 记忆快照：只管记忆数据的可恢复性，操作审计走 dsh session log。
  * 只存受影响记录，非全量。
  */
+export interface SnapshotStoreOptions {
+  /**
+   * 给定记录里此刻已不在盘上（被彻底删除）的那些。给了它，capture 落盘后复核（见 capture）；
+   * 接线层传 goneCopies(store)，测试里不关心并发的可以不给。
+   */
+  findGone?: (records: readonly SnapshotRecord[]) => Promise<ReadonlySet<SnapshotRecord>>
+}
+
 export class SnapshotStore {
   private table: KvTable<MemorySnapshot>
-  /** redact / purge 是整快照的读改写，进程内串行，否则两次并发改写会把对方抹掉的内容写回。 */
+  private findGone: SnapshotStoreOptions['findGone']
+  /** redact / purge / 落盘复核是整快照的读改写，进程内串行，否则两次并发改写会把对方抹掉的内容写回。 */
   private rewriteChain: Promise<void> = Promise.resolve()
 
-  constructor(table: KvTable<MemorySnapshot>) {
+  constructor(table: KvTable<MemorySnapshot>, options: SnapshotStoreOptions = {}) {
     this.table = table
+    this.findGone = options.findGone
   }
 
+  /**
+   * 拍快照。记录是调用方先前读的：读完到落盘之间，别的会话、进程可能彻底删除了其中一条，它先脱敏盘上所有快照、再删文件，
+   * 扫的时候这份还没落盘。所以落盘后按 findGone 复核，已经不在的在这份里脱敏（redactRecord）。
+   * 对方扫在这份落盘之前、删文件又在这边复核之后的，由彻底删除那一方删完再扫一遍兜住（tools/forget.ts）。
+   */
   async capture(
     input: { operation: MemorySnapshot['operation']; description: string; records: SnapshotRecord[] },
     now: number,
@@ -90,6 +105,8 @@ export class SnapshotStore {
       data: input.records,
     }
     await this.table.put(snapshot.id, snapshot)
+    const findGone = this.findGone
+    if (findGone !== undefined) await this.serialize(() => this.redactGoneNow(snapshot.id, findGone))
     await this.sweep(now)  // 顺手清理超窗口的旧快照
     return snapshot
   }
@@ -139,6 +156,20 @@ export class SnapshotStore {
     const run = this.rewriteChain.then(task)
     this.rewriteChain = run.catch(() => {})
     return run
+  }
+
+  /**
+   * 读盘上这份快照，已不在盘上的记录脱敏后写回；没有要脱敏的不写。写回的是复核前读到的那份：复核期间别的进程彻底删除了其中
+   * 另一条、已把它在盘上脱敏，会被这次写回盖成明文，所以写回后重读再查，直到没有新的要脱敏。
+   */
+  private async redactGoneNow(id: string, findGone: NonNullable<SnapshotStoreOptions['findGone']>): Promise<void> {
+    for (;;) {
+      const snap = await this.table.get(id)
+      if (snap === undefined) return
+      const gone = await findGone(snap.data.filter(r => r.redacted !== true))
+      if (gone.size === 0) return
+      await this.table.put(id, { ...snap, data: snap.data.map(r => (gone.has(r) ? redactRecord(r) : r)) })
+    }
   }
 
   private async redactNow(isHit: (r: SnapshotRecord) => boolean): Promise<void> {

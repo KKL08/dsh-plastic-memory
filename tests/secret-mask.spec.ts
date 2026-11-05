@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { detectSecrets, maskSecrets, maskSecretSurface, SECRET_MASK, hasSecret } from '../src/secrets.ts'
+import { detectSecrets, maskSecrets, maskSecretSurface, SECRET_MASK, hasSecret, secretFields } from '../src/secrets.ts'
 import { FAKE_SECRET, generatePrivateKeyPem } from './helpers/secrets.ts'
 
 describe('maskSecrets：只换命中片段', () => {
@@ -161,6 +161,24 @@ describe('PEM 私钥块：从 BEGIN 到对应的 END 整块遮住', () => {
     const truncated = pem.split('\n').slice(0, 2).join('\n')
     const r = { content: `私钥 ${truncated}`, name: '部署机', summary: '认证头 Bearer', tags: ['TESTONLYabcdefghijklmnop', '运维'] }
     expect(maskSecretSurface(r)).toEqual({ content: `私钥 ${SECRET_MASK}`, name: '部署机', summary: `认证头 ${SECRET_MASK}`, tags: [SECRET_MASK, '运维'] })
+  })
+
+  it('PA-12 BEGIN 行在 name、正文和 END 行在 summary：两处都遮，summary 里不剩私钥正文', () => {
+    const [begin, ...rest] = pem.split('\n')
+    const r = { content: '部署说明', name: begin, summary: rest.join('\n'), tags: ['ssh'] }
+    const masked = maskSecretSurface(r)
+    for (const line of bodyLines) expect(JSON.stringify(masked)).not.toContain(line)
+    expect(masked).toMatchObject({ content: '部署说明', name: SECRET_MASK, tags: ['ssh'] })
+    expect(secretFields(r)).toEqual(['name', 'summary'])
+  })
+
+  it('PA-12 secretFields：自身命中的字段加上跨字段区间覆盖到的字段，别的字段不算；疑似级也算', () => {
+    const truncated = pem.split('\n').slice(0, 2).join('\n')
+    expect(secretFields({ content: `私钥 ${truncated}`, name: '部署机', summary: '认证头 Bearer', tags: ['TESTONLYabcdefghijklmnop', '运维'] }))
+      .toEqual(['content', 'summary', 'tags'])
+    expect(secretFields({ content: '干净正文', name: '数据库', summary: '认证头 Bearer', tags: ['TESTONLYabcdefghijklmnop'] })).toEqual(['summary', 'tags'])
+    expect(secretFields({ content: '干净正文', name: '数据库', summary: 'api_key: TESTONLY0000000000000', tags: [] })).toEqual(['summary'])
+    expect(secretFields({ content: '干净正文', name: '数据库', summary: '没有密钥', tags: [] })).toEqual([])
   })
 
   it('maskSecretSurface：正文里的私钥整块遮住，其他字段不动', () => {

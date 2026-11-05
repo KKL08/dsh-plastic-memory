@@ -6,6 +6,7 @@ import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
 import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
 import { record } from './helpers/record.ts'
+import { FAKE_SECRET } from './helpers/secrets.ts'
 
 function makeDeps(): ConfirmToolDeps {
   return {
@@ -83,6 +84,25 @@ describe('memory_confirm resolve（横向冲突）', () => {
       expect(r.alsoCleared).toBe(1)
     }
     expect(await deps.decisions.list()).toHaveLength(0)
+  })
+
+  it('PA-11 败方含密钥：物理删除，结果写明已物理删除、请轮换凭证；快照里没有明文，条目移出账本', async () => {
+    const deps = makeDeps()
+    await deps.store.put(record({ id: 'mem_left', content: '左' }))
+    await deps.store.put(record({ id: 'mem_right', content: `右 ${FAKE_SECRET.sk}` }))
+    const { entry } = await deps.decisions.upsert({ memoryIds: ['mem_left', 'mem_right'], summary: '矛盾' }, 1)
+
+    const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-left' }, { workspacePath: '/proj' }, deps)
+
+    if (r.kind !== 'resolved') throw new Error(r.message)
+    expect(r.isHardDeleted).toBe(true)
+    expect(r.message).toContain('物理删除')
+    expect(r.message).toContain('轮换')
+    expect(await deps.store.get('mem_right')).toBeUndefined()
+    expect((await deps.store.get('mem_left'))!.status).toBe('active')
+    expect(await deps.decisions.get(entry.id)).toBeUndefined()
+    expect(await deps.decisions.listSettled()).toEqual([])
+    expect(JSON.stringify(await deps.snapshots.list())).not.toContain(FAKE_SECRET.sk)
   })
 
   it('keep-right：删 left', async () => {

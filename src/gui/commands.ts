@@ -404,6 +404,7 @@ async function dispatch(
       )
       if (r.kind === 'error') return r.code === 'cross-workspace' ? fail(cmd, 'cross-workspace', r.message, r.rejected) : fail(cmd, r.code ?? 'failed', r.message)
       if (r.kind === 'resolved' && r.isUnrecorded) return { ok: true, cmd, decisionId: command.decisionId, isUnrecorded: true }
+      if (r.kind === 'resolved' && r.isHardDeleted) return { ok: true, cmd, decisionId: command.decisionId, isHardDeleted: true }
       const snapshotId = (await settledEntry(command.decisionId))?.settled?.snapshotId
       return { ok: true, cmd, decisionId: command.decisionId, ...(snapshotId !== undefined ? { snapshotId } : {}) }
     }
@@ -816,9 +817,10 @@ async function dispatch(
         }
         const ids = matched.filter(r => r.status === 'active').map(r => r.id)
         if (ids.length === 0) continue
+        // 锁内复核：收集之后被别处改成别的类型的不删（同 retype）
         const r = await executeForget(
           { ids, reason: `用户在设置页删除或改名类型 ${command.from}`, allowCrossWorkspace: true },
-          gov, executorDeps, { isSoftOnly: true, target: layer },
+          gov, executorDeps, { isSoftOnly: true, target: layer, isChanged: current => current.type !== command.from },
         )
         migrated += r.forgotten.length
         skippedSecrets += r.skippedSecrets?.length ?? 0

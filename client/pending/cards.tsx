@@ -27,8 +27,8 @@ type Verdict = 'keep-left' | 'keep-right' | 'keep-both'
 
 /** 一次动作的结果，结果卡按它写文案、决定能不能撤销。 */
 export type Outcome =
-  /** isUnrecorded：两边都留但结论没记下（见命令结果 isUnrecorded），没有可撤销的条目。 */
-  | { kind: 'resolved'; verdict: Verdict; isUnrecorded?: true }
+  /** isUnrecorded：两边都留但结论没记下（见命令结果 isUnrecorded），没有可撤销的条目。isHardDeleted：败方含密钥、已彻底删除，没有撤销。 */
+  | { kind: 'resolved'; verdict: Verdict; isUnrecorded?: true; isHardDeleted?: true }
   /** decisionId：撤销用的账本条目（按记忆 id 提升时由命令结果带回；提升候选用条目自己的）。 */
   | { kind: 'promoted'; target: 'global' | 'agents-md'; decisionId?: string }
   /** 全局记忆移到了 workspacePath 那个项目；decisionId 是撤销用的账本条目，filePath 是移过去之后的文件。 */
@@ -188,7 +188,7 @@ export function SecretCard({ item, session, now, typeLabels, onDone }: CardProps
 export function HorizontalCard({ item, session, now, typeLabels, onDone, onRefused }: CardProps<'conflict-horizontal'>) {
   const t = useT()
   const action = useItemAction(session, (command, result) => {
-    if (command.cmd === 'resolve') onDone({ kind: 'resolved', verdict: command.verdict, ...(result.isUnrecorded ? { isUnrecorded: true } : {}) })
+    if (command.cmd === 'resolve') onDone({ kind: 'resolved', verdict: command.verdict, ...(result.isUnrecorded ? { isUnrecorded: true } : {}), ...(result.isHardDeleted ? { isHardDeleted: true } : {}) })
   }, onRefused)
   const preferred = item.preferredId === undefined ? undefined
     : item.left?.id === item.preferredId ? { side: 'A', memory: item.left }
@@ -218,7 +218,7 @@ export function HorizontalCard({ item, session, now, typeLabels, onDone, onRefus
 export function VerticalCard({ item, session, now, typeLabels, onDone, onRefused }: CardProps<'conflict-vertical'>) {
   const t = useT()
   const action = useItemAction(session, (command, result) => {
-    if (command.cmd === 'resolve') onDone({ kind: 'resolved', verdict: command.verdict, ...(result.isUnrecorded ? { isUnrecorded: true } : {}) })
+    if (command.cmd === 'resolve') onDone({ kind: 'resolved', verdict: command.verdict, ...(result.isUnrecorded ? { isUnrecorded: true } : {}), ...(result.isHardDeleted ? { isHardDeleted: true } : {}) })
   }, onRefused)
   return (
     <div className="pm-pending-item">
@@ -649,14 +649,17 @@ interface ResultCopy { memory?: MemoryCardData | null; chip: string; body: strin
 
 function resultCopy(item: PendingItem, outcome: Outcome, t: Translate): ResultCopy {
   if (outcome.kind === 'resolved' && item.kind === 'conflict-horizontal') {
-    if (outcome.verdict === 'keep-left') return { memory: item.left, chip: t('pending.result.keptA'), body: t('pending.result.deletedSide', { side: 'B' }), undoable: true }
-    if (outcome.verdict === 'keep-right') return { memory: item.right, chip: t('pending.result.keptB'), body: t('pending.result.deletedSide', { side: 'A' }), undoable: true }
+    const deleted = (side: 'A' | 'B') => (outcome.isHardDeleted ? t('conflict.purgedSide', { side }) : t('pending.result.deletedSide', { side }))
+    if (outcome.verdict === 'keep-left') return { memory: item.left, chip: t('pending.result.keptA'), body: deleted('B'), undoable: outcome.isHardDeleted !== true }
+    if (outcome.verdict === 'keep-right') return { memory: item.right, chip: t('pending.result.keptB'), body: deleted('A'), undoable: outcome.isHardDeleted !== true }
     if (outcome.isUnrecorded) return { chip: t('pending.result.keptBoth'), body: t('pending.result.unrecordedBody'), undoable: false }
     return { chip: t('pending.result.keptBoth'), body: t('pending.result.keptBothBody'), undoable: true }
   }
   if (outcome.kind === 'resolved' && item.kind === 'conflict-vertical') {
     if (outcome.verdict === CONFLICT_ACTION_VERDICTS.vertical.keepBaseline) {
-      return { chip: t('pending.result.followedBaseline'), body: t('pending.result.followedBaselineBody'), undoable: true }
+      return outcome.isHardDeleted
+        ? { chip: t('pending.result.followedBaseline'), body: t('conflict.purgedMemory'), undoable: false }
+        : { chip: t('pending.result.followedBaseline'), body: t('pending.result.followedBaselineBody'), undoable: true }
     }
     return { memory: item.memory, chip: t('pending.result.keptMemory'), body: t(outcome.isUnrecorded ? 'pending.result.unrecordedBody' : 'pending.result.keptMemoryBody'), undoable: outcome.isUnrecorded !== true }
   }
