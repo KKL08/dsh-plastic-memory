@@ -475,7 +475,7 @@ async function dispatch(
         }
         const { rejected } = gateRecords([rec], gov, command.allowCrossWorkspace)
         if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
-        if (!(await deps.store.restoreArchived(rec, { isExactLayer: layer !== undefined }))) return notFound(memoryId)
+        if (!(await deps.store.restoreArchived(rec, { isExactLayer: layer !== undefined, now }))) return notFound(memoryId)
         return { ok: true, cmd, memoryIds: [memoryId] }
       }
       const restore = async (): Promise<MemoryCommandResult> => {

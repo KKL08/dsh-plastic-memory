@@ -182,6 +182,15 @@ describe('executePromote', () => {
     }
   })
 
+  it('PA-17 target=agents-md：软删的 updatedAt 与 deletedAt 都取注入的时钟', async () => {
+    const NOW = 9_000
+    const store = new MemoryStore(new InMemoryTable())
+    await store.put(record({ id: 'mem_a' }))
+    const { writer } = fakeAgentsMd()
+    await executePromote({ confirmedIds: ['mem_a'], target: 'agents-md' }, { workspacePath: '/proj' }, { store, agentsMd: writer, snapshots: makeSnapshots(), now: () => NOW })
+    expect(await store.get('mem_a')).toMatchObject({ status: 'deleted', updatedAt: NOW, deletedAt: NOW })
+  })
+
   it('只处理 confirmedIds 里的（未确认的不动）', async () => {
     const store = new MemoryStore(new InMemoryTable())
     await store.put(record({ id: 'mem_a' }))

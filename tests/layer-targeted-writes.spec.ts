@@ -33,7 +33,7 @@ const backends: Backend[] = [
     name: 'InMemoryTable',
     make: async () => {
       const root = '/in-memory'
-      const t = new InMemoryTable(root)
+      const t = new InMemoryTable(root, () => NOW)
       return {
         store: new MemoryStore(t),
         // create 会清掉可见集合里同 id 的其余副本：直接放进虚拟目录
@@ -46,7 +46,7 @@ const backends: Backend[] = [
     name: 'FileTable',
     make: async () => {
       const root = await mkdtemp(join(tmpdir(), 'pm-layer-write-'))
-      const t = new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() })
+      const t = new FileTable({ root, stats: new InMemoryKvTable<RecallStats>(), now: () => NOW })
       return { store: new MemoryStore(t), seed: r => t.create(r), cleanup: () => rm(root, { recursive: true, force: true }) }
     },
   },
@@ -129,7 +129,7 @@ describe.each(backends)('指明项目那一份的写入只改它：$name', ({ ma
   })
 
   it('全局只在最近删除里有同 id 的：同样拒绝提升', async () => {
-    await h.seed(copy({ name: '全局那份', status: 'deleted', deletedAt: Date.now() }))   // 保留期内，维护点不清它
+    await h.seed(copy({ name: '全局那份', status: 'deleted', deletedAt: NOW }))   // 保留期内，维护点不清它
     await h.seed(projectCopy(T0))
     const deps = { store: h.store, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), now: () => NOW, agentsMd: { append: async () => {} } }
     const r = await executePromote({ confirmedIds: ['mem_dup'], target: 'global' }, ctx, deps, { target: PROJECT })

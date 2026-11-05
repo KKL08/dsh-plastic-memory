@@ -138,7 +138,7 @@ export async function executePromote(
     } else {
       // 两步无法原子：先软删再写 AGENTS.md，append 失败回滚软删——失败方向宁可"没提升"
       // 也不能"两处并存"（原顺序 append 成功+softDelete 失败会双份注入且结果谎报 promoted）。
-      if (!(await deps.store.updateIfLive(r, cur => review({ ...cur, status: 'deleted', updatedAt: Date.now() }), hintOf(r)))) {
+      if (!(await deps.store.updateIfLive(r, cur => review({ ...cur, status: 'deleted', updatedAt: now, deletedAt: cur.deletedAt ?? now }), hintOf(r)))) {
         skipped.push(r.id)   // 读到之后被别处删掉（软删）：不写 AGENTS.md
         continue
       }

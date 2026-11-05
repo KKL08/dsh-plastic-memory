@@ -656,11 +656,23 @@ describe('restore：没有快照覆盖的归档记忆', () => {
     return found.filePath.startsWith(join(found.dir, ARCHIVE_DIR))
   }
 
+  it('PA-17 恢复归档文件本身：updatedAt 取注入的时钟', async () => {
+    const e = env({ now: NOW + 60_000 })
+    await mkdir(join(wsDir(), ARCHIVE_DIR), { recursive: true })
+    await writeFile(join(wsDir(), WORKSPACE_MARKER), SESSION_WS + '\n')
+    const hand = record({ id: 'mem_hand', name: '手工归档', scope: 'workspace', workspacePath: SESSION_WS, status: 'deleted', deletedAt: NOW, updatedAt: NOW })
+    await writeFile(join(wsDir(), ARCHIVE_DIR, 'hand.md'), encodeRecord(hand, {}))
+
+    ok(await e.run({ cmd: 'restore', memoryId: 'mem_hand', layer: own }))
+    expect(await e.store.get('mem_hand', { workspacePath: SESSION_WS })).toMatchObject({ status: 'active', updatedAt: NOW + 60_000 })
+  })
+
   it('手工放进 .archive/ 的文件（status 仍写 active）：恢复成功，回到层顶层、重新出现在全部记忆里', async () => {
     const e = env()
     await mkdir(join(wsDir(), ARCHIVE_DIR), { recursive: true })
     await writeFile(join(wsDir(), WORKSPACE_MARKER), SESSION_WS + '\n')
-    const hand = record({ id: 'mem_hand', name: '手工归档', content: '用 pnpm', scope: 'workspace', workspacePath: SESSION_WS, updatedAt: NOW })
+    // 手工放进去的文件早于恢复：恢复靠 updatedAt 记成恢复时刻才写回顶层
+    const hand = record({ id: 'mem_hand', name: '手工归档', content: '用 pnpm', scope: 'workspace', workspacePath: SESSION_WS, updatedAt: NOW - 60_000 })
     await writeFile(join(wsDir(), ARCHIVE_DIR, 'hand.md'), encodeRecord(hand, {}))
     ok(await e.run({ cmd: 'refresh-views' }))
     expect(await deletedIds(e)).toEqual(['mem_hand'])

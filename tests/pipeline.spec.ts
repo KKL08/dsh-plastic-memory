@@ -192,14 +192,14 @@ describe('runSavePipeline', () => {
 
   it('update 保留 createdAt、刷新 lastConfirmedAt', async () => {
     const store = new MemoryStore(new InMemoryTable())
-    const first = await runSavePipeline(candidate(), deps(store))
+    const clock = { now: 1_700_000_000_000 }
+    const first = await runSavePipeline(candidate(), { ...deps(store), now: () => clock.now })
     if (first.kind !== 'saved') throw new Error(first.kind)
-    await new Promise(r => setTimeout(r, 5))
+    clock.now += 1000
     const updated = await runSavePipeline(
-      candidate({ action: 'update', id: first.record.id, content: '新内容' }), deps(store))
+      candidate({ action: 'update', id: first.record.id, content: '新内容' }), { ...deps(store), now: () => clock.now })
     if (updated.kind !== 'updated') throw new Error(updated.kind)
-    expect(updated.record.createdAt).toBe(first.record.createdAt)
-    expect(updated.record.lastConfirmedAt).toBeGreaterThan(first.record.lastConfirmedAt)
+    expect(updated.record).toMatchObject({ createdAt: 1_700_000_000_000, lastConfirmedAt: 1_700_000_001_000, updatedAt: 1_700_000_001_000 })
   })
 
   it('update 目标 id 不存在时 rejected(target-missing)', async () => {

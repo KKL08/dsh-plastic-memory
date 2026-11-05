@@ -1044,7 +1044,7 @@ describe('注入链接线', () => {
     }
   })
 
-  // 解析超时放行要等满组装的超时（1.5 秒），两步约 3 秒
+  // 解析超时放行要等满组装的超时（1.5 秒）：假的 setTimeout 推过去，不真等
   it('工作区解析超时：两步拿到同一份临时文本只发一次；解析落定后冻结的完整版不同，再发一次', async () => {
     const memoryRoot = await makeTmpRoot()
     const cwd = await makeTmpRoot() // resolveWorkspacePath 走 realpath，cwd 须真实存在
@@ -1063,17 +1063,29 @@ describe('注入链接线', () => {
     const t = await boot({ memoryRoot, get: name => (name === 'workspaceRegistry' ? workspaceRegistry : undefined) })
     const session = hostSession('sess-1', { cwd })
 
-    await t.step(session, 1, { messages: [userSaid('你好')] })
-    await t.step(session, 2)
-    expect(visibleSnapshots(session)).toEqual([expect.not.stringContaining('仅本仓库生效的偏好')])
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      // 一直推到这一步做完：超时之外，路上的视图替换间隔等也用 setTimeout
+      const settled = async (step: Promise<unknown>) => {
+        let isDone = false
+        const tracked = step.finally(() => { isDone = true })
+        while (!isDone) await vi.advanceTimersByTimeAsync(100)
+        await tracked
+      }
+      await settled(t.step(session, 1, { messages: [userSaid('你好')] }))
+      await settled(t.step(session, 2))
+      expect(visibleSnapshots(session)).toEqual([expect.not.stringContaining('仅本仓库生效的偏好')])
 
-    settle()
-    await t.step(session, 3)
+      settle()
+      await settled(t.step(session, 3))
+    } finally {
+      vi.useRealTimers()
+    }
     const [provisional, full] = visibleSnapshots(session)
     expect(provisional).toContain('压缩前就有的偏好')
     expect(full).toContain('仅本仓库生效的偏好')
     expect(visibleSnapshots(session)).toHaveLength(2)
-  }, 10_000)
+  })
 
   it('记忆里的 {{ 原样出现在快照消息里（自有消息不过宿主的变量插值）', async () => {
     const t = await boot({ memories: [{ id: 'mem_vue', type: 'preference', content: 'Vue 模板写 {{ msg }}，CI 里写 ${{ secrets.NPM_TOKEN }}' }] })
