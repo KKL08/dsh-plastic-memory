@@ -372,6 +372,11 @@ export class SidecarStore<S extends { id: string }, P extends { id: string }, C 
     this.autoCheckups = new EntryFileTable(join(this.stateDir, AUTO_CHECKUPS_DIR), sha1, autoCheckupSettingSchema, ungated)
   }
 
+  /** 旧 KV 导入是否已结清（导完且旧行已删）；彻底删除据此拦（续传会把旧快照里的明文放回来）。 */
+  isLegacyImportSettled(): Promise<boolean> {
+    return this.legacy.isImportSettled()
+  }
+
   private locked<R>(fn: () => Promise<R>): Promise<R> {
     const next = this.chain.then(fn, fn)
     this.chain = next.catch(() => {})

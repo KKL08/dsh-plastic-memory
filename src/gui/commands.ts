@@ -67,6 +67,8 @@ export interface MemoryCommandDeps {
   getBaseline: (exec: ToolRunContext) => readonly string[] | null
   /** 体检开关（用时读配置）；关闭时治理类子命令返回 governance-disabled。缺省视为开启。 */
   isGovernanceEnabled?: () => boolean
+  /** 旧 KV 导入是否已结清（导完且旧行已删）；缺省视为已结清。没结清时彻底删除回 failed：续传会把旧快照里的明文放回来。 */
+  isLegacyImportSettled?: () => Promise<boolean>
   log?: MemoryLogger
   now?: () => number
 }
@@ -582,6 +584,9 @@ async function dispatch(
     case 'hard-delete': {
       const isHardDelete = command.cmd === 'hard-delete'
       if (isHardDelete) {
+        if (deps.isLegacyImportSettled !== undefined && !(await deps.isLegacyImportSettled())) {
+          return fail(cmd, 'failed', '旧数据迁移还没收尾（升级前的快照没导完，或宿主里的旧副本还没清掉），彻底删除暂不可用，下次启动会再试。未做任何改动')
+        }
         const rec = await locate(command.memoryId, command.layer)
         if (!rec) return notFound(command.memoryId)
         if (rec.status === 'deleted') {

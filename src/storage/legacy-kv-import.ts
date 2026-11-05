@@ -46,6 +46,25 @@ export interface LegacyKvImportOptions<S, P> {
   now: () => number
 }
 
+/**
+ * 已存在的目标文件：读得出、合 schema 为 ok；内容坏（JSON 解析不了、不合 schema）为 corrupt；读时已经没了（别处刚删掉）为 gone。
+ * 其他读错（权限、I/O）往上抛，本次导入中止：读不出不等于坏了，拿旧值覆盖会盖掉迁移后的删除和脱敏。
+ */
+async function existingState(path: string, schema: ZodType<unknown>): Promise<'ok' | 'corrupt' | 'gone'> {
+  let text: string
+  try {
+    text = await readFile(path, 'utf8')
+  } catch (err) {
+    if (errnoCode(err) === 'ENOENT') return 'gone'
+    throw err
+  }
+  try {
+    return schema.safeParse(JSON.parse(text)).success ? 'ok' : 'corrupt'
+  } catch {
+    return 'corrupt'
+  }
+}
+
 /** 标记在且无需再清理旧 KV 行。 */
 function isSettled(marker: KvImportMarker): boolean {
   return marker.source === 'none' || marker.discarded === true
@@ -58,6 +77,13 @@ export class LegacyKvImport<S extends { id: string }, P extends { id: string }> 
 
   constructor(opts: LegacyKvImportOptions<S, P>) {
     this.opts = opts
+  }
+
+  /** 先过一次导入，再看标记：导完且旧行已删才算结清。 */
+  async isImportSettled(): Promise<boolean> {
+    await this.ensureImported()
+    const marker = await this.readMarker(join(this.opts.stateDir, KV_IMPORT_MARKER))
+    return marker !== undefined && isSettled(marker)
   }
 
   /** 锁内初始化屏障，memoize 成一个 Promise。失败或服务缺席都不写标记：本进程不再重试，
@@ -187,7 +213,11 @@ export class LegacyKvImport<S extends { id: string }, P extends { id: string }> 
     }
   }
 
-  /** 逐条排他创建；已存在不覆盖（中断后续传不会盖掉迁移后产生的新状态）。返回落成文件的条数。 */
+  /**
+   * 逐条排他创建；已存在不覆盖（中断后续传不会盖掉迁移后产生的新状态）。已存在却解析不了的换成完整内容：卷不支持硬链接时
+   * 排他创建退回复制，中断会留下半截文件，原样跳过它这条就丢了（读侧表时坏文件跳过）。已存在、读时又没了的不重建：
+   * 是别处刚删掉的。返回落成文件的条数。
+   */
   private async importTable<T extends { id: string }>(entries: Array<[string, unknown]>, dirName: string, schema: ZodType<T>): Promise<number> {
     const dir = join(this.opts.stateDir, dirName)
     await mkdir(dir, { recursive: true })
@@ -202,7 +232,13 @@ export class LegacyKvImport<S extends { id: string }, P extends { id: string }> 
         this.opts.log.warn(`[plastic-memory] 旧 KV 条目不合 schema，跳过：${dirName}/${key}`)
         continue
       }
-      await createExclusive(join(dir, `${key}.json`), JSON.stringify(parsed.data))
+      const path = join(dir, `${key}.json`)
+      const text = JSON.stringify(parsed.data)
+      if (!await createExclusive(path, text)) {
+        const state = await existingState(path, schema)
+        if (state === 'gone') continue
+        if (state === 'corrupt') await atomicWrite(path, text)
+      }
       count++
     }
     return count

@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
+import type { LegacyKvTables } from '../src/storage/legacy-kv-import.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
 import { computeDigest, encodeRecord, splitFrontmatter } from '../src/storage/frontmatter.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE, STATE_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
@@ -65,12 +66,17 @@ interface EnvOpts {
   heartbeat?: (callback: () => void, delayMs: number) => () => void
   /** 记忆表（缺省真实临时目录上的 FileTable）。 */
   table?: MemoryTable
+  /** 侧表的旧 KV 导入来源（缺省没有旧 KV 可导）。 */
+  openLegacyKv?: () => Promise<LegacyKvTables | undefined>
 }
 
 function env(opts: EnvOpts = {}) {
   const clock = { now: opts.now ?? NOW }
   // 侧表也用这个时钟：认领的时间和是否残留按它算
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }, now: () => clock.now })
+  const sidecar = new SidecarStore({
+    root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }, now: () => clock.now,
+    ...(opts.openLegacyKv !== undefined ? { openLegacyKv: opts.openLegacyKv } : {}),
+  })
   // 表和命令用同一个时钟：软删记的时刻和最近删除的保留期清扫才对得上
   const store = new MemoryStore(opts.table ?? new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now }), undefined, sidecar.recallStats)
   const decisions = new PendingDecisionsStore(opts.wrapPending?.(sidecar.pending) ?? sidecar.pending)
@@ -97,6 +103,7 @@ function env(opts: EnvOpts = {}) {
     getLlm: () => (opts.llm === undefined ? null : opts.llm),
     getBaseline: () => opts.baseline ?? null,
     ...(opts.governanceEnabled !== undefined ? { isGovernanceEnabled: () => opts.governanceEnabled! } : {}),
+    isLegacyImportSettled: () => sidecar.isLegacyImportSettled(),
     now: () => clock.now,
   })
   /** 按宿主 parseCommand 的切法：命令名之后的原文（含分隔空白）交给处理器。 */
@@ -766,6 +773,28 @@ describe('forget 遇到含密钥的记忆', () => {
     await e.store.create(record({ id: 'mem_plain' }))
     ok(await e.run({ cmd: 'forget', memoryId: 'mem_plain' }))
     expect((await e.store.get('mem_plain'))!.status).toBe('deleted')
+  })
+})
+
+describe('彻底删除与旧 KV 导入', () => {
+  const oldSnapshot = { id: 'snap_old', createdAt: 1, operation: 'manual' as const, description: '旧快照', memoryIds: [], data: [] }
+  it.each([
+    ['旧 KV 服务暂缺、还没导入', async (): Promise<LegacyKvTables | undefined> => undefined],
+    ['导入了但旧行还没删掉', async (): Promise<LegacyKvTables | undefined> => ({ snapshots: [['snap_old', oldSnapshot]], pending: [], discard: async () => { throw new Error('宿主忙') } })],
+  ])('PA-06 %s：彻底删除回 failed、说明旧数据迁移还没收尾，在用的密钥条目和最近删除里的都不动', async (_label, openLegacyKv) => {
+    const e = env({ openLegacyKv })
+    await e.store.create(record({ id: 'mem_s', content: `token ${FAKE_SECRET.sk}` }))
+    await e.store.create(record({ id: 'mem_gone', name: '已删' }))
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_gone' }))
+    const snapshots = await e.snapshots.list()
+    for (const memoryId of ['mem_s', 'mem_gone']) {
+      const r = err(await e.run({ cmd: 'hard-delete', memoryId }))
+      expect([r.code, r.detail]).toEqual(['failed', expect.stringContaining('旧数据迁移还没收尾')])
+      expect(r.detail).not.toContain('带回来')
+    }
+    expect((await e.store.get('mem_s'))!.status).toBe('active')
+    expect((await e.store.get('mem_gone'))!.status).toBe('deleted')
+    expect(await e.snapshots.list()).toEqual(snapshots)
   })
 })
 
