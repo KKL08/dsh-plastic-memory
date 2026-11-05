@@ -213,14 +213,14 @@ function deleteHint(record: Pick<MemoryRecord, 'workspacePath'>, opts: DeleteOpt
 
 export class MemoryStore {
   private table: MemoryTable
-  private log?: MemoryLogger
+  private readonly log: MemoryLogger
   private stats: BatchKvTable<RecallStats>
   private recallChain: Promise<unknown> = Promise.resolve() // markRecalled 的读改写在进程内串行
 
   /** stats：召回统计侧表（接线层传 .state/recall-stats.json）；缺省内存表，供不关心召回统计的测试。 */
   constructor(table: MemoryTable, log?: MemoryLogger, stats: BatchKvTable<RecallStats> = new InMemoryBatchKvTable<RecallStats>()) {
     this.table = table
-    this.log = log
+    this.log = log ?? console
     this.stats = stats
   }
 
@@ -392,7 +392,7 @@ export class MemoryStore {
       }
       await this.stats.putMany([...next])
     } catch (err) {
-      ;(this.log ?? console).error('[plastic-memory] 召回统计更新失败:', err)
+      this.log.error('[plastic-memory] 召回统计更新失败:', err)
     }
   }
 }

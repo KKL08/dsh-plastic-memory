@@ -836,7 +836,7 @@ async function dispatch(
         if (!r.ok && r.forgotten.length === 0 && (r.skippedSecrets?.length ?? 0) === 0) failures.push(r.message)
       }
       if (failures.length > 0) {
-        // 已经改了的照样重写视图（成功时由 runMemoryCommand 统一重写）
+        // 已经改了的照样重写视图（成功时由 run 统一重写）
         if (migrated > 0) await deps.views.request()
         return fail(cmd, 'failed', `${failures.length} 处没处理成功，可以重试：${failures.join('；')}`)
       }

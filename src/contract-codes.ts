@@ -74,7 +74,6 @@ export type CheckupInitiator = (typeof CHECKUP_INITIATORS)[number]
  * model-error = 模型调用出错（宿主给了错误码时带上），unparseable = 模型输出两次都解析不了，error = 体检本身出错。
  */
 export const CHECKUP_CAUSE_KINDS = ['no-default-model', 'model-error', 'unparseable', 'error'] as const
-export type CheckupCauseKind = (typeof CHECKUP_CAUSE_KINDS)[number]
 
 /** memory_health 建议的分层并列结构（health.ts）：独占层单元素，行动项层多元素，无事为空数组。 */
 export type HealthRecommendationKind =

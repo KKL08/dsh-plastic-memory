@@ -371,7 +371,7 @@ export async function apply(ctx: Context, config: Config) {
     }
     if (!anchorFallbackWarned.has(session)) {
       anchorFallbackWarned.add(session)
-      ctx.logger.warn(`turnBoundary projection unavailable for session "${session.header.id}", anchoring the whole session: ${reason}`)
+      ctx.logger.warn(`[plastic-memory] 会话 "${session.header.id}" 读不到 turnBoundary 投影，出处锚到整个会话：${reason}`)
     }
     return 0
   }
@@ -413,7 +413,7 @@ export async function apply(ctx: Context, config: Config) {
     const { mode, fallback } = subagentModeOf(probe<SessionProjectionRegistry>('sessionProjections'), session)
     if (fallback !== undefined && !modeFallbackWarned.has(session)) {
       modeFallbackWarned.add(session)
-      ctx.logger.warn(`subagent projection unavailable for session "${session.header.id}", treating it as one-shot: ${fallback}`)
+      ctx.logger.warn(`[plastic-memory] 会话 "${session.header.id}" 读不到 subagent 投影，按一次性子会话（one-shot）处理：${fallback}`)
     }
     return mode
   }
@@ -438,7 +438,7 @@ export async function apply(ctx: Context, config: Config) {
     } catch (error) {
       if (!baselineReadWarned.has(session)) {
         baselineReadWarned.add(session)
-        ctx.logger.warn(`plasticMemoryBaseline projection read threw for session "${session.header.id}", skipping the AGENTS.md baseline: ${String(error)}`)
+        ctx.logger.warn(`[plastic-memory] 会话 "${session.header.id}" 读 plasticMemoryBaseline 投影出错，这次不带 AGENTS.md 基线：${String(error)}`)
       }
       return null
     }

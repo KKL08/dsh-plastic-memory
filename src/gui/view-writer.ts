@@ -49,6 +49,7 @@ export interface ViewSourceDeps {
  */
 export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalViews> {
   const now = deps.now?.() ?? Date.now()
+  const log = deps.log ?? console
   const listing = await deps.store.listWorkspaceDirs()
   const ws = (path: string): LayerRef => ({ kind: 'workspace', path })
   const readLayers: LayerRef[] = [{ kind: 'global' }, ...[...new Set(listing.entries.map(e => e.workspacePath))].sort().map(ws)]
@@ -81,12 +82,12 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
     try {
       await deps.checkups?.removeMissingWorkspaces(present)
     } catch (err) {
-      (deps.log ?? console).warn('[plastic-memory] 体检记录表清理失败，下次生成视图再试', err)
+      log.warn('[plastic-memory] 体检记录表清理失败，下次生成视图再试', err)
     }
     try {
       await deps.autoCheckups?.removeMissingWorkspaces(present)
     } catch (err) {
-      (deps.log ?? console).warn('[plastic-memory] 自动体检设置表清理失败，下次生成视图再试', err)
+      log.warn('[plastic-memory] 自动体检设置表清理失败，下次生成视图再试', err)
     }
   }
   if (deps.ignores !== undefined) {
@@ -97,7 +98,7 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
     try {
       await deps.ignores.remove(staleIgnores(data.ignores, data.byId, { isComplete, before: now }))
     } catch (err) {
-      (deps.log ?? console).warn('[plastic-memory] 建议忽略表清理失败，下次生成视图再试', err)
+      log.warn('[plastic-memory] 建议忽略表清理失败，下次生成视图再试', err)
     }
   }
   return buildGlobalViews({

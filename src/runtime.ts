@@ -101,9 +101,11 @@ export class SnapshotCache {
   private resolving = new WeakMap<object, Promise<void>>()
 
   private deps: SnapshotCacheDeps
+  private readonly log: MemoryLogger
 
   constructor(deps: SnapshotCacheDeps) {
     this.deps = deps
+    this.log = deps.log ?? console
   }
 
   setWorkspacePath(session: object, path: string | undefined): void {
@@ -151,7 +153,7 @@ export class SnapshotCache {
     try {
       return await this.build(session)
     } catch (err) {
-      ;(this.deps.log ?? console).error('[plastic-memory] 快照组装失败:', err)
+      this.log.error('[plastic-memory] 快照组装失败:', err)
       return undefined
     }
   }
@@ -194,7 +196,7 @@ export class SnapshotCache {
     try {
       await this.deps.store.maintain({ kind: 'visible', workspacePath })
     } catch (err) {
-      ;(this.deps.log ?? console).error('[plastic-memory] 记忆目录维护失败:', err)
+      this.log.error('[plastic-memory] 记忆目录维护失败:', err)
     }
     await this.afterFreeze(deps, session, workspacePath, now, { ...usage, ...origin, coreIds })
     return text
@@ -218,7 +220,7 @@ export class SnapshotCache {
         frozenAt: now, budget, overflowMode: mode, ...usage, overflowChanged,
       })
     } catch (err) {
-      ;(this.deps.log ?? console).error('[plastic-memory] 快照冻结后的超限同步或会话视图失败:', err)
+      this.log.error('[plastic-memory] 快照冻结后的超限同步或会话视图失败:', err)
     }
   }
 

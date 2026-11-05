@@ -1374,7 +1374,7 @@ describe('子 agent 委派信息', () => {
       fakeExec({ agent: { session: s, options: {} } as unknown as ToolRunContext['agent'] }),
     ) as SaveOut
     /** 只看 subagent 投影的退化告警（证据锚读 turnBoundary 的告警另有用例）。 */
-    const modeWarnings = () => warnings.filter(w => w.includes('subagent projection'))
+    const modeWarnings = () => warnings.filter(w => w.includes('读不到 subagent 投影'))
     return { defs, session, save, modeWarnings, created: (s: Session) => base.listeners.get('session/created')!(s) }
   }
   const projectionWith = (subagent: unknown) => ({ stateOf: (_s: object, key: string) => (key === 'subagent' ? subagent : undefined) })

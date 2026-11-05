@@ -727,7 +727,6 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
     .refine(c => (c.action === 'retype') === (c.to !== undefined), { message: 'retype 要带 to，forget 不带' }),
 ])
 export type MemoryCommand = z.infer<typeof memoryCommandSchema>
-export type MemoryCommandName = MemoryCommand['cmd']
 
 /** 命令 → 整行文本（客户端发给 `remote.commands.execute`）。 */
 export function encodeMemoryCommand(command: MemoryCommand): string {
