@@ -3,6 +3,8 @@ import { executeSource, renderSourceResult, extractEventText, type ReadEventFn }
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
+import { FAKE_SECRET } from './helpers/secrets.ts'
+import { SECRET_MASK } from '../src/secrets.ts'
 
 // 本文件默认造一条 mem_a 的 workspace preference，源自固定会话 session-x（区间供开窗断言）。
 const record = (partial: Partial<MemoryRecord> = {}) => baseRecord({
@@ -53,6 +55,16 @@ describe('executeSource', () => {
     expect(result.lines).toEqual(['- [38] user: 以后测试别 mock 数据库'])
     expect(result.skipped).toBe(1)
     expect(result.range).toEqual([35, 42])
+    expect(result.name).toBe('mock 禁令')
+  })
+
+  it('命中时名称由执行器返回；名称里的高危密钥遮掉', async () => {
+    const store = await storeWith(record({ name: `部署 ${FAKE_SECRET.sk}`, handEdited: true }))
+    const readEvent: ReadEventFn = vi.fn().mockResolvedValue({ session: { id: 'session-x' }, events: [] })
+    const result = await executeSource({ memoryId: 'mem_a' }, ctx, { store, getReadEvent: () => readEvent })
+    if (result.kind !== 'ok') throw new Error(result.kind)
+    expect(result.name).toBe(`部署 ${SECRET_MASK}`)
+    expect(renderSourceResult(result)).not.toContain(FAKE_SECRET.sk)
   })
 
   it('window 参数覆盖默认宽度并封顶 24', async () => {
@@ -124,7 +136,7 @@ describe('executeSource 在子 agent 会话里', () => {
       expect(result, memoryId).toEqual({
         kind: 'rejected', memoryId, code: 'subagent-restricted', reason: '这条记忆的出处在别的会话，带回主会话查',
       })
-      expect(renderSourceResult(result)).toContain('这条记忆的出处在别的会话，带回主会话查')
+      expect(renderSourceResult(result)).toBe('未回查：这条记忆的出处在别的会话，带回主会话查')   // PA-15 前缀后接原因
     }
     expect(readEvent).not.toHaveBeenCalled()
   })
@@ -264,9 +276,9 @@ describe('extractEventText', () => {
 describe('renderSourceResult', () => {
   it('ok 含记忆 id、会话 id、区间与正文行', async () => {
     const text = renderSourceResult({
-      kind: 'ok', memoryId: 'mem_a', sessionId: 'session-x', range: [37, 42],
+      kind: 'ok', memoryId: 'mem_a', name: 'mock 禁令', sessionId: 'session-x', range: [37, 42],
       lines: ['- [37] user: 以后测试别 mock 数据库'], skipped: 2,
-    }, 'mock 禁令')
+    })
     expect(text).toContain('mem_a')
     expect(text).toContain('mock 禁令')
     expect(text).toContain('session-x')

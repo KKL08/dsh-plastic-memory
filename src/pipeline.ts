@@ -361,7 +361,7 @@ export async function runSavePipeline(
       return textSimilarity(text, peerText) >= DUPLICATE_SIMILARITY_THRESHOLD
     })
     if (hits.length > 0) {
-      const existing = hits.map(h => ({ id: h.id, summary: h.summary }))
+      const existing = hits.map(h => ({ id: h.id, summary: maskSecretSurface(h).summary }))
       return deps.delegation ? { kind: 'duplicate-suspected', existing, isFromSubagent: true } : { kind: 'duplicate-suspected', existing }
     }
   }

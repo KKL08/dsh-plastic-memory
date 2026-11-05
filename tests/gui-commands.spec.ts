@@ -3716,6 +3716,26 @@ describe('draft-edit（让模型改、让模型合并的生成）', () => {
     expect(prompts).toEqual([])
   })
 
+  it('PA-14 要求或上一稿含高危密钥：secret-critical，模型没有被调用', async () => {
+    const { llm, prompts } = scripted(answer({ content: '短', summary: '短' }))
+    const e = env({ llm })
+    await seedLong(e)
+    const draft = { content: '1. 跑测试', summary: '发版' }
+    expect(err(await e.run(draftOf('mem_l', { request: `改短，密钥 ${FAKE_SECRET.sk} 别丢` }))).code).toBe('secret-critical')
+    for (const previous of [
+      { ...draft, content: `1. 跑测试，token ${FAKE_SECRET.github}` },
+      { ...draft, summary: `发版 ${FAKE_SECRET.aws}` },
+      { ...draft, name: `发版 ${FAKE_SECRET.slack}` },
+      { ...draft, tags: [FAKE_SECRET.google] },
+    ]) {
+      expect(err(await e.run(draftOf('mem_l', { previous }))).code).toBe('secret-critical')
+    }
+    expect(prompts).toEqual([])
+    // 疑似级照常发（同记忆本身：疑似的不遮）
+    ok(await e.run(draftOf('mem_l', { request: '改短，api_key: TESTONLY0000000000000000 保留' })))
+    expect(prompts).toHaveLength(1)
+  })
+
   it('只含确认存下的疑似密钥：照常发给模型（同注入，疑似的不遮）', async () => {
     const { llm, prompts } = scripted(answer({ content: '短', summary: '短' }))
     const e = env({ llm })

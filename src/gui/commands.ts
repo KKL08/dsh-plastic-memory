@@ -716,6 +716,10 @@ async function dispatch(
       if (!records.every(r => r?.status === 'active')) return notFound(refs.map(ref => ref.memoryId).join('、'))
       // 高危密钥的原文不发给模型；确认存下的疑似密钥同注入，照原文发
       if (records.some(r => hasCriticalSecret(r!))) return fail(cmd, 'has-secret', '含密钥的记忆不发给模型。未做任何改动')
+      // 要求和上一稿同样进提示词；上一稿是模型回的原样，不遮，命中高危就整次不发
+      const previous = command.previous
+      const asked = [command.request ?? '', ...(previous !== undefined ? [previous.content, previous.name ?? '', previous.summary, ...(previous.tags ?? [])] : [])]
+      if (detectSecrets(asked.join('\n')).some(h => h.severity === 'critical')) return fail(cmd, 'secret-critical', '要求或上一稿里有高危密钥，不发给模型。未做任何改动')
       const llm = deps.getLlm(exec)
       if (llm === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型')
       const r = await generateDraft({ adviceType: command.adviceType, records: records.map(rec => rec!), request: command.request, previous: command.previous }, llm)

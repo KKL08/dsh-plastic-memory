@@ -692,7 +692,8 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   /**
    * 「让模型改 / 让模型合并」的生成：一条（合并时两条）记忆按建议类型的默认要求、或用户写的 request，单次调用借来的会话的模型，
    * 回一稿改后的内容（结果的 draft）。只读：不写记忆、不拍快照、不入账本、不进会话记录；「应用」由界面改发 edit-memory / merge-memories。
-   * previous：「再改改」时的上一稿，模型在它的基础上接着改。含密钥的记忆回 has-secret，原文不发给模型。
+   * previous：「再改改」时的上一稿，模型在它的基础上接着改。含密钥的记忆回 has-secret，原文不发给模型；
+   * request 或 previous 含高危密钥回 secret-critical，同样不发。
    */
   z.object({
     cmd: z.literal('draft-edit'),
@@ -779,7 +780,7 @@ export const GUI_ERROR_CODES = [
   'has-secret',         // forget 的目标含密钥（任一级），只能彻底删除：什么都没动，界面确认后改发 hard-delete；
                         // 直接改、直接合并的目标含密钥（界面上是遮盖后的正文）：什么都没动；让模型改的目标含密钥：不发给模型
   'stale',              // 直接改、直接合并：记忆在卡片加载后被改过；撤销模型改写、替代：之后又被改过。什么都没动
-  'secret-critical',    // 直接改、直接合并的新内容含高危密钥：什么都没动
+  'secret-critical',    // 直接改、直接合并的新内容含高危密钥：什么都没动；让模型改的要求或上一稿含高危密钥：不发给模型
   'secret-suspected',   // 直接改、直接合并的新内容含疑似密钥：什么都没动，用户确认后带 force 重发
   'claimed',            // 待决项正被另一次操作（别的标签页、宿主进程或体检）认领：什么都没动
   'busy',               // 体检：范围正在体检（别的体检认领着、没过期；「全部」有一个范围认领不到也算），或体检中途认领被别的进程接手。

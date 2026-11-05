@@ -3,6 +3,7 @@ import type { MemoryStore } from '../store.ts'
 import type { CheckupInitiator, CodedNote, ScanNoteCode } from '../contract-codes.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { MemoryRecord } from '../record-schema.ts'
+import { maskSecretSurface } from '../secrets.ts'
 import { candidateFingerprint, conflictFingerprint, type PendingDecisionsStore } from '../governance/decisions.ts'
 import type { CasKvTable } from '../kv-table.ts'
 import type { Finding, ScanCacheEntry } from '../governance/schema.ts'
@@ -490,7 +491,7 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     const byWorkspaceCandidates = [...byWorkspace.entries()]
       .map(([workspacePath, records]) => ({
         workspacePath,
-        items: records.filter(r => r.globalCandidate).map(r => ({ id: r.id, summary: r.summary })).slice(0, PROMOTE_LIMIT),
+        items: records.filter(r => r.globalCandidate).map(r => ({ id: r.id, summary: maskSecretSurface(r).summary })).slice(0, PROMOTE_LIMIT),
       }))
       .filter(w => w.items.length > 0)
     const promoteCandidates = {
@@ -562,7 +563,7 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
   }
 
   // global 提升候选：只吃模型主动标的 globalCandidate（不掺 misplaced——它双向，该降级的会被误列）。限流。
-  const allCandidates = records.filter(r => r.globalCandidate).map(r => ({ id: r.id, summary: r.summary }))
+  const allCandidates = records.filter(r => r.globalCandidate).map(r => ({ id: r.id, summary: maskSecretSurface(r).summary }))
   const promoteCandidates = {
     items: allCandidates.slice(0, PROMOTE_LIMIT),
     more: Math.max(0, allCandidates.length - PROMOTE_LIMIT),

@@ -16,6 +16,7 @@ import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { editFingerprint } from '../src/governance/snapshots.ts'
 import { candidate, record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
+import { SECRET_MASK } from '../src/secrets.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const session = { id: 's1', lastSeq: 42 }
@@ -174,6 +175,18 @@ describe('runSavePipeline', () => {
     expect(dup.kind).toBe('duplicate-suspected')
     const forced = await runSavePipeline(candidate({ content: '`src/auth.ts` 负责认证', force: true }), deps(store))
     expect(forced.kind).toBe('saved')
+  })
+
+  it('PA-10 去重提示里已有记忆的摘要手改进高危密钥：只给遮盖后的文字', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await store.put(record({
+      id: 'mem_handedit', type: 'preference', scope: 'workspace', workspacePath: '/proj',
+      content: '认证逻辑在 `src/auth.ts`', summary: `认证入口 ${FAKE_SECRET.sk}`, handEdited: true,
+    }))
+    const dup = await runSavePipeline(candidate({ content: '`src/auth.ts` 负责认证' }), deps(store))
+    if (dup.kind !== 'duplicate-suspected') throw new Error(dup.kind)
+    expect(dup.existing).toEqual([{ id: 'mem_handedit', summary: `认证入口 ${SECRET_MASK}` }])
+    expect(renderSaveResult(dup)).not.toContain(FAKE_SECRET.sk)
   })
 
   it('update 保留 createdAt、刷新 lastConfirmedAt', async () => {

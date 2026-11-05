@@ -430,6 +430,15 @@ describe('executeScan 全库体检', () => {
     expect(r.duplicates.items[0].workspaces).toEqual(['/proj-a', '/proj-b'])
   })
 
+  it('PA-10 全量体检：提升候选的摘要手改进高危密钥，按项目聚合的候选只给遮盖后的文字', async () => {
+    const deps = makeDeps()
+    await deps.store.put(record({ id: 'mem_c', scope: 'workspace', workspacePath: '/proj-a', globalCandidate: true, summary: `候选 ${FAKE_SECRET.github}`, handEdited: true }))
+    const r = await executeScan({ scope: 'all', layers: 'rule' }, deps, fakeExec())
+    if (r.kind !== 'checkup') throw new Error(r.kind)
+    expect(r.promoteCandidates.byWorkspace).toEqual([{ workspacePath: '/proj-a', items: [{ id: 'mem_c', summary: `候选 ${SECRET_MASK}` }] }])
+    expect(renderScanResult(r)).not.toContain(FAKE_SECRET.github)
+  })
+
   it('无 LLM 时跨项目重复退用实体聚类保底（疑似级）', async () => {
     const deps = makeDeps()
     await seedTwoWs(deps)
@@ -611,6 +620,14 @@ describe('renderScanResult', () => {
     expect(text).toContain('memory_promote')
     expect(text).toContain(`另有 ${r.promoteCandidates.more} 条`) // 折叠计数取自结构化 more
     expect(text).toMatch(/memory_source.*出生语境|出生语境.*memory_source/)  // 提升前核验提示
+  })
+
+  it('PA-10 提升候选的摘要手改进高危密钥：体检报告只给遮盖后的文字', async () => {
+    const store = new MemoryStore(new InMemoryTable())
+    await store.put(record({ id: 'mem_c', scope: 'workspace', workspacePath: '/a', globalCandidate: true, summary: `候选 ${FAKE_SECRET.github}`, handEdited: true }))
+    const r = await scanSingle({ scope: '/a', layers: 'rule' }, makeDeps({ store }))
+    expect(r.promoteCandidates.items).toEqual([{ id: 'mem_c', summary: `候选 ${SECRET_MASK}` }])
+    expect(renderScanResult(r)).not.toContain(FAKE_SECRET.github)
   })
 
   it('无 globalCandidate 时 promoteCandidates 为空、不渲染建议段', async () => {
