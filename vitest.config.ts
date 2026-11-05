@@ -2,6 +2,8 @@ import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
   test: {
+    // 超过 1 秒的用例在默认 reporter 里标出来，慢文件一眼可见
+    slowTestThreshold: 1000,
     // 两个项目：服务端 tests/ 跑 Node；浏览器半侧 client/ 的组件测试跑 jsdom（spec「Testing Decisions」第 1 层）。
     projects: [
       { extends: true, test: { name: 'node', include: ['tests/**/*.spec.ts'] } },

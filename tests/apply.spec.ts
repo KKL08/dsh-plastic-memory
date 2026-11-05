@@ -2041,7 +2041,7 @@ describe('配置热生效（loader/volatile-update）', () => {
     await t.sessionView(v => expect(v).toEqual({ ...frozen, savedIds: [saved.record!.id] }))
   })
 
-  it('快照来历：首次冻结是对话开始时；失败的压缩与配置热更新不改；成功压缩后重建是压缩后，压缩前新写入的进了带入', async () => {
+  it('快照来历：首次冻结是对话开始时；失败的压缩不改；配置热更新后文本变了是对话中重新带入；成功压缩后重建是压缩后，压缩前新写入的进了带入', async () => {
     const t = await setup()
     await t.putGlobal({ id: 'mem_p', type: 'preference', content: '测试里不要 mock 数据库' })
     await t.assembleOnce()
@@ -2049,17 +2049,26 @@ describe('配置热生效（loader/volatile-update）', () => {
     const saved = await t.save({ type: 'project', name: '冻结到 3 月', content: 'merge freeze 到 3 月 5 日' })
     const id = saved.record!.id
 
+    // 失败的压缩不标过期、不重建，视图还是首次冻结那份
     t.endCompaction(4_000, 'summarizer failed')
-    await t.assembleOnce()
-    await t.update({ evidenceLookup: 'active' })
     await t.assembleOnce()
     const unchanged = await t.sessionView(v => expect(v).toMatchObject({ origin: 'start', savedIds: [id] }))
     expect(unchanged.compactedAt).toBeUndefined()
 
+    // 配置热更新重建：期间新记了一条，文本变了要补发，来历是对话中重新带入。会话视图是旁路节流写入，条件都放进等待里
+    await t.update({ evidenceLookup: 'active' })
+    await t.assembleOnce()
+    await t.sessionView(v => {
+      expect(v).toMatchObject({ origin: 'refreshed', savedIds: [id] })
+      expect(v.compactedAt).toBeUndefined()
+    })
+
     t.endCompaction(5_000)
     await t.assembleOnce()
-    const compacted = await t.sessionView(v => expect(v).toMatchObject({ origin: 'compacted', compactedAt: 5_000, savedIds: [id] }))
-    expect(compacted.injectedIds).toContain(id)
+    await t.sessionView(v => {
+      expect(v).toMatchObject({ origin: 'compacted', compactedAt: 5_000, savedIds: [id] })
+      expect(v.injectedIds).toContain(id)
+    })
   })
 
   /** 全局视图是旁路写入：等它满足条件。 */

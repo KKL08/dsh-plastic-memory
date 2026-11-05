@@ -82,6 +82,8 @@ function env(opts: EnvOpts = {}) {
     memoryRoot: root,
     collect: () => collectGlobalViews({ store, decisions, snapshots, cache, checkups, autoCheckups, registry, memoryRoot: root, now: () => clock.now }),
     collectCheckups: () => collectCheckupView({ store, checkups, autoCheckups, cache, now: () => clock.now, ...(opts.governanceEnabled !== undefined ? { isGovernanceEnabled: () => opts.governanceEnabled! } : {}) }),
+    // 替换间隔按测试时钟算、不真等：节流本身由视图测试单独覆盖
+    now: () => clock.now, sleep: async () => {},
   })
   // 本进程调度器收到的「设置改了」通知次数
   const autoCheckupChanges = { count: 0 }

@@ -804,12 +804,14 @@ describe('视图写入', () => {
   async function readView(name: GlobalViewName) {
     return JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES[name]), 'utf8'))
   }
+  /** 替换间隔按固定时钟算、不真等；专测节流的那一例自己注入 now 与 sleep。 */
+  const noWait = { now: () => T0, sleep: async () => {} }
 
   it('同一 tick 内多次触发只收集、只写一遍；之后再触发再写', async () => {
     const h = harness()
     await h.store.create(w({ id: 'mem_a', name: 'A' }))
     let collects = 0
-    const writer = new ViewWriter({ memoryRoot: root, collect: () => { collects++; return collectGlobalViews(h.sourceDeps) } })
+    const writer = new ViewWriter({ memoryRoot: root, collect: () => { collects++; return collectGlobalViews(h.sourceDeps) }, ...noWait })
     renames.length = 0
     await Promise.all([writer.request(['pending']), writer.request(['library']), writer.request(['pending'])])
     expect(collects).toBe(1)
@@ -861,7 +863,7 @@ describe('视图写入', () => {
   it('全量重写写出四个全局视图，内容合契约', async () => {
     const h = harness()
     await h.store.create(g({ id: 'mem_g', name: 'G' }))
-    const writer = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews(h.sourceDeps) })
+    const writer = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews(h.sourceDeps), ...noWait })
     await writer.rewriteAll()
     expect(pendingViewSchema.safeParse(await readView('pending')).success).toBe(true)
     expect(healthViewSchema.safeParse(await readView('health')).success).toBe(true)
@@ -872,12 +874,12 @@ describe('视图写入', () => {
   it('会话归属对照：同一 tick 的多笔合成一次写；新写入器接着磁盘上已有的对照往里添，同一 cwd 以最新为准', async () => {
     const mapPath = join(root, GUI_VIEW_DIR, GUI_WORKSPACE_MAP_FILE)
     const readMap = async () => workspaceMapViewSchema.parse(JSON.parse(await readFile(mapPath, 'utf8')))
-    const first = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') } })
+    const first = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') }, ...noWait })
     await Promise.all([first.requestWorkspace('/link/app', '/w/app'), first.requestWorkspace('/w/app/sub', '/w/app')])
     expect(await readMap()).toEqual({ version: GUI_VIEW_VERSION, cwds: { '/link/app': '/w/app', '/w/app/sub': '/w/app' } })
 
     // 插件重载：新写入器先读回旧对照再合并，不把之前见过的会话丢掉
-    const second = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') } })
+    const second = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') }, ...noWait })
     await second.requestWorkspace('/w/app/pkg', '/w/app/pkg')
     await second.requestWorkspace('/w/app/sub', '/w/app/sub')
     expect((await readMap()).cwds).toEqual({ '/link/app': '/w/app', '/w/app/sub': '/w/app/sub', '/w/app/pkg': '/w/app/pkg' })
@@ -887,7 +889,7 @@ describe('视图写入', () => {
     const mapPath = join(root, GUI_VIEW_DIR, GUI_WORKSPACE_MAP_FILE)
     await mkdir(join(root, GUI_VIEW_DIR), { recursive: true })
     await writeFile(mapPath, JSON.stringify({ version: GUI_VIEW_VERSION - 1, cwds: { '/w/app/sub': '/w/app' } }), 'utf8')
-    const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') } })
+    const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') }, ...noWait })
     await writer.requestWorkspace('/w/blog', '/w/blog')
     expect(workspaceMapViewSchema.parse(JSON.parse(await readFile(mapPath, 'utf8')))).toEqual({
       version: GUI_VIEW_VERSION, cwds: { '/w/app/sub': '/w/app', '/w/blog': '/w/blog' },
@@ -898,7 +900,7 @@ describe('视图写入', () => {
     const mapPath = join(root, GUI_VIEW_DIR, GUI_WORKSPACE_MAP_FILE)
     await mkdir(join(root, GUI_VIEW_DIR), { recursive: true })
     await writeFile(mapPath, JSON.stringify({ version: GUI_VIEW_VERSION - 1, cwds: { '/w/app/sub': '/w/app' } }), 'utf8')
-    const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') } })
+    const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') }, ...noWait })
     await writer.requestWorkspace('/w/app/sub', '/w/app')
     expect(workspaceMapViewSchema.parse(JSON.parse(await readFile(mapPath, 'utf8')))).toEqual({ version: GUI_VIEW_VERSION, cwds: { '/w/app/sub': '/w/app' } })
   })
@@ -907,13 +909,13 @@ describe('视图写入', () => {
     const mapPath = join(root, GUI_VIEW_DIR, GUI_WORKSPACE_MAP_FILE)
     await mkdir(join(root, GUI_VIEW_DIR), { recursive: true })
     await writeFile(mapPath, '{not json', 'utf8')
-    const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') } })
+    const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') }, ...noWait })
     await writer.requestWorkspace('/w/app', '/w/app')
     expect(workspaceMapViewSchema.parse(JSON.parse(await readFile(mapPath, 'utf8'))).cwds).toEqual({ '/w/app': '/w/app' })
   })
 
   it('会话视图：同一 tick 内同一会话多次写入合并为最后一份', async () => {
-    const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') } })
+    const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') }, ...noWait })
     const base = {
       sessionId: 's/1', frozenAt: T0, origin: 'start' as const, budget: 4000, overflowMode: 'relax' as const,
       tokens: { workspace: 1, global: 2, fixed: 3 }, usedTokens: 3, injectedIds: ['mem_a'], coreIds: [], titleOnlyIds: [], omittedCount: 0,
@@ -938,7 +940,7 @@ describe('视图写入', () => {
     let release!: () => void
     const gate = new Promise<void>(resolve => { release = resolve })
     let collects = 0
-    const writer = new ViewWriter({ memoryRoot: root, collect: async () => { collects++; await gate; return collectGlobalViews(h.sourceDeps) } })
+    const writer = new ViewWriter({ memoryRoot: root, collect: async () => { collects++; await gate; return collectGlobalViews(h.sourceDeps) }, ...noWait })
     const inFlight = writer.rewriteAll()
     // 排在进行中那次之后：一次节流写、一次全量重写
     void writer.request(['pending'])
@@ -965,7 +967,7 @@ describe('视图写入', () => {
   })
 
   it('卸载：同一 tick 内刚请求、还没开始的写入整批丢弃', async () => {
-    const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') } })
+    const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') }, ...noWait })
     void writer.request(['library'])
     void writer.requestSession(buildSessionView(sessionBase))
     void writer.requestWorkspace('/w/app', '/w/app')
