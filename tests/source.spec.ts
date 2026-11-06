@@ -127,7 +127,7 @@ describe('executeSource 在子 agent 会话里', () => {
     delegation: { depth: 1, parentSessionId: 'sess-main', mode: 'one-shot' as const },
   }
 
-  it('出处在别的会话（含主会话）的记录 → subagent-restricted，不读事件；原因让模型带回主会话查', async () => {
+  it('PA-15：出处在别的会话（含主会话）的记录 → subagent-restricted，不读事件；给模型的文本以「未回查：」开头、后接原因', async () => {
     const store = await storeWith(
       record({ id: 'mem_main' }),
       record({ id: 'mem_sibling', source: { sessionId: 'sess-sibling', eventRange: [3, 8], sourceMode: 'agent-inferred' } }),
@@ -138,7 +138,7 @@ describe('executeSource 在子 agent 会话里', () => {
       expect(result, memoryId).toEqual({
         kind: 'rejected', memoryId, code: 'subagent-restricted', reason: '这条记忆的出处在别的会话，带回主会话查',
       })
-      expect(renderSourceResult(result)).toBe('未回查：这条记忆的出处在别的会话，带回主会话查')   // PA-15 前缀后接原因
+      expect(renderSourceResult(result)).toBe('未回查：这条记忆的出处在别的会话，带回主会话查')
     }
     expect(readEvent).not.toHaveBeenCalled()
   })

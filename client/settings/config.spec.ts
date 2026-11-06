@@ -229,7 +229,7 @@ describe('预设类型：改、删、恢复', () => {
 })
 
 describe('toPluginConfig：配置段 → 界面用到的几项', () => {
-  it('设置里超限处理、提升去处的每个取值都能转成插件配置', () => {
+  it('PA-53：设置里超限处理、提升去处的每个取值都能转成插件配置', () => {
     for (const overflow of OVERFLOW_MODES) {
       for (const target of PROMOTE_TARGETS) {
         const section = { ...DEFAULT_SECTION, snapshotOverflow: overflow, governance: { ...DEFAULT_SECTION.governance, globalPromoteTarget: target } }
