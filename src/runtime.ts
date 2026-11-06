@@ -74,6 +74,8 @@ export interface SnapshotCacheDeps {
   log?: MemoryLogger
   /** 会话是持久型子会话时回它自己的会话 id（注入带上它创建的待确认记录），主会话、一次性子会话回 undefined。每次构建现问；缺省都按 undefined。 */
   ownSessionIdOf?: (session: object) => string | undefined
+  /** 组装（有效期判定）、超限同步、计召回用的时钟，缺省取当前时间。 */
+  now?: () => number
 }
 
 /** 冻结快照的来历（会话视图的 origin、compactedAt）。 */
@@ -99,9 +101,11 @@ export class SnapshotCache {
   private resolving = new WeakMap<object, Promise<void>>()
 
   private deps: SnapshotCacheDeps
+  private readonly log: MemoryLogger
 
   constructor(deps: SnapshotCacheDeps) {
     this.deps = deps
+    this.log = deps.log ?? console
   }
 
   setWorkspacePath(session: object, path: string | undefined): void {
@@ -149,7 +153,7 @@ export class SnapshotCache {
     try {
       return await this.build(session)
     } catch (err) {
-      ;(this.deps.log ?? console).error('[plastic-memory] 快照组装失败:', err)
+      this.log.error('[plastic-memory] 快照组装失败:', err)
       return undefined
     }
   }
@@ -168,7 +172,7 @@ export class SnapshotCache {
     // 上限、超限处理、溯源档位可能是用时读配置的 getter：一次构建只取一次值，组装与冻结后的超限同步用同一份
     const deps = { ...this.deps }
     // 预读范围：只读 active，global + 当前 workspace（未解析时 global-only）；同一次读取的隔离文件数给冷启动文案用
-    const now = Date.now()
+    const now = deps.now?.() ?? Date.now()
     const preread = await prereadSnapshot(deps.store, workspacePath)
     const { text, coreIds, ...usage } = assembleSnapshot({ ...deps, ...preread, workspacePath, now, ownSessionId: deps.ownSessionIdOf?.(session) })
     if (!isResolved) return text
@@ -192,7 +196,7 @@ export class SnapshotCache {
     try {
       await this.deps.store.maintain({ kind: 'visible', workspacePath })
     } catch (err) {
-      ;(this.deps.log ?? console).error('[plastic-memory] 记忆目录维护失败:', err)
+      this.log.error('[plastic-memory] 记忆目录维护失败:', err)
     }
     await this.afterFreeze(deps, session, workspacePath, now, { ...usage, ...origin, coreIds })
     return text
@@ -216,7 +220,7 @@ export class SnapshotCache {
         frozenAt: now, budget, overflowMode: mode, ...usage, overflowChanged,
       })
     } catch (err) {
-      ;(this.deps.log ?? console).error('[plastic-memory] 快照冻结后的超限同步或会话视图失败:', err)
+      this.log.error('[plastic-memory] 快照冻结后的超限同步或会话视图失败:', err)
     }
   }
 
@@ -228,7 +232,7 @@ export class SnapshotCache {
     const deps = { ...this.deps }
     if (!deps.overflowLedger) return
     const mode = deps.overflow ?? 'relax'
-    const now = Date.now()
+    const now = deps.now?.() ?? Date.now()
     for (const scope of new Set(scopes)) {
       const workspacePath = scope === 'global' ? undefined : scope
       const { text: _text, coreIds: _coreIds, ...usage } = assembleSnapshot({ ...deps, ...(await prereadSnapshot(deps.store, workspacePath)), workspacePath, now })
@@ -249,7 +253,7 @@ export class SnapshotCache {
     const fresh = [...new Set(ids)].filter(id => !counted.has(id))
     if (fresh.length === 0) return
     for (const id of fresh) counted.add(id)
-    await this.deps.store.markRecalled(fresh)
+    await this.deps.store.markRecalled(fresh, this.deps.now?.() ?? Date.now())
   }
 
   /** compaction 结束：标记过期，不清空缓存，也不清召回记录。失败的压缩只走这里，不改来历。 */

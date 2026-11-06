@@ -12,7 +12,8 @@ import { createSystemMessage, createUserMessage, type MessageSourceMap, type Use
 
 // 真实 dsh-tools / dsh-storage-domain 包已从 npm 装好，此处不 mock 任何框架包。
 import { apply, Config, inject } from '../src/index.ts'
-import { SidecarStore, STATE_DIR, KV_IMPORT_MARKER, RECALL_STATS_FILE } from '../src/storage/sidecar.ts'
+import { SidecarStore, STATE_DIR, RECALL_STATS_FILE } from '../src/storage/sidecar.ts'
+import { KV_IMPORT_MARKER } from '../src/storage/legacy-kv-import.ts'
 import { kvImportMarkerSchema } from '../src/storage/schema.ts'
 import { WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
@@ -33,7 +34,7 @@ import {
 import { baselineProjectionDefinition } from '../src/governance/baseline.ts'
 import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
 import {
-  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_FILE, deletedViewSchema, healthViewSchema, libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema,
+  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_FILE, deletedViewSchema, libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema,
   workspaceMapViewSchema, type LibraryView, type PendingView,
 } from '../src/gui/contract.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
@@ -1043,7 +1044,7 @@ describe('注入链接线', () => {
     }
   })
 
-  // 解析超时放行要等满组装的超时（1.5 秒），两步约 3 秒
+  // 解析超时放行要等满组装的超时（1.5 秒）：假的 setTimeout 推过去，不真等
   it('工作区解析超时：两步拿到同一份临时文本只发一次；解析落定后冻结的完整版不同，再发一次', async () => {
     const memoryRoot = await makeTmpRoot()
     const cwd = await makeTmpRoot() // resolveWorkspacePath 走 realpath，cwd 须真实存在
@@ -1062,17 +1063,29 @@ describe('注入链接线', () => {
     const t = await boot({ memoryRoot, get: name => (name === 'workspaceRegistry' ? workspaceRegistry : undefined) })
     const session = hostSession('sess-1', { cwd })
 
-    await t.step(session, 1, { messages: [userSaid('你好')] })
-    await t.step(session, 2)
-    expect(visibleSnapshots(session)).toEqual([expect.not.stringContaining('仅本仓库生效的偏好')])
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      // 一直推到这一步做完：超时之外，路上的视图替换间隔等也用 setTimeout
+      const settled = async (step: Promise<unknown>) => {
+        let isDone = false
+        const tracked = step.finally(() => { isDone = true })
+        while (!isDone) await vi.advanceTimersByTimeAsync(100)
+        await tracked
+      }
+      await settled(t.step(session, 1, { messages: [userSaid('你好')] }))
+      await settled(t.step(session, 2))
+      expect(visibleSnapshots(session)).toEqual([expect.not.stringContaining('仅本仓库生效的偏好')])
 
-    settle()
-    await t.step(session, 3)
+      settle()
+      await settled(t.step(session, 3))
+    } finally {
+      vi.useRealTimers()
+    }
     const [provisional, full] = visibleSnapshots(session)
     expect(provisional).toContain('压缩前就有的偏好')
     expect(full).toContain('仅本仓库生效的偏好')
     expect(visibleSnapshots(session)).toHaveLength(2)
-  }, 10_000)
+  })
 
   it('记忆里的 {{ 原样出现在快照消息里（自有消息不过宿主的变量插值）', async () => {
     const t = await boot({ memories: [{ id: 'mem_vue', type: 'preference', content: 'Vue 模板写 {{ msg }}，CI 里写 ${{ secrets.NPM_TOKEN }}' }] })
@@ -1361,7 +1374,7 @@ describe('子 agent 委派信息', () => {
       fakeExec({ agent: { session: s, options: {} } as unknown as ToolRunContext['agent'] }),
     ) as SaveOut
     /** 只看 subagent 投影的退化告警（证据锚读 turnBoundary 的告警另有用例）。 */
-    const modeWarnings = () => warnings.filter(w => w.includes('subagent projection'))
+    const modeWarnings = () => warnings.filter(w => w.includes('读不到 subagent 投影'))
     return { defs, session, save, modeWarnings, created: (s: Session) => base.listeners.get('session/created')!(s) }
   }
   const projectionWith = (subagent: unknown) => ({ stateOf: (_s: object, key: string) => (key === 'subagent' ? subagent : undefined) })
@@ -2154,14 +2167,10 @@ describe('配置热生效（loader/volatile-update）', () => {
       expect.objectContaining({ kind: 'overflow', mode: 'relax', tier: expected.tier, workspacePath }),
     ])
     expect(expected.tier).toBe(1)
-    // 会话所在项目自己没有记忆：健康里单列这条超限，档位与待处理一致
-    expect((await readNow('health', healthViewSchema)).overflowOnlyLayers).toEqual([{ layer: { kind: 'workspace', workspacePath }, overflow: { ...expected, isDismissed: false } }])
 
     await t.update({ snapshotTokenBudget: usedTokens + 1000 })
     const pending = await readNow('pending', pendingViewSchema)
     expect([pending.items, pending.dot]).toEqual([[], 'none'])
-    const health = await readNow('health', healthViewSchema)
-    expect([health.layers.map(l => l.overflow).filter(o => o !== null), health.overflowOnlyLayers]).toEqual([[], []])
     expect(await new PendingDecisionsStore(sidecarAt(t.memoryRoot).pending).listOverflow()).toEqual([])
   })
 })

@@ -49,16 +49,18 @@ export type WarningCode =
   | 'subagent-scope-local'    // 子 agent 填 global：落当前项目、不标提升候选
 
 /** memory_scan 的说明性 note（scan.ts）。 */
-export type ScanNoteCode =
-  | 'semantic-unavailable'    // layers=full 但拿不到 LLM，只返回规则层
-  | 'no-layer-executed'       // layers=semantic 且拿不到 LLM，什么都没跑
-  | 'semantic-batched'        // 记忆超出一次调用的 token 预算，语义层分批检查，跨批的成对问题可能漏
-  | 'semantic-failed'         // LLM 抛异常或两次输出无法解析，未更新语义缓存
-  | 'model-unavailable'       // 模型用不了：宿主报未登录或缺凭据（governance/host-llm.ts MODEL_UNAVAILABLE_HOST_CODES），未更新语义缓存；不算失败
-  | 'baseline-missing'        // 未检测到 AGENTS.md 基线，垂直冲突检测未执行
-  | 'baseline-session-scoped' // 基线随当前会话，其他 workspace 的垂直冲突检测已跳过
-  | 'cross-ws-failed'         // 跨项目重复分析失败，退用实体聚类保底
-  | 'conflicts-settled'       // 有冲突此前裁决为两边都留、双方未改，本次不再列出
+export const SCAN_NOTE_CODES = [
+  'semantic-unavailable',    // layers=full 但拿不到 LLM，只返回规则层
+  'no-layer-executed',       // layers=semantic 且拿不到 LLM，什么都没跑
+  'semantic-batched',        // 记忆超出一次调用的 token 预算，语义层分批检查，跨批的成对问题可能漏
+  'semantic-failed',         // LLM 抛异常或两次输出无法解析，未更新语义缓存
+  'model-unavailable',       // 模型用不了：宿主报未登录或缺凭据（governance/host-llm.ts MODEL_UNAVAILABLE_HOST_CODES），未更新语义缓存；不算失败
+  'baseline-missing',        // 未检测到 AGENTS.md 基线，垂直冲突检测未执行
+  'baseline-session-scoped', // 基线随当前会话，其他 workspace 的垂直冲突检测已跳过
+  'cross-ws-failed',         // 跨项目重复分析失败，退用实体聚类保底
+  'conflicts-settled',       // 有冲突此前裁决为两边都留、双方未改，本次不再列出
+] as const
+export type ScanNoteCode = (typeof SCAN_NOTE_CODES)[number]
 
 /**
  * 体检完成记录的发起方（体检记录表，storage/schema.ts）：manual = 界面手动（记忆页的 `/memory scan`），auto = 自动体检，
@@ -72,7 +74,6 @@ export type CheckupInitiator = (typeof CHECKUP_INITIATORS)[number]
  * model-error = 模型调用出错（宿主给了错误码时带上），unparseable = 模型输出两次都解析不了，error = 体检本身出错。
  */
 export const CHECKUP_CAUSE_KINDS = ['no-default-model', 'model-error', 'unparseable', 'error'] as const
-export type CheckupCauseKind = (typeof CHECKUP_CAUSE_KINDS)[number]
 
 /** memory_health 建议的分层并列结构（health.ts）：独占层单元素，行动项层多元素，无事为空数组。 */
 export type HealthRecommendationKind =
@@ -114,12 +115,14 @@ export type FrontmatterErrorCode =
   | 'schema-invalid'    // 记录 schema 校验失败
 
 /** 读取记忆目录时的目录级说明（info 级，按文件或目录列出；storage/frontmatter.ts、storage/file-table.ts、tools/layer-preread.ts）。 */
-export type DirectoryNoteCode =
-  | 'reserved-keys'     // frontmatter 写了保留键（scope、workspacePath、召回统计、content），已忽略
-  | 'marker-missing'    // workspace 目录缺 .workspace 标记（或标记为空），目录不进清单、文件不读
-  | 'dir-unreadable'    // 目录不可读（权限等），计空
-  | 'dir-empty'         // workspace 目录顶层没有记忆文件（只剩归档或全空），不进体检清单
-  | 'duplicate-id'      // 同一 id 有多个文件：读取时按取舍规则用一份，其余副本不自动删（health / scan 报出）
+export const DIRECTORY_NOTE_CODES = [
+  'reserved-keys',     // frontmatter 写了保留键（scope、workspacePath、召回统计、content），已忽略
+  'marker-missing',    // workspace 目录缺 .workspace 标记（或标记为空），目录不进清单、文件不读
+  'dir-unreadable',    // 目录不可读（权限等），计空
+  'dir-empty',         // workspace 目录顶层没有记忆文件（只剩归档或全空），不进体检清单
+  'duplicate-id',      // 同一 id 有多个文件：读取时按取舍规则用一份，其余副本不自动删（health / scan 报出）
+] as const
+export type DirectoryNoteCode = (typeof DIRECTORY_NOTE_CODES)[number]
 
 /** 带 code 的说明条目（scan notes / save warnings 共用形状）。 */
 export interface CodedNote<C extends string> {

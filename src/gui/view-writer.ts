@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { MemoryStore, MemoryLogger } from '../store.ts'
 import type { KvTable } from '../kv-table.ts'
@@ -49,6 +49,7 @@ export interface ViewSourceDeps {
  */
 export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalViews> {
   const now = deps.now?.() ?? Date.now()
+  const log = deps.log ?? console
   const listing = await deps.store.listWorkspaceDirs()
   const ws = (path: string): LayerRef => ({ kind: 'workspace', path })
   const readLayers: LayerRef[] = [{ kind: 'global' }, ...[...new Set(listing.entries.map(e => e.workspacePath))].sort().map(ws)]
@@ -81,12 +82,12 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
     try {
       await deps.checkups?.removeMissingWorkspaces(present)
     } catch (err) {
-      (deps.log ?? console).warn('[plastic-memory] 体检记录表清理失败，下次生成视图再试', err)
+      log.warn('[plastic-memory] 体检记录表清理失败，下次生成视图再试', err)
     }
     try {
       await deps.autoCheckups?.removeMissingWorkspaces(present)
     } catch (err) {
-      (deps.log ?? console).warn('[plastic-memory] 自动体检设置表清理失败，下次生成视图再试', err)
+      log.warn('[plastic-memory] 自动体检设置表清理失败，下次生成视图再试', err)
     }
   }
   if (deps.ignores !== undefined) {
@@ -97,7 +98,7 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
     try {
       await deps.ignores.remove(staleIgnores(data.ignores, data.byId, { isComplete, before: now }))
     } catch (err) {
-      (deps.log ?? console).warn('[plastic-memory] 建议忽略表清理失败，下次生成视图再试', err)
+      log.warn('[plastic-memory] 建议忽略表清理失败，下次生成视图再试', err)
     }
   }
   return buildGlobalViews({
@@ -147,6 +148,8 @@ export async function collectCheckupView(deps: CheckupSourceDeps): Promise<Check
  * 节流：同一 tick 内的多次请求合并成一次收集、每个受影响的文件只写一遍；写入串行，进行中再来的请求排到下一轮。
  * 同一个文件两次替换至少隔开 VIEW_REPLACE_GAP_MS：宿主的文件观察对同一文件约 50ms 内的变更只通知第一次，
  * 紧挨着的第二次替换会被漏掉，浏览器半侧就停在上一版，直到下一次变化或刷新。
+ * 几个进程（桌面版与 `dsh web`）同开时：全局视图和体检视图替换前比生成时刻，早收集的不盖晚收集的（见 writeText）；
+ * 归属对照每次等完替换间隔、写前重读磁盘再合并。
  * 视图是派生缓存，写失败只记日志，不影响触发它的操作。
  * 卸载（dispose）后不再写：之后的请求直接返回，排队未开始的丢弃，进行中的那次写完才返回。
  */
@@ -159,7 +162,7 @@ export class ViewWriter {
   private readonly sessions = new Map<string, SessionView>()
   /** 待写进归属对照的条目（原始 cwd → 项目）。 */
   private readonly cwds = new Map<string, string>()
-  /** 已落盘的归属对照；首次写入前从磁盘读回（插件重载后接着记，不丢之前见过的会话）。 */
+  /** 最近一次落盘或读到的归属对照，只用来跳过和它一样的请求；写时总是重读磁盘再合并。 */
   private workspaceMap: Record<string, string> | undefined
   private scheduled: Promise<void> | undefined
   private tail: Promise<void> = Promise.resolve()
@@ -216,7 +219,10 @@ export class ViewWriter {
     return this.schedule()
   }
 
-  /** 全量重写入口：不等节流，排在进行中的写入之后立即收集并写出四个全局视图；返回写出的视图（已卸载或写失败时为 undefined）。 */
+  /**
+   * 全量重写入口：不等节流，排在进行中的写入之后立即收集并写出四个全局视图。返回本次收集的视图（已卸载或写失败时为 undefined）；
+   * 盘上已有别的进程写的更晚的视图时，对应文件不写，返回的仍是本次收集的那份。
+   */
   async rewriteAll(): Promise<GlobalViews | undefined> {
     if (this.disposed) return undefined
     let written: GlobalViews | undefined
@@ -263,7 +269,7 @@ export class ViewWriter {
 
   private async writeGlobal(names: readonly GlobalViewName[]): Promise<GlobalViews> {
     const views = await this.collect()
-    for (const name of names) await this.writeFile(GUI_VIEW_FILES[name], views[name])
+    for (const name of names) await this.writeText(GUI_VIEW_FILES[name], JSON.stringify(views[name]), views[name].generatedAt)
     // 上次体检和健康视图同源：写健康视图的时机（体检、写工具、配置热更新、刷新）体检视图也跟着重写
     if (names.includes('health')) await this.writeCheckups()
     return views
@@ -271,30 +277,43 @@ export class ViewWriter {
 
   private async writeCheckups(): Promise<void> {
     if (this.collectCheckups === undefined) return
-    const text = JSON.stringify(await this.collectCheckups())
-    const current = await readFile(join(this.dir, GUI_CHECKUP_VIEW_FILE), 'utf8').catch(() => undefined)
-    if (current !== text) await this.writeText(GUI_CHECKUP_VIEW_FILE, text)
+    const view = await this.collectCheckups()
+    // 比内容时去掉生成时刻：每次收集都换新时刻，只差它就重写会让界面白收一次文件事件
+    const content = (v: unknown) => JSON.stringify({ ...(v as object), generatedAt: undefined })
+    const current = await readFile(join(this.dir, GUI_CHECKUP_VIEW_FILE), 'utf8').then(t => JSON.parse(t) as unknown).catch(() => undefined)
+    if (current === undefined || content(current) !== content(view)) await this.writeText(GUI_CHECKUP_VIEW_FILE, JSON.stringify(view), view.generatedAt)
   }
 
   private async writeWorkspaceMap(entries: ReadonlyArray<readonly [string, string]>): Promise<void> {
-    // 磁盘上是旧版本号的：客户端按版本认，不认就退回原始 cwd，内容没变也重写一次
-    const onDisk = this.workspaceMap === undefined ? await this.readWorkspaceMap() : undefined
-    const map = this.workspaceMap ?? onDisk!.cwds
-    const next = { ...map }
-    for (const [cwd, workspacePath] of entries) next[cwd] = workspacePath
-    if (onDisk?.isOutdated !== true && entries.every(([cwd, workspacePath]) => map[cwd] === workspacePath)) { this.workspaceMap = next; return }
-    const view: WorkspaceMapView = { version: GUI_VIEW_VERSION, cwds: next }
-    await this.writeFile(GUI_WORKSPACE_MAP_FILE, view)
-    this.workspaceMap = next
+    // 等完替换间隔再重读磁盘合并：几个进程同开时各记各的会话，手里的旧对照、等待之前读到的对照都会盖掉别的进程刚记下的
+    let merged: Record<string, string> | undefined
+    await this.replace(GUI_WORKSPACE_MAP_FILE, async () => {
+      const onDisk = await this.readWorkspaceMap()
+      merged = { ...onDisk.cwds }
+      for (const [cwd, workspacePath] of entries) merged[cwd] = workspacePath
+      // 磁盘上是旧版本号的：客户端按版本认，不认就退回原始 cwd，内容没变也重写一次
+      if (!onDisk.isOutdated && entries.every(([cwd, workspacePath]) => onDisk.cwds[cwd] === workspacePath)) return undefined
+      const view: WorkspaceMapView = { version: GUI_VIEW_VERSION, cwds: merged }
+      return JSON.stringify(view)
+    })
+    this.workspaceMap = merged
   }
 
   /**
    * 磁盘上的旧对照；没有、读不懂（坏 JSON、形状不对）都从空表开始。读时不看版本号，只按 cwds 的形状读：视图版本升级时
    * 对照的形状没变，整份丢掉会让之前见过的会话都失去归属（写出时照旧写当前版本）。isOutdated：读到了、但版本号不是当前的。
+   * 其他读错（权限、I/O）往外抛，本次不写：当空表合并会把别的会话的归属都清掉。
    */
   private async readWorkspaceMap(): Promise<{ cwds: Record<string, string>; isOutdated: boolean }> {
+    let text: string
     try {
-      const json: unknown = JSON.parse(await readFile(join(this.dir, GUI_WORKSPACE_MAP_FILE), 'utf8'))
+      text = await readFile(join(this.dir, GUI_WORKSPACE_MAP_FILE), 'utf8')
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { cwds: {}, isOutdated: false }
+      throw err
+    }
+    try {
+      const json: unknown = JSON.parse(text)
       const parsed = workspaceMapViewSchema.pick({ cwds: true }).safeParse(json)
       const isOutdated = (json as { version?: unknown } | null)?.version !== GUI_VIEW_VERSION
       return parsed.success ? { cwds: { ...parsed.data.cwds }, isOutdated } : { cwds: {}, isOutdated: false }
@@ -307,15 +326,38 @@ export class ViewWriter {
     await this.writeText(fileName, JSON.stringify(view))
   }
 
-  private async writeText(fileName: string, text: string): Promise<void> {
+  private writeText(fileName: string, text: string, generatedAt?: number): Promise<void> {
+    return this.replace(fileName, async () => text, generatedAt)
+  }
+
+  /**
+   * 替换一个视图文件。render 在替换间隔等完之后才调用，返回 undefined 就不写：要按盘上现状合并的（归属对照）在这里读盘。
+   * generatedAt：这份视图的生成时刻。给了就紧贴 rename 读盘上那份，盘上的更晚就不写（删掉临时文件）：
+   * 几个进程同开时，早收集、晚写完的视图不盖掉别的进程刚写的新视图。
+   */
+  private async replace(fileName: string, render: () => Promise<string | undefined>, generatedAt?: number): Promise<void> {
     await mkdir(this.dir, { recursive: true })
     const path = join(this.dir, fileName)
+    const last = this.replacedAt.get(fileName)
+    // 封顶：时钟往回调过时 last 在此刻之后，不封顶就要多等回调的那段
+    const wait = last === undefined ? 0 : Math.min(last + VIEW_REPLACE_GAP_MS - this.now(), VIEW_REPLACE_GAP_MS)
+    if (wait > 0) await this.sleep(wait)
+    const text = await render()
+    if (text === undefined) return
     const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
     await writeFile(tmp, text, 'utf8')
-    const last = this.replacedAt.get(fileName)
-    const wait = last === undefined ? 0 : last + VIEW_REPLACE_GAP_MS - this.now()
-    if (wait > 0) await this.sleep(wait)
+    if (generatedAt !== undefined && await this.generatedAtOnDisk(path) > generatedAt) {
+      await rm(tmp, { force: true })
+      return
+    }
     await rename(tmp, path)
     this.replacedAt.set(fileName, this.now())
+  }
+
+  /** 盘上那份视图的生成时刻：读不到、没有这个字段、版本号不是当前的，或晚于此刻（时钟往回调过）的按 0 算。 */
+  private async generatedAtOnDisk(path: string): Promise<number> {
+    const onDisk = await readFile(path, 'utf8').then(t => JSON.parse(t) as { version?: unknown; generatedAt?: unknown } | null).catch(() => undefined)
+    const at = onDisk?.version === GUI_VIEW_VERSION ? onDisk.generatedAt : undefined
+    return typeof at === 'number' && at <= this.now() ? at : 0
   }
 }

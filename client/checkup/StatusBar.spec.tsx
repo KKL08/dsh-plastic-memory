@@ -50,8 +50,8 @@ const NO_DEDUCTIONS: Deductions = { rule: { points: 0, types: [] }, content: { p
 
 function healthLayer(layer: GuiLayerRef, total: number, overrides: Partial<HealthView['layers'][number]> = {}): HealthView['layers'][number] {
   return {
-    layer, totalMemories: total, score: 90, tier: 'green', gate: { secret: false }, issues: [], staleCount: 0,
-    lastCheckupAt: NOW - DAY, overflow: null, ignored: [], deductions: NO_DEDUCTIONS, ...overrides,
+    layer, totalMemories: total, score: 90, tier: 'green', gate: { secret: false }, issues: [],
+    lastCheckupAt: NOW - DAY, ignored: [], deductions: NO_DEDUCTIONS, ...overrides,
   }
 }
 function health({ governanceEnabled = true, app = {} }: { governanceEnabled?: boolean; app?: Partial<HealthView['layers'][number]> } = {}): HealthView {

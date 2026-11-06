@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
+import type { LegacyKvTables } from '../src/storage/legacy-kv-import.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
 import { computeDigest, encodeRecord, splitFrontmatter } from '../src/storage/frontmatter.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE, STATE_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
@@ -65,12 +66,17 @@ interface EnvOpts {
   heartbeat?: (callback: () => void, delayMs: number) => () => void
   /** 记忆表（缺省真实临时目录上的 FileTable）。 */
   table?: MemoryTable
+  /** 侧表的旧 KV 导入来源（缺省没有旧 KV 可导）。 */
+  openLegacyKv?: () => Promise<LegacyKvTables | undefined>
 }
 
 function env(opts: EnvOpts = {}) {
   const clock = { now: opts.now ?? NOW }
   // 侧表也用这个时钟：认领的时间和是否残留按它算
-  const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }, now: () => clock.now })
+  const sidecar = new SidecarStore({
+    root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }, now: () => clock.now,
+    ...(opts.openLegacyKv !== undefined ? { openLegacyKv: opts.openLegacyKv } : {}),
+  })
   // 表和命令用同一个时钟：软删记的时刻和最近删除的保留期清扫才对得上
   const store = new MemoryStore(opts.table ?? new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now }), undefined, sidecar.recallStats)
   const decisions = new PendingDecisionsStore(opts.wrapPending?.(sidecar.pending) ?? sidecar.pending)
@@ -97,6 +103,7 @@ function env(opts: EnvOpts = {}) {
     getLlm: () => (opts.llm === undefined ? null : opts.llm),
     getBaseline: () => opts.baseline ?? null,
     ...(opts.governanceEnabled !== undefined ? { isGovernanceEnabled: () => opts.governanceEnabled! } : {}),
+    isLegacyImportSettled: () => sidecar.isLegacyImportSettled(),
     now: () => clock.now,
   })
   /** 按宿主 parseCommand 的切法：命令名之后的原文（含分隔空白）交给处理器。 */
@@ -649,11 +656,23 @@ describe('restore：没有快照覆盖的归档记忆', () => {
     return found.filePath.startsWith(join(found.dir, ARCHIVE_DIR))
   }
 
+  it('PA-17 恢复归档文件本身：updatedAt 取注入的时钟', async () => {
+    const e = env({ now: NOW + 60_000 })
+    await mkdir(join(wsDir(), ARCHIVE_DIR), { recursive: true })
+    await writeFile(join(wsDir(), WORKSPACE_MARKER), SESSION_WS + '\n')
+    const hand = record({ id: 'mem_hand', name: '手工归档', scope: 'workspace', workspacePath: SESSION_WS, status: 'deleted', deletedAt: NOW, updatedAt: NOW })
+    await writeFile(join(wsDir(), ARCHIVE_DIR, 'hand.md'), encodeRecord(hand, {}))
+
+    ok(await e.run({ cmd: 'restore', memoryId: 'mem_hand', layer: own }))
+    expect(await e.store.get('mem_hand', { workspacePath: SESSION_WS })).toMatchObject({ status: 'active', updatedAt: NOW + 60_000 })
+  })
+
   it('手工放进 .archive/ 的文件（status 仍写 active）：恢复成功，回到层顶层、重新出现在全部记忆里', async () => {
     const e = env()
     await mkdir(join(wsDir(), ARCHIVE_DIR), { recursive: true })
     await writeFile(join(wsDir(), WORKSPACE_MARKER), SESSION_WS + '\n')
-    const hand = record({ id: 'mem_hand', name: '手工归档', content: '用 pnpm', scope: 'workspace', workspacePath: SESSION_WS, updatedAt: NOW })
+    // 手工放进去的文件早于恢复：恢复靠 updatedAt 记成恢复时刻才写回顶层
+    const hand = record({ id: 'mem_hand', name: '手工归档', content: '用 pnpm', scope: 'workspace', workspacePath: SESSION_WS, updatedAt: NOW - 60_000 })
     await writeFile(join(wsDir(), ARCHIVE_DIR, 'hand.md'), encodeRecord(hand, {}))
     ok(await e.run({ cmd: 'refresh-views' }))
     expect(await deletedIds(e)).toEqual(['mem_hand'])
@@ -766,6 +785,28 @@ describe('forget 遇到含密钥的记忆', () => {
     await e.store.create(record({ id: 'mem_plain' }))
     ok(await e.run({ cmd: 'forget', memoryId: 'mem_plain' }))
     expect((await e.store.get('mem_plain'))!.status).toBe('deleted')
+  })
+})
+
+describe('彻底删除与旧 KV 导入', () => {
+  const oldSnapshot = { id: 'snap_old', createdAt: 1, operation: 'manual' as const, description: '旧快照', memoryIds: [], data: [] }
+  it.each([
+    ['旧 KV 服务暂缺、还没导入', async (): Promise<LegacyKvTables | undefined> => undefined],
+    ['导入了但旧行还没删掉', async (): Promise<LegacyKvTables | undefined> => ({ snapshots: [['snap_old', oldSnapshot]], pending: [], discard: async () => { throw new Error('宿主忙') } })],
+  ])('PA-06 %s：彻底删除回 failed、说明旧数据迁移还没收尾，在用的密钥条目和最近删除里的都不动', async (_label, openLegacyKv) => {
+    const e = env({ openLegacyKv })
+    await e.store.create(record({ id: 'mem_s', content: `token ${FAKE_SECRET.sk}` }))
+    await e.store.create(record({ id: 'mem_gone', name: '已删' }))
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_gone' }))
+    const snapshots = await e.snapshots.list()
+    for (const memoryId of ['mem_s', 'mem_gone']) {
+      const r = err(await e.run({ cmd: 'hard-delete', memoryId }))
+      expect([r.code, r.detail]).toEqual(['failed', expect.stringContaining('旧数据迁移还没收尾')])
+      expect(r.detail).not.toContain('带回来')
+    }
+    expect((await e.store.get('mem_s'))!.status).toBe('active')
+    expect((await e.store.get('mem_gone'))!.status).toBe('deleted')
+    expect(await e.snapshots.list()).toEqual(snapshots)
   })
 })
 
@@ -3057,18 +3098,18 @@ describe('refresh-views', () => {
     }
   })
 
-  it('视图版本 13：开着旧页面的升级后，磁盘上旧版本（12）的全局视图和体检视图经 refresh-views 按新版本重新生成', async () => {
-    expect(GUI_VIEW_VERSION).toBe(13)
+  it('视图版本 14：开着旧页面的升级后，磁盘上旧版本（13）的全局视图和体检视图经 refresh-views 按新版本重新生成', async () => {
+    expect(GUI_VIEW_VERSION).toBe(14)
     const e = env()
     await seedPair(e)
     await mkdir(join(root, GUI_VIEW_DIR), { recursive: true })
-    for (const file of [...Object.values(GUI_VIEW_FILES), GUI_CHECKUP_VIEW_FILE]) await writeFile(join(root, GUI_VIEW_DIR, file), JSON.stringify({ version: 12 }))
+    for (const file of [...Object.values(GUI_VIEW_FILES), GUI_CHECKUP_VIEW_FILE]) await writeFile(join(root, GUI_VIEW_DIR, file), JSON.stringify({ version: 13 }))
     ok(await e.run({ cmd: 'refresh-views' }))
-    expect(pendingViewSchema.parse(await e.readView('pending')).version).toBe(13)
-    expect(healthViewSchema.parse(await e.readView('health')).version).toBe(13)
-    expect(libraryViewSchema.parse(await e.readView('library')).version).toBe(13)
-    expect(deletedViewSchema.parse(await e.readView('deleted')).version).toBe(13)
-    expect((await e.readCheckupView()).version).toBe(13)
+    expect(pendingViewSchema.parse(await e.readView('pending')).version).toBe(14)
+    expect(healthViewSchema.parse(await e.readView('health')).version).toBe(14)
+    expect(libraryViewSchema.parse(await e.readView('library')).version).toBe(14)
+    expect(deletedViewSchema.parse(await e.readView('deleted')).version).toBe(14)
+    expect((await e.readCheckupView()).version).toBe(14)
   })
 
   it('磁盘上是旧版（版本 4，没有建议整理）的待处理视图：按新版本重写，各级条数带上建议整理', async () => {

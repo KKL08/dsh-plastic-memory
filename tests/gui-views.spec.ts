@@ -18,10 +18,10 @@ import { executeForget } from '../src/tools/forget.ts'
 import { executeHealth } from '../src/tools/health.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import {
-  GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, PENDING_ITEM_KINDS, deletedViewSchema, healthViewSchema,
-  libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema, workspaceMapViewSchema, type GlobalViewName, type PendingItem,
+  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, PENDING_ITEM_KINDS, checkupViewSchema, deletedViewSchema, healthViewSchema,
+  libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema, workspaceMapViewSchema, type CheckupView, type GlobalViewName, type PendingItem,
 } from '../src/gui/contract.ts'
-import { buildSessionView } from '../src/gui/views.ts'
+import { GLOBAL_VIEW_NAMES, buildCheckupView, buildSessionView } from '../src/gui/views.ts'
 import { VIEW_REPLACE_GAP_MS, ViewWriter, collectGlobalViews } from '../src/gui/view-writer.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
@@ -29,12 +29,18 @@ import { fakeExec } from './helpers/exec.ts'
 import { FAKE_SECRET, generatePrivateKeyPem } from './helpers/secrets.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
 
-// 进程边界：记下每次 rename 的目标路径（视图写入是 tmp + rename，一次 rename 就是一次文件替换）。其余原样透传。
-const { renames } = vi.hoisted(() => ({ renames: [] as string[] }))
+// 进程边界：记下每次 rename 的目标路径（视图写入是 tmp + rename，一次 rename 就是一次文件替换）；
+// readFailures 里的路径读时报对应的错误码（权限、I/O 这类读错）。其余原样透传。
+const { renames, readFailures } = vi.hoisted(() => ({ renames: [] as string[], readFailures: new Map<string, string>() }))
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
   const rename = async (...args: Parameters<typeof actual.rename>) => { renames.push(String(args[1])); return actual.rename(...args) }
-  return { ...actual, rename }
+  const readFile = (async (...args: Parameters<typeof actual.readFile>) => {
+    const code = readFailures.get(String(args[0]))
+    if (code !== undefined) throw Object.assign(new Error(`${code}: 读失败`), { code })
+    return actual.readFile(...args)
+  }) as typeof actual.readFile
+  return { ...actual, rename, readFile }
 })
 
 // 视图生成：真实临时目录（FileTable + .state 侧表）+ 账本 → 五种视图 JSON。只断言视图内容，不 mock 自己的模块。
@@ -47,7 +53,7 @@ const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 
 let root: string
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-gui-views-')) })
-afterEach(async () => { await rm(root, { recursive: true, force: true }) })
+afterEach(async () => { readFailures.clear(); await rm(root, { recursive: true, force: true }) })
 
 function harness() {
   let clock = T0
@@ -289,7 +295,7 @@ describe('待处理视图：建议整理', () => {
     expect(await h.decisions.list()).toEqual([])
   })
 
-  it('和健康视图同口径：每层的建议条数 = 该层已过有效期、内容过长、旧记忆已不在的扣分条数 + 很久没确认条数', async () => {
+  it('和健康视图同口径：每层已过有效期、内容过长、旧记忆已不在的建议条数 = 该层这几类的扣分条数；有没有很久没确认的与新鲜度扣分一致', async () => {
     const h = harness()
     await seedAdvice(h)
     const { pending, health } = await h.views()
@@ -297,7 +303,8 @@ describe('待处理视图：建议整理', () => {
       const inLayer = pending.items.filter(i => i.kind === 'advice' && (layer.layer.kind === 'global'
         ? i.memories[0]!.scope === 'global' : i.memories[0]!.workspacePath === layer.layer.workspacePath))
       const ruleCount = layer.issues.filter(x => ['expired', 'bloat', 'orphan'].includes(x.type)).reduce((s, x) => s + x.count, 0)
-      expect(inLayer.length).toBe(ruleCount + layer.staleCount)
+      expect(inLayer.filter(i => i.kind === 'advice' && i.type !== 'stale')).toHaveLength(ruleCount)
+      expect(inLayer.some(i => i.kind === 'advice' && i.type === 'stale')).toBe(layer.deductions.freshness.types.includes('stale'))
     }
   })
 
@@ -622,7 +629,7 @@ describe('视图生成时刻', () => {
 })
 
 describe('健康视图', () => {
-  it('超限列为问题、不扣分：已忽略的仍列出（标明已忽略，待处理里没有它）；memory_health 同样报出', async () => {
+  it('超限不扣分：已忽略的不在待处理里；memory_health 照样报出', async () => {
     const h = harness()
     await h.store.create(w({ id: 'mem_a', name: 'A' }))
     const before = await h.health()
@@ -637,8 +644,6 @@ describe('健康视图', () => {
     expect(healthViewSchema.parse(health)).toEqual(health)
     expect(pending.items).toEqual([])
     const ws = health.layers.find(l => l.layer.kind === 'workspace')!
-    expect(ws.overflow).toEqual({ mode: 'relax', tier: 1, isDismissed: true })
-    expect(health.layers.find(l => l.layer.kind === 'global')!.overflow).toBeNull()
 
     const tool = await h.health()
     if (tool.kind !== 'single') throw new Error(tool.kind)
@@ -647,24 +652,6 @@ describe('健康视图', () => {
     expect(tool.overflow).toEqual({ mode: 'relax', tier: 1, summary: '带入记忆约 4100 token，超出上限 4000，已自动放宽到 5000' })
     expect(tool.recommendationKinds).toContain('budget-overflow')
     expect(tool.message).toContain('超出上限')
-  })
-
-  it('超限的项目自己没有记忆（不在体检清单里）：单列在 overflowOnlyLayers，只带超限档位，不编层统计；global 照常', async () => {
-    const h = harness()
-    await h.store.create(g({ id: 'mem_g', name: '全局一条' }))
-    await h.decisions.syncOverflow(WS, { mode: 'strict', tier: 0 }, T0, '超限')
-    await h.decisions.syncOverflow('global', { mode: 'strict', tier: 0 }, T0, '超限')
-
-    const { health } = await h.views()
-    expect(healthViewSchema.parse(health)).toEqual(health)
-    expect(health.layers.map(l => [l.layer, l.overflow])).toEqual([[{ kind: 'global' }, { mode: 'strict', tier: 0, isDismissed: false }]])
-    expect(health.overflowOnlyLayers).toEqual([{ layer: { kind: 'workspace', workspacePath: WS }, overflow: { mode: 'strict', tier: 0, isDismissed: false } }])
-
-    // 项目有了自己的记忆就回到体检清单，不再单列
-    await h.store.create(w({ id: 'mem_w', name: '本项目一条' }))
-    const again = (await h.views()).health
-    expect(again.layers.find(l => l.layer.kind === 'workspace')!.overflow).toEqual({ mode: 'strict', tier: 0, isDismissed: false })
-    expect(again.overflowOnlyLayers).toEqual([])
   })
 
   it('复用治理评分：与 memory_health 同分；从没体检过 lastCheckupAt 为 null；有密钥的层不打分', async () => {
@@ -679,7 +666,7 @@ describe('健康视图', () => {
     if (tool.kind !== 'single') throw new Error(tool.kind)
     const ws = health.layers.find(l => l.layer.kind === 'workspace')!
     expect(ws).toMatchObject({ layer: { kind: 'workspace', workspacePath: WS }, totalMemories: 2, score: tool.score, lastCheckupAt: null })
-    expect(ws.issues).toEqual([{ type: 'expired', count: 1, level: 'advice' }])
+    expect(ws.issues).toEqual([{ type: 'expired', count: 1 }])
     const global = health.layers.find(l => l.layer.kind === 'global')!
     expect(global).toMatchObject({ score: null, gate: { secret: true }, issues: [{ type: 'secret', count: 1 }] })
   })
@@ -702,45 +689,6 @@ describe('健康视图', () => {
     // 冲突还须仍在待决账本里才计
     await h.decisions.upsert({ memoryIds: ['mem_r1', 'mem_u'], summary: '矛盾', fingerprint: 'h' }, 1)
   }
-  /** 一类扣分原因在待处理视图里以哪种条目出现。 */
-  const showsUp = (type: string) => (item: PendingItem): boolean =>
-    type === 'secret' ? item.kind === 'secret'
-      : type === 'malformed' ? item.kind === 'unreadable-file'
-        : type === 'conflict' ? item.kind === 'conflict-horizontal' || item.kind === 'conflict-vertical'
-          : item.kind === 'advice' && item.type === type
-
-  it('每条扣分原因带待处理里对应的组：密钥、读不出的文件在高优问题，冲突在待你处理，其余在建议整理', async () => {
-    const h = harness()
-    await seedEveryIssue(h)
-    const { health, pending } = await h.views()
-    expect(healthViewSchema.parse(health)).toEqual(health)
-    const ws = health.layers.find(l => l.layer.kind === 'workspace')!
-    expect(ws.issues.map(i => [i.type, i.level])).toEqual([
-      ['secret', 'must-fix'], ['expired', 'advice'], ['malformed', 'must-fix'],
-      ['conflict', 'your-call'], ['redundancy', 'advice'], ['misplaced', 'advice'], ['unclear', 'advice'],
-    ])
-    // 真正的不变式：每类扣分原因的条目确实在待处理视图里、且就在它标的那一组
-    for (const issue of ws.issues) {
-      const items = pending.items.filter(showsUp(issue.type))
-      expect({ type: issue.type, levels: [...new Set(items.map(i => i.level))] }).toEqual({ type: issue.type, levels: [issue.level] })
-    }
-  })
-
-  it('体检关闭：冲突与语义建议不在待处理里，这几类的组为 null；规则类照常带组', async () => {
-    const h = harness()
-    await seedEveryIssue(h)
-    const off = await collectGlobalViews({ ...h.sourceDeps, isGovernanceEnabled: () => false })
-    expect(healthViewSchema.parse(off.health)).toEqual(off.health)
-    const ws = off.health.layers.find(l => l.layer.kind === 'workspace')!
-    expect(ws.issues.map(i => [i.type, i.level])).toEqual([
-      ['secret', 'must-fix'], ['expired', 'advice'], ['malformed', 'must-fix'],
-      ['conflict', null], ['redundancy', null], ['misplaced', null], ['unclear', null],
-    ])
-    for (const issue of ws.issues) {
-      const levels = [...new Set(off.pending.items.filter(showsUp(issue.type)).map(i => i.level))]
-      expect({ type: issue.type, levels }).toEqual({ type: issue.type, levels: issue.level === null ? [] : [issue.level] })
-    }
-  })
   it('扣分来源：每层带规则检查、内容检查、新鲜度三项扣分和各项此刻有的问题类型；三项相加正好是 100 减分数，分数与 memory_health 相同', async () => {
     const h = harness()
     // 不放密钥（有密钥不打分），另加一条超过衰退期没确认的
@@ -964,6 +912,207 @@ describe('视图写入', () => {
     await nextTicks()
     expect(collects).toBe(1)
     expect((await listViews()).sort()).toEqual(Object.values(GUI_VIEW_FILES).sort())
+  })
+
+  /** 一个只写体检视图的写入器：收集交给调用方（先采集好的视图），时钟与间隔等待可注入。 */
+  const checkupOnly = (view: () => CheckupView, opts: { now?: () => number; sleep?: (ms: number) => Promise<void> } = {}) =>
+    new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') }, collectCheckups: async () => view(), ...noWait, ...opts })
+  const checkupAt = (now: number, governanceEnabled = true): CheckupView => buildCheckupView({
+    now, governanceEnabled, settings: new Map(), layers: [{ kind: 'global' }],
+    lastCheckupAt: () => null, isInProgress: () => false, record: () => undefined, allRecord: undefined,
+  })
+  const readCheckup = async () => checkupViewSchema.parse(JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_CHECKUP_VIEW_FILE), 'utf8')))
+  const tmpLeft = async () => (await listViews()).filter(n => n.includes('.tmp-'))
+  /** 写入器的时钟晚于两次采集（盘上的 generatedAt 不算「晚于当前时刻」）。 */
+  const afterBoth = { now: () => T0 + 1000, sleep: async () => {} }
+
+  it('PA-09 两个写入器：早采集的晚写时不覆盖晚采集的，四个全局视图都留晚的那份，不留临时文件', async () => {
+    const h = harness()
+    const early = await h.views()
+    h.setClock(T0 + 10)
+    await h.store.create(w({ id: 'mem_late', name: '晚来的' }))
+    const late = await h.views()
+    expect([early.library.generatedAt, late.library.generatedAt]).toEqual([T0, T0 + 10])
+
+    await new ViewWriter({ memoryRoot: root, collect: async () => late, ...afterBoth }).rewriteAll()
+    await new ViewWriter({ memoryRoot: root, collect: async () => early, ...afterBoth }).rewriteAll()
+    for (const name of GLOBAL_VIEW_NAMES) expect((await readView(name)).generatedAt, name).toBe(T0 + 10)
+    expect((await readView('library')).layers[1].items.map((i: { id: string }) => i.id)).toEqual(['mem_late'])
+    expect(await tmpLeft()).toEqual([])
+  })
+
+  it('PA-09 体检视图同样不回退：早采集的晚写时不覆盖', async () => {
+    await checkupOnly(() => checkupAt(T0 + 10, false), afterBoth).requestCheckups()
+    await checkupOnly(() => checkupAt(T0, true), afterBoth).requestCheckups()
+    expect(await readCheckup()).toMatchObject({ generatedAt: T0 + 10, governanceEnabled: false })
+    expect(await tmpLeft()).toEqual([])
+  })
+
+  it('PA-09 盘上的旧文件缺 generatedAt：照常被覆盖', async () => {
+    const h = harness()
+    const views = await h.views()
+    await mkdir(join(root, GUI_VIEW_DIR), { recursive: true })
+    const { generatedAt: _, ...old } = views.library
+    await writeFile(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES.library), JSON.stringify(old), 'utf8')
+    await writeFile(join(root, GUI_VIEW_DIR, GUI_CHECKUP_VIEW_FILE), JSON.stringify({ ...checkupAt(T0, false), generatedAt: undefined }), 'utf8')
+    await new ViewWriter({ memoryRoot: root, collect: async () => views, ...noWait }).request(['library'])
+    await checkupOnly(() => checkupAt(T0, true)).requestCheckups()
+    expect((await readView('library')).generatedAt).toBe(T0)
+    expect(await readCheckup()).toMatchObject({ generatedAt: T0, governanceEnabled: true })
+  })
+
+  it('PA-09 等待替换间隔期间另一个写入器写入更晚的视图：本次等完不覆盖', async () => {
+    let t = T0
+    let wake!: () => void
+    const sleeps: number[] = []
+    const sleep = (ms: number) => { sleeps.push(ms); return new Promise<void>(resolve => { wake = resolve }) }
+    let next = checkupAt(T0, true)
+    const a = checkupOnly(() => next, { now: () => t, sleep })
+    await a.requestCheckups()
+    t += 40
+    next = checkupAt(t, false)
+    const waiting = a.requestCheckups()
+    await vi.waitFor(() => { expect(sleeps).toEqual([110]) })
+    await checkupOnly(() => checkupAt(t + 5, false)).requestCheckups()   // 另一个进程采集得更晚、先写完
+    t += 110
+    wake()
+    await waiting
+    expect((await readCheckup()).generatedAt).toBe(T0 + 45)
+    expect(await tmpLeft()).toEqual([])
+  })
+
+  it('PA-54 盘上视图的 generatedAt 晚于当前时刻（时钟往回调过）：新采集的照常写入', async () => {
+    const h = harness()
+    h.setClock(T0 + 60_000)
+    const future = await h.views()
+    await new ViewWriter({ memoryRoot: root, collect: async () => future, ...noWait }).request(['library'])
+    await checkupOnly(() => checkupAt(T0 + 60_000, false)).requestCheckups()
+    h.setClock(T0)
+    await h.store.create(w({ id: 'mem_after', name: '回调之后' }))
+    const now = await h.views()
+    await new ViewWriter({ memoryRoot: root, collect: async () => now, ...noWait }).request(['library'])
+    await checkupOnly(() => checkupAt(T0, true)).requestCheckups()
+    expect((await readView('library')).generatedAt).toBe(T0)
+    expect((await readView('library')).layers[1].items.map((i: { id: string }) => i.id)).toEqual(['mem_after'])
+    expect(await readCheckup()).toMatchObject({ generatedAt: T0, governanceEnabled: true })
+  })
+
+  it('时钟往回调过：下一次替换的等待不超过替换间隔', async () => {
+    let t = T0
+    const sleeps: number[] = []
+    let next = checkupAt(T0, true)
+    const writer = checkupOnly(() => next, { now: () => t, sleep: async ms => { sleeps.push(ms) } })
+    await writer.requestCheckups()
+    t = T0 - 60_000
+    next = checkupAt(t, false)
+    await writer.requestCheckups()
+    expect(sleeps.length).toBe(1)
+    expect(sleeps[0]).toBeLessThanOrEqual(VIEW_REPLACE_GAP_MS)
+    expect(await readCheckup()).toMatchObject({ governanceEnabled: false })
+  })
+
+  it('PA-09 全局视图等待替换间隔期间另一个写入器写入更晚的视图：本次等完不覆盖', async () => {
+    const h = harness()
+    let t = T0
+    let wake!: () => void
+    const sleeps: number[] = []
+    const sleep = (ms: number) => { sleeps.push(ms); return new Promise<void>(resolve => { wake = resolve }) }
+    let next = await h.views()
+    const a = new ViewWriter({ memoryRoot: root, collect: async () => next, now: () => t, sleep })
+    await a.request(['library'])
+    t += 40
+    h.setClock(t)
+    next = await h.views()
+    const waiting = a.request(['library'])
+    await vi.waitFor(() => { expect(sleeps).toEqual([110]) })
+    h.setClock(t + 5)
+    await h.store.create(w({ id: 'mem_other', name: '另一个进程写的' }))
+    const other = await h.views()
+    await new ViewWriter({ memoryRoot: root, collect: async () => other, ...afterBoth }).request(['library'])
+    t += 110
+    wake()
+    await waiting
+    expect((await readView('library')).generatedAt).toBe(T0 + 45)
+    expect((await readView('library')).layers[1].items.map((i: { id: string }) => i.id)).toEqual(['mem_other'])
+    expect(await tmpLeft()).toEqual([])
+  })
+
+  it('PA-09 盘上是旧版本号的视图：生成时刻再晚也照常被新版本覆盖', async () => {
+    const h = harness()
+    const views = await h.views()
+    await mkdir(join(root, GUI_VIEW_DIR), { recursive: true })
+    await writeFile(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES.library), JSON.stringify({ ...views.library, version: GUI_VIEW_VERSION - 1, generatedAt: T0 + 500 }), 'utf8')
+    await new ViewWriter({ memoryRoot: root, collect: async () => views, ...afterBoth }).request(['library'])
+    expect(await readView('library')).toMatchObject({ version: GUI_VIEW_VERSION, generatedAt: T0 })
+  })
+
+  it('PA-54 体检视图内容只差 generatedAt：不重写', async () => {
+    const path = join(root, GUI_VIEW_DIR, GUI_CHECKUP_VIEW_FILE)
+    await checkupOnly(() => checkupAt(T0)).requestCheckups()
+    renames.length = 0
+    await checkupOnly(() => checkupAt(T0 + 1000)).requestCheckups()
+    expect(renames.filter(p => p === path)).toEqual([])
+    expect((await readCheckup()).generatedAt).toBe(T0)
+  })
+
+  it('PA-55 两个写入器各自记会话归属：A 写过一条之后 B 再写自己的一条，盘上两条都在', async () => {
+    const mapPath = join(root, GUI_VIEW_DIR, GUI_WORKSPACE_MAP_FILE)
+    const readMap = async () => workspaceMapViewSchema.parse(JSON.parse(await readFile(mapPath, 'utf8'))).cwds
+    const a = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') }, ...noWait })
+    const b = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') }, ...noWait })
+    await b.requestWorkspace('/w/b1', '/w/b1')   // B 先写过一次，手里有一份旧对照
+    await a.requestWorkspace('/w/a', '/w/a')
+    await b.requestWorkspace('/w/b2', '/w/b2')
+    expect(await readMap()).toEqual({ '/w/b1': '/w/b1', '/w/a': '/w/a', '/w/b2': '/w/b2' })
+  })
+
+  it('PA-55 等待替换间隔期间另一个写入器记下一条会话归属：本次等完再读盘合并，两条都在', async () => {
+    const mapPath = join(root, GUI_VIEW_DIR, GUI_WORKSPACE_MAP_FILE)
+    const readMap = async () => workspaceMapViewSchema.parse(JSON.parse(await readFile(mapPath, 'utf8'))).cwds
+    let t = T0
+    let wake!: () => void
+    const sleeps: number[] = []
+    const sleep = (ms: number) => { sleeps.push(ms); return new Promise<void>(resolve => { wake = resolve }) }
+    const a = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') }, now: () => t, sleep })
+    await a.requestWorkspace('/w/a1', '/w/a1')
+    t += 40
+    const waiting = a.requestWorkspace('/w/a2', '/w/a2')
+    await vi.waitFor(() => { expect(sleeps).toEqual([110]) })
+    await new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') }, ...noWait }).requestWorkspace('/w/b', '/w/b')
+    t += 110
+    wake()
+    await waiting
+    expect(await readMap()).toEqual({ '/w/a1': '/w/a1', '/w/b': '/w/b', '/w/a2': '/w/a2' })
+    expect(await tmpLeft()).toEqual([])
+  })
+
+  it('PA-55 会话归属对照读盘遇到权限或 I/O 错误：本次不写、不清空盘上的对照，读得到之后照常合并', async () => {
+    const mapPath = join(root, GUI_VIEW_DIR, GUI_WORKSPACE_MAP_FILE)
+    const readMap = async () => workspaceMapViewSchema.parse(JSON.parse(await readFile(mapPath, 'utf8'))).cwds
+    const warn = vi.fn()
+    const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') }, log: { ...console, warn }, ...noWait })
+    await new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') }, ...noWait }).requestWorkspace('/w/old', '/w/old')
+    readFailures.set(mapPath, 'EACCES')
+    await writer.requestWorkspace('/w/new', '/w/new')
+    expect(warn).toHaveBeenCalledTimes(1)
+    readFailures.clear()
+    expect(await readMap()).toEqual({ '/w/old': '/w/old' })
+    await writer.requestWorkspace('/w/new', '/w/new')
+    expect(await readMap()).toEqual({ '/w/old': '/w/old', '/w/new': '/w/new' })
+  })
+
+  it('PA-16 视图版本为 14，健康视图不含健康页拆掉后的残留字段', async () => {
+    expect(GUI_VIEW_VERSION).toBe(14)
+    const h = harness()
+    await h.store.create(w({ id: 'mem_old', name: '过期', validTo: EXPIRED_AT }))
+    await h.decisions.syncOverflow(WS, { mode: 'relax', tier: 1 }, T0, '超限')
+    await new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews(h.sourceDeps), ...noWait }).rewriteAll()
+    const health = await readView('health')
+    expect(health).not.toHaveProperty('overflowOnlyLayers')
+    for (const layer of health.layers) {
+      expect(Object.keys(layer).sort()).toEqual(['deductions', 'gate', 'ignored', 'issues', 'lastCheckupAt', 'layer', 'score', 'tier', 'totalMemories'])
+      for (const issue of layer.issues) expect(Object.keys(issue).sort()).toEqual(['count', 'type'])
+    }
   })
 
   it('卸载：同一 tick 内刚请求、还没开始的写入整批丢弃', async () => {

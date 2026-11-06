@@ -222,8 +222,10 @@ export class FileTable implements MemoryTable {
     return { record, extras, filePath, dir }
   }
 
-  /** 读一组已解析位置的目录（顶层，可选含 .archive/），带 extras 的内部形态。 */
-  /** topLevel：给了就记下各目录顶层记忆文件的签名（读文件时顺手取的 stat，见 topLevelSignature）。 */
+  /**
+   * 读一组已解析位置的目录（顶层，可选含 .archive/），带 extras 的内部形态。
+   * topLevel：给了就记下各目录顶层记忆文件的签名（读文件时顺手取的 stat，见 topLevelSignature）。
+   */
   private async readDirs(
     dirs: readonly ScopeDir[], opts: ScopeReadOptions, topLevel?: Map<string, string>,
   ): Promise<{ slots: Slot[]; listedCount: number; quarantined: QuarantineEntry[]; directoryNotes: DirectoryNote[] }> {

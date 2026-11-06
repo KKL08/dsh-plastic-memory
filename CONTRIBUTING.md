@@ -56,11 +56,15 @@ before a release or when touching anything that talks to the host.
    the config layer, boots the host until the plugin starts, and checks the
    installed `lib/` statically. No API key.
 3. **Host contract** — `pnpm host:contract`. Same fresh host plus a sibling
-   verify plugin; nine checks need no key (tool registration, no-cwd rejection,
-   fresh-library health advice, file layout, lossless outputs, rule scan,
-   snapshot round trip, promote dismissal, dangling evidence anchor). Set `DEEPSEEK_API_KEY` to also run the
-   two semantic-layer checks; the key is written only into the temporary
-   `DSH_HOME` and never anywhere else.
+   verify plugin that drives the tools through the real host. Without a key it
+   covers install and load (the installed package boots and registers its
+   tools), the tool contract (workspace resolution, file layout, lossless
+   outputs, rule scan, snapshots, evidence anchors, restarts, subagent
+   sessions) and the GUI contract (the installed client bundle loads in the
+   host's factory format and ships every locale file). Set `DEEPSEEK_API_KEY`
+   to also run the semantic layer (model scans, the automatic checkup, masked
+   auth errors); the key is written only into the temporary `DSH_HOME` and
+   never anywhere else.
 
 Set `HOST_SMOKE_KEEP=1` to keep the temporary directory (logs, `DSH_HOME`) of
 either host check for debugging.

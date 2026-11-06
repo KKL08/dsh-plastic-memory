@@ -34,8 +34,8 @@ const library: LibraryView = {
 
 function healthLayer(layer: GuiLayerRef): HealthView['layers'][number] {
   return {
-    layer, totalMemories: 1, score: 90, tier: 'green', gate: { secret: false }, issues: [], staleCount: 0,
-    lastCheckupAt: NOW - 86_400_000, overflow: null, ignored: [],
+    layer, totalMemories: 1, score: 90, tier: 'green', gate: { secret: false }, issues: [],
+    lastCheckupAt: NOW - 86_400_000, ignored: [],
     deductions: { rule: { points: 0, types: [] }, content: { points: 0, types: [] }, freshness: { points: 0, types: [] } },
   }
 }

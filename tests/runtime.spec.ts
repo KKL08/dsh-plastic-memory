@@ -64,7 +64,9 @@ describe('SnapshotCache', () => {
   })
 
   it('setWorkspacePath 后 assemble 返回完整版并冻结，markRecalled 恰调用一次且参数为 core id', async () => {
-    const { store, cache } = makeCache()
+    const NOW = 1_700_000_000_000
+    const store = new MemoryStore(new InMemoryTable())
+    const cache = new SnapshotCache({ store, registry, budget: 4000, now: () => NOW })
     const spy = vi.spyOn(store, 'markRecalled')
     await store.put(record({ id: 'mem_core', type: 'preference', content: '不要 mock 数据库' }))
     const session = {}
@@ -73,7 +75,7 @@ describe('SnapshotCache', () => {
     const text = await cache.assemble(session)
     expect(text).toContain('不要 mock 数据库')
     expect(spy).toHaveBeenCalledTimes(1)
-    expect(spy).toHaveBeenCalledWith(['mem_core'])
+    expect(spy).toHaveBeenCalledWith(['mem_core'], NOW)
 
     // 冻结：后续写入新记忆，同一 session 仍返回旧快照，不重新组装，也不再计召回
     await store.put(record({ id: 'mem_new', type: 'preference', content: '另一条偏好' }))

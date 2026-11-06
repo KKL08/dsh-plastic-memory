@@ -245,10 +245,12 @@ export async function runSavePipeline(
     delegation?: SaveDelegation
     /** 子会话新建配额（配置 subagent.maxSavesPerSession，调用时现读），缺省 SUBAGENT_MAX_SAVES_DEFAULT。 */
     maxSubagentSaves?: number
+    /** 写入时刻（createdAt、updatedAt、有效期、快照与撤销记录）的时钟，缺省取当前时间。 */
+    now?: () => number
   },
 ): Promise<PipelineResult> {
   const { store, registry, session } = deps
-  const now = Date.now()
+  const now = deps.now?.() ?? Date.now()
 
   // 0. 子 agent 写入约束（主会话没有 delegation，原样往下走）
   const subagent = deps.delegation ? await checkSubagentWrite(input, deps) : { candidate: input, warnings: [] }

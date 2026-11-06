@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# R1 host contract: boot a fresh, real dsh host with the packed plugin and a
-# sibling verify plugin that drives the nine memory_* tools through the real
-# ctx.tools with synthetic sessions. No LLM is needed for H1–H9; H10/H11 and
-# the real auto checkup H17 run only when DEEPSEEK_API_KEY is set and the host
-# can pick a default model, otherwise they are reported as SKIPPED. With a key, a
-# third boot swaps in an invalid key for H18 (AUTH errors leave no raw host text
-# in plugin output); without one H18 is SKIPPED. Before booting, the installed package's
-# browser half is checked key-free (scripts/host-contract/verify-client.ts).
+# Host contract: boot a fresh, real dsh host with the packed plugin and a
+# sibling verify plugin that drives the memory_* tools through the real
+# ctx.tools with synthetic sessions. The checks fall into four groups:
+#   install and load  the installed package boots and registers its tools
+#   tool contract     tool behaviour against the real host, no LLM needed
+#   GUI contract      before booting, the installed package's browser half is
+#                     checked key-free (scripts/host-contract/verify-client.ts)
+#   semantic layer    model-backed checks; they run only when DEEPSEEK_API_KEY
+#                     is set and the host can pick a default model, otherwise
+#                     they are reported as SKIPPED. With a key, a third boot
+#                     swaps in an invalid key to check that AUTH errors leave
+#                     no raw host text in plugin output.
 # Never touches ~/.dsh.
 #
 #   scripts/host-contract/run.sh              run (temp dir removed on exit)

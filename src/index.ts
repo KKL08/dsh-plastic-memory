@@ -5,7 +5,8 @@ import { buildTypeRegistry, PRESET_SCENES, type SceneConfig, type TypeRegistry }
 import { memoryDomainSpec } from './domain-spec.ts'
 import { MemoryStore } from './store.ts'
 import { FileTable } from './storage/file-table.ts'
-import { SidecarStore, type LegacyKvTables } from './storage/sidecar.ts'
+import { SidecarStore } from './storage/sidecar.ts'
+import type { LegacyKvTables } from './storage/legacy-kv-import.ts'
 import { resolveMemoryRoot } from './storage/paths.ts'
 import { formatIndexLine } from './index-line.ts'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -134,7 +135,7 @@ export const inject = ['tools']
 type SessionLike = object & { header?: { id?: string; cwd?: string; delegationDepth?: number; parentSession?: string } }
 
 export async function apply(ctx: Context, config: Config) {
-  // 插件本次加载的时刻：健康视图带给浏览器半侧，判断冻结快照是否早于这次启动
+  // 插件本次加载的时刻：健康视图带给右侧栏，判断冻结快照是否早于这次启动
   const bootedAt = Date.now()
   // 类型表随 template / customTypes / scenes / removedPresetTypes 热更新重建；各处拿到的是转发到当前表的同一个对象。
   // 场景配置写错只警告（按通用或截断运行），不让插件加载失败
@@ -370,7 +371,7 @@ export async function apply(ctx: Context, config: Config) {
     }
     if (!anchorFallbackWarned.has(session)) {
       anchorFallbackWarned.add(session)
-      ctx.logger.warn(`turnBoundary projection unavailable for session "${session.header.id}", anchoring the whole session: ${reason}`)
+      ctx.logger.warn(`[plastic-memory] 会话 "${session.header.id}" 读不到 turnBoundary 投影，出处锚到整个会话：${reason}`)
     }
     return 0
   }
@@ -412,7 +413,7 @@ export async function apply(ctx: Context, config: Config) {
     const { mode, fallback } = subagentModeOf(probe<SessionProjectionRegistry>('sessionProjections'), session)
     if (fallback !== undefined && !modeFallbackWarned.has(session)) {
       modeFallbackWarned.add(session)
-      ctx.logger.warn(`subagent projection unavailable for session "${session.header.id}", treating it as one-shot: ${fallback}`)
+      ctx.logger.warn(`[plastic-memory] 会话 "${session.header.id}" 读不到 subagent 投影，按一次性子会话（one-shot）处理：${fallback}`)
     }
     return mode
   }
@@ -437,7 +438,7 @@ export async function apply(ctx: Context, config: Config) {
     } catch (error) {
       if (!baselineReadWarned.has(session)) {
         baselineReadWarned.add(session)
-        ctx.logger.warn(`plasticMemoryBaseline projection read threw for session "${session.header.id}", skipping the AGENTS.md baseline: ${String(error)}`)
+        ctx.logger.warn(`[plastic-memory] 会话 "${session.header.id}" 读 plasticMemoryBaseline 投影出错，这次不带 AGENTS.md 基线：${String(error)}`)
       }
       return null
     }
@@ -556,6 +557,7 @@ export async function apply(ctx: Context, config: Config) {
       onAutoCheckupChanged: () => void scheduler?.recheck(),
       resolveContext, getLlm, getBaseline, log: ctx.logger,
       isGovernanceEnabled: () => config.governance.enabled.get(),
+      isLegacyImportSettled: () => sidecar.isLegacyImportSettled(),
     }))
     // 卸载时（插件重载、commands 服务撤下）停写视图：cordis 卸载会 await 这个 disposer，
     // 进行中的写入落完才轮到新实例加载，旧实例的迟到写入不会盖掉新视图

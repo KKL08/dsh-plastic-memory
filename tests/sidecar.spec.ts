@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { SidecarStore, STATE_DIR, KV_IMPORT_MARKER, KV_IMPORT_LOCK, RECALL_STATS_FILE, type LegacyKvTables } from '../src/storage/sidecar.ts'
+import { SidecarStore, STATE_DIR, RECALL_STATS_FILE } from '../src/storage/sidecar.ts'
+import { KV_IMPORT_MARKER, KV_IMPORT_LOCK, type LegacyKvTables } from '../src/storage/legacy-kv-import.ts'
 import { kvImportMarkerSchema } from '../src/storage/schema.ts'
 import {
   memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema,
@@ -14,7 +15,7 @@ import { record } from './helpers/record.ts'
 
 // 进程边界的失败注入与观察：记录写文件 / 改名的路径，按条件让一次 writeFile（写到一半）或 rename 失败。
 // 不设故障时原样透传。
-type FsFault = { op: 'writeFile' | 'rename'; target: string }
+type FsFault = { op: 'writeFile' | 'rename'; target: string } | { op: 'readFile'; target: string; code: string }
 const { fsLog } = vi.hoisted(() => ({
   fsLog: { fault: undefined as FsFault | undefined, writes: [] as string[], renames: [] as Array<[string, string]> },
 }))
@@ -41,7 +42,15 @@ vi.mock('node:fs/promises', async importOriginal => {
     }
     return actual.rename(...args)
   })
-  return { ...actual, writeFile, rename }
+  const readFile = vi.fn(async (...args: Parameters<typeof actual.readFile>) => {
+    const fault = fsLog.fault
+    if (fault?.op === 'readFile' && String(args[0]) === fault.target) {
+      fsLog.fault = undefined
+      throw Object.assign(new Error(`${fault.code}: injected failure`), { code: fault.code })
+    }
+    return actual.readFile(...args)
+  }) as typeof actual.readFile
+  return { ...actual, writeFile, rename, readFile }
 })
 afterEach(() => { fsLog.fault = undefined; fsLog.writes = []; fsLog.renames = [] })
 
@@ -406,6 +415,50 @@ describe('SidecarStore：KV 导入协议', () => {
     expect((await s.snapshots.list()).map(([k]) => k).sort()).toEqual(['snap_a', 'snap_b'])
     expect((await readMarker()).counts).toEqual({ snapshots: 2, pending: 2 })
     expect((await listFiles(state)).filter(f => f.includes('.tmp-'))).toEqual([])
+  })
+
+  it('PA-07 续传时目标文件已存在但解析不了（不支持硬链接的卷上导入中断留下的半截文件）：换成完整内容；能解析的已有目标照旧跳过', async () => {
+    await mkdir(join(state, 'snapshots'), { recursive: true })
+    await mkdir(join(state, 'pending'), { recursive: true })
+    await writeFile(join(state, 'snapshots', 'snap_a.json'), JSON.stringify(snap('snap_a')).slice(0, 25), 'utf8')
+    await writeFile(join(state, 'snapshots', 'snap_b.json'), JSON.stringify({ id: 'snap_b' }), 'utf8')
+    await writeFile(join(state, 'pending', 'pd_a.json'), JSON.stringify(pd('pd_a', { summary: '迁移后改过' })), 'utf8')
+    const legacy = legacyOf({
+      snapshots: [['snap_a', snap('snap_a', { description: 'KV 里的完整内容' })], ['snap_b', snap('snap_b', { description: 'KV 里的 b' })]],
+      pending: [['pd_a', pd('pd_a', { summary: 'KV 里的旧值' })]],
+    })
+    const s = new SidecarStore({ root, schemas, openLegacyKv: legacy.open })
+    expect((await s.snapshots.get('snap_a'))?.description).toBe('KV 里的完整内容')
+    expect((await s.snapshots.get('snap_b'))?.description).toBe('KV 里的 b')
+    expect((await s.pending.get('pd_a'))?.summary).toBe('迁移后改过')
+    expect((await readMarker()).counts).toEqual({ snapshots: 2, pending: 1 })
+    expect((await listFiles(state)).filter(f => f.includes('.tmp-'))).toEqual([])
+  })
+
+  it('续传时读已有目标遇到权限或 I/O 错误：不当成坏文件覆盖，本次导入中止、不写标记，目标原样', async () => {
+    await mkdir(join(state, 'snapshots'), { recursive: true })
+    const target = join(state, 'snapshots', 'snap_a.json')
+    const redacted = JSON.stringify(snap('snap_a', { description: '已脱敏' }))
+    await writeFile(target, redacted, 'utf8')
+    const legacy = legacyOf({ snapshots: [['snap_a', snap('snap_a', { description: 'KV 里的明文' })]] })
+    fsLog.fault = { op: 'readFile', target, code: 'EACCES' }
+    const s = new SidecarStore({ root, schemas, openLegacyKv: legacy.open, log: makeLog().log })
+    await s.snapshots.list()
+    expect(await readFile(target, 'utf8')).toBe(redacted)
+    expect(await exists(join(state, KV_IMPORT_MARKER))).toBe(false)
+    expect(legacy.discards()).toBe(0)
+  })
+
+  it('排他创建时目标还在、读时已被别处删掉：不拿旧 KV 的值重建', async () => {
+    await mkdir(join(state, 'pending'), { recursive: true })
+    const target = join(state, 'pending', 'pd_a.json')
+    await writeFile(target, JSON.stringify(pd('pd_a')), 'utf8')
+    const legacy = legacyOf({ pending: [['pd_a', pd('pd_a', { summary: 'KV 里的旧值' })]] })
+    fsLog.fault = { op: 'readFile', target, code: 'ENOENT' }
+    const s = new SidecarStore({ root, schemas, openLegacyKv: legacy.open })
+    await s.pending.list()
+    expect(fsLog.renames.filter(([, to]) => to === target)).toEqual([])
+    expect((await readMarker()).counts.pending).toBe(0)
   })
 
   it('旧 KV 里不合 schema 或键不能当文件名的条目跳过并记日志，其余照常导入', async () => {

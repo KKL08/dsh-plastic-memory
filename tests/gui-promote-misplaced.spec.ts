@@ -98,7 +98,7 @@ describe('提升候选和放错层合并', () => {
     const e = env()
     await seedCandidate(e)
     expect(await itemsOfM(e)).toEqual(['promote-candidate'])
-    expect(await misplacedIssue(e)).toEqual({ type: 'misplaced', count: 1, level: 'advice' })
+    expect(await misplacedIssue(e)).toEqual({ type: 'misplaced', count: 1 })
     expect((await e.pending()).version).toBe(GUI_VIEW_VERSION)
   })
 
@@ -129,7 +129,7 @@ describe('「留在本项目」顺带忽略放错层', () => {
     ok(await e.run({ cmd: 'undo', decisionId: open.id }))
     expect(await ignoreOfM(e)).toEqual([])
     expect(await itemsOfM(e)).toEqual(['promote-candidate'])
-    expect(await misplacedIssue(e)).toEqual({ type: 'misplaced', count: 1, level: 'advice' })
+    expect(await misplacedIssue(e)).toEqual({ type: 'misplaced', count: 1 })
     expect((await e.decisions.list()).map(d => d.id)).toEqual([open.id])
   })
 
@@ -204,7 +204,7 @@ describe('「留在本项目」顺带忽略放错层', () => {
     await e.store.update((await e.store.get('mem_m'))!, r => ({ ...r, content: '所有项目都用 vitest 和 playwright' }))
     ok(await e.run({ cmd: 'scan' }))
     expect(await itemsOfM(e)).toEqual(['misplaced'])
-    expect(await misplacedIssue(e)).toEqual({ type: 'misplaced', count: 1, level: 'advice' })
+    expect(await misplacedIssue(e)).toEqual({ type: 'misplaced', count: 1 })
   })
 })
 

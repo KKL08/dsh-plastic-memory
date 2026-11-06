@@ -36,6 +36,8 @@ export interface SearchToolDeps {
   tokenizer?: QueryTokenizerOptions
   /** 缺省（纯测试场景）或拿不到 session 时：正文照常给全文，每次检索都计召回。 */
   sessionRecall?: SessionRecall
+  /** 有效期判定、计召回用的时钟，缺省取当前时间。 */
+  now?: () => number
 }
 
 export interface SearchArgs {
@@ -150,7 +152,7 @@ export async function executeSearch(
   const prefilter = unionTerms.length > 0 && !unionTerms.some(isNoiseTerm)
     ? { prefilterTerms: unionTerms, prefilterMatch: 'any' as const }
     : {}
-  const now = Date.now()
+  const now = deps.now?.() ?? Date.now()
   // 与快照预读同一条路：按范围读取 → 同 id 取舍 → active → validTo（过期的不进检索，治理扫描仍可见）
   const read = await deps.store.readLayer(scopeFilter, { ...(a.types ? { types: a.types } : {}), ...prefilter })
   const located = resolveLiveFirst(read.records, { workspacePath: hint })
@@ -179,7 +181,7 @@ export async function executeSearch(
   const handle = session.handle
   // 拿得到会话时同一会话每条只计一次召回，拿不到时每次都计
   if (sessionRecall && handle) await sessionRecall.markRecalled(handle, topIds)
-  else await deps.store.markRecalled(topIds)
+  else await deps.store.markRecalled(topIds, now)
   // 快照带入时的正文与现在一致才省略：冻结后改过的、同 id 取到别层副本的，快照里那份不是这一版
   const injected = sessionRecall && handle ? sessionRecall.injectedCore(handle) : undefined
 

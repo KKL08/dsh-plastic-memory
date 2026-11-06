@@ -27,10 +27,13 @@ export class InMemoryTable implements MemoryTable {
   private readonly root: string
   readonly globalDir: string
   private slots = new Map<string, LocatedFile>()   // filePath → 槽位
+  private readonly now: () => number
 
-  constructor(root = '/in-memory') {
+  /** now：补 deletedAt、维护点判过期用的时钟（同 FileTable 的 now），缺省取当前时间。 */
+  constructor(root = '/in-memory', now: () => number = Date.now) {
     this.root = root
     this.globalDir = join(root, GLOBAL_DIR)
+    this.now = now
   }
 
   private dirOf(record: MemoryRecord): string {
@@ -103,7 +106,7 @@ export class InMemoryTable implements MemoryTable {
   /** 落槽位（与 FileTable.persist 同规则）：status 离开 active 进 .archive/（deleted 缺 deletedAt 补 now）；目录、层、slug 都没变
    *  就留在原路径，否则在目标层重新取名；落下后清掉可见集合（global + 该记录的目录）里同 id 的其余副本，只认层时只清该目录。返回实际落下的记录。 */
   private place(prev: LocatedFile | undefined, value: MemoryRecord, isExactLayer = false): MemoryRecord {
-    const next = value.status === 'deleted' && value.deletedAt === undefined ? { ...value, deletedAt: Date.now() } : value
+    const next = value.status === 'deleted' && value.deletedAt === undefined ? { ...value, deletedAt: this.now() } : value
     if (prev) this.slots.delete(prev.filePath)
     const sameLocation = prev !== undefined && prev.record.scope === next.scope && prev.record.workspacePath === next.workspacePath
     const dir = sameLocation ? prev.dir : this.dirOf(next)
@@ -122,7 +125,7 @@ export class InMemoryTable implements MemoryTable {
    *  .archive/ 里 deletedAt 超保留期的删掉。索引、digest、tmp 在内存里没有对应物。 */
   async maintain(dirs: string[]) {
     const want = new Set(dirs)
-    const now = Date.now()
+    const now = this.now()
     for (const s of [...this.slots.values()].filter(s => want.has(s.dir))) {
       const archive = join(s.dir, ARCHIVE_DIR)
       const inArchive = dirname(s.filePath) === archive
@@ -210,14 +213,14 @@ function deleteHint(record: Pick<MemoryRecord, 'workspacePath'>, opts: DeleteOpt
 
 export class MemoryStore {
   private table: MemoryTable
-  private log?: MemoryLogger
+  private readonly log: MemoryLogger
   private stats: BatchKvTable<RecallStats>
   private recallChain: Promise<unknown> = Promise.resolve() // markRecalled 的读改写在进程内串行
 
   /** stats：召回统计侧表（接线层传 .state/recall-stats.json）；缺省内存表，供不关心召回统计的测试。 */
   constructor(table: MemoryTable, log?: MemoryLogger, stats: BatchKvTable<RecallStats> = new InMemoryBatchKvTable<RecallStats>()) {
     this.table = table
-    this.log = log
+    this.log = log ?? console
     this.stats = stats
   }
 
@@ -278,11 +281,11 @@ export class MemoryStore {
 
   /**
    * 归档记忆原样复活（没有快照覆盖时的恢复）：改回 active、去掉 deletedAt，经写路径搬回层顶层。
-   * 归档文件本身就是完整内容；updatedAt 记为恢复时刻，手工放进 .archive/ 仍写 active 的文件也因此会被写回顶层。定位同 softDelete。
+   * 归档文件本身就是完整内容；updatedAt 记为恢复时刻（opts.now，缺省当前时间），手工放进 .archive/ 仍写 active 的文件也因此会被写回顶层。定位同 softDelete。
    */
   async restoreArchived(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, opts: DeleteOptions = {}): Promise<boolean> {
     try {
-      await this.table.update(record.id, ({ deletedAt: _, ...r }) => ({ ...r, status: 'active', updatedAt: Date.now() }), deleteHint(record, opts))
+      await this.table.update(record.id, ({ deletedAt: _, ...r }) => ({ ...r, status: 'active', updatedAt: opts.now ?? Date.now() }), deleteHint(record, opts))
     } catch (err) {
       if (err instanceof RecordNotFoundError) return false   // 定位之后被别处删掉
       throw err
@@ -371,15 +374,14 @@ export class MemoryStore {
   /** 召回统计只读改写侧表，不经 table.update——记忆文件不因召回而重写。一次调用一次读、内存合并、
    *  一次批量写（单文件表只换一次文件）。跨进程单文件 LWW（参考字段）。
    *  ids 取自调用方同一次读取的结果（search 命中、快照 core 区），存活由那次读保证，这里不再逐 id 定位。 */
-  markRecalled(ids: string[]): Promise<void> {
-    const run = () => this.markRecalledInner(ids)
+  markRecalled(ids: string[], now = Date.now()): Promise<void> {
+    const run = () => this.markRecalledInner(ids, now)
     const next = this.recallChain.then(run, run)
     this.recallChain = next.catch(() => {})
     return next
   }
 
-  private async markRecalledInner(ids: string[]): Promise<void> {
-    const now = Date.now()
+  private async markRecalledInner(ids: string[], now: number): Promise<void> {
     try {
       const current = new Map(await this.stats.list())
       const next = new Map<string, RecallStats>()
@@ -390,7 +392,7 @@ export class MemoryStore {
       }
       await this.stats.putMany([...next])
     } catch (err) {
-      ;(this.log ?? console).error('[plastic-memory] 召回统计更新失败:', err)
+      this.log.error('[plastic-memory] 召回统计更新失败:', err)
     }
   }
 }
