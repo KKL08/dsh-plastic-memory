@@ -93,7 +93,7 @@ beforeEach(() => {
     else effects.recordWrites.push({ method, key: args[0] as string })
   })
   observe(PendingDecisionsStore.prototype, [
-    'upsert', 'settle', 'sweep', 'unsettle', 'syncOverflow', 'syncPromoteCandidates', 'addSettled', 'markUndone', 'remove', 'removeByMemoryIds', 'withClaim',
+    'upsert', 'settle', 'sweep', 'unsettle', 'syncOverflow', 'syncPromoteCandidates', 'addSettled', 'markUndone', 'remove', 'removeByMemoryIds', 'dropDependingOn', 'withClaim',
   ], name => { effects.ledgerWrites.push(name) })
   observe(SnapshotStore.prototype, ['capture', 'sweep', 'redact', 'purge', 'restore'], name => { effects.snapshotWrites.push(name) })
 })

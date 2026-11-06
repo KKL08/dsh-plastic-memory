@@ -89,3 +89,19 @@ describe('syncOverflow 与「忽略」交错', () => {
     expect(after).toMatchObject({ id: entry!.id, summary: '用量 4200', settled: { verdict: 'dismiss', at: 2 } })
   })
 })
+
+describe('dropDependingOn（彻底删除前清依赖条目）', () => {
+  it('指向被抹快照、涉及这条记忆的条目清掉；同一份快照只涉及别的记忆的、指向别的快照的、未决的都留着', async () => {
+    const s = makeStore()
+    const verdict = await s.addSettled({ kind: 'conflict', memoryIds: ['mem_a', 'mem_b'], summary: '裁决', workspaces: ['global', 'global'], fingerprint: 'fp' }, 'keep-left', 1, { snapshotId: 'snap_lost' })
+    const merge = await s.addSettled({ kind: 'edit', memoryIds: ['mem_c', 'mem_b'], summary: '合并', workspaces: ['global', 'global'], fingerprint: 'fp' }, 'merged', 1, { snapshotId: 'snap_other' })
+    const sameSnapshot = await s.addSettled({ kind: 'edit', memoryIds: ['mem_c'], summary: '同快照别的记忆', workspaces: ['global'], fingerprint: 'fp' }, 'edited', 1, { snapshotId: 'snap_lost' })
+    const open = (await s.upsert({ memoryIds: ['mem_b', 'mem_d'], summary: '未决' }, 1)).entry
+
+    await s.dropDependingOn(new Set(['snap_lost']), 'mem_b')
+
+    const left = [...await s.list(), ...await s.listSettled()].map(e => e.id).sort()
+    expect(left).toEqual([merge.id, sameSnapshot.id, open.id].sort())
+    expect(left).not.toContain(verdict.id)
+  })
+})

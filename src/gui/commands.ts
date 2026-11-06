@@ -10,18 +10,18 @@ import { RecordNotFoundError } from '../errors.ts'
 import { detectSecrets, hasCriticalSecret, hasSecret } from '../secrets.ts'
 import { computeDigest } from '../storage/frontmatter.ts'
 import { candidateFingerprint, type MisplacedIgnore, type PendingDecisionsStore } from '../governance/decisions.ts'
-import { asUndoable, expectedFingerprints, isModelChange, isStillOwnWrite, undoRuleOf, undoStateOf, type UndoableEntry } from '../governance/undo-rules.ts'
+import { isModelChange } from '../governance/undo-rules.ts'
 import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
-import { kindOf, verdictLoser, type PendingDecision, type ScanCacheEntry, type SnapshotRecord } from '../governance/schema.ts'
+import { kindOf, type PendingDecision, type ScanCacheEntry, type SnapshotRecord } from '../governance/schema.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
 import { executeConfirm } from '../tools/confirm.ts'
 import { executeForget } from '../tools/forget.ts'
 import { executePromote } from '../tools/promote.ts'
-import { executeSnapshotTool, type SnapshotToolOptions } from '../tools/snapshot.ts'
+import { executeUndo, restoreDeleted, type UndoResult } from '../tools/undo.ts'
 import {
-  copyHistory, crossWorkspaceNote, gateRecords, isCopyOf, locateCopy, workspaceLabel, type CrossWorkspaceRejection, type GovernanceContext,
+  copyHistory, crossWorkspaceNote, gateRecords, locateCopy, workspaceLabel, type CrossWorkspaceRejection, type GovernanceContext,
 } from '../tools/workspace-gate.ts'
 import {
   GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, mergeKeeperIndex, parseMemoryCommand, sessionViewFile,
@@ -98,8 +98,8 @@ const READ_ONLY_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['draft-ed
 /** 自己写视图的子命令：成功后不再按常规重写全部视图。 */
 const SELF_WRITING_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['scan', 'refresh-views', 'set-auto-checkup'])
 
-/** 改待决项的子命令，先认领条目再执行，同一条同时只跑一个（resolve 由执行器 executeConfirm 自己认领）。 */
-const CLAIMED_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['undo', 'promote', 'keep-local', 'dismiss-overflow'])
+/** 改待决项的子命令，先认领条目再执行，同一条同时只跑一个（resolve、undo 由执行器 executeConfirm、executeUndo 自己认领）。 */
+const CLAIMED_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['promote', 'keep-local', 'dismiss-overflow'])
 
 type Ok = Extract<MemoryCommandResult, { ok: true }>
 type Err = Extract<MemoryCommandResult, { ok: false }>
@@ -145,7 +145,7 @@ async function run(deps: MemoryCommandDeps, invocation: MemoryCommandInvocation)
   const gov = { workspacePath: context.workspacePath }
   let result: MemoryCommandResult
   if ('decisionId' in command && CLAIMED_COMMANDS.has(command.cmd)) {
-    // 两个标签页或两个宿主进程同时处理同一条（提升与留在本项目、两次撤销）：只让一条执行，另一条什么都不动
+    // 两个标签页或两个宿主进程同时处理同一条（提升与留在本项目）：只让一条执行，另一条什么都不动
     const claimed = await deps.decisions.withClaim(command.decisionId, () => dispatch(deps, command, gov, exec, now))
     result = claimed.isClaimed ? claimed.value : fail(command.cmd, 'claimed', `待决项 ${command.decisionId} 正在被另一次操作处理，未做任何改动`)
   } else {
@@ -204,17 +204,12 @@ async function dispatch(
   const { cmd } = command
   const executorDeps = { store: deps.store, decisions: deps.decisions, snapshots: deps.snapshots, log: deps.log, now: () => now }
   const notFound = (what: string) => fail(cmd, 'not-found', `不存在或已处理：${what}`)
+  // 撤销与最近删除的恢复：时钟现读，恢复收尾要判快照是不是途中刚过期被清扫，用命令开头的时刻判不出来
+  const undoDeps = { store: deps.store, decisions: deps.decisions, snapshots: deps.snapshots, ignores: deps.ignores, now: () => deps.now?.() ?? Date.now() }
+  const fromUndo = (r: UndoResult): MemoryCommandResult => (r.kind === 'error'
+    ? fail(cmd, r.code, r.message, r.rejected)
+    : { ok: true, cmd, decisionId: r.decisionId, memoryIds: r.restored, ...(r.snapshotId !== undefined ? { snapshotId: r.snapshotId } : {}) })
 
-  /** 按快照恢复这些记忆；返回恢复了的 id，或错误结果（快照过期、跨项目被拒、快照后被改过）。 */
-  const restoreFrom = async (snapshotId: string, memoryIds: string[], allowCrossWorkspace: boolean | undefined, options: SnapshotToolOptions = {}): Promise<string[] | Err> => {
-    // 时钟现读：恢复收尾要判快照是不是途中刚过期被清扫，用命令开头的时刻判不出来
-    const r = await executeSnapshotTool({ action: 'restore', snapshotId, memoryIds, allowCrossWorkspace }, gov, { ...executorDeps, now: () => deps.now?.() ?? Date.now() }, options)
-    if (r.kind === 'error') return fail(cmd, 'not-found', r.message)
-    if (r.kind !== 'restored') return fail(cmd, 'failed', r.message)
-    if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
-    if (r.skipped.length > 0) return fail(cmd, 'failed', r.message)
-    return r.restored
-  }
   const settledEntry = async (id: string) => (await deps.decisions.listSettled()).find(d => d.id === id)
   const openEntryOfKind = async (id: string, kind: ReturnType<typeof kindOf>): Promise<PendingDecision | Err> => {
     const entry = await deps.decisions.get(id)
@@ -226,99 +221,6 @@ async function dispatch(
   /** 命令带了作用域就只认那一份，否则按借来的会话定位（当前项目优先）。 */
   const locate = (memoryId: string, scope: Scope | undefined) =>
     scope === undefined ? deps.store.get(memoryId, { workspacePath: gov.workspacePath }) : locateCopy(deps.store, memoryId, scope)
-
-  /**
-   * 撤销直接改、直接合并：保留的那条此刻还是那次写下的内容，才按改前的快照把涉及的记忆都恢复（合并删掉的那条一起回来）；
-   * 之后被别处改过的不覆盖，什么都不动。恢复后条目移出账本。
-   */
-  const undoEdit = async (entry: UndoableEntry, allowCrossWorkspace: boolean | undefined): Promise<MemoryCommandResult> => {
-    const snapshotId = entry.settled.snapshotId
-    const snapshot = snapshotId === undefined ? undefined : await deps.snapshots.get(snapshotId)
-    const records = snapshot?.data.filter(r => entry.memoryIds.includes(r.id)) ?? []
-    const before = records.find(r => r.id === entry.memoryIds[0])
-    if (snapshotId === undefined || before === undefined) return notFound(`${entry.id} 改前的快照（可能已超过 14 天）`)
-    // 先过跨项目门：放行一部分就恢复一部分，合并会只回来一半
-    const { rejected } = gateRecords(records, gov, allowCrossWorkspace)
-    if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
-    const current = await locateCopy(deps.store, before.id, scopeAt(before.workspacePath))
-    if (undoStateOf(entry, before, current) !== 'undoable') {
-      return fail(cmd, 'failed', `记忆 ${before.id} 在这次修改之后又被改过或已删除，撤销会冲掉之后的改动，未做任何改动`)
-    }
-    // 要么全恢复、要么全不动：合并删掉的那条若已从最近删除恢复又改过，恢复会跳过它，保留的那条却已还原，所以先逐条核对。
-    // 还在最近删除里的也比内容：软删进去的若是快照之后的版本，恢复会拿快照里的旧内容盖掉它
-    const expected = expectedFingerprints(entry, records)
-    for (const rec of records) {
-      if (rec.id === before.id) continue
-      const cur = await deps.store.get(rec.id, scopeAt(rec.workspacePath))
-      if (cur !== undefined && editFingerprint(cur) !== expected.get(rec.id)) {
-        return fail(cmd, 'failed', `记忆 ${rec.id} 在这次修改之后又被改过，撤销会冲掉之后的改动，未做任何改动`)
-      }
-    }
-    // 写入那一刻按最新内容再核对一次：保留的那条仍在用、仍是那次写下的；其余（合并删掉的那条）内容仍同快照，在最近删除里或已恢复都行
-    const overwriteIf = (r: MemoryRecord) => (r.id === before.id ? isStillOwnWrite(entry, r) : editFingerprint(r) === expected.get(r.id))
-    const r = await restoreFrom(snapshotId, entry.memoryIds, allowCrossWorkspace, { isOwnScope: true, overwriteIf })
-    if (isErr(r)) return r
-    await deps.decisions.remove(entry.id)
-    return { ok: true, cmd, decisionId: entry.id, memoryIds: r, snapshotId }
-  }
-
-  /**
-   * 撤销模型改写、替代（对话卡片、右侧栏「这次新写入的」）：改写的那条仍在用、替代的那条仍是已取代，且内容还是那次写下的，
-   * 才按改前的快照恢复它（替代的旧记忆回到在用，替代它的那条不动）；之后被手改、模型再改或删掉的不覆盖，回 stale。
-   * 撤销后条目标已撤销、留到保留窗口结束，界面据此显示「已撤销」；已撤销的不能再撤。
-   */
-  const undoModelChange = async (entry: UndoableEntry, allowCrossWorkspace: boolean | undefined): Promise<MemoryCommandResult> => {
-    const snapshotId = entry.settled.snapshotId
-    const snapshot = snapshotId === undefined ? undefined : await deps.snapshots.get(snapshotId)
-    const before = snapshot?.data.find(r => r.id === entry.memoryIds[0])
-    const current = before === undefined ? undefined : await locateCopy(deps.store, before.id, scopeAt(before.workspacePath))
-    const state = undoStateOf(entry, before, current)
-    if (state === 'undone') return notFound(`${entry.id}（已撤销）`)
-    if (snapshotId === undefined || before === undefined) return notFound(`${entry.id} 改前的快照（可能已超过 14 天）`)
-    const { rejected } = gateRecords([before], gov, allowCrossWorkspace)
-    if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
-    const changed = () => fail(cmd, 'stale', `记忆 ${before.id} 在这次修改之后又被改过或已删除，撤销会冲掉之后的改动，未做任何改动`)
-    if (state === 'changed') return changed()
-    // 写入那一刻按最新内容再核对一次：之间被改过的跳过，什么都没写
-    const r = await restoreFrom(snapshotId, [before.id], allowCrossWorkspace, { isOwnScope: true, overwriteIf: cur => isStillOwnWrite(entry, cur) })
-    if (isErr(r)) return r.code === 'failed' ? changed() : r
-    await deps.decisions.markUndone(entry.id)
-    return { ok: true, cmd, decisionId: entry.id, memoryIds: r, snapshotId }
-  }
-
-  /**
-   * 撤销移到项目：项目里那份此刻还是移过去时的内容，才把它搬回全局。一次搬家，全局那份回来的同时项目里那份就不在了，
-   * 不会只做成一半；之后被改过、删掉，或全局又有了这个 id 的，什么都不动。搬回后条目移出账本。
-   */
-  const undoMove = async (entry: UndoableEntry, allowCrossWorkspace: boolean | undefined): Promise<MemoryCommandResult> => {
-    const memoryId = entry.memoryIds[0] ?? ''
-    const workspacePath = entry.workspaces?.[0]
-    const current = workspacePath === undefined ? undefined : await locateCopy(deps.store, memoryId, { kind: 'workspace', workspacePath })
-    if (current === undefined) return notFound(`${memoryId} 移过去的那一份`)
-    const { rejected } = gateRecords([current], gov, allowCrossWorkspace)
-    if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
-    const changed = () => fail(cmd, 'failed', `记忆 ${memoryId} 移过去之后又被改过或已删除，撤销会冲掉之后的改动，未做任何改动`)
-    if (undoStateOf(entry, undefined, current) !== 'undoable') return changed()
-    if ((await locateCopy(deps.store, memoryId, { kind: 'global' })) !== undefined) {
-      return fail(cmd, 'target-taken', `全局已有记忆 ${memoryId}，搬回去会盖掉它，未做任何改动`)
-    }
-    let isMoved = false
-    try {
-      await deps.store.update(current, (cur) => {
-        // 锁内按磁盘上的现状再核对一次
-        isMoved = isStillOwnWrite(entry, cur)
-        if (!isMoved) return cur
-        const { workspacePath: _workspacePath, ...rest } = cur
-        return { ...rest, scope: 'global' }
-      }, scopeAt(workspacePath))
-    } catch (error) {
-      if (!(error instanceof RecordNotFoundError)) throw error
-    }
-    if (!isMoved) return changed()
-    await deps.decisions.remove(entry.id)
-    const snapshotId = entry.settled.snapshotId
-    return { ok: true, cmd, decisionId: entry.id, memoryIds: [memoryId], ...(snapshotId !== undefined ? { snapshotId } : {}) }
-  }
 
   /** 结清这次提升或留下，返回条目 id。 */
   type SettleCandidate = (verdict: 'promoted' | 'keep-local', opts: { snapshotId?: string; fingerprint?: string; misplacedIgnore?: MisplacedIgnore }) => Promise<string>
@@ -409,88 +311,13 @@ async function dispatch(
       return { ok: true, cmd, decisionId: command.decisionId, ...(snapshotId !== undefined ? { snapshotId } : {}) }
     }
 
-    case 'undo': {
-      // 去掉 settled；记了快照的按它恢复败方（删一方的裁决）或恢复原位（提升为全局）
-      const found = await settledEntry(command.decisionId)
-      const entry = found === undefined ? undefined : asUndoable(found)
-      if (entry === undefined) return notFound(command.decisionId)
-      if (entry.kind === 'edit') return await undoEdit(entry, command.allowCrossWorkspace)
-      if (isModelChange(entry)) return await undoModelChange(entry, command.allowCrossWorkspace)
-      if (entry.kind === 'move') return await undoMove(entry, command.allowCrossWorkspace)
-      const { verdict, snapshotId } = entry.settled
-      const rule = undoRuleOf(entry)
-      const { targets } = rule
-      // 撤销提升只搬全局那一份：之后又移到别的项目的，按快照恢复会顺着全目录兜底把那个项目里的副本搬走
-      if (verdict === 'promoted') {
-        for (const memoryId of targets) {
-          if ((await locateCopy(deps.store, memoryId, { kind: 'global' })) === undefined) return notFound(`${memoryId} 全局那一份`)
-        }
-      }
-      let restored: string[] = []
-      if (targets.length > 0 && snapshotId !== undefined) {
-        const r = await restoreFrom(snapshotId, targets, command.allowCrossWorkspace)
-        if (isErr(r)) return r
-        restored = r
-      }
-      if (rule.mechanism === 'reflag') {
-        // 「留在本项目」清掉了候选标记、没拍快照：撤销时把标记放回去，否则条目回到待处理也找不到候选
-        const memoryId = entry.memoryIds[0] ?? ''
-        // 只认留下的那一层：不带层定位会挑到别层同 id 的副本，写回时还会清掉其余副本
-        const workspacePath = entry.workspaces?.[0] ?? gov.workspacePath
-        const rec = workspacePath === undefined ? undefined : await locateCopy(deps.store, memoryId, { kind: 'workspace', workspacePath })
-        if (!rec || rec.status !== 'active') return notFound(memoryId)
-        const { rejected } = gateRecords([rec], gov, command.allowCrossWorkspace)
-        if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
-        // 同 keep-local：不是内容编辑，updatedAt 不动
-        if (!(await deps.store.updateIfLive(rec, r => ({ ...r, globalCandidate: true }), scopeAt(workspacePath)))) return notFound(memoryId)
-        // 留下时顺带写的放错层忽略：忽略表里还是那一条才删，用户之前自己忽略的、之后重新忽略的都不碰
-        const written = entry.settled.misplacedIgnore
-        if (written !== undefined) await deps.ignores.unignoreIfSame('misplaced', [memoryId], { ignoredAt: written.ignoredAt, fingerprints: [written.fingerprint] })
-        restored = [memoryId]
-      }
-      // 就地处理时才记的条目：移出账本，回到没点过的样子；其余回到待处理
-      if (rule.fate === 'remove') await deps.decisions.remove(entry.id)
-      else await deps.decisions.unsettle(entry.id)
-      return { ok: true, cmd, decisionId: entry.id, memoryIds: restored, ...(snapshotId !== undefined ? { snapshotId } : {}) }
-    }
+    case 'undo':
+      return fromUndo(await executeUndo({ decisionId: command.decisionId, allowCrossWorkspace: command.allowCrossWorkspace }, gov, undoDeps))
 
     case 'restore': {
-      // 最近删除里的一条：被裁决删掉的走撤销那条路（按裁决的快照恢复，冲突回到待处理、沿用原条目）；
-      // 其余按最近一份含它的快照恢复；没有快照覆盖的（不经插件删除的归档文件）恢复归档文件本身
-      const { memoryId, layer: scope } = command
-      const rec = await locate(memoryId, scope)
-      if (!rec || rec.status !== 'deleted') return notFound(memoryId)
-      // 带了作用域时，裁决条目与快照都得覆盖那一份：同 id 别的副本的快照不拿来恢复它
-      const snapshots = await deps.snapshots.list()
-      const covers = (s: (typeof snapshots)[number] | undefined) =>
-        s?.data.some(r => r.id === memoryId && !r.redacted && (scope === undefined || isCopyOf(r, scope))) === true
-      const entry = (await deps.decisions.listSettled()).filter(d => verdictLoser(d, d.settled!.verdict) === memoryId
-        && (scope === undefined || covers(snapshots.find(s => s.id === d.settled!.snapshotId)))).at(-1)
-      const snapshotId = entry?.settled?.snapshotId ?? snapshots.find(covers)?.id
-      if (snapshotId === undefined) {
-        // 快照里只剩脱敏副本的是密钥硬删过的：归档里残留的副本也不复活
-        if (snapshots.some(s => s.data.some(r => r.id === memoryId && r.redacted === true && (scope === undefined || isCopyOf(r, scope))))) {
-          return fail(cmd, 'not-found', `${memoryId} 含密钥已物理删除，快照里只剩脱敏副本，不可恢复`)
-        }
-        const { rejected } = gateRecords([rec], gov, command.allowCrossWorkspace)
-        if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
-        if (!(await deps.store.restoreArchived(rec, { at: scope, now }))) return notFound(memoryId)
-        return { ok: true, cmd, memoryIds: [memoryId] }
-      }
-      const restore = async (): Promise<MemoryCommandResult> => {
-        const r = await restoreFrom(snapshotId, [memoryId], command.allowCrossWorkspace, { isOwnScope: scope !== undefined })
-        if (isErr(r)) return r
-        if (entry) await deps.decisions.unsettle(entry.id)
-        return { ok: true, cmd, memoryIds: r, snapshotId, ...(entry ? { decisionId: entry.id } : {}) }
-      }
-      if (!entry) return await restore()
-      // 裁决删掉的：同撤销，先认领条目、认领后重读，期间被撤销或重新裁决过的不再按旧裁决恢复、重开
-      const claimed = await deps.decisions.withClaim(entry.id, async () => {
-        const current = await settledEntry(entry.id)
-        if (current?.settled?.at !== entry.settled!.at || verdictLoser(current, current.settled.verdict) !== memoryId) return notFound(memoryId)
-        return await restore()
-      })
-      return claimed.isClaimed ? claimed.value : fail(cmd, 'claimed', `待决项 ${entry.id} 正在被另一次操作处理，未做任何改动`)
+      const r = await restoreDeleted({ memoryId: command.memoryId, scope: command.layer, allowCrossWorkspace: command.allowCrossWorkspace }, gov, undoDeps)
+      if (r.kind === 'error') return fail(cmd, r.code, r.message, 'rejected' in r ? r.rejected : undefined)
+      return { ok: true, cmd, memoryIds: r.restored, ...(r.snapshotId !== undefined ? { snapshotId: r.snapshotId } : {}), ...(r.decisionId !== undefined ? { decisionId: r.decisionId } : {}) }
     }
 
     case 'promote': {
@@ -597,12 +424,8 @@ async function dispatch(
           const isPurged: (r: SnapshotRecord) => boolean = target === undefined
             ? r => r.id === rec.id
             : await copyHistory(deps.store, snapshots.flatMap(s => s.data), new Set([rec.id]), target)
-          // 撤销要靠的那份快照副本马上就没了：指向它的裁决条目先清掉，之后恢复不再说冲突会回到待处理。
-          // 同一份快照里别的记忆的副本还在，它们的撤销条目留着
-          const lost = new Set(snapshots.filter(s => s.data.some(isPurged)).map(s => s.id))
-          for (const d of await deps.decisions.listSettled()) {
-            if (lost.has(d.settled?.snapshotId ?? '') && d.memoryIds.includes(rec.id)) await deps.decisions.remove(d.id)
-          }
+          // 撤销要靠的那份快照副本马上就没了：依赖它的条目先清掉
+          await deps.decisions.dropDependingOn(new Set(snapshots.filter(s => s.data.some(isPurged)).map(s => s.id)), rec.id)
           await deps.snapshots.purge(isPurged)
           // 锁内复核：定位之后被别处恢复成在用的，不删
           let isRestored = false

@@ -1226,6 +1226,15 @@ describe('待处理：直接改与直接合并', () => {
     expect(await screen.findByRole('button', { name: '直接改' })).toBeInTheDocument()
   })
 
+  it('撤销时这条之后又被改过（stale）：写明没有撤销，不用直接改的提示', async () => {
+    setup([bloat], { respond: command => (command.cmd === 'undo' ? { ok: false, cmd: command.cmd, code: 'stale', detail: '又改过' } : respondEdit(command)) })
+    startEdit()
+    fireEvent.change(screen.getByRole('textbox', { name: '正文' }), { target: { value: '跑测试再发' } })
+    await save()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
+    expect(await screen.findByRole('alert')).toHaveTextContent('这条记忆之后又被改过，撤销会冲掉之后的改动，没有撤销。')
+  })
+
   it('含密钥的记忆不给「直接改」「直接合并」', () => {
     const pair: PendingItem = { kind: 'advice', level: 'advice', type: 'redundancy', memories: [memory({ id: 'x1', digest: 'sha1:x1', hasSecret: true }), memory({ id: 'x2', digest: 'sha1:x2' })] }
     setup([{ ...bloat, memories: [{ ...target, hasSecret: true }] }, pair])

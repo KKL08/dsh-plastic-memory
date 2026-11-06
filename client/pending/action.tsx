@@ -95,7 +95,7 @@ export function useItemAction(session: BorrowedSession, onOk: (command: MemoryCo
       else if (r.code === 'has-secret' && command.cmd === 'forget') setState({ kind: 'secret', command })
       else if (r.code === 'secret-suspected' && (command.cmd === 'edit-memory' || command.cmd === 'merge-memories')) setState({ kind: 'suspected', command })
       // 这几种服务端原话只有中文，界面换成本地文案
-      else if (r.code === 'stale') setState({ kind: 'error', detail: t('pending.edit.stale') })
+      else if (r.code === 'stale') setState({ kind: 'error', detail: t(command.cmd === 'undo' || command.cmd === 'restore' ? 'pending.undo.stale' : 'pending.edit.stale') })
       else if (r.code === 'secret-critical') setState({ kind: 'error', detail: t('pending.edit.secretCritical') })
       else if (r.code === 'target-taken') {
         const key = command.cmd === 'undo' ? 'pending.move.undoTaken'

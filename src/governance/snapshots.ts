@@ -6,9 +6,18 @@ import { REDACTED_PLACEHOLDER, genId, type MemorySnapshot, type SnapshotRecord }
 import { RETENTION_MS } from '../retention.ts'
 import { maskSecrets, secretFields } from '../secrets.ts'
 import { roundValidity } from '../validity.ts'
+import { scopeAt } from '../scope.ts'
+import type { MemoryStore } from '../store.ts'
 
 /** 保留窗口：与软删清扫共用 retention.ts 的单一来源（两者必须一致）。 */
 export const SNAPSHOT_RETENTION_MS = RETENTION_MS
+
+export interface RestoreOptions {
+  target: 'exact' | 'hint'
+  /** 给函数时对锁内现状求值（定位不到时传 undefined），为真才写。 */
+  overwrite: boolean | ((current: MemoryRecord | undefined) => boolean)
+  now?: () => number
+}
 
 export interface SnapshotDiffEntry {
   id: string
@@ -196,55 +205,60 @@ export class SnapshotStore {
   }
 
   /**
-   * 选择性恢复：ids 为 undefined 恢复全部。快照后被修改过的记录默认跳过（冲突保护），
-   * overwriteChanged=true 才覆盖；给函数时只写它认可的现状（撤销：现状就是那次写下的内容），已删除的也不例外，
-   * 否则预检之后被别处删掉的会被盖回在用。脱敏记录（密钥硬删）一律跳过，计入 skipped 并单列在 redacted。
-   * 恢复动作本身只 put 旧数据，不做二次快照。current：调用方预读的现状（同 diff）。
-   * 预读之后记录仍可能被别处改动：不覆盖时把冲突判定交给 put 的 skipIf，在写入那一刻按最新内容再判一次；
-   * put 返回 false 即按「快照后被修改」跳过。返回 void 的 put 视为已写入。
+   * 选择性恢复，写回与撤回都在这里做：ids 为 undefined 恢复全部。快照后被修改过的记录默认跳过（冲突保护），
+   * overwrite=true 才覆盖；给函数时只写它认可的现状（撤销：现状就是那次写下的内容），已删除的、定位不到的也不例外，
+   * 否则之后被别处删掉的会被盖回在用、被搬走的会在原处重建旧版。冲突在写入那一刻按锁内最新内容判（put 的 skipIf），判中即按「快照后被修改」跳过。
+   * target：'exact' 写回快照里这条记录自己的作用域；'hint' 按它的 workspacePath 提示定位（当前项目优先），留给 agent 工具。
+   * 脱敏记录（密钥硬删）一律跳过，计入 skipped 并单列在 redacted。恢复动作本身只写旧数据，不做二次快照。
    * 密钥硬删先脱敏快照、再删文件（tools/forget.ts），可能发生在别的会话、别的进程，也可能在调用方读出快照之后：
    * 写入前按盘上的这份快照现读一次，已脱敏（或快照已清扫）的不写；全部写完再读一次，仍未脱敏说明对方删文件在后，
-   * 会连这份一起删掉，读到已脱敏的就用 discard 删掉刚写的那份，同样计入 redacted；条目已从快照里清掉的（最近删除里的彻底删除）
-   * 也 discard，计入 skipped。中途某条写入抛错时，已写入的照样复核完再抛。盘上快照只读这两次，条数多也不逐条重读。
-   * 收尾时整份快照都不在了：已过保留窗口的是被清扫掉的，刚写回的留着；还在窗口内的只可能是彻底删除抹空后整份删掉，照样 discard。
+   * 会连这份一起删掉，读到已脱敏的就撤回刚写的那份，同样计入 redacted；条目已从快照里清掉的（最近删除里的彻底删除）
+   * 也撤回，计入 skipped。撤回只删仍是刚写回那一版的：写回之后被改过的不是这次写的，留着、照样算恢复。
+   * 中途某条写入抛错时，已写入的照样复核完再抛。盘上快照只读这两次，条数多也不逐条重读。
+   * 收尾时整份快照都不在了：已过保留窗口的是被清扫掉的，刚写回的留着；还在窗口内的只可能是彻底删除抹空后整份删掉，照样撤回。
    * now 在收尾读完快照之后取，别处清扫用的时刻不会比它晚。
    */
   async restore(
     snapshot: MemorySnapshot,
     ids: string[] | undefined,
-    put: (record: MemoryRecord, skipIf?: (current: MemoryRecord | undefined) => boolean) => Promise<boolean | void>,
-    current: ReadonlyMap<string, MemoryRecord>,
-    overwriteChanged: boolean | ((current: MemoryRecord) => boolean),
-    discard: (record: MemoryRecord) => Promise<unknown>,
-    now: () => number = Date.now,
+    store: Pick<MemoryStore, 'put' | 'hardDelete'>,
+    { target, overwrite, now = Date.now }: RestoreOptions,
   ): Promise<{ restored: string[]; skipped: string[]; redacted: string[] }> {
     const targets = ids ? snapshot.data.filter(r => ids.includes(r.id)) : snapshot.data
-    const blocks = (cur: MemoryRecord | undefined, rec: MemoryRecord) => (typeof overwriteChanged === 'function'
-      ? cur !== undefined && !overwriteChanged(cur)
-      : isConflicting(cur, rec) && !overwriteChanged)
+    const blocks = (cur: MemoryRecord | undefined, rec: MemoryRecord) => (typeof overwrite === 'function'
+      ? !overwrite(cur)
+      : !overwrite && isConflicting(cur, rec))
     const outcomes: Array<'restored' | 'skipped' | 'redacted'> = []
+    const written = new Map<number, MemoryRecord>()
     const onDisk = async () => {
       const snap = await this.table.get(snapshot.id)
       return snap === undefined ? undefined : new Map(snap.data.map(r => [r.id, r]))
     }
     const before = await onDisk() ?? new Map<string, SnapshotRecord>()
     try {
-      for (const rec of targets) {
+      for (const [i, rec] of targets.entries()) {
         const latest = rec.redacted ? rec : before.get(rec.id)
-        if (latest?.redacted) outcomes.push('redacted')
-        else if (latest === undefined || blocks(current.get(rec.id), rec)) outcomes.push('skipped')
-        else outcomes.push((await put(rec, overwriteChanged === true ? undefined : cur => blocks(cur, rec))) === false ? 'skipped' : 'restored')
+        if (latest?.redacted) { outcomes.push('redacted'); continue }
+        const put = latest === undefined ? undefined
+          : await store.put(rec, target === 'exact' ? scopeAt(rec.workspacePath) : { workspacePath: rec.workspacePath },
+            overwrite === true ? undefined : cur => blocks(cur, rec))
+        if (put !== undefined) written.set(i, put)
+        outcomes.push(put === undefined ? 'skipped' : 'restored')
       }
     } finally {
       // 后面某条写入抛错也要跑：前面已写回的可能正赶上别处的密钥硬删
-      const after = outcomes.includes('restored') ? await onDisk() : undefined
+      const after = written.size > 0 ? await onDisk() : undefined
       // 整份快照过期被清扫：不是彻底删除，刚写回的都留着
-      if (outcomes.includes('restored') && !(after === undefined && snapshot.createdAt < now() - SNAPSHOT_RETENTION_MS)) {
-        for (const [i, rec] of targets.entries()) {
+      if (written.size > 0 && !(after === undefined && snapshot.createdAt < now() - SNAPSHOT_RETENTION_MS)) {
+        for (const [i, put] of written) {
           // 开头还在、收尾不在了：恢复途中被彻底删除（快照条目先清、文件后删），刚写回的同样撤回
-          const settled = after?.get(rec.id)
-          if (outcomes[i] !== 'restored' || (settled !== undefined && settled.redacted !== true)) continue
-          await discard(rec)
+          const settled = after?.get(put.id)
+          if (settled !== undefined && settled.redacted !== true) continue
+          // 已被对方删掉的照样按撤回计；写回之后被改过的不是这次写的，留着
+          const fingerprint = editFingerprint(put)
+          let isChanged = false
+          await store.hardDelete(put, { at: scopeAt(put.workspacePath) }, cur => (isChanged = editFingerprint(cur) !== fingerprint))
+          if (isChanged) continue
           outcomes[i] = settled === undefined ? 'skipped' : 'redacted'
         }
       }
