@@ -9,16 +9,17 @@ import type { EvidenceLookupLevel } from './evidence-guidance.ts'
 import { assembleSnapshot, overflowLevel, type OverflowMode, type SnapshotUsage } from './snapshot.ts'
 import type { OverflowLevel } from './contract-codes.ts'
 import { relaxedCap, type SessionView, type SnapshotOrigin } from './gui/contract.ts'
+import { ledgerLabel, scopeOfLedger, type Scope } from './scope.ts'
 
 /**
  * 快照的预读：global + 当前 workspace 顶层的 active 记录（同 id 按取舍规则留一份，口径同 queryScope 的默认查询），
- * 外加 id → 文件路径（相对记忆根目录：`<目录名>/<文件名>`），索引行末尾用它。走 readLayer 是为了拿到文件路径——
+ * 外加 id → 文件路径（相对记忆根目录：`<目录名>/<文件名>`），索引行末尾用它。走 readRaw 是为了拿到文件路径——
  * queryScope 只回记录。同一次读取的隔离文件数给冷启动文案用。
  */
 export async function prereadSnapshot(store: MemoryStore, workspacePath: string | undefined): Promise<{
   records: MemoryRecord[]; files: Map<string, string>; quarantinedCount: number
 }> {
-  const read = await store.readLayer({ kind: 'visible', workspacePath })
+  const read = await store.readRaw({ kind: 'visible', workspacePath })
   const located = resolveLiveFirst(read.records, { workspacePath }).filter(l => l.record.status === 'active')
   return {
     records: located.map(l => l.record),
@@ -213,7 +214,8 @@ export class SnapshotCache {
     try {
       if (overflowLedger) {
         const level = overflowLevel(mode, usage.usedTokens, budget)
-        overflowChanged = await overflowLedger.syncOverflow(workspacePath ?? 'global', level, now, level ? overflowSummary(level, usage, budget) : '')
+        const scope: Scope = workspacePath === undefined ? { kind: 'global' } : { kind: 'workspace', workspacePath }
+        overflowChanged = await overflowLedger.syncOverflow(ledgerLabel(scope), level, now, level ? overflowSummary(level, usage, budget) : '')
       }
       await onFrozen?.(session, {
         ...(workspacePath !== undefined ? { workspacePath } : {}),
@@ -234,7 +236,8 @@ export class SnapshotCache {
     const mode = deps.overflow ?? 'relax'
     const now = deps.now?.() ?? Date.now()
     for (const scope of new Set(scopes)) {
-      const workspacePath = scope === 'global' ? undefined : scope
+      const own = scopeOfLedger(scope)
+      const workspacePath = own.kind === 'global' ? undefined : own.workspacePath
       const { text: _text, coreIds: _coreIds, ...usage } = assembleSnapshot({ ...deps, ...(await prereadSnapshot(deps.store, workspacePath)), workspacePath, now })
       const level = overflowLevel(mode, usage.usedTokens, deps.budget)
       await deps.overflowLedger.syncOverflow(scope, level, now, level ? overflowSummary(level, usage, deps.budget) : '')

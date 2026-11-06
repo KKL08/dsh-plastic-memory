@@ -6,9 +6,9 @@ import { FileTable } from '../src/storage/file-table.ts'
 import { GLOBAL_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import { fakeExec } from './helpers/exec.ts'
-import { executeScan, cacheKey, renderScanResult, type ScanToolDeps, type ScanArgs, type SingleScanResult } from '../src/tools/scan.ts'
-import { GLOBAL_CACHE_KEY, scoreLayer } from '../src/governance/layer-health.ts'
-import { prereadLayers } from '../src/tools/layer-preread.ts'
+import { executeScan, renderScanResult, type ScanToolDeps, type ScanArgs, type SingleScanResult } from '../src/tools/scan.ts'
+import { GLOBAL_CACHE_KEY, scoreScope } from '../src/governance/scope-health.ts'
+import { prereadScopes } from '../src/tools/scope-preread.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { MODEL_UNAVAILABLE_HOST_CODES, hostSemanticLlm } from '../src/governance/host-llm.ts'
@@ -16,7 +16,8 @@ import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { InMemoryKvTable, type CasKvTable } from '../src/kv-table.ts'
-import { CheckupRecordStore, checkupKey } from '../src/governance/checkup-records.ts'
+import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
+import { checkupKey } from '../src/gui/contract.ts'
 import type { CheckupRecord } from '../src/storage/schema.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { PendingDecision, ScanCacheEntry } from '../src/governance/schema.ts'
@@ -291,11 +292,6 @@ describe('executeScan 单层模式', () => {
     const r = await scanSingle({}, deps)
     expect(r.usageTokens).toBe(6800)
     expect(renderScanResult(r)).not.toMatch(/6800|6,800|token/)
-  })
-
-  it('cacheKey：workspace 按路径分别取键，缺省落 global 层缓存键', () => {
-    expect(cacheKey('/proj')).toBe('cache_/proj')
-    expect(cacheKey(undefined)).toBe(GLOBAL_CACHE_KEY)
   })
 })
 
@@ -654,7 +650,7 @@ describe('executeScan 完成记录（上次体检）', () => {
     const plain = makeDeps({ getLlm: () => quiet })
     for (const d of [deps, plain]) await d.store.put(record({ id: 'mem_p', scope: 'workspace', workspacePath: '/proj' }))
     const r = await executeScan({ scope: '/proj' }, deps, fakeExec())
-    expect(await completed(checkups)).toEqual({ [checkupKey({ kind: 'workspace', path: '/proj' })]: { startedAt: 9000, completedAt: 9500, by: 'agent' } })
+    expect(await completed(checkups)).toEqual({ [checkupKey({ kind: 'workspace', workspacePath: '/proj' })]: { startedAt: 9000, completedAt: 9500, by: 'agent' } })
     expect(r).toEqual(await executeScan({ scope: '/proj' }, plain, fakeExec()))
   })
 
@@ -673,7 +669,7 @@ describe('executeScan 完成记录（上次体检）', () => {
     await deps.store.put(record({ id: 'mem_a', scope: 'workspace', workspacePath: '/proj-a' }))
     await deps.store.put(record({ id: 'mem_b', scope: 'workspace', workspacePath: '/proj-b' }))
     await executeScan({ scope: 'all' }, deps, fakeExec())
-    expect(Object.keys(await completed(checkups)).sort()).toEqual([checkupKey({ kind: 'global' }), checkupKey({ kind: 'workspace', path: '/proj-a' })].sort())
+    expect(Object.keys(await completed(checkups)).sort()).toEqual([checkupKey({ kind: 'global' }), checkupKey({ kind: 'workspace', workspacePath: '/proj-a' })].sort())
   })
 
   it.each([
@@ -900,7 +896,7 @@ describe('体检后手改记忆文件（「打开文件」直接改，frontmatte
     })
     const deps = makeDeps({ store, getLlm: (_exec: unknown) => redundancyLlm })
     await scanSingle({}, deps)
-    const redundancy = async () => scoreLayer(deps, await prereadLayers(deps, [{ kind: 'global' }], undefined), { kind: 'global' }, 9000)
+    const redundancy = async () => scoreScope(deps, await prereadScopes(deps, [{ kind: 'global' }], undefined), { kind: 'global' }, 9000)
       .health.counts.redundancy
     return { root, redundancy }
   }

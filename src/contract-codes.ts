@@ -114,7 +114,7 @@ export type FrontmatterErrorCode =
   | 'timestamp-parse'   // 时间戳无法解析
   | 'schema-invalid'    // 记录 schema 校验失败
 
-/** 读取记忆目录时的目录级说明（info 级，按文件或目录列出；storage/frontmatter.ts、storage/file-table.ts、tools/layer-preread.ts）。 */
+/** 读取记忆目录时的目录级说明（info 级，按文件或目录列出；storage/frontmatter.ts、storage/file-table.ts、tools/scope-preread.ts）。 */
 export const DIRECTORY_NOTE_CODES = [
   'reserved-keys',     // frontmatter 写了保留键（scope、workspacePath、召回统计、content），已忽略
   'marker-missing',    // workspace 目录缺 .workspace 标记（或标记为空），目录不进清单、文件不读

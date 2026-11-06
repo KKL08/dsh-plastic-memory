@@ -8,14 +8,15 @@ import type { ScanCacheEntry } from '../governance/schema.ts'
 import { FINDING_TYPES } from '../governance/schema.ts'
 import type { HealthThresholds } from '../governance/health-presets.ts'
 import { runRuleScan } from '../governance/rule-scan.ts'
-import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, checkupRowBase, ignoredNote, type LayerRef, TIER_LABEL } from '../governance/layer-health.ts'
+import { scoreScope, listWorkspaces, validateScopePaths, crossScopeConflicts, checkupRowBase, ignoredNote, TIER_LABEL } from '../governance/scope-health.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
 import { resolveAutoCheckup } from '../gui/contract.ts'
 import type { DirectoryNote } from '../storage/table.ts'
-import { prereadLayers, listingNotes, checkupWorkspaces, renderDirectoryNotes } from './layer-preread.ts'
+import { prereadScopes, listingNotes, checkupWorkspaces, renderDirectoryNotes } from './scope-preread.ts'
 import { decisionWorkspaces, decisionWorkspacesNote } from './workspace-gate.ts'
+import { ledgerLabel, type Scope } from '../scope.ts'
 
 const DAY = 86_400_000
 
@@ -41,7 +42,7 @@ export interface HealthToolDeps {
 }
 
 export interface HealthArgs {
-  /** 缺省=当前 workspace（无 workspace 会话退到 global 层）；'all'=全库分层体检；具体路径=该 workspace。 */
+  /** 缺省=当前 workspace（无 workspace 会话退到全局）；'all'=全库按作用域体检；具体路径=该 workspace。 */
   scope?: string
 }
 
@@ -68,11 +69,11 @@ export interface SingleHealthResult {
   totalMemories: number
   /** 用户在记忆页忽略、没有计分的建议条数。 */
   ignoredCount: number
-  /** 本层的全局提升候选数（闲时才进 recommendation 文本，字段常在）。 */
+  /** 本作用域的全局提升候选数（闲时才进 recommendation 文本，字段常在）。 */
   promoteCandidates: number
-  /** workspace 视图下 global 层检出的疑似密钥条数——不计本层分数，但必须报警。 */
+  /** workspace 视图下全局检出的疑似密钥条数——不计本作用域分数，但必须报警。 */
   globalSecretAlert: number
-  /** 本层会话带入的记忆超出上限（含已忽略的）：列为问题、不扣分。没超为 null。summary 是账本里的说明。 */
+  /** 本作用域会话带入的记忆超出上限（含已忽略的）：列为问题、不扣分。没超为 null。summary 是账本里的说明。 */
   overflow: { mode: 'relax' | 'strict'; tier: number; summary: string } | null
   recommendation: string
   /** recommendation 的结构化对应：独占层单元素、行动项层多元素（按代码顺序）、无事为空数组。 */
@@ -110,7 +111,7 @@ export interface CheckupHealthResult {
   message: string
 }
 
-/** scope 里出现无法识别的 workspace 时快速失败——静默算错层比报错危险得多。 */
+/** scope 里出现无法识别的 workspace 时快速失败——静默算错作用域比报错危险得多。 */
 export interface HealthErrorResult {
   kind: 'error'
   message: string
@@ -165,23 +166,23 @@ export function renderHealthResult(result: HealthToolResult): string {
  * memory_health：纯读取。规则层实时算 + 语义层读 scan_cache + 新鲜度轴。
  * 从未 scan 时语义计 0，不因缺语义数据压分。
  * 默认口径=当前 workspace（占比分母是本项目规模，不被跨项目聚合稀释）；
- * scope='all' 输出各 workspace 分数表 + global 层（零成本，无需用户确认）。
+ * scope='all' 输出各 workspace 分数表 + 全局（零成本，无需用户确认）。
  */
 export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, exec: ToolRunContext): Promise<HealthToolResult> {
   const args = rawArgs
   const now = deps.now?.() ?? Date.now()
   const th = deps.thresholds
   const overdueMs = th.pendingOverdueDays * DAY
-  // 预读范围：与 memory_scan 共用 prereadLayers——目标层（含 .archive/）的全部状态记录、层外引用按 id 定位、
-  // 待决账本、语义缓存、按层归档的隔离文件；之后的评分与聚合都是同步纯计算。
+  // 预读范围：与 memory_scan 共用 prereadScopes——目标作用域（含 .archive/）的全部状态记录、作用域外引用按 id 定位、
+  // 待决账本、语义缓存、按作用域归档的隔离文件；之后的评分与聚合都是同步纯计算。
   // 目录枚举只读标记与文件名：体检清单、scope 校验、缺标记 / 不可读目录的说明都出自它
   const listing = await deps.store.listWorkspaceDirs()
 
   if (args.scope === 'all') {
     // 全库：global + 体检清单里的全部 workspace 目录
-    const data = await prereadLayers(deps, [{ kind: 'global' }, ...checkupWorkspaces(listing).map(path => ({ kind: 'workspace' as const, path }))])
-    const layers: LayerRef[] = [{ kind: 'global' }, ...listWorkspaces(data.byId.values()).map(path => ({ kind: 'workspace' as const, path }))]
-    const scored = layers.map(l => scoreLayer(deps, data, l, now))
+    const data = await prereadScopes(deps, [{ kind: 'global' }, ...checkupWorkspaces(listing).map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))])
+    const scopes: Scope[] = [{ kind: 'global' }, ...listWorkspaces(data.byId.values()).map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
+    const scored = scopes.map(scope => scoreScope(deps, data, scope, now))
     const rows: CheckupRow[] = scored.map(r => ({
       ...checkupRowBase(r),
       semanticCachedAt: r.lastCheckupAt,
@@ -196,7 +197,7 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
     const wsCount = rows.length - 1
     return {
       kind: 'checkup', rows,
-      crossLayerConflicts: crossLayerConflicts(data.byId, data.pending),
+      crossLayerConflicts: crossScopeConflicts(data.byId, data.pending),
       promoteCandidates,
       pendingTotal: data.pending.length,
       directoryNotes: [...listingNotes(listing, { includeEmpty: true }), ...data.directoryNotes],
@@ -204,42 +205,42 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
     }
   }
 
-  // 单层视图：显式路径 > 当前会话 workspace > global 层（无 workspace 会话）
+  // 单个作用域：显式路径 > 当前会话 workspace > 全局（无 workspace 会话）
   const currentWs = exec !== undefined ? (await deps.resolveContext(exec)).workspacePath : undefined
   if (args.scope !== undefined) {
     const invalid = validateScopePaths(checkupWorkspaces(listing), currentWs, [args.scope])
     if (invalid !== null) return { kind: 'error', message: invalid }
   }
   const wsPath = args.scope ?? currentWs
-  const layer: LayerRef = wsPath !== undefined ? { kind: 'workspace', path: wsPath } : { kind: 'global' }
-  // 单层：目标层 + global（workspace 视图要兜住 global 层的密钥，待决项也看 global 一侧）
-  const data = await prereadLayers(deps, layer.kind === 'workspace' ? [layer, { kind: 'global' }] : [layer], wsPath)
-  const scored = scoreLayer(deps, data, layer, now)
+  const scope: Scope = wsPath !== undefined ? { kind: 'workspace', workspacePath: wsPath } : { kind: 'global' }
+  // 单个作用域：目标作用域 + global（workspace 视图要兜住 global 的密钥，待决项也看 global 一侧）
+  const data = await prereadScopes(deps, scope.kind === 'workspace' ? [scope, { kind: 'global' }] : [scope], wsPath)
+  const scored = scoreScope(deps, data, scope, now)
   const { health, records } = scored
   const globalActive = [...data.byId.values()].filter(r => r.status === 'active' && r.scope === 'global')
   // 语义部分的时间按上次体检算（完成记录），不按缓存
   const cachedAt = scored.lastCheckupAt
   // 这个范围开着自动体检：插件会按时自己查，不再提醒「语义扫描已是 N 天前」
   const isAutoCheckup = deps.autoCheckups !== undefined
-    && resolveAutoCheckup(await deps.autoCheckups.read(), layer.kind === 'global' ? { kind: 'global' } : { kind: 'workspace', workspacePath: layer.path }).frequency !== 'manual'
+    && resolveAutoCheckup(await deps.autoCheckups.read(), scope).frequency !== 'manual'
   const isSemanticStale = cachedAt !== null && !isAutoCheckup && now - cachedAt > th.scanStaleDays * DAY
 
-  // workspace 视图必须兜住 global 层的密钥——它在本会话同样生效，但归属（与修复责任）在 global 层，
-  // 不计本层分数，走报警 + recommendation 置顶
+  // workspace 视图必须兜住全局的密钥——它在本会话同样生效，但归属（与修复责任）在全局，
+  // 不计本作用域分数，走报警 + recommendation 置顶
   let globalSecretAlert = 0
-  if (layer.kind === 'workspace') {
+  if (scope.kind === 'workspace') {
     globalSecretAlert = runRuleScan(globalActive, id => data.byId.get(id), now).filter(f => f.type === 'secret').length
   }
 
-  // 待决项列可见集合（本层 + global——跨层冲突影响本 workspace 的会话）内的
+  // 待决项列可见集合（本作用域 + global——跨作用域的冲突影响本 workspace 的会话）内的
   const visibleIds = new Set([
     ...records.map(r => r.id),
-    ...(layer.kind === 'workspace' ? globalActive.map(r => r.id) : []),
+    ...(scope.kind === 'workspace' ? globalActive.map(r => r.id) : []),
   ])
   const pending = data.pending.filter(e => e.memoryIds.every(id => visibleIds.has(id)))
   const overdue = pending.filter(e => now - e.firstSeenAt >= overdueMs)
   // 超限按会话所属项目记账（无项目的会话记在 global）：列为问题，不进评分
-  const overflowEntry = (await deps.decisions.listOverflow()).find(e => overflowScopeOf(e) === (layer.kind === 'global' ? 'global' : layer.path))
+  const overflowEntry = (await deps.decisions.listOverflow()).find(e => overflowScopeOf(e) === ledgerLabel(scope))
   const overflow = overflowEntry === undefined ? null : { ...overflowLevelOf(overflowEntry), summary: overflowEntry.summary }
 
   // recommendation 分层并列。独占层：密钥（本层红线或 global 报警）永远最高、不受档位
@@ -283,15 +284,15 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
   const semanticNote = cachedAt !== null
     ? `（语义部分基于 ${Math.floor((now - cachedAt) / DAY)} 天前的扫描）`
     : '（从未做过语义扫描，语义问题按 0 计）'
-  const layerLabel = layer.kind === 'global' ? 'global 记忆'
+  const scopeLabel = scope.kind === 'global' ? 'global 记忆'
     : wsPath === currentWs ? '本项目记忆'
     : `workspace ${wsPath} 记忆`
   const gateNote = health.gate.secret ? '（检出密钥，红线判定）' : ''
 
   return {
     kind: 'single',
-    layer: layer.kind,
-    ...(layer.kind === 'workspace' ? { workspacePath: layer.path } : {}),
+    layer: scope.kind,
+    ...(scope.kind === 'workspace' ? { workspacePath: scope.workspacePath } : {}),
     score: Math.round(health.score * 100) / 100,
     tier: health.tier,
     gate: health.gate,
@@ -330,6 +331,6 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
     recommendation,
     recommendationKinds,
     directoryNotes: [...listingNotes(listing, { includeEmpty: false }), ...data.directoryNotes],
-    message: `${layerLabel}健康分 ${Math.floor(health.score)}/100（${TIER_LABEL[health.tier]}）${gateNote}${semanticNote}。${recommendation}。`,
+    message: `${scopeLabel}健康分 ${Math.floor(health.score)}/100（${TIER_LABEL[health.tier]}）${gateNote}${semanticNote}。${recommendation}。`,
   }
 }

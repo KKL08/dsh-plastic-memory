@@ -37,7 +37,7 @@ describe('SnapshotCache', () => {
     const injected = await cache.assemble(session)
     expect(injected).toContain('不要 mock 数据库')
     expect(frozenCore(cache, session)).toEqual(['mem_core'])
-    const reads = vi.spyOn(store, 'readLayer')
+    const reads = vi.spyOn(store, 'readRaw')
     expect(await cache.assemble(session)).toBe(injected)
     expect(reads).not.toHaveBeenCalled()
   })
@@ -152,10 +152,10 @@ describe('SnapshotCache', () => {
     // 可控的 store 替身：本次预读按调用时刻读出记录，然后挂起，直到测试放行
     let release!: () => void
     const gate = new Promise<void>(r => { release = r })
-    const query = store.readLayer.bind(store)
+    const query = store.readRaw.bind(store)
     let entered!: () => void
     const inQuery = new Promise<void>(r => { entered = r })
-    vi.spyOn(store, 'readLayer').mockImplementationOnce(async (...args) => {
+    vi.spyOn(store, 'readRaw').mockImplementationOnce(async (...args) => {
       const result = await query(...args)
       entered()
       await gate
@@ -182,12 +182,12 @@ describe('SnapshotCache', () => {
     await store.put(record({ id: 'mem_a', type: 'preference', content: '偏好' }))
     const session = {}
     cache.setWorkspacePath(session, undefined)
-    const readLayer = store.readLayer.bind(store)
+    const readRaw = store.readRaw.bind(store)
     let reads = 0
-    const churn = vi.spyOn(store, 'readLayer').mockImplementation(async (...args) => {
+    const churn = vi.spyOn(store, 'readRaw').mockImplementation(async (...args) => {
       reads++
       cache.markAllStale() // 每次预读都碰上配置热更新
-      return readLayer(...args)
+      return readRaw(...args)
     })
 
     expect(await cache.assemble(session)).toBeUndefined()
@@ -212,10 +212,10 @@ describe('SnapshotCache', () => {
 
     let release!: () => void
     const gate = new Promise<void>(r => { release = r })
-    const query = store.readLayer.bind(store)
+    const query = store.readRaw.bind(store)
     let entered!: () => void
     const inQuery = new Promise<void>(r => { entered = r })
-    vi.spyOn(store, 'readLayer').mockImplementationOnce(async (...args) => {
+    vi.spyOn(store, 'readRaw').mockImplementationOnce(async (...args) => {
       const result = await query(...args)
       entered()
       await gate
@@ -310,7 +310,7 @@ describe('SnapshotCache', () => {
 
   it('awaitResolved 只等解析：落定后不组装、不冻结', async () => {
     const { store } = makeCache()
-    const spy = vi.spyOn(store, 'readLayer')
+    const spy = vi.spyOn(store, 'readRaw')
     const cache = new SnapshotCache({ store, registry, budget: 4000, resolveWorkspace: async () => '/repo' })
     const session = { header: { cwd: '/repo' } }
     await cache.awaitResolved(session)
@@ -342,13 +342,13 @@ describe('SnapshotCache', () => {
     const cache = new SnapshotCache({ store, registry, budget: 4000, log })
     const session = {}
     cache.setWorkspacePath(session, undefined)
-    vi.spyOn(store, 'readLayer').mockRejectedValueOnce(new Error('boom'))
+    vi.spyOn(store, 'readRaw').mockRejectedValueOnce(new Error('boom'))
     expect(await cache.assemble(session)).toBeUndefined()
     expect(log.error).toHaveBeenCalledTimes(1)
 
     await cache.assemble(session)
     cache.markStale(session)
-    vi.spyOn(store, 'readLayer').mockRejectedValueOnce(new Error('boom'))
+    vi.spyOn(store, 'readRaw').mockRejectedValueOnce(new Error('boom'))
     expect(await cache.assemble(session)).toBeUndefined()
     expect(log.error).toHaveBeenCalledTimes(2)
     expect(frozenCore(cache, session)).toEqual(['mem_core'])
@@ -523,8 +523,8 @@ describe('SnapshotCache 快照来历', () => {
     const gate = new Promise<void>(r => { release = r })
     let entered!: () => void
     const inQuery = new Promise<void>(r => { entered = r })
-    const readLayer = store.readLayer.bind(store)
-    vi.spyOn(store, 'readLayer').mockImplementationOnce(async (...args) => { entered(); await gate; return readLayer(...args) })
+    const readRaw = store.readRaw.bind(store)
+    vi.spyOn(store, 'readRaw').mockImplementationOnce(async (...args) => { entered(); await gate; return readRaw(...args) })
     cache.markStale(session)
     const building = cache.assemble(session)
     await inQuery // 构建已开始，预读挂在 gate 上
@@ -544,8 +544,8 @@ describe('SnapshotCache 快照来历', () => {
       const gate = new Promise<void>(r => { release = r })
       let entered!: () => void
       const inQuery = new Promise<void>(r => { entered = r })
-      const readLayer = store.readLayer.bind(store)
-      vi.spyOn(store, 'readLayer').mockImplementationOnce(async (...args) => { entered(); await gate; return readLayer(...args) })
+      const readRaw = store.readRaw.bind(store)
+      vi.spyOn(store, 'readRaw').mockImplementationOnce(async (...args) => { entered(); await gate; return readRaw(...args) })
       const building = cache.assemble(session)
       await inQuery
       invalidate(cache, session) // 压缩之后的重建还没落定，又被标过期

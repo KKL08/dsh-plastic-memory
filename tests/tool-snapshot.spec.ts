@@ -105,7 +105,7 @@ describe('memory_snapshot', () => {
     const r = await executeSnapshotTool({ action: 'restore', snapshotId: snap.id }, { workspacePath: '/proj' }, deps)
     if (r.kind !== 'restored') throw new Error(r.kind)
     expect(r.redacted).toEqual(['mem_k'])
-    expect((await deps.store.query({ scope: { kind: 'workspace', path: '/proj' } }))).toEqual([])
+    expect((await deps.store.query({ scope: { kind: 'workspace', workspacePath: '/proj' } }))).toEqual([])
     expect((await deps.store.query({ scope: { kind: 'global' } })).map(x => x.content)).toEqual(['global 新写的'])
   })
 

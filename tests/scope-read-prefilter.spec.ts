@@ -95,17 +95,17 @@ describe('检索传给读取层的预筛词不含单字母与纯数字', () => {
     await writeFile(join(gdir, 'a.md'), encodeRecord(record({ id: 'mem_pn', name: 'pnpm 约定', content: '包管理用 pnpm' }), {}))
     await writeFile(join(gdir, 'b.md'), encodeRecord(record({ id: 'mem_v7', name: '运行时版本', content: 'Node 22 起步' }), {}))
     const store = new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() }))
-    const readLayer = vi.spyOn(store, 'readLayer')
+    const readRaw = vi.spyOn(store, 'readRaw')
     const deps = {
       store, registry: buildTypeRegistry({ template: 'coding', customTypes: {} }),
       resolveContext: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }),
     }
 
     const prefilterOf = async (query: string) => {
-      readLayer.mockClear()
+      readRaw.mockClear()
       const result = await executeSearch({ query }, fakeExec(), deps)
-      expect(readLayer).toHaveBeenCalledTimes(1)
-      return { opts: readLayer.mock.calls[0]![1] ?? {}, ids: result.hits.map(h => h.id) }
+      expect(readRaw).toHaveBeenCalledTimes(1)
+      return { opts: readRaw.mock.calls[0]![1] ?? {}, ids: result.hits.map(h => h.id) }
     }
 
     const plain = await prefilterOf('pnpm 约定')

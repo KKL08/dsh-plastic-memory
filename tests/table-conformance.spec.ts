@@ -601,13 +601,13 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect((await table.locate('mem_sup', { workspacePath: WS_A }))!.record.deletedAt).toBeUndefined()
   })
 
-  it('.archive/ 里 status 仍为 active 的文件按位置视为无效：readLayer / query 不把它当 active；maintain 把它归一成 deleted', async () => {
+  it('.archive/ 里 status 仍为 active 的文件按位置视为无效：readRaw / query 不把它当 active；maintain 把它归一成 deleted', async () => {
     const dir = h.wsDir(WS_A)
     await h.seedFile({ dir, fileName: 'stray.md', record: ws(WS_A, { id: 'mem_stray' }), archived: true })
     await h.seedFile({ dir, fileName: 'live.md', record: ws(WS_A, { id: 'mem_live' }) })
-    const layer = await store.readLayer({ kind: 'workspace', path: WS_A }, { includeArchive: true })
+    const layer = await store.readRaw({ kind: 'workspace', workspacePath: WS_A }, { includeArchive: true })
     expect(layer.records.find(r => r.record.id === 'mem_stray')!.record.status).toBe('deleted')
-    expect((await store.query({ scope: { kind: 'workspace', path: WS_A }, status: ['active', 'superseded', 'deleted'] }))
+    expect((await store.query({ scope: { kind: 'workspace', workspacePath: WS_A }, status: ['active', 'superseded', 'deleted'] }))
       .map(r => [r.id, r.status]).sort()).toEqual([['mem_live', 'active'], ['mem_stray', 'deleted']])
     await table.maintain([dir])
     const hit = (await table.locate('mem_stray', { workspacePath: WS_A }))!

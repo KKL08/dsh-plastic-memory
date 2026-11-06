@@ -10,7 +10,8 @@ import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { executeConfirm } from '../src/tools/confirm.ts'
 import { executePromote } from '../src/tools/promote.ts'
-import { locateCopy, type CopyTarget } from '../src/tools/workspace-gate.ts'
+import { locateCopy } from '../src/tools/workspace-gate.ts'
+import type { Scope } from '../src/scope.ts'
 import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
@@ -23,8 +24,8 @@ const WS = '/home/dev/proj-dup'
 const ctx = { workspacePath: WS }
 const T0 = 1_700_000_000_000
 const NOW = T0 + 50_000
-const PROJECT: CopyTarget = { kind: 'workspace', workspacePath: WS }
-const GLOBAL: CopyTarget = { kind: 'global' }
+const PROJECT: Scope = { kind: 'workspace', workspacePath: WS }
+const GLOBAL: Scope = { kind: 'global' }
 
 interface Backend { name: string; make(): Promise<{ store: MemoryStore; seed(r: MemoryRecord): Promise<void>; cleanup(): Promise<void> }> }
 

@@ -8,15 +8,15 @@ import { isModelChange, kindOf, type PendingDecisionsStore } from '../governance
 import type { SnapshotStore } from '../governance/snapshots.ts'
 import type { MemorySnapshot, ScanCacheEntry } from '../governance/schema.ts'
 import { staleIgnores, type AdviceIgnoreStore } from '../governance/advice-ignores.ts'
-import { checkupKey, lastCheckupAt, type CheckupRecordStore } from '../governance/checkup-records.ts'
+import { lastCheckupAt, type CheckupRecordStore } from '../governance/checkup-records.ts'
 import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
-import { layerCacheKey, type LayerRef } from '../governance/layer-health.ts'
-import { checkupWorkspaces, listingNotes, prereadLayers } from '../tools/layer-preread.ts'
+import { checkupWorkspaces, listingNotes, prereadScopes } from '../tools/scope-preread.ts'
 import {
-  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, SCOPE_KEYS, sessionViewFile, workspaceMapViewSchema,
+  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, SCOPE_KEYS, checkupKey, sessionViewFile, workspaceMapViewSchema,
   type CheckupView, type GlobalViewName, type SessionView, type WorkspaceMapView,
 } from './contract.ts'
 import { GLOBAL_VIEW_NAMES, buildCheckupView, buildGlobalViews, type GlobalViews } from './views.ts'
+import { scopeCacheKey, scopeOfLedger, type Scope } from '../scope.ts'
 
 export interface ViewSourceDeps {
   store: MemoryStore
@@ -43,18 +43,18 @@ export interface ViewSourceDeps {
 
 /**
  * 预读 → 四个全局视图。读 global + 全部 workspace 目录（含 .archive/；只剩归档的项目也读，最近删除要用），
- * 健康只列 global + 体检清单，与 memory_health 体检同一批层、同一个预读函数。
- * 顺带是建议忽略表的清理点：读的是全部层，引用的记忆已不在用（删除、归档、彻底删除）或内容变了的记录在这里删掉；
+ * 健康只列 global + 体检清单，与 memory_health 体检同一批作用域、同一个预读函数。
+ * 顺带是建议忽略表的清理点：读的是全部作用域，引用的记忆已不在用（删除、归档、彻底删除）或内容变了的记录在这里删掉；
  * 也是体检记录表、自动体检设置表的清理点：项目目录不在了，它的记录和设置在这里删掉。
  */
 export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalViews> {
   const now = deps.now?.() ?? Date.now()
   const log = deps.log ?? console
   const listing = await deps.store.listWorkspaceDirs()
-  const ws = (path: string): LayerRef => ({ kind: 'workspace', path })
-  const readLayers: LayerRef[] = [{ kind: 'global' }, ...[...new Set(listing.entries.map(e => e.workspacePath))].sort().map(ws)]
-  const healthLayers: LayerRef[] = [{ kind: 'global' }, ...checkupWorkspaces(listing).map(ws)]
-  const data = await prereadLayers(deps, readLayers)
+  const ws = (workspacePath: string): Scope => ({ kind: 'workspace', workspacePath })
+  const readScopes: Scope[] = [{ kind: 'global' }, ...[...new Set(listing.entries.map(e => e.workspacePath))].sort().map(ws)]
+  const healthScopes: Scope[] = [{ kind: 'global' }, ...checkupWorkspaces(listing).map(ws)]
+  const data = await prereadScopes(deps, readScopes)
   const [open, settled] = await Promise.all([deps.decisions.list(), deps.decisions.listSettled()])
   let modelChangeSnapshots: Map<string, MemorySnapshot> | undefined
   if (deps.snapshots !== undefined) {
@@ -67,9 +67,11 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
   // 提升候选按条目所在的项目取那一份（与提升命令定位同一份）：预读每个 id 只留一份，同 id 在别的项目也有时可能是那份
   const candidateCopies = new Map<string, LocatedRecord>()
   for (const e of open) {
-    const workspacePath = e.workspaces?.[0]
+    const label = e.workspaces?.[0]
+    const own = label === undefined ? undefined : scopeOfLedger(label)
     const r = data.byId.get(e.memoryIds[0] ?? '')
-    if (kindOf(e) !== 'promote-candidate' || workspacePath === undefined || workspacePath === 'global' || r === undefined) continue
+    if (kindOf(e) !== 'promote-candidate' || own?.kind !== 'workspace' || r === undefined) continue
+    const { workspacePath } = own
     if (r.scope === 'workspace' && r.workspacePath === workspacePath) continue
     const hit = await deps.store.locate(r.id, { workspacePath, isExactLayer: true })
     if (hit !== undefined && dirname(hit.filePath) === hit.dir) candidateCopies.set(e.id, { record: hit.record, filePath: hit.filePath, dir: hit.dir })
@@ -92,7 +94,7 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
   }
   if (deps.ignores !== undefined) {
     // 有读不出的文件或目录时，byId 里没有的 id 可能只是这次没读到，不按「已不在」清
-    const isComplete = readLayers.every(l => (data.quarantined.get(layerCacheKey(l)) ?? []).length === 0)
+    const isComplete = readScopes.every(s => (data.quarantined.get(scopeCacheKey(s)) ?? []).length === 0)
       && ![...notes, ...data.directoryNotes].some(n => n.code === 'marker-missing' || n.code === 'dir-unreadable')
     // 清理是顺带的：出错只记日志，不挡视图写出（没清掉的记录指纹对不上，本来就不起作用）
     try {
@@ -102,7 +104,7 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
     }
   }
   return buildGlobalViews({
-    now, memoryRoot: deps.memoryRoot, registry: deps.registry, data, readLayers, healthLayers, open, settled,
+    now, memoryRoot: deps.memoryRoot, registry: deps.registry, data, readScopes, healthScopes, open, settled,
     listingNotes: notes,
     governanceEnabled: deps.isGovernanceEnabled?.() ?? true,
     ...(deps.bootedAt !== undefined ? { bootedAt: deps.bootedAt } : {}),
@@ -126,19 +128,19 @@ export interface CheckupSourceDeps {
 export async function collectCheckupView(deps: CheckupSourceDeps): Promise<CheckupView> {
   const now = deps.now?.() ?? Date.now()
   const listing = await deps.store.listWorkspaceDirs()
-  const layers: LayerRef[] = [{ kind: 'global' }, ...checkupWorkspaces(listing).map(path => ({ kind: 'workspace' as const, path }))]
+  const scopes: Scope[] = [{ kind: 'global' }, ...checkupWorkspaces(listing).map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
   const [settings, records] = await Promise.all([deps.autoCheckups.read(), deps.checkups.list()])
   const byKey = new Map(records.map(r => [r.id, r]))
-  const last = new Map<LayerRef, number | null>()
-  const inProgress = new Set<LayerRef>()
-  for (const layer of layers) {
-    const record = byKey.get(checkupKey(layer))
-    last.set(layer, lastCheckupAt(record, record?.completed === undefined ? await deps.cache.get(layerCacheKey(layer)) : undefined))
-    if (await deps.checkups.isInProgress(layer)) inProgress.add(layer)
+  const last = new Map<Scope, number | null>()
+  const inProgress = new Set<Scope>()
+  for (const scope of scopes) {
+    const record = byKey.get(checkupKey(scope))
+    last.set(scope, lastCheckupAt(record, record?.completed === undefined ? await deps.cache.get(scopeCacheKey(scope)) : undefined))
+    if (await deps.checkups.isInProgress(scope)) inProgress.add(scope)
   }
   return buildCheckupView({
-    now, governanceEnabled: deps.isGovernanceEnabled?.() ?? true, settings, layers,
-    lastCheckupAt: layer => last.get(layer) ?? null, isInProgress: layer => inProgress.has(layer), record: layer => byKey.get(checkupKey(layer)),
+    now, governanceEnabled: deps.isGovernanceEnabled?.() ?? true, settings, scopes,
+    lastCheckupAt: scope => last.get(scope) ?? null, isInProgress: scope => inProgress.has(scope), record: scope => byKey.get(checkupKey(scope)),
     allRecord: byKey.get(SCOPE_KEYS.all),
   })
 }

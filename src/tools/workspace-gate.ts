@@ -1,6 +1,7 @@
 import type { MemoryRecord } from '../record-schema.ts'
 import type { GovernanceRejectCode } from '../contract-codes.ts'
 import type { MemoryStore } from '../store.ts'
+import { ledgerLabel, scopeOfMemory, type Scope } from '../scope.ts'
 
 /**
  * 跨 workspace 门（S2）：治理工具只在用户明确选择「全局整理」后才动其他项目的记录。
@@ -38,46 +39,38 @@ export function isVisible(record: Pick<MemoryRecord, 'scope' | 'workspacePath'>,
   return record.scope === 'global' || (context.workspacePath !== undefined && record.workspacePath === context.workspacePath)
 }
 
-/** 同 id 在几个层里各有一份时指明哪一份：global 层或某个项目的层（GUI 按页面上那一份操作，结构同 GUI 契约的层引用）。 */
-export type CopyTarget = { kind: 'global' } | { kind: 'workspace'; workspacePath: string }
-
-export function isCopyOf(record: Pick<MemoryRecord, 'scope' | 'workspacePath'>, target: CopyTarget): boolean {
+/** 同 id 在几个作用域里各有一份时，target 指明哪一份（GUI 按页面上那一份操作）。 */
+export function isCopyOf(record: Pick<MemoryRecord, 'scope' | 'workspacePath'>, target: Scope): boolean {
   return target.kind === 'global' ? record.scope === 'global' : record.scope === 'workspace' && record.workspacePath === target.workspacePath
 }
 
 /**
- * 按副本定位（含非 active）：只读目标那一层（isExactLayer），别层同 id 的副本再新也不取；目标层没有这个 id 时当作没找到。
+ * 按副本定位（含非 active）：只读目标作用域（isExactLayer），别的作用域里同 id 的副本再新也不取；目标作用域没有这个 id 时当作没找到。
  * 写回时调用方带同样的只认层提示（store 删除类方法的 isExactLayer），改的就是读到的这一份。
  */
-export async function locateCopy(store: Pick<MemoryStore, 'get'>, id: string, target: CopyTarget): Promise<MemoryRecord | undefined> {
+export async function locateCopy(store: Pick<MemoryStore, 'get'>, id: string, target: Scope): Promise<MemoryRecord | undefined> {
   const record = await store.get(id, { workspacePath: target.kind === 'workspace' ? target.workspacePath : undefined, isExactLayer: true })
   return record !== undefined && isCopyOf(record, target) ? record : undefined
 }
 
-/** 记录所在的层；项目记忆缺 workspacePath 时为 undefined。 */
-export function copyTargetOf(record: Pick<MemoryRecord, 'scope' | 'workspacePath'>): CopyTarget | undefined {
-  if (record.scope === 'global') return { kind: 'global' }
-  return record.workspacePath === undefined ? undefined : { kind: 'workspace', workspacePath: record.workspacePath }
-}
-
 /**
- * records 里此刻在各自那一层已经不在了（任何状态都没有，即被彻底删除）的那些副本。每层整读一次（含归档），
- * 不逐条定位：按 id 定位要扫整层，一份快照几百条时成了平方级；缺 workspacePath 的按 id 两级定位。
+ * records 里此刻在各自作用域里已经不在了（任何状态都没有，即被彻底删除）的那些副本。每个作用域整读一次（含归档），
+ * 不逐条定位：按 id 定位要扫整个作用域，一份快照几百条时成了平方级；缺 workspacePath 的按 id 两级定位。
  * 接线层把它交给 SnapshotStore，拍完快照落盘后复核（见 SnapshotStore.capture）。
  */
-export const goneCopies = (store: Pick<MemoryStore, 'get' | 'readLayer'>) => async <T extends Located>(records: readonly T[]): Promise<Set<T>> => {
-  const present = new Map<string, Set<string>>()   // 层标签 → 盘上有的 id
+export const goneCopies = (store: Pick<MemoryStore, 'get' | 'readRaw'>) => async <T extends Located>(records: readonly T[]): Promise<Set<T>> => {
+  const present = new Map<string, Set<string>>()   // 作用域标签 → 盘上有的 id
   const gone = new Set<T>()
   for (const r of records) {
-    const layer = copyTargetOf(r)
-    if (layer === undefined) {
+    const scope = scopeOfMemory(r)
+    if (scope === undefined) {
       if ((await store.get(r.id)) === undefined) gone.add(r)
       continue
     }
     const label = workspaceLabel(r)
     let ids = present.get(label)
     if (ids === undefined) {
-      const read = await store.readLayer(layer.kind === 'global' ? layer : { kind: 'workspace', path: layer.workspacePath }, { includeArchive: true })
+      const read = await store.readRaw(scope, { includeArchive: true })
       ids = new Set(read.records.map(l => l.record.id))
       present.set(label, ids)
     }
@@ -87,12 +80,12 @@ export const goneCopies = (store: Pick<MemoryStore, 'get' | 'readLayer'>) => asy
 }
 
 /**
- * 只动 target 那一份时，快照里哪些同 id 记录算它的历史：target 层的，加上别层里那一层此刻已定位不到这个 id（含归档）的——
- * 那是这条记忆搬层（提升、移到项目）之前留下的。别层还有这个 id 的，是那一份自己的历史，不算。
- * 先按层算好保留集合，返回的谓词是同步的（快照表在串行化的重写里用）。
+ * 只动 target 那一份时，快照里哪些同 id 记录算它的历史：target 作用域的，加上别的作用域里、那个作用域此刻已定位不到这个 id（含归档）的——
+ * 那是这条记忆换作用域（提升、移到项目）之前留下的。别的作用域还有这个 id 的，是那一份自己的历史，不算。
+ * 先按作用域算好保留集合，返回的谓词是同步的（快照表在串行化的重写里用）。
  */
 export async function copyHistory(
-  store: Pick<MemoryStore, 'get'>, records: Iterable<Located>, ids: ReadonlySet<string>, target: CopyTarget,
+  store: Pick<MemoryStore, 'get'>, records: Iterable<Located>, ids: ReadonlySet<string>, target: Scope,
 ): Promise<(record: Located) => boolean> {
   const key = (r: Located) => `${r.id}\0${workspaceLabel(r)}`
   const kept = new Set<string>()
@@ -100,8 +93,8 @@ export async function copyHistory(
   for (const r of records) {
     if (!ids.has(r.id) || isCopyOf(r, target) || checked.has(key(r))) continue
     checked.add(key(r))
-    const layer = copyTargetOf(r)
-    if (layer !== undefined && (await locateCopy(store, r.id, layer)) !== undefined) kept.add(key(r))
+    const scope = scopeOfMemory(r)
+    if (scope !== undefined && (await locateCopy(store, r.id, scope)) !== undefined) kept.add(key(r))
   }
   return r => ids.has(r.id) && !kept.has(key(r))
 }
@@ -109,7 +102,8 @@ export async function copyHistory(
 /** 记录所属 workspace 的标签：global 记忆为 'global'（待决账本的 workspaces 字段同口径）。 */
 export function workspaceLabel(record: Pick<MemoryRecord, 'scope' | 'workspacePath'> | undefined): string {
   if (record === undefined) return '(未知)'
-  return record.scope === 'global' ? 'global' : record.workspacePath ?? '(未知项目)'
+  const scope = scopeOfMemory(record)
+  return scope === undefined ? '(未知项目)' : ledgerLabel(scope)
 }
 
 /** 按门分拣：可见的放行；不可见的带参数放行并标出、不带参数拒绝。保持输入顺序。 */

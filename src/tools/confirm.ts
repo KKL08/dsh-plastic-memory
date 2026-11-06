@@ -4,7 +4,8 @@ import type { SnapshotStore } from '../governance/snapshots.ts'
 import { ALREADY_REVIEWED_REASON, NOT_DELEGATED_REASON, isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
 import type { AcceptRejectCode, DecisionRejectCode, GovernanceRejectCode } from '../contract-codes.ts'
 import { RecordNotFoundError } from '../errors.ts'
-import { crossWorkspaceNote, gateRecords, locateCopy, type CopyTarget, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
+import { crossWorkspaceNote, gateRecords, locateCopy, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
+import type { Scope } from '../scope.ts'
 import { executeForget } from './forget.ts'
 import { hasCriticalSecret } from '../secrets.ts'
 
@@ -26,7 +27,7 @@ export type ConfirmArgs =
 /** 只给 GUI 用的选项，不在工具参数里，模型传不进来。 */
 export interface ConfirmOptions {
   /** refresh 时同 id 多副本只认这一份（GUI 按页面上那一份操作）；缺省按会话 workspace 定位。跨 workspace 门照旧按会话判定。 */
-  target?: CopyTarget
+  target?: Scope
   /** resolve 时垂直冲突的条目没有指纹，两边都留要现算指纹用的基线（GUI 从借来的会话取）。 */
   baseline?: readonly string[]
 }

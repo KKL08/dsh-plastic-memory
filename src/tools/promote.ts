@@ -6,8 +6,9 @@ import type { MemorySnapshot } from '../governance/schema.ts'
 import { hasSecret } from '../secrets.ts'
 import {
   crossWorkspaceNote, gateRecords, locateCopy,
-  type CopyTarget, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark,
+  type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark,
 } from './workspace-gate.ts'
+import type { Scope } from '../scope.ts'
 
 export type PromoteTarget = 'global' | 'agents-md'
 
@@ -21,7 +22,7 @@ export interface PromoteDeps {
 /** 调用方给的选项，不在工具参数里，模型传不进来。 */
 export interface PromoteOptions {
   /** 同 id 多副本时只认这一份（GUI 按页面上那一份、或提升候选所在的项目操作）；缺省按会话 workspace 定位。跨 workspace 门照旧按会话判定。 */
-  target?: CopyTarget
+  target?: Scope
   /** 提升待确认的子 agent 记忆为全局即升档，reviewed 记谁：GUI 记 user，memory_promote 记 main；缺省 main。 */
   reviewedBy?: 'user' | 'main'
 }

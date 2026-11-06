@@ -11,17 +11,14 @@ import { runRuleScan, buildMalformedFindings } from '../governance/rule-scan.ts'
 import { runSemanticScan, type SemanticLlm } from '../governance/semantic-scan.ts'
 import { isModelUnavailableCode } from '../governance/host-llm.ts'
 import type { CheckupCause } from '../gui/contract.ts'
-import { scoreLayer, listWorkspaces, validateScopePaths, crossLayerConflicts, checkupRowBase, ignoredNote, findingFingerprints, GLOBAL_CACHE_KEY, type LayerRef, TIER_LABEL } from '../governance/layer-health.ts'
+import { scoreScope, listWorkspaces, validateScopePaths, crossScopeConflicts, checkupRowBase, ignoredNote, findingFingerprints, GLOBAL_CACHE_KEY, TIER_LABEL } from '../governance/scope-health.ts'
 import { applyIgnores, type AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
-import { prereadLayers, listingNotes, checkupWorkspaces, renderDirectoryNotes } from './layer-preread.ts'
+import { prereadScopes, listingNotes, checkupWorkspaces, renderDirectoryNotes } from './scope-preread.ts'
 import type { DirectoryNote } from '../storage/table.ts'
 import { runCrossWsScan, findEntityDuplicates, type CrossWsDuplicate } from '../governance/cross-ws.ts'
 import { decisionWorkspaces, decisionWorkspacesNote, workspaceLabel } from './workspace-gate.ts'
-
-export function cacheKey(scope: string | undefined): string {
-  return scope ? `cache_${scope}` : GLOBAL_CACHE_KEY
-}
+import { scopeCacheKey, scopeKey, type Scope } from '../scope.ts'
 
 export interface ScanToolDeps {
   store: MemoryStore
@@ -55,13 +52,13 @@ export interface ScanArgs {
 /** 不来自工具参数的调用方式：谁发起的（写进完成记录），以及「只查全局」。缺省是 agent 调 memory_scan。 */
 export interface ScanRun {
   by?: CheckupInitiator
-  /** 只查全局层：只读写全局层，只写全局的缓存与完成记录；给出时忽略 scope / scopes。 */
+  /** 只查全局：只读写全局记忆，只写全局的缓存与完成记录；给出时忽略 scope / scopes。 */
   isGlobalOnly?: boolean
   /**
-   * 全库体检每扫完一层，交出这一层自己的说明：没有基线、这一层的语义层分批 / 没做成、这一层跳过了基线检查等。
+   * 全库体检每扫完一个作用域，交出它自己的说明：没有基线、它的语义层分批 / 没做成、它跳过了基线检查等。
    * 只关乎整次的（跨项目重复没做成）不在里面，只在结果的 notes 里。
    */
-  onLayerNotes?: (layer: LayerRef, notes: readonly ScanNote[]) => void
+  onScopeNotes?: (scope: Scope, notes: readonly ScanNote[]) => void
 }
 
 export interface SingleScanResult {
@@ -118,13 +115,13 @@ export interface CheckupScanResult {
   /** 全库目录级说明：缺标记 / 不可读 / 只剩归档的目录、含保留键的文件、同 id 副本（含跨项目副本）。 */
   directoryNotes: DirectoryNote[]
   message: string
-  /** 分了批的各层批数之和（与说明码 semantic-batched 同时出现），没有层分批时缺省。 */
+  /** 分了批的各作用域批数之和（与说明码 semantic-batched 同时出现），没有作用域分批时缺省。 */
   semanticBatches?: number
-  /** 宿主流 usage 块报的实际用量合计（各层语义检查、跨项目重复检查，含重试）；宿主一次都没报时缺省。只给界面。 */
+  /** 宿主流 usage 块报的实际用量合计（各作用域的语义检查、跨项目重复检查，含重试）；宿主一次都没报时缺省。只给界面。 */
   usageTokens?: number
 }
 
-/** scope/scopes 里出现无法识别的 workspace 时快速失败——静默扫错层比报错危险得多。 */
+/** scope/scopes 里出现无法识别的 workspace 时快速失败——静默扫错作用域比报错危险得多。 */
 export interface ScanErrorResult {
   kind: 'error'
   message: string
@@ -220,17 +217,16 @@ interface ScanPass {
   existing: number
   /** 语义层分了批时的批数，不分批或没跑语义层时为 0。 */
   semanticBatches: number
-  /** 规则检查和内容检查都做完了（layers=full、拿到了模型、内容检查没失败）：这一层可以写完成记录。 */
+  /** 规则检查和内容检查都做完了（layers=full、拿到了模型、内容检查没失败）：这个作用域可以写完成记录。 */
   isChecked: boolean
 }
 
-/** 一次记录集的完整扫描（规则 + 语义 + 冲突挂账）。单层模式与体检的每层循环共用。onUsage 收各次模型调用的实际用量。 */
+/** 一次记录集的完整扫描（规则 + 语义 + 冲突挂账）。单个作用域的扫描与体检的逐作用域循环共用；语义缓存按 scope 写。onUsage 收各次模型调用的实际用量。 */
 async function scanPass(
   deps: ScanToolDeps,
   byId: ReadonlyMap<string, MemoryRecord>,
   records: MemoryRecord[],
-  cacheId: string,
-  scopeLabel: string,
+  scope: Scope,
   quarantined: readonly { path: string; error: string }[],
   layers: 'rule' | 'semantic' | 'full',
   llm: SemanticLlm | null,
@@ -241,6 +237,8 @@ async function scanPass(
 ): Promise<ScanPass> {
   const notes: ScanNote[] = []
   const findings: Finding[] = []
+  const cacheId = scopeCacheKey(scope)
+  const scopeLabel = scopeKey(scope)
   let semanticBatches = 0
   let isSemanticDone = false
   if (layers === 'rule' || layers === 'full') {
@@ -261,7 +259,7 @@ async function scanPass(
         priorityOrder[deps.registry.get(a.type).governancePriority] - priorityOrder[deps.registry.get(b.type).governancePriority]
         || b.updatedAt - a.updatedAt)
       const semantic = await runSemanticScan(ordered, baseline, llm, signal, onUsage)
-      // 失败时整层没有语义结果，只报失败
+      // 失败时这个作用域整个没有语义结果，只报失败
       if (semantic.batches > 1 && !semantic.failed) {
         semanticBatches = semantic.batches
         notes.push({ code: 'semantic-batched', text: `${scopeLabel} 记忆较多，语义层分 ${semantic.batches} 批检查，每条都查过，不同批之间的冲突和重复可能查不出` })
@@ -350,7 +348,7 @@ async function syncPromoteCandidates(
   now: number,
 ): Promise<void> {
   for (const ws of workspaces) {
-    const fresh = await deps.store.readLayer({ kind: 'workspace', path: ws })
+    const fresh = await deps.store.readRaw({ kind: 'workspace', workspacePath: ws })
     const own = new Map<string, MemoryRecord>()
     for (const { record: r } of fresh.records) {
       if (r.status === 'active' && r.scope === 'workspace' && r.workspacePath === ws && !own.has(r.id)) own.set(r.id, r)
@@ -364,8 +362,8 @@ async function syncPromoteCandidates(
  * memory_scan：只读+报告。副作用仅两处——语义结果写 scan_cache；conflict 与提升候选进 pending_decisions。
  * 清理动作由模型经用户确认后调 forget/save 执行。
  * 默认口径=当前 workspace 的可见集合（global + 本项目）；scope='all' 或 scopes 列表进入
- * 全库体检：逐 workspace 独立扫描计分 + global 层专项（缺口检测、跨层冲突聚合）。run.isGlobalOnly 只查全局层（记忆页的全局体检）。
- * 提交点：缓存、账本、提升候选都写完之后，给规则检查和内容检查都做完的每一层写完成记录（上次体检）；没走到这一步就不算做完。
+ * 全库体检：逐 workspace 独立扫描计分 + 全局专项（缺口检测、跨作用域冲突聚合）。run.isGlobalOnly 只查全局（记忆页的全局体检）。
+ * 提交点：缓存、账本、提升候选都写完之后，给规则检查和内容检查都做完的每个作用域写完成记录（上次体检）；没走到这一步就不算做完。
  */
 export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: ToolRunContext, run: ScanRun = {}): Promise<ScanToolResult> {
   const args: ScanArgs = run.isGlobalOnly ? (rawArgs.layers !== undefined ? { layers: rawArgs.layers } : {}) : rawArgs
@@ -383,7 +381,7 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
   })
   const baseline = deps.getBaseline(exec)
   /** 写完成记录：开始时间是这次扫描开始的时刻，完成时间现读。 */
-  const commit = async (checked: readonly LayerRef[]) => {
+  const commit = async (checked: readonly Scope[]) => {
     if (deps.checkups === undefined || checked.length === 0) return
     signal?.throwIfAborted()
     await deps.checkups.complete(checked, { startedAt: now, completedAt: deps.now?.() ?? Date.now(), by: run.by ?? 'agent' })
@@ -399,29 +397,30 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     const invalid = validateScopePaths(checkupWorkspaces(listing), currentWs, requested)
     if (invalid !== null) return { kind: 'error', message: invalid }
   }
-  // 单层模式的目标：只查全局 > 显式路径 > 当前会话 workspace > global 层（无 workspace 会话）
+  // 单个作用域的目标：只查全局 > 显式路径 > 当前会话 workspace > 全局（无 workspace 会话）
   const wsPath = run.isGlobalOnly ? undefined : args.scope ?? currentWs
-  // 预读范围：与 memory_health 共用 prereadLayers——目标层（含 .archive/）的全部状态记录、层外引用按 id 定位、
-  // 待决账本、语义缓存、按层归档的隔离文件。体检读 global + 所选 workspace；单层读可见集合（global + 本项目）。
-  // 扫描输入（active 的可见集合 / 本层集合）从这份预读里筛
-  const readLayers: LayerRef[] = checkup
-    ? [{ kind: 'global' }, ...(args.scopes && args.scopes.length > 0 ? args.scopes : checkupWorkspaces(listing)).map(path => ({ kind: 'workspace' as const, path }))]
-    : wsPath !== undefined ? [{ kind: 'workspace', path: wsPath }, { kind: 'global' }] : [{ kind: 'global' }]
-  const data = await prereadLayers(deps, readLayers, checkup ? undefined : wsPath)
+  const target: Scope = wsPath !== undefined ? { kind: 'workspace', workspacePath: wsPath } : { kind: 'global' }
+  // 预读范围：与 memory_health 共用 prereadScopes——目标作用域（含 .archive/）的全部状态记录、作用域外引用按 id 定位、
+  // 待决账本、语义缓存、按作用域归档的隔离文件。体检读 global + 所选 workspace；单个作用域读可见集合（global + 本项目）。
+  // 扫描输入（active 的可见集合 / 本作用域集合）从这份预读里筛
+  const readScopes: Scope[] = checkup
+    ? [{ kind: 'global' }, ...(args.scopes && args.scopes.length > 0 ? args.scopes : checkupWorkspaces(listing)).map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
+    : wsPath !== undefined ? [target, { kind: 'global' }] : [target]
+  const data = await prereadScopes(deps, readScopes, checkup ? undefined : wsPath)
   const active = (pred: (r: MemoryRecord) => boolean) =>
     [...data.byId.values()].filter(r => r.status === 'active' && pred(r))
   const visibleTo = (ws: string | undefined) => (r: MemoryRecord) =>
     r.scope === 'global' || (ws !== undefined && r.workspacePath === ws)
   const isGlobal = (r: MemoryRecord) => r.scope === 'global'
-  // malformed 按扫描层归属（与 memory_health 的 scoreLayer 同口径）：隔离文件按读到它的目录归层
-  const layerQuarantined = (ws: string | undefined) => data.quarantined.get(cacheKey(ws)) ?? []
+  // malformed 按扫描的作用域归属（与 memory_health 的 scoreScope 同口径）：隔离文件按读到它的目录归作用域
+  const quarantinedIn = (scope: Scope) => data.quarantined.get(scopeCacheKey(scope)) ?? []
 
   if (checkup) {
     const wsList = args.scopes && args.scopes.length > 0 ? args.scopes : listWorkspaces(data.byId.values())
     const notes: ScanNote[] = []
     if (baseline === null) notes.push({ code: 'baseline-missing', text: '未检测到 AGENTS.md 基线，垂直冲突检测未执行' })
-    // 没有基线对每一层都成立
-    const everyLayer = [...notes]
+    // 没有基线对每个作用域都成立
+    const everyScope = [...notes]
     const isVerticalSkippable = llm !== null && layers !== 'rule'
 
     const decisionItems: ScanPass['decisionItems'] = []
@@ -430,19 +429,19 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     const collect = (pass: ScanPass) => {
       semanticBatches += pass.semanticBatches
       for (const item of pass.decisionItems) {
-        if (seenDecisions.has(item.id)) continue // 同一冲突可能在多层被复扫，呈现去重
+        if (seenDecisions.has(item.id)) continue // 同一冲突可能在多个作用域被复扫，呈现去重
         seenDecisions.add(item.id)
         decisionItems.push(item)
       }
       notes.push(...pass.notes.filter(n => !notes.some(m => m.code === n.code && m.text === n.text)))
     }
 
-    // 每个 workspace 独立扫描：输入是该 ws 的可见集合（含 global，跨层冲突要在同一 prompt 里才可判），
-    // 语义缓存按作用域分别写；分数由 scoreLayer 按归属规则计算（纯 global 噪音不进 ws 层分数）
+    // 每个 workspace 独立扫描：输入是该 ws 的可见集合（含 global，跨作用域的冲突要在同一 prompt 里才可判），
+    // 语义缓存按作用域分别写；分数由 scoreScope 按归属规则计算（纯 global 噪音不进 ws 分数）
     // 基线是当前会话的指令内容（含本项目 CLAUDE.md），拿它去判其他 workspace 的垂直冲突
-    // 会误判——只对当前会话所属 ws 和 global 层生效，其余 ws 跳过垂直检测并如实说明
+    // 会误判——只对当前会话所属 ws 和全局生效，其余 ws 跳过垂直检测并如实说明
     const byWorkspace = new Map<string, MemoryRecord[]>()
-    const checked: LayerRef[] = []
+    const checked: Scope[] = []
     let baselineSkipped = 0
     for (const ws of wsList) {
       signal?.throwIfAborted()
@@ -450,21 +449,22 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
       const wsBaseline = ws === currentWs ? baseline : null
       const isBaselineSkipped = baseline !== null && wsBaseline === null
       if (isBaselineSkipped) baselineSkipped++
-      const pass = await scanPass(deps, data.byId, visible, cacheKey(ws), ws, layerQuarantined(ws), layers, llm, wsBaseline, now, signal, onUsage)
+      const scope: Scope = { kind: 'workspace', workspacePath: ws }
+      const pass = await scanPass(deps, data.byId, visible, scope, quarantinedIn(scope), layers, llm, wsBaseline, now, signal, onUsage)
       collect(pass)
-      run.onLayerNotes?.({ kind: 'workspace', path: ws }, [
-        ...everyLayer, ...pass.notes,
+      run.onScopeNotes?.(scope, [
+        ...everyScope, ...pass.notes,
         ...(isBaselineSkipped && isVerticalSkippable ? [{ code: 'baseline-session-scoped' as const, text: '基线随当前会话，扫描其他 workspace 时垂直冲突检测已跳过' }] : []),
       ])
-      if (pass.isChecked) checked.push({ kind: 'workspace', path: ws })
+      if (pass.isChecked) checked.push(scope)
       byWorkspace.set(ws, active(r => r.scope === 'workspace' && r.workspacePath === ws))
     }
-    // global 层：global-only 输入，单独一个缓存键
+    // 全局：global-only 输入，单独一个缓存键
     signal?.throwIfAborted()
     const globalRecords = active(isGlobal)
-    const globalPass = await scanPass(deps, data.byId, globalRecords, GLOBAL_CACHE_KEY, 'global', layerQuarantined(undefined), layers, llm, baseline, now, signal, onUsage)
+    const globalPass = await scanPass(deps, data.byId, globalRecords, { kind: 'global' }, quarantinedIn({ kind: 'global' }), layers, llm, baseline, now, signal, onUsage)
     collect(globalPass)
-    run.onLayerNotes?.({ kind: 'global' }, [...everyLayer, ...globalPass.notes])
+    run.onScopeNotes?.({ kind: 'global' }, [...everyScope, ...globalPass.notes])
     if (globalPass.isChecked) checked.push({ kind: 'global' })
     if (baselineSkipped > 0 && isVerticalSkippable) {
       notes.push({ code: 'baseline-session-scoped', text: `基线随当前会话，${baselineSkipped} 个其他 workspace 的垂直冲突检测已跳过` })
@@ -475,12 +475,12 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     const created = decisionItems.filter(i => i.isNew).length
     const existing = decisionItems.length - created
 
-    // 分层计分（与 memory_health 共用 prereadLayers + scoreLayer，两个工具对同一层永远同分）。
+    // 按作用域计分（与 memory_health 共用 prereadScopes + scoreScope，两个工具对同一作用域永远同分）。
     // 上面的扫描写了语义缓存与待决账本，计分前重读一份，口径与 health 读到的现状一致
-    const scored = await prereadLayers(deps, readLayers)
-    const layerRefs: LayerRef[] = [{ kind: 'global' }, ...wsList.map(path => ({ kind: 'workspace' as const, path }))]
-    const rows = layerRefs.map(ref => {
-      const r = scoreLayer(deps, scored, ref, now)
+    const scored = await prereadScopes(deps, readScopes)
+    const scoredScopes: Scope[] = [{ kind: 'global' }, ...wsList.map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
+    const rows = scoredScopes.map(scope => {
+      const r = scoreScope(deps, scored, scope, now)
       return {
         ...checkupRowBase(r),
         issues: r.ruleFindings.length + r.semanticFindings.length,
@@ -517,7 +517,7 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     // 体检收尾：清理孤儿语义缓存条目（废弃 workspace 的、历史遗留键）——体检本就是全库视角，
     // 天然的清扫时机；合法缓存键按"库里现存的全部 workspace"算，不受本次 scopes 子集影响
     signal?.throwIfAborted()
-    const validKeys = new Set([GLOBAL_CACHE_KEY, ...checkupWorkspaces(listing).map(ws => cacheKey(ws))])
+    const validKeys = new Set([GLOBAL_CACHE_KEY, ...checkupWorkspaces(listing).map(workspacePath => scopeCacheKey({ kind: 'workspace', workspacePath }))])
     for (const key of scored.cache.keys()) {
       if (!validKeys.has(key)) await deps.cache.delete(key)
     }
@@ -526,7 +526,7 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     return {
       kind: 'checkup', rows,
       pendingDecisions: { created, existing, items: decisionItems },
-      crossLayerConflicts: crossLayerConflicts(scored.byId, scored.pending),
+      crossLayerConflicts: crossScopeConflicts(scored.byId, scored.pending),
       promoteCandidates, duplicates, notes,
       directoryNotes: [...listingNotes(listing, { includeEmpty: true }), ...data.directoryNotes],
       message: `全库体检完成：global + ${wsList.length} 个 workspace 各自独立扫描计分${created > 0 ? `，新增 ${created} 个待决冲突` : ''}。清理需用户确认后执行：删除用 memory_forget，冲突裁决用 memory_confirm，提升全局用 memory_promote。`,
@@ -534,16 +534,16 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     }
   }
 
-  // 单层模式：输入用可见集合（global + 本项目）——global 里的问题（含最高危的 secret）对本会话同样生效，
-  // 跨层冲突也要双方同在 prompt 里才可判；分数归属的拆分在 memory_health（scoreLayer）做。
+  // 单个作用域：输入用可见集合（global + 本项目）——global 里的问题（含最高危的 secret）对本会话同样生效，
+  // 跨作用域的冲突也要双方同在 prompt 里才可判；分数归属的拆分在 memory_health（scoreScope）做。
   const records = active(wsPath !== undefined ? visibleTo(wsPath) : isGlobal)
-  // 显式扫别的 workspace 时基线不适用（基线随当前会话）；扫自己或 global 层照用
+  // 显式扫别的 workspace 时基线不适用（基线随当前会话）；扫自己或全局照用
   const passBaseline = wsPath === undefined || wsPath === currentWs ? baseline : null
   signal?.throwIfAborted()
-  const pass = await scanPass(deps, data.byId, records, cacheKey(wsPath), wsPath ?? 'global', layerQuarantined(wsPath), layers, llm, passBaseline, now, signal, onUsage)
+  const pass = await scanPass(deps, data.byId, records, target, quarantinedIn(target), layers, llm, passBaseline, now, signal, onUsage)
   signal?.throwIfAborted()
   if (wsPath !== undefined) await syncPromoteCandidates(deps, [wsPath], now)
-  if (pass.isChecked) await commit([wsPath !== undefined ? { kind: 'workspace', path: wsPath } : { kind: 'global' }])
+  if (pass.isChecked) await commit([target])
   const notes = [...pass.notes]
   if ((layers === 'semantic' || layers === 'full') && llm) {
     if (baseline === null) notes.push({ code: 'baseline-missing', text: '未检测到 AGENTS.md 基线，垂直冲突检测未执行' })

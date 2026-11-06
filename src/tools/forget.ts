@@ -7,8 +7,9 @@ import { redactRecord } from '../governance/snapshots.ts'
 import { hasSecret, maskSecrets } from '../secrets.ts'
 import {
   copyHistory, crossWorkspaceNote, gateRecords, locateCopy,
-  type CopyTarget, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark,
+  type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark,
 } from './workspace-gate.ts'
+import type { Scope } from '../scope.ts'
 
 /** memory_forget 工具的依赖，纯逻辑层与框架绑定层共用。 */
 export interface ForgetToolDeps {
@@ -32,7 +33,7 @@ export interface ForgetOptions {
   /** 只软删：含密钥的记录不删，列进 skippedSecrets，由调用方先问用户再走彻底删除。 */
   isSoftOnly?: boolean
   /** 同 id 多副本时只认这一份（GUI 按页面上那一份操作）；缺省按会话 workspace 定位。跨 workspace 门照旧按会话判定。 */
-  target?: CopyTarget
+  target?: Scope
   /** 删除时锁内看到的当前内容过了它就不删（不计入 forgotten）：调用方按某个条件收集的 id，收集之后被改得不再符合的留着。 */
   isChanged?: (current: MemoryRecord) => boolean
   /** 末尾按记忆 id 清账本时留下这一条（裁决冲突删败方：本次的条目要结清、留着撤销）。 */
@@ -176,17 +177,17 @@ export async function executeForget(
   }
 }
 
-/** 除 target 那一层外哪层都没有（含归档）的 id。 */
-async function withoutOtherCopies(store: MemoryStore, ids: readonly string[], target: CopyTarget): Promise<string[]> {
+/** 除 target 外哪个作用域都没有（含归档）的 id。 */
+async function withoutOtherCopies(store: MemoryStore, ids: readonly string[], target: Scope): Promise<string[]> {
   if (ids.length === 0) return []
   const workspaces = (await store.listWorkspaceDirs()).entries.map(e => e.workspacePath)
-  const others: CopyTarget[] = [
+  const others: Scope[] = [
     ...(target.kind === 'global' ? [] : [{ kind: 'global' } as const]),
     ...workspaces.filter(ws => target.kind === 'global' || ws !== target.workspacePath).map(workspacePath => ({ kind: 'workspace' as const, workspacePath })),
   ]
   const result: string[] = []
   for (const id of ids) {
-    const copies = await Promise.all(others.map(layer => locateCopy(store, id, layer)))
+    const copies = await Promise.all(others.map(scope => locateCopy(store, id, scope)))
     if (copies.every(c => c === undefined)) result.push(id)
   }
   return result

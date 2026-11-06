@@ -14,7 +14,7 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import { PendingDecisionsStore, candidateFingerprint, conflictFingerprint } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
-import { CheckupRecordStore, checkupKey } from '../src/governance/checkup-records.ts'
+import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
 import { REDACTED_PLACEHOLDER, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type PendingDecision } from '../src/governance/schema.ts'
 import type { ClaimKvTable } from '../src/kv-table.ts'
@@ -23,14 +23,15 @@ import { RETENTION_MS } from '../src/retention.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../src/gui/commands.ts'
 import {
-  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, encodeMemoryCommand, sessionViewFile,
+  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, checkupKey, encodeMemoryCommand, sessionViewFile,
   checkupViewSchema, deletedViewSchema, healthViewSchema, layerOfMemory, libraryViewSchema, memoryCommandResultSchema, pendingItemKey, pendingViewSchema,
   type MemoryCommand, type MemoryCommandResult, type PendingItem,
 } from '../src/gui/contract.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
 import { executeForget } from '../src/tools/forget.ts'
 import { executeSnapshotTool } from '../src/tools/snapshot.ts'
-import { cacheKey, executeScan } from '../src/tools/scan.ts'
+import { executeScan } from '../src/tools/scan.ts'
+import { scopeCacheKey, type Scope } from '../src/scope.ts'
 import { locateCopy } from '../src/tools/workspace-gate.ts'
 import { fakeExec } from './helpers/exec.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
@@ -693,7 +694,7 @@ describe('restore：没有快照覆盖的归档记忆', () => {
     const text = await readFile(filePath, 'utf8')
     expect(text).toContain('status: active')
     await writeFile(filePath, text.replace('status: active', 'status: deleted'))
-    await e.store.maintain({ kind: 'workspace', path: SESSION_WS })
+    await e.store.maintain({ kind: 'workspace', workspacePath: SESSION_WS })
     expect(await isInArchive(e, 'mem_edit')).toBe(true)
     ok(await e.run({ cmd: 'refresh-views' }))
     expect(await deletedIds(e)).toEqual(['mem_edit'])
@@ -854,7 +855,7 @@ describe('同 id 在两个项目里各有一份', () => {
   }
   /** 直接读那一层的目录（含 .archive/），不经同 id 取舍。 */
   const copyIn = async (e: ReturnType<typeof env>, ws: string | undefined) =>
-    (await e.store.readLayer(ws === undefined ? { kind: 'global' } : { kind: 'workspace', path: ws }, { includeArchive: true }))
+    (await e.store.readRaw(ws === undefined ? { kind: 'global' } : { kind: 'workspace', workspacePath: ws }, { includeArchive: true }))
       .records.find(l => l.record.id === 'mem_dup')?.record
 
   it('forget 指明别的项目：先要 allowCrossWorkspace，带上后只软删那一份', async () => {
@@ -1039,7 +1040,7 @@ describe('同 id 在本项目和全局各有一份、全局那份更新', () => 
   const own = { kind: 'workspace', workspacePath: SESSION_WS } as const
   const newer = Date.now() + 60_000
   const layerCopy = async (e: ReturnType<typeof env>, ws: string | undefined) =>
-    (await e.store.readLayer(ws === undefined ? { kind: 'global' } : { kind: 'workspace', path: ws }, { includeArchive: true }))
+    (await e.store.readRaw(ws === undefined ? { kind: 'global' } : { kind: 'workspace', workspacePath: ws }, { includeArchive: true }))
       .records.find(l => l.record.id === 'mem_dup')?.record
   const seed = async (e: ReturnType<typeof env>, content = '内容', globalUpdatedAt = newer) => {
     // 先建项目那份：写全局那份只清全局目录里的同 id 副本
@@ -1238,7 +1239,7 @@ describe('最近删除里彻底删除', () => {
   it('同 id 另一层仍在用的副本不受影响：文件、内容、它在快照里的副本都在；不带层时不会落到它头上', async () => {
     const e = env()
     const layerCopy = async (ws: string | undefined) =>
-      (await e.store.readLayer(ws === undefined ? { kind: 'global' } : { kind: 'workspace', path: ws }, { includeArchive: true }))
+      (await e.store.readRaw(ws === undefined ? { kind: 'global' } : { kind: 'workspace', workspacePath: ws }, { includeArchive: true }))
         .records.find(l => l.record.id === 'mem_dup')?.record
     const ownCopy = record({ id: 'mem_dup', name: '本项目那份', content: '紫藤架下的旧约定', scope: 'workspace', workspacePath: SESSION_WS })
     await e.store.create(ownCopy)
@@ -2107,8 +2108,8 @@ describe('move-memory（建议整理「放错层」的移到项目）', () => {
 
 describe('同 id 在会话项目和别的项目各有一份时提升', () => {
   // 页面上点的是别的项目那份：提升的必须是它，会话项目里的同 id 副本不碰
-  const copyIn = async (e: ReturnType<typeof env>, layer: { kind: 'global' } | { kind: 'workspace'; path: string }) =>
-    (await e.store.readLayer(layer, { includeArchive: true })).records.find(l => l.record.id === 'mem_dup')?.record
+  const copyIn = async (e: ReturnType<typeof env>, scope: Scope) =>
+    (await e.store.readRaw(scope, { includeArchive: true })).records.find(l => l.record.id === 'mem_dup')?.record
   const seedCopies = async (e: ReturnType<typeof env>) => {
     await e.store.create(record({ id: 'mem_dup', name: '本项目那份', scope: 'workspace', workspacePath: SESSION_WS }))
     await e.store.create(record({ id: 'mem_dup', name: '别的项目那份', scope: 'workspace', workspacePath: OTHER_WS, globalCandidate: true }))
@@ -2119,11 +2120,11 @@ describe('同 id 在会话项目和别的项目各有一份时提升', () => {
     await seedCopies(e)
     const other = { kind: 'workspace', workspacePath: OTHER_WS } as const
     expect(err(await e.run({ cmd: 'promote-memory', memoryId: 'mem_dup', layer: other })).code).toBe('cross-workspace')
-    expect((await copyIn(e, { kind: 'workspace', path: SESSION_WS }))?.name).toBe('本项目那份')
+    expect((await copyIn(e, { kind: 'workspace', workspacePath: SESSION_WS }))?.name).toBe('本项目那份')
     ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_dup', layer: other, allowCrossWorkspace: true }))
     expect((await copyIn(e, { kind: 'global' }))?.name).toBe('别的项目那份')
-    expect(await copyIn(e, { kind: 'workspace', path: OTHER_WS })).toBeUndefined()
-    expect((await copyIn(e, { kind: 'workspace', path: SESSION_WS }))?.name).toBe('本项目那份')
+    expect(await copyIn(e, { kind: 'workspace', workspacePath: OTHER_WS })).toBeUndefined()
+    expect((await copyIn(e, { kind: 'workspace', workspacePath: SESSION_WS }))?.name).toBe('本项目那份')
   })
 
   it('promote 别的项目的提升候选：同样只动候选所在项目那一份', async () => {
@@ -2131,10 +2132,10 @@ describe('同 id 在会话项目和别的项目各有一份时提升', () => {
     await seedCopies(e)
     const { entry } = await e.decisions.upsert({ kind: 'promote-candidate', memoryIds: ['mem_dup'], summary: '别的项目那份', workspaces: [OTHER_WS], fingerprint: 'fp' }, 1)
     expect(err(await e.run({ cmd: 'promote', decisionId: entry.id, target: 'global' })).code).toBe('cross-workspace')
-    expect((await copyIn(e, { kind: 'workspace', path: SESSION_WS }))?.name).toBe('本项目那份')
+    expect((await copyIn(e, { kind: 'workspace', workspacePath: SESSION_WS }))?.name).toBe('本项目那份')
     ok(await e.run({ cmd: 'promote', decisionId: entry.id, target: 'global', allowCrossWorkspace: true }))
     expect((await copyIn(e, { kind: 'global' }))?.name).toBe('别的项目那份')
-    expect((await copyIn(e, { kind: 'workspace', path: SESSION_WS }))?.name).toBe('本项目那份')
+    expect((await copyIn(e, { kind: 'workspace', workspacePath: SESSION_WS }))?.name).toBe('本项目那份')
   })
 
   it.each([OTHER_WS, SESSION_WS])('两份都是候选：待处理的提升卡显示条目所在项目（%s）那一份，与提升命令动的是同一份', async (ws) => {
@@ -2345,8 +2346,8 @@ describe('scan', () => {
 })
 
 describe('scan：上次体检与完成记录', () => {
-  const OTHER = { kind: 'workspace' as const, path: OTHER_WS }
-  const SESSION = { kind: 'workspace' as const, path: SESSION_WS }
+  const OTHER = { kind: 'workspace' as const, workspacePath: OTHER_WS }
+  const SESSION = { kind: 'workspace' as const, workspacePath: SESSION_WS }
   const GLOBAL = { kind: 'global' as const }
   const answering = (findings: () => object[]): SemanticLlm => ({ complete: async () => JSON.stringify({ findings: findings() }) })
   const quiet = answering(() => [])
@@ -2373,7 +2374,7 @@ describe('scan：上次体检与完成记录', () => {
     ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
     expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW + 1000, completedAt: NOW + 1000, by: 'manual' })
     expect(await completedOf(e, GLOBAL)).toBeUndefined()
-    expect((await e.cache.list()).map(([key]) => key)).toEqual([cacheKey(SESSION_WS)])
+    expect((await e.cache.list()).map(([key]) => key)).toEqual([scopeCacheKey({ kind: 'workspace', workspacePath: SESSION_WS })])
     const globalAfter = await healthOf(e, 'global')
     expect(globalAfter.score).toBe(globalBefore.score)
     expect(globalAfter.lastCheckupAt).toBeNull()
@@ -2411,7 +2412,7 @@ describe('scan：上次体检与完成记录', () => {
     const body = ok(await e.run({ cmd: 'scan', layer: { kind: 'global' } }))
     expect(seen.join('\n')).toContain('mem_g')
     expect(seen.join('\n')).not.toContain('mem_s')
-    expect((await e.cache.list()).map(([key]) => key)).toEqual([cacheKey(undefined)])
+    expect((await e.cache.list()).map(([key]) => key)).toEqual([scopeCacheKey({ kind: 'global' })])
     expect(await completedOf(e, GLOBAL)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
     expect(await completedOf(e, SESSION)).toBeUndefined()
     expect(body.scores!.map(s => s.layer)).toEqual([{ kind: 'global' }])
@@ -2432,7 +2433,7 @@ describe('scan：上次体检与完成记录', () => {
   })
 
   describe('「全部」只查开跑时认领到的范围：认领之后才建的项目不查、不写完成记录', () => {
-    const LATE = { kind: 'workspace' as const, path: '/tmp/pm-cmd-late' }
+    const LATE = { kind: 'workspace' as const, workspacePath: '/tmp/pm-cmd-late' }
     /** 认领之后、体检读库之前（体检前收集待处理的那一刻）新建一个项目。 */
     const envWithLateProject = () => {
       let isCreated = false
@@ -2443,7 +2444,7 @@ describe('scan：上次体检与完成记录', () => {
           collectViews: async () => {
             if (!isCreated) {
               isCreated = true
-              await e.store.create(record({ id: 'mem_late', name: '后来的', content: '用 bun', scope: 'workspace', workspacePath: LATE.path }))
+              await e.store.create(record({ id: 'mem_late', name: '后来的', content: '用 bun', scope: 'workspace', workspacePath: LATE.workspacePath }))
             }
             return w.collectViews()
           },
@@ -2541,7 +2542,7 @@ describe('scan：上次体检与完成记录', () => {
     dying = true
     e.clock.now = NOW + 1000
     expect(err(await e.run({ cmd: 'scan', workspacePath: SESSION_WS })).code).toBe('failed')
-    expect((await e.cache.get(cacheKey(SESSION_WS)))?.scannedAt).toBe(NOW + 1000)
+    expect((await e.cache.get(scopeCacheKey({ kind: 'workspace', workspacePath: SESSION_WS })))?.scannedAt).toBe(NOW + 1000)
     expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
     ok(await e.run({ cmd: 'refresh-views' }))
     expect((await lastCheckups(e))[SESSION_WS]).toBe(NOW)
@@ -2572,7 +2573,7 @@ describe('scan：上次体检与完成记录', () => {
     release()
     expect((await late).kind).toBe('single')
     expect(await completedOf(e, SESSION)).toEqual({ startedAt: NOW + 2000, completedAt: NOW + 2000, by: 'manual' })
-    const cached = await e.cache.get(cacheKey(SESSION_WS))
+    const cached = await e.cache.get(scopeCacheKey({ kind: 'workspace', workspacePath: SESSION_WS }))
     expect(cached).toMatchObject({ scannedAt: NOW + 2000, findings: [] })
     ok(await e.run({ cmd: 'refresh-views' }))
     expect((await lastCheckups(e))[SESSION_WS]).toBe(NOW + 2000)
@@ -2581,8 +2582,8 @@ describe('scan：上次体检与完成记录', () => {
   it('升级后还没有完成记录：上次体检取内容检查缓存的时间；有了完成记录就取完成记录', async () => {
     const e = env({ llm: quiet })
     await seedLayers(e)
-    await e.cache.put(cacheKey(SESSION_WS), { id: cacheKey(SESSION_WS), scannedAt: NOW - 5000, scope: SESSION_WS, findings: [] })
-    await e.cache.put(cacheKey(OTHER_WS), { id: cacheKey(OTHER_WS), scannedAt: NOW - 5000, scope: OTHER_WS, findings: [] })
+    await e.cache.put(scopeCacheKey({ kind: 'workspace', workspacePath: SESSION_WS }), { id: scopeCacheKey({ kind: 'workspace', workspacePath: SESSION_WS }), scannedAt: NOW - 5000, scope: SESSION_WS, findings: [] })
+    await e.cache.put(scopeCacheKey({ kind: 'workspace', workspacePath: OTHER_WS }), { id: scopeCacheKey({ kind: 'workspace', workspacePath: OTHER_WS }), scannedAt: NOW - 5000, scope: OTHER_WS, findings: [] })
     await e.checkups.complete([OTHER], { startedAt: NOW - 4000, completedAt: NOW - 3000, by: 'agent' })
     ok(await e.run({ cmd: 'refresh-views' }))
     expect(await lastCheckups(e)).toEqual({ global: null, [SESSION_WS]: NOW - 5000, [OTHER_WS]: NOW - 3000 })
@@ -2591,7 +2592,7 @@ describe('scan：上次体检与完成记录', () => {
   it('项目目录不在了：它的完成记录在视图生成时清掉，其余的留着', async () => {
     const e = env({ llm: quiet })
     await seedLayers(e)
-    const GONE = { kind: 'workspace' as const, path: '/tmp/pm-cmd-gone' }
+    const GONE = { kind: 'workspace' as const, workspacePath: '/tmp/pm-cmd-gone' }
     await e.checkups.complete([GLOBAL, SESSION, GONE], { startedAt: NOW, completedAt: NOW, by: 'manual' })
     ok(await e.run({ cmd: 'refresh-views' }))
     expect((await e.checkups.list()).map(r => r.id).sort()).toEqual([checkupKey(GLOBAL), checkupKey(SESSION)].sort())
@@ -2600,8 +2601,8 @@ describe('scan：上次体检与完成记录', () => {
 
 describe('scan：最近一次结果', () => {
   const GLOBAL = { kind: 'global' as const }
-  const SESSION = { kind: 'workspace' as const, path: SESSION_WS }
-  const OTHER = { kind: 'workspace' as const, path: OTHER_WS }
+  const SESSION = { kind: 'workspace' as const, workspacePath: SESSION_WS }
+  const OTHER = { kind: 'workspace' as const, workspacePath: OTHER_WS }
   const globalConflict = { type: 'conflict', memoryIds: ['mem_g1', 'mem_g2'], summary: '回答语言矛盾', suggestedAction: '裁决' }
   const crossConflict = { type: 'conflict', memoryIds: ['mem_g1', 'mem_s1'], summary: '全局和本项目矛盾', suggestedAction: '裁决' }
   const redundancy = { type: 'redundancy', memoryIds: ['mem_s1', 'mem_s2'], summary: '说的是一件事' }
@@ -2792,8 +2793,8 @@ describe('scan：最近一次结果', () => {
 
 describe('scan：按范围认领', () => {
   const GLOBAL = { kind: 'global' as const }
-  const SESSION = { kind: 'workspace' as const, path: SESSION_WS }
-  const OTHER = { kind: 'workspace' as const, path: OTHER_WS }
+  const SESSION = { kind: 'workspace' as const, workspacePath: SESSION_WS }
+  const OTHER = { kind: 'workspace' as const, workspacePath: OTHER_WS }
   /** 同一个记忆根上的另一个宿主进程：另一份侧表（同一个时钟）。 */
   const otherProcess = (e: ReturnType<typeof env>) => new SidecarStore({
     root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }, now: () => e.clock.now,
@@ -3076,10 +3077,10 @@ describe('confirm（仍然有效）', () => {
     await e.store.create(record({ id: 'mem_dup', name: '全局那份', lastConfirmedAt: 1 }))
     await e.store.create(record({ id: 'mem_dup', name: '本项目那份', scope: 'workspace', workspacePath: SESSION_WS, lastConfirmedAt: 1 }))
     ok(await e.run({ cmd: 'confirm', memoryId: 'mem_dup', layer: { kind: 'global' } }))
-    const copy = async (layer: Parameters<MemoryStore['readLayer']>[0]) =>
-      (await e.store.readLayer(layer, { includeArchive: true })).records.find(l => l.record.id === 'mem_dup')!.record.lastConfirmedAt
+    const copy = async (layer: Parameters<MemoryStore['readRaw']>[0]) =>
+      (await e.store.readRaw(layer, { includeArchive: true })).records.find(l => l.record.id === 'mem_dup')!.record.lastConfirmedAt
     expect(await copy({ kind: 'global' })).toBe(NOW)
-    expect(await copy({ kind: 'workspace', path: SESSION_WS })).toBe(1)
+    expect(await copy({ kind: 'workspace', workspacePath: SESSION_WS })).toBe(1)
   })
 })
 

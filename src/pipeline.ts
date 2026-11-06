@@ -11,6 +11,7 @@ import { RecordNotFoundError } from './errors.ts'
 import { extractEntities, textSimilarity, DUPLICATE_SIMILARITY_THRESHOLD } from './text.ts'
 import { toToolOutput } from './output.ts'
 import { VALIDITY_DATE_FORMAT, VALIDITY_FORMAT, formatValidity, parseValidityInput } from './validity.ts'
+import { ledgerLabel, scopeOfMemory } from './scope.ts'
 
 export interface SaveCandidate {
   action: 'create' | 'update'
@@ -218,7 +219,7 @@ async function checkSubagentWrite(
   // 软限制：串行调用不超，同一子会话并行调用可能多存一两条。无工作目录的 create 交给后面的 no-workspace
   if (candidate.action === 'create' && deps.workspacePath !== undefined) {
     const max = deps.maxSubagentSaves ?? SUBAGENT_MAX_SAVES_DEFAULT
-    const mine = await deps.store.query({ scope: { kind: 'workspace', path: deps.workspacePath }, status: ['active', 'superseded'] })
+    const mine = await deps.store.query({ scope: { kind: 'workspace', workspacePath: deps.workspacePath }, status: ['active', 'superseded'] })
     const count = mine.filter(r => r.delegation?.sessionId === deps.session.id).length
     if (count >= max) {
       return { code: 'subagent-restricted', reason: `本会话已存 ${count} 条，到了每个子会话 ${max} 条的上限；其余带回主会话。` }
@@ -353,7 +354,7 @@ export async function runSavePipeline(
     const entities = extractEntities(text)
     const peers = await store.query({
       types: [candidate.type],
-      scope: { kind: 'workspace', path: deps.workspacePath! }, // create 必有 workspace 作用域（前置已拒无 cwd）
+      scope: { kind: 'workspace', workspacePath: deps.workspacePath! }, // create 必有 workspace 作用域（前置已拒无 cwd）
       status: ['active'],
     })
     // 子 agent 只和主档比：待确认记录之间的分歧留给主会话接受时裁决，两条并存
@@ -493,7 +494,10 @@ export async function runSavePipeline(
       const written = await store.get(r.id, { workspacePath: r.workspacePath, isExactLayer: true })
       return written === undefined ? '' : editFingerprint(written)
     }
-    const workspaceOf = (r: MemoryRecord) => (r.scope === 'global' ? 'global' : r.workspacePath ?? '')
+    const workspaceOf = (r: MemoryRecord) => {
+      const scope = scopeOfMemory(r)
+      return scope === undefined ? '' : ledgerLabel(scope)
+    }
     if (candidate.action === 'update') {
       await deps.decisions.addSettled({
         kind: 'rewrite', memoryIds: [clean.id], summary: clean.name, workspaces: [workspaceOf(clean)], fingerprint: await fingerprintOf(clean), origin,

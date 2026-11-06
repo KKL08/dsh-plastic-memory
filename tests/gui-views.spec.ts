@@ -10,7 +10,7 @@ import { MemoryStore } from '../src/store.ts'
 import { candidateFingerprint, PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { SEVERITY_BY_TYPE, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type Finding, type FindingType } from '../src/governance/schema.ts'
-import { layerCacheKey, type LayerRef } from '../src/governance/layer-health.ts'
+import { scopeCacheKey, scopeKey, type Scope } from '../src/scope.ts'
 import { resolveHealthThresholds } from '../src/governance/health-presets.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { executeConfirm } from '../src/tools/confirm.ts'
@@ -360,10 +360,10 @@ describe('待处理视图：建议整理', () => {
 describe('待处理视图：建议整理的语义类', () => {
   const finding = (type: FindingType, memoryIds: string[], extra: Partial<Finding> = {}): Finding =>
     ({ type, layer: 'semantic', severity: SEVERITY_BY_TYPE[type], memoryIds, summary: '模型的说明', suggestedAction: '', ...extra })
-  /** 写入一层的上次语义体检缓存（体检写的就是这一份）。 */
-  async function cacheLayer(h: ReturnType<typeof harness>, layer: LayerRef, findings: Finding[]) {
-    const key = layerCacheKey(layer)
-    await h.cache.put(key, { id: key, scannedAt: T0, scope: layer.kind === 'global' ? 'global' : layer.path, findings })
+  /** 写入一个作用域的上次语义体检缓存（体检写的就是这一份）。 */
+  async function cacheScope(h: ReturnType<typeof harness>, scope: Scope, findings: Finding[]) {
+    const key = scopeCacheKey(scope)
+    await h.cache.put(key, { id: key, scannedAt: T0, scope: scopeKey(scope), findings })
   }
   const adviceOf = (pending: { items: readonly PendingItem[] }) =>
     pending.items.flatMap(i => i.kind === 'advice' ? [[i.type, i.memories.map(m => m.id)] as const] : [])
@@ -376,14 +376,14 @@ describe('待处理视图：建议整理的语义类', () => {
     await h.store.create(w({ id: 'mem_m', name: '该放全局' }))
     await h.store.create(w({ id: 'mem_u', name: '含糊' }))
     await h.store.create(g({ id: 'mem_gm', name: '该放项目' }))
-    await cacheLayer(h, { kind: 'workspace', path: WS }, [
+    await cacheScope(h, { kind: 'workspace', workspacePath: WS }, [
       finding('redundancy', ['mem_r2', 'mem_r1']),
       finding('redundancy', ['mem_rb'], { baselineRef: 'AGENTS.md：包管理' }),
       finding('misplaced', ['mem_m']),
       finding('unclear', ['mem_u']),
       finding('conflict', ['mem_r1', 'mem_u']),
     ])
-    await cacheLayer(h, { kind: 'global' }, [finding('misplaced', ['mem_gm'])])
+    await cacheScope(h, { kind: 'global' }, [finding('misplaced', ['mem_gm'])])
   }
 
   it('内容重复、放错层、表述不清从该层上次语义体检的缓存来，按身份各出一项：成对的内容重复一张卡（id 排序）；冲突不进建议整理', async () => {
@@ -404,7 +404,7 @@ describe('待处理视图：建议整理的语义类', () => {
   it('该层从没做过语义体检（没有缓存）：不出语义类', async () => {
     const h = harness()
     await h.store.create(w({ id: 'mem_a', name: 'A' }))
-    await cacheLayer(h, { kind: 'global' }, [finding('unclear', ['mem_a'])])
+    await cacheScope(h, { kind: 'global' }, [finding('unclear', ['mem_a'])])
     expect(adviceOf((await h.views()).pending)).toEqual([])
   })
 
@@ -432,7 +432,7 @@ describe('待处理视图：建议整理的语义类', () => {
   it('同一身份在两层的缓存里都出现：只出一项', async () => {
     const h = harness()
     await seedSemantic(h)
-    await cacheLayer(h, { kind: 'workspace', path: WS }, [finding('misplaced', ['mem_gm', 'mem_m'])])
+    await cacheScope(h, { kind: 'workspace', workspacePath: WS }, [finding('misplaced', ['mem_gm', 'mem_m'])])
     expect(adviceOf((await h.views()).pending)).toEqual([['misplaced', ['mem_gm']], ['misplaced', ['mem_m']]])
   })
 })
@@ -681,7 +681,7 @@ describe('健康视图', () => {
     await writeFile(join(wsDir(), 'broken.md'), '---\nname: [\n---\n正文\n')
     const semantic = (type: FindingType, memoryIds: string[]): Finding =>
       ({ type, layer: 'semantic', severity: SEVERITY_BY_TYPE[type], memoryIds, summary: 's', suggestedAction: '' })
-    const key = layerCacheKey({ kind: 'workspace', path: WS })
+    const key = scopeCacheKey({ kind: 'workspace', workspacePath: WS })
     await h.cache.put(key, { id: key, scannedAt: T0, scope: WS, findings: [
       semantic('conflict', ['mem_r1', 'mem_u']), semantic('redundancy', ['mem_r1', 'mem_r2']),
       semantic('misplaced', ['mem_m']), semantic('unclear', ['mem_u']),
@@ -918,7 +918,7 @@ describe('视图写入', () => {
   const checkupOnly = (view: () => CheckupView, opts: { now?: () => number; sleep?: (ms: number) => Promise<void> } = {}) =>
     new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('不该收集全局视图') }, collectCheckups: async () => view(), ...noWait, ...opts })
   const checkupAt = (now: number, governanceEnabled = true): CheckupView => buildCheckupView({
-    now, governanceEnabled, settings: new Map(), layers: [{ kind: 'global' }],
+    now, governanceEnabled, settings: new Map(), scopes: [{ kind: 'global' }],
     lastCheckupAt: () => null, isInProgress: () => false, record: () => undefined, allRecord: undefined,
   })
   const readCheckup = async () => checkupViewSchema.parse(JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_CHECKUP_VIEW_FILE), 'utf8')))

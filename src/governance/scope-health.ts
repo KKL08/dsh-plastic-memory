@@ -8,22 +8,17 @@ import { computeHealth, type HealthScore } from './scoring.ts'
 import { adviceFingerprint, applyIgnores, type IgnoredAdvice } from './advice-ignores.ts'
 import type { DirectoryNote, LocatedRecord, QuarantineEntry } from '../storage/table.ts'
 import type { CheckupRecord } from '../storage/schema.ts'
-import { checkupKey, lastCheckupAt } from './checkup-records.ts'
+import { lastCheckupAt } from './checkup-records.ts'
+import { checkupKey } from '../gui/contract.ts'
+import { scopeCacheKey, type Scope } from '../scope.ts'
 
 /** 健康档位的用户面标签（scan 体检行与 health message 共用一份，枚举值仍是 green/amber/red）。 */
 export const TIER_LABEL = { green: '绿色', amber: '黄色', red: '红色' } as const
 
 const DAY = 86_400_000
 
-/** 评分层引用：workspace 层按项目目录划分，global 层单列。 */
-export type LayerRef = { kind: 'workspace'; path: string } | { kind: 'global' }
-
-/** global 层的语义缓存键。workspace 层沿用 cache_<路径>（路径是绝对路径，不会与字面量撞名）。 */
-export const GLOBAL_CACHE_KEY = 'cache_global'
-
-export function layerCacheKey(layer: LayerRef): string {
-  return layer.kind === 'global' ? GLOBAL_CACHE_KEY : `cache_${layer.path}`
-}
+/** 全局的语义缓存键。 */
+export const GLOBAL_CACHE_KEY = scopeCacheKey({ kind: 'global' })
 
 /** 库里实际存在活跃记忆的 workspace 清单，按路径排序。体检的枚举来源。records 可含非 active，这里只数 active。 */
 export function listWorkspaces(records: Iterable<MemoryRecord>): string[] {
@@ -55,17 +50,17 @@ export function validateScopePaths(
     + (known.size > 0 ? `已知 workspace：\n${knownList}` : '当前记忆库还没有任何 workspace 层记忆。')
 }
 
-export interface LayerHealthDeps {
+export interface ScopeHealthDeps {
   registry: TypeRegistry
 }
 
 /**
- * health / scan 执行器预读好的评分输入（tools/layer-preread.ts 产出）。评分只吃它，不碰 store、
- * 账本表、缓存表——两个工具用同一份预读函数，对同一层永远同分。
+ * health / scan 执行器预读好的评分输入（tools/scope-preread.ts 产出）。评分只吃它，不碰 store、
+ * 账本表、缓存表——两个工具用同一份预读函数，对同一作用域永远同分。
  */
-export interface LayerPreread {
-  /** 预读各层的全部状态（active / superseded / deleted，含 .archive/）记录，加上按 id 定位到的层外引用，按 id 索引：
-   *  orphan 检测要分辨取代链引用，缓存过滤要核对跨层记录是否存活。 */
+export interface ScopePreread {
+  /** 预读各作用域的全部状态（active / superseded / deleted，含 .archive/）记录，加上按 id 定位到的作用域外引用，按 id 索引：
+   *  orphan 检测要分辨取代链引用，缓存过滤要核对跨作用域的记录是否存活。 */
   byId: ReadonlyMap<string, MemoryRecord>
   /** byId 里各记录实际读到的文件（绝对路径），评分不用，GUI 视图的「打开文件」用。 */
   filePaths: ReadonlyMap<string, string>
@@ -73,11 +68,11 @@ export interface LayerPreread {
   pending: readonly PendingDecision[]
   /** 语义扫描缓存，按缓存键索引。 */
   cache: ReadonlyMap<string, ScanCacheEntry>
-  /** 解析失败的记忆文件，按读到它的层归档（键为 layerCacheKey）。 */
+  /** 解析失败的记忆文件，按读到它的作用域归档（键为 scopeCacheKey）。 */
   quarantined: ReadonlyMap<string, readonly QuarantineEntry[]>
   /** 本次读取的目录级说明（保留键、不可读目录、同 id 副本）。 */
   directoryNotes: readonly DirectoryNote[]
-  /** 别层同 id 的 active 副本在用、因而没进 byId 的已删副本（每个 id 一份）；评分不用，GUI 的最近删除要列它。 */
+  /** 别的作用域里同 id 的 active 副本在用、因而没进 byId 的已删副本（每个 id 一份）；评分不用，GUI 的最近删除要列它。 */
   shadowedDeleted: readonly LocatedRecord[]
   /** 建议忽略表的全部记录：评分前据它剔除被忽略的发现（见 advice-ignores.ts）。 */
   ignores: readonly AdviceIgnore[]
@@ -85,48 +80,48 @@ export interface LayerPreread {
   checkups: ReadonlyMap<string, CheckupRecord>
 }
 
-export interface LayerHealthResult {
-  layer: LayerRef
+export interface ScopeHealthResult {
+  scope: Scope
   records: MemoryRecord[]
   health: HealthScore
   /** 上次体检（见 checkup-records.ts lastCheckupAt）；从没体检过为 null。 */
   lastCheckupAt: number | null
-  /** 归入本层计分的 findings（规则层实时 + 语义层缓存过滤后，已剔除用户忽略的），供报告展示。 */
+  /** 归入本作用域计分的 findings（规则层实时 + 语义层缓存过滤后，已剔除用户忽略的），供报告展示。 */
   ruleFindings: Finding[]
   semanticFindings: Finding[]
-  /** 本层被用户忽略、因而没计分的建议（GUI 健康页「已忽略」、工具输出的条数）。 */
+  /** 本作用域被用户忽略、因而没计分的建议（GUI 健康页「已忽略」、工具输出的条数）。 */
   ignored: IgnoredAdvice[]
   /** 超过衰退期未确认的记忆 id（条数即 health.freshness.staleCount），GUI 待处理的「很久没确认」用。 */
   staleIds: string[]
-  /** 本层的全局提升候选数（global 层恒 0）。 */
+  /** 本作用域的全局提升候选数（全局恒 0）。 */
   promoteCandidates: number
 }
 
 /**
- * 分层健康评分的公共装配：health（单层/体检表）与 scan（体检行）共用，
- * 保证两个工具对同一层永远算出同一个分数。
+ * 按作用域健康评分的公共装配：health（单个作用域/体检表）与 scan（体检行）共用，
+ * 保证两个工具对同一作用域永远算出同一个分数。
  *
  * 归属规则：
- * - 语义 findings（噪音与 conflict 同一谓词）计"全员存活且任一方属于本层"的条目：
- *   纯 global 的发现不算进 ws 层分数（否则同一条 global 问题会在 N 个 workspace 重复扣分）；
- *   跨层条目（如提升到 global 后 ws 残留旧条构成的冗余、global vs ws 冲突）归 ws 层——
- *   它污染的是该 ws 的会话，而 global 层语义扫描的输入是 global-only、看不到 ws 侧，
- *   若 ws 层也不计就两层都失明；
+ * - 语义 findings（噪音与 conflict 同一谓词）计"全员存活且任一方属于本作用域"的条目：
+ *   纯 global 的发现不算进 ws 分数（否则同一条 global 问题会在 N 个 workspace 重复扣分）；
+ *   跨作用域的条目（如提升到 global 后 ws 残留旧条构成的冗余、global vs ws 冲突）归 ws——
+ *   它污染的是该 ws 的会话，而全局语义扫描的输入是 global-only、看不到 ws 侧，
+ *   若 ws 也不计就两边都失明；
  * - conflict 还须仍在待决账本里（pairKey 匹配，不看 baselineRef 措辞）——用户裁决 keep-both/dismiss 后双方记忆都在、
  *   缓存过滤不掉，不对账会出现"刚裁决完分数纹丝不动"的自相矛盾；
  * - 其余语义 findings 涉及的记忆在那次体检之后改过（updatedAt 晚于缓存时间，或指纹与体检时记下的不同）就不计。
  * 最后剔除用户忽略的建议（指纹仍对得上的），评分公式不动；新鲜度不可忽略。
  */
-export function scoreLayer(deps: LayerHealthDeps, data: LayerPreread, layer: LayerRef, now: number): LayerHealthResult {
-  const records = [...data.byId.values()].filter(r => r.status === 'active' && (layer.kind === 'global'
+export function scoreScope(deps: ScopeHealthDeps, data: ScopePreread, scope: Scope, now: number): ScopeHealthResult {
+  const records = [...data.byId.values()].filter(r => r.status === 'active' && (scope.kind === 'global'
     ? r.scope === 'global'
-    : r.scope === 'workspace' && r.workspacePath === layer.path))
+    : r.scope === 'workspace' && r.workspacePath === scope.workspacePath))
   const liveIds = new Set(records.map(r => r.id))
 
   const ruleScan = runRuleScan(records, id => data.byId.get(id), now)
-  ruleScan.push(...buildMalformedFindings(data.quarantined.get(layerCacheKey(layer)) ?? []))
+  ruleScan.push(...buildMalformedFindings(data.quarantined.get(scopeCacheKey(scope)) ?? []))
 
-  const cached = data.cache.get(layerCacheKey(layer))
+  const cached = data.cache.get(scopeCacheKey(scope))
   const pendingKeys = new Set(data.pending.map(pairKey))
   const alive = (id: string) => data.byId.get(id)?.status === 'active'
   // 体检之后改过的记忆，缓存里关于它的结论（重复、放错层、表述不清）已不作数，下次体检再说；冲突走账本指纹，不在此列。
@@ -156,16 +151,16 @@ export function scoreLayer(deps: LayerHealthDeps, data: LayerPreread, layer: Lay
 
   const health = computeHealth({
     totalMemories: records.length, ruleFindings, semanticFindings, freshnessRatios,
-    layer: layer.kind,
+    scopeKind: scope.kind,
   })
   return {
-    layer, records, health,
-    lastCheckupAt: lastCheckupAt(data.checkups.get(checkupKey(layer)), cached),
+    scope, records, health,
+    lastCheckupAt: lastCheckupAt(data.checkups.get(checkupKey(scope)), cached),
     ruleFindings, semanticFindings,
     ignored: [...rule.ignored, ...semantic.ignored],
     // 与 computeHealth 的 staleCount 同一判据（ratio > 1）
     staleIds: freshness.filter(f => f.ratio > 1).map(f => f.id),
-    promoteCandidates: layer.kind === 'workspace' ? records.filter(r => r.globalCandidate).length : 0,
+    promoteCandidates: scope.kind === 'workspace' ? records.filter(r => r.globalCandidate).length : 0,
   }
 }
 
@@ -180,11 +175,11 @@ export function findingFingerprints(findings: readonly Finding[], byId: Readonly
 }
 
 /**
- * 跨层冲突聚合：待决账本里 global 记忆 + workspace 记忆配对的条目，按 global id 分组，
+ * 跨作用域冲突聚合：待决账本里 global 记忆 + workspace 记忆配对的条目，按 global id 分组，
  * 命中 ≥2 个不同 workspace 的说明该全局规则被多数项目反对，优先裁定。
  * memory_scan 体检与 memory_health 体检共用，两个工具对同一账本永远给出同一结果。
  */
-export function crossLayerConflicts(
+export function crossScopeConflicts(
   byId: ReadonlyMap<string, MemoryRecord>,
   pending: readonly PendingDecision[],
 ): Array<{ globalId: string; workspaces: string[]; decisionIds: string[] }> {
@@ -204,8 +199,8 @@ export function crossLayerConflicts(
     .map(([globalId, v]) => ({ globalId, workspaces: [...v.workspaces].sort(), decisionIds: v.decisionIds }))
 }
 
-/** 体检表"主要问题"列：非零的问题类计数按 FINDING_TYPES 顺序，超期计数殿后，空层显示破折号。 */
-export function issueSummary(result: LayerHealthResult): string {
+/** 体检表"主要问题"列：非零的问题类计数按 FINDING_TYPES 顺序，超期计数殿后，没有记忆的作用域显示破折号。 */
+export function issueSummary(result: ScopeHealthResult): string {
   const parts = FINDING_TYPES
     .map(t => [t, result.health.counts[t]] as const)
     .filter(([, n]) => n > 0)
@@ -220,7 +215,7 @@ export function ignoredNote(count: number): string | undefined {
 }
 
 /** 体检行里 scan 与 health 共有的字段。scan 另加 issues；health 另加上次体检、promoteCandidates。 */
-export function checkupRowBase(result: LayerHealthResult): {
+export function checkupRowBase(result: ScopeHealthResult): {
   layer: 'workspace' | 'global'
   workspacePath?: string
   totalMemories: number
@@ -232,8 +227,8 @@ export function checkupRowBase(result: LayerHealthResult): {
   ignoredCount: number
 } {
   return {
-    layer: result.layer.kind,
-    ...(result.layer.kind === 'workspace' ? { workspacePath: result.layer.path } : {}),
+    layer: result.scope.kind,
+    ...(result.scope.kind === 'workspace' ? { workspacePath: result.scope.workspacePath } : {}),
     totalMemories: result.records.length,
     score: Math.round(result.health.score * 100) / 100,
     tier: result.health.tier,

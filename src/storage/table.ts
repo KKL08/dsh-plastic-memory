@@ -29,7 +29,7 @@ export interface LocatedRecord { record: MemoryRecord; filePath: string; dir: st
 /** 定位结果：比 LocatedRecord 多带 extras（未知 frontmatter 键，写回时保留）。 */
 export interface LocatedFile extends LocatedRecord { extras: Record<string, unknown> }
 
-/** 位置即作用域（同 readLayer）：.archive/ 里 status 仍写着 active 的按 deleted 看。 */
+/** 位置即作用域（同 readRaw）：.archive/ 里 status 仍写着 active 的按 deleted 看。 */
 export function byPosition(found: LocatedFile): MemoryRecord {
   return found.record.status === 'active' && dirname(found.filePath) !== found.dir ? { ...found.record, status: 'deleted' } : found.record
 }

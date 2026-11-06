@@ -4,58 +4,58 @@ import type { KvTable } from '../kv-table.ts'
 import type { ScanCacheEntry } from '../governance/schema.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
-import { layerCacheKey, type LayerPreread, type LayerRef } from '../governance/layer-health.ts'
+import type { ScopePreread } from '../governance/scope-health.ts'
+import { scopeCacheKey, type Scope } from '../scope.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { dirname, join } from 'node:path'
 import { SECRET_MASK, exposedPath, maskSecrets } from '../secrets.ts'
 import { resolveDuplicates, resolveLiveFirst, type DirectoryNote, type LocatedRecord, type QuarantineEntry, type WorkspaceDirListing } from '../storage/table.ts'
 
 /**
- * memory_health 与 memory_scan 共用的预读：两个工具从同一个函数取评分输入，对同一层永远同分。
- * 预读范围：只读给定的层（每层的目录连同 .archive/，记录取全部状态）——规则扫描要分辨取代链引用，
- * 缓存过滤要核对记录是否存活。层外的引用（取代链与语义缓存里指向其他层的 id，如提升到 global 后
+ * memory_health 与 memory_scan 共用的预读：两个工具从同一个函数取评分输入，对同一作用域永远同分。
+ * 预读范围：只读给定的作用域（每个作用域的目录连同 .archive/，记录取全部状态）——规则扫描要分辨取代链引用，
+ * 缓存过滤要核对记录是否存活。作用域外的引用（取代链与语义缓存里指向其他作用域的 id，如提升到 global 后
  * global 记录的 supersedes 指向 workspace 旧条）按 id 两级定位，不整库预读。
- * 隔离条目按读到它的层归档（malformed 按所在目录归层）；同 id 多文件按取舍规则留一份（active 副本优先），其余副本报目录级说明、不删。
+ * 隔离条目按读到它的作用域归档（malformed 按所在目录归作用域）；同 id 多文件按取舍规则留一份（active 副本优先），其余副本报目录级说明、不删。
  * 另取待决账本里的全部未决冲突、语义缓存全部条目、建议忽略表全部记录（缺省没有忽略表，按没有忽略算）、
  * 体检记录表全部记录（缺省按没有完成记录算，上次体检取缓存时间）。
  */
-export async function prereadLayers(
+export async function prereadScopes(
   deps: { store: MemoryStore; decisions: PendingDecisionsStore; cache: KvTable<ScanCacheEntry>; ignores?: Pick<AdviceIgnoreStore, 'list'>; checkups?: Pick<CheckupRecordStore, 'list'> },
-  layers: readonly LayerRef[],
-  /** 当前 workspace：同 id 取舍与跨层定位的提示。 */
+  scopes: readonly Scope[],
+  /** 当前 workspace：同 id 取舍与跨作用域定位的提示。 */
   workspacePath?: string,
-): Promise<LayerPreread> {
+): Promise<ScopePreread> {
   const read: LocatedRecord[] = []
   const quarantined = new Map<string, QuarantineEntry[]>()
   const directoryNotes: DirectoryNote[] = []
-  for (const layer of layers) {
-    const scope = layer.kind === 'global' ? layer : { kind: 'workspace' as const, path: layer.path }
-    const r = await deps.store.readLayer(scope, { includeArchive: true })
+  for (const scope of scopes) {
+    const r = await deps.store.readRaw(scope, { includeArchive: true })
     read.push(...r.records)
-    quarantined.set(layerCacheKey(layer), r.quarantined)
+    quarantined.set(scopeCacheKey(scope), r.quarantined)
     const byPath = new Map(r.records.map(l => [l.filePath, l]))
     directoryNotes.push(...r.directoryNotes.map(n => maskNote(n, byPath.get(n.path))))
   }
   const hint = { workspacePath }
-  // 已删、已取代的副本不遮住别层在用的同 id 副本；被盖住的已删副本单列（最近删除），也不算同 id 副本。
-  // 同层还有在用副本的已删副本不单列：按层恢复定位到的是在用那份，列出来也恢复不了
+  // 已删、已取代的副本不遮住别的作用域里在用的同 id 副本；被盖住的已删副本单列（最近删除），也不算同 id 副本。
+  // 同一作用域还有在用副本的已删副本不单列：按作用域恢复定位到的是在用那份，列出来也恢复不了
   const chosen = resolveLiveFirst(read, hint)
   const kept = new Map(chosen.map(l => [l.record.id, l]))
   const shadowed = read.filter(l => l.record.status !== 'active' && kept.get(l.record.id)?.record.status === 'active')
   directoryNotes.push(...duplicateNotes(read.filter(l => !shadowed.includes(l)), chosen))
-  // 在用 = 层顶层的 active（同按 id 定位的 pickLiveFirst）
+  // 在用 = 作用域目录顶层的 active（同按 id 定位的 pickLiveFirst）
   const liveDirs = new Set(read.filter(l => l.record.status === 'active' && dirname(l.filePath) === l.dir).map(l => `${l.record.id}\n${l.dir}`))
   const shadowedDeleted = resolveDuplicates(shadowed.filter(l => l.record.status === 'deleted' && !liveDirs.has(`${l.record.id}\n${l.dir}`)), hint)
   const byId = new Map<string, MemoryRecord>(chosen.map(l => [l.record.id, l.record]))
   const filePaths = new Map<string, string>(chosen.map(l => [l.record.id, l.filePath]))
   const cache = new Map(await deps.cache.list())
-  // 评分与跨层聚合只认冲突；提升候选、超限提醒（GUI 条目）不进
+  // 评分与跨作用域聚合只认冲突；提升候选、超限提醒（GUI 条目）不进
   const pending = (await deps.decisions.list()).filter(e => kindOf(e) === 'conflict')
 
   const refs = new Set<string>()
   for (const r of byId.values()) if (r.status === 'active') for (const id of r.supersedes ?? []) refs.add(id)
-  for (const layer of layers) for (const f of cache.get(layerCacheKey(layer))?.findings ?? []) for (const id of f.memoryIds) refs.add(id)
-  // 待决条目的另一方可能只剩归档（目录不进体检清单，预读不到）：触及本次层的条目，其成员也按 id 定位，跨层冲突聚合才不漏
+  for (const scope of scopes) for (const f of cache.get(scopeCacheKey(scope))?.findings ?? []) for (const id of f.memoryIds) refs.add(id)
+  // 待决条目的另一方可能只剩归档（目录不进体检清单，预读不到）：触及本次作用域的条目，其成员也按 id 定位，跨作用域冲突聚合才不漏
   for (const e of pending) if (e.memoryIds.some(id => byId.has(id))) for (const id of e.memoryIds) refs.add(id)
   for (const id of refs) {
     if (byId.has(id)) continue

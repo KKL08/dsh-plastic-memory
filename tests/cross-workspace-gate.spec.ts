@@ -568,7 +568,7 @@ describe('同 id 多副本时，门放行的那份就是被改的那份：删除
       decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
     }
     const activeIn = async (path: string) =>
-      (await store.queryScope({ scope: { kind: 'workspace', path }, status: ['active'] })).records.map(r => r.id)
+      (await store.queryScope({ scope: { kind: 'workspace', workspacePath: path }, status: ['active'] })).records.map(r => r.id)
     return { table, store, deps, activeIn }
   }
 

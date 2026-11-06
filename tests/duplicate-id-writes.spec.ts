@@ -15,6 +15,7 @@ import { InMemoryKvTable, type KvTable } from '../src/kv-table.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
+import type { Scope } from '../src/scope.ts'
 
 // 同 id 多副本时，执行器预读 / 过门用的那份记录与最终写入落到的那份
 // 必须是同一个文件，否则会改到门没检查过的副本（其他项目的、或 global 上被修改过的）。
@@ -36,7 +37,7 @@ function world() {
   const deps = { store, snapshots, decisions, agentsMd, log: quiet, now: () => 5000 }
   const seed = (dir: string, fileName: string, rec: MemoryRecord) => table.seedFile({ dir, fileName, record: rec })
   const wsDir = (path: string) => join('/in-memory', workspaceDirName(path))
-  const activeIn = async (scope: { kind: 'global' } | { kind: 'workspace'; path: string }) =>
+  const activeIn = async (scope: Scope) =>
     (await store.queryScope({ scope, status: ['active'] })).records
   return { table, store, snapshots, deps, seed, wsDir, activeIn }
 }
@@ -49,8 +50,8 @@ describe('promote 到 global：搬家的是门放行的当前项目那份，其�
     const r = await executePromote({ confirmedIds: ['mem_dup'], target: 'global' }, IN_ZETA, w.deps)
     expect(r.promoted).toEqual([{ id: 'mem_dup', target: 'global' }])
     expect((await w.activeIn({ kind: 'global' })).map(x => x.content)).toEqual(['ZETA 的副本'])
-    expect(await w.activeIn({ kind: 'workspace', path: ZETA })).toEqual([])
-    expect((await w.activeIn({ kind: 'workspace', path: ALPHA })).map(x => x.content)).toEqual(['ALPHA 的副本'])
+    expect(await w.activeIn({ kind: 'workspace', workspacePath: ZETA })).toEqual([])
+    expect((await w.activeIn({ kind: 'workspace', workspacePath: ALPHA })).map(x => x.content)).toEqual(['ALPHA 的副本'])
   })
 })
 
@@ -77,7 +78,7 @@ describe('密钥硬删：可见集合（global + 当前项目）里该 id 的全
     w.seed(w.wsDir(ZETA), 'dup.md', ws(ZETA, { id: 'mem_dup', content: `token ${FAKE_SECRET.sk}`, updatedAt: 200 }))
     const r = await executeForget({ ids: ['mem_dup'], reason: '泄漏' }, IN_ZETA, w.deps)
     expect(r.hardDeleted).toEqual(['mem_dup'])
-    expect(await w.activeIn({ kind: 'workspace', path: ZETA })).toEqual([])
+    expect(await w.activeIn({ kind: 'workspace', workspacePath: ZETA })).toEqual([])
     expect(await w.activeIn({ kind: 'global' })).toEqual([])
     expect(await w.store.get('mem_dup')).toBeUndefined()
   })

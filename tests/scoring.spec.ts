@@ -116,7 +116,7 @@ describe('computeHealth 三层结构', () => {
   it('misplaced 分层：workspace 层 6、global 层 10（项目私货混进 global 在所有会话生效）', () => {
     const base = { ...empty, totalMemories: 10, semanticFindings: findings('misplaced', 3) }
     expect(computeHealth(base).semanticPenalty).toBeCloseTo(6)
-    expect(computeHealth({ ...base, layer: 'global' }).semanticPenalty).toBeCloseTo(10)
+    expect(computeHealth({ ...base, scopeKind: 'global' }).semanticPenalty).toBeCloseTo(10)
   })
 
   it('expired 降为噪音档 6：validTo 过期已被注入/检索过滤，只占地方不误导', () => {

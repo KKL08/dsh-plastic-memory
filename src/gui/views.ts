@@ -10,34 +10,34 @@ import { candidateFingerprint, isModelChange, kindOf, overflowLevelOf, overflowS
 import { editFingerprint } from '../governance/snapshots.ts'
 import { runRuleScan } from '../governance/rule-scan.ts'
 import { byConfidenceThenConfirmed } from '../snapshot.ts'
-import { layerCacheKey, scoreLayer, type LayerPreread, type LayerRef } from '../governance/layer-health.ts'
+import { scoreScope, type ScopePreread } from '../governance/scope-health.ts'
 import type { IgnoredAdvice } from '../governance/advice-ignores.ts'
 import { autoCheckupDue, autoCheckupRetryAt, isRetryLimitReached } from '../governance/auto-checkups.ts'
-import { checkupKey } from '../governance/checkup-records.ts'
 import { RULE_PENALTY_TYPES, SEMANTIC_NOISE_TYPES } from '../governance/scoring.ts'
 import type { CheckupRecord } from '../storage/schema.ts'
 import type { ScanNoteCode } from '../contract-codes.ts'
 import {
-  ADVICE_TYPES, GUI_VIEW_VERSION, PENDING_ITEM_KINDS, PENDING_LEVEL_OF_KIND, PENDING_LEVELS, SCOPE_KEYS, isAwaitingDecision, resolveAutoCheckup,
-  pendingItemKey, pendingItemScopes, sameLayer,
-  type AdviceType, type AutoCheckupFrequency, type CheckupAdded, type CheckupCause, type CheckupResult, type CheckupView, type DeletedView, type MemoryPromotion, type GlobalViewName, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCard,
+  ADVICE_TYPES, GUI_VIEW_VERSION, PENDING_ITEM_KINDS, PENDING_LEVEL_OF_KIND, PENDING_LEVELS, SCOPE_KEYS, checkupKey, isAwaitingDecision, resolveAutoCheckup,
+  pendingItemKey, pendingItemScopes,
+  type AdviceType, type AutoCheckupFrequency, type CheckupAdded, type CheckupCause, type CheckupResult, type CheckupView, type DeletedView, type MemoryPromotion, type GlobalViewName, type HealthView, type LibraryView, type MemoryCard,
   type MemoryCommandResult, type ModelChange, type PendingItem, type PendingView, type SessionView,
 } from './contract.ts'
+import { isInScope, sameScope, scopeCacheKey, scopeOfLedger, type Scope } from '../scope.ts'
 
 /**
  * 视图生成（纯函数）：预读数据 + 账本 → 界面要读的视图 JSON（契约见 contract.ts）。不读存储、不写盘。
- * 预读由 view-writer.ts 的 collectGlobalViews 做（复用 memory_health / memory_scan 的 prereadLayers）。
+ * 预读由 view-writer.ts 的 collectGlobalViews 做（复用 memory_health / memory_scan 的 prereadScopes）。
  */
 export interface ViewInput {
   now: number
   memoryRoot: string
   registry: TypeRegistry
-  /** prereadLayers 读 readLayers 的结果。 */
-  data: LayerPreread
-  /** 读了哪些层：global + 全部 workspace 目录（含只剩归档的，最近删除要用）。 */
-  readLayers: readonly LayerRef[]
-  /** 健康视图列哪些层：global + 体检清单。 */
-  healthLayers: readonly LayerRef[]
+  /** prereadScopes 读 readScopes 的结果。 */
+  data: ScopePreread
+  /** 读了哪些作用域：global + 全部 workspace 目录（含只剩归档的，最近删除要用）。 */
+  readScopes: readonly Scope[]
+  /** 健康视图列哪些作用域：global + 体检清单。 */
+  healthScopes: readonly Scope[]
   /** 账本里的未决条目（全部种类）与已裁决条目。 */
   open: readonly PendingDecision[]
   settled: readonly PendingDecision[]
@@ -49,7 +49,7 @@ export interface ViewInput {
   bootedAt?: number
   /** 模型改写、替代的改前快照（按快照 id）；缺省不列 modelChanges。 */
   modelChangeSnapshots?: ReadonlyMap<string, MemorySnapshot>
-  /** 提升候选条目所在项目的那一份（按条目 id），只列 data.byId 取到的是别层副本的；缺省按 byId。 */
+  /** 提升候选条目所在项目的那一份（按条目 id），只列 data.byId 取到的是别的作用域里那份的；缺省按 byId。 */
   candidateCopies?: ReadonlyMap<string, LocatedRecord>
 }
 
@@ -66,19 +66,11 @@ export function buildGlobalViews(input: ViewInput): GlobalViews {
 
 export const GLOBAL_VIEW_NAMES: readonly GlobalViewName[] = ['pending', 'health', 'library', 'deleted']
 
-function toGuiLayer(layer: LayerRef): GuiLayerRef {
-  return layer.kind === 'global' ? { kind: 'global' } : { kind: 'workspace', workspacePath: layer.path }
-}
-
-function inLayer(r: MemoryRecord, layer: LayerRef): boolean {
-  return layer.kind === 'global' ? r.scope === 'global' : r.scope === 'workspace' && r.workspacePath === layer.path
-}
-
 const byNameThenId = (a: MemoryRecord, b: MemoryRecord) =>
   a.name < b.name ? -1 : a.name > b.name ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0
 
 /** 记忆卡：四个文字面遮盖密钥片段，路径原样；digest 按原文算（直接改的版本核对用）。 */
-function card(r: MemoryRecord, data: LayerPreread, filePath = data.filePaths.get(r.id) ?? ''): MemoryCard {
+function card(r: MemoryRecord, data: ScopePreread, filePath = data.filePaths.get(r.id) ?? ''): MemoryCard {
   const m = maskSecretSurface(r)
   return {
     id: r.id, name: m.name, type: r.type, scope: r.scope,
@@ -98,12 +90,12 @@ function card(r: MemoryRecord, data: LayerPreread, filePath = data.filePaths.get
   }
 }
 
-function cardOf(id: string | undefined, data: LayerPreread): MemoryCard | null {
+function cardOf(id: string | undefined, data: ScopePreread): MemoryCard | null {
   const r = id === undefined ? undefined : data.byId.get(id)
   return r === undefined ? null : card(r, data)
 }
 
-function activeRecords(data: LayerPreread): MemoryRecord[] {
+function activeRecords(data: ScopePreread): MemoryRecord[] {
   return [...data.byId.values()].filter(r => r.status === 'active').sort(byNameThenId)
 }
 
@@ -126,14 +118,16 @@ export function buildPendingView(input: ViewInput): PendingView {
       const copy = input.candidateCopies?.get(e.id)
       const r = copy?.record ?? data.byId.get(e.memoryIds[0] ?? '')
       const workspacePath = e.workspaces?.[0]
-      const isOwnCopy = workspacePath === undefined || workspacePath === 'global' || r?.workspacePath === workspacePath
+      const own = workspacePath === undefined ? undefined : scopeOfLedger(workspacePath)
+      const isOwnCopy = own === undefined || own.kind === 'global' || r?.workspacePath === own.workspacePath
       if (r?.status === 'active' && r.scope === 'workspace' && r.globalCandidate && isOwnCopy) {
         items.push({ kind, level: PENDING_LEVEL_OF_KIND[kind], ...base, memory: card(r, data, copy?.filePath) })
       }
     }
     else if (kind === 'overflow') {
-      const scope = overflowScopeOf(e)
-      items.push({ kind, level: PENDING_LEVEL_OF_KIND[kind], ...base, ...overflowLevelOf(e), ...(scope !== undefined && scope !== 'global' ? { workspacePath: scope } : {}) })
+      const label = overflowScopeOf(e)
+      const scope = label === undefined ? undefined : scopeOfLedger(label)
+      items.push({ kind, level: PENDING_LEVEL_OF_KIND[kind], ...base, ...overflowLevelOf(e), ...(scope?.kind === 'workspace' ? { workspacePath: scope.workspacePath } : {}) })
     }
     else if (e.baselineRef !== undefined) {
       items.push({ kind: 'conflict-vertical', level: PENDING_LEVEL_OF_KIND['conflict-vertical'], ...base, summary: e.summary, memory: cardOf(e.memoryIds[0], data), baselineRef: e.baselineRef })
@@ -145,11 +139,11 @@ export function buildPendingView(input: ViewInput): PendingView {
       })
     }
   }
-  for (const layer of input.readLayers) {
-    for (const q of data.quarantined.get(layerCacheKey(layer)) ?? []) {
+  for (const scope of input.readScopes) {
+    for (const q of data.quarantined.get(scopeCacheKey(scope)) ?? []) {
       items.push({
         // 显示用的相对路径与体检说明同口径遮一遍（手起名的文件名可能带密钥）；filePath 是打开文件用的，照给
-        kind: 'unreadable-file', level: PENDING_LEVEL_OF_KIND['unreadable-file'], layer: toGuiLayer(layer), filePath: q.path,
+        kind: 'unreadable-file', level: PENDING_LEVEL_OF_KIND['unreadable-file'], layer: scope, filePath: q.path,
         relativePath: maskSecrets(relative(input.memoryRoot, q.path).split(sep).join('/')), error: q.error,
       })
     }
@@ -173,15 +167,15 @@ export function buildPendingView(input: ViewInput): PendingView {
 const SEMANTIC_ADVICE_TYPES: ReadonlySet<AdviceType> = new Set(['redundancy', 'misplaced', 'unclear'])
 
 /**
- * 建议整理（现算、不入账本）：与健康分同一次评分（scoreLayer）的规则发现、语义缓存发现和超期记忆，所以只出体检清单里各层的
- * active 记忆；语义缓存里指向已删、已取代或已不在这一层的记忆的发现、用户忽略的建议，评分已经滤掉。规则类与超期不靠模型，体检关闭时照常列出；
+ * 建议整理（现算、不入账本）：与健康分同一次评分（scoreScope）的规则发现、语义缓存发现和超期记忆，所以只出体检清单里各作用域的
+ * active 记忆；语义缓存里指向已删、已取代或已不在这个作用域的记忆的发现、用户忽略的建议，评分已经滤掉。规则类与超期不靠模型，体检关闭时照常列出；
  * 语义类和冲突一样，体检关闭时不出（冲突走账本，不在这里）。同一身份（类型 + 排序后的记忆 id）只出一项。
- * 按问题类型排，同类按层（global 在前）、再按（第一条记忆的）名称。
+ * 按问题类型排，同类按作用域（global 在前）、再按（第一条记忆的）名称。
  */
 function adviceItems(input: ViewInput): PendingItem[] {
   const { data } = input
-  const found = input.healthLayers.flatMap((layer, layerIndex) => {
-    const r = scoreLayer({ registry: input.registry }, data, layer, input.now)
+  const found = input.healthScopes.flatMap((scope, scopeIndex) => {
+    const r = scoreScope({ registry: input.registry }, data, scope, input.now)
     const semantic = input.governanceEnabled ? r.semanticFindings : []
     const groups = (type: AdviceType): string[][] => {
       if (type === 'stale') return r.staleIds.map(id => [id])
@@ -189,7 +183,7 @@ function adviceItems(input: ViewInput): PendingItem[] {
       const hits = semantic.filter(f => f.type === type)
       return type === 'redundancy' ? hits.map(f => [...f.memoryIds].sort()) : hits.flatMap(f => f.memoryIds.map(id => [id]))
     }
-    return ADVICE_TYPES.flatMap(type => groups(type).map(ids => ({ type, layerIndex, records: ids.map(id => data.byId.get(id)!) })))
+    return ADVICE_TYPES.flatMap(type => groups(type).map(ids => ({ type, scopeIndex, records: ids.map(id => data.byId.get(id)!) })))
   })
   const seen = new Set<string>()
   const unique = found.filter((f) => {
@@ -198,20 +192,20 @@ function adviceItems(input: ViewInput): PendingItem[] {
     seen.add(key)
     return true
   })
-  unique.sort((a, b) => ADVICE_TYPES.indexOf(a.type) - ADVICE_TYPES.indexOf(b.type) || a.layerIndex - b.layerIndex || byNameThenId(a.records[0]!, b.records[0]!))
+  unique.sort((a, b) => ADVICE_TYPES.indexOf(a.type) - ADVICE_TYPES.indexOf(b.type) || a.scopeIndex - b.scopeIndex || byNameThenId(a.records[0]!, b.records[0]!))
   return unique.map(({ type, records }) => ({ kind: 'advice', level: PENDING_LEVEL_OF_KIND.advice, type, memories: records.map(r => card(r, data)) }))
 }
 
 /**
- * 体检结果（`scan` 命令）：体检后的待处理里有、体检前没有的项按级别计数，以及体检后各层的健康分。
- * covered = 本次体检覆盖的层，'all' 是全库体检；只数、只列涉及这些层的。用户忽略的建议本就不在待处理里，不会算进来。
+ * 体检结果（`scan` 命令）：体检后的待处理里有、体检前没有的项按级别计数，以及体检后各作用域的健康分。
+ * covered = 本次体检覆盖的作用域，'all' 是全库体检；只数、只列涉及这些作用域的。用户忽略的建议本就不在待处理里，不会算进来。
  */
 export function scanOutcome(
   before: PendingView,
   after: Pick<GlobalViews, 'pending' | 'health'>,
-  covered: readonly GuiLayerRef[] | 'all',
+  covered: readonly Scope[] | 'all',
 ): Required<Pick<Extract<MemoryCommandResult, { ok: true }>, 'added' | 'scores'>> {
-  const isCovered = (layer: GuiLayerRef) => covered === 'all' || covered.some(c => sameLayer(c, layer))
+  const isCovered = (scope: Scope) => covered === 'all' || covered.some(c => sameScope(c, scope))
   const added = addedItems(before, after.pending, covered)
   const pending = added.filter(i => i.level !== 'advice')
   const levels = [...new Set(pending.map(i => i.level))]
@@ -224,10 +218,10 @@ export function scanOutcome(
   }
 }
 
-/** 体检新增的待处理项：体检后有、体检前没有（按身份比较），且属于本次体检覆盖的层（'all' 是全部层），按体检后视图里的先后。 */
-function addedItems(before: PendingView, after: PendingView, covered: readonly GuiLayerRef[] | 'all'): PendingItem[] {
+/** 体检新增的待处理项：体检后有、体检前没有（按身份比较），且属于本次体检覆盖的作用域（'all' 是全部作用域），按体检后视图里的先后。 */
+function addedItems(before: PendingView, after: PendingView, covered: readonly Scope[] | 'all'): PendingItem[] {
   const seen = new Set(before.items.map(pendingItemKey))
-  return after.items.filter(i => !seen.has(pendingItemKey(i)) && (covered === 'all' || pendingItemScopes(i).some(l => covered.some(c => sameLayer(c, l)))))
+  return after.items.filter(i => !seen.has(pendingItemKey(i)) && (covered === 'all' || pendingItemScopes(i).some(s => covered.some(c => sameScope(c, s)))))
 }
 
 function addedOf(items: readonly PendingItem[]): CheckupAdded {
@@ -235,12 +229,12 @@ function addedOf(items: readonly PendingItem[]): CheckupAdded {
   return { keys: items.map(pendingItemKey), pending, advice: items.length - pending }
 }
 
-/** 体检的目标：只查全局、某个项目，或全部（layers 是这次被查的每个范围）。 */
-export type CheckupTarget = { kind: 'global' } | { kind: 'workspace'; path: string } | { kind: 'all'; layers: readonly LayerRef[] }
+/** 体检的目标：只查全局、某个项目，或全部（scopes 是这次被查的每个范围）。 */
+export type CheckupTarget = Scope | { kind: 'all'; scopes: readonly Scope[] }
 
 /**
  * 一次界面手动体检或自动体检的最近一次结果，按范围给出要写进体检记录表的各条（键 → 结果）；字段口径见 contract.ts checkupResultSchema。
- * 判新增的覆盖层同 scan 命令：全局是全局层，项目是全局加本项目，全部是所有层。说明只留说明码和原因（文字是给模型看的）。
+ * 判新增的覆盖范围同 scan 命令：全局是全局，项目是全局加本项目，全部是所有作用域。说明只留说明码和原因（文字是给模型看的）。
  */
 export function checkupResults(before: PendingView, after: PendingView, run: {
   target: CheckupTarget
@@ -250,26 +244,25 @@ export function checkupResults(before: PendingView, after: PendingView, run: {
   usageTokens?: number
   notes: ReadonlyArray<{ code: ScanNoteCode; cause?: CheckupCause }>
   /** 「全部」体检时各范围自己的说明（键同体检记录表）；没给的范围用整次的 notes。 */
-  layerNotes?: ReadonlyMap<string, ReadonlyArray<{ code: ScanNoteCode; cause?: CheckupCause }>>
+  scopeNotes?: ReadonlyMap<string, ReadonlyArray<{ code: ScanNoteCode; cause?: CheckupCause }>>
 }): Array<{ key: string; result: CheckupResult }> {
   const { target } = run
   const toNotes = (notes: typeof run.notes) => notes.map(n => ({ code: n.code, ...(n.cause !== undefined ? { cause: n.cause } : {}) }))
   const base = { checkupId: run.checkupId, by: run.by, completedAt: run.completedAt, notes: toNotes(run.notes) }
   const usage = run.usageTokens !== undefined ? { usageTokens: run.usageTokens } : {}
-  const belongsTo = (layer: GuiLayerRef) => (i: PendingItem) => pendingItemScopes(i).some(s => sameLayer(s, layer))
+  const belongsTo = (scope: Scope) => (i: PendingItem) => pendingItemScopes(i).some(s => sameScope(s, scope))
   if (target.kind === 'global') {
     const added = addedItems(before, after, [{ kind: 'global' }])
     return [{ key: SCOPE_KEYS.global, result: { ...base, added: addedOf(added), ...usage } }]
   }
   if (target.kind === 'workspace') {
-    const own = toGuiLayer(target)
-    const added = addedItems(before, after, [{ kind: 'global' }, own])
+    const added = addedItems(before, after, [{ kind: 'global' }, target])
     // 项目体检读全局：顺带发现、只属于全局的新增记在全局名下，不算本项目的
-    const result = { ...base, added: addedOf(added.filter(belongsTo(own))), globalAdded: addedOf(added.filter(i => !belongsTo(own)(i))), ...usage }
-    return [{ key: target.path, result }]
+    const result = { ...base, added: addedOf(added.filter(belongsTo(target))), globalAdded: addedOf(added.filter(i => !belongsTo(target)(i))), ...usage }
+    return [{ key: checkupKey(target), result }]
   }
   const added = [...new Map(addedItems(before, after, 'all').map(i => [pendingItemKey(i), i])).values()]
-  const groups = new Map<string, { scope: GuiLayerRef; keys: string[] }>()
+  const groups = new Map<string, { scope: Scope; keys: string[] }>()
   for (const item of added) {
     for (const scope of pendingItemScopes(item)) {
       const id = scope.kind === 'global' ? '' : scope.workspacePath
@@ -281,9 +274,9 @@ export function checkupResults(before: PendingView, after: PendingView, run: {
   // 全局（id 为空串）在前，项目按路径
   const byScope = [...groups.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([, g]) => g)
   return [
-    ...target.layers.map(layer => {
-      const own = run.layerNotes?.get(checkupKey(layer))
-      return { key: checkupKey(layer), result: { ...base, ...(own !== undefined ? { notes: toNotes(own) } : {}), added: addedOf(added.filter(belongsTo(toGuiLayer(layer)))) } }
+    ...target.scopes.map(scope => {
+      const own = run.scopeNotes?.get(checkupKey(scope))
+      return { key: checkupKey(scope), result: { ...base, ...(own !== undefined ? { notes: toNotes(own) } : {}), added: addedOf(added.filter(belongsTo(scope))) } }
     }),
     { key: SCOPE_KEYS.all, result: { ...base, added: addedOf(added), byScope, ...usage } },
   ]
@@ -303,24 +296,24 @@ function typeOrder(registry: TypeRegistry, present: Iterable<string>): string[] 
   return [...scene, ...others]
 }
 
-/** 健康：每层复用 scoreLayer（与 memory_health / memory_scan 同分，同样剔除用户忽略的建议，另列在 ignored）；有密钥的层不打分。 */
+/** 健康：每个作用域复用 scoreScope（与 memory_health / memory_scan 同分，同样剔除用户忽略的建议，另列在 ignored）；有密钥的作用域不打分。 */
 export function buildHealthView(input: ViewInput): HealthView {
   return {
     version: GUI_VIEW_VERSION,
     generatedAt: input.now,
     governanceEnabled: input.governanceEnabled,
     ...(input.bootedAt !== undefined ? { bootedAt: input.bootedAt } : {}),
-    layers: input.healthLayers.map(layer => {
-      const r = scoreLayer({ registry: input.registry }, input.data, layer, input.now)
+    layers: input.healthScopes.map(scope => {
+      const r = scoreScope({ registry: input.registry }, input.data, scope, input.now)
       return {
-        layer: toGuiLayer(layer),
+        layer: scope,
         totalMemories: r.records.length,
         score: r.health.gate.secret ? null : Math.round(r.health.score * 100) / 100,
         tier: r.health.tier,
         gate: r.health.gate,
         issues: FINDING_TYPES.filter(t => r.health.counts[t] > 0).map(type => ({ type, count: r.health.counts[type] })),
         lastCheckupAt: r.lastCheckupAt,
-        ignored: ignoredOfLayer(r.ignored, input.data),
+        ignored: ignoredOfScope(r.ignored, input.data),
         deductions: deductionsOf(r.health),
       }
     }),
@@ -328,7 +321,7 @@ export function buildHealthView(input: ViewInput): HealthView {
 }
 
 /** 扣分来源：评分模块已分开算好的三项扣分，各带此刻有的问题类型（按 FINDING_TYPES 的顺序）。 */
-function deductionsOf(health: ReturnType<typeof scoreLayer>['health']): HealthView['layers'][number]['deductions'] {
+function deductionsOf(health: ReturnType<typeof scoreScope>['health']): HealthView['layers'][number]['deductions'] {
   const round = (points: number) => Math.round(points * 100) / 100
   const present = (types: readonly FindingType[]) => FINDING_TYPES.filter(t => types.includes(t) && health.counts[t] > 0)
   return {
@@ -340,17 +333,17 @@ function deductionsOf(health: ReturnType<typeof scoreLayer>['health']): HealthVi
 
 /**
  * 体检视图：每个范围的有效频率（跟随还是单独设置）、上次体检、下次自动体检、是否到期、是否在体检、自动体检的连续失败和「模型用不了」，
- * 外加体检开关。layers 是全局加体检清单（与健康视图同一批层、同一顺序）；lastCheckupAt 给出每个范围的上次体检，
+ * 外加体检开关。scopes 是全局加体检清单（与健康视图同一批作用域、同一顺序）；lastCheckupAt 给出每个范围的上次体检，
  * isInProgress 给出它此刻有没有体检认领着，record 给出它在体检记录表里的那条（没有为 undefined）；allRecord 是键 all 的那条。
  */
 export function buildCheckupView(input: {
   now: number
   governanceEnabled: boolean
   settings: ReadonlyMap<string, AutoCheckupFrequency>
-  layers: readonly LayerRef[]
-  lastCheckupAt: (layer: LayerRef) => number | null
-  isInProgress: (layer: LayerRef) => boolean
-  record: (layer: LayerRef) => CheckupRecord | undefined
+  scopes: readonly Scope[]
+  lastCheckupAt: (scope: Scope) => number | null
+  isInProgress: (scope: Scope) => boolean
+  record: (scope: Scope) => CheckupRecord | undefined
   allRecord: CheckupRecord | undefined
 }): CheckupView {
   return {
@@ -359,13 +352,12 @@ export function buildCheckupView(input: {
     governanceEnabled: input.governanceEnabled,
     defaultFrequency: resolveAutoCheckup(input.settings, { kind: 'all' }).frequency,
     allResult: input.allRecord?.lastResult ?? null,
-    scopes: input.layers.map(layer => {
-      const scope = toGuiLayer(layer)
+    scopes: input.scopes.map(scope => {
       const { frequency, isOwn } = resolveAutoCheckup(input.settings, scope)
-      const lastCheckupAt = input.lastCheckupAt(layer)
-      const { failure, modelUnavailable, lastResult } = input.record(layer) ?? {}
+      const lastCheckupAt = input.lastCheckupAt(scope)
+      const { failure, modelUnavailable, lastResult } = input.record(scope) ?? {}
       return {
-        scope, frequency, isOwn, lastCheckupAt, ...autoCheckupDue(frequency, lastCheckupAt, input.now), isInProgress: input.isInProgress(layer),
+        scope, frequency, isOwn, lastCheckupAt, ...autoCheckupDue(frequency, lastCheckupAt, input.now), isInProgress: input.isInProgress(scope),
         // 重试时间按此刻的有效频率现算；仅手动时不会自动重试（不到期），按 0 天算，界面也不显示
         failure: failure === undefined ? null : {
           count: failure.count, retryAt: autoCheckupRetryAt(failure.count, failure.failedAt, frequency === 'manual' ? 0 : frequency),
@@ -378,8 +370,8 @@ export function buildCheckupView(input: {
   }
 }
 
-/** 本层「已忽略」：记忆名称与摘要遮盖密钥；按问题类型（建议整理的顺序）、再按第一条记忆的名称排。 */
-function ignoredOfLayer(ignored: readonly IgnoredAdvice[], data: LayerPreread): HealthView['layers'][number]['ignored'] {
+/** 本作用域「已忽略」：记忆名称与摘要遮盖密钥；按问题类型（建议整理的顺序）、再按第一条记忆的名称排。 */
+function ignoredOfScope(ignored: readonly IgnoredAdvice[], data: ScopePreread): HealthView['layers'][number]['ignored'] {
   return ignored
     .map(({ type, memoryIds }) => ({
       type,
@@ -408,14 +400,14 @@ function promotionReader(input: ViewInput): (r: MemoryRecord) => MemoryPromotion
   }
 }
 
-/** 全部记忆：按层列 active 记忆；空的项目层不列，global 总在。目录问题不含 dir-empty（那不是问题）。 */
+/** 全部记忆：按作用域列 active 记忆；空的项目不列，global 总在。目录问题不含 dir-empty（那不是问题）。 */
 export function buildLibraryView(input: ViewInput): LibraryView {
   const active = activeRecords(input.data)
   const promotionOf = promotionReader(input)
-  const layers = input.readLayers
-    .map(layer => ({
-      layer: toGuiLayer(layer),
-      items: active.filter(r => inLayer(r, layer)).map((r) => {
+  const scopeGroups = input.readScopes
+    .map(scope => ({
+      layer: scope,
+      items: active.filter(r => isInScope(r, scope)).map((r) => {
         const promotion = promotionOf(r)
         return promotion === undefined ? card(r, input.data) : { ...card(r, input.data), promotion }
       }),
@@ -424,14 +416,14 @@ export function buildLibraryView(input: ViewInput): LibraryView {
   const directoryIssues = [...input.listingNotes, ...input.data.directoryNotes]
     .filter(n => n.code !== 'dir-empty')
     .map(n => ({ code: n.code, path: n.path, ...(n.keys !== undefined ? { keys: n.keys } : {}), ...(n.keptPath !== undefined ? { keptPath: n.keptPath } : {}) }))
-  const presentTypes = layers.flatMap(l => l.items.map(m => m.type))
+  const presentTypes = scopeGroups.flatMap(l => l.items.map(m => m.type))
   const typeLabelsOfView = typeLabels(input.registry, presentTypes)
   // byId 每个 id 一份（在用副本优先）：不在用的就是这个 id 没有在用副本
   const inactiveIds = [...input.data.byId.values()].filter(r => r.status !== 'active').map(r => r.id)
-  const hasUnreadFiles = input.readLayers.some(l => (input.data.quarantined.get(layerCacheKey(l)) ?? []).length > 0)
+  const hasUnreadFiles = input.readScopes.some(s => (input.data.quarantined.get(scopeCacheKey(s)) ?? []).length > 0)
     || directoryIssues.some(i => i.code === 'marker-missing' || i.code === 'dir-unreadable')
   return {
-    version: GUI_VIEW_VERSION, generatedAt: input.now, memoryRoot: input.memoryRoot, layers, directoryIssues,
+    version: GUI_VIEW_VERSION, generatedAt: input.now, memoryRoot: input.memoryRoot, layers: scopeGroups, directoryIssues,
     inactiveIds, hasUnreadFiles, typeLabels: typeLabelsOfView, typeOrder: typeOrder(input.registry, presentTypes),
     ...(input.modelChangeSnapshots !== undefined ? { modelChanges: modelChangesOf(input, input.modelChangeSnapshots) } : {}),
   }
@@ -440,7 +432,7 @@ export function buildLibraryView(input: ViewInput): LibraryView {
 /**
  * 保留窗口内模型改写、替代的改动（对话卡、右侧栏「这次新写入的」）：改前那份取快照，快照已清或只剩脱敏副本的不列。
  * 能不能撤按记忆此刻的样子判：改写的那条仍在用、替代的那条仍是已取代，且内容还是那次写下的（指纹对得上），同撤销命令的核对。
- * 预读每个 id 只留一份（在用副本优先）：留下的不在改前那份的层里时看不到那一层的现状，先给按钮，由撤销命令按那一层核对；哪一层都没有了算之后又改过。
+ * 预读每个 id 只留一份（在用副本优先）：留下的不在改前那份的作用域里时看不到那个作用域的现状，先给按钮，由撤销命令按那个作用域核对；哪个作用域都没有了算之后又改过。
  */
 function modelChangesOf(input: ViewInput, snapshots: ReadonlyMap<string, MemorySnapshot>): ModelChange[] {
   const cutoff = input.now - RETENTION_MS
@@ -452,9 +444,9 @@ function modelChangesOf(input: ViewInput, snapshots: ReadonlyMap<string, MemoryS
     if (before === undefined || before.redacted === true) return []
     const kind = kindOf(e) === 'rewrite' ? 'rewrite' : 'supersede'
     const current = input.data.byId.get(memoryId)
-    const isSameLayer = current !== undefined && current.scope === before.scope
+    const isSameScope = current !== undefined && current.scope === before.scope
       && (before.scope !== 'workspace' || current.workspacePath === before.workspacePath)
-    const isOwnWrite = current !== undefined && (!isSameLayer
+    const isOwnWrite = current !== undefined && (!isSameScope
       || (current.status === (kind === 'rewrite' ? 'active' : 'superseded') && editFingerprint(current) === e.fingerprint))
     return [{
       decisionId: e.id, kind, memoryId,
@@ -476,13 +468,13 @@ export function buildDeletedView(input: ViewInput): DeletedView {
     const prev = causeById.get(loser)
     if (prev === undefined || prev.settled!.at <= e.settled!.at) causeById.set(loser, e)
   }
-  // 别层同 id 副本还在用时，删掉的这份不在 byId 里，从 shadowedDeleted 补上（带它自己的文件路径）
+  // 别的作用域里同 id 副本还在用时，删掉的这份不在 byId 里，从 shadowedDeleted 补上（带它自己的文件路径）
   const deletedCopies = [
     ...[...input.data.byId.values()].filter(r => r.status === 'deleted').map(r => ({ r, filePath: input.data.filePaths.get(r.id) ?? '' })),
     ...input.data.shadowedDeleted.map(l => ({ r: l.record, filePath: l.filePath })),
   ]
   const items = deletedCopies
-    .filter(({ r }) => input.readLayers.some(l => inLayer(r, l)))
+    .filter(({ r }) => input.readScopes.some(s => isInScope(r, s)))
     .map(({ r, filePath }) => ({ r, filePath, deletedAt: r.deletedAt ?? r.updatedAt }))
     .filter(({ deletedAt }) => deletedAt >= cutoff)
     .sort((a, b) => b.deletedAt - a.deletedAt || (a.r.id < b.r.id ? -1 : 1))

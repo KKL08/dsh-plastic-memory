@@ -10,8 +10,8 @@ import { InMemoryKvTable } from '../src/kv-table.ts'
 import { MemoryStore } from '../src/store.ts'
 import { SnapshotCache } from '../src/runtime.ts'
 import { executeHealth } from '../src/tools/health.ts'
-import { prereadLayers } from '../src/tools/layer-preread.ts'
-import { crossLayerConflicts } from '../src/governance/layer-health.ts'
+import { prereadScopes } from '../src/tools/scope-preread.ts'
+import { crossScopeConflicts } from '../src/governance/scope-health.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
 import { resolveHealthThresholds } from '../src/governance/health-presets.ts'
@@ -551,7 +551,7 @@ describe('memory_health 纯读', () => {
 })
 
 describe('待决账本成员只在仅剩归档的目录里', () => {
-  it('prereadLayers 对 pending 的成员按 id 定位，crossLayerConflicts 不漏', async () => {
+  it('prereadScopes 对 pending 的成员按 id 定位，crossScopeConflicts 不漏', async () => {
     const now = Date.now()
     await writeMem(globalDir(), 'g1.md', record({ id: 'mem_g1' }))
     await writeMem(wsDir(WS), 'a.md', wsRecord({ id: 'mem_a' }), WS)
@@ -563,9 +563,9 @@ describe('待决账本成员只在仅剩归档的目录里', () => {
     const decisions = new PendingDecisionsStore(sidecar.pending)
     await decisions.upsert({ memoryIds: ['mem_g1', 'mem_a'], summary: '' }, now)
     await decisions.upsert({ memoryIds: ['mem_g1', 'mem_b'], summary: '' }, now)
-    const data = await prereadLayers({ store, decisions, cache: sidecar.scanCache }, [{ kind: 'global' }, { kind: 'workspace', path: WS }])
+    const data = await prereadScopes({ store, decisions, cache: sidecar.scanCache }, [{ kind: 'global' }, { kind: 'workspace', workspacePath: WS }])
     expect(data.byId.get('mem_b')?.status).toBe('deleted')
-    const conflicts = crossLayerConflicts(data.byId, data.pending)
+    const conflicts = crossScopeConflicts(data.byId, data.pending)
     expect(conflicts.map(c => [c.globalId, c.workspaces])).toEqual([['mem_g1', [WS, OTHER]]])
   })
 })
