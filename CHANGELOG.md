@@ -309,6 +309,11 @@ All notable changes to this project are documented here. The format follows
   as done and refreshes the memory page. A failed automatic checkup no
   longer marks a scope as failed when a later checkup of it has already
   finished.
+- The memory page picks up settings that finish loading after it opens, or
+  that reload while the app runs, instead of staying on the defaults until
+  it is reopened.
+- With reduced motion turned on in the system, the checkup spinner stays
+  still instead of turning slowly.
 
 ## [0.2.0-beta.1] - 2026-10-25
 
