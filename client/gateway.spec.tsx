@@ -830,7 +830,7 @@ describe('createHostGateway', () => {
     const { result } = renderHook(() => gateway.useConfig())
     expect(result.current).toBeUndefined()
     act(() => { snapshot = { status: 'ready', value, revision: 1, writable: true }; for (const fn of listeners) fn() })
-    expect(result.current).toEqual({ snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget: 'agents-md', accent: 'blue-whale' })
+    expect(result.current).toEqual({ snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget: 'agents-md', accent: 'blue-whale', customTypes: {} })
     expect(get).toHaveBeenCalledWith(ENTRY_ID)
     expect(await gateway.setConfig('snapshotTokenBudget', 5000)).toBe(true)
     expect(set).toHaveBeenCalledWith('snapshotTokenBudget', 5000)
@@ -847,6 +847,14 @@ describe('createHostGateway', () => {
     const base = { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governance: { enabled: true, globalPromoteTarget: 'plugin-global' } }
     expect(toPluginConfig(base)?.accent).toBe('ella')
     expect(toPluginConfig({ ...base, accent: 'neon' })?.accent).toBe('ella')
+  })
+
+  it('customTypes 只取显示名；没名字或结构不对的条目按没改名处理，不连累其余几项', () => {
+    const base = { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governance: { enabled: true, globalPromoteTarget: 'plugin-global' } }
+    const customTypes = { procedure: { label: '发版手册', description: 'd' }, term: { label: '' }, broken: null, odd: { label: 3 } }
+    expect(toPluginConfig({ ...base, customTypes })?.customTypes).toEqual({ procedure: { label: '发版手册' } })
+    expect(toPluginConfig({ ...base, customTypes: 'x' })?.customTypes).toEqual({})
+    expect(toPluginConfig(base)?.customTypes).toEqual({})
   })
 
   it('打开文件 / 在文件管理器中显示走 session.openWorkspacePath；读文件走 workspaceFiles', async () => {

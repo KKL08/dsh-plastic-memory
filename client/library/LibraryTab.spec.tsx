@@ -1,6 +1,6 @@
 // 「全部记忆」tab：对假网关断言渲染出什么、每个动作发出了哪条命令或宿主调用。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { GUI_VIEW_VERSION, scopeKey, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
 import type { BorrowedSession } from '../gateway.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
@@ -9,6 +9,9 @@ import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { LibraryTab } from './LibraryTab.tsx'
 import type { FoldMemory } from './groups.tsx'
 import { FLASH_MS } from './shared.tsx'
+import { createTranslator } from '../i18n.tsx'
+import { en } from '../locales.ts'
+import { PanelShell } from '../ui/PanelShell.tsx'
 
 const app = { kind: 'workspace', workspacePath: '/w/app' } as const
 const blog = { kind: 'workspace', workspacePath: '/w/blog' } as const
@@ -90,7 +93,7 @@ describe('全部记忆', () => {
   it('全局写全局目录、按类型分组；「全部」不写存储说明，跨范围按更新时间分段，7 天前的收在「更早」里并说一句', () => {
     const { unmount } = renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'global' }} session={session} now={NOW} />, createFakeGateway({ views: { library: library() } }))
     expect(document.querySelector('.pm-lib-storage')).toHaveTextContent('/m/global')
-    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['preference1'])
+    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['行为偏好1'])
     expect(screen.queryByText('最近 7 天没有新记或改动的记忆。')).toBeNull()
     unmount()
     renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'all' }} session={session} now={NOW} />, createFakeGateway({ views: { library: library() } }))
@@ -202,7 +205,7 @@ describe('全部记忆', () => {
       await remove(rowOf('博客用 Astro'))
       act(() => { gateway.setView('library', blogGone) })
       expect(rowOf('博客用 Astro')).toHaveTextContent('已删除，14 天内可在「最近删除」找回。')
-      expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(scope.kind === 'all' ? ['24 小时内1', '更早1'] : ['preference1'])
+      expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(scope.kind === 'all' ? ['24 小时内1', '更早1'] : ['行为偏好1'])
       await act(async () => { fireEvent.click(within(rowOf('博客用 Astro')).getByRole('button', { name: '撤销' })) })
       expect(gateway.executed.map(e => e.command)).toEqual([
         { cmd: 'forget', memoryId: 'b1', layer: blog },
@@ -564,7 +567,7 @@ describe('全部记忆', () => {
       expect(screen.queryByRole('button', { name: /展开其余/ })).toBeNull()
       expect(screen.queryByText('最近 7 天没有新记或改动的记忆。')).toBeNull()
       const row = rowOf('博客 b1')
-      expect(row.querySelector('.pm-chip')).toHaveTextContent('preference')
+      expect(row.querySelector('.pm-chip')).toHaveTextContent('行为偏好')
       expect(within(row).getByRole('button', { name: '到「blog」查看这条' })).toHaveTextContent('blog›')
       expect(within(rowOf('回答用中文')).getByRole('button', { name: '到「全局」查看这条' })).toBeInTheDocument()
     })
@@ -666,5 +669,27 @@ describe('全部记忆', () => {
       expect(rowOf('测试里不要 mock 数据库，用 testcontainers 起真实 Postgres。')).toHaveClass('pm-flash')
       expect(scrollIntoView).toHaveBeenCalledTimes(1)
     })
+  })
+})
+
+describe('类型显示名', () => {
+  const config = { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget: 'plugin-global', accent: 'ella' } as const
+
+  it('PA-20：改过名的预设类型显示配置里的名字（和右侧栏、设置页同名）', () => {
+    const view = library({ layers: [{ layer: app, items: [memory({ id: 'c1', type: 'procedure', content: '发版先跑全量测试' })] }], typeOrder: ['procedure'], typeLabels: { procedure: '可复用流程' } })
+    renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />,
+      createFakeGateway({ views: { library: view }, config: { ...config, customTypes: { procedure: { label: '发版手册' } } } }))
+    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['发版手册1'])
+  })
+
+  it('PA-20：英文界面下内置、退役类型都写英文名，不用视图里的中文名', () => {
+    render(<PanelShell gateway={createFakeGateway({ views: { library: typed() } })} t={createTranslator(en)}><LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} /></PanelShell>)
+    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['Preference1', 'Facts & lessons5', 'Person1'])
+  })
+
+  it('配置里没有、也不是内置类型（切模板前的旧类型）：用视图里的名字，再没有显示 id', () => {
+    const view = library({ layers: [{ layer: app, items: [memory({ id: 'x1', type: 'term' }), memory({ id: 'x2', type: 'mystery' })] }], typeOrder: ['term', 'mystery'], typeLabels: { term: '术语' } })
+    renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: view } }))
+    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['术语1', 'mystery1'])
   })
 })

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { GUI_VIEW_VERSION, type AdviceType, type HealthView, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type PendingItem, type PendingView } from '../../src/gui/contract.ts'
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { useGateway, type PluginConfig } from '../gateway.ts'
@@ -7,11 +7,14 @@ import { FLASH_MS } from '../library/shared.tsx'
 import { ALL_SCOPE, createNavStore, type NavStore, type PageScope } from '../nav.ts'
 import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { PendingTab } from './PendingTab.tsx'
+import { createTranslator } from '../i18n.tsx'
+import { en } from '../locales.ts'
+import { PanelShell } from '../ui/PanelShell.tsx'
 
 // 待处理 tab：给定一份待处理视图，断言每类卡渲染出什么、点按钮向网关发了什么命令。
 
 const SESSION = { kind: 'ready', sessionId: 's1', cwd: '/w/app' } as const
-const config: PluginConfig = { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget: 'plugin-global', accent: 'ella' }
+const config: PluginConfig = { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget: 'plugin-global', accent: 'ella', customTypes: {} }
 
 const A = memory({ id: 'a', content: '测试用真实 Postgres。', sourceMode: 'user-explicit' })
 const B = memory({ id: 'b', content: '测试里 mock 数据库就行。', sourceMode: 'agent-inferred' })
@@ -1724,5 +1727,23 @@ describe('待处理：放错层只给挪层', () => {
     renderInShell(<PendingTab nav={createNavStore()} session={lonely} scope={ALL_SCOPE} workspacePath={undefined} now={NOW} />, gateway)
     openPicker()
     expect(within(cardOf()).getByRole('button', { name: '取消' })).toHaveFocus()
+  })
+})
+
+describe('PA-20 类型显示名', () => {
+  const typedSecret = (type: string): PendingItem => ({ ...secret, memory: { ...secret.memory, type } })
+  const chipsOf = (card: Element) => [...card.querySelectorAll('.pm-chip')].map(el => el.textContent)
+
+  it('改过名的预设类型显示配置里的名字（和右侧栏、记忆查看同名）', () => {
+    setup([typedSecret('procedure')], { config: { ...config, customTypes: { procedure: { label: '发版手册' } } } })
+    expect(chipsOf(screen.getByRole('heading', { level: 3, name: '这条记忆里有密钥' }).closest('article')!)).toContain('发版手册')
+  })
+
+  it('英文界面下卡片里的类型写英文名，不用视图里的中文名', () => {
+    const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(typedSecret('preference')), health: scannedHealth(NOW) } })
+    render(<PanelShell gateway={gateway} t={createTranslator(en)}><PendingTab nav={createNavStore()} session={SESSION} scope={ALL_SCOPE} workspacePath="/w/app" now={NOW} /></PanelShell>)
+    const card = screen.getByRole('heading', { level: 3, name: /secret/i }).closest('article')!
+    expect(chipsOf(card)).toContain('Preference')
+    expect(card).not.toHaveTextContent('行为偏好')
   })
 })

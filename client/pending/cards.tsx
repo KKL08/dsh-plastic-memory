@@ -49,7 +49,7 @@ export interface CardProps<K extends PendingItem['kind']> {
   item: Item<K>
   session: BorrowedSession
   now: number
-  typeLabels: Readonly<Record<string, string>>
+  typeLabel: (type: string) => string
   onDone: (outcome: Outcome) => void
   /** 这一条正在别处处理或刚处理完，什么都没动（见 isHandledElsewhere）：由列表在卡片外提示。 */
   onRefused: () => void
@@ -119,13 +119,13 @@ function Card({ marker, title, aside, focusable = false, isResult = false, child
   )
 }
 
-function MemoryOf({ memory, session, now, typeLabels }: {
+function MemoryOf({ memory, session, now, typeLabel }: {
   memory: MemoryCardData
   session: BorrowedSession
   now: number
-  typeLabels: Readonly<Record<string, string>>
+  typeLabel: (type: string) => string
 }) {
-  return <MemoryCard memory={memory} now={now} typeLabel={typeLabels[memory.type]} projectName={projectNameOf(session)(memory)} />
+  return <MemoryCard memory={memory} now={now} typeLabel={typeLabel(memory.type)} projectName={projectNameOf(session)(memory)} />
 }
 
 export function titleOf(item: PendingItem, t: Translate): string {
@@ -142,7 +142,7 @@ export function titleOf(item: PendingItem, t: Translate): string {
 
 // —— 密钥 ——
 
-export function SecretCard({ item, session, now, typeLabels, onDone }: CardProps<'secret'>) {
+export function SecretCard({ item, session, now, typeLabel, onDone }: CardProps<'secret'>) {
   const t = useT()
   const gateway = useGateway()
   const action = useItemAction(session, () => { onDone({ kind: 'hard-deleted' }) })
@@ -157,7 +157,7 @@ export function SecretCard({ item, session, now, typeLabels, onDone }: CardProps
   const open = () => { void gateway.openPath(memory.filePath, 'open').then((ok) => { if (!ok) action.fail(t('pending.openFailed')) }) }
   return (
     <Card marker={<StatusMarker kind="secret" label={t('marker.secret')} />} title={t('pending.secret.title')}>
-      <MemoryOf session={session} memory={typeof revealed === 'string' ? { ...memory, content: revealed } : memory} now={now} typeLabels={typeLabels} />
+      <MemoryOf session={session} memory={typeof revealed === 'string' ? { ...memory, content: revealed } : memory} now={now} typeLabel={typeLabel} />
       {revealed === null ? <p className="pm-pending-text">{t('pending.secret.readFailed')}</p> : null}
       <AdviceNote>{t('pending.secret.body')}</AdviceNote>
       {confirming
@@ -185,7 +185,7 @@ export function SecretCard({ item, session, now, typeLabels, onDone }: CardProps
 
 // —— 冲突 ——
 
-export function HorizontalCard({ item, session, now, typeLabels, onDone, onRefused }: CardProps<'conflict-horizontal'>) {
+export function HorizontalCard({ item, session, now, typeLabel, onDone, onRefused }: CardProps<'conflict-horizontal'>) {
   const t = useT()
   const action = useItemAction(session, (command, result) => {
     if (command.cmd === 'resolve') onDone({ kind: 'resolved', verdict: command.verdict, ...(result.isUnrecorded ? { isUnrecorded: true } : {}), ...(result.isHardDeleted ? { isHardDeleted: true } : {}) })
@@ -205,7 +205,7 @@ export function HorizontalCard({ item, session, now, typeLabels, onDone, onRefus
         title={titleOf(item, t)}
         note={note}
         unavailable={action.unavailable}
-        typeLabel={type => typeLabels[type] ?? type}
+        typeLabel={typeLabel}
         projectName={projectNameOf(session)}
         headExtra={<ScopeChips />}
         onRule={(verdict) => { action.run({ cmd: 'resolve', decisionId: item.decisionId, verdict }) }}
@@ -215,7 +215,7 @@ export function HorizontalCard({ item, session, now, typeLabels, onDone, onRefus
   )
 }
 
-export function VerticalCard({ item, session, now, typeLabels, onDone, onRefused }: CardProps<'conflict-vertical'>) {
+export function VerticalCard({ item, session, now, typeLabel, onDone, onRefused }: CardProps<'conflict-vertical'>) {
   const t = useT()
   const action = useItemAction(session, (command, result) => {
     if (command.cmd === 'resolve') onDone({ kind: 'resolved', verdict: command.verdict, ...(result.isUnrecorded ? { isUnrecorded: true } : {}), ...(result.isHardDeleted ? { isHardDeleted: true } : {}) })
@@ -229,7 +229,7 @@ export function VerticalCard({ item, session, now, typeLabels, onDone, onRefused
         now={now}
         title={titleOf(item, t)}
         unavailable={action.unavailable}
-        typeLabel={type => typeLabels[type] ?? type}
+        typeLabel={typeLabel}
         projectName={projectNameOf(session)}
         headExtra={<ScopeChips />}
         onRule={(verdict) => { action.run({ cmd: 'resolve', decisionId: item.decisionId, verdict }) }}
@@ -241,7 +241,7 @@ export function VerticalCard({ item, session, now, typeLabels, onDone, onRefused
 
 // —— 提升候选 ——
 
-export function PromoteCard({ item, session, now, typeLabels, onDone, onRefused, promoteTarget }: CardProps<'promote-candidate'> & {
+export function PromoteCard({ item, session, now, typeLabel, onDone, onRefused, promoteTarget }: CardProps<'promote-candidate'> & {
   /** 来自配置 governance.globalPromoteTarget；还没读到为 undefined。 */
   promoteTarget: 'global' | 'agents-md' | undefined
 }) {
@@ -261,7 +261,7 @@ export function PromoteCard({ item, session, now, typeLabels, onDone, onRefused,
     >
       {item.memory === null
         ? <p className="pm-pending-text">{t('conflict.missing')}</p>
-        : <MemoryOf session={session} memory={item.memory} now={now} typeLabels={typeLabels} />}
+        : <MemoryOf session={session} memory={item.memory} now={now} typeLabel={typeLabel} />}
       {promoteTarget !== undefined
         ? <AdviceNote>{t(promoteTarget === 'agents-md' ? 'pending.promote.agentsMdNote' : 'pending.promote.globalNote')}</AdviceNote>
         : null}
@@ -445,7 +445,7 @@ export function AdviceCard(props: CardProps<'advice'> & {
   /** 「移到项目…」默认选中的项目（当前页面的项目）。 */
   defaultProject: string | undefined
 }) {
-  const { item, session, now, typeLabels, onDone, onRefused, projects, defaultProject } = props
+  const { item, session, now, typeLabel, onDone, onRefused, projects, defaultProject } = props
   const t = useT()
   const gateway = useGateway()
   const action = useItemAction(session, (command, result) => {
@@ -503,7 +503,7 @@ export function AdviceCard(props: CardProps<'advice'> & {
       {isMoving
         ? (
           <>
-            <div className="pm-pending-advice-memories"><MemoryOf session={session} memory={memory} now={now} typeLabels={typeLabels} /></div>
+            <div className="pm-pending-advice-memories"><MemoryOf session={session} memory={memory} now={now} typeLabel={typeLabel} /></div>
             <MovePanel
               projects={projects}
               initial={defaultProject}
@@ -527,7 +527,7 @@ export function AdviceCard(props: CardProps<'advice'> & {
         : isModelEditing && isModelEditType(item.type)
           ? (
             <>
-              <div className="pm-pending-advice-memories"><MemoryOf session={session} memory={memory} now={now} typeLabels={typeLabels} /></div>
+              <div className="pm-pending-advice-memories"><MemoryOf session={session} memory={memory} now={now} typeLabel={typeLabel} /></div>
               <ModelEditPanel
                 memories={[memory]}
                 adviceType={item.type}
@@ -542,7 +542,7 @@ export function AdviceCard(props: CardProps<'advice'> & {
           )
           : (
             <>
-              <div className="pm-pending-advice-memories">{item.memories.map(m => <MemoryOf key={m.id} session={session} memory={m} now={now} typeLabels={typeLabels} />)}</div>
+              <div className="pm-pending-advice-memories">{item.memories.map(m => <MemoryOf key={m.id} session={session} memory={m} now={now} typeLabel={typeLabel} />)}</div>
               <AdviceNote>{t(copy.body, { date: formatDay(memory.lastConfirmedAt, now, t) })}</AdviceNote>
               <div className="pm-pending-actions">{copy.actions.map(a => buttons[a])}</div>
             </>
@@ -566,7 +566,7 @@ function mergeDraft(pair: readonly [MemoryCardData, MemoryCardData]): { draft: E
  * 互相重复的几条记忆一张卡：每条各自一栏，带自己的删除和打开文件。两条时左右并排，写「删除左边 / 删除右边」，
  * 两条都能改时再给「直接合并」「让模型合并」：合成保留的那条，另一条进最近删除。
  */
-function AdviceGroupCard({ item, session, now, typeLabels, action, buttonsOf }: CardProps<'advice'> & {
+function AdviceGroupCard({ item, session, now, typeLabel, action, buttonsOf }: CardProps<'advice'> & {
   action: ItemAction
   buttonsOf: (memory: MemoryCardData, deleteLabel?: string) => Record<AdviceAction, ReactNode>
 }) {
@@ -592,7 +592,7 @@ function AdviceGroupCard({ item, session, now, typeLabels, action, buttonsOf }: 
           const buttons = buttonsOf(m, side === undefined ? undefined : t(side.delete))
           return (
             <section key={m.id} className="pm-pending-advice-side" aria-label={side === undefined ? m.name : t(side.label)}>
-              <MemoryOf session={session} memory={m} now={now} typeLabels={typeLabels} />
+              <MemoryOf session={session} memory={m} now={now} typeLabel={typeLabel} />
               {isMerging || isModelMerging ? null : <div className="pm-pending-actions">{buttons.open}{buttons.delete}</div>}
             </section>
           )
@@ -687,12 +687,12 @@ function resultCopy(item: PendingItem, outcome: Outcome, t: Translate): ResultCo
   }
 }
 
-export function ResultCard({ item, outcome, session, now, typeLabels, onUndone, onRefused }: {
+export function ResultCard({ item, outcome, session, now, typeLabel, onUndone, onRefused }: {
   item: PendingItem
   outcome: Outcome
   session: BorrowedSession
   now: number
-  typeLabels: Readonly<Record<string, string>>
+  typeLabel: (type: string) => string
   onUndone: () => void
   onRefused: () => void
 }) {
@@ -708,7 +708,7 @@ export function ResultCard({ item, outcome, session, now, typeLabels, onUndone, 
     : undoId !== undefined ? { cmd: 'undo', decisionId: undoId } : undefined
   return (
     <Card marker={item.kind === 'advice' ? undefined : <StatusMarker kind="done" />} title={titleOf(item, t)} focusable isResult>
-      {copy.memory ? <MemoryOf session={session} memory={copy.memory} now={now} typeLabels={typeLabels} /> : null}
+      {copy.memory ? <MemoryOf session={session} memory={copy.memory} now={now} typeLabel={typeLabel} /> : null}
       <ResultLine
         chip={copy.chip}
         undo={undo !== undefined

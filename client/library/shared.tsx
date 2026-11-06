@@ -11,6 +11,7 @@ import { CrossConfirm, crossConfirmCss, SecretDeleteConfirm } from '../pending/a
 import { keepFocusInPlace } from '../ui/focus-return.ts'
 import { Icon } from '../ui/Icon.tsx'
 import { prefersReducedMotion } from '../ui/motion.tsx'
+import { typeLabel } from '../type-label.ts'
 
 type LabelledView = ViewState<{ typeLabels?: Readonly<Record<string, string>> }>
 
@@ -22,14 +23,16 @@ export function mergeTypeLabels(...views: readonly LabelledView[]): Record<strin
   return Object.assign({}, ...views.map(v => v.status === 'ready' ? v.data.typeLabels ?? {} : {}))
 }
 
-/** hook：类型 id → 显示名，取自全部记忆 / 最近删除 / 待处理里已就绪的那几份；视图都没到、或认不出的类型显示 id。 */
+/** hook：类型 id → 显示名（取法见 typeLabel）；视图里的名字取自全部记忆 / 最近删除 / 待处理里已就绪的那几份。 */
 export function useTypeLabel(session: BorrowedSession): (type: string) => string {
   const gateway = useGateway()
+  const t = useT()
   const library = gateway.useView(session, 'library')
   const deleted = gateway.useView(session, 'deleted')
   const pending = gateway.useView(session, 'pending')
-  const labels = useMemo(() => mergeTypeLabels(library, deleted, pending), [library, deleted, pending])
-  return useCallback((type: string) => labels[type] ?? type, [labels])
+  const customTypes = gateway.useConfig()?.customTypes
+  const viewLabels = useMemo(() => mergeTypeLabels(library, deleted, pending), [library, deleted, pending])
+  return useCallback((type: string) => typeLabel(t, type, { viewLabels, customTypes }), [t, viewLabels, customTypes])
 }
 
 /** 搜索框（记忆查看、最近删除顶部）：按名称、摘要、正文和标签筛，不分大小写。 */

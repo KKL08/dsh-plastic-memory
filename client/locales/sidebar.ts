@@ -1,6 +1,5 @@
 /**
- * 右侧栏「记忆」tab 与「开始」页入口的文案，由 locales.ts 合并进同一个命名空间。
- * 类型名是内置与模板类型的显示名（对照 src/type-registry.ts）；自定义类型视图里没有显示名，直接显示类型 id。
+ * 右侧栏「记忆」tab 与「开始」页入口的文案，由 locales.ts 合并进同一个命名空间。类型显示名在 locales.ts 的 type.*（见 type-label.ts）。
  */
 
 export const sidebarZh = {
@@ -51,16 +50,6 @@ export const sidebarZh = {
   'sidebar.action.busy': '正在处理…',
   'sidebar.action.failed': '没有成功：{detail}',
   'sidebar.action.refused': '你的选择没有生效：这条冲突正在别处处理，或者刚在别处处理完。',
-
-  'sidebar.type.profile': '用户画像',
-  'sidebar.type.preference': '行为偏好',
-  'sidebar.type.knowledge': '事实与经验',
-  'sidebar.type.project': '项目信息',
-  'sidebar.type.reference': '参考引用',
-  'sidebar.type.procedure': '可复用流程',
-  'sidebar.type.decision': '决定',
-  'sidebar.type.commitment': '承诺',
-  'sidebar.type.person': '人物',
 } as const
 
 export const sidebarEn: Record<keyof typeof sidebarZh, string> = {
@@ -111,14 +100,4 @@ export const sidebarEn: Record<keyof typeof sidebarZh, string> = {
   'sidebar.action.busy': 'Working…',
   'sidebar.action.failed': 'Did not go through: {detail}',
   'sidebar.action.refused': 'Your choice did not take effect: this conflict is being handled elsewhere, or was just handled there.',
-
-  'sidebar.type.profile': 'Profile',
-  'sidebar.type.preference': 'Preference',
-  'sidebar.type.knowledge': 'Facts & lessons',
-  'sidebar.type.project': 'Project',
-  'sidebar.type.reference': 'Reference',
-  'sidebar.type.procedure': 'Procedure',
-  'sidebar.type.decision': 'Decision',
-  'sidebar.type.commitment': 'Commitment',
-  'sidebar.type.person': 'Person',
 }

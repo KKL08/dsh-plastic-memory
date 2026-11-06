@@ -182,7 +182,7 @@ describe('跳转', () => {
 
   it('弹层传送到 body 外也跟着主题色', () => {
     const { gateway } = setup({ view: sessionView() })
-    act(() => { gateway.setConfigValue({ snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget: 'plugin-global', accent: 'blue-whale' }) })
+    act(() => { gateway.setConfigValue({ snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget: 'plugin-global', accent: 'blue-whale', customTypes: {} }) })
     expect(openPanel()).toHaveAttribute('data-pm-accent', 'blue-whale')
   })
 

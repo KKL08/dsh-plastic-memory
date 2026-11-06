@@ -18,7 +18,8 @@ import {
   droppedTypes, governanceEnabled, parsePositiveInt, sceneChanges, type ConfigForm, type Migrations, type SettingsFields,
 } from './config.ts'
 import { Dialog, TextField } from './controls.tsx'
-import { SceneSection, sceneLabel, typeLabel, typeNames } from './Scenes.tsx'
+import { SceneSection, sceneLabel, typeNames } from './Scenes.tsx'
+import { typeLabel } from '../type-label.ts'
 import { StatusCard } from './StatusCard.tsx'
 import { useSettingsDraft, type MigrateType } from './useSettingsDraft.ts'
 
@@ -55,7 +56,7 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
   const dropped = droppedTypes(saved, f, draft.migrations)
   /** 确认框里改动列表下面的影响：不再新增哪几类、已开着的对话重新带入记忆。 */
   const effects = [
-    ...(dropped.length > 0 ? [t('settings.scene.dropHint', { types: typeNames(t, dropped.map(n => typeLabel(t, n, saved.customTypes))) })] : []),
+    ...(dropped.length > 0 ? [t('settings.scene.dropHint', { types: typeNames(t, dropped.map(n => typeLabel(t, n, { customTypes: saved.customTypes }))) })] : []),
     ...(USAGE_FIELDS.some(key => draft.changed.has(key)) ? [t('settings.usage.reloadNote')] : []),
   ]
   const changes = draft.dirty ? changeLines(t, saved, f, draft.changed, draft.migrations, counts) : []
@@ -249,9 +250,9 @@ function changeLines(t: Translate, saved: SettingsFields, fields: SettingsFields
     if (key === 'removedPresets') {
       const parts = presetTypeChanges(saved, fields)
       change = partsText(t, {
-        edited: parts.edited.map(n => typeLabel(t, n, fields.customTypes)),
-        reset: parts.reset.map(n => typeLabel(t, n, saved.customTypes)),
-        removed: parts.removed.map(n => typeLabel(t, n, saved.customTypes)),
+        edited: parts.edited.map(n => typeLabel(t, n, { customTypes: fields.customTypes })),
+        reset: parts.reset.map(n => typeLabel(t, n, { customTypes: saved.customTypes })),
+        removed: parts.removed.map(n => typeLabel(t, n, { customTypes: saved.customTypes })),
         restored: parts.restored.map(n => typeLabel(t, n, {})),
       })
     } else if (key === 'customTypes') {

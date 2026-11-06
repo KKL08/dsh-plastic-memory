@@ -21,11 +21,11 @@ import {
   CONFLICT_ACTION_VERDICTS, layerOfMemory, type MemoryCard as MemoryCardData, type MemoryCommand, type MemoryCommandResult, type ModelChange, type PendingItem, type SnapshotOrigin,
 } from '../../src/gui/contract.ts'
 import { samePath, useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
-import { baseName, formatNumber, useT, type Translate } from '../i18n.tsx'
+import { baseName, formatNumber, useT } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
-import { sidebarZh } from '../locales/sidebar.ts'
 import type { NavTarget } from '../nav.ts'
 import { mergeTypeLabels } from '../library/shared.tsx'
+import { typeLabel } from '../type-label.ts'
 import { ResultLine } from '../ui/Advice.tsx'
 import { ConflictRuling, VerticalConflictRuling } from '../ui/ConflictRuling.tsx'
 import { ContextBudgetBar } from '../ui/ContextBudgetBar.tsx'
@@ -80,12 +80,6 @@ export interface SidebarTabProps {
   openPage: (target: NavTarget) => void
 }
 
-/** 内置类型按界面语言写；其余（自定义、切模板前的旧类型）取全部记忆、待处理视图的 typeLabels，再认不出写 id。 */
-function typeLabel(t: Translate, type: string, labels: Readonly<Record<string, string>> | undefined): string {
-  const key = `sidebar.type.${type}`
-  return key in sidebarZh ? t(key as LocaleKey) : labels?.[type] ?? type
-}
-
 /** 待处理条目是否属于这个项目。 */
 function inWorkspace(item: PendingItem, ws: string): boolean {
   const own = (m: MemoryCardData | null) => m !== null && m.scope === 'workspace' && samePath(m.workspacePath, ws)
@@ -107,6 +101,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const library = gateway.useView(session, 'library')
   const pending = gateway.useView(session, 'pending')
   const health = gateway.useView(session, 'health')
+  const config = gateway.useConfig()
   // 删过的记忆（这里、全部记忆或对话交付卡删的）：新记的列表里立刻去掉，不等视图刷新
   const deletions = gateway.useDeletions()
   const [ruled, setRuled] = useState<readonly Ruled[]>([])
@@ -197,8 +192,8 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const pendingItems = pending.status === 'ready' ? pending.data.items : []
   const conflicts = pendingItems.filter((item): item is Conflict => item.kind === 'conflict-horizontal')
   const verticals = pendingItems.filter((item): item is VerticalConflict => item.kind === 'conflict-vertical')
-  const labels = mergeTypeLabels(library, pending)
-  const label = (type: string) => typeLabel(t, type, labels)
+  const viewLabels = mergeTypeLabels(library, pending)
+  const label = (type: string) => typeLabel(t, type, { viewLabels, customTypes: config?.customTypes })
   const ruledIds = new Set(ruled.map(r => r.decisionId))
   const inline = new Set<string>()
   const shown = new Set<string>()
