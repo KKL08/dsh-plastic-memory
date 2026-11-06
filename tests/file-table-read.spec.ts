@@ -13,12 +13,13 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { MemoryStore } from '../src/store.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
+import { writesDuring } from './helpers/fs-writes.ts'
 
 // 读侧内核：磁盘是唯一真相、读路径零写入、
 // 预筛是超集、加载期零 I/O。只测 FileTable；双后端一致的语义在 table-conformance.spec.ts。
 
 // 进程边界的闸门：让一次写临时文件停在半路，直到测试放行（看写锁被占着时读路径等不等）。没有闸门时原样透传。
-// reads：tracing 期间记下 readFile 读过的路径（看定位读了哪些文件的内容）。
+// reads：tracing 期间记下 readFile 读过的路径（看定位读了哪些文件的内容）。写调用另由 helpers/fs-writes.ts 记录（读路径零写入）。
 const { gate, reads } = vi.hoisted(() => ({
   gate: { current: undefined as { match: (path: string) => boolean; entered: () => void; release: Promise<void> } | undefined },
   reads: { tracing: false, paths: [] as string[] },
@@ -38,7 +39,7 @@ vi.mock('node:fs/promises', async importOriginal => {
     }
     return actual.writeFile(...args)
   })
-  return { ...actual, readFile, writeFile }
+  return (await import('./helpers/fs-writes.ts')).recordWrites({ ...actual, readFile, writeFile })
 })
 afterEach(() => { gate.current = undefined; reads.tracing = false; reads.paths = [] })
 
@@ -108,20 +109,19 @@ describe('外部写入立即可见：没有任何刷新调用', () => {
   })
 })
 
-/** 递归快照：相对路径 → mtime（目录与文件都计），读路径前后必须逐项相等。 */
-async function treeSnapshot(dir: string, prefix = ''): Promise<Record<string, number>> {
-  const out: Record<string, number> = {}
+/** 递归列出目录项（相对路径，目录与文件都计），读路径前后必须相等。 */
+async function treeEntries(dir: string, prefix = ''): Promise<string[]> {
+  const out: string[] = []
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const rel = prefix + entry.name
-    const s = await stat(join(dir, entry.name))
-    out[rel] = s.mtimeMs
-    if (entry.isDirectory()) Object.assign(out, await treeSnapshot(join(dir, entry.name), `${rel}/`))
+    out.push(rel)
+    if (entry.isDirectory()) out.push(...await treeEntries(join(dir, entry.name), `${rel}/`))
   }
-  return out
+  return out.sort()
 }
 
 describe('读路径零写入', () => {
-  it('readScope / locate / listWorkspaceDirs 前后目录项与 mtime 不变：含 tmp 残留、重复 id、缺标记目录、隔离文件', async () => {
+  it('readScope / locate / listWorkspaceDirs 没有写调用、目录项不变：含 tmp 残留、重复 id、缺标记目录、隔离文件', async () => {
     await seedGlobal('a.md', record({ id: 'mem_a' }))
     await seedGlobal('dup-old.md', record({ id: 'mem_dup', updatedAt: 100 }))
     await seedGlobal('dup-new.md', record({ id: 'mem_dup', updatedAt: 200 }))
@@ -133,24 +133,26 @@ describe('读路径零写入', () => {
       encodeRecord(record({ id: 'mem_old', scope: 'workspace', workspacePath: '/home/dev/p', status: 'deleted', updatedAt: 1 }), {}))
     await mkdir(join(root, 'stray-dir'), { recursive: true })   // 缺标记
     await writeFile(join(root, 'stray-dir', 'x.md'), encodeRecord(record({ id: 'mem_stray' }), {}))
-    await new Promise(r => setTimeout(r, 5))
-    const before = await treeSnapshot(root)
+    const before = await treeEntries(root)
 
-    const t = open({ now: () => Date.now() + 10 * 86_400_000 })   // 远超 tmp 陈旧阈值与保留期，读路径也不能清
-    const read = await t.readScope([globalDir(), wsDir('/home/dev/p'), join(root, 'stray-dir')], { includeArchive: true })
-    expect(read.records.map(r => r.record.id).sort()).toEqual(['mem_a', 'mem_dup', 'mem_dup', 'mem_old', 'mem_w'])  // 重复 id 不取舍、不删
-    expect(read.quarantined.map(q => q.path)).toEqual([join(globalDir(), 'bad.md')])
-    expect(read.directoryNotes.map(n => [n.code, n.path])).toEqual([['marker-missing', join(root, 'stray-dir')]])
-    expect((await t.locate('mem_dup', {}))!.filePath).toBe(join(globalDir(), 'dup-new.md'))
-    expect((await t.locate('mem_old', { workspacePath: '/home/dev/p' }))!.filePath).toBe(join(wsDir('/home/dev/p'), ARCHIVE_DIR, 'old.md'))
-    expect(await t.locate('mem_nope', { workspacePath: '/home/dev/p' })).toBeUndefined()   // 两级都走一遍
-    const listing = await t.listWorkspaceDirs()
-    expect(listing.entries.map(e => e.workspacePath)).toEqual(['/home/dev/p'])
-    expect(listing.directoryNotes.map(n => n.code)).toEqual(['marker-missing'])
-    await t.readScope([t.globalDir, ...listing.entries.map(e => e.dir)], { includeArchive: true })
+    const writes = await writesDuring(async () => {
+      const t = open({ now: () => Date.now() + 10 * 86_400_000 })   // 远超 tmp 陈旧阈值与保留期，读路径也不能清
+      const read = await t.readScope([globalDir(), wsDir('/home/dev/p'), join(root, 'stray-dir')], { includeArchive: true })
+      expect(read.records.map(r => r.record.id).sort()).toEqual(['mem_a', 'mem_dup', 'mem_dup', 'mem_old', 'mem_w'])  // 重复 id 不取舍、不删
+      expect(read.quarantined.map(q => q.path)).toEqual([join(globalDir(), 'bad.md')])
+      expect(read.directoryNotes.map(n => [n.code, n.path])).toEqual([['marker-missing', join(root, 'stray-dir')]])
+      expect((await t.locate('mem_dup', {}))!.filePath).toBe(join(globalDir(), 'dup-new.md'))
+      expect((await t.locate('mem_old', { workspacePath: '/home/dev/p' }))!.filePath).toBe(join(wsDir('/home/dev/p'), ARCHIVE_DIR, 'old.md'))
+      expect(await t.locate('mem_nope', { workspacePath: '/home/dev/p' })).toBeUndefined()   // 两级都走一遍
+      const listing = await t.listWorkspaceDirs()
+      expect(listing.entries.map(e => e.workspacePath)).toEqual(['/home/dev/p'])
+      expect(listing.directoryNotes.map(n => n.code)).toEqual(['marker-missing'])
+      await t.readScope([t.globalDir, ...listing.entries.map(e => e.dir)], { includeArchive: true })
+    })
 
-    expect(await treeSnapshot(root)).toEqual(before)
-    expect(Object.keys(before)).not.toContain(STATE_DIR)
+    expect(writes).toEqual([])
+    expect(await treeEntries(root)).toEqual(before)
+    expect(before).not.toContain(STATE_DIR)
   })
 })
 

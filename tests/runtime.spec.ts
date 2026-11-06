@@ -304,17 +304,26 @@ describe('SnapshotCache', () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ content: '全局条目', type: 'preference' }))
     await store.put(record({ content: '仅本仓库生效的偏好', type: 'preference', scope: 'workspace', workspacePath: '/repo' }))
+    // 慢解析：挂在闸门上，首轮组装开始之后才放行
+    let entered!: () => void
+    const inResolve = new Promise<void>(r => { entered = r })
+    let release!: () => void
+    const gate = new Promise<void>(r => { release = r })
     const cache = new SnapshotCache({
       store, registry, budget: 4000,
       host: snapshotHost({
         workspaceOf: async (s: object) => {
-          await new Promise(r => setTimeout(r, 20)) // 模拟慢解析：必然晚于同步首轮组装
+          entered()
+          await gate
           return (s as { header?: { cwd?: string } }).header?.cwd
         },
       }),
     })
     const session = { header: { cwd: '/repo' } }
-    expect(await cache.assemble(session)).toContain('仅本仓库生效的偏好')
+    const assembled = cache.assemble(session)
+    await inResolve // 首轮组装已开始，解析挂在闸门上
+    release()
+    expect(await assembled).toContain('仅本仓库生效的偏好')
   })
 
   it('awaitResolved 只等解析：落定后不组装、不冻结', async () => {

@@ -18,6 +18,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { FileTable } from '../src/storage/file-table.ts'
@@ -39,13 +40,15 @@ import {
 } from '../tests/fixtures/search-eval.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from '../tests/helpers/in-memory-kv.ts'
 
-const { values: argv } = parseArgs({ options: { brief: { type: 'boolean', default: false }, all: { type: 'boolean', default: false } } })
-
 const LIMIT = 10
 type Ranking = string[]
 type Results = Map<EvalQuery, Ranking>
 /** 生产路径每条查询的说明码（判弱统计用）。 */
 type NoteCodes = Map<EvalQuery, SearchNoteCode | undefined>
+/** 生产路径跑一遍全部查询的结果。 */
+export interface ProductionRun { results: Results; notes: NoteCodes }
+/** 输出一行（可含换行）；缺省为空行。 */
+type Out = (line?: string) => void
 
 // ---------------- 指标 ----------------
 
@@ -90,7 +93,8 @@ const missingJieba = {
   readMainDictionary(): Uint8Array { throw new Error('unreachable') },
 }
 
-async function productionRun(store: MemoryStore, tier: 'bigram' | 'jieba'): Promise<{ results: Results; notes: NoteCodes }> {
+/** 生产路径逐条跑全部评估查询；跑完把 jieba 加载器复原。tests/search-eval.spec.ts 也用它，各档只跑一遍、各用例共用。 */
+export async function productionRun(store: MemoryStore, tier: 'bigram' | 'jieba', limit = LIMIT): Promise<ProductionRun> {
   resetJieba(tier === 'bigram' ? missingJieba : undefined)
   const deps = {
     store, registry, tokenizer: { log: silent },
@@ -99,7 +103,7 @@ async function productionRun(store: MemoryStore, tier: 'bigram' | 'jieba'): Prom
   const results: Results = new Map()
   const notes: NoteCodes = new Map()
   for (const q of EVAL_QUERIES) {
-    const r = await executeSearch({ query: q.query, limit: LIMIT }, exec, deps)
+    const r = await executeSearch({ query: q.query, limit }, exec, deps)
     results.set(q, r.hits.map(h => h.id))
     notes.set(q, r.noteCode)
   }
@@ -318,42 +322,42 @@ const name = (id: string) => EVAL_RECORDS.find(r => r.id === id)?.name ?? id
 const top3 = (ids: Ranking) => ids.slice(0, 3).map(id => `${id}「${name(id)}」`).join('、') || '（空）'
 const rankStr = (r: number) => (Number.isFinite(r) ? String(r) : '—')
 
-function printTierMetrics(label: string, results: Results): void {
-  console.log(`${label.padEnd(8)} ${fmt(metrics(results))}`)
+function printTierMetrics(out: Out, label: string, results: Results): void {
+  out(`${label.padEnd(8)} ${fmt(metrics(results))}`)
   for (const c of EVAL_CATEGORIES) {
     const note = BASELINE_ONLY_CATEGORIES.includes(c) ? '  （只记基线，不计入上面的总数）'
       : STRICT_CATEGORIES.includes(c) ? '  （逐条要第一名，不计入上面的总数）'
         : NOTE_ONLY_CATEGORIES.includes(c) ? '  （只评判弱，不计入上面的总数）' : ''
-    console.log(`  ${c.padEnd(13)} ${fmt(metrics(results, q => q.category === c))}${note}`)
+    out(`  ${c.padEnd(13)} ${fmt(metrics(results, q => q.category === c))}${note}`)
   }
 }
 
-function printDiff(a: Results, b: Results, labelA: string, labelB: string, onlyChanged = true): void {
+function printDiff(out: Out, a: Results, b: Results, labelA: string, labelB: string, onlyChanged = true): void {
   for (const q of LISTED_QUERIES) {
     const ra = rankOf(q, a.get(q)!), rb = rankOf(q, b.get(q)!)
     const sameTop3 = a.get(q)!.slice(0, 3).join() === b.get(q)!.slice(0, 3).join()
     if (onlyChanged && ra === rb && sameTop3) continue
-    console.log(`- [${q.category}] ${JSON.stringify(q.query)}  预期 ${q.relevant.join(' / ')}  名次 ${labelA} ${rankStr(ra)} → ${labelB} ${rankStr(rb)}`)
-    console.log(`    ${labelA}: ${top3(a.get(q)!)}`)
-    console.log(`    ${labelB}: ${top3(b.get(q)!)}`)
+    out(`- [${q.category}] ${JSON.stringify(q.query)}  预期 ${q.relevant.join(' / ')}  名次 ${labelA} ${rankStr(ra)} → ${labelB} ${rankStr(rb)}`)
+    out(`    ${labelA}: ${top3(a.get(q)!)}`)
+    out(`    ${labelB}: ${top3(b.get(q)!)}`)
   }
 }
 
-function printMisses(label: string, results: Results): void {
+function printMisses(out: Out, label: string, results: Results): void {
   const misses = LISTED_QUERIES.filter(q => rankOf(q, results.get(q)!) !== 1)
-  console.log(`${label} 未进第一名（${misses.length} 条）：`)
+  out(`${label} 未进第一名（${misses.length} 条）：`)
   for (const q of misses) {
-    console.log(`- [${q.category}] ${JSON.stringify(q.query)}  预期 ${q.relevant.join(' / ')}  名次 ${rankStr(rankOf(q, results.get(q)!))}`)
-    console.log(`    ${top3(results.get(q)!)}`)
+    out(`- [${q.category}] ${JSON.stringify(q.query)}  预期 ${q.relevant.join(' / ')}  名次 ${rankStr(rankOf(q, results.get(q)!))}`)
+    out(`    ${top3(results.get(q)!)}`)
   }
 }
 
 /** 只记基线的类别：逐条列出两档名次与前三名。 */
-function printBaselineOnly(tiers: [string, Results][]): void {
+function printBaselineOnly(out: Out, tiers: [string, Results][]): void {
   for (const q of EVAL_QUERIES.filter(q => BASELINE_ONLY_CATEGORIES.includes(q.category))) {
     const kind = q.paraphrase === undefined ? '' : `/${q.paraphrase}`
-    console.log(`- [${q.category}${kind}] ${JSON.stringify(q.query)}  预期 ${q.relevant.join(' / ')}  名次 ${tiers.map(([l, r]) => `${l} ${rankStr(rankOf(q, r.get(q)!))}`).join('、')}`)
-    for (const [l, r] of tiers) console.log(`    ${l}: ${top3(r.get(q)!)}`)
+    out(`- [${q.category}${kind}] ${JSON.stringify(q.query)}  预期 ${q.relevant.join(' / ')}  名次 ${tiers.map(([l, r]) => `${l} ${rankStr(rankOf(q, r.get(q)!))}`).join('、')}`)
+    for (const [l, r] of tiers) out(`    ${l}: ${top3(r.get(q)!)}`)
   }
 }
 
@@ -363,17 +367,38 @@ const isWeak = (code: SearchNoteCode | undefined) => code !== undefined && (WEAK
  * 判弱统计：各类别判弱几条、其中首条正确的几条；逐条列出首条正确却判弱的（白搜一轮，应尽量少）、
  * 首条不对却没判弱的（模型会把错的当答案）与库里没有答案却没判弱的（应为 0）。零 token 查询不出说明码，不计。
  */
-function printWeak(label: string, run: { results: Results; notes: NoteCodes }): void {
+function printWeak(out: Out, label: string, run: ProductionRun): void {
   const counted = EVAL_QUERIES.filter(q => q.category !== 'zero-token')
   const correct = (q: EvalQuery) => rankOf(q, run.results.get(q)!) === 1
   const weak = (q: EvalQuery) => isWeak(run.notes.get(q))
   const row = (qs: EvalQuery[]) => `判弱 ${qs.filter(weak).length}/${qs.length}，其中首条正确 ${qs.filter(q => weak(q) && correct(q)).length}`
-  console.log(`${label.padEnd(8)} ${row(counted)}`)
-  for (const c of EVAL_CATEGORIES.filter(c => c !== 'zero-token')) console.log(`  ${c.padEnd(16)} ${row(counted.filter(q => q.category === c))}`)
+  out(`${label.padEnd(8)} ${row(counted)}`)
+  for (const c of EVAL_CATEGORIES.filter(c => c !== 'zero-token')) out(`  ${c.padEnd(16)} ${row(counted.filter(q => q.category === c))}`)
   const answerable = counted.filter(q => q.relevant.length > 0)
-  for (const q of answerable.filter(q => weak(q) && correct(q))) console.log(`  首条正确却判弱：[${q.category}] ${JSON.stringify(q.query)}  ${run.notes.get(q)}`)
-  for (const q of answerable.filter(q => !weak(q) && !correct(q))) console.log(`  首条不对却没判弱：[${q.category}] ${JSON.stringify(q.query)}  ${run.notes.get(q) ?? '无说明码'}`)
-  for (const q of counted.filter(q => q.relevant.length === 0 && !weak(q))) console.log(`  没有答案却没判弱：[${q.category}] ${JSON.stringify(q.query)}  ${run.notes.get(q) ?? '无说明码'}`)
+  for (const q of answerable.filter(q => weak(q) && correct(q))) out(`  首条正确却判弱：[${q.category}] ${JSON.stringify(q.query)}  ${run.notes.get(q)}`)
+  for (const q of answerable.filter(q => !weak(q) && !correct(q))) out(`  首条不对却没判弱：[${q.category}] ${JSON.stringify(q.query)}  ${run.notes.get(q) ?? '无说明码'}`)
+  for (const q of counted.filter(q => q.relevant.length === 0 && !weak(q))) out(`  没有答案却没判弱：[${q.category}] ${JSON.stringify(q.query)}  ${run.notes.get(q) ?? '无说明码'}`)
+}
+
+/** --brief 打印的几节：两档指标、逐条差异与未进第一名、命中弱。jieba 不可用时不传第二档。 */
+export function briefReport(bigram: ProductionRun, jieba?: ProductionRun): string {
+  const lines: string[] = []
+  const out: Out = (line = '') => { lines.push(line) }
+  out('\n## 两档指标（FileTable + executeSearch）\n')
+  printTierMetrics(out, 'bigram', bigram.results)
+  if (jieba) {
+    printTierMetrics(out, 'jieba', jieba.results)
+    out('\n## 逐条差异：bigram → jieba（名次或前三名有变化的查询）\n')
+    printDiff(out, bigram.results, jieba.results, 'bigram', 'jieba')
+    out()
+    printMisses(out, 'jieba', jieba.results)
+  }
+  out()
+  printMisses(out, 'bigram', bigram.results)
+  out(`\n## 命中弱（${WEAK_SEARCH_NOTE_CODES.join(' / ')}）\n`)
+  printWeak(out, 'bigram', bigram)
+  if (jieba) printWeak(out, 'jieba', jieba)
+  return lines.join('\n')
 }
 
 function sameOrder(a: Results, b: Results): EvalQuery[] {
@@ -381,6 +406,8 @@ function sameOrder(a: Results, b: Results): EvalQuery[] {
 }
 
 async function main(): Promise<void> {
+  const { values: argv } = parseArgs({ options: { brief: { type: 'boolean', default: false }, all: { type: 'boolean', default: false } } })
+  const log: Out = (line = '') => { console.log(line) }
   const lens = EVAL_RECORDS.map(r => r.content.length)
   const strictCount = EVAL_QUERIES.filter(q => STRICT_CATEGORIES.includes(q.category)).length
   console.log(`# memory_search 评估：${EVAL_RECORDS.length} 条记忆、${EVAL_QUERIES.length} 条查询（进聚合门槛 ${GATED_QUERIES.length} 条，逐条第一名 ${strictCount} 条，只记基线 ${EVAL_QUERIES.length - GATED_QUERIES.length - strictCount} 条；limit ${LIMIT}）`)
@@ -399,26 +426,11 @@ async function main(): Promise<void> {
     const store = new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() }), undefined, new InMemoryBatchKvTable())
     for (const r of EVAL_RECORDS) await store.put(r)
 
-    console.log('\n## 两档指标（FileTable + executeSearch）\n')
     const runBigram = await productionRun(store, 'bigram')
     const prodBigram = runBigram.results
-    printTierMetrics('bigram', prodBigram)
     const runJieba = hasJieba ? await productionRun(store, 'jieba') : undefined
     const prodJieba = runJieba?.results
-    if (prodJieba) printTierMetrics('jieba', prodJieba)
-
-    if (prodJieba) {
-      console.log('\n## 逐条差异：bigram → jieba（名次或前三名有变化的查询）\n')
-      printDiff(prodBigram, prodJieba, 'bigram', 'jieba')
-      console.log()
-      printMisses('jieba', prodJieba)
-    }
-    console.log()
-    printMisses('bigram', prodBigram)
-
-    console.log(`\n## 命中弱（${WEAK_SEARCH_NOTE_CODES.join(' / ')}）\n`)
-    printWeak('bigram', runBigram)
-    if (runJieba) printWeak('jieba', runJieba)
+    log(briefReport(runBigram, runJieba))
     if (argv.brief) return
 
     // 自检：对照路径在生产参数下与 executeSearch 逐条同序；本地实现的生产加权方式与 rankRecords 同序
@@ -440,7 +452,7 @@ async function main(): Promise<void> {
       const vc = runVariant(prodVariant('cut'))
       console.log(`cutForSearch  ${fmt(metrics(vs))}`)
       console.log(`cut           ${fmt(metrics(vc))}`)
-      printDiff(vs, vc, 'cutForSearch', 'cut')
+      printDiff(log, vs, vc, 'cutForSearch', 'cut')
     }
 
     console.log('\n## 单字 CJK token：保留对剔除（生产参数）\n')
@@ -449,7 +461,7 @@ async function main(): Promise<void> {
       const drop = runVariant({ ...prodVariant(seg), dropSingleCjk: true })
       console.log(`${seg.padEnd(13)} 保留 ${fmt(metrics(keep))}`)
       console.log(`${''.padEnd(13)} 剔除 ${fmt(metrics(drop))}`)
-      printDiff(keep, drop, '保留', '剔除')
+      printDiff(log, keep, drop, '保留', '剔除')
     }
 
     console.log('\n## 加权方式 × 字段权重 × 平均长度\n')
@@ -488,11 +500,11 @@ async function main(): Promise<void> {
       console.log(`${seg.padEnd(13)} BM25  ${fmt(metrics(a))}   plain-name ${fmt(metrics(a, q => q.category === 'plain-name'))}`)
       console.log(`${''.padEnd(13)} BM25F ${fmt(metrics(b))}   plain-name ${fmt(metrics(b, q => q.category === 'plain-name'))}`)
       console.log(`${''.padEnd(13)} 探针 BM25 ${probePasses({ scoring: 'bm25', params: RANKING_PARAMS })}/${FIELD_PROBES.length}、BM25F ${probePasses({ scoring: 'bm25f', params: RANKING_PARAMS })}/${FIELD_PROBES.length}`)
-      printDiff(a, b, 'BM25', 'BM25F')
+      printDiff(log, a, b, 'BM25', 'BM25F')
     }
 
     console.log(`\n## 只记基线的类别（${BASELINE_ONLY_CATEGORIES.join('、')}）：逐条名次\n`)
-    printBaselineOnly(prodJieba ? [['bigram', prodBigram], ['jieba', prodJieba]] : [['bigram', prodBigram]])
+    printBaselineOnly(log, prodJieba ? [['bigram', prodBigram], ['jieba', prodJieba]] : [['bigram', prodBigram]])
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -502,4 +514,4 @@ async function main(): Promise<void> {
 const PRODUCTION_MODE: SegmentMode = 'cutForSearch'
 const PRODUCTION_SCORING: Scoring = 'bm25f'
 
-await main()
+if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) await main()

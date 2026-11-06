@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach, afterEach } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -19,6 +19,10 @@ import { record as baseRecord } from './helpers/record.ts'
 import { RecordNotFoundError } from '../src/errors.ts'
 import { captureRejection } from './helpers/errors.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
+import { writesDuring } from './helpers/fs-writes.ts'
+
+// 「不触碰文件」看 node:fs/promises 的写调用记录（透传，见 helpers/fs-writes.ts），不比 mtime。
+vi.mock('node:fs/promises', async importOriginal => (await import('./helpers/fs-writes.ts')).recordWrites(await importOriginal()))
 
 // 本文件默认造那条"包管理用 pnpm"的 global preference（编解码/去重断言的固定样本）。
 const record = (partial: Partial<MemoryRecord> = {}) => baseRecord({
@@ -42,13 +46,11 @@ async function load() {
 const quarantined = (t: FileTable) => t.readScope([join(root, GLOBAL_DIR)]).then(r => r.quarantined)
 
 describe('FileTable 写侧', () => {
-  it('markRecalled 型更新（只动易变字段）不触碰文件——mtime 不变', async () => {
+  it('markRecalled 型更新（只动易变字段）不触碰文件：没有写调用', async () => {
     await seedGlobal('a.md', record({ id: 'mem_a' }))
     const t = await load()
-    const before = (await stat(join(root, GLOBAL_DIR, 'a.md'))).mtimeMs
-    await t.update('mem_a', {}, r => ({ ...r, recallCount: r.recallCount + 1, lastRecalledAt: 123 }))
-    const after = (await stat(join(root, GLOBAL_DIR, 'a.md'))).mtimeMs
-    expect(after).toBe(before)                       // 召回统计只进侧表，不重写文件
+    const writes = await writesDuring(() => t.update('mem_a', {}, r => ({ ...r, recallCount: r.recallCount + 1, lastRecalledAt: 123 })))
+    expect(writes).toEqual([])                       // 召回统计只进侧表（这里是内存表），不重写文件
     expect(((await t.locate('mem_a', {}))?.record)!.recallCount).toBe(1)      // 内存与 sidecar 已更新
   })
 

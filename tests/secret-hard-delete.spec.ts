@@ -22,6 +22,7 @@ import type { RejectCode, WarningCode } from '../src/contract-codes.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord, candidate } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
+import { writesDuring } from './helpers/fs-writes.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
 import { InMemoryTable } from './helpers/in-memory-table.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
@@ -31,7 +32,7 @@ import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts
 // forget 场景全部用真实目录（FileTable + .state 侧表）。
 
 // 进程边界的失败注入：写快照重写的临时文件写到一半失败、或临时文件写完后 rename 失败（只触发一次）。
-// 不设故障时原样透传。
+// 不设故障时原样透传。写调用另由 helpers/fs-writes.ts 记录（看硬删除外有没有写别的文件）。
 type FsFault = { op: 'writeFile'; when: (path: string) => boolean } | { op: 'rename'; when: (from: string, to: string) => boolean }
 const { faults } = vi.hoisted(() => ({ faults: { next: undefined as FsFault | undefined } }))
 vi.mock('node:fs/promises', async importOriginal => {
@@ -54,7 +55,7 @@ vi.mock('node:fs/promises', async importOriginal => {
     }
     return actual.rename(...args)
   })
-  return { ...actual, writeFile, rename }
+  return (await import('./helpers/fs-writes.ts')).recordWrites({ ...actual, writeFile, rename })
 })
 afterEach(() => { faults.next = undefined })
 
@@ -102,12 +103,6 @@ async function listTree(dir: string, base = dir): Promise<string[]> {
     if (entry.isDirectory()) out.push(...await listTree(path, base))
   }
   return out.sort()
-}
-/** 递归 mtime 快照：相对路径 → mtimeMs（.state/ 除外）。 */
-async function mtimes(): Promise<Map<string, number>> {
-  const out = new Map<string, number>()
-  for (const rel of await listTree(root)) out.set(rel, (await stat(join(root, rel))).mtimeMs)
-  return out
 }
 /** 快照文件的原始 JSON（不过 schema，按落盘字节读）。 */
 async function rawSnapshot(id: string): Promise<{ text: string; json: { data: Array<Record<string, unknown>> } }> {
@@ -190,7 +185,7 @@ describe('密钥硬删', () => {
     expect((await readdir(snapDir())).filter(n => n.includes('.tmp-'))).toEqual([])
   })
 
-  it('验收场景：含三条记录的手动快照，硬删其中一条后另两条字节级不变、show 与 diff 正常、restore 恢复另两条并把脱敏那条计入 skipped 且说明已硬删；除被删文件外记忆目录目录项与 mtime 不变；重写中途失败（临时文件写到一半、rename 失败）快照文件仍是完整旧版', async () => {
+  it('验收场景：含三条记录的手动快照，硬删其中一条后另两条字节级不变、show 与 diff 正常、restore 恢复另两条并把脱敏那条计入 skipped 且说明已硬删；除被删文件与 MEMORY.md 外记忆目录没有写调用、目录项不变；重写中途失败（临时文件写到一半、rename 失败）快照文件仍是完整旧版', async () => {
     const h = harness()
     await h.store.create(wsRec({ id: 'mem_x', name: '测试框架', content: '用 vitest' }))
     await h.store.create(wsRec({ id: 'mem_y', name: '提交语言', content: 'commit 用英文' }))
@@ -200,8 +195,8 @@ describe('密钥硬删', () => {
     const xBefore = await rawRecordJson(manual.snapshotId, 'mem_x')
     const yBefore = await rawRecordJson(manual.snapshotId, 'mem_y')
     const zFile = join(workspaceDirName(WS), '数据库口令.md')
-    const before = await mtimes()
-    expect(before.has(zFile)).toBe(true)
+    const before = await listTree(root)
+    expect(before).toContain(zFile)
     const inoBefore = (await stat(join(snapDir(), `${manual.snapshotId}.json`))).ino
 
     // 重写中途失败：临时文件写到一半失败、临时文件写完后 rename 失败。forget 报错，快照文件逐字节仍是完整旧版，
@@ -228,16 +223,16 @@ describe('密钥硬删', () => {
     }
     expect((await h.snapshots.list()).find(s => s.id === manual.snapshotId)?.data.map(r => r.id)).toEqual(['mem_x', 'mem_y', 'mem_z'])
 
-    const forgot = await h.forget(['mem_z'])
-    expect(forgot.hardDeleted).toEqual(['mem_z'])
+    let forgot: Awaited<ReturnType<typeof h.forget>> | undefined
+    const writes = await writesDuring(async () => { forgot = await h.forget(['mem_z']) })
+    expect(forgot!.hardDeleted).toEqual(['mem_z'])
 
-    // 除被删文件外，目录项与 mtime 不变。例外两处是删除的必然结果：所在目录自身的 mtime（少了一个目录项）、
-    // MEMORY.md（派生索引必须去掉被删条目那一行）。
-    const after = await mtimes()
-    const derived = new Set([workspaceDirName(WS), join(workspaceDirName(WS), INDEX_FILE)])
-    const expected = new Map([...before].filter(([rel]) => rel !== zFile))
-    expect([...after.keys()]).toEqual([...expected.keys()])
-    for (const [rel, mtime] of expected) if (!derived.has(rel)) expect(after.get(rel)).toBe(mtime)
+    // 记忆目录（.state/ 除外）只写两处，都是删除的必然结果：删掉被删文件、重写 MEMORY.md（派生索引必须去掉被删条目那一行）。
+    // 其余文件没有写调用，目录项只少了被删文件。
+    const touched = [join(root, zFile), join(wsDir(), INDEX_FILE)]
+    expect(writes.some(c => c.includes(touched[0]!))).toBe(true)
+    expect(writes.filter(c => !c.includes(join(root, STATE_DIR)) && !touched.some(p => c.includes(p)))).toEqual([])
+    expect(await listTree(root)).toEqual(before.filter(rel => rel !== zFile))
     expect(await readFile(join(wsDir(), INDEX_FILE), 'utf8')).not.toContain('mem_z')
     expect(await allMemoryText()).not.toContain(SUSPECTED_TEXT)
 

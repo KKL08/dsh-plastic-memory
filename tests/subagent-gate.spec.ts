@@ -1,7 +1,7 @@
-import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { Session, SESSION_FORMAT_VERSION, type SessionId } from '@deepseek-ai/dsh-session'
 import { createSystemMessage, type StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -12,9 +12,12 @@ import { lastVisibleSnapshot } from '../src/snapshot-message.ts'
 import { decodeFile } from '../src/storage/frontmatter.ts'
 import { isPendingDelegated, type MemoryRecord } from '../src/record-schema.ts'
 import { fakeExec } from './helpers/exec.ts'
+import { writesDuring } from './helpers/fs-writes.ts'
 
 // 子 agent 只读门：宿主子 agent 会话的 header 带 delegationDepth（父深度 + 1），主会话缺省。
 // 经 apply() 注册后的真实工具定义走一遍，宿主对象只按最小结构伪造（进程边界）。
+// 「磁盘零变化」看 node:fs/promises 的写调用记录（透传，见 helpers/fs-writes.ts），不比 mtime。
+vi.mock('node:fs/promises', async importOriginal => (await import('./helpers/fs-writes.ts')).recordWrites(await importOriginal()))
 
 const SUBAGENT_READONLY: ToolGateCode = 'subagent-readonly'
 const WRITE_TOOLS = ['memory_save', 'memory_forget', 'memory_confirm', 'memory_promote', 'memory_snapshot', 'memory_scan'] as const
@@ -36,15 +39,15 @@ afterEach(async () => {
   await Promise.all(tmpDirs.splice(0).map(d => rm(d, { recursive: true, force: true })))
 })
 
-/** 递归快照：相对路径 → mtime（目录与文件都计，含 .state/）。 */
-async function treeSnapshot(dir: string, prefix = ''): Promise<Record<string, number>> {
-  const out: Record<string, number> = {}
+/** 递归列出目录项（相对路径，目录与文件都计，含 .state/）。 */
+async function treeEntries(dir: string, prefix = ''): Promise<string[]> {
+  const out: string[] = []
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const rel = prefix + entry.name
-    out[rel] = (await stat(join(dir, entry.name))).mtimeMs
-    if (entry.isDirectory()) Object.assign(out, await treeSnapshot(join(dir, entry.name), `${rel}/`))
+    out.push(rel)
+    if (entry.isDirectory()) out.push(...await treeEntries(join(dir, entry.name), `${rel}/`))
   }
-  return out
+  return out.sort()
 }
 
 /** 起插件：最小宿主 ctx（工具注册、事件、llm 与 sessionQuery 服务），留住注册后的工具定义。governance 缺省开启。 */
@@ -172,7 +175,7 @@ describe('子 agent 只读门', () => {
   it('depth 为 1 时 memory_save 以外的写工具返回 subagent-readonly，磁盘零变化；search、source、快照组装不经这道门', async () => {
     const h = await boot()
     const { id, snapshotId } = await seed(h)
-    const before = await treeSnapshot(h.memoryRoot)
+    const before = await treeEntries(h.memoryRoot)
 
     const attempts: Array<[string, unknown]> = [
       ['memory_forget', { ids: [id], reason: '子代理想删' }],
@@ -182,13 +185,16 @@ describe('子 agent 只读门', () => {
       ['memory_snapshot', { action: 'create', description: '子代理快照' }],
       ['memory_scan', {}],
     ]
-    for (const [tool, args] of attempts) {
-      const out = await h.call(tool, args, 1) as Gated
-      expect(out, tool).toMatchObject({ kind: 'rejected', code: SUBAGENT_READONLY })
-    }
-    // 更深的子 agent 同样拒
-    expect(await h.call('memory_forget', { ids: [id], reason: '孙代理想删' }, 2)).toMatchObject({ code: SUBAGENT_READONLY })
-    expect(await treeSnapshot(h.memoryRoot)).toEqual(before)
+    const writes = await writesDuring(async () => {
+      for (const [tool, args] of attempts) {
+        const out = await h.call(tool, args, 1) as Gated
+        expect(out, tool).toMatchObject({ kind: 'rejected', code: SUBAGENT_READONLY })
+      }
+      // 更深的子 agent 同样拒
+      expect(await h.call('memory_forget', { ids: [id], reason: '孙代理想删' }, 2)).toMatchObject({ code: SUBAGENT_READONLY })
+    })
+    expect(writes).toEqual([])
+    expect(await treeEntries(h.memoryRoot)).toEqual(before)
 
     const search = await h.call('memory_search', { query: 'zebra' }, 1) as { hits: Array<{ id: string }> }
     expect(search.hits.map(x => x.id)).toEqual([id])
@@ -285,9 +291,12 @@ describe('子 agent 写入随治理开关', () => {
   it('治理关闭：子会话 memory_save 回 subagent-readonly、磁盘不动；开启后下一次调用放行，再关闭又封住', async () => {
     const h = await boot({ governance: false })
     await h.call('memory_save', saveArgs('主会话垫底', '先让目录存在')) // 主会话照常
-    const before = await treeSnapshot(h.memoryRoot)
-    expect(await h.call('memory_save', childSaveArgs('子代理想存的', '子代理的新事实'), 1)).toMatchObject({ kind: 'rejected', code: SUBAGENT_READONLY })
-    expect(await treeSnapshot(h.memoryRoot)).toEqual(before)
+    const before = await treeEntries(h.memoryRoot)
+    const writes = await writesDuring(async () => {
+      expect(await h.call('memory_save', childSaveArgs('子代理想存的', '子代理的新事实'), 1)).toMatchObject({ kind: 'rejected', code: SUBAGENT_READONLY })
+    })
+    expect(writes).toEqual([])
+    expect(await treeEntries(h.memoryRoot)).toEqual(before)
 
     await h.setGovernance(true)
     const out = await h.call('memory_save', childSaveArgs('子代理想存的', '子代理的新事实'), 1) as Saved
@@ -338,11 +347,14 @@ describe('memory_confirm accept-subagent 经注册处', () => {
   it('子会话（深度 1、2）调 accept-subagent 回 subagent-readonly，磁盘不动', async () => {
     const h = await boot()
     const id = await childSaved(h)
-    const before = await treeSnapshot(h.memoryRoot)
-    for (const depth of [1, 2]) {
-      expect(await h.call('memory_confirm', { action: 'accept-subagent', memoryId: id }, depth), `depth ${depth}`).toMatchObject({ kind: 'rejected', code: SUBAGENT_READONLY })
-    }
-    expect(await treeSnapshot(h.memoryRoot)).toEqual(before)
+    const before = await treeEntries(h.memoryRoot)
+    const writes = await writesDuring(async () => {
+      for (const depth of [1, 2]) {
+        expect(await h.call('memory_confirm', { action: 'accept-subagent', memoryId: id }, depth), `depth ${depth}`).toMatchObject({ kind: 'rejected', code: SUBAGENT_READONLY })
+      }
+    })
+    expect(writes).toEqual([])
+    expect(await treeEntries(h.memoryRoot)).toEqual(before)
     expect(isPendingDelegated((await readBack(h.memoryRoot, id)).record)).toBe(true)
   })
 
