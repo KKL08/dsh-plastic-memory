@@ -178,12 +178,12 @@ export async function runCheckup(input: CheckupRunInput, deps: CheckupRunDeps): 
     const after = await refresh(startedAt) ?? (before === undefined ? undefined : await collect())
     // 核心提交之后才被取消（认领被接手、插件卸载）：体检已经做完，只是不写最近一次结果，免得盖掉接手的那次
     if (signal.aborted) return result.kind === 'error' ? { kind: 'cancelled' } : doneOf(result)
-    if (result.kind === 'error') return await failed(input, deps, scopes, { kind: 'error', message: result.message })
+    if (result.kind === 'error') return await failed(input, deps, scopes, { kind: 'error', message: result.message }, startedAt)
     if (by === 'auto') {
       const unavailable = result.notes.find(n => n.code === 'model-unavailable')
       if (unavailable !== undefined) return { kind: 'model-unavailable', cause: unavailable.cause ?? { kind: 'model-error' } }
       const semanticFailed = result.notes.find(n => n.code === 'semantic-failed')
-      if (semanticFailed !== undefined) return await failed(input, deps, scopes, semanticFailed.cause ?? { kind: 'model-error' })
+      if (semanticFailed !== undefined) return await failed(input, deps, scopes, semanticFailed.cause ?? { kind: 'model-error' }, startedAt)
     }
     const compared = before !== undefined && after !== undefined ? { before, after } : undefined
     if (compared !== undefined) {
@@ -212,7 +212,7 @@ export async function runCheckup(input: CheckupRunInput, deps: CheckupRunDeps): 
       return { kind: 'done', notes: [] }
     }
     // 原话进体检记录和视图：先遮掉疑似密钥
-    return await failed(input, deps, scopes, { kind: 'error', message: maskDiagnostic(err instanceof Error ? err.message : String(err)) })
+    return await failed(input, deps, scopes, { kind: 'error', message: maskDiagnostic(err instanceof Error ? err.message : String(err)) }, startedAt)
   } finally {
     if (held !== undefined && !('busy' in held)) await held.release()
   }
@@ -228,11 +228,11 @@ function doneOf(result: Exclude<ScanToolResult, { kind: 'error' }>, compared?: {
 }
 
 /** 没做完：自动体检在放掉认领之前给这次的范围记失败（连续失败计数、重试时间）；手动不记，交给界面回失败。 */
-async function failed(input: CheckupRunInput, deps: CheckupRunDeps, scopes: readonly Scope[], cause: CheckupCause): Promise<CheckupRunOutcome> {
+async function failed(input: CheckupRunInput, deps: CheckupRunDeps, scopes: readonly Scope[], cause: CheckupCause, startedAt?: number): Promise<CheckupRunOutcome> {
   if (input.by === 'auto') {
     deps.log.warn('[plastic-memory] 自动体检没做完，稍后再试', cause)
     try {
-      for (const scope of scopes) await deps.checkups.recordFailure(scope, cause, deps.now())
+      for (const scope of scopes) await deps.checkups.recordFailure(scope, cause, deps.now(), startedAt)
     } catch (err) {
       // 记不下也不挡：没有失败记录，下一次检查照常到期再试
       deps.log.warn('[plastic-memory] 记不下自动体检的失败，下次检查再试', err)

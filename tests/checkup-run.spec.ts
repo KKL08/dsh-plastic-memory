@@ -496,6 +496,20 @@ describe('没做成', () => {
     expect(rec.lastResult).toBeUndefined()
   })
 
+  it('PA-57 自动：模型出错时这个范围已有更晚开始、先做完的 agent 体检：不给它记失败', async () => {
+    const e = env()
+    await seedScopes(e)
+    const llm: SemanticLlm = {
+      complete: async () => {
+        await e.checkups.complete([SESSION], { startedAt: NOW + 1, completedAt: NOW + 2, by: 'agent' })
+        throw Object.assign(new Error('host RATE_LIMIT'), { code: 'RATE_LIMIT' })
+      },
+    }
+    expect(await e.run({ target: SESSION, llm, by: 'auto' })).toMatchObject({ kind: 'failed' })
+    const rec = (await e.recordOf(checkupKey(SESSION)))!
+    expect([rec.completed?.by, rec.failure]).toEqual(['agent', undefined])
+  })
+
   it('PA-57 自动：宿主报模型用不了，返回原因，一次体检不写任何记录', async () => {
     const e = env()
     await seedScopes(e)
