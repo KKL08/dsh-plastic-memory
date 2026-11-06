@@ -14,6 +14,7 @@ import { executeSnapshotTool } from '../src/tools/snapshot.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
+import { scopeAt } from '../src/scope.ts'
 
 // 恢复进行到一半，另一个会话把含密钥的记忆彻底删除（先脱敏快照、再删文件）：恢复不能把明文写回来。
 // 全部用真实目录（FileTable + .state 侧表），两个会话共用同一个记忆根目录。
@@ -113,4 +114,29 @@ describe('恢复与密钥硬删交错', () => {
     expect(await a.store.get('mem_k', ctx)).toBeUndefined()
     expect(await allMemoryText()).not.toContain(FAKE_SECRET.sk)
   })
+
+  // 收尾只在快照里这条被清掉或脱敏时才删刚写回的那份：写回之后、收尾之前被用户改过的，删的就不再是这次写的
+  for (const [label, clear] of [
+    ['快照里这条被清掉', (b: ReturnType<typeof session>) => b.snapshots.purge(r => r.id === 'mem_o')],
+    ['快照里这条被脱敏', (b: ReturnType<typeof session>) => b.snapshots.redact(new Set(['mem_o']))],
+  ] as const) {
+    it(`PA-38 恢复写回之后用户编辑了它，接着${label}：收尾不删编辑后的这条`, async () => {
+      const snapshotId = await seed()
+      const a = session()
+      const b = session()
+      const put = a.store.put.bind(a.store)
+      vi.spyOn(a.store, 'put').mockImplementation(async (rec, hint, skipIf) => {
+        const written = await put(rec, hint, skipIf)
+        await b.store.update({ id: 'mem_o', workspacePath: WS }, cur => ({ ...cur, content: '用 pnpm 9' }), scopeAt(WS))
+        await clear(b)
+        return written
+      })
+
+      const r = await a.snapshot({ action: 'restore', snapshotId, memoryIds: ['mem_o'] })
+
+      if (r.kind !== 'restored') throw new Error(r.kind)
+      expect(r.restored).toEqual(['mem_o'])
+      expect((await a.store.get('mem_o', ctx))?.content).toBe('用 pnpm 9')
+    })
+  }
 })

@@ -281,10 +281,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect(snap.data[0].id).toBe(rec.id)
     expect(snap.data[0].status).toBe('active') // 快照记的是删除前的状态
 
-    const byId = new Map((await store.query({ status: ['active', 'superseded', 'deleted'] })).map(r => [r.id, r]))
-    const { restored } = await snapshots.restore(
-      snap, undefined, async r => (await store.put(r)) !== undefined, byId, false, r => store.hardDelete(r),
-    )
+    const { restored } = await snapshots.restore(snap, undefined, store, { target: 'hint', overwrite: false })
     expect(restored).toEqual([rec.id])
     expect((await store.get(rec.id))!.status).toBe('active')
 

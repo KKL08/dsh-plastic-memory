@@ -3,13 +3,27 @@ import { SnapshotStore, SNAPSHOT_RETENTION_MS } from '../src/governance/snapshot
 import { memorySnapshotSchema, type MemorySnapshot } from '../src/governance/schema.ts'
 import { isPendingDelegated, type MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
-import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
+import { InMemoryBatchKvTable, InMemoryKvTable } from './helpers/in-memory-kv.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { MemoryStore } from '../src/store.ts'
 
 function makeStore() {
   return new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
 }
-/** 这些用例不涉及密钥硬删，写后复核不会要求撤回。 */
-const noDiscard = async () => {}
+function memoryStore(...records: MemoryRecord[]) {
+  const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
+  return Promise.all(records.map(r => store.put(r))).then(() => store)
+}
+/** 写入那一刻插进别处的动作：照常写，写完再跑 during（快照恢复收尾之前）。 */
+function duringPut(store: MemoryStore, during: (rec: MemoryRecord) => Promise<void>) {
+  const put = store.put.bind(store)
+  return vi.spyOn(store, 'put').mockImplementation(async (rec, from, skipIf) => {
+    const written = await put(rec, from, skipIf)
+    await during(rec)
+    return written
+  })
+}
+const restoring = { target: 'exact', overwrite: false } as const
 
 describe('SnapshotStore.capture', () => {
   it('capture 只存受影响记录，list 按 createdAt 倒序', async () => {
@@ -40,33 +54,28 @@ describe('SnapshotStore.diff / restore', () => {
     expect(entries[0].changedAfterSnapshot).toBe(true)
   })
 
-  it('restore 默认跳过快照后被修改的记录，overwriteChanged 时覆盖', async () => {
+  it('restore 默认跳过快照后被修改的记录，overwrite 时覆盖', async () => {
     const s = makeStore()
     const original = record({ id: 'mem_a', content: '原文', updatedAt: 50 })
     const snap = await s.capture({ operation: 'pre-forget', description: 'd', records: [original] }, 100)
-    const changed = record({ id: 'mem_a', content: '改过', updatedAt: 150 })
+    const store = await memoryStore(record({ id: 'mem_a', content: '改过', updatedAt: 150 }))
 
-    const written: MemoryRecord[] = []
-    const put = async (r: MemoryRecord) => { written.push(r) }
-
-    const r1 = await s.restore(snap, undefined, put, new Map([['mem_a', changed]]), false, noDiscard)
+    const r1 = await s.restore(snap, undefined, store, restoring)
     expect(r1.skipped).toEqual(['mem_a'])
-    expect(written).toHaveLength(0)
+    expect((await store.get('mem_a'))?.content).toBe('改过')
 
-    const r2 = await s.restore(snap, undefined, put, new Map([['mem_a', changed]]), true, noDiscard)
+    const r2 = await s.restore(snap, undefined, store, { ...restoring, overwrite: true })
     expect(r2.restored).toEqual(['mem_a'])
-    expect(written[0].content).toBe('原文')
+    expect((await store.get('mem_a'))?.content).toBe('原文')
   })
 
   it('restore 可指定 ids 只恢复部分；已消失的记录直接恢复', async () => {
     const s = makeStore()
-    const a = record({ id: 'mem_a', content: 'A' })
-    const b = record({ id: 'mem_b', content: 'B' })
-    const snap = await s.capture({ operation: 'pre-forget', description: 'd', records: [a, b] }, 100)
-    const written: MemoryRecord[] = []
-    const r = await s.restore(snap, ['mem_b'], async rec => { written.push(rec) }, new Map(), false, noDiscard)
+    const snap = await s.capture({ operation: 'pre-forget', description: 'd', records: [record({ id: 'mem_a' }), record({ id: 'mem_b' })] }, 100)
+    const store = await memoryStore()
+    const r = await s.restore(snap, ['mem_b'], store, restoring)
     expect(r.restored).toEqual(['mem_b'])
-    expect(written.map(x => x.id)).toEqual(['mem_b'])
+    expect((await store.query({ status: ['active', 'deleted'] })).map(x => x.id)).toEqual(['mem_b'])
   })
 
   it('当前记录是软删除状态时不算冲突，默认即可恢复', async () => {
@@ -75,12 +84,12 @@ describe('SnapshotStore.diff / restore', () => {
     const snap = await s.capture({ operation: 'pre-forget', description: 'd', records: [original] }, 100)
     // softDelete 后记录仍在库里：status='deleted' 且 updatedAt 晚于快照
     const softDeleted = record({ id: 'mem_a', content: '原文', status: 'deleted', updatedAt: 150 })
+    const store = await memoryStore(softDeleted)
 
-    const written: MemoryRecord[] = []
-    const r = await s.restore(snap, undefined, async rec => { written.push(rec) }, new Map([['mem_a', softDeleted]]), false, noDiscard)
+    const r = await s.restore(snap, undefined, store, restoring)
     expect(r.restored).toEqual(['mem_a'])
     expect(r.skipped).toEqual([])
-    expect(written[0].status).toBe('active')
+    expect((await store.get('mem_a'))?.status).toBe('active')
 
     // diff 也不应把它标成“快照后被修改过”
     expect(s.diff(snap, new Map([['mem_a', softDeleted]]))[0].changedAfterSnapshot).toBe(false)
@@ -93,16 +102,16 @@ describe('SnapshotStore.restore：盘上快照只在写前、写后各读一次'
     const s = new SnapshotStore(kv)
     const records = Array.from({ length: 20 }, (_, i) => record({ id: `mem_${String(i).padStart(2, '0')}` }))
     const snap = await s.capture({ operation: 'manual', description: '大快照', records }, 100)
+    const store = await memoryStore()
+    // 写入的同时别的会话把它彻底删除
+    duringPut(store, async rec => { if (rec.id === 'mem_03' || rec.id === 'mem_11') await s.redact(new Set([rec.id])) })
     const reads = vi.spyOn(kv, 'get')
-    const discarded: string[] = []
-    const r = await s.restore(snap, undefined, async rec => {
-      if (rec.id === 'mem_03' || rec.id === 'mem_11') await s.redact(new Set([rec.id]))   // 写入的同时别的会话把它彻底删除
-    }, new Map(), false, async rec => { discarded.push(rec.id) })
+    const r = await s.restore(snap, undefined, store, restoring)
     expect(reads).toHaveBeenCalledTimes(2)
-    expect(discarded).toEqual(['mem_03', 'mem_11'])
     expect(r.redacted).toEqual(['mem_03', 'mem_11'])
     expect(r.skipped).toEqual(['mem_03', 'mem_11'])
     expect(r.restored).toEqual(records.map(x => x.id).filter(id => id !== 'mem_03' && id !== 'mem_11'))
+    expect((await store.query({})).map(x => x.id).sort()).toEqual(r.restored)
   })
 })
 
@@ -110,11 +119,10 @@ describe('SnapshotStore.restore：恢复途中别处动了快照', () => {
   it('写入 A 时别的会话彻底删除了 B（先从快照里清掉 B、再删文件）：B 写回后收尾撤回，计入 skipped', async () => {
     const s = makeStore()
     const snap = await s.capture({ operation: 'manual', description: 'd', records: [record({ id: 'mem_a' }), record({ id: 'mem_b' })] }, 100)
-    const discarded: string[] = []
-    const r = await s.restore(snap, undefined, async rec => {
-      if (rec.id === 'mem_a') await s.purge(x => x.id === 'mem_b')
-    }, new Map(), false, async rec => { discarded.push(rec.id) })
-    expect(discarded).toEqual(['mem_b'])
+    const store = await memoryStore()
+    duringPut(store, async rec => { if (rec.id === 'mem_a') await s.purge(x => x.id === 'mem_b') })
+    const r = await s.restore(snap, undefined, store, restoring)
+    expect(await store.get('mem_b')).toBeUndefined()
     expect(r.restored).toEqual(['mem_a'])
     expect(r.skipped).toEqual(['mem_b'])
     expect(r.redacted).toEqual([])
@@ -124,13 +132,14 @@ describe('SnapshotStore.restore：恢复途中别处动了快照', () => {
     const s = makeStore()
     const clock = { now: 100 + SNAPSHOT_RETENTION_MS - 1 }
     const snap = await s.capture({ operation: 'pre-forget', description: 'd', records: [record({ id: 'mem_a' })] }, 100)
-    const discarded: string[] = []
-    const r = await s.restore(snap, undefined, async () => {
+    const store = await memoryStore()
+    duringPut(store, async () => {
       clock.now += 2
       await s.sweep(clock.now)   // 别的会话这时清扫过期快照
-    }, new Map(), false, async rec => { discarded.push(rec.id) }, () => clock.now)
+    })
+    const r = await s.restore(snap, undefined, store, { ...restoring, now: () => clock.now })
     expect(await s.get(snap.id)).toBeUndefined()
-    expect(discarded).toEqual([])
+    expect(await store.get('mem_a')).toBeDefined()
     expect(r.restored).toEqual(['mem_a'])
     expect(r.skipped).toEqual([])
   })
@@ -138,12 +147,11 @@ describe('SnapshotStore.restore：恢复途中别处动了快照', () => {
   it('写入时别的会话彻底删除了快照里唯一的一条（快照空了整份删掉）：仍在保留期内，刚写回的撤回', async () => {
     const s = makeStore()
     const snap = await s.capture({ operation: 'pre-forget', description: 'd', records: [record({ id: 'mem_a' })] }, 100)
-    const discarded: string[] = []
-    const r = await s.restore(snap, undefined, async () => {
-      await s.purge(x => x.id === 'mem_a')
-    }, new Map(), false, async rec => { discarded.push(rec.id) }, () => 200)
+    const store = await memoryStore()
+    duringPut(store, () => s.purge(x => x.id === 'mem_a'))
+    const r = await s.restore(snap, undefined, store, { ...restoring, now: () => 200 })
     expect(await s.get(snap.id)).toBeUndefined()
-    expect(discarded).toEqual(['mem_a'])
+    expect(await store.get('mem_a')).toBeUndefined()
     expect(r.restored).toEqual([])
     expect(r.skipped).toEqual(['mem_a'])
   })
@@ -151,14 +159,14 @@ describe('SnapshotStore.restore：恢复途中别处动了快照', () => {
   it('后一条写入抛错：已写入的照样收尾复核，写后才脱敏的撤回，再把错误抛出去', async () => {
     const s = makeStore()
     const snap = await s.capture({ operation: 'manual', description: 'd', records: [record({ id: 'mem_a' }), record({ id: 'mem_b' })] }, 100)
-    const discarded: string[] = []
+    const store = await memoryStore()
     const failure = new Error('ENOSPC')
-    const restoring = s.restore(snap, undefined, async rec => {
+    duringPut(store, async rec => {
       if (rec.id === 'mem_a') await s.redact(new Set(['mem_a']))   // 写入 A 的同时别的会话把它彻底删除
       else throw failure
-    }, new Map(), false, async rec => { discarded.push(rec.id) })
-    await expect(restoring).rejects.toBe(failure)
-    expect(discarded).toEqual(['mem_a'])
+    })
+    await expect(s.restore(snap, undefined, store, restoring)).rejects.toBe(failure)
+    expect(await store.get('mem_a')).toBeUndefined()
   })
 })
 
@@ -180,10 +188,11 @@ describe('快照带着委派块', () => {
     const snap = await s.capture({ operation: 'pre-update', description: 'd', records: [before] }, 100)
     const promoted = { ...before, delegation: { ...creator, reviewed: { by: 'main' as const, at: 150 } }, updatedAt: 150, lastConfirmedAt: 150 }
     expect(isPendingDelegated(promoted)).toBe(false)
-    const written: MemoryRecord[] = []
-    const r = await s.restore(snap, undefined, async rec => { written.push(rec) }, new Map([['mem_a', promoted]]), false, noDiscard)
+    const store = await memoryStore(promoted)
+    const r = await s.restore(snap, undefined, store, restoring)
     expect(r.restored).toEqual(['mem_a'])
-    expect(written[0].delegation).toEqual(creator)
-    expect(isPendingDelegated(written[0])).toBe(true)
+    const written = (await store.get('mem_a'))!
+    expect(written.delegation).toEqual(creator)
+    expect(isPendingDelegated(written)).toBe(true)
   })
 })

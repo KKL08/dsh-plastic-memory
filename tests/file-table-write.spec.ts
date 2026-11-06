@@ -154,8 +154,7 @@ describe('FileTable 写侧', () => {
     await t.delete('mem_r', {})
     const mdFiles = async () => (await readdir(join(root, GLOBAL_DIR))).filter(n => n.endsWith('.md') && n !== 'MEMORY.md')
     expect(await mdFiles()).toHaveLength(0)
-    const byId = new Map((await t.readScope([t.globalDir], { includeArchive: true })).records.map(r => [r.record.id, r.record]))
-    const { restored } = await snapshots.restore(snap, undefined, async r => (await t.put(r, {})) !== undefined, byId, false, r => t.delete(r.id, {}))
+    const { restored } = await snapshots.restore(snap, undefined, new MemoryStore(t, undefined, new InMemoryBatchKvTable()), { target: 'exact', overwrite: false })
     expect(restored).toEqual(['mem_r'])
     expect(await mdFiles()).toHaveLength(1)
     const reloaded = await load()
@@ -415,8 +414,7 @@ describe('写路径内核（锁内定位、排他占名、搬家与归档）', (
       .toEqual([['mem_p', 'global']])
 
     const snap = (await snapshots.list()).find(s => s.operation === 'pre-promote')!
-    const current = new Map([['mem_p', (await store.get('mem_p'))!]])
-    const { restored } = await snapshots.restore(snap, undefined, async rec => (await store.put(rec)) !== undefined, current, false, rec => store.hardDelete(rec))
+    const { restored } = await snapshots.restore(snap, undefined, store, { target: 'hint', overwrite: false })
     expect(restored).toEqual(['mem_p'])
     expect(await mds(globalDir())).toEqual([])
     expect(await mds(wsDir())).toEqual(['提升.md'])

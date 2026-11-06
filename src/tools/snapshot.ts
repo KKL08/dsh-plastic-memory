@@ -134,15 +134,11 @@ export async function executeSnapshotTool(
   }
 
   // restore
-  const { restored, skipped, redacted } = await deps.snapshots.restore(
-    snap, [...allowedIds],
-    async (r, skipIf) => (await deps.store.put(r, targetOf(r.workspacePath), skipIf)) !== undefined,
-    current,
-    options.overwriteIf ?? args.overwriteChanged ?? false,
-    // 撤回只删刚写回的那一份（快照里这条记录自己的作用域），别的作用域里同 id 的副本不是这次恢复写的
-    r => deps.store.hardDelete(r, { at: scopeAt(r.workspacePath) }),
-    () => deps.now?.() ?? Date.now(),
-  )
+  const { restored, skipped, redacted } = await deps.snapshots.restore(snap, [...allowedIds], deps.store, {
+    target: options.isOwnScope === true ? 'exact' : 'hint',
+    overwrite: options.overwriteIf ?? args.overwriteChanged ?? false,
+    now: () => deps.now?.() ?? Date.now(),
+  })
   const changedCount = skipped.length - redacted.length
   const skippedNote = changedCount > 0
     ? `；${changedCount} 条因快照后被修改而跳过（确认覆盖请带 overwriteChanged: true）`
