@@ -55,7 +55,7 @@ export const pendingZh = {
   'pending.promote.agentsMd': '写进 AGENTS.md',
   'pending.promote.reason': '这条看起来适合所有项目。',
   'pending.promote.globalNote': '提升后所有项目都会带入它，14 天内可撤销。',
-  'pending.promote.agentsMdNote': '之后由你自己维护：插件不再体检它，它也不会过期。',
+  'pending.promote.agentsMdNote': '之后由你自己维护：插件不再体检它，有效期也不再生效。',
   'pending.promote.keepLocal': '留在本项目',
   'pending.promote.configLoading': '正在读取设置…',
 
@@ -241,7 +241,7 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.promote.agentsMd': 'Write into AGENTS.md',
   'pending.promote.reason': 'This looks useful to every project.',
   'pending.promote.globalNote': 'Every project will bring it in. You can undo within 14 days.',
-  'pending.promote.agentsMdNote': 'You maintain it from then on: the plugin stops checking it and it never expires.',
+  'pending.promote.agentsMdNote': 'You maintain it from then on: the plugin stops checking it, and its expiry no longer applies.',
   'pending.promote.keepLocal': 'Keep in this project',
   'pending.promote.configLoading': 'Reading settings…',
 

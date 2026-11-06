@@ -427,6 +427,22 @@ describe('createHostGateway', () => {
     expect(executed).toEqual(['/memory info', '/memory refresh-views'])
   })
 
+  it('运行中换了新的配置服务、里面的 memoryRoot 不同：同样丢掉缓存重来一次', async () => {
+    localStorage.setItem(MEMORY_ROOT_KEY, '/old/memories')
+    localStorage.setItem(MEMORY_ROOT_CONFIG_KEY, '')
+    files['/old/memories/.state/gui/pending.json'] = JSON.stringify({ ...pending, dot: 'none' })
+    resources[fileAddress('s1', '/old/memories/.state/gui/pending.json')] = { status: 'live', value: { absolutePath: 'x', version: 'v1' }, failure: undefined }
+    resources[fileAddress('s1', pendingPath)] = { status: 'live', value: { absolutePath: pendingPath, version: 'v1' }, failure: undefined }
+    const { gateway, provide } = lateConfigForms()
+    provide({})
+    const { result } = renderHook(() => gateway.useView(gateway.useSession('/w/app'), 'pending'))
+    await waitFor(() => { expect(result.current).toMatchObject({ status: 'ready', data: { dot: 'none' } }) })
+    expect(executed).toEqual([])
+    provide({ memoryRoot: '/h/memories' })
+    await waitFor(() => { expect(result.current).toEqual({ status: 'ready', data: pending }) })
+    expect(executed).toEqual(['/memory info', '/memory refresh-views'])
+  })
+
   it('首次（没有缓存）拿到根时把当时的配置值一起记下', async () => {
     resources[fileAddress('s1', pendingPath)] = { status: 'failed', value: undefined, failure: { code: 'workspace-file/not-found', message: '' } }
     const form = createFakeConfigForm({ value: { ...DEFAULT_SECTION, memoryRoot: '~/mem' } })
@@ -743,6 +759,35 @@ describe('createHostGateway', () => {
     expect(get).toHaveBeenCalledWith(ENTRY_ID)
     expect(await gateway.setConfig('snapshotTokenBudget', 5000)).toBe(true)
     expect(set).toHaveBeenCalledWith('snapshotTokenBudget', 5000)
+  })
+
+  /** 配置服务由测试决定何时就位、何时换新（宿主运行中重载设置模块）；其余依赖照常立即注入。 */
+  function lateConfigForms() {
+    let attach: ((scope: HostContext) => void) | undefined
+    let dispose: (() => void) | undefined
+    const base = fakeCtx()
+    const ctx = { ...base, inject: (deps: string[], fn: (scope: HostContext) => void) => { if (deps.includes('configForms')) attach = fn; else base.inject(deps, fn) } } as HostContext
+    const provide = (value: Partial<typeof DEFAULT_SECTION>) => act(() => {
+      dispose?.()
+      const form = createFakeConfigForm({ value: { ...DEFAULT_SECTION, ...value } })
+      attach!({ ...ctx, configForms: { get: () => form }, effect: (execute: () => () => void) => { dispose = execute() } } as unknown as HostContext)
+    })
+    return { gateway: createHostGateway(ctx)(props), provide }
+  }
+
+  it('配置服务在组件读过之后才就位：useConfig 读到配置', () => {
+    const { gateway, provide } = lateConfigForms()
+    const { result } = renderHook(() => gateway.useConfig())
+    provide({ accent: 'ella' })
+    expect(result.current?.accent).toBe('ella')
+  })
+
+  it('配置服务运行中换了新的：useConfig 读新表单', () => {
+    const { gateway, provide } = lateConfigForms()
+    provide({ accent: 'ella' })
+    const { result } = renderHook(() => gateway.useConfig())
+    provide({ accent: 'blue-whale' })
+    expect(result.current?.accent).toBe('blue-whale')
   })
 
   it('宿主不服务配置：useConfig 为 undefined，setConfig 为 false', async () => {

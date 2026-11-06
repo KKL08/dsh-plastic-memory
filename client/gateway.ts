@@ -347,13 +347,23 @@ export function createHostGateway(ctx: HostContext): BindGateway {
     void result.then((view) => { if (view.status === 'error' && viewReads.get(path) === entry) viewReads.delete(path) })
     return result
   }
-  // configForms 是可选服务：就位时记下，离开时清掉（根上下文没 inject 它，不能直接读）
+  // configForms 是可选服务：就位时记下，离开时清掉（根上下文没 inject 它，不能直接读）。
+  // 服务可能在组件读过之后才到、或运行中换新的：每次变动递增版本号，读配置的 hook 订阅它，重新绑定新表单
   let configForms: ConfigFormsService | undefined
   let binding: ConfigBinding | undefined
+  let serviceVersion = 0
+  const serviceListeners = new Set<() => void>()
+  const serviceChanged = () => { serviceVersion++; for (const fn of serviceListeners) fn() }
+  const subscribeService = (fn: () => void) => { serviceListeners.add(fn); return () => { serviceListeners.delete(fn) } }
+  const getServiceVersion = () => serviceVersion
   ctx.inject(['configForms'], (scope) => {
     scope.effect(() => {
-      configForms = scope.configForms
-      return () => { configForms = undefined; binding = undefined }
+      const service = scope.configForms
+      configForms = service
+      binding = undefined
+      serviceChanged()
+      // 只清自己那一份：新服务先就位、旧的后离开时，不把新的清掉
+      return () => { if (configForms !== service) return; configForms = undefined; binding = undefined; serviceChanged() }
     }, 'plastic-memory: gateway config form')
   })
   // 第一次用到时才向宿主要表单（get 会触发配置镜像加载）；服务在时绑定一次，订阅函数身份稳定
@@ -364,13 +374,18 @@ export function createHostGateway(ctx: HostContext): BindGateway {
     binding = { form, get: () => form.getSnapshot(), subscribe: fn => form.subscribe(fn) }
     return binding
   }
+  /** 配置表单当前快照：服务换了就重新绑定，订阅新表单。 */
+  function useConfigSnapshot() {
+    useSyncExternalStore(subscribeService, getServiceVersion)
+    const { get, subscribe } = config()
+    return useSyncExternalStore(subscribe, get)
+  }
 
   return ({ useSessions, useResource }) => {
     /** isPassive：只读不催，不为它发 info / refresh-views（读的会话可能正在跑；根由页面自己的视图问到）。 */
     function useViewState<N extends ViewName>(session: BorrowedSession, name: N, isPassive: boolean): ViewState<ViewMap[N]> {
       const rootState = useSyncExternalStore(root.subscribe, root.get)
-      const { get: getConfig, subscribe: subscribeConfig } = config()
-      const configSnapshot = useSyncExternalStore(subscribeConfig, getConfig)
+      const configSnapshot = useConfigSnapshot()
       const configured = configSnapshot?.status === 'ready' ? configuredRoot(configSnapshot.value) : undefined
       useEffect(() => { root.syncConfig(configured) }, [configured])
       const sessionId = session.kind === 'ready' ? session.sessionId : undefined
@@ -444,8 +459,7 @@ export function createHostGateway(ctx: HostContext): BindGateway {
         return state
       },
       useConfig() {
-        const { get, subscribe } = config()
-        const snapshot = useSyncExternalStore(subscribe, get)
+        const snapshot = useConfigSnapshot()
         return useMemo(() => snapshot?.status === 'ready' ? toPluginConfig(snapshot.value) : undefined, [snapshot])
       },
       async setConfig(field, value) {
