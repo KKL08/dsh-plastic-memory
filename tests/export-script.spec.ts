@@ -1,4 +1,4 @@
-import { expect, it, beforeEach, afterEach } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -22,7 +22,7 @@ async function load(root: string) {
   return new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() })   // 构造零 I/O，读时直接读目录
 }
 
-it('导出 global + workspace 记录，坏记录进 skipped 不中断；FileTable 读回全字段往返', async () => {
+describe('导出 global + workspace 两条和一条坏记录（共用一次导出）', () => {
   const kv = kvJson({
     mem_global: {
       id: 'mem_global', name: '包管理用 pnpm', type: 'preference', scope: 'global',
@@ -48,48 +48,62 @@ it('导出 global + workspace 记录，坏记录进 skipped 不中断；FileTabl
     },
   })
 
-  const result = await exportMemories(kv, root)
-  expect(result.exported).toBe(2)
-  expect(result.skipped).toHaveLength(1)
-  expect(result.skipped[0]).toContain('mem_bad')
+  let dir: string
+  let result: Awaited<ReturnType<typeof exportMemories>>
+  let t: FileTable
+  beforeAll(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'pm15-export-'))
+    result = await exportMemories(kv, dir)
+    t = await load(dir)
+  })
+  afterAll(async () => { await rm(dir, { recursive: true, force: true }) })
 
-  const t = await load(root)
+  it('两层各落在自己的作用域：global 不带项目，workspace 的项目路径无损还原', async () => {
+    expect(result.exported).toBe(2)
+    const g = (await t.locate('mem_global', {}))?.record
+    expect(g?.scope).toBe('global')
+    expect(g?.workspacePath).toBeUndefined()
+    const w = (await t.locate('mem_ws', {}))?.record
+    expect(w?.scope).toBe('workspace')
+    expect(w?.workspacePath).toBe('/home/dev/example-project') // .workspace 标记无损还原
+  })
 
-  const g = ((await t.locate('mem_global', {}))?.record)!
-  expect(g).toBeDefined()
-  expect(g.scope).toBe('global')
-  expect(g.name).toBe('包管理用 pnpm')
-  expect(g.tags).toEqual(['pnpm', 'npm'])
-  expect(g.content).toBe('这个项目的包管理一律用 pnpm，不要用 npm')
-  expect(g.summary).toBe('包管理选型')
-  expect(g.source).toEqual({ sessionId: 'session-1', eventRange: [0, 2212], sourceMode: 'user-explicit' })
-  expect(g.createdAt).toBe(1787166378210)
-  expect(g.updatedAt).toBe(1787166913000)
-  expect(g.lastConfirmedAt).toBe(1787166378210)
-  expect(g.status).toBe('active')
-  expect(g.confidence).toBe(0.9)
-  // recallCount/lastRecalledAt 是 sidecar-only 字段（frontmatter 不承载），导出脚本不写 KvTable 侧车，
-  // 因此 FileTable 读文件时在无侧车行时按文档默认注入 0/null——这是有意的、非本脚本职责范围内的已知损失。
-  expect(g.recallCount).toBe(0)
-  expect(g.lastRecalledAt).toBeNull()
-  // 可选键（validFrom/validTo/supersedes）原始记录未携带 → 往返后仍不出现
-  expect(g.validFrom).toBeUndefined()
-  expect(g.validTo).toBeUndefined()
-  expect(g.supersedes).toBeUndefined()
+  it('坏记录进 skipped，不中断其余导出，也不落盘', async () => {
+    expect(result.skipped).toHaveLength(1)
+    expect(result.skipped[0]).toContain('mem_bad')
+    expect((await t.locate('mem_bad', {}))?.record).toBeUndefined()
+  })
 
-  const w = ((await t.locate('mem_ws', {}))?.record)!
-  expect(w).toBeDefined()
-  expect(w.scope).toBe('workspace')
-  expect(w.workspacePath).toBe('/home/dev/example-project') // .workspace 标记无损还原
-  expect(w.name).toBe('部署脚本密钥')
-  expect(w.tags).toEqual([])
-  expect(w.content).toBe('密钥已挪进环境变量，此条留作记录')
-  expect(w.summary).toBe('部署脚本里硬编码的密钥')
-  expect(w.source).toEqual({ sessionId: 'session-2', eventRange: [0, 4363], sourceMode: 'user-explicit' })
-  expect(w.createdAt).toBe(1787166378178)
-  expect(w.updatedAt).toBe(1787166720840)
+  it('FileTable 读回全字段往返', async () => {
+    const g = ((await t.locate('mem_global', {}))?.record)!
+    expect(g.name).toBe('包管理用 pnpm')
+    expect(g.tags).toEqual(['pnpm', 'npm'])
+    expect(g.content).toBe('这个项目的包管理一律用 pnpm，不要用 npm')
+    expect(g.summary).toBe('包管理选型')
+    expect(g.source).toEqual({ sessionId: 'session-1', eventRange: [0, 2212], sourceMode: 'user-explicit' })
+    expect(g.createdAt).toBe(1787166378210)
+    expect(g.updatedAt).toBe(1787166913000)
+    expect(g.lastConfirmedAt).toBe(1787166378210)
+    expect(g.status).toBe('active')
+    expect(g.confidence).toBe(0.9)
+    // recallCount/lastRecalledAt 是 sidecar-only 字段（frontmatter 不承载），导出脚本不写 KvTable 侧车，
+    // 因此 FileTable 读文件时在无侧车行时按文档默认注入 0/null——这是有意的、非本脚本职责范围内的已知损失。
+    expect(g.recallCount).toBe(0)
+    expect(g.lastRecalledAt).toBeNull()
+    // 可选键（validFrom/validTo/supersedes）原始记录未携带 → 往返后仍不出现
+    expect(g.validFrom).toBeUndefined()
+    expect(g.validTo).toBeUndefined()
+    expect(g.supersedes).toBeUndefined()
 
-  expect((await t.locate('mem_bad', {}))?.record).toBeUndefined()
+    const w = ((await t.locate('mem_ws', {}))?.record)!
+    expect(w.name).toBe('部署脚本密钥')
+    expect(w.tags).toEqual([])
+    expect(w.content).toBe('密钥已挪进环境变量，此条留作记录')
+    expect(w.summary).toBe('部署脚本里硬编码的密钥')
+    expect(w.source).toEqual({ sessionId: 'session-2', eventRange: [0, 4363], sourceMode: 'user-explicit' })
+    expect(w.createdAt).toBe(1787166378178)
+    expect(w.updatedAt).toBe(1787166720840)
+  })
 })
 
 it('同目录内 name slug 撞名 → 缀 id 兜底，两条记录都能落盘且互不覆盖', async () => {

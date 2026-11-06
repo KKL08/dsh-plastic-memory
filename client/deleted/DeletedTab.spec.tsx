@@ -264,28 +264,44 @@ describe('最近删除', () => {
   describe('彻底删除', () => {
     const confirmText = '现在就彻底删除这条记忆？删除后不能恢复，以前快照里的副本也一起抹掉。'
 
-    it('「彻底删除…」是 ghost 按钮、在「恢复」左边；点了只在行内展开确认，不发命令，两个按钮都暂不可用；取消后什么都不变', () => {
+    const renderDeleted = () => {
       const gateway = createFakeGateway({ views: { deleted } })
       renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
-      const row = rowOf('用 pnpm 不用 npm')
+      return { gateway, row: rowOf('用 pnpm 不用 npm') }
+    }
+
+    it('「彻底删除…」是 ghost 按钮、在「恢复」左边', () => {
+      const { row } = renderDeleted()
       const buttons = within(row.querySelector('.pm-del-actions') as HTMLElement).getAllByRole('button')
       expect(buttons.map(b => b.textContent)).toEqual(['彻底删除…', '恢复'])
       // 「彻底删除…」是无边框、次文字色的 ghost 按钮，和「恢复」区分开
       expect(buttons[0]).toHaveClass('pm-btn--ghost')
       expect(buttons[1]).not.toHaveClass('pm-btn--ghost')
+    })
 
-      fireEvent.click(buttons[0]!)
+    it('点了只在这一行展开确认、不开对话框，两个按钮都暂不可用', () => {
+      const { row } = renderDeleted()
+      fireEvent.click(within(row).getByRole('button', { name: '彻底删除…' }))
       expect(within(row).getByText(confirmText)).toBeInTheDocument()
+      expect(screen.getAllByText(confirmText)).toHaveLength(1)
       expect(screen.queryByRole('dialog')).toBeNull()
-      expect(gateway.executed).toEqual([])
       expect(within(row).getByRole('button', { name: '恢复' })).toHaveAttribute('aria-disabled', 'true')
       expect(within(row).getByRole('button', { name: '彻底删除…' })).toHaveAttribute('aria-disabled', 'true')
-      expect(screen.getAllByText(confirmText)).toHaveLength(1)
+    })
 
+    it('点了「彻底删除…」不发命令', () => {
+      const { gateway, row } = renderDeleted()
+      fireEvent.click(within(row).getByRole('button', { name: '彻底删除…' }))
+      expect(gateway.executed).toEqual([])
+    })
+
+    it('取消后确认收起、按钮复原，不发命令也没有结果提示', () => {
+      const { gateway, row } = renderDeleted()
+      fireEvent.click(within(row).getByRole('button', { name: '彻底删除…' }))
       fireEvent.click(within(row).getByRole('button', { name: '取消' }))
       expect(screen.queryByText(confirmText)).toBeNull()
-      expect(gateway.executed).toEqual([])
       expect(within(row).getByRole('button', { name: '恢复' })).not.toHaveAttribute('aria-disabled')
+      expect(gateway.executed).toEqual([])
       expect(screen.queryByRole('status')).toBeNull()
     })
 
