@@ -1,12 +1,13 @@
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import type { MemoryStore, MemoryLogger } from '../store.ts'
 import type { KvTable } from '../kv-table.ts'
-import type { LocatedRecord } from '../storage/table.ts'
+import { byPosition, type LocatedRecord } from '../storage/table.ts'
 import type { TypeRegistry } from '../type-registry.ts'
-import { isModelChange, kindOf, type PendingDecisionsStore } from '../governance/decisions.ts'
+import type { PendingDecisionsStore } from '../governance/decisions.ts'
+import { isModelChange } from '../governance/undo-rules.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
-import type { MemorySnapshot, ScanCacheEntry } from '../governance/schema.ts'
+import { kindOf, type MemorySnapshot, type ScanCacheEntry } from '../governance/schema.ts'
 import { staleIgnores, type AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import { lastCheckupAt, type CheckupRecordStore } from '../governance/checkup-records.ts'
 import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
@@ -16,7 +17,8 @@ import {
   type CheckupView, type GlobalViewName, type SessionView, type WorkspaceMapView,
 } from './contract.ts'
 import { GLOBAL_VIEW_NAMES, buildCheckupView, buildGlobalViews, type GlobalViews } from './views.ts'
-import { scopeCacheKey, scopeOfLedger, type Scope } from '../scope.ts'
+import { scopeCacheKey, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
+import { isCopyOf } from '../tools/workspace-gate.ts'
 
 export interface ViewSourceDeps {
   store: MemoryStore
@@ -64,17 +66,26 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
       if (snap !== undefined) modelChangeSnapshots.set(snap.id, snap)
     }
   }
-  // 提升候选按条目所在的项目取那一份（与提升命令定位同一份）：预读每个 id 只留一份，同 id 在别的项目也有时可能是那份
-  const candidateCopies = new Map<string, LocatedRecord>()
+  // 条目所在作用域的那一份（与对它动手的命令定位同一份）：预读每个 id 只留一份，同 id 在别的作用域也有时可能是那份。
+  // 提升候选取条目所在的项目，模型改写、替代取改前那份的作用域
+  const entryCopies = new Map<string, LocatedRecord>()
+  const readCopy = async (entryId: string, memoryId: string, at: Scope) => {
+    const r = data.byId.get(memoryId)
+    if (r !== undefined && isCopyOf(r, at)) return
+    const hit = await deps.store.locate(memoryId, at)
+    // 按位置归一（同撤销与提升命令读到的）：.archive/ 里仍写着 active 的算已删
+    if (hit !== undefined && isCopyOf(hit.record, at)) entryCopies.set(entryId, { record: byPosition(hit), filePath: hit.filePath, dir: hit.dir })
+  }
   for (const e of open) {
     const label = e.workspaces?.[0]
     const own = label === undefined ? undefined : scopeOfLedger(label)
-    const r = data.byId.get(e.memoryIds[0] ?? '')
-    if (kindOf(e) !== 'promote-candidate' || own?.kind !== 'workspace' || r === undefined) continue
-    const { workspacePath } = own
-    if (r.scope === 'workspace' && r.workspacePath === workspacePath) continue
-    const hit = await deps.store.locate(r.id, own)
-    if (hit !== undefined && dirname(hit.filePath) === hit.dir) candidateCopies.set(e.id, { record: hit.record, filePath: hit.filePath, dir: hit.dir })
+    if (kindOf(e) === 'promote-candidate' && own?.kind === 'workspace' && data.byId.has(e.memoryIds[0] ?? '')) await readCopy(e.id, e.memoryIds[0]!, own)
+  }
+  for (const e of settled.filter(isModelChange)) {
+    const memoryId = e.memoryIds[0] ?? ''
+    const before = modelChangeSnapshots?.get(e.settled?.snapshotId ?? '')?.data.find(r => r.id === memoryId)
+    const at = before === undefined ? undefined : scopeOfMemory(before)
+    if (at !== undefined) await readCopy(e.id, memoryId, at)
   }
   const notes = listingNotes(listing, { includeEmpty: false })
   // 有缺标记或读不出的目录时，项目可能只是这次没认出来，不按「目录不在了」清它的体检记录
@@ -109,7 +120,7 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
     governanceEnabled: deps.isGovernanceEnabled?.() ?? true,
     ...(deps.bootedAt !== undefined ? { bootedAt: deps.bootedAt } : {}),
     ...(modelChangeSnapshots !== undefined ? { modelChangeSnapshots } : {}),
-    candidateCopies,
+    entryCopies,
   })
 }
 

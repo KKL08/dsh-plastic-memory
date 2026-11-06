@@ -5,13 +5,13 @@ import { ALREADY_REVIEWED_REASON, CONFIDENCE_BY_SOURCE, NOT_DELEGATED_REASON, is
 import type { MemoryStore } from './store.ts'
 import type { TypeRegistry } from './type-registry.ts'
 import type { PendingDecisionsStore } from './governance/decisions.ts'
-import { editFingerprint, type SnapshotStore } from './governance/snapshots.ts'
+import type { SnapshotStore } from './governance/snapshots.ts'
 import { detectSecrets, maskSecretSurface } from './secrets.ts'
 import { RecordNotFoundError } from './errors.ts'
 import { extractEntities, textSimilarity, DUPLICATE_SIMILARITY_THRESHOLD } from './text.ts'
 import { toToolOutput } from './output.ts'
 import { VALIDITY_DATE_FORMAT, VALIDITY_FORMAT, formatValidity, parseValidityInput } from './validity.ts'
-import { ledgerLabel, scopeAt, scopeOfMemory } from './scope.ts'
+import { ledgerLabel, scopeOfMemory } from './scope.ts'
 
 export interface SaveCandidate {
   action: 'create' | 'update'
@@ -461,6 +461,7 @@ export async function runSavePipeline(
   // 锁内复核：读到目标之后它又被改过（召回统计之外有字段不同，按位置看已归档，或已不在可见集合里）就不写——界面直接改、
   // 别的会话改写、删除、归档、提升、清候选标记夹在读和写之间时，整条替换会把它们盖掉。只删了本层、定位落到别层同 id 副本的，
   // 作用域不同同样拦下。子 agent 改写的归属已按读到的目标判过，其间被接受、提升的在这里一并拦下
+  let rewritten: MemoryRecord | undefined
   if (candidate.action === 'create') await store.create(clean)
   else {
     const seen: { current?: MemoryRecord } = {}
@@ -468,7 +469,8 @@ export async function runSavePipeline(
       seen.current = current
       return current === undefined || !isSameRecord(current, target!)
     }
-    if (!await store.put(clean, undefined, isChangedSinceRead)) return changedAfterRead(clean.id, seen.current, deps.delegation !== undefined)
+    rewritten = await store.put(clean, undefined, isChangedSinceRead)
+    if (rewritten === undefined) return changedAfterRead(clean.id, seen.current, deps.delegation !== undefined)
   }
 
   // 6. supersedes 处理：读到时在用的同作用域目标置 superseded（见上方 replaced）；锁内再看一次，其间被删除、被取代、
@@ -476,38 +478,29 @@ export async function runSavePipeline(
   const superseded: MemoryRecord[] = []
   for (const old of replaced) {
     try {
-      await store.update(old, (r) => {
+      const written = await store.update(old, (r) => {
         // 抛出即不写（同 updateIfLive）
         if (r.status !== 'active' || r.updatedAt !== old.updatedAt || !isSameScope(r)) throw new RecordNotFoundError(r.id)
         return { ...r, status: 'superseded', updatedAt: now }
       })
-      superseded.push(old)
+      superseded.push(written)
     } catch (err) {
       if (!(err instanceof RecordNotFoundError)) throw err   // 读到之后被别处动过：静默跳过
     }
   }
 
-  // 7. 撤销记录：改写、替代各记一条已结清的条目，指纹按落盘后的内容（撤销前据此确认之后没被别处改过）
+  // 7. 撤销记录：改写、替代各记一条已结清的条目，指纹按这次写下的那条（put / update 的返回值），撤销前据此确认之后没被别处改过
   if (snapshot && deps.decisions) {
     const origin = { sessionId: session.id, callId: deps.callId ?? '' }
-    const fingerprintOf = async (r: MemoryRecord) => {
-      const written = await store.get(r.id, scopeAt(r.workspacePath))
-      return written === undefined ? '' : editFingerprint(written)
-    }
     const workspaceOf = (r: MemoryRecord) => {
       const scope = scopeOfMemory(r)
       return scope === undefined ? '' : ledgerLabel(scope)
     }
-    if (candidate.action === 'update') {
-      await deps.decisions.addSettled({
-        kind: 'rewrite', memoryIds: [clean.id], summary: clean.name, workspaces: [workspaceOf(clean)], fingerprint: await fingerprintOf(clean), origin,
-      }, 'rewritten', now, snapshot.id)
+    if (rewritten !== undefined) {
+      await deps.decisions.addModelChange(rewritten, { kind: 'rewrite', workspace: workspaceOf(rewritten), origin }, snapshot.id, now)
     }
     for (const old of superseded) {
-      await deps.decisions.addSettled({
-        kind: 'supersede', memoryIds: [old.id], summary: old.name, workspaces: [workspaceOf(old)], fingerprint: await fingerprintOf(old),
-        origin: { ...origin, by: clean.id },
-      }, 'superseded', now, snapshot.id)
+      await deps.decisions.addModelChange(old, { kind: 'supersede', workspace: workspaceOf(old), origin: { ...origin, by: clean.id } }, snapshot.id, now)
     }
   }
 
