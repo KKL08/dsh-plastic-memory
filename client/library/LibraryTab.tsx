@@ -1,7 +1,7 @@
 /**
  * 「记忆查看」：选中范围里的记忆卡列表。搜索框 → 项目和全局下一行存储说明（每条一个文件 · 目录 · 打开目录）→ 目录问题（来自视图，
  * 不在这里重算）→ 列表。单个范围按类型分组，每组先露 3 条；「全部」跨范围按更新时间分四段，卡片上的范围名点了下钻到那个范围。行尾「删除」（先原位确认「删除这条？ 删除 · 取消」，再软删）·「打开文件」；
- * 删掉的那行原位换成结果行，可撤销（发 restore）；含密钥的再确认一次彻底删除，不可恢复。
+ * 删掉的那行原位换成结果行，可撤销（发 restore）；含密钥的再确认一次彻底删除，不可恢复。别处正在处理这一条时列表上方写明没有生效。
  */
 import { useEffect, useState } from 'react'
 import { checkupKey, scopeOfMemory, type LibraryView, type MemoryCard as MemoryCardData } from '../../src/gui/contract.ts'
@@ -166,12 +166,12 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
               <Button
                 variant="ghost"
                 unavailable={actions.unavailable(memory.id)}
-                onClick={() => { void actions.run(memory.id, { cmd: 'restore', memoryId: memory.id, layer: own }, null, () => { mark(memory, 'restored') }) }}
+                onClick={() => { actions.run(memory.id, { cmd: 'restore', memoryId: memory.id, layer: own }, null, () => { mark(memory, 'restored') }) }}
               >
                 {t('library.undo')}
               </Button>
             </div>
-            {actions.crossConfirm(memory.id)}
+            {actions.feedback(memory.id)}
           </div>
         </li>
       )
@@ -182,8 +182,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
           {isAll
             ? <MemoryCard memory={memory} now={now} typeLabel={typeLabel(memory.type)} scopeSlot={scopeLink(memory)} />
             : <MemoryCard memory={memory} now={now} hideType hideScope />}
-          {actions.crossConfirm(memory.id)}
-          {actions.secretConfirm(memory.id)}
+          {actions.feedback(memory.id)}
         </div>
         <div className="pm-row-actions">
           <DeleteWithConfirm
@@ -191,7 +190,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
               // 删的是正在高亮的那一条：当作播完，所在的组记成展开，结果行和「撤销」不缩回「展开其余」里
               if (memory.id === flashId) endFlash()
               mark(memory, 'deleting')
-              void actions.run(memory.id, { cmd: 'forget', memoryId: memory.id, layer: own }, null, () => { mark(memory, 'deleted') })
+              actions.run(memory.id, { cmd: 'forget', memoryId: memory.id, layer: own }, null, () => { mark(memory, 'deleted') })
             }}
             trigger={open => <Button variant="ghost" unavailable={actions.unavailable(memory.id)} onClick={open}>{t('library.delete')}</Button>}
           />
@@ -247,6 +246,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
         )
         : null}
       {notice !== undefined ? <p className="pm-notice" role="status" tabIndex={-1}>{notice.text}</p> : null}
+      {actions.strayFailures(items.map(m => m.id))}
       {items.length === 0
         ? (total === 0 && kept.length === 0
             ? <EmptyState variant="first" title={t('library.empty.first.title')}>{t('library.empty.first.body')}</EmptyState>

@@ -55,8 +55,6 @@ export const libraryZh = {
   'deleted.empty.title': '最近没有删除过记忆',
   'deleted.empty.body': '删除的记忆在这里保留 14 天，期间可以恢复，之后彻底清除。含密钥的记忆删除时直接抹掉，不进这里。',
 
-  'action.busy': '正在处理…',
-  'action.failed': '没有成功：{detail}',
   'action.openFailed': '没能打开，DeepSeek Harness 拒绝了这个路径。',
 } as const
 
@@ -115,7 +113,5 @@ export const libraryEn: Record<keyof typeof libraryZh, string> = {
   'deleted.empty.title': 'Nothing recently deleted',
   'deleted.empty.body': 'Deleted memories stay here for 14 days and can be restored, then they are purged. Memories containing secrets are erased on delete and never land here.',
 
-  'action.busy': 'Working…',
-  'action.failed': 'Did not work: {detail}',
   'action.openFailed': 'Could not open it; DeepSeek Harness refused this path.',
 }

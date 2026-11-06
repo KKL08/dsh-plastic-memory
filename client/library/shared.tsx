@@ -1,14 +1,14 @@
 /**
  * 「记忆查看」「最近删除」共用的几件小东西：视图没就绪时的一行说明、带参数打开时的目标行高亮、
- * 行尾动作的进行中 / 结果提示与跨项目确认、类型显示名。
+ * 行尾动作（经命令往返模块）的结果提示与行内反馈、类型显示名。
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { MemoryCard, MemoryCommand } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { useT } from '../i18n.tsx'
 import { useNavTarget, type NavStore, type NavTarget } from '../nav.ts'
-import { confirmCss, CrossConfirm, SecretDeleteConfirm } from '../command/confirm.tsx'
-import { keepFocusInPlace } from '../ui/focus-return.ts'
+import { CommandFeedback, confirmCss } from '../command/confirm.tsx'
+import { useCommandRunner } from '../command/useCommandRunner.ts'
 import { Icon } from '../ui/Icon.tsx'
 import { prefersReducedMotion } from '../ui/motion.tsx'
 import { typeLabel } from '../type-label.ts'
@@ -133,96 +133,54 @@ export function FlashRow({ flashing, onFlashEnd, className, children, as: Tag = 
   )
 }
 
-/** purged：彻底删除了（含密钥的记忆，或最近删除里的一条），最近删除里没有它，提示里不带去那儿的链接。 */
-export type Notice = { kind: 'ok'; text: string } | { kind: 'purged'; text: string } | { kind: 'error'; text: string }
+/**
+ * 列表上方的一行提示。purged：彻底删除了（含密钥的记忆，或最近删除里的一条），最近删除里没有它，提示里不带去那儿的链接；
+ * elsewhere：这一条正在别处处理或刚处理完，这次什么都没动（那一行可能随之消失，所以提示不放在行里）。
+ */
+export type Notice = { kind: 'ok'; text: string } | { kind: 'purged'; text: string } | { kind: 'elsewhere'; text: string } | { kind: 'error'; text: string }
 
 /** 成功后的提示；null = 不提示，结果由调用方原位画（onOk）。 */
 type OkText = ((result: { decisionId?: string }) => string) | null
 
-/** 等跨项目确认的那一行：服务端拒了（什么都没动），用户点「继续处理」才带 allowCrossWorkspace 重发。 */
-interface CrossPending { memoryId: string; workspacePath: string; command: MemoryCommand; okText: OkText; onOk: (() => void) | undefined }
-
 /**
- * 行尾动作：进行中的记忆 id 和最近一次结果。命令失败显示宿主或执行器的原话。
- * 涉及其他项目时和待处理卡同一套流程：先不带 allowCrossWorkspace 发，服务端回 cross-workspace 就在那一行确认。
- * 删除含密钥的记忆时服务端回 has-secret（什么都没动），同样在那一行确认，用户点「彻底删除」才发 hard-delete。
+ * 行尾动作：经命令往返模块按记忆 id 发命令，成功后的提示放在列表上方。跨项目确认、彻底删除确认（删除含密钥的记忆时
+ * 服务端回 has-secret）和失败画在那一行（feedback），那一行已不在列表里时失败挪到列表上方（strayFailures）；
+ * 别处已处理的提示放在列表上方。
  */
 export function useRowActions(session: BorrowedSession) {
   const t = useT()
   const gateway = useGateway()
-  const [busy, setBusy] = useState<ReadonlySet<string>>(new Set())
+  const runner = useCommandRunner(session)
   const [notice, setNotice] = useState<Notice | undefined>(undefined)
-  const [cross, setCross] = useState<CrossPending | undefined>(undefined)
-  /** forget 回了 has-secret 的那条命令：彻底删除沿用它指明的那一份，跨项目确认过的也不再问。 */
-  const [secret, setSecret] = useState<Extract<MemoryCommand, { cmd: 'forget' }> | undefined>(undefined)
-  const sessionId = session.kind === 'ready' ? session.sessionId : undefined
-  const mark = (id: string, on: boolean) => {
-    setBusy((prev) => {
-      const next = new Set(prev)
-      if (on) next.add(id)
-      else next.delete(id)
-      return next
+  /** 发过命令的记忆 id：找那一行已不在列表里的失败用。 */
+  const ran = useRef(new Set<string>())
+  const run = (memoryId: string, command: MemoryCommand, okText: OkText, onOk?: () => void) => {
+    setNotice(undefined)
+    ran.current.add(memoryId)
+    runner.run(memoryId, command, {
+      onOk(result, sent) {
+        // forget 回 has-secret 后改发的彻底删除：这一行不留结果，提示不可恢复
+        if (sent.cmd !== command.cmd) { setNotice({ kind: 'purged', text: t('pending.secret.deletedNotice') }); return }
+        onOk?.()
+        setNotice(okText === null ? undefined : sent.cmd === 'hard-delete' ? { kind: 'purged', text: okText(result) } : { kind: 'ok', text: okText(result) })
+      },
+      onHandledElsewhere() { setNotice({ kind: 'elsewhere', text: t('command.handledElsewhere') }) },
     })
-  }
-  const run = async (memoryId: string, command: MemoryCommand, okText: OkText, onOk?: () => void) => {
-    if (sessionId === undefined) return
-    keepFocusInPlace()
-    mark(memoryId, true)
-    const result = await gateway.execute(sessionId, command)
-    mark(memoryId, false)
-    const workspacePath = result.ok ? undefined : result.rejected?.[0]?.workspacePath
-    const isAllowed = 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
-    if (!result.ok && result.code === 'cross-workspace' && !isAllowed && workspacePath !== undefined) {
-      setNotice(undefined)
-      setCross({ memoryId, workspacePath, command, okText, onOk })
-      return
-    }
-    if (!result.ok && result.code === 'has-secret' && command.cmd === 'forget') {
-      setNotice(undefined)
-      setSecret(command)
-      return
-    }
-    if (result.ok) onOk?.()
-    setNotice(!result.ok ? { kind: 'error', text: t('action.failed', { detail: result.detail ?? result.code }) }
-      : okText === null ? undefined
-      : command.cmd === 'hard-delete' ? { kind: 'purged', text: okText(result) } : { kind: 'ok', text: okText(result) })
   }
   return {
     notice,
-    /** 按钮的 unavailable：没有会话、这条正在处理或等跨项目 / 彻底删除确认时给原因。 */
-    unavailable(id: string, needsSession = true): string | undefined {
-      if (needsSession && sessionId === undefined) return t('session.none.hint')
-      return busy.has(id) || cross?.memoryId === id || secret?.memoryId === id ? t('action.busy') : undefined
-    },
+    /** 按钮的 unavailable：没有会话、这条正在处理或等确认时给原因。 */
+    unavailable: runner.unavailable,
     run,
     /** 这一条的命令发出了、结果还没回来。 */
-    isBusy(id: string): boolean { return busy.has(id) },
-    /** 这一行的跨项目确认；不在等确认时为 null。 */
-    crossConfirm(memoryId: string): ReactNode {
-      if (cross?.memoryId !== memoryId) return null
-      return (
-        <CrossConfirm
-          workspacePath={cross.workspacePath}
-          onCancel={() => { setCross(undefined) }}
-          onConfirm={() => {
-            setCross(undefined)
-            void run(cross.memoryId, { ...cross.command, allowCrossWorkspace: true } as MemoryCommand, cross.okText, cross.onOk)
-          }}
-        />
-      )
-    },
-    /** 这一行的彻底删除确认（forget 回了 has-secret）；不在等确认时为 null。 */
-    secretConfirm(memoryId: string): ReactNode {
-      if (secret?.memoryId !== memoryId) return null
-      return (
-        <SecretDeleteConfirm
-          onCancel={() => { setSecret(undefined) }}
-          onConfirm={() => {
-            setSecret(undefined)
-            void run(memoryId, { ...secret, cmd: 'hard-delete' }, () => t('pending.secret.deletedNotice'))
-          }}
-        />
-      )
+    isBusy(id: string): boolean { return runner.stateOf(id).kind === 'busy' },
+    /** 这一行的确认与失败；没有时为 null。 */
+    feedback(memoryId: string): ReactNode { return <CommandFeedback runner={runner} id={memoryId} /> },
+    /** 失败的那一条已不在列表里（别处删掉、恢复了）：失败提示放在列表上方，不跟着那一行消失。shown：此刻列表里的记忆 id。 */
+    strayFailures(shown: readonly string[]): ReactNode {
+      const ids = new Set(shown)
+      return [...ran.current].filter(id => !ids.has(id) && runner.stateOf(id).kind === 'failed')
+        .map(id => <CommandFeedback key={id} runner={runner} id={id} />)
     },
     async open(path: string, action?: 'reveal') {
       if (!(await gateway.openPath(path, action))) setNotice({ kind: 'error', text: t('action.openFailed') })

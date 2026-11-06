@@ -2,7 +2,7 @@
  * 「最近删除」：选中范围里 14 天内软删的记忆。搜索框 → 一行保留规则 → 列表，按删除那天分「今天 / 近 7 天 / 更早」三段，
  * 都默认展开、不截断（截断会把快到期的藏起来），「全部」里卡片写范围名。每行写何时删；裁决时删掉的标来源
  * （「以「胜方名」为准时删除」，次文字色，不用颜色），下一行提示恢复后冲突会回到待处理。行尾「还能恢复 N 天 · 彻底删除… · 恢复」：
- * 恢复发 `/memory restore`；「彻底删除…」在行内确认一次，确认后发 `/memory hard-delete`，不等到期。
+ * 恢复发 `/memory restore`；「彻底删除…」在行内确认一次，确认后发 `/memory hard-delete`，不等到期。别处正在处理这一条时上方写明没有生效。
  * 密钥是物理删除，不在这里，空状态写明。
  */
 import { Fragment, useState } from 'react'
@@ -85,7 +85,7 @@ export function DeletedTab({ nav, scope, session, fold, now = Date.now() }: {
 
   const row = ({ memory, deletedAt, purgeAt, cause }: DeletedItem) => {
     const meta = [cause !== undefined ? causeLabel(cause, names, t) : t('deleted.label'), formatDay(deletedAt, now, t)]
-    const unavailable = actions.unavailable(memory.id) ?? (confirming === memory.id ? t('action.busy') : undefined)
+    const unavailable = actions.unavailable(memory.id) ?? (confirming === memory.id ? t('pending.busy') : undefined)
     return (
       <FlashRow key={memory.id} className="pm-list-row" flashing={flashId === memory.id} onFlashEnd={endFlash}>
         <div className="pm-del-body">
@@ -105,7 +105,7 @@ export function DeletedTab({ nav, scope, session, fold, now = Date.now() }: {
             ))}
           </p>
           {cause !== undefined ? <p className="pm-del-hint">{t('deleted.restoreHint')}</p> : null}
-          {actions.crossConfirm(memory.id)}
+          {actions.feedback(memory.id)}
           {confirming === memory.id
             ? (
               <SecretDeleteConfirm
@@ -114,7 +114,7 @@ export function DeletedTab({ nav, scope, session, fold, now = Date.now() }: {
                 onCancel={() => { setConfirming(undefined) }}
                 onConfirm={() => {
                   setConfirming(undefined)
-                  void actions.run(memory.id, { cmd: 'hard-delete', memoryId: memory.id, layer: scopeOfMemory(memory) }, () => t('deleted.hardDeleted'))
+                  actions.run(memory.id, { cmd: 'hard-delete', memoryId: memory.id, layer: scopeOfMemory(memory) }, () => t('deleted.hardDeleted'))
                 }}
               />
             )
@@ -126,7 +126,7 @@ export function DeletedTab({ nav, scope, session, fold, now = Date.now() }: {
           <Button
             unavailable={unavailable}
             onClick={() => {
-              void actions.run(
+              actions.run(
                 memory.id,
                 { cmd: 'restore', memoryId: memory.id, layer: scopeOfMemory(memory) },
                 result => t(result.decisionId !== undefined ? 'deleted.restoredConflict' : 'deleted.restored'),
@@ -146,6 +146,7 @@ export function DeletedTab({ nav, scope, session, fold, now = Date.now() }: {
       <SearchBox label={t('deleted.search.label')} placeholder={t('deleted.search.placeholder')} value={query} onChange={setQuery} />
       {scopeItems.length > 0 ? <p className="pm-del-note">{t('deleted.note')}</p> : null}
       {actions.notice !== undefined ? <p className="pm-notice" role="status" tabIndex={-1}>{actions.notice.text}</p> : null}
+      {actions.strayFailures(items.map(item => item.memory.id))}
       {items.length === 0
         ? scopeItems.length > 0
           ? <EmptyState variant="daily" title={t('deleted.search.none')} />

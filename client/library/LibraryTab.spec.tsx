@@ -2,7 +2,7 @@
 import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { GUI_VIEW_VERSION, checkupKey, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, checkupKey, type LibraryView, type MemoryCommandResult, type PendingView } from '../../src/gui/contract.ts'
 import type { BorrowedSession } from '../gateway.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createNavStore } from '../nav.ts'
@@ -197,6 +197,23 @@ describe('全部记忆', () => {
     expect(within(result()).getByRole('button', { name: '删除' })).toBeInTheDocument()
   })
 
+  it('PA-44 撤销删除时这条正在别处处理（claimed）：提示已在别处处理，不显示失败，结果行照旧', async () => {
+    const gateway = createFakeGateway({
+      views: { library: library() },
+      respond: command => command.cmd === 'restore'
+        ? { ok: false, cmd: command.cmd, code: 'claimed', detail: '待决项 pd1 正在被另一次操作处理，未做任何改动' }
+        : { ok: true, cmd: command.cmd },
+    })
+    renderInShell(<LibraryTab nav={createNavStore({ view: 'library' })} scope={app} session={session} now={NOW} />, gateway)
+    await remove(rowOf('提交前跑 typecheck'))
+    const result = () => screen.getAllByRole('listitem')[1]!
+    await act(async () => { fireEvent.click(within(result()).getByRole('button', { name: '撤销' })) })
+    expect(screen.getByRole('status')).toHaveTextContent('这次操作没有生效：这一条正在别处处理，或者刚在别处处理完。')
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByText(/没有成功|正在被另一次操作处理/)).toBeNull()
+    expect(result()).toHaveTextContent('已删除，14 天内可在「最近删除」找回。')
+  })
+
   it('删掉一个项目的最后一条：视图里这一层没了，结果行照样留在原位、能撤销；组标题也还在', async () => {
     const onlyBlog = library({ layers: [{ layer: { kind: 'global' }, items: [memory({ id: 'g1', scope: 'global', workspacePath: undefined, content: '回答用中文' })] }, { layer: blog, items: [memory({ id: 'b1', workspacePath: '/w/blog', content: '博客用 Astro', updatedAt: NOW - HOUR })] }] })
     const blogGone = library({ layers: [onlyBlog.layers[0]!] })
@@ -289,6 +306,17 @@ describe('全部记忆', () => {
     expect(screen.queryByText(/14 天/)).toBeNull()
   })
 
+  it('删除失败时这一行已经不在了（别处删掉）：失败提示挪到列表上方，不跟着那一行消失', async () => {
+    let release: ((result: MemoryCommandResult) => void) | undefined
+    const gateway = createFakeGateway({ views: { library: library() }, respond: () => new Promise((resolve) => { release = resolve }) })
+    renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
+    await remove(rowOf('提交前跑 typecheck'))
+    act(() => { gateway.setView('library', library({ layers: library().layers.map(l => ({ ...l, items: l.items.filter(m => m.id !== 'a2') })) })) })
+    await act(async () => { release!({ ok: false, cmd: 'forget', code: 'not-found', detail: '记忆 a2 不存在' }) })
+    expect(screen.queryByText('提交前跑 typecheck')).toBeNull()
+    expect(screen.getByRole('alert')).toHaveTextContent('没有成功：记忆 a2 不存在')
+  })
+
   it('删别的项目里的记忆：服务端拒（cross-workspace）后在行里确认，「继续处理」才带 allowCrossWorkspace 重发；失败显示原话', async () => {
     const gateway = createFakeGateway({
       views: { library: library() },
@@ -309,7 +337,7 @@ describe('全部记忆', () => {
       { cmd: 'forget', memoryId: 'b1', layer: blog, allowCrossWorkspace: true },
     ])
     expect(screen.queryByText(/属于 blog 项目/)).toBeNull()
-    expect(screen.getByRole('status')).toHaveTextContent('没有成功：记忆 b1 不存在')
+    expect(within(screen.getByRole('listitem')).getByRole('alert')).toHaveTextContent('没有成功：记忆 b1 不存在')
   })
 
   it('别的项目里含密钥的记忆：先确认彻底删除，再确认跨项目，重发的是带 allowCrossWorkspace 的 hard-delete，最后提示不可恢复', async () => {
