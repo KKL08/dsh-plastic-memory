@@ -57,11 +57,14 @@ before a release or when touching anything that talks to the host.
    installed `lib/` statically. No API key.
 3. **Host contract** — `pnpm host:contract`. Same fresh host plus a sibling
    verify plugin that drives the tools through the real host. Without a key it
-   covers install and load (the installed package boots and registers its
-   tools), the tool contract (workspace resolution, file layout, lossless
-   outputs, rule scan, snapshots, evidence anchors, restarts, subagent
-   sessions) and the GUI contract (the installed client bundle loads in the
-   host's factory format and ships every locale file). Set `DEEPSEEK_API_KEY`
+   covers install and load (the installed package boots, registers its tools
+   and its automatic checkup timer), the tool contract (workspace resolution,
+   file layout, lossless outputs, rule scan, snapshots, evidence anchors,
+   restarts, subagent sessions) and the GUI contract (the installed client
+   bundle loads in the host's factory format, registers exactly its expected
+   slots, all of them declared by the host, and ships every locale file;
+   `/memory` commands run through the host's command service and return
+   results the GUI can decode). Set `DEEPSEEK_API_KEY`
    to also run the semantic layer (model scans, the automatic checkup, masked
    auth errors); the key is written only into the temporary `DSH_HOME` and
    never anywhere else.
