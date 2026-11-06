@@ -339,7 +339,8 @@ export class ViewWriter {
     await mkdir(this.dir, { recursive: true })
     const path = join(this.dir, fileName)
     const last = this.replacedAt.get(fileName)
-    const wait = last === undefined ? 0 : last + VIEW_REPLACE_GAP_MS - this.now()
+    // 封顶：时钟往回调过时 last 在此刻之后，不封顶就要多等回调的那段
+    const wait = last === undefined ? 0 : Math.min(last + VIEW_REPLACE_GAP_MS - this.now(), VIEW_REPLACE_GAP_MS)
     if (wait > 0) await this.sleep(wait)
     const text = await render()
     if (text === undefined) return

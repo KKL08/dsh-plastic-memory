@@ -997,6 +997,20 @@ describe('视图写入', () => {
     expect(await readCheckup()).toMatchObject({ generatedAt: T0, governanceEnabled: true })
   })
 
+  it('时钟往回调过：下一次替换的等待不超过替换间隔', async () => {
+    let t = T0
+    const sleeps: number[] = []
+    let next = checkupAt(T0, true)
+    const writer = checkupOnly(() => next, { now: () => t, sleep: async ms => { sleeps.push(ms) } })
+    await writer.requestCheckups()
+    t = T0 - 60_000
+    next = checkupAt(t, false)
+    await writer.requestCheckups()
+    expect(sleeps.length).toBe(1)
+    expect(sleeps[0]).toBeLessThanOrEqual(VIEW_REPLACE_GAP_MS)
+    expect(await readCheckup()).toMatchObject({ governanceEnabled: false })
+  })
+
   it('PA-09 全局视图等待替换间隔期间另一个写入器写入更晚的视图：本次等完不覆盖', async () => {
     const h = harness()
     let t = T0
