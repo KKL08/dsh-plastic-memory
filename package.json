@@ -42,6 +42,9 @@
     "lib",
     "locale",
     "assets/icon.svg",
+    "assets/banner.jpg",
+    "assets/architecture.svg",
+    "assets/architecture.en.svg",
     "cordis.patch.yml",
     "README.md",
     "THIRD_PARTY_NOTICES.md"

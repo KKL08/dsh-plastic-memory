@@ -11,7 +11,7 @@ if (!input || !output || (flag !== undefined && flag !== '--without-optional')) 
   process.exit(2)
 }
 const p = JSON.parse(fs.readFileSync(input, 'utf8'))
-const out = { ...p, main: 'lib/index.js', exports: p.publishConfig.exports, files: ['lib', 'locale', 'assets/icon.svg', 'cordis.patch.yml', 'README.md', 'THIRD_PARTY_NOTICES.md'] }
+const out = { ...p, main: 'lib/index.js', exports: p.publishConfig.exports, files: ['lib', 'locale', 'assets/icon.svg', 'assets/banner.jpg', 'assets/architecture.svg', 'assets/architecture.en.svg', 'cordis.patch.yml', 'README.md', 'THIRD_PARTY_NOTICES.md'] }
 out.scripts = Object.fromEntries(Object.entries(p.scripts ?? {}).filter(([k]) => !k.includes('e2e')))
 if (flag === '--without-optional') delete out.optionalDependencies
 fs.writeFileSync(output, JSON.stringify(out, null, 2) + '\n')
