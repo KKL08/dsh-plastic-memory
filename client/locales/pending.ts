@@ -2,7 +2,6 @@
 
 export const pendingZh = {
   'pending.busy': '正在处理…',
-  'pending.failed': '没有完成：{detail}',
   'pending.undo': '撤销',
   'pending.cancel': '取消',
   'pending.cross.body': '这条记忆属于 {name} 项目，不是当前项目。确定在这里处理它吗？',
@@ -189,7 +188,6 @@ export const pendingZh = {
 
 export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.busy': 'Working…',
-  'pending.failed': 'Did not finish: {detail}',
   'pending.undo': 'Undo',
   'pending.cancel': 'Cancel',
   'pending.cross.body': 'This memory belongs to project {name}, not this one. Handle it from here anyway?',

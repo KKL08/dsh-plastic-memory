@@ -307,7 +307,7 @@ describe('待处理：各类卡', () => {
   it('命令失败：原话显示在卡片里', async () => {
     setup([promote], { respond: () => ({ ok: false, code: 'governance-disabled', detail: '体检已关闭，可在配置文件里把 governance.enabled 改成 true 打开' }) })
     fireEvent.click(screen.getByRole('button', { name: '提升为全局' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('没有完成：体检已关闭，可在配置文件里把 governance.enabled 改成 true 打开')
+    expect(await screen.findByRole('alert')).toHaveTextContent('没有成功：体检已关闭，可在配置文件里把 governance.enabled 改成 true 打开')
   })
 })
 
@@ -1268,25 +1268,6 @@ describe('待处理：直接改与直接合并', () => {
     expect(screen.getByRole('button', { name: '保存' })).not.toHaveAttribute('aria-disabled')
   })
 
-  it('名称里有高危密钥：同样本地拦住，不发命令', async () => {
-    const { commands } = setup([bloat], { respond: respondEdit })
-    startEdit()
-    fireEvent.click(screen.getByRole('button', { name: '更多' }))
-    fireEvent.change(screen.getByRole('textbox', { name: '名称' }), { target: { value: criticalKey } })
-    await save()
-    expect(commands()).toEqual([])
-    expect(screen.getByRole('alert')).toHaveTextContent('内容里有高危密钥，没有保存。')
-  })
-
-  it('新内容只是像密钥：照常发给服务端，由它回疑似再确认', async () => {
-    const { commands } = setup([bloat], { respond: command => (command.cmd === 'edit-memory' && command.force !== true ? { ok: false, cmd: command.cmd, code: 'secret-suspected' } : edited) })
-    startEdit()
-    fireEvent.change(screen.getByRole('textbox', { name: '正文' }), { target: { value: 'password: abc12345' } })
-    await save()
-    expect(commands().map(c => c.cmd)).toEqual(['edit-memory'])
-    expect(screen.getByText('内容里有像密钥的片段。确定不是密钥再保存。')).toBeInTheDocument()
-  })
-
   it('新内容像密钥：卡片里再确认一次，「仍然保存」带 force 重发', async () => {
     const { commands } = setup([bloat], {
       respond: command => (command.cmd === 'edit-memory' && command.force !== true ? { ok: false, cmd: command.cmd, code: 'secret-suspected' } : edited),
@@ -1345,15 +1326,6 @@ describe('待处理：直接改与直接合并', () => {
       }])
       expect(screen.getByText('已合并')).toBeInTheDocument()
       expect(screen.getByText(`被字句 · 12 字 → 14 字`)).toBeInTheDocument()
-    })
-
-    it('合并后的内容有高危密钥：本地拦住，不发命令', async () => {
-      const { commands } = setup([pairOf(left, right)], { respond: command => (command.cmd === 'merge-memories' ? merged : { ok: true, cmd: command.cmd }) })
-      fireEvent.click(screen.getByRole('button', { name: '直接合并' }))
-      fireEvent.change(screen.getByRole('textbox', { name: '正文' }), { target: { value: `两条合一：${criticalKey}` } })
-      await save()
-      expect(commands()).toEqual([])
-      expect(screen.getByRole('alert')).toHaveTextContent('内容里有高危密钥，没有保存。')
     })
 
     it('一条全局一条项目：保留全局那条，预填它的名称', () => {

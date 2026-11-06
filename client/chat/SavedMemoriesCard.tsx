@@ -5,6 +5,7 @@
  * 点「删除」才发，删后原位留「已删除。14 天内也能在最近删除里找回。」和「撤销」；
  * 每条右下角「查看详情 ›」（次文字色、常规字重）打开记忆页「记忆查看」并定位到这一条（故事 41）。
  * 含密钥的记忆不能软删（服务端回 has-secret，什么都没动）：原位确认，「彻底删除」发 hard-delete，删后只留不可恢复的说明、没有撤销。
+ * 命令经命令往返模块发出：跨项目确认、失败提示同其他面板；撤销删除失败时那一行还是「已删除」，不另写原因（显式选项）。
  * 删没删读网关的删除状态：在右侧栏、全部记忆里删了同一条，或 agent 在对话里删了它，这里也换成删后的样子。
  * 密钥不会出现在这里：记忆卡在 savedMemoryCard 里已遮盖，口径比视图宽（疑似密钥也遮，见 tool-summary.ts）。
  * 模型标成全局提升候选的（全部记忆视图里的 promotion）：折叠行末尾「· N 条可提升为全局」，展开后那条元信息带「可提升为全局」，
@@ -23,20 +24,17 @@ import { useTypeLabel } from '../library/shared.tsx'
 import { Icon } from '../ui/Icon.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { withRollingNumber } from '../ui/motion.tsx'
-import { keepFocusInPlace } from '../ui/focus-return.ts'
-import { crossConfirmCss, DeleteWithConfirm, SecretDeleteConfirm } from '../pending/action.tsx'
-import { promoteInPlaceCss, promotionOf, usePromoteInPlace, type InPlacePromotion } from '../pending/promote-in-place.tsx'
-import { ModelChangeLine, modelChangeCss } from '../pending/model-change.tsx'
+import { CommandFeedback, confirmCss, DeleteWithConfirm } from '../command/confirm.tsx'
+import { useCommandRunner } from '../command/useCommandRunner.ts'
+import { promoteInPlaceCss, promotionOf, usePromoteInPlace, type InPlacePromotion } from './promote-in-place.tsx'
+import { ModelChangeLine, modelChangeCss } from './model-change.tsx'
 import type { SavedMemory } from './saved-turn.ts'
 
 /** 卡片挂上时最近一条记下不超过这么久，算对话进行中刚出现的；翻历史时的卡都更早。 */
 const LIVE_MS = 10_000
 
-/** 这一行自己的进行中 / 失败 / 等确认；删没删读网关的删除状态（别处删的也算，交付卡卸载重挂也还在）。 */
-type RowState =
-  | { kind: 'idle' } | { kind: 'busy' } | { kind: 'failed'; detail: string }
-  /** 等用户确认彻底删除（含密钥）。 */
-  | { kind: 'secret' }
+/** 这一行删除、撤销删除在命令往返里的 key：进行中、等确认、失败都记在这里；删没删读网关的删除状态（别处删的也算，交付卡卸载重挂也还在）。 */
+const ROW = 'row'
 
 export interface SavedMemoriesCardProps {
   sessionId: string
@@ -75,7 +73,7 @@ function SavedRow({ session, item, scope, promotion, rewrite, superseded, expire
 }) {
   const t = useT()
   const gateway = useGateway()
-  const { sessionId } = session
+  const runner = useCommandRunner(session)
   const id = item.memory.id
   const promote = usePromoteInPlace(session, item.memory, scope, promotion, onWroteAgentsMd)
   // 写进了 AGENTS.md：项目里那条进了最近删除，这一行留着结果，不再给删除、查看详情
@@ -84,7 +82,13 @@ function SavedRow({ session, item, scope, promotion, rewrite, superseded, expire
   const [firstSeen] = useState(() => Date.now())
   const savedAt = Number.isFinite(item.memory.updatedAt) && item.memory.updatedAt > 0 ? item.memory.updatedAt : firstSeen
   const how = gateway.useDeletions().of(id, scope, savedAt)
-  const [state, setState] = useState<RowState>({ kind: 'idle' })
+  // 这一行换成「已删除」时收起之前的失败（例如删除失败后别处删了它），撤销回来也不带着
+  const [seenHow, setSeenHow] = useState(how)
+  if (seenHow !== how) {
+    setSeenHow(how)
+    if (how === 'soft') runner.cancel(ROW)
+  }
+  const isBusy = runner.stateOf(ROW).kind === 'busy'
   const changes = (
     <>
       {rewrite !== undefined ? <ModelChangeLine session={session} change={rewrite} kind="rewrite" after={item.memory} /> : null}
@@ -92,16 +96,7 @@ function SavedRow({ session, item, scope, promotion, rewrite, superseded, expire
       {expiredSupersedes > 0 ? <ModelChangeLine session={session} change="expired" kind="supersede" count={expiredSupersedes} /> : null}
     </>
   )
-  const run = async (cmd: 'forget' | 'restore' | 'hard-delete') => {
-    if (state.kind === 'busy') return
-    keepFocusInPlace()
-    setState({ kind: 'busy' })
-    const result = await gateway.execute(sessionId, { cmd, memoryId: id, layer: scope })
-    if (result.ok) setState({ kind: 'idle' })
-    else if (cmd === 'forget' && result.code === 'has-secret') setState({ kind: 'secret' })
-    // 撤销失败时那一行还是「已删除」，不另写原因
-    else setState(cmd === 'restore' ? { kind: 'idle' } : { kind: 'failed', detail: result.detail ?? result.code })
-  }
+  const feedback = <CommandFeedback runner={runner} id={ROW} />
   if (isWrittenToAgentsMd) {
     return (
       <div className="pm-saved-row" data-memory-id={id}>
@@ -119,11 +114,19 @@ function SavedRow({ session, item, scope, promotion, rewrite, superseded, expire
       </div>
     )
   }
-  if (how === 'soft' && state.kind !== 'busy') {
+  if (how === 'soft' && !isBusy) {
     return (
       <div className="pm-saved-row pm-saved-row--deleted" data-memory-id={id}>
-        <p className="pm-saved-note">{t('chat.card.deleted')}</p>
-        <Button onClick={() => { void run('restore') }}>{t('chat.card.undo')}</Button>
+        <div className="pm-saved-main">
+          <p className="pm-saved-note">{t('chat.card.deleted')}</p>
+          {feedback}
+        </div>
+        <Button
+          unavailable={runner.unavailable(ROW)}
+          onClick={() => { runner.run(ROW, { cmd: 'restore', memoryId: id, layer: scope }, { onFailed: 'silent' }) }}
+        >
+          {t('chat.card.undo')}
+        </Button>
       </div>
     )
   }
@@ -133,24 +136,21 @@ function SavedRow({ session, item, scope, promotion, rewrite, superseded, expire
         <MemoryCard memory={item.memory} now={now} typeLabel={typeLabel(item.memory.type)} />
         {promote}
         {changes}
-        {state.kind === 'failed' ? <p className="pm-saved-note">{t('chat.card.failed', { detail: state.detail })}</p> : null}
-        {state.kind === 'secret'
-          ? <SecretDeleteConfirm onCancel={() => { setState({ kind: 'idle' }) }} onConfirm={() => { void run('hard-delete') }} />
-          : null}
+        {feedback}
         <div className="pm-saved-foot">
           <button type="button" className="pm-link" onClick={onDetail}>{t('chat.card.detail')}</button>
         </div>
       </div>
       <DeleteWithConfirm
-        onDelete={() => { void run('forget') }}
+        onDelete={() => { runner.run(ROW, { cmd: 'forget', memoryId: id, layer: scope }) }}
         trigger={open => (
           <button
             type="button"
             className="pm-icon-btn"
             aria-label={t('chat.card.delete')}
             title={t('chat.card.delete')}
-            aria-disabled={state.kind === 'busy' || state.kind === 'secret' || undefined}
-            onClick={() => { if (state.kind !== 'busy' && state.kind !== 'secret') open() }}
+            aria-disabled={runner.unavailable(ROW) !== undefined || undefined}
+            onClick={() => { if (runner.unavailable(ROW) === undefined) open() }}
           >
             <Icon name="trash" size={14} />
           </button>
@@ -274,7 +274,7 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
   )
 }
 
-export const savedMemoriesCardCss = crossConfirmCss + promoteInPlaceCss + modelChangeCss + `
+export const savedMemoriesCardCss = confirmCss + promoteInPlaceCss + modelChangeCss + `
 .pm-saved {
   display: flex; flex-direction: column; gap: 10px; margin: 4px 0; padding: 12px 14px;
   border: 0.5px solid var(--pm-line-card); border-radius: var(--dsw-radius-lg, 16px); background: var(--pm-bg);

@@ -7,6 +7,7 @@
 import { diffWords, type Change } from 'diff'
 import { Fragment, useEffect, useId, useRef, useState } from 'react'
 import { detectSecrets, scopeOfMemory, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type ModelEditAdviceType } from '../../src/gui/contract.ts'
+import { LLM_FAILURE_KEYS } from '../command/protocol.ts'
 import { useGateway, type BorrowedSession, type ModelState } from '../gateway.ts'
 import { formatNumber, useT, type Translate } from '../i18n.tsx'
 import { Button } from '../ui/Button.tsx'
@@ -26,10 +27,10 @@ const diffOf = (before: string, after: string) => diffWords(before, after, { int
 
 function failureOf(r: Extract<MemoryCommandResult, { ok: false }>, t: Translate): string {
   switch (r.code) {
-    case 'llm-unavailable': return t('pending.model.unavailable')
-    case 'llm-failed': return t('pending.model.failed', { detail: r.detail ?? '' })
-    case 'llm-invalid-output': return t('pending.model.invalid')
-    default: return t('pending.failed', { detail: r.detail ?? r.code })
+    case 'llm-unavailable': return t(LLM_FAILURE_KEYS[r.code])
+    case 'llm-failed': return t(LLM_FAILURE_KEYS[r.code], { detail: r.detail ?? '' })
+    case 'llm-invalid-output': return t(LLM_FAILURE_KEYS[r.code])
+    default: return t('command.failed', { detail: r.detail ?? r.code })
   }
 }
 

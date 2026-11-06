@@ -1,7 +1,7 @@
 // 「最近删除」tab：对假网关断言每行的清除时刻、裁决来源、恢复与彻底删除命令、空状态。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { GUI_VIEW_VERSION, type DeletedView, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, type DeletedView, type LibraryView, type MemoryCommandResult, type PendingView } from '../../src/gui/contract.ts'
 import type { BorrowedSession } from '../gateway.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createNavStore } from '../nav.ts'
@@ -176,6 +176,31 @@ describe('最近删除', () => {
     expect(screen.getByRole('status')).toHaveTextContent('已恢复，这条冲突回到了「等你决定」。')
   })
 
+  it('PA-44 恢复时这条正在别处处理（claimed）：提示已在别处处理，不显示失败，这一行照旧可用', async () => {
+    const gateway = createFakeGateway({
+      views: { deleted },
+      respond: command => ({ ok: false, cmd: command.cmd, code: 'claimed', detail: '待决项 pd1 正在被另一次操作处理，未做任何改动' }),
+    })
+    renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
+    const row = rowOf('测试用 sqlite')
+    await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '恢复' })) })
+    expect(screen.getByRole('status')).toHaveTextContent('这次操作没有生效：这一条正在别处处理，或者刚在别处处理完。')
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByText(/没有成功|正在被另一次操作处理/)).toBeNull()
+    expect(within(row).getByRole('button', { name: '恢复' })).not.toHaveAttribute('aria-disabled')
+  })
+
+  it('恢复失败时这一行已经不在了（别处彻底删掉）：失败提示挪到列表上方，不跟着那一行消失', async () => {
+    let release: ((result: MemoryCommandResult) => void) | undefined
+    const gateway = createFakeGateway({ views: { deleted }, respond: () => new Promise((resolve) => { release = resolve }) })
+    renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
+    await act(async () => { fireEvent.click(within(rowOf('用 pnpm 不用 npm')).getByRole('button', { name: '恢复' })) })
+    act(() => { gateway.setView('deleted', { ...deleted, items: deleted.items.filter(item => item.memory.id !== 'd1') }) })
+    await act(async () => { release!({ ok: false, cmd: 'restore', code: 'not-found', detail: '记忆 d1 不存在' }) })
+    expect(screen.queryByText('用 pnpm 不用 npm')).toBeNull()
+    expect(screen.getByRole('alert')).toHaveTextContent('没有成功：记忆 d1 不存在')
+  })
+
   it('恢复别的项目里的：服务端拒后在行里确认，「取消」不重发，「继续处理」带 allowCrossWorkspace 重发；普通恢复只说已恢复', async () => {
     const gateway = createFakeGateway({
       views: { deleted },
@@ -282,7 +307,7 @@ describe('最近删除', () => {
       const row = rowOf('用 pnpm 不用 npm')
       fireEvent.click(within(row).getByRole('button', { name: '彻底删除…' }))
       await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '彻底删除' })) })
-      expect(screen.getByRole('status')).toHaveTextContent('没有成功：不存在或已处理：d1')
+      expect(within(row).getByRole('alert')).toHaveTextContent('没有成功：不存在或已处理：d1')
       expect(within(row).getByRole('button', { name: '恢复' })).not.toHaveAttribute('aria-disabled')
       expect(within(row).getByRole('button', { name: '彻底删除…' })).not.toHaveAttribute('aria-disabled')
     })

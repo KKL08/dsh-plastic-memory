@@ -1,5 +1,5 @@
 /**
- * 待处理的各类卡（PRD 5.2；建议整理见 spec「建议整理的动作」）与处理后留在原位的结果卡。每张卡动手前写清后果；动作经 useItemAction 发命令，
+ * 待处理的各类卡（PRD 5.2；建议整理见 spec「建议整理的动作」）与处理后留在原位的结果卡。每张卡动手前写清后果；动作经 useCardAction（命令往返模块）发命令，
  * 成功后把结果（Outcome）交给列表，由列表在原位换成结果卡。
  */
 import { createContext, useContext, useState, type ReactNode } from 'react'
@@ -17,7 +17,9 @@ import { ConflictRuling, VerticalConflictRuling } from '../ui/ConflictRuling.tsx
 import { DismissButton } from '../ui/DismissButton.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { StatusMarker } from '../ui/StatusMarker.tsx'
-import { ActionFeedback, DeleteWithConfirm, SecretDeleteConfirm, useItemAction, type EditCommand, type ItemAction } from './action.tsx'
+import { CommandFeedback, DeleteWithConfirm, SecretDeleteConfirm } from '../command/confirm.tsx'
+import type { EditCommand } from '../command/protocol.ts'
+import { useCommandRunner, type RunHandlers } from '../command/useCommandRunner.ts'
 import { EditPanel, type EditDraft } from './edit.tsx'
 import { ModelEditPanel } from './model-edit.tsx'
 import { MovePanel } from './move.tsx'
@@ -51,8 +53,30 @@ export interface CardProps<K extends PendingItem['kind']> {
   now: number
   typeLabel: (type: string) => string
   onDone: (outcome: Outcome) => void
-  /** 这一条正在别处处理或刚处理完，什么都没动（见 isHandledElsewhere）：由列表在卡片外提示。 */
+  /** 这一条正在别处处理或刚处理完，什么都没动（命令往返的 handled-elsewhere）：由列表在卡片外提示。 */
   onRefused: () => void
+}
+
+/** 一张卡的动作：共用一个 key，在途、等确认、失败都记在这张卡上，反馈画在卡片底部。 */
+export interface CardAction {
+  run(command: MemoryCommand): void
+  /** 按钮不可用的原因：没有会话、正在处理、等确认。 */
+  unavailable: string | undefined
+  /** 命令以外的失败（打开文件、写配置）也显示在同一处。 */
+  fail(detail: string): void
+  feedback: ReactNode
+}
+
+const CARD = 'card'
+
+export function useCardAction(session: BorrowedSession, handlers: RunHandlers): CardAction {
+  const runner = useCommandRunner(session)
+  return {
+    run(command) { runner.run(CARD, command, handlers) },
+    unavailable: runner.unavailable(CARD),
+    fail(detail) { runner.fail(CARD, detail) },
+    feedback: <CommandFeedback runner={runner} id={CARD} />,
+  }
 }
 
 /** 记忆在别的项目里（相对借来的会话所在项目）时返回项目路径。 */
@@ -145,7 +169,7 @@ export function titleOf(item: PendingItem, t: Translate): string {
 export function SecretCard({ item, session, now, typeLabel, onDone }: CardProps<'secret'>) {
   const t = useT()
   const gateway = useGateway()
-  const action = useItemAction(session, () => { onDone({ kind: 'hard-deleted' }) })
+  const action = useCardAction(session, { onOk: () => { onDone({ kind: 'hard-deleted' }) } })
   /** 本机临时展开的原文：只在这个组件的内存里，收起或离开页面就没了。 */
   const [revealed, setRevealed] = useState<string | null | undefined>(undefined)
   const [confirming, setConfirming] = useState(false)
@@ -178,18 +202,21 @@ export function SecretCard({ item, session, now, typeLabel, onDone }: CardProps<
             <Button variant="danger" unavailable={action.unavailable} onClick={() => { setConfirming(true) }}>{t('pending.secret.delete')}</Button>
           </div>
         )}
-      <ActionFeedback action={action} />
+      {action.feedback}
     </Card>
   )
 }
 
 // —— 冲突 ——
 
+/** 裁决成功 → 结果卡的 Outcome。 */
+const resolvedTo = (onDone: (outcome: Outcome) => void): RunHandlers['onOk'] => (result, command) => {
+  if (command.cmd === 'resolve') onDone({ kind: 'resolved', verdict: command.verdict, ...(result.isUnrecorded ? { isUnrecorded: true } : {}), ...(result.isHardDeleted ? { isHardDeleted: true } : {}) })
+}
+
 export function HorizontalCard({ item, session, now, typeLabel, onDone, onRefused }: CardProps<'conflict-horizontal'>) {
   const t = useT()
-  const action = useItemAction(session, (command, result) => {
-    if (command.cmd === 'resolve') onDone({ kind: 'resolved', verdict: command.verdict, ...(result.isUnrecorded ? { isUnrecorded: true } : {}), ...(result.isHardDeleted ? { isHardDeleted: true } : {}) })
-  }, onRefused)
+  const action = useCardAction(session, { onOk: resolvedTo(onDone), onHandledElsewhere: onRefused })
   const preferred = item.preferredId === undefined ? undefined
     : item.left?.id === item.preferredId ? { side: 'A', memory: item.left }
       : item.right?.id === item.preferredId ? { side: 'B', memory: item.right } : undefined
@@ -210,16 +237,14 @@ export function HorizontalCard({ item, session, now, typeLabel, onDone, onRefuse
         headExtra={<ScopeChips />}
         onRule={(verdict) => { action.run({ cmd: 'resolve', decisionId: item.decisionId, verdict }) }}
       />
-      <ActionFeedback action={action} />
+      {action.feedback}
     </div>
   )
 }
 
 export function VerticalCard({ item, session, now, typeLabel, onDone, onRefused }: CardProps<'conflict-vertical'>) {
   const t = useT()
-  const action = useItemAction(session, (command, result) => {
-    if (command.cmd === 'resolve') onDone({ kind: 'resolved', verdict: command.verdict, ...(result.isUnrecorded ? { isUnrecorded: true } : {}), ...(result.isHardDeleted ? { isHardDeleted: true } : {}) })
-  }, onRefused)
+  const action = useCardAction(session, { onOk: resolvedTo(onDone), onHandledElsewhere: onRefused })
   return (
     <div className="pm-pending-item">
       <VerticalConflictRuling
@@ -234,7 +259,7 @@ export function VerticalCard({ item, session, now, typeLabel, onDone, onRefused 
         headExtra={<ScopeChips />}
         onRule={(verdict) => { action.run({ cmd: 'resolve', decisionId: item.decisionId, verdict }) }}
       />
-      <ActionFeedback action={action} />
+      {action.feedback}
     </div>
   )
 }
@@ -246,10 +271,13 @@ export function PromoteCard({ item, session, now, typeLabel, onDone, onRefused, 
   promoteTarget: 'global' | 'agents-md' | undefined
 }) {
   const t = useT()
-  const action = useItemAction(session, (command) => {
-    if (command.cmd === 'promote') onDone({ kind: 'promoted', target: command.target })
-    if (command.cmd === 'keep-local') onDone({ kind: 'kept-local' })
-  }, onRefused)
+  const action = useCardAction(session, {
+    onOk: (_result, command) => {
+      if (command.cmd === 'promote') onDone({ kind: 'promoted', target: command.target })
+      if (command.cmd === 'keep-local') onDone({ kind: 'kept-local' })
+    },
+    onHandledElsewhere: onRefused,
+  })
   const other = otherProject(item.memory, session)
   const unavailable = action.unavailable ?? (item.memory === null ? t('conflict.missingHint') : undefined)
   const promoteLabel = promoteTarget === 'agents-md' ? t('pending.promote.agentsMd')
@@ -276,7 +304,7 @@ export function PromoteCard({ item, session, now, typeLabel, onDone, onRefused, 
           {promoteLabel}
         </Button>
       </div>
-      <ActionFeedback action={action} />
+      {action.feedback}
     </Card>
   )
 }
@@ -290,7 +318,7 @@ export function OverflowCard({ item, session, onDone, onRefused, budget, onClean
 }) {
   const t = useT()
   const gateway = useGateway()
-  const action = useItemAction(session, () => { onDone({ kind: 'dismissed' }) }, onRefused)
+  const action = useCardAction(session, { onOk: () => { onDone({ kind: 'dismissed' }) }, onHandledElsewhere: onRefused })
   // 建议值：下一档的起点向上取整到百，填了就不会在这一档再提醒
   const suggested = budget === undefined ? '' : String(Math.ceil(relaxedCap(budget, item.tier + 1) / 100) * 100)
   const [draft, setDraft] = useState<string | undefined>(undefined)
@@ -344,7 +372,7 @@ export function OverflowCard({ item, session, onDone, onRefused, budget, onClean
           {t('pending.overflow.cleanup')}
         </button>
       </p>
-      <ActionFeedback action={action} />
+      {action.feedback}
     </Card>
   )
 }
@@ -354,7 +382,7 @@ export function OverflowCard({ item, session, onDone, onRefused, budget, onClean
 export function UnreadableCard({ item, session }: CardProps<'unreadable-file'>) {
   const t = useT()
   const gateway = useGateway()
-  const action = useItemAction(session, () => {})
+  const action = useCardAction(session, {})
   const open = (how: 'open' | 'reveal') => {
     void gateway.openPath(item.filePath, how).then((ok) => { if (!ok) action.fail(t('pending.openFailed')) })
   }
@@ -366,7 +394,7 @@ export function UnreadableCard({ item, session }: CardProps<'unreadable-file'>) 
         <Button onClick={() => { open('reveal') }}>{t(isMac() ? 'pending.unreadable.revealMac' : 'pending.unreadable.revealOther')}</Button>
         <Button onClick={() => { open('open') }}>{t('pending.unreadable.open')}</Button>
       </div>
-      <ActionFeedback action={action} />
+      {action.feedback}
     </Card>
   )
 }
@@ -404,7 +432,7 @@ const MISPLACED_TO_PROJECT = { body: 'pending.advice.misplaced.toProjectBody', a
  * 标题行右上角的叉「不再提醒」：发 ignore-advice，带这一项的类型和全部记忆（内容重复是整组），每条带卡片上那一份的作用域和卡片版本。
  * 很久没确认的不给：它的出路是「仍然有效」或删除。
  */
-function IgnoreButton({ item, action }: { item: Item<'advice'>; action: ItemAction }) {
+function IgnoreButton({ item, action }: { item: Item<'advice'>; action: CardAction }) {
   const t = useT()
   if (item.type === 'stale') return null
   const memories = item.memories.map(m => ({ memoryId: m.id, layer: scopeOfMemory(m), base: baseOf(m) }))
@@ -445,7 +473,7 @@ export function AdviceCard(props: CardProps<'advice'> & {
   const { item, session, now, typeLabel, onDone, onRefused, projects, defaultProject } = props
   const t = useT()
   const gateway = useGateway()
-  const action = useItemAction(session, (command, result) => {
+  const action = useCardAction(session, { onHandledElsewhere: onRefused, onOk: (result, command) => {
     if (command.cmd === 'confirm') onDone({ kind: 'confirmed' })
     if (command.cmd === 'forget') onDone({ kind: 'deleted', memoryId: command.memoryId, scope: command.layer })
     if (command.cmd === 'hard-delete') onDone({ kind: 'hard-deleted' })
@@ -462,7 +490,7 @@ export function AdviceCard(props: CardProps<'advice'> & {
         filePath: result.filePath,
       })
     }
-  }, onRefused)
+  } })
   const [isEditing, setEditing] = useState(false)
   const [isModelEditing, setModelEditing] = useState(false)
   const [isMoving, setMoving] = useState(false)
@@ -544,7 +572,7 @@ export function AdviceCard(props: CardProps<'advice'> & {
               <div className="pm-pending-actions">{copy.actions.map(a => buttons[a])}</div>
             </>
           )}
-      <ActionFeedback action={action} />
+      {action.feedback}
     </Card>
   )
 }
@@ -564,7 +592,7 @@ function mergeDraft(pair: readonly [MemoryCardData, MemoryCardData]): { draft: E
  * 两条都能改时再给「直接合并」「让模型合并」：合成保留的那条，另一条进最近删除。
  */
 function AdviceGroupCard({ item, session, now, typeLabel, action, buttonsOf }: CardProps<'advice'> & {
-  action: ItemAction
+  action: CardAction
   buttonsOf: (memory: MemoryCardData, deleteLabel?: string) => Record<AdviceAction, ReactNode>
 }) {
   const t = useT()
@@ -635,7 +663,7 @@ function AdviceGroupCard({ item, session, now, typeLabel, action, buttonsOf }: C
               </div>
             </>
           )}
-      <ActionFeedback action={action} />
+      {action.feedback}
     </Card>
   )
 }
@@ -694,7 +722,7 @@ export function ResultCard({ item, outcome, session, now, typeLabel, onUndone, o
   onRefused: () => void
 }) {
   const t = useT()
-  const action = useItemAction(session, () => { onUndone() }, onRefused)
+  const action = useCardAction(session, { onOk: () => { onUndone() }, onHandledElsewhere: onRefused })
   if (outcome.kind === 'edited' || outcome.kind === 'merged') return <EditedRow item={item} outcome={outcome} action={action} />
   const copy = resultCopy(item, outcome, t)
   const undoId = 'decisionId' in item ? item.decisionId : outcome.kind === 'promoted' || outcome.kind === 'moved' ? outcome.decisionId : undefined
@@ -718,7 +746,7 @@ export function ResultCard({ item, outcome, session, now, typeLabel, onUndone, o
       >
         {copy.body}
       </ResultLine>
-      <ActionFeedback action={action} />
+      {action.feedback}
     </Card>
   )
 }
@@ -727,7 +755,7 @@ export function ResultCard({ item, outcome, session, now, typeLabel, onUndone, o
 function EditedRow({ item, outcome, action }: {
   item: PendingItem
   outcome: Extract<Outcome, { kind: 'edited' | 'merged' }>
-  action: ItemAction
+  action: CardAction
 }) {
   const t = useT()
   const gateway = useGateway()
@@ -752,7 +780,7 @@ function EditedRow({ item, outcome, action }: {
           : null}
         {filePath !== undefined ? <Button onClick={open}>{t('pending.advice.open')}</Button> : null}
       </div>
-      <ActionFeedback action={action} />
+      {action.feedback}
     </article>
   )
 }
