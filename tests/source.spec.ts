@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import { executeSource, renderSourceResult, extractEventText, type ReadEventFn } from '../src/tools/source.ts'
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
+import { MemoryStore } from '../src/store.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 // 本文件默认造一条 mem_a 的 workspace preference，源自固定会话 session-x（区间供开窗断言）。
 const record = (partial: Partial<MemoryRecord> = {}) => baseRecord({
@@ -15,7 +17,7 @@ const record = (partial: Partial<MemoryRecord> = {}) => baseRecord({
 })
 
 async function storeWith(...records: MemoryRecord[]): Promise<MemoryStore> {
-  const store = new MemoryStore(new InMemoryTable())
+  const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
   for (const r of records) await store.put(r)
   return store
 }

@@ -2,10 +2,11 @@ import { mkdir, readdir, readFile, writeFile, rename, rm, stat } from 'node:fs/p
 import { ConcurrentModificationError, RecordNotFoundError } from '../errors.ts'
 import { basename, dirname, join, relative } from 'node:path'
 import type { MemoryRecord } from '../record-schema.ts'
+import type { Scope } from '../scope.ts'
 import {
-  byPosition, resolveDuplicates, pickLiveFirst,
+  byPosition, resolveDuplicates, pickLiveFirst, isScopeTarget, scopesOf,
   type MemoryTable, type MemoryLogger, type DirectoryNote, type QuarantineEntry, type LocatedFile, type LocatedRecord,
-  type LocateHint, type ScopeReadOptions, type ScopeReadResult, type WorkspaceDirListing, type KeywordMatch,
+  type LocateTarget, type ScopeReadOptions, type ScopeReadResult, type WorkspaceDirListing, type KeywordMatch,
 } from './table.ts'
 import type { KvTable } from '../kv-table.ts'
 import type { RecallStats } from './schema.ts'
@@ -317,15 +318,15 @@ export class FileTable implements MemoryTable {
     return { entries, directoryNotes }
   }
 
-  /** 提示 workspace 的目录：先算确定性目录名并校验标记；算不出或标记不符时经清单找（覆盖手工改名的目录）。 */
-  private async hintDirs(workspacePath: string): Promise<ScopeDir[]> {
+  /** 提示 workspace 的目录：先算确定性目录名并校验标记；算不出或标记不符时经清单找（覆盖手工改名的目录）。
+   *  listing：调用方已读过的清单，给了就不再重读。 */
+  private async hintDirs(workspacePath: string, listing?: WorkspaceDirListing): Promise<ScopeDir[]> {
     const loc: FileLocation = { scope: 'workspace', workspacePath }
     const dir = join(this.opts.root, workspaceDirName(workspacePath))
     try {
       if ((await this.readMarker(dir)) === workspacePath) return [{ dir, loc }]
     } catch { /* 不可读：走清单 */ }
-    const listing = await this.listWorkspaceDirs()
-    return listing.entries.filter(e => e.workspacePath === workspacePath).map(e => ({ dir: e.dir, loc }))
+    return (listing ?? await this.listWorkspaceDirs()).entries.filter(e => e.workspacePath === workspacePath).map(e => ({ dir: e.dir, loc }))
   }
 
   async workspaceDirs(workspacePath: string): Promise<string[]> {
@@ -359,18 +360,22 @@ export class FileTable implements MemoryTable {
     return found
   }
 
-  async locate(id: string, hint?: LocateHint): Promise<LocatedFile | undefined> {
-    const slot = await this.locateSlot(id, hint)
+  async locate(id: string, target: LocateTarget): Promise<LocatedFile | undefined> {
+    const slot = await this.locateSlot(id, target)
     return slot && this.toLocated(slot)
   }
 
-  /** locate 的内部形态：带磁盘原文与读到的全部副本，写路径据此在写盘前复核。 */
-  private async locateSlot(id: string, hint?: LocateHint): Promise<LocatedSlot | undefined> {
-    // 先挑在用副本：别层更新的已删副本不遮住它，遗忘、刷新改的才是读路径上看得到的那份
-    const pick = (copies: Slot[]) => copies.length > 0 ? { ...pickLiveFirst(copies, hint)!, copies } : undefined
+  /** locate 的内部形态：带磁盘原文与读到的全部副本，写路径据此在写盘前复核。缺省目标即不带当前项目的会话视角。 */
+  private async locateSlot(id: string, target: LocateTarget = {}): Promise<LocatedSlot | undefined> {
     const global: ScopeDir = { dir: this.globalDir, loc: { scope: 'global' } }
-    const hinted = hint?.workspacePath === undefined ? [] : await this.hintDirs(hint.workspacePath)
-    if (hint?.isExactLayer === true) return pick(await this.scanForId(id, hint.workspacePath === undefined ? [global] : hinted))
+    if (isScopeTarget(target)) {
+      const own = target.kind === 'global' ? [global] : await this.hintDirs(target.workspacePath)
+      const copies = await this.scanForId(id, own)
+      return copies.length > 0 ? { ...pickLiveFirst(copies)!, copies } : undefined
+    }
+    // 先挑在用副本：别的作用域里更新的已删副本不遮住它，遗忘、刷新改的才是读路径上看得到的那份
+    const pick = (copies: Slot[]) => copies.length > 0 ? { ...pickLiveFirst(copies, target)!, copies } : undefined
+    const hinted = target.workspacePath === undefined ? [] : await this.hintDirs(target.workspacePath)
     const first = await this.scanForId(id, [global, ...hinted])
     if (first.length > 0) return pick(first)
     const scanned = new Set([this.globalDir, ...hinted.map(d => d.dir)])
@@ -378,6 +383,14 @@ export class FileTable implements MemoryTable {
       .filter(e => !scanned.has(e.dir))
       .map(e => ({ dir: e.dir, loc: { scope: 'workspace', workspacePath: e.workspacePath } as FileLocation }))
     return pick(await this.scanForId(id, rest))
+  }
+
+  async copiesOf(id: string): Promise<Scope[]> {
+    // 每个项目看的目录与给作用域定位时相同（hintDirs）：标准目录在就不看同一项目的改名目录，按这里返回的作用域定位才找得到
+    const listing = await this.listWorkspaceDirs()
+    const workspaces = await Promise.all([...new Set(listing.entries.map(e => e.workspacePath))].map(p => this.hintDirs(p, listing)))
+    const copies = await this.scanForId(id, [{ dir: this.globalDir, loc: { scope: 'global' } }, ...workspaces.flat()])
+    return scopesOf(copies.map(c => c.record))
   }
 
   // —— 写侧（锁内）——
@@ -471,12 +484,12 @@ export class FileTable implements MemoryTable {
   }
 
   /**
-   * 写该 id 之后清掉可见集合（global + 该记录所在目录，含各自 .archive/）里的其余副本；其他项目的副本不动；只认层的写只清该目录。
+   * 写该 id 之后清掉可见集合（global + 该记录所在目录，含各自 .archive/）里的其余副本；其他项目的副本不动；给作用域的写只清该目录。
    * 给了 known（写路径传 locate 读到的副本）就只删其中此后没变过的：读之后才出现或被改过的是别的进程刚写的，两边都删对方的副本会一份不剩，
    * 留下的同 id 副本由读路径取舍、下一次写清掉。不给（删除路径）就当场扫、全删。
    */
-  private async removeOtherCopies(id: string, keepPath: string, dir: string, isExactLayer: boolean, known?: readonly Slot[]): Promise<void> {
-    const dirs = new Set(isExactLayer ? [dir] : [this.globalDir, dir])
+  private async removeOtherCopies(id: string, keepPath: string, dir: string, isOwnDirOnly: boolean, known?: readonly Slot[]): Promise<void> {
+    const dirs = new Set(isOwnDirOnly ? [dir] : [this.globalDir, dir])
     const copies = known ?? await this.scanForId(id, (await this.resolveDirs([...dirs])).scopeDirs)
     for (const copy of copies) {
       if (!dirs.has(copy.dir) || copy.filePath.toLowerCase() === keepPath.toLowerCase()) continue
@@ -643,7 +656,7 @@ export class FileTable implements MemoryTable {
    * tmp + rename 覆盖，否则排他占名 → 搬家删旧 → 清可见集合里该 id 的其余副本 → 本目录（搬家时两个）维护点。返回实际写出的记录。
    * 覆盖、占名、删旧之前都复核 prev 的原文，变了抛 StaleReadError（占名后才发现的先撤回新文件），由调用方重来。
    */
-  private async persist(key: string, prev: LocatedSlot | undefined, value: MemoryRecord, isExactLayer = false): Promise<MemoryRecord> {
+  private async persist(key: string, prev: LocatedSlot | undefined, value: MemoryRecord, isOwnDirOnly = false): Promise<MemoryRecord> {
     const next = value.status === 'deleted' && value.deletedAt === undefined ? { ...value, deletedAt: this.now() } : value
     const volatileChanged = !prev || !this.volatileEqual(prev.record, next)
     const stableChanged = !prev || !this.stableEqual(prev.record, next)
@@ -679,7 +692,7 @@ export class FileTable implements MemoryTable {
           await rm(prev.filePath, { force: true })
         }
       }
-      await this.removeOtherCopies(key, filePath, dir, isExactLayer, prev?.copies ?? [])
+      await this.removeOtherCopies(key, filePath, dir, isOwnDirOnly, prev?.copies ?? [])
       await this.maintainDirs(moved ? [dir, prev!.dir] : [dir])
     }
     if (volatileChanged) {
@@ -689,10 +702,10 @@ export class FileTable implements MemoryTable {
   }
 
   /** 锁内 locate → attempt；attempt 因复核失败作废就重新 locate 再来，总共 WRITE_ATTEMPTS 次。 */
-  private async withFreshLocate<T>(key: string, hint: LocateHint | undefined, attempt: (current: LocatedSlot | undefined) => Promise<T>): Promise<T> {
+  private async withFreshLocate<T>(key: string, target: LocateTarget, attempt: (current: LocatedSlot | undefined) => Promise<T>): Promise<T> {
     for (let i = 0; i < WRITE_ATTEMPTS; i++) {
       try {
-        return await attempt(await this.locateSlot(key, hint))
+        return await attempt(await this.locateSlot(key, target))
       } catch (err) {
         if (!(err instanceof StaleReadError)) throw err
       }
@@ -704,38 +717,37 @@ export class FileTable implements MemoryTable {
     await this.locked(async () => { await this.persist(record.id, undefined, record) })
   }
 
-  async put(key: string, value: MemoryRecord, hint: LocateHint = { workspacePath: value.workspacePath }, skipIf?: (current: MemoryRecord | undefined) => boolean): Promise<boolean> {
+  async put(value: MemoryRecord, from: LocateTarget, skipIf?: (current: MemoryRecord | undefined) => boolean): Promise<MemoryRecord | undefined> {
     // put 是整条替换：值由调用方给定，重来时只换新的位置、附加字段与召回统计，不重算内容；skipIf 每轮按新读数重判
-    return this.locked(() => this.withFreshLocate(key, hint, async prev => {
-      if (skipIf?.(prev && byPosition(prev))) return false
+    return this.locked(() => this.withFreshLocate(value.id, from, async prev => {
+      if (skipIf?.(prev && byPosition(prev))) return undefined
       // put 不承载召回统计（召回统计只住 .state/recall-stats.json，快照恢复不恢复它）。召回统计
       // 由 MemoryStore.markRecalled 直写侧表；prev 在时以侧表现值为准，restore 旧记录不回退 sidecar。
       const next = prev
         ? { ...value, recallCount: prev.record.recallCount, lastRecalledAt: prev.record.lastRecalledAt }
         : value
-      await this.persist(key, prev, next, hint.isExactLayer === true)
-      return true
+      return this.persist(value.id, prev, next, isScopeTarget(from))
     }))
   }
 
-  async update(key: string, fn: (current: MemoryRecord) => MemoryRecord, hint?: LocateHint): Promise<MemoryRecord> {
+  async update(id: string, from: LocateTarget, fn: (current: MemoryRecord) => MemoryRecord): Promise<MemoryRecord> {
     // 锁内重读磁盘：外部编辑不丢；写盘前又被改就在新内容上重算 fn
-    return this.locked(() => this.withFreshLocate(key, hint, async current => {
-      if (!current) throw new RecordNotFoundError(key)
-      return this.persist(key, current, fn(current.record), hint?.isExactLayer === true)
+    return this.locked(() => this.withFreshLocate(id, from, async current => {
+      if (!current) throw new RecordNotFoundError(id)
+      return this.persist(id, current, fn(current.record), isScopeTarget(from))
     }))
   }
 
-  async delete(key: string, hint?: LocateHint, skipIf?: (current: LocatedFile) => boolean): Promise<boolean> {
+  async delete(id: string, at: LocateTarget, skipIf?: (current: LocatedFile) => boolean): Promise<boolean> {
     return this.locked(async () => {
-      const slot = await this.locate(key, hint)
+      const slot = await this.locate(id, at)
       if (!slot || skipIf?.(slot)) return false
       await rm(slot.filePath, { force: true })
       // 彻底删除（密钥硬删、最近删除里的彻底删除）的承诺是「可见集合里再没有它」：global 与该记录目录里同 id 的其余副本
-      // （含 .archive/）一并物理删除；只认层时只删该目录里的，别层的同 id 副本是另一张卡
-      await this.removeOtherCopies(key, slot.filePath, slot.dir, hint?.isExactLayer === true)
-      // 召回统计按 id 一行，别层还有副本时是它的，留着
-      if ((await this.locateSlot(key)) === undefined) await this.opts.stats.delete(key)
+      // （含 .archive/）一并物理删除；给作用域时只删该目录里的，别的作用域里的同 id 副本是另一张卡
+      await this.removeOtherCopies(id, slot.filePath, slot.dir, isScopeTarget(at))
+      // 召回统计按 id 一行，别的作用域还有副本时是它的，留着
+      if ((await this.locateSlot(id)) === undefined) await this.opts.stats.delete(id)
       await this.maintainDirs([...new Set([slot.dir, this.globalDir])])
       return true
     })

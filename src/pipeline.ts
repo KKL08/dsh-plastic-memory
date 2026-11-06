@@ -11,7 +11,7 @@ import { RecordNotFoundError } from './errors.ts'
 import { extractEntities, textSimilarity, DUPLICATE_SIMILARITY_THRESHOLD } from './text.ts'
 import { toToolOutput } from './output.ts'
 import { VALIDITY_DATE_FORMAT, VALIDITY_FORMAT, formatValidity, parseValidityInput } from './validity.ts'
-import { ledgerLabel, scopeOfMemory } from './scope.ts'
+import { ledgerLabel, scopeAt, scopeOfMemory } from './scope.ts'
 
 export interface SaveCandidate {
   action: 'create' | 'update'
@@ -491,7 +491,7 @@ export async function runSavePipeline(
   if (snapshot && deps.decisions) {
     const origin = { sessionId: session.id, callId: deps.callId ?? '' }
     const fingerprintOf = async (r: MemoryRecord) => {
-      const written = await store.get(r.id, { workspacePath: r.workspacePath, isExactLayer: true })
+      const written = await store.get(r.id, scopeAt(r.workspacePath))
       return written === undefined ? '' : editFingerprint(written)
     }
     const workspaceOf = (r: MemoryRecord) => {

@@ -2,18 +2,19 @@ import { describe, expect, it } from 'vitest'
 import { scoreScope, listWorkspaces, GLOBAL_CACHE_KEY, type ScopeHealthDeps } from '../src/governance/scope-health.ts'
 import { prereadScopes } from '../src/tools/scope-preread.ts'
 import { scopeCacheKey, type Scope } from '../src/scope.ts'
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
+import { MemoryStore } from '../src/store.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { workspaceDirName, GLOBAL_DIR, WORKSPACE_MARKER } from '../src/storage/paths.ts'
 import type { PendingDecision, ScanCacheEntry, Finding } from '../src/governance/schema.ts'
 import { record } from './helpers/record.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 function semantic(type: Finding['type'], memoryIds: string[]): Finding {
   return { type, layer: 'semantic', severity: 'info', memoryIds, summary: '', suggestedAction: '' }
@@ -28,7 +29,7 @@ interface Fixture extends ScopeHealthDeps {
 
 function makeDeps(): Fixture {
   return {
-    store: new MemoryStore(new InMemoryTable()),
+    store: new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable()),
     registry: buildTypeRegistry({ template: 'coding', customTypes: {} }),
     decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
     cache: new InMemoryKvTable<ScanCacheEntry>(),
@@ -125,7 +126,7 @@ describe('scoreScope 归属规则', () => {
       await mkdir(wsDir, { recursive: true })
       await writeFile(join(wsDir, WORKSPACE_MARKER), '/p\n')
       await writeFile(join(wsDir, 'bad2.md'), '没有 frontmatter\n')
-      const deps: Fixture = { ...makeDeps(), store: new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() })) }
+      const deps: Fixture = { ...makeDeps(), store: new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() }), undefined, new InMemoryBatchKvTable()) }
       expect((await score(deps, { kind: 'global' }, 200)).health.counts.malformed).toBe(1)
       // 项目的预读同时读了 global，global 的坏文件不算进本项目（不跨作用域重复扣分）
       expect((await score(deps, { kind: 'workspace', workspacePath: '/p' }, 200)).health.counts.malformed).toBe(1)

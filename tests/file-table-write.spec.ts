@@ -5,7 +5,6 @@ import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { workspaceDirName, WORKSPACE_MARKER, GLOBAL_DIR, ARCHIVE_DIR } from '../src/storage/paths.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
@@ -19,6 +18,7 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { RecordNotFoundError } from '../src/errors.ts'
 import { captureRejection } from './helpers/errors.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 // 本文件默认造那条"包管理用 pnpm"的 global preference（编解码/去重断言的固定样本）。
 const record = (partial: Partial<MemoryRecord> = {}) => baseRecord({
@@ -46,16 +46,16 @@ describe('FileTable 写侧', () => {
     await seedGlobal('a.md', record({ id: 'mem_a' }))
     const t = await load()
     const before = (await stat(join(root, GLOBAL_DIR, 'a.md'))).mtimeMs
-    await t.update('mem_a', r => ({ ...r, recallCount: r.recallCount + 1, lastRecalledAt: 123 }))
+    await t.update('mem_a', {}, r => ({ ...r, recallCount: r.recallCount + 1, lastRecalledAt: 123 }))
     const after = (await stat(join(root, GLOBAL_DIR, 'a.md'))).mtimeMs
     expect(after).toBe(before)                       // 召回统计只进侧表，不重写文件
-    expect(((await t.locate('mem_a'))?.record)!.recallCount).toBe(1)      // 内存与 sidecar 已更新
+    expect(((await t.locate('mem_a', {}))?.record)!.recallCount).toBe(1)      // 内存与 sidecar 已更新
   })
 
   it('内容更新重写文件，且文件里不出现易变字段（旧统计不被 spread 带进文件）', async () => {
     await seedGlobal('a.md', record({ id: 'mem_a' }))
     const t = await load()
-    await t.update('mem_a', r => ({ ...r, recallCount: 5, content: '新内容', updatedAt: 999 }))
+    await t.update('mem_a', {}, r => ({ ...r, recallCount: 5, content: '新内容', updatedAt: 999 }))
     const raw = await readFile(join(root, GLOBAL_DIR, 'a.md'), 'utf8')
     expect(raw).toContain('新内容')
     expect(raw).not.toContain('recallCount')
@@ -64,7 +64,7 @@ describe('FileTable 写侧', () => {
   it('scope 变更 = 移动：新目录有、旧目录无、.workspace 正确', async () => {
     await seedGlobal('a.md', record({ id: 'mem_a' }))
     const t = await load()
-    await t.update('mem_a', r => ({ ...r, scope: 'workspace', workspacePath: '/tmp/proj-x', updatedAt: 2 }))
+    await t.update('mem_a', {}, r => ({ ...r, scope: 'workspace', workspacePath: '/tmp/proj-x', updatedAt: 2 }))
     const wsDir = join(root, workspaceDirName('/tmp/proj-x'))
     expect((await readFile(join(wsDir, WORKSPACE_MARKER), 'utf8')).trim()).toBe('/tmp/proj-x')
     expect((await readdir(wsDir)).some(n => n.endsWith('.md') && n !== 'MEMORY.md')).toBe(true)
@@ -78,8 +78,8 @@ describe('FileTable 写侧', () => {
     await writeFile(join(root, workspaceDirName('/tmp/proj-y'), 'a.md'),
       encodeRecord(record({ id: 'mem_w', scope: 'workspace', workspacePath: '/tmp/proj-y' }), {}))
     const t = await load()
-    expect((await t.locate('mem_w'))?.record).toBeDefined()
-    await t.update('mem_w', r => ({ ...r, scope: 'global', workspacePath: undefined, updatedAt: 3 }))
+    expect((await t.locate('mem_w', {}))?.record).toBeDefined()
+    await t.update('mem_w', {}, r => ({ ...r, scope: 'global', workspacePath: undefined, updatedAt: 3 }))
     const wsDir = join(root, workspaceDirName('/tmp/proj-y'))
     const wsMds = (await readdir(wsDir)).filter(n => n.endsWith('.md') && n !== 'MEMORY.md')
     expect(wsMds).toHaveLength(0)
@@ -93,7 +93,7 @@ describe('FileTable 写侧', () => {
     await writeFile(join(root, workspaceDirName('/tmp/proj-a'), 'a.md'),
       encodeRecord(record({ id: 'mem_w', scope: 'workspace', workspacePath: '/tmp/proj-a' }), {}))
     const t = await load()
-    await t.update('mem_w', r => ({ ...r, workspacePath: '/tmp/proj-b', updatedAt: 4 }))
+    await t.update('mem_w', {}, r => ({ ...r, workspacePath: '/tmp/proj-b', updatedAt: 4 }))
     const oldDir = join(root, workspaceDirName('/tmp/proj-a'))
     const newDir = join(root, workspaceDirName('/tmp/proj-b'))
     expect((await readdir(oldDir)).filter(n => n.endsWith('.md') && n !== 'MEMORY.md')).toHaveLength(0)
@@ -103,7 +103,7 @@ describe('FileTable 写侧', () => {
   it('改 name（slug 变）：旧文件消失、新文件名含新 slug、内容正确', async () => {
     await seedGlobal('a.md', record({ id: 'mem_a', name: '旧名' }))
     const t = await load()
-    await t.update('mem_a', r => ({ ...r, name: '新名', updatedAt: 2 }))
+    await t.update('mem_a', {}, r => ({ ...r, name: '新名', updatedAt: 2 }))
     await expect(stat(join(root, GLOBAL_DIR, 'a.md'))).rejects.toThrow()  // 旧 slug 文件消失
     const mds = (await readdir(join(root, GLOBAL_DIR))).filter(n => n.endsWith('.md') && n !== 'MEMORY.md')
     expect(mds).toHaveLength(1)
@@ -115,7 +115,7 @@ describe('FileTable 写侧', () => {
   it('name 变但 slug 不变（仅加空格）：文件不动', async () => {
     await seedGlobal('a.md', record({ id: 'mem_a', name: '包管理' }))
     const t = await load()
-    await t.update('mem_a', r => ({ ...r, name: '包管理 ', updatedAt: 2 }))  // 尾随空格，slug 相同
+    await t.update('mem_a', {}, r => ({ ...r, name: '包管理 ', updatedAt: 2 }))  // 尾随空格，slug 相同
     const mds = (await readdir(join(root, GLOBAL_DIR))).filter(n => n.endsWith('.md') && n !== 'MEMORY.md')
     expect(mds).toEqual(['a.md'])  // 文件名不折腾
   })
@@ -123,56 +123,56 @@ describe('FileTable 写侧', () => {
   it('仅大小写变化不触发重命名：大小写不敏感文件系统上新旧路径是同一文件，重命名会删掉刚写的自己', async () => {
     await seedGlobal('Mock-rule.md', record({ id: 'mem_a', name: 'Mock Rule' }))
     const t = await load()
-    await t.update('mem_a', r => ({ ...r, name: 'mock rule', updatedAt: 2 }))
+    await t.update('mem_a', {}, r => ({ ...r, name: 'mock rule', updatedAt: 2 }))
     const mds = (await readdir(join(root, GLOBAL_DIR))).filter(n => n.endsWith('.md') && n !== 'MEMORY.md')
     expect(mds).toHaveLength(1)                    // 文件仍在（丢数据回归钉子）
     const raw = await readFile(join(root, GLOBAL_DIR, mds[0]), 'utf8')
     expect(raw).toContain('name: mock rule')       // 内容已更新
-    expect(((await t.locate('mem_a'))?.record)!.name).toBe('mock rule')
+    expect(((await t.locate('mem_a', {}))?.record)!.name).toBe('mock rule')
   })
 
   it('put 全新 id：建文件；slug 冲突缀 id 片段', async () => {
     const t = await load()
-    await t.put('mem_1', record({ id: 'mem_1', name: '同名' }))
-    await t.put('mem_2', record({ id: 'mem_2', name: '同名' }))
+    await t.put(record({ id: 'mem_1', name: '同名' }), {})
+    await t.put(record({ id: 'mem_2', name: '同名' }), {})
     const names = (await readdir(join(root, GLOBAL_DIR))).filter(n => n.endsWith('.md') && n !== 'MEMORY.md')
     expect(names).toHaveLength(2)
   })
 
   it('put 全新 id 后内存可读（冒烟）', async () => {
     const t = await load()
-    await t.put('mem_r', record({ id: 'mem_r', content: '复活' }))
-    expect(((await t.locate('mem_r'))?.record)!.content).toBe('复活')
+    await t.put(record({ id: 'mem_r', content: '复活' }), {})
+    expect(((await t.locate('mem_r', {}))?.record)!.content).toBe('复活')
   })
 
   it('真实恢复链：快照 → 物理删除（文件不在） → SnapshotStore.restore → 新实例重载仍可见', async () => {
     const t = await load()
     const rec = record({ id: 'mem_r', content: '删掉再复活' })
-    await t.put('mem_r', rec)
+    await t.put(rec, {})
     const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
     const snap = await snapshots.capture({ operation: 'manual', description: '恢复链测试', records: [rec] }, 10)
-    await t.delete('mem_r')
+    await t.delete('mem_r', {})
     const mdFiles = async () => (await readdir(join(root, GLOBAL_DIR))).filter(n => n.endsWith('.md') && n !== 'MEMORY.md')
     expect(await mdFiles()).toHaveLength(0)
     const byId = new Map((await t.readScope([t.globalDir], { includeArchive: true })).records.map(r => [r.record.id, r.record]))
-    const { restored } = await snapshots.restore(snap, undefined, r => t.put(r.id, r), byId, false, r => t.delete(r.id))
+    const { restored } = await snapshots.restore(snap, undefined, async r => (await t.put(r, {})) !== undefined, byId, false, r => t.delete(r.id, {}))
     expect(restored).toEqual(['mem_r'])
     expect(await mdFiles()).toHaveLength(1)
     const reloaded = await load()
-    expect(((await reloaded.locate('mem_r'))?.record)!.content).toBe('删掉再复活')
+    expect(((await reloaded.locate('mem_r', {}))?.record)!.content).toBe('删掉再复活')
   })
 
   it('unknown extras 经 update 往返仍在文件里', async () => {
     await seedGlobal('a.md', record({ id: 'mem_a' }), { customField: '手加的' })
     const t = await load()
-    await t.update('mem_a', r => ({ ...r, content: '改了', updatedAt: 2 }))
+    await t.update('mem_a', {}, r => ({ ...r, content: '改了', updatedAt: 2 }))
     expect(await readFile(join(root, GLOBAL_DIR, 'a.md'), 'utf8')).toContain('customField')
   })
 
   it('MEMORY.md 在写路径末尾再生且只列 active+stale', async () => {
     const t = await load()
-    await t.put('mem_a', record({ id: 'mem_a', name: '活着' }))
-    await t.put('mem_d', record({ id: 'mem_d', name: '已删', status: 'deleted' }))
+    await t.put(record({ id: 'mem_a', name: '活着' }), {})
+    await t.put(record({ id: 'mem_d', name: '已删', status: 'deleted' }), {})
     const idx = await readFile(join(root, GLOBAL_DIR, 'MEMORY.md'), 'utf8')
     expect(idx).toContain('mem_a')
     expect(idx).not.toContain('mem_d')
@@ -182,15 +182,15 @@ describe('FileTable 写侧', () => {
     await seedGlobal('a.md', record({ id: 'mem_a' }))
     const t = await load()
     await Promise.all([
-      t.update('mem_a', r => ({ ...r, recallCount: r.recallCount + 1 })),
-      t.update('mem_a', r => ({ ...r, recallCount: r.recallCount + 1 })),
+      t.update('mem_a', {}, r => ({ ...r, recallCount: r.recallCount + 1 })),
+      t.update('mem_a', {}, r => ({ ...r, recallCount: r.recallCount + 1 })),
     ])
-    expect(((await t.locate('mem_a'))?.record)!.recallCount).toBe(2)
+    expect(((await t.locate('mem_a', {}))?.record)!.recallCount).toBe(2)
   })
 
   it('update 缺 key 抛 RecordNotFoundError（与 InMemoryTable 同一错误类）', async () => {
     const t = await load()
-    const err = await captureRejection(t.update('ghost', r => r))
+    const err = await captureRejection(t.update('ghost', {}, r => r))
     expect(err).toBeInstanceOf(RecordNotFoundError)
     expect(err).toMatchObject({ id: 'ghost' })
   })
@@ -198,30 +198,30 @@ describe('FileTable 写侧', () => {
   it('delete：物理删文件 + sidecar 行 + map；返回是否存在', async () => {
     await seedGlobal('a.md', record({ id: 'mem_a' }))
     const t = await load()
-    expect(await t.delete('mem_a')).toBe(true)
-    expect((await t.locate('mem_a'))?.record).toBeUndefined()
+    expect(await t.delete('mem_a', {})).toBe(true)
+    expect((await t.locate('mem_a', {}))?.record).toBeUndefined()
     await expect(stat(join(root, GLOBAL_DIR, 'a.md'))).rejects.toThrow()
-    expect(await t.delete('mem_a')).toBe(false)
+    expect(await t.delete('mem_a', {})).toBe(false)
   })
 
   it('status→deleted 触发保留期清扫钩子（未超期不删除文件，但走清扫流程不报错）', async () => {
     const t = await load()
-    await t.put('mem_a', record({ id: 'mem_a' }))
-    await expect(t.update('mem_a', r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))).resolves.toBeDefined()
-    expect(((await t.locate('mem_a'))?.record)!.status).toBe('deleted')
+    await t.put(record({ id: 'mem_a' }), {})
+    await expect(t.update('mem_a', {}, r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))).resolves.toBeDefined()
+    expect(((await t.locate('mem_a', {}))?.record)!.status).toBe('deleted')
   })
 })
 
 describe('FileTable 保留名避让（评审 M4：APFS 大小写不敏感，memory.md 会与 MEMORY.md 相互覆盖）', () => {
   it('put 名为 memory 的记录：文件走 id 兜底名，索引再生后重载不丢、不进隔离区', async () => {
     const t = await load()
-    await t.put('mem_rsv', record({ id: 'mem_rsv', name: 'memory' }))
+    await t.put(record({ id: 'mem_rsv', name: 'memory' }), {})
     const files = await readdir(join(root, GLOBAL_DIR))
     expect(files).not.toContain('memory.md')
     expect(files).toContain(`memory-${'mem_rsv'.slice(-6)}.md`)
 
     const t2 = await load() // 全新实例：记录仍在、隔离区为空
-    expect(((await t2.locate('mem_rsv'))?.record)!.name).toBe('memory')
+    expect(((await t2.locate('mem_rsv', {}))?.record)!.name).toBe('memory')
     expect(await quarantined(t2)).toEqual([])
   })
 })
@@ -233,14 +233,14 @@ describe('FileTable 撞名检查看得见磁盘（终审 I1：隔离文件不可
     const t = await load()
     expect(await quarantined(t)).toHaveLength(1)
 
-    await t.put('mem_new', record({ id: 'mem_new', name: 'pnpm' }))
+    await t.put(record({ id: 'mem_new', name: 'pnpm' }), {})
     // 用户手写内容必须原样保留
     expect(await readFile(join(root, GLOBAL_DIR, 'pnpm.md'), 'utf8')).toContain('用户手写')
     const files = await readdir(join(root, GLOBAL_DIR))
     expect(files).toContain(`pnpm-${'mem_new'.slice(-6)}.md`)
 
     const t2 = await load() // 新实例：新记录在、坏文件仍被隔离（malformed finding 不消失）
-    expect(((await t2.locate('mem_new'))?.record)!.name).toBe('pnpm')
+    expect(((await t2.locate('mem_new', {}))?.record)!.name).toBe('pnpm')
     expect(await quarantined(t2)).toHaveLength(1)
   })
 })
@@ -300,7 +300,7 @@ describe('写路径内核（锁内定位、排他占名、搬家与归档）', (
     await seedGlobal('a.md', record({ id: 'mem_a', name: 'A', content: '我是 A' }))
     await seedGlobal('b.md', record({ id: 'mem_b', name: 'b', content: '我是 B' }))
     const t = await load()
-    await t.update('mem_a', r => ({ ...r, name: 'b', updatedAt: 2 }))
+    await t.update('mem_a', {}, r => ({ ...r, name: 'b', updatedAt: 2 }))
     expect(await mds(globalDir())).toEqual([`b-${'mem_a'.slice(-6)}.md`, 'b.md'].sort())
     expect(await readFile(join(globalDir(), 'b.md'), 'utf8')).toContain('我是 B')
     expect(await readFile(join(globalDir(), `b-${'mem_a'.slice(-6)}.md`), 'utf8')).toContain('我是 A')
@@ -311,7 +311,7 @@ describe('写路径内核（锁内定位、排他占名、搬家与归档）', (
     const t = new FileTable({ root, stats: new InMemoryKvTable<RecallStats>(), now: () => NOW })
     await t.create(record({ id: 'mem_a', name: '活着', updatedAt: NOW - 10 }))
     await t.create(record({ id: 'mem_d', name: '要删', updatedAt: NOW - 10 }))
-    const next = await t.update('mem_d', r => ({ ...r, status: 'deleted', updatedAt: NOW }))
+    const next = await t.update('mem_d', {}, r => ({ ...r, status: 'deleted', updatedAt: NOW }))
     expect(next.deletedAt).toBe(NOW)
     expect(await mds(globalDir())).toEqual(['活着.md'])
     expect(await mds(join(globalDir(), ARCHIVE_DIR))).toEqual(['要删.md'])
@@ -319,7 +319,7 @@ describe('写路径内核（锁内定位、排他占名、搬家与归档）', (
     const idx = await readFile(join(globalDir(), 'MEMORY.md'), 'utf8')
     expect(idx).toContain('mem_a')
     expect(idx).not.toContain('mem_d')
-    expect((await t.locate('mem_d'))!.record.deletedAt).toBe(NOW)
+    expect((await t.locate('mem_d', {}))!.record.deletedAt).toBe(NOW)
   })
 
   it('归档时 .archive/ 已有同名异 id 文件：追加 id 片段，两份都保留', async () => {
@@ -329,47 +329,47 @@ describe('写路径内核（锁内定位、排他占名、搬家与归档）', (
       encodeRecord(record({ id: 'mem_old', name: '同名', status: 'deleted', content: '早先归档的', updatedAt: NOW, deletedAt: NOW }), {}))
     const t = await load()
     await t.create(record({ id: 'mem_cur', name: '同名', content: '后来归档的' }))
-    await t.update('mem_cur', r => ({ ...r, status: 'superseded', updatedAt: Date.now() }))
+    await t.update('mem_cur', {}, r => ({ ...r, status: 'superseded', updatedAt: Date.now() }))
     expect(await mds(globalDir())).toEqual([])
     expect(await mds(join(globalDir(), ARCHIVE_DIR))).toEqual([`同名-${'mem_cur'.slice(-6)}.md`, '同名.md'].sort())
     expect(await readFile(join(globalDir(), ARCHIVE_DIR, '同名.md'), 'utf8')).toContain('早先归档的')
-    expect((await t.locate('mem_old'))!.record.content).toBe('早先归档的')
-    expect((await t.locate('mem_cur'))!.record.content).toBe('后来归档的')
+    expect((await t.locate('mem_old', {}))!.record.content).toBe('早先归档的')
+    expect((await t.locate('mem_cur', {}))!.record.content).toBe('后来归档的')
   })
 
   it('回到 active（restore）：从 .archive/ 搬回顶层并占名，.archive/ 里的文件消失', async () => {
     const t = await load()
     const r = record({ id: 'mem_r', name: '复活', content: '复活正文', updatedAt: 10 })
     await t.create(r)
-    await t.update('mem_r', c => ({ ...c, status: 'deleted', updatedAt: Date.now() }))
+    await t.update('mem_r', {}, c => ({ ...c, status: 'deleted', updatedAt: Date.now() }))
     expect(await mds(globalDir())).toEqual([])
-    await t.put('mem_r', r)   // 快照恢复：整条旧记录 put 回来
+    await t.put(r, {})   // 快照恢复：整条旧记录 put 回来
     expect(await mds(globalDir())).toEqual(['复活.md'])
     expect(await mds(join(globalDir(), ARCHIVE_DIR))).toEqual([])
-    expect((await t.locate('mem_r'))!.record).toEqual(r)
+    expect((await t.locate('mem_r', {}))!.record).toEqual(r)
   })
 
   it('delete 物理删除 .archive/ 里的文件（供 S1 使用）', async () => {
     const t = await load()
     await t.create(record({ id: 'mem_s', name: '密钥' }))
-    await t.update('mem_s', r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))
+    await t.update('mem_s', {}, r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))
     expect(await mds(join(globalDir(), ARCHIVE_DIR))).toEqual(['密钥.md'])
-    expect(await t.delete('mem_s')).toBe(true)
+    expect(await t.delete('mem_s', {})).toBe(true)
     expect(await mds(join(globalDir(), ARCHIVE_DIR))).toEqual([])
-    expect(await t.locate('mem_s')).toBeUndefined()
+    expect(await t.locate('mem_s', {})).toBeUndefined()
   })
 
   it('顶层 deleted 文件搬进 .archive/ 后 listWorkspaceDirs 的 hasActiveTopLevel 自然收敛', async () => {
     const t = await load()
     await t.create(wsRecord({ id: 'mem_only', name: '唯一' }))
     expect((await t.listWorkspaceDirs()).entries).toEqual([{ workspacePath: WS, dir: wsDir(), hasActiveTopLevel: true }])
-    await t.update('mem_only', r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))
+    await t.update('mem_only', {}, r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))
     expect((await t.listWorkspaceDirs()).entries).toEqual([{ workspacePath: WS, dir: wsDir(), hasActiveTopLevel: false }])
   })
 
   it('同进程并发：两个会话对象 Promise.all 同时 save 与 forget，结束后文件齐全、无 tmp 残留', async () => {
     const t = await load()
-    const store = new MemoryStore(t)
+    const store = new MemoryStore(t, undefined, new InMemoryBatchKvTable())
     const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
     const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
     const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
@@ -400,7 +400,7 @@ describe('写路径内核（锁内定位、排他占名、搬家与归档）', (
 
   it('promote 到 global 后旧 workspace 文件消失、新实例只看到 global 那份；pre-promote 快照 restore 后 global 消失、workspace 回来（无双文件）', async () => {
     const t = await load()
-    const store = new MemoryStore(t)
+    const store = new MemoryStore(t, undefined, new InMemoryBatchKvTable())
     const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
     const r = wsRecord({ id: 'mem_p', name: '提升', content: '要提升的', globalCandidate: true, updatedAt: 100 })
     await t.create(r)
@@ -416,14 +416,14 @@ describe('写路径内核（锁内定位、排他占名、搬家与归档）', (
 
     const snap = (await snapshots.list()).find(s => s.operation === 'pre-promote')!
     const current = new Map([['mem_p', (await store.get('mem_p'))!]])
-    const { restored } = await snapshots.restore(snap, undefined, rec => store.put(rec), current, false, rec => store.hardDelete(rec))
+    const { restored } = await snapshots.restore(snap, undefined, async rec => (await store.put(rec)) !== undefined, current, false, rec => store.hardDelete(rec))
     expect(restored).toEqual(['mem_p'])
     expect(await mds(globalDir())).toEqual([])
     expect(await mds(wsDir())).toEqual(['提升.md'])
     const again = await load()
     expect((await again.readScope([again.globalDir, wsDir()], { includeArchive: true })).records.map(x => [x.record.id, x.record.scope]))
       .toEqual([['mem_p', 'workspace']])
-    expect((await again.locate('mem_p'))!.record).toEqual(r)
+    expect((await again.locate('mem_p', {}))!.record).toEqual(r)
   })
 })
 
@@ -445,9 +445,9 @@ describe('写路径与外部编辑交错', () => {
     }
     const t = new Interleaved({ root, stats: new InMemoryKvTable<RecallStats>() })
     t.armed = true
-    await t.update('mem_a', r => ({ ...r, content: '改 A', updatedAt: 2 }))
-    expect(((await t.locate('mem_b'))?.record)!.content).toBe(externalB)
-    await t.update('mem_b', r => ({ ...r, lastConfirmedAt: 99 }))
+    await t.update('mem_a', {}, r => ({ ...r, content: '改 A', updatedAt: 2 }))
+    expect(((await t.locate('mem_b', {}))?.record)!.content).toBe(externalB)
+    await t.update('mem_b', {}, r => ({ ...r, lastConfirmedAt: 99 }))
     expect(await readFile(join(root, GLOBAL_DIR, 'b.md'), 'utf8')).toContain(externalB)
   })
 })

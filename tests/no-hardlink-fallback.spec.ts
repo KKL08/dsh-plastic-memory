@@ -7,10 +7,10 @@ import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { GLOBAL_DIR } from '../src/storage/paths.ts'
 import { SidecarStore, STATE_DIR } from '../src/storage/sidecar.ts'
 import { KV_IMPORT_MARKER } from '../src/storage/legacy-kv-import.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type MemorySnapshot } from '../src/governance/schema.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import { record } from './helpers/record.ts'
+import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 
 // 文件系统是进程边界：只把 link 换成可控的桩，其余 fs 函数保持真实。
 vi.mock('node:fs/promises', async importOriginal => {
@@ -46,7 +46,7 @@ describe.each(['ENOTSUP', 'EPERM', 'ENOSYS'])('不支持硬链接的卷（link �
     const r = record({ id: 'mem_new', name: '新建', content: '新建正文' })
     await newTable().create(r)
     expect(await readFile(join(globalDir(), '新建.md'), 'utf8')).toContain('新建正文')
-    expect((await newTable().locate('mem_new'))!.record).toEqual(r)
+    expect((await newTable().locate('mem_new', {}))!.record).toEqual(r)
     expect(await tmps(globalDir())).toEqual([])
     expect(vi.mocked(link)).toHaveBeenCalled()
   })

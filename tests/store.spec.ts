@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
-import { InMemoryBatchKvTable } from '../src/kv-table.ts'
+import { MemoryStore } from '../src/store.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import { record } from './helpers/record.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 describe('MemoryStore.query', () => {
   it('visible 过滤：global + 匹配 workspace，排除其他 workspace', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'g', scope: 'global' }))
     await store.put(record({ id: 'w1', scope: 'workspace', workspacePath: '/a' }))
     await store.put(record({ id: 'w2', scope: 'workspace', workspacePath: '/b' }))
@@ -15,14 +16,14 @@ describe('MemoryStore.query', () => {
   })
 
   it('workspacePath 为 undefined 时只见 global', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'g', scope: 'global' }))
     await store.put(record({ id: 'w', scope: 'workspace', workspacePath: '/a' }))
     expect((await store.query({ scope: { kind: 'visible', workspacePath: undefined } })).map(r => r.id)).toEqual(['g'])
   })
 
   it('status 缺省只返回 active（superseded/deleted 排除）', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'a', status: 'active' }))
     await store.put(record({ id: 'd', status: 'deleted' }))
     await store.put(record({ id: 'p', status: 'superseded' }))
@@ -30,7 +31,7 @@ describe('MemoryStore.query', () => {
   })
 
   it('keyword 对 content/summary/tags 小写子串匹配', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'hit', content: '用 PostgreSQL 存储' }))
     await store.put(record({ id: 'miss', content: '无关内容', summary: '无关' }))
     expect((await store.query({ keyword: 'postgresql' })).map(r => r.id)).toEqual(['hit'])
@@ -39,7 +40,7 @@ describe('MemoryStore.query', () => {
 
 describe('MemoryStore 变更', () => {
   it('softDelete 置 status 为 deleted', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'x' }))
     expect(await store.softDelete({ id: 'x', workspacePath: undefined })).toBe(true)
     expect((await store.get('x'))!.status).toBe('deleted')

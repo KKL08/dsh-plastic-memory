@@ -8,9 +8,9 @@
 import { createInterface } from 'node:readline'
 import { once } from 'node:events'
 import { FileTable } from '../../src/storage/file-table.ts'
-import { InMemoryKvTable } from '../../src/kv-table.ts'
 import type { RecallStats } from '../../src/storage/schema.ts'
 import { record } from './record.ts'
+import { InMemoryKvTable } from './in-memory-kv.ts'
 
 const [root, tag, stepsArg] = process.argv.slice(2)
 if (root === undefined || tag === undefined || stepsArg === undefined) throw new Error('usage: write-worker.ts <root> <tag> <steps>')
@@ -26,7 +26,7 @@ lines.close()
 
 for (const step of steps) {
   if (step === 'create') await table.create(own)
-  else if (step === 'forget') await table.update(own.id, r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))
+  else if (step === 'forget') await table.update(own.id, {}, r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))
   else throw new Error(`unknown step: ${step}`)
 }
 process.stdout.write(`${JSON.stringify({ id: own.id, content: own.content })}\n`)

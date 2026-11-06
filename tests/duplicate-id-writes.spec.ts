@@ -5,17 +5,19 @@ import { executeForget } from '../src/tools/forget.ts'
 import { executeConfirm } from '../src/tools/confirm.ts'
 import { executePromote } from '../src/tools/promote.ts'
 import { executeSnapshotTool } from '../src/tools/snapshot.ts'
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
+import { MemoryStore } from '../src/store.ts'
 import { workspaceDirName } from '../src/storage/paths.ts'
 import type { MemoryLogger } from '../src/storage/table.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
-import { InMemoryKvTable, type KvTable } from '../src/kv-table.ts'
+import { type KvTable } from '../src/kv-table.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import type { Scope } from '../src/scope.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 // 同 id 多副本时，执行器预读 / 过门用的那份记录与最终写入落到的那份
 // 必须是同一个文件，否则会改到门没检查过的副本（其他项目的、或 global 上被修改过的）。
@@ -30,7 +32,7 @@ const glob = (partial: Partial<MemoryRecord> = {}) => record({ scope: 'global', 
 
 function world() {
   const table = new InMemoryTable()
-  const store = new MemoryStore(table)
+  const store = new MemoryStore(table, undefined, new InMemoryBatchKvTable())
   const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
   const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
   const agentsMd = { lines: [] as string[], append: async function (line: string) { this.lines.push(line) } }

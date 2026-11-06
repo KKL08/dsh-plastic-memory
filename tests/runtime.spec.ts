@@ -3,19 +3,21 @@ import { mkdtemp, mkdir, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SnapshotCache, resolveWorkspacePath, type FrozenSnapshotInfo } from '../src/runtime.ts'
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
+import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { COLD_START_TEXT, assembleSnapshot } from '../src/snapshot.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { workspaceDirName } from '../src/storage/paths.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 
 // 本文件默认时间戳为 0。
 const record = (partial: Partial<MemoryRecord> = {}) => baseRecord({ createdAt: 0, updatedAt: 0, lastConfirmedAt: 0, ...partial })
 
-function makeCache(store = new MemoryStore(new InMemoryTable())) {
+function makeCache(store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())) {
   return { store, cache: new SnapshotCache({ store, registry, budget: 4000 }) }
 }
 
@@ -65,7 +67,7 @@ describe('SnapshotCache', () => {
 
   it('setWorkspacePath 后 assemble 返回完整版并冻结，markRecalled 恰调用一次且参数为 core id', async () => {
     const NOW = 1_700_000_000_000
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const cache = new SnapshotCache({ store, registry, budget: 4000, now: () => NOW })
     const spy = vi.spyOn(store, 'markRecalled')
     await store.put(record({ id: 'mem_core', type: 'preference', content: '不要 mock 数据库' }))
@@ -234,7 +236,7 @@ describe('SnapshotCache', () => {
   })
 
   it('构造 memoryRoot 时，临时文本与冻结快照都含磁盘路径行（⑧×D1）', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_g', type: 'preference', content: '不要 mock 数据库' }))
     const cache = new SnapshotCache({ store, registry, budget: 4000, memoryRoot: '/home/.dsh/memories' })
     const session = {}
@@ -246,7 +248,7 @@ describe('SnapshotCache', () => {
   })
 
   it('MEMORY.md 行与注入索引行末尾带文件名（同源格式，passive 不带 summary；磁盘侧不带陈旧度，注入侧带）：冻结快照的索引行以相对记忆根目录的实际文件路径收尾', async () => {
-    const store = new MemoryStore(new InMemoryTable('/home/.dsh/memories'))
+    const store = new MemoryStore(new InMemoryTable('/home/.dsh/memories'), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_g', name: '网关限流', type: 'knowledge', summary: '阈值 80', lastConfirmedAt: Date.now() }))
     await store.put(record({ id: 'mem_w', name: '发布节奏', type: 'knowledge', summary: '周四发布', scope: 'workspace', workspacePath: '/repo', lastConfirmedAt: Date.now() }))
     const cache = new SnapshotCache({ store, registry, budget: 4000, memoryRoot: '/home/.dsh/memories' })
@@ -258,7 +260,7 @@ describe('SnapshotCache', () => {
   })
 
   it('HMR 已知窗口：新建缓存实例对存量 session 首次组装触发解析；没落定先给临时文本，落定后冻结完整版', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const spy = vi.spyOn(store, 'markRecalled')
     await store.put(record({ id: 'mem_global', type: 'preference', content: '不要 mock 数据库' }))
     await store.put(record({ id: 'mem_ws', type: 'preference', scope: 'workspace', workspacePath: '/repo', content: '仅本仓库生效的偏好' }))
@@ -294,7 +296,7 @@ describe('SnapshotCache', () => {
   })
 
   it('assemble：首轮组装显式等待解析——等待后的首次组装即完整版（不赌宿主时序）', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ content: '全局条目', type: 'preference' }))
     await store.put(record({ content: '仅本仓库生效的偏好', type: 'preference', scope: 'workspace', workspacePath: '/repo' }))
     const cache = new SnapshotCache({
@@ -319,7 +321,7 @@ describe('SnapshotCache', () => {
   })
 
   it('assemble：解析悬挂时超时放行，走 global-only 临时文本，不冻结、不计召回', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const spy = vi.spyOn(store, 'markRecalled')
     await store.put(record({ content: '全局条目', type: 'preference' }))
     await store.put(record({ content: '仅本仓库生效的偏好', type: 'preference', scope: 'workspace', workspacePath: '/repo' }))
@@ -403,7 +405,7 @@ describe('SnapshotCache × 待确认记录', () => {
   // 宿主会话的最小形状：header.id 是会话 id；哪个会话是持久型子会话由 ownSessionIdOf 决定（接线在 index.ts）
   const session = (id: string) => ({ header: { id } })
   function makeDelegatingCache(continuable: ReadonlySet<string>) {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const cache = new SnapshotCache({
       store, registry, budget: 4000,
       ownSessionIdOf: s => {
@@ -451,7 +453,7 @@ describe('SnapshotCache × 待确认记录', () => {
 // 其他重建（失败的压缩、配置热更新）文本变了（会补发）是对话中重新带入，没变就沿用上一次的来历。
 describe('SnapshotCache 快照来历', () => {
   function makeTracked(hasEarlierTurns?: (session: object) => boolean) {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const frozen: FrozenSnapshotInfo[] = []
     const cache = new SnapshotCache({
       store, registry, budget: 4000, onFrozen: (_s, info) => { frozen.push(info) },

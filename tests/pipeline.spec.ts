@@ -6,10 +6,9 @@ import { FileTable } from '../src/storage/file-table.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
 import { renderSaveResult } from '../src/tools/save.ts'
 import { extractEntities } from '../src/text.ts'
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
+import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
@@ -17,11 +16,13 @@ import { editFingerprint } from '../src/governance/snapshots.ts'
 import { candidate, record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const session = { id: 's1', lastSeq: 42 }
 
-function deps(store = new MemoryStore(new InMemoryTable())) {
+function deps(store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())) {
   return { store, registry, workspacePath: '/proj' as string | undefined, session, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()) }
 }
 
@@ -82,7 +83,7 @@ describe('runSavePipeline', () => {
   })
 
   it('update 路径的 confidence 同样只能下调（走同一套映射钳制）', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const created = await runSavePipeline(candidate(), deps(store))   // sourceMode 默认 user-explicit，confidence 0.9
     if (created.kind !== 'saved') throw new Error(created.kind)
     const updated = await runSavePipeline(
@@ -116,7 +117,7 @@ describe('runSavePipeline', () => {
   // A1 回归：例行 update 不得变更 scope——已经用户确认提升的 global 记忆若能被 update
   // 拉回当前项目，提升闸就被写入链绕过了（发布前审计双方独立发现并实证的缺陷）。
   it('update 一条 global 记录（模型照实填 scope=global）不降级、不搬家', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     // 模拟 promote 后的 global 记录：直接放一条 scope=global 进 store
     const created = await runSavePipeline(candidate({ scope: 'workspace' }), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
@@ -132,7 +133,7 @@ describe('runSavePipeline', () => {
   })
 
   it('update 时填与 target 不同的 scope：保持原 scope 并给警告', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const created = await runSavePipeline(candidate({ scope: 'workspace' }), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
     await store.put({ ...created.record, scope: 'global', workspacePath: undefined } as never)
@@ -146,7 +147,7 @@ describe('runSavePipeline', () => {
   })
 
   it('update workspace 记录填 global：转为提升候选并提示；已是候选则静默幂等', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const created = await runSavePipeline(candidate({ scope: 'workspace' }), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
     const first = await runSavePipeline(
@@ -170,7 +171,7 @@ describe('runSavePipeline', () => {
   })
 
   it('同实体的同类记忆触发 duplicate-suspected，force 可跳过', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await runSavePipeline(candidate({ content: '认证逻辑在 `src/auth.ts`' }), deps(store))
     const dup = await runSavePipeline(candidate({ content: '`src/auth.ts` 负责认证' }), deps(store))
     expect(dup.kind).toBe('duplicate-suspected')
@@ -179,7 +180,7 @@ describe('runSavePipeline', () => {
   })
 
   it('PA-10 去重提示里已有记忆的摘要手改进高危密钥：只给遮盖后的文字', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({
       id: 'mem_handedit', type: 'preference', scope: 'workspace', workspacePath: '/proj',
       content: '认证逻辑在 `src/auth.ts`', summary: `认证入口 ${FAKE_SECRET.sk}`, handEdited: true,
@@ -191,7 +192,7 @@ describe('runSavePipeline', () => {
   })
 
   it('update 保留 createdAt、刷新 lastConfirmedAt', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const clock = { now: 1_700_000_000_000 }
     const first = await runSavePipeline(candidate(), { ...deps(store), now: () => clock.now })
     if (first.kind !== 'saved') throw new Error(first.kind)
@@ -209,7 +210,7 @@ describe('runSavePipeline', () => {
   })
 
   it('update 目标已 softDelete 时 rejected', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const created = await runSavePipeline(candidate(), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
     await store.softDelete(created.record)
@@ -219,7 +220,7 @@ describe('runSavePipeline', () => {
   })
 
   it('supersedes 把旧记忆置为 superseded', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const old = await runSavePipeline(candidate(), deps(store))
     if (old.kind !== 'saved') throw new Error(old.kind)
     await runSavePipeline(candidate({ content: '完全不同的新说法', force: true, supersedes: [old.record.id] }), deps(store))
@@ -227,7 +228,7 @@ describe('runSavePipeline', () => {
   })
 
   it('PA-01：替代目标里有已删除的：它仍是已删除、仍在最近删除、deletedAt 不变；同批在用的目标照常变成被取代', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const gone = await runSavePipeline(candidate({ name: '删掉的', content: '删掉的说法' }), deps(store))
     const live = await runSavePipeline(candidate({ name: '在用的', content: '在用的说法', force: true }), deps(store))
     if (gone.kind !== 'saved' || live.kind !== 'saved') throw new Error('seed')
@@ -240,7 +241,7 @@ describe('runSavePipeline', () => {
   })
 
   it('PA-13：supersedes 里含高危密钥时拒存、不落盘；疑似密钥要 force', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const critical = await runSavePipeline(candidate({ supersedes: [FAKE_SECRET.sk] }), deps(store))
     expect(critical).toMatchObject({ kind: 'rejected', code: 'secret-critical' })
     expect(await store.query({ status: ['active', 'superseded', 'deleted'] })).toEqual([])
@@ -251,7 +252,7 @@ describe('runSavePipeline', () => {
 
   // B1a：supersedes 目标必须与本次写入记录同属一个作用域
   it('B1a: workspace 保存 supersedes 指向 global 记录 → global 保持 active 且给警告', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     // 放一条 global 记录（模拟 promote 后）
     const g = await runSavePipeline(candidate({ scope: 'workspace' }), deps(store))
     if (g.kind !== 'saved') throw new Error(g.kind)
@@ -266,7 +267,7 @@ describe('runSavePipeline', () => {
   })
 
   it('B1a: 同 workspace 目标仍正常置 superseded（回归）', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const old = await runSavePipeline(candidate({ scope: 'workspace' }), deps(store))
     if (old.kind !== 'saved') throw new Error(old.kind)
     const saved = await runSavePipeline(
@@ -279,7 +280,7 @@ describe('runSavePipeline', () => {
 
   // B1b：update 不能跨 workspace 改写其他项目的记忆
   it('B1b: update 指向其他 workspace 的记录 → rejected', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const created = await runSavePipeline(candidate({ scope: 'workspace' }), deps(store))  // workspacePath /proj
     if (created.kind !== 'saved') throw new Error(created.kind)
     const result = await runSavePipeline(
@@ -290,7 +291,7 @@ describe('runSavePipeline', () => {
   })
 
   it('B1b: update 指向本 workspace 记录 → 正常（回归）', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const created = await runSavePipeline(candidate({ scope: 'workspace' }), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
     const result = await runSavePipeline(
@@ -299,7 +300,7 @@ describe('runSavePipeline', () => {
   })
 
   it('B1b: 无 cwd 会话（workspacePath undefined）update workspace 记录 → rejected', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const created = await runSavePipeline(candidate({ scope: 'workspace' }), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
     const result = await runSavePipeline(
@@ -310,7 +311,7 @@ describe('runSavePipeline', () => {
 
   // B1c：update global 目标快照先行
   it('B1c: update global 记录（带 snapshots dep）→ 拍 pre-update 快照含旧内容、警告带快照 id', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const snaps = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
     const created = await runSavePipeline(candidate({ scope: 'workspace' }), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
@@ -328,7 +329,7 @@ describe('runSavePipeline', () => {
   })
 
   it('B1c: update global 记录不带 snapshots dep → 更新成功不炸', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const created = await runSavePipeline(candidate({ scope: 'workspace' }), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
     await store.put({ ...created.record, scope: 'global', workspacePath: undefined } as never)
@@ -338,7 +339,7 @@ describe('runSavePipeline', () => {
   })
 
   it('update workspace 记录同样先拍 pre-update 快照（含旧内容），结果不变：没有警告', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const snaps = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
     const created = await runSavePipeline(candidate({ scope: 'workspace', content: '旧的项目内容' }), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
@@ -355,14 +356,14 @@ describe('runSavePipeline', () => {
 
   // B2：判重级联——实体轴优先，实体为空才落 Dice 兜底
   it('B2: 两条含相同实体的记忆仍判重（实体轴回归）', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await runSavePipeline(candidate({ scope: 'workspace', content: '认证逻辑在 `src/auth.ts`' }), deps(store))
     const dup = await runSavePipeline(candidate({ scope: 'workspace', content: '`src/auth.ts` 负责认证' }), deps(store))
     expect(dup.kind).toBe('duplicate-suspected')
   })
 
   it('B2: 有实体但实体不重叠、字面高度相似 → 不再判重（级联生效）', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const first = await runSavePipeline(
       candidate({ scope: 'workspace', content: '超时配置在 `src/config-a.ts` 里，默认三十秒', summary: '超时配置位置' }), deps(store))
     if (first.kind !== 'saved') throw new Error(first.kind)
@@ -372,7 +373,7 @@ describe('runSavePipeline', () => {
   })
 
   it('B2: 无实体的纯中文散文高相似 → 仍判重（Dice 兜底回归）', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const first = await runSavePipeline(
       candidate({ scope: 'workspace', content: '测试里不要 mock 数据库', summary: '测试不 mock 数据库' }), deps(store))
     if (first.kind !== 'saved') throw new Error(first.kind)
@@ -394,7 +395,7 @@ describe('runSavePipeline', () => {
   })
 
   it('update 一条 global 记录（workspacePath 归 undefined）不留 undefined 键', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const created = await runSavePipeline(candidate({ scope: 'workspace' }), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
     // 目标是真正的 global 记录（B1b 允许维护 global；跨 workspace 才拒绝）
@@ -418,7 +419,7 @@ describe('runSavePipeline', () => {
   })
 
   it('含高危密钥（明确厂商特征）时 rejected 且不落盘（D6）', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const result = await runSavePipeline(
       candidate({ content: `我的 API 密钥是 ${FAKE_SECRET.skProj}` }),
       deps(store),
@@ -438,7 +439,7 @@ describe('runSavePipeline', () => {
   })
 
   it('update 含疑似密钥带 force 时返回 warnings', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const created = await runSavePipeline(candidate(), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
     const updated = await runSavePipeline(
@@ -451,7 +452,7 @@ describe('runSavePipeline', () => {
   })
 
   it('中文散文重复经 bigram 相似度查出（实体轴对纯中文失明）', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const first = await runSavePipeline(
       candidate({ scope: 'workspace', content: '测试里不要 mock 数据库', summary: '测试不 mock 数据库' }), deps(store))
     if (first.kind !== 'saved') throw new Error(first.kind)
@@ -461,7 +462,7 @@ describe('runSavePipeline', () => {
   })
 
   it('同类型不同主题的中文记忆不误判重复', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await runSavePipeline(
       candidate({ scope: 'workspace', content: '报销截止是每个月的二十五日', summary: '报销截止日' }), deps(store))
     const other = await runSavePipeline(
@@ -471,7 +472,7 @@ describe('runSavePipeline', () => {
 
   // 密钥检测覆盖全部外泄面：summary 进注入索引、name 进文件名、tags 进索引行
   it('高危密钥只出现在 summary 时同样拦截不落盘', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const result = await runSavePipeline(
       candidate({ scope: 'workspace', content: '正文干净', summary: `密钥 ${FAKE_SECRET.sk} 备份` }),
       deps(store),
@@ -489,7 +490,7 @@ describe('runSavePipeline', () => {
   })
 
   it('update 无密钥时不存在 warnings 键', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const created = await runSavePipeline(candidate(), deps(store))
     if (created.kind !== 'saved') throw new Error(created.kind)
     const updated = await runSavePipeline(
@@ -510,7 +511,7 @@ describe('runSavePipeline：有效期', () => {
   beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(NOW) })
   afterEach(() => { vi.useRealTimers() })
 
-  async function save(partial: object, store = new MemoryStore(new InMemoryTable())) {
+  async function save(partial: object, store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())) {
     return runSavePipeline(candidate({ scope: 'workspace', ...partial }), deps(store))
   }
 
@@ -533,14 +534,14 @@ describe('runSavePipeline：有效期', () => {
     ['只有日期', { validFrom: '2026-10-01', validTo: '2026-11-05' }, () => [local(2026, 10, 1, 14, 37), local(2026, 11, 5, 14, 37)]],
   ] as const)('落库毫秒正确（%s）：从 store 回读、重新打开文件存储再读，两个字段都是换算后的毫秒', async (_label, partial, expected) => {
     const [from, to] = expected()
-    const memory = new MemoryStore(new InMemoryTable())
+    const memory = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const inMemory = await save(partial, memory)
     if (inMemory.kind !== 'saved') throw new Error(inMemory.kind)
     expect(await memory.get(inMemory.record.id, { workspacePath: '/proj' })).toMatchObject({ validFrom: from, validTo: to })
 
     const root = await mkdtemp(join(tmpdir(), 'pm-validity-'))
     try {
-      const open = () => new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>(), now: () => NOW }))
+      const open = () => new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>(), now: () => NOW }), undefined, new InMemoryBatchKvTable())
       const saved = await save(partial, open())
       if (saved.kind !== 'saved') throw new Error(saved.kind)
       expect(await open().get(saved.record.id, { workspacePath: '/proj' })).toMatchObject({ validFrom: from, validTo: to })
@@ -582,7 +583,7 @@ describe('runSavePipeline：有效期', () => {
     ['validTo 早于 validFrom', { validFrom: '2026-11-05 10:00', validTo: '2026-11-04 10:00' }, 'validity-reversed', 'validTo'],
     ['validTo 等于 validFrom', { validFrom: '2026-11-05 10:00', validTo: '2026-11-05 10:00' }, 'validity-reversed', 'validTo'],
   ])('拒存不落盘：%s', async (_label, partial, code, key) => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const r = await save(partial, store)
     expect(r).toMatchObject({ kind: 'rejected', code })
     if (r.kind !== 'rejected') throw new Error(r.kind)
@@ -602,7 +603,7 @@ describe('runSavePipeline：有效期', () => {
   })
 
   it('update 不传：保留 target 的两个值，与 supersedes 同款回退', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const created = await save({ validFrom: '2026-11-01 09:30', validTo: '2026-11-05 18:00' }, store)
     if (created.kind !== 'saved') throw new Error(created.kind)
     const kept = await runSavePipeline(candidate({ action: 'update', id: created.record.id, content: '例行内容更新' }), deps(store))
@@ -612,7 +613,7 @@ describe('runSavePipeline：有效期', () => {
   })
 
   it('update 只传 validTo：target 有 validFrom 就保留，没有才记写入时刻', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const withFrom = await save({ validFrom: '2026-11-01 09:30' }, store)
     const bare = await save({ name: '另一条', content: '完全不同的另一件事', summary: '另一条' }, store)
     if (withFrom.kind !== 'saved' || bare.kind !== 'saved') throw new Error('setup')
@@ -624,7 +625,7 @@ describe('runSavePipeline：有效期', () => {
   })
 
   it('update 只传 validFrom：保留 target 的 validTo；新起点不早于它时拒、不改盘', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const created = await save({ validTo: '2026-11-05 18:00' }, store)
     if (created.kind !== 'saved') throw new Error(created.kind)
     const moved = await runSavePipeline(candidate({ action: 'update', id: created.record.id, validFrom: '2026-11-01 09:30' }), deps(store))
@@ -636,7 +637,7 @@ describe('runSavePipeline：有效期', () => {
   })
 
   it('target 存着倒挂的有效期（validTo 不晚于 validFrom，如手改出来的），update 不传这两个参数：照常更新、原值保留', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const created = await save({}, store)
     if (created.kind !== 'saved') throw new Error(created.kind)
     const reversed = { validFrom: local(2026, 11, 5, 18, 0), validTo: local(2026, 11, 1, 9, 30) }
@@ -647,7 +648,7 @@ describe('runSavePipeline：有效期', () => {
   })
 
   it('update 传了已过去的 validTo 照样拒；target 自己已过期但这次不传有效期，照常更新', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const created = await save({ validTo: '2026-11-05 18:00' }, store)
     if (created.kind !== 'saved') throw new Error(created.kind)
     const past = await runSavePipeline(candidate({ action: 'update', id: created.record.id, validTo: '2026-10-01 00:00' }), deps(store))
@@ -661,7 +662,7 @@ describe('runSavePipeline：有效期', () => {
 
 // 模型改写、替代的兜底：改前先拍快照、记一条可撤销的已结清条目；手改过的记忆不悄悄覆盖
 describe('runSavePipeline：模型改写的兜底', () => {
-  function guarded(store = new MemoryStore(new InMemoryTable())) {
+  function guarded(store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())) {
     const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
     const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
     return { store, snapshots, decisions, deps: { ...deps(store), snapshots, decisions, callId: 'call-7' } }
@@ -815,7 +816,7 @@ describe('runSavePipeline：模型改写的兜底', () => {
   })
 
   it('没手改过的记忆：结果与不带账本时逐字一致', async () => {
-    const plain = new MemoryStore(new InMemoryTable())
+    const plain = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const e = guarded()
     for (const store of [plain, e.store]) await store.put({ ...(await seed(store)), id: 'mem_same', name: '同一条' })
     const update = candidate({ action: 'update', id: 'mem_same', content: '新内容', scope: 'global' })
@@ -833,7 +834,7 @@ describe('runSavePipeline：模型改写的兜底', () => {
 describe('runSavePipeline：子 agent 写入约束', () => {
   const CHILD = { id: 'sess-child', lastSeq: 9, turnStartSeq: 4 }
   const delegation = { depth: 1, parentSessionId: 'sess-main', rootSessionId: 'sess-main', mode: 'one-shot' as const }
-  const childDeps = (store = new MemoryStore(new InMemoryTable()), extra: object = {}) =>
+  const childDeps = (store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable()), extra: object = {}) =>
     ({ store, registry, workspacePath: '/proj' as string | undefined, session: CHILD, delegation, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), ...extra })
   const childCandidate = (partial: object = {}) => candidate({
     type: 'knowledge', scope: 'workspace', sourceMode: 'environment-observed',
@@ -854,7 +855,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   })
 
   it('sourceMode 只收观察、推断：其余三种回 subagent-restricted，原因写明按观察或推断重发', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     for (const sourceMode of ['user-explicit', 'user-behavior', 'agent-action-confirmed']) {
       const reason = await restricted(runSavePipeline(childCandidate({ sourceMode }), childDeps(store)))
       expect(reason).toBe(`sourceMode=${sourceMode} 子 agent 用不了：子 agent 收到的指令来自委派方，不算用户明说；按观察（environment-observed）或推断（agent-inferred）重发。`)
@@ -889,7 +890,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   })
 
   it('非空 supersedes 或 force: true 回 subagent-restricted；空 supersedes、force: false 照常', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const old = await runSavePipeline(candidate({ scope: 'workspace', type: 'knowledge' }), deps(store))   // 主会话的一条，给 supersedes 一个真实目标
     if (old.kind !== 'saved') throw new Error(old.kind)
     expect(await restricted(runSavePipeline(childCandidate({ supersedes: [old.record.id] }), childDeps(store))))
@@ -932,7 +933,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   })
 
   it('update 只改本会话创建、还没升档的：创建者字段不变、reviewed 为空、证据锚换成这次的', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(owned('mem_self', 'self'))
     const r = await runSavePipeline(childCandidate({ action: 'update', id: 'mem_self', sourceMode: 'agent-inferred', content: '改过的观察' }), childDeps(store))
     if (r.kind !== 'updated') throw new Error(r.kind)
@@ -943,7 +944,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   })
 
   it('update 主会话的、别的子会话的、已升档的回 subagent-restricted，原因说明是哪种，记录不动', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const cases: Array<[string, 'main' | 'other' | 'self-reviewed', string]> = [
       ['mem_main', 'main', '是主会话写的或用户手建的'],
       ['mem_other', 'other', '是别的子会话存的'],
@@ -958,7 +959,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   })
 
   it('update 目标不存在或已删除回 subagent-restricted，不落到 target-missing', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(owned('mem_self', 'self'))
     await store.softDelete((await store.get('mem_self'))!)
     for (const id of ['mem_none', 'mem_self']) {
@@ -969,7 +970,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   })
 
   it('update 已提升为全局的待确认记录回 subagent-restricted，全局记录不动', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put({ ...owned('mem_g', 'self'), scope: 'global', workspacePath: undefined })
     const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', id: 'mem_g', content: '子 agent 想改成这样' }), childDeps(store)))
     expect(reason).toBe('子 agent 只能改本会话存下、还没被接受的记忆；mem_g 已经提升为全局。要改的内容带回主会话。')
@@ -977,7 +978,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   })
 
   it('检查时读到已删除、之后被恢复成主会话的记录：照样拒，子级内容不会变成主档', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const main = owned('mem_main', 'main')
     await store.put(main)
     vi.spyOn(store, 'get').mockResolvedValueOnce({ ...main, status: 'deleted' })
@@ -993,7 +994,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
       ['deleted', r => ({ ...r, status: 'deleted' })],
     ]
     for (const [label, change] of changes) {
-      const store = new MemoryStore(new InMemoryTable())
+      const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
       await store.put(owned('mem_self', 'self'))
       const realPut = store.put.bind(store)
       vi.spyOn(store, 'put').mockImplementationOnce(async (r, hint, skipIf) => {
@@ -1008,7 +1009,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   })
 
   it('update 用户手改过的待确认记录：原因不提 force，说明子 agent 改不了', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put({ ...owned('mem_self', 'self'), handEdited: true })
     const r = await runSavePipeline(childCandidate({ action: 'update', id: 'mem_self', content: '子 agent 想改成这样' }), childDeps(store))
     if (r.kind !== 'rejected') throw new Error(r.kind)
@@ -1026,14 +1027,14 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   })
 
   it('归属检查排在 supersedes / force 之后：改别人的记录又带 force，报 force', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(owned('mem_main', 'main'))
     expect(await restricted(runSavePipeline(childCandidate({ action: 'update', id: 'mem_main', force: true }), childDeps(store)))).toContain('force')
   })
 
   it('去重只比主档：撞主会话写的、已升档的回 duplicate-suspected 并列出，提示向委派方说明分歧', async () => {
     for (const by of ['main', 'self-reviewed'] as const) {
-      const store = new MemoryStore(new InMemoryTable())
+      const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
       await store.put({ ...owned('mem_kept', by), content: '`pnpm test` 在 main 上是绿的' })
       const r = await runSavePipeline(childCandidate({ content: '`pnpm test` 在 main 上会挂' }), childDeps(store))
       expect(r, by).toEqual({ kind: 'duplicate-suspected', existing: [{ id: 'mem_kept', summary: 'mem_kept 旧摘要' }], isFromSubagent: true })
@@ -1045,7 +1046,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   })
 
   it('去重不比待确认：撞别的子会话（或本会话）存的待确认记录照常存，两条并存', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put({ ...owned('mem_peer', 'other'), content: '`pnpm test` 在 main 上是绿的' })
     const r = await runSavePipeline(childCandidate({ content: '`pnpm test` 在 main 上会挂' }), childDeps(store))
     if (r.kind !== 'saved') throw new Error(r.kind)
@@ -1068,7 +1069,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   })
 
   it('配额按配置值；删一条释放额度；已取代、已过期的仍占额度', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const d = childDeps(store, { maxSubagentSaves: 3 })
     expect((await createMany(3, d)).kind).toBe('saved')
     expect(await restricted(runSavePipeline(childCandidate({ name: '第 4 条' }), d))).toContain('本会话已存 3 条')
@@ -1083,7 +1084,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   })
 
   it('配额只拦 create：到了上限 update 自己的待确认记录照常', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const d = childDeps(store, { maxSubagentSaves: 1 })
     const saved = await createMany(1, d)
     if (saved.kind !== 'saved') throw new Error(saved.kind)
@@ -1091,7 +1092,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   })
 
   it('并行子级各算各的：别的子会话、主会话的记录不占本会话额度', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(owned('mem_other', 'other'))
     await store.put(owned('mem_main', 'main'))
     const d = childDeps(store, { maxSubagentSaves: 1 })
@@ -1101,7 +1102,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   })
 
   it('主会话的去重不变：撞待确认记录照旧 duplicate-suspected，提示 force 重发', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put({ ...owned('mem_peer', 'other'), content: '`pnpm test` 在 main 上是绿的' })
     const r = await runSavePipeline(candidate({ type: 'knowledge', scope: 'workspace', content: '`pnpm test` 在 main 上会挂' }), deps(store))
     expect(r).toEqual({ kind: 'duplicate-suspected', existing: [{ id: 'mem_peer', summary: 'mem_peer 旧摘要' }] })
@@ -1116,7 +1117,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
     const mainUpdate = (id: string) => candidate({ action: 'update', id, type: 'knowledge', scope: 'workspace', sourceMode: 'agent-inferred', content: '主会话改写后的内容' })
 
     it('update 待确认记录即接受：reviewed 补 main 与当前时间，创建者四个字段原样，证据锚换成主会话这次的', async () => {
-      const store = new MemoryStore(new InMemoryTable())
+      const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
       await store.put(owned('mem_p', 'self'))
       const r = await runSavePipeline(mainUpdate('mem_p'), deps(store))
       if (r.kind !== 'updated') throw new Error(r.kind)
@@ -1128,7 +1129,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
     it('目标已接受的 reviewed 不动：用户改过的不被 main 覆写，主会话早先接受的保留原时刻', async () => {
       const cases: Array<{ by: 'user' | 'main'; at: number }> = [{ by: 'user', at: 3 }, { by: 'main', at: 5 }]
       for (const reviewed of cases) {
-        const store = new MemoryStore(new InMemoryTable())
+        const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
         await store.put({ ...owned('mem_p', 'self'), delegation: { ...CREATOR, reviewed } })
         const r = await runSavePipeline(mainUpdate('mem_p'), deps(store))
         if (r.kind !== 'updated') throw new Error(r.kind)
@@ -1137,7 +1138,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
     })
 
     it('主会话自己的记录 update 后仍不带 delegation', async () => {
-      const store = new MemoryStore(new InMemoryTable())
+      const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
       await store.put(owned('mem_main', 'main'))
       const r = await runSavePipeline(mainUpdate('mem_main'), deps(store))
       if (r.kind !== 'updated') throw new Error(r.kind)
@@ -1145,7 +1146,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
     })
 
     it('supersedes 待确认记录照旧：目标置 superseded，创建者信息不动、仍未接受', async () => {
-      const store = new MemoryStore(new InMemoryTable())
+      const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
       const before = owned('mem_p', 'self')
       await store.put(before)
       const r = await runSavePipeline(candidate({ type: 'knowledge', scope: 'workspace', name: '新说法', content: '完全不同的新说法', supersedes: ['mem_p'] }), deps(store))

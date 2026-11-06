@@ -13,9 +13,9 @@ import { encodeRecord } from '../src/storage/frontmatter.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { MODEL_UNAVAILABLE_HOST_CODES, hostSemanticLlm } from '../src/governance/host-llm.ts'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
+import { MemoryStore } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
-import { InMemoryKvTable, type CasKvTable } from '../src/kv-table.ts'
+import { type CasKvTable } from '../src/kv-table.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { checkupKey } from '../src/gui/contract.ts'
 import type { CheckupRecord } from '../src/storage/schema.ts'
@@ -24,10 +24,12 @@ import type { PendingDecision, ScanCacheEntry } from '../src/governance/schema.t
 import { SECRET_MASK } from '../src/secrets.ts'
 import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 function makeDeps(overrides?: Partial<ScanToolDeps>): ScanToolDeps {
   return {
-    store: new MemoryStore(new InMemoryTable()),
+    store: new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable()),
     registry: buildTypeRegistry({ template: 'coding', customTypes: {} }),
     decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
     cache: new InMemoryKvTable<ScanCacheEntry>(),
@@ -51,7 +53,7 @@ async function fileBackedStore(files: Record<string, string>, workspaces: string
     await mkdir(dirname(join(root, rel)), { recursive: true })
     await writeFile(join(root, rel), text)
   }
-  return { root, store: new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() })) }
+  return { root, store: new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() }), undefined, new InMemoryBatchKvTable()) }
 }
 const roots: string[] = []
 afterEach(async () => { for (const r of roots.splice(0)) await rm(r, { recursive: true, force: true }) })
@@ -602,7 +604,7 @@ describe('renderScanResult', () => {
   })
 
   it('globalCandidate 记忆进 promoteCandidates + 渲染建议段（限流折叠）', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     for (let i = 0; i < 6; i++) {
       await store.put(record({ id: `mem_c${i}`, scope: 'workspace', workspacePath: '/a', globalCandidate: true, summary: `候选${i}` }))
     }
@@ -619,7 +621,7 @@ describe('renderScanResult', () => {
   })
 
   it('PA-10 提升候选的摘要手改进高危密钥：体检报告只给遮盖后的文字', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_c', scope: 'workspace', workspacePath: '/a', globalCandidate: true, summary: `候选 ${FAKE_SECRET.github}`, handEdited: true }))
     const r = await scanSingle({ scope: '/a', layers: 'rule' }, makeDeps({ store }))
     expect(r.promoteCandidates.items).toEqual([{ id: 'mem_c', summary: `候选 ${SECRET_MASK}` }])
@@ -627,7 +629,7 @@ describe('renderScanResult', () => {
   })
 
   it('无 globalCandidate 时 promoteCandidates 为空、不渲染建议段', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_x', scope: 'workspace', workspacePath: '/a', summary: '普通' }))
     const r = await scanSingle({ scope: '/a', layers: 'rule' }, makeDeps({ store }))
     expect(r.promoteCandidates.items).toEqual([])

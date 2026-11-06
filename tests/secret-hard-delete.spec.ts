@@ -5,7 +5,7 @@ import { join, relative } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { ARCHIVE_DIR, INDEX_FILE, STATE_DIR, workspaceDirName } from '../src/storage/paths.ts'
-import { MemoryStore, InMemoryTable, type MemoryLogger } from '../src/store.ts'
+import { MemoryStore, type MemoryLogger } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import {
@@ -17,13 +17,14 @@ import { executeSnapshotTool } from '../src/tools/snapshot.ts'
 import { goneCopies } from '../src/tools/workspace-gate.ts'
 import { createSaveTool } from '../src/tools/save-tool.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { RejectCode, WarningCode } from '../src/contract-codes.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord, candidate } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 // 含密钥的记忆被遗忘时立即物理删除，所有快照里不留明文，且不破坏快照里的其他记录；
 // 疑似密钥保存时被拦下确认。
@@ -283,7 +284,7 @@ describe('密钥硬删', () => {
   })
 
   it('save：critical 仍拒绝；suspected 拒绝并返回 secret-suspected，force: true 放行并保留警告；force 工具说明含「疑似密钥拦截」（后来又加了手改保护）', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const deps = { store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), workspacePath: WS, session: { id: 's', lastSeq: 1 } }
 
     const critical = await runSavePipeline(candidate({ scope: 'workspace', content: `密钥 ${FAKE_SECRET.sk}` }), deps)
@@ -320,7 +321,7 @@ describe('密钥硬删', () => {
 
   it('稳定码进 contract-codes，测试断常量不断文案', async () => {
     // RejectCode / WarningCode 两边都收 secret-suspected：不带 force 是拒绝码，带 force 是警告码
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const deps = { store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), workspacePath: WS, session: { id: 's', lastSeq: 1 } }
     const rejected = await runSavePipeline(candidate({ scope: 'workspace', summary: SUSPECTED_TEXT }), deps)
     if (rejected.kind !== 'rejected') throw new Error(rejected.kind)

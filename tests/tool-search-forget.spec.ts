@@ -3,18 +3,19 @@ import { fakeExec } from './helpers/exec.ts'
 import { executeSearch, renderSearchResult, truncationNote, type SearchToolDeps } from '../src/tools/search.ts'
 import { countSearchHits } from '../client/chat/tool-summary.ts'
 import { executeForget } from '../src/tools/forget.ts'
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
+import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
-import { InMemoryKvTable, InMemoryBatchKvTable } from '../src/kv-table.ts'
 import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import { record } from './helpers/record.ts'
 import { STALENESS_NOTE } from '../src/record-freshness.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const session = { id: 's1', lastSeq: 1 }
@@ -45,7 +46,7 @@ function makeSearchDeps(store: MemoryStore): SearchToolDeps {
 
 describe('executeSearch', () => {
   it('按 confidence 降序排序并截断 limit', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await seed(store, '低置信条目', 0.5)
     const high = await seed(store, '高置信条目', 0.9)
     const result = await executeSearch({ query: '条目', limit: 1 }, fakeExec(), makeSearchDeps(store))
@@ -63,7 +64,7 @@ describe('executeSearch', () => {
   })
 
   it('与注入同口径：明确密钥遮成占位，疑似密钥照原文（用户确认过），name 不含密钥时文件路径照给', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_key', name: '网关', summary: `网关 key ${FAKE_SECRET.sk}`, content: `部署用 ${FAKE_SECRET.github}，预发库密码: Abc12345` }))
     const result = await executeSearch({ query: '网关' }, fakeExec(), makeSearchDeps(store))
     expect(result.hits[0]).toMatchObject({
@@ -76,7 +77,7 @@ describe('executeSearch', () => {
   })
 
   it('超过衰退期未确认的命中带陈旧度标注', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const r = await seed(store, '老知识')
     await store.put({ ...(await store.get(r.id))!, lastConfirmedAt: Date.now() - 100 * 86_400_000 }) // knowledge 衰减 90 天
     const result = await executeSearch({ query: '老知识' }, fakeExec(), makeSearchDeps(store))
@@ -86,7 +87,7 @@ describe('executeSearch', () => {
 
 describe('executeForget（P1 批量版）', () => {
   it('单条遗忘：先快照后软删', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_a', content: '要删的' }))
     const deps = makeForgetDeps(store)
     const result = await executeForget({ ids: ['mem_a'], reason: '用户要求' }, { workspacePath: '/proj' }, deps)
@@ -102,7 +103,7 @@ describe('executeForget（P1 批量版）', () => {
   })
 
   it('子 agent 存的待确认记录照旧：先快照后软删，快照里带着委派信息', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const delegation = { sessionId: 'sess-child', depth: 1, parentSessionId: 'sess-main' }
     await store.put(record({ id: 'mem_p', scope: 'workspace', workspacePath: '/proj', delegation }))
     const deps = makeForgetDeps(store)
@@ -113,7 +114,7 @@ describe('executeForget（P1 批量版）', () => {
   })
 
   it('批量遗忘：一个快照包含全部受影响记忆', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_a' }))
     await store.put(record({ id: 'mem_b' }))
     const deps = makeForgetDeps(store)
@@ -124,7 +125,7 @@ describe('executeForget（P1 批量版）', () => {
   })
 
   it('部分命中：找不到/已删除的进 missing，找到的正常删', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_a' }))
     await store.put(record({ id: 'mem_gone', status: 'deleted' }))
     const deps = makeForgetDeps(store)
@@ -135,7 +136,7 @@ describe('executeForget（P1 批量版）', () => {
   })
 
   it('全部未命中：不写快照，ok=false', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const deps = makeForgetDeps(store)
     const result = await executeForget({ ids: ['mem_ghost'], reason: 'r' }, { workspacePath: '/proj' }, deps)
     expect(result.ok).toBe(false)
@@ -144,7 +145,7 @@ describe('executeForget（P1 批量版）', () => {
   })
 
   it('遗忘后清理引用被删记忆的 pending-decisions 条目', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_a' }))
     const deps = makeForgetDeps(store)
     await deps.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '冲突' }, 1)
@@ -154,7 +155,7 @@ describe('executeForget（P1 批量版）', () => {
   })
 
   it('重复 id 只当一条处理：快照不重复存、计数不虚报', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_a' }))
     await store.put(record({ id: 'mem_b' }))
     const deps = makeForgetDeps(store)
@@ -172,7 +173,7 @@ describe('executeSearch：命中多于返回条数时说明总数', () => {
   }
 
   it('截断时说明共命中几条、列了几条，给出调大 limit 与换更具体关键词两条路', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await seedMany(store, 3)
     const r = await executeSearch({ query: '发版条目', limit: 1 }, fakeExec(), makeSearchDeps(store))
     expect(r.hits).toHaveLength(1)
@@ -186,7 +187,7 @@ describe('executeSearch：命中多于返回条数时说明总数', () => {
   })
 
   it('没有截断时不附说明', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await seedMany(store, 2)
     const r = await executeSearch({ query: '发版条目' }, fakeExec(), makeSearchDeps(store))
     expect(r.hits).toHaveLength(2)
@@ -194,7 +195,7 @@ describe('executeSearch：命中多于返回条数时说明总数', () => {
   })
 
   it('limit 已到上限 50（含传入更大的值）时，只建议换更具体的关键词', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await seedMany(store, 52)
     for (const limit of [50, 80]) {
       const r = await executeSearch({ query: '发版条目', limit }, fakeExec(), makeSearchDeps(store))
@@ -206,7 +207,7 @@ describe('executeSearch：命中多于返回条数时说明总数', () => {
   })
 
   it('命中弱的说明与截断说明同时出现：两句都在命中列表之前', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await seedMany(store, 3)
     const r = await executeSearch({ query: '发版条目 周报', limit: 1 }, fakeExec(), makeSearchDeps(store))
     expect(r.noteCode).toBe('low-coverage')

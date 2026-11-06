@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { fakeExec } from './helpers/exec.ts'
 import { record } from './helpers/record.ts'
-import { InMemoryTable, MemoryStore } from '../src/store.ts'
+import { MemoryStore } from '../src/store.ts'
 import { executeSearch, type SearchToolDeps } from '../src/tools/search.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { createTokenizer } from '../src/search/tokenizer.ts'
@@ -12,6 +12,8 @@ import {
   defaultJiebaLoader, resetJieba, tokenizerForQuery,
   type JiebaClass, type JiebaInstance, type JiebaLoader,
 } from '../src/search/jieba-segmenter.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 // jieba 加载器是进程边界：退化链用注入的假加载器模拟缺包、二进制缺失、坏词典；
 // 真实包的用例在 @node-rs/jieba 可解析、平台二进制可加载时才跑（可选依赖没装上时 skip）。
@@ -146,7 +148,7 @@ describe('jieba 档：懒加载与单例（注入加载器）', () => {
   it('纯 Latin 查询不触发加载；同进程第二次搜索不再加载', async () => {
     const { loader, calls } = fakeLoader()
     resetJieba(loader)
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_host', content: '宿主插件页的配置表单 readScope' }))
     const deps: SearchToolDeps = {
       store, registry,
@@ -168,7 +170,7 @@ describe('jieba 档：懒加载与单例（注入加载器）', () => {
     const { loader, calls, instances } = fakeLoader()
     resetJieba(loader)
     const session = (id: string, workspacePath?: string): SearchToolDeps => {
-      const store = new MemoryStore(new InMemoryTable())
+      const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
       return { store, registry, resolveContext: async () => ({ workspacePath, session: { id, lastSeq: 1 } }) }
     }
     const sessions = [session('s-a'), session('s-b', '/home/dev/proj-a'), session('s-c', '/home/dev/proj-b')]

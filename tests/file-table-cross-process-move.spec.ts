@@ -5,12 +5,12 @@ import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
 import { encodeRecord, splitFrontmatter } from '../src/storage/frontmatter.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE } from '../src/storage/paths.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { RecordNotFoundError } from '../src/errors.ts'
 import { captureRejection } from './helpers/errors.ts'
+import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 
 // 两个宿主进程同时搬同一个 id 的文件：两个 FileTable 实例共用一个记忆根目录，各有各的进程内锁，互不排队。
 // fs 是进程边界：给 link / rm / rename 套一层，在指定路径的调用之前或之后插进另一个实例的整次写入，交错时机确定，不靠 sleep。
@@ -112,8 +112,8 @@ describe('两个进程把同一个 id 改成同一个名字', () => {
     await seed()
     const a = newTable()
     const b = newTable()
-    at('after', 'link', join(globalDir(), '改名后.md'), () => asOtherProcess(() => b.update('mem_race', renameByB)))
-    await a.update('mem_race', renameByA)
+    at('after', 'link', join(globalDir(), '改名后.md'), () => asOtherProcess(() => b.update('mem_race', {}, renameByB)))
+    await a.update('mem_race', {}, renameByA)
     expect(await mds(globalDir())).toEqual(['改名后.md'])
     expect(await readMoved()).toEqual({ summary: 'A 改的摘要', body: 'B 改的正文' })
   })
@@ -122,8 +122,8 @@ describe('两个进程把同一个 id 改成同一个名字', () => {
     await seed()
     const a = newTable()
     const b = newTable()
-    at('before', 'link', join(globalDir(), '改名后.md'), () => asOtherProcess(() => a.update('mem_race', renameByA)))
-    await b.update('mem_race', renameByB)
+    at('before', 'link', join(globalDir(), '改名后.md'), () => asOtherProcess(() => a.update('mem_race', {}, renameByA)))
+    await b.update('mem_race', {}, renameByB)
     expect(await mds(globalDir())).toEqual(['改名后.md'])
     expect(await readMoved()).toEqual({ summary: 'A 改的摘要', body: 'B 改的正文' })
   })
@@ -134,7 +134,7 @@ describe('占名之后、删旧文件之前源文件不见了', () => {
     const source = await seed()
     const b = newTable()
     at('after', 'link', join(globalDir(), '改名后.md'), () => rm(source))
-    expect(await captureRejection(b.update('mem_race', renameByB))).toBeInstanceOf(RecordNotFoundError)
+    expect(await captureRejection(b.update('mem_race', {}, renameByB))).toBeInstanceOf(RecordNotFoundError)
     expect(await mds(globalDir())).toEqual([])
   })
 
@@ -143,7 +143,7 @@ describe('占名之后、删旧文件之前源文件不见了', () => {
     const source = await seed()
     const b = newTable()
     at('after', 'copyFile', join(globalDir(), '改名后.md'), () => rm(source))
-    expect(await captureRejection(b.update('mem_race', renameByB))).toBeInstanceOf(RecordNotFoundError)
+    expect(await captureRejection(b.update('mem_race', {}, renameByB))).toBeInstanceOf(RecordNotFoundError)
     expect(await mds(globalDir())).toEqual([])
   })
 
@@ -159,15 +159,15 @@ describe('占名之后、删旧文件之前源文件不见了', () => {
     let releaseB!: () => void
     const aDone = new Promise<void>(r => { releaseB = r })
     at('before', 'link', join(globalDir(), '甲.md'), async () => {
-      bRun = b.update('mem_race', r => ({ ...r, name: '乙' }))
+      bRun = b.update('mem_race', {}, r => ({ ...r, name: '乙' }))
       await bReachedRm
     })
     at('before', 'rm', source, async () => { bAtRm(); await aDone })
-    await a.update('mem_race', r => ({ ...r, name: '甲' }))
+    await a.update('mem_race', {}, r => ({ ...r, name: '甲' }))
     releaseB()
     await bRun
     expect(await mds(globalDir())).toEqual(['乙.md', '甲.md'])
-    await newTable().update('mem_race', r => ({ ...r, summary: '再写一次' }))
+    await newTable().update('mem_race', {}, r => ({ ...r, summary: '再写一次' }))
     expect(await mds(globalDir())).toHaveLength(1)
   })
 })
@@ -179,8 +179,8 @@ describe('搬家与彻底删除交错：删除方扫完之后搬家方才占名'
     await seed(record({ content: '含密钥的正文' }))
     const a = newTable()
     const b = newTable()
-    at('before', 'link', join(globalDir(), ARCHIVE_DIR, '竞态.md'), () => asOtherProcess(() => b.delete('mem_race')))
-    expect(await captureRejection(a.update('mem_race', r => ({ ...r, status: 'deleted' })))).toBeInstanceOf(RecordNotFoundError)
+    at('before', 'link', join(globalDir(), ARCHIVE_DIR, '竞态.md'), () => asOtherProcess(() => b.delete('mem_race', {})))
+    expect(await captureRejection(a.update('mem_race', {}, r => ({ ...r, status: 'deleted' })))).toBeInstanceOf(RecordNotFoundError)
     expect(await mds(globalDir())).toEqual([])
     expect(await mds(join(globalDir(), ARCHIVE_DIR))).toEqual([])
   })
@@ -189,7 +189,7 @@ describe('搬家与彻底删除交错：删除方扫完之后搬家方才占名'
     await seed(record({ status: 'deleted', deletedAt: Date.now() }))
     const a = newTable()
     const b = newTable()
-    at('before', 'link', join(globalDir(), ARCHIVE_DIR, '竞态.md'), () => asOtherProcess(() => b.delete('mem_race')))
+    at('before', 'link', join(globalDir(), ARCHIVE_DIR, '竞态.md'), () => asOtherProcess(() => b.delete('mem_race', {})))
     await a.maintain([globalDir()])
     expect(await mds(globalDir())).toEqual([])
     expect(await mds(join(globalDir(), ARCHIVE_DIR))).toEqual([])

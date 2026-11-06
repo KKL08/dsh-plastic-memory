@@ -88,7 +88,7 @@ function observe<T extends object>(proto: T, names: ReadonlyArray<keyof T & stri
 beforeEach(() => {
   observe(FileTable.prototype, ['create', 'put', 'update', 'delete'], (method, args, result) => {
     if (method === 'create') effects.recordWrites.push({ method, record: args[0] as MemoryRecord })
-    else if (method === 'put') effects.recordWrites.push({ method, record: args[1] as MemoryRecord })
+    else if (method === 'put') effects.recordWrites.push({ method, record: args[0] as MemoryRecord })
     else if (method === 'update') effects.recordWrites.push({ method, record: result as MemoryRecord })
     else effects.recordWrites.push({ method, key: args[0] as string })
   })

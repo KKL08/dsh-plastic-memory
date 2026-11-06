@@ -1,172 +1,18 @@
-import { basename, dirname, join, relative } from 'node:path'
+import { dirname } from 'node:path'
 import type { MemoryRecord } from './record-schema.ts'
 import { RecordNotFoundError } from './errors.ts'
 import { expandQueryTerms, matchScore } from './text.ts'
 import {
-  byPosition, pickLiveFirst, resolveLiveFirst,
-  type MemoryLogger, type MemoryTable, type LocatedFile, type LocateHint, type ScopeReadOptions, type ScopeReadResult, type KeywordMatch,
-  type WorkspaceDirListing, type DirectoryNote, type QuarantineEntry,
+  byPosition, resolveLiveFirst,
+  type MemoryLogger, type MemoryTable, type LocateTarget, type ScopeReadOptions, type ScopeReadResult, type KeywordMatch,
+  type DirectoryNote, type QuarantineEntry,
 } from './storage/table.ts'
-import { ARCHIVE_DIR, GLOBAL_DIR, deriveFileId, isReservedFileName, slugifyName, workspaceDirName } from './storage/paths.ts'
-import { InMemoryBatchKvTable, type BatchKvTable } from './kv-table.ts'
+import type { BatchKvTable } from './kv-table.ts'
 import type { RecallStats } from './storage/schema.ts'
-import { RETENTION_MS } from './retention.ts'
 import { hasSecret } from './secrets.ts'
-import { isInScope, type Scope } from './scope.ts'
+import type { Scope } from './scope.ts'
 
-export type { MemoryLogger, MemoryTable, KeywordMatch } from './storage/table.ts'
-
-/** 双后端套件往虚拟目录放文件用的记录：缺 id 时按相对路径派生（对应 FileTable 读手建文件）。 */
-export type SeedRecord = Omit<MemoryRecord, 'id'> & { id?: string }
-
-/**
- * MemoryTable 的内存参考实现：一棵虚拟文件树（filePath → 槽位），目录名与 FileTable 同源（storage/paths），
- * 所以 readScope 的 `dirs` 用同样的绝对路径表达。同 id 可以多槽位（seedFile 放的），取舍规则与 FileTable 共用。
- * 预筛是超集，内存实现不预筛。
- */
-export class InMemoryTable implements MemoryTable {
-  private readonly root: string
-  readonly globalDir: string
-  private slots = new Map<string, LocatedFile>()   // filePath → 槽位
-  private readonly now: () => number
-
-  /** now：补 deletedAt、维护点判过期用的时钟（同 FileTable 的 now），缺省取当前时间。 */
-  constructor(root = '/in-memory', now: () => number = Date.now) {
-    this.root = root
-    this.globalDir = join(root, GLOBAL_DIR)
-    this.now = now
-  }
-
-  private dirOf(record: MemoryRecord): string {
-    return record.scope === 'global' ? this.globalDir : join(this.root, workspaceDirName(record.workspacePath!))
-  }
-
-  /** 与 FileTable.claimAndWrite 同规则：基础名 → id 片段名 → 全 id 名，被别的 id 占着就换下一个（level 是顶层或 .archive/）。 */
-  private pathFor(record: MemoryRecord, level: string, base = slugifyName(record.name)): string {
-    for (const name of [`${base}.md`, `${base}-${record.id.slice(-6)}.md`]) {
-      if (isReservedFileName(name)) continue
-      const path = join(level, name)
-      const taken = this.slots.get(path)
-      if (taken === undefined || taken.record.id === record.id) return path
-    }
-    return join(level, `${base}-${record.id}.md`)
-  }
-
-  /** 供双后端套件直接往虚拟目录放一个文件（对应 FileTable 的手写 / 外部落盘文件）。archived 放进 .archive/。 */
-  seedFile(opts: { dir: string; fileName: string; record: SeedRecord; archived?: boolean; extras?: Record<string, unknown> }): LocatedFile {
-    const filePath = join(opts.archived ? join(opts.dir, ARCHIVE_DIR) : opts.dir, opts.fileName)
-    const id = opts.record.id ?? deriveFileId(relative(this.root, filePath))
-    const slot: LocatedFile = { record: { ...opts.record, id }, extras: opts.extras ?? {}, filePath, dir: opts.dir }
-    this.slots.set(filePath, slot)
-    return slot
-  }
-
-  async workspaceDirs(workspacePath: string): Promise<string[]> {
-    return [join(this.root, workspaceDirName(workspacePath))]
-  }
-
-  async readScope(dirs: string[], opts: ScopeReadOptions = {}): Promise<ScopeReadResult> {
-    const want = new Set(dirs)
-    const inScope = [...this.slots.values()].filter(s => want.has(s.dir))
-    const records = inScope
-      .filter(s => opts.includeArchive || dirname(s.filePath) === s.dir)
-      .filter(s => opts.types === undefined || opts.types.includes(s.record.type))
-      .map(({ record, filePath, dir }) => ({ record, filePath, dir }))
-    // 与 FileTable 同口径：只数顶层，在 types 过滤之前
-    const listedCount = inScope.filter(s => dirname(s.filePath) === s.dir).length
-    return { records, listedCount, quarantined: [], directoryNotes: [] }
-  }
-
-  async locate(id: string, hint?: LocateHint): Promise<LocatedFile | undefined> {
-    const all = [...this.slots.values()].filter(s => s.record.id === id)
-    if (hint?.isExactLayer === true) {
-      const ownDir = hint.workspacePath === undefined ? this.globalDir : join(this.root, workspaceDirName(hint.workspacePath))
-      return pickLiveFirst(all.filter(s => s.dir === ownDir), hint)
-    }
-    const firstLevel = all.filter(s => s.dir === this.globalDir
-      || (hint?.workspacePath !== undefined && s.record.scope === 'workspace' && s.record.workspacePath === hint.workspacePath))
-    return pickLiveFirst(firstLevel.length > 0 ? firstLevel : all, hint)
-  }
-
-  async listWorkspaceDirs(): Promise<WorkspaceDirListing> {
-    const byDir = new Map<string, { workspacePath: string; hasActiveTopLevel: boolean }>()
-    for (const s of this.slots.values()) {
-      if (s.dir === this.globalDir) continue
-      const entry = byDir.get(s.dir) ?? { workspacePath: s.record.workspacePath!, hasActiveTopLevel: false }
-      if (dirname(s.filePath) === s.dir) entry.hasActiveTopLevel = true
-      byDir.set(s.dir, entry)
-    }
-    const directoryNotes: DirectoryNote[] = []
-    const entries = [...byDir].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([dir, e]) => {
-      if (!e.hasActiveTopLevel) directoryNotes.push({ level: 'info', code: 'dir-empty', path: dir, text: `workspace 目录顶层没有记忆文件（只剩归档或全空），不进体检清单：${dir}` })
-      return { dir, ...e }
-    })
-    return { entries, directoryNotes }
-  }
-
-  /** 落槽位（与 FileTable.persist 同规则）：status 离开 active 进 .archive/（deleted 缺 deletedAt 补 now）；目录、层、slug 都没变
-   *  就留在原路径，否则在目标层重新取名；落下后清掉可见集合（global + 该记录的目录）里同 id 的其余副本，只认层时只清该目录。返回实际落下的记录。 */
-  private place(prev: LocatedFile | undefined, value: MemoryRecord, isExactLayer = false): MemoryRecord {
-    const next = value.status === 'deleted' && value.deletedAt === undefined ? { ...value, deletedAt: this.now() } : value
-    if (prev) this.slots.delete(prev.filePath)
-    const sameLocation = prev !== undefined && prev.record.scope === next.scope && prev.record.workspacePath === next.workspacePath
-    const dir = sameLocation ? prev.dir : this.dirOf(next)
-    const level = next.status === 'active' ? dir : join(dir, ARCHIVE_DIR)
-    const renamed = prev !== undefined && slugifyName(next.name).toLowerCase() !== slugifyName(prev.record.name).toLowerCase()
-    const inPlace = prev !== undefined && sameLocation && !renamed && dirname(prev.filePath) === level
-    const filePath = inPlace ? prev.filePath : this.pathFor(next, level)
-    for (const s of this.slots.values()) {
-      if (s.record.id === next.id && s.filePath !== filePath && ((!isExactLayer && s.dir === this.globalDir) || s.dir === dir)) this.slots.delete(s.filePath)
-    }
-    this.slots.set(filePath, { record: next, extras: prev?.extras ?? {}, filePath, dir })
-    return next
-  }
-
-  /** 维护点的内存对应：顶层非 active 搬 .archive/（deleted 补 deletedAt）；.archive/ 里 active 按位置归一成 deleted；
-   *  .archive/ 里 deletedAt 超保留期的删掉。索引、digest、tmp 在内存里没有对应物。 */
-  async maintain(dirs: string[]) {
-    const want = new Set(dirs)
-    const now = this.now()
-    for (const s of [...this.slots.values()].filter(s => want.has(s.dir))) {
-      const archive = join(s.dir, ARCHIVE_DIR)
-      const inArchive = dirname(s.filePath) === archive
-      let record = s.record
-      if (inArchive && record.status === 'active') record = { ...record, status: 'deleted' }
-      if (record.status === 'deleted' && record.deletedAt === undefined) record = { ...record, deletedAt: now }
-      if (inArchive && record.status === 'deleted' && record.deletedAt! < now - RETENTION_MS) { this.slots.delete(s.filePath); continue }
-      if (!inArchive && record.status !== 'active') {
-        this.slots.delete(s.filePath)
-        const filePath = this.pathFor(record, archive, basename(s.filePath, '.md'))   // 搬家不改文件名
-        this.slots.set(filePath, { ...s, record, filePath })
-      } else if (record !== s.record) this.slots.set(s.filePath, { ...s, record })
-    }
-  }
-
-  async create(record: MemoryRecord) {
-    this.place(undefined, record)   // 不定位：新 id 直接占名
-  }
-  async put(key: string, value: MemoryRecord, hint: LocateHint = { workspacePath: value.workspacePath }, skipIf?: (current: MemoryRecord | undefined) => boolean) {
-    // 与 FileTable 同语义：put 不承载召回统计（召回统计住侧表，由 MemoryStore.markRecalled 写）
-    const prev = await this.locate(key, hint)
-    if (skipIf?.(prev && byPosition(prev))) return false
-    this.place(prev, prev ? { ...value, recallCount: prev.record.recallCount, lastRecalledAt: prev.record.lastRecalledAt } : value, hint.isExactLayer === true)
-    return true
-  }
-  async update(key: string, fn: (c: MemoryRecord) => MemoryRecord, hint?: LocateHint) {
-    const current = await this.locate(key, hint)
-    if (!current) throw new RecordNotFoundError(key)
-    return this.place(current, fn(current.record), hint?.isExactLayer === true)
-  }
-  async delete(key: string, hint?: LocateHint, skipIf?: (current: LocatedFile) => boolean) {
-    const current = await this.locate(key, hint)
-    if (!current || skipIf?.(current)) return false
-    // 与 FileTable 同语义：可见集合（global + 该记录目录）里同 id 的其余副本一并删除；只认层时只删该目录里的
-    for (const s of this.slots.values()) {
-      if (s.record.id === key && ((hint?.isExactLayer !== true && s.dir === this.globalDir) || s.dir === current.dir)) this.slots.delete(s.filePath)
-    }
-    return true
-  }
-}
+export type { MemoryLogger, MemoryTable, KeywordMatch, LocateTarget, SessionTarget } from './storage/table.ts'
 
 /** 查询范围：一个作用域（全局或某个项目），或当前会话的可见集合（global + 当前 workspace）。缺省读全部目录。 */
 export type QueryScope = Scope | { kind: 'visible'; workspacePath: string | undefined }
@@ -190,7 +36,8 @@ export interface QueryResult {
 
 /** 删除类方法的选项。 */
 export interface DeleteOptions {
-  isExactLayer?: boolean
+  /** 只认这个作用域里的那一份（见 LocateTarget）；缺省按记录自己的 workspace 做会话视角定位。 */
+  at?: Scope
   /** 软删的时刻（updatedAt、deletedAt）：调用方有注入的时钟时传它，缺省取当前时间。 */
   now?: number
 }
@@ -204,9 +51,8 @@ function markDeleted(r: MemoryRecord, now: number | undefined): MemoryRecord {
   return { ...r, status: 'deleted', updatedAt: now, deletedAt: r.deletedAt ?? now }
 }
 
-/** 按记录自己的 workspace 定位；global 记录没有 workspacePath，只认层时即 global 层。 */
-function deleteHint(record: Pick<MemoryRecord, 'workspacePath'>, opts: DeleteOptions): LocateHint {
-  return { workspacePath: record.workspacePath, ...(opts.isExactLayer === true ? { isExactLayer: true } : {}) }
+function deleteTarget(record: Pick<MemoryRecord, 'workspacePath'>, opts: DeleteOptions): LocateTarget {
+  return opts.at ?? { workspacePath: record.workspacePath }
 }
 
 export class MemoryStore {
@@ -215,47 +61,43 @@ export class MemoryStore {
   private stats: BatchKvTable<RecallStats>
   private recallChain: Promise<unknown> = Promise.resolve() // markRecalled 的读改写在进程内串行
 
-  /** stats：召回统计侧表（接线层传 .state/recall-stats.json）；缺省内存表，供不关心召回统计的测试。 */
-  constructor(table: MemoryTable, log?: MemoryLogger, stats: BatchKvTable<RecallStats> = new InMemoryBatchKvTable<RecallStats>()) {
+  /** log 缺省回退 console；stats：召回统计侧表（接线层传 .state/recall-stats.json）。 */
+  constructor(table: MemoryTable, log: MemoryLogger | undefined, stats: BatchKvTable<RecallStats>) {
     this.table = table
     this.log = log ?? console
     this.stats = stats
   }
 
-  /** 按 id 两级定位（含非 active）；hint 是当前 workspace，一级先看它的目录。
+  /** 按 id 定位（含非 active）；缺省是不带当前项目的会话视角，目标规则见 LocateTarget。
    *  位置即作用域（同 readRaw）：.archive/ 里 status 仍写着 active 的按 deleted 返回。 */
-  async get(id: string, hint?: LocateHint): Promise<MemoryRecord | undefined> {
-    const found = await this.table.locate(id, hint)
+  async get(id: string, target: LocateTarget = {}): Promise<MemoryRecord | undefined> {
+    const found = await this.table.locate(id, target)
     return found === undefined ? undefined : byPosition(found)
   }
-  locate(id: string, hint?: LocateHint) { return this.table.locate(id, hint) }
-  /** 这个 id 在哪些作用域有副本（任何状态，含只在 .archive/ 里的）：全局在前，项目按路径排序。逐个作用域只认本作用域定位。 */
-  async copiesOf(id: string): Promise<Scope[]> {
-    const workspaces = [...new Set((await this.table.listWorkspaceDirs()).entries.map(e => e.workspacePath))].sort()
-    const scopes: Scope[] = [{ kind: 'global' }, ...workspaces.map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
-    const copies = await Promise.all(scopes.map(scope =>
-      this.get(id, { workspacePath: scope.kind === 'workspace' ? scope.workspacePath : undefined, isExactLayer: true })))
-    return scopes.filter((scope, i) => copies[i] !== undefined && isInScope(copies[i], scope))
-  }
+  locate(id: string, target: LocateTarget = {}) { return this.table.locate(id, target) }
+  /** 这个 id 在哪些作用域有副本（任何状态，含只在 .archive/ 里的）：全局在前，项目按路径排序。 */
+  copiesOf(id: string): Promise<Scope[]> { return this.table.copiesOf(id) }
   listWorkspaceDirs() { return this.table.listWorkspaceDirs() }
   /** 新记录：不定位，排他占名（save create 用）。 */
   create(record: MemoryRecord) { return this.table.create(record) }
-  /** 整条替换。hint：跨 scope 搬家时传原记录的 workspace，让定位到的是门放行的那份；缺省按 record 自己的 workspace。
-   *  skipIf 见 MemoryTable.put：锁内按最新内容判定为真就不写，返回 false。 */
-  put(record: MemoryRecord, hint?: LocateHint, skipIf?: (current: MemoryRecord | undefined) => boolean) { return this.table.put(record.id, record, hint, skipIf) }
+  /** 整条替换。from：跨 scope 搬家时传原记录的作用域，让定位到的是门放行的那份；缺省按 record 自己的 workspace 做会话视角定位。
+   *  skipIf 见 MemoryTable.put：锁内按最新内容判定为真就不写，返回 undefined；写了返回实际写出的记录。 */
+  put(record: MemoryRecord, from: LocateTarget = { workspacePath: record.workspacePath }, skipIf?: (current: MemoryRecord | undefined) => boolean) {
+    return this.table.put(record, from, skipIf)
+  }
   /** 读改写：锁内按调用方读到的那条记录定位（定位约定同 put），对磁盘上的当前内容套 fn；
    *  调用方读到之后被别处改过的字段不丢。只改几个字段的写回都该走这里，整条替换才用 put。 */
-  update(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, fn: (current: MemoryRecord) => MemoryRecord, hint: LocateHint = { workspacePath: record.workspacePath }) {
-    return this.table.update(record.id, fn, hint)
+  update(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, fn: (current: MemoryRecord) => MemoryRecord, from: LocateTarget = { workspacePath: record.workspacePath }) {
+    return this.table.update(record.id, from, fn)
   }
   /** 同 update，但锁内发现记录已不存在或已软删就不写、返回 undefined（工具据此报「不存在或已删除」，不抛错）。
-   *  hint 同 update：调用方按层读到的（locateCopy），带只认层提示写回，别层同 id 的副本不动。 */
-  async updateIfLive(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, fn: (current: MemoryRecord) => MemoryRecord, hint?: LocateHint): Promise<MemoryRecord | undefined> {
+   *  from 同 update：调用方按作用域读到的（locateCopy），给同一个作用域写回，别的作用域里同 id 的副本不动。 */
+  async updateIfLive(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, fn: (current: MemoryRecord) => MemoryRecord, from?: LocateTarget): Promise<MemoryRecord | undefined> {
     try {
       return await this.update(record, r => {
         if (r.status === 'deleted') throw new RecordNotFoundError(r.id)
         return fn(r)
-      }, hint)
+      }, from)
     } catch (err) {
       if (err instanceof RecordNotFoundError) return undefined
       throw err
@@ -266,18 +108,18 @@ export class MemoryStore {
    * 删除按记录定位：调用方传入它读到并过了门的那条记录，按该记录自己的 workspace 定位（与 put 同约定），
    * 同 id 多副本时改的就是门检查过的那份，不会落到 global 或别的项目的副本上。
    * hardDelete 物理删除文件（不进 .archive/，不可恢复）：给密钥硬删（tools/forget.ts）和最近删除里的彻底删除（gui/commands.ts）用。
-   * isExactLayer：只认这条记录所在的那一层（见 LocateHint），同可见集合里别层的副本更新也不改到它头上。
+   * opts.at：只认这个作用域里的那一份（见 LocateTarget），可见集合里别的作用域的副本更新也不改到它头上。
    * skipIf：锁内对将被删的那份求值（位置即作用域，同 get），为真就不删、返回 false。
    */
   hardDelete(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, opts: DeleteOptions = {}, skipIf?: (current: MemoryRecord) => boolean): Promise<boolean> {
-    return this.table.delete(record.id, deleteHint(record, opts), skipIf && (found => skipIf(byPosition(found))))
+    return this.table.delete(record.id, deleteTarget(record, opts), skipIf && (found => skipIf(byPosition(found))))
   }
 
   async softDelete(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, opts: DeleteOptions = {}): Promise<boolean> {
-    const hint = deleteHint(record, opts)
-    if (!(await this.table.locate(record.id, hint))) return false
+    const target = deleteTarget(record, opts)
+    if (!(await this.table.locate(record.id, target))) return false
     try {
-      await this.table.update(record.id, r => markDeleted(r, opts.now), hint)
+      await this.table.update(record.id, target, r => markDeleted(r, opts.now))
     } catch (err) {
       if (err instanceof RecordNotFoundError) return false   // 定位之后被别处删掉
       throw err
@@ -291,7 +133,7 @@ export class MemoryStore {
    */
   async restoreArchived(record: Pick<MemoryRecord, 'id' | 'workspacePath'>, opts: DeleteOptions = {}): Promise<boolean> {
     try {
-      await this.table.update(record.id, ({ deletedAt: _, ...r }) => ({ ...r, status: 'active', updatedAt: opts.now ?? Date.now() }), deleteHint(record, opts))
+      await this.table.update(record.id, deleteTarget(record, opts), ({ deletedAt: _, ...r }) => ({ ...r, status: 'active', updatedAt: opts.now ?? Date.now() }))
     } catch (err) {
       if (err instanceof RecordNotFoundError) return false   // 定位之后被别处删掉
       throw err
@@ -309,15 +151,15 @@ export class MemoryStore {
     record: Pick<MemoryRecord, 'id' | 'workspacePath'>,
     opts: DeleteOptions & { isChanged?: (current: MemoryRecord) => boolean; isSecret?: (current: MemoryRecord) => boolean } = {},
   ): Promise<'deleted' | 'has-secret' | 'changed' | 'missing'> {
-    const hint = deleteHint(record, opts)
-    if (!(await this.table.locate(record.id, hint))) return 'missing'
+    const target = deleteTarget(record, opts)
+    if (!(await this.table.locate(record.id, target))) return 'missing'
     try {
       // 走 update 的读改写：写盘前又被改就在新内容上重判，判密钥看的始终是将被覆盖的那份
       let outcome: 'deleted' | 'has-secret' | 'changed' = 'deleted'
       await this.update(record, (r) => {
         outcome = opts.isChanged?.(r) === true ? 'changed' : (opts.isSecret ?? hasSecret)(r) ? 'has-secret' : 'deleted'
         return outcome === 'deleted' ? markDeleted(r, opts.now) : r
-      }, hint)
+      }, target)
       return outcome
     } catch (err) {
       if (err instanceof RecordNotFoundError) return 'missing'   // 定位之后被别处删掉
@@ -354,7 +196,7 @@ export class MemoryStore {
   async queryScope(filter: QueryFilter): Promise<QueryResult> {
     const statuses = filter.status ?? ['active']
     const scope = filter.scope
-    const hint = scope?.kind === 'workspace' || scope?.kind === 'visible' ? scope.workspacePath : undefined
+    const workspacePath = scope?.kind === 'workspace' || scope?.kind === 'visible' ? scope.workspacePath : undefined
     // keyword 按 keywordMatch 取全部或任一词项命中（AND 零命中回退 OR 由调用方 executeSearch 决定）。
     // 原文预筛用同一组词项、同一模式：expandQueryTerms 只做小写、按空白切分、CJK 段切 bigram，不扩同义词，
     // 每个词项都是查询原文的子串，命中记录的原文里必然以子串出现（缺 id 行文件的派生 id 由 FileTable 预筛一并算入），
@@ -366,7 +208,7 @@ export class MemoryStore {
       ...(terms.length > 0 ? { prefilterTerms: terms, prefilterMatch: keywordMatch } : {}),
       includeArchive: statuses.some(s => s !== 'active'),
     })
-    const records = resolveLiveFirst(read.records, { workspacePath: hint }).map(l => l.record).filter(r =>
+    const records = resolveLiveFirst(read.records, { workspacePath }).map(l => l.record).filter(r =>
       statuses.includes(r.status)
       && (!filter.tags || filter.tags.some(t => r.tags.includes(t)))
       && (terms.length === 0 || (keywordMatch === 'any' ? matchScore(r, terms) > 0 : matchScore(r, terms) === terms.length)))

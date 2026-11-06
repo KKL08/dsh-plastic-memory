@@ -4,13 +4,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { executePromote } from '../src/tools/promote.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
+import { MemoryStore } from '../src/store.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import type { MemorySnapshot } from '../src/governance/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 // 本文件默认造一条 workspace 层、待提升的 preference（agent-inferred，globalCandidate）。
 const record = (partial: Partial<MemoryRecord> = {}) => baseRecord({
@@ -30,7 +31,7 @@ function makeSnapshots() {
 
 describe('executePromote', () => {
   it('target=global：scope 改 global、workspacePath 清空、globalCandidate 清除', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_x' }))
     const { writer } = fakeAgentsMd()
     const r = await executePromote({ confirmedIds: ['mem_x'], target: 'global' }, { workspacePath: '/proj' }, { store, agentsMd: writer, snapshots: makeSnapshots() })
@@ -42,7 +43,7 @@ describe('executePromote', () => {
   })
 
   it('target=global：提升后记录不留 undefined 键（无损 JSON 不变式）', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_x' }))
     const { writer } = fakeAgentsMd()
     await executePromote({ confirmedIds: ['mem_x'], target: 'global' }, { workspacePath: '/proj' }, { store, agentsMd: writer, snapshots: makeSnapshots() })
@@ -52,7 +53,7 @@ describe('executePromote', () => {
   })
 
   it('target=agents-md：写入 AGENTS.md + 原记忆软删', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_y', name: '偏好', content: '用 pnpm' }))
     const { writer, lines } = fakeAgentsMd()
     const r = await executePromote({ confirmedIds: ['mem_y'], target: 'agents-md' }, { workspacePath: '/proj' }, { store, agentsMd: writer, snapshots: makeSnapshots() })
@@ -63,7 +64,7 @@ describe('executePromote', () => {
 
   it('快照先行：两种 target 提升前都对目标整批拍 pre-promote 快照，data 含原记录', async () => {
     for (const target of ['global', 'agents-md'] as const) {
-      const store = new MemoryStore(new InMemoryTable())
+      const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
       await store.put(record({ id: 'mem_s', name: '偏好', content: '用 pnpm' }))
       const snapshots = makeSnapshots()
       const r = await executePromote({ confirmedIds: ['mem_s'], target }, { workspacePath: '/proj' }, { store, agentsMd: fakeAgentsMd().writer, snapshots })
@@ -79,14 +80,14 @@ describe('executePromote', () => {
   })
 
   it('无可提升记录时不拍快照', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const snapshots = makeSnapshots()
     await executePromote({ confirmedIds: ['mem_ghost'], target: 'global' }, { workspacePath: '/proj' }, { store, agentsMd: fakeAgentsMd().writer, snapshots })
     expect(await snapshots.list()).toHaveLength(0)
   })
 
   it('agents-md 分支 append 失败时回滚软删：记忆仍 active、计入 skipped、不谎报 promoted', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_z', name: '偏好', content: '用 pnpm' }))
     const failing = { append: async () => { throw new Error('EACCES: AGENTS.md 不可写') } }
     const r = await executePromote({ confirmedIds: ['mem_z'], target: 'agents-md' }, { workspacePath: '/proj' }, { store, agentsMd: failing, snapshots: makeSnapshots() })
@@ -97,7 +98,7 @@ describe('executePromote', () => {
 
   // AGENTS.md 原文注入所有项目的会话、不归插件管：含密钥的记忆写进去就是明文外泄，原记忆进回收站后留下的只剩这份明文
   it('target=agents-md：含 critical 密钥的记录拒绝写入，AGENTS.md 不动、记忆仍 active、计入 skipped 并说明原因', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_sec', name: '部署凭证', content: `token ${FAKE_SECRET.sk}` }))
     const { writer, lines } = fakeAgentsMd()
     const snapshots = makeSnapshots()
@@ -111,7 +112,7 @@ describe('executePromote', () => {
   })
 
   it('target=agents-md：只含 suspected 密钥（用户 force 放行保存）的记录同样拒绝', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_sus', name: '测试库', content: '数据库密码: hunter2024x' }))
     const { writer, lines } = fakeAgentsMd()
     const r = await executePromote({ confirmedIds: ['mem_sus'], target: 'agents-md' }, { workspacePath: '/proj' }, { store, agentsMd: writer, snapshots: makeSnapshots() })
@@ -123,7 +124,7 @@ describe('executePromote', () => {
   })
 
   it('target=agents-md：同一批里干净的照常写入，含密钥的被拒', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_ok', name: '偏好', content: '用 pnpm' }))
     await store.put(record({ id: 'mem_sec', name: '部署凭证', content: `token ${FAKE_SECRET.github}` }))
     const { writer, lines } = fakeAgentsMd()
@@ -139,7 +140,7 @@ describe('executePromote', () => {
   })
 
   it('已删除/不存在的 id 跳过、不计入 promoted', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const { writer } = fakeAgentsMd()
     const r = await executePromote({ confirmedIds: ['mem_ghost'], target: 'global' }, { workspacePath: '/proj' }, { store, agentsMd: writer, snapshots: makeSnapshots() })
     expect(r.promoted).toEqual([])
@@ -150,7 +151,7 @@ describe('executePromote', () => {
     const NOW = 9_000
     const creator = { sessionId: 'sess-child', depth: 1, parentSessionId: 'sess-main' }
     for (const by of ['user', 'main'] as const) {
-      const store = new MemoryStore(new InMemoryTable())
+      const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
       await store.put(record({ id: 'mem_p', delegation: creator }))
       await store.put(record({ id: 'mem_r', delegation: { ...creator, reviewed: { by: 'main', at: 5 } } }))
       await store.put(record({ id: 'mem_m' }))
@@ -167,7 +168,7 @@ describe('executePromote', () => {
     const NOW = 9_000
     const creator = { sessionId: 'sess-child', depth: 1, parentSessionId: 'sess-main' }
     for (const by of ['user', 'main'] as const) {
-      const store = new MemoryStore(new InMemoryTable())
+      const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
       await store.put(record({ id: 'mem_p', delegation: creator }))
       await store.put(record({ id: 'mem_m' }))
       const { writer, lines } = fakeAgentsMd()
@@ -184,7 +185,7 @@ describe('executePromote', () => {
 
   it('PA-17 target=agents-md：软删的 updatedAt 与 deletedAt 都取注入的时钟', async () => {
     const NOW = 9_000
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_a' }))
     const { writer } = fakeAgentsMd()
     await executePromote({ confirmedIds: ['mem_a'], target: 'agents-md' }, { workspacePath: '/proj' }, { store, agentsMd: writer, snapshots: makeSnapshots(), now: () => NOW })
@@ -192,7 +193,7 @@ describe('executePromote', () => {
   })
 
   it('只处理 confirmedIds 里的（未确认的不动）', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_a' }))
     await store.put(record({ id: 'mem_b' }))
     const { writer } = fakeAgentsMd()
@@ -202,7 +203,7 @@ describe('executePromote', () => {
   })
 
   it('dismiss：清除候选标记、记忆留在项目内、scope 与 updatedAt 不变', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_d', updatedAt: 111 }))
     const { writer } = fakeAgentsMd()
     const r = await executePromote({ confirmedIds: ['mem_d'], target: 'global', dismiss: true }, { workspacePath: '/proj' }, { store, agentsMd: writer, snapshots: makeSnapshots() })
@@ -216,7 +217,7 @@ describe('executePromote', () => {
   })
 
   it('dismiss：不拍快照', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_d' }))
     const snapshots = makeSnapshots()
     await executePromote({ confirmedIds: ['mem_d'], target: 'global', dismiss: true }, { workspacePath: '/proj' }, { store, agentsMd: fakeAgentsMd().writer, snapshots })
@@ -224,7 +225,7 @@ describe('executePromote', () => {
   })
 
   it('dismiss：缺失/已删的 id 计入 skipped', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_d' }))
     const r = await executePromote({ confirmedIds: ['mem_d', 'mem_ghost'], target: 'global', dismiss: true }, { workspacePath: '/proj' }, { store, agentsMd: fakeAgentsMd().writer, snapshots: makeSnapshots() })
     expect(r.dismissed).toEqual(['mem_d'])
@@ -238,7 +239,7 @@ describe('executePromote × 真实 AgentsMdWriter', () => {
   afterEach(async () => { await rm(dir, { recursive: true, force: true }) })
 
   it('并发提升两条到 agents-md：两次都报 promoted 时，两条内容都必须在目标文件里', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_p1', name: '甲', content: '并发提升的第一条' }))
     await store.put(record({ id: 'mem_p2', name: '乙', content: '并发提升的第二条' }))
     const writer = createAgentsMdWriter(join(dir, 'AGENTS.md'))
@@ -257,7 +258,7 @@ describe('executePromote × 真实 AgentsMdWriter', () => {
   })
 
   it('串行提升前缀相同的两条：两条都进目标文件，源记录都软删', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_long', name: '包管理', content: '使用 pnpm 安装依赖并运行测试' }))
     await store.put(record({ id: 'mem_short', name: '包管理', content: '使用 pnpm 安装依赖' }))
     const writer = createAgentsMdWriter(join(dir, 'AGENTS.md'))
@@ -269,7 +270,7 @@ describe('executePromote × 真实 AgentsMdWriter', () => {
   })
 
   it('PA-04 AGENTS.md 读取报权限错误：提升失败、记忆仍 active，文件原文一字不变', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_ro', name: '偏好', content: '用 pnpm' }))
     const file = join(dir, 'AGENTS.md')
     const original = '# 用户手写\n别动这段\n'

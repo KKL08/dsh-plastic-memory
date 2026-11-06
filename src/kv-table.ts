@@ -37,44 +37,8 @@ export interface CasKvTable<T> extends KvTable<T> {
   update(key: string, fn: (current: T | undefined) => T | undefined): Promise<boolean>
 }
 
-export class InMemoryKvTable<T> implements ClaimKvTable<T>, CasKvTable<T>, RefreshableClaimKvTable<T> {
-  private map = new Map<string, T>()
-  private claimed = new Map<string, symbol>()
-  async get(key: string) { return this.map.get(key) }
-  async list() { return [...this.map.entries()] }
-  async put(key: string, value: T) { this.map.set(key, value) }
-  async delete(key: string) { return this.map.delete(key) }
-  async deleteIf(key: string, isStill: (current: T) => boolean) {
-    const cur = this.map.get(key)
-    return cur !== undefined && isStill(cur) && this.map.delete(key)
-  }
-  async update(key: string, fn: (current: T | undefined) => T | undefined) {
-    const next = fn(this.map.get(key))
-    if (next === undefined) return false
-    this.map.set(key, next)
-    return true
-  }
-  async claim(key: string) {
-    return (await this.claimRefreshable(key))?.release
-  }
-  async claimRefreshable(key: string) {
-    if (this.claimed.has(key)) return undefined
-    const token = Symbol(key)
-    this.claimed.set(key, token)
-    return {
-      refresh: async () => this.claimed.get(key) === token,
-      release: async () => { if (this.claimed.get(key) === token) this.claimed.delete(key) },
-    }
-  }
-  async isClaimed(key: string) { return this.claimed.has(key) }
-}
-
 /** 带批量写的 KV：只给召回统计用（单文件表，一次 markRecalled 只该换一次文件）。KvTable 本身不加批量。 */
 export interface BatchKvTable<T> extends KvTable<T> {
   /** 一次写入多条，与已有条目合并（同键覆盖）。 */
   putMany(entries: ReadonlyArray<[string, T]>): Promise<void>
-}
-
-export class InMemoryBatchKvTable<T> extends InMemoryKvTable<T> implements BatchKvTable<T> {
-  async putMany(entries: ReadonlyArray<[string, T]>) { for (const [key, value] of entries) await super.put(key, value) }
 }

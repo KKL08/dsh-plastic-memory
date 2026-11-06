@@ -18,14 +18,13 @@ import { executeSave } from '../src/tools/save.ts'
 import { executeSource } from '../src/tools/source.ts'
 import { executeScan, renderScanResult } from '../src/tools/scan.ts'
 import { executeHealth, renderHealthResult } from '../src/tools/health.ts'
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
+import { MemoryStore } from '../src/store.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { ARCHIVE_DIR, workspaceDirName } from '../src/storage/paths.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { resolveHealthThresholds } from '../src/governance/health-presets.ts'
 import { pendingDecisionSchema, type MemorySnapshot, type PendingDecision, type ScanCacheEntry } from '../src/governance/schema.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { GovernanceRejectCode, RejectCode } from '../src/contract-codes.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
@@ -33,6 +32,8 @@ import type { MemoryLogger } from "../src/storage/table.ts"
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 // 治理动作只有在用户明确选择「全局整理」后才能跨项目。
 // 场景统一为：会话在项目 A，B 是另一个项目；global 记忆对任何会话都可见。
@@ -51,7 +52,7 @@ const inB = (id: string, partial: Partial<MemoryRecord> = {}) => record({ id, sc
 const glob = (id: string, partial: Partial<MemoryRecord> = {}) => record({ id, scope: 'global', ...partial })
 
 function world() {
-  const store = new MemoryStore(new InMemoryTable())
+  const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
   const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
   const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
   const agentsMd = { lines: [] as string[], append: async function (line: string) { this.lines.push(line) } }
@@ -336,7 +337,7 @@ describe('待决账本条目新增 workspaces 字段（global 用 global），sc
   })
 
   it('scan 挂账：条目按 memoryIds 顺序记录双方 workspace，global 记作 global；结果与渲染带上', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
     await store.put(inA('mem_a', { content: '用 pnpm' }))
     await store.put(glob('mem_g', { content: '用 npm' }))
@@ -358,7 +359,7 @@ describe('待决账本条目新增 workspaces 字段（global 用 global），sc
   })
 
   it('health 列出待决项带 workspaces；旧条目缺字段时按记录现状补出', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
     await store.put(inA('mem_a'))
     await store.put(glob('mem_g'))
@@ -505,7 +506,7 @@ describe('在项目 A 的会话里操作项目 B 记录的正反两组测试', (
   async function onDisk() {
     const root = await mkdtemp(join(tmpdir(), 'pm-cross-ws-'))
     roots.push(root)
-    const store = new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() }))
+    const store = new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() }), undefined, new InMemoryBatchKvTable())
     const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
     const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
     await store.create(inA('mem_a', { name: 'A 规则' }))
@@ -561,7 +562,7 @@ describe('同 id 多副本时，门放行的那份就是被改的那份：删除
 
   function dupWorld() {
     const table = new InMemoryTable()
-    const store = new MemoryStore(table)
+    const store = new MemoryStore(table, undefined, new InMemoryBatchKvTable())
     const deps = {
       store, log: quiet, now: () => 5000,
       snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),

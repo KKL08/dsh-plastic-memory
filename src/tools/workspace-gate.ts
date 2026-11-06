@@ -45,11 +45,11 @@ export function isCopyOf(record: Pick<MemoryRecord, 'scope' | 'workspacePath'>, 
 }
 
 /**
- * 按副本定位（含非 active）：只读目标作用域（isExactLayer），别的作用域里同 id 的副本再新也不取；目标作用域没有这个 id 时当作没找到。
- * 写回时调用方带同样的只认层提示（store 删除类方法的 isExactLayer），改的就是读到的这一份。
+ * 按副本定位（含非 active）：只读目标作用域，别的作用域里同 id 的副本再新也不取；目标作用域没有这个 id 时当作没找到。
+ * 写回时调用方给同一个作用域（store 删除类方法的 at），改的就是读到的这一份。
  */
 export async function locateCopy(store: Pick<MemoryStore, 'get'>, id: string, target: Scope): Promise<MemoryRecord | undefined> {
-  const record = await store.get(id, { workspacePath: target.kind === 'workspace' ? target.workspacePath : undefined, isExactLayer: true })
+  const record = await store.get(id, target)
   return record !== undefined && isCopyOf(record, target) ? record : undefined
 }
 

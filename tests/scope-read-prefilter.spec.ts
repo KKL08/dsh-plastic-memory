@@ -6,7 +6,6 @@ import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR } from '../src/storage/paths.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import { expandQueryTerms, matchScore } from '../src/text.ts'
 import { createTokenizer } from '../src/search/tokenizer.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
@@ -15,6 +14,7 @@ import { fakeExec } from './helpers/exec.ts'
 import { MemoryStore } from '../src/store.ts'
 import { executeSearch } from '../src/tools/search.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 // 读取层 prefactor：any 模式预筛接任意一组子串词项（检索会传新 token ∪ 旧词项），列出文件数与预筛无关。
 
@@ -94,7 +94,7 @@ describe('检索传给读取层的预筛词不含单字母与纯数字', () => {
     await mkdir(gdir)
     await writeFile(join(gdir, 'a.md'), encodeRecord(record({ id: 'mem_pn', name: 'pnpm 约定', content: '包管理用 pnpm' }), {}))
     await writeFile(join(gdir, 'b.md'), encodeRecord(record({ id: 'mem_v7', name: '运行时版本', content: 'Node 22 起步' }), {}))
-    const store = new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() }))
+    const store = new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() }), undefined, new InMemoryBatchKvTable())
     const readRaw = vi.spyOn(store, 'readRaw')
     const deps = {
       store, registry: buildTypeRegistry({ template: 'coding', customTypes: {} }),

@@ -6,8 +6,8 @@ import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
 import { encodeRecord, splitFrontmatter } from '../src/storage/frontmatter.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE } from '../src/storage/paths.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import { MemoryStore } from '../src/store.ts'
+import { scopeAt } from '../src/scope.ts'
 import { ConcurrentModificationError } from '../src/errors.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
@@ -23,6 +23,7 @@ import type { RejectCode } from '../src/contract-codes.ts'
 import { executeSnapshotTool } from '../src/tools/snapshot.ts'
 import { record as baseRecord, candidate } from './helpers/record.ts'
 import { captureRejection } from './helpers/errors.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 // 写路径锁内 locate 之后、写盘之前，别的宿主进程或用户改了这个文件：update 要在新内容上重算，put 要基于新的
 // 位置与附加字段重写，都不能拿旧读数盖掉新内容。fs 是进程边界：只给 readFile 套一层，在指定路径第 n 次读完
@@ -95,7 +96,7 @@ describe('update：locate 之后文件被改，在新内容上重算再写', () 
     changeAfterRead(path, encodeRecord(record({ content: '并发改的' }), {}), AFTER_LOCATE)
     const seen: string[] = []
     const t = newTable()
-    await t.update('mem_race', r => { seen.push(r.content); return { ...r, summary: 'fn 改的摘要' } })
+    await t.update('mem_race', {}, r => { seen.push(r.content); return { ...r, summary: 'fn 改的摘要' } })
     expect(seen).toEqual(['旧正文', '并发改的'])
     const fm = splitFrontmatter(await readFile(path, 'utf8'))
     expect(fm.body).toContain('并发改的')
@@ -110,11 +111,11 @@ describe('update：locate 之后文件被改，在新内容上重算再写', () 
     const isEntered = new Promise<void>(resolve => { entered = resolve })
     let release!: () => void
     writeGate.current = { match: p => p.startsWith(join(globalDir(), '占锁.md.tmp-')), entered, release: new Promise<void>(resolve => { release = resolve }) }
-    const holding = t.update('mem_hold', r => ({ ...r, content: '占锁的写' }))
+    const holding = t.update('mem_hold', {}, r => ({ ...r, content: '占锁的写' }))
     await isEntered // 写锁被占着
 
     const seen: string[] = []
-    const waiting = t.update('mem_race', r => { seen.push(r.content); return { ...r, summary: 'fn 改的摘要' } })
+    const waiting = t.update('mem_race', {}, r => { seen.push(r.content); return { ...r, summary: 'fn 改的摘要' } })
     await writeFile(path, encodeRecord(record({ content: '等锁时外部改的' }), {}), 'utf8')
     release()
     await holding
@@ -131,7 +132,7 @@ describe('update：locate 之后文件被改，在新内容上重算再写', () 
     let calls = 0
     const t = newTable()
     // fn 运行时正处于 locate 与写盘之间：在这里同步写盘，等于每一轮都有别的进程抢先改了文件
-    const err = await captureRejection(t.update('mem_race', r => {
+    const err = await captureRejection(t.update('mem_race', {}, r => {
       calls++
       writeFileSync(path, encodeRecord(record({ content: `第 ${calls} 次并发` }), {}), 'utf8')
       return { ...r, summary: '不该落盘' }
@@ -150,7 +151,7 @@ describe('update：locate 之后文件被改，在新内容上重算再写', () 
     const path = await seed('竞态.md', record())
     changeAfterRead(path, encodeRecord(record({ content: '并发改的' }), {}), afterRead)
     const t = newTable()
-    await t.update('mem_race', r => ({ ...r, name: '改名后' }))
+    await t.update('mem_race', {}, r => ({ ...r, name: '改名后' }))
     expect(await mds(globalDir())).toEqual(['改名后.md'])
     const text = await readFile(join(globalDir(), '改名后.md'), 'utf8')
     expect(text).toContain('并发改的')
@@ -162,7 +163,7 @@ describe('put：locate 之后文件被改，按新的位置与附加字段重写
   it('并发加上的未知 frontmatter 字段不丢，正文以 put 的值为准', async () => {
     const path = await seed('竞态.md', record())
     changeAfterRead(path, encodeRecord(record({ content: '并发改的' }), { owner: 'me' }), AFTER_LOCATE)
-    await newTable().put('mem_race', record({ content: 'put 的正文' }))
+    await newTable().put(record({ content: 'put 的正文' }), {})
     const fm = splitFrontmatter(await readFile(path, 'utf8'))
     expect(fm.data.owner).toBe('me')
     expect(fm.body).toContain('put 的正文')
@@ -192,7 +193,7 @@ const removals = {
 }
 
 describe('读改写的工具调用：读到之后被别处改过的正文不丢', () => {
-  const newStore = () => new MemoryStore(newTable())
+  const newStore = () => new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())
   const bodyOf = async (store: MemoryStore, id: string) => (await store.get(id))!.content
 
   it('memory_confirm refresh 只改 lastConfirmedAt', async () => {
@@ -256,7 +257,7 @@ describe('读改写的工具调用：读到之后被别处改过的正文不丢'
 
 describe('memory_snapshot restore：预读之后被改的记录按「快照后被修改」跳过', () => {
   async function setup() {
-    const store = new MemoryStore(newTable())
+    const store = new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ content: '快照时' }))
     const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
     const snap = await snapshots.capture({ operation: 'manual', description: 'd', records: [(await store.get('mem_race'))!] }, Date.now())
@@ -286,7 +287,7 @@ describe('memory_snapshot restore：预读之后被改的记录按「快照后�
 })
 
 describe('读改写的工具调用：读到之后记录被别处删掉，返回可读结果而不是抛错', () => {
-  const newStore = () => new MemoryStore(newTable())
+  const newStore = () => new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())
   const confirmDeps = (store: MemoryStore) => ({
     store, now: () => 5000,
     decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
@@ -362,7 +363,7 @@ describe('memory_save supersedes：读到旧记忆之后、置 superseded 之前
   ]
 
   it.each(changes)('PA-02：%s：新记忆照常保存，旧记忆保持在用', async (_label, change) => {
-    const store = new MemoryStore(newTable())
+    const store = new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())
     const deps = { store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), workspacePath: '/proj' as string | undefined, session: { id: 's1', lastSeq: 42 } }
     const old = await runSavePipeline(candidate({ content: '旧说法' }), deps)
     if (old.kind !== 'saved') throw new Error(old.kind)
@@ -392,7 +393,7 @@ describe('memory_save update：读到目标之后、写入之前目标被改过�
   it.each(changes)('PA-02：%s：回拒绝，记录保持改过之后那一版', async (_label, text, code) => {
     const path = await seed('mem_race.md', record())
     changeAfterRead(path, text, AFTER_LOCATE)
-    const r = await runSavePipeline(candidate({ action: 'update', id: 'mem_race', name: '竞态', type: 'preference', content: '模型想改成这样' }), saveDeps(new MemoryStore(newTable())))
+    const r = await runSavePipeline(candidate({ action: 'update', id: 'mem_race', name: '竞态', type: 'preference', content: '模型想改成这样' }), saveDeps(new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())))
     expect(r).toMatchObject({ kind: 'rejected', code, subcode: 'changed-after-read' })
     expect(await readFile(path, 'utf8').catch(() => undefined)).toBe(text)
   })
@@ -400,7 +401,7 @@ describe('memory_save update：读到目标之后、写入之前目标被改过�
   it('PA-02：界面改过：拒绝原因带用户那一版的内容', async () => {
     const path = await seed('mem_race.md', record())
     changeAfterRead(path, encodeRecord(record({ content: '用户改的', handEdited: true, updatedAt: later }), {}), AFTER_LOCATE)
-    const r = await runSavePipeline(candidate({ action: 'update', id: 'mem_race', name: '竞态', type: 'preference', content: '模型想改成这样' }), saveDeps(new MemoryStore(newTable())))
+    const r = await runSavePipeline(candidate({ action: 'update', id: 'mem_race', name: '竞态', type: 'preference', content: '模型想改成这样' }), saveDeps(new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())))
     if (r.kind !== 'rejected') throw new Error(r.kind)
     expect(r.reason).toContain('用户改的')
   })
@@ -408,7 +409,7 @@ describe('memory_save update：读到目标之后、写入之前目标被改过�
   const update = () => candidate({ action: 'update', id: 'mem_race', name: '竞态', type: 'preference', content: '模型想改成这样' })
 
   it('PA-02：候选标记被清掉、updatedAt 没变：回拒绝，标记不被盖回', async () => {
-    const store = new MemoryStore(newTable())
+    const store = new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ scope: 'workspace', workspacePath: '/proj', globalCandidate: true }))
     afterGet(store, 'mem_race', async loc => { await store.update(loc.record, r => ({ ...r, globalCandidate: false })) })
     const r = await runSavePipeline(update(), saveDeps(store))
@@ -420,7 +421,7 @@ describe('memory_save update：读到目标之后、写入之前目标被改过�
   it('PA-02：文件原样移进 .archive/（frontmatter 没改）：按已删除回拒绝，不搬回顶层', async () => {
     const path = await seed('mem_race.md', record())
     const archived = join(globalDir(), ARCHIVE_DIR, 'mem_race.md')
-    const store = new MemoryStore(newTable())
+    const store = new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())
     afterGet(store, 'mem_race', async () => {
       await mkdir(join(globalDir(), ARCHIVE_DIR), { recursive: true })
       await rename(path, archived)
@@ -432,12 +433,12 @@ describe('memory_save update：读到目标之后、写入之前目标被改过�
   })
 
   it('PA-02：本项目那份被只删这一层、global 有同 id 同时间戳的副本：回拒绝，global 那份不动、不被搬走', async () => {
-    const store = new MemoryStore(newTable())
+    const store = new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ content: '全局那份' }))
-    await store.put(record({ scope: 'workspace', workspacePath: '/proj', content: '项目那份' }), { workspacePath: '/proj', isExactLayer: true })
+    await store.put(record({ scope: 'workspace', workspacePath: '/proj', content: '项目那份' }), { kind: 'workspace', workspacePath: '/proj' })
     afterGet(store, 'mem_race', async loc => {
       expect(loc.record.content).toBe('项目那份')
-      expect(await store.hardDelete(loc.record, { isExactLayer: true })).toBe(true)
+      expect(await store.hardDelete(loc.record, { at: scopeAt(loc.record.workspacePath) })).toBe(true)
     })
     const r = await runSavePipeline(update(), saveDeps(store))
     expect(r).toMatchObject({ kind: 'rejected', code: 'target-missing', subcode: 'changed-after-read' })
@@ -447,7 +448,7 @@ describe('memory_save update：读到目标之后、写入之前目标被改过�
 
   it('读到之后没人动过：照常写入', async () => {
     await seed('mem_race.md', record())
-    const store = new MemoryStore(newTable())
+    const store = new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())
     const r = await runSavePipeline(candidate({ action: 'update', id: 'mem_race', name: '竞态', type: 'preference', content: '模型想改成这样' }), saveDeps(store))
     expect(r.kind).toBe('updated')
     expect((await store.get('mem_race'))!.content).toBe('模型想改成这样')

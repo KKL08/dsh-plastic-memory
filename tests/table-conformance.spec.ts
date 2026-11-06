@@ -2,11 +2,11 @@ import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { MemoryStore, InMemoryTable, type MemoryTable, type SeedRecord } from '../src/store.ts'
+import { MemoryStore, type MemoryTable } from '../src/store.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, WORKSPACE_MARKER, deriveFileId, workspaceDirName } from '../src/storage/paths.ts'
-import { InMemoryKvTable, InMemoryBatchKvTable, type BatchKvTable } from '../src/kv-table.ts'
+import { type BatchKvTable } from '../src/kv-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
 import { executeForget } from '../src/tools/forget.ts'
@@ -23,6 +23,8 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import { RecordNotFoundError } from '../src/errors.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import { captureRejection } from './helpers/errors.ts'
+import { InMemoryTable, type SeedRecord } from './helpers/in-memory-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 /** 与 P0/P1 既有测试同一约定：只声明必填字段，可选字段（validTo/supersedes/workspacePath）
  *  只在 partial 里显式传入时才出现——不写成 `key: undefined`，否则 encode/decode 往返后
@@ -139,16 +141,16 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
       createdAt: NOW, updatedAt: NOW, lastConfirmedAt: NOW, deletedAt: NOW,   // 缺 deletedAt 时写路径会补 now，显式给定保证逐字段相等
     })
 
-    for (const r of [recGlobal, recA, recB, recADeleted]) await table.put(r.id, r)
+    for (const r of [recGlobal, recA, recB, recADeleted]) await table.put(r, {})
     if (reload) await reload()
 
     // put→get 逐字段相等（FileTable 场景下强制先过 encode→disk→decode）
-    expect((await table.locate(recGlobal.id))?.record).toEqual(recGlobal)
-    expect((await table.locate(recA.id))?.record).toEqual(recA)
-    expect((await table.locate(recB.id))?.record).toEqual(recB)
-    expect((await table.locate(recADeleted.id))?.record).toEqual(recADeleted)
+    expect((await table.locate(recGlobal.id, {}))?.record).toEqual(recGlobal)
+    expect((await table.locate(recA.id, {}))?.record).toEqual(recA)
+    expect((await table.locate(recB.id, {}))?.record).toEqual(recB)
+    expect((await table.locate(recADeleted.id, {}))?.record).toEqual(recADeleted)
 
-    const s = new MemoryStore(table)
+    const s = new MemoryStore(table, undefined, new InMemoryBatchKvTable())
 
     // visible(/repo-with-hyphens/sub-dir) → global + ws=/a，ws=/b 因 scope 不匹配被排除
     const visibleA = await s.query({ scope: { kind: 'visible', workspacePath: '/home/dev/repo-with-hyphens/sub-dir' } })
@@ -167,19 +169,19 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
 
   it('update 语义与错误信息一致；softDelete → status=deleted', async () => {
     const rec = record({ id: 'mem_update_1', name: '待更新记忆', content: '原始内容', updatedAt: 1 })
-    await table.put(rec.id, rec)
+    await table.put(rec, {})
 
-    const updated = await table.update(rec.id, r => ({ ...r, content: '更新后内容', updatedAt: 2 }))
+    const updated = await table.update(rec.id, {}, r => ({ ...r, content: '更新后内容', updatedAt: 2 }))
     expect(updated.content).toBe('更新后内容')
-    expect(((await table.locate(rec.id))?.record)!.content).toBe('更新后内容')
+    expect(((await table.locate(rec.id, {}))?.record)!.content).toBe('更新后内容')
 
-    const err = await captureRejection(table.update('ghost', r => r))
+    const err = await captureRejection(table.update('ghost', {}, r => r))
     expect(err).toBeInstanceOf(RecordNotFoundError)
     expect(err).toMatchObject({ id: 'ghost' })
 
     const ok = await store.softDelete(rec)
     expect(ok).toBe(true)
-    expect(((await table.locate(rec.id))?.record)!.status).toBe('deleted')
+    expect(((await table.locate(rec.id, {}))?.record)!.status).toBe('deleted')
     expect(await store.softDelete({ id: 'ghost2', workspacePath: undefined })).toBe(false)
   })
 
@@ -212,7 +214,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     // FileTable 的合并读法不变：重载后记录带上侧表里的统计
     if (reload) {
       await reload()
-      expect(((await table.locate(rec.id))?.record)!.recallCount).toBe(3)
+      expect(((await table.locate(rec.id, {}))?.record)!.recallCount).toBe(3)
     }
   })
 
@@ -257,9 +259,9 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect((await store.get(other.record.id))!.status).toBe('superseded')
 
     if (reload) await reload()
-    expect(((await table.locate(updated.record.id))?.record)!.content).toBe('流程A 的内容 v2')
-    expect(((await table.locate(updated.record.id))?.record)!.createdAt).toBe(created.record.createdAt)
-    expect(((await table.locate(other.record.id))?.record)!.status).toBe('superseded')
+    expect(((await table.locate(updated.record.id, {}))?.record)!.content).toBe('流程A 的内容 v2')
+    expect(((await table.locate(updated.record.id, {}))?.record)!.createdAt).toBe(created.record.createdAt)
+    expect(((await table.locate(other.record.id, {}))?.record)!.status).toBe('superseded')
   })
 
   it('forget 批量 + 快照先行 + restore 复活：端到端一致', async () => {
@@ -281,41 +283,41 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
 
     const byId = new Map((await store.query({ status: ['active', 'superseded', 'deleted'] })).map(r => [r.id, r]))
     const { restored } = await snapshots.restore(
-      snap, undefined, r => store.put(r), byId, false, r => store.hardDelete(r),
+      snap, undefined, async r => (await store.put(r)) !== undefined, byId, false, r => store.hardDelete(r),
     )
     expect(restored).toEqual([rec.id])
     expect((await store.get(rec.id))!.status).toBe('active')
 
     if (reload) await reload()
-    expect(((await table.locate(rec.id))?.record)!.status).toBe('active') // FileTable：重载后复活仍成立
+    expect(((await table.locate(rec.id, {}))?.record)!.status).toBe('active') // FileTable：重载后复活仍成立
   })
 
   it('put 不承载召回统计：restore 旧记录不回退 recallCount/lastRecalledAt', async () => {
     const r = record({ id: 'mem_vol', name: '统计保持' })
-    await table.put('mem_vol', r)
-    await table.update('mem_vol', c => ({ ...c, recallCount: 7, lastRecalledAt: 1787200000000 }))
+    await table.put(r, {})
+    await table.update('mem_vol', {}, c => ({ ...c, recallCount: 7, lastRecalledAt: 1787200000000 }))
     // 模拟 snapshots.restore：把快照时点的旧记录（recallCount=0）整条 put 回来
-    await table.put('mem_vol', { ...r, summary: '恢复后的摘要' })
-    const after = ((await table.locate('mem_vol'))?.record)!
+    await table.put({ ...r, summary: '恢复后的摘要' }, {})
+    const after = ((await table.locate('mem_vol', {}))?.record)!
     expect(after.summary).toBe('恢复后的摘要')  // 稳定字段照常恢复
     expect(after.recallCount).toBe(7)           // 召回统计不回退
     expect(after.lastRecalledAt).toBe(1787200000000)
     if (reload) {
       await reload()
-      const reloaded = ((await table.locate('mem_vol'))?.record)!
+      const reloaded = ((await table.locate('mem_vol', {}))?.record)!
       expect(reloaded.recallCount).toBe(7)      // sidecar 一致：重载前后同值
       expect(reloaded.lastRecalledAt).toBe(1787200000000)
     }
   })
 
-  it('put 的 skipIf 收到锁内定位到的当前记录，定位不到时收到 undefined；为真就不写、返回 false', async () => {
+  it('put 的 skipIf 收到锁内定位到的当前记录，定位不到时收到 undefined；为真就不写、返回 undefined', async () => {
     const seen: Array<string | undefined> = []
     const skipMissing = (c: { summary: string } | undefined) => { seen.push(c?.summary); return c === undefined }
-    expect(await table.put('mem_skip', record({ id: 'mem_skip', summary: '新建' }), undefined, skipMissing)).toBe(false)
-    expect(await table.locate('mem_skip')).toBeUndefined()
-    await table.put('mem_skip', record({ id: 'mem_skip', summary: '原样' }))
-    expect(await table.put('mem_skip', record({ id: 'mem_skip', summary: '改后' }), undefined, skipMissing)).toBe(true)
-    expect((await table.locate('mem_skip'))!.record.summary).toBe('改后')
+    expect(await table.put(record({ id: 'mem_skip', summary: '新建' }), {}, skipMissing)).toBeUndefined()
+    expect(await table.locate('mem_skip', {})).toBeUndefined()
+    await table.put(record({ id: 'mem_skip', summary: '原样' }), {})
+    expect(await table.put(record({ id: 'mem_skip', summary: '改后' }), {}, skipMissing)).toMatchObject({ summary: '改后' })
+    expect((await table.locate('mem_skip', {}))!.record.summary).toBe('改后')
     expect(seen).toEqual([undefined, '原样'])
   })
 
@@ -338,17 +340,17 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
 
     const fromElsewhere = await table.locate('mem_dup', { workspacePath: '/home/dev/proj-c' })
     expect(fromElsewhere!.record.content).toBe('B 的新副本')     // 落到二级：全部 workspace 目录，updatedAt 新者
-    expect((await table.locate('mem_dup'))!.record.content).toBe('B 的新副本')  // 无提示同样落到二级
+    expect((await table.locate('mem_dup', {}))!.record.content).toBe('B 的新副本')  // 无提示同样落到二级
     expect(await table.locate('mem_ghost', { workspacePath: WS_A })).toBeUndefined()
   })
 
-  it('按 id 定位先挑在用副本：别层更新的已删副本不遮住它；不只认层的软删改的也是在用那份', async () => {
+  it('按 id 定位先挑在用副本：别的作用域里更新的已删副本不遮住它；会话视角的软删改的也是在用那份', async () => {
     await h.seedFile({ dir: h.globalDir, fileName: 'g.md', record: record({ id: 'mem_l', content: 'global 在用', updatedAt: 100 }) })
     await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'w.md', archived: true,
       record: ws(WS_A, { id: 'mem_l', content: 'A 已删', status: 'deleted', deletedAt: 250, updatedAt: 200 }) })
     expect((await table.locate('mem_l', { workspacePath: WS_A }))!.record.content).toBe('global 在用')
     expect((await store.get('mem_l', { workspacePath: WS_A }))!.status).toBe('active')
-    expect((await table.locate('mem_l', { workspacePath: WS_A, isExactLayer: true }))!.record.content).toBe('A 已删')   // 只认层照旧
+    expect((await table.locate('mem_l', { kind: 'workspace', workspacePath: WS_A }))!.record.content).toBe('A 已删')   // 给作用域时照旧只看 A
     expect(await store.softDelete({ id: 'mem_l', workspacePath: WS_A })).toBe(true)
     expect(await store.query({ scope: { kind: 'global' } })).toEqual([])
   })
@@ -359,44 +361,44 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect((await table.locate('mem_r1', { workspacePath: WS_A }))!.record.content).toBe('global 较新')
   })
 
-  it('只认指明的层（isExactLayer）：项目层只看它的目录、不取更新的 global 副本，缺 workspacePath 即 global 层；update / delete 带同一提示改的也是那一份', async () => {
+  it('给作用域只认那一份：项目只看它的目录、不取更新的 global 副本；update / delete 给同一个作用域改的也是那一份', async () => {
     await h.seedFile({ dir: h.globalDir, fileName: 'g.md', record: record({ id: 'mem_x', content: 'global 较新', updatedAt: 200 }) })
     await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'w.md', record: ws(WS_A, { id: 'mem_x', content: 'A 较旧', updatedAt: 100 }) })
     await h.seedFile({ dir: h.wsDir(WS_B), fileName: 'b.md', record: ws(WS_B, { id: 'mem_only_b', content: '只在 B' }) })
-    const inA = { workspacePath: WS_A, isExactLayer: true }
+    const inA = { kind: 'workspace', workspacePath: WS_A } as const
     expect((await table.locate('mem_x', inA))!.record.content).toBe('A 较旧')
-    expect((await table.locate('mem_x', { isExactLayer: true }))!.record.content).toBe('global 较新')
+    expect((await table.locate('mem_x', { kind: 'global' }))!.record.content).toBe('global 较新')
     expect(await table.locate('mem_only_b', inA)).toBeUndefined()           // 不落到二级扫别的项目
-    expect(await table.locate('mem_only_b', { isExactLayer: true })).toBeUndefined()
+    expect(await table.locate('mem_only_b', { kind: 'global' })).toBeUndefined()
 
-    const written = await table.update('mem_x', r => ({ ...r, content: 'A 改过' }), inA)
+    const written = await table.update('mem_x', inA, r => ({ ...r, content: 'A 改过' }))
     expect(written.workspacePath).toBe(WS_A)
     expect((await table.locate('mem_x', inA))!.record.content).toBe('A 改过')
     expect(await table.delete('mem_x', inA)).toBe(true)
     expect(await table.locate('mem_x', inA)).toBeUndefined()
   })
 
-  it('只认层的写与删只清同一层里的同 id 副本：global 那份不动；不只认层时照旧清可见集合（global + 该目录）', async () => {
+  it('给作用域的写与删只清同一作用域里的同 id 副本：global 那份不动；会话视角时照旧清可见集合（global + 该目录）', async () => {
     const seed = async (globalUpdatedAt = 200) => {
       await h.seedFile({ dir: h.globalDir, fileName: 'g.md', record: record({ id: 'mem_y', content: 'global 那份', updatedAt: globalUpdatedAt }) })
       await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'w.md', record: ws(WS_A, { id: 'mem_y', content: 'A 那份', updatedAt: 100 }) })
     }
-    const inA = { workspacePath: WS_A, isExactLayer: true }
-    const inGlobal = { isExactLayer: true }
+    const inA = { kind: 'workspace', workspacePath: WS_A } as const
+    const inGlobal = { kind: 'global' } as const
     await seed()
-    await table.update('mem_y', r => ({ ...r, status: 'deleted' }), inA)      // 软删进 .archive/
+    await table.update('mem_y', inA, r => ({ ...r, status: 'deleted' }))      // 软删进 .archive/
     expect((await table.locate('mem_y', inA))!.record.status).toBe('deleted')
     expect((await table.locate('mem_y', inGlobal))!.record.content).toBe('global 那份')
-    await table.put('mem_y', { ...(await table.locate('mem_y', inA))!.record, status: 'active' }, inA)   // 恢复
+    await table.put({ ...(await table.locate('mem_y', inA))!.record, status: 'active' }, inA)   // 恢复
     expect((await table.locate('mem_y', inGlobal))!.record.content).toBe('global 那份')
     expect(await table.delete('mem_y', inA)).toBe(true)
     expect(await table.locate('mem_y', inA)).toBeUndefined()
     expect((await table.locate('mem_y', inGlobal))!.record.content).toBe('global 那份')
 
     await table.delete('mem_y', inGlobal)
-    await seed(100)   // 同龄：不只认层时提示的 A 目录优先，定位到 A 那份
-    await table.update('mem_y', r => ({ ...r, content: 'A 改过' }), { workspacePath: WS_A, isExactLayer: false })
-    expect(await table.locate('mem_y', inGlobal)).toBeUndefined()            // 不只认层：可见集合去重照旧
+    await seed(100)   // 同龄：会话视角下当前项目 A 的目录优先，定位到 A 那份
+    await table.update('mem_y', { workspacePath: WS_A }, r => ({ ...r, content: 'A 改过' }))
+    expect(await table.locate('mem_y', inGlobal)).toBeUndefined()            // 会话视角：可见集合去重照旧
   })
 
   it('同 id 取舍②：updatedAt 相同时提示的 workspace 目录优先于 global', async () => {
@@ -410,7 +412,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     await h.seedFile({ dir: h.wsDir(WS_B), fileName: 'w.md', record: ws(WS_B, { id: 'mem_r3', content: '其他项目', updatedAt: 100 }) })
     const all = await store.query({})
     expect(all.filter(r => r.id === 'mem_r3').map(r => r.content)).toEqual(['global'])
-    expect(((await table.locate('mem_r3'))?.record)!.content).toBe('global')
+    expect(((await table.locate('mem_r3', {}))?.record)!.content).toBe('global')
   })
 
   it('query 按范围读：可见集合 = global + 当前 workspace 目录，同 id 多文件只返回一条（新者优先，相等时当前 workspace 优先）', async () => {
@@ -443,31 +445,31 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     const read = await table.readScope([h.globalDir])
     expect(read.records.map(r => r.record.id)).toEqual([expected])
     expect(read.records[0].record).toMatchObject({ name: '手建', content: '手写的正文', scope: 'global' })
-    const hit = await table.locate(expected)
+    const hit = await table.locate(expected, {})
     expect(hit!.filePath).toBe(join(h.globalDir, '手建.md'))
     expect(hit!.record.name).toBe('手建')
-    expect(await table.locate(deriveFileId(`${GLOBAL_DIR}/不存在.md`))).toBeUndefined()
+    expect(await table.locate(deriveFileId(`${GLOBAL_DIR}/不存在.md`), {})).toBeUndefined()
   })
 
   it('派生 id 写回后跟着记录走：改名让文件换了路径，仍能按原派生 id 定位', async () => {
     const { id: _id, ...noId } = record({ name: '手建', type: 'knowledge', content: '手写的正文' })
     await h.seedFile({ dir: h.globalDir, fileName: '手建.md', record: noId })
     const derived = deriveFileId(`${GLOBAL_DIR}/手建.md`)
-    await table.update(derived, r => ({ ...r, name: '改过名', updatedAt: r.updatedAt + 1 }))
-    const hit = await table.locate(derived)
+    await table.update(derived, {}, r => ({ ...r, name: '改过名', updatedAt: r.updatedAt + 1 }))
+    const hit = await table.locate(derived, {})
     expect(hit).toBeDefined()
     expect(hit!.record.name).toBe('改过名')
     expect(hit!.filePath).toBe(join(h.globalDir, '改过名.md'))
-    expect(await table.locate(deriveFileId(`${GLOBAL_DIR}/改过名.md`))).toBeUndefined()   // 新路径的哈希不是它的 id
+    expect(await table.locate(deriveFileId(`${GLOBAL_DIR}/改过名.md`), {})).toBeUndefined()   // 新路径的哈希不是它的 id
   })
 
   it('update 锁内重读：fn 看到的是磁盘当前内容，外部修改不丢', async () => {
-    await table.put('mem_ext', record({ id: 'mem_ext', name: 'ext', content: '原始', updatedAt: 1 }))
+    await table.put(record({ id: 'mem_ext', name: 'ext', content: '原始', updatedAt: 1 }), {})
     // 外部覆盖同一个文件（put 落的文件名是 slug(name).md）
     await h.seedFile({ dir: h.globalDir, fileName: 'ext.md', record: record({ id: 'mem_ext', name: 'ext', content: '外部改过', updatedAt: 2 }) })
-    const next = await table.update('mem_ext', r => ({ ...r, content: `${r.content}+追加`, updatedAt: 3 }))
+    const next = await table.update('mem_ext', {}, r => ({ ...r, content: `${r.content}+追加`, updatedAt: 3 }))
     expect(next.content).toBe('外部改过+追加')
-    expect(((await table.locate('mem_ext'))?.record)!.content).toBe('外部改过+追加')
+    expect(((await table.locate('mem_ext', {}))?.record)!.content).toBe('外部改过+追加')
   })
 
   it('readScope：缺省只读顶层，includeArchive 连 .archive/ 一起读；types 在解析后过滤；记录含非 active', async () => {
@@ -486,17 +488,21 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect(archived.filePath).toBe(join(h.wsDir(WS_A), ARCHIVE_DIR, 'd.md'))
   })
 
-  it('copiesOf：同 id 在哪些作用域有副本，含只在 .archive/ 里的；全局在前、项目按路径排序；没有就是空', async () => {
+  it('PA-25 copiesOf：同 id 在哪些作用域有副本，含只在 .archive/ 里的；全局在前、项目按路径排序；没有就是空；MemoryStore 透传', async () => {
     await h.seedFile({ dir: h.wsDir(WS_B), fileName: 'm.md', record: ws(WS_B, { id: 'mem_m', type: 'project' }) })
     await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'm.md', record: ws(WS_A, { id: 'mem_m', type: 'project', status: 'deleted' }), archived: true })
     await h.seedFile({ dir: h.globalDir, fileName: 'm.md', record: record({ id: 'mem_m', type: 'project' }) })
     await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'other.md', record: ws(WS_A, { id: 'mem_other', type: 'project' }) })
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'twice.md', record: ws(WS_A, { id: 'mem_twice', type: 'project' }) })
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'twice-old.md', record: ws(WS_A, { id: 'mem_twice', type: 'project', status: 'deleted' }), archived: true })
 
-    expect(await store.copiesOf('mem_m')).toEqual([
+    expect(await table.copiesOf('mem_m')).toEqual([
       { kind: 'global' }, { kind: 'workspace', workspacePath: WS_A }, { kind: 'workspace', workspacePath: WS_B },
     ])
-    expect(await store.copiesOf('mem_other')).toEqual([{ kind: 'workspace', workspacePath: WS_A }])
-    expect(await store.copiesOf('mem_ghost')).toEqual([])
+    expect(await table.copiesOf('mem_other')).toEqual([{ kind: 'workspace', workspacePath: WS_A }])
+    expect(await table.copiesOf('mem_twice')).toEqual([{ kind: 'workspace', workspacePath: WS_A }])   // 同一作用域两份只算一次
+    expect(await table.copiesOf('mem_ghost')).toEqual([])
+    expect(await store.copiesOf('mem_m')).toEqual(await table.copiesOf('mem_m'))
   })
 
   it('readScope.listedCount：范围内顶层文件数，与 types、预筛开关、includeArchive 无关；两个后端同值', async () => {
@@ -532,7 +538,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     ].sort((x, y) => (x.dir < y.dir ? -1 : 1)))
     expect(listing.directoryNotes.map(n => [n.code, n.path])).toEqual([['dir-empty', h.wsDir(WS_B)]])
     // 定位用全部目录：只剩归档的目录也能按 id 找到
-    expect((await table.locate('mem_b'))!.record.status).toBe('deleted')
+    expect((await table.locate('mem_b', {}))!.record.status).toBe('deleted')
   })
 
   // —— 写路径内核 ——
@@ -554,11 +560,11 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
   it('put 跨目录定位旧文件：global put 不带 workspacePath 也找到 workspace 里的旧文件并搬家，旧目录无、新目录有', async () => {
     await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'mv.md', record: ws(WS_A, { id: 'mem_mv', name: 'mv', content: '搬家前', updatedAt: 1 }) })
     const { workspacePath: _w, ...rest } = ws(WS_A, { id: 'mem_mv', name: 'mv', content: '搬家后', updatedAt: 2 })
-    await table.put('mem_mv', { ...rest, scope: 'global' })
+    await table.put({ ...rest, scope: 'global' }, {})
     expect(await topLevel(h.wsDir(WS_A))).toEqual([])
     const inGlobal = await topLevel(h.globalDir)
     expect(inGlobal.map(([id]) => id)).toEqual(['mem_mv'])
-    expect((await table.locate('mem_mv'))!.record).toMatchObject({ scope: 'global', content: '搬家后' })
+    expect((await table.locate('mem_mv', {}))!.record).toMatchObject({ scope: 'global', content: '搬家后' })
   })
 
   it('status 变为 deleted / superseded 时文件移入同目录 .archive/，deleted 补 deletedAt；回到 active 搬回顶层', async () => {
@@ -566,8 +572,8 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     await table.create(ws(WS_A, { id: 'mem_del', name: 'del', updatedAt: NOW - 3 }))
     await table.create(ws(WS_A, { id: 'mem_sup', name: 'sup', updatedAt: NOW - 3 }))
     const dir = h.wsDir(WS_A)
-    await table.update('mem_del', r => ({ ...r, status: 'deleted', updatedAt: NOW - 2 }))
-    await table.update('mem_sup', r => ({ ...r, status: 'superseded', updatedAt: NOW - 2 }))
+    await table.update('mem_del', {}, r => ({ ...r, status: 'deleted', updatedAt: NOW - 2 }))
+    await table.update('mem_sup', {}, r => ({ ...r, status: 'superseded', updatedAt: NOW - 2 }))
     const rows = new Map(await topLevel(dir))
     expect(rows.get('mem_del')).toBe(join(dir, ARCHIVE_DIR, 'del.md'))
     expect(rows.get('mem_sup')).toBe(join(dir, ARCHIVE_DIR, 'sup.md'))
@@ -577,11 +583,11 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect((await table.locate('mem_sup', { workspacePath: WS_A }))!.record.deletedAt).toBeUndefined()
 
     // 显式给的 deletedAt 不被覆盖（取窗口内的值：清扫按 deletedAt 计 14 天）
-    await table.update('mem_sup', r => ({ ...r, status: 'deleted', deletedAt: NOW - 777, updatedAt: NOW - 1 }))
+    await table.update('mem_sup', {}, r => ({ ...r, status: 'deleted', deletedAt: NOW - 777, updatedAt: NOW - 1 }))
     expect((await table.locate('mem_sup', { workspacePath: WS_A }))!.record.deletedAt).toBe(NOW - 777)
 
     // restore：整条 put 回 active（无 deletedAt）→ 从 .archive/ 搬回顶层，归档文件消失
-    await table.put('mem_del', ws(WS_A, { id: 'mem_del', name: 'del', updatedAt: NOW }))
+    await table.put(ws(WS_A, { id: 'mem_del', name: 'del', updatedAt: NOW }), { workspacePath: WS_A })
     const after = await topLevel(dir)
     expect(after.find(([id]) => id === 'mem_del')![1]).toBe(join(dir, 'del.md'))
     expect(after.filter(([id]) => id === 'mem_del')).toHaveLength(1)
@@ -590,12 +596,12 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
 
   it('delete 物理删除，含 .archive/ 里的文件', async () => {
     await table.create(record({ id: 'mem_gone', name: 'gone', updatedAt: Date.now() - 1 }))
-    await table.update('mem_gone', r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))   // 保留窗口内，不被清扫
+    await table.update('mem_gone', {}, r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))   // 保留窗口内，不被清扫
     expect((await topLevel(h.globalDir)).map(([, p]) => p)).toEqual([join(h.globalDir, ARCHIVE_DIR, 'gone.md')])
-    expect(await table.delete('mem_gone')).toBe(true)
-    expect(await table.locate('mem_gone')).toBeUndefined()
+    expect(await table.delete('mem_gone', {})).toBe(true)
+    expect(await table.locate('mem_gone', {})).toBeUndefined()
     expect(await topLevel(h.globalDir)).toEqual([])
-    expect(await table.delete('mem_gone')).toBe(false)
+    expect(await table.delete('mem_gone', {})).toBe(false)
   })
 
   // —— 维护点 ——
@@ -637,7 +643,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     await h.seedFile({ dir: h.globalDir, fileName: 'sup.md', record: record({ id: 'mem_sup', status: 'superseded', updatedAt: old }), archived: true })
     await table.maintain([h.globalDir])
     expect((await topLevel(h.globalDir)).map(([id]) => id).sort()).toEqual(['mem_fresh', 'mem_sup'])
-    expect(await table.locate('mem_gone')).toBeUndefined()
+    expect(await table.locate('mem_gone', {})).toBeUndefined()
   })
 
   it('同 id 副本只在写该 id 时清理，且只删可见集合（global + 该记录的 workspace 目录，含 .archive/）内的其余副本', async () => {
@@ -654,7 +660,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect((await table.readScope([h.globalDir, h.wsDir(WS_A)], { includeArchive: true })).records.filter(r => r.record.id === 'mem_c')).toHaveLength(3)
 
     // put 带 workspacePath：一级定位 global + 本项目目录，取舍到 updatedAt 最新的本项目那份
-    await table.put('mem_c', ws(WS_A, { id: 'mem_c', content: '改过', updatedAt: now }))
+    await table.put(ws(WS_A, { id: 'mem_c', content: '改过', updatedAt: now }), { workspacePath: WS_A })
     const visible = (await table.readScope([h.globalDir, h.wsDir(WS_A)], { includeArchive: true })).records
     expect(visible.filter(r => r.record.id === 'mem_c').map(r => r.filePath)).toEqual([join(h.wsDir(WS_A), 'cur.md')])
     expect(visible.filter(r => r.record.id === 'mem_by')).toHaveLength(2)                        // 别的 id 的副本不动
@@ -662,4 +668,112 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect((await table.locate('mem_c', { workspacePath: WS_A }))!.record.content).toBe('改过')
   })
 
+
+
+  // —— 两种目标：给作用域只认这一份，给会话视角按会话定位 ——
+
+  const IN_A = { kind: 'workspace', workspacePath: WS_A } as const
+  const IN_GLOBAL = { kind: 'global' } as const
+  const contentsIn = async (dir: string, id: string) =>
+    (await table.readScope([dir], { includeArchive: true })).records.filter(r => r.record.id === id).map(r => r.record.content).sort()
+
+  describe('PA-26 清副本按目标种类与写删分流；会话视角定位在用优先、同龄按当前项目 → 全局 → 其他项目', () => {
+    /** 同 id 四份：全局、本项目在用、本项目归档、别的项目。 */
+    const seedFour = async (globalUpdatedAt = 100) => {
+      await h.seedFile({ dir: h.globalDir, fileName: 'p.md', record: record({ id: 'mem_p', content: '全局', updatedAt: globalUpdatedAt }) })
+      await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'p.md', record: ws(WS_A, { id: 'mem_p', content: 'A', updatedAt: 100 }) })
+      await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'p-old.md', archived: true,
+        record: ws(WS_A, { id: 'mem_p', content: 'A 归档', status: 'deleted', updatedAt: 50, deletedAt: Date.now() }) })
+      await h.seedFile({ dir: h.wsDir(WS_B), fileName: 'p.md', record: ws(WS_B, { id: 'mem_p', content: 'B', updatedAt: 100 }) })
+    }
+
+    it('给作用域的写只清那一个作用域里的同 id 副本，全局和别的项目都不动', async () => {
+      await seedFour()
+      const current = (await table.locate('mem_p', IN_A))!.record
+      await table.put({ ...current, content: 'A 改过' }, IN_A)
+      expect(await contentsIn(h.wsDir(WS_A), 'mem_p')).toEqual(['A 改过'])
+      expect(await contentsIn(h.globalDir, 'mem_p')).toEqual(['全局'])
+      expect(await contentsIn(h.wsDir(WS_B), 'mem_p')).toEqual(['B'])
+    })
+
+    it('给作用域的删只清那一个作用域里的同 id 副本，全局和别的项目都不动', async () => {
+      await seedFour()
+      expect(await table.delete('mem_p', IN_A)).toBe(true)
+      expect(await contentsIn(h.wsDir(WS_A), 'mem_p')).toEqual([])
+      expect(await contentsIn(h.globalDir, 'mem_p')).toEqual(['全局'])
+      expect(await contentsIn(h.wsDir(WS_B), 'mem_p')).toEqual(['B'])
+    })
+
+    it('会话视角的写清全局加写入目标作用域：定位到较新的全局那份、写进本项目，两处只剩新写的一份，别的项目不动', async () => {
+      await seedFour(200)
+      expect((await table.locate('mem_p', { workspacePath: WS_A }))!.record.content).toBe('全局')
+      await table.put(ws(WS_A, { id: 'mem_p', content: '写进 A', updatedAt: 300 }), { workspacePath: WS_A })
+      expect(await contentsIn(h.globalDir, 'mem_p')).toEqual([])
+      expect(await contentsIn(h.wsDir(WS_A), 'mem_p')).toEqual(['写进 A'])
+      expect(await contentsIn(h.wsDir(WS_B), 'mem_p')).toEqual(['B'])
+    })
+
+    it('会话视角的写定位到本项目那份时，清全局加本项目，别的项目不动', async () => {
+      await seedFour()
+      const current = (await table.locate('mem_p', { workspacePath: WS_A }))!.record
+      expect(current.content).toBe('A')
+      await table.put({ ...current, content: 'A 改过' }, { workspacePath: WS_A })
+      expect(await contentsIn(h.globalDir, 'mem_p')).toEqual([])
+      expect(await contentsIn(h.wsDir(WS_A), 'mem_p')).toEqual(['A 改过'])
+      expect(await contentsIn(h.wsDir(WS_B), 'mem_p')).toEqual(['B'])
+    })
+
+    it('会话视角的删清全局加定位到的那份所在作用域：定位到全局那份时本项目的副本不动', async () => {
+      await seedFour(200)
+      expect(await table.delete('mem_p', { workspacePath: WS_A })).toBe(true)
+      expect(await contentsIn(h.globalDir, 'mem_p')).toEqual([])
+      expect(await contentsIn(h.wsDir(WS_A), 'mem_p')).toEqual(['A', 'A 归档'])
+      expect(await contentsIn(h.wsDir(WS_B), 'mem_p')).toEqual(['B'])
+    })
+
+    it('会话视角的删定位到本项目那份时，清全局加本项目，别的项目不动', async () => {
+      await seedFour()
+      expect(await table.delete('mem_p', { workspacePath: WS_A })).toBe(true)
+      expect(await contentsIn(h.globalDir, 'mem_p')).toEqual([])
+      expect(await contentsIn(h.wsDir(WS_A), 'mem_p')).toEqual([])
+      expect(await contentsIn(h.wsDir(WS_B), 'mem_p')).toEqual(['B'])
+    })
+
+    it('会话视角定位：在用的副本优先于更新的已删副本；给作用域只看那一份', async () => {
+      await h.seedFile({ dir: h.globalDir, fileName: 'l.md', record: record({ id: 'mem_l2', content: '全局在用', updatedAt: 100 }) })
+      await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'l.md', archived: true,
+        record: ws(WS_A, { id: 'mem_l2', content: 'A 已删', status: 'deleted', deletedAt: 300, updatedAt: 300 }) })
+      expect((await table.locate('mem_l2', { workspacePath: WS_A }))!.record.content).toBe('全局在用')
+      expect((await table.locate('mem_l2', IN_A))!.record.content).toBe('A 已删')
+      expect((await table.locate('mem_l2', IN_GLOBAL))!.record.content).toBe('全局在用')
+    })
+
+    it('会话视角定位：时间相同按当前项目 → 全局 → 其他项目', async () => {
+      await seedFour()
+      expect((await table.locate('mem_p', { workspacePath: WS_A }))!.record.content).toBe('A')
+      expect((await table.locate('mem_p', {}))!.record.content).toBe('全局')
+      await table.delete('mem_p', IN_GLOBAL)
+      expect((await table.locate('mem_p', { workspacePath: WS_B }))!.record.content).toBe('B')
+      expect((await table.locate('mem_p', { workspacePath: '/home/dev/proj-c' }))!.record.content).toBe('A')   // 都是其他项目：按文件路径
+    })
+  })
+
+  describe('PA-27 put 返回实际写出的记录', () => {
+    it('返回的记录与盘上一致：召回统计取现有那份的，软删补上 deletedAt', async () => {
+      await table.put(record({ id: 'mem_ret', content: '原样' }), {})
+      await table.update('mem_ret', {}, c => ({ ...c, recallCount: 3, lastRecalledAt: 1787200000000 }))
+      const written = await table.put(record({ id: 'mem_ret', content: '删掉', status: 'deleted' }), {})
+      expect(written).toMatchObject({ id: 'mem_ret', content: '删掉', status: 'deleted', recallCount: 3, lastRecalledAt: 1787200000000 })
+      expect(written!.deletedAt).toEqual(expect.any(Number))
+      expect((await table.locate('mem_ret', {}))!.record).toEqual(written)
+    })
+
+    it('skipIf 命中时返回 undefined、不写盘', async () => {
+      await table.put(record({ id: 'mem_ret2', content: '原样' }), {})
+      expect(await table.put(record({ id: 'mem_ret2', content: '不该写' }), {}, () => true)).toBeUndefined()
+      expect((await table.locate('mem_ret2', {}))!.record.content).toBe('原样')
+      expect(await table.put(record({ id: 'mem_new', content: '不该写' }), {}, c => c === undefined)).toBeUndefined()
+      expect(await table.locate('mem_new', {})).toBeUndefined()
+    })
+  })
 })

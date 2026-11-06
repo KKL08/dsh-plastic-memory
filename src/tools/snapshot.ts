@@ -1,7 +1,8 @@
-import type { MemoryStore } from '../store.ts'
+import type { MemoryStore, LocateTarget } from '../store.ts'
 import type { SnapshotStore, SnapshotDiffEntry } from '../governance/snapshots.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { maskSecretSurface } from '../secrets.ts'
+import { scopeAt } from '../scope.ts'
 import { crossWorkspaceNote, gateRecords, isVisible, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
 
 export interface SnapshotToolDeps {
@@ -23,11 +24,11 @@ interface CrossWorkspaceFields {
   otherWorkspaces: OtherWorkspaceMark[]
 }
 
-/** 只给 GUI 用的选项，不在工具参数里。isExactLayer：show / restore 按快照里每条记录自己的那一层定位与写回，
- *  不取别层更新的同 id 副本（GUI 恢复页面上那一份）。overwriteIf：给了它就只写现状过了它的记录，快照后被修改过的照样覆盖、
+/** 只给 GUI 用的选项，不在工具参数里。isOwnScope：show / restore 按快照里每条记录自己的作用域定位与写回，
+ *  不取别的作用域里更新的同 id 副本（GUI 恢复页面上那一份）。overwriteIf：给了它就只写现状过了它的记录，快照后被修改过的照样覆盖、
  *  已删除的也要过它（撤销：现状正是那次写下的内容）。 */
 export interface SnapshotToolOptions {
-  isExactLayer?: boolean
+  isOwnScope?: boolean
   overwriteIf?: (current: MemoryRecord) => boolean
 }
 
@@ -102,10 +103,10 @@ export async function executeSnapshotTool(
   }
   // show / restore 的预读范围：快照内每个记录的现状，按该记录自己的 workspace 定位（含非 active）——restore 的 put 按同一
   // 提示定位，冲突判断看的就是将被覆盖的那份文件；按会话 workspace 定位会在同 id 多副本时比错对象。
-  const exact = options.isExactLayer === true ? { isExactLayer: true } : {}
+  const targetOf = (workspacePath: string | undefined): LocateTarget => options.isOwnScope === true ? scopeAt(workspacePath) : { workspacePath }
   const current = new Map<string, MemoryRecord>()
   for (const { id, workspacePath } of snap.data) {
-    const r = await deps.store.get(id, { workspacePath, ...exact })
+    const r = await deps.store.get(id, targetOf(workspacePath))
     if (r) current.set(id, r)
   }
   // 跨 workspace 门：快照里的记录与它的现状任一方落在其他项目，就按那个项目判定（restore 写回快照里的位置）
@@ -135,11 +136,11 @@ export async function executeSnapshotTool(
   // restore
   const { restored, skipped, redacted } = await deps.snapshots.restore(
     snap, [...allowedIds],
-    (r, skipIf) => deps.store.put(r, options.isExactLayer === true ? { workspacePath: r.workspacePath, isExactLayer: true } : undefined, skipIf),
+    async (r, skipIf) => (await deps.store.put(r, targetOf(r.workspacePath), skipIf)) !== undefined,
     current,
     options.overwriteIf ?? args.overwriteChanged ?? false,
-    // 撤回只删刚写回的那一份（快照里这条记录自己的那一层），别层同 id 的副本不是这次恢复写的
-    r => deps.store.hardDelete(r, { isExactLayer: true }),
+    // 撤回只删刚写回的那一份（快照里这条记录自己的作用域），别的作用域里同 id 的副本不是这次恢复写的
+    r => deps.store.hardDelete(r, { at: scopeAt(r.workspacePath) }),
     () => deps.now?.() ?? Date.now(),
   )
   const changedCount = skipped.length - redacted.length

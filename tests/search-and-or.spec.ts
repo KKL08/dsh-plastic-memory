@@ -3,11 +3,10 @@ import fc from 'fast-check'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
+import { MemoryStore } from '../src/store.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { GLOBAL_DIR, deriveFileId } from '../src/storage/paths.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import { expandQueryTerms, matchScore } from '../src/text.ts'
 import { executeSearch, renderSearchResult, type SearchToolDeps } from '../src/tools/search.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
@@ -15,6 +14,8 @@ import type { SearchNoteCode } from '../src/contract-codes.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import { record } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 // 多词查询先 AND，零命中回退 OR 并按命中数排序；原文预筛随模式切换。
 
@@ -30,7 +31,7 @@ let root: string
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-and-or-')) })
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 const globalDir = () => join(root, GLOBAL_DIR)
-const fileStore = () => new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() }))
+const fileStore = () => new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() }), undefined, new InMemoryBatchKvTable())
 
 describe('AND 命中集 ⊆ OR 命中集（性质测试）；零 AND 命中时回退并附说明码', () => {
   // 小词池让记录与查询大量重叠；混入中文（走 bigram）、id 片段与查不到的词
@@ -46,7 +47,7 @@ describe('AND 命中集 ⊆ OR 命中集（性质测试）；零 AND 命中时�
         await Promise.all(contents.map((ws, i) => writeFile(join(dir, GLOBAL_DIR, `r${i}.md`),
           encodeRecord(record({ id: `mem_p${i}`, name: `条目${i}`, summary: '', content: ws.join(' ') || '空' }), {}))))
         const table = new FileTable({ root: dir, stats: new InMemoryKvTable<RecallStats>() })
-        const store = new MemoryStore(table)
+        const store = new MemoryStore(table, undefined, new InMemoryBatchKvTable())
         const keyword = queryWords.join(' ')
         const ids = async (keywordMatch: 'all' | 'any') =>
           (await store.query({ keyword, keywordMatch, scope: { kind: 'global' } })).map(r => r.id).sort()
@@ -64,7 +65,7 @@ describe('AND 命中集 ⊆ OR 命中集（性质测试）；零 AND 命中时�
   })
 
   it('零 AND 命中时回退并附说明码', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_two', content: 'deploy hook 都齐了' }))
     await store.put(record({ id: 'mem_one', content: '只提到 deploy' }))
     await store.put(record({ id: 'mem_none', content: '无关内容' }))
@@ -92,7 +93,7 @@ describe('AND 命中集 ⊆ OR 命中集（性质测试）；零 AND 命中时�
 })
 
 it('排序：命中分 → confidence 降序 → lastConfirmedAt 降序；recallCount 不参与', async () => {
-  const store = new MemoryStore(new InMemoryTable())
+  const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
   // 回退 OR 时命中分最高者排第一，即使 confidence 最低
   await store.put(record({ id: 'mem_score', content: 'alpha beta', confidence: 0.1, lastConfirmedAt: 1 }))
   await store.put(record({ id: 'mem_lowconf', content: 'alpha', confidence: 0.5, lastConfirmedAt: 900, recallCount: 500 }))
@@ -139,7 +140,7 @@ describe('原文预筛随模式切换：AND 按全部词项、OR 按任一', () 
 
 it('说明码进 contract-codes', async () => {
   // LOW_COVERAGE 以 SearchNoteCode 声明：码不在 contract-codes 的联合里则类型检查不过
-  const store = new MemoryStore(new InMemoryTable())
+  const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
   await store.put(record({ id: 'mem_a', content: 'alpha' }))
   const result = await executeSearch({ query: 'alpha missing' }, fakeExec(), searchDeps(store))
   expect(result.noteCode).toBe(LOW_COVERAGE)

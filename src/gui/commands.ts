@@ -32,7 +32,7 @@ import type { ViewWriter } from './view-writer.ts'
 import { generateDraft } from './model-draft.ts'
 import { holdCheckups, processInterval, type IntervalTimer } from './auto-checkup.ts'
 import { checkupWorkspaces } from '../tools/scope-preread.ts'
-import { scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
+import { scopeAt, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
 import { checkupResults, scanOutcome, type CheckupTarget } from './views.ts'
 
 /**
@@ -244,7 +244,7 @@ async function dispatch(
     const { rejected } = gateRecords(records, gov, allowCrossWorkspace)
     if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
     const isOwnWrite = (r: MemoryRecord) => editFingerprint(r) === entry.fingerprint
-    const current = await deps.store.get(before.id, { workspacePath: before.workspacePath, isExactLayer: true })
+    const current = await deps.store.get(before.id, scopeAt(before.workspacePath))
     if (current?.status !== 'active' || !isOwnWrite(current)) {
       return fail(cmd, 'failed', `记忆 ${before.id} 在这次修改之后又被改过或已删除，撤销会冲掉之后的改动，未做任何改动`)
     }
@@ -252,7 +252,7 @@ async function dispatch(
     // 还在最近删除里的也比内容：软删进去的若是快照之后的版本，恢复会拿快照里的旧内容盖掉它
     for (const rec of records) {
       if (rec.id === before.id) continue
-      const cur = await deps.store.get(rec.id, { workspacePath: rec.workspacePath, isExactLayer: true })
+      const cur = await deps.store.get(rec.id, scopeAt(rec.workspacePath))
       if (cur !== undefined && editFingerprint(cur) !== editFingerprint(rec) && !isOwnWrite(cur)) {
         return fail(cmd, 'failed', `记忆 ${rec.id} 在这次修改之后又被改过，撤销会冲掉之后的改动，未做任何改动`)
       }
@@ -262,7 +262,7 @@ async function dispatch(
     const overwriteIf = (r: MemoryRecord) => (r.id === before.id
       ? r.status === 'active' && isOwnWrite(r)
       : editFingerprint(r) === snapshotted.get(r.id) || isOwnWrite(r))
-    const r = await restoreFrom(snapshotId, entry.memoryIds, allowCrossWorkspace, { isExactLayer: true, overwriteIf })
+    const r = await restoreFrom(snapshotId, entry.memoryIds, allowCrossWorkspace, { isOwnScope: true, overwriteIf })
     if (isErr(r)) return r
     await deps.decisions.remove(entry.id)
     return { ok: true, cmd, decisionId: entry.id, memoryIds: r, snapshotId }
@@ -283,11 +283,11 @@ async function dispatch(
     if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
     const status = kindOf(entry) === 'rewrite' ? 'active' : 'superseded'
     const isOwnWrite = (r: MemoryRecord) => r.status === status && editFingerprint(r) === entry.fingerprint
-    const current = await deps.store.get(before.id, { workspacePath: before.workspacePath, isExactLayer: true })
+    const current = await deps.store.get(before.id, scopeAt(before.workspacePath))
     const changed = () => fail(cmd, 'stale', `记忆 ${before.id} 在这次修改之后又被改过或已删除，撤销会冲掉之后的改动，未做任何改动`)
     if (current === undefined || !isOwnWrite(current)) return changed()
     // 写入那一刻按最新内容再核对一次：之间被改过的跳过，什么都没写
-    const r = await restoreFrom(snapshotId, [before.id], allowCrossWorkspace, { isExactLayer: true, overwriteIf: isOwnWrite })
+    const r = await restoreFrom(snapshotId, [before.id], allowCrossWorkspace, { isOwnScope: true, overwriteIf: isOwnWrite })
     if (isErr(r)) return r.code === 'failed' ? changed() : r
     await deps.decisions.markUndone(entry.id)
     return { ok: true, cmd, decisionId: entry.id, memoryIds: r, snapshotId }
@@ -318,7 +318,7 @@ async function dispatch(
         if (!isMoved) return cur
         const { workspacePath: _workspacePath, ...rest } = cur
         return { ...rest, scope: 'global' }
-      }, { workspacePath, isExactLayer: true })
+      }, scopeAt(workspacePath))
     } catch (error) {
       if (!(error instanceof RecordNotFoundError)) throw error
     }
@@ -387,7 +387,7 @@ async function dispatch(
     if (r.rejected.length > 0) return fail(cmd, 'cross-workspace', r.message, r.rejected)
     if (r.dismissed.length === 0) return fail(cmd, 'failed', r.message)
     // 只认刚清掉标记的那一层：别层同 id 的副本不算它
-    const current = await deps.store.get(memoryId, { workspacePath, isExactLayer: true })
+    const current = await deps.store.get(memoryId, scopeAt(workspacePath))
     const written = current === undefined ? undefined : await deps.ignores.ignoreIfAbsent('misplaced', [current], now)
     const decisionId = await settle('keep-local', current === undefined ? {} : {
       fingerprint: candidateFingerprint(current),
@@ -444,7 +444,7 @@ async function dispatch(
         const { rejected } = gateRecords([rec], gov, command.allowCrossWorkspace)
         if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
         // 同 keep-local：不是内容编辑，updatedAt 不动
-        if (!(await deps.store.updateIfLive(rec, r => ({ ...r, globalCandidate: true }), { workspacePath, isExactLayer: true }))) return notFound(memoryId)
+        if (!(await deps.store.updateIfLive(rec, r => ({ ...r, globalCandidate: true }), scopeAt(workspacePath)))) return notFound(memoryId)
         // 留下时顺带写的放错层忽略：忽略表里还是那一条才删，用户之前自己忽略的、之后重新忽略的都不碰
         const written = entry.settled.misplacedIgnore
         if (written !== undefined) await deps.ignores.unignoreIfSame('misplaced', [memoryId], { ignoredAt: written.ignoredAt, fingerprints: [written.fingerprint] })
@@ -476,11 +476,11 @@ async function dispatch(
         }
         const { rejected } = gateRecords([rec], gov, command.allowCrossWorkspace)
         if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
-        if (!(await deps.store.restoreArchived(rec, { isExactLayer: scope !== undefined, now }))) return notFound(memoryId)
+        if (!(await deps.store.restoreArchived(rec, { at: scope, now }))) return notFound(memoryId)
         return { ok: true, cmd, memoryIds: [memoryId] }
       }
       const restore = async (): Promise<MemoryCommandResult> => {
-        const r = await restoreFrom(snapshotId, [memoryId], command.allowCrossWorkspace, { isExactLayer: scope !== undefined })
+        const r = await restoreFrom(snapshotId, [memoryId], command.allowCrossWorkspace, { isOwnScope: scope !== undefined })
         if (isErr(r)) return r
         if (entry) await deps.decisions.unsettle(entry.id)
         return { ok: true, cmd, memoryIds: r, snapshotId, ...(entry ? { decisionId: entry.id } : {}) }
@@ -558,7 +558,7 @@ async function dispatch(
         written = await deps.store.update(rec, (cur) => {
           if (cur.status !== 'active') throw new RecordNotFoundError(cur.id)
           return { ...cur, scope: 'workspace', workspacePath }
-        }, { workspacePath: undefined, isExactLayer: true })
+        }, { kind: 'global' })
       } catch (error) {
         if (!(error instanceof RecordNotFoundError)) throw error
       }
@@ -566,7 +566,7 @@ async function dispatch(
       const entry = await deps.decisions.addSettled({
         kind: 'move', memoryIds: [rec.id], summary: rec.summary, workspaces: [workspacePath], fingerprint: editFingerprint(written),
       }, 'moved', now, snapshot.id)
-      const located = await deps.store.locate(rec.id, { workspacePath, isExactLayer: true })
+      const located = await deps.store.locate(rec.id, scopeAt(workspacePath))
       return { ok: true, cmd, decisionId: entry.id, memoryIds: [rec.id], snapshotId: snapshot.id, ...(located !== undefined ? { filePath: located.filePath } : {}) }
     }
 
@@ -610,7 +610,7 @@ async function dispatch(
           await deps.snapshots.purge(isPurged)
           // 锁内复核：定位之后被别处恢复成在用的，不删
           let isRestored = false
-          if (!(await deps.store.hardDelete(rec, { isExactLayer: true }, current => (isRestored = current.status !== 'deleted')))) {
+          if (!(await deps.store.hardDelete(rec, { at: scopeAt(rec.workspacePath) }, current => (isRestored = current.status !== 'deleted')))) {
             return isRestored ? fail(cmd, 'failed', `记忆 ${command.memoryId} 刚被恢复或改过，没有彻底删除`) : notFound(command.memoryId)
           }
           // 账本按 id 记：哪层都没有它了才清，指向它的裁决撤销随之找不到
@@ -676,7 +676,7 @@ async function dispatch(
         records: targets.map(t => t.record),
       }, now)
       // 出处、类型、作用域、有效期、置信度、取代关系不动：这是用户亲手改的内容，不是借来的会话说的
-      const hint = { workspacePath: kept.record.workspacePath, isExactLayer: true }
+      const own = scopeAt(kept.record.workspacePath)
       let mine: MemoryRecord | undefined
       try {
         await deps.store.update(kept.record, (cur) => {
@@ -686,7 +686,7 @@ async function dispatch(
           // 子 agent 写的待确认记录：用户亲手改过就算升档；已升档的不改写升档来源
           const delegation = isPendingDelegated(cur) ? { delegation: { ...cur.delegation!, reviewed: { by: 'user' as const, at: now } } } : {}
           return (mine = { ...cur, content, name, summary, tags, updatedAt: now, lastConfirmedAt: now, handEdited: true, ...delegation })
-        }, hint)
+        }, own)
       } catch (error) {
         if (!(error instanceof RecordNotFoundError)) throw error
       }
@@ -695,17 +695,17 @@ async function dispatch(
       // 锁内再按卡片版本核对一次：核对之后被改过的不删，保留的那条退回改前（之间没被别处再改的话），整体回 stale；
       // 核对之后另一个会话才写进密钥的不删（极少见），这次只算改了保留的那条
       const outcome = removed === undefined ? 'deleted'
-        : await deps.store.softDeleteUnlessSecret(removed.record, { isExactLayer: true, now, isChanged: cur => cur.status !== 'active' || isStale(cur, removed.base) })
+        : await deps.store.softDeleteUnlessSecret(removed.record, { at: scopeAt(removed.record.workspacePath), now, isChanged: cur => cur.status !== 'active' || isStale(cur, removed.base) })
       if (outcome === 'changed') {
         const isMine = (cur: MemoryRecord) => cur.status === 'active' && cur.updatedAt === now && editFingerprint(cur) === editFingerprint(mine!)
-        await deps.store.update(kept.record, cur => (isMine(cur) ? kept.record : cur), hint).catch((error: unknown) => {
+        await deps.store.update(kept.record, cur => (isMine(cur) ? kept.record : cur), own).catch((error: unknown) => {
           if (!(error instanceof RecordNotFoundError)) throw error
         })
         return stale()
       }
       const isRemoved = outcome !== 'has-secret'
       if (removed !== undefined && isRemoved) await deps.decisions.removeByMemoryIds([removed.record.id])
-      const written = await deps.store.locate(kept.record.id, hint)
+      const written = await deps.store.locate(kept.record.id, own)
       const memoryIds = removed !== undefined && isRemoved ? [kept.record.id, removed.record.id] : [kept.record.id]
       const entry = await deps.decisions.addSettled({
         kind: 'edit', memoryIds, summary: name, fingerprint: written === undefined ? '' : editFingerprint(written.record),
@@ -816,7 +816,7 @@ async function dispatch(
                 if (current.type !== command.from) return current
                 isChanged = true
                 return { ...current, type: command.to! }
-              }, { workspacePath, isExactLayer: true })
+              }, scopeAt(workspacePath))
             } catch (error) {
               failures.push(`${r.id}：${error instanceof Error ? error.message : String(error)}`)
               continue

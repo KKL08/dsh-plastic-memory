@@ -3,13 +3,14 @@ import { fakeExec } from './helpers/exec.ts'
 import { executeScan, type ScanToolDeps } from '../src/tools/scan.ts'
 import { executeHealth, type HealthToolDeps } from '../src/tools/health.ts'
 import { GLOBAL_CACHE_KEY } from '../src/governance/scope-health.ts'
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
+import { MemoryStore } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { PendingDecision, ScanCacheEntry, Finding } from '../src/governance/schema.ts'
 import { record } from './helpers/record.ts'
 import { DAY } from './helpers/clock.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 const NOW = 100 * DAY
 
@@ -38,7 +39,7 @@ function sharedDeps(store: MemoryStore, decisions: PendingDecisionsStore, cache:
 
 describe('体检聚合：scan 与 health 对同一层同口径（提取前先钉住行为）', () => {
   it('issueSummary：非零计数按 FINDING_TYPES 顺序、超期后缀、空层显示破折号，两工具一致', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
     const cache = new InMemoryKvTable<ScanCacheEntry>()
 
@@ -77,7 +78,7 @@ describe('体检聚合：scan 与 health 对同一层同口径（提取前先钉
   })
 
   it('跨层冲突聚合：首个 global/首个 workspace、workspaces 排序、decisionIds 按 firstSeenAt、忽略单侧，两工具一致', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
     const cache = new InMemoryKvTable<ScanCacheEntry>()
 
@@ -112,7 +113,7 @@ describe('体检聚合：scan 与 health 对同一层同口径（提取前先钉
   })
 
   it('分数：memory_scan 写完缓存与账本后，memory_health 对每一层给出同一评分与分档（全库与单层都一致）', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
     const cache = new InMemoryKvTable<ScanCacheEntry>()
 

@@ -33,6 +33,11 @@ export function scopeOfLedger(label: string): Scope {
   return label === GLOBAL_SCOPE_KEY ? { kind: 'global' } : { kind: 'workspace', workspacePath: label }
 }
 
+/** 只带 workspacePath 的写法转成作用域：缺省即全局（记录、命令参数都按这个约定）。 */
+export function scopeAt(workspacePath: string | undefined): Scope {
+  return workspacePath === undefined ? { kind: 'global' } : { kind: 'workspace', workspacePath }
+}
+
 /** 记忆所在的作用域。项目记忆缺 workspacePath 时为 undefined（定位不到）。 */
 export function scopeOfMemory(memory: { scope: 'global' | 'workspace'; workspacePath?: string | undefined }): Scope | undefined {
   if (memory.scope === 'global') return { kind: 'global' }
