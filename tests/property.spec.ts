@@ -250,8 +250,8 @@ describe('子 agent 记忆的生命周期', () => {
       checkups: new CheckupRecordStore(sidecar.checkups), autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups), ignores: new AdviceIgnoreStore(sidecar.adviceIgnores),
       registry: buildTypeRegistry({ template: 'coding', customTypes: {} }), agentsMd: createAgentsMdWriter(join(memoryRoot, 'AGENTS.md')),
       views: { request: async () => undefined, rewriteAll: async () => undefined, collectViews: async () => { throw new Error('不收集视图') }, requestCheckups: async () => {} },
-      resolveContext: async () => ({ workspacePath: ws, delegationDepth: 0, session: { id: 'sess-main' } }),
-      getLlm: () => null, getBaseline: () => null,
+      host: { contextOf: async () => ({ workspacePath: ws, delegationDepth: 0, session: { id: 'sess-main' } }), llmOf: () => null, baselineOf: () => null },
+      
     })
     const session = (id: string, header: { delegationDepth?: number; parentSession?: string } = {}) =>
       Session.create(id as SessionId, [], { version: SESSION_FORMAT_VERSION, id: id as SessionId, createdAt: 0, isSeeded: false, cwd: ws, ...header as object })

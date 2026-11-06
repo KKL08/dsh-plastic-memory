@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, mkdir, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { SnapshotCache, resolveWorkspacePath, type FrozenSnapshotInfo } from '../src/runtime.ts'
+import { SnapshotCache, resolveWorkspacePath, type FrozenSnapshotInfo, type SnapshotHost } from '../src/runtime.ts'
 import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { COLD_START_TEXT, assembleSnapshot } from '../src/snapshot.ts'
@@ -26,6 +26,11 @@ const frozenCore = (cache: SnapshotCache, session: object) => {
   const core = cache.injectedCore(session)
   return core && [...core.keys()].sort()
 }
+
+/** 宿主会话替身：只给要用的方法，其余按没有项目、没有更早的轮、不是持久型子会话。 */
+const snapshotHost = (partial: Partial<SnapshotHost>): SnapshotHost => ({
+  workspaceOf: async () => undefined, hasEarlierTurns: () => false, ownSessionIdOf: () => undefined, ...partial,
+})
 
 describe('SnapshotCache', () => {
   it('首次组装才冻结，不先计召回；之后再组装命中缓存，不读盘，回同一份文本', async () => {
@@ -271,7 +276,7 @@ describe('SnapshotCache', () => {
     const gate = new Promise<void>(r => { release = r })
     const cache = new SnapshotCache({
       store, registry, budget: 4000,
-      resolveWorkspace: async (s: object) => { calls++; await gate; return (s as { header?: { cwd?: string } }).header?.cwd },
+      host: snapshotHost({ workspaceOf: async (s: object) => { calls++; await gate; return (s as { header?: { cwd?: string } }).header?.cwd } }),
     })
     const session = { header: { cwd: '/repo' } }
 
@@ -301,10 +306,12 @@ describe('SnapshotCache', () => {
     await store.put(record({ content: '仅本仓库生效的偏好', type: 'preference', scope: 'workspace', workspacePath: '/repo' }))
     const cache = new SnapshotCache({
       store, registry, budget: 4000,
-      resolveWorkspace: async (s: object) => {
-        await new Promise(r => setTimeout(r, 20)) // 模拟慢解析：必然晚于同步首轮组装
-        return (s as { header?: { cwd?: string } }).header?.cwd
-      },
+      host: snapshotHost({
+        workspaceOf: async (s: object) => {
+          await new Promise(r => setTimeout(r, 20)) // 模拟慢解析：必然晚于同步首轮组装
+          return (s as { header?: { cwd?: string } }).header?.cwd
+        },
+      }),
     })
     const session = { header: { cwd: '/repo' } }
     expect(await cache.assemble(session)).toContain('仅本仓库生效的偏好')
@@ -313,7 +320,7 @@ describe('SnapshotCache', () => {
   it('awaitResolved 只等解析：落定后不组装、不冻结', async () => {
     const { store } = makeCache()
     const spy = vi.spyOn(store, 'readRaw')
-    const cache = new SnapshotCache({ store, registry, budget: 4000, resolveWorkspace: async () => '/repo' })
+    const cache = new SnapshotCache({ store, registry, budget: 4000, host: snapshotHost({ workspaceOf: async () => '/repo' }) })
     const session = { header: { cwd: '/repo' } }
     await cache.awaitResolved(session)
     expect(spy).not.toHaveBeenCalled()
@@ -327,7 +334,7 @@ describe('SnapshotCache', () => {
     await store.put(record({ content: '仅本仓库生效的偏好', type: 'preference', scope: 'workspace', workspacePath: '/repo' }))
     const cache = new SnapshotCache({
       store, registry, budget: 4000,
-      resolveWorkspace: () => new Promise<string | undefined>(() => {}), // 永不落定
+      host: snapshotHost({ workspaceOf: () => new Promise<string | undefined>(() => {}) }), // 永不落定
     })
     const session = { header: { cwd: '/repo' } }
     const text = await cache.assemble(session, 30)
@@ -356,12 +363,12 @@ describe('SnapshotCache', () => {
     expect(frozenCore(cache, session)).toEqual(['mem_core'])
   })
 
-  it('在途解析去重：同一 session 连续两次预热只触发一次 resolveWorkspace', () => {
+  it('在途解析去重：同一 session 连续两次预热只问一次所属项目', () => {
     const { store } = makeCache()
     let calls = 0
     const cache = new SnapshotCache({
       store, registry, budget: 4000,
-      resolveWorkspace: async () => { calls++; return '/repo' },
+      host: snapshotHost({ workspaceOf: async () => { calls++; return '/repo' } }),
     })
     const session = { header: { cwd: '/repo' } }
     cache.prewarm(session)
@@ -402,16 +409,18 @@ describe('SnapshotCache', () => {
 describe('SnapshotCache × 待确认记录', () => {
   const pending = (sessionId: string, partial: Partial<MemoryRecord>) =>
     record({ type: 'preference', delegation: { sessionId, depth: 1, parentSessionId: 'main' }, ...partial })
-  // 宿主会话的最小形状：header.id 是会话 id；哪个会话是持久型子会话由 ownSessionIdOf 决定（接线在 index.ts）
+  // 宿主会话的最小形状：header.id 是会话 id；哪个会话是持久型子会话由宿主会话的 ownSessionIdOf 决定
   const session = (id: string) => ({ header: { id } })
   function makeDelegatingCache(continuable: ReadonlySet<string>) {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const cache = new SnapshotCache({
       store, registry, budget: 4000,
-      ownSessionIdOf: s => {
-        const id = (s as { header: { id: string } }).header.id
-        return continuable.has(id) ? id : undefined
-      },
+      host: snapshotHost({
+        ownSessionIdOf: s => {
+          const id = (s as { header: { id: string } }).header.id
+          return continuable.has(id) ? id : undefined
+        },
+      }),
     })
     return { store, cache }
   }
@@ -457,7 +466,7 @@ describe('SnapshotCache 快照来历', () => {
     const frozen: FrozenSnapshotInfo[] = []
     const cache = new SnapshotCache({
       store, registry, budget: 4000, onFrozen: (_s, info) => { frozen.push(info) },
-      ...(hasEarlierTurns === undefined ? {} : { hasEarlierTurns }),
+      ...(hasEarlierTurns === undefined ? {} : { host: snapshotHost({ hasEarlierTurns }) }),
     })
     const session = {}
     cache.setWorkspacePath(session, undefined)

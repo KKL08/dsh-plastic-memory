@@ -29,7 +29,7 @@ function verticalLlm() {
   }
 }
 
-function makeEnv(overrides?: Partial<ScanToolDeps>) {
+function makeEnv({ host, ...overrides }: Partial<Omit<ScanToolDeps, 'host'>> & { host?: Partial<ScanToolDeps['host']> } = {}) {
   const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
   const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
   const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
@@ -37,9 +37,7 @@ function makeEnv(overrides?: Partial<ScanToolDeps>) {
     store, decisions,
     registry: buildTypeRegistry({ template: 'coding', customTypes: {} }),
     cache: new InMemoryKvTable<ScanCacheEntry>(),
-    getBaseline: () => null,
-    getLlm: (_exec: unknown) => horizontalLlm,
-    resolveContext: async () => ({ workspacePath: undefined }),
+    host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: () => horizontalLlm, baselineOf: () => null, ...host },
     now: () => 9000,
     ...overrides,
   }
@@ -92,7 +90,7 @@ describe('裁决过的冲突不再重报', () => {
 
   it('垂直冲突 keep-left 后：baselineRef 措辞变了也不再报；基线改了才重新报', async () => {
     let baseline = ['# AGENTS.md\n用 pnpm']
-    const env = makeEnv({ getLlm: (_exec: unknown) => llm, getBaseline: () => baseline })
+    const env = makeEnv({ host: { llmOf: (_exec: unknown) => llm, baselineOf: () => baseline }, })
     const llm = verticalLlm()
     await env.store.put(record({ id: 'mem_v', content: '这个项目用 npm' }))
     const first = await env.scan()

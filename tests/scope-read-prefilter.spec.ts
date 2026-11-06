@@ -98,7 +98,7 @@ describe('检索传给读取层的预筛词不含单字母与纯数字', () => {
     const readRaw = vi.spyOn(store, 'readRaw')
     const deps = {
       store, registry: buildTypeRegistry({ template: 'coding', customTypes: {} }),
-      resolveContext: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }),
+      host: { contextOf: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }) },
     }
 
     const prefilterOf = async (query: string) => {

@@ -35,7 +35,7 @@ const tokenize = createTokenizer()
 
 const deps = (store: MemoryStore, workspacePath?: string): SearchToolDeps => ({
   store, registry,
-  resolveContext: async () => ({ workspacePath, session: { id: 's', lastSeq: 1 } }),
+  host: { contextOf: async () => ({ workspacePath, session: { id: 's', lastSeq: 1 } }) },
 })
 
 let root: string

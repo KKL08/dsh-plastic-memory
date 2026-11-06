@@ -34,7 +34,7 @@ function makeDeps(now: number, workspacePath?: string): HealthToolDeps {
     decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
     cache: new InMemoryKvTable<ScanCacheEntry>(),
     thresholds: { actionScoreThreshold: 70, pendingOverdueDays: 7, scanStaleDays: 7 },
-    resolveContext: async () => ({ workspacePath }),
+    host: { contextOf: async () => ({ workspacePath }) },
     now: () => now,
   }
 }
@@ -131,7 +131,7 @@ describe('executeHealth 单层视图', () => {
     const project = await runSingle({}, deps)
     expect(project.recommendationKinds).not.toContain('semantic-stale')
     expect(project.recommendation).not.toContain('语义扫描已是')
-    const global = await runSingle({}, { ...deps, resolveContext: async () => ({ workspacePath: undefined }) })
+    const global = await runSingle({}, { ...deps, host: { contextOf: async () => ({ workspacePath: undefined }) } })
     expect(global.recommendationKinds).toContain('semantic-stale')
     // 改回什么都没设：项目跟随仅手动，照旧提醒
     await autoCheckups.set({ kind: 'all' }, 'manual')

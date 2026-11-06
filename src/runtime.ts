@@ -56,6 +56,16 @@ function overflowSummary(level: OverflowLevel, usage: SnapshotUsage, budget: num
     : `带入记忆约 ${usage.usedTokens} token，已用到上限 ${budget} 的 95%${usage.omittedCount > 0 ? `，${usage.omittedCount} 条没带入` : ''}`
 }
 
+/** 快照缓存读宿主会话要的三样（记忆层不引用执行器层的 HostSession，它结构上满足这里）。 */
+export interface SnapshotHost {
+  /** 会话所属项目：未解析的会话自愈时问一次。 */
+  workspaceOf(session: object): Promise<string | undefined>
+  /** 本实例第一次冻结某会话时问一次：会话是否已有更早的轮（是则来历记为重新带入）。 */
+  hasEarlierTurns(session: object): boolean
+  /** 持久型子会话自己的会话 id（注入带上它创建的待确认记录），主会话、一次性子会话回 undefined。每次构建现问。 */
+  ownSessionIdOf(session: object): string | undefined
+}
+
 export interface SnapshotCacheDeps {
   store: MemoryStore
   registry: TypeRegistry
@@ -68,13 +78,10 @@ export interface SnapshotCacheDeps {
   overflowLedger?: OverflowLedger
   /** 冻结之后调用（会话视图的写入口，接线在 index.ts）。失败只记日志。 */
   onFrozen?: (session: object, info: FrozenSnapshotInfo) => void | Promise<void>
-  resolveWorkspace?: (session: object) => Promise<string | undefined>
-  /** 本实例第一次冻结某会话时问一次：会话是否已有更早的轮（是则来历记为重新带入）。缺省按没有。 */
-  hasEarlierTurns?: (session: object) => boolean
+  /** 宿主会话。缺省（纯测试场景）时不自愈解析项目、来历按新开、不带本会话的待确认记录。 */
+  host?: SnapshotHost
   /** 日志注入口，缺省回退 console（见 store.ts MemoryLogger）。 */
   log?: MemoryLogger
-  /** 会话是持久型子会话时回它自己的会话 id（注入带上它创建的待确认记录），主会话、一次性子会话回 undefined。每次构建现问；缺省都按 undefined。 */
-  ownSessionIdOf?: (session: object) => string | undefined
   /** 组装（有效期判定）、超限同步、计召回用的时钟，缺省取当前时间。 */
   now?: () => number
 }
@@ -114,13 +121,13 @@ export class SnapshotCache {
   }
 
   /** 未解析 session 的自愈：触发一次异步解析并落缓存（同 session 去重、可等待）。
-   *  纯测试场景（未注入 resolveWorkspace）时不做事，维持"等 setWorkspacePath 显式喂"的现行为。 */
+   *  纯测试场景（未注入 host）时不做事，维持"等 setWorkspacePath 显式喂"的现行为。 */
   private ensureResolving(session: object): Promise<void> | undefined {
-    const resolve = this.deps.resolveWorkspace
-    if (!resolve || this.workspacePaths.has(session)) return undefined
+    const host = this.deps.host
+    if (!host || this.workspacePaths.has(session)) return undefined
     let pending = this.resolving.get(session)
     if (!pending) {
-      pending = resolve(session)
+      pending = host.workspaceOf(session)
         .then(path => this.setWorkspacePath(session, path))
         .catch(() => this.setWorkspacePath(session, undefined))
         .finally(() => this.resolving.delete(session))
@@ -175,7 +182,7 @@ export class SnapshotCache {
     // 预读范围：只读 active，global + 当前 workspace（未解析时 global-only）；同一次读取的隔离文件数给冷启动文案用
     const now = deps.now?.() ?? Date.now()
     const preread = await prereadSnapshot(deps.store, workspacePath)
-    const { text, coreIds, ...usage } = assembleSnapshot({ ...deps, ...preread, workspacePath, now, ownSessionId: deps.ownSessionIdOf?.(session) })
+    const { text, coreIds, ...usage } = assembleSnapshot({ ...deps, ...preread, workspacePath, now, ownSessionId: deps.host?.ownSessionIdOf(session) })
     if (!isResolved) return text
     // 构建期间被标过期（压缩、配置热更新）：这份作废，按新代次重建，冻结后再交出去，模型看到的就是冻结的那份。
     // 连续作废到上限还不稳定，这次不给文本，下一个发送点再来；不交出没冻结的文本
@@ -188,7 +195,7 @@ export class SnapshotCache {
     // 本实例第一次冻结时看会话有没有更早的轮
     const compactedAt = this.compactions.get(session)
     const origin: Origin = compactedAt !== undefined ? { origin: 'compacted', compactedAt }
-      : landed === undefined ? { origin: this.deps.hasEarlierTurns?.(session) ? 'resumed' : 'start' }
+      : landed === undefined ? { origin: this.deps.host?.hasEarlierTurns(session) ? 'resumed' : 'start' }
         : landed.text === text ? landed.origin : { origin: 'refreshed' }
     this.compactions.delete(session)
     this.cache.set(session, { text, generation, core: new Map(coreIds.map(id => [id, contentOf.get(id)!])), origin })

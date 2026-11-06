@@ -57,11 +57,10 @@ function world() {
   const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
   const agentsMd = { lines: [] as string[], append: async function (line: string) { this.lines.push(line) } }
   const now = () => 5000
-  const resolveContext = async () => ({ workspacePath: A as string | undefined })
   return {
     store, snapshots, decisions, agentsMd,
     deps: { store, snapshots, decisions, agentsMd, now },
-    resolveContext,
+    host: { contextOf: async () => ({ workspacePath: A as string | undefined }) },
     seed: async (...records: MemoryRecord[]) => { for (const r of records) await store.put(r) },
   }
 }
@@ -69,10 +68,10 @@ function world() {
 describe('forget / confirm refresh / confirm resolve / promote / snapshot create（指定 id）/ show / restore 新增布尔参数 allowCrossWorkspace，缺省 false；工具说明写明只有用户明确选了全局整理才传', () => {
   const w = world()
   const tools: Array<[string, ToolDefinition, Record<string, unknown>]> = [
-    ['memory_forget', createForgetTool({ ...w.deps, resolveContext: w.resolveContext }), { ids: ['mem_x'], reason: '过期' }],
-    ['memory_confirm', createConfirmTool({ ...w.deps, resolveContext: w.resolveContext }), { action: 'refresh', memoryId: 'mem_x' }],
-    ['memory_promote', createPromoteTool({ ...w.deps, agentsMd: w.agentsMd, defaultTarget: 'global', resolveContext: w.resolveContext }), { ids: ['mem_x'] }],
-    ['memory_snapshot', createSnapshotTool({ ...w.deps, resolveContext: w.resolveContext }), { action: 'restore', snapshotId: 'snap_x' }],
+    ['memory_forget', createForgetTool({ ...w.deps, host: w.host }), { ids: ['mem_x'], reason: '过期' }],
+    ['memory_confirm', createConfirmTool({ ...w.deps, host: w.host }), { action: 'refresh', memoryId: 'mem_x' }],
+    ['memory_promote', createPromoteTool({ ...w.deps, agentsMd: w.agentsMd, defaultTarget: 'global', host: w.host }), { ids: ['mem_x'] }],
+    ['memory_snapshot', createSnapshotTool({ ...w.deps, host: w.host }), { action: 'restore', snapshotId: 'snap_x' }],
   ]
 
   for (const [name, tool, legal] of tools) {
@@ -256,7 +255,7 @@ describe('带参数：放行，结构化结果与渲染文本对非可见集合�
   it('forget 绑定层：参数透传到执行器，渲染文本标出 B', async () => {
     const w = world()
     await w.seed(inB('mem_b'))
-    const tool = createForgetTool({ ...w.deps, resolveContext: w.resolveContext })
+    const tool = createForgetTool({ ...w.deps, host: w.host })
     const args = { ids: ['mem_b'], reason: '全局整理', allowCrossWorkspace: true }
     const result = await tool.execute(args, exec)
     const text = (tool.output.render(args as never, result as never) as Array<{ text: string }>)[0].text
@@ -348,8 +347,8 @@ describe('待决账本条目新增 workspaces 字段（global 用 global），sc
     }
     const r = await executeScan({ layers: 'full' }, {
       store, registry, decisions, cache: new InMemoryKvTable<ScanCacheEntry>(),
-      getBaseline: () => null, getLlm: () => conflictLlm,
-      resolveContext: async () => ({ workspacePath: A }), now: () => 9000,
+      host: { contextOf: async () => ({ workspacePath: A }), llmOf: () => conflictLlm, baselineOf: () => null },
+      now: () => 9000,
     }, fakeExec())
     if (r.kind !== 'single') throw new Error(r.kind)
     const [entry] = await decisions.list()
@@ -372,7 +371,7 @@ describe('待决账本条目新增 workspaces 字段（global 用 global），sc
     for (const ds of [decisions, legacy]) {
       const r = await executeHealth({}, {
         store, registry, decisions: ds, cache: new InMemoryKvTable<ScanCacheEntry>(),
-        thresholds: resolveHealthThresholds('normal'), resolveContext: async () => ({ workspacePath: A }), now: () => 9000,
+        thresholds: resolveHealthThresholds('normal'), host: { contextOf: async () => ({ workspacePath: A }) }, now: () => 9000,
       }, fakeExec())
       if (r.kind !== 'single') throw new Error(r.kind)
       expect(r.pendingDecisions.items[0].workspaces).toEqual([A, 'global'])
@@ -471,8 +470,8 @@ describe('memory_save update 的 cross-workspace 与 memory_source 的 forbidden
   const ctx = async () => ({ workspacePath: A as string | undefined, session: { id: 's', lastSeq: 1 } })
 
   it('memory_save / memory_source 的参数 schema 里没有 allowCrossWorkspace', () => {
-    const save = createSaveTool({ store: w.store, snapshots: w.snapshots, registry, resolveContext: ctx })
-    const source = createSourceTool({ store: w.store, resolveContext: ctx, getReadEvent: () => null })
+    const save = createSaveTool({ store: w.store, snapshots: w.snapshots, registry, host: { saveContextOf: ctx } })
+    const source = createSourceTool({ store: w.store, host: { contextOf: ctx }, getReadEvent: () => null })
     for (const tool of [save, source]) {
       const schema = schemaOf(tool) as { properties: Record<string, unknown> }
       expect(Object.keys(schema.properties)).not.toContain('allowCrossWorkspace')
@@ -486,7 +485,7 @@ describe('memory_save update 的 cross-workspace 与 memory_source 的 forbidden
       action: 'update' as const, id: 'mem_b', name: '条目', type: 'knowledge', scope: 'workspace' as const,
       content: '改写', summary: '摘要', sourceMode: 'user-explicit' as const, allowCrossWorkspace: true,
     }
-    const r = await executeSave(args, exec, { store: w2.store, snapshots: w2.snapshots, registry, resolveContext: ctx })
+    const r = await executeSave(args, exec, { store: w2.store, snapshots: w2.snapshots, registry, host: { saveContextOf: ctx } })
     expect(r).toMatchObject({ kind: 'rejected', code: SAVE_CROSS })
     expect((await w2.store.get('mem_b'))!.content).toBe('原文')
   })

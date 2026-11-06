@@ -1,10 +1,11 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { executeSource, renderSourceResult, type SourceToolDeps, type SourceResult } from './source.ts'
 import { toToolOutput } from './output.ts'
+import type { ContextHost } from './host-session.ts'
 
 export interface SourceToolBindingDeps extends SourceToolDeps {
-  resolveContext: (exec: ToolRunContext) => Promise<Parameters<typeof executeSource>[1]>
+  host: ContextHost<Parameters<typeof executeSource>[1]>
 }
 
 /**
@@ -29,7 +30,7 @@ export function createSourceTool(deps: SourceToolBindingDeps): ToolDefinition {
       render: (_args, value) => [{ type: 'text', text: renderSourceResult(value as unknown as SourceResult) }],
     },
     execute: async (args, exec) => {
-      const context = await deps.resolveContext(exec)
+      const context = await deps.host.contextOf(exec)
       return toToolOutput(await executeSource(args, context, deps))
     },
   })

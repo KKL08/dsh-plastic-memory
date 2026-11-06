@@ -8,11 +8,12 @@ import { CJK } from '../search/tokenizer.ts'
 import { anchorTerms, compareRanked, pendingLast, rankRecords, type RankedRecord, type SearchTier } from '../search/ranking.ts'
 import { groupQueryTerms, judgeTopHit, termHitCounts, type TermHitCount } from '../search/coverage.ts'
 import type { TypeRegistry } from '../type-registry.ts'
+import type { ContextHost } from './host-session.ts'
 import { sourceNote } from '../index-line.ts'
 import { stalenessNote, withinValidity } from '../record-freshness.ts'
 import { exposedPath, maskSecretSurface } from '../secrets.ts'
 
-/** memory_search 运行时需要的会话上下文，由框架绑定层的 resolveContext 提供。 */
+/** memory_search 运行时需要的会话上下文，由宿主会话适配器的 contextOf 提供。 */
 export interface SearchContext {
   workspacePath: string | undefined
   /** handle：宿主的 session 对象，快照缓存与召回去重按它分会话；拿不到 session 时缺省。 */
@@ -31,7 +32,7 @@ export interface SessionRecall {
 export interface SearchToolDeps {
   store: MemoryStore
   registry: TypeRegistry
-  resolveContext(exec: ToolRunContext): Promise<SearchContext>
+  host: ContextHost<SearchContext>
   /** 分词器选项：用户词典路径（现读）与降级告警的日志器。缺省只用主词典、告警走 console。 */
   tokenizer?: QueryTokenizerOptions
   /** 缺省（纯测试场景）或拿不到 session 时：正文照常给全文，每次检索都计召回。 */
@@ -127,7 +128,7 @@ export async function executeSearch(
   deps: SearchToolDeps,
 ): Promise<{ hits: SearchHit[]; note?: string; noteCode?: SearchNoteCode; moreNote?: string }> {
   const a = args
-  const { workspacePath, session } = await deps.resolveContext(exec)
+  const { workspacePath, session } = await deps.host.contextOf(exec)
   // 明确要"只看本项目"而当前会话没有工作目录：显式说明而非静默落回 global-only——
   // 用户要项目范围时给他全局结果是误导
   if (a.scope === 'workspace' && workspacePath === undefined) {

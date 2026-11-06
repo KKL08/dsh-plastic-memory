@@ -1,11 +1,12 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { executeConfirm, type ConfirmResult, type ConfirmToolDeps } from './confirm.ts'
 import { toToolOutput } from './output.ts'
 import { ALLOW_CROSS_WORKSPACE_PARAM, type GovernanceContext } from './workspace-gate.ts'
+import type { ContextHost } from './host-session.ts'
 
 export interface ConfirmToolBindingDeps extends ConfirmToolDeps {
-  resolveContext: (exec: ToolRunContext) => Promise<GovernanceContext>
+  host: ContextHost<GovernanceContext>
 }
 
 /**
@@ -27,6 +28,6 @@ export function createConfirmTool(deps: ConfirmToolBindingDeps): ToolDefinition 
       schema: { type: 'json' },
       render: (_args, value) => [{ type: 'text', text: (value as unknown as ConfirmResult).message }],
     },
-    execute: async (args, exec) => toToolOutput(await executeConfirm(args, await deps.resolveContext(exec), deps)),
+    execute: async (args, exec) => toToolOutput(await executeConfirm(args, await deps.host.contextOf(exec), deps)),
   })
 }

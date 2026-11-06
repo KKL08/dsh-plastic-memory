@@ -1,12 +1,13 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { executePromote, type PromoteTarget, type PromoteDeps, type PromoteResult } from './promote.ts'
 import { toToolOutput } from './output.ts'
 import { ALLOW_CROSS_WORKSPACE_PARAM, type GovernanceContext } from './workspace-gate.ts'
+import type { ContextHost } from './host-session.ts'
 
 export interface PromoteToolDeps extends PromoteDeps {
   defaultTarget: PromoteTarget
-  resolveContext: (exec: ToolRunContext) => Promise<GovernanceContext>
+  host: ContextHost<GovernanceContext>
 }
 
 /**
@@ -32,7 +33,7 @@ export function createPromoteTool(deps: PromoteToolDeps): ToolDefinition {
     output: { schema: { type: 'json' }, render: (_a, v) => [{ type: 'text', text: (v as unknown as PromoteResult).message }] },
     execute: async (args, exec) => {
       const target: PromoteTarget = args.target ?? deps.defaultTarget
-      const context = await deps.resolveContext(exec)
+      const context = await deps.host.contextOf(exec)
       return toToolOutput(await executePromote({ confirmedIds: args.ids, target, dismiss: args.dismiss, allowCrossWorkspace: args.allowCrossWorkspace }, context, deps, { reviewedBy: 'main' }))
     },
   })

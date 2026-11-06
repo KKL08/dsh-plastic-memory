@@ -7,6 +7,11 @@ import type { DelegationHeader } from './subagent-gate.ts'
 /** 宿主没给会话 id 时用的哨兵：会话视图、新写入名单遇到它都跳过。 */
 export const UNKNOWN_SESSION_ID = 'unknown'
 
+/** 只要上下文一部分的消费者收的 host：HostSession 结构上满足它，装配处传同一个对象。 */
+export interface ContextHost<C> {
+  contextOf(exec: ToolRunContext): Promise<C>
+}
+
 /** 工具执行时的会话上下文：全部来自宿主，不来自工具参数。 */
 export interface HostContext {
   workspacePath: string | undefined

@@ -542,7 +542,7 @@ describe('memory_health 纯读', () => {
     const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
     const deps = {
       store, registry, decisions: new PendingDecisionsStore(sidecar.pending), cache: sidecar.scanCache,
-      thresholds: resolveHealthThresholds('normal'), resolveContext: async () => ({ workspacePath: WS }),
+      thresholds: resolveHealthThresholds('normal'), host: { contextOf: async () => ({ workspacePath: WS }) },
     }
     expect((await executeHealth({}, deps, fakeExec())).kind).toBe('single')
     expect((await executeHealth({ scope: 'all' }, deps, fakeExec())).kind).toBe('checkup')

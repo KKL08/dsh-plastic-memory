@@ -1,11 +1,12 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { executeForget, type ForgetResult, type ForgetToolDeps } from './forget.ts'
 import { toToolOutput } from './output.ts'
 import { ALLOW_CROSS_WORKSPACE_PARAM, type GovernanceContext } from './workspace-gate.ts'
+import type { ContextHost } from './host-session.ts'
 
 export interface ForgetToolBindingDeps extends ForgetToolDeps {
-  resolveContext: (exec: ToolRunContext) => Promise<GovernanceContext>
+  host: ContextHost<GovernanceContext>
 }
 
 /**
@@ -25,6 +26,6 @@ export function createForgetTool(deps: ForgetToolBindingDeps): ToolDefinition {
       schema: { type: 'json' },
       render: (_args, value) => [{ type: 'text', text: (value as unknown as ForgetResult).message }],
     },
-    execute: async (args, exec) => toToolOutput(await executeForget(args, await deps.resolveContext(exec), deps)),
+    execute: async (args, exec) => toToolOutput(await executeForget(args, await deps.host.contextOf(exec), deps)),
   })
 }

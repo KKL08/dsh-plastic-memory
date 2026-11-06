@@ -228,12 +228,12 @@ try {
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const exec = { signal: new AbortController().signal } as ToolRunContext
   const session = { id: 'bench-session', lastSeq: 10, turnStartSeq: 5 }
-  const resolveContext = async () => ({ workspacePath: currentWs, session })
+  const contextOf = async () => ({ workspacePath: currentWs, session })
   const snapshotCache = new SnapshotCache({ store, registry, budget: 4000, memoryRoot: root, evidenceLookup: 'strict', log: quietLog })
   const healthDeps = {
     store, registry, decisions, cache: sidecar.scanCache,
     thresholds: resolveHealthThresholds('normal'),
-    resolveContext,
+    host: { contextOf },
   }
   const updateTargets = seeded.filter(r => r.workspacePath === currentWs && r.status === 'active')
   // 顶层只有 active（非 active 在 .archive/，缺省不读）
@@ -260,7 +260,7 @@ try {
       if (!text?.startsWith('# 长期记忆')) throw new Error('快照没有组装出记忆内容')
     }),
     await bench('memory_search', async () => {
-      const r = await executeSearch({ query: `${WORDS[0]} 部署流程` }, exec, { store, registry, resolveContext })
+      const r = await executeSearch({ query: `${WORDS[0]} 部署流程` }, exec, { store, registry, host: { contextOf } })
       if (r.hits.length === 0) throw new Error('memory_search 没有命中')
     }),
     await bench('memory_save（create）', async round => {
@@ -269,7 +269,7 @@ try {
       const r = await executeSave({
         action: 'create', name: `bench-save-${round + 1}-${words[0]}`, type: 'knowledge', scope: 'workspace',
         content: words.join(' '), summary: words.slice(0, 2).join(' '), sourceMode: 'user-explicit',
-      }, exec, { store, registry, snapshots, resolveContext })
+      }, exec, { store, registry, snapshots, host: { saveContextOf: contextOf } })
       if (r.kind !== 'saved') throw new Error(`memory_save 未落盘：${r.kind}`)
     }),
     await bench('memory_save（update）', async round => {
@@ -277,7 +277,7 @@ try {
       const r = await executeSave({
         action: 'update', id: target.id, name: target.name, type: target.type, scope: 'workspace',
         content: `${target.content}（第 ${round + 2} 次更新）`, summary: target.summary, sourceMode: 'user-explicit',
-      }, exec, { store, registry, snapshots, resolveContext })
+      }, exec, { store, registry, snapshots, host: { saveContextOf: contextOf } })
       if (r.kind !== 'updated') throw new Error(`update 未落盘：${r.kind}`)
     }),
     await bench('memory_health 单层（当前项目）', async () => {
@@ -302,7 +302,7 @@ try {
   let lastRead: ScopeReadResult | undefined
   const probeStore: MemoryStore = Object.create(store)
   probeStore.readRaw = async (scope, opts) => (lastRead = await store.readRaw(scope, opts))
-  const searchDeps = { store: probeStore, registry, resolveContext, tokenizer: searchTokenizer }
+  const searchDeps = { store: probeStore, registry, host: { contextOf }, tokenizer: searchTokenizer }
 
   /**
    * 打分阶段堆增量：对执行器读到的同一批候选，在 gc 后的基线上做查询分词与 rankRecords（含逐条记录分词），

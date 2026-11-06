@@ -101,9 +101,7 @@ function env(opts: EnvOpts = {}) {
     ...(opts.log !== undefined ? { log: opts.log } : {}),
     ...(opts.heartbeat !== undefined ? { heartbeat: opts.heartbeat } : {}),
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),
-    resolveContext: async () => ({ workspacePath: 'workspacePath' in opts ? opts.workspacePath : SESSION_WS, delegationDepth: opts.delegationDepth ?? 0, session: { id: 'sess-1' } }),
-    getLlm: () => (opts.llm === undefined ? null : opts.llm),
-    getBaseline: () => opts.baseline ?? null,
+    host: { contextOf: async () => ({ workspacePath: 'workspacePath' in opts ? opts.workspacePath : SESSION_WS, delegationDepth: opts.delegationDepth ?? 0, session: { id: 'sess-1' } }), llmOf: () => (opts.llm === undefined ? null : opts.llm), baselineOf: () => opts.baseline ?? null },
     ...(opts.governanceEnabled !== undefined ? { isGovernanceEnabled: () => opts.governanceEnabled! } : {}),
     isLegacyImportSettled: () => sidecar.isLegacyImportSettled(),
     now: () => clock.now,
@@ -332,7 +330,7 @@ describe('resolve 与 undo', () => {
     const llm = { complete: async () => JSON.stringify({ findings: [{ type: 'conflict', memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', suggestedAction: '裁决' }] }) }
     const scanned = await executeScan({}, {
       store: e.store, registry, decisions: e.decisions, cache: e.cache, checkups: e.checkups,
-      getBaseline: () => null, getLlm: () => llm, resolveContext: async () => ({ workspacePath: undefined }), now: () => e.clock.now,
+      host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: () => llm, baselineOf: () => null }, now: () => e.clock.now,
     }, fakeExec())
     if (scanned.kind !== 'single') throw new Error(`expected single, got ${scanned.kind}`)
     expect(scanned.pendingDecisions.created).toBe(0)
@@ -2577,7 +2575,7 @@ describe('scan：上次体检与完成记录', () => {
     e.clock.now = NOW + 1000
     const late = executeScan({ scope: SESSION_WS }, {
       store: e.store, registry, decisions: e.decisions, cache: e.cache, checkups: e.checkups,
-      getBaseline: () => null, getLlm: () => slow, resolveContext: async () => ({ workspacePath: SESSION_WS }), now: () => e.clock.now,
+      host: { contextOf: async () => ({ workspacePath: SESSION_WS }), llmOf: () => slow, baselineOf: () => null }, now: () => e.clock.now,
     }, fakeExec())
     e.clock.now = NOW + 2000
     ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
@@ -2765,11 +2763,11 @@ describe('scan：最近一次结果', () => {
     e.clock.now = NOW + 1000
     await executeScan({ scope: OTHER_WS }, {
       store: e.store, registry, decisions: e.decisions, cache: e.cache, checkups: e.checkups,
-      getBaseline: () => null, getLlm: () => llm, resolveContext: async () => ({ workspacePath: SESSION_WS }), now: () => e.clock.now,
+      host: { contextOf: async () => ({ workspacePath: SESSION_WS }), llmOf: () => llm, baselineOf: () => null }, now: () => e.clock.now,
     }, fakeExec())
     await executeScan({ scope: SESSION_WS }, {
       store: e.store, registry, decisions: e.decisions, cache: e.cache, checkups: e.checkups,
-      getBaseline: () => null, getLlm: () => llm, resolveContext: async () => ({ workspacePath: SESSION_WS }), now: () => e.clock.now,
+      host: { contextOf: async () => ({ workspacePath: SESSION_WS }), llmOf: () => llm, baselineOf: () => null }, now: () => e.clock.now,
     }, fakeExec())
     expect(await recordOf(e, checkupKey(OTHER))).toEqual({ id: checkupKey(OTHER), completed: { startedAt: NOW + 1000, completedAt: NOW + 1000, by: 'agent' } })
     expect((await recordOf(e, checkupKey(SESSION)))).toMatchObject({ completed: { by: 'agent' }, lastResult: before })

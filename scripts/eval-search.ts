@@ -94,7 +94,7 @@ async function productionRun(store: MemoryStore, tier: 'bigram' | 'jieba'): Prom
   resetJieba(tier === 'bigram' ? missingJieba : undefined)
   const deps = {
     store, registry, tokenizer: { log: silent },
-    resolveContext: async () => ({ workspacePath: undefined, session: { id: 'eval', lastSeq: 1 } }),
+    host: { contextOf: async () => ({ workspacePath: undefined, session: { id: 'eval', lastSeq: 1 } }) },
   }
   const results: Results = new Map()
   const notes: NoteCodes = new Map()

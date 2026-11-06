@@ -9,7 +9,7 @@ import { SidecarStore } from './storage/sidecar.ts'
 import type { LegacyKvTables } from './storage/legacy-kv-import.ts'
 import { resolveMemoryRoot } from './storage/paths.ts'
 import { formatIndexLine } from './index-line.ts'
-import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { SUBAGENT_MAX_SAVES_DEFAULT } from './pipeline.ts'
 import { createSaveTool } from './tools/save-tool.ts'
@@ -235,12 +235,6 @@ export async function apply(ctx: Context, config: Config) {
   }
   // 宿主会话的读取集中在适配器：探测、退化、同一会话只警告一次是它的内部规则
   const host = createCordisHostSession({ lookup: name => ctx.get(name), logger: ctx.logger, resolveCwd })
-  // cwd → workspace 归属的单一解析路径：SnapshotCache 的 lazy 自愈与 session/created 的 eager 预热共用
-  const resolveWorkspace = (session: object) => host.workspaceOf(session)
-  const hasEarlierTurns = (session: object) => host.hasEarlierTurns(session)
-  const resolveContext = (exec: ToolRunContext) => host.contextOf(exec)
-  const resolveSaveContext = (exec: ToolRunContext) => host.saveContextOf(exec)
-  const getDefaultLlm = () => host.defaultLlm()
   // 会话视图（进程内存）：每个会话最近一次冻结的视图，与这次对话新记的 id（可能早于首次冻结）
   const frozenViews = new Map<string, SessionView>()
   const savedIds = new Map<string, string[]>()
@@ -257,12 +251,10 @@ export async function apply(ctx: Context, config: Config) {
   // 超限提醒进待决账本（治理关闭时也记：它是待处理里的提醒，不是体检结果）。
   // 上限、超限处理、溯源档位是 getter：每次构建快照时现读配置（SnapshotCache 一次构建只取一次）。
   const snapshotCache = new SnapshotCache({
-    store, registry, overflowLedger: decisions, memoryRoot, resolveWorkspace, hasEarlierTurns, log: ctx.logger,
+    store, registry, overflowLedger: decisions, memoryRoot, host, log: ctx.logger,
     get budget() { return config.snapshotTokenBudget.get() },
     get overflow() { return config.snapshotOverflow.get() },
     get evidenceLookup() { return config.evidenceLookup.get() },
-    // 持久型子会话的注入带上它自己创建的待确认记录；主会话、一次性子会话不带（mode 每次构建现读 subagent 投影）
-    ownSessionIdOf: session => host.ownSessionIdOf(session),
     onFrozen: (session, { overflowChanged, ...info }) => {
       const sessionId = (session as SessionLike).header?.id
       if (views === undefined || sessionId === undefined) return
@@ -274,9 +266,6 @@ export async function apply(ctx: Context, config: Config) {
     },
   })
 
-  // 语义层模型与基线都按触发调用的 agent 取：memory_scan 与 /memory scan（借来的会话）共用
-  const getLlm = (exec: ToolRunContext) => host.llmOf(exec)
-  const getBaseline = (exec: ToolRunContext) => host.baselineOf(exec)
   // AGENTS.md 位置从 DSH_HOME 独立解析（不从 memoryRoot 反推——自定义 root 时会指向 dsh 不读的文件）；
   // memory_promote 与 /memory promote 共用一个写入器（进程内串行）
   const agentsMd = createAgentsMdWriter(agentsMdPath())
@@ -292,31 +281,31 @@ export async function apply(ctx: Context, config: Config) {
         void views?.request()
       }
     },
-  }, resolveContext, allowSubagent))
+  }, host, allowSubagent))
   // memory_save 的类型枚举与说明在注册时从类型表生成：模板或自定义类型热更新后注销重注册。
   // 子 agent 写入随治理开关：待确认记录的接受入口 memory_confirm 随开关注册，关着时子 agent 照旧只读（每次调用现读）；
   // 说明里的子 agent 段按注册时的开关写，开关热更新时也重注册
   const allowSubagentSave = () => config.governance.enabled.get()
   const registerSave = () => registerWrite(
     createSaveTool({
-      store, registry, resolveContext: resolveSaveContext, snapshots, decisions, onSaved,
+      store, registry, host, snapshots, decisions, onSaved,
       maxSubagentSaves: () => config.subagent.maxSavesPerSession.get(),
     }, { allowSubagent: allowSubagentSave() }),
     allowSubagentSave,
   )
   let disposeSave = registerSave()
   ctx.tools.register(createSearchTool({
-    store, registry, resolveContext, sessionRecall: snapshotCache,
+    store, registry, host, sessionRecall: snapshotCache,
     tokenizer: { userDictionaryPath: () => config.search.userDictionaryPath.get(), log: ctx.logger },
   }))
-  registerWrite(createForgetTool({ store, snapshots, decisions, log: ctx.logger, resolveContext }))
+  registerWrite(createForgetTool({ store, snapshots, decisions, log: ctx.logger, host }))
   // 快照的写入与恢复必须成对——治理关闭时 forget 仍会拍快照，若没有恢复入口，
   // 14 天的快照就是死存储。故 memory_snapshot 放在治理开关之外，与 forget 一起常驻。
-  registerWrite(createSnapshotTool({ store, snapshots, resolveContext }))
+  registerWrite(createSnapshotTool({ store, snapshots, host }))
   // memory_source：证据下钻（日常 + 治理都用，常驻）。sessionQuery 是 base bundle 默认服务，
   // 但按 llm 同款惯例 per-call 探测 + try/catch——某些 profile 缺席时工具内优雅降级，不挂载失败。
   ctx.tools.register(createSourceTool({
-    store, resolveContext,
+    store, host,
     getReadEvent: () => {
       try {
         const sq = ctx.get('sessionQuery') as { readEvent?: ReadEventFn } | undefined
@@ -333,24 +322,22 @@ export async function apply(ctx: Context, config: Config) {
     for (const dispose of governanceTools.splice(0)) dispose()
     if (!config.governance.enabled.get()) return
     governanceTools = [
-      registerWrite(createConfirmTool({ store, decisions, snapshots, log: ctx.logger, resolveContext })),
+      registerWrite(createConfirmTool({ store, decisions, snapshots, log: ctx.logger, host })),
       // 基线按触发调用的 session 取（宿主投影 cell 按 session 隔离，防多会话串台）。
       // 扫描会写语义缓存、登记待决冲突，归写工具；health 纯读，不套门
       registerWrite(createScanTool({
         store, registry, decisions, cache: scanCache, ignores, checkups,
-        getBaseline,
-        getLlm,
-        resolveContext,
+        host,
       })),
       ctx.tools.register(createHealthTool({
         store, registry, decisions, cache: scanCache, ignores, checkups, autoCheckups,
         get thresholds() { return resolveHealthThresholds(config.governance.health.sensitivity.get()) },
-        resolveContext,
+        host,
       })),
       // memory_promote：把用户确认的候选提升 global。确认由模型先调 ask_user_question 完成
       // （工具内部弹 userQuestions 会被 web 会话拒绝 "requires agent-owned session"），本工具纯执行。
       registerWrite(createPromoteTool({
-        store, agentsMd, snapshots, resolveContext,
+        store, agentsMd, snapshots, host,
         get defaultTarget(): PromoteTarget { return config.governance.globalPromoteTarget.get() === 'agents-md' ? 'agents-md' : 'global' },
       })),
     ]
@@ -379,7 +366,7 @@ export async function apply(ctx: Context, config: Config) {
     commands.register(createMemoryCommand({
       memoryRoot, store, decisions, snapshots, cache: scanCache, checkups, autoCheckups, ignores, registry, agentsMd, views: writer,
       onAutoCheckupChanged: () => void scheduler?.recheck(),
-      resolveContext, getLlm, getBaseline, log: ctx.logger,
+      host, log: ctx.logger,
       isGovernanceEnabled: () => config.governance.enabled.get(),
       isLegacyImportSettled: () => sidecar.isLegacyImportSettled(),
     }))
@@ -393,7 +380,7 @@ export async function apply(ctx: Context, config: Config) {
   let startupViewsPending = true
 
   // 自动体检调度：宿主有计时服务时才有（可选注册，同 commands）。计时器挂在 child 上，插件卸载时宿主停掉它们；
-  // disposer 再取消正在跑的体检并等它收尾。无会话，用宿主默认模型（getDefaultLlm）。
+  // disposer 再取消正在跑的体检并等它收尾。无会话，用宿主默认模型（host.defaultLlm）。
   ctx.inject(['timer'], child => {
     const timer = child as unknown as AutoCheckupTimer
     const created = new AutoCheckupScheduler({
@@ -401,7 +388,7 @@ export async function apply(ctx: Context, config: Config) {
       checkups,
       collectPending: async () => (await collectViews()).pending,
       status: () => collectCheckupView(checkupSource),
-      getDefaultLlm,
+      host,
       isGovernanceEnabled: () => config.governance.enabled.get(),
       timer: { timeout: (callback, delayMs) => timer.timeout(callback, delayMs), interval: (callback, delayMs) => timer.interval(callback, delayMs) },
       onChecked: async () => { await views?.requestCheckups() },
@@ -427,7 +414,9 @@ export async function apply(ctx: Context, config: Config) {
   }
   loaderEvents.on('loader/volatile-update', async paths => {
     const changed = (...keys: string[]) => paths.some(path => keys.includes(path.join('.')))
-    if (changed('template', 'customTypes', 'scenes', 'removedPresetTypes')) {
+    // 决定类型表的配置：变了重建类型表，冻结快照也过期
+    const typeKeys = ['template', 'customTypes', 'scenes', 'removedPresetTypes']
+    if (changed(...typeKeys)) {
       try {
         currentRegistry = buildRegistry()
         disposeSave()
@@ -444,7 +433,7 @@ export async function apply(ctx: Context, config: Config) {
     }
     // search.userDictionaryPath 不用在这里处理：memory_search 每次现读路径，变了下一次搜索就重建分词实例
     // 只有组装快照时读的字段变了才让冻结快照过期；主题色、提升路径、体检灵敏度这类改了不重建
-    if (changed('template', 'customTypes', 'scenes', 'removedPresetTypes', 'snapshotTokenBudget', 'snapshotOverflow', 'evidenceLookup')) {
+    if (changed(...typeKeys, 'snapshotTokenBudget', 'snapshotOverflow', 'evidenceLookup')) {
       snapshotCache.markAllStale()
     }
     // 改了上限或超限处理：已有的超限提醒按新配置当场重算（调高上限后不再提醒，档位按新上限算），重写视图时就是新结果

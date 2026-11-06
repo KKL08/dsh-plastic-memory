@@ -56,12 +56,15 @@ function env(opts: { llm?: SemanticLlm } = {}) {
   const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
   const cache = sidecar.scanCache
   const views = new ViewWriter({ memoryRoot: root, collect: () => collectGlobalViews({ store, decisions, cache, ignores, registry, memoryRoot: root, now: () => NOW }), now: () => NOW, sleep: async () => {} })
-  const resolveContext = async () => ({ workspacePath: WS, delegationDepth: 0, session: { id: 'sess-1' } })
-  const getLlm = () => opts.llm ?? null
+  const host = {
+    contextOf: async () => ({ workspacePath: WS, delegationDepth: 0, session: { id: 'sess-1' } }),
+    llmOf: () => opts.llm ?? null,
+    baselineOf: () => null,
+  }
   const command = createMemoryCommand({
     memoryRoot: root, store, decisions, snapshots, cache, checkups: new CheckupRecordStore(sidecar.checkups), autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups), ignores, registry, views,
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),
-    resolveContext, getLlm, getBaseline: () => null, now: () => NOW,
+    host, now: () => NOW,
   })
   /** 按宿主 parseCommand 的切法：命令名之后的原文交给处理器。 */
   const runRaw = async (rawInput: string): Promise<MemoryCommandResult> =>
@@ -70,10 +73,10 @@ function env(opts: { llm?: SemanticLlm } = {}) {
   const readView = async (name: keyof typeof GUI_VIEW_FILES) => JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES[name]), 'utf8')) as unknown
   const pending = async () => pendingViewSchema.parse(await readView('pending'))
   const health = async () => healthViewSchema.parse(await readView('health'))
-  const toolDeps = { store, registry, decisions, cache, ignores, resolveContext, now: () => NOW }
+  const toolDeps = { store, registry, decisions, cache, ignores, host, now: () => NOW }
   const healthTool = (scope?: string) => executeHealth(scope === undefined ? {} : { scope }, { ...toolDeps, thresholds: resolveHealthThresholds('normal') }, fakeExec())
   const scanTool = (args: { scope?: string; layers?: 'rule' | 'full' } = {}) =>
-    executeScan({ layers: 'rule', ...args }, { ...toolDeps, getBaseline: () => null, getLlm }, fakeExec())
+    executeScan({ layers: 'rule', ...args }, toolDeps, fakeExec())
   /** 照界面的做法点「忽略」：从待处理视图里那张卡带上每条记忆的层和卡片版本。 */
   const ignore = async (type: IgnorableAdviceType, ids: readonly string[]) => {
     const key = [...ids].sort().join(',')

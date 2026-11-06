@@ -152,7 +152,7 @@ describe('jieba 档：懒加载与单例（注入加载器）', () => {
     await store.put(record({ id: 'mem_host', content: '宿主插件页的配置表单 readScope' }))
     const deps: SearchToolDeps = {
       store, registry,
-      resolveContext: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }),
+      host: { contextOf: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }) },
     }
 
     const latin = await executeSearch({ query: 'readScope' }, fakeExec(), deps)
@@ -171,7 +171,7 @@ describe('jieba 档：懒加载与单例（注入加载器）', () => {
     resetJieba(loader)
     const session = (id: string, workspacePath?: string): SearchToolDeps => {
       const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
-      return { store, registry, resolveContext: async () => ({ workspacePath, session: { id, lastSeq: 1 } }) }
+      return { store, registry, host: { contextOf: async () => ({ workspacePath, session: { id, lastSeq: 1 } }) }}
     }
     const sessions = [session('s-a'), session('s-b', '/home/dev/proj-a'), session('s-c', '/home/dev/proj-b')]
     for (const deps of sessions) await deps.store.put(record({ id: 'mem_host', content: '宿主插件页的配置表单' }))

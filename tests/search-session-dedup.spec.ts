@@ -20,7 +20,7 @@ function setup(opts: { budget?: number; overflow?: OverflowMode } = {}) {
   /** handle 是宿主的 session 对象；不给表示拿不到 session（如 exec 上没有 agent）。 */
   const deps = (handle?: object): SearchToolDeps => ({
     store, registry, sessionRecall: cache,
-    resolveContext: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1, ...(handle ? { handle } : {}) } }),
+    host: { contextOf: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1, ...(handle ? { handle } : {}) } }) },
   })
   const search = (query: string, handle?: object) => executeSearch({ query }, fakeExec(), deps(handle))
   /** 模拟宿主首轮组装：workspace 解析落定后冻结快照。 */

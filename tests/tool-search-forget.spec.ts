@@ -40,7 +40,7 @@ function makeSearchDeps(store: MemoryStore): SearchToolDeps {
   return {
     store,
     registry,
-    resolveContext: async () => ({ workspacePath: '/proj', session }),
+    host: { contextOf: async () => ({ workspacePath: '/proj', session }) },
   }
 }
 

@@ -42,12 +42,14 @@ const projections = (states: Record<string, unknown>) => ({
 })
 const throwing = () => { throw new Error('boom') }
 
-describe('PA-28 宿主服务缺席、未注册、调用抛错时各自退化，同一会话同一原因只警告一次', () => {
+describe('PA-28 宿主服务缺席、未注册、调用抛错时各自退化，同一会话同一类退化只警告一次', () => {
   const turnAnchorCases: Array<[string, Record<string, unknown>, string]> = [
     ['服务缺席', {}, 'service is absent'],
     ['投影未注册', { sessionProjections: projections({}) }, 'not registered'],
     ['查找抛错', { sessionProjections: throwing }, 'threw'],
-    ['读取抛错', { sessionProjections: projections({ turnBoundary: throwing }) }, 'threw'],
+    ['读取抛错', { sessionProjections: projections({ turnBoundary: throwing }) }, 'threw: Error: boom'],
+    ['没有开着的轮', { sessionProjections: projections({ turnBoundary: { openTurnStartSeq: null } }) }, 'no open turn'],
+    ['投影缺字段', { sessionProjections: projections({ turnBoundary: {} }) }, 'undefined'],
   ]
   it.each(turnAnchorCases)('证据锚读不到 turnBoundary（%s）：起点为 0，每个会话警告一次', async (_label, services, reason) => {
     const { host, warnings } = boot(services)
@@ -61,9 +63,11 @@ describe('PA-28 宿主服务缺席、未注册、调用抛错时各自退化，�
     expect(warnings).toHaveLength(2)
   })
 
-  it('证据锚读得到：起点取投影的 openTurnStartSeq，不警告', async () => {
-    const { host, warnings } = boot({ sessionProjections: projections({ turnBoundary: { openTurnStartSeq: 7 } }) })
-    expect((await host.contextOf(execOf(session('sess-a')))).session.turnStartSeq).toBe(7)
+  it('证据锚读得到：起点取投影的 openTurnStartSeq，终点是 seq - 1，不警告', async () => {
+    const { host, warnings } = boot({ sessionProjections: projections({ turnBoundary: { openTurnStartSeq: 3 } }) })
+    const at = (seq: number) => ({ header: { id: 'sess-a' }, seq }) as unknown as Session
+    expect((await host.contextOf(execOf(at(7)))).session).toMatchObject({ turnStartSeq: 3, lastSeq: 6 })
+    expect((await host.contextOf(execOf(at(0)))).session.lastSeq).toBe(0)
     expect(warnings).toEqual([])
   })
 
@@ -81,6 +85,16 @@ describe('PA-28 宿主服务缺席、未注册、调用抛错时各自退化，�
     expect(modeWarnings).toHaveLength(1)
     expect(modeWarnings[0]).toContain('sess-child')
     expect(modeWarnings[0]).toContain(reason)
+    expect(modeWarnings[0]).toContain('one-shot')
+  })
+
+  it('子会话 mode 读得到（可续、一次性、空状态）：照读，不警告', () => {
+    const child = session('sess-child', { delegationDepth: 1, parentSession: 'sess-main' })
+    for (const [state, mode] of [[{ identity: { mode: 'continuable' } }, 'continuable'], [{ identity: { mode: 'one-shot' } }, 'one-shot'], [{}, 'one-shot']] as const) {
+      const { host, warnings } = boot({ sessionProjections: projections({ subagent: state }) })
+      expect(host.modeOf(child)).toBe(mode)
+      expect(warnings).toEqual([])
+    }
   })
 
   it('同一会话不同原因各警告一次：证据锚与 mode 互不吞掉', async () => {
@@ -99,12 +113,27 @@ describe('PA-28 宿主服务缺席、未注册、调用抛错时各自退化，�
     expect(broken.host.baselineOf(execOf(s))).toBeNull()
     expect(broken.warnings).toHaveLength(1)
     expect(broken.warnings[0]).toContain('plasticMemoryBaseline')
+    expect(broken.warnings[0]).toContain('sess-a')
+    expect(broken.warnings[0]).toContain('boom')
     for (const services of [{}, { sessionProjections: throwing }, { sessionProjections: projections({}) }]) {
       const quiet = boot(services)
       expect(quiet.host.baselineOf(execOf(s))).toBeNull()
       expect(quiet.warnings).toEqual([])
     }
     expect(boot().host.baselineOf(execOf())).toBeNull()
+  })
+
+  it('基线：取当前生效的正文；状态里的形状漂移每个会话每个 seq 只警告一次', () => {
+    const state = { entries: [{ text: '用 pnpm', scopes: ['.'] }], baselineScopes: ['.'], drift: [{ seq: 0, kind: 'no-changes' }] }
+    const { host, warnings } = boot({ sessionProjections: projections({ plasticMemoryBaseline: state }) })
+    const a = session('sess-a')
+    expect(host.baselineOf(execOf(a))).toEqual(['用 pnpm'])
+    expect(host.baselineOf(execOf(a))).toEqual(['用 pnpm'])
+    expect(warnings).toEqual(['agent-instructions message at seq 0 carries no changes array; keeping its text without scope tracking'])
+    host.baselineOf(execOf(session('sess-b')))
+    expect(warnings).toHaveLength(2)
+    const empty = boot({ sessionProjections: projections({ plasticMemoryBaseline: { entries: [], baselineScopes: [], drift: [] } }) })
+    expect(empty.host.baselineOf(execOf(a))).toBeNull()
   })
 
   it('更早的轮：读不到（缺席、抛错）按没有；lastTurn 大于 1 才算', () => {
@@ -174,21 +203,42 @@ describe('PA-29 子 agent 的保存上下文沿父链解析到根会话；父链
     expect(query.asked).toEqual([])
   })
 
-  it('父链读不到（服务缺席、查无此会话、查询抛错）：根会话留空，其余照常', async () => {
-    const child = session('sess-child', { delegationDepth: 1, parentSession: 'sess-main' })
+  it('任一跳读不到（服务缺席、查无此会话、第二跳断、查询抛错、宿主没有 filterSessions）：根会话留空，其余照常', async () => {
+    const child = session('sess-d2', { delegationDepth: 2, parentSession: 'sess-d1' })
     const broken = { async filterSessions() { throw new Error('boom') } }
-    for (const sessionQuery of [undefined, fakeQuery([]), broken, throwing]) {
+    const secondHopGone = fakeQuery([{ id: 'sess-d1', delegationDepth: 1, parentSession: 'sess-gone' }])
+    for (const sessionQuery of [undefined, fakeQuery([]), secondHopGone, broken, throwing, { readEvent: async () => ({ events: [] }) }]) {
       const { host } = boot({ sessionProjections: continuable, sessionQuery })
       const context = await host.saveContextOf(execOf(child))
-      expect(context.delegation).toEqual({ depth: 1, parentSessionId: 'sess-main', mode: 'continuable' })
+      expect(context.delegation).toEqual({ depth: 2, parentSessionId: 'sess-d1', mode: 'continuable' })
     }
   })
 
-  it('主会话、用户 fork 的会话（深度 0 带 parentSession）不带委派，不读父链', async () => {
-    const query = fakeQuery([{ id: 'sess-main' }])
+  it('用户 fork 出来的主会话是它自己那棵树的根，不再往上走', async () => {
+    const query = fakeQuery([{ id: 'sess-orig' }, { id: 'sess-fork', parentSession: 'sess-orig' }])
     const { host } = boot({ sessionProjections: continuable, sessionQuery: query })
+    const child = session('sess-child', { delegationDepth: 1, parentSession: 'sess-fork' })
+    expect((await host.saveContextOf(execOf(child))).delegation).toMatchObject({ parentSessionId: 'sess-fork', rootSessionId: 'sess-fork' })
+    expect(query.asked).toEqual(['sess-fork'])
+  })
+
+  it('最多走「深度」跳：父链深度不降（宿主数据异常）时停下，根会话留空', async () => {
+    const query = fakeQuery([
+      { id: 'sess-p', delegationDepth: 1, parentSession: 'sess-q' },
+      { id: 'sess-q', delegationDepth: 1, parentSession: 'sess-p' },
+    ])
+    const { host } = boot({ sessionProjections: continuable, sessionQuery: query })
+    const child = session('sess-child', { delegationDepth: 1, parentSession: 'sess-p' })
+    expect((await host.saveContextOf(execOf(child))).delegation).not.toHaveProperty('rootSessionId')
+    expect(query.asked).toEqual(['sess-p'])
+  })
+
+  it('主会话、用户 fork 的会话（深度 0 带 parentSession）不带委派，不读父链，也不读 subagent 投影', async () => {
+    const query = fakeQuery([{ id: 'sess-main' }])
+    const { host, warnings } = boot({ sessionProjections: projections({ turnBoundary: { openTurnStartSeq: 0 } }), sessionQuery: query })
     expect((await host.saveContextOf(execOf(session('sess-fork', { parentSession: 'sess-main' })))).delegation).toBeUndefined()
     expect(query.asked).toEqual([])
+    expect(warnings).toEqual([])
   })
 
   it('持久型子会话自己的会话 id：深度 ≥ 1 且可续才有', () => {

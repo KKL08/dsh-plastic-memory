@@ -18,7 +18,7 @@ import type { MemoryCommandDefinition } from '../src/gui/commands.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { record } from './helpers/record.ts'
 
-// 权限面（spec「权限面」表逐行）：经 apply() 的完整注册包装（registerWrite、只读门、resolveContext）调用每个工具，
+// 权限面（spec「权限面」表逐行）：经 apply() 的完整注册包装（registerWrite、只读门、宿主会话适配器）调用每个工具，
 // 在进程边界与存储入口打观察点：模型调用（宿主 llm.stream）、sessionQuery.readEvent / filterSessions、记录表的写入口
 // （FileTable 的 create / put / update / delete）、待决账本与快照的写方法、node:fs 的写调用（按路径看 global 目录、语义缓存）。
 // 观察点只记录、照常透传。「必须不发生」只断言业务层；框架旁路写（召回统计、目录维护、超限账本、会话视图、归属对照）不断言。

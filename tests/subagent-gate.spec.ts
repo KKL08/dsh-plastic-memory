@@ -192,7 +192,7 @@ describe('子 agent 只读门', () => {
 
     const search = await h.call('memory_search', { query: 'zebra' }, 1) as { hits: Array<{ id: string }> }
     expect(search.hits.map(x => x.id)).toEqual([id])
-    // source 不经只读门；出处在主会话的记录由溯源自己的会话限制拒绝（委派信息经注册处的 resolveContext 带到）
+    // source 不经只读门；出处在主会话的记录由溯源自己的会话限制拒绝（委派信息经宿主会话适配器带到）
     expect(await h.call('memory_source', { memoryId: id }, 1)).toMatchObject({ kind: 'rejected', code: 'subagent-restricted', memoryId: id })
     expect(await h.call('memory_source', { memoryId: id })).toMatchObject({ kind: 'ok', memoryId: id })
     expect(await h.call('memory_health', {}, 1)).not.toMatchObject({ code: SUBAGENT_READONLY })

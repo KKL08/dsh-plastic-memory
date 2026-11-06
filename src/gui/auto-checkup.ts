@@ -1,6 +1,7 @@
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryLogger } from '../store.ts'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
+import type { HostSession } from '../tools/host-session.ts'
 import { scopeKey, type Scope } from '../scope.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import { executeScan, type ScanToolDeps, type ScanToolResult } from '../tools/scan.ts'
@@ -80,7 +81,7 @@ export async function holdCheckups(checkups: Pick<CheckupRecordStore, 'claim'>, 
 
 export interface AutoCheckupSchedulerDeps {
   /** 体检执行器里和会话无关的依赖；模型、基线、所属项目由调度器按无会话给。 */
-  scan: Omit<ScanToolDeps, 'getLlm' | 'getBaseline' | 'resolveContext' | 'now' | 'checkups'>
+  scan: Omit<ScanToolDeps, 'host' | 'now' | 'checkups'>
   /** 体检记录表：开跑前按范围认领，体检做完由执行器写完成记录、再记最近一次结果；没做完记失败，模型用不了记原因。 */
   checkups: Pick<CheckupRecordStore, 'list' | 'complete' | 'claim' | 'recordFailure' | 'recordModelUnavailable' | 'recordResults'>
   /** 收集此刻的待处理（全部作用域）：体检前后各收集一次，比出这次的新增。 */
@@ -88,7 +89,7 @@ export interface AutoCheckupSchedulerDeps {
   /** 每个范围此刻的情况（体检视图的内容：有效频率、是否到期，全局在前、项目按路径排序）。每次检查现读，别的进程改的设置也能读到。 */
   status: () => Promise<CheckupView>
   /** 宿主当前的默认模型；拿不到为 null（这次不跑）。每次开跑现读，不缓存。 */
-  getDefaultLlm: () => SemanticLlm | null
+  host: Pick<HostSession, 'defaultLlm'>
   /** 体检开关（用时读配置）：关着时不跑。 */
   isGovernanceEnabled: () => boolean
   timer: AutoCheckupTimer
@@ -193,7 +194,7 @@ export class AutoCheckupScheduler {
     for (const [i, { scope }] of due.entries()) {
       if (this.isDisposed || !this.deps.isGovernanceEnabled()) return
       // 每次开跑现读默认模型：用户在两次之间换了模型就用新的
-      const llm = this.deps.getDefaultLlm()
+      const llm = this.deps.host.defaultLlm()
       const outcome = llm === null
         ? { modelUnavailable: { kind: 'no-default-model' as const } }
         : await this.run(scope, llm)
@@ -237,9 +238,8 @@ export class AutoCheckupScheduler {
         {
           ...this.deps.scan,
           checkups: this.deps.checkups,
-          getLlm: () => llm,
-          getBaseline: () => null,
-          resolveContext: async () => ({ workspacePath: undefined }),
+          // 无会话：模型已在开跑前取好，没有基线，也没有「当前项目」
+          host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: () => llm, baselineOf: () => null },
           now: this.deps.now,
         },
         { signal: controller.signal } as ToolRunContext,

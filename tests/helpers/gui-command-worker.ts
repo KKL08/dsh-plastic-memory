@@ -49,8 +49,8 @@ const command = createMemoryCommand({
   memoryRoot: root, store, decisions, snapshots: new SnapshotStore(sidecar.snapshots), cache,
   checkups: new CheckupRecordStore(sidecar.checkups), autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups), ignores, registry, views,
   agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),
-  resolveContext: async () => ({ workspacePath, delegationDepth: 0, session: { id: `s-${tag}` } }),
-  getLlm: () => null, getBaseline: () => null, now,
+  host: { contextOf: async () => ({ workspacePath, delegationDepth: 0, session: { id: `s-${tag}` } }), llmOf: () => null, baselineOf: () => null },
+  now,
 })
 
 type Command =

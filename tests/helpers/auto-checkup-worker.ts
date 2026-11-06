@@ -86,7 +86,7 @@ const scheduler = new AutoCheckupScheduler({
   checkups,
   collectPending: async () => (await collectGlobalViews({ store, decisions, cache: sidecar.scanCache, ignores, checkups, registry, memoryRoot: root, now: () => clock.now })).pending,
   status: () => collectCheckupView(source),
-  getDefaultLlm: () => hostSemanticLlm(llm, { provider: 'deepseek', model: 'deepseek-v4-flash' }),
+  host: { defaultLlm: () => hostSemanticLlm(llm, { provider: 'deepseek', model: 'deepseek-v4-flash' }) },
   isGovernanceEnabled: () => true,
   timer,
   onChecked: () => writer.requestCheckups(),

@@ -49,7 +49,7 @@ async function run(cmd: Command): Promise<unknown> {
     case 'forget':
       return executeForget({ ids: cmd.ids, reason: cmd.reason }, { workspacePath }, { store, snapshots, decisions, log })
     case 'search':
-      return executeSearch({ query: cmd.query }, fakeExec(), { store, registry, resolveContext: async () => ({ workspacePath, session }) })
+      return executeSearch({ query: cmd.query }, fakeExec(), { store, registry, host: { contextOf: async () => ({ workspacePath, session }) } })
     case 'restore':
       return executeSnapshotTool({ action: 'restore', snapshotId: cmd.snapshotId }, { workspacePath }, { store, snapshots })
   }
