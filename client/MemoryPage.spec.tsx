@@ -263,6 +263,23 @@ describe('视图切换与按范围筛选', () => {
     expect(nav.get().view).toBe('deleted')
   })
 
+  it('视图切换：右键到头绕回第一个、左键绕回最后一个，Home / End 到首尾，焦点跟着走', () => {
+    const { nav } = open()
+    tab(/^处理/).focus()
+    fireEvent.keyDown(tab(/^处理/), { key: 'End' })
+    expect(nav.get().view).toBe('deleted')
+    expect(tab(/^最近删除/)).toHaveFocus()
+    fireEvent.keyDown(tab(/^最近删除/), { key: 'ArrowRight' })
+    expect(nav.get().view).toBe('todo')
+    expect(tab(/^处理/)).toHaveFocus()
+    fireEvent.keyDown(tab(/^处理/), { key: 'ArrowLeft' })
+    expect(nav.get().view).toBe('deleted')
+    expect(tab(/^最近删除/)).toHaveFocus()
+    fireEvent.keyDown(tab(/^最近删除/), { key: 'Home' })
+    expect(nav.get().view).toBe('todo')
+    expect(tab(/^处理/)).toHaveFocus()
+  })
+
   it('入口直达：先写目标再切面板，页面跟着目标走', () => {
     const nav = createNavStore()
     const order: string[] = []

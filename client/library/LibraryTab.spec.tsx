@@ -467,6 +467,8 @@ describe('全部记忆', () => {
       })
       renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
       await pressRemove(A1)
+      // 确认组打开时焦点在「取消」上
+      await waitFor(() => { expect(screen.getByRole('button', { name: '取消' })).toHaveFocus() })
       await press(screen.getByRole('button', { name: '取消' }))
       await waitFor(() => { expect(delOf(A1)).toHaveFocus() })
 

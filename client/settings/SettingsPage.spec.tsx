@@ -144,6 +144,18 @@ describe('保存：revision 冻结、冲突、非法值', () => {
     expect(save()).toBeEnabled()
   })
 
+  it('确认弹窗打开时焦点在弹层的「关闭」上，Esc 关闭后焦点回到「保存」，不提交', async () => {
+    const { form } = setup()
+    fireEvent.click(radio('办公'))
+    save().focus()
+    fireEvent.click(save())
+    await waitFor(() => { expect(within(confirmDialog()).getByRole('button', { name: '关闭' })).toHaveFocus() })
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    await waitFor(() => { expect(save()).toHaveFocus() })
+    expect(form.calls).toHaveLength(0)
+  })
+
   it('没有改动时保存置灰；多项改动一次 mutate，带开始编辑时的 revision；保存后回到干净状态', async () => {
     const { form } = setup()
     expect(save()).toBeDisabled()
