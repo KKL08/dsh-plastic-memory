@@ -140,9 +140,8 @@ export const conflictRulingCss = `
 .pm-conflict-body { display: flex; flex-direction: column; gap: 10px; flex: 1; min-width: 0; }
 .pm-conflict-missing { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-ab {
-  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
-  width: 18px; height: 18px; margin-top: 2px; border-radius: 999px; border: 1px solid var(--pm-text);
-  font-size: 11px; font-weight: 600; line-height: 1; color: var(--pm-text);
+  flex-shrink: 0; min-width: 10px;
+  font-size: 13px; font-weight: 600; line-height: 22px; color: var(--pm-text-2);
 }
 .pm-conflict--wide .pm-conflict-side { padding: 12px 14px; border: .5px solid var(--pm-line-card); border-radius: var(--dsw-radius-lg, 16px); }
 /* A / B 改成上下排：记忆页窄屏（pm-page 720px 以下），或主区（pm-main，不含左栏）内容宽 640px 以下 */

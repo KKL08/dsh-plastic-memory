@@ -9,13 +9,13 @@ import { useT } from '../i18n.tsx'
 import { Chip } from './Chip.tsx'
 import { Icon } from './Icon.tsx'
 
-/** 灯泡：宿主图标集里没有，按同一规格画（16 栅格、1px 描边、currentColor）。 */
+/** 灯泡：宿主图标集里没有，按同一规格画（16 栅格、1px 描边、currentColor，描边不随缩放，同 Icon）。 */
 function BulbIcon() {
   return (
     <svg width={15} height={15} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1} strokeLinecap="square" aria-hidden="true">
-      <path d="M6.2 10.8V10.3C4.7 9.5 3.6 8 3.6 6.3C3.6 3.9 5.6 2 8 2C10.4 2 12.4 3.9 12.4 6.3C12.4 8 11.3 9.5 9.8 10.3V10.8" />
-      <path d="M6.2 12.3H9.8" />
-      <path d="M6.9 14.1H9.1" />
+      <path d="M6.2 10.8V10.3C4.7 9.5 3.6 8 3.6 6.3C3.6 3.9 5.6 2 8 2C10.4 2 12.4 3.9 12.4 6.3C12.4 8 11.3 9.5 9.8 10.3V10.8" vectorEffect="non-scaling-stroke" />
+      <path d="M6.2 12.3H9.8" vectorEffect="non-scaling-stroke" />
+      <path d="M6.9 14.1H9.1" vectorEffect="non-scaling-stroke" />
     </svg>
   )
 }
@@ -24,7 +24,7 @@ export function AdviceNote({ label = 'advice', children }: { label?: 'advice' | 
   const t = useT()
   return (
     <div className="pm-advice">
-      {label === 'note' ? <Icon name="info" size={15} /> : <BulbIcon />}
+      {label === 'note' ? <Icon name="info" size={14} /> : <BulbIcon />}
       <span className="pm-advice-label">{t(label === 'note' ? 'advice.label.note' : 'advice.label')}</span>
       <p className="pm-advice-text">{children}</p>
     </div>
