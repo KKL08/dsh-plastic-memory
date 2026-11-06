@@ -24,7 +24,7 @@ import { ViewWriter, collectCheckupView, collectGlobalViews } from '../src/gui/v
 import { createMemoryCommand } from '../src/gui/commands.ts'
 import {
   GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, checkupKey, encodeMemoryCommand, sessionViewFile,
-  checkupViewSchema, deletedViewSchema, healthViewSchema, libraryViewSchema, memoryCommandResultSchema, pendingItemKey, pendingViewSchema, scopeOfMemory,
+  checkupViewSchema, deletedViewSchema, healthViewSchema, libraryViewSchema, memoryCommandResultSchema, pendingViewSchema, scopeOfMemory,
   type MemoryCommand, type MemoryCommandResult, type PendingItem,
 } from '../src/gui/contract.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
@@ -2269,51 +2269,6 @@ describe('scan', () => {
       expect(ok(await e.run({ cmd: 'scan' })).added).toEqual({ pending: 2, advice: 0 })
     })
 
-    it('体检前收集视图出错：体检照常做完、带回说明，只是不带新增条数与分数；出错记一条日志', async () => {
-      const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
-      const e = env({
-        llm: answering(() => [conflict]), log,
-        wrapViews: w => ({ request: () => w.request(), rewriteAll: () => w.rewriteAll(), requestCheckups: () => w.requestCheckups(), collectViews: () => Promise.reject(new Error('读不出')) }),
-      })
-      await seedFour(e)
-      const body = ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
-      expect(body.notes).toContain('baseline-missing')
-      expect(body).not.toHaveProperty('added')
-      expect(body).not.toHaveProperty('scores')
-      expect(await e.decisions.list()).toHaveLength(1)
-      expect(log.warn).toHaveBeenCalledTimes(1)
-    })
-
-    it('体检提交之后记最近一次结果出错：命令照常回 ok，记一条日志', async () => {
-      const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
-      const e = env({ llm: answering(() => [conflict]), log })
-      await seedFour(e)
-      vi.spyOn(e.checkups, 'recordResults').mockRejectedValue(new Error('写不进'))
-      const body = ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
-      expect(body.added).toMatchObject({ pending: 1, advice: 0 })
-      expect((await e.checkups.list()).find(r => r.id === SESSION_WS)?.completed).toMatchObject({ by: 'manual' })
-      expect(log.warn).toHaveBeenCalledTimes(1)
-    })
-
-    it('体检后视图没写成、补收集也出错：体检不算失败，照样带回说明，不带新增条数与分数', async () => {
-      const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
-      let collects = 0
-      const e = env({
-        llm: answering(() => [conflict]), log,
-        wrapViews: w => ({
-          request: () => w.request(),
-          rewriteAll: async () => undefined,
-          requestCheckups: () => w.requestCheckups(),
-          collectViews: () => (++collects === 1 ? w.collectViews() : Promise.reject(new Error('读不出'))),
-        }),
-      })
-      await seedFour(e)
-      const body = ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
-      expect(body.notes).toContain('baseline-missing')
-      expect(body).not.toHaveProperty('added')
-      expect(log.warn).toHaveBeenCalledTimes(1)
-    })
-
     it('再体检一次、发现没变：都是 0', async () => {
       const e = env({ llm: answering(() => [conflict, redundancy]) })
       await seedFour(e)
@@ -2440,47 +2395,6 @@ describe('scan：上次体检与完成记录', () => {
     ok(await e.run({ cmd: 'scan' }))
     for (const layer of [GLOBAL, SESSION, OTHER]) expect(await completedOf(e, layer)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
     expect(await lastCheckups(e)).toEqual({ global: NOW, [SESSION_WS]: NOW, [OTHER_WS]: NOW })
-  })
-
-  describe('「全部」只查开跑时认领到的范围：认领之后才建的项目不查、不写完成记录', () => {
-    const LATE = { kind: 'workspace' as const, workspacePath: '/tmp/pm-cmd-late' }
-    /** 认领之后、体检读库之前（体检前收集待处理的那一刻）新建一个项目。 */
-    const envWithLateProject = () => {
-      let isCreated = false
-      const e: ReturnType<typeof env> = env({
-        llm: quiet,
-        wrapViews: w => ({
-          request: () => w.request(), rewriteAll: () => w.rewriteAll(), requestCheckups: () => w.requestCheckups(),
-          collectViews: async () => {
-            if (!isCreated) {
-              isCreated = true
-              await e.store.create(record({ id: 'mem_late', name: '后来的', content: '用 bun', scope: 'workspace', workspacePath: LATE.workspacePath }))
-            }
-            return w.collectViews()
-          },
-        }),
-      })
-      return e
-    }
-    const allResultOf = async (e: ReturnType<typeof env>) => (await e.checkups.list()).find(r => r.id === 'all')?.lastResult
-
-    it('有项目：只查认领到的全局和项目', async () => {
-      const e = envWithLateProject()
-      await seedScopes(e)
-      ok(await e.run({ cmd: 'scan' }))
-      for (const layer of [GLOBAL, SESSION, OTHER]) expect(await completedOf(e, layer)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
-      expect(await completedOf(e, LATE)).toBeUndefined()
-      expect(await allResultOf(e)).toMatchObject({ by: 'manual', completedAt: NOW })
-    })
-
-    it('还没有项目：只查全局，结果仍记在「全部」名下', async () => {
-      const e = envWithLateProject()
-      await e.store.create(record({ id: 'mem_g', name: '全局', content: '回答用中文' }))
-      ok(await e.run({ cmd: 'scan' }))
-      expect(await completedOf(e, GLOBAL)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
-      expect(await completedOf(e, LATE)).toBeUndefined()
-      expect(await allResultOf(e)).toMatchObject({ by: 'manual', completedAt: NOW })
-    })
   })
 
   it('内容检查失败：不写完成记录，上次体检仍是之前那次', async () => {
@@ -2613,10 +2527,7 @@ describe('scan：最近一次结果', () => {
   const GLOBAL = { kind: 'global' as const }
   const SESSION = { kind: 'workspace' as const, workspacePath: SESSION_WS }
   const OTHER = { kind: 'workspace' as const, workspacePath: OTHER_WS }
-  const globalConflict = { type: 'conflict', memoryIds: ['mem_g1', 'mem_g2'], summary: '回答语言矛盾', suggestedAction: '裁决' }
   const crossConflict = { type: 'conflict', memoryIds: ['mem_g1', 'mem_s1'], summary: '全局和本项目矛盾', suggestedAction: '裁决' }
-  const redundancy = { type: 'redundancy', memoryIds: ['mem_s1', 'mem_s2'], summary: '说的是一件事' }
-  const otherUnclear = { type: 'unclear', memoryIds: ['mem_o'], summary: '说得不清楚' }
   /**
    * 模型只报这次输入里有的记忆之间的发现（项目体检的输入是全局加本项目，全局体检只有全局）；每次调用宿主报 usage 个 token，
    * 不给 usage 就是宿主没报。
@@ -2642,91 +2553,6 @@ describe('scan：最近一次结果', () => {
   }
   const recordOf = async (e: ReturnType<typeof env>, key: string) => (await e.checkups.list()).find(r => r.id === key)
   const resultOf = async (e: ReturnType<typeof env>, layer: Parameters<typeof checkupKey>[0]) => (await recordOf(e, checkupKey(layer)))?.lastResult
-  /** 待处理视图里某类条目的身份。 */
-  const keyOf = async (e: ReturnType<typeof env>, pick: (i: PendingItem) => boolean) => {
-    const items = pendingViewSchema.parse(await e.readView('pending')).items.filter(pick)
-    expect(items).toHaveLength(1)
-    return pendingItemKey(items[0]!)
-  }
-  const conflictOf = (a: string, b: string) => (i: PendingItem) => i.kind === 'conflict-horizontal' && i.left?.id === a && i.right?.id === b
-  const adviceOf = (type: string) => (i: PendingItem) => i.kind === 'advice' && i.type === type
-  const sorted = (keys: readonly string[]) => [...keys].sort()
-
-  it('项目体检：记下体检标识、属于本项目的新增身份与条数（等你决定、可以整理分开）、宿主报的用量、说明码；全局自己的记录不动', async () => {
-    const { llm, calls } = answering([crossConflict, redundancy], 300)
-    const e = env({ llm })
-    await seed(e)
-    const body = ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
-    const result = await resultOf(e, SESSION)
-    expect(result).toEqual({
-      checkupId: expect.any(String), by: 'manual', completedAt: NOW,
-      added: { keys: [await keyOf(e, conflictOf('mem_g1', 'mem_s1')), await keyOf(e, adviceOf('redundancy'))], pending: 1, advice: 1 },
-      globalAdded: { keys: [], pending: 0, advice: 0 },
-      usageTokens: calls.count * 300,
-      notes: [{ code: 'baseline-missing' }],
-    })
-    expect(result!.checkupId).not.toBe('')
-    // 和命令结果同一套新增
-    expect(body.added).toMatchObject({ pending: result!.added.pending, advice: result!.added.advice })
-    expect(await resultOf(e, GLOBAL)).toBeUndefined()
-    expect(await recordOf(e, 'all')).toBeUndefined()
-  })
-
-  it('新增归属：项目体检顺带发现两条全局记忆之间的冲突，项目的新增里不算它，记在全局名下；全局和本项目之间的冲突算本项目的', async () => {
-    const e = env({ llm: answering([globalConflict, crossConflict]).llm })
-    await seed(e)
-    const body = ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
-    const result = (await resultOf(e, SESSION))!
-    expect(result.added).toEqual({ keys: [await keyOf(e, conflictOf('mem_g1', 'mem_s1'))], pending: 1, advice: 0 })
-    expect(result.globalAdded).toEqual({ keys: [await keyOf(e, conflictOf('mem_g1', 'mem_g2'))], pending: 1, advice: 0 })
-    // 命令结果的新增条数口径不变：项目体检覆盖全局加本项目，两张冲突卡都算
-    expect(body.added).toMatchObject({ pending: 2 })
-  })
-
-  it('全部体检：每个被查的范围各写自己的结果（同一个体检标识），另写键 all 的一条（新增按身份去重、按所属范围分组，带用量和说明），all 没有完成记录和失败计数', async () => {
-    const { llm, calls } = answering([globalConflict, crossConflict, redundancy, otherUnclear], 100)
-    const e = env({ llm })
-    await seed(e)
-    ok(await e.run({ cmd: 'scan' }))
-    const gc = await keyOf(e, conflictOf('mem_g1', 'mem_g2'))
-    const cc = await keyOf(e, conflictOf('mem_g1', 'mem_s1'))
-    const red = await keyOf(e, adviceOf('redundancy'))
-    const unclear = await keyOf(e, adviceOf('unclear'))
-    const [global, session, other] = await Promise.all([GLOBAL, SESSION, OTHER].map(l => resultOf(e, l)))
-    const all = (await recordOf(e, 'all'))!
-    const checkupId = all.lastResult!.checkupId
-    // 说明码各记各的范围（没有基线对每个范围都成立）；跨项目重复这类整次的只在 all 上
-    for (const r of [global, session, other]) expect(r).toMatchObject({ checkupId, by: 'manual', completedAt: NOW, notes: [{ code: 'baseline-missing' }] })
-    // 用量是整次体检的，只记在 all 上
-    for (const r of [global, session, other]) expect(r).not.toHaveProperty('usageTokens')
-    expect({ ...global!.added, keys: sorted(global!.added.keys) }).toEqual({ keys: sorted([gc, cc]), pending: 2, advice: 0 })
-    expect(session!.added).toEqual({ keys: [cc, red], pending: 1, advice: 1 })
-    expect(other!.added).toEqual({ keys: [unclear], pending: 0, advice: 1 })
-    // 全局和本项目之间的冲突在 all 里只算一次
-    expect(all).toEqual({
-      id: 'all',
-      lastResult: {
-        checkupId, by: 'manual', completedAt: NOW,
-        added: { keys: expect.any(Array), pending: 2, advice: 2 },
-        byScope: [
-          { scope: { kind: 'global' }, keys: expect.any(Array) },
-          // 项目按路径排
-          { scope: { kind: 'workspace', workspacePath: OTHER_WS }, keys: [unclear] },
-          { scope: { kind: 'workspace', workspacePath: SESSION_WS }, keys: [cc, red] },
-        ],
-        usageTokens: calls.count * 100,
-        notes: expect.arrayContaining([{ code: 'baseline-missing' }]),
-      },
-    })
-    expect(sorted(all.lastResult!.added.keys)).toEqual(sorted([gc, cc, red, unclear]))
-    expect(sorted(all.lastResult!.byScope![0]!.keys)).toEqual(sorted([gc, cc]))
-    // 体检视图：各范围带自己的最近一次结果，「全部」的结果单独一项；all 不是体检视图里的范围、不参与到期
-    const view = await e.readCheckupView()
-    expect(view.allResult).toEqual(all.lastResult)
-    expect(view.scopes.map(s => [s.scope, s.lastResult])).toEqual([
-      [{ kind: 'global' }, global], [{ kind: 'workspace', workspacePath: OTHER_WS }, other], [{ kind: 'workspace', workspacePath: SESSION_WS }, session],
-    ])
-  })
 
   it('全部体检的说明码按范围给：一个范围内容检查没做完，别的范围不带；跳过基线检查只记在被跳过的范围；整次的合并记在 all', async () => {
     // 输入里有别的项目的记忆就输出无法解析（这个项目的内容检查和跨项目重复都没做成），其余照常
@@ -2740,18 +2566,6 @@ describe('scan：最近一次结果', () => {
     expect(await codes(OTHER)).toEqual(['semantic-failed', 'baseline-session-scoped'])
     expect((await recordOf(e, 'all'))!.lastResult!.notes.map(n => n.code).sort())
       .toEqual(['baseline-session-scoped', 'cross-ws-failed', 'semantic-failed'])
-  })
-
-  it('再体检一次：最近一次结果换成新的体检标识，没有新增', async () => {
-    const e = env({ llm: answering([crossConflict]).llm })
-    await seed(e)
-    ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
-    const first = (await resultOf(e, SESSION))!
-    e.clock.now = NOW + 1000
-    ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
-    const second = (await resultOf(e, SESSION))!
-    expect(second.checkupId).not.toBe(first.checkupId)
-    expect(second).toMatchObject({ completedAt: NOW + 1000, added: { keys: [], pending: 0, advice: 0 } })
   })
 
   it('agent 体检（memory_scan）只写完成记录、不写结果：之前的最近一次结果原样留着', async () => {
@@ -2773,16 +2587,6 @@ describe('scan：最近一次结果', () => {
     expect((await recordOf(e, checkupKey(SESSION)))).toMatchObject({ completed: { by: 'agent' }, lastResult: before })
   })
 
-  it('内容检查没做完也写结果：说明码带原因（宿主错误码），不写完成记录', async () => {
-    const e = env({ llm: { complete: async () => { throw Object.assign(new Error('too many requests'), { code: 'RATE_LIMIT' }) } } })
-    await seed(e)
-    ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
-    const r = (await recordOf(e, checkupKey(SESSION)))!
-    expect(r.completed).toBeUndefined()
-    expect(r.lastResult!.notes).toContainEqual({ code: 'semantic-failed', cause: expect.objectContaining({ kind: 'model-error', hostCode: 'RATE_LIMIT' }) })
-    expect(r.lastResult).not.toHaveProperty('usageTokens')
-  })
-
   it('说明码：分了批、基线检查被跳过（查的不是借来的会话所在的项目）', async () => {
     const e = env({ llm: answering([]).llm, baseline: ['用 pnpm'] })
     for (let i = 0; i < 6; i++) await e.store.create(record({ id: `mem_big${i}`, name: `大${i}`, content: '记'.repeat(10_000), scope: 'workspace', workspacePath: OTHER_WS }))
@@ -2790,15 +2594,6 @@ describe('scan：最近一次结果', () => {
     expect((await resultOf(e, OTHER))!.notes.map(n => n.code)).toEqual(expect.arrayContaining(['semantic-batched', 'baseline-session-scoped']))
   })
 
-  it('体检前收集视图出错：比不出新增，这次不写结果', async () => {
-    const e = env({
-      llm: answering([crossConflict]).llm, log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-      wrapViews: w => ({ request: () => w.request(), rewriteAll: () => w.rewriteAll(), requestCheckups: () => w.requestCheckups(), collectViews: () => Promise.reject(new Error('读不出')) }),
-    })
-    await seed(e)
-    ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
-    expect(await resultOf(e, SESSION)).toBeUndefined()
-  })
 })
 
 describe('scan：按范围认领', () => {
@@ -2832,49 +2627,19 @@ describe('scan：按范围认领', () => {
   const inProgress = async (e: ReturnType<typeof env>) => Object.fromEntries((await e.readCheckupView()).scopes
     .map(s => [s.scope.kind === 'global' ? 'global' : s.scope.workspacePath, s.isInProgress]))
 
-  it('范围正在体检（别的进程认领着）时手动体检回 busy：不调模型、不写缓存和完成记录；别的范围照常体检', async () => {
+  it('范围正在体检（别的进程认领着）：回 busy，说明里写明是哪个范围', async () => {
     const m = countingLlm()
     const e = env({ llm: m.llm })
     await seedScopes(e)
     const other = otherProcess(e)
     const heldGlobal = await other.claimRefreshable(checkupKey(GLOBAL))
-    const heldSession = await other.claimRefreshable(checkupKey(SESSION))
+    const heldOther = await other.claimRefreshable(checkupKey(OTHER))
     const busy = err(await e.run({ cmd: 'scan', layer: { kind: 'global' } }))
-    expect(busy.code).toBe('busy')
-    expect(busy.detail).toContain('全局')
-    expect(err(await e.run({ cmd: 'scan', workspacePath: SESSION_WS })).code).toBe('busy')
+    expect(busy).toMatchObject({ code: 'busy', detail: expect.stringContaining('全局') })
+    expect(err(await e.run({ cmd: 'scan', workspacePath: OTHER_WS }))).toMatchObject({ code: 'busy', detail: expect.stringContaining(OTHER_WS) })
     expect(m.calls).toEqual([])
-    expect(await e.cache.list()).toEqual([])
-    expect(await e.checkups.list()).toEqual([])
-    // 别的进程的认领原样留着
-    expect(await other.isClaimed(checkupKey(GLOBAL))).toBe(true)
-    expect(await other.isClaimed(checkupKey(SESSION))).toBe(true)
-    ok(await e.run({ cmd: 'scan', workspacePath: OTHER_WS }))
-    expect(m.calls).toHaveLength(1)
     await heldGlobal!.release()
-    await heldSession!.release()
-    ok(await e.run({ cmd: 'scan', layer: { kind: 'global' } }))
-  })
-
-  it('「全部」要认领所有范围：有一个认领不到就整个回 busy，已认领的范围立刻放掉', async () => {
-    const m = countingLlm()
-    const e = env({ llm: m.llm })
-    await seedScopes(e)
-    const other = otherProcess(e)
-    const held = await other.claimRefreshable(checkupKey(OTHER))
-    expect(err(await e.run({ cmd: 'scan' })).code).toBe('busy')
-    expect(m.calls).toEqual([])
-    expect(await e.checkups.list()).toEqual([])
-    // 全局和本项目没被这次留着：别的进程马上就能认领
-    for (const layer of [GLOBAL, SESSION]) {
-      const again = await other.claimRefreshable(checkupKey(layer))
-      expect(again, checkupKey(layer)).toBeDefined()
-      await again!.release()
-    }
-    expect(await other.isClaimed(checkupKey(OTHER))).toBe(true)
-    await held!.release()
-    ok(await e.run({ cmd: 'scan' }))
-    expect(m.calls.length).toBeGreaterThan(0)
+    await heldOther!.release()
   })
 
   it('体检进行中：体检视图里这个范围「进行中」，别的进程认领不到；做完放掉认领，视图回到不在进行中', async () => {

@@ -15,11 +15,10 @@ import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
 import { hostSemanticLlm, type HostModelRoute } from '../src/governance/host-llm.ts'
 import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
 import { GLOBAL_CACHE_KEY } from '../src/governance/scope-health.ts'
-import type { Scope } from '../src/scope.ts'
-import type { ScanToolResult } from '../src/tools/scan.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from '../src/gui/view-writer.ts'
-import { AUTO_CHECKUP_FIRST_CHECK_MS, AUTO_CHECKUP_INTERVAL_MS, CHECKUP_CLAIM_REFRESH_MS, AutoCheckupScheduler, type AutoCheckupTimer } from '../src/gui/auto-checkup.ts'
-import { GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, checkupKey, checkupViewSchema, pendingItemKey, type AutoCheckupFrequency, type CheckupView, type ScopeOrAll } from '../src/gui/contract.ts'
+import { AUTO_CHECKUP_FIRST_CHECK_MS, AUTO_CHECKUP_INTERVAL_MS, AutoCheckupScheduler, type AutoCheckupTimer } from '../src/gui/auto-checkup.ts'
+import { CHECKUP_CLAIM_REFRESH_MS } from '../src/gui/checkup-run.ts'
+import { GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, checkupKey, checkupViewSchema, type AutoCheckupFrequency, type CheckupView, type ScopeOrAll } from '../src/gui/contract.ts'
 import { executeScan } from '../src/tools/scan.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { fakeExec } from './helpers/exec.ts'
@@ -146,15 +145,14 @@ function env(opts: {
   // 宿主默认模型选择的当前值（用例中途可以改）
   const route = { current: 'defaultModel' in opts ? opts.defaultModel : DEFAULT_ROUTE }
   const source = { store, checkups, autoCheckups, cache, isGovernanceEnabled: () => governance.isEnabled, now: () => clock.now }
-  const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('这里只写体检视图') }, collectCheckups: () => collectCheckupView(source), now: () => clock.now, sleep: async () => {} })
-  const timers = fakeTimer(clock)
-  const scanned: Array<{ scope: Scope; result: ScanToolResult }> = []
   const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
-  const collectPending = async () => (await collectGlobalViews({ store, decisions, cache, ignores, checkups, registry, memoryRoot: root, now: () => clock.now })).pending
+  const collectViews = () => collectGlobalViews({ store, decisions, cache, ignores, checkups, registry, memoryRoot: root, now: () => clock.now })
+  const writer = new ViewWriter({ memoryRoot: root, collect: collectViews, collectCheckups: () => collectCheckupView(source), now: () => clock.now, sleep: async () => {} })
+  const timers = fakeTimer(clock)
   const scheduler = new AutoCheckupScheduler({
     scan: { store, registry, decisions, cache, ignores },
     checkups,
-    collectPending,
+    views: writer,
     status: opts.wrapStatus?.(() => collectCheckupView(source)) ?? (() => collectCheckupView(source)),
     // 每次开跑现读宿主默认模型（假的那份可以在用例中途改）
     host: { defaultLlm: () => hostSemanticLlm(llm, route.current) },
@@ -162,8 +160,6 @@ function env(opts: {
     timer: timers.timer,
     onChecked: () => writer.requestCheckups(),
     onClaimChanged: () => writer.requestCheckups(),
-    // 接线层在这里重写视图（含体检视图）
-    onScanned: async (scope, result) => { scanned.push({ scope, result }); await writer.requestCheckups() },
     now: () => clock.now,
   })
   live.push(scheduler)
@@ -173,7 +169,7 @@ function env(opts: {
   /** 推进时间并等这次检查（含它跑的体检）做完。 */
   const advance = async (ms: number) => { timers.advance(ms); await scheduler.whenIdle() }
   const lastResultOf = async (key: string) => (await checkups.list()).find(r => r.id === key)?.lastResult
-  return { clock, store, decisions, checkups, autoCheckups, cache, llm, governance, route, timers, scheduler, scanned, set, completed, readView, advance, sidecar, collectPending, lastResultOf }
+  return { clock, store, decisions, checkups, autoCheckups, cache, llm, governance, route, timers, scheduler, set, completed, readView, advance, sidecar, lastResultOf }
 }
 
 const ws = (path: string) => ({ kind: 'workspace' as const, workspacePath: path })
@@ -237,11 +233,8 @@ describe('自动体检调度：到期就在后台体检一次', () => {
     expect((await e.completed())[checkupKey({ kind: 'workspace', workspacePath: DISCUSSION })]).toEqual({ startedAt: at, completedAt: at, by: 'auto' })
     expect((await e.decisions.list()).map(d => d.memoryIds)).toEqual([['mem_x', 'mem_y']])
     // 后台没有会话投影：不查和 AGENTS.md 基线的冲突，结果带 baseline-missing；只查这一个范围，不跑跨项目重复检查
-    expect(e.scanned).toHaveLength(1)
-    expect(e.scanned[0]!.scope).toEqual({ kind: 'workspace', workspacePath: DISCUSSION })
-    const result = e.scanned[0]!.result
-    expect(result.kind).toBe('single')
-    expect(result.kind !== 'error' && result.notes.map(n => n.code)).toContain('baseline-missing')
+    expect((await e.lastResultOf(checkupKey(ws(DISCUSSION))))?.notes).toEqual([{ code: 'baseline-missing' }])
+    expect(await e.lastResultOf(checkupKey({ kind: 'global' }))).toBeUndefined()
 
     const view = await e.readView()
     expect(view.scopes.find(s => s.scope.kind === 'workspace')).toEqual({
@@ -251,32 +244,6 @@ describe('自动体检调度：到期就在后台体检一次', () => {
 
     await e.advance(3 * AUTO_CHECKUP_INTERVAL_MS)
     expect(e.llm.requests).toHaveLength(1)
-  })
-
-  it('自动体检写最近一次结果：发起方自动、新增身份与条数、用量取宿主流 usage 报的数；不写键 all 的那条', async () => {
-    const llm = fakeHostLlm({ findings: () => [{ type: 'conflict', memoryIds: ['mem_x', 'mem_y'], summary: '端口说法矛盾', suggestedAction: '请裁决' }] })
-    const e = env({ llm })
-    await e.store.create(record({ id: 'mem_x', name: '端口甲', content: 'discussion 的记忆：端口 3000', scope: 'workspace', workspacePath: DISCUSSION }))
-    await e.store.create(record({ id: 'mem_y', name: '端口乙', content: 'discussion 的记忆：端口 4000', scope: 'workspace', workspacePath: DISCUSSION }))
-    await e.set(ws(DISCUSSION), 1)
-    e.scheduler.start()
-    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
-    const conflict = (await e.collectPending()).items.find(i => i.kind === 'conflict-horizontal')!
-    const at = NOW + AUTO_CHECKUP_FIRST_CHECK_MS
-    const result = await e.lastResultOf(checkupKey({ kind: 'workspace', workspacePath: DISCUSSION }))
-    expect(result).toEqual({
-      checkupId: expect.any(String), by: 'auto', completedAt: at,
-      added: { keys: [pendingItemKey(conflict)], pending: 1, advice: 0 },
-      globalAdded: { keys: [], pending: 0, advice: 0 },
-      // 宿主流的 usage 块：输入 1200 + 输出 80，一次调用
-      usageTokens: 1280,
-      notes: [{ code: 'baseline-missing' }],
-    })
-    expect(e.llm.requests).toHaveLength(1)
-    const view = await e.readView()
-    expect(view.scopes.find(s => s.scope.kind === 'workspace')!.lastResult).toEqual(result)
-    expect(view.allResult).toBeNull()
-    expect(await e.lastResultOf('all')).toBeUndefined()
   })
 
   it('dsh 关着时错过了好几个周期：打开后补跑一次，不按错过的次数连跑', async () => {
@@ -389,7 +356,7 @@ describe('自动体检调度：不跑的情况', () => {
     await e.scheduler.dispose()
     expect(await e.completed()).toEqual({})
     expect(await e.cache.list()).toEqual([])
-    expect(e.scanned).toEqual([])
+    expect(await e.lastResultOf('global')).toBeUndefined()
     // 下次打开：仍是到期
     const status = await collectCheckupView({ store: e.store, checkups: e.checkups, autoCheckups: e.autoCheckups, cache: e.cache, now: () => e.clock.now })
     expect(status.scopes[0]).toMatchObject({ scope: { kind: 'global' }, isDue: true, lastCheckupAt: null })
@@ -666,7 +633,7 @@ describe('自动体检调度：上次体检的兜底（没有完成记录时取�
 })
 
 describe('自动体检调度：模型用不了', () => {
-  it('宿主回未登录：这次不跑、不算失败、不重新计时，到期的范围都记「模型用不了」和原因；下一次检查再试，登录后开始跑', async () => {
+  it('PA-57 宿主回未登录：这次不跑、不算失败、不重新计时，到期的范围都记「模型用不了」和原因；下一次检查再试，登录后开始跑', async () => {
     let reply: HostReply = { code: 'ACCOUNT_SIGN_IN_REQUIRED', message: 'Sign in to DeepSeek to use the account provider.' }
     const e = env({ llm: fakeHostLlm({ reply: () => reply }) })
     await e.store.create(record({ id: 'mem_g', content: '全局的记忆' }))

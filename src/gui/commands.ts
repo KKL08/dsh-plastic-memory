@@ -11,29 +11,27 @@ import { detectSecrets, hasCriticalSecret, hasSecret } from '../secrets.ts'
 import { computeDigest } from '../storage/frontmatter.ts'
 import { candidateFingerprint, isModelChange, kindOf, verdictLoser, type MisplacedIgnore, type PendingDecisionsStore } from '../governance/decisions.ts'
 import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
-import { genId, type PendingDecision, type ScanCacheEntry, type SnapshotRecord } from '../governance/schema.ts'
+import { type PendingDecision, type ScanCacheEntry, type SnapshotRecord } from '../governance/schema.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
 import { executeConfirm } from '../tools/confirm.ts'
 import { executeForget } from '../tools/forget.ts'
 import { executePromote } from '../tools/promote.ts'
-import { executeScan, type ScanNote } from '../tools/scan.ts'
 import { executeSnapshotTool, type SnapshotToolOptions } from '../tools/snapshot.ts'
 import {
   copyHistory, crossWorkspaceNote, gateRecords, isCopyOf, locateCopy, workspaceLabel, type CrossWorkspaceRejection, type GovernanceContext,
 } from '../tools/workspace-gate.ts'
 import {
-  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, checkupKey, mergeKeeperIndex, parseMemoryCommand, sessionViewFile,
+  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, mergeKeeperIndex, parseMemoryCommand, sessionViewFile,
   type GuiErrorCode, type MemoryCommand, type MemoryCommandResult,
 } from './contract.ts'
 import type { ViewWriter } from './view-writer.ts'
 import { generateDraft } from './model-draft.ts'
-import { holdCheckups, processInterval, type IntervalTimer } from './auto-checkup.ts'
-import { checkupWorkspaces } from '../tools/scope-preread.ts'
+import { processInterval, runCheckup, type IntervalTimer } from './checkup-run.ts'
 import { scopeAt, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
 import { UNKNOWN_SESSION_ID, type ContextHost, type HostSession } from '../tools/host-session.ts'
-import { checkupResults, scanOutcome, type CheckupTarget } from './views.ts'
+import { scanOutcome } from './views.ts'
 
 /**
  * `/memory` 人类命令（GUI 的动作通道）：解析契约参数 → 调现有执行器 → 返回契约 JSON 文本。
@@ -758,30 +756,39 @@ async function dispatch(
 
     case 'scan': {
       // 在借来的会话的 agent 上解析模型，拿不到就不扫（只跑规则层会让界面以为体检做完了）
-      if (deps.host.llmOf(exec) === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型，可在对话里让 agent 体检')
-      const isGlobalOnly = command.layer !== undefined
+      const llm = deps.host.llmOf(exec)
+      if (llm === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型，可在对话里让 agent 体检')
+      const target = command.layer !== undefined ? { kind: 'global' as const }
+        : command.workspacePath !== undefined ? { kind: 'workspace' as const, workspacePath: command.workspacePath } : { kind: 'all' as const }
+      const { workspacePath: currentWorkspace } = await deps.host.contextOf(exec)
       // 开跑前认领要查的范围（和自动体检共用一套认领）：正在体检就回 busy；「全部」要认领全局和每个项目，有一个认领不到整个回 busy
-      const scopes: Scope[] = isGlobalOnly ? [{ kind: 'global' }]
-        : command.workspacePath !== undefined ? [{ kind: 'workspace', workspacePath: command.workspacePath }]
-        : [{ kind: 'global' }, ...checkupWorkspaces(await deps.store.listWorkspaceDirs()).map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
-      const controller = new AbortController()
-      const held = await holdCheckups(deps.checkups, scopes, {
+      const r = await runCheckup({
+        target, by: 'manual', llm, baseline: deps.host.baselineOf(exec),
+        ...(currentWorkspace !== undefined ? { currentWorkspace } : {}),
+      }, {
+        scan: { store: deps.store, registry: deps.registry, decisions: deps.decisions, cache: deps.cache, ignores: deps.ignores },
+        checkups: deps.checkups, views: deps.views,
         interval: deps.heartbeat ?? processInterval,
-        onLost: () => { controller.abort(new DOMException('checkup claim taken over', 'AbortError')) },
-        onChange: () => deps.views.requestCheckups(),
+        onClaimChanged: () => deps.views.requestCheckups(),
+        // 时钟现读：完成记录的完成时间是体检做完的时刻，不是命令开始的时刻
+        now: () => deps.now?.() ?? Date.now(),
         log: deps.log ?? console,
       })
-      if ('busy' in held) return fail(cmd, 'busy', `${held.busy.kind === 'global' ? '全局' : held.busy.workspacePath} 正在体检，查完再来`)
-      try {
-        const target: CheckupTarget = isGlobalOnly ? { kind: 'global' }
-          : command.workspacePath !== undefined ? { kind: 'workspace', workspacePath: command.workspacePath } : { kind: 'all', scopes }
-        return await scanHeld(deps, command, target, { ...exec, signal: controller.signal }, now)
-      } catch (err) {
-        // 认领中途被别的进程接手：执行器在写入检查点前停下了，这次没提交
-        if (controller.signal.aborted) return fail(cmd, 'busy', '体检中途被别的进程接手，这次没有提交')
-        throw err
-      } finally {
-        await held.release()
+      switch (r.kind) {
+        case 'busy': return fail(cmd, 'busy', `${r.scope.kind === 'global' ? '全局' : r.scope.workspacePath} 正在体检，查完再来`)
+        // 认领中途被别的进程接手：核心在写入检查点前停下了，这次没提交
+        case 'cancelled': return fail(cmd, 'busy', '体检中途被别的进程接手，这次没有提交')
+        case 'failed':
+        case 'model-unavailable': return fail(cmd, 'failed', r.cause.message ?? r.cause.hostCode ?? r.cause.kind)
+      }
+      // 判新增的覆盖范围：项目体检读的是本项目的可见集合（全局 + 本项目），只查全局是全局，全库体检是全部作用域
+      const covered = target.kind === 'global' ? [target]
+        : target.kind === 'workspace' ? [{ kind: 'global' as const }, target] : 'all'
+      return {
+        ok: true, cmd, notes: r.notes.map(n => n.code),
+        ...(r.semanticBatches !== undefined ? { semanticBatches: r.semanticBatches } : {}),
+        ...(r.usageTokens !== undefined ? { usageTokens: r.usageTokens } : {}),
+        ...(r.compared !== undefined ? scanOutcome(r.compared.before, r.compared.after, covered) : {}),
       }
     }
 
@@ -847,65 +854,4 @@ async function dispatch(
       await deps.views.rewriteAll()
       return { ok: true, cmd }
   }
-}
-
-/**
- * 认领到范围之后的界面手动体检：前后各收集一次待处理比出新增，体检完给覆盖到的范围写完成记录（发起方界面手动），
- * 再给被查的范围（「全部」另加键 all）记下最近一次结果。
- */
-async function scanHeld(
-  deps: MemoryCommandDeps,
-  command: Extract<MemoryCommand, { cmd: 'scan' }>,
-  target: CheckupTarget,
-  exec: ToolRunContext,
-  now: number,
-): Promise<MemoryCommandResult> {
-  const { cmd } = command
-  // 新增条数与分数是附带的：收集视图出错只记日志、结果里不带它们，不挡体检本身，也不把做完的体检报成失败
-  const collect = () => deps.views.collectViews().catch((err: unknown) => {
-    (deps.log ?? console).warn('[plastic-memory] 体检结果的视图收集失败，这次不给新增条数与分数', err)
-    return undefined
-  })
-  // 体检前的待处理，和体检后比出新增
-  const before = (await collect())?.pending
-  const isGlobalOnly = command.layer !== undefined
-  // 「全部」体检时各范围自己的说明，结果按范围记它们；整次合并的只记在 all 上
-  const scopeNotes = new Map<string, readonly ScanNote[]>()
-  // 「全部」只查认领到的项目：执行器自己再枚举会把认领之后才建的项目也查了。一个项目都没有时只查全局（空 scopes 不是全库）
-  const scopes = target.kind === 'all' ? target.scopes.flatMap(s => (s.kind === 'workspace' ? [s.workspacePath] : [])) : undefined
-  // 时钟现读：完成记录的完成时间是体检做完的时刻，不是命令开始的时刻
-  const r = await executeScan(
-    scopes !== undefined ? { scopes, layers: 'full' } : { ...(command.workspacePath !== undefined ? { scope: command.workspacePath } : {}), layers: 'full' },
-    {
-      store: deps.store, registry: deps.registry, decisions: deps.decisions, cache: deps.cache, checkups: deps.checkups,
-      host: deps.host, now: () => deps.now?.() ?? Date.now(),
-    },
-    exec, { by: 'manual', isGlobalOnly: isGlobalOnly || scopes?.length === 0, onScopeNotes: (scope, notes) => { scopeNotes.set(checkupKey(scope), notes) } },
-  )
-  await deps.decisions.sweep(now)
-  const after = await deps.views.rewriteAll() ?? (before === undefined ? undefined : await collect())
-  if (r.kind === 'error') return fail(cmd, 'failed', r.message)
-  // 最近一次结果：比不出新增（收集视图出错）就不记；认领已被别的进程接手的不记，免得盖掉接手的那次。
-  // 体检这时已经提交，记不下结果只记日志，不把做完的体检报成失败（和自动体检同一步一样）
-  if (before !== undefined && after !== undefined && exec.signal?.aborted !== true) {
-    try {
-      await deps.checkups.recordResults(checkupResults(before, after.pending, {
-        target, checkupId: genId('ck'), by: 'manual', completedAt: deps.now?.() ?? Date.now(), notes: r.notes, scopeNotes,
-        ...(r.usageTokens !== undefined ? { usageTokens: r.usageTokens } : {}),
-      }))
-    } catch (err) {
-      (deps.log ?? console).warn('[plastic-memory] 记不下手动体检的结果', err)
-    }
-  }
-  // 判新增的覆盖范围：项目体检读的是本项目的可见集合（全局 + 本项目），只查全局是全局，全库体检是全部作用域
-  const covered = isGlobalOnly ? [{ kind: 'global' as const }]
-    : command.workspacePath === undefined ? 'all' : [{ kind: 'global' as const }, { kind: 'workspace' as const, workspacePath: command.workspacePath }]
-  const notes = r.notes.map(n => n.code)
-  const extras = {
-    ...(r.semanticBatches !== undefined ? { semanticBatches: r.semanticBatches } : {}),
-    ...(r.usageTokens !== undefined ? { usageTokens: r.usageTokens } : {}),
-  }
-  return before === undefined || after === undefined
-    ? { ok: true, cmd, notes, ...extras }
-    : { ok: true, cmd, notes, ...extras, ...scanOutcome(before, after, covered) }
 }

@@ -38,7 +38,7 @@ export function listWorkspaces(records: Iterable<MemoryRecord>): string[] {
 export function validateScopePaths(
   knownWorkspaces: Iterable<string>,
   currentWs: string | undefined,
-  requested: string[],
+  requested: readonly string[],
 ): string | null {
   const known = new Set(knownWorkspaces)
   if (currentWs !== undefined) known.add(currentWs)
