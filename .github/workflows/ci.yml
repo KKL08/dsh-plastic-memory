@@ -16,9 +16,9 @@ jobs:
       matrix:
         node: ['22', '24']
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
           cache: pnpm
@@ -36,7 +36,7 @@ jobs:
           done
       - run: scripts/check-no-local-paths.sh
       - name: Cache the pinned dsh host
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/dsh-plastic-memory
           key: dsh-host-${{ runner.os }}-node${{ matrix.node }}-${{ hashFiles('package.json') }}
@@ -49,9 +49,9 @@ jobs:
   host-floor:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: pnpm
@@ -61,7 +61,7 @@ jobs:
       - run: pnpm lint
       - run: pnpm test
       - name: Cache the floor dsh host
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/dsh-plastic-memory
           key: dsh-host-floor-${{ runner.os }}-${{ hashFiles('package.json') }}
