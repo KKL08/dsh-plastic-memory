@@ -9,15 +9,14 @@ import type { BindGateway } from '../gateway.ts'
 import type { HostContext, RootStandardProps } from '../host.ts'
 import type { Translate } from '../i18n.tsx'
 import { openMemoryPage, type NavStore } from '../nav.ts'
+import { slotCss } from '../styles.ts'
 import { PanelShell } from '../ui/PanelShell.tsx'
 import { ENTRY_ID, PACKAGE_NAME } from './config.ts'
-import { controlsCss } from './controls.tsx'
-import { scenesCss } from './Scenes.tsx'
-import { SettingsPage, settingsPageCss } from './SettingsPage.tsx'
+import { SettingsPage } from './SettingsPage.tsx'
 
 export type ConfigFormsService = NonNullable<HostContext['configForms']>
 
-const SETTINGS_CSS = controlsCss + scenesCss + settingsPageCss
+const SETTINGS_CSS = slotCss('settings')
 
 export function createSettingsCard(ctx: HostContext, configForms: ConfigFormsService, nav: NavStore, bind: BindGateway, useTranslate: () => Translate) {
   return function PlasticMemorySettings(props: RootStandardProps & { view?: 'summary' | 'page' }) {

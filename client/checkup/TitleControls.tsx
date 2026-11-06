@@ -311,7 +311,7 @@ function AutoCheckup({ scope, session, view }: { scope: PageScope; session: Borr
         aria-controls={isOpen ? menuId : undefined}
         onClick={toggle}
       >
-        <span className="pm-auto-label">{t('checkup.auto')}</span>
+        <span>{t('checkup.auto')}</span>
         <span className="pm-auto-value">{value}</span>
         <Icon name="chevronsUpDown" size={14} />
       </button>

@@ -24,10 +24,10 @@ import { useTypeLabel } from '../library/shared.tsx'
 import { Icon } from '../ui/Icon.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { withRollingNumber } from '../ui/motion.tsx'
-import { CommandFeedback, confirmCss, DeleteWithConfirm } from '../command/confirm.tsx'
+import { CommandFeedback, DeleteWithConfirm } from '../command/confirm.tsx'
 import { useCommandRunner } from '../command/useCommandRunner.ts'
-import { promoteInPlaceCss, promotionOf, usePromoteInPlace, type InPlacePromotion } from './promote-in-place.tsx'
-import { ModelChangeLine, modelChangeCss } from './model-change.tsx'
+import { promotionOf, usePromoteInPlace, type InPlacePromotion } from './promote-in-place.tsx'
+import { ModelChangeLine } from './model-change.tsx'
 import type { SavedMemory } from './saved-turn.ts'
 
 /** 卡片挂上时最近一条记下不超过这么久，算对话进行中刚出现的；翻历史时的卡都更早。 */
@@ -274,7 +274,7 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
   )
 }
 
-export const savedMemoriesCardCss = confirmCss + promoteInPlaceCss + modelChangeCss + `
+export const savedMemoriesCardCss = `
 .pm-saved {
   display: flex; flex-direction: column; gap: 10px; margin: 4px 0; padding: 12px 14px;
   border: 0.5px solid var(--pm-line-card); border-radius: var(--dsw-radius-lg, 16px); background: var(--pm-bg);

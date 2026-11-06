@@ -34,11 +34,11 @@ import { EmptyState } from '../ui/EmptyState.tsx'
 import { Icon } from '../ui/Icon.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { Arrival, useArrivals } from '../ui/motion.tsx'
-import { CommandFeedback, confirmCss, DeleteWithConfirm } from '../command/confirm.tsx'
+import { CommandFeedback, DeleteWithConfirm } from '../command/confirm.tsx'
 import type { Ok } from '../command/protocol.ts'
 import { useCommandRunner } from '../command/useCommandRunner.ts'
-import { promoteInPlaceCss, promotionOf, usePromoteInPlace, type InPlacePromotion } from '../chat/promote-in-place.tsx'
-import { ModelChangeLine, modelChangeCss } from '../chat/model-change.tsx'
+import { promotionOf, usePromoteInPlace, type InPlacePromotion } from '../chat/promote-in-place.tsx'
+import { ModelChangeLine } from '../chat/model-change.tsx'
 import { isLiveWrite, sessionCards, writtenSinceSnapshot } from './session-memories.ts'
 
 type Conflict = Extract<PendingItem, { kind: 'conflict-horizontal' }>
@@ -452,7 +452,7 @@ function SavedRow({ session, memory, card, state, onWroteAgentsMd, children }: {
   const promote = usePromoteInPlace(session, memory, scopeOfMemory(memory), state ?? promotionOf(memory), onWroteAgentsMd)
   return (
     <div className="pm-side-saved" data-memory-id={memory.id}>
-      <div className="pm-side-saved-card">{card(memory)}</div>
+      <div>{card(memory)}</div>
       {children}
       <div className="pm-side-saved-promote">{promote}</div>
     </div>
@@ -509,7 +509,7 @@ function Note({ title, children }: { title: string; children: ReactNode }) {
   )
 }
 
-export const sidebarTabCss = confirmCss + promoteInPlaceCss + modelChangeCss + `
+export const sidebarTabCss = `
 .pm-side-root { height: 100%; min-height: 0; }
 .pm-side {
   height: 100%; min-height: 0; overflow: auto; scrollbar-gutter: stable;
@@ -552,7 +552,7 @@ export const sidebarTabCss = confirmCss + promoteInPlaceCss + modelChangeCss + `
 .pm-side .pm-conflict-buttons { flex-wrap: nowrap; }
 .pm-side .pm-conflict-buttons .pm-btn { padding: 5px 10px; }
 .pm-side-ruled { display: flex; flex-direction: column; gap: 10px; }
-.pm-link[aria-disabled='true'] { opacity: .4; cursor: default; }
+.pm-side .pm-link[aria-disabled='true'] { opacity: .4; cursor: default; }
 .pm-side-note { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: var(--dsw-radius-md, 12px); background: var(--pm-bg-block); }
 .pm-side-note-title { margin: 0; font-size: 13px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
 .pm-side-note-body { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }

@@ -11,8 +11,11 @@ import type { Translate } from '../i18n.tsx'
 import { NS } from '../locales.ts'
 import { MemoryIcon } from '../MemoryIcon.tsx'
 import { openMemoryPage, SIDEBAR_TAB_ID, SIDEBAR_TAB_KIND, type NavStore } from '../nav.ts'
+import { slotCss } from '../styles.ts'
 import { PanelShell } from '../ui/PanelShell.tsx'
-import { SidebarTab, sidebarTabCss } from './SidebarTab.tsx'
+import { SidebarTab } from './SidebarTab.tsx'
+
+const SIDEBAR_CSS = slotCss('sidebar')
 
 function GuideIcon({ size }: { size?: number | undefined }) {
   return <MemoryIcon size={size ?? 22} />
@@ -56,7 +59,7 @@ export function registerSidebarTab(ctx: SidebarHost, nav: NavStore, bind: BindGa
     const translate = useTranslate()
     const cwd = props.useSessions(s => s.byId[props.sessionId]?.cwd)
     return (
-      <PanelShell gateway={gateway} t={translate} className="pm-side-root" extraCss={sidebarTabCss}>
+      <PanelShell gateway={gateway} t={translate} className="pm-side-root" extraCss={SIDEBAR_CSS}>
         <SidebarTab
           sessionId={props.sessionId}
           workspacePath={cwd}

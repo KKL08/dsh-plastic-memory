@@ -7,7 +7,7 @@ import type { MemoryCard, MemoryCommand } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { useT } from '../i18n.tsx'
 import { useNavTarget, type NavStore, type NavTarget } from '../nav.ts'
-import { CommandFeedback, confirmCss } from '../command/confirm.tsx'
+import { CommandFeedback } from '../command/confirm.tsx'
 import { useCommandRunner } from '../command/useCommandRunner.ts'
 import { Icon } from '../ui/Icon.tsx'
 import { prefersReducedMotion } from '../ui/motion.tsx'
@@ -188,7 +188,7 @@ export function useRowActions(session: BorrowedSession) {
   }
 }
 
-export const sharedTabCss = confirmCss + `
+export const sharedTabCss = `
 .pm-search {
   display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border-radius: 12px;
   border: .5px solid var(--pm-line-input); color: var(--pm-text-2); background: transparent;

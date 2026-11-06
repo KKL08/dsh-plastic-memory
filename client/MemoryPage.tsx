@@ -21,17 +21,16 @@ import {
 import { PendingTab } from './pending/PendingTab.tsx'
 import { useCheckupRuns } from './checkup/runs.ts'
 import { useVisitSeen } from './checkup/seen.ts'
-import { scoreOf, StatusBar, statusBarCss } from './checkup/StatusBar.tsx'
-import { TitleControls, titleControlsCss } from './checkup/TitleControls.tsx'
+import { scoreOf, StatusBar } from './checkup/StatusBar.tsx'
+import { TitleControls } from './checkup/TitleControls.tsx'
 import { Button } from './ui/Button.tsx'
 import { Chip } from './ui/Chip.tsx'
 import { EmptyState } from './ui/EmptyState.tsx'
 import { Icon } from './ui/Icon.tsx'
 import { StatusMarker } from './ui/StatusMarker.tsx'
-import { DeletedTab, deletedTabCss } from './deleted/DeletedTab.tsx'
-import { LibraryTab, libraryTabCss } from './library/LibraryTab.tsx'
-import { groupsCss, type FoldMemory } from './library/groups.tsx'
-import { sharedTabCss } from './library/shared.tsx'
+import { DeletedTab } from './deleted/DeletedTab.tsx'
+import { LibraryTab } from './library/LibraryTab.tsx'
+import type { FoldMemory } from './library/groups.tsx'
 import { SegmentedTabs, type SegmentedTab } from './ui/Segmented.tsx'
 
 const VIEW_LABEL = { todo: 'tab.todo', library: 'tab.library', deleted: 'tab.deleted' } as const satisfies Record<MemoryView, string>
@@ -478,4 +477,4 @@ export const memoryPageCss = `
 .pm-tab-count { font-weight: 400; color: var(--pm-text-2); }
 .pm-page-panel { min-height: 0; }
 .pm-page-placeholder { margin: 24px 0; text-align: center; font-size: 12px; color: var(--pm-text-2); }
-` + titleControlsCss + statusBarCss + sharedTabCss + groupsCss + libraryTabCss + deletedTabCss
+`

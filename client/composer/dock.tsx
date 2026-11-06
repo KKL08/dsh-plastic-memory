@@ -8,8 +8,11 @@ import type { BindGateway } from '../gateway.ts'
 import type { HostContext, SessionStandardProps } from '../host.ts'
 import type { Translate } from '../i18n.tsx'
 import { openMemoryPage, useCanOpen, type NavStore } from '../nav.ts'
+import { slotCss } from '../styles.ts'
 import { PanelShell } from '../ui/PanelShell.tsx'
-import { MemoryButton, memoryButtonCss } from './MemoryButton.tsx'
+import { MemoryButton } from './MemoryButton.tsx'
+
+const COMPOSER_CSS = slotCss('composer')
 
 /** dock 条目 id。 */
 export const DOCK_ID = 'plastic-memory'
@@ -27,7 +30,7 @@ export function createComposerDock(
     const t = useTranslate()
     const canOpenTab = useCanOpen(nav, 'sidebarTab')
     return (
-      <PanelShell gateway={gateway} t={t} className="pm-composer-root" extraCss={memoryButtonCss}>
+      <PanelShell gateway={gateway} t={t} className="pm-composer-root" extraCss={COMPOSER_CSS}>
         <MemoryButton
           sessionId={props.sessionId}
           useProjection={props.useProjection}

@@ -10,13 +10,13 @@ export function StatusMarker({ kind, size = 'page', label }: { kind: MarkerKind;
   if (kind === 'secret') {
     const px = size === 'nav' ? 9 : 14
     return (
-      <svg className={`pm-marker pm-marker--secret pm-marker--${size}`} width={px} height={px} viewBox="0 0 14 14" {...a11y}>
+      <svg className={`pm-marker pm-marker--${size}`} data-pm-marker={kind} width={px} height={px} viewBox="0 0 14 14" {...a11y}>
         <path d="M7 1.4 13.2 12.4H.8Z" fill="var(--pm-error)" stroke="var(--pm-error)" strokeWidth="1.2" strokeLinejoin="round" />
         {size === 'page' ? <path d="M7 5.2v3.4M7 10.4v.1" stroke="var(--pm-on-error)" strokeWidth="1.5" strokeLinecap="round" /> : null}
       </svg>
     )
   }
-  return <span className={`pm-marker pm-marker--dot pm-marker--${kind} pm-marker--${size}`} {...a11y} />
+  return <span className={`pm-marker pm-marker--dot pm-marker--${kind} pm-marker--${size}`} data-pm-marker={kind} {...a11y} />
 }
 
 export const statusMarkerCss = `

@@ -9,13 +9,16 @@ import { createHostGateway, GatewayProvider, type BindGateway } from './gateway.
 import type { HostContext, RootStandardProps } from './host.ts'
 import { useHostTranslate } from './i18n.tsx'
 import { en, NS, zh } from './locales.ts'
-import { MemoryPage, memoryPageCss } from './MemoryPage.tsx'
+import { MemoryPage } from './MemoryPage.tsx'
 import { NavIcon } from './NavIcon.tsx'
 import { createNavStore, PANEL_ID, type NavStore } from './nav.ts'
 import { registerSidebarTab } from './sidebar/register.tsx'
 import { PACKAGE_NAME } from './settings/config.ts'
 import { applySettings } from './settings/index.tsx'
+import { slotCss } from './styles.ts'
 import { PanelShell } from './ui/PanelShell.tsx'
+
+const PAGE_CSS = slotCss('page')
 
 export { PANEL_ID }
 /** npm 包名：宿主插件页按它打开本插件的详情（配置区在详情页里）；定义在 settings/config.ts。 */
@@ -29,7 +32,7 @@ function createMainPanel(ctx: HostContext, nav: NavStore, bind: BindGateway) {
     const gateway = useMemo(() => bind(props), [props.useSessions, props.useResource])
     const t = useHostTranslate(ctx.locale, NS)
     return (
-      <PanelShell gateway={gateway} t={t} className="pm-root--page" extraCss={memoryPageCss}>
+      <PanelShell gateway={gateway} t={t} className="pm-root--page" extraCss={PAGE_CSS}>
         <MemoryPage nav={nav} />
       </PanelShell>
     )

@@ -187,7 +187,7 @@ describe('「全部」的状态条', () => {
     const secret: PendingView['items'] = [{ kind: 'secret', level: 'must-fix', memory: b1 }, ...items]
     const { gateway } = open({ view: 'todo', scope: { kind: 'all' } }, { views: { pending: { ...pending, items: secret, levelCounts: levelCountsOf(secret) } } })
     expect(lines()[0]).toMatch(/^全局有事等你决定\s*·\s*app 有事等你决定\s*·\s*blog 有密钥要先处理$/)
-    expect(bar().querySelector('.pm-marker')).toHaveClass('pm-marker--secret')
+    expect(bar().querySelector('.pm-marker')).toHaveAttribute('data-pm-marker', 'secret')
     act(() => { gateway.setView('pending', { ...pending, items: [], levelCounts: levelCountsOf([]) }) })
     expect(lines()[0]).toBe('没有要你决定的事')
     expect(bar().querySelector('.pm-marker')).toHaveClass('pm-marker--ok')

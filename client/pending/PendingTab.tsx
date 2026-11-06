@@ -17,7 +17,6 @@ import { PENDING_LEVELS, pendingItemKey, pendingItemScopes, type HealthView, typ
 import { isNewItem, markSeen, newItemIndex, readSeen, type Seen } from '../checkup/seen.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, formatDay, formatNumber, useT } from '../i18n.tsx'
-import { confirmCss } from '../command/confirm.tsx'
 import { ItemSending } from '../command/useCommandRunner.ts'
 import { FlashRow, useFlashTarget, useTypeLabel, ViewMessage } from '../library/shared.tsx'
 import type { LocaleKey } from '../locales.ts'
@@ -28,9 +27,6 @@ import { EmptyState } from '../ui/EmptyState.tsx'
 import { Icon } from '../ui/Icon.tsx'
 import { Arrival, useArrivals } from '../ui/motion.tsx'
 import { StatusMarker } from '../ui/StatusMarker.tsx'
-import { editCss } from './edit.tsx'
-import { modelEditCss } from './model-edit.tsx'
-import { moveCss } from './move.tsx'
 import {
   AdviceCard, adviceTitle, HorizontalCard, ItemIsNew, ItemScopeNames, OverflowCard, PromoteCard, ResultCard, SecretCard, titleOf, UnreadableCard, useCardAction, VerticalCard, type Outcome,
 } from './cards.tsx'
@@ -239,7 +235,6 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
 
   return (
     <div ref={root} className="pm-pending" tabIndex={-1}>
-      <style data-plastic-memory-pending="">{pendingCss}</style>
       {isEmpty
         ? (
           <>
@@ -443,7 +438,7 @@ function PendingEmpty({ isOff, lastCheckupAt, now }: {
   )
 }
 
-export const pendingCss = confirmCss + editCss + modelEditCss + moveCss + `
+export const pendingCss = `
 .pm-pending { display: flex; flex-direction: column; }
 .pm-root .pm-pending:focus-visible { outline: none; }
 .pm-pending-group { display: flex; flex-direction: column; }

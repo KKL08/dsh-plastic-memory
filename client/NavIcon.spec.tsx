@@ -34,7 +34,7 @@ describe('左栏图标圆点', () => {
   it('有等你决定的条目：琥珀圆点，图标线条在圆点处被 mask 挖空', () => {
     const { container, marker } = setup(pending('amber'))
     expect(marker()).toBe('pending')
-    expect(container.querySelector('.pm-nav-dot')).not.toBeNull()
+    expect(container.querySelector('[data-pm-nav-mark="dot"]')).not.toBeNull()
     const mask = container.querySelector('mask')
     expect(mask).not.toBeNull()
     expect(container.querySelector('g[mask]')?.getAttribute('mask')).toBe(`url(#${mask!.id})`)
@@ -43,8 +43,8 @@ describe('左栏图标圆点', () => {
   it('有密钥：红色小三角盖过琥珀点', () => {
     const { container, marker } = setup(pending('red', [{ kind: 'secret', level: 'must-fix', memory: memory() }, promote]))
     expect(marker()).toBe('secret')
-    expect(container.querySelector('.pm-nav-secret')).not.toBeNull()
-    expect(container.querySelector('.pm-nav-dot')).toBeNull()
+    expect(container.querySelector('[data-pm-nav-mark="secret"]')).not.toBeNull()
+    expect(container.querySelector('[data-pm-nav-mark="dot"]')).toBeNull()
   })
 
   it('只有读不出的文件（dot = none）、视图没就绪、没有会话：都不亮点，也不挖洞', () => {

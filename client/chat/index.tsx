@@ -8,11 +8,14 @@ import type { HostContext, RootStandardProps } from '../host.ts'
 import { TranslateProvider, useHostTranslate } from '../i18n.tsx'
 import { NS } from '../locales.ts'
 import { openMemoryPage, type NavStore } from '../nav.ts'
+import { slotCss } from '../styles.ts'
 import { PanelShell } from '../ui/PanelShell.tsx'
 import { MemoryToolRow, type MemoryToolViewProps } from './MemoryToolRow.tsx'
 import { SAVED_TURN_KEY, savedTurnDefinition, type SavedTurnData, type SavedTurnDefinition } from './saved-turn.ts'
-import { SavedMemoriesCard, savedMemoriesCardCss } from './SavedMemoriesCard.tsx'
+import { SavedMemoriesCard } from './SavedMemoriesCard.tsx'
 import { MEMORY_TOOLS } from './tool-summary.ts'
+
+const CHAT_CSS = slotCss('chat')
 
 /** 宿主 TurnTailOwnerProps 的结构子集（turn.data 只读本插件的 key）。 */
 export interface TurnTailProps extends RootStandardProps {
@@ -55,7 +58,7 @@ function createTurnTail(ctx: HostContext, nav: NavStore, bind: BindGateway) {
     const t = useHostTranslate(ctx.locale, NS)
     if (saved.length === 0) return null
     return (
-      <PanelShell gateway={gateway} t={t} extraCss={savedMemoriesCardCss}>
+      <PanelShell gateway={gateway} t={t} extraCss={CHAT_CSS}>
         <SavedMemoriesCard sessionId={props.sessionId} cwd={cwd} saved={saved} now={Date.now()} openDetail={openDetail} />
       </PanelShell>
     )

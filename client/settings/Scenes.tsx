@@ -676,7 +676,7 @@ function LinkConfirm({ question, note, actions, cancelLabel, onCancel, block = f
         onCancel()
       }}
     >
-      <span id={questionId} className="pm-scene-confirm-text">{question}</span>
+      <span id={questionId}>{question}</span>
       {note !== undefined ? <span className="pm-scene-confirm-note">{note}</span> : null}
       <span className="pm-scene-confirm-actions">
         {actions.map(action => (
