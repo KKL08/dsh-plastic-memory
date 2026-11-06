@@ -16,16 +16,16 @@
  * 这次对话里模型改写、替代已有记忆的（全部记忆视图的 modelChanges，按会话认领、晚于这份快照的；同一条只列最近那次改写，本次新记的不另列）也列在「这次新写入的」：
  * 改写的那条带「已改写」、「改前 / 改后」对照与「撤销修改」，替代写「「新」替代了「旧」」与「撤销修改」（见 model-change.tsx）。
  */
-import { useMemo, useRef, useState, type ReactNode } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import {
   CONFLICT_ACTION_VERDICTS, pendingItemScopes, sameScope, scopeOfMemory,
-  type MemoryCard as MemoryCardData, type MemoryCommand, type MemoryCommandResult, type ModelChange, type PendingItem, type Scope, type SnapshotOrigin,
+  type MemoryCard as MemoryCardData, type MemoryCommand, type ModelChange, type PendingItem, type Scope, type SnapshotOrigin,
 } from '../../src/gui/contract.ts'
-import { samePath, useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
+import { samePath, useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, formatNumber, useT } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
 import type { NavTarget } from '../nav.ts'
-import { mergeTypeLabels } from '../library/shared.tsx'
+import { mergeTypeLabels, ViewMessage } from '../library/shared.tsx'
 import { typeLabel } from '../type-label.ts'
 import { ResultLine } from '../ui/Advice.tsx'
 import { ConflictRuling, VerticalConflictRuling } from '../ui/ConflictRuling.tsx'
@@ -34,11 +34,11 @@ import { EmptyState } from '../ui/EmptyState.tsx'
 import { Icon } from '../ui/Icon.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { Arrival, useArrivals } from '../ui/motion.tsx'
-import { confirmCss, CrossConfirm, DeleteWithConfirm, SecretDeleteConfirm } from '../command/confirm.tsx'
-import { interpret } from '../command/protocol.ts'
-import { promoteInPlaceCss, promotionOf, usePromoteInPlace, type InPlacePromotion } from '../pending/promote-in-place.tsx'
-import { ModelChangeLine, modelChangeCss } from '../pending/model-change.tsx'
-import { keepFocusInPlace } from '../ui/focus-return.ts'
+import { CommandFeedback, confirmCss, DeleteWithConfirm } from '../command/confirm.tsx'
+import type { Ok } from '../command/protocol.ts'
+import { useCommandRunner } from '../command/useCommandRunner.ts'
+import { promoteInPlaceCss, promotionOf, usePromoteInPlace, type InPlacePromotion } from '../chat/promote-in-place.tsx'
+import { ModelChangeLine, modelChangeCss } from '../chat/model-change.tsx'
 import { isLiveWrite, sessionCards, writtenSinceSnapshot } from './session-memories.ts'
 
 type Conflict = Extract<PendingItem, { kind: 'conflict-horizontal' }>
@@ -54,7 +54,6 @@ type Ruled =
   | { kind: 'horizontal'; decisionId: string; verdict: Verdict; left: MemoryCardData; right: MemoryCardData } & Outcome
   | { kind: 'vertical'; decisionId: string; verdict: Verdict; memory: MemoryCardData } & Outcome
 
-type Ok = Extract<MemoryCommandResult, { ok: true }>
 const outcomeOf = (result: Ok): Outcome => ({ ...(result.isUnrecorded ? { isUnrecorded: true } : {}), ...(result.isHardDeleted ? { isHardDeleted: true } : {}) })
 
 const ruledMemories = (r: Ruled): MemoryCardData[] => r.kind === 'horizontal' ? [r.left, r.right] : [r.memory]
@@ -105,76 +104,55 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const [purged, setPurged] = useState<ReadonlySet<string>>(new Set())
   /** 这里写进了 AGENTS.md 的：项目里那条进了最近删除、离开了视图，按 id 留着那张卡和结果。 */
   const [wroteAgentsMd, setWroteAgentsMd] = useState<ReadonlyMap<string, MemoryCardData>>(new Map())
-  const [secretId, setSecretId] = useState<string | undefined>(undefined)
-  // 在途的动作按条（待决项 id / 记忆 id）记：别的动作开始或结束都不让这一条重新可点，同一条冲突不会发出两条相反的裁决。
-  // ref 同步拦截，state 只管渲染
-  const inFlight = useRef(new Set<string>())
-  const [busy, setBusy] = useState<ReadonlySet<string>>(new Set())
-  const [failure, setFailure] = useState<{ id: string; detail: string } | undefined>(undefined)
-  /** 没有生效的那次裁决或撤销（待决项 id）。 */
+  // 动作按条（待决项 id / 记忆 id）经命令往返模块发出：在途时这一条不可再点，同一条冲突不会发出两条相反的裁决；
+  // 跨项目确认、含密钥改彻底删除、失败提示都同其他面板
+  const runner = useCommandRunner(session)
+  /** 没有生效的那次裁决或撤销（待决项 id）：冲突卡消失后提示还要留着，所以记在这里，下一次动作时收起。 */
   const [refused, setRefused] = useState<string | undefined>(undefined)
-  // 涉及其他项目时服务端先拒（什么都没动），和待处理卡同一套：原位确认，「继续处理」才带 allowCrossWorkspace 重发
-  const [cross, setCross] = useState<{ id: string; workspacePath: string; command: MemoryCommand; onOk: (result: Ok) => void } | undefined>(undefined)
 
-  const run = async (id: string, command: MemoryCommand, onOk: (result: Ok) => void) => {
-    if (inFlight.current.has(id)) return
-    inFlight.current.add(id)
-    keepFocusInPlace()
-    setBusy(new Set(inFlight.current))
-    setFailure(undefined)
+  const run = (id: string, command: MemoryCommand, onOk: (result: Ok, sent: MemoryCommand) => void) => {
     setRefused(undefined)
-    setCross(undefined)
-    setSecretId(undefined)
-    const result = await gateway.execute(sessionId, command)
-    inFlight.current.delete(id)
-    setBusy(new Set(inFlight.current))
-    if (result.ok) { onOk(result); return }
-    const workspacePath = result.rejected?.[0]?.workspacePath
-    const isAllowed = 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
-    if (result.code === 'cross-workspace' && !isAllowed && workspacePath !== undefined) setCross({ id, workspacePath, command, onOk })
-    else if (result.code === 'has-secret' && command.cmd === 'forget') setSecretId(id)
-    else if (interpret(command, result).kind === 'handled-elsewhere') setRefused(id)
-    else setFailure({ id, detail: result.detail ?? result.code })
+    runner.run(id, command, { onOk, onHandledElsewhere() { setRefused(id) } })
   }
   const rule = (item: Conflict, verdict: Verdict) => {
     const { left, right } = item
     if (left === null || right === null) return
-    void run(item.decisionId, { cmd: 'resolve', decisionId: item.decisionId, verdict }, (result) => {
+    run(item.decisionId, { cmd: 'resolve', decisionId: item.decisionId, verdict }, (result) => {
       setRuled(prev => [...prev, { kind: 'horizontal', decisionId: item.decisionId, verdict, left, right, ...outcomeOf(result) }])
     })
   }
   const ruleVertical = (item: VerticalConflict, verdict: Verdict) => {
     const { memory } = item
     if (memory === null) return
-    void run(item.decisionId, { cmd: 'resolve', decisionId: item.decisionId, verdict }, (result) => {
+    run(item.decisionId, { cmd: 'resolve', decisionId: item.decisionId, verdict }, (result) => {
       setRuled(prev => [...prev, { kind: 'vertical', decisionId: item.decisionId, verdict, memory, ...outcomeOf(result) }])
     })
   }
   const undo = (decisionId: string) => {
-    void run(decisionId, { cmd: 'undo', decisionId }, () => { setRuled(prev => prev.filter(r => r.decisionId !== decisionId)) })
+    run(decisionId, { cmd: 'undo', decisionId }, () => { setRuled(prev => prev.filter(r => r.decisionId !== decisionId)) })
   }
+  // 发出 forget 时就记下（含密钥时确认后改发的彻底删除沿用这一次），等删除状态记成彻底删除再换上说明：
+  // 网关记删除和成功回调不在同一次提交，回调里才记会先空出一帧（这一行没了、说明还没来），焦点趁机落到后面的控件上。
+  // 软删成功的去掉：之后在别处彻底删除的普通记忆不写含密钥那句
   const forget = (memory: MemoryCardData) => {
     const memoryId = memory.id
-    void run(memoryId, { cmd: 'forget', memoryId, layer: scopeOfMemory(memory) }, () => {})
-  }
-  // 发出时就记下，等删除状态记成彻底删除再换上说明：网关记删除和这里的成功回调不在同一次提交，
-  // 回调里才记会先空出一帧（这一行没了、说明还没来），焦点趁机落到后面的控件上
-  const hardDelete = (memoryId: string, memory: MemoryCardData | undefined) => {
     setPurged(prev => new Set(prev).add(memoryId))
-    void run(memoryId, { cmd: 'hard-delete', memoryId, layer: memory && scopeOfMemory(memory) }, () => {})
+    run(memoryId, { cmd: 'forget', memoryId, layer: scopeOfMemory(memory) }, (_result, sent) => {
+      if (sent.cmd === 'forget') setPurged((prev) => { const next = new Set(prev); next.delete(memoryId); return next })
+    })
   }
   const isPurged = (id: string) => purged.has(id) && deletions.of(id) === 'hard'
 
   const arrivals = useArrivals(sessionView.status === 'ready' ? writtenSinceSnapshot(sessionView.data) : undefined, sessionId)
 
-  if (library.status !== 'ready') return <div className="pm-side"><ViewNote state={library} /></div>
+  if (library.status !== 'ready') return <div className="pm-side"><ViewMessage state={library} idle={t('view.loading')} className="pm-side-hint" /></div>
 
   const snapshot = sessionView.status === 'ready' ? sessionView.data : undefined
   const ws = snapshot?.workspacePath ?? cwd
   const { byId, globalCount, projectCount } = sessionCards(library.data, ws)
   // 彻底删除的那条视图里已经没有了，按 id 原位留一行说明（删的是最后一条时留在空状态上面，也是焦点的落点）
   const purgedNote = (id: string) => <p key={id} className="pm-side-hint" tabIndex={-1}>{t('pending.secret.deletedNotice')}</p>
-  const refusedNote = <p className="pm-side-error" role="alert" tabIndex={-1}>{t('sidebar.action.refused')}</p>
+  const refusedNote = <p className="pm-pending-error" role="alert" tabIndex={-1}>{t('sidebar.action.refused')}</p>
   if (globalCount === 0 && projectCount === 0) {
     return (
       <div className="pm-side">
@@ -255,23 +233,9 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const card = (memory: MemoryCardData) => (
     <MemoryCard memory={memory} now={now} typeLabel={label(memory.type)} hideScope={memory.scope === 'workspace'} />
   )
-  const failed = (id: string) => {
-    if (secretId === id) return <SecretDeleteConfirm onCancel={() => { setSecretId(undefined) }} onConfirm={() => { hardDelete(id, byId.get(id)) }} />
-    if (cross?.id === id) {
-      return (
-        <CrossConfirm
-          workspacePath={cross.workspacePath}
-          onCancel={() => { setCross(undefined) }}
-          onConfirm={() => { void run(cross.id, { ...cross.command, allowCrossWorkspace: true } as MemoryCommand, cross.onOk) }}
-        />
-      )
-    }
-    if (refused === id) return refusedNote
-    return failure?.id === id
-      ? <p className="pm-side-error" role="alert">{t('sidebar.action.failed', { detail: failure.detail })}</p>
-      : null
-  }
-  const isWaiting = (id: string) => busy.has(id) || cross?.id === id || secretId === id
+  /** 这一条的确认、失败或没有生效。 */
+  const failed = (id: string) => refused === id ? refusedNote : <CommandFeedback runner={runner} id={id} />
+  const isWaiting = (id: string) => runner.unavailable(id) !== undefined
   // 冲突对方可能在别的项目：那一方写项目名（这里的「本项目」是会话视图解析出的项目，和上面分层同一口径）
   const projectName = (m: MemoryCardData) =>
     m.scope === 'workspace' && m.workspacePath !== undefined && !samePath(m.workspacePath, ws) ? baseName(m.workspacePath) : undefined
@@ -292,7 +256,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const usage = snapshot === undefined
     ? sessionView.status === 'missing'
       ? <Note title={t('sidebar.noSnapshot.title')}>{t('sidebar.noSnapshot.body')}</Note>
-      : <ViewNote state={sessionView} />
+      : <ViewMessage state={sessionView} idle={t('view.loading')} className="pm-side-hint" />
     : bootedAt !== undefined && snapshot.frozenAt < bootedAt
       ? <Note title={t('sidebar.stale.title')}>{t('sidebar.stale.body')}</Note>
       : (
@@ -414,7 +378,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
                           typeLabel={label}
                           hideScope={isOwnSide(item.left) && isOwnSide(item.right)}
                           projectName={projectName}
-                          unavailable={isWaiting(item.decisionId) ? t('sidebar.action.busy') : undefined}
+                          unavailable={runner.unavailable(item.decisionId)}
                           onRule={(verdict) => { rule(item, verdict) }}
                         />
                         {failed(item.decisionId)}
@@ -432,7 +396,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
                           now={now}
                           typeLabel={label}
                           hideScope={item.memory?.scope !== 'global'}
-                          unavailable={isWaiting(item.decisionId) ? t('sidebar.action.busy') : undefined}
+                          unavailable={runner.unavailable(item.decisionId)}
                           onRule={(verdict) => { ruleVertical(item, verdict) }}
                         />
                         {failed(item.decisionId)}
@@ -542,15 +506,6 @@ function Note({ title, children }: { title: string; children: ReactNode }) {
   )
 }
 
-function ViewNote({ state }: { state: ViewState<unknown> }) {
-  const t = useT()
-  const text = state.status === 'error' ? t('view.error', { message: state.message })
-    : state.status === 'outdated' ? t('view.outdated')
-    : state.status === 'missing' ? t('view.missing')
-    : t('view.loading')
-  return <p className="pm-side-hint" role="status">{text}</p>
-}
-
 export const sidebarTabCss = confirmCss + promoteInPlaceCss + modelChangeCss + `
 .pm-side-root { height: 100%; min-height: 0; }
 .pm-side {
@@ -574,7 +529,7 @@ export const sidebarTabCss = confirmCss + promoteInPlaceCss + modelChangeCss + `
 .pm-side-group-depth { font-weight: 400; color: var(--pm-text-2); }
 .pm-side-section-head { display: flex; flex-direction: column; gap: 2px; }
 .pm-side-saved { display: grid; grid-template-columns: minmax(0, 1fr) 24px; align-items: start; gap: 4px 8px; }
-.pm-side-saved > .pm-side-error, .pm-side-saved > .pm-side-saved-promote { grid-column: 1 / -1; }
+.pm-side-saved > .pm-pending-error, .pm-side-saved > .pm-side-saved-promote { grid-column: 1 / -1; }
 .pm-side-saved-promote { display: flex; flex-direction: column; gap: 8px; }
 .pm-side-saved-promote:empty { display: none; }
 .pm-side-change { display: flex; flex-direction: column; gap: 6px; }
@@ -598,7 +553,6 @@ export const sidebarTabCss = confirmCss + promoteInPlaceCss + modelChangeCss + `
 .pm-side-note { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: var(--dsw-radius-md, 12px); background: var(--pm-bg-block); }
 .pm-side-note-title { margin: 0; font-size: 13px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
 .pm-side-note-body { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
-.pm-side-error { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-error); }
 .pm-side-footer {
   margin: auto 0 0; padding-top: 12px; border-top: .5px solid var(--pm-line);
   font-size: 12px; line-height: 1.5; color: var(--pm-text-2);

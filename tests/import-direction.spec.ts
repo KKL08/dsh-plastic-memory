@@ -221,6 +221,12 @@ describe('client/ 不留无引用的代码与文案', () => {
     expect(orphans).toEqual([])
   })
 
+  it('视图没就绪的提示只有一个组件（ViewMessage）：别处不另写一份', () => {
+    const owners = CLIENT_FILES.filter(f => !isSpec(f) && !f.startsWith('locales'))
+      .filter(f => readFileSync(`${CLIENT_DIR}${f}`, 'utf8').includes("'view.error'"))
+    expect(owners).toEqual(['library/shared.tsx'])
+  })
+
   it('每条界面文案键都有引用：字面出现，或由带前缀的模板串拼出（如 `budget.part.${key}`）', () => {
     const source = CLIENT_FILES.filter(f => !isSpec(f) && !f.startsWith('locales'))
       .map(f => readFileSync(`${CLIENT_DIR}${f}`, 'utf8')).join('\n')

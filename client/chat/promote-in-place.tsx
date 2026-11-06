@@ -110,15 +110,14 @@ export function usePromoteInPlace(
         : shown === 'kept-local' ? <ResultLine chip={t('pending.result.keptLocal')} undo={undo}>{t('pending.result.keptLocalBody')}</ResultLine>
         : shown === 'wrote-agents-md' ? <ResultLine chip={t('pending.result.wroteAgentsMd')}>{t('pending.result.wroteAgentsMdBody')}</ResultLine>
         : null}
-      {isRefused ? <p className="pm-pending-text" role="alert" tabIndex={-1}>{t('pending.refused', { title: memory.name })}</p> : null}
+      {isRefused ? <p className="pm-pending-error" role="alert" tabIndex={-1}>{t('pending.refused', { title: memory.name })}</p> : null}
       <CommandFeedback runner={runner} id={PROMOTE} />
     </>
   )
 }
 
-/** 两处的行都窄，按钮用列表行尾的小号，结果行末尾的「撤销」同样小号；失败原话、没有生效同待处理卡，用正文色，只管这两处的行。 */
+/** 两处的行都窄，按钮用列表行尾的小号，结果行末尾的「撤销」同样小号。 */
 export const promoteInPlaceCss = `
 .pm-promote-actions .pm-btn { padding: 2px 10px; font-size: 12px; }
 .pm-result-line .pm-promote-undo { padding: 2px 10px; font-size: 12px; }
-:is(.pm-saved-row, .pm-side-saved) :is(.pm-pending-error, .pm-pending-text) { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text); }
 `

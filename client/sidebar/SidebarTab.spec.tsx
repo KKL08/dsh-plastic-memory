@@ -9,7 +9,7 @@ import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import type { PluginConfig } from '../gateway.ts'
 import { createNavStore, openMemoryPage, PANEL_ID } from '../nav.ts'
 import { memory, renderInShell, levelCountsOf } from '../test-utils.tsx'
-import { SidebarTab } from './SidebarTab.tsx'
+import { SidebarTab, sidebarTabCss } from './SidebarTab.tsx'
 import { createTranslator } from '../i18n.tsx'
 import { en } from '../locales.ts'
 import { PanelShell } from '../ui/PanelShell.tsx'
@@ -276,6 +276,16 @@ describe('SidebarTab 这次新写入的', () => {
     await remove(saved.getByRole('button', { name: '删除这条记忆' }))
     expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'n1', layer: { kind: 'workspace', workspacePath: WS } }])
     expect(screen.queryByText('报销截止每月 25 日。')).toBeNull()
+  })
+
+  it('普通记忆在这里软删、之后在最近删除里彻底删掉：不写含密钥那句「已彻底删除」', async () => {
+    const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
+    const { gateway } = setup({ library: library(pref, proj, glob, fresh), session: snapshot({ savedIds: ['n1'] }), pending: pending() })
+    await remove(within(screen.getByRole('region', { name: '这次新写入的' })).getByRole('button', { name: '删除这条记忆' }))
+    expect(screen.queryByText('报销截止每月 25 日。')).toBeNull()
+    await act(async () => { await gateway.execute('s1', { cmd: 'hard-delete', memoryId: 'n1', layer: { kind: 'workspace', workspacePath: WS } }) })
+    expect(gateway.executed.map(e => e.command.cmd)).toEqual(['forget', 'hard-delete'])
+    expect(screen.queryByText(/已彻底删除/)).toBeNull()
   })
 
   it('确认开着时这条从列表里没了（别处删了）：再回来时是垃圾桶，不带着没收起的确认', async () => {
@@ -588,6 +598,35 @@ describe('SidebarTab 就地裁决', () => {
       gateway.setView('library', library(pref, pref2, proj, glob))
     })
     expect(screen.getByRole('heading', { name: '两条记忆互相矛盾，等你决定' })).toBeInTheDocument()
+  })
+
+  it('PA-46 失败的提示各处一致：英文同一句，正文色（不另起红字）', async () => {
+    const gateway = createFakeGateway({
+      views: { health: health(), library: library(pref, pref2), session: snapshot({ injectedIds: ['p1'] }), pending: pending(conflict) },
+      respond: () => ({ ok: false, code: 'failed', detail: 'cannot locate the losing memory' }),
+      config: configWith('plugin-global'),
+    })
+    render(<PanelShell gateway={gateway} t={createTranslator(en)}><SidebarTab sessionId="s1" workspacePath={WS} openPage={vi.fn()} /></PanelShell>)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Keep both' })) })
+    expect(screen.getByRole('alert')).toHaveTextContent('Did not work: cannot locate the losing memory')
+    expect(screen.getByRole('alert')).toHaveClass('pm-pending-error')
+    expect(sidebarTabCss).not.toContain('pm-side-error')
+  })
+
+  it('PA-45 撤销回 stale：写本地文案，不显示服务端的中文原话', async () => {
+    const gateway = createFakeGateway({
+      views: { health: health(), library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending(conflict) },
+      respond: command => command.cmd === 'undo'
+        ? { ok: false, cmd: command.cmd, code: 'stale', detail: '记忆之后又被改过，未做任何改动' }
+        : { ok: true, cmd: command.cmd, decisionId: 'pd_1' },
+      config: configWith('plugin-global'),
+    })
+    render(<PanelShell gateway={gateway} t={createTranslator(en)}><SidebarTab sessionId="s1" workspacePath={WS} openPage={vi.fn()} /></PanelShell>)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Keep both' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Undo' })) })
+    expect(gateway.executed.map(e => e.command.cmd)).toEqual(['resolve', 'undo'])
+    expect(screen.getByRole('alert')).toHaveTextContent('Did not work: This memory changed afterwards, so undoing would overwrite those changes. Nothing was undone.')
+    expect(screen.queryByText(/未做任何改动/)).toBeNull()
   })
 
   it('裁决失败：原位写宿主原话，冲突卡还在', async () => {

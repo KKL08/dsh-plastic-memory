@@ -512,13 +512,54 @@ describe('交付卡', () => {
     await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
   })
 
-  it('删除失败时原文还在，旁边写服务端原话', async () => {
+  it('PA-46 删除失败时原文还在，旁边按统一的失败提示写服务端原话（role=alert）', async () => {
     const gateway = createFakeGateway({ respond: () => ({ ok: false, code: 'not-found', detail: '记忆不存在' }) })
     renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} />, gateway)
     expand()
     await remove(screen.getByRole('button', { name: '删除这条记忆' }))
-    expect(await screen.findByText('没有成功：记忆不存在')).toBeInTheDocument()
+    expect(await screen.findByRole('alert')).toHaveTextContent('没有成功：记忆不存在')
+    expect(screen.getByRole('alert')).toHaveClass('pm-pending-error')
     expect(screen.getByText('原文')).toBeInTheDocument()
+  })
+
+  it('PA-46 撤销删除失败不显示原因（显式例外）：还是「已删除」和「撤销」', async () => {
+    const gateway = createFakeGateway({
+      respond: command => command.cmd === 'restore'
+        ? { ok: false, cmd: command.cmd, code: 'failed', detail: '磁盘满了' }
+        : { ok: true, cmd: command.cmd, memoryIds: ['mem_1'] },
+    })
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} />, gateway)
+    expand()
+    await remove(screen.getByRole('button', { name: '删除这条记忆' }))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
+    expect(gateway.executed.map(e => e.command.cmd)).toEqual(['forget', 'restore'])
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByText(/磁盘满了/)).toBeNull()
+    expect(screen.getByText('已删除。14 天内也能在最近删除里找回。')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '撤销' })).toBeInTheDocument()
+  })
+
+  it('PA-43 属于别的项目的记忆：删除时服务端先拒，原位跨项目确认，「继续处理」带 allowCrossWorkspace 重发并删掉', async () => {
+    const other = { kind: 'workspace', workspacePath: '/w/blog' } as const
+    const gateway = createFakeGateway({
+      respond: command => 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
+        ? { ok: true, cmd: command.cmd, memoryIds: ['mem_1'] }
+        : { ok: false, cmd: command.cmd, code: 'cross-workspace', rejected: [{ id: 'mem_1', workspacePath: '/w/blog' }] },
+    })
+    const item = { ...saved('mem_1', '原文'), memory: { ...saved('mem_1', '原文').memory, workspacePath: '/w/blog' } }
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[item]} now={NOW} openDetail={() => {}} />, gateway)
+    expand()
+    await remove(screen.getByRole('button', { name: '删除这条记忆' }))
+    expect(screen.getByText('这条记忆属于 blog 项目，不是当前项目。确定在这里处理它吗？')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByRole('button', { name: '删除这条记忆' })).toHaveAttribute('aria-disabled', 'true')
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '继续处理' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([
+      { cmd: 'forget', memoryId: 'mem_1', layer: other },
+      { cmd: 'forget', memoryId: 'mem_1', layer: other, allowCrossWorkspace: true },
+    ])
+    expect(await screen.findByText('已删除。14 天内也能在最近删除里找回。')).toBeInTheDocument()
+    expect(screen.queryByText(/属于 blog 项目/)).toBeNull()
   })
 })
 
@@ -797,6 +838,24 @@ describe('交付卡与其他界面共用删除状态', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除' })) })
     expect(chatCard().getByText('已删除。14 天内也能在最近删除里找回。')).toBeInTheDocument()
     expect(chatCard().queryByRole('button', { name: '删除这条记忆' })).toBeNull()
+  })
+
+  it('删除失败后别处删了这条：「已删除」那一行不带着之前的失败，撤销回来后也没有', async () => {
+    let calls = 0
+    const gateway = createFakeGateway({
+      views: { library: libraryView() },
+      respond: command => (calls++ === 0 ? { ok: false, cmd: command.cmd, code: 'failed', detail: '磁盘满了' } : { ok: true, cmd: command.cmd, memoryIds: ['n1'] }),
+    })
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd={WS} saved={[fresh()]} now={NOW} openDetail={() => {}} />, gateway)
+    expand(chatCard())
+    await remove(chatCard().getByRole('button', { name: '删除这条记忆' }))
+    expect(chatCard().getByRole('alert')).toHaveTextContent('没有成功：磁盘满了')
+    await act(async () => { await gateway.execute('s1', { cmd: 'forget', memoryId: 'n1', layer: { kind: 'workspace', workspacePath: WS } }) })
+    expect(chatCard().getByText('已删除。14 天内也能在最近删除里找回。')).toBeInTheDocument()
+    expect(chatCard().queryByRole('alert')).toBeNull()
+    await act(async () => { fireEvent.click(chatCard().getByRole('button', { name: '撤销' })) })
+    expect(chatCard().getByRole('button', { name: '删除这条记忆' })).toBeInTheDocument()
+    expect(chatCard().queryByRole('alert')).toBeNull()
   })
 
   it('确认开着时别处删了这条：撤销回来后是垃圾桶，不带着没收起的确认', async () => {
@@ -1155,7 +1214,7 @@ describe('交付卡：模型改写、替代已有记忆', () => {
     expect(row('mem_r').queryByRole('button', { name: '撤销修改' })).toBeNull()
   })
 
-  it('之后又改过：视图标 changed，或撤销回 stale，都写「之后又改过，没法直接撤销」、不给按钮', async () => {
+  it('PA-46 之后又改过：视图标 changed，或撤销回 stale（显式例外，不当失败显示），都写「之后又改过，没法直接撤销」、不给按钮', async () => {
     card([rewrite()], [change({ state: 'changed' })])
     fireEvent.click(screen.getByRole('button', { expanded: false }))
     expect(row('mem_r').getByText('之后又改过，没法直接撤销')).toBeInTheDocument()
@@ -1165,6 +1224,8 @@ describe('交付卡：模型改写、替代已有记忆', () => {
     fireEvent.click(screen.getByRole('button', { expanded: false }))
     await act(async () => { fireEvent.click(row('mem_r').getByRole('button', { name: '撤销修改' })) })
     expect(row('mem_r').getByText('之后又改过，没法直接撤销')).toBeInTheDocument()
+    expect(row('mem_r').queryByRole('alert')).toBeNull()
+    expect(row('mem_r').queryByText(/又改过$/)).toBeNull()
   })
 
   it('别处撤销过（视图标 undone）：写「已撤销」', () => {
