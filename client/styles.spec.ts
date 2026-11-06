@@ -109,8 +109,8 @@ describe('样式撞名', () => {
     expect(styleConstantsIn('const aCss = `.pm-a {}`\nexport const bCss =\n  aCss + `.pm-b {}`\nconst PAGE_CSS = slotCss()\nexport const slotCss = (slot: string) => slot')).toEqual(['aCss', 'bCss'])
   })
 
-  it('只有插槽外壳、工具记录和命令记录自己插 <style>，别的组件的样式都走登记表', () => {
-    expect(filesInjectingStyle(import.meta.dirname).sort()).toEqual(['chat/MemoryCommandRow.tsx', 'chat/MemoryToolRow.tsx', 'ui/PanelShell.tsx'])
+  it('只有插槽外壳和记忆工具行（命令行共用）自己插 <style>，别的组件的样式都走登记表', () => {
+    expect(filesInjectingStyle(import.meta.dirname).sort()).toEqual(['chat/MemoryToolRow.tsx', 'ui/PanelShell.tsx'])
   })
 
   it('各插槽根不再重复带公共样式', () => {
