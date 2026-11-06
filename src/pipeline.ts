@@ -52,8 +52,17 @@ export type PipelineResult =
 /**
  * 同一个拒绝码下再分的内部子码：只给测试和日志区分分支，不是工具契约的稳定标识符（稳定码见 contract-codes.ts）。
  * changed-after-read：update 读到目标之后、写入之前，目标被别处改过或删掉了，这次没写。
+ * subagent-*：子 agent 写入约束的各条（都回 subagent-restricted），见 checkSubagentWrite。
  */
-export type SaveRejectSubcode = 'changed-after-read'
+export type SaveRejectSubcode =
+  | 'changed-after-read'
+  | 'subagent-source-mode'
+  | 'subagent-type'
+  | 'subagent-supersedes'
+  | 'subagent-force'
+  | 'subagent-target-gone'
+  | 'subagent-not-own'
+  | 'subagent-quota'
 
 /** 保存成功但要提醒模型/用户的事：code 稳定、text 可改。 */
 export type SaveWarning = CodedNote<WarningCode>
@@ -133,7 +142,7 @@ export const SUBAGENT_MAX_SAVES_DEFAULT = 10
  */
 function changedAfterRead(id: string, current: MemoryRecord | undefined, isFromSubagent: boolean): PipelineResult {
   if (isFromSubagent) {
-    return { kind: 'rejected', code: 'subagent-restricted', reason: `记忆 ${id} 在读取之后被改过（可能已被接受、删除或提升为全局），这次没写；要改的内容带回主会话。` }
+    return { kind: 'rejected', code: 'subagent-restricted', subcode: 'changed-after-read', reason: `记忆 ${id} 在读取之后被改过（可能已被接受、删除或提升为全局），这次没写；要改的内容带回主会话。` }
   }
   const subcode = 'changed-after-read'
   if (current === undefined || current.status === 'deleted') {
@@ -171,7 +180,7 @@ function isSameRecord(a: MemoryRecord, b: MemoryRecord): boolean {
 async function checkSubagentWrite(
   input: SaveCandidate,
   deps: PipelineDeps,
-): Promise<{ candidate: SaveCandidate; warnings: SaveWarning[] } | { code: RejectCode; reason: string }> {
+): Promise<{ candidate: SaveCandidate; warnings: SaveWarning[] } | { code: RejectCode; subcode: SaveRejectSubcode; reason: string }> {
   const warnings: SaveWarning[] = []
   let candidate = input
   // 子 agent 没有提升候选的通道：global 直接落当前项目，提不提全局由主会话决定
@@ -182,6 +191,7 @@ async function checkSubagentWrite(
   if (!SUBAGENT_SOURCE_MODES.includes(candidate.sourceMode)) {
     return {
       code: 'subagent-restricted',
+      subcode: 'subagent-source-mode',
       reason: `sourceMode=${candidate.sourceMode} 子 agent 用不了：子 agent 收到的指令来自委派方，不算用户明说；按观察（environment-observed）或推断（agent-inferred）重发。`,
     }
   }
@@ -190,16 +200,18 @@ async function checkSubagentWrite(
     const shown = writable.length > 0 ? `当前场景里能写：${writable.join('、')}` : '当前场景里两类都没有'
     return {
       code: 'subagent-restricted',
+      subcode: 'subagent-type',
       reason: `子 agent 只能写 knowledge、project 两类，且要在当前场景里（${shown}）；"${candidate.type}" 不行，这件事带回主会话。`,
     }
   }
   if ((candidate.supersedes ?? []).length > 0) {
-    return { code: 'subagent-restricted', reason: '子 agent 不能用 supersedes 替代旧记忆；去掉 supersedes 重发，要替代哪条带回主会话。' }
+    return { code: 'subagent-restricted', subcode: 'subagent-supersedes', reason: '子 agent 不能用 supersedes 替代旧记忆；去掉 supersedes 重发，要替代哪条带回主会话。' }
   }
   // force 放行的三道检查（去重、手改保护、疑似密钥）都要用户点头，子 agent 问不到用户
   if (candidate.force) {
     return {
       code: 'subagent-restricted',
+      subcode: 'subagent-force',
       reason: '子 agent 不能带 force：去重、手改保护、疑似密钥三道检查子 agent 都过不去。撞重复就另存或放弃，疑似密钥一律不存；去掉 force 重发。',
     }
   }
@@ -208,11 +220,11 @@ async function checkSubagentWrite(
   if (candidate.action === 'update' && candidate.id !== undefined) {
     const target = await deps.store.get(candidate.id, { workspacePath: deps.workspacePath })
     if (target === undefined || target.status === 'deleted') {
-      return { code: 'subagent-restricted', reason: `要改的记忆 ${candidate.id} 不存在或已删除，带回主会话。` }
+      return { code: 'subagent-restricted', subcode: 'subagent-target-gone', reason: `要改的记忆 ${candidate.id} 不存在或已删除，带回主会话。` }
     }
     const why = notOwnPending(target, deps.session.id)
     if (why !== undefined) {
-      return { code: 'subagent-restricted', reason: `子 agent 只能改本会话存下、还没被接受的记忆；${candidate.id} ${why}。要改的内容带回主会话。` }
+      return { code: 'subagent-restricted', subcode: 'subagent-not-own', reason: `子 agent 只能改本会话存下、还没被接受的记忆；${candidate.id} ${why}。要改的内容带回主会话。` }
     }
   }
   // 新建配额：现数本会话创建的记录（在用含已过期、已取代都算，删了就释放），不加锁、不另存计数。
@@ -222,7 +234,7 @@ async function checkSubagentWrite(
     const mine = await deps.store.query({ scope: { kind: 'workspace', workspacePath: deps.workspacePath }, status: ['active', 'superseded'] })
     const count = mine.filter(r => r.delegation?.sessionId === deps.session.id).length
     if (count >= max) {
-      return { code: 'subagent-restricted', reason: `本会话已存 ${count} 条，到了每个子会话 ${max} 条的上限；其余带回主会话。` }
+      return { code: 'subagent-restricted', subcode: 'subagent-quota', reason: `本会话已存 ${count} 条，到了每个子会话 ${max} 条的上限；其余带回主会话。` }
     }
   }
   return { candidate, warnings }
