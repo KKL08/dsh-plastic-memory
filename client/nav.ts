@@ -4,7 +4,7 @@
  * 另管两个依赖宿主可选服务的出口（插件页、右侧栏记忆 tab）：服务在才能用，不能用的入口不画。
  */
 import { useSyncExternalStore } from 'react'
-import { sameLayer, type GuiLayerRef, type PendingLevel, type ScopeRef } from '../src/gui/contract.ts'
+import { sameScope, type PendingLevel, type Scope, type ScopeOrAll } from '../src/gui/contract.ts'
 import type { HostContext } from './host.ts'
 import { formatNumber, type Translate } from './i18n.tsx'
 import { baseName } from './path.ts'
@@ -21,28 +21,28 @@ export const SIDEBAR_TAB_KIND = 'plastic-memory'
 export const MEMORY_VIEWS = ['todo', 'library', 'deleted'] as const
 export type MemoryView = (typeof MEMORY_VIEWS)[number]
 
-/** 记忆页左栏选中的范围：全部，或一个作用域（全局、某个项目）。即契约里的范围（ScopeRef）。 */
-export type PageScope = ScopeRef
+/** 记忆页左栏选中的范围：全部，或一个作用域（全局、某个项目）。即契约里的范围（ScopeOrAll）。 */
+export type PageScope = ScopeOrAll
 export const ALL_SCOPE: PageScope = { kind: 'all' }
 
 export function samePageScope(a: PageScope, b: PageScope): boolean {
   if (a.kind === 'all' || b.kind === 'all') return a.kind === b.kind
-  return sameLayer(a, b)
+  return sameScope(a, b)
 }
 
 /** 属于这些作用域的条目在不在这个范围里：「全部」包含一切。 */
-export function isInScope(layers: readonly GuiLayerRef[], scope: PageScope): boolean {
-  return scope.kind === 'all' || layers.some(layer => sameLayer(layer, scope))
+export function isInScope(scopes: readonly Scope[], scope: PageScope): boolean {
+  return scope.kind === 'all' || scopes.some(s => sameScope(s, scope))
 }
 
 /** 作用域的显示顺序：全局在前，项目按显示名（路径最后一段）的字母序，同名按路径。左栏和「全部」里的分段都按它。 */
-export function compareLayers(a: GuiLayerRef, b: GuiLayerRef): number {
+export function compareScopes(a: Scope, b: Scope): number {
   if (a.kind === 'global' || b.kind === 'global') return a.kind === b.kind ? 0 : a.kind === 'global' ? -1 : 1
   return baseName(a.workspacePath).localeCompare(baseName(b.workspacePath)) || a.workspacePath.localeCompare(b.workspacePath)
 }
 
 /** 范围的显示名：「全部」、「全局」，项目写目录名（路径最后一段）。左栏、标题行、状态条、范围标签都用它。 */
-export function scopeName(scope: PageScope, t: Translate): string {
+export function scopeLabel(scope: PageScope, t: Translate): string {
   return scope.kind === 'all' ? t('scope.all') : scope.kind === 'global' ? t('scope.global') : baseName(scope.workspacePath)
 }
 
@@ -81,7 +81,7 @@ export type NewItemJump = 'todo' | 'advice' | 'any'
 export const LEGACY_TABS = ['pending', 'health', 'library', 'deleted'] as const
 export interface LegacyNavTarget {
   tab: (typeof LEGACY_TABS)[number]
-  scope?: GuiLayerRef
+  scope?: Scope
   memoryId?: string
   level?: PendingLevel
 }

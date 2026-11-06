@@ -4,10 +4,10 @@
  * 删掉的那行原位换成结果行，可撤销（发 restore）；含密钥的再确认一次彻底删除，不可恢复。
  */
 import { useEffect, useState } from 'react'
-import { layerOfMemory, scopeKey, type LibraryView, type MemoryCard as MemoryCardData } from '../../src/gui/contract.ts'
+import { checkupKey, scopeOfMemory, type LibraryView, type MemoryCard as MemoryCardData } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, useT, type Translate } from '../i18n.tsx'
-import { isInScope, scopeName, type NavStore, type PageScope } from '../nav.ts'
+import { isInScope, scopeLabel, type NavStore, type PageScope } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { Icon } from '../ui/Icon.tsx'
@@ -20,8 +20,8 @@ function dirName(path: string): string {
   return path.replace(/[\\/][^\\/]*$/, '')
 }
 
-/** 这一层的目录：记忆文件都在层目录顶层，取任一条的所在目录；空的全局层落在 `<memoryRoot>/global`。 */
-function layerDir(view: LibraryView, scope: PageScope, firstFile: string | undefined): string | undefined {
+/** 这个作用域的目录：记忆文件都在作用域目录顶层，取任一条的所在目录；空的全局落在 `<memoryRoot>/global`。 */
+function scopeDir(view: LibraryView, scope: PageScope, firstFile: string | undefined): string | undefined {
   if (scope.kind === 'all') return undefined
   if (firstFile !== undefined && firstFile !== '') return dirName(firstFile)
   return scope.kind === 'global' ? `${view.memoryRoot.replace(/[\\/]+$/, '')}/global` : undefined
@@ -78,7 +78,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
   // 本页删掉、视图里已经没有的那几条留在原位（等结果、结果行或撤销后等视图回来）；分组的排序是稳定的，插回原位就落回原来的组和位置
   const scopeItems = [...viewItems]
   for (const row of kept) {
-    const at = layerOfMemory(row.memory)
+    const at = scopeOfMemory(row.memory)
     if (at === undefined || !isInScope([at], scope) || scopeItems.some(m => m.id === row.memory.id)) continue
     scopeItems.splice(Math.min(row.index, scopeItems.length), 0, row.memory)
   }
@@ -98,12 +98,12 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
   }, [viewIds])
   const { flashId, revealId, targetId, clear } = useFlashTarget(nav, items.map(m => m.id))
   const typeLabel = useTypeLabel(session)
-  const folds = useFold(fold, `library|${scopeKey(scope)}`, isSearching)
+  const folds = useFold(fold, `library|${checkupKey(scope)}`, isSearching)
   if (view.status !== 'ready') return <ViewMessage state={view} />
 
   const data = view.data
   const total = data.layers.reduce((n, l) => n + l.items.length, 0)
-  const dir = layerDir(data, scope, viewItems[0]?.filePath)
+  const dir = scopeDir(data, scope, viewItems[0]?.filePath)
   const notice = actions.notice
   const mark = (memory: MemoryCardData, state: DoneRow['state']) => {
     setDone((prev) => {
@@ -128,17 +128,17 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
 
   /** 「全部」里卡片上的范围名：点了落到那个范围的记忆查看，这一条所在的组展开，滚到中间、高亮、接住焦点。 */
   const scopeLink = (memory: MemoryCardData) => {
-    const layer = layerOfMemory(memory)
-    if (layer === undefined) return undefined
-    const name = scopeName(layer, t)
+    const own = scopeOfMemory(memory)
+    if (own === undefined) return undefined
+    const name = scopeLabel(own, t)
     return (
       <button
         type="button"
         className="pm-mc-item pm-lib-scope"
         aria-label={t('library.goScope', { scope: name })}
-        onClick={() => { nav.update({ scope: layer, memoryId: memory.id }) }}
+        onClick={() => { nav.update({ scope: own, memoryId: memory.id }) }}
       >
-        <Icon name={layer.kind === 'global' ? 'globe' : 'folder'} size={13} />
+        <Icon name={own.kind === 'global' ? 'globe' : 'folder'} size={13} />
         {name}
         <span aria-hidden="true">›</span>
       </button>
@@ -146,7 +146,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
   }
 
   const row = (memory: MemoryCardData) => {
-    const layer = layerOfMemory(memory)
+    const own = scopeOfMemory(memory)
     if (done.get(memory.id)?.state === 'deleted') {
       return (
         <li key={memory.id} className="pm-list-row pm-lib-done">
@@ -166,7 +166,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
               <Button
                 variant="ghost"
                 unavailable={actions.unavailable(memory.id)}
-                onClick={() => { void actions.run(memory.id, { cmd: 'restore', memoryId: memory.id, layer }, null, () => { mark(memory, 'restored') }) }}
+                onClick={() => { void actions.run(memory.id, { cmd: 'restore', memoryId: memory.id, layer: own }, null, () => { mark(memory, 'restored') }) }}
               >
                 {t('library.undo')}
               </Button>
@@ -191,7 +191,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
               // 删的是正在高亮的那一条：当作播完，所在的组记成展开，结果行和「撤销」不缩回「展开其余」里
               if (memory.id === flashId) endFlash()
               mark(memory, 'deleting')
-              void actions.run(memory.id, { cmd: 'forget', memoryId: memory.id, layer }, null, () => { mark(memory, 'deleted') })
+              void actions.run(memory.id, { cmd: 'forget', memoryId: memory.id, layer: own }, null, () => { mark(memory, 'deleted') })
             }}
             trigger={open => <Button variant="ghost" unavailable={actions.unavailable(memory.id)} onClick={open}>{t('library.delete')}</Button>}
           />

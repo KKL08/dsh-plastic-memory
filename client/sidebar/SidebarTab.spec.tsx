@@ -520,7 +520,7 @@ describe('SidebarTab 这次新写入的：提升候选就地处理', () => {
 
 describe('SidebarTab 同 id 的多份副本', () => {
   const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。', updatedAt: 100 })
-  const withLayers = (...extra: LibraryView['layers']) => {
+  const withScopes = (...extra: LibraryView['layers']) => {
     const base = library(pref, proj, glob, fresh)
     return { ...base, layers: [...base.layers, ...extra] }
   }
@@ -528,7 +528,7 @@ describe('SidebarTab 同 id 的多份副本', () => {
   it('别的项目里有同 id 的更新副本：只看会话看得见的层，显示并删除本项目那份', async () => {
     const elsewhere = memory({ id: 'n1', type: 'knowledge', content: '别的项目的同 id 副本', workspacePath: '/w/blog', updatedAt: 999 })
     const { gateway } = setup({
-      library: withLayers({ layer: { kind: 'workspace', workspacePath: '/w/blog' }, items: [elsewhere] }),
+      library: withScopes({ layer: { kind: 'workspace', workspacePath: '/w/blog' }, items: [elsewhere] }),
       session: snapshot({ savedIds: ['n1'] }), pending: pending(),
     })
     const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
@@ -794,6 +794,21 @@ describe('SidebarTab 底部入口', () => {
     fireEvent.click(screen.getByRole('button', { name: '在记忆页处理 ›' }))
     expect(nav.get()).toEqual({ view: 'todo', scope: { kind: 'workspace', workspacePath: WS }, fromChat: true })
     expect(layout.selectPanel).toHaveBeenCalledWith(PANEL_ID)
+  })
+})
+
+describe('SidebarTab 项目路径的写法', () => {
+  it('PA-22：会话视图的项目路径带末尾分隔符、记忆和待处理里不带：认成同一个项目，命令里的作用域仍是记录里的原路径', async () => {
+    const { container, gateway } = setup({
+      library: library(pref, pref2, proj, glob),
+      session: snapshot({ workspacePath: `${WS}/`, injectedIds: ['p1', 'g1'], savedIds: ['p2'] }),
+      pending: pending(vertical),
+    })
+    expect(container.querySelector('.pm-side-crumb')).toHaveTextContent('本项目 / app')
+    expect(screen.getByText(/本项目还有 1 处待处理/)).toBeInTheDocument()
+    const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
+    await remove(saved.getByRole('button', { name: '删除这条记忆' }))
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'forget', memoryId: 'p2', layer: { kind: 'workspace', workspacePath: WS } }])
   })
 })
 

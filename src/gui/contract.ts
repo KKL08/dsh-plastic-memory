@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { memoryRecordSchema } from '../record-schema.ts'
-import { scopeKey as standardScopeKey, scopeSchema } from '../scope.ts'
+import { sameScope, scopeKey, scopeOfMemory, scopeSchema, type Scope } from '../scope.ts'
 import { CHECKUP_CAUSE_KINDS, CHECKUP_INITIATORS, DIRECTORY_NOTE_CODES, IGNORABLE_ADVICE_TYPES, MODEL_CHANGE_KINDS, OVERFLOW_MODES, SCAN_NOTE_CODES } from '../contract-codes.ts'
 
 /** 快照、最近删除的保留窗口（毫秒）：对话卡据此判断模型改写的改前版本是否已过期。 */
@@ -50,8 +50,8 @@ const generatedAt = z.number().optional()
 
 // —— 共用片段 ——
 
-export const layerRefSchema = scopeSchema
-export type GuiLayerRef = z.infer<typeof layerRefSchema>
+/** 作用域的身份（形状、判等、标准键、从记忆推作用域）定义在 scope.ts，经这里转出给浏览器半侧。 */
+export { sameScope, scopeKey, scopeOfMemory, scopeSchema, type Scope } from '../scope.ts'
 
 const sourceModeSchema = memoryRecordSchema.shape.source.unwrap().shape.sourceMode
 const reviewedBySchema = memoryRecordSchema.shape.delegation.unwrap().shape.reviewed.unwrap().shape.by
@@ -99,14 +99,8 @@ export const memoryCardSchema = z.object({
 })
 export type MemoryCard = z.infer<typeof memoryCardSchema>
 
-/** 记忆卡所在的层：同 id 在几个层里各有一份时，命令带上它指明页面上的那一份。项目记忆缺 workspacePath 时为 undefined（服务端按借来的会话定位）。 */
-export function layerOfMemory(memory: Pick<MemoryCard, 'scope' | 'workspacePath'>): GuiLayerRef | undefined {
-  if (memory.scope === 'global') return { kind: 'global' }
-  return memory.workspacePath === undefined ? undefined : { kind: 'workspace', workspacePath: memory.workspacePath }
-}
-
 /**
- * 直接合并时保留哪条：一条全局一条项目时保留全局那条；同层（或两个不同项目）保留创建较早的，同时创建按 id。
+ * 直接合并时保留哪条：一条全局一条项目时保留全局那条；同一作用域（或两个不同项目）保留创建较早的，同时创建按 id。
  * 服务端按它决定保留哪条，界面按它预填名称和摘要。
  */
 export function mergeKeeperIndex(memories: readonly [MergeSide, MergeSide]): 0 | 1 {
@@ -160,7 +154,7 @@ export const PENDING_LEVEL_OF_KIND = {
 
 /**
  * 建议整理项的问题类型，按显示顺序。除 stale 外与体检发现（governance/schema.ts FINDING_TYPES）同名：
- * expired / bloat / orphan 由规则检查实时算；redundancy / misplaced / unclear 取该层上次语义体检的缓存（体检关闭时不出）；
+ * expired / bloat / orphan 由规则检查实时算；redundancy / misplaced / unclear 取该作用域上次语义体检的缓存（体检关闭时不出）；
  * stale = 超过类型衰退期没确认（健康分的新鲜度）。
  */
 export const ADVICE_TYPES = ['expired', 'bloat', 'redundancy', 'orphan', 'misplaced', 'unclear', 'stale'] as const
@@ -169,7 +163,7 @@ export type AdviceType = (typeof ADVICE_TYPES)[number]
 /** 能「忽略」的建议类型：除「很久没确认」外都能（它的出路是「仍然有效」或删除）。名字定义在 contract-codes（治理侧同用）。 */
 export { IGNORABLE_ADVICE_TYPES, type IgnorableAdviceType } from '../contract-codes.ts'
 
-/** 能「让模型改」（内容重复是「让模型合并」）的建议类型：服务端按它给默认要求，界面按它出按钮。放错层不在其中：改写不动层，它只问挪不挪。 */
+/** 能「让模型改」（内容重复是「让模型合并」）的建议类型：服务端按它给默认要求，界面按它出按钮。放错层不在其中：改写不换作用域，它只问挪不挪。 */
 export const MODEL_EDIT_ADVICE_TYPES = ['bloat', 'redundancy', 'unclear'] as const satisfies readonly AdviceType[]
 export type ModelEditAdviceType = (typeof MODEL_EDIT_ADVICE_TYPES)[number]
 
@@ -204,7 +198,7 @@ export const pendingItemSchema = z.discriminatedUnion('kind', [
     mode: z.enum(OVERFLOW_MODES), tier: z.number().int().nonnegative(), workspacePath: z.string().optional(),
   }),
   z.object({
-    kind: z.literal('unreadable-file'), level: levelOf('unreadable-file'), layer: layerRefSchema,
+    kind: z.literal('unreadable-file'), level: levelOf('unreadable-file'), layer: scopeSchema,
     filePath: z.string(), relativePath: z.string(),
     /** 解析器原话。 */
     error: z.string(),
@@ -220,13 +214,8 @@ export const pendingItemSchema = z.discriminatedUnion('kind', [
 ])
 export type PendingItem = z.infer<typeof pendingItemSchema>
 
-/** 两个作用域是否同一个：都是全局，或同一个项目路径。 */
-export function sameLayer(a: GuiLayerRef, b: GuiLayerRef): boolean {
-  return a.kind === b.kind && (a.kind === 'global' || (b.kind === 'workspace' && a.workspacePath === b.workspacePath))
-}
-
 /**
- * 待处理项的身份（判新增、「全部」里去重）：账本来的按条目 id；密钥按层 + 记忆 id；读不出的文件按路径；
+ * 待处理项的身份（判新增、「全部」里去重）：账本来的按条目 id；密钥按作用域 + 记忆 id；读不出的文件按路径；
  * 建议整理按类型 + 排序后的记忆 id。服务端和客户端共用。
  */
 export function pendingItemKey(item: PendingItem): string {
@@ -240,28 +229,28 @@ export function pendingItemKey(item: PendingItem): string {
 
 /**
  * 待处理项属于哪些范围（全局或某个项目；「全部」包含一切，不在返回里），不重复，按出现先后。服务端和客户端共用：
- * 记忆类条目和基线冲突按记忆所在层；冲突按双方各自的层（全局和项目之间的属于两个范围）；超限按它的作用域
- * （没有项目的会话归全局）；读不出的文件按所在目录；建议整理按涉及记忆各自的层。定位不到层的记忆不算。
+ * 记忆类条目和基线冲突按记忆所在作用域；冲突按双方各自的作用域（全局和项目之间的属于两个范围）；超限按它的作用域
+ * （没有项目的会话归全局）；读不出的文件按所在目录；建议整理按涉及记忆各自的作用域。定位不到作用域的记忆不算。
  */
-export function pendingItemScopes(item: PendingItem): GuiLayerRef[] {
-  const layers = ((): Array<GuiLayerRef | undefined> => {
+export function pendingItemScopes(item: PendingItem): Scope[] {
+  const scopes = ((): Array<Scope | undefined> => {
     switch (item.kind) {
       case 'unreadable-file': return [item.layer]
       case 'overflow': return [item.workspacePath === undefined ? { kind: 'global' } : { kind: 'workspace', workspacePath: item.workspacePath }]
-      case 'conflict-horizontal': return [item.left, item.right].map(m => m === null ? undefined : layerOfMemory(m))
-      case 'advice': return item.memories.map(layerOfMemory)
-      default: return [item.memory === null ? undefined : layerOfMemory(item.memory)]
+      case 'conflict-horizontal': return [item.left, item.right].map(m => m === null ? undefined : scopeOfMemory(m))
+      case 'advice': return item.memories.map(scopeOfMemory)
+      default: return [item.memory === null ? undefined : scopeOfMemory(item.memory)]
     }
   })()
-  const out: GuiLayerRef[] = []
-  for (const layer of layers) if (layer !== undefined && !out.some(l => sameLayer(l, layer))) out.push(layer)
+  const out: Scope[] = []
+  for (const scope of scopes) if (scope !== undefined && !out.some(s => sameScope(s, scope))) out.push(scope)
   return out
 }
 
 /** 左栏图标圆点：密钥红点盖过琥珀点；读不出的文件、建议整理不亮点。 */
 export const PENDING_DOTS = ['none', 'amber', 'red'] as const
 
-/** 待处理（全部层），按 PENDING_ITEM_KINDS 顺序（先按级别）、同类按 firstSeenAt 升序；建议整理按 ADVICE_TYPES、层（global 在前）、名称排。 */
+/** 待处理（全部作用域），按 PENDING_ITEM_KINDS 顺序（先按级别）、同类按 firstSeenAt 升序；建议整理按 ADVICE_TYPES、作用域（global 在前）、名称排。 */
 export const pendingViewSchema = z.object({
   version,
   generatedAt,
@@ -289,22 +278,22 @@ export const RESOLVE_VERDICTS = ['keep-left', 'keep-right', 'keep-both'] as cons
 /** 一项扣分：扣了多少分，包含哪些问题类型（扣 0 分时为空）。 */
 const deductionSchema = z.object({ points: z.number().nonnegative(), types: z.array(z.string()) })
 
-export const healthLayerSchema = z.object({
-  layer: layerRefSchema,
+export const healthScopeSchema = z.object({
+  layer: scopeSchema,
   totalMemories: z.number().int().nonnegative(),
-  /** 有密钥时该层不打分：null。 */
+  /** 有密钥时该作用域不打分：null。 */
   score: z.number().nullable(),
   tier: z.enum(['green', 'amber', 'red']),
   gate: z.object({ secret: z.boolean() }),
   /** 非零的扣分原因计数（规则检查实时 + 内容检查取上次体检），type 取值见 governance/schema.ts FINDING_TYPES，按其顺序。 */
   issues: z.array(z.object({ type: z.string(), count: z.number().int().positive() })),
   /**
-   * 上次体检：本层最近一次体检完成记录的完成时间（规则检查和内容检查都写完才算）；还没有完成记录（升级前体检过）时
+   * 上次体检：本作用域最近一次体检完成记录的完成时间（规则检查和内容检查都写完才算）；还没有完成记录（升级前体检过）时
    * 暂取内容检查缓存的时间；从没体检过为 null。
    */
   lastCheckupAt: z.number().nullable(),
   /**
-   * 本层被用户忽略、没有计分的建议（issues 里已不含它们），按问题类型、再按第一条记忆名排；条数即长度。
+   * 本作用域被用户忽略、没有计分的建议（issues 里已不含它们），按问题类型、再按第一条记忆名排；条数即长度。
    * memories 是涉及的记忆（内容重复两条，按 id 排序），名称与摘要已遮盖密钥；取消忽略按 type + 这些 id 发 unignore-advice。
    */
   ignored: z.array(z.object({
@@ -325,7 +314,7 @@ export const healthViewSchema = z.object({
   governanceEnabled: z.boolean(),
   /** 插件本次加载的时刻（epoch ms）：会话快照的 frozenAt 早于它就是「重启后未重新带入」；浏览器半侧拿不到宿主进程时间，从这里读。 */
   bootedAt: z.number().optional(),
-  layers: z.array(healthLayerSchema),
+  layers: z.array(healthScopeSchema),
 })
 export type HealthView = z.infer<typeof healthViewSchema>
 
@@ -375,8 +364,8 @@ export const libraryViewSchema = z.object({
   generatedAt,
   /** 存储目录（绝对路径）。 */
   memoryRoot: z.string(),
-  /** global 在前，项目按路径排序；每层只列 active 记忆，按 name 再 id 排序。 */
-  layers: z.array(z.object({ layer: layerRefSchema, items: z.array(memoryCardSchema) })),
+  /** global 在前，项目按路径排序；每个作用域只列 active 记忆，按 name 再 id 排序。 */
+  layers: z.array(z.object({ layer: scopeSchema, items: z.array(memoryCardSchema) })),
   /** 目录问题：同 id 多份副本、被忽略的字段、缺标记 / 不可读目录。 */
   directoryIssues: z.array(directoryIssueSchema),
   /**
@@ -482,20 +471,16 @@ export type WorkspaceMapView = z.infer<typeof workspaceMapViewSchema>
 
 // —— 自动体检 ——
 
-/** 范围键：「全部」、全局，项目用它的绝对路径（scopeKey）。自动体检设置表、体检记录表按它存。 */
-export const SCOPE_KEYS = { all: 'all', global: 'global' } as const
+/** 「全部」的体检键；全局和项目取标准键（见 checkupKey）。自动体检设置表、体检记录表按体检键存。 */
+export const SCOPE_KEYS = { all: 'all' } as const
 
 /** 范围：记忆页左栏选中的对象。「全部」是所有作用域的合称，本身不是作用域、不单独体检，自动体检的默认值记在它上面。 */
-export const scopeRefSchema = z.discriminatedUnion('kind', [z.object({ kind: z.literal('all') }), ...layerRefSchema.options])
-export type ScopeRef = z.infer<typeof scopeRefSchema>
-
-export function scopeKey(scope: ScopeRef): string {
-  return scope.kind === 'workspace' ? scope.workspacePath : SCOPE_KEYS[scope.kind]
-}
+export const scopeOrAllSchema = z.discriminatedUnion('kind', [z.object({ kind: z.literal('all') }), ...scopeSchema.options])
+export type ScopeOrAll = z.infer<typeof scopeOrAllSchema>
 
 /** 体检键（自动体检设置表、体检记录表按它存）：「全部」取 `all`，作用域取标准键。 */
-export function checkupKey(scope: ScopeRef): string {
-  return scope.kind === 'all' ? SCOPE_KEYS.all : standardScopeKey(scope)
+export function checkupKey(scope: ScopeOrAll): string {
+  return scope.kind === 'all' ? SCOPE_KEYS.all : scopeKey(scope)
 }
 
 /** 自动体检「每 N 天」的上限。 */
@@ -510,10 +495,10 @@ export const AUTO_CHECKUP_FOLLOW = 'follow'
  * 自动体检的继承解析：settings 是设置表的内容（范围键 → 设了的频率）。「全部」的值是默认值，没设就是仅手动；
  * 全局和项目没有条目时跟随它，有条目就是单独设置（值和默认值相同也算），之后改「全部」它不跟。
  */
-export function resolveAutoCheckup(settings: ReadonlyMap<string, AutoCheckupFrequency>, scope: ScopeRef): { frequency: AutoCheckupFrequency; isOwn: boolean } {
+export function resolveAutoCheckup(settings: ReadonlyMap<string, AutoCheckupFrequency>, scope: ScopeOrAll): { frequency: AutoCheckupFrequency; isOwn: boolean } {
   const fallback = settings.get(SCOPE_KEYS.all) ?? 'manual'
   if (scope.kind === 'all') return { frequency: fallback, isOwn: false }
-  const own = settings.get(scopeKey(scope))
+  const own = settings.get(checkupKey(scope))
   return own === undefined ? { frequency: fallback, isOwn: false } : { frequency: own, isOwn: true }
 }
 
@@ -538,7 +523,7 @@ export type CheckupAdded = z.infer<typeof checkupAddedSchema>
 
 /**
  * 一次界面手动体检或自动体检的最近一次结果（体检记录表与体检视图共用）。agent 的 memory_scan 不写。
- * 新增 = 体检后的待处理里有、体检前没有（只看这次体检覆盖的层，同 scan 命令的 added），按条目属于哪些范围（pendingItemScopes）记：
+ * 新增 = 体检后的待处理里有、体检前没有（只看这次体检覆盖的作用域，同 scan 命令的 added），按条目属于哪些范围（pendingItemScopes）记：
  * - 全局、项目的记录：added 是属于这个范围的新增。项目体检会读全局，顺带发现、只属于全局的新增（如两条全局记忆之间的冲突）
  *   不算进 added，记在 globalAdded（只有项目体检写的结果有）；全局和项目之间的冲突属于两个范围，算项目的。
  * - 键 all 的记录（「全部」手动体检，见 SCOPE_KEYS）：added 是全部新增，按身份去重；byScope 把新增按所属范围分组
@@ -553,7 +538,7 @@ export const checkupResultSchema = z.object({
   completedAt: z.number(),
   added: checkupAddedSchema,
   globalAdded: checkupAddedSchema.optional(),
-  byScope: z.array(z.object({ scope: layerRefSchema, keys: z.array(z.string()) })).optional(),
+  byScope: z.array(z.object({ scope: scopeSchema, keys: z.array(z.string()) })).optional(),
   /** 宿主流 usage 块报的实际用量合计（同 scan 命令的 usageTokens）；宿主一次都没报时缺省。自动体检不经过会话，用量由插件自己记在这里。 */
   usageTokens: z.number().int().nonnegative().optional(),
   /** 说明码（如内容检查没做完 semantic-failed、分了批 semantic-batched、基线检查被跳过 baseline-missing），semantic-failed、model-unavailable 带原因。 */
@@ -577,9 +562,9 @@ export const checkupViewSchema = z.object({
   defaultFrequency: autoCheckupFrequencySchema,
   /** 「全部」手动体检的最近一次结果（体检记录表键 all 的那条）；没做过为 null。 */
   allResult: checkupResultSchema.nullable(),
-  /** 全局在前，项目按路径排序（与健康视图同一批层）。 */
+  /** 全局在前，项目按路径排序（与健康视图同一批作用域）。 */
   scopes: z.array(z.object({
-    scope: layerRefSchema,
+    scope: scopeSchema,
     /** 有效频率（见 resolveAutoCheckup）。 */
     frequency: autoCheckupFrequencySchema,
     /** 单独设置；false = 跟随「全部」。 */
@@ -616,13 +601,13 @@ export type CheckupView = z.infer<typeof checkupViewSchema>
 const allowCrossWorkspace = z.boolean().optional()
 /** 记忆类型的英文名：小写字母和连字符（同 types.ts 的类型标识约定、设置页的校验）。 */
 const typeNameSchema = z.string().regex(/^[a-z]+(?:-[a-z]+)*$/)
-/** 目标记忆所在的层（见 layerOfMemory）：服务端只动这一份，跨项目门仍按借来的会话判定；缺省按借来的会话定位。 */
-const layer = layerRefSchema.optional()
+/** 目标记忆所在的作用域（见 scopeOfMemory）：服务端只动这一份，跨项目门仍按借来的会话判定；缺省按借来的会话定位。 */
+const targetScope = scopeSchema.optional()
 
 /** 卡片加载时记忆的版本（MemoryCard 的 updatedAt 与 digest）。 */
 const memoryBaseSchema = z.object({ updatedAt: z.number(), digest: z.string() })
-const mergeRefSchema = z.object({ memoryId: z.string(), layer, base: memoryBaseSchema })
-const draftRefSchema = z.object({ memoryId: z.string(), layer })
+const mergeRefSchema = z.object({ memoryId: z.string(), layer: targetScope, base: memoryBaseSchema })
+const draftRefSchema = z.object({ memoryId: z.string(), layer: targetScope })
 
 /** 「让模型改」的一稿：正文、摘要每次都有；名称、标签缺省 = 模型没改。只在界面和命令之间来回，不落盘。 */
 export const memoryDraftSchema = z.object({
@@ -664,33 +649,33 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
    * agents-md 写进 AGENTS.md、项目里那条软删，插件不再管理它，不留账、不可撤销（结果不带 decisionId）。
    */
   z.object({
-    cmd: z.literal('promote-memory'), memoryId: z.string(), layer, isCandidateRequired: z.boolean().optional(),
+    cmd: z.literal('promote-memory'), memoryId: z.string(), layer: targetScope, isCandidateRequired: z.boolean().optional(),
     target: z.enum(['global', 'agents-md']).optional(), allowCrossWorkspace,
   }),
   /**
    * 按记忆 id 把一条提升候选留在本项目（对话卡片、右侧栏「这次新写入的」）。同 keep-local：清掉候选标记，在账本里留一条
    * 已结清的 keep-local（记忆已在等你决定里时就结清那一条），以后体检不再提。不是候选（已提升、已留下、已删）回 not-found。
    */
-  z.object({ cmd: z.literal('keep-local-memory'), memoryId: z.string(), layer, allowCrossWorkspace }),
+  z.object({ cmd: z.literal('keep-local-memory'), memoryId: z.string(), layer: targetScope, allowCrossWorkspace }),
   /**
    * 把一条全局记忆移到 workspacePath 那个项目（建议整理「放错层」里全局那条，与 promote-memory 对称）：只认全局那一份，
    * 内容、id、出处、时间戳不动，全局那份不再存在。目标项目已有同 id 的记忆（在用的或最近删除里的）回 target-taken，什么都不动。
    * 跨项目门按目标项目判。快照先行，在账本里留一条已结清的移动，结果的 decisionId 交给 undo 撤销（搬回全局）。
    */
   z.object({ cmd: z.literal('move-memory'), memoryId: z.string(), workspacePath: z.string(), allowCrossWorkspace }),
-  z.object({ cmd: z.literal('forget'), memoryId: z.string(), layer, allowCrossWorkspace }),
-  z.object({ cmd: z.literal('restore'), memoryId: z.string(), layer, allowCrossWorkspace }),
+  z.object({ cmd: z.literal('forget'), memoryId: z.string(), layer: targetScope, allowCrossWorkspace }),
+  z.object({ cmd: z.literal('restore'), memoryId: z.string(), layer: targetScope, allowCrossWorkspace }),
   /** 彻底删除：在用的只收含密钥的；最近删除里的不等 14 天到期，连同快照里的副本现在就清掉。 */
-  z.object({ cmd: z.literal('hard-delete'), memoryId: z.string(), layer, allowCrossWorkspace }),
+  z.object({ cmd: z.literal('hard-delete'), memoryId: z.string(), layer: targetScope, allowCrossWorkspace }),
   /** 刷新一条记忆的确认时间（建议整理「很久没确认」的「仍然有效」），内容不动。不受体检开关影响。 */
-  z.object({ cmd: z.literal('confirm'), memoryId: z.string(), layer, allowCrossWorkspace }),
+  z.object({ cmd: z.literal('confirm'), memoryId: z.string(), layer: targetScope, allowCrossWorkspace }),
   /**
    * 建议整理的「直接改」：正文、名称、摘要、标签换成给定值，updatedAt、lastConfirmedAt 记为当前时间，标手改（模型改写、替代前要先问用户）；
    * 类型、作用域、出处、有效期、置信度、取代关系、召回统计不动。base 是卡片加载时的版本，磁盘上对不上回 stale，什么都不动。
    * 新内容含高危密钥回 secret-critical；疑似密钥回 secret-suspected，用户确认后带 force 重发。快照先行（项目记忆也拍），
    * 在账本里留一条已结清的条目，结果的 decisionId 交给 undo 撤销。
    */
-  z.object({ cmd: z.literal('edit-memory'), memoryId: z.string(), layer, base: memoryBaseSchema, ...editFields }),
+  z.object({ cmd: z.literal('edit-memory'), memoryId: z.string(), layer: targetScope, base: memoryBaseSchema, ...editFields }),
   /**
    * 内容重复的「直接合并」：两条里按 mergeKeeperIndex 保留一条，按 edit-memory 的规则改成给定内容；另一条软删进最近删除。
    * 两条同拍一份快照，undo 把两条都恢复。
@@ -714,7 +699,7 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   z.object({ cmd: z.literal('dismiss-overflow'), decisionId: z.string() }),
   /**
    * 忽略一条建议整理项：记下这几条记忆的指纹，之后该项不再出现在待处理、不再扣分；建议依据的字段变了就不再算已忽略。
-   * memories 是该项涉及的记忆（内容重复为一组，顺序不论；其余类型恰好一条），每条带卡片上那一份的层和卡片版本：
+   * memories 是该项涉及的记忆（内容重复为一组，顺序不论；其余类型恰好一条），每条带卡片上那一份的作用域和卡片版本：
    * 只认那一份，版本对不上（卡片加载后被改过）回 stale，不在用回 not-found，都什么都不记。
    * 不改记忆，所以不过跨项目门、不受体检开关影响；同一项再忽略一次只是刷新记录。
    */
@@ -723,7 +708,7 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   z.object({ cmd: z.literal('unignore-advice'), type: z.enum(IGNORABLE_ADVICE_TYPES), memoryIds: z.array(z.string()).min(1) }),
   /**
    * 体检，目标三选一：不带参数 = 全部（逐个查每个项目，再单独查一遍全局）；workspacePath = 这个项目（读全局加本项目、
-   * 只写本项目的缓存）；layer = 全局（只查全局层、只写全局的缓存）。两者不能同时给。体检完给覆盖到的每个范围写完成记录（发起方界面手动）。
+   * 只写本项目的缓存）；layer = 全局（只查全局、只写全局的缓存）。两者不能同时给。体检完给覆盖到的每个范围写完成记录（发起方界面手动）。
    */
   z.object({ cmd: z.literal('scan'), workspacePath: z.string().optional(), layer: z.object({ kind: z.literal('global') }).optional() })
     .refine(c => c.workspacePath === undefined || c.layer === undefined, { message: 'workspacePath 与 layer 只能给一个' }),
@@ -733,7 +718,7 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
    */
   z.object({
     cmd: z.literal('set-auto-checkup'),
-    scope: scopeRefSchema,
+    scope: scopeOrAllSchema,
     frequency: z.union([autoCheckupFrequencySchema, z.literal(AUTO_CHECKUP_FOLLOW)]),
   }).refine(c => c.scope.kind !== 'all' || c.frequency !== AUTO_CHECKUP_FOLLOW, { message: '「全部」没有可跟随的范围' }),
   z.object({ cmd: z.literal('refresh-views') }),
@@ -821,7 +806,7 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     /** scan：体检的说明码（如 baseline-session-scoped）。 */
     notes: z.array(z.enum(SCAN_NOTE_CODES)).optional(),
     /**
-     * scan：本次新增的待处理项条数。新增 = 体检后有、体检前没有（按待处理项的身份比较，只看本次体检覆盖的层），
+     * scan：本次新增的待处理项条数。新增 = 体检后有、体检前没有（按待处理项的身份比较，只看本次体检覆盖的作用域），
      * 不等于「体检查出来的」：体检期间别的会话写入引出的、时间推移刚越过「很久没确认」门槛的也算。
      * 用户忽略的建议不在待处理里，不算。pending = 高优问题 + 待你处理，advice = 建议整理。
      * pendingLevel：新增的待处理都在同一组时给出那一组（界面的链接定位到它），分在两组或没有新增时缺省。
@@ -831,9 +816,9 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
       pending: z.number().int().nonnegative(), advice: z.number().int().nonnegative(),
       pendingLevel: z.enum(['must-fix', 'your-call']).optional(),
     }).optional(),
-    /** scan：本次体检覆盖各层的健康分（与健康视图同值，有密钥的层为 null），按健康视图的层序；与 added 同时缺省。 */
-    scores: z.array(z.object({ layer: layerRefSchema, score: z.number().nullable() })).optional(),
-    /** scan：内容检查分了批时的批数（分批的各层相加），与说明码 semantic-batched 同时出现；不分批时缺省。 */
+    /** scan：本次体检覆盖各作用域的健康分（与健康视图同值，有密钥的作用域为 null），按健康视图的顺序；与 added 同时缺省。 */
+    scores: z.array(z.object({ layer: scopeSchema, score: z.number().nullable() })).optional(),
+    /** scan：内容检查分了批时的批数（分批的各作用域相加），与说明码 semantic-batched 同时出现；不分批时缺省。 */
     semanticBatches: z.number().int().positive().optional(),
     /** scan：宿主流 usage 块报的实际用量合计（所有批次、重试、跨项目重复检查）；宿主一次都没报时缺省，不拿估算顶替。 */
     usageTokens: z.number().int().nonnegative().optional(),

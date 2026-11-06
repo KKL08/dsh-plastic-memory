@@ -11,12 +11,12 @@
  */
 import { isValidElement, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import {
-  sameLayer, scopeKey, SCOPE_KEYS,
-  type CheckupCause, type CheckupResult, type CheckupView, type GuiLayerRef, type HealthView,
+  checkupKey, sameScope, SCOPE_KEYS,
+  type CheckupCause, type CheckupResult, type CheckupView, type HealthView, type Scope,
 } from '../../src/gui/contract.ts'
 import { baseName, formatDay, formatDayTime, formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
-import { allScopesSub, scopeName, type MemoryView, type NavStore, type NewItemJump, type PageScope } from '../nav.ts'
+import { allScopesSub, scopeLabel, type MemoryView, type NavStore, type NewItemJump, type PageScope } from '../nav.ts'
 import { Icon } from '../ui/Icon.tsx'
 import { useHeightTransition, withRollingNumber } from '../ui/motion.tsx'
 import { StatusMarker, type MarkerKind } from '../ui/StatusMarker.tsx'
@@ -24,17 +24,17 @@ import type { CheckupRuns, RunFailure } from './runs.ts'
 import { checkupResults, isResultSeen, markSeen, type Seen, type SeenMark } from './seen.ts'
 import { frequencyText } from './TitleControls.tsx'
 
-type HealthLayer = HealthView['layers'][number]
+type ScopeHealth = HealthView['layers'][number]
 type ScopeEntry = CheckupView['scopes'][number]
 
 /** 分数能不能写：有密钥不打分；从没体检过也不写，只有规则检查的分数会让人误以为体检过了。 */
-export function scoreOf(layer: HealthLayer | undefined): number | 'secret' | undefined {
-  if (layer === undefined) return undefined
-  if (layer.gate.secret || layer.score === null) return 'secret'
-  return layer.lastCheckupAt === null ? undefined : layer.score
+export function scoreOf(health: ScopeHealth | undefined): number | 'secret' | undefined {
+  if (health === undefined) return undefined
+  if (health.gate.secret || health.score === null) return 'secret'
+  return health.lastCheckupAt === null ? undefined : health.score
 }
 
-const TIER_MARKER = { green: 'ok', amber: 'pending', red: 'error' } as const satisfies Record<HealthLayer['tier'], MarkerKind>
+const TIER_MARKER = { green: 'ok', amber: 'pending', red: 'error' } as const satisfies Record<ScopeHealth['tier'], MarkerKind>
 
 const DEDUCTIONS = ['rule', 'content', 'freshness'] as const
 const DEDUCTION_LABEL = {
@@ -111,7 +111,7 @@ export function StatusBar({ scope, view, nav, runs, seen, health, checkups, isGo
   /** 「全部」第二行的「N 个项目和全局」。 */
   projectCount: number
   /** 「全部」首行：各范围（左栏的顺序）要处理的件数和有没有密钥。 */
-  needs: ReadonlyArray<{ scope: GuiLayerRef; todo: number; hasSecret: boolean }>
+  needs: ReadonlyArray<{ scope: Scope; todo: number; hasSecret: boolean }>
 }) {
   const t = useT()
   const now = Date.now()
@@ -143,14 +143,14 @@ export function StatusBar({ scope, view, nav, runs, seen, health, checkups, isGo
       </section>
     )
   }
-  const layer = health.layers.find(l => sameLayer(l.layer, scope))
-  const entry = checkups?.scopes.find(s => sameLayer(s.scope, scope))
-  return <ScopeStatus layer={layer} entry={entry} count={count} now={now} result={result} />
+  const scopeHealth = health.layers.find(l => sameScope(l.layer, scope))
+  const entry = checkups?.scopes.find(s => sameScope(s.scope, scope))
+  return <ScopeStatus scopeHealth={scopeHealth} entry={entry} count={count} now={now} result={result} />
 }
 
 /** 项目 / 全局：首行分数、第二行、分数怎么来的，最后是结果行。 */
-function ScopeStatus({ layer, entry, count, now, result }: {
-  layer: HealthLayer | undefined
+function ScopeStatus({ scopeHealth, entry, count, now, result }: {
+  scopeHealth: ScopeHealth | undefined
   entry: ScopeEntry | undefined
   count: string
   now: number
@@ -159,8 +159,8 @@ function ScopeStatus({ layer, entry, count, now, result }: {
   const t = useT()
   const whyId = useId()
   const [isWhyOpen, setWhyOpen] = useState(false)
-  const score = scoreOf(layer)
-  const lastAt = entry?.lastCheckupAt ?? layer?.lastCheckupAt ?? null
+  const score = scoreOf(scopeHealth)
+  const lastAt = entry?.lastCheckupAt ?? scopeHealth?.lastCheckupAt ?? null
   const meta: ReactNode[] = [count]
   if (lastAt !== null) meta.push(t('checkup.status.last', { date: formatDay(lastAt, now, t) }))
   // 没做完、模型用不了时由结果行说什么时候再试，这里不再说「马上在后台查」
@@ -176,9 +176,9 @@ function ScopeStatus({ layer, entry, count, now, result }: {
       </button>,
     )
   }
-  const deductions = layer === undefined ? [] : DEDUCTIONS.filter(d => layer.deductions[d].points > 0)
+  const deductions = scopeHealth === undefined ? [] : DEDUCTIONS.filter(d => scopeHealth.deductions[d].points > 0)
   // 首行没有标记（还没打分）时，下面几行不缩进去对一个不存在的标记
-  const isPlain = score !== 'secret' && (score === undefined || layer === undefined)
+  const isPlain = score !== 'secret' && (score === undefined || scopeHealth === undefined)
   return (
     <section className={isPlain ? 'pm-status pm-status--plain' : 'pm-status'} aria-label={t('status.label')}>
       <p className="pm-status-line">
@@ -189,23 +189,23 @@ function ScopeStatus({ layer, entry, count, now, result }: {
               {t('status.unscored')}<Sep /><span className="pm-status-soft">{t('status.secretFirst')}</span>
             </>
           )
-          : score === undefined || layer === undefined
+          : score === undefined || scopeHealth === undefined
             ? <span className="pm-status-soft">{t('health.unscored')}</span>
             : (
               <>
-                <span className="pm-status-mark"><StatusMarker kind={TIER_MARKER[layer.tier]} /></span>
-                {withRollingNumber(slot => t('health.score', { score: slot }), score, formatNumber(score))}<Sep /><span className="pm-status-soft">{t(`health.tier.${layer.tier}`)}</span>
+                <span className="pm-status-mark"><StatusMarker kind={TIER_MARKER[scopeHealth.tier]} /></span>
+                {withRollingNumber(slot => t('health.score', { score: slot }), score, formatNumber(score))}<Sep /><span className="pm-status-soft">{t(`health.tier.${scopeHealth.tier}`)}</span>
               </>
             )}
       </p>
       <p className="pm-status-meta">{joined(meta)}</p>
-      {isWhyOpen && layer !== undefined
+      {isWhyOpen && scopeHealth !== undefined
         ? (
           <ul id={whyId} className="pm-status-deductions" aria-label={t('checkup.status.why')}>
             {deductions.length === 0
               ? <li>{t('checkup.status.noDeduction')}</li>
               : deductions.map((d) => {
-                const { points, types } = layer.deductions[d]
+                const { points, types } = scopeHealth.deductions[d]
                 const label = t(DEDUCTION_LABEL[d])
                 const typeText = types.map(type => (ISSUE_LABEL[type] === undefined ? type : t(ISSUE_LABEL[type]))).join(t('checkup.status.listSep'))
                 return (
@@ -225,7 +225,7 @@ function ScopeStatus({ layer, entry, count, now, result }: {
 }
 
 /** 「全部」首行：哪些范围要处理（有密钥的写「有密钥要先处理」），标记取最急的；都没有时绿圆点「没有要你决定的事」。 */
-function AllHeadline({ needs }: { needs: ReadonlyArray<{ scope: GuiLayerRef; todo: number; hasSecret: boolean }> }) {
+function AllHeadline({ needs }: { needs: ReadonlyArray<{ scope: Scope; todo: number; hasSecret: boolean }> }) {
   const t = useT()
   const busy = needs.filter(n => n.todo > 0)
   if (busy.length === 0) {
@@ -248,7 +248,7 @@ function AllHeadline({ needs }: { needs: ReadonlyArray<{ scope: GuiLayerRef; tod
 
 /** 「全部」第二行的自动体检概况；全是仅手动且没有单独设置时不写。 */
 function autoSummary(view: CheckupView, t: Translate): string | undefined {
-  const own = view.scopes.filter(s => s.isOwn).map(s => scopeName(s.scope, t))
+  const own = view.scopes.filter(s => s.isOwn).map(s => scopeLabel(s.scope, t))
   const frequency = view.defaultFrequency
   if (own.length === 0) return frequency === 'manual' ? undefined : t('checkup.status.all.auto', { frequency: frequencyText(frequency, t) })
   const names = own.join(t('checkup.status.listSep'))
@@ -296,8 +296,8 @@ function ResultRow({ scope, isTodoView, nav, runs, seen, checkups, now }: {
   useEffect(() => {
     if (isTodoView && checkups !== undefined) markSeen(checkups, shown.current)
   })
-  const key = scopeKey(scope)
-  const jump = (to: NewItemJump, target?: GuiLayerRef) => {
+  const key = checkupKey(scope)
+  const jump = (to: NewItemJump, target?: Scope) => {
     nav.update({ view: 'todo', newItem: to, memoryId: undefined, ...(target !== undefined ? { scope: target } : {}) })
   }
   const link = (text: string, onClick: () => void) => <button type="button" className="pm-link" onClick={onClick}>{text}</button>
@@ -331,7 +331,7 @@ function ResultRow({ scope, isTodoView, nav, runs, seen, checkups, now }: {
         lines.push(<Line key="auto">{joined(parts)}</Line>)
       }
     } else {
-      const entry = checkups?.scopes.find(s => sameLayer(s.scope, scope))
+      const entry = checkups?.scopes.find(s => sameScope(s.scope, scope))
       // 仅手动的范围不会自动重试：失败行和「模型用不了」一样不写
       if (entry?.failure != null && entry.frequency !== 'manual') {
         const { cause, retryAt, isRetryLimitReached } = entry.failure

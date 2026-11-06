@@ -22,7 +22,7 @@ import {
   type AdviceType, type AutoCheckupFrequency, type CheckupAdded, type CheckupCause, type CheckupResult, type CheckupView, type DeletedView, type MemoryPromotion, type GlobalViewName, type HealthView, type LibraryView, type MemoryCard,
   type MemoryCommandResult, type ModelChange, type PendingItem, type PendingView, type SessionView,
 } from './contract.ts'
-import { isInScope, sameScope, scopeCacheKey, scopeOfLedger, type Scope } from '../scope.ts'
+import { isInScope, scopeCacheKey, scopeKey, scopeOfLedger, type Scope } from '../scope.ts'
 
 /**
  * 视图生成（纯函数）：预读数据 + 账本 → 界面要读的视图 JSON（契约见 contract.ts）。不读存储、不写盘。
@@ -205,7 +205,7 @@ export function scanOutcome(
   after: Pick<GlobalViews, 'pending' | 'health'>,
   covered: readonly Scope[] | 'all',
 ): Required<Pick<Extract<MemoryCommandResult, { ok: true }>, 'added' | 'scores'>> {
-  const isCovered = (scope: Scope) => covered === 'all' || covered.some(c => sameScope(c, scope))
+  const isCovered = (scope: Scope) => covered === 'all' || covered.some(c => scopeKey(c) === scopeKey(scope))
   const added = addedItems(before, after.pending, covered)
   const pending = added.filter(i => i.level !== 'advice')
   const levels = [...new Set(pending.map(i => i.level))]
@@ -221,7 +221,7 @@ export function scanOutcome(
 /** 体检新增的待处理项：体检后有、体检前没有（按身份比较），且属于本次体检覆盖的作用域（'all' 是全部作用域），按体检后视图里的先后。 */
 function addedItems(before: PendingView, after: PendingView, covered: readonly Scope[] | 'all'): PendingItem[] {
   const seen = new Set(before.items.map(pendingItemKey))
-  return after.items.filter(i => !seen.has(pendingItemKey(i)) && (covered === 'all' || pendingItemScopes(i).some(s => covered.some(c => sameScope(c, s)))))
+  return after.items.filter(i => !seen.has(pendingItemKey(i)) && (covered === 'all' || pendingItemScopes(i).some(s => covered.some(c => scopeKey(c) === scopeKey(s)))))
 }
 
 function addedOf(items: readonly PendingItem[]): CheckupAdded {
@@ -250,10 +250,10 @@ export function checkupResults(before: PendingView, after: PendingView, run: {
   const toNotes = (notes: typeof run.notes) => notes.map(n => ({ code: n.code, ...(n.cause !== undefined ? { cause: n.cause } : {}) }))
   const base = { checkupId: run.checkupId, by: run.by, completedAt: run.completedAt, notes: toNotes(run.notes) }
   const usage = run.usageTokens !== undefined ? { usageTokens: run.usageTokens } : {}
-  const belongsTo = (scope: Scope) => (i: PendingItem) => pendingItemScopes(i).some(s => sameScope(s, scope))
+  const belongsTo = (scope: Scope) => (i: PendingItem) => pendingItemScopes(i).some(s => scopeKey(s) === scopeKey(scope))
   if (target.kind === 'global') {
     const added = addedItems(before, after, [{ kind: 'global' }])
-    return [{ key: SCOPE_KEYS.global, result: { ...base, added: addedOf(added), ...usage } }]
+    return [{ key: checkupKey({ kind: 'global' }), result: { ...base, added: addedOf(added), ...usage } }]
   }
   if (target.kind === 'workspace') {
     const added = addedItems(before, after, [{ kind: 'global' }, target])

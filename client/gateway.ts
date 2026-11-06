@@ -13,9 +13,9 @@ import { createContext, useContext, useEffect, useMemo, useState, useSyncExterna
 import {
   GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, encodeMemoryCommand, sessionViewFile,
   checkupViewSchema, deletedViewSchema, healthViewSchema, libraryViewSchema, pendingViewSchema, sessionViewSchema, workspaceMapViewSchema,
-  ACCENTS, layerOfMemory, memoryCommandResultSchema,
-  type Accent, type CheckupView, type DeletedView, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCard, type MemoryCommand, type MemoryCommandResult,
-  type PendingItem, type PendingView, type SessionView, type WorkspaceMapView,
+  ACCENTS, memoryCommandResultSchema, scopeKey, scopeOfMemory,
+  type Accent, type CheckupView, type DeletedView, type HealthView, type LibraryView, type MemoryCard, type MemoryCommand, type MemoryCommandResult,
+  type PendingItem, type PendingView, type Scope, type SessionView, type WorkspaceMapView,
 } from '../src/gui/contract.ts'
 import type {
   CommandExecution, ConfigForm, ConfigFormSnapshot, HostContext, RemoteResult, RootStandardProps, SessionListState,
@@ -103,25 +103,25 @@ export interface PluginConfig {
 /** 删除状态的一份快照：soft 进了最近删除、可恢复；hard 是彻底删除；undefined = 没删或看不出来。 */
 export interface Deletions {
   /**
-   * layer：页面上这一份所在的层（同 id 在几层各有一份时各算各的）；不知道层时按 id 判，任一份删了都算。
+   * scope：页面上这一份所在的作用域（同 id 在几个作用域各有一份时各算各的）；不知道作用域时按 id 判，任一份删了都算。
    * savedAt：记下这条记忆的时刻；给了才可能按视图判彻底删除（见 createDeletionStore 第 3 条）。
    */
-  of(id: string, layer?: GuiLayerRef, savedAt?: number): 'soft' | 'hard' | undefined
+  of(id: string, scope?: Scope, savedAt?: number): 'soft' | 'hard' | undefined
 }
 
-/** 一份副本的键：id + 层。不知道层时没有键。 */
-function copyKey(id: string, layer: GuiLayerRef | undefined): string | undefined {
-  return layer === undefined ? undefined : JSON.stringify([id, layer.kind === 'global' ? null : layer.workspacePath])
+/** 一份副本的键：id + 作用域的标准键。不知道作用域时没有键。 */
+function copyKey(id: string, scope: Scope | undefined): string | undefined {
+  return scope === undefined ? undefined : JSON.stringify([id, scopeKey(scope)])
 }
 
-/** 经本网关的一次动作。copy 缺省 = 命令没带层，同 id 各层都算。 */
+/** 经本网关的一次动作。copy 缺省 = 命令没带作用域，同 id 各作用域都算。 */
 interface LocalDeletion { id: string; copy: string | undefined; how: 'soft' | 'hard' | 'restored' }
 
 /**
  * 删除状态，全部记忆、最近删除、右侧栏、对话交付卡显示同一条记忆时都读这一份，删除后不会有的地方还留着删除按钮。
- * 软删与恢复按 id + 层记：同 id 在几层各有一份时，删掉其中一份不影响别层那份的显示。三个来源：
+ * 软删与恢复按 id + 作用域记：同 id 在几个作用域各有一份时，删掉其中一份不影响别处那份的显示。三个来源：
  * 1. 经本网关发出的 forget / hard-delete / restore 成功后记一笔，不等视图刷新。
- * 2. 读到的视图：在最近删除里、全部记忆里同一层又没有在用副本的，算软删（对话里 agent 自己删的也在这里）。别层同 id 副本还在用时
+ * 2. 读到的视图：在最近删除里、全部记忆里同一作用域又没有在用副本的，算软删（对话里 agent 自己删的也在这里）。别的作用域同 id 副本还在用时
  *    删掉的那份也列在最近删除里，所以要两份视图都读到过才判断。
  * 3. 彻底删除要有正面证据：本页读到的视图里出现过这条，之后两份视图出自同一次收集（generatedAt 相同）、晚于这条记忆记下的
  *    时刻，而全部记忆、最近删除、不在用的 id（已取代等）里都没有它，也没有读不全的地方（读不出的文件可能就是它）。
@@ -132,7 +132,7 @@ interface LocalDeletion { id: string; copy: string | undefined; how: 'soft' | 'h
  * 彻底删除一直记着。页面关掉就没了。
  */
 export function createDeletionStore() {
-  /** 经本网关的动作，视图确认前优先。键是副本键，命令没带层时是 id；后记的排在后面。 */
+  /** 经本网关的动作，视图确认前优先。键是副本键，命令没带作用域时是 id；后记的排在后面。 */
   const local = new Map<string, LocalDeletion>()
   /** 最近一次读到的两份视图：最近删除里的、全部记忆里在用的（id 与副本键），和各自的生成时刻。 */
   let deleted: { ids: ReadonlySet<string>; copies: ReadonlySet<string>; at: number | undefined } | undefined
@@ -140,7 +140,7 @@ export function createDeletionStore() {
   let library: { ids: ReadonlySet<string>; copies: ReadonlySet<string>; inactive: ReadonlySet<string> | undefined; at: number | undefined } | undefined
   /** 本页读到的视图里出现过的 id（在用、最近删除、不在用都算）：判彻底删除的前提。 */
   const seen = new Set<string>()
-  /** 视图证明是软删的副本键，和不知道层时用的 id。 */
+  /** 视图证明是软删的副本键，和不知道作用域时用的 id。 */
   let viewSoft: { copies: ReadonlySet<string>; ids: ReadonlySet<string> } = { copies: new Set(), ids: new Set() }
   const listeners = new Set<() => void>()
   const snapshot = (): Deletions => {
@@ -152,9 +152,9 @@ export function createDeletionStore() {
     const lib = library
     const del = deleted
     return {
-      of(id, layer, savedAt) {
-        const copy = copyKey(id, layer)
-        // 本地记录：知道层时取这一份的，没有再取命令没带层的那笔；不知道层时取这个 id 最近的一笔
+      of(id, scope, savedAt) {
+        const copy = copyKey(id, scope)
+        // 本地记录：知道作用域时取这一份的，没有再取命令没带作用域的那笔；不知道作用域时取这个 id 最近的一笔
         const own = mine.find(e => e.id === id && (copy === undefined || e.copy === copy))
           ?? (copy === undefined ? undefined : mine.find(e => e.id === id && e.copy === undefined))
         if (own !== undefined) return own.how === 'restored' ? undefined : own.how
@@ -176,20 +176,20 @@ export function createDeletionStore() {
       if (!result.ok || (command.cmd !== 'forget' && command.cmd !== 'hard-delete' && command.cmd !== 'restore')) return
       const copy = copyKey(command.memoryId, command.layer)
       const key = copy ?? command.memoryId
-      local.delete(key)   // 重新排到最后：不知道层时取最近的一笔
+      local.delete(key)   // 重新排到最后：不知道作用域时取最近的一笔
       local.set(key, { id: command.memoryId, copy, how: command.cmd === 'forget' ? 'soft' : command.cmd === 'hard-delete' ? 'hard' : 'restored' })
       publish()
     },
     /** 读到一份最近删除或全部记忆视图：重算视图证明的软删，去掉视图已经确认的本地记录。 */
     settle(view: { name: 'deleted'; data: DeletedView } | { name: 'library'; data: LibraryView }) {
-      const keysOf = (memories: readonly MemoryCard[]) => new Set(memories.flatMap(m => copyKey(m.id, layerOfMemory(m)) ?? []))
+      const keysOf = (memories: readonly MemoryCard[]) => new Set(memories.flatMap(m => copyKey(m.id, scopeOfMemory(m)) ?? []))
       if (view.name === 'deleted') {
         const memories = view.data.items.map(item => item.memory)
         deleted = { ids: new Set(memories.map(m => m.id)), copies: keysOf(memories), at: view.data.generatedAt }
         for (const id of deleted.ids) seen.add(id)
       } else {
         const { inactiveIds, hasUnreadFiles } = view.data
-        const memories = view.data.layers.flatMap(layer => layer.items)
+        const memories = view.data.layers.flatMap(s => s.items)
         library = {
           ids: new Set(memories.map(m => m.id)),
           copies: keysOf(memories),

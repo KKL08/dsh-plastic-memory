@@ -32,7 +32,7 @@ import { record } from './helpers/record.ts'
 const NOW = 10 * RETENTION_MS
 const WS = '/tmp/pm-promote-misplaced-ws'
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
-const wsLayer = { kind: 'workspace', workspacePath: WS } as const
+const wsScope = { kind: 'workspace', workspacePath: WS } as const
 
 /** 模型把 mem_m 判为放错层（该放全局）。 */
 const misplacedLlm: SemanticLlm = { complete: async () => JSON.stringify({ findings: [{ type: 'misplaced', memoryIds: ['mem_m'], summary: '对所有项目都适用' }] }) }
@@ -67,7 +67,7 @@ function env() {
   /** 照界面的做法忽略 mem_m 的放错层：带上记忆此刻的版本。 */
   const ignoreMisplaced = async () => {
     const r = (await store.get('mem_m'))!
-    return run({ cmd: 'ignore-advice', type: 'misplaced', memories: [{ memoryId: 'mem_m', layer: wsLayer, base: { updatedAt: r.updatedAt, digest: computeDigest(r.name, r.summary, r.content) } }] })
+    return run({ cmd: 'ignore-advice', type: 'misplaced', memories: [{ memoryId: 'mem_m', layer: wsScope, base: { updatedAt: r.updatedAt, digest: computeDigest(r.name, r.summary, r.content) } }] })
   }
   return { store, decisions, ignores, pendingTable: sidecar.pending, clock, run, pending, wsHealth, ignoreMisplaced }
 }
@@ -212,7 +212,7 @@ describe('按 id 的 keep-local-memory（对话卡、右侧栏）', () => {
   it('等你决定里已有它的提升候选：同样顺带忽略、记进结清的那一条；撤销时删掉，提升卡回来', async () => {
     const e = env()
     const open = await seedCandidate(e)
-    const body = ok(await e.run({ cmd: 'keep-local-memory', memoryId: 'mem_m', layer: wsLayer }))
+    const body = ok(await e.run({ cmd: 'keep-local-memory', memoryId: 'mem_m', layer: wsScope }))
     expect(body.decisionId).toBe(open.id)
     const fingerprint = await fingerprintOfM(e)
     expect((await ignoreOfM(e)).map(i => [i.fingerprints, i.ignoredAt])).toEqual([[[fingerprint], NOW]])
@@ -232,7 +232,7 @@ describe('按 id 的 keep-local-memory（对话卡、右侧栏）', () => {
     await e.store.updateIfLive((await e.store.get('mem_m'))!, r => ({ ...r, globalCandidate: true }))
     expect(await e.decisions.list()).toEqual([])
 
-    const body = ok(await e.run({ cmd: 'keep-local-memory', memoryId: 'mem_m', layer: wsLayer }))
+    const body = ok(await e.run({ cmd: 'keep-local-memory', memoryId: 'mem_m', layer: wsScope }))
     const [settled] = await e.decisions.listSettled()
     expect(settled!.settled).toMatchObject({ verdict: 'keep-local', isBornSettled: true, misplacedIgnore: { ignoredAt: NOW, fingerprint: await fingerprintOfM(e) } })
     expect(await ignoreOfM(e)).toHaveLength(1)

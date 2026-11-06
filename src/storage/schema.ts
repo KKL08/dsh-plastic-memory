@@ -54,7 +54,7 @@ export type CheckupCompletion = NonNullable<CheckupRecord['completed']>
 
 /**
  * 自动体检设置表的一行（`.state/auto-checkups/<sha1(id)>.json`，见 storage/sidecar.ts），一个范围一条。id 是范围键：
- * `all`（「全部」的默认值）、`global` 或项目的绝对路径（见 gui/contract.ts scopeKey）。frequency 是 manual 或 1–90 天。
+ * `all`（「全部」的默认值）、`global` 或项目的绝对路径（见 gui/contract.ts checkupKey）。frequency 是 manual 或 1–90 天。
  * 没有某个范围的条目 = 跟随 `all`；没有 `all` = 仅手动，所以表空着就是全部仅手动。
  */
 export const autoCheckupSettingSchema = z.object({

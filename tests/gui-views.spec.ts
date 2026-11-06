@@ -299,12 +299,12 @@ describe('待处理视图：建议整理', () => {
     const h = harness()
     await seedAdvice(h)
     const { pending, health } = await h.views()
-    for (const layer of health.layers) {
-      const inLayer = pending.items.filter(i => i.kind === 'advice' && (layer.layer.kind === 'global'
-        ? i.memories[0]!.scope === 'global' : i.memories[0]!.workspacePath === layer.layer.workspacePath))
-      const ruleCount = layer.issues.filter(x => ['expired', 'bloat', 'orphan'].includes(x.type)).reduce((s, x) => s + x.count, 0)
-      expect(inLayer.filter(i => i.kind === 'advice' && i.type !== 'stale')).toHaveLength(ruleCount)
-      expect(inLayer.some(i => i.kind === 'advice' && i.type === 'stale')).toBe(layer.deductions.freshness.types.includes('stale'))
+    for (const entry of health.layers) {
+      const inScope = pending.items.filter(i => i.kind === 'advice' && (entry.layer.kind === 'global'
+        ? i.memories[0]!.scope === 'global' : i.memories[0]!.workspacePath === entry.layer.workspacePath))
+      const ruleCount = entry.issues.filter(x => ['expired', 'bloat', 'orphan'].includes(x.type)).reduce((s, x) => s + x.count, 0)
+      expect(inScope.filter(i => i.kind === 'advice' && i.type !== 'stale')).toHaveLength(ruleCount)
+      expect(inScope.some(i => i.kind === 'advice' && i.type === 'stale')).toBe(entry.deductions.freshness.types.includes('stale'))
     }
   })
 

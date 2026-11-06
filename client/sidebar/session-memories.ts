@@ -1,12 +1,12 @@
 /**
  * 这次对话的记忆怎么取、哪些新写入还算数：右侧栏记忆 tab 与输入框记忆弹层共用，两处口径一致。
  */
-import { layerOfMemory, type LibraryView, type MemoryCard, type SessionView } from '../../src/gui/contract.ts'
-import { samePath, type Deletions } from '../gateway.ts'
+import { sameScope, scopeOfMemory, type LibraryView, type MemoryCard, type SessionView } from '../../src/gui/contract.ts'
+import type { Deletions } from '../gateway.ts'
 
 /**
- * 只收会话看得见的层（global + 本项目）的记忆卡，按 id 取；同 id 两层都有时取服务端会取的那份：updatedAt 新者，相同时本项目优先。
- * 另数出两层各有几条。
+ * 只收会话看得见的作用域（global + 本项目）的记忆卡，按 id 取；同 id 两处都有时取服务端会取的那份：updatedAt 新者，相同时本项目优先。
+ * 另数出两处各有几条。
  */
 export function sessionCards(library: LibraryView, ws: string | undefined): {
   byId: Map<string, MemoryCard>; globalCount: number; projectCount: number
@@ -14,11 +14,11 @@ export function sessionCards(library: LibraryView, ws: string | undefined): {
   const byId = new Map<string, MemoryCard>()
   let globalCount = 0
   let projectCount = 0
-  for (const { layer, items } of library.layers) {
-    const isOwn = layer.kind === 'workspace' && ws !== undefined && samePath(layer.workspacePath, ws)
-    if (layer.kind === 'global') globalCount += items.length
+  for (const { layer: scope, items } of library.layers) {
+    const isOwn = ws !== undefined && sameScope(scope, { kind: 'workspace', workspacePath: ws })
+    if (scope.kind === 'global') globalCount += items.length
     else if (isOwn) projectCount += items.length
-    if (layer.kind !== 'global' && !isOwn) continue
+    if (scope.kind !== 'global' && !isOwn) continue
     for (const item of items) {
       const current = byId.get(item.id)
       if (current === undefined || item.updatedAt > current.updatedAt || (item.updatedAt === current.updatedAt && isOwn)) byId.set(item.id, item)
@@ -40,5 +40,5 @@ export function writtenSinceSnapshot(view: SessionView): string[] {
 export function isLiveWrite(id: string, byId: ReadonlyMap<string, MemoryCard> | undefined, deletions: Deletions): boolean {
   if (byId === undefined) return deletions.of(id) === undefined
   const memory = byId.get(id)
-  return memory !== undefined && deletions.of(id, layerOfMemory(memory)) === undefined
+  return memory !== undefined && deletions.of(id, scopeOfMemory(memory)) === undefined
 }

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import {
   GUI_VIEW_VERSION, pendingItemKey,
-  type AutoCheckupFrequency, type CheckupResult, type CheckupView, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCommandResult, type PendingView,
+  type AutoCheckupFrequency, type CheckupResult, type CheckupView, type HealthView, type LibraryView, type MemoryCommandResult, type PendingView, type Scope,
 } from '../../src/gui/contract.ts'
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { createTranslator } from '../i18n.tsx'
@@ -13,9 +13,9 @@ import { levelCountsOf, memory, NOW, renderInShell } from '../test-utils.tsx'
 import { PanelShell } from '../ui/PanelShell.tsx'
 import { FLASH_MS } from '../library/shared.tsx'
 
-const GLOBAL: GuiLayerRef = { kind: 'global' }
-const APP: GuiLayerRef = { kind: 'workspace', workspacePath: '/w/app' }
-const BLOG: GuiLayerRef = { kind: 'workspace', workspacePath: '/w/blog' }
+const GLOBAL: Scope = { kind: 'global' }
+const APP: Scope = { kind: 'workspace', workspacePath: '/w/app' }
+const BLOG: Scope = { kind: 'workspace', workspacePath: '/w/blog' }
 const DAY = 86_400_000
 const HOUR = 3_600_000
 
@@ -48,14 +48,14 @@ const library: LibraryView = {
 type Deductions = HealthView['layers'][number]['deductions']
 const NO_DEDUCTIONS: Deductions = { rule: { points: 0, types: [] }, content: { points: 0, types: [] }, freshness: { points: 0, types: [] } }
 
-function healthLayer(layer: GuiLayerRef, total: number, overrides: Partial<HealthView['layers'][number]> = {}): HealthView['layers'][number] {
+function healthScope(scope: Scope, total: number, overrides: Partial<HealthView['layers'][number]> = {}): HealthView['layers'][number] {
   return {
-    layer, totalMemories: total, score: 90, tier: 'green', gate: { secret: false }, issues: [],
+    layer: scope, totalMemories: total, score: 90, tier: 'green', gate: { secret: false }, issues: [],
     lastCheckupAt: NOW - DAY, ignored: [], deductions: NO_DEDUCTIONS, ...overrides,
   }
 }
 function health({ governanceEnabled = true, app = {} }: { governanceEnabled?: boolean; app?: Partial<HealthView['layers'][number]> } = {}): HealthView {
-  return { version: GUI_VIEW_VERSION, governanceEnabled, layers: [healthLayer(GLOBAL, 2), healthLayer(APP, 2, app), healthLayer(BLOG, 1)] }
+  return { version: GUI_VIEW_VERSION, governanceEnabled, layers: [healthScope(GLOBAL, 2), healthScope(APP, 2, app), healthScope(BLOG, 1)] }
 }
 
 type ScopeEntry = CheckupView['scopes'][number]
@@ -69,10 +69,10 @@ function checkups({ all = 'manual', scopes = {}, allResult = null, governanceEna
   allResult?: CheckupResult | null
   governanceEnabled?: boolean
 } = {}): CheckupView {
-  const entry = (layer: GuiLayerRef): ScopeEntry => ({
-    scope: layer, frequency: all, isOwn: false, lastCheckupAt: NOW - DAY, nextCheckupAt: null, isDue: false,
+  const entry = (scope: Scope): ScopeEntry => ({
+    scope, frequency: all, isOwn: false, lastCheckupAt: NOW - DAY, nextCheckupAt: null, isDue: false,
     isInProgress: false, failure: null, modelUnavailable: null, lastResult: null,
-    ...scopes[layer.kind === 'global' ? 'global' : layer.workspacePath],
+    ...scopes[scope.kind === 'global' ? 'global' : scope.workspacePath],
   })
   return { version: GUI_VIEW_VERSION, governanceEnabled, defaultFrequency: all, allResult, scopes: [entry(GLOBAL), entry(APP), entry(BLOG)] }
 }
@@ -80,7 +80,7 @@ function checkups({ all = 'manual', scopes = {}, allResult = null, governanceEna
 const views = { pending, library, health: health(), checkups: checkups() }
 
 /** 打开记忆页：给范围就落在它的处理视图。 */
-function open(target: NavTarget | GuiLayerRef = APP, init: FakeGatewayInit = {}) {
+function open(target: NavTarget | Scope = APP, init: FakeGatewayInit = {}) {
   const nav = createNavStore()
   openMemoryPage({ layout: { selectPanel: vi.fn() } }, nav, 'view' in target ? target : { view: 'todo', scope: target })
   const gateway = createFakeGateway({ currentWorkspace: '/w/app', ...init, views: { ...views, ...init.views } })

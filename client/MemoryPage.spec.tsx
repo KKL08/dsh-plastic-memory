@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { GUI_VIEW_VERSION, type DeletedView, type GuiLayerRef, type HealthView, type LibraryView, type PendingView } from '../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, type DeletedView, type HealthView, type LibraryView, type PendingView, type Scope } from '../src/gui/contract.ts'
 import { createFakeGateway } from './gateway.fake.ts'
 import { createTranslator } from './i18n.tsx'
 import { en } from './locales.ts'
@@ -9,9 +9,9 @@ import { createNavStore, openMemoryPage, PANEL_ID } from './nav.ts'
 import { levelCountsOf, memory, NOW, renderInShell } from './test-utils.tsx'
 import { PanelShell } from './ui/PanelShell.tsx'
 
-const GLOBAL: GuiLayerRef = { kind: 'global' }
-const APP: GuiLayerRef = { kind: 'workspace', workspacePath: '/w/app' }
-const ZETA: GuiLayerRef = { kind: 'workspace', workspacePath: '/w/zeta' }
+const GLOBAL: Scope = { kind: 'global' }
+const APP: Scope = { kind: 'workspace', workspacePath: '/w/app' }
+const ZETA: Scope = { kind: 'workspace', workspacePath: '/w/zeta' }
 
 const g1 = memory({ id: 'g1', name: 'g1', scope: 'global', workspacePath: undefined })
 const a1 = memory({ id: 'a1', name: 'a1' })
@@ -38,16 +38,16 @@ const library: LibraryView = {
 }
 const deleted: DeletedView = { version: GUI_VIEW_VERSION, items: [{ memory: b1, deletedAt: NOW - 1000, purgeAt: NOW + 5 * 86_400_000 }] }
 
-function healthLayer(layer: GuiLayerRef, score: number | null, tier: 'green' | 'amber' | 'red', totalMemories = 1): HealthView['layers'][number] {
+function healthScope(scope: Scope, score: number | null, tier: 'green' | 'amber' | 'red', totalMemories = 1): HealthView['layers'][number] {
   return {
-    layer, totalMemories, score, tier, gate: { secret: score === null }, issues: [],
+    layer: scope, totalMemories, score, tier, gate: { secret: score === null }, issues: [],
     lastCheckupAt: NOW - 86_400_000, ignored: [],
     deductions: { rule: { points: 0, types: [] }, content: { points: 0, types: [] }, freshness: { points: 0, types: [] } },
   }
 }
 const health: HealthView = {
   version: GUI_VIEW_VERSION, governanceEnabled: true,
-  layers: [healthLayer(GLOBAL, 85, 'green'), healthLayer(APP, 60, 'amber', 2), healthLayer(ZETA, null, 'red')],
+  layers: [healthScope(GLOBAL, 85, 'green'), healthScope(APP, 60, 'amber', 2), healthScope(ZETA, null, 'red')],
 }
 
 const views = { pending, library, deleted, health }
@@ -89,7 +89,7 @@ describe('左栏范围', () => {
       pending: { ...pending, dot: 'none' as const, items: [], levelCounts: levelCountsOf([]) },
       library: { ...library, layers: [{ layer: GLOBAL, items: [g1] }] },
       deleted: { ...deleted, items: [] },
-      health: { ...health, layers: [healthLayer(GLOBAL, 85, 'green')] },
+      health: { ...health, layers: [healthScope(GLOBAL, 85, 'green')] },
     }
     open({ view: 'todo', scope: { kind: 'all' } }, createFakeGateway({ views: globalOnly }))
     expect(rowParts(railRow('全部')).sub).toBe('只有全局')
@@ -171,7 +171,7 @@ describe('标题行与状态条', () => {
   })
 
   it('分数分档：85 / 60 / 40 分别是绿、琥珀、红圆点，写良好 / 需要留意 / 有问题', () => {
-    const scored: HealthView = { ...health, layers: [healthLayer(GLOBAL, 85, 'green'), healthLayer(APP, 60, 'amber'), healthLayer(ZETA, 40, 'red')] }
+    const scored: HealthView = { ...health, layers: [healthScope(GLOBAL, 85, 'green'), healthScope(APP, 60, 'amber'), healthScope(ZETA, 40, 'red')] }
     open({ view: 'todo', scope: GLOBAL }, createFakeGateway({ views: { ...views, health: scored } }))
     const check = (text: RegExp, marker: string) => {
       expect(statusBar()).toHaveTextContent(text)
@@ -312,6 +312,17 @@ describe('落点与旧导航目标', () => {
     expect(within(titleRow()).getAllByText(/./).map(el => el.textContent)).toEqual(['app', '当前对话', '/w/app'])
     expect(rowParts(railRow('app')).sub).toMatch(/· 当前对话$/)
     expect(rowParts(railRow('全局')).sub).not.toMatch(/当前对话/)
+  })
+
+  it('PA-22：对话的项目路径带末尾分隔符、视图里不带：认成同一个项目，左栏只列一次，件数照算，选它仍写视图里的路径', () => {
+    const { nav } = open({ view: 'todo', fromChat: true }, createFakeGateway({ currentWorkspace: '/w/app/', views }))
+    expect(rail().getAllByRole('button').map(b => rowParts(b).name)).toEqual(['全部', '全局', 'app', 'blog', 'zeta'])
+    expect(railRow('app')).toHaveAttribute('aria-current', 'true')
+    expect(rowParts(railRow('app')).sub).toMatch(/· 当前对话$/)
+    expect(screen.getAllByRole('tab').map(t => t.textContent)).toEqual(['处理2· 可整理 1', '记忆查看2', '最近删除'])
+    fireEvent.click(railRow('zeta'))
+    fireEvent.click(railRow('app'))
+    expect(nav.get().scope).toEqual(APP)
   })
 
   it('不是从对话进来的不标「当前对话」', () => {

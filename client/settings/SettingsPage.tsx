@@ -290,7 +290,7 @@ function useMemoryCounts(session: ReturnType<ReturnType<typeof useGateway>['useS
   if (library.status !== 'ready' || (deleted.status !== 'ready' && deleted.status !== 'missing')) return undefined
   const counts = new Map<string, number>()
   const add = (type: string) => { counts.set(type, (counts.get(type) ?? 0) + 1) }
-  for (const layer of library.data.layers) for (const memory of layer.items) add(memory.type)
+  for (const group of library.data.layers) for (const memory of group.items) add(memory.type)
   if (deleted.status === 'ready') for (const item of deleted.data.items) add(item.memory.type)
   return counts
 }

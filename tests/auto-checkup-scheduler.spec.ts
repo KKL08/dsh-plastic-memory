@@ -19,7 +19,7 @@ import type { Scope } from '../src/scope.ts'
 import type { ScanToolResult } from '../src/tools/scan.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { AUTO_CHECKUP_FIRST_CHECK_MS, AUTO_CHECKUP_INTERVAL_MS, CHECKUP_CLAIM_REFRESH_MS, AutoCheckupScheduler, type AutoCheckupTimer } from '../src/gui/auto-checkup.ts'
-import { GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, checkupKey, checkupViewSchema, pendingItemKey, type AutoCheckupFrequency, type CheckupView, type ScopeRef } from '../src/gui/contract.ts'
+import { GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, checkupKey, checkupViewSchema, pendingItemKey, type AutoCheckupFrequency, type CheckupView, type ScopeOrAll } from '../src/gui/contract.ts'
 import { executeScan } from '../src/tools/scan.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { fakeExec } from './helpers/exec.ts'
@@ -167,7 +167,7 @@ function env(opts: {
     now: () => clock.now,
   })
   live.push(scheduler)
-  const set = (scope: ScopeRef, frequency: AutoCheckupFrequency) => autoCheckups.set(scope, frequency)
+  const set = (scope: ScopeOrAll, frequency: AutoCheckupFrequency) => autoCheckups.set(scope, frequency)
   const completed = async () => Object.fromEntries((await checkups.list()).map(r => [r.id, r.completed]))
   const readView = async () => checkupViewSchema.parse(JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_CHECKUP_VIEW_FILE), 'utf8')))
   /** 推进时间并等这次检查（含它跑的体检）做完。 */

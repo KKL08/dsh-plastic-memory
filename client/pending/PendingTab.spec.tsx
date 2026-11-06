@@ -1054,8 +1054,8 @@ describe('待处理：可以整理', () => {
 })
 
 describe('可以整理：不再提醒的条目', () => {
-  const healthLayer = (layer: HealthView['layers'][number]['layer'], ignored: HealthView['layers'][number]['ignored']): HealthView['layers'][number] => ({
-    layer, totalMemories: 3, score: 90, tier: 'green', gate: { secret: false }, issues: [], lastCheckupAt: NOW, ignored,
+  const healthScope = (scope: HealthView['layers'][number]['layer'], ignored: HealthView['layers'][number]['ignored']): HealthView['layers'][number] => ({
+    layer: scope, totalMemories: 3, score: 90, tier: 'green', gate: { secret: false }, issues: [], lastCheckupAt: NOW, ignored,
     deductions: { rule: { points: 0, types: [] }, content: { points: 0, types: [] }, freshness: { points: 0, types: [] } },
   })
   const app = { kind: 'workspace', workspacePath: '/w/app' } as const
@@ -1063,8 +1063,8 @@ describe('可以整理：不再提醒的条目', () => {
     version: GUI_VIEW_VERSION,
     governanceEnabled: true,
     layers: [
-      healthLayer({ kind: 'global' }, [{ type: 'unclear', memories: [{ id: 'g1', name: '模糊那条', summary: '' }] }]),
-      healthLayer(app, [
+      healthScope({ kind: 'global' }, [{ type: 'unclear', memories: [{ id: 'g1', name: '模糊那条', summary: '' }] }]),
+      healthScope(app, [
         { type: 'bloat', memories: [{ id: 'i1', name: '太长那条', summary: '' }] },
         { type: 'redundancy', memories: [{ id: 'i2', name: '甲', summary: '' }, { id: 'i3', name: '乙', summary: '' }] },
       ]),

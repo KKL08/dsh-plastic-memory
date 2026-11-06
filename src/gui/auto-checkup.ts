@@ -1,7 +1,7 @@
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryLogger } from '../store.ts'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
-import { sameScope, type Scope } from '../scope.ts'
+import { scopeKey, type Scope } from '../scope.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import { executeScan, type ScanToolDeps, type ScanToolResult } from '../tools/scan.ts'
 import { genId } from '../governance/schema.ts'
@@ -307,6 +307,6 @@ export class AutoCheckupScheduler {
   private async isStillDue(target: Scope): Promise<boolean> {
     const { scopes } = await this.deps.status()
     const now = this.deps.now()
-    return scopes.some(({ scope, isDue, failure }) => isDue && (failure === null || failure.retryAt <= now) && sameScope(scope, target))
+    return scopes.some(({ scope, isDue, failure }) => isDue && (failure === null || failure.retryAt <= now) && scopeKey(scope) === scopeKey(target))
   }
 }

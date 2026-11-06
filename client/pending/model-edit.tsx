@@ -6,7 +6,7 @@
  */
 import { diffWords, type Change } from 'diff'
 import { Fragment, useEffect, useId, useRef, useState } from 'react'
-import { detectSecrets, layerOfMemory, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type ModelEditAdviceType } from '../../src/gui/contract.ts'
+import { detectSecrets, scopeOfMemory, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type ModelEditAdviceType } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ModelState } from '../gateway.ts'
 import { formatNumber, useT, type Translate } from '../i18n.tsx'
 import { Button } from '../ui/Button.tsx'
@@ -79,7 +79,7 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
     const command: DraftCommand = {
       cmd: 'draft-edit',
       adviceType,
-      memories: memories.map(m => ({ memoryId: m.id, layer: layerOfMemory(m) })) as DraftCommand['memories'],
+      memories: memories.map(m => ({ memoryId: m.id, layer: scopeOfMemory(m) })) as DraftCommand['memories'],
       ...(text !== '' ? { request: text } : {}),
       ...(previous !== undefined ? { previous } : {}),
     }

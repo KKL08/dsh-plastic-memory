@@ -2,14 +2,14 @@
  * 新写入的提升候选就地处理（对话交付卡、右侧栏「这次新写入的」共用）：记忆卡下面是建议区（来由和后果），再下面「留在本项目」「提升为全局」。
  * 提升按记忆 id 发 promote-memory（只认此刻仍是候选的），去处同待处理的提升卡跟着配置 globalPromoteTarget：写进 AGENTS.md 时
  * 按钮写「写进 AGENTS.md」，结果「已写进 AGENTS.md」、不可撤销（项目里那条进了最近删除，这一行由上层留着结果）；配置还没读到时提升暂不可用。
- * 留下发 keep-local-memory，都带这条所在的层；不进待处理、不亮圆点。
+ * 留下发 keep-local-memory，都带这条所在的作用域；不进待处理、不亮圆点。
  * 跨项目确认、失败原话沿用待处理卡（useItemAction）；别处正在处理或刚处理完时原位写「没有生效」。
  * 处理过的（这里、另一处或待处理里）建议区和按钮原位换成结果行「已提升为全局」「留在本项目」+ 一句后果：状态读全部记忆视图。
  * 这里处理的，结果行末尾带「撤销」（按这次的 decisionId 发 undo，同待处理的结果卡），撤销后回到候选；
  * 这次的结果只顶到视图下一次变化为止，之后（含别处撤销、模型重新标记）跟着视图走。
  */
 import { useState, type ReactNode } from 'react'
-import type { GuiLayerRef, MemoryCard, MemoryCommand } from '../../src/gui/contract.ts'
+import type { MemoryCard, MemoryCommand, Scope } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type PluginConfig } from '../gateway.ts'
 import { useT } from '../i18n.tsx'
 import { AdviceNote, ResultLine } from '../ui/Advice.tsx'
@@ -20,7 +20,7 @@ import { ActionFeedback, useItemAction } from './action.tsx'
 export type InPlacePromotion = 'candidate' | 'kept-local' | 'promoted' | 'wrote-agents-md'
 
 /**
- * 全部记忆视图里这条新写入的记忆此刻的提升状态。新写入的总在项目里（模型没有直写全局的通道），在全局层就是提升过了。
+ * 全部记忆视图里这条新写入的记忆此刻的提升状态。新写入的总在项目里（模型没有直写全局的通道），在全局就是提升过了。
  * 体检关闭时视图不标候选，这里也就不提示。
  */
 export function promotionOf(card: MemoryCard | undefined): InPlacePromotion | undefined {
@@ -29,15 +29,15 @@ export function promotionOf(card: MemoryCard | undefined): InPlacePromotion | un
 }
 
 /** 就地提升发出的命令，去处按配置 governance.globalPromoteTarget。 */
-export function inPlacePromoteCommand(memoryId: string, layer: GuiLayerRef | undefined, target: PluginConfig['globalPromoteTarget']): MemoryCommand {
-  return { cmd: 'promote-memory', memoryId, layer, isCandidateRequired: true, ...(target === 'agents-md' ? { target: 'agents-md' as const } : {}) }
+export function inPlacePromoteCommand(memoryId: string, scope: Scope | undefined, target: PluginConfig['globalPromoteTarget']): MemoryCommand {
+  return { cmd: 'promote-memory', memoryId, layer: scope, isCandidateRequired: true, ...(target === 'agents-md' ? { target: 'agents-md' as const } : {}) }
 }
 
 type Verdict = Exclude<InPlacePromotion, 'candidate'>
 
 /** controls 放在记忆卡下面：候选时是建议区和按钮，处理过是结果行；另有跨项目确认、失败原话、没有生效。 */
 export function usePromoteInPlace(
-  session: BorrowedSession, memory: MemoryCard, layer: GuiLayerRef | undefined, state: InPlacePromotion | undefined,
+  session: BorrowedSession, memory: MemoryCard, scope: Scope | undefined, state: InPlacePromotion | undefined,
   /** 写进了 AGENTS.md：上层记下，记忆离开视图后这一行仍留着结果。 */
   onWroteAgentsMd?: () => void,
 ): ReactNode {
@@ -92,10 +92,10 @@ export function usePromoteInPlace(
           <>
             <AdviceNote>{t('conflict.twoSentences', { first: t('pending.promote.reason'), second: note })}</AdviceNote>
             <div className="pm-pending-actions pm-promote-actions">
-              <Button unavailable={action.unavailable} onClick={() => { run({ cmd: 'keep-local-memory', memoryId: memory.id, layer }) }}>{t('pending.promote.keepLocal')}</Button>
+              <Button unavailable={action.unavailable} onClick={() => { run({ cmd: 'keep-local-memory', memoryId: memory.id, layer: scope }) }}>{t('pending.promote.keepLocal')}</Button>
               <Button
                 unavailable={action.unavailable ?? (promoteTarget === undefined ? t('pending.promote.configLoading') : undefined)}
-                onClick={() => { if (promoteTarget !== undefined) run(inPlacePromoteCommand(memory.id, layer, promoteTarget)) }}
+                onClick={() => { if (promoteTarget !== undefined) run(inPlacePromoteCommand(memory.id, scope, promoteTarget)) }}
               >
                 {t(promoteTarget === 'agents-md' ? 'pending.promote.agentsMd' : 'pending.promote.global')}
               </Button>

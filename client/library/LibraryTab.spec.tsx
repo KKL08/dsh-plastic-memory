@@ -2,7 +2,7 @@
 import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { GUI_VIEW_VERSION, scopeKey, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, checkupKey, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
 import type { BorrowedSession } from '../gateway.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { createNavStore } from '../nav.ts'
@@ -575,7 +575,7 @@ describe('全部记忆', () => {
       expect(groupBody('事实与经验').querySelector('.pm-arrive')).toBeNull()
       unmountAgain()
       renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'workspace', workspacePath: '/w/app2' }} session={session} fold={fold} now={NOW} />, gateway)
-      expect([...fold.keys()].every(key => key.startsWith(`library|${scopeKey(app)}|`))).toBe(true)
+      expect([...fold.keys()].every(key => key.startsWith(`library|${checkupKey(app)}|`))).toBe(true)
     })
   })
 
@@ -634,7 +634,7 @@ describe('全部记忆', () => {
     })
 
     it('目标在收起的组、第 4 条以后：同一次渲染里展开组和其余，高亮那一行并接住焦点；高亮播完组照样展开着', () => {
-      const fold: FoldMemory = new Map([[`library|${scopeKey(app)}|type:knowledge`, { isOpen: false }]])
+      const fold: FoldMemory = new Map([[`library|${checkupKey(app)}|type:knowledge`, { isOpen: false }]])
       const nav = createNavStore({ view: 'library', scope: app, memoryId: 'k5' })
       renderInShell(<LibraryTab nav={nav} scope={app} session={session} fold={fold} now={NOW} />, createFakeGateway({ views: { library: typed() } }))
       const row = rowOf('经验 5')
@@ -648,7 +648,7 @@ describe('全部记忆', () => {
       expect(rowOf('经验 4')).not.toHaveAttribute('tabindex')
       expect(groupToggle('事实与经验')).toHaveAttribute('aria-expanded', 'true')
       expect(texts(groupBody('事实与经验'))).toHaveLength(5)
-      expect(fold.get(`library|${scopeKey(app)}|type:knowledge`)).toEqual({ isOpen: true, isFull: true })
+      expect(fold.get(`library|${checkupKey(app)}|type:knowledge`)).toEqual({ isOpen: true, isFull: true })
     })
 
     it('高亮期间目标行被搜索滤掉：高亮就此结束；清空搜索后不重播，不抢搜索框的焦点', () => {

@@ -24,7 +24,7 @@ import { ViewWriter, collectCheckupView, collectGlobalViews } from '../src/gui/v
 import { createMemoryCommand } from '../src/gui/commands.ts'
 import {
   GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, checkupKey, encodeMemoryCommand, sessionViewFile,
-  checkupViewSchema, deletedViewSchema, healthViewSchema, layerOfMemory, libraryViewSchema, memoryCommandResultSchema, pendingItemKey, pendingViewSchema,
+  checkupViewSchema, deletedViewSchema, healthViewSchema, libraryViewSchema, memoryCommandResultSchema, pendingItemKey, pendingViewSchema, scopeOfMemory,
   type MemoryCommand, type MemoryCommandResult, type PendingItem,
 } from '../src/gui/contract.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
@@ -1020,7 +1020,7 @@ describe('最近删除：同层在用副本遮住的已删副本', () => {
 
     const items = deletedViewSchema.parse(await e.readView('deleted')).items
     expect(items.map(i => [i.memory.name, i.memory.scope])).toEqual([['全局那份', 'global']])
-    ok(await e.run({ cmd: 'restore', memoryId: 'mem_dup', layer: layerOfMemory(items[0]!.memory) }))
+    ok(await e.run({ cmd: 'restore', memoryId: 'mem_dup', layer: scopeOfMemory(items[0]!.memory) }))
     expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
   })
 
@@ -1486,7 +1486,7 @@ describe('提升候选与超限', () => {
 describe('promote-memory（建议整理「放错层」的提升为全局）', () => {
   /** 模型把 mem_m 判为放错层（该放全局）；别的层里没有这个 id，解析时丢掉。 */
   const misplacedLlm: SemanticLlm = { complete: async () => JSON.stringify({ findings: [{ type: 'misplaced', memoryIds: ['mem_m'], summary: '对所有项目都适用' }] }) }
-  const wsLayer = (workspacePath: string) => ({ kind: 'workspace', workspacePath }) as const
+  const wsScope = (workspacePath: string) => ({ kind: 'workspace', workspacePath }) as const
   const misplacedIds = async (e: ReturnType<typeof env>) => pendingViewSchema.parse(await e.readView('pending')).items
     .flatMap(i => i.kind === 'advice' && i.type === 'misplaced' ? i.memories.map(m => m.id) : [])
 
@@ -1496,7 +1496,7 @@ describe('promote-memory（建议整理「放错层」的提升为全局）', ()
     ok(await e.run({ cmd: 'scan' }))
     expect(await misplacedIds(e)).toEqual(['mem_m'])
 
-    const body = ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_m', layer: wsLayer(SESSION_WS) }))
+    const body = ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_m', layer: wsScope(SESSION_WS) }))
     const [snap] = await e.snapshots.list()
     expect(body).toMatchObject({ cmd: 'promote-memory', memoryIds: ['mem_m'], snapshotId: snap!.id })
     expect((await e.store.get('mem_m'))!.scope).toBe('global')
@@ -1520,7 +1520,7 @@ describe('promote-memory（建议整理「放错层」的提升为全局）', ()
     const e = env()
     await e.store.create(record({ id: 'mem_m', name: '己', scope: 'workspace', workspacePath: SESSION_WS, globalCandidate: true }))
     const { entry } = await e.decisions.upsert({ kind: 'promote-candidate', memoryIds: ['mem_m'], summary: '己', workspaces: [SESSION_WS], fingerprint: 'fp-m' }, 1)
-    const body = ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_m', layer: wsLayer(SESSION_WS) }))
+    const body = ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_m', layer: wsScope(SESSION_WS) }))
     expect(body.decisionId).toBe(entry.id)
     expect((await allEntries(e)).map(d => [d.id, d.settled?.verdict])).toEqual([[entry.id, 'promoted']])
     ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
@@ -1533,7 +1533,7 @@ describe('promote-memory（建议整理「放错层」的提升为全局）', ()
     await e.store.create(record({ id: 'mem_d', name: '删掉的', scope: 'workspace', workspacePath: SESSION_WS }))
     ok(await e.run({ cmd: 'forget', memoryId: 'mem_d' }))
     for (const memoryId of ['mem_g', 'mem_d', 'mem_none']) {
-      expect(err(await e.run({ cmd: 'promote-memory', memoryId, layer: wsLayer(SESSION_WS) })).code).toBe('not-found')
+      expect(err(await e.run({ cmd: 'promote-memory', memoryId, layer: wsScope(SESSION_WS) })).code).toBe('not-found')
     }
     expect((await e.store.get('mem_g'))!.scope).toBe('global')
     expect(await allEntries(e)).toEqual([])
@@ -1543,11 +1543,11 @@ describe('promote-memory（建议整理「放错层」的提升为全局）', ()
   it('别的项目的记忆：先要 allowCrossWorkspace，带上才提升', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_o', name: '别处的', scope: 'workspace', workspacePath: OTHER_WS }))
-    const body = err(await e.run({ cmd: 'promote-memory', memoryId: 'mem_o', layer: wsLayer(OTHER_WS) }))
+    const body = err(await e.run({ cmd: 'promote-memory', memoryId: 'mem_o', layer: wsScope(OTHER_WS) }))
     expect(body).toMatchObject({ code: 'cross-workspace', rejected: [{ id: 'mem_o', workspacePath: OTHER_WS }] })
     expect((await e.store.get('mem_o'))!.scope).toBe('workspace')
     expect(await allEntries(e)).toEqual([])
-    ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_o', layer: wsLayer(OTHER_WS), allowCrossWorkspace: true }))
+    ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_o', layer: wsScope(OTHER_WS), allowCrossWorkspace: true }))
     expect((await e.store.get('mem_o'))!.scope).toBe('global')
   })
 
@@ -1555,7 +1555,7 @@ describe('promote-memory（建议整理「放错层」的提升为全局）', ()
     const e = env()
     const creator = { sessionId: 'sess-sub', depth: 1, parentSessionId: 'sess-1' }
     await e.store.create(record({ id: 'mem_p', scope: 'workspace', workspacePath: SESSION_WS, delegation: creator }))
-    ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_p', layer: wsLayer(SESSION_WS) }))
+    ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_p', layer: wsScope(SESSION_WS) }))
     const after = (await e.store.get('mem_p'))!
     expect(after.scope).toBe('global')
     expect(after.delegation).toEqual({ ...creator, reviewed: { by: 'user', at: NOW } })
@@ -1564,7 +1564,7 @@ describe('promote-memory（建议整理「放错层」的提升为全局）', ()
 
 describe('就地提升（对话卡片、右侧栏「这次新写入的」）：promote-memory 与 keep-local-memory', () => {
   const quietLlm: SemanticLlm = { complete: async () => '{"findings":[]}' }
-  const wsLayer = { kind: 'workspace', workspacePath: SESSION_WS } as const
+  const wsScope = { kind: 'workspace', workspacePath: SESSION_WS } as const
 
   /** 模型以 scope: global 新记一条：管线降级为本项目 + globalCandidate，不经体检，账本里什么都没有。 */
   async function saveCandidate(e: ReturnType<typeof env>, name = '戊', content = '所有项目都用 vitest') {
@@ -1590,7 +1590,7 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
   it('留在本项目：清掉候选标记、账本里只留一条已结清的 keep-local，待处理与圆点不变；之后体检也不再提', async () => {
     const e = env({ llm: quietLlm })
     const memoryId = await saveCandidate(e)
-    const body = ok(await e.run({ cmd: 'keep-local-memory', memoryId, layer: wsLayer }))
+    const body = ok(await e.run({ cmd: 'keep-local-memory', memoryId, layer: wsScope }))
     expect(body).toMatchObject({ cmd: 'keep-local-memory', memoryIds: [memoryId] })
     const rec = (await e.store.get(memoryId))!
     expect([rec.scope, rec.workspacePath, rec.globalCandidate]).toEqual(['workspace', SESSION_WS, undefined])
@@ -1613,7 +1613,7 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
   it('提升为全局：记忆变 global，账本里只留一条已结清的提升，待处理与圆点不变；之后体检也不再提', async () => {
     const e = env({ llm: quietLlm })
     const memoryId = await saveCandidate(e)
-    const body = ok(await e.run({ cmd: 'promote-memory', memoryId, layer: wsLayer }))
+    const body = ok(await e.run({ cmd: 'promote-memory', memoryId, layer: wsScope }))
     expect((await e.store.get(memoryId))!.scope).toBe('global')
     expect(await e.decisions.list()).toEqual([])
     expect((await e.decisions.listSettled()).map(d => [d.id, d.settled?.verdict])).toEqual([[body.decisionId, 'promoted']])
@@ -1628,7 +1628,7 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
     const memoryId = await saveCandidate(e)
     ok(await e.run({ cmd: 'scan' }))
     const [open] = await e.decisions.list()
-    const body = ok(await e.run({ cmd: 'keep-local-memory', memoryId, layer: wsLayer }))
+    const body = ok(await e.run({ cmd: 'keep-local-memory', memoryId, layer: wsScope }))
     expect(body.decisionId).toBe(open!.id)
     expect((await e.decisions.listSettled()).map(d => [d.id, d.settled?.verdict])).toEqual([[open!.id, 'keep-local']])
     expect(await candidateIds(e)).toEqual([])
@@ -1643,7 +1643,7 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
     ok(await e.run({ cmd: 'scan' }))
     const [open] = await e.decisions.list()
     let result: MemoryCommandResult | undefined
-    await e.decisions.withClaim(open!.id, async () => { result = await e.run({ cmd, memoryId, layer: wsLayer }) })
+    await e.decisions.withClaim(open!.id, async () => { result = await e.run({ cmd, memoryId, layer: wsScope }) })
     expect(err(result!).code).toBe('claimed')
     const rec = (await e.store.get(memoryId))!
     expect([rec.scope, rec.globalCandidate]).toEqual(['workspace', true])
@@ -1654,13 +1654,13 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
   it('别处已处理：提升过的再「留在本项目」、留下过的再「留在本项目」→ not-found，什么都不动', async () => {
     const e = env()
     const promotedId = await saveCandidate(e)
-    ok(await e.run({ cmd: 'promote-memory', memoryId: promotedId, layer: wsLayer }))
-    expect(err(await e.run({ cmd: 'keep-local-memory', memoryId: promotedId, layer: wsLayer })).code).toBe('not-found')
+    ok(await e.run({ cmd: 'promote-memory', memoryId: promotedId, layer: wsScope }))
+    expect(err(await e.run({ cmd: 'keep-local-memory', memoryId: promotedId, layer: wsScope })).code).toBe('not-found')
     expect((await e.store.get(promotedId))!.scope).toBe('global')
 
     const keptId = await saveCandidate(e, '己', '提交信息一律写英文')
-    ok(await e.run({ cmd: 'keep-local-memory', memoryId: keptId, layer: wsLayer }))
-    expect(err(await e.run({ cmd: 'keep-local-memory', memoryId: keptId, layer: wsLayer })).code).toBe('not-found')
+    ok(await e.run({ cmd: 'keep-local-memory', memoryId: keptId, layer: wsScope }))
+    expect(err(await e.run({ cmd: 'keep-local-memory', memoryId: keptId, layer: wsScope })).code).toBe('not-found')
     expect((await e.decisions.listSettled()).map(d => d.settled?.verdict)).toEqual(['promoted', 'keep-local'])
     expect(await e.decisions.list()).toEqual([])
   })
@@ -1668,8 +1668,8 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
   it('就地提升只认此刻仍是候选的：别处已「留在本项目」后再点「提升为全局」→ not-found，记忆不动、结论还是留在本项目', async () => {
     const e = env()
     const memoryId = await saveCandidate(e)
-    const kept = ok(await e.run({ cmd: 'keep-local-memory', memoryId, layer: wsLayer }))
-    expect(err(await e.run({ cmd: 'promote-memory', memoryId, layer: wsLayer, isCandidateRequired: true })).code).toBe('not-found')
+    const kept = ok(await e.run({ cmd: 'keep-local-memory', memoryId, layer: wsScope }))
+    expect(err(await e.run({ cmd: 'promote-memory', memoryId, layer: wsScope, isCandidateRequired: true })).code).toBe('not-found')
     const rec = (await e.store.get(memoryId))!
     expect([rec.scope, rec.workspacePath]).toEqual(['workspace', SESSION_WS])
     expect((await e.decisions.listSettled()).map(d => [d.id, d.settled?.verdict])).toEqual([[kept.decisionId, 'keep-local']])
@@ -1678,8 +1678,8 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
   it('不带 isCandidateRequired 的 promote-memory（建议整理「放错层」）照旧：不是候选也提升', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_plain', name: '普通', scope: 'workspace', workspacePath: SESSION_WS }))
-    expect(err(await e.run({ cmd: 'promote-memory', memoryId: 'mem_plain', layer: wsLayer, isCandidateRequired: true })).code).toBe('not-found')
-    ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_plain', layer: wsLayer }))
+    expect(err(await e.run({ cmd: 'promote-memory', memoryId: 'mem_plain', layer: wsScope, isCandidateRequired: true })).code).toBe('not-found')
+    ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_plain', layer: wsScope }))
     expect((await e.store.get('mem_plain'))!.scope).toBe('global')
   })
 
@@ -1692,7 +1692,7 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
     // 模拟体检在记账与认领之间把没挂账的条目清掉：认领任何条目之前先删掉它
     const claim = e.decisions.withClaim.bind(e.decisions)
     e.decisions.withClaim = async (id, fn) => { await e.decisions.remove(id); return await claim(id, fn) }
-    const body = ok(await e.run({ cmd, memoryId, layer: wsLayer }))
+    const body = ok(await e.run({ cmd, memoryId, layer: wsScope }))
     expect((await e.decisions.listSettled()).map(d => [d.id, d.settled?.verdict])).toEqual([[body.decisionId, verdict]])
     e.decisions.withClaim = claim
     ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
@@ -1706,7 +1706,7 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
   ] as const)('就地%s后就地撤销（点之前账本里没有它）：记忆回到候选、账本里的那条移除，不进等你决定、不亮圆点；之后体检照旧同步', async (cmd) => {
     const e = env({ llm: quietLlm })
     const memoryId = await saveCandidate(e)
-    const body = ok(await e.run(cmd === 'promote-memory' ? { cmd, memoryId, layer: wsLayer, isCandidateRequired: true } : { cmd, memoryId, layer: wsLayer }))
+    const body = ok(await e.run(cmd === 'promote-memory' ? { cmd, memoryId, layer: wsScope, isCandidateRequired: true } : { cmd, memoryId, layer: wsScope }))
     ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
     const rec = (await e.store.get(memoryId))!
     expect([rec.scope, rec.workspacePath, rec.globalCandidate]).toEqual(['workspace', SESSION_WS, true])
@@ -1722,7 +1722,7 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
     const memoryId = await saveCandidate(e)
     ok(await e.run({ cmd: 'scan' }))
     const [open] = await e.decisions.list()
-    const body = ok(await e.run({ cmd: 'keep-local-memory', memoryId, layer: wsLayer }))
+    const body = ok(await e.run({ cmd: 'keep-local-memory', memoryId, layer: wsScope }))
     ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
     expect((await e.decisions.list()).map(d => d.id)).toEqual([open!.id])
     expect(await candidateIds(e)).toEqual([memoryId])
@@ -1731,7 +1731,7 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
   it('配置为写进 AGENTS.md 时就地提升同等待处理卡：写进 AGENTS.md、项目里那条软删（快照先行），账本不留东西、不进等你决定；最近删除里能找回', async () => {
     const e = env({ llm: quietLlm })
     const memoryId = await saveCandidate(e)
-    const body = ok(await e.run({ cmd: 'promote-memory', memoryId, layer: wsLayer, isCandidateRequired: true, target: 'agents-md' }))
+    const body = ok(await e.run({ cmd: 'promote-memory', memoryId, layer: wsScope, isCandidateRequired: true, target: 'agents-md' }))
     expect(body.memoryIds).toEqual([memoryId])
     expect(await readFile(join(root, 'AGENTS.md'), 'utf8')).toContain('所有项目都用 vitest')
     expect((await e.store.get(memoryId))!.status).toBe('deleted')
@@ -1740,7 +1740,7 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
     expect(await allEntries(e)).toEqual([])
     const view = await pendingView(e)
     expect([ledgerItems(view), view.dot]).toEqual([[], 'none'])
-    ok(await e.run({ cmd: 'restore', memoryId, layer: wsLayer }))
+    ok(await e.run({ cmd: 'restore', memoryId, layer: wsScope }))
     expect((await e.store.get(memoryId))!.status).toBe('active')
   })
 
@@ -1749,7 +1749,7 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
     const memoryId = await saveCandidate(e)
     ok(await e.run({ cmd: 'scan' }))
     expect(await candidateIds(e)).toEqual([memoryId])
-    ok(await e.run({ cmd: 'promote-memory', memoryId, layer: wsLayer, isCandidateRequired: true, target: 'agents-md' }))
+    ok(await e.run({ cmd: 'promote-memory', memoryId, layer: wsScope, isCandidateRequired: true, target: 'agents-md' }))
     expect(await allEntries(e)).toEqual([])
     expect(await candidateIds(e)).toEqual([])
   })
@@ -1757,7 +1757,7 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
   it('写进 AGENTS.md：含密钥的记忆同待处理卡回 failed 并说明原因，什么都不动', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_sec', name: '部署凭证', content: `token ${FAKE_SECRET.sk}`, scope: 'workspace', workspacePath: SESSION_WS, globalCandidate: true }))
-    const body = err(await e.run({ cmd: 'promote-memory', memoryId: 'mem_sec', layer: wsLayer, isCandidateRequired: true, target: 'agents-md' }))
+    const body = err(await e.run({ cmd: 'promote-memory', memoryId: 'mem_sec', layer: wsScope, isCandidateRequired: true, target: 'agents-md' }))
     expect(body.code).toBe('failed')
     expect(body.detail).toContain('含密钥的记忆不能写入 AGENTS.md')
     await expect(stat(join(root, 'AGENTS.md'))).rejects.toThrow()
@@ -1777,7 +1777,7 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
     const { workspacePath: _ws, ...rest } = project
     await e.store.create({ ...rest, scope: 'global', globalCandidate: undefined, content: '全局那份' })
     if (isDeleted) ok(await e.run({ cmd: 'forget', memoryId, layer: { kind: 'global' } }))
-    expect(err(await e.run({ cmd: 'promote-memory', memoryId, layer: wsLayer, isCandidateRequired: true })).code).toBe('target-taken')
+    expect(err(await e.run({ cmd: 'promote-memory', memoryId, layer: wsScope, isCandidateRequired: true })).code).toBe('target-taken')
     const { entry: open } = await e.decisions.upsert({ kind: 'promote-candidate', memoryIds: [memoryId], summary: '', workspaces: [SESSION_WS], fingerprint: 'fp' }, 1)
     expect(err(await e.run({ cmd: 'promote', decisionId: open.id, target: 'global' })).code).toBe('target-taken')
     const rec = (await e.store.locate(memoryId, { workspacePath: SESSION_WS, isExactLayer: true }))!.record
@@ -1793,7 +1793,7 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
     await e.store.create(record({ id: 'mem_d', name: '删掉的', scope: 'workspace', workspacePath: SESSION_WS, globalCandidate: true }))
     ok(await e.run({ cmd: 'forget', memoryId: 'mem_d' }))
     for (const memoryId of ['mem_plain', 'mem_g', 'mem_d', 'mem_none']) {
-      expect(err(await e.run({ cmd: 'keep-local-memory', memoryId, layer: wsLayer })).code).toBe('not-found')
+      expect(err(await e.run({ cmd: 'keep-local-memory', memoryId, layer: wsScope })).code).toBe('not-found')
     }
     expect(await allEntries(e)).toEqual([])
   })
@@ -1812,7 +1812,7 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
   it('体检关闭时 keep-local-memory 同 keep-local：governance-disabled，什么都不动', async () => {
     const e = env({ governanceEnabled: false })
     const memoryId = await saveCandidate(e)
-    const refused = err(await e.run({ cmd: 'keep-local-memory', memoryId, layer: wsLayer }))
+    const refused = err(await e.run({ cmd: 'keep-local-memory', memoryId, layer: wsScope }))
     expect(refused.code).toBe('governance-disabled')
     // 设置页只读这个开关，打开它要改配置文件
     expect(refused.detail).toBe('体检已关闭，可在配置文件里把 governance.enabled 改成 true 打开')
@@ -1826,7 +1826,7 @@ describe.each([
   { name: 'FileTable', inMemory: false },
   { name: 'InMemoryTable', inMemory: true },
 ])('留在本项目与撤销只认项目那一份（同 id 两层并存）：$name', ({ inMemory }) => {
-  const wsLayer = { kind: 'workspace', workspacePath: SESSION_WS } as const
+  const wsScope = { kind: 'workspace', workspacePath: SESSION_WS } as const
   const copy = (partial: Partial<MemoryRecord>) => record({ id: 'mem_dup', type: 'preference', createdAt: 1, lastConfirmedAt: 1, ...partial })
 
   describe.each([
@@ -1845,7 +1845,7 @@ describe.each([
         else await e.store.create(r)
       }
       expect(await locateCopy(e.store, 'mem_dup', { kind: 'global' })).toBeDefined()
-      expect(await locateCopy(e.store, 'mem_dup', wsLayer)).toBeDefined()
+      expect(await locateCopy(e.store, 'mem_dup', wsScope)).toBeDefined()
       return e
     }
     async function expectGlobalUntouched(e: ReturnType<typeof env>) {
@@ -1853,11 +1853,11 @@ describe.each([
       expect(g).toMatchObject({ status: 'active', name: '全局那份', content: '全局那份的正文', updatedAt: globalAt })
       expect(g!.globalCandidate).toBeUndefined()
     }
-    const projectNow = async (e: ReturnType<typeof env>) => locateCopy(e.store, 'mem_dup', wsLayer)
+    const projectNow = async (e: ReturnType<typeof env>) => locateCopy(e.store, 'mem_dup', wsScope)
 
     it('就地留下：清的是项目那份，账本指纹记项目那份；撤销把标记放回项目那份', async () => {
       const e = await setup()
-      const body = ok(await e.run({ cmd: 'keep-local-memory', memoryId: 'mem_dup', layer: wsLayer }))
+      const body = ok(await e.run({ cmd: 'keep-local-memory', memoryId: 'mem_dup', layer: wsScope }))
       expect((await projectNow(e))!.globalCandidate).toBeUndefined()
       await expectGlobalUntouched(e)
       const settled = (await e.decisions.listSettled()).find(d => d.id === body.decisionId)!
@@ -2359,7 +2359,7 @@ describe('scan：上次体检与完成记录', () => {
     .map(l => [l.layer.kind === 'global' ? 'global' : l.layer.workspacePath, l.lastCheckupAt]))
   const healthOf = async (e: ReturnType<typeof env>, kind: 'global') =>
     healthViewSchema.parse(await e.readView('health')).layers.find(l => l.layer.kind === kind)!
-  async function seedLayers(e: ReturnType<typeof env>) {
+  async function seedScopes(e: ReturnType<typeof env>) {
     await e.store.create(record({ id: 'mem_g', name: '全局', content: '回答用中文' }))
     await e.store.create(record({ id: 'mem_s', name: '本项目', content: '用 pnpm', scope: 'workspace', workspacePath: SESSION_WS }))
     await e.store.create(record({ id: 'mem_o', name: '别的项目', content: '用 npm', scope: 'workspace', workspacePath: OTHER_WS }))
@@ -2367,7 +2367,7 @@ describe('scan：上次体检与完成记录', () => {
 
   it('项目体检：只给本项目写完成记录（发起方界面手动、开始与完成时间）和缓存；全局的分数与上次体检不变', async () => {
     const e = env({ llm: answering(() => [{ type: 'unclear', memoryIds: ['mem_g'], summary: '说得不清楚' }]) })
-    await seedLayers(e)
+    await seedScopes(e)
     ok(await e.run({ cmd: 'refresh-views' }))
     const globalBefore = await healthOf(e, 'global')
     e.clock.now = NOW + 1000
@@ -2392,7 +2392,7 @@ describe('scan：上次体检与完成记录', () => {
         : []
       return JSON.stringify({ findings })
     } } })
-    await seedLayers(e)
+    await seedScopes(e)
     ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
     expect(seen.length).toBeGreaterThan(0)
     expect(seen.join('\n')).toContain('mem_g')
@@ -2408,7 +2408,7 @@ describe('scan：上次体检与完成记录', () => {
   it('只查全局：只读写全局层，只写全局的缓存与完成记录；结果只给全局的分数', async () => {
     const seen: string[] = []
     const e = env({ llm: { complete: async (input) => { seen.push(JSON.stringify(input)); return '{"findings":[]}' } } })
-    await seedLayers(e)
+    await seedScopes(e)
     const body = ok(await e.run({ cmd: 'scan', layer: { kind: 'global' } }))
     expect(seen.join('\n')).toContain('mem_g')
     expect(seen.join('\n')).not.toContain('mem_s')
@@ -2426,7 +2426,7 @@ describe('scan：上次体检与完成记录', () => {
 
   it('全部体检：全局和每个项目都写完成记录，健康视图里的上次体检都更新', async () => {
     const e = env({ llm: quiet })
-    await seedLayers(e)
+    await seedScopes(e)
     ok(await e.run({ cmd: 'scan' }))
     for (const layer of [GLOBAL, SESSION, OTHER]) expect(await completedOf(e, layer)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
     expect(await lastCheckups(e)).toEqual({ global: NOW, [SESSION_WS]: NOW, [OTHER_WS]: NOW })
@@ -2456,7 +2456,7 @@ describe('scan：上次体检与完成记录', () => {
 
     it('有项目：只查认领到的全局和项目', async () => {
       const e = envWithLateProject()
-      await seedLayers(e)
+      await seedScopes(e)
       ok(await e.run({ cmd: 'scan' }))
       for (const layer of [GLOBAL, SESSION, OTHER]) expect(await completedOf(e, layer)).toEqual({ startedAt: NOW, completedAt: NOW, by: 'manual' })
       expect(await completedOf(e, LATE)).toBeUndefined()
@@ -2476,7 +2476,7 @@ describe('scan：上次体检与完成记录', () => {
   it('内容检查失败：不写完成记录，上次体检仍是之前那次', async () => {
     let failing = false
     const e = env({ llm: { complete: async () => { if (failing) throw new Error('模型报错'); return '{"findings":[]}' } } })
-    await seedLayers(e)
+    await seedScopes(e)
     ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
     failing = true
     e.clock.now = NOW + 1000
@@ -2491,7 +2491,7 @@ describe('scan：上次体检与完成记录', () => {
     ['RATE_LIMIT', 'semantic-failed', 'model-unavailable'],
   ] as const)('借用会话的模型报宿主错误码 %s：说明码是 %s，不是 %s；不写完成记录', async (code, note, other) => {
     const e = env({ llm: { complete: async () => { throw Object.assign(new Error(`host ${code}`), { code }) } } })
-    await seedLayers(e)
+    await seedScopes(e)
     const notes = ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS })).notes
     expect(notes).toContain(note)
     expect(notes).not.toContain(other)
@@ -2500,7 +2500,7 @@ describe('scan：上次体检与完成记录', () => {
 
   it('手动体检成功：清掉这个范围自动体检的失败计数和「模型用不了」，体检视图跟着更新', async () => {
     const e = env({ llm: quiet })
-    await seedLayers(e)
+    await seedScopes(e)
     ok(await e.run({ cmd: 'set-auto-checkup', scope: { kind: 'all' }, frequency: 1 }))
     await e.checkups.recordFailure(SESSION, { kind: 'model-error', hostCode: 'RATE_LIMIT', message: 'too many requests' }, NOW - 1000)
     await e.checkups.recordFailure(SESSION, { kind: 'unparseable' }, NOW - 500)
@@ -2561,7 +2561,7 @@ describe('scan：上次体检与完成记录', () => {
     // 先开始的 agent 体检：模型卡住，等界面体检做完再返回，报的发现也不同
     const slow: SemanticLlm = { complete: async () => { await gate; return JSON.stringify({ findings: [{ type: 'unclear', memoryIds: ['mem_s'], summary: '旧结论' }] }) } }
     const e = env({ llm: quiet })
-    await seedLayers(e)
+    await seedScopes(e)
     e.clock.now = NOW + 1000
     const late = executeScan({ scope: SESSION_WS }, {
       store: e.store, registry, decisions: e.decisions, cache: e.cache, checkups: e.checkups,
@@ -2581,7 +2581,7 @@ describe('scan：上次体检与完成记录', () => {
 
   it('升级后还没有完成记录：上次体检取内容检查缓存的时间；有了完成记录就取完成记录', async () => {
     const e = env({ llm: quiet })
-    await seedLayers(e)
+    await seedScopes(e)
     await e.cache.put(scopeCacheKey({ kind: 'workspace', workspacePath: SESSION_WS }), { id: scopeCacheKey({ kind: 'workspace', workspacePath: SESSION_WS }), scannedAt: NOW - 5000, scope: SESSION_WS, findings: [] })
     await e.cache.put(scopeCacheKey({ kind: 'workspace', workspacePath: OTHER_WS }), { id: scopeCacheKey({ kind: 'workspace', workspacePath: OTHER_WS }), scannedAt: NOW - 5000, scope: OTHER_WS, findings: [] })
     await e.checkups.complete([OTHER], { startedAt: NOW - 4000, completedAt: NOW - 3000, by: 'agent' })
@@ -2591,7 +2591,7 @@ describe('scan：上次体检与完成记录', () => {
 
   it('项目目录不在了：它的完成记录在视图生成时清掉，其余的留着', async () => {
     const e = env({ llm: quiet })
-    await seedLayers(e)
+    await seedScopes(e)
     const GONE = { kind: 'workspace' as const, workspacePath: '/tmp/pm-cmd-gone' }
     await e.checkups.complete([GLOBAL, SESSION, GONE], { startedAt: NOW, completedAt: NOW, by: 'manual' })
     ok(await e.run({ cmd: 'refresh-views' }))
@@ -2799,7 +2799,7 @@ describe('scan：按范围认领', () => {
   const otherProcess = (e: ReturnType<typeof env>) => new SidecarStore({
     root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }, now: () => e.clock.now,
   }).checkups
-  async function seedLayers(e: ReturnType<typeof env>) {
+  async function seedScopes(e: ReturnType<typeof env>) {
     await e.store.create(record({ id: 'mem_g', name: '全局', content: '回答用中文' }))
     await e.store.create(record({ id: 'mem_s', name: '本项目', content: '用 pnpm', scope: 'workspace', workspacePath: SESSION_WS }))
     await e.store.create(record({ id: 'mem_o', name: '别的项目', content: '用 npm', scope: 'workspace', workspacePath: OTHER_WS }))
@@ -2825,7 +2825,7 @@ describe('scan：按范围认领', () => {
   it('范围正在体检（别的进程认领着）时手动体检回 busy：不调模型、不写缓存和完成记录；别的范围照常体检', async () => {
     const m = countingLlm()
     const e = env({ llm: m.llm })
-    await seedLayers(e)
+    await seedScopes(e)
     const other = otherProcess(e)
     const heldGlobal = await other.claimRefreshable(checkupKey(GLOBAL))
     const heldSession = await other.claimRefreshable(checkupKey(SESSION))
@@ -2849,7 +2849,7 @@ describe('scan：按范围认领', () => {
   it('「全部」要认领所有范围：有一个认领不到就整个回 busy，已认领的范围立刻放掉', async () => {
     const m = countingLlm()
     const e = env({ llm: m.llm })
-    await seedLayers(e)
+    await seedScopes(e)
     const other = otherProcess(e)
     const held = await other.claimRefreshable(checkupKey(OTHER))
     expect(err(await e.run({ cmd: 'scan' })).code).toBe('busy')
@@ -2871,7 +2871,7 @@ describe('scan：按范围认领', () => {
     let open!: () => void
     const m = countingLlm({ gate: new Promise<void>(resolve => { open = resolve }) })
     const e = env({ llm: m.llm })
-    await seedLayers(e)
+    await seedScopes(e)
     ok(await e.run({ cmd: 'refresh-views' }))
     expect(await inProgress(e)).toEqual({ global: false, [SESSION_WS]: false, [OTHER_WS]: false })
     const running = e.run({ cmd: 'scan', workspacePath: SESSION_WS })
@@ -2898,7 +2898,7 @@ describe('scan：按范围认领', () => {
     })
     const infos: string[] = []
     const e = env({ llm: m.llm, heartbeat, log: { info: (msg: string) => { infos.push(msg) }, warn() {}, error() {} } })
-    await seedLayers(e)
+    await seedScopes(e)
     await e.store.create(record({ id: 'mem_s2', name: '本项目二', content: '用 yarn', scope: 'workspace', workspacePath: SESSION_WS }))
     const running = e.run({ cmd: 'scan', workspacePath: SESSION_WS })
     await m.called
@@ -3155,8 +3155,8 @@ describe('读不出的文件', () => {
 
 describe('edit-memory（建议整理的直接改）', () => {
   const LATER = NOW + 1000
-  const wsLayer = (workspacePath: string) => ({ kind: 'workspace', workspacePath }) as const
-  const layerOf = (workspacePath: string | undefined) => (workspacePath === undefined ? { kind: 'global' } as const : wsLayer(workspacePath))
+  const wsScope = (workspacePath: string) => ({ kind: 'workspace', workspacePath }) as const
+  const scopeOf = (workspacePath: string | undefined) => (workspacePath === undefined ? { kind: 'global' } as const : wsScope(workspacePath))
   /** 卡片上的版本：从视图里读，和界面发的一样。 */
   async function baseOf(e: ReturnType<typeof env>, id: string) {
     ok(await e.run({ cmd: 'refresh-views' }))
@@ -3166,7 +3166,7 @@ describe('edit-memory（建议整理的直接改）', () => {
   const fileOf = async (e: ReturnType<typeof env>, id: string, workspacePath?: string) =>
     (await e.store.locate(id, { workspacePath, isExactLayer: true }))!.filePath
   const edit = (memoryId: string, workspacePath: string | undefined, base: { updatedAt: number; digest: string }, fields: Partial<Extract<MemoryCommand, { cmd: 'edit-memory' }>> = {}): MemoryCommand => ({
-    cmd: 'edit-memory', memoryId, layer: layerOf(workspacePath), base, content: '新正文', name: '新名称', summary: '新摘要', tags: ['新标签'], ...fields,
+    cmd: 'edit-memory', memoryId, layer: scopeOf(workspacePath), base, content: '新正文', name: '新名称', summary: '新摘要', tags: ['新标签'], ...fields,
   })
 
   it('文件里 content / name / summary / tags 是新值；updatedAt、lastConfirmedAt 刷新，digest 重算，标手改（模型改写前要先问用户），索引行重写；其余字段一概不动', async () => {
@@ -3415,7 +3415,7 @@ describe('edit-memory（建议整理的直接改）', () => {
 
 describe('merge-memories（内容重复的直接合并）', () => {
   const LATER = NOW + 1000
-  const layerOf = (r: { scope: string; workspacePath?: string }) => (r.scope === 'global' ? { kind: 'global' } as const : { kind: 'workspace', workspacePath: r.workspacePath! } as const)
+  const scopeOf = (r: { scope: string; workspacePath?: string }) => (r.scope === 'global' ? { kind: 'global' } as const : { kind: 'workspace', workspacePath: r.workspacePath! } as const)
   async function cardsOf(e: ReturnType<typeof env>) {
     ok(await e.run({ cmd: 'refresh-views' }))
     return libraryViewSchema.parse(await e.readView('library')).layers.flatMap(l => l.items)
@@ -3424,7 +3424,7 @@ describe('merge-memories（内容重复的直接合并）', () => {
     const cards = await cardsOf(e)
     const ref = (id: string) => {
       const c = cards.find(m => m.id === id)!
-      return { memoryId: id, layer: layerOf(c), base: { updatedAt: c.updatedAt, digest: c.digest! } }
+      return { memoryId: id, layer: scopeOf(c), base: { updatedAt: c.updatedAt, digest: c.digest! } }
     }
     return e.run({ cmd: 'merge-memories', memories: [ref(ids[0]), ref(ids[1])], content: '合并后的正文', name: '合并后', summary: '合并摘要', tags: ['甲', '乙'], ...fields } as MemoryCommand)
   }
@@ -3585,7 +3585,7 @@ describe('model-info（让模型改用哪个模型）', () => {
 })
 
 describe('draft-edit（让模型改、让模型合并的生成）', () => {
-  const wsLayer = { kind: 'workspace', workspacePath: SESSION_WS } as const
+  const wsScope = { kind: 'workspace', workspacePath: SESSION_WS } as const
   const LONG = `发版流程：${'先跑测试再打包，'.repeat(20)}版本号进 package.json。`
 
   /** 记下收到的提示词，按顺序回答；回答是 Error 时抛出（模型报错）。 */
@@ -3604,7 +3604,7 @@ describe('draft-edit（让模型改、让模型合并的生成）', () => {
   }
   const answer = (draft: object) => JSON.stringify(draft)
   const draftOf = (memoryId: string, fields: Partial<Extract<MemoryCommand, { cmd: 'draft-edit' }>> = {}): MemoryCommand =>
-    ({ cmd: 'draft-edit', adviceType: 'bloat', memories: [{ memoryId, layer: wsLayer }], ...fields }) as MemoryCommand
+    ({ cmd: 'draft-edit', adviceType: 'bloat', memories: [{ memoryId, layer: wsScope }], ...fields }) as MemoryCommand
 
   async function seedLong(e: ReturnType<typeof env>, overrides: Parameters<typeof record>[0] = {}) {
     await e.store.create(record({ id: 'mem_l', name: '发版流程', scope: 'workspace', workspacePath: SESSION_WS, content: LONG, summary: '发版步骤', tags: ['发版'], ...overrides }))

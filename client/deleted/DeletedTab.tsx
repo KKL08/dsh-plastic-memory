@@ -6,7 +6,7 @@
  * 密钥是物理删除，不在这里，空状态写明。
  */
 import { Fragment, useState } from 'react'
-import { layerOfMemory, scopeKey, type DeletedView, type LibraryView } from '../../src/gui/contract.ts'
+import { checkupKey, scopeOfMemory, type DeletedView, type LibraryView } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, formatDay, useT, type Translate } from '../i18n.tsx'
 import { isInScope, type NavStore, type PageScope } from '../nav.ts'
@@ -22,8 +22,8 @@ type DeletedItem = DeletedView['items'][number]
 const DAY_MS = 24 * 60 * 60 * 1000
 
 function inScope(item: DeletedItem, scope: PageScope): boolean {
-  const layer = layerOfMemory(item.memory)
-  return isInScope(layer === undefined ? [] : [layer], scope)
+  const own = scopeOfMemory(item.memory)
+  return isInScope(own === undefined ? [] : [own], scope)
 }
 
 /**
@@ -36,11 +36,11 @@ function causeLabel(cause: NonNullable<DeletedItem['cause']>, names: ReadonlyMap
   return t(cause.verdict === 'keep-left' ? 'deleted.cause.keepA' : 'deleted.cause.keepB')
 }
 
-/** 记忆 id → 名字：全部记忆（各层 active）加最近删除。 */
+/** 记忆 id → 名字：全部记忆（各作用域 active）加最近删除。 */
 function memoryNames(library: LibraryView | undefined, deleted: DeletedView): Map<string, string> {
   const names = new Map<string, string>()
   for (const { memory } of deleted.items) names.set(memory.id, memory.name)
-  for (const layer of library?.layers ?? []) for (const memory of layer.items) names.set(memory.id, memory.name)
+  for (const group of library?.layers ?? []) for (const memory of group.items) names.set(memory.id, memory.name)
   return names
 }
 
@@ -73,7 +73,7 @@ export function DeletedTab({ nav, scope, session, fold, now = Date.now() }: {
   /** 正在等彻底删除确认的那一行。 */
   const [confirming, setConfirming] = useState<string | undefined>(undefined)
   const isSearching = query.trim() !== ''
-  const folds = useFold(fold, `deleted|${scopeKey(scope)}`, isSearching)
+  const folds = useFold(fold, `deleted|${checkupKey(scope)}`, isSearching)
   if (view.status !== 'ready') return <ViewMessage state={view} />
   const names = memoryNames(library.status === 'ready' ? library.data : undefined, view.data)
   // 高亮播完：目标所在的段记成展开，免得那一行在眼前缩回去
@@ -114,7 +114,7 @@ export function DeletedTab({ nav, scope, session, fold, now = Date.now() }: {
                 onCancel={() => { setConfirming(undefined) }}
                 onConfirm={() => {
                   setConfirming(undefined)
-                  void actions.run(memory.id, { cmd: 'hard-delete', memoryId: memory.id, layer: layerOfMemory(memory) }, () => t('deleted.hardDeleted'))
+                  void actions.run(memory.id, { cmd: 'hard-delete', memoryId: memory.id, layer: scopeOfMemory(memory) }, () => t('deleted.hardDeleted'))
                 }}
               />
             )
@@ -128,7 +128,7 @@ export function DeletedTab({ nav, scope, session, fold, now = Date.now() }: {
             onClick={() => {
               void actions.run(
                 memory.id,
-                { cmd: 'restore', memoryId: memory.id, layer: layerOfMemory(memory) },
+                { cmd: 'restore', memoryId: memory.id, layer: scopeOfMemory(memory) },
                 result => t(result.decisionId !== undefined ? 'deleted.restoredConflict' : 'deleted.restored'),
               )
             }}
