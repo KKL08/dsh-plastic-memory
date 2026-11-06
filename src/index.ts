@@ -386,15 +386,14 @@ export async function apply(ctx: Context, config: Config) {
     const created = new AutoCheckupScheduler({
       scan: { store, registry, decisions, cache: scanCache, ignores },
       checkups,
-      collectPending: async () => (await collectViews()).pending,
+      // 体检前只收集；体检后立刻重写全部视图（没有视图写入器时一次体检改为现收一份）
+      views: { collectViews, rewriteAll: async () => views?.rewriteAll() },
       status: () => collectCheckupView(checkupSource),
       host,
       isGovernanceEnabled: () => config.governance.enabled.get(),
       timer: { timeout: (callback, delayMs) => timer.timeout(callback, delayMs), interval: (callback, delayMs) => timer.interval(callback, delayMs) },
       onChecked: async () => { await views?.requestCheckups() },
       onClaimChanged: async () => { await views?.requestCheckups() },
-      // 自动体检挂了账、写了完成记录：待处理、健康和体检视图都重写
-      onScanned: async () => { await views?.request() },
       now: () => Date.now(),
       log: ctx.logger,
     })

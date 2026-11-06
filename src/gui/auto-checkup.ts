@@ -1,15 +1,10 @@
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryLogger } from '../store.ts'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
 import type { HostSession } from '../tools/host-session.ts'
 import { scopeKey, type Scope } from '../scope.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
-import { executeScan, type ScanToolDeps, type ScanToolResult } from '../tools/scan.ts'
-import { genId } from '../governance/schema.ts'
-import { maskDiagnostic } from '../secrets.ts'
-import type { CheckupCause, CheckupView, PendingView } from './contract.ts'
-import { checkupResults } from './views.ts'
-import { holdCheckups, type IntervalTimer } from './checkup-run.ts'
+import type { CheckupCause, CheckupView } from './contract.ts'
+import { runCheckup, type CheckupRunDeps, type IntervalTimer } from './checkup-run.ts'
 
 /** 插件启动后等这么久第一次检查（不跟首轮对话抢资源）。 */
 export const AUTO_CHECKUP_FIRST_CHECK_MS = 3 * 60_000
@@ -23,12 +18,12 @@ export interface AutoCheckupTimer {
 }
 
 export interface AutoCheckupSchedulerDeps {
-  /** 体检执行器里和会话无关的依赖；模型、基线、所属项目由调度器按无会话给。 */
-  scan: Omit<ScanToolDeps, 'host' | 'now' | 'checkups'>
-  /** 体检记录表：开跑前按范围认领，体检做完由执行器写完成记录、再记最近一次结果；没做完记失败，模型用不了记原因。 */
-  checkups: Pick<CheckupRecordStore, 'list' | 'complete' | 'claim' | 'recordFailure' | 'recordModelUnavailable' | 'recordResults'>
-  /** 收集此刻的待处理（全部作用域）：体检前后各收集一次，比出这次的新增。 */
-  collectPending: () => Promise<PendingView>
+  /** 体检核心里和会话无关的依赖；模型、基线、所属项目由调度器按无会话给。 */
+  scan: CheckupRunDeps['scan']
+  /** 体检记录表：一次体检认领、写完成记录、最近一次结果和失败；调度器自己只读状态、记「模型用不了」。 */
+  checkups: CheckupRunDeps['checkups'] & Pick<CheckupRecordStore, 'recordModelUnavailable'>
+  /** 体检前收集待处理、体检后立刻重写视图（比出这次的新增）。 */
+  views: CheckupRunDeps['views']
   /** 每个范围此刻的情况（体检视图的内容：有效频率、是否到期，全局在前、项目按路径排序）。每次检查现读，别的进程改的设置也能读到。 */
   status: () => Promise<CheckupView>
   /** 宿主当前的默认模型；拿不到为 null（这次不跑）。每次开跑现读，不缓存。 */
@@ -40,24 +35,22 @@ export interface AutoCheckupSchedulerDeps {
   onChecked?: () => Promise<void>
   /** 认领到、放掉一个范围之后调用：重写体检视图（进行中）。 */
   onClaimChanged?: () => Promise<void>
-  /** 一个范围体检完（没被取消）后调用：重写视图。 */
-  onScanned?: (scope: Scope, result: ScanToolResult) => Promise<void> | void
   now: () => number
   log?: MemoryLogger
 }
 
 /**
  * 自动体检调度：dsh 开着时，按共享的设置表和完成记录，在后台对到期的范围做体检。不借会话、不打断对话：
- * 用宿主的默认模型无会话调用，结果照常写缓存、挂账、写完成记录（发起方 auto），和手动体检那个范围同口径；
- * 做完的再记下最近一次结果（新增、用量、说明）。后台调用不经过会话，宿主的用量统计看不到，用量取宿主流 usage 块报的数，由插件记在结果里。
+ * 每个范围经一次体检（checkup-run.ts，与界面手动体检同一套规则）：用宿主的默认模型无会话调用，结果照常写缓存、挂账、写完成记录（发起方 auto），
+ * 做完立刻重写视图、记下最近一次结果（新增、用量、说明）。后台调用不经过会话，宿主的用量统计看不到，用量取宿主流 usage 块报的数，由插件记在结果里。
  * 到期的范围依次查、一次只跑一个（全局先，项目按路径）；一次检查每个范围只补一次。
- * 跨进程：开跑前认领这个范围（与界面手动体检共用，见 checkup-run.ts holdCheckups），别的进程正在查就跳过；认领到之后重读完成记录，
+ * 跨进程：一次体检开跑前认领这个范围，别的进程正在查就跳过；认领到之后经「认领后确认」重读完成记录，
  * 别的进程刚查过、已经不到期的放掉不跑。持有期间心跳，认领被别的进程接手就取消这次体检、不再提交。
  * 卸载时取消正在跑的体检：执行器在写入检查点前停下，不写完成记录，下次照常到期。
  *
  * 没做成的两类，都记进体检记录（各进程共有的事实），不写完成记录、不重新计时：
- * - 模型用不了（拿不到默认模型，或宿主报未登录、缺凭据）：不算失败，这次检查里到期的范围都记上原因、不再往下试，下一次检查再试；
- * - 失败（模型调用出错、输出解析不了、体检出错）：连续失败次数加一，1 小时后再试，连续 3 次后等到下一个周期；做完一次体检就清零。
+ * - 模型用不了（拿不到默认模型，或宿主报未登录、缺凭据）：不算失败，由调度器给这次检查里到期的范围都记上原因、不再往下试，下一次检查再试；
+ * - 失败（模型调用出错、输出解析不了、体检出错）：一次体检在放掉认领之前记，连续失败次数加一，1 小时后再试，连续 3 次后等到下一个周期；做完一次体检就清零。
  * 取消（插件卸载、认领被别的进程接手）两样都不记。
  */
 export class AutoCheckupScheduler {
@@ -160,89 +153,24 @@ export class AutoCheckupScheduler {
 
   /**
    * 体检一个范围，和手动体检那个范围同口径：项目读全局加本项目、写本项目的缓存；全局只查全局。后台没有会话投影，不查基线。
-   * 没做完的记失败；碰上模型用不了不记，返回原因交给调用方。
+   * 没做完的由一次体检记失败；碰上模型用不了不记，返回原因交给调用方。取消（插件卸载、认领被接手、已不到期）什么都不记。
    */
   private async run(scope: Scope, llm: SemanticLlm): Promise<{ modelUnavailable: CheckupCause } | undefined> {
     const controller = new AbortController()
     this.controller = controller
-    let held: Awaited<ReturnType<typeof holdCheckups>> | undefined
     try {
-      held = await holdCheckups(this.deps.checkups, [scope], {
+      const outcome = await runCheckup({
+        target: scope, by: 'auto', llm, baseline: null, signal: controller.signal,
+        confirmHeld: () => this.isStillDue(scope),
+      }, {
+        scan: this.deps.scan, checkups: this.deps.checkups, views: this.deps.views,
         interval: (callback, delayMs) => this.deps.timer.interval(callback, delayMs),
-        onLost: () => { controller.abort(new DOMException('checkup claim taken over', 'AbortError')) },
-        ...(this.deps.onClaimChanged !== undefined ? { onChange: this.deps.onClaimChanged } : {}),
-        log: this.log,
+        ...(this.deps.onClaimChanged !== undefined ? { onClaimChanged: this.deps.onClaimChanged } : {}),
+        now: this.deps.now, log: this.log,
       })
-      // 别的进程正在查这个范围：跳过；认领到之后别的进程刚查完、已经不到期的，也不跑
-      if ('busy' in held || !(await this.isStillDue(scope))) return undefined
-      const before = await this.collectPending()
-      const result = await executeScan(
-        scope.kind === 'global' ? { layers: 'full' } : { scope: scope.workspacePath, layers: 'full' },
-        {
-          ...this.deps.scan,
-          checkups: this.deps.checkups,
-          // 无会话：模型已在开跑前取好，没有基线，也没有「当前项目」
-          host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: () => llm, baselineOf: () => null },
-          now: this.deps.now,
-        },
-        { signal: controller.signal } as ToolRunContext,
-        { by: 'auto', isGlobalOnly: scope.kind === 'global' },
-      )
-      // 取消（插件卸载、认领被别的进程接手）不算失败：什么都不记，下次检查照常到期；接手的进程会自己查
-      if (controller.signal.aborted) return undefined
-      const unavailable = result.kind === 'error' ? undefined : result.notes.find(n => n.code === 'model-unavailable')
-      if (unavailable !== undefined) return { modelUnavailable: unavailable.cause ?? { kind: 'model-error' } }
-      const failed = result.kind === 'error'
-        ? { kind: 'error' as const, message: result.message }
-        : result.notes.find(n => n.code === 'semantic-failed')?.cause
-      // 释放认领之前记：记录是这个范围的，别的进程这时还接不了手
-      if (failed !== undefined) await this.recordFailure(scope, failed)
-      else if (result.kind !== 'error') await this.recordResult(scope, before, result, controller.signal)
-      await this.deps.onScanned?.(scope, result)
-      return undefined
-    } catch (err) {
-      if (controller.signal.aborted) return undefined
-      // 原话进体检记录和视图：先遮掉疑似密钥
-      await this.recordFailure(scope, { kind: 'error', message: maskDiagnostic(err instanceof Error ? err.message : String(err)) })
-      return undefined
+      return outcome.kind === 'model-unavailable' ? { modelUnavailable: outcome.cause } : undefined
     } finally {
-      if (held !== undefined && !('busy' in held)) await held.release()
       this.controller = undefined
-    }
-  }
-
-  /** 收集待处理；出错只记日志，这次不记结果（体检本身照常算做完）。 */
-  private async collectPending(): Promise<PendingView | undefined> {
-    try {
-      return await this.deps.collectPending()
-    } catch (err) {
-      this.log.warn('[plastic-memory] 自动体检收集待处理失败，这次不记新增', err)
-      return undefined
-    }
-  }
-
-  /** 做完的自动体检记下最近一次结果：体检前后的待处理比出新增，用量取执行器合计的宿主报数。 */
-  private async recordResult(scope: Scope, before: PendingView | undefined, result: Exclude<ScanToolResult, { kind: 'error' }>, signal: AbortSignal): Promise<void> {
-    const after = before === undefined ? undefined : await this.collectPending()
-    // 收集期间认领被别的进程接手：不记，免得盖掉接手的那次
-    if (before === undefined || after === undefined || signal.aborted) return
-    try {
-      await this.deps.checkups.recordResults(checkupResults(before, after, {
-        target: scope, checkupId: genId('ck'), by: 'auto', completedAt: this.deps.now(), notes: result.notes,
-        ...(result.usageTokens !== undefined ? { usageTokens: result.usageTokens } : {}),
-      }))
-    } catch (err) {
-      this.log.warn('[plastic-memory] 记不下自动体检的结果', err)
-    }
-  }
-
-  private async recordFailure(scope: Scope, cause: CheckupCause): Promise<void> {
-    this.log.warn('[plastic-memory] 自动体检没做完，稍后再试', cause)
-    try {
-      await this.deps.checkups.recordFailure(scope, cause, this.deps.now())
-    } catch (err) {
-      // 记不下也不挡：没有失败记录，下一次检查照常到期再试
-      this.log.warn('[plastic-memory] 记不下自动体检的失败，下次检查再试', err)
     }
   }
 

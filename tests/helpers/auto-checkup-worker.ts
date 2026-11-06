@@ -84,14 +84,20 @@ const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
 const scheduler = new AutoCheckupScheduler({
   scan: { store, registry, decisions, cache: sidecar.scanCache, ignores },
   checkups,
-  collectPending: async () => (await collectGlobalViews({ store, decisions, cache: sidecar.scanCache, ignores, checkups, registry, memoryRoot: root, now: () => clock.now })).pending,
+  views: {
+    collectViews: () => collectGlobalViews({ store, decisions, cache: sidecar.scanCache, ignores, checkups, registry, memoryRoot: root, now: () => clock.now }),
+    // 体检做完、提交之后立刻重写视图：这里只收集，并报一次「体检做完」
+    rewriteAll: async () => {
+      emit({ event: 'scanned' })
+      return collectGlobalViews({ store, decisions, cache: sidecar.scanCache, ignores, checkups, registry, memoryRoot: root, now: () => clock.now })
+    },
+  },
   status: () => collectCheckupView(source),
   host: { defaultLlm: () => hostSemanticLlm(llm, { provider: 'deepseek', model: 'deepseek-v4-flash' }) },
   isGovernanceEnabled: () => true,
   timer,
   onChecked: () => writer.requestCheckups(),
   onClaimChanged: () => writer.requestCheckups(),
-  onScanned: async () => { emit({ event: 'scanned' }); await writer.requestCheckups() },
   now: () => clock.now,
   log: { ...quiet, info: (message: string) => { if (message.includes('接手')) emit({ event: 'lost' }) } },
 })

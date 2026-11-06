@@ -262,7 +262,7 @@ describe('取消', () => {
     expect((await e.recordOf(checkupKey(SESSION)))?.completed).toEqual({ startedAt: NOW + 5000, completedAt: NOW + 5000, by: 'manual' })
   })
 
-  it('认领后确认返回 false：放掉认领、算取消，不调模型、不写任何记录', async () => {
+  it('PA-32 认领后确认返回 false：放掉认领、算取消，不调模型、不写任何记录', async () => {
     const m = answering([])
     const e = env()
     await seedScopes(e)
@@ -374,19 +374,40 @@ describe('做完：重写视图与最近一次结果', () => {
     expect(second).toMatchObject({ completedAt: NOW + 1000, added: { keys: [], pending: 0, advice: 0 } })
   })
 
-  it('手动也清过期的已结清条目（sweep）', async () => {
+  it.each(['manual', 'auto'] as const)('PA-33 清过期的已结清条目（sweep），手动与自动一致：%s', async (by) => {
     const e = env()
     await seed(e)
     const old = (await e.decisions.upsert({ memoryIds: ['mem_g1', 'mem_g2'], summary: '旧冲突', fingerprint: 'fp-old' }, 1)).entry
     await e.decisions.settle(old.id, 'keep-right', NOW - RETENTION_MS - 1000, { snapshotId: 'snap_old' })
     expect(await e.decisions.listSettled()).toHaveLength(1)
-    expect((await e.run({ target: GLOBAL, llm: quiet })).kind).toBe('done')
+    expect((await e.run({ target: GLOBAL, llm: quiet, by })).kind).toBe('done')
     expect(await e.decisions.listSettled()).toEqual([])
+  })
+
+  it('PA-34 自动体检做完立即重写视图；最近一次结果发起方自动、新增身份与条数、用量；不写键 all 的那条', async () => {
+    const { llm, calls } = answering([crossConflict], { usage: 1280 })
+    const e = env()
+    await seed(e)
+    expect(await e.run({ target: SESSION, llm, by: 'auto', baseline: null, currentWorkspace: undefined })).toMatchObject({ kind: 'done' })
+    const cc = await keyOf(e, conflictOf('mem_g1', 'mem_s1'))
+    const result = await resultOf(e, SESSION)
+    expect(result).toEqual({
+      checkupId: expect.any(String), by: 'auto', completedAt: NOW,
+      added: { keys: [cc], pending: 1, advice: 0 },
+      globalAdded: { keys: [], pending: 0, advice: 0 },
+      usageTokens: calls.length * 1280,
+      notes: [{ code: 'baseline-missing' }],
+    })
+    expect((await e.recordOf(checkupKey(SESSION)))?.completed).toEqual({ startedAt: NOW, completedAt: NOW, by: 'auto' })
+    const view = await e.checkupView()
+    expect(view.scopes.find(s => checkupKey(s.scope) === checkupKey(SESSION))!.lastResult).toEqual(result)
+    expect(view.allResult).toBeNull()
+    expect(await e.recordOf('all')).toBeUndefined()
   })
 })
 
 describe('没做成', () => {
-  it('手动：内容检查没做完照样算做完，说明码带原因、结果照写，不写完成记录、不写失败记录', async () => {
+  it('PA-57 手动：内容检查没做完照样算做完，说明码带原因、结果照写，不写完成记录、不写失败记录', async () => {
     const e = env()
     await seedScopes(e)
     const r = await e.run({ target: SESSION, llm: hostError('RATE_LIMIT') })
@@ -397,7 +418,7 @@ describe('没做成', () => {
     expect(rec.lastResult!.notes).toContainEqual({ code: 'semantic-failed', cause: expect.objectContaining({ kind: 'model-error', hostCode: 'RATE_LIMIT' }) })
   })
 
-  it('手动：体检出错返回失败，不写失败记录', async () => {
+  it('PA-57 手动：体检出错返回失败，不写失败记录', async () => {
     const e = env()
     await seedScopes(e)
     const r = await e.run({ target: { kind: 'workspace', workspacePath: '/tmp/pm-run-unknown' }, llm: quiet })
@@ -405,7 +426,7 @@ describe('没做成', () => {
     expect(await e.checkups.list()).toEqual([])
   })
 
-  it('自动：模型出错在放掉认领之前记失败，返回失败；不写完成记录和结果', async () => {
+  it('PA-57 自动：模型出错时失败记录在放掉认领之前已写下，返回失败；不写完成记录和结果', async () => {
     const e = env()
     await seedScopes(e)
     let isHeldWhenFailed: boolean | undefined
@@ -423,7 +444,7 @@ describe('没做成', () => {
     expect(rec.lastResult).toBeUndefined()
   })
 
-  it('自动：宿主报模型用不了，返回原因，不记失败、不写结果', async () => {
+  it('PA-57 自动：宿主报模型用不了，返回原因，一次体检不写任何记录', async () => {
     const e = env()
     await seedScopes(e)
     const r = await e.run({ target: SESSION, llm: hostError('ACCOUNT_SIGN_IN_REQUIRED'), by: 'auto' })
