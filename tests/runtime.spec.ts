@@ -130,6 +130,17 @@ describe('SnapshotCache', () => {
     expect(frozenCore(cache, session)).toEqual([])
   })
 
+  it('库里只有子 agent 存的待确认记录：主会话按空库出冷启动文案', async () => {
+    const { store, cache } = makeCache()
+    await store.put(record({
+      id: 'mem_pending', type: 'knowledge', content: '子 agent 观察到的事',
+      delegation: { sessionId: 'sess-child', depth: 1, parentSessionId: 'sess-main', rootSessionId: 'sess-main' },
+    }))
+    const session = {}
+    cache.setWorkspacePath(session, undefined)
+    expect(await cache.assemble(session)).toBe(COLD_START_TEXT)
+  })
+
   it('空库 + 未解析：global-only 临时文本是冷启动文案，不冻结', async () => {
     const { cache } = makeCache()
     const session = {}

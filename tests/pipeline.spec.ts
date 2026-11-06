@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
-import { runSavePipeline } from '../src/pipeline.ts'
+import { runSavePipeline, type SaveRejectSubcode } from '../src/pipeline.ts'
 import { renderSaveResult } from '../src/tools/save.ts'
 import { extractEntities } from '../src/text.ts'
 import { MemoryStore } from '../src/store.ts'
@@ -828,7 +828,8 @@ describe('runSavePipeline：模型改写的兜底', () => {
 })
 
 /**
- * 子 agent 写入约束（spec 第 2–7、9 条）：委派上下文由宿主填，管线最前一个判断块，拒绝码统一 subagent-restricted。
+ * 子 agent 写入约束（spec 第 2–7、9 条）：委派上下文由宿主填，管线最前一个判断块，拒绝码统一 subagent-restricted，
+ * 各条用内部子码区分。原因文案只查区分分支的参数，不整句断言。
  * 候选默认取子 agent 能存的形状（knowledge、workspace、观察所得），各用例只改要犯的那一条。
  */
 describe('runSavePipeline：子 agent 写入约束', () => {
@@ -840,9 +841,9 @@ describe('runSavePipeline：子 agent 写入约束', () => {
     type: 'knowledge', scope: 'workspace', sourceMode: 'environment-observed',
     name: '子观察', content: 'main 上 pnpm test 会挂', summary: 'main 测试会挂', ...partial,
   })
-  const restricted = async (result: Promise<unknown>) => {
-    const r = await result as { kind: string; code?: string; reason?: string }
-    expect(r).toMatchObject({ kind: 'rejected', code: 'subagent-restricted' })
+  const restricted = async (result: Promise<unknown>, subcode: SaveRejectSubcode) => {
+    const r = await result as { kind: string; code?: string; subcode?: string; reason?: string }
+    expect(r).toMatchObject({ kind: 'rejected', code: 'subagent-restricted', subcode })
     return r.reason!
   }
 
@@ -857,8 +858,8 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   it('sourceMode 只收观察、推断：其余三种回 subagent-restricted，原因写明按观察或推断重发', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     for (const sourceMode of ['user-explicit', 'user-behavior', 'agent-action-confirmed']) {
-      const reason = await restricted(runSavePipeline(childCandidate({ sourceMode }), childDeps(store)))
-      expect(reason).toBe(`sourceMode=${sourceMode} 子 agent 用不了：子 agent 收到的指令来自委派方，不算用户明说；按观察（environment-observed）或推断（agent-inferred）重发。`)
+      const reason = await restricted(runSavePipeline(childCandidate({ sourceMode }), childDeps(store)), 'subagent-source-mode')
+      expect(reason).toContain(`sourceMode=${sourceMode}`)
     }
     expect(await store.query({ scope: { kind: 'workspace', workspacePath: '/proj' } })).toEqual([])
     for (const sourceMode of ['environment-observed', 'agent-inferred']) {
@@ -880,12 +881,12 @@ describe('runSavePipeline：子 agent 写入约束', () => {
       ['knowledge', custom, '当前场景里能写：project'],                // 内置但不在当前场景
     ]
     for (const [type, reg, allowed] of cases) {
-      const reason = await restricted(runSavePipeline(childCandidate({ type }), { ...childDeps(), registry: reg }))
-      expect(reason, type).toBe(`子 agent 只能写 knowledge、project 两类，且要在当前场景里（${allowed}）；"${type}" 不行，这件事带回主会话。`)
+      const reason = await restricted(runSavePipeline(childCandidate({ type }), { ...childDeps(), registry: reg }), 'subagent-type')
+      expect(reason, type).toContain(`"${type}"`)
+      expect(reason, type).toContain(allowed)
     }
     const none = buildTypeRegistry({ template: 'scene-1', customTypes: {}, scenes: { 'scene-1': { label: '写作', types: ['preference'] } } })
-    expect(await restricted(runSavePipeline(childCandidate(), { ...childDeps(), registry: none })))
-      .toBe('子 agent 只能写 knowledge、project 两类，且要在当前场景里（当前场景里两类都没有）；"knowledge" 不行，这件事带回主会话。')
+    expect(await restricted(runSavePipeline(childCandidate(), { ...childDeps(), registry: none }), 'subagent-type')).toContain('当前场景里两类都没有')
     expect((await runSavePipeline(childCandidate({ type: 'project' }), { ...childDeps(), registry: custom })).kind).toBe('saved')
   })
 
@@ -893,24 +894,22 @@ describe('runSavePipeline：子 agent 写入约束', () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const old = await runSavePipeline(candidate({ scope: 'workspace', type: 'knowledge' }), deps(store))   // 主会话的一条，给 supersedes 一个真实目标
     if (old.kind !== 'saved') throw new Error(old.kind)
-    expect(await restricted(runSavePipeline(childCandidate({ supersedes: [old.record.id] }), childDeps(store))))
-      .toBe('子 agent 不能用 supersedes 替代旧记忆；去掉 supersedes 重发，要替代哪条带回主会话。')
-    expect(await restricted(runSavePipeline(childCandidate({ force: true }), childDeps(store))))
-      .toBe('子 agent 不能带 force：去重、手改保护、疑似密钥三道检查子 agent 都过不去。撞重复就另存或放弃，疑似密钥一律不存；去掉 force 重发。')
+    await restricted(runSavePipeline(childCandidate({ supersedes: [old.record.id] }), childDeps(store)), 'subagent-supersedes')
+    await restricted(runSavePipeline(childCandidate({ force: true }), childDeps(store)), 'subagent-force')
     expect((await store.get(old.record.id))!.status).toBe('active')
     expect((await runSavePipeline(childCandidate({ supersedes: [], force: false }), childDeps(store))).kind).toBe('saved')
   })
 
   it('同时犯多条时按 sourceMode → 类型 → supersedes → force 的顺序报最前一条', async () => {
     const all = { sourceMode: 'user-explicit', type: 'preference', supersedes: ['mem_x'], force: true }
-    const steps: Array<[object, string]> = [
-      [all, 'sourceMode='],
-      [{ ...all, sourceMode: 'agent-inferred' }, '只能写 knowledge、project'],
-      [{ ...all, sourceMode: 'agent-inferred', type: 'project' }, 'supersedes'],
-      [{ ...all, sourceMode: 'agent-inferred', type: 'project', supersedes: undefined }, 'force'],
+    const steps: Array<[object, SaveRejectSubcode]> = [
+      [all, 'subagent-source-mode'],
+      [{ ...all, sourceMode: 'agent-inferred' }, 'subagent-type'],
+      [{ ...all, sourceMode: 'agent-inferred', type: 'project' }, 'subagent-supersedes'],
+      [{ ...all, sourceMode: 'agent-inferred', type: 'project', supersedes: undefined }, 'subagent-force'],
     ]
-    for (const [partial, lead] of steps) {
-      expect(await restricted(runSavePipeline(childCandidate({ scope: 'global', ...partial }), childDeps()))).toContain(lead)
+    for (const [partial, subcode] of steps) {
+      await restricted(runSavePipeline(childCandidate({ scope: 'global', ...partial }), childDeps()), subcode)
     }
   })
 
@@ -952,8 +951,8 @@ describe('runSavePipeline：子 agent 写入约束', () => {
     ]
     for (const [id, by] of cases) await store.put(owned(id, by))
     for (const [id, , why] of cases) {
-      const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', id, content: '子 agent 想改成这样' }), childDeps(store)))
-      expect(reason, id).toBe(`子 agent 只能改本会话存下、还没被接受的记忆；${id} ${why}。要改的内容带回主会话。`)
+      const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', id, content: '子 agent 想改成这样' }), childDeps(store)), 'subagent-not-own')
+      expect(reason, id).toContain(`${id} ${why}`)
       expect((await store.get(id))!.content, id).toBe(`「${id}」的旧内容`)
     }
   })
@@ -963,8 +962,8 @@ describe('runSavePipeline：子 agent 写入约束', () => {
     await store.put(owned('mem_self', 'self'))
     await store.softDelete((await store.get('mem_self'))!)
     for (const id of ['mem_none', 'mem_self']) {
-      const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', id, content: '子 agent 想改成这样' }), childDeps(store)))
-      expect(reason, id).toBe(`要改的记忆 ${id} 不存在或已删除，带回主会话。`)
+      const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', id, content: '子 agent 想改成这样' }), childDeps(store)), 'subagent-target-gone')
+      expect(reason, id).toContain(id)
     }
     expect((await store.get('mem_self'))!.content).toBe('「mem_self」的旧内容')
   })
@@ -972,8 +971,8 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   it('update 已提升为全局的待确认记录回 subagent-restricted，全局记录不动', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put({ ...owned('mem_g', 'self'), scope: 'global', workspacePath: undefined })
-    const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', id: 'mem_g', content: '子 agent 想改成这样' }), childDeps(store)))
-    expect(reason).toBe('子 agent 只能改本会话存下、还没被接受的记忆；mem_g 已经提升为全局。要改的内容带回主会话。')
+    const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', id: 'mem_g', content: '子 agent 想改成这样' }), childDeps(store)), 'subagent-not-own')
+    expect(reason).toContain('mem_g 已经提升为全局')
     expect((await store.get('mem_g'))!.content).toBe('「mem_g」的旧内容')
   })
 
@@ -991,9 +990,8 @@ describe('runSavePipeline：子 agent 写入约束', () => {
       expect(await store.restoreArchived(main)).toBe(true)
       return read
     })
-    const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', id: 'mem_main', content: '子 agent 想改成这样' }), childDeps(store)))
+    await restricted(runSavePipeline(childCandidate({ action: 'update', id: 'mem_main', content: '子 agent 想改成这样' }), childDeps(store)), 'subagent-target-gone')
     expect(checked).toBe('deleted')
-    expect(reason).toBe('要改的记忆 mem_main 不存在或已删除，带回主会话。')
     expect(await store.get('mem_main')).toMatchObject({ status: 'active', content: '「mem_main」的旧内容' })
   })
 
@@ -1013,8 +1011,8 @@ describe('runSavePipeline：子 agent 写入约束', () => {
         await realPut(change(current), { workspacePath: current.workspacePath })
         return realPut(r, hint, skipIf)
       })
-      const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', id: 'mem_self', content: '子 agent 想改成这样' }), childDeps(store)))
-      expect(reason, label).toBe('记忆 mem_self 在读取之后被改过（可能已被接受、删除或提升为全局），这次没写；要改的内容带回主会话。')
+      const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', id: 'mem_self', content: '子 agent 想改成这样' }), childDeps(store)), 'changed-after-read')
+      expect(reason, label).toContain('mem_self')
       expect((await store.get('mem_self'))!.content, label).toBe('「mem_self」的旧内容')
     }
   })
@@ -1040,7 +1038,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   it('归属检查排在 supersedes / force 之后：改别人的记录又带 force，报 force', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(owned('mem_main', 'main'))
-    expect(await restricted(runSavePipeline(childCandidate({ action: 'update', id: 'mem_main', force: true }), childDeps(store)))).toContain('force')
+    await restricted(runSavePipeline(childCandidate({ action: 'update', id: 'mem_main', force: true }), childDeps(store)), 'subagent-force')
   })
 
   it('去重只比主档：撞主会话写的、已升档的回 duplicate-suspected 并列出，提示向委派方说明分歧', async () => {
@@ -1075,15 +1073,14 @@ describe('runSavePipeline：子 agent 写入约束', () => {
   it('每会话新建配额默认 10：第 11 条回 subagent-restricted，原因含已存条数', async () => {
     const d = childDeps()
     expect((await createMany(10, d)).kind).toBe('saved')
-    expect(await restricted(runSavePipeline(childCandidate({ name: '第 11 条' }), d)))
-      .toBe('本会话已存 10 条，到了每个子会话 10 条的上限；其余带回主会话。')
+    expect(await restricted(runSavePipeline(childCandidate({ name: '第 11 条' }), d), 'subagent-quota')).toContain('本会话已存 10 条')
   })
 
   it('配额按配置值；删一条释放额度；已取代、已过期的仍占额度', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const d = childDeps(store, { maxSubagentSaves: 3 })
     expect((await createMany(3, d)).kind).toBe('saved')
-    expect(await restricted(runSavePipeline(childCandidate({ name: '第 4 条' }), d))).toContain('本会话已存 3 条')
+    expect(await restricted(runSavePipeline(childCandidate({ name: '第 4 条' }), d), 'subagent-quota')).toContain('本会话已存 3 条')
 
     const [first, second, third] = await store.query({ scope: { kind: 'workspace', workspacePath: '/proj' } })
     await store.softDelete(first!)
@@ -1091,7 +1088,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
 
     await store.update(second!, r => ({ ...r, status: 'superseded' }))
     await store.put({ ...third!, validTo: 1 })   // 早已过期，仍是 active
-    expect(await restricted(runSavePipeline(childCandidate({ name: '又一条' }), d))).toContain('本会话已存 3 条')
+    expect(await restricted(runSavePipeline(childCandidate({ name: '又一条' }), d), 'subagent-quota')).toContain('本会话已存 3 条')
   })
 
   it('配额只拦 create：到了上限 update 自己的待确认记录照常', async () => {

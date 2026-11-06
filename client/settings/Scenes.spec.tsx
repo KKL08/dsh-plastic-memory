@@ -206,6 +206,19 @@ describe('场景弹层', () => {
     expect(radio('编码')).toHaveAccessibleDescription('行为偏好、事实与经验、项目信息、参考引用 + 可复用流程')
   })
 
+  it('编辑自建场景：可以改名、增减类型，保存写回同一个 id', async () => {
+    const { form } = setup({ value: { scenes: { 'scene-1': { label: '写作', types: ['preference', 'reference'] } } } })
+    fireEvent.click(button('编辑场景 写作'))
+    const d = dialog('编辑场景')
+    fireEvent.change(within(d).getByLabelText('场景名'), { target: { value: '写稿' } })
+    fireEvent.click(check(d, '参考引用'))
+    fireEvent.click(check(d, '决定'))
+    fireEvent.click(button('确定', d))
+    expect(radio('写稿')).toHaveAccessibleDescription('行为偏好 + 决定')
+    await clickSave(form)
+    expect(form.calls[0]!.ops).toEqual([{ op: 'set', path: ['scenes', 'scene-1'], value: { label: '写稿', types: ['preference', 'decision'] } }])
+  })
+
   it('弹层是一次事务：勾选和新建的类型在取消后全部撤销', () => {
     setup()
     fireEvent.click(button('编辑场景 编码'))
@@ -291,22 +304,36 @@ describe('记忆类型列表', () => {
     scenes: { coding: { label: '编码', types: [...GENERAL, 'domain-term'] }, office: { label: '办公', types: [...GENERAL, 'decision'] } },
   }
 
-  it('类型卡分三组，写哪些场景在用、存了几条；通用只有查看，预设、我加的有编辑、删除，我加的带英文名', () => {
-    setup({ value: pool, memories: ['domain-term', 'domain-term', 'profile'], deletedMemories: ['domain-term'] })
+  const withCounts = () => setup({ value: pool, memories: ['domain-term', 'domain-term', 'profile'], deletedMemories: ['domain-term'] })
+
+  it('类型卡分三组：通用五类、预设、我加的', () => {
+    withCounts()
     expect(typeTitles('通用五类')).toEqual(['用户画像', '行为偏好', '事实与经验', '项目信息', '参考引用'])
     expect(typeTitles('预设')).toEqual(['可复用流程', '决定'])
     expect(typeTitles('我加的')).toEqual(['术语', '客户名'])
+  })
+
+  it('每张类型卡写哪些场景在用、存了几条（最近删除里的也算）', () => {
+    withCounts()
     expect(within(typeRow('用户画像')).getByText('通用、编码、办公在用 · 1 条记忆')).toBeInTheDocument()
     expect(within(typeRow('可复用流程')).getByText('没有场景在用 · 0 条记忆')).toBeInTheDocument()
     expect(within(typeRow('决定')).getByText('办公在用 · 0 条记忆')).toBeInTheDocument()
-    expect(within(typeRow('术语')).getByText('domain-term')).toBeInTheDocument()
     expect(within(typeRow('术语')).getByText('编码在用 · 3 条记忆')).toBeInTheDocument()
     expect(within(typeRow('客户名')).getByText('没有场景在用 · 0 条记忆')).toBeInTheDocument()
+  })
+
+  it('通用只有查看；预设、我加的有编辑、删除', () => {
+    withCounts()
     expect(within(typeRow('用户画像')).getAllByRole('button').map(el => el.getAttribute('aria-label'))).toEqual(['查看 用户画像'])
     expect(within(typeRow('决定')).getAllByRole('button').map(el => el.getAttribute('aria-label'))).toEqual(['编辑 决定', '删除 决定'])
-    expect(within(typeRow('决定')).queryByText('decision')).toBeNull()
     expect(button('编辑 术语', typeRow('术语'))).toBeInTheDocument()
     expect(button('删除 客户名', typeRow('客户名'))).toBeInTheDocument()
+  })
+
+  it('我加的类型卡带英文名，预设不带', () => {
+    withCounts()
+    expect(within(typeRow('术语')).getByText('domain-term')).toBeInTheDocument()
+    expect(within(typeRow('决定')).queryByText('decision')).toBeNull()
   })
 
   it('条数读不到时只写哪些场景在用', () => {

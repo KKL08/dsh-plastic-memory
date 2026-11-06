@@ -46,10 +46,12 @@ before a release or when touching anything that talks to the host.
 
 1. **Unit and integration** — `pnpm test` (add `--coverage` for a report under
    `coverage/`). Tests assert behavior through structured fields and codes, not
-   through Chinese prose; one `it` checks one thing; fixtures come from
-   `tests/helpers/`; nothing under `~/.dsh` is touched. `tests/bindings.spec.ts`
-   builds the tools with the real `defineTool` and checks every result against
-   the host's lossless-JSON rule — keep it green when you change a result shape.
+   through Chinese prose; one `it` checks one thing (an end-to-end scenario
+   whose title starts with `验收场景` may make several assertions along one
+   script); fixtures come from `tests/helpers/`; nothing under `~/.dsh` is
+   touched. `tests/bindings.spec.ts` builds the tools with the real
+   `defineTool` and checks every result against the host's lossless-JSON
+   rule — keep it green when you change a result shape.
 2. **Install smoke** — `pnpm host:smoke`. Builds and packs the published shape,
    installs the pinned dsh host into `~/.cache/dsh-plastic-memory` (once; later
    runs take seconds), installs the tarball into a temporary `DSH_HOME`, checks

@@ -172,16 +172,23 @@ describe('SidecarStore：四张表落 .state/', () => {
     expect((await a.recallStats.get('mem_a'))?.recallCount).toBe(5)
   })
 
-  it('并发写入后没有 tmp 残留，单文件表的并发 put 不丢条目（进程内串行）', async () => {
+  /** 四张侧表各并发写 10 条。 */
+  const writeConcurrently = (s: Store) => Promise.all([
+    ...Array.from({ length: 10 }, (_, i) => s.snapshots.put(`snap_${i}`, snap(`snap_${i}`))),
+    ...Array.from({ length: 10 }, (_, i) => s.pending.put(`pd_${i}`, pd(`pd_${i}`))),
+    ...Array.from({ length: 10 }, (_, i) => s.scanCache.put(`cache_${i}`, cacheEntry(`cache_${i}`))),
+    ...Array.from({ length: 10 }, (_, i) => s.recallStats.put(`mem_${i}`, { id: `mem_${i}`, recallCount: i, lastRecalledAt: null })),
+  ])
+
+  it('并发写入后目录里没有 tmp 残留', async () => {
+    await writeConcurrently(new SidecarStore({ root, schemas }))
+    expect((await listFiles(state)).filter(f => f.includes('.tmp-'))).toEqual([])
+  })
+
+  it('并发写入不丢条目：分文件的三张表各 10 个文件，单文件表进程内串行、10 条都在', async () => {
     const s = new SidecarStore({ root, schemas })
-    await Promise.all([
-      ...Array.from({ length: 10 }, (_, i) => s.snapshots.put(`snap_${i}`, snap(`snap_${i}`))),
-      ...Array.from({ length: 10 }, (_, i) => s.pending.put(`pd_${i}`, pd(`pd_${i}`))),
-      ...Array.from({ length: 10 }, (_, i) => s.scanCache.put(`cache_${i}`, cacheEntry(`cache_${i}`))),
-      ...Array.from({ length: 10 }, (_, i) => s.recallStats.put(`mem_${i}`, { id: `mem_${i}`, recallCount: i, lastRecalledAt: null })),
-    ])
+    await writeConcurrently(s)
     const files = await listFiles(state)
-    expect(files.filter(f => f.includes('.tmp-'))).toEqual([])
     expect(files.filter(f => f.startsWith('snapshots/'))).toHaveLength(10)
     expect(files.filter(f => f.startsWith('pending/'))).toHaveLength(10)
     expect(files.filter(f => f.startsWith('scan-cache/'))).toHaveLength(10)
