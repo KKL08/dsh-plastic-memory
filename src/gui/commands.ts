@@ -330,20 +330,25 @@ async function dispatch(
    * 认领后条目仍未决、记忆仍符合条件才做，做完结清那一条。还没有条目：直接做，做成之后才记一条已结清的，
    * 账本里不留没做成的条目，体检也清不掉一条还没记的。isInPlace（对话卡片、右侧栏）时这样新记的条目标 isBornSettled，撤销时移出账本。
    */
+  const isCandidateEntryOf = (e: PendingDecision, r: MemoryRecord) =>
+    kindOf(e) === 'promote-candidate' && e.memoryIds[0] === r.id && e.workspaces?.[0] === r.workspacePath
   const onCandidateEntry = async (
     memoryId: string, scope: Scope | undefined, isEligible: (r: MemoryRecord) => boolean, isInPlace: boolean,
     act: (rec: MemoryRecord, settle: SettleCandidate, drop: DropCandidate) => Promise<MemoryCommandResult>,
   ): Promise<MemoryCommandResult> => {
     const seen = await locate(memoryId, scope)
     if (!seen || !isEligible(seen)) return notFound(memoryId)
-    const open = (await deps.decisions.list())
-      .find(e => kindOf(e) === 'promote-candidate' && e.memoryIds[0] === seen.id && e.workspaces?.[0] === seen.workspacePath)
+    const open = (await deps.decisions.list()).find(e => isCandidateEntryOf(e, seen))
     if (open === undefined) {
-      return await act(seen, async (verdict, opts) => {
-        const { entry, created } = await deps.decisions.upsert(
-          { kind: 'promote-candidate', memoryIds: [seen.id], summary: seen.summary, workspaces: [seen.workspacePath!], fingerprint: candidateFingerprint(seen) }, now,
+      // 一步记成已结清：先记未决再结清的话，两步之间体检同步提升候选会把它当「已不是候选」清掉，撤销就找不到它
+      return await act(seen, async (verdict, { fingerprint, ...opts }) => {
+        // 动手期间体检刚挂进等你决定的：结清那一条，不另记一条
+        const raced = (await deps.decisions.list()).find(e => isCandidateEntryOf(e, seen))
+        if (raced !== undefined && await deps.decisions.settle(raced.id, verdict, now, { ...opts, ...(fingerprint !== undefined ? { fingerprint } : {}) })) return raced.id
+        const entry = await deps.decisions.addSettled(
+          { kind: 'promote-candidate', memoryIds: [seen.id], summary: seen.summary, workspaces: [seen.workspacePath!], fingerprint: fingerprint ?? candidateFingerprint(seen) },
+          verdict, now, isInPlace ? { ...opts, isBornSettled: true } : opts,
         )
-        await deps.decisions.settle(entry.id, verdict, now, created && isInPlace ? { ...opts, isBornSettled: true } : opts)
         return entry.id
       }, async () => undefined)
     }
@@ -556,9 +561,7 @@ async function dispatch(
         if (!(error instanceof RecordNotFoundError)) throw error
       }
       if (written === undefined) return notFound(memoryId)
-      const entry = await deps.decisions.addSettled({
-        kind: 'move', memoryIds: [rec.id], summary: rec.summary, workspaces: [workspacePath], fingerprint: editFingerprint(written),
-      }, 'moved', now, snapshot.id)
+      const entry = await deps.decisions.addMove(written, { summary: rec.summary, workspace: workspacePath }, snapshot.id, now)
       const located = await deps.store.locate(rec.id, scopeAt(workspacePath))
       return { ok: true, cmd, decisionId: entry.id, memoryIds: [rec.id], snapshotId: snapshot.id, ...(located !== undefined ? { filePath: located.filePath } : {}) }
     }
@@ -671,8 +674,11 @@ async function dispatch(
       // 出处、类型、作用域、有效期、置信度、取代关系不动：这是用户亲手改的内容，不是借来的会话说的
       const own = scopeAt(kept.record.workspacePath)
       let mine: MemoryRecord | undefined
+      let committed: MemoryRecord | undefined
       try {
-        await deps.store.update(kept.record, (cur) => {
+        committed = await deps.store.update(kept.record, (cur) => {
+          // 写盘前被改过时文件表会重读重来：每次都从头判，上一轮算的不算数
+          mine = undefined
           // 锁内按磁盘上的现状再核对一次：读过之后被改过就原样不写
           if (cur.status !== 'active' || isStale(cur, kept.base)) return cur
           // 标手改：出处还是原来的会话，「已手编，出处可能不对应」照实；模型之后要改写、替代它得先问用户（同手改文件）
@@ -698,14 +704,13 @@ async function dispatch(
       }
       const isRemoved = outcome !== 'has-secret'
       if (removed !== undefined && isRemoved) await deps.decisions.removeByMemoryIds([removed.record.id])
-      const written = await deps.store.locate(kept.record.id, own)
       const memoryIds = removed !== undefined && isRemoved ? [kept.record.id, removed.record.id] : [kept.record.id]
-      const entry = await deps.decisions.addSettled({
-        kind: 'edit', memoryIds, summary: name, fingerprint: written === undefined ? '' : editFingerprint(written.record),
-        workspaces: memoryIds.map(id => workspaceLabel(targets.find(t => t.record.id === id)!.record)),
-      }, memoryIds.length === 2 ? 'merged' : 'edited', now, snapshot.id)
+      const entry = await deps.decisions.addEdit(committed!, {
+        memoryIds, summary: name, workspaces: memoryIds.map(id => workspaceLabel(targets.find(t => t.record.id === id)!.record)),
+      }, memoryIds.length === 2 ? 'merged' : 'edited', snapshot.id, now)
       if (!isRemoved) return fail(cmd, 'has-secret', `保留的那条已改好；另一条（${removed!.record.id}）刚被写进密钥，没有删除`)
-      return { ok: true, cmd, decisionId: entry.id, memoryIds, snapshotId: snapshot.id, ...(written !== undefined ? { filePath: written.filePath } : {}) }
+      const located = await deps.store.locate(kept.record.id, own)
+      return { ok: true, cmd, decisionId: entry.id, memoryIds, snapshotId: snapshot.id, ...(located !== undefined ? { filePath: located.filePath } : {}) }
     }
 
     case 'draft-edit': {

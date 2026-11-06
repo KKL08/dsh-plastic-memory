@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -1234,7 +1235,7 @@ describe('最近删除里彻底删除', () => {
     for (const r of [t, r1, r2]) await e.store.create(r)
     const snap = await e.snapshots.capture({ operation: 'pre-update', description: '保存前', records: [t, r1, r2] }, NOW - 1)
     const settled = async (id: string, kind: 'rewrite' | 'supersede') =>
-      e.decisions.addSettled({ kind, memoryIds: [id], summary: id, workspaces: ['global'], fingerprint: `fp-${id}` }, kind === 'rewrite' ? 'rewritten' : 'superseded', NOW - 1, snap.id)
+      e.decisions.addSettled({ kind, memoryIds: [id], summary: id, workspaces: ['global'], fingerprint: `fp-${id}` }, kind === 'rewrite' ? 'rewritten' : 'superseded', NOW - 1, { snapshotId: snap.id })
     const [et, er1, er2] = [await settled('mem_t', 'rewrite'), await settled('mem_r1', 'supersede'), await settled('mem_r2', 'supersede')]
     ok(await e.run({ cmd: 'forget', memoryId: 'mem_r1', layer: { kind: 'global' } }))
 
@@ -1725,6 +1726,65 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
     expect([ledgerItems(view), view.dot]).toEqual([[], 'none'])
     ok(await e.run({ cmd: 'scan' }))
     expect(await candidateIds(e)).toEqual([memoryId])
+  })
+
+  it('PA-39 就地提升记条目时体检恰好同步提升候选（记忆已在全局、不再是候选）：条目照样记下，撤销成功', async () => {
+    let sync = async () => {}
+    let isArmed = true
+    const e = env({
+      llm: quietLlm,
+      wrapPending: table => ({
+        get: key => table.get(key),
+        put: async (key, value) => {
+          await table.put(key, value)
+          // 账本里一出现这条记忆的提升候选，就让体检同步一次
+          if (isArmed && value.kind === 'promote-candidate') {
+            isArmed = false
+            await sync()
+          }
+        },
+        delete: key => table.delete(key),
+        claim: key => table.claim(key),
+        list: () => table.list(),
+      }),
+    })
+    sync = () => e.decisions.syncPromoteCandidates(SESSION_WS, [], new Set(), e.clock.now)
+    const memoryId = await saveCandidate(e)
+    const body = ok(await e.run({ cmd: 'promote-memory', memoryId, layer: wsScope, isCandidateRequired: true }))
+    expect(isArmed).toBe(false)
+    ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
+    const rec = (await e.store.get(memoryId))!
+    expect([rec.scope, rec.workspacePath, rec.globalCandidate]).toEqual(['workspace', SESSION_WS, true])
+    expect(await allEntries(e)).toEqual([])
+  })
+
+  it('就地留下时体检刚把它挂进等你决定（点的时候账本里还没有）：结清那一条，不另记一条，之后体检也不再提', async () => {
+    let lists = 0
+    let raceIn = async () => {}
+    const e = env({
+      llm: quietLlm,
+      wrapPending: table => ({
+        get: key => table.get(key),
+        put: (key, value) => table.put(key, value),
+        delete: key => table.delete(key),
+        claim: key => table.claim(key),
+        // 命令第一次读账本（还没有条目）之后，体检挂进一条
+        list: async () => {
+          const rows = await table.list()
+          if (++lists === 1) await raceIn()
+          return rows
+        },
+      }),
+    })
+    const memoryId = await saveCandidate(e)
+    raceIn = async () => {
+      const r = (await e.store.get(memoryId))!
+      await e.decisions.upsert({ kind: 'promote-candidate', memoryIds: [memoryId], summary: r.summary, workspaces: [SESSION_WS], fingerprint: candidateFingerprint(r) }, e.clock.now)
+    }
+    const body = ok(await e.run({ cmd: 'keep-local-memory', memoryId, layer: wsScope }))
+    expect((await allEntries(e)).map(d => [d.id, d.settled?.verdict])).toEqual([[body.decisionId, 'keep-local']])
+    ok(await e.run({ cmd: 'scan' }))
+    expect(await candidateIds(e)).toEqual([])
   })
 
   it('就地处理的是体检已挂进等你决定的那条：撤销照旧重开那一条（点之前它就在等你决定里）', async () => {
@@ -2983,6 +3043,29 @@ describe('edit-memory（建议整理的直接改）', () => {
     const settled = await e.decisions.listSettled()
     expect(settled.map(d => [d.id, d.kind, d.memoryIds, d.settled])).toEqual([[body.decisionId, 'edit', ['mem_e'], { verdict: 'edited', at: LATER, snapshotId: snap!.id }]])
     expect(ledgerItems(pendingViewSchema.parse(await e.readView('pending')))).toEqual([])
+  })
+
+  it('写盘前文件被别处改过、文件表重来时卡片已过期：回 stale，不记撤销条目，别处的版本保留', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_x', name: '甲', content: '旧正文', scope: 'workspace', workspacePath: SESSION_WS }))
+    const path = await fileOf(e, 'mem_x', SESSION_WS)
+    const base = await baseOf(e, 'mem_x')
+    e.clock.now = LATER
+    // 第一次算完要写的内容后、写盘复核前，另一个进程改了这个文件：文件表重读重来，这时卡片版本已对不上
+    const update = e.store.update.bind(e.store)
+    let isArmed = true
+    e.store.update = (rec, fn, from) => update(rec, (cur) => {
+      const next = fn(cur)
+      if (isArmed) {
+        isArmed = false
+        writeFileSync(path, encodeRecord({ ...cur, content: '别处改的', updatedAt: LATER + 1 }, {}))
+      }
+      return next
+    }, from)
+    expect(err(await e.run(edit('mem_x', SESSION_WS, base))).code).toBe('stale')
+    expect(isArmed).toBe(false)
+    expect((await e.store.get('mem_x', scopeAt(SESSION_WS)))!.content).toBe('别处改的')
+    expect(await e.decisions.listSettled()).toEqual([])
   })
 
   it.each([['项目记忆', SESSION_WS], ['全局记忆', undefined]] as const)('%s改后可撤销：撤销后文件与改前一字不差，账本条目清掉', async (_label, workspacePath) => {

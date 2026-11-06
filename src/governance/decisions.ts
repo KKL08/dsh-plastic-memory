@@ -4,6 +4,7 @@ import type { MemoryRecord } from '../record-schema.ts'
 import type { OverflowLevel } from '../contract-codes.ts'
 import { genId, kindOf, verdictLoser, type PendingDecision, type PendingKind, type SettledVerdict } from './schema.ts'
 import { isUndoExpired } from './undo-rules.ts'
+import { editFingerprint } from './snapshots.ts'
 
 /** 去重 key：memoryIds 排序拼接 + baselineRef（垂直冲突与横向冲突互不干扰）。 */
 export function dedupKey(memoryIds: string[], baselineRef?: string): string {
@@ -320,17 +321,42 @@ export class PendingDecisionsStore {
   }
 
   /**
-   * 记一条生来就已结清的条目（直接改、直接合并、移到项目、模型改写与替代的撤销记录）：不经过未决，别处读账本时不会把它当待处理。
-   * 同一条记忆改几次就有几条，撤销各自核对指纹；超出保留窗口由 sweep 清掉。
+   * 记一条生来就已结清的条目，不经过未决：别处读账本（体检同步提升候选）时不会把它当待处理清掉。
+   * 撤销记录走下面按种类的方法；就地处理时才记的提升、留下也直接用它（isBornSettled 见 schema）。超出保留窗口由 sweep 清掉。
    */
   async addSettled(
     input: { kind: PendingKind; memoryIds: string[]; summary: string; workspaces: string[]; fingerprint: string; origin?: PendingDecision['origin'] },
-    verdict: SettledVerdict, now: number, snapshotId: string,
+    verdict: SettledVerdict, now: number,
+    opts: { snapshotId?: string; isBornSettled?: true; misplacedIgnore?: MisplacedIgnore } = {},
   ): Promise<PendingDecision> {
-    const entry: PendingDecision = { id: genId('pd'), ...input, firstSeenAt: now, settled: { verdict, at: now, snapshotId } }
+    const settled = {
+      verdict, at: now, ...(opts.snapshotId !== undefined ? { snapshotId: opts.snapshotId } : {}), ...(opts.isBornSettled ? { isBornSettled: true as const } : {}),
+      ...(opts.misplacedIgnore !== undefined ? { misplacedIgnore: opts.misplacedIgnore } : {}),
+    }
+    const entry: PendingDecision = { id: genId('pd'), ...input, firstSeenAt: now, settled }
     await this.table.put(entry.id, entry)
     await this.sweep(now)
     return entry
+  }
+
+  // 撤销记录：written 必须是这次操作提交的那条（处理器手里写下的、put / update 的返回值），指纹按它算，不写后重读：
+  // 重读拿到的可能已是别处紧接着写的版本，撤销会把它当成自己写的盖掉。同一条记忆改几次就有几条，撤销各自核对指纹。
+
+  /** 直接改、直接合并：written 是保留的那条，memoryIds 是保留的那条（合并时再跟上删掉的那条）。 */
+  addEdit(written: MemoryRecord, input: { memoryIds: string[]; summary: string; workspaces: string[] }, verdict: 'edited' | 'merged', snapshotId: string, now: number) {
+    return this.addSettled({ kind: 'edit', ...input, fingerprint: editFingerprint(written) }, verdict, now, { snapshotId })
+  }
+
+  /** 全局记忆移到项目：written 是移过去的那一份。 */
+  addMove(written: MemoryRecord, input: { summary: string; workspace: string }, snapshotId: string, now: number) {
+    return this.addSettled({ kind: 'move', memoryIds: [written.id], summary: input.summary, workspaces: [input.workspace], fingerprint: editFingerprint(written) }, 'moved', now, { snapshotId })
+  }
+
+  /** 模型改写、替代：written 是改写后的那条、标成已取代的那条。 */
+  addModelChange(written: MemoryRecord, input: { kind: 'rewrite' | 'supersede'; workspace: string; origin: NonNullable<PendingDecision['origin']> }, snapshotId: string, now: number) {
+    return this.addSettled({
+      kind: input.kind, memoryIds: [written.id], summary: written.name, workspaces: [input.workspace], fingerprint: editFingerprint(written), origin: input.origin,
+    }, input.kind === 'rewrite' ? 'rewritten' : 'superseded', now, { snapshotId })
   }
 
   /** 模型改写、替代已撤销：条目留到保留窗口结束（对话卡与右侧栏据此显示「已撤销」），不能再撤一次。条目不存在或未结清返回 false。 */
