@@ -1,8 +1,7 @@
-import type { MemoryStore, LocateTarget } from '../store.ts'
+import type { MemoryStore } from '../store.ts'
 import type { SnapshotStore, SnapshotDiffEntry } from '../governance/snapshots.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { maskSecretSurface } from '../secrets.ts'
-import { scopeAt } from '../scope.ts'
 import { crossWorkspaceNote, gateRecords, isVisible, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
 
 export interface SnapshotToolDeps {
@@ -24,14 +23,6 @@ interface CrossWorkspaceFields {
   otherWorkspaces: OtherWorkspaceMark[]
 }
 
-/** 只给 GUI 用的选项，不在工具参数里。isOwnScope：show / restore 按快照里每条记录自己的作用域定位与写回，
- *  不取别的作用域里更新的同 id 副本（GUI 恢复页面上那一份）。overwriteIf：给了它就只写现状过了它的记录，快照后被修改过的照样覆盖、
- *  已删除的也要过它（撤销：现状正是那次写下的内容）。 */
-export interface SnapshotToolOptions {
-  isOwnScope?: boolean
-  overwriteIf?: (current: MemoryRecord) => boolean
-}
-
 export type SnapshotToolResult =
   | { kind: 'created'; snapshotId: string; count: number; missing: string[]; message: string } & CrossWorkspaceFields
   | { kind: 'listed'; snapshots: Array<{ id: string; createdAt: number; operation: string; description: string; count: number }>; message: string }
@@ -48,7 +39,6 @@ export async function executeSnapshotTool(
   rawArgs: unknown,
   context: GovernanceContext,
   deps: SnapshotToolDeps,
-  options: SnapshotToolOptions = {},
 ): Promise<SnapshotToolResult> {
   const args = rawArgs as SnapshotToolArgs
   const now = deps.now?.() ?? Date.now()
@@ -103,10 +93,9 @@ export async function executeSnapshotTool(
   }
   // show / restore 的预读范围：快照内每个记录的现状，按该记录自己的 workspace 定位（含非 active）——restore 的 put 按同一
   // 提示定位，冲突判断看的就是将被覆盖的那份文件；按会话 workspace 定位会在同 id 多副本时比错对象。
-  const targetOf = (workspacePath: string | undefined): LocateTarget => options.isOwnScope === true ? scopeAt(workspacePath) : { workspacePath }
   const current = new Map<string, MemoryRecord>()
   for (const { id, workspacePath } of snap.data) {
-    const r = await deps.store.get(id, targetOf(workspacePath))
+    const r = await deps.store.get(id, { workspacePath })
     if (r) current.set(id, r)
   }
   // 跨 workspace 门：快照里的记录与它的现状任一方落在其他项目，就按那个项目判定（restore 写回快照里的位置）
@@ -135,8 +124,8 @@ export async function executeSnapshotTool(
 
   // restore
   const { restored, skipped, redacted } = await deps.snapshots.restore(snap, [...allowedIds], deps.store, {
-    target: options.isOwnScope === true ? 'exact' : 'hint',
-    overwrite: options.overwriteIf ?? args.overwriteChanged ?? false,
+    target: 'hint',
+    overwrite: args.overwriteChanged ?? false,
     now: () => deps.now?.() ?? Date.now(),
   })
   const changedCount = skipped.length - redacted.length

@@ -371,6 +371,17 @@ export class PendingDecisionsStore {
     return this.table.delete(id)
   }
 
+  /**
+   * 彻底删除前清依赖条目：撤销要靠的那份快照副本马上就没了（snapshotIds 是含被抹那条的快照），指向它们、涉及这条记忆的条目清掉，
+   * 之后恢复不再说冲突会回到待处理。同一份快照里别的记忆的副本还在，只涉及它们的撤销条目留着。
+   */
+  async dropDependingOn(snapshotIds: ReadonlySet<string>, memoryId: string): Promise<void> {
+    for (const [key, e] of await this.table.list()) {
+      const snapshotId = e.settled?.snapshotId
+      if (snapshotId !== undefined && snapshotIds.has(snapshotId) && e.memoryIds.includes(memoryId)) await this.table.delete(key)
+    }
+  }
+
   /** 悬空引用清理：任一被删记忆出现在条目里，整条移除（含已裁决条目，keepId 那条除外）。返回移除的未决条目数。 */
   async removeByMemoryIds(memoryIds: string[], keepId?: string): Promise<number> {
     const hit = (await this.table.list()).filter(([key, e]) => key !== keepId && e.memoryIds.some(id => memoryIds.includes(id)))

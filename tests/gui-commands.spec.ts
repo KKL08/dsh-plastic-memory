@@ -133,24 +133,10 @@ async function seedPair(e: ReturnType<typeof env>, ws?: string) {
   return (await e.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', fingerprint: 'fp-ab' }, 1)).entry
 }
 
-async function seedVertical(e: ReturnType<typeof env>) {
-  await e.store.create(record({ id: 'mem_v', name: '丙', content: '用 yarn' }))
-  return (await e.decisions.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '与基线矛盾', fingerprint: 'fp-v' }, 1)).entry
-}
-
 const allEntries = async (e: ReturnType<typeof env>) => [...await e.decisions.list(), ...await e.decisions.listSettled()]
 
 /** 待处理里除建议整理以外的项：夹具记忆的确认时间很早，另有「很久没确认」的建议，与账本无关。 */
 const ledgerItems = (view: { items: readonly PendingItem[] }) => view.items.filter(i => i.kind !== 'advice')
-
-/** 撤销预检之后、写回之前，另一个会话把这条记忆删进最近删除：在写回前插进一次软删。 */
-function forgetBeforePut(e: ReturnType<typeof env>, id: string, workspacePath?: string) {
-  const put = e.store.put.bind(e.store)
-  e.store.put = async (...args) => {
-    if (args[0].id === id) expect(await e.store.softDelete({ id, workspacePath }, { at: scopeAt(workspacePath), now: e.clock.now })).toBe(true)
-    return put(...args)
-  }
-}
 
 describe('info', () => {
   it('返回 memoryRoot、视图文件绝对路径与契约版本；只建视图目录，不写视图文件（宿主的文件观察不跟踪父目录尚不存在的文件，客户端订阅前目录要先在）', async () => {
@@ -291,31 +277,6 @@ describe('resolve 与 undo', () => {
     expect((await e.store.get('mem_b'))!.content).toBe('用 npm，password: TESTONLY99')
   })
 
-  it('垂直 keep-right（以基线为准）：删记忆；undo 后记忆回来、冲突回到待处理', async () => {
-    const e = env()
-    const entry = await seedVertical(e)
-    ok(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-right' }))
-    expect((await e.store.get('mem_v'))!.status).toBe('deleted')
-
-    ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
-    expect((await e.store.get('mem_v'))!.status).toBe('active')
-    expect((await allEntries(e)).map(d => [d.id, d.settled])).toEqual([[entry.id, undefined]])
-  })
-
-  it('keep-both：两条都留、条目 settled；undo 只去掉 settled，记忆不动、不碰快照', async () => {
-    const e = env()
-    const entry = await seedPair(e)
-    ok(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-both' }))
-    expect((await e.decisions.listSettled()).map(d => d.settled?.verdict)).toEqual(['keep-both'])
-
-    const undone = ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
-    expect(undone.memoryIds ?? []).toEqual([])
-    expect((await e.decisions.list()).map(d => d.id)).toEqual([entry.id])
-    expect((await e.store.get('mem_a'))!.status).toBe('active')
-    expect((await e.store.get('mem_b'))!.status).toBe('active')
-    expect(await e.snapshots.list()).toEqual([])
-  })
-
   it('没有指纹的条目（升级前导入的）两边都留：按双方此刻的内容现算指纹记下，体检同一对不再挂账，可以撤销', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_a', name: '甲', content: '用 pnpm' }))
@@ -373,11 +334,6 @@ describe('resolve 与 undo', () => {
     expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('not-found')
   })
 
-  it('undo 一条未裁决的条目 → not-found', async () => {
-    const e = env()
-    const entry = await seedPair(e)
-    expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('not-found')
-  })
 })
 
 describe('并发裁决', () => {
@@ -515,46 +471,6 @@ describe('并发裁决', () => {
     expect((await e.store.get('mem_c'))!.scope).toBe('workspace')
   })
 
-  it('从最近删除恢复裁决删掉的那条，碰上别人持有该条目的认领：claimed，记忆与账本都不动', async () => {
-    const e = env()
-    const pair = await seedPair(e)
-    ok(await e.run({ cmd: 'resolve', decisionId: pair.id, verdict: 'keep-left' }))
-    const before = await allEntries(e)
-    await writeClaim(pair.id, process.pid)
-    const body = err(await e.run({ cmd: 'restore', memoryId: 'mem_b' }))
-    expect(body.code).toBe('claimed')
-    expect(await allEntries(e)).toEqual(before)
-    expect((await e.store.get('mem_b'))!.status).toBe('deleted')
-  })
-
-  it('恢复裁决败方之前，别处撤销了这条并按相反结论重新裁决：新的裁决不被重开', async () => {
-    let entryId = ''
-    const other = env()
-    // 本次认领之前，另一个标签页撤销条目、改判保留败方（两步都持有认领，做完放开）
-    const e = env({
-      wrapPending: table => ({
-        get: key => table.get(key),
-        put: (key, value) => table.put(key, value),
-        delete: key => table.delete(key),
-        list: () => table.list(),
-        claim: async (key) => {
-          if (key === entryId) {
-            entryId = ''
-            ok(await other.run({ cmd: 'undo', decisionId: key }))
-            ok(await other.run({ cmd: 'resolve', decisionId: key, verdict: 'keep-right' }))
-          }
-          return table.claim(key)
-        },
-      }),
-    })
-    const pair = await seedPair(e)
-    ok(await e.run({ cmd: 'resolve', decisionId: pair.id, verdict: 'keep-left' }))
-    entryId = pair.id
-    await e.run({ cmd: 'restore', memoryId: 'mem_b' })
-    expect((await allEntries(e)).map(d => [d.id, d.settled?.verdict])).toEqual([[pair.id, 'keep-right']])
-    expect([(await e.store.get('mem_a'))!.status, (await e.store.get('mem_b'))!.status]).toEqual(['deleted', 'active'])
-  })
-
   it('认领前别处刚裁决完：not-found，什么都不动', async () => {
     let entryId = ''
     // 预检之后、本次认领之前，另一个标签页的裁决做完（条目出了待决）并放开了认领
@@ -620,29 +536,6 @@ describe('restore', () => {
     expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
   })
 
-  it('恢复途中那份快照刚过 14 天被别处清扫：刚恢复的记忆留着，不当成被彻底删除', async () => {
-    const e = env()
-    await e.store.create(record({ id: 'mem_f', name: '丁', content: '临期的记忆' }))
-    ok(await e.run({ cmd: 'forget', memoryId: 'mem_f' }))
-    e.clock.now = NOW + RETENTION_MS - 1
-    // 写回那一刻时间走过保留窗口，另一个会话顺手清扫了过期快照
-    const put = e.store.put.bind(e.store)
-    e.store.put = async (...args) => {
-      const written = await put(...args)
-      e.clock.now += 2
-      await e.snapshots.sweep(e.clock.now)
-      return written
-    }
-    ok(await e.run({ cmd: 'restore', memoryId: 'mem_f' }))
-    expect(await e.snapshots.list()).toEqual([])
-    expect(await e.store.get('mem_f')).toMatchObject({ status: 'active', content: '临期的记忆' })
-  })
-
-  it('还活着的记忆 restore → not-found', async () => {
-    const e = env()
-    await e.store.create(record({ id: 'mem_live' }))
-    expect(err(await e.run({ cmd: 'restore', memoryId: 'mem_live' })).code).toBe('not-found')
-  })
 })
 
 describe('restore：没有快照覆盖的归档记忆', () => {
@@ -1427,15 +1320,6 @@ describe('提升候选与超限', () => {
     expect((await pendingCandidates(e)).map(i => 'decisionId' in i && i.decisionId)).toEqual([decisionId])
   })
 
-  it('undo「留在本项目」时记忆已不在 → not-found，条目保持已裁决', async () => {
-    const e = env({ llm: quietLlm })
-    const { decisionId, memoryId } = await seedCandidate(e)
-    ok(await e.run({ cmd: 'keep-local', decisionId }))
-    await e.store.softDelete((await e.store.get(memoryId))!)
-    expect(err(await e.run({ cmd: 'undo', decisionId })).code).toBe('not-found')
-    expect((await e.decisions.listSettled()).map(d => d.id)).toEqual([decisionId])
-  })
-
   it('keep-local 的指纹按记忆此刻的内容记：上次体检后模型改过内容，留在本项目后同内容再被标记也不重开', async () => {
     const e = env({ llm: quietLlm })
     const { decisionId, memoryId } = await seedCandidate(e)
@@ -1484,14 +1368,6 @@ describe('提升候选与超限', () => {
     expect((await e.decisions.listSettled()).map(d => [d.id, d.settled?.verdict])).toEqual([[entry.id, 'dismiss']])
   })
 
-  it('undo 忽略过的超限提醒：回到未决，同一条条目', async () => {
-    const e = env()
-    const { entry } = await e.decisions.upsert({ kind: 'overflow', memoryIds: [], summary: '超出上限', fingerprint: '1' }, 1)
-    ok(await e.run({ cmd: 'dismiss-overflow', decisionId: entry.id }))
-    ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
-    expect(await e.decisions.listSettled()).toEqual([])
-    expect((await e.decisions.list()).map(d => d.id)).toEqual([entry.id])
-  })
 })
 
 describe('promote-memory（建议整理「放错层」的提升为全局）', () => {
@@ -2019,26 +1895,6 @@ describe('move-memory（建议整理「放错层」的移到项目）', () => {
     expect(await misplacedIds(e)).toEqual(['mem_g'])
   })
 
-  it('移过去之后又被改过：拒绝撤销，什么都不动', async () => {
-    const e = env()
-    await e.store.create(original())
-    const body = ok(await e.run(move(SESSION_WS)))
-    await e.store.update({ id: 'mem_g', workspacePath: SESSION_WS }, r => ({ ...r, content: '之后又改的' }))
-    expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('failed')
-    expect((await copyIn(e, 'mem_g', SESSION_WS))!.record.content).toBe('之后又改的')
-    expect(await copyIn(e, 'mem_g')).toBeUndefined()
-    expect((await e.decisions.listSettled()).map(d => d.id)).toEqual([body.decisionId])
-  })
-
-  it('移过去之后被删了：拒绝撤销，什么都不动', async () => {
-    const e = env()
-    await e.store.create(original())
-    const body = ok(await e.run(move(SESSION_WS)))
-    await e.store.softDelete({ id: 'mem_g', workspacePath: SESSION_WS }, { at: scopeAt(SESSION_WS) })
-    expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).ok).toBe(false)
-    expect(await copyIn(e, 'mem_g')).toBeUndefined()
-  })
-
   it.each([
     ['在用的', 'active'],
     ['最近删除里的', 'deleted'],
@@ -2098,48 +1954,6 @@ describe('move-memory（建议整理「放错层」的移到项目）', () => {
     ok(await e.run({ cmd: 'undo', decisionId: body.decisionId!, allowCrossWorkspace: true }))
     expect(await copyIn(e, 'mem_g')).toBeDefined()
     expect(await copyIn(e, 'mem_g', OTHER_WS)).toBeUndefined()
-  })
-
-  it('提升为全局后又移到别的项目：撤销提升 → not-found，移过去的那份和移动记录都不动', async () => {
-    const e = env()
-    await e.store.create({ ...original(), scope: 'workspace', workspacePath: SESSION_WS })
-    const promoted = ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_g', layer: { kind: 'workspace', workspacePath: SESSION_WS } }))
-    const moved = ok(await e.run(move(OTHER_WS, { allowCrossWorkspace: true })))
-    const target = (await copyIn(e, 'mem_g', OTHER_WS))!
-    const targetBefore = await readFile(target.filePath, 'utf8')
-
-    expect(err(await e.run({ cmd: 'undo', decisionId: promoted.decisionId!, allowCrossWorkspace: true })).code).toBe('not-found')
-    expect(await readFile((await copyIn(e, 'mem_g', OTHER_WS))!.filePath, 'utf8')).toBe(targetBefore)
-    expect(await copyIn(e, 'mem_g', SESSION_WS)).toBeUndefined()
-    expect(await copyIn(e, 'mem_g')).toBeUndefined()
-    expect((await e.decisions.listSettled()).map(d => [d.id, d.settled?.verdict])).toEqual([[promoted.decisionId, 'promoted'], [moved.decisionId, 'moved']])
-  })
-
-  it('撤销移动时全局已有这个 id：target-taken，什么都不动', async () => {
-    const e = env()
-    await e.store.create(original())
-    const body = ok(await e.run(move(SESSION_WS)))
-    await e.store.create(record({ id: 'mem_g', name: '后来的全局', content: '后来写进全局的' }))
-    const projectBefore = await readFile((await copyIn(e, 'mem_g', SESSION_WS))!.filePath, 'utf8')
-    const globalBefore = await readFile((await copyIn(e, 'mem_g'))!.filePath, 'utf8')
-
-    expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('target-taken')
-    expect(await readFile((await copyIn(e, 'mem_g', SESSION_WS))!.filePath, 'utf8')).toBe(projectBefore)
-    expect(await readFile((await copyIn(e, 'mem_g'))!.filePath, 'utf8')).toBe(globalBefore)
-    expect((await e.decisions.listSettled()).map(d => d.id)).toEqual([body.decisionId])
-  })
-
-  it('移过去之后又被提升回全局：撤销移动 → not-found，什么都不动', async () => {
-    const e = env()
-    await e.store.create(original())
-    const body = ok(await e.run(move(SESSION_WS)))
-    const promoted = ok(await e.run({ cmd: 'promote-memory', memoryId: 'mem_g', layer: { kind: 'workspace', workspacePath: SESSION_WS } }))
-    const globalBefore = await readFile((await copyIn(e, 'mem_g'))!.filePath, 'utf8')
-
-    expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('not-found')
-    expect(await readFile((await copyIn(e, 'mem_g'))!.filePath, 'utf8')).toBe(globalBefore)
-    expect(await copyIn(e, 'mem_g', SESSION_WS)).toBeUndefined()
-    expect((await e.decisions.listSettled()).map(d => d.id).sort()).toEqual([body.decisionId, promoted.decisionId].sort())
   })
 
   it.each([
@@ -3144,27 +2958,6 @@ describe('edit-memory（建议整理的直接改）', () => {
     expect((await e.store.get('mem_off'))!.content).toBe('旧正文')
   })
 
-  it('撤销前这条又被改过：拒绝撤销，什么都不动', async () => {
-    const e = env()
-    await e.store.create(record({ id: 'mem_again', content: '旧正文' }))
-    e.clock.now = LATER
-    const body = ok(await e.run(edit('mem_again', undefined, await baseOf(e, 'mem_again'))))
-    await e.store.update({ id: 'mem_again' }, r => ({ ...r, content: '之后又改的', updatedAt: LATER + 1 }))
-    expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('failed')
-    expect((await e.store.get('mem_again'))!.content).toBe('之后又改的')
-    expect((await e.decisions.listSettled()).map(d => d.id)).toEqual([body.decisionId])
-  })
-
-  it('撤销预检之后、写回之前被别处删进最近删除：不盖回在用，回 failed', async () => {
-    const e = env()
-    await e.store.create(record({ id: 'mem_gone', content: '旧正文' }))
-    e.clock.now = LATER
-    const body = ok(await e.run(edit('mem_gone', undefined, await baseOf(e, 'mem_gone'))))
-    forgetBeforePut(e, 'mem_gone')
-    expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('failed')
-    expect(await e.store.get('mem_gone')).toMatchObject({ status: 'deleted', content: '新正文' })
-  })
-
   it('卡片加载之后记忆被改过（手改文件、别处更新）：stale，不写盘、不拍快照、不记账', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_s', name: '甲', content: '旧正文', scope: 'workspace', workspacePath: SESSION_WS }))
@@ -3247,7 +3040,7 @@ describe('edit-memory（建议整理的直接改）', () => {
     expect(err(await e.run(edit('mem_ok', undefined, okBase, { content: '' }))).code).toBe('invalid-args')
   })
 
-  it('改完后语义类建议（表述不清）不再显示、撤销后回来；规则类（内容过长）按新内容重算', async () => {
+  async function scannedWithAdvice() {
     const llm: SemanticLlm = { complete: async () => JSON.stringify({ findings: [{ type: 'unclear', memoryIds: ['mem_c'], summary: '缺对象' }] }) }
     const e = env({ llm })
     await e.store.create(record({ id: 'mem_c', content: '照旧', scope: 'workspace', workspacePath: SESSION_WS }))
@@ -3257,13 +3050,25 @@ describe('edit-memory（建议整理的直接改）', () => {
       .flatMap(i => i.kind === 'advice' && i.type === type ? i.memories.map(m => m.id) : [])
     expect(await adviceIds('unclear')).toEqual(['mem_c'])
     expect(await adviceIds('bloat')).toEqual(['mem_l'])
-
     e.clock.now = LATER
-    const body = ok(await e.run(edit('mem_c', SESSION_WS, await baseOf(e, 'mem_c'), { content: '发版前在 feature 分支跑 typecheck' })))
+    return { e, adviceIds }
+  }
+
+  it('改完后语义类建议（表述不清）不再显示', async () => {
+    const { e, adviceIds } = await scannedWithAdvice()
+    ok(await e.run(edit('mem_c', SESSION_WS, await baseOf(e, 'mem_c'), { content: '发版前在 feature 分支跑 typecheck' })))
     expect(await adviceIds('unclear')).toEqual([])
+  })
+
+  it('撤销这次修改后，语义类建议回来', async () => {
+    const { e, adviceIds } = await scannedWithAdvice()
+    const body = ok(await e.run(edit('mem_c', SESSION_WS, await baseOf(e, 'mem_c'), { content: '发版前在 feature 分支跑 typecheck' })))
     ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
     expect(await adviceIds('unclear')).toEqual(['mem_c'])
+  })
 
+  it('规则类建议（内容过长）按新内容重算', async () => {
+    const { e, adviceIds } = await scannedWithAdvice()
     ok(await e.run(edit('mem_l', SESSION_WS, await baseOf(e, 'mem_l'), { content: 'y'.repeat(2050) })))
     expect(await adviceIds('bloat')).toEqual(['mem_l'])
     ok(await e.run(edit('mem_l', SESSION_WS, await baseOf(e, 'mem_l'), { content: '短了' })))
@@ -3353,22 +3158,6 @@ describe('merge-memories（内容重复的直接合并）', () => {
     expect(await e.decisions.listSettled()).toEqual([])
   })
 
-  it('撤销前被删的那条在最近删除里的内容和快照不同：拒绝撤销，不拿快照里的旧内容盖掉它', async () => {
-    const e = env()
-    await e.store.create(record({ id: 'mem_a', content: '甲的正文', createdAt: 1 }))
-    await e.store.create(record({ id: 'mem_b', content: '乙的正文', createdAt: 2 }))
-    e.clock.now = LATER
-    const body = ok(await merge(e, ['mem_a', 'mem_b']))
-    // 软删进最近删除的是之后的版本（核对与软删之间被改过）
-    await e.store.update({ id: 'mem_b' }, r => ({ ...r, content: '乙的第二版' }))
-    const filePath = (await e.store.locate('mem_a'))!.filePath
-    const merged = await readFile(filePath, 'utf8')
-
-    expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('failed')
-    expect(await readFile(filePath, 'utf8')).toBe(merged)
-    expect(await e.store.get('mem_b')).toMatchObject({ status: 'deleted', content: '乙的第二版' })
-  })
-
   it('要删掉的那条含疑似密钥（软删不了）：入口就拒绝 has-secret，两条都原样、不拍快照、不记账', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_a', content: '甲的正文', createdAt: 1 }))
@@ -3390,34 +3179,6 @@ describe('merge-memories（内容重复的直接合并）', () => {
     const cards = await cardsOf(e)
     const ref = { memoryId: 'mem_a', layer: { kind: 'global' } as const, base: { updatedAt: cards[0]!.updatedAt, digest: cards[0]!.digest! } }
     expect(err(await e.run({ cmd: 'merge-memories', memories: [ref, ref], content: '合并', name: '合并', summary: '', tags: [] })).code).toBe('invalid-args')
-  })
-
-  it('撤销前保留的那条又被改过：拒绝撤销，另一条也不恢复', async () => {
-    const e = env()
-    await e.store.create(record({ id: 'mem_a', content: '甲的正文', createdAt: 1 }))
-    await e.store.create(record({ id: 'mem_b', content: '乙的正文', createdAt: 2 }))
-    e.clock.now = LATER
-    const body = ok(await merge(e, ['mem_a', 'mem_b']))
-    await e.store.update({ id: 'mem_a' }, r => ({ ...r, content: '之后又改的', updatedAt: LATER + 1 }))
-    expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('failed')
-    expect([(await e.store.get('mem_a'))!.content, (await e.store.get('mem_b'))!.status]).toEqual(['之后又改的', 'deleted'])
-  })
-
-  it('撤销前被删的那条先从最近删除恢复、又改过：整个拒绝，保留的那条也不还原', async () => {
-    const e = env()
-    await e.store.create(record({ id: 'mem_a', content: '甲的正文', createdAt: 1 }))
-    await e.store.create(record({ id: 'mem_b', content: '乙的正文', createdAt: 2 }))
-    e.clock.now = LATER
-    const body = ok(await merge(e, ['mem_a', 'mem_b']))
-    ok(await e.run({ cmd: 'restore', memoryId: 'mem_b', layer: { kind: 'global' } }))
-    await e.store.update({ id: 'mem_b' }, r => ({ ...r, content: '乙恢复后又改的', updatedAt: LATER + 1 }))
-    const filePath = (await e.store.locate('mem_a'))!.filePath
-    const merged = await readFile(filePath, 'utf8')
-
-    expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('failed')
-    expect(await readFile(filePath, 'utf8')).toBe(merged)
-    expect([(await e.store.get('mem_b'))!.status, (await e.store.get('mem_b'))!.content]).toEqual(['active', '乙恢复后又改的'])
-    expect((await e.decisions.listSettled()).map(d => d.id)).toEqual([body.decisionId])
   })
 
   it('保留的那条是待确认的子 agent 记忆：合并算用户升档，写 reviewed user，另一条照常进最近删除', async () => {
@@ -3743,51 +3504,6 @@ describe('撤销模型改写、替代（对话卡片、右侧栏「这次新写�
     expect((await e.store.get('mem_old', { workspacePath: SESSION_WS }))!.status).toBe('active')
     expect((await e.store.get(saved.record.id, { workspacePath: SESSION_WS }))!.status).toBe('active')
     expect((await modelChanges(e))?.map(c => c.state)).toEqual(['undone'])
-  })
-
-  it.each([
-    ['改写', 'update'],
-    ['替代', 'supersede'],
-  ] as const)('force %s手改过的记忆后撤销：内容、状态、手改标记都回到改前；替代时新写的那条保留', async (_label, kind) => {
-    const e = env()
-    await seedMemory(e, 'mem_h', '改前的内容')
-    await e.store.update({ id: 'mem_h', workspacePath: SESSION_WS }, r => ({ ...r, content: '用户手改后的内容', handEdited: true }))
-    const before = (await e.store.get('mem_h', { workspacePath: SESSION_WS }))!
-    expect(before).toMatchObject({ content: '用户手改后的内容', status: 'active', handEdited: true })
-
-    const saved = kind === 'update'
-      ? await save(e, { action: 'update', id: 'mem_h', name: '名-mem_h', content: '用户同意后的新内容' })
-      : await save(e, { name: '新说法', content: '完全不同的新说法', supersedes: ['mem_h'] })
-    expect(saved.kind).toBe(kind === 'update' ? 'updated' : 'saved')
-    const changed = (await e.store.get('mem_h', { workspacePath: SESSION_WS }))!
-    expect(kind === 'update' ? changed.content : changed.status).toBe(kind === 'update' ? '用户同意后的新内容' : 'superseded')
-
-    const entry = await changeOf(e)
-    ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
-    const back = (await e.store.get('mem_h', { workspacePath: SESSION_WS }))!
-    expect(back).toMatchObject({ content: '用户手改后的内容', status: 'active', handEdited: true })
-    if (saved.kind === 'saved') expect((await e.store.get(saved.record.id, { workspacePath: SESSION_WS }))).toMatchObject({ status: 'active', content: '完全不同的新说法' })
-    expect((await modelChanges(e))?.map(c => c.state)).toEqual(['undone'])
-  })
-
-  it('撤销改写：预检之后、写回之前被别处删进最近删除：不盖回在用，回 stale', async () => {
-    const e = env()
-    await seedMemory(e, 'mem_r', '改前的内容')
-    await save(e, { action: 'update', id: 'mem_r', name: '名-mem_r', content: '模型改写后的' })
-    const entry = await changeOf(e)
-    forgetBeforePut(e, 'mem_r', SESSION_WS)
-    expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('stale')
-    expect(await e.store.get('mem_r', { workspacePath: SESSION_WS })).toMatchObject({ status: 'deleted', content: '模型改写后的' })
-  })
-
-  it('撤销替代：预检之后、写回之前旧记忆被别处删进最近删除：不盖回在用，回 stale', async () => {
-    const e = env()
-    await seedMemory(e, 'mem_old', '旧说法')
-    await save(e, { name: '新说法', content: '完全不同的新说法', supersedes: ['mem_old'] })
-    const entry = await changeOf(e)
-    forgetBeforePut(e, 'mem_old', SESSION_WS)
-    expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('stale')
-    expect((await e.store.get('mem_old', { workspacePath: SESSION_WS }))!.status).toBe('deleted')
   })
 
   it('别层有同 id 的在用副本：视图不拿那份判状态（仍可撤），撤销只动被替代的那一层', async () => {

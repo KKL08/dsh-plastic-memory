@@ -14,7 +14,8 @@ export const SNAPSHOT_RETENTION_MS = RETENTION_MS
 
 export interface RestoreOptions {
   target: 'exact' | 'hint'
-  overwrite: boolean | ((current: MemoryRecord) => boolean)
+  /** 给函数时对锁内现状求值（定位不到时传 undefined），为真才写。 */
+  overwrite: boolean | ((current: MemoryRecord | undefined) => boolean)
   now?: () => number
 }
 
@@ -205,8 +206,8 @@ export class SnapshotStore {
 
   /**
    * 选择性恢复，写回与撤回都在这里做：ids 为 undefined 恢复全部。快照后被修改过的记录默认跳过（冲突保护），
-   * overwrite=true 才覆盖；给函数时只写它认可的现状（撤销：现状就是那次写下的内容），已删除的也不例外，
-   * 否则之后被别处删掉的会被盖回在用。冲突在写入那一刻按锁内最新内容判（put 的 skipIf），判中即按「快照后被修改」跳过。
+   * overwrite=true 才覆盖；给函数时只写它认可的现状（撤销：现状就是那次写下的内容），已删除的、定位不到的也不例外，
+   * 否则之后被别处删掉的会被盖回在用、被搬走的会在原处重建旧版。冲突在写入那一刻按锁内最新内容判（put 的 skipIf），判中即按「快照后被修改」跳过。
    * target：'exact' 写回快照里这条记录自己的作用域；'hint' 按它的 workspacePath 提示定位（当前项目优先），留给 agent 工具。
    * 脱敏记录（密钥硬删）一律跳过，计入 skipped 并单列在 redacted。恢复动作本身只写旧数据，不做二次快照。
    * 密钥硬删先脱敏快照、再删文件（tools/forget.ts），可能发生在别的会话、别的进程，也可能在调用方读出快照之后：
@@ -225,7 +226,7 @@ export class SnapshotStore {
   ): Promise<{ restored: string[]; skipped: string[]; redacted: string[] }> {
     const targets = ids ? snapshot.data.filter(r => ids.includes(r.id)) : snapshot.data
     const blocks = (cur: MemoryRecord | undefined, rec: MemoryRecord) => (typeof overwrite === 'function'
-      ? cur !== undefined && !overwrite(cur)
+      ? !overwrite(cur)
       : !overwrite && isConflicting(cur, rec))
     const outcomes: Array<'restored' | 'skipped' | 'redacted'> = []
     const written = new Map<number, MemoryRecord>()

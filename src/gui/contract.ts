@@ -638,7 +638,8 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   z.object({ cmd: z.literal('info') }),
   z.object({ cmd: z.literal('resolve'), decisionId: z.string(), verdict: z.enum(RESOLVE_VERDICTS), allowCrossWorkspace }),
   /** 撤销一条已裁决条目：去掉 settled，记了快照的按它恢复败方（提升为全局则恢复原位）；直接改、移到项目的撤销后条目移出账本；
-   *  模型改写、替代（全部记忆视图的 modelChanges）按改前快照恢复，之后又被改过的回 stale，撤销后条目标已撤销留着。 */
+   *  模型改写、替代（全部记忆视图的 modelChanges）按改前快照恢复，撤销后条目标已撤销留着。
+   *  六类撤销遇到目标之后又被改过（或已不在原处）一律回 stale、条目留着；合并的撤销不会只恢复一半：要么都不动，要么写回的那条中途被第三方改过、停在第三方的版本。 */
   z.object({ cmd: z.literal('undo'), decisionId: z.string(), allowCrossWorkspace }),
   z.object({ cmd: z.literal('promote'), decisionId: z.string(), target: z.enum(['global', 'agents-md']), allowCrossWorkspace }),
   z.object({ cmd: z.literal('keep-local'), decisionId: z.string(), allowCrossWorkspace }),
@@ -664,6 +665,7 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
    */
   z.object({ cmd: z.literal('move-memory'), memoryId: z.string(), workspacePath: z.string(), allowCrossWorkspace }),
   z.object({ cmd: z.literal('forget'), memoryId: z.string(), layer: targetScope, allowCrossWorkspace }),
+  /** 从最近删除恢复一条记忆：它是某次裁决删掉的、那次裁决还能撤销时，等同撤销那次裁决（错误码与 undo 一致）；否则按快照或归档恢复。 */
   z.object({ cmd: z.literal('restore'), memoryId: z.string(), layer: targetScope, allowCrossWorkspace }),
   /** 彻底删除：在用的只收含密钥的；最近删除里的不等 14 天到期，连同快照里的副本现在就清掉。 */
   z.object({ cmd: z.literal('hard-delete'), memoryId: z.string(), layer: targetScope, allowCrossWorkspace }),
@@ -772,14 +774,14 @@ export const GUI_ERROR_CODES = [
   'governance-disabled', // 体检已关闭：裁决、撤销、提升、移到项目、留在本项目、体检、忽略超限不可用
   'has-secret',         // forget 的目标含密钥（任一级），只能彻底删除：什么都没动，界面确认后改发 hard-delete；
                         // 直接改、直接合并的目标含密钥（界面上是遮盖后的正文）：什么都没动；让模型改的目标含密钥：不发给模型
-  'stale',              // 直接改、直接合并：记忆在卡片加载后被改过；撤销模型改写、替代：之后又被改过。什么都没动
+  'stale',              // 直接改、直接合并：记忆在卡片加载后被改过；任一类撤销（含等同撤销的恢复）：目标之后又被改过或已不在原处。什么都没动（合并撤销中途被第三方改过的停在第三方的版本）
   'secret-critical',    // 直接改、直接合并的新内容含高危密钥：什么都没动；让模型改的要求或上一稿含高危密钥：不发给模型
   'secret-suspected',   // 直接改、直接合并的新内容含疑似密钥：什么都没动，用户确认后带 force 重发
   'claimed',            // 待决项正被另一次操作（别的标签页、宿主进程或体检）认领：什么都没动
   'busy',               // 体检：范围正在体检（别的体检认领着、没过期；「全部」有一个范围认领不到也算），或体检中途认领被别的进程接手。
                         // 没认领到时什么都没动；中途被接手的这次不再提交。和待决项的 claimed 是两回事
   'target-taken',       // 移到项目：目标项目已有同 id 的记忆；撤销移到项目、提升为全局：全局已有同 id 的记忆（含最近删除）。什么都没动
-  'failed',             // 执行器报错，detail 带原话
+  'failed',             // 真失败：执行器或读写报错，detail 带原话。撤销遇到「之后又被改过」不走这里，回 stale；最近删除的普通恢复（不等同撤销）快照后被改过仍回它
 ] as const
 export type GuiErrorCode = (typeof GUI_ERROR_CODES)[number]
 
