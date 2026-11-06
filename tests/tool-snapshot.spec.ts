@@ -1,8 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { executeSnapshotTool, type SnapshotToolDeps } from '../src/tools/snapshot.ts'
 import { executeForget } from '../src/tools/forget.ts'
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
+import { MemoryStore } from '../src/store.ts'
 import { SnapshotStore, SNAPSHOT_RETENTION_MS } from '../src/governance/snapshots.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import type { MemorySnapshot } from '../src/governance/schema.ts'
@@ -10,10 +9,12 @@ import type { PendingDecision } from '../src/governance/schema.ts'
 import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 function makeDeps(now = 1000): SnapshotToolDeps {
   return {
-    store: new MemoryStore(new InMemoryTable()),
+    store: new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable()),
     snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
     now: () => now,
   }
@@ -120,7 +121,7 @@ describe('memory_snapshot', () => {
   })
 
   it('forget 之后 restore 能把记忆原样救回（撤销误删的核心路径）', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_a', content: '不该被删的内容' }))
     const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
     const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())

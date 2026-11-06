@@ -6,7 +6,6 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { MemoryStore } from '../src/store.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { GLOBAL_DIR } from '../src/storage/paths.ts'
@@ -23,6 +22,7 @@ import {
   BASELINE_ONLY_CATEGORIES, EVAL_CATEGORIES, EVAL_QUERIES, EVAL_RECORDS, NOTE_ONLY_CATEGORIES, PARAPHRASE_KINDS, STRICT_CATEGORIES,
   type EvalQuery,
 } from './fixtures/search-eval.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 // 评估集回归（语料与查询见 tests/fixtures/search-eval.ts，逐条对比与调参用 scripts/eval-search.ts）。
 // 两层：① 与权重无关的不变量逐条断言；② bigram 与 jieba 两档的 top-1 / top-3 聚合下限，不逐条断言。
@@ -52,7 +52,7 @@ beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), 'pm-eval-'))
   await mkdir(join(root, GLOBAL_DIR))
   await Promise.all(EVAL_RECORDS.map(r => writeFile(join(root, GLOBAL_DIR, `${r.id}.md`), encodeRecord(r, {}), 'utf8')))
-  const store = new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() }))
+  const store = new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() }), undefined, new InMemoryBatchKvTable())
   deps = { store, registry, tokenizer: { log: silent }, resolveContext: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }) }
 })
 afterAll(async () => {

@@ -6,7 +6,6 @@ import { FileTable, DELETED_RETENTION_MS } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { computeDigest, encodeRecord, splitFrontmatter } from '../src/storage/frontmatter.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE, STATE_DIR, WORKSPACE_MARKER, deriveFileId, workspaceDirName } from '../src/storage/paths.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import { MemoryStore } from '../src/store.ts'
 import { SnapshotCache } from '../src/runtime.ts'
 import { executeHealth } from '../src/tools/health.ts'
@@ -21,6 +20,7 @@ import { isPendingDelegated, type MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { formatIndexLine } from '../src/index-line.ts'
+import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 
 // 维护点（写路径末尾与快照冻结时的目录整理）。只测 FileTable 专属的磁盘效应；
 // 双后端一致的语义在 table-conformance.spec.ts。全部用真实目录，不 mock 自己的模块。

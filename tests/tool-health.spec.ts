@@ -8,8 +8,7 @@ import type { RecallStats } from '../src/storage/schema.ts'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { fakeExec } from './helpers/exec.ts'
 import { executeHealth, renderHealthResult, type HealthToolDeps, type HealthArgs, type SingleHealthResult, TIER_LABEL } from '../src/tools/health.ts'
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
+import { MemoryStore } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import type { AutoCheckupSetting, CheckupRecord } from '../src/storage/schema.ts'
@@ -19,6 +18,8 @@ import type { PendingDecision, ScanCacheEntry, Finding } from '../src/governance
 import { record } from './helpers/record.ts'
 import { DAY } from './helpers/clock.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 function semantic(type: Finding['type'], memoryIds: string[], summary = ''): Finding {
   return { type, layer: 'semantic', severity: 'info', memoryIds, summary, suggestedAction: '' }
@@ -28,7 +29,7 @@ function semantic(type: Finding['type'], memoryIds: string[], summary = ''): Fin
 // profile / preference / reference = null（不参与新鲜度）。
 function makeDeps(now: number, workspacePath?: string): HealthToolDeps {
   return {
-    store: new MemoryStore(new InMemoryTable()),
+    store: new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable()),
     registry: buildTypeRegistry({ template: 'coding', customTypes: {} }),
     decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
     cache: new InMemoryKvTable<ScanCacheEntry>(),
@@ -50,7 +51,7 @@ async function fileBackedStore(files: Record<string, string>, workspaces: string
     await mkdir(dirname(join(root, rel)), { recursive: true })
     await writeFile(join(root, rel), text)
   }
-  return { root, store: new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() })) }
+  return { root, store: new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() }), undefined, new InMemoryBatchKvTable()) }
 }
 const roots: string[] = []
 afterEach(async () => { for (const r of roots.splice(0)) await rm(r, { recursive: true, force: true }) })

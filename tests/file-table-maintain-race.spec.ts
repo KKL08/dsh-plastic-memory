@@ -8,7 +8,7 @@ import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE } from '../src/storage/paths.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
+import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 
 // 维护点读到文件之后、动手之前，别的宿主进程或用户改了这个文件：基于旧读数的改写、搬家、删除都不能盖掉新内容。
 // 文件系统是进程边界：只给 readFile 套一层，在指定路径第 n 次读完之后用真实 writeFile 换掉文件内容，模拟并发修改。

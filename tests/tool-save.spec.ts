@@ -2,16 +2,17 @@ import { describe, expect, it } from 'vitest'
 import { fakeExec } from './helpers/exec.ts'
 import { record } from './helpers/record.ts'
 import { executeSave, renderSaveResult, type SaveToolDeps } from '../src/tools/save.ts'
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
+import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 
-function makeDeps(store = new MemoryStore(new InMemoryTable())): SaveToolDeps {
+function makeDeps(store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())): SaveToolDeps {
   return {
     store,
     registry,
@@ -30,7 +31,7 @@ const base = {
 
 describe('executeSave', () => {
   it('create 走管线返回 saved，store 多一条', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const result = await executeSave(
       { ...base, name: 'commit 语言', content: 'commit 信息用英文', summary: 'commit 英文' },
       fakeExec(),
@@ -41,7 +42,7 @@ describe('executeSave', () => {
   })
 
   it('tags 缺省时归一化为空数组仍能保存', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const result = await executeSave(
       // 故意不传 tags，验证 executeSave 里的归一化
       { action: 'create', type: 'preference', scope: 'global', sourceMode: 'user-explicit', name: '标题', content: '内容', summary: '摘要' },
@@ -53,7 +54,7 @@ describe('executeSave', () => {
   })
 
   it('同实体的同类记忆触发 duplicate-suspected', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const deps = makeDeps(store)
     await executeSave({ ...base, name: '认证位置', content: '认证逻辑在 `src/auth.ts`', summary: 'auth 位置' }, fakeExec(), deps)
     const dup = await executeSave({ ...base, name: '认证位置改', content: '`src/auth.ts` 负责认证', summary: 'auth 位置改' }, fakeExec(), deps)
@@ -61,7 +62,7 @@ describe('executeSave', () => {
   })
 
   it('resolveContext 无 workspacePath（无 cwd 会话）时 create 拒存', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const deps: SaveToolDeps = {
       ...makeDeps(store),
       resolveContext: async () => ({ workspacePath: undefined, session: { id: 's1', lastSeq: 3 } }),
@@ -77,7 +78,7 @@ describe('executeSave', () => {
   // 回归：executeSave 必须无条件把 workspacePath 传给管线，否则 scope=global 时管线看不到
   // workspace 上下文，降级永不触发（真机实测发现的 bug——单测直调 runSavePipeline 会漏掉这层）。
   it('scope=global 且有 workspace 上下文时，executeSave 降级 workspace + globalCandidate', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const deps: SaveToolDeps = {
       ...makeDeps(store),
       resolveContext: async () => ({ workspacePath: '/proj', session: { id: 's1', lastSeq: 3 } }),
@@ -94,7 +95,7 @@ describe('executeSave', () => {
 
   // B1c 接线：executeSave 把 snapshots dep 透传给管线，update global 目标时拍快照
   it('update global 目标时经 snapshots dep 拍 pre-update 快照', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
     const deps: SaveToolDeps = { ...makeDeps(store), snapshots }
     const created = await executeSave(
@@ -113,7 +114,7 @@ describe('executeSave', () => {
   })
 
   it('改写记下撤销记录：会话取上下文、调用 id 取这次工具调用', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
     const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
     const deps: SaveToolDeps = { ...makeDeps(store), snapshots, decisions }
@@ -129,7 +130,7 @@ describe('executeSave', () => {
 
 describe('renderSaveResult', () => {
   it('saved 文案含 id、类型、scope', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const result = await executeSave(
       { ...base, name: 'commit 语言', content: 'commit 信息用英文', summary: 'commit 英文' },
       fakeExec(),
@@ -176,7 +177,7 @@ describe('renderSaveResult', () => {
   })
 
   it('updated 文案含 id', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const deps = makeDeps(store)
     const created = await executeSave(
       { ...base, name: 'commit 语言', content: 'commit 信息用英文', summary: 'commit 英文' },
@@ -206,7 +207,7 @@ describe('renderSaveResult', () => {
   })
 
   it('saved 含 warnings 时渲染显示警告行', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const result = await executeSave(
       { ...base, name: '密钥记录', content: '内部约定 api_key: 1234567890abcdefghij', summary: 'key', force: true },
       fakeExec(),
@@ -220,7 +221,7 @@ describe('renderSaveResult', () => {
   })
 
   it('updated 含 warnings 时渲染显示警告行', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const deps = makeDeps(store)
     const created = await executeSave(
       { ...base, name: 'title', content: '普通内容', summary: '摘要' },
@@ -250,7 +251,7 @@ describe('renderSaveResult', () => {
   })
 
   it('saved/updated 无 warnings 时渲染文案不改变', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const result = await executeSave(
       { ...base, name: 'clean content', content: 'just regular text', summary: 'summary' },
       fakeExec(),

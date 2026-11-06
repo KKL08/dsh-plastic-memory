@@ -1,16 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import { executeConfirm, type ConfirmToolDeps } from '../src/tools/confirm.ts'
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
+import { MemoryStore } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
 import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 function makeDeps(): ConfirmToolDeps {
   return {
-    store: new MemoryStore(new InMemoryTable()),
+    store: new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable()),
     decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
     snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
     now: () => 5000,

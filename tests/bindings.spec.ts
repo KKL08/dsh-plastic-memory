@@ -13,14 +13,15 @@ import { createPromoteTool } from '../src/tools/promote-tool.ts'
 import { createSnapshotTool } from '../src/tools/snapshot-tool.ts'
 import { createSourceTool } from '../src/tools/source-tool.ts'
 
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
+import { MemoryStore } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
 import type { MemorySnapshot, PendingDecision, ScanCacheEntry } from '../src/governance/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 /**
  * 九个工具绑定层（src/tools/*-tool.ts）的契约测试。绑定层此前从未被测：纯逻辑在
@@ -70,7 +71,7 @@ function expectRenderClean(tool: ToolDefinition, args: unknown, value: unknown):
 // memory_save
 // ---------------------------------------------------------------------------
 describe('memory_save 绑定', () => {
-  const makeTool = (store = new MemoryStore(new InMemoryTable())) => createSaveTool({
+  const makeTool = (store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())) => createSaveTool({
     store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
     resolveContext: async () => ({ workspacePath: '/proj', session: { id: 's', lastSeq: 1 } }),
   })
@@ -132,7 +133,7 @@ describe('memory_save 绑定', () => {
 // ---------------------------------------------------------------------------
 describe('memory_search 绑定', () => {
   async function seededTool() {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const r = await runSavePipeline({
       action: 'create', name: '认证位置', type: 'knowledge', scope: 'workspace',
       content: '认证逻辑在 src/auth.ts', summary: 'auth 位置', tags: ['auth'], sourceMode: 'user-explicit', force: true,
@@ -194,7 +195,7 @@ describe('memory_search 绑定', () => {
 // ---------------------------------------------------------------------------
 describe('memory_forget 绑定', () => {
   async function makeTool(seed = true) {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     if (seed) await store.put(record({ id: 'mem_f' }))
     return createForgetTool({
       store, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
@@ -233,7 +234,7 @@ describe('memory_forget 绑定', () => {
 // ---------------------------------------------------------------------------
 describe('memory_promote 绑定', () => {
   async function makeTool() {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_p', scope: 'workspace', workspacePath: '/proj', globalCandidate: true }))
     return createPromoteTool({
       store, agentsMd: { append: async () => {} } as never,
@@ -267,7 +268,7 @@ describe('memory_promote 绑定', () => {
   })
 
   it('提升待确认的子 agent 记忆：reviewed 记为 main', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_s', scope: 'workspace', workspacePath: '/proj', globalCandidate: true, delegation: { sessionId: 'sess-child', depth: 1, parentSessionId: 'sess-main' } }))
     const tool = createPromoteTool({
       store, agentsMd: { append: async () => {} } as never,
@@ -284,7 +285,7 @@ describe('memory_promote 绑定', () => {
 // ---------------------------------------------------------------------------
 describe('memory_confirm 绑定', () => {
   async function makeTool() {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_c' }))
     return createConfirmTool({
       store, decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
@@ -326,20 +327,20 @@ describe('memory_snapshot 绑定', () => {
     createSnapshotTool({ store, snapshots, now: () => NOW, resolveContext: async () => ({ workspacePath: '/proj' }) })
 
   it('(a) 合法参数过、缺必填（action）拒', () => {
-    const tool = makeTool(new MemoryStore(new InMemoryTable()), new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()))
+    const tool = makeTool(new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable()), new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()))
     expect(validateJsonSchemaValue(schemaOf(tool), { action: 'create' })).toEqual([])
     expect(validateJsonSchemaValue(schemaOf(tool), { description: '无 action' }).length).toBeGreaterThan(0)
   })
 
   it('(b) 空库 create 结果无损 JSON', async () => {
-    const tool = makeTool(new MemoryStore(new InMemoryTable()), new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()))
+    const tool = makeTool(new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable()), new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()))
     const result = await tool.execute({ action: 'create' }, exec)
     expect((result as { kind: string }).kind).toBe('created')
     expect(jsonOk(result)).toBe(true)
   })
 
   it('(b) list 结果无损 JSON', async () => {
-    const tool = makeTool(new MemoryStore(new InMemoryTable()), new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()))
+    const tool = makeTool(new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable()), new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()))
     expect(jsonOk(await tool.execute({ action: 'list' }, exec))).toBe(true)
   })
 
@@ -348,7 +349,7 @@ describe('memory_snapshot 绑定', () => {
   // 出口收口前此例为红（暴露绑定层未把结果钉成无损 JSON），现在锁定该契约不回退。
   it('(b) show 悬空记录（快照后被移除）结果须为无损 JSON', async () => {
     const table = new InMemoryTable()
-    const store = new MemoryStore(table)
+    const store = new MemoryStore(table, undefined, new InMemoryBatchKvTable())
     const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
     const rec = record({ id: 'mem_gone' })
     await store.put(rec)
@@ -360,7 +361,7 @@ describe('memory_snapshot 绑定', () => {
   })
 
   it('(c) render 块无损 JSON', async () => {
-    const tool = makeTool(new MemoryStore(new InMemoryTable()), new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()))
+    const tool = makeTool(new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable()), new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()))
     const result = await tool.execute({ action: 'create' }, exec)
     expectRenderClean(tool, {}, result)
   })
@@ -371,7 +372,7 @@ describe('memory_snapshot 绑定', () => {
 // ---------------------------------------------------------------------------
 describe('memory_source 绑定', () => {
   async function makeTool() {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_s', scope: 'workspace', workspacePath: '/proj' }))
     return createSourceTool({
       store, getReadEvent: () => null, // 会话查询服务不可用 → unavailable
@@ -409,7 +410,7 @@ describe('memory_source 绑定', () => {
 // ---------------------------------------------------------------------------
 describe('memory_scan 绑定', () => {
   async function makeTool(workspacePath?: string, seed?: (store: MemoryStore) => Promise<void>) {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await seed?.(store)
     return createScanTool({
       store, registry,
@@ -456,7 +457,7 @@ describe('memory_scan 绑定', () => {
 // ---------------------------------------------------------------------------
 describe('memory_health 绑定', () => {
   async function makeTool(workspacePath?: string, seed?: (store: MemoryStore) => Promise<void>) {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await seed?.(store)
     return createHealthTool({
       store, registry,

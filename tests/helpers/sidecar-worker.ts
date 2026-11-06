@@ -9,8 +9,9 @@ import { once } from 'node:events'
 import { SidecarStore } from '../../src/storage/sidecar.ts'
 import { SnapshotStore } from '../../src/governance/snapshots.ts'
 import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../../src/governance/schema.ts'
-import { MemoryStore, InMemoryTable } from '../../src/store.ts'
+import { MemoryStore } from '../../src/store.ts'
 import { record } from './record.ts'
+import { InMemoryTable } from './in-memory-table.ts'
 
 const [root, countArg, tag] = process.argv.slice(2)
 if (root === undefined || countArg === undefined || tag === undefined) throw new Error('usage: sidecar-worker.ts <root> <count> <tag>')

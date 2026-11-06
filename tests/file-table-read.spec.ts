@@ -11,8 +11,8 @@ import { matchScore } from '../src/text.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import { MemoryStore } from '../src/store.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 // 读侧内核：磁盘是唯一真相、读路径零写入、
 // 预筛是超集、加载期零 I/O。只测 FileTable；双后端一致的语义在 table-conformance.spec.ts。
@@ -157,7 +157,7 @@ describe('读路径零写入', () => {
 describe('读路径不加锁', () => {
   it('写路径持锁、停在写临时文件的半路时，locate / readScope / listWorkspaceDirs 与 MemoryStore 的 get、readRaw 照常返回旧内容，不排在写锁后面', async () => {
     const table = open()
-    const store = new MemoryStore(table)
+    const store = new MemoryStore(table, undefined, new InMemoryBatchKvTable())
     const ws = '/home/dev/proj-lock'
     const r = record({ id: 'mem_lock', name: '锁', scope: 'workspace', workspacePath: ws, content: '旧正文' })
     await table.create(r)

@@ -2,11 +2,11 @@ import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { MemoryStore, InMemoryTable, type MemoryTable, type SeedRecord } from '../src/store.ts'
-import { InMemoryKvTable, InMemoryBatchKvTable, type BatchKvTable } from '../src/kv-table.ts'
+import { MemoryStore, type MemoryTable } from '../src/store.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, WORKSPACE_MARKER, deriveFileId, workspaceDirName } from '../src/storage/paths.ts'
+import { type BatchKvTable } from '../src/kv-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
 import { executeForget } from '../src/tools/forget.ts'
@@ -23,6 +23,8 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import { RecordNotFoundError } from '../src/errors.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import { captureRejection } from './helpers/errors.ts'
+import { InMemoryTable, type SeedRecord } from './helpers/in-memory-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 /** 与 P0/P1 既有测试同一约定：只声明必填字段，可选字段（validTo/supersedes/workspacePath）
  *  只在 partial 里显式传入时才出现——不写成 `key: undefined`，否则 encode/decode 往返后
@@ -148,7 +150,7 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect((await table.locate(recB.id, {}))?.record).toEqual(recB)
     expect((await table.locate(recADeleted.id, {}))?.record).toEqual(recADeleted)
 
-    const s = new MemoryStore(table)
+    const s = new MemoryStore(table, undefined, new InMemoryBatchKvTable())
 
     // visible(/repo-with-hyphens/sub-dir) → global + ws=/a，ws=/b 因 scope 不匹配被排除
     const visibleA = await s.query({ scope: { kind: 'visible', workspacePath: '/home/dev/repo-with-hyphens/sub-dir' } })

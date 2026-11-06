@@ -2,8 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
+import { MemoryStore } from '../src/store.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { GLOBAL_DIR, workspaceDirName } from '../src/storage/paths.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
@@ -16,6 +15,8 @@ import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.t
 import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 // 同一个 id 在本项目和全局各有一份在用的：指明了项目那一份的确认、提升，读和写都只认那一份，全局那份一字不动。
 // 两个后端都跑，两份各自较新时各跑一遍（定位不带层时按「在用、较新」挑，正好把两种挑法都走到）。
@@ -36,7 +37,7 @@ const backends: Backend[] = [
       const root = '/in-memory'
       const t = new InMemoryTable(root, () => NOW)
       return {
-        store: new MemoryStore(t),
+        store: new MemoryStore(t, undefined, new InMemoryBatchKvTable()),
         // create 会清掉可见集合里同 id 的其余副本：直接放进虚拟目录
         seed: async r => { t.seedFile({ dir: r.scope === 'global' ? join(root, GLOBAL_DIR) : join(root, workspaceDirName(r.workspacePath!)), fileName: `${r.name}.md`, record: r }) },
         cleanup: async () => {},
@@ -48,7 +49,7 @@ const backends: Backend[] = [
     make: async () => {
       const root = await mkdtemp(join(tmpdir(), 'pm-layer-write-'))
       const t = new FileTable({ root, stats: new InMemoryKvTable<RecallStats>(), now: () => NOW })
-      return { store: new MemoryStore(t), seed: r => t.create(r), cleanup: () => rm(root, { recursive: true, force: true }) }
+      return { store: new MemoryStore(t, undefined, new InMemoryBatchKvTable()), seed: r => t.create(r), cleanup: () => rm(root, { recursive: true, force: true }) }
     },
   },
 ]

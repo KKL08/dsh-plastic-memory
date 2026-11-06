@@ -10,7 +10,6 @@ import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import type { MemorySnapshot, PendingDecision } from '../src/governance/schema.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import { MemoryStore } from '../src/store.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
 import { executeForget } from '../src/tools/forget.ts'
@@ -19,6 +18,7 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { RecordNotFoundError } from '../src/errors.ts'
 import { captureRejection } from './helpers/errors.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 // 本文件默认造那条"包管理用 pnpm"的 global preference（编解码/去重断言的固定样本）。
 const record = (partial: Partial<MemoryRecord> = {}) => baseRecord({
@@ -369,7 +369,7 @@ describe('写路径内核（锁内定位、排他占名、搬家与归档）', (
 
   it('同进程并发：两个会话对象 Promise.all 同时 save 与 forget，结束后文件齐全、无 tmp 残留', async () => {
     const t = await load()
-    const store = new MemoryStore(t)
+    const store = new MemoryStore(t, undefined, new InMemoryBatchKvTable())
     const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
     const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
     const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
@@ -400,7 +400,7 @@ describe('写路径内核（锁内定位、排他占名、搬家与归档）', (
 
   it('promote 到 global 后旧 workspace 文件消失、新实例只看到 global 那份；pre-promote 快照 restore 后 global 消失、workspace 回来（无双文件）', async () => {
     const t = await load()
-    const store = new MemoryStore(t)
+    const store = new MemoryStore(t, undefined, new InMemoryBatchKvTable())
     const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
     const r = wsRecord({ id: 'mem_p', name: '提升', content: '要提升的', globalCandidate: true, updatedAt: 100 })
     await t.create(r)

@@ -3,7 +3,7 @@ import { SnapshotStore, SNAPSHOT_RETENTION_MS } from '../src/governance/snapshot
 import { memorySnapshotSchema, type MemorySnapshot } from '../src/governance/schema.ts'
 import { isPendingDelegated, type MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
+import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 
 function makeStore() {
   return new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())

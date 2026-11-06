@@ -6,11 +6,13 @@ import { SidecarStore } from '../src/storage/sidecar.ts'
 import { PendingDecisionsStore, overflowLevelOf } from '../src/governance/decisions.ts'
 import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
 import { SnapshotCache, type FrozenSnapshotInfo } from '../src/runtime.ts'
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
+import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { OverflowMode } from '../src/snapshot.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 // 超出上限提醒进待决账本（kind: overflow，指纹 = 档位）：快照冻结时按会话所属项目同步。
 // 真实临时目录 + 文件侧表；记忆走内存表（与 runtime.spec 同一口径）。
@@ -52,7 +54,7 @@ const overflowEntries = async (d: PendingDecisionsStore) => ({
 
 describe('自动放宽：档位提醒', () => {
   it('超过上限进入第 1 档记一条；同档再组装不重复；升档换成新档', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await seed(store, 10)
     const used = (await freeze(store, undefined, 1e9)).usedTokens
     const d = ledger()
@@ -73,7 +75,7 @@ describe('自动放宽：档位提醒', () => {
   })
 
   it('忽略（settled）后同档不再提醒；进入更高档重新提醒', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await seed(store, 10)
     const used = (await freeze(store, undefined, 1e9)).usedTokens
     const d = ledger()
@@ -89,7 +91,7 @@ describe('自动放宽：档位提醒', () => {
   })
 
   it('同档用量变了：沿用原条目（id、首次出现时间、忽略状态不变），说明里的数字跟着更新', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await seed(store, 10)
     const used = (await freeze(store, undefined, 1e9)).usedTokens
     const d = ledger()
@@ -111,7 +113,7 @@ describe('自动放宽：档位提醒', () => {
   })
 
   it('用量降回上限以内：删除条目，再超出时重新提醒', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await seed(store, 10)
     const used = (await freeze(store, undefined, 1e9)).usedTokens
     const d = ledger()
@@ -130,7 +132,7 @@ describe('自动放宽：档位提醒', () => {
   })
 
   it('从已忽略的高档降一档：高档条目删除，低档沿用忽略，不因回落打扰；再升回高档重新提醒', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await seed(store, 10)
     const used = (await freeze(store, undefined, 1e9)).usedTokens
     const d = ledger()
@@ -150,7 +152,7 @@ describe('自动放宽：档位提醒', () => {
   })
 
   it('按项目各记各的：另一个项目没超限不会删掉这个项目的提醒', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await seed(store, 10)
     const used = (await freeze(store, undefined, 1e9)).usedTokens
     const d = ledger()
@@ -164,7 +166,7 @@ describe('自动放宽：档位提醒', () => {
   })
 
   it('workspace 未解析的临时文本不冻结，也不碰账本', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_g', summary: '一段用来占预算的摘要文字' }))
     const d = ledger()
     const cache = new SnapshotCache({ store, registry, budget: 1, overflowLedger: d })
@@ -178,7 +180,7 @@ describe('估算口径变了（升级）：已有提醒在下次冻结时重新�
   const oldSummary = '带入记忆约 9000 token，超出上限 4000，已自动放宽到 9000'
 
   it('新口径下回到上限以内：旧提醒删除，不留已忽略的残条', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await seed(store, 10)
     const used = (await freeze(store, undefined, 1e9)).usedTokens
     const d = ledger()
@@ -189,7 +191,7 @@ describe('估算口径变了（升级）：已有提醒在下次冻结时重新�
   })
 
   it('新口径下仍超出：换成新档位，说明里是新口径的用量', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await seed(store, 10)
     const used = (await freeze(store, undefined, 1e9)).usedTokens
     const d = ledger()
@@ -205,11 +207,11 @@ describe('估算口径变了（升级）：已有提醒在下次冻结时重新�
 
 describe('严格按上限：95% 提醒', () => {
   it('用到 95% 记一条 strict 提醒；截断条数进冻结信息；切回自动放宽时旧提醒换掉', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await seed(store, 10)
     const used = (await freeze(store, undefined, 1e9)).usedTokens
     // 每条索引行等长：量出单行与固定开销，预算恰好装下 5 条（用量 = 上限）
-    const nine = new MemoryStore(new InMemoryTable())
+    const nine = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await seed(nine, 9)
     const line = used - (await freeze(nine, undefined, 1e9)).usedTokens
     const fiveLines = used - 5 * line
@@ -236,7 +238,7 @@ describe('严格按上限：95% 提醒', () => {
 
 describe('冻结信息：会话视图的原料', () => {
   it('三段 token、带入 id、上限与模式；冻结时刻', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await seed(store, 3)
     await store.put(record({ id: 'mem_global', summary: '全局的一条' }))
     const before = Date.now()

@@ -10,7 +10,7 @@ import { KV_IMPORT_MARKER } from '../src/storage/legacy-kv-import.ts'
 import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type MemorySnapshot } from '../src/governance/schema.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import { record } from './helpers/record.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
+import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 
 // 文件系统是进程边界：只把 link 换成可控的桩，其余 fs 函数保持真实。
 vi.mock('node:fs/promises', async importOriginal => {

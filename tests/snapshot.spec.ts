@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { assembleSnapshot, estimateTokens, COLD_START_TEXT, coldStartUnparseableText, MEMORY_AS_DATA_NOTE, COMPACTION_ENGINE_NOTE, TYPE_USAGE_HEADING } from '../src/snapshot.ts'
 import { SNAPSHOT_SUPERSEDE_NOTE } from '../src/snapshot-message.ts'
 import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
+import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { workspaceDirName } from '../src/storage/paths.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
@@ -12,6 +12,8 @@ import { STALENESS_NOTE } from '../src/record-freshness.ts'
 import { formatIndexLine } from '../src/index-line.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
 import { FAKE_SECRET, generatePrivateKeyPem } from './helpers/secrets.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 
@@ -24,12 +26,12 @@ describe('assembleSnapshot', () => {
   const base = { registry, workspacePath: undefined, budget: 4000, now: 10 * DAY }
 
   it('记忆库为空输出冷启动文案，coreIds 为空数组', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     expect(assembleSnapshot({ ...base, records: await visible(store) })).toMatchObject({ text: COLD_START_TEXT, coreIds: [] })
   })
 
   it('core 类型正文出现在 core 区（带 id），且不在索引区重复；passive 只显示 name', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_core', name: 'mock 禁令', type: 'preference', content: '不要 mock 数据库', summary: '测试不 mock 数据库' }))
     await store.put(record({ id: 'mem_ref', name: '看板', type: 'reference', content: '看板在 https://x.dev', summary: '团队看板的地址' }))
     const { text } = assembleSnapshot({ ...base, records: await visible(store) })
@@ -42,7 +44,7 @@ describe('assembleSnapshot', () => {
   })
 
   it('titleOnlyIds：索引行只带名称和标签（不带摘要）的那些，与索引行格式器同一个判据', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_core', type: 'preference', content: '不要 mock 数据库' }))
     await store.put(record({ id: 'mem_ref', name: '看板', type: 'reference', summary: '团队看板的地址' }))
     await store.put(record({ id: 'mem_k', name: '报销', type: 'knowledge', summary: '报销截止每月 25 日' }))
@@ -54,7 +56,7 @@ describe('assembleSnapshot', () => {
   })
 
   it('⑧ 磁盘路径只透 global + 当前项目，不透其他 workspace（跨项目隔离）', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_core', type: 'preference', content: '不要 mock 数据库' }))
     // 无 workspace（global-only）：只透 global，不指向任何项目目录、不说"各 workspace 子目录"
     const globalOnly = assembleSnapshot({ ...base, records: await visible(store), memoryRoot: '/home/.dsh/memories' })
@@ -71,7 +73,7 @@ describe('assembleSnapshot', () => {
   })
 
   it('超过衰退期未确认的记忆，注入行尾带陈旧度标注；期内不带', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_p', type: 'project', lastConfirmedAt: 0, summary: '冻结到三月' }))          // project 衰减 7 天，now=10 天 → 超期
     await store.put(record({ id: 'mem_fresh', type: 'project', lastConfirmedAt: 9 * DAY, summary: '新决定' }))    // 1 天前确认 → 期内
     await store.put(record({ id: 'mem_core', type: 'preference', lastConfirmedAt: 0, content: '偏好内容' }))       // decayDays=null 永不标注
@@ -84,7 +86,7 @@ describe('assembleSnapshot', () => {
   })
 
   it('validTo 已过期的记忆不进注入（治理扫描仍可见）；未过期的照常', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_dead', validTo: 9 * DAY, summary: '已失效约定' }))
     await store.put(record({ id: 'mem_alive', validTo: 11 * DAY, summary: '仍有效约定' }))
     const { text } = assembleSnapshot({ ...base, records: await visible(store) })
@@ -93,14 +95,14 @@ describe('assembleSnapshot', () => {
   })
 
   it('库里只剩 validTo 过期记忆时不误报冷启动', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_dead', validTo: 9 * DAY }))
     const { text } = assembleSnapshot({ ...base, records: await visible(store) })
     expect(text).not.toBe(COLD_START_TEXT)
   })
 
   it('超预算时丢弃低优先级组并注明剩余数量', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     for (let i = 0; i < 200; i++) {
       await store.put(record({ id: `mem_k${i}`, type: 'knowledge', summary: `知识条目${i}`.repeat(8) }))
       await store.put(record({ id: `mem_r${i}`, type: 'reference' }))
@@ -110,7 +112,7 @@ describe('assembleSnapshot', () => {
   })
 
   it('返回 coreIds 为进入 core 区的记忆 id，且不产生 markRecalled 副作用（纯函数）', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const spy = vi.spyOn(store, 'markRecalled')
     await store.put(record({ id: 'mem_core', name: 'mock 禁令', type: 'preference', content: '不要 mock 数据库', summary: '测试不 mock 数据库' }))
     await store.put(record({ id: 'mem_ref', name: '看板', type: 'reference', content: '看板在 https://x.dev', summary: '团队看板的地址' }))
@@ -120,7 +122,7 @@ describe('assembleSnapshot', () => {
   })
 
   it('evidenceLookup 给出时拼对应档位文案；缺省与空库不拼', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_1' }))
     for (const level of ['off', 'strict', 'active'] as const) {
       const { text } = assembleSnapshot({ ...base, records: await visible(store), evidenceLookup: level })
@@ -133,7 +135,7 @@ describe('assembleSnapshot', () => {
     // 缺省（纯测试场景）不拼
     expect(assembleSnapshot({ ...base, records: await visible(store) }).text).not.toContain('memory_source')
     // 空库冷启动路径不拼（没有记忆就没有锚）
-    const empty = new MemoryStore(new InMemoryTable())
+    const empty = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     expect(assembleSnapshot({ ...base, records: await visible(empty), evidenceLookup: 'active' }).text).toBe(COLD_START_TEXT)
   })
 
@@ -150,7 +152,7 @@ describe('assembleSnapshot', () => {
     // 上一个用例两组都远超预算、必然都被丢弃，排序方向写反也能过，是弱信号。
     // 这里让两组体积严格相等（内容仅"高/低"一字之差），预算精确卡在"刚好放得下 high 组，
     // 放不下再加 low 组"的临界点——如果排序方向写反（先丢 high 组），断言会失败。
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const priorityRegistry = buildTypeRegistry({
       template: 'coding',
       customTypes: {
@@ -179,7 +181,7 @@ describe('assembleSnapshot', () => {
   })
 
   it('预算只够 high 组前几条：high 组部分装入并注明剩余，low 组整组进尾注', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const priorityRegistry = buildTypeRegistry({
       template: 'coding',
       customTypes: {
@@ -211,7 +213,7 @@ describe('assembleSnapshot', () => {
   })
 
   it('组内装入顺序按 confidence 降序（与 core 区一致）', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const priorityRegistry = buildTypeRegistry({
       template: 'coding',
       customTypes: {

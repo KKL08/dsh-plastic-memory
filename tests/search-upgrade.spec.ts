@@ -1,18 +1,20 @@
 import { describe, expect, it } from 'vitest'
 import { fakeExec } from './helpers/exec.ts'
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
+import { MemoryStore } from '../src/store.ts'
 import { sourceNote, formatIndexLine, INFERENCE_NOTE } from '../src/index-line.ts'
 import { STALENESS_NOTE } from '../src/record-freshness.ts'
 import { renderSearchResult, executeSearch, type SearchToolDeps, type SearchHit } from '../src/tools/search.ts'
 import { assembleSnapshot } from '../src/snapshot.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { record } from './helpers/record.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 
 describe('store.query 关键词匹配（含 CJK bigram）+ id/name 入 haystack', () => {
   it('缺省全部词项命中（AND）；keywordMatch any 时命中任一词即入选', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_pnpm', content: '这个项目的包管理一律用 pnpm，不要用 npm' }))
 
     expect((await store.query({ keyword: 'pnpm 包管理' })).map(r => r.id)).toEqual(['mem_pnpm'])
@@ -25,7 +27,7 @@ describe('store.query 关键词匹配（含 CJK bigram）+ id/name 入 haystack'
   })
 
   it('按 id 可检索、按 name 可检索（索引→全文断路修复）', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_abc', name: '专有名词名字', content: '与关键词无关的正文', summary: '也无关' }))
 
     expect((await store.query({ keyword: 'mem_abc' })).map(r => r.id)).toEqual(['mem_abc'])
@@ -33,14 +35,14 @@ describe('store.query 关键词匹配（含 CJK bigram）+ id/name 入 haystack'
   })
 
   it('连写中文仍命中（bigram 覆盖连续子串）', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_cjk', content: '这个项目的包管理一律用 pnpm，不要用 npm' }))
 
     expect((await store.query({ keyword: '包管理一律' })).map(r => r.id)).toEqual(['mem_cjk'])
   })
 
   it('中文短语经 bigram 切分，正文里非连续也能命中', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_deploy', content: '部署的流程和配置都记在 wiki' }))
 
     // "部署流程配置"整段在正文里不连续；bigram(部署/署流/流程/程配/配置)命中 部署+流程+配置（任一命中模式）
@@ -50,7 +52,7 @@ describe('store.query 关键词匹配（含 CJK bigram）+ id/name 入 haystack'
 
 describe('executeSearch 排序：命中词数 → confidence → lastConfirmedAt', () => {
   it('OR 回退时命中更多查询词的排前，即使 confidence 较低', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_two', content: 'deploy hook 都齐了', confidence: 0.5 }))
     await store.put(record({ id: 'mem_one', content: '只提到 deploy', confidence: 0.9 }))
     const deps: SearchToolDeps = {
@@ -78,7 +80,7 @@ describe('低置信标注', () => {
   })
 
   it('executeSearch 过滤 validTo 已过期的记忆，命中项带陈旧度标注', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const now = Date.now()
     await store.put(record({ id: 'mem_dead', content: '过期约定 magicword', validTo: now - 1000 }))
     await store.put(record({ id: 'mem_stale', content: '很久没确认 magicword', lastConfirmedAt: now - 100 * 86_400_000 })) // knowledge 衰减 90 天
@@ -105,7 +107,7 @@ describe('低置信标注', () => {
   })
 
   it('executeSearch 按 sourceMode 填充 SearchHit.sourceNote', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({
       id: 'mem_inferred', content: '推断出来的知识', summary: '推断摘要',
       source: { sessionId: 's', eventRange: [0, 1], sourceMode: 'agent-inferred' },
@@ -119,7 +121,7 @@ describe('低置信标注', () => {
   })
 
   it('snapshot core 区/索引区都带标注', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({
       id: 'mem_core_inferred', type: 'preference', content: '模型推断出的偏好', summary: '偏好摘要',
       source: { sessionId: 's', eventRange: [0, 1], sourceMode: 'agent-inferred' },
@@ -162,7 +164,7 @@ describe('索引行格式', () => {
 
 describe('scope=workspace 无工作目录时显式说明', () => {
   it('返回空 hits + note，渲染输出 note 而非"没有匹配"', async () => {
-    const store = new MemoryStore(new InMemoryTable())
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_g', content: '全局内容 magicword' }))
     const deps: SearchToolDeps = {
       store, registry,

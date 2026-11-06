@@ -6,7 +6,6 @@ import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
 import { MemoryStore } from '../src/store.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
@@ -24,6 +23,7 @@ import {
   type MemoryCommand, type MemoryCommandResult,
 } from '../src/gui/contract.ts'
 import { record } from './helpers/record.ts'
+import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 
 // 提升候选与放错层合并：同一条项目记忆既是提升候选、又被判放错层（项目 → 全局）时，处理视图只出提升卡；
 // 「留在本项目」顺带写一条放错层的忽略并记进账本条目，撤销时只删它写的那一条。

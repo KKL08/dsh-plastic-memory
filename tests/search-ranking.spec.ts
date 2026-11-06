@@ -3,8 +3,7 @@ import fc from 'fast-check'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
+import { MemoryStore } from '../src/store.ts'
 import type { MemoryTable, ScopeReadOptions } from '../src/storage/table.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { GLOBAL_DIR, workspaceDirName } from '../src/storage/paths.ts'
@@ -22,6 +21,8 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import { record } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 // memory_search 内核换成分词 + BM25 + 字段加权，三档一张表；跑在 FileTable 临时目录上，与生产一致。
 
@@ -44,7 +45,7 @@ afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 const fileTable = (dir = root) => new FileTable({ root: dir, stats: new InMemoryKvTable<RecallStats>() })
 
 async function seeded(records: MemoryRecord[], table: MemoryTable = fileTable()): Promise<MemoryStore> {
-  const store = new MemoryStore(table)
+  const store = new MemoryStore(table, undefined, new InMemoryBatchKvTable())
   for (const r of records) await store.put(r)
   return store
 }
@@ -627,8 +628,8 @@ describe('性质测试', { timeout: 15_000 }, () => {
       await seeded(toRecords(rows), table)
       const withSeen: ScopeReadOptions[] = []
       const withoutSeen: ScopeReadOptions[] = []
-      const withPrefilter = new MemoryStore(tapTable(table, 'spy', withSeen))
-      const withoutPrefilter = new MemoryStore(tapTable(table, 'strip', withoutSeen))
+      const withPrefilter = new MemoryStore(tapTable(table, 'spy', withSeen), undefined, new InMemoryBatchKvTable())
+      const withoutPrefilter = new MemoryStore(tapTable(table, 'strip', withoutSeen), undefined, new InMemoryBatchKvTable())
       const a = await search(withPrefilter, q, { limit: 50 })
       const b = await search(withoutPrefilter, q, { limit: 50 })
       expect(a.hits.map(h => h.id)).toEqual(b.hits.map(h => h.id))

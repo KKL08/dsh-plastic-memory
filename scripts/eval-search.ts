@@ -21,7 +21,6 @@ import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { FileTable } from '../src/storage/file-table.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import { MemoryStore } from '../src/store.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
@@ -38,6 +37,7 @@ import { WEAK_SEARCH_NOTE_CODES, type SearchNoteCode } from '../src/contract-cod
 import {
   BASELINE_ONLY_CATEGORIES, EVAL_CATEGORIES, EVAL_QUERIES, EVAL_RECORDS, NOTE_ONLY_CATEGORIES, STRICT_CATEGORIES, type EvalQuery,
 } from '../tests/fixtures/search-eval.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from '../tests/helpers/in-memory-kv.ts'
 
 const { values: argv } = parseArgs({ options: { brief: { type: 'boolean', default: false }, all: { type: 'boolean', default: false } } })
 
@@ -396,7 +396,7 @@ async function main(): Promise<void> {
 
   const root = await mkdtemp(join(tmpdir(), 'pm-eval-'))
   try {
-    const store = new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() }))
+    const store = new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() }), undefined, new InMemoryBatchKvTable())
     for (const r of EVAL_RECORDS) await store.put(r)
 
     console.log('\n## 两档指标（FileTable + executeSearch）\n')

@@ -8,7 +8,7 @@ import { workspaceDirName, WORKSPACE_MARKER, GLOBAL_DIR, STATE_DIR, ARCHIVE_DIR 
 import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
+import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 
 // 从磁盘读记忆目录的行为（0.2.0 起没有加载期：每个读方法直接读目录；清扫、索引再生、tmp 清理只在写路径末尾）。
 // 本文件默认造那条"包管理用 pnpm"的 global preference（编解码/去重断言的固定样本）。

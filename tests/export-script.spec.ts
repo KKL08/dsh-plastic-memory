@@ -7,7 +7,7 @@ import { FileTable } from '../src/storage/file-table.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import { isPendingDelegated, type MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
+import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 
 let root: string
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm15-export-')) })

@@ -3,7 +3,7 @@ import {
   genId, pendingDecisionSchema, memorySnapshotSchema,
   scanCacheSchema, SEVERITY_BY_TYPE, FINDING_TYPES,
 } from '../src/governance/schema.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
+import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 
 describe('genId', () => {
   it('生成带前缀的短 id，同前缀两次不重复', () => {

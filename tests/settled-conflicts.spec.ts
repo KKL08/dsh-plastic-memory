@@ -2,13 +2,14 @@ import { describe, expect, it } from 'vitest'
 import { fakeExec } from './helpers/exec.ts'
 import { executeScan, type ScanToolDeps, type SingleScanResult } from '../src/tools/scan.ts'
 import { executeConfirm } from '../src/tools/confirm.ts'
-import { MemoryStore, InMemoryTable } from '../src/store.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
+import { MemoryStore } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import type { MemorySnapshot, PendingDecision, ScanCacheEntry } from '../src/governance/schema.ts'
 import { record } from './helpers/record.ts'
+import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
 
 /** 裁决「两条都留」后，体检记住这个结论：两边内容（垂直冲突含基线）都没变就不再报。 */
 
@@ -29,7 +30,7 @@ function verticalLlm() {
 }
 
 function makeEnv(overrides?: Partial<ScanToolDeps>) {
-  const store = new MemoryStore(new InMemoryTable())
+  const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
   const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
   const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
   const scanDeps: ScanToolDeps = {
