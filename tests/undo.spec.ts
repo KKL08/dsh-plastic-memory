@@ -485,6 +485,19 @@ describe('写入那一刻的交错与写盘出错', () => {
     expect(await settledOf(e, id)).toBeDefined()
   })
 
+  it('冲突删一方时败方已在最近删除（没有快照可撤）：撤销与撤销规则同判过期，冲突不回待处理', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_a', name: '甲', content: '用 pnpm' }))
+    await e.store.create(record({ id: 'mem_b', name: '乙', content: '用 npm' }))
+    const { entry } = await e.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', fingerprint: 'fp-ab' }, 1)
+    await e.store.softDelete({ id: 'mem_b' }, { at: GLOBAL, now: NOW })
+    expect((await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-left' }, e.context, e)).kind).toBe('resolved')
+    const settled = asUndoable((await settledOf(e, entry.id))!)!
+    expect(undoStateOf(settled, undefined, undefined)).toBe('expired')
+    expect(errorOf(await e.undo(entry.id))).toMatchObject({ code: 'not-found', reason: 'expired' })
+    expect(await settledOf(e, entry.id)).toBeDefined()
+  })
+
   it('PA-35 撤销提升核对过全局那份之后、写回之前它被删进最近删除：stale，原项目不复活', async () => {
     const e = env()
     const id = await seedPromote(e)
