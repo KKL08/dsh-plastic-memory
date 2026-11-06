@@ -57,7 +57,7 @@ const vertical: PendingItem = { kind: 'conflict-vertical', level: 'your-call', d
 
 /** 插件配置，去处按参数。 */
 function configWith(globalPromoteTarget: PluginConfig['globalPromoteTarget']): PluginConfig {
-  return { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget, accent: 'ella' }
+  return { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget, accent: 'ella', customTypes: {} }
 }
 
 function setup(views: FakeGatewayInit['views'], respond?: FakeGatewayInit['respond'], config: PluginConfig = configWith('plugin-global')) {
@@ -884,5 +884,24 @@ describe('SidebarTab 确认收起后的键盘焦点', () => {
     await press(keepBoth)
     await press(screen.getByRole('button', { name: '继续处理' }))
     await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
+  })
+})
+
+describe('类型显示名', () => {
+  const proc = memory({ id: 'c1', type: 'procedure', content: '发版先跑全量测试。' })
+
+  it('PA-20：改过名的预设类型按配置里的名字分组（和记忆查看、设置页同名）', () => {
+    setup({ library: library(proc), session: snapshot({ injectedIds: ['c1'] }), pending: pending() }, undefined,
+      { ...configWith('plugin-global'), customTypes: { procedure: { label: '发版手册' } } })
+    const groups = within(screen.getByRole('region', { name: '带入的记忆' }))
+    expect(groups.getByRole('heading', { name: /^发版手册 1/ })).toBeInTheDocument()
+    expect(groups.queryByRole('heading', { name: /^可复用流程/ })).toBeNull()
+  })
+
+  it('PA-20：英文界面下内置、预设类型都写英文名', () => {
+    const gateway = createFakeGateway({ views: { health: health(), library: library(pref, proc, glob), session: snapshot({ injectedIds: ['p1', 'c1', 'g1'] }), pending: pending() } })
+    render(<PanelShell gateway={gateway} t={createTranslator(en)}><SidebarTab sessionId="s1" workspacePath={WS} openPage={vi.fn()} /></PanelShell>)
+    const groups = within(screen.getByRole('region', { name: 'Brought-in memories' }))
+    expect(groups.getAllByRole('heading', { level: 3 }).map(h => h.textContent?.split(/\s\d/)[0])).toEqual(['Preference', 'Procedure', 'Profile'])
   })
 })

@@ -17,7 +17,7 @@ import { PENDING_LEVELS, pendingItemKey, pendingItemScopes, type GuiLayerRef, ty
 import { isNewItem, markSeen, newItemIndex, readSeen, type Seen } from '../checkup/seen.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { baseName, formatDay, formatNumber, useT } from '../i18n.tsx'
-import { FlashRow, useFlashTarget } from '../library/shared.tsx'
+import { FlashRow, useFlashTarget, useTypeLabel } from '../library/shared.tsx'
 import type { LocaleKey } from '../locales.ts'
 import { compareLayers, isInScope, scopeName, useNavTarget, type NavStore, type NavTarget, type NewItemJump, type PageScope } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
@@ -125,7 +125,7 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
   const ignored = [...healthLayers].sort((a, b) => compareLayers(a.layer, b.layer))
     .flatMap(l => l.ignored.map(item => ({ item, scopeName: scope.kind === 'all' ? layerName(l.layer) : undefined })))
   const ignoredBlock = ignored.length === 0 ? null : <Ignored entries={ignored} session={session} />
-  const typeLabels = pending.status === 'ready' ? pending.data.typeLabels : {}
+  const typeLabel = useTypeLabel(session)
   const { flashId, clear } = useFlashTarget(nav, viewItems.flatMap(memoryIdsOf))
   const root = useRef<HTMLDivElement>(null)
   useGroupFocus(nav, root, pending.status === 'ready')
@@ -193,7 +193,7 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
                 outcome={recent.outcome}
                 session={session}
                 now={now}
-                typeLabels={typeLabels}
+                typeLabel={typeLabel}
                 onUndone={() => { done({ ...recent, undone: true }) }}
                 onRefused={refuse(recent.item, recent.index)}
               />
@@ -215,7 +215,7 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
   if (refused !== undefined && refusedRow !== undefined && !isEmpty) rows.splice(Math.min(refused.index, rows.length), 0, refusedRow)
 
   function renderCard(item: PendingItem, onDone: (outcome: Outcome) => void, onRefused: () => void): ReactElement {
-    const props = { session, now, typeLabels, onDone, onRefused }
+    const props = { session, now, typeLabel, onDone, onRefused }
     switch (item.kind) {
       case 'secret': return <SecretCard item={item} {...props} />
       case 'conflict-horizontal': return <HorizontalCard item={item} {...props} />

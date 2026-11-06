@@ -80,7 +80,8 @@ export function useFold(memory: FoldMemory | undefined, prefix: string, isSearch
   const [own] = useState<FoldMemory>(() => new Map())
   const [, rerender] = useReducer((n: number) => n + 1, 0)
   const searchFold = useRef(new Map<string, boolean>())
-  if (!isSearching) searchFold.current.clear()
+  // 清空搜索后才丢：不搜索时这份表不参与渲染，放在提交之后清不影响这一帧
+  useEffect(() => { if (!isSearching) searchFold.current.clear() }, [isSearching])
   const store = memory ?? own
   const at = (key: string) => `${prefix}|${key}`
   const remember = (key: string, entry: FoldEntry) => {
@@ -122,7 +123,7 @@ export function MemoryGroup({ title, count, latest, now, isOpen, onToggle, hidde
   const t = useT()
   const bodyId = useId()
   const head = useRef<HTMLButtonElement>(null)
-  const body = useRef<HTMLDivElement>(null)
+  const list = useRef<HTMLUListElement>(null)
   const isClicked = useRef(false)
   const focusAfter = useRef<'more' | 'less' | undefined>(undefined)
   useLayoutEffect(() => {
@@ -133,8 +134,8 @@ export function MemoryGroup({ title, count, latest, now, isOpen, onToggle, hidde
       head.current?.focus({ preventScroll: true })
     } else if (to === 'more') {
       // 焦点落在新露出的第一行整行上（不落到它的「删除」）；行本来不可聚焦，只在接住焦点期间临时可聚焦
-      const row = body.current?.querySelectorAll<HTMLElement>('.pm-list > li').item(GROUP_PREVIEW)
-      if (row == null) return
+      const row = list.current?.children.item(GROUP_PREVIEW)
+      if (!(row instanceof HTMLElement)) return
       if (!row.hasAttribute('tabindex')) {
         row.tabIndex = -1
         row.addEventListener('blur', () => { row.removeAttribute('tabindex') }, { once: true })
@@ -159,11 +160,11 @@ export function MemoryGroup({ title, count, latest, now, isOpen, onToggle, hidde
           {!isOpen && latest !== undefined ? <span className="pm-memgroup-latest">{t('library.group.latest', { date: formatDay(latest, now, t) })}</span> : null}
         </button>
       </h3>
-      <div ref={body} id={bodyId} className="pm-memgroup-body" hidden={!isOpen}>
+      <div id={bodyId} className="pm-memgroup-body" hidden={!isOpen}>
         {isOpen
           ? (
             <GroupBody clicked={isClicked}>
-              <ul className="pm-list">{children}</ul>
+              <ul ref={list} className="pm-list">{children}</ul>
               {hidden > 0 && onMore !== undefined
                 ? (
                   <button type="button" className="pm-memgroup-more" onClick={() => { focusAfter.current = 'more'; onMore() }}>

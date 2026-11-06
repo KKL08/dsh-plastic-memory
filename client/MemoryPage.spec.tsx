@@ -263,6 +263,23 @@ describe('视图切换与按范围筛选', () => {
     expect(nav.get().view).toBe('deleted')
   })
 
+  it('视图切换：右键到头绕回第一个、左键绕回最后一个，Home / End 到首尾，焦点跟着走', () => {
+    const { nav } = open()
+    tab(/^处理/).focus()
+    fireEvent.keyDown(tab(/^处理/), { key: 'End' })
+    expect(nav.get().view).toBe('deleted')
+    expect(tab(/^最近删除/)).toHaveFocus()
+    fireEvent.keyDown(tab(/^最近删除/), { key: 'ArrowRight' })
+    expect(nav.get().view).toBe('todo')
+    expect(tab(/^处理/)).toHaveFocus()
+    fireEvent.keyDown(tab(/^处理/), { key: 'ArrowLeft' })
+    expect(nav.get().view).toBe('deleted')
+    expect(tab(/^最近删除/)).toHaveFocus()
+    fireEvent.keyDown(tab(/^最近删除/), { key: 'Home' })
+    expect(nav.get().view).toBe('todo')
+    expect(tab(/^处理/)).toHaveFocus()
+  })
+
   it('入口直达：先写目标再切面板，页面跟着目标走', () => {
     const nav = createNavStore()
     const order: string[] = []
@@ -364,15 +381,15 @@ describe('记忆查看：落点、折叠与滚动', () => {
 
   it('折叠状态切到处理再切回来、换范围再回来都还在；换范围清空搜索', () => {
     open({ view: 'library', scope: APP })
-    fireEvent.click(groupToggle('preference'))
+    fireEvent.click(groupToggle('行为偏好'))
     fireEvent.click(tab(/^处理/))
     fireEvent.click(tab(/^记忆查看/))
-    expect(groupToggle('preference')).toHaveAttribute('aria-expanded', 'false')
+    expect(groupToggle('行为偏好')).toHaveAttribute('aria-expanded', 'false')
     fireEvent.change(within(panel()).getByRole('searchbox', { name: '搜索记忆' }), { target: { value: '没有这种东西' } })
     fireEvent.click(railRow('全局'))
     fireEvent.click(railRow('app'))
     expect(within(panel()).getByRole('searchbox', { name: '搜索记忆' })).toHaveValue('')
-    expect(groupToggle('preference')).toHaveAttribute('aria-expanded', 'false')
+    expect(groupToggle('行为偏好')).toHaveAttribute('aria-expanded', 'false')
   })
 
   it('换范围、切视图再回来，滚动位置还原；没来过的从顶部开始', () => {

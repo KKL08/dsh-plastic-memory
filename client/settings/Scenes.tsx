@@ -12,7 +12,7 @@ import { useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
 import { Button } from '../ui/Button.tsx'
 import {
-  BUILTIN_TYPE_NAMES, EMPTY_TYPE_DRAFT, GENERAL_SCENE, MAX_SCENES, PRESET_TYPE_NAMES, RETIRED_TYPE_NAMES, SCENE_MAX_TYPES, TYPE_DEFINITIONS,
+  BUILTIN_TYPE_NAMES, EMPTY_TYPE_DRAFT, GENERAL_SCENE, MAX_SCENES, PRESET_TYPE_NAMES, SCENE_MAX_TYPES, TYPE_DEFINITIONS,
   draftOf, forgetMigrations, isPresetEdited, isPresetScene, isPresetType, isPresetTypeEdited, keepMigrations, memoryCountOf, nextSceneId,
   pendingNames, presetSceneTypes, removeType, renameMigrations, renameType, restorePresetType, sceneTypes, scenesUsing, validateSceneDraft,
   validateTypeDraft, type CustomType, type CustomTypeDraft, type MigrationAction, type Migrations, type Pool, type Scene, type SettingsFields,
@@ -20,17 +20,11 @@ import {
 import { Icon } from '../ui/Icon.tsx'
 import { Dialog, TextField } from './controls.tsx'
 import { TypeFormFields } from './CustomTypes.tsx'
+import { typeLabel } from '../type-label.ts'
 
 type DefinedType = keyof typeof TYPE_DEFINITIONS
 
-const KNOWN_TYPES: ReadonlySet<string> = new Set([...BUILTIN_TYPE_NAMES, ...PRESET_TYPE_NAMES, ...RETIRED_TYPE_NAMES])
 const BUILTIN: readonly string[] = BUILTIN_TYPE_NAMES
-
-/** 类型在界面上的名字：自建的取它的中文名，内置、预设、退役的取 locale，都不是就是英文名。 */
-export function typeLabel(t: Translate, name: string, customTypes: Readonly<Record<string, CustomType>>): string {
-  if (Object.hasOwn(customTypes, name)) return customTypes[name]!.label
-  return KNOWN_TYPES.has(name) ? t(`sidebar.type.${name}` as LocaleKey) : name
-}
 
 /** 场景在界面上的名字：通用、编码、办公取 locale（不能改名），自定义场景取配置里的名字。 */
 export function sceneLabel(t: Translate, id: string, scenes: Readonly<Record<string, Scene>>): string {
@@ -46,7 +40,7 @@ export function typeNames(t: Translate, labels: readonly string[]): string {
 
 /** 场景行的组成：通用五类齐全时写「通用五类」，否则列出来；其余类型逐个用「 + 」接上。 */
 function typesSummary(t: Translate, names: readonly string[], customTypes: Readonly<Record<string, CustomType>>): string {
-  const label = (name: string) => typeLabel(t, name, customTypes)
+  const label = (name: string) => typeLabel(t, name, { customTypes })
   const builtin = names.filter(n => BUILTIN.includes(n))
   const parts = builtin.length === BUILTIN.length ? [t('settings.scene.generalTypes')] : builtin.length > 0 ? [builtin.map(label).join(t('settings.scene.listSep'))] : []
   return [...parts, ...names.filter(n => !BUILTIN.includes(n)).map(label)].join(t('settings.scene.groupSep'))
@@ -133,7 +127,7 @@ export function SceneSection({ fields, saved, migrations, counts, canMigrate, di
             {isEdited ? <span className="pm-scene-tag">{t('settings.scene.edited')}</span> : null}
           </span>
           <span className="pm-tile-detail" id={detailId}>
-            {sceneId === GENERAL_SCENE ? types.map(n => typeLabel(t, n, fields.customTypes)).join(t('settings.scene.listSep')) : typesSummary(t, types, fields.customTypes)}
+            {sceneId === GENERAL_SCENE ? types.map(n => typeLabel(t, n, { customTypes: fields.customTypes })).join(t('settings.scene.listSep')) : typesSummary(t, types, fields.customTypes)}
           </span>
         </label>
         {scene === undefined
@@ -172,7 +166,7 @@ export function SceneSection({ fields, saved, migrations, counts, canMigrate, di
   }
 
   const typeTile = (name: string) => {
-    const label = typeLabel(t, name, fields.customTypes)
+    const label = typeLabel(t, name, { customTypes: fields.customTypes })
     const isBuiltin = BUILTIN.includes(name)
     const isPreset = isPresetType(name)
     const isEdited = isPresetTypeEdited(name, fields.customTypes)
@@ -354,7 +348,7 @@ function SceneDialog({ mode, fields, saved, migrations: initialMigrations, count
 
   const selected = scene.types.filter(name => isPooled(pool, name))
   const isFull = selected.length >= SCENE_MAX_TYPES
-  const label = (name: string) => typeLabel(t, name, pool.customTypes)
+  const label = (name: string) => typeLabel(t, name, { customTypes: pool.customTypes })
   const sceneName = (sid: string) => sceneLabel(t, sid, pool.scenes)
 
   const finishForm = (nextPool: Pool, nextScene: Scene, nextMigrations: Migrations) => {
@@ -621,7 +615,7 @@ function TypeRemoveConfirm({ name, pool, saved, migrations, counts, canMigrate, 
   const n = countOf(name, migrations, counts)
   const isUsed = hasMemories(name, saved, migrations, counts)
   const text = [
-    t('settings.type.removeQuestion', { label: typeLabel(t, name, pool.customTypes) }),
+    t('settings.type.removeQuestion', { label: typeLabel(t, name, { customTypes: pool.customTypes }) }),
     users.length > 0 ? t(editingScene !== undefined ? 'settings.type.removeAlsoUsed' : 'settings.type.removeUsed', { scenes: users.join(t('settings.scene.listSep')) }) : '',
     isUsed ? n !== undefined ? t('settings.type.removeMemories', { n }) : t('settings.type.removeMemoriesUnknown') : '',
   ].join('')

@@ -24,6 +24,16 @@ export const zh = {
   'scope.global': '全局',
   'scope.workspace': '本项目',
 
+  'type.profile': '用户画像',
+  'type.preference': '行为偏好',
+  'type.knowledge': '事实与经验',
+  'type.project': '项目信息',
+  'type.reference': '参考引用',
+  'type.procedure': '可复用流程',
+  'type.decision': '决定',
+  'type.commitment': '承诺',
+  'type.person': '人物',
+
   'rail.label': '范围',
   'rail.settings': '插件设置',
   'scope.all': '全部',
@@ -143,6 +153,16 @@ export const en: Record<LocaleKey, string> = {
 
   'scope.global': 'Global',
   'scope.workspace': 'This project',
+
+  'type.profile': 'Profile',
+  'type.preference': 'Preference',
+  'type.knowledge': 'Facts & lessons',
+  'type.project': 'Project',
+  'type.reference': 'Reference',
+  'type.procedure': 'Procedure',
+  'type.decision': 'Decision',
+  'type.commitment': 'Commitment',
+  'type.person': 'Person',
 
   'rail.label': 'Scopes',
   'rail.settings': 'Plugin settings',

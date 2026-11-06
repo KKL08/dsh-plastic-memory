@@ -7,6 +7,7 @@
  * 快满时不变色，琥珀和红不进这条。token 是插件估算，所以带「约」。
  * 输入框弹层的三段条与明细共用这里的拆分、色段和色块。
  */
+import { relaxedCap, relaxedTier } from '../../src/gui/contract.ts'
 import { formatNumber, useT } from '../i18n.tsx'
 
 interface BudgetUsage {
@@ -34,10 +35,9 @@ export function budgetParts({ tokens, usedTokens }: BudgetUsage): BudgetParts {
   return { total: workspace + global + fixed, counted: usedTokens, workspace, global, headings, uncounted: fixed - headings }
 }
 
-/** 自动放宽的当前档：总量没超上限就是上限本身。 */
-export function relaxedCap(total: number, budget: number): number {
-  if (budget <= 0 || total <= budget) return budget
-  return budget * (1 + 0.25 * Math.ceil((total - budget) / (budget * 0.25)))
+/** 用量 total 放宽到的上限（自动放宽的当前档）：没超上限就是上限本身。 */
+export function capFor(total: number, budget: number): number {
+  return relaxedCap(budget, relaxedTier(total, budget))
 }
 
 /**
@@ -45,7 +45,7 @@ export function relaxedCap(total: number, budget: number): number {
  * 记忆页右侧栏的用量条和输入框弹层的三段条共用。
  */
 export function barScale(used: number, limited: number, budget: number): number {
-  return Math.max(relaxedCap(limited, budget), used, 1)
+  return Math.max(capFor(limited, budget), used, 1)
 }
 
 /** 条内三段（为 0 的段不画）：固定说明段里标题实色在前、不计上限的斜纹在后，按 token 分宽。 */
@@ -88,7 +88,7 @@ export interface ContextBudgetBarProps extends BudgetUsage {
 export function ContextBudgetBar({ count, budget, tokens, usedTokens, droppedCount = 0, onHandle }: ContextBudgetBarProps) {
   const t = useT()
   const parts = budgetParts({ tokens, usedTokens })
-  const cap = relaxedCap(parts.counted, budget)
+  const cap = capFor(parts.counted, budget)
   const scale = barScale(parts.total, parts.counted, budget)
   const relaxed = parts.counted > budget && droppedCount === 0
   return (

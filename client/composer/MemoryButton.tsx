@@ -18,7 +18,7 @@ import { formatNumber, useT } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
 import { MemoryIcon } from '../MemoryIcon.tsx'
 import { isLiveWrite, sessionCards, writtenSinceSnapshot } from '../sidebar/session-memories.ts'
-import { barScale, budgetParts, BudgetSegments, BudgetSwatch, relaxedCap, shownParts } from '../ui/ContextBudgetBar.tsx'
+import { barScale, budgetParts, BudgetSegments, BudgetSwatch, capFor, shownParts } from '../ui/ContextBudgetBar.tsx'
 
 /** 条数行随快照来历变（和右侧栏用量标题同一口径）。 */
 const COUNTS_LINE: Record<SnapshotOrigin, LocaleKey> = {
@@ -113,7 +113,7 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
     : (view.usedTokens > view.budget
       ? t('composer.relaxed', {
         over: formatNumber(view.usedTokens - view.budget),
-        cap: formatNumber(relaxedCap(view.usedTokens, view.budget)),
+        cap: formatNumber(capFor(view.usedTokens, view.budget)),
       })
       : null)
 

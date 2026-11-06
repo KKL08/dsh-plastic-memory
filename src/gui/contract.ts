@@ -119,6 +119,22 @@ export function mergeKeeperIndex(memories: readonly [MergeSide, MergeSide]): 0 |
 }
 type MergeSide = Pick<MemoryCard, 'id' | 'scope' | 'createdAt'>
 
+// —— 超出上限 ——
+
+/** 自动放宽：用量超过上限后，每档把上限放宽 25%。 */
+export const OVERFLOW_STEP = 0.25
+
+/** 用量落在自动放宽的第几档：没超上限（或上限不是正数）为 0；超过上限 × (1 + 0.25(n-1)) 为第 n 档。 */
+export function relaxedTier(usedTokens: number, budget: number): number {
+  if (!(budget > 0) || usedTokens <= budget) return 0
+  return Math.ceil(((usedTokens - budget) / OVERFLOW_STEP) / budget)
+}
+
+/** 第 tier 档放宽到的上限，取整；账本说明、超限卡、用量条都写这个数。 */
+export function relaxedCap(budget: number, tier: number): number {
+  return Math.round(budget * (1 + OVERFLOW_STEP * tier))
+}
+
 // —— 待处理 ——
 
 /**

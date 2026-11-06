@@ -35,7 +35,7 @@ describe('PanelShell 样式', () => {
 })
 
 describe('主题色', () => {
-  const config = { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget: 'plugin-global' } as const
+  const config = { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget: 'plugin-global', customTypes: {} } as const
 
   it('跟着配置切换：插槽根和传送出去的弹窗根都带上主题色；配置还没读到时不带', () => {
     const gateway = createFakeGateway()

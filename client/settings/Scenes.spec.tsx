@@ -1,12 +1,15 @@
 // 设置页「记什么」：场景列表、记忆类型列表、场景弹层、类型表单、改名与删除的迁移。
 import { describe, expect, it } from 'vitest'
-import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { GUI_VIEW_VERSION, type DeletedView, type LibraryView, type MemoryCommand, type MemoryCommandResult } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
 import { memory, NOW, renderInShell } from '../test-utils.tsx'
 import { createFakeConfigForm, DEFAULT_SECTION, type FakeConfigForm } from './config-form.fake.ts'
 import { nextSceneId, TYPE_DEFINITIONS } from './config.ts'
 import { SettingsPage } from './SettingsPage.tsx'
+import { createTranslator } from '../i18n.tsx'
+import { en } from '../locales.ts'
+import { PanelShell } from '../ui/PanelShell.tsx'
 
 const term = { label: '术语', description: 'd', whenToSave: 'w', recall: 'search', decayDays: null, governancePriority: 'medium' }
 const client = { ...term, label: '客户名' }
@@ -706,5 +709,19 @@ describe('改名与删除：已有记忆怎么办', () => {
     expect(within(row).getByText('开一个会话后才能处理已有记忆。')).toBeInTheDocument()
     expect(button('移到最近删除', row)).toBeDisabled()
     expect(button('保留记忆', row)).toBeEnabled()
+  })
+})
+
+describe('类型显示名', () => {
+  it('PA-20：改过名的预设类型显示配置里的名字（和右侧栏、记忆查看同名）', () => {
+    setup({ value: { customTypes: { procedure: { ...TYPE_DEFINITIONS.procedure, label: '发版手册' } } } })
+    expect(typeTitles('预设')).toEqual(['发版手册', '决定'])
+  })
+
+  it('PA-20：英文界面下内置、预设类型写英文名', () => {
+    render(<PanelShell gateway={createFakeGateway({ views: { library: library([]) } })} t={createTranslator(en)}><SettingsPage form={createFakeConfigForm()} onOpenMemoryPage={() => {}} now={NOW} /></PanelShell>)
+    const region = screen.getByRole('region', { name: 'Memory types' })
+    const titles = [...region.querySelectorAll('.pm-tile-title')].map(el => el.textContent)
+    expect(titles).toEqual(['Profile', 'Preference', 'Facts & lessons', 'Project', 'Reference', 'Procedure', 'Decision'])
   })
 })

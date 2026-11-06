@@ -207,22 +207,22 @@ export const modelEditCss = `
 .pm-model-ask { min-height: 58px; resize: vertical; }
 .pm-model-busy { display: flex; align-items: center; gap: 10px; font-size: 13px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-model-busy .pm-btn { margin-left: auto; }
-.pm-model-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--pm-accent); animation: pm-model-pulse 1.2s ease-in-out infinite; }
+.pm-model-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--pm-text-2); animation: pm-model-pulse 1.2s ease-in-out infinite; }
 @keyframes pm-model-pulse { 0%, 100% { opacity: .3; } 50% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .pm-model-dot { animation: none; } }
 .pm-model-result { container-type: inline-size; }
 .pm-model-compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 @container (max-width: 520px) { .pm-model-compare { grid-template-columns: minmax(0, 1fr); } }
 .pm-model-pane { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.pm-model-pane-title { margin: 0; font-size: 12px; font-weight: 600; line-height: 1.5; color: var(--pm-text-3); }
+.pm-model-pane-title { margin: 0; font-size: 12px; font-weight: 600; line-height: 1.5; color: var(--pm-text-2); }
 .pm-model-body {
   display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: var(--dsw-radius-sm, 8px);
   background: var(--pm-bg); border: .5px solid var(--pm-line-card);
 }
 .pm-model-text, .pm-model-field { margin: 0; font-size: 13px; line-height: 1.6; color: var(--pm-text); white-space: pre-wrap; overflow-wrap: anywhere; }
 .pm-model-field { font-size: 12px; }
-.pm-model-field-label { margin-right: 8px; color: var(--pm-text-3); }
-.pm-model-body del { color: var(--pm-text-3); text-decoration-color: var(--pm-text-3); background: var(--pm-hover); }
-.pm-model-body ins { text-decoration: none; background: var(--pm-accent-tint); box-shadow: inset 0 -1px 0 var(--pm-accent-soft); }
-.pm-model-stat { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-3); font-variant-numeric: tabular-nums; }
+.pm-model-field-label { margin-right: 8px; color: var(--pm-text-2); }
+.pm-model-body del { color: var(--pm-text-2); text-decoration-color: var(--pm-text-2); background: var(--pm-hover); }
+.pm-model-body ins { text-decoration: none; background: var(--pm-hover); box-shadow: inset 0 -1px 0 var(--pm-text); }
+.pm-model-stat { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); font-variant-numeric: tabular-nums; }
 `

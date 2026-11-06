@@ -143,12 +143,12 @@ export const editCss = `
   border: .5px solid var(--pm-line-input); border-radius: var(--dsw-radius-sm, 8px);
 }
 .pm-edit-tag { display: inline-flex; align-items: center; height: 22px; padding-left: 8px; border-radius: 6px; background: var(--pm-hover); font-size: 12px; color: var(--pm-text); }
-.pm-edit-tag button { padding: 0 6px; border: 0; background: none; font: inherit; color: var(--pm-text-3); cursor: pointer; }
+.pm-edit-tag button { padding: 0 6px; border: 0; background: none; font: inherit; color: var(--pm-text-2); cursor: pointer; }
 .pm-edit-tag button:hover { color: var(--pm-text); }
 .pm-edit-tag-input { flex: 1; min-width: 120px; height: 22px; border: 0; outline: 0; background: none; font: inherit; font-size: 12px; color: var(--pm-text); }
 .pm-edit-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 4px; }
-.pm-edit-hint { display: flex; flex-wrap: wrap; gap: 0 12px; margin-right: auto; font-size: 12px; line-height: 1.5; color: var(--pm-text-3); }
-.pm-edit-count { font-size: 12px; line-height: 1.5; color: var(--pm-text-3); font-variant-numeric: tabular-nums; }
+.pm-edit-hint { display: flex; flex-wrap: wrap; gap: 0 12px; margin-right: auto; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
+.pm-edit-count { font-size: 12px; line-height: 1.5; color: var(--pm-text-2); font-variant-numeric: tabular-nums; }
 .pm-pending-done { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .pm-pending-done-text { flex: 1; min-width: 0; font-size: 13px; line-height: 1.5; color: var(--pm-text); overflow-wrap: anywhere; }
 `
