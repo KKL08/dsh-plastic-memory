@@ -4,6 +4,7 @@ import { useRef, useState } from 'react'
 import { Arrival, RollingNumber, useArrivals, useHeightTransition, withRollingNumber, type Arrivals } from './motion.tsx'
 import { savedMemoriesCardCss } from '../chat/SavedMemoriesCard.tsx'
 import { statusBarCss } from '../checkup/StatusBar.tsx'
+import { titleControlsCss } from '../checkup/TitleControls.tsx'
 import { pendingCss } from '../pending/PendingTab.tsx'
 
 /** jsdom 没有 Element.animate：换成记录调用的假实现，测完还原。 */
@@ -214,5 +215,12 @@ describe('状态条结果行淡入（CSS）', () => {
     const line = '.pm-status-result[data-live] .pm-status-result-line'
     expect(bodiesOf(statusBarCss, line, '').some(body => /transition:\s*opacity 200ms ease-out/.test(body))).toBe(true)
     expect(bodiesOf(statusBarCss, line, REDUCE).some(body => /transition:\s*none/.test(body))).toBe(true)
+  })
+})
+
+describe('体检进行中的转圈（CSS）', () => {
+  it('一直转；减少动态效果时停下，不只是放慢', () => {
+    expect(bodiesOf(titleControlsCss, '.pm-run-spinner', '').some(body => /animation:\s*pm-run-spin\b/.test(body))).toBe(true)
+    expect(bodiesOf(titleControlsCss, '.pm-run-spinner', REDUCE).some(body => /(^|;)\s*animation:\s*none\s*(;|$)/.test(body))).toBe(true)
   })
 })

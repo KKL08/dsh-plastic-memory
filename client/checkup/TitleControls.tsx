@@ -423,7 +423,7 @@ export const titleControlsCss = `
   animation: pm-run-spin .8s linear infinite;
 }
 @keyframes pm-run-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .pm-run-spinner { animation-duration: 2.4s; } }
+@media (prefers-reduced-motion: reduce) { .pm-run-spinner { animation: none; } }
 .pm-run-wrap { position: relative; display: inline-flex; }
 .pm-run-note {
   position: absolute; top: calc(100% + 4px); right: 0; z-index: 20; width: 240px; box-sizing: border-box; padding: 10px 12px; border-radius: 14px;
