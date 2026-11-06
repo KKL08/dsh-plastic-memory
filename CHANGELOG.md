@@ -184,7 +184,8 @@ All notable changes to this project are documented here. The format follows
 - Actions taken on the memory page or in the sidebar show up in the chat as
   one gray line, such as "Memory · Delete a memory", instead of the raw
   command result. A failed action says it did not go through and why,
-  without red text, since the panel already reported it in place.
+  without red text, since the panel already reported it in place. Clicking
+  the line shows the command and its full result, with secrets masked.
 
 ### Fixed
 - The plugin page of DeepSeek Harness 0.2.2-rc.1 shows the README as the
