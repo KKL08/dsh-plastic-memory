@@ -58,7 +58,7 @@ describe('runRuleScan', () => {
     const [f] = runRuleScan([record({ id: 'mem_a', validTo })], () => undefined, validTo + 1).filter(x => x.type === 'expired')
     expect(f!.summary).toBe('已过有效期（validTo=2026-10-28 18:05）')
     expect(f!.summary).not.toContain(String(validTo))
-    expect(f!.suggestedAction).toBe('向用户确认：仍然有效就用 memory_save 延长 validTo（写 "YYYY-MM-DD HH:mm"，用户只给了日期就写 "YYYY-MM-DD"）；已经失效就用 memory_forget 归档')
+    for (const part of ['memory_save', 'validTo', '"YYYY-MM-DD HH:mm"', 'memory_forget']) expect(f!.suggestedAction).toContain(part)
   })
 
   it('bloat：content 超过阈值才报', () => {

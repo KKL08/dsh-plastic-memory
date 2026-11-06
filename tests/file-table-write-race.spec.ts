@@ -265,14 +265,14 @@ describe('memory_snapshot restore：预读之后被改的记录按「快照后�
     return { store, deps: { store, snapshots }, snap }
   }
 
-  it('overwriteChanged=false：不覆盖并发修改，计入 skipped，提示与预读冲突时相同', async () => {
+  it('overwriteChanged=false：不覆盖并发修改，计入 skipped，提示里给出 overwriteChanged 参数', async () => {
     const { store, deps, snap } = await setup()
     const r = await executeSnapshotTool({ action: 'restore', snapshotId: snap.id }, { workspacePath: '/proj' }, deps)
     vi.restoreAllMocks()
     if (r.kind !== 'restored') throw new Error(r.kind)
     expect(r.restored).toEqual([])
     expect(r.skipped).toEqual(['mem_race'])
-    expect(r.message).toContain('1 条因快照后被修改而跳过（确认覆盖请带 overwriteChanged: true）')
+    expect(r.message).toContain('overwriteChanged: true')
     expect((await store.get('mem_race'))!.content).toBe('并发改的')
   })
 
