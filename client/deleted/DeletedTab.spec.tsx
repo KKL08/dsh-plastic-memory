@@ -77,7 +77,7 @@ describe('最近删除', () => {
     const tail = rowOf('用 pnpm 不用 npm').querySelector('.pm-row-actions')!
     expect(tail).toHaveTextContent(/^还能恢复 12 天彻底删除…恢复$/)
     expect(rowOf('测试用 sqlite').querySelector('.pm-row-actions')).toHaveTextContent(/^还能恢复不到 1 天/)
-    expect(within(rowOf('用 pnpm 不用 npm')).queryByText('恢复后这条冲突会回到待处理')).toBeNull()
+    expect(within(rowOf('用 pnpm 不用 npm')).queryByText('恢复后这条冲突会回到「等你决定」')).toBeNull()
   })
 
   it('「全部」按删除那天分「今天 / 近 7 天 / 更早 · 7 天内彻底删除」三段，都展开；卡片写范围名；搜索按内容筛', () => {
@@ -136,7 +136,7 @@ describe('最近删除', () => {
     const a = rowOf('测试用 sqlite')
     expect(a.querySelector('.pm-del-meta')).toHaveTextContent(/^以「postgres-in-tests」为准时删除/)
     expect(a.querySelector('.pm-del-meta .pm-chip')).toBeNull()
-    expect(within(a).getByText('恢复后这条冲突会回到待处理')).toHaveClass('pm-del-hint')
+    expect(within(a).getByText('恢复后这条冲突会回到「等你决定」')).toHaveClass('pm-del-hint')
     expect(rowOf('缩进用 tab').querySelector('.pm-del-meta')).toHaveTextContent(/^以「pnpm-only」为准时删除·刚刚/)
     expect(rowOf('分支直接推 main').querySelector('.pm-del-meta')).toHaveTextContent(/^以基线为准时删除/)
   })
@@ -165,7 +165,7 @@ describe('最近删除', () => {
     expect(rowOf('用 pnpm 不用 npm').querySelector('.pm-mc-meta')).toHaveTextContent(/^行为偏好/)
   })
 
-  it('恢复发 /memory restore；被裁决删掉的恢复后提示冲突回到待处理', async () => {
+  it('恢复发 /memory restore；被裁决删掉的恢复后提示冲突回到「等你决定」', async () => {
     const gateway = createFakeGateway({
       views: { deleted },
       respond: command => ({ ok: true, cmd: command.cmd, memoryIds: ['d2'], decisionId: 'pd1' }),
@@ -173,7 +173,7 @@ describe('最近删除', () => {
     renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
     await act(async () => { fireEvent.click(within(rowOf('测试用 sqlite')).getByRole('button', { name: '恢复' })) })
     expect(gateway.executed).toEqual([{ sessionId: 's1', command: { cmd: 'restore', memoryId: 'd2', layer: app } }])
-    expect(screen.getByRole('status')).toHaveTextContent('已恢复，这条冲突回到了待处理。')
+    expect(screen.getByRole('status')).toHaveTextContent('已恢复，这条冲突回到了「等你决定」。')
   })
 
   it('恢复别的项目里的：服务端拒后在行里确认，「取消」不重发，「继续处理」带 allowCrossWorkspace 重发；普通恢复只说已恢复', async () => {
@@ -216,7 +216,7 @@ describe('最近删除', () => {
     await act(async () => { fireEvent.click(confirm) })
     act(() => { gateway.setView('deleted', { version: GUI_VIEW_VERSION, items: [] }) })
     expect(screen.getByText('最近没有删除过记忆')).toBeInTheDocument()
-    const notice = screen.getByText('已恢复，这条冲突回到了待处理。')
+    const notice = screen.getByText('已恢复，这条冲突回到了「等你决定」。')
     await waitFor(() => { expect(notice).toHaveFocus() })
   })
 
