@@ -59,6 +59,8 @@ export interface ScanRun {
    * 只关乎整次的（跨项目重复没做成）不在里面，只在结果的 notes 里。
    */
   onScopeNotes?: (scope: Scope, notes: readonly ScanNote[]) => void
+  /** 提交点（提升候选同步、做完的作用域的完成记录）写完时调用，一个作用域都没做完也调：之后再被取消，体检已经算做完。 */
+  onCommitted?: () => void
 }
 
 export interface SingleScanResult {
@@ -409,7 +411,7 @@ export async function executeScan(args: ScanArgs, deps: ScanToolDeps, exec: Tool
  * 清理动作由模型经用户确认后调 forget/save 执行。
  * 提交点：缓存、账本、提升候选都写完之后，给规则检查和内容检查都做完的每个作用域写完成记录（上次体检）；没走到这一步就不算做完。
  */
-export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<ScanRun, 'by' | 'onScopeNotes'> = {}): Promise<ScanToolResult> {
+export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<ScanRun, 'by' | 'onScopeNotes' | 'onCommitted'> = {}): Promise<ScanToolResult> {
   const { llm, baseline, signal, currentWorkspace: currentWs } = input
   const layers = input.layers ?? 'full'
   const now = input.startedAt ?? deps.now?.() ?? Date.now()
@@ -424,9 +426,11 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
   const settle = async (workspaces: readonly string[], checked: readonly Scope[]) => {
     signal?.throwIfAborted()
     await syncPromoteCandidates(deps, workspaces, now)
-    if (deps.checkups === undefined || checked.length === 0) return
-    signal?.throwIfAborted()
-    await deps.checkups.complete(checked, { startedAt: now, completedAt: deps.now?.() ?? Date.now(), by: run.by ?? 'agent' })
+    if (deps.checkups !== undefined && checked.length > 0) {
+      signal?.throwIfAborted()
+      await deps.checkups.complete(checked, { startedAt: now, completedAt: deps.now?.() ?? Date.now(), by: run.by ?? 'agent' })
+    }
+    run.onCommitted?.()
   }
   // 目录枚举只读标记与文件名：体检清单、scope 校验、缺标记 / 不可读目录的说明都出自它
   const listing = await deps.store.listWorkspaceDirs()
