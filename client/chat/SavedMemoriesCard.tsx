@@ -14,8 +14,8 @@
  * 改动按工具调用 id 认领全部记忆视图的 modelChanges，会话结束后照样认得；视图里没有、且调用已超出保留窗口的改写写「已超过 14 天」。
  */
 import { useId, useMemo, useState } from 'react'
-import { RETENTION_MS, layerOfMemory, type GuiLayerRef, type LibraryView, type ModelChange } from '../../src/gui/contract.ts'
-import { samePath, useGateway, workspaceOf, type BorrowedSession } from '../gateway.ts'
+import { RETENTION_MS, sameScope, scopeOfMemory, type LibraryView, type ModelChange, type Scope } from '../../src/gui/contract.ts'
+import { useGateway, workspaceOf, type BorrowedSession } from '../gateway.ts'
 import { useT } from '../i18n.tsx'
 import type { NavTarget } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
@@ -48,15 +48,14 @@ export interface SavedMemoriesCardProps {
   openDetail: (target: NavTarget) => void
 }
 
-/** 这条新记的记忆此刻在全部记忆视图里的样子：先找它所在的层，没有再找全局（提升过了）。视图没读到时 undefined。 */
-function liveCard(library: LibraryView | undefined, id: string, layer: GuiLayerRef | undefined) {
+/** 这条新记的记忆此刻在全部记忆视图里的样子：先找它所在的作用域，没有再找全局（提升过了）。视图没读到时 undefined。 */
+function liveCard(library: LibraryView | undefined, id: string, scope: Scope | undefined) {
   if (library === undefined) return undefined
-  const find = (match: (l: GuiLayerRef) => boolean) => library.layers.find(l => match(l.layer))?.items.find(m => m.id === id)
-  const sameLayer = (l: GuiLayerRef) => layer !== undefined && l.kind === layer.kind && (l.kind === 'global' || (layer.kind === 'workspace' && samePath(l.workspacePath, layer.workspacePath)))
-  return find(sameLayer) ?? find(l => l.kind === 'global')
+  const find = (match: (s: Scope) => boolean) => library.layers.find(l => match(l.layer))?.items.find(m => m.id === id)
+  return find(s => scope !== undefined && sameScope(s, scope)) ?? find(s => s.kind === 'global')
 }
 
-function SavedRow({ session, item, layer, promotion, rewrite, superseded, expiredSupersedes, now, typeLabel, onDetail, onWroteAgentsMd }: {
+function SavedRow({ session, item, scope, promotion, rewrite, superseded, expiredSupersedes, now, typeLabel, onDetail, onWroteAgentsMd }: {
   session: BorrowedSession & { kind: 'ready' }
   item: SavedMemory
   /** 改写的那次改动（视图里认领到的，或已过保留窗口）；新记的没有。 */
@@ -65,8 +64,8 @@ function SavedRow({ session, item, layer, promotion, rewrite, superseded, expire
   superseded: readonly ModelChange[]
   /** 视图里认不出、已过保留窗口的替代条数（取参数里的 supersedes）：写一行过期说明。 */
   expiredSupersedes: number
-  /** 这条记忆所在的层：删除、撤销、提升、留下都带上它，同 id 别层还在用时也只动这一份。 */
-  layer: GuiLayerRef | undefined
+  /** 这条记忆所在的作用域：删除、撤销、提升、留下都带上它，同 id 在别的作用域还在用时也只动这一份。 */
+  scope: Scope | undefined
   /** 提升为全局的状态（全部记忆视图）。 */
   promotion: InPlacePromotion | undefined
   now: number
@@ -78,13 +77,13 @@ function SavedRow({ session, item, layer, promotion, rewrite, superseded, expire
   const gateway = useGateway()
   const { sessionId } = session
   const id = item.memory.id
-  const promote = usePromoteInPlace(session, item.memory, layer, promotion, onWroteAgentsMd)
+  const promote = usePromoteInPlace(session, item.memory, scope, promotion, onWroteAgentsMd)
   // 写进了 AGENTS.md：项目里那条进了最近删除，这一行留着结果，不再给删除、查看详情
   const isWrittenToAgentsMd = promotion === 'wrote-agents-md'
   // 记下的时刻取记忆卡上的（结果事件的时间）；没有就用这一行第一次出现的时刻。只有晚于它的视图才拿来判彻底删除
   const [firstSeen] = useState(() => Date.now())
   const savedAt = Number.isFinite(item.memory.updatedAt) && item.memory.updatedAt > 0 ? item.memory.updatedAt : firstSeen
-  const how = gateway.useDeletions().of(id, layer, savedAt)
+  const how = gateway.useDeletions().of(id, scope, savedAt)
   const [state, setState] = useState<RowState>({ kind: 'idle' })
   const changes = (
     <>
@@ -97,7 +96,7 @@ function SavedRow({ session, item, layer, promotion, rewrite, superseded, expire
     if (state.kind === 'busy') return
     keepFocusInPlace()
     setState({ kind: 'busy' })
-    const result = await gateway.execute(sessionId, { cmd, memoryId: id, layer })
+    const result = await gateway.execute(sessionId, { cmd, memoryId: id, layer: scope })
     if (result.ok) setState({ kind: 'idle' })
     else if (cmd === 'forget' && result.code === 'has-secret') setState({ kind: 'secret' })
     // 撤销失败时那一行还是「已删除」，不另写原因
@@ -172,19 +171,19 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
   const session = useMemo<BorrowedSession & { kind: 'ready' }>(() => ({ kind: 'ready', sessionId, cwd }), [sessionId, cwd])
   const typeLabel = useTypeLabel(session)
   const gateway = useGateway()
-  // 本项目记忆的层：工具结果里没有项目路径，取服务端给这个会话定的项目（会话视图）；没有会话视图的旧对话
+  // 本项目记忆的作用域：工具结果里没有项目路径，取服务端给这个会话定的项目（会话视图）；没有会话视图的旧对话
   // 按归属对照定（cwd 是子目录、软链路径时也落到项目上）
   const sessionView = gateway.useView(session, 'session')
   const workspaceMap = gateway.useView(session, 'workspaces')
   const library = gateway.useView(session, 'library')
   const workspacePath = (sessionView.status === 'ready' ? sessionView.data.workspacePath : undefined)
     ?? workspaceOf(cwd, workspaceMap.status === 'ready' ? workspaceMap.data.cwds : {})
-  const layerOf = (memory: SavedMemory['memory']): GuiLayerRef | undefined => layerOfMemory(memory)
+  const scopeOf = (memory: SavedMemory['memory']): Scope | undefined => scopeOfMemory(memory)
     ?? (workspacePath === undefined ? undefined : { kind: 'workspace', workspacePath })
   // 提升过的按全局那一份写作用域，删除、撤销、查看详情也落在全局
   const current = (item: SavedMemory): { memory: SavedMemory['memory']; promotion: InPlacePromotion | undefined } => {
     if (wroteAgentsMd.has(item.memory.id)) return { memory: item.memory, promotion: 'wrote-agents-md' }
-    const live = liveCard(library.status === 'ready' ? library.data : undefined, item.memory.id, layerOf(item.memory))
+    const live = liveCard(library.status === 'ready' ? library.data : undefined, item.memory.id, scopeOf(item.memory))
     const promotion = promotionOf(live)
     if (promotion !== 'promoted') return { memory: item.memory, promotion }
     const { workspacePath: _workspacePath, ...rest } = item.memory
@@ -224,9 +223,9 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
     withRollingNumber(slot => t(key, { count: slot }), saved.length, String(saved.length))
   const titleNode = fresh > 0 && rewritten === 0 ? counted('chat.card.title') : title
   const foldedNode = fresh > 0 && rewritten === 0 ? counted(saved.length === 1 ? 'chat.card.folded.one' : 'chat.card.folded') : folded
-  // 和删除、撤销同一个层：全局记忆落在全局；本项目记忆落在服务端给会话定的项目（cwd 可能是项目子目录），都不知道时只带 id
+  // 和删除、撤销同一个作用域：全局记忆落在全局；本项目记忆落在服务端给会话定的项目（cwd 可能是项目子目录），都不知道时只带 id
   const detail = (memory: SavedMemory['memory']) => {
-    const scope = layerOf(memory)
+    const scope = scopeOf(memory)
     openDetail({ view: 'library', ...(scope === undefined ? {} : { scope }), memoryId: memory.id, fromChat: true })
   }
   return (
@@ -258,7 +257,7 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
               key={item.callId}
               session={session}
               item={{ ...item, memory }}
-              layer={layerOf(memory)}
+              scope={scopeOf(memory)}
               promotion={promotion}
               rewrite={rewriteOf(item)}
               superseded={changesOf(item).filter(c => c.kind === 'supersede')}

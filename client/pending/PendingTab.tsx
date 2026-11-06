@@ -13,13 +13,13 @@
  * 带 newItem 进来时（状态条结果行的链接）跳到第一条带「新」的条目：滚到视野中间、闪一次、接住焦点；没有就落在顶部。
  */
 import { useEffect, useId, useRef, useState, type ReactElement, type ReactNode, type RefObject } from 'react'
-import { PENDING_LEVELS, pendingItemKey, pendingItemScopes, type GuiLayerRef, type HealthView, type LibraryView, type PendingItem, type PendingLevel, type PendingView } from '../../src/gui/contract.ts'
+import { PENDING_LEVELS, pendingItemKey, pendingItemScopes, type HealthView, type LibraryView, type PendingItem, type PendingLevel, type PendingView } from '../../src/gui/contract.ts'
 import { isNewItem, markSeen, newItemIndex, readSeen, type Seen } from '../checkup/seen.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { baseName, formatDay, formatNumber, useT } from '../i18n.tsx'
 import { FlashRow, useFlashTarget, useTypeLabel } from '../library/shared.tsx'
 import type { LocaleKey } from '../locales.ts'
-import { compareLayers, isInScope, scopeName, useNavTarget, type NavStore, type NavTarget, type NewItemJump, type PageScope } from '../nav.ts'
+import { compareScopes, isInScope, scopeLabel, useNavTarget, type NavStore, type NavTarget, type NewItemJump, type PageScope } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { Chip } from '../ui/Chip.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
@@ -119,11 +119,10 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
     .map(item => ({ item, isNew: isNew(item) }))
     .sort((a, b) => Number(b.isNew) - Number(a.isNew))
     .map(({ item }) => item)
-  const layerName = (layer: GuiLayerRef) => scopeName(layer, t)
-  const scopeNames = (item: PendingItem): readonly string[] => scope.kind !== 'all' ? [] : pendingItemScopes(item).map(layerName)
-  const healthLayers = health.status === 'ready' ? health.data.layers.filter(l => isInScope([l.layer], scope)) : []
-  const ignored = [...healthLayers].sort((a, b) => compareLayers(a.layer, b.layer))
-    .flatMap(l => l.ignored.map(item => ({ item, scopeName: scope.kind === 'all' ? layerName(l.layer) : undefined })))
+  const scopeNames = (item: PendingItem): readonly string[] => scope.kind !== 'all' ? [] : pendingItemScopes(item).map(s => scopeLabel(s, t))
+  const healthScopes = health.status === 'ready' ? health.data.layers.filter(h => isInScope([h.layer], scope)) : []
+  const ignored = [...healthScopes].sort((a, b) => compareScopes(a.layer, b.layer))
+    .flatMap(h => h.ignored.map(item => ({ item, scopeLabel: scope.kind === 'all' ? scopeLabel(h.layer, t) : undefined })))
   const ignoredBlock = ignored.length === 0 ? null : <Ignored entries={ignored} session={session} />
   const typeLabel = useTypeLabel(session)
   const { flashId, clear } = useFlashTarget(nav, viewItems.flatMap(memoryIdsOf))
@@ -229,7 +228,7 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
           item={item}
           {...props}
           budget={config?.snapshotTokenBudget}
-          onCleanup={(layer) => { nav.update({ view: 'library', scope: layer, memoryId: undefined }) }}
+          onCleanup={(target) => { nav.update({ view: 'library', scope: target, memoryId: undefined }) }}
         />
       )
       case 'unreadable-file': return <UnreadableCard item={item} {...props} />
@@ -246,7 +245,7 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
             {refusedRow?.node}
             <PendingEmpty
               isOff={health.status === 'ready' && !health.data.governanceEnabled}
-              lastCheckupAt={health.status === 'ready' ? lastScanAt(healthLayers) : undefined}
+              lastCheckupAt={health.status === 'ready' ? lastScanAt(healthScopes) : undefined}
               now={now}
             />
             {ignoredBlock}
@@ -339,7 +338,7 @@ function useNewItemJump(
  */
 function knownProjects(defaultProject: string | undefined, session: BorrowedSession, library: LibraryView | undefined): string[] {
   const paths = new Set<string>(session.kind === 'ready' ? Object.values(session.workspaces ?? {}) : [])
-  for (const { layer } of library?.layers ?? []) if (layer.kind === 'workspace') paths.add(layer.workspacePath)
+  for (const { layer: scope } of library?.layers ?? []) if (scope.kind === 'workspace') paths.add(scope.workspacePath)
   if (defaultProject !== undefined) paths.delete(defaultProject)
   const rest = [...paths].sort((a, b) => baseName(a).localeCompare(baseName(b)) || a.localeCompare(b))
   return defaultProject === undefined ? rest : [defaultProject, ...rest]
@@ -368,13 +367,13 @@ function PendingGroup({ level, count, children }: { level: PendingLevel; count: 
 type IgnoredItem = HealthView['layers'][number]['ignored'][number]
 
 /** 不再提醒的一条：问题类型 · 记忆名（「全部」里带范围胶囊），「恢复提醒」发 unignore-advice；成功后视图重写，这一条随之消失。 */
-function IgnoredRow({ item, scopeName, session }: { item: IgnoredItem; scopeName: string | undefined; session: BorrowedSession }) {
+function IgnoredRow({ item, scopeLabel, session }: { item: IgnoredItem; scopeLabel: string | undefined; session: BorrowedSession }) {
   const t = useT()
   const action = useItemAction(session, () => {})
   return (
     <li className="pm-ignored-row">
       <span className="pm-ignored-text">{[adviceTitle(item.type, t), ...item.memories.map(m => m.name)].join(' · ')}</span>
-      {scopeName !== undefined ? <Chip variant="neutral">{scopeName}</Chip> : null}
+      {scopeLabel !== undefined ? <Chip variant="neutral">{scopeLabel}</Chip> : null}
       <Button
         variant="ghost"
         className="pm-ignored-undo"
@@ -388,8 +387,8 @@ function IgnoredRow({ item, scopeName, session }: { item: IgnoredItem; scopeName
   )
 }
 
-/** 「不再提醒的 N 条 查看 ⌄」：默认收起，展开逐条列出。数据取健康视图里这个范围各层的已忽略。 */
-function Ignored({ entries, session }: { entries: ReadonlyArray<{ item: IgnoredItem; scopeName: string | undefined }>; session: BorrowedSession }) {
+/** 「不再提醒的 N 条 查看 ⌄」：默认收起，展开逐条列出。数据取健康视图里这个范围各作用域的已忽略。 */
+function Ignored({ entries, session }: { entries: ReadonlyArray<{ item: IgnoredItem; scopeLabel: string | undefined }>; session: BorrowedSession }) {
   const t = useT()
   const [isOpen, setOpen] = useState(false)
   const listId = useId()
@@ -406,8 +405,8 @@ function Ignored({ entries, session }: { entries: ReadonlyArray<{ item: IgnoredI
       {isOpen
         ? (
           <ul id={listId} className="pm-ignored-list" aria-label={label}>
-            {entries.map(({ item, scopeName }) => (
-              <IgnoredRow key={`${scopeName ?? ''}:${item.type}:${item.memories.map(m => m.id).join(',')}`} item={item} scopeName={scopeName} session={session} />
+            {entries.map(({ item, scopeLabel }) => (
+              <IgnoredRow key={`${scopeLabel ?? ''}:${item.type}:${item.memories.map(m => m.id).join(',')}`} item={item} scopeLabel={scopeLabel} session={session} />
             ))}
           </ul>
         )
@@ -425,9 +424,9 @@ function ViewStatus({ state }: { state: Exclude<ViewState<PendingView>, { status
   return <p className="pm-page-placeholder" role="status">{text}</p>
 }
 
-/** 这个范围最近一次体检的时间；一层都没体检过为 null。 */
-function lastScanAt(layers: HealthView['layers']): number | null {
-  const times = layers.map(l => l.lastCheckupAt).filter((v): v is number => v !== null)
+/** 这个范围最近一次体检的时间；一个作用域都没体检过为 null。 */
+function lastScanAt(scopes: HealthView['layers']): number | null {
+  const times = scopes.map(l => l.lastCheckupAt).filter((v): v is number => v !== null)
   return times.length === 0 ? null : Math.max(...times)
 }
 

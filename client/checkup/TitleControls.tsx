@@ -9,12 +9,12 @@
  */
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type FocusEvent, type MouseEvent } from 'react'
 import {
-  AUTO_CHECKUP_FOLLOW, AUTO_CHECKUP_MAX_DAYS, resolveAutoCheckup, scopeKey, SCOPE_KEYS,
-  type AutoCheckupFrequency, type CheckupView, type GuiLayerRef,
+  AUTO_CHECKUP_FOLLOW, AUTO_CHECKUP_MAX_DAYS, checkupKey, resolveAutoCheckup, SCOPE_KEYS,
+  type AutoCheckupFrequency, type CheckupView, type Scope,
 } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, formatNumber, useT, type Translate } from '../i18n.tsx'
-import { scopeName, type PageScope } from '../nav.ts'
+import { scopeLabel, type PageScope } from '../nav.ts'
 import { parsePositiveInt } from '../settings/config.ts'
 import { Button } from '../ui/Button.tsx'
 import { Icon } from '../ui/Icon.tsx'
@@ -46,9 +46,9 @@ export function TitleControls({ scope, session, runs, checkups, isGovernanceEnab
   return (
     <>
       {/* 换范围时收起菜单、清掉没生效的草稿 */}
-      {checkups !== undefined ? <AutoCheckup key={scopeKey(scope)} scope={scope} session={session} view={checkups} /> : null}
+      {checkups !== undefined ? <AutoCheckup key={checkupKey(scope)} scope={scope} session={session} view={checkups} /> : null}
       {/* 换范围时收起说明弹层 */}
-      <RunCheckup key={`run:${scopeKey(scope)}`} scope={scope} runs={runs} projectCount={projectCount} isEmpty={isEmpty} />
+      <RunCheckup key={`run:${checkupKey(scope)}`} scope={scope} runs={runs} projectCount={projectCount} isEmpty={isEmpty} />
     </>
   )
 }
@@ -171,16 +171,16 @@ function AutoCheckup({ scope, session, view }: { scope: PageScope; session: Borr
 
   // 继承解析和服务端共用契约里的纯函数：视图里没有的新项目也按跟随算
   const settings = new Map<string, AutoCheckupFrequency>([[SCOPE_KEYS.all, view.defaultFrequency]])
-  for (const s of view.scopes) if (s.isOwn) settings.set(scopeKey(s.scope), s.frequency)
+  for (const s of view.scopes) if (s.isOwn) settings.set(checkupKey(s.scope), s.frequency)
   const { frequency, isOwn } = resolveAutoCheckup(settings, scope)
   const isAll = scope.kind === 'all'
   const isExplicit = isAll || isOwn
-  const owned = isAll ? view.scopes.filter(s => s.isOwn && !hidden.has(scopeKey(s.scope))) : []
+  const owned = isAll ? view.scopes.filter(s => s.isOwn && !hidden.has(checkupKey(s.scope))) : []
   const days = parseDays(draft)
 
   // 视图里已经不是单独设置了的，不用再藏
   useEffect(() => {
-    setHidden(prev => prev.size === 0 ? prev : new Set([...prev].filter(key => view.scopes.some(s => s.isOwn && scopeKey(s.scope) === key))))
+    setHidden(prev => prev.size === 0 ? prev : new Set([...prev].filter(key => view.scopes.some(s => s.isOwn && checkupKey(s.scope) === key))))
   }, [view])
 
   const title = isAll ? t('checkup.auto.title.all') : scope.kind === 'global' ? t('checkup.auto.title.global')
@@ -262,8 +262,8 @@ function AutoCheckup({ scope, session, view }: { scope: PageScope; session: Borr
     if (next !== null && (menu.current?.contains(next) || next === trigger.current)) return
     dismiss()
   }
-  const unfollow = (target: GuiLayerRef, event: MouseEvent<HTMLButtonElement>) => {
-    const key = scopeKey(target)
+  const unfollow = (target: Scope, event: MouseEvent<HTMLButtonElement>) => {
+    const key = checkupKey(target)
     // 这一行要消失：焦点先挪到下一行，没有就上一项
     const list = items()
     const at = list.indexOf(event.currentTarget)
@@ -371,9 +371,9 @@ function AutoCheckup({ scope, session, view }: { scope: PageScope; session: Borr
                 <ul role="group" aria-labelledby={`${menuId}-own`} className="pm-auto-own">
                   <li role="none" id={`${menuId}-own`} className="pm-auto-own-title">{t('checkup.auto.own.title')}</li>
                   {owned.map((s) => {
-                    const name = scopeName(s.scope, t)
+                    const name = scopeLabel(s.scope, t)
                     return (
-                      <li role="none" key={scopeKey(s.scope)} className="pm-auto-own-row">
+                      <li role="none" key={checkupKey(s.scope)} className="pm-auto-own-row">
                         <span className="pm-auto-own-label">{t('checkup.auto.own.row', { name, value: frequencyText(s.frequency, t) })}</span>
                         <button
                           type="button"

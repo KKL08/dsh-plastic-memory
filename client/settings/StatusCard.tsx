@@ -1,6 +1,6 @@
 /**
  * 设置页顶部的状态卡（Health Banner）：一句结论 + 记忆数与上次体检时间 + 「打开记忆页 ›」。
- * 插件页是全局页面，结论按全部层汇总；数据来自视图文件（借一个会话读，没有会话时只写一句提示）。
+ * 插件页是全局页面，结论按全部作用域汇总；数据来自视图文件（借一个会话读，没有会话时只写一句提示）。
  * 结论按优先级：配置文件关掉体检 → 有密钥 → 有 N 处等你决定 → 还没有记忆 → 还没体检过 → 状态良好。
  * 「打开记忆页 ›」落在「全部」的处理视图。这里不放「立即体检」：体检要选范围，设置页没有范围，入口只留记忆页标题行。
  */
@@ -19,9 +19,9 @@ export function summarize(
   now: number,
   t: Translate,
 ): Status {
-  const count = views.library.layers.reduce((sum, layer) => sum + layer.items.length, 0)
+  const count = views.library.layers.reduce((sum, group) => sum + group.items.length, 0)
   const scannedAt = views.health.layers.reduce<number | null>(
-    (latest, layer) => layer.lastCheckupAt !== null && (latest === null || layer.lastCheckupAt > latest) ? layer.lastCheckupAt : latest, null)
+    (latest, s) => s.lastCheckupAt !== null && (latest === null || s.lastCheckupAt > latest) ? s.lastCheckupAt : latest, null)
   const countText = t(count === 1 ? 'settings.status.count.one' : 'settings.status.count', { n: formatNumber(count) })
   if (!governanceEnabled) return { conclusion: t('settings.governanceOff'), detail: countText }
   const detail = `${countText} · ${scannedAt === null ? t('settings.status.neverScanned') : t('settings.status.lastScan', { date: formatDay(scannedAt, now, t) })}`

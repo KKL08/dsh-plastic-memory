@@ -1,7 +1,5 @@
 import { FINDING_TYPES, type Finding, type FindingType } from './schema.ts'
-
-/** 评分层：workspace 层与 global 层对 misplaced 的危害判定不同（见 NOISE_CAPS 注释）。 */
-export type ScoreLayer = 'workspace' | 'global'
+import type { Scope } from '../scope.ts'
 
 /** 红线触发时 score 的红区上限：密钥存在即不可接受，gate 判死而非扣分算术（高分不能稀释它）。 */
 export const SECRET_GATE_SCORE_CAP = 40
@@ -52,8 +50,8 @@ export interface HealthInput {
   semanticFindings: Finding[]
   /** 每条有 decayDays 的活跃记忆的 (now − lastConfirmedAt) / (decayDays × 86400000)。 */
   freshnessRatios: number[]
-  /** 缺省 workspace。global 层的 misplaced 用重 cap。 */
-  layer?: ScoreLayer
+  /** 缺省 workspace。全局的 misplaced 用重 cap（见 NOISE_CAPS 注释）。 */
+  scopeKind?: Scope['kind']
 }
 
 export interface HealthScore {
@@ -68,12 +66,12 @@ export interface HealthScore {
 }
 
 export function computeHealth(input: HealthInput): HealthScore {
-  const layer = input.layer ?? 'workspace'
+  const scopeKind = input.scopeKind ?? 'workspace'
   const counts = Object.fromEntries(FINDING_TYPES.map(t => [t, 0])) as Record<FindingType, number>
   for (const f of [...input.ruleFindings, ...input.semanticFindings]) counts[f.type]++
 
   const capOf = (type: Exclude<FindingType, 'secret' | 'conflict'>): number =>
-    type === 'misplaced' && layer === 'global' ? GLOBAL_MISPLACED_CAP : NOISE_CAPS[type]
+    type === 'misplaced' && scopeKind === 'global' ? GLOBAL_MISPLACED_CAP : NOISE_CAPS[type]
   const noisePenalty = (type: Exclude<FindingType, 'secret' | 'conflict'>): number =>
     capOf(type) * noiseProgress(counts[type], input.totalMemories)
 

@@ -137,9 +137,9 @@ export async function executeSearch(
   const scopeFilter: QueryScope = a.scope === 'global'
     ? { kind: 'global' }
     : a.scope === 'workspace' && workspacePath
-      ? { kind: 'workspace', path: workspacePath }
+      ? { kind: 'workspace', workspacePath }
       : { kind: 'visible', workspacePath }
-  const hint = scopeFilter.kind === 'workspace' ? scopeFilter.path : scopeFilter.kind === 'visible' ? scopeFilter.workspacePath : undefined
+  const hint = scopeFilter.kind === 'global' ? undefined : scopeFilter.workspacePath
   // 查询与记录两侧共用这一个分词器：查询含汉字时是 jieba 档（首次搜索才加载），否则 bigram
   const tokenize = await tokenizerForQuery(a.query, deps.tokenizer)
   // 两套词项：新 token 定前两档并打分（分词命中计词频，字段子串命中只计命中）；旧词项（expandQueryTerms）给第三档，
@@ -154,7 +154,7 @@ export async function executeSearch(
     : {}
   const now = deps.now?.() ?? Date.now()
   // 与快照预读同一条路：按范围读取 → 同 id 取舍 → active → validTo（过期的不进检索，治理扫描仍可见）
-  const read = await deps.store.readLayer(scopeFilter, { ...(a.types ? { types: a.types } : {}), ...prefilter })
+  const read = await deps.store.readRaw(scopeFilter, { ...(a.types ? { types: a.types } : {}), ...prefilter })
   const located = resolveLiveFirst(read.records, { workspacePath: hint })
     .filter(l => l.record.status === 'active' && withinValidity(l.record, now))
   const candidates = located.map(l => l.record)

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import {
   GUI_VIEW_VERSION,
-  type AutoCheckupFrequency, type CheckupView, type GuiLayerRef, type HealthView, type LibraryView, type MemoryCommand, type MemoryCommandResult, type PendingView,
+  type AutoCheckupFrequency, type CheckupView, type HealthView, type LibraryView, type MemoryCommand, type MemoryCommandResult, type PendingView, type Scope,
 } from '../../src/gui/contract.ts'
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { createTranslator } from '../i18n.tsx'
@@ -12,10 +12,10 @@ import { createNavStore, openMemoryPage } from '../nav.ts'
 import { levelCountsOf, memory, NOW, renderInShell } from '../test-utils.tsx'
 import { PanelShell } from '../ui/PanelShell.tsx'
 
-const GLOBAL: GuiLayerRef = { kind: 'global' }
-const APP: GuiLayerRef = { kind: 'workspace', workspacePath: '/w/app' }
-const BLOG: GuiLayerRef = { kind: 'workspace', workspacePath: '/w/blog' }
-const ZETA: GuiLayerRef = { kind: 'workspace', workspacePath: '/w/zeta' }
+const GLOBAL: Scope = { kind: 'global' }
+const APP: Scope = { kind: 'workspace', workspacePath: '/w/app' }
+const BLOG: Scope = { kind: 'workspace', workspacePath: '/w/blog' }
+const ZETA: Scope = { kind: 'workspace', workspacePath: '/w/zeta' }
 
 const g1 = memory({ id: 'g1', name: 'g1', scope: 'global', workspacePath: undefined })
 const a1 = memory({ id: 'a1', name: 'a1' })
@@ -32,15 +32,15 @@ const library: LibraryView = {
   layers: [{ layer: GLOBAL, items: [g1] }, { layer: APP, items: [a1, a2] }, { layer: BLOG, items: [b1] }, { layer: ZETA, items: [z1] }],
 }
 
-function healthLayer(layer: GuiLayerRef): HealthView['layers'][number] {
+function healthScope(scope: Scope): HealthView['layers'][number] {
   return {
-    layer, totalMemories: 1, score: 90, tier: 'green', gate: { secret: false }, issues: [],
+    layer: scope, totalMemories: 1, score: 90, tier: 'green', gate: { secret: false }, issues: [],
     lastCheckupAt: NOW - 86_400_000, ignored: [],
     deductions: { rule: { points: 0, types: [] }, content: { points: 0, types: [] }, freshness: { points: 0, types: [] } },
   }
 }
 const health = (governanceEnabled = true): HealthView => ({
-  version: GUI_VIEW_VERSION, governanceEnabled, layers: [healthLayer(GLOBAL), healthLayer(APP), healthLayer(BLOG), healthLayer(ZETA)],
+  version: GUI_VIEW_VERSION, governanceEnabled, layers: [healthScope(GLOBAL), healthScope(APP), healthScope(BLOG), healthScope(ZETA)],
 })
 
 /** 体检视图夹具：own 是单独设置了的范围（键：global 或项目路径）；zeta 不在视图里，当作刚加的新项目。 */
@@ -50,11 +50,11 @@ function checkups({ all = 'manual', own = {}, inProgress = [], governanceEnabled
   inProgress?: readonly string[]
   governanceEnabled?: boolean
 } = {}): CheckupView {
-  const scope = (layer: GuiLayerRef): CheckupView['scopes'][number] => {
-    const key = layer.kind === 'global' ? 'global' : layer.workspacePath
+  const scope = (s: Scope): CheckupView['scopes'][number] => {
+    const key = s.kind === 'global' ? 'global' : s.workspacePath
     const isOwn = own[key] !== undefined
     return {
-      scope: layer, frequency: own[key] ?? all, isOwn, lastCheckupAt: NOW - 86_400_000, nextCheckupAt: null, isDue: false,
+      scope: s, frequency: own[key] ?? all, isOwn, lastCheckupAt: NOW - 86_400_000, nextCheckupAt: null, isDue: false,
       isInProgress: inProgress.includes(key), failure: null, modelUnavailable: null, lastResult: null,
     }
   }
@@ -63,7 +63,7 @@ function checkups({ all = 'manual', own = {}, inProgress = [], governanceEnabled
 
 const views = { pending, library, health: health(), checkups: checkups() }
 
-function open(scope: GuiLayerRef | { kind: 'all' } = { kind: 'all' }, init: FakeGatewayInit = {}) {
+function open(scope: Scope | { kind: 'all' } = { kind: 'all' }, init: FakeGatewayInit = {}) {
   const nav = createNavStore()
   openMemoryPage({ layout: { selectPanel: vi.fn() } }, nav, { view: 'todo', scope })
   const gateway = createFakeGateway({ currentWorkspace: '/w/app', views, ...init, ...(init.views ? { views: { ...views, ...init.views } } : {}) })
@@ -122,7 +122,7 @@ describe('立即体检：按范围发出的 scan 目标', () => {
 })
 
 describe('立即体检：范围里还没有记忆', () => {
-  const NEW: GuiLayerRef = { kind: 'workspace', workspacePath: '/w/new' }
+  const NEW: Scope = { kind: 'workspace', workspacePath: '/w/new' }
   const emptyLibrary = (layers: LibraryView['layers']): LibraryView => ({ ...library, layers })
   const note = () => screen.getByRole('dialog')
 
@@ -619,7 +619,7 @@ describe('体检在配置文件里关闭', () => {
 })
 
 describe('英文界面', () => {
-  const openEn = (scope: GuiLayerRef | { kind: 'all' }) => {
+  const openEn = (scope: Scope | { kind: 'all' }) => {
     const nav = createNavStore()
     openMemoryPage({ layout: { selectPanel: vi.fn() } }, nav, { view: 'todo', scope })
     const gateway = createFakeGateway({ currentWorkspace: '/w/app', views: { ...views, checkups: checkups({ all: 7, own: { global: 1 } }) } })

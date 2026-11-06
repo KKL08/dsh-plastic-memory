@@ -1,16 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { pendingItemKey, pendingItemScopes, sameLayer, type GuiLayerRef, type MemoryCard, type PendingItem } from '../src/gui/contract.ts'
+import { pendingItemKey, pendingItemScopes, type MemoryCard, type PendingItem, type Scope } from '../src/gui/contract.ts'
 
 // 契约纯函数：条目属于哪些范围、条目身份。服务端判新增、客户端按范围筛选和算件数共用这一份。
 
-const GLOBAL: GuiLayerRef = { kind: 'global' }
-const APP: GuiLayerRef = { kind: 'workspace', workspacePath: '/w/app' }
-const BLOG: GuiLayerRef = { kind: 'workspace', workspacePath: '/w/blog' }
+const GLOBAL: Scope = { kind: 'global' }
+const APP: Scope = { kind: 'workspace', workspacePath: '/w/app' }
+const BLOG: Scope = { kind: 'workspace', workspacePath: '/w/blog' }
 
-function card(id: string, layer: GuiLayerRef): MemoryCard {
+function card(id: string, scope: Scope): MemoryCard {
   return {
-    id, name: id, type: 'preference', scope: layer.kind,
-    ...(layer.kind === 'workspace' ? { workspacePath: layer.workspacePath } : {}),
+    id, name: id, type: 'preference', scope: scope.kind,
+    ...(scope.kind === 'workspace' ? { workspacePath: scope.workspacePath } : {}),
     summary: '', content: 'x', tags: [], createdAt: 1, updatedAt: 1, lastConfirmedAt: 1, filePath: `/m/${id}.md`,
   }
 }
@@ -80,14 +80,5 @@ describe('pendingItemKey：条目身份', () => {
     expect(pendingItemKey(horizontal(card('a', GLOBAL), card('b', APP)))).toBe(pendingItemKey(horizontal(null, null)))
     const file = (filePath: string): PendingItem => ({ kind: 'unreadable-file', level: 'must-fix', layer: APP, filePath, relativePath: 'x.md', error: 'bad' })
     expect(pendingItemKey(file('/m/x.md'))).not.toBe(pendingItemKey(file('/m/y.md')))
-  })
-})
-
-describe('sameLayer', () => {
-  it('都是全局，或同一个项目路径', () => {
-    expect(sameLayer(GLOBAL, { kind: 'global' })).toBe(true)
-    expect(sameLayer(APP, { kind: 'workspace', workspacePath: '/w/app' })).toBe(true)
-    expect(sameLayer(APP, BLOG)).toBe(false)
-    expect(sameLayer(APP, GLOBAL)).toBe(false)
   })
 })

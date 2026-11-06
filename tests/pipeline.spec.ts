@@ -859,7 +859,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
       const reason = await restricted(runSavePipeline(childCandidate({ sourceMode }), childDeps(store)))
       expect(reason).toBe(`sourceMode=${sourceMode} 子 agent 用不了：子 agent 收到的指令来自委派方，不算用户明说；按观察（environment-observed）或推断（agent-inferred）重发。`)
     }
-    expect(await store.query({ scope: { kind: 'workspace', path: '/proj' } })).toEqual([])
+    expect(await store.query({ scope: { kind: 'workspace', workspacePath: '/proj' } })).toEqual([])
     for (const sourceMode of ['environment-observed', 'agent-inferred']) {
       expect((await runSavePipeline(childCandidate({ sourceMode }), childDeps())).kind).toBe('saved')
     }
@@ -1049,7 +1049,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
     await store.put({ ...owned('mem_peer', 'other'), content: '`pnpm test` 在 main 上是绿的' })
     const r = await runSavePipeline(childCandidate({ content: '`pnpm test` 在 main 上会挂' }), childDeps(store))
     if (r.kind !== 'saved') throw new Error(r.kind)
-    const active = await store.query({ scope: { kind: 'workspace', path: '/proj' } })
+    const active = await store.query({ scope: { kind: 'workspace', workspacePath: '/proj' } })
     expect(active.map(x => x.id).sort()).toEqual([r.record.id, 'mem_peer'].sort())
   })
 
@@ -1073,7 +1073,7 @@ describe('runSavePipeline：子 agent 写入约束', () => {
     expect((await createMany(3, d)).kind).toBe('saved')
     expect(await restricted(runSavePipeline(childCandidate({ name: '第 4 条' }), d))).toContain('本会话已存 3 条')
 
-    const [first, second, third] = await store.query({ scope: { kind: 'workspace', path: '/proj' } })
+    const [first, second, third] = await store.query({ scope: { kind: 'workspace', workspacePath: '/proj' } })
     await store.softDelete(first!)
     expect((await runSavePipeline(childCandidate({ name: '删后再存' }), d)).kind).toBe('saved')
 

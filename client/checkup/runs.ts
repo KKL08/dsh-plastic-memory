@@ -9,7 +9,7 @@
  * 状态挂在记忆页这一层，切范围、切视图都不丢；标题行按钮和状态条结果行读同一份。
  */
 import { useEffect, useRef, useState } from 'react'
-import { scopeKey, type CheckupView, type GuiErrorCode, type MemoryCommand } from '../../src/gui/contract.ts'
+import { checkupKey, type CheckupView, type GuiErrorCode, type MemoryCommand } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { ALL_SCOPE, type PageScope } from '../nav.ts'
 
@@ -25,7 +25,7 @@ export interface CheckupRuns {
   run(scope: PageScope): void
 }
 
-/** 范围 → scan 的目标：「全部」不带参数，全局只查全局层，项目带它的路径。 */
+/** 范围 → scan 的目标：「全部」不带参数，全局只查全局，项目带它的路径。 */
 export function scanCommand(scope: PageScope): MemoryCommand {
   return scope.kind === 'all' ? { cmd: 'scan' }
     : scope.kind === 'global' ? { cmd: 'scan', layer: { kind: 'global' } }
@@ -50,18 +50,18 @@ export function useCheckupRuns(session: BorrowedSession, checkups: CheckupView |
   const active = [...local].filter(([, e]) => e.state !== 'failed')
   const viewBusy = (checkups?.scopes ?? []).filter(s => s.isInProgress).map((s): PageScope => s.scope)
   const busyScope = (scope: PageScope): PageScope | undefined => {
-    if (active.some(([key, e]) => key === scopeKey(ALL_SCOPE) && e.state === 'running')) return ALL_SCOPE
+    if (active.some(([key, e]) => key === checkupKey(ALL_SCOPE) && e.state === 'running')) return ALL_SCOPE
     if (scope.kind === 'all') return active[0]?.[1].scope ?? viewBusy[0]
-    const key = scopeKey(scope)
-    return active.some(([k]) => k === key) || viewBusy.some(s => scopeKey(s) === key) ? scope : undefined
+    const key = checkupKey(scope)
+    return active.some(([k]) => k === key) || viewBusy.some(s => checkupKey(s) === key) ? scope : undefined
   }
   const failure = (scope: PageScope): RunFailure | undefined => {
-    const entry = local.get(scopeKey(scope))
+    const entry = local.get(checkupKey(scope))
     return entry?.state === 'failed' ? entry.failure : undefined
   }
   const run = (scope: PageScope) => {
     if (session.kind !== 'ready' || busyScope(scope) !== undefined) return
-    const key = scopeKey(scope)
+    const key = checkupKey(scope)
     setLocal(prev => new Map(prev).set(key, { scope, state: 'running' }))
     void gateway.execute(session.sessionId, scanCommand(scope)).then((result) => {
       if (!live.current) return
@@ -80,6 +80,6 @@ export function useCheckupRuns(session: BorrowedSession, checkups: CheckupView |
 /** 体检视图里这个范围有晚于 at 的完成：上次体检或最近一次结果的完成时间；「全部」看「全部」那次的结果。 */
 function completedAfter(checkups: CheckupView, scope: PageScope, at: number): boolean {
   if (scope.kind === 'all') return (checkups.allResult?.completedAt ?? -Infinity) > at
-  const entry = checkups.scopes.find(s => scopeKey(s.scope) === scopeKey(scope))
+  const entry = checkups.scopes.find(s => checkupKey(s.scope) === checkupKey(scope))
   return entry !== undefined && Math.max(entry.lastCheckupAt ?? -Infinity, entry.lastResult?.completedAt ?? -Infinity) > at
 }

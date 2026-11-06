@@ -18,7 +18,8 @@
  */
 import { useMemo, useRef, useState, type ReactNode } from 'react'
 import {
-  CONFLICT_ACTION_VERDICTS, layerOfMemory, type MemoryCard as MemoryCardData, type MemoryCommand, type MemoryCommandResult, type ModelChange, type PendingItem, type SnapshotOrigin,
+  CONFLICT_ACTION_VERDICTS, pendingItemScopes, sameScope, scopeOfMemory,
+  type MemoryCard as MemoryCardData, type MemoryCommand, type MemoryCommandResult, type ModelChange, type PendingItem, type Scope, type SnapshotOrigin,
 } from '../../src/gui/contract.ts'
 import { samePath, useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { baseName, formatNumber, useT } from '../i18n.tsx'
@@ -80,17 +81,12 @@ export interface SidebarTabProps {
   openPage: (target: NavTarget) => void
 }
 
-/** 待处理条目是否属于这个项目。 */
+/** 待处理条目是否属于这个项目（与记忆页按范围筛选同一口径）。 */
 function inWorkspace(item: PendingItem, ws: string): boolean {
-  const own = (m: MemoryCardData | null) => m !== null && m.scope === 'workspace' && samePath(m.workspacePath, ws)
-  switch (item.kind) {
-    case 'secret': case 'conflict-vertical': case 'promote-candidate': return own(item.memory)
-    case 'conflict-horizontal': return own(item.left) || own(item.right)
-    case 'overflow': return samePath(item.workspacePath, ws)
-    case 'unreadable-file': return item.layer.kind === 'workspace' && samePath(item.layer.workspacePath, ws)
-    // 右侧栏这次不分级，建议整理不算进「本项目还有 N 处待处理」
-    case 'advice': return false
-  }
+  // 右侧栏这次不分级，建议整理不算进「本项目还有 N 处待处理」
+  if (item.kind === 'advice') return false
+  const own: Scope = { kind: 'workspace', workspacePath: ws }
+  return pendingItemScopes(item).some(s => sameScope(s, own))
 }
 
 export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarTabProps) {
@@ -158,13 +154,13 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   }
   const forget = (memory: MemoryCardData) => {
     const memoryId = memory.id
-    void run(memoryId, { cmd: 'forget', memoryId, layer: layerOfMemory(memory) }, () => {})
+    void run(memoryId, { cmd: 'forget', memoryId, layer: scopeOfMemory(memory) }, () => {})
   }
   // 发出时就记下，等删除状态记成彻底删除再换上说明：网关记删除和这里的成功回调不在同一次提交，
   // 回调里才记会先空出一帧（这一行没了、说明还没来），焦点趁机落到后面的控件上
   const hardDelete = (memoryId: string, memory: MemoryCardData | undefined) => {
     setPurged(prev => new Set(prev).add(memoryId))
-    void run(memoryId, { cmd: 'hard-delete', memoryId, layer: memory && layerOfMemory(memory) }, () => {})
+    void run(memoryId, { cmd: 'hard-delete', memoryId, layer: memory && scopeOfMemory(memory) }, () => {})
   }
   const isPurged = (id: string) => purged.has(id) && deletions.of(id) === 'hard'
 
@@ -488,7 +484,7 @@ function SavedRow({ session, memory, card, state, onWroteAgentsMd, children }: {
   /** 行尾删除与它的反馈。 */
   children: ReactNode
 }) {
-  const promote = usePromoteInPlace(session, memory, layerOfMemory(memory), state ?? promotionOf(memory), onWroteAgentsMd)
+  const promote = usePromoteInPlace(session, memory, scopeOfMemory(memory), state ?? promotionOf(memory), onWroteAgentsMd)
   return (
     <div className="pm-side-saved" data-memory-id={memory.id}>
       <div className="pm-side-saved-card">{card(memory)}</div>

@@ -4,8 +4,8 @@
  */
 import { createContext, useContext, useState, type ReactNode } from 'react'
 import {
-  CONFLICT_ACTION_VERDICTS, MODEL_EDIT_ADVICE_TYPES, layerOfMemory, mergeKeeperIndex, relaxedCap,
-  type AdviceType, type GuiLayerRef, type IgnorableAdviceType, type MemoryCard as MemoryCardData, type MemoryCommand, type ModelEditAdviceType, type PendingItem,
+  CONFLICT_ACTION_VERDICTS, MODEL_EDIT_ADVICE_TYPES, mergeKeeperIndex, relaxedCap, scopeOfMemory,
+  type AdviceType, type IgnorableAdviceType, type MemoryCard as MemoryCardData, type MemoryCommand, type ModelEditAdviceType, type PendingItem, type Scope,
 } from '../../src/gui/contract.ts'
 import { belongsTo, useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, formatDay, formatNumber, useT, type Translate } from '../i18n.tsx'
@@ -39,7 +39,7 @@ export type Outcome =
   | { kind: 'raised'; budget: number }
   | { kind: 'confirmed' }
   /** 软删进了最近删除：撤销发 restore，带删的那一份。 */
-  | { kind: 'deleted'; memoryId: string; layer: GuiLayerRef | undefined }
+  | { kind: 'deleted'; memoryId: string; scope: Scope | undefined }
   /** 建议整理的忽略：撤销发 unignore-advice，带同样的类型和记忆 id。 */
   | { kind: 'ignored'; type: IgnorableAdviceType; memoryIds: string[] }
   /** 直接改、直接合并：结果行写名称和字数变化；filePath 是写完后的文件（改了名称文件名会跟着变）。 */
@@ -166,7 +166,7 @@ export function SecretCard({ item, session, now, typeLabel, onDone }: CardProps<
             showTitle={false}
             unavailable={action.unavailable}
             onCancel={() => { setConfirming(false) }}
-            onConfirm={() => { action.run({ cmd: 'hard-delete', memoryId: memory.id, layer: layerOfMemory(memory) }) }}
+            onConfirm={() => { action.run({ cmd: 'hard-delete', memoryId: memory.id, layer: scopeOfMemory(memory) }) }}
           />
         )
         : (
@@ -285,8 +285,8 @@ export function PromoteCard({ item, session, now, typeLabel, onDone, onRefused, 
 
 export function OverflowCard({ item, session, onDone, onRefused, budget, onCleanup }: CardProps<'overflow'> & {
   budget: number | undefined
-  /** 「整理记忆 ›」：去全部记忆，作用域是这张卡那一层。 */
-  onCleanup: (scope: GuiLayerRef) => void
+  /** 「整理记忆 ›」：去全部记忆，作用域是这张卡所在的那个。 */
+  onCleanup: (scope: Scope) => void
 }) {
   const t = useT()
   const gateway = useGateway()
@@ -387,7 +387,7 @@ const ADVICE_COPY = {
   bloat: { title: 'pending.advice.bloat.title', body: 'pending.advice.bloat.body', actions: ['open', 'edit', 'model'] },
   redundancy: { title: 'pending.advice.redundancy.title', body: 'pending.advice.redundancy.baselineBody', actions: ['open', 'delete'] },
   orphan: { title: 'pending.advice.orphan.title', body: 'pending.advice.orphan.body', actions: ['open'] },
-  // 放错层只回答挪不挪：改写不动层
+  // 放错层只回答挪不挪：改写不换作用域
   misplaced: { title: 'pending.advice.misplaced.title', body: 'pending.advice.misplaced.toGlobalBody', actions: ['open', 'promote'] },
   unclear: { title: 'pending.advice.unclear.title', body: 'pending.advice.unclear.body', actions: ['open', 'edit', 'model'] },
 } as const satisfies Record<AdviceType, { title: LocaleKey; body: LocaleKey; actions: readonly AdviceAction[] }>
@@ -401,13 +401,13 @@ export function adviceTitle(type: AdviceType, t: Translate): string {
 const MISPLACED_TO_PROJECT = { body: 'pending.advice.misplaced.toProjectBody', actions: ['open', 'move'] } as const
 
 /**
- * 标题行右上角的叉「不再提醒」：发 ignore-advice，带这一项的类型和全部记忆（内容重复是整组），每条带卡片上那一份的层和卡片版本。
+ * 标题行右上角的叉「不再提醒」：发 ignore-advice，带这一项的类型和全部记忆（内容重复是整组），每条带卡片上那一份的作用域和卡片版本。
  * 很久没确认的不给：它的出路是「仍然有效」或删除。
  */
 function IgnoreButton({ item, action }: { item: Item<'advice'>; action: ItemAction }) {
   const t = useT()
   if (item.type === 'stale') return null
-  const memories = item.memories.map(m => ({ memoryId: m.id, layer: layerOfMemory(m), base: baseOf(m) }))
+  const memories = item.memories.map(m => ({ memoryId: m.id, layer: scopeOfMemory(m), base: baseOf(m) }))
   const command: MemoryCommand = { cmd: 'ignore-advice', type: item.type, memories }
   return <DismissButton label={t('pending.dismiss')} unavailable={action.unavailable} onClick={() => { action.run(command) }} />
 }
@@ -447,7 +447,7 @@ export function AdviceCard(props: CardProps<'advice'> & {
   const gateway = useGateway()
   const action = useItemAction(session, (command, result) => {
     if (command.cmd === 'confirm') onDone({ kind: 'confirmed' })
-    if (command.cmd === 'forget') onDone({ kind: 'deleted', memoryId: command.memoryId, layer: command.layer })
+    if (command.cmd === 'forget') onDone({ kind: 'deleted', memoryId: command.memoryId, scope: command.layer })
     if (command.cmd === 'hard-delete') onDone({ kind: 'hard-deleted' })
     if (command.cmd === 'promote-memory') onDone({ kind: 'promoted', target: 'global', decisionId: result.decisionId })
     if (command.cmd === 'move-memory') onDone({ kind: 'moved', workspacePath: command.workspacePath, decisionId: result.decisionId, filePath: result.filePath })
@@ -467,18 +467,18 @@ export function AdviceCard(props: CardProps<'advice'> & {
   const [isModelEditing, setModelEditing] = useState(false)
   const [isMoving, setMoving] = useState(false)
   const buttonsOf = (memory: MemoryCardData, deleteLabel = t('pending.advice.delete')): Record<AdviceAction, ReactNode> => {
-    const layer = layerOfMemory(memory)
+    const scope = scopeOfMemory(memory)
     const open = () => { void gateway.openPath(memory.filePath, 'open').then((ok) => { if (!ok) action.fail(t('pending.openFailed')) }) }
     return {
-      confirm: <Button key="confirm" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'confirm', memoryId: memory.id, layer }) }}>{t('pending.advice.confirm')}</Button>,
+      confirm: <Button key="confirm" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'confirm', memoryId: memory.id, layer: scope }) }}>{t('pending.advice.confirm')}</Button>,
       delete: (
         <DeleteWithConfirm
           key="delete"
-          onDelete={() => { action.run({ cmd: 'forget', memoryId: memory.id, layer }) }}
+          onDelete={() => { action.run({ cmd: 'forget', memoryId: memory.id, layer: scope }) }}
           trigger={open => <Button unavailable={action.unavailable} onClick={open}>{deleteLabel}</Button>}
         />
       ),
-      promote: <Button key="promote" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'promote-memory', memoryId: memory.id, layer }) }}>{t('pending.promote.global')}</Button>,
+      promote: <Button key="promote" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'promote-memory', memoryId: memory.id, layer: scope }) }}>{t('pending.promote.global')}</Button>,
       move: <Button key="move" unavailable={action.unavailable} onClick={() => { setMoving(true) }}>{t('pending.move.move')}</Button>,
       open: <Button key="open" variant="ghost" onClick={open}>{t('pending.advice.open')}</Button>,
       edit: isEditable(memory)
@@ -518,7 +518,7 @@ export function AdviceCard(props: CardProps<'advice'> & {
             isMerge={false}
             unavailable={action.unavailable}
             onCancel={() => { setEditing(false) }}
-            onSave={(draft) => { action.run({ cmd: 'edit-memory', memoryId: memory.id, layer: layerOfMemory(memory), base: baseOf(memory), ...draft }) }}
+            onSave={(draft) => { action.run({ cmd: 'edit-memory', memoryId: memory.id, layer: scopeOfMemory(memory), base: baseOf(memory), ...draft }) }}
           />
         )
         : isModelEditing && isModelEditType(item.type)
@@ -533,7 +533,7 @@ export function AdviceCard(props: CardProps<'advice'> & {
                 session={session}
                 unavailable={action.unavailable}
                 onClose={() => { setModelEditing(false) }}
-                onApply={(draft) => { action.run({ cmd: 'edit-memory', memoryId: memory.id, layer: layerOfMemory(memory), base: baseOf(memory), ...draft }) }}
+                onApply={(draft) => { action.run({ cmd: 'edit-memory', memoryId: memory.id, layer: scopeOfMemory(memory), base: baseOf(memory), ...draft }) }}
               />
             </>
           )
@@ -574,7 +574,7 @@ function AdviceGroupCard({ item, session, now, typeLabel, action, buttonsOf }: C
   const [isModelMerging, setModelMerging] = useState(false)
   const merge = pair === undefined ? undefined : mergeDraft(pair)
   const mergeWith = (both: readonly [MemoryCardData, MemoryCardData], draft: EditDraft) => {
-    const memories = both.map(m => ({ memoryId: m.id, layer: layerOfMemory(m), base: baseOf(m) }))
+    const memories = both.map(m => ({ memoryId: m.id, layer: scopeOfMemory(m), base: baseOf(m) }))
     action.run({ cmd: 'merge-memories', memories: [memories[0]!, memories[1]!], ...draft })
   }
   const sides = [
@@ -701,7 +701,7 @@ export function ResultCard({ item, outcome, session, now, typeLabel, onUndone, o
   // 忽略不进账本，撤销就是取消忽略；删除进了最近删除，撤销就是恢复那一份；其余撤销按账本条目
   const undo: MemoryCommand | undefined = !copy.undoable ? undefined
     : outcome.kind === 'ignored' ? { cmd: 'unignore-advice', type: outcome.type, memoryIds: outcome.memoryIds }
-    : outcome.kind === 'deleted' ? { cmd: 'restore', memoryId: outcome.memoryId, layer: outcome.layer }
+    : outcome.kind === 'deleted' ? { cmd: 'restore', memoryId: outcome.memoryId, layer: outcome.scope }
     : undoId !== undefined ? { cmd: 'undo', decisionId: undoId } : undefined
   return (
     <Card marker={item.kind === 'advice' ? undefined : <StatusMarker kind="done" />} title={titleOf(item, t)} focusable isResult>

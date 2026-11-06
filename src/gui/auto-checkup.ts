@@ -1,7 +1,7 @@
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryLogger } from '../store.ts'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
-import type { LayerRef } from '../governance/layer-health.ts'
+import { scopeKey, type Scope } from '../scope.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import { executeScan, type ScanToolDeps, type ScanToolResult } from '../tools/scan.ts'
 import { genId } from '../governance/schema.ts'
@@ -39,13 +39,13 @@ export const processInterval: IntervalTimer = (callback, delayMs) => {
  * 别的进程接手了）就调 onLost，由调用方触发这次体检的取消信号：执行器在下一个写入检查点前停下，不再提交。
  * 认领到和放掉之后都调 onChange（重写体检视图里的「进行中」）。release 先停心跳、等在途的刷新做完，再放掉认领（只删自己的）。
  */
-export async function holdCheckups(checkups: Pick<CheckupRecordStore, 'claim'>, layers: readonly LayerRef[], opts: {
+export async function holdCheckups(checkups: Pick<CheckupRecordStore, 'claim'>, scopes: readonly Scope[], opts: {
   interval: IntervalTimer
   onLost: () => void
   onChange?: () => Promise<void> | void
   log: MemoryLogger
-}): Promise<{ release: () => Promise<void> } | { busy: LayerRef }> {
-  const claimed = await checkups.claim(layers)
+}): Promise<{ release: () => Promise<void> } | { busy: Scope }> {
+  const claimed = await checkups.claim(scopes)
   if ('busy' in claimed) return claimed
   let isLost = false
   // 刷新串成一条链，释放时等它跑完，免得放掉之后又被在途的刷新写回来
@@ -83,7 +83,7 @@ export interface AutoCheckupSchedulerDeps {
   scan: Omit<ScanToolDeps, 'getLlm' | 'getBaseline' | 'resolveContext' | 'now' | 'checkups'>
   /** 体检记录表：开跑前按范围认领，体检做完由执行器写完成记录、再记最近一次结果；没做完记失败，模型用不了记原因。 */
   checkups: Pick<CheckupRecordStore, 'list' | 'complete' | 'claim' | 'recordFailure' | 'recordModelUnavailable' | 'recordResults'>
-  /** 收集此刻的待处理（全部层）：体检前后各收集一次，比出这次的新增。 */
+  /** 收集此刻的待处理（全部作用域）：体检前后各收集一次，比出这次的新增。 */
   collectPending: () => Promise<PendingView>
   /** 每个范围此刻的情况（体检视图的内容：有效频率、是否到期，全局在前、项目按路径排序）。每次检查现读，别的进程改的设置也能读到。 */
   status: () => Promise<CheckupView>
@@ -97,7 +97,7 @@ export interface AutoCheckupSchedulerDeps {
   /** 认领到、放掉一个范围之后调用：重写体检视图（进行中）。 */
   onClaimChanged?: () => Promise<void>
   /** 一个范围体检完（没被取消）后调用：重写视图。 */
-  onScanned?: (layer: LayerRef, result: ScanToolResult) => Promise<void> | void
+  onScanned?: (scope: Scope, result: ScanToolResult) => Promise<void> | void
   now: () => number
   log?: MemoryLogger
 }
@@ -196,18 +196,18 @@ export class AutoCheckupScheduler {
       const llm = this.deps.getDefaultLlm()
       const outcome = llm === null
         ? { modelUnavailable: { kind: 'no-default-model' as const } }
-        : await this.run(toLayerRef(scope), llm)
+        : await this.run(scope, llm)
       if (outcome === undefined) continue
       // 模型用不了：别的到期范围不再白试，都记上同一个原因（别的进程正在查的不碰），下一次检查再试
       this.log.warn('[plastic-memory] 默认模型现在用不了，自动体检这次不跑，下次检查再试', outcome.modelUnavailable)
-      await this.recordModelUnavailable(due.slice(i).filter(s => !s.isInProgress).map(s => toLayerRef(s.scope)), outcome.modelUnavailable, startedAt)
+      await this.recordModelUnavailable(due.slice(i).filter(s => !s.isInProgress).map(s => s.scope), outcome.modelUnavailable, startedAt)
       return
     }
   }
 
-  private async recordModelUnavailable(layers: readonly LayerRef[], cause: CheckupCause, since: number): Promise<void> {
+  private async recordModelUnavailable(scopes: readonly Scope[], cause: CheckupCause, since: number): Promise<void> {
     try {
-      for (const layer of layers) await this.deps.checkups.recordModelUnavailable(layer, cause, since)
+      for (const scope of scopes) await this.deps.checkups.recordModelUnavailable(scope, cause, since)
     } catch (err) {
       this.log.warn('[plastic-memory] 记不下「模型用不了」，下次检查再试', err)
     }
@@ -218,22 +218,22 @@ export class AutoCheckupScheduler {
    * 体检一个范围，和手动体检那个范围同口径：项目读全局加本项目、写本项目的缓存；全局只查全局。后台没有会话投影，不查基线。
    * 没做完的记失败；碰上模型用不了不记，返回原因交给调用方。
    */
-  private async run(layer: LayerRef, llm: SemanticLlm): Promise<{ modelUnavailable: CheckupCause } | undefined> {
+  private async run(scope: Scope, llm: SemanticLlm): Promise<{ modelUnavailable: CheckupCause } | undefined> {
     const controller = new AbortController()
     this.controller = controller
     let held: Awaited<ReturnType<typeof holdCheckups>> | undefined
     try {
-      held = await holdCheckups(this.deps.checkups, [layer], {
+      held = await holdCheckups(this.deps.checkups, [scope], {
         interval: (callback, delayMs) => this.deps.timer.interval(callback, delayMs),
         onLost: () => { controller.abort(new DOMException('checkup claim taken over', 'AbortError')) },
         ...(this.deps.onClaimChanged !== undefined ? { onChange: this.deps.onClaimChanged } : {}),
         log: this.log,
       })
       // 别的进程正在查这个范围：跳过；认领到之后别的进程刚查完、已经不到期的，也不跑
-      if ('busy' in held || !(await this.isStillDue(layer))) return undefined
+      if ('busy' in held || !(await this.isStillDue(scope))) return undefined
       const before = await this.collectPending()
       const result = await executeScan(
-        layer.kind === 'global' ? { layers: 'full' } : { scope: layer.path, layers: 'full' },
+        scope.kind === 'global' ? { layers: 'full' } : { scope: scope.workspacePath, layers: 'full' },
         {
           ...this.deps.scan,
           checkups: this.deps.checkups,
@@ -243,7 +243,7 @@ export class AutoCheckupScheduler {
           now: this.deps.now,
         },
         { signal: controller.signal } as ToolRunContext,
-        { by: 'auto', isGlobalOnly: layer.kind === 'global' },
+        { by: 'auto', isGlobalOnly: scope.kind === 'global' },
       )
       // 取消（插件卸载、认领被别的进程接手）不算失败：什么都不记，下次检查照常到期；接手的进程会自己查
       if (controller.signal.aborted) return undefined
@@ -253,14 +253,14 @@ export class AutoCheckupScheduler {
         ? { kind: 'error' as const, message: result.message }
         : result.notes.find(n => n.code === 'semantic-failed')?.cause
       // 释放认领之前记：记录是这个范围的，别的进程这时还接不了手
-      if (failed !== undefined) await this.recordFailure(layer, failed)
-      else if (result.kind !== 'error') await this.recordResult(layer, before, result, controller.signal)
-      await this.deps.onScanned?.(layer, result)
+      if (failed !== undefined) await this.recordFailure(scope, failed)
+      else if (result.kind !== 'error') await this.recordResult(scope, before, result, controller.signal)
+      await this.deps.onScanned?.(scope, result)
       return undefined
     } catch (err) {
       if (controller.signal.aborted) return undefined
       // 原话进体检记录和视图：先遮掉疑似密钥
-      await this.recordFailure(layer, { kind: 'error', message: maskDiagnostic(err instanceof Error ? err.message : String(err)) })
+      await this.recordFailure(scope, { kind: 'error', message: maskDiagnostic(err instanceof Error ? err.message : String(err)) })
       return undefined
     } finally {
       if (held !== undefined && !('busy' in held)) await held.release()
@@ -279,13 +279,13 @@ export class AutoCheckupScheduler {
   }
 
   /** 做完的自动体检记下最近一次结果：体检前后的待处理比出新增，用量取执行器合计的宿主报数。 */
-  private async recordResult(layer: LayerRef, before: PendingView | undefined, result: Exclude<ScanToolResult, { kind: 'error' }>, signal: AbortSignal): Promise<void> {
+  private async recordResult(scope: Scope, before: PendingView | undefined, result: Exclude<ScanToolResult, { kind: 'error' }>, signal: AbortSignal): Promise<void> {
     const after = before === undefined ? undefined : await this.collectPending()
     // 收集期间认领被别的进程接手：不记，免得盖掉接手的那次
     if (before === undefined || after === undefined || signal.aborted) return
     try {
       await this.deps.checkups.recordResults(checkupResults(before, after, {
-        target: layer, checkupId: genId('ck'), by: 'auto', completedAt: this.deps.now(), notes: result.notes,
+        target: scope, checkupId: genId('ck'), by: 'auto', completedAt: this.deps.now(), notes: result.notes,
         ...(result.usageTokens !== undefined ? { usageTokens: result.usageTokens } : {}),
       }))
     } catch (err) {
@@ -293,10 +293,10 @@ export class AutoCheckupScheduler {
     }
   }
 
-  private async recordFailure(layer: LayerRef, cause: CheckupCause): Promise<void> {
+  private async recordFailure(scope: Scope, cause: CheckupCause): Promise<void> {
     this.log.warn('[plastic-memory] 自动体检没做完，稍后再试', cause)
     try {
-      await this.deps.checkups.recordFailure(layer, cause, this.deps.now())
+      await this.deps.checkups.recordFailure(scope, cause, this.deps.now())
     } catch (err) {
       // 记不下也不挡：没有失败记录，下一次检查照常到期再试
       this.log.warn('[plastic-memory] 记不下自动体检的失败，下次检查再试', err)
@@ -304,14 +304,9 @@ export class AutoCheckupScheduler {
   }
 
   /** 认领到之后重读体检记录：这个范围此刻还到期（别的进程刚查完的不到期；别的进程刚记了失败、还没到重试时间的也不跑）。 */
-  private async isStillDue(layer: LayerRef): Promise<boolean> {
+  private async isStillDue(target: Scope): Promise<boolean> {
     const { scopes } = await this.deps.status()
     const now = this.deps.now()
-    return scopes.some(({ scope, isDue, failure }) => isDue && (failure === null || failure.retryAt <= now)
-      && (scope.kind === 'global' ? layer.kind === 'global' : layer.kind === 'workspace' && scope.workspacePath === layer.path))
+    return scopes.some(({ scope, isDue, failure }) => isDue && (failure === null || failure.retryAt <= now) && scopeKey(scope) === scopeKey(target))
   }
-}
-
-function toLayerRef(scope: CheckupView['scopes'][number]['scope']): LayerRef {
-  return scope.kind === 'global' ? { kind: 'global' } : { kind: 'workspace', path: scope.workspacePath }
 }

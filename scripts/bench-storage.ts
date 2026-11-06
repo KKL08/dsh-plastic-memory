@@ -301,7 +301,7 @@ try {
   // 包一层 store 截下执行器自己那次按范围读取的结果：预筛词、候选、listedCount 都是执行器实际用的，bench 不重算
   let lastRead: ScopeReadResult | undefined
   const probeStore: MemoryStore = Object.create(store)
-  probeStore.readLayer = async (scope, opts) => (lastRead = await store.readLayer(scope, opts))
+  probeStore.readRaw = async (scope, opts) => (lastRead = await store.readRaw(scope, opts))
   const searchDeps = { store: probeStore, registry, resolveContext, tokenizer: searchTokenizer }
 
   /**

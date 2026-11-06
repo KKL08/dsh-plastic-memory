@@ -10,15 +10,16 @@ import { MemoryStore } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
-import { CheckupRecordStore, checkupKey } from '../src/governance/checkup-records.ts'
+import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
 import { hostSemanticLlm, type HostModelRoute } from '../src/governance/host-llm.ts'
 import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../src/governance/schema.ts'
-import { GLOBAL_CACHE_KEY, type LayerRef } from '../src/governance/layer-health.ts'
+import { GLOBAL_CACHE_KEY } from '../src/governance/scope-health.ts'
+import type { Scope } from '../src/scope.ts'
 import type { ScanToolResult } from '../src/tools/scan.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { AUTO_CHECKUP_FIRST_CHECK_MS, AUTO_CHECKUP_INTERVAL_MS, CHECKUP_CLAIM_REFRESH_MS, AutoCheckupScheduler, type AutoCheckupTimer } from '../src/gui/auto-checkup.ts'
-import { GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, checkupViewSchema, pendingItemKey, type AutoCheckupFrequency, type CheckupView, type ScopeRef } from '../src/gui/contract.ts'
+import { GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, checkupKey, checkupViewSchema, pendingItemKey, type AutoCheckupFrequency, type CheckupView, type ScopeOrAll } from '../src/gui/contract.ts'
 import { executeScan } from '../src/tools/scan.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { fakeExec } from './helpers/exec.ts'
@@ -147,7 +148,7 @@ function env(opts: {
   const source = { store, checkups, autoCheckups, cache, isGovernanceEnabled: () => governance.isEnabled, now: () => clock.now }
   const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('这里只写体检视图') }, collectCheckups: () => collectCheckupView(source), now: () => clock.now, sleep: async () => {} })
   const timers = fakeTimer(clock)
-  const scanned: Array<{ layer: LayerRef; result: ScanToolResult }> = []
+  const scanned: Array<{ scope: Scope; result: ScanToolResult }> = []
   const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
   const collectPending = async () => (await collectGlobalViews({ store, decisions, cache, ignores, checkups, registry, memoryRoot: root, now: () => clock.now })).pending
   const scheduler = new AutoCheckupScheduler({
@@ -162,11 +163,11 @@ function env(opts: {
     onChecked: () => writer.requestCheckups(),
     onClaimChanged: () => writer.requestCheckups(),
     // 接线层在这里重写视图（含体检视图）
-    onScanned: async (layer, result) => { scanned.push({ layer, result }); await writer.requestCheckups() },
+    onScanned: async (scope, result) => { scanned.push({ scope, result }); await writer.requestCheckups() },
     now: () => clock.now,
   })
   live.push(scheduler)
-  const set = (scope: ScopeRef, frequency: AutoCheckupFrequency) => autoCheckups.set(scope, frequency)
+  const set = (scope: ScopeOrAll, frequency: AutoCheckupFrequency) => autoCheckups.set(scope, frequency)
   const completed = async () => Object.fromEntries((await checkups.list()).map(r => [r.id, r.completed]))
   const readView = async () => checkupViewSchema.parse(JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_CHECKUP_VIEW_FILE), 'utf8')))
   /** 推进时间并等这次检查（含它跑的体检）做完。 */
@@ -224,7 +225,7 @@ describe('自动体检调度：到期就在后台体检一次', () => {
     await e.store.create(record({ id: 'mem_y', name: '端口乙', content: 'discussion 的记忆：端口 4000', scope: 'workspace', workspacePath: DISCUSSION }))
     await e.set(ws(DISCUSSION), 1)
     const lastAt = NOW - 25 * HOUR
-    await e.checkups.complete([{ kind: 'workspace', path: DISCUSSION }], { startedAt: lastAt - 60_000, completedAt: lastAt, by: 'manual' })
+    await e.checkups.complete([{ kind: 'workspace', workspacePath: DISCUSSION }], { startedAt: lastAt - 60_000, completedAt: lastAt, by: 'manual' })
     e.scheduler.start()
     await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
 
@@ -233,11 +234,11 @@ describe('自动体检调度：到期就在后台体检一次', () => {
     expect(e.llm.requests[0]).toMatchObject(DEFAULT_ROUTE)
     expect(e.llm.requests[0]).not.toHaveProperty('sessionId')
     const at = NOW + AUTO_CHECKUP_FIRST_CHECK_MS
-    expect((await e.completed())[checkupKey({ kind: 'workspace', path: DISCUSSION })]).toEqual({ startedAt: at, completedAt: at, by: 'auto' })
+    expect((await e.completed())[checkupKey({ kind: 'workspace', workspacePath: DISCUSSION })]).toEqual({ startedAt: at, completedAt: at, by: 'auto' })
     expect((await e.decisions.list()).map(d => d.memoryIds)).toEqual([['mem_x', 'mem_y']])
     // 后台没有会话投影：不查和 AGENTS.md 基线的冲突，结果带 baseline-missing；只查这一个范围，不跑跨项目重复检查
     expect(e.scanned).toHaveLength(1)
-    expect(e.scanned[0]!.layer).toEqual({ kind: 'workspace', path: DISCUSSION })
+    expect(e.scanned[0]!.scope).toEqual({ kind: 'workspace', workspacePath: DISCUSSION })
     const result = e.scanned[0]!.result
     expect(result.kind).toBe('single')
     expect(result.kind !== 'error' && result.notes.map(n => n.code)).toContain('baseline-missing')
@@ -262,7 +263,7 @@ describe('自动体检调度：到期就在后台体检一次', () => {
     await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
     const conflict = (await e.collectPending()).items.find(i => i.kind === 'conflict-horizontal')!
     const at = NOW + AUTO_CHECKUP_FIRST_CHECK_MS
-    const result = await e.lastResultOf(checkupKey({ kind: 'workspace', path: DISCUSSION }))
+    const result = await e.lastResultOf(checkupKey({ kind: 'workspace', workspacePath: DISCUSSION }))
     expect(result).toEqual({
       checkupId: expect.any(String), by: 'auto', completedAt: at,
       added: { keys: [pendingItemKey(conflict)], pending: 1, advice: 0 },
@@ -295,7 +296,7 @@ describe('自动体检调度：到期就在后台体检一次', () => {
     await e.store.create(record({ id: 'mem_b', content: '项目 b 的记忆', scope: 'workspace', workspacePath: OTHER_B }))
     await e.set({ kind: 'all' }, 1)
     await e.checkups.complete([{ kind: 'global' }], { startedAt: NOW - HOUR, completedAt: NOW - HOUR, by: 'agent' })
-    await e.checkups.complete([{ kind: 'workspace', path: OTHER_A }], { startedAt: NOW - HOUR, completedAt: NOW - HOUR, by: 'manual' })
+    await e.checkups.complete([{ kind: 'workspace', workspacePath: OTHER_A }], { startedAt: NOW - HOUR, completedAt: NOW - HOUR, by: 'manual' })
     e.scheduler.start()
     await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
     expect(e.llm.requests.map(scopeOfRequest)).toEqual([OTHER_B])
@@ -723,7 +724,7 @@ describe('自动体检调度：模型用不了', () => {
     await llm.nthStarted(1)
     // 全局还在等模型时，别处（agent 体检不认领）把项目 a 查完了
     const at = e.clock.now
-    await e.checkups.complete([{ kind: 'workspace', path: OTHER_A }], { startedAt: at, completedAt: at, by: 'agent' })
+    await e.checkups.complete([{ kind: 'workspace', workspacePath: OTHER_A }], { startedAt: at, completedAt: at, by: 'agent' })
     open()
     await e.scheduler.whenIdle()
     const records = Object.fromEntries((await e.checkups.list()).map(r => [r.id, r]))

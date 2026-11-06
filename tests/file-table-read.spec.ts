@@ -155,7 +155,7 @@ describe('读路径零写入', () => {
 })
 
 describe('读路径不加锁', () => {
-  it('写路径持锁、停在写临时文件的半路时，locate / readScope / listWorkspaceDirs 与 MemoryStore 的 get、readLayer 照常返回旧内容，不排在写锁后面', async () => {
+  it('写路径持锁、停在写临时文件的半路时，locate / readScope / listWorkspaceDirs 与 MemoryStore 的 get、readRaw 照常返回旧内容，不排在写锁后面', async () => {
     const table = open()
     const store = new MemoryStore(table)
     const ws = '/home/dev/proj-lock'
@@ -174,7 +174,7 @@ describe('读路径不加锁', () => {
     expect((await table.readScope([wsDir(ws)])).records.map(l => l.record.content)).toEqual(['旧正文'])
     expect((await table.listWorkspaceDirs()).entries.map(e => e.workspacePath)).toEqual([ws])
     expect((await store.get('mem_lock', { workspacePath: ws }))?.content).toBe('旧正文')
-    expect((await store.readLayer({ kind: 'workspace', path: ws })).records.map(l => l.record.content)).toEqual(['旧正文'])
+    expect((await store.readRaw({ kind: 'workspace', workspacePath: ws })).records.map(l => l.record.content)).toEqual(['旧正文'])
 
     release()
     await writing

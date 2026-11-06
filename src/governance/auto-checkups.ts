@@ -1,7 +1,7 @@
 import { isAbsolute } from 'node:path'
 import type { KvTable } from '../kv-table.ts'
 import type { AutoCheckupSetting } from '../storage/schema.ts'
-import { AUTO_CHECKUP_FOLLOW, scopeKey, type AutoCheckupFrequency, type ScopeRef } from '../gui/contract.ts'
+import { AUTO_CHECKUP_FOLLOW, checkupKey, type AutoCheckupFrequency, type ScopeOrAll } from '../gui/contract.ts'
 
 /**
  * 自动体检的设置表和到期计算。
@@ -23,8 +23,8 @@ export class AutoCheckupSettingStore {
   }
 
   /** 写一个范围的设置；follow 删掉它（本来就没有也算成功）。 */
-  async set(scope: ScopeRef, frequency: AutoCheckupFrequency | typeof AUTO_CHECKUP_FOLLOW): Promise<void> {
-    const key = scopeKey(scope)
+  async set(scope: ScopeOrAll, frequency: AutoCheckupFrequency | typeof AUTO_CHECKUP_FOLLOW): Promise<void> {
+    const key = checkupKey(scope)
     if (frequency === AUTO_CHECKUP_FOLLOW) await this.table.delete(key)
     else await this.table.put(key, { id: key, frequency })
   }

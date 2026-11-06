@@ -9,13 +9,13 @@
  */
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ChangeEvent, type KeyboardEvent, type MutableRefObject, type ReactNode, type RefObject } from 'react'
 import {
-  layerOfMemory, pendingItemKey, pendingItemScopes, sameLayer, scopeKey,
-  type DeletedView, type GuiLayerRef, type LibraryView, type PendingView,
+  checkupKey, pendingItemKey, pendingItemScopes, sameScope, scopeOfMemory,
+  type DeletedView, type LibraryView, type PendingView, type Scope,
 } from '../src/gui/contract.ts'
 import { useGateway, type ViewState } from './gateway.ts'
 import { formatNumber, useT } from './i18n.tsx'
 import {
-  ALL_SCOPE, MEMORY_VIEWS, allScopesSub, compareLayers, isInScope, samePageScope, scopeName, useCanOpen, useNavTarget,
+  ALL_SCOPE, MEMORY_VIEWS, allScopesSub, compareScopes, isInScope, samePageScope, scopeLabel, useCanOpen, useNavTarget,
   type MemoryView, type NavStore, type NavTarget, type PageScope,
 } from './nav.ts'
 import { PendingTab } from './pending/PendingTab.tsx'
@@ -61,15 +61,19 @@ function dataOf<V>(state: ViewState<V>): V | undefined {
 
 /**
  * 左栏列出的作用域：全局在前，项目按显示名的字母序（同名按路径）。项目取有记忆的、只剩最近删除的、有待处理的；
- * extra 是另外要列出的项目（当前对话的项目，没有记忆也列）。
+ * extra 是另外要列出的项目（当前对话的项目，没有记忆也列）。同一个项目只列一次（末尾带不带分隔符都算同一个），取视图里的写法。
  */
-function listScopes(library: LibraryView | undefined, deleted: DeletedView | undefined, pending: PendingView | undefined, extra: readonly string[]): GuiLayerRef[] {
-  const paths = new Set<string>(extra)
-  for (const { layer } of library?.layers ?? []) if (layer.kind === 'workspace') paths.add(layer.workspacePath)
-  for (const { memory } of deleted?.items ?? []) if (memory.workspacePath !== undefined && memory.scope === 'workspace') paths.add(memory.workspacePath)
-  for (const item of pending?.items ?? []) for (const layer of pendingItemScopes(item)) if (layer.kind === 'workspace') paths.add(layer.workspacePath)
-  const projects = [...paths].map((workspacePath): GuiLayerRef => ({ kind: 'workspace', workspacePath })).sort(compareLayers)
-  return [{ kind: 'global' }, ...projects]
+function listScopes(library: LibraryView | undefined, deleted: DeletedView | undefined, pending: PendingView | undefined, extra: readonly string[]): Scope[] {
+  const projects: Scope[] = []
+  const add = (workspacePath: string) => {
+    const project: Scope = { kind: 'workspace', workspacePath }
+    if (!projects.some(p => sameScope(p, project))) projects.push(project)
+  }
+  for (const { layer: scope } of library?.layers ?? []) if (scope.kind === 'workspace') add(scope.workspacePath)
+  for (const { memory } of deleted?.items ?? []) if (memory.workspacePath !== undefined && memory.scope === 'workspace') add(memory.workspacePath)
+  for (const item of pending?.items ?? []) for (const scope of pendingItemScopes(item)) if (scope.kind === 'workspace') add(scope.workspacePath)
+  for (const workspacePath of extra) add(workspacePath)
+  return [{ kind: 'global' }, ...projects.sort(compareScopes)]
 }
 
 export function MemoryPage({ nav }: { nav: NavStore }) {
@@ -78,7 +82,7 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
   const target = useNavTarget(nav)
   const current = gateway.useCurrentWorkspace()
   // 从对话进来的那个对话的项目（不在项目里时是全局）；归属对照还在读时为 undefined
-  const chat: GuiLayerRef | undefined = target.fromChat === true && current.status === 'ready'
+  const chat: Scope | undefined = target.fromChat === true && current.status === 'ready'
     ? current.workspacePath === undefined ? { kind: 'global' } : { kind: 'workspace', workspacePath: current.workspacePath }
     : undefined
   const resolved: PageScope | undefined = target.scope ?? (target.fromChat === true ? chat : ALL_SCOPE)
@@ -91,14 +95,14 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
   const pending = dataOf(pendingState)
   const runs = useCheckupRuns(session, checkups)
   // 「新」和结果行按这次停留进入范围时的记录显示：换范围、重开页面才算离开，同一范围里切视图不算
-  const seen = useVisitSeen(resolved === undefined ? '' : scopeKey(resolved))
+  const seen = useVisitSeen(resolved === undefined ? '' : checkupKey(resolved))
   const tabsId = useId()
   const entry = useLanding(nav)
   useChatLanding(nav, entry, target, resolved, pending)
   const canOpenSettings = useCanOpen(nav, 'settings')
   const [fold] = useState<FoldMemory>(() => new Map())
   const scroll = useScrollMemory(
-    resolved === undefined ? '' : `${target.view}|${scopeKey(resolved)}`,
+    resolved === undefined ? '' : `${target.view}|${checkupKey(resolved)}`,
     target.memoryId !== undefined || target.level !== undefined || target.newItem !== undefined,
   )
   // 旧目标「全部」带着记忆（改版前的入口）：落到这条记忆自己的范围，查不到的留在「全部」
@@ -124,12 +128,12 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
   const chatPath = chat?.kind === 'workspace' ? chat.workspacePath : undefined
 
   const scopes = listScopes(library, deleted, pending, [chatPath, scope.kind === 'workspace' ? scope.workspacePath : undefined].filter(p => p !== undefined))
-  const isChat = (s: PageScope) => chatPath !== undefined && s.kind === 'workspace' && s.workspacePath === chatPath
+  const isChat = (s: PageScope) => chat?.kind === 'workspace' && samePageScope(s, chat)
   const projectCount = scopes.length - 1
   const select = (next: PageScope) => { nav.update({ scope: next, memoryId: undefined }) }
   const counts = countTodo(pending, scope)
   const libraryCount = library?.layers.filter(l => isInScope([l.layer], scope)).reduce((n, l) => n + l.items.length, 0)
-  const deletedCount = deleted?.items.filter(item => isInScope([layerOfMemory(item.memory)].filter(l => l !== undefined), scope)).length
+  const deletedCount = deleted?.items.filter(item => isInScope([scopeOfMemory(item.memory)].filter(s => s !== undefined), scope)).length
 
   const tabLabel = (view: MemoryView): ReactNode => {
     const count = view === 'todo' ? (pending === undefined ? undefined : counts.todo) : view === 'library' ? libraryCount : deletedCount || undefined
@@ -144,11 +148,11 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
   const items = MEMORY_VIEWS.map((view): SegmentedTab<MemoryView> => ({
     value: view, label: tabLabel(view), id: `${tabsId}-${view}`, panelId: `${tabsId}-${view}-panel`,
   })) as [SegmentedTab<MemoryView>, ...SegmentedTab<MemoryView>[]]
-  const layerHealth = scope.kind === 'all' ? undefined : health?.layers.find(l => sameLayer(l.layer, scope))
+  const scopeHealth = scope.kind === 'all' ? undefined : health?.layers.find(l => sameScope(l.layer, scope))
   const isGovernanceEnabled = (checkups ?? health)?.governanceEnabled !== false
-  // 「全部」体检实际会查的项目数（有活跃记忆的项目，健康视图和体检视图同一批层）；左栏还列只剩最近删除、只有待处理的项目，不算
-  const checkupLayers = health?.layers.map(l => l.layer) ?? checkups?.scopes.map(s => s.scope)
-  const checkupProjectCount = checkupLayers?.filter(l => l.kind === 'workspace').length ?? projectCount
+  // 「全部」体检实际会查的项目数（有活跃记忆的项目，健康视图和体检视图同一批作用域）；左栏还列只剩最近删除、只有待处理的项目，不算
+  const checkupScopes = health?.layers.map(l => l.layer) ?? checkups?.scopes.map(s => s.scope)
+  const checkupProjectCount = checkupScopes?.filter(s => s.kind === 'workspace').length ?? projectCount
 
   return (
     <div className="pm-page-frame">
@@ -162,10 +166,10 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
             row={(s) => {
               const count = countTodo(pending, s)
               if (s.kind === 'all') return { sub: allScopesSub(projectCount, t), count }
-              const layer = library?.layers.find(l => sameLayer(l.layer, s))
-              const n = layer?.items.length ?? 0
+              const group = library?.layers.find(l => sameScope(l.layer, s))
+              const n = group?.items.length ?? 0
               // 体检在配置文件里关了：只写条数，不打分（和状态条一致）
-              const score = isGovernanceEnabled ? scoreOf(health?.layers.find(l => sameLayer(l.layer, s))) : undefined
+              const score = isGovernanceEnabled ? scoreOf(health?.layers.find(l => sameScope(l.layer, s))) : undefined
               const parts = [t(n === 1 ? 'rail.count.one' : 'rail.count', { n: formatNumber(n) })]
               if (score === 'secret') parts.push(t('rail.unscored'))
               else if (score !== undefined) parts.push(t('health.score', { score: formatNumber(score) }))
@@ -194,7 +198,7 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
           />
           <header className="pm-head">
             <div className="pm-head-main">
-              <h2 className="pm-head-title">{scopeName(scope, t)}</h2>
+              <h2 className="pm-head-title">{scopeLabel(scope, t)}</h2>
               {isChat(scope) ? <Chip variant="neutral">{t('scope.currentChat')}</Chip> : null}
               <span className="pm-head-path" title={scope.kind === 'workspace' ? scope.workspacePath : undefined}>
                 {scope.kind === 'all' ? allScopesSub(projectCount, t) : scope.kind === 'global' ? t('scope.global.sub') : scope.workspacePath}
@@ -212,10 +216,10 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
               />
             </div>
           </header>
-          {health !== undefined && (scope.kind === 'all' || layerHealth !== undefined)
+          {health !== undefined && (scope.kind === 'all' || scopeHealth !== undefined)
             ? (
               <StatusBar
-                key={scopeKey(scope)}
+                key={checkupKey(scope)}
                 scope={scope}
                 view={target.view}
                 nav={nav}
@@ -224,7 +228,7 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
                 health={health}
                 checkups={checkups}
                 isGovernanceEnabled={isGovernanceEnabled}
-                memoryCount={libraryCount ?? (scope.kind === 'all' ? health.layers : [layerHealth!]).reduce((n, l) => n + l.totalMemories, 0)}
+                memoryCount={libraryCount ?? (scope.kind === 'all' ? health.layers : [scopeHealth!]).reduce((n, l) => n + l.totalMemories, 0)}
                 projectCount={projectCount}
                 needs={scopes.map(s => ({ scope: s, ...countTodo(pending, s) }))}
               />
@@ -234,13 +238,13 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
           <div role="tabpanel" id={`${tabsId}-${target.view}-panel`} aria-labelledby={`${tabsId}-${target.view}`} className="pm-page-panel">
             {target.view === 'todo'
               // 按范围给 key：换范围就收起上一个范围刚处理的结果卡和说明
-              ? <PendingTab key={scopeKey(scope)} nav={nav} session={session} scope={scope} seen={seen} workspacePath={scope.kind === 'workspace' ? scope.workspacePath : undefined} />
+              ? <PendingTab key={checkupKey(scope)} nav={nav} session={session} scope={scope} seen={seen} workspacePath={scope.kind === 'workspace' ? scope.workspacePath : undefined} />
               // 换范围同样重挂：搜索、刚删的结果行、直达高亮不跟过来；折叠状态在 fold 里，还在
               : ownScope !== undefined
                 ? null
                 : target.view === 'library'
-                  ? <LibraryTab key={scopeKey(scope)} nav={nav} scope={scope} session={session} fold={fold} />
-                  : <DeletedTab key={scopeKey(scope)} nav={nav} scope={scope} session={session} fold={fold} />}
+                  ? <LibraryTab key={checkupKey(scope)} nav={nav} scope={scope} session={session} fold={fold} />
+                  : <DeletedTab key={checkupKey(scope)} nav={nav} scope={scope} session={session} fold={fold} />}
           </div>
         </main>
       </div>
@@ -320,7 +324,7 @@ function NarrowScope({ scopes, selected, onSelect, others, onSettings }: {
 }) {
   const t = useT()
   const onChange = (event: ChangeEvent<HTMLSelectElement>) => {
-    const next = scopes.find(s => scopeKey(s) === event.target.value)
+    const next = scopes.find(s => checkupKey(s) === event.target.value)
     if (next !== undefined && !samePageScope(next, selected)) onSelect(next)
   }
   return (
@@ -328,8 +332,8 @@ function NarrowScope({ scopes, selected, onSelect, others, onSettings }: {
       <div className="pm-narrow-bar">
         <label className="pm-narrow-scope">
           {t('rail.label')}
-          <select value={scopeKey(selected)} onChange={onChange}>
-            {scopes.map(s => <option key={scopeKey(s)} value={scopeKey(s)}>{scopeName(s, t)}</option>)}
+          <select value={checkupKey(scopes.find(s => samePageScope(s, selected)) ?? selected)} onChange={onChange}>
+            {scopes.map(s => <option key={checkupKey(s)} value={checkupKey(s)}>{scopeLabel(s, t)}</option>)}
           </select>
         </label>
         {onSettings !== undefined ? <Button variant="ghost" onClick={onSettings}>{t('page.settings')}</Button> : null}
@@ -374,7 +378,7 @@ function ScopeRail({ scopes, selected, onSelect, row }: {
           const isSelected = i === index
           const { sub, count } = row(scope)
           return (
-            <li key={scopeKey(scope)} className={scope.kind === 'all' ? 'pm-rail-item pm-rail-item--all' : 'pm-rail-item'}>
+            <li key={checkupKey(scope)} className={scope.kind === 'all' ? 'pm-rail-item pm-rail-item--all' : 'pm-rail-item'}>
               <button
                 type="button"
                 className="pm-rail-scope"
@@ -383,7 +387,7 @@ function ScopeRail({ scopes, selected, onSelect, row }: {
                 onClick={() => { if (!isSelected) onSelect(scope) }}
                 onKeyDown={onKeyDown}
               >
-                <span className="pm-rail-name">{scopeName(scope, t)}</span>
+                <span className="pm-rail-name">{scopeLabel(scope, t)}</span>
                 <span className="pm-rail-sub">{sub}</span>
                 {count.todo > 0
                   ? (

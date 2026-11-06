@@ -12,6 +12,7 @@ import { InMemoryBatchKvTable, type BatchKvTable } from './kv-table.ts'
 import type { RecallStats } from './storage/schema.ts'
 import { RETENTION_MS } from './retention.ts'
 import { hasSecret } from './secrets.ts'
+import { isInScope, type Scope } from './scope.ts'
 
 export type { MemoryLogger, MemoryTable, KeywordMatch } from './storage/table.ts'
 
@@ -167,11 +168,8 @@ export class InMemoryTable implements MemoryTable {
   }
 }
 
-/** 查询范围：global 层、某个 workspace 层、或当前会话的可见集合（global + 当前 workspace）。缺省读全部目录。 */
-export type QueryScope =
-  | { kind: 'global' }
-  | { kind: 'workspace'; path: string }
-  | { kind: 'visible'; workspacePath: string | undefined }
+/** 查询范围：一个作用域（全局或某个项目），或当前会话的可见集合（global + 当前 workspace）。缺省读全部目录。 */
+export type QueryScope = Scope | { kind: 'visible'; workspacePath: string | undefined }
 
 export interface QueryFilter {
   scope?: QueryScope
@@ -225,12 +223,20 @@ export class MemoryStore {
   }
 
   /** 按 id 两级定位（含非 active）；hint 是当前 workspace，一级先看它的目录。
-   *  位置即作用域（同 readLayer）：.archive/ 里 status 仍写着 active 的按 deleted 返回。 */
+   *  位置即作用域（同 readRaw）：.archive/ 里 status 仍写着 active 的按 deleted 返回。 */
   async get(id: string, hint?: LocateHint): Promise<MemoryRecord | undefined> {
     const found = await this.table.locate(id, hint)
     return found === undefined ? undefined : byPosition(found)
   }
   locate(id: string, hint?: LocateHint) { return this.table.locate(id, hint) }
+  /** 这个 id 在哪些作用域有副本（任何状态，含只在 .archive/ 里的）：全局在前，项目按路径排序。逐个作用域只认本作用域定位。 */
+  async copiesOf(id: string): Promise<Scope[]> {
+    const workspaces = [...new Set((await this.table.listWorkspaceDirs()).entries.map(e => e.workspacePath))].sort()
+    const scopes: Scope[] = [{ kind: 'global' }, ...workspaces.map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
+    const copies = await Promise.all(scopes.map(scope =>
+      this.get(id, { workspacePath: scope.kind === 'workspace' ? scope.workspacePath : undefined, isExactLayer: true })))
+    return scopes.filter((scope, i) => copies[i] !== undefined && isInScope(copies[i], scope))
+  }
   listWorkspaceDirs() { return this.table.listWorkspaceDirs() }
   /** 新记录：不定位，排他占名（save create 用）。 */
   create(record: MemoryRecord) { return this.table.create(record) }
@@ -323,13 +329,13 @@ export class MemoryStore {
   private async dirsOf(scope: QueryScope | undefined): Promise<string[]> {
     if (scope === undefined) return [this.table.globalDir, ...(await this.table.listWorkspaceDirs()).entries.map(e => e.dir)]
     if (scope.kind === 'global') return [this.table.globalDir]
-    if (scope.kind === 'workspace') return this.table.workspaceDirs(scope.path)
+    if (scope.kind === 'workspace') return this.table.workspaceDirs(scope.workspacePath)
     return [this.table.globalDir, ...(scope.workspacePath === undefined ? [] : await this.table.workspaceDirs(scope.workspacePath))]
   }
 
-  /** 按范围原样读目录：记录含非 active、同 id 不取舍。health / scan 的层预读用它。
+  /** 按范围原样读目录：记录含非 active、同 id 不取舍。health / scan 按作用域预读用它。
    *  位置即作用域：.archive/ 里 status 仍写着 active 的文件（手工搬进去的）按 deleted 看待，维护点会把它归一落盘。 */
-  async readLayer(scope: QueryScope | undefined, opts: ScopeReadOptions = {}): Promise<ScopeReadResult> {
+  async readRaw(scope: QueryScope | undefined, opts: ScopeReadOptions = {}): Promise<ScopeReadResult> {
     const read = await this.table.readScope(await this.dirsOf(scope), opts)
     const records = read.records.map(l =>
       l.record.status === 'active' && dirname(l.filePath) !== l.dir ? { ...l, record: { ...l.record, status: 'deleted' as const } } : l)
@@ -348,14 +354,14 @@ export class MemoryStore {
   async queryScope(filter: QueryFilter): Promise<QueryResult> {
     const statuses = filter.status ?? ['active']
     const scope = filter.scope
-    const hint = scope?.kind === 'workspace' ? scope.path : scope?.kind === 'visible' ? scope.workspacePath : undefined
+    const hint = scope?.kind === 'workspace' || scope?.kind === 'visible' ? scope.workspacePath : undefined
     // keyword 按 keywordMatch 取全部或任一词项命中（AND 零命中回退 OR 由调用方 executeSearch 决定）。
     // 原文预筛用同一组词项、同一模式：expandQueryTerms 只做小写、按空白切分、CJK 段切 bigram，不扩同义词，
     // 每个词项都是查询原文的子串，命中记录的原文里必然以子串出现（缺 id 行文件的派生 id 由 FileTable 预筛一并算入），
     // 所以预筛是超集。
     const terms = filter.keyword ? expandQueryTerms(filter.keyword.toLowerCase()) : []
     const keywordMatch = filter.keywordMatch ?? 'all'
-    const read = await this.readLayer(scope, {
+    const read = await this.readRaw(scope, {
       ...(filter.types ? { types: filter.types } : {}),
       ...(terms.length > 0 ? { prefilterTerms: terms, prefilterMatch: keywordMatch } : {}),
       includeArchive: statuses.some(s => s !== 'active'),

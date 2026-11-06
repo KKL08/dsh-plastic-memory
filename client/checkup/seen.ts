@@ -1,6 +1,6 @@
 /**
  * 「新」和结果行「看过」的本地记录，存在浏览器本地（localStorage）：桌面版和 web 版各存各的，同一条新条目两边各标一次。
- * 按体检标识存：这次体检新增的条目里显示过的（条目身份 pendingItemKey）、看过这次结果行的范围（范围键 scopeKey）。
+ * 按体检标识存：这次体检新增的条目里显示过的（条目身份 pendingItemKey）、看过这次结果行的范围（体检键 checkupKey）。
  * 只留体检视图里还在的那几次体检（各范围最近一次结果和「全部」那条），每次写入时清掉别的。
  * 读写都包 try/catch：存储不可用时当作什么都没看过、什么都记不下，页面照常显示（「新」和结果行每次进来都在）。
  * 「离开再回来」：进入一个范围（换范围、重开记忆页）时读一份快照（useVisitSeen），停在这个范围期间按快照显示，
@@ -8,7 +8,7 @@
  */
 import { useState } from 'react'
 import { z } from 'zod'
-import { scopeKey, SCOPE_KEYS, type CheckupResult, type CheckupView } from '../../src/gui/contract.ts'
+import { checkupKey, SCOPE_KEYS, type CheckupResult, type CheckupView } from '../../src/gui/contract.ts'
 
 export const SEEN_STORAGE_KEY = 'dsh-plastic-memory.gui.checkupSeen'
 
@@ -71,7 +71,7 @@ export function checkupResults(view: CheckupView | undefined): Array<{ scope: st
   const out: Array<{ scope: string; result: CheckupResult }> = []
   if (view.allResult !== null) out.push({ scope: SCOPE_KEYS.all, result: view.allResult })
   for (const s of view.scopes) {
-    if (s.lastResult !== null) out.push({ scope: scopeKey(s.scope), result: s.lastResult })
+    if (s.lastResult !== null) out.push({ scope: checkupKey(s.scope), result: s.lastResult })
   }
   return out
 }

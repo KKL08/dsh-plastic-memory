@@ -14,7 +14,7 @@ import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
 import { genId, type PendingDecision, type ScanCacheEntry, type SnapshotRecord } from '../governance/schema.ts'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
-import { checkupKey, type CheckupRecordStore } from '../governance/checkup-records.ts'
+import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
 import { executeConfirm } from '../tools/confirm.ts'
 import { executeForget } from '../tools/forget.ts'
@@ -22,17 +22,17 @@ import { executePromote } from '../tools/promote.ts'
 import { executeScan, type ScanNote } from '../tools/scan.ts'
 import { executeSnapshotTool, type SnapshotToolOptions } from '../tools/snapshot.ts'
 import {
-  copyHistory, copyTargetOf, crossWorkspaceNote, gateRecords, isCopyOf, locateCopy, workspaceLabel, type CrossWorkspaceRejection, type GovernanceContext,
+  copyHistory, crossWorkspaceNote, gateRecords, isCopyOf, locateCopy, workspaceLabel, type CrossWorkspaceRejection, type GovernanceContext,
 } from '../tools/workspace-gate.ts'
 import {
-  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, mergeKeeperIndex, parseMemoryCommand, sessionViewFile,
-  type GuiErrorCode, type GuiLayerRef, type MemoryCommand, type MemoryCommandResult,
+  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, checkupKey, mergeKeeperIndex, parseMemoryCommand, sessionViewFile,
+  type GuiErrorCode, type MemoryCommand, type MemoryCommandResult,
 } from './contract.ts'
 import type { ViewWriter } from './view-writer.ts'
 import { generateDraft } from './model-draft.ts'
 import { holdCheckups, processInterval, type IntervalTimer } from './auto-checkup.ts'
-import { checkupWorkspaces } from '../tools/layer-preread.ts'
-import type { LayerRef } from '../governance/layer-health.ts'
+import { checkupWorkspaces } from '../tools/scope-preread.ts'
+import { scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
 import { checkupResults, scanOutcome, type CheckupTarget } from './views.ts'
 
 /**
@@ -160,9 +160,10 @@ async function run(deps: MemoryCommandDeps, invocation: MemoryCommandInvocation)
 }
 
 /** 提升候选所在项目的那一份（同 id 在会话项目里另有一份时不动错）；旧条目没记项目时按会话定位。 */
-function candidateCopy(entry: PendingDecision): { target?: GuiLayerRef } {
-  const workspacePath = entry.workspaces?.[0]
-  return workspacePath === undefined || workspacePath === 'global' ? {} : { target: { kind: 'workspace', workspacePath } }
+function candidateCopy(entry: PendingDecision): { target?: Scope } {
+  const label = entry.workspaces?.[0]
+  const scope = label === undefined ? undefined : scopeOfLedger(label)
+  return scope?.kind === 'workspace' ? { target: scope } : {}
 }
 
 /** 撤销的是直接改、直接合并、模型改写与替代：改本身不受体检开关影响，撤销也不受。 */
@@ -225,9 +226,9 @@ async function dispatch(
     return entry
   }
   const isErr = (v: unknown): v is Err => typeof v === 'object' && v !== null && 'ok' in v && v.ok === false
-  /** 命令带了层就只认那一份，否则按借来的会话定位（当前项目优先）。 */
-  const locate = (memoryId: string, layer: GuiLayerRef | undefined) =>
-    layer === undefined ? deps.store.get(memoryId, { workspacePath: gov.workspacePath }) : locateCopy(deps.store, memoryId, layer)
+  /** 命令带了作用域就只认那一份，否则按借来的会话定位（当前项目优先）。 */
+  const locate = (memoryId: string, scope: Scope | undefined) =>
+    scope === undefined ? deps.store.get(memoryId, { workspacePath: gov.workspacePath }) : locateCopy(deps.store, memoryId, scope)
 
   /**
    * 撤销直接改、直接合并：保留的那条此刻还是那次写下的内容，才按改前的快照把涉及的记忆都恢复（合并删掉的那条一起回来）；
@@ -338,10 +339,10 @@ async function dispatch(
    * 账本里不留没做成的条目，体检也清不掉一条还没记的。isInPlace（对话卡片、右侧栏）时这样新记的条目标 isBornSettled，撤销时移出账本。
    */
   const onCandidateEntry = async (
-    memoryId: string, layer: GuiLayerRef | undefined, isEligible: (r: MemoryRecord) => boolean, isInPlace: boolean,
+    memoryId: string, scope: Scope | undefined, isEligible: (r: MemoryRecord) => boolean, isInPlace: boolean,
     act: (rec: MemoryRecord, settle: SettleCandidate, drop: DropCandidate) => Promise<MemoryCommandResult>,
   ): Promise<MemoryCommandResult> => {
-    const seen = await locate(memoryId, layer)
+    const seen = await locate(memoryId, scope)
     if (!seen || !isEligible(seen)) return notFound(memoryId)
     const open = (await deps.decisions.list())
       .find(e => kindOf(e) === 'promote-candidate' && e.memoryIds[0] === seen.id && e.workspaces?.[0] === seen.workspacePath)
@@ -355,7 +356,7 @@ async function dispatch(
       }, async () => undefined)
     }
     const claimed = await deps.decisions.withClaim(open.id, async () => {
-      const rec = await locate(memoryId, layer)
+      const rec = await locate(memoryId, scope)
       if ((await deps.decisions.get(open.id)) === undefined || !rec || !isEligible(rec)) return notFound(memoryId)
       return await act(rec, async (verdict, opts) => {
         await deps.decisions.settle(open.id, verdict, now, opts)
@@ -377,7 +378,7 @@ async function dispatch(
    */
   const keepLocal = async (
     memoryId: string, workspacePath: string | undefined, allowCrossWorkspace: boolean | undefined, settle: SettleCandidate,
-    options: { target?: GuiLayerRef } = {},
+    options: { target?: Scope } = {},
   ): Promise<MemoryCommandResult> => {
     const r = await executePromote(
       { confirmedIds: [memoryId], target: 'global', dismiss: true, allowCrossWorkspace },
@@ -458,28 +459,28 @@ async function dispatch(
     case 'restore': {
       // 最近删除里的一条：被裁决删掉的走撤销那条路（按裁决的快照恢复，冲突回到待处理、沿用原条目）；
       // 其余按最近一份含它的快照恢复；没有快照覆盖的（不经插件删除的归档文件）恢复归档文件本身
-      const { memoryId, layer } = command
-      const rec = await locate(memoryId, layer)
+      const { memoryId, layer: scope } = command
+      const rec = await locate(memoryId, scope)
       if (!rec || rec.status !== 'deleted') return notFound(memoryId)
-      // 带了层时，裁决条目与快照都得覆盖那一份：同 id 别的副本的快照不拿来恢复它
+      // 带了作用域时，裁决条目与快照都得覆盖那一份：同 id 别的副本的快照不拿来恢复它
       const snapshots = await deps.snapshots.list()
       const covers = (s: (typeof snapshots)[number] | undefined) =>
-        s?.data.some(r => r.id === memoryId && !r.redacted && (layer === undefined || isCopyOf(r, layer))) === true
+        s?.data.some(r => r.id === memoryId && !r.redacted && (scope === undefined || isCopyOf(r, scope))) === true
       const entry = (await deps.decisions.listSettled()).filter(d => verdictLoser(d, d.settled!.verdict) === memoryId
-        && (layer === undefined || covers(snapshots.find(s => s.id === d.settled!.snapshotId)))).at(-1)
+        && (scope === undefined || covers(snapshots.find(s => s.id === d.settled!.snapshotId)))).at(-1)
       const snapshotId = entry?.settled?.snapshotId ?? snapshots.find(covers)?.id
       if (snapshotId === undefined) {
         // 快照里只剩脱敏副本的是密钥硬删过的：归档里残留的副本也不复活
-        if (snapshots.some(s => s.data.some(r => r.id === memoryId && r.redacted === true && (layer === undefined || isCopyOf(r, layer))))) {
+        if (snapshots.some(s => s.data.some(r => r.id === memoryId && r.redacted === true && (scope === undefined || isCopyOf(r, scope))))) {
           return fail(cmd, 'not-found', `${memoryId} 含密钥已物理删除，快照里只剩脱敏副本，不可恢复`)
         }
         const { rejected } = gateRecords([rec], gov, command.allowCrossWorkspace)
         if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
-        if (!(await deps.store.restoreArchived(rec, { isExactLayer: layer !== undefined, now }))) return notFound(memoryId)
+        if (!(await deps.store.restoreArchived(rec, { isExactLayer: scope !== undefined, now }))) return notFound(memoryId)
         return { ok: true, cmd, memoryIds: [memoryId] }
       }
       const restore = async (): Promise<MemoryCommandResult> => {
-        const r = await restoreFrom(snapshotId, [memoryId], command.allowCrossWorkspace, { isExactLayer: layer !== undefined })
+        const r = await restoreFrom(snapshotId, [memoryId], command.allowCrossWorkspace, { isExactLayer: scope !== undefined })
         if (isErr(r)) return r
         if (entry) await deps.decisions.unsettle(entry.id)
         return { ok: true, cmd, memoryIds: r, snapshotId, ...(entry ? { decisionId: entry.id } : {}) }
@@ -596,7 +597,7 @@ async function dispatch(
           if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
           // 别层还有这个 id 的副本时，快照里那一层的副本是它的历史，留着
           const snapshots = await deps.snapshots.list()
-          const target = copyTargetOf(rec)
+          const target = scopeOfMemory(rec)
           const isPurged: (r: SnapshotRecord) => boolean = target === undefined
             ? r => r.id === rec.id
             : await copyHistory(deps.store, snapshots.flatMap(s => s.data), new Set([rec.id]), target)
@@ -762,20 +763,20 @@ async function dispatch(
       if (deps.getLlm(exec) === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型，可在对话里让 agent 体检')
       const isGlobalOnly = command.layer !== undefined
       // 开跑前认领要查的范围（和自动体检共用一套认领）：正在体检就回 busy；「全部」要认领全局和每个项目，有一个认领不到整个回 busy
-      const layers: LayerRef[] = isGlobalOnly ? [{ kind: 'global' }]
-        : command.workspacePath !== undefined ? [{ kind: 'workspace', path: command.workspacePath }]
-        : [{ kind: 'global' }, ...checkupWorkspaces(await deps.store.listWorkspaceDirs()).map(path => ({ kind: 'workspace' as const, path }))]
+      const scopes: Scope[] = isGlobalOnly ? [{ kind: 'global' }]
+        : command.workspacePath !== undefined ? [{ kind: 'workspace', workspacePath: command.workspacePath }]
+        : [{ kind: 'global' }, ...checkupWorkspaces(await deps.store.listWorkspaceDirs()).map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
       const controller = new AbortController()
-      const held = await holdCheckups(deps.checkups, layers, {
+      const held = await holdCheckups(deps.checkups, scopes, {
         interval: deps.heartbeat ?? processInterval,
         onLost: () => { controller.abort(new DOMException('checkup claim taken over', 'AbortError')) },
         onChange: () => deps.views.requestCheckups(),
         log: deps.log ?? console,
       })
-      if ('busy' in held) return fail(cmd, 'busy', `${held.busy.kind === 'global' ? '全局' : held.busy.path} 正在体检，查完再来`)
+      if ('busy' in held) return fail(cmd, 'busy', `${held.busy.kind === 'global' ? '全局' : held.busy.workspacePath} 正在体检，查完再来`)
       try {
         const target: CheckupTarget = isGlobalOnly ? { kind: 'global' }
-          : command.workspacePath !== undefined ? { kind: 'workspace', path: command.workspacePath } : { kind: 'all', layers }
+          : command.workspacePath !== undefined ? { kind: 'workspace', workspacePath: command.workspacePath } : { kind: 'all', scopes }
         return await scanHeld(deps, command, target, { ...exec, signal: controller.signal }, now)
       } catch (err) {
         // 认领中途被别的进程接手：执行器在写入检查点前停下了，这次没提交
@@ -798,13 +799,13 @@ async function dispatch(
 
     case 'migrate-type': {
       const listing = await deps.store.listWorkspaceDirs()
-      const layers: GuiLayerRef[] = [{ kind: 'global' }, ...[...new Set(listing.entries.map(e => e.workspacePath))].sort().map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
+      const scopes: Scope[] = [{ kind: 'global' }, ...[...new Set(listing.entries.map(e => e.workspacePath))].sort().map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
       let migrated = 0
       let skippedSecrets = 0
       const failures: string[] = []
-      for (const layer of layers) {
-        const workspacePath = layer.kind === 'workspace' ? layer.workspacePath : undefined
-        const read = await deps.store.readLayer(layer.kind === 'global' ? layer : { kind: 'workspace', path: layer.workspacePath }, { includeArchive: true })
+      for (const scope of scopes) {
+        const workspacePath = scope.kind === 'workspace' ? scope.workspacePath : undefined
+        const read = await deps.store.readRaw(scope, { includeArchive: true })
         const matched = read.records.map(l => l.record).filter(r => r.type === command.from)
         if (command.action === 'retype') {
           for (const r of matched) {
@@ -829,7 +830,7 @@ async function dispatch(
         // 锁内复核：收集之后被别处改成别的类型的不删（同 retype）
         const r = await executeForget(
           { ids, reason: `用户在设置页删除或改名类型 ${command.from}`, allowCrossWorkspace: true },
-          gov, executorDeps, { isSoftOnly: true, target: layer, isChanged: current => current.type !== command.from },
+          gov, executorDeps, { isSoftOnly: true, target: scope, isChanged: current => current.type !== command.from },
         )
         migrated += r.forgotten.length
         skippedSecrets += r.skippedSecrets?.length ?? 0
@@ -871,9 +872,9 @@ async function scanHeld(
   const before = (await collect())?.pending
   const isGlobalOnly = command.layer !== undefined
   // 「全部」体检时各范围自己的说明，结果按范围记它们；整次合并的只记在 all 上
-  const layerNotes = new Map<string, readonly ScanNote[]>()
+  const scopeNotes = new Map<string, readonly ScanNote[]>()
   // 「全部」只查认领到的项目：执行器自己再枚举会把认领之后才建的项目也查了。一个项目都没有时只查全局（空 scopes 不是全库）
-  const scopes = target.kind === 'all' ? target.layers.flatMap(l => (l.kind === 'workspace' ? [l.path] : [])) : undefined
+  const scopes = target.kind === 'all' ? target.scopes.flatMap(s => (s.kind === 'workspace' ? [s.workspacePath] : [])) : undefined
   // 时钟现读：完成记录的完成时间是体检做完的时刻，不是命令开始的时刻
   const r = await executeScan(
     scopes !== undefined ? { scopes, layers: 'full' } : { ...(command.workspacePath !== undefined ? { scope: command.workspacePath } : {}), layers: 'full' },
@@ -881,7 +882,7 @@ async function scanHeld(
       store: deps.store, registry: deps.registry, decisions: deps.decisions, cache: deps.cache, checkups: deps.checkups,
       getBaseline: deps.getBaseline, getLlm: deps.getLlm, resolveContext: deps.resolveContext, now: () => deps.now?.() ?? Date.now(),
     },
-    exec, { by: 'manual', isGlobalOnly: isGlobalOnly || scopes?.length === 0, onLayerNotes: (layer, notes) => { layerNotes.set(checkupKey(layer), notes) } },
+    exec, { by: 'manual', isGlobalOnly: isGlobalOnly || scopes?.length === 0, onScopeNotes: (scope, notes) => { scopeNotes.set(checkupKey(scope), notes) } },
   )
   await deps.decisions.sweep(now)
   const after = await deps.views.rewriteAll() ?? (before === undefined ? undefined : await collect())
@@ -891,14 +892,14 @@ async function scanHeld(
   if (before !== undefined && after !== undefined && exec.signal?.aborted !== true) {
     try {
       await deps.checkups.recordResults(checkupResults(before, after.pending, {
-        target, checkupId: genId('ck'), by: 'manual', completedAt: deps.now?.() ?? Date.now(), notes: r.notes, layerNotes,
+        target, checkupId: genId('ck'), by: 'manual', completedAt: deps.now?.() ?? Date.now(), notes: r.notes, scopeNotes,
         ...(r.usageTokens !== undefined ? { usageTokens: r.usageTokens } : {}),
       }))
     } catch (err) {
       (deps.log ?? console).warn('[plastic-memory] 记不下手动体检的结果', err)
     }
   }
-  // 判新增的覆盖层：项目体检读的是本项目的可见集合（全局 + 本项目），只查全局是全局层，全库体检是全部层
+  // 判新增的覆盖范围：项目体检读的是本项目的可见集合（全局 + 本项目），只查全局是全局，全库体检是全部作用域
   const covered = isGlobalOnly ? [{ kind: 'global' as const }]
     : command.workspacePath === undefined ? 'all' : [{ kind: 'global' as const }, { kind: 'workspace' as const, workspacePath: command.workspacePath }]
   const notes = r.notes.map(n => n.code)

@@ -25,7 +25,7 @@ import { overflowLevel } from '../src/snapshot.ts'
 import { SNAPSHOT_SOURCE_KIND, lastVisibleSnapshot, snapshotTextOf } from '../src/snapshot-message.ts'
 import { BUILTIN_TYPES, PRESET_SCENES } from '../src/type-registry.ts'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
-import { cacheKey } from '../src/tools/scan.ts'
+import { scopeCacheKey } from '../src/scope.ts'
 import { IN_SNAPSHOT_NOTE } from '../src/tools/search.ts'
 import {
   memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema,
@@ -999,13 +999,13 @@ describe('注入链接线', () => {
     const controller = new AbortController()
     controller.abort()
     const empty: Decision = { kind: 'enter', messages: [] }
-    const readLayer = vi.spyOn(MemoryStore.prototype, 'readLayer')
+    const readRaw = vi.spyOn(MemoryStore.prototype, 'readRaw')
     try {
       // 直接调监听：测试台的 step 遇到中止会自己提前返回，看不出插件做没做
       expect(await t.preStep({ agent: { session }, messages: [], turn: 1, step: 2, signal: controller.signal }, async () => empty)).toBe(empty)
-      expect(readLayer).not.toHaveBeenCalled()
+      expect(readRaw).not.toHaveBeenCalled()
     } finally {
-      readLayer.mockRestore()
+      readRaw.mockRestore()
     }
     expect(session.surface.nodes).toEqual(nodesBefore)
     expect(await t.recallStats()).toBe(statsBefore)
@@ -1018,12 +1018,12 @@ describe('注入链接线', () => {
     const t = await boot()
     const session = sessionWithoutSnapshot()
     const reject: Decision = { kind: 'reject' }
-    const readLayer = vi.spyOn(MemoryStore.prototype, 'readLayer')
+    const readRaw = vi.spyOn(MemoryStore.prototype, 'readRaw')
     try {
       expect(await t.step(session, 2, { decision: reject })).toBe(reject)
-      expect(readLayer).not.toHaveBeenCalled()
+      expect(readRaw).not.toHaveBeenCalled()
     } finally {
-      readLayer.mockRestore()
+      readRaw.mockRestore()
     }
     expect(visibleSnapshots(session)).toEqual([])
   })
@@ -1031,7 +1031,7 @@ describe('注入链接线', () => {
   it('组装失败：这一步不发、只记日志；下一个发送点恢复后发', async () => {
     const t = await boot()
     const session = hostSession('sess-1')
-    const spy = vi.spyOn(MemoryStore.prototype, 'readLayer').mockRejectedValueOnce(new Error('disk gone'))
+    const spy = vi.spyOn(MemoryStore.prototype, 'readRaw').mockRejectedValueOnce(new Error('disk gone'))
     try {
       const hello: Decision = { kind: 'enter', messages: [userSaid('你好')] }
       expect(await t.step(session, 1, { decision: hello })).toBe(hello)
@@ -1250,7 +1250,7 @@ describe('语义扫描请求形状', () => {
     }
     const memoryRoot = await seedMemory(await makeTmpRoot())
     const cwd = await makeTmpRoot()
-    const cacheId = cacheKey(await realpath(cwd)) // 无 workspaceRegistry 时规范化 cwd 即目录作用域
+    const cacheId = scopeCacheKey({ kind: 'workspace', workspacePath: await realpath(cwd) }) // 无 workspaceRegistry 时规范化 cwd 即目录作用域
     const prior: ScanCacheEntry = {
       id: cacheId, scannedAt: 1, scope: await realpath(cwd),
       findings: [{
@@ -1301,7 +1301,7 @@ describe('语义扫描请求形状', () => {
     })
     await expect(defs.get('memory_scan')!.execute({ layers: 'semantic' }, exec)).rejects.toMatchObject({ name: 'AbortError' })
     expect(base.llmRequests).toHaveLength(1)
-    expect(await sidecarAt(memoryRoot).scanCache.get(cacheKey(await realpath(cwd)))).toBeUndefined()
+    expect(await sidecarAt(memoryRoot).scanCache.get(scopeCacheKey({ kind: 'workspace', workspacePath: await realpath(cwd) }))).toBeUndefined()
   })
 
   it('用量取每条流最后一个 usage 块，宿主在出错收尾前报了用量的也计入；一次都没报时结果不带用量', async () => {

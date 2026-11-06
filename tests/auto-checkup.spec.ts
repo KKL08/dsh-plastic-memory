@@ -1,18 +1,18 @@
 import { describe, expect, it } from 'vitest'
-import { resolveAutoCheckup, scopeKey, type AutoCheckupFrequency, type ScopeRef } from '../src/gui/contract.ts'
+import { checkupKey, resolveAutoCheckup, type AutoCheckupFrequency, type ScopeOrAll } from '../src/gui/contract.ts'
 import { AUTO_CHECKUP_MAX_FAILURES, AUTO_CHECKUP_RETRY_MS, autoCheckupDue, autoCheckupRetryAt, isRetryLimitReached } from '../src/governance/auto-checkups.ts'
 
 // 自动体检的纯函数：继承解析（契约，服务端调度和客户端菜单共用）按 spec「自动体检情况表」逐行断言，以 discussion 为例；到期计算（治理层）。
 
-const ALL: ScopeRef = { kind: 'all' }
-const DISCUSSION: ScopeRef = { kind: 'workspace', workspacePath: '/work/discussion' }
-const OTHER: ScopeRef = { kind: 'workspace', workspacePath: '/work/other' }
-const GLOBAL: ScopeRef = { kind: 'global' }
-const NEW_PROJECT: ScopeRef = { kind: 'workspace', workspacePath: '/work/new' }
+const ALL: ScopeOrAll = { kind: 'all' }
+const DISCUSSION: ScopeOrAll = { kind: 'workspace', workspacePath: '/work/discussion' }
+const OTHER: ScopeOrAll = { kind: 'workspace', workspacePath: '/work/other' }
+const GLOBAL: ScopeOrAll = { kind: 'global' }
+const NEW_PROJECT: ScopeOrAll = { kind: 'workspace', workspacePath: '/work/new' }
 
 /** 设置表：范围 → 设了的频率；没列的范围没有条目。 */
-function settings(entries: Array<[ScopeRef, AutoCheckupFrequency]>): ReadonlyMap<string, AutoCheckupFrequency> {
-  return new Map(entries.map(([scope, frequency]) => [scopeKey(scope), frequency]))
+function settings(entries: Array<[ScopeOrAll, AutoCheckupFrequency]>): ReadonlyMap<string, AutoCheckupFrequency> {
+  return new Map(entries.map(([scope, frequency]) => [checkupKey(scope), frequency]))
 }
 
 describe('resolveAutoCheckup：自动体检情况表', () => {
@@ -60,9 +60,9 @@ describe('resolveAutoCheckup：自动体检情况表', () => {
   })
 })
 
-describe('scopeKey', () => {
+describe('checkupKey', () => {
   it('「全部」是 all、全局是 global、项目是它的绝对路径', () => {
-    expect([ALL, GLOBAL, DISCUSSION].map(scopeKey)).toEqual(['all', 'global', '/work/discussion'])
+    expect([ALL, GLOBAL, DISCUSSION].map(checkupKey)).toEqual(['all', 'global', '/work/discussion'])
   })
 })
 

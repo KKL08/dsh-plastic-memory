@@ -26,7 +26,7 @@ export type KvImportMarker = z.infer<typeof kvImportMarkerSchema>
 
 /**
  * 体检记录表的一行（`.state/checkups/<sha1(id)>.json`，见 storage/sidecar.ts），每个范围一条。id 是范围键：
- * `global` 或项目的绝对路径（见 governance/checkup-records.ts checkupKey）；另有键 `all` 的一条，只有 lastResult。
+ * `global` 或项目的绝对路径（见 gui/contract.ts checkupKey）；另有键 `all` 的一条，只有 lastResult。
  * completed 是完成记录：这个范围最近一次做完的体检（规则检查和内容检查都写完：缓存、账本、提升候选），即「上次体检」。
  * 还没有做完过的范围没有它。
  * failure 是自动体检的连续失败（次数、下次重试时间、最近一次的原因），modelUnavailable 是最近一次自动体检的尝试碰上模型用不了的原因；
@@ -54,7 +54,7 @@ export type CheckupCompletion = NonNullable<CheckupRecord['completed']>
 
 /**
  * 自动体检设置表的一行（`.state/auto-checkups/<sha1(id)>.json`，见 storage/sidecar.ts），一个范围一条。id 是范围键：
- * `all`（「全部」的默认值）、`global` 或项目的绝对路径（见 gui/contract.ts scopeKey）。frequency 是 manual 或 1–90 天。
+ * `all`（「全部」的默认值）、`global` 或项目的绝对路径（见 gui/contract.ts checkupKey）。frequency 是 manual 或 1–90 天。
  * 没有某个范围的条目 = 跟随 `all`；没有 `all` = 仅手动，所以表空着就是全部仅手动。
  */
 export const autoCheckupSettingSchema = z.object({
