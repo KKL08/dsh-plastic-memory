@@ -1,16 +1,19 @@
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { Session } from '@deepseek-ai/dsh-session'
-import type { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import type { ToolGateCode } from '../contract-codes.ts'
 import type { SaveDelegation } from '../pipeline.ts'
 
-// 宿主 subagent 投影（dsh-subagent 注册）的内部状态：插件只读 identity.mode，按宿主形状局部登记这一项，
-// 不为一个键把 dsh-subagent 及其一串宿主 peer 拉进开发依赖。无有效描述符时状态是 {}。
-declare module '@deepseek-ai/dsh-session-projection' {
-  interface SessionProjectionStateMap {
-    subagent: { identity?: { mode: SaveDelegation['mode'] } }
-  }
+/**
+ * 宿主投影注册表里插件用到的读法：按键读状态。宿主 0.2.2 起这个读法的状态类型是 unknown（0.2.1 按键表给具体类型），
+ * 插件按自己读的字段局部写类型，两版宿主都能编译。
+ */
+export interface ProjectionReader {
+  stateOf(session: Session, key: string): unknown
 }
+
+// 宿主 subagent 投影（dsh-subagent 注册）的内部状态：插件只读 identity.mode，按宿主形状局部写这一项，
+// 不为一个键把 dsh-subagent 及其一串宿主 peer 拉进开发依赖。无有效描述符时状态是 {}。
+type SubagentState = { identity?: { mode: SaveDelegation['mode'] } }
 
 /**
  * 子 agent 只读门：子 agent 的上下文是裁剪过的任务切片，写出的记忆缺主会话语境、出处锚也指向子会话，
@@ -64,12 +67,12 @@ export async function resolveRootSessionId(
  * 服务缺席、投影未注册、读取抛错也按一次性，fallback 写明原因（由调用方决定怎么留痕）。
  */
 export function subagentModeOf(
-  projections: Pick<SessionProjectionRegistry, 'stateOf'> | undefined,
+  projections: ProjectionReader | undefined,
   session: Session,
 ): { mode: SaveDelegation['mode']; fallback?: string } {
   if (projections === undefined) return { mode: 'one-shot', fallback: 'sessionProjections service is absent' }
   try {
-    const state = projections.stateOf(session, 'subagent')
+    const state = projections.stateOf(session, 'subagent') as SubagentState | undefined
     if (state === undefined) return { mode: 'one-shot', fallback: 'subagent projection is not registered' }
     return { mode: state.identity?.mode ?? 'one-shot' }
   } catch (error) {
