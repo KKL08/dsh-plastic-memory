@@ -159,6 +159,9 @@ All notable changes to this project are documented here. The format follows
   and switching views no longer flashes a loading line.
 
 ### Fixed
+- The plugin page of DeepSeek Harness 0.2.2-rc.1 shows the README as the
+  plugin's details; its banner and architecture diagram showed as broken
+  images because the package did not ship them. Both now ship with it.
 - Turning plastic-memory off and back on in the plugin page left its
   interface missing (the Memory entry in the left sidebar, the right sidebar
   tab, the composer button and the settings card) until the app restarted.

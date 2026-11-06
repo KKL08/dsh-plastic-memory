@@ -25,3 +25,23 @@ describe('插件图标', () => {
     expect(shaped.icon).toBe('./assets/icon.svg')
   })
 })
+
+// 宿主的插件管理页把 README 渲染成插件详情，相对路径的图片从已安装的包里读：没随包发布就是一张裂图。
+describe('README 里的本地图片', () => {
+  const images = ['README.md', 'README.en.md'].flatMap(file =>
+    [...readFileSync(file, 'utf8').matchAll(/!\[[^\]]*\]\(([^)\s]+)\)/g)].map(m => m[1]!).filter(src => !/^[a-z]+:/i.test(src)))
+
+  it('README 引用了本地图片（防止正则失效后下一条空过）', () => {
+    expect(images.length).toBeGreaterThan(0)
+  })
+
+  it('每张都在两份发布清单里', () => {
+    const out = join(mkdtempSync(join(tmpdir(), 'pm-shape-')), 'package.json')
+    execFileSync(process.execPath, ['scripts/publish-shape.cjs', 'package.json', out])
+    const shaped = JSON.parse(readFileSync(out, 'utf8')) as { files: string[] }
+    for (const src of images) {
+      expect(pkg.files, src).toContain(src)
+      expect(shaped.files, src).toContain(src)
+    }
+  })
+})
