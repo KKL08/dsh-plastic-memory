@@ -11,9 +11,6 @@ import { resolveMemoryRoot } from './storage/paths.ts'
 import { formatIndexLine } from './index-line.ts'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { Session } from '@deepseek-ai/dsh-session'
-// dsh-agent 的类型增广把 turnBoundary 键登记进投影状态表；stateOf(session, 'turnBoundary') 因此按宿主真实键表校验。
-import type {} from '@deepseek-ai/dsh-agent'
-import type { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import { SUBAGENT_MAX_SAVES_DEFAULT, type SaveDelegation } from './pipeline.ts'
 import { createSaveTool } from './tools/save-tool.ts'
 import { createSearchTool } from './tools/search-tool.ts'
@@ -26,7 +23,7 @@ import type { PromoteTarget } from './tools/promote.ts'
 import { createAgentsMdWriter, agentsMdPath } from './storage/agents-md.ts'
 import { createSnapshotTool } from './tools/snapshot-tool.ts'
 import { createSourceTool } from './tools/source-tool.ts'
-import { delegationDepthOf, gateSubagentWrites, resolveRootSessionId, subagentModeOf, type DelegationHeader } from './tools/subagent-gate.ts'
+import { delegationDepthOf, gateSubagentWrites, resolveRootSessionId, subagentModeOf, type DelegationHeader, type ProjectionReader } from './tools/subagent-gate.ts'
 import { goneCopies } from './tools/workspace-gate.ts'
 import type { ReadEventFn } from './tools/source.ts'
 import { SnapshotCache, resolveWorkspacePath } from './runtime.ts'
@@ -40,7 +37,7 @@ import { CheckupRecordStore } from './governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from './governance/auto-checkups.ts'
 import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from './governance/schema.ts'
 import type { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
-import { baselineProjectionDefinition, readBaseline } from './governance/baseline.ts'
+import { baselineProjectionDefinition, readBaseline, type BaselineState } from './governance/baseline.ts'
 import type { SemanticLlm } from './governance/semantic-scan.ts'
 import { hostSemanticLlm, type HostLlmService, type HostModelRoute } from './governance/host-llm.ts'
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
@@ -338,12 +335,15 @@ export async function apply(ctx: Context, config: Config) {
     }
   }
 
+  /** dsh-agent turnBoundary 投影里插件读的两个字段（宿主形状的子集）。 */
+  type TurnBoundaryState = { lastTurn?: number; openTurnStartSeq?: number | null }
+
   /** 会话是否已过了第 1 轮：快照本该在第 1 轮冻结，本实例第一次冻结时已是之后的轮，说明是重启后续上或插件重载。
    *  读 turnBoundary 投影的 lastTurn（宿主按事件增量折叠，不读日志）；服务缺席、投影未注册、读取抛错都按没有。 */
   function hasEarlierTurns(session: object): boolean {
     try {
-      const projections = ctx.get('sessionProjections') as SessionProjectionRegistry | undefined
-      return (projections?.stateOf(session as Session, 'turnBoundary')?.lastTurn ?? 0) > 1
+      const projections = ctx.get('sessionProjections') as ProjectionReader | undefined
+      return ((projections?.stateOf(session as Session, 'turnBoundary') as TurnBoundaryState | undefined)?.lastTurn ?? 0) > 1
     } catch {
       return false
     }
@@ -357,11 +357,11 @@ export async function apply(ctx: Context, config: Config) {
   function openTurnStartSeq(session: Session): number {
     let reason: string
     try {
-      const projections = ctx.get('sessionProjections') as SessionProjectionRegistry | undefined
+      const projections = ctx.get('sessionProjections') as ProjectionReader | undefined
       if (projections === undefined) {
         reason = 'sessionProjections service is absent'
       } else {
-        const turn = projections.stateOf(session, 'turnBoundary')
+        const turn = projections.stateOf(session, 'turnBoundary') as TurnBoundaryState | undefined
         if (turn === undefined) reason = 'turnBoundary projection is not registered'
         else if (typeof turn.openTurnStartSeq === 'number') return turn.openTurnStartSeq
         else reason = `openTurnStartSeq is ${String(turn.openTurnStartSeq)} (no open turn)`
@@ -410,7 +410,7 @@ export async function apply(ctx: Context, config: Config) {
    *  读不到按一次性，每个 session 第一次退化打 warn。 */
   const modeFallbackWarned = new WeakSet<Session>()
   function sessionModeOf(session: Session): SaveDelegation['mode'] {
-    const { mode, fallback } = subagentModeOf(probe<SessionProjectionRegistry>('sessionProjections'), session)
+    const { mode, fallback } = subagentModeOf(probe<ProjectionReader>('sessionProjections'), session)
     if (fallback !== undefined && !modeFallbackWarned.has(session)) {
       modeFallbackWarned.add(session)
       ctx.logger.warn(`[plastic-memory] 会话 "${session.header.id}" 读不到 subagent 投影，按一次性子会话（one-shot）处理：${fallback}`)
@@ -426,15 +426,15 @@ export async function apply(ctx: Context, config: Config) {
   const baselineReadWarned = new WeakSet<Session>()
   function sessionBaseline(session: Session | undefined): readonly string[] | null {
     if (session === undefined) return null
-    let projections: SessionProjectionRegistry | undefined
+    let projections: ProjectionReader | undefined
     try {
-      projections = ctx.get('sessionProjections') as SessionProjectionRegistry | undefined
+      projections = ctx.get('sessionProjections') as ProjectionReader | undefined
     } catch {
       return null
     }
     let state
     try {
-      state = projections?.stateOf(session, 'plasticMemoryBaseline')
+      state = projections?.stateOf(session, 'plasticMemoryBaseline') as BaselineState | undefined
     } catch (error) {
       if (!baselineReadWarned.has(session)) {
         baselineReadWarned.add(session)

@@ -123,7 +123,7 @@ export const baselineProjectionDefinition = {
   stateSchema: baselineStateSchema,
   init: (): BaselineState => ({ entries: [], baselineScopes: [], drift: [] }),
   apply: applyBaseline,
-} satisfies Omit<ProjectionDefinition<'plasticMemoryBaseline'>, 'wire'>
+} satisfies Omit<ProjectionDefinition<'plasticMemoryBaseline', BaselineState>, 'wire'>
 
 /** 当前有效指令消息的正文，按事件顺序（越靠后越新）；从未见过任何指令时为空。 */
 export function baselineTexts(state: BaselineState): readonly string[] {

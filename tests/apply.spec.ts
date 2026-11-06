@@ -31,7 +31,7 @@ import {
   memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema,
   type MemorySnapshot, type PendingDecision, type ScanCacheEntry,
 } from '../src/governance/schema.ts'
-import { baselineProjectionDefinition } from '../src/governance/baseline.ts'
+import { baselineProjectionDefinition, type BaselineState } from '../src/governance/baseline.ts'
 import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
 import {
   GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_FILE, deletedViewSchema, libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema,
@@ -1676,7 +1676,7 @@ describe('AGENTS.md 基线：读 plasticMemoryBaseline 投影', () => {
     })
     await child
     const session = fakeSession(await makeTmpRoot(), [baselineMessage(0, '# AGENTS.md\n用 pnpm')])
-    expect(host.sessionProjections.stateOf(session as never, 'plasticMemoryBaseline')?.entries).toEqual([{ text: '# AGENTS.md\n用 pnpm', scopes: ['.'] }])
+    expect((host.sessionProjections.stateOf(session as never, 'plasticMemoryBaseline') as BaselineState | undefined)?.entries).toEqual([{ text: '# AGENTS.md\n用 pnpm', scopes: ['.'] }])
     const row = host.sessionProjections.checkpoint(session as never).plasticMemoryBaseline
     expect(row?.ver).toBe(baselineProjectionDefinition.stateVersion)
     expect(baselineProjectionDefinition.stateSchema.safeParse(row?.val).success).toBe(true)
