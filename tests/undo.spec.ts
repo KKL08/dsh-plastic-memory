@@ -485,6 +485,31 @@ describe('写入那一刻的交错与写盘出错', () => {
     expect(await settledOf(e, id)).toBeDefined()
   })
 
+  it('冲突删一方时败方已在最近删除（没有快照可撤）：撤销与撤销规则同判过期，冲突不回待处理', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_a', name: '甲', content: '用 pnpm' }))
+    await e.store.create(record({ id: 'mem_b', name: '乙', content: '用 npm' }))
+    const { entry } = await e.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', fingerprint: 'fp-ab' }, 1)
+    await e.store.softDelete({ id: 'mem_b' }, { at: GLOBAL, now: NOW })
+    expect((await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-left' }, e.context, e)).kind).toBe('resolved')
+    const settled = asUndoable((await settledOf(e, entry.id))!)!
+    expect(undoStateOf(settled, undefined, undefined)).toBe('expired')
+    expect(errorOf(await e.undo(entry.id))).toMatchObject({ code: 'not-found', reason: 'expired' })
+    expect(await settledOf(e, entry.id)).toBeDefined()
+  })
+
+  it('PA-35 撤销提升核对过全局那份之后、写回之前它被删进最近删除：stale，原项目不复活', async () => {
+    const e = env()
+    const id = await seedPromote(e)
+    const restore = e.snapshots.restore.bind(e.snapshots)
+    e.snapshots.restore = async (...args) => {
+      await e.store.softDelete({ id: 'mem_c' }, { at: GLOBAL, now: NOW })
+      return restore(...args)
+    }
+    expect(errorOf(await e.undo(id)).code).toBe('stale')
+    expect([await copy(e, 'mem_c', WS), (await copy(e, 'mem_c'))?.status]).toEqual([undefined, 'deleted'])
+  })
+
   it('PA-35 提升为全局后全局那份被改过、原项目里另有同 id 的原样副本：stale，全局改过的那份不被清掉', async () => {
     const e = env()
     const id = await seedPromote(e)

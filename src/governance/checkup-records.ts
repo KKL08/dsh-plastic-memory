@@ -66,10 +66,12 @@ export class CheckupRecordStore {
   /**
    * 自动体检这次没做完（模型调用出错、输出解析不了、体检出错）：连续失败次数加一，记下失败时刻（重试时间在生成体检视图时
    * 按当时的有效频率算，用户之后改频率跟着变）；最近一次尝试不再是「模型用不了」。不写完成记录，不重新计时。持有这个范围的认领时调用。
+   * startedAt 是这次体检开始的时刻：这个范围已有开始得更晚的完成记录（不参与认领的 agent 体检先做完了），不记。
    */
-  async recordFailure(scope: Scope, cause: CheckupCause, failedAt: number): Promise<void> {
+  async recordFailure(scope: Scope, cause: CheckupCause, failedAt: number, startedAt = failedAt): Promise<void> {
     const key = checkupKey(scope)
     await this.table.update(key, (cur) => {
+      if (cur?.completed !== undefined && cur.completed.startedAt > startedAt) return undefined
       const { modelUnavailable: _modelUnavailable, ...rest } = cur ?? { id: key }
       const count = (cur?.failure?.count ?? 0) + 1
       return { ...rest, id: key, failure: { count, failedAt, cause } }

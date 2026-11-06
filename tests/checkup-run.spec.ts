@@ -254,6 +254,58 @@ describe('取消', () => {
     expect(rec.failure).toBeUndefined()
   })
 
+  it('全部体检写下完成记录之后、跨项目分析时取消：体检算做完，视图照样重写', async () => {
+    const controller = new AbortController()
+    let rewrites = 0
+    const e = env({ views: w => ({ collectViews: () => w.collectViews(), rewriteAll: () => { rewrites++; return w.rewriteAll() } }) })
+    await seedScopes(e)
+    const llm: SemanticLlm = {
+      complete: async () => {
+        // 完成记录已写下才到的调用就是提交之后的跨项目分析
+        if ((await e.recordOf(checkupKey(GLOBAL)))?.completed !== undefined) controller.abort(new DOMException('plugin unloaded', 'AbortError'))
+        return JSON.stringify({ findings: [] })
+      },
+    }
+    const r = await e.run({ target: { kind: 'all' }, llm, signal: controller.signal })
+    expect([r.kind, rewrites]).toEqual(['done', 1])
+  })
+
+  it('全部体检各范围内容检查都没做成、跨项目分析时取消：照样重写视图（账本和提升候选已经写下）', async () => {
+    const controller = new AbortController()
+    let rewrites = 0
+    const e = env({ views: w => ({ collectViews: () => w.collectViews(), rewriteAll: () => { rewrites++; return w.rewriteAll() } }) })
+    await seedScopes(e)
+    await e.store.create(record({ id: 'mem_g2', name: '全局二', content: '回答简短' }))
+    await e.store.create(record({ id: 'mem_s2', name: '本项目二', content: '用 yarn', scope: 'workspace', workspacePath: SESSION_WS }))
+    await e.store.create(record({ id: 'mem_o2', name: '别的项目二', content: '用 bun', scope: 'workspace', workspacePath: OTHER_WS }))
+    const llm: SemanticLlm = {
+      complete: async (input) => {
+        if (input.system.includes('多个项目（workspace）')) controller.abort(new DOMException('plugin unloaded', 'AbortError'))
+        return '不是 JSON'
+      },
+    }
+    await e.run({ target: { kind: 'all' }, llm, signal: controller.signal })
+    expect([await e.recordOf(checkupKey(GLOBAL)), rewrites]).toEqual([undefined, 1])
+  })
+
+  it('取消后刷新视图出错（视图目录不可写）：体检照样回做完，不往外抛，记一条日志', async () => {
+    const controller = new AbortController()
+    const warns: string[] = []
+    const e = env({
+      log: { info() {}, warn: (msg: string) => { warns.push(msg) }, error() {} },
+      views: w => ({ collectViews: () => w.collectViews(), rewriteAll: async () => { throw new Error('ENOSPC') } }),
+    })
+    await seedScopes(e)
+    const llm: SemanticLlm = {
+      complete: async () => {
+        if ((await e.recordOf(checkupKey(GLOBAL)))?.completed !== undefined) controller.abort(new DOMException('plugin unloaded', 'AbortError'))
+        return JSON.stringify({ findings: [] })
+      },
+    }
+    expect((await e.run({ target: { kind: 'all' }, llm, signal: controller.signal })).kind).toBe('done')
+    expect(warns.some(m => m.includes('视图'))).toBe(true)
+  })
+
   it('完成记录的开始时间是核心开读的时刻，不含认领和体检前收集视图的时间', async () => {
     let isAdvanced = false
     const e: Env = env({ onClaimChanged: async () => { if (!isAdvanced) { isAdvanced = true; e.clock.now = NOW + 5000 } } })
@@ -442,6 +494,20 @@ describe('没做成', () => {
     expect(rec.failure).toMatchObject({ count: 1, cause: expect.objectContaining({ hostCode: 'RATE_LIMIT' }) })
     expect(rec.completed).toBeUndefined()
     expect(rec.lastResult).toBeUndefined()
+  })
+
+  it('PA-57 自动：模型出错时这个范围已有更晚开始、先做完的 agent 体检：不给它记失败', async () => {
+    const e = env()
+    await seedScopes(e)
+    const llm: SemanticLlm = {
+      complete: async () => {
+        await e.checkups.complete([SESSION], { startedAt: NOW + 1, completedAt: NOW + 2, by: 'agent' })
+        throw Object.assign(new Error('host RATE_LIMIT'), { code: 'RATE_LIMIT' })
+      },
+    }
+    expect(await e.run({ target: SESSION, llm, by: 'auto' })).toMatchObject({ kind: 'failed' })
+    const rec = (await e.recordOf(checkupKey(SESSION)))!
+    expect([rec.completed?.by, rec.failure]).toEqual(['agent', undefined])
   })
 
   it('PA-57 自动：宿主报模型用不了，返回原因，一次体检不写任何记录', async () => {

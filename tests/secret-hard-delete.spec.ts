@@ -1,10 +1,10 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises'
+import { chmod, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
-import { ARCHIVE_DIR, INDEX_FILE, STATE_DIR, workspaceDirName } from '../src/storage/paths.ts'
+import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE, STATE_DIR, workspaceDirName } from '../src/storage/paths.ts'
 import { MemoryStore, type MemoryLogger } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
@@ -381,6 +381,61 @@ describe('PA-08：拍快照与彻底删除同一条含密钥的记忆交错', ()
     if (restored.kind !== 'restored') throw new Error(restored.kind)
     expect(restored.redacted).toEqual(['mem_key'])
     expect(await a.store.get('mem_key', { workspacePath: WS })).toBeUndefined()
+  })
+
+  it('PA-08 同一作用域里另有一个读不出的文件，快照落盘前另一个进程彻底删除了含密钥的这条：照样脱敏', async () => {
+    const a = harness()
+    const b = harness()
+    await a.store.create(secret())
+    await writeFile(join(wsDir(), 'broken.md'), '---\nname: [没闭合\n---\n')
+    const capture = a.snapshots.capture.bind(a.snapshots)
+    a.snapshots.capture = async (input, now) => {
+      expect((await b.forget(['mem_key'])).hardDeleted).toEqual(['mem_key'])
+      return capture(input, now)
+    }
+
+    const created = await a.snapshot({ action: 'create', memoryIds: ['mem_key'] })
+    if (created.kind !== 'created') throw new Error(created.kind)
+
+    const { text } = await rawSnapshot(created.snapshotId)
+    expect(text).not.toContain(FAKE_SECRET.sk)
+  })
+
+  it('PA-08 快照落盘复核时全局目录一时读不出（权限）：不算已删除，快照里这份不脱敏', async () => {
+    const a = harness()
+    await a.store.create(baseRecord({ id: 'mem_plain', name: '构建命令', content: '用 pnpm build' }))
+    const globalDir = join(root, GLOBAL_DIR)
+    const capture = a.snapshots.capture.bind(a.snapshots)
+    a.snapshots.capture = async (input, now) => {
+      await chmod(globalDir, 0o000)
+      return capture(input, now)
+    }
+
+    try {
+      const created = await a.snapshot({ action: 'create', memoryIds: ['mem_plain'] })
+      if (created.kind !== 'created') throw new Error(created.kind)
+      const { json } = await rawSnapshot(created.snapshotId)
+      expect(json.data.find(r => r.id === 'mem_plain')!.redacted).toBeUndefined()
+    } finally {
+      await chmod(globalDir, 0o700)
+    }
+  })
+
+  it('PA-08 快照落盘复核时这条的文件一时读不出（frontmatter 写坏了）：不算已删除，快照里这份不脱敏', async () => {
+    const a = harness()
+    await a.store.create(wsRec({ id: 'mem_plain', name: '构建命令', content: '用 pnpm build' }))
+    const [file] = (await readdir(wsDir())).filter(f => f.endsWith('.md') && f !== INDEX_FILE)
+    const capture = a.snapshots.capture.bind(a.snapshots)
+    a.snapshots.capture = async (input, now) => {
+      await writeFile(join(wsDir(), file!), '---\nname: [没闭合\n---\n')
+      return capture(input, now)
+    }
+
+    const created = await a.snapshot({ action: 'create', memoryIds: ['mem_plain'] })
+    if (created.kind !== 'created') throw new Error(created.kind)
+
+    const { json } = await rawSnapshot(created.snapshotId)
+    expect(json.data.find(r => r.id === 'mem_plain')!.redacted).toBeUndefined()
   })
 
   it('PA-08 对方扫快照在这份落盘之前、删文件在这边复核之后：对方删完再扫一遍，这份也脱敏', async () => {

@@ -2,6 +2,7 @@ import type { MemoryRecord } from '../record-schema.ts'
 import type { GovernanceRejectCode } from '../contract-codes.ts'
 import type { MemoryStore } from '../store.ts'
 import { ledgerLabel, scopeOfMemory, type Scope } from '../scope.ts'
+import { hasCriticalSecret } from '../secrets.ts'
 
 /**
  * 跨 workspace 门（S2）：治理工具只在用户明确选择「全局整理」后才动其他项目的记录。
@@ -58,8 +59,9 @@ export async function locateCopy(store: Pick<MemoryStore, 'get'>, id: string, ta
  * 不逐条定位：按 id 定位要扫整个作用域，一份快照几百条时成了平方级；缺 workspacePath 的按 id 两级定位。
  * 接线层把它交给 SnapshotStore，拍完快照落盘后复核（见 SnapshotStore.capture）。
  */
-export const goneCopies = (store: Pick<MemoryStore, 'get' | 'readRaw'>) => async <T extends Located>(records: readonly T[]): Promise<Set<T>> => {
-  const present = new Map<string, Set<string>>()   // 作用域标签 → 盘上有的 id
+export const goneCopies = (store: Pick<MemoryStore, 'get' | 'readRaw'>) => async <T extends Located & Pick<MemoryRecord, 'content' | 'name' | 'summary' | 'tags'>>(records: readonly T[]): Promise<Set<T>> => {
+  // 作用域标签 → 盘上读得出的 id，和这个作用域里有没有读不出的文件或目录（项目标记读不出时目录整个不在清单里，看不出来，是残留）
+  const present = new Map<string, { ids: Set<string>; isPartial: boolean }>()
   const gone = new Set<T>()
   for (const r of records) {
     const scope = scopeOfMemory(r)
@@ -68,13 +70,15 @@ export const goneCopies = (store: Pick<MemoryStore, 'get' | 'readRaw'>) => async
       continue
     }
     const label = workspaceLabel(r)
-    let ids = present.get(label)
-    if (ids === undefined) {
-      const read = await store.readRaw(scope, { includeArchive: true })
-      ids = new Set(read.records.map(l => l.record.id))
-      present.set(label, ids)
+    let read = present.get(label)
+    if (read === undefined) {
+      const raw = await store.readRaw(scope, { includeArchive: true })
+      read = { ids: new Set(raw.records.map(l => l.record.id)), isPartial: raw.quarantined.length > 0 || raw.directoryNotes.some(n => n.code === 'dir-unreadable') }
+      present.set(label, read)
     }
-    if (!ids.has(r.id)) gone.add(r)
+    if (read.ids.has(r.id)) continue
+    // 有读不出的文件时，读不出的可能就是它：只有含高危密钥的照样判不在（错脱敏也比留明文强），其余的说不准，不判
+    if (!read.isPartial || hasCriticalSecret(r)) gone.add(r)
   }
   return gone
 }

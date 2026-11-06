@@ -299,6 +299,16 @@ All notable changes to this project are documented here. The format follows
   bars matches the one in effect.
 - The memory page treats a project path with and without a trailing
   separator as one project, as the right sidebar does.
+- Undoing a promotion to global, or a conflict ruling, changes nothing when
+  the memory was deleted or changed in the meantime, or when no snapshot
+  of it was kept; it no longer brings back a memory deleted after the
+  promotion.
+- A memory file or folder that cannot be read for a moment no longer
+  leaves its snapshot copies permanently unrestorable.
+- Cancelling a checkup after it has already recorded its results counts
+  as done and refreshes the memory page. A failed automatic checkup no
+  longer marks a scope as failed when a later checkup of it has already
+  finished.
 
 ## [0.2.0-beta.1] - 2026-10-25
 

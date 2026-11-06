@@ -180,11 +180,16 @@ async function restoreVerdict(entry: UndoableEntry, rule: UndoRule, allow: boole
   const { targets } = rule
   const isPromote = entry.settled.verdict === 'promoted'
   const snapshot = targets.length > 0 ? await snapshotOf(entry, deps) : undefined
-  if (targets.length > 0 && entry.settled.snapshotId !== undefined && snapshot === undefined) {
-    return notFound(`快照 ${entry.settled.snapshotId}（可能已超过 14 天保留窗口）`, 'expired')
+  const records = snapshot?.data.filter(r => targets.includes(r.id)) ?? []
+  // 过期与否按撤销规则 undoStateOf 判：快照里没有可恢复的那份就撤不了
+  if (undoStateOf(entry, records[0], undefined) === 'expired') {
+    return notFound(entry.settled.snapshotId === undefined
+      ? '可恢复的快照（裁决时败方已不在用，没有拍快照）'
+      : snapshot === undefined
+        ? `快照 ${entry.settled.snapshotId}（可能已超过 14 天保留窗口）`
+        : `快照 ${entry.settled.snapshotId} 里的这条记忆（已被彻底删除）`, 'expired')
   }
   const target = isPromote ? 'hint' : 'exact'
-  const records = snapshot?.data.filter(r => targets.includes(r.id)) ?? []
   const rejected = await gateRestore(records, target, allow, context, deps.store)
   if (rejected.length > 0) return crossWorkspace(rejected)
   // 撤销提升只搬全局那一份，且它得仍在用、内容同快照：之后又搬走、删掉、改过的不动。按提示定位恢复时比的可能是
@@ -198,7 +203,11 @@ async function restoreVerdict(entry: UndoableEntry, rule: UndoRule, allow: boole
   }
   let restored: string[] = []
   if (snapshot !== undefined) {
-    const r = await deps.snapshots.restore(snapshot, targets, deps.store, { target, overwrite: false, now: deps.now ?? Date.now })
+    // 撤销提升：上面的核对在锁外，写回那一刻再按锁内现状核一次，核对之后才被删掉、改过的不复活
+    const overwrite = isPromote
+      ? (cur: MemoryRecord | undefined) => cur?.status === 'active' && records.some(r => r.id === cur.id && !isConflicting(cur, r))
+      : false
+    const r = await deps.snapshots.restore(snapshot, targets, deps.store, { target, overwrite, now: deps.now ?? Date.now })
     if (r.skipped.length > 0) return changed(r.skipped[0]!, r.redacted.length > 0 ? 'redacted' : 'changed')
     restored = r.restored
   }

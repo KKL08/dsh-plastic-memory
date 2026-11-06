@@ -132,6 +132,18 @@ export async function runCheckup(input: CheckupRunInput, deps: CheckupRunDeps): 
   const controller = new AbortController()
   const signal = input.signal !== undefined ? AbortSignal.any([input.signal, controller.signal]) : controller.signal
   let held: Awaited<ReturnType<typeof holdCheckups>> | undefined
+  let isCommitted = false
+  // 体检挂了账、写了缓存和完成记录：先清过期的已结清条目，再立刻重写视图，体检后的视图就是重写收集到的这份。
+  // 清理是顺带的：体检这时已经提交，清不掉只记日志，不把做完的体检报成失败
+  const refresh = async (startedAt: number) => {
+    try {
+      await deps.scan.decisions.sweep(startedAt)
+    } catch (err) {
+      deps.log.warn('[plastic-memory] 体检后清理过期的已结清条目失败，下次再清', err)
+    }
+    return await deps.views.rewriteAll()
+  }
+  let startedAt: number | undefined
   try {
     held = await holdCheckups(deps.checkups, scopes, {
       interval: deps.interval,
@@ -155,28 +167,23 @@ export async function runCheckup(input: CheckupRunInput, deps: CheckupRunDeps): 
       : { kind: 'scope', scope: target.kind === 'all' ? { kind: 'global' } : target }
     const scopeNotes = new Map<string, readonly ScanNote[]>()
     // 开始时间是核心开读的时刻：认领、收集视图花的时间不算，完成记录才不会被这段时间里开跑的 agent 体检挡掉
-    const startedAt = deps.now()
+    startedAt = deps.now()
     const result = await runScan({
       target: scanTarget, layers: 'full', llm: input.llm, baseline: input.baseline,
       ...(input.currentWorkspace !== undefined ? { currentWorkspace: input.currentWorkspace } : {}),
       signal, startedAt,
-    }, { ...deps.scan, checkups: deps.checkups, now: deps.now }, { by, onScopeNotes: (scope, notes) => { scopeNotes.set(checkupKey(scope), notes) } })
-    // 体检挂了账、写了缓存和完成记录：先清过期的已结清条目，再立刻重写视图，体检后的视图就是重写收集到的这份。
-    // 清理是顺带的：体检这时已经提交，清不掉只记日志，不把做完的体检报成失败
-    try {
-      await deps.scan.decisions.sweep(startedAt)
-    } catch (err) {
-      deps.log.warn('[plastic-memory] 体检后清理过期的已结清条目失败，下次再清', err)
-    }
-    const after = await deps.views.rewriteAll() ?? (before === undefined ? undefined : await collect())
+    }, { ...deps.scan, checkups: deps.checkups, now: deps.now }, {
+      by, onScopeNotes: (scope, notes) => { scopeNotes.set(checkupKey(scope), notes) }, onCommitted: () => { isCommitted = true },
+    })
+    const after = await refresh(startedAt) ?? (before === undefined ? undefined : await collect())
     // 核心提交之后才被取消（认领被接手、插件卸载）：体检已经做完，只是不写最近一次结果，免得盖掉接手的那次
     if (signal.aborted) return result.kind === 'error' ? { kind: 'cancelled' } : doneOf(result)
-    if (result.kind === 'error') return await failed(input, deps, scopes, { kind: 'error', message: result.message })
+    if (result.kind === 'error') return await failed(input, deps, scopes, { kind: 'error', message: result.message }, startedAt)
     if (by === 'auto') {
       const unavailable = result.notes.find(n => n.code === 'model-unavailable')
       if (unavailable !== undefined) return { kind: 'model-unavailable', cause: unavailable.cause ?? { kind: 'model-error' } }
       const semanticFailed = result.notes.find(n => n.code === 'semantic-failed')
-      if (semanticFailed !== undefined) return await failed(input, deps, scopes, semanticFailed.cause ?? { kind: 'model-error' })
+      if (semanticFailed !== undefined) return await failed(input, deps, scopes, semanticFailed.cause ?? { kind: 'model-error' }, startedAt)
     }
     const compared = before !== undefined && after !== undefined ? { before, after } : undefined
     if (compared !== undefined) {
@@ -193,9 +200,19 @@ export async function runCheckup(input: CheckupRunInput, deps: CheckupRunDeps): 
     }
     return doneOf(result, compared)
   } catch (err) {
-    if (signal.aborted) return { kind: 'cancelled' }
+    if (signal.aborted) {
+      if (!isCommitted || startedAt === undefined) return { kind: 'cancelled' }
+      // 核心提交之后、跑完之前被取消（全部体检提交后还有跨项目分析）：体检已经做完，照样刷新视图，不写最近一次结果；
+      // 结果没拿到，说明码随之没有。刷新出错只记日志，不把做完的体检报成失败
+      try {
+        await refresh(startedAt)
+      } catch (err) {
+        deps.log.warn('[plastic-memory] 体检取消后刷新视图失败，下次重写再补', err)
+      }
+      return { kind: 'done', notes: [] }
+    }
     // 原话进体检记录和视图：先遮掉疑似密钥
-    return await failed(input, deps, scopes, { kind: 'error', message: maskDiagnostic(err instanceof Error ? err.message : String(err)) })
+    return await failed(input, deps, scopes, { kind: 'error', message: maskDiagnostic(err instanceof Error ? err.message : String(err)) }, startedAt)
   } finally {
     if (held !== undefined && !('busy' in held)) await held.release()
   }
@@ -211,11 +228,11 @@ function doneOf(result: Exclude<ScanToolResult, { kind: 'error' }>, compared?: {
 }
 
 /** 没做完：自动体检在放掉认领之前给这次的范围记失败（连续失败计数、重试时间）；手动不记，交给界面回失败。 */
-async function failed(input: CheckupRunInput, deps: CheckupRunDeps, scopes: readonly Scope[], cause: CheckupCause): Promise<CheckupRunOutcome> {
+async function failed(input: CheckupRunInput, deps: CheckupRunDeps, scopes: readonly Scope[], cause: CheckupCause, startedAt?: number): Promise<CheckupRunOutcome> {
   if (input.by === 'auto') {
     deps.log.warn('[plastic-memory] 自动体检没做完，稍后再试', cause)
     try {
-      for (const scope of scopes) await deps.checkups.recordFailure(scope, cause, deps.now())
+      for (const scope of scopes) await deps.checkups.recordFailure(scope, cause, deps.now(), startedAt)
     } catch (err) {
       // 记不下也不挡：没有失败记录，下一次检查照常到期再试
       deps.log.warn('[plastic-memory] 记不下自动体检的失败，下次检查再试', err)
