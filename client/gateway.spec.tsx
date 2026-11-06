@@ -3,10 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
 import { useSyncExternalStore } from 'react'
 import { GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, type CheckupView, type PendingItem, type PendingView } from '../src/gui/contract.ts'
-import {
-  belongsTo, createHostGateway, decodeExecution, fileAddress, MEMORY_ROOT_CONFIG_KEY, MEMORY_ROOT_KEY, parseView, pickSession, toPluginConfig, viewPath,
-  workspaceOf,
-} from './gateway.ts'
+import { createHostGateway, decodeExecution, fileAddress, MEMORY_ROOT_CONFIG_KEY, MEMORY_ROOT_KEY, parseView, viewPath } from './gateway.ts'
 import { createFakeConfigForm, DEFAULT_SECTION } from './settings/config-form.fake.ts'
 import { ENTRY_ID } from './settings/config.ts'
 import { createTranslator } from './i18n.tsx'
@@ -23,102 +20,6 @@ function summary(id: string, patch: Partial<SessionSummary> = {}): SessionSummar
 function list(...rows: SessionSummary[]): SessionListState {
   return { ids: rows.map(r => r.id), byId: Object.fromEntries(rows.map(r => [r.id, r])), phase: 'ready' }
 }
-
-describe('pickSession：只有「无会话 / 有会话」两态', () => {
-  it('一个会话都没有 → none', () => {
-    expect(pickSession(list(), '/w/app')).toEqual({ kind: 'none' })
-  })
-
-  it('优先页面项目里最近更新的会话，其次当前选中，再其次最近更新的任一会话；子 agent 不借', () => {
-    const rows = list(
-      summary('old-app', { cwd: '/w/app', updatedAt: 1 }),
-      summary('new-app', { cwd: '/w/app/', updatedAt: 5 }),
-      summary('sub', { cwd: '/w/app', updatedAt: 9, origin: 'subagent' }),
-      summary('selected', { cwd: '/w/other', updatedAt: 2, retainedBy: { mainView: 1 } }),
-      summary('latest', { cwd: '/w/third', updatedAt: 8 }),
-    )
-    expect(pickSession(rows, '/w/app')).toEqual({ kind: 'ready', sessionId: 'new-app', cwd: '/w/app/' })
-    expect(pickSession(rows, '/w/none')).toEqual({ kind: 'ready', sessionId: 'selected', cwd: '/w/other' })
-    expect(pickSession(list(summary('a', { updatedAt: 1 }), summary('b', { updatedAt: 3 })), undefined))
-      .toEqual({ kind: 'ready', sessionId: 'b', cwd: undefined })
-  })
-
-  it('历史会话（没在跑）照样能借', () => {
-    expect(pickSession(list(summary('cold', { running: false })), undefined).kind).toBe('ready')
-  })
-
-  it('同一档里先借空闲的会话：项目里较旧的空闲会话胜过较新的、正在跑的', () => {
-    const rows = list(
-      summary('idle-app', { cwd: '/w/app', updatedAt: 1 }),
-      summary('busy-app', { cwd: '/w/app', updatedAt: 5, running: true }),
-    )
-    expect(pickSession(rows, '/w/app')).toEqual({ kind: 'ready', sessionId: 'idle-app', cwd: '/w/app' })
-    // 最后一档同理
-    expect(pickSession(rows, undefined)).toEqual({ kind: 'ready', sessionId: 'idle-app', cwd: '/w/app' })
-  })
-
-  it('只有正在跑的会话时照样借，界面不至于不能用', () => {
-    expect(pickSession(list(summary('busy', { cwd: '/w/app', running: true })), '/w/app'))
-      .toEqual({ kind: 'ready', sessionId: 'busy', cwd: '/w/app' })
-    expect(pickSession(list(summary('busy', { running: true })), undefined).kind).toBe('ready')
-  })
-
-  it('档位顺序不变：项目里正在跑的会话仍先于别处空闲的选中会话、最近会话；选中会话仍先于最近会话', () => {
-    const rows = list(
-      summary('busy-app', { cwd: '/w/app', updatedAt: 1, running: true }),
-      summary('selected', { cwd: '/w/other', updatedAt: 2, retainedBy: { mainView: 1 } }),
-      summary('latest', { cwd: '/w/third', updatedAt: 8 }),
-    )
-    expect(pickSession(rows, '/w/app')).toMatchObject({ sessionId: 'busy-app' })
-    expect(pickSession(rows, '/w/none')).toMatchObject({ sessionId: 'selected' })
-  })
-
-  it('项目子目录里开的会话算这个项目的；共用前缀的兄弟目录不算', () => {
-    const rows = list(
-      summary('sub', { cwd: '/w/app/packages/core', updatedAt: 1 }),
-      summary('sibling', { cwd: '/w/app-other', updatedAt: 9 }),
-      summary('selected', { cwd: '/w/third', updatedAt: 2, retainedBy: { mainView: 1 } }),
-    )
-    expect(pickSession(rows, '/w/app')).toMatchObject({ sessionId: 'sub' })
-    expect(pickSession(rows, '/w/app/')).toMatchObject({ sessionId: 'sub' })
-    expect(pickSession(list(rows.byId.sibling!, rows.byId.selected!), '/w/app')).toMatchObject({ sessionId: 'selected' })
-  })
-
-  it('服务端记下的对照（原始 cwd → 项目）以它为准：软链接路径也算，cwd 在项目里、归属却是嵌套的子项目则不算', () => {
-    const rows = list(
-      summary('linked', { cwd: '/link/app', updatedAt: 1 }),
-      summary('nested', { cwd: '/w/app/pkg', updatedAt: 9 }),
-      summary('latest', { cwd: '/w/third', updatedAt: 5 }),
-    )
-    const map = { '/link/app': '/w/app', '/w/app/pkg': '/w/app/pkg' }
-    expect(pickSession(rows, '/w/app', map)).toMatchObject({ sessionId: 'linked' })
-    expect(pickSession(rows, '/w/app/pkg', map)).toMatchObject({ sessionId: 'nested' })
-  })
-
-  it('服务端没见过的会话按路径判断，取包含 cwd 的最深的已知项目：嵌套子项目里的会话归子项目', () => {
-    const rows = list(
-      summary('in-pkg', { cwd: '/w/app/pkg/src', updatedAt: 9 }),
-      summary('in-app', { cwd: '/w/app/docs', updatedAt: 1 }),
-    )
-    // /w/app/pkg 是已知项目（对照里有别的会话归到它）
-    const map = { '/elsewhere': '/w/app/pkg' }
-    expect(pickSession(rows, '/w/app', map)).toMatchObject({ sessionId: 'in-app' })
-    expect(pickSession(rows, '/w/app/pkg', map)).toMatchObject({ sessionId: 'in-pkg' })
-    // 不知道 pkg 是项目时，两个都算 /w/app 的，照旧挑最近的
-    expect(pickSession(rows, '/w/app')).toMatchObject({ sessionId: 'in-pkg' })
-  })
-
-  it('belongsTo / workspaceOf：对照优先，其次最深的已知项目，都没有时 workspaceOf 回原始 cwd', () => {
-    const map = { '/link/app': '/w/app', '/x': '/w/app/pkg' }
-    expect(belongsTo('/link/app/', '/w/app', map)).toBe(true)
-    expect(belongsTo('/w/app/pkg/a', '/w/app', map)).toBe(false)
-    expect(belongsTo('/w/app-other', '/w/app', map)).toBe(false)
-    expect(belongsTo(undefined, '/w/app', map)).toBe(false)
-    expect(workspaceOf('/link/app', map)).toBe('/w/app')
-    expect(workspaceOf('/w/app/pkg/a', map)).toBe('/w/app/pkg')
-    expect(workspaceOf('/w/new/sub', map)).toBe('/w/new/sub')
-  })
-})
 
 describe('decodeExecution', () => {
   it('成功、失败都按契约 JSON 解析', () => {
@@ -213,7 +114,11 @@ describe('createHostGateway', () => {
     executed = []; resources = {}; files = {}; localStorage.clear()
     openWorkspacePath = vi.fn(async () => ({ ok: true as const, value: { opened: true } }))
   })
-  afterEach(() => { localStorage.clear() })
+  afterEach(() => { localStorage.clear(); vi.useRealTimers() })
+
+  /** 要断言「之后没再发命令」的用例开头装上：假计时器跟着真实时间走（waitFor 照常轮询），断言前再用 settle 跑完排着的计时器。 */
+  const useFakeClock = () => { vi.useFakeTimers({ shouldAdvanceTime: true }) }
+  const settle = () => act(async () => { await vi.runAllTimersAsync() })
 
   it('删除状态在插槽根之间共用：一处 forget / hard-delete 成功，另一处读到；restore 后去掉；失败不记', async () => {
     const bind = createHostGateway(fakeCtx())
@@ -448,20 +353,22 @@ describe('createHostGateway', () => {
     })
 
     it('重写后仍不认识：显示过时，只发这一次，重渲染、资源推来新版本都不再发', async () => {
+      useFakeClock()
       const { result, rerender } = setup('still-old')
       await waitFor(() => { expect(result.current).toEqual({ status: 'outdated' }) })
       resources[fileAddress('s1', pendingPath)] = { status: 'live', value: { absolutePath: pendingPath, version: 'v2' }, failure: undefined }
       rerender()
-      await new Promise(r => setTimeout(r, 50))
+      await settle()
       expect(result.current).toEqual({ status: 'outdated' })
       expect(executed).toEqual(['/memory refresh-views'])
     })
 
     it('重写失败：显示过时，不反复重试', async () => {
+      useFakeClock()
       const { result, rerender } = setup('fail')
       await waitFor(() => { expect(result.current).toEqual({ status: 'outdated' }) })
       rerender()
-      await new Promise(r => setTimeout(r, 50))
+      await settle()
       expect(executed).toEqual(['/memory refresh-views'])
     })
   })
@@ -552,6 +459,7 @@ describe('createHostGateway', () => {
   })
 
   it('两个视图挂着不同会话、info 都失败：各试一次就停，不来回重试', async () => {
+    useFakeClock()
     const two = list(summary('s1', { cwd: '/w/a', updatedAt: 1 }), summary('s2', { cwd: '/w/b', updatedAt: 2 }))
     const ctx = fakeCtx()
     const execute = ctx.remote.commands.execute as ReturnType<typeof vi.fn>
@@ -559,7 +467,7 @@ describe('createHostGateway', () => {
     const gateway = createHostGateway(ctx)({ ...props, useSessions: <S,>(selector: (s: SessionListState) => S) => selector(two) })
     const { result } = renderHook(() => [gateway.useView(gateway.useSession('/w/a'), 'pending'), gateway.useView(gateway.useSession('/w/b'), 'pending')])
     await waitFor(() => { expect(result.current.every(v => v.status === 'error')).toBe(true) })
-    await new Promise(r => setTimeout(r, 50))
+    await settle()
     expect(executed).toEqual(['/memory info', '/memory info'])
   })
 
@@ -611,13 +519,14 @@ describe('createHostGateway', () => {
     })
 
     it('同时多处要刷新只发一条', async () => {
+      useFakeClock()
       const gateway = setup(1)
       const { result } = renderHook(() => [
         gateway.useView(gateway.useSession('/w/app'), 'library'),
         gateway.useView(gateway.useSession('/w/app'), 'library'),
       ])
       await waitFor(() => { expect(executed).toEqual(['/memory refresh-views']) })
-      await new Promise(r => setTimeout(r, 50))
+      await settle()
       expect(executed).toEqual(['/memory refresh-views'])
       expect(result.current.every(v => v.status === 'missing')).toBe(true)
     })
@@ -836,25 +745,10 @@ describe('createHostGateway', () => {
     expect(set).toHaveBeenCalledWith('snapshotTokenBudget', 5000)
   })
 
-  it('宿主不服务配置：useConfig 为 undefined，setConfig 为 false；结构不对的值不认', async () => {
+  it('宿主不服务配置：useConfig 为 undefined，setConfig 为 false', async () => {
     const gateway = createHostGateway(fakeCtx())(props)
     expect(renderHook(() => gateway.useConfig()).result.current).toBeUndefined()
     expect(await gateway.setConfig('snapshotTokenBudget', 5000)).toBe(false)
-    expect(toPluginConfig({ snapshotTokenBudget: '4000' })).toBeUndefined()
-  })
-
-  it('主题色取不到或不认识时按艾拉主题色，不连累其余几项', () => {
-    const base = { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governance: { enabled: true, globalPromoteTarget: 'plugin-global' } }
-    expect(toPluginConfig(base)?.accent).toBe('ella')
-    expect(toPluginConfig({ ...base, accent: 'neon' })?.accent).toBe('ella')
-  })
-
-  it('customTypes 只取显示名；没名字或结构不对的条目按没改名处理，不连累其余几项', () => {
-    const base = { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governance: { enabled: true, globalPromoteTarget: 'plugin-global' } }
-    const customTypes = { procedure: { label: '发版手册', description: 'd' }, term: { label: '' }, broken: null, odd: { label: 3 } }
-    expect(toPluginConfig({ ...base, customTypes })?.customTypes).toEqual({ procedure: { label: '发版手册' } })
-    expect(toPluginConfig({ ...base, customTypes: 'x' })?.customTypes).toEqual({})
-    expect(toPluginConfig(base)?.customTypes).toEqual({})
   })
 
   it('打开文件 / 在文件管理器中显示走 session.openWorkspacePath；读文件走 workspaceFiles', async () => {

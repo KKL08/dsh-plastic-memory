@@ -16,7 +16,8 @@
  */
 import { useId, useMemo, useState } from 'react'
 import { RETENTION_MS, sameScope, scopeOfMemory, type LibraryView, type ModelChange, type Scope } from '../../src/gui/contract.ts'
-import { useGateway, workspaceOf, type BorrowedSession } from '../gateway.ts'
+import { useGateway, type BorrowedSession } from '../gateway.ts'
+import { workspaceOf } from '../session-pick.ts'
 import { useT } from '../i18n.tsx'
 import type { NavTarget } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'

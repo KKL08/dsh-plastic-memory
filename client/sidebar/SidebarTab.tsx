@@ -21,7 +21,8 @@ import {
   CONFLICT_ACTION_VERDICTS, pendingItemScopes, sameScope, scopeOfMemory,
   type MemoryCard as MemoryCardData, type MemoryCommand, type ModelChange, type PendingItem, type Scope, type SnapshotOrigin,
 } from '../../src/gui/contract.ts'
-import { samePath, useGateway, type BorrowedSession } from '../gateway.ts'
+import { useGateway, type BorrowedSession } from '../gateway.ts'
+import { samePath } from '../session-pick.ts'
 import { baseName, formatNumber, useT } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
 import type { NavTarget } from '../nav.ts'

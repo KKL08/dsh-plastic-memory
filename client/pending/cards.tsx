@@ -7,7 +7,8 @@ import {
   CONFLICT_ACTION_VERDICTS, MODEL_EDIT_ADVICE_TYPES, mergeKeeperIndex, relaxedCap, scopeOfMemory,
   type AdviceType, type IgnorableAdviceType, type MemoryCard as MemoryCardData, type MemoryCommand, type ModelEditAdviceType, type PendingItem, type Scope,
 } from '../../src/gui/contract.ts'
-import { belongsTo, useGateway, type BorrowedSession } from '../gateway.ts'
+import { useGateway, type BorrowedSession } from '../gateway.ts'
+import { belongsTo } from '../session-pick.ts'
 import { baseName, formatDay, formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
 import { AdviceNote, ResultLine } from '../ui/Advice.tsx'

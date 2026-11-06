@@ -1,11 +1,12 @@
-// 设置页配置模型的纯函数：场景的解析与写入、场景 id、类型迁移的合并、类型表单校验。
+// 设置页配置模型的纯函数：场景的解析与写入、场景 id、类型迁移的合并、类型表单校验，以及界面用到的那几项配置。
 import { describe, expect, it } from 'vitest'
 import {
   BUILTIN_TYPE_NAMES, EMPTY_TYPE_DRAFT, GENERAL_SCENE, PRESET_SCENES, TYPE_DEFINITIONS, buildOps, customTypeChanges, droppedTypes, fieldsOf,
   forgetMigrations, isPresetEdited, isPresetTypeEdited, keepMigrations, memoryCountOf, nextSceneId, pendingNames, presetSceneTypes, presetTypeChanges,
   removeType, renameMigrations, renameType, restorePresetType, sceneChanges, sceneTypes, typePool, validateSceneDraft, validateTypeDraft,
-  type CustomType, type SettingsFields,
+  OVERFLOW_MODES, PROMOTE_TARGETS, toPluginConfig, type CustomType, type SettingsFields,
 } from './config.ts'
+import { DEFAULT_SECTION } from './config-form.fake.ts'
 
 const term: CustomType = { label: '术语', description: 'd', whenToSave: 'w', recall: 'search', decayDays: null, governancePriority: 'medium' }
 const base = (patch: Partial<SettingsFields> = {}): SettingsFields => ({ ...fieldsOf({}), ...patch })
@@ -224,5 +225,36 @@ describe('预设类型：改、删、恢复', () => {
     const draft = { ...EMPTY_TYPE_DRAFT, name: 'decision', label: '决策', description: 'd', whenToSave: 'w' }
     const result = validateTypeDraft(draft, { names: ['procedure', 'decision'], labels: [], removedPresets: ['decision'] })
     expect(result).toMatchObject({ ok: false, errors: { name: 'name-removed-preset' } })
+  })
+})
+
+describe('toPluginConfig：配置段 → 界面用到的几项', () => {
+  it('设置里超限处理、提升去处的每个取值都能转成插件配置', () => {
+    for (const overflow of OVERFLOW_MODES) {
+      for (const target of PROMOTE_TARGETS) {
+        const section = { ...DEFAULT_SECTION, snapshotOverflow: overflow, governance: { ...DEFAULT_SECTION.governance, globalPromoteTarget: target } }
+        expect(toPluginConfig(section)).toMatchObject({ snapshotOverflow: overflow, globalPromoteTarget: target })
+      }
+    }
+  })
+
+  it('结构不对、取值不认识时不认整份', () => {
+    expect(toPluginConfig({ snapshotTokenBudget: '4000' })).toBeUndefined()
+    expect(toPluginConfig({ ...DEFAULT_SECTION, snapshotOverflow: 'cut' })).toBeUndefined()
+    expect(toPluginConfig({ ...DEFAULT_SECTION, governance: { ...DEFAULT_SECTION.governance, globalPromoteTarget: 'readme' } })).toBeUndefined()
+  })
+
+  it('主题色取不到或不认识时按艾拉主题色，不连累其余几项', () => {
+    const base = { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governance: { enabled: true, globalPromoteTarget: 'plugin-global' } }
+    expect(toPluginConfig(base)?.accent).toBe('ella')
+    expect(toPluginConfig({ ...base, accent: 'neon' })?.accent).toBe('ella')
+  })
+
+  it('customTypes 只取显示名；没名字或结构不对的条目按没改名处理，不连累其余几项', () => {
+    const base = { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governance: { enabled: true, globalPromoteTarget: 'plugin-global' } }
+    const customTypes = { procedure: { label: '发版手册', description: 'd' }, term: { label: '' }, broken: null, odd: { label: 3 } }
+    expect(toPluginConfig({ ...base, customTypes })?.customTypes).toEqual({ procedure: { label: '发版手册' } })
+    expect(toPluginConfig({ ...base, customTypes: 'x' })?.customTypes).toEqual({})
+    expect(toPluginConfig(base)?.customTypes).toEqual({})
   })
 })

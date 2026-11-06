@@ -4,7 +4,8 @@
  */
 import { useSyncExternalStore } from 'react'
 import type { MemoryCommand, MemoryCommandResult } from '../src/gui/contract.ts'
-import { createDeletionStore, type BorrowedSession, type CurrentWorkspace, type MemoryGateway, type PluginConfig, type ViewMap, type ViewName, type ViewState } from './gateway.ts'
+import { createDeletionStore } from './deletions.ts'
+import type { BorrowedSession, CurrentWorkspace, MemoryGateway, PluginConfig, ViewMap, ViewName, ViewState } from './gateway.ts'
 
 export interface FakeGatewayInit {
   session?: BorrowedSession
