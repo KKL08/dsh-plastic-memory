@@ -207,7 +207,7 @@ describe('待处理：各类卡', () => {
 
   it('提升目标是 AGENTS.md：按钮改「写进 AGENTS.md」并说明插件不再管理；结果不能撤销', async () => {
     const { commands } = setup([promote], { config: { ...config, globalPromoteTarget: 'agents-md' } })
-    expect(screen.getByText('之后由你自己维护：插件不再体检它，它也不会过期。')).toBeInTheDocument()
+    expect(screen.getByText('之后由你自己维护：插件不再体检它，有效期也不再生效。')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '写进 AGENTS.md' }))
     await screen.findByText('已写进 AGENTS.md')
     expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
