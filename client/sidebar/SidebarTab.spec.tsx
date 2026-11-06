@@ -589,6 +589,8 @@ describe('SidebarTab 就地裁决', () => {
     expect(screen.queryByRole('heading', { name: '两条记忆互相矛盾，等你决定' })).toBeNull()
     expect(screen.getByText('已按 A')).toBeInTheDocument()
     expect(screen.getByText(/B 已删除，14 天内可恢复。/)).toBeInTheDocument()
+    // 删掉一条只影响之后的组装：这次对话冻结的快照里还是两条
+    expect(screen.getByText('这次对话里已带入的不变，压缩后或下个对话起生效。')).toBeInTheDocument()
 
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
     expect(gateway.executed.map(e => e.command)[1]).toEqual({ cmd: 'undo', decisionId: 'pd_1' })
@@ -788,6 +790,7 @@ describe('SidebarTab 就地裁决：和基线冲突', () => {
     })
     expect(screen.getByText('已按基线')).toBeInTheDocument()
     expect(screen.getByText(/这条记忆已删除，14 天内可恢复。/)).toBeInTheDocument()
+    expect(screen.getByText('这次对话里已带入的不变，压缩后或下个对话起生效。')).toBeInTheDocument()
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
     expect(gateway.executed.map(e => e.command)[1]).toEqual({ cmd: 'undo', decisionId: 'pd_v' })
   })
@@ -799,6 +802,8 @@ describe('SidebarTab 就地裁决：和基线冲突', () => {
     act(() => { gateway.setView('pending', pending()) })
     expect(screen.getByText('已保留这条记忆')).toBeInTheDocument()
     expect(screen.getByText('merge freeze 到 3 月 5 日。')).toBeInTheDocument()
+    // 什么都没删，带入的内容之后也不变，不写生效时机
+    expect(screen.queryByText('这次对话里已带入的不变，压缩后或下个对话起生效。')).toBeNull()
   })
 
   it('建议整理不进右侧栏，也不算进底部「本项目还有 N 处待处理」', () => {

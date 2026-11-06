@@ -46,6 +46,7 @@ export const sidebarZh = {
   'sidebar.ruled.deletedMemory': '这条记忆已删除，14 天内可恢复。',
   'sidebar.ruled.keptMemory': '基线和记忆都不变时不再报。',
   'sidebar.ruled.unrecorded': '这次的决定没能记下，下次体检可能还会报。',
+  'sidebar.ruled.appliesLater': '这次对话里已带入的不变，压缩后或下个对话起生效。',
   'sidebar.ruled.undo': '撤销',
   'sidebar.action.refused': '你的选择没有生效：这条冲突正在别处处理，或者刚在别处处理完。',
 } as const
@@ -94,6 +95,7 @@ export const sidebarEn: Record<keyof typeof sidebarZh, string> = {
   'sidebar.ruled.deletedMemory': 'This memory was deleted. It can be restored within 14 days.',
   'sidebar.ruled.keptMemory': 'Not reported again while neither changes.',
   'sidebar.ruled.unrecorded': 'This decision could not be saved, so the next checkup may report it again.',
+  'sidebar.ruled.appliesLater': 'What this conversation already loaded stays the same. The change applies after compaction or in the next conversation.',
   'sidebar.ruled.undo': 'Undo',
   'sidebar.action.refused': 'Your choice did not take effect: this conflict is being handled elsewhere, or was just handled there.',
 }
