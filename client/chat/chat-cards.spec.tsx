@@ -771,7 +771,7 @@ describe('交付卡：提升候选就地处理', () => {
     expect(row('mem_c').getByRole('button', { name: '留在本项目' })).not.toHaveAttribute('aria-disabled')
   })
 
-  it('设置里的每个提升去处，配置段转过来都认得：按钮写去处，不停在「正在读取设置」', () => {
+  it('PA-53：设置里的每个提升去处，配置段转过来都认得：按钮写去处，不停在「正在读取设置」', () => {
     const labels: Record<(typeof PROMOTE_TARGETS)[number], string> = { 'plugin-global': '提升为全局', 'agents-md': '写进 AGENTS.md' }
     for (const target of PROMOTE_TARGETS) {
       const config = toPluginConfig({ ...DEFAULT_SECTION, governance: { ...DEFAULT_SECTION.governance, globalPromoteTarget: target } })

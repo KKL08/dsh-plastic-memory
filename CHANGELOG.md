@@ -67,6 +67,11 @@ All notable changes to this project are documented here. The format follows
   back; after upgrading again it is pending as before.
 - `host:contract` now also checks subagent writes on a real child session:
   saving, search order, `memory_source` and acceptance by the parent.
+  Without a model key it also runs `/memory` commands through DeepSeek
+  Harness's command service and decodes the results with the interface
+  contract, checks that automatic checkups register a timer with it, and
+  checks that every slot the interface uses is declared by the installed
+  DeepSeek Harness.
 - `memory_save` takes `validFrom` and `validTo` as local `YYYY-MM-DD HH:mm`,
   or just a date when no time was given, which then gets the time of saving.
   Models often got the old epoch milliseconds wrong, saving memories that had
@@ -108,8 +113,9 @@ All notable changes to this project are documented here. The format follows
   icon tells apart you, the agent and the environment.
 - Wherever you decide on a memory, a suggestion below it says why you are
   asked and what each choice does, always above the buttons. Once you
-  decide, a result line with undo takes its place. "Could become global"
-  and "Rewritten" moved out of the memory's details into these lines.
+  decide, a result line takes its place, with undo where the decision can
+  be undone. "Could become global" and "Rewritten" moved out of the
+  memory's details into these lines.
   Conflict cards on the memory page and in the sidebar share one layout:
   the two memories, a note on what each choice does, then the three
   choices together in one row.
@@ -157,6 +163,24 @@ All notable changes to this project are documented here. The format follows
   last 7 days, and earlier. While the memory page stays open, it keeps
   which groups you folded and where you scrolled in each view and scope,
   and switching views no longer flashes a loading line.
+- Automatic checkups refresh the memory page as soon as they finish and
+  clear past decisions that can no longer be undone, the same as checkups
+  you start yourself.
+- When a ruling in the right sidebar deletes a memory, the result line adds
+  that the chat keeps what it already loaded and the change applies after
+  compaction or in the next chat.
+- Conflict cards label the two sides with a plain A and B, and line icons
+  keep a one-pixel stroke at every size, so small marks stay sharp.
+- Overall polish of how the panels report an action: a failure reads the
+  same in the chat card, the sidebar, To do, All and Recently deleted, next
+  to the row it concerns, and an action on a memory being handled elsewhere
+  says it did not take effect. Deleting a memory of another project from the
+  chat card asks first. Hints, counts and paths in the edit, move and "Edit
+  with model" panels use the secondary text color, and tool descriptions
+  and results call global and project memory a scope.
+- The ids in `memory_save`'s `supersedes` go through secret detection like
+  the other fields, and the checkup's note about references to missing
+  memories masks secrets.
 
 ### Fixed
 - The plugin page of DeepSeek Harness 0.2.2-rc.1 shows the README as the
@@ -175,7 +199,7 @@ All notable changes to this project are documented here. The format follows
   than what it replaces) no longer triggers a snapshot refresh either, since
   nothing was removed and a refresh would only add a second copy next to
   the old one.
-- Hard-deleting one copy of a memory that also exists in another layer
+- Hard-deleting one copy of a memory that also exists in another scope
   (global and a project, or two projects) no longer clears the other copy's
   undo history, and no longer marks its snapshots as holding a secret, which
   made restoring that copy fail. When a memory is hard-deleted because of a
@@ -224,6 +248,57 @@ All notable changes to this project are documented here. The format follows
 - `pnpm lint` (oxlint) joins CI and the contributor checklist. Besides the
   default correctness rules it keeps the pure logic free of runtime imports
   from the host packages, so it stays testable without a host.
+- When the model rewrites a memory that you edited on the memory page, or
+  that another chat changed, while it was working, the rewrite is rejected
+  and the model gets the current content to start from; a memory you edited
+  by hand still needs your consent first. A `supersedes` pointing at a
+  memory that was deleted, rewritten or moved in the meantime leaves it as
+  it is.
+- An edit or merge on the memory page that meets a change made elsewhere at
+  the same moment asks you to refresh and edit again, and keeps the other
+  version and both memories as they are.
+- Resolving a conflict deletes a losing memory that holds a high-risk secret
+  permanently and erases it from every snapshot, like deleting it directly;
+  the card says so beforehand and offers no undo afterwards. A loser holding
+  only a suspected secret, confirmed when it was saved, still goes to
+  Recently deleted.
+- A snapshot taken while another chat permanently deletes one of its
+  memories does not keep that memory in plain text, and a secret spanning
+  two fields, such as a private key split between name and summary, is
+  erased from both.
+- Removing a type in settings leaves alone memories that were changed to
+  another type while the removal ran.
+- High-risk secrets edited by hand into a summary are masked in duplicate
+  hints, promotion candidates, cross-project duplicate topics, what a
+  cross-project checkup sends to the model, and `memory_source` output.
+  "Edit with model" sends nothing that contains a high-risk secret.
+- When `~/.dsh/AGENTS.md` cannot be read, promoting to it fails, keeps the
+  memory and leaves the file untouched. When every file name a new memory
+  could take is held by other files, the save fails without overwriting any
+  of them.
+- With the desktop app and `dsh web` open at the same time, a memory view
+  collected earlier but written later does not replace a newer one, and the
+  two keep each other's chat-to-project assignments. The memory page keeps
+  updating after the system clock is set back.
+- After upgrading from 0.1.x, deleting a memory permanently waits until the
+  one-off import of old data has finished and says so, so a resumed import
+  cannot bring plain-text copies back from old snapshots. A resumed import
+  on a disk without hard links replaces the half-written files it left.
+- Undo checks the exact copy a change touched: when that memory was edited,
+  deleted or moved afterwards, every kind of undo says so and changes
+  nothing, and the memory page's undo button agrees with it. Undoing a merge
+  restores both memories or neither, and a memory just promoted to global or
+  kept in its project can be undone while a checkup is running.
+- Restoring from Recently deleted a memory that a conflict ruling removed
+  works like undoing that ruling and says the conflict goes back to Waiting
+  on you. A memory restored from a snapshot and edited right away keeps the
+  edit.
+- A renamed preset type shows the same name on the memory page, in the right
+  sidebar and on pending cards, and the English interface shows English type
+  names throughout. The relaxed budget shown in the overflow card and usage
+  bars matches the one in effect.
+- The memory page treats a project path with and without a trailing
+  separator as one project, as the right sidebar does.
 
 ## [0.2.0-beta.1] - 2026-10-25
 
@@ -362,9 +437,9 @@ All notable changes to this project are documented here. The format follows
   in place; snapshots and pending decisions are imported from the host's KV
   store on first use (or at a later start if the store is not available yet),
   by one host process at a time so a decision you settle right after the
-  upgrade does not come back, and the copies there are removed once the
-  import has finished (retried at later starts if removal fails), so nothing
-  stays behind in the host's store. The host's
+  upgrade does not come back, and the imported copies there are removed once
+  the import has finished (retried at later starts if removal fails). Recall
+  statistics and the scan cache are not imported and start fresh. The host's
   `storageDomain` service is therefore no longer required.
 - Hand-written memory files need only `name` and `type` in the frontmatter; the
   id is derived from the file path and every other field is filled in at the

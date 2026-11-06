@@ -75,7 +75,7 @@ const definedStyleConstants = (dir: string) => sourceFiles(dir).flatMap(file => 
 const filesInjectingStyle = (dir: string) => sourceFiles(dir).filter(file => /<style[\s>]/.test(readFileSync(join(dir, file), 'utf8').replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '')))
 
 describe('样式撞名', () => {
-  it('两个模块给同一个类写不带祖先限定的规则，算撞名；带了祖先限定的不算', () => {
+  it('PA-47：两个模块给同一个类写不带祖先限定的规则，算撞名；带了祖先限定的不算', () => {
     expect(collisions({ aCss: '.pm-x { color: red; }', bCss: '.pm-y .pm-x { gap: 0; }\n.pm-x:hover { gap: 1px; }' }))
       .toEqual([['pm-x', ['aCss', 'bCss']]])
     expect(collisions({ aCss: '.pm-x { color: red; }', bCss: '.pm-y > .pm-x, .pm-x + .pm-w { gap: 0; }' }))
@@ -101,7 +101,7 @@ describe('样式撞名', () => {
     expect(collisions(REGISTERED)).toEqual([])
   })
 
-  it('客户端里定义的样式常量都登记了', () => {
+  it('PA-47：客户端里定义的样式常量都登记了', () => {
     expect(definedStyleConstants(import.meta.dirname).sort()).toEqual(Object.keys(REGISTERED).sort())
   })
 
