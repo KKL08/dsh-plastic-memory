@@ -1,5 +1,5 @@
 /**
- * 设置页的配置模型（纯函数）：宿主 ConfigForm 的结构子集、插件配置段的形状、草稿 → 写入操作、校验。
+ * 配置模型（纯函数）：宿主 ConfigForm 的结构子集、插件配置段的形状、草稿 → 写入操作、校验，以及记忆页等界面读的那几项（toPluginConfig）。
  * 配置段形状对照 src/index.ts 的 Config schema（客户端只许 import src/gui/contract，这里手写一份）；
  * 只有 `.volatile()` 字段进表单，memoryRoot 只读显示，writeMode 不进。
  */
@@ -367,8 +367,10 @@ function at(value: unknown, path: readonly string[]): unknown {
   return cur
 }
 
+const isOneOf = <T extends string>(choices: readonly T[], value: unknown): value is T => choices.includes(value as T)
+
 function oneOf<T extends string>(choices: readonly T[], value: unknown, fallback: T): T {
-  return choices.includes(value as T) ? value as T : fallback
+  return isOneOf(choices, value) ? value : fallback
 }
 
 /** 配置段里的 scenes：结构不对的项跳过；整段取不到时用出厂的编码、办公。 */
@@ -413,15 +415,49 @@ export function fieldsOf(section: unknown): SettingsFields {
   }
 }
 
-/** 体检开关 `governance.enabled`：只在配置文件里改，设置页只读它来置灰依赖体检的项。取不到时按 schema 默认开着。 */
+/** 体检开关 `governance.enabled`：只在配置文件里改，不进表单。 */
+const GOVERNANCE_ENABLED = ['governance', 'enabled']
+
+/** 设置页只读体检开关来置灰依赖体检的项。取不到时按 schema 默认开着。 */
 export function governanceEnabled(section: unknown): boolean {
-  return at(section, ['governance', 'enabled']) !== false
+  return at(section, GOVERNANCE_ENABLED) !== false
 }
 
 /** 配置里写的 memoryRoot（空 = 默认位置）。 */
 export function configuredRoot(section: unknown): string {
   const root = at(section, ['memoryRoot'])
   return typeof root === 'string' ? root : ''
+}
+
+/** 记忆页、右侧栏等界面用到的配置项（配置段的子集，值已按 schema 带上默认值）。 */
+export interface PluginConfig {
+  snapshotTokenBudget: number
+  snapshotOverflow: (typeof OVERFLOW_MODES)[number]
+  governanceEnabled: boolean
+  globalPromoteTarget: (typeof PROMOTE_TARGETS)[number]
+  accent: (typeof ACCENTS)[number]
+  /** 我加的类型和改过的预设（配置 customTypes），界面只用到显示名。 */
+  customTypes: Readonly<Record<string, { label: string }>>
+}
+
+/** 配置段 → 界面用到的几项；结构不对为 undefined。和表单字段读同一套路径、认同一套取值。 */
+export function toPluginConfig(section: unknown): PluginConfig | undefined {
+  const budget = at(section, PATHS.budget)
+  const overflow = at(section, PATHS.overflow)
+  const enabled = at(section, GOVERNANCE_ENABLED)
+  const target = at(section, PATHS.promoteTarget)
+  if (typeof budget !== 'number' || !isOneOf(OVERFLOW_MODES, overflow) || typeof enabled !== 'boolean' || !isOneOf(PROMOTE_TARGETS, target)) return undefined
+  // 主题色只管外观：取不到或不认识时按默认主题色，不让整份配置作废
+  const accent = oneOf(ACCENTS, at(section, PATHS.accent), DEFAULTS.accent)
+  // 类型名同理：只收带字符串名字的条目，坏条目按没改名显示
+  const types = at(section, ['customTypes'])
+  const customTypes = typeof types === 'object' && types !== null
+    ? Object.fromEntries(Object.entries(types).flatMap(([name, type]) => {
+      const label = at(type, ['label'])
+      return typeof label === 'string' && label !== '' ? [[name, { label }]] : []
+    }))
+    : {}
+  return { snapshotTokenBudget: budget, snapshotOverflow: overflow, governanceEnabled: enabled, globalPromoteTarget: target, accent, customTypes }
 }
 
 /** 正整数文本 → 数字；不是正整数为 undefined。 */

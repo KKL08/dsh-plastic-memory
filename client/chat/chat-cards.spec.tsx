@@ -10,6 +10,8 @@ import { en, zh } from '../locales.ts'
 import { PanelShell } from '../ui/PanelShell.tsx'
 import type { SessionListState } from '../host.ts'
 import { createNavStore, PANEL_ID } from '../nav.ts'
+import { PROMOTE_TARGETS, toPluginConfig } from '../settings/config.ts'
+import { DEFAULT_SECTION } from '../settings/config-form.fake.ts'
 import { fakeHostContext, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { registerChatCards, type TurnTailProps } from './index.tsx'
 import { MemoryToolRow, type MemoryToolViewProps } from './MemoryToolRow.tsx'
@@ -767,6 +769,18 @@ describe('交付卡：提升候选就地处理', () => {
     expand()
     expect(row('mem_c').getByRole('button', { name: '提升为全局' })).toHaveAttribute('aria-disabled', 'true')
     expect(row('mem_c').getByRole('button', { name: '留在本项目' })).not.toHaveAttribute('aria-disabled')
+  })
+
+  it('设置里的每个提升去处，配置段转过来都认得：按钮写去处，不停在「正在读取设置」', () => {
+    const labels: Record<(typeof PROMOTE_TARGETS)[number], string> = { 'plugin-global': '提升为全局', 'agents-md': '写进 AGENTS.md' }
+    for (const target of PROMOTE_TARGETS) {
+      const config = toPluginConfig({ ...DEFAULT_SECTION, governance: { ...DEFAULT_SECTION.governance, globalPromoteTarget: target } })
+      expect(config).toBeDefined()
+      const { unmount } = card(undefined, config!)
+      expand()
+      expect(row('mem_c').getByRole('button', { name: labels[target] })).not.toHaveAttribute('aria-disabled')
+      unmount()
+    }
   })
 
   it('英文：折叠行、建议区与两个按钮', () => {

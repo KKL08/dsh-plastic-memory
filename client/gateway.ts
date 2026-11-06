@@ -13,14 +13,18 @@ import { createContext, useContext, useEffect, useMemo, useState, useSyncExterna
 import {
   GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, encodeMemoryCommand, sessionViewFile,
   checkupViewSchema, deletedViewSchema, healthViewSchema, libraryViewSchema, pendingViewSchema, sessionViewSchema, workspaceMapViewSchema,
-  ACCENTS, memoryCommandResultSchema, scopeKey, scopeOfMemory,
-  type Accent, type CheckupView, type DeletedView, type HealthView, type LibraryView, type MemoryCard, type MemoryCommand, type MemoryCommandResult,
-  type PendingItem, type PendingView, type Scope, type SessionView, type WorkspaceMapView,
+  memoryCommandResultSchema,
+  type CheckupView, type DeletedView, type HealthView, type LibraryView, type MemoryCommand, type MemoryCommandResult,
+  type PendingView, type SessionView, type WorkspaceMapView,
 } from '../src/gui/contract.ts'
 import type {
-  CommandExecution, ConfigForm, ConfigFormSnapshot, HostContext, RemoteResult, RootStandardProps, SessionListState,
+  CommandExecution, ConfigForm, ConfigFormSnapshot, HostContext, RemoteResult, RootStandardProps,
 } from './host.ts'
-import { configuredRoot, ENTRY_ID } from './settings/config.ts'
+import { createDeletionStore, type Deletions } from './deletions.ts'
+import { pickSession, selectedSessionId, workspaceOf, type BorrowedSession, type WorkspaceMap } from './session-pick.ts'
+import { configuredRoot, ENTRY_ID, toPluginConfig, type PluginConfig } from './settings/config.ts'
+
+export type { BorrowedSession, Deletions, PluginConfig, WorkspaceMap }
 
 export interface ViewMap {
   pending: PendingView
@@ -35,14 +39,6 @@ export interface ViewMap {
   workspaces: WorkspaceMapView
 }
 export type ViewName = keyof ViewMap
-
-/** 服务端记下的会话归属对照：原始 cwd → 项目。 */
-export type WorkspaceMap = Readonly<Record<string, string>>
-
-export type BorrowedSession =
-  | { kind: 'none' }
-  /** workspaces：借会话时用的归属对照，判断这个会话属于哪个项目要用同一份（见 belongsTo）；缺省按空表。 */
-  | { kind: 'ready'; sessionId: string; cwd: string | undefined; workspaces?: WorkspaceMap }
 
 /** 当前选中会话所属的项目。loading：归属对照还没读到，不拿原始 cwd 先顶上。 */
 export type CurrentWorkspace =
@@ -89,132 +85,6 @@ export interface MemoryGateway {
 /** unknown：还没问到、或没有会话，按可用处理；unavailable：服务端说借来的会话拿不到模型；model 缺省 = 不知道名字。 */
 export type ModelState = { status: 'unknown' } | { status: 'ready'; model: string | undefined } | { status: 'unavailable' }
 
-/** 界面用到的配置项（宿主配置段 `plastic-memory` 的子集，值已按 schema 带上默认值）。 */
-export interface PluginConfig {
-  snapshotTokenBudget: number
-  snapshotOverflow: Extract<PendingItem, { kind: 'overflow' }>['mode']
-  governanceEnabled: boolean
-  globalPromoteTarget: 'plugin-global' | 'agents-md'
-  accent: Accent
-  /** 我加的类型和改过的预设（配置 customTypes），界面只用到显示名。 */
-  customTypes: Readonly<Record<string, { label: string }>>
-}
-
-/** 删除状态的一份快照：soft 进了最近删除、可恢复；hard 是彻底删除；undefined = 没删或看不出来。 */
-export interface Deletions {
-  /**
-   * scope：页面上这一份所在的作用域（同 id 在几个作用域各有一份时各算各的）；不知道作用域时按 id 判，任一份删了都算。
-   * savedAt：记下这条记忆的时刻；给了才可能按视图判彻底删除（见 createDeletionStore 第 3 条）。
-   */
-  of(id: string, scope?: Scope, savedAt?: number): 'soft' | 'hard' | undefined
-}
-
-/** 一份副本的键：id + 作用域的标准键。不知道作用域时没有键。 */
-function copyKey(id: string, scope: Scope | undefined): string | undefined {
-  return scope === undefined ? undefined : JSON.stringify([id, scopeKey(scope)])
-}
-
-/** 经本网关的一次动作。copy 缺省 = 命令没带作用域，同 id 各作用域都算。 */
-interface LocalDeletion { id: string; copy: string | undefined; how: 'soft' | 'hard' | 'restored' }
-
-/**
- * 删除状态，全部记忆、最近删除、右侧栏、对话交付卡显示同一条记忆时都读这一份，删除后不会有的地方还留着删除按钮。
- * 软删与恢复按 id + 作用域记：同 id 在几个作用域各有一份时，删掉其中一份不影响别处那份的显示。三个来源：
- * 1. 经本网关发出的 forget / hard-delete / restore 成功后记一笔，不等视图刷新。
- * 2. 读到的视图：在最近删除里、全部记忆里同一作用域又没有在用副本的，算软删（对话里 agent 自己删的也在这里）。别的作用域同 id 副本还在用时
- *    删掉的那份也列在最近删除里，所以要两份视图都读到过才判断。
- * 3. 彻底删除要有正面证据：本页读到的视图里出现过这条，之后两份视图出自同一次收集（generatedAt 相同）、晚于这条记忆记下的
- *    时刻，而全部记忆、最近删除、不在用的 id（已取代等）里都没有它，也没有读不全的地方（读不出的文件可能就是它）。
- *    只是缺席算不知道：从没在视图里出现过（收集落在记下与写盘之间）、视图早于记下的时刻、两份不是同一次收集、
- *    旧视图文件缺这些字段，都不判。这一条按 id 判。
- * 第 1 条记的软删 / 恢复在视图确认之前优先（视图可能还是动作之前的）：软删要出现在最近删除里、恢复要重新出现在全部记忆里，
- * 确认后去掉，之后以视图为准；有本地记录时不按第 3 条判；
- * 彻底删除一直记着。页面关掉就没了。
- */
-export function createDeletionStore() {
-  /** 经本网关的动作，视图确认前优先。键是副本键，命令没带作用域时是 id；后记的排在后面。 */
-  const local = new Map<string, LocalDeletion>()
-  /** 最近一次读到的两份视图：最近删除里的、全部记忆里在用的（id 与副本键），和各自的生成时刻。 */
-  let deleted: { ids: ReadonlySet<string>; copies: ReadonlySet<string>; at: number | undefined } | undefined
-  /** inactive：不在用的 id；全部记忆视图没给出、或有读不全的地方时为 undefined（判不了彻底删除）。 */
-  let library: { ids: ReadonlySet<string>; copies: ReadonlySet<string>; inactive: ReadonlySet<string> | undefined; at: number | undefined } | undefined
-  /** 本页读到的视图里出现过的 id（在用、最近删除、不在用都算）：判彻底删除的前提。 */
-  const seen = new Set<string>()
-  /** 视图证明是软删的副本键，和不知道作用域时用的 id。 */
-  let viewSoft: { copies: ReadonlySet<string>; ids: ReadonlySet<string> } = { copies: new Set(), ids: new Set() }
-  const listeners = new Set<() => void>()
-  const snapshot = (): Deletions => {
-    const mine = [...local.values()].reverse()   // 最近的在前
-    const soft = viewSoft
-    const seenIds = new Set(seen)
-    // 两份视图出自同一次收集才拿来判彻底删除
-    const at = deleted?.at !== undefined && deleted.at === library?.at ? deleted.at : undefined
-    const lib = library
-    const del = deleted
-    return {
-      of(id, scope, savedAt) {
-        const copy = copyKey(id, scope)
-        // 本地记录：知道作用域时取这一份的，没有再取命令没带作用域的那笔；不知道作用域时取这个 id 最近的一笔
-        const own = mine.find(e => e.id === id && (copy === undefined || e.copy === copy))
-          ?? (copy === undefined ? undefined : mine.find(e => e.id === id && e.copy === undefined))
-        if (own !== undefined) return own.how === 'restored' ? undefined : own.how
-        if (copy !== undefined ? soft.copies.has(copy) : soft.ids.has(id)) return 'soft'
-        if (savedAt === undefined || at === undefined || at <= savedAt || lib?.inactive === undefined || del === undefined || !seenIds.has(id)) return undefined
-        return lib.ids.has(id) || del.ids.has(id) || lib.inactive.has(id) ? undefined : 'hard'
-      },
-    }
-  }
-  let state = snapshot()
-  const publish = () => {
-    state = snapshot()
-    for (const fn of listeners) fn()
-  }
-  return {
-    get: () => state,
-    subscribe(fn: () => void) { listeners.add(fn); return () => { listeners.delete(fn) } },
-    record(command: MemoryCommand, result: MemoryCommandResult) {
-      if (!result.ok || (command.cmd !== 'forget' && command.cmd !== 'hard-delete' && command.cmd !== 'restore')) return
-      const copy = copyKey(command.memoryId, command.layer)
-      const key = copy ?? command.memoryId
-      local.delete(key)   // 重新排到最后：不知道作用域时取最近的一笔
-      local.set(key, { id: command.memoryId, copy, how: command.cmd === 'forget' ? 'soft' : command.cmd === 'hard-delete' ? 'hard' : 'restored' })
-      publish()
-    },
-    /** 读到一份最近删除或全部记忆视图：重算视图证明的软删，去掉视图已经确认的本地记录。 */
-    settle(view: { name: 'deleted'; data: DeletedView } | { name: 'library'; data: LibraryView }) {
-      const keysOf = (memories: readonly MemoryCard[]) => new Set(memories.flatMap(m => copyKey(m.id, scopeOfMemory(m)) ?? []))
-      if (view.name === 'deleted') {
-        const memories = view.data.items.map(item => item.memory)
-        deleted = { ids: new Set(memories.map(m => m.id)), copies: keysOf(memories), at: view.data.generatedAt }
-        for (const id of deleted.ids) seen.add(id)
-      } else {
-        const { inactiveIds, hasUnreadFiles } = view.data
-        const memories = view.data.layers.flatMap(s => s.items)
-        library = {
-          ids: new Set(memories.map(m => m.id)),
-          copies: keysOf(memories),
-          inactive: inactiveIds === undefined || hasUnreadFiles !== false ? undefined : new Set(inactiveIds),
-          at: view.data.generatedAt,
-        }
-        for (const id of [...library.ids, ...inactiveIds ?? []]) seen.add(id)
-      }
-      if (deleted === undefined || library === undefined) { publish(); return }
-      const active = library
-      viewSoft = {
-        copies: new Set([...deleted.copies].filter(copy => !active.copies.has(copy))),
-        ids: new Set([...deleted.ids].filter(id => !active.ids.has(id))),
-      }
-      // 视图确认：软删的出现在最近删除里，恢复的重新出现在全部记忆里
-      for (const [key, e] of local) {
-        const isSoft = e.copy !== undefined ? viewSoft.copies.has(e.copy) : viewSoft.ids.has(e.id)
-        const isActive = e.copy !== undefined ? active.copies.has(e.copy) : active.ids.has(e.id)
-        if ((e.how === 'soft' && isSoft) || (e.how === 'restored' && isActive && !isSoft)) local.delete(key)
-      }
-      publish()
-    },
-  }
-}
-
 const GatewayContext = createContext<MemoryGateway | null>(null)
 
 export const GatewayProvider = GatewayContext.Provider
@@ -226,89 +96,6 @@ export function useGateway(): MemoryGateway {
 }
 
 // —— 纯函数（宿主实现用，单测直接测） ——
-
-function isBorrowable(list: SessionListState, id: string): boolean {
-  return list.byId[id] !== undefined && list.byId[id]!.origin !== 'subagent'
-}
-
-function newest(list: SessionListState, ids: readonly string[]): string | undefined {
-  let best: string | undefined
-  for (const id of ids) {
-    if (best === undefined || list.byId[id]!.updatedAt > list.byId[best]!.updatedAt) best = id
-  }
-  return best
-}
-
-/** 一档里挑一个：先挑空闲的（命令会立刻插进正在跑的那一轮），都在跑才退回正在跑的，保证界面总能用。 */
-function preferIdle(list: SessionListState, ids: readonly string[]): string | undefined {
-  return newest(list, ids.filter(id => !list.byId[id]!.running)) ?? newest(list, ids)
-}
-
-/** 当前选中的会话：主视图持有它（retainedBy.mainView > 0）。 */
-export function selectedSessionId(list: SessionListState): string | undefined {
-  return list.ids.find(id => (list.byId[id]?.retainedBy.mainView ?? 0) > 0)
-}
-
-/** 对照里记下的项目（cwd 忽略末尾分隔符比较）；没有为 undefined。 */
-function lookup(map: WorkspaceMap, cwd: string): string | undefined {
-  if (map[cwd] !== undefined) return map[cwd]
-  for (const [key, workspacePath] of Object.entries(map)) if (samePath(key, cwd)) return workspacePath
-  return undefined
-}
-
-/** projects 里包含 cwd 的最深的那个；都不包含为 undefined。 */
-function deepestContaining(cwd: string, projects: Iterable<string>): string | undefined {
-  let best: string | undefined
-  for (const p of projects) {
-    if (isWithin(cwd, p) && (best === undefined || stripTrailing(p).length > stripTrailing(best).length)) best = p
-  }
-  return best
-}
-
-/**
- * 会话（按它的原始 cwd）是否属于项目 workspacePath。服务端按 realpath 后最近的已注册项目目录归属会话，
- * 浏览器半侧解析不了软链接，所以：服务端记下过这个 cwd 就以对照为准；没记下过（服务端还没见过这个会话）
- * 就按路径判断，在已知项目（对照里出现过的项目，加上 workspacePath 本身）里取包含 cwd 的最深的那个，
- * 这样嵌套子项目里的会话归子项目，不归外层。
- */
-export function belongsTo(cwd: string | undefined, workspacePath: string | undefined, map: WorkspaceMap): boolean {
-  if (cwd === undefined || workspacePath === undefined) return false
-  const known = lookup(map, cwd)
-  if (known !== undefined) return samePath(known, workspacePath)
-  const deepest = deepestContaining(cwd, [...Object.values(map), workspacePath])
-  return deepest !== undefined && samePath(deepest, workspacePath)
-}
-
-/** 会话所属的项目：对照里有就用它，其次包含 cwd 的最深的已知项目，都没有时是原始 cwd（服务端也拿 cwd 本身当作用域）。 */
-export function workspaceOf(cwd: string | undefined, map: WorkspaceMap): string | undefined {
-  if (cwd === undefined) return undefined
-  return lookup(map, cwd) ?? deepestContaining(cwd, Object.values(map)) ?? cwd
-}
-
-export function pickSession(list: SessionListState, workspacePath: string | undefined, map: WorkspaceMap = {}): BorrowedSession {
-  const candidates = list.ids.filter(id => isBorrowable(list, id))
-  const inWorkspace = workspacePath === undefined ? [] : candidates.filter(id => belongsTo(list.byId[id]!.cwd, workspacePath, map))
-  const selected = selectedSessionId(list)
-  const id = preferIdle(list, inWorkspace)
-    ?? (selected !== undefined && candidates.includes(selected) ? selected : undefined)
-    ?? preferIdle(list, candidates)
-  return id === undefined ? { kind: 'none' } : { kind: 'ready', sessionId: id, cwd: list.byId[id]!.cwd }
-}
-
-const stripTrailing = (p: string) => p.replace(/[\\/]+$/, '')
-
-/** 两个路径是否同一处（忽略末尾的分隔符）；任一为 undefined 时不同。 */
-export function samePath(a: string | undefined, b: string | undefined): boolean {
-  return a !== undefined && b !== undefined && stripTrailing(a) === stripTrailing(b)
-}
-
-/** path 是否就是 dir 或在它下面（按整段比，/w/app-other 不在 /w/app 下）；任一为 undefined 时否。 */
-export function isWithin(path: string | undefined, dir: string | undefined): boolean {
-  if (path === undefined || dir === undefined) return false
-  const p = stripTrailing(path)
-  const d = stripTrailing(dir)
-  return p === d || p.startsWith(`${d}/`) || p.startsWith(`${d}\\`)
-}
 
 function failed(detail: string, cmd?: string): MemoryCommandResult {
   return { ok: false, code: 'failed', detail, ...(cmd === undefined ? {} : { cmd }) }
@@ -358,25 +145,6 @@ export function viewPath(memoryRoot: string, name: ViewName, sessionId: string):
 export function fileAddress(sessionId: string, path: string): string {
   const enc = (s: string) => encodeURIComponent(s).replace(/%3A/gi, ':')
   return `dsh-resource://file/session/${enc(sessionId)}/${path.replace(/\\/g, '/').split('/').map(enc).join('/')}`
-}
-
-/** 宿主配置段（schema 解析后的值）→ 界面用到的几项；结构不对为 undefined。 */
-export function toPluginConfig(value: unknown): PluginConfig | undefined {
-  if (typeof value !== 'object' || value === null) return undefined
-  const v = value as { snapshotTokenBudget?: unknown; snapshotOverflow?: unknown; governance?: { enabled?: unknown; globalPromoteTarget?: unknown }; accent?: unknown; customTypes?: unknown }
-  const g = v.governance
-  if (typeof v.snapshotTokenBudget !== 'number' || (v.snapshotOverflow !== 'relax' && v.snapshotOverflow !== 'strict')
-    || typeof g?.enabled !== 'boolean' || (g.globalPromoteTarget !== 'plugin-global' && g.globalPromoteTarget !== 'agents-md')) return undefined
-  // 主题色只管外观：取不到或不认识时按艾拉主题色，不让整份配置作废
-  const accent = ACCENTS.find(a => a === v.accent) ?? 'ella'
-  // 类型名同理：只收带字符串名字的条目，坏条目按没改名显示
-  const customTypes = typeof v.customTypes === 'object' && v.customTypes !== null
-    ? Object.fromEntries(Object.entries(v.customTypes).flatMap(([name, type]) => {
-      const label = (type as { label?: unknown } | null)?.label
-      return typeof label === 'string' && label !== '' ? [[name, { label }]] : []
-    }))
-    : {}
-  return { snapshotTokenBudget: v.snapshotTokenBudget, snapshotOverflow: v.snapshotOverflow, governanceEnabled: g.enabled, globalPromoteTarget: g.globalPromoteTarget, accent, customTypes }
 }
 
 // —— 宿主实现 ——

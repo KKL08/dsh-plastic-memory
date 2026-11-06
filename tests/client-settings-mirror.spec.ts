@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { parse } from 'yaml'
 import {
-  BUILTIN_TYPE_NAMES, ENTRY_ID, PACKAGE_NAME, PRESET_SCENES as CLIENT_PRESET_SCENES, PRESET_TYPE_NAMES, RETIRED_TYPE_NAMES, SENSITIVITY_NUMBERS,
-  TYPE_DEFINITIONS, buildOps, fieldsOf, removeType,
+  BUILTIN_TYPE_NAMES, ENTRY_ID, OVERFLOW_MODES, PACKAGE_NAME, PRESET_SCENES as CLIENT_PRESET_SCENES, PRESET_TYPE_NAMES, PROMOTE_TARGETS,
+  RETIRED_TYPE_NAMES, SENSITIVITY_NUMBERS, TYPE_DEFINITIONS, buildOps, fieldsOf, removeType,
 } from '../client/settings/config.ts'
 import { applyOps } from '../client/settings/config-form.fake.ts'
 import { Config } from '../src/index.ts'
@@ -29,6 +29,14 @@ describe('设置页手抄的服务端常量', () => {
   it('编码、办公的出厂组成与 PRESET_SCENES 一致，也是 Config 里 scenes 的默认值', () => {
     expect(CLIENT_PRESET_SCENES).toEqual(PRESET_SCENES)
     expect(fieldsOf({ scenes: new Config({} as never).scenes.get() }).scenes).toEqual(PRESET_SCENES)
+  })
+
+  it('超限处理、提升去处的取值与 Config 里的可选值一致', () => {
+    type Union = { list: Array<{ value: string }> }
+    const options = (schema: unknown) => (schema as Union).list.map(s => s.value)
+    const dict = (Config as unknown as { dict: Record<string, { dict: Record<string, unknown> }> }).dict
+    expect([...OVERFLOW_MODES]).toEqual(options(dict.snapshotOverflow))
+    expect([...PROMOTE_TARGETS]).toEqual(options(dict.governance!.dict.globalPromoteTarget))
   })
 
   it('灵敏度说明里的数值与预设一致', () => {
