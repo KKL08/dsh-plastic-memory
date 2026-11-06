@@ -304,17 +304,26 @@ describe('SnapshotCache', () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ content: '全局条目', type: 'preference' }))
     await store.put(record({ content: '仅本仓库生效的偏好', type: 'preference', scope: 'workspace', workspacePath: '/repo' }))
+    // 慢解析：挂在闸门上，首轮组装开始之后才放行
+    let entered!: () => void
+    const inResolve = new Promise<void>(r => { entered = r })
+    let release!: () => void
+    const gate = new Promise<void>(r => { release = r })
     const cache = new SnapshotCache({
       store, registry, budget: 4000,
       host: snapshotHost({
         workspaceOf: async (s: object) => {
-          await new Promise(r => setTimeout(r, 20)) // 模拟慢解析：必然晚于同步首轮组装
+          entered()
+          await gate
           return (s as { header?: { cwd?: string } }).header?.cwd
         },
       }),
     })
     const session = { header: { cwd: '/repo' } }
-    expect(await cache.assemble(session)).toContain('仅本仓库生效的偏好')
+    const assembled = cache.assemble(session)
+    await inResolve // 首轮组装已开始，解析挂在闸门上
+    release()
+    expect(await assembled).toContain('仅本仓库生效的偏好')
   })
 
   it('awaitResolved 只等解析：落定后不组装、不冻结', async () => {
@@ -348,16 +357,20 @@ describe('SnapshotCache', () => {
     const { store } = makeCache()
     await store.put(record({ id: 'mem_core', type: 'preference', content: '不要 mock 数据库' }))
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
-    const cache = new SnapshotCache({ store, registry, budget: 4000, log })
+    // 故障在宿主边界注入：组装途中问宿主会话自己的 id 时抛错。读盘的故障到不了这里——目录读不出按空计，不让组装失败
+    let isHostBroken = false
+    const host = snapshotHost({ ownSessionIdOf: () => { if (isHostBroken) throw new Error('session closed'); return undefined } })
+    const cache = new SnapshotCache({ store, registry, budget: 4000, log, host })
     const session = {}
     cache.setWorkspacePath(session, undefined)
-    vi.spyOn(store, 'readRaw').mockRejectedValueOnce(new Error('boom'))
+    isHostBroken = true
     expect(await cache.assemble(session)).toBeUndefined()
     expect(log.error).toHaveBeenCalledTimes(1)
 
+    isHostBroken = false
     await cache.assemble(session)
     cache.markStale(session)
-    vi.spyOn(store, 'readRaw').mockRejectedValueOnce(new Error('boom'))
+    isHostBroken = true
     expect(await cache.assemble(session)).toBeUndefined()
     expect(log.error).toHaveBeenCalledTimes(2)
     expect(frozenCore(cache, session)).toEqual(['mem_core'])

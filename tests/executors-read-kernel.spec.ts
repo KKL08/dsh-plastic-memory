@@ -27,9 +27,12 @@ import { record as baseRecord } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
+import { writesDuring } from './helpers/fs-writes.ts'
 
 // 执行器切到按范围读取与两级定位。全部用真实目录（FileTable + .state 侧表），
 // 只 mock 进程边界（sessionQuery.readEvent）；文件直接写盘模拟用户手编、git、其他进程。
+// 「零写入」看 node:fs/promises 的写调用记录（透传，见 helpers/fs-writes.ts），不比 mtime。
+vi.mock('node:fs/promises', async importOriginal => (await import('./helpers/fs-writes.ts')).recordWrites(await importOriginal()))
 
 const WS = '/home/dev/proj-a'
 const OTHER = '/home/dev/proj-b'
@@ -112,16 +115,16 @@ function harness(opts: { readEvent?: ReadEventFn; now?: number } = {}) {
   }
 }
 
-/** 递归快照：相对路径 → mtime（目录与文件都计）；.state/（侧表，含召回统计）不计。 */
-async function treeSnapshot(dir: string, prefix = ''): Promise<Record<string, number>> {
-  const out: Record<string, number> = {}
+/** 递归列出目录项（相对路径，目录与文件都计）；.state/（侧表，含召回统计）不计。 */
+async function treeEntries(dir: string, prefix = ''): Promise<string[]> {
+  const out: string[] = []
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const rel = prefix + entry.name
     if (rel === STATE_DIR) continue
-    out[rel] = (await stat(join(dir, entry.name))).mtimeMs
-    if (entry.isDirectory()) Object.assign(out, await treeSnapshot(join(dir, entry.name), `${rel}/`))
+    out.push(rel)
+    if (entry.isDirectory()) out.push(...await treeEntries(join(dir, entry.name), `${rel}/`))
   }
-  return out
+  return out.sort()
 }
 
 function single<T extends { kind: string }>(r: T): Extract<T, { kind: 'single' }> {
@@ -156,7 +159,7 @@ describe('执行器走按范围读取与两级定位', () => {
     expect(single(await h.health()).totalMemories).toBe(0)
   })
 
-  it('读路径零写入端到端：含 tmp 残留、重复 id、过期 deleted、手改 MEMORY.md 的真实目录 → search / health / source → 记忆目录全部目录项与 mtime 不变（recall-stats 除外）', async () => {
+  it('读路径零写入端到端：含 tmp 残留、重复 id、过期 deleted、手改 MEMORY.md 的真实目录 → search / health / source → 记忆目录没有写调用、目录项不变（.state/ 侧表除外）', async () => {
     const old = Date.now() - 30 * DAY
     await writeMem(globalDir(), 'g.md', rec({ id: 'mem_g', name: '全局探针', content: '零写入 全局' }))
     await writeMem(globalDir(), 'dup.md', rec({ id: 'mem_dup', name: '重复', content: '零写入 旧副本', updatedAt: 100 }))
@@ -167,19 +170,23 @@ describe('执行器走按范围读取与两级定位', () => {
     await writeRaw(wsDir(WS), 'hand.md', handBuilt('手建', '零写入 手建正文'))
     await writeRaw(wsDir(WS), INDEX_FILE, '# 用户手改过的索引\n')
     await writeRaw(globalDir(), INDEX_FILE, '# 另一个手改索引\n')
-    await new Promise(r => setTimeout(r, 5))
-    const before = await treeSnapshot(root)
+    const before = await treeEntries(root)
 
     const h = harness({ now: Date.now() + 10 * DAY })   // 远超保留期与 tmp 陈旧阈值：读路径也不能清
-    expect((await h.search('零写入')).hits.map(x => x.id).sort()).toEqual(['mem_dup', 'mem_g', deriveFileId(relative(root, join(wsDir(WS), 'hand.md')))].sort())
-    await h.health()
-    await h.health({ scope: 'all' })
-    await h.scan()
-    await h.source('mem_dup')
-    await h.source('mem_gone')
-    await h.source(deriveFileId(relative(root, join(wsDir(WS), 'hand.md'))))
+    const writes = await writesDuring(async () => {
+      expect((await h.search('零写入')).hits.map(x => x.id).sort()).toEqual(['mem_dup', 'mem_g', deriveFileId(relative(root, join(wsDir(WS), 'hand.md')))].sort())
+      await h.health()
+      await h.health({ scope: 'all' })
+      await h.scan()
+      await h.source('mem_dup')
+      await h.source('mem_gone')
+      await h.source(deriveFileId(relative(root, join(wsDir(WS), 'hand.md'))))
+    })
 
-    expect(await treeSnapshot(root)).toEqual(before)
+    const stateDir = join(root, STATE_DIR)
+    expect(writes.some(c => c.includes(stateDir))).toBe(true)   // 召回统计照常写侧表：写调用记得到
+    expect(writes.filter(c => !c.includes(stateDir))).toEqual([])
+    expect(await treeEntries(root)).toEqual(before)
   })
 
   it('search 的文件路径与注入同口径：name 含密钥的不给路径，手起名的文件名带密钥的遮掉', async () => {
@@ -355,14 +362,15 @@ describe('执行器走按范围读取与两级定位', () => {
   it('过期（validTo 已过）的 active 文件留在顶层、不注入不检索；expired finding 建议文案同时给出「延长 validTo」和「memory_forget」', async () => {
     const path = await writeMem(wsDir(WS), 'expired.md', wsRec({ id: 'mem_exp', name: '过期探针', content: '过期 探针正文', validTo: Date.now() - DAY }), WS)
     await writeMem(wsDir(WS), 'live.md', wsRec({ id: 'mem_live', name: '有效', content: '有效 探针正文' }))
-    const mtime = (await stat(path)).mtimeMs
     const h = harness()
 
-    expect((await h.search('探针正文')).hits.map(x => x.id)).toEqual(['mem_live'])
-    const text = await h.assemble()
-    expect(text).toContain('有效 探针正文')
-    expect(text).not.toContain('过期 探针正文')
-    expect((await stat(path)).mtimeMs).toBe(mtime)
+    const writes = await writesDuring(async () => {
+      expect((await h.search('探针正文')).hits.map(x => x.id)).toEqual(['mem_live'])
+      const text = await h.assemble()
+      expect(text).toContain('有效 探针正文')
+      expect(text).not.toContain('过期 探针正文')
+    })
+    expect(writes.filter(c => c.includes(path))).toEqual([])   // 过期文件不搬、不重写
 
     const expired = single(await h.scan()).findings.find(f => f.type === 'expired')
     expect(expired?.memoryIds).toEqual(['mem_exp'])

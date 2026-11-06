@@ -2,9 +2,6 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
-import { fileURLToPath } from 'node:url'
 import { MemoryStore } from '../src/store.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
@@ -23,6 +20,7 @@ import {
   type EvalQuery,
 } from './fixtures/search-eval.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
+import { briefReport, productionRun, type ProductionRun } from '../scripts/eval-search.ts'
 
 // 评估集回归（语料与查询见 tests/fixtures/search-eval.ts，逐条对比与调参用 scripts/eval-search.ts）。
 // 两层：① 与权重无关的不变量逐条断言；② bigram 与 jieba 两档的 top-1 / top-3 聚合下限，不逐条断言。
@@ -31,6 +29,7 @@ import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts
 // 中英双写（bilingual）、长句（long-answerable）与库里没有答案（no-answer、long-no-answer）只评「命中弱」：
 // 有答案的看首条对不对、判弱的有几条，没有答案的必须全部判弱。
 // 跑在 FileTable 临时目录上走 executeSearch，与生产同一条路。
+// 全部评估查询每档只跑一遍（limit 10 与 50 各一遍，用评估脚本同一个函数），各用例按查询取结果，不每例重跑语料。
 
 const jiebaProbe = await defaultJiebaLoader.importJieba().then(() => undefined, (err: unknown) => err instanceof Error ? err.message : String(err))
 if (jiebaProbe !== undefined) console.log(`[search-eval] @node-rs/jieba 不可解析，跳过 jieba 档：${jiebaProbe}`)
@@ -46,6 +45,13 @@ const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const silent = { warn() {} }
 let root: string
 let deps: SearchToolDeps
+type Tier = 'bigram' | 'jieba'
+const runs: Partial<Record<`${Tier}-${10 | 50}`, ProductionRun>> = {}
+/** 某档、某 limit 下这条评估查询的返回 id 与说明码（beforeAll 里跑好的）。 */
+const ran = (tier: Tier, limit: 10 | 50, q: EvalQuery) => {
+  const run = runs[`${tier}-${limit}`]!
+  return { ids: run.results.get(q)!, noteCode: run.notes.get(q) }
+}
 
 // 语料直接按文件格式写进 global 目录（逐条 store.put 会每次重写索引，全量并行跑时超出钩子时限）；读取仍走 FileTable
 beforeAll(async () => {
@@ -54,7 +60,10 @@ beforeAll(async () => {
   await Promise.all(EVAL_RECORDS.map(r => writeFile(join(root, GLOBAL_DIR, `${r.id}.md`), encodeRecord(r, {}), 'utf8')))
   const store = new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() }), undefined, new InMemoryBatchKvTable())
   deps = { store, registry, tokenizer: { log: silent }, host: { contextOf: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }) }}
-})
+  for (const tier of jiebaProbe === undefined ? ['bigram', 'jieba'] as const : ['bigram'] as const) {
+    for (const limit of [10, 50] as const) runs[`${tier}-${limit}`] = await productionRun(store, tier, limit)
+  }
+}, 60_000)
 afterAll(async () => {
   resetJieba()
   await rm(root, { recursive: true, force: true })
@@ -131,8 +140,8 @@ describe('不变量（与权重无关）', { timeout: 60_000 }, () => {
         useTier(tier)
         for (const q of EVAL_QUERIES.filter(q => q.category !== 'zero-token' && q.category !== 'id-direct')) {
           const oracle = await tierOracle(q.query)
-          const r = await search(q.query, 50)
-          const tiers = r.hits.map(h => oracle(byId.get(h.id)!))
+          const r = ran(tier, 50, q)
+          const tiers = r.ids.map(id => oracle(byId.get(id)!))
           expect(tiers, q.query).not.toContain(undefined)
           const order = (tiers as SearchTier[]).map(t => TIER_ORDER[t])
           expect(order, q.query).toEqual([...order].sort((a, b) => a - b))
@@ -149,7 +158,7 @@ describe('不变量（与权重无关）', { timeout: 60_000 }, () => {
           if (candidates.length > 50) continue
           const legacy = expandQueryTerms(q.query)
           const legacyAll = EVAL_RECORDS.filter(r => matchScore(r, legacy) === legacy.length).map(r => r.id)
-          const hits = (await search(q.query, 50)).hits.map(h => h.id)
+          const hits = ran(tier, 50, q).ids
           expect(hits, q.query).toEqual(expect.arrayContaining(legacyAll))
           checked++
         }
@@ -206,13 +215,12 @@ const GATED_QUERIES = EVAL_QUERIES.filter(q => ![...BASELINE_ONLY_CATEGORIES, ..
 
 describe('聚合下限', { timeout: 60_000 }, () => {
   for (const tier of ['bigram', 'jieba'] as const) {
-    it.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档 top-1 ≥ ${FLOORS[tier].top1}、top-3 ≥ ${FLOORS[tier].top3}（共 ${GATED_QUERIES.length} 条），七个类别各自不低于本版结果`, async () => {
-      useTier(tier)
+    it.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档 top-1 ≥ ${FLOORS[tier].top1}、top-3 ≥ ${FLOORS[tier].top3}（共 ${GATED_QUERIES.length} 条），七个类别各自不低于本版结果`, () => {
       let top1 = 0
       let top3 = 0
       const perCategory = new Map<string, Floor>()
       for (const q of GATED_QUERIES) {
-        const r = rankOf(q, (await search(q.query)).hits.map(h => h.id))
+        const r = rankOf(q, ran(tier, 10, q).ids)
         const c = perCategory.get(q.category) ?? { top1: 0, top3: 0 }
         if (r === 1) { top1++; c.top1++ }
         if (r <= 3) { top3++; c.top3++ }
@@ -247,11 +255,10 @@ describe('锚点类（逐条第一名）', { timeout: 60_000 }, () => {
   })
 
   for (const tier of ['bigram', 'jieba'] as const) {
-    it.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档：每条锚点查询的第一名都是字面含该值的记录`, async () => {
-      useTier(tier)
+    it.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档：每条锚点查询的第一名都是字面含该值的记录`, () => {
       const misses: string[] = []
       for (const q of ANCHOR_QUERIES) {
-        const first = (await search(q.query)).hits[0]?.id
+        const first = ran(tier, 10, q).ids[0]
         if (first === undefined || !q.relevant.includes(first)) misses.push(`${q.query} → ${first ?? '（空）'}`)
       }
       expect(misses).toEqual([])
@@ -309,13 +316,12 @@ describe('换说法类（只记基线，不设分数线）', { timeout: 60_000 }
   })
 
   for (const tier of ['bigram', 'jieba'] as const) {
-    it.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档能跑通，top-1、top-3、MRR 是合法数值`, async () => {
-      useTier(tier)
+    it.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档能跑通，top-1、top-3、MRR 是合法数值`, () => {
       let top1 = 0
       let top3 = 0
       let mrr = 0
       for (const q of PARAPHRASES) {
-        const r = rankOf(q, (await search(q.query)).hits.map(h => h.id))
+        const r = rankOf(q, ran(tier, 10, q).ids)
         if (r === 1) top1++
         if (r <= 3) top3++
         mrr += Number.isFinite(r) ? 1 / r : 0
@@ -385,44 +391,40 @@ describe('命中弱', { timeout: 60_000 }, () => {
 
   for (const tier of ['bigram', 'jieba'] as const) {
     describe.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档`, () => {
-      it('库里没有答案的查询（短词与长句）全部判弱', async () => {
-        useTier(tier)
+      it('库里没有答案的查询（短词与长句）全部判弱', () => {
         const notWeak: string[] = []
         for (const q of NO_ANSWER_QUERIES) {
-          const r = await search(q.query)
-          expect(r.hits.length, q.query).toBeGreaterThan(0)   // 有常见词能部分命中，不是空结果
+          const r = ran(tier, 10, q)
+          expect(r.ids.length, q.query).toBeGreaterThan(0)   // 有常见词能部分命中，不是空结果
           if (!isWeak(r.noteCode)) notWeak.push(`${q.query} → ${r.noteCode ?? '无说明码'}`)
         }
         expect(notWeak).toEqual([])
       })
 
-      it('换语言查、记忆标签里存了别名：首条正确，全命中、不出说明', async () => {
-        useTier(tier)
+      it('换语言查、记忆标签里存了别名：首条正确，全命中、不出说明', () => {
         const bad: string[] = []
         for (const q of EVAL_QUERIES.filter(q => q.category === 'bilingual')) {
-          const r = await search(q.query)
-          const first = r.hits[0]?.id
+          const r = ran(tier, 10, q)
+          const first = r.ids[0]
           if (first === undefined || !q.relevant.includes(first) || r.noteCode !== undefined) bad.push(`${q.query} → ${first ?? '（空）'} ${r.noteCode ?? ''}`)
         }
         expect(bad).toEqual([])
       })
 
-      it('换语言查、记忆没存别名：有部分命中，但不当成全命中，提示命中弱', async () => {
-        useTier(tier)
+      it('换语言查、记忆没存别名：有部分命中，但不当成全命中，提示命中弱', () => {
         const bad: string[] = []
         for (const q of EVAL_QUERIES.filter(q => q.category === 'bilingual-no-alias')) {
-          const r = await search(q.query)
-          if (r.hits.length === 0 || !isWeak(r.noteCode)) bad.push(`${q.query} → ${r.hits.length} 条 ${r.noteCode ?? '无说明码'}`)
+          const r = ran(tier, 10, q)
+          if (r.ids.length === 0 || !isWeak(r.noteCode)) bad.push(`${q.query} → ${r.ids.length} 条 ${r.noteCode ?? '无说明码'}`)
         }
         expect(bad).toEqual([])
       })
 
-      it(`首条正确却判弱的查询不超过 ${WEAK_CORRECT_CEILING} 条（记忆没存别名的换语言查与库里没有答案的除外）`, async () => {
-        useTier(tier)
+      it(`首条正确却判弱的查询不超过 ${WEAK_CORRECT_CEILING} 条（记忆没存别名的换语言查与库里没有答案的除外）`, () => {
         const weakCorrect: string[] = []
         for (const q of EVAL_QUERIES.filter(q => q.category !== 'zero-token' && q.category !== 'bilingual-no-alias' && q.relevant.length > 0)) {
-          const r = await search(q.query)
-          if (isWeak(r.noteCode) && rankOf(q, r.hits.map(h => h.id)) === 1) weakCorrect.push(q.query)
+          const r = ran(tier, 10, q)
+          if (isWeak(r.noteCode) && rankOf(q, r.ids) === 1) weakCorrect.push(q.query)
         }
         expect(weakCorrect.length, weakCorrect.join('、')).toBeLessThanOrEqual(WEAK_CORRECT_CEILING)
       })
@@ -431,12 +433,10 @@ describe('命中弱', { timeout: 60_000 }, () => {
 })
 
 describe('评估脚本 scripts/eval-search.ts --brief 的输出', () => {
-  const SCRIPT = fileURLToPath(new URL('../scripts/eval-search.ts', import.meta.url))
   const METRICS = /^top-1 \d+\/\d+ {2}top-3 \d+\/\d+ {2}MRR \d\.\d{3}/
 
-  it('每种分词一行总览，下面按类别分行（换说法类单独成行、注明只记基线）；不打印调参对照', async () => {
-    const { stdout } = await promisify(execFile)(process.execPath, [SCRIPT, '--brief'], { maxBuffer: 16 * 1024 * 1024 })
-    const lines = stdout.split('\n')
+  it('每种分词一行总览，下面按类别分行（换说法类单独成行、注明只记基线）；不打印调参对照', () => {
+    const lines = briefReport(runs['bigram-10']!, runs['jieba-10']).split('\n')
     const tiers = jiebaProbe === undefined ? ['bigram', 'jieba'] : ['bigram']
     for (const tier of tiers) {
       const at = lines.findIndex(l => l.startsWith(`${tier.padEnd(8)} top-1 `))
@@ -452,5 +452,5 @@ describe('评估脚本 scripts/eval-search.ts --brief 的输出', () => {
     expect(lines.filter(l => l.startsWith('## ')).map(l => l.split('（')[0]!.split('：')[0])).toEqual(
       jiebaProbe === undefined ? ['## 两档指标', '## 逐条差异', '## 命中弱'] : ['## 两档指标', '## 命中弱'],
     )
-  }, 60_000)
+  })
 })

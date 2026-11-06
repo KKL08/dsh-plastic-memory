@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
@@ -77,7 +77,12 @@ const record = (partial: Partial<MemoryRecord> = {}) => baseRecord({
 })
 
 let root: string
-beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-cross-move-')) })
+/** 文件系统时钟相对 Date.now() 的偏移：两个实例的 tmp 陈旧判定拿它和文件 mtime 比，不假定两个时钟一致。 */
+let fsClockOffset: number
+beforeEach(async () => {
+  root = await mkdtemp(join(tmpdir(), 'pm-cross-move-'))
+  fsClockOffset = (await stat(root)).mtimeMs - Date.now()
+})
 afterEach(async () => {
   hooks.length = 0
   reads.length = 0
@@ -89,7 +94,7 @@ afterEach(async () => {
 const globalDir = () => join(root, GLOBAL_DIR)
 const mds = async (dir: string) => (await readdir(dir).catch(() => [] as string[])).filter(n => n.endsWith('.md') && n !== INDEX_FILE).sort()
 /** 每个实例一份召回统计侧表，模拟两个进程。 */
-const newTable = () => new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() })
+const newTable = () => new FileTable({ root, stats: new InMemoryKvTable<RecallStats>(), now: () => Date.now() + fsClockOffset })
 
 async function seed(r: MemoryRecord = record(), fileName = '竞态.md', dir = globalDir()): Promise<string> {
   await mkdir(dir, { recursive: true })

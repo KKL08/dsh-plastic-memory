@@ -981,9 +981,20 @@ describe('runSavePipeline：子 agent 写入约束', () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const main = owned('mem_main', 'main')
     await store.put(main)
-    vi.spyOn(store, 'get').mockResolvedValueOnce({ ...main, status: 'deleted' })
-    await restricted(runSavePipeline(childCandidate({ action: 'update', id: 'mem_main', content: '子 agent 想改成这样' }), childDeps(store)))
-    expect((await store.get('mem_main'))!.content).toBe('「mem_main」的旧内容')
+    // 透传检查那次读取，读之前真实软删、读完真实恢复：检查读到的是已删除，写入时它已回到主会话名下
+    const realGet = store.get.bind(store)
+    let checked: string | undefined
+    vi.spyOn(store, 'get').mockImplementationOnce(async (id, target) => {
+      await store.softDelete(main)
+      const read = await realGet(id, target)
+      checked = read?.status
+      expect(await store.restoreArchived(main)).toBe(true)
+      return read
+    })
+    const reason = await restricted(runSavePipeline(childCandidate({ action: 'update', id: 'mem_main', content: '子 agent 想改成这样' }), childDeps(store)))
+    expect(checked).toBe('deleted')
+    expect(reason).toBe('要改的记忆 mem_main 不存在或已删除，带回主会话。')
+    expect(await store.get('mem_main')).toMatchObject({ status: 'active', content: '「mem_main」的旧内容' })
   })
 
   it('检查之后、写入之前记录被接受、提升或删除：锁内重判后不写，回 subagent-restricted', async () => {

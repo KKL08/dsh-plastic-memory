@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { MemoryStore, type MemoryTable } from '../src/store.ts'
@@ -25,6 +25,10 @@ import { RETENTION_MS } from '../src/retention.ts'
 import { captureRejection } from './helpers/errors.ts'
 import { InMemoryTable, type SeedRecord } from './helpers/in-memory-table.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
+import { writesDuring } from './helpers/fs-writes.ts'
+
+// FileTable 后端「不重写文件」看 node:fs/promises 的写调用记录（透传，见 helpers/fs-writes.ts），不比 mtime。
+vi.mock('node:fs/promises', async importOriginal => (await import('./helpers/fs-writes.ts')).recordWrites(await importOriginal()))
 
 /** 与 P0/P1 既有测试同一约定：只声明必填字段，可选字段（validTo/supersedes/workspacePath）
  *  只在 partial 里显式传入时才出现——不写成 `key: undefined`，否则 encode/decode 往返后
@@ -40,7 +44,7 @@ interface BackendHandle {
   cleanup(): Promise<void>
   /** 仅 FileTable 提供（现为空操作）：没有常驻表之后每次读都走 encode→disk→decode，保留调用点让断言照跑。 */
   reload?: () => Promise<void>
-  /** 仅 FileTable 提供：记忆根目录，供 markRecalled 的 mtime 断言直接 stat 文件。 */
+  /** 仅 FileTable 提供：记忆根目录，供 markRecalled 断言记忆文件没有写调用。 */
   root?: string
   /** 两个后端共用的目录名（storage/paths 同源）：readScope 的 dirs 用它表达。 */
   globalDir: string
@@ -87,6 +91,9 @@ const backends: Backend[] = [
           await mkdir(dir, { recursive: true })
           if (f.record.scope === 'workspace') await writeFile(join(f.dir, WORKSPACE_MARKER), `${f.record.workspacePath}\n`)
           await writeFile(join(dir, f.fileName), handWritten(f.record))
+          // 文件写下的时刻按测试时钟记（同 InMemoryTable 缺 deletedAt 时取 now），不假定 Date.now() 与文件系统时钟一致
+          const at = new Date()
+          await utimes(join(dir, f.fileName), at, at)
         },
       }
     },
@@ -185,18 +192,19 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect(await store.softDelete({ id: 'ghost2', workspacePath: undefined })).toBe(false)
   })
 
-  it('markRecalled 只写召回统计侧表：统计 +1，不经 table.update、不逐 id 定位，记忆文件 mtime 不变', async () => {
+  it('markRecalled 只写召回统计侧表：统计 +1，不经 table.update、不逐 id 定位，不重写记忆文件', async () => {
     const rec = record({ id: 'mem_recall_1', name: 'markrecalled-test', content: '待召回内容', updatedAt: 1 })
     await store.put(rec)
 
     const filePath = root ? join(root, GLOBAL_DIR, 'markrecalled-test.md') : undefined
-    const before = filePath ? (await stat(filePath)).mtimeMs : undefined
     const update = vi.spyOn(table, 'update')
     const locate = vi.spyOn(table, 'locate')
     const putMany = vi.spyOn(stats, 'putMany')
 
-    await store.markRecalled([rec.id])
-    await store.markRecalled([rec.id, rec.id])
+    const writes = await writesDuring(async () => {
+      await store.markRecalled([rec.id])
+      await store.markRecalled([rec.id, rec.id])
+    })
 
     expect(update).not.toHaveBeenCalled()
     // ids 来自调用方同一次读取的结果（search 命中、快照 core 区），存活由那次读保证，不再逐 id 两级定位
@@ -206,10 +214,10 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect(row).toMatchObject({ id: rec.id, recallCount: 3 })
     expect(row!.lastRecalledAt).not.toBeNull()
 
-    // 召回统计只走侧表，文件本体不重写——mtime 不变
+    // 召回统计只走侧表，文件本体不重写：侧表有写调用，记忆文件没有
     if (filePath) {
-      const after = (await stat(filePath)).mtimeMs
-      expect(after).toBe(before)
+      expect(writes).not.toEqual([])
+      expect(writes.filter(c => c.includes(filePath))).toEqual([])
     }
     // FileTable 的合并读法不变：重载后记录带上侧表里的统计
     if (reload) {

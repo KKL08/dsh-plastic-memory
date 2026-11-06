@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach, afterEach } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, mkdir, writeFile, rm, stat, chmod, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,9 +9,12 @@ import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
+import { writesDuring } from './helpers/fs-writes.ts'
 
 // 从磁盘读记忆目录的行为（0.2.0 起没有加载期：每个读方法直接读目录；清扫、索引再生、tmp 清理只在写路径末尾）。
 // 本文件默认造那条"包管理用 pnpm"的 global preference（编解码/去重断言的固定样本）。
+// 「不写盘」看 node:fs/promises 的写调用记录（透传，见 helpers/fs-writes.ts）。
+vi.mock('node:fs/promises', async importOriginal => (await import('./helpers/fs-writes.ts')).recordWrites(await importOriginal()))
 const record = (partial: Partial<MemoryRecord> = {}) => baseRecord({
   id: 'mem_abc', name: '包管理用 pnpm', type: 'preference',
   tags: ['pnpm', 'npm'], content: '这个项目的包管理一律用 pnpm', summary: '包管理选型',
@@ -181,7 +184,8 @@ describe('tmp 残留只在写路径末尾清理', () => {
     await seedGlobal('a.md', record({ id: 'mem_a' }))
     const tmp = join(root, GLOBAL_DIR, `a.md.tmp-${process.pid + 1}-abc123`)
     await writeFile(tmp, '别的进程在途')
-    const t = open()
+    const mtime = (await stat(tmp)).mtimeMs
+    const t = open({ now: () => mtime })   // 新鲜相对文件系统记下的 mtime 算，不假定 Date.now() 与文件系统时钟一致
     await t.put(record({ id: 'mem_b', name: 'b' }), {})
     expect((await stat(tmp)).isFile()).toBe(true)
   })
@@ -197,14 +201,14 @@ describe('tmp 残留只在写路径末尾清理', () => {
   })
 })
 
-it('MEMORY.md 内容未变时写路径末尾的再生不改其 mtime（不空转写盘）', async () => {
+it('MEMORY.md 内容未变时写路径末尾的再生不重写它（不空转写盘）', async () => {
   const t = open()
-  await t.put(record({ id: 'mem_a', name: 'a' }), {})
-  const before = await stat(join(root, GLOBAL_DIR, 'MEMORY.md'))
-  await new Promise(r => setTimeout(r, 10))
-  await t.put(record({ id: 'mem_d', name: 'd', status: 'deleted', updatedAt: Date.now() }), {})   // 不进索引：索引内容不变
-  const after = await stat(join(root, GLOBAL_DIR, 'MEMORY.md'))
-  expect(after.mtimeMs).toBe(before.mtimeMs)
+  const index = join(root, GLOBAL_DIR, 'MEMORY.md')
+  const first = await writesDuring(() => t.put(record({ id: 'mem_a', name: 'a' }), {}))
+  expect(first.filter(c => c.includes(index))).not.toEqual([])   // 首次写出索引：写调用记得到
+  const writes = await writesDuring(() => t.put(record({ id: 'mem_d', name: 'd', status: 'deleted', updatedAt: Date.now() }), {}))   // 不进索引：索引内容不变
+  expect(writes).not.toEqual([])   // 这次 put 本身照常写盘
+  expect(writes.filter(c => c.includes(index))).toEqual([])
 })
 
 it('合法名称含 .tmp- 不是原子写残留：新实例、推进 61 秒后再写，记录与文件都还在', async () => {

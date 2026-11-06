@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -1191,10 +1191,14 @@ describe('最近删除里彻底删除', () => {
     const e = env()
     const entry = await seedPair(e)
     ok(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' }))
-    const hardDelete = e.store.hardDelete.bind(e.store)
-    e.store.hardDelete = async () => { throw new Error('磁盘出错') }
-    expect(err(await e.run({ cmd: 'hard-delete', memoryId: 'mem_b', layer: { kind: 'global' } })).code).toBe('failed')
-    e.store.hardDelete = hardDelete
+    // 归档目录只读：归档文件删不掉
+    const archive = join(root, GLOBAL_DIR, ARCHIVE_DIR)
+    await chmod(archive, 0o500)
+    try {
+      expect(err(await e.run({ cmd: 'hard-delete', memoryId: 'mem_b', layer: { kind: 'global' } }))).toMatchObject({ code: 'failed', detail: expect.stringContaining('EACCES') })
+    } finally {
+      await chmod(archive, 0o700)
+    }
     expect(await snapshotIds(e, 'mem_b')).toEqual([])
     expect(await allEntries(e)).toEqual([])
     ok(await e.run({ cmd: 'refresh-views' }))

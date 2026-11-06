@@ -21,9 +21,24 @@ import { record as baseRecord } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { formatIndexLine } from '../src/index-line.ts'
 import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
+import { writesDuring } from './helpers/fs-writes.ts'
 
 // 维护点（写路径末尾与快照冻结时的目录整理）。只测 FileTable 专属的磁盘效应；
 // 双后端一致的语义在 table-conformance.spec.ts。全部用真实目录，不 mock 自己的模块。
+// 「零写入」看 node:fs/promises 的写调用记录（透传，见 helpers/fs-writes.ts），不比 mtime。
+// renameFault：设了就让下一次改名到匹配路径的 rename 失败一次（维护点写盘失败），平时原样透传。
+const { renameFault } = vi.hoisted(() => ({ renameFault: { when: undefined as ((to: string) => boolean) | undefined } }))
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  const rename = async (...args: Parameters<typeof actual.rename>) => {
+    if (renameFault.when?.(String(args[1]))) {
+      renameFault.when = undefined
+      throw Object.assign(new Error('EACCES: injected failure, rename'), { code: 'EACCES' })
+    }
+    return actual.rename(...args)
+  }
+  return (await import('./helpers/fs-writes.ts')).recordWrites({ ...actual, rename })
+})
 
 const DAY = 86_400_000
 const WS = '/home/dev/proj-m'
@@ -37,7 +52,10 @@ const wsRecord = (partial: Partial<MemoryRecord> = {}, ws = WS) => record({ scop
 
 let root: string
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-maint-')) })
-afterEach(async () => { await rm(root, { recursive: true, force: true }) })
+afterEach(async () => {
+  renameFault.when = undefined
+  await rm(root, { recursive: true, force: true })
+})
 
 const globalDir = () => join(root, GLOBAL_DIR)
 const wsDir = (p = WS) => join(root, workspaceDirName(p))
@@ -65,17 +83,19 @@ const iso = (ms: number) => new Date(ms).toISOString()
 const mds = async (dir: string) => (await readdir(dir).catch(() => [] as string[])).filter(n => n.endsWith('.md') && n !== INDEX_FILE).sort()
 const frontmatter = async (path: string) => splitFrontmatter(await readFile(path, 'utf8')).data
 
-/** 递归快照：相对路径 → mtime（目录与文件都计）；.state/ 不计。 */
-async function treeSnapshot(dir: string, prefix = ''): Promise<Record<string, number>> {
-  const out: Record<string, number> = {}
+/** 递归列出目录项（相对路径，目录与文件都计）；.state/ 不计。 */
+async function treeEntries(dir: string, prefix = ''): Promise<string[]> {
+  const out: string[] = []
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const rel = prefix + entry.name
     if (rel === STATE_DIR) continue
-    out[rel] = (await stat(join(dir, entry.name))).mtimeMs
-    if (entry.isDirectory()) Object.assign(out, await treeSnapshot(join(dir, entry.name), `${rel}/`))
+    out.push(rel)
+    if (entry.isDirectory()) out.push(...await treeEntries(join(dir, entry.name), `${rel}/`))
   }
-  return out
+  return out.sort()
 }
+/** 写调用里落在 dir 下的（含原子写的临时文件）。 */
+const writesUnder = (calls: string[], dir: string) => calls.filter(c => c.includes(dir))
 
 function open(opts: Partial<ConstructorParameters<typeof FileTable>[0]> = {}) {
   const stats = new InMemoryKvTable<RecallStats>()
@@ -83,7 +103,7 @@ function open(opts: Partial<ConstructorParameters<typeof FileTable>[0]> = {}) {
 }
 
 describe('维护点动作 ①：再生 MEMORY.md', () => {
-  it('只列顶层 active 且未过期的记录，按 name 再 id 排序；内容不变不写（mtime 不变）', async () => {
+  it('只列顶层 active 且未过期的记录，按 name 再 id 排序；内容不变不写', async () => {
     const now = Date.now()
     await writeMem(globalDir(), 'b.md', record({ id: 'mem_b', name: 'beta' }))
     await writeMem(globalDir(), 'a2.md', record({ id: 'mem_a2', name: 'alpha' }))
@@ -91,14 +111,12 @@ describe('维护点动作 ①：再生 MEMORY.md', () => {
     await writeMem(globalDir(), 'exp.md', record({ id: 'mem_exp', name: '过期', validTo: now - DAY }))
     await writeMem(archiveOf(globalDir()), 'arch.md', record({ id: 'mem_arch', name: '归档', status: 'deleted', deletedAt: now }))
     const { table } = open()
-    await table.maintain([globalDir()])
+    // 第一次写出索引：写调用确实记得到
+    expect(writesUnder(await writesDuring(() => table.maintain([globalDir()])), join(globalDir(), INDEX_FILE))).not.toEqual([])
     const idx = await readFile(join(globalDir(), INDEX_FILE), 'utf8')
     const ids = [...idx.matchAll(/\[(mem_\w+)\]/g)].map(m => m[1])
     expect(ids).toEqual(['mem_a1', 'mem_a2', 'mem_b'])
-    const mtime = (await stat(join(globalDir(), INDEX_FILE))).mtimeMs
-    await new Promise(r => setTimeout(r, 5))
-    await table.maintain([globalDir()])
-    expect((await stat(join(globalDir(), INDEX_FILE))).mtimeMs).toBe(mtime)
+    expect(await writesDuring(() => table.maintain([globalDir()]))).toEqual([])
   })
 })
 
@@ -218,10 +236,9 @@ describe('维护点动作 ④：手建 / 手编文件回写', () => {
     expect(fm).toMatchObject({ tags: [], summary: '', status: 'active', confidence: 0.9 })
     expect(typeof fm.updatedAt).toBe('string')
     expect(typeof fm.lastConfirmedAt).toBe('string')
-    await new Promise(r => setTimeout(r, 5))
-    const before = await treeSnapshot(root)
-    await table.maintain([wsDir()])
-    expect(await treeSnapshot(root)).toEqual(before)
+    const before = await treeEntries(root)
+    expect(await writesDuring(() => table.maintain([wsDir()]))).toEqual([])
+    expect(await treeEntries(root)).toEqual(before)
   })
 
   it('digest 存在且不匹配（正文被手改）→ 重算 digest、handEdited: true、updatedAt 与 lastConfirmedAt 取 mtime；再维护不再动', async () => {
@@ -240,21 +257,19 @@ describe('维护点动作 ④：手建 / 手编文件回写', () => {
     const hit = (await table.locate('mem_e', {}))!.record
     expect(hit.handEdited).toBe(true)
     expect(hit.updatedAt).toBe(Date.parse(iso(edited)))
-    await new Promise(r => setTimeout(r, 5))
-    const before = await treeSnapshot(root)
-    await table.maintain([globalDir()])
-    expect(await treeSnapshot(root)).toEqual(before)
+    const before = await treeEntries(root)
+    expect(await writesDuring(() => table.maintain([globalDir()]))).toEqual([])
+    expect(await treeEntries(root)).toEqual(before)
   })
 
-  it('插件自己写出的文件在稳态下零写入：维护点前后目录项与 mtime 逐项相等', async () => {
+  it('插件自己写出的文件在稳态下零写入：维护点没有写调用、目录项不变', async () => {
     const { table } = open()
     await table.create(wsRecord({ id: 'mem_w1', name: '一', tags: ['a', 'b'], summary: '摘要', content: '多行\n正文' }))
     await table.create(record({ id: 'mem_g1', name: '二', validTo: Date.now() + DAY, supersedes: ['mem_x'], globalCandidate: true }))
     await table.update('mem_w1', {}, r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))
-    await new Promise(r => setTimeout(r, 5))
-    const before = await treeSnapshot(root)
-    await table.maintain([globalDir(), wsDir()])
-    expect(await treeSnapshot(root)).toEqual(before)
+    const before = await treeEntries(root)
+    expect(await writesDuring(() => table.maintain([globalDir(), wsDir()]))).toEqual([])
+    expect(await treeEntries(root)).toEqual(before)
   })
 })
 
@@ -269,10 +284,9 @@ describe('维护点回写带着委派块', () => {
     expect(fm.delegation).toEqual({ sessionId: 'child', depth: 1, parentSessionId: 'main' })
     const hit = (await table.locate(fm.id as string, {}))!.record
     expect(isPendingDelegated(hit)).toBe(true)
-    await new Promise(r => setTimeout(r, 5))
-    const before = await treeSnapshot(root)
-    await table.maintain([globalDir()])
-    expect(await treeSnapshot(root)).toEqual(before)
+    const before = await treeEntries(root)
+    expect(await writesDuring(() => table.maintain([globalDir()]))).toEqual([])
+    expect(await treeEntries(root)).toEqual(before)
   })
 
   it('插件写出的带 reviewed 的记录：update 保留整块，稳态零写入', async () => {
@@ -281,10 +295,9 @@ describe('维护点回写带着委派块', () => {
     await table.create(record({ id: 'mem_d', delegation }))
     await table.update('mem_d', {}, r => ({ ...r, content: '改写', updatedAt: Date.now() }))
     expect((await table.locate('mem_d', {}))!.record.delegation).toEqual(delegation)
-    await new Promise(r => setTimeout(r, 5))
-    const before = await treeSnapshot(root)
-    await table.maintain([globalDir()])
-    expect(await treeSnapshot(root)).toEqual(before)
+    const before = await treeEntries(root)
+    expect(await writesDuring(() => table.maintain([globalDir()]))).toEqual([])
+    expect(await treeEntries(root)).toEqual(before)
   })
 })
 
@@ -316,10 +329,9 @@ describe('维护点动作 ④：旧版本写的有效期改写成本机时间', 
     expect(fm.updatedAt).toBe(iso(top.updatedAt))
     expect(fm.lastConfirmedAt).toBe(iso(top.lastConfirmedAt))
     expect(fm.digest).toBe(computeDigest(top.name, top.summary, top.content))
-    await new Promise(r => setTimeout(r, 5))
-    const before = await treeSnapshot(root)
-    await table.maintain([wsDir()])
-    expect(await treeSnapshot(root)).toEqual(before)
+    const before = await treeEntries(root)
+    expect(await writesDuring(() => table.maintain([wsDir()]))).toEqual([])
+    expect(await treeEntries(root)).toEqual(before)
   })
 
   it('转换前后读到的值相同：旧文件读出来就按同样规则取整，转换不改变任何读方看到的有效期', async () => {
@@ -395,10 +407,12 @@ describe('维护点动作 ⑤：陈旧 tmp 清理', () => {
   it('本进程 pid 的残留与超 60 秒的残留被删，他进程的新鲜残留不动', async () => {
     await writeMem(globalDir(), 'a.md', record({ id: 'mem_a' }))
     await writeRaw(globalDir(), `a.md.tmp-${process.pid}-mine`, '自家残留')
-    await writeRaw(archiveOf(globalDir()), `b.md.tmp-${process.pid + 1}-fresh`, '他人在途')
+    const fresh = await writeRaw(archiveOf(globalDir()), `b.md.tmp-${process.pid + 1}-fresh`, '他人在途')
+    // 新鲜、陈旧都相对文件系统记下的 mtime 算，不假定 Date.now() 与文件系统时钟一致
+    const at = (await stat(fresh)).mtimeMs
     const stale = await writeRaw(globalDir(), `c.md.tmp-${process.pid + 1}-stale`, '他人陈旧')
-    await touch(stale, Date.now() - 120_000)
-    const { table } = open()
+    await touch(stale, at - 120_000)
+    const { table } = open({ now: () => at })
     await table.maintain([globalDir()])
     expect((await readdir(globalDir())).filter(n => n.includes('.tmp-'))).toEqual([])
     expect((await readdir(archiveOf(globalDir()))).filter(n => n.includes('.tmp-'))).toEqual([`b.md.tmp-${process.pid + 1}-fresh`])
@@ -406,14 +420,12 @@ describe('维护点动作 ⑤：陈旧 tmp 清理', () => {
 })
 
 describe('维护点的边界', () => {
-  it('过期（validTo 已过）的 active 文件不搬家：留在顶层、mtime 不变，只不进 MEMORY.md', async () => {
+  it('过期（validTo 已过）的 active 文件不搬家：留在顶层、不重写，只不进 MEMORY.md', async () => {
     const path = await writeMem(globalDir(), 'exp.md', record({ id: 'mem_exp', name: '过期', validTo: Date.now() - DAY }))
     await writeMem(globalDir(), 'live.md', record({ id: 'mem_live', name: '有效' }))
-    const mtime = (await stat(path)).mtimeMs
     const { table } = open()
-    await table.maintain([globalDir()])
+    expect(writesUnder(await writesDuring(() => table.maintain([globalDir()])), path)).toEqual([])
     expect(await mds(globalDir())).toEqual(['exp.md', 'live.md'])
-    expect((await stat(path)).mtimeMs).toBe(mtime)
     const idx = await readFile(join(globalDir(), INDEX_FILE), 'utf8')
     expect(idx).toContain('mem_live')
     expect(idx).not.toContain('mem_exp')
@@ -423,12 +435,11 @@ describe('维护点的边界', () => {
     await writeMem(globalDir(), 'd.md', record({ id: 'mem_d', status: 'deleted' }))
     await writeMem(wsDir(), 'wd.md', wsRecord({ id: 'mem_wd', status: 'deleted' }), WS)
     await writeRaw(wsDir(), INDEX_FILE, '# 手改\n')
-    await new Promise(r => setTimeout(r, 5))
-    const before = await treeSnapshot(wsDir())
+    const before = await treeEntries(wsDir())
     const { table } = open()
-    await table.maintain([globalDir()])
+    expect(writesUnder(await writesDuring(() => table.maintain([globalDir()])), wsDir())).toEqual([])
     expect(await mds(archiveOf(globalDir()))).toEqual(['d.md'])
-    expect(await treeSnapshot(wsDir())).toEqual(before)
+    expect(await treeEntries(wsDir())).toEqual(before)
   })
 
   it('.archive/ 里 status 仍为 active 的文件按位置归一成 deleted（deletedAt 取 mtime），不搬回顶层', async () => {
@@ -508,45 +519,50 @@ describe('快照冻结是维护点', () => {
   it('会话没有 workspace（解析为 undefined）时只维护 global，workspace 目录不动', async () => {
     await writeMem(globalDir(), 'gd.md', record({ id: 'mem_gd', status: 'deleted' }))
     await writeMem(wsDir(), 'wd.md', wsRecord({ id: 'mem_wd', status: 'deleted' }), WS)
-    await new Promise(r => setTimeout(r, 5))
-    const before = await treeSnapshot(wsDir())
+    const before = await treeEntries(wsDir())
     const h = harness()
-    await h.assemble(undefined)
+    expect(writesUnder(await writesDuring(() => h.assemble(undefined)), wsDir())).toEqual([])
     expect(await mds(archiveOf(globalDir()))).toEqual(['gd.md'])
-    expect(await treeSnapshot(wsDir())).toEqual(before)
+    expect(await treeEntries(wsDir())).toEqual(before)
   })
 
   it('维护失败只记日志，注入文本照常返回并冻结', async () => {
     await writeMem(wsDir(), 'live.md', wsRecord({ id: 'mem_live', name: '有效', content: '有效 正文' }), WS)
+    // 手建文件缺 digest，维护点要回写它；回写的 rename 失败让这次维护失败
+    const hand = await writeRaw(wsDir(), 'hand.md', '---\nname: 手建\ntype: preference\n---\n\n手写\n')
+    renameFault.when = to => to === hand
     const h = harness()
-    vi.spyOn(h.store, 'maintain').mockRejectedValueOnce(new Error('boom'))
     const s = {}
     h.cache.setWorkspacePath(s, WS)
     const text = await h.cache.assemble(s)
     expect(text).toContain('有效 正文')
+    expect(renameFault.when).toBeUndefined()   // 故障确实在维护点回写时触发
     expect(h.cache.injectedCore(s)).toBeDefined()
     expect(h.log.error).toHaveBeenCalledTimes(1)
+    expect(h.log.error.mock.calls[0]![1]).toMatchObject({ code: 'EACCES' })   // 记下的就是注入的那次失败
   })
 })
 
 describe('memory_health 纯读', () => {
-  it('真实目录里有待搬家的 deleted、手改的 MEMORY.md、手建文件：单层与全库体检后目录项与 mtime 逐项不变', async () => {
+  it('真实目录里有待搬家的 deleted、手改的 MEMORY.md、手建文件：单层与全库体检不写记忆目录（.state/ 除外）、目录项不变', async () => {
     await writeMem(wsDir(), 'gone.md', wsRecord({ id: 'mem_gone', status: 'deleted' }), WS)
     await writeRaw(wsDir(), 'hand.md', '---\nname: 手建\ntype: preference\n---\n\n手写\n')
     await writeRaw(wsDir(), INDEX_FILE, '# 手改\n')
     await writeMem(globalDir(), 'g.md', record({ id: 'mem_g' }))
     await writeRaw(globalDir(), INDEX_FILE, '# 手改\n')
-    await new Promise(r => setTimeout(r, 5))
-    const before = await treeSnapshot(root)
+    const before = await treeEntries(root)
     const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
     const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats }), undefined, sidecar.recallStats)
     const deps = {
       store, registry, decisions: new PendingDecisionsStore(sidecar.pending), cache: sidecar.scanCache,
       thresholds: resolveHealthThresholds('normal'), host: { contextOf: async () => ({ workspacePath: WS }) },
     }
-    expect((await executeHealth({}, deps, fakeExec())).kind).toBe('single')
-    expect((await executeHealth({ scope: 'all' }, deps, fakeExec())).kind).toBe('checkup')
-    expect(await treeSnapshot(root)).toEqual(before)
+    const writes = await writesDuring(async () => {
+      expect((await executeHealth({}, deps, fakeExec())).kind).toBe('single')
+      expect((await executeHealth({ scope: 'all' }, deps, fakeExec())).kind).toBe('checkup')
+    })
+    expect(writes.filter(c => !c.includes(join(root, STATE_DIR)))).toEqual([])
+    expect(await treeEntries(root)).toEqual(before)
   })
 })
 
