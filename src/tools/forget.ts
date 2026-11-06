@@ -9,7 +9,7 @@ import {
   copyHistory, crossWorkspaceNote, gateRecords, locateCopy,
   type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark,
 } from './workspace-gate.ts'
-import type { Scope } from '../scope.ts'
+import { scopeKey, type Scope } from '../scope.ts'
 
 /** memory_forget 工具的依赖，纯逻辑层与框架绑定层共用。 */
 export interface ForgetToolDeps {
@@ -179,16 +179,9 @@ export async function executeForget(
 
 /** 除 target 外哪个作用域都没有（含归档）的 id。 */
 async function withoutOtherCopies(store: MemoryStore, ids: readonly string[], target: Scope): Promise<string[]> {
-  if (ids.length === 0) return []
-  const workspaces = (await store.listWorkspaceDirs()).entries.map(e => e.workspacePath)
-  const others: Scope[] = [
-    ...(target.kind === 'global' ? [] : [{ kind: 'global' } as const]),
-    ...workspaces.filter(ws => target.kind === 'global' || ws !== target.workspacePath).map(workspacePath => ({ kind: 'workspace' as const, workspacePath })),
-  ]
   const result: string[] = []
   for (const id of ids) {
-    const copies = await Promise.all(others.map(scope => locateCopy(store, id, scope)))
-    if (copies.every(c => c === undefined)) result.push(id)
+    if ((await store.copiesOf(id)).every(scope => scopeKey(scope) === scopeKey(target))) result.push(id)
   }
   return result
 }

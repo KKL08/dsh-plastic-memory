@@ -486,6 +486,19 @@ describe.each(backends)('后端一致性：$name', ({ make }) => {
     expect(archived.filePath).toBe(join(h.wsDir(WS_A), ARCHIVE_DIR, 'd.md'))
   })
 
+  it('copiesOf：同 id 在哪些作用域有副本，含只在 .archive/ 里的；全局在前、项目按路径排序；没有就是空', async () => {
+    await h.seedFile({ dir: h.wsDir(WS_B), fileName: 'm.md', record: ws(WS_B, { id: 'mem_m', type: 'project' }) })
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'm.md', record: ws(WS_A, { id: 'mem_m', type: 'project', status: 'deleted' }), archived: true })
+    await h.seedFile({ dir: h.globalDir, fileName: 'm.md', record: record({ id: 'mem_m', type: 'project' }) })
+    await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'other.md', record: ws(WS_A, { id: 'mem_other', type: 'project' }) })
+
+    expect(await store.copiesOf('mem_m')).toEqual([
+      { kind: 'global' }, { kind: 'workspace', workspacePath: WS_A }, { kind: 'workspace', workspacePath: WS_B },
+    ])
+    expect(await store.copiesOf('mem_other')).toEqual([{ kind: 'workspace', workspacePath: WS_A }])
+    expect(await store.copiesOf('mem_ghost')).toEqual([])
+  })
+
   it('readScope.listedCount：范围内顶层文件数，与 types、预筛开关、includeArchive 无关；两个后端同值', async () => {
     await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'k.md', record: ws(WS_A, { id: 'mem_k', type: 'knowledge', content: 'alpha 部署' }) })
     await h.seedFile({ dir: h.wsDir(WS_A), fileName: 'p.md', record: ws(WS_A, { id: 'mem_p', type: 'project', content: 'alpha', status: 'superseded' }) })

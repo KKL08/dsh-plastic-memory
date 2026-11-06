@@ -104,7 +104,7 @@ export async function executePromote(
   const taken: string[] = []
   if (args.target === 'global') {
     for (const r of found) {
-      if (r.scope === 'workspace' && (await locateCopy(deps.store, r.id, { kind: 'global' })) !== undefined) taken.push(r.id)
+      if (r.scope === 'workspace' && (await deps.store.copiesOf(r.id)).some(scope => scope.kind === 'global')) taken.push(r.id)
     }
   }
   const targets = taken.length === 0 ? found : found.filter(r => !taken.includes(r.id))

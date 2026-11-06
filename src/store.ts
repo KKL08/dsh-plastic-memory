@@ -12,7 +12,7 @@ import { InMemoryBatchKvTable, type BatchKvTable } from './kv-table.ts'
 import type { RecallStats } from './storage/schema.ts'
 import { RETENTION_MS } from './retention.ts'
 import { hasSecret } from './secrets.ts'
-import type { Scope } from './scope.ts'
+import { isInScope, type Scope } from './scope.ts'
 
 export type { MemoryLogger, MemoryTable, KeywordMatch } from './storage/table.ts'
 
@@ -229,6 +229,14 @@ export class MemoryStore {
     return found === undefined ? undefined : byPosition(found)
   }
   locate(id: string, hint?: LocateHint) { return this.table.locate(id, hint) }
+  /** 这个 id 在哪些作用域有副本（任何状态，含只在 .archive/ 里的）：全局在前，项目按路径排序。逐个作用域只认本作用域定位。 */
+  async copiesOf(id: string): Promise<Scope[]> {
+    const workspaces = [...new Set((await this.table.listWorkspaceDirs()).entries.map(e => e.workspacePath))].sort()
+    const scopes: Scope[] = [{ kind: 'global' }, ...workspaces.map(workspacePath => ({ kind: 'workspace' as const, workspacePath }))]
+    const copies = await Promise.all(scopes.map(scope =>
+      this.get(id, { workspacePath: scope.kind === 'workspace' ? scope.workspacePath : undefined, isExactLayer: true })))
+    return scopes.filter((scope, i) => copies[i] !== undefined && isInScope(copies[i], scope))
+  }
   listWorkspaceDirs() { return this.table.listWorkspaceDirs() }
   /** 新记录：不定位，排他占名（save create 用）。 */
   create(record: MemoryRecord) { return this.table.create(record) }

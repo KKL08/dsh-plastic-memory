@@ -930,6 +930,17 @@ describe('同 id 在两个项目里各有一份', () => {
     expect(await allEntries(e)).toEqual([entry])
   })
 
+  it('forget 指明一份：路径只差末尾分隔符的另一个目录也是别处的副本，账本里指向这个 id 的条目留着', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_dup', scope: 'workspace', workspacePath: SESSION_WS }))
+    await e.store.create(record({ id: 'mem_dup', scope: 'workspace', workspacePath: `${SESSION_WS}/` }))
+    await e.store.create(record({ id: 'mem_y', scope: 'workspace', workspacePath: SESSION_WS }))
+    const entry = (await e.decisions.upsert({ memoryIds: ['mem_dup', 'mem_y'], summary: '同 id 的冲突', fingerprint: 'fp-dup' }, 1)).entry
+    ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: own }))
+    expect((await copyIn(e, `${SESSION_WS}/`))!.status).toBe('active')
+    expect(await allEntries(e)).toEqual([entry])
+  })
+
   it('hard-delete 指明含密钥的一份：只脱敏这一层在快照里的副本，别的项目那份的快照照常能恢复', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_dup', name: '本项目那份', content: `token ${FAKE_SECRET.sk}`, scope: 'workspace', workspacePath: SESSION_WS }))
