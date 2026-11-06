@@ -33,6 +33,7 @@ import { generateDraft } from './model-draft.ts'
 import { holdCheckups, processInterval, type IntervalTimer } from './auto-checkup.ts'
 import { checkupWorkspaces } from '../tools/scope-preread.ts'
 import { scopeAt, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
+import { UNKNOWN_SESSION_ID } from '../tools/host-session.ts'
 import { checkupResults, scanOutcome, type CheckupTarget } from './views.ts'
 
 /**
@@ -190,7 +191,7 @@ async function info(deps: MemoryCommandDeps, sessionId: string): Promise<Ok> {
         pending: at(GUI_VIEW_FILES.pending), health: at(GUI_VIEW_FILES.health),
         library: at(GUI_VIEW_FILES.library), deleted: at(GUI_VIEW_FILES.deleted),
         checkups: at(GUI_CHECKUP_VIEW_FILE),
-        ...(sessionId !== 'unknown' ? { session: at(sessionViewFile(sessionId)) } : {}),
+        ...(sessionId !== UNKNOWN_SESSION_ID ? { session: at(sessionViewFile(sessionId)) } : {}),
       },
       version: GUI_VIEW_VERSION,
     },
