@@ -85,7 +85,7 @@ export function commandInput(args: string | null): string | null {
   if (text === '') return null
   const space = text.search(/\s/)
   if (space === -1) return maskCard(text)
-  return `${maskCard(text.slice(0, space))} ${maskedBody(text.slice(space).trim())}`
+  return maskCard(`${text.slice(0, space)} ${maskedBody(text.slice(space).trim())}`)
 }
 
 /** 点开后的输出：结果文本，是 JSON 就排版，遮过密钥。还在跑或没有文本时为 null。 */
@@ -106,10 +106,8 @@ const maskStrings = (value: unknown): unknown =>
 
 /**
  * 卡里展开的正文（工具行的输入也用它）：是 JSON 就先遮每个字符串的原值再排版——排版后换行成了 `\n`，
- * 跨行的密钥（`Bearer` 换行接 token）就认不出了；排完再整体遮一遍，兜住键值分在两段的赋值。不是 JSON 就原样遮。
+ * 跨行的密钥（`Bearer` 换行接 token）就认不出了；排完再整体遮一遍，键名里的也遮到。不是 JSON 就原样遮。
  */
 export function maskedBody(text: string): string {
-  let value: unknown
-  try { value = JSON.parse(text) } catch { return maskCard(text) }
-  return maskCard(JSON.stringify(maskStrings(value), null, 2))
+  try { return maskCard(JSON.stringify(maskStrings(JSON.parse(text)), null, 2)) } catch { return maskCard(text) }
 }

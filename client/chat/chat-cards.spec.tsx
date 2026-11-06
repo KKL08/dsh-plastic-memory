@@ -238,6 +238,10 @@ describe('命令行：面板发的 /memory 命令在对话里画成一句话', (
     const tool: MemoryToolViewProps = { ...result('memory_save', { content: `Authorization: Bearer\n${token}` }, '已保存'), useDisclosure: () => ({ expanded: true, toggle: () => {} }) }
     renderInShell(<MemoryToolRow {...tool} hostT={hostT} />)
     expect(document.querySelector('.pm-tr-io')!.textContent).not.toContain(token)
+    cleanup()
+    renderInShell(<MemoryCommandRow node={node(` Bearer ${token}`, null)} hostT={hostT} />)
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    expect(document.querySelector('.pm-tr-io')!.textContent).not.toContain(token)
   })
 
   it('不是 JSON 的返回原样显示；既没参数也没返回时不能展开', () => {
