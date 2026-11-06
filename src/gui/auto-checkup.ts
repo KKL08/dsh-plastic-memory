@@ -9,74 +9,17 @@ import { genId } from '../governance/schema.ts'
 import { maskDiagnostic } from '../secrets.ts'
 import type { CheckupCause, CheckupView, PendingView } from './contract.ts'
 import { checkupResults } from './views.ts'
+import { holdCheckups, type IntervalTimer } from './checkup-run.ts'
 
 /** 插件启动后等这么久第一次检查（不跟首轮对话抢资源）。 */
 export const AUTO_CHECKUP_FIRST_CHECK_MS = 3 * 60_000
 /** 之后每隔这么久检查一次到期。不用几天后才触发的长定时器：笔记本睡眠时计时器会停，固定间隔检查醒来就能补上。 */
 export const AUTO_CHECKUP_INTERVAL_MS = 10 * 60_000
 
-/** 体检持有认领期间每隔这么久刷新一次认领时间；60 秒没刷新算残留（storage/sidecar.ts）。 */
-export const CHECKUP_CLAIM_REFRESH_MS = 10_000
-
-/** 定时重复执行 callback，返回停掉它的函数。 */
-export type IntervalTimer = (callback: () => void, delayMs: number) => () => void
-
 /** 宿主计时服务的结构子集（ctx.timeout / ctx.interval）：返回停掉它的函数，插件卸载时宿主也会停。 */
 export interface AutoCheckupTimer {
   timeout(callback: () => void, delayMs: number): () => void
   interval: IntervalTimer
-}
-
-/** 进程自己的 setInterval（命令处理器没有宿主计时服务时用），不拖住进程退出。 */
-export const processInterval: IntervalTimer = (callback, delayMs) => {
-  const timer = setInterval(callback, delayMs)
-  timer.unref()
-  return () => { clearInterval(timer) }
-}
-
-/**
- * 体检开跑前认领这些范围并保持心跳，界面手动体检和自动体检共用。有一个范围认领不到（别的体检正认领着、没过期）就把已认领的
- * 立刻放掉，返回那个正在体检的范围。认领到之后每 10 秒刷新一次认领时间；刷新时发现认领已不是自己的（被当成残留清掉、
- * 别的进程接手了）就调 onLost，由调用方触发这次体检的取消信号：执行器在下一个写入检查点前停下，不再提交。
- * 认领到和放掉之后都调 onChange（重写体检视图里的「进行中」）。release 先停心跳、等在途的刷新做完，再放掉认领（只删自己的）。
- */
-export async function holdCheckups(checkups: Pick<CheckupRecordStore, 'claim'>, scopes: readonly Scope[], opts: {
-  interval: IntervalTimer
-  onLost: () => void
-  onChange?: () => Promise<void> | void
-  log: MemoryLogger
-}): Promise<{ release: () => Promise<void> } | { busy: Scope }> {
-  const claimed = await checkups.claim(scopes)
-  if ('busy' in claimed) return claimed
-  let isLost = false
-  // 刷新串成一条链，释放时等它跑完，免得放掉之后又被在途的刷新写回来
-  let refreshing: Promise<void> = Promise.resolve()
-  const stop = opts.interval(() => {
-    refreshing = refreshing.then(async () => {
-      if (isLost) return
-      for (const claim of claimed.claims) {
-        if (await claim.refresh()) continue
-        isLost = true
-        opts.log.info('[plastic-memory] 体检的认领被别的进程接手，这次体检停下、不提交')
-        opts.onLost()
-        return
-      }
-    }).catch((err: unknown) => { opts.log.warn('[plastic-memory] 刷新体检认领失败，下次心跳再试', err) })
-  }, CHECKUP_CLAIM_REFRESH_MS)
-  await opts.onChange?.()
-  return {
-    release: async () => {
-      stop()
-      await refreshing
-      try {
-        for (const claim of claimed.claims) await claim.release()
-      } catch (err) {
-        // 没放掉的认领不再刷新，60 秒后按残留处理
-        opts.log.warn('[plastic-memory] 放掉体检认领失败，60 秒后按残留处理', err)
-      }
-      await opts.onChange?.()
-    },
-  }
 }
 
 export interface AutoCheckupSchedulerDeps {
@@ -108,7 +51,7 @@ export interface AutoCheckupSchedulerDeps {
  * 用宿主的默认模型无会话调用，结果照常写缓存、挂账、写完成记录（发起方 auto），和手动体检那个范围同口径；
  * 做完的再记下最近一次结果（新增、用量、说明）。后台调用不经过会话，宿主的用量统计看不到，用量取宿主流 usage 块报的数，由插件记在结果里。
  * 到期的范围依次查、一次只跑一个（全局先，项目按路径）；一次检查每个范围只补一次。
- * 跨进程：开跑前认领这个范围（与界面手动体检共用，见 holdCheckups），别的进程正在查就跳过；认领到之后重读完成记录，
+ * 跨进程：开跑前认领这个范围（与界面手动体检共用，见 checkup-run.ts holdCheckups），别的进程正在查就跳过；认领到之后重读完成记录，
  * 别的进程刚查过、已经不到期的放掉不跑。持有期间心跳，认领被别的进程接手就取消这次体检、不再提交。
  * 卸载时取消正在跑的体检：执行器在写入检查点前停下，不写完成记录，下次照常到期。
  *

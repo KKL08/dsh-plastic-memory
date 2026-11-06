@@ -23,7 +23,7 @@ export class CheckupRecordStore {
   }
 
   /**
-   * 认领这些范围：全部认领到才算，返回各自的认领（持有者要定时刷新，见 gui/auto-checkup.ts holdCheckups）；
+   * 认领这些范围：全部认领到才算，返回各自的认领（持有者要定时刷新，见 gui/checkup-run.ts holdCheckups）；
    * 有一个认领不到就把已认领的立刻放掉，返回那个正在体检的范围。
    */
   async claim(scopes: readonly Scope[]): Promise<{ claims: RefreshableClaim[] } | { busy: Scope }> {
