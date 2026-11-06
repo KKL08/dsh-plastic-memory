@@ -10,10 +10,11 @@ import { useMemo, type KeyboardEvent } from 'react'
 import { maskSecrets, type MaskOptions } from '../../src/gui/contract.ts'
 import { useT } from '../i18n.tsx'
 import { Icon } from '../ui/Icon.tsx'
+import { prettyJson } from './command-summary.ts'
 import { parseArgs, toolSummary, type MemoryToolName } from './tool-summary.ts'
 
 const CARD_MASK: MaskOptions = { severity: 'suspected' }
-const maskCard = (text: string) => maskSecrets(text, CARD_MASK)
+export const maskCard = (text: string) => maskSecrets(text, CARD_MASK)
 
 /** 宿主 ToolResultNode 里用到的字段。 */
 export interface ToolResultBlock {
@@ -38,17 +39,13 @@ export type MemoryToolViewProps = {
 /** 宿主 `conversation` 命名空间的翻译函数。 */
 export type HostTranslate = (key: string) => string
 
-type RowState = 'preparing' | 'running' | 'ok' | 'error' | 'stopped'
+export type RowState = 'preparing' | 'running' | 'ok' | 'error' | 'stopped'
 
 /** 宿主 resultText：文本块原样，其他块转 JSON；失败且没有内容时写错误名与码。 */
 function resultText(block: ToolResultBlock): string {
   const parts = block.content.map(b => (b.type === 'text' ? b.text ?? '' : JSON.stringify(b, null, 2)))
   if (parts.length === 0 && block.error !== undefined) parts.push(`${block.error.name}: ${block.error.code}`)
   return parts.join('\n')
-}
-
-function formatBody(argsRaw: string): string {
-  try { return JSON.stringify(JSON.parse(argsRaw), null, 2) } catch { return argsRaw }
 }
 
 const firstLine = (text: string) => text.split('\n', 1)[0]!
@@ -77,20 +74,47 @@ export function MemoryToolRow(props: MemoryToolViewProps & { hostT: HostTranslat
   }, [state, output, toolName, argsRaw, done, t])
 
   const bodyRaw = argsRaw === '' ? null : argsRaw
-  const expandable = state !== 'preparing' && (bodyRaw !== null || output !== null)
+  const summaryClass = state === 'error' ? 'pm-tr-summary pm-tr-summary--error'
+    : state === 'stopped' ? 'pm-tr-summary pm-tr-summary--stopped' : 'pm-tr-summary'
+
+  return (
+    <RowView
+      attrs={{ 'data-tool': toolName }} state={state} title={hostT('tool.title.generic')} summary={summaryText} summaryClass={summaryClass}
+      input={bodyRaw === null ? null : maskCard(prettyJson(bodyRaw))} output={output} isOutputError={state === 'error'}
+      expanded={expanded} toggle={toggle} inspect={inspect} hostT={hostT}
+    />
+  )
+}
+
+export interface RowViewProps {
+  attrs: Record<string, string>
+  state: RowState
+  title: string
+  summary: string
+  summaryClass: string
+  /** 点开后的输入 / 输出（已遮盖）；两者都没有时这一行不能展开。 */
+  input: string | null
+  output: string | null
+  isOutputError: boolean
+  expanded: boolean
+  toggle: () => void
+  inspect?: (() => void) | undefined
+  hostT: HostTranslate
+}
+
+/** 一行的外观（记忆工具行、面板命令行共用）：图标、标题、摘要，点开是宿主的输入 / 输出块。 */
+export function RowView({ attrs, state, title, summary, summaryClass, input, output, isOutputError, expanded, toggle, inspect, hostT }: RowViewProps) {
+  const expandable = state !== 'preparing' && (input !== null || output !== null)
   const open = expanded && expandable
   const status = STATUS_KEY[state]
-  const title = hostT('tool.title.generic')
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!expandable || (event.key !== 'Enter' && event.key !== ' ')) return
     event.preventDefault()
     toggle()
   }
-  const summaryClass = state === 'error' ? 'pm-tr-summary pm-tr-summary--error'
-    : state === 'stopped' ? 'pm-tr-summary pm-tr-summary--stopped' : 'pm-tr-summary'
 
   return (
-    <div className="pm-tr" data-tool={toolName} data-state={state}>
+    <div className="pm-tr" {...attrs} data-state={state}>
       <style>{memoryToolRowCss}</style>
       {status !== undefined ? <span className="pm-tr-sr">{hostT(status)}</span> : null}
       <div className="pm-tr-disclosure" data-open={open || undefined}>
@@ -113,10 +137,10 @@ export function MemoryToolRow(props: MemoryToolViewProps & { hostT: HostTranslat
           </span>
           <span className="pm-tr-content">
             <span className="pm-tr-title">{title}</span>
-            {summaryText !== '' ? (
+            {summary !== '' ? (
               <>
                 <span className="pm-tr-sep" aria-hidden="true" />
-                <span className={summaryClass}>{summaryText}</span>
+                <span className={summaryClass}>{summary}</span>
               </>
             ) : null}
           </span>
@@ -124,17 +148,17 @@ export function MemoryToolRow(props: MemoryToolViewProps & { hostT: HostTranslat
         {open ? (
           <div className="pm-tr-body">
             <div className="pm-tr-io">
-              {bodyRaw !== null ? (
+              {input !== null ? (
                 <div className="pm-tr-io-section">
                   <span className="pm-tr-io-label">{hostT('row.input')}</span>
-                  <span className="pm-tr-io-text">{maskCard(formatBody(bodyRaw))}</span>
+                  <span className="pm-tr-io-text">{input}</span>
                 </div>
               ) : null}
-              {bodyRaw !== null && output !== null ? <span className="pm-tr-io-divider" aria-hidden="true" /> : null}
+              {input !== null && output !== null ? <span className="pm-tr-io-divider" aria-hidden="true" /> : null}
               {output !== null ? (
                 <div className="pm-tr-io-section">
                   <span className="pm-tr-io-label">{hostT('row.output')}</span>
-                  <span className="pm-tr-io-text" data-error={state === 'error' || undefined}>{output}</span>
+                  <span className="pm-tr-io-text" data-error={isOutputError || undefined}>{output}</span>
                 </div>
               ) : null}
             </div>

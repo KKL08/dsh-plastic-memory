@@ -78,3 +78,24 @@ export function commandLine(args: string | null, outcome: CommandOutcome): Comma
     case 'failed': return { state: 'error', action, reason: handled.isLocalized ? { key: handled.detail } : firstLine(handled.detail) }
   }
 }
+
+/** 点开后的输入：子命令加排好版的参数 JSON（参数不是 JSON 时原样）。没有参数原文时为 null。 */
+export function commandInput(args: string | null): string | null {
+  const text = args?.trim() ?? ''
+  if (text === '') return null
+  const space = text.search(/\s/)
+  if (space === -1) return text
+  return `${text.slice(0, space)} ${prettyJson(text.slice(space).trim())}`
+}
+
+/** 点开后的输出：结果文本，是 JSON 就排版。还在跑或没有文本时为 null。 */
+export function commandOutput(outcome: CommandOutcome): string | null {
+  const text = outcome?.text ?? ''
+  return text === '' ? null : prettyJson(text)
+}
+
+/** 是 JSON 就排版，否则原样（工具行的输入也用它）。 */
+export function prettyJson(text: string): string {
+  try { return JSON.stringify(JSON.parse(text), null, 2) } catch { return text }
+}
+

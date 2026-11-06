@@ -113,6 +113,26 @@ describe('折叠行：对齐宿主通用工具行，只换摘要', () => {
     expect(screen.getByText('输入')).toBeInTheDocument()
     expect(screen.getByText(SAVED_TEXT)).toBeInTheDocument()
   })
+
+  it('各状态的外观：准备中不能展开；中断标黄；失败标红、展开的返回也标红；有 inspect 时点开带「查看详情」', () => {
+    const preparing: MemoryToolViewProps = { toolName: 'memory_save', useDisclosure: disclosure(), phase: 'preparing', block: undefined }
+    const { container: prep, unmount } = renderInShell(<MemoryToolRow {...preparing} hostT={hostT} />)
+    expect(prep.querySelector('[role="button"]')).toBeNull()
+    expect(prep.querySelector('.pm-tr-sr')).toHaveTextContent('准备中')
+    unmount()
+    const stopped: MemoryToolViewProps = { ...result('memory_scan', {}, '中断'), phase: 'result', block: { kind: 'tool-result', call: { name: 'memory_scan', argsRaw: '{}' }, content: [], isError: true, error: { name: 'Abort', code: 'interrupted' } } }
+    const { container: stop, unmount: unmountStopped } = renderInShell(<MemoryToolRow {...stopped} hostT={hostT} />)
+    expect(stop.querySelector('.pm-tr-summary')).toHaveClass('pm-tr-summary--stopped')
+    unmountStopped()
+    const inspect = vi.fn()
+    const failed: MemoryToolViewProps = { ...result('memory_scan', {}, '拿不到模型', true), useDisclosure: () => ({ expanded: true, toggle: () => {} }), inspect }
+    const { container: fail } = renderInShell(<MemoryToolRow {...failed} hostT={hostT} />)
+    expect(fail.querySelector('.pm-tr')).toHaveAttribute('data-tool', 'memory_scan')
+    expect(fail.querySelector('.pm-tr-summary')).toHaveClass('pm-tr-summary--error')
+    expect(fail.querySelector('.pm-tr-io [data-error]')).toHaveTextContent('拿不到模型')
+    fireEvent.click(screen.getByRole('button', { name: 'row.inspect' }))
+    expect(inspect).toHaveBeenCalled()
+  })
 })
 
 // —— 交付卡 ——
@@ -173,11 +193,44 @@ describe('命令行：面板发的 /memory 命令在对话里画成一句话', (
     }
   })
 
-  it('还在跑：同一句话，读屏报运行中；只占一行，不能展开', () => {
+  it('还在跑：同一句话，读屏报运行中', () => {
     const { container } = renderInShell(<MemoryCommandRow node={node(` forget ${JSON.stringify(memoryLayer)}`, null)} hostT={hostT} />)
     expect(container.querySelector('.pm-tr-summary')).toHaveTextContent('删除一条记忆…')
     expect(container.querySelector('.pm-tr-sr')).toHaveTextContent('运行中')
-    expect(container.querySelector('[role="button"]')).toBeNull()
+    fireEvent.keyDown(screen.getByRole('button', { expanded: false }), { key: ' ' })
+    expect(document.querySelector('.pm-tr-io')).toHaveTextContent('输入')
+    expect(document.querySelector('.pm-tr-io')).not.toHaveTextContent('输出')
+  })
+
+  it('默认收起；点开看完整的输入和返回：JSON 排版，密钥照样遮掉，失败的返回也不标红', () => {
+    const secret = 'sk-abcdefghijklmnopqrstuvwxyz0123456789'
+    renderInShell(<MemoryCommandRow node={node(` forget ${JSON.stringify(memoryLayer)}`, done({ ok: false, cmd: 'forget', code: 'failed', detail: `boom ${secret}` }))} hostT={hostT} />)
+    const row = screen.getByRole('button', { expanded: false })
+    expect(screen.queryByText('输入')).toBeNull()
+    fireEvent.click(row)
+    expect(row).toHaveAttribute('aria-expanded', 'true')
+    const io = document.querySelector('.pm-tr-io')!
+    expect(io).toHaveTextContent('输入')
+    expect(io.textContent).toContain('forget {\n  "memoryId": "m1"')
+    expect(io).toHaveTextContent('输出')
+    expect(io.textContent).toContain('"code": "failed"')
+    expect(io.textContent).not.toContain(secret)
+    expect(io.querySelector('[data-error]')).toBeNull()
+    fireEvent.keyDown(row, { key: 'Enter' })
+    expect(document.querySelector('.pm-tr-io')).toBeNull()
+    cleanup()
+    renderInShell(<MemoryCommandRow node={node(` forget ${JSON.stringify(memoryLayer)}`, done({ ok: false, cmd: 'forget', code: 'failed', detail: 'password=Hunter2-2026xyz' }))} hostT={hostT} />)
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    expect(document.querySelector('.pm-tr-io')?.textContent).not.toContain('Hunter2-2026xyz')
+  })
+
+  it('不是 JSON 的返回原样显示；既没参数也没返回时不能展开', () => {
+    renderInShell(<MemoryCommandRow node={node(' nope', { kind: 'error', text: '未知子命令 nope\n详情' })} hostT={hostT} />)
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    expect(document.querySelector('.pm-tr-io')?.textContent).toContain('未知子命令 nope\n详情')
+    cleanup()
+    renderInShell(<MemoryCommandRow node={node(null, null)} hostT={hostT} />)
+    expect(screen.queryByRole('button')).toBeNull()
   })
 
   it('失败不画成红色：写「没有成功」和原因，原因按面板同一套文案', () => {
