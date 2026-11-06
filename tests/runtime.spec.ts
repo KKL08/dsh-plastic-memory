@@ -357,16 +357,20 @@ describe('SnapshotCache', () => {
     const { store } = makeCache()
     await store.put(record({ id: 'mem_core', type: 'preference', content: '不要 mock 数据库' }))
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
-    const cache = new SnapshotCache({ store, registry, budget: 4000, log })
+    // 故障在宿主边界注入：组装途中问宿主会话自己的 id 时抛错。读盘的故障到不了这里——目录读不出按空计，不让组装失败
+    let isHostBroken = false
+    const host = snapshotHost({ ownSessionIdOf: () => { if (isHostBroken) throw new Error('session closed'); return undefined } })
+    const cache = new SnapshotCache({ store, registry, budget: 4000, log, host })
     const session = {}
     cache.setWorkspacePath(session, undefined)
-    vi.spyOn(store, 'readRaw').mockRejectedValueOnce(new Error('boom'))
+    isHostBroken = true
     expect(await cache.assemble(session)).toBeUndefined()
     expect(log.error).toHaveBeenCalledTimes(1)
 
+    isHostBroken = false
     await cache.assemble(session)
     cache.markStale(session)
-    vi.spyOn(store, 'readRaw').mockRejectedValueOnce(new Error('boom'))
+    isHostBroken = true
     expect(await cache.assemble(session)).toBeUndefined()
     expect(log.error).toHaveBeenCalledTimes(2)
     expect(frozenCore(cache, session)).toEqual(['mem_core'])

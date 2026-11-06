@@ -26,7 +26,19 @@ import { writesDuring } from './helpers/fs-writes.ts'
 // 维护点（写路径末尾与快照冻结时的目录整理）。只测 FileTable 专属的磁盘效应；
 // 双后端一致的语义在 table-conformance.spec.ts。全部用真实目录，不 mock 自己的模块。
 // 「零写入」看 node:fs/promises 的写调用记录（透传，见 helpers/fs-writes.ts），不比 mtime。
-vi.mock('node:fs/promises', async importOriginal => (await import('./helpers/fs-writes.ts')).recordWrites(await importOriginal()))
+// renameFault：设了就让下一次改名到匹配路径的 rename 失败一次（维护点写盘失败），平时原样透传。
+const { renameFault } = vi.hoisted(() => ({ renameFault: { when: undefined as ((to: string) => boolean) | undefined } }))
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  const rename = async (...args: Parameters<typeof actual.rename>) => {
+    if (renameFault.when?.(String(args[1]))) {
+      renameFault.when = undefined
+      throw Object.assign(new Error('EACCES: injected failure, rename'), { code: 'EACCES' })
+    }
+    return actual.rename(...args)
+  }
+  return (await import('./helpers/fs-writes.ts')).recordWrites({ ...actual, rename })
+})
 
 const DAY = 86_400_000
 const WS = '/home/dev/proj-m'
@@ -40,7 +52,10 @@ const wsRecord = (partial: Partial<MemoryRecord> = {}, ws = WS) => record({ scop
 
 let root: string
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-maint-')) })
-afterEach(async () => { await rm(root, { recursive: true, force: true }) })
+afterEach(async () => {
+  renameFault.when = undefined
+  await rm(root, { recursive: true, force: true })
+})
 
 const globalDir = () => join(root, GLOBAL_DIR)
 const wsDir = (p = WS) => join(root, workspaceDirName(p))
@@ -513,14 +528,18 @@ describe('快照冻结是维护点', () => {
 
   it('维护失败只记日志，注入文本照常返回并冻结', async () => {
     await writeMem(wsDir(), 'live.md', wsRecord({ id: 'mem_live', name: '有效', content: '有效 正文' }), WS)
+    // 手建文件缺 digest，维护点要回写它；回写的 rename 失败让这次维护失败
+    const hand = await writeRaw(wsDir(), 'hand.md', '---\nname: 手建\ntype: preference\n---\n\n手写\n')
+    renameFault.when = to => to === hand
     const h = harness()
-    vi.spyOn(h.store, 'maintain').mockRejectedValueOnce(new Error('boom'))
     const s = {}
     h.cache.setWorkspacePath(s, WS)
     const text = await h.cache.assemble(s)
     expect(text).toContain('有效 正文')
+    expect(renameFault.when).toBeUndefined()   // 故障确实在维护点回写时触发
     expect(h.cache.injectedCore(s)).toBeDefined()
     expect(h.log.error).toHaveBeenCalledTimes(1)
+    expect(h.log.error.mock.calls[0]![1]).toMatchObject({ code: 'EACCES' })   // 记下的就是注入的那次失败
   })
 })
 

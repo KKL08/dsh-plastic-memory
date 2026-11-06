@@ -86,16 +86,6 @@ describe('executePromote', () => {
     expect(await snapshots.list()).toHaveLength(0)
   })
 
-  it('agents-md 分支 append 失败时回滚软删：记忆仍 active、计入 skipped、不谎报 promoted', async () => {
-    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
-    await store.put(record({ id: 'mem_z', name: '偏好', content: '用 pnpm' }))
-    const failing = { append: async () => { throw new Error('EACCES: AGENTS.md 不可写') } }
-    const r = await executePromote({ confirmedIds: ['mem_z'], target: 'agents-md' }, { workspacePath: '/proj' }, { store, agentsMd: failing, snapshots: makeSnapshots() })
-    expect(r.promoted).toEqual([])
-    expect(r.skipped).toEqual(['mem_z'])
-    expect((await store.get('mem_z'))!.status).toBe('active')  // 软删已回滚，记忆没有丢
-  })
-
   // AGENTS.md 原文注入所有项目的会话、不归插件管：含密钥的记忆写进去就是明文外泄，原记忆进回收站后留下的只剩这份明文
   it('target=agents-md：含 critical 密钥的记录拒绝写入，AGENTS.md 不动、记忆仍 active、计入 skipped 并说明原因', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
@@ -267,6 +257,21 @@ describe('executePromote × 真实 AgentsMdWriter', () => {
     await executePromote({ confirmedIds: ['mem_short'], target: 'agents-md' }, { workspacePath: '/proj' }, deps)
     const text = await readFile(join(dir, 'AGENTS.md'), 'utf8')
     expect(text.split('\n').filter(l => l.startsWith('- 包管理 — '))).toHaveLength(2)
+  })
+
+  it('agents-md 分支写入失败（目录只读）时回滚软删：记忆仍 active、计入 skipped、不谎报 promoted', async () => {
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
+    await store.put(record({ id: 'mem_z', name: '偏好', content: '用 pnpm' }))
+    await chmod(dir, 0o500) // AGENTS.md 还不存在，临时文件写不进去
+    let r: Awaited<ReturnType<typeof executePromote>>
+    try {
+      r = await executePromote({ confirmedIds: ['mem_z'], target: 'agents-md' }, { workspacePath: '/proj' }, { store, agentsMd: createAgentsMdWriter(join(dir, 'AGENTS.md')), snapshots: makeSnapshots() })
+    } finally {
+      await chmod(dir, 0o700)
+    }
+    expect(r.promoted).toEqual([])
+    expect(r.skipped).toEqual(['mem_z'])
+    expect((await store.get('mem_z'))!.status).toBe('active')  // 软删已回滚，记忆没有丢
   })
 
   it('PA-04 AGENTS.md 读取报权限错误：提升失败、记忆仍 active，文件原文一字不变', async () => {
