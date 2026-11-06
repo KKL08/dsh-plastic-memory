@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto'
 import type { ClaimKvTable } from '../kv-table.ts'
 import type { MemoryRecord } from '../record-schema.ts'
-import { RETENTION_MS } from '../retention.ts'
-import { MODEL_CHANGE_KINDS, type OverflowLevel } from '../contract-codes.ts'
-import { genId, type PendingDecision, type PendingKind, type SettledVerdict } from './schema.ts'
+import type { OverflowLevel } from '../contract-codes.ts'
+import { genId, kindOf, verdictLoser, type PendingDecision, type PendingKind, type SettledVerdict } from './schema.ts'
+import { isUndoExpired } from './undo-rules.ts'
 
 /** 去重 key：memoryIds 排序拼接 + baselineRef（垂直冲突与横向冲突互不干扰）。 */
 export function dedupKey(memoryIds: string[], baselineRef?: string): string {
@@ -29,11 +29,6 @@ export type MisplacedIgnore = NonNullable<NonNullable<PendingDecision['settled']
 
 type KindKeyed ={ kind?: PendingKind; memoryIds: string[]; baselineRef?: string }
 
-/** 条目种类，缺省即冲突（旧条目）。 */
-export function kindOf(entry: { kind?: PendingKind }): PendingKind {
-  return entry.kind ?? 'conflict'
-}
-
 /** 同一组记忆、同一类冲突（横向 / 垂直）的键，不看 baselineRef 措辞（LLM 自由填写，每次扫描都可能不同）。 */
 export function pairKey(entry: { memoryIds: string[]; baselineRef?: string }): string {
   return dedupKey(entry.memoryIds) + (entry.baselineRef !== undefined ? '#baseline' : '')
@@ -44,29 +39,9 @@ function samePair(a: KindKeyed, b: KindKeyed): boolean {
   return kindOf(a) === kindOf(b) && pairKey(a) === pairKey(b)
 }
 
-/**
- * 裁决要删掉的一方（败方）；两边都留、或不是冲突条目时为 undefined。
- * 横向：left=memoryIds[0]、right=memoryIds[1]；垂直（有 baselineRef）：left=记忆、right=基线，基线不可删，keep-right 意为记忆删除。
- */
-export function verdictLoser(entry: KindKeyed, verdict: SettledVerdict): string | undefined {
-  if (kindOf(entry) !== 'conflict') return undefined
-  if (entry.baselineRef !== undefined) return verdict === 'keep-right' ? entry.memoryIds[0] : undefined
-  return verdict === 'keep-left' ? entry.memoryIds[1] : verdict === 'keep-right' ? entry.memoryIds[0] : undefined
-}
-
 /** 已裁决且裁决删掉了一方的条目。 */
 function isDeletionSettled(entry: PendingDecision): boolean {
   return entry.settled !== undefined && verdictLoser(entry, entry.settled.verdict) !== undefined
-}
-
-/** 模型用 memory_save 改写、替代已有记忆留的撤销记录。 */
-export function isModelChange(entry: { kind?: PendingKind }): boolean {
-  return (MODEL_CHANGE_KINDS as readonly PendingKind[]).includes(kindOf(entry))
-}
-
-/** 留作撤销的已裁决条目（删一方、提升为全局、直接改与直接合并、移到项目、模型改写与替代）：快照过了保留窗口就无从撤销，由 sweep 清掉。 */
-function isUndoable(entry: PendingDecision): boolean {
-  return isDeletionSettled(entry) || entry.settled?.verdict === 'promoted' || kindOf(entry) === 'edit' || kindOf(entry) === 'move' || isModelChange(entry)
 }
 
 /** 超限条目的指纹：relax 为档位号（'1'、'2'…），strict 只有一档。 */
@@ -250,9 +225,8 @@ export class PendingDecisionsStore {
    * 快照也已过期，撤销无从谈起，条目一起清掉（提升为全局的同理：快照过期即不可撤销）（与 storage 维护点、SnapshotStore.sweep 同一个 RETENTION_MS 截止线）。
    */
   async sweep(now: number): Promise<void> {
-    const cutoff = now - RETENTION_MS
     for (const [key, e] of await this.table.list()) {
-      if (isUndoable(e) && e.settled!.at < cutoff) await this.table.delete(key)
+      if (isUndoExpired(e, now)) await this.table.delete(key)
     }
   }
 

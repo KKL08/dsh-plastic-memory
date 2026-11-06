@@ -1,5 +1,6 @@
 import type { MemoryLogger, MemoryStore } from '../store.ts'
-import { conflictFingerprint, kindOf, verdictLoser, type PendingDecisionsStore } from '../governance/decisions.ts'
+import { conflictFingerprint, type PendingDecisionsStore } from '../governance/decisions.ts'
+import { kindOf, verdictLoser } from '../governance/schema.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
 import { ALREADY_REVIEWED_REASON, NOT_DELEGATED_REASON, isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
 import type { AcceptRejectCode, DecisionRejectCode, GovernanceRejectCode } from '../contract-codes.ts'

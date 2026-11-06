@@ -5,9 +5,9 @@ import type { DirectoryNote, LocatedRecord } from '../storage/table.ts'
 import { RETENTION_MS } from '../retention.ts'
 import { hasCriticalSecret, maskSecretSurface, maskSecrets } from '../secrets.ts'
 import { computeDigest } from '../storage/frontmatter.ts'
-import { FINDING_TYPES, type FindingType, type MemorySnapshot, type PendingDecision } from '../governance/schema.ts'
-import { candidateFingerprint, isModelChange, kindOf, overflowLevelOf, overflowScopeOf, verdictLoser } from '../governance/decisions.ts'
-import { editFingerprint } from '../governance/snapshots.ts'
+import { FINDING_TYPES, kindOf, verdictLoser, type FindingType, type MemorySnapshot, type PendingDecision } from '../governance/schema.ts'
+import { candidateFingerprint, overflowLevelOf, overflowScopeOf } from '../governance/decisions.ts'
+import { asUndoable, isModelChange, undoStateOf } from '../governance/undo-rules.ts'
 import { runRuleScan } from '../governance/rule-scan.ts'
 import { byConfidenceThenConfirmed } from '../snapshot.ts'
 import { scoreScope, type ScopePreread } from '../governance/scope-health.ts'
@@ -22,7 +22,8 @@ import {
   type AdviceType, type AutoCheckupFrequency, type CheckupAdded, type CheckupCause, type CheckupResult, type CheckupView, type DeletedView, type MemoryPromotion, type GlobalViewName, type HealthView, type LibraryView, type MemoryCard,
   type MemoryCommandResult, type ModelChange, type PendingItem, type PendingView, type SessionView,
 } from './contract.ts'
-import { isInScope, scopeCacheKey, scopeKey, scopeOfLedger, type Scope } from '../scope.ts'
+import { isInScope, scopeCacheKey, scopeKey, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
+import { isCopyOf } from '../tools/workspace-gate.ts'
 
 /**
  * 视图生成（纯函数）：预读数据 + 账本 → 界面要读的视图 JSON（契约见 contract.ts）。不读存储、不写盘。
@@ -49,8 +50,11 @@ export interface ViewInput {
   bootedAt?: number
   /** 模型改写、替代的改前快照（按快照 id）；缺省不列 modelChanges。 */
   modelChangeSnapshots?: ReadonlyMap<string, MemorySnapshot>
-  /** 提升候选条目所在项目的那一份（按条目 id），只列 data.byId 取到的是别的作用域里那份的；缺省按 byId。 */
-  candidateCopies?: ReadonlyMap<string, LocatedRecord>
+  /**
+   * 条目所在作用域里的那一份（按条目 id）：提升候选取条目所在的项目，模型改写、替代取改前那份的作用域。
+   * 只列 data.byId 取到的是别的作用域里那份的；那个作用域里已经没有的不列，按 byId 是否在那个作用域判。
+   */
+  entryCopies?: ReadonlyMap<string, LocatedRecord>
 }
 
 export type GlobalViews = { pending: PendingView; health: HealthView; library: LibraryView; deleted: DeletedView }
@@ -115,7 +119,7 @@ export function buildPendingView(input: ViewInput): PendingView {
     if (kind === 'promote-candidate') {
       // 记忆已不是本项目候选（模型直接 memory_promote、标记被清、记忆没了）：旧条目不显示，下次体检清掉。
       // 取条目所在项目的那一份（提升命令定位的就是它），同 id 别的项目那份不算
-      const copy = input.candidateCopies?.get(e.id)
+      const copy = input.entryCopies?.get(e.id)
       const r = copy?.record ?? data.byId.get(e.memoryIds[0] ?? '')
       const workspacePath = e.workspaces?.[0]
       const own = workspacePath === undefined ? undefined : scopeOfLedger(workspacePath)
@@ -431,31 +435,33 @@ export function buildLibraryView(input: ViewInput): LibraryView {
 
 /**
  * 保留窗口内模型改写、替代的改动（对话卡、右侧栏「这次新写入的」）：改前那份取快照，快照已清或只剩脱敏副本的不列。
- * 能不能撤按记忆此刻的样子判：改写的那条仍在用、替代的那条仍是已取代，且内容还是那次写下的（指纹对得上），同撤销命令的核对。
- * 预读每个 id 只留一份（在用副本优先）：留下的不在改前那份的作用域里时看不到那个作用域的现状，先给按钮，由撤销命令按那个作用域核对；哪个作用域都没有了算之后又改过。
+ * 能不能撤问撤销规则（undoStateOf），现状取改前那份所在作用域里的那一份：别的作用域里同 id 的副本不算，与撤销命令核对的是同一份。
  */
 function modelChangesOf(input: ViewInput, snapshots: ReadonlyMap<string, MemorySnapshot>): ModelChange[] {
   const cutoff = input.now - RETENTION_MS
   return input.settled.flatMap((e): ModelChange[] => {
-    const settled = e.settled!
-    if (!isModelChange(e) || e.origin === undefined || settled.at < cutoff || settled.snapshotId === undefined) return []
-    const memoryId = e.memoryIds[0]!
+    const entry = asUndoable(e)!
+    const { settled } = entry
+    if (!isModelChange(entry) || entry.origin === undefined || settled.at < cutoff || settled.snapshotId === undefined) return []
+    const memoryId = entry.memoryIds[0]!
     const before = snapshots.get(settled.snapshotId)?.data.find(r => r.id === memoryId)
     if (before === undefined || before.redacted === true) return []
-    const kind = kindOf(e) === 'rewrite' ? 'rewrite' : 'supersede'
-    const current = input.data.byId.get(memoryId)
-    const isSameScope = current !== undefined && current.scope === before.scope
-      && (before.scope !== 'workspace' || current.workspacePath === before.workspacePath)
-    const isOwnWrite = current !== undefined && (!isSameScope
-      || (current.status === (kind === 'rewrite' ? 'active' : 'superseded') && editFingerprint(current) === e.fingerprint))
+    const at = scopeOfMemory(before)
+    const state = undoStateOf(entry, before, at === undefined ? undefined : copyIn(input, entry.id, memoryId, at))
+    if (state === 'expired') return []
     return [{
-      decisionId: e.id, kind, memoryId,
-      ...(e.origin.by !== undefined ? { by: e.origin.by } : {}),
+      decisionId: entry.id, kind: entry.kind === 'rewrite' ? 'rewrite' : 'supersede', memoryId,
+      ...(entry.origin.by !== undefined ? { by: entry.origin.by } : {}),
       before: card(before, input.data),
-      sessionId: e.origin.sessionId, callId: e.origin.callId, at: settled.at,
-      state: settled.isUndone === true ? 'undone' : isOwnWrite ? 'undoable' : 'changed',
+      sessionId: entry.origin.sessionId, callId: entry.origin.callId, at: settled.at, state,
     }]
   })
+}
+
+/** 条目目标在 at 那个作用域里的那一份：预读留下的就在那里用它，否则取 entryCopies 补读的；都没有算那里已经没有。 */
+function copyIn(input: ViewInput, entryId: string, memoryId: string, at: Scope): MemoryRecord | undefined {
+  const r = input.data.byId.get(memoryId)
+  return r !== undefined && isCopyOf(r, at) ? r : input.entryCopies?.get(entryId)?.record
 }
 
 /** 最近删除：保留窗口内软删的记忆；裁决删掉的从已裁决条目找来源（同一条记忆被多次裁决取最近的）。 */

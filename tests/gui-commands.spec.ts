@@ -3719,12 +3719,19 @@ describe('撤销模型改写、替代（对话卡片、右侧栏「这次新写�
     expect((await e.store.get('mem_old', { kind: 'global' }))!.content).toBe('全局的另一份')
   })
 
-  it('改写的那条之后被彻底删除（哪一层都没有了）：视图标 changed', async () => {
+  it.each([
+    ['之后又被手改', (e: ReturnType<typeof env>) => e.store.update({ id: 'mem_old', workspacePath: SESSION_WS }, r => ({ ...r, content: '之后手改的' }), scopeAt(SESSION_WS))],
+    ['之后被彻底删除', (e: ReturnType<typeof env>) => e.store.hardDelete({ id: 'mem_old', workspacePath: SESSION_WS }, { at: scopeAt(SESSION_WS) })],
+  ] as const)('PA-40 别层有同 id 的在用副本，被替代的那层%s：视图按那一层判 changed，撤销回 stale', async (_label, changeAgain) => {
     const e = env()
-    await seedMemory(e, 'mem_r', '改前的内容')
-    await save(e, { action: 'update', id: 'mem_r', name: '名-mem_r', content: '模型改写后的' })
-    await e.store.hardDelete({ id: 'mem_r', workspacePath: SESSION_WS }, { at: scopeAt(SESSION_WS) })
+    await seedMemory(e, 'mem_old', '旧说法')
+    await save(e, { name: '新说法', content: '完全不同的新说法', supersedes: ['mem_old'] })
+    await e.store.create(record({ id: 'mem_old', name: '全局那份', content: '全局的另一份', scope: 'global' }))
+    const entry = await changeOf(e)
+    await changeAgain(e)
     expect((await modelChanges(e))?.map(c => c.state)).toEqual(['changed'])
+    expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('stale')
+    expect((await e.store.get('mem_old', { kind: 'global' }))!.content).toBe('全局的另一份')
   })
 
   it('替代之后旧记忆又被改过或删了：不复活，回 stale', async () => {
@@ -3736,6 +3743,21 @@ describe('撤销模型改写、替代（对话卡片、右侧栏「这次新写�
     expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('stale')
     expect((await e.store.get('mem_old', { workspacePath: SESSION_WS }))!.status).toBe('superseded')
     expect((await modelChanges(e))?.[0]?.state).toBe('changed')
+  })
+
+  it('PA-40 别层有同 id 的在用副本，改写的那层文件被手工挪进 .archive/（仍写着 active）：视图按位置算已删、判 changed，撤销回 stale', async () => {
+    const e = env()
+    await seedMemory(e, 'mem_r', '改前的内容')
+    await save(e, { action: 'update', id: 'mem_r', name: '名-mem_r', content: '模型改写后的' })
+    await e.store.create(record({ id: 'mem_r', name: '全局那份', content: '全局的另一份', scope: 'global' }))
+    const entry = await changeOf(e)
+    const dir = join(root, workspaceDirName(SESSION_WS))
+    const name = (await readdir(dir)).find(n => n.startsWith('名-mem_r'))!
+    await mkdir(join(dir, ARCHIVE_DIR), { recursive: true })
+    await writeFile(join(dir, ARCHIVE_DIR, name), await readFile(join(dir, name), 'utf8'))
+    await rm(join(dir, name))
+    expect((await modelChanges(e))?.map(c => c.state)).toEqual(['changed'])
+    expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('stale')
   })
 
   it('改前快照已过保留窗口：撤销回 not-found，视图不再列它', async () => {
