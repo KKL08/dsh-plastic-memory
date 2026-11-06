@@ -2,10 +2,15 @@
 # Host contract: boot a fresh, real dsh host with the packed plugin and a
 # sibling verify plugin that drives the memory_* tools through the real
 # ctx.tools with synthetic sessions. The checks fall into four groups:
-#   install and load  the installed package boots and registers its tools
+#   install and load  the installed package boots, registers its tools and
+#                     its automatic checkup timer
 #   tool contract     tool behaviour against the real host, no LLM needed
 #   GUI contract      before booting, the installed package's browser half is
-#                     checked key-free (scripts/host-contract/verify-client.ts)
+#                     checked key-free (scripts/host-contract/verify-client.ts):
+#                     factory load, its slots against the host's declarations,
+#                     locale files; after boot, /memory commands run through
+#                     the host's command service and must decode with the GUI
+#                     contract schema
 #   semantic layer    model-backed checks; they run only when DEEPSEEK_API_KEY
 #                     is set and the host can pick a default model, otherwise
 #                     they are reported as SKIPPED. With a key, a third boot

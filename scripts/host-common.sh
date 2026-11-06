@@ -105,7 +105,9 @@ host_verify_client() {
   local pkg
   pkg="$(find "$HOMEDIR" -type f -path '*/node_modules/dsh-plastic-memory/package.json' 2>/dev/null | head -n 1)"
   [ -n "$pkg" ] || { STEP=client; echo "$HOST_TAG: installed dsh-plastic-memory/package.json not found under $HOMEDIR" >&2; return 1; }
-  host_run client node "$REPO/scripts/host-contract/verify-client.ts" "$(dirname "$pkg")"
+  host_run client node "$REPO/scripts/host-contract/verify-client.ts" "$(dirname "$pkg")" "$HOST"
+  # Acceptance-tagged checks are echoed so their names show up in the run output
+  { grep -E '^(PASS|FAIL)  PA-' "$LOGS/client.log" || true; } | sed "s/^/$HOST_TAG: /"
 }
 
 # Write tripwire: fail if anything under the real ~/.dsh is newer than MARKER.

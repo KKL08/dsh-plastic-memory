@@ -7,6 +7,7 @@
  * 当轮锚来自宿主 turnBoundary 投影（H13）、外部直接写进记忆目录的文件出现在新会话第一步的快照消息里（H15）、
  * 宿主 grep 工具搜记忆根目录时顶层命中、.archive/ 不命中（H16）、
  * 带委派 header 的真子会话存入待确认记忆、检索排在主档后、溯源只限自己的会话、父会话接受后进新会话的注入（H19）。
+ * 无 key 也跑的宿主服务契约：经宿主 commands 服务执行 `/memory` 命令，结果过 GUI 契约 schema；自动体检调度器在宿主计时服务登记了定时器。
  * 有 DEEPSEEK_API_KEY 且宿主能选出默认模型时再跑语义扫描与取消两项、以及一次真实的自动体检（H17：无会话、宿主默认模型），否则标 SKIPPED。
  * run.sh 随后用同一个 DSH_HOME 再起一次宿主（HOST_CONTRACT_PHASE=restart）：第一趟把
  * 恢复的记录 id 写进交接文件，第二趟跑 H12，证明恢复结果过了进程重启仍可读；H14 第一趟建持久化会话、
@@ -24,6 +25,7 @@ import { tmpdir } from 'node:os'
 import { snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
 import { createSystemMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Context } from '@deepseek-ai/cordis'
+import { memoryCommandResultSchema } from '../../src/gui/contract.ts'
 
 export const name = 'dsh-plastic-memory-host-contract'
 export const inject = ['tools', 'sessions']
@@ -91,6 +93,9 @@ interface H14Handoff { ok: boolean; skipped?: boolean; detail: string; sessionId
 type Commands = {
   execute(agent: unknown, line: string, attachments: readonly unknown[], signal: AbortSignal): Promise<{ result: { kind: string; text?: string } } | undefined>
 }
+/** cordis 公开诊断接口的最小契约：注册表里每个插件的 fiber，fiber.getEffects() 列出它名下 effect 的标签树。 */
+type EffectMeta = { label: string; children: EffectMeta[] }
+type Registry = { values(): Iterable<{ fibers: Iterable<{ name: string; inject: Record<string, unknown>; getEffects(): EffectMeta[] }> }> }
 /** 宿主 llm 服务的最小契约：H18 直调一次拿宿主给的原始错误（码与原话），再比对插件的输出里有没有原话。 */
 type LlmService = { stream(req: unknown): AsyncIterable<{ type: string; reason?: { kind: string; failure?: { code?: string; message?: string } } }> }
 type CheckupCauseShape = { kind: string; hostCode?: string; message?: string }
@@ -186,20 +191,24 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
     }
     const hasKey = !!process.env.DEEPSEEK_API_KEY
 
+    /** 走界面同一条路执行一行 `/memory …`：宿主 commands 服务按整行执行。返回宿主的执行结果，宿主缺服务或命令没注册时返回原因。 */
+    const runMemoryCommand = async (workspacePath: string, line: string): Promise<{ kind: string; text?: string } | string> => {
+      const commands = ctx.get('commands') as Commands | undefined
+      if (!commands) return '宿主缺 commands 服务'
+      const agent = { session: sessions.create(undefined, { meta: { cwd: workspacePath } }), options: {} }
+      const r = await commands.execute(agent, line, [], new AbortController().signal)
+      return r === undefined ? '/memory 命令没有注册' : r.result
+    }
     /**
      * 打开一个项目的自动体检（每天），走界面同一条路：宿主 commands 服务执行 `/memory set-auto-checkup`，
      * 插件写设置表后立刻重算调度，从没体检过的项目马上到期，后台无会话、用宿主默认模型去查。
      * 会话只是命令借来写生命周期事件、解析项目的，体检本身不经过它。返回 undefined 表示命令成功，否则是原因。
      */
     const enableAutoCheckup = async (workspacePath: string): Promise<string | undefined> => {
-      const commands = ctx.get('commands') as Commands | undefined
-      if (!commands) return '宿主缺 commands 服务'
       if (!ctx.get('timer')) return '宿主缺 timer 服务（插件的自动体检调度挂在它上面）'
-      const agent = { session: sessions.create(undefined, { meta: { cwd: workspacePath } }), options: {} }
-      const line = `/memory set-auto-checkup ${JSON.stringify({ scope: { kind: 'workspace', workspacePath }, frequency: 1 })}`
-      const r = await commands.execute(agent, line, [], new AbortController().signal)
-      if (r === undefined) return '/memory 命令没有注册'
-      return r.result.kind === 'success' ? undefined : `set-auto-checkup → ${r.result.kind}: ${r.result.text}`
+      const r = await runMemoryCommand(workspacePath, `/memory set-auto-checkup ${JSON.stringify({ scope: { kind: 'workspace', workspacePath }, frequency: 1 })}`)
+      if (typeof r === 'string') return r
+      return r.kind === 'success' ? undefined : `set-auto-checkup → ${r.kind}: ${r.text}`
     }
     const checkupViewPath = join(memoriesRoot, ...CHECKUP_VIEW_PATH)
     /** 体检视图里这个项目的那一项；视图还没写出来或正在替换时为 undefined。 */
@@ -620,6 +629,49 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
         try { await handle.close() } finally { detach() }
       }
     })().catch((e: unknown): H14Handoff => ({ ok: false, detail: `异常: ${e instanceof Error ? e.stack ?? e.message : String(e)}` }))
+
+    // 无 key 档的宿主服务契约：命令服务或计时服务变了，这两项先红，不必等带 key 的 H17
+    await attempt('PA-49-COMMANDS-GUI-CONTRACT', async () => {
+      const ws = mkWs('pa49')
+      // 界面的解码同一套：结果正文是 JSON，过 GUI 契约的 memoryCommandResultSchema
+      const decode = async (line: string) => {
+        const r = await runMemoryCommand(ws, line)
+        if (typeof r === 'string') return { error: r }
+        let json: unknown
+        try { json = JSON.parse(r.text ?? '') } catch { return { error: `${r.kind}: 正文不是 JSON: ${r.text}` } }
+        const parsed = memoryCommandResultSchema.safeParse(json)
+        return parsed.success ? { result: parsed.data } : { error: `不合 GUI 契约: ${parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ')}` }
+      }
+      const info = await decode('/memory info')
+      const resolve = await decode(`/memory resolve ${JSON.stringify({ decisionId: 'pd_host_contract_missing', verdict: 'keep-left' })}`)
+      const isInfoOk = info.result?.ok === true && info.result.cmd === 'info' && info.result.info !== undefined
+      const isNotFound = info.result !== undefined && resolve.result?.ok === false && resolve.result.code === 'not-found'
+      return {
+        ok: isInfoOk && isNotFound,
+        detail: `info: ${info.error ?? `ok=${info.result?.ok} views=${Object.keys((info.result?.ok === true && info.result.info?.views) || {}).join(',')}`}`
+          + ` | resolve(不存在的条目): ${resolve.error ?? (resolve.result?.ok === false ? `code=${resolve.result.code}` : 'ok=true')}`,
+      }
+    })
+    // 调度器启动时在宿主计时服务登记第一次检查（之后换成周期检查），插件卸载时宿主替它停掉；不调模型。
+    // 宿主计时服务把定时器登记成调用方 fiber 上的 effect，标签 ctx.timeout() / ctx.interval()，经诊断接口读出来
+    await attempt('PA-50-SCHEDULER-TIMER', async () => {
+      const registry = (ctx as unknown as { registry: Registry }).registry
+      const labels: string[] = []
+      const collect = (meta: EffectMeta): void => { labels.push(meta.label); meta.children.forEach(collect) }
+      let timerFibers = 0
+      for (const runtime of registry.values()) {
+        for (const fiber of runtime.fibers) {
+          if (fiber.name !== 'dsh-plastic-memory' || !('timer' in fiber.inject)) continue
+          timerFibers++
+          fiber.getEffects().forEach(collect)
+        }
+      }
+      const isRegistered = labels.some(l => l === 'ctx.timeout()' || l === 'ctx.interval()')
+      return {
+        ok: isRegistered,
+        detail: timerFibers === 0 ? '插件名下没有依赖 timer 的 fiber（宿主计时服务改了名，或插件没拿到它）' : `effects=${labels.join(',') || '（无）'}`,
+      }
+    })
 
     // 语义层两项：需要凭证 + 宿主可选默认模型
     const sel = readDefaultModel()
