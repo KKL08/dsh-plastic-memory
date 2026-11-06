@@ -149,7 +149,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
     const own = scopeOfMemory(memory)
     if (done.get(memory.id)?.state === 'deleted') {
       return (
-        <li key={memory.id} className="pm-list-row pm-lib-done">
+        <li key={memory.id} className="pm-list-row">
           <div className="pm-row-body">
             <div className="pm-lib-gone">
               <MemoryCard

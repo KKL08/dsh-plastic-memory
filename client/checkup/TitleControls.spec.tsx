@@ -7,8 +7,9 @@ import {
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { createTranslator } from '../i18n.tsx'
 import { en } from '../locales.ts'
-import { MemoryPage, memoryPageCss } from '../MemoryPage.tsx'
+import { MemoryPage } from '../MemoryPage.tsx'
 import { createNavStore, openMemoryPage } from '../nav.ts'
+import { slotCss } from '../styles.ts'
 import { levelCountsOf, memory, NOW, renderInShell } from '../test-utils.tsx'
 import { PanelShell } from '../ui/PanelShell.tsx'
 
@@ -419,7 +420,7 @@ describe('自动体检按钮与菜单：情况表', () => {
 
   it('窄窗口（主区约 400px）里提示不撑出横向滚动：标题行动作区和自动体检控件都能折行，动作区不超过标题行宽', () => {
     /** 选择器正好是 selector 的那条规则的声明。 */
-    const rule = (selector: string) => memoryPageCss.match(new RegExp(`(?:^|\\n)${selector.replace(/[.-]/g, '\\$&')} \\{([^}]*)\\}`))?.[1] ?? ''
+    const rule = (selector: string) => slotCss('page').match(new RegExp(`(?:^|\\n)${selector.replace(/[.-]/g, '\\$&')} \\{([^}]*)\\}`))?.[1] ?? ''
     expect(rule('.pm-head-actions')).toMatch(/flex-wrap: wrap/)
     expect(rule('.pm-head-actions')).toMatch(/min-width: 0/)
     expect(rule('.pm-head-actions')).toMatch(/max-width: 100%/)

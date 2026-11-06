@@ -1,9 +1,7 @@
-// 分组、分段的纯逻辑：类型组的顺序，时间段的边界；组样式的类名不和别处撞。
+// 分组、分段的纯逻辑：类型组的顺序，时间段的边界。
 import { describe, expect, it } from 'vitest'
-import { memoryPageCss } from '../MemoryPage.tsx'
 import { memory, NOW } from '../test-utils.tsx'
-import { PM_CSS } from '../ui/PanelShell.tsx'
-import { deletedBucketOf, groupByType, groupsCss, recentBucketOf } from './groups.tsx'
+import { deletedBucketOf, groupByType, recentBucketOf } from './groups.tsx'
 
 const HOUR = 60 * 60 * 1000
 
@@ -49,13 +47,5 @@ describe('时间分段', () => {
     expect(deletedBucketOf(daysAgo(1, 23), NOW)).toBe('week')
     expect(deletedBucketOf(daysAgo(6, 0), NOW)).toBe('week')
     expect(deletedBucketOf(daysAgo(7, 23), NOW)).toBe('older')
-  })
-})
-
-describe('组样式', () => {
-  it('每条规则打头的类名，插件别处的样式不再定义：所有面板共用一张样式表，撞名会互相套上（曾套上设置页的组标题字号和缩进）', () => {
-    const leads = (css: string) => new Set([...css.matchAll(/(?:^|[{},])\s*\.(pm-[\w-]+)/g)].map(m => m[1]!))
-    const others = leads(PM_CSS + memoryPageCss.replace(groupsCss, ''))
-    expect([...leads(groupsCss)].filter(name => others.has(name))).toEqual([])
   })
 })

@@ -140,7 +140,7 @@ export function SoftDeleteConfirm({ onCancel, onConfirm }: { onCancel: () => voi
         if (next !== null && !event.currentTarget.contains(next)) onCancel()
       }}
     >
-      <span id={questionId} className="pm-soft-confirm-text">{t('pending.softDelete.question')}</span>
+      <span id={questionId}>{t('pending.softDelete.question')}</span>
       <button type="button" className="pm-link" onClick={onConfirm}>{t('pending.softDelete.confirm')}</button>
       <i className="pm-sep" aria-hidden="true">·</i>
       <button type="button" className="pm-link pm-soft-confirm-cancel" autoFocus onClick={onCancel}>{t('pending.cancel')}</button>

@@ -11,20 +11,20 @@ import { buttonCss } from './Button.tsx'
 import { chipCss } from './Chip.tsx'
 import { conflictRulingCss } from './ConflictRuling.tsx'
 import { contextBudgetBarCss } from './ContextBudgetBar.tsx'
-import { dismissButtonCss } from './DismissButton.tsx'
 import { emptyStateCss } from './EmptyState.tsx'
-import { healthBannerCss } from './HealthBanner.tsx'
 import { memoryCardCss } from './MemoryCard.tsx'
 import { motionCss } from './motion.tsx'
 import { segmentedCss } from './Segmented.tsx'
-import { settingsCss } from './Settings.tsx'
 import { statusMarkerCss } from './StatusMarker.tsx'
 import { themeCss } from './theme.ts'
 
-export const PM_CSS = [
+/** 每个插槽根都带的公共样式；只属于某一个面板的样式不放这里，见 `styles.ts`。 */
+export const PM_STYLES = {
   themeCss, buttonCss, chipCss, statusMarkerCss, memoryCardCss, adviceCss, conflictRulingCss, contextBudgetBarCss,
-  dismissButtonCss, emptyStateCss, healthBannerCss, motionCss, segmentedCss, settingsCss,
-].join('')
+  emptyStateCss, motionCss, segmentedCss,
+}
+
+export const PM_CSS = Object.values(PM_STYLES).join('')
 
 export function PanelShell({ gateway, t, className, children, extraCss = '' }: {
   gateway: MemoryGateway

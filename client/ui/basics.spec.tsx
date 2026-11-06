@@ -83,7 +83,7 @@ describe('StatusMarker', () => {
   it('导航尺寸：圆点 7px 档，三角不画「!」', () => {
     const { container } = renderInShell(<><StatusMarker kind="pending" size="nav" /><StatusMarker kind="secret" size="nav" /></>)
     expect(container.querySelector('.pm-marker--pending')).toHaveClass('pm-marker--nav')
-    expect(container.querySelector('svg.pm-marker--secret')!.querySelectorAll('path')).toHaveLength(1)
+    expect(container.querySelector('svg[data-pm-marker="secret"]')!.querySelectorAll('path')).toHaveLength(1)
   })
 })
 

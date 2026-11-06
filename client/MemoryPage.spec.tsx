@@ -107,15 +107,15 @@ describe('左栏范围', () => {
 
   it('有事要处理的行带标记和件数：密钥红三角，其余琥珀圆点；读屏念「N 件待处理」，含密钥时说明；「全部」按条目去重', () => {
     open()
-    const marker = (name: string) => railRow(name).querySelector('.pm-marker')?.getAttribute('class') ?? ''
+    const marker = (name: string) => railRow(name).querySelector('.pm-marker')?.getAttribute('data-pm-marker')
     expect(rowParts(railRow('全部')).badge).toBe('3，3 件待处理，含密钥')
-    expect(marker('全部')).toContain('pm-marker--secret')
+    expect(marker('全部')).toBe('secret')
     expect(rowParts(railRow('全局')).badge).toBe('1，1 件待处理')
-    expect(marker('全局')).toContain('pm-marker--pending')
+    expect(marker('全局')).toBe('pending')
     expect(rowParts(railRow('app')).badge).toBe('2，2 件待处理')
     expect(rowParts(railRow('blog')).badge).toBe('')
     expect(rowParts(railRow('zeta')).badge).toBe('1，1 件待处理，含密钥')
-    expect(marker('zeta')).toContain('pm-marker--secret')
+    expect(marker('zeta')).toBe('secret')
   })
 
   it('点一行：写回导航、标为当前，右栏只看这个范围，按它借会话', () => {
@@ -188,7 +188,7 @@ describe('标题行与状态条', () => {
     open({ view: 'todo', scope: ZETA })
     expect(statusBar()).toHaveTextContent(/暂不打分\s*·\s*有密钥，先处理/)
     expect(statusBar()).not.toHaveTextContent(/\d+ 分/)
-    expect(statusBar()!.querySelector('.pm-marker')).toHaveClass('pm-marker--secret')
+    expect(statusBar()!.querySelector('.pm-marker')).toHaveAttribute('data-pm-marker', 'secret')
     expect(within(panel()).getByRole('heading', { level: 2 })).toHaveTextContent('先处理')
   })
 
@@ -458,7 +458,7 @@ describe('窄屏', () => {
     const { nav } = open({ view: 'todo', scope: APP })
     const others = screen.getByRole('button', { name: /^其他范围还有/ })
     expect(others).toHaveTextContent('其他范围还有 1 件待处理 ›')
-    expect(others.querySelector('.pm-marker')).toHaveClass('pm-marker--secret')
+    expect(others.querySelector('.pm-marker')).toHaveAttribute('data-pm-marker', 'secret')
     fireEvent.click(others)
     expect(nav.get().scope).toEqual({ kind: 'all' })
     expect(screen.queryByRole('button', { name: /^其他范围还有/ })).toBeNull()

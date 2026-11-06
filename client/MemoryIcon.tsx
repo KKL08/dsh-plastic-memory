@@ -39,9 +39,9 @@ export function MemoryIcon({ size, marker }: { size: number; marker?: IconMarker
             </mask>
             <g mask={`url(#${maskId})`}>{lines}</g>
             {marker === 'pending'
-              ? <circle className="pm-nav-dot" cx={DOT.cx} cy={DOT.cy} r={DOT.r} fill="var(--dsw-alias-state-warn-primary, #F59E0B)" stroke="none" />
+              ? <circle data-pm-nav-mark="dot" cx={DOT.cx} cy={DOT.cy} r={DOT.r} fill="var(--dsw-alias-state-warn-primary, #F59E0B)" stroke="none" />
               : (
-                <path className="pm-nav-secret" d={TRIANGLE} fill="var(--dsw-alias-state-error-primary, #EF4444)"
+                <path data-pm-nav-mark="secret" d={TRIANGLE} fill="var(--dsw-alias-state-error-primary, #EF4444)"
                   stroke="var(--dsw-alias-state-error-primary, #EF4444)" strokeWidth={1} />
               )}
           </>

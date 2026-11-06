@@ -103,7 +103,7 @@ export function VerticalConflictRuling(props: VerticalConflictRulingProps) {
   const { vertical } = CONFLICT_ACTION_VERDICTS
   const unavailable = props.unavailable ?? (props.memory === null ? t('conflict.missingHint') : undefined)
   return (
-    <article className={`pm-conflict pm-conflict--${props.layout} pm-conflict--vertical`}>
+    <article className={`pm-conflict pm-conflict--${props.layout}`}>
       <header className="pm-conflict-head">
         <span className="pm-conflict-mark"><StatusMarker kind="pending" /></span>
         <h3 className="pm-conflict-title">{props.title ?? t('conflict.vertical.title')}</h3>
