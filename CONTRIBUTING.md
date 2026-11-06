@@ -76,7 +76,8 @@ either host check for debugging.
 
 Before opening a PR: write the failing test first when fixing a bug, list the
 edge cases when adding behavior, and run `scripts/check-no-local-paths.sh` — it
-rejects machine-local paths and hostnames in tracked files.
+rejects machine-local paths and hostnames in tracked files. When a change
+touches packaging, also run `pnpm build && scripts/check-pack-whitelist.sh`.
 
 ## Host version
 
