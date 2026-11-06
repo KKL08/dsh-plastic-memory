@@ -5,8 +5,8 @@
  */
 import { useCallback, useMemo, useState } from 'react'
 import { useT } from '../i18n.tsx'
-import { commandInput, commandLine, commandOutput, type CommandOutcome } from './command-summary.ts'
-import { maskCard, RowView, type HostTranslate } from './MemoryToolRow.tsx'
+import { commandInput, commandLine, commandOutput, maskCard, type CommandOutcome } from './command-summary.ts'
+import { RowView, type HostTranslate } from './MemoryToolRow.tsx'
 
 const NOTE_KEYS = { awaiting: 'chat.command.awaiting', elsewhere: 'chat.command.elsewhere', busy: 'chat.command.busy' } as const
 
@@ -31,8 +31,8 @@ export function MemoryCommandRow({ node, hostT }: { node: MemoryCommandNode; hos
   }, [line, t])
   const [expanded, setExpanded] = useState(false)
   const toggle = useCallback(() => { setExpanded(value => !value) }, [])
-  const input = useMemo(() => { const text = commandInput(node.args); return text === null ? null : maskCard(text) }, [node.args])
-  const output = useMemo(() => { const text = commandOutput(node.outcome); return text === null ? null : maskCard(text) }, [node.outcome])
+  const input = useMemo(() => commandInput(node.args), [node.args])
+  const output = useMemo(() => commandOutput(node.outcome), [node.outcome])
   return (
     <RowView
       attrs={node.name === null ? {} : { 'data-command': node.name }} state={line.state} title={t('chat.command.title')}

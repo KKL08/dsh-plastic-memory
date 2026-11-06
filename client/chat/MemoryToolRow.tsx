@@ -7,14 +7,11 @@
  * password= / api_key= 赋值），密钥一律不出现在对话卡里。
  */
 import { useMemo, type KeyboardEvent } from 'react'
-import { maskSecrets, type MaskOptions } from '../../src/gui/contract.ts'
 import { useT } from '../i18n.tsx'
 import { Icon } from '../ui/Icon.tsx'
-import { prettyJson } from './command-summary.ts'
+import { maskCard, maskedBody } from './command-summary.ts'
 import { parseArgs, toolSummary, type MemoryToolName } from './tool-summary.ts'
 
-const CARD_MASK: MaskOptions = { severity: 'suspected' }
-export const maskCard = (text: string) => maskSecrets(text, CARD_MASK)
 
 /** 宿主 ToolResultNode 里用到的字段。 */
 export interface ToolResultBlock {
@@ -80,7 +77,7 @@ export function MemoryToolRow(props: MemoryToolViewProps & { hostT: HostTranslat
   return (
     <RowView
       attrs={{ 'data-tool': toolName }} state={state} title={hostT('tool.title.generic')} summary={summaryText} summaryClass={summaryClass}
-      input={bodyRaw === null ? null : maskCard(prettyJson(bodyRaw))} output={output} isOutputError={state === 'error'}
+      input={bodyRaw === null ? null : maskedBody(bodyRaw)} output={output} isOutputError={state === 'error'}
       expanded={expanded} toggle={toggle} inspect={inspect} hostT={hostT}
     />
   )

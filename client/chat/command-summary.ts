@@ -2,7 +2,7 @@
  * 面板发的 `/memory` 命令在对话里那一行的摘要。宿主每执行一条命令都在会话日志里记下参数原文和结果文本，
  * 对话界面默认把结果 JSON 原样摊开；这里按子命令写成一句话，失败原因和面板走同一套文案（interpret）。纯函数，不碰 React。
  */
-import { memoryCommandResultSchema, parseMemoryCommand, type MemoryCommand } from '../../src/gui/contract.ts'
+import { maskSecrets, memoryCommandResultSchema, parseMemoryCommand, type MaskOptions, type MemoryCommand } from '../../src/gui/contract.ts'
 import { interpret } from '../command/protocol.ts'
 import { baseName } from '../path.ts'
 import type { Summary } from './tool-summary.ts'
@@ -79,23 +79,37 @@ export function commandLine(args: string | null, outcome: CommandOutcome): Comma
   }
 }
 
-/** 点开后的输入：子命令加排好版的参数 JSON（参数不是 JSON 时原样）。没有参数原文时为 null。 */
+/** 点开后的输入：子命令加排好版的参数 JSON（参数不是 JSON 时原样），遮过密钥。没有参数原文时为 null。 */
 export function commandInput(args: string | null): string | null {
   const text = args?.trim() ?? ''
   if (text === '') return null
   const space = text.search(/\s/)
-  if (space === -1) return text
-  return `${text.slice(0, space)} ${prettyJson(text.slice(space).trim())}`
+  if (space === -1) return maskCard(text)
+  return `${maskCard(text.slice(0, space))} ${maskedBody(text.slice(space).trim())}`
 }
 
-/** 点开后的输出：结果文本，是 JSON 就排版。还在跑或没有文本时为 null。 */
+/** 点开后的输出：结果文本，是 JSON 就排版，遮过密钥。还在跑或没有文本时为 null。 */
 export function commandOutput(outcome: CommandOutcome): string | null {
   const text = outcome?.text ?? ''
-  return text === '' ? null : prettyJson(text)
+  return text === '' ? null : maskedBody(text)
 }
 
-/** 是 JSON 就排版，否则原样（工具行的输入也用它）。 */
-export function prettyJson(text: string): string {
-  try { return JSON.stringify(JSON.parse(text), null, 2) } catch { return text }
-}
+const CARD_MASK: MaskOptions = { severity: 'suspected' }
+/** 对话卡里的密钥一律遮掉，疑似的也遮（带 force 存下的 password= / api_key= 赋值）。 */
+export const maskCard = (text: string) => maskSecrets(text, CARD_MASK)
 
+const maskStrings = (value: unknown): unknown =>
+  typeof value === 'string' ? maskCard(value)
+    : Array.isArray(value) ? value.map(maskStrings)
+      : value !== null && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, maskStrings(v)]))
+        : value
+
+/**
+ * 卡里展开的正文（工具行的输入也用它）：是 JSON 就先遮每个字符串的原值再排版——排版后换行成了 `\n`，
+ * 跨行的密钥（`Bearer` 换行接 token）就认不出了；排完再整体遮一遍，兜住键值分在两段的赋值。不是 JSON 就原样遮。
+ */
+export function maskedBody(text: string): string {
+  let value: unknown
+  try { value = JSON.parse(text) } catch { return maskCard(text) }
+  return maskCard(JSON.stringify(maskStrings(value), null, 2))
+}

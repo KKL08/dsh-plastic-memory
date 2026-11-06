@@ -224,6 +224,22 @@ describe('命令行：面板发的 /memory 命令在对话里画成一句话', (
     expect(document.querySelector('.pm-tr-io')?.textContent).not.toContain('Hunter2-2026xyz')
   })
 
+  it('JSON 里跨行的密钥：先按原值遮再排版，转义后的换行不让它漏过去（命令行的输入、输出，工具行的输入）', () => {
+    const token = 'TESTONLYabcdefghijklmnop'
+    const assigned = 'abcdefghijklmnop1234'
+    const args = { memoryId: 'm1', scope: { kind: 'global' }, content: `Authorization: Bearer\n${token}` }
+    renderInShell(<MemoryCommandRow node={node(` forget ${JSON.stringify(args)}`, done({ ok: false, cmd: 'forget', code: 'failed', detail: `api_key=\n${assigned}` }))} hostT={hostT} />)
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    const io = document.querySelector('.pm-tr-io')!.textContent!
+    expect(io).toContain('"memoryId": "m1"')
+    expect(io).not.toContain(token)
+    expect(io).not.toContain(assigned)
+    cleanup()
+    const tool: MemoryToolViewProps = { ...result('memory_save', { content: `Authorization: Bearer\n${token}` }, '已保存'), useDisclosure: () => ({ expanded: true, toggle: () => {} }) }
+    renderInShell(<MemoryToolRow {...tool} hostT={hostT} />)
+    expect(document.querySelector('.pm-tr-io')!.textContent).not.toContain(token)
+  })
+
   it('不是 JSON 的返回原样显示；既没参数也没返回时不能展开', () => {
     renderInShell(<MemoryCommandRow node={node(' nope', { kind: 'error', text: '未知子命令 nope\n详情' })} hostT={hostT} />)
     fireEvent.click(screen.getByRole('button', { expanded: false }))
