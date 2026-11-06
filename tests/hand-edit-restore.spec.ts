@@ -71,13 +71,13 @@ function harness() {
   const cache = new SnapshotCache({ store, registry, budget: 4000, memoryRoot: root })
   return {
     store, snapshots, decisions,
-    search: (query: string) => executeSearch({ query }, fakeExec(), { store, registry, resolveContext: ctx }),
+    search: (query: string) => executeSearch({ query }, fakeExec(), { store, registry, host: { contextOf: ctx } }),
     assemble: async () => {
       const s = {}
       cache.setWorkspacePath(s, WS)
       return cache.assemble(s)
     },
-    save: (args: Parameters<typeof executeSave>[0]) => executeSave(args, fakeExec(), { store, registry, resolveContext: ctx, snapshots }),
+    save: (args: Parameters<typeof executeSave>[0]) => executeSave(args, fakeExec(), { store, registry, host: { saveContextOf: ctx }, snapshots }),
     snapshot: (args: Parameters<typeof executeSnapshotTool>[0]) => executeSnapshotTool(args, { workspacePath: WS }, { store, snapshots }),
   }
 }

@@ -157,7 +157,7 @@ function env(opts: {
     collectPending,
     status: opts.wrapStatus?.(() => collectCheckupView(source)) ?? (() => collectCheckupView(source)),
     // 每次开跑现读宿主默认模型（假的那份可以在用例中途改）
-    getDefaultLlm: () => hostSemanticLlm(llm, route.current),
+    host: { defaultLlm: () => hostSemanticLlm(llm, route.current) },
     isGovernanceEnabled: () => governance.isEnabled,
     timer: timers.timer,
     onChecked: () => writer.requestCheckups(),
@@ -479,7 +479,7 @@ describe('自动体检调度：按范围认领', () => {
     e.clock.now = autoStartedAt + 1000
     const agent = executeScan({}, {
       store: e.store, registry, decisions: e.decisions, cache: e.cache, checkups: e.checkups,
-      getBaseline: () => null, getLlm: () => agentLlm, resolveContext: async () => ({ workspacePath: undefined }), now: () => e.clock.now,
+      host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: () => agentLlm, baselineOf: () => null }, now: () => e.clock.now,
     }, fakeExec())
     await agentStarted
     expect(await e.checkups.isInProgress({ kind: 'global' })).toBe(true)
@@ -592,7 +592,7 @@ describe('自动体检调度：失败与重试', () => {
     const manualAt = e.clock.now
     await executeScan({ layers: 'full' }, {
       store: e.store, registry, decisions: e.decisions, cache: e.cache, checkups: e.checkups,
-      getBaseline: () => null, getLlm: () => ({ complete: async () => '{"findings":[]}' }), resolveContext: async () => ({ workspacePath: undefined }), now: () => e.clock.now,
+      host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: () => ({ complete: async () => '{"findings":[]}' }), baselineOf: () => null }, now: () => e.clock.now,
     }, fakeExec(), { by: 'manual', isGlobalOnly: true })
     await e.advance(AUTO_CHECKUP_INTERVAL_MS)
     expect((await e.readView()).scopes[0]).toMatchObject({ failure: null, lastCheckupAt: manualAt, nextCheckupAt: manualAt + DAY, isDue: false })
@@ -645,7 +645,7 @@ describe('自动体检调度：上次体检的兜底（没有完成记录时取�
     })
     await executeScan({ layers: 'full' }, {
       store: e.store, registry, decisions: e.decisions, cache, checkups: e.checkups,
-      getBaseline: () => null, getLlm: () => ({ complete: async () => '{"findings":[]}' }), resolveContext: async () => ({ workspacePath: undefined }), now: () => e.clock.now,
+      host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: () => ({ complete: async () => '{"findings":[]}' }), baselineOf: () => null }, now: () => e.clock.now,
     }, { ...fakeExec(), signal: controller.signal }, { by: 'auto', isGlobalOnly: true }).catch(() => undefined)
     expect(await e.cache.list()).toHaveLength(1)
     expect(await e.completed()).toEqual({})

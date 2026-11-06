@@ -17,7 +17,7 @@ function makeDeps(store = new MemoryStore(new InMemoryTable(), undefined, new In
     store,
     registry,
     snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
-    resolveContext: async () => ({ workspacePath: '/proj', session: { id: 's1', lastSeq: 3 } }),
+    host: { saveContextOf: async () => ({ workspacePath: '/proj', session: { id: 's1', lastSeq: 3 } }) },
   }
 }
 
@@ -61,11 +61,11 @@ describe('executeSave', () => {
     expect(dup.kind).toBe('duplicate-suspected')
   })
 
-  it('resolveContext 无 workspacePath（无 cwd 会话）时 create 拒存', async () => {
+  it('保存上下文无 workspacePath（无 cwd 会话）时 create 拒存', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const deps: SaveToolDeps = {
       ...makeDeps(store),
-      resolveContext: async () => ({ workspacePath: undefined, session: { id: 's1', lastSeq: 3 } }),
+      host: { saveContextOf: async () => ({ workspacePath: undefined, session: { id: 's1', lastSeq: 3 } }) },
     }
     const result = await executeSave(
       { ...base, scope: 'workspace', name: '项目规则', content: '本项目用 pnpm', summary: 'pnpm' },
@@ -81,7 +81,7 @@ describe('executeSave', () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     const deps: SaveToolDeps = {
       ...makeDeps(store),
-      resolveContext: async () => ({ workspacePath: '/proj', session: { id: 's1', lastSeq: 3 } }),
+      host: { saveContextOf: async () => ({ workspacePath: '/proj', session: { id: 's1', lastSeq: 3 } }) },
     }
     const result = await executeSave(
       { ...base, scope: 'global', name: '全局偏好', content: '所有项目用 pnpm', summary: 'pnpm' },

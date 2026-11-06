@@ -136,7 +136,7 @@ const driftMessage = ({ seq, kind }: BaselineDrift): string => kind === 'no-chan
 
 /**
  * 读侧：状态 → 正文与本次新告警。`warned` 是该 session 已告警过的 seq，只对不在其中的漂移产出告警并记入。
- * 去重范围由调用方决定（index.ts 按 session 对象存在 WeakMap 里，随插件生命周期）。
+ * 去重范围由调用方决定（宿主会话适配器按 session 对象存在 WeakMap 里，随插件生命周期）。
  * drift 是滑动窗口，退出窗口的 seq 不会再出现，顺手从 `warned` 里清掉，集合大小随 DRIFT_LIMIT 封顶。
  */
 export function readBaseline(state: BaselineState, warned: Set<number>): { texts: readonly string[]; warnings: readonly string[] } {

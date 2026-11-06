@@ -10,6 +10,7 @@ import type { Finding, ScanCacheEntry } from '../governance/schema.ts'
 import { runRuleScan, buildMalformedFindings } from '../governance/rule-scan.ts'
 import { runSemanticScan, type SemanticLlm } from '../governance/semantic-scan.ts'
 import { isModelUnavailableCode } from '../governance/host-llm.ts'
+import type { ContextHost, HostSession } from './host-session.ts'
 import type { CheckupCause } from '../gui/contract.ts'
 import { scoreScope, listWorkspaces, validateScopePaths, crossScopeConflicts, checkupRowBase, ignoredNote, findingFingerprints, GLOBAL_CACHE_KEY, TIER_LABEL } from '../governance/scope-health.ts'
 import { applyIgnores, type AdviceIgnoreStore } from '../governance/advice-ignores.ts'
@@ -30,14 +31,10 @@ export interface ScanToolDeps {
   ignores?: Pick<AdviceIgnoreStore, 'list'>
   /** 体检记录表：一次体检全部写完后给覆盖到的范围写完成记录（提交点）。缺省不写。 */
   checkups?: Pick<CheckupRecordStore, 'list' | 'complete'>
-  /** 按触发调用的 session 取该会话的 AGENTS.md/CLAUDE.md 基线（宿主投影按 session 隔离）。 */
-  getBaseline: (exec: ToolRunContext) => readonly string[] | null
-  /** 按调用解析（而非加载时一次性解析）——provider/model 只能从触发调用的 exec 上下文里的
-   *  agent 拿到，插件加载时不存在。null = 当前环境拿不到 LLM 或解析不出 provider/model
-   *  （语义层跳过并说明） */
-  getLlm: (exec: ToolRunContext) => SemanticLlm | null
-  /** 当前会话的 workspace（默认口径"当前项目"的来源）。 */
-  resolveContext: (exec: ToolRunContext) => Promise<{ workspacePath: string | undefined }>
+  /** 宿主会话，都按触发调用的会话取：baselineOf 是该会话的 AGENTS.md/CLAUDE.md 基线（宿主投影按 session 隔离）；
+   *  llmOf 按调用解析——provider/model 只能从触发调用的 agent 拿到，插件加载时不存在，null = 拿不到 LLM（语义层跳过并说明）；
+   *  contextOf 给当前会话的 workspace（默认口径"当前项目"的来源）。 */
+  host: ContextHost<{ workspacePath: string | undefined }> & Pick<HostSession, 'llmOf' | 'baselineOf'>
   now?: () => number
 }
 
@@ -371,7 +368,7 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
   // 用户取消信号（宿主 exec.signal 契约）：每个语义调用透传，各写入前设检查点。
   const signal = exec?.signal
   const now = deps.now?.() ?? Date.now()
-  const llm = deps.getLlm(exec)
+  const llm = deps.host.llmOf(exec)
   // 本次扫描各次模型调用的实际用量合计；宿主一次都没报时保持 undefined，不拿估算顶替
   let usageTokens: number | undefined
   const onUsage = (tokens: number) => { usageTokens = (usageTokens ?? 0) + tokens }
@@ -379,14 +376,14 @@ export async function executeScan(rawArgs: ScanArgs, deps: ScanToolDeps, exec: T
     ...(semanticBatches > 0 ? { semanticBatches } : {}),
     ...(usageTokens !== undefined ? { usageTokens } : {}),
   })
-  const baseline = deps.getBaseline(exec)
+  const baseline = deps.host.baselineOf(exec)
   /** 写完成记录：开始时间是这次扫描开始的时刻，完成时间现读。 */
   const commit = async (checked: readonly Scope[]) => {
     if (deps.checkups === undefined || checked.length === 0) return
     signal?.throwIfAborted()
     await deps.checkups.complete(checked, { startedAt: now, completedAt: deps.now?.() ?? Date.now(), by: run.by ?? 'agent' })
   }
-  const currentWs = exec !== undefined ? (await deps.resolveContext(exec)).workspacePath : undefined
+  const currentWs = exec !== undefined ? (await deps.host.contextOf(exec)).workspacePath : undefined
   // 目录枚举只读标记与文件名：体检清单、scope 校验、缺标记 / 不可读目录的说明都出自它
   const listing = await deps.store.listWorkspaceDirs()
   const checkup = args.scope === 'all' || (args.scopes !== undefined && args.scopes.length > 0)

@@ -87,15 +87,15 @@ function harness(opts: { readEvent?: ReadEventFn; now?: number } = {}) {
   const ctx = (ws: string | null) => async () => ({ workspacePath: ws ?? undefined, session })
   const now = () => opts.now ?? Date.now()
   const healthDeps = (ws: string | null = WS): HealthToolDeps => ({
-    store, registry, decisions, cache: sidecar.scanCache, thresholds: resolveHealthThresholds('normal'), resolveContext: ctx(ws), now,
+    store, registry, decisions, cache: sidecar.scanCache, thresholds: resolveHealthThresholds('normal'), host: { contextOf: ctx(ws) }, now,
   })
   const scanDeps = (ws: string | null = WS): ScanToolDeps => ({
-    store, registry, decisions, cache: sidecar.scanCache, getBaseline: () => null, getLlm: () => null, resolveContext: ctx(ws), now,
+    store, registry, decisions, cache: sidecar.scanCache, host: { contextOf: ctx(ws), llmOf: () => null, baselineOf: () => null }, now,
   })
   const cache = new SnapshotCache({ store, registry, budget: 4000, memoryRoot: root })
   return {
     table, store, sidecar, decisions,
-    search: (query: string, ws: string | null = WS) => executeSearch({ query }, fakeExec(), { store, registry, resolveContext: ctx(ws) }),
+    search: (query: string, ws: string | null = WS) => executeSearch({ query }, fakeExec(), { store, registry, host: { contextOf: ctx(ws) } }),
     /** 每次一个新 session（对应新开会话）：读盘组装、冻结。 */
     assemble: async (ws: string | null = WS) => {
       const s = {}
@@ -107,7 +107,7 @@ function harness(opts: { readEvent?: ReadEventFn; now?: number } = {}) {
     source: (memoryId: string, ws: string | null = WS) =>
       executeSource({ memoryId }, { workspacePath: ws ?? undefined }, { store, getReadEvent: () => opts.readEvent ?? null }),
     save: (args: Parameters<typeof executeSave>[0], ws: string | null = WS) =>
-      executeSave(args, fakeExec(), { store, registry, resolveContext: ctx(ws), snapshots }),
+      executeSave(args, fakeExec(), { store, registry, host: { saveContextOf: ctx(ws) }, snapshots }),
     forget: (ids: string[]) => executeForget({ ids, reason: '测试' }, { workspacePath: WS }, { store, snapshots, decisions }),
   }
 }

@@ -4,9 +4,9 @@ import { fileURLToPath } from 'node:url'
 import { posix } from 'node:path'
 import { zh as clientZh } from '../client/locales.ts'
 
-// 依赖方向守门：叶子 ← storage ← 记忆层 ← governance ← tools 执行器 ← GUI 层（gui/*）← tools 绑定层 ← 接线层（index.ts、domain-spec）。
+// 依赖方向守门：叶子 ← storage ← 记忆层 ← governance ← tools 执行器 ← GUI 层（gui/*）← tools 绑定层 ← 接线层（index.ts、domain-spec、宿主会话适配器）。
 // 每层只能 import 本层及更低层（GUI 层可 import 执行器、不 import 绑定层，执行器不 import GUI 层）；框架包（@deepseek-ai/*）的运行时 import 只许绑定层与接线层
-// （index.ts、domain-spec）碰，type-only 引用任何层都允许。
+// （index.ts、domain-spec、宿主会话适配器）碰，type-only 引用任何层都允许。
 // 静态读文件 + 正则扫描，不执行源码。
 
 const SRC_DIR = fileURLToPath(new URL('../src/', import.meta.url))
@@ -25,8 +25,8 @@ const LEAF_MODULES = new Set([
 const MEMORY_MODULES = new Set([
   'pipeline', 'store', 'snapshot', 'snapshot-message', 'runtime', 'type-registry', 'evidence-guidance', 'search/ranking', 'search/coverage',
 ])
-// 接线层：index.ts 与交给 ctx.storageDomain.open 的域定义（只被 index.ts 用）
-const ENTRY_MODULES = new Set(['index', 'domain-spec'])
+// 接线层：index.ts、交给 ctx.storageDomain.open 的域定义、宿主会话适配器（后两个只被 index.ts 用）
+const ENTRY_MODULES = new Set(['index', 'domain-spec', 'cordis-host-session'])
 
 const FRAMEWORK_PREFIX = '@deepseek-ai/'
 

@@ -57,7 +57,7 @@ describe('executeSearch 排序：命中词数 → confidence → lastConfirmedAt
     await store.put(record({ id: 'mem_one', content: '只提到 deploy', confidence: 0.9 }))
     const deps: SearchToolDeps = {
       store, registry,
-      resolveContext: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }),
+      host: { contextOf: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }) },
     }
     const result = await executeSearch({ query: 'deploy hook rollback' }, fakeExec(), deps)
     // mem_two 命中 2 词、confidence 0.5；mem_one 命中 1 词、confidence 0.9——命中数优先
@@ -87,7 +87,7 @@ describe('低置信标注', () => {
     await store.put(record({ id: 'mem_ok', content: '新鲜内容 magicword', lastConfirmedAt: now }))
     const deps: SearchToolDeps = {
       store, registry,
-      resolveContext: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }),
+      host: { contextOf: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }) },
     }
     const { hits } = await executeSearch({ query: 'magicword' }, fakeExec(), deps)
     const ids = hits.map(h => h.id)
@@ -114,7 +114,7 @@ describe('低置信标注', () => {
     }))
     const deps: SearchToolDeps = {
       store, registry,
-      resolveContext: async () => ({ workspacePath: undefined, session: { id: 's1', lastSeq: 1 } }),
+      host: { contextOf: async () => ({ workspacePath: undefined, session: { id: 's1', lastSeq: 1 } }) },
     }
     const result = await executeSearch({ query: '推断' }, fakeExec(), deps)
     expect(result.hits[0].sourceNote).toBe(INFERENCE_NOTE)
@@ -168,7 +168,7 @@ describe('scope=workspace 无工作目录时显式说明', () => {
     await store.put(record({ id: 'mem_g', content: '全局内容 magicword' }))
     const deps: SearchToolDeps = {
       store, registry,
-      resolveContext: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }),
+      host: { contextOf: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }) },
     }
     const result = await executeSearch({ query: 'magicword', scope: 'workspace' }, fakeExec(), deps)
     expect(result.hits).toEqual([])

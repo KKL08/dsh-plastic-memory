@@ -71,7 +71,7 @@ function harness() {
     forget: (ids: string[]) => executeForget({ ids, reason: '测试' }, { workspacePath: WS }, { store, snapshots, decisions, now: () => clock }),
     health: () => executeHealth({}, {
       store, registry, decisions, cache: sidecar.scanCache, thresholds: resolveHealthThresholds('normal'),
-      resolveContext: async () => ({ workspacePath: WS }), now: () => clock,
+      host: { contextOf: async () => ({ workspacePath: WS }) }, now: () => clock,
     }, fakeExec()),
   }
 }

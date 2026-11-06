@@ -37,7 +37,7 @@ type ToolDef = { execute(args: unknown, exec: unknown): Promise<unknown> }
 type Tools = { get(name: string): ToolDef | undefined; schemas(): Array<{ name: string }> }
 /** 宿主 SessionStore 的最小契约：只用到 create（建真 Session，会话 id 由宿主分配）。H19 用 meta 的委派 header 建子会话（宿主 childSessionMeta 写的同两项）。 */
 type Sessions = { create(id?: string, options?: { meta?: { cwd?: string; delegationDepth?: number; parentSession?: string } }): SessionLike }
-/** 宿主 Session 的最小契约：resolveContext 读 header；H9b 用 append 落一条用户消息；H15 读可见历史。 */
+/** 宿主 Session 的最小契约：工具上下文读 header；H9b 用 append 落一条用户消息；H15 读可见历史。 */
 type SessionLike = {
   header: { id: string; cwd?: string; delegationDepth?: number; parentSession?: string }; seq: number
   append(type: string, data: unknown, opts?: unknown): { seq: number }

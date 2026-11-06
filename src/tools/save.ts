@@ -6,7 +6,7 @@ import type { PendingDecisionsStore } from '../governance/decisions.ts'
 import { isPendingDelegated } from '../record-schema.ts'
 import { runSavePipeline, type PipelineResult, type SaveCandidate, type SaveDelegation } from '../pipeline.ts'
 
-/** memory_save 运行时需要的会话上下文，由框架绑定层的 resolveContext 提供。 */
+/** memory_save 运行时需要的会话上下文，由宿主会话适配器的 saveContextOf 提供。 */
 export interface SaveContext {
   workspacePath: string | undefined
   /** turnStartSeq 是证据锚的起点（当轮 turn/start 的 seq）；缺省时管线回退整会话锚。 */
@@ -22,7 +22,7 @@ export type SaveArgs = Omit<SaveCandidate, 'tags'> & { tags?: string[] }
 export interface SaveToolDeps {
   store: MemoryStore
   registry: TypeRegistry
-  resolveContext(exec: ToolRunContext): Promise<SaveContext>
+  host: { saveContextOf(exec: ToolRunContext): Promise<SaveContext> }
   /** 改写、替代前拍快照用（快照先行）；必填，测试传内存实现。 */
   snapshots: SnapshotStore
   /** 改写、替代后记撤销记录（对话卡、右侧栏的「撤销修改」）；生产接线传入已有实例，测试可缺省。 */
@@ -87,7 +87,7 @@ export async function executeSave(
   exec: ToolRunContext,
   deps: SaveToolDeps,
 ): Promise<PipelineResult> {
-  const context = await deps.resolveContext(exec)
+  const context = await deps.host.saveContextOf(exec)
   const candidate: SaveCandidate = { ...args, tags: args.tags ?? [] } // 可选参数归一化
   const result = await runSavePipeline(candidate, {
     store: deps.store,

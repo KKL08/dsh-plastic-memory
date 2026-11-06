@@ -12,7 +12,6 @@ import { computeDigest } from '../storage/frontmatter.ts'
 import { candidateFingerprint, isModelChange, kindOf, verdictLoser, type MisplacedIgnore, type PendingDecisionsStore } from '../governance/decisions.ts'
 import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
 import { genId, type PendingDecision, type ScanCacheEntry, type SnapshotRecord } from '../governance/schema.ts'
-import type { SemanticLlm } from '../governance/semantic-scan.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
@@ -33,6 +32,7 @@ import { generateDraft } from './model-draft.ts'
 import { holdCheckups, processInterval, type IntervalTimer } from './auto-checkup.ts'
 import { checkupWorkspaces } from '../tools/scope-preread.ts'
 import { scopeAt, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
+import { UNKNOWN_SESSION_ID, type ContextHost, type HostSession } from '../tools/host-session.ts'
 import { checkupResults, scanOutcome, type CheckupTarget } from './views.ts'
 
 /**
@@ -60,11 +60,9 @@ export interface MemoryCommandDeps {
   registry: TypeRegistry
   agentsMd: AgentsMdWriter
   views: Pick<ViewWriter, 'request' | 'rewriteAll' | 'collectViews' | 'requestCheckups'>
-  /** 借来的会话 → workspace、子 agent 深度、会话 id（与工具共用接线层的同一个解析函数，exec 只带 agent）。 */
-  resolveContext: (exec: ToolRunContext) => Promise<{ workspacePath: string | undefined; delegationDepth: number; session: { id: string } }>
-  /** 在借来的会话的 agent 上解析模型；null = 拿不到。 */
-  getLlm: (exec: ToolRunContext) => SemanticLlm | null
-  getBaseline: (exec: ToolRunContext) => readonly string[] | null
+  /** 宿主会话（与工具共用同一个适配器，exec 只带 agent）：借来的会话 → workspace、子 agent 深度、会话 id；
+   *  在它的 agent 上解析模型（null = 拿不到）、取它的 AGENTS.md 基线。 */
+  host: ContextHost<{ workspacePath: string | undefined; delegationDepth: number; session: { id: string } }> & Pick<HostSession, 'llmOf' | 'baselineOf'>
   /** 体检开关（用时读配置）；关闭时治理类子命令返回 governance-disabled。缺省视为开启。 */
   isGovernanceEnabled?: () => boolean
   /** 旧 KV 导入是否已结清（导完且旧行已删）；缺省视为已结清。没结清时彻底删除回 failed：续传会把旧快照里的明文放回来。 */
@@ -134,10 +132,10 @@ async function run(deps: MemoryCommandDeps, invocation: MemoryCommandInvocation)
   if (!parsed.ok) return fail(undefined, 'invalid-args', parsed.detail)
   const command = parsed.command
   const exec = { agent: invocation.agent } as unknown as ToolRunContext
-  const context = await deps.resolveContext(exec)
+  const context = await deps.host.contextOf(exec)
   if (command.cmd === 'info') return await info(deps, context.session.id)
   if (command.cmd === 'model-info') {
-    const llm = deps.getLlm(exec)
+    const llm = deps.host.llmOf(exec)
     return llm === null ? fail(command.cmd, 'llm-unavailable', '借用的会话拿不到模型') : { ok: true, cmd: command.cmd, ...(llm.model !== undefined ? { model: llm.model } : {}) }
   }
   if (GOVERNANCE_COMMANDS.has(command.cmd) && deps.isGovernanceEnabled?.() === false && !(await isEditUndo(deps.decisions, command))) {
@@ -190,7 +188,7 @@ async function info(deps: MemoryCommandDeps, sessionId: string): Promise<Ok> {
         pending: at(GUI_VIEW_FILES.pending), health: at(GUI_VIEW_FILES.health),
         library: at(GUI_VIEW_FILES.library), deleted: at(GUI_VIEW_FILES.deleted),
         checkups: at(GUI_CHECKUP_VIEW_FILE),
-        ...(sessionId !== 'unknown' ? { session: at(sessionViewFile(sessionId)) } : {}),
+        ...(sessionId !== UNKNOWN_SESSION_ID ? { session: at(sessionViewFile(sessionId)) } : {}),
       },
       version: GUI_VIEW_VERSION,
     },
@@ -400,7 +398,7 @@ async function dispatch(
     case 'resolve': {
       if (!(await deps.decisions.get(command.decisionId))) return notFound(command.decisionId)
       // 升级前导入的垂直冲突没有指纹，两边都留时要按基线现算
-      const baseline = deps.getBaseline(exec)
+      const baseline = deps.host.baselineOf(exec)
       const r = await executeConfirm(
         { action: 'resolve', decisionId: command.decisionId, verdict: command.verdict, allowCrossWorkspace: command.allowCrossWorkspace },
         gov, executorDeps, baseline !== null ? { baseline } : {},
@@ -726,7 +724,7 @@ async function dispatch(
       const previous = command.previous
       const asked = [command.request ?? '', ...(previous !== undefined ? [previous.content, previous.name ?? '', previous.summary, ...(previous.tags ?? [])] : [])]
       if (detectSecrets(asked.join('\n')).some(h => h.severity === 'critical')) return fail(cmd, 'secret-critical', '要求或上一稿里有高危密钥，不发给模型。未做任何改动')
-      const llm = deps.getLlm(exec)
+      const llm = deps.host.llmOf(exec)
       if (llm === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型')
       const r = await generateDraft({ adviceType: command.adviceType, records: records.map(rec => rec!), request: command.request, previous: command.previous }, llm)
       if (!r.ok) return fail(cmd, r.code, r.detail)
@@ -760,7 +758,7 @@ async function dispatch(
 
     case 'scan': {
       // 在借来的会话的 agent 上解析模型，拿不到就不扫（只跑规则层会让界面以为体检做完了）
-      if (deps.getLlm(exec) === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型，可在对话里让 agent 体检')
+      if (deps.host.llmOf(exec) === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型，可在对话里让 agent 体检')
       const isGlobalOnly = command.layer !== undefined
       // 开跑前认领要查的范围（和自动体检共用一套认领）：正在体检就回 busy；「全部」要认领全局和每个项目，有一个认领不到整个回 busy
       const scopes: Scope[] = isGlobalOnly ? [{ kind: 'global' }]
@@ -880,7 +878,7 @@ async function scanHeld(
     scopes !== undefined ? { scopes, layers: 'full' } : { ...(command.workspacePath !== undefined ? { scope: command.workspacePath } : {}), layers: 'full' },
     {
       store: deps.store, registry: deps.registry, decisions: deps.decisions, cache: deps.cache, checkups: deps.checkups,
-      getBaseline: deps.getBaseline, getLlm: deps.getLlm, resolveContext: deps.resolveContext, now: () => deps.now?.() ?? Date.now(),
+      host: deps.host, now: () => deps.now?.() ?? Date.now(),
     },
     exec, { by: 'manual', isGlobalOnly: isGlobalOnly || scopes?.length === 0, onScopeNotes: (scope, notes) => { scopeNotes.set(checkupKey(scope), notes) } },
   )

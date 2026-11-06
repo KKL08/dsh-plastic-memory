@@ -53,7 +53,7 @@ beforeAll(async () => {
   await mkdir(join(root, GLOBAL_DIR))
   await Promise.all(EVAL_RECORDS.map(r => writeFile(join(root, GLOBAL_DIR, `${r.id}.md`), encodeRecord(r, {}), 'utf8')))
   const store = new MemoryStore(new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() }), undefined, new InMemoryBatchKvTable())
-  deps = { store, registry, tokenizer: { log: silent }, resolveContext: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }) }
+  deps = { store, registry, tokenizer: { log: silent }, host: { contextOf: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }) }}
 })
 afterAll(async () => {
   resetJieba()

@@ -44,7 +44,7 @@ import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const NOW = 1_000_000
-/** 绑定层 execute 只从 exec 读 signal（scan）或转交给 resolveContext；最小桩即可。 */
+/** 绑定层 execute 只从 exec 读 signal（scan）或转交给 host；最小桩即可。 */
 const exec = fakeExec()
 const jsonOk = (v: unknown): boolean => snapshotJsonValue(v) !== undefined
 const schemaOf = (tool: ToolDefinition): JsonSchemaNode => tool.parameters as unknown as JsonSchemaNode
@@ -73,7 +73,7 @@ function expectRenderClean(tool: ToolDefinition, args: unknown, value: unknown):
 describe('memory_save 绑定', () => {
   const makeTool = (store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())) => createSaveTool({
     store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
-    resolveContext: async () => ({ workspacePath: '/proj', session: { id: 's', lastSeq: 1 } }),
+    host: { saveContextOf: async () => ({ workspacePath: '/proj', session: { id: 's', lastSeq: 1 } }) },
   })
   const legal = { action: 'create', name: '标题', type: 'preference', scope: 'global', content: '内容', summary: '摘要', sourceMode: 'user-explicit' }
 
@@ -139,7 +139,7 @@ describe('memory_search 绑定', () => {
       content: '认证逻辑在 src/auth.ts', summary: 'auth 位置', tags: ['auth'], sourceMode: 'user-explicit', force: true,
     }, { store, registry, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), workspacePath: '/proj', session: { id: 's', lastSeq: 1 } })
     if (r.kind !== 'saved') throw new Error(r.kind)
-    return createSearchTool({ store, registry, resolveContext: async () => ({ workspacePath: '/proj', session: { id: 's', lastSeq: 1 } }) })
+    return createSearchTool({ store, registry, host: { contextOf: async () => ({ workspacePath: '/proj', session: { id: 's', lastSeq: 1 } }) } })
   }
 
   it('工具描述开头讲清它管什么、和 grep 怎么分工，再分段教关键词写法与读结果（换行保留），命中弱时换词再搜一次', async () => {
@@ -200,7 +200,7 @@ describe('memory_forget 绑定', () => {
     return createForgetTool({
       store, snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
       decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()), now: () => NOW,
-      resolveContext: async () => ({ workspacePath: '/proj' }),
+      host: { contextOf: async () => ({ workspacePath: '/proj' }) },
     })
   }
 
@@ -239,7 +239,7 @@ describe('memory_promote 绑定', () => {
     return createPromoteTool({
       store, agentsMd: { append: async () => {} } as never,
       snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), defaultTarget: 'global', now: () => NOW,
-      resolveContext: async () => ({ workspacePath: '/proj' }),
+      host: { contextOf: async () => ({ workspacePath: '/proj' }) },
     })
   }
 
@@ -273,7 +273,7 @@ describe('memory_promote 绑定', () => {
     const tool = createPromoteTool({
       store, agentsMd: { append: async () => {} } as never,
       snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), defaultTarget: 'global', now: () => NOW,
-      resolveContext: async () => ({ workspacePath: '/proj' }),
+      host: { contextOf: async () => ({ workspacePath: '/proj' }) },
     })
     await tool.execute({ ids: ['mem_s'] }, exec)
     expect((await store.get('mem_s'))!.delegation?.reviewed).toEqual({ by: 'main', at: NOW })
@@ -290,7 +290,7 @@ describe('memory_confirm 绑定', () => {
     return createConfirmTool({
       store, decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
       snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), now: () => NOW,
-      resolveContext: async () => ({ workspacePath: '/proj' }),
+      host: { contextOf: async () => ({ workspacePath: '/proj' }) },
     })
   }
 
@@ -324,7 +324,7 @@ describe('memory_confirm 绑定', () => {
 // ---------------------------------------------------------------------------
 describe('memory_snapshot 绑定', () => {
   const makeTool = (store: MemoryStore, snapshots: SnapshotStore) =>
-    createSnapshotTool({ store, snapshots, now: () => NOW, resolveContext: async () => ({ workspacePath: '/proj' }) })
+    createSnapshotTool({ store, snapshots, now: () => NOW, host: { contextOf: async () => ({ workspacePath: '/proj' }) } })
 
   it('(a) 合法参数过、缺必填（action）拒', () => {
     const tool = makeTool(new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable()), new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()))
@@ -376,7 +376,7 @@ describe('memory_source 绑定', () => {
     await store.put(record({ id: 'mem_s', scope: 'workspace', workspacePath: '/proj' }))
     return createSourceTool({
       store, getReadEvent: () => null, // 会话查询服务不可用 → unavailable
-      resolveContext: async () => ({ workspacePath: '/proj' }),
+      host: { contextOf: async () => ({ workspacePath: '/proj' }) },
     })
   }
 
@@ -416,9 +416,8 @@ describe('memory_scan 绑定', () => {
       store, registry,
       decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
       cache: new InMemoryKvTable<ScanCacheEntry>(),
-      getBaseline: () => null,
-      getLlm: () => null, // 无 LLM：语义层跳过，只跑规则层
-      resolveContext: async () => ({ workspacePath }),
+      // 无 LLM：语义层跳过，只跑规则层
+      host: { contextOf: async () => ({ workspacePath }), llmOf: () => null, baselineOf: () => null },
       now: () => NOW,
     })
   }
@@ -464,7 +463,7 @@ describe('memory_health 绑定', () => {
       decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
       cache: new InMemoryKvTable<ScanCacheEntry>(),
       thresholds: { actionScoreThreshold: 70, pendingOverdueDays: 7, scanStaleDays: 7 },
-      resolveContext: async () => ({ workspacePath }),
+      host: { contextOf: async () => ({ workspacePath }) },
       now: () => NOW,
     })
   }

@@ -1,11 +1,12 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { executeSnapshotTool, type SnapshotToolDeps, type SnapshotToolResult } from './snapshot.ts'
 import { toToolOutput } from './output.ts'
 import { ALLOW_CROSS_WORKSPACE_PARAM, type GovernanceContext } from './workspace-gate.ts'
+import type { ContextHost } from './host-session.ts'
 
 export interface SnapshotToolBindingDeps extends SnapshotToolDeps {
-  resolveContext: (exec: ToolRunContext) => Promise<GovernanceContext>
+  host: ContextHost<GovernanceContext>
 }
 
 /**
@@ -28,6 +29,6 @@ export function createSnapshotTool(deps: SnapshotToolBindingDeps): ToolDefinitio
       schema: { type: 'json' },
       render: (_args, value) => [{ type: 'text', text: (value as unknown as SnapshotToolResult).message }],
     },
-    execute: async (args, exec) => toToolOutput(await executeSnapshotTool(args, await deps.resolveContext(exec), deps)),
+    execute: async (args, exec) => toToolOutput(await executeSnapshotTool(args, await deps.host.contextOf(exec), deps)),
   })
 }

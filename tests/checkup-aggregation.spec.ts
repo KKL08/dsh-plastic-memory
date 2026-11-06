@@ -23,15 +23,13 @@ function sharedDeps(store: MemoryStore, decisions: PendingDecisionsStore, cache:
   const shared = { store, registry: buildTypeRegistry({ template: 'coding', customTypes: {} }), decisions, cache }
   const scanDeps: ScanToolDeps = {
     ...shared,
-    getBaseline: () => null,
-    getLlm: (_exec: unknown) => null,
-    resolveContext: async () => ({ workspacePath: undefined }),
+    host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: (_exec: unknown) => null, baselineOf: () => null },
     now: () => NOW,
   }
   const healthDeps: HealthToolDeps = {
     ...shared,
     thresholds: { actionScoreThreshold: 70, pendingOverdueDays: 7, scanStaleDays: 7 },
-    resolveContext: async () => ({ workspacePath: undefined }),
+    host: { contextOf: async () => ({ workspacePath: undefined }) },
     now: () => NOW,
   }
   return { scanDeps, healthDeps }

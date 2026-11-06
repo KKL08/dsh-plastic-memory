@@ -160,7 +160,7 @@ function mockCtx(opts: {
 /**
  * 让 get() 像 cordis 的 Context proxy 一样，对任何服务名都抛错（真实 cordis 对未 inject 的
  * 服务名抛 "cannot get property ... without inject"）。用于证明 apply() 不受 ctx.get 抛错影响：
- * getLlm 现在按调用解析（Fix 2），apply() 期间不会同步碰 ctx.get('llm')，这个 stub 对每个名字
+ * 模型按调用解析，apply() 期间不会同步碰 ctx.get('llm')，这个 stub 对每个名字
  * 都抛错，正好把"任何服务解析失败/抛错都不该拖垮插件加载"这条钉死，而不只是 llm 这一个名字。
  */
 function mockCtxWithThrowingGet() {
@@ -1354,15 +1354,14 @@ describe('子 agent 委派信息', () => {
   type SaveOut = { kind: string; record: { id: string; delegation?: Record<string, unknown> }; code?: string }
   const SAVE_ARGS = { action: 'create', type: 'knowledge', scope: 'workspace', sourceMode: 'environment-observed', tags: [] }
 
-  async function boot(o: { projections?: unknown; sessionQuery?: unknown } = {}) {
+  async function boot(o: { sessionQuery?: unknown } = {}) {
     const defs = new Map<string, ToolDef>()
-    const warnings: string[] = []
     const base = mockCtx()
     const ctx = {
       ...base,
       tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
-      get: (name: string) => (name === 'sessionProjections' ? o.projections : name === 'sessionQuery' ? o.sessionQuery : undefined),
-      logger: { info() {}, warn: (msg: string) => { warnings.push(msg) }, error() {} },
+      get: (name: string) => (name === 'sessionQuery' ? o.sessionQuery : undefined),
+      logger: { info() {}, warn() {}, error() {} }, // 没有投影服务：mode 与证据锚的退化告警在适配器测试里断言
     }
     const memoryRoot = await makeTmpRoot()
     const cwd = await makeTmpRoot() // resolveWorkspacePath 走 realpath，cwd 必须真实存在
@@ -1373,43 +1372,14 @@ describe('子 agent 委派信息', () => {
       { ...SAVE_ARGS, name, summary: `${name}摘要`, content: `子会话里看到「${name}」`, ...extra }, // 引号短语是实体：各条互不撞重复
       fakeExec({ agent: { session: s, options: {} } as unknown as ToolRunContext['agent'] }),
     ) as SaveOut
-    /** 只看 subagent 投影的退化告警（证据锚读 turnBoundary 的告警另有用例）。 */
-    const modeWarnings = () => warnings.filter(w => w.includes('读不到 subagent 投影'))
-    return { defs, session, save, modeWarnings, created: (s: Session) => base.listeners.get('session/created')!(s) }
+    return { defs, session, save, created: (s: Session) => base.listeners.get('session/created')!(s) }
   }
-  const projectionWith = (subagent: unknown) => ({ stateOf: (_s: object, key: string) => (key === 'subagent' ? subagent : undefined) })
 
   it('深度 1：delegation 带创建者会话、深度、直接父会话', async () => {
     const t = await boot()
     const out = await t.save(t.session('sess-child', { delegationDepth: 1, parentSession: 'sess-main' }), '子观察')
     expect(out.kind).toBe('saved')
     expect(out.record.delegation).toMatchObject({ sessionId: 'sess-child', depth: 1, parentSessionId: 'sess-main' })
-  })
-
-  it('用户 fork 的主会话（深度 0 带 parentSession）不算委派，记录不带 delegation，也不读 subagent 投影', async () => {
-    const t = await boot()
-    const out = await t.save(t.session('sess-fork', { parentSession: 'sess-main' }), 'fork 观察')
-    expect(out.kind).toBe('saved')
-    expect(out.record.delegation).toBeUndefined()
-    expect(t.modeWarnings()).toEqual([])
-  })
-
-  it('mode：投影给出 identity 或 {} 时不告警；投影未注册、服务缺席按一次性，每个会话告警一次', async () => {
-    for (const subagent of [{ identity: { mode: 'continuable', label: 'reviewer', seq: 0 } }, { identity: { mode: 'one-shot', seq: 0 } }, {}]) {
-      const t = await boot({ projections: projectionWith(subagent) })
-      expect((await t.save(t.session('sess-child', { delegationDepth: 1, parentSession: 'sess-main' }), '有投影')).kind).toBe('saved')
-      expect(t.modeWarnings()).toEqual([])
-    }
-    for (const [projections, reason] of [[projectionWith(undefined), 'not registered'], [undefined, 'service is absent']] as const) {
-      const t = await boot({ projections })
-      const child = t.session('sess-child', { delegationDepth: 1, parentSession: 'sess-main' })
-      expect((await t.save(child, '无投影一')).kind).toBe('saved')
-      expect((await t.save(child, '无投影二')).kind).toBe('saved')
-      expect(t.modeWarnings()).toHaveLength(1)
-      expect(t.modeWarnings()[0]).toContain('sess-child')
-      expect(t.modeWarnings()[0]).toContain('one-shot')
-      expect(t.modeWarnings()[0]).toContain(reason)
-    }
   })
 
   /** sessionQuery 替身：filterSessions 按 id 给出 header（宿主 SessionRecord 形状），记下问过哪些 id；readEvent 记次数（不该被调）。 */
@@ -1444,14 +1414,6 @@ describe('子 agent 委派信息', () => {
     expect(query.reads).toEqual([])
   })
 
-  it('用户 fork 出来的主会话是它自己那棵树的根，不再往上走', async () => {
-    const query = fakeQuery([{ id: 'sess-orig' }, { id: 'sess-fork', parentSession: 'sess-orig' }])
-    const t = await boot({ sessionQuery: query })
-    const out = await t.save(t.session('sess-child', { delegationDepth: 1, parentSession: 'sess-fork' }), 'fork 下的子观察')
-    expect(out.record.delegation).toMatchObject({ parentSessionId: 'sess-fork', rootSessionId: 'sess-fork' })
-    expect(query.asked).toEqual(['sess-fork'])
-  })
-
   it('进程内见过的会话走缓存，不问 sessionQuery', async () => {
     const query = fakeQuery([])
     const t = await boot({ sessionQuery: query })
@@ -1461,33 +1423,6 @@ describe('子 agent 委派信息', () => {
     expect(d1.record.delegation).toMatchObject({ rootSessionId: 'sess-main' })
     expect(d2.record.delegation).toMatchObject({ rootSessionId: 'sess-main' })
     expect(query.asked).toEqual([])
-  })
-
-  it('任一跳读不到（查无此会话、查询抛错、服务缺席、宿主没有 filterSessions）：记录照存，rootSessionId 缺省', async () => {
-    const services: unknown[] = [
-      fakeQuery([{ id: 'sess-d1', delegationDepth: 1, parentSession: 'sess-gone' }]), // 第二跳断
-      { filterSessions: async () => { throw new Error('persistence listing failed') } },
-      undefined,
-      { readEvent: async () => ({ events: [] }) },
-    ]
-    for (const sessionQuery of services) {
-      const t = await boot({ sessionQuery })
-      const out = await t.save(t.session('sess-d2', { delegationDepth: 2, parentSession: 'sess-d1' }), '链断了')
-      expect(out.kind).toBe('saved')
-      expect(out.record.delegation).toEqual({ sessionId: 'sess-d2', depth: 2, parentSessionId: 'sess-d1' })
-    }
-  })
-
-  it('最多走「深度」跳：父链深度不降（宿主数据异常）时停下，rootSessionId 缺省', async () => {
-    const query = fakeQuery([
-      { id: 'sess-p', delegationDepth: 1, parentSession: 'sess-q' },
-      { id: 'sess-q', delegationDepth: 1, parentSession: 'sess-p' },
-    ])
-    const t = await boot({ sessionQuery: query })
-    const out = await t.save(t.session('sess-child', { delegationDepth: 1, parentSession: 'sess-p' }), '环')
-    expect(out.kind).toBe('saved')
-    expect(out.record.delegation).not.toHaveProperty('rootSessionId')
-    expect(query.asked).toEqual(['sess-p'])
   })
 
   it('memory_save 的参数里没有委派字段；模型传了同名字段被忽略，委派信息只认宿主 header', async () => {
@@ -1547,57 +1482,6 @@ describe('证据锚：读 turnBoundary 投影', () => {
     const { session, save, warnings } = await boot(projectionWith({ openTurnStartSeq: 3 as TurnBoundaryProjection['openTurnStartSeq'] }))
     expect(await save(session(7))).toEqual([3, 6])
     expect(warnings).toEqual([])
-  })
-
-  it('sessionProjections 服务缺席 → 退回整会话锚 [0, seq - 1]，warn 说明原因', async () => {
-    const { session, save, warnings } = await boot(undefined)
-    expect(await save(session(7))).toEqual([0, 6])
-    expect(warnings).toHaveLength(1)
-    expect(warnings[0]).toContain('sess-1')
-    expect(warnings[0]).toContain('service is absent')
-  })
-
-  it('stateOf 对 turnBoundary 返回 undefined（投影未注册）→ [0, seq - 1]，warn 说明原因', async () => {
-    const { session, save, warnings } = await boot(projectionWith(undefined))
-    expect(await save(session(7))).toEqual([0, 6])
-    expect(warnings).toHaveLength(1)
-    expect(warnings[0]).toContain('not registered')
-  })
-
-  it('openTurnStartSeq 为 null（工具执行时却没有开着的轮）→ [0, seq - 1]，warn 说明原因', async () => {
-    const { session, save, warnings } = await boot(projectionWith({ openTurnStartSeq: null }))
-    expect(await save(session(7))).toEqual([0, 6])
-    expect(warnings).toHaveLength(1)
-    expect(warnings[0]).toContain('no open turn')
-  })
-
-  it('投影对象缺少 openTurnStartSeq 字段（宿主形状变化）→ [0, seq - 1]，warn 而不是静默', async () => {
-    const { session, save, warnings } = await boot(projectionWith({}))
-    expect(await save(session(7))).toEqual([0, 6])
-    expect(warnings).toHaveLength(1)
-    expect(warnings[0]).toContain('undefined')
-  })
-
-  it('stateOf 抛错（宿主行为变化）→ 退回 [0, seq - 1]，warn 带上错误', async () => {
-    const { session, save, warnings } = await boot({ stateOf: () => { throw new Error('projection exploded') } })
-    expect(await save(session(7))).toEqual([0, 6])
-    expect(warnings).toHaveLength(1)
-    expect(warnings[0]).toContain('projection exploded')
-  })
-
-  it('同一 session 反复退化只 warn 一次，不同 session 各自 warn', async () => {
-    const { session, save, warnings } = await boot(undefined)
-    const first = session(7)
-    await save(first, 'anchor-1')
-    await save(first, 'anchor-2')
-    expect(warnings).toHaveLength(1)
-    await save(session(9), 'anchor-3')
-    expect(warnings).toHaveLength(2)
-  })
-
-  it('空日志（seq = 0）→ [0, 0]', async () => {
-    const { session, save } = await boot(projectionWith({ openTurnStartSeq: null }))
-    expect(await save(session(0))).toEqual([0, 0])
   })
 })
 
@@ -1710,64 +1594,6 @@ describe('AGENTS.md 基线：读 plasticMemoryBaseline 投影', () => {
       expectedBaseline(['项目乙：用 npm']),
       expectedBaseline(['项目甲：用 pnpm']),
     ])
-  })
-
-  it('sessionProjections 服务缺席（ctx.get 返回 undefined，cordis 的真实形状）：体检扫描带 baseline-missing，不告警', async () => {
-    const { scan, warnings } = await boot(mockCtx())
-    const out = await scan(fakeSession(await makeTmpRoot(), [baselineMessage(0, '有基线但没有投影服务')]), { scope: 'all' })
-    expect(out.notes?.map(n => n.code)).toContain('baseline-missing')
-    expect(warnings.filter(w => /baseline/i.test(w))).toEqual([])
-  })
-
-  it('sessionProjections 服务缺席（ctx.get 抛错）：体检扫描带 baseline-missing，不抛', async () => {
-    const base = mockCtx()
-    const { scan } = await boot(base, {
-      get: name => {
-        if (name === 'sessionProjections') throw new Error(`no such service: ${name}`)
-        return base.get(name)
-      },
-    })
-    const out = await scan(fakeSession(await makeTmpRoot(), [baselineMessage(0, '有基线但读不到')]), { scope: 'all' })
-    expect(out.notes?.map(n => n.code)).toContain('baseline-missing')
-  })
-
-  it('注册表在、但插件的投影没注册上（stateOf 返回 undefined）：体检扫描带 baseline-missing，不抛', async () => {
-    const projections = await hostRegistry()
-    const { scan } = await boot(mockCtx({ projections, registerProjection: false }))
-    const session = fakeSession(await makeTmpRoot(), [baselineMessage(0, '有基线但键未注册')])
-    const out = await scan(session, { scope: 'all' })
-    expect(projections.checkpoint(session as never)).not.toHaveProperty('plasticMemoryBaseline')
-    expect(out.notes?.map(n => n.code)).toContain('baseline-missing')
-  })
-
-  it('日志里有形状漂移的指令消息：首次扫描 warn 一次，同一 session 再扫不重复', async () => {
-    const projections = await hostRegistry()
-    const { scan, warnings } = await boot(mockCtx({ projections }))
-    const broken = baselineMessage(0, '缺 changes 的基线')
-    delete (broken.data as { source: { changes?: unknown } }).source.changes
-    const session = fakeSession(await makeTmpRoot(), [broken])
-    const out = await scan(session, { scope: 'all' })
-    expect(out.notes?.map(n => n.code) ?? []).not.toContain('baseline-missing')
-    await scan(session, { scope: 'all' })
-    const drift = warnings.filter(w => w.includes('agent-instructions message'))
-    expect(drift).toEqual(['agent-instructions message at seq 0 carries no changes array; keeping its text without scope tracking'])
-  })
-
-  it('stateOf 读取抛错（会话日志读不出）：体检扫描带 baseline-missing、不抛，同一 session 只 warn 一次', async () => {
-    const projections = await hostRegistry()
-    const { scan, warnings } = await boot(mockCtx({ projections }))
-    const session = {
-      ...fakeSession(await makeTmpRoot(), []),
-      snapshotEvents: () => { throw new Error('log unreadable') },
-    }
-    const first = await scan(session, { scope: 'all' })
-    const second = await scan(session, { scope: 'all' })
-    expect(first.notes?.map(n => n.code)).toContain('baseline-missing')
-    expect(second.notes?.map(n => n.code)).toContain('baseline-missing')
-    const baselineWarnings = warnings.filter(w => w.includes('plasticMemoryBaseline'))
-    expect(baselineWarnings).toHaveLength(1)
-    expect(baselineWarnings[0]).toContain(session.header.id)
-    expect(baselineWarnings[0]).toContain('log unreadable')
   })
 })
 

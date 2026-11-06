@@ -24,7 +24,7 @@ const LOW_COVERAGE: SearchNoteCode = 'low-coverage'
 
 const searchDeps = (store: MemoryStore): SearchToolDeps => ({
   store, registry,
-  resolveContext: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }),
+  host: { contextOf: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }) },
 })
 
 let root: string

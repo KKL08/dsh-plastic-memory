@@ -55,8 +55,8 @@ function env() {
   const command = createMemoryCommand({
     memoryRoot: root, store, decisions, snapshots, cache, checkups, autoCheckups, ignores, registry, views,
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),
-    resolveContext: async () => ({ workspacePath: WS, delegationDepth: 0, session: { id: 'sess-1' } }),
-    getLlm: () => misplacedLlm, getBaseline: () => null, now: () => clock.now,
+    host: { contextOf: async () => ({ workspacePath: WS, delegationDepth: 0, session: { id: 'sess-1' } }), llmOf: () => misplacedLlm, baselineOf: () => null },
+    now: () => clock.now,
   })
   const run = async (c: MemoryCommand): Promise<MemoryCommandResult> => memoryCommandResultSchema.parse(JSON.parse(
     (await command.handler({ rawInput: encodeMemoryCommand(c).slice(`/${MEMORY_COMMAND_NAME}`.length), agent: {} })).text!,

@@ -1,4 +1,5 @@
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { ContextHost } from './host-session.ts'
 import type { MemoryStore } from '../store.ts'
 import type { HealthRecommendationKind } from '../contract-codes.ts'
 import type { TypeRegistry } from '../type-registry.ts'
@@ -37,7 +38,7 @@ export interface HealthToolDeps {
   /** 触发阈值（由 index.ts 从 sensitivity 预设解析后注入）。 */
   thresholds: HealthThresholds
   /** 当前会话的 workspace（默认口径"当前项目"的来源）。 */
-  resolveContext: (exec: ToolRunContext) => Promise<{ workspacePath: string | undefined }>
+  host: ContextHost<{ workspacePath: string | undefined }>
   now?: () => number
 }
 
@@ -206,7 +207,7 @@ export async function executeHealth(rawArgs: HealthArgs, deps: HealthToolDeps, e
   }
 
   // 单个作用域：显式路径 > 当前会话 workspace > 全局（无 workspace 会话）
-  const currentWs = exec !== undefined ? (await deps.resolveContext(exec)).workspacePath : undefined
+  const currentWs = exec !== undefined ? (await deps.host.contextOf(exec)).workspacePath : undefined
   if (args.scope !== undefined) {
     const invalid = validateScopePaths(checkupWorkspaces(listing), currentWs, [args.scope])
     if (invalid !== null) return { kind: 'error', message: invalid }

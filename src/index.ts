@@ -9,9 +9,9 @@ import { SidecarStore } from './storage/sidecar.ts'
 import type { LegacyKvTables } from './storage/legacy-kv-import.ts'
 import { resolveMemoryRoot } from './storage/paths.ts'
 import { formatIndexLine } from './index-line.ts'
-import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { Session } from '@deepseek-ai/dsh-session'
-import { SUBAGENT_MAX_SAVES_DEFAULT, type SaveDelegation } from './pipeline.ts'
+import { SUBAGENT_MAX_SAVES_DEFAULT } from './pipeline.ts'
 import { createSaveTool } from './tools/save-tool.ts'
 import { createSearchTool } from './tools/search-tool.ts'
 import { createForgetTool } from './tools/forget-tool.ts'
@@ -23,7 +23,9 @@ import type { PromoteTarget } from './tools/promote.ts'
 import { createAgentsMdWriter, agentsMdPath } from './storage/agents-md.ts'
 import { createSnapshotTool } from './tools/snapshot-tool.ts'
 import { createSourceTool } from './tools/source-tool.ts'
-import { delegationDepthOf, gateSubagentWrites, resolveRootSessionId, subagentModeOf, type DelegationHeader, type ProjectionReader } from './tools/subagent-gate.ts'
+import { gateSubagentWrites } from './tools/subagent-gate.ts'
+import { UNKNOWN_SESSION_ID } from './tools/host-session.ts'
+import { createCordisHostSession } from './cordis-host-session.ts'
 import { goneCopies } from './tools/workspace-gate.ts'
 import type { ReadEventFn } from './tools/source.ts'
 import { SnapshotCache, resolveWorkspacePath } from './runtime.ts'
@@ -37,9 +39,7 @@ import { CheckupRecordStore } from './governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from './governance/auto-checkups.ts'
 import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from './governance/schema.ts'
 import type { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
-import { baselineProjectionDefinition, readBaseline, type BaselineState } from './governance/baseline.ts'
-import type { SemanticLlm } from './governance/semantic-scan.ts'
-import { hostSemanticLlm, type HostLlmService, type HostModelRoute } from './governance/host-llm.ts'
+import { baselineProjectionDefinition } from './governance/baseline.ts'
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { createMemoryCommand, type MemoryCommandDefinition } from './gui/commands.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from './gui/view-writer.ts'
@@ -233,14 +233,13 @@ export async function apply(ctx: Context, config: Config) {
     }
     return workspacePath
   }
-  // cwd → workspace 归属的单一解析路径：SnapshotCache 的 lazy 自愈与 session/created 的 eager 预热共用，
-  // 避免两处各写一份 resolveWorkspacePath 调用。
-  const resolveWorkspace = (session: object) => resolveCwd((session as SessionLike).header?.cwd)
+  // 宿主会话的读取集中在适配器：探测、退化、同一会话只警告一次是它的内部规则
+  const host = createCordisHostSession({ lookup: name => ctx.get(name), logger: ctx.logger, resolveCwd })
   // 会话视图（进程内存）：每个会话最近一次冻结的视图，与这次对话新记的 id（可能早于首次冻结）
   const frozenViews = new Map<string, SessionView>()
   const savedIds = new Map<string, string[]>()
   const onSaved = (sessionId: string, memoryId: string) => {
-    if (sessionId === 'unknown') return
+    if (sessionId === UNKNOWN_SESSION_ID) return
     const ids = [...(savedIds.get(sessionId) ?? []), memoryId]
     savedIds.set(sessionId, ids)
     const last = frozenViews.get(sessionId)
@@ -252,15 +251,10 @@ export async function apply(ctx: Context, config: Config) {
   // 超限提醒进待决账本（治理关闭时也记：它是待处理里的提醒，不是体检结果）。
   // 上限、超限处理、溯源档位是 getter：每次构建快照时现读配置（SnapshotCache 一次构建只取一次）。
   const snapshotCache = new SnapshotCache({
-    store, registry, overflowLedger: decisions, memoryRoot, resolveWorkspace, hasEarlierTurns, log: ctx.logger,
+    store, registry, overflowLedger: decisions, memoryRoot, host, log: ctx.logger,
     get budget() { return config.snapshotTokenBudget.get() },
     get overflow() { return config.snapshotOverflow.get() },
     get evidenceLookup() { return config.evidenceLookup.get() },
-    // 持久型子会话的注入带上它自己创建的待确认记录；主会话、一次性子会话不带（mode 每次构建现读 subagent 投影）
-    ownSessionIdOf: session => {
-      const s = session as Session
-      return delegationDepthOf(s) >= 1 && sessionModeOf(s) === 'continuable' ? s.header.id : undefined
-    },
     onFrozen: (session, { overflowChanged, ...info }) => {
       const sessionId = (session as SessionLike).header?.id
       if (views === undefined || sessionId === undefined) return
@@ -272,187 +266,6 @@ export async function apply(ctx: Context, config: Config) {
     },
   })
 
-  // 语义层模型：按调用构建（provider/model 只能在调用时解析，插件加载时没有），模型调用本身由 governance/host-llm.ts 适配宿主流。
-  // 服务一律经 ctx.get 探测而非属性访问——cordis 的 Context 是 proxy，未 inject 的服务名走属性访问会抛错
-  // （cannot get property "llm" without inject）；ctx.get 是安全查找，未注册老实返回 undefined
-  // （cordis reflect.ts _getImpl），下面的 try/catch 只是对宿主行为变化的防御。
-  const probe = <T>(name: string): T | undefined => {
-    try {
-      return ctx.get(name) as T | undefined
-    } catch {
-      return undefined
-    }
-  }
-  // 有会话（memory_scan、借用会话的 /memory 命令）：用这个会话的模型。解析顺序对齐宿主 compaction 摘要器：
-  // session.requestHeader()?.config（最近一次路由请求的配置）→ agent.options.provider/model；拿不到就是 null，
-  // 体检和「让模型改」回 llm-unavailable，不改用默认模型——用户在那个会话里选的模型才是这次该用的。
-  const makeSemanticLlm = (input: {
-    session?: { requestHeader?: () => { config?: { provider?: string; model?: string } } | undefined }
-    agentOptions?: { provider?: string; model?: string }
-  }): SemanticLlm | null => {
-    const routed = input.session?.requestHeader?.()?.config
-    return hostSemanticLlm(probe<HostLlmService>('llm'), {
-      provider: routed?.provider ?? input.agentOptions?.provider,
-      model: routed?.model ?? input.agentOptions?.model,
-    })
-  }
-  // 无会话（自动体检）：没有会话可借，用宿主的默认模型选择（agentDefaultModel 的当前选择：新建 agent 用它，
-  // 用户在对话里换模型时它通常跟着变）。可选依赖，每次开跑现读、不缓存；服务缺席或读取抛错就是 null，自动体检不跑、记「模型用不了」。
-  const getDefaultLlm = (): SemanticLlm | null => {
-    let route: HostModelRoute | undefined
-    try {
-      route = probe<{ currentSelection(): HostModelRoute }>('agentDefaultModel')?.currentSelection()
-    } catch {
-      return null
-    }
-    return hostSemanticLlm(probe<HostLlmService>('llm'), route)
-  }
-
-  // 工具执行上下文：从 exec.agent.session 取 session、workspace 与子 agent 深度（header.delegationDepth）。证据锚的两个数都走宿主
-  // 0.1.5 起的明码标价读法（Session 不再暴露整份事件数组）：终点 = session.seq - 1（seq 是下一条
-  // 事件的位置，O(1)）；起点 = agent-loop 注册的 turnBoundary 投影里的 openTurnStartSeq
-  // （当轮 turn/start 的 seq，宿主按事件增量折叠，不重扫日志）。
-  // 子 agent 会话（深度 ≥ 1）另带委派上下文：直接父会话取 header.parentSession（深度 0 的会话也可能带它，那是用户 fork，不算委派），
-  // mode 现读 subagent 投影。全部来自宿主，不来自工具参数。
-  async function resolveContext(exec: ToolRunContext) {
-    const session = exec.agent?.session
-    rememberHeader(session?.header)
-    const delegationDepth = delegationDepthOf(session)
-    const delegation: SaveDelegation | undefined = session && delegationDepth >= 1
-      ? { depth: delegationDepth, parentSessionId: session.header.parentSession ?? 'unknown', mode: sessionModeOf(session) }
-      : undefined
-    return {
-      workspacePath: await resolveCwd(session?.header.cwd),
-      delegationDepth,
-      ...(delegation ? { delegation } : {}),
-      session: {
-        id: session?.header.id ?? 'unknown',
-        lastSeq: session ? Math.max(session.seq - 1, 0) : 0,
-        turnStartSeq: session ? openTurnStartSeq(session) : 0,
-        // 宿主 session 对象本身：检索按它找本会话的冻结快照、做召回去重
-        ...(session ? { handle: session } : {}),
-      },
-    }
-  }
-
-  /** dsh-agent turnBoundary 投影里插件读的两个字段（宿主形状的子集）。 */
-  type TurnBoundaryState = { lastTurn?: number; openTurnStartSeq?: number | null }
-
-  /** 会话是否已过了第 1 轮：快照本该在第 1 轮冻结，本实例第一次冻结时已是之后的轮，说明是重启后续上或插件重载。
-   *  读 turnBoundary 投影的 lastTurn（宿主按事件增量折叠，不读日志）；服务缺席、投影未注册、读取抛错都按没有。 */
-  function hasEarlierTurns(session: object): boolean {
-    try {
-      const projections = ctx.get('sessionProjections') as ProjectionReader | undefined
-      return ((projections?.stateOf(session as Session, 'turnBoundary') as TurnBoundaryState | undefined)?.lastTurn ?? 0) > 1
-    } catch {
-      return false
-    }
-  }
-
-  /** 当轮 turn/start 的 seq；拿不到一律 0（整会话锚）。sessionProjections 按调用经 ctx.get 探测
-   *  （与 llm、sessionQuery 同款惯例，不进 inject）。服务缺席（如 sdk-minimal 这类不带 agent-loop 的
-   *  profile）、投影未注册、工具执行时却没有开着的轮、投影读取抛错，都退回整会话锚——但退化不能悄无声息：
-   *  每个 session 第一次退化时打 warn 留痕（之后同一 session 不再重复）。 */
-  const anchorFallbackWarned = new WeakSet<Session>()
-  function openTurnStartSeq(session: Session): number {
-    let reason: string
-    try {
-      const projections = ctx.get('sessionProjections') as ProjectionReader | undefined
-      if (projections === undefined) {
-        reason = 'sessionProjections service is absent'
-      } else {
-        const turn = projections.stateOf(session, 'turnBoundary') as TurnBoundaryState | undefined
-        if (turn === undefined) reason = 'turnBoundary projection is not registered'
-        else if (typeof turn.openTurnStartSeq === 'number') return turn.openTurnStartSeq
-        else reason = `openTurnStartSeq is ${String(turn.openTurnStartSeq)} (no open turn)`
-      }
-    } catch (error) {
-      reason = `projection read threw: ${String(error)}`
-    }
-    if (!anchorFallbackWarned.has(session)) {
-      anchorFallbackWarned.add(session)
-      ctx.logger.warn(`[plastic-memory] 会话 "${session.header.id}" 读不到 turnBoundary 投影，出处锚到整个会话：${reason}`)
-    }
-    return 0
-  }
-
-  // 进程内见过的会话 header（委派三项宿主写入后不变）：根会话解析先查这里，查不到再问 sessionQuery
-  const knownHeaders = new Map<string, DelegationHeader>()
-  function rememberHeader(header: SessionLike['header']) {
-    if (header?.id === undefined) return
-    knownHeaders.set(header.id, { id: header.id, delegationDepth: header.delegationDepth, parentSession: header.parentSession })
-  }
-  /** 一个会话的 header：缓存优先，再问 sessionQuery（filterSessions 按 id，只读 header、不读事件）。
-   *  服务缺席、宿主没有这个方法、查无此会话、查询抛错都返回 undefined（根会话留空）。sessionQuery 按调用探测，同 memory_source。 */
-  async function lookupHeader(id: string): Promise<DelegationHeader | undefined> {
-    const known = knownHeaders.get(id)
-    if (known !== undefined) return known
-    type HeaderQuery = { filterSessions?(filters: ReadonlyArray<{ kind: 'id'; values: readonly string[] }>): Promise<Array<{ header: DelegationHeader }>> }
-    try {
-      const records = await probe<HeaderQuery>('sessionQuery')?.filterSessions?.([{ kind: 'id', values: [id] }])
-      const header = records?.find(r => r.header.id === id)?.header
-      rememberHeader(header)
-      return header
-    } catch {
-      return undefined
-    }
-  }
-  /** memory_save 的上下文：子会话再沿父链解析根会话（只有保存才读祖先 header，其余工具不读）。 */
-  async function resolveSaveContext(exec: ToolRunContext) {
-    const context = await resolveContext(exec)
-    const header = exec.agent?.session?.header
-    if (context.delegation === undefined || header === undefined) return context
-    const rootSessionId = await resolveRootSessionId(header, lookupHeader)
-    return rootSessionId === undefined ? context : { ...context, delegation: { ...context.delegation, rootSessionId } }
-  }
-
-  /** 子会话的 mode（一次性 / 持久型）：sessionProjections 按调用经 probe 探测（惯例同 openTurnStartSeq），
-   *  读不到按一次性，每个 session 第一次退化打 warn。 */
-  const modeFallbackWarned = new WeakSet<Session>()
-  function sessionModeOf(session: Session): SaveDelegation['mode'] {
-    const { mode, fallback } = subagentModeOf(probe<ProjectionReader>('sessionProjections'), session)
-    if (fallback !== undefined && !modeFallbackWarned.has(session)) {
-      modeFallbackWarned.add(session)
-      ctx.logger.warn(`[plastic-memory] 会话 "${session.header.id}" 读不到 subagent 投影，按一次性子会话（one-shot）处理：${fallback}`)
-    }
-    return mode
-  }
-
-  /** 该 session 当前生效的指令正文（按事件顺序）；null = 没有生效指令，或服务缺席、键未注册、读取抛错
-   *  （垂直冲突检测跳过，扫描打 baseline-missing）。探测惯例同 openTurnStartSeq。
-   *  状态里的形状漂移按 session 对象、每个 seq 只 warn 一次（插件重载后对历史漂移会再 warn 一次）；
-   *  读取抛错每个 session 也只 warn 一次。 */
-  const baselineDriftWarned = new WeakMap<Session, Set<number>>()
-  const baselineReadWarned = new WeakSet<Session>()
-  function sessionBaseline(session: Session | undefined): readonly string[] | null {
-    if (session === undefined) return null
-    let projections: ProjectionReader | undefined
-    try {
-      projections = ctx.get('sessionProjections') as ProjectionReader | undefined
-    } catch {
-      return null
-    }
-    let state
-    try {
-      state = projections?.stateOf(session, 'plasticMemoryBaseline') as BaselineState | undefined
-    } catch (error) {
-      if (!baselineReadWarned.has(session)) {
-        baselineReadWarned.add(session)
-        ctx.logger.warn(`[plastic-memory] 会话 "${session.header.id}" 读 plasticMemoryBaseline 投影出错，这次不带 AGENTS.md 基线：${String(error)}`)
-      }
-      return null
-    }
-    if (state === undefined) return null
-    let warned = baselineDriftWarned.get(session)
-    if (warned === undefined) baselineDriftWarned.set(session, warned = new Set())
-    const { texts, warnings } = readBaseline(state, warned)
-    for (const message of warnings) ctx.logger.warn(message)
-    return texts.length === 0 ? null : texts
-  }
-
-  // 语义层模型与基线都按触发调用的 agent 取：memory_scan 与 /memory scan（借来的会话）共用
-  const getLlm = (exec: ToolRunContext) => makeSemanticLlm({ session: exec.agent?.session, agentOptions: exec.agent?.options })
-  const getBaseline = (exec: ToolRunContext) => sessionBaseline(exec.agent?.session)
   // AGENTS.md 位置从 DSH_HOME 独立解析（不从 memoryRoot 反推——自定义 root 时会指向 dsh 不读的文件）；
   // memory_promote 与 /memory promote 共用一个写入器（进程内串行）
   const agentsMd = createAgentsMdWriter(agentsMdPath())
@@ -468,31 +281,31 @@ export async function apply(ctx: Context, config: Config) {
         void views?.request()
       }
     },
-  }, resolveContext, allowSubagent))
+  }, host, allowSubagent))
   // memory_save 的类型枚举与说明在注册时从类型表生成：模板或自定义类型热更新后注销重注册。
   // 子 agent 写入随治理开关：待确认记录的接受入口 memory_confirm 随开关注册，关着时子 agent 照旧只读（每次调用现读）；
   // 说明里的子 agent 段按注册时的开关写，开关热更新时也重注册
   const allowSubagentSave = () => config.governance.enabled.get()
   const registerSave = () => registerWrite(
     createSaveTool({
-      store, registry, resolveContext: resolveSaveContext, snapshots, decisions, onSaved,
+      store, registry, host, snapshots, decisions, onSaved,
       maxSubagentSaves: () => config.subagent.maxSavesPerSession.get(),
     }, { allowSubagent: allowSubagentSave() }),
     allowSubagentSave,
   )
   let disposeSave = registerSave()
   ctx.tools.register(createSearchTool({
-    store, registry, resolveContext, sessionRecall: snapshotCache,
+    store, registry, host, sessionRecall: snapshotCache,
     tokenizer: { userDictionaryPath: () => config.search.userDictionaryPath.get(), log: ctx.logger },
   }))
-  registerWrite(createForgetTool({ store, snapshots, decisions, log: ctx.logger, resolveContext }))
+  registerWrite(createForgetTool({ store, snapshots, decisions, log: ctx.logger, host }))
   // 快照的写入与恢复必须成对——治理关闭时 forget 仍会拍快照，若没有恢复入口，
   // 14 天的快照就是死存储。故 memory_snapshot 放在治理开关之外，与 forget 一起常驻。
-  registerWrite(createSnapshotTool({ store, snapshots, resolveContext }))
+  registerWrite(createSnapshotTool({ store, snapshots, host }))
   // memory_source：证据下钻（日常 + 治理都用，常驻）。sessionQuery 是 base bundle 默认服务，
   // 但按 llm 同款惯例 per-call 探测 + try/catch——某些 profile 缺席时工具内优雅降级，不挂载失败。
   ctx.tools.register(createSourceTool({
-    store, resolveContext,
+    store, host,
     getReadEvent: () => {
       try {
         const sq = ctx.get('sessionQuery') as { readEvent?: ReadEventFn } | undefined
@@ -509,24 +322,22 @@ export async function apply(ctx: Context, config: Config) {
     for (const dispose of governanceTools.splice(0)) dispose()
     if (!config.governance.enabled.get()) return
     governanceTools = [
-      registerWrite(createConfirmTool({ store, decisions, snapshots, log: ctx.logger, resolveContext })),
+      registerWrite(createConfirmTool({ store, decisions, snapshots, log: ctx.logger, host })),
       // 基线按触发调用的 session 取（宿主投影 cell 按 session 隔离，防多会话串台）。
       // 扫描会写语义缓存、登记待决冲突，归写工具；health 纯读，不套门
       registerWrite(createScanTool({
         store, registry, decisions, cache: scanCache, ignores, checkups,
-        getBaseline,
-        getLlm,
-        resolveContext,
+        host,
       })),
       ctx.tools.register(createHealthTool({
         store, registry, decisions, cache: scanCache, ignores, checkups, autoCheckups,
         get thresholds() { return resolveHealthThresholds(config.governance.health.sensitivity.get()) },
-        resolveContext,
+        host,
       })),
       // memory_promote：把用户确认的候选提升 global。确认由模型先调 ask_user_question 完成
       // （工具内部弹 userQuestions 会被 web 会话拒绝 "requires agent-owned session"），本工具纯执行。
       registerWrite(createPromoteTool({
-        store, agentsMd, snapshots, resolveContext,
+        store, agentsMd, snapshots, host,
         get defaultTarget(): PromoteTarget { return config.governance.globalPromoteTarget.get() === 'agents-md' ? 'agents-md' : 'global' },
       })),
     ]
@@ -555,7 +366,7 @@ export async function apply(ctx: Context, config: Config) {
     commands.register(createMemoryCommand({
       memoryRoot, store, decisions, snapshots, cache: scanCache, checkups, autoCheckups, ignores, registry, agentsMd, views: writer,
       onAutoCheckupChanged: () => void scheduler?.recheck(),
-      resolveContext, getLlm, getBaseline, log: ctx.logger,
+      host, log: ctx.logger,
       isGovernanceEnabled: () => config.governance.enabled.get(),
       isLegacyImportSettled: () => sidecar.isLegacyImportSettled(),
     }))
@@ -569,7 +380,7 @@ export async function apply(ctx: Context, config: Config) {
   let startupViewsPending = true
 
   // 自动体检调度：宿主有计时服务时才有（可选注册，同 commands）。计时器挂在 child 上，插件卸载时宿主停掉它们；
-  // disposer 再取消正在跑的体检并等它收尾。无会话，用宿主默认模型（getDefaultLlm）。
+  // disposer 再取消正在跑的体检并等它收尾。无会话，用宿主默认模型（host.defaultLlm）。
   ctx.inject(['timer'], child => {
     const timer = child as unknown as AutoCheckupTimer
     const created = new AutoCheckupScheduler({
@@ -577,7 +388,7 @@ export async function apply(ctx: Context, config: Config) {
       checkups,
       collectPending: async () => (await collectViews()).pending,
       status: () => collectCheckupView(checkupSource),
-      getDefaultLlm,
+      host,
       isGovernanceEnabled: () => config.governance.enabled.get(),
       timer: { timeout: (callback, delayMs) => timer.timeout(callback, delayMs), interval: (callback, delayMs) => timer.interval(callback, delayMs) },
       onChecked: async () => { await views?.requestCheckups() },
@@ -603,7 +414,9 @@ export async function apply(ctx: Context, config: Config) {
   }
   loaderEvents.on('loader/volatile-update', async paths => {
     const changed = (...keys: string[]) => paths.some(path => keys.includes(path.join('.')))
-    if (changed('template', 'customTypes', 'scenes', 'removedPresetTypes')) {
+    // 决定类型表的配置：变了重建类型表，冻结快照也过期
+    const typeKeys = ['template', 'customTypes', 'scenes', 'removedPresetTypes']
+    if (changed(...typeKeys)) {
       try {
         currentRegistry = buildRegistry()
         disposeSave()
@@ -620,7 +433,7 @@ export async function apply(ctx: Context, config: Config) {
     }
     // search.userDictionaryPath 不用在这里处理：memory_search 每次现读路径，变了下一次搜索就重建分词实例
     // 只有组装快照时读的字段变了才让冻结快照过期；主题色、提升路径、体检灵敏度这类改了不重建
-    if (changed('template', 'customTypes', 'scenes', 'removedPresetTypes', 'snapshotTokenBudget', 'snapshotOverflow', 'evidenceLookup')) {
+    if (changed(...typeKeys, 'snapshotTokenBudget', 'snapshotOverflow', 'evidenceLookup')) {
       snapshotCache.markAllStale()
     }
     // 改了上限或超限处理：已有的超限提醒按新配置当场重算（调高上限后不再提醒，档位按新上限算），重写视图时就是新结果
@@ -648,7 +461,7 @@ export async function apply(ctx: Context, config: Config) {
     // eager 预热：新 session 不必等首次组装才解析 workspace（HMR 后存量 session 由组装入口自愈）。
     // 与组装入口的解析等待同一份 memoize，不重复解析；只解析不组装，快照仍在首个发送点冻结。
     snapshotCache.prewarm(session)
-    rememberHeader(session.header)
+    host.remember(session.header)
     // 第一个会话出现时写一遍全局视图（不 await）：浏览器半侧首次打开记忆页要有内容；此时宿主已挂好 storageDomain。
     if (startupViewsPending && views) {
       startupViewsPending = false

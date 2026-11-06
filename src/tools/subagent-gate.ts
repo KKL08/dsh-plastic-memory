@@ -86,7 +86,7 @@ export function subagentModeOf(
  */
 export function gateSubagentWrites(
   tool: ToolDefinition,
-  resolveContext: (exec: ToolRunContext) => Promise<{ delegationDepth: number }>,
+  host: { contextOf(exec: ToolRunContext): Promise<{ delegationDepth: number }> },
   allowSubagent?: () => boolean,
 ): ToolDefinition {
   return {
@@ -101,7 +101,7 @@ export function gateSubagentWrites(
         : tool.output.render(args, value),
     },
     execute: async (args, exec) => {
-      if ((await resolveContext(exec)).delegationDepth < 1 || allowSubagent?.()) return tool.execute(args, exec)
+      if ((await host.contextOf(exec)).delegationDepth < 1 || allowSubagent?.()) return tool.execute(args, exec)
       const result: SubagentReadonlyResult = {
         kind: 'rejected',
         code: SUBAGENT_READONLY,
