@@ -206,6 +206,19 @@ describe('场景弹层', () => {
     expect(radio('编码')).toHaveAccessibleDescription('行为偏好、事实与经验、项目信息、参考引用 + 可复用流程')
   })
 
+  it('编辑自建场景：可以改名、增减类型，保存写回同一个 id', async () => {
+    const { form } = setup({ value: { scenes: { 'scene-1': { label: '写作', types: ['preference', 'reference'] } } } })
+    fireEvent.click(button('编辑场景 写作'))
+    const d = dialog('编辑场景')
+    fireEvent.change(within(d).getByLabelText('场景名'), { target: { value: '写稿' } })
+    fireEvent.click(check(d, '参考引用'))
+    fireEvent.click(check(d, '决定'))
+    fireEvent.click(button('确定', d))
+    expect(radio('写稿')).toHaveAccessibleDescription('行为偏好 + 决定')
+    await clickSave(form)
+    expect(form.calls[0]!.ops).toEqual([{ op: 'set', path: ['scenes', 'scene-1'], value: { label: '写稿', types: ['preference', 'decision'] } }])
+  })
+
   it('弹层是一次事务：勾选和新建的类型在取消后全部撤销', () => {
     setup()
     fireEvent.click(button('编辑场景 编码'))

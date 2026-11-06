@@ -51,6 +51,10 @@ describe('buildTypeRegistry', () => {
     expect(policy.decayDays).toBe(90)
   })
 
+  it('预设「决定」的治理优先级为高', () => {
+    expect(buildTypeRegistry({ template: 'office', customTypes: {} }).get('decision').governancePriority).toBe('high')
+  })
+
   it('切场景后读时认得类型池里的类型（label、decayDays 不退化），写时仍只认当前场景', () => {
     const office = buildTypeRegistry({ template: 'office', customTypes: {} })
     expect(office.get('procedure')).toMatchObject({ label: '可复用流程', decayDays: 90, recall: 'search', governancePriority: 'medium' })
@@ -129,6 +133,11 @@ describe('场景', () => {
     expect(buildTypeRegistry({ template: 'office', customTypes: {} }).all().map(t => t.name))
       .toEqual([...BUILTIN_TYPES.map(t => t.name), 'decision'])
     expect(PRESET_SCENES.coding.types).toEqual([...BUILTIN_TYPES.map(t => t.name), 'procedure'])
+  })
+
+  it('通用场景（custom）配了非空 customTypes 也只有内置五类', () => {
+    const registry = buildTypeRegistry({ template: GENERAL_SCENE, customTypes: { 'domain-term': term } })
+    expect(registry.all().map(t => t.name)).toEqual(BUILTIN_TYPES.map(t => t.name))
   })
 
   it('通用场景（custom）只有内置五类，scenes 里写了 custom 也忽略', () => {

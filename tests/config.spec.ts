@@ -61,6 +61,14 @@ describe('Config schema', () => {
     expect(new Config({ scenes: {} } as never).scenes.get()).toEqual({})
   })
 
+  it('场景缺 types 时 schema 拒绝', () => {
+    expect(() => new Config({ scenes: { 'scene-1': { label: '写作' } } } as never)).toThrow()
+  })
+
+  it('场景的 types 不是数组时 schema 拒绝', () => {
+    expect(() => new Config({ scenes: { 'scene-1': { label: '写作', types: 'preference' } } } as never)).toThrow()
+  })
+
   it('非法 writeMode 抛错', () => {
     // 非法 writeMode 应在运行时被 Schemastery 拒绝
     expect(() => new Config({ writeMode: 'magic' } as never)).toThrow()

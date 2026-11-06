@@ -414,6 +414,18 @@ describe('权限面：子 agent 调每个工具只触发权限内的副作用', 
     }
   })
 
+  it('子级存下记忆后主会话没有新消息：下一步照旧，不补注入、不发通知', async () => {
+    const h = await boot()
+    const main = h.session('sess-main')
+    const child = h.session('sess-child', { delegationDepth: 1, parentSession: 'sess-main' })
+    await h.inject(main)
+    const before = main.deriveMessages().length
+    expect((await h.call(child, 'memory_save', childSave('子级新观察'))).kind).toBe('saved')
+    expect(main.deriveMessages()).toHaveLength(before)
+    await h.inject(main)
+    expect(main.deriveMessages()).toHaveLength(before + 1) // 只多了 inject 自己追加的那条系统提示词
+  })
+
   it('自动体检不经会话：子会话的保存、检索、注入都不触发它（不读默认模型、不排计时、不写体检记录、不调模型）', async () => {
     const h = await boot()
     const child = h.session('sess-child', { delegationDepth: 1, parentSession: 'sess-main', mode: 'continuable' })
