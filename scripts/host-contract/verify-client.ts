@@ -23,7 +23,7 @@ interface Handoff { id: string; factory: (require: (spec: string) => unknown) =>
 
 /** 插件挂的全部插槽（对着钉版与 peer 下界宿主客户端包的 SlotMap 声明逐个核过）。插件新挂或撤掉一处时同步改这里。 */
 const EXPECTED_SLOTS = [
-  'conversation.chat.turnTail', 'conversation.composer.dock', 'main', 'plugins.bundle.config',
+  'conversation.chat.commandview', 'conversation.chat.turnTail', 'conversation.composer.dock', 'main', 'plugins.bundle.config',
   'sidebar.panellist', 'sidebar.right.pane.tab', 'sidebar.right.pane.tab.title', 'tool.call.toolview',
 ]
 

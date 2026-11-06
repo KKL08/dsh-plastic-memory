@@ -14,6 +14,7 @@ import { PROMOTE_TARGETS, toPluginConfig } from '../settings/config.ts'
 import { DEFAULT_SECTION } from '../settings/config-form.fake.ts'
 import { fakeHostContext, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { registerChatCards, type TurnTailProps } from './index.tsx'
+import { MemoryCommandRow, type MemoryCommandNode } from './MemoryCommandRow.tsx'
 import { MemoryToolRow, type MemoryToolViewProps } from './MemoryToolRow.tsx'
 import { savedTurnDefinition, type SavedMemory, type SavedTurnData } from './saved-turn.ts'
 import { SavedMemoriesCard, savedMemoriesCardCss } from './SavedMemoriesCard.tsx'
@@ -134,6 +135,121 @@ const call = (seq: number, callId: string, name: string, args: object): Ev =>
 const res = (seq: number, callId: string, text: string, isError = false): Ev =>
   ({ type: 'tool/result', seq, time: NOW, surfaceOp: 'append', data: { turn: 1, message: { isError, content: [{ type: 'text', text }], source: { callId } } } })
 const turnStart: Ev = { type: 'turn/start', seq: 1, time: NOW, data: { turn: 1 } }
+
+describe('命令行：面板发的 /memory 命令在对话里画成一句话', () => {
+  const node = (args: string | null, outcome: MemoryCommandNode['outcome']): MemoryCommandNode => ({ name: 'memory', args, outcome })
+  const done = (result: MemoryCommandResult) => ({ kind: 'success' as const, text: JSON.stringify(result) })
+  const line = (n: MemoryCommandNode) => {
+    const { container, unmount } = renderInShell(<MemoryCommandRow node={n} hostT={hostT} />)
+    const row = { title: container.querySelector('.pm-tr-title')?.textContent, summary: container.querySelector('.pm-tr-summary')?.textContent, sr: container.querySelector('.pm-tr-sr')?.textContent, text: container.querySelector('.pm-tr-disclosure')?.textContent ?? '', summaryClass: container.querySelector('.pm-tr-summary')?.className }
+    unmount()
+    return row
+  }
+  const memoryLayer = { memoryId: 'm1', layer: { kind: 'global' } }
+
+  it('成功的命令按子命令写一句话，标题是「记忆」，不出现结果 JSON', () => {
+    const cases: Array<[string, string]> = [
+      [' info', '查找记忆所在位置'],
+      [' refresh-views', '刷新记忆视图'],
+      [` forget ${JSON.stringify(memoryLayer)}`, '删除一条记忆'],
+      [` hard-delete ${JSON.stringify(memoryLayer)}`, '彻底删除一条记忆'],
+      [` restore ${JSON.stringify(memoryLayer)}`, '恢复一条记忆'],
+      [' resolve {"decisionId":"pd_1","verdict":"keep-left"}', '裁决冲突，留下一条'],
+      [' resolve {"decisionId":"pd_1","verdict":"keep-both"}', '裁决冲突，两条都留下'],
+      [' undo {"decisionId":"pd_1"}', '撤销一次处理'],
+      [` promote-memory ${JSON.stringify({ ...memoryLayer, target: 'agents-md' })}`, '写进 AGENTS.md'],
+      [' promote {"decisionId":"pd_1","target":"global"}', '提升为全局'],
+      [' move-memory {"memoryId":"m1","workspacePath":"/w/app"}', '移到项目「app」'],
+      [' scan', '体检记忆'],
+      [' model-info', '查看可用的模型'],
+      [' set-auto-checkup {"scope":{"kind":"all"},"frequency":"manual"}', '修改自动体检频率'],
+      [' migrate-type {"from":"旧类型","action":"forget"}', '处理类型「旧类型」的记忆'],
+    ]
+    for (const [args, summary] of cases) {
+      const row = line(node(args, done({ ok: true, cmd: args.trim().split(' ')[0]! })))
+      expect(row.title).toBe('记忆')
+      expect(row.summary).toBe(summary)
+      expect(row.text).not.toContain('"ok"')
+    }
+  })
+
+  it('还在跑：同一句话，读屏报运行中；只占一行，不能展开', () => {
+    const { container } = renderInShell(<MemoryCommandRow node={node(` forget ${JSON.stringify(memoryLayer)}`, null)} hostT={hostT} />)
+    expect(container.querySelector('.pm-tr-summary')).toHaveTextContent('删除一条记忆…')
+    expect(container.querySelector('.pm-tr-sr')).toHaveTextContent('运行中')
+    expect(container.querySelector('[role="button"]')).toBeNull()
+  })
+
+  it('失败不画成红色：写「没有成功」和原因，原因按面板同一套文案', () => {
+    const forget = ` forget ${JSON.stringify(memoryLayer)}`
+    const failed = line(node(forget, done({ ok: false, cmd: 'forget', code: 'failed', detail: 'EACCES: permission denied' })))
+    expect(failed.summary).toBe('删除一条记忆：没有成功，EACCES: permission denied')
+    expect(failed.sr).toBe('失败')
+    expect(failed.summaryClass).toBe('pm-tr-summary')
+    expect(line(node(' undo {"decisionId":"pd_1"}', done({ ok: false, cmd: 'undo', code: 'stale' }))).summary)
+      .toBe(`撤销一次处理：没有成功，${zh['pending.undo.stale']}`)
+  })
+
+  it('等确认、别处已处理不算失败', () => {
+    expect(line(node(` forget ${JSON.stringify(memoryLayer)}`, done({ ok: false, cmd: 'forget', code: 'has-secret' }))).summary).toBe('删除一条记忆：需要你确认')
+    const resolve = ' resolve {"decisionId":"pd_1","verdict":"keep-left"}'
+    const claimed = line(node(resolve, done({ ok: false, cmd: 'resolve', code: 'claimed' })))
+    expect(claimed.summary).toBe('裁决冲突，留下一条：别处已处理')
+    expect(claimed.sr).toBeUndefined()
+  })
+
+  it('认不出的参数、不是 JSON 的结果：写原话首行，密钥照样遮掉', () => {
+    expect(line(node(' nope', { kind: 'error', text: '未知子命令 nope\n详情' })).summary).toBe('执行记忆命令：没有成功，未知子命令 nope')
+    const leaked = line(node(` forget ${JSON.stringify(memoryLayer)}`, { kind: 'error', text: 'boom sk-abcdefghijklmnopqrstuvwxyz0123456789' }))
+    expect(leaked.summary).not.toContain('sk-abcdefghijklmnopqrstuvwxyz0123456789')
+  })
+
+  it('和体检面板一致：已有体检在跑不算失败；体检关闭、体检拿不到模型用面板的文案', () => {
+    const busy = line(node(' scan', done({ ok: false, cmd: 'scan', code: 'busy', detail: '/w/proj 正在体检，查完再来' })))
+    expect(busy.summary).toBe('体检记忆：已有体检在进行')
+    expect(busy.sr).toBeUndefined()
+    expect(line(node(' scan', done({ ok: false, cmd: 'scan', code: 'governance-disabled', detail: '体检已关闭' }))).summary).toBe(`体检记忆：没有成功，${zh['settings.governanceOff']}`)
+    expect(line(node(' scan', done({ ok: false, cmd: 'scan', code: 'llm-unavailable' }))).summary).toBe(`体检记忆：没有成功，${zh['checkup.result.llmUnavailable']}`)
+  })
+
+  it('跨项目确认、疑似密钥确认也是「需要你确认」', () => {
+    const cross = line(node(` forget ${JSON.stringify(memoryLayer)}`, done({ ok: false, cmd: 'forget', code: 'cross-workspace', rejected: [{ id: 'm1', workspacePath: '/w/other' }] })))
+    expect(cross.summary).toBe('删除一条记忆：需要你确认')
+    const edit = { memoryId: 'm1', layer: { kind: 'global' }, base: { updatedAt: 1, digest: 'd' }, name: 'n', summary: 's', content: 'c', tags: [] }
+    const parsed = line(node(` edit-memory ${JSON.stringify(edit)}`, done({ ok: false, cmd: 'edit-memory', code: 'secret-suspected' })))
+    expect(parsed.summary).toBe('修改一条记忆：需要你确认')
+  })
+
+  it('原因为空、参数缺失、参数认不出时句子照样完整', () => {
+    expect(line(node(` forget ${JSON.stringify(memoryLayer)}`, { kind: 'error' })).summary).toBe('删除一条记忆：没有成功')
+    expect(line(node(` forget ${JSON.stringify(memoryLayer)}`, done({ ok: false, cmd: 'forget', code: 'failed', detail: '' }))).summary).toBe('删除一条记忆：没有成功')
+    expect(line(node(null, done({ ok: true, cmd: 'info' }))).summary).toBe('执行记忆命令')
+    expect(line(node(' nope {}', done({ ok: false, code: 'invalid-args', detail: 'cmd: Invalid input' }))).summary).toBe('执行记忆命令：没有成功，cmd: Invalid input')
+  })
+
+  it('结果 JSON 里的原话带密钥（高危、疑似）也遮掉', () => {
+    const critical = line(node(` forget ${JSON.stringify(memoryLayer)}`, done({ ok: false, cmd: 'forget', code: 'failed', detail: 'boom sk-abcdefghijklmnopqrstuvwxyz0123456789' })))
+    expect(critical.summary).not.toContain('sk-abcdefghijklmnopqrstuvwxyz0123456789')
+    const suspected = line(node(` forget ${JSON.stringify(memoryLayer)}`, done({ ok: false, cmd: 'forget', code: 'failed', detail: 'password=Hunter2-2026xyz' })))
+    expect(suspected.summary).not.toContain('Hunter2-2026xyz')
+  })
+
+  it('经注册的插槽组件渲染：宿主给 { node }', () => {
+    const { registered } = fakeHost()
+    const View = registered.find(r => r.options.name === 'conversation.chat.commandview')!.component as ComponentType<{ node: MemoryCommandNode }>
+    const { container } = render(<View node={node(` forget ${JSON.stringify(memoryLayer)}`, done({ ok: true, cmd: 'forget' }))} />)
+    expect(container.querySelector('.pm-tr-title')).toHaveTextContent('记忆')
+    expect(container.querySelector('.pm-tr-summary')).toHaveTextContent('删除一条记忆')
+  })
+
+  it('英文界面', () => {
+    const { container } = render(<PanelShell gateway={createFakeGateway()} t={createTranslator(en)}><MemoryCommandRow node={node(` forget ${JSON.stringify(memoryLayer)}`, done({ ok: false, cmd: 'forget', code: 'failed', detail: 'EACCES' }))} hostT={hostT} /></PanelShell>)
+    expect(container.querySelector('.pm-tr-title')).toHaveTextContent('Memory')
+    expect(container.querySelector('.pm-tr-summary')).toHaveTextContent('Delete a memory: didn’t go through. EACCES')
+    const { container: awaiting } = render(<PanelShell gateway={createFakeGateway()} t={createTranslator(en)}><MemoryCommandRow node={node(` forget ${JSON.stringify(memoryLayer)}`, done({ ok: false, cmd: 'forget', code: 'has-secret' }))} hostT={hostT} /></PanelShell>)
+    expect(awaiting.querySelector('.pm-tr-summary')).toHaveTextContent('Delete a memory: needs your confirmation')
+  })
+})
 
 describe('交付卡出现的条件', () => {
   it('只收本轮成功新记、改写的 memory_save（改写的标 isUpdate）；疑似重复、失败、别的工具都不算', () => {
@@ -1130,6 +1246,7 @@ describe('注册', () => {
     const { registered, definitions } = fakeHost()
     expect(registered.filter(r => r.options.name === 'tool.call.toolview').map(r => r.options.key)).toEqual([...MEMORY_TOOLS])
     expect(registered.filter(r => r.options.name === 'conversation.chat.turnTail')).toHaveLength(1)
+    expect(registered.filter(r => r.options.name === 'conversation.chat.commandview').map(r => r.options.key)).toEqual(['memory'])
     expect(definitions).toEqual([savedTurnDefinition])
   })
 

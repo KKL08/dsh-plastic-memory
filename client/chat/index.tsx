@@ -1,8 +1,10 @@
 /**
- * 对话里的两层卡：`tool.call.toolview` 按九个工具名注册折叠行；`conversation.chat.turnTail` 注册交付卡，
+ * 对话里的两层卡：`tool.call.toolview` 按九个工具名注册折叠行；`conversation.chat.commandview` 把面板发的 `/memory`
+ * 命令画成一句话；`conversation.chat.turnTail` 注册交付卡，
  * 本轮新记的记忆由会话事件 Definition 挂到 Turn 上。`uiConversation` 是可选服务，没有就不注册交付卡。
  */
 import { useMemo, useSyncExternalStore } from 'react'
+import { MEMORY_COMMAND_NAME } from '../../src/gui/contract.ts'
 import type { BindGateway } from '../gateway.ts'
 import type { HostContext, RootStandardProps } from '../host.ts'
 import { TranslateProvider, useHostTranslate } from '../i18n.tsx'
@@ -10,6 +12,7 @@ import { NS } from '../locales.ts'
 import { openMemoryPage, type NavStore } from '../nav.ts'
 import { slotCss } from '../styles.ts'
 import { PanelShell } from '../ui/PanelShell.tsx'
+import { MemoryCommandRow, type MemoryCommandNode } from './MemoryCommandRow.tsx'
 import { MemoryToolRow, type MemoryToolViewProps } from './MemoryToolRow.tsx'
 import { SAVED_TURN_KEY, savedTurnDefinition, type SavedTurnData, type SavedTurnDefinition } from './saved-turn.ts'
 import { SavedMemoriesCard } from './SavedMemoriesCard.tsx'
@@ -46,6 +49,18 @@ function createToolView(ctx: HostContext) {
   }
 }
 
+function createCommandView(ctx: HostContext) {
+  return function MemoryCommandView(props: { node: MemoryCommandNode }) {
+    const t = useHostTranslate(ctx.locale, NS)
+    const hostT = useHostTranslate(ctx.locale, 'conversation') as (key: string) => string
+    return (
+      <TranslateProvider value={t}>
+        <MemoryCommandRow node={props.node} hostT={hostT} />
+      </TranslateProvider>
+    )
+  }
+}
+
 function createTurnTail(ctx: HostContext, nav: NavStore, bind: BindGateway) {
   const openDetail = (target: Parameters<typeof openMemoryPage>[2]) => openMemoryPage(ctx, nav, target)
   return function MemoryTurnTail(props: TurnTailProps) {
@@ -71,6 +86,8 @@ export function registerChatCards(ctx: HostContext, nav: NavStore, bind: BindGat
     const disposers = MEMORY_TOOLS.map(key => ctx.slots.register({ name: 'tool.call.toolview', key }, ToolView))
     return () => { for (const dispose of disposers) dispose() }
   })
+  const CommandView = createCommandView(ctx)
+  ctx.slots.inject('conversation.chat.commandview', () => ctx.slots.register({ name: 'conversation.chat.commandview', key: MEMORY_COMMAND_NAME }, CommandView))
   ctx.inject(['uiConversation'], (child) => {
     const chat = child as ChatContext
     chat.uiConversation.events.register(savedTurnDefinition)

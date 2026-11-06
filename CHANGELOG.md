@@ -181,6 +181,10 @@ All notable changes to this project are documented here. The format follows
 - The ids in `memory_save`'s `supersedes` go through secret detection like
   the other fields, and the checkup's note about references to missing
   memories masks secrets.
+- Actions taken on the memory page or in the sidebar show up in the chat as
+  one gray line, such as "Memory · Delete a memory", instead of the raw
+  command result. A failed action says it did not go through and why,
+  without red text, since the panel already reported it in place.
 
 ### Fixed
 - The plugin page of DeepSeek Harness 0.2.2-rc.1 shows the README as the
