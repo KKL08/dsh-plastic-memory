@@ -198,7 +198,11 @@ async function restoreVerdict(entry: UndoableEntry, rule: UndoRule, allow: boole
   }
   let restored: string[] = []
   if (snapshot !== undefined) {
-    const r = await deps.snapshots.restore(snapshot, targets, deps.store, { target, overwrite: false, now: deps.now ?? Date.now })
+    // 撤销提升：上面的核对在锁外，写回那一刻再按锁内现状核一次，核对之后才被删掉、改过的不复活
+    const overwrite = isPromote
+      ? (cur: MemoryRecord | undefined) => cur?.status === 'active' && records.some(r => r.id === cur.id && !isConflicting(cur, r))
+      : false
+    const r = await deps.snapshots.restore(snapshot, targets, deps.store, { target, overwrite, now: deps.now ?? Date.now })
     if (r.skipped.length > 0) return changed(r.skipped[0]!, r.redacted.length > 0 ? 'redacted' : 'changed')
     restored = r.restored
   }
