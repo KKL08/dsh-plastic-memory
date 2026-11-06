@@ -10,7 +10,8 @@ import {
 } from './table.ts'
 import type { KvTable } from '../kv-table.ts'
 import type { RecallStats } from './schema.ts'
-import { decodeFile, digestMismatch, encodeRecord, type FileLocation } from './frontmatter.ts'
+import { decodeFile, digestMismatch, encodeRecord, type DecodeOutcome, type FileLocation } from './frontmatter.ts'
+import { ParseCache, type CachedFile, type FileSignature } from './parse-cache.ts'
 import {
   WORKSPACE_MARKER, INDEX_FILE, GLOBAL_DIR, ARCHIVE_DIR, workspaceDirName, slugifyName, isReservedFileName,
   isMemoryFileName, isCompanionLikeFileName, isWorkspaceDirName, deriveFileId, isDerivedFileId,
@@ -69,6 +70,8 @@ export interface FileTableOptions {
   now?: () => number
   /** 日志注入口，缺省回退 console（见 store.ts MemoryLogger）。 */
   log?: MemoryLogger
+  /** 解析缓存，缺省每个文件表新建一个；只在本文件内部用（readDirs）。 */
+  parseCache?: ParseCache<DecodeOutcome>
 }
 
 /**
@@ -114,6 +117,7 @@ function frontmatterOf(raw: string): string {
 
 /**
  * 文件表：磁盘是唯一真相，进程里不常驻记忆表。构造不做 I/O；每个操作读它涉及的目录。
+ * 读目录时每个文件都 stat，签名没变才用解析缓存里的结果（parse-cache.ts），外部改动下一次读就能看到。
  * 读路径不加锁、不写盘；写路径经一条 Promise 链串行，锁内先 locate 重读磁盘再应用修改（外部编辑不丢）；create 是例外：新 id 不定位，排他占名。
  * 锁只管本进程：写盘前复核文件原文仍是 locate 读到的那份，被别的进程或用户改过就重新 locate、重算后再写。
  * 记忆目录的维护只有两处入口：写路径末尾（被写的目录）与 maintain（快照冻结时由调用方对 global + 当前 workspace 调用），都走同一把锁。
@@ -122,11 +126,13 @@ export class FileTable implements MemoryTable {
   private chain: Promise<unknown> = Promise.resolve()  // 进程内互斥：写路径与维护点串行化
   private readonly log: MemoryLogger
   private readonly opts: FileTableOptions
+  private readonly parseCache: ParseCache<DecodeOutcome>
   readonly globalDir: string
 
   constructor(opts: FileTableOptions) {
     this.opts = opts
     this.log = opts.log ?? console
+    this.parseCache = opts.parseCache ?? new ParseCache()
     this.globalDir = join(opts.root, GLOBAL_DIR)
   }
 
@@ -188,34 +194,52 @@ export class FileTable implements MemoryTable {
     return match === 'any' ? terms.some(t => text.includes(t)) : terms.every(t => text.includes(t))
   }
 
-  /** 读单个记忆文件。返回 undefined = 被预筛跳过 / 竞态消失 / 不是普通文件。 */
+  /**
+   * 读单个记忆文件。返回 undefined = 被预筛跳过 / 竞态消失 / 不是普通文件。
+   * useCache：只有 readDirs 走解析缓存。命中就用缓存的原文与解析结果、不读内容；不命中读完按读前时刻决定存不存（见 parse-cache.ts）。
+   */
   private async readMemoryFile(
     filePath: string, dir: string, loc: FileLocation, prefilter: Prefilter, statsRows: ReadonlyMap<string, RecallStats>,
-    seen?: Map<string, string>,
+    seen?: Map<string, string>, useCache = false,
   ): Promise<{ slot: Slot; notes: DirectoryNote[] } | { quarantined: QuarantineEntry } | undefined> {
-    let mtimeMs: number
+    const cache = useCache ? this.parseCache : undefined
+    const readStartedAt = this.now()
+    let sig: FileSignature
     let raw: string
+    let cached: CachedFile<DecodeOutcome> | undefined
     try {
       const s = await stat(filePath)
       if (!s.isFile()) return undefined
       seen?.set(basename(filePath), statSignature(basename(filePath), s))   // 在读内容之前取：签名不会比读到的内容新
-      mtimeMs = s.mtimeMs
-      raw = await readFile(filePath, 'utf8')
+      sig = { ino: s.ino, size: s.size, mtimeMs: s.mtimeMs, ctimeMs: s.ctimeMs }
+      cached = cache?.lookup(filePath, sig, loc)
+      raw = cached?.raw ?? await readFile(filePath, 'utf8')
     } catch (err) {
+      cache?.evict(filePath)
       if (errnoCode(err) === 'ENOENT') return undefined   // readdir 之后被删：竞态
       if (isCompanionLikeFileName(basename(filePath))) return undefined
       return { quarantined: { path: filePath, error: maskDiagnostic(err instanceof Error ? err.message : String(err)) } }
     }
-    if (!this.passesPrefilter(raw, filePath, prefilter)) return undefined
-    const outcome = decodeFile(raw, { path: filePath, loc, relPath: relative(this.opts.root, filePath), mtimeMs })
+    if (!this.passesPrefilter(raw, filePath, prefilter)) {
+      if (cached === undefined) cache?.store(filePath, sig, loc, readStartedAt, { raw })
+      return undefined
+    }
+    let outcome = cached?.decoded
+    if (outcome === undefined) {
+      const decoded = decodeFile(raw, { path: filePath, loc, relPath: relative(this.opts.root, filePath), mtimeMs: sig.mtimeMs })
+      // 解析报错可能带出文件里的原值（时间戳、字段校验），进缓存、视图、体检结果之前先遮密钥
+      outcome = decoded.ok ? decoded : { ...decoded, error: maskDiagnostic(decoded.error) }
+      cache?.store(filePath, sig, loc, readStartedAt, { raw, decoded: outcome })
+    }
     if (!outcome.ok) {
       // 伴生文件 / 锁文件形态的名字解析不出就不是记忆（伴生文件是二进制），静默跳过
       if (isCompanionLikeFileName(basename(filePath))) return undefined
-      // 解析报错可能带出文件里的原值（时间戳、字段校验），进视图、体检结果之前先遮密钥
-      return { quarantined: { path: outcome.path, error: maskDiagnostic(outcome.error) } }
+      return { quarantined: { path: outcome.path, error: outcome.error } }
     }
+    const mtimeMs = sig.mtimeMs
     const row = statsRows.get(outcome.record.id)
-    const record = row ? { ...outcome.record, recallCount: row.recallCount, lastRecalledAt: row.lastRecalledAt } : outcome.record
+    // 浅拷贝：缓存里的解析结果是冻结的，调用方拿到的顶层可以改
+    const record = row ? { ...outcome.record, recallCount: row.recallCount, lastRecalledAt: row.lastRecalledAt } : { ...outcome.record }
     return {
       slot: { record, extras: outcome.extras, filePath, dir, raw, mtimeMs, hasReservedKeys: outcome.notes.some(n => n.code === 'reserved-keys') },
       notes: outcome.notes.map(n => ({ ...n, path: filePath })),
@@ -249,9 +273,10 @@ export class FileTable implements MemoryTable {
         if ('note' in listed) { directoryNotes.push(listed.note); continue }
         // 伴生文件形态的名字不走预筛、一律解析：它算不算记忆文件要看解析结果，列出文件数才与预筛开关无关
         const names = listed.names.sort()
+        this.parseCache.retain(level, new Set(names))
         const results = await Promise.all(names.map(name =>
           this.readMemoryFile(join(level, name), dir, loc, isCompanionLikeFileName(name) ? NO_PREFILTER : prefilter, statsRows,
-            level === dir ? topLevel : undefined)))
+            level === dir ? topLevel : undefined, true)))
         // 只数顶层，预筛、types 之前；伴生文件形态的名字解析成记忆才数（非原生卷上每个文件都配一个伴生文件）
         if (level === dir) listedCount += names.filter((n, i) => !isCompanionLikeFileName(n) || isSlot(results[i])).length
         for (const r of results) {

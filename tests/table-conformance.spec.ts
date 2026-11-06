@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { MemoryStore, type MemoryTable } from '../src/store.ts'
 import { FileTable } from '../src/storage/file-table.ts'
+import { ParseCache } from '../src/storage/parse-cache.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, WORKSPACE_MARKER, deriveFileId, workspaceDirName } from '../src/storage/paths.ts'
 import { type BatchKvTable } from '../src/kv-table.ts'
@@ -75,14 +76,20 @@ const backends: Backend[] = [
       }
     },
   },
-  {
-    name: 'FileTable',
+  fileTableBackend('FileTable'),
+  // 解析缓存全开：刚写下的文件也进缓存，命中率最高。证明命中时结果不变、没有调用方改缓存里的对象（PC-09）
+  fileTableBackend('FileTable（缓存全开）', () => new ParseCache({ settleMs: 0 })),
+]
+
+function fileTableBackend(name: string, parseCache?: () => ParseCache<never>): Backend {
+  return {
+    name,
     make: async () => {
       const root = await mkdtemp(join(tmpdir(), 'pm-conf-'))
       const { recallStats: stats } = new SidecarStore({
         root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema },
       })
-      const t = new FileTable({ root, stats })
+      const t = new FileTable({ root, stats, parseCache: parseCache?.() })
       return {
         table: t, stats, cleanup: () => rm(root, { recursive: true, force: true }), reload: async () => {}, root,
         globalDir: join(root, GLOBAL_DIR), wsDir: p => join(root, workspaceDirName(p)),
@@ -97,8 +104,8 @@ const backends: Backend[] = [
         },
       }
     },
-  },
-]
+  }
+}
 
 describe.each(backends)('后端一致性：$name', ({ make }) => {
   let table: MemoryTable
