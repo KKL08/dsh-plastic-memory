@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { memoryRecordSchema } from '../record-schema.ts'
+import { scopeKey as standardScopeKey, scopeSchema } from '../scope.ts'
 import { CHECKUP_CAUSE_KINDS, CHECKUP_INITIATORS, DIRECTORY_NOTE_CODES, IGNORABLE_ADVICE_TYPES, MODEL_CHANGE_KINDS, OVERFLOW_MODES, SCAN_NOTE_CODES } from '../contract-codes.ts'
 
 /** 快照、最近删除的保留窗口（毫秒）：对话卡据此判断模型改写的改前版本是否已过期。 */
@@ -49,10 +50,7 @@ const generatedAt = z.number().optional()
 
 // —— 共用片段 ——
 
-export const layerRefSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('global') }),
-  z.object({ kind: z.literal('workspace'), workspacePath: z.string() }),
-])
+export const layerRefSchema = scopeSchema
 export type GuiLayerRef = z.infer<typeof layerRefSchema>
 
 const sourceModeSchema = memoryRecordSchema.shape.source.unwrap().shape.sourceMode
@@ -493,6 +491,11 @@ export type ScopeRef = z.infer<typeof scopeRefSchema>
 
 export function scopeKey(scope: ScopeRef): string {
   return scope.kind === 'workspace' ? scope.workspacePath : SCOPE_KEYS[scope.kind]
+}
+
+/** 体检键（自动体检设置表、体检记录表按它存）：「全部」取 `all`，作用域取标准键。 */
+export function checkupKey(scope: ScopeRef): string {
+  return scope.kind === 'all' ? SCOPE_KEYS.all : standardScopeKey(scope)
 }
 
 /** 自动体检「每 N 天」的上限。 */

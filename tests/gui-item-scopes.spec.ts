@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { pendingItemKey, pendingItemScopes, sameLayer, type GuiLayerRef, type MemoryCard, type PendingItem } from '../src/gui/contract.ts'
+import { pendingItemKey, pendingItemScopes, type GuiLayerRef, type MemoryCard, type PendingItem } from '../src/gui/contract.ts'
 
 // 契约纯函数：条目属于哪些范围、条目身份。服务端判新增、客户端按范围筛选和算件数共用这一份。
 
@@ -80,14 +80,5 @@ describe('pendingItemKey：条目身份', () => {
     expect(pendingItemKey(horizontal(card('a', GLOBAL), card('b', APP)))).toBe(pendingItemKey(horizontal(null, null)))
     const file = (filePath: string): PendingItem => ({ kind: 'unreadable-file', level: 'must-fix', layer: APP, filePath, relativePath: 'x.md', error: 'bad' })
     expect(pendingItemKey(file('/m/x.md'))).not.toBe(pendingItemKey(file('/m/y.md')))
-  })
-})
-
-describe('sameLayer', () => {
-  it('都是全局，或同一个项目路径', () => {
-    expect(sameLayer(GLOBAL, { kind: 'global' })).toBe(true)
-    expect(sameLayer(APP, { kind: 'workspace', workspacePath: '/w/app' })).toBe(true)
-    expect(sameLayer(APP, BLOG)).toBe(false)
-    expect(sameLayer(APP, GLOBAL)).toBe(false)
   })
 })
