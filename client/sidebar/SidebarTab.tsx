@@ -476,6 +476,8 @@ function RuledCard({ ruled, card, busy, onUndo }: {
     : ruled.isHardDeleted ? ruled.kind === 'vertical' ? t('conflict.purgedMemory') : t('conflict.purgedSide', { side: verdict === 'keep-left' ? 'B' : 'A' })
     : t(ruled.kind === 'vertical' ? isBaseline ? 'sidebar.ruled.deletedMemory' : 'sidebar.ruled.keptMemory'
       : verdict === 'keep-left' ? 'sidebar.ruled.deletedB' : verdict === 'keep-right' ? 'sidebar.ruled.deletedA' : 'sidebar.ruled.keptBoth')
+  // 删掉了一条时补一句生效时机：这次对话的快照已冻结，删掉的那条要到压缩后或下个对话才不再带入
+  const isDeleting = ruled.kind === 'vertical' ? isBaseline : verdict !== CONFLICT_ACTION_VERDICTS.horizontal.keepBoth
   const kept = ruled.kind === 'vertical' ? isBaseline ? [] : [ruled.memory]
     : verdict === 'keep-left' ? [ruled.left] : verdict === 'keep-right' ? [ruled.right] : [ruled.left, ruled.right]
   return (
@@ -492,6 +494,7 @@ function RuledCard({ ruled, card, busy, onUndo }: {
           )}
       >
         {note}
+        {isDeleting ? <> <span>{t('sidebar.ruled.appliesLater')}</span></> : null}
       </ResultLine>
     </article>
   )
