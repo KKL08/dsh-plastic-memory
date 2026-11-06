@@ -14,9 +14,9 @@ import { createSnapshotTool } from '../src/tools/snapshot-tool.ts'
 import { createSourceTool } from '../src/tools/source-tool.ts'
 
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
+import { InMemoryKvTable } from '../src/kv-table.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
 import type { MemorySnapshot, PendingDecision, ScanCacheEntry } from '../src/governance/schema.ts'
@@ -353,7 +353,7 @@ describe('memory_snapshot 绑定', () => {
     const rec = record({ id: 'mem_gone' })
     await store.put(rec)
     const snap = await snapshots.capture({ operation: 'manual', description: '清理前', records: [rec] }, NOW)
-    await table.delete('mem_gone') // 记录文件被移除，快照仍引用它 → diff.current = undefined
+    await table.delete('mem_gone', {}) // 记录文件被移除，快照仍引用它 → diff.current = undefined
     const result = await makeTool(store, snapshots).execute({ action: 'show', snapshotId: snap.id }, exec)
     expect((result as { kind: string }).kind).toBe('shown')
     expect(snapshotJsonValue(result)).not.toBe(undefined)

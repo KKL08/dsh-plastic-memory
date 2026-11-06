@@ -73,7 +73,7 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
     if (kindOf(e) !== 'promote-candidate' || own?.kind !== 'workspace' || r === undefined) continue
     const { workspacePath } = own
     if (r.scope === 'workspace' && r.workspacePath === workspacePath) continue
-    const hit = await deps.store.locate(r.id, { workspacePath, isExactLayer: true })
+    const hit = await deps.store.locate(r.id, own)
     if (hit !== undefined && dirname(hit.filePath) === hit.dir) candidateCopies.set(e.id, { record: hit.record, filePath: hit.filePath, dir: hit.dir })
   }
   const notes = listingNotes(listing, { includeEmpty: false })

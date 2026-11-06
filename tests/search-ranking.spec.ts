@@ -4,10 +4,10 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 import { MemoryStore, InMemoryTable } from '../src/store.ts'
+import { InMemoryKvTable } from '../src/kv-table.ts'
 import type { MemoryTable, ScopeReadOptions } from '../src/storage/table.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { GLOBAL_DIR, workspaceDirName } from '../src/storage/paths.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import { expandQueryTerms, matchScore } from '../src/text.ts'
 import { createTokenizer } from '../src/search/tokenizer.ts'
 import { RANKING_FIELDS, RANKING_PARAMS, anchorTerms, rankRecords, substringEligible, type RankingParams } from '../src/search/ranking.ts'
@@ -607,12 +607,13 @@ function tapTable(t: MemoryTable, mode: 'strip' | 'spy', seen: ScopeReadOptions[
       const { prefilterTerms: _t, prefilterMatch: _m, ...rest } = opts
       return t.readScope(dirs, rest)
     },
-    locate: (id, h) => t.locate(id, h),
+    locate: (id, target) => t.locate(id, target),
     listWorkspaceDirs: () => t.listWorkspaceDirs(),
     create: r => t.create(r),
-    put: (k, v, h) => t.put(k, v, h),
-    update: (k, f, h) => t.update(k, f, h),
-    delete: (k, h) => t.delete(k, h),
+    put: (v, from, skipIf) => t.put(v, from, skipIf),
+    update: (id, from, fn) => t.update(id, from, fn),
+    delete: (id, at, skipIf) => t.delete(id, at, skipIf),
+    copiesOf: id => t.copiesOf(id),
     maintain: d => t.maintain(d),
   }
 }

@@ -8,6 +8,7 @@ import { encodeRecord, splitFrontmatter } from '../src/storage/frontmatter.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE } from '../src/storage/paths.ts'
 import { InMemoryKvTable } from '../src/kv-table.ts'
 import { MemoryStore } from '../src/store.ts'
+import { scopeAt } from '../src/scope.ts'
 import { ConcurrentModificationError } from '../src/errors.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
@@ -95,7 +96,7 @@ describe('update：locate 之后文件被改，在新内容上重算再写', () 
     changeAfterRead(path, encodeRecord(record({ content: '并发改的' }), {}), AFTER_LOCATE)
     const seen: string[] = []
     const t = newTable()
-    await t.update('mem_race', r => { seen.push(r.content); return { ...r, summary: 'fn 改的摘要' } })
+    await t.update('mem_race', {}, r => { seen.push(r.content); return { ...r, summary: 'fn 改的摘要' } })
     expect(seen).toEqual(['旧正文', '并发改的'])
     const fm = splitFrontmatter(await readFile(path, 'utf8'))
     expect(fm.body).toContain('并发改的')
@@ -110,11 +111,11 @@ describe('update：locate 之后文件被改，在新内容上重算再写', () 
     const isEntered = new Promise<void>(resolve => { entered = resolve })
     let release!: () => void
     writeGate.current = { match: p => p.startsWith(join(globalDir(), '占锁.md.tmp-')), entered, release: new Promise<void>(resolve => { release = resolve }) }
-    const holding = t.update('mem_hold', r => ({ ...r, content: '占锁的写' }))
+    const holding = t.update('mem_hold', {}, r => ({ ...r, content: '占锁的写' }))
     await isEntered // 写锁被占着
 
     const seen: string[] = []
-    const waiting = t.update('mem_race', r => { seen.push(r.content); return { ...r, summary: 'fn 改的摘要' } })
+    const waiting = t.update('mem_race', {}, r => { seen.push(r.content); return { ...r, summary: 'fn 改的摘要' } })
     await writeFile(path, encodeRecord(record({ content: '等锁时外部改的' }), {}), 'utf8')
     release()
     await holding
@@ -131,7 +132,7 @@ describe('update：locate 之后文件被改，在新内容上重算再写', () 
     let calls = 0
     const t = newTable()
     // fn 运行时正处于 locate 与写盘之间：在这里同步写盘，等于每一轮都有别的进程抢先改了文件
-    const err = await captureRejection(t.update('mem_race', r => {
+    const err = await captureRejection(t.update('mem_race', {}, r => {
       calls++
       writeFileSync(path, encodeRecord(record({ content: `第 ${calls} 次并发` }), {}), 'utf8')
       return { ...r, summary: '不该落盘' }
@@ -150,7 +151,7 @@ describe('update：locate 之后文件被改，在新内容上重算再写', () 
     const path = await seed('竞态.md', record())
     changeAfterRead(path, encodeRecord(record({ content: '并发改的' }), {}), afterRead)
     const t = newTable()
-    await t.update('mem_race', r => ({ ...r, name: '改名后' }))
+    await t.update('mem_race', {}, r => ({ ...r, name: '改名后' }))
     expect(await mds(globalDir())).toEqual(['改名后.md'])
     const text = await readFile(join(globalDir(), '改名后.md'), 'utf8')
     expect(text).toContain('并发改的')
@@ -162,7 +163,7 @@ describe('put：locate 之后文件被改，按新的位置与附加字段重写
   it('并发加上的未知 frontmatter 字段不丢，正文以 put 的值为准', async () => {
     const path = await seed('竞态.md', record())
     changeAfterRead(path, encodeRecord(record({ content: '并发改的' }), { owner: 'me' }), AFTER_LOCATE)
-    await newTable().put('mem_race', record({ content: 'put 的正文' }))
+    await newTable().put(record({ content: 'put 的正文' }), {})
     const fm = splitFrontmatter(await readFile(path, 'utf8'))
     expect(fm.data.owner).toBe('me')
     expect(fm.body).toContain('put 的正文')
@@ -434,10 +435,10 @@ describe('memory_save update：读到目标之后、写入之前目标被改过�
   it('PA-02：本项目那份被只删这一层、global 有同 id 同时间戳的副本：回拒绝，global 那份不动、不被搬走', async () => {
     const store = new MemoryStore(newTable())
     await store.put(record({ content: '全局那份' }))
-    await store.put(record({ scope: 'workspace', workspacePath: '/proj', content: '项目那份' }), { workspacePath: '/proj', isExactLayer: true })
+    await store.put(record({ scope: 'workspace', workspacePath: '/proj', content: '项目那份' }), { kind: 'workspace', workspacePath: '/proj' })
     afterGet(store, 'mem_race', async loc => {
       expect(loc.record.content).toBe('项目那份')
-      expect(await store.hardDelete(loc.record, { isExactLayer: true })).toBe(true)
+      expect(await store.hardDelete(loc.record, { at: scopeAt(loc.record.workspacePath) })).toBe(true)
     })
     const r = await runSavePipeline(update(), saveDeps(store))
     expect(r).toMatchObject({ kind: 'rejected', code: 'target-missing', subcode: 'changed-after-read' })

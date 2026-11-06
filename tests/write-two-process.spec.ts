@@ -8,8 +8,8 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ARCHIVE_DIR, GLOBAL_DIR } from '../src/storage/paths.ts'
 import { FileTable } from '../src/storage/file-table.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
+import { InMemoryKvTable } from '../src/kv-table.ts'
 
 // 测试第 5 层：两个真实 Node 进程同时写同一个记忆目录（rename 只覆盖同一记录自己的文件，
 // 所以两个进程写同名异 id 的记录两条都存活）。子进程用 Node 内置类型剥离直接跑 .ts，起跑靠 stdin 握手同步。
@@ -54,7 +54,7 @@ describe('双进程写路径', () => {
     const bodies = await Promise.all(files.map(f => readFile(join(dir, f), 'utf8')))
     for (const r of results) expect(bodies.some(b => b.includes(r.content))).toBe(true)
     const t = new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() })
-    for (const r of results) expect((await t.locate(r.id))!.record.content).toBe(r.content)
+    for (const r of results) expect((await t.locate(r.id, {}))!.record.content).toBe(r.content)
     const idx = await readFile(join(dir, 'MEMORY.md'), 'utf8')
     for (const r of results) expect(idx).toContain(r.id)
   }, 30_000)
@@ -69,6 +69,6 @@ describe('双进程写路径', () => {
     const bodies = await Promise.all(archived.map(f => readFile(join(dir, ARCHIVE_DIR, f), 'utf8')))
     for (const r of results) expect(bodies.some(b => b.includes(r.content))).toBe(true)
     const t = new FileTable({ root, stats: new InMemoryKvTable<RecallStats>() })
-    for (const r of results) expect((await t.locate(r.id))!.record.status).toBe('deleted')
+    for (const r of results) expect((await t.locate(r.id, {}))!.record.status).toBe('deleted')
   }, 30_000)
 })

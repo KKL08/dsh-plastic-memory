@@ -5,10 +5,10 @@ import { join } from 'node:path'
 import { FileTable, DELETED_RETENTION_MS } from '../src/storage/file-table.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { workspaceDirName, WORKSPACE_MARKER, GLOBAL_DIR, STATE_DIR, ARCHIVE_DIR } from '../src/storage/paths.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
+import { InMemoryKvTable } from '../src/kv-table.ts'
 
 // 从磁盘读记忆目录的行为（0.2.0 起没有加载期：每个读方法直接读目录；清扫、索引再生、tmp 清理只在写路径末尾）。
 // 本文件默认造那条"包管理用 pnpm"的 global preference（编解码/去重断言的固定样本）。
@@ -47,8 +47,8 @@ it('读 global 与 workspace，含连字符的路径经 .workspace 无损还原'
   await seedWorkspace('/home/dev/example-project', 'b.md',
     record({ id: 'mem_w', scope: 'workspace', workspacePath: '/home/dev/example-project' }))
   const t = open()
-  expect(((await t.locate('mem_g'))?.record)!.scope).toBe('global')
-  expect(((await t.locate('mem_w'))?.record)!.workspacePath).toBe('/home/dev/example-project') // Critical #1 回归钉
+  expect(((await t.locate('mem_g', {}))?.record)!.scope).toBe('global')
+  expect(((await t.locate('mem_w', {}))?.record)!.workspacePath).toBe('/home/dev/example-project') // Critical #1 回归钉
 })
 
 it('MEMORY.md 被跳过不算 malformed；坏文件随读取返回隔离条目且不影响其余', async () => {
@@ -57,7 +57,7 @@ it('MEMORY.md 被跳过不算 malformed；坏文件随读取返回隔离条目�
   await writeFile(join(root, GLOBAL_DIR, 'MEMORY.md'), '# 索引\n')
   await writeFile(join(root, GLOBAL_DIR, 'bad.md'), '没有 frontmatter')
   const t = open()
-  expect(((await t.locate('mem_ok'))?.record)!.status).toBe('active')
+  expect(((await t.locate('mem_ok', {}))?.record)!.status).toBe('active')
   const { quarantined } = await t.readScope([globalDir()])
   expect(quarantined).toHaveLength(1)
   expect(quarantined[0].path).toContain('bad.md')
@@ -67,7 +67,7 @@ it('同 id 两处 → 读到 updatedAt 新者，旧文件保留（读路径零�
   await seedGlobal('old.md', record({ id: 'mem_dup', updatedAt: 100 }))
   await seedGlobal('new.md', record({ id: 'mem_dup', updatedAt: 200, content: '新版' }))
   const t = open()
-  expect(((await t.locate('mem_dup'))?.record)!.content).toBe('新版')
+  expect(((await t.locate('mem_dup', {}))?.record)!.content).toBe('新版')
   expect((await stat(join(root, GLOBAL_DIR, 'old.md'))).isFile()).toBe(true)
 })
 
@@ -87,11 +87,11 @@ it('sidecar 合并：有行取行值，无行注入默认', async () => {
   const stats = new InMemoryKvTable<RecallStats>()
   await stats.put('mem_a', { id: 'mem_a', recallCount: 7, lastRecalledAt: 999 })
   const t = open({ stats })
-  expect(((await t.locate('mem_a'))?.record)!.recallCount).toBe(7)
-  expect(((await t.locate('mem_a'))?.record)!.lastRecalledAt).toBe(999)
+  expect(((await t.locate('mem_a', {}))?.record)!.recallCount).toBe(7)
+  expect(((await t.locate('mem_a', {}))?.record)!.lastRecalledAt).toBe(999)
   // mem_b 在 sidecar 里无行 → decode 阶段注入默认值，合并不应改动
-  expect(((await t.locate('mem_b'))?.record)!.recallCount).toBe(0)
-  expect(((await t.locate('mem_b'))?.record)!.lastRecalledAt).toBeNull()
+  expect(((await t.locate('mem_b', {}))?.record)!.recallCount).toBe(0)
+  expect(((await t.locate('mem_b', {}))?.record)!.lastRecalledAt).toBeNull()
   // readScope 同样合并
   const byId = new Map((await t.readScope([globalDir()])).records.map(r => [r.record.id, r.record]))
   expect(byId.get('mem_a')!.recallCount).toBe(7)
@@ -103,36 +103,36 @@ it('清扫在写路径末尾：.archive/ 里 deletedAt 超 14 天 → 物理删�
   await seedArchived('old.md', record({ id: 'mem_old', status: 'deleted', updatedAt: now, deletedAt: now - DELETED_RETENTION_MS - 1 }))
   await seedArchived('fresh.md', record({ id: 'mem_fresh', status: 'deleted', updatedAt: now - 30 * 86_400_000, deletedAt: now - 1000 }))
   const t = open({ now: () => now })
-  expect(((await t.locate('mem_old'))?.record)!.status).toBe('deleted')   // 读路径不清
-  await t.put('mem_x', record({ id: 'mem_x', name: 'x', updatedAt: now }))   // 写该目录触发维护
-  expect((await t.locate('mem_old'))?.record).toBeUndefined()
+  expect(((await t.locate('mem_old', {}))?.record)!.status).toBe('deleted')   // 读路径不清
+  await t.put(record({ id: 'mem_x', name: 'x', updatedAt: now }), {})   // 写该目录触发维护
+  expect((await t.locate('mem_old', {}))?.record).toBeUndefined()
   await expect(stat(join(root, GLOBAL_DIR, ARCHIVE_DIR, 'old.md'))).rejects.toThrow()
-  expect(((await t.locate('mem_fresh'))?.record)!.status).toBe('deleted')
+  expect(((await t.locate('mem_fresh', {}))?.record)!.status).toBe('deleted')
 })
 
 it('外部就地覆盖写无需任何刷新调用：下一次读就是新内容', async () => {
   await seedGlobal('a.md', record({ id: 'mem_a' }))
   const t = open()
-  expect(((await t.locate('mem_a'))?.record)!.content).toBe('这个项目的包管理一律用 pnpm')
+  expect(((await t.locate('mem_a', {}))?.record)!.content).toBe('这个项目的包管理一律用 pnpm')
   await writeFile(join(root, GLOBAL_DIR, 'a.md'), encodeRecord(record({ id: 'mem_a', content: '外部改过' }), {}))
-  expect(((await t.locate('mem_a'))?.record)!.content).toBe('外部改过')
+  expect(((await t.locate('mem_a', {}))?.record)!.content).toBe('外部改过')
 })
 
 it('紧邻的外部编辑也立即可见（没有节流、没有指纹）', async () => {
   await seedGlobal('a.md', record({ id: 'mem_a', content: '原始' }))
   const t = open({ now: () => 1_000_000 })
-  expect(((await t.locate('mem_a'))?.record)!.content).toBe('原始')
+  expect(((await t.locate('mem_a', {}))?.record)!.content).toBe('原始')
   await writeFile(join(root, GLOBAL_DIR, 'a.md'), encodeRecord(record({ id: 'mem_a', content: '改动1' }), {}))
-  expect(((await t.locate('mem_a'))?.record)!.content).toBe('改动1')
+  expect(((await t.locate('mem_a', {}))?.record)!.content).toBe('改动1')
 })
 
 it('root 变得不可读：读方法不抛，按空返回并带 dir-unreadable 说明', async () => {
   await seedGlobal('a.md', record({ id: 'mem_a' }))
   const t = open()
-  expect((await t.locate('mem_a'))?.record).toBeDefined()
+  expect((await t.locate('mem_a', {}))?.record).toBeDefined()
   await chmod(root, 0o000)
   try {
-    expect((await t.locate('mem_a'))?.record).toBeUndefined()
+    expect((await t.locate('mem_a', {}))?.record).toBeUndefined()
     const listing = await t.listWorkspaceDirs()
     expect(listing.entries).toEqual([])
     expect(listing.directoryNotes.map(n => n.code)).toEqual(['dir-unreadable'])
@@ -157,8 +157,8 @@ it('单个 workspace 目录不可读 → 该目录记录缺失，其余目录记
   await chmod(wsDir, 0o000)
   try {
     const t = open()
-    expect(((await t.locate('mem_g'))?.record)!.scope).toBe('global')
-    expect((await t.locate('mem_w'))?.record).toBeUndefined()
+    expect(((await t.locate('mem_g', {}))?.record)!.scope).toBe('global')
+    expect((await t.locate('mem_w', {}))?.record).toBeUndefined()
     expect((await t.readScope([t.globalDir, wsDir])).records.map(r => r.record.id)).toEqual(['mem_g'])
   } finally {
     await chmod(wsDir, 0o755)  // 恢复权限，否则 afterEach 的 rm 会失败
@@ -171,9 +171,9 @@ describe('tmp 残留只在写路径末尾清理', () => {
     const tmp = join(root, GLOBAL_DIR, `a.md.tmp-${process.pid}-abc123`)
     await writeFile(tmp, '残留')
     const t = open()
-    await t.locate('mem_a')
+    await t.locate('mem_a', {})
     expect((await stat(tmp)).isFile()).toBe(true)   // 纯读不清
-    await t.put('mem_b', record({ id: 'mem_b', name: 'b' }))
+    await t.put(record({ id: 'mem_b', name: 'b' }), {})
     await expect(stat(tmp)).rejects.toThrow()
   })
 
@@ -182,7 +182,7 @@ describe('tmp 残留只在写路径末尾清理', () => {
     const tmp = join(root, GLOBAL_DIR, `a.md.tmp-${process.pid + 1}-abc123`)
     await writeFile(tmp, '别的进程在途')
     const t = open()
-    await t.put('mem_b', record({ id: 'mem_b', name: 'b' }))
+    await t.put(record({ id: 'mem_b', name: 'b' }), {})
     expect((await stat(tmp)).isFile()).toBe(true)
   })
 
@@ -192,17 +192,17 @@ describe('tmp 残留只在写路径末尾清理', () => {
     await writeFile(tmp, '陈旧残留')
     const mtime = (await stat(tmp)).mtimeMs
     const t = open({ now: () => mtime + 61_000 })
-    await t.put('mem_b', record({ id: 'mem_b', name: 'b', updatedAt: mtime }))
+    await t.put(record({ id: 'mem_b', name: 'b', updatedAt: mtime }), {})
     await expect(stat(tmp)).rejects.toThrow()
   })
 })
 
 it('MEMORY.md 内容未变时写路径末尾的再生不改其 mtime（不空转写盘）', async () => {
   const t = open()
-  await t.put('mem_a', record({ id: 'mem_a', name: 'a' }))
+  await t.put(record({ id: 'mem_a', name: 'a' }), {})
   const before = await stat(join(root, GLOBAL_DIR, 'MEMORY.md'))
   await new Promise(r => setTimeout(r, 10))
-  await t.put('mem_d', record({ id: 'mem_d', name: 'd', status: 'deleted', updatedAt: Date.now() }))   // 不进索引：索引内容不变
+  await t.put(record({ id: 'mem_d', name: 'd', status: 'deleted', updatedAt: Date.now() }), {})   // 不进索引：索引内容不变
   const after = await stat(join(root, GLOBAL_DIR, 'MEMORY.md'))
   expect(after.mtimeMs).toBe(before.mtimeMs)
 })
@@ -213,13 +213,13 @@ it('合法名称含 .tmp- 不是原子写残留：新实例、推进 61 秒后�
   let clock = 1_000_000
   const mk = () => open({ now: () => clock })
   const t1 = mk()
-  await t1.put('mem_tmp', record({ id: 'mem_tmp', name: 'cache.tmp-notes' }))
+  await t1.put(record({ id: 'mem_tmp', name: 'cache.tmp-notes' }), {})
   const t2 = mk()
-  expect((await t2.locate('mem_tmp'))?.record.name).toBe('cache.tmp-notes')
+  expect((await t2.locate('mem_tmp', {}))?.record.name).toBe('cache.tmp-notes')
   clock += 61_000
   const t3 = mk()
-  await t3.put('mem_other', record({ id: 'mem_other', name: 'other' }))
-  expect((await t3.locate('mem_tmp'))?.record.name).toBe('cache.tmp-notes')
+  await t3.put(record({ id: 'mem_other', name: 'other' }), {})
+  expect((await t3.locate('mem_tmp', {}))?.record.name).toBe('cache.tmp-notes')
   expect(await readdir(join(root, GLOBAL_DIR))).toContain('cache.tmp-notes.md')
 })
 
@@ -247,23 +247,23 @@ describe('点开头的名字（文件名由记忆名字生成，名字可以以�
     expect(listedCount).toBe(2)
     // 列出文件数与预筛无关：预筛词一个都不命中，合法的伴生文件形态名字照样数到
     expect((await t.readScope([globalDir()], { prefilterTerms: ['不会出现的词'] })).listedCount).toBe(2)
-    expect((await t.locate('mem_apple'))?.filePath).toBe(join(root, GLOBAL_DIR, '._旧笔记.md'))
-    expect((await t.locate('mem_lock'))?.record.name).toBe('.#锁')
+    expect((await t.locate('mem_apple', {}))?.filePath).toBe(join(root, GLOBAL_DIR, '._旧笔记.md'))
+    expect((await t.locate('mem_lock', {}))?.record.name).toBe('.#锁')
   })
 
   it('名字以 ._ / .# 开头的记忆写下去还能读回来、搜得到', async () => {
     const t = open()
-    await t.put('mem_apple', record({ id: 'mem_apple', name: '._notes' }))
-    await t.put('mem_lock', record({ id: 'mem_lock', name: '.#notes' }))
+    await t.put(record({ id: 'mem_apple', name: '._notes' }), {})
+    await t.put(record({ id: 'mem_lock', name: '.#notes' }), {})
     expect((await t.readScope([globalDir()])).records.map(r => r.record.id).sort()).toEqual(['mem_apple', 'mem_lock'])
-    expect((await t.locate('mem_apple'))?.record.name).toBe('._notes')
-    expect((await t.locate('mem_lock'))?.record.name).toBe('.#notes')
+    expect((await t.locate('mem_apple', {}))?.record.name).toBe('._notes')
+    expect((await t.locate('mem_lock', {}))?.record.name).toBe('.#notes')
   })
 
   it('名字以点开头的记忆写下去还能读回来', async () => {
     const t = open()
-    await t.put('mem_npmrc', record({ id: 'mem_npmrc', name: '.npmrc 镜像' }))
-    expect(((await t.locate('mem_npmrc'))?.record)!.name).toBe('.npmrc 镜像')
+    await t.put(record({ id: 'mem_npmrc', name: '.npmrc 镜像' }), {})
+    expect(((await t.locate('mem_npmrc', {}))?.record)!.name).toBe('.npmrc 镜像')
     expect((await t.readScope([globalDir()])).records.map(r => r.record.id)).toEqual(['mem_npmrc'])
   })
 

@@ -26,7 +26,7 @@ lines.close()
 
 for (const step of steps) {
   if (step === 'create') await table.create(own)
-  else if (step === 'forget') await table.update(own.id, r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))
+  else if (step === 'forget') await table.update(own.id, {}, r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))
   else throw new Error(`unknown step: ${step}`)
 }
 process.stdout.write(`${JSON.stringify({ id: own.id, content: own.content })}\n`)

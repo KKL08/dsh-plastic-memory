@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { PendingDecisionsStore, dedupKey } from '../src/governance/decisions.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import type { PendingDecision } from '../src/governance/schema.ts'
+import { InMemoryKvTable } from '../src/kv-table.ts'
 
 function makeStore() {
   return new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())

@@ -128,8 +128,8 @@ export async function executeForget(
 
   const forgotten: string[] = []
   const hardDeleted: string[] = []
-  // 指明了副本：删的时候也只认那一层，与定位同口径
-  const deleteOpts = { isExactLayer: options.target !== undefined }
+  // 指明了副本：删的时候也只认那个作用域，与定位同口径
+  const deleteOpts = { at: options.target }
   const purge = async (record: MemoryRecord) => {
     if (await deps.store.hardDelete(record, deleteOpts, options.isChanged)) {
       forgotten.push(record.id)

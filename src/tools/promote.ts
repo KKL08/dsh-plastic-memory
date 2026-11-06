@@ -64,8 +64,8 @@ export async function executePromote(
   const promoted: PromoteResult['promoted'] = []
   const skipped: string[] = []
   const located: MemoryRecord[] = []
-  // 指明了副本的按同一层写回（只认层），别层同 id 的副本再新也不改到它头上，也不被当成其余副本清掉
-  const hintOf = (r: MemoryRecord) => options.target === undefined ? undefined : { workspacePath: r.workspacePath, isExactLayer: true }
+  // 指明了副本的按同一个作用域写回，别的作用域里同 id 的副本再新也不改到它头上，也不被当成其余副本清掉
+  const from = options.target
   for (const id of args.confirmedIds) {
     const r = options.target === undefined
       ? await deps.store.get(id, { workspacePath: context.workspacePath })
@@ -90,7 +90,7 @@ export async function executePromote(
     const dismissed: string[] = []
     for (const r of found) {
       // 无损 JSON 不变式：解构剔键而非置 undefined。读到之后被别处删掉的计入 skipped，同预读时就不在
-      if (await deps.store.updateIfLive(r, ({ globalCandidate, ...rest }) => rest, hintOf(r))) dismissed.push(r.id)
+      if (await deps.store.updateIfLive(r, ({ globalCandidate, ...rest }) => rest, from)) dismissed.push(r.id)
       else skipped.push(r.id)
     }
     const skipNote = skipped.length > 0 ? `（${skipped.length} 条不存在或已删除，见 skipped）` : ''
@@ -132,21 +132,21 @@ export async function executePromote(
       // 无损 JSON 不变式：不能把 workspacePath/globalCandidate 置为 undefined 键，解构剔键。
       // 按原记录的 workspace 定位：同 id 多副本时搬走的才是门放行的这份，不是 global 或别的项目的副本
       const promote = ({ workspacePath, globalCandidate, ...rest }: MemoryRecord): MemoryRecord => review({ ...rest, scope: 'global' })
-      if (!(await deps.store.updateIfLive(r, promote, hintOf(r)))) {
+      if (!(await deps.store.updateIfLive(r, promote, from))) {
         skipped.push(r.id)   // 读到之后被别处删掉
         continue
       }
     } else {
       // 两步无法原子：先软删再写 AGENTS.md，append 失败回滚软删——失败方向宁可"没提升"
       // 也不能"两处并存"（原顺序 append 成功+softDelete 失败会双份注入且结果谎报 promoted）。
-      if (!(await deps.store.updateIfLive(r, cur => review({ ...cur, status: 'deleted', updatedAt: now, deletedAt: cur.deletedAt ?? now }), hintOf(r)))) {
+      if (!(await deps.store.updateIfLive(r, cur => review({ ...cur, status: 'deleted', updatedAt: now, deletedAt: cur.deletedAt ?? now }), from))) {
         skipped.push(r.id)   // 读到之后被别处删掉（软删）：不写 AGENTS.md
         continue
       }
       try {
         await deps.agentsMd.append(`${r.name} — ${r.content}`)
       } catch {
-        await deps.store.put(r, hintOf(r))
+        await deps.store.put(r, from)
         skipped.push(r.id)
         continue
       }

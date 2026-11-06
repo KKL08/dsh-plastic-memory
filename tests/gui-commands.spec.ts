@@ -10,6 +10,7 @@ import { createAgentsMdWriter } from '../src/storage/agents-md.ts'
 import { computeDigest, encodeRecord, splitFrontmatter } from '../src/storage/frontmatter.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE, STATE_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
 import { InMemoryTable, MemoryStore, type MemoryLogger, type MemoryTable } from '../src/store.ts'
+import type { ClaimKvTable } from '../src/kv-table.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { PendingDecisionsStore, candidateFingerprint, conflictFingerprint } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
@@ -17,7 +18,6 @@ import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
 import { REDACTED_PLACEHOLDER, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type PendingDecision } from '../src/governance/schema.ts'
-import type { ClaimKvTable } from '../src/kv-table.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from '../src/gui/view-writer.ts'
@@ -31,7 +31,7 @@ import { runSavePipeline } from '../src/pipeline.ts'
 import { executeForget } from '../src/tools/forget.ts'
 import { executeSnapshotTool } from '../src/tools/snapshot.ts'
 import { executeScan } from '../src/tools/scan.ts'
-import { scopeCacheKey, type Scope } from '../src/scope.ts'
+import { scopeAt, scopeCacheKey, type Scope } from '../src/scope.ts'
 import { locateCopy } from '../src/tools/workspace-gate.ts'
 import { fakeExec } from './helpers/exec.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
@@ -147,7 +147,7 @@ const ledgerItems = (view: { items: readonly PendingItem[] }) => view.items.filt
 function forgetBeforePut(e: ReturnType<typeof env>, id: string, workspacePath?: string) {
   const put = e.store.put.bind(e.store)
   e.store.put = async (...args) => {
-    if (args[0].id === id) expect(await e.store.softDelete({ id, workspacePath }, { isExactLayer: true, now: e.clock.now })).toBe(true)
+    if (args[0].id === id) expect(await e.store.softDelete({ id, workspacePath }, { at: scopeAt(workspacePath), now: e.clock.now })).toBe(true)
     return put(...args)
   }
 }
@@ -369,7 +369,7 @@ describe('resolve 与 undo', () => {
     expect(body.isUnrecorded).toBe(true)
     expect(body.snapshotId).toBeUndefined()
     expect(await allEntries(e)).toEqual([])
-    expect((await e.store.get('mem_v', { workspacePath: OTHER_WS, isExactLayer: true }))!.status).toBe('active')
+    expect((await e.store.get('mem_v', { kind: 'workspace', workspacePath: OTHER_WS }))!.status).toBe('active')
     expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('not-found')
   })
 
@@ -922,7 +922,7 @@ describe('同 id 在两个项目里各有一份', () => {
   it('forget 指明一份：别的项目那份只在最近删除里，同样算还有副本，账本里指向这个 id 的条目留着', async () => {
     const e = env()
     await seedCopies(e)
-    expect(await e.store.softDelete({ id: 'mem_dup', workspacePath: OTHER_WS }, { isExactLayer: true, now: e.clock.now })).toBe(true)
+    expect(await e.store.softDelete({ id: 'mem_dup', workspacePath: OTHER_WS }, { at: scopeAt(OTHER_WS), now: e.clock.now })).toBe(true)
     await e.store.create(record({ id: 'mem_y', scope: 'workspace', workspacePath: SESSION_WS }))
     const entry = (await e.decisions.upsert({ memoryIds: ['mem_dup', 'mem_y'], summary: '同 id 的冲突', fingerprint: 'fp-dup' }, 1)).entry
     ok(await e.run({ cmd: 'forget', memoryId: 'mem_dup', layer: own }))
@@ -1286,7 +1286,7 @@ describe('最近删除里彻底删除', () => {
     const purge = e.snapshots.purge.bind(e.snapshots)
     e.snapshots.purge = async isPurged => {
       await purge(isPurged)
-      expect(await e.store.restoreArchived({ id: 'mem_p', workspacePath: SESSION_WS }, { isExactLayer: true })).toBe(true)
+      expect(await e.store.restoreArchived({ id: 'mem_p', workspacePath: SESSION_WS }, { at: scopeAt(SESSION_WS) })).toBe(true)
     }
     const body = err(await e.run({ cmd: 'hard-delete', memoryId: 'mem_p', layer: own }))
     expect(body.code).toBe('failed')
@@ -1791,7 +1791,7 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
     expect(err(await e.run({ cmd: 'promote-memory', memoryId, layer: wsScope, isCandidateRequired: true })).code).toBe('target-taken')
     const { entry: open } = await e.decisions.upsert({ kind: 'promote-candidate', memoryIds: [memoryId], summary: '', workspaces: [SESSION_WS], fingerprint: 'fp' }, 1)
     expect(err(await e.run({ cmd: 'promote', decisionId: open.id, target: 'global' })).code).toBe('target-taken')
-    const rec = (await e.store.locate(memoryId, { workspacePath: SESSION_WS, isExactLayer: true }))!.record
+    const rec = (await e.store.locate(memoryId, { kind: 'workspace', workspacePath: SESSION_WS }))!.record
     expect([rec.scope, rec.status, rec.globalCandidate]).toEqual(['workspace', 'active', true])
     expect(await e.decisions.list()).toEqual([open])
     expect(await e.decisions.listSettled()).toEqual([])
@@ -1902,7 +1902,7 @@ describe('move-memory（建议整理「放错层」的移到项目）', () => {
   const misplacedIds = async (e: ReturnType<typeof env>) => pendingViewSchema.parse(await e.readView('pending')).items
     .flatMap(i => i.kind === 'advice' && i.type === 'misplaced' ? i.memories.map(m => m.id) : [])
   const copyIn = async (e: ReturnType<typeof env>, id: string, workspacePath?: string) =>
-    (await e.store.locate(id, { workspacePath, isExactLayer: true }))
+    (await e.store.locate(id, scopeAt(workspacePath)))
   const original = () => record({
     id: 'mem_g', name: '本仓用 pnpm', content: '这个仓库装依赖用 pnpm', summary: '装依赖用 pnpm', tags: ['pnpm'],
     source: { sessionId: 'sess-old', eventRange: [3, 9], sourceMode: 'user-explicit' },
@@ -1975,7 +1975,7 @@ describe('move-memory（建议整理「放错层」的移到项目）', () => {
     const e = env()
     await e.store.create(original())
     const body = ok(await e.run(move(SESSION_WS)))
-    await e.store.softDelete({ id: 'mem_g', workspacePath: SESSION_WS }, { isExactLayer: true })
+    await e.store.softDelete({ id: 'mem_g', workspacePath: SESSION_WS }, { at: scopeAt(SESSION_WS) })
     expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).ok).toBe(false)
     expect(await copyIn(e, 'mem_g')).toBeUndefined()
   })
@@ -1987,7 +1987,7 @@ describe('move-memory（建议整理「放错层」的移到项目）', () => {
     const e = env()
     await e.store.create(original())
     await e.store.create(record({ id: 'mem_g', name: '项目里那份', content: '项目里的内容', scope: 'workspace', workspacePath: SESSION_WS }))
-    if (status === 'deleted') await e.store.softDelete({ id: 'mem_g', workspacePath: SESSION_WS }, { isExactLayer: true })
+    if (status === 'deleted') await e.store.softDelete({ id: 'mem_g', workspacePath: SESSION_WS }, { at: scopeAt(SESSION_WS) })
     const projectBefore = await readFile((await copyIn(e, 'mem_g', SESSION_WS))!.filePath, 'utf8')
     const globalBefore = await readFile((await copyIn(e, 'mem_g'))!.filePath, 'utf8')
     const snapshotsBefore = (await e.snapshots.list()).length
@@ -2166,7 +2166,7 @@ describe('同 id 在会话项目和别的项目各有一份时提升', () => {
     await e.store.create(record({ id: 'mem_dup', name: '本项目那份', scope: 'workspace', workspacePath: SESSION_WS, globalCandidate: true }))
     await e.store.create(record({ id: 'mem_dup', name: '别的项目那份', scope: 'workspace', workspacePath: OTHER_WS, globalCandidate: true }))
     await e.decisions.upsert({ kind: 'promote-candidate', memoryIds: ['mem_dup'], summary: '候选', workspaces: [SESSION_WS], fingerprint: 'fp' }, 1)
-    expect(await e.store.softDelete({ id: 'mem_dup', workspacePath: SESSION_WS }, { isExactLayer: true, now: e.clock.now })).toBe(true)
+    expect(await e.store.softDelete({ id: 'mem_dup', workspacePath: SESSION_WS }, { at: scopeAt(SESSION_WS), now: e.clock.now })).toBe(true)
     ok(await e.run({ cmd: 'refresh-views' }))
     expect(pendingViewSchema.parse(await e.readView('pending')).items.filter(i => i.kind === 'promote-candidate')).toEqual([])
   })
@@ -3175,7 +3175,7 @@ describe('edit-memory（建议整理的直接改）', () => {
     return { updatedAt: card.updatedAt, digest: card.digest! }
   }
   const fileOf = async (e: ReturnType<typeof env>, id: string, workspacePath?: string) =>
-    (await e.store.locate(id, { workspacePath, isExactLayer: true }))!.filePath
+    (await e.store.locate(id, scopeAt(workspacePath)))!.filePath
   const edit = (memoryId: string, workspacePath: string | undefined, base: { updatedAt: number; digest: string }, fields: Partial<Extract<MemoryCommand, { cmd: 'edit-memory' }>> = {}): MemoryCommand => ({
     cmd: 'edit-memory', memoryId, layer: scopeOf(workspacePath), base, content: '新正文', name: '新名称', summary: '新摘要', tags: ['新标签'], ...fields,
   })
@@ -3448,16 +3448,16 @@ describe('merge-memories（内容重复的直接合并）', () => {
     await e.store.create(record({ id: 'mem_a', name: '甲', content: '甲的正文', tags: ['甲'], ...a }))
     await e.store.create(record({ id: 'mem_b', name: '乙', content: '乙的正文', tags: ['乙'], ...b }))
     const ws = (id: string) => (id === 'mem_a' ? a : b).scope === 'global' ? undefined : SESSION_WS
-    const paths = { kept: await (async () => (await e.store.locate(keptId, { workspacePath: ws(keptId), isExactLayer: true }))!.filePath)(), removed: (await e.store.locate(removedId, { workspacePath: ws(removedId), isExactLayer: true }))!.filePath }
+    const paths = { kept: await (async () => (await e.store.locate(keptId, scopeAt(ws(keptId))))!.filePath)(), removed: (await e.store.locate(removedId, scopeAt(ws(removedId))))!.filePath }
     const before = { kept: await readFile(paths.kept, 'utf8'), removed: await readFile(paths.removed, 'utf8') }
 
     e.clock.now = LATER
     const body = ok(await merge(e, ['mem_a', 'mem_b']))
     expect(body.memoryIds).toEqual([keptId, removedId])
-    const kept = (await e.store.get(keptId, { workspacePath: ws(keptId), isExactLayer: true }))!
+    const kept = (await e.store.get(keptId, scopeAt(ws(keptId))))!
     expect([kept.status, kept.content, kept.name, kept.summary, kept.tags, kept.updatedAt]).toEqual(['active', '合并后的正文', '合并后', '合并摘要', ['甲', '乙'], LATER])
     expect(kept.handEdited).toBe(true)
-    const removed = (await e.store.get(removedId, { workspacePath: ws(removedId), isExactLayer: true }))!
+    const removed = (await e.store.get(removedId, scopeAt(ws(removedId))))!
     // 删除时刻用注入的时钟，最近删除的保留期才算得准
     expect([removed.status, removed.updatedAt, removed.deletedAt]).toEqual(['deleted', LATER, LATER])
     expect(deletedViewSchema.parse(await e.readView('deleted')).items.map(i => i.memory.id)).toEqual([removedId])
@@ -3807,7 +3807,7 @@ describe('draft-edit（让模型改、让模型合并的生成）', () => {
     const { llm, prompts } = scripted()
     const e = env({ llm })
     await seedLong(e)
-    await e.store.softDeleteUnlessSecret((await e.store.get('mem_l', { workspacePath: SESSION_WS }))!, { isExactLayer: true, now: NOW })
+    await e.store.softDeleteUnlessSecret((await e.store.get('mem_l', { workspacePath: SESSION_WS }))!, { at: scopeAt(SESSION_WS), now: NOW })
     expect(err(await e.run(draftOf('mem_l'))).code).toBe('not-found')
     expect(err(await e.run(draftOf('mem_nope'))).code).toBe('not-found')
     expect(prompts).toEqual([])
@@ -3951,15 +3951,15 @@ describe('撤销模型改写、替代（对话卡片、右侧栏「这次新写�
     const entry = await changeOf(e)
     expect((await modelChanges(e))?.map(c => c.state)).toEqual(['undoable'])
     ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
-    expect((await e.store.get('mem_old', { workspacePath: SESSION_WS, isExactLayer: true }))!.status).toBe('active')
-    expect((await e.store.get('mem_old', { isExactLayer: true }))!.content).toBe('全局的另一份')
+    expect((await e.store.get('mem_old', { kind: 'workspace', workspacePath: SESSION_WS }))!.status).toBe('active')
+    expect((await e.store.get('mem_old', { kind: 'global' }))!.content).toBe('全局的另一份')
   })
 
   it('改写的那条之后被彻底删除（哪一层都没有了）：视图标 changed', async () => {
     const e = env()
     await seedMemory(e, 'mem_r', '改前的内容')
     await save(e, { action: 'update', id: 'mem_r', name: '名-mem_r', content: '模型改写后的' })
-    await e.store.hardDelete({ id: 'mem_r', workspacePath: SESSION_WS }, { isExactLayer: true })
+    await e.store.hardDelete({ id: 'mem_r', workspacePath: SESSION_WS }, { at: scopeAt(SESSION_WS) })
     expect((await modelChanges(e))?.map(c => c.state)).toEqual(['changed'])
   })
 
@@ -4005,7 +4005,7 @@ describe('migrate-type', () => {
   const OTHER = { scope: 'workspace' as const, workspacePath: OTHER_WS }
   const SESSION = { scope: 'workspace' as const, workspacePath: SESSION_WS }
   const typeOf = async (e: ReturnType<typeof env>, id: string, workspacePath?: string) =>
-    (await e.store.get(id, { workspacePath, isExactLayer: true }))?.type
+    (await e.store.get(id, scopeAt(workspacePath)))?.type
 
   it('retype：全局和所有项目里这一类的记忆（含最近删除里的）都改成新名字，别的类型不动；重跑只处理剩下的', async () => {
     const e = env()
@@ -4013,7 +4013,7 @@ describe('migrate-type', () => {
     await e.store.create(record({ id: 'mem_s', type: 'domain-term', ...SESSION }))
     await e.store.create(record({ id: 'mem_o', type: 'domain-term', ...OTHER }))
     await e.store.create(record({ id: 'mem_del', type: 'domain-term', ...OTHER }))
-    expect(await e.store.softDelete({ id: 'mem_del', workspacePath: OTHER_WS }, { isExactLayer: true, now: NOW })).toBe(true)
+    expect(await e.store.softDelete({ id: 'mem_del', workspacePath: OTHER_WS }, { at: scopeAt(OTHER_WS), now: NOW })).toBe(true)
     await e.store.create(record({ id: 'mem_k', type: 'knowledge' }))
 
     const body = ok(await e.run({ cmd: 'migrate-type', from: 'domain-term', action: 'retype', to: 'glossary' }))
@@ -4021,7 +4021,7 @@ describe('migrate-type', () => {
     for (const [id, ws] of [['mem_g'], ['mem_s', SESSION_WS], ['mem_o', OTHER_WS], ['mem_del', OTHER_WS]] as const) {
       expect(await typeOf(e, id, ws)).toBe('glossary')
     }
-    expect((await e.store.get('mem_del', { workspacePath: OTHER_WS, isExactLayer: true }))?.status).toBe('deleted')
+    expect((await e.store.get('mem_del', { kind: 'workspace', workspacePath: OTHER_WS }))?.status).toBe('deleted')
     expect(await typeOf(e, 'mem_k')).toBe('knowledge')
     const library = libraryViewSchema.parse(await e.readView('library'))
     expect(library.layers.flatMap(l => l.items).filter(m => m.type === 'glossary')).toHaveLength(3)
@@ -4046,8 +4046,8 @@ describe('migrate-type', () => {
     const body = ok(await e.run({ cmd: 'migrate-type', from: 'client', action: 'forget' }))
     expect(body.migrated).toBe(2)
     expect(body.skippedSecrets).toBe(1)
-    expect((await e.store.get('mem_g', { isExactLayer: true }))?.status).toBe('deleted')
-    expect((await e.store.get('mem_o', { workspacePath: OTHER_WS, isExactLayer: true }))?.status).toBe('deleted')
+    expect((await e.store.get('mem_g', { kind: 'global' }))?.status).toBe('deleted')
+    expect((await e.store.get('mem_o', { kind: 'workspace', workspacePath: OTHER_WS }))?.status).toBe('deleted')
     expect((await e.store.get('mem_sec'))?.status).toBe('active')
     expect((await e.store.get('mem_k'))?.status).toBe('active')
     const deleted = deletedViewSchema.parse(await e.readView('deleted'))

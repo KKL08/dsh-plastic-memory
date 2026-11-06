@@ -130,7 +130,7 @@ describe('维护点动作 ②：顶层非 active 文件搬 .archive/', () => {
     const delFm = await frontmatter(join(archiveOf(globalDir()), 'del.md'))
     expect(delFm.deletedAt).toBe(iso(edited))
     expect(await frontmatter(join(archiveOf(globalDir()), 'sup.md'))).not.toHaveProperty('deletedAt')
-    expect((await table.locate('mem_del'))!.record.deletedAt).toBe(Date.parse(iso(edited)))
+    expect((await table.locate('mem_del', {}))!.record.deletedAt).toBe(Date.parse(iso(edited)))
   })
 
   it('.archive/ 里已有同名异 id 文件：追加 id 片段，两份都保留', async () => {
@@ -142,7 +142,7 @@ describe('维护点动作 ②：顶层非 active 文件搬 .archive/', () => {
     expect(await mds(globalDir())).toEqual([])
     expect(await mds(archiveOf(globalDir()))).toEqual([`同名-${'mem_new'.slice(-6)}.md`, '同名.md'].sort())
     expect(await readFile(join(archiveOf(globalDir()), '同名.md'), 'utf8')).toContain('早先归档的')
-    expect((await table.locate('mem_new'))!.record.content).toBe('后来手改的')
+    expect((await table.locate('mem_new', {}))!.record.content).toBe('后来手改的')
   })
 
   it('PA-05 .archive/ 里三个候选名都被别的 id 占着：这条留在顶层、本轮跳过，别的文件照常维护', async () => {
@@ -237,7 +237,7 @@ describe('维护点动作 ④：手建 / 手编文件回写', () => {
     expect(fm.updatedAt).toBe(iso(edited))
     expect(fm.lastConfirmedAt).toBe(iso(edited))
     expect(fm.createdAt).toBe(iso(original.createdAt))   // createdAt 不动
-    const hit = (await table.locate('mem_e'))!.record
+    const hit = (await table.locate('mem_e', {}))!.record
     expect(hit.handEdited).toBe(true)
     expect(hit.updatedAt).toBe(Date.parse(iso(edited)))
     await new Promise(r => setTimeout(r, 5))
@@ -250,7 +250,7 @@ describe('维护点动作 ④：手建 / 手编文件回写', () => {
     const { table } = open()
     await table.create(wsRecord({ id: 'mem_w1', name: '一', tags: ['a', 'b'], summary: '摘要', content: '多行\n正文' }))
     await table.create(record({ id: 'mem_g1', name: '二', validTo: Date.now() + DAY, supersedes: ['mem_x'], globalCandidate: true }))
-    await table.update('mem_w1', r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))
+    await table.update('mem_w1', {}, r => ({ ...r, status: 'deleted', updatedAt: Date.now() }))
     await new Promise(r => setTimeout(r, 5))
     const before = await treeSnapshot(root)
     await table.maintain([globalDir(), wsDir()])
@@ -267,7 +267,7 @@ describe('维护点回写带着委派块', () => {
     const fm = await frontmatter(path)
     expect(fm.digest).toBe(computeDigest('子级写的', '', '正文'))
     expect(fm.delegation).toEqual({ sessionId: 'child', depth: 1, parentSessionId: 'main' })
-    const hit = (await table.locate(fm.id as string))!.record
+    const hit = (await table.locate(fm.id as string, {}))!.record
     expect(isPendingDelegated(hit)).toBe(true)
     await new Promise(r => setTimeout(r, 5))
     const before = await treeSnapshot(root)
@@ -279,8 +279,8 @@ describe('维护点回写带着委派块', () => {
     const delegation = { sessionId: 'child', depth: 2, parentSessionId: 'mid', rootSessionId: 'main', reviewed: { by: 'main' as const, at: 1_700_000_100_000 } }
     const { table } = open()
     await table.create(record({ id: 'mem_d', delegation }))
-    await table.update('mem_d', r => ({ ...r, content: '改写', updatedAt: Date.now() }))
-    expect((await table.locate('mem_d'))!.record.delegation).toEqual(delegation)
+    await table.update('mem_d', {}, r => ({ ...r, content: '改写', updatedAt: Date.now() }))
+    expect((await table.locate('mem_d', {}))!.record.delegation).toEqual(delegation)
     await new Promise(r => setTimeout(r, 5))
     const before = await treeSnapshot(root)
     await table.maintain([globalDir()])
@@ -325,20 +325,20 @@ describe('维护点动作 ④：旧版本写的有效期改写成本机时间', 
   it('转换前后读到的值相同：旧文件读出来就按同样规则取整，转换不改变任何读方看到的有效期', async () => {
     const path = await writeRaw(wsDir(), '冻结期.md', legacy(old({ id: 'mem_top', name: '冻结期' })), WS)
     const { table } = open()
-    const before = (await table.locate('mem_top'))!.record
+    const before = (await table.locate('mem_top', {}))!.record
     expect(before).toMatchObject({ validFrom: new Date(2099, 10, 1, 9, 30).getTime(), validTo: minute + 60_000 })
     await table.maintain([wsDir()])
     expect(await readFile(path, 'utf8')).toContain('\nvalidTo: 2099-11-05 18:01\n')
-    expect((await table.locate('mem_top'))!.record).toEqual(before)
+    expect((await table.locate('mem_top', {}))!.record).toEqual(before)
   })
 
   it('转换之后手改正文照样判出手编；转换本身不算手编', async () => {
     const path = await writeRaw(wsDir(), '冻结期.md', legacy(old({ id: 'mem_top', name: '冻结期', content: '原文' })), WS)
     const { table } = open()
     await table.maintain([wsDir()])
-    expect((await table.locate('mem_top'))!.record.handEdited).toBeUndefined()
+    expect((await table.locate('mem_top', {}))!.record.handEdited).toBeUndefined()
     await writeFile(path, (await readFile(path, 'utf8')).replace('原文', '用户改过的正文'))
-    expect((await table.locate('mem_top'))!.record.handEdited).toBe(true)
+    expect((await table.locate('mem_top', {}))!.record.handEdited).toBe(true)
     await table.maintain([wsDir()])
     expect((await frontmatter(path)).handEdited).toBe(true)
   })
@@ -464,7 +464,7 @@ describe('同 id 重复副本只在写该 id 时清理', () => {
     await writeMem(globalDir(), 'bystander-2.md', record({ id: 'mem_by', updatedAt: 200 }))
     const { table } = open()
     // put 带 workspacePath：一级定位 global + 本项目目录，取舍到 updatedAt 最新的本项目那份
-    await table.put('mem_c', wsRecord({ id: 'mem_c', content: '改过', updatedAt: now }))
+    await table.put(wsRecord({ id: 'mem_c', content: '改过', updatedAt: now }), { workspacePath: WS })
     expect(await mds(wsDir())).toEqual(['cur.md'])
     expect(await mds(archiveOf(wsDir()))).toEqual([])
     expect(await mds(globalDir())).toEqual(['bystander-2.md', 'bystander.md'])   // 别的 id 的副本不动

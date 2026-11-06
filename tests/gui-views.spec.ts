@@ -479,7 +479,7 @@ describe('全部记忆视图', () => {
     await h.store.create(g({ id: 'mem_same', name: '全局那份' }))
     await h.store.create(w({ id: 'mem_same', name: '本项目那份' }))
     h.setClock(T0 + 5000)
-    expect(await h.store.softDelete({ id: 'mem_same' }, { isExactLayer: true })).toBe(true)
+    expect(await h.store.softDelete({ id: 'mem_same' }, { at: { kind: 'global' } })).toBe(true)
 
     const { library, deleted } = await h.views()
     expect(library.layers.map(l => [l.layer, l.items.map(i => [i.id, i.name, i.filePath])])).toEqual([

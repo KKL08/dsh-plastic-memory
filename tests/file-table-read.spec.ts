@@ -7,11 +7,11 @@ import { FileTable } from '../src/storage/file-table.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { resolveDuplicates, type LocatedRecord } from '../src/storage/table.ts'
 import { ARCHIVE_DIR, GLOBAL_DIR, STATE_DIR, WORKSPACE_MARKER, deriveFileId, workspaceDirName } from '../src/storage/paths.ts'
-import { InMemoryKvTable } from '../src/kv-table.ts'
 import { matchScore } from '../src/text.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
+import { InMemoryKvTable } from '../src/kv-table.ts'
 import { MemoryStore } from '../src/store.ts'
 
 // 读侧内核：磁盘是唯一真相、读路径零写入、
@@ -88,13 +88,13 @@ describe('外部写入立即可见：没有任何刷新调用', () => {
     expect((await t.readScope([globalDir()])).records).toEqual([])
     await seedGlobal('a.md', record({ id: 'mem_a', content: '第一版' }))
     expect((await t.readScope([globalDir()])).records.map(r => r.record.content)).toEqual(['第一版'])
-    expect(((await t.locate('mem_a'))?.record)!.content).toBe('第一版')
+    expect(((await t.locate('mem_a', {}))?.record)!.content).toBe('第一版')
     await writeFile(join(globalDir(), 'a.md'), encodeRecord(record({ id: 'mem_a', content: '第二版' }), {}))
     expect((await t.readScope([globalDir()])).records.map(r => r.record.content)).toEqual(['第二版'])
-    expect(((await t.locate('mem_a'))?.record)!.content).toBe('第二版')
+    expect(((await t.locate('mem_a', {}))?.record)!.content).toBe('第二版')
     await rm(join(globalDir(), 'a.md'))
     expect((await t.readScope([globalDir()])).records).toEqual([])
-    expect((await t.locate('mem_a'))?.record).toBeUndefined()
+    expect((await t.locate('mem_a', {}))?.record).toBeUndefined()
   })
 
   it('readScope 的记录带实际文件路径与所在目录；workspacePath 取自 .workspace 标记', async () => {
@@ -141,7 +141,7 @@ describe('读路径零写入', () => {
     expect(read.records.map(r => r.record.id).sort()).toEqual(['mem_a', 'mem_dup', 'mem_dup', 'mem_old', 'mem_w'])  // 重复 id 不取舍、不删
     expect(read.quarantined.map(q => q.path)).toEqual([join(globalDir(), 'bad.md')])
     expect(read.directoryNotes.map(n => [n.code, n.path])).toEqual([['marker-missing', join(root, 'stray-dir')]])
-    expect((await t.locate('mem_dup'))!.filePath).toBe(join(globalDir(), 'dup-new.md'))
+    expect((await t.locate('mem_dup', {}))!.filePath).toBe(join(globalDir(), 'dup-new.md'))
     expect((await t.locate('mem_old', { workspacePath: '/home/dev/p' }))!.filePath).toBe(join(wsDir('/home/dev/p'), ARCHIVE_DIR, 'old.md'))
     expect(await t.locate('mem_nope', { workspacePath: '/home/dev/p' })).toBeUndefined()   // 两级都走一遍
     const listing = await t.listWorkspaceDirs()
@@ -166,7 +166,7 @@ describe('读路径不加锁', () => {
     const isEntered = new Promise<void>(resolve => { entered = resolve })
     let release!: () => void
     gate.current = { match: path => path.startsWith(join(wsDir(ws), '锁.md.tmp-')), entered, release: new Promise<void>(resolve => { release = resolve }) }
-    const writing = table.update('mem_lock', cur => ({ ...cur, content: '新正文', updatedAt: cur.updatedAt + 1 }), { workspacePath: ws })
+    const writing = table.update('mem_lock', { workspacePath: ws }, cur => ({ ...cur, content: '新正文', updatedAt: cur.updatedAt + 1 }))
     await isEntered // 写路径已在锁内、停在写临时文件之前
 
     // 读路径都不等这把锁：写还没放行，它们就都返回了，读到的是旧内容
@@ -191,7 +191,7 @@ describe('派生 id 定位', () => {
     const derived = deriveFileId(`${GLOBAL_DIR}/手建.md`)
     const table = open()
     reads.tracing = true
-    const hit = await table.locate(derived)
+    const hit = await table.locate(derived, {})
     reads.tracing = false
     expect(hit?.filePath).toBe(target)
     expect(hit?.record).toMatchObject({ id: derived, name: '手建', content: '手写的正文' })
@@ -272,7 +272,7 @@ describe('文件形态', () => {
     const [hit] = (await t.readScope([globalDir()])).records
     expect(hit.record.id).toBe('mem_crlf')
     expect(hit.record.content).toBe('第一行\r\n第二行')
-    expect((await t.locate('mem_crlf'))!.filePath).toBe(join(globalDir(), 'crlf.md'))
+    expect((await t.locate('mem_crlf', {}))!.filePath).toBe(join(globalDir(), 'crlf.md'))
   })
 
   it('id 带引号与两侧空白（id: "mem_x" / id: \'mem_y\'  ）也能定位', async () => {
@@ -280,15 +280,15 @@ describe('文件形态', () => {
     await writeFile(join(globalDir(), 'q.md'), '---\nid: "mem_x"\nname: n\ntype: knowledge\n---\n\nc\n')
     await writeFile(join(globalDir(), 's.md'), "---\nid:   'mem_y'   \nname: n\ntype: knowledge\n---\n\nc\n")
     const t = open()
-    expect((await t.locate('mem_x'))!.filePath).toBe(join(globalDir(), 'q.md'))
-    expect((await t.locate('mem_y'))!.filePath).toBe(join(globalDir(), 's.md'))
-    expect(await t.locate('mem_')).toBeUndefined()   // 前缀不算命中
+    expect((await t.locate('mem_x', {}))!.filePath).toBe(join(globalDir(), 'q.md'))
+    expect((await t.locate('mem_y', {}))!.filePath).toBe(join(globalDir(), 's.md'))
+    expect(await t.locate('mem_', {})).toBeUndefined()   // 前缀不算命中
   })
 
   it('正文里的 "id: …" 行不算定位命中', async () => {
     await seedGlobal('a.md', record({ id: 'mem_real', content: 'id: mem_fake\n上面那行是正文' }))
     const t = open()
-    expect(await t.locate('mem_fake')).toBeUndefined()
+    expect(await t.locate('mem_fake', {})).toBeUndefined()
   })
 })
 
@@ -301,8 +301,8 @@ describe('加载期零 I/O', () => {
     expect(await t.locate('mem_a', { workspacePath: '/p' })).toBeUndefined()
     await expect(stat(missing)).rejects.toThrow()
     // 首次写才建目录
-    await t.put('mem_a', record({ id: 'mem_a' }))
-    expect(((await t.locate('mem_a'))?.record)!.id).toBe('mem_a')
+    await t.put(record({ id: 'mem_a' }), {})
+    expect(((await t.locate('mem_a', {}))?.record)!.id).toBe('mem_a')
   })
 })
 
@@ -338,10 +338,23 @@ describe('目录级说明与目录名确定性', () => {
     const t = open()
     expect((await t.listWorkspaceDirs()).entries).toEqual([{ workspacePath: '/home/dev/p', dir: renamed, hasActiveTopLevel: true }])
     expect((await t.locate('mem_a', { workspacePath: '/home/dev/p' }))!.dir).toBe(renamed)
-    await t.update('mem_a', r => ({ ...r, content: '改过', updatedAt: 2 }))
-    await t.put('mem_b', record({ id: 'mem_b', name: 'b', scope: 'workspace', workspacePath: '/home/dev/p' }))
+    await t.update('mem_a', {}, r => ({ ...r, content: '改过', updatedAt: 2 }))
+    await t.put(record({ id: 'mem_b', name: 'b', scope: 'workspace', workspacePath: '/home/dev/p' }), { workspacePath: '/home/dev/p' })
     expect((await readdir(renamed)).filter(n => n.endsWith('.md')).sort()).toEqual(['MEMORY.md', 'a.md', 'b.md'])
     await expect(stat(wsDir('/home/dev/p'))).rejects.toThrow()   // 没有另建确定性目录
+  })
+
+  it('copiesOf 与给作用域的定位同口径：标准目录与改名目录并存时只看标准目录，只有改名目录时看它', async () => {
+    const p = '/home/dev/p'
+    const renamed = join(root, 'my-renamed-project')
+    await seedGlobal('x.md', record({ id: 'mem_x' }))
+    await seedWorkspace(p, 'x.md', record({ id: 'mem_x', scope: 'workspace', workspacePath: p }), renamed)
+    const t = open()
+    expect(await t.copiesOf('mem_x')).toEqual([{ kind: 'global' }, { kind: 'workspace', workspacePath: p }])   // 只有改名目录
+
+    await seedWorkspace(p, 'other.md', record({ id: 'mem_other', scope: 'workspace', workspacePath: p }))   // 标准目录出现
+    expect(await t.locate('mem_x', { kind: 'workspace', workspacePath: p })).toBeUndefined()
+    expect(await t.copiesOf('mem_x')).toEqual([{ kind: 'global' }])
   })
 })
 
