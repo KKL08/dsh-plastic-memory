@@ -1,4 +1,5 @@
 // 「全部记忆」tab：对假网关断言渲染出什么、每个动作发出了哪条命令或宿主调用。
+import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { GUI_VIEW_VERSION, scopeKey, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
@@ -539,6 +540,24 @@ describe('全部记忆', () => {
       expect(groupToggle('人物')).toHaveAttribute('aria-expanded', 'false')
       expect(groupToggle('事实与经验')).toHaveAttribute('aria-expanded', 'true')
       expect(texts(groupBody('事实与经验'))).toHaveLength(3)
+      // 上一次搜索里的收起清空搜索时就丢了：再搜索，组照样都展开
+      fireEvent.change(search, { target: { value: '1' } })
+      expect(groupToggle('事实与经验')).toHaveAttribute('aria-expanded', 'true')
+    })
+
+    it('StrictMode 下分组行为不变：搜索里收起、清空复原、再搜都展开；「展开其余」焦点落在新露出的第一条', () => {
+      renderInShell(<StrictMode><LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} /></StrictMode>, createFakeGateway({ views: { library: typed() } }))
+      const search = screen.getByRole('searchbox', { name: '搜索记忆' })
+      fireEvent.change(search, { target: { value: '1' } })
+      fireEvent.click(groupToggle('事实与经验'))
+      expect(groupToggle('事实与经验')).toHaveAttribute('aria-expanded', 'false')
+      fireEvent.change(search, { target: { value: '' } })
+      expect(groupToggle('事实与经验')).toHaveAttribute('aria-expanded', 'true')
+      fireEvent.change(search, { target: { value: '1' } })
+      expect(groupToggle('事实与经验')).toHaveAttribute('aria-expanded', 'true')
+      fireEvent.change(search, { target: { value: '' } })
+      fireEvent.click(screen.getByRole('button', { name: '展开其余 2 条' }))
+      expect(rowOf('经验 4')).toHaveFocus()
     })
 
     it('折叠状态记在记忆页给的那一份里：切走再回来（重挂）还在，另一个范围不受影响', () => {
