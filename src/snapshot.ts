@@ -6,6 +6,7 @@ import { EVIDENCE_GUIDANCE, type EvidenceLookupLevel } from './evidence-guidance
 import { stalenessNote, withinValidity } from './record-freshness.ts'
 import { exposedPath, maskSecretSurface } from './secrets.ts'
 import type { OverflowLevel, OverflowMode } from './contract-codes.ts'
+import { relaxedTier } from './gui/contract.ts'
 import { CJK } from './search/tokenizer.ts'
 import { SNAPSHOT_MESSAGE_PREFIX } from './snapshot-message.ts'
 
@@ -94,7 +95,7 @@ export function overflowLevel(mode: OverflowMode, usedTokens: number, budget: nu
   if (!(budget > 0)) return undefined
   if (mode === 'strict') return usedTokens * 100 >= budget * 95 ? { mode, tier: 0 } : undefined
   if (usedTokens <= budget) return undefined
-  return { mode, tier: Math.ceil(((usedTokens - budget) * 4) / budget) }
+  return { mode, tier: relaxedTier(usedTokens, budget) }
 }
 
 /** 各类记忆怎么用：带入了的类型按首次出现的顺序各一行，没写用法的跳过；一行都没有时不出这一段。 */

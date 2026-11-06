@@ -7,6 +7,7 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { DAY } from './helpers/clock.ts'
 import { SNAPSHOT_SUPERSEDE_NOTE } from '../src/snapshot-message.ts'
+import { relaxedCap, relaxedTier } from '../src/gui/contract.ts'
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const NOW = 10 * DAY
@@ -134,6 +135,18 @@ describe('overflowLevel：档位', () => {
     expect(overflowLevel('relax', 5000, 4000)).toEqual({ mode: 'relax', tier: 1 })
     expect(overflowLevel('relax', 5001, 4000)).toEqual({ mode: 'relax', tier: 2 })
     expect(overflowLevel('relax', 9000, 4000)).toEqual({ mode: 'relax', tier: 5 })
+  })
+
+  it('PA-21：上限不是 4 的倍数时，界面算的档位和放宽上限与服务端一致（取整同账本说明）', () => {
+    // [上限, 用量, 档位, 放宽到的上限]：档位与上限按手算写死，不从被测函数推
+    const rows: ReadonlyArray<[number, number, number, number]> = [[4002, 4100, 1, 5003], [4001, 5100, 2, 6002], [4003, 5003, 1, 5004], [4003, 5004, 2, 6005], [999, 1000, 1, 1249]]
+    for (const [budget, used, tier, cap] of rows) {
+      expect(overflowLevel('relax', used, budget)).toEqual({ mode: 'relax', tier })
+      expect(relaxedTier(used, budget)).toBe(tier)
+      expect(relaxedCap(budget, tier)).toBe(cap)
+    }
+    expect(relaxedTier(4002, 4002)).toBe(0)
+    expect(relaxedCap(4002, 0)).toBe(4002)
   })
 
   it('严格：用到 95% 记一档', () => {

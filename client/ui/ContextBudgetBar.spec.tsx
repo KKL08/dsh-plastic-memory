@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, screen } from '@testing-library/react'
-import { barScale, budgetParts, ContextBudgetBar, relaxedCap } from './ContextBudgetBar.tsx'
+import { barScale, budgetParts, capFor, ContextBudgetBar } from './ContextBudgetBar.tsx'
 import { renderInShell } from '../test-utils.tsx'
 
 const widths = (container: HTMLElement) =>
@@ -12,13 +12,13 @@ const legendKeys = (container: HTMLElement) =>
     text: el.textContent,
   }))
 
-describe('relaxedCap', () => {
+describe('capFor', () => {
   it('没超上限是上限本身；超出按 25% 一档向上取', () => {
-    expect(relaxedCap(3000, 4000)).toBe(4000)
-    expect(relaxedCap(4000, 4000)).toBe(4000)
-    expect(relaxedCap(4001, 4000)).toBe(5000)
-    expect(relaxedCap(5000, 4000)).toBe(5000)
-    expect(relaxedCap(5200, 4000)).toBe(6000)
+    expect(capFor(3000, 4000)).toBe(4000)
+    expect(capFor(4000, 4000)).toBe(4000)
+    expect(capFor(4001, 4000)).toBe(5000)
+    expect(capFor(5000, 4000)).toBe(5000)
+    expect(capFor(5200, 4000)).toBe(6000)
   })
 })
 

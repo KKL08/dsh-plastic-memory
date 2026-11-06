@@ -8,7 +8,7 @@ import type { TypeRegistry } from './type-registry.ts'
 import type { EvidenceLookupLevel } from './evidence-guidance.ts'
 import { assembleSnapshot, overflowLevel, type OverflowMode, type SnapshotUsage } from './snapshot.ts'
 import type { OverflowLevel } from './contract-codes.ts'
-import type { SessionView, SnapshotOrigin } from './gui/contract.ts'
+import { relaxedCap, type SessionView, type SnapshotOrigin } from './gui/contract.ts'
 
 /**
  * 快照的预读：global + 当前 workspace 顶层的 active 记录（同 id 按取舍规则留一份，口径同 queryScope 的默认查询），
@@ -51,7 +51,7 @@ export type FrozenSnapshotInfo = Omit<SessionView, 'version' | 'sessionId' | 'sa
 /** 写进账本的超限说明（给 agent 和日志看；界面文案由客户端按结构渲染）。 */
 function overflowSummary(level: OverflowLevel, usage: SnapshotUsage, budget: number): string {
   return level.mode === 'relax'
-    ? `带入记忆约 ${usage.usedTokens} token，超出上限 ${budget}，已自动放宽到 ${Math.round(budget * (1 + 0.25 * level.tier))}`
+    ? `带入记忆约 ${usage.usedTokens} token，超出上限 ${budget}，已自动放宽到 ${relaxedCap(budget, level.tier)}`
     : `带入记忆约 ${usage.usedTokens} token，已用到上限 ${budget} 的 95%${usage.omittedCount > 0 ? `，${usage.omittedCount} 条没带入` : ''}`
 }
 

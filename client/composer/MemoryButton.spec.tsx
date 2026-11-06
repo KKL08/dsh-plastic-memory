@@ -149,6 +149,11 @@ describe('超限行', () => {
     expect(dialog).toHaveTextContent('超出上限 480，已自动放宽到 5,000·处理 ›')
   })
 
+  it('PA-21：上限不是 4 的倍数时，放宽到的上限按服务端口径取整', () => {
+    setup({ view: sessionView({ budget: 4002, usedTokens: 4100, tokens: { workspace: 3000, global: 1100, fixed: 300 } }) })
+    expect(openPanel()).toHaveTextContent('超出上限 98，已自动放宽到 5,003·处理 ›')
+  })
+
   it('严格：已到上限，N 条没带入 · 处理 ›', () => {
     setup({ view: sessionView({ overflowMode: 'strict', usedTokens: 4000, omittedCount: 3, tokens: { workspace: 2800, global: 1150, fixed: 250 } }) })
     const dialog = openPanel()

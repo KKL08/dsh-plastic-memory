@@ -4,7 +4,7 @@
  */
 import { createContext, useContext, useState, type ReactNode } from 'react'
 import {
-  CONFLICT_ACTION_VERDICTS, MODEL_EDIT_ADVICE_TYPES, layerOfMemory, mergeKeeperIndex,
+  CONFLICT_ACTION_VERDICTS, MODEL_EDIT_ADVICE_TYPES, layerOfMemory, mergeKeeperIndex, relaxedCap,
   type AdviceType, type GuiLayerRef, type IgnorableAdviceType, type MemoryCard as MemoryCardData, type MemoryCommand, type ModelEditAdviceType, type PendingItem,
 } from '../../src/gui/contract.ts'
 import { belongsTo, useGateway, type BorrowedSession } from '../gateway.ts'
@@ -283,9 +283,6 @@ export function PromoteCard({ item, session, now, typeLabel, onDone, onRefused, 
 
 // —— 超出上限 ——
 
-/** 第 tier 档放宽到的上限：budget × (1 + 0.25 × tier)。 */
-const capOf = (budget: number, tier: number) => Math.round(budget * (1 + 0.25 * tier))
-
 export function OverflowCard({ item, session, onDone, onRefused, budget, onCleanup }: CardProps<'overflow'> & {
   budget: number | undefined
   /** 「整理记忆 ›」：去全部记忆，作用域是这张卡那一层。 */
@@ -295,7 +292,7 @@ export function OverflowCard({ item, session, onDone, onRefused, budget, onClean
   const gateway = useGateway()
   const action = useItemAction(session, () => { onDone({ kind: 'dismissed' }) }, onRefused)
   // 建议值：下一档的起点向上取整到百，填了就不会在这一档再提醒
-  const suggested = budget === undefined ? '' : String(Math.ceil(capOf(budget, item.tier + 1) / 100) * 100)
+  const suggested = budget === undefined ? '' : String(Math.ceil(relaxedCap(budget, item.tier + 1) / 100) * 100)
   const [draft, setDraft] = useState<string | undefined>(undefined)
   const value = draft ?? suggested
   const parsed = Number(value)
@@ -313,7 +310,7 @@ export function OverflowCard({ item, session, onDone, onRefused, budget, onClean
   const over = 25 * item.tier
   const summary = item.mode === 'relax'
     ? budget === undefined ? t('pending.overflow.relaxNoBudget', { over })
-      : t('pending.overflow.relax', { over, cap: formatNumber(capOf(budget, item.tier)), budget: formatNumber(budget) })
+      : t('pending.overflow.relax', { over, cap: formatNumber(relaxedCap(budget, item.tier)), budget: formatNumber(budget) })
     : budget === undefined ? t('pending.overflow.strictNoBudget') : t('pending.overflow.strict', { budget: formatNumber(budget) })
   return (
     <Card
