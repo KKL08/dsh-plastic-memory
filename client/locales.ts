@@ -68,6 +68,9 @@ export const zh = {
   'view.outdated': '数据格式已更新，需要刷新。',
   'view.error': '读取失败：{message}',
 
+  'command.failed': '没有成功：{detail}',
+  'command.handledElsewhere': '这次操作没有生效：这一条正在别处处理，或者刚在别处处理完。',
+
   'time.justNow': '刚刚',
   'time.monthDay': '{month} 月 {day} 日',
   'time.yearMonthDay': '{year} 年 {month} 月 {day} 日',
@@ -197,6 +200,9 @@ export const en: Record<LocaleKey, string> = {
   'view.missing': 'This data has not been generated yet.',
   'view.outdated': 'The data format changed and needs a refresh.',
   'view.error': 'Could not read: {message}',
+
+  'command.failed': 'Did not work: {detail}',
+  'command.handledElsewhere': 'This did not take effect: it is being handled elsewhere, or was just handled there.',
 
   'time.justNow': 'Just now',
   'time.monthDay': '{monthName} {day}',

@@ -662,7 +662,7 @@ describe('交付卡：提升候选就地处理', () => {
     expand()
     await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '提升为全局' })) })
     await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '撤销' })) })
-    expect(row('mem_c').getByRole('alert')).toHaveTextContent('没有完成：快照已过期')
+    expect(row('mem_c').getByRole('alert')).toHaveTextContent('没有成功：快照已过期')
     expect(row('mem_c').getByText('已提升为全局')).toBeInTheDocument()
     expect(row('mem_c').getByRole('button', { name: '撤销' })).toBeInTheDocument()
   })
@@ -704,7 +704,7 @@ describe('交付卡：提升候选就地处理', () => {
     }), configWith('agents-md'))
     expand()
     await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '写进 AGENTS.md' })) })
-    expect(row('mem_c').getByRole('alert')).toHaveTextContent('没有完成：含密钥的记忆不能写入 AGENTS.md：mem_c')
+    expect(row('mem_c').getByRole('alert')).toHaveTextContent('没有成功：含密钥的记忆不能写入 AGENTS.md：mem_c')
     expect(row('mem_c').getByText(/^这条看起来适合所有项目。/)).toBeInTheDocument()
   })
 
@@ -716,7 +716,7 @@ describe('交付卡：提升候选就地处理', () => {
     expect(screen.getByRole('button', { expanded: false })).toBeInTheDocument()
     expand()
     await act(async () => { fireEvent.click(row('mem_c').getByRole('button', { name: '提升为全局' })) })
-    expect(row('mem_c').getByRole('alert')).toHaveTextContent('没有完成：全局里已经有这条记忆（含最近删除），没有提升。')
+    expect(row('mem_c').getByRole('alert')).toHaveTextContent('没有成功：全局里已经有这条记忆（含最近删除），没有提升。')
     expect(row('mem_c').getByText(/^这条看起来适合所有项目。/)).toBeInTheDocument()
   })
 

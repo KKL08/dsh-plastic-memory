@@ -1,6 +1,6 @@
 /**
  * 建议整理卡里就地改一条记忆（直接改）或把两条合成一条（直接合并）：正文是编辑框，「更多」里是名称、摘要、标签，类型改不了。
- * 这里只管草稿；命令由卡片经 useItemAction 发出，保存中、等确认时按钮跟着卡片的忙状态置灰，失败原因写在卡片底下。
+ * 这里只管草稿；命令由卡片经 useCardAction 发出，保存中、等确认时按钮跟着卡片的忙状态置灰，失败原因写在卡片底下。
  */
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 import { formatNumber, useT } from '../i18n.tsx'

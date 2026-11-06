@@ -12,7 +12,7 @@ import { Button } from '../ui/Button.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { Icon } from '../ui/Icon.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
-import { DeleteWithConfirm } from '../pending/action.tsx'
+import { DeleteWithConfirm } from '../command/confirm.tsx'
 import { bucketize, GROUP_PREVIEW, groupByType, MemoryGroup, RECENT_BUCKETS, recentBucketOf, useFold, type FoldMemory } from './groups.tsx'
 import { FlashRow, matchesQuery, SearchBox, useFlashTarget, useRowActions, useTypeLabel, ViewMessage } from './shared.tsx'
 
@@ -99,7 +99,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
   const { flashId, revealId, targetId, clear } = useFlashTarget(nav, items.map(m => m.id))
   const typeLabel = useTypeLabel(session)
   const folds = useFold(fold, `library|${checkupKey(scope)}`, isSearching)
-  if (view.status !== 'ready') return <ViewMessage state={view} />
+  if (view.status !== 'ready') return <ViewMessage state={view} idle={null} />
 
   const data = view.data
   const total = data.layers.reduce((n, l) => n + l.items.length, 0)

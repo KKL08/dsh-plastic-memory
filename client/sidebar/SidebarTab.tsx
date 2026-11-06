@@ -34,7 +34,8 @@ import { EmptyState } from '../ui/EmptyState.tsx'
 import { Icon } from '../ui/Icon.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { Arrival, useArrivals } from '../ui/motion.tsx'
-import { CrossConfirm, crossConfirmCss, isHandledElsewhere, DeleteWithConfirm, SecretDeleteConfirm } from '../pending/action.tsx'
+import { confirmCss, CrossConfirm, DeleteWithConfirm, SecretDeleteConfirm } from '../command/confirm.tsx'
+import { interpret } from '../command/protocol.ts'
 import { promoteInPlaceCss, promotionOf, usePromoteInPlace, type InPlacePromotion } from '../pending/promote-in-place.tsx'
 import { ModelChangeLine, modelChangeCss } from '../pending/model-change.tsx'
 import { keepFocusInPlace } from '../ui/focus-return.ts'
@@ -132,7 +133,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     const isAllowed = 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
     if (result.code === 'cross-workspace' && !isAllowed && workspacePath !== undefined) setCross({ id, workspacePath, command, onOk })
     else if (result.code === 'has-secret' && command.cmd === 'forget') setSecretId(id)
-    else if (isHandledElsewhere(command, result)) setRefused(id)
+    else if (interpret(command, result).kind === 'handled-elsewhere') setRefused(id)
     else setFailure({ id, detail: result.detail ?? result.code })
   }
   const rule = (item: Conflict, verdict: Verdict) => {
@@ -550,7 +551,7 @@ function ViewNote({ state }: { state: ViewState<unknown> }) {
   return <p className="pm-side-hint" role="status">{text}</p>
 }
 
-export const sidebarTabCss = crossConfirmCss + promoteInPlaceCss + modelChangeCss + `
+export const sidebarTabCss = confirmCss + promoteInPlaceCss + modelChangeCss + `
 .pm-side-root { height: 100%; min-height: 0; }
 .pm-side {
   height: 100%; min-height: 0; overflow: auto; scrollbar-gutter: stable;

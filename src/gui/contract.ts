@@ -734,6 +734,27 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
 ])
 export type MemoryCommand = z.infer<typeof memoryCommandSchema>
 
+/** 带 allowCrossWorkspace 字段的命令。 */
+export type CrossWorkspaceCommand = Extract<MemoryCommand, { cmd: CrossWorkspaceCmd }>
+type CrossWorkspaceCmd = MemoryCommand extends infer C ? C extends { cmd: infer K } ? 'allowCrossWorkspace' extends keyof C ? K : never : never : never
+
+/**
+ * 可带跨项目确认的命令：服务端回 cross-workspace（什么都没动）时，界面确认后带 allowCrossWorkspace 重发。
+ * 从命令 schema 推出：schema 里有 allowCrossWorkspace 字段的就是。
+ */
+export const CROSS_WORKSPACE_COMMANDS: ReadonlySet<CrossWorkspaceCmd> = new Set(
+  memoryCommandSchema.options.flatMap(o => 'allowCrossWorkspace' in o.shape ? [o.shape.cmd.value as CrossWorkspaceCmd] : []),
+)
+
+/**
+ * 条目还开着才能做的命令，not-found 算别处已处理：处理待决项的，not-found 只可能是条目已出了待决；按记忆 id 提升为全局的，
+ * 只可能是那条记忆已不在那个项目里（别处已提升或删掉）；按记忆 id 留在本项目的，是那条已不是候选（别处已处理）；
+ * 移到项目的同理，是那条已不在全局；忽略建议的，只可能是涉及的记忆已在别处删掉。undo 的 not-found 还可能是快照过期，不在其中。
+ */
+export const OPEN_ITEM_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set([
+  'resolve', 'promote', 'keep-local', 'dismiss-overflow', 'promote-memory', 'keep-local-memory', 'move-memory', 'ignore-advice',
+] as const)
+
 /** 命令 → 整行文本（客户端发给 `remote.commands.execute`）。 */
 export function encodeMemoryCommand(command: MemoryCommand): string {
   const { cmd, ...rest } = command

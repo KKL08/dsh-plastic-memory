@@ -13,11 +13,13 @@
  * 带 newItem 进来时（状态条结果行的链接）跳到第一条带「新」的条目：滚到视野中间、闪一次、接住焦点；没有就落在顶部。
  */
 import { useEffect, useId, useRef, useState, type ReactElement, type ReactNode, type RefObject } from 'react'
-import { PENDING_LEVELS, pendingItemKey, pendingItemScopes, type HealthView, type LibraryView, type PendingItem, type PendingLevel, type PendingView } from '../../src/gui/contract.ts'
+import { PENDING_LEVELS, pendingItemKey, pendingItemScopes, type HealthView, type LibraryView, type PendingItem, type PendingLevel } from '../../src/gui/contract.ts'
 import { isNewItem, markSeen, newItemIndex, readSeen, type Seen } from '../checkup/seen.ts'
-import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
+import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, formatDay, formatNumber, useT } from '../i18n.tsx'
-import { FlashRow, useFlashTarget, useTypeLabel } from '../library/shared.tsx'
+import { confirmCss } from '../command/confirm.tsx'
+import { ItemSending } from '../command/useCommandRunner.ts'
+import { FlashRow, useFlashTarget, useTypeLabel, ViewMessage } from '../library/shared.tsx'
 import type { LocaleKey } from '../locales.ts'
 import { compareScopes, isInScope, scopeLabel, useNavTarget, type NavStore, type NavTarget, type NewItemJump, type PageScope } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
@@ -26,12 +28,11 @@ import { EmptyState } from '../ui/EmptyState.tsx'
 import { Icon } from '../ui/Icon.tsx'
 import { Arrival, useArrivals } from '../ui/motion.tsx'
 import { StatusMarker } from '../ui/StatusMarker.tsx'
-import { ActionFeedback, crossConfirmCss, ItemSending, useItemAction } from './action.tsx'
 import { editCss } from './edit.tsx'
 import { modelEditCss } from './model-edit.tsx'
 import { moveCss } from './move.tsx'
 import {
-  AdviceCard, adviceTitle, HorizontalCard, ItemIsNew, ItemScopeNames, OverflowCard, PromoteCard, ResultCard, SecretCard, titleOf, UnreadableCard, VerticalCard, type Outcome,
+  AdviceCard, adviceTitle, HorizontalCard, ItemIsNew, ItemScopeNames, OverflowCard, PromoteCard, ResultCard, SecretCard, titleOf, UnreadableCard, useCardAction, VerticalCard, type Outcome,
 } from './cards.tsx'
 
 /** 建议整理先显示的行数，其余收进「展开其余 N 条」；要紧的两组全部显示。 */
@@ -140,7 +141,7 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
   // 撤销后视图把条目带回来了：本地那张让位
   useEffect(() => { if (recent?.undone && backInView) setRecent(undefined) }, [recent, backInView])
 
-  if (pending.status !== 'ready' && recent === undefined) return <ViewStatus state={pending} />
+  if (pending.status !== 'ready' && recent === undefined) return <ViewMessage state={pending} idle={t('session.none.title')} className="pm-page-placeholder" />
 
   // 视图还没重写时刚处理的条目仍在里面：先藏起来，原位放结果卡
   const items = viewItems.filter(i => recent === undefined || recent.undone || pendingItemKey(i) !== recentKey)
@@ -369,7 +370,7 @@ type IgnoredItem = HealthView['layers'][number]['ignored'][number]
 /** 不再提醒的一条：问题类型 · 记忆名（「全部」里带范围胶囊），「恢复提醒」发 unignore-advice；成功后视图重写，这一条随之消失。 */
 function IgnoredRow({ item, scopeLabel, session }: { item: IgnoredItem; scopeLabel: string | undefined; session: BorrowedSession }) {
   const t = useT()
-  const action = useItemAction(session, () => {})
+  const action = useCardAction(session, {})
   return (
     <li className="pm-ignored-row">
       <span className="pm-ignored-text">{[adviceTitle(item.type, t), ...item.memories.map(m => m.name)].join(' · ')}</span>
@@ -382,7 +383,7 @@ function IgnoredRow({ item, scopeLabel, session }: { item: IgnoredItem; scopeLab
       >
         {t('pending.ignored.unignore')}
       </Button>
-      <ActionFeedback action={action} />
+      {action.feedback}
     </li>
   )
 }
@@ -415,15 +416,6 @@ function Ignored({ entries, session }: { entries: ReadonlyArray<{ item: IgnoredI
   )
 }
 
-function ViewStatus({ state }: { state: Exclude<ViewState<PendingView>, { status: 'ready' }> }) {
-  const t = useT()
-  const text = state.status === 'error' ? t('view.error', { message: state.message })
-    : state.status === 'missing' ? t('view.missing')
-      : state.status === 'outdated' ? t('view.outdated')
-        : state.status === 'idle' ? t('session.none.title') : t('view.loading')
-  return <p className="pm-page-placeholder" role="status">{text}</p>
-}
-
 /** 这个范围最近一次体检的时间；一个作用域都没体检过为 null。 */
 function lastScanAt(scopes: HealthView['layers']): number | null {
   const times = scopes.map(l => l.lastCheckupAt).filter((v): v is number => v !== null)
@@ -451,7 +443,7 @@ function PendingEmpty({ isOff, lastCheckupAt, now }: {
   )
 }
 
-export const pendingCss = crossConfirmCss + editCss + modelEditCss + moveCss + `
+export const pendingCss = confirmCss + editCss + modelEditCss + moveCss + `
 .pm-pending { display: flex; flex-direction: column; }
 .pm-root .pm-pending:focus-visible { outline: none; }
 .pm-pending-group { display: flex; flex-direction: column; }
@@ -494,7 +486,7 @@ export const pendingCss = crossConfirmCss + editCss + modelEditCss + moveCss + `
 .pm-pending-item--marked .pm-pending-body { padding-left: 22px; }
 .pm-pending-hint { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-pending-hint .pm-link { margin-left: 8px; font-size: 12px; }
-.pm-pending-error { margin: 6px 0 0; font-size: 12px; line-height: 1.5; color: var(--pm-text); }
+.pm-pending-item .pm-pending-error { margin-top: 6px; }
 .pm-pending-refused { margin: 0; padding: 12px 0; font-size: 12px; line-height: 1.5; color: var(--pm-text); }
 .pm-pending-item--result { transition: opacity 120ms ease-out; }
 @starting-style { .pm-pending-item--result { opacity: 0; } }

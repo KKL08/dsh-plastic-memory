@@ -7,7 +7,7 @@ import type { MemoryCard, MemoryCommand } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { useT } from '../i18n.tsx'
 import { useNavTarget, type NavStore, type NavTarget } from '../nav.ts'
-import { CrossConfirm, crossConfirmCss, SecretDeleteConfirm } from '../pending/action.tsx'
+import { confirmCss, CrossConfirm, SecretDeleteConfirm } from '../command/confirm.tsx'
 import { keepFocusInPlace } from '../ui/focus-return.ts'
 import { Icon } from '../ui/Icon.tsx'
 import { prefersReducedMotion } from '../ui/motion.tsx'
@@ -56,12 +56,15 @@ export function matchesQuery(memory: MemoryCard, query: string): boolean {
   return [memory.name, memory.summary, memory.content, ...memory.tags].some(text => text.toLowerCase().includes(q))
 }
 
-/** 视图不是 ready 时的一行说明；idle（没有会话）由页面壳的空态负责，这里不画。 */
-export function ViewMessage({ state }: { state: Exclude<ViewState<unknown>, { status: 'ready' }> }) {
+/**
+ * 视图还没就绪时的一行说明（role=status），各面板共用。idle（没有会话）写什么由调用方给：null 不画（由页面壳的空态负责）。
+ * 视图已就绪时不画。
+ */
+export function ViewMessage({ state, idle, className = 'pm-tab-message' }: { state: ViewState<unknown>; idle: string | null; className?: string }) {
   const t = useT()
-  if (state.status === 'idle') return null
-  const text = state.status === 'error' ? t('view.error', { message: state.message }) : t(`view.${state.status}`)
-  return <p className="pm-tab-message">{text}</p>
+  if (state.status === 'ready' || (state.status === 'idle' && idle === null)) return null
+  const text = state.status === 'error' ? t('view.error', { message: state.message }) : state.status === 'idle' ? idle : t(`view.${state.status}`)
+  return <p className={className} role="status">{text}</p>
 }
 
 /**
@@ -227,7 +230,7 @@ export function useRowActions(session: BorrowedSession) {
   }
 }
 
-export const sharedTabCss = crossConfirmCss + `
+export const sharedTabCss = confirmCss + `
 .pm-search {
   display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border-radius: 12px;
   border: .5px solid var(--pm-line-input); color: var(--pm-text-2); background: transparent;

@@ -13,7 +13,7 @@ import { isInScope, type NavStore, type PageScope } from '../nav.ts'
 import { Button } from '../ui/Button.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
-import { SecretDeleteConfirm } from '../pending/action.tsx'
+import { SecretDeleteConfirm } from '../command/confirm.tsx'
 import { bucketize, DELETED_BUCKETS, deletedBucketOf, MemoryGroup, useFold, type FoldMemory } from '../library/groups.tsx'
 import { FlashRow, matchesQuery, SearchBox, useFlashTarget, useRowActions, useTypeLabel, ViewMessage } from '../library/shared.tsx'
 
@@ -74,7 +74,7 @@ export function DeletedTab({ nav, scope, session, fold, now = Date.now() }: {
   const [confirming, setConfirming] = useState<string | undefined>(undefined)
   const isSearching = query.trim() !== ''
   const folds = useFold(fold, `deleted|${checkupKey(scope)}`, isSearching)
-  if (view.status !== 'ready') return <ViewMessage state={view} />
+  if (view.status !== 'ready') return <ViewMessage state={view} idle={null} />
   const names = memoryNames(library.status === 'ready' ? library.data : undefined, view.data)
   // 高亮播完：目标所在的段记成展开，免得那一行在眼前缩回去
   const endFlash = () => {
