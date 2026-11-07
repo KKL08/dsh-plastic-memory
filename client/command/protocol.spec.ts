@@ -84,6 +84,27 @@ describe('发出之前拦下', () => {
     }
   })
 
+  it('让模型改的要求、此前的要求、上一稿四个面、计划的文字任一处含高危密钥：不发，给让模型改的本地文案', () => {
+    const draft = { ...SAMPLE_COMMANDS['draft-edit'], request: '再短一点' }
+    const previous = { content: '正文', summary: '摘要', name: '名称', tags: ['标签'] }
+    const question = { text: '换成什么？', placeholder: '不填就保留' }
+    for (const command of [
+      { ...draft, request: key },
+      { ...draft, priorRequests: ['先改短', key] },
+      { ...draft, previous: { ...previous, content: key } },
+      { ...draft, previous: { ...previous, name: key } },
+      { ...draft, previous: { ...previous, summary: key } },
+      { ...draft, previous: { ...previous, tags: [key] } },
+      { ...draft, planNote: { reason: key } },
+      { ...draft, planNote: { reason: '过时了', question: { ...question, text: key } } },
+      { ...draft, planNote: { reason: '过时了', question: { ...question, placeholder: key } } },
+      { ...draft, planNote: { reason: '过时了', question, answer: key } },
+    ]) {
+      expect(refuseBeforeSend(command)).toEqual(local('secret-critical', 'pending.model.secretCritical'))
+    }
+    expect(refuseBeforeSend({ ...draft, priorRequests: ['先改短'], previous, planNote: { reason: '过时了', question, answer: '保留' } })).toBeUndefined()
+  })
+
   it('其余命令、以及只是像密钥的内容：照常发', () => {
     for (const command of COMMANDS) expect(refuseBeforeSend(command)).toBeUndefined()
     expect(refuseBeforeSend({ ...SAMPLE_COMMANDS['edit-memory'], content: 'password: abc12345' })).toBeUndefined()

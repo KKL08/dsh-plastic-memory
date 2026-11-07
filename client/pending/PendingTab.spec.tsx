@@ -1493,6 +1493,35 @@ describe('待处理：让模型改与让模型合并', () => {
     })
   })
 
+  it('再改改：此前每一轮写过的要求按先后带在 priorRequests 里（没写要求的那轮不带）', async () => {
+    const { commands } = setup([bloat], { respond: respondWith() })
+    open()
+    const ask = (text: string) => { fireEvent.change(screen.getByRole('textbox', { name: /想怎么改/ }), { target: { value: text } }) }
+    await generate()
+    fireEvent.click(screen.getByRole('button', { name: '再改改' }))
+    ask('「打包」改成「构建」')
+    await generate()
+    fireEvent.click(screen.getByRole('button', { name: '再改改' }))
+    ask('再短一点')
+    await generate()
+    expect(commands().map(c => c.cmd === 'draft-edit' ? [c.request, c.priorRequests] : c.cmd)).toEqual([
+      [undefined, undefined],
+      ['「打包」改成「构建」', undefined],
+      ['再短一点', ['「打包」改成「构建」']],
+    ])
+  })
+
+  it('上一稿里有高危密钥：再改改时本地拦住，不发 draft-edit，就地写明原因', async () => {
+    const { commands } = setup([bloat], { respond: respondWith({ content: `部署 token ${'sk-' + 'TESTONLY'.padEnd(24, 'a')}` }) })
+    open()
+    await generate()
+    fireEvent.click(screen.getByRole('button', { name: '再改改' }))
+    fireEvent.change(screen.getByRole('textbox', { name: /想怎么改/ }), { target: { value: '去掉 token' } })
+    await generate()
+    expect(commands().map(c => c.cmd)).toEqual(['draft-edit'])
+    expect(screen.getByRole('alert')).toHaveTextContent('要求里有高危密钥，没有发送。去掉密钥再生成。')
+  })
+
   it('生成中只锁这张卡：显示「正在生成修改……」和「停止」，别的卡照常可用', async () => {
     setup([bloat, stale], { respond: command => (command.cmd === 'draft-edit' ? new Promise<never>(() => {}) : { ok: true, cmd: command.cmd }) })
     open()

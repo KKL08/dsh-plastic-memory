@@ -81,13 +81,25 @@ export function interpret(command: MemoryCommand, result: MemoryCommandResult): 
   return key !== undefined ? local(code, key) : { kind: 'failed', code, detail: result.detail ?? code, isLocalized: false }
 }
 
+const hasCritical = (texts: readonly string[]) => detectSecrets(texts.join('\n')).some(h => h.severity === 'critical')
+
 /**
- * 发出之前就拦下的：直接改、直接合并的新内容四个面拼起来含高危密钥（与服务端同口径）。命令文本会进借用会话的日志，
- * 高危的不能发出去；疑似的照常发，由服务端回 secret-suspected 再确认。
+ * 发出之前就拦下的（与服务端同口径）：直接改、直接合并的新内容四个面；让模型改的要求、此前的要求、计划的文字、上一稿四个面。
+ * 命令文本会进借用会话的日志，含高危密钥的不能发出去；疑似的照常发，改写由服务端回 secret-suspected 再确认。
  */
 export function refuseBeforeSend(command: MemoryCommand): Failure | undefined {
-  if (command.cmd !== 'edit-memory' && command.cmd !== 'merge-memories') return undefined
-  const { content, name, summary, tags } = command
-  const isCritical = detectSecrets(`${content}\n${name}\n${summary}\n${tags.join(' ')}`).some(h => h.severity === 'critical')
-  return isCritical ? local('secret-critical', 'pending.edit.secretCritical') : undefined
+  if (command.cmd === 'edit-memory' || command.cmd === 'merge-memories') {
+    const { content, name, summary, tags } = command
+    return hasCritical([content, name, summary, tags.join(' ')]) ? local('secret-critical', 'pending.edit.secretCritical') : undefined
+  }
+  if (command.cmd === 'draft-edit') {
+    const { previous, planNote } = command
+    const texts = [
+      command.request ?? '', ...(command.priorRequests ?? []),
+      ...(planNote !== undefined ? [planNote.reason, planNote.question?.text ?? '', planNote.question?.placeholder ?? '', planNote.answer ?? ''] : []),
+      ...(previous !== undefined ? [previous.content, previous.name ?? '', previous.summary, ...(previous.tags ?? [])] : []),
+    ]
+    return hasCritical(texts) ? local('secret-critical', 'pending.model.secretCritical') : undefined
+  }
+  return undefined
 }

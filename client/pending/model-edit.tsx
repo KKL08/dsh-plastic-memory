@@ -6,8 +6,8 @@
  */
 import { diffWords, type Change } from 'diff'
 import { Fragment, useEffect, useId, useRef, useState } from 'react'
-import { detectSecrets, scopeOfMemory, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type ModelEditAdviceType } from '../../src/gui/contract.ts'
-import { LLM_FAILURE_KEYS } from '../command/protocol.ts'
+import { scopeOfMemory, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type ModelEditAdviceType } from '../../src/gui/contract.ts'
+import { LLM_FAILURE_KEYS, refuseBeforeSend } from '../command/protocol.ts'
 import { useGateway, type BorrowedSession, type ModelState } from '../gateway.ts'
 import { formatNumber, useT, type Translate } from '../i18n.tsx'
 import { Button } from '../ui/Button.tsx'
@@ -65,6 +65,8 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
   const [request, setRequest] = useState('')
   /** 「再改改」的起点。 */
   const [previous, setPrevious] = useState<EditDraft | undefined>(undefined)
+  /** 此前每一轮写过的要求，按先后：「再改改」时带上，前几轮纠正过的事实不丢。 */
+  const [priorRequests, setPriorRequests] = useState<string[]>([])
   /** 正在等的那次请求的序号：停止、收起后序号前进，旧请求的结果对不上号就丢掉。 */
   const seq = useRef(0)
   useEffect(() => () => { seq.current += 1 }, [])
@@ -74,16 +76,18 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
   const generate = () => {
     if (session.kind !== 'ready') return
     const text = request.trim()
-    // 命令文本会进借用会话的日志：要求里有高危密钥就不发
-    if (detectSecrets(text).some(h => h.severity === 'critical')) { setPhase({ kind: 'ask', error: t('pending.model.secretCritical') }); return }
-    const mine = ++seq.current
     const command: DraftCommand = {
       cmd: 'draft-edit',
       adviceType,
       memories: memories.map(m => ({ memoryId: m.id, layer: scopeOfMemory(m) })) as DraftCommand['memories'],
       ...(text !== '' ? { request: text } : {}),
+      ...(priorRequests.length > 0 ? { priorRequests } : {}),
       ...(previous !== undefined ? { previous } : {}),
     }
+    // 命令文本会进借用会话的日志：要求、此前的要求、上一稿里有高危密钥就不发
+    const refused = refuseBeforeSend(command)
+    if (refused !== undefined) { setPhase({ kind: 'ask', error: refused.isLocalized ? t(refused.detail) : refused.detail }); return }
+    const mine = ++seq.current
     keepFocusInPlace()
     setPhase({ kind: 'busy' })
     void gateway.execute(session.sessionId, command).then((r) => {
@@ -183,7 +187,11 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
         <Button variant="ghost" unavailable={unavailable} onClick={onClose}>{t('pending.model.discard')}</Button>
         <Button
           unavailable={unavailable}
-          onClick={() => { setPrevious(draft); setRequest(''); setPhase({ kind: 'ask' }) }}
+          onClick={() => {
+            const text = request.trim()
+            if (text !== '') setPriorRequests(prior => [...prior, text])
+            setPrevious(draft); setRequest(''); setPhase({ kind: 'ask' })
+          }}
         >
           {t('pending.model.again')}
         </Button>
