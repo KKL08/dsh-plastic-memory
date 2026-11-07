@@ -2,7 +2,7 @@
  * 网关的内存假实现：组件测试唯一的 mock 边界（对应宿主远程调用，属于进程边界）。
  * 测试设定会话两态与视图内容，断言组件渲染出什么、发出了哪些命令。
  */
-import { useSyncExternalStore } from 'react'
+import { useEffect, useRef, useSyncExternalStore } from 'react'
 import type { MemoryCommand, MemoryCommandResult } from '../src/gui/contract.ts'
 import { createDeletionStore } from './deletions.ts'
 import type { BorrowedSession, CurrentWorkspace, MemoryGateway, PluginConfig, ViewMap, ViewName, ViewState } from './gateway.ts'
@@ -37,6 +37,8 @@ export interface FakeGateway extends MemoryGateway {
   readonly reads: string[]
   /** 每次 useModel 被问到的会话 id（宿主实现在第一次问时发 model-info）。 */
   readonly modelRequests: string[]
+  /** useFreshViews 请求刷新的会话 id：每次打开一次（宿主实现在这时发 refresh-views）。 */
+  readonly freshRequests: string[]
   setConfigValue(config: PluginConfig | undefined): void
   setSession(session: BorrowedSession): void
   setCurrentWorkspace(path: string | undefined | { status: 'loading' }): void
@@ -70,6 +72,7 @@ export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
   const opened: FakeGateway['opened'] = []
   const reads: string[] = []
   const modelRequests: string[] = []
+  const freshRequests: string[] = []
   let config = init.config
   // 删除状态和宿主实现同一份逻辑：同一个假网关下的几个界面共用；推来的最近删除、全部记忆视图也进去，等同宿主读到它
   const deletions = createDeletionStore()
@@ -89,6 +92,7 @@ export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
     configWrites,
     reads,
     modelRequests,
+    freshRequests,
     setConfigValue(next) { config = next; bump() },
     useConfig() {
       useRevision()
@@ -127,6 +131,15 @@ export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
       useRevision()
       if (borrowed.kind === 'none') return { status: 'idle' }
       return (views.get(name) ?? { status: 'missing' }) as ViewState<ViewMap[typeof name]>
+    },
+    useFreshViews(borrowed) {
+      const sessionId = borrowed.kind === 'ready' ? borrowed.sessionId : undefined
+      const isRequested = useRef(false)
+      useEffect(() => {
+        if (sessionId === undefined || isRequested.current) return
+        isRequested.current = true
+        freshRequests.push(sessionId)
+      }, [sessionId])
     },
     async execute(sessionId, command) {
       executed.push({ sessionId, command })

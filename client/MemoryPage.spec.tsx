@@ -129,6 +129,17 @@ describe('左栏范围', () => {
     expect(gateway.sessionRequests.at(-1)).toBeUndefined()
   })
 
+  it('每次打开请求刷新一次视图（外面改过的文件靠它显示出来）；页内换范围、换借来的会话不再请求', () => {
+    const { gateway } = open()
+    expect(gateway.freshRequests).toEqual(['fake-session'])
+    fireEvent.click(railRow('zeta'))
+    act(() => { gateway.setSession({ kind: 'ready', sessionId: 'other', cwd: '/w/zeta' }) })
+    expect(gateway.freshRequests).toEqual(['fake-session'])
+    cleanup()
+    open(undefined, gateway)
+    expect(gateway.freshRequests).toEqual(['fake-session', 'other'])
+  })
+
   it('上下键在范围间移动并选中，焦点跟着走；只有选中行在 Tab 序列里', () => {
     const { nav } = open()
     railRow('全部').focus()

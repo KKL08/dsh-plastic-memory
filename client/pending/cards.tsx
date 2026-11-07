@@ -492,8 +492,9 @@ export function AdviceCard(props: CardProps<'advice'> & {
       })
     }
   } })
-  const [isEditing, setEditing] = useState(false)
-  const [isModelEditing, setModelEditing] = useState(false)
+  // 直接改、让模型改打开那一刻的那条记忆：之后视图刷新了（别处改过）也按它预填、按它的版本核对，免得用户照旧版改的稿子冲掉别处的改动
+  const [editing, setEditing] = useState<MemoryCardData>()
+  const [modelEditing, setModelEditing] = useState<MemoryCardData>()
   const [isMoving, setMoving] = useState(false)
   const buttonsOf = (memory: MemoryCardData, deleteLabel = t('pending.advice.delete')): Record<AdviceAction, ReactNode> => {
     const scope = scopeOfMemory(memory)
@@ -511,10 +512,10 @@ export function AdviceCard(props: CardProps<'advice'> & {
       move: <Button key="move" unavailable={action.unavailable} onClick={() => { setMoving(true) }}>{t('pending.move.move')}</Button>,
       open: <Button key="open" variant="ghost" onClick={open}>{t('pending.advice.open')}</Button>,
       edit: isEditable(memory)
-        ? <Button key="edit" unavailable={action.unavailable} onClick={() => { setEditing(true) }}>{t('pending.edit.edit')}</Button>
+        ? <Button key="edit" unavailable={action.unavailable} onClick={() => { setEditing(memory) }}>{t('pending.edit.edit')}</Button>
         : null,
       model: isEditable(memory)
-        ? <Button key="model" unavailable={action.unavailable} onClick={() => { setModelEditing(true) }}>{t('pending.model.edit')}</Button>
+        ? <Button key="model" unavailable={action.unavailable} onClick={() => { setModelEditing(memory) }}>{t('pending.model.edit')}</Button>
         : null,
     }
   }
@@ -525,7 +526,7 @@ export function AdviceCard(props: CardProps<'advice'> & {
   const copy = item.type === 'misplaced' && memory.scope === 'global' ? { ...ADVICE_COPY.misplaced, ...MISPLACED_TO_PROJECT } : ADVICE_COPY[item.type]
   const buttons = buttonsOf(memory)
   return (
-    <Card title={t(copy.title)} aside={item.type === 'stale' || isMoving || isEditing || isModelEditing ? undefined : <IgnoreButton item={item} action={action} />}>
+    <Card title={t(copy.title)} aside={item.type === 'stale' || isMoving || editing !== undefined || modelEditing !== undefined ? undefined : <IgnoreButton item={item} action={action} />}>
       {isMoving
         ? (
           <>
@@ -539,30 +540,30 @@ export function AdviceCard(props: CardProps<'advice'> & {
             />
           </>
         )
-        : isEditing
+        : editing !== undefined
         ? (
           <EditPanel
-            initial={{ content: memory.content, name: memory.name, summary: memory.summary, tags: memory.tags }}
-            original={{ content: memory.content, summary: memory.summary, chars: memory.content.length }}
+            initial={{ content: editing.content, name: editing.name, summary: editing.summary, tags: editing.tags }}
+            original={{ content: editing.content, summary: editing.summary, chars: editing.content.length }}
             isMerge={false}
             unavailable={action.unavailable}
-            onCancel={() => { setEditing(false) }}
-            onSave={(draft) => { action.run({ cmd: 'edit-memory', memoryId: memory.id, layer: scopeOfMemory(memory), base: baseOf(memory), ...draft }) }}
+            onCancel={() => { setEditing(undefined) }}
+            onSave={(draft) => { action.run({ cmd: 'edit-memory', memoryId: editing.id, layer: scopeOfMemory(editing), base: baseOf(editing), ...draft }) }}
           />
         )
-        : isModelEditing && isModelEditType(item.type)
+        : modelEditing !== undefined && isModelEditType(item.type)
           ? (
             <>
-              <div className="pm-pending-advice-memories"><MemoryOf session={session} memory={memory} now={now} typeLabel={typeLabel} /></div>
+              <div className="pm-pending-advice-memories"><MemoryOf session={session} memory={modelEditing} now={now} typeLabel={typeLabel} /></div>
               <ModelEditPanel
-                memories={[memory]}
+                memories={[modelEditing]}
                 adviceType={item.type}
                 typeTitle={t(copy.title)}
-                base={{ content: memory.content, name: memory.name, summary: memory.summary, tags: memory.tags }}
+                base={{ content: modelEditing.content, name: modelEditing.name, summary: modelEditing.summary, tags: modelEditing.tags }}
                 session={session}
                 unavailable={action.unavailable}
-                onClose={() => { setModelEditing(false) }}
-                onApply={(draft) => { action.run({ cmd: 'edit-memory', memoryId: memory.id, layer: scopeOfMemory(memory), base: baseOf(memory), ...draft }) }}
+                onClose={() => { setModelEditing(undefined) }}
+                onApply={(draft) => { action.run({ cmd: 'edit-memory', memoryId: modelEditing.id, layer: scopeOfMemory(modelEditing), base: baseOf(modelEditing), ...draft }) }}
               />
             </>
           )
@@ -579,7 +580,9 @@ export function AdviceCard(props: CardProps<'advice'> & {
 }
 
 /** 直接合并的预填：保留的那条（mergeKeeperIndex）正文在前、空行接另一条，名称和摘要取保留那条，标签取并集。 */
-function mergeDraft(pair: readonly [MemoryCardData, MemoryCardData]): { draft: EditDraft; chars: number } {
+type Pair = readonly [MemoryCardData, MemoryCardData]
+
+function mergeDraft(pair: Pair): { draft: EditDraft; chars: number } {
   const kept = pair[mergeKeeperIndex(pair)]
   const other = pair[1 - mergeKeeperIndex(pair)]!
   return {
@@ -599,10 +602,12 @@ function AdviceGroupCard({ item, session, now, typeLabel, action, buttonsOf }: C
   const t = useT()
   const isPair = item.memories.length === 2
   const pair = isPair && item.memories.every(isEditable) ? [item.memories[0]!, item.memories[1]!] as const : undefined
-  const [isMerging, setMerging] = useState(false)
-  const [isModelMerging, setModelMerging] = useState(false)
-  const merge = pair === undefined ? undefined : mergeDraft(pair)
-  const mergeWith = (both: readonly [MemoryCardData, MemoryCardData], draft: EditDraft) => {
+  // 直接合并、让模型合并打开那一刻的两条：之后视图刷新了也按它们预填、按它们的版本核对（同单条的直接改）
+  const [merging, setMerging] = useState<Pair>()
+  const [modelMerging, setModelMerging] = useState<Pair>()
+  const opened = merging ?? modelMerging
+  const merge = opened === undefined ? undefined : mergeDraft(opened)
+  const mergeWith = (both: Pair, draft: EditDraft) => {
     const memories = both.map(m => ({ memoryId: m.id, layer: scopeOfMemory(m), base: baseOf(m) }))
     action.run({ cmd: 'merge-memories', memories: [memories[0]!, memories[1]!], ...draft })
   }
@@ -611,7 +616,7 @@ function AdviceGroupCard({ item, session, now, typeLabel, action, buttonsOf }: C
     { label: 'pending.advice.redundancy.right', delete: 'pending.advice.redundancy.deleteRight' },
   ] as const
   return (
-    <Card title={t('pending.advice.redundancy.title')} aside={isMerging || isModelMerging ? undefined : <IgnoreButton item={item} action={action} />}>
+    <Card title={t('pending.advice.redundancy.title')} aside={opened !== undefined ? undefined : <IgnoreButton item={item} action={action} />}>
       <div className="pm-pending-advice-memories pm-pending-advice-group">
         {item.memories.map((m, i) => {
           const side = isPair ? sides[i] : undefined
@@ -619,34 +624,34 @@ function AdviceGroupCard({ item, session, now, typeLabel, action, buttonsOf }: C
           return (
             <section key={m.id} className="pm-pending-advice-side" aria-label={side === undefined ? m.name : t(side.label)}>
               <MemoryOf session={session} memory={m} now={now} typeLabel={typeLabel} />
-              {isMerging || isModelMerging ? null : <div className="pm-pending-actions">{buttons.open}{buttons.delete}</div>}
+              {opened !== undefined ? null : <div className="pm-pending-actions">{buttons.open}{buttons.delete}</div>}
             </section>
           )
         })}
       </div>
-      {isMerging && pair !== undefined && merge !== undefined
+      {merging !== undefined && merge !== undefined
         ? (
           <EditPanel
             initial={merge.draft}
             original={{ content: merge.draft.content, summary: merge.draft.summary, chars: merge.chars }}
             isMerge
             unavailable={action.unavailable}
-            onCancel={() => { setMerging(false) }}
-            onSave={(draft) => { mergeWith(pair, draft) }}
+            onCancel={() => { setMerging(undefined) }}
+            onSave={(draft) => { mergeWith(merging, draft) }}
           />
         )
-        : isModelMerging && pair !== undefined && merge !== undefined
+        : modelMerging !== undefined && merge !== undefined
           ? (
             <ModelEditPanel
-              memories={pair}
+              memories={modelMerging}
               adviceType="redundancy"
               typeTitle={t('pending.advice.redundancy.title')}
               base={merge.draft}
-              keeper={mergeKeeperIndex(pair)}
+              keeper={mergeKeeperIndex(modelMerging)}
               session={session}
               unavailable={action.unavailable}
-              onClose={() => { setModelMerging(false) }}
-              onApply={(draft) => { mergeWith(pair, draft) }}
+              onClose={() => { setModelMerging(undefined) }}
+              onApply={(draft) => { mergeWith(modelMerging, draft) }}
             />
           )
           : (
@@ -656,8 +661,8 @@ function AdviceGroupCard({ item, session, now, typeLabel, action, buttonsOf }: C
                 {pair !== undefined
                   ? (
                     <>
-                      <Button unavailable={action.unavailable} onClick={() => { setMerging(true) }}>{t('pending.edit.merge')}</Button>
-                      <Button unavailable={action.unavailable} onClick={() => { setModelMerging(true) }}>{t('pending.model.merge')}</Button>
+                      <Button unavailable={action.unavailable} onClick={() => { setMerging(pair) }}>{t('pending.edit.merge')}</Button>
+                      <Button unavailable={action.unavailable} onClick={() => { setModelMerging(pair) }}>{t('pending.model.merge')}</Button>
                     </>
                   )
                   : null}

@@ -86,6 +86,8 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
     : undefined
   const resolved: PageScope | undefined = target.scope ?? (target.fromChat === true ? chat : ALL_SCOPE)
   const session = gateway.useSession(resolved?.kind === 'workspace' ? resolved.workspacePath : undefined)
+  // 视图没有文件监听：每次打开请服务端按磁盘现状重写一次，外面改过的文件才显示得出来
+  gateway.useFreshViews(session)
   const pendingState = gateway.useView(session, 'pending')
   const library = dataOf(gateway.useView(session, 'library'))
   const deleted = dataOf(gateway.useView(session, 'deleted'))

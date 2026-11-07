@@ -198,7 +198,7 @@ describe('最近删除', () => {
     act(() => { gateway.setView('deleted', { ...deleted, items: deleted.items.filter(item => item.memory.id !== 'd1') }) })
     await act(async () => { release!({ ok: false, cmd: 'restore', code: 'not-found', detail: '记忆 d1 不存在' }) })
     expect(screen.queryByText('用 pnpm 不用 npm')).toBeNull()
-    expect(screen.getByRole('alert')).toHaveTextContent('没有成功：记忆 d1 不存在')
+    expect(screen.getByRole('alert')).toHaveTextContent('没有成功：这条记忆已经不在了，可能在别处删掉了。列表已更新。')
   })
 
   it('恢复别的项目里的：服务端拒后在行里确认，「取消」不重发，「继续处理」带 allowCrossWorkspace 重发；普通恢复只说已恢复', async () => {
@@ -318,7 +318,7 @@ describe('最近删除', () => {
     })
 
     it('失败写原因，这一行和「恢复」照旧可用', async () => {
-      const gateway = createFakeGateway({ views: { deleted }, respond: command => ({ ok: false, cmd: command.cmd, code: 'not-found', detail: '不存在或已处理：d1' }) })
+      const gateway = createFakeGateway({ views: { deleted }, respond: command => ({ ok: false, cmd: command.cmd, code: 'failed', detail: '不存在或已处理：d1' }) })
       renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
       const row = rowOf('用 pnpm 不用 npm')
       fireEvent.click(within(row).getByRole('button', { name: '彻底删除…' }))

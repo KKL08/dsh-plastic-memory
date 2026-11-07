@@ -2886,6 +2886,51 @@ describe('edit-memory（建议整理的直接改）', () => {
     expect(await e.decisions.listSettled()).toEqual([])
   })
 
+  describe('界面落后于磁盘而失败时重写视图（外部改动没有文件监听，靠这次失败把界面换成磁盘上的现状）', () => {
+    const libraryCard = async (e: ReturnType<typeof env>, id: string) =>
+      libraryViewSchema.parse(await e.readView('library')).layers.flatMap(l => l.items).find(m => m.id === id)
+    /** 数视图写入器被请求重写的次数。 */
+    const counted = () => {
+      const requests = { count: 0 }
+      const wrapViews = (writer: ViewWriter) => ({
+        request: (...args: Parameters<ViewWriter['request']>) => { requests.count++; return writer.request(...args) },
+        rewriteAll: writer.rewriteAll.bind(writer), collectViews: writer.collectViews.bind(writer), requestCheckups: writer.requestCheckups.bind(writer),
+      })
+      return { requests, wrapViews }
+    }
+
+    it('文件在外面手改过、卡片版本对不上回 stale：视图照样重写，卡片换成手改后的正文', async () => {
+      const e = env()
+      await e.store.create(record({ id: 'mem_h', name: '甲', content: '旧正文', scope: 'workspace', workspacePath: SESSION_WS }))
+      const base = await baseOf(e, 'mem_h')
+      const path = await fileOf(e, 'mem_h', SESSION_WS)
+      await writeFile(path, (await readFile(path, 'utf8')).replace('旧正文', '手改的正文'))
+      expect(err(await e.run(edit('mem_h', SESSION_WS, base))).code).toBe('stale')
+      expect((await libraryCard(e, 'mem_h'))!.content).toBe('手改的正文')
+    })
+
+    it('文件在外面删掉了、删除回 not-found：视图照样重写，这条从记忆查看里消失', async () => {
+      const e = env()
+      await e.store.create(record({ id: 'mem_d', name: '甲', content: '正文', scope: 'workspace', workspacePath: SESSION_WS }))
+      ok(await e.run({ cmd: 'refresh-views' }))
+      expect(await libraryCard(e, 'mem_d')).toBeDefined()
+      await rm(await fileOf(e, 'mem_d', SESSION_WS))
+      expect(err(await e.run({ cmd: 'forget', memoryId: 'mem_d', layer: wsScope(SESSION_WS) })).code).toBe('not-found')
+      expect(await libraryCard(e, 'mem_d')).toBeUndefined()
+    })
+
+    it('其他失败（参数不对）不重写', async () => {
+      const { requests, wrapViews } = counted()
+      const e = env({ wrapViews })
+      await e.store.create(record({ id: 'mem_p', name: '甲', content: '正文', scope: 'workspace', workspacePath: SESSION_WS }))
+      const base = await baseOf(e, 'mem_p')
+      const before = requests.count
+      const same = { memoryId: 'mem_p', layer: wsScope(SESSION_WS), base }
+      expect(err(await e.run({ cmd: 'merge-memories', memories: [same, same], content: '合', name: '合', summary: '合', tags: [] })).code).toBe('invalid-args')
+      expect(requests.count).toBe(before)
+    })
+  })
+
   it.each([['项目记忆', SESSION_WS], ['全局记忆', undefined]] as const)('%s改后可撤销：撤销后文件与改前一字不差，账本条目清掉', async (_label, workspacePath) => {
     const e = env()
     await e.store.create(record({ id: 'mem_u', name: '甲', content: '旧正文', tags: ['旧'], ...(workspacePath !== undefined ? { scope: 'workspace', workspacePath } : {}) }))

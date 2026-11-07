@@ -1,8 +1,9 @@
 // 面板注册壳：apply 注册双语字典、左栏图标与记忆页；记忆页挂在宿主标准 props 上能渲染出两态。
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { ComponentType } from 'react'
 import { apply, inject, PACKAGE_NAME } from './index.tsx'
+import { MEMORY_ROOT_CONFIG_KEY, MEMORY_ROOT_KEY } from './gateway.ts'
 import type { RootStandardProps, SessionListState, SessionStandardProps } from './host.ts'
 import { createTranslator } from './i18n.tsx'
 import { en, NS, zh } from './locales.ts'
@@ -147,5 +148,31 @@ describe('apply', () => {
     const session = { ...props(state), sessionId: 's1', useProjection: () => undefined }
     render(<><Page {...props(state)} /><Dock {...session} /><Side {...session} /><Settings {...props(state)} view="page" /></>)
     await waitFor(() => expect(vi.mocked(ctx.remote.commands.execute).mock.calls.map(([, line]) => line)).toEqual(['/memory info', '/memory refresh-views']))
+  })
+
+  it('浏览器缓存了根：几个插槽根同时挂上，只有记忆页打开时那一次 refresh-views，不发 info', async () => {
+    localStorage.clear()
+    localStorage.setItem(MEMORY_ROOT_KEY, '/home/me/.dsh/memories')
+    // 缓存时配置里的 memoryRoot 也记着（空 = 默认位置），和当前配置一致，不重新问 info
+    localStorage.setItem(MEMORY_ROOT_CONFIG_KEY, '')
+    const { registered, ctx } = setup()
+    vi.mocked(ctx.remote.commands.execute).mockImplementation(async (_sid, line) => ({
+      ok: true as const,
+      value: { commandId: 'c', result: { kind: 'success' as const, text: JSON.stringify({ ok: true, cmd: line.split(' ')[1] }) } },
+    }))
+    const component = <P,>(name: string) => registered.find(r => r.options.name === name)!.component as ComponentType<P>
+    const Page = component<RootStandardProps>('main')
+    const Dock = component<SessionStandardProps>('conversation.composer.dock')
+    const Side = component<SessionStandardProps>('sidebar.right.pane.tab')
+    const Settings = component<RootStandardProps & { view: 'page' }>('plugins.bundle.config')
+    const state: SessionListState = { ids: ['s1'], byId: { s1: { id: 's1', displayTitle: 's1', running: true, cwd: '/w/app', updatedAt: 1, retainedBy: { mainView: 1 } } }, phase: 'ready' }
+    const session = { ...props(state), sessionId: 's1', useProjection: () => undefined }
+    const lines = () => vi.mocked(ctx.remote.commands.execute).mock.calls.map(([, line]) => line)
+    const { unmount } = render(<><Page {...props(state)} /><Dock {...session} /><Side {...session} /><Settings {...props(state)} view="page" /></>)
+    await waitFor(() => expect(lines()).toEqual(['/memory refresh-views']))
+    unmount()
+    render(<Dock {...session} />)
+    await act(async () => {})
+    expect(lines()).toEqual(['/memory refresh-views'])
   })
 })

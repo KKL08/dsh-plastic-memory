@@ -704,7 +704,7 @@ describe('交付卡', () => {
   })
 
   it('PA-46 删除失败时原文还在，旁边按统一的失败提示写服务端原话（role=alert）', async () => {
-    const gateway = createFakeGateway({ respond: () => ({ ok: false, code: 'not-found', detail: '记忆不存在' }) })
+    const gateway = createFakeGateway({ respond: () => ({ ok: false, code: 'failed', detail: '记忆不存在' }) })
     renderInShell(<SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={[saved('mem_1', '原文')]} now={NOW} openDetail={() => {}} />, gateway)
     expand()
     await remove(screen.getByRole('button', { name: '删除这条记忆' }))

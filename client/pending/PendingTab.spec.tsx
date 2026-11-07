@@ -1281,11 +1281,30 @@ describe('待处理：直接改与直接合并', () => {
     expect(commands().map(c => c.cmd === 'edit-memory' && c.force)).toEqual([undefined, true])
   })
 
-  it('记忆在卡片加载后被改过：写明刷新后再改', async () => {
-    setup([bloat], { respond: command => ({ ok: false, cmd: command.cmd, code: 'stale', detail: '这条记忆刚被改过' }) })
+  it('记忆在卡片加载后被改过：没有保存，写明重新打开修改；视图换成新版本后稿子留着，再保存仍按开始改时的版本核对，不冲掉别处的改动', async () => {
+    const { gateway, commands } = setup([bloat], { respond: command => ({ ok: false, cmd: command.cmd, code: 'stale', detail: '这条记忆刚被改过' }) })
     startEdit()
+    fireEvent.change(screen.getByRole('textbox', { name: '正文' }), { target: { value: '我的稿子' } })
     await save()
-    expect(screen.getByRole('alert')).toHaveTextContent('这条记忆刚被改过，刷新后再改。')
+    expect(screen.getByRole('alert')).toHaveTextContent('这条记忆刚被改过，没有保存。重新打开修改，会从最新内容开始。')
+    // 服务端因这次失败重写了视图：卡片换成别处改过的版本
+    const changed = { ...target, content: '别处改的', digest: 'sha1:b1x', updatedAt: 222 }
+    act(() => { gateway.setView('pending', view({ ...bloat, memories: [changed] })) })
+    expect(screen.getByRole('textbox', { name: '正文' })).toHaveValue('我的稿子')
+    await save()
+    expect(commands().map(c => c.cmd === 'edit-memory' && c.base)).toEqual([base, base])
+
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    startEdit()
+    expect(screen.getByRole('textbox', { name: '正文' })).toHaveValue('别处改的')
+    await save()
+    expect(commands().map(c => c.cmd === 'edit-memory' && c.base).at(-1)).toEqual({ updatedAt: 222, digest: 'sha1:b1x' })
+  })
+
+  it('点「不再提醒」时记忆刚被改过：写明卡片已换成最新内容，看过再决定', async () => {
+    setup([bloat], { respond: command => ({ ok: false, cmd: command.cmd, code: 'stale', detail: '这条记忆刚被改过' }) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '不再提醒' })) })
+    expect(screen.getByRole('alert')).toHaveTextContent('这条记忆刚被改过，已换成最新内容，看过再决定要不要忽略。')
   })
 
   it('保存中只锁这张卡：保存、取消置灰，别的卡照常可用', async () => {
@@ -1326,6 +1345,16 @@ describe('待处理：直接改与直接合并', () => {
       }])
       expect(screen.getByText('已合并')).toBeInTheDocument()
       expect(screen.getByText(`被字句 · 12 字 → 14 字`)).toBeInTheDocument()
+    })
+
+    it('合并中两条里有一条被别处改了、视图换成新版本：保存仍按打开合并时的两条版本核对，编辑框不变', async () => {
+      const { gateway, commands } = setup([pairOf(left, right)], { respond: command => ({ ok: false, cmd: command.cmd, code: 'stale' }) })
+      fireEvent.click(screen.getByRole('button', { name: '直接合并' }))
+      act(() => { gateway.setView('pending', view(pairOf({ ...left, content: '别处改的', updatedAt: 99, digest: 'sha1:r1x' }, right))) })
+      expect(screen.getByRole('textbox', { name: '正文' })).toHaveValue('少用被字句。\n\n避免翻译腔。')
+      await save()
+      const sent = commands().at(-1)
+      expect(sent?.cmd === 'merge-memories' && sent.memories.map(m => m.base)).toEqual([{ updatedAt: 21, digest: 'sha1:r1' }, { updatedAt: 22, digest: 'sha1:r2' }])
     })
 
     it('一条全局一条项目：保留全局那条，预填它的名称', () => {
@@ -1428,6 +1457,16 @@ describe('待处理：让模型改与让模型合并', () => {
     expect(screen.getByText('发版流程 · 13 字 → 9 字')).toBeInTheDocument()
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
     expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'pd_e' })
+  })
+
+  it('面板开着时视图换成别处改过的版本：应用仍按打开时的卡片版本核对（服务端回 stale，不冲掉别处的改动）', async () => {
+    const { gateway, commands } = setup([bloat], { respond: respondWith() })
+    open()
+    act(() => { gateway.setView('pending', view({ ...bloat, memories: [{ ...target, content: '别处改的', updatedAt: 222, digest: 'sha1:b1x' }] })) })
+    await generate()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '应用' })) })
+    const sent = commands().at(-1)
+    expect(sent?.cmd === 'edit-memory' && sent.base).toEqual(base)
   })
 
   it('「放弃」收起，不写', async () => {
