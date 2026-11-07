@@ -815,14 +815,14 @@ describe('createHostGateway', () => {
       }
     }
 
-    it('「让模型改」生成在途：面板还在，结果回来照常显示', async () => {
+    it('让模型改生成在途：面板还在，结果回来照常显示', async () => {
       let finishDraft: (() => void) | undefined
       const { switchSession } = setup(async (_sid, line) => {
         if (!line.startsWith('/memory draft-edit')) return reply({ ok: true, cmd: line.split(' ')[1], model: 'deepseek-flash' })
         await new Promise<void>((resolve) => { finishDraft = resolve })
         return reply({ ok: true, cmd: 'draft-edit', draft: { content: '本项目用 pnpm。', summary: '包管理器' }, model: 'deepseek-flash' })
       })
-      fireEvent.click(await screen.findByRole('button', { name: '让模型改' }))
+      fireEvent.click(await screen.findByRole('button', { name: '修改' }))
       fireEvent.click(screen.getByRole('button', { name: '生成修改' }))
       expect(screen.getByText('正在生成修改……')).toBeInTheDocument()
       switchSession()
@@ -831,9 +831,10 @@ describe('createHostGateway', () => {
       expect(await screen.findByRole('button', { name: '应用' })).toBeInTheDocument()
     })
 
-    it('「直接改」改到一半：编辑框和改过的正文都还在', async () => {
+    it('手动改到一半：编辑框和改过的正文都还在', async () => {
       const { switchSession } = setup(async (_sid, line) => reply({ ok: true, cmd: line.split(' ')[1] }))
-      fireEvent.click(await screen.findByRole('button', { name: '直接改' }))
+      fireEvent.click(await screen.findByRole('button', { name: '修改' }))
+      fireEvent.click(screen.getByRole('tab', { name: '手动改' }))
       fireEvent.change(screen.getByRole('textbox', { name: '正文' }), { target: { value: '本项目用 pnpm。' } })
       switchSession()
       expect(screen.getByRole('textbox', { name: '正文' })).toHaveValue('本项目用 pnpm。')

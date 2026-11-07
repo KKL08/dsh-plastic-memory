@@ -1,8 +1,9 @@
 /**
  * 建议整理卡里的「让模型改 / 让模型合并」：写一句要求（可不写）→ 借来的会话的模型生成一稿 → 原文与改后左右对照 → 点「应用」才写入。
- * 生成发 draft-edit（只读，结果只在这个组件的内存里）；应用交回卡片，按直接改、直接合并发 edit-memory / merge-memories，
- * 之后的结果行、撤销都和直接改一样。生成中只锁这张卡。
- * 「停止」只是不再等：命令没法从界面取消，之后到达的结果按请求序号认出来丢掉。
+ * 生成发 draft-edit（只读，结果只在这个组件的内存里）；应用交回卡片，按手动改、手动合并发 edit-memory / merge-memories，
+ * 之后的结果行、撤销都和手动改一样。生成中只锁这张卡。
+ * 「停止」只是不再等：命令没法从界面取消，之后到达的结果按请求序号认出来丢掉；目标记忆或它的版本变了也一样。
+ * 挂在两段切换的外壳（edit-modes.tsx）里：「放弃」只清掉这一稿、回到写要求（要求保留），关闭面板走外壳。
  */
 import { diffWords, type Change } from 'diff'
 import { Fragment, useEffect, useId, useRef, useState } from 'react'
@@ -13,6 +14,7 @@ import { formatNumber, useT, type Translate } from '../i18n.tsx'
 import { Button } from '../ui/Button.tsx'
 import { keepFocusInPlace, useReturnFocus } from '../ui/focus-return.ts'
 import type { EditDraft } from './edit.tsx'
+import { useReportEditState, type EditPhase, type EditState } from './edit-modes.tsx'
 
 type DraftCommand = Extract<MemoryCommand, { cmd: 'draft-edit' }>
 
@@ -40,21 +42,23 @@ function hintOf(model: ModelState, t: Translate): string {
   return model.status === 'ready' && model.model !== undefined ? t('pending.model.hint', { model: model.model }) : t('pending.model.hintNoName')
 }
 
-export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, session, unavailable, onClose, onApply }: {
+export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, session, unavailable, onClose, onApply, onStateChange }: {
   /** 一条，或合并时两条（卡片上的左右顺序）。 */
   memories: readonly [MemoryCard] | readonly [MemoryCard, MemoryCard]
   adviceType: ModelEditAdviceType
   /** 建议类型的标题，写进输入框的说明。 */
   typeTitle: string
-  /** 模型没改名称、标签时沿用的值，也是对照里原来的名称、摘要、标签：单条是它自己，合并是直接合并的预填。 */
+  /** 模型没改名称、标签时沿用的值，也是对照里原来的名称、摘要、标签：单条是它自己，合并是手动合并的预填。 */
   base: EditDraft
   /** 合并时保留哪条（mergeKeeperIndex）。 */
   keeper?: 0 | 1
   session: BorrowedSession
   /** 卡片的忙状态（应用中、等确认）。 */
   unavailable: string | undefined
+  /** 写要求时的「取消」：关闭整个面板。 */
   onClose: () => void
   onApply: (draft: EditDraft) => void
+  onStateChange?: (state: EditState) => void
 }) {
   const t = useT()
   const id = useId()
@@ -70,6 +74,22 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
   /** 正在等的那次请求的序号：停止、收起后序号前进，旧请求的结果对不上号就丢掉。 */
   const seq = useRef(0)
   useEffect(() => () => { seq.current += 1 }, [])
+  // 目标记忆或它的版本变了：在等的那次作废，回到写要求
+  const target = memories.map(m => `${m.id}@${m.updatedAt}@${m.digest ?? ''}`).join('|')
+  const lastTarget = useRef(target)
+  useEffect(() => {
+    if (lastTarget.current === target) return
+    lastTarget.current = target
+    seq.current += 1
+    setPhase(prev => (prev.kind === 'busy' ? { kind: 'ask' } : prev))
+  }, [target])
+  /** 点过「应用」：之后卡片忙着（保存中、等确认）就报 saving。 */
+  const [hasApplied, setApplied] = useState(false)
+  // 卡片不忙了（命令回来了：失败、确认被取消，或发送前就拦下）就复位，之后卡片因别的原因不可用不算保存中
+  useEffect(() => { if (hasApplied && unavailable === undefined) setApplied(false) }, [hasApplied, unavailable])
+  const reported: EditPhase = phase.kind === 'ask' ? 'idle' : phase.kind === 'busy' ? 'busy' : hasApplied && unavailable !== undefined ? 'saving' : 'result'
+  // 「再改改」后还没写新要求时，上一稿也是没应用的稿
+  useReportEditState(onStateChange, reported, request.trim() !== '' || phase.kind === 'result' || previous !== undefined)
   const root = useRef<HTMLDivElement>(null)
   useReturnFocus(root)
 
@@ -184,7 +204,7 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
       </p>
       <div className="pm-edit-foot">
         <span className="pm-edit-hint" />
-        <Button variant="ghost" unavailable={unavailable} onClick={onClose}>{t('pending.model.discard')}</Button>
+        <Button variant="ghost" unavailable={unavailable} onClick={() => { setPhase({ kind: 'ask' }) }}>{t('pending.model.discard')}</Button>
         <Button
           unavailable={unavailable}
           onClick={() => {
@@ -195,7 +215,7 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
         >
           {t('pending.model.again')}
         </Button>
-        <Button variant="primary" unavailable={unavailable} onClick={() => { onApply(draft) }}>{t('pending.model.apply')}</Button>
+        <Button variant="primary" unavailable={unavailable} onClick={() => { setApplied(true); onApply(draft) }}>{t('pending.model.apply')}</Button>
       </div>
     </div>
   )
