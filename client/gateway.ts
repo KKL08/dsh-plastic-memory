@@ -9,11 +9,11 @@
  * 视图文件还在，靠「读不到」发现不了）时丢掉缓存，按首次进入重来。没有配置服务时不比对。
  * 只有两态：一个会话都没有 → none；有会话（历史或在跑，宿主会自动 resume 冷会话）→ ready。
  */
-import { createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import {
   GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, encodeMemoryCommand, sessionViewFile,
   checkupViewSchema, deletedViewSchema, healthViewSchema, libraryViewSchema, pendingViewSchema, sessionViewSchema, workspaceMapViewSchema,
-  memoryCommandResultSchema,
+  memoryCommandResultSchema, VIEW_BEHIND_CODES,
   type CheckupView, type DeletedView, type HealthView, type LibraryView, type MemoryCommand, type MemoryCommandResult,
   type PendingView, type SessionView, type WorkspaceMapView,
 } from '../src/gui/contract.ts'
@@ -66,6 +66,11 @@ export interface MemoryGateway {
   useCurrentWorkspace(): CurrentWorkspace
   /** hook：订阅一份视图，版本变化再读。 */
   useView<N extends ViewName>(session: BorrowedSession, name: N): ViewState<ViewMap[N]>
+  /**
+   * hook：记忆页每次打开请服务端按磁盘现状重写一次视图（视图没有文件监听，外面改过的文件靠它显示出来）。
+   * 同一次打开只发一次；根还没问到时不另发，拿到根之后那次刷新就算这次的。
+   */
+  useFreshViews(session: BorrowedSession): void
   /** 执行一条 `/memory` 命令，结果按契约解析；宿主或解析层面的失败折成 `failed`。删除、恢复成功后记进删除状态（见 useDeletions）。 */
   execute(sessionId: string, command: MemoryCommand): Promise<MemoryCommandResult>
   /** hook：删过的记忆（见 createDeletionStore），各处显示同一条记忆时读它。 */
@@ -195,6 +200,7 @@ function createRootStore(run: RunLine) {
   let infoInflight = false
   const failedSessions = new Set<string>()
   let refreshed = false
+  let refreshing = false
   const set = (next: RootState) => { state = next; for (const fn of listeners) fn() }
   const rememberConfig = (configured: string | undefined) => {
     cachedConfig = configured
@@ -208,6 +214,17 @@ function createRootStore(run: RunLine) {
     rememberConfig(liveConfig)
     isFresh = true
     set({ ...state, memoryRoot, error: undefined })
+  }
+  /** 发一次 refresh-views：成功后刷新次数加一（挂着的视图据此重读），失败了 ensureViews 下次再试。 */
+  const refresh = (sessionId: string) => {
+    refreshed = true
+    refreshing = true
+    if (state.isRefreshFailed === true) set({ ...state, isRefreshFailed: false })
+    void run(sessionId, encodeMemoryCommand({ cmd: 'refresh-views' })).then((r) => {
+      refreshing = false
+      if (decodeExecution('refresh-views', r).ok) set({ ...state, refreshes: state.refreshes + 1 })
+      else { refreshed = false; set({ ...state, isRefreshFailed: true }) }
+    })
   }
   const store = {
     get: () => state,
@@ -254,12 +271,12 @@ function createRootStore(run: RunLine) {
     /** 让服务端把视图文件写出来：首次拿到 memoryRoot 之后、视图文件缺失或版本不认识时，每个页面生命周期成功一次；同一时间只发一条，失败了下次再试。 */
     ensureViews(sessionId: string) {
       if (refreshed) return
-      refreshed = true
-      if (state.isRefreshFailed === true) set({ ...state, isRefreshFailed: false })
-      void run(sessionId, encodeMemoryCommand({ cmd: 'refresh-views' })).then((r) => {
-        if (decodeExecution('refresh-views', r).ok) set({ ...state, refreshes: state.refreshes + 1 })
-        else { refreshed = false; set({ ...state, isRefreshFailed: true }) }
-      })
+      refresh(sessionId)
+    },
+    /** 记忆页打开：根已知就再刷新一次（这次页面里刷新过也发）；根还没问到时由拿到根之后的 ensureViews 发；正在刷新时不重复发。 */
+    refreshOnOpen(sessionId: string) {
+      if (state.memoryRoot === undefined || refreshing) return
+      refresh(sessionId)
     },
   }
   return store
@@ -307,8 +324,8 @@ export function createHostGateway(ctx: HostContext): BindGateway {
   }
   const deletions = createDeletionStore()
   /**
-   * 本页成功执行的命令次数。命令回结果前服务端已写好视图，但宿主的文件观察会漏掉紧挨着的第二次替换、版本停在上一版，
-   * 所以它也算进读视图的触发：本页的命令一成功，挂着的视图都重读一次。
+   * 本页成功执行的命令次数（含因界面落后于磁盘而失败的：服务端同样重写了视图）。命令回结果前服务端已写好视图，
+   * 但宿主的文件观察会漏掉紧挨着的第二次替换、版本停在上一版，所以它也算进读视图的触发：本页的命令一成功，挂着的视图都重读一次。
    */
   let succeeded = 0
   const succeededListeners = new Set<() => void>()
@@ -317,7 +334,7 @@ export function createHostGateway(ctx: HostContext): BindGateway {
   const execute: MemoryGateway['execute'] = async (sessionId, command) => {
     const result = decodeExecution(command.cmd, await run(sessionId, encodeMemoryCommand(command)))
     deletions.record(command, result)
-    if (result.ok) { succeeded++; for (const fn of succeededListeners) fn() }
+    if (result.ok || VIEW_BEHIND_CODES.has(result.code)) { succeeded++; for (const fn of succeededListeners) fn() }
     return result
   }
   const root = createRootStore(run)
@@ -498,6 +515,16 @@ export function createHostGateway(ctx: HostContext): BindGateway {
       },
       useView(session, name) {
         return useViewState(session, name, false)
+      },
+      useFreshViews(session) {
+        const sessionId = session.kind === 'ready' ? session.sessionId : undefined
+        // 借来的会话中途换了不算再打开一次
+        const isRequested = useRef(false)
+        useEffect(() => {
+          if (sessionId === undefined || isRequested.current) return
+          isRequested.current = true
+          root.refreshOnOpen(sessionId)
+        }, [sessionId])
       },
     }
   }

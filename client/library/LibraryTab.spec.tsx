@@ -314,14 +314,14 @@ describe('全部记忆', () => {
     act(() => { gateway.setView('library', library({ layers: library().layers.map(l => ({ ...l, items: l.items.filter(m => m.id !== 'a2') })) })) })
     await act(async () => { release!({ ok: false, cmd: 'forget', code: 'not-found', detail: '记忆 a2 不存在' }) })
     expect(screen.queryByText('提交前跑 typecheck')).toBeNull()
-    expect(screen.getByRole('alert')).toHaveTextContent('没有成功：记忆 a2 不存在')
+    expect(screen.getByRole('alert')).toHaveTextContent('没有成功：这条记忆已经不在了，可能在别处删掉了。列表已更新。')
   })
 
   it('删别的项目里的记忆：服务端拒（cross-workspace）后在行里确认，「继续处理」才带 allowCrossWorkspace 重发；失败显示原话', async () => {
     const gateway = createFakeGateway({
       views: { library: library() },
       respond: command => 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
-        ? { ok: false, cmd: command.cmd, code: 'not-found', detail: '记忆 b1 不存在' }
+        ? { ok: false, cmd: command.cmd, code: 'failed', detail: '记忆 b1 不存在' }
         : { ok: false, cmd: command.cmd, code: 'cross-workspace', rejected: [{ id: 'b1', workspacePath: '/w/blog' }] },
     })
     renderInShell(<LibraryTab nav={createNavStore()} scope={{ kind: 'workspace', workspacePath: '/w/blog' }} session={session} now={NOW} />, gateway)

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
 import { useSyncExternalStore } from 'react'
 import { GUI_VIEW_VERSION, GUI_WORKSPACE_MAP_FILE, type CheckupView, type PendingItem, type PendingView } from '../src/gui/contract.ts'
-import { createHostGateway, decodeExecution, fileAddress, MEMORY_ROOT_CONFIG_KEY, MEMORY_ROOT_KEY, parseView, viewPath } from './gateway.ts'
+import { createHostGateway, decodeExecution, fileAddress, MEMORY_ROOT_CONFIG_KEY, MEMORY_ROOT_KEY, parseView, viewPath, type BorrowedSession } from './gateway.ts'
 import { createFakeConfigForm, DEFAULT_SECTION } from './settings/config-form.fake.ts'
 import { ENTRY_ID } from './settings/config.ts'
 import { createTranslator } from './i18n.tsx'
@@ -266,6 +266,108 @@ describe('createHostGateway', () => {
     await waitFor(() => { expect(opened.current).toEqual({ status: 'ready', data: settled }) })
   })
 
+  it('命令因界面落后于磁盘而失败（stale、not-found）：服务端已重写视图，挂着的视图照样重读；别的失败不重读', async () => {
+    localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+    resources[fileAddress('s1', pendingPath)] = { status: 'live', value: { absolutePath: pendingPath, version: 'v1' }, failure: undefined }
+    files[pendingPath] = JSON.stringify(pending)
+    const rewritten: PendingView = { ...pending, dot: 'none' }
+    const ctx = fakeCtx({
+      remote: {
+        commands: {
+          execute: vi.fn(async (_sid: string, line: string) => {
+            executed.push(line)
+            const code = line.startsWith('/memory forget ') ? 'not-found' : line.startsWith('/memory undo ') ? 'stale' : 'failed'
+            if (code !== 'failed') files[pendingPath] = JSON.stringify(code === 'stale' ? pending : rewritten)
+            return { ok: true as const, value: { commandId: 'c', result: { kind: 'error' as const, text: JSON.stringify({ ok: false, cmd: 'x', code }) } } }
+          }),
+        },
+      },
+    })
+    const gateway = createHostGateway(ctx)(props)
+    const read = ctx.remote.workspaceFiles.read as ReturnType<typeof vi.fn>
+    const { result } = renderHook(() => gateway.useView(gateway.useSession(undefined), 'pending'))
+    await waitFor(() => { expect(result.current).toEqual({ status: 'ready', data: pending }) })
+    const reads = () => read.mock.calls.filter(([, path]) => path === pendingPath).length
+
+    await act(async () => { await gateway.execute('s1', { cmd: 'resolve', decisionId: 'd1', verdict: 'keep-left' }) })
+    expect(reads()).toBe(1)
+    await act(async () => { await gateway.execute('s1', { cmd: 'forget', memoryId: 'm1', layer: { kind: 'global' } }) })
+    await waitFor(() => { expect(result.current).toEqual({ status: 'ready', data: rewritten }) })
+    await act(async () => { await gateway.execute('s1', { cmd: 'undo', decisionId: 'd1' }) })
+    await waitFor(() => { expect(result.current).toEqual({ status: 'ready', data: pending }) })
+  })
+
+  describe('打开记忆页刷新一次视图（外部改过的文件没有监听）', () => {
+    it('浏览器缓存了根也发 refresh-views；同一次打开只发一次；关掉再开再发', async () => {
+      localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+      const gateway = createHostGateway(fakeCtx())(props)
+      const open = () => renderHook(() => { gateway.useFreshViews(gateway.useSession(undefined)) })
+      const first = open()
+      await waitFor(() => { expect(executed).toEqual(['/memory refresh-views']) })
+      first.rerender()
+      first.unmount()
+      expect(executed).toEqual(['/memory refresh-views'])
+      open()
+      await waitFor(() => { expect(executed).toEqual(['/memory refresh-views', '/memory refresh-views']) })
+    })
+
+    it('缓存了根、视图文件又缺失：打开时的刷新和补写视图的刷新合成一条', async () => {
+      useFakeClock()
+      localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+      resources[fileAddress('s1', pendingPath)] = { status: 'failed', value: undefined, failure: { code: 'workspace-file/not-found', message: '' } }
+      const gateway = createHostGateway(fakeCtx())(props)
+      const { result } = renderHook(() => {
+        const session = gateway.useSession(undefined)
+        const view = gateway.useView(session, 'pending')
+        gateway.useFreshViews(session)
+        return view
+      })
+      await waitFor(() => { expect(result.current).toEqual({ status: 'ready', data: pending }) })
+      await settle()
+      expect(executed).toEqual(['/memory refresh-views'])
+    })
+
+    it('借来的会话中途换了：同一次打开不再发', async () => {
+      useFakeClock()
+      localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+      const gateway = createHostGateway(fakeCtx())(props)
+      const ready = (sessionId: string): BorrowedSession => ({ kind: 'ready', sessionId, cwd: '/w/app' })
+      const { rerender } = renderHook(({ session }) => { gateway.useFreshViews(session) }, { initialProps: { session: ready('s1') } })
+      await waitFor(() => { expect(executed).toEqual(['/memory refresh-views']) })
+      rerender({ session: ready('s2') })
+      await settle()
+      expect(executed).toEqual(['/memory refresh-views'])
+    })
+
+    it('刷新后挂着的视图读到重写的内容，即使宿主没推新版本', async () => {
+      localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+      resources[fileAddress('s1', pendingPath)] = { status: 'live', value: { absolutePath: pendingPath, version: 'v1' }, failure: undefined }
+      // 磁盘上是外部改动之前的视图；refresh-views 按现状重写（假服务端写出 pending）
+      files[pendingPath] = JSON.stringify({ ...pending, dot: 'none' })
+      const gateway = createHostGateway(fakeCtx())(props)
+      const { result } = renderHook(() => {
+        const session = gateway.useSession(undefined)
+        gateway.useFreshViews(session)
+        return gateway.useView(session, 'pending')
+      })
+      await waitFor(() => { expect(result.current).toEqual({ status: 'ready', data: pending }) })
+    })
+
+    it('根还没问到：不另发，info 之后那次刷新就算这次打开的', async () => {
+      useFakeClock()
+      resources[fileAddress('s1', pendingPath)] = { status: 'failed', value: undefined, failure: { code: 'workspace-file/not-found', message: '' } }
+      const gateway = createHostGateway(fakeCtx())(props)
+      renderHook(() => {
+        const session = gateway.useSession(undefined)
+        gateway.useFreshViews(session)
+        return gateway.useView(session, 'pending')
+      })
+      await waitFor(() => { expect(executed).toEqual(['/memory info', '/memory refresh-views']) })
+      await settle()
+      expect(executed).toEqual(['/memory info', '/memory refresh-views'])
+    })
+  })
+
   it('资源一直停在 not-found（新装后首次打开，视图目录当时还不存在）：refresh-views 后读到内容，本页命令成功后照样重读', async () => {
     resources[fileAddress('s1', pendingPath)] = { status: 'failed', value: undefined, failure: { code: 'workspace-file/not-found', message: '' } }
     const settled: PendingView = { ...pending, dot: 'none' }
@@ -425,6 +527,46 @@ describe('createHostGateway', () => {
     act(() => { form.externalChange([{ op: 'set', path: ['memoryRoot'], value: '/h/memories' }]) })
     await waitFor(() => { expect(result.current).toEqual({ status: 'ready', data: pending }) })
     expect(executed).toEqual(['/memory info', '/memory refresh-views'])
+  })
+
+  it('旧根的 refresh-views 还在途时配置换了根：新根照样发自己的 refresh-views，旧根那条回来不算新根刷新过', async () => {
+    useFakeClock()
+    localStorage.setItem(MEMORY_ROOT_KEY, '/old/memories')
+    localStorage.setItem(MEMORY_ROOT_CONFIG_KEY, '')
+    files['/old/memories/.state/gui/pending.json'] = JSON.stringify({ ...pending, dot: 'none' })
+    resources[fileAddress('s1', '/old/memories/.state/gui/pending.json')] = { status: 'live', value: { absolutePath: 'x', version: 'v1' }, failure: undefined }
+    // 新根下已有格式合法、内容陈旧的视图：缺失、版本检查都不会补写，只能靠这次刷新
+    files[pendingPath] = JSON.stringify({ ...pending, dot: 'red' })
+    resources[fileAddress('s1', pendingPath)] = { status: 'live', value: { absolutePath: pendingPath, version: 'v1' }, failure: undefined }
+    const form = createFakeConfigForm()
+    const ctx = fakeCtx({ configForms: { get: () => form } })
+    const execute = ctx.remote.commands.execute as ReturnType<typeof vi.fn>
+    const ok = execute.getMockImplementation()!
+    let release!: () => void
+    const held = new Promise<void>((resolve) => { release = resolve })
+    let isFirst = true
+    execute.mockImplementation(async (sid: string, line: string) => {
+      if (line === '/memory refresh-views' && isFirst) {
+        isFirst = false
+        executed.push(line)
+        await held
+        return { ok: true as const, value: { commandId: 'c', result: { kind: 'success' as const, text: JSON.stringify({ ok: true, cmd: 'refresh-views' }) } } }
+      }
+      return ok(sid, line)
+    })
+    const gateway = createHostGateway(ctx)(props)
+    const { result } = renderHook(() => {
+      const session = gateway.useSession('/w/app')
+      gateway.useFreshViews(session)
+      return gateway.useView(session, 'pending')
+    })
+    await waitFor(() => { expect(executed).toEqual(['/memory refresh-views']) })
+    act(() => { form.externalChange([{ op: 'set', path: ['memoryRoot'], value: '/h/memories' }]) })
+    await waitFor(() => { expect(executed).toEqual(['/memory refresh-views', '/memory info', '/memory refresh-views']) })
+    await waitFor(() => { expect(result.current).toEqual({ status: 'ready', data: pending }) })
+    await act(async () => { release() })
+    await settle()
+    expect(executed).toEqual(['/memory refresh-views', '/memory info', '/memory refresh-views'])
   })
 
   it('运行中换了新的配置服务、里面的 memoryRoot 不同：同样丢掉缓存重来一次', async () => {

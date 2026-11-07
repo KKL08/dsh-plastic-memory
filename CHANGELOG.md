@@ -188,6 +188,15 @@ All notable changes to this project are documented here. The format follows
   the line shows the command and its full result, with secrets masked.
 
 ### Fixed
+- Memory files edited outside the plugin (in an editor, by git or by a sync
+  tool) did not show up on the Memory page until the plugin itself wrote a
+  memory, and editing such a memory on the page failed with "refresh, then
+  edit again" while nothing on the page could refresh it. The Memory page
+  now reloads its lists from disk each time it opens. When an action is
+  turned down because the memory changed or was deleted elsewhere, the page
+  switches to what is on disk and says so. An edit or merge started before
+  such a change is still checked against the version it started from, so it
+  never overwrites the outside edit.
 - The plugin page of DeepSeek Harness 0.2.2-rc.1 shows the README as the
   plugin's details; its banner and architecture diagram showed as broken
   images because the package did not ship them. Both now ship with it.

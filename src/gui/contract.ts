@@ -806,6 +806,9 @@ export const GUI_ERROR_CODES = [
 ] as const
 export type GuiErrorCode = (typeof GUI_ERROR_CODES)[number]
 
+/** 说明界面落后于磁盘的失败码（卡片版本对不上、要动的已经不在）：什么都没动，但服务端会重写一次视图，客户端随之重读。 */
+export const VIEW_BEHIND_CODES: ReadonlySet<GuiErrorCode> = new Set(['stale', 'not-found'])
+
 export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
   z.object({
     ok: z.literal(true),

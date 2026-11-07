@@ -24,7 +24,7 @@ import {
   copyHistory, crossWorkspaceNote, gateRecords, locateCopy, workspaceLabel, type CrossWorkspaceRejection, type GovernanceContext,
 } from '../tools/workspace-gate.ts'
 import {
-  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, mergeKeeperIndex, parseMemoryCommand, sessionViewFile,
+  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, VIEW_BEHIND_CODES, mergeKeeperIndex, parseMemoryCommand, sessionViewFile,
   type GuiErrorCode, type MemoryCommand, type MemoryCommandResult,
 } from './contract.ts'
 import type { ViewWriter } from './view-writer.ts'
@@ -153,6 +153,8 @@ async function run(deps: MemoryCommandDeps, invocation: MemoryCommandInvocation)
   }
   // scan / refresh-views 自己做全量重写，set-auto-checkup 只重写体检视图
   if (result.ok && !SELF_WRITING_COMMANDS.has(command.cmd) && !READ_ONLY_COMMANDS.has(command.cmd)) await deps.views.request()
+  // 卡片版本对不上、或要动的已经不在：界面落后于磁盘（多半是外面改过文件，视图没有文件监听），重写一次让界面换成现状
+  else if (!result.ok && VIEW_BEHIND_CODES.has(result.code)) await deps.views.request()
   return result
 }
 
@@ -472,7 +474,7 @@ async function dispatch(
       if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
       // 界面只遮高危密钥：确认存下的疑似密钥是原文，照常改
       if (targets.some(t => hasCriticalSecret(t.record))) return fail(cmd, 'has-secret', '含密钥的记忆不能在这里改：界面上是遮盖后的正文，保存会把占位文字写回去。未做任何改动')
-      const stale = () => fail(cmd, 'stale', '这条记忆刚被改过，刷新后再改。未做任何改动')
+      const stale = () => fail(cmd, 'stale', '这条记忆刚被改过，界面已换成最新内容。未做任何改动')
       if (targets.some(t => isStale(t.record, t.base))) return stale()
       // 与 memory_save 同口径：四个面一起查，高危直接拦，疑似等用户确认
       const { content, name, summary, tags } = command
@@ -570,7 +572,7 @@ async function dispatch(
       // 只认卡片上那一份，且还是用户看到的那一版：指纹按它记
       const records = await Promise.all(refs.map(ref => locate(ref.memoryId, ref.layer)))
       if (!records.every(r => r?.status === 'active')) return notFound(ids.join('、'))
-      if (refs.some((ref, i) => isStale(records[i]!, ref.base))) return fail(cmd, 'stale', '这条记忆刚被改过，刷新后再看。未做任何改动')
+      if (refs.some((ref, i) => isStale(records[i]!, ref.base))) return fail(cmd, 'stale', '这条记忆刚被改过，界面已换成最新内容。未做任何改动')
       const entry = await deps.ignores.ignore(command.type, records.map(r => r!), now)
       return { ok: true, cmd, memoryIds: entry.memoryIds }
     }

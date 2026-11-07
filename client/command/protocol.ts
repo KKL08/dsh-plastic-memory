@@ -4,7 +4,7 @@
  * - forget 的目标含密钥（has-secret，什么都没动）：确认后改发 hard-delete，沿用这条命令指明的那一份；
  * - 直接改、直接合并的新内容像密钥（secret-suspected，什么都没动）：确认不是密钥后带 force 重发；
  * - 条目正被别处认领（claimed），或待决项已不在（契约 OPEN_ITEM_COMMANDS 的 not-found）：别处已处理；
- * - 服务端原话只有中文的几种（stale、secret-critical、target-taken、拿不到模型、模型输出不合格式）换本地文案，其余显示原话。
+ * - 服务端原话只有中文的几种（stale、not-found、secret-critical、target-taken、拿不到模型、模型输出不合格式）换本地文案，其余显示原话。
  * 确认类 Outcome 自带要重发的命令，面板不碰命令形状。
  */
 import {
@@ -45,7 +45,11 @@ const local = (code: GuiErrorCode | undefined, detail: LocaleKey): Failure => ({
 
 function localKeyOf(command: MemoryCommand, code: GuiErrorCode): LocaleKey | undefined {
   switch (code) {
-    case 'stale': return command.cmd === 'undo' || command.cmd === 'restore' ? 'pending.undo.stale' : 'pending.edit.stale'
+    case 'stale':
+      return command.cmd === 'undo' || command.cmd === 'restore' ? 'pending.undo.stale'
+        : command.cmd === 'ignore-advice' ? 'pending.ignore.stale' : 'pending.edit.stale'
+    // 按记忆动手的：要动的记忆已经不在（多半在外面删了），服务端已重写视图。待决项的在前面算别处已处理；撤销的是快照没了，照常显示原话
+    case 'not-found': return 'memoryId' in command || 'memories' in command ? 'pending.memory.gone' : undefined
     case 'secret-critical': return 'pending.edit.secretCritical'
     case 'target-taken':
       return command.cmd === 'undo' ? 'pending.move.undoTaken'
