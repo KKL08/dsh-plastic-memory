@@ -1,15 +1,17 @@
 /**
- * 建议整理卡里就地改一条记忆（直接改）或把两条合成一条（直接合并）：正文是编辑框，「更多」里是名称、摘要、标签，类型改不了。
+ * 建议整理卡里就地改一条记忆（手动改）或把两条合成一条（手动合并）：正文是编辑框，「更多」里是名称、摘要、标签，类型改不了。
  * 这里只管草稿；命令由卡片经 useCardAction 发出，保存中、等确认时按钮跟着卡片的忙状态置灰，失败原因写在卡片底下。
+ * 挂在两段切换的外壳（edit-modes.tsx）里，经 onStateChange 报告是否在保存、有没有改过。
  */
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 import { formatNumber, useT } from '../i18n.tsx'
 import { Button } from '../ui/Button.tsx'
 import { useReturnFocus } from '../ui/focus-return.ts'
+import { useReportEditState, type EditState } from './edit-modes.tsx'
 
 export interface EditDraft { content: string; name: string; summary: string; tags: string[] }
 
-export function EditPanel({ initial, original, isMerge, unavailable, onCancel, onSave }: {
+export function EditPanel({ initial, original, isMerge, unavailable, onCancel, onSave, onStateChange }: {
   /** 编辑框和「更多」的预填值。 */
   initial: EditDraft
   /** 改前的正文、摘要（判断「正文改了、摘要没动」）和字数（合并时两条相加）。 */
@@ -19,16 +21,21 @@ export function EditPanel({ initial, original, isMerge, unavailable, onCancel, o
   unavailable: string | undefined
   onCancel: () => void
   onSave: (draft: EditDraft) => void
+  onStateChange?: (state: EditState) => void
 }) {
   const t = useT()
   const id = useId()
   const [draft, setDraft] = useState(initial)
   const [isMoreOpen, setMoreOpen] = useState(false)
   const [tagText, setTagText] = useState('')
+  /** 点过「保存」：之后卡片忙着（保存中、等确认）就报 saving。 */
+  const [hasSaved, setSaved] = useState(false)
+  // 卡片不忙了（命令回来了：失败、确认被取消，或发送前就拦下）就复位，之后卡片因别的原因不可用不算保存中
+  useEffect(() => { if (hasSaved && unavailable === undefined) setSaved(false) }, [hasSaved, unavailable])
   /** 点了「去改摘要」：「更多」展开后把焦点放进摘要。 */
   const [isSummaryWanted, setSummaryWanted] = useState(false)
   const summaryRef = useRef<HTMLInputElement>(null)
-  // 取消时焦点回到「直接改」，保存后卡片换成结果行就落在结果行上
+  // 取消时焦点回到「修改」，保存后卡片换成结果行就落在结果行上
   const root = useRef<HTMLDivElement>(null)
   useReturnFocus(root)
   useEffect(() => {
@@ -42,6 +49,9 @@ export function EditPanel({ initial, original, isMerge, unavailable, onCancel, o
   // 只提示不拦：摘要进注入索引，正文改了它却还是旧的，agent 会按旧摘要找
   const isSummaryStale = content !== original.content.trim() && draft.summary === original.summary
   const isEmpty = content === '' || draft.name.trim() === ''
+  const isDirty = tagText.trim() !== '' || draft.content !== initial.content || draft.name !== initial.name || draft.summary !== initial.summary
+    || draft.tags.join('\n') !== initial.tags.join('\n')
+  useReportEditState(onStateChange, hasSaved && unavailable !== undefined ? 'saving' : 'idle', isDirty)
   const addTag = (event: KeyboardEvent<HTMLInputElement>) => {
     // 输入法选词的回车不算
     if (event.key !== 'Enter' || event.nativeEvent.isComposing) return
@@ -108,15 +118,16 @@ export function EditPanel({ initial, original, isMerge, unavailable, onCancel, o
         : null}
       <div className="pm-edit-foot">
         <span className="pm-edit-hint">
-          {isMerge ? <span>{t('pending.edit.mergeNote')}</span> : null}
-          {isMoreOpen ? <span>{t('pending.edit.typeFixed')}</span> : null}
+          {isMerge
+            ? <><span>{t('pending.edit.mergeNote')}</span>{isMoreOpen ? <span>{t('pending.edit.typeFixed')}</span> : null}</>
+            : <span>{t('pending.edit.note')}</span>}
         </span>
         <span className="pm-edit-count">{t('pending.edit.count', { from: formatNumber(original.chars), to: formatNumber(content.length) })}</span>
         <Button variant="ghost" unavailable={unavailable} onClick={onCancel}>{t('pending.cancel')}</Button>
         <Button
           variant="primary"
           unavailable={unavailable ?? (isEmpty ? t('pending.edit.empty') : undefined)}
-          onClick={() => { onSave({ content, name: draft.name.trim(), summary: draft.summary.trim(), tags: draft.tags }) }}
+          onClick={() => { setSaved(true); onSave({ content, name: draft.name.trim(), summary: draft.summary.trim(), tags: draft.tags }) }}
         >
           {t('pending.edit.save')}
         </Button>

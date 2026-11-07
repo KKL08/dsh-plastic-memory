@@ -180,6 +180,7 @@ describe('命令行：面板发的 /memory 命令在对话里画成一句话', (
       [` promote-memory ${JSON.stringify({ ...memoryLayer, target: 'agents-md' })}`, '写进 AGENTS.md'],
       [' promote {"decisionId":"pd_1","target":"global"}', '提升为全局'],
       [' move-memory {"memoryId":"m1","workspacePath":"/w/app"}', '移到项目「app」'],
+      [` apply-edits ${JSON.stringify({ ops: [{ kind: 'forget', ...memoryLayer, base: { updatedAt: 1, digest: 'd' } }, { kind: 'forget', memoryId: 'm2', base: { updatedAt: 1, digest: 'd' } }] })}`, '整理 2 条记忆'],
       [' scan', '体检记忆'],
       [' model-info', '查看可用的模型'],
       [' set-auto-checkup {"scope":{"kind":"all"},"frequency":"manual"}', '修改自动体检频率'],

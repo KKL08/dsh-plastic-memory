@@ -107,7 +107,13 @@ export function CommandFeedback({ runner, id }: { runner: CommandRunner; id: str
  * 都收起，什么都不发。焦点没落到任何控件上不算移出：Safari 等点按钮时不给按钮焦点，「取消」会先失焦到页面上，
  * 这时收起就点不到「删除」了；切到别的应用也是这样。「取消」排在最后，落在原来按钮的位置上，连点两下也删不掉；焦点进来时也停在它上面。
  */
-export function SoftDeleteConfirm({ onCancel, onConfirm }: { onCancel: () => void; onConfirm: () => void }) {
+export function SoftDeleteConfirm({ onCancel, onConfirm, question, confirmLabel }: {
+  onCancel: () => void
+  onConfirm: () => void
+  /** 换个问法（记忆查看换行前的「放弃刚写的内容？ 放弃 · 取消」），收起规则相同；缺省问删除。 */
+  question?: string
+  confirmLabel?: string
+}) {
   const t = useT()
   const ref = useRef<HTMLSpanElement>(null)
   const questionId = useId()
@@ -140,8 +146,8 @@ export function SoftDeleteConfirm({ onCancel, onConfirm }: { onCancel: () => voi
         if (next !== null && !event.currentTarget.contains(next)) onCancel()
       }}
     >
-      <span id={questionId}>{t('pending.softDelete.question')}</span>
-      <button type="button" className="pm-link" onClick={onConfirm}>{t('pending.softDelete.confirm')}</button>
+      <span id={questionId}>{question ?? t('pending.softDelete.question')}</span>
+      <button type="button" className="pm-link" onClick={onConfirm}>{confirmLabel ?? t('pending.softDelete.confirm')}</button>
       <i className="pm-sep" aria-hidden="true">·</i>
       <button type="button" className="pm-link pm-soft-confirm-cancel" autoFocus onClick={onCancel}>{t('pending.cancel')}</button>
     </span>

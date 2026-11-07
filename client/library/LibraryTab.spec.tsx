@@ -2,17 +2,18 @@
 import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { GUI_VIEW_VERSION, checkupKey, type LibraryView, type MemoryCommandResult, type PendingView } from '../../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, MAX_BATCH_EDIT, checkupKey, type EditPlan, type LibraryView, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type PendingView } from '../../src/gui/contract.ts'
 import type { BorrowedSession } from '../gateway.ts'
-import { createFakeGateway } from '../gateway.fake.ts'
-import { createNavStore } from '../nav.ts'
+import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
+import { createNavStore, type PageScope } from '../nav.ts'
+import { EDIT_MODE_STORAGE_KEY } from '../pending/edit-modes.tsx'
 import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
-import { LibraryTab } from './LibraryTab.tsx'
+import { LibraryTab, libraryTabCss } from './LibraryTab.tsx'
 import type { FoldMemory } from './groups.tsx'
 import { FLASH_MS } from './shared.tsx'
 import { createTranslator } from '../i18n.tsx'
 import { en } from '../locales.ts'
-import { PanelShell } from '../ui/PanelShell.tsx'
+import { PanelShell, PM_CSS } from '../ui/PanelShell.tsx'
 
 const app = { kind: 'workspace', workspacePath: '/w/app' } as const
 const blog = { kind: 'workspace', workspacePath: '/w/blog' } as const
@@ -115,10 +116,10 @@ describe('全部记忆', () => {
     expect(screen.getByRole('status')).toHaveTextContent('没有找到匹配的记忆')
   })
 
-  it('行尾先是「删除」（幽灵按钮），再是「打开文件」；没有「在访达中显示」', () => {
+  it('没有版本（digest）的行尾只有「删除」（幽灵按钮）和「打开文件」（纯图标）；没有「在访达中显示」', () => {
     renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: library() } }))
     const buttons = within(rowOf('提交前跑 typecheck')).getAllByRole('button')
-    expect(buttons.map(b => b.textContent)).toEqual(['删除', '打开文件'])
+    expect(buttons.map(b => b.getAttribute('aria-label') ?? b.textContent)).toEqual(['删除', '打开文件'])
     expect(buttons[0]).toHaveClass('pm-btn--ghost')
   })
 
@@ -718,6 +719,825 @@ describe('全部记忆', () => {
       expect(rowOf('测试里不要 mock 数据库，用 testcontainers 起真实 Postgres。')).toHaveClass('pm-flash')
       expect(scrollIntoView).toHaveBeenCalledTimes(1)
     })
+  })
+})
+
+describe('记忆查看：单条修改', () => {
+  const target = memory({ id: 'a1', name: '发版流程', content: '每周三发版，先跑测试再打包。', summary: '发版的节奏', tags: ['发版'], digest: 'sha1:a1', updatedAt: 111, filePath: '/m/app-1/a1.md' })
+  const other = memory({ id: 'a2', name: '提交前检查', content: '提交前跑 typecheck', summary: '提交前', digest: 'sha1:a2', updatedAt: 222, filePath: '/m/app-1/a2.md' })
+  const base = { updatedAt: 111, digest: 'sha1:a1' }
+  const view = (items = [target, other]) => library({ layers: [{ layer: app, items }] })
+  const drafted = (draft: object = {}): MemoryCommandResult => ({ ok: true, cmd: 'draft-edit', draft: { content: '每周四发版，先跑测试再打包。', summary: '发版的节奏', ...draft }, model: 'deepseek-v4-flash' } as MemoryCommandResult)
+  const edited: MemoryCommandResult = { ok: true, cmd: 'edit-memory', decisionId: 'pd_e', memoryIds: ['a1'], snapshotId: 'snap_e', filePath: '/m/app-1/a1.md' }
+  const respondWith = (draft: object = {}) => (command: MemoryCommand): MemoryCommandResult | Promise<MemoryCommandResult> =>
+    command.cmd === 'draft-edit' ? drafted(draft) : command.cmd === 'edit-memory' ? edited : { ok: true, cmd: command.cmd }
+  const critical = `${'sk-' + 'TESTONLY'.padEnd(24, 'a')}`
+
+  function setup({ items, respond = respondWith(), model, scope = app }: {
+    items?: MemoryCard[]
+    respond?: (command: MemoryCommand) => MemoryCommandResult | Promise<MemoryCommandResult>
+    model?: string | null
+    scope?: PageScope
+  } = {}) {
+    const gateway = createFakeGateway({ views: { library: view(items) }, respond, ...(model !== undefined ? { model } : {}) })
+    const utils = renderInShell(<LibraryTab nav={createNavStore({ view: 'library' })} scope={scope} session={session} now={NOW} />, gateway)
+    return { gateway, utils, commands: () => gateway.executed.map(e => e.command) }
+  }
+  /** 记忆卡原文是这一句的那一行（面板里的编辑框、对照也有同样的字，不能按全文找）。 */
+  const row = (text = '每周三发版，先跑测试再打包。') => {
+    const hit = [...document.querySelectorAll<HTMLElement>('.pm-list > li')].find(li => li.querySelector('.pm-mc-text')?.firstChild?.textContent === text)
+    if (hit === undefined) throw new Error(`没有原文是「${text}」的行`)
+    return hit
+  }
+  const open = (li = row()) => { fireEvent.click(within(li).getByRole('button', { name: '修改' })) }
+  const ask = () => screen.getByRole('textbox', { name: '想怎么改这条？' })
+  const write = (text: string) => { fireEvent.change(ask(), { target: { value: text } }) }
+  const generate = async () => { await act(async () => { fireEvent.click(screen.getByRole('button', { name: '生成修改' })) }) }
+  const apply = async () => { await act(async () => { fireEvent.click(screen.getByRole('button', { name: '应用' })) }) }
+
+  beforeEach(() => { localStorage.clear() })
+  afterEach(() => { vi.useRealTimers(); localStorage.clear() })
+
+  it('故事 1：行尾依次是「修改」（小号次按钮）·「删除」（幽灵）·「打开文件」（纯图标，读屏名称和悬停提示都是「打开文件」）', () => {
+    const { gateway } = setup()
+    const buttons = within(row()).getAllByRole('button')
+    expect(buttons.map(b => b.getAttribute('aria-label') ?? b.textContent)).toEqual(['修改', '删除', '打开文件'])
+    expect(buttons[0]).toHaveClass('pm-btn--secondary')
+    expect(buttons[1]).toHaveClass('pm-btn--ghost')
+    expect(buttons[2]).toHaveClass('pm-btn--icon')
+    expect(buttons[2]).toHaveAttribute('title', '打开文件')
+    expect(buttons[2]).toHaveTextContent(/^$/)
+    expect(buttons[2]!.querySelector('svg')).not.toBeNull()
+    fireEvent.click(buttons[2]!)
+    expect(gateway.opened).toEqual([{ path: '/m/app-1/a1.md' }])
+  })
+
+  it('故事 1：含密钥或没有版本（digest）的不显示「修改」；「全部」范围同样有「修改」', () => {
+    const secret = memory({ id: 'a3', content: '部署 token [已隐藏]', digest: 'sha1:a3', hasSecret: true })
+    const bare = memory({ id: 'a4', content: '没有版本的那条' })
+    const { utils } = setup({ items: [target, secret, bare] })
+    expect(within(row('部署 token [已隐藏]')).queryByRole('button', { name: '修改' })).toBeNull()
+    expect(within(row('没有版本的那条')).queryByRole('button', { name: '修改' })).toBeNull()
+    utils.unmount()
+    setup({ items: [{ ...target, updatedAt: NOW - HOUR }], scope: { kind: 'all' } })
+    expect(within(row()).getByRole('button', { name: '修改' })).toBeInTheDocument()
+  })
+
+  it('故事 2：点「修改」在这一行下展开面板，行尾按钮收起；默认停在「让模型改」', () => {
+    setup()
+    open()
+    const li = row()
+    expect(within(li).getByRole('tablist', { name: '修改方式' })).toBeInTheDocument()
+    expect(within(li).getByRole('tab', { name: '让模型改' })).toHaveAttribute('aria-selected', 'true')
+    expect(within(li).queryByRole('button', { name: '删除' })).toBeNull()
+    expect(within(li).queryByRole('button', { name: '打开文件' })).toBeNull()
+    expect(within(li).getByRole('textbox', { name: '想怎么改这条？' })).toBeInTheDocument()
+    // 别的行照常
+    expect(within(row('提交前跑 typecheck')).getByRole('button', { name: '修改' })).toBeInTheDocument()
+    fireEvent.click(within(li).getByRole('button', { name: '取消' }))
+    expect(within(row()).getByRole('button', { name: '修改' })).toBeInTheDocument()
+  })
+
+  it('故事 2：同一时刻只展开一个面板；没写东西时直接换过去', () => {
+    setup()
+    open()
+    open(row('提交前跑 typecheck'))
+    expect(screen.getAllByRole('tablist')).toHaveLength(1)
+    expect(within(row('提交前跑 typecheck')).getByRole('tablist', { name: '修改方式' })).toBeInTheDocument()
+    expect(within(row()).getByRole('button', { name: '修改' })).toBeInTheDocument()
+  })
+
+  it('故事 2：已展开的面板有没发出的输入时，换行前先原位问「放弃刚写的内容？」；取消留在原处，确认后再换', () => {
+    setup()
+    open()
+    write('再短一点')
+    open(row('提交前跑 typecheck'))
+    const question = within(row('提交前跑 typecheck')).getByRole('group', { name: '放弃刚写的内容？' })
+    expect(ask()).toHaveValue('再短一点')
+    fireEvent.click(within(question).getByRole('button', { name: '取消' }))
+    expect(within(row('提交前跑 typecheck')).queryByRole('group', { name: '放弃刚写的内容？' })).toBeNull()
+    expect(ask()).toHaveValue('再短一点')
+    open(row('提交前跑 typecheck'))
+    fireEvent.click(within(within(row('提交前跑 typecheck')).getByRole('group', { name: '放弃刚写的内容？' })).getByRole('button', { name: '放弃' }))
+    expect(screen.getAllByRole('tablist')).toHaveLength(1)
+    expect(within(row('提交前跑 typecheck')).getByRole('tablist')).toBeInTheDocument()
+    expect(ask()).toHaveValue('')
+  })
+
+  it('故事 2：已出稿没应用也算没保存的内容，换行前先问', async () => {
+    setup()
+    open()
+    write('改成周四')
+    await generate()
+    open(row('提交前跑 typecheck'))
+    expect(within(row('提交前跑 typecheck')).getByRole('group', { name: '放弃刚写的内容？' })).toBeInTheDocument()
+  })
+
+  it('故事 2a：选过手动改，下次在别的行打开也停在手动改（和待处理共用偏好）', () => {
+    setup()
+    open()
+    fireEvent.click(screen.getByRole('tab', { name: '手动改' }))
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    open(row('提交前跑 typecheck'))
+    expect(screen.getByRole('tab', { name: '手动改' })).toHaveAttribute('aria-selected', 'true')
+    expect(localStorage.getItem(EDIT_MODE_STORAGE_KEY)).toBe('manual')
+  })
+
+  it('故事 2b：切换方式不丢输入；生成中切换控件置灰', async () => {
+    setup({ respond: command => (command.cmd === 'draft-edit' ? new Promise<never>(() => {}) : { ok: true, cmd: command.cmd }) })
+    open()
+    write('改成周四')
+    fireEvent.click(screen.getByRole('tab', { name: '手动改' }))
+    fireEvent.click(screen.getByRole('tab', { name: '让模型改' }))
+    expect(ask()).toHaveValue('改成周四')
+    await generate()
+    expect(screen.getByRole('tab', { name: '手动改' })).toBeDisabled()
+  })
+
+  it('故事 2c：手动改：正文预填，「更多」里是名称、摘要、标签；字数、说明；正文或名称为空时「保存」置灰', () => {
+    localStorage.setItem(EDIT_MODE_STORAGE_KEY, 'manual')
+    setup()
+    open()
+    const li = row()
+    const content = within(li).getByRole('textbox', { name: '正文' })
+    expect(content).toHaveValue('每周三发版，先跑测试再打包。')
+    expect(within(li).getByText('直接改正文，保存后可以撤销。类型改不了：换类型要先删再记。')).toBeInTheDocument()
+    expect(within(li).getByText('14 字 → 14 字')).toBeInTheDocument()
+    fireEvent.click(within(li).getByRole('button', { name: /更多/ }))
+    expect(within(li).getByRole('textbox', { name: '名称' })).toHaveValue('发版流程')
+    expect(within(li).getByRole('textbox', { name: '摘要' })).toHaveValue('发版的节奏')
+    expect(within(li).getByText('发版')).toBeInTheDocument()
+    expect(within(li).getAllByRole('button').slice(-2).map(b => b.textContent)).toEqual(['取消', '保存'])
+    fireEvent.change(content, { target: { value: '  ' } })
+    expect(within(li).getByRole('button', { name: '保存' })).toHaveAttribute('aria-disabled', 'true')
+  })
+
+  it('故事 2d：手动改保存发 edit-memory（带层和打开时的版本），行内换成新内容、标「刚改」，结果行「已保存修改 · 撤销」', async () => {
+    localStorage.setItem(EDIT_MODE_STORAGE_KEY, 'manual')
+    const { commands } = setup()
+    open()
+    fireEvent.change(screen.getByRole('textbox', { name: '正文' }), { target: { value: '每周四发版。' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '保存' })) })
+    expect(commands()).toEqual([{ cmd: 'edit-memory', memoryId: 'a1', layer: app, base, content: '每周四发版。', name: '发版流程', summary: '发版的节奏', tags: ['发版'] }])
+    const li = row('每周四发版。')
+    expect(within(li).queryByRole('tablist')).toBeNull()
+    expect(within(li).getByText('刚改')).toHaveClass('pm-chip--neutral')
+    expect(within(li).getByText('已保存修改')).toBeInTheDocument()
+    expect(within(li).getByRole('button', { name: '撤销' })).toBeInTheDocument()
+  })
+
+  it('故事 3：标签「想怎么改这条？」，下面「常用写法（可选）」跟四个快捷意图，文本框有占位例句', () => {
+    setup()
+    open()
+    const intents = screen.getByRole('group', { name: '常用写法（可选）' })
+    expect(within(intents).getAllByRole('button').map(b => b.textContent)).toEqual(['压缩要点', '改清楚', '纠正内容', '补充信息'])
+    expect(ask()).toHaveAttribute('placeholder', '也可以直接输入你的要求，例如：「每周三发版」已经不对了，现在改成每周四，以这个为准。')
+  })
+
+  it('故事 4：点快捷意图把模板填进文本框（替换原有内容），按钮按下，选中第一个「___」', () => {
+    setup()
+    open()
+    write('原来写的')
+    const intents = screen.getByRole('group', { name: '常用写法（可选）' })
+    fireEvent.click(within(intents).getByRole('button', { name: '纠正内容' }))
+    const box = ask() as HTMLTextAreaElement
+    expect(box).toHaveValue('「___」已经不对了，现在是「___」，以这个为准。')
+    expect(within(intents).getByRole('button', { name: '纠正内容' })).toHaveAttribute('aria-pressed', 'true')
+    expect(box).toHaveFocus()
+    expect([box.selectionStart, box.selectionEnd]).toEqual([1, 4])
+    fireEvent.click(within(intents).getByRole('button', { name: '压缩要点' }))
+    expect(box).toHaveValue('压缩成要点，保留 ___，可以删掉 ___。')
+    expect([box.selectionStart, box.selectionEnd]).toEqual([9, 12])
+    expect(within(intents).getByRole('button', { name: '纠正内容' })).toHaveAttribute('aria-pressed', 'false')
+    expect(within(intents).getByRole('button', { name: '压缩要点' })).toHaveAttribute('aria-pressed', 'true')
+    fireEvent.click(within(intents).getByRole('button', { name: '改清楚' }))
+    expect(box).toHaveValue('「___」写得含糊，指的是 ___。')
+    fireEvent.click(within(intents).getByRole('button', { name: '补充信息' }))
+    expect(box).toHaveValue('补上：___（原文没有，按我写的加）。')
+  })
+
+  it('故事 5：要求必填：空着或只有空白时「生成修改」置灰并提示怎么开头；有内容就能发（留着「___」也行），不带建议类型', async () => {
+    const { commands } = setup({ model: 'deepseek-v4-flash' })
+    open()
+    const button = () => screen.getByRole('button', { name: '生成修改' })
+    expect(button()).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getByText('先写要求，或从常用写法开个头')).toBeInTheDocument()
+    write('   ')
+    expect(button()).toHaveAttribute('aria-disabled', 'true')
+    await generate()
+    expect(commands()).toEqual([])
+    fireEvent.click(screen.getByRole('button', { name: '补充信息' }))
+    expect(button()).not.toHaveAttribute('aria-disabled')
+    expect(screen.getByText('用当前模型 deepseek-v4-flash 生成，先给你看结果再决定')).toBeInTheDocument()
+    await generate()
+    expect(commands()).toEqual([{ cmd: 'draft-edit', memories: [{ memoryId: 'a1', layer: app }], request: '补上：___（原文没有，按我写的加）。' }])
+  })
+
+  it('故事 6：面板说明写清模型只用原文和你写的信息', () => {
+    setup()
+    open()
+    const note = screen.getByText('模型按原文和你的要求改写这条记忆，格式由它保持，比手动改文件稳妥。它只用你写的信息，不会自己补充。会消耗少量 token。')
+    expect(note.closest('.pm-model-note')?.querySelector('svg')).not.toBeNull()
+  })
+
+  it('故事 7：生成中只锁这一行（别的行照常能点）；「停止」回到写要求，输入保留', async () => {
+    setup({ respond: command => (command.cmd === 'draft-edit' ? new Promise<never>(() => {}) : { ok: true, cmd: command.cmd }) })
+    open()
+    write('改成周四')
+    await generate()
+    expect(within(row()).getByRole('status')).toHaveTextContent('正在生成修改……')
+    const others = within(row('提交前跑 typecheck'))
+    expect(others.getByRole('button', { name: '修改' })).not.toHaveAttribute('aria-disabled')
+    expect(others.getByRole('button', { name: '删除' })).not.toHaveAttribute('aria-disabled')
+    fireEvent.click(screen.getByRole('button', { name: '停止' }))
+    expect(ask()).toHaveValue('改成周四')
+  })
+
+  it('故事 8：出稿后左右对照、字数变化，「放弃 · 再改改 · 应用」；再改改带上一稿和此前的要求', async () => {
+    const { commands } = setup()
+    open()
+    write('「每周三发版」已经不对了，现在是「每周四」，以这个为准。')
+    await generate()
+    expect(screen.getByRole('region', { name: '原文' }).querySelector('del')).toHaveTextContent('三')
+    expect(screen.getByRole('region', { name: '改后' }).querySelector('ins')).toHaveTextContent('四')
+    expect(document.querySelector('.pm-model-stat')).toHaveTextContent('14 字 → 14 字')
+    expect(within(row()).getAllByRole('button').slice(-3).map(b => b.textContent)).toEqual(['放弃', '再改改', '应用'])
+    fireEvent.click(screen.getByRole('button', { name: '再改改' }))
+    expect(ask()).toHaveValue('')
+    write('再短一点')
+    await generate()
+    expect(commands().at(-1)).toEqual({
+      cmd: 'draft-edit', memories: [{ memoryId: 'a1', layer: app }], request: '再短一点',
+      priorRequests: ['「每周三发版」已经不对了，现在是「每周四」，以这个为准。'],
+      previous: { content: '每周四发版，先跑测试再打包。', summary: '发版的节奏', name: '发版流程', tags: ['发版'] },
+    })
+  })
+
+  it('故事 9：应用发 edit-memory；行内换成新内容、高亮一次、标「刚改」（中性胶囊），结果行「已按你的要求改写这条 · 撤销」；撤销发 undo，结果行和「刚改」都收起', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const { gateway, commands } = setup()
+    open()
+    write('改成周四')
+    await generate()
+    await apply()
+    expect(commands().at(-1)).toEqual({ cmd: 'edit-memory', memoryId: 'a1', layer: app, base, content: '每周四发版，先跑测试再打包。', name: '发版流程', summary: '发版的节奏', tags: ['发版'] })
+    // 视图还没推来：先按应用的稿子画
+    const li = row('每周四发版，先跑测试再打包。')
+    expect(li).toHaveClass('pm-flash')
+    expect(within(li).getByText('刚改')).toHaveClass('pm-chip--neutral')
+    expect(within(li).getByText('已按你的要求改写这条')).toBeInTheDocument()
+    act(() => { vi.advanceTimersByTime(FLASH_MS) })
+    expect(row('每周四发版，先跑测试再打包。')).not.toHaveClass('pm-flash')
+    // 视图推来新版本：照视图画
+    act(() => { gateway.setView('library', view([{ ...target, content: '每周四发版，先跑测试再打包。', updatedAt: 333, digest: 'sha1:a1b' }, other])) })
+    expect(within(row('每周四发版，先跑测试再打包。')).getByText('刚改')).toBeInTheDocument()
+
+    await act(async () => { fireEvent.click(within(row('每周四发版，先跑测试再打包。')).getByRole('button', { name: '撤销' })) })
+    expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'pd_e' })
+    act(() => { gateway.setView('library', view()) })
+    expect(within(row()).queryByText('已按你的要求改写这条')).toBeNull()
+    expect(within(row()).queryByText('刚改')).toBeNull()
+  })
+
+  it('故事 9：结果行在展开别的面板后收起（「刚改」留着）；撤销被拒时写明原因', async () => {
+    const { gateway } = setup({ respond: command => (command.cmd === 'undo' ? { ok: false, cmd: 'undo', code: 'stale' } : respondWith()(command)) })
+    open()
+    write('改成周四')
+    await generate()
+    await apply()
+    act(() => { gateway.setView('library', view([{ ...target, content: '每周四发版，先跑测试再打包。', updatedAt: 333, digest: 'sha1:a1b' }, other])) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
+    expect(within(row('每周四发版，先跑测试再打包。')).getByRole('alert')).toHaveTextContent('这条记忆之后又被改过')
+    open(row('提交前跑 typecheck'))
+    expect(screen.queryByText('已按你的要求改写这条')).toBeNull()
+    expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
+    expect(within(row('每周四发版，先跑测试再打包。')).getByText('刚改')).toBeInTheDocument()
+  })
+
+  it('故事 10：要求里有高危密钥：不发送，面板里写明原因', async () => {
+    const { commands } = setup()
+    open()
+    write(`把 ${critical} 删掉`)
+    await generate()
+    expect(commands()).toEqual([])
+    expect(screen.getByRole('alert')).toHaveTextContent('要求里有高危密钥，没有发送。去掉密钥再生成。')
+  })
+
+  it('故事 11：应用时这条已被别处改过（stale）：面板关闭，行内换成最新内容，结果行提示重新打开', async () => {
+    const { gateway } = setup({ respond: command => (command.cmd === 'edit-memory' ? { ok: false, cmd: 'edit-memory', code: 'stale' } : respondWith()(command)) })
+    open()
+    write('改成周四')
+    await generate()
+    await apply()
+    expect(screen.queryByRole('tablist')).toBeNull()
+    expect(within(row()).getByText('这条刚被改过，已换成最新内容。要改请重新打开。')).toBeInTheDocument()
+    expect(within(row()).queryByRole('button', { name: '撤销' })).toBeNull()
+    expect(within(row()).queryByText('刚改')).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+    act(() => { gateway.setView('library', view([{ ...target, content: '每周五发版。', updatedAt: 444, digest: 'sha1:a1c' }, other])) })
+    expect(within(row('每周五发版。')).getByText('这条刚被改过，已换成最新内容。要改请重新打开。')).toBeInTheDocument()
+  })
+
+  it('故事 12：改后稿像密钥（secret-suspected）：原位确认后带 force 重发', async () => {
+    const { commands } = setup({ respond: command => (command.cmd === 'edit-memory' && command.force !== true ? { ok: false, cmd: 'edit-memory', code: 'secret-suspected' } : respondWith()(command)) })
+    open()
+    write('改成周四')
+    await generate()
+    await apply()
+    const confirm = within(row()).getByRole('group', { name: '仍然保存' })
+    expect(confirm).toHaveTextContent('内容里有像密钥的片段。确定不是密钥再保存。')
+    await act(async () => { fireEvent.click(within(confirm).getByRole('button', { name: '仍然保存' })) })
+    expect(commands().filter(c => c.cmd === 'edit-memory').map(c => c.cmd === 'edit-memory' && c.force)).toEqual([undefined, true])
+    expect(within(row('每周四发版，先跑测试再打包。')).getByText('已按你的要求改写这条')).toBeInTheDocument()
+  })
+
+  it('故事 12：改后稿含高危密钥：发出前拦下，不保存', async () => {
+    const { commands } = setup({ respond: respondWith({ content: `部署用 ${critical}` }) })
+    open()
+    write('加上部署 token')
+    await generate()
+    await apply()
+    expect(commands().map(c => c.cmd)).toEqual(['draft-edit'])
+    expect(within(row()).getByRole('alert')).toHaveTextContent('内容里有高危密钥，没有保存。')
+  })
+})
+
+describe('记忆查看：多选', () => {
+  const pick = (id: string, content: string, patch: Partial<MemoryCard> = {}) =>
+    memory({ id, content, digest: `sha1:${id}`, updatedAt: 100 + Number(id.replace(/\D/g, '') || 0), filePath: `/m/app-1/${id}.md`, ...patch })
+  // 分在三个类型里，每组不超过 3 条，都露在外面
+  const a1 = pick('a1', '每周三发版，先跑测试再打包。')
+  const a2 = pick('a2', '提交前跑 typecheck', { type: 'knowledge' })
+  const a3 = pick('a3', '格式化用 prettier', { type: 'person' })
+  const secret = pick('a8', '部署 token [已隐藏]', { type: 'knowledge', hasSecret: true })
+  const bare = memory({ id: 'a9', type: 'person', content: '没有版本的那条', filePath: '/m/app-1/a9.md' })
+  const view = (items: MemoryCard[] = [a1, a2, a3, secret, bare]) => library({ layers: [{ layer: app, items }] })
+
+  function setup({ items, scope = app, config }: { items?: MemoryCard[]; scope?: PageScope; config?: FakeGatewayInit['config'] } = {}) {
+    const gateway = createFakeGateway({ views: { library: view(items) }, ...(config !== undefined ? { config } : {}) })
+    const utils = renderInShell(<LibraryTab nav={createNavStore({ view: 'library' })} scope={scope} session={session} now={NOW} />, gateway)
+    return { gateway, utils }
+  }
+  const row = (text: string) => {
+    const hit = [...document.querySelectorAll<HTMLElement>('.pm-list > li')].find(li => li.querySelector('.pm-mc-text')?.firstChild?.textContent === text)
+    if (hit === undefined) throw new Error(`没有原文是「${text}」的行`)
+    return hit
+  }
+  const box = (text: string) => within(row(text)).getByRole('checkbox')
+  const enter = () => { fireEvent.click(screen.getByRole('button', { name: '选择' })) }
+  const check = (...texts: string[]) => { for (const text of texts) fireEvent.click(box(text)) }
+  const bar = () => screen.getByRole('group', { name: '多选操作' })
+  const tidy = () => within(bar()).getByRole('button', { name: '整理所选…' })
+
+  beforeEach(() => { localStorage.clear() })
+  afterEach(() => { localStorage.clear() })
+
+  it('故事 13：项目和全局范围的搜索框右侧有「选择」（次按钮）；「全部」范围没有', () => {
+    const { utils } = setup()
+    const search = screen.getByRole('searchbox', { name: '搜索记忆' }).closest('.pm-search')!
+    const select = screen.getByRole('button', { name: '选择' })
+    expect(select).toHaveClass('pm-btn--secondary')
+    expect(search.nextElementSibling).toBe(select)
+    utils.unmount()
+    const global = setup({ items: [pick('g1', '回答用中文', { scope: 'global', workspacePath: undefined })], scope: { kind: 'global' } })
+    expect(screen.getByRole('button', { name: '选择' })).toBeInTheDocument()
+    global.utils.unmount()
+    setup({ items: [{ ...a1, updatedAt: NOW - HOUR }], scope: { kind: 'all' } })
+    expect(screen.queryByRole('button', { name: '选择' })).toBeNull()
+  })
+
+  it('故事 14：点「选择」变成按下态的「完成」；每行左侧出现勾选框，行尾按钮全部收起', () => {
+    setup()
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
+    enter()
+    const done = screen.getByRole('button', { name: '完成' })
+    expect(done).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByRole('button', { name: '选择' })).toBeNull()
+    expect(screen.getAllByRole('checkbox')).toHaveLength(5)
+    const li = row('提交前跑 typecheck')
+    expect(li.firstElementChild).toContainElement(within(li).getByRole('checkbox'))
+    expect(within(li).queryAllByRole('button')).toHaveLength(0)
+    expect(document.querySelector('.pm-row-actions')).toBeNull()
+  })
+
+  it('故事 14：含密钥、没有版本的行勾选框置灰，悬停写明原因；可选的行勾选框名字带上记忆名', () => {
+    setup()
+    enter()
+    expect(box('部署 token [已隐藏]')).toBeDisabled()
+    expect(box('部署 token [已隐藏]').closest('label')).toHaveAttribute('title', '含密钥的记忆不发给模型')
+    expect(box('没有版本的那条')).toBeDisabled()
+    expect(box('没有版本的那条').closest('label')).toHaveAttribute('title', '这条读不到版本，先刷新')
+    expect(box('提交前跑 typecheck')).toBeEnabled()
+    expect(box('提交前跑 typecheck').closest('label')).not.toHaveAttribute('title')
+    expect(box('提交前跑 typecheck')).toHaveAccessibleName(`选择「${a2.name}」`)
+  })
+
+  it('故事 14：已展开的单条面板没写东西时直接收起；有没发出的输入先原位问「放弃刚写的内容？」，取消留在原处，确认后进多选', () => {
+    setup()
+    fireEvent.click(within(row('提交前跑 typecheck')).getByRole('button', { name: '修改' }))
+    enter()
+    expect(screen.queryByRole('tablist')).toBeNull()
+    expect(screen.getAllByRole('checkbox')).toHaveLength(5)
+    fireEvent.click(screen.getByRole('button', { name: '完成' }))
+    fireEvent.click(within(row('提交前跑 typecheck')).getByRole('button', { name: '修改' }))
+    fireEvent.change(screen.getByRole('textbox', { name: '想怎么改这条？' }), { target: { value: '再短一点' } })
+    enter()
+    const question = screen.getByRole('group', { name: '放弃刚写的内容？' })
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
+    fireEvent.click(within(question).getByRole('button', { name: '取消' }))
+    expect(screen.getByRole('textbox', { name: '想怎么改这条？' })).toHaveValue('再短一点')
+    expect(screen.getByRole('button', { name: '选择' })).toBeInTheDocument()
+    enter()
+    fireEvent.click(within(screen.getByRole('group', { name: '放弃刚写的内容？' })).getByRole('button', { name: '放弃' }))
+    expect(screen.queryByRole('tablist')).toBeNull()
+    expect(screen.getAllByRole('checkbox')).toHaveLength(5)
+  })
+
+  it('故事 15：勾选的行换选中行底色（--pm-accent-tint，跟随主题色）；底部操作条「已选 N 条 · 全选当前结果 · 取消 · 整理所选…」，不到 2 条时「整理所选…」置灰', () => {
+    setup({ config: { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget: 'plugin-global', customTypes: {}, accent: 'blue-whale' } })
+    enter()
+    expect(within(bar()).getByRole('status')).toHaveTextContent('已选 0 条')
+    expect(within(bar()).getAllByRole('button').map(b => b.textContent)).toEqual(['全选当前结果', '取消', '整理所选…'])
+    expect(tidy()).toHaveClass('pm-btn--primary')
+    expect(tidy()).toHaveAttribute('aria-disabled', 'true')
+    check('每周三发版，先跑测试再打包。')
+    expect(row('每周三发版，先跑测试再打包。')).toHaveClass('pm-lib-row--selected')
+    expect(row('提交前跑 typecheck')).not.toHaveClass('pm-lib-row--selected')
+    expect(within(bar()).getByRole('status')).toHaveTextContent('已选 1 条')
+    expect(tidy()).toHaveAttribute('aria-disabled', 'true')
+    check('提交前跑 typecheck')
+    expect(within(bar()).getByRole('status')).toHaveTextContent('已选 2 条')
+    expect(tidy()).not.toHaveAttribute('aria-disabled')
+    // 选中底色只用主题色令牌：银藤、大肥鱼两套主题色各自定义它，根上的 data-pm-accent 决定用哪套
+    expect(libraryTabCss).toMatch(/\.pm-lib-row--selected \{[^}]*background: var\(--pm-accent-tint\);/)
+    expect(libraryTabCss).not.toMatch(/#[0-9a-fA-F]{3,8}\b/)
+    expect(document.querySelector('.pm-root')).toHaveAttribute('data-pm-accent', 'blue-whale')
+    expect(PM_CSS).toMatch(/\.pm-root \{[^}]*--pm-accent-tint: #F2F0F9;/)
+    expect(PM_CSS).toMatch(/\.pm-root\[data-pm-accent='blue-whale'\][^{]*\{[^}]*--pm-accent-tint: var\(--dsw-alias-state-business-tertiary\);/)
+  })
+
+  it('故事 16：「全选当前结果」勾上当前搜索结果里所有可选的行（含收在「展开其余」里的），跳过置灰的', () => {
+    setup()
+    fireEvent.change(screen.getByRole('searchbox', { name: '搜索记忆' }), { target: { value: '发版' } })
+    enter()
+    fireEvent.click(within(bar()).getByRole('button', { name: '全选当前结果' }))
+    expect(within(bar()).getByRole('status')).toHaveTextContent('已选 1 条')
+    fireEvent.change(screen.getByRole('searchbox', { name: '搜索记忆' }), { target: { value: '' } })
+    expect(box('每周三发版，先跑测试再打包。')).toBeChecked()
+    expect(box('提交前跑 typecheck')).not.toBeChecked()
+    fireEvent.click(within(bar()).getByRole('button', { name: '全选当前结果' }))
+    expect(within(bar()).getByRole('status')).toHaveTextContent('已选 3 条')
+    expect(box('部署 token [已隐藏]')).not.toBeChecked()
+    expect(box('没有版本的那条')).not.toBeChecked()
+  })
+
+  it(`故事 16：超过 ${MAX_BATCH_EDIT} 条时操作条文字换成上限提示，「整理所选…」置灰；回到上限以内恢复`, () => {
+    const many = Array.from({ length: MAX_BATCH_EDIT + 1 }, (_, i) => pick(`k${i + 1}`, `经验 ${i + 1}`))
+    setup({ items: many })
+    enter()
+    fireEvent.click(within(bar()).getByRole('button', { name: '全选当前结果' }))
+    expect(within(bar()).getByRole('status')).toHaveTextContent(`已选 ${MAX_BATCH_EDIT + 1} 条 · 一次最多整理 ${MAX_BATCH_EDIT} 条，先用搜索缩小范围`)
+    expect(tidy()).toHaveAttribute('aria-disabled', 'true')
+    fireEvent.click(screen.getByRole('button', { name: /^展开其余/ }))
+    check('经验 1')
+    expect(within(bar()).getByRole('status')).toHaveTextContent(new RegExp(`^已选 ${MAX_BATCH_EDIT} 条$`))
+    expect(tidy()).not.toHaveAttribute('aria-disabled')
+  })
+
+  it('故事 17：「取消」或「完成」退出多选、清空勾选，行尾按钮回来', () => {
+    setup()
+    enter()
+    check('每周三发版，先跑测试再打包。', '提交前跑 typecheck')
+    fireEvent.click(within(bar()).getByRole('button', { name: '取消' }))
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
+    expect(screen.queryByRole('group', { name: '多选操作' })).toBeNull()
+    expect(within(row('提交前跑 typecheck')).getByRole('button', { name: '修改' })).toBeInTheDocument()
+    enter()
+    expect(screen.getAllByRole('checkbox').filter(c => (c as HTMLInputElement).checked)).toHaveLength(0)
+    check('提交前跑 typecheck')
+    fireEvent.click(screen.getByRole('button', { name: '完成' }))
+    enter()
+    expect(box('提交前跑 typecheck')).not.toBeChecked()
+  })
+
+  it('别处删掉已选的记忆：按视图自动去掉勾选，撤销回来也不再勾上', () => {
+    const { gateway } = setup()
+    enter()
+    check('每周三发版，先跑测试再打包。', '提交前跑 typecheck', '格式化用 prettier')
+    act(() => { gateway.setView('library', view([a1, a3, secret, bare])) })
+    expect(within(bar()).getByRole('status')).toHaveTextContent('已选 2 条')
+    act(() => { gateway.setView('library', view()) })
+    expect(box('提交前跑 typecheck')).not.toBeChecked()
+    expect(within(bar()).getByRole('status')).toHaveTextContent('已选 2 条')
+  })
+
+  it('故事 18：「整理所选…」换成整理工作区：标题「整理所选的 N 条」、右上「返回列表」、步骤条当前在「写要求」；返回列表回到多选、勾选还在', () => {
+    setup()
+    enter()
+    check('每周三发版，先跑测试再打包。', '格式化用 prettier')
+    fireEvent.click(tidy())
+    expect(screen.queryByRole('searchbox')).toBeNull()
+    expect(document.querySelector('.pm-memgroups')).toBeNull()
+    const title = screen.getByRole('heading', { name: '整理所选的 2 条' })
+    expect(title).toHaveFocus()
+    const steps = screen.getByRole('list', { name: '步骤' })
+    expect(within(steps).getAllByRole('listitem').map(li => li.textContent)).toEqual(['写要求', '看计划', '对照应用'])
+    expect(within(steps).getByText('写要求').closest('li')).toHaveAttribute('aria-current', 'step')
+    fireEvent.click(screen.getByRole('button', { name: '返回列表' }))
+    expect(screen.getByRole('button', { name: '完成' })).toHaveAttribute('aria-pressed', 'true')
+    expect(tidy()).toHaveFocus()
+    expect(box('每周三发版，先跑测试再打包。')).toBeChecked()
+    expect(box('格式化用 prettier')).toBeChecked()
+    expect(box('提交前跑 typecheck')).not.toBeChecked()
+  })
+
+  it('故事 18：工作区拿的是点「整理所选…」那一刻的快照：之后视图变了（已选的一条被删）标题不变，回到列表才按视图去掉勾选', () => {
+    const { gateway } = setup()
+    enter()
+    check('每周三发版，先跑测试再打包。', '提交前跑 typecheck', '格式化用 prettier')
+    fireEvent.click(tidy())
+    act(() => { gateway.setView('library', view([a1, a3, secret, bare])) })
+    expect(screen.getByRole('heading', { name: '整理所选的 3 条' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '返回列表' }))
+    expect(within(bar()).getByRole('status')).toHaveTextContent('已选 2 条')
+  })
+})
+
+describe('记忆查看：整理所选的应用与撤销', () => {
+  const pick = (id: string, name: string, content: string, type = 'knowledge') =>
+    memory({ id, name, content, type, digest: `sha1:${id}`, updatedAt: 100 + Number(id.replace(/\D/g, '')), filePath: `/m/app-1/${id}.md` })
+  // 分在三个类型里，都露在外面
+  const p1 = pick('p1', '格式化用 prettier', '代码格式化统一用 prettier。')
+  const c2 = pick('c2', '提交前检查', '提交前依次跑 pnpm lint && prettier --write .', 'workflow')
+  const b4 = pick('b4', '格式化改用 biome', '11 月起格式化改用 biome。', 'decision')
+  const ref = (m: MemoryCard) => ({ memoryId: m.id, layer: app, base: { updatedAt: m.updatedAt, digest: m.digest! } })
+  const view = (items: MemoryCard[] = [p1, c2, b4]) => library({ layers: [{ layer: app, items }] })
+  const PLAN: EditPlan = {
+    understanding: '以 biome 为准。',
+    ops: [
+      { memoryId: 'p1', action: 'delete', reason: '已被取代。', into: 'b4' },
+      { memoryId: 'c2', action: 'rewrite', reason: 'prettier 换成 biome。' },
+      { memoryId: 'b4', action: 'keep', reason: '已是现在的说法。' },
+    ],
+  }
+  const DRAFT = { content: '提交前依次跑 pnpm lint && biome format --write .', summary: '提交前先 lint 再格式化' }
+  const applied: MemoryCommandResult = { ok: true, cmd: 'apply-edits', decisionId: 'pd_t', memoryIds: ['p1', 'c2'], snapshotId: 'snap_t' }
+  const critical = `${'sk-' + 'TESTONLY'.padEnd(24, 'a')}`
+
+  function setup({ plan = PLAN, draft = DRAFT, apply = () => applied, undo = () => ({ ok: true, cmd: 'undo', decisionId: 'pd_t' }), planned }: {
+    plan?: EditPlan
+    draft?: typeof DRAFT
+    apply?: (command: Extract<MemoryCommand, { cmd: 'apply-edits' }>) => MemoryCommandResult
+    undo?: () => MemoryCommandResult
+    /** 改写 plan-edits 的结果：返回 undefined 时照常回 plan。 */
+    planned?: () => MemoryCommandResult | undefined
+  } = {}) {
+    const respond = (command: MemoryCommand): MemoryCommandResult => {
+      switch (command.cmd) {
+        case 'plan-edits': return planned?.() ?? { ok: true, cmd: 'plan-edits', plan, model: 'deepseek-v4-flash' }
+        case 'draft-plan': return { ok: true, cmd: 'draft-plan', drafts: command.ops.map(op => ({ memoryId: op.memoryId, draft })), model: 'deepseek-v4-flash' }
+        case 'apply-edits': return apply(command)
+        case 'undo': return undo()
+        default: return { ok: true, cmd: command.cmd }
+      }
+    }
+    const gateway = createFakeGateway({ views: { library: view() }, respond, model: 'deepseek-v4-flash' })
+    renderInShell(<LibraryTab nav={createNavStore({ view: 'library' })} scope={app} session={session} now={NOW} />, gateway)
+    return { gateway, commands: () => gateway.executed.map(e => e.command) }
+  }
+  const row = (text: string) => {
+    const hit = [...document.querySelectorAll<HTMLElement>('.pm-list > li')].find(li => li.querySelector('.pm-mc-text')?.firstChild?.textContent === text)
+    if (hit === undefined) throw new Error(`没有原文是「${text}」的行`)
+    return hit
+  }
+  const hasRow = (text: string) => [...document.querySelectorAll('.pm-list > li .pm-mc-text')].some(p => p.firstChild?.textContent === text)
+  const tidyButton = () => within(screen.getByRole('group', { name: '多选操作' })).getByRole('button', { name: '整理所选…' })
+  /** 选中三条、写要求、出计划、按计划出稿，停在对照应用。 */
+  const toApply = async () => {
+    fireEvent.click(screen.getByRole('button', { name: '选择' }))
+    for (const m of [p1, c2, b4]) fireEvent.click(within(row(m.content)).getByRole('checkbox'))
+    fireEvent.click(tidyButton())
+    fireEvent.change(screen.getByRole('textbox', { name: '想怎么整理这几条？' }), { target: { value: '以 biome 为准' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '生成整理计划' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^(按计划出稿|下一步)$/ })) })
+  }
+  const applyAll = async () => {
+    fireEvent.click(screen.getByRole('button', { name: '应用全部' }))
+    const confirm = screen.queryByRole('group', { name: /确认应用？$/ })
+    if (confirm !== null) await act(async () => { fireEvent.click(within(confirm).getByRole('button', { name: '确认应用' })) })
+  }
+  const resultBar = () => document.querySelector<HTMLElement>('.pm-lib-tidied')
+
+  beforeEach(() => { localStorage.clear() })
+  afterEach(() => { localStorage.clear() })
+
+  it('故事 25：有删除项时「应用全部」先原位确认；确认后发 apply-edits，按计划顺序带改写四个面和删除的承接，承接到不改写的那条进 keep', async () => {
+    const { commands } = setup()
+    await toApply()
+    fireEvent.click(screen.getByRole('button', { name: '应用全部' }))
+    const confirm = screen.getByRole('group', { name: '其中 1 项会删除「格式化用 prettier」，确认应用？' })
+    expect(commands().map(c => c.cmd)).toEqual(['plan-edits', 'draft-plan'])
+    await act(async () => { fireEvent.click(within(confirm).getByRole('button', { name: '确认应用' })) })
+    expect(commands()[2]).toEqual({
+      cmd: 'apply-edits',
+      ops: [
+        { kind: 'forget', ...ref(p1), into: 'b4' },
+        { kind: 'edit', ...ref(c2), content: DRAFT.content, summary: DRAFT.summary, name: c2.name, tags: c2.tags },
+      ],
+      keep: [ref(b4)],
+    })
+  })
+
+  it('故事 26：应用成功回到列表、退出多选；顶部结果条「已整理 N 条……」带副行和「撤销全部」，焦点接到结果条；改写的行换成新内容、高亮一次、标「刚改」，删掉的先不画', async () => {
+    setup()
+    await toApply()
+    await applyAll()
+    expect(screen.queryByRole('heading', { name: /^整理所选的/ })).toBeNull()
+    expect(screen.getByRole('button', { name: '选择' })).not.toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
+    const bar = resultBar()!
+    expect(within(bar).getByRole('status')).toHaveTextContent('已整理 3 条：删除 1 条、改写 1 条，1 条没动删掉的在最近删除，14 天内可恢复')
+    expect(within(bar).getByRole('button', { name: '撤销全部' })).toBeInTheDocument()
+    expect(bar).toHaveFocus()
+    const rewritten = row(DRAFT.content)
+    expect(within(rewritten).getByText('刚改')).toHaveClass('pm-chip--neutral')
+    expect(rewritten).toHaveClass('pm-flash')
+    expect(row(b4.content)).not.toHaveClass('pm-flash')
+    expect(within(row(b4.content)).queryByText('刚改')).toBeNull()
+    expect(hasRow(p1.content)).toBe(false)
+  })
+
+  it('故事 26：只有改写时直接应用，结果条没有「最近删除」的副行；开始下一次整理时结果条收起', async () => {
+    const plan: EditPlan = { understanding: '只改写。', ops: [{ memoryId: 'p1', action: 'keep', reason: '不动。' }, PLAN.ops[1]!, { memoryId: 'b4', action: 'keep', reason: '不动。' }] }
+    setup({ plan })
+    await toApply()
+    fireEvent.click(screen.getByRole('button', { name: '应用全部' }))
+    await act(async () => {})
+    expect(within(resultBar()!).getByRole('status')).toHaveTextContent(/^已整理 3 条：删除 0 条、改写 1 条，2 条没动$/)
+    fireEvent.click(screen.getByRole('button', { name: '选择' }))
+    for (const m of [p1, b4]) fireEvent.click(within(row(m.content)).getByRole('checkbox'))
+    fireEvent.click(tidyButton())
+    fireEvent.click(screen.getByRole('button', { name: '返回列表' }))
+    expect(resultBar()).toBeNull()
+  })
+
+  it('故事 27：「撤销全部」发 undo 撤整批，成功后结果条和「刚改」都收起', async () => {
+    const { commands } = setup()
+    await toApply()
+    await applyAll()
+    await act(async () => { fireEvent.click(within(resultBar()!).getByRole('button', { name: '撤销全部' })) })
+    expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'pd_t' })
+    expect(resultBar()).toBeNull()
+    expect(screen.queryByText('刚改')).toBeNull()
+  })
+
+  it('故事 27：有记忆之后又被改过（stale）：整批不动，结果条写明「没法一起撤销」，不再给撤销', async () => {
+    setup({ undo: () => ({ ok: false, cmd: 'undo', code: 'stale', detail: '有记忆之后又被改过' }) })
+    await toApply()
+    await applyAll()
+    await act(async () => { fireEvent.click(within(resultBar()!).getByRole('button', { name: '撤销全部' })) })
+    const bar = resultBar()!
+    expect(within(bar).getByRole('status')).toHaveTextContent('有记忆之后又被改过，没法一起撤销')
+    expect(within(bar).queryByRole('button', { name: '撤销全部' })).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  describe('故事 28：选中的记忆被别处改过或删了', () => {
+    const c2New = { ...c2, content: '提交前跑 pnpm check', digest: 'sha1:c2-new', updatedAt: 999 }
+    const picked = () => within(screen.getByRole('region', { name: '已选的记忆' }))
+    const generateButton = () => screen.getByRole('button', { name: '生成整理计划' })
+    const ask = () => screen.getByRole('textbox', { name: '想怎么整理这几条？' })
+    const toRequest = async () => {
+      fireEvent.click(screen.getByRole('button', { name: '选择' }))
+      for (const m of [p1, c2, b4]) fireEvent.click(within(row(m.content)).getByRole('checkbox'))
+      fireEvent.click(tidyButton())
+      fireEvent.change(ask(), { target: { value: '以 biome 为准' } })
+      await act(async () => { fireEvent.click(generateButton()) })
+    }
+    const stale = (cmd: 'plan-edits' | 'apply-edits', code: 'stale' | 'not-found', memoryIds: string[]): MemoryCommandResult => ({ ok: false, cmd, code, detail: '有记忆刚被改过', memoryIds })
+
+    it('生成计划回 stale：顶部提示、回到写要求、要求保留；视图晚到前清单显示「正在换成最新内容……」、「生成整理计划」置灰，版本没变的视图推送不算；换了版本再重建，按新版本发', async () => {
+      let calls = 0
+      const { gateway, commands } = setup({ planned: () => (++calls === 1 ? stale('plan-edits', 'stale', ['c2']) : undefined) })
+      await toRequest()
+      expect(screen.getByText('有 1 条刚被改过，已换成最新内容。计划需要重新生成。')).toHaveAttribute('role', 'status')
+      expect(ask()).toHaveValue('以 biome 为准')
+      expect(screen.getByRole('list', { name: '步骤' }).querySelector('[aria-current="step"]')).toHaveTextContent('写要求')
+      expect(picked().getByRole('status')).toHaveTextContent('正在换成最新内容……')
+      expect(generateButton()).toHaveAttribute('aria-disabled', 'true')
+      expect(screen.queryByRole('alert')).toBeNull()
+      // 别的推送，c2 还是旧版本：不拿它重建
+      act(() => { gateway.setView('library', view([p1, c2, b4])) })
+      expect(picked().getByRole('status')).toHaveTextContent('正在换成最新内容……')
+      act(() => { gateway.setView('library', view([p1, c2New, b4])) })
+      expect(picked().queryByRole('status')).toBeNull()
+      expect(picked().getByText(c2New.content)).toBeInTheDocument()
+      expect(picked().queryByText(c2.content)).toBeNull()
+      expect(generateButton()).not.toHaveAttribute('aria-disabled')
+      await act(async () => { fireEvent.click(generateButton()) })
+      expect(commands().at(-1)).toMatchObject({ cmd: 'plan-edits', memories: [ref(p1), ref(c2New), ref(b4)] })
+      expect(screen.queryByText(/刚被改过/)).toBeNull()
+    })
+
+    it('视图比命令结果先到：直接按新版本重建，不出「正在换成最新内容……」', async () => {
+      let push: (() => void) | undefined
+      const { gateway } = setup({ planned: () => { push?.(); return stale('plan-edits', 'stale', ['c2']) } })
+      push = () => { gateway.setView('library', view([p1, c2New, b4])) }
+      await toRequest()
+      expect(screen.getByText('有 1 条刚被改过，已换成最新内容。计划需要重新生成。')).toBeInTheDocument()
+      expect(picked().queryByRole('status')).toBeNull()
+      expect(picked().getByText(c2New.content)).toBeInTheDocument()
+    })
+
+    it('换成最新内容重建之后再应用：结果按重建后的版本画，改写的行按稿子画、删掉的行不画', async () => {
+      const p1New = { ...p1, content: '代码格式化统一用 prettier（旧规则）。', digest: 'sha1:p1-new', updatedAt: 998 }
+      let calls = 0
+      const { gateway, commands } = setup({ planned: () => (++calls === 1 ? stale('plan-edits', 'stale', ['p1', 'c2']) : undefined) })
+      await toRequest()
+      act(() => { gateway.setView('library', view([p1New, c2New, b4])) })
+      await act(async () => { fireEvent.click(generateButton()) })
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^(按计划出稿|下一步)$/ })) })
+      await applyAll()
+      expect(commands().at(-1)).toMatchObject({ cmd: 'apply-edits', ops: [{ kind: 'forget', ...ref(p1New) }, { kind: 'edit', ...ref(c2New) }] })
+      // 视图还没推来应用后的版本：改写的按稿子画，删掉的先不画
+      expect(row(DRAFT.content)).toHaveClass('pm-flash')
+      expect(hasRow(c2New.content)).toBe(false)
+      expect(hasRow(p1New.content)).toBe(false)
+      expect(hasRow(b4.content)).toBe(true)
+    })
+
+    it('应用回 not-found：留在工作区、回到写要求，不在底部报错；视图更新后已删的那条移出清单', async () => {
+      const { gateway } = setup({ apply: () => stale('apply-edits', 'not-found', ['p1']) })
+      await toApply()
+      await applyAll()
+      expect(screen.getByRole('heading', { name: '整理所选的 3 条' })).toBeInTheDocument()
+      expect(screen.getByText('有 1 条刚被改过，已换成最新内容。计划需要重新生成。')).toBeInTheDocument()
+      expect(ask()).toHaveValue('以 biome 为准')
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(resultBar()).toBeNull()
+      act(() => { gateway.setView('library', view([c2, b4])) })
+      expect(screen.getByRole('heading', { name: '整理所选的 2 条' })).toBeInTheDocument()
+      expect(picked().queryByText(p1.content)).toBeNull()
+      expect(generateButton()).not.toHaveAttribute('aria-disabled')
+    })
+  })
+
+  describe('故事 26a：只应用了一部分', () => {
+    const partial = (patch: Partial<Extract<MemoryCommandResult, { ok: true }>>): MemoryCommandResult =>
+      ({ ok: true, cmd: 'apply-edits', snapshotId: 'snap_t', isPartial: true, memoryIds: [], unrecordedIds: [], ...patch })
+
+    it('结果条「只应用了其中 k 条，其余没有改动」，副行点名没退回的几条和原因；「撤销全部」撤的是仍是这次写下的那条', async () => {
+      const { commands } = setup({ apply: () => partial({ decisionId: 'pd_t', memoryIds: ['c2'], unrecordedIds: ['p1'] }) })
+      await toApply()
+      await applyAll()
+      const bar = resultBar()!
+      const status = within(bar).getByRole('status')
+      expect(status.querySelector('.pm-lib-tidied-title')).toHaveTextContent('只应用了其中 2 条，其余没有改动')
+      expect([...status.querySelectorAll('.pm-lib-result-text')].map(p => p.textContent)).toEqual([
+        '「提交前检查」退回时写盘出错，仍是这次改的样子，可以撤销',
+        '「格式化用 prettier」退回前又被别处改过，停在那边的版本，不在撤销范围',
+      ])
+      expect(bar).toHaveFocus()
+      // 留下的改写标「刚改」；没退回、停在别处版本的删除项照视图画，不藏
+      expect(within(row(DRAFT.content)).getByText('刚改')).toBeInTheDocument()
+      expect(hasRow(p1.content)).toBe(true)
+      await act(async () => { fireEvent.click(within(bar).getByRole('button', { name: '撤销全部' })) })
+      expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'pd_t' })
+      expect(resultBar()).toBeNull()
+    })
+
+    it('留下的都已被别处接着改过：没有可撤销的，不给「撤销全部」', async () => {
+      setup({ apply: () => partial({ unrecordedIds: ['c2'] }) })
+      await toApply()
+      await applyAll()
+      const bar = resultBar()!
+      expect(within(bar).getByRole('status')).toHaveTextContent('只应用了其中 1 条，其余没有改动「提交前检查」退回前又被别处改过，停在那边的版本，不在撤销范围')
+      expect(within(bar).queryByRole('button', { name: '撤销全部' })).toBeNull()
+      expect(screen.queryByText('刚改')).toBeNull()
+    })
+  })
+
+  it('应用的新内容像密钥（secret-suspected）：工作区里原位确认，「仍然保存」带 force 重发', async () => {
+    let calls = 0
+    const { commands } = setup({ apply: () => (++calls === 1 ? { ok: false, cmd: 'apply-edits', code: 'secret-suspected', detail: '像密钥' } : applied) })
+    await toApply()
+    await applyAll()
+    const confirm = screen.getByRole('group', { name: '仍然保存' })
+    expect(screen.getByRole('heading', { name: '整理所选的 3 条' })).toBeInTheDocument()
+    await act(async () => { fireEvent.click(within(confirm).getByRole('button', { name: '仍然保存' })) })
+    const sent = commands().filter(c => c.cmd === 'apply-edits')
+    expect(sent).toHaveLength(2)
+    expect(sent[1]).toEqual({ ...sent[0], force: true })
+    expect(resultBar()).not.toBeNull()
+  })
+
+  it('改写项的新内容含高危密钥：不发 apply-edits，工作区里报原因', async () => {
+    const { commands } = setup({ draft: { ...DRAFT, content: `token ${critical}` } })
+    await toApply()
+    await applyAll()
+    expect(commands().map(c => c.cmd)).toEqual(['plan-edits', 'draft-plan'])
+    expect(screen.getByRole('alert')).toHaveTextContent('内容里有高危密钥，没有保存。')
+    expect(resultBar()).toBeNull()
   })
 })
 

@@ -24,6 +24,8 @@ function actionOf(command: MemoryCommand): Summary {
     case 'model-info': return { key: 'chat.command.modelInfo' }
     case 'refresh-views': return { key: 'chat.command.refreshViews' }
     case 'draft-edit': return { key: 'chat.command.draftEdit' }
+    case 'plan-edits': return { key: 'chat.command.planEdits' }
+    case 'draft-plan': return { key: 'chat.command.draftPlan' }
     case 'resolve': return { key: command.verdict === 'keep-both' ? 'chat.command.resolve.both' : 'chat.command.resolve.one' }
     case 'undo': return { key: 'chat.command.undo' }
     case 'promote':
@@ -37,6 +39,7 @@ function actionOf(command: MemoryCommand): Summary {
     case 'confirm': return { key: 'chat.command.confirm' }
     case 'edit-memory': return { key: 'chat.command.edit' }
     case 'merge-memories': return { key: 'chat.command.merge' }
+    case 'apply-edits': return { key: 'chat.command.applyEdits', params: { n: command.ops.length } }
     case 'dismiss-overflow': return { key: 'chat.command.dismissOverflow' }
     case 'ignore-advice': return { key: 'chat.command.ignoreAdvice' }
     case 'unignore-advice': return { key: 'chat.command.unignoreAdvice' }

@@ -34,9 +34,11 @@ export interface MemoryCardProps {
   scopeSlot?: ReactNode
   /** 记忆不在借来的会话所在项目里时，作用域写这个项目名，不写「本项目」。 */
   projectName?: string | undefined
+  /** 跟在原文末尾的标签（记忆查看里刚改过的「刚改」）。 */
+  badge?: ReactNode
 }
 
-export function MemoryCard({ memory, now, typeLabel, hideType = false, hideScope = false, scopeSlot, projectName }: MemoryCardProps) {
+export function MemoryCard({ memory, now, typeLabel, hideType = false, hideScope = false, scopeSlot, projectName, badge }: MemoryCardProps) {
   const t = useT()
   const expired = memory.validTo !== undefined && memory.validTo <= now
   const item = (icon: IconName | undefined, text: string) => (
@@ -44,7 +46,7 @@ export function MemoryCard({ memory, now, typeLabel, hideType = false, hideScope
   )
   return (
     <div className={expired ? 'pm-mc pm-mc--expired' : 'pm-mc'} data-memory-id={memory.id}>
-      <p className="pm-mc-text">{memory.content}</p>
+      <p className="pm-mc-text">{memory.content}{badge !== undefined ? <span className="pm-mc-badge">{badge}</span> : null}</p>
       <div className="pm-mc-meta">
         {hideType ? null : <Chip variant="neutral">{typeLabel ?? memory.type}</Chip>}
         {scopeSlot !== undefined ? scopeSlot : hideScope ? null : memory.scope === 'global' ? item('globe', t('scope.global')) : item('folder', projectName ?? t('scope.workspace'))}
@@ -65,6 +67,8 @@ export const memoryCardCss = `
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .pm-mc--expired .pm-mc-text { color: var(--pm-text-2); }
+.pm-mc-badge { margin-left: 6px; white-space: nowrap; }
+.pm-mc-badge .pm-chip { vertical-align: 1px; }
 .pm-mc-meta {
   display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; padding-left: 14px;
   font-size: 12px; line-height: 1.5; color: var(--pm-text-2);

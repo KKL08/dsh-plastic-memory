@@ -2,7 +2,7 @@ import type { MemoryStore } from '../store.ts'
 import type { PendingDecisionsStore } from '../governance/decisions.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import { editFingerprint, isConflicting, type SnapshotStore } from '../governance/snapshots.ts'
-import { asUndoable, expectedFingerprints, isStillOwnWrite, undoRuleOf, undoStateOf, type UndoableEntry, type UndoRule } from '../governance/undo-rules.ts'
+import { asUndoable, expectedFingerprints, isStillOwnWrite, undoRuleOf, undoStateOf, undoStateOfAll, type TargetCopies, type UndoableEntry, type UndoRule } from '../governance/undo-rules.ts'
 import { verdictLoser, type MemorySnapshot, type SnapshotRecord } from '../governance/schema.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import { RecordNotFoundError } from '../errors.ts'
@@ -47,7 +47,7 @@ const GLOBAL: Scope = { kind: 'global' }
 
 /**
  * 撤销一条已结清的条目：认领 → 过跨项目门 → 预检 → 按种类的机制动手、锁内复核 → 条目去向（见 undoRuleOf）。
- * 机制三种：按改前快照恢复（直接改与合并、模型改写与替代、删一方的裁决、提升为全局）、搬回（移到项目）、放回标记（留在本项目）。
+ * 机制三种：按改前快照恢复（直接改与合并、整理所选的应用、模型改写与替代、删一方的裁决、提升为全局）、搬回（移到项目）、放回标记（留在本项目）。
  * 之后被改过的一律回 stale；同一条同时只撤一次，撞上另一次操作回 claimed。
  */
 export function executeUndo(args: { decisionId: string; allowCrossWorkspace?: boolean }, context: GovernanceContext, deps: UndoDeps): Promise<UndoResult> {
@@ -68,7 +68,9 @@ async function claimAndUndo(
     const allow = args.allowCrossWorkspace
     if (rule.mechanism === 'relocate') return await relocate(entry, rule, allow, context, deps)
     if (rule.mechanism === 'reflag') return await reflag(entry, rule, allow, context, deps)
-    return rule.expectedStatus !== undefined ? await restoreOwnWrites(entry, rule, allow, context, deps) : await restoreVerdict(entry, rule, allow, context, deps)
+    return rule.expectedStatus !== undefined || rule.receipts !== undefined
+      ? await restoreOwnWrites(entry, rule, allow, context, deps)
+      : await restoreVerdict(entry, rule, allow, context, deps)
   })
   return claimed.isClaimed ? claimed.value : error('claimed', `待决项 ${args.decisionId} 正在被另一次操作处理，未做任何改动`)
 }
@@ -103,51 +105,68 @@ async function gateRestore(records: readonly SnapshotRecord[], target: 'exact' |
 }
 
 /**
- * 按指纹判的种类（直接改与合并、模型改写与替代）：主条此刻仍是那次写下的，合并删掉的那条内容仍同快照（在最近删除里或已恢复都行），
- * 才按改前快照恢复。合并不留半截：先写容易被争用的那条（合并删掉的：最近删除里能被恢复、恢复后能被改），再写保留的；
- * 写入那一刻各按锁内现状再核对一次，后一条被跳过时把已写的那条写回预检时的样子——只在它仍是刚写回的那一版时写回，
+ * 按指纹判的种类（直接改与合并、整理所选的应用、模型改写与替代）：主条此刻仍是那次写下的，合并删掉的那条内容仍同快照
+ * （在最近删除里或已恢复都行），才按改前快照恢复；整理所选的每一项都按回执比（删掉的那条单独恢复过也算对不上），一项不符整批不动，
+ * 快照缺任一项就撤不了。不留半截：先写容易被争用的（合并、整理里删掉的：最近删除里能被恢复、恢复后能被改），再写其余的；
+ * 写入那一刻各按锁内现状再核对一次，后一条被跳过时把已写的那几条写回预检时的样子——只在它仍是刚写回的那一版时写回，
  * 已被第三方改过就不写回，停在第三方的版本。结果只有三种：全成；全不动；停在第三方的版本。后两种都回 stale、条目留着。
  */
 async function restoreOwnWrites(entry: UndoableEntry, rule: UndoRule, allow: boolean | undefined, context: GovernanceContext, deps: UndoDeps): Promise<UndoResult> {
   const snapshot = await snapshotOf(entry, deps)
-  const records = snapshot?.data.filter(r => entry.memoryIds.includes(r.id)) ?? []
-  const main = records.find(r => r.id === entry.memoryIds[0])
-  if (snapshot === undefined || main === undefined) return notFound(`${entry.id} 改前的快照（可能已超过 14 天）`, 'expired')
+  const records = snapshot?.data.filter(r => rule.targets.includes(r.id)) ?? []
+  const main = records.find(r => r.id === rule.targets[0])
+  // 每个目标的两份：改前快照里的，和它此刻在快照里那个作用域的现状
+  const copies = new Map<string, TargetCopies>()
+  for (const id of rule.targets) {
+    const before = records.find(r => r.id === id)
+    copies.set(id, { before, current: before === undefined ? undefined : await locateCopy(deps.store, id, scopeAt(before.workspacePath)) })
+  }
+  const state = undoStateOfAll(entry, copies)
+  if (snapshot === undefined || main === undefined || state === 'expired') return notFound(`${entry.id} 改前的快照（可能已超过 14 天）`, 'expired')
   // 先过跨项目门：放行一部分就恢复一部分，合并会只回来一半
   const rejected = await gateRestore(records, 'exact', allow, context, deps.store)
   if (rejected.length > 0) return crossWorkspace(rejected)
-  if (undoStateOf(entry, main, await locateCopy(deps.store, main.id, scopeAt(main.workspacePath))) !== 'undoable') return changed(main.id)
+  if (state !== 'undoable') {
+    const first = rule.targets.find(id => undoStateOf(entry, copies.get(id)?.before, copies.get(id)?.current) !== 'undoable')
+    return changed(first ?? main.id)
+  }
   // 还在最近删除里的也比内容：软删进去的若是快照之后的版本，恢复会拿快照里的旧内容盖掉它
   const expected = expectedFingerprints(entry, records)
+  const isByReceipt = rule.receipts !== undefined
   const others = records.filter(r => r.id !== main.id)
-  const prechecked = new Map<string, MemoryRecord | undefined>()
   for (const rec of others) {
-    const current = await locateCopy(deps.store, rec.id, scopeAt(rec.workspacePath))
+    const current = copies.get(rec.id)?.current
     if (current !== undefined && editFingerprint(current) !== expected.get(rec.id)) return changed(rec.id)
-    prechecked.set(rec.id, current)
   }
   const now = deps.now ?? Date.now
   // 写入那一刻锁内看到的现状：补偿退回它，而不是预检读到的那份（其间别处原样恢复、软删的不被冲掉）
   const seen = new Map<string, MemoryRecord | undefined>()
   const isOwn = (rec: SnapshotRecord) => (cur: MemoryRecord | undefined) => {
     seen.set(rec.id, cur)
-    if (rec === main) return cur !== undefined && isStillOwnWrite(entry, cur)
+    if (rec === main || isByReceipt) return cur !== undefined && isStillOwnWrite(entry, cur)
     // 定位不到的只在预检时就不在才写：预检之后被搬走、物理删除的不在原处重建
-    return cur === undefined ? prechecked.get(rec.id) === undefined : editFingerprint(cur) === expected.get(rec.id)
+    return cur === undefined ? copies.get(rec.id)?.current === undefined : editFingerprint(cur) === expected.get(rec.id)
   }
+  // 整理所选：删掉的那几条先写（在最近删除里，最容易被单独恢复），再写改写的；其余按「合并删掉的在前、保留的在后」
+  const isDeleted = (rec: SnapshotRecord) => rule.receipts?.find(r => r.memoryId === rec.id)?.expectedStatus === 'deleted'
+  const order = isByReceipt ? [...records.filter(isDeleted), ...records.filter(r => !isDeleted(r))] : [...others, main]
   const written: SnapshotRecord[] = []
+  let inFlight: SnapshotRecord | undefined
   try {
-    for (const rec of [...others, main]) {
+    for (const rec of order) {
+      inFlight = rec
       const r = await deps.snapshots.restore(snapshot, [rec.id], deps.store, { target: 'exact', overwrite: isOwn(rec), now })
       if (r.restored.length === 0) {
         const isAnyKept = await withdraw(written, seen, deps.store)
         return changed(rec.id, r.redacted.length > 0 ? 'redacted' : isAnyKept ? 'kept-third-party' : 'changed')
       }
       written.push(rec)
+      inFlight = undefined
     }
   } catch (err) {
-    // 写盘出错同样不留半截：已写回的照样退回，再把错误抛出去
-    await withdraw(written, seen, deps.store)
+    // 写盘出错同样不留半截：已写回的照样退回，再把错误抛出去。出错的那一项可能已写回、之后才抛（维护目录、写统计），
+    // 一并交给 withdraw：它只退仍是刚写回那一版的，没写成的原样不动
+    await withdraw(inFlight === undefined ? written : [...written, inFlight], seen, deps.store)
     throw err
   }
   return settleUndo(entry, rule, deps, entry.memoryIds.filter(id => written.some(r => r.id === id)))
@@ -159,16 +178,23 @@ async function restoreOwnWrites(entry: UndoableEntry, rule: UndoRule, allow: boo
  */
 async function withdraw(written: readonly SnapshotRecord[], seen: ReadonlyMap<string, MemoryRecord | undefined>, store: MemoryStore): Promise<boolean> {
   let isAnyKept = false
+  let failure: unknown
   for (const rec of written) {
     const fingerprint = editFingerprint(rec)
     const isJustWritten = (cur: MemoryRecord | undefined) => cur !== undefined && cur.status === rec.status && editFingerprint(cur) === fingerprint
     const at = scopeAt(rec.workspacePath)
     const before = seen.get(rec.id)
-    const isBack = before === undefined
-      ? await store.hardDelete(rec, { at }, cur => !isJustWritten(cur))
-      : (await store.put(before, at, cur => !isJustWritten(cur))) !== undefined
-    if (!isBack) isAnyKept = true
+    // 一项退回出错不中断其余：都退完再把第一个错误抛出去
+    try {
+      const isBack = before === undefined
+        ? await store.hardDelete(rec, { at }, cur => !isJustWritten(cur))
+        : (await store.put(before, at, cur => !isJustWritten(cur))) !== undefined
+      if (!isBack) isAnyKept = true
+    } catch (err) {
+      failure ??= err
+    }
   }
+  if (failure !== undefined) throw failure
   return isAnyKept
 }
 

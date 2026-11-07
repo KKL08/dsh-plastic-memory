@@ -8,7 +8,8 @@ import { useGateway, type BorrowedSession, type ViewState } from '../gateway.ts'
 import { useT } from '../i18n.tsx'
 import { useNavTarget, type NavStore, type NavTarget } from '../nav.ts'
 import { CommandFeedback } from '../command/confirm.tsx'
-import { useCommandRunner } from '../command/useCommandRunner.ts'
+import type { Ok } from '../command/protocol.ts'
+import { useCommandRunner, type RunHandlers } from '../command/useCommandRunner.ts'
 import { Icon } from '../ui/Icon.tsx'
 import { prefersReducedMotion } from '../ui/motion.tsx'
 import { typeLabel } from '../type-label.ts'
@@ -154,17 +155,19 @@ export function useRowActions(session: BorrowedSession) {
   const [notice, setNotice] = useState<Notice | undefined>(undefined)
   /** 发过命令的记忆 id：找那一行已不在列表里的失败用。 */
   const ran = useRef(new Set<string>())
-  const run = (memoryId: string, command: MemoryCommand, okText: OkText, onOk?: () => void) => {
+  /** onFailed：同 RunHandlers，调用方就地处理的失败（记忆查看修改时的 stale）不再画在行里。 */
+  const run = (memoryId: string, command: MemoryCommand, okText: OkText, onOk?: (result: Ok) => void, onFailed?: RunHandlers['onFailed']) => {
     setNotice(undefined)
     ran.current.add(memoryId)
     runner.run(memoryId, command, {
       onOk(result, sent) {
         // forget 回 has-secret 后改发的彻底删除：这一行不留结果，提示不可恢复
         if (sent.cmd !== command.cmd) { setNotice({ kind: 'purged', text: t('pending.secret.deletedNotice') }); return }
-        onOk?.()
+        onOk?.(result)
         setNotice(okText === null ? undefined : sent.cmd === 'hard-delete' ? { kind: 'purged', text: okText(result) } : { kind: 'ok', text: okText(result) })
       },
       onHandledElsewhere() { setNotice({ kind: 'elsewhere', text: t('command.handledElsewhere') }) },
+      ...(onFailed !== undefined ? { onFailed } : {}),
     })
   }
   return {
@@ -172,6 +175,8 @@ export function useRowActions(session: BorrowedSession) {
     /** 按钮的 unavailable：没有会话、这条正在处理或等确认时给原因。 */
     unavailable: runner.unavailable,
     run,
+    /** 收起这一条的确认或失败（在途的不动）。 */
+    dismiss(id: string): void { runner.cancel(id) },
     /** 这一条的命令发出了、结果还没回来。 */
     isBusy(id: string): boolean { return runner.stateOf(id).kind === 'busy' },
     /** 这一行的确认与失败；没有时为 null。 */
@@ -212,7 +217,7 @@ export const sharedTabCss = `
 .pm-list-row > .pm-mc { flex: 1; }
 .pm-row-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
 .pm-row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; flex-shrink: 0; }
-.pm-row-actions .pm-btn { padding: 2px 10px; font-size: 12px; }
+.pm-row-actions .pm-btn:not(.pm-btn--icon) { padding: 2px 10px; font-size: 12px; }
 @container (max-width: 500px) {
   .pm-list-row { flex-direction: column; align-items: stretch; gap: 8px; }
 }

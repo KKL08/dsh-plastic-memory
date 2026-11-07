@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
-  checkupResultSchema, CROSS_WORKSPACE_COMMANDS, directoryIssueSchema, memoryCommandResultSchema, memoryCommandSchema, OPEN_ITEM_COMMANDS,
+  checkupResultSchema, CROSS_WORKSPACE_COMMANDS, directoryIssueSchema, encodeMemoryCommand, MEMORY_COMMAND_NAME, memoryCommandResultSchema,
+  MAX_BATCH_EDIT, memoryCommandSchema, OPEN_ITEM_COMMANDS, parseMemoryCommand, type MemoryCommand,
 } from '../src/gui/contract.ts'
 import { SAMPLE_COMMANDS } from '../client/command/test-commands.ts'
 
@@ -26,7 +27,7 @@ describe('契约里界面要用的命令集', () => {
       expect({ cmd, isKept: 'allowCrossWorkspace' in parsed }).toEqual({ cmd, isKept: CROSS_WORKSPACE_COMMANDS.has(cmd as never) })
     }
     expect([...CROSS_WORKSPACE_COMMANDS].sort()).toEqual([
-      'confirm', 'edit-memory', 'forget', 'hard-delete', 'keep-local', 'keep-local-memory', 'merge-memories', 'move-memory',
+      'apply-edits', 'confirm', 'edit-memory', 'forget', 'hard-delete', 'keep-local', 'keep-local-memory', 'merge-memories', 'move-memory',
       'promote', 'promote-memory', 'resolve', 'restore', 'undo',
     ])
   })
@@ -35,5 +36,145 @@ describe('契约里界面要用的命令集', () => {
     const known = new Set(memoryCommandSchema.options.map(o => o.shape.cmd.value))
     expect([...OPEN_ITEM_COMMANDS].filter(cmd => !known.has(cmd))).toEqual([])
     expect(OPEN_ITEM_COMMANDS.has('undo')).toBe(false)
+  })
+})
+
+describe('draft-edit 的放宽', () => {
+  const ref = { memoryId: 'm1', layer: { kind: 'global' } } as const
+
+  it('不带建议类型时要求必填（只有空白也算没写）；带建议类型时要求可空', () => {
+    const accepts = (args: object) => memoryCommandSchema.safeParse({ cmd: 'draft-edit', memories: [ref], ...args }).success
+    expect(accepts({ request: '「每周三」改成每周四' })).toBe(true)
+    expect(accepts({})).toBe(false)
+    expect(accepts({ request: '  \n' })).toBe(false)
+    expect(accepts({ adviceType: 'bloat' })).toBe(true)
+  })
+
+  it('此前的要求、计划、并入的记忆随命令文本往返', () => {
+    const command = {
+      cmd: 'draft-edit', memories: [ref], request: '再短一点', priorRequests: ['周三改成周四', '命令保留'],
+      planNote: { reason: '和另一条说法矛盾', question: { text: '以哪条为准？', placeholder: '不填就以较新的为准' }, answer: '以周四为准' },
+      absorbs: [{ memoryId: 'm2', layer: { kind: 'global' } }],
+      previous: { content: '每周四发版', summary: '发版日' },
+    } as const satisfies MemoryCommand
+    const parsed = parseMemoryCommand(encodeMemoryCommand(command).slice(`/${MEMORY_COMMAND_NAME} `.length))
+    expect(parsed).toEqual({ ok: true, command })
+  })
+
+  it('计划只有理由也收；提问缺占位文字不收', () => {
+    const accepts = (planNote: object) => memoryCommandSchema.safeParse({ cmd: 'draft-edit', memories: [ref], request: '改', planNote }).success
+    expect(accepts({ reason: '过时了' })).toBe(true)
+    expect(accepts({ reason: '过时了', question: { text: '换成什么？' } })).toBe(false)
+  })
+})
+
+describe('plan-edits（整理所选的计划）', () => {
+  const ref = (memoryId: string) => ({ memoryId, layer: { kind: 'global' }, base: { updatedAt: 1, digest: `sha1:${memoryId}` } }) as const
+  const refs = (n: number) => Array.from({ length: n }, (_, i) => ref(`m${i + 1}`))
+
+  it(`选中条数 2–${MAX_BATCH_EDIT}：1 条、${MAX_BATCH_EDIT + 1} 条不收`, () => {
+    const accepts = (n: number) => memoryCommandSchema.safeParse({ cmd: 'plan-edits', memories: refs(n), request: '合成一条' }).success
+    expect([1, 2, MAX_BATCH_EDIT, MAX_BATCH_EDIT + 1].map(accepts)).toEqual([false, true, true, false])
+  })
+
+  it('要求必填（只有空白也算没写）；每条都要带卡片版本', () => {
+    const accepts = (args: object) => memoryCommandSchema.safeParse({ cmd: 'plan-edits', memories: refs(2), ...args }).success
+    expect([accepts({ request: '合成一条' }), accepts({}), accepts({ request: ' \n' })]).toEqual([true, false, false])
+    expect(memoryCommandSchema.safeParse({ cmd: 'plan-edits', memories: [ref('m1'), { memoryId: 'm2' }], request: '合' }).success).toBe(false)
+  })
+
+  it('不带跨项目确认：只读，不过门', () => {
+    expect(CROSS_WORKSPACE_COMMANDS.has('plan-edits' as never)).toBe(false)
+  })
+
+  it('命令与结果随文本往返；动作只收改写、删除、不动', () => {
+    const command = { cmd: 'plan-edits', memories: refs(3), request: '以 biome 为准' } as const satisfies MemoryCommand
+    expect(parseMemoryCommand(encodeMemoryCommand(command).slice(`/${MEMORY_COMMAND_NAME} `.length))).toEqual({ ok: true, command })
+    const plan = {
+      understanding: '以 biome 为准',
+      ops: [
+        { memoryId: 'm1', action: 'delete', reason: '被取代', into: 'm2' },
+        { memoryId: 'm2', action: 'rewrite', reason: '补进命令', question: { text: '配置写哪？', placeholder: '不填就只换名字' } },
+        { memoryId: 'm3', action: 'keep', reason: '已是新说法' },
+      ],
+    }
+    const result = { ok: true, cmd: 'plan-edits', plan, model: 'deepseek-v4-flash' }
+    expect(memoryCommandResultSchema.parse(JSON.parse(JSON.stringify(result)))).toEqual(result)
+    expect(memoryCommandResultSchema.safeParse({ ...result, plan: { ...plan, ops: [{ memoryId: 'm1', action: 'merge', reason: '合' }] } }).success).toBe(false)
+  })
+})
+
+describe('draft-plan（整理所选按计划出稿）', () => {
+  const ref = (memoryId: string) => ({ memoryId, layer: { kind: 'global' }, base: { updatedAt: 1, digest: `sha1:${memoryId}` } }) as const
+  const refs = (n: number) => Array.from({ length: n }, (_, i) => ref(`m${i + 1}`))
+  const op = { memoryId: 'm2', reason: '补进命令' }
+
+  it(`选中条数 2–${MAX_BATCH_EDIT}：1 条、${MAX_BATCH_EDIT + 1} 条不收；改写项 1 项起`, () => {
+    const accepts = (n: number, ops: object[] = [op]) => memoryCommandSchema.safeParse({ cmd: 'draft-plan', memories: refs(n), request: '合成一条', ops }).success
+    expect([1, 2, MAX_BATCH_EDIT, MAX_BATCH_EDIT + 1].map(n => accepts(n))).toEqual([false, true, true, false])
+    expect([accepts(2, []), accepts(2, [op])]).toEqual([false, true])
+  })
+
+  it('要求必填；提问缺占位文字不收；不带跨项目确认（只读，不过门）', () => {
+    const accepts = (args: object) => memoryCommandSchema.safeParse({ cmd: 'draft-plan', memories: refs(2), ops: [op], ...args }).success
+    expect([accepts({ request: '合成一条' }), accepts({}), accepts({ request: ' ' })]).toEqual([true, false, false])
+    expect(accepts({ request: '合', ops: [{ ...op, question: { text: '写哪？' } }] })).toBe(false)
+    expect(CROSS_WORKSPACE_COMMANDS.has('draft-plan' as never)).toBe(false)
+  })
+
+  it('命令与结果随文本往返：改写项带理由、提问、回答、承接的删除项；结果每项一稿', () => {
+    const command = {
+      cmd: 'draft-plan', memories: refs(3), request: '以 biome 为准',
+      ops: [{ memoryId: 'm2', reason: '补进命令', question: { text: '配置写哪？', placeholder: '不填就只换名字' }, answer: '选第二种', absorbs: ['m1'] }],
+    } as const satisfies MemoryCommand
+    expect(parseMemoryCommand(encodeMemoryCommand(command).slice(`/${MEMORY_COMMAND_NAME} `.length))).toEqual({ ok: true, command })
+    const result = { ok: true, cmd: 'draft-plan', drafts: [{ memoryId: 'm2', draft: { content: '用 biome', summary: '格式化', name: '格式化' } }], model: 'deepseek-v4-flash' }
+    expect(memoryCommandResultSchema.parse(JSON.parse(JSON.stringify(result)))).toEqual(result)
+  })
+})
+
+describe('apply-edits（整理所选应用全部）', () => {
+  const ref = (memoryId: string) => ({ memoryId, layer: { kind: 'global' }, base: { updatedAt: 1, digest: `sha1:${memoryId}` } }) as const
+  const edit = (memoryId: string) => ({ kind: 'edit' as const, ...ref(memoryId), content: '新正文', name: '新名称', summary: '新摘要', tags: ['标签'] })
+  const forget = (memoryId: string, into?: string) => ({ kind: 'forget', ...ref(memoryId), ...(into !== undefined ? { into } : {}) }) as const
+  const ops = (n: number) => Array.from({ length: n }, (_, i) => (i % 2 === 0 ? edit(`m${i + 1}`) : forget(`m${i + 1}`)))
+
+  it(`改动 1–${MAX_BATCH_EDIT} 项：0 项、${MAX_BATCH_EDIT + 1} 项不收`, () => {
+    const accepts = (n: number) => memoryCommandSchema.safeParse({ cmd: 'apply-edits', ops: ops(n) }).success
+    expect([0, 1, MAX_BATCH_EDIT, MAX_BATCH_EDIT + 1].map(accepts)).toEqual([false, true, true, false])
+  })
+
+  it('改写项四个面都要带、正文和名称不能空；每项都要带卡片版本', () => {
+    const accepts = (op: object) => memoryCommandSchema.safeParse({ cmd: 'apply-edits', ops: [op] }).success
+    expect(accepts(edit('m1'))).toBe(true)
+    expect(accepts({ ...edit('m1'), content: '' })).toBe(false)
+    expect(accepts({ ...edit('m1'), name: '' })).toBe(false)
+    const { tags: _tags, ...noTags } = edit('m1')
+    expect(accepts(noTags)).toBe(false)
+    const { base: _base, ...noBase } = forget('m1')
+    expect(accepts(noBase)).toBe(false)
+  })
+
+  it('带跨项目确认：写入，过门', () => {
+    expect(CROSS_WORKSPACE_COMMANDS.has('apply-edits')).toBe(true)
+  })
+
+  it('命令与结果随文本往返：改写、删除（带承接）、不动的核对项、force；结果带条目、记忆、快照，部分生效另带 isPartial', () => {
+    const command = {
+      cmd: 'apply-edits', ops: [forget('m1', 'm3'), edit('m2')], keep: [ref('m3')], force: true, allowCrossWorkspace: true,
+    } as const satisfies MemoryCommand
+    expect(parseMemoryCommand(encodeMemoryCommand(command).slice(`/${MEMORY_COMMAND_NAME} `.length))).toEqual({ ok: true, command })
+    const result = { ok: true, cmd: 'apply-edits', decisionId: 'pd_1', memoryIds: ['m1', 'm2'], snapshotId: 'snap_1' }
+    expect(memoryCommandResultSchema.parse(JSON.parse(JSON.stringify(result)))).toEqual(result)
+    expect(memoryCommandResultSchema.parse({ ...result, isPartial: true })).toEqual({ ...result, isPartial: true })
+    const partial = { ok: true, cmd: 'apply-edits', memoryIds: ['m2'], snapshotId: 'snap_1', isPartial: true, unrecordedIds: ['m1'] }
+    expect(memoryCommandResultSchema.parse(JSON.parse(JSON.stringify(partial)))).toEqual(partial)
+  })
+
+  it('失败结果可带 memoryIds（stale、not-found 列出对不上或找不到的），随文本往返；不带也合法', () => {
+    const failure = { ok: false, cmd: 'apply-edits', code: 'stale', detail: '有记忆刚被改过', memoryIds: ['m1', 'm3'] }
+    expect(memoryCommandResultSchema.parse(JSON.parse(JSON.stringify(failure)))).toEqual(failure)
+    const { memoryIds: _ids, ...bare } = failure
+    expect(memoryCommandResultSchema.parse(bare)).toEqual(bare)
   })
 })

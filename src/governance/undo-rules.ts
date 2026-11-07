@@ -1,7 +1,7 @@
 import type { MemoryRecord } from '../record-schema.ts'
 import { MODEL_CHANGE_KINDS } from '../contract-codes.ts'
 import { RETENTION_MS } from '../retention.ts'
-import { kindOf, verdictLoser, type PendingDecision, type PendingKind } from './schema.ts'
+import { kindOf, verdictLoser, type BatchReceipt, type PendingDecision, type PendingKind } from './schema.ts'
 import { editFingerprint } from './snapshots.ts'
 
 // 撤销的判据只有这一份：视图显示能不能撤、撤销命令动手前核对、账本清理过期条目，都问这里。
@@ -30,18 +30,24 @@ export interface UndoRule {
   targets: string[]
   /** 按指纹判的种类：目标此刻应有的状态；缺省的种类不比指纹，按快照恢复时的冲突判。 */
   expectedStatus?: MemoryRecord['status']
+  /** 按回执逐项判的种类（整理所选）：每个目标按自己那条回执比状态和指纹，不看 expectedStatus 和条目的 fingerprint。 */
+  receipts?: readonly BatchReceipt[]
   mechanism: UndoMechanism
   fate: UndoFate
 }
 
 /**
  * 按种类的表。删一方的裁决恢复败方、提升为全局恢复原位，回到待处理；就地处理时才记的（isBornSettled）移出账本，回到没点过的样子。
- * 留在本项目没拍快照，放回候选标记。直接改与合并、移到项目撤后移出账本；模型改写与替代撤后标已撤销。
+ * 留在本项目没拍快照，放回候选标记。直接改与合并、整理所选的应用、移到项目撤后移出账本；模型改写与替代撤后标已撤销。
  */
 export function undoRuleOf(entry: UndoableEntry): UndoRule {
   const { verdict, isBornSettled } = entry.settled
   switch (entry.kind) {
-    case 'edit': return { targets: entry.memoryIds, expectedStatus: 'active', mechanism: 'restore-snapshot', fate: 'remove' }
+    case 'edit': {
+      if (verdict !== 'batch-edited') return { targets: entry.memoryIds, expectedStatus: 'active', mechanism: 'restore-snapshot', fate: 'remove' }
+      const receipts = entry.receipts ?? []
+      return { targets: receipts.map(r => r.memoryId), mechanism: 'restore-snapshot', fate: 'remove', receipts }
+    }
     case 'move': return { targets: entry.memoryIds, expectedStatus: 'active', mechanism: 'relocate', fate: 'remove' }
     case 'rewrite': return { targets: entry.memoryIds, expectedStatus: 'active', mechanism: 'restore-snapshot', fate: 'mark-undone' }
     case 'supersede': return { targets: entry.memoryIds, expectedStatus: 'superseded', mechanism: 'restore-snapshot', fate: 'mark-undone' }
@@ -53,15 +59,25 @@ export function undoRuleOf(entry: UndoableEntry): UndoRule {
   }
 }
 
-/** 这条记忆此刻还是那次写下的：状态是种类期望的状态，内容指纹对得上（editFingerprint）。不按指纹判的种类一律不算。 */
+/**
+ * 这条记忆此刻还是那次写下的：状态是种类期望的状态，内容指纹对得上（editFingerprint）。有回执的种类按它自己那条回执比，
+ * 回执里没有它就不算。不按指纹判的种类一律不算。
+ */
 export function isStillOwnWrite(entry: UndoableEntry, current: MemoryRecord | undefined): boolean {
-  const { expectedStatus } = undoRuleOf(entry)
-  return expectedStatus !== undefined && current !== undefined && current.status === expectedStatus
+  const { expectedStatus, receipts } = undoRuleOf(entry)
+  if (current === undefined) return false
+  if (receipts !== undefined) {
+    const receipt = receipts.find(r => r.memoryId === current.id)
+    return receipt !== undefined && current.status === receipt.expectedStatus && editFingerprint(current) === receipt.fingerprint
+  }
+  return expectedStatus !== undefined && current.status === expectedStatus
     && entry.fingerprint !== undefined && editFingerprint(current) === entry.fingerprint
 }
 
-/** 每个目标期望的指纹：主条（memoryIds[0]）是那次写下的，其余（合并删掉的那条）是改前快照里的。 */
+/** 每个目标期望的指纹：有回执的按回执；否则主条（memoryIds[0]）是那次写下的，其余（合并删掉的那条）是改前快照里的。 */
 export function expectedFingerprints(entry: UndoableEntry, snapshotted: readonly MemoryRecord[]): Map<string, string> {
+  const { receipts } = undoRuleOf(entry)
+  if (receipts !== undefined) return new Map(receipts.map(r => [r.memoryId, r.fingerprint]))
   const expected = new Map<string, string>()
   for (const id of entry.memoryIds) {
     const before = snapshotted.find(r => r.id === id)
@@ -82,16 +98,33 @@ export function undoStateOf(entry: UndoableEntry, before: MemoryRecord | undefin
   if (entry.settled.isUndone === true) return 'undone'
   const rule = undoRuleOf(entry)
   if (rule.mechanism === 'restore-snapshot' && rule.targets.length > 0 && before === undefined) return 'expired'
-  if (rule.expectedStatus === undefined) return 'undoable'
+  if (rule.expectedStatus === undefined && rule.receipts === undefined) return 'undoable'
   return isStillOwnWrite(entry, current) ? 'undoable' : 'changed'
 }
 
-/** 留作撤销的已结清条目（删一方、提升为全局、直接改与直接合并、移到项目、模型改写与替代）：快照过了保留窗口就无从撤销。 */
+/** 一个撤销目标的两份：改前快照里的（快照已清或缺这一项为 undefined）、此刻在它自己作用域里的（哪都没有为 undefined）。 */
+export interface TargetCopies { before: MemoryRecord | undefined; current: MemoryRecord | undefined }
+
+/**
+ * 整条此刻能不能撤：有回执的（整理所选）每个目标逐项问 undoStateOf，任一项快照缺了是 expired，任一项不是那次写下的是 changed；
+ * 没有回执的只问主条（第一个目标），同 undoStateOf。copies 里没有的目标按两份都没有算。
+ */
+export function undoStateOfAll(entry: UndoableEntry, copies: ReadonlyMap<string, TargetCopies>): UndoState {
+  const rule = undoRuleOf(entry)
+  const examined = rule.receipts !== undefined ? rule.targets : rule.targets.slice(0, 1)
+  if (examined.length === 0) return undoStateOf(entry, undefined, undefined)
+  const states = examined.map(id => undoStateOf(entry, copies.get(id)?.before, copies.get(id)?.current))
+  for (const state of ['undone', 'expired', 'changed'] as const) if (states.includes(state)) return state
+  return 'undoable'
+}
+
+/** 留作撤销的已结清条目（删一方、提升为全局、直接改与直接合并、整理所选的应用、移到项目、模型改写与替代）：快照过了保留窗口就无从撤销。 */
 export function isUndoable(entry: PendingDecision): boolean {
   const undoable = asUndoable(entry)
   if (undoable === undefined) return false
+  const rule = undoRuleOf(undoable)
   return verdictLoser(undoable, undoable.settled.verdict) !== undefined || undoable.settled.verdict === 'promoted'
-    || undoRuleOf(undoable).expectedStatus !== undefined
+    || rule.expectedStatus !== undefined || rule.receipts !== undefined
 }
 
 /** 账本清理的截止线（与快照、最近删除同一个 RETENTION_MS）：留作撤销的条目结清超过保留窗口就清掉。 */

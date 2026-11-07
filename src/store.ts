@@ -46,7 +46,7 @@ export interface DeleteOptions {
  * 软删。给了 now 时 deletedAt 也记成它（已有的不动，保留期从第一次删除算起）；
  * 缺省时 deletedAt 照旧由表在落盘时补上。
  */
-function markDeleted(r: MemoryRecord, now: number | undefined): MemoryRecord {
+export function markDeleted(r: MemoryRecord, now: number | undefined): MemoryRecord {
   if (now === undefined) return { ...r, status: 'deleted', updatedAt: Date.now() }
   return { ...r, status: 'deleted', updatedAt: now, deletedAt: r.deletedAt ?? now }
 }

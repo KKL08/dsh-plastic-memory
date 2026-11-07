@@ -607,6 +607,8 @@ const targetScope = scopeSchema.optional()
 /** 卡片加载时记忆的版本（MemoryCard 的 updatedAt 与 digest）。 */
 const memoryBaseSchema = z.object({ updatedAt: z.number(), digest: z.string() })
 const mergeRefSchema = z.object({ memoryId: z.string(), layer: targetScope, base: memoryBaseSchema })
+/** 「整理所选」一次最多几条：记忆查看多选的上限，整理命令的条数上限也用它（暂定，真机测过计划质量再定）。 */
+export const MAX_BATCH_EDIT = 20
 const draftRefSchema = z.object({ memoryId: z.string(), layer: targetScope })
 
 /** 「让模型改」的一稿：正文、摘要每次都有；名称、标签缺省 = 模型没改。只在界面和命令之间来回，不落盘。 */
@@ -617,6 +619,51 @@ export const memoryDraftSchema = z.object({
   tags: z.array(z.string()).optional(),
 })
 export type MemoryDraft = z.infer<typeof memoryDraftSchema>
+/** 整理计划里模型给的提问：问题，和不回答时的默认处理（输入框的占位文字）。 */
+const planQuestionSchema = z.object({ text: z.string(), placeholder: z.string() })
+/** 「整理所选」里单项「再改改」带的这一项计划：用户确认过的理由、提问和回答（没回答 = 按默认处理）。 */
+export const planNoteSchema = z.object({ reason: z.string(), question: planQuestionSchema.optional(), answer: z.string().optional() })
+export type PlanNote = z.infer<typeof planNoteSchema>
+/** 整理计划里每条记忆的动作：改写、删除、不动。 */
+export const PLAN_ACTIONS = ['rewrite', 'delete', 'keep'] as const
+export type PlanAction = (typeof PLAN_ACTIONS)[number]
+/**
+ * 整理计划（plan-edits 的结果）：understanding 一两句复述用户要什么；ops 每条选中的记忆恰好一项，按选中的顺序。
+ * into 只在删除项上，指承接它内容的那条（本次选中的另一条，动作是改写或不动）；question 只在改写项上。只在界面和命令之间来回，不落盘。
+ */
+export const editPlanSchema = z.object({
+  understanding: z.string(),
+  ops: z.array(z.object({
+    memoryId: z.string(),
+    action: z.enum(PLAN_ACTIONS),
+    reason: z.string(),
+    into: z.string().optional(),
+    question: planQuestionSchema.optional(),
+  })),
+})
+export type EditPlan = z.infer<typeof editPlanSchema>
+export type PlanOp = EditPlan['ops'][number]
+/**
+ * 按计划出稿（draft-plan）的一个改写项：用户确认过的理由、提问和回答（没回答 = 按默认处理），
+ * absorbs 是计划里内容并进这一项、用户确认要删的记忆（into 指向这一项的删除项）。
+ */
+export const draftPlanOpSchema = z.object({
+  memoryId: z.string(),
+  reason: z.string(),
+  question: planQuestionSchema.optional(),
+  answer: z.string().optional(),
+  absorbs: z.array(z.string()).optional(),
+})
+export type DraftPlanOp = z.infer<typeof draftPlanOpSchema>
+/**
+ * 「整理所选」应用的一项（apply-edits 的 ops）：改写带写进去的四个面（同直接改）；删除带 into，是计划里承接它内容的那条
+ * （本批的某个改写项或 keep 里的一条）。都带卡片版本。
+ */
+export const applyEditOpSchema = z.discriminatedUnion('kind', [
+  mergeRefSchema.extend({ kind: z.literal('edit'), content: z.string().min(1), name: z.string().min(1), summary: z.string(), tags: z.array(z.string()) }),
+  mergeRefSchema.extend({ kind: z.literal('forget'), into: z.string().optional() }),
+])
+export type ApplyEditOp = z.infer<typeof applyEditOpSchema>
 /** 直接改、直接合并写进去的四个字段；force：疑似密钥经用户确认后放行（高危密钥一律拦）。 */
 const editFields = {
   content: z.string().min(1),
@@ -688,15 +735,57 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   /**
    * 「让模型改 / 让模型合并」的生成：一条（合并时两条）记忆按建议类型的默认要求、或用户写的 request，单次调用借来的会话的模型，
    * 回一稿改后的内容（结果的 draft）。只读：不写记忆、不拍快照、不入账本、不进会话记录；「应用」由界面改发 edit-memory / merge-memories。
-   * previous：「再改改」时的上一稿，模型在它的基础上接着改。含密钥的记忆回 has-secret，原文不发给模型；
-   * request 或 previous 含高危密钥回 secret-critical，同样不发。
+   * adviceType 缺省（记忆查看里的修改，不是从建议来的）时 request 必填。
+   * previous：「再改改」时的上一稿，模型在它的基础上接着改；priorRequests：此前每一轮的要求，按先后排列；
+   * planNote：「整理所选」单项再改改时这一项的计划；absorbs：同时并进这一项、应用后会删除的记忆（计划里 into 指向这一项的删除项），
+   * 要在用、与 memories 同一作用域、不与 memories 重复，否则回 not-found / invalid-args。含密钥的记忆（含 absorbs）回 has-secret，原文不发给模型；
+   * request、priorRequests、planNote、previous 任一处含高危密钥回 secret-critical，同样不发。
    */
   z.object({
     cmd: z.literal('draft-edit'),
-    adviceType: z.enum(MODEL_EDIT_ADVICE_TYPES),
+    adviceType: z.enum(MODEL_EDIT_ADVICE_TYPES).optional(),
     memories: z.union([z.tuple([draftRefSchema]), z.tuple([draftRefSchema, draftRefSchema])]),
     request: z.string().optional(),
+    priorRequests: z.array(z.string()).optional(),
+    planNote: planNoteSchema.optional(),
+    absorbs: z.array(draftRefSchema).max(MAX_BATCH_EDIT).optional(),
     previous: memoryDraftSchema.optional(),
+  }).refine(c => c.adviceType !== undefined || (c.request ?? '').trim() !== '', { message: '没有建议类型时要写 request', path: ['request'] }),
+  /**
+   * 「整理所选」的计划：选中的 2–20 条记忆（同一作用域，各带卡片版本）和用户的要求，单次调用借来的会话的模型，回一份整理计划（结果的 plan）。
+   * 只读：不写记忆、不拍快照、不入账本，不过跨项目门（同 draft-edit）。目标 id 重复、不在同一作用域回 invalid-args；版本对不上回 stale；
+   * 含密钥的记忆回 has-secret、要求含高危密钥回 secret-critical，都不发给模型；模型的计划漏条、多条、into / question 不合规则回 llm-invalid-output。
+   */
+  z.object({
+    cmd: z.literal('plan-edits'),
+    memories: z.array(mergeRefSchema).min(2).max(MAX_BATCH_EDIT),
+    request: z.string().refine(s => s.trim() !== '', { message: '要写 request' }),
+  }),
+  /**
+   * 「整理所选」按计划出稿：plan-edits 的选中记忆和要求，加上用户勾选的改写项（ops，1 项起，选中记忆的无重复子集），
+   * 单次调用借来的会话的模型，每个改写项回一稿（结果的 drafts）。选中的全部记忆都作为上下文给模型；删除项不需要稿，不进这条命令。
+   * 只读，不过跨项目门（同 plan-edits）。ops 不是子集、absorbs 不在选中里或落在 ops 上或被两项承接回 invalid-args；
+   * 要求、理由、提问、回答任一处含高危密钥回 secret-critical；模型没给齐每项恰好一稿回 llm-invalid-output。其余同 plan-edits。
+   */
+  z.object({
+    cmd: z.literal('draft-plan'),
+    memories: z.array(mergeRefSchema).min(2).max(MAX_BATCH_EDIT),
+    request: z.string().refine(s => s.trim() !== '', { message: '要写 request' }),
+    ops: z.array(draftPlanOpSchema).min(1).max(MAX_BATCH_EDIT),
+  }),
+  /**
+   * 「整理所选」的应用全部：ops 是对照后要写的 1–20 项（按计划顺序，改写或删除），keep 是删除依据涉及、这次不写的记忆，只核对版本。
+   * 整批一份快照（pre-update），逐项写，全成后在账本里留一条已结清的 batch-edited（带逐项回执），结果的 decisionId 交给 undo 一次撤回。
+   * 目标 id 重复（ops 之间、ops 与 keep 之间）、不在同一作用域、删除的 into 不指向本批的改写项或 keep 回 invalid-args；
+   * 任一条不在用回 not-found；改写的目标含高危密钥、删除的目标含密钥（疑似也算）回 has-secret；版本对不上回 stale；
+   * 改写项四个面含高危密钥回 secret-critical，疑似回 secret-suspected，确认后带 force 重发。以上都什么都不写。
+   */
+  z.object({
+    cmd: z.literal('apply-edits'),
+    ops: z.array(applyEditOpSchema).min(1).max(MAX_BATCH_EDIT),
+    keep: z.array(mergeRefSchema).max(MAX_BATCH_EDIT).optional(),
+    force: z.boolean().optional(),
+    allowCrossWorkspace,
   }),
   z.object({ cmd: z.literal('dismiss-overflow'), decisionId: z.string() }),
   /**
@@ -790,14 +879,14 @@ export const GUI_ERROR_CODES = [
   'cross-workspace',    // 涉及其他项目且未带 allowCrossWorkspace，什么都没动
   'llm-unavailable',    // 体检、让模型改拿不到模型
   'llm-failed',         // 让模型改：模型报错，detail 带原话
-  'llm-invalid-output', // 让模型改：模型的输出不合要求的格式
+  'llm-invalid-output', // 让模型改：模型的输出不合要求的格式；整理计划：漏条、多条、承接或提问不合规则
   'subagent-readonly',  // 借的会话是子 agent，不可写
   'governance-disabled', // 体检已关闭：裁决、撤销、提升、移到项目、留在本项目、体检、忽略超限不可用
   'has-secret',         // forget 的目标含密钥（任一级），只能彻底删除：什么都没动，界面确认后改发 hard-delete；
-                        // 直接改、直接合并的目标含密钥（界面上是遮盖后的正文）：什么都没动；让模型改的目标含密钥：不发给模型
-  'stale',              // 直接改、直接合并：记忆在卡片加载后被改过；任一类撤销（含等同撤销的恢复）：目标之后又被改过或已不在原处。什么都没动（合并撤销中途被第三方改过的停在第三方的版本）
-  'secret-critical',    // 直接改、直接合并的新内容含高危密钥：什么都没动；让模型改的要求或上一稿含高危密钥：不发给模型
-  'secret-suspected',   // 直接改、直接合并的新内容含疑似密钥：什么都没动，用户确认后带 force 重发
+                        // 直接改、直接合并、整理所选的应用的目标含密钥（界面上是遮盖后的正文）：什么都没动；让模型改、整理计划的目标含密钥：不发给模型
+  'stale',              // 直接改、直接合并、整理计划与应用：记忆在卡片加载后被改过；任一类撤销（含等同撤销的恢复）：目标之后又被改过或已不在原处。什么都没动（合并撤销中途被第三方改过的停在第三方的版本）
+  'secret-critical',    // 直接改、直接合并、整理所选的应用的新内容含高危密钥：什么都没动；让模型改、整理计划的要求、此前的要求、计划或上一稿含高危密钥：不发给模型
+  'secret-suspected',   // 直接改、直接合并、整理所选的应用的新内容含疑似密钥：什么都没动，用户确认后带 force 重发
   'claimed',            // 待决项正被另一次操作（别的标签页、宿主进程或体检）认领：什么都没动
   'busy',               // 体检：范围正在体检（别的体检认领着、没过期；「全部」有一个范围认领不到也算），或体检中途认领被别的进程接手。
                         // 没认领到时什么都没动；中途被接手的这次不再提交。和待决项的 claimed 是两回事
@@ -816,6 +905,12 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     decisionId: z.string().optional(),
     memoryIds: z.array(z.string()).optional(),
     snapshotId: z.string().optional(),
+    /**
+     * apply-edits：只应用了一部分（中途失败、已写的没能全部退回）。memoryIds 只列仍是这次写下、记进账本可撤销的；
+     * 回退之前已被别处接着改过的停在别处的版本，不进账本、不可撤销，列在 unrecordedIds。两者之外的都已退回或没写。
+     */
+    isPartial: z.literal(true).optional(),
+    unrecordedIds: z.array(z.string()).optional(),
     /** edit-memory / merge-memories：保留的那条写完后的文件（改了名称时文件名跟着变）；move-memory：移过去之后的文件。 */
     filePath: z.string().optional(),
     /**
@@ -827,7 +922,11 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     isHardDeleted: z.literal(true).optional(),
     /** draft-edit：模型给的改后稿。 */
     draft: memoryDraftSchema.optional(),
-    /** model-info、draft-edit：借来的会话用的模型名；拿不到名字时缺省。 */
+    /** plan-edits：模型给的整理计划。 */
+    plan: editPlanSchema.optional(),
+    /** draft-plan：每个改写项一稿，按命令里 ops 的顺序。 */
+    drafts: z.array(z.object({ memoryId: z.string(), draft: memoryDraftSchema })).optional(),
+    /** model-info、draft-edit、plan-edits、draft-plan：借来的会话用的模型名；拿不到名字时缺省。 */
     model: z.string().optional(),
     /** scan：体检的说明码（如 baseline-session-scoped）。 */
     notes: z.array(z.enum(SCAN_NOTE_CODES)).optional(),
@@ -868,6 +967,8 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     rejected: z.array(z.object({ id: z.string(), workspacePath: z.string() })).optional(),
     /** 宿主或执行器的原话，界面原样显示。 */
     detail: z.string().optional(),
+    /** stale、not-found：对不上或找不到的那几条（整理所选的三条命令、让模型改），界面据此等视图换成最新内容、移出清单。 */
+    memoryIds: z.array(z.string()).optional(),
   }),
 ])
 export type MemoryCommandResult = z.infer<typeof memoryCommandResultSchema>
