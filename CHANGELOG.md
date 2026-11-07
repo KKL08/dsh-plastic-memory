@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Memories can be changed straight from the memory list. Edit on a row
+  lets you tell the model what to change or edit the text yourself, in the
+  same panel pending cards now use for edits and merges, and both can be
+  undone. Select lets you tidy 2–20 memories from one scope at once: the
+  model proposes what to rewrite, delete or keep and asks when it lacks
+  information, nothing is written until you have reviewed each change, and
+  Undo all reverts the whole batch.
 - Subagent sessions can save memories with `memory_save` while governance
   is on. What they save lands in the current project as pending: it is not
   injected into the main session, ranks after other memories in search, and
