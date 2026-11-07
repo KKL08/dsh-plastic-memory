@@ -2,18 +2,18 @@
 import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { GUI_VIEW_VERSION, checkupKey, type LibraryView, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type PendingView } from '../../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, MAX_BATCH_EDIT, checkupKey, type LibraryView, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type PendingView } from '../../src/gui/contract.ts'
 import type { BorrowedSession } from '../gateway.ts'
-import { createFakeGateway } from '../gateway.fake.ts'
+import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { createNavStore, type PageScope } from '../nav.ts'
 import { EDIT_MODE_STORAGE_KEY } from '../pending/edit-modes.tsx'
 import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
-import { LibraryTab } from './LibraryTab.tsx'
+import { LibraryTab, libraryTabCss } from './LibraryTab.tsx'
 import type { FoldMemory } from './groups.tsx'
 import { FLASH_MS } from './shared.tsx'
 import { createTranslator } from '../i18n.tsx'
 import { en } from '../locales.ts'
-import { PanelShell } from '../ui/PanelShell.tsx'
+import { PanelShell, PM_CSS } from '../ui/PanelShell.tsx'
 
 const app = { kind: 'workspace', workspacePath: '/w/app' } as const
 const blog = { kind: 'workspace', workspacePath: '/w/blog' } as const
@@ -1059,6 +1059,207 @@ describe('记忆查看：单条修改', () => {
     await apply()
     expect(commands().map(c => c.cmd)).toEqual(['draft-edit'])
     expect(within(row()).getByRole('alert')).toHaveTextContent('内容里有高危密钥，没有保存。')
+  })
+})
+
+describe('记忆查看：多选', () => {
+  const pick = (id: string, content: string, patch: Partial<MemoryCard> = {}) =>
+    memory({ id, content, digest: `sha1:${id}`, updatedAt: 100 + Number(id.replace(/\D/g, '') || 0), filePath: `/m/app-1/${id}.md`, ...patch })
+  // 分在三个类型里，每组不超过 3 条，都露在外面
+  const a1 = pick('a1', '每周三发版，先跑测试再打包。')
+  const a2 = pick('a2', '提交前跑 typecheck', { type: 'knowledge' })
+  const a3 = pick('a3', '格式化用 prettier', { type: 'person' })
+  const secret = pick('a8', '部署 token [已隐藏]', { type: 'knowledge', hasSecret: true })
+  const bare = memory({ id: 'a9', type: 'person', content: '没有版本的那条', filePath: '/m/app-1/a9.md' })
+  const view = (items: MemoryCard[] = [a1, a2, a3, secret, bare]) => library({ layers: [{ layer: app, items }] })
+
+  function setup({ items, scope = app, config }: { items?: MemoryCard[]; scope?: PageScope; config?: FakeGatewayInit['config'] } = {}) {
+    const gateway = createFakeGateway({ views: { library: view(items) }, ...(config !== undefined ? { config } : {}) })
+    const utils = renderInShell(<LibraryTab nav={createNavStore({ view: 'library' })} scope={scope} session={session} now={NOW} />, gateway)
+    return { gateway, utils }
+  }
+  const row = (text: string) => {
+    const hit = [...document.querySelectorAll<HTMLElement>('.pm-list > li')].find(li => li.querySelector('.pm-mc-text')?.firstChild?.textContent === text)
+    if (hit === undefined) throw new Error(`没有原文是「${text}」的行`)
+    return hit
+  }
+  const box = (text: string) => within(row(text)).getByRole('checkbox')
+  const enter = () => { fireEvent.click(screen.getByRole('button', { name: '选择' })) }
+  const check = (...texts: string[]) => { for (const text of texts) fireEvent.click(box(text)) }
+  const bar = () => screen.getByRole('group', { name: '多选操作' })
+  const tidy = () => within(bar()).getByRole('button', { name: '整理所选…' })
+
+  beforeEach(() => { localStorage.clear() })
+  afterEach(() => { localStorage.clear() })
+
+  it('故事 13：项目和全局范围的搜索框右侧有「选择」（次按钮）；「全部」范围没有', () => {
+    const { utils } = setup()
+    const search = screen.getByRole('searchbox', { name: '搜索记忆' }).closest('.pm-search')!
+    const select = screen.getByRole('button', { name: '选择' })
+    expect(select).toHaveClass('pm-btn--secondary')
+    expect(search.nextElementSibling).toBe(select)
+    utils.unmount()
+    const global = setup({ items: [pick('g1', '回答用中文', { scope: 'global', workspacePath: undefined })], scope: { kind: 'global' } })
+    expect(screen.getByRole('button', { name: '选择' })).toBeInTheDocument()
+    global.utils.unmount()
+    setup({ items: [{ ...a1, updatedAt: NOW - HOUR }], scope: { kind: 'all' } })
+    expect(screen.queryByRole('button', { name: '选择' })).toBeNull()
+  })
+
+  it('故事 14：点「选择」变成按下态的「完成」；每行左侧出现勾选框，行尾按钮全部收起', () => {
+    setup()
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
+    enter()
+    const done = screen.getByRole('button', { name: '完成' })
+    expect(done).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByRole('button', { name: '选择' })).toBeNull()
+    expect(screen.getAllByRole('checkbox')).toHaveLength(5)
+    const li = row('提交前跑 typecheck')
+    expect(li.firstElementChild).toContainElement(within(li).getByRole('checkbox'))
+    expect(within(li).queryAllByRole('button')).toHaveLength(0)
+    expect(document.querySelector('.pm-row-actions')).toBeNull()
+  })
+
+  it('故事 14：含密钥、没有版本的行勾选框置灰，悬停写明原因；可选的行勾选框名字带上记忆名', () => {
+    setup()
+    enter()
+    expect(box('部署 token [已隐藏]')).toBeDisabled()
+    expect(box('部署 token [已隐藏]').closest('label')).toHaveAttribute('title', '含密钥的记忆不发给模型')
+    expect(box('没有版本的那条')).toBeDisabled()
+    expect(box('没有版本的那条').closest('label')).toHaveAttribute('title', '这条读不到版本，先刷新')
+    expect(box('提交前跑 typecheck')).toBeEnabled()
+    expect(box('提交前跑 typecheck').closest('label')).not.toHaveAttribute('title')
+    expect(box('提交前跑 typecheck')).toHaveAccessibleName(`选择「${a2.name}」`)
+  })
+
+  it('故事 14：已展开的单条面板没写东西时直接收起；有没发出的输入先原位问「放弃刚写的内容？」，取消留在原处，确认后进多选', () => {
+    setup()
+    fireEvent.click(within(row('提交前跑 typecheck')).getByRole('button', { name: '修改' }))
+    enter()
+    expect(screen.queryByRole('tablist')).toBeNull()
+    expect(screen.getAllByRole('checkbox')).toHaveLength(5)
+    fireEvent.click(screen.getByRole('button', { name: '完成' }))
+    fireEvent.click(within(row('提交前跑 typecheck')).getByRole('button', { name: '修改' }))
+    fireEvent.change(screen.getByRole('textbox', { name: '想怎么改这条？' }), { target: { value: '再短一点' } })
+    enter()
+    const question = screen.getByRole('group', { name: '放弃刚写的内容？' })
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
+    fireEvent.click(within(question).getByRole('button', { name: '取消' }))
+    expect(screen.getByRole('textbox', { name: '想怎么改这条？' })).toHaveValue('再短一点')
+    expect(screen.getByRole('button', { name: '选择' })).toBeInTheDocument()
+    enter()
+    fireEvent.click(within(screen.getByRole('group', { name: '放弃刚写的内容？' })).getByRole('button', { name: '放弃' }))
+    expect(screen.queryByRole('tablist')).toBeNull()
+    expect(screen.getAllByRole('checkbox')).toHaveLength(5)
+  })
+
+  it('故事 15：勾选的行换选中行底色（--pm-accent-tint，跟随主题色）；底部操作条「已选 N 条 · 全选当前结果 · 取消 · 整理所选…」，不到 2 条时「整理所选…」置灰', () => {
+    setup({ config: { snapshotTokenBudget: 4000, snapshotOverflow: 'relax', governanceEnabled: true, globalPromoteTarget: 'plugin-global', customTypes: {}, accent: 'blue-whale' } })
+    enter()
+    expect(within(bar()).getByRole('status')).toHaveTextContent('已选 0 条')
+    expect(within(bar()).getAllByRole('button').map(b => b.textContent)).toEqual(['全选当前结果', '取消', '整理所选…'])
+    expect(tidy()).toHaveClass('pm-btn--primary')
+    expect(tidy()).toHaveAttribute('aria-disabled', 'true')
+    check('每周三发版，先跑测试再打包。')
+    expect(row('每周三发版，先跑测试再打包。')).toHaveClass('pm-lib-row--selected')
+    expect(row('提交前跑 typecheck')).not.toHaveClass('pm-lib-row--selected')
+    expect(within(bar()).getByRole('status')).toHaveTextContent('已选 1 条')
+    expect(tidy()).toHaveAttribute('aria-disabled', 'true')
+    check('提交前跑 typecheck')
+    expect(within(bar()).getByRole('status')).toHaveTextContent('已选 2 条')
+    expect(tidy()).not.toHaveAttribute('aria-disabled')
+    // 选中底色只用主题色令牌：银藤、大肥鱼两套主题色各自定义它，根上的 data-pm-accent 决定用哪套
+    expect(libraryTabCss).toMatch(/\.pm-lib-row--selected \{[^}]*background: var\(--pm-accent-tint\);/)
+    expect(libraryTabCss).not.toMatch(/#[0-9a-fA-F]{3,8}\b/)
+    expect(document.querySelector('.pm-root')).toHaveAttribute('data-pm-accent', 'blue-whale')
+    expect(PM_CSS).toMatch(/\.pm-root \{[^}]*--pm-accent-tint: #F2F0F9;/)
+    expect(PM_CSS).toMatch(/\.pm-root\[data-pm-accent='blue-whale'\][^{]*\{[^}]*--pm-accent-tint: var\(--dsw-alias-state-business-tertiary\);/)
+  })
+
+  it('故事 16：「全选当前结果」勾上当前搜索结果里所有可选的行（含收在「展开其余」里的），跳过置灰的', () => {
+    setup()
+    fireEvent.change(screen.getByRole('searchbox', { name: '搜索记忆' }), { target: { value: '发版' } })
+    enter()
+    fireEvent.click(within(bar()).getByRole('button', { name: '全选当前结果' }))
+    expect(within(bar()).getByRole('status')).toHaveTextContent('已选 1 条')
+    fireEvent.change(screen.getByRole('searchbox', { name: '搜索记忆' }), { target: { value: '' } })
+    expect(box('每周三发版，先跑测试再打包。')).toBeChecked()
+    expect(box('提交前跑 typecheck')).not.toBeChecked()
+    fireEvent.click(within(bar()).getByRole('button', { name: '全选当前结果' }))
+    expect(within(bar()).getByRole('status')).toHaveTextContent('已选 3 条')
+    expect(box('部署 token [已隐藏]')).not.toBeChecked()
+    expect(box('没有版本的那条')).not.toBeChecked()
+  })
+
+  it(`故事 16：超过 ${MAX_BATCH_EDIT} 条时操作条文字换成上限提示，「整理所选…」置灰；回到上限以内恢复`, () => {
+    const many = Array.from({ length: MAX_BATCH_EDIT + 1 }, (_, i) => pick(`k${i + 1}`, `经验 ${i + 1}`))
+    setup({ items: many })
+    enter()
+    fireEvent.click(within(bar()).getByRole('button', { name: '全选当前结果' }))
+    expect(within(bar()).getByRole('status')).toHaveTextContent(`已选 ${MAX_BATCH_EDIT + 1} 条 · 一次最多整理 ${MAX_BATCH_EDIT} 条，先用搜索缩小范围`)
+    expect(tidy()).toHaveAttribute('aria-disabled', 'true')
+    fireEvent.click(screen.getByRole('button', { name: /^展开其余/ }))
+    check('经验 1')
+    expect(within(bar()).getByRole('status')).toHaveTextContent(new RegExp(`^已选 ${MAX_BATCH_EDIT} 条$`))
+    expect(tidy()).not.toHaveAttribute('aria-disabled')
+  })
+
+  it('故事 17：「取消」或「完成」退出多选、清空勾选，行尾按钮回来', () => {
+    setup()
+    enter()
+    check('每周三发版，先跑测试再打包。', '提交前跑 typecheck')
+    fireEvent.click(within(bar()).getByRole('button', { name: '取消' }))
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
+    expect(screen.queryByRole('group', { name: '多选操作' })).toBeNull()
+    expect(within(row('提交前跑 typecheck')).getByRole('button', { name: '修改' })).toBeInTheDocument()
+    enter()
+    expect(screen.getAllByRole('checkbox').filter(c => (c as HTMLInputElement).checked)).toHaveLength(0)
+    check('提交前跑 typecheck')
+    fireEvent.click(screen.getByRole('button', { name: '完成' }))
+    enter()
+    expect(box('提交前跑 typecheck')).not.toBeChecked()
+  })
+
+  it('别处删掉已选的记忆：按视图自动去掉勾选，撤销回来也不再勾上', () => {
+    const { gateway } = setup()
+    enter()
+    check('每周三发版，先跑测试再打包。', '提交前跑 typecheck', '格式化用 prettier')
+    act(() => { gateway.setView('library', view([a1, a3, secret, bare])) })
+    expect(within(bar()).getByRole('status')).toHaveTextContent('已选 2 条')
+    act(() => { gateway.setView('library', view()) })
+    expect(box('提交前跑 typecheck')).not.toBeChecked()
+    expect(within(bar()).getByRole('status')).toHaveTextContent('已选 2 条')
+  })
+
+  it('故事 18：「整理所选…」换成整理工作区：标题「整理所选的 N 条」、右上「返回列表」、步骤条当前在「写要求」；返回列表回到多选、勾选还在', () => {
+    setup()
+    enter()
+    check('每周三发版，先跑测试再打包。', '格式化用 prettier')
+    fireEvent.click(tidy())
+    expect(screen.queryByRole('searchbox')).toBeNull()
+    expect(document.querySelector('.pm-memgroups')).toBeNull()
+    const title = screen.getByRole('heading', { name: '整理所选的 2 条' })
+    expect(title).toHaveFocus()
+    const steps = screen.getByRole('list', { name: '步骤' })
+    expect(within(steps).getAllByRole('listitem').map(li => li.textContent)).toEqual(['写要求', '看计划', '对照应用'])
+    expect(within(steps).getByText('写要求').closest('li')).toHaveAttribute('aria-current', 'step')
+    fireEvent.click(screen.getByRole('button', { name: '返回列表' }))
+    expect(screen.getByRole('button', { name: '完成' })).toHaveAttribute('aria-pressed', 'true')
+    expect(tidy()).toHaveFocus()
+    expect(box('每周三发版，先跑测试再打包。')).toBeChecked()
+    expect(box('格式化用 prettier')).toBeChecked()
+    expect(box('提交前跑 typecheck')).not.toBeChecked()
+  })
+
+  it('故事 18：工作区拿的是点「整理所选…」那一刻的快照：之后视图变了（已选的一条被删）标题不变，回到列表才按视图去掉勾选', () => {
+    const { gateway } = setup()
+    enter()
+    check('每周三发版，先跑测试再打包。', '提交前跑 typecheck', '格式化用 prettier')
+    fireEvent.click(tidy())
+    act(() => { gateway.setView('library', view([a1, a3, secret, bare])) })
+    expect(screen.getByRole('heading', { name: '整理所选的 3 条' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '返回列表' }))
+    expect(within(bar()).getByRole('status')).toHaveTextContent('已选 2 条')
   })
 })
 

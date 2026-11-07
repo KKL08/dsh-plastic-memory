@@ -10,6 +10,7 @@ import { titleControlsCss } from './checkup/TitleControls.tsx'
 import { confirmCss } from './command/confirm.tsx'
 import { memoryButtonCss } from './composer/MemoryButton.tsx'
 import { deletedTabCss } from './deleted/DeletedTab.tsx'
+import { batchEditCss } from './library/batch-edit.tsx'
 import { groupsCss } from './library/groups.tsx'
 import { libraryTabCss } from './library/LibraryTab.tsx'
 import { sharedTabCss } from './library/shared.tsx'
@@ -29,7 +30,7 @@ import { settingsCss } from './ui/Settings.tsx'
 
 export const SLOT_STYLES = {
   page: {
-    dismissButtonCss, memoryPageCss, titleControlsCss, statusBarCss, confirmCss, sharedTabCss, groupsCss, libraryTabCss,
+    dismissButtonCss, memoryPageCss, titleControlsCss, statusBarCss, confirmCss, sharedTabCss, groupsCss, libraryTabCss, batchEditCss,
     deletedTabCss, editCss, editModesCss, modelEditCss, moveCss, pendingCss,
   },
   sidebar: { confirmCss, promoteInPlaceCss, modelChangeCss, sidebarTabCss },

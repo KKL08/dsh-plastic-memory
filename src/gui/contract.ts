@@ -607,6 +607,8 @@ const targetScope = scopeSchema.optional()
 /** 卡片加载时记忆的版本（MemoryCard 的 updatedAt 与 digest）。 */
 const memoryBaseSchema = z.object({ updatedAt: z.number(), digest: z.string() })
 const mergeRefSchema = z.object({ memoryId: z.string(), layer: targetScope, base: memoryBaseSchema })
+/** 「整理所选」一次最多几条：记忆查看多选的上限，整理命令的条数上限也用它（暂定，真机测过计划质量再定）。 */
+export const MAX_BATCH_EDIT = 20
 const draftRefSchema = z.object({ memoryId: z.string(), layer: targetScope })
 
 /** 「让模型改」的一稿：正文、摘要每次都有；名称、标签缺省 = 模型没改。只在界面和命令之间来回，不落盘。 */

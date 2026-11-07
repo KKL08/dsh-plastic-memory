@@ -35,6 +35,8 @@ export const buttonCss = `
   cursor: pointer;
 }
 .pm-btn:hover:not(:disabled):not([aria-disabled='true']) { background: var(--pm-hover); }
+/* 开关式按钮按下（如记忆查看的「选择 → 完成」）：底色保持按下态，悬停也不变浅 */
+.pm-btn[aria-pressed='true'], .pm-btn[aria-pressed='true']:hover:not(:disabled):not([aria-disabled='true']) { background: var(--pm-pressed); }
 .pm-btn--primary { border: 1px solid transparent; background: var(--pm-text); color: var(--pm-bg-raised); }
 .pm-btn--primary:hover:not(:disabled):not([aria-disabled='true']) { background: var(--pm-text); }
 .pm-btn--quiet {

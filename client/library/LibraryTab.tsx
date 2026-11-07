@@ -6,9 +6,11 @@
  * 「修改」在这一行下展开两段切换的面板（同待处理卡），同一时刻只展开一个，换行前有没保存的输入先原位问；
  * 应用或保存发 edit-memory，之后行内换成新内容、高亮一次、标「刚改」，结果行可撤销（发 undo）；结果行在展开别的面板或离开后收起。
  * 含密钥或没有版本的记忆不给「修改」（同待处理卡）。
+ * 项目和全局范围的搜索框右侧有「选择」：进多选后每行左侧出勾选框、行尾按钮收起，勾选的行用选中行底色；列表底部浮起操作条
+ * （已选条数 · 全选当前结果 · 取消 · 整理所选…）。「整理所选…」把列表换成整理工作区（batch-edit.tsx）。「全部」范围不能多选。
  */
 import { useEffect, useRef, useState } from 'react'
-import { checkupKey, scopeOfMemory, type LibraryView, type MemoryCard as MemoryCardData } from '../../src/gui/contract.ts'
+import { checkupKey, MAX_BATCH_EDIT, scopeOfMemory, type LibraryView, type MemoryCard as MemoryCardData } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, useT, type Translate } from '../i18n.tsx'
 import { isInScope, scopeLabel, type NavStore, type PageScope } from '../nav.ts'
@@ -22,6 +24,7 @@ import { baseOf, isEditable } from '../pending/cards.tsx'
 import { EditPanel, type EditDraft } from '../pending/edit.tsx'
 import { EditModes, type EditState } from '../pending/edit-modes.tsx'
 import { ModelEditPanel } from '../pending/model-edit.tsx'
+import { BatchEdit, toBatchItems, type BatchItem } from './batch-edit.tsx'
 import { bucketize, GROUP_PREVIEW, groupByType, MemoryGroup, RECENT_BUCKETS, recentBucketOf, useFold, type FoldMemory } from './groups.tsx'
 import { FlashRow, matchesQuery, SearchBox, useFlashTarget, useRowActions, useTypeLabel, ViewMessage } from './shared.tsx'
 
@@ -106,6 +109,16 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
   const [fresh, setFresh] = useState<ReadonlySet<string>>(new Set())
   /** 刚改完、正在高亮的那一行。 */
   const [editFlash, setEditFlash] = useState<string>()
+  /** 多选开着没有、勾了哪几条（id）。 */
+  const [selecting, setSelecting] = useState(false)
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set())
+  /** 点「选择」时单条面板有没保存的输入：在「选择」原位问。 */
+  const [askingSelect, setAskingSelect] = useState(false)
+  /** 整理工作区：点「整理所选…」那一刻的快照，之后视图刷新不改它。 */
+  const [batch, setBatch] = useState<readonly BatchItem[]>()
+  /** 从工作区回到列表：焦点回「整理所选…」。 */
+  const selectionBar = useRef<HTMLDivElement>(null)
+  const isBackFromBatch = useRef(false)
   const kept = [...done.values()].filter(row => row.state !== 'deleting' || actions.isBusy(row.memory.id))
   const viewItems = view.status === 'ready' ? view.data.layers.filter(l => isInScope([l.layer], scope)).flatMap(l => l.items) : []
   // 本页删掉、视图里已经没有的那几条留在原位（等结果、结果行或撤销后等视图回来）；分组的排序是稳定的，插回原位就落回原来的组和位置
@@ -137,9 +150,32 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
     panel.current = IDLE_EDIT
     setEditing(undefined)
   }, [isEditingGone])
+  // 可勾选的：视图里在、能修改的（同「修改」的规则）。别处删掉或变得不能选的，从勾选里去掉，之后回来也不再勾上
+  const isViewReady = view.status === 'ready'
+  const selectableKey = viewItems.filter(isEditable).map(m => m.id).join('\n')
+  useEffect(() => {
+    if (!isViewReady) return
+    const ids = new Set(selectableKey.split('\n'))
+    setSelected((prev) => {
+      const next = [...prev].filter(id => ids.has(id))
+      return next.length === prev.size ? prev : new Set(next)
+    })
+  }, [selectableKey, isViewReady])
+  useEffect(() => {
+    if (batch !== undefined || !isBackFromBatch.current) return
+    isBackFromBatch.current = false
+    selectionBar.current?.querySelector<HTMLElement>('.pm-btn--primary')?.focus()
+  }, [batch])
   const { flashId, revealId, targetId, clear } = useFlashTarget(nav, items.map(m => m.id))
   const typeLabel = useTypeLabel(session)
   const folds = useFold(fold, `library|${checkupKey(scope)}`, isSearching)
+  if (batch !== undefined) {
+    return (
+      <div className="pm-lib">
+        <BatchEdit items={batch} onBack={() => { isBackFromBatch.current = true; setBatch(undefined) }} />
+      </div>
+    )
+  }
   if (view.status !== 'ready') return <ViewMessage state={view} idle={null} />
 
   const data = view.data
@@ -184,6 +220,35 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
       return undefined
     })
   }
+  const selectable = new Set(selectableKey.split('\n'))
+  const picked = viewItems.filter(m => selected.has(m.id) && selectable.has(m.id))
+  const pickedIds = new Set(picked.map(m => m.id))
+  const startSelect = () => {
+    panel.current = IDLE_EDIT
+    setEditing(undefined)
+    setAsking(undefined)
+    setAskingSelect(false)
+    setEdited(undefined)
+    setSelected(new Set())
+    setSelecting(true)
+  }
+  /** 进多选：展开着的单条面板有没保存的输入时先原位问（同换行）。 */
+  const select = () => {
+    if (editing !== undefined && panel.current.isDirty) { setAskingSelect(true); return }
+    startSelect()
+  }
+  const endSelect = () => {
+    setSelecting(false)
+    setSelected(new Set())
+  }
+  const toggle = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (!next.delete(id)) next.add(id)
+      return next
+    })
+  }
+
   /** 应用（让模型改）或保存（手动改）：发 edit-memory，带打开面板时的版本；别处改过（stale）就关面板、换最新内容。 */
   const save = (before: MemoryCardData, draft: EditDraft, via: 'model' | 'manual') => {
     const command = { cmd: 'edit-memory', memoryId: before.id, layer: scopeOfMemory(before), base: baseOf(before), ...draft } as const
@@ -273,6 +338,37 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
     )
   }
 
+  /** 多选时行首的勾选框：含密钥、没有版本的置灰，悬停写明原因。 */
+  const checkbox = (memory: MemoryCardData, isPicked: boolean) => {
+    const reason = memory.hasSecret === true ? t('library.select.secret') : memory.digest === undefined ? t('library.select.noVersion') : undefined
+    return (
+      <label className="pm-lib-check" title={reason}>
+        <input
+          type="checkbox"
+          aria-label={t('library.select.row', { name: memory.name })}
+          checked={isPicked}
+          disabled={reason !== undefined}
+          onChange={() => { toggle(memory.id) }}
+        />
+      </label>
+    )
+  }
+
+  /** 多选的操作条：浮在列表底部。2 条起、不超过上限才能整理。 */
+  const selectBar = () => {
+    const n = picked.length
+    const isOver = n > MAX_BATCH_EDIT
+    const blocked = n < 2 ? t('library.select.tooFew') : isOver ? t('library.select.tooMany', { n, max: MAX_BATCH_EDIT }) : undefined
+    return (
+      <div ref={selectionBar} className="pm-lib-selbar" role="group" aria-label={t('library.select.bar')}>
+        <p className="pm-lib-selbar-count" role="status">{isOver ? t('library.select.tooMany', { n, max: MAX_BATCH_EDIT }) : t('library.select.count', { n })}</p>
+        <Button onClick={() => { setSelected(prev => new Set([...prev, ...items.filter(m => selectable.has(m.id)).map(m => m.id)])) }}>{t('library.select.all')}</Button>
+        <Button variant="ghost" onClick={endSelect}>{t('library.select.cancel')}</Button>
+        <Button variant="primary" unavailable={blocked} onClick={() => { setBatch(toBatchItems(picked)) }}>{t('library.select.tidy')}</Button>
+      </div>
+    )
+  }
+
   const row = (memory: MemoryCardData) => {
     const own = scopeOfMemory(memory)
     if (done.get(memory.id)?.state === 'deleted') {
@@ -313,8 +409,11 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
       if (editFlash === memory.id) setEditFlash(undefined)
       if (flashId === memory.id) endFlash()
     }
+    const isPicked = selecting && pickedIds.has(memory.id)
+    const className = ['pm-list-row', selecting ? 'pm-lib-row--selecting' : '', isPicked ? 'pm-lib-row--selected' : ''].filter(Boolean).join(' ')
     return (
-      <FlashRow key={memory.id} className="pm-list-row" flashing={flashId === memory.id || editFlash === memory.id} onFlashEnd={endRowFlash} takesFocus={memory.id === targetId}>
+      <FlashRow key={memory.id} className={className} flashing={flashId === memory.id || editFlash === memory.id} onFlashEnd={endRowFlash} takesFocus={memory.id === targetId}>
+        {selecting ? checkbox(memory, isPicked) : null}
         <div className="pm-row-body">
           {isAll
             ? <MemoryCard memory={shown} now={now} typeLabel={typeLabel(memory.type)} scopeSlot={scopeLink(memory)} badge={badge} />
@@ -323,7 +422,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
           {result !== undefined ? editedRow(result) : null}
           {actions.feedback(memory.id)}
         </div>
-        {isEditing
+        {isEditing || selecting
           ? null
           : (
             <div className="pm-row-actions">
@@ -382,7 +481,21 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
 
   return (
     <div className="pm-lib">
-      <SearchBox label={t('library.search.label')} placeholder={t('library.search.placeholder')} value={query} onChange={setQuery} />
+      <div className="pm-lib-bar">
+        <SearchBox label={t('library.search.label')} placeholder={t('library.search.placeholder')} value={query} onChange={setQuery} />
+        {isAll
+          ? null
+          : askingSelect
+            ? (
+              <SoftDeleteConfirm
+                question={t('library.edit.discard')}
+                confirmLabel={t('library.edit.discardConfirm')}
+                onCancel={() => { setAskingSelect(false) }}
+                onConfirm={startSelect}
+              />
+            )
+            : <Button aria-pressed={selecting} onClick={selecting ? endSelect : select}>{t(selecting ? 'library.select.done' : 'library.select')}</Button>}
+      </div>
       {viewItems.length > 0 && dir !== undefined
         ? (
           <p className="pm-lib-storage">
@@ -414,6 +527,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
             <div className="pm-memgroups">{groups.map(group)}</div>
           </>
         )}
+      {selecting ? selectBar() : null}
     </div>
   )
 }
@@ -432,4 +546,22 @@ export const libraryTabCss = `
 .pm-lib-gone { opacity: .55; }
 .pm-lib-result { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .pm-lib-result-text { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
+.pm-lib-bar { display: flex; align-items: center; gap: 8px; }
+.pm-lib-bar > .pm-search { flex: 1; min-width: 0; }
+.pm-lib-check { display: flex; align-items: center; flex-shrink: 0; height: 22px; cursor: pointer; }
+.pm-lib-check input { margin: 0; accent-color: var(--pm-text); cursor: inherit; }
+.pm-lib-check:has(input:disabled) { cursor: default; }
+.pm-lib-row--selected { background: var(--pm-accent-tint); }
+/* 窄宽度下行改成上下排；多选时行尾按钮收起了，勾选框仍留在卡片左边 */
+@container (max-width: 500px) {
+  .pm-list-row.pm-lib-row--selecting { flex-direction: row; }
+}
+/* 主区底部留白 48px：操作条浮在离底 16px 处。滚到底时主区的底部留白不一定算进滚动范围（内容溢出视图面板时），
+   条自己带 16px 下边距，停在原位时也离底 16px，不会被顶上去压住最后一行 */
+.pm-lib-selbar {
+  position: sticky; bottom: -32px; z-index: 1; margin-bottom: 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 8px 8px 8px 16px; border: .5px solid var(--pm-line-card); border-radius: var(--dsw-radius-lg, 16px);
+  background: var(--pm-bg-raised); box-shadow: var(--dsw-elevation-panel);
+}
+.pm-lib-selbar-count { flex: 1; min-width: 0; margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 `
