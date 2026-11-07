@@ -2,7 +2,7 @@ import { z } from 'zod'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { SemanticLlm } from '../governance/semantic-scan.ts'
 import { PLAN_ACTIONS, type EditPlan, type PlanOp } from './contract.ts'
-import { jsonObjectIn } from './model-draft.ts'
+import { jsonObjectIn, memoriesJson } from './model-draft.ts'
 
 /**
  * 「整理所选」的计划：一次调用借来的会话的模型，为选中的几条记忆各定一个动作（改写 / 删除 / 不动）和理由。纯逻辑，模型经 SemanticLlm 注入；
@@ -38,8 +38,7 @@ export interface PlanInput {
 }
 
 export function buildPlanPrompt(input: PlanInput): { system: string; user: string } {
-  // JSON 编码：正文里的换行、引号、像标题的行都留在字符串里，分不清边界的地方不会被当成提示词的一部分
-  const memories = JSON.stringify(input.records.map(r => ({ id: r.id, name: r.name, summary: r.summary, tags: r.tags, content: r.content })), null, 2)
+  const memories = memoriesJson(input.records)
   return { system: SYSTEM_PROMPT, user: `## 用户的要求\n${input.request.trim()}\n\n## 选中的记忆\n${memories}` }
 }
 

@@ -56,14 +56,20 @@ export interface DraftInput {
   previous?: MemoryDraft
 }
 
-function planSection(note: PlanNote): string {
+/** 一项计划写进提示词的几行：理由；有提问时带上问题原文，和用户的回答或默认处理（回答是指代式的也看得懂）。整理所选的出稿共用。 */
+export function planNoteLines(note: PlanNote): string[] {
   const lines = [`理由：${note.reason}`]
   if (note.question !== undefined) {
     lines.push(`提问：${note.question.text}`)
     const answer = note.answer?.trim() ?? ''
     lines.push(answer !== '' ? `用户的回答：${answer}` : `用户没回答，按默认处理：${note.question.placeholder}`)
   }
-  return `## 用户确认过的计划\n${lines.join('\n')}`
+  return lines
+}
+
+/** 记忆写进提示词的样子：JSON 编码，正文里的换行、引号、像标题的行都留在字符串里，分不清边界的地方不会被当成提示词的一部分。整理所选的计划、出稿共用。 */
+export function memoriesJson(records: readonly MemoryRecord[]): string {
+  return JSON.stringify(records.map(r => ({ id: r.id, name: r.name, summary: r.summary, tags: r.tags, content: r.content })), null, 2)
 }
 
 export function buildDraftPrompt(input: DraftInput): { system: string; user: string } {
@@ -71,11 +77,10 @@ export function buildDraftPrompt(input: DraftInput): { system: string; user: str
   const written = input.request?.trim() ?? ''
   const request = written !== '' ? written : `用户没写，按这类问题的默认要求：${issue?.request ?? ''}`
   const prior = (input.priorRequests ?? []).map(r => r.trim()).filter(r => r !== '')
-  // JSON 编码：正文里的换行、引号、像标题的行都留在字符串里，分不清边界的地方不会被当成提示词的一部分
-  const memories = JSON.stringify(input.records.map(r => ({ id: r.id, name: r.name, summary: r.summary, tags: r.tags, content: r.content })), null, 2)
+  const memories = memoriesJson(input.records)
   const sections = [
     ...(issue !== undefined ? [`## 发现的问题\n${issue.problem}`] : []),
-    ...(input.planNote !== undefined ? [planSection(input.planNote)] : []),
+    ...(input.planNote !== undefined ? [`## 用户确认过的计划\n${planNoteLines(input.planNote).join('\n')}`] : []),
     ...(prior.length > 0 ? [`## 此前的要求（按先后排列）\n${prior.map((r, i) => `${i + 1}. ${r}`).join('\n')}`] : []),
     `## 用户的要求\n${request}`,
     `## 原记忆\n${memories}`,
@@ -104,12 +109,15 @@ export function jsonObjectIn(raw: string): unknown {
   }
 }
 
+/** 模型给的一稿换成契约的形状：名称、标签写 null 当没改，标签去重。 */
+export function toMemoryDraft({ content, summary, name, tags }: z.infer<typeof draftOutputSchema>): MemoryDraft {
+  return { content, summary, ...(name != null ? { name } : {}), ...(tags != null ? { tags: [...new Set(tags)] } : {}) }
+}
+
 /** 解析模型输出（容忍外面包了代码块或前后多了话）；不合格式为 null。 */
 export function parseDraftOutput(raw: string): MemoryDraft | null {
   const parsed = draftOutputSchema.safeParse(jsonObjectIn(raw))
-  if (!parsed.success) return null
-  const { content, summary, name, tags } = parsed.data
-  return { content, summary, ...(name != null ? { name } : {}), ...(tags != null ? { tags: [...new Set(tags)] } : {}) }
+  return parsed.success ? toMemoryDraft(parsed.data) : null
 }
 
 /** 单次调用，不重试：失败交给界面写原因、由用户重试。 */

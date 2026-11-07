@@ -643,6 +643,18 @@ export const editPlanSchema = z.object({
 })
 export type EditPlan = z.infer<typeof editPlanSchema>
 export type PlanOp = EditPlan['ops'][number]
+/**
+ * 按计划出稿（draft-plan）的一个改写项：用户确认过的理由、提问和回答（没回答 = 按默认处理），
+ * absorbs 是计划里内容并进这一项、用户确认要删的记忆（into 指向这一项的删除项）。
+ */
+export const draftPlanOpSchema = z.object({
+  memoryId: z.string(),
+  reason: z.string(),
+  question: planQuestionSchema.optional(),
+  answer: z.string().optional(),
+  absorbs: z.array(z.string()).optional(),
+})
+export type DraftPlanOp = z.infer<typeof draftPlanOpSchema>
 /** 直接改、直接合并写进去的四个字段；force：疑似密钥经用户确认后放行（高危密钥一律拦）。 */
 const editFields = {
   content: z.string().min(1),
@@ -737,6 +749,18 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
     cmd: z.literal('plan-edits'),
     memories: z.array(mergeRefSchema).min(2).max(MAX_BATCH_EDIT),
     request: z.string().refine(s => s.trim() !== '', { message: '要写 request' }),
+  }),
+  /**
+   * 「整理所选」按计划出稿：plan-edits 的选中记忆和要求，加上用户勾选的改写项（ops，1 项起，选中记忆的无重复子集），
+   * 单次调用借来的会话的模型，每个改写项回一稿（结果的 drafts）。选中的全部记忆都作为上下文给模型；删除项不需要稿，不进这条命令。
+   * 只读，不过跨项目门（同 plan-edits）。ops 不是子集、absorbs 不在选中里或落在 ops 上或被两项承接回 invalid-args；
+   * 要求、理由、提问、回答任一处含高危密钥回 secret-critical；模型没给齐每项恰好一稿回 llm-invalid-output。其余同 plan-edits。
+   */
+  z.object({
+    cmd: z.literal('draft-plan'),
+    memories: z.array(mergeRefSchema).min(2).max(MAX_BATCH_EDIT),
+    request: z.string().refine(s => s.trim() !== '', { message: '要写 request' }),
+    ops: z.array(draftPlanOpSchema).min(1).max(MAX_BATCH_EDIT),
   }),
   z.object({ cmd: z.literal('dismiss-overflow'), decisionId: z.string() }),
   /**
@@ -869,7 +893,9 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     draft: memoryDraftSchema.optional(),
     /** plan-edits：模型给的整理计划。 */
     plan: editPlanSchema.optional(),
-    /** model-info、draft-edit、plan-edits：借来的会话用的模型名；拿不到名字时缺省。 */
+    /** draft-plan：每个改写项一稿，按命令里 ops 的顺序。 */
+    drafts: z.array(z.object({ memoryId: z.string(), draft: memoryDraftSchema })).optional(),
+    /** model-info、draft-edit、plan-edits、draft-plan：借来的会话用的模型名；拿不到名字时缺省。 */
     model: z.string().optional(),
     /** scan：体检的说明码（如 baseline-session-scoped）。 */
     notes: z.array(z.enum(SCAN_NOTE_CODES)).optional(),

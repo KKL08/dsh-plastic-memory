@@ -24,6 +24,10 @@ export const SAMPLE_COMMANDS: { [K in MemoryCommand['cmd']]: Extract<MemoryComma
   'model-info': { cmd: 'model-info' },
   'draft-edit': { cmd: 'draft-edit', adviceType: 'bloat', memories: [{ memoryId: 'm1', layer: ws }] },
   'plan-edits': { cmd: 'plan-edits', memories: [{ memoryId: 'm1', layer: ws, base }, { memoryId: 'm2', layer: ws, base }], request: '合成一条' },
+  'draft-plan': {
+    cmd: 'draft-plan', memories: [{ memoryId: 'm1', layer: ws, base }, { memoryId: 'm2', layer: ws, base }], request: '合成一条',
+    ops: [{ memoryId: 'm2', reason: '补进命令', question: { text: '配置写哪？', placeholder: '不填就只换名字' }, answer: '写根目录', absorbs: ['m1'] }],
+  },
   'dismiss-overflow': { cmd: 'dismiss-overflow', decisionId: 'd1' },
   'ignore-advice': { cmd: 'ignore-advice', type: 'bloat', memories: [{ memoryId: 'm1', layer: ws, base }] },
   'unignore-advice': { cmd: 'unignore-advice', type: 'bloat', memoryIds: ['m1'] },

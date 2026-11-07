@@ -102,3 +102,32 @@ describe('plan-edits（整理所选的计划）', () => {
     expect(memoryCommandResultSchema.safeParse({ ...result, plan: { ...plan, ops: [{ memoryId: 'm1', action: 'merge', reason: '合' }] } }).success).toBe(false)
   })
 })
+
+describe('draft-plan（整理所选按计划出稿）', () => {
+  const ref = (memoryId: string) => ({ memoryId, layer: { kind: 'global' }, base: { updatedAt: 1, digest: `sha1:${memoryId}` } }) as const
+  const refs = (n: number) => Array.from({ length: n }, (_, i) => ref(`m${i + 1}`))
+  const op = { memoryId: 'm2', reason: '补进命令' }
+
+  it(`选中条数 2–${MAX_BATCH_EDIT}：1 条、${MAX_BATCH_EDIT + 1} 条不收；改写项 1 项起`, () => {
+    const accepts = (n: number, ops: object[] = [op]) => memoryCommandSchema.safeParse({ cmd: 'draft-plan', memories: refs(n), request: '合成一条', ops }).success
+    expect([1, 2, MAX_BATCH_EDIT, MAX_BATCH_EDIT + 1].map(n => accepts(n))).toEqual([false, true, true, false])
+    expect([accepts(2, []), accepts(2, [op])]).toEqual([false, true])
+  })
+
+  it('要求必填；提问缺占位文字不收；不带跨项目确认（只读，不过门）', () => {
+    const accepts = (args: object) => memoryCommandSchema.safeParse({ cmd: 'draft-plan', memories: refs(2), ops: [op], ...args }).success
+    expect([accepts({ request: '合成一条' }), accepts({}), accepts({ request: ' ' })]).toEqual([true, false, false])
+    expect(accepts({ request: '合', ops: [{ ...op, question: { text: '写哪？' } }] })).toBe(false)
+    expect(CROSS_WORKSPACE_COMMANDS.has('draft-plan' as never)).toBe(false)
+  })
+
+  it('命令与结果随文本往返：改写项带理由、提问、回答、承接的删除项；结果每项一稿', () => {
+    const command = {
+      cmd: 'draft-plan', memories: refs(3), request: '以 biome 为准',
+      ops: [{ memoryId: 'm2', reason: '补进命令', question: { text: '配置写哪？', placeholder: '不填就只换名字' }, answer: '选第二种', absorbs: ['m1'] }],
+    } as const satisfies MemoryCommand
+    expect(parseMemoryCommand(encodeMemoryCommand(command).slice(`/${MEMORY_COMMAND_NAME} `.length))).toEqual({ ok: true, command })
+    const result = { ok: true, cmd: 'draft-plan', drafts: [{ memoryId: 'm2', draft: { content: '用 biome', summary: '格式化', name: '格式化' } }], model: 'deepseek-v4-flash' }
+    expect(memoryCommandResultSchema.parse(JSON.parse(JSON.stringify(result)))).toEqual(result)
+  })
+})

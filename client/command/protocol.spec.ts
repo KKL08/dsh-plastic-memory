@@ -111,6 +111,22 @@ describe('发出之前拦下', () => {
     expect(refuseBeforeSend({ ...plan, request: '以 biome 为准，api_key: abc12345' })).toBeUndefined()
   })
 
+  it('故事 30：按计划出稿的要求、理由、提问、默认处理、回答任一处含高危密钥：不发，给让模型改的本地文案', () => {
+    const draft = SAMPLE_COMMANDS['draft-plan']
+    const op = draft.ops[0]!
+    const question = op.question!
+    for (const command of [
+      { ...draft, request: key },
+      { ...draft, ops: [{ ...op, reason: key }] },
+      { ...draft, ops: [{ ...op, question: { ...question, text: key } }] },
+      { ...draft, ops: [{ ...op, question: { ...question, placeholder: key } }] },
+      { ...draft, ops: [{ memoryId: 'm1', reason: '换命令' }, { ...op, answer: key }] },
+    ]) {
+      expect(refuseBeforeSend(command)).toEqual(local('secret-critical', 'pending.model.secretCritical'))
+    }
+    expect(refuseBeforeSend({ ...draft, ops: [{ ...op, answer: 'api_key: abc12345' }] })).toBeUndefined()
+  })
+
   it('其余命令、以及只是像密钥的内容：照常发', () => {
     for (const command of COMMANDS) expect(refuseBeforeSend(command)).toBeUndefined()
     expect(refuseBeforeSend({ ...SAMPLE_COMMANDS['edit-memory'], content: 'password: abc12345' })).toBeUndefined()

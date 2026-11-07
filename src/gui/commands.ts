@@ -25,11 +25,12 @@ import {
 } from '../tools/workspace-gate.ts'
 import {
   GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, VIEW_BEHIND_CODES, mergeKeeperIndex, parseMemoryCommand, sessionViewFile,
-  type GuiErrorCode, type MemoryCommand, type MemoryCommandResult,
+  type DraftPlanOp, type GuiErrorCode, type MemoryCommand, type MemoryCommandResult,
 } from './contract.ts'
 import type { ViewWriter } from './view-writer.ts'
 import { generateDraft } from './model-draft.ts'
 import { generatePlan } from './model-plan.ts'
+import { generatePlanDrafts } from './model-draft-plan.ts'
 import { processInterval, runCheckup, type IntervalTimer } from './checkup-run.ts'
 import { sameScope, scopeAt, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
 import { UNKNOWN_SESSION_ID, type ContextHost, type HostSession } from '../tools/host-session.ts'
@@ -94,7 +95,7 @@ export interface MemoryCommandDefinition {
 const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'undo', 'promote', 'promote-memory', 'move-memory', 'keep-local', 'keep-local-memory', 'scan'])
 
 /** 不写任何东西的子命令：成功后也不重写视图。 */
-const READ_ONLY_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['draft-edit', 'plan-edits'])
+const READ_ONLY_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['draft-edit', 'plan-edits', 'draft-plan'])
 
 /** 自己写视图的子命令：成功后不再按常规重写全部视图。 */
 const SELF_WRITING_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['scan', 'refresh-views', 'set-auto-checkup'])
@@ -186,6 +187,26 @@ function batchRefsProblem(refs: readonly { memoryId: string; layer?: Scope | und
   if (repeated !== undefined) return `同一条记忆选了两次：${repeated}`
   const layers = refs.flatMap(r => (r.layer === undefined ? [] : [r.layer]))
   return layers.every(l => sameScope(l, layers[0]!)) ? undefined : '选中的记忆不在同一个作用域（全局和项目、或不同项目混在一起）'
+}
+
+/**
+ * draft-plan 的改写项和承接对不上选中的记忆：改写项是选中记忆的无重复子集；承接的记忆在选中里、不是改写项，每条最多被一项承接。不合规时给原因。
+ */
+function draftOpsProblem(memoryIds: readonly string[], ops: readonly DraftPlanOp[]): string | undefined {
+  const rewrites = new Set<string>()
+  for (const op of ops) {
+    if (!memoryIds.includes(op.memoryId)) return `改写项不在选中的记忆里：${op.memoryId}`
+    if (rewrites.has(op.memoryId)) return `同一条改写项列了两次：${op.memoryId}`
+    rewrites.add(op.memoryId)
+  }
+  const absorbed = new Set<string>()
+  for (const id of ops.flatMap(op => op.absorbs ?? [])) {
+    if (!memoryIds.includes(id)) return `承接的记忆不在选中的记忆里：${id}`
+    if (rewrites.has(id)) return `承接的记忆也是改写项：${id}`
+    if (absorbed.has(id)) return `同一条记忆被承接了两次：${id}`
+    absorbed.add(id)
+  }
+  return undefined
 }
 
 /** 定位到的记忆都在同一个作用域。 */
@@ -595,6 +616,27 @@ async function dispatch(
       const r = await generatePlan({ records, request: command.request }, llm)
       if (!r.ok) return fail(cmd, r.code, r.detail)
       return { ok: true, cmd, plan: r.plan, ...(llm.model !== undefined ? { model: llm.model } : {}) }
+    }
+
+    case 'draft-plan': {
+      const refs = command.memories
+      const problem = batchRefsProblem(refs) ?? draftOpsProblem(refs.map(ref => ref.memoryId), command.ops)
+      if (problem !== undefined) return fail(cmd, 'invalid-args', problem)
+      const located = await Promise.all(refs.map(ref => locate(ref.memoryId, ref.layer)))
+      const gone = refs.filter((_, i) => located[i]?.status !== 'active').map(ref => ref.memoryId)
+      if (gone.length > 0) return notFound(gone.join('、'))
+      const records = located as MemoryRecord[]
+      if (!isOneScope(records)) return fail(cmd, 'invalid-args', '选中的记忆不在同一个作用域（全局和项目、或不同项目混在一起）')
+      if (records.some((r, i) => isStale(r, refs[i]!.base))) return fail(cmd, 'stale', '有记忆刚被改过，界面已换成最新内容。未做任何改动')
+      // 同 plan-edits：选中的全部记忆都进提示词（只作参考的也是）；要求和计划的文字同样进，命中高危就整次不发
+      if (records.some(r => hasCriticalSecret(r))) return fail(cmd, 'has-secret', '含密钥的记忆不发给模型。未做任何改动')
+      const asked = [command.request, ...command.ops.flatMap(op => [op.reason, op.question?.text ?? '', op.question?.placeholder ?? '', op.answer ?? ''])]
+      if (detectSecrets(asked.join('\n')).some(h => h.severity === 'critical')) return fail(cmd, 'secret-critical', '要求或计划里有高危密钥，不发给模型。未做任何改动')
+      const llm = deps.host.llmOf(exec)
+      if (llm === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型')
+      const r = await generatePlanDrafts({ records, request: command.request, ops: command.ops }, llm)
+      if (!r.ok) return fail(cmd, r.code, r.detail)
+      return { ok: true, cmd, drafts: r.drafts, ...(llm.model !== undefined ? { model: llm.model } : {}) }
     }
 
     case 'dismiss-overflow': {

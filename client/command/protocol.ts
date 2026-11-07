@@ -84,7 +84,7 @@ export function interpret(command: MemoryCommand, result: MemoryCommandResult): 
 const hasCritical = (texts: readonly string[]) => detectSecrets(texts.join('\n')).some(h => h.severity === 'critical')
 
 /**
- * 发出之前就拦下的（与服务端同口径）：直接改、直接合并的新内容四个面；让模型改的要求、此前的要求、计划的文字、上一稿四个面；整理计划的要求。
+ * 发出之前就拦下的（与服务端同口径）：直接改、直接合并的新内容四个面；让模型改的要求、此前的要求、计划的文字、上一稿四个面；整理计划的要求；按计划出稿的要求和每项的理由、提问、回答。
  * 命令文本会进借用会话的日志，含高危密钥的不能发出去；疑似的照常发，改写由服务端回 secret-suspected 再确认。
  */
 export function refuseBeforeSend(command: MemoryCommand): Failure | undefined {
@@ -102,5 +102,9 @@ export function refuseBeforeSend(command: MemoryCommand): Failure | undefined {
     return hasCritical(texts) ? local('secret-critical', 'pending.model.secretCritical') : undefined
   }
   if (command.cmd === 'plan-edits') return hasCritical([command.request]) ? local('secret-critical', 'pending.model.secretCritical') : undefined
+  if (command.cmd === 'draft-plan') {
+    const texts = [command.request, ...command.ops.flatMap(op => [op.reason, op.question?.text ?? '', op.question?.placeholder ?? '', op.answer ?? ''])]
+    return hasCritical(texts) ? local('secret-critical', 'pending.model.secretCritical') : undefined
+  }
   return undefined
 }
