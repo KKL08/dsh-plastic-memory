@@ -1,11 +1,11 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
-import { mkdir, mkdtemp, readFile, rename, rm, stat, utimes, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, rename, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
 import { ParseCache } from '../src/storage/parse-cache.ts'
-import { encodeRecord } from '../src/storage/frontmatter.ts'
-import { GLOBAL_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
+import { decodeFile, encodeRecord, type FileLocation } from '../src/storage/frontmatter.ts'
+import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
 import { MemoryStore } from '../src/store.ts'
 import { executeSearch } from '../src/tools/search.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
@@ -235,5 +235,126 @@ describe('解析缓存：FileTable 读取路径', () => {
         expect(await cached(query), `第 ${round} 轮：${query}`).toEqual(await uncached(query))
       }
     }
+  })
+})
+
+const GLOBAL: FileLocation = { scope: 'global' }
+const SECRET = `sk-ant-api03-${'S'.repeat(40)}`
+const exists = (path: string) => access(path).then(() => true, () => false)
+async function signatureOf(path: string) {
+  const s = await stat(path)
+  return { ino: s.ino, size: s.size, mtimeMs: s.mtimeMs, ctimeMs: s.ctimeMs }
+}
+
+describe('解析缓存：写路径逐出与维护点', () => {
+  const searchOf = (t: FileTable) => {
+    const store = new MemoryStore(t, undefined, new InMemoryBatchKvTable())
+    const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
+    return (query: string) => executeSearch({ query }, fakeExec(), {
+      store, registry, host: { contextOf: async () => ({ workspacePath: undefined, session: { id: 's', lastSeq: 1 } }) },
+    })
+  }
+
+  it('PC-07：彻底删除含密钥的记忆后，readScope 与检索都不交出它的原文，缓存当场逐出', async () => {
+    const path = await seed('secret', { id: 'mem_s', content: `token ${SECRET}` })
+    await seed('other', { id: 'mem_o', content: 'token 无关' })
+    const cache = new ParseCache<never>()
+    const t = newTable(cache)
+    await t.readScope([globalDir()])
+    const sig = await signatureOf(path)
+    expect(cache.lookup(path, sig, GLOBAL)).toBeDefined()
+
+    expect(await t.delete('mem_s', { kind: 'global' })).toBe(true)
+    expect(cache.lookup(path, sig, GLOBAL)).toBeUndefined()
+    expect(JSON.stringify(await t.readScope([globalDir()]))).not.toContain(SECRET)
+    expect(JSON.stringify(await searchOf(t)('token'))).not.toContain(SECRET)
+  })
+
+  it('PC-07：读取进行到一半时被彻底删除、旧条目被回填，之后的读取也不交出它；下一次读这个目录后缓存里没有它', async () => {
+    const path = await seed('secret', { id: 'mem_s', content: `token ${SECRET}` })
+    await seed('other', { id: 'mem_o', content: 'token 无关' })
+    const sig = await signatureOf(path)
+    const cache = new ParseCache<never>()
+    const t = newTable(cache)
+    fsHooks.afterRead = async p => {
+      if (p !== path) return
+      fsHooks.afterRead = undefined
+      await t.delete('mem_s', { kind: 'global' })   // 内容已读到，删除在它存进缓存之前发生
+    }
+    await t.readScope([globalDir()])
+    expect(await exists(path)).toBe(false)
+    expect(cache.lookup(path, sig, GLOBAL)).toBeDefined()   // 回填：只在内存里，交不出去
+
+    expect(JSON.stringify(await t.readScope([globalDir()]))).not.toContain(SECRET)
+    expect(cache.lookup(path, sig, GLOBAL)).toBeUndefined()
+    expect(JSON.stringify(await searchOf(t)('token'))).not.toContain(SECRET)
+  })
+
+  it('PC-07：软删搬进 .archive/ 后，原路径的条目没了', async () => {
+    const path = await seed('a', { id: 'mem_a' })
+    const cache = new ParseCache<never>()
+    const t = newTable(cache)
+    await t.readScope([globalDir()])
+    const sig = await signatureOf(path)
+    await t.update('mem_a', { kind: 'global' }, r => ({ ...r, status: 'deleted' }))
+    expect(await exists(path)).toBe(false)
+    expect(cache.lookup(path, sig, GLOBAL)).toBeUndefined()
+  })
+
+  /** 往缓存里塞一份和磁盘对不上、签名却相同的条目：模拟缓存陈旧。 */
+  async function plantStale(cache: ParseCache<never>, path: string, stale: MemoryRecord, raw = encodeRecord(stale, {})) {
+    const decoded = decodeFile(raw, { path, loc: GLOBAL, relPath: path.slice(root.length + 1) })
+    cache.store(path, await signatureOf(path), GLOBAL, Number.MAX_SAFE_INTEGER, { raw, decoded } as never)
+  }
+
+  it('PC-08：缓存说顶层这条已删、磁盘上仍在用：不搬 .archive/，路径逐出，下一次维护照常', async () => {
+    const path = await seed('a', { id: 'mem_a', name: 'a' })
+    const cache = new ParseCache<never>()
+    const t = newTable(cache)
+    await plantStale(cache, path, record({ id: 'mem_a', name: 'a', status: 'deleted', deletedAt: clock }))
+    await t.maintain([globalDir()])
+    expect(await exists(path)).toBe(true)
+    expect(await exists(join(globalDir(), ARCHIVE_DIR, 'a.md'))).toBe(false)
+    await t.maintain([globalDir()])
+    expect(await readFile(join(globalDir(), INDEX_FILE), 'utf8')).toContain('mem_a')
+  })
+
+  it('PC-08：缓存原文需要重新编码、磁盘上其实不同：不回写', async () => {
+    const path = await seed('a', { id: 'mem_a', name: 'a' })
+    const before = await readFile(path, 'utf8')
+    const cache = new ParseCache<never>()
+    const t = newTable(cache)
+    const stale = record({ id: 'mem_a', name: 'a', content: '陈旧的正文' })
+    await plantStale(cache, path, stale, encodeRecord(stale, {}).replace(/^digest:.*\n/m, ''))   // 缺 digest：维护点会想补上
+    await t.maintain([globalDir()])
+    expect(await readFile(path, 'utf8')).toBe(before)
+    expect(cache.lookup(path, await signatureOf(path), GLOBAL)).toBeUndefined()
+  })
+
+  it('PC-08：缓存说 .archive/ 里这条已超保留期、磁盘上刚删不久：不物理删除', async () => {
+    const archive = join(globalDir(), ARCHIVE_DIR)
+    const path = await seed('a', { id: 'mem_a', name: 'a', status: 'deleted', deletedAt: clock }, archive)
+    const cache = new ParseCache<never>()
+    const t = newTable(cache)
+    await plantStale(cache, path, record({ id: 'mem_a', name: 'a', status: 'deleted', deletedAt: 1 }))
+    await t.maintain([globalDir()])
+    expect(await exists(path)).toBe(true)
+    expect(cache.lookup(path, await signatureOf(path), GLOBAL)).toBeUndefined()
+  })
+
+  it('PC-08：racy 窗口内被同大小改写的在用记录，维护点写出的 MEMORY.md 反映新内容', async () => {
+    const path = await seed('a', { id: 'mem_a', name: 'aaaa', summary: '旧摘要xx' })
+    const T = 1_800_000_000_000
+    fsHooks.coarseTime = T   // 改写前后签名相同
+    const t = newTable()
+    clock = T + 1_000
+    await t.maintain([globalDir()])
+    expect(await readFile(join(globalDir(), INDEX_FILE), 'utf8')).toContain('旧摘要xx')
+    await writeFile(path, (await readFile(path, 'utf8')).replace('旧摘要xx', '新摘要yy'))
+    clock = T + 6_000
+    await t.maintain([globalDir()])
+    const index = await readFile(join(globalDir(), INDEX_FILE), 'utf8')
+    expect(index).toContain('新摘要yy')
+    expect(index).not.toContain('旧摘要xx')
   })
 })

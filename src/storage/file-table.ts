@@ -455,7 +455,7 @@ export class FileTable implements MemoryTable {
         if (record.status === 'deleted' && record.deletedAt === undefined) record = { ...record, deletedAt: slot.mtimeMs }
         if (inArchive && record.status === 'deleted' && record.deletedAt! < cutoff) {
           if (!(await this.unchangedSince(slot))) continue
-          await rm(slot.filePath, { force: true })
+          await this.removeFile(slot.filePath)
           // 同 delete：别层还有这个 id 时统计行是它的。只在真删过期文件时全盘找一次，平常的维护不多读
           if ((await this.locateSlot(record.id)) === undefined) await this.opts.stats.delete(record.id)
           continue
@@ -478,7 +478,7 @@ export class FileTable implements MemoryTable {
           }
           if (claim.path.toLowerCase() !== slot.filePath.toLowerCase()) {
             // 占名期间源文件被改：撤回刚写的归档副本，源文件留给下次维护
-            if (await this.unchangedSince(slot)) await rm(slot.filePath, { force: true })
+            if (await this.unchangedSince(slot)) await this.removeFile(slot.filePath)
             else await this.withdrawClaim(slot.filePath, claim, text)
           }
           continue
@@ -508,9 +508,19 @@ export class FileTable implements MemoryTable {
     }
   }
 
-  /** 动手前的复核（维护点与写路径共用）：磁盘原文仍等于读到的那份。读不出（已删、不可读）也算变了。 */
+  /** 动手前的复核（维护点与写路径共用）：磁盘原文仍等于读到的那份。读不出（已删、不可读）也算变了。
+   *  变了就逐出解析缓存：读到的可能是缓存里的陈旧原文，重算时不能再拿到同一份。 */
   private async unchangedSince(slot: Slot): Promise<boolean> {
-    try { return (await readFile(slot.filePath, 'utf8')) === slot.raw } catch { return false }
+    let unchanged: boolean
+    try { unchanged = (await readFile(slot.filePath, 'utf8')) === slot.raw } catch { unchanged = false }
+    if (!unchanged) this.parseCache.evict(slot.filePath)
+    return unchanged
+  }
+
+  /** 删一个记忆文件，同时逐出解析缓存（彻底删除后缓存不再留它的原文）。 */
+  private async removeFile(filePath: string): Promise<void> {
+    await rm(filePath, { force: true })
+    this.parseCache.evict(filePath)
   }
 
   /**
@@ -523,7 +533,7 @@ export class FileTable implements MemoryTable {
     const copies = known ?? await this.scanForId(id, (await this.resolveDirs([...dirs])).scopeDirs)
     for (const copy of copies) {
       if (!dirs.has(copy.dir) || copy.filePath.toLowerCase() === keepPath.toLowerCase()) continue
-      if (known === undefined || await this.unchangedSince(copy)) await rm(copy.filePath, { force: true })
+      if (known === undefined || await this.unchangedSince(copy)) await this.removeFile(copy.filePath)
     }
   }
 
@@ -534,7 +544,7 @@ export class FileTable implements MemoryTable {
   private async withdrawClaim(source: string, claim: Claim, text: string): Promise<void> {
     const sourceGone = await stat(source).then(() => false, () => true)
     if (sourceGone && (await stat(claim.path).catch(() => undefined))?.ino !== claim.ino) return
-    if ((await readFile(claim.path, 'utf8').catch(() => undefined)) === text) await rm(claim.path, { force: true })
+    if ((await readFile(claim.path, 'utf8').catch(() => undefined)) === text) await this.removeFile(claim.path)
   }
 
   /** 目录顶层记忆文件的签名：每个文件的名字、大小、mtime，不含索引；只 readdir + stat，不读内容。口径同 readDirs 顺手记下的那份。 */
@@ -595,6 +605,7 @@ export class FileTable implements MemoryTable {
     const tmp = `${filePath}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
     await writeFile(tmp, text, 'utf8')
     await rename(tmp, filePath)
+    this.parseCache.evict(filePath)
   }
 
   private volatileEqual(a: MemoryRecord, b: MemoryRecord): boolean {
@@ -661,7 +672,9 @@ export class FileTable implements MemoryTable {
         const path = join(level, name)
         try {
           // 退回复制时目标是另一个文件，按目标本身记；硬链接时就是 tmp，不再 stat（此刻目标名可能已被别人 rename 覆盖）
-          return { path, ino: (await linkExclusive(tmp, path)) ? (await stat(path)).ino : ino }
+          const isCopy = await linkExclusive(tmp, path)
+          this.parseCache.evict(path)
+          return { path, ino: isCopy ? (await stat(path)).ino : ino }
         } catch (err) {
           if (errnoCode(err) !== 'EEXIST') throw err
         }
@@ -672,6 +685,7 @@ export class FileTable implements MemoryTable {
         // 文件名由 name 派生、可能带密钥，报错只给目录和占着的 id
         else if (onDisk !== null) throw new NameTakenError(`候选文件名都被别的记忆占着，没有写入：${dirname(path)}（占着的 id：${onDisk.id}）`)
         await rename(tmp, path)
+        this.parseCache.evict(path)
         return { path, ino }
       }
       throw new Error(`unreachable: ${fullIdName}`)   // 全 id 名不会是保留名，循环必在它那里返回或抛错
@@ -719,7 +733,7 @@ export class FileTable implements MemoryTable {
             await this.withdrawClaim(prev.filePath, claim, text)   // 占名期间旧文件被改或不见了：按规则撤回新文件，重来
             throw new StaleReadError()
           }
-          await rm(prev.filePath, { force: true })
+          await this.removeFile(prev.filePath)
         }
       }
       await this.removeOtherCopies(key, filePath, dir, isOwnDirOnly, prev?.copies ?? [])
@@ -772,7 +786,7 @@ export class FileTable implements MemoryTable {
     return this.locked(async () => {
       const slot = await this.locate(id, at)
       if (!slot || skipIf?.(slot)) return false
-      await rm(slot.filePath, { force: true })
+      await this.removeFile(slot.filePath)
       // 彻底删除（密钥硬删、最近删除里的彻底删除）的承诺是「可见集合里再没有它」：global 与该记录目录里同 id 的其余副本
       // （含 .archive/）一并物理删除；给作用域时只删该目录里的，别的作用域里的同 id 副本是另一张卡
       await this.removeOtherCopies(id, slot.filePath, slot.dir, isScopeTarget(at))
