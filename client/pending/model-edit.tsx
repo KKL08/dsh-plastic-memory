@@ -40,7 +40,7 @@ function failureOf(r: Extract<MemoryCommandResult, { ok: false }>, t: Translate)
 }
 
 /** 拿到模型名写全句；会话没有模型写原因；还在问或没给名字只写后半句。 */
-function hintOf(model: ModelState, t: Translate): string {
+export function hintOf(model: ModelState, t: Translate): string {
   if (model.status === 'unavailable') return t('pending.model.unavailable')
   return model.status === 'ready' && model.model !== undefined ? t('pending.model.hint', { model: model.model }) : t('pending.model.hintNoName')
 }

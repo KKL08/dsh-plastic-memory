@@ -172,7 +172,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
   if (batch !== undefined) {
     return (
       <div className="pm-lib">
-        <BatchEdit items={batch} onBack={() => { isBackFromBatch.current = true; setBatch(undefined) }} />
+        <BatchEdit items={batch} session={session} onBack={() => { isBackFromBatch.current = true; setBatch(undefined) }} />
       </div>
     )
   }

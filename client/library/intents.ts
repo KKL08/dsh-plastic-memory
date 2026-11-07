@@ -16,3 +16,11 @@ export const SINGLE_INTENTS = [
   { id: 'correct', label: 'library.intent.correct', template: 'library.intent.correct.template' },
   { id: 'supplement', label: 'library.intent.supplement', template: 'library.intent.supplement.template' },
 ] as const satisfies readonly Intent[]
+
+/** 「整理所选」的四个快捷意图（多条），按显示顺序。 */
+export const BATCH_INTENTS = [
+  { id: 'resolve', label: 'library.intent.resolve', template: 'library.intent.resolve.template' },
+  { id: 'dedupe', label: 'library.intent.dedupe', template: 'library.intent.dedupe.template' },
+  { id: 'prune', label: 'library.intent.prune', template: 'library.intent.prune.template' },
+  { id: 'unify', label: 'library.intent.unify', template: 'library.intent.unify.template' },
+] as const satisfies readonly Intent[]
