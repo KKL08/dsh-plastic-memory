@@ -50,10 +50,11 @@ describe('draft-edit 的放宽', () => {
     expect(accepts({ adviceType: 'bloat' })).toBe(true)
   })
 
-  it('此前的要求、计划随命令文本往返', () => {
+  it('此前的要求、计划、并入的记忆随命令文本往返', () => {
     const command = {
       cmd: 'draft-edit', memories: [ref], request: '再短一点', priorRequests: ['周三改成周四', '命令保留'],
       planNote: { reason: '和另一条说法矛盾', question: { text: '以哪条为准？', placeholder: '不填就以较新的为准' }, answer: '以周四为准' },
+      absorbs: [{ memoryId: 'm2', layer: { kind: 'global' } }],
       previous: { content: '每周四发版', summary: '发版日' },
     } as const satisfies MemoryCommand
     const parsed = parseMemoryCommand(encodeMemoryCommand(command).slice(`/${MEMORY_COMMAND_NAME} `.length))
@@ -166,5 +167,14 @@ describe('apply-edits（整理所选应用全部）', () => {
     const result = { ok: true, cmd: 'apply-edits', decisionId: 'pd_1', memoryIds: ['m1', 'm2'], snapshotId: 'snap_1' }
     expect(memoryCommandResultSchema.parse(JSON.parse(JSON.stringify(result)))).toEqual(result)
     expect(memoryCommandResultSchema.parse({ ...result, isPartial: true })).toEqual({ ...result, isPartial: true })
+    const partial = { ok: true, cmd: 'apply-edits', memoryIds: ['m2'], snapshotId: 'snap_1', isPartial: true, unrecordedIds: ['m1'] }
+    expect(memoryCommandResultSchema.parse(JSON.parse(JSON.stringify(partial)))).toEqual(partial)
+  })
+
+  it('失败结果可带 memoryIds（stale、not-found 列出对不上或找不到的），随文本往返；不带也合法', () => {
+    const failure = { ok: false, cmd: 'apply-edits', code: 'stale', detail: '有记忆刚被改过', memoryIds: ['m1', 'm3'] }
+    expect(memoryCommandResultSchema.parse(JSON.parse(JSON.stringify(failure)))).toEqual(failure)
+    const { memoryIds: _ids, ...bare } = failure
+    expect(memoryCommandResultSchema.parse(bare)).toEqual(bare)
   })
 })

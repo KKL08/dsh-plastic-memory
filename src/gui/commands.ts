@@ -12,7 +12,7 @@ import { computeDigest } from '../storage/frontmatter.ts'
 import { candidateFingerprint, type MisplacedIgnore, type PendingDecisionsStore } from '../governance/decisions.ts'
 import { isModelChange } from '../governance/undo-rules.ts'
 import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
-import { kindOf, type PendingDecision, type ScanCacheEntry, type SnapshotRecord } from '../governance/schema.ts'
+import { kindOf, type MemorySnapshot, type PendingDecision, type ScanCacheEntry, type SnapshotRecord } from '../governance/schema.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
@@ -32,7 +32,7 @@ import { generateDraft } from './model-draft.ts'
 import { generatePlan } from './model-plan.ts'
 import { generatePlanDrafts } from './model-draft-plan.ts'
 import { processInterval, runCheckup, type IntervalTimer } from './checkup-run.ts'
-import { sameScope, scopeAt, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
+import { sameScope, scopeAt, scopeKey, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
 import { UNKNOWN_SESSION_ID, type ContextHost, type HostSession } from '../tools/host-session.ts'
 import { scanOutcome } from './views.ts'
 
@@ -240,8 +240,58 @@ async function committedAfterThrow(store: MemoryStore, record: MemoryRecord, op:
   return current !== undefined && current.status === status && current.updatedAt === now && editFingerprint(current) === editFingerprint(candidate) ? current : undefined
 }
 
+/**
+ * 整理所选的回退：已写的项按写入记录逐条退回快照里的改前版本。只退仍是这次写下那版的（写回那一刻锁内核对），之间被别处接着改过的
+ * 停在别处的版本、不覆盖；一项回退抛错也接着退其余的。回退写盘同样不拿调用当证明：正常返回以恢复结果为准，抛错的按 id 重读，
+ * 已是改前版本算退回，仍是这次写下的留着（kept，照常结账、可撤销），都不是算被别处改过（unrecorded，不可撤销）。
+ */
+async function rollBackBatch(
+  writes: readonly BatchWrite[], snapshot: MemorySnapshot, deps: Pick<MemoryCommandDeps, 'store' | 'snapshots' | 'now'>,
+): Promise<{ kept: BatchWrite[]; unrecorded: string[] }> {
+  const kept: BatchWrite[] = []
+  const unrecorded: string[] = []
+  for (const write of writes) {
+    const { written } = write
+    const before = snapshot.data.find(r => r.id === write.memoryId)
+    if (written === undefined || before === undefined) continue
+    const isOwn = (cur: MemoryRecord | undefined) => cur !== undefined && cur.status === written.status && editFingerprint(cur) === editFingerprint(written)
+    try {
+      const r = await deps.snapshots.restore(snapshot, [write.memoryId], deps.store, { target: 'exact', overwrite: isOwn, now: () => deps.now?.() ?? Date.now() })
+      if (r.restored.length === 0) unrecorded.push(write.memoryId)
+    } catch {
+      const current = await locateCopy(deps.store, write.memoryId, scopeAt(before.workspacePath)).catch(() => undefined)
+      if (current?.status === before.status && editFingerprint(current) === editFingerprint(before)) continue
+      if (isOwn(current)) kept.push(write)
+      else unrecorded.push(write.memoryId)
+    }
+  }
+  return { kept, unrecorded }
+}
+
+/**
+ * 整理所选的结账：删除项按 id 清掉指向它们的账本条目（同 forget），再记一条带逐项回执的 batch-edited。任一步抛错时按快照 id
+ * 重读账本：新条目已在（写进去之后的清理抛错）就算记上了；不在就把这几项也按快照退回，再把错误抛出去。
+ * 回退和记账都失败时，整批前拍的快照仍在保留期内，是最后的恢复依据。
+ */
+async function settleBatch(
+  writes: readonly BatchWrite[], workspaces: string[], snapshot: MemorySnapshot, deps: Pick<MemoryCommandDeps, 'store' | 'snapshots' | 'decisions' | 'now'>, now: number,
+): Promise<PendingDecision> {
+  try {
+    const forgotten = writes.filter(w => w.op === 'forget').map(w => w.memoryId)
+    if (forgotten.length > 0) await deps.decisions.removeByMemoryIds(forgotten)
+    return await deps.decisions.addBatchEdit(
+      writes.map(w => ({ memoryId: w.memoryId, op: w.op, written: w.written! })), { summary: `整理所选 ${writes.length} 条`, workspaces }, snapshot.id, now,
+    )
+  } catch (error) {
+    const recorded = (await deps.decisions.listSettled().catch(() => [])).find(d => d.settled?.verdict === 'batch-edited' && d.settled.snapshotId === snapshot.id)
+    if (recorded !== undefined) return recorded
+    await rollBackBatch(writes, snapshot, deps)
+    throw error
+  }
+}
+
 /** 定位到的记忆都在同一个作用域。 */
-const isOneScope = (records: readonly MemoryRecord[]) => new Set(records.map(r => (r.scope === 'global' ? '' : `ws:${r.workspacePath ?? ''}`))).size <= 1
+const isOneScope = (records: readonly MemoryRecord[]) => new Set(records.map(r => scopeKey(scopeAt(r.workspacePath)))).size <= 1
 
 /** 顺手把视图目录建出来：宿主的文件资源对「父目录还不存在」的缺失文件不跟踪之后的创建，客户端是先问 info 再订阅视图的。 */
 async function info(deps: MemoryCommandDeps, sessionId: string): Promise<Ok> {
@@ -274,6 +324,8 @@ async function dispatch(
   const { cmd } = command
   const executorDeps = { store: deps.store, decisions: deps.decisions, snapshots: deps.snapshots, log: deps.log, now: () => now }
   const notFound = (what: string) => fail(cmd, 'not-found', `不存在或已处理：${what}`)
+  /** 界面落后于磁盘（卡片版本对不上、要动的已经不在）：失败结果带上是哪几条，界面据此等视图换成最新内容。 */
+  const behind = (code: 'stale' | 'not-found', memoryIds: readonly string[], detail: string): Err => ({ ...fail(cmd, code, detail), memoryIds: [...memoryIds] })
   /** 与 memory_save 同口径：要写进去的四个面一起查，高危直接拦，疑似等用户确认后带 force 重发。 */
   const editSecretsProblem = (edits: readonly { content: string; name: string; summary: string; tags: string[] }[], force: boolean | undefined): Err | undefined => {
     const hits = detectSecrets(edits.map(f => `${f.content}\n${f.name}\n${f.summary}\n${f.tags.join(' ')}`).join('\n'))
@@ -299,6 +351,20 @@ async function dispatch(
   /** 命令带了作用域就只认那一份，否则按借来的会话定位（当前项目优先）。 */
   const locate = (memoryId: string, scope: Scope | undefined) =>
     scope === undefined ? deps.store.get(memoryId, { workspacePath: gov.workspacePath }) : locateCopy(deps.store, memoryId, scope)
+  /**
+   * 「整理所选」各命令的定位与核对：按页面上那一份定位，都还在用（否则 not-found）、在同一个作用域（否则 invalid-args）、
+   * 版本和卡片对得上（否则 stale）；not-found、stale 带上是哪几条。都过了返回定位到的记忆，顺序同 refs。
+   */
+  const locateBatch = async (refs: readonly { memoryId: string; layer?: Scope | undefined; base: { updatedAt: number; digest: string } }[]): Promise<MemoryRecord[] | Err> => {
+    const located = await Promise.all(refs.map(ref => locate(ref.memoryId, ref.layer)))
+    const gone = refs.filter((_, i) => located[i]?.status !== 'active').map(ref => ref.memoryId)
+    if (gone.length > 0) return behind('not-found', gone, `不存在或已处理：${gone.join('、')}`)
+    const records = located as MemoryRecord[]
+    if (!isOneScope(records)) return fail(cmd, 'invalid-args', '选中的记忆不在同一个作用域（全局和项目、或不同项目混在一起）')
+    const staleIds = refs.filter((ref, i) => isStale(records[i]!, ref.base)).map(ref => ref.memoryId)
+    if (staleIds.length > 0) return behind('stale', staleIds, '有记忆刚被改过，界面已换成最新内容。未做任何改动')
+    return records
+  }
 
   /** 结清这次提升或留下，返回条目 id。 */
   type SettleCandidate = (verdict: 'promoted' | 'keep-local', opts: { snapshotId?: string; fingerprint?: string; misplacedIgnore?: MisplacedIgnore }) => Promise<string>
@@ -613,12 +679,9 @@ async function dispatch(
       const refs = [...ops, ...keep]
       const problem = batchRefsProblem(refs) ?? applyOpsProblem(ops, keep)
       if (problem !== undefined) return fail(cmd, 'invalid-args', problem)
-      // 都按页面上那一份定位，且此刻仍在用：已删、不存在的什么都不动
-      const located = await Promise.all(refs.map(ref => locate(ref.memoryId, ref.layer)))
-      const gone = refs.filter((_, i) => located[i]?.status !== 'active').map(ref => ref.memoryId)
-      if (gone.length > 0) return notFound(gone.join('、'))
-      const records = located as MemoryRecord[]
-      if (!isOneScope(records)) return fail(cmd, 'invalid-args', '选中的记忆不在同一个作用域（全局和项目、或不同项目混在一起）')
+      // 都按页面上那一份定位，且此刻仍在用：已删、不存在的什么都不动；ops 和 keep 都核对版本：删除依据涉及的「不动」项被改过，删除的理由可能已不成立
+      const records = await locateBatch(refs)
+      if (isErr(records)) return records
       const targets = ops.map((op, i) => ({ op, record: records[i]! }))
       // keep 只核对版本、不写，不过门
       const { rejected } = gateRecords(targets.map(t => t.record), gov, command.allowCrossWorkspace)
@@ -626,14 +689,15 @@ async function dispatch(
       // 改写的目标含高危密钥：界面上是遮盖后的正文（同直接改）；删除的目标含密钥（疑似也算）软删不了（同合并要删的那条）
       const secretHeld = targets.find(t => (t.op.kind === 'edit' ? hasCriticalSecret(t.record) : hasSecret(t.record)))
       if (secretHeld !== undefined) return fail(cmd, 'has-secret', `记忆 ${secretHeld.record.id} 含密钥，不能在这里整理：先彻底删除它，或手改文件去掉密钥。未做任何改动`)
-      if (refs.some((ref, i) => isStale(records[i]!, ref.base))) return fail(cmd, 'stale', '有记忆刚被改过，界面已换成最新内容。未做任何改动')
       const secretProblem = editSecretsProblem(ops.flatMap(op => (op.kind === 'edit' ? [op] : [])), command.force)
       if (secretProblem !== undefined) return secretProblem
 
-      // 整批一份快照，撤销全部按它恢复
+      // 整批一份快照，撤销全部和中途失败的回退都按它恢复
       const snapshot = await deps.snapshots.capture({ operation: 'pre-update', description: `整理所选 ${ops.length} 条前`, records: targets.map(t => t.record) }, now)
       // 按计划顺序逐项写，每项在提交那一刻记写入记录。回调里算出的只是候选（文件表复核失败会重来），调用正常返回才以返回值为准
       const writes: BatchWrite[] = []
+      /** 第一项失败的原因：锁内发现被改过、已不在，软删时刚被写进密钥，或写入抛错。之后的项不再写。 */
+      let failure: { kind: 'stale' | 'not-found' | 'has-secret'; memoryId: string } | { kind: 'thrown'; error: unknown } | undefined
       for (const { op, record } of targets) {
         const at = scopeAt(record.workspacePath)
         const write: BatchWrite = { memoryId: record.id, op: op.kind }
@@ -657,35 +721,52 @@ async function dispatch(
             if (outcome === 'deleted') write.written = markDeleted(candidate!, now)
           }
         } catch (error) {
-          if (!(error instanceof RecordNotFoundError)) {
-            // 抛错时不知道落没落盘：按 id 重读，状态和指纹与最后一次候选一致、updatedAt 是这次的才算已写
+          if (error instanceof RecordNotFoundError) outcome = 'missing'
+          else {
+            // 抛错时不知道落没落盘：按 id 重读，状态和指纹与最后一次候选一致、updatedAt 是这次的才算已写（已写的一样要退回）
             write.written = await committedAfterThrow(deps.store, record, op.kind, candidate, now)
-            throw error
+            failure = { kind: 'thrown', error }
+            break
           }
         }
         if (write.written === undefined) {
-          // TODO: 已写的项按写入记录退回快照里的改前版本
-          return outcome === 'has-secret'
-            ? fail(cmd, 'has-secret', `记忆 ${record.id} 刚被写进密钥，没有删除`)
-            : fail(cmd, 'stale', '有记忆刚被改过，界面已换成最新内容')
+          failure = { kind: outcome === 'has-secret' ? 'has-secret' : outcome === 'missing' ? 'not-found' : 'stale', memoryId: record.id }
+          break
         }
       }
-      // 删除项走删除的老路：账本里指向它们的条目一并清掉（同 forget）
-      const forgotten = writes.filter(w => w.op === 'forget').map(w => w.memoryId)
-      if (forgotten.length > 0) await deps.decisions.removeByMemoryIds(forgotten)
-      const entry = await deps.decisions.addBatchEdit(
-        writes.map(w => ({ memoryId: w.memoryId, op: w.op, written: w.written! })),
-        { summary: `整理所选 ${ops.length} 条`, workspaces: targets.map(t => workspaceLabel(t.record)) }, snapshot.id, now,
-      )
-      return { ok: true, cmd, decisionId: entry.id, memoryIds: writes.map(w => w.memoryId), snapshotId: snapshot.id }
+      const labelsOf = (done: readonly BatchWrite[]) => done.map(w => workspaceLabel(targets.find(t => t.record.id === w.memoryId)!.record))
+      if (failure === undefined) {
+        const entry = await settleBatch(writes, labelsOf(writes), snapshot, deps, now)
+        return { ok: true, cmd, decisionId: entry.id, memoryIds: writes.map(w => w.memoryId), snapshotId: snapshot.id }
+      }
+      // 中途失败：已写的退回快照里的改前版本
+      const { kept, unrecorded } = await rollBackBatch(writes, snapshot, deps)
+      if (kept.length === 0 && unrecorded.length === 0) {
+        if (failure.kind === 'thrown') throw failure.error
+        if (failure.kind === 'has-secret') return fail(cmd, 'has-secret', `记忆 ${failure.memoryId} 刚被写进密钥，没有删除；已写的都已退回`)
+        return behind(failure.kind, [failure.memoryId], '有记忆刚被改过，界面已换成最新内容；已写的都已退回')
+      }
+      // 没退干净：仍是本批写下的照常结账、可撤销；被别处接着改过的停在别处的版本，列出来、不可撤销
+      const entry = kept.length > 0 ? await settleBatch(kept, labelsOf(kept), snapshot, deps, now) : undefined
+      return {
+        ok: true, cmd, ...(entry !== undefined ? { decisionId: entry.id } : {}), memoryIds: kept.map(w => w.memoryId), snapshotId: snapshot.id,
+        isPartial: true, unrecordedIds: unrecorded,
+      }
     }
 
     case 'draft-edit': {
       const refs = command.memories
+      const absorbs = command.absorbs ?? []
       if (refs.length === 2 && refs[0].memoryId === refs[1]!.memoryId) return fail(cmd, 'invalid-args', `要合并的两条是同一条记忆：${refs[0].memoryId}`)
-      const records = await Promise.all(refs.map(ref => locate(ref.memoryId, ref.layer)))
-      if (!records.every(r => r?.status === 'active')) return notFound(refs.map(ref => ref.memoryId).join('、'))
-      // 高危密钥的原文不发给模型；确认存下的疑似密钥同注入，照原文发
+      // 并入的记忆不与要改的重复、和要改的在同一个作用域（同整理所选），定位之后再核对一次
+      const absorbProblem = absorbs.length > 0 ? batchRefsProblem([...refs, ...absorbs]) : undefined
+      if (absorbProblem !== undefined) return fail(cmd, 'invalid-args', absorbProblem)
+      const targets = [...refs, ...absorbs]
+      const records = await Promise.all(targets.map(ref => locate(ref.memoryId, ref.layer)))
+      const gone = targets.filter((_, i) => records[i]?.status !== 'active').map(ref => ref.memoryId)
+      if (gone.length > 0) return behind('not-found', gone, `不存在或已处理：${gone.join('、')}`)
+      if (absorbs.length > 0 && !isOneScope(records.map(r => r!))) return fail(cmd, 'invalid-args', '并入的记忆和要改的不在同一个作用域（全局和项目、或不同项目混在一起）')
+      // 高危密钥的原文不发给模型（并入的记忆也是）；确认存下的疑似密钥同注入，照原文发
       if (records.some(r => hasCriticalSecret(r!))) return fail(cmd, 'has-secret', '含密钥的记忆不发给模型。未做任何改动')
       // 要求、此前的要求、计划和上一稿同样进提示词；上一稿是模型回的原样，不遮，命中高危就整次不发
       const { previous, planNote } = command
@@ -698,7 +779,10 @@ async function dispatch(
       const llm = deps.host.llmOf(exec)
       if (llm === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型')
       const { adviceType, request, priorRequests } = command
-      const r = await generateDraft({ adviceType, records: records.map(rec => rec!), request, priorRequests, planNote, previous }, llm)
+      const located = records.map(rec => rec!)
+      const r = await generateDraft({
+        adviceType, records: located.slice(0, refs.length), absorbed: located.slice(refs.length), request, priorRequests, planNote, previous,
+      }, llm)
       if (!r.ok) return fail(cmd, r.code, r.detail)
       return { ok: true, cmd, draft: r.draft, ...(llm.model !== undefined ? { model: llm.model } : {}) }
     }
@@ -707,12 +791,8 @@ async function dispatch(
       const refs = command.memories
       const problem = batchRefsProblem(refs)
       if (problem !== undefined) return fail(cmd, 'invalid-args', problem)
-      const located = await Promise.all(refs.map(ref => locate(ref.memoryId, ref.layer)))
-      const gone = refs.filter((_, i) => located[i]?.status !== 'active').map(ref => ref.memoryId)
-      if (gone.length > 0) return notFound(gone.join('、'))
-      const records = located as MemoryRecord[]
-      if (!isOneScope(records)) return fail(cmd, 'invalid-args', '选中的记忆不在同一个作用域（全局和项目、或不同项目混在一起）')
-      if (records.some((r, i) => isStale(r, refs[i]!.base))) return fail(cmd, 'stale', '有记忆刚被改过，界面已换成最新内容。未做任何改动')
+      const records = await locateBatch(refs)
+      if (isErr(records)) return records
       // 同 draft-edit：高危密钥的原文不发给模型，确认存下的疑似密钥照原文发；要求进提示词，命中高危就整次不发
       if (records.some(r => hasCriticalSecret(r))) return fail(cmd, 'has-secret', '含密钥的记忆不发给模型。未做任何改动')
       if (detectSecrets(command.request).some(h => h.severity === 'critical')) return fail(cmd, 'secret-critical', '要求里有高危密钥，不发给模型。未做任何改动')
@@ -727,12 +807,8 @@ async function dispatch(
       const refs = command.memories
       const problem = batchRefsProblem(refs) ?? draftOpsProblem(refs.map(ref => ref.memoryId), command.ops)
       if (problem !== undefined) return fail(cmd, 'invalid-args', problem)
-      const located = await Promise.all(refs.map(ref => locate(ref.memoryId, ref.layer)))
-      const gone = refs.filter((_, i) => located[i]?.status !== 'active').map(ref => ref.memoryId)
-      if (gone.length > 0) return notFound(gone.join('、'))
-      const records = located as MemoryRecord[]
-      if (!isOneScope(records)) return fail(cmd, 'invalid-args', '选中的记忆不在同一个作用域（全局和项目、或不同项目混在一起）')
-      if (records.some((r, i) => isStale(r, refs[i]!.base))) return fail(cmd, 'stale', '有记忆刚被改过，界面已换成最新内容。未做任何改动')
+      const records = await locateBatch(refs)
+      if (isErr(records)) return records
       // 同 plan-edits：选中的全部记忆都进提示词（只作参考的也是）；要求和计划的文字同样进，命中高危就整次不发
       if (records.some(r => hasCriticalSecret(r))) return fail(cmd, 'has-secret', '含密钥的记忆不发给模型。未做任何改动')
       const asked = [command.request, ...command.ops.flatMap(op => [op.reason, op.question?.text ?? '', op.question?.placeholder ?? '', op.answer ?? ''])]

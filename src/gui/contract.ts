@@ -737,7 +737,8 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
    * 回一稿改后的内容（结果的 draft）。只读：不写记忆、不拍快照、不入账本、不进会话记录；「应用」由界面改发 edit-memory / merge-memories。
    * adviceType 缺省（记忆查看里的修改，不是从建议来的）时 request 必填。
    * previous：「再改改」时的上一稿，模型在它的基础上接着改；priorRequests：此前每一轮的要求，按先后排列；
-   * planNote：「整理所选」单项再改改时这一项的计划。含密钥的记忆回 has-secret，原文不发给模型；
+   * planNote：「整理所选」单项再改改时这一项的计划；absorbs：同时并进这一项、应用后会删除的记忆（计划里 into 指向这一项的删除项），
+   * 要在用、与 memories 同一作用域、不与 memories 重复，否则回 not-found / invalid-args。含密钥的记忆（含 absorbs）回 has-secret，原文不发给模型；
    * request、priorRequests、planNote、previous 任一处含高危密钥回 secret-critical，同样不发。
    */
   z.object({
@@ -747,6 +748,7 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
     request: z.string().optional(),
     priorRequests: z.array(z.string()).optional(),
     planNote: planNoteSchema.optional(),
+    absorbs: z.array(draftRefSchema).max(MAX_BATCH_EDIT).optional(),
     previous: memoryDraftSchema.optional(),
   }).refine(c => c.adviceType !== undefined || (c.request ?? '').trim() !== '', { message: '没有建议类型时要写 request', path: ['request'] }),
   /**
@@ -903,8 +905,12 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     decisionId: z.string().optional(),
     memoryIds: z.array(z.string()).optional(),
     snapshotId: z.string().optional(),
-    /** apply-edits：只应用了一部分（中途失败、已写的没能全部退回），memoryIds 只列实际留下的。 */
+    /**
+     * apply-edits：只应用了一部分（中途失败、已写的没能全部退回）。memoryIds 只列仍是这次写下、记进账本可撤销的；
+     * 回退之前已被别处接着改过的停在别处的版本，不进账本、不可撤销，列在 unrecordedIds。两者之外的都已退回或没写。
+     */
     isPartial: z.literal(true).optional(),
+    unrecordedIds: z.array(z.string()).optional(),
     /** edit-memory / merge-memories：保留的那条写完后的文件（改了名称时文件名跟着变）；move-memory：移过去之后的文件。 */
     filePath: z.string().optional(),
     /**
@@ -961,6 +967,8 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     rejected: z.array(z.object({ id: z.string(), workspacePath: z.string() })).optional(),
     /** 宿主或执行器的原话，界面原样显示。 */
     detail: z.string().optional(),
+    /** stale、not-found：对不上或找不到的那几条（整理所选的三条命令、让模型改），界面据此等视图换成最新内容、移出清单。 */
+    memoryIds: z.array(z.string()).optional(),
   }),
 ])
 export type MemoryCommandResult = z.infer<typeof memoryCommandResultSchema>
