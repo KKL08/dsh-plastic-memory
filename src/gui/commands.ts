@@ -29,8 +29,9 @@ import {
 } from './contract.ts'
 import type { ViewWriter } from './view-writer.ts'
 import { generateDraft } from './model-draft.ts'
+import { generatePlan } from './model-plan.ts'
 import { processInterval, runCheckup, type IntervalTimer } from './checkup-run.ts'
-import { scopeAt, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
+import { sameScope, scopeAt, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
 import { UNKNOWN_SESSION_ID, type ContextHost, type HostSession } from '../tools/host-session.ts'
 import { scanOutcome } from './views.ts'
 
@@ -93,7 +94,7 @@ export interface MemoryCommandDefinition {
 const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'undo', 'promote', 'promote-memory', 'move-memory', 'keep-local', 'keep-local-memory', 'scan'])
 
 /** 不写任何东西的子命令：成功后也不重写视图。 */
-const READ_ONLY_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['draft-edit'])
+const READ_ONLY_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['draft-edit', 'plan-edits'])
 
 /** 自己写视图的子命令：成功后不再按常规重写全部视图。 */
 const SELF_WRITING_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['scan', 'refresh-views', 'set-auto-checkup'])
@@ -174,6 +175,21 @@ async function isEditUndo(decisions: PendingDecisionsStore, command: MemoryComma
 function isStale(r: MemoryRecord, base: { updatedAt: number; digest: string }): boolean {
   return r.updatedAt !== base.updatedAt || computeDigest(r.name, r.summary, r.content) !== base.digest
 }
+
+/**
+ * 「整理所选」各命令的输入校验（模型调用、快照之前）：目标 id 不重复，命令里写了作用域的都是同一个。不合规时给原因。
+ * 没写作用域的按会话定位，定位之后再用 isOneScope 核对一次。
+ */
+function batchRefsProblem(refs: readonly { memoryId: string; layer?: Scope | undefined }[]): string | undefined {
+  const ids = refs.map(r => r.memoryId)
+  const repeated = ids.find((id, i) => ids.indexOf(id) !== i)
+  if (repeated !== undefined) return `同一条记忆选了两次：${repeated}`
+  const layers = refs.flatMap(r => (r.layer === undefined ? [] : [r.layer]))
+  return layers.every(l => sameScope(l, layers[0]!)) ? undefined : '选中的记忆不在同一个作用域（全局和项目、或不同项目混在一起）'
+}
+
+/** 定位到的记忆都在同一个作用域。 */
+const isOneScope = (records: readonly MemoryRecord[]) => new Set(records.map(r => (r.scope === 'global' ? '' : `ws:${r.workspacePath ?? ''}`))).size <= 1
 
 /** 顺手把视图目录建出来：宿主的文件资源对「父目录还不存在」的缺失文件不跟踪之后的创建，客户端是先问 info 再订阅视图的。 */
 async function info(deps: MemoryCommandDeps, sessionId: string): Promise<Ok> {
@@ -559,6 +575,26 @@ async function dispatch(
       const r = await generateDraft({ adviceType, records: records.map(rec => rec!), request, priorRequests, planNote, previous }, llm)
       if (!r.ok) return fail(cmd, r.code, r.detail)
       return { ok: true, cmd, draft: r.draft, ...(llm.model !== undefined ? { model: llm.model } : {}) }
+    }
+
+    case 'plan-edits': {
+      const refs = command.memories
+      const problem = batchRefsProblem(refs)
+      if (problem !== undefined) return fail(cmd, 'invalid-args', problem)
+      const located = await Promise.all(refs.map(ref => locate(ref.memoryId, ref.layer)))
+      const gone = refs.filter((_, i) => located[i]?.status !== 'active').map(ref => ref.memoryId)
+      if (gone.length > 0) return notFound(gone.join('、'))
+      const records = located as MemoryRecord[]
+      if (!isOneScope(records)) return fail(cmd, 'invalid-args', '选中的记忆不在同一个作用域（全局和项目、或不同项目混在一起）')
+      if (records.some((r, i) => isStale(r, refs[i]!.base))) return fail(cmd, 'stale', '有记忆刚被改过，界面已换成最新内容。未做任何改动')
+      // 同 draft-edit：高危密钥的原文不发给模型，确认存下的疑似密钥照原文发；要求进提示词，命中高危就整次不发
+      if (records.some(r => hasCriticalSecret(r))) return fail(cmd, 'has-secret', '含密钥的记忆不发给模型。未做任何改动')
+      if (detectSecrets(command.request).some(h => h.severity === 'critical')) return fail(cmd, 'secret-critical', '要求里有高危密钥，不发给模型。未做任何改动')
+      const llm = deps.host.llmOf(exec)
+      if (llm === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型')
+      const r = await generatePlan({ records, request: command.request }, llm)
+      if (!r.ok) return fail(cmd, r.code, r.detail)
+      return { ok: true, cmd, plan: r.plan, ...(llm.model !== undefined ? { model: llm.model } : {}) }
     }
 
     case 'dismiss-overflow': {

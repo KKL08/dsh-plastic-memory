@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   checkupResultSchema, CROSS_WORKSPACE_COMMANDS, directoryIssueSchema, encodeMemoryCommand, MEMORY_COMMAND_NAME, memoryCommandResultSchema,
-  memoryCommandSchema, OPEN_ITEM_COMMANDS, parseMemoryCommand, type MemoryCommand,
+  MAX_BATCH_EDIT, memoryCommandSchema, OPEN_ITEM_COMMANDS, parseMemoryCommand, type MemoryCommand,
 } from '../src/gui/contract.ts'
 import { SAMPLE_COMMANDS } from '../client/command/test-commands.ts'
 
@@ -64,5 +64,41 @@ describe('draft-edit 的放宽', () => {
     const accepts = (planNote: object) => memoryCommandSchema.safeParse({ cmd: 'draft-edit', memories: [ref], request: '改', planNote }).success
     expect(accepts({ reason: '过时了' })).toBe(true)
     expect(accepts({ reason: '过时了', question: { text: '换成什么？' } })).toBe(false)
+  })
+})
+
+describe('plan-edits（整理所选的计划）', () => {
+  const ref = (memoryId: string) => ({ memoryId, layer: { kind: 'global' }, base: { updatedAt: 1, digest: `sha1:${memoryId}` } }) as const
+  const refs = (n: number) => Array.from({ length: n }, (_, i) => ref(`m${i + 1}`))
+
+  it(`选中条数 2–${MAX_BATCH_EDIT}：1 条、${MAX_BATCH_EDIT + 1} 条不收`, () => {
+    const accepts = (n: number) => memoryCommandSchema.safeParse({ cmd: 'plan-edits', memories: refs(n), request: '合成一条' }).success
+    expect([1, 2, MAX_BATCH_EDIT, MAX_BATCH_EDIT + 1].map(accepts)).toEqual([false, true, true, false])
+  })
+
+  it('要求必填（只有空白也算没写）；每条都要带卡片版本', () => {
+    const accepts = (args: object) => memoryCommandSchema.safeParse({ cmd: 'plan-edits', memories: refs(2), ...args }).success
+    expect([accepts({ request: '合成一条' }), accepts({}), accepts({ request: ' \n' })]).toEqual([true, false, false])
+    expect(memoryCommandSchema.safeParse({ cmd: 'plan-edits', memories: [ref('m1'), { memoryId: 'm2' }], request: '合' }).success).toBe(false)
+  })
+
+  it('不带跨项目确认：只读，不过门', () => {
+    expect(CROSS_WORKSPACE_COMMANDS.has('plan-edits' as never)).toBe(false)
+  })
+
+  it('命令与结果随文本往返；动作只收改写、删除、不动', () => {
+    const command = { cmd: 'plan-edits', memories: refs(3), request: '以 biome 为准' } as const satisfies MemoryCommand
+    expect(parseMemoryCommand(encodeMemoryCommand(command).slice(`/${MEMORY_COMMAND_NAME} `.length))).toEqual({ ok: true, command })
+    const plan = {
+      understanding: '以 biome 为准',
+      ops: [
+        { memoryId: 'm1', action: 'delete', reason: '被取代', into: 'm2' },
+        { memoryId: 'm2', action: 'rewrite', reason: '补进命令', question: { text: '配置写哪？', placeholder: '不填就只换名字' } },
+        { memoryId: 'm3', action: 'keep', reason: '已是新说法' },
+      ],
+    }
+    const result = { ok: true, cmd: 'plan-edits', plan, model: 'deepseek-v4-flash' }
+    expect(memoryCommandResultSchema.parse(JSON.parse(JSON.stringify(result)))).toEqual(result)
+    expect(memoryCommandResultSchema.safeParse({ ...result, plan: { ...plan, ops: [{ memoryId: 'm1', action: 'merge', reason: '合' }] } }).success).toBe(false)
   })
 })

@@ -92,18 +92,21 @@ export const draftOutputSchema = z.object({
   tags: z.array(z.string().trim().min(1)).nullish(),
 })
 
-/** 解析模型输出（容忍外面包了代码块或前后多了话）；不合格式为 null。 */
-export function parseDraftOutput(raw: string): MemoryDraft | null {
+/** 模型回复里的 JSON 对象（容忍外面包了代码块或前后多了话）：取第一个 { 到最后一个 }；解析不了为 undefined。 */
+export function jsonObjectIn(raw: string): unknown {
   const start = raw.indexOf('{')
   const end = raw.lastIndexOf('}')
-  if (start < 0 || end <= start) return null
-  let json: unknown
+  if (start < 0 || end <= start) return undefined
   try {
-    json = JSON.parse(raw.slice(start, end + 1))
+    return JSON.parse(raw.slice(start, end + 1)) as unknown
   } catch {
-    return null
+    return undefined
   }
-  const parsed = draftOutputSchema.safeParse(json)
+}
+
+/** 解析模型输出（容忍外面包了代码块或前后多了话）；不合格式为 null。 */
+export function parseDraftOutput(raw: string): MemoryDraft | null {
+  const parsed = draftOutputSchema.safeParse(jsonObjectIn(raw))
   if (!parsed.success) return null
   const { content, summary, name, tags } = parsed.data
   return { content, summary, ...(name != null ? { name } : {}), ...(tags != null ? { tags: [...new Set(tags)] } : {}) }
