@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { MemoryRecord } from '../record-schema.ts'
-import type { SemanticLlm } from '../governance/semantic-scan.ts'
+import { idsToNames, type SemanticLlm } from '../governance/semantic-scan.ts'
 import { PLAN_ACTIONS, type EditPlan, type PlanOp } from './contract.ts'
 import { jsonObjectIn, memoriesJson } from './model-draft.ts'
 
@@ -101,11 +101,9 @@ export async function generatePlan(input: PlanInput, llm: SemanticLlm): Promise<
   return r.ok ? { ok: true, plan: withNamesForIds(r.plan, input.records) } : { ok: false, code: 'llm-invalid-output', detail: r.detail }
 }
 
-/** 给用户看的文字里模型仍写了记忆 id 的，换成「名称」（连同两侧各一个空格，引号已经隔开）：一次替换，长 id 先匹配（id 互为前缀时不错换）。 */
+/** 给用户看的文字里模型仍写了记忆 id 的，换成「名称」。 */
 function withNamesForIds(plan: EditPlan, records: readonly MemoryRecord[]): EditPlan {
-  const names = new Map(records.map(r => [r.id, r.name]))
-  const pattern = [...names.keys()].sort((a, b) => b.length - a.length).map(id => id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
-  const named = (text: string) => text.replace(new RegExp(` ?(${pattern}) ?`, 'g'), (_, id: string) => `「${names.get(id)}」`)
+  const named = idsToNames(records)
   return {
     understanding: named(plan.understanding),
     ops: plan.ops.map(op => ({

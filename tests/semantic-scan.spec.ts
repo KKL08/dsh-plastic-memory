@@ -30,6 +30,12 @@ describe('buildSemanticPrompt', () => {
     expect(user).toContain('包管理用 npm')
   })
 
+  it('每条记忆带上名称，说明文字里提到记忆时写名称', () => {
+    const { system, user } = buildSemanticPrompt([record({ id: 'mem_a', name: '包管理用 pnpm' })], null)
+    expect(user).toContain('  name: 包管理用 pnpm')
+    expect(system).toContain('summary、suggestedAction 是给用户看的：提到记忆时写它的 name，id 只写在 memoryIds 里。')
+  })
+
   it('无基线时 user 说明基线缺失，system 要求跳过垂直冲突', () => {
     const { user } = buildSemanticPrompt([record({ id: 'mem_a' })], null)
     expect(user).toContain('（无权威配置基线，跳过垂直冲突检测）')
@@ -208,6 +214,28 @@ describe('runSemanticScan', () => {
     expect(out.findings).toHaveLength(1)
     expect(calls).toHaveLength(2)
     expect(calls[1]).toContain('只输出 JSON')
+  })
+
+  it('说明文字里写了记忆 id：换成那条的名称（连同两侧空格），长 id 先匹配', async () => {
+    const llm = {
+      complete: async () => JSON.stringify({ findings: [{
+        type: 'conflict', memoryIds: ['mem_node', 'mem_node22'],
+        summary: 'mem_node22 说用 Node 22，mem_node 说用 Node 20',
+        suggestedAction: '保留 mem_node22 ，删除 mem_node',
+      }] }),
+    }
+    const out = await runSemanticScan([
+      record({ id: 'mem_node', name: 'Node 版本 20' }),
+      record({ id: 'mem_node22', name: 'Node 版本 22' }),
+    ], null, llm)
+    expect(out.findings[0]!.summary).toBe('「Node 版本 22」说用 Node 22，「Node 版本 20」说用 Node 20')
+    expect(out.findings[0]!.suggestedAction).toBe('保留「Node 版本 22」，删除「Node 版本 20」')
+  })
+
+  it('换进说明文字的名称同样遮掉明确密钥', async () => {
+    const llm = { complete: async () => '{"findings":[{"type":"unclear","memoryIds":["mem_a"],"summary":"mem_a 看不出管到哪里","suggestedAction":"补充"}]}' }
+    const out = await runSemanticScan([record({ id: 'mem_a', name: `网关 ${FAKE_SECRET.sk}` })], null, llm)
+    expect(out.findings[0]!.summary).toBe(`「网关 ${SECRET_MASK}」看不出管到哪里`)
   })
 
   it('两次都失败返回 failed:true 空 findings，原因是输出解析不了', async () => {
