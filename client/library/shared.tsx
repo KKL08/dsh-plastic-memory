@@ -175,6 +175,8 @@ export function useRowActions(session: BorrowedSession) {
     /** 按钮的 unavailable：没有会话、这条正在处理或等确认时给原因。 */
     unavailable: runner.unavailable,
     run,
+    /** 收起这一条的确认或失败（在途的不动）。 */
+    dismiss(id: string): void { runner.cancel(id) },
     /** 这一条的命令发出了、结果还没回来。 */
     isBusy(id: string): boolean { return runner.stateOf(id).kind === 'busy' },
     /** 这一行的确认与失败；没有时为 null。 */

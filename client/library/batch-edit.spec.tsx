@@ -319,6 +319,11 @@ describe('整理所选：写要求与看计划', () => {
     const itemOf = (name: string) => within(screen.getByRole('list', { name: '逐项对照' })).getByRole('listitem', { name: new RegExp(`「${name}」$`) })
     const applyFoot = () => screen.getByText(/^将应用/)
     const applyAll = () => screen.getByRole('button', { name: '应用全部' })
+    /** 有删除项：点「应用全部」后在确认条里点「确认应用」。 */
+    const applyWithConfirm = () => {
+      fireEvent.click(applyAll())
+      fireEvent.click(within(screen.getByRole('group', { name: /确认应用？$/ })).getByRole('button', { name: '确认应用' }))
+    }
     const critical = `${'sk-' + 'TESTONLY'.padEnd(24, 'a')}`
 
     it('故事 24：「按计划出稿」发 draft-plan：选中的全部记忆、要求、勾选的改写项按计划顺序带理由、提问、回答，并进它的删除项作承接；出稿中显示进度和「停止」', async () => {
@@ -498,27 +503,48 @@ describe('整理所选：写要求与看计划', () => {
     it('故事 25：「应用全部」交出最终改动：改写项带四个面、删除项带承接，承接到不改写的记忆进 keep；放弃的项不在里面', async () => {
       const { onApply } = await toApply({ plan: PLAN })
       fireEvent.click(within(itemOf('提交前检查')).getByRole('button', { name: '放弃这项' }))
-      fireEvent.click(applyAll())
+      applyWithConfirm()
       expect(onApply).toHaveBeenCalledWith({
         ops: [
           { kind: 'forget', ...ITEMS[0]!.ref, into: 'b4' },
           { kind: 'edit', ...ITEMS[2]!.ref, content: DRAFTS.e3!.content, summary: DRAFTS.e3!.summary, name: '编辑器格式化', tags: e3.tags },
         ],
         keep: [ITEMS[3]!.ref],
+        total: 4,
       })
     })
 
     it('故事 25：承接到本批改写的删除不另列 keep；改写项被放弃而删除留着时，被承接的那条进 keep 核对版本', async () => {
       const { onApply } = await toApply()
-      fireEvent.click(applyAll())
+      applyWithConfirm()
       expect(onApply).toHaveBeenLastCalledWith(expect.objectContaining({ keep: [] }))
       fireEvent.click(within(itemOf('提交前检查')).getByRole('button', { name: '放弃这项' }))
       fireEvent.click(within(itemOf('格式化用 prettier')).getByRole('button', { name: '恢复这项' }))
-      fireEvent.click(applyAll())
+      applyWithConfirm()
       expect(onApply).toHaveBeenLastCalledWith({
         ops: [{ kind: 'forget', ...ITEMS[0]!.ref, into: 'c2' }, expect.objectContaining({ kind: 'edit', memoryId: 'e3' })],
         keep: [ITEMS[1]!.ref],
+        total: 4,
       })
+    })
+
+    it('故事 25：有删除项时「应用全部」先原位换成确认条，写明删哪几条；取消什么都不交、按钮回来', async () => {
+      const { onApply } = await toApply()
+      fireEvent.click(applyAll())
+      const bar = screen.getByRole('group', { name: '其中 1 项会删除「格式化用 prettier」，确认应用？' })
+      expect(screen.queryByRole('button', { name: '应用全部' })).toBeNull()
+      expect(within(bar).getAllByRole('button').map(b => b.textContent)).toEqual(['确认应用', '取消'])
+      fireEvent.click(within(bar).getByRole('button', { name: '取消' }))
+      expect(onApply).not.toHaveBeenCalled()
+      expect(applyAll()).toBeInTheDocument()
+    })
+
+    it('故事 25：没有删除项直接应用，不出确认条', async () => {
+      const { onApply } = await toApply()
+      fireEvent.click(within(itemOf('格式化用 prettier')).getByRole('button', { name: '放弃这项' }))
+      fireEvent.click(applyAll())
+      expect(screen.queryByRole('group', { name: /确认应用？$/ })).toBeNull()
+      expect(onApply).toHaveBeenCalledWith(expect.objectContaining({ ops: [expect.objectContaining({ kind: 'edit', memoryId: 'c2' }), expect.objectContaining({ kind: 'edit', memoryId: 'e3' })] }))
     })
 
     it('故事 25：全部放弃时「应用全部」置灰；「全部放弃」回多选', async () => {

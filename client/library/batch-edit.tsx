@@ -5,12 +5,13 @@
  * 写要求：已选清单（可移出）+ 要求框（四个多条快捷意图），发 plan-edits（只读）。看计划：模型的理解、每条一个动作和理由，
  * 改动项可取消勾选（取消承接的改写时依赖它的删除一起取消），改写项下的提问可回答；计划不写入任何东西。
  * 对照应用：勾选的改写项一次发 draft-plan（只读）出稿，全是删除时不发；逐项对照，单项可「再改改」（draft-edit）或放弃，
- * 「应用全部」把最终改动交给 onApply。「停止」只是不再等：之后到达的结果按请求序号认出来丢掉，回到上一步，输入保留。
+ * 「应用全部」把最终改动交给 onApply；有删除项时先原位换成确认条「其中 a 项会删除「…」，确认应用？」。「停止」只是不再等：之后到达的结果按请求序号认出来丢掉，回到上一步，输入保留。
  */
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import {
   scopeOfMemory, type DraftPlanOp, type EditPlan, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type PlanOp, type Scope,
 } from '../../src/gui/contract.ts'
+import { SoftDeleteConfirm } from '../command/confirm.tsx'
 import { interpret, LLM_FAILURE_KEYS, refuseBeforeSend } from '../command/protocol.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { useT, type Translate } from '../i18n.tsx'
@@ -72,10 +73,14 @@ export interface PlanChoice {
 export type BatchRef = BatchItem['ref']
 /** 对照完要应用的一项：改写带四个面，删除带承接它内容的那条（计划里的 into）。 */
 export type BatchApplyOp = ({ kind: 'edit' } & BatchRef & EditDraft) | ({ kind: 'forget'; into?: string } & BatchRef)
-/** 「应用全部」交出的最终改动：ops 按计划顺序、不含放弃的项；keep 是删除承接到、但这次不写的记忆，只用来核对版本。 */
+/**
+ * 「应用全部」交出的最终改动：ops 按计划顺序、不含放弃的项；keep 是删除承接到、但这次不写的记忆，只用来核对版本。
+ * total 是这次整理的条数（写要求时移出的不算），结果条用它算「没动」的条数。
+ */
 export interface BatchApplication {
   ops: BatchApplyOp[]
   keep: BatchRef[]
+  total: number
 }
 
 /** 勾选的改动项，按计划顺序。 */
@@ -90,7 +95,7 @@ export function applicationOf(choice: PlanChoice, picked: readonly BatchItem[], 
     : { kind: 'forget', ...refOf(op.memoryId), ...(op.into !== undefined ? { into: op.into } : {}) }))
   const edited = new Set(kept.filter(op => op.action === 'rewrite').map(op => op.memoryId))
   const intos = new Set(kept.flatMap(op => (op.action === 'delete' && op.into !== undefined && !edited.has(op.into) ? [op.into] : [])))
-  return { ops, keep: choice.plan.ops.filter(op => intos.has(op.memoryId)).map(op => refOf(op.memoryId)) }
+  return { ops, keep: choice.plan.ops.filter(op => intos.has(op.memoryId)).map(op => refOf(op.memoryId)), total: picked.length }
 }
 
 /** 勾选的改写项交给 draft-plan 的样子：理由、提问、回答（没填不带），并进它、也勾上了的删除项作承接。 */
@@ -129,13 +134,17 @@ function failureOf(command: MemoryCommand, r: Extract<MemoryCommandResult, { ok:
   return outcome.isLocalized ? t(outcome.detail) : t('command.failed', { detail: outcome.detail })
 }
 
-export function BatchEdit({ items, session, onBack, onApply }: {
+export function BatchEdit({ items, session, onBack, onApply, applyUnavailable, applyFeedback }: {
   items: readonly BatchItem[]
   session: BorrowedSession
   /** 回到多选，勾选保留。 */
   onBack: () => void
   /** 「应用全部」：对照后的最终改动。 */
   onApply?: (application: BatchApplication) => void
+  /** 「应用全部」暂不可用的原因（没有会话、正在应用或等确认）。 */
+  applyUnavailable?: string | undefined
+  /** 应用的确认与失败，画在底部按钮下。 */
+  applyFeedback?: ReactNode
 }) {
   const t = useT()
   const titleId = useId()
@@ -248,7 +257,18 @@ export function BatchEdit({ items, session, onBack, onApply }: {
                   <Button variant="ghost" onClick={() => { stopDrafting(stage.choice) }}>{t('pending.model.stop')}</Button>
                 </div>
               )
-              : <ApplyStep session={session} choice={stage.choice} picked={picked} drafts={stage.drafts} onDiscardAll={onBack} onApply={onApply} />}
+              : (
+                <ApplyStep
+                  session={session}
+                  choice={stage.choice}
+                  picked={picked}
+                  drafts={stage.drafts}
+                  onDiscardAll={onBack}
+                  onApply={onApply}
+                  unavailable={applyUnavailable}
+                  feedback={applyFeedback}
+                />
+              )}
     </section>
   )
 }
@@ -441,13 +461,15 @@ function PlanStep({ plan, initial, error, picked, onRevise, onConfirm }: {
  * 对照应用：按计划顺序逐项。改写项原文 / 改后对照，可「再改改」（单项 draft-edit）或放弃；删除项划掉原文，只能放弃。
  * 放弃的项变淡、按钮换成「恢复这项」；放弃改写项时并进它的删除项一起放弃并提示，恢复改写不自动恢复删除（同看计划的取消勾选）。
  */
-function ApplyStep({ session, choice, picked, drafts: initialDrafts, onDiscardAll, onApply }: {
+function ApplyStep({ session, choice, picked, drafts: initialDrafts, onDiscardAll, onApply, unavailable, feedback }: {
   session: BorrowedSession
   choice: PlanChoice
   picked: readonly BatchItem[]
   drafts: Readonly<Record<string, EditDraft>>
   onDiscardAll: () => void
   onApply: ((application: BatchApplication) => void) | undefined
+  unavailable: string | undefined
+  feedback: ReactNode
 }) {
   const t = useT()
   const ops = chosenOps(choice)
@@ -457,6 +479,8 @@ function ApplyStep({ session, choice, picked, drafts: initialDrafts, onDiscardAl
   const [held, setHeld] = useState<ReadonlySet<string>>(new Set())
   /** 正在「再改改」生成的项：生成完才能应用。 */
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set())
+  /** 有删除项时点了「应用全部」：按钮原位换成确认条。 */
+  const [isConfirming, setConfirming] = useState(false)
   const toggle = (op: PlanOp) => {
     const isDropping = !dropped.has(op.memoryId)
     const next = new Set(dropped)
@@ -483,7 +507,10 @@ function ApplyStep({ session, choice, picked, drafts: initialDrafts, onDiscardAl
     })
   }
   const live = ops.filter(op => !dropped.has(op.memoryId))
-  const deletes = live.filter(op => op.action === 'delete').length
+  const deleting = live.filter(op => op.action === 'delete')
+  const deletes = deleting.length
+  const nameOf = (memoryId: string) => picked.find(item => item.memory.id === memoryId)!.memory.name
+  const apply = () => { onApply?.(applicationOf(choice, picked, drafts, dropped)) }
   return (
     <>
       <ul className="pm-batch-items" aria-label={t('library.batch.items')}>
@@ -525,14 +552,26 @@ function ApplyStep({ session, choice, picked, drafts: initialDrafts, onDiscardAl
       <div className="pm-edit-foot pm-plan-foot">
         <span className="pm-edit-hint">{t('library.batch.applySummary', { n: live.length, deletes, rewrites: live.length - deletes })}</span>
         <Button variant="ghost" onClick={onDiscardAll}>{t('library.batch.discardAll')}</Button>
-        <Button
-          variant="primary"
-          unavailable={live.length === 0 ? t('library.batch.nothing') : busy.size > 0 ? t('library.batch.waitItem') : undefined}
-          onClick={() => { onApply?.(applicationOf(choice, picked, drafts, dropped)) }}
-        >
-          {t('library.batch.applyAll')}
-        </Button>
+        {isConfirming
+          ? (
+            <SoftDeleteConfirm
+              question={t('library.batch.confirmDelete', { n: deletes, names: deleting.map(op => nameOf(op.memoryId)).join(t('library.batch.nameSep')) })}
+              confirmLabel={t('library.batch.confirmApply')}
+              onCancel={() => { setConfirming(false) }}
+              onConfirm={() => { setConfirming(false); apply() }}
+            />
+          )
+          : (
+            <Button
+              variant="primary"
+              unavailable={live.length === 0 ? t('library.batch.nothing') : busy.size > 0 ? t('library.batch.waitItem') : unavailable}
+              onClick={() => { if (deletes > 0) setConfirming(true); else apply() }}
+            >
+              {t('library.batch.applyAll')}
+            </Button>
+          )}
       </div>
+      {feedback}
     </>
   )
 }

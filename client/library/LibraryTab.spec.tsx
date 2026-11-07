@@ -2,7 +2,7 @@
 import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { GUI_VIEW_VERSION, MAX_BATCH_EDIT, checkupKey, type LibraryView, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type PendingView } from '../../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, MAX_BATCH_EDIT, checkupKey, type EditPlan, type LibraryView, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type PendingView } from '../../src/gui/contract.ts'
 import type { BorrowedSession } from '../gateway.ts'
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { createNavStore, type PageScope } from '../nav.ts'
@@ -1260,6 +1260,167 @@ describe('记忆查看：多选', () => {
     expect(screen.getByRole('heading', { name: '整理所选的 3 条' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '返回列表' }))
     expect(within(bar()).getByRole('status')).toHaveTextContent('已选 2 条')
+  })
+})
+
+describe('记忆查看：整理所选的应用与撤销', () => {
+  const pick = (id: string, name: string, content: string, type = 'knowledge') =>
+    memory({ id, name, content, type, digest: `sha1:${id}`, updatedAt: 100 + Number(id.replace(/\D/g, '')), filePath: `/m/app-1/${id}.md` })
+  // 分在三个类型里，都露在外面
+  const p1 = pick('p1', '格式化用 prettier', '代码格式化统一用 prettier。')
+  const c2 = pick('c2', '提交前检查', '提交前依次跑 pnpm lint && prettier --write .', 'workflow')
+  const b4 = pick('b4', '格式化改用 biome', '11 月起格式化改用 biome。', 'decision')
+  const ref = (m: MemoryCard) => ({ memoryId: m.id, layer: app, base: { updatedAt: m.updatedAt, digest: m.digest! } })
+  const view = (items: MemoryCard[] = [p1, c2, b4]) => library({ layers: [{ layer: app, items }] })
+  const PLAN: EditPlan = {
+    understanding: '以 biome 为准。',
+    ops: [
+      { memoryId: 'p1', action: 'delete', reason: '已被取代。', into: 'b4' },
+      { memoryId: 'c2', action: 'rewrite', reason: 'prettier 换成 biome。' },
+      { memoryId: 'b4', action: 'keep', reason: '已是现在的说法。' },
+    ],
+  }
+  const DRAFT = { content: '提交前依次跑 pnpm lint && biome format --write .', summary: '提交前先 lint 再格式化' }
+  const applied: MemoryCommandResult = { ok: true, cmd: 'apply-edits', decisionId: 'pd_t', memoryIds: ['p1', 'c2'], snapshotId: 'snap_t' }
+  const critical = `${'sk-' + 'TESTONLY'.padEnd(24, 'a')}`
+
+  function setup({ plan = PLAN, draft = DRAFT, apply = () => applied, undo = () => ({ ok: true, cmd: 'undo', decisionId: 'pd_t' }) }: {
+    plan?: EditPlan
+    draft?: typeof DRAFT
+    apply?: (command: Extract<MemoryCommand, { cmd: 'apply-edits' }>) => MemoryCommandResult
+    undo?: () => MemoryCommandResult
+  } = {}) {
+    const respond = (command: MemoryCommand): MemoryCommandResult => {
+      switch (command.cmd) {
+        case 'plan-edits': return { ok: true, cmd: 'plan-edits', plan, model: 'deepseek-v4-flash' }
+        case 'draft-plan': return { ok: true, cmd: 'draft-plan', drafts: command.ops.map(op => ({ memoryId: op.memoryId, draft })), model: 'deepseek-v4-flash' }
+        case 'apply-edits': return apply(command)
+        case 'undo': return undo()
+        default: return { ok: true, cmd: command.cmd }
+      }
+    }
+    const gateway = createFakeGateway({ views: { library: view() }, respond, model: 'deepseek-v4-flash' })
+    renderInShell(<LibraryTab nav={createNavStore({ view: 'library' })} scope={app} session={session} now={NOW} />, gateway)
+    return { gateway, commands: () => gateway.executed.map(e => e.command) }
+  }
+  const row = (text: string) => {
+    const hit = [...document.querySelectorAll<HTMLElement>('.pm-list > li')].find(li => li.querySelector('.pm-mc-text')?.firstChild?.textContent === text)
+    if (hit === undefined) throw new Error(`没有原文是「${text}」的行`)
+    return hit
+  }
+  const hasRow = (text: string) => [...document.querySelectorAll('.pm-list > li .pm-mc-text')].some(p => p.firstChild?.textContent === text)
+  const tidyButton = () => within(screen.getByRole('group', { name: '多选操作' })).getByRole('button', { name: '整理所选…' })
+  /** 选中三条、写要求、出计划、按计划出稿，停在对照应用。 */
+  const toApply = async () => {
+    fireEvent.click(screen.getByRole('button', { name: '选择' }))
+    for (const m of [p1, c2, b4]) fireEvent.click(within(row(m.content)).getByRole('checkbox'))
+    fireEvent.click(tidyButton())
+    fireEvent.change(screen.getByRole('textbox', { name: '想怎么整理这几条？' }), { target: { value: '以 biome 为准' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '生成整理计划' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^(按计划出稿|下一步)$/ })) })
+  }
+  const applyAll = async () => {
+    fireEvent.click(screen.getByRole('button', { name: '应用全部' }))
+    const confirm = screen.queryByRole('group', { name: /确认应用？$/ })
+    if (confirm !== null) await act(async () => { fireEvent.click(within(confirm).getByRole('button', { name: '确认应用' })) })
+  }
+  const resultBar = () => document.querySelector<HTMLElement>('.pm-lib-tidied')
+
+  beforeEach(() => { localStorage.clear() })
+  afterEach(() => { localStorage.clear() })
+
+  it('故事 25：有删除项时「应用全部」先原位确认；确认后发 apply-edits，按计划顺序带改写四个面和删除的承接，承接到不改写的那条进 keep', async () => {
+    const { commands } = setup()
+    await toApply()
+    fireEvent.click(screen.getByRole('button', { name: '应用全部' }))
+    const confirm = screen.getByRole('group', { name: '其中 1 项会删除「格式化用 prettier」，确认应用？' })
+    expect(commands().map(c => c.cmd)).toEqual(['plan-edits', 'draft-plan'])
+    await act(async () => { fireEvent.click(within(confirm).getByRole('button', { name: '确认应用' })) })
+    expect(commands()[2]).toEqual({
+      cmd: 'apply-edits',
+      ops: [
+        { kind: 'forget', ...ref(p1), into: 'b4' },
+        { kind: 'edit', ...ref(c2), content: DRAFT.content, summary: DRAFT.summary, name: c2.name, tags: c2.tags },
+      ],
+      keep: [ref(b4)],
+    })
+  })
+
+  it('故事 26：应用成功回到列表、退出多选；顶部结果条「已整理 N 条……」带副行和「撤销全部」，焦点接到结果条；改写的行换成新内容、高亮一次、标「刚改」，删掉的先不画', async () => {
+    setup()
+    await toApply()
+    await applyAll()
+    expect(screen.queryByRole('heading', { name: /^整理所选的/ })).toBeNull()
+    expect(screen.getByRole('button', { name: '选择' })).not.toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
+    const bar = resultBar()!
+    expect(within(bar).getByRole('status')).toHaveTextContent('已整理 3 条：删除 1 条、改写 1 条，1 条没动删掉的在最近删除，14 天内可恢复')
+    expect(within(bar).getByRole('button', { name: '撤销全部' })).toBeInTheDocument()
+    expect(bar).toHaveFocus()
+    const rewritten = row(DRAFT.content)
+    expect(within(rewritten).getByText('刚改')).toHaveClass('pm-chip--neutral')
+    expect(rewritten).toHaveClass('pm-flash')
+    expect(row(b4.content)).not.toHaveClass('pm-flash')
+    expect(within(row(b4.content)).queryByText('刚改')).toBeNull()
+    expect(hasRow(p1.content)).toBe(false)
+  })
+
+  it('故事 26：只有改写时直接应用，结果条没有「最近删除」的副行；开始下一次整理时结果条收起', async () => {
+    const plan: EditPlan = { understanding: '只改写。', ops: [{ memoryId: 'p1', action: 'keep', reason: '不动。' }, PLAN.ops[1]!, { memoryId: 'b4', action: 'keep', reason: '不动。' }] }
+    setup({ plan })
+    await toApply()
+    fireEvent.click(screen.getByRole('button', { name: '应用全部' }))
+    await act(async () => {})
+    expect(within(resultBar()!).getByRole('status')).toHaveTextContent(/^已整理 3 条：删除 0 条、改写 1 条，2 条没动$/)
+    fireEvent.click(screen.getByRole('button', { name: '选择' }))
+    for (const m of [p1, b4]) fireEvent.click(within(row(m.content)).getByRole('checkbox'))
+    fireEvent.click(tidyButton())
+    fireEvent.click(screen.getByRole('button', { name: '返回列表' }))
+    expect(resultBar()).toBeNull()
+  })
+
+  it('故事 27：「撤销全部」发 undo 撤整批，成功后结果条和「刚改」都收起', async () => {
+    const { commands } = setup()
+    await toApply()
+    await applyAll()
+    await act(async () => { fireEvent.click(within(resultBar()!).getByRole('button', { name: '撤销全部' })) })
+    expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'pd_t' })
+    expect(resultBar()).toBeNull()
+    expect(screen.queryByText('刚改')).toBeNull()
+  })
+
+  it('故事 27：有记忆之后又被改过（stale）：整批不动，结果条写明「没法一起撤销」，不再给撤销', async () => {
+    setup({ undo: () => ({ ok: false, cmd: 'undo', code: 'stale', detail: '有记忆之后又被改过' }) })
+    await toApply()
+    await applyAll()
+    await act(async () => { fireEvent.click(within(resultBar()!).getByRole('button', { name: '撤销全部' })) })
+    const bar = resultBar()!
+    expect(within(bar).getByRole('status')).toHaveTextContent('有记忆之后又被改过，没法一起撤销')
+    expect(within(bar).queryByRole('button', { name: '撤销全部' })).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('应用的新内容像密钥（secret-suspected）：工作区里原位确认，「仍然保存」带 force 重发', async () => {
+    let calls = 0
+    const { commands } = setup({ apply: () => (++calls === 1 ? { ok: false, cmd: 'apply-edits', code: 'secret-suspected', detail: '像密钥' } : applied) })
+    await toApply()
+    await applyAll()
+    const confirm = screen.getByRole('group', { name: '仍然保存' })
+    expect(screen.getByRole('heading', { name: '整理所选的 3 条' })).toBeInTheDocument()
+    await act(async () => { fireEvent.click(within(confirm).getByRole('button', { name: '仍然保存' })) })
+    const sent = commands().filter(c => c.cmd === 'apply-edits')
+    expect(sent).toHaveLength(2)
+    expect(sent[1]).toEqual({ ...sent[0], force: true })
+    expect(resultBar()).not.toBeNull()
+  })
+
+  it('改写项的新内容含高危密钥：不发 apply-edits，工作区里报原因', async () => {
+    const { commands } = setup({ draft: { ...DRAFT, content: `token ${critical}` } })
+    await toApply()
+    await applyAll()
+    expect(commands().map(c => c.cmd)).toEqual(['plan-edits', 'draft-plan'])
+    expect(screen.getByRole('alert')).toHaveTextContent('内容里有高危密钥，没有保存。')
+    expect(resultBar()).toBeNull()
   })
 })
 

@@ -8,6 +8,8 @@
  * 含密钥或没有版本的记忆不给「修改」（同待处理卡）。
  * 项目和全局范围的搜索框右侧有「选择」：进多选后每行左侧出勾选框、行尾按钮收起，勾选的行用选中行底色；列表底部浮起操作条
  * （已选条数 · 全选当前结果 · 取消 · 整理所选…）。「整理所选…」把列表换成整理工作区（batch-edit.tsx）。「全部」范围不能多选。
+ * 工作区「应用全部」发 apply-edits；成功回到列表、退出多选，顶部结果条「已整理 N 条……」带「撤销全部」（发 undo，整批一起撤），
+ * 改写过的行高亮一次、标「刚改」。结果条在离开记忆查看或开始下一次整理时收起。
  */
 import { useEffect, useRef, useState } from 'react'
 import { checkupKey, MAX_BATCH_EDIT, scopeOfMemory, type LibraryView, type MemoryCard as MemoryCardData } from '../../src/gui/contract.ts'
@@ -24,7 +26,7 @@ import { baseOf, isEditable } from '../pending/cards.tsx'
 import { EditPanel, type EditDraft } from '../pending/edit.tsx'
 import { EditModes, type EditState } from '../pending/edit-modes.tsx'
 import { ModelEditPanel } from '../pending/model-edit.tsx'
-import { BatchEdit, toBatchItems, type BatchItem } from './batch-edit.tsx'
+import { BatchEdit, toBatchItems, type BatchApplication, type BatchItem } from './batch-edit.tsx'
 import { bucketize, GROUP_PREVIEW, groupByType, MemoryGroup, RECENT_BUCKETS, recentBucketOf, useFold, type FoldMemory } from './groups.tsx'
 import { FlashRow, matchesQuery, SearchBox, useFlashTarget, useRowActions, useTypeLabel, ViewMessage } from './shared.tsx'
 
@@ -78,6 +80,21 @@ type EditedRow =
 
 const IDLE_EDIT: EditState = { phase: 'idle', isDirty: false }
 
+/** 整理所选的应用和撤销全部共用的命令 key（不是记忆 id）。 */
+const TIDY = 'tidy'
+
+/**
+ * 整理所选应用成功后的结果条。rewritten：改写项点「整理所选…」那一刻的样子和写下的稿，视图还是那一版时按稿画；
+ * deleted：删除项那一刻的样子，视图还是那一版时先不画（新视图还没推来）。isStale：撤销全部时有记忆之后又被改过，整批没动。
+ */
+interface TidyResult {
+  decisionId: string
+  total: number
+  rewritten: ReadonlyMap<string, { before: MemoryCardData; draft: EditDraft }>
+  deleted: readonly MemoryCardData[]
+  isStale: boolean
+}
+
 const draftOf = (memory: MemoryCardData): EditDraft => ({ content: memory.content, name: memory.name, summary: memory.summary, tags: memory.tags })
 const isSameVersion = (a: MemoryCardData, b: MemoryCardData) => a.updatedAt === b.updatedAt && a.digest === b.digest
 
@@ -107,8 +124,8 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
   const [edited, setEdited] = useState<EditedRow>()
   /** 这次打开期间改过的，标「刚改」。 */
   const [fresh, setFresh] = useState<ReadonlySet<string>>(new Set())
-  /** 刚改完、正在高亮的那一行。 */
-  const [editFlash, setEditFlash] = useState<string>()
+  /** 刚改完、正在高亮的那几行（整理所选一次改写多条）。 */
+  const [editFlash, setEditFlash] = useState<ReadonlySet<string>>(new Set())
   /** 多选开着没有、勾了哪几条（id）。 */
   const [selecting, setSelecting] = useState(false)
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set())
@@ -119,6 +136,10 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
   /** 从工作区回到列表：焦点回「整理所选…」。 */
   const selectionBar = useRef<HTMLDivElement>(null)
   const isBackFromBatch = useRef(false)
+  const [tidied, setTidied] = useState<TidyResult>()
+  /** 应用成功回到列表：焦点接到结果条上。 */
+  const tidiedBar = useRef<HTMLDivElement>(null)
+  const tidiedId = tidied?.decisionId
   const kept = [...done.values()].filter(row => row.state !== 'deleting' || actions.isBusy(row.memory.id))
   const viewItems = view.status === 'ready' ? view.data.layers.filter(l => isInScope([l.layer], scope)).flatMap(l => l.items) : []
   // 本页删掉、视图里已经没有的那几条留在原位（等结果、结果行或撤销后等视图回来）；分组的排序是稳定的，插回原位就落回原来的组和位置
@@ -129,8 +150,10 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
     scopeItems.splice(Math.min(row.index, scopeItems.length), 0, row.memory)
   }
   const isSearching = query.trim() !== ''
+  // 整理删掉的、视图还没推来新版本的：先不画
+  const tidyGone = (m: MemoryCardData) => tidied?.deleted.some(d => d.id === m.id && isSameVersion(m, d)) === true
   // 展开着面板的那一行不被搜索滤掉，免得面板连同写了一半的要求一起没了
-  const items = scopeItems.filter(m => matchesQuery(m, query) || m.id === editing?.id)
+  const items = scopeItems.filter(m => !tidyGone(m) && (matchesQuery(m, query) || m.id === editing?.id))
   const viewIds = viewItems.map(m => m.id).join('\n')
   // 撤销后视图里又有了：不用再替它占位
   useEffect(() => {
@@ -166,13 +189,42 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
     isBackFromBatch.current = false
     selectionBar.current?.querySelector<HTMLElement>('.pm-btn--primary')?.focus()
   }, [batch])
+  useEffect(() => { if (tidiedId !== undefined) tidiedBar.current?.focus() }, [tidiedId])
   const { flashId, revealId, targetId, clear } = useFlashTarget(nav, items.map(m => m.id))
   const typeLabel = useTypeLabel(session)
   const folds = useFold(fold, `library|${checkupKey(scope)}`, isSearching)
+  /** 应用全部：发 apply-edits；成功回到列表、退出多选，挂结果条，改写过的标「刚改」、高亮一次。 */
+  const applyTidy = (snapshot: readonly BatchItem[], application: BatchApplication) => {
+    const { ops, keep, total } = application
+    const command = { cmd: 'apply-edits', ops, ...(keep.length > 0 ? { keep } : {}) } as const
+    actions.run(TIDY, command, null, (result) => {
+      const memoryOf = (id: string) => snapshot.find(item => item.memory.id === id)!.memory
+      const rewritten = new Map(ops.flatMap(op => (op.kind === 'edit'
+        ? [[op.memoryId, { before: memoryOf(op.memoryId), draft: { content: op.content, name: op.name, summary: op.summary, tags: op.tags } }] as const]
+        : [])))
+      setBatch(undefined)
+      setSelecting(false)
+      setSelected(new Set())
+      setEdited(undefined)
+      setTidied({
+        decisionId: result.decisionId!, total, rewritten, isStale: false,
+        deleted: ops.filter(op => op.kind === 'forget').map(op => memoryOf(op.memoryId)),
+      })
+      setFresh(prev => new Set([...prev, ...rewritten.keys()]))
+      setEditFlash(new Set(rewritten.keys()))
+    })
+  }
   if (batch !== undefined) {
     return (
       <div className="pm-lib">
-        <BatchEdit items={batch} session={session} onBack={() => { isBackFromBatch.current = true; setBatch(undefined) }} />
+        <BatchEdit
+          items={batch}
+          session={session}
+          onBack={() => { isBackFromBatch.current = true; setBatch(undefined) }}
+          onApply={(application) => { applyTidy(batch, application) }}
+          applyUnavailable={actions.unavailable(TIDY)}
+          applyFeedback={actions.feedback(TIDY)}
+        />
       </div>
     )
   }
@@ -256,7 +308,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
       closeEdit(before.id)
       setEdited({ kind: 'done', memoryId: before.id, via, decisionId: result.decisionId, before, draft })
       setFresh(prev => new Set(prev).add(before.id))
-      setEditFlash(before.id)
+      setEditFlash(new Set([before.id]))
     }, (failure) => {
       if (failure.code !== 'stale') return false
       closeEdit(before.id)
@@ -273,6 +325,39 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
         return next
       })
     })
+  }
+
+  /** 撤销全部：整批一起恢复；有记忆之后又被改过（stale）整批没动，结果条写明，不再给撤销。 */
+  const undoTidy = (result: TidyResult) => {
+    actions.run(TIDY, { cmd: 'undo', decisionId: result.decisionId }, null, () => {
+      setTidied(undefined)
+      setFresh((prev) => {
+        const next = new Set(prev)
+        for (const id of result.rewritten.keys()) next.delete(id)
+        return next
+      })
+    }, (failure) => {
+      if (failure.code !== 'stale') return false
+      setTidied({ ...result, isStale: true })
+      return true
+    })
+  }
+  /** 整理所选的结果条：列表顶部，「已整理 N 条……」，有删除时副行说去哪找回，右侧「撤销全部」。 */
+  const tidiedBarOf = (result: TidyResult) => {
+    const deletes = result.deleted.length
+    const rewrites = result.rewritten.size
+    const sub = result.isStale ? t('library.batch.undoStale') : deletes > 0 ? t('library.batch.doneDeleted') : undefined
+    return (
+      <div ref={tidiedBar} className="pm-lib-result pm-lib-tidied" tabIndex={-1}>
+        <div role="status">
+          <p className="pm-lib-tidied-title">{t('library.batch.done', { n: result.total, deletes, rewrites, kept: result.total - deletes - rewrites })}</p>
+          {sub !== undefined ? <p className="pm-lib-result-text">{sub}</p> : null}
+        </div>
+        {result.isStale
+          ? null
+          : <Button variant="ghost" unavailable={actions.unavailable(TIDY)} onClick={() => { undoTidy(result) }}>{t('library.batch.undoAll')}</Button>}
+      </div>
+    )
   }
 
   /** 修改面板：两段切换，两侧都按打开时的那一份预填、按它的版本核对。 */
@@ -364,7 +449,18 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
         <p className="pm-lib-selbar-count" role="status">{isOver ? t('library.select.tooMany', { n, max: MAX_BATCH_EDIT }) : t('library.select.count', { n })}</p>
         <Button onClick={() => { setSelected(prev => new Set([...prev, ...items.filter(m => selectable.has(m.id)).map(m => m.id)])) }}>{t('library.select.all')}</Button>
         <Button variant="ghost" onClick={endSelect}>{t('library.select.cancel')}</Button>
-        <Button variant="primary" unavailable={blocked} onClick={() => { setBatch(toBatchItems(picked)) }}>{t('library.select.tidy')}</Button>
+        <Button
+          variant="primary"
+          unavailable={blocked}
+          onClick={() => {
+            // 开始下一次整理：上一次的结果条和应用留下的提示收起
+            setTidied(undefined)
+            actions.dismiss(TIDY)
+            setBatch(toBatchItems(picked))
+          }}
+        >
+          {t('library.select.tidy')}
+        </Button>
       </div>
     )
   }
@@ -402,17 +498,25 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
     }
     const isEditing = editing?.id === memory.id
     const result = edited?.memoryId === memory.id ? edited : undefined
+    const tidyRewrite = tidied?.rewritten.get(memory.id)
     // 刚应用、视图还没推来新版本：先按写下的稿子画
-    const shown = result?.kind === 'done' && isSameVersion(memory, result.before) ? { ...memory, ...result.draft } : memory
+    const shown = result?.kind === 'done' && isSameVersion(memory, result.before) ? { ...memory, ...result.draft }
+      : tidyRewrite !== undefined && isSameVersion(memory, tidyRewrite.before) ? { ...memory, ...tidyRewrite.draft } : memory
     const badge = fresh.has(memory.id) ? <Chip variant="neutral">{t('library.edit.justEdited')}</Chip> : undefined
     const endRowFlash = () => {
-      if (editFlash === memory.id) setEditFlash(undefined)
+      if (editFlash.has(memory.id)) {
+        setEditFlash((prev) => {
+          const next = new Set(prev)
+          next.delete(memory.id)
+          return next
+        })
+      }
       if (flashId === memory.id) endFlash()
     }
     const isPicked = selecting && pickedIds.has(memory.id)
     const className = ['pm-list-row', selecting ? 'pm-lib-row--selecting' : '', isPicked ? 'pm-lib-row--selected' : ''].filter(Boolean).join(' ')
     return (
-      <FlashRow key={memory.id} className={className} flashing={flashId === memory.id || editFlash === memory.id} onFlashEnd={endRowFlash} takesFocus={memory.id === targetId}>
+      <FlashRow key={memory.id} className={className} flashing={flashId === memory.id || editFlash.has(memory.id)} onFlashEnd={endRowFlash} takesFocus={memory.id === targetId}>
         {selecting ? checkbox(memory, isPicked) : null}
         <div className="pm-row-body">
           {isAll
@@ -513,8 +617,10 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
           </ul>
         )
         : null}
+      {tidied !== undefined ? tidiedBarOf(tidied) : null}
+      {tidied !== undefined ? actions.feedback(TIDY) : null}
       {notice !== undefined ? <p className="pm-notice" role="status" tabIndex={-1}>{notice.text}</p> : null}
-      {actions.strayFailures(items.map(m => m.id))}
+      {actions.strayFailures([...items.map(m => m.id), TIDY])}
       {items.length === 0
         ? (total === 0 && kept.length === 0
             ? <EmptyState variant="first" title={t('library.empty.first.title')}>{t('library.empty.first.body')}</EmptyState>
@@ -546,6 +652,10 @@ export const libraryTabCss = `
 .pm-lib-gone { opacity: .55; }
 .pm-lib-result { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .pm-lib-result-text { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
+.pm-lib-tidied { padding: 8px 8px 8px 16px; border: .5px solid var(--pm-line-card); border-radius: 10px; }
+.pm-lib-tidied:focus { outline: none; }
+.pm-lib-tidied:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--pm-focus); outline-offset: 0; }
+.pm-lib-tidied-title { margin: 0; font-size: 13px; line-height: 1.5; color: var(--pm-text); }
 .pm-lib-bar { display: flex; align-items: center; gap: 8px; }
 .pm-lib-bar > .pm-search { flex: 1; min-width: 0; }
 .pm-lib-check { display: flex; align-items: center; flex-shrink: 0; height: 22px; cursor: pointer; }

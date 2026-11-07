@@ -19,9 +19,9 @@ const EXPECTED: Record<GuiErrorCode, (command: MemoryCommand) => Outcome> = {
     ? { kind: 'confirm-cross', workspacePath: '/w/blog', isMove: c.cmd === 'move-memory', resend: { ...c, allowCrossWorkspace: true } as MemoryCommand }
     : raw('cross-workspace'),
   'has-secret': c => c.cmd === 'forget' ? { kind: 'confirm-secret', resend: { ...c, cmd: 'hard-delete' } } : raw('has-secret'),
-  'secret-suspected': c => c.cmd === 'edit-memory' || c.cmd === 'merge-memories' ? { kind: 'confirm-suspected', resend: { ...c, force: true } } : raw('secret-suspected'),
+  'secret-suspected': c => c.cmd === 'edit-memory' || c.cmd === 'merge-memories' || c.cmd === 'apply-edits' ? { kind: 'confirm-suspected', resend: { ...c, force: true } } : raw('secret-suspected'),
   'claimed': () => ({ kind: 'handled-elsewhere' }),
-  'not-found': c => OPEN_ITEM_COMMANDS.has(c.cmd) ? { kind: 'handled-elsewhere' } : 'memoryId' in c || 'memories' in c ? local('not-found', 'pending.memory.gone') : raw('not-found'),
+  'not-found': c => OPEN_ITEM_COMMANDS.has(c.cmd) ? { kind: 'handled-elsewhere' } : 'memoryId' in c || 'memories' in c || c.cmd === 'apply-edits' ? local('not-found', 'pending.memory.gone') : raw('not-found'),
   'stale': c => local('stale', is(c, 'undo', 'restore') ? 'pending.undo.stale' : is(c, 'ignore-advice') ? 'pending.ignore.stale' : 'pending.edit.stale'),
   'secret-critical': () => local('secret-critical', 'pending.edit.secretCritical'),
   'target-taken': c => local('target-taken', is(c, 'undo') ? 'pending.move.undoTaken' : is(c, 'promote', 'promote-memory') ? 'pending.promote.taken' : 'pending.move.taken'),
@@ -82,6 +82,15 @@ describe('发出之前拦下', () => {
     for (const command of [{ ...edit, content: key }, { ...edit, name: key }, { ...edit, summary: key }, { ...edit, tags: [key] }, { ...merge, content: key }]) {
       expect(refuseBeforeSend(command)).toEqual(local('secret-critical', 'pending.edit.secretCritical'))
     }
+  })
+
+  it('整理所选任一改写项的四个面含高危密钥：不发，给本地文案；删除项不看', () => {
+    const apply = SAMPLE_COMMANDS['apply-edits']
+    const [forget, edit] = apply.ops as [Extract<typeof apply.ops[number], { kind: 'forget' }>, Extract<typeof apply.ops[number], { kind: 'edit' }>]
+    for (const changed of [{ content: key }, { name: key }, { summary: key }, { tags: ['x', key] }]) {
+      expect(refuseBeforeSend({ ...apply, ops: [forget, { ...edit, ...changed }] })).toEqual(local('secret-critical', 'pending.edit.secretCritical'))
+    }
+    expect(refuseBeforeSend({ ...apply, ops: [forget, { ...edit, content: 'api_key: abc12345' }] })).toBeUndefined()
   })
 
   it('让模型改的要求、此前的要求、上一稿四个面、计划的文字任一处含高危密钥：不发，给让模型改的本地文案', () => {
