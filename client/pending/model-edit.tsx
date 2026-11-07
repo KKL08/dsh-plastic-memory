@@ -174,6 +174,41 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
   }
 
   const { draft } = phase
+  return (
+    <div ref={root} className="pm-edit pm-model-result">
+      <DraftCompare memories={memories} base={base} draft={draft} keeper={keeper} />
+      <div className="pm-edit-foot">
+        <span className="pm-edit-hint" />
+        <Button variant="ghost" unavailable={unavailable} onClick={() => { setPhase({ kind: 'ask' }) }}>{t('pending.model.discard')}</Button>
+        <Button
+          unavailable={unavailable}
+          onClick={() => {
+            const text = request.trim()
+            if (text !== '') setPriorRequests(prior => [...prior, text])
+            setPrevious(draft); setRequest(''); setPhase({ kind: 'ask' })
+          }}
+        >
+          {t('pending.model.again')}
+        </Button>
+        <Button variant="primary" unavailable={unavailable} onClick={() => { setApplied(true); onApply(draft) }}>{t('pending.model.apply')}</Button>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 原文与改后左右对照：单条按词高亮（原文一侧标删掉的、改后一侧标新增的），合并只并排；下方「N → M 字」，合并时加上哪条进最近删除。
+ * 名称、摘要、标签变了才列出来。单条、合并的模型面板和整理所选的对照应用共用。
+ */
+export function DraftCompare({ memories, base, draft, keeper }: {
+  memories: readonly [MemoryCard] | readonly [MemoryCard, MemoryCard]
+  /** 对照里原来的名称、摘要、标签。 */
+  base: EditDraft
+  draft: EditDraft
+  keeper?: 0 | 1 | undefined
+}) {
+  const t = useT()
+  const id = useId()
   const isMerge = memories.length === 2
   const chars = memories.reduce((n, m) => n + m.content.length, 0)
   // 名称、摘要、标签：变了才列出来
@@ -196,7 +231,7 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
     </p>
   ))
   return (
-    <div ref={root} className="pm-edit pm-model-result">
+    <>
       <div className="pm-model-compare">
         <section className="pm-model-pane" aria-labelledby={`${id}-before`}>
           <h4 id={`${id}-before`} className="pm-model-pane-title">{t(isMerge ? 'pending.model.mergeBefore' : 'pending.model.before')}</h4>
@@ -213,22 +248,7 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
         <span>{t('pending.edit.count', { from: formatNumber(chars), to: formatNumber(draft.content.length) })}</span>
         {removed !== undefined ? <><span aria-hidden="true">{' · '}</span><span>{t('pending.model.mergeNote', { side: removed })}</span></> : null}
       </p>
-      <div className="pm-edit-foot">
-        <span className="pm-edit-hint" />
-        <Button variant="ghost" unavailable={unavailable} onClick={() => { setPhase({ kind: 'ask' }) }}>{t('pending.model.discard')}</Button>
-        <Button
-          unavailable={unavailable}
-          onClick={() => {
-            const text = request.trim()
-            if (text !== '') setPriorRequests(prior => [...prior, text])
-            setPrevious(draft); setRequest(''); setPhase({ kind: 'ask' })
-          }}
-        >
-          {t('pending.model.again')}
-        </Button>
-        <Button variant="primary" unavailable={unavailable} onClick={() => { setApplied(true); onApply(draft) }}>{t('pending.model.apply')}</Button>
-      </div>
-    </div>
+    </>
   )
 }
 
