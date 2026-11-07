@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { MemoryLogger, MemoryStore } from '../store.ts'
+import { markDeleted, type MemoryLogger, type MemoryStore } from '../store.ts'
 import type { CasKvTable } from '../kv-table.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { AgentsMdWriter } from '../storage/agents-md.ts'
@@ -25,7 +25,7 @@ import {
 } from '../tools/workspace-gate.ts'
 import {
   GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, VIEW_BEHIND_CODES, mergeKeeperIndex, parseMemoryCommand, sessionViewFile,
-  type DraftPlanOp, type GuiErrorCode, type MemoryCommand, type MemoryCommandResult,
+  type ApplyEditOp, type DraftPlanOp, type GuiErrorCode, type MemoryCommand, type MemoryCommandResult,
 } from './contract.ts'
 import type { ViewWriter } from './view-writer.ts'
 import { generateDraft } from './model-draft.ts'
@@ -209,6 +209,37 @@ function draftOpsProblem(memoryIds: readonly string[], ops: readonly DraftPlanOp
   return undefined
 }
 
+/** apply-edits 的删除项承接不对：into 要指向本批的某个改写项或 keep 里的一条。不合规时给原因。 */
+function applyOpsProblem(ops: readonly ApplyEditOp[], keep: readonly { memoryId: string }[]): string | undefined {
+  const hosts = new Set([...ops.flatMap(op => (op.kind === 'edit' ? [op.memoryId] : [])), ...keep.map(ref => ref.memoryId)])
+  const stray = ops.find(op => op.kind === 'forget' && op.into !== undefined && !hosts.has(op.into))
+  return stray === undefined ? undefined : `删除项 ${stray.memoryId} 的承接 ${stray.kind === 'forget' ? stray.into : ''} 不是本批的改写项或核对项`
+}
+
+/** 用户亲手改的四个面写进去（直接改、直接合并、整理所选的改写项）：updatedAt、lastConfirmedAt 记为现在，标手改；出处、类型、作用域等不动。 */
+function asHandEdited(cur: MemoryRecord, fields: { content: string; name: string; summary: string; tags: string[] }, now: number): MemoryRecord {
+  // 标手改：出处还是原来的会话，「已手编，出处可能不对应」照实；模型之后要改写、替代它得先问用户（同手改文件）
+  // 子 agent 写的待确认记录：用户亲手改过就算升档；已升档的不改写升档来源
+  const delegation = isPendingDelegated(cur) ? { delegation: { ...cur.delegation!, reviewed: { by: 'user' as const, at: now } } } : {}
+  const { content, name, summary, tags } = fields
+  return { ...cur, content, name, summary, tags, updatedAt: now, lastConfirmedAt: now, handEdited: true, ...delegation }
+}
+
+/** 整理所选逐项写的写入记录：written 是这一项实际提交的那份（没写成为 undefined），之后的回执、回退都按它。 */
+interface BatchWrite { memoryId: string; op: ApplyEditOp['kind']; written?: MemoryRecord }
+
+/**
+ * 写入调用抛错后这一项落没落盘（文件表写盘后还可能在维护目录、写统计时抛错）：按 id 在它自己的作用域里重读，
+ * 状态是这一步该有的（改写在用、删除在最近删除）、指纹与最后一次候选一致、updatedAt 是这次的时刻，才算已写，返回读到的那份。
+ */
+async function committedAfterThrow(store: MemoryStore, record: MemoryRecord, op: ApplyEditOp['kind'], candidate: MemoryRecord | undefined, now: number): Promise<MemoryRecord | undefined> {
+  const scope = scopeOfMemory(record)
+  if (candidate === undefined || scope === undefined) return undefined
+  const current = await locateCopy(store, record.id, scope).catch(() => undefined)
+  const status = op === 'edit' ? 'active' : 'deleted'
+  return current !== undefined && current.status === status && current.updatedAt === now && editFingerprint(current) === editFingerprint(candidate) ? current : undefined
+}
+
 /** 定位到的记忆都在同一个作用域。 */
 const isOneScope = (records: readonly MemoryRecord[]) => new Set(records.map(r => (r.scope === 'global' ? '' : `ws:${r.workspacePath ?? ''}`))).size <= 1
 
@@ -243,6 +274,14 @@ async function dispatch(
   const { cmd } = command
   const executorDeps = { store: deps.store, decisions: deps.decisions, snapshots: deps.snapshots, log: deps.log, now: () => now }
   const notFound = (what: string) => fail(cmd, 'not-found', `不存在或已处理：${what}`)
+  /** 与 memory_save 同口径：要写进去的四个面一起查，高危直接拦，疑似等用户确认后带 force 重发。 */
+  const editSecretsProblem = (edits: readonly { content: string; name: string; summary: string; tags: string[] }[], force: boolean | undefined): Err | undefined => {
+    const hits = detectSecrets(edits.map(f => `${f.content}\n${f.name}\n${f.summary}\n${f.tags.join(' ')}`).join('\n'))
+    const names = (severity: 'critical' | 'suspected') => [...new Set(hits.filter(h => h.severity === severity).map(h => h.name))].join('、')
+    if (names('critical') !== '') return fail(cmd, 'secret-critical', `检测到高危密钥（${names('critical')}），未保存`)
+    if (names('suspected') !== '' && force !== true) return fail(cmd, 'secret-suspected', `检测到疑似密钥（${names('suspected')}），未保存；确认不是密钥后带 force 重发`)
+    return undefined
+  }
   // 撤销与最近删除的恢复：时钟现读，恢复收尾要判快照是不是途中刚过期被清扫，用命令开头的时刻判不出来
   const undoDeps = { store: deps.store, decisions: deps.decisions, snapshots: deps.snapshots, ignores: deps.ignores, now: () => deps.now?.() ?? Date.now() }
   const fromUndo = (r: UndoResult): MemoryCommandResult => (r.kind === 'error'
@@ -513,12 +552,8 @@ async function dispatch(
       if (targets.some(t => hasCriticalSecret(t.record))) return fail(cmd, 'has-secret', '含密钥的记忆不能在这里改：界面上是遮盖后的正文，保存会把占位文字写回去。未做任何改动')
       const stale = () => fail(cmd, 'stale', '这条记忆刚被改过，界面已换成最新内容。未做任何改动')
       if (targets.some(t => isStale(t.record, t.base))) return stale()
-      // 与 memory_save 同口径：四个面一起查，高危直接拦，疑似等用户确认
-      const { content, name, summary, tags } = command
-      const hits = detectSecrets(`${content}\n${name}\n${summary}\n${tags.join(' ')}`)
-      const names = (severity: 'critical' | 'suspected') => hits.filter(h => h.severity === severity).map(h => h.name).join('、')
-      if (names('critical') !== '') return fail(cmd, 'secret-critical', `检测到高危密钥（${names('critical')}），未保存`)
-      if (names('suspected') !== '' && command.force !== true) return fail(cmd, 'secret-suspected', `检测到疑似密钥（${names('suspected')}），未保存；确认不是密钥后带 force 重发`)
+      const secretProblem = editSecretsProblem([command], command.force)
+      if (secretProblem !== undefined) return secretProblem
 
       const keepAt = targets.length === 2 ? mergeKeeperIndex([targets[0]!.record, targets[1]!.record]) : 0
       const kept = targets[keepAt]!
@@ -543,10 +578,7 @@ async function dispatch(
           mine = undefined
           // 锁内按磁盘上的现状再核对一次：读过之后被改过就原样不写
           if (cur.status !== 'active' || isStale(cur, kept.base)) return cur
-          // 标手改：出处还是原来的会话，「已手编，出处可能不对应」照实；模型之后要改写、替代它得先问用户（同手改文件）
-          // 子 agent 写的待确认记录：用户亲手改过就算升档；已升档的不改写升档来源
-          const delegation = isPendingDelegated(cur) ? { delegation: { ...cur.delegation!, reviewed: { by: 'user' as const, at: now } } } : {}
-          return (mine = { ...cur, content, name, summary, tags, updatedAt: now, lastConfirmedAt: now, handEdited: true, ...delegation })
+          return (mine = asHandEdited(cur, command, now))
         }, own)
       } catch (error) {
         if (!(error instanceof RecordNotFoundError)) throw error
@@ -568,11 +600,84 @@ async function dispatch(
       if (removed !== undefined && isRemoved) await deps.decisions.removeByMemoryIds([removed.record.id])
       const memoryIds = removed !== undefined && isRemoved ? [kept.record.id, removed.record.id] : [kept.record.id]
       const entry = await deps.decisions.addEdit(committed!, {
-        memoryIds, summary: name, workspaces: memoryIds.map(id => workspaceLabel(targets.find(t => t.record.id === id)!.record)),
+        memoryIds, summary: command.name, workspaces: memoryIds.map(id => workspaceLabel(targets.find(t => t.record.id === id)!.record)),
       }, memoryIds.length === 2 ? 'merged' : 'edited', snapshot.id, now)
       if (!isRemoved) return fail(cmd, 'has-secret', `保留的那条已改好；另一条（${removed!.record.id}）刚被写进密钥，没有删除`)
       const located = await deps.store.locate(kept.record.id, own)
       return { ok: true, cmd, decisionId: entry.id, memoryIds, snapshotId: snapshot.id, ...(located !== undefined ? { filePath: located.filePath } : {}) }
+    }
+
+    case 'apply-edits': {
+      const { ops } = command
+      const keep = command.keep ?? []
+      const refs = [...ops, ...keep]
+      const problem = batchRefsProblem(refs) ?? applyOpsProblem(ops, keep)
+      if (problem !== undefined) return fail(cmd, 'invalid-args', problem)
+      // 都按页面上那一份定位，且此刻仍在用：已删、不存在的什么都不动
+      const located = await Promise.all(refs.map(ref => locate(ref.memoryId, ref.layer)))
+      const gone = refs.filter((_, i) => located[i]?.status !== 'active').map(ref => ref.memoryId)
+      if (gone.length > 0) return notFound(gone.join('、'))
+      const records = located as MemoryRecord[]
+      if (!isOneScope(records)) return fail(cmd, 'invalid-args', '选中的记忆不在同一个作用域（全局和项目、或不同项目混在一起）')
+      const targets = ops.map((op, i) => ({ op, record: records[i]! }))
+      // keep 只核对版本、不写，不过门
+      const { rejected } = gateRecords(targets.map(t => t.record), gov, command.allowCrossWorkspace)
+      if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
+      // 改写的目标含高危密钥：界面上是遮盖后的正文（同直接改）；删除的目标含密钥（疑似也算）软删不了（同合并要删的那条）
+      const secretHeld = targets.find(t => (t.op.kind === 'edit' ? hasCriticalSecret(t.record) : hasSecret(t.record)))
+      if (secretHeld !== undefined) return fail(cmd, 'has-secret', `记忆 ${secretHeld.record.id} 含密钥，不能在这里整理：先彻底删除它，或手改文件去掉密钥。未做任何改动`)
+      if (refs.some((ref, i) => isStale(records[i]!, ref.base))) return fail(cmd, 'stale', '有记忆刚被改过，界面已换成最新内容。未做任何改动')
+      const secretProblem = editSecretsProblem(ops.flatMap(op => (op.kind === 'edit' ? [op] : [])), command.force)
+      if (secretProblem !== undefined) return secretProblem
+
+      // 整批一份快照，撤销全部按它恢复
+      const snapshot = await deps.snapshots.capture({ operation: 'pre-update', description: `整理所选 ${ops.length} 条前`, records: targets.map(t => t.record) }, now)
+      // 按计划顺序逐项写，每项在提交那一刻记写入记录。回调里算出的只是候选（文件表复核失败会重来），调用正常返回才以返回值为准
+      const writes: BatchWrite[] = []
+      for (const { op, record } of targets) {
+        const at = scopeAt(record.workspacePath)
+        const write: BatchWrite = { memoryId: record.id, op: op.kind }
+        writes.push(write)
+        let candidate: MemoryRecord | undefined
+        let outcome: 'deleted' | 'has-secret' | 'changed' | 'missing' = 'changed'
+        try {
+          if (op.kind === 'edit') {
+            const committed = await deps.store.update(record, (cur) => {
+              candidate = undefined
+              // 锁内按磁盘上的现状再核对一次：读过之后被改过就原样不写
+              if (cur.status !== 'active' || isStale(cur, op.base)) return cur
+              return (candidate = asHandEdited(cur, op, now))
+            }, at)
+            if (candidate !== undefined) write.written = committed
+          } else {
+            outcome = await deps.store.softDeleteUnlessSecret(record, {
+              at, now, isChanged: (cur) => { candidate = cur; return cur.status !== 'active' || isStale(cur, op.base) },
+            })
+            // 软删只改状态和时间，内容就是锁内最后看到的那份
+            if (outcome === 'deleted') write.written = markDeleted(candidate!, now)
+          }
+        } catch (error) {
+          if (!(error instanceof RecordNotFoundError)) {
+            // 抛错时不知道落没落盘：按 id 重读，状态和指纹与最后一次候选一致、updatedAt 是这次的才算已写
+            write.written = await committedAfterThrow(deps.store, record, op.kind, candidate, now)
+            throw error
+          }
+        }
+        if (write.written === undefined) {
+          // TODO: 已写的项按写入记录退回快照里的改前版本
+          return outcome === 'has-secret'
+            ? fail(cmd, 'has-secret', `记忆 ${record.id} 刚被写进密钥，没有删除`)
+            : fail(cmd, 'stale', '有记忆刚被改过，界面已换成最新内容')
+        }
+      }
+      // 删除项走删除的老路：账本里指向它们的条目一并清掉（同 forget）
+      const forgotten = writes.filter(w => w.op === 'forget').map(w => w.memoryId)
+      if (forgotten.length > 0) await deps.decisions.removeByMemoryIds(forgotten)
+      const entry = await deps.decisions.addBatchEdit(
+        writes.map(w => ({ memoryId: w.memoryId, op: w.op, written: w.written! })),
+        { summary: `整理所选 ${ops.length} 条`, workspaces: targets.map(t => workspaceLabel(t.record)) }, snapshot.id, now,
+      )
+      return { ok: true, cmd, decisionId: entry.id, memoryIds: writes.map(w => w.memoryId), snapshotId: snapshot.id }
     }
 
     case 'draft-edit': {

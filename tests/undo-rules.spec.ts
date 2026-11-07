@@ -5,8 +5,8 @@ import { join } from 'node:path'
 import { FileTable } from '../src/storage/file-table.ts'
 import { MemoryStore } from '../src/store.ts'
 import { editFingerprint } from '../src/governance/snapshots.ts'
-import type { PendingDecision, PendingKind, SettledVerdict } from '../src/governance/schema.ts'
-import { asUndoable, expectedFingerprints, isStillOwnWrite, isUndoable, undoRuleOf, undoStateOf, type UndoableEntry } from '../src/governance/undo-rules.ts'
+import type { BatchReceipt, PendingDecision, PendingKind, SettledVerdict } from '../src/governance/schema.ts'
+import { asUndoable, expectedFingerprints, isStillOwnWrite, isUndoable, undoRuleOf, undoStateOf, undoStateOfAll, type UndoableEntry } from '../src/governance/undo-rules.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { scopeAt } from '../src/scope.ts'
@@ -171,5 +171,74 @@ describe('asUndoable 与 isUndoable', () => {
     expect([at('conflict', 'keep-left'), at('promote-candidate', 'promoted'), at('edit', 'edited'), at('move', 'moved'), at('rewrite', 'rewritten'), at('supersede', 'superseded')])
       .toEqual([true, true, true, true, true, true])
     expect([at('conflict', 'keep-both'), at('promote-candidate', 'keep-local'), at('overflow', 'dismiss')]).toEqual([false, false, false])
+  })
+})
+
+describe('整理所选（batch-edited）：按回执逐项比', () => {
+  const receipt = (r: MemoryRecord, op: 'edit' | 'forget'): BatchReceipt =>
+    ({ memoryId: r.id, op, fingerprint: editFingerprint(r), expectedStatus: op === 'edit' ? 'active' : 'deleted' })
+  const batch = (receipts: BatchReceipt[]) => settled('edit', receipts.map(r => r.memoryId), { verdict: 'batch-edited', receipts })
+
+  it('undoRuleOf：目标是全部回执项，按改前快照恢复，撤后移出账本', () => {
+    const receipts: BatchReceipt[] = [
+      { memoryId: 'mem_d', op: 'forget', fingerprint: 'fp-d', expectedStatus: 'deleted' },
+      { memoryId: 'mem_e', op: 'edit', fingerprint: 'fp-e', expectedStatus: 'active' },
+    ]
+    expect(undoRuleOf(batch(receipts))).toEqual({ targets: ['mem_d', 'mem_e'], mechanism: 'restore-snapshot', fate: 'remove', receipts })
+  })
+
+  it('isStillOwnWrite / undoStateOf：每项按自己的回执比状态和指纹；改写项被改、删除项被单独恢复或彻底删除都算已改过', async () => {
+    const edited = await written({ id: 'mem_e', content: '改写后' })
+    const deleted = await written({ id: 'mem_d', content: '删掉的', status: 'deleted', deletedAt: NOW })
+    const entry = batch([receipt(deleted, 'forget'), receipt(edited, 'edit')])
+    const before = (r: MemoryRecord) => ({ ...r, content: '改前', status: 'active' as const })
+    expect([isStillOwnWrite(entry, edited), isStillOwnWrite(entry, deleted)]).toEqual([true, true])
+    expect([undoStateOf(entry, before(edited), edited), undoStateOf(entry, before(deleted), deleted)]).toEqual(['undoable', 'undoable'])
+    // 回执里没有的记忆、此刻哪都没有：都不算那次写下的
+    expect(isStillOwnWrite(entry, await written({ id: 'mem_x' }))).toBe(false)
+    expect(undoStateOf(entry, before(edited), undefined)).toBe('changed')
+
+    await store.update(edited, r => ({ ...r, content: '之后又改的' }), scopeAt(WS))
+    expect(undoStateOf(entry, before(edited), await reread('mem_e'))).toBe('changed')
+    // 删掉的那条在最近删除里单独恢复了：内容没变，状态不是期望的
+    await store.update(deleted, r => ({ ...r, status: 'active' }), scopeAt(WS))
+    expect(undoStateOf(entry, before(deleted), await reread('mem_d'))).toBe('changed')
+    await store.hardDelete(deleted, { at: scopeAt(WS) })
+    expect(undoStateOf(entry, before(deleted), await reread('mem_d'))).toBe('changed')
+  })
+
+  it('undoStateOfAll：逐项都可撤才可撤；任一项快照缺了是 expired，任一项对不上是 changed；已撤销的是 undone', async () => {
+    const edited = await written({ id: 'mem_e', content: '改写后' })
+    const deleted = await written({ id: 'mem_d', content: '删掉的', status: 'deleted', deletedAt: NOW })
+    const entry = batch([receipt(deleted, 'forget'), receipt(edited, 'edit')])
+    const copies = (patch: Partial<Record<string, { before?: MemoryRecord; current?: MemoryRecord }>> = {}) => new Map([
+      ['mem_d', { before: deleted, current: deleted, ...patch.mem_d }],
+      ['mem_e', { before: edited, current: edited, ...patch.mem_e }],
+    ])
+    expect(undoStateOfAll(entry, copies())).toBe('undoable')
+    expect(undoStateOfAll(entry, copies({ mem_e: { current: { ...edited, content: '又改了' } } }))).toBe('changed')
+    expect(undoStateOfAll(entry, copies({ mem_d: { before: undefined } }))).toBe('expired')
+    expect(undoStateOfAll(entry, new Map([['mem_e', { before: edited, current: edited }]]))).toBe('expired')
+    expect(undoStateOfAll({ ...entry, settled: { ...entry.settled, isUndone: true } }, copies())).toBe('undone')
+  })
+
+  it('undoStateOfAll：没有回执的种类只看主条（同 undoStateOf）', async () => {
+    const after = await written({ content: '那次写下的' })
+    const entry = settled('edit', [after.id, 'mem_r'], { verdict: 'merged', fingerprint: editFingerprint(after) })
+    expect(undoStateOfAll(entry, new Map([[after.id, { before: after, current: after }]]))).toBe('undoable')
+    expect(undoStateOfAll(entry, new Map([[after.id, { before: undefined, current: after }]]))).toBe('expired')
+  })
+
+  it('expectedFingerprints：有回执时每项按回执取', () => {
+    const entry = batch([
+      { memoryId: 'mem_d', op: 'forget', fingerprint: 'fp-d', expectedStatus: 'deleted' },
+      { memoryId: 'mem_e', op: 'edit', fingerprint: 'fp-e', expectedStatus: 'active' },
+    ])
+    expect(expectedFingerprints(entry, [record({ id: 'mem_d' }), record({ id: 'mem_e' })])).toEqual(new Map([['mem_d', 'fp-d'], ['mem_e', 'fp-e']]))
+  })
+
+  it('isUndoable：留作撤销，随快照过期清掉', () => {
+    const entry = batch([{ memoryId: 'mem_e', op: 'edit', fingerprint: 'fp-e', expectedStatus: 'active' }])
+    expect(isUndoable(entry)).toBe(true)
   })
 })

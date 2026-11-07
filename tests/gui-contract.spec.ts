@@ -27,7 +27,7 @@ describe('契约里界面要用的命令集', () => {
       expect({ cmd, isKept: 'allowCrossWorkspace' in parsed }).toEqual({ cmd, isKept: CROSS_WORKSPACE_COMMANDS.has(cmd as never) })
     }
     expect([...CROSS_WORKSPACE_COMMANDS].sort()).toEqual([
-      'confirm', 'edit-memory', 'forget', 'hard-delete', 'keep-local', 'keep-local-memory', 'merge-memories', 'move-memory',
+      'apply-edits', 'confirm', 'edit-memory', 'forget', 'hard-delete', 'keep-local', 'keep-local-memory', 'merge-memories', 'move-memory',
       'promote', 'promote-memory', 'resolve', 'restore', 'undo',
     ])
   })
@@ -129,5 +129,42 @@ describe('draft-plan（整理所选按计划出稿）', () => {
     expect(parseMemoryCommand(encodeMemoryCommand(command).slice(`/${MEMORY_COMMAND_NAME} `.length))).toEqual({ ok: true, command })
     const result = { ok: true, cmd: 'draft-plan', drafts: [{ memoryId: 'm2', draft: { content: '用 biome', summary: '格式化', name: '格式化' } }], model: 'deepseek-v4-flash' }
     expect(memoryCommandResultSchema.parse(JSON.parse(JSON.stringify(result)))).toEqual(result)
+  })
+})
+
+describe('apply-edits（整理所选应用全部）', () => {
+  const ref = (memoryId: string) => ({ memoryId, layer: { kind: 'global' }, base: { updatedAt: 1, digest: `sha1:${memoryId}` } }) as const
+  const edit = (memoryId: string) => ({ kind: 'edit' as const, ...ref(memoryId), content: '新正文', name: '新名称', summary: '新摘要', tags: ['标签'] })
+  const forget = (memoryId: string, into?: string) => ({ kind: 'forget', ...ref(memoryId), ...(into !== undefined ? { into } : {}) }) as const
+  const ops = (n: number) => Array.from({ length: n }, (_, i) => (i % 2 === 0 ? edit(`m${i + 1}`) : forget(`m${i + 1}`)))
+
+  it(`改动 1–${MAX_BATCH_EDIT} 项：0 项、${MAX_BATCH_EDIT + 1} 项不收`, () => {
+    const accepts = (n: number) => memoryCommandSchema.safeParse({ cmd: 'apply-edits', ops: ops(n) }).success
+    expect([0, 1, MAX_BATCH_EDIT, MAX_BATCH_EDIT + 1].map(accepts)).toEqual([false, true, true, false])
+  })
+
+  it('改写项四个面都要带、正文和名称不能空；每项都要带卡片版本', () => {
+    const accepts = (op: object) => memoryCommandSchema.safeParse({ cmd: 'apply-edits', ops: [op] }).success
+    expect(accepts(edit('m1'))).toBe(true)
+    expect(accepts({ ...edit('m1'), content: '' })).toBe(false)
+    expect(accepts({ ...edit('m1'), name: '' })).toBe(false)
+    const { tags: _tags, ...noTags } = edit('m1')
+    expect(accepts(noTags)).toBe(false)
+    const { base: _base, ...noBase } = forget('m1')
+    expect(accepts(noBase)).toBe(false)
+  })
+
+  it('带跨项目确认：写入，过门', () => {
+    expect(CROSS_WORKSPACE_COMMANDS.has('apply-edits')).toBe(true)
+  })
+
+  it('命令与结果随文本往返：改写、删除（带承接）、不动的核对项、force；结果带条目、记忆、快照，部分生效另带 isPartial', () => {
+    const command = {
+      cmd: 'apply-edits', ops: [forget('m1', 'm3'), edit('m2')], keep: [ref('m3')], force: true, allowCrossWorkspace: true,
+    } as const satisfies MemoryCommand
+    expect(parseMemoryCommand(encodeMemoryCommand(command).slice(`/${MEMORY_COMMAND_NAME} `.length))).toEqual({ ok: true, command })
+    const result = { ok: true, cmd: 'apply-edits', decisionId: 'pd_1', memoryIds: ['m1', 'm2'], snapshotId: 'snap_1' }
+    expect(memoryCommandResultSchema.parse(JSON.parse(JSON.stringify(result)))).toEqual(result)
+    expect(memoryCommandResultSchema.parse({ ...result, isPartial: true })).toEqual({ ...result, isPartial: true })
   })
 })

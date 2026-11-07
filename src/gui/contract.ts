@@ -655,6 +655,15 @@ export const draftPlanOpSchema = z.object({
   absorbs: z.array(z.string()).optional(),
 })
 export type DraftPlanOp = z.infer<typeof draftPlanOpSchema>
+/**
+ * 「整理所选」应用的一项（apply-edits 的 ops）：改写带写进去的四个面（同直接改）；删除带 into，是计划里承接它内容的那条
+ * （本批的某个改写项或 keep 里的一条）。都带卡片版本。
+ */
+export const applyEditOpSchema = z.discriminatedUnion('kind', [
+  mergeRefSchema.extend({ kind: z.literal('edit'), content: z.string().min(1), name: z.string().min(1), summary: z.string(), tags: z.array(z.string()) }),
+  mergeRefSchema.extend({ kind: z.literal('forget'), into: z.string().optional() }),
+])
+export type ApplyEditOp = z.infer<typeof applyEditOpSchema>
 /** 直接改、直接合并写进去的四个字段；force：疑似密钥经用户确认后放行（高危密钥一律拦）。 */
 const editFields = {
   content: z.string().min(1),
@@ -762,6 +771,20 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
     request: z.string().refine(s => s.trim() !== '', { message: '要写 request' }),
     ops: z.array(draftPlanOpSchema).min(1).max(MAX_BATCH_EDIT),
   }),
+  /**
+   * 「整理所选」的应用全部：ops 是对照后要写的 1–20 项（按计划顺序，改写或删除），keep 是删除依据涉及、这次不写的记忆，只核对版本。
+   * 整批一份快照（pre-update），逐项写，全成后在账本里留一条已结清的 batch-edited（带逐项回执），结果的 decisionId 交给 undo 一次撤回。
+   * 目标 id 重复（ops 之间、ops 与 keep 之间）、不在同一作用域、删除的 into 不指向本批的改写项或 keep 回 invalid-args；
+   * 任一条不在用回 not-found；改写的目标含高危密钥、删除的目标含密钥（疑似也算）回 has-secret；版本对不上回 stale；
+   * 改写项四个面含高危密钥回 secret-critical，疑似回 secret-suspected，确认后带 force 重发。以上都什么都不写。
+   */
+  z.object({
+    cmd: z.literal('apply-edits'),
+    ops: z.array(applyEditOpSchema).min(1).max(MAX_BATCH_EDIT),
+    keep: z.array(mergeRefSchema).max(MAX_BATCH_EDIT).optional(),
+    force: z.boolean().optional(),
+    allowCrossWorkspace,
+  }),
   z.object({ cmd: z.literal('dismiss-overflow'), decisionId: z.string() }),
   /**
    * 忽略一条建议整理项：记下这几条记忆的指纹，之后该项不再出现在待处理、不再扣分；建议依据的字段变了就不再算已忽略。
@@ -858,10 +881,10 @@ export const GUI_ERROR_CODES = [
   'subagent-readonly',  // 借的会话是子 agent，不可写
   'governance-disabled', // 体检已关闭：裁决、撤销、提升、移到项目、留在本项目、体检、忽略超限不可用
   'has-secret',         // forget 的目标含密钥（任一级），只能彻底删除：什么都没动，界面确认后改发 hard-delete；
-                        // 直接改、直接合并的目标含密钥（界面上是遮盖后的正文）：什么都没动；让模型改、整理计划的目标含密钥：不发给模型
-  'stale',              // 直接改、直接合并、整理计划：记忆在卡片加载后被改过；任一类撤销（含等同撤销的恢复）：目标之后又被改过或已不在原处。什么都没动（合并撤销中途被第三方改过的停在第三方的版本）
-  'secret-critical',    // 直接改、直接合并的新内容含高危密钥：什么都没动；让模型改、整理计划的要求、此前的要求、计划或上一稿含高危密钥：不发给模型
-  'secret-suspected',   // 直接改、直接合并的新内容含疑似密钥：什么都没动，用户确认后带 force 重发
+                        // 直接改、直接合并、整理所选的应用的目标含密钥（界面上是遮盖后的正文）：什么都没动；让模型改、整理计划的目标含密钥：不发给模型
+  'stale',              // 直接改、直接合并、整理计划与应用：记忆在卡片加载后被改过；任一类撤销（含等同撤销的恢复）：目标之后又被改过或已不在原处。什么都没动（合并撤销中途被第三方改过的停在第三方的版本）
+  'secret-critical',    // 直接改、直接合并、整理所选的应用的新内容含高危密钥：什么都没动；让模型改、整理计划的要求、此前的要求、计划或上一稿含高危密钥：不发给模型
+  'secret-suspected',   // 直接改、直接合并、整理所选的应用的新内容含疑似密钥：什么都没动，用户确认后带 force 重发
   'claimed',            // 待决项正被另一次操作（别的标签页、宿主进程或体检）认领：什么都没动
   'busy',               // 体检：范围正在体检（别的体检认领着、没过期；「全部」有一个范围认领不到也算），或体检中途认领被别的进程接手。
                         // 没认领到时什么都没动；中途被接手的这次不再提交。和待决项的 claimed 是两回事
@@ -880,6 +903,8 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     decisionId: z.string().optional(),
     memoryIds: z.array(z.string()).optional(),
     snapshotId: z.string().optional(),
+    /** apply-edits：只应用了一部分（中途失败、已写的没能全部退回），memoryIds 只列实际留下的。 */
+    isPartial: z.literal(true).optional(),
     /** edit-memory / merge-memories：保留的那条写完后的文件（改了名称时文件名跟着变）；move-memory：移过去之后的文件。 */
     filePath: z.string().optional(),
     /**

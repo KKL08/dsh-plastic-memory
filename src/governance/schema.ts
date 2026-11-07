@@ -29,8 +29,10 @@ export function kindOf(entry: { kind?: PendingKind }): PendingKind {
  * fingerprint 是写完后的内容（editFingerprint），撤销前据此确认之后没被别处改过；
  * moved：全局记忆移到了项目（memoryIds 是那条，workspaces 是目标项目），snapshotId 是移动前的快照，fingerprint 同直接改。
  * rewritten / superseded：模型改写了 memoryIds 那条、模型把那条标成了已取代，snapshotId 是改前的快照，fingerprint 是改完后那条的内容（同直接改）。
+ * batch-edited：整理所选一次应用（种类 edit，memoryIds 是这次写下的全部，按计划顺序），snapshotId 是整批改前的快照，
+ * 不记 fingerprint，改记逐项回执 receipts。
  */
-export const SETTLED_VERDICTS = ['keep-both', 'dismiss', 'keep-left', 'keep-right', 'keep-local', 'promoted', 'edited', 'merged', 'moved', 'rewritten', 'superseded'] as const
+export const SETTLED_VERDICTS = ['keep-both', 'dismiss', 'keep-left', 'keep-right', 'keep-local', 'promoted', 'edited', 'merged', 'moved', 'rewritten', 'superseded', 'batch-edited'] as const
 export type SettledVerdict = (typeof SETTLED_VERDICTS)[number]
 
 /**
@@ -42,6 +44,18 @@ export function verdictLoser(entry: { kind?: PendingKind; memoryIds: string[]; b
   if (entry.baselineRef !== undefined) return verdict === 'keep-right' ? entry.memoryIds[0] : undefined
   return verdict === 'keep-left' ? entry.memoryIds[1] : verdict === 'keep-right' ? entry.memoryIds[0] : undefined
 }
+
+/**
+ * 整理所选一次应用的逐项回执：这一项是改写还是删除，写下时的内容指纹（editFingerprint，取实际提交的那份），
+ * 写完后应有的状态（改写 active、删除 deleted）。撤销前逐项比对，状态和指纹都对得上才算「还是那次写下的」。
+ */
+export const batchReceiptSchema = z.object({
+  memoryId: z.string(),
+  op: z.enum(['edit', 'forget']),
+  fingerprint: z.string(),
+  expectedStatus: z.enum(['active', 'deleted']),
+})
+export type BatchReceipt = z.infer<typeof batchReceiptSchema>
 
 export const pendingDecisionSchema = z.object({
   id: z.string(),
@@ -55,6 +69,8 @@ export const pendingDecisionSchema = z.object({
   /** 冲突：最近一次扫描时双方的内容指纹（垂直冲突含基线），见 conflictFingerprint；提升候选：记忆内容指纹；超限：档位号；
    *  直接改、移到项目：写完后的内容指纹。旧条目没有此字段。 */
   fingerprint: z.string().optional(),
+  /** 整理所选的应用（batch-edited）：逐项回执，与 memoryIds 同序。其余条目没有此字段。 */
+  receipts: z.array(batchReceiptSchema).optional(),
   /** 模型改写、替代：哪个会话里哪次 memory_save 调用改的（对话卡按 callId、右侧栏按 sessionId 认领）；替代时 by 是替代它的那条。 */
   origin: z.object({ sessionId: z.string(), callId: z.string(), by: z.string().optional() }).optional(),
   /**

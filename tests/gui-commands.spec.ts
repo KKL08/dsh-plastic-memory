@@ -13,7 +13,7 @@ import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE, STATE_DIR, WORKSPACE_MARKER, works
 import { MemoryStore, type MemoryLogger, type MemoryTable } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { PendingDecisionsStore, candidateFingerprint, conflictFingerprint } from '../src/governance/decisions.ts'
-import { SnapshotStore } from '../src/governance/snapshots.ts'
+import { SnapshotStore, editFingerprint } from '../src/governance/snapshots.ts'
 import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
@@ -4274,5 +4274,271 @@ describe('migrate-type', () => {
     expect(err(await e.runRaw(' migrate-type {"from":"domain-term","action":"retype"}')).code).toBe('invalid-args')
     const sub = env({ delegationDepth: 1 })
     expect(err(await sub.run({ cmd: 'migrate-type', from: 'domain-term', action: 'forget' })).code).toBe('subagent-readonly')
+  })
+})
+
+describe('apply-edits（整理所选：应用全部）', () => {
+  const LATER = NOW + 1000
+  const wsScope = { kind: 'workspace', workspacePath: SESSION_WS } as const
+  type ApplyCommand = Extract<MemoryCommand, { cmd: 'apply-edits' }>
+  type Ref = { memoryId: string; layer: Scope; base: { updatedAt: number; digest: string } }
+  const SEED = [
+    { id: 'mem_p', name: '格式化用 prettier', content: '代码格式化统一用 prettier。' },
+    { id: 'mem_c', name: '提交前检查', content: '提交前依次跑 pnpm lint && prettier --write .' },
+    { id: 'mem_e', name: '编辑器设置', content: 'VS Code 装 prettier 扩展。' },
+    { id: 'mem_b', name: '格式化改用 biome', content: '11 月起格式化改用 biome。' },
+  ] as const
+
+  async function seed(e: ReturnType<typeof env>, workspacePath = SESSION_WS) {
+    for (const m of SEED) await e.store.create(record({ ...m, tags: ['格式化'], scope: 'workspace', workspacePath }))
+  }
+  async function refOf(e: ReturnType<typeof env>, id: string, layer: Scope = wsScope): Promise<Ref> {
+    const r = (await locateCopy(e.store, id, layer))!
+    return { memoryId: id, layer, base: { updatedAt: r.updatedAt, digest: computeDigest(r.name, r.summary, r.content) } }
+  }
+  const edit = async (e: ReturnType<typeof env>, id: string, fields: object = {}, layer?: Scope) =>
+    ({ kind: 'edit' as const, ...await refOf(e, id, layer), content: `${id} 改写后`, name: `${id} 新名`, summary: `${id} 新摘要`, tags: ['biome'], ...fields })
+  const forget = async (e: ReturnType<typeof env>, id: string, into?: string, layer?: Scope) =>
+    ({ kind: 'forget' as const, ...await refOf(e, id, layer), ...(into !== undefined ? { into } : {}) })
+  const apply = (e: ReturnType<typeof env>, fields: Omit<ApplyCommand, 'cmd'>) => e.run({ cmd: 'apply-edits', ...fields })
+  const files = async (e: ReturnType<typeof env>, workspacePath = SESSION_WS) =>
+    Promise.all(SEED.map(async m => { const at = await e.store.locate(m.id, scopeAt(workspacePath)); return at === undefined ? undefined : [at.filePath, await readFile(at.filePath, 'utf8')] }))
+  const statusOf = async (e: ReturnType<typeof env>, id: string) => (await locateCopy(e.store, id, wsScope))?.status
+
+  it('混合批次：按计划顺序逐项写，整批一份快照，删除项进最近删除并清掉指向它们的账本条目，记一条带逐项回执的 batch-edited', async () => {
+    const e = env()
+    await seed(e)
+    const stale = await e.decisions.upsert({ memoryIds: ['mem_p', 'mem_x'], summary: '旧冲突', fingerprint: 'fp' }, 1)
+    const command = { ops: [await forget(e, 'mem_p', 'mem_c'), await edit(e, 'mem_c'), await edit(e, 'mem_e'), await forget(e, 'mem_b', 'mem_k')], keep: [] as Ref[] }
+    // 承接到 keep 的删除：被承接的那条只核对版本，不写
+    await e.store.create(record({ id: 'mem_k', name: '承接', content: '只核对', scope: 'workspace', workspacePath: SESSION_WS }))
+    command.keep.push(await refOf(e, 'mem_k'))
+    const keptFile = await readFile((await e.store.locate('mem_k', scopeAt(SESSION_WS)))!.filePath, 'utf8')
+    e.clock.now = LATER
+    const body = ok(await apply(e, command))
+
+    expect(body.memoryIds).toEqual(['mem_p', 'mem_c', 'mem_e', 'mem_b'])
+    const after = async (id: string) => (await locateCopy(e.store, id, wsScope))!
+    expect(await after('mem_c')).toMatchObject({ status: 'active', content: 'mem_c 改写后', name: 'mem_c 新名', summary: 'mem_c 新摘要', tags: ['biome'], updatedAt: LATER, lastConfirmedAt: LATER, handEdited: true })
+    expect(await after('mem_e')).toMatchObject({ status: 'active', content: 'mem_e 改写后' })
+    expect([(await after('mem_p')).status, (await after('mem_b')).status]).toEqual(['deleted', 'deleted'])
+    expect([(await after('mem_p')).deletedAt, (await after('mem_p')).content]).toEqual([LATER, '代码格式化统一用 prettier。'])
+    expect(await readFile((await e.store.locate('mem_k', scopeAt(SESSION_WS)))!.filePath, 'utf8')).toBe(keptFile)
+    expect(deletedViewSchema.parse(await e.readView('deleted')).items.map(i => i.memory.id).sort()).toEqual(['mem_b', 'mem_p'])
+
+    const snaps = await e.snapshots.list()
+    expect(snaps).toHaveLength(1)
+    expect(snaps[0]).toMatchObject({ id: body.snapshotId, operation: 'pre-update', description: '整理所选 4 条前' })
+    expect([...snaps[0]!.memoryIds].sort()).toEqual(['mem_b', 'mem_c', 'mem_e', 'mem_p'])
+    expect(snaps[0]!.data.find(r => r.id === 'mem_c')?.content).toBe('提交前依次跑 pnpm lint && prettier --write .')
+
+    const entries = await allEntries(e)
+    expect(entries.map(d => d.id)).toEqual([body.decisionId])
+    expect(entries.some(d => d.id === stale.entry.id)).toBe(false)
+    const entry = entries[0]!
+    expect(entry).toMatchObject({ kind: 'edit', memoryIds: ['mem_p', 'mem_c', 'mem_e', 'mem_b'], settled: { verdict: 'batch-edited', at: LATER, snapshotId: body.snapshotId } })
+    expect(entry.receipts).toEqual(await Promise.all([['mem_p', 'forget'], ['mem_c', 'edit'], ['mem_e', 'edit'], ['mem_b', 'forget']].map(async ([id, op]) => ({
+      memoryId: id, op, fingerprint: editFingerprint(await after(id!)), expectedStatus: op === 'edit' ? 'active' : 'deleted',
+    }))))
+    // 视图已重写：改写的内容出现在全部记忆里
+    expect(libraryViewSchema.parse(await e.readView('library')).layers.flatMap(l => l.items).find(m => m.id === 'mem_c')?.content).toBe('mem_c 改写后')
+  })
+
+  it('待确认的子 agent 记忆被改写：算用户升档（同直接改）', async () => {
+    const e = env()
+    await seed(e)
+    const creator = { sessionId: 'sess-sub', depth: 1, parentSessionId: 'sess-1' }
+    await e.store.update({ id: 'mem_c', workspacePath: SESSION_WS }, r => ({ ...r, delegation: creator }), scopeAt(SESSION_WS))
+    e.clock.now = LATER
+    ok(await apply(e, { ops: [await edit(e, 'mem_c'), await forget(e, 'mem_p', 'mem_c')] }))
+    expect((await locateCopy(e.store, 'mem_c', wsScope))!.delegation).toEqual({ ...creator, reviewed: { by: 'user', at: LATER } })
+  })
+
+  describe('输入校验：invalid-args，不拍快照、什么都不写', () => {
+    it.each([
+      ['同一条既改又删', async (e: ReturnType<typeof env>) => ({ ops: [await edit(e, 'mem_c'), await forget(e, 'mem_c')] })],
+      ['同一条改两次', async (e: ReturnType<typeof env>) => ({ ops: [await edit(e, 'mem_c'), await edit(e, 'mem_c')] })],
+      ['改动项又列进 keep', async (e: ReturnType<typeof env>) => ({ ops: [await edit(e, 'mem_c'), await forget(e, 'mem_p', 'mem_c')], keep: [await refOf(e, 'mem_c')] })],
+      ['删除的承接指向本批以外', async (e: ReturnType<typeof env>) => ({ ops: [await forget(e, 'mem_p', 'mem_b')] })],
+      ['删除的承接指向另一个删除项', async (e: ReturnType<typeof env>) => ({ ops: [await forget(e, 'mem_p', 'mem_b'), await forget(e, 'mem_b')] })],
+      ['删除的承接指向自己', async (e: ReturnType<typeof env>) => ({ ops: [await forget(e, 'mem_p', 'mem_p')] })],
+      ['命令里写的作用域不是同一个', async (e: ReturnType<typeof env>) => ({ ops: [await edit(e, 'mem_c'), await edit(e, 'mem_g', {}, { kind: 'global' })] })],
+      ['没写作用域、定位后不在同一个作用域', async (e: ReturnType<typeof env>) => {
+        const { layer: _l1, ...c } = await edit(e, 'mem_c')
+        const { layer: _l2, ...g } = await edit(e, 'mem_g', {}, { kind: 'global' })
+        return { ops: [c, g] }
+      }],
+    ] as const)('%s', async (_label, build) => {
+      const e = env()
+      await seed(e)
+      await e.store.create(record({ id: 'mem_g', content: '全局那条' }))
+      const before = await files(e)
+      const body = err(await apply(e, await build(e) as Omit<ApplyCommand, 'cmd'>))
+      expect(body.code).toBe('invalid-args')
+      expect(await files(e)).toEqual(before)
+      expect(await e.snapshots.list()).toEqual([])
+      expect(await allEntries(e)).toEqual([])
+    })
+  })
+
+  it('任一条不在用：not-found，什么都不写', async () => {
+    const e = env()
+    await seed(e)
+    const command = { ops: [await edit(e, 'mem_c'), await forget(e, 'mem_p', 'mem_c')] }
+    await e.store.softDelete({ id: 'mem_p', workspacePath: SESSION_WS }, { at: scopeAt(SESSION_WS), now: NOW })
+    const before = await files(e)
+    expect(err(await apply(e, command)).code).toBe('not-found')
+    expect(await files(e)).toEqual(before)
+    expect(await e.snapshots.list()).toEqual([])
+  })
+
+  it('任一条在卡片加载后被改过：stale，什么都不写', async () => {
+    const e = env()
+    await seed(e)
+    const command = { ops: [await edit(e, 'mem_c'), await edit(e, 'mem_e')] }
+    await e.store.update({ id: 'mem_e', workspacePath: SESSION_WS }, r => ({ ...r, content: '别处改了', updatedAt: NOW + 5 }), scopeAt(SESSION_WS))
+    const before = await files(e)
+    expect(err(await apply(e, command)).code).toBe('stale')
+    expect(await files(e)).toEqual(before)
+    expect(await e.snapshots.list()).toEqual([])
+    expect(await allEntries(e)).toEqual([])
+  })
+
+  it.each([
+    ['改写的目标含高危密钥', { mem_c: `token ${FAKE_SECRET.sk}` }, async (e: ReturnType<typeof env>) => ({ ops: [await edit(e, 'mem_c')] })],
+    ['删除的目标含疑似密钥（软删不了）', { mem_p: '内部约定 api_key: TESTONLY0000000000000' }, async (e: ReturnType<typeof env>) => ({ ops: [await edit(e, 'mem_c'), await forget(e, 'mem_p', 'mem_c')] })],
+  ] as const)('%s：has-secret，什么都不写', async (_label, contents, build) => {
+    const e = env()
+    await seed(e)
+    for (const [id, content] of Object.entries(contents)) await e.store.update({ id, workspacePath: SESSION_WS }, r => ({ ...r, content }), scopeAt(SESSION_WS))
+    const before = await files(e)
+    expect(err(await apply(e, await build(e))).code).toBe('has-secret')
+    expect(await files(e)).toEqual(before)
+    expect(await e.snapshots.list()).toEqual([])
+  })
+
+  it.each(['content', 'name', 'summary', 'tags'] as const)('改写项的 %s 含高危密钥：secret-critical，什么都不写', async (field) => {
+    const e = env()
+    await seed(e)
+    const secret = `token ${FAKE_SECRET.sk}`
+    const before = await files(e)
+    const body = err(await apply(e, { ops: [await edit(e, 'mem_c'), await edit(e, 'mem_e', { [field]: field === 'tags' ? [secret] : secret })] }))
+    expect(body.code).toBe('secret-critical')
+    expect(await files(e)).toEqual(before)
+    expect(await e.snapshots.list()).toEqual([])
+  })
+
+  it('改写项含疑似密钥：先回 secret-suspected 什么都不写；确认后带 force 重发写入', async () => {
+    const e = env()
+    await seed(e)
+    const command = { ops: [await edit(e, 'mem_c', { content: '测试库 api_key: TESTONLY0000000000000000' }), await forget(e, 'mem_p', 'mem_c')] }
+    const before = await files(e)
+    expect(err(await apply(e, command)).code).toBe('secret-suspected')
+    expect(await files(e)).toEqual(before)
+    ok(await apply(e, { ...command, force: true }))
+    expect((await locateCopy(e.store, 'mem_c', wsScope))!.content).toBe('测试库 api_key: TESTONLY0000000000000000')
+    expect(await statusOf(e, 'mem_p')).toBe('deleted')
+  })
+
+  it('其他项目的记忆：过跨项目门，先回 cross-workspace 什么都不写；带 allowCrossWorkspace 后成功', async () => {
+    const e = env()
+    await seed(e, OTHER_WS)
+    const other = { kind: 'workspace', workspacePath: OTHER_WS } as const
+    const command = { ops: [await edit(e, 'mem_c', {}, other), await forget(e, 'mem_p', 'mem_c', other)] }
+    const before = await files(e, OTHER_WS)
+    const body = err(await apply(e, command))
+    expect(body.code).toBe('cross-workspace')
+    expect(body.rejected?.[0]?.workspacePath).toBe(OTHER_WS)
+    expect(await files(e, OTHER_WS)).toEqual(before)
+    expect(await e.snapshots.list()).toEqual([])
+    ok(await apply(e, { ...command, allowCrossWorkspace: true }))
+    expect((await locateCopy(e.store, 'mem_p', other))!.status).toBe('deleted')
+  })
+
+  describe('撤销全部（undo batch-edited）', () => {
+    it.each([
+      ['多条改写', async (e: ReturnType<typeof env>) => [await edit(e, 'mem_c'), await edit(e, 'mem_e'), await edit(e, 'mem_b')]],
+      ['全是删除', async (e: ReturnType<typeof env>) => [await forget(e, 'mem_p'), await forget(e, 'mem_e')]],
+      ['改写和删除混合', async (e: ReturnType<typeof env>) => [await forget(e, 'mem_p', 'mem_c'), await edit(e, 'mem_c'), await forget(e, 'mem_e')]],
+    ] as const)('%s：一次恢复整批，文件逐字节复原，最近删除清空，条目移出账本', async (_label, build) => {
+      const e = env()
+      await seed(e)
+      const before = await files(e)
+      const ops = await build(e)
+      e.clock.now = LATER
+      const body = ok(await apply(e, { ops }))
+      expect(await files(e)).not.toEqual(before)
+
+      const undone = ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
+      expect([...undone.memoryIds!].sort()).toEqual(ops.map(op => op.memoryId).sort())
+      expect(await files(e)).toEqual(before)
+      expect(deletedViewSchema.parse(await e.readView('deleted')).items).toEqual([])
+      expect(await allEntries(e)).toEqual([])
+    })
+
+    it('体检关闭时也能撤（同直接改）', async () => {
+      const e = env({ governanceEnabled: false })
+      await seed(e)
+      const before = await files(e)
+      const body = ok(await apply(e, { ops: [await edit(e, 'mem_c'), await forget(e, 'mem_p', 'mem_c')] }))
+      ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
+      expect(await files(e)).toEqual(before)
+    })
+
+    it('其中一条之后又被改过：stale，整批不动（改写的留着、删除的仍在最近删除），条目留着', async () => {
+      const e = env()
+      await seed(e)
+      const body = ok(await apply(e, { ops: [await forget(e, 'mem_p', 'mem_c'), await edit(e, 'mem_c'), await edit(e, 'mem_e')] }))
+      await e.store.update({ id: 'mem_e', workspacePath: SESSION_WS }, r => ({ ...r, content: '用户又改的' }), scopeAt(SESSION_WS))
+      const before = await files(e)
+      expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('stale')
+      expect(await files(e)).toEqual(before)
+      expect(await statusOf(e, 'mem_p')).toBe('deleted')
+      expect((await allEntries(e)).map(d => d.id)).toEqual([body.decisionId])
+    })
+
+    it('删掉的那条先在最近删除里单独恢复了：stale，整批不动', async () => {
+      const e = env()
+      await seed(e)
+      const body = ok(await apply(e, { ops: [await forget(e, 'mem_p', 'mem_c'), await edit(e, 'mem_c')] }))
+      ok(await e.run({ cmd: 'restore', memoryId: 'mem_p', layer: wsScope }))
+      expect(await statusOf(e, 'mem_p')).toBe('active')
+      const before = await files(e)
+      expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('stale')
+      expect(await files(e)).toEqual(before)
+      expect((await locateCopy(e.store, 'mem_c', wsScope))!.content).toBe('mem_c 改写后')
+      expect((await allEntries(e)).map(d => d.id)).toEqual([body.decisionId])
+    })
+
+    it('第二项写回后才抛错（写完维护目录时报错）：已写回的连同这一项一起退回，条目留着，修好后能重撤', async () => {
+      const e = env()
+      await seed(e)
+      const before = await files(e)
+      const body = ok(await apply(e, { ops: [await forget(e, 'mem_p', 'mem_c'), await edit(e, 'mem_c'), await edit(e, 'mem_e')] }))
+      const applied = await files(e)
+      const restore = e.snapshots.restore.bind(e.snapshots)
+      e.snapshots.restore = (async (...args: Parameters<typeof restore>) => {
+        const r = await restore(...args)
+        if (args[1]?.includes('mem_c') === true) throw new Error('维护目录失败')
+        return r
+      }) as typeof restore
+      expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))).toMatchObject({ code: 'failed', detail: '维护目录失败' })
+      expect(await files(e)).toEqual(applied)
+      expect((await allEntries(e)).map(d => d.id)).toEqual([body.decisionId])
+
+      e.snapshots.restore = restore
+      ok(await e.run({ cmd: 'undo', decisionId: body.decisionId! }))
+      expect(await files(e)).toEqual(before)
+    })
+
+    it('改前快照缺了其中一项（已清掉）：撤不了（not-found，过期），整批不动', async () => {
+      const e = env()
+      await seed(e)
+      const body = ok(await apply(e, { ops: [await forget(e, 'mem_p', 'mem_c'), await edit(e, 'mem_c')] }))
+      await e.snapshots.purge(r => r.id === 'mem_p')
+      const before = await files(e)
+      expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('not-found')
+      expect(await files(e)).toEqual(before)
+    })
   })
 })

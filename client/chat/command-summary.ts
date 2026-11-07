@@ -39,6 +39,7 @@ function actionOf(command: MemoryCommand): Summary {
     case 'confirm': return { key: 'chat.command.confirm' }
     case 'edit-memory': return { key: 'chat.command.edit' }
     case 'merge-memories': return { key: 'chat.command.merge' }
+    case 'apply-edits': return { key: 'chat.command.applyEdits', params: { n: command.ops.length } }
     case 'dismiss-overflow': return { key: 'chat.command.dismissOverflow' }
     case 'ignore-advice': return { key: 'chat.command.ignoreAdvice' }
     case 'unignore-advice': return { key: 'chat.command.unignoreAdvice' }

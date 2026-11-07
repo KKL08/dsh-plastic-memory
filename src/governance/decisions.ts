@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import type { ClaimKvTable } from '../kv-table.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { OverflowLevel } from '../contract-codes.ts'
-import { genId, kindOf, verdictLoser, type PendingDecision, type PendingKind, type SettledVerdict } from './schema.ts'
+import { genId, kindOf, verdictLoser, type BatchReceipt, type PendingDecision, type PendingKind, type SettledVerdict } from './schema.ts'
 import { isUndoExpired } from './undo-rules.ts'
 import { editFingerprint } from './snapshots.ts'
 
@@ -325,7 +325,7 @@ export class PendingDecisionsStore {
    * 撤销记录走下面按种类的方法；就地处理时才记的提升、留下也直接用它（isBornSettled 见 schema）。超出保留窗口由 sweep 清掉。
    */
   async addSettled(
-    input: { kind: PendingKind; memoryIds: string[]; summary: string; workspaces: string[]; fingerprint: string; origin?: PendingDecision['origin'] },
+    input: { kind: PendingKind; memoryIds: string[]; summary: string; workspaces: string[]; fingerprint?: string; receipts?: BatchReceipt[]; origin?: PendingDecision['origin'] },
     verdict: SettledVerdict, now: number,
     opts: { snapshotId?: string; isBornSettled?: true; misplacedIgnore?: MisplacedIgnore } = {},
   ): Promise<PendingDecision> {
@@ -345,6 +345,17 @@ export class PendingDecisionsStore {
   /** 直接改、直接合并：written 是保留的那条，memoryIds 是保留的那条（合并时再跟上删掉的那条）。 */
   addEdit(written: MemoryRecord, input: { memoryIds: string[]; summary: string; workspaces: string[] }, verdict: 'edited' | 'merged', snapshotId: string, now: number) {
     return this.addSettled({ kind: 'edit', ...input, fingerprint: editFingerprint(written) }, verdict, now, { snapshotId })
+  }
+
+  /**
+   * 整理所选的应用：writes 是这次提交的每一项（按计划顺序），written 是那一项实际提交的那份（改写是 update 的返回值，
+   * 删除是软删时锁内那份），回执的指纹按它算；改写写完应是在用，删除写完应在最近删除里。
+   */
+  addBatchEdit(
+    writes: ReadonlyArray<{ memoryId: string; op: BatchReceipt['op']; written: MemoryRecord }>, input: { summary: string; workspaces: string[] }, snapshotId: string, now: number,
+  ) {
+    const receipts = writes.map((w): BatchReceipt => ({ memoryId: w.memoryId, op: w.op, fingerprint: editFingerprint(w.written), expectedStatus: w.op === 'edit' ? 'active' : 'deleted' }))
+    return this.addSettled({ kind: 'edit', memoryIds: writes.map(w => w.memoryId), ...input, receipts }, 'batch-edited', now, { snapshotId })
   }
 
   /** 全局记忆移到项目：written 是移过去的那一份。 */
