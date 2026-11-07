@@ -118,8 +118,9 @@ export function EditPanel({ initial, original, isMerge, unavailable, onCancel, o
         : null}
       <div className="pm-edit-foot">
         <span className="pm-edit-hint">
-          {isMerge ? <span>{t('pending.edit.mergeNote')}</span> : null}
-          {isMoreOpen ? <span>{t('pending.edit.typeFixed')}</span> : null}
+          {isMerge
+            ? <><span>{t('pending.edit.mergeNote')}</span>{isMoreOpen ? <span>{t('pending.edit.typeFixed')}</span> : null}</>
+            : <span>{t('pending.edit.note')}</span>}
         </span>
         <span className="pm-edit-count">{t('pending.edit.count', { from: formatNumber(original.chars), to: formatNumber(content.length) })}</span>
         <Button variant="ghost" unavailable={unavailable} onClick={onCancel}>{t('pending.cancel')}</Button>

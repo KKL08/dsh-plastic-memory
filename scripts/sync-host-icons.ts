@@ -44,6 +44,7 @@ export const HOST_ICONS = {
   chevronsUpDown: 'IconChevronsUpDownOutlineRegular',
   trash: 'IconTrashOutlineRegular',
   plus: 'IconPlusOutlineRegular',
+  openFile: 'IconRightUpOutlineRegular',
 } as const
 
 const ATTRS = ['d', 'cx', 'cy', 'r', 'x', 'y', 'width', 'height', 'rx', 'x1', 'y1', 'x2', 'y2', 'fill', 'stroke', 'stroke-linecap', 'stroke-linejoin', 'stroke-miterlimit', 'fill-rule', 'clip-rule'] as const

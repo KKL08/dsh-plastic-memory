@@ -2,10 +2,11 @@
 import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { GUI_VIEW_VERSION, checkupKey, type LibraryView, type MemoryCommandResult, type PendingView } from '../../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, checkupKey, type LibraryView, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type PendingView } from '../../src/gui/contract.ts'
 import type { BorrowedSession } from '../gateway.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
-import { createNavStore } from '../nav.ts'
+import { createNavStore, type PageScope } from '../nav.ts'
+import { EDIT_MODE_STORAGE_KEY } from '../pending/edit-modes.tsx'
 import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { LibraryTab } from './LibraryTab.tsx'
 import type { FoldMemory } from './groups.tsx'
@@ -115,10 +116,10 @@ describe('全部记忆', () => {
     expect(screen.getByRole('status')).toHaveTextContent('没有找到匹配的记忆')
   })
 
-  it('行尾先是「删除」（幽灵按钮），再是「打开文件」；没有「在访达中显示」', () => {
+  it('没有版本（digest）的行尾只有「删除」（幽灵按钮）和「打开文件」（纯图标）；没有「在访达中显示」', () => {
     renderInShell(<LibraryTab nav={createNavStore()} scope={app} session={session} now={NOW} />, createFakeGateway({ views: { library: library() } }))
     const buttons = within(rowOf('提交前跑 typecheck')).getAllByRole('button')
-    expect(buttons.map(b => b.textContent)).toEqual(['删除', '打开文件'])
+    expect(buttons.map(b => b.getAttribute('aria-label') ?? b.textContent)).toEqual(['删除', '打开文件'])
     expect(buttons[0]).toHaveClass('pm-btn--ghost')
   })
 
@@ -718,6 +719,346 @@ describe('全部记忆', () => {
       expect(rowOf('测试里不要 mock 数据库，用 testcontainers 起真实 Postgres。')).toHaveClass('pm-flash')
       expect(scrollIntoView).toHaveBeenCalledTimes(1)
     })
+  })
+})
+
+describe('记忆查看：单条修改', () => {
+  const target = memory({ id: 'a1', name: '发版流程', content: '每周三发版，先跑测试再打包。', summary: '发版的节奏', tags: ['发版'], digest: 'sha1:a1', updatedAt: 111, filePath: '/m/app-1/a1.md' })
+  const other = memory({ id: 'a2', name: '提交前检查', content: '提交前跑 typecheck', summary: '提交前', digest: 'sha1:a2', updatedAt: 222, filePath: '/m/app-1/a2.md' })
+  const base = { updatedAt: 111, digest: 'sha1:a1' }
+  const view = (items = [target, other]) => library({ layers: [{ layer: app, items }] })
+  const drafted = (draft: object = {}): MemoryCommandResult => ({ ok: true, cmd: 'draft-edit', draft: { content: '每周四发版，先跑测试再打包。', summary: '发版的节奏', ...draft }, model: 'deepseek-v4-flash' } as MemoryCommandResult)
+  const edited: MemoryCommandResult = { ok: true, cmd: 'edit-memory', decisionId: 'pd_e', memoryIds: ['a1'], snapshotId: 'snap_e', filePath: '/m/app-1/a1.md' }
+  const respondWith = (draft: object = {}) => (command: MemoryCommand): MemoryCommandResult | Promise<MemoryCommandResult> =>
+    command.cmd === 'draft-edit' ? drafted(draft) : command.cmd === 'edit-memory' ? edited : { ok: true, cmd: command.cmd }
+  const critical = `${'sk-' + 'TESTONLY'.padEnd(24, 'a')}`
+
+  function setup({ items, respond = respondWith(), model, scope = app }: {
+    items?: MemoryCard[]
+    respond?: (command: MemoryCommand) => MemoryCommandResult | Promise<MemoryCommandResult>
+    model?: string | null
+    scope?: PageScope
+  } = {}) {
+    const gateway = createFakeGateway({ views: { library: view(items) }, respond, ...(model !== undefined ? { model } : {}) })
+    const utils = renderInShell(<LibraryTab nav={createNavStore({ view: 'library' })} scope={scope} session={session} now={NOW} />, gateway)
+    return { gateway, utils, commands: () => gateway.executed.map(e => e.command) }
+  }
+  /** 记忆卡原文是这一句的那一行（面板里的编辑框、对照也有同样的字，不能按全文找）。 */
+  const row = (text = '每周三发版，先跑测试再打包。') => {
+    const hit = [...document.querySelectorAll<HTMLElement>('.pm-list > li')].find(li => li.querySelector('.pm-mc-text')?.firstChild?.textContent === text)
+    if (hit === undefined) throw new Error(`没有原文是「${text}」的行`)
+    return hit
+  }
+  const open = (li = row()) => { fireEvent.click(within(li).getByRole('button', { name: '修改' })) }
+  const ask = () => screen.getByRole('textbox', { name: '想怎么改这条？' })
+  const write = (text: string) => { fireEvent.change(ask(), { target: { value: text } }) }
+  const generate = async () => { await act(async () => { fireEvent.click(screen.getByRole('button', { name: '生成修改' })) }) }
+  const apply = async () => { await act(async () => { fireEvent.click(screen.getByRole('button', { name: '应用' })) }) }
+
+  beforeEach(() => { localStorage.clear() })
+  afterEach(() => { vi.useRealTimers(); localStorage.clear() })
+
+  it('故事 1：行尾依次是「修改」（小号次按钮）·「删除」（幽灵）·「打开文件」（纯图标，读屏名称和悬停提示都是「打开文件」）', () => {
+    const { gateway } = setup()
+    const buttons = within(row()).getAllByRole('button')
+    expect(buttons.map(b => b.getAttribute('aria-label') ?? b.textContent)).toEqual(['修改', '删除', '打开文件'])
+    expect(buttons[0]).toHaveClass('pm-btn--secondary')
+    expect(buttons[1]).toHaveClass('pm-btn--ghost')
+    expect(buttons[2]).toHaveClass('pm-btn--icon')
+    expect(buttons[2]).toHaveAttribute('title', '打开文件')
+    expect(buttons[2]).toHaveTextContent(/^$/)
+    expect(buttons[2]!.querySelector('svg')).not.toBeNull()
+    fireEvent.click(buttons[2]!)
+    expect(gateway.opened).toEqual([{ path: '/m/app-1/a1.md' }])
+  })
+
+  it('故事 1：含密钥或没有版本（digest）的不显示「修改」；「全部」范围同样有「修改」', () => {
+    const secret = memory({ id: 'a3', content: '部署 token [已隐藏]', digest: 'sha1:a3', hasSecret: true })
+    const bare = memory({ id: 'a4', content: '没有版本的那条' })
+    const { utils } = setup({ items: [target, secret, bare] })
+    expect(within(row('部署 token [已隐藏]')).queryByRole('button', { name: '修改' })).toBeNull()
+    expect(within(row('没有版本的那条')).queryByRole('button', { name: '修改' })).toBeNull()
+    utils.unmount()
+    setup({ items: [{ ...target, updatedAt: NOW - HOUR }], scope: { kind: 'all' } })
+    expect(within(row()).getByRole('button', { name: '修改' })).toBeInTheDocument()
+  })
+
+  it('故事 2：点「修改」在这一行下展开面板，行尾按钮收起；默认停在「让模型改」', () => {
+    setup()
+    open()
+    const li = row()
+    expect(within(li).getByRole('tablist', { name: '修改方式' })).toBeInTheDocument()
+    expect(within(li).getByRole('tab', { name: '让模型改' })).toHaveAttribute('aria-selected', 'true')
+    expect(within(li).queryByRole('button', { name: '删除' })).toBeNull()
+    expect(within(li).queryByRole('button', { name: '打开文件' })).toBeNull()
+    expect(within(li).getByRole('textbox', { name: '想怎么改这条？' })).toBeInTheDocument()
+    // 别的行照常
+    expect(within(row('提交前跑 typecheck')).getByRole('button', { name: '修改' })).toBeInTheDocument()
+    fireEvent.click(within(li).getByRole('button', { name: '取消' }))
+    expect(within(row()).getByRole('button', { name: '修改' })).toBeInTheDocument()
+  })
+
+  it('故事 2：同一时刻只展开一个面板；没写东西时直接换过去', () => {
+    setup()
+    open()
+    open(row('提交前跑 typecheck'))
+    expect(screen.getAllByRole('tablist')).toHaveLength(1)
+    expect(within(row('提交前跑 typecheck')).getByRole('tablist', { name: '修改方式' })).toBeInTheDocument()
+    expect(within(row()).getByRole('button', { name: '修改' })).toBeInTheDocument()
+  })
+
+  it('故事 2：已展开的面板有没发出的输入时，换行前先原位问「放弃刚写的内容？」；取消留在原处，确认后再换', () => {
+    setup()
+    open()
+    write('再短一点')
+    open(row('提交前跑 typecheck'))
+    const question = within(row('提交前跑 typecheck')).getByRole('group', { name: '放弃刚写的内容？' })
+    expect(ask()).toHaveValue('再短一点')
+    fireEvent.click(within(question).getByRole('button', { name: '取消' }))
+    expect(within(row('提交前跑 typecheck')).queryByRole('group', { name: '放弃刚写的内容？' })).toBeNull()
+    expect(ask()).toHaveValue('再短一点')
+    open(row('提交前跑 typecheck'))
+    fireEvent.click(within(within(row('提交前跑 typecheck')).getByRole('group', { name: '放弃刚写的内容？' })).getByRole('button', { name: '放弃' }))
+    expect(screen.getAllByRole('tablist')).toHaveLength(1)
+    expect(within(row('提交前跑 typecheck')).getByRole('tablist')).toBeInTheDocument()
+    expect(ask()).toHaveValue('')
+  })
+
+  it('故事 2：已出稿没应用也算没保存的内容，换行前先问', async () => {
+    setup()
+    open()
+    write('改成周四')
+    await generate()
+    open(row('提交前跑 typecheck'))
+    expect(within(row('提交前跑 typecheck')).getByRole('group', { name: '放弃刚写的内容？' })).toBeInTheDocument()
+  })
+
+  it('故事 2a：选过手动改，下次在别的行打开也停在手动改（和待处理共用偏好）', () => {
+    setup()
+    open()
+    fireEvent.click(screen.getByRole('tab', { name: '手动改' }))
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    open(row('提交前跑 typecheck'))
+    expect(screen.getByRole('tab', { name: '手动改' })).toHaveAttribute('aria-selected', 'true')
+    expect(localStorage.getItem(EDIT_MODE_STORAGE_KEY)).toBe('manual')
+  })
+
+  it('故事 2b：切换方式不丢输入；生成中切换控件置灰', async () => {
+    setup({ respond: command => (command.cmd === 'draft-edit' ? new Promise<never>(() => {}) : { ok: true, cmd: command.cmd }) })
+    open()
+    write('改成周四')
+    fireEvent.click(screen.getByRole('tab', { name: '手动改' }))
+    fireEvent.click(screen.getByRole('tab', { name: '让模型改' }))
+    expect(ask()).toHaveValue('改成周四')
+    await generate()
+    expect(screen.getByRole('tab', { name: '手动改' })).toBeDisabled()
+  })
+
+  it('故事 2c：手动改：正文预填，「更多」里是名称、摘要、标签；字数、说明；正文或名称为空时「保存」置灰', () => {
+    localStorage.setItem(EDIT_MODE_STORAGE_KEY, 'manual')
+    setup()
+    open()
+    const li = row()
+    const content = within(li).getByRole('textbox', { name: '正文' })
+    expect(content).toHaveValue('每周三发版，先跑测试再打包。')
+    expect(within(li).getByText('直接改正文，保存后可以撤销。类型改不了：换类型要先删再记。')).toBeInTheDocument()
+    expect(within(li).getByText('14 字 → 14 字')).toBeInTheDocument()
+    fireEvent.click(within(li).getByRole('button', { name: /更多/ }))
+    expect(within(li).getByRole('textbox', { name: '名称' })).toHaveValue('发版流程')
+    expect(within(li).getByRole('textbox', { name: '摘要' })).toHaveValue('发版的节奏')
+    expect(within(li).getByText('发版')).toBeInTheDocument()
+    expect(within(li).getAllByRole('button').slice(-2).map(b => b.textContent)).toEqual(['取消', '保存'])
+    fireEvent.change(content, { target: { value: '  ' } })
+    expect(within(li).getByRole('button', { name: '保存' })).toHaveAttribute('aria-disabled', 'true')
+  })
+
+  it('故事 2d：手动改保存发 edit-memory（带层和打开时的版本），行内换成新内容、标「刚改」，结果行「已保存修改 · 撤销」', async () => {
+    localStorage.setItem(EDIT_MODE_STORAGE_KEY, 'manual')
+    const { commands } = setup()
+    open()
+    fireEvent.change(screen.getByRole('textbox', { name: '正文' }), { target: { value: '每周四发版。' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '保存' })) })
+    expect(commands()).toEqual([{ cmd: 'edit-memory', memoryId: 'a1', layer: app, base, content: '每周四发版。', name: '发版流程', summary: '发版的节奏', tags: ['发版'] }])
+    const li = row('每周四发版。')
+    expect(within(li).queryByRole('tablist')).toBeNull()
+    expect(within(li).getByText('刚改')).toHaveClass('pm-chip--neutral')
+    expect(within(li).getByText('已保存修改')).toBeInTheDocument()
+    expect(within(li).getByRole('button', { name: '撤销' })).toBeInTheDocument()
+  })
+
+  it('故事 3：标签「想怎么改这条？」，下面「常用写法（可选）」跟四个快捷意图，文本框有占位例句', () => {
+    setup()
+    open()
+    const intents = screen.getByRole('group', { name: '常用写法（可选）' })
+    expect(within(intents).getAllByRole('button').map(b => b.textContent)).toEqual(['压缩要点', '改清楚', '纠正内容', '补充信息'])
+    expect(ask()).toHaveAttribute('placeholder', '也可以直接输入你的要求，例如：「每周三发版」已经不对了，现在改成每周四，以这个为准。')
+  })
+
+  it('故事 4：点快捷意图把模板填进文本框（替换原有内容），按钮按下，选中第一个「___」', () => {
+    setup()
+    open()
+    write('原来写的')
+    const intents = screen.getByRole('group', { name: '常用写法（可选）' })
+    fireEvent.click(within(intents).getByRole('button', { name: '纠正内容' }))
+    const box = ask() as HTMLTextAreaElement
+    expect(box).toHaveValue('「___」已经不对了，现在是「___」，以这个为准。')
+    expect(within(intents).getByRole('button', { name: '纠正内容' })).toHaveAttribute('aria-pressed', 'true')
+    expect(box).toHaveFocus()
+    expect([box.selectionStart, box.selectionEnd]).toEqual([1, 4])
+    fireEvent.click(within(intents).getByRole('button', { name: '压缩要点' }))
+    expect(box).toHaveValue('压缩成要点，保留 ___，可以删掉 ___。')
+    expect([box.selectionStart, box.selectionEnd]).toEqual([9, 12])
+    expect(within(intents).getByRole('button', { name: '纠正内容' })).toHaveAttribute('aria-pressed', 'false')
+    expect(within(intents).getByRole('button', { name: '压缩要点' })).toHaveAttribute('aria-pressed', 'true')
+    fireEvent.click(within(intents).getByRole('button', { name: '改清楚' }))
+    expect(box).toHaveValue('「___」写得含糊，指的是 ___。')
+    fireEvent.click(within(intents).getByRole('button', { name: '补充信息' }))
+    expect(box).toHaveValue('补上：___（原文没有，按我写的加）。')
+  })
+
+  it('故事 5：要求必填：空着或只有空白时「生成修改」置灰并提示怎么开头；有内容就能发（留着「___」也行），不带建议类型', async () => {
+    const { commands } = setup({ model: 'deepseek-v4-flash' })
+    open()
+    const button = () => screen.getByRole('button', { name: '生成修改' })
+    expect(button()).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getByText('先写要求，或从常用写法开个头')).toBeInTheDocument()
+    write('   ')
+    expect(button()).toHaveAttribute('aria-disabled', 'true')
+    await generate()
+    expect(commands()).toEqual([])
+    fireEvent.click(screen.getByRole('button', { name: '补充信息' }))
+    expect(button()).not.toHaveAttribute('aria-disabled')
+    expect(screen.getByText('用当前模型 deepseek-v4-flash 生成，先给你看结果再决定')).toBeInTheDocument()
+    await generate()
+    expect(commands()).toEqual([{ cmd: 'draft-edit', memories: [{ memoryId: 'a1', layer: app }], request: '补上：___（原文没有，按我写的加）。' }])
+  })
+
+  it('故事 6：面板说明写清模型只用原文和你写的信息', () => {
+    setup()
+    open()
+    const note = screen.getByText('模型按原文和你的要求改写这条记忆，格式由它保持，比手动改文件稳妥。它只用你写的信息，不会自己补充。会消耗少量 token。')
+    expect(note.closest('.pm-model-note')?.querySelector('svg')).not.toBeNull()
+  })
+
+  it('故事 7：生成中只锁这一行（别的行照常能点）；「停止」回到写要求，输入保留', async () => {
+    setup({ respond: command => (command.cmd === 'draft-edit' ? new Promise<never>(() => {}) : { ok: true, cmd: command.cmd }) })
+    open()
+    write('改成周四')
+    await generate()
+    expect(within(row()).getByRole('status')).toHaveTextContent('正在生成修改……')
+    const others = within(row('提交前跑 typecheck'))
+    expect(others.getByRole('button', { name: '修改' })).not.toHaveAttribute('aria-disabled')
+    expect(others.getByRole('button', { name: '删除' })).not.toHaveAttribute('aria-disabled')
+    fireEvent.click(screen.getByRole('button', { name: '停止' }))
+    expect(ask()).toHaveValue('改成周四')
+  })
+
+  it('故事 8：出稿后左右对照、字数变化，「放弃 · 再改改 · 应用」；再改改带上一稿和此前的要求', async () => {
+    const { commands } = setup()
+    open()
+    write('「每周三发版」已经不对了，现在是「每周四」，以这个为准。')
+    await generate()
+    expect(screen.getByRole('region', { name: '原文' }).querySelector('del')).toHaveTextContent('三')
+    expect(screen.getByRole('region', { name: '改后' }).querySelector('ins')).toHaveTextContent('四')
+    expect(document.querySelector('.pm-model-stat')).toHaveTextContent('14 字 → 14 字')
+    expect(within(row()).getAllByRole('button').slice(-3).map(b => b.textContent)).toEqual(['放弃', '再改改', '应用'])
+    fireEvent.click(screen.getByRole('button', { name: '再改改' }))
+    expect(ask()).toHaveValue('')
+    write('再短一点')
+    await generate()
+    expect(commands().at(-1)).toEqual({
+      cmd: 'draft-edit', memories: [{ memoryId: 'a1', layer: app }], request: '再短一点',
+      priorRequests: ['「每周三发版」已经不对了，现在是「每周四」，以这个为准。'],
+      previous: { content: '每周四发版，先跑测试再打包。', summary: '发版的节奏', name: '发版流程', tags: ['发版'] },
+    })
+  })
+
+  it('故事 9：应用发 edit-memory；行内换成新内容、高亮一次、标「刚改」（中性胶囊），结果行「已按你的要求改写这条 · 撤销」；撤销发 undo，结果行和「刚改」都收起', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const { gateway, commands } = setup()
+    open()
+    write('改成周四')
+    await generate()
+    await apply()
+    expect(commands().at(-1)).toEqual({ cmd: 'edit-memory', memoryId: 'a1', layer: app, base, content: '每周四发版，先跑测试再打包。', name: '发版流程', summary: '发版的节奏', tags: ['发版'] })
+    // 视图还没推来：先按应用的稿子画
+    const li = row('每周四发版，先跑测试再打包。')
+    expect(li).toHaveClass('pm-flash')
+    expect(within(li).getByText('刚改')).toHaveClass('pm-chip--neutral')
+    expect(within(li).getByText('已按你的要求改写这条')).toBeInTheDocument()
+    act(() => { vi.advanceTimersByTime(FLASH_MS) })
+    expect(row('每周四发版，先跑测试再打包。')).not.toHaveClass('pm-flash')
+    // 视图推来新版本：照视图画
+    act(() => { gateway.setView('library', view([{ ...target, content: '每周四发版，先跑测试再打包。', updatedAt: 333, digest: 'sha1:a1b' }, other])) })
+    expect(within(row('每周四发版，先跑测试再打包。')).getByText('刚改')).toBeInTheDocument()
+
+    await act(async () => { fireEvent.click(within(row('每周四发版，先跑测试再打包。')).getByRole('button', { name: '撤销' })) })
+    expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'pd_e' })
+    act(() => { gateway.setView('library', view()) })
+    expect(within(row()).queryByText('已按你的要求改写这条')).toBeNull()
+    expect(within(row()).queryByText('刚改')).toBeNull()
+  })
+
+  it('故事 9：结果行在展开别的面板后收起（「刚改」留着）；撤销被拒时写明原因', async () => {
+    const { gateway } = setup({ respond: command => (command.cmd === 'undo' ? { ok: false, cmd: 'undo', code: 'stale' } : respondWith()(command)) })
+    open()
+    write('改成周四')
+    await generate()
+    await apply()
+    act(() => { gateway.setView('library', view([{ ...target, content: '每周四发版，先跑测试再打包。', updatedAt: 333, digest: 'sha1:a1b' }, other])) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
+    expect(within(row('每周四发版，先跑测试再打包。')).getByRole('alert')).toHaveTextContent('这条记忆之后又被改过')
+    open(row('提交前跑 typecheck'))
+    expect(screen.queryByText('已按你的要求改写这条')).toBeNull()
+    expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
+    expect(within(row('每周四发版，先跑测试再打包。')).getByText('刚改')).toBeInTheDocument()
+  })
+
+  it('故事 10：要求里有高危密钥：不发送，面板里写明原因', async () => {
+    const { commands } = setup()
+    open()
+    write(`把 ${critical} 删掉`)
+    await generate()
+    expect(commands()).toEqual([])
+    expect(screen.getByRole('alert')).toHaveTextContent('要求里有高危密钥，没有发送。去掉密钥再生成。')
+  })
+
+  it('故事 11：应用时这条已被别处改过（stale）：面板关闭，行内换成最新内容，结果行提示重新打开', async () => {
+    const { gateway } = setup({ respond: command => (command.cmd === 'edit-memory' ? { ok: false, cmd: 'edit-memory', code: 'stale' } : respondWith()(command)) })
+    open()
+    write('改成周四')
+    await generate()
+    await apply()
+    expect(screen.queryByRole('tablist')).toBeNull()
+    expect(within(row()).getByText('这条刚被改过，已换成最新内容。要改请重新打开。')).toBeInTheDocument()
+    expect(within(row()).queryByRole('button', { name: '撤销' })).toBeNull()
+    expect(within(row()).queryByText('刚改')).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+    act(() => { gateway.setView('library', view([{ ...target, content: '每周五发版。', updatedAt: 444, digest: 'sha1:a1c' }, other])) })
+    expect(within(row('每周五发版。')).getByText('这条刚被改过，已换成最新内容。要改请重新打开。')).toBeInTheDocument()
+  })
+
+  it('故事 12：改后稿像密钥（secret-suspected）：原位确认后带 force 重发', async () => {
+    const { commands } = setup({ respond: command => (command.cmd === 'edit-memory' && command.force !== true ? { ok: false, cmd: 'edit-memory', code: 'secret-suspected' } : respondWith()(command)) })
+    open()
+    write('改成周四')
+    await generate()
+    await apply()
+    const confirm = within(row()).getByRole('group', { name: '仍然保存' })
+    expect(confirm).toHaveTextContent('内容里有像密钥的片段。确定不是密钥再保存。')
+    await act(async () => { fireEvent.click(within(confirm).getByRole('button', { name: '仍然保存' })) })
+    expect(commands().filter(c => c.cmd === 'edit-memory').map(c => c.cmd === 'edit-memory' && c.force)).toEqual([undefined, true])
+    expect(within(row('每周四发版，先跑测试再打包。')).getByText('已按你的要求改写这条')).toBeInTheDocument()
+  })
+
+  it('故事 12：改后稿含高危密钥：发出前拦下，不保存', async () => {
+    const { commands } = setup({ respond: respondWith({ content: `部署用 ${critical}` }) })
+    open()
+    write('加上部署 token')
+    await generate()
+    await apply()
+    expect(commands().map(c => c.cmd)).toEqual(['draft-edit'])
+    expect(within(row()).getByRole('alert')).toHaveTextContent('内容里有高危密钥，没有保存。')
   })
 })
 

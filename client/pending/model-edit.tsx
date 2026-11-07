@@ -4,15 +4,18 @@
  * 之后的结果行、撤销都和手动改一样。生成中只锁这张卡。
  * 「停止」只是不再等：命令没法从界面取消，之后到达的结果按请求序号认出来丢掉；目标记忆或它的版本变了也一样。
  * 挂在两段切换的外壳（edit-modes.tsx）里：「放弃」只清掉这一稿、回到写要求（要求保留），关闭面板走外壳。
+ * 记忆查看里的修改不是从建议来的，没有建议类型：要求必填，空着时「生成修改」置灰；单条时给快捷意图和说明。
  */
 import { diffWords, type Change } from 'diff'
-import { Fragment, useEffect, useId, useRef, useState } from 'react'
+import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { scopeOfMemory, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type ModelEditAdviceType } from '../../src/gui/contract.ts'
 import { LLM_FAILURE_KEYS, refuseBeforeSend } from '../command/protocol.ts'
 import { useGateway, type BorrowedSession, type ModelState } from '../gateway.ts'
 import { formatNumber, useT, type Translate } from '../i18n.tsx'
+import { INTENT_BLANK, SINGLE_INTENTS, type Intent } from '../library/intents.ts'
 import { Button } from '../ui/Button.tsx'
 import { keepFocusInPlace, useReturnFocus } from '../ui/focus-return.ts'
+import { Icon } from '../ui/Icon.tsx'
 import type { EditDraft } from './edit.tsx'
 import { useReportEditState, type EditPhase, type EditState } from './edit-modes.tsx'
 
@@ -45,9 +48,10 @@ function hintOf(model: ModelState, t: Translate): string {
 export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, session, unavailable, onClose, onApply, onStateChange }: {
   /** 一条，或合并时两条（卡片上的左右顺序）。 */
   memories: readonly [MemoryCard] | readonly [MemoryCard, MemoryCard]
-  adviceType: ModelEditAdviceType
+  /** 从建议整理卡来时的建议类型（要求可不写，按它的默认要求）；记忆查看里没有，要求必填。 */
+  adviceType?: ModelEditAdviceType
   /** 建议类型的标题，写进输入框的说明。 */
-  typeTitle: string
+  typeTitle?: string
   /** 模型没改名称、标签时沿用的值，也是对照里原来的名称、摘要、标签：单条是它自己，合并是手动合并的预填。 */
   base: EditDraft
   /** 合并时保留哪条（mergeKeeperIndex）。 */
@@ -93,12 +97,15 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
   const root = useRef<HTMLDivElement>(null)
   useReturnFocus(root)
 
+  const isRequired = adviceType === undefined
+  const isSingle = memories.length === 1
   const generate = () => {
     if (session.kind !== 'ready') return
     const text = request.trim()
+    if (isRequired && text === '') return
     const command: DraftCommand = {
       cmd: 'draft-edit',
-      adviceType,
+      ...(adviceType !== undefined ? { adviceType } : {}),
       memories: memories.map(m => ({ memoryId: m.id, layer: scopeOfMemory(m) })) as DraftCommand['memories'],
       ...(text !== '' ? { request: text } : {}),
       ...(priorRequests.length > 0 ? { priorRequests } : {}),
@@ -136,23 +143,27 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
   }
 
   if (phase.kind === 'ask') {
+    const isMissing = isRequired && request.trim() === ''
     return (
       <div ref={root} className="pm-edit">
-        <label className="pm-edit-label" htmlFor={`${id}-ask`}>{t('pending.model.ask', { type: typeTitle })}</label>
-        <textarea
-          id={`${id}-ask`}
-          className="pm-edit-input pm-model-ask"
+        <RequestBox
+          id={id}
+          label={isRequired ? t('library.model.ask') : t('pending.model.ask', { type: typeTitle ?? '' })}
           value={request}
-          autoFocus
-          onChange={(event) => { setRequest(event.target.value) }}
+          onChange={setRequest}
+          intents={isSingle ? SINGLE_INTENTS : undefined}
+          placeholder={isSingle ? t('library.model.placeholder') : undefined}
         />
+        {isRequired
+          ? <p className="pm-model-note"><Icon name="info" size={14} /><span>{t('library.model.note')}</span></p>
+          : null}
         {phase.error !== undefined ? <p className="pm-pending-error" role="alert">{phase.error}</p> : null}
         <div className="pm-edit-foot">
-          <span className="pm-edit-hint">{hintOf(model, t)}</span>
+          <span className="pm-edit-hint">{isMissing && model.status !== 'unavailable' ? t('library.model.empty') : hintOf(model, t)}</span>
           <Button variant="ghost" unavailable={unavailable} onClick={onClose}>{t('pending.cancel')}</Button>
           <Button
             variant="primary"
-            unavailable={unavailable ?? (model.status === 'unavailable' ? t('pending.model.unavailable') : undefined)}
+            unavailable={unavailable ?? (model.status === 'unavailable' ? t('pending.model.unavailable') : isMissing ? t('library.model.empty') : undefined)}
             onClick={generate}
           >
             {t('pending.model.generate')}
@@ -221,6 +232,65 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
   )
 }
 
+/**
+ * 写要求区：标签、快捷意图（给了才有）、要求框。点快捷意图把模板换进要求框（替换原有内容）、按钮按下，
+ * 选中第一个「___」等用户改。单条修改、待处理卡的让模型改共用。
+ */
+export function RequestBox({ id, label, value, onChange, intents, placeholder }: {
+  /** 要求框的 id 前缀（同一面板里的 useId）。 */
+  id: string
+  label: string
+  value: string
+  onChange: (value: string) => void
+  intents?: readonly Intent[] | undefined
+  placeholder?: string | undefined
+}) {
+  const t = useT()
+  const box = useRef<HTMLTextAreaElement>(null)
+  const [picked, setPicked] = useState<string>()
+  /** 每填一次模板加一：填进去之后（渲染完）选中第一个空。 */
+  const [filled, setFilled] = useState(0)
+  useLayoutEffect(() => {
+    const el = box.current
+    if (filled === 0 || el === null) return
+    el.focus()
+    const at = el.value.indexOf(INTENT_BLANK)
+    if (at >= 0) el.setSelectionRange(at, at + INTENT_BLANK.length)
+  }, [filled])
+  return (
+    <>
+      <label className="pm-edit-label" htmlFor={`${id}-ask`}>{label}</label>
+      {intents !== undefined
+        ? (
+          <div className="pm-intents" role="group" aria-labelledby={`${id}-intents`}>
+            <span id={`${id}-intents`} className="pm-intents-label">{t('library.model.intents')}</span>
+            {intents.map(intent => (
+              <Button
+                key={intent.id}
+                variant="quiet"
+                className="pm-intent"
+                aria-pressed={picked === intent.id && value !== ''}
+                onClick={() => { onChange(t(intent.template)); setPicked(intent.id); setFilled(n => n + 1) }}
+              >
+                {t(intent.label)}
+              </Button>
+            ))}
+          </div>
+        )
+        : null}
+      <textarea
+        ref={box}
+        id={`${id}-ask`}
+        className="pm-edit-input pm-model-ask"
+        value={value}
+        placeholder={placeholder}
+        autoFocus
+        onChange={(event) => { onChange(event.target.value) }}
+      />
+    </>
+  )
+}
+
 /** 对照的一侧：原文一侧只标删掉的，改后一侧只标新增的。 */
 function Diff({ parts, side }: { parts: Change[]; side: 'before' | 'after' }) {
   return (
@@ -234,6 +304,12 @@ function Diff({ parts, side }: { parts: Change[]; side: 'before' | 'after' }) {
 
 export const modelEditCss = `
 .pm-model-ask { min-height: 58px; resize: vertical; }
+.pm-model-ask::placeholder { color: var(--pm-text-3); }
+.pm-intents { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.pm-intents-label { margin-right: 2px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
+.pm-intent[aria-pressed='true'] { background: var(--pm-pressed); color: var(--pm-text); }
+.pm-model-note { display: flex; align-items: flex-start; gap: 6px; margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
+.pm-model-note svg { flex-shrink: 0; margin-top: 2px; }
 .pm-model-busy { display: flex; align-items: center; gap: 10px; font-size: 13px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-model-busy .pm-btn { margin-left: auto; }
 .pm-model-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--pm-text-2); animation: pm-model-pulse 1.2s ease-in-out infinite; }

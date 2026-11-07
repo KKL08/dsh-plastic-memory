@@ -1167,14 +1167,14 @@ describe('待处理：手动改与手动合并', () => {
     expect(commands()).toEqual([{ cmd: 'edit-memory', memoryId: 'b1', layer, base, content: next, name: '发版流程', summary: '发版的步骤', tags: ['发版', 'npm'] }])
   })
 
-  it('「更多」展开名称、摘要、标签，底部写明类型改不了；标签点 × 移除、回车添加（空的和重复的不加）；保存带上改过的三项', async () => {
+  it('「更多」展开名称、摘要、标签，底部说明写明保存后可撤销、类型改不了；标签点 × 移除、回车添加（空的和重复的不加）；保存带上改过的三项', async () => {
     const { commands } = setup([bloat], { respond: respondEdit })
     startEdit()
     const more = screen.getByRole('button', { name: '更多' })
     expect(more).toHaveAttribute('aria-expanded', 'false')
     fireEvent.click(more)
     expect(screen.getByRole('button', { name: '收起' })).toHaveAttribute('aria-expanded', 'true')
-    expect(screen.getByText('类型改不了：换类型要先删再记')).toBeInTheDocument()
+    expect(screen.getByText('直接改正文，保存后可以撤销。类型改不了：换类型要先删再记。')).toBeInTheDocument()
     fireEvent.change(screen.getByRole('textbox', { name: '名称' }), { target: { value: '发版步骤' } })
     fireEvent.change(screen.getByRole('textbox', { name: '摘要' }), { target: { value: '发版前后的固定步骤' } })
     fireEvent.click(screen.getByRole('button', { name: '移除标签 npm' }))
@@ -1412,6 +1412,20 @@ describe('待处理：让模型改与让模型合并', () => {
     expect(commands()).toEqual([])
   })
 
+  it('31：建议卡的让模型改也有「常用写法（可选）」四个快捷意图（同记忆查看），要求照样可以不写；没有记忆查看那句说明', async () => {
+    const { commands } = setup([bloat], { respond: respondWith() })
+    open()
+    const intents = screen.getByRole('group', { name: '常用写法（可选）' })
+    expect(within(intents).getAllByRole('button').map(b => b.textContent)).toEqual(['压缩要点', '改清楚', '纠正内容', '补充信息'])
+    fireEvent.click(within(intents).getByRole('button', { name: '压缩要点' }))
+    expect(screen.getByRole('textbox', { name: /想怎么改？不写也行/ })).toHaveValue('压缩成要点，保留 ___，可以删掉 ___。')
+    expect(screen.queryByText(/它只用你写的信息/)).toBeNull()
+    fireEvent.change(screen.getByRole('textbox', { name: /想怎么改/ }), { target: { value: '' } })
+    expect(screen.getByRole('button', { name: '生成修改' })).not.toHaveAttribute('aria-disabled')
+    await generate()
+    expect(commands()).toEqual([{ cmd: 'draft-edit', adviceType: 'bloat', memories: [{ memoryId: 'b1', layer }] }])
+  })
+
   it('拿不到模型名：提示只写后半句', () => {
     setup([bloat])
     open()
@@ -1627,11 +1641,13 @@ describe('待处理：让模型改与让模型合并', () => {
       ? { ok: true, cmd: 'draft-edit', draft: { content: '中文写作避免翻译腔，少用被字句。', summary: '中文写作要自然' } }
       : command.cmd === 'merge-memories' ? merged : { ok: true, cmd: command.cmd })
 
-    it('点「合并」默认停在让模型合并；结果左边两条原文、右边合并稿，标明保留哪条的 id，不高亮', async () => {
+    it('点「合并」默认停在让模型合并（没有快捷意图）；结果左边两条原文、右边合并稿，标明保留哪条的 id，不高亮', async () => {
       const { commands } = setup([pair], { respond })
       expect(within(screen.getByRole('article')).getAllByRole('button').at(-1)?.textContent).toBe('合并')
       open('合并')
       expect(screen.getByRole('textbox', { name: '想怎么改？不写也行，会按「内容重复」默认处理' })).toBeInTheDocument()
+      // 快捷意图只给单条
+      expect(screen.queryByRole('group', { name: '常用写法（可选）' })).toBeNull()
       expect(screen.queryByRole('button', { name: '不再提醒' })).toBeNull()
       await generate()
       expect(commands()).toEqual([{ cmd: 'draft-edit', adviceType: 'redundancy', memories: [{ memoryId: 'r1', layer }, { memoryId: 'r2', layer }] }])

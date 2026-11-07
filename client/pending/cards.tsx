@@ -446,13 +446,13 @@ function IgnoreButton({ item, action }: { item: Item<'advice'>; action: CardActi
  * 能不能修改：要有内容摘要（服务端靠它和 updatedAt 认出卡片加载后被改过），且不含密钥（界面上的文字可能是遮盖后的，
  * 照着改会把遮盖写回文件）。
  */
-const isEditable = (memory: MemoryCardData) => memory.digest !== undefined && memory.hasSecret !== true
+export const isEditable = (memory: MemoryCardData) => memory.digest !== undefined && memory.hasSecret !== true
 
 /** 能让模型改的建议类型（服务端按它给默认要求）。 */
 const isModelEditType = (type: AdviceType): type is ModelEditAdviceType => (MODEL_EDIT_ADVICE_TYPES as readonly AdviceType[]).includes(type)
 
 /** 命令里带回的卡片版本。 */
-const baseOf = (memory: MemoryCardData) => ({ updatedAt: memory.updatedAt, digest: memory.digest ?? '' })
+export const baseOf = (memory: MemoryCardData) => ({ updatedAt: memory.updatedAt, digest: memory.digest ?? '' })
 
 /** 改前字数：单条是那一条，合并是两条相加。 */
 function charsBefore(memories: readonly MemoryCardData[], command: EditCommand): number {

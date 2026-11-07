@@ -362,5 +362,26 @@ export const HOST_ICON_DATA = {
         }
       }
     ]
+  },
+  "openFile": {
+    "viewBox": "0 0 16 16",
+    "strokeWidth": "1",
+    "root": {},
+    "shapes": [
+      {
+        "tag": "path",
+        "attrs": {
+          "d": "M11.7256 2.77441C12.5538 2.77469 13.2256 3.44616 13.2256 4.27441V10.1416H12.2256V4.27441C12.2256 3.99844 12.0015 3.77469 11.7256 3.77441H5.7207V2.77441H11.7256Z",
+          "fill": "currentColor"
+        }
+      },
+      {
+        "tag": "path",
+        "attrs": {
+          "d": "M2.77441 13.2255L12.3756 3.62427",
+          "stroke": "currentColor"
+        }
+      }
+    ]
   }
 } as const
