@@ -617,6 +617,11 @@ export const memoryDraftSchema = z.object({
   tags: z.array(z.string()).optional(),
 })
 export type MemoryDraft = z.infer<typeof memoryDraftSchema>
+/** 整理计划里模型给的提问：问题，和不回答时的默认处理（输入框的占位文字）。 */
+const planQuestionSchema = z.object({ text: z.string(), placeholder: z.string() })
+/** 「整理所选」里单项「再改改」带的这一项计划：用户确认过的理由、提问和回答（没回答 = 按默认处理）。 */
+export const planNoteSchema = z.object({ reason: z.string(), question: planQuestionSchema.optional(), answer: z.string().optional() })
+export type PlanNote = z.infer<typeof planNoteSchema>
 /** 直接改、直接合并写进去的四个字段；force：疑似密钥经用户确认后放行（高危密钥一律拦）。 */
 const editFields = {
   content: z.string().min(1),
@@ -688,16 +693,20 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   /**
    * 「让模型改 / 让模型合并」的生成：一条（合并时两条）记忆按建议类型的默认要求、或用户写的 request，单次调用借来的会话的模型，
    * 回一稿改后的内容（结果的 draft）。只读：不写记忆、不拍快照、不入账本、不进会话记录；「应用」由界面改发 edit-memory / merge-memories。
-   * previous：「再改改」时的上一稿，模型在它的基础上接着改。含密钥的记忆回 has-secret，原文不发给模型；
-   * request 或 previous 含高危密钥回 secret-critical，同样不发。
+   * adviceType 缺省（记忆查看里的修改，不是从建议来的）时 request 必填。
+   * previous：「再改改」时的上一稿，模型在它的基础上接着改；priorRequests：此前每一轮的要求，按先后排列；
+   * planNote：「整理所选」单项再改改时这一项的计划。含密钥的记忆回 has-secret，原文不发给模型；
+   * request、priorRequests、planNote、previous 任一处含高危密钥回 secret-critical，同样不发。
    */
   z.object({
     cmd: z.literal('draft-edit'),
-    adviceType: z.enum(MODEL_EDIT_ADVICE_TYPES),
+    adviceType: z.enum(MODEL_EDIT_ADVICE_TYPES).optional(),
     memories: z.union([z.tuple([draftRefSchema]), z.tuple([draftRefSchema, draftRefSchema])]),
     request: z.string().optional(),
+    priorRequests: z.array(z.string()).optional(),
+    planNote: planNoteSchema.optional(),
     previous: memoryDraftSchema.optional(),
-  }),
+  }).refine(c => c.adviceType !== undefined || (c.request ?? '').trim() !== '', { message: '没有建议类型时要写 request', path: ['request'] }),
   z.object({ cmd: z.literal('dismiss-overflow'), decisionId: z.string() }),
   /**
    * 忽略一条建议整理项：记下这几条记忆的指纹，之后该项不再出现在待处理、不再扣分；建议依据的字段变了就不再算已忽略。
@@ -796,7 +805,7 @@ export const GUI_ERROR_CODES = [
   'has-secret',         // forget 的目标含密钥（任一级），只能彻底删除：什么都没动，界面确认后改发 hard-delete；
                         // 直接改、直接合并的目标含密钥（界面上是遮盖后的正文）：什么都没动；让模型改的目标含密钥：不发给模型
   'stale',              // 直接改、直接合并：记忆在卡片加载后被改过；任一类撤销（含等同撤销的恢复）：目标之后又被改过或已不在原处。什么都没动（合并撤销中途被第三方改过的停在第三方的版本）
-  'secret-critical',    // 直接改、直接合并的新内容含高危密钥：什么都没动；让模型改的要求或上一稿含高危密钥：不发给模型
+  'secret-critical',    // 直接改、直接合并的新内容含高危密钥：什么都没动；让模型改的要求、此前的要求、计划或上一稿含高危密钥：不发给模型
   'secret-suspected',   // 直接改、直接合并的新内容含疑似密钥：什么都没动，用户确认后带 force 重发
   'claimed',            // 待决项正被另一次操作（别的标签页、宿主进程或体检）认领：什么都没动
   'busy',               // 体检：范围正在体检（别的体检认领着、没过期；「全部」有一个范围认领不到也算），或体检中途认领被别的进程接手。
