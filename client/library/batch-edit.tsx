@@ -6,6 +6,8 @@
  * 改动项可取消勾选（取消承接的改写时依赖它的删除一起取消），改写项下的提问可回答；计划不写入任何东西。
  * 对照应用：勾选的改写项一次发 draft-plan（只读）出稿，全是删除时不发；逐项对照，单项可「再改改」（draft-edit）或放弃，
  * 「应用全部」把最终改动交给 onApply；有删除项时先原位换成确认条「其中 a 项会删除「…」，确认应用？」。「停止」只是不再等：之后到达的结果按请求序号认出来丢掉，回到上一步，输入保留。
+ * 任一步回 stale、not-found（选中的记忆被别处改过或删了）：顶部提示有几条刚被改过，回到写要求、要求保留；已选清单等视图里这几条的版本
+ * 和旧 base 不同（或已不在）再换成最新内容、移出已删的，视图没到时清单显示「正在换成最新内容……」、「生成整理计划」置灰。
  */
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import {
@@ -15,7 +17,7 @@ import { SoftDeleteConfirm } from '../command/confirm.tsx'
 import { interpret, LLM_FAILURE_KEYS, refuseBeforeSend } from '../command/protocol.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { useT, type Translate } from '../i18n.tsx'
-import { baseOf } from '../pending/cards.tsx'
+import { baseOf, isEditable } from '../pending/cards.tsx'
 import type { EditDraft } from '../pending/edit.tsx'
 import { DraftCompare, hintOf, RequestBox } from '../pending/model-edit.tsx'
 import { Button } from '../ui/Button.tsx'
@@ -86,16 +88,23 @@ export interface BatchApplication {
 /** 勾选的改动项，按计划顺序。 */
 const chosenOps = (choice: PlanChoice) => choice.plan.ops.filter(op => op.action !== 'keep' && choice.checked.includes(op.memoryId))
 
-/** 对照后的最终改动：勾选且没放弃的项；删除项承接到的记忆这次不改写时进 keep。 */
+/** 对照后的最终改动：勾选且没放弃的项；承接它的改写不在这批里的删除项不交出去（独有的信息没有去处）；计划里不动的承接项进 keep。 */
 export function applicationOf(choice: PlanChoice, picked: readonly BatchItem[], drafts: Readonly<Record<string, EditDraft>>, dropped: ReadonlySet<string>): BatchApplication {
   const refOf = (memoryId: string) => picked.find(item => item.memory.id === memoryId)!.ref
-  const kept = chosenOps(choice).filter(op => !dropped.has(op.memoryId))
+  const live = chosenOps(choice).filter(op => !dropped.has(op.memoryId))
+  const kept = live.filter(op => !isOrphanDelete(op, choice.plan.ops, new Set(live.map(o => o.memoryId))))
   const ops = kept.map((op): BatchApplyOp => (op.action === 'rewrite'
     ? { kind: 'edit', ...refOf(op.memoryId), ...drafts[op.memoryId]! }
     : { kind: 'forget', ...refOf(op.memoryId), ...(op.into !== undefined ? { into: op.into } : {}) }))
   const edited = new Set(kept.filter(op => op.action === 'rewrite').map(op => op.memoryId))
   const intos = new Set(kept.flatMap(op => (op.action === 'delete' && op.into !== undefined && !edited.has(op.into) ? [op.into] : [])))
-  return { ops, keep: choice.plan.ops.filter(op => intos.has(op.memoryId)).map(op => refOf(op.memoryId)), total: picked.length }
+  return { ops, keep: choice.plan.ops.filter(op => op.action === 'keep' && intos.has(op.memoryId)).map(op => refOf(op.memoryId)), total: picked.length }
+}
+
+/** 删除项承接到计划里的改写、而那条改写这次不做（没勾或放弃了）：单独删掉它，独有的信息就丢了。 */
+function isOrphanDelete(op: PlanOp, planOps: readonly PlanOp[], active: ReadonlySet<string>): boolean {
+  return op.action === 'delete' && op.into !== undefined && !active.has(op.into)
+    && planOps.some(o => o.memoryId === op.into && o.action === 'rewrite')
 }
 
 /** 勾选的改写项交给 draft-plan 的样子：理由、提问、回答（没填不带），并进它、也勾上了的删除项作承接。 */
@@ -134,13 +143,18 @@ function failureOf(command: MemoryCommand, r: Extract<MemoryCommandResult, { ok:
   return outcome.isLocalized ? t(outcome.detail) : t('command.failed', { detail: outcome.detail })
 }
 
-export function BatchEdit({ items, session, onBack, onApply, applyUnavailable, applyFeedback }: {
+export function BatchEdit({ items, latest, session, onBack, onApply, applyUnavailable, applyFeedback }: {
   items: readonly BatchItem[]
+  /** 视图里此刻的记忆（视图没到时缺省）：有记忆刚被别处改过时，等这几条换成新版本再重建清单。 */
+  latest?: readonly MemoryCard[] | undefined
   session: BorrowedSession
   /** 回到多选，勾选保留。 */
   onBack: () => void
-  /** 「应用全部」：对照后的最终改动。 */
-  onApply?: (application: BatchApplication) => void
+  /**
+   * 「应用全部」：对照后的最终改动，和此刻清单里的各条（换成最新内容重建过的话是重建后的版本，结果条按它比版本）。
+   * 应用回 stale、not-found 时调用方把对不上的那几条交给 onBehind。
+   */
+  onApply?: (application: BatchApplication, picked: readonly BatchItem[], onBehind: (memoryIds: readonly string[]) => void) => void
   /** 「应用全部」暂不可用的原因（没有会话、正在应用或等确认）。 */
   applyUnavailable?: string | undefined
   /** 应用的确认与失败，画在底部按钮下。 */
@@ -159,9 +173,43 @@ export function BatchEdit({ items, session, onBack, onApply, applyUnavailable, a
   /** 正在等的那次请求的序号：停止、离开后序号前进，旧请求的结果对不上号就丢掉。 */
   const seq = useRef(0)
   useEffect(() => () => { seq.current += 1 }, [])
+  /** 刚被别处改过或删了的那几条和它们的旧版本：视图里换成新版本（或已不在）之前，清单不重建。 */
+  const [refreshing, setRefreshing] = useState<ReadonlyMap<string, BatchRef['base']>>()
+  /** 顶部提示：有几条刚被改过。重新生成计划时收起。 */
+  const [behindCount, setBehindCount] = useState<number>()
+  useEffect(() => {
+    if (refreshing === undefined || latest === undefined) return
+    const fresh = new Map(latest.map(m => [m.id, m]))
+    const isArrived = [...refreshing].every(([id, base]) => {
+      const m = fresh.get(id)
+      return m === undefined || baseOf(m).updatedAt !== base.updatedAt || baseOf(m).digest !== base.digest
+    })
+    if (!isArrived) return
+    // 换成最新原文；已删的、变得不能整理的（写进了密钥、读不到版本）移出清单
+    setPicked(prev => prev.flatMap((item) => {
+      if (!refreshing.has(item.memory.id)) return [item]
+      const m = fresh.get(item.memory.id)
+      return m !== undefined && isEditable(m) ? toBatchItems([m]) : []
+    }))
+    setRefreshing(undefined)
+  }, [latest, refreshing])
+  /** 选中的记忆被别处改过或删了：在等的作废，回到写要求（要求保留），等视图把这几条换成最新内容。 */
+  const behind = (memoryIds: readonly string[]) => {
+    seq.current += 1
+    const waiting = new Map(picked.filter(item => memoryIds.includes(item.memory.id)).map(item => [item.memory.id, item.ref.base]))
+    setRefreshing(waiting.size > 0 ? waiting : undefined)
+    setBehindCount(memoryIds.length)
+    setStage({ kind: 'request' })
+  }
+  /** 失败是 stale、not-found 且说得出是哪几条：按 behind 处理。返回是否这样处理了。 */
+  const isBehind = (r: Extract<MemoryCommandResult, { ok: false }>) => {
+    if ((r.code !== 'stale' && r.code !== 'not-found') || r.memoryIds === undefined || r.memoryIds.length === 0) return false
+    behind(r.memoryIds)
+    return true
+  }
 
   const generate = () => {
-    if (session.kind !== 'ready') return
+    if (session.kind !== 'ready' || refreshing !== undefined) return
     const text = request.trim()
     if (text === '' || picked.length < 2) return
     const command: PlanCommand = { cmd: 'plan-edits', memories: picked.map(item => item.ref), request: text }
@@ -169,10 +217,11 @@ export function BatchEdit({ items, session, onBack, onApply, applyUnavailable, a
     const refused = refuseBeforeSend(command)
     if (refused !== undefined) { setStage({ kind: 'request', error: refused.isLocalized ? t(refused.detail) : refused.detail }); return }
     const mine = ++seq.current
+    setBehindCount(undefined)
     setStage({ kind: 'planning' })
     void gateway.execute(session.sessionId, command).then((r) => {
       if (mine !== seq.current) return
-      if (!r.ok) { setStage({ kind: 'request', error: failureOf(command, r, t) }); return }
+      if (!r.ok) { if (!isBehind(r)) setStage({ kind: 'request', error: failureOf(command, r, t) }); return }
       if (r.plan === undefined) { setStage({ kind: 'request', error: t('pending.model.invalid') }); return }
       setStage({ kind: 'plan', plan: r.plan })
     })
@@ -195,7 +244,7 @@ export function BatchEdit({ items, session, onBack, onApply, applyUnavailable, a
     setStage({ kind: 'drafting', choice })
     void gateway.execute(session.sessionId, command).then((r) => {
       if (mine !== seq.current) return
-      if (!r.ok) { back(failureOf(command, r, t)); return }
+      if (!r.ok) { if (!isBehind(r)) back(failureOf(command, r, t)); return }
       const drafts: Record<string, EditDraft> = {}
       for (const { memoryId, draft } of r.drafts ?? []) {
         const memory = picked.find(item => item.memory.id === memoryId)?.memory
@@ -217,11 +266,13 @@ export function BatchEdit({ items, session, onBack, onApply, applyUnavailable, a
         <Button variant="ghost" onClick={onBack}>{t('library.batch.back')}</Button>
       </div>
       <BatchSteps current={STEP_OF[stage.kind]} />
+      {behindCount !== undefined ? <p className="pm-notice" role="status">{t('library.batch.behind', { n: behindCount })}</p> : null}
       {stage.kind === 'request'
         ? (
           <RequestStep
             session={session}
             picked={picked}
+            isRefreshing={refreshing !== undefined}
             onUnpick={(id) => { setPicked(prev => prev.filter(item => item.memory.id !== id)) }}
             request={request}
             onRequest={setRequest}
@@ -264,7 +315,8 @@ export function BatchEdit({ items, session, onBack, onApply, applyUnavailable, a
                   picked={picked}
                   drafts={stage.drafts}
                   onDiscardAll={onBack}
-                  onApply={onApply}
+                  onApply={onApply === undefined ? undefined : (application) => { onApply(application, picked, behind) }}
+                  onBehind={behind}
                   unavailable={applyUnavailable}
                   feedback={applyFeedback}
                 />
@@ -274,9 +326,11 @@ export function BatchEdit({ items, session, onBack, onApply, applyUnavailable, a
 }
 
 /** 写要求：已选清单（类型 + 单行原文 + 「✕」移出）、要求框、说明、「取消」「生成整理计划」。 */
-function RequestStep({ session, picked, onUnpick, request, onRequest, error, onCancel, onGenerate }: {
+function RequestStep({ session, picked, isRefreshing, onUnpick, request, onRequest, error, onCancel, onGenerate }: {
   session: BorrowedSession
   picked: readonly BatchItem[]
+  /** 有几条刚被别处改过，视图还没把它们换成最新内容。 */
+  isRefreshing: boolean
   onUnpick: (memoryId: string) => void
   request: string
   onRequest: (value: string) => void
@@ -300,12 +354,13 @@ function RequestStep({ session, picked, onUnpick, request, onRequest, error, onC
     buttons[Math.min(at, buttons.length - 1)]?.focus()
   }, [picked])
   const isMissing = request.trim() === ''
-  const blocked = model.status === 'unavailable' ? t('pending.model.unavailable')
+  const blocked = isRefreshing ? t('library.batch.refreshing') : model.status === 'unavailable' ? t('pending.model.unavailable')
     : picked.length < 2 ? t('library.select.tooFew') : isMissing ? t('library.model.empty') : undefined
   return (
     <>
       <section className="pm-batch-picked" aria-label={t('library.batch.picked')}>
-        <ul ref={list} className="pm-batch-picked-list">
+        {isRefreshing ? <p className="pm-batch-picked-count" role="status">{t('library.batch.refreshing')}</p> : null}
+        <ul ref={list} className="pm-batch-picked-list" hidden={isRefreshing}>
           {picked.map((item, index) => (
             <li key={item.memory.id} className="pm-batch-picked-row">
               <Chip variant="neutral">{typeLabel(item.memory.type)}</Chip>
@@ -322,7 +377,7 @@ function RequestStep({ session, picked, onUnpick, request, onRequest, error, onC
             </li>
           ))}
         </ul>
-        <p className="pm-batch-picked-count">{t('library.batch.count', { n: picked.length })}</p>
+        {isRefreshing ? null : <p className="pm-batch-picked-count">{t('library.batch.count', { n: picked.length })}</p>}
       </section>
       <div className="pm-edit">
         <RequestBox
@@ -370,6 +425,7 @@ function PlanStep({ plan, initial, error, picked, onRevise, onConfirm }: {
   const dependents = (op: PlanOp) => plan.ops.filter(d => d.action === 'delete' && d.into === op.memoryId).map(d => d.memoryId)
   const toggle = (op: PlanOp) => {
     const isOn = !checked.has(op.memoryId)
+    if (isOn && isOrphanDelete(op, plan.ops, checked)) return
     const next = new Set(checked)
     const nextHeld = new Set(held)
     if (isOn) next.add(op.memoryId)
@@ -409,7 +465,7 @@ function PlanStep({ plan, initial, error, picked, onRevise, onConfirm }: {
                 className="pm-plan-check"
                 aria-label={t('library.batch.op', { action, name: nameOf(op.memoryId) })}
                 checked={op.action !== 'keep' && checked.has(op.memoryId)}
-                disabled={op.action === 'keep'}
+                disabled={op.action === 'keep' || isOrphanDelete(op, plan.ops, checked)}
                 onChange={() => { toggle(op) }}
               />
               <div className="pm-plan-op-body">
@@ -461,13 +517,15 @@ function PlanStep({ plan, initial, error, picked, onRevise, onConfirm }: {
  * 对照应用：按计划顺序逐项。改写项原文 / 改后对照，可「再改改」（单项 draft-edit）或放弃；删除项划掉原文，只能放弃。
  * 放弃的项变淡、按钮换成「恢复这项」；放弃改写项时并进它的删除项一起放弃并提示，恢复改写不自动恢复删除（同看计划的取消勾选）。
  */
-function ApplyStep({ session, choice, picked, drafts: initialDrafts, onDiscardAll, onApply, unavailable, feedback }: {
+function ApplyStep({ session, choice, picked, drafts: initialDrafts, onDiscardAll, onApply, onBehind, unavailable, feedback }: {
   session: BorrowedSession
   choice: PlanChoice
   picked: readonly BatchItem[]
   drafts: Readonly<Record<string, EditDraft>>
   onDiscardAll: () => void
   onApply: ((application: BatchApplication) => void) | undefined
+  /** 「再改改」时这一项已被别处删了。 */
+  onBehind: (memoryIds: readonly string[]) => void
   unavailable: string | undefined
   feedback: ReactNode
 }) {
@@ -510,6 +568,10 @@ function ApplyStep({ session, choice, picked, drafts: initialDrafts, onDiscardAl
   const deleting = live.filter(op => op.action === 'delete')
   const deletes = deleting.length
   const nameOf = (memoryId: string) => picked.find(item => item.memory.id === memoryId)!.memory.name
+  const refOf = (memoryId: string) => {
+    const { ref } = picked.find(item => item.memory.id === memoryId)!
+    return { memoryId: ref.memoryId, layer: ref.layer }
+  }
   const apply = () => { onApply?.(applicationOf(choice, picked, drafts, dropped)) }
   return (
     <>
@@ -527,10 +589,12 @@ function ApplyStep({ session, choice, picked, drafts: initialDrafts, onDiscardAl
                 draft={draft}
                 request={choice.request}
                 answer={choice.answers[op.memoryId]}
+                absorbs={deleting.filter(d => d.into === op.memoryId).map(d => refOf(d.memoryId))}
                 isDropped={dropped.has(op.memoryId)}
                 onToggle={() => { toggle(op) }}
                 onDraft={(next) => { setDrafts(prev => ({ ...prev, [op.memoryId]: next })) }}
                 onBusy={(isBusy) => { setItemBusy(op.memoryId, isBusy) }}
+                onBehind={onBehind}
               />
             )
             : (
@@ -540,7 +604,13 @@ function ApplyStep({ session, choice, picked, drafts: initialDrafts, onDiscardAl
                 aria-label={t('library.batch.op', { action: t('library.batch.action.delete'), name: item.memory.name })}
               >
                 <ItemHead action={t('library.batch.action.delete')} name={item.memory.name}>
-                  <Button variant="ghost" onClick={() => { toggle(op) }}>{t(dropped.has(op.memoryId) ? 'library.batch.restore' : 'library.batch.drop')}</Button>
+                  <Button
+                    variant="ghost"
+                    unavailable={dropped.has(op.memoryId) && isOrphanDelete(op, ops, new Set(live.map(o => o.memoryId))) ? t('library.batch.dropHeld') : undefined}
+                    onClick={() => { toggle(op) }}
+                  >
+                    {t(dropped.has(op.memoryId) ? 'library.batch.restore' : 'library.batch.drop')}
+                  </Button>
                 </ItemHead>
                 <p className="pm-batch-struck"><del>{item.memory.content}</del></p>
                 <p className="pm-batch-item-note">{t('library.batch.deleteNote')}</p>
@@ -594,9 +664,9 @@ type ItemPhase =
 
 /**
  * 对照里的一个改写项。「再改改」在这一项下写新要求，发 draft-edit：本轮要求、此前的要求（整体要求在前，再是这一项之前每轮的要求）、
- * 这一项的计划（理由、提问、回答）和上一稿。生成中只锁这一项，「停止」回到写要求、输入保留。
+ * 这一项的计划（理由、提问、回答）、并进它且仍要删的记忆和上一稿。生成中只锁这一项，「停止」回到写要求、输入保留。
  */
-function RewriteItem({ session, op, item, draft, request, answer, isDropped, onToggle, onDraft, onBusy }: {
+function RewriteItem({ session, op, item, draft, request, answer, absorbs, isDropped, onToggle, onDraft, onBusy, onBehind }: {
   session: BorrowedSession
   op: PlanOp
   item: BatchItem
@@ -605,10 +675,14 @@ function RewriteItem({ session, op, item, draft, request, answer, isDropped, onT
   request: string
   /** 用户对这一项提问的回答（没填缺省）。 */
   answer: string | undefined
+  /** 内容并进这一项、此刻仍要删的删除项（没放弃的）：再改改时一起发给模型，免得它们独有的信息被改掉。 */
+  absorbs: NonNullable<DraftCommand['absorbs']>
   isDropped: boolean
   onToggle: () => void
   onDraft: (draft: EditDraft) => void
   onBusy: (isBusy: boolean) => void
+  /** 这一项已被别处删了（not-found）：交给工作区回到写要求。 */
+  onBehind: (memoryIds: readonly string[]) => void
 }) {
   const t = useT()
   const id = useId()
@@ -636,6 +710,7 @@ function RewriteItem({ session, op, item, draft, request, answer, isDropped, onT
       request: text.trim(),
       priorRequests: [request, ...rounds],
       planNote: { reason: op.reason, ...(op.question !== undefined ? { question: op.question } : {}), ...(answer !== undefined ? { answer } : {}) },
+      ...(absorbs.length > 0 ? { absorbs } : {}),
       previous: draft,
     }
     // 命令文本会进借用会话的日志：要求、此前的要求、计划、上一稿里有高危密钥就不发
@@ -645,6 +720,7 @@ function RewriteItem({ session, op, item, draft, request, answer, isDropped, onT
     setPhase({ kind: 'busy', text })
     void gateway.execute(session.sessionId, command).then((r) => {
       if (mine !== seq.current) return
+      if (!r.ok && r.code === 'not-found') { setPhase({ kind: 'idle' }); onBehind(r.memoryIds ?? [memory.id]); return }
       if (!r.ok) { setPhase({ kind: 'ask', text, error: failureOf(command, r, t) }); return }
       if (r.draft === undefined) { setPhase({ kind: 'ask', text, error: t('pending.model.invalid') }); return }
       onDraft(fillDraft(r.draft, draft))

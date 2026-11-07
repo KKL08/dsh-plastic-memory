@@ -1284,15 +1284,17 @@ describe('记忆查看：整理所选的应用与撤销', () => {
   const applied: MemoryCommandResult = { ok: true, cmd: 'apply-edits', decisionId: 'pd_t', memoryIds: ['p1', 'c2'], snapshotId: 'snap_t' }
   const critical = `${'sk-' + 'TESTONLY'.padEnd(24, 'a')}`
 
-  function setup({ plan = PLAN, draft = DRAFT, apply = () => applied, undo = () => ({ ok: true, cmd: 'undo', decisionId: 'pd_t' }) }: {
+  function setup({ plan = PLAN, draft = DRAFT, apply = () => applied, undo = () => ({ ok: true, cmd: 'undo', decisionId: 'pd_t' }), planned }: {
     plan?: EditPlan
     draft?: typeof DRAFT
     apply?: (command: Extract<MemoryCommand, { cmd: 'apply-edits' }>) => MemoryCommandResult
     undo?: () => MemoryCommandResult
+    /** 改写 plan-edits 的结果：返回 undefined 时照常回 plan。 */
+    planned?: () => MemoryCommandResult | undefined
   } = {}) {
     const respond = (command: MemoryCommand): MemoryCommandResult => {
       switch (command.cmd) {
-        case 'plan-edits': return { ok: true, cmd: 'plan-edits', plan, model: 'deepseek-v4-flash' }
+        case 'plan-edits': return planned?.() ?? { ok: true, cmd: 'plan-edits', plan, model: 'deepseek-v4-flash' }
         case 'draft-plan': return { ok: true, cmd: 'draft-plan', drafts: command.ops.map(op => ({ memoryId: op.memoryId, draft })), model: 'deepseek-v4-flash' }
         case 'apply-edits': return apply(command)
         case 'undo': return undo()
@@ -1398,6 +1400,121 @@ describe('记忆查看：整理所选的应用与撤销', () => {
     expect(within(bar).getByRole('status')).toHaveTextContent('有记忆之后又被改过，没法一起撤销')
     expect(within(bar).queryByRole('button', { name: '撤销全部' })).toBeNull()
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  describe('故事 28：选中的记忆被别处改过或删了', () => {
+    const c2New = { ...c2, content: '提交前跑 pnpm check', digest: 'sha1:c2-new', updatedAt: 999 }
+    const picked = () => within(screen.getByRole('region', { name: '已选的记忆' }))
+    const generateButton = () => screen.getByRole('button', { name: '生成整理计划' })
+    const ask = () => screen.getByRole('textbox', { name: '想怎么整理这几条？' })
+    const toRequest = async () => {
+      fireEvent.click(screen.getByRole('button', { name: '选择' }))
+      for (const m of [p1, c2, b4]) fireEvent.click(within(row(m.content)).getByRole('checkbox'))
+      fireEvent.click(tidyButton())
+      fireEvent.change(ask(), { target: { value: '以 biome 为准' } })
+      await act(async () => { fireEvent.click(generateButton()) })
+    }
+    const stale = (cmd: 'plan-edits' | 'apply-edits', code: 'stale' | 'not-found', memoryIds: string[]): MemoryCommandResult => ({ ok: false, cmd, code, detail: '有记忆刚被改过', memoryIds })
+
+    it('生成计划回 stale：顶部提示、回到写要求、要求保留；视图晚到前清单显示「正在换成最新内容……」、「生成整理计划」置灰，版本没变的视图推送不算；换了版本再重建，按新版本发', async () => {
+      let calls = 0
+      const { gateway, commands } = setup({ planned: () => (++calls === 1 ? stale('plan-edits', 'stale', ['c2']) : undefined) })
+      await toRequest()
+      expect(screen.getByText('有 1 条刚被改过，已换成最新内容。计划需要重新生成。')).toHaveAttribute('role', 'status')
+      expect(ask()).toHaveValue('以 biome 为准')
+      expect(screen.getByRole('list', { name: '步骤' }).querySelector('[aria-current="step"]')).toHaveTextContent('写要求')
+      expect(picked().getByRole('status')).toHaveTextContent('正在换成最新内容……')
+      expect(generateButton()).toHaveAttribute('aria-disabled', 'true')
+      expect(screen.queryByRole('alert')).toBeNull()
+      // 别的推送，c2 还是旧版本：不拿它重建
+      act(() => { gateway.setView('library', view([p1, c2, b4])) })
+      expect(picked().getByRole('status')).toHaveTextContent('正在换成最新内容……')
+      act(() => { gateway.setView('library', view([p1, c2New, b4])) })
+      expect(picked().queryByRole('status')).toBeNull()
+      expect(picked().getByText(c2New.content)).toBeInTheDocument()
+      expect(picked().queryByText(c2.content)).toBeNull()
+      expect(generateButton()).not.toHaveAttribute('aria-disabled')
+      await act(async () => { fireEvent.click(generateButton()) })
+      expect(commands().at(-1)).toMatchObject({ cmd: 'plan-edits', memories: [ref(p1), ref(c2New), ref(b4)] })
+      expect(screen.queryByText(/刚被改过/)).toBeNull()
+    })
+
+    it('视图比命令结果先到：直接按新版本重建，不出「正在换成最新内容……」', async () => {
+      let push: (() => void) | undefined
+      const { gateway } = setup({ planned: () => { push?.(); return stale('plan-edits', 'stale', ['c2']) } })
+      push = () => { gateway.setView('library', view([p1, c2New, b4])) }
+      await toRequest()
+      expect(screen.getByText('有 1 条刚被改过，已换成最新内容。计划需要重新生成。')).toBeInTheDocument()
+      expect(picked().queryByRole('status')).toBeNull()
+      expect(picked().getByText(c2New.content)).toBeInTheDocument()
+    })
+
+    it('换成最新内容重建之后再应用：结果按重建后的版本画，改写的行按稿子画、删掉的行不画', async () => {
+      const p1New = { ...p1, content: '代码格式化统一用 prettier（旧规则）。', digest: 'sha1:p1-new', updatedAt: 998 }
+      let calls = 0
+      const { gateway, commands } = setup({ planned: () => (++calls === 1 ? stale('plan-edits', 'stale', ['p1', 'c2']) : undefined) })
+      await toRequest()
+      act(() => { gateway.setView('library', view([p1New, c2New, b4])) })
+      await act(async () => { fireEvent.click(generateButton()) })
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^(按计划出稿|下一步)$/ })) })
+      await applyAll()
+      expect(commands().at(-1)).toMatchObject({ cmd: 'apply-edits', ops: [{ kind: 'forget', ...ref(p1New) }, { kind: 'edit', ...ref(c2New) }] })
+      // 视图还没推来应用后的版本：改写的按稿子画，删掉的先不画
+      expect(row(DRAFT.content)).toHaveClass('pm-flash')
+      expect(hasRow(c2New.content)).toBe(false)
+      expect(hasRow(p1New.content)).toBe(false)
+      expect(hasRow(b4.content)).toBe(true)
+    })
+
+    it('应用回 not-found：留在工作区、回到写要求，不在底部报错；视图更新后已删的那条移出清单', async () => {
+      const { gateway } = setup({ apply: () => stale('apply-edits', 'not-found', ['p1']) })
+      await toApply()
+      await applyAll()
+      expect(screen.getByRole('heading', { name: '整理所选的 3 条' })).toBeInTheDocument()
+      expect(screen.getByText('有 1 条刚被改过，已换成最新内容。计划需要重新生成。')).toBeInTheDocument()
+      expect(ask()).toHaveValue('以 biome 为准')
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(resultBar()).toBeNull()
+      act(() => { gateway.setView('library', view([c2, b4])) })
+      expect(screen.getByRole('heading', { name: '整理所选的 2 条' })).toBeInTheDocument()
+      expect(picked().queryByText(p1.content)).toBeNull()
+      expect(generateButton()).not.toHaveAttribute('aria-disabled')
+    })
+  })
+
+  describe('故事 26a：只应用了一部分', () => {
+    const partial = (patch: Partial<Extract<MemoryCommandResult, { ok: true }>>): MemoryCommandResult =>
+      ({ ok: true, cmd: 'apply-edits', snapshotId: 'snap_t', isPartial: true, memoryIds: [], unrecordedIds: [], ...patch })
+
+    it('结果条「只应用了其中 k 条，其余没有改动」，副行点名没退回的几条和原因；「撤销全部」撤的是仍是这次写下的那条', async () => {
+      const { commands } = setup({ apply: () => partial({ decisionId: 'pd_t', memoryIds: ['c2'], unrecordedIds: ['p1'] }) })
+      await toApply()
+      await applyAll()
+      const bar = resultBar()!
+      const status = within(bar).getByRole('status')
+      expect(status.querySelector('.pm-lib-tidied-title')).toHaveTextContent('只应用了其中 2 条，其余没有改动')
+      expect([...status.querySelectorAll('.pm-lib-result-text')].map(p => p.textContent)).toEqual([
+        '「提交前检查」退回时写盘出错，仍是这次改的样子，可以撤销',
+        '「格式化用 prettier」退回前又被别处改过，停在那边的版本，不在撤销范围',
+      ])
+      expect(bar).toHaveFocus()
+      // 留下的改写标「刚改」；没退回、停在别处版本的删除项照视图画，不藏
+      expect(within(row(DRAFT.content)).getByText('刚改')).toBeInTheDocument()
+      expect(hasRow(p1.content)).toBe(true)
+      await act(async () => { fireEvent.click(within(bar).getByRole('button', { name: '撤销全部' })) })
+      expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'pd_t' })
+      expect(resultBar()).toBeNull()
+    })
+
+    it('留下的都已被别处接着改过：没有可撤销的，不给「撤销全部」', async () => {
+      setup({ apply: () => partial({ unrecordedIds: ['c2'] }) })
+      await toApply()
+      await applyAll()
+      const bar = resultBar()!
+      expect(within(bar).getByRole('status')).toHaveTextContent('只应用了其中 1 条，其余没有改动「提交前检查」退回前又被别处改过，停在那边的版本，不在撤销范围')
+      expect(within(bar).queryByRole('button', { name: '撤销全部' })).toBeNull()
+      expect(screen.queryByText('刚改')).toBeNull()
+    })
   })
 
   it('应用的新内容像密钥（secret-suspected）：工作区里原位确认，「仍然保存」带 force 重发', async () => {

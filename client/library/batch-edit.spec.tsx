@@ -5,7 +5,7 @@ import type { EditPlan, MemoryCommand, MemoryCommandResult, MemoryDraft } from '
 import { createFakeGateway } from '../gateway.fake.ts'
 import type { BorrowedSession } from '../gateway.ts'
 import { memory, renderInShell } from '../test-utils.tsx'
-import { BatchEdit, batchEditCss, BatchSteps, toBatchItems, type BatchItem } from './batch-edit.tsx'
+import { applicationOf, BatchEdit, batchEditCss, BatchSteps, toBatchItems, type BatchItem, type PlanChoice } from './batch-edit.tsx'
 
 describe('整理工作区', () => {
   it('故事 18：步骤条「写要求 / 看计划 / 对照应用」，当前步标 aria-current、加粗，已完成的步前加「✓」', () => {
@@ -207,12 +207,17 @@ describe('整理所选：写要求与看计划', () => {
     fireEvent.click(box('提交前检查'))
     expect(box('格式化用 prettier')).not.toBeChecked()
     expect(opOf('格式化用 prettier')).toHaveTextContent('承接它的改写已取消，这条先不删')
+    // 承接的改写没勾上时，删除项勾不回来：单独删掉它，独有的信息就没有去处
+    expect(box('格式化用 prettier')).toBeDisabled()
+    fireEvent.click(box('格式化用 prettier'))
+    expect(box('格式化用 prettier')).not.toBeChecked()
     // 承接项是不动的删除项不受影响
     expect(box('编辑器设置')).toBeChecked()
     expect(opOf('编辑器设置')).not.toHaveTextContent('承接它的改写已取消')
     fireEvent.click(box('提交前检查'))
     expect(box('提交前检查')).toBeChecked()
     expect(box('格式化用 prettier')).not.toBeChecked()
+    expect(box('格式化用 prettier')).toBeEnabled()
     expect(opOf('格式化用 prettier')).not.toHaveTextContent('承接它的改写已取消')
     fireEvent.click(box('格式化用 prettier'))
     expect(box('格式化用 prettier')).toBeChecked()
@@ -262,7 +267,7 @@ describe('整理所选：写要求与看计划', () => {
   it.each([
     ['llm-invalid-output', '模型返回的内容格式不对，再试一次。'],
     ['llm-failed', '模型出错了：rate limited'],
-    ['stale', '这条记忆刚被改过'],
+    ['stale', '有记忆刚被改过或删掉了，已换成最新内容。计划需要重新生成。'],
   ] as const)('计划没生成（%s）：回到写要求，要求保留，报原因', async (code, text) => {
     setup({ respond: () => ({ ok: false, cmd: 'plan-edits', code, detail: 'rate limited' }) })
     write(REQUEST)
@@ -419,6 +424,11 @@ describe('整理所选：写要求与看计划', () => {
       expect(itemOf('格式化用 prettier')).toHaveClass('pm-batch-item--dropped')
       expect(itemOf('格式化用 prettier')).toHaveTextContent('承接它的改写已放弃，这条先不删')
       expect(applyFoot()).toHaveTextContent('将应用 1 项：删除 0 条、改写 1 条')
+      // 承接的改写放弃着，删除项恢复不了
+      const locked = within(itemOf('格式化用 prettier')).getByRole('button', { name: '恢复这项' })
+      expect(locked).toHaveAttribute('aria-disabled', 'true')
+      fireEvent.click(locked)
+      expect(itemOf('格式化用 prettier')).toHaveClass('pm-batch-item--dropped')
       fireEvent.click(within(itemOf('提交前检查')).getByRole('button', { name: '恢复这项' }))
       expect(itemOf('提交前检查')).not.toHaveClass('pm-batch-item--dropped')
       expect(itemOf('格式化用 prettier')).toHaveClass('pm-batch-item--dropped')
@@ -461,6 +471,22 @@ describe('整理所选：写要求与看计划', () => {
       expect(within(item()).getByRole('region', { name: '改后' })).toHaveTextContent('名称编辑器格式化')
     })
 
+    it('故事 24：承接了删除项的改写「再改改」时带上并进它、仍要删的记忆（absorbs）；那条删除项放弃了就不带', async () => {
+      const { commands } = await toApply()
+      const item = () => itemOf('提交前检查')
+      const again = async (text: string) => {
+        fireEvent.click(within(item()).getByRole('button', { name: '再改改' }))
+        fireEvent.change(within(item()).getByRole('textbox', { name: '这一项还想怎么改？' }), { target: { value: text } })
+        await act(async () => { fireEvent.click(within(item()).getByRole('button', { name: '生成修改' })) })
+      }
+      await again('再短一点')
+      expect(commands().at(-1)).toMatchObject({ cmd: 'draft-edit', memories: [{ memoryId: 'c2', layer: app }], absorbs: [{ memoryId: 'p1', layer: app }] })
+      fireEvent.click(within(itemOf('格式化用 prettier')).getByRole('button', { name: '放弃这项' }))
+      await again('用英文')
+      expect(commands().at(-1)).toMatchObject({ cmd: 'draft-edit', request: '用英文' })
+      expect(commands().at(-1)).not.toHaveProperty('absorbs')
+    })
+
     it('故事 29：「再改改」生成中只锁这一项，「停止」回到写要求、输入保留，晚到的稿丢掉；「取消」收起', async () => {
       let resolve!: (r: MemoryCommandResult) => void
       await toApply({ draftEdit: () => new Promise((r) => { resolve = r }) })
@@ -478,6 +504,19 @@ describe('整理所选：写要求与看计划', () => {
       fireEvent.click(within(item()).getByRole('button', { name: '取消' }))
       expect(within(item()).queryByRole('textbox')).toBeNull()
       expect(applyAll()).not.toHaveAttribute('aria-disabled')
+    })
+
+    it('故事 28：「再改改」时这一项已被别处删了（not-found）：回到写要求、要求保留，顶部提示，清单等视图换成最新内容', async () => {
+      await toApply({ draftEdit: () => ({ ok: false, cmd: 'draft-edit', code: 'not-found', detail: '不存在', memoryIds: ['c2'] }) })
+      const item = () => itemOf('提交前检查')
+      fireEvent.click(within(item()).getByRole('button', { name: '再改改' }))
+      fireEvent.change(within(item()).getByRole('textbox'), { target: { value: '再短一点' } })
+      await act(async () => { fireEvent.click(within(item()).getByRole('button', { name: '生成修改' })) })
+      expect(current()).toBe('写要求')
+      expect(ask()).toHaveValue(REQUEST)
+      expect(screen.getByText('有 1 条刚被改过，已换成最新内容。计划需要重新生成。')).toBeInTheDocument()
+      expect(picked().getByRole('status')).toHaveTextContent('正在换成最新内容……')
+      expect(generateButton()).toHaveAttribute('aria-disabled', 'true')
     })
 
     it('故事 30：「再改改」的要求里有高危密钥：不发，这一项里报原因', async () => {
@@ -511,19 +550,22 @@ describe('整理所选：写要求与看计划', () => {
         ],
         keep: [ITEMS[3]!.ref],
         total: 4,
-      })
+      }, ITEMS, expect.any(Function))
     })
 
-    it('故事 25：承接到本批改写的删除不另列 keep；改写项被放弃而删除留着时，被承接的那条进 keep 核对版本', async () => {
+    it('故事 25：承接到本批改写的删除不另列 keep；承接的改写不在这批里时，依赖它的删除也不交出去，放弃的改写不当作不动', async () => {
       const { onApply } = await toApply()
       applyWithConfirm()
-      expect(onApply).toHaveBeenLastCalledWith(expect.objectContaining({ keep: [] }))
-      fireEvent.click(within(itemOf('提交前检查')).getByRole('button', { name: '放弃这项' }))
-      fireEvent.click(within(itemOf('格式化用 prettier')).getByRole('button', { name: '恢复这项' }))
-      applyWithConfirm()
-      expect(onApply).toHaveBeenLastCalledWith({
-        ops: [{ kind: 'forget', ...ITEMS[0]!.ref, into: 'c2' }, expect.objectContaining({ kind: 'edit', memoryId: 'e3' })],
-        keep: [ITEMS[1]!.ref],
+      expect(onApply).toHaveBeenLastCalledWith(expect.objectContaining({ keep: [] }), ITEMS, expect.any(Function))
+      const choice: PlanChoice = { request: '以 biome 为准', plan: { understanding: '合成一条', ops: [
+        { memoryId: 'p1', action: 'delete', reason: '重复。', into: 'c2' },
+        { memoryId: 'c2', action: 'rewrite', reason: '补进。' },
+        { memoryId: 'e3', action: 'rewrite', reason: '换扩展。' },
+      ] }, checked: ['p1', 'c2', 'e3'], answers: {} }
+      const drafts = { c2: { content: 'c', summary: 's', name: 'n', tags: [] }, e3: { content: 'e', summary: 's', name: 'n', tags: [] } }
+      expect(applicationOf(choice, ITEMS, drafts, new Set(['c2']))).toEqual({
+        ops: [{ kind: 'edit', ...ITEMS[2]!.ref, ...drafts.e3 }],
+        keep: [],
         total: 4,
       })
     })
@@ -544,7 +586,7 @@ describe('整理所选：写要求与看计划', () => {
       fireEvent.click(within(itemOf('格式化用 prettier')).getByRole('button', { name: '放弃这项' }))
       fireEvent.click(applyAll())
       expect(screen.queryByRole('group', { name: /确认应用？$/ })).toBeNull()
-      expect(onApply).toHaveBeenCalledWith(expect.objectContaining({ ops: [expect.objectContaining({ kind: 'edit', memoryId: 'c2' }), expect.objectContaining({ kind: 'edit', memoryId: 'e3' })] }))
+      expect(onApply).toHaveBeenCalledWith(expect.objectContaining({ ops: [expect.objectContaining({ kind: 'edit', memoryId: 'c2' }), expect.objectContaining({ kind: 'edit', memoryId: 'e3' })] }), ITEMS, expect.any(Function))
     })
 
     it('故事 25：全部放弃时「应用全部」置灰；「全部放弃」回多选', async () => {

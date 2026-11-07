@@ -10,6 +10,8 @@
  * （已选条数 · 全选当前结果 · 取消 · 整理所选…）。「整理所选…」把列表换成整理工作区（batch-edit.tsx）。「全部」范围不能多选。
  * 工作区「应用全部」发 apply-edits；成功回到列表、退出多选，顶部结果条「已整理 N 条……」带「撤销全部」（发 undo，整批一起撤），
  * 改写过的行高亮一次、标「刚改」。结果条在离开记忆查看或开始下一次整理时收起。
+ * 应用中途失败、已写的没能全部退回时同样回到列表，结果条换成「只应用了其中 k 条……」，副行写明哪几条没退回、为什么，
+ * 「撤销全部」只撤仍是这次写下的；应用回 stale、not-found 时留在工作区，交给它等视图换成最新内容。
  */
 import { useEffect, useRef, useState } from 'react'
 import { checkupKey, MAX_BATCH_EDIT, scopeOfMemory, type LibraryView, type MemoryCard as MemoryCardData } from '../../src/gui/contract.ts'
@@ -84,15 +86,18 @@ const IDLE_EDIT: EditState = { phase: 'idle', isDirty: false }
 const TIDY = 'tidy'
 
 /**
- * 整理所选应用成功后的结果条。rewritten：改写项点「整理所选…」那一刻的样子和写下的稿，视图还是那一版时按稿画；
+ * 整理所选应用成功后的结果条。rewritten：改写项应用时工作区里的样子（命令核对的那一版）和写下的稿，视图还是那一版时按稿画；
  * deleted：删除项那一刻的样子，视图还是那一版时先不画（新视图还没推来）。isStale：撤销全部时有记忆之后又被改过，整批没动。
+ * partial：只应用了一部分（退回时写盘出错、仍是这次写下的 kept，可撤销；退回前被别处接着改了的 unrecorded，不可撤销），
+ * rewritten、deleted 只含 kept 里的。decisionId 缺省：没有可撤销的。
  */
 interface TidyResult {
-  decisionId: string
+  decisionId: string | undefined
   total: number
   rewritten: ReadonlyMap<string, { before: MemoryCardData; draft: EditDraft }>
   deleted: readonly MemoryCardData[]
   isStale: boolean
+  partial?: { kept: readonly MemoryCardData[]; unrecorded: readonly MemoryCardData[] }
 }
 
 const draftOf = (memory: MemoryCardData): EditDraft => ({ content: memory.content, name: memory.name, summary: memory.summary, tags: memory.tags })
@@ -139,7 +144,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
   const [tidied, setTidied] = useState<TidyResult>()
   /** 应用成功回到列表：焦点接到结果条上。 */
   const tidiedBar = useRef<HTMLDivElement>(null)
-  const tidiedId = tidied?.decisionId
+  const isTidiedNew = useRef(false)
   const kept = [...done.values()].filter(row => row.state !== 'deleting' || actions.isBusy(row.memory.id))
   const viewItems = view.status === 'ready' ? view.data.layers.filter(l => isInScope([l.layer], scope)).flatMap(l => l.items) : []
   // 本页删掉、视图里已经没有的那几条留在原位（等结果、结果行或撤销后等视图回来）；分组的排序是稳定的，插回原位就落回原来的组和位置
@@ -189,29 +194,45 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
     isBackFromBatch.current = false
     selectionBar.current?.querySelector<HTMLElement>('.pm-btn--primary')?.focus()
   }, [batch])
-  useEffect(() => { if (tidiedId !== undefined) tidiedBar.current?.focus() }, [tidiedId])
+  useEffect(() => {
+    if (tidied === undefined || !isTidiedNew.current) return
+    isTidiedNew.current = false
+    tidiedBar.current?.focus()
+  }, [tidied])
   const { flashId, revealId, targetId, clear } = useFlashTarget(nav, items.map(m => m.id))
   const typeLabel = useTypeLabel(session)
   const folds = useFold(fold, `library|${checkupKey(scope)}`, isSearching)
-  /** 应用全部：发 apply-edits；成功回到列表、退出多选，挂结果条，改写过的标「刚改」、高亮一次。 */
-  const applyTidy = (snapshot: readonly BatchItem[], application: BatchApplication) => {
+  /**
+   * 应用全部：发 apply-edits；成功（含只应用了一部分）回到列表、退出多选，挂结果条，留下的改写标「刚改」、高亮一次。
+   * stale、not-found：把对不上的那几条交回工作区（onBehind），由它回到写要求、等视图换成最新内容。
+   */
+  const applyTidy = (picked: readonly BatchItem[], application: BatchApplication, onBehind: (memoryIds: readonly string[]) => void) => {
     const { ops, keep, total } = application
     const command = { cmd: 'apply-edits', ops, ...(keep.length > 0 ? { keep } : {}) } as const
     actions.run(TIDY, command, null, (result) => {
-      const memoryOf = (id: string) => snapshot.find(item => item.memory.id === id)!.memory
-      const rewritten = new Map(ops.flatMap(op => (op.kind === 'edit'
+      const memoryOf = (id: string) => picked.find(item => item.memory.id === id)!.memory
+      // 只应用了一部分时只列仍是这次写下的
+      const kept = new Set(result.memoryIds ?? ops.map(op => op.memoryId))
+      const rewritten = new Map(ops.flatMap(op => (op.kind === 'edit' && kept.has(op.memoryId)
         ? [[op.memoryId, { before: memoryOf(op.memoryId), draft: { content: op.content, name: op.name, summary: op.summary, tags: op.tags } }] as const]
         : [])))
       setBatch(undefined)
       setSelecting(false)
       setSelected(new Set())
       setEdited(undefined)
+      isTidiedNew.current = true
       setTidied({
-        decisionId: result.decisionId!, total, rewritten, isStale: false,
-        deleted: ops.filter(op => op.kind === 'forget').map(op => memoryOf(op.memoryId)),
+        decisionId: result.decisionId, total, rewritten, isStale: false,
+        deleted: ops.filter(op => op.kind === 'forget' && kept.has(op.memoryId)).map(op => memoryOf(op.memoryId)),
+        ...(result.isPartial === true ? { partial: { kept: [...kept].map(memoryOf), unrecorded: (result.unrecordedIds ?? []).map(memoryOf) } } : {}),
       })
       setFresh(prev => new Set([...prev, ...rewritten.keys()]))
       setEditFlash(new Set(rewritten.keys()))
+    }, (failure) => {
+      const ids = failure.memoryIds
+      if ((failure.code !== 'stale' && failure.code !== 'not-found') || ids === undefined || ids.length === 0) return false
+      onBehind(ids)
+      return true
     })
   }
   if (batch !== undefined) {
@@ -219,9 +240,10 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
       <div className="pm-lib">
         <BatchEdit
           items={batch}
+          latest={isViewReady ? viewItems : undefined}
           session={session}
           onBack={() => { isBackFromBatch.current = true; setBatch(undefined) }}
-          onApply={(application) => { applyTidy(batch, application) }}
+          onApply={(application, picked, onBehind) => { applyTidy(picked, application, onBehind) }}
           applyUnavailable={actions.unavailable(TIDY)}
           applyFeedback={actions.feedback(TIDY)}
         />
@@ -328,8 +350,8 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
   }
 
   /** 撤销全部：整批一起恢复；有记忆之后又被改过（stale）整批没动，结果条写明，不再给撤销。 */
-  const undoTidy = (result: TidyResult) => {
-    actions.run(TIDY, { cmd: 'undo', decisionId: result.decisionId }, null, () => {
+  const undoTidy = (result: TidyResult, decisionId: string) => {
+    actions.run(TIDY, { cmd: 'undo', decisionId }, null, () => {
       setTidied(undefined)
       setFresh((prev) => {
         const next = new Set(prev)
@@ -342,20 +364,33 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
       return true
     })
   }
-  /** 整理所选的结果条：列表顶部，「已整理 N 条……」，有删除时副行说去哪找回，右侧「撤销全部」。 */
+  /**
+   * 整理所选的结果条：列表顶部，「已整理 N 条……」，有删除时副行说去哪找回，右侧「撤销全部」。
+   * 只应用了一部分：「只应用了其中 k 条，其余没有改动」，副行点名没退回的几条和原因；没有可撤销的就不给「撤销全部」。
+   */
   const tidiedBarOf = (result: TidyResult) => {
     const deletes = result.deleted.length
     const rewrites = result.rewritten.size
-    const sub = result.isStale ? t('library.batch.undoStale') : deletes > 0 ? t('library.batch.doneDeleted') : undefined
+    const { partial, decisionId } = result
+    const names = (memories: readonly MemoryCardData[]) => memories.map(m => m.name).join(t('library.batch.nameSep'))
+    const subs = result.isStale ? [t('library.batch.undoStale')] : [
+      ...(partial !== undefined && partial.kept.length > 0 ? [t('library.batch.partialKept', { names: names(partial.kept) })] : []),
+      ...(partial !== undefined && partial.unrecorded.length > 0 ? [t('library.batch.partialChanged', { names: names(partial.unrecorded) })] : []),
+      ...(deletes > 0 ? [t('library.batch.doneDeleted')] : []),
+    ]
     return (
       <div ref={tidiedBar} className="pm-lib-result pm-lib-tidied" tabIndex={-1}>
         <div role="status">
-          <p className="pm-lib-tidied-title">{t('library.batch.done', { n: result.total, deletes, rewrites, kept: result.total - deletes - rewrites })}</p>
-          {sub !== undefined ? <p className="pm-lib-result-text">{sub}</p> : null}
+          <p className="pm-lib-tidied-title">
+            {partial !== undefined
+              ? t('library.batch.partial', { n: partial.kept.length + partial.unrecorded.length })
+              : t('library.batch.done', { n: result.total, deletes, rewrites, kept: result.total - deletes - rewrites })}
+          </p>
+          {subs.map(sub => <p key={sub} className="pm-lib-result-text">{sub}</p>)}
         </div>
-        {result.isStale
+        {result.isStale || decisionId === undefined
           ? null
-          : <Button variant="ghost" unavailable={actions.unavailable(TIDY)} onClick={() => { undoTidy(result) }}>{t('library.batch.undoAll')}</Button>}
+          : <Button variant="ghost" unavailable={actions.unavailable(TIDY)} onClick={() => { undoTidy(result, decisionId) }}>{t('library.batch.undoAll')}</Button>}
       </div>
     )
   }

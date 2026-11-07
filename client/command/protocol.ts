@@ -4,7 +4,8 @@
  * - forget 的目标含密钥（has-secret，什么都没动）：确认后改发 hard-delete，沿用这条命令指明的那一份；
  * - 直接改、直接合并、整理所选的新内容像密钥（secret-suspected，什么都没动）：确认不是密钥后带 force 重发；
  * - 条目正被别处认领（claimed），或待决项已不在（契约 OPEN_ITEM_COMMANDS 的 not-found）：别处已处理；
- * - 服务端原话只有中文的几种（stale、not-found、secret-critical、target-taken、拿不到模型、模型输出不合格式）换本地文案，其余显示原话。
+ * - 服务端原话只有中文的几种（stale、not-found、secret-critical、target-taken、拿不到模型、模型输出不合格式）换本地文案，其余显示原话；
+ *   stale、not-found 分单条、整理所选两种口径，失败结果里的 memoryIds 照传。
  * 确认类 Outcome 自带要重发的命令，面板不碰命令形状。
  */
 import {
@@ -21,11 +22,11 @@ type ForceCommand = EditCommand | Extract<MemoryCommand, { cmd: 'apply-edits' }>
 
 /**
  * 失败：isLocalized 时 detail 是文案键，否则是服务端原话（没有原话时是结果码）。
- * code 缺省 = 不是服务端回的（发出前拦下、命令以外的失败）。
+ * code 缺省 = 不是服务端回的（发出前拦下、命令以外的失败）。memoryIds：stale、not-found 时服务端列出的对不上或找不到的那几条。
  */
 export type Failure =
-  | { kind: 'failed'; code?: GuiErrorCode; detail: LocaleKey; isLocalized: true }
-  | { kind: 'failed'; code?: GuiErrorCode; detail: string; isLocalized: false }
+  | { kind: 'failed'; code?: GuiErrorCode; detail: LocaleKey; isLocalized: true; memoryIds?: string[] }
+  | { kind: 'failed'; code?: GuiErrorCode; detail: string; isLocalized: false; memoryIds?: string[] }
 
 export type Outcome =
   | { kind: 'ok'; result: Ok }
@@ -45,13 +46,17 @@ export const LLM_FAILURE_KEYS = {
 
 const local = (code: GuiErrorCode | undefined, detail: LocaleKey): Failure => ({ kind: 'failed', ...(code === undefined ? {} : { code }), detail, isLocalized: true })
 
+/** 整理所选的三条命令：stale、not-found 都说「计划要重新生成」。 */
+const isTidyCommand = (command: MemoryCommand) => command.cmd === 'plan-edits' || command.cmd === 'draft-plan' || command.cmd === 'apply-edits'
+
 function localKeyOf(command: MemoryCommand, code: GuiErrorCode): LocaleKey | undefined {
+  if ((code === 'stale' || code === 'not-found') && isTidyCommand(command)) return 'library.batch.stale'
   switch (code) {
     case 'stale':
       return command.cmd === 'undo' || command.cmd === 'restore' ? 'pending.undo.stale'
         : command.cmd === 'ignore-advice' ? 'pending.ignore.stale' : 'pending.edit.stale'
     // 按记忆动手的：要动的记忆已经不在（多半在外面删了），服务端已重写视图。待决项的在前面算别处已处理；撤销的是快照没了，照常显示原话
-    case 'not-found': return 'memoryId' in command || 'memories' in command || command.cmd === 'apply-edits' ? 'pending.memory.gone' : undefined
+    case 'not-found': return 'memoryId' in command || 'memories' in command ? 'pending.memory.gone' : undefined
     case 'secret-critical': return 'pending.edit.secretCritical'
     case 'target-taken':
       return command.cmd === 'undo' ? 'pending.move.undoTaken'
@@ -80,7 +85,8 @@ export function interpret(command: MemoryCommand, result: MemoryCommandResult): 
   }
   if (code === 'claimed' || (code === 'not-found' && OPEN_ITEM_COMMANDS.has(command.cmd))) return { kind: 'handled-elsewhere' }
   const key = localKeyOf(command, code)
-  return key !== undefined ? local(code, key) : { kind: 'failed', code, detail: result.detail ?? code, isLocalized: false }
+  const ids = result.memoryIds !== undefined ? { memoryIds: result.memoryIds } : {}
+  return key !== undefined ? { ...local(code, key), ...ids } : { kind: 'failed', code, detail: result.detail ?? code, isLocalized: false, ...ids }
 }
 
 const hasCritical = (texts: readonly string[]) => detectSecrets(texts.join('\n')).some(h => h.severity === 'critical')

@@ -12,6 +12,8 @@ const refusal = (command: MemoryCommand, code: GuiErrorCode, extra: Partial<Extr
 const raw = (code: GuiErrorCode): Outcome => ({ kind: 'failed', code, detail: `原话：${code}`, isLocalized: false })
 const local = (code: GuiErrorCode, detail: LocaleKey): Outcome => ({ kind: 'failed', code, detail, isLocalized: true })
 const is = (command: MemoryCommand, ...cmds: Array<MemoryCommand['cmd']>) => cmds.includes(command.cmd)
+/** 整理所选的三条命令：stale、not-found 按整理口径。 */
+const isTidy = (command: MemoryCommand) => is(command, 'plan-edits', 'draft-plan', 'apply-edits')
 
 /** 每个结果码在每个命令上应得的 Outcome。 */
 const EXPECTED: Record<GuiErrorCode, (command: MemoryCommand) => Outcome> = {
@@ -21,8 +23,9 @@ const EXPECTED: Record<GuiErrorCode, (command: MemoryCommand) => Outcome> = {
   'has-secret': c => c.cmd === 'forget' ? { kind: 'confirm-secret', resend: { ...c, cmd: 'hard-delete' } } : raw('has-secret'),
   'secret-suspected': c => c.cmd === 'edit-memory' || c.cmd === 'merge-memories' || c.cmd === 'apply-edits' ? { kind: 'confirm-suspected', resend: { ...c, force: true } } : raw('secret-suspected'),
   'claimed': () => ({ kind: 'handled-elsewhere' }),
-  'not-found': c => OPEN_ITEM_COMMANDS.has(c.cmd) ? { kind: 'handled-elsewhere' } : 'memoryId' in c || 'memories' in c || c.cmd === 'apply-edits' ? local('not-found', 'pending.memory.gone') : raw('not-found'),
-  'stale': c => local('stale', is(c, 'undo', 'restore') ? 'pending.undo.stale' : is(c, 'ignore-advice') ? 'pending.ignore.stale' : 'pending.edit.stale'),
+  'not-found': c => OPEN_ITEM_COMMANDS.has(c.cmd) ? { kind: 'handled-elsewhere' } : isTidy(c) ? local('not-found', 'library.batch.stale')
+    : 'memoryId' in c || 'memories' in c ? local('not-found', 'pending.memory.gone') : raw('not-found'),
+  'stale': c => local('stale', isTidy(c) ? 'library.batch.stale' : is(c, 'undo', 'restore') ? 'pending.undo.stale' : is(c, 'ignore-advice') ? 'pending.ignore.stale' : 'pending.edit.stale'),
   'secret-critical': () => local('secret-critical', 'pending.edit.secretCritical'),
   'target-taken': c => local('target-taken', is(c, 'undo') ? 'pending.move.undoTaken' : is(c, 'promote', 'promote-memory') ? 'pending.promote.taken' : 'pending.move.taken'),
   'llm-unavailable': () => local('llm-unavailable', 'pending.model.unavailable'),
@@ -64,6 +67,13 @@ describe('命令往返协议：命令 × 结果码', () => {
     expect(interpret(forget, refusal(forget, 'has-secret'))).toEqual({ kind: 'confirm-secret', resend: { ...forget, cmd: 'hard-delete' } })
     const edit = { ...SAMPLE_COMMANDS['edit-memory'], allowCrossWorkspace: true }
     expect(interpret(edit, refusal(edit, 'secret-suspected'))).toEqual({ kind: 'confirm-suspected', resend: { ...edit, force: true } })
+  })
+
+  it('stale、not-found 带回服务端列出的 memoryIds（整理所选据此等视图换成最新内容）', () => {
+    const apply = SAMPLE_COMMANDS['apply-edits']
+    expect(interpret(apply, refusal(apply, 'stale', { memoryIds: ['m1'] }))).toEqual({ ...local('stale', 'library.batch.stale'), memoryIds: ['m1'] })
+    const plan = SAMPLE_COMMANDS['plan-edits']
+    expect(interpret(plan, refusal(plan, 'not-found', { memoryIds: ['m2'] }))).toEqual({ ...local('not-found', 'library.batch.stale'), memoryIds: ['m2'] })
   })
 
   it('PA-42 服务端没给原话：失败写结果码', () => {
