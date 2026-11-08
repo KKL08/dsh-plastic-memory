@@ -50,6 +50,14 @@ All notable changes to this project are documented here. The format follows
 - Custom types take an optional `howToUse`: how the model should use these
   memories once they are brought into a chat. The settings page form has a
   matching field.
+- `memory_search` takes `match`. The default `any` returns every hit,
+  ranked as before; `all` returns only memories that contain every keyword.
+  When `all` finds none, the result says so, shows how many memories each
+  keyword matched and points to `any` for partial hits.
+- Each `memory_search` hit that lacks some keywords says on its first line
+  which keywords it fully matched, or that it matched only part of one or
+  only a substring, so the model can compare hits at a glance. Hits that
+  contain every keyword are not marked.
 
 ### Changed
 - The model gets a fuller picture of each memory type. When saving, it
@@ -193,6 +201,12 @@ All notable changes to this project are documented here. The format follows
   command result. A failed action says it did not go through and why,
   without red text, since the panel already reported it in place. Clicking
   the line shows the command and its full result, with secrets masked.
+- The `types` parameter of `memory_search` now describes the current
+  scene's types, notes which ones are usually already in the memory
+  snapshot, and is updated as soon as the scene or custom types change.
+  When none of the requested types has a memory in scope, the result says
+  so and lists the types that do, with counts, so the model can tell a
+  wrong type from keywords that did not match.
 
 ### Fixed
 - Checkup findings referred to memories by internal ids such as
@@ -257,9 +271,9 @@ All notable changes to this project are documented here. The format follows
   input method often does, are masked whole. Before, only the BEGIN line
   was masked and the key body could show in snapshots and search results.
 - When a question like "数据库连接池的密码是什么" matches a memory's topic
-  but not the thing asked for, `memory_search` names the missing word, so
-  the model can see what the top hit lacks. English articles,
-  prepositions and auxiliaries such as "to" or "with" are never reported as
+  but not the thing asked for, `memory_search` shows which keywords the top
+  hit matched, so the model can see what it lacks. English articles,
+  prepositions and auxiliaries such as "to" or "with" never count as
   missing.
 - On a fresh install, the memory page updates after you delete a memory or
   handle a card even if it was opened before its data files existed.
@@ -499,10 +513,12 @@ All notable changes to this project are documented here. The format follows
   word (`scope` in `readScope`), and matches in the name, summary and tags
   weigh more than matches in the content; a query that is exactly a memory
   id returns that memory first, without a note. The result opens with a note
-  when no returned memory contains every keyword (`or-fallback`), naming the
-  keywords the top hit lacks and how many memories each keyword matched. It
-  flags a weak match only when the top hit covers less than half of the
-  query's content words (`low-coverage`) or when nothing but a literal match
+  when no returned memory contains every keyword (`or-fallback`), and adds
+  how many memories each keyword matched when the top hit lacks a whole
+  keyword. Coverage counts two Chinese characters as one word, so a
+  mixed-language query is judged the same whichever language the top hit is
+  written in. It flags a weak match only when the top hit covers less than
+  half of the query's content (`low-coverage`) or when nothing but a literal match
   on the query text is left (`substring-fallback`), and then suggests
   searching again, for example with the term in the other language.
   Question words and particles in long questions don't count. The notes are
