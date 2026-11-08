@@ -613,6 +613,7 @@ function ApplyStep({ session, choice, picked, drafts: initialDrafts, onDiscardAl
                   </Button>
                 </ItemHead>
                 <p className="pm-batch-struck"><del>{item.memory.content}</del></p>
+                {op.into !== undefined ? <p className="pm-batch-item-note">{t('library.batch.into', { name: nameOf(op.into) })}</p> : null}
                 <p className="pm-batch-item-note">{t('library.batch.deleteNote')}</p>
                 {held.has(op.memoryId) ? <p className="pm-plan-held">{t('library.batch.dropHeld')}</p> : null}
               </li>

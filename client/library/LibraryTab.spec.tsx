@@ -1381,14 +1381,20 @@ describe('记忆查看：整理所选的应用与撤销', () => {
     expect(resultBar()).toBeNull()
   })
 
-  it('故事 27：「撤销全部」发 undo 撤整批，成功后结果条和「刚改」都收起', async () => {
+  it('故事 27：「撤销全部」发 undo 撤整批，成功后结果条原位换成「已撤销这次整理」（不带按钮，焦点留在结果条），「刚改」收起', async () => {
     const { commands } = setup()
     await toApply()
     await applyAll()
     await act(async () => { fireEvent.click(within(resultBar()!).getByRole('button', { name: '撤销全部' })) })
     expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'pd_t' })
-    expect(resultBar()).toBeNull()
+    const bar = resultBar()!
+    expect(within(bar).getByRole('status')).toHaveTextContent(/^已撤销这次整理，2 条恢复原样$/)
+    expect(within(bar).queryByRole('button')).toBeNull()
+    expect(bar).toHaveFocus()
     expect(screen.queryByText('刚改')).toBeNull()
+    // 删掉的那条回到列表，改写的那条按视图画
+    expect(hasRow(p1.content)).toBe(true)
+    expect(hasRow(DRAFT.content)).toBe(false)
   })
 
   it('故事 27：有记忆之后又被改过（stale）：整批不动，结果条写明「没法一起撤销」，不再给撤销', async () => {
@@ -1503,7 +1509,7 @@ describe('记忆查看：整理所选的应用与撤销', () => {
       expect(hasRow(p1.content)).toBe(true)
       await act(async () => { fireEvent.click(within(bar).getByRole('button', { name: '撤销全部' })) })
       expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'pd_t' })
-      expect(resultBar()).toBeNull()
+      expect(within(resultBar()!).getByRole('status')).toHaveTextContent(/^已撤销这次整理，1 条恢复原样$/)
     })
 
     it('留下的都已被别处接着改过：没有可撤销的，不给「撤销全部」', async () => {
