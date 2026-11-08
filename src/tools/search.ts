@@ -46,6 +46,8 @@ export interface SearchArgs {
   types?: string[]
   scope?: 'global' | 'workspace' | 'all-visible'
   limit?: number
+  /** 缺省 any：按档位排好的全部命中；all：只返回全命中档（同时含全部关键词）。 */
+  match?: 'any' | 'all'
 }
 
 export interface SearchHit {
@@ -75,6 +77,16 @@ export const SUBSTRING_FALLBACK_NOTE = `没有命中关键词的记忆，以下�
 /** 首条覆盖过半、但有关键词没完整出现时接在 OR_FALLBACK_NOTE 后：只说哪些没对上，不下结论。 */
 export const TOP_MISSING_LEAD = '排第一的那条没对上：'
 export const topMissingNote = (labels: readonly string[]) => `${TOP_MISSING_LEAD}${labels.join('、')}。`
+
+/**
+ * match: all 搜空时的说明（码 all-no-hit）：先说没有全命中，接逐词命中条数，再说换 any 能看到什么。
+ * 不带码的「没有匹配的记忆」只在 any 下出现：all 搜空时部分命中的记忆可能就在范围里，要让模型知道还有这条路。
+ */
+export const ALL_NO_HIT_NOTE = '没有记忆同时含全部关键词。'
+export const ANY_MATCH_HINT = '改用 match: "any" 可以看部分命中的结果。'
+
+/** any 模式截断、且全部结果里有非全命中时接在截断说明末尾：all 会改变结果时才提。 */
+export const MATCH_ALL_HINT = '用 match: "all" 可以只看同时含全部关键词的记忆。'
 
 /** 逐词命中一行最多列几个词，多的写「等 N 个」。 */
 export const TERM_NOTE_MAX = 8
@@ -180,7 +192,13 @@ export async function executeSearch(
   const direct = ranked.findIndex(e => e.record.id === directId)
   if (direct > 0) ranked.unshift(...ranked.splice(direct, 1))
   const isDirect = direct >= 0
-  const top = ranked.slice(0, limit)
+  // 全命中档（置顶的 id 直达不滤）。没有可打分 token 时 match 不起作用：留空时全在全命中档，
+  // 只有噪声词项时记忆靠旧词项进子串档，没有东西可以「全部命中」，照滤会平白搜空
+  const allOnly = tokens.length > 0 ? ranked.filter((e, i) => e.tier === 'all' || (isDirect && i === 0)) : ranked
+  const matchAll = a.match === 'all' && tokens.length > 0
+  // 过滤放在排序之后：逐词命中条数仍按全部候选（ranked）算
+  const listed = matchAll ? allOnly : ranked
+  const top = listed.slice(0, limit)
   const topIds = top.map(e => e.record.id)
   const { sessionRecall } = deps
   const handle = session.handle
@@ -195,14 +213,18 @@ export async function executeSearch(
   // 附逐词命中条数（范围内全部候选）。
   // 查询恰是某条记忆的 id：它已置顶，就是要找的那条，不出说明码
   const hasTier = (tier: SearchTier) => top.some(e => e.tier === tier)
+  // match: all 搜空 → all-no-hit（返回列表为空，与上面三码互斥）；all 有结果时列表只剩全命中档，三码自然不出。
+  // 范围内没有任何命中时换 any 也是空，不出此码，和 any 一样是不带码的空结果
+  const allNoHit = matchAll && top.length === 0 && ranked.length > 0
   let note: { noteCode: SearchNoteCode; note: string } | undefined
-  if (top.length > 0 && !hasTier('all') && !isDirect) {
+  if (allNoHit || (top.length > 0 && !hasTier('all') && !isDirect)) {
     const rows = ranked.map(e => e.tokenHits)
     const groups = groupQueryTerms(a.query, tokens, tokenize)
     const withCounts = (text: string) => [text, termHitNote(termHitCounts(groups, tokens, rows))].filter(x => x !== undefined).join('\n')
     const first = top.find(e => e.tier === 'partial')
     const verdict = first === undefined ? undefined : judgeTopHit(groups, tokens, first.tokenHits)
-    if (verdict === undefined) note = { noteCode: 'substring-fallback', note: withCounts(SUBSTRING_FALLBACK_NOTE) }
+    if (allNoHit) note = { noteCode: 'all-no-hit', note: [withCounts(ALL_NO_HIT_NOTE), ANY_MATCH_HINT].join('\n') }
+    else if (verdict === undefined) note = { noteCode: 'substring-fallback', note: withCounts(SUBSTRING_FALLBACK_NOTE) }
     else if (verdict.weak) note = { noteCode: 'low-coverage', note: withCounts(LOW_COVERAGE_NOTE) }
     else if (verdict.missingKeywords.length > 0) {
       const missing = [...new Set(verdict.missingKeywords.map(g => g.units.map(u => u.label).join('/')))]
@@ -211,7 +233,9 @@ export async function executeSearch(
   }
   return {
     ...note,
-    ...(ranked.length > top.length ? { moreNote: truncationNote(ranked.length, top.length, limit === MAX_SEARCH_LIMIT) } : {}),
+    ...(listed.length > top.length
+      ? { moreNote: truncationNote(listed.length, top.length, limit === MAX_SEARCH_LIMIT) + (listed.length > allOnly.length && allOnly.some(e => e.tier === 'all') ? MATCH_ALL_HINT : '') }
+      : {}),
     // 与注入同口径：只遮明确密钥（疑似级写入时用户已确认）；文件路径同注入，name 被遮的不给，其余遮一遍
     hits: top.map(({ record: h }) => {
       const masked = maskSecretSurface(h)

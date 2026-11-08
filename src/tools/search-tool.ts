@@ -32,6 +32,7 @@ export function createSearchTool(deps: SearchToolDeps): ToolDefinition {
       '- 查询是空格分隔的关键词，中英文均可，版本号、路径这类原样文字可以直接搜。同时含全部关键词的记忆排在最前，所以一次查询里放预期会在同一条记忆里一起出现的词，排序最准。',
       '- 记忆里的说法可能和用户的不同：开头记忆索引里的说法、用户的原话，以及你判断意思相近或相关的写法，都可以拿来搜。',
       '- 中文和英文写法分开匹配：记忆里只有其中一种写法时，两种一起写只算部分命中。',
+      '- match 缺省为 any，返回按档位排好的全部命中；设为 all 只返回同时含全部关键词的记忆；有部分命中但没有全命中时，开头会说明并列出各关键词命中几条。',
       '- 想从几个角度找，可以分几次搜，每次一个角度。搜几次、什么时候停，由你根据结果是否已经回答了问题来判断。',
       '',
       '怎么读结果：',
@@ -46,6 +47,7 @@ export function createSearchTool(deps: SearchToolDeps): ToolDefinition {
       types: { type: 'array', items: { type: 'string' }, description: describeTypes(deps.registry) },
       scope: { type: 'string', enum: ['global', 'workspace', 'all-visible'], description: '缺省 all-visible（global + 当前 workspace）' },
       limit: { type: 'number', description: '返回条数上限，缺省 10，最大 50；命中更多时结果开头会说明总数' },
+      match: { type: 'string', enum: ['any', 'all'], description: '匹配模式，缺省 any：返回按档位排好的全部命中；all：只返回同时含全部关键词的记忆' },
     },
     output: {
       schema: { type: 'json' },

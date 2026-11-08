@@ -211,6 +211,7 @@ describe('executeSearch：命中多于返回条数时说明总数', () => {
     await seedMany(store, 3)
     const r = await executeSearch({ query: '发版条目 周报', limit: 1 }, fakeExec(), makeSearchDeps(store))
     expect(r.noteCode).toBe('or-fallback')
+    // 结果全是部分命中、没有全命中：all 只会搜空，截断说明不提它
     expect(r.moreNote).toBe(truncationNote(3, 1, false))
     const head = renderSearchResult(r).split('\n\n')[0]!
     expect(head).toContain(r.note!)

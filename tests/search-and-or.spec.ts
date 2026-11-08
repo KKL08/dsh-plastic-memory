@@ -8,9 +8,11 @@ import { FileTable } from '../src/storage/file-table.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { GLOBAL_DIR, deriveFileId } from '../src/storage/paths.ts'
 import { expandQueryTerms, matchScore } from '../src/text.ts'
-import { executeSearch, renderSearchResult, type SearchToolDeps } from '../src/tools/search.ts'
+import {
+  executeSearch, renderSearchResult, termHitNote, truncationNote, ALL_NO_HIT_NOTE, ANY_MATCH_HINT, MATCH_ALL_HINT, type SearchToolDeps,
+} from '../src/tools/search.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
-import type { SearchNoteCode } from '../src/contract-codes.ts'
+import { WEAK_SEARCH_NOTE_CODES, type SearchNoteCode } from '../src/contract-codes.ts'
 import type { RecallStats } from '../src/storage/schema.ts'
 import { record } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
@@ -21,6 +23,7 @@ import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts
 
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const LOW_COVERAGE: SearchNoteCode = 'low-coverage'
+const ALL_NO_HIT: SearchNoteCode = 'all-no-hit'
 
 const searchDeps = (store: MemoryStore): SearchToolDeps => ({
   store, registry,
@@ -145,4 +148,122 @@ it('说明码进 contract-codes', async () => {
   const result = await executeSearch({ query: 'alpha missing absent' }, fakeExec(), searchDeps(store))
   expect(result.noteCode).toBe(LOW_COVERAGE)
   expect(result.hits.map(h => h.id)).toEqual(['mem_a'])
+})
+
+// match: all 在排序之后、截断之前滤掉非全命中档；逐词命中条数仍按全部候选算
+describe('匹配模式 match', () => {
+  const memStore = async (records: Parameters<typeof record>[0][]) => {
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
+    for (const r of records) await store.put(record(r))
+    return store
+  }
+  const run = (store: MemoryStore, query: string, extra: Partial<Parameters<typeof executeSearch>[0]> = {}) =>
+    executeSearch({ query, ...extra }, fakeExec(), searchDeps(store))
+  const pending = (depth: number) => ({ delegation: { sessionId: `sub-${depth}`, depth, parentSessionId: 'main' } })
+
+  it('all 只返回同时含全部关键词的记忆，不带说明码；不填与填 any 结果相同', async () => {
+    const store = await memStore([
+      { id: 'mem_full', content: 'alpha beta', lastConfirmedAt: 3 },
+      { id: 'mem_part', content: 'alpha', lastConfirmedAt: 2 },
+      { id: 'mem_sub', content: 'alphabet', lastConfirmedAt: 1 },
+    ])
+    const all = await run(store, 'alpha beta', { match: 'all' })
+    expect(all.hits.map(h => h.id)).toEqual(['mem_full'])
+    expect(all.noteCode).toBeUndefined()
+    expect(all.note).toBeUndefined()
+    const dflt = await run(store, 'alpha beta')
+    expect(dflt.hits.map(h => h.id)).toEqual(['mem_full', 'mem_part', 'mem_sub'])
+    expect(await run(store, 'alpha beta', { match: 'any' })).toEqual(dflt)
+  })
+
+  it('all 搜空：说明码 all-no-hit，文案接逐词命中条数（按全部候选算）与换 any 的提示；any 同样查询照旧', async () => {
+    const store = await memStore([
+      { id: 'mem_a', content: 'alpha' },
+      { id: 'mem_g', content: 'gamma 与 alpha' },
+      { id: 'mem_b', content: 'beta' },
+    ])
+    const r = await run(store, 'alpha beta', { match: 'all' })
+    expect(r.hits).toEqual([])
+    expect(r.noteCode).toBe(ALL_NO_HIT)
+    expect(r.note).toBe([ALL_NO_HIT_NOTE, termHitNote([{ label: 'alpha', count: 2 }, { label: 'beta', count: 1 }]), ANY_MATCH_HINT].join('\n'))
+    expect(r.note).toContain('各关键词命中的记忆条数：alpha 2、beta 1。')
+    expect(r.moreNote).toBeUndefined()
+    // 判弱看的是 any 下的排序结果，评估脚本按这组码数「命中弱」：all 搜空不算在内
+    expect(WEAK_SEARCH_NOTE_CODES).not.toContain(r.noteCode)
+    // 渲染出说明而不是「没有匹配的记忆」
+    expect(renderSearchResult(r)).toBe(r.note)
+    expect((await run(store, 'alpha beta')).noteCode).toBe('or-fallback')
+
+    // 范围内一条都没命中：换 any 也是空，all 不出 all-no-hit，和 any 一样是不带码的空结果
+    const anyNone = await run(store, 'zeta omega')
+    expect(anyNone.hits).toEqual([])
+    expect(anyNone.noteCode).toBeUndefined()
+    expect(renderSearchResult(anyNone)).toBe('没有匹配的记忆。')
+    expect(await run(store, 'zeta omega', { match: 'all' })).toEqual(anyNone)
+  })
+
+  it('id 直达在过滤之前置顶且不滤，两种模式结果相同', async () => {
+    const store = await memStore([
+      { id: 'mem_target', content: '正文与查询无关' },
+      { id: 'mem_mention', content: 'mem_target 被提到' },
+    ])
+    const any = await run(store, 'mem_target')
+    expect(any.hits.map(h => h.id)).toEqual(['mem_target', 'mem_mention'])
+    expect(await run(store, 'mem_target', { match: 'all' })).toEqual(any)
+
+    const alone = await memStore([{ id: 'mem_only', content: '正文与查询无关' }])
+    const r = await run(alone, 'mem_only', { match: 'all' })
+    expect(r.hits.map(h => h.id)).toEqual(['mem_only'])
+    expect(r.noteCode).toBeUndefined()
+  })
+
+  it('all 模式下待确认记录仍排在主档之后，limit 照常生效', async () => {
+    const store = await memStore([
+      { id: 'mem_pend', content: '部署流程 回滚 部署流程', confidence: 0.9, ...pending(1) },
+      { id: 'mem_main', content: '部署流程 回滚', confidence: 0.3 },
+      { id: 'mem_part', content: '部署流程', confidence: 0.9 },
+    ])
+    expect((await run(store, '部署流程 回滚', { match: 'all' })).hits.map(h => h.id)).toEqual(['mem_main', 'mem_pend'])
+    expect((await run(store, '部署流程 回滚', { match: 'all', limit: 1 })).hits.map(h => h.id)).toEqual(['mem_main'])
+  })
+
+  it('截断说明：any 且全部结果里有非全命中才提 all；全是全命中或 all 模式不提', async () => {
+    const mixed = await memStore([
+      { id: 'mem_f1', content: 'alpha beta' },
+      { id: 'mem_f2', content: 'alpha beta' },
+      { id: 'mem_p', content: 'alpha' },
+    ])
+    const anyMixed = await run(mixed, 'alpha beta', { limit: 1 })
+    expect(anyMixed.moreNote).toBe(`${truncationNote(3, 1, false)}${MATCH_ALL_HINT}`)
+    expect(anyMixed.moreNote!.endsWith(MATCH_ALL_HINT)).toBe(true)
+    // all 模式：只数全命中，不提 all
+    expect((await run(mixed, 'alpha beta', { match: 'all', limit: 1 })).moreNote).toBe(truncationNote(2, 1, false))
+
+    const allFull = await memStore([
+      { id: 'mem_f1', content: 'alpha beta' },
+      { id: 'mem_f2', content: 'alpha beta' },
+    ])
+    expect((await run(allFull, 'alpha beta', { limit: 1 })).moreNote).toBe(truncationNote(2, 1, false))
+    expect((await run(allFull, 'alpha beta', { match: 'all', limit: 1 })).moreNote).toBe(truncationNote(2, 1, false))
+  })
+
+  it('查询没有可打分的词（留空、纯数字、单字母）时 match 不起作用，两种模式结果相同，截断说明不提 all', async () => {
+    const store = await memStore([
+      { id: 'mem_1', content: '发布于 2024 年 x 号', lastConfirmedAt: 2 },
+      { id: 'mem_2', content: '2024 x 版本', lastConfirmedAt: 1 },
+    ])
+    for (const query of ['', '2024', 'x']) {
+      const any = await run(store, query, { limit: 1 })
+      expect(any.hits).toHaveLength(1)
+      expect(any.moreNote).toBe(truncationNote(2, 1, false))
+      expect(await run(store, query, { match: 'all', limit: 1 })).toEqual(any)
+    }
+    // 没命中时也一样：不出 all-no-hit，是不带码的空结果
+    for (const query of ['9999', 'q']) {
+      const any = await run(store, query)
+      expect(any.hits).toEqual([])
+      expect(any.noteCode).toBeUndefined()
+      expect(await run(store, query, { match: 'all' })).toEqual(any)
+    }
+  })
 })

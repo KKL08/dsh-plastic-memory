@@ -218,6 +218,22 @@ describe('memory_search 绑定', () => {
     })
   })
 
+  it('match 参数：可选，取值 any / all，说明两种模式各返回什么；描述「查询写法」一节讲这两种模式', async () => {
+    const tool = await seededTool()
+    const schema = schemaOf(tool)
+    expect(validateJsonSchemaValue(schema, { query: 'auth', match: 'all' })).toEqual([])
+    expect(validateJsonSchemaValue(schema, { query: 'auth', match: 'any' })).toEqual([])
+    expect(validateJsonSchemaValue(schema, { query: 'auth', match: 'some' }).length).toBeGreaterThan(0)
+    const match = (schema as { properties: Record<string, { enum?: string[]; description?: string }> }).properties.match!
+    expect(match.enum).toEqual(['any', 'all'])
+    expect(match.description).toContain('缺省 any')
+    expect(match.description).toContain('同时含全部关键词')
+    expect((schema as { required?: string[] }).required ?? []).not.toContain('match')
+    const d = tool.description
+    const section = d.slice(d.indexOf('查询写法：'), d.indexOf('怎么读结果：'))
+    expect(section).toContain('- match 缺省为 any，返回按档位排好的全部命中；设为 all 只返回同时含全部关键词的记忆')
+  })
+
   it('(a) 合法参数过、缺必填（query）拒', async () => {
     const tool = await seededTool()
     expect(validateJsonSchemaValue(schemaOf(tool), { query: 'auth' })).toEqual([])
