@@ -195,6 +195,8 @@ All notable changes to this project are documented here. The format follows
   the line shows the command and its full result, with secrets masked.
 
 ### Fixed
+- Checkup findings referred to memories by internal ids such as
+  `mem_xxx`. Their descriptions now use the memory names.
 - Memory files edited outside the plugin (in an editor, by git or by a sync
   tool) did not show up on the Memory page until the plugin itself wrote a
   memory, and editing such a memory on the page failed with "refresh, then

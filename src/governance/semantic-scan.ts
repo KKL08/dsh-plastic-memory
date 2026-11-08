@@ -77,6 +77,8 @@ const SYSTEM_PROMPT = `你是记忆库治理审查员。对给出的记忆列表
 - misplaced 错位：记忆放错了 scope（项目特定的放了 global，或全局偏好锁在了项目里）。
 - unclear 模糊：新会话没有额外上下文时无法据此行动；或者只有一句结论，看不出是在什么情况下定的，因此判断不了它管到哪里。短本身不算问题；看得出管到哪里、也能照着做的短记忆不报。
 
+summary、suggestedAction 是给用户看的：提到记忆时写它的 name，id 只写在 memoryIds 里。
+
 只报有把握的问题，不确定就不报。只输出 JSON，不要任何其他文字，格式：
 {"findings":[{"type":"conflict","memoryIds":["mem_x","mem_y"],"summary":"一句话描述","suggestedAction":"建议动作","baselineRef":"仅垂直冲突填，如 AGENTS.md：某规则"}]}
 没有问题输出 {"findings":[]}`
@@ -98,7 +100,7 @@ export function buildSemanticPrompt(
 /** 记忆列表里的一条（明确密钥已遮）。分批按它估算 token，与发给模型的文字同一口径。 */
 export function semanticMemoryLine(record: MemoryRecord): string {
   const r = maskSecretSurface(record)
-  return `- id=${r.id} type=${r.type} scope=${r.scope}${r.workspacePath ? `(${r.workspacePath})` : ''}\n  content: ${r.content}\n  summary: ${r.summary}`
+  return `- id=${r.id} type=${r.type} scope=${r.scope}${r.workspacePath ? `(${r.workspacePath})` : ''}\n  name: ${r.name}\n  content: ${r.content}\n  summary: ${r.summary}`
 }
 
 /**
@@ -158,6 +160,17 @@ export function planSemanticBatches(records: MemoryRecord[], budget = SEMANTIC_B
 
 /** 模型写的说明可能引用记忆里的密钥，会进待决账本、体检缓存与工具输出：两级都遮。 */
 const maskText = (text: string) => maskSecrets(text, { severity: 'suspected' })
+
+/**
+ * 给用户看的文字里模型仍写了记忆 id 的，换成「名称」（连同两侧各一个空格，引号已经隔开）：一次替换，长 id 先匹配（id 互为前缀时不错换）。
+ * 体检说明和「整理所选」的计划共用；名称由调用方先遮好密钥。
+ */
+export function idsToNames(records: readonly { id: string; name: string }[]): (text: string) => string {
+  if (records.length === 0) return text => text
+  const names = new Map(records.map(r => [r.id, r.name]))
+  const pattern = new RegExp(` ?(${[...names.keys()].sort((a, b) => b.length - a.length).map(id => id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')}) ?`, 'g')
+  return text => text.replace(pattern, (_, id: string) => `「${names.get(id)}」`)
+}
 
 /** 解析 LLM 输出。整体解析失败返回 null（触发重试）；单条非法只跳过该条。 */
 export function parseSemanticFindings(raw: string, knownIds: Set<string>): Finding[] | null {
@@ -268,6 +281,8 @@ async function scanBatch(
 ): Promise<Finding[] | SemanticFailure> {
   const knownIds = new Set(records.map(r => r.id))
   const prompt = buildSemanticPrompt(records, baseline)
+  const named = idsToNames(records.map(r => maskSecretSurface(r, { severity: 'suspected' })))
+  const withNames = (findings: Finding[]) => findings.map(f => ({ ...f, summary: named(f.summary), suggestedAction: named(f.suggestedAction) }))
 
   // LLM 调用本身可能抛（限流/超时/上下文超限/网络），必须与"输出无法解析"同等降级——
   // 否则 layers=full 时已经算好的规则层结果会被一起丢掉。
@@ -280,7 +295,7 @@ async function scanBatch(
     // 普通错误落到下面的重试
   }
   const first = firstRaw === null ? null : parseSemanticFindings(firstRaw, knownIds)
-  if (first !== null) return first
+  if (first !== null) return withNames(first)
 
   // 同上：重试调用本身也可能抛，与"重试输出仍无法解析"同等降级为失败。
   let retryRaw: string
@@ -292,5 +307,6 @@ async function scanBatch(
     // 两次都失败：原因带上错误码交给调用方
     return modelError(err)
   }
-  return parseSemanticFindings(retryRaw, knownIds) ?? { kind: 'unparseable' }
+  const retried = parseSemanticFindings(retryRaw, knownIds)
+  return retried !== null ? withNames(retried) : { kind: 'unparseable' }
 }
