@@ -409,7 +409,7 @@ describe('整理所选：写要求与看计划', () => {
       expect(within(rewrite).getAllByRole('button').map(b => b.textContent)).toEqual(['放弃这项', '再改改'])
       const removal = itemOf('格式化用 prettier')
       expect(removal.querySelector('del')).toHaveTextContent(p1.content)
-      expect(removal).toHaveTextContent('应用后进最近删除，14 天内可恢复。')
+      expect([...removal.querySelectorAll('.pm-batch-item-note')].map(p => p.textContent)).toEqual(['内容并入：提交前检查', '应用后进最近删除，14 天内可恢复。'])
       expect(within(removal).getAllByRole('button').map(b => b.textContent)).toEqual(['放弃这项'])
       // 名称变了才列出来
       expect(within(itemOf('编辑器设置')).getByRole('region', { name: '改后' })).toHaveTextContent('名称编辑器格式化')

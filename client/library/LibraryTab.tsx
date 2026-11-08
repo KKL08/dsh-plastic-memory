@@ -97,6 +97,8 @@ interface TidyResult {
   rewritten: ReadonlyMap<string, { before: MemoryCardData; draft: EditDraft }>
   deleted: readonly MemoryCardData[]
   isStale: boolean
+  /** 已经整批撤销：撤回了几条。结果条换成一句「已撤销」，不再有按钮；改写、删除清空，列表照视图画。 */
+  undone?: number
   partial?: { kept: readonly MemoryCardData[]; unrecorded: readonly MemoryCardData[] }
 }
 
@@ -352,7 +354,9 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
   /** 撤销全部：整批一起恢复；有记忆之后又被改过（stale）整批没动，结果条写明，不再给撤销。 */
   const undoTidy = (result: TidyResult, decisionId: string) => {
     actions.run(TIDY, { cmd: 'undo', decisionId }, null, () => {
-      setTidied(undefined)
+      // 撤回的可能有屏幕外的几条，按钮又随之消失：结果条原位说一句，焦点留在它上面
+      isTidiedNew.current = true
+      setTidied({ ...result, rewritten: new Map(), deleted: [], undone: result.rewritten.size + result.deleted.length })
       setFresh((prev) => {
         const next = new Set(prev)
         for (const id of result.rewritten.keys()) next.delete(id)
@@ -373,6 +377,13 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
     const rewrites = result.rewritten.size
     const { partial, decisionId } = result
     const names = (memories: readonly MemoryCardData[]) => memories.map(m => m.name).join(t('library.batch.nameSep'))
+    if (result.undone !== undefined) {
+      return (
+        <div ref={tidiedBar} className="pm-lib-result pm-lib-tidied" tabIndex={-1}>
+          <p role="status" className="pm-lib-tidied-title">{t('library.batch.undone', { n: result.undone })}</p>
+        </div>
+      )
+    }
     const subs = result.isStale ? [t('library.batch.undoStale')] : [
       ...(partial !== undefined && partial.kept.length > 0 ? [t('library.batch.partialKept', { names: names(partial.kept) })] : []),
       ...(partial !== undefined && partial.unrecorded.length > 0 ? [t('library.batch.partialChanged', { names: names(partial.unrecorded) })] : []),
