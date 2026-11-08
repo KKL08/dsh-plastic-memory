@@ -16,7 +16,7 @@ import { createSourceTool } from '../src/tools/source-tool.ts'
 import { MemoryStore } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
-import { buildTypeRegistry } from '../src/type-registry.ts'
+import { buildTypeRegistry, BUILTIN_TYPES, PRESET_TYPES, RETIRED_TYPES } from '../src/type-registry.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
 import type { MemorySnapshot, PendingDecision, ScanCacheEntry } from '../src/governance/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
@@ -161,6 +161,61 @@ describe('memory_search 绑定', () => {
     expect(query.description).not.toMatch(/\d 到 \d 个/)
     expect(query.description).not.toContain('/')
     expect(query.description).toContain('不到一半')
+  })
+
+  describe('types 参数说明从类型表生成', () => {
+    // 两三类的假场景：不依赖内置类型的名字，也用来断言说明里没有写死的类型名
+    const sceneRegistry = (types: string[]) => buildTypeRegistry({
+      template: 'trial',
+      customTypes: {
+        alpha: { label: '甲类', description: '甲', whenToSave: '甲', howToUse: '甲', recall: 'core', decayDays: null, governancePriority: 'low' },
+        beta: { label: '乙类', description: '乙', whenToSave: '乙', howToUse: '乙', recall: 'search', decayDays: 30, governancePriority: 'high' },
+        gamma: { label: '丙类', description: '丙', whenToSave: '丙', howToUse: '丙', recall: 'passive', decayDays: null, governancePriority: 'medium' },
+      },
+      scenes: { trial: { label: '试验', types } },
+    })
+    const toolWith = (types: string[]) => createSearchTool({
+      store: new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable()),
+      registry: sceneRegistry(types),
+      host: { contextOf: async () => ({ workspacePath: '/proj', session: { id: 's', lastSeq: 1 } }) },
+    })
+    const typesParam = (tool: ToolDefinition) =>
+      (schemaOf(tool) as { properties: Record<string, { description?: string; enum?: unknown; items?: { enum?: unknown } }>; required?: string[] })
+
+    it('固定用法文字讲清筛选、不填、类型名来源、只填 types 列一类、其他场景和退役类型也能搜', () => {
+      const d = typesParam(toolWith(['alpha', 'beta'])).properties.types!.description!
+      expect(d).toContain('按类型筛选')
+      expect(d).toContain('不填查全部类型')
+      expect(d).toContain('开头记忆索引分组标题括号里的英文名')
+      expect(d).toContain('query 留空、只填 types')
+      expect(d).toContain('按置信度和最近确认时间排')
+      expect(d).toContain('limit')
+      expect(d).toContain('其他场景和已退役类型的记忆也能按类型名搜到')
+    })
+
+    it('列出当前场景的类型「name（标签）」，core 类型标「通常已整条带入」，其余不标', () => {
+      const d = typesParam(toolWith(['alpha', 'beta'])).properties.types!.description!
+      expect(d).toContain('alpha（甲类）：通常已整条带入开头的长期记忆')
+      expect(d).toContain('beta（乙类）')
+      expect(d).not.toContain('beta（乙类）：通常已整条带入')
+      expect(d).not.toContain('gamma')
+    })
+
+    it('换一个场景的类型表，说明随之变化；不含任何内置或预设类型名', () => {
+      const d = typesParam(toolWith(['beta', 'gamma'])).properties.types!.description!
+      expect(d).toContain('beta（乙类）')
+      expect(d).toContain('gamma（丙类）')
+      expect(d).not.toContain('alpha')
+      for (const name of [...BUILTIN_TYPES, ...PRESET_TYPES, ...RETIRED_TYPES].map(t => t.name)) expect(d).not.toContain(name)
+    })
+
+    it('types 是字符串数组，不设枚举、不必填', () => {
+      const schema = typesParam(toolWith(['alpha', 'beta']))
+      expect(schema.properties.types!.enum).toBeUndefined()
+      expect(schema.properties.types!.items!.enum).toBeUndefined()
+      expect(schema.required ?? []).not.toContain('types')
+      expect(validateJsonSchemaValue(schemaOf(toolWith(['alpha'])), { query: '', types: ['commitment', 'whatever'] })).toEqual([])
+    })
   })
 
   it('(a) 合法参数过、缺必填（query）拒', async () => {

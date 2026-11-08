@@ -294,10 +294,12 @@ export async function apply(ctx: Context, config: Config) {
     allowSubagentSave,
   )
   let disposeSave = registerSave()
-  ctx.tools.register(createSearchTool({
+  // memory_search 的 types 说明同样从类型表生成，类型配置热更新时随 memory_save 一起重注册；执行时仍经转发对象现读类型表
+  const registerSearch = () => ctx.tools.register(createSearchTool({
     store, registry, host, sessionRecall: snapshotCache,
     tokenizer: { userDictionaryPath: () => config.search.userDictionaryPath.get(), log: ctx.logger },
   }))
+  let disposeSearch = registerSearch()
   registerWrite(createForgetTool({ store, snapshots, decisions, log: ctx.logger, host }))
   // 快照的写入与恢复必须成对——治理关闭时 forget 仍会拍快照，若没有恢复入口，
   // 14 天的快照就是死存储。故 memory_snapshot 放在治理开关之外，与 forget 一起常驻。
@@ -420,8 +422,10 @@ export async function apply(ctx: Context, config: Config) {
         currentRegistry = buildRegistry()
         disposeSave()
         disposeSave = registerSave()
+        disposeSearch()
+        disposeSearch = registerSearch()
       } catch (err) {
-        // 自定义类型与内置重名：保留原类型表与 memory_save，等配置改对
+        // 自定义类型与内置重名：保留原类型表、memory_save 与 memory_search，等配置改对
         ctx.logger.error('[plastic-memory] 类型配置热更新失败，沿用原类型表:', err)
       }
     }

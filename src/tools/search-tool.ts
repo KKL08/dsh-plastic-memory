@@ -2,10 +2,25 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { executeSearch, renderSearchResult, type SearchHit, type SearchToolDeps } from './search.ts'
 import { toToolOutput } from './output.ts'
+import type { TypeRegistry } from '../type-registry.ts'
+
+/**
+ * types 的参数说明：固定用法 + 当前场景的类型列表。类型可配置，名字全从类型表读；
+ * core 类型说「通常」已带入，是因为严格上限模式下可能被省略。
+ */
+function describeTypes(registry: TypeRegistry): string {
+  const list = registry.all().map(t => t.recall === 'core' ? `${t.name}（${t.label}）：通常已整条带入开头的长期记忆` : `${t.name}（${t.label}）`)
+  return [
+    '按类型筛选，不填查全部类型。类型名是开头记忆索引分组标题括号里的英文名。',
+    'query 留空、只填 types 时列出这几类的记忆，按置信度和最近确认时间排，受 limit 限制，命中更多时结果开头会说明总数。',
+    '其他场景和已退役类型的记忆也能按类型名搜到。',
+    `当前场景的类型：${list.join('；')}`,
+  ].join('')
+}
 
 /**
  * 把 memory_search 工具接到 dsh 框架上。纯逻辑在 search.ts，不依赖框架包，测试直接测它；
- * 本文件由 typecheck + 真机验证保证。
+ * 本文件由 typecheck + 真机验证保证。types 说明在创建时从类型表生成，类型配置热更新后由 index.ts 重注册。
  */
 export function createSearchTool(deps: SearchToolDeps): ToolDefinition {
   return defineTool({
@@ -28,7 +43,7 @@ export function createSearchTool(deps: SearchToolDeps): ToolDefinition {
     ].join('\n'),
     parameters: {
       query: { type: 'string', required: true, description: '空格分隔的关键词，中英文均可；对名称、摘要、标签、内容匹配。没有记录命中全部关键词时结果开头会说明，排第一的对上一半以上、但有关键词没对上时会点名这些词；排第一的对上的查询内容不到一半、或只有子串命中时会提示命中弱' },
-      types: { type: 'array', items: { type: 'string' } },
+      types: { type: 'array', items: { type: 'string' }, description: describeTypes(deps.registry) },
       scope: { type: 'string', enum: ['global', 'workspace', 'all-visible'], description: '缺省 all-visible（global + 当前 workspace）' },
       limit: { type: 'number', description: '返回条数上限，缺省 10，最大 50；命中更多时结果开头会说明总数' },
     },

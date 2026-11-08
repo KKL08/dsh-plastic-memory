@@ -1602,7 +1602,7 @@ describe('AGENTS.md 基线：读 plasticMemoryBaseline 投影', () => {
  * （载荷是变化路径的键数组），不重挂插件。这里用 commitVolatile 当 Loader 的替身，其余全走 apply 注册出来的真实接线。
  */
 describe('配置热生效（loader/volatile-update）', () => {
-  type ToolDef = { name: string; description: string; parameters: { properties: Record<string, { enum?: string[] }> }; execute(args: unknown, exec: unknown): Promise<unknown> }
+  type ToolDef = { name: string; description: string; parameters: { properties: Record<string, { enum?: string[]; description?: string }> }; execute(args: unknown, exec: unknown): Promise<unknown> }
   type CommandDef = { name: string; handler(inv: { rawInput: string; agent: unknown }): Promise<{ kind: string; text?: string }> }
   const VOLATILE_WRITE = Symbol.for('cosmokit.volatile.write')
   const GOVERNANCE_TOOLS = ['memory_confirm', 'memory_health', 'memory_promote', 'memory_scan']
@@ -1772,6 +1772,40 @@ describe('配置热生效（loader/volatile-update）', () => {
     await expect(t.save({ type: 'procedure', name: '流程', content: '旧场景的类型' })).rejects.toThrow(/type/)
     await expect(t.save({ type: 'profile', name: '画像', content: '场景去掉的通用类型' })).rejects.toThrow(/type/)
     expect(await t.save({ type: 'decision', name: '定了用 A', content: '周会定了选型用 A 方案' })).toMatchObject({ kind: 'saved' })
+  })
+
+  it('类型配置变化：memory_search 注销再注册，types 说明换成新场景的类型', async () => {
+    const t = await setup()
+    const searchDef = t.tool('memory_search')
+    expect(searchDef.parameters.properties.types!.description).not.toContain('regulation')
+    const scenes = { ...PRESET_SCENES, 'scene-1': { label: '合规', types: ['preference', 'regulation'] } }
+    await t.update({ template: 'scene-1', customTypes: { regulation }, scenes })
+    const researched = t.tool('memory_search')
+    expect(researched).not.toBe(searchDef)
+    expect(researched.parameters.properties.types!.description).toContain('regulation（合规要求）：通常已整条带入')
+    expect(researched.parameters.properties.types!.description).not.toContain('procedure')
+    // 只删预设类型也是类型键：说明里随之去掉
+    await t.update({ template: 'coding' })
+    expect(t.tool('memory_search').parameters.properties.types!.description).toContain('procedure')
+    await t.update({ removedPresetTypes: ['procedure'] })
+    expect(t.tool('memory_search').parameters.properties.types!.description).not.toContain('procedure')
+  })
+
+  it('类型表重建失败（自定义类型与内置重名）：memory_save 与 memory_search 都保持原样', async () => {
+    const t = await setup()
+    const saveDef = t.tool('memory_save')
+    const searchDef = t.tool('memory_search')
+    // decayDays 用数字：schema 把 null 当缺失必填值（同加载即抛错那条用例）
+    await t.update({ customTypes: { profile: { ...regulation, decayDays: 90 } } })
+    expect(t.tool('memory_save')).toBe(saveDef)
+    expect(t.tool('memory_search')).toBe(searchDef)
+  })
+
+  it('只变 governance.enabled：memory_search 不重注册', async () => {
+    const t = await setup()
+    const searchDef = t.tool('memory_search')
+    await t.update({ governance: { enabled: false } })
+    expect(t.tool('memory_search')).toBe(searchDef)
   })
 
   it('删掉预设类型：memory_save 重注册、不能再新增；已有记忆照常带入，分组名按出厂定义', async () => {
