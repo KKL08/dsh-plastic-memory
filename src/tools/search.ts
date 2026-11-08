@@ -62,21 +62,25 @@ export interface SearchHit {
 /** 命中的 core 记忆全文已在本会话快照里时，正文换成这句：同一段全文不在上下文里贴两遍。 */
 export const IN_SNAPSHOT_NOTE = '全文已在本会话带入的长期记忆里。'
 
-/** 命中弱时附在说明末尾：说明码本身就是「相关度弱」的信号，提示模型换词再搜一次，而不是把弱结果当定论。 */
+/** 命中弱时附在说明末尾：排第一的连一半都没对上，提示模型可以换词再搜，而不是把弱结果当定论。 */
 export const RETRY_HINT = '命中弱，可以换同义词、换成另一种语言的写法、减少词数或换个角度再搜一次。'
 /**
- * 说明文案（码在 contract-codes）：返回列表里没有全命中记录、首条覆盖够 / 首条覆盖不够（见 search/coverage.ts）/
- * 只有旧子串匹配命中的记录（第三档）。覆盖够的只如实说明，不劝重搜：长句提问时首条往往就是答案。
+ * 说明文案（码在 contract-codes）：返回列表里没有全命中记录、首条覆盖过半 / 首条覆盖不到一半（见 search/coverage.ts）/
+ * 只有旧子串匹配命中的记录（第三档）。覆盖过半的只如实说明，不劝重搜：首条缺个词往往只是换了说法，要不要再搜由模型看结果判断。
  */
 export const OR_FALLBACK_NOTE = '没有记忆同时含全部关键词，以下按相关性排序。'
-export const LOW_COVERAGE_NOTE = `没有记忆同时含全部关键词，排第一的也只含其中一部分，以下按相关性排序。${RETRY_HINT}`
+export const LOW_COVERAGE_NOTE = `没有记忆同时含全部关键词，排第一的对上的查询内容不到一半，以下按相关性排序。${RETRY_HINT}`
 export const SUBSTRING_FALLBACK_NOTE = `没有命中关键词的记忆，以下只是关键词以子串出现的结果。${RETRY_HINT}`
+
+/** 首条覆盖过半、但有关键词没完整出现时接在 OR_FALLBACK_NOTE 后：只说哪些没对上，不下结论。 */
+export const TOP_MISSING_LEAD = '排第一的那条没对上：'
+export const topMissingNote = (labels: readonly string[]) => `${TOP_MISSING_LEAD}${labels.join('、')}。`
 
 /** 逐词命中一行最多列几个词，多的写「等 N 个」。 */
 export const TERM_NOTE_MAX = 8
 
 /**
- * 命中弱时接在说明后的一行：各关键词在范围内命中几条，一条都没命中的单独点名，让模型知道该换哪个词。
+ * 命中弱或首条缺关键词时接在说明后的一行：各关键词在范围内命中几条，一条都没命中的单独点名，让模型知道是哪个词没对上。
  * 没有可列的词（如纯数字查询）时返回 undefined，不出这一行。
  */
 export function termHitNote(counts: readonly TermHitCount[]): string | undefined {
@@ -186,19 +190,24 @@ export async function executeSearch(
   // 快照带入时的正文与现在一致才省略：冻结后改过的、同 id 取到别层副本的，快照里那份不是这一版
   const injected = sessionRecall && handle ? sessionRecall.injectedCore(handle) : undefined
 
-  // 说明码只看返回列表：没有全命中时，排第一的部分命中记录覆盖够 → or-fallback，不够 → low-coverage；
-  // 连部分命中也没有、只剩第三档 → substring-fallback（三者互斥、substring 优先）。判弱的两种附逐词命中条数（范围内全部候选）。
+  // 说明码只看返回列表：没有全命中时，排第一的部分命中记录覆盖过半 → or-fallback，不到一半 → low-coverage；
+  // 连部分命中也没有、只剩第三档 → substring-fallback（三者互斥、substring 优先）。判弱的两种、以及首条缺关键词的 or-fallback
+  // 附逐词命中条数（范围内全部候选）。
   // 查询恰是某条记忆的 id：它已置顶，就是要找的那条，不出说明码
   const hasTier = (tier: SearchTier) => top.some(e => e.tier === tier)
   let note: { noteCode: SearchNoteCode; note: string } | undefined
   if (top.length > 0 && !hasTier('all') && !isDirect) {
     const rows = ranked.map(e => e.tokenHits)
     const groups = groupQueryTerms(a.query, tokens, tokenize)
-    const weakNote = (text: string) => [text, termHitNote(termHitCounts(groups, tokens, rows))].filter(x => x !== undefined).join('\n')
+    const withCounts = (text: string) => [text, termHitNote(termHitCounts(groups, tokens, rows))].filter(x => x !== undefined).join('\n')
     const first = top.find(e => e.tier === 'partial')
-    if (first === undefined) note = { noteCode: 'substring-fallback', note: weakNote(SUBSTRING_FALLBACK_NOTE) }
-    else if (judgeTopHit(groups, tokens, first.tokenHits).weak) note = { noteCode: 'low-coverage', note: weakNote(LOW_COVERAGE_NOTE) }
-    else note = { noteCode: 'or-fallback', note: OR_FALLBACK_NOTE }
+    const verdict = first === undefined ? undefined : judgeTopHit(groups, tokens, first.tokenHits)
+    if (verdict === undefined) note = { noteCode: 'substring-fallback', note: withCounts(SUBSTRING_FALLBACK_NOTE) }
+    else if (verdict.weak) note = { noteCode: 'low-coverage', note: withCounts(LOW_COVERAGE_NOTE) }
+    else if (verdict.missingKeywords.length > 0) {
+      const missing = [...new Set(verdict.missingKeywords.map(g => g.units.map(u => u.label).join('/')))]
+      note = { noteCode: 'or-fallback', note: withCounts(`${OR_FALLBACK_NOTE}${topMissingNote(missing)}`) }
+    } else note = { noteCode: 'or-fallback', note: OR_FALLBACK_NOTE }
   }
   return {
     ...note,

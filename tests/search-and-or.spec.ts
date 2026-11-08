@@ -75,10 +75,10 @@ describe('AND 命中集 ⊆ OR 命中集（性质测试）；零 AND 命中时�
     expect(and.hits.map(h => h.id)).toEqual(['mem_two', 'mem_one'])
     expect(and.noteCode).toBeUndefined()
 
-    // 没有全命中：都是部分命中，按相关性排序，带说明码（rollback 一条都没命中，判弱），渲染里先说明再列结果
+    // 没有全命中：都是部分命中，按相关性排序，带说明码（排第一的缺 rollback，点名但不判弱），渲染里先说明再列结果
     const or = await executeSearch({ query: 'deploy hook rollback' }, fakeExec(), searchDeps(store))
     expect(or.hits.map(h => h.id)).toEqual(['mem_two', 'mem_one'])
-    expect(or.noteCode).toBe(LOW_COVERAGE)
+    expect(or.noteCode).toBe('or-fallback')
     const text = renderSearchResult(or)
     expect(text.startsWith(or.note!)).toBe(true)
     expect(text).toContain('[mem_two]')
@@ -102,7 +102,7 @@ it('排序：命中分 → confidence 降序 → lastConfirmedAt 降序；recall
   await store.put(record({ id: 'mem_recent', content: 'alpha', confidence: 0.9, lastConfirmedAt: 200, recallCount: 0 }))
 
   const { hits, noteCode } = await executeSearch({ query: 'alpha beta gamma' }, fakeExec(), searchDeps(store))
-  expect(noteCode).toBe(LOW_COVERAGE)
+  expect(noteCode).toBe('or-fallback')
   expect(hits.map(h => h.id)).toEqual(['mem_score', 'mem_recent', 'mem_old_popular', 'mem_lowconf'])
 })
 
@@ -142,7 +142,7 @@ it('说明码进 contract-codes', async () => {
   // LOW_COVERAGE 以 SearchNoteCode 声明：码不在 contract-codes 的联合里则类型检查不过
   const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
   await store.put(record({ id: 'mem_a', content: 'alpha' }))
-  const result = await executeSearch({ query: 'alpha missing' }, fakeExec(), searchDeps(store))
+  const result = await executeSearch({ query: 'alpha missing absent' }, fakeExec(), searchDeps(store))
   expect(result.noteCode).toBe(LOW_COVERAGE)
   expect(result.hits.map(h => h.id)).toEqual(['mem_a'])
 })

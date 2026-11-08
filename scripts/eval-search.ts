@@ -365,7 +365,7 @@ const isWeak = (code: SearchNoteCode | undefined) => code !== undefined && (WEAK
 
 /**
  * 判弱统计：各类别判弱几条、其中首条正确的几条；逐条列出首条正确却判弱的（白搜一轮，应尽量少）、
- * 首条不对却没判弱的（模型会把错的当答案）与库里没有答案却没判弱的（应为 0）。零 token 查询不出说明码，不计。
+ * 首条不对却没判弱的与库里没有答案却没判弱的（这两类只带说明、由模型看结果判断，供调阈值时对照）。零 token 查询不出说明码，不计。
  */
 function printWeak(out: Out, label: string, run: ProductionRun): void {
   const counted = EVAL_QUERIES.filter(q => q.category !== 'zero-token')

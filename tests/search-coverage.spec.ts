@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { createTokenizer } from '../src/search/tokenizer.ts'
 import {
-  KEYWORD_MAX_CJK_CHARS, WEAK_COVERAGE_BELOW, contentSegments, groupQueryTerms, judgeTopHit, termHitCounts, type TermGroup,
+  KEYWORD_MAX_CJK_CHARS, contentSegments, groupQueryTerms, judgeTopHit, termHitCounts, type TermGroup,
 } from '../src/search/coverage.ts'
 
-// 「命中弱」按首条覆盖度判断：查询切成词（CJK 去掉虚词后的内容段），
-// 关键词整组缺失或覆盖的内容字不到阈值才算弱。
+// 「命中弱」按首条覆盖度判断：查询切成词（CJK 去掉虚词后的内容段），覆盖的内容不到一半才算弱；
+// 整组没出现的关键词另外列出，不单独决定判弱。
 // 这里用 bigram 分词器（与 jieba 是否安装无关）；生产两档在评估集上的表现见 tests/search-eval.spec.ts。
 
 const tokenize = createTokenizer()
@@ -80,18 +80,17 @@ describe('斜杠词', () => {
     expect(keywords(groupsFor('src/gui/contract.ts'))).toEqual([true])
   })
 
-  it('首条只写了中文，查询里的英文写法也算一个关键词：缺了就判弱', () => {
+  it('首条只写了中文，查询里的英文写法也算一个关键词：缺了照样列出', () => {
     const v = judge('防抖/debounce', '前端搜索输入框防抖 300 毫秒')
     expect(v.missingKeywords.map(labelOf)).toEqual(['debounce'])
-    expect(v.weak).toBe(true)
   })
 })
 
 describe('首条覆盖度判弱', () => {
-  it('中英两种写法空格分开：各是一个关键词，首条缺了英文写法就判弱', () => {
+  it('中英两种写法空格分开：各是一个关键词，首条缺了英文写法只列出来，覆盖过半不判弱', () => {
     const v = judge('防抖 debounce', '前端搜索输入框防抖 300 毫秒')
     expect(v.missingKeywords.map(labelOf)).toEqual(['debounce'])
-    expect(v.weak).toBe(true)
+    expect(v.weak).toBe(false)
   })
 
   it('长句中文：疑问词不算内容，首条盖住了几乎全部内容字，不判弱', () => {
@@ -102,48 +101,62 @@ describe('首条覆盖度判弱', () => {
     expect(v.weak).toBe(false)
   })
 
-  it('长句中文：虚词和跨过虚词的二字碎片不算覆盖，首条只盖住一半内容字就判弱', () => {
+  it('长句中文：虚词和跨过虚词的二字碎片不算覆盖；刚好一半不判弱，不到一半判弱', () => {
     // 记录里有「是什么」「么格」，但只有「日志」是内容字
     const v = judge('日志是什么格式', '问是什么么格的都记进日志')
     expect(v.coverage).toBe(0.5)
-    expect(v.coverage).toBeLessThan(WEAK_COVERAGE_BELOW)
-    expect(v.weak).toBe(true)
+    expect(v.weak).toBe(false)
+    // 内容段「日志格式规范」6 字，首条只有「日志」
+    const v2 = judge('日志格式规范是什么', '问是什么么格的都记进日志')
+    expect(v2.coverage).toBeLessThan(0.5)
+    expect(v2.weak).toBe(true)
   })
 
-  it('长句中文：库里没有答案，首条只盖住后面几个词、缺了话题词，判弱', () => {
+  it('长句中文：首条盖住了大半内容字，即使缺了话题词也不判弱（库里有没有答案，词面分不出来）', () => {
     const v = judge('定时任务的执行时间怎么配置', '任务的执行时间在配置中心里改')
     expect(v.coverage).toBe(0.8)
-    expect(judge('周报模板应该放在哪个目录', '邮件模板放在 templates 目录').weak).toBe(true)
+    expect(v.weak).toBe(false)
   })
 
-  it('「X 的 Y 是什么」：问的那个词 Y 是关键词，首条话题对上、缺了 Y 就判弱', () => {
+  it('「X 的 Y 是什么」：问的那个词 Y 是关键词，首条话题对上、缺了 Y 就列出来', () => {
     const v1 = judge('数据库连接池的密码是什么', '数据库连接池使用固定上限，最大连接数为 20。')
     expect(v1.missingKeywords.map(labelOf)).toEqual(['密码'])
-    expect(v1.weak).toBe(true)
+    expect(v1.weak).toBe(false)
     const v2 = judge('部署脚本的超时是多少', '部署脚本在 CI 里运行，失败时自动重试一次。')
     expect(v2.missingKeywords.map(labelOf)).toEqual(['超时'])
-    expect(v2.weak).toBe(true)
-    // 首条写着 Y：不判弱
-    expect(judge('数据库连接池的密码是什么', '数据库连接池的密码放在密钥管理里，不写进配置').weak).toBe(false)
+    // 首条写着 Y：没有缺的
+    expect(judge('数据库连接池的密码是什么', '数据库连接池的密码放在密钥管理里，不写进配置').missingKeywords).toEqual([])
   })
 
-  it('关键词整个没在首条出现，即使其余都在也判弱：库里没有答案的查询', () => {
+  it('关键词整个没在首条出现、其余都在：列出缺的词，不判弱', () => {
     const v = judge('证书 过期 续期', '登录会话七天过期，活跃时自动续期')
-    expect(v.coverage).toBeGreaterThanOrEqual(WEAK_COVERAGE_BELOW)
     expect(v.missingKeywords.map(labelOf)).toEqual(['证书'])
-    expect(v.weak).toBe(true)
+    expect(v.weak).toBe(false)
   })
 
-  it('英文查询里的介词、冠词没在首条出现，实词都在：不判弱', () => {
-    expect(judge('cache invalidation with Redis', 'Cache invalidation: Redis keys are deleted after each write').weak).toBe(false)
-    expect(judge('deploy to staging', 'Deploy staging builds from the release branch').weak).toBe(false)
-    // 实词缺了照样判弱
-    expect(judge('deploy to staging', 'Deploy production builds from the release branch').weak).toBe(true)
+  it('英文查询里的介词、冠词没在首条出现，实词都在：没有缺的词', () => {
+    expect(judge('cache invalidation with Redis', 'Cache invalidation: Redis keys are deleted after each write').missingKeywords).toEqual([])
+    expect(judge('deploy to staging', 'Deploy staging builds from the release branch').missingKeywords).toEqual([])
+    // 实词缺了照样列出
+    expect(judge('deploy to staging', 'Deploy production builds from the release branch').missingKeywords.map(labelOf)).toEqual(['staging'])
   })
 
-  it('中文通用词加英文产品名：产品名没出现就判弱', () => {
+  it('两个关键词首条只对上中文那个：内容字过半，列出缺的词、不判弱', () => {
     const v = judge('Redis 缓存', '更新数据后先写库再删缓存')
     expect(v.missingKeywords.map(labelOf)).toEqual(['Redis'])
+    expect(v.weak).toBe(false)
+  })
+
+  it('中英混写的查询：两个汉字约等于一个英文词，判定不随首条用哪种语言写而变', () => {
+    expect(judge('防抖 debounce', '前端搜索输入框防抖 300 毫秒').weak).toBe(false)
+    expect(judge('防抖 debounce', 'search input debounce 300ms').weak).toBe(false)
+    expect(judge('Redis 哨兵', '哨兵模式三节点').weak).toBe(false)
+    expect(judge('Redis 哨兵', 'Redis 单机部署').weak).toBe(false)
+  })
+
+  it('三个关键词首条只对上一个：不到一半，判弱', () => {
+    const v = judge('Redis 缓存 哨兵', '更新数据后先写库再删缓存')
+    expect(v.missingKeywords.map(labelOf)).toEqual(['Redis', '哨兵'])
     expect(v.weak).toBe(true)
   })
 

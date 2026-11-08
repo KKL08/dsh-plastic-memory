@@ -142,25 +142,25 @@ describe('memory_search 绑定', () => {
     return createSearchTool({ store, registry, host: { contextOf: async () => ({ workspacePath: '/proj', session: { id: 's', lastSeq: 1 } }) } })
   }
 
-  it('工具描述开头讲清它管什么、和 grep 怎么分工，再分段教关键词写法与读结果（换行保留），命中弱时换词再搜一次', async () => {
+  it('工具描述开头讲清它管什么、和 grep 怎么分工，再分段讲查询写法与读结果（换行保留）；不限词数，搜几次由模型判断', async () => {
     const tool = await seededTool()
     const d = tool.description
     expect(d.startsWith('查长期记忆用这个工具：想知道某件事有没有记过、记的是什么，或按 id 取一条。\n范围是本项目和全局记忆。')).toBe(true)
     expect(d).toContain('代码和项目文件用 grep 搜；记忆目录不要用 grep 搜：那里还存着已删除和其他项目的记忆')
-    expect(d).toContain('\n怎么写关键词：\n- 写 2 到 4 个实词。版本号、路径这类原样文字可以直接搜。\n')
-    expect(d).toContain('\n- 优先用开头记忆索引里出现过的说法；用户的说法和索引对不上时，先用你推测的记忆写法搜；命中弱再换用户原话的词搜一次。\n')
-    expect(d).not.toContain('一起带上')
-    expect(d).toContain('- 每个术语只写一种写法，用记忆里最可能出现的那种；同一术语的中文和英文写法不要放进同一次查询。\n\n怎么读结果：\n')
-    expect(d).not.toContain('/ 连')
-    expect(d).toContain('换个角度再搜一次')
-    // 没判弱时只陈述首条覆盖了多少；判弱时说明里会列逐词命中条数
-    expect(d).toContain('没提示命中弱时，排第一的那条含了查询的大部分内容。')
-    expect(d).toContain('开头提示命中弱时，有可列的词就列出各关键词命中几条：先换掉一条都没命中的词，或换同义词、换成另一种语言的写法、减少词数、换个角度再搜一次。')
+    expect(d).toContain('\n查询写法：\n- 查询是空格分隔的关键词，中英文均可，版本号、路径这类原样文字可以直接搜。')
+    expect(d).not.toMatch(/\d 到 \d 个/)
+    expect(d).toContain('开头记忆索引里的说法、用户的原话，以及你判断意思相近或相关的写法，都可以拿来搜。')
+    expect(d).toContain('中文和英文写法分开匹配')
+    expect(d).toContain('想从几个角度找，可以分几次搜，每次一个角度。搜几次、什么时候停，由你根据结果是否已经回答了问题来判断。\n\n怎么读结果：\n')
+    // 说明只陈述事实：没对上的词、各词命中条数、覆盖不到一半时的命中弱；是否再搜以读到的内容为准
+    expect(d).toContain('排第一的对上了一半以上、但有关键词没对上时，会点名这些词，并列出各关键词在范围内命中几条。')
+    expect(d).toContain('排第一的对上的查询内容不到一半、或只有子串命中时，开头会提示命中弱，并列出各关键词命中几条。')
+    expect(d).toContain('这些说明是参考信号，结果是否已经回答了问题，以你读到的内容为准。')
     const query = (schemaOf(tool) as { properties: Record<string, { description?: string }> }).properties.query!
-    expect(query.description).toContain('每个术语只写一种写法，中英文写法不要同时带上')
+    expect(query.description).toContain('空格分隔的关键词，中英文均可')
+    expect(query.description).not.toMatch(/\d 到 \d 个/)
     expect(query.description).not.toContain('/')
-    expect(query.description).toContain('有可列的词时还列出各关键词命中几条')
-    expect(query.description).toContain('建议换词或换成另一种语言的写法再搜一次')
+    expect(query.description).toContain('不到一半')
   })
 
   it('(a) 合法参数过、缺必填（query）拒', async () => {

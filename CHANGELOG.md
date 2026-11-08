@@ -256,11 +256,11 @@ All notable changes to this project are documented here. The format follows
   full-width space, as text copied from web pages or typed with a Chinese
   input method often does, are masked whole. Before, only the BEGIN line
   was masked and the key body could show in snapshots and search results.
-- `memory_search` marks the top hit as weak when a question like
-  "数据库连接池的密码是什么" matches the topic but not the thing asked for,
-  so the model searches again instead of answering from an unrelated
-  memory. English articles, prepositions and auxiliaries such as "to" or
-  "with" no longer make an otherwise matching top hit look weak.
+- When a question like "数据库连接池的密码是什么" matches a memory's topic
+  but not the thing asked for, `memory_search` names the missing word, so
+  the model can see what the top hit lacks. English articles,
+  prepositions and auxiliaries such as "to" or "with" are never reported as
+  missing.
 - On a fresh install, the memory page updates after you delete a memory or
   handle a card even if it was opened before its data files existed.
   Before, it kept showing the old list until reloaded.
@@ -499,24 +499,24 @@ All notable changes to this project are documented here. The format follows
   word (`scope` in `readScope`), and matches in the name, summary and tags
   weigh more than matches in the content; a query that is exactly a memory
   id returns that memory first, without a note. The result opens with a note
-  when no returned memory contains every keyword (`or-fallback`). It flags a
-  weak match when the top hit also misses a whole keyword or covers less
-  than 65% of the query's content words (`low-coverage`), or when nothing
-  but a literal match on the query text is left (`substring-fallback`); a
-  weak match suggests searching again, for example with the term in the
-  other language, and, when there are words to list, how many memories each
-  keyword matched. Question words and particles in long questions don't
-  count. When unsure it flags: a false flag costs one extra search, a missed
-  one lets the model take a wrong hit for the answer.
+  when no returned memory contains every keyword (`or-fallback`), naming the
+  keywords the top hit lacks and how many memories each keyword matched. It
+  flags a weak match only when the top hit covers less than half of the
+  query's content words (`low-coverage`) or when nothing but a literal match
+  on the query text is left (`substring-fallback`), and then suggests
+  searching again, for example with the term in the other language.
+  Question words and particles in long questions don't count. The notes are
+  signals for the model, not verdicts: a missing word often just means the
+  memory phrases it differently, so whether to search again is left to the
+  model.
 - The `memory_search` tool description now says what the tool does: it ranks
   by relevance, accepts Chinese and English queries and returns file paths.
-  It also tells the model how to query well (two to four content words, each
-  term written once, in the form the memory most likely uses, rather than in
-  Chinese and English side by side), and when a result is flagged as a weak
-  match the note suggests searching again with synonyms, the term in the
-  other language or fewer words, starting with the keywords no memory
-  contains. `memory_save` asks for synonyms, bilingual aliases and
-  abbreviations in tags, limited to words the name, summary and content
+  It explains how queries are matched (keywords separated by spaces, Chinese
+  and English spellings matched separately) and what the result notes mean,
+  and leaves the rest to the model: it can search from several angles, use
+  the user's words or related wording it judges useful, and decide
+  how many searches a question needs. `memory_save` asks for synonyms,
+  bilingual aliases and abbreviations in tags, limited to words the name, summary and content
   don't already contain, so later searches phrased differently still find
   the memory.
 - `memory_save` now asks the model to note, next to the rule itself, the

@@ -206,11 +206,11 @@ describe('executeSearch：命中多于返回条数时说明总数', () => {
     }
   })
 
-  it('命中弱的说明与截断说明同时出现：两句都在命中列表之前', async () => {
+  it('部分命中的说明与截断说明同时出现：两句都在命中列表之前', async () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await seedMany(store, 3)
     const r = await executeSearch({ query: '发版条目 周报', limit: 1 }, fakeExec(), makeSearchDeps(store))
-    expect(r.noteCode).toBe('low-coverage')
+    expect(r.noteCode).toBe('or-fallback')
     expect(r.moreNote).toBe(truncationNote(3, 1, false))
     const head = renderSearchResult(r).split('\n\n')[0]!
     expect(head).toContain(r.note!)

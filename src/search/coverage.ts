@@ -3,15 +3,15 @@ import { CJK } from './tokenizer.ts'
 /**
  * 「命中弱」的判断：没有记录同时命中全部查询 token 时，看排第一的那条对上了查询的多少。
  * 查询先按空白切成词，再按文字种类切开：CJK 连续段去掉虚词后剩下的内容段，其他文字的整词。逐词命中条数也按这套分组数。
- * 纯函数，不碰存储与分词器状态。拿不准时偏向判弱：误判弱只多搜一轮，漏判弱会让模型把错的结果当答案。
+ * 纯函数，不碰存储与分词器状态。这是给模型的反馈信号，不替它下结论：词面分不出「库里没有答案」和「对的记忆换了说法」，
+ * 所以缺了哪些关键词如实列出，由模型结合结果内容判断；「命中弱」只留给首条连一半都没对上的情况。
  */
 
 /**
- * 首条覆盖的查询内容低于这个比例算弱。取值由评估集（tests/fixtures/search-eval.ts）定：库里没有答案的长句，
- * 首条最多盖住约六成内容字（两档分词器都是），取刚好高过它的值；有答案的长句因此会有几条误判弱，只多搜一轮。
- * 依据见 scripts/eval-search.ts「命中弱」一节；改之前先跑它。
+ * 首条覆盖的查询内容低于这个比例（不到一半）算弱。取更高的值时，首条正确的部分命中大多也会判弱
+ * （模型自己写查询时尤其明显），判弱就失去了区分度。依据见 scripts/eval-search.ts「命中弱」一节；改之前先跑它。
  */
-export const WEAK_COVERAGE_BELOW = 0.65
+export const WEAK_COVERAGE_BELOW = 0.5
 
 /**
  * 去掉虚词后 2 到这个字数的 CJK 词按关键词看（术语多在四字以内）；更长的按句子看，各内容段只计入覆盖度，
@@ -57,7 +57,7 @@ export interface QueryUnit {
 export interface TermGroup {
   /** 一个词。 */
   units: QueryUnit[]
-  /** 关键词组：非 CJK 词、去掉虚词后 2 到 KEYWORD_MAX_CJK_CHARS 字的 CJK 词（句子里只算问的那段）。整组没在首条出现就判弱；其余只计入覆盖度。 */
+  /** 关键词组：非 CJK 词、去掉虚词后 2 到 KEYWORD_MAX_CJK_CHARS 字的 CJK 词（句子里只算问的那段）。整组没在首条出现就列为缺失；其余只计入覆盖度。 */
   keyword: boolean
 }
 
@@ -135,12 +135,15 @@ export function groupQueryTerms(query: string, tokens: readonly string[], tokeni
   return groups
 }
 
+/** 覆盖度里一个 CJK 字的权重：两个汉字约等于一个英文词，中英混写的查询不因首条用哪种语言写而判定不同。纯中文或纯英文的查询比例不受影响。 */
+const CJK_CHAR_WEIGHT = 0.5
+
 export interface CoverageVerdict {
-  /** 首条覆盖的查询内容比例：各组取对上比例高的写法，CJK 内容段逐字、非 CJK 词按 token 合计。 */
+  /** 首条覆盖的查询内容比例：各组取对上比例高的写法，CJK 内容段逐字（按 CJK_CHAR_WEIGHT 计）、非 CJK 词按 token 合计。 */
   coverage: number
   /** 首条里一个写法都没完整出现的关键词组。 */
   missingKeywords: TermGroup[]
-  /** 有关键词组缺失，或覆盖度低于 WEAK_COVERAGE_BELOW。 */
+  /** 覆盖度低于 WEAK_COVERAGE_BELOW。 */
   weak: boolean
 }
 
@@ -150,13 +153,14 @@ export function judgeTopHit(groups: readonly TermGroup[], tokens: readonly strin
   let total = 0
   const missingKeywords: TermGroup[] = []
   for (const g of groups) {
-    const best = g.units.map(u => unitCover(u, tokens, hits)).reduce((a, b) => (b.covered * a.total > a.covered * b.total ? b : a))
-    covered += best.covered
-    total += best.total
+    const best = g.units.map(u => ({ ...unitCover(u, tokens, hits), weight: u.byChar ? CJK_CHAR_WEIGHT : 1 }))
+      .reduce((a, b) => (b.covered * a.total > a.covered * b.total ? b : a))
+    covered += best.covered * best.weight
+    total += best.total * best.weight
     if (g.keyword && !g.units.some(u => isFull(u, tokens, hits))) missingKeywords.push(g)
   }
   const coverage = total === 0 ? 0 : covered / total
-  return { coverage, missingKeywords, weak: missingKeywords.length > 0 || coverage < WEAK_COVERAGE_BELOW }
+  return { coverage, missingKeywords, weak: coverage < WEAK_COVERAGE_BELOW }
 }
 
 export interface TermHitCount {

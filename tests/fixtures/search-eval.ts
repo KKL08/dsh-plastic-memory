@@ -792,7 +792,7 @@ export const STRICT_CATEGORIES: readonly EvalCategory[] = ['anchor']
 /**
  * 只用来评估「命中弱」判定的类别，不进排序指标：
  * - 换语言查（bilingual）：答案记忆用中文写、标签里存了英文别名（memory_save 要求的），查询只写英文：应全命中、不判弱；
- * - 换语言查、记忆没存别名（bilingual-no-alias）：答案记忆只有中文写法，查询写英文：应判弱，提示换成另一种语言再搜；
+ * - 换语言查、记忆没存别名（bilingual-no-alias）：答案记忆只有中文写法，查询写英文：不当成全命中，说明里判弱或点名缺的那种写法；
  * - 库里没有答案（no-answer）：查询里有常见词能部分命中，但没有一条记忆讲这件事，relevant 为空；
  * - 长句提问（long-answerable / long-no-answer）：按日常说话的口气整句提问，前者库里有答案，后者没有（relevant 为空）。
  */
@@ -914,12 +914,12 @@ export const EVAL_QUERIES: readonly EvalQuery[] = [
   { query: 'reconnect', category: 'bilingual', relevant: ['mem_o1y9b4'] },
   { query: 'mutex', category: 'bilingual', relevant: ['mem_x2k9m4', 'mem_e3t7z5'] },
   { query: 'pagination', category: 'bilingual', relevant: ['mem_v1u7j6'] },
-  // 换语言查、记忆没存别名：只有中文写法，查询写英文，应判弱（判弱评估用，不进排序指标）
+  // 换语言查、记忆没存别名：只有中文写法，查询写英文，说明里应判弱或点名缺的写法（判弱评估用，不进排序指标）
   { query: 'rotation 密钥', category: 'bilingual-no-alias', relevant: ['mem_r8f2n5'] },
   { query: 'memory leak', category: 'bilingual-no-alias', relevant: ['mem_z7a4k1'] },
   { query: 'read replica', category: 'bilingual-no-alias', relevant: ['mem_t2x5w4'] },
   { query: 'debounce 毫秒', category: 'bilingual-no-alias', relevant: ['mem_h5e1m8'] },
-  // 库里没有答案：有常见词能部分命中，但没有记忆讲这件事（判弱评估用，结果应全部判弱）
+  // 库里没有答案：有常见词能部分命中，但没有记忆讲这件事（判弱评估用，结果应全部带说明）
   { query: '数据库 分库分表', category: 'no-answer', relevant: [] },
   { query: '前端 埋点 上报', category: 'no-answer', relevant: [] },
   { query: '周报 模板', category: 'no-answer', relevant: [] },
@@ -940,7 +940,7 @@ export const EVAL_QUERIES: readonly EvalQuery[] = [
   { query: '前端搜索框的防抖设了多少毫秒', category: 'long-answerable', relevant: ['mem_h5e1m8'] },
   { query: '更新数据的时候先删缓存还是先写库', category: 'long-answerable', relevant: ['mem_e5j2f9'] },
   { query: '依赖一般多久集中升级一次', category: 'long-answerable', relevant: ['mem_i6t9j2'] },
-  // 长句提问、库里没有答案：常见词能部分命中（判弱评估用，结果应全部判弱）
+  // 长句提问、库里没有答案：常见词能部分命中（判弱评估用，结果应全部带说明）
   { query: '前端埋点数据怎么上报到服务端', category: 'long-no-answer', relevant: [] },
   { query: '周报模板应该放在哪个目录', category: 'long-no-answer', relevant: [] },
   { query: '定时任务的执行时间怎么配置', category: 'long-no-answer', relevant: [] },
