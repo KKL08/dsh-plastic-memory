@@ -4,7 +4,7 @@
  * 手动运行，不进 CI：
  *
  *   node scripts/eval-search.ts            全部输出
- *   node scripts/eval-search.ts --brief    只打印两档指标与逐条差异
+ *   node scripts/eval-search.ts --brief    只打印两档指标、逐条差异、命中弱与 all 模式
  *   node scripts/eval-search.ts --all      权重网格列出全部组合（缺省每种加权方式只列前 10）
  *
  * 两档的主结果走生产同一条路：语料写进 FileTable 临时目录，逐条调 executeSearch。
@@ -14,6 +14,7 @@
  * 只记基线的类别（换说法）单独成行，不计入总数、逐条差异与调参对照；全部输出的末尾逐条列出它们的名次。
  * 逐条设门槛的类别（锚点）单独成行，不计入总数，但列进逐条差异与未进第一名。
  * 只评判弱的类别（换语言查、库里没有答案、长句提问）单独成行，不计入总数与调参对照；「命中弱」一节按类别统计判弱条数。
+ * 「all 模式」一节把有答案的查询用 match: 'all' 再跑一遍，按类别统计搜空率与搜到时的首名命中。
  */
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -94,7 +95,7 @@ const missingJieba = {
 }
 
 /** 生产路径逐条跑全部评估查询；跑完把 jieba 加载器复原。tests/search-eval.spec.ts 也用它，各档只跑一遍、各用例共用。 */
-export async function productionRun(store: MemoryStore, tier: 'bigram' | 'jieba', limit = LIMIT): Promise<ProductionRun> {
+export async function productionRun(store: MemoryStore, tier: 'bigram' | 'jieba', limit = LIMIT, match?: 'any' | 'all'): Promise<ProductionRun> {
   resetJieba(tier === 'bigram' ? missingJieba : undefined)
   const deps = {
     store, registry, tokenizer: { log: silent },
@@ -103,7 +104,7 @@ export async function productionRun(store: MemoryStore, tier: 'bigram' | 'jieba'
   const results: Results = new Map()
   const notes: NoteCodes = new Map()
   for (const q of EVAL_QUERIES) {
-    const r = await executeSearch({ query: q.query, limit }, exec, deps)
+    const r = await executeSearch({ query: q.query, limit, match }, exec, deps)
     results.set(q, r.hits.map(h => h.id))
     notes.set(q, r.noteCode)
   }
@@ -380,6 +381,22 @@ function printWeak(out: Out, label: string, run: ProductionRun): void {
   for (const q of counted.filter(q => q.relevant.length === 0 && !weak(q))) out(`  没有答案却没判弱：[${q.category}] ${JSON.stringify(q.query)}  ${run.notes.get(q) ?? '无说明码'}`)
 }
 
+/** all 模式统计：有答案的查询（零 token 除外，match 对它不起作用）搜空几条、搜到的里首名命中几条。 */
+function printAllMode(out: Out, label: string, run: ProductionRun): void {
+  const counted = EVAL_QUERIES.filter(q => q.category !== 'zero-token' && q.relevant.length > 0)
+  const row = (qs: EvalQuery[]) => {
+    const found = qs.filter(q => run.results.get(q)!.length > 0)
+    const empty = qs.length - found.length
+    const pct = qs.length === 0 ? 0 : Math.round(empty / qs.length * 100)
+    return `搜空 ${empty}/${qs.length}（${pct}%），搜到时首名命中 ${found.filter(q => rankOf(q, run.results.get(q)!) === 1).length}/${found.length}`
+  }
+  out(`${label.padEnd(8)} ${row(counted)}`)
+  for (const c of EVAL_CATEGORIES) {
+    const qs = counted.filter(q => q.category === c)
+    if (qs.length > 0) out(`  ${c.padEnd(16)} ${row(qs)}`)
+  }
+}
+
 /** --brief 打印的几节：两档指标、逐条差异与未进第一名、命中弱。jieba 不可用时不传第二档。 */
 export function briefReport(bigram: ProductionRun, jieba?: ProductionRun): string {
   const lines: string[] = []
@@ -431,6 +448,9 @@ async function main(): Promise<void> {
     const runJieba = hasJieba ? await productionRun(store, 'jieba') : undefined
     const prodJieba = runJieba?.results
     log(briefReport(runBigram, runJieba))
+    log('\n## all 模式（match: all，有答案的查询）\n')
+    printAllMode(log, 'bigram', await productionRun(store, 'bigram', LIMIT, 'all'))
+    if (hasJieba) printAllMode(log, 'jieba', await productionRun(store, 'jieba', LIMIT, 'all'))
     if (argv.brief) return
 
     // 自检：对照路径在生产参数下与 executeSearch 逐条同序；本地实现的生产加权方式与 rankRecords 同序

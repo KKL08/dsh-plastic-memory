@@ -437,6 +437,16 @@ describe('命中弱', { timeout: 60_000 }, () => {
         expect(bad).toEqual([])
       })
 
+      it('两种写法一起写、记忆只有一种：目标排第一，附计数行而不判弱', async () => {
+        useTier(tier)
+        const bad: string[] = []
+        for (const q of EVAL_QUERIES.filter(q => q.category === 'dual-lang')) {
+          const r = await search(q.query)
+          if (rankOf(q, r.hits.map(h => h.id)) !== 1 || isWeak(r.noteCode) || !withCountLine(r)) bad.push(`${q.query} → ${r.hits[0]?.id ?? '（空）'} ${r.noteCode ?? '无说明码'}`)
+        }
+        expect(bad).toEqual([])
+      })
+
       it(`首条正确却判弱的查询不超过 ${WEAK_CORRECT_CEILING} 条（记忆没存别名的换语言查与库里没有答案的除外）`, () => {
         const weakCorrect: string[] = []
         for (const q of EVAL_QUERIES.filter(q => q.category !== 'zero-token' && q.category !== 'bilingual-no-alias' && q.relevant.length > 0)) {

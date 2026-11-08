@@ -775,7 +775,7 @@ export const EVAL_RECORDS: MemoryRecord[] = MEMORIES.map((m, i) => ({
 }))
 
 export const EVAL_CATEGORIES = [
-  'short-cjk', 'long-cjk', 'identifier', 'partial-word', 'plain-name', 'id-direct', 'zero-token', 'anchor', 'paraphrase',
+  'short-cjk', 'long-cjk', 'identifier', 'partial-word', 'plain-name', 'id-direct', 'zero-token', 'anchor', 'dual-lang', 'paraphrase',
   'bilingual', 'bilingual-no-alias', 'no-answer', 'long-answerable', 'long-no-answer',
 ] as const
 export type EvalCategory = (typeof EVAL_CATEGORIES)[number]
@@ -786,8 +786,10 @@ export const BASELINE_ONLY_CATEGORIES: readonly EvalCategory[] = ['paraphrase']
 /**
  * 逐条设门槛的类别：每条查询两档都必须第一名命中，不计入聚合下限。
  * 锚点类（带标点的字面值）靠字面整词命中排序键定第一名，结果是确定的，掉一条就是规则坏了，不留余量。
+ * 中英两种写法一起查（dual-lang）：语料里只有其中一种写法，另一种词落空，答案仍应第一名，且说明码不判弱
+ * （部分命中带 or-fallback 是预期；判弱会让模型白搜一轮，计入「首条正确却判弱」的上限）。
  */
-export const STRICT_CATEGORIES: readonly EvalCategory[] = ['anchor']
+export const STRICT_CATEGORIES: readonly EvalCategory[] = ['anchor', 'dual-lang']
 
 /**
  * 只用来评估「命中弱」判定的类别，不进排序指标：
@@ -888,6 +890,12 @@ export const EVAL_QUERIES: readonly EvalQuery[] = [
   { query: 'db:seed', category: 'anchor', relevant: ['mem_t5d1s3'] },
   { query: 'db:reset', category: 'anchor', relevant: ['mem_t6d9r2'] },
   { query: 'host:contract', category: 'anchor', relevant: ['mem_f7o3m5'] },
+  // 中英两种写法一起查：语料里只有一种写法（前四条只有中文，最后一条只有英文）
+  { query: '防抖 debounce', category: 'dual-lang', relevant: ['mem_h5e1m8'] },
+  { query: '内存泄漏 memory leak', category: 'dual-lang', relevant: ['mem_z7a4k1'] },
+  { query: '读写分离 read replica', category: 'dual-lang', relevant: ['mem_t2x5w4'] },
+  { query: '孤儿进程 orphan process', category: 'dual-lang', relevant: ['mem_p7r1v3'] },
+  { query: '保活 keepAlive', category: 'dual-lang', relevant: ['mem_q9u3x7', 'mem_a8w4e1'] },
   // 换说法：只看 name 列表写查询，再对照全文标注；主要实词不出现在相关记忆的四个字段里（tests/search-eval.spec.ts 检查）。
   // 只记基线，不进回归门槛。总览类记录（设计总览、新人上手须知）按惯例不算相关。
   { query: '上云开销超标的通知', category: 'paraphrase', paraphrase: 'synonym', relevant: ['mem_s6j9r8'] },
