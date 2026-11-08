@@ -9,7 +9,8 @@ import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { GLOBAL_DIR, deriveFileId } from '../src/storage/paths.ts'
 import { expandQueryTerms, matchScore } from '../src/text.ts'
 import {
-  executeSearch, renderSearchResult, termHitNote, truncationNote, ALL_NO_HIT_NOTE, ANY_MATCH_HINT, MATCH_ALL_HINT, type SearchToolDeps,
+  executeSearch, renderSearchResult, termHitNote, truncationNote, ALL_NO_HIT_NOTE, ANY_MATCH_HINT, MATCH_ALL_HINT, OR_FALLBACK_NOTE,
+  type SearchToolDeps,
 } from '../src/tools/search.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { WEAK_SEARCH_NOTE_CODES, type SearchNoteCode } from '../src/contract-codes.ts'
@@ -265,5 +266,89 @@ describe('匹配模式 match', () => {
       expect(any.noteCode).toBeUndefined()
       expect(await run(store, query, { match: 'all' })).toEqual(any)
     }
+  })
+})
+
+// 逐条命中标注：档位定状态，部分命中档再看有没有可列出的完整词；词的口径同逐词命中条数
+describe('逐条命中标注', () => {
+  const memStore = async (records: Parameters<typeof record>[0][]) => {
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
+    for (const r of records) await store.put(record(r))
+    return store
+  }
+  const run = (store: MemoryStore, query: string, extra: Partial<Parameters<typeof executeSearch>[0]> = {}) =>
+    executeSearch({ query, ...extra }, fakeExec(), searchDeps(store))
+  const store4 = () => memStore([
+    { id: 'mem_full', summary: '全', content: 'alpha beta foo-bar' },
+    { id: 'mem_part', summary: '部分', content: 'alpha beta' },
+    { id: 'mem_frag', summary: '碎', content: 'foo only' },
+    { id: 'mem_xalpha', summary: '子串', name: '无关', content: '无关' },
+  ])
+
+  it('四种状态：全命中为空、部分命中列对上的词、部分命中但没有完整词、仅子串命中；matchedTerms 只在部分命中档', async () => {
+    const r = await run(await store4(), 'alpha beta foo-bar')
+    const byId = new Map(r.hits.map(h => [h.id, h]))
+    expect(r.hits.map(h => h.id)).toEqual(['mem_full', 'mem_part', 'mem_frag', 'mem_xalpha'])
+    expect(byId.get('mem_full')!.matchNote).toBe('')
+    expect(byId.get('mem_part')!.matchNote).toBe(' · 匹配：alpha、beta')
+    expect(byId.get('mem_frag')!.matchNote).toBe(' · 部分命中，没有可列出的完整关键词')
+    expect(byId.get('mem_xalpha')!.matchNote).toBe(' · 仅子串命中')
+    expect(byId.get('mem_part')!.matchedTerms).toEqual(['alpha', 'beta'])
+    expect(byId.get('mem_frag')!.matchedTerms).toEqual([])
+    expect('matchedTerms' in byId.get('mem_full')!).toBe(false)
+    expect('matchedTerms' in byId.get('mem_xalpha')!).toBe(false)
+  })
+
+  it('渲染：头行在陈旧说明之后、文件路径之前接命中说明；全命中不加东西', async () => {
+    const r = await run(await store4(), 'alpha beta foo-bar')
+    const text = renderSearchResult(r)
+    for (const h of r.hits) {
+      const head = `[${h.id}] ${h.type}｜${h.summary}${h.sourceNote}${h.stalenessNote}${h.matchNote}${h.path !== undefined ? ` · ${h.path}` : ''}\n`
+      expect(text).toContain(head)
+    }
+    // 次序：陈旧说明 → 命中说明 → 路径
+    expect(text).toMatch(/｜部分（[^）]*可能过时） · 匹配：alpha、beta · \/\S+\.md\n/)
+    expect(text).toMatch(/｜子串（[^）]*可能过时） · 仅子串命中 · \/\S+\.md\n/)
+    // 纯函数渲染：路径在命中说明之后
+    const hit = { id: 'mem_x', type: 'knowledge', summary: 's', content: 'c', sourceNote: '', stalenessNote: ' · 陈旧', matchNote: ' · 匹配：a', path: '/m/x.md' }
+    expect(renderSearchResult({ hits: [hit] })).toBe('[mem_x] knowledge｜s · 陈旧 · 匹配：a · /m/x.md\nc')
+  })
+
+  it('match: all 下没有标注', async () => {
+    const r = await run(await store4(), 'alpha beta', { match: 'all' })
+    expect(r.hits.map(h => h.id).sort()).toEqual(['mem_full', 'mem_part'])
+    for (const h of r.hits) {
+      expect(h.matchNote).toBe('')
+      expect('matchedTerms' in h).toBe(false)
+    }
+  })
+
+  it('id 直达置顶的那条不带标注：matchNote 为空串、没有 matchedTerms；其余照常标', async () => {
+    const store = await memStore([
+      { id: 'mem_target', content: '正文与查询无关' },
+      { id: 'mem_mention', content: 'mem_target 被提到' },
+      { id: 'mem_part', content: 'target 单独出现' },
+    ])
+    for (const match of ['any', 'all'] as const) {
+      const r = await run(store, 'mem_target', { match })
+      expect(r.hits[0]!.id).toBe('mem_target')
+      expect(r.hits[0]!.matchNote).toBe('')
+      expect('matchedTerms' in r.hits[0]!).toBe(false)
+      expect(renderSearchResult(r)).toMatch(/^\[mem_target\] knowledge｜摘要（[^）]*可能过时） · \/\S+\.md\n/)
+    }
+    // 不是 id 直达的部分命中照常标
+    expect((await run(store, 'mem_target')).hits.find(h => h.id === 'mem_part')!.matchNote).toMatch(/^ · /)
+  })
+
+  it('开头说明不再点名排第一的缺的词：or-fallback 回到固定文案加逐词命中条数', async () => {
+    const store = await memStore([
+      { id: 'mem_two', content: 'deploy hook 都齐了' },
+      { id: 'mem_one', content: '只提到 deploy' },
+    ])
+    const r = await run(store, 'deploy hook rollback')
+    expect(r.noteCode).toBe('or-fallback')
+    expect(r.note).not.toContain('没对上')
+    expect(r.note).toBe([OR_FALLBACK_NOTE, termHitNote([{ label: 'deploy', count: 2 }, { label: 'hook', count: 1 }, { label: 'rollback', count: 0 }])].join('\n'))
+    expect(r.hits[0]!.matchNote).toBe(' · 匹配：deploy、hook')
   })
 })

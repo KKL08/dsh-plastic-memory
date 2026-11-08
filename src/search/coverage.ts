@@ -168,21 +168,34 @@ export interface TermHitCount {
   count: number
 }
 
-/**
- * 逐词命中条数，按查询里的顺序、同名去重：每组算一个词，完整出现才算。
- * 句子里的内容段只列词长的（2 到 KEYWORD_MAX_CJK_CHARS 字），单字和更长的短语不列，也不列二字碎片。
- * rows 是范围内各条记录对查询 token 的命中。
- */
-export function termHitCounts(groups: readonly TermGroup[], tokens: readonly string[], rows: readonly (readonly boolean[])[]): TermHitCount[] {
-  const out: TermHitCount[] = []
-  const wordLike = (g: TermGroup) => {
-    const n = [...g.units[0]!.label].length
-    return g.keyword || (n >= 2 && n <= KEYWORD_MAX_CJK_CHARS)
-  }
+/** 可列出的词：关键词组，或词长的内容段（2 到 KEYWORD_MAX_CJK_CHARS 字）；单字和更长的短语不列，也不列二字碎片。 */
+const wordLike = (g: TermGroup) => {
+  const n = [...g.units[0]!.label].length
+  return g.keyword || (n >= 2 && n <= KEYWORD_MAX_CJK_CHARS)
+}
+/** 可列出的词，按查询里的顺序、同名去重。 */
+const listedGroups = (groups: readonly TermGroup[]) => {
+  const out: { label: string; group: TermGroup }[] = []
   for (const g of groups.filter(wordLike)) {
     const label = g.units.map(u => u.label).join('/')
-    if (out.some(c => c.label === label)) continue
-    out.push({ label, count: rows.filter(hits => g.units.some(u => isFull(u, tokens, hits))).length })
+    if (!out.some(c => c.label === label)) out.push({ label, group: g })
   }
   return out
+}
+/** 整组在这条记录里完整出现：任一写法完整对上。 */
+const groupFull = (g: TermGroup, tokens: readonly string[], hits: readonly boolean[]) => g.units.some(u => isFull(u, tokens, hits))
+
+/**
+ * 逐词命中条数：每组算一个词，完整出现才算。rows 是范围内各条记录对查询 token 的命中。
+ */
+export function termHitCounts(groups: readonly TermGroup[], tokens: readonly string[], rows: readonly (readonly boolean[])[]): TermHitCount[] {
+  return listedGroups(groups).map(({ label, group }) => ({ label, count: rows.filter(hits => groupFull(group, tokens, hits)).length }))
+}
+
+/**
+ * 一条记录完整对上的词，给逐条命中标注用。和 termHitCounts 同一套筛词与整组判定，
+ * 所以这里列出的词在计数行里一定有、且这条记录计在它的条数里。hits 是这条记录对各查询 token 的命中。
+ */
+export function matchedTerms(groups: readonly TermGroup[], tokens: readonly string[], hits: readonly boolean[]): string[] {
+  return listedGroups(groups).filter(({ group }) => groupFull(group, tokens, hits)).map(({ label }) => label)
 }

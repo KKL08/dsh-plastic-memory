@@ -11,7 +11,7 @@ import { expandQueryTerms, matchScore } from '../src/text.ts'
 import { createTokenizer } from '../src/search/tokenizer.ts'
 import { RANKING_FIELDS, RANKING_PARAMS, anchorTerms, rankRecords, substringEligible, type RankingParams } from '../src/search/ranking.ts'
 import {
-  executeSearch, renderSearchResult, termHitNote, topMissingNote, LOW_COVERAGE_NOTE, OR_FALLBACK_NOTE, RETRY_HINT, SUBSTRING_FALLBACK_NOTE,
+  executeSearch, renderSearchResult, termHitNote, LOW_COVERAGE_NOTE, OR_FALLBACK_NOTE, RETRY_HINT, SUBSTRING_FALLBACK_NOTE,
   TERM_NOTE_MAX, type SearchToolDeps,
 } from '../src/tools/search.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
@@ -418,13 +418,15 @@ describe('说明码：四种触发，互斥、substring 优先', () => {
     expect(full.noteCode).toBeUndefined()
     expect(full.note).toBeUndefined()
 
-    // 排第一的对上三个词里的两个：or-fallback，点名缺的 gamma
+    // 排第一的对上三个词里的两个：or-fallback，缺的 gamma 由逐条标注和计数行给出
     const partial = await search(store, 'alpha beta gamma')
     expect(partial.hits.map(h => h.id)).toEqual(['mem_full', 'mem_part', 'mem_sub'])
     expect(partial.noteCode).toBe(OR_FALLBACK)
-    expect(partial.note!.startsWith(`${OR_FALLBACK_NOTE}${topMissingNote(['gamma'])}`)).toBe(true)
-    // 查询里重复的词只点名一次
-    expect((await search(store, 'alpha beta gamma gamma')).note!.split('\n')[0]).toBe(`${OR_FALLBACK_NOTE}${topMissingNote(['gamma'])}`)
+    expect(partial.note!.split('\n')[0]).toBe(OR_FALLBACK_NOTE)
+    expect(partial.note!.split('\n')[1]).toContain('范围内一条都没命中的：gamma。')
+    expect(partial.hits[0]!.matchNote).toBe(' · 匹配：alpha、beta')
+    // 查询里重复的词只算一次
+    expect((await search(store, 'alpha beta gamma gamma')).note).toBe(partial.note)
 
     // 排第一的只对上三个词里的一个：不到一半，判弱
     const weak = await search(store, 'alpha gamma delta')
@@ -454,8 +456,8 @@ describe('说明码：四种触发，互斥、substring 优先', () => {
   })
 })
 
-describe('部分命中的说明：如实列出排第一的缺了什么，覆盖不到一半才判弱', () => {
-  it('斜杠连写不是一组别名：部署/deploy 的两个词都要命中，只含「部署」的记录不算全命中，说明里点名缺的 deploy', async () => {
+describe('部分命中的说明：如实列出对上了什么，覆盖不到一半才判弱', () => {
+  it('斜杠连写不是一组别名：部署/deploy 的两个词都要命中，只含「部署」的记录不算全命中，标注列出对上的词', async () => {
     const store = await seeded([
       record({ id: 'mem_flow', name: '上线流程', content: '部署流程：先上预发再全量' }),
       record({ id: 'mem_other', name: '无关', content: '与查询无关的内容' }),
@@ -463,7 +465,8 @@ describe('部分命中的说明：如实列出排第一的缺了什么，覆盖�
     const r = await search(store, '部署/deploy 流程')
     expect(r.hits.map(h => h.id)).toEqual(['mem_flow'])
     expect(r.noteCode).toBe(OR_FALLBACK)
-    expect(r.note!.split('\n')[0]).toBe('没有记忆同时含全部关键词，以下按相关性排序。排第一的那条没对上：deploy。')
+    expect(r.note!.split('\n')[0]).toBe('没有记忆同时含全部关键词，以下按相关性排序。')
+    expect(r.hits[0]!.matchNote).toBe(' · 匹配：部署、流程')
     expect(r.note).not.toContain(RETRY_HINT)
     expect(r.note!.split('\n')[1]).toBe('各关键词命中的记忆条数：部署 1、deploy 0、流程 1。范围内一条都没命中的：deploy。')
   })
@@ -505,13 +508,14 @@ describe('部分命中的说明：如实列出排第一的缺了什么，覆盖�
     expect(renderSearchResult(r).startsWith(r.note!)).toBe(true)
   })
 
-  it('中英两种写法放进同一次查询：各算一个关键词，首条缺了英文写法就点名，不判弱', async () => {
+  it('中英两种写法放进同一次查询：各算一个关键词，首条缺了英文写法时标注只列中文写法，不判弱', async () => {
     const store = await seeded([
       record({ id: 'mem_debounce', name: '搜索框防抖', content: '前端搜索输入框防抖 300 毫秒，回车立即搜' }),
     ])
     const r = await search(store, '防抖 debounce')
     expect(r.noteCode).toBe(OR_FALLBACK)
-    expect(r.note!.split('\n')[0]).toBe(`${OR_FALLBACK_NOTE}${topMissingNote(['debounce'])}`)
+    expect(r.note!.split('\n')[0]).toBe(OR_FALLBACK_NOTE)
+    expect(r.hits[0]!.matchNote).toBe(' · 匹配：防抖')
     expect(r.note!.split('\n')[1]).toBe('各关键词命中的记忆条数：防抖 1、debounce 0。范围内一条都没命中的：debounce。')
     // 英文词的标签去掉紧挨着的标点
     const r2 = await search(store, 'debounce（防抖）')
@@ -585,7 +589,7 @@ describe('结果形状：命中带文件绝对路径', () => {
   })
 
   it('渲染头行末尾追加「 · 绝对路径」，其余格式不变', () => {
-    const hit = { id: 'mem_x', type: 'knowledge', summary: '摘要', content: '正文\n第二行', sourceNote: '（推断）', stalenessNote: '（可能过时）', path: '/m/global/x.md' }
+    const hit = { id: 'mem_x', type: 'knowledge', summary: '摘要', content: '正文\n第二行', sourceNote: '（推断）', stalenessNote: '（可能过时）', matchNote: '', path: '/m/global/x.md' }
     expect(renderSearchResult({ hits: [hit] })).toBe('[mem_x] knowledge｜摘要（推断）（可能过时） · /m/global/x.md\n正文\n第二行')
     expect(renderSearchResult({ hits: [hit], note: '说明' })).toBe('说明\n\n[mem_x] knowledge｜摘要（推断）（可能过时） · /m/global/x.md\n正文\n第二行')
   })

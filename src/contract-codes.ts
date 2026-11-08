@@ -97,7 +97,7 @@ export type SourceRejectCode = Extract<RejectCode, 'subagent-restricted'> // 子
 /** memory_search 的说明性 note（search.ts）。 */
 export type SearchNoteCode =
   | 'no-workspace'        // scope=workspace 但当前会话没有工作目录
-  | 'or-fallback'         // 返回列表里没有同时命中全部查询 token（分词命中或字段子串命中）的记忆，排第一的部分命中记录覆盖过半（见 low-coverage），结果按相关性排序；首条缺了整组关键词时点名缺的词、附逐词命中条数，不劝重搜
+  | 'or-fallback'         // 返回列表里没有同时命中全部查询 token（分词命中或字段子串命中）的记忆，排第一的部分命中记录覆盖过半（见 low-coverage），结果按相关性排序；首条缺了整组关键词时附逐词命中条数（各条对上了哪些词见逐条命中说明），不劝重搜
   | 'low-coverage'        // 同上没有全命中，且排第一的部分命中记录覆盖的查询内容不到一半（search/coverage.ts）：命中弱，建议换词再搜，附逐词命中条数
   | 'substring-fallback'  // 返回列表里没有任何 token 命中的记忆，只有旧子串匹配命中的（如 id 前缀）：命中弱，附逐词命中条数（没有可列的词时不附）；三者互斥、substring 优先；查询恰是某条记忆的 id 时三者都不出
   | 'all-no-hit'          // match=all 且没有记忆同时含全部关键词（返回列表为空）：附逐词命中条数（按全部候选算）与改用 any 的提示。

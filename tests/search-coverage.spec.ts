@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createTokenizer } from '../src/search/tokenizer.ts'
 import {
-  KEYWORD_MAX_CJK_CHARS, contentSegments, groupQueryTerms, judgeTopHit, termHitCounts, type TermGroup,
+  KEYWORD_MAX_CJK_CHARS, contentSegments, groupQueryTerms, judgeTopHit, matchedTerms, termHitCounts, type TermGroup,
 } from '../src/search/coverage.ts'
 
 // 「命中弱」按首条覆盖度判断：查询切成词（CJK 去掉虚词后的内容段），覆盖的内容不到一半才算弱；
@@ -199,5 +199,60 @@ describe('逐词命中条数', () => {
       { label: '周报模板', count: 0 },
       { label: '目录', count: 1 },
     ])
+  })
+})
+
+describe('逐条对上的词', () => {
+  /** 一条记录（原文 text）完整对上了查询里的哪些词。 */
+  const matched = (query: string, text: string) => {
+    const tokens = tokensOf(query)
+    return matchedTerms(groupQueryTerms(query, tokens, tokenize), tokens, hitsIn(text, tokens))
+  }
+
+  it('中文句子按内容段算：对上的是整段，不是二字碎片', () => {
+    expect(matched('周报模板怎么归档', '周报模板放在 docs 下')).toEqual(['周报模板'])
+    expect(matched('周报模板怎么归档', '周报模板按月归档')).toEqual(['周报模板', '归档'])
+  })
+
+  it('英文词按它切出的 token 全命中才算；中英混写各算一个词', () => {
+    expect(matched('cron deploy', 'cron job runs nightly')).toEqual(['cron'])
+    expect(matched('定时任务 cron', '定时任务每天跑')).toEqual(['定时任务'])
+    expect(matched('定时任务 cron', '用 cron 跑定时任务')).toEqual(['定时任务', 'cron'])
+  })
+
+  it('只盖住一个词的一部分不算对上：中文段缺字、记录一个 token 都没命中', () => {
+    expect(matched('模板 热生效', '改完立即生效')).toEqual([])
+    expect(matched('模板 热生效', 'id 前缀子串')).toEqual([])
+  })
+
+  it('虚词不列', () => {
+    expect(matched('how to configure cron', 'how to configure cron')).toEqual(['configure', 'cron'])
+    expect(matched('模板 怎么热生效 吗', '模板热生效吗')).toEqual(['模板', '热生效'])
+  })
+
+  it('命中了 token 但没有完整的词时返回空：foo-bar 只含 foo；长句段被筛词规则滤掉', () => {
+    expect(matched('foo-bar', 'foo only')).toEqual([])
+    expect(matched('数据库连接池 zebra', '数据库连接池的上限是 20')).toEqual([])
+  })
+
+  it('和逐词命中条数同一口径：标注里的词在计数行里都有，且这条记录算进了它的条数', () => {
+    const cases: [string, string[]][] = [
+      ['周报模板怎么归档 docs', ['周报模板放在 docs 下', '按月归档', '无关']],
+      ['数据库连接池 zebra 密码', ['数据库连接池的密码', 'zebra 斑马']],
+      ['foo-bar cron 定时任务', ['foo only', 'cron 定时任务', 'foo-bar']],
+    ]
+    for (const [q, records] of cases) {
+      const tokens = tokensOf(q)
+      const groups = groupQueryTerms(q, tokens, tokenize)
+      for (const text of records) {
+        const hits = hitsIn(text, tokens)
+        const counts = termHitCounts(groups, tokens, [hits])
+        for (const label of matchedTerms(groups, tokens, hits)) {
+          expect(counts.find(c => c.label === label)?.count, `${q} / ${text} / ${label}`).toBe(1)
+        }
+        // 反过来也成立：这条记录在计数里算命中的词，标注里都列了
+        expect(matchedTerms(groups, tokens, hits)).toEqual(counts.filter(c => c.count === 1).map(c => c.label))
+      }
+    }
   })
 })

@@ -152,8 +152,10 @@ describe('memory_search 绑定', () => {
     expect(d).toContain('开头记忆索引里的说法、用户的原话，以及你判断意思相近或相关的写法，都可以拿来搜。')
     expect(d).toContain('中文和英文写法分开匹配')
     expect(d).toContain('想从几个角度找，可以分几次搜，每次一个角度。搜几次、什么时候停，由你根据结果是否已经回答了问题来判断。\n\n怎么读结果：\n')
-    // 说明只陈述事实：没对上的词、各词命中条数、覆盖不到一半时的命中弱；是否再搜以读到的内容为准
-    expect(d).toContain('排第一的对上了一半以上、但有关键词没对上时，会点名这些词，并列出各关键词在范围内命中几条。')
+    // 说明只陈述事实：逐条命中标注、各词命中条数、覆盖不到一半时的命中弱；是否再搜以读到的内容为准
+    expect(d).toContain('- 不是全命中的结果，头行会注明命中情况：完整对上了哪些关键词，或只对上一部分、只以子串出现；全命中的不标。')
+    expect(d).toContain('- 没有记忆同时含全部关键词时，开头会说明；排第一的有关键词没完整对上时，还会列出各关键词在范围内命中几条。')
+    expect(d).not.toContain('点名')
     expect(d).toContain('排第一的对上的查询内容不到一半、或只有子串命中时，开头会提示命中弱，并列出各关键词命中几条。')
     expect(d).toContain('这些说明是参考信号，结果是否已经回答了问题，以你读到的内容为准。')
     const query = (schemaOf(tool) as { properties: Record<string, { description?: string }> }).properties.query!
@@ -161,6 +163,8 @@ describe('memory_search 绑定', () => {
     expect(query.description).not.toMatch(/\d 到 \d 个/)
     expect(query.description).not.toContain('/')
     expect(query.description).toContain('不到一半')
+    expect(query.description).not.toContain('点名')
+    expect(query.description).toContain('不是全命中的结果在头行标出完整对上的关键词')
   })
 
   describe('types 参数说明从类型表生成', () => {

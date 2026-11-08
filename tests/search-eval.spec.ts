@@ -12,7 +12,7 @@ import { buildTypeRegistry } from '../src/type-registry.ts'
 import { expandQueryTerms, matchScore } from '../src/text.ts'
 import { RANKING_FIELDS, TIER_ORDER, substringEligible, type SearchTier } from '../src/search/ranking.ts'
 import { defaultJiebaLoader, resetJieba, tokenizerForQuery, type JiebaLoader } from '../src/search/jieba-segmenter.ts'
-import { executeSearch, topMissingNote, TOP_MISSING_LEAD, type SearchToolDeps } from '../src/tools/search.ts'
+import { executeSearch, TERM_HITS_LEAD, type SearchToolDeps } from '../src/tools/search.ts'
 import { WEAK_SEARCH_NOTE_CODES, type SearchNoteCode } from '../src/contract-codes.ts'
 import { fakeExec } from './helpers/exec.ts'
 import {
@@ -172,7 +172,8 @@ describe('不变量（与权重无关）', { timeout: 60_000 }, () => {
     expect((await search('pnpm lockfile')).noteCode).toBeUndefined()
     const half = await search('pnpm zzqqxx')
     expect(half.noteCode).toBe('or-fallback')
-    expect(half.note).toContain(topMissingNote(['zzqqxx']))
+    expect(half.note).toContain('范围内一条都没命中的：zzqqxx。')
+    expect(half.hits[0]!.matchNote).toBe(' · 匹配：pnpm')
     expect((await search('pnpm zzqqxx wwkkjj')).noteCode).toBe('low-coverage')
     expect((await search('记忆文件手编后出处对不上怎么办')).noteCode).toBe('or-fallback')
     // memor 以子串出现在 memory 里，算全命中
@@ -342,18 +343,21 @@ describe('换说法类（只记基线，不设分数线）', { timeout: 60_000 }
 
 // ---- 命中弱 ----
 //
-// 说明是给模型的反馈信号：没有全命中就说明；排第一的缺了整个关键词就点名缺的词、附逐词命中条数；
+// 说明是给模型的反馈信号：没有全命中就说明；排第一的缺了整个关键词就附逐词命中条数，每条对上了哪些词由逐条标注给出；
 // 排第一的覆盖不到一半才判弱、劝换词再搜。词面分不出「库里没有答案」和「对的记忆换了说法」，
-// 所以库里没有答案的查询只要求带说明、短词查询点名缺的词，不要求判弱；首条已经正确却判弱的设上限。
+// 所以库里没有答案的查询只要求带说明、短词查询附计数行，不要求判弱；首条已经正确却判弱的设上限。
 // 0.65 阈值、缺关键词即判弱时：评估集首条正确却判弱 bigram 5 条、jieba 3 条，模型自己写查询的对话评测里首条正确的部分命中
 // 几乎全被判弱，判弱失去了区分度。改成覆盖不到一半才判弱后：bigram 1 条、jieba 0 条；没有答案的查询判弱约一半，其余带说明。
-// 换语言查：记忆标签里存了另一种语言的别名时，只写一种写法就全命中、不出说明；没存别名时带说明、点名缺的那种写法。
+// 换语言查：记忆标签里存了另一种语言的别名时，只写一种写法就全命中、不出说明；没存别名时带说明、附计数行。
 
 const WEAK_CORRECT_CEILING = 1
 /** 库里没有答案的查询（短词与长句共 18 条）至少判弱几条：本版 bigram 8 条、jieba 9 条。判弱不要求全中，但掉到这以下说明排序或覆盖计算退化了。 */
 const NO_ANSWER_WEAK_FLOOR = 8
 const NO_ANSWER_QUERIES = EVAL_QUERIES.filter(q => q.category !== 'zero-token' && q.relevant.length === 0)
 const isWeak = (code: SearchNoteCode | undefined) => code !== undefined && (WEAK_SEARCH_NOTE_CODES as readonly string[]).includes(code)
+/** or-fallback 附了逐词命中条数：排第一的缺了整个关键词时才附（覆盖过半、没缺词的只有一句说明）。 */
+const withCountLine = (r: { noteCode?: SearchNoteCode; note?: string }) =>
+  r.noteCode === 'or-fallback' && r.note?.split('\n')[1]?.startsWith(TERM_HITS_LEAD) === true
 
 describe('斜杠词是普通的词：要字面命中', { timeout: 60_000 }, () => {
   const textOf = (id: string) => { const r = byId.get(id)!; return [r.id, r.name, r.summary, r.tags.join(' '), r.content].join('\n').toLowerCase() }
@@ -364,11 +368,12 @@ describe('斜杠词是普通的词：要字面命中', { timeout: 60_000 }, () =
         expect((await search('api/v2')).hits[0]?.id).toBe('mem_i7p2w4')
       })
 
-      it('TCP/IP 两个词都要命中：只靠 scripts 里的 ip 子串的记录不算全命中，说明里点名排第一的没对上 TCP/IP', async () => {
+      it('TCP/IP 两个词都要命中：只靠 scripts 里的 ip 子串的记录不算全命中，判弱或附计数行，首条带命中标注', async () => {
         useTier(tier)
         const r = await search('TCP/IP')
         expect(r.noteCode, r.hits.map(h => h.id).join(' ')).toBeDefined()
-        expect(isWeak(r.noteCode) || r.note!.includes(topMissingNote(['TCP/IP'])), r.note).toBe(true)
+        expect(isWeak(r.noteCode) || withCountLine(r), r.note).toBe(true)
+        expect(r.hits[0]!.matchNote).not.toBe('')
       })
 
       it('src/search 排序：不含 src 的记录不算全命中', async () => {
@@ -396,14 +401,13 @@ describe('命中弱', { timeout: 60_000 }, () => {
 
   for (const tier of ['bigram', 'jieba'] as const) {
     describe.skipIf(tier === 'jieba' && jiebaProbe !== undefined)(`${tier} 档`, () => {
-      it('库里没有答案的查询（短词与长句）全部带说明；短词查询判弱或点名排第一的缺的词', async () => {
+      it('库里没有答案的查询（短词与长句）全部带说明；短词查询判弱或附计数行', async () => {
         useTier(tier)
         const silent: string[] = []
         for (const q of NO_ANSWER_QUERIES) {
           const r = await search(q.query)
           expect(r.hits.length, q.query).toBeGreaterThan(0)   // 有常见词能部分命中，不是空结果
-          const named = r.note?.includes(TOP_MISSING_LEAD) === true
-          if (r.noteCode === undefined || (q.category === 'no-answer' && !isWeak(r.noteCode) && !named)) silent.push(`${q.query} → ${r.noteCode ?? '无说明码'}`)
+          if (r.noteCode === undefined || (q.category === 'no-answer' && !isWeak(r.noteCode) && !withCountLine(r))) silent.push(`${q.query} → ${r.noteCode ?? '无说明码'}`)
         }
         expect(silent).toEqual([])
       })
@@ -423,13 +427,12 @@ describe('命中弱', { timeout: 60_000 }, () => {
         expect(bad).toEqual([])
       })
 
-      it('换语言查、记忆没存别名：有部分命中，但不当成全命中，判弱或点名排第一的缺的词', async () => {
+      it('换语言查、记忆没存别名：有部分命中，但不当成全命中，判弱或附计数行', async () => {
         useTier(tier)
         const bad: string[] = []
         for (const q of EVAL_QUERIES.filter(q => q.category === 'bilingual-no-alias')) {
           const r = await search(q.query)
-          const named = r.note?.includes(TOP_MISSING_LEAD) === true
-          if (r.hits.length === 0 || (!isWeak(r.noteCode) && !named)) bad.push(`${q.query} → ${r.hits.length} 条 ${r.noteCode ?? '无说明码'}`)
+          if (r.hits.length === 0 || (!isWeak(r.noteCode) && !withCountLine(r))) bad.push(`${q.query} → ${r.hits.length} 条 ${r.noteCode ?? '无说明码'}`)
         }
         expect(bad).toEqual([])
       })
