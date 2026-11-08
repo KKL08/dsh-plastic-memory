@@ -6,11 +6,11 @@ import { join } from 'node:path'
 import { MemoryStore } from '../src/store.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
-import { GLOBAL_DIR, deriveFileId } from '../src/storage/paths.ts'
+import { GLOBAL_DIR, WORKSPACE_MARKER, deriveFileId, workspaceDirName } from '../src/storage/paths.ts'
 import { expandQueryTerms, matchScore } from '../src/text.ts'
 import {
-  executeSearch, renderSearchResult, termHitNote, truncationNote, ALL_NO_HIT_NOTE, ANY_MATCH_HINT, MATCH_ALL_HINT, OR_FALLBACK_NOTE,
-  type SearchToolDeps,
+  executeSearch, renderSearchResult, termHitNote, truncationNote, typesNoRecordsNote, ALL_NO_HIT_NOTE, ANY_MATCH_HINT, MATCH_ALL_HINT,
+  OR_FALLBACK_NOTE, type SearchToolDeps,
 } from '../src/tools/search.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
 import { WEAK_SEARCH_NOTE_CODES, type SearchNoteCode } from '../src/contract-codes.ts'
@@ -350,5 +350,115 @@ describe('逐条命中标注', () => {
     expect(r.note).not.toContain('没对上')
     expect(r.note).toBe([OR_FALLBACK_NOTE, termHitNote([{ label: 'deploy', count: 2 }, { label: 'hook', count: 1 }, { label: 'rollback', count: 0 }])].join('\n'))
     expect(r.hits[0]!.matchNote).toBe(' · 匹配：deploy、hook')
+  })
+})
+
+// 类型缺失说明：types 给了、首次搜索的候选为空才二次读；首次有候选就算类型存在，二次读不推翻
+describe('类型缺失说明 types-no-records', () => {
+  const TYPES_NO_RECORDS: SearchNoteCode = 'types-no-records'
+  const memStore = async (records: Parameters<typeof record>[0][]) => {
+    const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
+    for (const r of records) await store.put(record(r))
+    return store
+  }
+  const run = (store: MemoryStore, query: string, extra: Partial<Parameters<typeof executeSearch>[0]> = {}) =>
+    executeSearch({ query, ...extra }, fakeExec(), searchDeps(store))
+  /** 直接落盘的同 id 多副本（store.put 会清掉可见集合里的其余副本）：global 与 /w/proj 各一份。 */
+  const wsDir = () => join(root, workspaceDirName('/w/proj'))
+  const seedCopies = async (globalCopy: Parameters<typeof record>[0], wsCopy: Parameters<typeof record>[0]) => {
+    await mkdir(globalDir(), { recursive: true })
+    await mkdir(wsDir(), { recursive: true })
+    await writeFile(join(wsDir(), WORKSPACE_MARKER), '/w/proj', 'utf8')
+    await writeFile(join(globalDir(), 'g.md'), encodeRecord(record({ id: 'mem_x', ...globalCopy }), {}))
+    await writeFile(join(wsDir(), 'w.md'), encodeRecord(record({ id: 'mem_x', scope: 'workspace', workspacePath: '/w/proj', ...wsCopy }), {}))
+    const store = fileStore()
+    const deps: SearchToolDeps = { ...searchDeps(store), host: { contextOf: async () => ({ workspacePath: '/w/proj', session: { id: 's', lastSeq: 1 } }) } }
+    return (query: string, extra: Partial<Parameters<typeof executeSearch>[0]> = {}) => executeSearch({ query, ...extra }, fakeExec(), deps)
+  }
+
+  it('types 传空数组当没填：结果与不带 types 相同，不出缺失说明', async () => {
+    const store = await memStore([{ id: 'mem_k1', type: 'knowledge', content: 'alpha' }])
+    const plain = await run(store, 'alpha')
+    const empty = await run(store, 'alpha', { types: [] })
+    expect(empty.hits.map(h => h.id)).toEqual(['mem_k1'])
+    expect(empty.noteCode).toBe(plain.noteCode)
+  })
+
+  it('填的类型在范围内没有：码 types-no-records，文案列缺的类型与不限类型时各类型条数（降序、有标签的附标签、旧类型名照列）；all 同样', async () => {
+    const store = await memStore([
+      { id: 'mem_k1', type: 'knowledge', content: 'alpha' },
+      { id: 'mem_k2', type: 'knowledge', content: 'beta' },
+      { id: 'mem_old', type: 'legacy_note', content: 'gamma' },   // 类型表里没有的旧类型：标签回落为名字，不附
+      { id: 'mem_dead', type: 'preference', content: 'alpha', validTo: 1 },   // 过期：不算有效记忆
+    ])
+    const r = await run(store, 'alpha', { types: ['procedure', 'person'] })
+    expect(r.hits).toEqual([])
+    expect(r.noteCode).toBe(TYPES_NO_RECORDS)
+    expect(r.note).toBe(typesNoRecordsNote(['procedure', 'person'], [{ type: 'knowledge', label: '事实与经验', count: 2 }, { type: 'legacy_note', count: 1 }]))
+    expect(r.note).toBe('范围内没有 procedure、person 类型的记忆。不限类型时范围内的记忆：knowledge（事实与经验）2 条、legacy_note 1 条。')
+    expect(r.moreNote).toBeUndefined()
+    expect(renderSearchResult(r)).toBe(r.note)
+    expect(WEAK_SEARCH_NOTE_CODES).not.toContain(r.noteCode)
+    // 二次读只计数：说明里不出现记忆正文
+    expect(r.note).not.toContain('gamma')
+    // 优先级：types-no-records 在 all-no-hit 之前
+    expect(await run(store, 'alpha', { types: ['procedure', 'person'], match: 'all' })).toEqual(r)
+    // 但在 no-workspace 之后
+    expect((await run(store, 'alpha', { types: ['procedure'], scope: 'workspace' })).noteCode).toBe('no-workspace')
+  })
+
+  it('不限类型也查不到有效记忆：同一个码，文案直说，不列空表', async () => {
+    const store = await memStore([{ id: 'mem_dead', type: 'knowledge', content: 'alpha', validTo: 1 }])
+    const r = await run(store, 'alpha', { types: ['knowledge'] })
+    expect(r.hits).toEqual([])
+    expect(r.noteCode).toBe(TYPES_NO_RECORDS)
+    expect(r.note).toBe('范围内没有 knowledge 类型的记忆，不限类型也没有查到有效记忆。')
+    expect(r.note).not.toContain('范围内没有记忆')
+    expect(r.note).not.toContain('：')
+  })
+
+  it('填的类型有记忆、只是关键词没对上：不出类型说明；any 不带码，all 滤空时出 all-no-hit', async () => {
+    const store = await memStore([{ id: 'mem_k', type: 'knowledge', content: 'alpha' }])
+    const none = await run(store, 'zeta', { types: ['knowledge'] })
+    expect(none.hits).toEqual([])
+    expect(none.noteCode).toBeUndefined()
+    expect(renderSearchResult(none)).toBe('没有匹配的记忆。')
+    // 范围内一条都没命中时 all 也是不带码的空结果（all-no-hit 只在 all 真的滤掉了条目时出现）
+    expect(await run(store, 'zeta', { types: ['knowledge'], match: 'all' })).toEqual(none)
+    const partial = await run(store, 'alpha beta', { types: ['knowledge'], match: 'all' })
+    expect(partial.hits).toEqual([])
+    expect(partial.noteCode).toBe(ALL_NO_HIT)
+    expect((await run(store, 'alpha beta', { types: ['knowledge'] })).noteCode).toBe('or-fallback')
+  })
+
+  it('同 id 跨作用域两份类型不同：搜旧类型能搜到旧的那份，缺失判断也算它存在；条数表按不限类型的取舍只计新的那份', async () => {
+    // 项目里的新副本是 procedure，全局的旧副本还是 knowledge；不带类型过滤取舍时新副本胜出
+    const run = await seedCopies(
+      { type: 'knowledge', content: 'alpha 旧类型', updatedAt: 1 },
+      { type: 'procedure', content: 'beta 新类型', updatedAt: 2 },
+    )
+    expect((await run('alpha', { types: ['knowledge'] })).hits.map(h => h.id)).toEqual(['mem_x'])
+    // 关键词没对上、预筛跳过两份：二次读先按 knowledge 过滤再取舍，旧副本在 → 不是类型缺失
+    const miss = await run('zeta', { types: ['knowledge'] })
+    expect(miss.hits).toEqual([])
+    expect(miss.noteCode).toBeUndefined()
+    // 真缺的类型：条数表是不限类型视图，同 id 两份只计一份（新的 procedure），knowledge 不在表里
+    const absent = await run('zeta', { types: ['person'] })
+    expect(absent.noteCode).toBe(TYPES_NO_RECORDS)
+    expect(absent.note).toBe('范围内没有 person 类型的记忆。不限类型时范围内的记忆：procedure（可复用流程）1 条。')
+  })
+
+  it('同 id 两份同类型，有效的被预筛留下、过期的新副本不含查询词：首次有候选就算类型存在，all 搜空出 all-no-hit 而不是缺失说明', async () => {
+    const run = await seedCopies(
+      { type: 'knowledge', content: 'alpha 有效', updatedAt: 1 },
+      { type: 'knowledge', content: '无关 过期', updatedAt: 2, validTo: 1 },
+    )
+    // 不带预筛再读一次会取到过期的新副本、滤掉后为空；首次候选非空（有效副本）已证明类型存在，二次读不推翻
+    const r = await run('alpha gamma', { types: ['knowledge'], match: 'all' })
+    expect(r.hits).toEqual([])
+    expect(r.noteCode).toBe(ALL_NO_HIT)
+    const any = await run('alpha gamma', { types: ['knowledge'] })
+    expect(any.hits.map(h => h.id)).toEqual(['mem_x'])
+    expect(any.noteCode).toBe('or-fallback')
   })
 })

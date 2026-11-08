@@ -2,7 +2,7 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryStore, QueryScope } from '../store.ts'
 import type { SearchNoteCode } from '../contract-codes.ts'
 import { expandQueryTerms } from '../text.ts'
-import { resolveLiveFirst } from '../storage/table.ts'
+import { resolveLiveFirst, type LocatedRecord } from '../storage/table.ts'
 import { tokenizerForQuery, type QueryTokenizerOptions } from '../search/jieba-segmenter.ts'
 import { CJK } from '../search/tokenizer.ts'
 import { anchorTerms, compareRanked, pendingLast, rankRecords, type RankedRecord, type SearchTier } from '../search/ranking.ts'
@@ -98,6 +98,21 @@ export const ANY_MATCH_HINT = '改用 match: "any" 可以看部分命中的结�
 /** any 模式截断、且全部结果里有非全命中时接在截断说明末尾：all 会改变结果时才提。 */
 export const MATCH_ALL_HINT = '用 match: "all" 可以只看同时含全部关键词的记忆。'
 
+/** 类型缺失说明里条数表的一行：类型名、类型表给的标签（与名字相同时不带）、不限类型时能查到的有效记忆条数。 */
+export interface TypeCount { type: string; label?: string; count: number }
+
+/**
+ * 填的类型在范围内没有有效记忆时的说明（码 types-no-records）：先列缺的类型，再给不限类型时范围内各类型几条，
+ * 让模型分得清是这几类没有、还是关键词没对上。条数表为空只说不限类型也没有查到有效记忆：表是取舍过滤后的视图，
+ * 不等于范围内没有记忆（取舍可能选中过期的新副本、丢掉有效的旧副本）。
+ */
+export function typesNoRecordsNote(missing: readonly string[], counts: readonly TypeCount[]): string {
+  const head = `范围内没有 ${missing.join('、')} 类型的记忆`
+  if (counts.length === 0) return `${head}，不限类型也没有查到有效记忆。`
+  const rows = counts.map(c => `${c.type}${c.label !== undefined ? `（${c.label}）` : ' '}${c.count} 条`)
+  return `${head}。不限类型时范围内的记忆：${rows.join('、')}。`
+}
+
 /** 逐词命中那行的开头。 */
 export const TERM_HITS_LEAD = '各关键词命中的记忆条数：'
 
@@ -148,6 +163,30 @@ function isNoiseTerm(term: string): boolean {
 }
 
 /**
+ * 填的类型在范围内有没有有效记忆：按同一范围再读一次原始记录（不带预筛、不带类型过滤），分两路算。
+ * 存在性按搜索路径同序——先按请求类型过滤再取舍、过滤：同 id 跨作用域两份类型不同时，搜旧类型能搜到旧的那份，
+ * 先取舍再看类型会把它漏掉。条数表另算——不按类型过滤、直接取舍过滤后按类型计数，是「不限类型时能查到的有效记忆」视图，
+ * 同 id 两份只计一份。只计数，不渲染任何记录字段。类型存在时返回 undefined。
+ */
+async function missingTypesNote(
+  types: readonly string[],
+  scope: QueryScope,
+  liveOf: (records: readonly LocatedRecord[]) => LocatedRecord[],
+  deps: SearchToolDeps,
+): Promise<string | undefined> {
+  const read = await deps.store.readRaw(scope)
+  if (liveOf(read.records.filter(l => types.includes(l.record.type))).length > 0) return undefined
+  const counts = new Map<string, number>()
+  for (const l of liveOf(read.records)) counts.set(l.record.type, (counts.get(l.record.type) ?? 0) + 1)
+  // 条数降序，同数按类型名；类型名来自读盘，旧场景的类型也会出现，类型表给得出标签才附
+  const table = [...counts].map(([type, count]) => {
+    const label = deps.registry.get(type).label
+    return { type, count, ...(label !== type ? { label } : {}) }
+  }).sort((x, y) => y.count - x.count || (x.type < y.type ? -1 : x.type > y.type ? 1 : 0))
+  return typesNoRecordsNote(types, table)
+}
+
+/**
  * memory_search 工具的真正执行逻辑：解析上下文、按范围读取、取舍过滤、分档打分、排序截断、标记召回。
  * 不依赖任何 dsh 框架包，测试直接调它。
  */
@@ -184,10 +223,18 @@ export async function executeSearch(
     : {}
   const now = deps.now?.() ?? Date.now()
   // 与快照预读同一条路：按范围读取 → 同 id 取舍 → active → validTo（过期的不进检索，治理扫描仍可见）
-  const read = await deps.store.readRaw(scopeFilter, { ...(a.types ? { types: a.types } : {}), ...prefilter })
-  const located = resolveLiveFirst(read.records, { workspacePath: hint })
+  // types 空数组当没填：模型传 [] 表达的是不筛，按字面过滤会把全部记忆滤掉
+  const typeFilter = a.types !== undefined && a.types.length > 0 ? { types: a.types } : {}
+  const read = await deps.store.readRaw(scopeFilter, { ...typeFilter, ...prefilter })
+  const liveOf = (records: readonly LocatedRecord[]) => resolveLiveFirst(records, { workspacePath: hint })
     .filter(l => l.record.status === 'active' && withinValidity(l.record, now))
+  const located = liveOf(read.records)
   const candidates = located.map(l => l.record)
+  // 类型缺失说明：填了 types 而候选为空，才按同一范围再读一次（不带预筛、不带类型过滤）分辨是这几类没有、还是关键词没对上。
+  // 首次候选非空就证明这几类有记忆，二次读不推翻它：预筛改变参与取舍的副本，二次读可能选中另一份已过期的副本。
+  const typesNote = a.types !== undefined && a.types.length > 0 && candidates.length === 0
+    ? await missingTypesNote(a.types, scopeFilter, liveOf, deps)
+    : undefined
   // 取舍后同 id 只留一份，命中按 id 取回它的文件绝对路径
   const filePathOf = new Map(located.map(l => [l.record.id, l.filePath]))
 
@@ -232,8 +279,10 @@ export async function executeSearch(
   // match: all 搜空 → all-no-hit（返回列表为空，与上面三码互斥）；all 有结果时列表只剩全命中档，三码自然不出。
   // 范围内没有任何命中时换 any 也是空，不出此码，和 any 一样是不带码的空结果
   const allNoHit = matchAll && top.length === 0 && ranked.length > 0
-  let note: { noteCode: SearchNoteCode; note: string } | undefined
-  if (allNoHit || (top.length > 0 && !hasTier('all') && !isDirect)) {
+  // 优先级（结果只带一个码）：no-workspace（上面已返回）→ types-no-records → all-no-hit → 三码；类型缺失时候选为空，后面几码本就不成立
+  let note: { noteCode: SearchNoteCode; note: string } | undefined =
+    typesNote === undefined ? undefined : { noteCode: 'types-no-records', note: typesNote }
+  if (note === undefined && (allNoHit || (top.length > 0 && !hasTier('all') && !isDirect))) {
     const rows = ranked.map(e => e.tokenHits)
     const withCounts = (text: string) => [text, termHitNote(termHitCounts(groups, tokens, rows))].filter(x => x !== undefined).join('\n')
     const first = top.find(e => e.tier === 'partial')

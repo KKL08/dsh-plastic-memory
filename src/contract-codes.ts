@@ -101,8 +101,12 @@ export type SearchNoteCode =
   | 'low-coverage'        // 同上没有全命中，且排第一的部分命中记录覆盖的查询内容不到一半（search/coverage.ts）：命中弱，建议换词再搜，附逐词命中条数
   | 'substring-fallback'  // 返回列表里没有任何 token 命中的记忆，只有旧子串匹配命中的（如 id 前缀）：命中弱，附逐词命中条数（没有可列的词时不附）；三者互斥、substring 优先；查询恰是某条记忆的 id 时三者都不出
   | 'all-no-hit'          // match=all 且没有记忆同时含全部关键词（返回列表为空）：附逐词命中条数（按全部候选算）与改用 any 的提示。
-                          // 结果只带一个码，优先级 no-workspace → all-no-hit → 上面三码；all 有结果时列表只剩全命中，上面三码不出；
-                          // 查询没有可打分 token 时 match 不起作用，不出此码；范围内没有任何命中时不出此码
+                          // all 有结果时列表只剩全命中，上面三码不出；查询没有可打分 token 时 match 不起作用，不出此码；范围内没有任何命中时不出此码
+  | 'types-no-records'    // 填了 types 且这几类在范围内一条有效记忆都没有（返回列表为空）：列缺的类型，接不限类型时范围内各类型的有效记忆条数
+                          // （同 id 多副本取舍后只计一份）；这个视图也为空时直说不限类型也没有查到有效记忆。
+                          // 首次搜索有候选（经类型过滤、副本取舍、状态与有效期过滤）就算类型存在，不出此码。
+                          // 结果只带一个码，互斥、按此顺序取第一个成立的：no-workspace → types-no-records → all-no-hit → or-fallback / low-coverage / substring-fallback；
+                          // 不带码的空结果只在类型有记忆、关键词没对上时出现（all 一条都没滤掉时同样不带码）
 
 /** 表示命中弱的检索说明码：说明里带换词再搜的建议与逐词命中条数。 */
 export const WEAK_SEARCH_NOTE_CODES = ['low-coverage', 'substring-fallback'] as const satisfies readonly SearchNoteCode[]
