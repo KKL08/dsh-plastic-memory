@@ -2,11 +2,11 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { MemoryStore, QueryScope } from '../store.ts'
 import type { SearchNoteCode } from '../contract-codes.ts'
 import { expandQueryTerms } from '../text.ts'
-import { resolveLiveFirst } from '../storage/table.ts'
+import { resolveLiveFirst, type LocatedRecord } from '../storage/table.ts'
 import { tokenizerForQuery, type QueryTokenizerOptions } from '../search/jieba-segmenter.ts'
 import { CJK } from '../search/tokenizer.ts'
 import { anchorTerms, compareRanked, pendingLast, rankRecords, type RankedRecord, type SearchTier } from '../search/ranking.ts'
-import { groupQueryTerms, judgeTopHit, termHitCounts, type TermHitCount } from '../search/coverage.ts'
+import { groupQueryTerms, judgeTopHit, matchedTerms, termHitCounts, type TermHitCount } from '../search/coverage.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { ContextHost } from './host-session.ts'
 import { sourceNote } from '../index-line.ts'
@@ -46,6 +46,8 @@ export interface SearchArgs {
   types?: string[]
   scope?: 'global' | 'workspace' | 'all-visible'
   limit?: number
+  /** 缺省 any：按档位排好的全部命中；all：只返回全命中档（同时含全部关键词）。 */
+  match?: 'any' | 'all'
 }
 
 export interface SearchHit {
@@ -55,6 +57,10 @@ export interface SearchHit {
   content: string
   sourceNote: string
   stalenessNote: string
+  /** 命中说明（见 matchNoteOf），全命中为空串。 */
+  matchNote: string
+  /** 完整对上的查询词，只在部分命中档出现（可能为空）；口径同逐词命中条数。 */
+  matchedTerms?: string[]
   /** 记忆文件的绝对路径（记忆根目录 + 目录名 + 文件名）；模型要全文或上下文时直接 Read。name 含明确密钥时不给（见 exposedPath）。 */
   path?: string
 }
@@ -62,28 +68,66 @@ export interface SearchHit {
 /** 命中的 core 记忆全文已在本会话快照里时，正文换成这句：同一段全文不在上下文里贴两遍。 */
 export const IN_SNAPSHOT_NOTE = '全文已在本会话带入的长期记忆里。'
 
-/** 命中弱时附在说明末尾：说明码本身就是「相关度弱」的信号，提示模型换词再搜一次，而不是把弱结果当定论。 */
+/** 命中弱时附在说明末尾：排第一的连一半都没对上，提示模型可以换词再搜，而不是把弱结果当定论。 */
 export const RETRY_HINT = '命中弱，可以换同义词、换成另一种语言的写法、减少词数或换个角度再搜一次。'
 /**
- * 说明文案（码在 contract-codes）：返回列表里没有全命中记录、首条覆盖够 / 首条覆盖不够（见 search/coverage.ts）/
- * 只有旧子串匹配命中的记录（第三档）。覆盖够的只如实说明，不劝重搜：长句提问时首条往往就是答案。
+ * 说明文案（码在 contract-codes）：返回列表里没有全命中记录、首条覆盖过半 / 首条覆盖不到一半（见 search/coverage.ts）/
+ * 只有旧子串匹配命中的记录（第三档）。覆盖过半的只如实说明，不劝重搜：首条缺个词往往只是换了说法，要不要再搜由模型看结果判断。
  */
 export const OR_FALLBACK_NOTE = '没有记忆同时含全部关键词，以下按相关性排序。'
-export const LOW_COVERAGE_NOTE = `没有记忆同时含全部关键词，排第一的也只含其中一部分，以下按相关性排序。${RETRY_HINT}`
+export const LOW_COVERAGE_NOTE = `没有记忆同时含全部关键词，排第一的对上的查询内容不到一半，以下按相关性排序。${RETRY_HINT}`
 export const SUBSTRING_FALLBACK_NOTE = `没有命中关键词的记忆，以下只是关键词以子串出现的结果。${RETRY_HINT}`
+
+/**
+ * 逐条命中说明，接在头行陈旧说明之后：每条各对上了什么，扫头行就能比较各条的成色。全命中不加。
+ * 部分命中但列不出完整词（只盖住了词的一部分，或对上的只是长句段）单独一种，不和子串命中混在一起。
+ */
+export function matchNoteOf(tier: SearchTier, terms: readonly string[]): string {
+  if (tier === 'all') return ''
+  if (tier === 'substring') return ' · 仅子串命中'
+  return terms.length > 0 ? ` · 匹配：${terms.join('、')}` : ' · 部分命中，没有可列出的完整关键词'
+}
+
+/**
+ * match: all 搜空时的说明（码 all-no-hit）：先说没有全命中，接逐词命中条数，再说换 any 能看到什么。
+ * 不带码的「没有匹配的记忆」只在 any 下出现：all 搜空时部分命中的记忆可能就在范围里，要让模型知道还有这条路。
+ */
+export const ALL_NO_HIT_NOTE = '没有记忆同时含全部关键词。'
+export const ANY_MATCH_HINT = '改用 match: "any" 可以看部分命中的结果。'
+
+/** any 模式截断、且全部结果里有非全命中时接在截断说明末尾：all 会改变结果时才提。 */
+export const MATCH_ALL_HINT = '用 match: "all" 可以只看同时含全部关键词的记忆。'
+
+/** 类型缺失说明里条数表的一行：类型名、类型表给的标签（与名字相同时不带）、不限类型时能查到的有效记忆条数。 */
+export interface TypeCount { type: string; label?: string; count: number }
+
+/**
+ * 填的类型在范围内没有有效记忆时的说明（码 types-no-records）：先列缺的类型，再给不限类型时范围内各类型几条，
+ * 让模型分得清是这几类没有、还是关键词没对上。条数表为空只说不限类型也没有查到有效记忆：表是取舍过滤后的视图，
+ * 不等于范围内没有记忆（取舍可能选中过期的新副本、丢掉有效的旧副本）。
+ */
+export function typesNoRecordsNote(missing: readonly string[], counts: readonly TypeCount[]): string {
+  const head = `范围内没有 ${missing.join('、')} 类型的记忆`
+  if (counts.length === 0) return `${head}，不限类型也没有查到有效记忆。`
+  const rows = counts.map(c => `${c.type}${c.label !== undefined ? `（${c.label}）` : ' '}${c.count} 条`)
+  return `${head}。不限类型时范围内的记忆：${rows.join('、')}。`
+}
+
+/** 逐词命中那行的开头。 */
+export const TERM_HITS_LEAD = '各关键词命中的记忆条数：'
 
 /** 逐词命中一行最多列几个词，多的写「等 N 个」。 */
 export const TERM_NOTE_MAX = 8
 
 /**
- * 命中弱时接在说明后的一行：各关键词在范围内命中几条，一条都没命中的单独点名，让模型知道该换哪个词。
+ * 命中弱或首条缺关键词时接在说明后的一行：各关键词在范围内命中几条，一条都没命中的单独点名，让模型知道是哪个词没对上。
  * 没有可列的词（如纯数字查询）时返回 undefined，不出这一行。
  */
 export function termHitNote(counts: readonly TermHitCount[]): string | undefined {
   if (counts.length === 0) return undefined
   const list = (items: readonly string[]) =>
     items.length > TERM_NOTE_MAX ? `${items.slice(0, TERM_NOTE_MAX).join('、')} 等 ${items.length} 个` : items.join('、')
-  const head = `各关键词命中的记忆条数：${list(counts.map(c => `${c.label} ${c.count}`))}。`
+  const head = `${TERM_HITS_LEAD}${list(counts.map(c => `${c.label} ${c.count}`))}。`
   const zero = counts.filter(c => c.count === 0).map(c => c.label)
   return zero.length === 0 ? head : `${head}范围内一条都没命中的：${list(zero)}。`
 }
@@ -105,7 +149,7 @@ export function truncationNote(total: number, shown: number, atCap: boolean): st
 
 /** 把命中结果渲染成给模型看的一段文本：有说明先写说明，再列命中（头行末尾带文件绝对路径）。纯函数。 */
 export function renderSearchResult(result: { hits: SearchHit[]; note?: string; moreNote?: string }): string {
-  const blocks = result.hits.map(h => `[${h.id}] ${h.type}｜${h.summary}${h.sourceNote}${h.stalenessNote}${h.path !== undefined ? ` · ${h.path}` : ''}\n${h.content}`)
+  const blocks = result.hits.map(h => `[${h.id}] ${h.type}｜${h.summary}${h.sourceNote}${h.stalenessNote}${h.matchNote}${h.path !== undefined ? ` · ${h.path}` : ''}\n${h.content}`)
   const head = [result.note, result.moreNote].filter((x): x is string => x !== undefined).join('\n')
   if (head !== '') blocks.unshift(head)
   return blocks.length === 0 ? '没有匹配的记忆。' : blocks.join('\n\n')
@@ -116,6 +160,30 @@ const CJK_CHAR = new RegExp(`[${CJK}]`, 'u')
 /** 单个字母、纯数字几乎在每个文件里出现：既不作为打分 token，也不能进 any 模式预筛。单个 CJK 字是实词，保留。 */
 function isNoiseTerm(term: string): boolean {
   return /^\p{N}+$/u.test(term) || ([...term].length === 1 && !CJK_CHAR.test(term))
+}
+
+/**
+ * 填的类型在范围内有没有有效记忆：按同一范围再读一次原始记录（不带预筛、不带类型过滤），分两路算。
+ * 存在性按搜索路径同序——先按请求类型过滤再取舍、过滤：同 id 跨作用域两份类型不同时，搜旧类型能搜到旧的那份，
+ * 先取舍再看类型会把它漏掉。条数表另算——不按类型过滤、直接取舍过滤后按类型计数，是「不限类型时能查到的有效记忆」视图，
+ * 同 id 两份只计一份。只计数，不渲染任何记录字段。类型存在时返回 undefined。
+ */
+async function missingTypesNote(
+  types: readonly string[],
+  scope: QueryScope,
+  liveOf: (records: readonly LocatedRecord[]) => LocatedRecord[],
+  deps: SearchToolDeps,
+): Promise<string | undefined> {
+  const read = await deps.store.readRaw(scope)
+  if (liveOf(read.records.filter(l => types.includes(l.record.type))).length > 0) return undefined
+  const counts = new Map<string, number>()
+  for (const l of liveOf(read.records)) counts.set(l.record.type, (counts.get(l.record.type) ?? 0) + 1)
+  // 条数降序，同数按类型名；类型名来自读盘，旧场景的类型也会出现，类型表给得出标签才附
+  const table = [...counts].map(([type, count]) => {
+    const label = deps.registry.get(type).label
+    return { type, count, ...(label !== type ? { label } : {}) }
+  }).sort((x, y) => y.count - x.count || (x.type < y.type ? -1 : x.type > y.type ? 1 : 0))
+  return typesNoRecordsNote(types, table)
 }
 
 /**
@@ -155,10 +223,18 @@ export async function executeSearch(
     : {}
   const now = deps.now?.() ?? Date.now()
   // 与快照预读同一条路：按范围读取 → 同 id 取舍 → active → validTo（过期的不进检索，治理扫描仍可见）
-  const read = await deps.store.readRaw(scopeFilter, { ...(a.types ? { types: a.types } : {}), ...prefilter })
-  const located = resolveLiveFirst(read.records, { workspacePath: hint })
+  // types 空数组当没填：模型传 [] 表达的是不筛，按字面过滤会把全部记忆滤掉
+  const typeFilter = a.types !== undefined && a.types.length > 0 ? { types: a.types } : {}
+  const read = await deps.store.readRaw(scopeFilter, { ...typeFilter, ...prefilter })
+  const liveOf = (records: readonly LocatedRecord[]) => resolveLiveFirst(records, { workspacePath: hint })
     .filter(l => l.record.status === 'active' && withinValidity(l.record, now))
+  const located = liveOf(read.records)
   const candidates = located.map(l => l.record)
+  // 类型缺失说明：填了 types 而候选为空，才按同一范围再读一次（不带预筛、不带类型过滤）分辨是这几类没有、还是关键词没对上。
+  // 首次候选非空就证明这几类有记忆，二次读不推翻它：预筛改变参与取舍的副本，二次读可能选中另一份已过期的副本。
+  const typesNote = a.types !== undefined && a.types.length > 0 && candidates.length === 0
+    ? await missingTypesNote(a.types, scopeFilter, liveOf, deps)
+    : undefined
   // 取舍后同 id 只留一份，命中按 id 取回它的文件绝对路径
   const filePathOf = new Map(located.map(l => [l.record.id, l.filePath]))
 
@@ -176,7 +252,13 @@ export async function executeSearch(
   const direct = ranked.findIndex(e => e.record.id === directId)
   if (direct > 0) ranked.unshift(...ranked.splice(direct, 1))
   const isDirect = direct >= 0
-  const top = ranked.slice(0, limit)
+  // 全命中档（置顶的 id 直达不滤）。没有可打分 token 时 match 不起作用：留空时全在全命中档，
+  // 只有噪声词项时记忆靠旧词项进子串档，没有东西可以「全部命中」，照滤会平白搜空
+  const allOnly = tokens.length > 0 ? ranked.filter((e, i) => e.tier === 'all' || (isDirect && i === 0)) : ranked
+  const matchAll = a.match === 'all' && tokens.length > 0
+  // 过滤放在排序之后：逐词命中条数仍按全部候选（ranked）算
+  const listed = matchAll ? allOnly : ranked
+  const top = listed.slice(0, limit)
   const topIds = top.map(e => e.record.id)
   const { sessionRecall } = deps
   const handle = session.handle
@@ -186,32 +268,50 @@ export async function executeSearch(
   // 快照带入时的正文与现在一致才省略：冻结后改过的、同 id 取到别层副本的，快照里那份不是这一版
   const injected = sessionRecall && handle ? sessionRecall.injectedCore(handle) : undefined
 
-  // 说明码只看返回列表：没有全命中时，排第一的部分命中记录覆盖够 → or-fallback，不够 → low-coverage；
-  // 连部分命中也没有、只剩第三档 → substring-fallback（三者互斥、substring 优先）。判弱的两种附逐词命中条数（范围内全部候选）。
+  // 查询分组：开头说明的判弱、逐词命中条数与逐条命中说明共用
+  const groups = groupQueryTerms(a.query, tokens, tokenize)
+
+  // 说明码只看返回列表：没有全命中时，排第一的部分命中记录覆盖过半 → or-fallback，不到一半 → low-coverage；
+  // 连部分命中也没有、只剩第三档 → substring-fallback（三者互斥、substring 优先）。判弱的两种、以及首条缺关键词的 or-fallback
+  // 附逐词命中条数（范围内全部候选）；缺的是哪些词由逐条命中说明给出。
   // 查询恰是某条记忆的 id：它已置顶，就是要找的那条，不出说明码
   const hasTier = (tier: SearchTier) => top.some(e => e.tier === tier)
-  let note: { noteCode: SearchNoteCode; note: string } | undefined
-  if (top.length > 0 && !hasTier('all') && !isDirect) {
+  // match: all 搜空 → all-no-hit（返回列表为空，与上面三码互斥）；all 有结果时列表只剩全命中档，三码自然不出。
+  // 范围内没有任何命中时换 any 也是空，不出此码，和 any 一样是不带码的空结果
+  const allNoHit = matchAll && top.length === 0 && ranked.length > 0
+  // 优先级（结果只带一个码）：no-workspace（上面已返回）→ types-no-records → all-no-hit → 三码；类型缺失时候选为空，后面几码本就不成立
+  let note: { noteCode: SearchNoteCode; note: string } | undefined =
+    typesNote === undefined ? undefined : { noteCode: 'types-no-records', note: typesNote }
+  if (note === undefined && (allNoHit || (top.length > 0 && !hasTier('all') && !isDirect))) {
     const rows = ranked.map(e => e.tokenHits)
-    const groups = groupQueryTerms(a.query, tokens, tokenize)
-    const weakNote = (text: string) => [text, termHitNote(termHitCounts(groups, tokens, rows))].filter(x => x !== undefined).join('\n')
+    const withCounts = (text: string) => [text, termHitNote(termHitCounts(groups, tokens, rows))].filter(x => x !== undefined).join('\n')
     const first = top.find(e => e.tier === 'partial')
-    if (first === undefined) note = { noteCode: 'substring-fallback', note: weakNote(SUBSTRING_FALLBACK_NOTE) }
-    else if (judgeTopHit(groups, tokens, first.tokenHits).weak) note = { noteCode: 'low-coverage', note: weakNote(LOW_COVERAGE_NOTE) }
+    const verdict = first === undefined ? undefined : judgeTopHit(groups, tokens, first.tokenHits)
+    if (allNoHit) note = { noteCode: 'all-no-hit', note: [withCounts(ALL_NO_HIT_NOTE), ANY_MATCH_HINT].join('\n') }
+    else if (verdict === undefined) note = { noteCode: 'substring-fallback', note: withCounts(SUBSTRING_FALLBACK_NOTE) }
+    else if (verdict.weak) note = { noteCode: 'low-coverage', note: withCounts(LOW_COVERAGE_NOTE) }
+    else if (verdict.missingKeywords.length > 0) note = { noteCode: 'or-fallback', note: withCounts(OR_FALLBACK_NOTE) }
     else note = { noteCode: 'or-fallback', note: OR_FALLBACK_NOTE }
   }
   return {
     ...note,
-    ...(ranked.length > top.length ? { moreNote: truncationNote(ranked.length, top.length, limit === MAX_SEARCH_LIMIT) } : {}),
+    ...(listed.length > top.length
+      ? { moreNote: truncationNote(listed.length, top.length, limit === MAX_SEARCH_LIMIT) + (listed.length > allOnly.length && allOnly.some(e => e.tier === 'all') ? MATCH_ALL_HINT : '') }
+      : {}),
     // 与注入同口径：只遮明确密钥（疑似级写入时用户已确认）；文件路径同注入，name 被遮的不给，其余遮一遍
-    hits: top.map(({ record: h }) => {
+    hits: top.map(({ record: h, tier: rankedTier, tokenHits }, i) => {
       const masked = maskSecretSurface(h)
       const path = exposedPath(h, filePathOf.get(h.id)!)
+      // id 直达置顶的那条就是模型按 id 要的，不标命中情况（同它不出说明码）
+      const tier = isDirect && i === 0 ? 'all' : rankedTier
+      const terms = tier === 'partial' ? matchedTerms(groups, tokens, tokenHits) : []
       return {
         id: h.id, type: h.type, summary: masked.summary,
         content: injected?.get(h.id) === h.content ? IN_SNAPSHOT_NOTE : masked.content,
         sourceNote: sourceNote(h),
         stalenessNote: stalenessNote(h, deps.registry.get(h.type).decayDays, now),
+        matchNote: matchNoteOf(tier, terms),
+        ...(tier === 'partial' ? { matchedTerms: terms } : {}),
         ...(path !== undefined ? { path } : {}),
       }
     }),

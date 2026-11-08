@@ -16,7 +16,7 @@ import { createSourceTool } from '../src/tools/source-tool.ts'
 import { MemoryStore } from '../src/store.ts'
 import { PendingDecisionsStore } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
-import { buildTypeRegistry } from '../src/type-registry.ts'
+import { buildTypeRegistry, BUILTIN_TYPES, PRESET_TYPES, RETIRED_TYPES } from '../src/type-registry.ts'
 import { runSavePipeline } from '../src/pipeline.ts'
 import type { MemorySnapshot, PendingDecision, ScanCacheEntry } from '../src/governance/schema.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
@@ -142,25 +142,100 @@ describe('memory_search 绑定', () => {
     return createSearchTool({ store, registry, host: { contextOf: async () => ({ workspacePath: '/proj', session: { id: 's', lastSeq: 1 } }) } })
   }
 
-  it('工具描述开头讲清它管什么、和 grep 怎么分工，再分段教关键词写法与读结果（换行保留），命中弱时换词再搜一次', async () => {
+  it('工具描述开头讲清它管什么、和 grep 怎么分工，再分段讲查询写法与读结果（换行保留）；不限词数，搜几次由模型判断', async () => {
     const tool = await seededTool()
     const d = tool.description
     expect(d.startsWith('查长期记忆用这个工具：想知道某件事有没有记过、记的是什么，或按 id 取一条。\n范围是本项目和全局记忆。')).toBe(true)
     expect(d).toContain('代码和项目文件用 grep 搜；记忆目录不要用 grep 搜：那里还存着已删除和其他项目的记忆')
-    expect(d).toContain('\n怎么写关键词：\n- 写 2 到 4 个实词。版本号、路径这类原样文字可以直接搜。\n')
-    expect(d).toContain('\n- 优先用开头记忆索引里出现过的说法；用户的说法和索引对不上时，先用你推测的记忆写法搜；命中弱再换用户原话的词搜一次。\n')
-    expect(d).not.toContain('一起带上')
-    expect(d).toContain('- 每个术语只写一种写法，用记忆里最可能出现的那种；同一术语的中文和英文写法不要放进同一次查询。\n\n怎么读结果：\n')
-    expect(d).not.toContain('/ 连')
-    expect(d).toContain('换个角度再搜一次')
-    // 没判弱时只陈述首条覆盖了多少；判弱时说明里会列逐词命中条数
-    expect(d).toContain('没提示命中弱时，排第一的那条含了查询的大部分内容。')
-    expect(d).toContain('开头提示命中弱时，有可列的词就列出各关键词命中几条：先换掉一条都没命中的词，或换同义词、换成另一种语言的写法、减少词数、换个角度再搜一次。')
+    expect(d).toContain('\n查询写法：\n- 查询是空格分隔的关键词，中英文均可，版本号、路径这类原样文字可以直接搜。')
+    expect(d).not.toMatch(/\d 到 \d 个/)
+    expect(d).toContain('开头记忆索引里的说法、用户的原话，以及你判断意思相近或相关的写法，都可以拿来搜。')
+    expect(d).toContain('中文和英文写法分开匹配')
+    expect(d).toContain('想从几个角度找，可以分几次搜，每次一个角度。搜几次、什么时候停，由你根据结果是否已经回答了问题来判断。\n\n怎么读结果：\n')
+    // 说明只陈述事实：逐条命中标注、各词命中条数、覆盖不到一半时的命中弱；是否再搜以读到的内容为准
+    expect(d).toContain('- 不是全命中的结果，头行会注明命中情况：完整对上了哪些关键词，或只对上一部分、只以子串出现；全命中的不标。')
+    expect(d).toContain('- 没有记忆同时含全部关键词时，开头会说明；排第一的有关键词没完整对上时，还会列出各关键词在范围内命中几条。')
+    expect(d).not.toContain('点名')
+    expect(d).toContain('排第一的对上的查询内容不到一半、或只有子串命中时，开头会提示命中弱，并列出各关键词命中几条。')
+    expect(d).toContain('这些说明是参考信号，结果是否已经回答了问题，以你读到的内容为准。')
     const query = (schemaOf(tool) as { properties: Record<string, { description?: string }> }).properties.query!
-    expect(query.description).toContain('每个术语只写一种写法，中英文写法不要同时带上')
+    expect(query.description).toContain('空格分隔的关键词，中英文均可')
+    expect(query.description).not.toMatch(/\d 到 \d 个/)
     expect(query.description).not.toContain('/')
-    expect(query.description).toContain('有可列的词时还列出各关键词命中几条')
-    expect(query.description).toContain('建议换词或换成另一种语言的写法再搜一次')
+    expect(query.description).toContain('不到一半')
+    expect(query.description).not.toContain('点名')
+    expect(query.description).toContain('不是全命中的结果在头行标出完整对上的关键词')
+  })
+
+  describe('types 参数说明从类型表生成', () => {
+    // 两三类的假场景：不依赖内置类型的名字，也用来断言说明里没有写死的类型名
+    const sceneRegistry = (types: string[]) => buildTypeRegistry({
+      template: 'trial',
+      customTypes: {
+        alpha: { label: '甲类', description: '甲', whenToSave: '甲', howToUse: '甲', recall: 'core', decayDays: null, governancePriority: 'low' },
+        beta: { label: '乙类', description: '乙', whenToSave: '乙', howToUse: '乙', recall: 'search', decayDays: 30, governancePriority: 'high' },
+        gamma: { label: '丙类', description: '丙', whenToSave: '丙', howToUse: '丙', recall: 'passive', decayDays: null, governancePriority: 'medium' },
+      },
+      scenes: { trial: { label: '试验', types } },
+    })
+    const toolWith = (types: string[]) => createSearchTool({
+      store: new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable()),
+      registry: sceneRegistry(types),
+      host: { contextOf: async () => ({ workspacePath: '/proj', session: { id: 's', lastSeq: 1 } }) },
+    })
+    const typesParam = (tool: ToolDefinition) =>
+      (schemaOf(tool) as { properties: Record<string, { description?: string; enum?: unknown; items?: { enum?: unknown } }>; required?: string[] })
+
+    it('固定用法文字讲清筛选、不填、类型名来源、只填 types 列一类、其他场景和退役类型也能搜', () => {
+      const d = typesParam(toolWith(['alpha', 'beta'])).properties.types!.description!
+      expect(d).toContain('按类型筛选')
+      expect(d).toContain('不填查全部类型')
+      expect(d).toContain('开头记忆索引分组标题括号里的英文名')
+      expect(d).toContain('query 留空、只填 types')
+      expect(d).toContain('按置信度和最近确认时间排')
+      expect(d).toContain('limit')
+      expect(d).toContain('其他场景和已退役类型的记忆也能按类型名搜到')
+    })
+
+    it('列出当前场景的类型「name（标签）」，core 类型标「通常已整条带入」，其余不标', () => {
+      const d = typesParam(toolWith(['alpha', 'beta'])).properties.types!.description!
+      expect(d).toContain('alpha（甲类）：通常已整条带入开头的长期记忆')
+      expect(d).toContain('beta（乙类）')
+      expect(d).not.toContain('beta（乙类）：通常已整条带入')
+      expect(d).not.toContain('gamma')
+    })
+
+    it('换一个场景的类型表，说明随之变化；不含任何内置或预设类型名', () => {
+      const d = typesParam(toolWith(['beta', 'gamma'])).properties.types!.description!
+      expect(d).toContain('beta（乙类）')
+      expect(d).toContain('gamma（丙类）')
+      expect(d).not.toContain('alpha')
+      for (const name of [...BUILTIN_TYPES, ...PRESET_TYPES, ...RETIRED_TYPES].map(t => t.name)) expect(d).not.toContain(name)
+    })
+
+    it('types 是字符串数组，不设枚举、不必填', () => {
+      const schema = typesParam(toolWith(['alpha', 'beta']))
+      expect(schema.properties.types!.enum).toBeUndefined()
+      expect(schema.properties.types!.items!.enum).toBeUndefined()
+      expect(schema.required ?? []).not.toContain('types')
+      expect(validateJsonSchemaValue(schemaOf(toolWith(['alpha'])), { query: '', types: ['commitment', 'whatever'] })).toEqual([])
+    })
+  })
+
+  it('match 参数：可选，取值 any / all，说明两种模式各返回什么；描述「查询写法」一节讲这两种模式', async () => {
+    const tool = await seededTool()
+    const schema = schemaOf(tool)
+    expect(validateJsonSchemaValue(schema, { query: 'auth', match: 'all' })).toEqual([])
+    expect(validateJsonSchemaValue(schema, { query: 'auth', match: 'any' })).toEqual([])
+    expect(validateJsonSchemaValue(schema, { query: 'auth', match: 'some' }).length).toBeGreaterThan(0)
+    const match = (schema as { properties: Record<string, { enum?: string[]; description?: string }> }).properties.match!
+    expect(match.enum).toEqual(['any', 'all'])
+    expect(match.description).toContain('缺省 any')
+    expect(match.description).toContain('同时含全部关键词')
+    expect((schema as { required?: string[] }).required ?? []).not.toContain('match')
+    const d = tool.description
+    const section = d.slice(d.indexOf('查询写法：'), d.indexOf('怎么读结果：'))
+    expect(section).toContain('- match 缺省为 any，返回按档位排好的全部命中；设为 all 只返回同时含全部关键词的记忆')
   })
 
   it('(a) 合法参数过、缺必填（query）拒', async () => {

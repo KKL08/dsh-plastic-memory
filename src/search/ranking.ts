@@ -59,7 +59,7 @@ export interface RankedRecord {
   anchorHits: number
   /** all / partial 档是 BM25F 分数（只以子串命中的 token 不贡献词频）；substring 档是旧词项的命中词数。只在同档内可比。 */
   score: number
-  /** 各查询 token 是否命中（下标同 RankInput.tokens，命中口径同档位）；substring 档全为 false。判「命中弱」与逐词命中条数用。 */
+  /** 各查询 token 是否命中（下标同 RankInput.tokens，命中口径同档位）；substring 档全为 false。判「命中弱」、逐词命中条数与逐条命中说明用。 */
   tokenHits: boolean[]
 }
 

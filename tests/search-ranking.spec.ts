@@ -418,11 +418,20 @@ describe('说明码：四种触发，互斥、substring 优先', () => {
     expect(full.noteCode).toBeUndefined()
     expect(full.note).toBeUndefined()
 
-    // gamma 是关键词，排第一的也没有它：判弱
+    // 排第一的对上三个词里的两个：or-fallback，缺的 gamma 由逐条标注和计数行给出
     const partial = await search(store, 'alpha beta gamma')
     expect(partial.hits.map(h => h.id)).toEqual(['mem_full', 'mem_part', 'mem_sub'])
-    expect(partial.noteCode).toBe(LOW_COVERAGE)
-    expect(partial.note!.startsWith(LOW_COVERAGE_NOTE)).toBe(true)
+    expect(partial.noteCode).toBe(OR_FALLBACK)
+    expect(partial.note!.split('\n')[0]).toBe(OR_FALLBACK_NOTE)
+    expect(partial.note!.split('\n')[1]).toContain('范围内一条都没命中的：gamma。')
+    expect(partial.hits[0]!.matchNote).toBe(' · 匹配：alpha、beta')
+    // 查询里重复的词只算一次
+    expect((await search(store, 'alpha beta gamma gamma')).note).toBe(partial.note)
+
+    // 排第一的只对上三个词里的一个：不到一半，判弱
+    const weak = await search(store, 'alpha gamma delta')
+    expect(weak.noteCode).toBe(LOW_COVERAGE)
+    expect(weak.note!.startsWith(LOW_COVERAGE_NOTE)).toBe(true)
 
     // alph 以子串出现在三条记录的正文里：都算全命中，分数同为 0，按 lastConfirmedAt 排
     const fieldSub = await search(store, 'alph')
@@ -443,19 +452,22 @@ describe('说明码：四种触发，互斥、substring 优先', () => {
       record({ id: 'mem_part', content: 'alpha' }),
       record({ id: 'mem_sub', content: 'alphabet' }),
     ])
-    expect((await search(store, 'alpha beta', { limit: 1 })).noteCode).toBe(LOW_COVERAGE)
+    expect((await search(store, 'alpha beta', { limit: 1 })).noteCode).toBe(OR_FALLBACK)
   })
 })
 
-describe('命中弱：按排第一的部分命中记录覆盖了多少查询判断', () => {
-  it('斜杠连写不是一组别名：部署/deploy 的两个词都要命中，只含「部署」的记录不算全命中，提示命中弱', async () => {
+describe('部分命中的说明：如实列出对上了什么，覆盖不到一半才判弱', () => {
+  it('斜杠连写不是一组别名：部署/deploy 的两个词都要命中，只含「部署」的记录不算全命中，标注列出对上的词', async () => {
     const store = await seeded([
       record({ id: 'mem_flow', name: '上线流程', content: '部署流程：先上预发再全量' }),
       record({ id: 'mem_other', name: '无关', content: '与查询无关的内容' }),
     ])
     const r = await search(store, '部署/deploy 流程')
     expect(r.hits.map(h => h.id)).toEqual(['mem_flow'])
-    expect(r.noteCode).toBe(LOW_COVERAGE)
+    expect(r.noteCode).toBe(OR_FALLBACK)
+    expect(r.note!.split('\n')[0]).toBe('没有记忆同时含全部关键词，以下按相关性排序。')
+    expect(r.hits[0]!.matchNote).toBe(' · 匹配：部署、流程')
+    expect(r.note).not.toContain(RETRY_HINT)
     expect(r.note!.split('\n')[1]).toBe('各关键词命中的记忆条数：部署 1、deploy 0、流程 1。范围内一条都没命中的：deploy。')
   })
 
@@ -469,7 +481,7 @@ describe('命中弱：按排第一的部分命中记录覆盖了多少查询判�
     expect(r.noteCode).toBeUndefined()
   })
 
-  it('长句中文、首条只缺疑问词这类：or-fallback，如实说明没有全命中，不劝重搜、不列逐词命中', async () => {
+  it('长句中文、首条没缺关键词：or-fallback，只说明没有全命中，不劝重搜、不列逐词命中', async () => {
     const store = await seeded([
       record({ id: 'mem_hand', name: '手编文件后的出处标注', content: '记忆文件被手编过时，出处可能对不上，读取时加标注' }),
     ])
@@ -481,26 +493,29 @@ describe('命中弱：按排第一的部分命中记录覆盖了多少查询判�
     expect(r.note).not.toContain(RETRY_HINT)
   })
 
-  it('有关键词在范围内一条都没有：low-coverage，劝重搜，再列各关键词命中条数和一条都没命中的词', async () => {
+  it('排第一的对上不到一半：low-coverage，劝重搜，再列各关键词命中条数和一条都没命中的词', async () => {
     const store = await seeded([
       record({ id: 'mem_tpl', name: '切换模板后立即生效', content: '记忆模板改了不用重启' }),
       record({ id: 'mem_mail', name: '邮件模板修改', content: '改邮件模板后要重新部署才生效' }),
     ])
-    const r = await search(store, '周报 模板')
+    const r = await search(store, '周报 模板 归档')
     expect(r.noteCode).toBe(LOW_COVERAGE)
+    expect(LOW_COVERAGE_NOTE).toBe(`没有记忆同时含全部关键词，排第一的对上的查询内容不到一半，以下按相关性排序。${RETRY_HINT}`)
     expect(LOW_COVERAGE_NOTE.endsWith(RETRY_HINT)).toBe(true)
     expect(RETRY_HINT).toBe('命中弱，可以换同义词、换成另一种语言的写法、减少词数或换个角度再搜一次。')
-    expect(r.note).toBe(`${LOW_COVERAGE_NOTE}\n各关键词命中的记忆条数：周报 0、模板 2。范围内一条都没命中的：周报。`)
+    expect(r.note).toBe(`${LOW_COVERAGE_NOTE}\n各关键词命中的记忆条数：周报 0、模板 2、归档 0。范围内一条都没命中的：周报、归档。`)
     // 说明在命中列表之前
     expect(renderSearchResult(r).startsWith(r.note!)).toBe(true)
   })
 
-  it('中英两种写法放进同一次查询：各算一个关键词，首条缺了英文写法就判弱', async () => {
+  it('中英两种写法放进同一次查询：各算一个关键词，首条缺了英文写法时标注只列中文写法，不判弱', async () => {
     const store = await seeded([
       record({ id: 'mem_debounce', name: '搜索框防抖', content: '前端搜索输入框防抖 300 毫秒，回车立即搜' }),
     ])
     const r = await search(store, '防抖 debounce')
-    expect(r.noteCode).toBe(LOW_COVERAGE)
+    expect(r.noteCode).toBe(OR_FALLBACK)
+    expect(r.note!.split('\n')[0]).toBe(OR_FALLBACK_NOTE)
+    expect(r.hits[0]!.matchNote).toBe(' · 匹配：防抖')
     expect(r.note!.split('\n')[1]).toBe('各关键词命中的记忆条数：防抖 1、debounce 0。范围内一条都没命中的：debounce。')
     // 英文词的标签去掉紧挨着的标点
     const r2 = await search(store, 'debounce（防抖）')
@@ -574,7 +589,7 @@ describe('结果形状：命中带文件绝对路径', () => {
   })
 
   it('渲染头行末尾追加「 · 绝对路径」，其余格式不变', () => {
-    const hit = { id: 'mem_x', type: 'knowledge', summary: '摘要', content: '正文\n第二行', sourceNote: '（推断）', stalenessNote: '（可能过时）', path: '/m/global/x.md' }
+    const hit = { id: 'mem_x', type: 'knowledge', summary: '摘要', content: '正文\n第二行', sourceNote: '（推断）', stalenessNote: '（可能过时）', matchNote: '', path: '/m/global/x.md' }
     expect(renderSearchResult({ hits: [hit] })).toBe('[mem_x] knowledge｜摘要（推断）（可能过时） · /m/global/x.md\n正文\n第二行')
     expect(renderSearchResult({ hits: [hit], note: '说明' })).toBe('说明\n\n[mem_x] knowledge｜摘要（推断）（可能过时） · /m/global/x.md\n正文\n第二行')
   })
