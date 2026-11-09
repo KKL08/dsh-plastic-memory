@@ -207,6 +207,13 @@ All notable changes to this project are documented here. The format follows
   When none of the requested types has a memory in scope, the result says
   so and lists the types that do, with counts, so the model can tell a
   wrong type from keywords that did not match.
+- `memory_search` keeps a single search from flooding the context with
+  long memories. The top hits still come with their full text, but a very
+  long memory, and lower-ranked hits once enough full text has been
+  returned, show only a passage of the text (around the matched keywords when
+  there are any), marked as an
+  excerpt with the memory's total length. The model gets the full text by
+  searching for the memory's id or reading the file on the hit's first line.
 
 ### Fixed
 - Checkup findings referred to memories by internal ids such as

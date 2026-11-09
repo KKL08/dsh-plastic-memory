@@ -34,6 +34,20 @@ describe('对话卡解析的文本格式与服务端渲染器一致', () => {
     expect(countSearchHits(text)).toBe(3)
   })
 
+  it('memory_search：含节选条目、省略标记和节选说明时命中计数不变', () => {
+    const hit = (id: string) => ({ id, type: 'fact', summary: `摘要 ${id}`, content: '正文\n第二行', sourceNote: '', stalenessNote: '', matchNote: '', path: `/m/global/${id}.md` })
+    const excerpt = (id: string, content: string) => ({ ...hit(id), content, isExcerpt: true, contentChars: 5321 })
+    const hits = [
+      hit('a'),
+      excerpt('b', '[前文省略]\n命中词所在的几句话。\n[后文省略]'),
+      excerpt('c', '[前文省略]\n结尾的几句话。'),
+      excerpt('d', '开头的几句话。\n[后文省略]'),
+    ]
+    const text = renderSearchResult({ hits, note: '没有同时命中全部关键词的记忆，以下按相关性排序。', moreNote: '共命中 9 条，只列出前 4 条。' })
+    expect(text).toContain('[b] fact｜摘要 b · 节选，正文共 5321 字符 · /m/global/b.md\n[前文省略]\n')
+    expect(countSearchHits(text)).toBe(4)
+  })
+
   it('memory_forget：从 message 里读「已遗忘 N 条」', () => {
     // forget 的 message 在 executeForget 里拼装（要真实 store 才能跑），这里直接核对源码里的模板开头
     const source = readFileSync(new URL('../src/tools/forget.ts', import.meta.url), 'utf8')

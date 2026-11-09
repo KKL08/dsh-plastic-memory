@@ -6,6 +6,7 @@ import { resolveLiveFirst, type LocatedRecord } from '../storage/table.ts'
 import { tokenizerForQuery, type QueryTokenizerOptions } from '../search/jieba-segmenter.ts'
 import { CJK } from '../search/tokenizer.ts'
 import { anchorTerms, compareRanked, pendingLast, rankRecords, type RankedRecord, type SearchTier } from '../search/ranking.ts'
+import { matchWindow } from '../search/window.ts'
 import { groupQueryTerms, judgeTopHit, matchedTerms, termHitCounts, type TermHitCount } from '../search/coverage.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { ContextHost } from './host-session.ts'
@@ -63,6 +64,37 @@ export interface SearchHit {
   matchedTerms?: string[]
   /** 记忆文件的绝对路径（记忆根目录 + 目录名 + 文件名）；模型要全文或上下文时直接 Read。name 含明确密钥时不给（见 exposedPath）。 */
   path?: string
+  /** 节选条目才有：content 装的是命中窗口加省略标记，不是完整正文。 */
+  isExcerpt?: boolean
+  /** 节选条目才有：遮盖密钥后的正文总字符数，头行据此标「正文共 N 字符」。 */
+  contentChars?: number
+}
+
+// 结果分级的门槛（字符数按遮盖密钥后的正文取字符串长度）。一次检索往上下文里放的正文要有个可预期的上限：
+// 排在前面的保底给全文，单条很长的、以及全文总量到了预算之后的条目，只给正文的一段。
+
+/** 排名在这个数以内的条目保底给全文（单条超过节选门槛的除外）。 */
+export const FULL_TEXT_GUARANTEED_HITS = 5
+/** 单条正文超过这个长度就给节选，保底范围内的也一样。 */
+export const EXCERPT_ABOVE_CHARS = 2000
+/** 全文正文的累计预算：保底范围内的全文也计入，但只约束保底范围之后的条目；节选、头行、说明都不计入。 */
+export const FULL_TEXT_BUDGET_CHARS = 8000
+/** 命中窗口向两边扩展到这个长度为止。 */
+export const WINDOW_TARGET_CHARS = 200
+/** 命中窗口的硬上限；正文不超过它的条目落到节选位时直接给全文，节选不会比它更省。 */
+export const WINDOW_MAX_CHARS = 300
+
+/**
+ * 结果里有节选条目时接在开头说明最后：讲清节选是什么、取全文的两条路，并提醒更新是整条替换。
+ * 不带说明码，渲染时由命中里有没有节选条目推出。
+ */
+export const EXCERPT_NOTE = '下面头行标「节选」的条目只给出正文的一段（有命中词时取它附近）。要全文，用 memory_search 按 id 查，或读头行末尾路径指向的文件。更新记忆会替换整条正文，更新前先确认已读过它的全文。'
+
+/** 节选正文：窗口前后还有正文时各加一行省略标记；标记不以头行格式开头，对话卡片按头行计数不受影响。 */
+function excerptOf(content: string, terms: readonly string[]): string {
+  const w = matchWindow(content, terms, WINDOW_TARGET_CHARS, WINDOW_MAX_CHARS)
+  return [w.hasBefore ? '[前文省略]' : undefined, w.text, w.hasAfter ? '[后文省略]' : undefined]
+    .filter((x): x is string => x !== undefined).join('\n')
 }
 
 /** 命中的 core 记忆全文已在本会话快照里时，正文换成这句：同一段全文不在上下文里贴两遍。 */
@@ -147,10 +179,14 @@ export function truncationNote(total: number, shown: number, atCap: boolean): st
     : `${head}要看更多可以调大 limit（最多 ${MAX_SEARCH_LIMIT}），想缩小范围可以换更具体的关键词。`
 }
 
-/** 把命中结果渲染成给模型看的一段文本：有说明先写说明，再列命中（头行末尾带文件绝对路径）。纯函数。 */
+/**
+ * 把命中结果渲染成给模型看的一段文本：有说明先写说明，再列命中（头行末尾带文件绝对路径）。纯函数。
+ * 节选条目在头行路径前标字数，路径保持在行末；有节选条目时开头说明最后接节选说明。
+ */
 export function renderSearchResult(result: { hits: SearchHit[]; note?: string; moreNote?: string }): string {
-  const blocks = result.hits.map(h => `[${h.id}] ${h.type}｜${h.summary}${h.sourceNote}${h.stalenessNote}${h.matchNote}${h.path !== undefined ? ` · ${h.path}` : ''}\n${h.content}`)
-  const head = [result.note, result.moreNote].filter((x): x is string => x !== undefined).join('\n')
+  const blocks = result.hits.map(h => `[${h.id}] ${h.type}｜${h.summary}${h.sourceNote}${h.stalenessNote}${h.matchNote}${h.isExcerpt ? ` · 节选，正文共 ${h.contentChars} 字符` : ''}${h.path !== undefined ? ` · ${h.path}` : ''}\n${h.content}`)
+  const excerptNote = result.hits.some(h => h.isExcerpt) ? EXCERPT_NOTE : undefined
+  const head = [result.note, result.moreNote, excerptNote].filter((x): x is string => x !== undefined).join('\n')
   if (head !== '') blocks.unshift(head)
   return blocks.length === 0 ? '没有匹配的记忆。' : blocks.join('\n\n')
 }
@@ -293,6 +329,9 @@ export async function executeSearch(
     else if (verdict.missingKeywords.length > 0) note = { noteCode: 'or-fallback', note: withCounts(OR_FALLBACK_NOTE) }
     else note = { noteCode: 'or-fallback', note: OR_FALLBACK_NOTE }
   }
+  // 形态判定按排名逐条做，状态只有两个：已计入的全文字数、级联是否已开始（开始后不再结束）
+  let fullChars = 0
+  let cascading = false
   return {
     ...note,
     ...(listed.length > top.length
@@ -305,14 +344,38 @@ export async function executeSearch(
       // id 直达置顶的那条就是模型按 id 要的，不标命中情况（同它不出说明码）
       const tier = isDirect && i === 0 ? 'all' : rankedTier
       const terms = tier === 'partial' ? matchedTerms(groups, tokens, tokenHits) : []
+      // 形态：全文已在注入快照里的仍给说明句，计 0；按 id 要的那条全文；单条超门槛的节选、不计入；
+      // 保底范围内全文；之后按预算累计，某条放不下就开始级联，它和之后走到这一步的都给节选
+      let content = masked.content
+      let isExcerpt = false
+      if (injected?.get(h.id) === h.content) content = IN_SNAPSHOT_NOTE
+      else {
+        const chars = masked.content.length
+        if (isDirect && i === 0) fullChars += chars
+        else if (chars > EXCERPT_ABOVE_CHARS) isExcerpt = true
+        else if (i < FULL_TEXT_GUARANTEED_HITS) fullChars += chars
+        else if (!cascading && fullChars + chars <= FULL_TEXT_BUDGET_CHARS) fullChars += chars
+        // 节选不会比窗口硬上限更省，短条目直接给全文，不计入、也不开始级联
+        else if (chars > WINDOW_MAX_CHARS) {
+          cascading = true
+          isExcerpt = true
+        }
+        if (isExcerpt) {
+          // 命中词取这条命中的全部查询 token：分词会产出嵌套 token（「新鲜度」拆出「新鲜」），只取可按子串定位的会让
+          // 只命中短 token 的记录窗口落到开头。记录已确定命中，这里只挑位置。只在子串档命中的用旧词项
+          const words = rankedTier === 'substring' ? legacyTerms : tokens.filter((_, k) => tokenHits[k])
+          content = excerptOf(masked.content, words)
+        }
+      }
       return {
         id: h.id, type: h.type, summary: masked.summary,
-        content: injected?.get(h.id) === h.content ? IN_SNAPSHOT_NOTE : masked.content,
+        content,
         sourceNote: sourceNote(h),
         stalenessNote: stalenessNote(h, deps.registry.get(h.type).decayDays, now),
         matchNote: matchNoteOf(tier, terms),
         ...(tier === 'partial' ? { matchedTerms: terms } : {}),
         ...(path !== undefined ? { path } : {}),
+        ...(isExcerpt ? { isExcerpt, contentChars: masked.content.length } : {}),
       }
     }),
   }
