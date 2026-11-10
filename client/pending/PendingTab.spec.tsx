@@ -225,6 +225,14 @@ describe('待处理：各类卡', () => {
     expect(screen.getByRole('button', { name: '提升 blog 里的这条' })).toHaveAttribute('title', '正在读取设置…')
   })
 
+  it('候选在别的项目里：处理后结果卡的标题仍写项目名，和处理前一致', async () => {
+    const other: PendingItem = { ...promote, memory: memory({ id: 'p2', workspacePath: '/w/blog' }) } as PendingItem
+    setup([other])
+    fireEvent.click(screen.getByRole('button', { name: '留在本项目' }))
+    await screen.findByText('以后不再提示这条。')
+    expect(screen.getByRole('heading', { name: 'blog 里的这条适合所有项目' })).toBeInTheDocument()
+  })
+
   it('别的项目里的记忆：卡上元信息写项目名，不写「本项目」；本项目的照旧写「本项目」', () => {
     const other: PendingItem = { ...promote, memory: memory({ id: 'p2', workspacePath: '/w/blog' }) } as PendingItem
     const cross: PendingItem = { ...horizontal, right: memory({ id: 'b2', content: '博客里 mock 数据库。', workspacePath: '/w/blog' }) } as PendingItem
@@ -293,6 +301,24 @@ describe('待处理：各类卡', () => {
     expect(gateway.executed).toEqual([])
   })
 
+  it('超限：还没读到设置时「保存」的提示写正在读取设置，不写缺数字的「填一个比  大的整数」', () => {
+    setup([overflow], { config: undefined })
+    expect(screen.getByRole('button', { name: '保存' })).toHaveAttribute('title', '正在读取设置…')
+  })
+
+  it('超限：保存上限期间右上角的叉「不再提醒」不可用', async () => {
+    const { gateway, commands } = setup([overflow])
+    let finish: ((ok: boolean) => void) | undefined
+    gateway.setConfig = () => new Promise<boolean>((resolve) => { finish = resolve })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    const dismiss = screen.getByRole('button', { name: '不再提醒' })
+    expect(dismiss).toHaveAttribute('aria-disabled', 'true')
+    fireEvent.click(dismiss)
+    expect(commands()).toEqual([])
+    await act(async () => { finish?.(true) })
+    await screen.findByText('上限已调到 6,000')
+  })
+
   it('严格模式超限：写 95%', () => {
     setup([{ ...overflow, mode: 'strict', tier: 0 } as PendingItem])
     expect(screen.getByText('已用到上限 4,000 的 95%，再多的记忆不会带入。')).toBeInTheDocument()
@@ -302,6 +328,7 @@ describe('待处理：各类卡', () => {
     const { gateway } = setup([unreadable])
     expect(screen.getByText('app/broken.md')).toBeInTheDocument()
     expect(screen.getByText(unreadable.kind === 'unreadable-file' ? unreadable.error : '')).toBeInTheDocument()
+    expect(screen.getByText('这个文件现在读不出来，里面的记忆不会带入对话。打开文件改好格式后，下次打开记忆页时这条提醒会消失，记忆恢复带入。')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '打开文件' }))
     fireEvent.click(screen.getByRole('button', { name: /中显示/ }))
     await waitFor(() => { expect(gateway.opened).toEqual([{ path: '/m/app/broken.md' }, { path: '/m/app/broken.md', action: 'reveal' }]) })
@@ -504,6 +531,11 @@ describe('待处理：跨项目先确认', () => {
     fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
     expect(await screen.findByText('这条记忆属于 blog 项目，不是当前项目。确定在这里处理它吗？')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '以 B 为准' })).toHaveAttribute('aria-disabled', 'true')
+    // 等确认时卡上其它按钮的提示写在等你确认，不写正在处理
+    expect(screen.getByRole('button', { name: '以 B 为准' })).toHaveAttribute('title', '等你先确认')
+    // 确认块里「取消」是幽灵按钮，和「继续处理」分出主次
+    expect(screen.getByRole('button', { name: '取消' })).toHaveClass('pm-btn--ghost')
+    expect(screen.getByRole('button', { name: '继续处理' })).not.toHaveClass('pm-btn--ghost')
     fireEvent.click(screen.getByRole('button', { name: '取消' }))
     expect(screen.queryByText(/属于 blog 项目/)).toBeNull()
     expect(commands()).toHaveLength(1)
@@ -767,8 +799,8 @@ describe('待处理：可以整理', () => {
   const toProject = advice('misplaced', 'md', { scope: 'global', workspacePath: undefined, filePath: '/m/global/md.md' })
   const unclear = advice('unclear', 'u1')
   const duplicates = [
-    memory({ id: 'r1', content: '左边的内容。', filePath: '/m/app/r1.md', digest: 'sha1:r1' }),
-    memory({ id: 'r2', content: '右边的内容。', filePath: '/m/app/r2.md', digest: 'sha1:r2' }),
+    memory({ id: 'r1', name: 'pg-real', content: '左边的内容。', filePath: '/m/app/r1.md', digest: 'sha1:r1' }),
+    memory({ id: 'r2', name: 'pg-mock', content: '右边的内容。', filePath: '/m/app/r2.md', digest: 'sha1:r2' }),
   ]
   const pair: PendingItem = { kind: 'advice', level: 'advice', type: 'redundancy', memories: duplicates }
   const layer = { kind: 'workspace', workspacePath: '/w/app' } as const
@@ -847,6 +879,10 @@ describe('待处理：可以整理', () => {
     fireEvent.click(ignore)
     await screen.findByText('不再扣分；内容改了会重新提醒。')
     expect(commands()).toEqual([{ cmd: 'ignore-advice', type: 'redundancy', memories: duplicates.map(m => ({ memoryId: m.id, layer, base: { updatedAt: m.updatedAt, digest: m.digest } })) }])
+    // 结果卡两条都显示，不只左边那条
+    const result = screen.getByText('不再扣分；内容改了会重新提醒。').closest('article')!
+    expect(within(result).getByText('左边的内容。')).toBeInTheDocument()
+    expect(within(result).getByText('右边的内容。')).toBeInTheDocument()
   })
 
   it('说明按情形写：和指令文件重复、该放全局、只和项目有关、表述不清、内容过长', () => {
@@ -863,7 +899,7 @@ describe('待处理：可以整理', () => {
   it('内容重复的两条在同一张卡上左右并排，各自「删除左边 / 删除右边」「打开文件」；删除发 forget（带层）', async () => {
     const { gateway, commands } = setup([pair])
     const card = cardOf('内容重复')
-    expect(screen.getByText('两条说的是同一件事，留一条就够。删掉的那条 14 天内可在「最近删除」恢复。')).toBeInTheDocument()
+    expect(screen.getByText('这两条内容有重叠。说的是同一件事，留一条就够；各有要保留的细节，再用「合并」；其实是两件事，点右上角不再提醒。删掉的那条 14 天内可在「最近删除」恢复。')).toBeInTheDocument()
     const left = within(card).getByRole('region', { name: '左边这条' })
     const right = within(card).getByRole('region', { name: '右边这条' })
     expect(within(left).getByText('左边的内容。')).toBeInTheDocument()
@@ -878,13 +914,17 @@ describe('待处理：可以整理', () => {
     fireEvent.click(confirmIn(right))
     await screen.findByText('已删除')
     expect(commands()).toEqual([{ cmd: 'forget', memoryId: 'r2', layer }])
+    // 结果卡写明删的是哪一条
+    expect(screen.getByText('「pg-mock」14 天内可在「最近删除」恢复。')).toBeInTheDocument()
   })
 
   it('三条以上互相重复：每条一栏，按钮写「删除」，栏名是记忆名', async () => {
     const { commands } = setup([{ kind: 'advice', level: 'advice', type: 'redundancy', memories: [...duplicates, memory({ id: 'r3', name: '第三条' })] }])
     const card = cardOf('内容重复')
-    expect(screen.getByText('这几条说的是同一件事，留一条就够。删掉的 14 天内可在「最近删除」恢复。')).toBeInTheDocument()
+    expect(screen.getByText('这几条内容有重叠。说的是同一件事，留一条就够；其实是不同的事，点右上角不再提醒。')).toBeInTheDocument()
     expect(within(card).getAllByRole('button').map(b => b.textContent)).toEqual(['不再提醒', '打开文件', '删除', '打开文件', '删除', '打开文件', '删除'])
+    // 不能合并：卡片底部不留空的动作行
+    expect(card.querySelector('.pm-pending-body > .pm-pending-actions')).toBeNull()
     const third = within(card).getByRole('region', { name: '第三条' })
     fireEvent.click(within(third).getByRole('button', { name: '删除' }))
     fireEvent.click(confirmIn(third))
@@ -934,7 +974,7 @@ describe('待处理：可以整理', () => {
     fireEvent.click(confirmIn(cardOf('已过有效期')))
     await screen.findByText('已删除')
     expect(commands()).toEqual([{ cmd: 'forget', memoryId: 'e1', layer }])
-    expect(screen.getByText('14 天内可在「最近删除」恢复。')).toBeInTheDocument()
+    expect(screen.getByText('「记忆 e1」14 天内可在「最近删除」恢复。')).toBeInTheDocument()
   })
 
   it('删除后结果行可撤销：撤销发 restore（带层），卡片回来、按钮照旧', async () => {
@@ -1031,9 +1071,13 @@ describe('待处理：可以整理', () => {
     setup(many)
     expect(within(groupOf()).getAllByRole('article')).toHaveLength(5)
     expect(screen.getAllByRole('heading', { level: 2 }).map(h => h.textContent)).toEqual(['可以整理 7'])
-    fireEvent.click(screen.getByRole('button', { name: '展开其余 2 条' }))
+    const more = screen.getByRole('button', { name: '展开其余 2 条' })
+    more.focus()
+    fireEvent.click(more)
     expect(within(groupOf()).getAllByRole('article')).toHaveLength(7)
     expect(screen.queryByRole('button', { name: /展开其余/ })).toBeNull()
+    // 按钮没了，焦点交给新露出的第一条，不掉回页首
+    expect(document.activeElement).toBe(within(groupOf()).getAllByRole('article')[5]!.closest('.pm-pending-row'))
   })
 
   it('只折叠可以整理：等你决定超过 5 条也全部显示', () => {
@@ -1172,7 +1216,13 @@ describe('待处理：手动改与手动合并', () => {
     startEdit()
     const more = screen.getByRole('button', { name: '更多' })
     expect(more).toHaveAttribute('aria-expanded', 'false')
+    // 箭头、叉用图标，不用文字字符
+    expect(more.textContent).toBe('更多')
+    expect(more.querySelector('svg')).not.toBeNull()
     fireEvent.click(more)
+    const removeNpm = screen.getByRole('button', { name: '移除标签 npm' })
+    expect(removeNpm.textContent).toBe('')
+    expect(removeNpm.querySelector('svg')).not.toBeNull()
     expect(screen.getByRole('button', { name: '收起' })).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByText('直接改正文，保存后可以撤销。类型改不了：换类型要先删再记。')).toBeInTheDocument()
     fireEvent.change(screen.getByRole('textbox', { name: '名称' }), { target: { value: '发版步骤' } })
@@ -1854,6 +1904,8 @@ describe('待处理：放错层只给挪层', () => {
     const group = within(cardOf()).getByRole('group', { name: '移到哪个项目' })
     expect(within(group).getAllByRole('radio').map(r => (r as HTMLInputElement).value)).toEqual(['/w/app', '/w/blog'])
     expect(within(group).getByRole('radio', { name: /^app/ })).toBeChecked()
+    // 路径会截断：悬停看全文
+    expect(within(group).getByText('/w/blog')).toHaveAttribute('title', '/w/blog')
     expect(within(cardOf()).queryByRole('button', { name: '不再提醒' })).toBeNull()
     fireEvent.click(within(cardOf()).getByRole('button', { name: '取消' }))
     expect(within(cardOf()).queryByRole('group', { name: '移到哪个项目' })).toBeNull()

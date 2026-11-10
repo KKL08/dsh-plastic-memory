@@ -32,7 +32,7 @@ export function CrossConfirm({ workspacePath, isMove = false, onCancel, onConfir
       <p className="pm-pending-text">{t(isMove ? 'pending.cross.moveBody' : 'pending.cross.body', { name: baseName(workspacePath) })}</p>
       <div className="pm-pending-actions">
         {/* 焦点移进确认，停在不改动任何东西的「取消」上 */}
-        <Button autoFocus onClick={onCancel}>{t('pending.cancel')}</Button>
+        <Button variant="ghost" autoFocus onClick={onCancel}>{t('pending.cancel')}</Button>
         <Button onClick={onConfirm}>{t('pending.cross.confirm')}</Button>
       </div>
     </ConfirmGroup>
@@ -61,7 +61,7 @@ export function SecretDeleteConfirm({ onCancel, onConfirm, unavailable, showTitl
       <p className="pm-pending-text">{body ?? t('pending.secret.confirmBody')}</p>
       <div className="pm-pending-actions">
         {/* 默认焦点在「取消」：回车不会手滑删掉 */}
-        <Button autoFocus onClick={onCancel}>{t('pending.cancel')}</Button>
+        <Button variant="ghost" autoFocus onClick={onCancel}>{t('pending.cancel')}</Button>
         <Button variant="danger" unavailable={unavailable} onClick={onConfirm}>{t('pending.secret.confirmDelete')}</Button>
       </div>
     </ConfirmGroup>
@@ -75,7 +75,7 @@ function SuspectedConfirm({ onCancel, onConfirm }: { onCancel: () => void; onCon
     <ConfirmGroup label={t('pending.edit.saveAnyway')}>
       <p className="pm-pending-text">{t('pending.edit.secretSuspected')}</p>
       <div className="pm-pending-actions">
-        <Button autoFocus onClick={onCancel}>{t('pending.cancel')}</Button>
+        <Button variant="ghost" autoFocus onClick={onCancel}>{t('pending.cancel')}</Button>
         <Button onClick={onConfirm}>{t('pending.edit.saveAnyway')}</Button>
       </div>
     </ConfirmGroup>

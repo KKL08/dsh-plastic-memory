@@ -324,7 +324,7 @@ function Diff({ parts, side }: { parts: Change[]; side: 'before' | 'after' }) {
 
 export const modelEditCss = `
 .pm-model-ask { min-height: 58px; resize: vertical; }
-.pm-model-ask::placeholder { color: var(--pm-text-3); }
+.pm-model-ask::placeholder { color: var(--pm-text-2); }
 .pm-intents { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .pm-intents-label { margin-right: 2px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-intent[aria-pressed='true'] { background: var(--pm-pressed); color: var(--pm-text); }

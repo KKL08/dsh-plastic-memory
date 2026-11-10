@@ -12,7 +12,7 @@
  * 按进入这个范围时读的记录标（记忆页给出，同一范围里切视图不重读）；显示出来的随即记下，换范围再回来就不标了。
  * 带 newItem 进来时（状态条结果行的链接）跳到第一条带「新」的条目：滚到视野中间、闪一次、接住焦点；没有就落在顶部。
  */
-import { useEffect, useId, useRef, useState, type ReactElement, type ReactNode, type RefObject } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode, type RefObject } from 'react'
 import { PENDING_LEVELS, pendingItemKey, pendingItemScopes, type HealthView, type LibraryView, type PendingItem, type PendingLevel } from '../../src/gui/contract.ts'
 import { isNewItem, markSeen, newItemIndex, readSeen, type Seen } from '../checkup/seen.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
@@ -97,6 +97,8 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
   const [sending, setSending] = useState<ReadonlyMap<string, { item: PendingItem; index: number }>>(new Map())
   /** 点过「展开其余 N 条」的组。 */
   const [expanded, setExpanded] = useState<ReadonlySet<PendingLevel>>(new Set())
+  const root = useRef<HTMLDivElement>(null)
+  const revealFocus = useRevealFocus(root)
   const [mountSeen] = useState(readSeen)
   const seen = visitSeen ?? mountSeen
   const newIndex = newItemIndex(checkups)
@@ -109,7 +111,7 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
     markSeen(checkups, shownNew.current.flatMap(key => (newIndex.get(key) ?? []).map(checkupId => ({ checkupId, keys: [key] }))))
   })
   const done = (next: Recent) => { setRecent(next); setRefused(undefined) }
-  const refuse = (item: PendingItem, index: number) => () => { setRefused({ key: pendingItemKey(item), index, title: titleOf(item, t), level: item.level }) }
+  const refuse = (item: PendingItem, index: number) => () => { setRefused({ key: pendingItemKey(item), index, title: titleOf(item, t, session), level: item.level }) }
 
   // 带「新」的排在组内最前（各组按级别分开画，整体稳定排序即可）
   const viewItems = (pending.status === 'ready' ? pending.data.items.filter(item => isInScope(pendingItemScopes(item), scope)) : [])
@@ -123,7 +125,6 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
   const ignoredBlock = ignored.length === 0 ? null : <Ignored entries={ignored} session={session} />
   const typeLabel = useTypeLabel(session)
   const { flashId, clear } = useFlashTarget(nav, viewItems.flatMap(memoryIdsOf))
-  const root = useRef<HTMLDivElement>(null)
   useGroupFocus(nav, root, pending.status === 'ready')
   const jump = useNewItemJump(nav, root, pending.status === 'ready' && checkupState.status !== 'loading', (to) => {
     const levels: readonly PendingLevel[] = JUMP_LEVELS[to]
@@ -272,7 +273,7 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
                   ))}
                   {shown.length < group.length
                     ? (
-                      <button type="button" className="pm-pending-more" onClick={() => { setExpanded(prev => new Set(prev).add(level)) }}>
+                      <button type="button" className="pm-pending-more" onClick={() => { revealFocus(level); setExpanded(prev => new Set(prev).add(level)) }}>
                         {t('pending.more', { n: formatNumber(group.length - shown.length) })}
                       </button>
                     )
@@ -285,6 +286,28 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
         )}
     </div>
   )
+}
+
+/**
+ * 点「展开其余 N 条」后按钮没了：焦点落在那一组新露出的第一条整行上（不落到它的按钮上），不掉回页首。
+ * 行本来不可聚焦，只在接住焦点期间临时可聚焦。返回的函数在点击时记下是哪一组，展开后的那次渲染里定位。
+ */
+function useRevealFocus(root: RefObject<HTMLDivElement | null>): (level: PendingLevel) => void {
+  const pending = useRef<PendingLevel | undefined>(undefined)
+  useLayoutEffect(() => {
+    const level = pending.current
+    pending.current = undefined
+    if (level === undefined) return
+    const group = root.current?.querySelector(`[data-level="${level}"]`)?.closest('section')
+    const row = [...(group?.children ?? [])].filter(el => el.classList.contains('pm-pending-row'))[GROUP_PREVIEW]
+    if (!(row instanceof HTMLElement)) return
+    if (!row.hasAttribute('tabindex')) {
+      row.tabIndex = -1
+      row.addEventListener('blur', () => { row.removeAttribute('tabindex') }, { once: true })
+    }
+    row.focus()
+  })
+  return (level) => { pending.current = level }
 }
 
 /**
@@ -470,13 +493,19 @@ export const pendingCss = `
 .pm-pending-row.pm-flash { margin-inline: -12px; padding-inline: 12px; border-radius: 10px; }
 .pm-pending-row.pm-flash::before { left: 2px; }
 .pm-pending-item { padding: 16px 0 18px; }
+/* 冲突卡：底部间距由这一层给，裁决外壳自己的底部内边距清掉；后面的确认块、报错和其它卡的正文一样从 22px 起（右侧栏的冲突卡不在这一层，不受影响） */
+.pm-pending-item > .pm-conflict { padding-bottom: 0; }
+.pm-pending-item > .pm-conflict ~ * { margin-left: 22px; margin-top: 10px; }
+.pm-pending-item > .pm-conflict ~ .pm-pending-error { margin-top: 16px; }
 .pm-pending-head { display: flex; align-items: center; gap: 8px; min-height: 24px; margin-bottom: 12px; }
 /* 标记列 14px（密钥三角的宽度）：圆点、三角、灰点的标题都从 22px 起，和状态条的缩进一致 */
 .pm-pending-mark { display: inline-flex; justify-content: center; flex: 0 0 14px; }
-.pm-pending-title { margin: 0; flex: 0 1 auto; min-width: 0; font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
+.pm-pending-title { margin: 0; flex: 0 1 auto; min-width: 0; font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--pm-text); overflow-wrap: anywhere; }
 /* 标题折成两行时叉仍在右上角 */
 .pm-pending-aside { position: relative; flex: 0 0 24px; align-self: flex-start; height: 24px; margin-left: auto; }
-.pm-pending-scope { display: inline-flex; }
+/* 范围胶囊可收缩：标题、项目名很长时不把胶囊和右上角的叉挤出视口（同记忆卡元信息行的胶囊） */
+.pm-pending-scope { display: inline-flex; flex: 0 0 auto; max-width: 50%; min-width: 0; }
+.pm-pending-scope .pm-chip { min-width: 0; overflow: hidden; }
 .pm-pending-body { display: flex; flex-direction: column; gap: 10px; padding-left: 16px; }
 .pm-pending-item--marked .pm-pending-body { padding-left: 22px; }
 .pm-pending-hint { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }

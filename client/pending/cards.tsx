@@ -154,12 +154,16 @@ function MemoryOf({ memory, session, now, typeLabel }: {
   return <MemoryCard memory={memory} now={now} typeLabel={typeLabel(memory.type)} projectName={projectNameOf(session)(memory)} />
 }
 
-export function titleOf(item: PendingItem, t: Translate): string {
+/** 卡片标题；处理前的卡和处理后的结果卡共用，别的项目里的提升候选两处都写项目名。 */
+export function titleOf(item: PendingItem, t: Translate, session: BorrowedSession): string {
   switch (item.kind) {
     case 'secret': return t('pending.secret.title')
     case 'conflict-horizontal': return item.summary || t('conflict.title')
     case 'conflict-vertical': return item.summary || t('conflict.title')
-    case 'promote-candidate': return t('pending.promote.title')
+    case 'promote-candidate': {
+      const other = otherProject(item.memory, session)
+      return other !== undefined ? t('pending.promote.titleIn', { name: baseName(other) }) : t('pending.promote.title')
+    }
     case 'overflow': return t('pending.overflow.title')
     case 'unreadable-file': return t('pending.unreadable.title')
     case 'advice': return t(ADVICE_COPY[item.type].title)
@@ -231,7 +235,7 @@ export function HorizontalCard({ item, session, now, typeLabel, onDone, onRefuse
         left={item.left}
         right={item.right}
         now={now}
-        title={titleOf(item, t)}
+        title={titleOf(item, t, session)}
         note={note}
         unavailable={action.unavailable}
         typeLabel={typeLabel}
@@ -254,7 +258,7 @@ export function VerticalCard({ item, session, now, typeLabel, onDone, onRefused 
         memory={item.memory}
         baselineRef={item.baselineRef}
         now={now}
-        title={titleOf(item, t)}
+        title={titleOf(item, t, session)}
         unavailable={action.unavailable}
         typeLabel={typeLabel}
         projectName={projectNameOf(session)}
@@ -285,10 +289,7 @@ export function PromoteCard({ item, session, now, typeLabel, onDone, onRefused, 
   const promoteLabel = promoteTarget === 'agents-md' ? t('pending.promote.agentsMd')
     : other !== undefined ? t('pending.promote.globalIn', { name: baseName(other) }) : t('pending.promote.global')
   return (
-    <Card
-      marker={<StatusMarker kind="pending" />}
-      title={other !== undefined ? t('pending.promote.titleIn', { name: baseName(other) }) : t('pending.promote.title')}
-    >
+    <Card marker={<StatusMarker kind="pending" />} title={titleOf(item, t, session)}>
       {item.memory === null
         ? <p className="pm-pending-text">{t('conflict.missing')}</p>
         : <MemoryOf session={session} memory={item.memory} now={now} typeLabel={typeLabel} />}
@@ -346,7 +347,7 @@ export function OverflowCard({ item, session, onDone, onRefused, budget, onClean
     <Card
       marker={<StatusMarker kind="pending" />}
       title={t('pending.overflow.title')}
-      aside={<DismissButton label={t('pending.dismiss')} unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'dismiss-overflow', decisionId: item.decisionId }) }} />}
+      aside={<DismissButton label={t('pending.dismiss')} unavailable={action.unavailable ?? (saving ? t('pending.busy') : undefined)} onClick={() => { action.run({ cmd: 'dismiss-overflow', decisionId: item.decisionId }) }} />}
     >
       <p className="pm-pending-text">{summary}</p>
       <div className="pm-pending-option">
@@ -360,7 +361,12 @@ export function OverflowCard({ item, session, onDone, onRefused, budget, onClean
             onChange={(event) => { setDraft(event.target.value) }}
           />
         </label>
-        <Button unavailable={saving ? t('pending.busy') : invalid ? t('pending.overflow.invalid', { budget: budget === undefined ? '' : formatNumber(budget) }) : undefined} onClick={save}>
+        <Button
+          unavailable={saving ? t('pending.busy')
+            : budget === undefined ? t('pending.promote.configLoading')
+              : invalid ? t('pending.overflow.invalid', { budget: formatNumber(budget) }) : undefined}
+          onClick={save}
+        >
           {t('pending.overflow.save')}
         </Button>
       </div>
@@ -392,6 +398,7 @@ export function UnreadableCard({ item, session }: CardProps<'unreadable-file'>) 
     <Card marker={<StatusMarker kind="pending" />} title={t('pending.unreadable.title')}>
       <p className="pm-pending-path">{item.relativePath}</p>
       <pre className="pm-pending-error-text">{item.error}</pre>
+      <AdviceNote>{t('pending.unreadable.body')}</AdviceNote>
       <div className="pm-pending-actions">
         <Button onClick={() => { open('reveal') }}>{t(isMac() ? 'pending.unreadable.revealMac' : 'pending.unreadable.revealOther')}</Button>
         <Button onClick={() => { open('open') }}>{t('pending.unreadable.open')}</Button>
@@ -666,9 +673,13 @@ function AdviceGroupCard({ item, session, now, typeLabel, action, buttonsOf }: C
           : (
             <>
               <AdviceNote>{t(isPair ? 'pending.advice.redundancy.body' : 'pending.advice.redundancy.manyBody')}</AdviceNote>
-              <div className="pm-pending-actions">
-                {pair !== undefined ? <Button unavailable={action.unavailable} onClick={() => { setMerging(pair) }}>{t('pending.merge')}</Button> : null}
-              </div>
+              {pair !== undefined
+                ? (
+                  <div className="pm-pending-actions">
+                    <Button unavailable={action.unavailable} onClick={() => { setMerging(pair) }}>{t('pending.merge')}</Button>
+                  </div>
+                )
+                : null}
             </>
           )}
       {action.feedback}
@@ -678,7 +689,8 @@ function AdviceGroupCard({ item, session, now, typeLabel, action, buttonsOf }: C
 
 // —— 结果卡：刚处理完留在原位，能撤销的带「撤销」 ——
 
-interface ResultCopy { memory?: MemoryCardData | null; chip: string; body: string; undoable: boolean }
+/** memories：结果卡上显示的记忆，内容重复的一组忽略后整组都显示。 */
+interface ResultCopy { memory?: MemoryCardData | null; memories?: readonly MemoryCardData[]; chip: string; body: string; undoable: boolean }
 
 function resultCopy(item: PendingItem, outcome: Outcome, t: Translate): ResultCopy {
   if (outcome.kind === 'resolved' && item.kind === 'conflict-horizontal') {
@@ -713,8 +725,15 @@ function resultCopy(item: PendingItem, outcome: Outcome, t: Translate): ResultCo
     case 'dismissed': return { chip: t('pending.result.dismissed'), body: t('pending.result.dismissedBody'), undoable: true }
     case 'raised': return { chip: t('pending.result.raised', { budget: formatNumber(outcome.budget) }), body: t('pending.overflow.raiseHint'), undoable: false }
     case 'confirmed': return { memory, chip: t('pending.result.confirmed'), body: t('pending.result.confirmedBody'), undoable: false }
-    case 'deleted': return { chip: t('pending.result.deleted'), body: t('pending.result.deletedBody'), undoable: true }
-    case 'ignored': return { memory, chip: t('pending.result.ignored'), body: t('pending.result.ignoredBody'), undoable: true }
+    case 'deleted': {
+      // 写明删的是哪一条：内容重复的一对删了一边，标题看不出是哪条
+      const name = item.kind === 'advice' ? item.memories.find(m => m.id === outcome.memoryId)?.name : undefined
+      return { chip: t('pending.result.deleted'), body: name === undefined ? t('pending.result.deletedBody') : t('pending.result.deletedNamedBody', { name }), undoable: true }
+    }
+    case 'ignored': {
+      const ignored = item.kind === 'advice' && item.memories.length > 1 ? { memories: item.memories } : { memory }
+      return { ...ignored, chip: t('pending.result.ignored'), body: t('pending.result.ignoredBody'), undoable: true }
+    }
     case 'resolved': throw new Error(`resolved outcome on ${item.kind}`)
     case 'edited': case 'merged': throw new Error(`${outcome.kind} outcome renders as EditedRow`)
   }
@@ -740,8 +759,11 @@ export function ResultCard({ item, outcome, session, now, typeLabel, onUndone, o
     : outcome.kind === 'deleted' ? { cmd: 'restore', memoryId: outcome.memoryId, layer: outcome.scope }
     : undoId !== undefined ? { cmd: 'undo', decisionId: undoId } : undefined
   return (
-    <Card marker={item.kind === 'advice' ? undefined : <StatusMarker kind="done" />} title={titleOf(item, t)} focusable isResult>
+    <Card marker={item.kind === 'advice' ? undefined : <StatusMarker kind="done" />} title={titleOf(item, t, session)} focusable isResult>
       {copy.memory ? <MemoryOf session={session} memory={copy.memory} now={now} typeLabel={typeLabel} /> : null}
+      {copy.memories !== undefined
+        ? <div className="pm-pending-advice-group">{copy.memories.map(m => <MemoryOf key={m.id} session={session} memory={m} now={now} typeLabel={typeLabel} />)}</div>
+        : null}
       <ResultLine
         chip={copy.chip}
         undo={undo !== undefined

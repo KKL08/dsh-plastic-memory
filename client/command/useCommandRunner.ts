@@ -98,7 +98,9 @@ export function useCommandRunner(session: BorrowedSession): CommandRunner {
     stateOf,
     unavailable(key) {
       if (session.kind !== 'ready') return t('session.none.hint')
-      return stateOf(key).kind === 'busy' || stateOf(key).kind.startsWith('confirm-') ? t('pending.busy') : undefined
+      const { kind } = stateOf(key)
+      // 等确认时卡在用户这边，不是命令在途
+      return kind === 'busy' ? t('pending.busy') : kind.startsWith('confirm-') ? t('pending.awaitingConfirm') : undefined
     },
     confirm(key) {
       const state = stateOf(key)

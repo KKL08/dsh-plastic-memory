@@ -6,6 +6,7 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 import { formatNumber, useT } from '../i18n.tsx'
 import { Button } from '../ui/Button.tsx'
+import { Icon } from '../ui/Icon.tsx'
 import { useReturnFocus } from '../ui/focus-return.ts'
 import { useReportEditState, type EditState } from './edit-modes.tsx'
 
@@ -79,7 +80,7 @@ export function EditPanel({ initial, original, isMerge, unavailable, onCancel, o
         onClick={() => { setMoreOpen(open => !open) }}
       >
         {t(isMoreOpen ? 'pending.edit.less' : 'pending.edit.more')}
-        <span aria-hidden="true">{isMoreOpen ? ' ▴' : ' ▾'}</span>
+        <Icon name="chevronDownMedium" size={12} />
       </button>
       {isMoreOpen
         ? (
@@ -93,7 +94,12 @@ export function EditPanel({ initial, original, isMerge, unavailable, onCancel, o
               {draft.tags.map(tag => (
                 <span key={tag} className="pm-edit-tag">
                   {tag}
-                  <button type="button" aria-label={t('pending.edit.removeTag', { tag })} onClick={() => { set({ tags: draft.tags.filter(x => x !== tag) }) }}>×</button>
+                  <button type="button" aria-label={t('pending.edit.removeTag', { tag })} onClick={() => { set({ tags: draft.tags.filter(x => x !== tag) }) }}>
+                    {/* 同标题行「不再提醒」的叉 */}
+                    <svg width="8" height="8" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" aria-hidden="true">
+                      <path d="m1.5 1.5 7 7m0-7-7 7" />
+                    </svg>
+                  </button>
                 </span>
               ))}
               <input
@@ -145,7 +151,11 @@ export const editCss = `
 }
 .pm-edit-input:focus-visible, .pm-edit-tags:focus-within { outline: var(--dsw-focus-ring-width, 2px) solid var(--pm-focus); outline-offset: 0; }
 .pm-edit-content { min-height: 120px; resize: vertical; }
-.pm-edit-more { align-self: flex-start; padding: 2px 0; border: 0; background: none; font: inherit; font-size: 12px; color: var(--pm-text-2); cursor: pointer; }
+.pm-edit-more {
+  display: inline-flex; align-items: center; gap: 2px; align-self: flex-start; padding: 2px 0; border: 0; background: none;
+  font: inherit; font-size: 12px; color: var(--pm-text-2); cursor: pointer;
+}
+.pm-edit-more[aria-expanded='true'] svg { transform: rotate(180deg); }
 .pm-edit-more:hover { color: var(--pm-text); }
 .pm-edit-fields { display: flex; flex-direction: column; gap: 6px; }
 .pm-edit-fields .pm-edit-label { margin-top: 4px; }
@@ -154,9 +164,10 @@ export const editCss = `
   border: .5px solid var(--pm-line-input); border-radius: var(--dsw-radius-sm, 8px);
 }
 .pm-edit-tag { display: inline-flex; align-items: center; height: 22px; padding-left: 8px; border-radius: 6px; background: var(--pm-hover); font-size: 12px; color: var(--pm-text); }
-.pm-edit-tag button { padding: 0 6px; border: 0; background: none; font: inherit; color: var(--pm-text-2); cursor: pointer; }
+.pm-edit-tag button { display: inline-flex; align-items: center; align-self: stretch; padding: 0 6px; border: 0; background: none; font: inherit; color: var(--pm-text-2); cursor: pointer; }
 .pm-edit-tag button:hover { color: var(--pm-text); }
 .pm-edit-tag-input { flex: 1; min-width: 120px; height: 22px; border: 0; outline: 0; background: none; font: inherit; font-size: 12px; color: var(--pm-text); }
+.pm-edit-tag-input::placeholder { color: var(--pm-text-2); }
 .pm-edit-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 4px; }
 .pm-edit-hint { display: flex; flex-wrap: wrap; gap: 0 12px; margin-right: auto; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-edit-count { font-size: 12px; line-height: 1.5; color: var(--pm-text-2); font-variant-numeric: tabular-nums; }

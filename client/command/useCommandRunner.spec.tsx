@@ -61,7 +61,8 @@ describe('useCommandRunner', () => {
     }))
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '删除 a' })) })
     expect(screen.getByRole('group', { name: '继续处理' })).toHaveTextContent('blog')
-    expect(runner.unavailable('a')).toBe('正在处理…')
+    // 等的是用户回答，不是命令在途
+    expect(runner.unavailable('a')).toBe('等你先确认')
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '继续处理' })) })
     expect(gateway.executed.map(e => e.command)).toEqual([forget, { ...forget, allowCrossWorkspace: true }])
     expect(onOk).toHaveBeenCalledWith({ ok: true, cmd: 'forget' }, { ...forget, allowCrossWorkspace: true })

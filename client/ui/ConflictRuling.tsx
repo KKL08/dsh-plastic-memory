@@ -132,7 +132,8 @@ export const conflictRulingCss = `
 .pm-conflict-mark { display: inline-flex; }
 .pm-conflict--wide .pm-conflict-mark { justify-content: center; flex: 0 0 14px; }
 .pm-conflict--wide .pm-conflict-note { margin-left: 22px; }
-.pm-conflict-title { margin: 0; font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
+/* 标题是模型写的摘要，可能带长函数名、路径：允许在任意处折行，不把右边的胶囊挤出去 */
+.pm-conflict-title { margin: 0; min-width: 0; overflow-wrap: anywhere; font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
 .pm-conflict-note { margin: -6px 0 12px 16px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-conflict-sides { display: flex; flex-direction: column; gap: 12px; }
 .pm-conflict--wide .pm-conflict-sides { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; padding-left: 22px; }
