@@ -640,6 +640,8 @@ describe('SidebarTab 就地裁决', () => {
     expect(screen.getByText(/B 已删除，14 天内可恢复。/)).toBeInTheDocument()
     // 删掉一条只影响之后的组装：这次对话冻结的快照里还是两条
     expect(screen.getByText('这次对话里已带入的不变，压缩后或下个对话起生效。')).toBeInTheDocument()
+    // 「撤销」和别处一样是标准尺寸的幽灵按钮
+    expect(screen.getByRole('button', { name: '撤销' })).toHaveClass('pm-btn--ghost')
 
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
     expect(gateway.executed.map(e => e.command)[1]).toEqual({ cmd: 'undo', decisionId: 'pd_1' })

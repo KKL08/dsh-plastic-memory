@@ -24,7 +24,7 @@ import { EmptyState } from '../ui/EmptyState.tsx'
 import { Icon } from '../ui/Icon.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { DeleteWithConfirm, SoftDeleteConfirm } from '../command/confirm.tsx'
-import { baseOf, isEditable } from '../pending/cards.tsx'
+import { baseOf, draftOf, isEditable } from '../pending/cards.tsx'
 import { EditPanel, type EditDraft } from '../pending/edit.tsx'
 import { EditModes, type EditState } from '../pending/edit-modes.tsx'
 import { ModelEditPanel } from '../pending/model-edit.tsx'
@@ -97,7 +97,6 @@ interface TidyResult {
   partial?: { recorded: readonly MemoryCardData[]; unrecorded: readonly MemoryCardData[] }
 }
 
-const draftOf = (memory: MemoryCardData): EditDraft => ({ content: memory.content, name: memory.name, summary: memory.summary, tags: memory.tags })
 const isSameVersion = (a: MemoryCardData, b: MemoryCardData) => a.updatedAt === b.updatedAt && a.digest === b.digest
 
 /** 一个组：单个范围按类型（先露 3 条），「全部」按时间段（不截断，「更早」默认收起）。 */
@@ -585,7 +584,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
                     onConfirm={() => { startEdit(memory) }}
                   />
                 )
-                : <Button unavailable={actions.unavailable(memory.id)} onClick={() => { modify(memory) }}>{t('pending.modify')}</Button>}
+                : <Button size="sm" unavailable={actions.unavailable(memory.id)} onClick={() => { modify(memory) }}>{t('pending.modify')}</Button>}
               <DeleteWithConfirm
                 onDelete={() => {
                   // 删的是正在高亮的那一条：当作播完，所在的组记成展开，结果行和「撤销」不缩回「展开其余」里
@@ -593,7 +592,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
                   mark(memory, 'deleting')
                   actions.run(memory.id, { cmd: 'forget', memoryId: memory.id, layer: own }, null, () => { mark(memory, 'deleted') })
                 }}
-                trigger={open => <Button variant="ghost" unavailable={actions.unavailable(memory.id)} onClick={open}>{t('library.delete')}</Button>}
+                trigger={open => <Button variant="ghost" size="sm" unavailable={actions.unavailable(memory.id)} onClick={open}>{t('library.delete')}</Button>}
               />
               <Button variant="icon" aria-label={t('library.openFile')} title={t('library.openFile')} onClick={() => { void actions.open(memory.filePath) }}>
                 <Icon name="openFile" size={14} />

@@ -11,6 +11,7 @@ import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { belongsTo } from '../session-pick.ts'
 import { baseName, formatDay, formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
+import { isMac } from '../path.ts'
 import { AdviceNote, ResultLine } from '../ui/Advice.tsx'
 import { Button } from '../ui/Button.tsx'
 import { Chip } from '../ui/Chip.tsx'
@@ -96,12 +97,10 @@ function projectNameOf(session: BorrowedSession): (memory: MemoryCardData) => st
 }
 
 /** 记忆文件全文 → 正文（去掉 frontmatter）。 */
-export function bodyOf(text: string): string {
+function bodyOf(text: string): string {
   const m = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/.exec(text)
   return (m === null ? text : text.slice(m[0].length)).trim()
 }
-
-const isMac = () => typeof navigator !== 'undefined' && /mac/i.test(navigator.platform)
 
 /** 「全部」里每张卡标题后的范围名胶囊（条目属于哪些范围）；选了具体范围时为空，不画。由列表按行给出。 */
 export const ItemScopeNames = createContext<readonly string[]>([])
@@ -775,7 +774,7 @@ export function ResultCard({ item, outcome, session, now, typeLabel, onUndone, o
         chip={copy.chip}
         undo={undo !== undefined
           ? (
-            <Button variant="ghost" className="pm-pending-undo" unavailable={action.unavailable} onClick={() => { action.run(undo) }}>
+            <Button variant="ghost" unavailable={action.unavailable} onClick={() => { action.run(undo) }}>
               {t('pending.undo')}
             </Button>
           )
@@ -810,7 +809,7 @@ function EditedRow({ item, outcome, action }: {
         </span>
         {undoId !== undefined
           ? (
-            <Button variant="ghost" className="pm-pending-undo" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'undo', decisionId: undoId }) }}>
+            <Button variant="ghost" unavailable={action.unavailable} onClick={() => { action.run({ cmd: 'undo', decisionId: undoId }) }}>
               {t('pending.undo')}
             </Button>
           )

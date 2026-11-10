@@ -217,7 +217,6 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   )
   /** 这一条的确认、失败或没有生效。 */
   const failed = (id: string) => refused === id ? refusedNote : <CommandFeedback runner={runner} id={id} />
-  const isWaiting = (id: string) => runner.unavailable(id) !== undefined
   // 冲突对方可能在别的项目：那一方写项目名（这里的「本项目」是会话视图解析出的项目，和上面分层同一口径）
   const projectName = (m: MemoryCardData) =>
     m.scope === 'workspace' && m.workspacePath !== undefined && !samePath(m.workspacePath, ws) ? baseName(m.workspacePath) : undefined
@@ -290,16 +289,15 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
                     <DeleteWithConfirm
                       onDelete={() => { forget(memory) }}
                       trigger={open => (
-                        <button
-                          type="button"
-                          className="pm-side-delete"
+                        <Button
+                          variant="icon"
                           aria-label={t('sidebar.saved.delete')}
                           title={t('sidebar.saved.delete')}
-                          aria-disabled={isWaiting(id) || undefined}
-                          onClick={() => { if (!isWaiting(id)) open() }}
+                          unavailable={runner.unavailable(id)}
+                          onClick={open}
                         >
                           <Icon name="trash" size={14} />
-                        </button>
+                        </Button>
                       )}
                     />
                     {failed(id)}
@@ -388,7 +386,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
                   const { ruled: r } = entry
                   return (
                     <div key={r.decisionId}>
-                      <RuledCard ruled={r} card={card} busy={isWaiting(r.decisionId)} onUndo={() => { undo(r.decisionId) }} />
+                      <RuledCard ruled={r} card={card} unavailable={runner.unavailable(r.decisionId)} onUndo={() => { undo(r.decisionId) }} />
                       {failed(r.decisionId)}
                     </div>
                   )
@@ -442,10 +440,10 @@ function SavedRow({ session, memory, card, state, onWroteAgentsMd, children }: {
 }
 
 /** 刚裁决完：留下的卡（按基线则不留卡），下面结果行「已按 A」（基线冲突：「已保留这条记忆」）+ 后果 +「撤销」。 */
-function RuledCard({ ruled, card, busy, onUndo }: {
+function RuledCard({ ruled, card, unavailable, onUndo }: {
   ruled: Ruled
   card: (memory: MemoryCardData) => ReactNode
-  busy: boolean
+  unavailable: string | undefined
   onUndo: () => void
 }) {
   const t = useT()
@@ -470,9 +468,9 @@ function RuledCard({ ruled, card, busy, onUndo }: {
         undo={ruled.isUnrecorded || ruled.isHardDeleted
           ? undefined
           : (
-            <button type="button" className="pm-link" aria-disabled={busy || undefined} onClick={() => { if (!busy) onUndo() }}>
+            <Button variant="ghost" unavailable={unavailable} onClick={onUndo}>
               {t('sidebar.ruled.undo')}
-            </button>
+            </Button>
           )}
       >
         {note}
@@ -522,19 +520,12 @@ export const sidebarTabCss = `
 .pm-side-change > .pm-change:only-child { padding-left: 0; }
 /* 侧栏窄，删除确认放不进行尾：换到卡片下面一行靠右，记忆卡不跟着变窄 */
 .pm-side-saved > .pm-soft-confirm { grid-column: 1 / -1; justify-self: end; }
-.pm-side-delete {
-  display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0;
-  border: 0; border-radius: var(--dsw-radius-sm, 8px); background: transparent; color: var(--pm-text-2); cursor: pointer;
-}
-.pm-side-delete:hover { background: var(--pm-hover); color: var(--pm-text); }
-.pm-side-delete[aria-disabled='true'] { opacity: .4; cursor: default; }
 .pm-side .pm-conflict { padding-bottom: 0; }
 .pm-side .pm-conflict .pm-mc-text {
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
 }
 .pm-side .pm-conflict-buttons .pm-btn { padding: 5px 10px; }
 .pm-side-ruled { display: flex; flex-direction: column; gap: 10px; }
-.pm-side .pm-link[aria-disabled='true'] { opacity: .4; cursor: default; }
 .pm-side-note { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: var(--dsw-radius-md, 12px); background: var(--pm-bg-block); }
 .pm-side-note-title { margin: 0; font-size: 13px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
 .pm-side-note-body { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }

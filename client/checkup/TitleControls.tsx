@@ -413,7 +413,7 @@ function Check({ isChecked }: { isChecked: boolean }) {
 export const titleControlsCss = `
 .pm-head-off { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-btn.pm-run {
-  height: 30px; gap: 6px; padding: 0 12px; border: 0; border-radius: 12px;
+  height: 30px; gap: 6px; padding: 0 12px; border: 0; border-radius: var(--dsw-radius-md, 12px);
   background: var(--pm-hover); font-weight: 600; color: var(--pm-text);
 }
 .pm-btn.pm-run:hover:not([aria-disabled='true']), .pm-btn.pm-run:active:not([aria-disabled='true']) { background: var(--pm-pressed); }
@@ -425,26 +425,23 @@ export const titleControlsCss = `
 @keyframes pm-run-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .pm-run-spinner { animation: none; } }
 .pm-run-wrap { position: relative; display: inline-flex; }
-.pm-run-note {
-  position: absolute; top: calc(100% + 4px); right: 0; z-index: 20; width: 240px; box-sizing: border-box; padding: 10px 12px; border-radius: 14px;
+/* 标题行的两个弹层：「立即体检」旁的说明、自动体检菜单，挂在触发按钮下方右对齐（--start 左对齐） */
+.pm-run-note, .pm-auto-menu {
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 20; border-radius: 14px;
   background: var(--pm-bg-raised); box-shadow: var(--dsw-elevation-panel); outline: none; text-align: left;
 }
-.pm-run-note--start { right: auto; left: 0; }
+.pm-run-note--start, .pm-auto-menu--start { right: auto; left: 0; }
+.pm-run-note { width: 240px; box-sizing: border-box; padding: 10px 12px; }
 .pm-run-note-text { margin: 0; font-size: 13px; line-height: 1.5; color: var(--pm-text); }
 .pm-auto { position: relative; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
 .pm-auto-failed { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text); }
 .pm-auto-trigger {
-  display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 8px 0 10px; border: 0; border-radius: 12px;
+  display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 8px 0 10px; border: 0; border-radius: var(--dsw-radius-md, 12px);
   background: transparent; font: inherit; font-size: 13px; line-height: 1.5; white-space: nowrap; color: var(--pm-text-2); cursor: pointer;
 }
 .pm-auto-trigger:hover, .pm-auto-trigger[aria-expanded='true'] { background: var(--pm-hover); }
 .pm-auto-value { color: var(--pm-text); }
-.pm-auto-menu {
-  position: absolute; top: calc(100% + 4px); right: 0; z-index: 20; width: 272px; padding: 6px; border-radius: 14px;
-  background: var(--pm-bg-raised); box-shadow: var(--dsw-elevation-panel); outline: none;
-  display: flex; flex-direction: column; text-align: left;
-}
-.pm-auto-menu--start { right: auto; left: 0; }
+.pm-auto-menu { width: 272px; padding: 6px; display: flex; flex-direction: column; }
 .pm-auto-menu-title { margin: 0; padding: 6px 8px 4px; font-size: 12px; font-weight: 600; line-height: 1.5; color: var(--pm-text-2); }
 .pm-auto-option {
   display: grid; grid-template-columns: 16px minmax(0, 1fr); column-gap: 8px; align-items: center;
@@ -457,7 +454,7 @@ export const titleControlsCss = `
 .pm-auto-option-hint { grid-column: 2; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-auto-option-hint--invalid { color: var(--pm-error); }
 .pm-auto-days {
-  width: 52px; height: 26px; box-sizing: border-box; padding: 0 8px; border: .5px solid var(--pm-line-input); border-radius: 8px;
+  width: 52px; height: 26px; box-sizing: border-box; padding: 0 8px; border: .5px solid var(--pm-line-input); border-radius: var(--dsw-radius-sm, 8px);
   background: var(--pm-bg); font: inherit; font-size: 13px; color: var(--pm-text);
 }
 .pm-auto-days:focus-visible { outline: none; border-color: var(--dsw-alias-state-business-primary); }

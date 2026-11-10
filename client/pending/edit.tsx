@@ -6,6 +6,7 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 import { formatNumber, useT } from '../i18n.tsx'
 import { Button } from '../ui/Button.tsx'
+import { CrossIcon } from '../ui/CrossIcon.tsx'
 import { Icon } from '../ui/Icon.tsx'
 import { useReturnFocus } from '../ui/focus-return.ts'
 import { useReportEditState, type EditState } from './edit-modes.tsx'
@@ -95,10 +96,7 @@ export function EditPanel({ initial, original, isMerge, unavailable, onCancel, o
                 <span key={tag} className="pm-edit-tag">
                   {tag}
                   <button type="button" aria-label={t('pending.edit.removeTag', { tag })} onClick={() => { set({ tags: draft.tags.filter(x => x !== tag) }) }}>
-                    {/* 同标题行「不再提醒」的叉 */}
-                    <svg width="8" height="8" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" aria-hidden="true">
-                      <path d="m1.5 1.5 7 7m0-7-7 7" />
-                    </svg>
+                    <CrossIcon size={8} />
                   </button>
                 </span>
               ))}
@@ -149,6 +147,7 @@ export const editCss = `
   width: 100%; padding: 6px 10px; font: inherit; font-size: 13px; line-height: 1.6; color: var(--pm-text); background: var(--pm-bg);
   border: .5px solid var(--pm-line-input); border-radius: var(--dsw-radius-sm, 8px);
 }
+.pm-edit-input::placeholder { color: var(--pm-text-2); }
 .pm-edit-input:focus-visible, .pm-edit-tags:focus-within { outline: var(--dsw-focus-ring-width, 2px) solid var(--pm-focus); outline-offset: 0; }
 .pm-edit-content { min-height: 120px; resize: vertical; }
 .pm-edit-more {

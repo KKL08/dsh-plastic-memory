@@ -83,7 +83,7 @@ export function usePromoteInPlace(
   const undoId = decided !== undefined && shown === decided.verdict ? decided.decisionId : undefined
   const undo = undoId !== undefined
     ? (
-      <Button variant="ghost" className="pm-promote-undo" unavailable={unavailable} onClick={() => { run({ cmd: 'undo', decisionId: undoId }) }}>
+      <Button variant="ghost" unavailable={unavailable} onClick={() => { run({ cmd: 'undo', decisionId: undoId }) }}>
         {t('pending.undo')}
       </Button>
     )
@@ -95,9 +95,10 @@ export function usePromoteInPlace(
         ? (
           <>
             <AdviceNote>{t('conflict.twoSentences', { first: t('pending.promote.reason'), second: note })}</AdviceNote>
-            <div className="pm-pending-actions pm-promote-actions">
-              <Button unavailable={unavailable} onClick={() => { run({ cmd: 'keep-local-memory', memoryId: memory.id, layer: scope }) }}>{t('pending.promote.keepLocal')}</Button>
+            <div className="pm-pending-actions">
+              <Button size="sm" unavailable={unavailable} onClick={() => { run({ cmd: 'keep-local-memory', memoryId: memory.id, layer: scope }) }}>{t('pending.promote.keepLocal')}</Button>
               <Button
+                size="sm"
                 unavailable={unavailable ?? (promoteTarget === undefined ? t('pending.promote.configLoading') : undefined)}
                 onClick={() => { if (promoteTarget !== undefined) run(inPlacePromoteCommand(memory.id, scope, promoteTarget)) }}
               >
@@ -115,9 +116,3 @@ export function usePromoteInPlace(
     </>
   )
 }
-
-/** 两处的行都窄，按钮用列表行尾的小号，结果行末尾的「撤销」同样小号。 */
-export const promoteInPlaceCss = `
-.pm-promote-actions .pm-btn { padding: 2px 10px; font-size: 12px; }
-.pm-result-line .pm-promote-undo { padding: 2px 10px; font-size: 12px; }
-`

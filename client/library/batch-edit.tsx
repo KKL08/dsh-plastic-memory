@@ -14,14 +14,15 @@ import {
   scopeOfMemory, type DraftPlanOp, type EditPlan, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type PlanOp, type Scope,
 } from '../../src/gui/contract.ts'
 import { SoftDeleteConfirm } from '../command/confirm.tsx'
-import { interpret, LLM_FAILURE_KEYS, refuseBeforeSend } from '../command/protocol.ts'
+import { refuseBeforeSend } from '../command/protocol.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
-import { useT, type Translate } from '../i18n.tsx'
+import { useT } from '../i18n.tsx'
 import { baseOf, draftOf, isEditable } from '../pending/cards.tsx'
 import type { EditDraft } from '../pending/edit.tsx'
-import { DraftCompare, ModelBusy, RequestBox, requestFootOf } from '../pending/model-edit.tsx'
+import { DraftCompare, ModelBusy, modelFailureOf, RequestBox, requestFootOf } from '../pending/model-edit.tsx'
 import { Button } from '../ui/Button.tsx'
 import { Chip } from '../ui/Chip.tsx'
+import { CrossIcon } from '../ui/CrossIcon.tsx'
 import { Icon } from '../ui/Icon.tsx'
 import { StatusMarker } from '../ui/StatusMarker.tsx'
 import { BATCH_INTENTS, SINGLE_INTENTS } from './intents.ts'
@@ -156,14 +157,6 @@ type Stage =
 
 const STEP_OF = { request: 'request', planning: 'plan', plan: 'plan', drafting: 'apply', apply: 'apply' } as const satisfies Record<Stage['kind'], BatchStep>
 
-/** 整理的几条命令失败的文案：模型出错带原话，其余按命令协议（stale、not-found 等换本地文案）。 */
-function batchFailureOf(command: MemoryCommand, r: Extract<MemoryCommandResult, { ok: false }>, t: Translate): string {
-  if (r.code === 'llm-failed') return t(LLM_FAILURE_KEYS[r.code], { detail: r.detail ?? '' })
-  const outcome = interpret(command, r)
-  if (outcome.kind !== 'failed') return t('command.failed', { detail: r.detail ?? r.code })
-  return outcome.isLocalized ? t(outcome.detail) : t('command.failed', { detail: outcome.detail })
-}
-
 export function BatchEdit({ items, latest, session, onBack, onApply, applyUnavailable, applyFeedback }: {
   items: readonly BatchItem[]
   /** 视图里此刻的记忆（视图没到时缺省）：有记忆刚被别处改过时，等这几条换成新版本再重建清单。 */
@@ -242,7 +235,7 @@ export function BatchEdit({ items, latest, session, onBack, onApply, applyUnavai
     setStage({ kind: 'planning' })
     void gateway.execute(session.sessionId, command).then((r) => {
       if (mine !== seq.current) return
-      if (!r.ok) { if (!isBehind(r)) setStage({ kind: 'request', error: batchFailureOf(command, r, t) }); return }
+      if (!r.ok) { if (!isBehind(r)) setStage({ kind: 'request', error: modelFailureOf(command, r, t) }); return }
       if (r.plan === undefined) { setStage({ kind: 'request', error: t('pending.model.invalid') }); return }
       setStage({ kind: 'plan', plan: r.plan })
     })
@@ -265,7 +258,7 @@ export function BatchEdit({ items, latest, session, onBack, onApply, applyUnavai
     setStage({ kind: 'drafting', choice })
     void gateway.execute(session.sessionId, command).then((r) => {
       if (mine !== seq.current) return
-      if (!r.ok) { if (!isBehind(r)) back(batchFailureOf(command, r, t)); return }
+      if (!r.ok) { if (!isBehind(r)) back(modelFailureOf(command, r, t)); return }
       const drafts: Record<string, EditDraft> = {}
       for (const { memoryId, draft } of r.drafts ?? []) {
         const memory = picked.find(item => item.memory.id === memoryId)?.memory
@@ -380,10 +373,7 @@ function RequestStep({ session, picked, isRefreshing, onUnpick, request, onReque
                 title={t('library.batch.unpickHint')}
                 onClick={() => { removedAt.current = index; onUnpick(item.memory.id) }}
               >
-                {/* 同「不再提醒」的叉（DismissButton）：宿主图标集里没有叉 */}
-                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" aria-hidden="true">
-                  <path d="m1.5 1.5 7 7m0-7-7 7" />
-                </svg>
+                <CrossIcon />
               </Button>
             </li>
           ))}
@@ -712,7 +702,7 @@ function RewriteItem({ session, op, item, draft, request, answer, absorbs, isDro
     void gateway.execute(session.sessionId, command).then((r) => {
       if (mine !== seq.current) return
       if (!r.ok && r.code === 'not-found') { setPhase({ kind: 'idle' }); onBehind(r.memoryIds ?? [memory.id]); return }
-      if (!r.ok) { setPhase({ kind: 'ask', text, error: batchFailureOf(command, r, t) }); return }
+      if (!r.ok) { setPhase({ kind: 'ask', text, error: modelFailureOf(command, r, t) }); return }
       if (r.draft === undefined) { setPhase({ kind: 'ask', text, error: t('pending.model.invalid') }); return }
       onDraft(fillDraft(r.draft, draft))
       setRounds(prev => [...prev, text.trim()])

@@ -10,6 +10,7 @@ import { useGateway } from '../gateway.ts'
 import { useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
 import { ALL_SCOPE, type NavTarget } from '../nav.ts'
+import { isMac } from '../path.ts'
 import { Button } from '../ui/Button.tsx'
 import { SegmentedControl } from '../ui/Segmented.tsx'
 import { SettingsForm, SettingsGroup, SettingsGroupCard, SettingsItem } from '../ui/Settings.tsx'
@@ -321,9 +322,6 @@ function MigrationNote({ draft }: { draft: ReturnType<typeof useSettingsDraft> }
   }
   return null
 }
-
-/** 和处理视图「读不出的文件」卡同一判断（client/pending/cards.tsx 里那份没导出）。 */
-const isMac = () => typeof navigator !== 'undefined' && /mac/i.test(navigator.platform)
 
 /**
  * 实际路径来自视图（服务端解析过的绝对路径）；还没读到时显示配置里写的，都没有就提示开会话。

@@ -195,14 +195,14 @@ export function useRowActions(session: BorrowedSession) {
 
 export const sharedTabCss = `
 .pm-search {
-  display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border-radius: 12px;
+  display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border-radius: var(--dsw-radius-md, 12px);
   border: .5px solid var(--pm-line-input); color: var(--pm-text-2); background: transparent;
 }
 .pm-search input {
   flex: 1; min-width: 0; height: 100%; border: 0; outline: none; background: transparent;
   font: inherit; font-size: 13px; color: var(--pm-text);
 }
-.pm-search input::placeholder { color: var(--pm-text-3); }
+.pm-search input::placeholder { color: var(--pm-text-2); }
 .pm-search:focus-within { outline: var(--dsw-focus-ring-width, 2px) solid var(--pm-focus); outline-offset: 0; }
 .pm-tab-message { margin: 24px 0; text-align: center; font-size: 12px; color: var(--pm-text-2); }
 .pm-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
@@ -217,7 +217,6 @@ export const sharedTabCss = `
 .pm-list-row > .pm-mc { flex: 1; }
 .pm-row-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
 .pm-row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; flex-shrink: 0; }
-.pm-row-actions .pm-btn:not(.pm-btn--icon) { padding: 2px 10px; font-size: 12px; }
 @container (max-width: 500px) {
   .pm-list-row { flex-direction: column; align-items: stretch; gap: 8px; }
 }

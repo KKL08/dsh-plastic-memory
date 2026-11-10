@@ -5,24 +5,22 @@
  */
 export type MarkerKind = 'pending' | 'secret' | 'ok' | 'error' | 'done'
 
-export function StatusMarker({ kind, size = 'page', label }: { kind: MarkerKind; size?: 'nav' | 'page'; label?: string }) {
+export function StatusMarker({ kind, label }: { kind: MarkerKind; label?: string }) {
   const a11y = label === undefined ? { 'aria-hidden': true } : { role: 'img', 'aria-label': label }
   if (kind === 'secret') {
-    const px = size === 'nav' ? 9 : 14
     return (
-      <svg className={`pm-marker pm-marker--${size}`} data-pm-marker={kind} width={px} height={px} viewBox="0 0 14 14" {...a11y}>
+      <svg className="pm-marker" data-pm-marker={kind} width={14} height={14} viewBox="0 0 14 14" {...a11y}>
         <path d="M7 1.4 13.2 12.4H.8Z" fill="var(--pm-error)" stroke="var(--pm-error)" strokeWidth="1.2" strokeLinejoin="round" />
-        {size === 'page' ? <path d="M7 5.2v3.4M7 10.4v.1" stroke="var(--pm-on-error)" strokeWidth="1.5" strokeLinecap="round" /> : null}
+        <path d="M7 5.2v3.4M7 10.4v.1" stroke="var(--pm-on-error)" strokeWidth="1.5" strokeLinecap="round" />
       </svg>
     )
   }
-  return <span className={`pm-marker pm-marker--dot pm-marker--${kind} pm-marker--${size}`} data-pm-marker={kind} {...a11y} />
+  return <span className={`pm-marker pm-marker--dot pm-marker--${kind}`} data-pm-marker={kind} {...a11y} />
 }
 
 export const statusMarkerCss = `
 .pm-marker { display: inline-block; flex-shrink: 0; vertical-align: middle; }
 .pm-marker--dot { width: 8px; height: 8px; border-radius: 999px; }
-.pm-marker--dot.pm-marker--nav { width: 7px; height: 7px; }
 .pm-marker--pending { background: var(--pm-warn); }
 .pm-marker--ok { background: var(--pm-success); }
 .pm-marker--error { background: var(--pm-error); }

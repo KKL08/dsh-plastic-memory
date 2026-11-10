@@ -140,22 +140,21 @@ function SavedRow({ session, item, scope, promotion, rewrite, superseded, expire
         {changes}
         {feedback}
         <div className="pm-saved-foot">
-          <button type="button" className="pm-link" onClick={onDetail}>{t('chat.card.detail')}</button>
+          <button type="button" className="pm-link pm-link--muted" onClick={onDetail}>{t('chat.card.detail')}</button>
         </div>
       </div>
       <DeleteWithConfirm
         onDelete={() => { runner.run(ROW, { cmd: 'forget', memoryId: id, layer: scope }) }}
         trigger={open => (
-          <button
-            type="button"
-            className="pm-icon-btn"
+          <Button
+            variant="icon"
             aria-label={t('chat.card.delete')}
             title={t('chat.card.delete')}
-            aria-disabled={runner.unavailable(ROW) !== undefined || undefined}
-            onClick={() => { if (runner.unavailable(ROW) === undefined) open() }}
+            unavailable={runner.unavailable(ROW)}
+            onClick={open}
           >
             <Icon name="trash" size={14} />
-          </button>
+          </Button>
         )}
       />
     </div>
@@ -303,14 +302,6 @@ export const savedMemoriesCardCss = `
 .pm-saved-row--deleted { align-items: center; justify-content: space-between; }
 .pm-saved-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .pm-saved-note { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
-.pm-icon-btn {
-  flex: none; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px;
-  padding: 0; border: 0; border-radius: var(--dsw-radius-sm, 8px); background: none; color: var(--pm-text-2); cursor: pointer;
-}
-.pm-icon-btn svg { width: 14px; height: 14px; }
-.pm-icon-btn:hover:not([aria-disabled='true']) { background: var(--pm-hover); color: var(--pm-text); }
-.pm-icon-btn[aria-disabled='true'] { opacity: .4; cursor: default; }
 .pm-saved-foot { display: flex; justify-content: flex-end; }
-.pm-saved-foot .pm-link { font-size: 12px; font-weight: 400; color: var(--pm-text-2); }
-.pm-saved-foot .pm-link:hover { color: var(--pm-text); text-decoration: none; }
+.pm-saved-foot .pm-link { font-size: 12px; }
 `

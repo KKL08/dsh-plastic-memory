@@ -3,6 +3,8 @@
  * 平时只有一个 10px 的叉；悬停或键盘聚焦时向左展开出字，压在标题行上、不挤动标题和胶囊。
  * 不用原生 disabled，理由同 Button 的 `unavailable`。
  */
+import { CrossIcon } from './CrossIcon.tsx'
+
 export function DismissButton({ label, unavailable, onClick }: {
   /** 展开后显示的字，也是读屏名称。 */
   label: string
@@ -20,9 +22,7 @@ export function DismissButton({ label, unavailable, onClick }: {
       onClick={() => { if (!blocked) onClick() }}
     >
       <span className="pm-dismiss-label" aria-hidden="true">{label}</span>
-      <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" aria-hidden="true">
-        <path d="m1.5 1.5 7 7m0-7-7 7" />
-      </svg>
+      <CrossIcon />
     </button>
   )
 }

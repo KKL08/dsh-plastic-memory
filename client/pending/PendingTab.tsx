@@ -395,6 +395,7 @@ function IgnoredRow({ item, scopeLabel, session }: { item: IgnoredItem; scopeLab
       {scopeLabel !== undefined ? <Chip variant="neutral">{scopeLabel}</Chip> : null}
       <Button
         variant="ghost"
+        size="sm"
         className="pm-ignored-undo"
         unavailable={action.unavailable}
         onClick={() => { action.run({ cmd: 'unignore-advice', type: item.type, memoryIds: item.memories.map(m => m.id) }) }}
@@ -469,6 +470,8 @@ export const pendingCss = `
 .pm-pending-group-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 6px; margin-top: 4px; }
 .pm-pending-group-title { margin: 0; font-size: 16px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
 .pm-pending-group-note { display: inline-flex; gap: 6px; margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
+/* 点两侧的 6px 由标题行和这一行的 gap 给，点自己的外边距清掉 */
+.pm-pending-group-note .pm-sep { margin: 0; }
 .pm-pending-all-done { display: flex; align-items: center; gap: 8px; margin: 0 0 16px; font-size: 13px; line-height: 1.55; color: var(--pm-text); }
 .pm-ignored { padding: 12px 0 4px; border-top: .5px solid var(--pm-line); font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-ignored-line { display: flex; align-items: center; gap: 8px; margin: 0; }
@@ -482,7 +485,7 @@ export const pendingCss = `
 .pm-ignored-list { margin: 8px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
 .pm-ignored-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
 .pm-ignored-text { min-width: 0; overflow-wrap: anywhere; }
-.pm-ignored-undo { margin-left: auto; padding: 2px 10px; font-size: 12px; }
+.pm-ignored-undo { margin-left: auto; }
 .pm-ignored-row .pm-pending-error { flex-basis: 100%; margin: 0; }
 .pm-pending-advice-memories .pm-mc-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 .pm-pending-advice-group { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
@@ -515,7 +518,6 @@ export const pendingCss = `
 .pm-pending-item--result { transition: opacity 120ms ease-out; }
 @starting-style { .pm-pending-item--result { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .pm-pending-item--result { transition: none; } }
-.pm-pending-undo { font-weight: 600; }
 .pm-pending-path { margin: 0; font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 12px; color: var(--pm-text); overflow-wrap: anywhere; }
 .pm-pending-error-text {
   margin: 0; padding: 8px 12px; border-radius: var(--dsw-radius-sm, 8px); background: var(--pm-bg-block);

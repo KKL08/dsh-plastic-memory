@@ -1272,8 +1272,9 @@ describe('待处理：手动改与手动合并', () => {
     await save()
     expect(screen.getByText('已修改')).toBeInTheDocument()
     expect(screen.getByText(`发版步骤 · ${long.length} 字 → 5 字`)).toBeInTheDocument()
-    // 「撤销」和别的结果行一样 600
-    expect(screen.getByRole('button', { name: '撤销' })).toHaveClass('pm-btn--ghost', 'pm-pending-undo')
+    // 「撤销」和别处一样是标准尺寸的幽灵按钮
+    expect(screen.getByRole('button', { name: '撤销' })).toHaveClass('pm-btn--ghost')
+    expect(screen.getByRole('button', { name: '撤销' })).not.toHaveClass('pm-btn--sm')
     expect(screen.getByRole('button', { name: '打开文件' })).toHaveClass('pm-btn--secondary')
     expect(screen.queryByRole('textbox', { name: '正文' })).toBeNull()
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '打开文件' })) })
@@ -1632,6 +1633,8 @@ describe('待处理：让模型改与让模型合并', () => {
     ['输出不合格式', { ok: false, cmd: 'draft-edit', code: 'llm-invalid-output', detail: '模型的输出不是要求的 JSON 格式' }, '模型返回的内容格式不对，再试一次。'],
     ['模型报错', { ok: false, cmd: 'draft-edit', code: 'llm-failed', detail: 'rate limited' }, '模型出错了：rate limited'],
     ['拿不到模型', { ok: false, cmd: 'draft-edit', code: 'llm-unavailable', detail: '借用的会话拿不到模型' }, '拿不到当前会话的模型。'],
+    // 和整理所选同一套命令协议：记忆已不在换本地文案，不显示服务端原话
+    ['记忆已不在', { ok: false, cmd: 'draft-edit', code: 'not-found', detail: '不存在或已处理：b1' }, '这条记忆已经不在了，可能在别处删掉了。列表已更新。'],
   ] as const)('生成失败（%s）：卡片写原因，可以重试', async (_label, failure, message) => {
     const replies: MemoryCommandResult[] = [failure as MemoryCommandResult, drafted({})]
     const { commands } = setup([bloat], { respond: command => (command.cmd === 'draft-edit' ? replies.shift()! : { ok: true, cmd: command.cmd }) })

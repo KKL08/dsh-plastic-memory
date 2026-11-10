@@ -268,7 +268,7 @@ export function SceneSection({ fields, saved, migrations, counts, canMigrate, di
             <p key={name} className="pm-tile-removed">
               <span>{t('settings.types.removedLine', { label })}</span>
               <i className="pm-sep" aria-hidden="true">·</i>
-              <button type="button" className="pm-link" disabled={disabled} aria-label={t('settings.types.restoreAria', { name: label })}
+              <button type="button" className="pm-link pm-link--muted" disabled={disabled} aria-label={t('settings.types.restoreAria', { name: label })}
                 onClick={() => { restorePreset(name) }}>{t('settings.types.restore')}</button>
             </p>
           )
@@ -715,6 +715,7 @@ export const scenesCss = `
 .pm-tile-group-title + .pm-tile-removed { margin-top: 0; }
 .pm-tile-removed + .pm-tile-removed { margin-top: 4px; }
 .pm-tile-removed .pm-sep { margin: 0; }
+.pm-tile-removed .pm-link { font-weight: 600; }
 .pm-type-view { display: flex; flex-direction: column; gap: 12px; margin: 0; }
 .pm-type-view div { display: flex; flex-direction: column; gap: 2px; }
 .pm-type-view dt { font-size: 12px; font-weight: 500; line-height: 1.5; color: var(--pm-text-2); }

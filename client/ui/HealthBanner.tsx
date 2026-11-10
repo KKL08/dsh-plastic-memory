@@ -34,7 +34,6 @@ export const healthBannerCss = `
 }
 .pm-banner-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .pm-banner-title { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
-.pm-banner-title .pm-sep { margin: 0 6px 0 -2px; }
 /* 标记占 14px 宽的列（圆点和三角同宽），第二行缩进 14 + 8 = 22px 对齐结论，和状态条同一做法 */
 .pm-banner-mark { display: inline-flex; justify-content: center; flex-shrink: 0; width: 14px; }
 .pm-banner-detail { margin: 0 0 0 22px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }

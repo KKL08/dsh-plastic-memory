@@ -9,7 +9,7 @@
 import { diffWords, type Change } from 'diff'
 import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { scopeOfMemory, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type ModelEditAdviceType } from '../../src/gui/contract.ts'
-import { LLM_FAILURE_KEYS, refuseBeforeSend } from '../command/protocol.ts'
+import { interpret, LLM_FAILURE_KEYS, refuseBeforeSend } from '../command/protocol.ts'
 import { useGateway, type BorrowedSession, type ModelState } from '../gateway.ts'
 import { formatNumber, useT, type Translate } from '../i18n.tsx'
 import { INTENT_BLANK, SINGLE_INTENTS, type Intent } from '../library/intents.ts'
@@ -30,14 +30,15 @@ type Phase =
 const segmenter = new Intl.Segmenter('zh', { granularity: 'word' })
 const diffOf = (before: string, after: string) => diffWords(before, after, { intlSegmenter: segmenter })
 
-/** 生成失败的文案：拿不到模型、模型出错、输出不合格式换本地文案，其余显示服务端原话。 */
-function draftFailureOf(r: Extract<MemoryCommandResult, { ok: false }>, t: Translate): string {
-  switch (r.code) {
-    case 'llm-unavailable': return t(LLM_FAILURE_KEYS[r.code])
-    case 'llm-failed': return t(LLM_FAILURE_KEYS[r.code], { detail: r.detail ?? '' })
-    case 'llm-invalid-output': return t(LLM_FAILURE_KEYS[r.code])
-    default: return t('command.failed', { detail: r.detail ?? r.code })
-  }
+/**
+ * 让模型改、整理所选这几条命令失败的文案：模型出错带原话，其余按命令协议（拿不到模型、输出不合格式、stale、not-found 等换本地文案）。
+ * 单条修改的生成和整理的计划、出稿、应用共用。
+ */
+export function modelFailureOf(command: MemoryCommand, r: Extract<MemoryCommandResult, { ok: false }>, t: Translate): string {
+  if (r.code === 'llm-failed') return t(LLM_FAILURE_KEYS[r.code], { detail: r.detail ?? '' })
+  const outcome = interpret(command, r)
+  if (outcome.kind !== 'failed') return t('command.failed', { detail: r.detail ?? r.code })
+  return outcome.isLocalized ? t(outcome.detail) : t('command.failed', { detail: outcome.detail })
 }
 
 /** 拿到模型名写全句；会话没有模型写原因；还在问或没给名字只写后半句。 */
@@ -144,7 +145,7 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
     setPhase({ kind: 'busy' })
     void gateway.execute(session.sessionId, command).then((r) => {
       if (mine !== seq.current) return
-      if (!r.ok) { setPhase({ kind: 'ask', error: draftFailureOf(r, t) }); return }
+      if (!r.ok) { setPhase({ kind: 'ask', error: modelFailureOf(command, r, t) }); return }
       if (r.draft === undefined) { setPhase({ kind: 'ask', error: t('pending.model.invalid') }); return }
       const { content, summary, name, tags } = r.draft
       setPhase({ kind: 'result', draft: { content, summary, name: name ?? base.name, tags: tags ?? base.tags } })

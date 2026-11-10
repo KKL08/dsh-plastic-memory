@@ -85,7 +85,7 @@ export function DeletedTab({ nav, scope, session, fold, now = Date.now() }: {
 
   const row = ({ memory, deletedAt, purgeAt, cause }: DeletedItem) => {
     const meta = [cause !== undefined ? causeLabel(cause, names, t) : t('deleted.label'), formatDay(deletedAt, now, t)]
-    const unavailable = actions.unavailable(memory.id) ?? (confirming === memory.id ? t('pending.busy') : undefined)
+    const unavailable = actions.unavailable(memory.id) ?? (confirming === memory.id ? t('pending.awaitingConfirm') : undefined)
     return (
       <FlashRow key={memory.id} className="pm-list-row" flashing={flashId === memory.id} onFlashEnd={endFlash}>
         <div className="pm-del-body">
@@ -122,8 +122,9 @@ export function DeletedTab({ nav, scope, session, fold, now = Date.now() }: {
         </div>
         <div className="pm-row-actions pm-del-actions">
           <span className="pm-del-left">{leftLabel(purgeAt, now, t)}</span>
-          <Button variant="ghost" unavailable={unavailable} onClick={() => { setConfirming(memory.id) }}>{t('deleted.hardDelete')}</Button>
+          <Button variant="ghost" size="sm" unavailable={unavailable} onClick={() => { setConfirming(memory.id) }}>{t('deleted.hardDelete')}</Button>
           <Button
+            size="sm"
             unavailable={unavailable}
             onClick={() => {
               actions.run(

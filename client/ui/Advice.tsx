@@ -47,5 +47,4 @@ export const adviceCss = `
 .pm-advice-label { flex: none; margin-right: 2px; font-size: 12px; font-weight: 600; line-height: 1.6; color: var(--pm-text); }
 .pm-advice-text, .pm-result-text { flex: 1; min-width: 0; margin: 0; font-size: 12px; line-height: 1.6; color: var(--pm-text-2); }
 .pm-result-line { align-items: center; flex-wrap: wrap; gap: 8px; }
-.pm-result-line .pm-link { font-size: 12px; }
 `

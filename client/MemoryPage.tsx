@@ -479,5 +479,4 @@ export const memoryPageCss = `
 }
 .pm-tab-count { font-weight: 400; color: var(--pm-text-2); }
 .pm-page-panel { min-height: 0; }
-.pm-page-placeholder { margin: 24px 0; text-align: center; font-size: 12px; color: var(--pm-text-2); }
 `

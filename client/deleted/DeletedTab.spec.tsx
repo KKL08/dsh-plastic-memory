@@ -279,7 +279,7 @@ describe('最近删除', () => {
       expect(buttons[1]).not.toHaveClass('pm-btn--ghost')
     })
 
-    it('点了只在这一行展开确认、不开对话框，两个按钮都暂不可用', () => {
+    it('点了只在这一行展开确认、不开对话框，两个按钮都暂不可用，悬停提示「等你先确认」', () => {
       const { row } = renderDeleted()
       fireEvent.click(within(row).getByRole('button', { name: '彻底删除…' }))
       expect(within(row).getByText(confirmText)).toBeInTheDocument()
@@ -287,6 +287,7 @@ describe('最近删除', () => {
       expect(screen.queryByRole('dialog')).toBeNull()
       expect(within(row).getByRole('button', { name: '恢复' })).toHaveAttribute('aria-disabled', 'true')
       expect(within(row).getByRole('button', { name: '彻底删除…' })).toHaveAttribute('aria-disabled', 'true')
+      expect(within(row).getByRole('button', { name: '恢复' })).toHaveAttribute('title', '等你先确认')
     })
 
     it('点了「彻底删除…」不发命令', () => {
