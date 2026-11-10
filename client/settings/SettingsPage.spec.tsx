@@ -248,6 +248,7 @@ describe('保存：revision 冻结、冲突、非法值', () => {
     expect(screen.getByText('当前配置是只读的，改不了。')).toBeInTheDocument()
     expect(radio('办公')).toBeDisabled()
     expect(screen.getByRole('button', { name: '新建场景' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '新建类型' })).toBeDisabled()
     expect(tab('提醒的灵敏度', '积极')).toBeDisabled()
   })
 })

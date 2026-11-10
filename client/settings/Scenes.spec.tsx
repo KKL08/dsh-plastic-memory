@@ -51,9 +51,14 @@ const confirmLines = () => within(dialog('保存这些改动？')).getAllByRole(
 const typesRegion = () => screen.getByRole('region', { name: '记忆类型' })
 /** 记忆类型卡（三组里任一组），按开头的中文名找。 */
 const typeRow = (label: string) => within(typesRegion()).getAllByRole('listitem').find(el => el.textContent!.startsWith(label))!
-/** 记忆类型的一组卡（通用五类、预设、我加的）上的标题。 */
+/** 记忆类型的一组卡（通用五类、预设、我加的）上的标题；新建卡没有标题，不算。 */
 const typeTitles = (group: string) => within(within(typesRegion()).getByRole('list', { name: group })).getAllByRole('listitem')
-  .map(el => el.querySelector('.pm-tile-title')!.textContent)
+  .flatMap(el => el.querySelector('.pm-tile-title')?.textContent ?? [])
+/** 新建按钮所在的卡：断言它是哪张列表的最后一项。 */
+const lastTileOf = (entry: HTMLElement) => {
+  const item = entry.closest('li')!
+  return { item, list: item.parentElement!, isLast: item.parentElement!.lastElementChild === item }
+}
 
 async function clickSave(form: FakeConfigForm) {
   const before = form.calls.length
@@ -137,6 +142,7 @@ describe('场景列表', () => {
     const scene = (label: string) => ({ label, types: ['profile'] })
     setup({ value: { scenes: { coding: scene('编码'), office: scene('办公'), a: scene('a'), b: scene('b') } } })
     expect(button('新建场景')).toHaveAccessibleDescription('还能建 1 个')
+    expect(button('新建场景')).toBeEnabled()
     fireEvent.click(button('删除场景 a'))
     fireEvent.click(button('删除'))
     expect(screen.getByText('还能建 2 个')).toBeInTheDocument()
@@ -148,6 +154,18 @@ describe('场景列表', () => {
     expect(screen.getAllByRole('radio')).toHaveLength(7)
     expect(screen.getByText('还能建 0 个')).toBeInTheDocument()
     expect(button('新建场景')).toBeDisabled()
+    expect(lastTileOf(button('新建场景')).isLast).toBe(true)
+  })
+
+  it('新建场景是场景网格的最后一张卡，「还能建几个」在卡里', () => {
+    setup()
+    const { item, list, isLast } = lastTileOf(button('新建场景'))
+    expect(list).toBe(screen.getByRole('radiogroup', { name: '场景' }))
+    expect(list).toHaveClass('pm-tiles')
+    expect(isLast).toBe(true)
+    expect(within(item).getByText('还能建 3 个')).toBeInTheDocument()
+    fireEvent.click(button('新建场景'))
+    expect(dialog('新建场景')).toBeInTheDocument()
   })
 })
 
@@ -311,6 +329,19 @@ describe('记忆类型列表', () => {
     expect(typeTitles('通用五类')).toEqual(['用户画像', '行为偏好', '事实与经验', '项目信息', '参考引用'])
     expect(typeTitles('预设')).toEqual(['可复用流程', '决定'])
     expect(typeTitles('我加的')).toEqual(['术语', '客户名'])
+  })
+
+  it('新建类型是「我加的」网格的最后一张卡；还没有自己加的类型时组里只有这一张', () => {
+    setup()
+    const mine = within(typesRegion()).getByRole('list', { name: '我加的' })
+    expect(mine).toHaveClass('pm-tiles')
+    expect(within(mine).getAllByRole('listitem')).toHaveLength(1)
+    expect(lastTileOf(button('新建类型', mine)).isLast).toBe(true)
+    fireEvent.click(button('新建类型', mine))
+    fillType(dialog('新建类型'), { label: '术语', name: 'domain-term' })
+    fireEvent.click(button('确定', dialog('新建类型')))
+    expect(typeTitles('我加的')).toEqual(['术语'])
+    expect(lastTileOf(button('新建类型', mine)).isLast).toBe(true)
   })
 
   it('每张类型卡写哪些场景在用、存了几条（最近删除里的也算）', () => {

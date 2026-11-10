@@ -227,11 +227,11 @@ export function SceneSection({ fields, saved, migrations, counts, canMigrate, di
       </li>
     )
   }
-  /** 一组类型卡：小标题 + 网格（一张都没有时不出网格），后面接这一组的附加行。 */
-  const typeGroup = (group: 'general' | 'preset' | 'custom', names: readonly string[], extra: ReactNode = null) => (
+  /** 一组类型卡：小标题 + 网格（一张都没有、也没有新建卡时不出网格），后面接这一组的附加行。 */
+  const typeGroup = (group: 'general' | 'preset' | 'custom', names: readonly string[], extra: ReactNode = null, addTile: ReactNode = null) => (
     <div className="pm-tile-group">
       <h4 className="pm-tile-group-title" id={`${id}-types-${group}`} tabIndex={-1} {...focusKey(`group:${group}`)}>{t(`settings.types.group.${group}`)}</h4>
-      {names.length > 0 ? <ul className="pm-tiles" aria-labelledby={`${id}-types-${group}`}>{names.map(typeTile)}</ul> : null}
+      {names.length > 0 || addTile !== null ? <ul className="pm-tiles" aria-labelledby={`${id}-types-${group}`}>{names.map(typeTile)}{addTile}</ul> : null}
       {extra}
     </div>
   )
@@ -247,16 +247,17 @@ export function SceneSection({ fields, saved, migrations, counts, canMigrate, di
         <h3 className="pm-subgroup-title" id={`${id}-scenes`} tabIndex={-1} {...focusKey('group:scenes')}>{t('settings.scene.label')}</h3>
         <ul className="pm-tiles" role="radiogroup" aria-labelledby={`${id}-scenes`}>
           {sceneIds.map(sceneTile)}
+          <li className="pm-tile-add-item">
+            <button
+              type="button" className="pm-tile-add" disabled={disabled || remaining === 0}
+              aria-label={t('settings.scene.add')} aria-describedby={`${id}-remaining`}
+              onClick={() => { openDialog({ kind: 'scene' }) }}
+            >
+              <span className="pm-tile-add-title"><Icon name="plus" size={14} />{t('settings.scene.add')}</span>
+              <span className="pm-tile-add-note" id={`${id}-remaining`}>{t('settings.scene.remaining', { n: remaining })}</span>
+            </button>
+          </li>
         </ul>
-        <button
-          type="button" className="pm-tile-add" disabled={disabled || remaining === 0}
-          aria-label={t('settings.scene.add')} aria-describedby={`${id}-remaining`}
-          onClick={() => { openDialog({ kind: 'scene' }) }}
-        >
-          <Icon name="plus" size={14} />
-          {t('settings.scene.add')}
-          <span className="pm-tile-add-note" id={`${id}-remaining`}>{t('settings.scene.remaining', { n: remaining })}</span>
-        </button>
       </section>
       <section className="pm-subgroup" aria-labelledby={`${id}-types`}>
         <h3 className="pm-subgroup-title" id={`${id}-types`}>{t('settings.types.title')}</h3>
@@ -273,11 +274,12 @@ export function SceneSection({ fields, saved, migrations, counts, canMigrate, di
             </p>
           )
         }))}
-        {typeGroup('custom', Object.keys(fields.customTypes).filter(name => !isPresetType(name)), (
-          <button type="button" className="pm-tile-add" disabled={disabled} onClick={() => { openDialog({ kind: 'type' }) }}>
-            <Icon name="plus" size={14} />
-            {t('settings.types.create')}
-          </button>
+        {typeGroup('custom', Object.keys(fields.customTypes).filter(name => !isPresetType(name)), null, (
+          <li className="pm-tile-add-item">
+            <button type="button" className="pm-tile-add" disabled={disabled} onClick={() => { openDialog({ kind: 'type' }) }}>
+              <span className="pm-tile-add-title"><Icon name="plus" size={14} />{t('settings.types.create')}</span>
+            </button>
+          </li>
         ))}
       </section>
       {dialog?.kind === 'view' ? <TypeView name={dialog.name} onClose={() => { setDialog(undefined) }} /> : null}

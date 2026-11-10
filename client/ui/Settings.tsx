@@ -8,7 +8,7 @@
  * - SettingsItem：卡片里的一项，上下各 14px，项与项之间 0.5px 细线。
  * - SettingsGroup：只有组标题的一组，组里放几组小卡（「记什么」的场景、记忆类型）：每组前一个小标题（.pm-subgroup-title），
  *   小卡排成网格（.pm-tiles，同宿主 Agent 预设的卡片网格），卡身 .pm-tile-main、卡脚 .pm-tile-foot（细线隔开的操作），
- *   单选卡的整个卡身是单选框（.pm-tile-radio 盖满卡身），选中同宿主外观方块：平台底色 + bluish-400 描边；新建是网格下的虚线条（.pm-tile-add）。
+ *   单选卡的整个卡身是单选框（.pm-tile-radio 盖满卡身），选中同宿主外观方块：平台底色 + bluish-400 描边；新建是网格最后一张虚线卡（.pm-tile-add）。
  */
 import { useEffect, useId, useRef, type ReactNode } from 'react'
 import { useT } from '../i18n.tsx'
@@ -120,13 +120,15 @@ export const settingsCss = `
 .pm-tile:not(.pm-tile--selected):has(.pm-tile-radio:enabled:hover) { background: var(--pm-hover); }
 .pm-tile--selected { border-color: var(--pm-line-selected); background: var(--pm-bg-block); }
 .pm-tile:has(.pm-tile-radio:focus-visible) { outline: var(--dsw-focus-ring-width, 2px) solid var(--pm-focus); outline-offset: 2px; }
+.pm-tile-add-item { display: flex; min-width: 0; }
+/* 独占一行时不矮于带卡脚的普通小卡：卡身 14 + 19.5 + 4 + 18 + 14，卡脚 8 + 24 + 8，加上下描边和卡脚细线，共 111px */
 .pm-tile-add {
-  display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; min-height: 44px; margin-top: 12px; padding: 0 16px;
+  display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-width: 0; min-height: 111px; padding: 14px 16px;
   border: 1px dashed var(--pm-line-card); border-radius: var(--dsw-radius-lg, 16px); background: transparent;
   font: inherit; font-size: 13px; line-height: 1.5; color: var(--pm-text); cursor: pointer;
 }
 .pm-tile-add:hover:not(:disabled) { background: var(--pm-hover); }
 .pm-tile-add:disabled { opacity: .4; cursor: default; }
-.pm-tile-add-note { margin-left: 4px; font-size: 12px; color: var(--pm-text-3); }
-.pm-tile-group-title + .pm-tile-add { margin-top: 0; }
+.pm-tile-add-title { display: inline-flex; align-items: center; gap: 6px; }
+.pm-tile-add-note { font-size: 12px; color: var(--pm-text-3); }
 `
