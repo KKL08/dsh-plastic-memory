@@ -262,6 +262,31 @@ describe('维护点动作 ④：手建 / 手编文件回写', () => {
     expect(await treeEntries(root)).toEqual(before)
   })
 
+  it('frontmatter 含保留键的手写文件不回写：键和值原样留着，读取照常报保留键说明', async () => {
+    // content 键的值只在 frontmatter 里，回写会把这段文字丢掉；scope 键留着，用户才看得到「已忽略」的提醒
+    const raw = '---\nname: 手写\ntype: preference\nscope: global\ncontent: 只写在键里的一句\n---\n\n正文\n'
+    const path = await writeRaw(wsDir(), 'hand.md', raw, WS)
+    const { table } = open()
+    await table.create(wsRecord({ id: 'mem_n', name: '无关的' }))
+    await table.update('mem_n', {}, r => ({ ...r, status: 'deleted', deletedAt: Date.now() }))
+    await table.maintain([wsDir()])
+    expect(await readFile(path, 'utf8')).toBe(raw)
+    const { records, directoryNotes } = await table.readScope([wsDir()])
+    expect(records.map(r => r.record.name)).toEqual(['手写'])
+    expect(directoryNotes.map(n => [n.code, n.path])).toEqual([['reserved-keys', path]])
+    expect(await readFile(join(wsDir(), INDEX_FILE), 'utf8')).toContain('手写')
+  })
+
+  it('.archive/ 里含保留键的文件照常回写：保留键去掉，active 归一成 deleted', async () => {
+    const path = await writeRaw(archiveOf(wsDir()), 'hand.md', '---\nname: 归档的手写\ntype: preference\nscope: global\n---\n\n正文\n')
+    await ensureDir(wsDir(), WS)
+    const { table } = open()
+    await table.maintain([wsDir()])
+    const fm = await frontmatter(path)
+    expect(fm).not.toHaveProperty('scope')
+    expect(fm.status).toBe('deleted')
+  })
+
   it('插件自己写出的文件在稳态下零写入：维护点没有写调用、目录项不变', async () => {
     const { table } = open()
     await table.create(wsRecord({ id: 'mem_w1', name: '一', tags: ['a', 'b'], summary: '摘要', content: '多行\n正文' }))
