@@ -710,10 +710,10 @@ export const scenesCss = `
 .pm-tile-code { margin-left: auto; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pm-subgroup-hint + .pm-tile-group { margin-top: 12px; }
 .pm-tile-group + .pm-tile-group { margin-top: 16px; }
-.pm-tile-group-title { margin: 0 0 8px; padding-left: 16px; font-size: 12px; font-weight: 500; line-height: 1.5; color: var(--pm-text-2); }
+.pm-tile-group-title { margin: 0 0 8px; font-size: 12px; font-weight: 500; line-height: 1.5; color: var(--pm-text-2); }
 /* 删掉一张卡后焦点落在组标题上（只供读屏和键盘接着走），不画焦点框 */
 .pm-tile-group-title:focus, .pm-subgroup .pm-subgroup-title:focus { outline: none; }
-.pm-tile-removed { display: flex; align-items: center; gap: 6px; margin: 8px 0 0; padding-left: 16px; font-size: 12px; line-height: 1.5; color: var(--pm-text-3); }
+.pm-tile-removed { display: flex; align-items: center; gap: 6px; margin: 8px 0 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-3); }
 .pm-tile-group-title + .pm-tile-removed { margin-top: 0; }
 .pm-tile-removed + .pm-tile-removed { margin-top: 4px; }
 .pm-tile-removed .pm-sep { margin: 0; }

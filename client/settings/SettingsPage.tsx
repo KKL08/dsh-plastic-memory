@@ -13,7 +13,7 @@ import { ALL_SCOPE, type NavTarget } from '../nav.ts'
 import { isMac } from '../path.ts'
 import { Button } from '../ui/Button.tsx'
 import { SegmentedControl } from '../ui/Segmented.tsx'
-import { SettingsForm, SettingsGroup, SettingsGroupCard, SettingsItem } from '../ui/Settings.tsx'
+import { SettingsForm, SettingsGroupCard, SettingsItem } from '../ui/Settings.tsx'
 import {
   ACCENTS, EVIDENCE_LEVELS, OVERFLOW_MODES, PROMOTE_TARGETS, SENSITIVITIES, SENSITIVITY_NUMBERS, configuredRoot, customTypeChanges, presetTypeChanges,
   droppedTypes, governanceEnabled, parsePositiveInt, sceneChanges, type ConfigForm, type Migrations, type SettingsFields,
@@ -82,7 +82,7 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
         onSave={() => { setConfirming(true) }}
         onDiscard={draft.discard}
       >
-        <SettingsGroup title={t('settings.group.what')}>
+        <SettingsGroupCard title={t('settings.group.what')}>
           <SceneSection
             fields={f}
             saved={saved}
@@ -93,7 +93,7 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
             now={() => now ?? Date.now()}
             onChange={edit}
           />
-        </SettingsGroup>
+        </SettingsGroupCard>
 
         <SettingsGroupCard title={t('settings.group.how')}>
           <SettingsItem label={t('settings.budget.label')} htmlFor={`${id}-budget`}>

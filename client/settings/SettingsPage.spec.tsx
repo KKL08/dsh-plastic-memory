@@ -61,6 +61,20 @@ describe('三组设置的渲染', () => {
     expect(screen.queryByText(/^当前：/)).toBeNull()
   })
 
+  it('四组各一张设置卡，组标题在卡外；「记什么」的场景和记忆类型都在它那张卡里', () => {
+    const { container } = setup()
+    const groups = [...container.querySelectorAll('.pm-group')]
+    expect(groups.map(group => group.querySelector('.pm-group-title')!.textContent)).toEqual(['记什么', '怎么用', '怎么管', '外观'])
+    for (const group of groups) {
+      expect(group.querySelectorAll(':scope > .pm-group-card')).toHaveLength(1)
+      expect(group.querySelector('.pm-group-card')!.contains(group.querySelector('.pm-group-title'))).toBe(false)
+    }
+    const what = groups[0]!.querySelector('.pm-group-card') as HTMLElement
+    expect(within(what).getByRole('heading', { name: '场景' })).toBeInTheDocument()
+    expect(within(what).getByRole('heading', { name: '记忆类型' })).toBeInTheDocument()
+    expect(within(what).getByRole('radiogroup', { name: '场景' })).toBeInTheDocument()
+  })
+
   it('怎么用：上限数字、超出上限两种模式的说明、溯源三档', () => {
     setup({ value: section({ snapshotTokenBudget: 6000, snapshotOverflow: 'strict', evidenceLookup: 'active' }) })
     expect(screen.getByLabelText('对话开始时自动带入的记忆上限（token）')).toHaveValue('6000')
