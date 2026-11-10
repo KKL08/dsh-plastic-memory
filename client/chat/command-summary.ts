@@ -51,6 +51,20 @@ function actionOf(command: MemoryCommand): Summary {
 
 const firstLine = (text: string) => text.split('\n', 1)[0]!
 
+/** 页面自己发、不是用户动作的命令：查记忆根、刷新视图、查模型。请求被中断时服务端照常做完，下次打开会再发。 */
+const MAINTENANCE: ReadonlySet<MemoryCommand['cmd']> = new Set(['info', 'refresh-views', 'model-info'])
+
+/**
+ * 结果文本是不是「请求被中断」。宿主在请求连接关掉时只把中断错误的 message 写进结果文本，不带错误名或错误码，
+ * 只能按文本认：Node 的 AbortError 原话（含 fetch 那句）、浏览器的默认原因、宿主自己的兜底句。运行时换了措辞就认不出，
+ * 认不出时照旧显示失败。
+ */
+function isAbortedText(text: string | undefined): boolean {
+  if (text === undefined) return false
+  const head = text.trim()
+  return /^(this|the) operation was aborted\.?$/i.test(head) || head === 'signal is aborted without reason' || head === 'command aborted'
+}
+
 function parseResult(text: string | undefined) {
   if (text === undefined) return undefined
   try { return memoryCommandResultSchema.safeParse(JSON.parse(text)).data } catch { return undefined }
@@ -63,6 +77,7 @@ export function commandLine(args: string | null, outcome: CommandOutcome): Comma
   if (outcome === null) return { state: 'running', action }
   const result = parseResult(outcome.text)
   if (result === undefined) {
+    if (outcome.kind === 'error' && command !== undefined && MAINTENANCE.has(command.cmd) && isAbortedText(outcome.text)) return { state: 'ok', action }
     return outcome.kind === 'success' ? { state: 'ok', action } : { state: 'error', action, reason: firstLine(outcome.text ?? '') }
   }
   if (result.ok) return { state: 'ok', action }

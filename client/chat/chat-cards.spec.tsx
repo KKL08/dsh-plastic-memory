@@ -278,6 +278,27 @@ describe('命令行：面板发的 /memory 命令在对话里画成一句话', (
     expect(claimed.sr).toBeUndefined()
   })
 
+  it('页面自己发的维护命令（查位置、刷新视图、查模型）请求被中断：按完成显示，不写「没有成功」和原话', () => {
+    const aborted = ['This operation was aborted', 'The operation was aborted.', 'signal is aborted without reason', 'command aborted']
+    for (const [args, summary] of [[' info', '查找记忆所在位置'], [' refresh-views', '刷新记忆视图'], [' model-info', '查看可用的模型']] as const) {
+      for (const text of aborted) {
+        const row = line(node(args, { kind: 'error', text }))
+        expect(row.summary).toBe(summary)
+        expect(row.sr).toBeUndefined()
+      }
+    }
+    // 别的失败照旧
+    expect(line(node(' refresh-views', { kind: 'error', text: 'EACCES: permission denied' })).summary).toBe('刷新记忆视图：没有成功，EACCES: permission denied')
+  })
+
+  it('用户发的命令被中断照旧算失败：不知道有没有做成，要让人看得到', () => {
+    const forget = line(node(` forget ${JSON.stringify(memoryLayer)}`, { kind: 'error', text: 'This operation was aborted' }))
+    expect(forget.summary).toBe('删除一条记忆：没有成功，This operation was aborted')
+    expect(forget.sr).toBe('失败')
+    expect(line(node(' resolve {"decisionId":"pd_1","verdict":"keep-left"}', { kind: 'error', text: 'command aborted' })).summary)
+      .toBe('裁决冲突，留下一条：没有成功，command aborted')
+  })
+
   it('认不出的参数、不是 JSON 的结果：写原话首行，密钥照样遮掉', () => {
     expect(line(node(' nope', { kind: 'error', text: '未知子命令 nope\n详情' })).summary).toBe('执行记忆命令：没有成功，未知子命令 nope')
     const leaked = line(node(` forget ${JSON.stringify(memoryLayer)}`, { kind: 'error', text: 'boom sk-abcdefghijklmnopqrstuvwxyz0123456789' }))
