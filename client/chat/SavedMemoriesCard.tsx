@@ -123,6 +123,7 @@ function SavedRow({ session, item, scope, promotion, rewrite, superseded, expire
           {feedback}
         </div>
         <Button
+          variant="ghost"
           unavailable={runner.unavailable(ROW)}
           onClick={() => { runner.run(ROW, { cmd: 'restore', memoryId: id, layer: scope }, { onFailed: 'silent' }) }}
         >
@@ -240,10 +241,10 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
                 <span className="pm-saved-lead">{foldedNode}</span>
                 <span className="pm-saved-first" title={saved[0]?.memory.name}>{saved[0]?.memory.name}</span>
                 {candidates > 0
-                  ? <span className="pm-saved-hint"><i className="pm-sep" aria-hidden="true">·</i>{t('chat.card.folded.promote', { count: candidates })}</span>
+                  ? <span className="pm-saved-hint" title={t('chat.card.folded.promote', { count: candidates })}><i className="pm-sep" aria-hidden="true">·</i>{t('chat.card.folded.promote', { count: candidates })}</span>
                   : null}
                 {supersededCount > 0
-                  ? <span className="pm-saved-hint"><i className="pm-sep" aria-hidden="true">·</i>{t('chat.card.folded.superseded', { count: supersededCount })}</span>
+                  ? <span className="pm-saved-hint" title={t('chat.card.folded.superseded', { count: supersededCount })}><i className="pm-sep" aria-hidden="true">·</i>{t('chat.card.folded.superseded', { count: supersededCount })}</span>
                   : null}
               </>
             )}
@@ -290,7 +291,8 @@ export const savedMemoriesCardCss = `
 }
 .pm-saved-lead { flex: none; white-space: pre; }
 .pm-saved-first { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; color: var(--pm-text-2); }
-.pm-saved-hint { flex: none; font-weight: 400; color: var(--pm-text-2); white-space: nowrap; }
+/* 末尾的提示和首条名称一起收缩，窄的时候写省略号，不画出卡片 */
+.pm-saved-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; color: var(--pm-text-2); }
 .pm-saved-chevron { flex: none; margin-left: auto; padding-left: 8px; font-weight: 400; color: var(--pm-text-2); transition: transform 120ms ease; }
 .pm-saved[data-open] .pm-saved-chevron { transform: rotate(90deg); }
 @media (prefers-reduced-motion: reduce) { .pm-saved-chevron { transition: none; } }

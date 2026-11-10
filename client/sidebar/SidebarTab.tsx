@@ -10,7 +10,8 @@
  * 刚裁决的冲突在本地留原位可撤销，tab 卸载后收起。
  * 裁决碰上这条冲突正在别处处理或刚处理完（什么都没动）：冲突卡还在时原位说明，那边的结果写进视图、卡片消失后
  * 说明挪到「带入的记忆」上面（没有记忆了就在空状态上面），下一次动作时收起。
- * 新写入的行尾删除先在原位确认「删除这条？ 删除 · 取消」，点「删除」才发 forget。
+ * 新写入的行尾删除先在原位确认「删除这条？ 删除 · 取消」，点「删除」才发 forget；删后原位留「已删除」和「撤销」（发 restore，
+ * 文案和撤销失败不写原因同对话交付卡），tab 卸载后收起。别处删掉的照旧直接从列表里去掉。
  * 新写入的含密钥时不能软删（服务端回 has-secret，什么都没动）：原位确认，「彻底删除」发 hard-delete，删后原位留不可恢复的说明，tab 卸载后收起。
  * 新写入的是全局提升候选时就地给「留在本项目」「提升为全局」，处理过的换成结果文字（见 promote-in-place.tsx），不进底部的待处理计数。
  * 这次对话里模型改写、替代已有记忆的（全部记忆视图的 modelChanges，按会话认领、晚于这份快照的；同一条只列最近那次改写，本次新记的不另列）也列在「这次新写入的」：
@@ -29,6 +30,7 @@ import type { NavTarget } from '../nav.ts'
 import { mergeTypeLabels, ViewMessage } from '../library/shared.tsx'
 import { typeLabel } from '../type-label.ts'
 import { ResultLine } from '../ui/Advice.tsx'
+import { Button } from '../ui/Button.tsx'
 import { ConflictRuling, VerticalConflictRuling } from '../ui/ConflictRuling.tsx'
 import { ContextBudgetBar } from '../ui/ContextBudgetBar.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
@@ -103,6 +105,11 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const deletions = gateway.useDeletions()
   const [ruled, setRuled] = useState<readonly Ruled[]>([])
   const [purged, setPurged] = useState<ReadonlySet<string>>(new Set())
+  /**
+   * 在这里删过的新写入：按 id 留着那张卡，软删后原位画「已删除 · 撤销」（视图刷新后卡已经不在全部记忆里）。
+   * isRestored：撤销成功、视图还没刷新回来，照原样画这张卡；视图里重新有了就去掉这一笔。
+   */
+  const [removed, setRemoved] = useState<ReadonlyMap<string, { memory: MemoryCardData; isRestored?: true }>>(new Map())
   /** 这里写进了 AGENTS.md 的：项目里那条进了最近删除、离开了视图，按 id 留着那张卡和结果。 */
   const [wroteAgentsMd, setWroteAgentsMd] = useState<ReadonlyMap<string, MemoryCardData>>(new Map())
   // 动作按条（待决项 id / 记忆 id）经命令往返模块发出：在途时这一条不可再点，同一条冲突不会发出两条相反的裁决；
@@ -138,11 +145,20 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const forget = (memory: MemoryCardData) => {
     const memoryId = memory.id
     setPurged(prev => new Set(prev).add(memoryId))
+    // 同样在发出时记下：网关记成软删的那一帧这一行就换成「已删除」，焦点落在原位的「撤销」上
+    setRemoved(prev => new Map(prev).set(memoryId, { memory }))
     run(memoryId, { cmd: 'forget', memoryId, layer: scopeOfMemory(memory) }, (_result, sent) => {
       if (sent.cmd === 'forget') setPurged((prev) => { const next = new Set(prev); next.delete(memoryId); return next })
     })
   }
   const isPurged = (id: string) => purged.has(id) && deletions.of(id) === 'hard'
+  // 撤销删除失败不写原因，那一行还是「已删除」（同对话交付卡）
+  const restore = (memory: MemoryCardData) => {
+    runner.run(memory.id, { cmd: 'restore', memoryId: memory.id, layer: scopeOfMemory(memory) }, {
+      onFailed: 'silent',
+      onOk() { setRemoved(prev => new Map(prev).set(memory.id, { memory, isRestored: true })) },
+    })
+  }
 
   const arrivals = useArrivals(sessionView.status === 'ready' ? writtenSinceSnapshot(sessionView.data) : undefined, sessionId)
 
@@ -151,6 +167,11 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const snapshot = sessionView.status === 'ready' ? sessionView.data : undefined
   const ws = snapshot?.workspacePath ?? cwd
   const { byId, globalCount, projectCount } = sessionCards(library.data, ws)
+  // 撤销回来的那条视图里重新有了：以视图为准，不再按留下的卡画
+  const settled = [...removed].filter(([id, entry]) => entry.isRestored === true && byId.has(id)).map(([id]) => id)
+  if (settled.length > 0) {
+    setRemoved((prev) => { const next = new Map(prev); for (const id of settled) next.delete(id); return next })
+  }
   // 彻底删除的那条视图里已经没有了，按 id 原位留一行说明（删的是最后一条时留在空状态上面，也是焦点的落点）
   const purgedNote = (id: string) => <p key={id} className="pm-side-hint" tabIndex={-1}>{t('pending.secret.deletedNotice')}</p>
   const refusedNote = <p className="pm-pending-error" role="alert" tabIndex={-1}>{t('sidebar.action.refused')}</p>
@@ -212,10 +233,17 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     }
   }
   // 这次新写入的只列还没进快照、还在的；彻底删除的原位留说明
+  // 这里软删的原位留「已删除 · 撤销」，撤销后视图还没刷新回来的照留下的卡画
   const saved = (snapshot === undefined ? [] : writtenSinceSnapshot(snapshot))
-    .flatMap((id): Array<{ id: string; memory: MemoryCardData | undefined; isWrittenToAgentsMd?: true }> =>
-      wroteAgentsMd.has(id) ? [{ id, memory: wroteAgentsMd.get(id), isWrittenToAgentsMd: true }]
-        : isPurged(id) ? [{ id, memory: undefined }] : isLiveWrite(id, byId, deletions) ? [{ id, memory: byId.get(id) }] : [])
+    .flatMap((id): Array<{ id: string; memory: MemoryCardData | undefined; isWrittenToAgentsMd?: true; isDeleted?: true }> => {
+      if (wroteAgentsMd.has(id)) return [{ id, memory: wroteAgentsMd.get(id), isWrittenToAgentsMd: true }]
+      if (isPurged(id)) return [{ id, memory: undefined }]
+      const entry = removed.get(id)
+      const how = entry === undefined ? undefined : deletions.of(id, scopeOfMemory(entry.memory))
+      if (entry !== undefined && how === 'soft') return [{ id, memory: entry.memory, isDeleted: true }]
+      if (isLiveWrite(id, byId, deletions)) return [{ id, memory: byId.get(id) }]
+      return entry?.isRestored === true && how === undefined ? [{ id, memory: entry.memory }] : []
+    })
   // 这次对话里模型改写、替代的：快照冻结之后的（之前的已在这份快照里，同新写入的口径）。
   // 同一条改写多次只列最近那次；这次对话里新记的那条再被改写不另列，新写入那行已经是它
   const sessionChanges = snapshot === undefined ? [] : (library.data.modelChanges ?? [])
@@ -293,9 +321,18 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
               <h2 className="pm-side-title">{t('sidebar.saved.title')}</h2>
               <p className="pm-side-hint">{t('sidebar.saved.note')}</p>
             </div>
-            {saved.map(({ id, memory, isWrittenToAgentsMd }) => {
+            {saved.map(({ id, memory, isWrittenToAgentsMd, isDeleted }) => {
               const row = memory === undefined
                 ? purgedNote(id)
+                : isDeleted === true
+                  ? (
+                    <div key={id} className="pm-side-saved pm-side-saved--deleted" data-memory-id={id}>
+                      <p className="pm-side-hint">{t('chat.card.deleted')}</p>
+                      <Button variant="ghost" unavailable={runner.unavailable(id)} onClick={() => { restore(memory) }}>
+                        {t('chat.card.undo')}
+                      </Button>
+                    </div>
+                  )
                 : isWrittenToAgentsMd === true
                   ? <SavedRow key={id} session={session} memory={memory} card={card} state="wrote-agents-md">{null}</SavedRow>
                   : (
@@ -534,6 +571,7 @@ export const sidebarTabCss = `
 .pm-side-section-head { display: flex; flex-direction: column; gap: 2px; }
 .pm-side-saved { display: grid; grid-template-columns: minmax(0, 1fr) 24px; align-items: start; gap: 4px 8px; }
 .pm-side-saved > .pm-pending-error, .pm-side-saved > .pm-side-saved-promote { grid-column: 1 / -1; }
+.pm-side-saved--deleted { display: flex; align-items: center; justify-content: space-between; }
 .pm-side-saved-promote { display: flex; flex-direction: column; gap: 8px; }
 .pm-side-saved-promote:empty { display: none; }
 .pm-side-change { display: flex; flex-direction: column; gap: 6px; }
@@ -550,7 +588,6 @@ export const sidebarTabCss = `
 .pm-side .pm-conflict .pm-mc-text {
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
 }
-.pm-side .pm-conflict-buttons { flex-wrap: nowrap; }
 .pm-side .pm-conflict-buttons .pm-btn { padding: 5px 10px; }
 .pm-side-ruled { display: flex; flex-direction: column; gap: 10px; }
 .pm-side .pm-link[aria-disabled='true'] { opacity: .4; cursor: default; }

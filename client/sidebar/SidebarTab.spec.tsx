@@ -278,6 +278,55 @@ describe('SidebarTab 这次新写入的', () => {
     expect(screen.queryByText('报销截止每月 25 日。')).toBeNull()
   })
 
+  it('删除后原位留「已删除」和「撤销」（幽灵按钮，同对话卡的文案）；视图刷新后这一行还在；撤销发 restore，视图刷新回来前照原样画那条', async () => {
+    const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
+    const other = memory({ id: 'n2', type: 'knowledge', content: '周报周五发。' })
+    const { gateway } = setup({ library: library(pref, proj, glob, fresh, other), session: snapshot({ savedIds: ['n1', 'n2'] }), pending: pending() })
+    const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
+    await remove(saved.getAllByRole('button', { name: '删除这条记忆' })[0]!)
+    expect(saved.queryByText('报销截止每月 25 日。')).toBeNull()
+    expect(saved.getByText('已删除。14 天内也能在最近删除里找回。')).toBeInTheDocument()
+    const undo = saved.getByRole('button', { name: '撤销' })
+    expect(undo).toHaveClass('pm-btn--ghost')
+    // 删掉的那条离开全部记忆视图：这一行还在原位，后面那条照旧
+    act(() => { gateway.setView('library', library(pref, proj, glob, other)) })
+    expect(saved.getByText('已删除。14 天内也能在最近删除里找回。')).toBeInTheDocument()
+    expect(saved.getByText('周报周五发。')).toBeInTheDocument()
+
+    await act(async () => { fireEvent.click(saved.getByRole('button', { name: '撤销' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([
+      { cmd: 'forget', memoryId: 'n1', layer: { kind: 'workspace', workspacePath: WS } },
+      { cmd: 'restore', memoryId: 'n1', layer: { kind: 'workspace', workspacePath: WS } },
+    ])
+    expect(saved.queryByText('已删除。14 天内也能在最近删除里找回。')).toBeNull()
+    expect(saved.getByText('报销截止每月 25 日。')).toBeInTheDocument()
+    act(() => { gateway.setView('library', library(pref, proj, glob, fresh, other)) })
+    expect(saved.getByText('报销截止每月 25 日。')).toBeInTheDocument()
+    expect(saved.getAllByRole('button', { name: '删除这条记忆' })).toHaveLength(2)
+  })
+
+  it('撤销删除失败不写原因（同对话卡）：还是「已删除」和「撤销」', async () => {
+    const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
+    setup(
+      { library: library(pref, proj, glob, fresh), session: snapshot({ savedIds: ['n1'] }), pending: pending() },
+      command => command.cmd === 'restore' ? { ok: false, cmd: command.cmd, code: 'failed', detail: '磁盘满了' } : { ok: true, cmd: command.cmd, memoryIds: ['n1'] },
+    )
+    const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
+    await remove(saved.getByRole('button', { name: '删除这条记忆' }))
+    await act(async () => { fireEvent.click(saved.getByRole('button', { name: '撤销' })) })
+    expect(screen.queryByText(/磁盘满了/)).toBeNull()
+    expect(saved.getByText('已删除。14 天内也能在最近删除里找回。')).toBeInTheDocument()
+    expect(saved.getByRole('button', { name: '撤销' })).toBeInTheDocument()
+  })
+
+  it('别处删掉的新写入（全部记忆、对话卡）：这里照旧直接去掉，不留撤销行', async () => {
+    const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
+    const { gateway } = setup({ library: library(pref, proj, glob, fresh), session: snapshot({ savedIds: ['n1'] }), pending: pending() })
+    await act(async () => { await gateway.execute('s1', { cmd: 'forget', memoryId: 'n1', layer: { kind: 'workspace', workspacePath: WS } }) })
+    expect(screen.queryByRole('region', { name: '这次新写入的' })).toBeNull()
+    expect(screen.queryByText('已删除。14 天内也能在最近删除里找回。')).toBeNull()
+  })
+
   it('普通记忆在这里软删、之后在最近删除里彻底删掉：不写含密钥那句「已彻底删除」', async () => {
     const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
     const { gateway } = setup({ library: library(pref, proj, glob, fresh), session: snapshot({ savedIds: ['n1'] }), pending: pending() })
@@ -615,6 +664,10 @@ describe('SidebarTab 就地裁决', () => {
     expect(sidebarTabCss).not.toContain('pm-side-error')
   })
 
+  it('侧栏窄（英文按钮约 283px）：冲突卡按钮放不下时换行，不强制一行', () => {
+    expect(sidebarTabCss).not.toMatch(/\.pm-conflict-buttons \{[^}]*nowrap/)
+  })
+
   it('PA-45 撤销回 stale：写本地文案，不显示服务端的中文原话', async () => {
     const gateway = createFakeGateway({
       views: { health: health(), library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending(conflict) },
@@ -863,7 +916,7 @@ describe('SidebarTab 确认收起后的键盘焦点', () => {
     await act(async () => { fireEvent.click(button) })
   }
 
-  it('普通删除：确认后这一行没了，焦点落到下一条的删除按钮', async () => {
+  it('普通删除：确认后这一行换成「已删除」，焦点落到原位的「撤销」；撤销后回到这一行的删除按钮', async () => {
     const one = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
     const two = memory({ id: 'n2', type: 'knowledge', content: '周报周五发。' })
     setup({ library: library(pref, proj, glob, one, two), session: snapshot({ savedIds: ['n1', 'n2'] }), pending: pending() })
@@ -872,7 +925,9 @@ describe('SidebarTab 确认收起后的键盘焦点', () => {
     await press(first!)
     await press(saved.getByRole('button', { name: '删除' }))
     expect(saved.queryByText('报销截止每月 25 日。')).toBeNull()
-    await waitFor(() => { expect(saved.getByRole('button', { name: '删除这条记忆' })).toHaveFocus() })
+    await waitFor(() => { expect(saved.getByRole('button', { name: '撤销' })).toHaveFocus() })
+    await press(saved.getByRole('button', { name: '撤销' }))
+    await waitFor(() => { expect(saved.getAllByRole('button', { name: '删除这条记忆' })[0]).toHaveFocus() })
   })
 
   it('含密钥确认：「取消」回到删除按钮；彻底删除后落到原位那行说明上', async () => {

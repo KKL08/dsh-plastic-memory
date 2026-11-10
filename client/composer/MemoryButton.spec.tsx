@@ -198,6 +198,35 @@ describe('跳转', () => {
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 
+  it('打开后焦点进弹层，落在第一个可点的链接上（弹层挂在 body 末尾，不用 Tab 走完整页）', () => {
+    setup({ view: sessionView({ overflowMode: 'strict', omittedCount: 2 }) })
+    const trigger = screen.getByRole('button', { name: '记忆' })
+    trigger.focus()
+    fireEvent.click(trigger)
+    expect(screen.getByRole('button', { name: '处理 ›' })).toHaveFocus()
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(trigger).toHaveFocus()
+  })
+
+  it('弹层里没有链接（没有超限、宿主没有右侧栏）：焦点落在弹层本身，Esc 照样还给按钮', () => {
+    setup({ view: sessionView(), hasSidebar: false })
+    const trigger = screen.getByRole('button', { name: '记忆' })
+    trigger.focus()
+    fireEvent.click(trigger)
+    expect(screen.getByRole('dialog')).toHaveFocus()
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(trigger).toHaveFocus()
+  })
+
+  it('点弹层里的跳转收起后，焦点先回到「记忆」按钮，不掉到 body', () => {
+    setup({ view: sessionView({ overflowMode: 'strict', omittedCount: 2 }) })
+    openPanel()
+    fireEvent.click(screen.getByRole('button', { name: '处理 ›' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.getByRole('button', { name: '记忆' })).toHaveFocus()
+  })
+
   it('焦点在弹层里时 Esc 收起，焦点回到「记忆」按钮', () => {
     setup({ view: sessionView() })
     openPanel()

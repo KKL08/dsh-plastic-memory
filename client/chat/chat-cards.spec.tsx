@@ -245,6 +245,12 @@ describe('命令行：面板发的 /memory 命令在对话里画成一句话', (
     expect(document.querySelector('.pm-tr-io')!.textContent).not.toContain(token)
   })
 
+  it('一句话放不下截断时，悬停能看到全文：摘要带同样文字的 title', () => {
+    const { container } = renderInShell(<MemoryCommandRow node={node(` forget ${JSON.stringify(memoryLayer)}`, done({ ok: false, cmd: 'forget', code: 'failed', detail: 'EACCES: permission denied' }))} hostT={hostT} />)
+    const summary = container.querySelector('.pm-tr-summary')!
+    expect(summary).toHaveAttribute('title', '删除一条记忆：没有成功，EACCES: permission denied')
+  })
+
   it('不是 JSON 的返回原样显示；既没参数也没返回时不能展开', () => {
     renderInShell(<MemoryCommandRow node={node(' nope', { kind: 'error', text: '未知子命令 nope\n详情' })} hostT={hostT} />)
     fireEvent.click(screen.getByRole('button', { expanded: false }))
@@ -431,6 +437,11 @@ describe('交付卡默认折叠', () => {
     expect(container.querySelector('.pm-saved-chevron')).toHaveTextContent('›')
   })
 
+  it('折叠行末尾的提示（可提升、替代了几条）窄的时候也收缩、写省略号，不画出卡片；完整文字在 title 里', () => {
+    expect(savedMemoriesCardCss).toMatch(/\.pm-saved-hint \{[^}]*min-width: 0;[^}]*overflow: hidden;[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;/)
+    expect(savedMemoriesCardCss).not.toMatch(/\.pm-saved-hint \{[^}]*flex: none/)
+  })
+
   it('点一下展开成卡片（每条记忆卡、查看详情、删除），再点收起；展开状态不持久，重挂又是折叠', () => {
     const card = <SavedMemoriesCard sessionId="s1" cwd="/w/app" saved={items} now={NOW} openDetail={() => {}} />
     const { unmount } = renderInShell(card)
@@ -555,6 +566,8 @@ describe('交付卡', () => {
     expect(gateway.executed).toEqual([{ sessionId: 's1', command: { cmd: 'forget', memoryId: 'mem_1', layer: { kind: 'workspace', workspacePath: '/w/app' } } }])
     expect(screen.queryByText('测试不 mock 数据库')).toBeNull()
 
+    // 撤销是幽灵按钮，和卡里其它动作一样轻，不用标准尺寸的次按钮
+    expect(screen.getByRole('button', { name: '撤销' })).toHaveClass('pm-btn--ghost')
     fireEvent.click(screen.getByRole('button', { name: '撤销' }))
     expect(await screen.findByText('测试不 mock 数据库')).toBeInTheDocument()
     expect(gateway.executed.at(-1)).toEqual({ sessionId: 's1', command: { cmd: 'restore', memoryId: 'mem_1', layer: { kind: 'workspace', workspacePath: '/w/app' } } })
@@ -785,6 +798,7 @@ describe('交付卡：提升候选就地处理', () => {
     const { unmount } = card()
     const toggle = screen.getByRole('button', { expanded: false })
     expect(toggle).toHaveTextContent('这轮记住了 2 条新记忆：提交信息用英文·1 条可提升为全局›')
+    expect(toggle.querySelector('.pm-saved-hint')).toHaveAttribute('title', '1 条可提升为全局')
     unmount()
     card(createFakeGateway({ views: { library: libraryOf([cand.memory, plain.memory]) } }))
     expect(screen.getByRole('button', { expanded: false })).not.toHaveTextContent('可提升为全局')
