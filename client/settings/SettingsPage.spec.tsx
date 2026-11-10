@@ -1,5 +1,5 @@
 // 插件设置页：三组设置的渲染、revision 冻结与冲突提示、非法值、配置文件关掉体检时置灰、状态卡。场景与类型见 Scenes.spec.tsx。
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { GUI_VIEW_VERSION, type HealthView, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
@@ -154,6 +154,15 @@ describe('保存：revision 冻结、冲突、非法值', () => {
     expect(screen.queryByRole('dialog')).toBeNull()
     await waitFor(() => { expect(save()).toHaveFocus() })
     expect(form.calls).toHaveLength(0)
+  })
+
+  it('确认弹窗里点「保存」后焦点落在保存行（保存按钮这时置灰），不掉回页首', async () => {
+    const { form } = setup()
+    fireEvent.click(radio('办公'))
+    save().focus()
+    await clickSave(form)
+    await waitFor(() => { expect(save()).toBeDisabled() })
+    expect(save().closest('.pm-form-footer')).toHaveFocus()
   })
 
   it('没有改动时保存置灰；多项改动一次 mutate，带开始编辑时的 revision；保存后回到干净状态', async () => {
@@ -370,7 +379,21 @@ describe('状态卡', () => {
 })
 
 describe('记忆文件位置「在访达中显示」', () => {
+  const onPlatform = (platform: string) => { vi.spyOn(navigator, 'platform', 'get').mockReturnValue(platform) }
+  afterEach(() => { vi.restoreAllMocks() })
+
+  it.each([
+    ['MacIntel', '在访达中显示'],
+    ['Win32', '在文件夹中显示'],
+    ['Linux x86_64', '在文件夹中显示'],
+  ])('按平台写：%s 上是「%s」', (platform, label) => {
+    onPlatform(platform)
+    setup()
+    expect(screen.getByRole('button', { name: label })).toBeInTheDocument()
+  })
+
   it('有实际路径时可以在访达中显示；宿主拒绝时写一句', async () => {
+    onPlatform('MacIntel')
     const gateway = createFakeGateway({ views: { pending: pending(), health: health(NOW), library: library(3, '/home/me/.dsh/memories') }, openOk: false })
     renderInShell(<SettingsPage form={createFakeConfigForm()} onOpenMemoryPage={() => {}} now={NOW} />, gateway)
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '在访达中显示' })) })
@@ -380,6 +403,6 @@ describe('记忆文件位置「在访达中显示」', () => {
 
   it('还不知道路径时没有这个按钮', () => {
     renderInShell(<SettingsPage form={createFakeConfigForm()} onOpenMemoryPage={() => {}} now={NOW} />, createFakeGateway())
-    expect(screen.queryByRole('button', { name: '在访达中显示' })).toBeNull()
+    expect(screen.queryByRole('button', { name: /中显示$/ })).toBeNull()
   })
 })

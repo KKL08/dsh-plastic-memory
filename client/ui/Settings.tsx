@@ -42,7 +42,8 @@ export function SettingsForm({ state, pending, onSave, onDiscard, children }: {
     <div className="pm-form">
       {!state.writable ? <p className="pm-form-note" role="status">{t('settings.readOnly')}</p> : null}
       {children}
-      <div className="pm-form-footer">
+      {/* tabIndex -1：保存按钮置灰时焦点的落点（确认框点了保存之后），Tab 一下就是保存按钮 */}
+      <div className="pm-form-footer" tabIndex={-1}>
         {state.failed ? <p className="pm-form-failed" role="status">{t('settings.saveFailed')}</p> : null}
         <Button variant="primary" disabled={!state.dirty || state.invalid || state.saving || !state.writable}
           aria-describedby={pending !== undefined ? pendingId : undefined} onClick={onSave}>
@@ -92,6 +93,8 @@ export const settingsCss = `
   position: sticky; bottom: -48px; z-index: 1; display: flex; align-items: center; gap: 12px;
   margin-top: 16px; padding: 12px 0; border-top: .5px solid var(--pm-line); background: var(--pm-bg-page);
 }
+/* 只是焦点落点，不画焦点框（主题的 [tabindex] 焦点环同权重、先加载，这里加 .pm-root 压过它） */
+.pm-root .pm-form-footer:focus { outline: none; }
 .pm-form-pending { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-3); }
 .pm-form-failed { flex: 1; min-width: 0; margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-error); }
 .pm-group + .pm-group { margin-top: 32px; }

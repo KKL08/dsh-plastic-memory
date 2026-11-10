@@ -520,6 +520,14 @@ describe('通用、预设类型', () => {
     expect(button('删除场景 编码')).toHaveFocus()
   })
 
+  it('删掉场景：焦点落到「场景」小标题，不掉回页首', () => {
+    setup()
+    fireEvent.click(button('删除场景 编码'))
+    fireEvent.click(button('删除', radio('编码').closest('li')!))
+    expect(screen.queryByRole('radio', { name: '编码' })).toBeNull()
+    expect(screen.getByRole('heading', { name: '场景' })).toHaveFocus()
+  })
+
   it('场景弹层里删类型：取消回到这一行的「删除」，删掉后落到「新建类型」', () => {
     setup({ value: { customTypes: { term }, scenes: { coding: { label: '编码', types: [...GENERAL, 'term'] }, office: { label: '办公', types: [...GENERAL, 'decision'] } } } })
     fireEvent.click(button('编辑场景 编码'))

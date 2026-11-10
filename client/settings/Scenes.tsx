@@ -106,6 +106,7 @@ export function SceneSection({ fields, saved, migrations, counts, canMigrate, di
     const { [sceneId]: _removed, ...scenes } = fields.scenes
     setRemoving(undefined)
     onChange({ scenes, ...(fields.template === sceneId ? { template: GENERAL_SCENE } : {}) })
+    focusNext('group:scenes')
   }
   const sceneTile = (sceneId: string) => {
     const name = sceneLabel(t, sceneId, fields.scenes)
@@ -243,7 +244,7 @@ export function SceneSection({ fields, saved, migrations, counts, canMigrate, di
   return (
     <>
       <section className="pm-subgroup">
-        <h3 className="pm-subgroup-title" id={`${id}-scenes`}>{t('settings.scene.label')}</h3>
+        <h3 className="pm-subgroup-title" id={`${id}-scenes`} tabIndex={-1} {...focusKey('group:scenes')}>{t('settings.scene.label')}</h3>
         <ul className="pm-tiles" role="radiogroup" aria-labelledby={`${id}-scenes`}>
           {sceneIds.map(sceneTile)}
         </ul>
@@ -709,12 +710,10 @@ export const scenesCss = `
 .pm-tile-group + .pm-tile-group { margin-top: 16px; }
 .pm-tile-group-title { margin: 0 0 8px; padding-left: 16px; font-size: 12px; font-weight: 500; line-height: 1.5; color: var(--pm-text-2); }
 /* 删掉一张卡后焦点落在组标题上（只供读屏和键盘接着走），不画焦点框 */
-.pm-tile-group-title:focus { outline: none; }
+.pm-tile-group-title:focus, .pm-subgroup .pm-subgroup-title:focus { outline: none; }
 .pm-tile-removed { display: flex; align-items: center; gap: 6px; margin: 8px 0 0; padding-left: 16px; font-size: 12px; line-height: 1.5; color: var(--pm-text-3); }
 .pm-tile-group-title + .pm-tile-removed { margin-top: 0; }
 .pm-tile-removed + .pm-tile-removed { margin-top: 4px; }
-/* 卡片区里的链接要压过设置页的 .pm-settings .pm-link（13px，后加载） */
-.pm-tile-group .pm-tile-removed .pm-link { font-size: 12px; }
 .pm-tile-removed .pm-sep { margin: 0; }
 .pm-type-view { display: flex; flex-direction: column; gap: 12px; margin: 0; }
 .pm-type-view div { display: flex; flex-direction: column; gap: 2px; }
@@ -727,7 +726,6 @@ export const scenesCss = `
 .pm-scene-group .pm-scene-confirm--block { margin: 2px 0 6px 23px; }
 .pm-scene-confirm-note { flex-basis: 100%; color: var(--pm-text-3); }
 .pm-scene-confirm-actions { display: inline-flex; align-items: center; gap: 8px; }
-.pm-scene-confirm .pm-link, .pm-tile .pm-scene-confirm .pm-link { font-size: 12px; }
 .pm-scene-confirm .pm-link:disabled { color: var(--pm-text-3); cursor: default; text-decoration: none; }
 .pm-scene-confirm .pm-sep { margin: 0 -2px; font-style: normal; }
 .pm-scene-confirm .pm-scene-confirm-cancel { font-weight: 400; color: var(--pm-text-2); }

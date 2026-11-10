@@ -19,7 +19,7 @@ export function HealthBanner({ marker, conclusion, detail, actions }: HealthBann
   return (
     <section className={marker === undefined ? 'pm-banner pm-banner--plain' : 'pm-banner'}>
       <div className="pm-banner-main">
-        <p className="pm-banner-title">{marker !== undefined ? <StatusMarker kind={marker} /> : null}{conclusion}</p>
+        <p className="pm-banner-title">{marker !== undefined ? <span className="pm-banner-mark"><StatusMarker kind={marker} /></span> : null}{conclusion}</p>
         {detail !== undefined ? <p className="pm-banner-detail">{detail}</p> : null}
       </div>
       {actions !== undefined ? <div className="pm-banner-actions">{actions}</div> : null}
@@ -35,7 +35,9 @@ export const healthBannerCss = `
 .pm-banner-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .pm-banner-title { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
 .pm-banner-title .pm-sep { margin: 0 6px 0 -2px; }
-.pm-banner-detail { margin: 0 0 0 16px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
+/* 标记占 14px 宽的列（圆点和三角同宽），第二行缩进 14 + 8 = 22px 对齐结论，和状态条同一做法 */
+.pm-banner-mark { display: inline-flex; justify-content: center; flex-shrink: 0; width: 14px; }
+.pm-banner-detail { margin: 0 0 0 22px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-banner--plain .pm-banner-detail { margin-left: 0; }
 .pm-banner-actions { display: flex; gap: 8px; flex-shrink: 0; }
 `

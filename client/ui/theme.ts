@@ -46,7 +46,7 @@ body[data-ds-dark-theme] .pm-root[data-pm-accent='blue-whale'] {
   --pm-accent-soft: color-mix(in srgb, var(--dsw-alias-state-business-primary) 50%, var(--pm-bg));
 }
 .pm-root *, .pm-root *::before, .pm-root *::after { box-sizing: border-box; }
-.pm-root :is(button, [role='option'], [tabindex]):focus-visible {
+.pm-root :is(button, input[type='checkbox'], [role='option'], [tabindex]):focus-visible {
   outline: var(--dsw-focus-ring-width, 2px) solid var(--pm-focus);
   outline-offset: 2px;
 }

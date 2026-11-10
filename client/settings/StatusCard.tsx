@@ -62,7 +62,7 @@ export function StatusCard({ governanceEnabled, onOpen, now = Date.now() }: {
       {...(status.marker !== undefined ? { marker: status.marker } : {})}
       conclusion={status.conclusion}
       {...(status.detail !== undefined ? { detail: status.detail } : {})}
-      actions={<button type="button" className="pm-link" onClick={() => { onOpen({ view: 'todo', scope: ALL_SCOPE }) }}>{t('settings.status.open')}</button>}
+      actions={<button type="button" className="pm-link pm-settings-link" onClick={() => { onOpen({ view: 'todo', scope: ALL_SCOPE }) }}>{t('settings.status.open')}</button>}
     />
   )
 }

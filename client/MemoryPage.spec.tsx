@@ -98,6 +98,17 @@ describe('左栏范围', () => {
     expect(document.body).not.toHaveTextContent('0 个项目')
   })
 
+  it.each([
+    ['还没读到', { status: 'loading' as const }],
+    ['读取失败', { status: 'error' as const, message: 'boom' }],
+  ])('记忆%s时副行不写条数，分数照写', (_label, libraryState) => {
+    open({ view: 'todo' }, createFakeGateway({ currentWorkspace: '/w/app', views: { ...views, library: libraryState } }))
+    expect(rowParts(railRow('全局')).sub).toBe('85 分')
+    expect(rowParts(railRow('app')).sub).toBe('60 分')
+    expect(rowParts(railRow('zeta')).sub).toBe('暂不打分')
+    expect(rail().getAllByRole('button').map(b => rowParts(b).sub).join('|')).not.toMatch(/\d+ 条/)
+  })
+
   it('配置文件关掉体检：副行只写条数，不写分数', () => {
     open({ view: 'todo' }, createFakeGateway({ currentWorkspace: '/w/app', views: { ...views, health: { ...health, governanceEnabled: false } } }))
     expect(rail().getAllByRole('button').map(b => rowParts(b).sub)).toEqual([

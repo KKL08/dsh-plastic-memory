@@ -73,7 +73,7 @@ export const memoryCardCss = `
   display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; padding-left: 14px;
   font-size: 12px; line-height: 1.5; color: var(--pm-text-2);
 }
-.pm-mc-item { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.pm-mc-item { display: inline-flex; align-items: center; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
 .pm-mc-item svg { flex-shrink: 0; }
 /* 自定义类型名可能很长：窄侧栏里允许折行，不撑出横向滚动 */
 .pm-mc-meta .pm-chip { flex-shrink: 1; min-width: 0; white-space: normal; overflow-wrap: anywhere; }

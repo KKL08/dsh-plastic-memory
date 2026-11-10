@@ -4,7 +4,7 @@
  * 改动先暂存，保存行吸在可视区底部、写还有几项没保存；点保存先弹窗列出改了哪几项和保存后的影响（不再新增哪几类、已开着的对话重新带入记忆），确认后一次提交（useSettingsDraft）。
  * 体检开关 `governance.enabled` 只在配置文件里改，界面上不放；配置文件关掉体检时依赖它的两项置灰保留、说明换成原因，不隐藏。
  */
-import { useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import type { MemoryCommand } from '../../src/gui/contract.ts'
 import { useGateway } from '../gateway.ts'
 import { useT, type Translate } from '../i18n.tsx'
@@ -46,6 +46,14 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
   const draft = useSettingsDraft(form, migrate)
   const { snapshot, fields: f, saved, edit } = draft
   const [isConfirming, setConfirming] = useState(false)
+  const root = useRef<HTMLDivElement>(null)
+  // 确认框里点了保存：弹层关掉时保存按钮正置灰（保存中、存完没有改动），焦点还不回去，改落到保存行
+  const isFocusingFooter = useRef(false)
+  useEffect(() => {
+    if (!isFocusingFooter.current || isConfirming) return
+    isFocusingFooter.current = false
+    root.current?.querySelector<HTMLElement>('.pm-form-footer')?.focus()
+  })
   if (snapshot.status === 'loading') return <p className="pm-form-note" role="status">{t('settings.loading')}</p>
 
   const locked = !snapshot.writable || draft.saving
@@ -62,7 +70,7 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
   const changes = draft.dirty ? changeLines(t, saved, f, draft.changed, draft.migrations, counts) : []
 
   return (
-    <div className="pm-settings">
+    <div ref={root} className="pm-settings">
       <StatusCard governanceEnabled={governanceOn} onOpen={onOpenMemoryPage} {...(now !== undefined ? { now } : {})} />
       <SettingsForm
         state={{
@@ -153,7 +161,7 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
             />
           </SettingsItem>
           <SettingsItem label={t('settings.deleted.label')} hint={t('settings.deleted.hint')}>
-            <button type="button" className="pm-link" onClick={() => { onOpenMemoryPage({ view: 'deleted', scope: ALL_SCOPE }) }}>{t('settings.deleted.open')}</button>
+            <button type="button" className="pm-link pm-settings-link" onClick={() => { onOpenMemoryPage({ view: 'deleted', scope: ALL_SCOPE }) }}>{t('settings.deleted.open')}</button>
           </SettingsItem>
           <SettingsItem label={t('settings.root.label')} hint={t('settings.root.hint')}>
             <MemoryRoot configured={configuredRoot(snapshot.value)} />
@@ -192,7 +200,7 @@ export function SettingsPage({ form, onOpenMemoryPage, now }: {
             footer={(
               <>
                 <Button onClick={() => { setConfirming(false) }}>{t('settings.confirm.cancel')}</Button>
-                <Button variant="primary" onClick={() => { setConfirming(false); void draft.save() }}>{t('settings.confirm.save')}</Button>
+                <Button variant="primary" onClick={() => { isFocusingFooter.current = true; setConfirming(false); void draft.save() }}>{t('settings.confirm.save')}</Button>
               </>
             )}
           >
@@ -314,9 +322,12 @@ function MigrationNote({ draft }: { draft: ReturnType<typeof useSettingsDraft> }
   return null
 }
 
+/** 和处理视图「读不出的文件」卡同一判断（client/pending/cards.tsx 里那份没导出）。 */
+const isMac = () => typeof navigator !== 'undefined' && /mac/i.test(navigator.platform)
+
 /**
  * 实际路径来自视图（服务端解析过的绝对路径）；还没读到时显示配置里写的，都没有就提示开会话。
- * 有路径就能「在访达中显示」（openWorkspacePath 不要会话）。
+ * 有路径就能「在访达中显示」（其它平台写「在文件夹中显示」；openWorkspacePath 不要会话）。
  */
 function MemoryRoot({ configured }: { configured: string }) {
   const t = useT()
@@ -328,8 +339,8 @@ function MemoryRoot({ configured }: { configured: string }) {
   return (
     <span className="pm-settings-root">
       <code className="pm-settings-path">{path}</code>
-      <button type="button" className="pm-link" onClick={() => { void gateway.openPath(path, 'reveal').then((ok) => { setRefused(!ok) }) }}>
-        {t('library.reveal')}
+      <button type="button" className="pm-link pm-settings-link" onClick={() => { void gateway.openPath(path, 'reveal').then((ok) => { setRefused(!ok) }) }}>
+        {t(isMac() ? 'pending.unreadable.revealMac' : 'pending.unreadable.revealOther')}
       </button>
       {isRefused ? <span className="pm-setting-hint" role="status">{t('action.openFailed')}</span> : null}
     </span>
@@ -351,6 +362,7 @@ export const settingsPageCss = `
   color: var(--pm-text-2); overflow-wrap: anywhere; user-select: text;
 }
 .pm-settings-root > .pm-setting-hint { flex-basis: 100%; }
-.pm-settings .pm-link { font-size: 13px; line-height: 1.5; color: var(--pm-text-2); white-space: nowrap; }
-.pm-settings .pm-link:hover { color: var(--pm-text); text-decoration: none; }
+/* 次文字色的只有三个跳转链接：状态卡「打开记忆页 ›」、「查看最近删除 ›」、「在访达中显示」；别的链接（卡片里的「恢复」、原位确认）照普通链接 */
+.pm-settings .pm-settings-link { font-size: 13px; line-height: 1.5; color: var(--pm-text-2); white-space: nowrap; }
+.pm-settings .pm-settings-link:hover { color: var(--pm-text); text-decoration: none; }
 `

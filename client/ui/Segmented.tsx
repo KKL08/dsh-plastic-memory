@@ -152,7 +152,7 @@ export const segmentedCss = `
 .pm-tab {
   position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 4px; height: 34px; padding: 0 12px;
   border: none; border-radius: var(--dsw-radius-md, 12px); background: transparent; cursor: pointer;
-  font: inherit; font-size: 14px; line-height: 20px; color: var(--pm-text-2); transition: color 180ms ease;
+  font: inherit; font-size: 14px; line-height: 20px; white-space: nowrap; color: var(--pm-text-2); transition: color 180ms ease;
 }
 .pm-tab:hover, .pm-tab[aria-selected='true'] { color: var(--pm-text); }
 .pm-tab[aria-selected='true'] { font-weight: 600; }
