@@ -83,11 +83,11 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
 
   useEffect(() => {
     if (!open) return
-    const onPointer = (e: PointerEvent) => {
-      const target = e.target as Node
-      if (rootRef.current?.contains(target) || panelRef.current?.contains(target)) return
-      setPosition(null)
-    }
+    const isOutside = (target: Node) => !(rootRef.current?.contains(target) || panelRef.current?.contains(target))
+    const onPointer = (e: PointerEvent) => { if (isOutside(e.target as Node)) setPosition(null) }
+    // Tab 走到弹层和按钮以外时收起。弹层挂在 body 末尾，往后 Tab 会先走出页面、再绕回宿主的控件，
+    // 失焦那一下看不出去向，所以按焦点落到哪里判断；只是切走窗口（焦点没落到页面里别处）时不动
+    const onFocusIn = (e: FocusEvent) => { if (isOutside(e.target as Node)) setPosition(null) }
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
       // 焦点在弹层里时收起后还给按钮，不让它掉到 body
@@ -97,9 +97,11 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
     }
     document.addEventListener('pointerdown', onPointer, true)
     document.addEventListener('keydown', onKey)
+    document.addEventListener('focusin', onFocusIn)
     return () => {
       document.removeEventListener('pointerdown', onPointer, true)
       document.removeEventListener('keydown', onKey)
+      document.removeEventListener('focusin', onFocusIn)
     }
   }, [open])
 
