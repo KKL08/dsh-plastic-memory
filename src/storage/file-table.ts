@@ -71,8 +71,11 @@ export interface FileTableOptions {
   log?: MemoryLogger
 }
 
-/** 读取结果的内部形态：带 extras、磁盘原文与 mtime（维护点逐字节比较与取 mtime 用）；对外的 LocatedRecord / LocatedFile 不带后两者。 */
-interface Slot extends LocatedFile { raw: string; mtimeMs: number }
+/**
+ * 读取结果的内部形态：带 extras、磁盘原文与 mtime（维护点逐字节比较与取 mtime 用）；对外的 LocatedRecord / LocatedFile 不带后两者。
+ * hasReservedKeys：frontmatter 写了保留键（见 frontmatter.ts），维护点不就地回写这份文件。
+ */
+interface Slot extends LocatedFile { raw: string; mtimeMs: number; hasReservedKeys: boolean }
 /** 写路径的定位结果：取舍出的那份，外加这次定位读到的该 id 全部副本（含它自己）。写盘时只覆盖、只删这些副本里此后没变过的。 */
 interface LocatedSlot extends Slot { copies: readonly Slot[] }
 /** 占名结果：落到的路径，与本轮写下的那个文件的 inode（硬链接或 rename 过去的就是 tmp 的 inode；退回复制时是复制出的目标自己的）。 */
@@ -214,7 +217,7 @@ export class FileTable implements MemoryTable {
     const row = statsRows.get(outcome.record.id)
     const record = row ? { ...outcome.record, recallCount: row.recallCount, lastRecalledAt: row.lastRecalledAt } : outcome.record
     return {
-      slot: { record, extras: outcome.extras, filePath, dir, raw, mtimeMs },
+      slot: { record, extras: outcome.extras, filePath, dir, raw, mtimeMs, hasReservedKeys: outcome.notes.some(n => n.code === 'reserved-keys') },
       notes: outcome.notes.map(n => ({ ...n, path: filePath })),
     }
   }
@@ -404,7 +407,7 @@ export class FileTable implements MemoryTable {
    *  - .archive/ 里 status 仍为 active 的按位置归一成 deleted（位置即作用域，不搬回顶层）；deleted 缺 deletedAt 用 mtime 补
    *  - ③ .archive/ 里 deletedAt 超保留期的物理删除，哪层都没有这个 id 了才清召回统计行（superseded 不清）
    *  - ④ 手建 / 手编回写：digest 认识且不匹配 → handEdited、updatedAt 与 lastConfirmedAt 取 mtime；缺 id / 缺 digest / 时间戳形态 /
-   *    缺省字段由重新 encode 补齐；判「有变化」= 重新 encode 后与磁盘原文逐字节比较，不同才写
+   *    缺省字段由重新 encode 补齐；判「有变化」= 重新 encode 后与磁盘原文逐字节比较，不同才写；顶层含保留键的文件不回写
    *  - ② 顶层非 active 的搬进 .archive/（撞名追加 id 片段）；已过期的 active 文件不动
    *  - ① 再生 MEMORY.md：顶层 active 且未过期，同 id 取一份，name 再 id 排序，内容不变不写
    *  - ⑤ 陈旧 tmp 清理
@@ -455,7 +458,9 @@ export class FileTable implements MemoryTable {
           }
           continue
         }
-        if (text !== slot.raw && await this.unchangedSince(slot)) await this.atomicWrite(slot.filePath, text)
+        // 顶层含保留键的文件原样留着：回写会删掉这些键（content 键的值随之丢失），目录问题里的提醒也跟着消失，等用户自己改
+        const keepAsIs = !inArchive && slot.hasReservedKeys
+        if (!keepAsIs && text !== slot.raw && await this.unchangedSince(slot)) await this.atomicWrite(slot.filePath, text)
         if (!inArchive) kept.push({ record, filePath: slot.filePath, dir: slot.dir })
       }
       // kept 只剩顶层 active（非 active 已搬走）：同 id 取一份，再过滤已过期的

@@ -463,6 +463,19 @@ describe('全部记忆视图', () => {
     expect(library.directoryIssues.find(i => i.code === 'duplicate-id')).toEqual({ code: 'duplicate-id', path: dup, keptPath: join(root, GLOBAL_DIR, '全局一条.md') })
   })
 
+  it('删掉同目录另一条记忆之后，被忽略字段的目录问题还在，手写文件原样不动', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_other', name: '无关的' }))
+    const reserved = join(wsDir(), 'reserved.md')
+    const raw = '---\nname: 保留键\ntype: preference\nscope: global\n---\n\n正文\n'
+    await writeFile(reserved, raw)
+    expect((await h.views()).library.directoryIssues.map(i => [i.code, i.path])).toContainEqual(['reserved-keys', reserved])
+
+    await h.forget(['mem_other'])
+    expect(await readFile(reserved, 'utf8')).toBe(raw)
+    expect((await h.views()).library.directoryIssues.map(i => [i.code, i.path])).toContainEqual(['reserved-keys', reserved])
+  })
+
   it('hasSecret 只标高危密钥：用户确认存下的疑似密钥照原文显示，不标（不挡就地编辑）', async () => {
     const h = harness()
     await h.store.create(g({ id: 'mem_crit', name: '部署凭证', content: `token ${FAKE_SECRET.sk}` }))
