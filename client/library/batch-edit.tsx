@@ -155,7 +155,7 @@ export function BatchEdit({ items, latest, session, onBack, onApply, applyUnavai
    * 应用回 stale、not-found 时调用方把对不上的那几条交给 onBehind。
    */
   onApply?: (application: BatchApplication, picked: readonly BatchItem[], onBehind: (memoryIds: readonly string[]) => void) => void
-  /** 「应用全部」暂不可用的原因（没有会话、正在应用或等确认）。 */
+  /** 「应用全部」暂不可用的原因（没有会话、正在应用或等确认）；这时「返回列表」「全部放弃」也不可用，免得应用结果和确认没人接。 */
   applyUnavailable?: string | undefined
   /** 应用的确认与失败，画在底部按钮下。 */
   applyFeedback?: ReactNode
@@ -263,7 +263,7 @@ export function BatchEdit({ items, latest, session, onBack, onApply, applyUnavai
     <section className="pm-batch" aria-labelledby={titleId}>
       <div className="pm-batch-head">
         <h3 ref={title} id={titleId} className="pm-batch-title" tabIndex={-1}>{t('library.batch.title', { n: picked.length })}</h3>
-        <Button variant="ghost" onClick={onBack}>{t('library.batch.back')}</Button>
+        <Button variant="ghost" unavailable={applyUnavailable} onClick={onBack}>{t('library.batch.back')}</Button>
       </div>
       <BatchSteps current={STEP_OF[stage.kind]} />
       {behindCount !== undefined ? <p className="pm-notice" role="status">{t('library.batch.behind', { n: behindCount })}</p> : null}
@@ -372,7 +372,10 @@ function RequestStep({ session, picked, isRefreshing, onUnpick, request, onReque
                 title={t('library.batch.unpickHint')}
                 onClick={() => { removedAt.current = index; onUnpick(item.memory.id) }}
               >
-                <span aria-hidden="true">✕</span>
+                {/* 同「不再提醒」的叉（DismissButton）：宿主图标集里没有叉 */}
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" aria-hidden="true">
+                  <path d="m1.5 1.5 7 7m0-7-7 7" />
+                </svg>
               </Button>
             </li>
           ))}
@@ -622,7 +625,7 @@ function ApplyStep({ session, choice, picked, drafts: initialDrafts, onDiscardAl
       </ul>
       <div className="pm-edit-foot pm-plan-foot">
         <span className="pm-edit-hint">{t('library.batch.applySummary', { n: live.length, deletes, rewrites: live.length - deletes })}</span>
-        <Button variant="ghost" onClick={onDiscardAll}>{t('library.batch.discardAll')}</Button>
+        <Button variant="ghost" unavailable={unavailable} onClick={onDiscardAll}>{t('library.batch.discardAll')}</Button>
         {isConfirming
           ? (
             <SoftDeleteConfirm
@@ -811,6 +814,9 @@ export const batchEditCss = `
 .pm-plan-question { display: flex; align-items: baseline; gap: 6px; margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text); }
 .pm-plan-question .pm-marker { align-self: center; }
 .pm-plan-foot { padding-top: 12px; border-top: .5px solid var(--pm-line); }
+/* 删除确认的问句列出要删的每条名称，可能很长：在底栏里独占一行、问句换行，两个链接不折行 */
+.pm-plan-foot .pm-soft-confirm { flex: 1 1 100%; white-space: normal; }
+.pm-plan-foot .pm-soft-confirm > :not(:first-child) { flex: none; white-space: nowrap; }
 .pm-batch-items { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
 .pm-batch-item { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; }
 .pm-batch-item + .pm-batch-item { border-top: .5px solid var(--pm-line); }

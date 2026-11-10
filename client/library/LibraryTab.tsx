@@ -13,7 +13,7 @@
  * 应用中途失败、已写的没能全部退回时同样回到列表，结果条换成「只应用了其中 k 条……」，副行写明哪几条没退回、为什么，
  * 「撤销全部」只撤仍是这次写下的；应用回 stale、not-found 时留在工作区，交给它等视图换成最新内容。
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { checkupKey, MAX_BATCH_EDIT, scopeOfMemory, type LibraryView, type MemoryCard as MemoryCardData } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, useT, type Translate } from '../i18n.tsx'
@@ -147,6 +147,13 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
   /** 应用成功回到列表：焦点接到结果条上。 */
   const tidiedBar = useRef<HTMLDivElement>(null)
   const isTidiedNew = useRef(false)
+  /** 多选操作条点「取消」：焦点回到搜索框旁的「选择」。 */
+  const libBar = useRef<HTMLDivElement>(null)
+  /** 不可选的勾选框念原因用的 id 前缀。 */
+  const checkId = useId()
+  /** 这一次渲染里展开着的组露出的行（id）。整理应用成功后只给这些行留高亮，收起的组里的行之后展开时不再突然高亮、滚过去。 */
+  const drawnRows = useRef<ReadonlySet<string>>(new Set())
+  const isTidyFlashNew = useRef(false)
   const kept = [...done.values()].filter(row => row.state !== 'deleting' || actions.isBusy(row.memory.id))
   const viewItems = view.status === 'ready' ? view.data.layers.filter(l => isInScope([l.layer], scope)).flatMap(l => l.items) : []
   // 本页删掉、视图里已经没有的那几条留在原位（等结果、结果行或撤销后等视图回来）；分组的排序是稳定的，插回原位就落回原来的组和位置
@@ -201,6 +208,14 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
     isTidiedNew.current = false
     tidiedBar.current?.focus()
   }, [tidied])
+  useEffect(() => {
+    if (!isTidyFlashNew.current) return
+    isTidyFlashNew.current = false
+    setEditFlash((prev) => {
+      const next = [...prev].filter(id => drawnRows.current.has(id))
+      return next.length === prev.size ? prev : new Set(next)
+    })
+  }, [editFlash])
   const { flashId, revealId, targetId, clear } = useFlashTarget(nav, items.map(m => m.id))
   const typeLabel = useTypeLabel(session)
   const folds = useFold(fold, `library|${checkupKey(scope)}`, isSearching)
@@ -229,6 +244,8 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
         ...(result.isPartial === true ? { partial: { kept: [...kept].map(memoryOf), unrecorded: (result.unrecordedIds ?? []).map(memoryOf) } } : {}),
       })
       setFresh(prev => new Set([...prev, ...rewritten.keys()]))
+      // 回到列表画完后，没画出来的（收起的组里、收在「展开其余」里的）去掉高亮
+      isTidyFlashNew.current = true
       setEditFlash(new Set(rewritten.keys()))
     }, (failure) => {
       const ids = failure.memoryIds
@@ -469,18 +486,25 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
     )
   }
 
-  /** 多选时行首的勾选框：含密钥、没有版本的置灰，悬停写明原因。 */
+  /**
+   * 多选时行首的勾选框：含密钥、没有版本的置灰，悬停写明原因。不用原生 disabled（同 Button 的 unavailable）：
+   * 读屏能念到原因（aria-describedby），点击被吞掉。
+   */
   const checkbox = (memory: MemoryCardData, isPicked: boolean) => {
     const reason = memory.hasSecret === true ? t('library.select.secret') : memory.digest === undefined ? t('library.select.noVersion') : undefined
+    const blocked = reason !== undefined
+    const reasonId = `${checkId}-${memory.id}`
     return (
       <label className="pm-lib-check" title={reason}>
         <input
           type="checkbox"
           aria-label={t('library.select.row', { name: memory.name })}
+          aria-disabled={blocked || undefined}
+          aria-describedby={blocked ? reasonId : undefined}
           checked={isPicked}
-          disabled={reason !== undefined}
-          onChange={() => { toggle(memory.id) }}
+          onChange={() => { if (!blocked) toggle(memory.id) }}
         />
+        {blocked ? <span id={reasonId} className="pm-sr-only">{reason}</span> : null}
       </label>
     )
   }
@@ -494,7 +518,16 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
       <div ref={selectionBar} className="pm-lib-selbar" role="group" aria-label={t('library.select.bar')}>
         <p className="pm-lib-selbar-count" role="status">{isOver ? t('library.select.tooMany', { n, max: MAX_BATCH_EDIT }) : t('library.select.count', { n })}</p>
         <Button onClick={() => { setSelected(prev => new Set([...prev, ...items.filter(m => selectable.has(m.id)).map(m => m.id)])) }}>{t('library.select.all')}</Button>
-        <Button variant="ghost" onClick={endSelect}>{t('library.select.cancel')}</Button>
+        <Button
+          variant="ghost"
+          onClick={() => {
+            // 操作条随之收起：焦点回到「选择」（多选期间它就是「完成」，同一个按钮）
+            endSelect()
+            libBar.current?.querySelector<HTMLElement>('.pm-btn[aria-pressed]')?.focus()
+          }}
+        >
+          {t('library.select.cancel')}
+        </Button>
         <Button
           variant="primary"
           unavailable={blocked}
@@ -515,7 +548,10 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
     const own = scopeOfMemory(memory)
     if (done.get(memory.id)?.state === 'deleted') {
       return (
-        <li key={memory.id} className="pm-list-row">
+        <li key={memory.id} className={selecting ? 'pm-list-row pm-lib-row--selecting' : 'pm-list-row'}>
+          {selecting
+            ? <span className="pm-lib-check pm-lib-check--blank" aria-hidden="true"><input type="checkbox" tabIndex={-1} disabled /></span>
+            : null}
           <div className="pm-row-body">
             <div className="pm-lib-gone">
               <MemoryCard
@@ -604,11 +640,15 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
     )
   }
 
+  // 下面画组时记下露出的行，提交后整理的高亮据此去掉没画出来的
+  const drawn = new Set<string>()
+  drawnRows.current = drawn
   const group = ({ key, title, items: rows, isOpenByDefault, truncates, latest }: Group) => {
     const reveal = rows.findIndex(m => m.id === revealId)
     const isOpen = reveal >= 0 || folds.isOpen(key, isOpenByDefault)
     const isFull = !truncates || reveal >= GROUP_PREVIEW || folds.isFull(key)
     const shown = isFull ? rows : rows.slice(0, GROUP_PREVIEW)
+    if (isOpen) for (const m of shown) drawn.add(m.id)
     // 直达高亮期间收起这个组：高亮一起结束，不再把组撑着
     const settle = () => { if (reveal >= 0) clear() }
     return (
@@ -631,7 +671,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
 
   return (
     <div className="pm-lib">
-      <div className="pm-lib-bar">
+      <div ref={libBar} className="pm-lib-bar">
         <SearchBox label={t('library.search.label')} placeholder={t('library.search.placeholder')} value={query} onChange={setQuery} />
         {isAll
           ? null
@@ -706,7 +746,10 @@ export const libraryTabCss = `
 .pm-lib-bar > .pm-search { flex: 1; min-width: 0; }
 .pm-lib-check { display: flex; align-items: center; flex-shrink: 0; height: 22px; cursor: pointer; }
 .pm-lib-check input { margin: 0; accent-color: var(--pm-text); cursor: inherit; }
-.pm-lib-check:has(input:disabled) { cursor: default; }
+.pm-lib-check:has(input[aria-disabled='true']) { cursor: default; }
+.pm-lib-check input[aria-disabled='true'] { opacity: .4; }
+/* 刚删掉的结果行：只占勾选框那一列的位置，和别的行对齐 */
+.pm-lib-check--blank { visibility: hidden; }
 .pm-lib-row--selected { background: var(--pm-accent-tint); }
 /* 窄宽度下行改成上下排；多选时行尾按钮收起了，勾选框仍留在卡片左边 */
 @container (max-width: 500px) {

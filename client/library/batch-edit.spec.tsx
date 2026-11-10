@@ -86,7 +86,9 @@ describe('整理所选：写要求与看计划', () => {
     expect(within(rows[0]!).getByText('事实与经验')).toHaveClass('pm-chip--neutral')
     const remove = within(rows[1]!).getByRole('button', { name: '不整理「提交前检查」' })
     expect(remove).toHaveAttribute('title', '不整理这条')
-    expect(remove).toHaveTextContent('✕')
+    // 叉是自画的线性图标，不用文字字符
+    expect(remove).toHaveTextContent(/^$/)
+    expect(remove.querySelector('svg')).toHaveAttribute('aria-hidden', 'true')
     expect(picked().getByText('4 条')).toBeInTheDocument()
   })
 

@@ -1123,13 +1123,39 @@ describe('记忆查看：多选', () => {
   it('故事 14：含密钥、没有版本的行勾选框置灰，悬停写明原因；可选的行勾选框名字带上记忆名', () => {
     setup()
     enter()
-    expect(box('部署 token [已隐藏]')).toBeDisabled()
+    expect(box('部署 token [已隐藏]')).toHaveAttribute('aria-disabled', 'true')
     expect(box('部署 token [已隐藏]').closest('label')).toHaveAttribute('title', '含密钥的记忆不发给模型')
-    expect(box('没有版本的那条')).toBeDisabled()
+    expect(box('没有版本的那条')).toHaveAttribute('aria-disabled', 'true')
     expect(box('没有版本的那条').closest('label')).toHaveAttribute('title', '这条读不到版本，先刷新')
     expect(box('提交前跑 typecheck')).toBeEnabled()
+    expect(box('提交前跑 typecheck')).not.toHaveAttribute('aria-disabled')
+    expect(box('提交前跑 typecheck')).not.toHaveAccessibleDescription()
     expect(box('提交前跑 typecheck').closest('label')).not.toHaveAttribute('title')
     expect(box('提交前跑 typecheck')).toHaveAccessibleName(`选择「${a2.name}」`)
+  })
+
+  it('故事 14：不可选的勾选框不用原生 disabled（读屏念得到原因），点了不勾上', () => {
+    setup()
+    enter()
+    const secretBox = box('部署 token [已隐藏]')
+    expect(secretBox).toBeEnabled()
+    expect(secretBox).toHaveAccessibleDescription('含密钥的记忆不发给模型')
+    expect(box('没有版本的那条')).toHaveAccessibleDescription('这条读不到版本，先刷新')
+    fireEvent.click(secretBox)
+    expect(secretBox).not.toBeChecked()
+    expect(within(bar()).getByRole('status')).toHaveTextContent('已选 0 条')
+  })
+
+  it('故事 14：选择模式下刚删掉的结果行左侧留出勾选框列的位置，和别的行对齐', async () => {
+    setup()
+    await remove(row('提交前跑 typecheck'))
+    enter()
+    const gone = row('提交前跑 typecheck')
+    expect(within(gone).queryByRole('checkbox')).toBeNull()
+    const slot = gone.firstElementChild!
+    expect(slot).toHaveClass('pm-lib-check')
+    expect(slot).toHaveAttribute('aria-hidden', 'true')
+    expect(row('每周三发版，先跑测试再打包。').firstElementChild).toHaveClass('pm-lib-check')
   })
 
   it('故事 14：已展开的单条面板没写东西时直接收起；有没发出的输入先原位问「放弃刚写的内容？」，取消留在原处，确认后进多选', () => {
@@ -1220,6 +1246,15 @@ describe('记忆查看：多选', () => {
     expect(box('提交前跑 typecheck')).not.toBeChecked()
   })
 
+  it('故事 17：操作条的「取消」收起后，焦点回到「选择」，不掉到页面上', () => {
+    setup()
+    enter()
+    const cancel = within(bar()).getByRole('button', { name: '取消' })
+    cancel.focus()
+    fireEvent.click(cancel)
+    expect(screen.getByRole('button', { name: '选择' })).toHaveFocus()
+  })
+
   it('别处删掉已选的记忆：按视图自动去掉勾选，撤销回来也不再勾上', () => {
     const { gateway } = setup()
     enter()
@@ -1287,12 +1322,12 @@ describe('记忆查看：整理所选的应用与撤销', () => {
   function setup({ plan = PLAN, draft = DRAFT, apply = () => applied, undo = () => ({ ok: true, cmd: 'undo', decisionId: 'pd_t' }), planned }: {
     plan?: EditPlan
     draft?: typeof DRAFT
-    apply?: (command: Extract<MemoryCommand, { cmd: 'apply-edits' }>) => MemoryCommandResult
+    apply?: (command: Extract<MemoryCommand, { cmd: 'apply-edits' }>) => MemoryCommandResult | Promise<MemoryCommandResult>
     undo?: () => MemoryCommandResult
     /** 改写 plan-edits 的结果：返回 undefined 时照常回 plan。 */
     planned?: () => MemoryCommandResult | undefined
   } = {}) {
-    const respond = (command: MemoryCommand): MemoryCommandResult => {
+    const respond = (command: MemoryCommand): MemoryCommandResult | Promise<MemoryCommandResult> => {
       switch (command.cmd) {
         case 'plan-edits': return planned?.() ?? { ok: true, cmd: 'plan-edits', plan, model: 'deepseek-v4-flash' }
         case 'draft-plan': return { ok: true, cmd: 'draft-plan', drafts: command.ops.map(op => ({ memoryId: op.memoryId, draft })), model: 'deepseek-v4-flash' }
@@ -1365,6 +1400,51 @@ describe('记忆查看：整理所选的应用与撤销', () => {
     expect(row(b4.content)).not.toHaveClass('pm-flash')
     expect(within(row(b4.content)).queryByText('刚改')).toBeNull()
     expect(hasRow(p1.content)).toBe(false)
+  })
+
+  it('故事 26：改写的行当时在收起的组里：结果条照常，之后展开那一组时这一行不再高亮', async () => {
+    setup()
+    fireEvent.click(screen.getByRole('button', { name: '选择' }))
+    for (const m of [p1, b4]) fireEvent.click(within(row(m.content)).getByRole('checkbox'))
+    // 收起改写那条所在的组，再用「全选当前结果」把它勾上
+    const toggleOf = (li: HTMLElement) => li.closest('.pm-memgroup')!.querySelector<HTMLElement>('.pm-memgroup-toggle')!
+    const toggle = toggleOf(row(c2.content))
+    fireEvent.click(toggle)
+    fireEvent.click(within(screen.getByRole('group', { name: '多选操作' })).getByRole('button', { name: '全选当前结果' }))
+    fireEvent.click(tidyButton())
+    fireEvent.change(screen.getByRole('textbox', { name: '想怎么整理这几条？' }), { target: { value: '以 biome 为准' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '生成整理计划' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '按计划出稿' })) })
+    await applyAll()
+    expect(within(resultBar()!).getByRole('status')).toHaveTextContent(/^已整理 3 条/)
+    expect(hasRow(DRAFT.content)).toBe(false)
+    fireEvent.click(screen.getAllByRole('button', { expanded: false })[0]!)
+    expect(row(DRAFT.content)).not.toHaveClass('pm-flash')
+    expect(within(row(DRAFT.content)).getByText('刚改')).toBeInTheDocument()
+  })
+
+  it('故事 26：应用在途时「返回列表」「全部放弃」不可用，点了不离开工作区；结果回来后照常回到列表', async () => {
+    let release!: (r: MemoryCommandResult) => void
+    setup({ apply: () => new Promise((r) => { release = r }) })
+    await toApply()
+    await applyAll()
+    const back = screen.getByRole('button', { name: '返回列表' })
+    const discard = screen.getByRole('button', { name: '全部放弃' })
+    expect(back).toHaveAttribute('aria-disabled', 'true')
+    expect(discard).toHaveAttribute('aria-disabled', 'true')
+    fireEvent.click(back)
+    fireEvent.click(discard)
+    expect(screen.getByRole('heading', { name: '整理所选的 3 条' })).toBeInTheDocument()
+    await act(async () => { release(applied) })
+    expect(screen.queryByRole('heading', { name: /^整理所选的/ })).toBeNull()
+    expect(within(resultBar()!).getByRole('status')).toHaveTextContent(/^已整理 3 条/)
+  })
+
+  it('故事 26：没在应用时「返回列表」「全部放弃」照常可用', async () => {
+    setup()
+    await toApply()
+    expect(screen.getByRole('button', { name: '返回列表' })).not.toHaveAttribute('aria-disabled')
+    expect(screen.getByRole('button', { name: '全部放弃' })).not.toHaveAttribute('aria-disabled')
   })
 
   it('故事 26：只有改写时直接应用，结果条没有「最近删除」的副行；开始下一次整理时结果条收起', async () => {
