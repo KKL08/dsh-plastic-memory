@@ -43,23 +43,9 @@ import { useCommandRunner } from '../command/useCommandRunner.ts'
 import { promotionOf, usePromoteInPlace, type InPlacePromotion } from '../chat/promote-in-place.tsx'
 import { ModelChangeLine } from '../chat/model-change.tsx'
 import { isLiveWrite, sessionCards, writtenSinceSnapshot } from './session-memories.ts'
-
-type Conflict = Extract<PendingItem, { kind: 'conflict-horizontal' }>
-type VerticalConflict = Extract<PendingItem, { kind: 'conflict-vertical' }>
-type Verdict = 'keep-left' | 'keep-right' | 'keep-both'
-
-/**
- * 刚裁决的冲突：记忆的快照留着，被删后仍能原位显示。isUnrecorded：两边都留但结论没记下（见命令结果 isUnrecorded），
- * 没有可撤销的条目。isHardDeleted：败方含密钥、已彻底删除，同样没有撤销。
- */
-type Outcome = { isUnrecorded?: true; isHardDeleted?: true }
-type Ruled =
-  | { kind: 'horizontal'; decisionId: string; verdict: Verdict; left: MemoryCardData; right: MemoryCardData } & Outcome
-  | { kind: 'vertical'; decisionId: string; verdict: Verdict; memory: MemoryCardData } & Outcome
+import { groupInjected, type Conflict, type GroupDepth, type Outcome, type Ruled, type Verdict, type VerticalConflict } from './injected-groups.ts'
 
 const outcomeOf = (result: Ok): Outcome => ({ ...(result.isUnrecorded ? { isUnrecorded: true } : {}), ...(result.isHardDeleted ? { isHardDeleted: true } : {}) })
-
-const ruledMemories = (r: Ruled): MemoryCardData[] => r.kind === 'horizontal' ? [r.left, r.right] : [r.memory]
 
 /** 用量标题随快照来历变。 */
 const USAGE_TITLE: Record<SnapshotOrigin, LocaleKey> = {
@@ -69,11 +55,12 @@ const USAGE_TITLE: Record<SnapshotOrigin, LocaleKey> = {
   refreshed: 'sidebar.usage.titleRefreshed',
 }
 
-type Entry =
-  | { kind: 'memory'; memory: MemoryCardData }
-  | { kind: 'conflict'; item: Conflict }
-  | { kind: 'vertical'; item: VerticalConflict }
-  | { kind: 'ruled'; ruled: Ruled }
+/** 组标题后面标的带入方式。 */
+const DEPTH_LABEL: Record<GroupDepth, LocaleKey> = {
+  full: 'sidebar.groups.full',
+  summary: 'sidebar.groups.summary',
+  titleOnly: 'sidebar.groups.titleOnly',
+}
 
 export interface SidebarTabProps {
   /** tab 所在的会话。 */
@@ -185,53 +172,19 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     )
   }
 
-  // 带入的记忆按类型分组；记忆有待决横向冲突（或刚裁决完）时，那张冲突卡占它的位置，另一方不再单独列
   const pendingItems = pending.status === 'ready' ? pending.data.items : []
-  const conflicts = pendingItems.filter((item): item is Conflict => item.kind === 'conflict-horizontal')
-  const verticals = pendingItems.filter((item): item is VerticalConflict => item.kind === 'conflict-vertical')
   const viewLabels = mergeTypeLabels(library, pending)
   const label = (type: string) => typeLabel(t, type, { viewLabels, customTypes: config?.customTypes })
   const ruledIds = new Set(ruled.map(r => r.decisionId))
-  const inline = new Set<string>()
-  const shown = new Set<string>()
-  const groups = new Map<string, Entry[]>()
-  const counts = new Map<string, number>()
-  // 每组按带入方式计数：快照按类型决定全文（core 区）、带摘要的索引行还是只带名称和标签的索引行，一组正常只有一种
-  const coreIds = new Set(snapshot?.coreIds ?? [])
-  const titleOnlyIds = new Set(snapshot?.titleOnlyIds ?? [])
-  const fullCounts = new Map<string, number>()
-  const titleCounts = new Map<string, number>()
-  const push = (type: string, entry: Entry) => { groups.set(type, [...groups.get(type) ?? [], entry]) }
-  for (const id of snapshot?.injectedIds ?? []) {
-    const done = ruled.find(r => ruledMemories(r).some(m => m.id === id))
-    const memory = byId.get(id) ?? (done === undefined ? undefined : ruledMemories(done).find(m => m.id === id))
-    if (memory === undefined) continue
-    counts.set(memory.type, (counts.get(memory.type) ?? 0) + 1)
-    if (coreIds.has(id)) fullCounts.set(memory.type, (fullCounts.get(memory.type) ?? 0) + 1)
-    if (titleOnlyIds.has(id)) titleCounts.set(memory.type, (titleCounts.get(memory.type) ?? 0) + 1)
-    if (shown.has(id)) continue
-    const open = done === undefined
-      ? conflicts.find(c => !ruledIds.has(c.decisionId) && (c.left?.id === id || c.right?.id === id))
-      : undefined
-    const openVertical = done === undefined && open === undefined
-      ? verticals.find(c => !ruledIds.has(c.decisionId) && c.memory?.id === id)
-      : undefined
-    if (done !== undefined) {
-      push(memory.type, { kind: 'ruled', ruled: done })
-      for (const m of ruledMemories(done)) shown.add(m.id)
-    } else if (openVertical !== undefined) {
-      push(memory.type, { kind: 'vertical', item: openVertical })
-      inline.add(openVertical.decisionId)
-      shown.add(id)
-    } else if (open !== undefined) {
-      push(memory.type, { kind: 'conflict', item: open })
-      inline.add(open.decisionId)
-      for (const side of [open.left, open.right]) if (side !== null) shown.add(side.id)
-    } else {
-      push(memory.type, { kind: 'memory', memory })
-      shown.add(id)
-    }
-  }
+  const { groups, inline } = groupInjected({
+    injectedIds: snapshot?.injectedIds ?? [],
+    coreIds: snapshot?.coreIds ?? [],
+    titleOnlyIds: snapshot?.titleOnlyIds ?? [],
+    byId,
+    ruled,
+    conflicts: pendingItems.filter((item): item is Conflict => item.kind === 'conflict-horizontal'),
+    verticals: pendingItems.filter((item): item is VerticalConflict => item.kind === 'conflict-vertical'),
+  })
   // 这次新写入的只列还没进快照、还在的；彻底删除的原位留说明
   // 这里软删的原位留「已删除 · 撤销」，撤销后视图还没刷新回来的照留下的卡画
   const saved = (snapshot === undefined ? [] : writtenSinceSnapshot(snapshot))
@@ -273,15 +226,6 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   // 会话快照冻结在插件本次加载之前 = 对话里还是重启前带入的那份
   const bootedAt = health.status === 'ready' ? health.data.bootedAt : undefined
   const usageTitle = t(USAGE_TITLE[snapshot?.origin ?? 'start'])
-  // 混着几种带入方式的组不标
-  const depthMark = (type: string) => {
-    const total = counts.get(type) ?? 0
-    const full = fullCounts.get(type) ?? 0
-    const titleOnly = titleCounts.get(type) ?? 0
-    if (full === total) return t('sidebar.groups.full')
-    if (titleOnly === total) return t('sidebar.groups.titleOnly')
-    return full === 0 && titleOnly === 0 ? t('sidebar.groups.summary') : undefined
-  }
   const usage = snapshot === undefined
     ? sessionView.status === 'missing'
       ? <Note title={t('sidebar.noSnapshot.title')}>{t('sidebar.noSnapshot.body')}</Note>
@@ -386,19 +330,19 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
         : null}
 
       {refused !== undefined && !inline.has(refused) && !ruledIds.has(refused) ? refusedNote : null}
-      {groups.size > 0
+      {groups.length > 0
         ? (
           <section className="pm-side-section" aria-label={t('sidebar.groups.title')}>
             <h2 className="pm-side-title">{t('sidebar.groups.title')}</h2>
-            {[...groups].map(([type, entries]) => (
+            {groups.map(({ type, count, depth, entries }) => (
               <section key={type} className="pm-side-group" aria-label={label(type)}>
                 <h3 className="pm-side-group-title">
                   {label(type)}{' '}
-                  <span className="pm-side-group-count">{formatNumber(counts.get(type) ?? 0)}</span>
-                  {depthMark(type) === undefined ? null : (
+                  <span className="pm-side-group-count">{formatNumber(count)}</span>
+                  {depth === undefined ? null : (
                     <>
                       {' '}<i className="pm-sep" aria-hidden="true">·</i>
-                      <span className="pm-side-group-depth">{depthMark(type)}</span>
+                      <span className="pm-side-group-depth">{t(DEPTH_LABEL[depth])}</span>
                     </>
                   )}
                 </h3>
