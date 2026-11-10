@@ -1,6 +1,6 @@
 /**
- * 右侧栏「带入的记忆」怎么分组：按类型分组，每组数出带入几条、按哪种方式带入；
- * 记忆有待决冲突（或刚裁决完）时，那张冲突卡占它的位置，另一方不再单独列。
+ * 右侧栏「带入的记忆」怎么分组：按类型分组，每组列出带入的记忆、标出按哪种方式带入；
+ * 带入的记忆涉及的待决冲突（和刚裁决完的）另列一份，画在「等你决定」段里，冲突双方照常留在各自的类型组。
  */
 import type { MemoryCard, PendingItem } from '../../src/gui/contract.ts'
 
@@ -17,8 +17,8 @@ export type Ruled =
   | { kind: 'horizontal'; decisionId: string; verdict: Verdict; left: MemoryCard; right: MemoryCard } & Outcome
   | { kind: 'vertical'; decisionId: string; verdict: Verdict; memory: MemoryCard } & Outcome
 
-export type Entry =
-  | { kind: 'memory'; memory: MemoryCard }
+/** 「等你决定」里的一张卡：待决的横向、基线冲突，或刚裁决完的结果。 */
+export type Decision =
   | { kind: 'conflict'; item: Conflict }
   | { kind: 'vertical'; item: VerticalConflict }
   | { kind: 'ruled'; ruled: Ruled }
@@ -28,17 +28,17 @@ export type GroupDepth = 'full' | 'summary' | 'titleOnly'
 
 export interface InjectedGroup {
   type: string
-  /** 这一类带入了几条（含挂在别组冲突卡里的）。 */
-  count: number
   depth: GroupDepth | undefined
-  entries: Entry[]
+  /** 这一类带入的记忆，按带入的顺序。 */
+  memories: MemoryCard[]
 }
 
 const ruledMemories = (r: Ruled): MemoryCard[] => r.kind === 'horizontal' ? [r.left, r.right] : [r.memory]
 
 /**
  * 按快照带入的顺序分组（组按首次出现排）。找不到的 id 跳过；刚裁决的冲突，记忆即使已从视图里删掉也按留下的快照画。
- * inline：就地挂出来的待决冲突（decisionId），底部「其余待处理」不再算它们。
+ * decisions：涉及带入记忆的冲突，按涉及的记忆首次带入的顺序排，同一条记忆先横向后基线；刚裁决的占它原来的位置，同一 decisionId 的待决项不再列。
+ * inline：列出来的待决冲突（decisionId），底部「其余待处理」不再算它们。
  */
 export function groupInjected({ injectedIds, coreIds, titleOnlyIds, byId, ruled, conflicts, verticals }: {
   injectedIds: readonly string[]
@@ -48,52 +48,45 @@ export function groupInjected({ injectedIds, coreIds, titleOnlyIds, byId, ruled,
   ruled: readonly Ruled[]
   conflicts: readonly Conflict[]
   verticals: readonly VerticalConflict[]
-}): { groups: InjectedGroup[]; inline: Set<string> } {
+}): { groups: InjectedGroup[]; decisions: Decision[]; inline: Set<string> } {
   const ruledIds = new Set(ruled.map(r => r.decisionId))
+  const sides = (...list: Array<MemoryCard | null>) => list.flatMap(m => m === null ? [] : [m.id])
+  const candidates: Array<{ decision: Decision; ids: string[] }> = [
+    ...ruled.filter(r => r.kind === 'horizontal').map(r => ({ decision: { kind: 'ruled' as const, ruled: r }, ids: sides(...ruledMemories(r)) })),
+    ...conflicts.filter(c => !ruledIds.has(c.decisionId)).map(c => ({ decision: { kind: 'conflict' as const, item: c }, ids: sides(c.left, c.right) })),
+    ...ruled.filter(r => r.kind === 'vertical').map(r => ({ decision: { kind: 'ruled' as const, ruled: r }, ids: sides(...ruledMemories(r)) })),
+    ...verticals.filter(c => !ruledIds.has(c.decisionId)).map(c => ({ decision: { kind: 'vertical' as const, item: c }, ids: sides(c.memory) })),
+  ]
   const core = new Set(coreIds)
   const titleOnly = new Set(titleOnlyIds)
-  const tallies = new Map<string, { total: number; full: number; titleOnly: number }>()
-  const entries = new Map<string, Entry[]>()
+  const groups = new Map<string, { memories: MemoryCard[]; full: number; titleOnly: number }>()
+  const decisions: Decision[] = []
   const inline = new Set<string>()
-  const shown = new Set<string>()
-  const push = (type: string, entry: Entry) => { entries.set(type, [...entries.get(type) ?? [], entry]) }
+  const listed = new Set<(typeof candidates)[number]>()
   for (const id of injectedIds) {
+    for (const candidate of candidates) {
+      if (listed.has(candidate) || !candidate.ids.includes(id)) continue
+      listed.add(candidate)
+      decisions.push(candidate.decision)
+      if (candidate.decision.kind !== 'ruled') inline.add(candidate.decision.item.decisionId)
+    }
     const done = ruled.find(r => ruledMemories(r).some(m => m.id === id))
     const memory = byId.get(id) ?? (done === undefined ? undefined : ruledMemories(done).find(m => m.id === id))
     if (memory === undefined) continue
-    const tally = tallies.get(memory.type) ?? { total: 0, full: 0, titleOnly: 0 }
-    tallies.set(memory.type, {
-      total: tally.total + 1,
-      full: tally.full + (core.has(id) ? 1 : 0),
-      titleOnly: tally.titleOnly + (titleOnly.has(id) ? 1 : 0),
+    const group = groups.get(memory.type) ?? { memories: [], full: 0, titleOnly: 0 }
+    groups.set(memory.type, {
+      memories: [...group.memories, memory],
+      full: group.full + (core.has(id) ? 1 : 0),
+      titleOnly: group.titleOnly + (titleOnly.has(id) ? 1 : 0),
     })
-    if (shown.has(id)) continue
-    const open = done === undefined
-      ? conflicts.find(c => !ruledIds.has(c.decisionId) && (c.left?.id === id || c.right?.id === id))
-      : undefined
-    const openVertical = done === undefined && open === undefined
-      ? verticals.find(c => !ruledIds.has(c.decisionId) && c.memory?.id === id)
-      : undefined
-    if (done !== undefined) {
-      push(memory.type, { kind: 'ruled', ruled: done })
-      for (const m of ruledMemories(done)) shown.add(m.id)
-    } else if (openVertical !== undefined) {
-      push(memory.type, { kind: 'vertical', item: openVertical })
-      inline.add(openVertical.decisionId)
-      shown.add(id)
-    } else if (open !== undefined) {
-      push(memory.type, { kind: 'conflict', item: open })
-      inline.add(open.decisionId)
-      for (const side of [open.left, open.right]) if (side !== null) shown.add(side.id)
-    } else {
-      push(memory.type, { kind: 'memory', memory })
-      shown.add(id)
-    }
   }
-  const groups = [...entries].map(([type, list]): InjectedGroup => {
-    const { total, full, titleOnly: titles } = tallies.get(type) ?? { total: 0, full: 0, titleOnly: 0 }
-    const depth = full === total ? 'full' : titles === total ? 'titleOnly' : full === 0 && titles === 0 ? 'summary' : undefined
-    return { type, count: total, depth, entries: list }
-  })
-  return { groups, inline }
+  return {
+    groups: [...groups].map(([type, { memories, full, titleOnly: titles }]): InjectedGroup => {
+      const total = memories.length
+      const depth = full === total ? 'full' : titles === total ? 'titleOnly' : full === 0 && titles === 0 ? 'summary' : undefined
+      return { type, depth, memories }
+    }),
+    decisions,
+    inline,
+  }
 }

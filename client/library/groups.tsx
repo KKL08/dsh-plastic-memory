@@ -188,8 +188,8 @@ export function MemoryGroup({ title, count, latest, now, isOpen, onToggle, hidde
   )
 }
 
-/** 组体：挂载时是点标题展开的才撑开，挂上就清掉标记；之后结构不变，展开其余、视图刷新都不再播。 */
-function GroupBody({ clicked, children }: { clicked: MutableRefObject<boolean>; children: ReactNode }) {
+/** 组体：挂载时是点标题展开的才撑开，挂上就清掉标记；之后结构不变，展开其余、视图刷新都不再播。右侧栏的可折叠段也用它。 */
+export function GroupBody({ clicked, children }: { clicked: MutableRefObject<boolean>; children: ReactNode }) {
   const [isArriving] = useState(() => clicked.current)
   useEffect(() => { clicked.current = false }, [])
   if (!isArriving) return children

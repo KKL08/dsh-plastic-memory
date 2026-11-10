@@ -85,6 +85,7 @@ describe('SidebarTab 四种状态', () => {
   it('有全局没本项目：提示本项目还没有记忆，列出带入的全局记忆，不写「本项目 0 条」', () => {
     setup({ library: library(glob), session: snapshot({ injectedIds: ['g1'] }), pending: pending() })
     expect(screen.getByText('本项目还没有记忆，这次带入的都是全局记忆。')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '用户画像 1 全文' }))
     expect(screen.getByText('用户是数据工程师。')).toBeInTheDocument()
     expect(screen.queryByText(/本项目 0 条/)).toBeNull()
   })
@@ -241,6 +242,7 @@ describe('SidebarTab 快照来历与分组', () => {
     expect(savedAfter.getByText('周五不发版。')).toBeInTheDocument()
     const injected = within(screen.getByRole('region', { name: '带入的记忆' }))
     expect(injected.getByRole('heading', { name: '事实与经验 1 只带摘要' })).toBeInTheDocument()
+    fireEvent.click(injected.getByRole('button', { name: '事实与经验 1 只带摘要' }))
     expect(screen.getAllByText('报销截止每月 25 日。')).toHaveLength(1)
 
     act(() => { gateway.setView('session', snapshot({ origin: 'compacted', injectedIds: ['p1', 'j1', 'g1', 'n1', 'n2'], savedIds: ['n1', 'n2'] })) })
@@ -616,16 +618,15 @@ describe('SidebarTab 同 id 的多份副本', () => {
 })
 
 describe('SidebarTab 就地裁决', () => {
-  it('冲突卡挂在那条记忆所在组里，另一方不再单独列；裁决后留原位，撤销后冲突回来', async () => {
+  it('冲突卡在「等你决定」段里；裁决后结果留原位，撤销后冲突回来', async () => {
     const { gateway, container } = setup({
       library: library(pref, pref2, proj, glob),
       session: snapshot({ injectedIds: ['p1', 'j1', 'p2', 'g1'] }),
       pending: pending(conflict),
     })
-    const group = within(screen.getByRole('region', { name: '行为偏好' }))
+    const group = within(screen.getByRole('region', { name: '等你决定' }))
     expect(group.getByRole('heading', { name: '两条记忆互相矛盾，等你决定' })).toBeInTheDocument()
-    expect(group.getByRole('heading', { name: '行为偏好 2 全文' })).toBeInTheDocument()
-    expect(screen.getAllByText('测试里 mock 数据库就行。')).toHaveLength(1)
+    expect(within(screen.getByRole('region', { name: '带入的记忆' })).getByRole('heading', { name: '行为偏好 2 全文' })).toBeInTheDocument()
     expect(container.querySelectorAll('.pm-conflict-buttons button')).toHaveLength(3)
 
     await act(async () => { fireEvent.click(group.getByRole('button', { name: '以 A 为准' })) })
@@ -705,7 +706,7 @@ describe('SidebarTab 别处已经在处理同一条冲突', () => {
       { library: library(pref, pref2, proj, glob), session: snapshot({ injectedIds: ['p1', 'j1', 'p2', 'g1'] }), pending: pending(conflict) },
       command => ({ ok: false, cmd: command.cmd, code, detail: '待决项 pd_1 正在被另一次裁决处理，未做任何改动。' }),
     )
-    const group = within(screen.getByRole('region', { name: '行为偏好' }))
+    const group = within(screen.getByRole('region', { name: '等你决定' }))
     await act(async () => { fireEvent.click(group.getByRole('button', { name: '以 B 为准' })) })
     expect(group.getByRole('alert')).toHaveTextContent(refused)
     expect(screen.queryByText(/正在被另一次裁决处理/)).toBeNull()
@@ -745,7 +746,7 @@ describe('SidebarTab 一条冲突同时只发一次裁决', () => {
         ? new Promise(resolve => { finish = () => { resolve({ ok: true, cmd: command.cmd, decisionId: 'pd_1' }) } })
         : { ok: true, cmd: command.cmd, memoryIds: ['n1'] },
     )
-    const group = within(screen.getByRole('region', { name: '行为偏好' }))
+    const group = within(screen.getByRole('region', { name: '等你决定' }))
     await act(async () => { fireEvent.click(group.getByRole('button', { name: '以 A 为准' })) })
     const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
     await remove(saved.getByRole('button', { name: '删除这条记忆' }))
@@ -829,9 +830,9 @@ describe('SidebarTab 冲突对方在别的项目', () => {
 })
 
 describe('SidebarTab 就地裁决：和基线冲突', () => {
-  it('带入的记忆和基线冲突：冲突卡挂在它的组里，写明基线不会被删除；以基线为准发 keep-right，结果留原位可撤销', async () => {
+  it('带入的记忆和基线冲突：冲突卡在「等你决定」段里，写明基线不会被删除；以基线为准发 keep-right，结果留原位可撤销', async () => {
     const { gateway } = setup({ library: library(pref, proj), session: snapshot({ injectedIds: ['p1', 'j1'] }), pending: pending(vertical) })
-    const group = within(screen.getByRole('region', { name: '项目信息' }))
+    const group = within(screen.getByRole('region', { name: '等你决定' }))
     expect(group.getByRole('heading', { name: '这条记忆和基线矛盾，等你决定' })).toBeInTheDocument()
     expect(group.getByText('AGENTS.md 是基线，不会被删除。')).toBeInTheDocument()
     expect(screen.getAllByText('merge freeze 到 3 月 5 日。')).toHaveLength(1)
@@ -983,6 +984,45 @@ describe('SidebarTab 确认收起后的键盘焦点', () => {
     await waitFor(() => { expect(note).toHaveFocus() })
   })
 
+  it('撤销裁决：撤销生效、视图还没带回冲突时「等你决定」段不消失，原位画回冲突卡，焦点落在第一个裁决按钮；视图带回后卡片不重挂、焦点不动', async () => {
+    const { gateway } = setup({ library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1', 'p2', 'j1'] }), pending: pending(conflict) })
+    await press(screen.getByRole('button', { name: '以 A 为准' }))
+    act(() => {
+      gateway.setView('pending', pending())
+      gateway.setView('library', library(pref, proj))
+    })
+    await press(screen.getByRole('button', { name: '撤销' }))
+    // 中间态：撤销已生效，待处理视图里还没有这条冲突
+    const yourCall = screen.getByRole('region', { name: '等你决定' })
+    const card = within(yourCall).getByRole('heading', { name: '两条记忆互相矛盾，等你决定' }).closest('article')!
+    expect(within(card).getByText('测试里 mock 数据库就行。')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '等你决定 1' })).toHaveAttribute('aria-expanded', 'true')
+    await waitFor(() => { expect(within(card).getByRole('button', { name: '以 A 为准' })).toHaveFocus() })
+
+    act(() => {
+      gateway.setView('pending', pending(conflict))
+      gateway.setView('library', library(pref, pref2, proj))
+    })
+    expect(within(yourCall).getAllByRole('article')).toHaveLength(1)
+    expect(within(yourCall).getByRole('article')).toBe(card)
+    expect(within(card).getByRole('button', { name: '以 A 为准' })).toHaveFocus()
+  })
+
+  it('撤销后视图还没带回冲突时可以接着裁决：发 resolve，换成新的结果卡', async () => {
+    const { gateway } = setup({ library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1', 'p2', 'j1'] }), pending: pending(conflict) })
+    await press(screen.getByRole('button', { name: '以 A 为准' }))
+    act(() => { gateway.setView('pending', pending()) })
+    await press(screen.getByRole('button', { name: '撤销' }))
+    await press(await screen.findByRole('button', { name: '以 B 为准' }))
+    expect(gateway.executed.map(e => e.command)).toEqual([
+      { cmd: 'resolve', decisionId: 'pd_1', verdict: 'keep-left' },
+      { cmd: 'undo', decisionId: 'pd_1' },
+      { cmd: 'resolve', decisionId: 'pd_1', verdict: 'keep-right' },
+    ])
+    expect(screen.getByText('已按 B')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '以 A 为准' })).toBeNull()
+  })
+
   it('跨项目确认：「取消」回到裁决按钮；「继续处理」裁决完落到结果的「撤销」', async () => {
     const other = memory({ id: 'p2', type: 'preference', workspacePath: '/w/blog', content: '测试里 mock 数据库就行。' })
     const cross: PendingItem = { ...conflict, right: other } as PendingItem
@@ -1019,5 +1059,108 @@ describe('类型显示名', () => {
     render(<PanelShell gateway={gateway} t={createTranslator(en)}><SidebarTab sessionId="s1" workspacePath={WS} openPage={vi.fn()} /></PanelShell>)
     const groups = within(screen.getByRole('region', { name: 'Brought-in memories' }))
     expect(groups.getAllByRole('heading', { level: 3 }).map(h => h.textContent?.split(/\s\d/)[0])).toEqual(['Preference', 'Procedure', 'Profile'])
+  })
+})
+
+describe('SidebarTab 折叠与「等你决定」', () => {
+  const yourCall = () => screen.getByRole('region', { name: '等你决定' })
+  const injected = () => screen.getByRole('region', { name: '带入的记忆' })
+
+  it('带入的记忆各类型组默认收起：标题是整行按钮（aria-expanded / aria-controls），点开露出记忆卡并撑开，再点收起', () => {
+    setup({ library: library(pref, proj, glob), session: snapshot(), pending: pending() })
+    const toggle = screen.getByRole('button', { name: '行为偏好 1 全文' })
+    expect(toggle.closest('h3')).toHaveClass('pm-side-group-title')
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    const body = document.getElementById(toggle.getAttribute('aria-controls')!)!
+    expect(body).not.toBeVisible()
+    expect(screen.queryByText('测试用真实 Postgres。')).toBeNull()
+
+    fireEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(within(body).getByText('测试用真实 Postgres。').closest('.pm-arrive')).not.toBeNull()
+    expect(screen.getByRole('button', { name: '项目信息 1 只带摘要' })).toHaveAttribute('aria-expanded', 'false')
+
+    fireEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText('测试用真实 Postgres。')).toBeNull()
+  })
+
+  it('没有待裁决也没有结果卡：不画「等你决定」', () => {
+    setup({ library: library(pref, proj, glob), session: snapshot(), pending: pending(promote) })
+    expect(screen.queryByRole('region', { name: '等你决定' })).toBeNull()
+  })
+
+  it('有待决冲突：「等你决定」在「这次新写入的」之后、「带入的记忆」之前，标题带琥珀圆点和条数、默认展开（首屏不播撑开）；冲突双方照常列在各自类型组，组仍收起、不带标记', () => {
+    const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
+    const { container } = setup({
+      library: library(pref, pref2, proj, glob, fresh),
+      session: snapshot({ injectedIds: ['p1', 'j1', 'p2', 'g1'], savedIds: ['n1'] }),
+      pending: pending(conflict, vertical),
+    })
+    expect([...container.querySelectorAll('.pm-side > section')].map(s => s.getAttribute('aria-label')))
+      .toEqual(['对话开始时带入的记忆', '这次新写入的', '等你决定', '带入的记忆'])
+    const head = screen.getByRole('button', { name: '等你决定 2' })
+    expect(head.closest('h2')).toHaveClass('pm-side-title')
+    expect(head).toHaveAttribute('aria-expanded', 'true')
+    expect(head.querySelector('.pm-marker--pending')).not.toBeNull()
+    expect(yourCall().querySelector('.pm-arrive')).toBeNull()
+    expect(within(yourCall()).getByRole('heading', { name: '两条记忆互相矛盾，等你决定' })).toBeInTheDocument()
+    expect(within(yourCall()).getByRole('heading', { name: '这条记忆和基线矛盾，等你决定' })).toBeInTheDocument()
+
+    expect(injected().querySelector('.pm-conflict, .pm-marker')).toBeNull()
+    const prefs = within(injected()).getByRole('button', { name: '行为偏好 2 全文' })
+    expect(prefs).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(prefs)
+    expect(within(injected()).getByText('测试用真实 Postgres。')).toBeInTheDocument()
+    expect(within(injected()).getByText('测试里 mock 数据库就行。')).toBeInTheDocument()
+  })
+
+  it('同一条记忆既有横向又有基线冲突：两张卡都在「等你决定」，底部不再算它们', () => {
+    const onPref: PendingItem = { ...vertical, decisionId: 'pd_v2', memory: pref } as PendingItem
+    setup({ library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1', 'p2'] }), pending: pending(conflict, onPref) })
+    expect(screen.getByRole('button', { name: '等你决定 2' })).toBeInTheDocument()
+    expect(within(yourCall()).getAllByRole('article')).toHaveLength(2)
+    expect(screen.queryByText(/处待处理/)).toBeNull()
+  })
+
+  it('「等你决定」可以收起，视图刷新后照旧收起；只剩结果卡时标题不写条数、不带圆点；收起后新冲突进来，标题重新带圆点和条数', async () => {
+    const { gateway } = setup({ library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1', 'p2', 'j1'] }), pending: pending(conflict) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '以 A 为准' })) })
+    act(() => {
+      gateway.setView('pending', pending())
+      gateway.setView('library', library(pref, proj))
+    })
+    const head = screen.getByRole('button', { name: '等你决定' })
+    expect(head.querySelector('.pm-marker')).toBeNull()
+    expect(within(yourCall()).getByText('已按 A')).toBeInTheDocument()
+
+    fireEvent.click(head)
+    expect(head).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText('已按 A')).toBeNull()
+    act(() => { gateway.setView('pending', pending(vertical)) })
+    const again = screen.getByRole('button', { name: '等你决定 1' })
+    expect(again).toHaveAttribute('aria-expanded', 'false')
+    expect(again.querySelector('.pm-marker--pending')).not.toBeNull()
+    expect(screen.queryByRole('heading', { name: '这条记忆和基线矛盾，等你决定' })).toBeNull()
+  })
+
+  it('三个段标题文字从同一处起：折叠箭头放在标题行末尾，「等你决定」的琥珀圆点跟在条数后面，不挤在文字前', () => {
+    const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
+    setup({ library: library(pref, pref2, proj, fresh), session: snapshot({ injectedIds: ['p1', 'p2', 'j1'], savedIds: ['n1'] }), pending: pending(conflict) })
+    for (const name of ['等你决定 1', '行为偏好 2 全文']) {
+      const head = screen.getByRole('button', { name })
+      // 按钮里先是标题文字，箭头在最后
+      expect(head.firstElementChild).toHaveClass('pm-side-fold-label')
+      expect(head.lastElementChild?.tagName.toLowerCase()).toBe('svg')
+      expect(head.querySelector('.pm-side-fold-label')!.firstChild?.nodeType).toBe(Node.TEXT_NODE)
+    }
+    const label = screen.getByRole('button', { name: '等你决定 1' }).querySelector('.pm-side-fold-label')!
+    expect(label.lastElementChild).toHaveClass('pm-marker--pending')
+  })
+
+  it('英文：段标题写 Waiting on you', () => {
+    const gateway = createFakeGateway({ views: { health: health(), library: library(pref, pref2), session: snapshot({ injectedIds: ['p1'] }), pending: pending(conflict) } })
+    render(<PanelShell gateway={gateway} t={createTranslator(en)}><SidebarTab sessionId="s1" workspacePath={WS} openPage={vi.fn()} /></PanelShell>)
+    expect(screen.getByRole('button', { name: 'Waiting on you 1' })).toHaveAttribute('aria-expanded', 'true')
   })
 })
