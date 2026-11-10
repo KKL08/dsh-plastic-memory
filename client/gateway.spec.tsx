@@ -486,6 +486,37 @@ describe('createHostGateway', () => {
     expect(localStorage.getItem(MEMORY_ROOT_KEY)).toBe('/h/memories')
   })
 
+  describe('「这次对话」视图缺失（新对话还没发第一条消息，快照冻结时才写）', () => {
+    const notFound = { status: 'failed', value: undefined, failure: { code: 'workspace-file/not-found', message: '' } } as const
+
+    it('refresh-views 写不出它：不为它发 refresh-views，也不因它刷新后仍缺失再问 info', async () => {
+      useFakeClock()
+      localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+      resources[fileAddress('s1', viewPath('/h/memories', 'session', 's1'))] = notFound
+      const gateway = createHostGateway(fakeCtx())(props)
+      const { result } = renderHook(() => gateway.useView(gateway.useSession('/w/app'), 'session'))
+      await settle()
+      expect(result.current).toEqual({ status: 'missing' })
+      expect(executed).toEqual([])
+    })
+
+    it('同时挂着缺失的全局视图：照旧为全局视图发一次 refresh-views，刷新后「这次对话」仍缺失不再问 info', async () => {
+      useFakeClock()
+      localStorage.setItem(MEMORY_ROOT_KEY, '/h/memories')
+      resources[fileAddress('s1', viewPath('/h/memories', 'session', 's1'))] = notFound
+      resources[fileAddress('s1', pendingPath)] = notFound
+      const gateway = createHostGateway(fakeCtx())(props)
+      const { result } = renderHook(() => {
+        const session = gateway.useSession('/w/app')
+        return { session: gateway.useView(session, 'session'), pending: gateway.useView(session, 'pending') }
+      })
+      await waitFor(() => { expect(result.current.pending).toEqual({ status: 'ready', data: pending }) })
+      await settle()
+      expect(result.current.session).toEqual({ status: 'missing' })
+      expect(executed).toEqual(['/memory refresh-views'])
+    })
+  })
+
   it('设置里改了 memoryRoot（旧目录还有视图文件）：配置值和缓存时不一样就丢掉缓存，发一次 info，再 refresh-views，从新根读', async () => {
     localStorage.setItem(MEMORY_ROOT_KEY, '/old/memories')
     localStorage.setItem(MEMORY_ROOT_CONFIG_KEY, '')

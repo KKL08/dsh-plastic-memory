@@ -411,7 +411,10 @@ export function createHostGateway(ctx: HostContext): BindGateway {
       const stat = useResource(sessionId !== undefined && path !== undefined ? fileAddress(sessionId, path) : '')
       const version = stat.status === 'live' ? stat.value?.version : undefined
       const isMissing = stat.status === 'failed' && stat.failure?.code === 'workspace-file/not-found'
-      useEffect(() => { if (!isPassive && sessionId !== undefined && isMissing) root.ensureViews(sessionId) }, [isPassive, sessionId, isMissing])
+      // refresh-views 只重写四个全局视图和体检视图：缺失、版本不认识时只为这几个请服务端重写。「这次对话」视图在快照冻结时写
+      // （新对话发第一条消息前一定缺），归属对照在解析会话归属时写，为它们发刷新写不出文件，只会在借来的会话里白留一行
+      const isRegenerable = !isPassive && (name in GUI_VIEW_FILES || name === 'checkups')
+      useEffect(() => { if (isRegenerable && sessionId !== undefined && isMissing) root.ensureViews(sessionId) }, [isRegenerable, sessionId, isMissing])
       // 读到的内容按文件认，不按经哪个会话读：借来的会话中途换了（它开始跑一轮、换了更新的会话），全局视图还是同一个文件，
       // 沿用已读到的内容，不回到读取中（否则整页列表重挂，卡片上正在进行的编辑、生成都丢了）；「这次对话」视图的路径带会话 id，换会话照样重读
       const key = path ?? ''
@@ -420,11 +423,11 @@ export function createHostGateway(ctx: HostContext): BindGateway {
       const commands = useSyncExternalStore(subscribeSucceeded, getSucceeded)
       const trigger = version !== undefined ? `${version}#${rootState.refreshes}#${commands}` : isMissing && rootState.refreshes > 0 ? `refresh:${rootState.refreshes}#${commands}` : undefined
       const [read, setRead] = useState(() => (path === undefined ? undefined : lastReads.get(path)) as ReadState<ViewMap[N]> | undefined)
+      // 刷新后仍读不到才说明缓存的根可能过期；刷新本来就写不出的视图仍缺失是常态，不据此再问 info
       const isStillMissing = isMissing && trigger !== undefined && read?.key === key && read.trigger === trigger && read.view.status === 'missing'
-      useEffect(() => { if (!isPassive && sessionId !== undefined && isStillMissing) root.revalidate(sessionId) }, [isPassive, sessionId, isStillMissing])
-      // 版本不认识（旧插件写的、或刷新前留下的）：refresh-views 只重写四个全局视图和体检视图，这几个请服务端重写一次，
-      // 这次页面里已全量重写过就不再发；重写完重读，仍不认识才显示过时。不轮询
-      const isRegenerable = !isPassive && (name in GUI_VIEW_FILES || name === 'checkups')
+      useEffect(() => { if (isRegenerable && sessionId !== undefined && isStillMissing) root.revalidate(sessionId) }, [isRegenerable, sessionId, isStillMissing])
+      // 版本不认识（旧插件写的、或刷新前留下的）：可重写的视图请服务端重写一次，这次页面里已全量重写过就不再发；
+      // 重写完重读，仍不认识才显示过时。不轮询
       const isOutdated = read !== undefined && read.key === key && read.view.status === 'outdated'
       useEffect(() => { if (isRegenerable && sessionId !== undefined && isOutdated) root.ensureViews(sessionId) }, [isRegenerable, sessionId, isOutdated])
       const isAwaitingRewrite = isRegenerable && isOutdated
