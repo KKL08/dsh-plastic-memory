@@ -175,29 +175,27 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
     if (key !== recentKey && !items.some(i => pendingItemKey(i) === key)) rows.splice(Math.min(index, rows.length), 0, cardRow(item, index))
   }
   if (recent !== undefined && !(recent.undone && backInView)) {
-    rows.splice(Math.min(recent.index, rows.length), 0, {
-      key: `recent:${recentKey}`,
-      level: recent.item.level,
-      isItem: recent.undone,
-      node: (
-        <ItemScopeNames.Provider value={scopeNames(recent.item)}>
-          {recent.undone
-            // 撤销已生效、视图还没带回来：先按原样显示，可以接着处理
-            ? renderCard(recent.item, (outcome) => { done({ ...recent, outcome, undone: false }) }, refuse(recent.item, recent.index))
-            : (
-              <ResultCard
-                item={recent.item}
-                outcome={recent.outcome}
-                session={session}
-                now={now}
-                typeLabel={typeLabel}
-                onUndone={() => { done({ ...recent, undone: true }) }}
-                onRefused={refuse(recent.item, recent.index)}
-              />
-            )}
-        </ItemScopeNames.Provider>
-      ),
-    })
+    rows.splice(Math.min(recent.index, rows.length), 0, recent.undone
+      // 撤销已生效、视图还没带回来：按原样显示，可以接着处理；和视图带回的那张同 key 同结构，带回时不重挂，焦点不丢
+      ? cardRow(recent.item, recent.index)
+      : {
+        key: `recent:${recentKey}`,
+        level: recent.item.level,
+        isItem: false,
+        node: (
+          <ItemScopeNames.Provider value={scopeNames(recent.item)}>
+            <ResultCard
+              item={recent.item}
+              outcome={recent.outcome}
+              session={session}
+              now={now}
+              typeLabel={typeLabel}
+              onUndone={() => { done({ ...recent, undone: true }) }}
+              onRefused={refuse(recent.item, recent.index)}
+            />
+          </ItemScopeNames.Provider>
+        ),
+      })
   }
 
   const isEmpty = rows.length === 0

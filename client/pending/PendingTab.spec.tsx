@@ -606,6 +606,33 @@ describe('待处理：确认收起后的键盘焦点', () => {
     await screen.findByText('已按 A')
     await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
   })
+
+  // 裁决 → 视图去掉这条 → 撤销（本地原样画回）→ 视图带回：画回的卡和视图带回的是同一张，不重挂，焦点不动、位置不变
+  it.each([
+    { kind: '横向冲突', item: horizontal, action: '以 A 为准', landsOn: '以 A 为准' },
+    { kind: '垂直冲突', item: vertical, action: '保留这条记忆', landsOn: undefined },
+    { kind: '提升候选', item: promote, action: '提升为全局', landsOn: undefined },
+    { kind: '超限', item: overflow, action: '不再提醒', landsOn: undefined },
+    { kind: '可以整理', item: tidy, action: '不再提醒', landsOn: undefined },
+  ])('$kind：撤销后视图带回这条，卡片不重挂、焦点留在原控件上、列表位置不变', async ({ item, action, landsOn }) => {
+    const { gateway } = setup([secret, item, unreadable])
+    const headings = () => screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)
+    const before = headings()
+    await press(screen.getByRole('button', { name: action }))
+    await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
+    act(() => { gateway.setView('pending', view(secret, unreadable)) })
+    await press(screen.getByRole('button', { name: '撤销' }))
+    await waitFor(() => { expect(document.activeElement?.closest('article')?.querySelector('h3')).not.toBeNull() })
+    const focused = document.activeElement as HTMLElement
+    if (landsOn !== undefined) expect(focused).toHaveAccessibleName(landsOn)
+    const card = focused.closest('article')!
+    expect(headings()).toEqual(before)
+
+    act(() => { gateway.setView('pending', view(secret, item, unreadable)) })
+    expect(card.isConnected).toBe(true)
+    expect(focused).toHaveFocus()
+    expect(headings()).toEqual(before)
+  })
 })
 
 describe('待处理：两态与空状态', () => {
