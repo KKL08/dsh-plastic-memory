@@ -461,6 +461,13 @@ const isModelEditType = (type: AdviceType): type is ModelEditAdviceType => (MODE
 /** 命令里带回的卡片版本。 */
 export const baseOf = (memory: MemoryCardData) => ({ updatedAt: memory.updatedAt, digest: memory.digest ?? '' })
 
+/** 单条修改的预填：这条记忆此刻的四个面。 */
+export const draftOf = (memory: MemoryCardData): EditDraft => ({ content: memory.content, name: memory.name, summary: memory.summary, tags: memory.tags })
+
+/** 单条修改写入：按点「修改」那一刻的版本核对。 */
+const editCommandOf = (memory: MemoryCardData, draft: EditDraft): MemoryCommand =>
+  ({ cmd: 'edit-memory', memoryId: memory.id, layer: scopeOfMemory(memory), base: baseOf(memory), ...draft })
+
 /** 改前字数：单条是那一条，合并是两条相加。 */
 function charsBefore(memories: readonly MemoryCardData[], command: EditCommand): number {
   const ids = command.cmd === 'edit-memory' ? [command.memoryId] : command.memories.map(m => m.memoryId)
@@ -556,23 +563,23 @@ export function AdviceCard(props: CardProps<'advice'> & {
                     memories={[modifying]}
                     adviceType={modelType}
                     typeTitle={t(copy.title)}
-                    base={{ content: modifying.content, name: modifying.name, summary: modifying.summary, tags: modifying.tags }}
+                    base={draftOf(modifying)}
                     session={session}
                     unavailable={action.unavailable}
                     onClose={() => { setModifying(undefined) }}
-                    onApply={(draft) => { action.run({ cmd: 'edit-memory', memoryId: modifying.id, layer: scopeOfMemory(modifying), base: baseOf(modifying), ...draft }) }}
+                    onApply={(draft) => { action.run(editCommandOf(modifying, draft)) }}
                     onStateChange={report}
                   />
                 </>
               )}
               manual={report => (
                 <EditPanel
-                  initial={{ content: modifying.content, name: modifying.name, summary: modifying.summary, tags: modifying.tags }}
+                  initial={draftOf(modifying)}
                   original={{ content: modifying.content, summary: modifying.summary, chars: modifying.content.length }}
                   isMerge={false}
                   unavailable={action.unavailable}
                   onCancel={() => { setModifying(undefined) }}
-                  onSave={(draft) => { action.run({ cmd: 'edit-memory', memoryId: modifying.id, layer: scopeOfMemory(modifying), base: baseOf(modifying), ...draft }) }}
+                  onSave={(draft) => { action.run(editCommandOf(modifying, draft)) }}
                   onStateChange={report}
                 />
               )}

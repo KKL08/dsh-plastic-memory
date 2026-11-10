@@ -30,7 +30,8 @@ type Phase =
 const segmenter = new Intl.Segmenter('zh', { granularity: 'word' })
 const diffOf = (before: string, after: string) => diffWords(before, after, { intlSegmenter: segmenter })
 
-function failureOf(r: Extract<MemoryCommandResult, { ok: false }>, t: Translate): string {
+/** 生成失败的文案：拿不到模型、模型出错、输出不合格式换本地文案，其余显示服务端原话。 */
+function draftFailureOf(r: Extract<MemoryCommandResult, { ok: false }>, t: Translate): string {
   switch (r.code) {
     case 'llm-unavailable': return t(LLM_FAILURE_KEYS[r.code])
     case 'llm-failed': return t(LLM_FAILURE_KEYS[r.code], { detail: r.detail ?? '' })
@@ -40,9 +41,33 @@ function failureOf(r: Extract<MemoryCommandResult, { ok: false }>, t: Translate)
 }
 
 /** 拿到模型名写全句；会话没有模型写原因；还在问或没给名字只写后半句。 */
-export function hintOf(model: ModelState, t: Translate): string {
+function hintOf(model: ModelState, t: Translate): string {
   if (model.status === 'unavailable') return t('pending.model.unavailable')
   return model.status === 'ready' && model.model !== undefined ? t('pending.model.hint', { model: model.model }) : t('pending.model.hintNoName')
+}
+
+/**
+ * 写要求区底栏：左侧的提示和「生成」的置灰原因。拿不到模型最先；other 是调用方另有的原因，排在它之后、要求空着之前。
+ * 要求空着（isMissing）时提示写要求，否则写用哪个模型。
+ */
+export function requestFootOf(model: ModelState, isMissing: boolean, t: Translate, other?: string): { hint: string; blocked: string | undefined } {
+  const isUnavailable = model.status === 'unavailable'
+  return {
+    hint: isMissing && !isUnavailable ? t('library.model.empty') : hintOf(model, t),
+    blocked: isUnavailable ? t('pending.model.unavailable') : other ?? (isMissing ? t('library.model.empty') : undefined),
+  }
+}
+
+/** 模型生成中的一行：跳动的点、在做什么、「停止」。 */
+export function ModelBusy({ label, onStop }: { label: string; onStop: () => void }) {
+  const t = useT()
+  return (
+    <div className="pm-model-busy" role="status">
+      <span className="pm-model-dot" aria-hidden="true" />
+      <span>{label}</span>
+      <Button variant="ghost" onClick={onStop}>{t('pending.model.stop')}</Button>
+    </div>
+  )
 }
 
 export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, session, unavailable, onClose, onApply, onStateChange }: {
@@ -119,7 +144,7 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
     setPhase({ kind: 'busy' })
     void gateway.execute(session.sessionId, command).then((r) => {
       if (mine !== seq.current) return
-      if (!r.ok) { setPhase({ kind: 'ask', error: failureOf(r, t) }); return }
+      if (!r.ok) { setPhase({ kind: 'ask', error: draftFailureOf(r, t) }); return }
       if (r.draft === undefined) { setPhase({ kind: 'ask', error: t('pending.model.invalid') }); return }
       const { content, summary, name, tags } = r.draft
       setPhase({ kind: 'result', draft: { content, summary, name: name ?? base.name, tags: tags ?? base.tags } })
@@ -133,17 +158,13 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
   if (phase.kind === 'busy') {
     return (
       <div ref={root} className="pm-edit">
-        <div className="pm-model-busy" role="status">
-          <span className="pm-model-dot" aria-hidden="true" />
-          <span>{t('pending.model.busy')}</span>
-          <Button variant="ghost" onClick={stop}>{t('pending.model.stop')}</Button>
-        </div>
+        <ModelBusy label={t('pending.model.busy')} onStop={stop} />
       </div>
     )
   }
 
   if (phase.kind === 'ask') {
-    const isMissing = isRequired && request.trim() === ''
+    const foot = requestFootOf(model, isRequired && request.trim() === '', t)
     return (
       <div ref={root} className="pm-edit">
         <RequestBox
@@ -159,15 +180,9 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
           : null}
         {phase.error !== undefined ? <p className="pm-pending-error" role="alert">{phase.error}</p> : null}
         <div className="pm-edit-foot">
-          <span className="pm-edit-hint">{isMissing && model.status !== 'unavailable' ? t('library.model.empty') : hintOf(model, t)}</span>
+          <span className="pm-edit-hint">{foot.hint}</span>
           <Button variant="ghost" unavailable={unavailable} onClick={onClose}>{t('pending.cancel')}</Button>
-          <Button
-            variant="primary"
-            unavailable={unavailable ?? (model.status === 'unavailable' ? t('pending.model.unavailable') : isMissing ? t('library.model.empty') : undefined)}
-            onClick={generate}
-          >
-            {t('pending.model.generate')}
-          </Button>
+          <Button variant="primary" unavailable={unavailable ?? foot.blocked} onClick={generate}>{t('pending.model.generate')}</Button>
         </div>
       </div>
     )

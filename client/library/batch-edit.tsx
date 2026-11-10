@@ -17,9 +17,9 @@ import { SoftDeleteConfirm } from '../command/confirm.tsx'
 import { interpret, LLM_FAILURE_KEYS, refuseBeforeSend } from '../command/protocol.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { useT, type Translate } from '../i18n.tsx'
-import { baseOf, isEditable } from '../pending/cards.tsx'
+import { baseOf, draftOf, isEditable } from '../pending/cards.tsx'
 import type { EditDraft } from '../pending/edit.tsx'
-import { DraftCompare, hintOf, RequestBox } from '../pending/model-edit.tsx'
+import { DraftCompare, ModelBusy, RequestBox, requestFootOf } from '../pending/model-edit.tsx'
 import { Button } from '../ui/Button.tsx'
 import { Chip } from '../ui/Chip.tsx'
 import { Icon } from '../ui/Icon.tsx'
@@ -107,6 +107,26 @@ function isOrphanDelete(op: PlanOp, planOps: readonly PlanOp[], active: Readonly
     && planOps.some(o => o.memoryId === op.into && o.action === 'rewrite')
 }
 
+/**
+ * 选上或取消一项（active 是此刻选着的）。取消改写项时，内容要并进它、此刻还选着的删除项一起取消，记进 held（下面写明原因）；
+ * 重新选上改写项不带回这些删除项，只把它们移出 held。看计划的勾选和对照应用的放弃共用。
+ */
+export function toggleWithDependents(op: PlanOp, ops: readonly PlanOp[], active: ReadonlySet<string>, held: ReadonlySet<string>): { active: Set<string>; held: Set<string> } {
+  const isOn = !active.has(op.memoryId)
+  const next = new Set(active)
+  const nextHeld = new Set(held)
+  if (isOn) next.add(op.memoryId)
+  else next.delete(op.memoryId)
+  nextHeld.delete(op.memoryId)
+  if (op.action === 'rewrite') {
+    for (const d of ops.filter(d => d.action === 'delete' && d.into === op.memoryId)) {
+      if (!isOn && next.delete(d.memoryId)) nextHeld.add(d.memoryId)
+      if (isOn) nextHeld.delete(d.memoryId)
+    }
+  }
+  return { active: next, held: nextHeld }
+}
+
 /** 勾选的改写项交给 draft-plan 的样子：理由、提问、回答（没填不带），并进它、也勾上了的删除项作承接。 */
 function draftOpsOf(choice: PlanChoice): DraftPlanOp[] {
   const chosen = chosenOps(choice)
@@ -136,7 +156,8 @@ type Stage =
 
 const STEP_OF = { request: 'request', planning: 'plan', plan: 'plan', drafting: 'apply', apply: 'apply' } as const satisfies Record<Stage['kind'], BatchStep>
 
-function failureOf(command: MemoryCommand, r: Extract<MemoryCommandResult, { ok: false }>, t: Translate): string {
+/** 整理的几条命令失败的文案：模型出错带原话，其余按命令协议（stale、not-found 等换本地文案）。 */
+function batchFailureOf(command: MemoryCommand, r: Extract<MemoryCommandResult, { ok: false }>, t: Translate): string {
   if (r.code === 'llm-failed') return t(LLM_FAILURE_KEYS[r.code], { detail: r.detail ?? '' })
   const outcome = interpret(command, r)
   if (outcome.kind !== 'failed') return t('command.failed', { detail: r.detail ?? r.code })
@@ -221,7 +242,7 @@ export function BatchEdit({ items, latest, session, onBack, onApply, applyUnavai
     setStage({ kind: 'planning' })
     void gateway.execute(session.sessionId, command).then((r) => {
       if (mine !== seq.current) return
-      if (!r.ok) { if (!isBehind(r)) setStage({ kind: 'request', error: failureOf(command, r, t) }); return }
+      if (!r.ok) { if (!isBehind(r)) setStage({ kind: 'request', error: batchFailureOf(command, r, t) }); return }
       if (r.plan === undefined) { setStage({ kind: 'request', error: t('pending.model.invalid') }); return }
       setStage({ kind: 'plan', plan: r.plan })
     })
@@ -244,7 +265,7 @@ export function BatchEdit({ items, latest, session, onBack, onApply, applyUnavai
     setStage({ kind: 'drafting', choice })
     void gateway.execute(session.sessionId, command).then((r) => {
       if (mine !== seq.current) return
-      if (!r.ok) { if (!isBehind(r)) back(failureOf(command, r, t)); return }
+      if (!r.ok) { if (!isBehind(r)) back(batchFailureOf(command, r, t)); return }
       const drafts: Record<string, EditDraft> = {}
       for (const { memoryId, draft } of r.drafts ?? []) {
         const memory = picked.find(item => item.memory.id === memoryId)?.memory
@@ -282,13 +303,7 @@ export function BatchEdit({ items, latest, session, onBack, onApply, applyUnavai
           />
         )
         : stage.kind === 'planning'
-          ? (
-            <div className="pm-model-busy" role="status">
-              <span className="pm-model-dot" aria-hidden="true" />
-              <span>{t('library.batch.planning')}</span>
-              <Button variant="ghost" onClick={stop}>{t('pending.model.stop')}</Button>
-            </div>
-          )
+          ? <ModelBusy label={t('library.batch.planning')} onStop={stop} />
           : stage.kind === 'plan'
             ? (
               <PlanStep
@@ -301,13 +316,7 @@ export function BatchEdit({ items, latest, session, onBack, onApply, applyUnavai
               />
             )
             : stage.kind === 'drafting'
-              ? (
-                <div className="pm-model-busy" role="status">
-                  <span className="pm-model-dot" aria-hidden="true" />
-                  <span>{t('library.batch.drafting')}</span>
-                  <Button variant="ghost" onClick={() => { stopDrafting(stage.choice) }}>{t('pending.model.stop')}</Button>
-                </div>
-              )
+              ? <ModelBusy label={t('library.batch.drafting')} onStop={() => { stopDrafting(stage.choice) }} />
               : (
                 <ApplyStep
                   session={session}
@@ -353,9 +362,8 @@ function RequestStep({ session, picked, isRefreshing, onUnpick, request, onReque
     const buttons = list.current?.querySelectorAll<HTMLElement>('.pm-batch-unpick') ?? []
     buttons[Math.min(at, buttons.length - 1)]?.focus()
   }, [picked])
-  const isMissing = request.trim() === ''
-  const blocked = isRefreshing ? t('library.batch.refreshing') : model.status === 'unavailable' ? t('pending.model.unavailable')
-    : picked.length < 2 ? t('library.select.tooFew') : isMissing ? t('library.model.empty') : undefined
+  const foot = requestFootOf(model, request.trim() === '', t, picked.length < 2 ? t('library.select.tooFew') : undefined)
+  const blocked = isRefreshing ? t('library.batch.refreshing') : foot.blocked
   return (
     <>
       <section className="pm-batch-picked" aria-label={t('library.batch.picked')}>
@@ -394,7 +402,7 @@ function RequestStep({ session, picked, isRefreshing, onUnpick, request, onReque
         <p className="pm-model-note"><Icon name="info" size={14} /><span>{t('library.batch.note')}</span></p>
         {error !== undefined ? <p className="pm-pending-error" role="alert">{error}</p> : null}
         <div className="pm-edit-foot">
-          <span className="pm-edit-hint">{isMissing && model.status !== 'unavailable' ? t('library.model.empty') : hintOf(model, t)}</span>
+          <span className="pm-edit-hint">{foot.hint}</span>
           <Button variant="ghost" onClick={onCancel}>{t('pending.cancel')}</Button>
           <Button variant="primary" unavailable={blocked} onClick={onGenerate}>{t('library.batch.generate')}</Button>
         </div>
@@ -425,23 +433,11 @@ function PlanStep({ plan, initial, error, picked, onRevise, onConfirm }: {
     d.action === 'delete' && !initial.checked.includes(d.memoryId)
     && plan.ops.some(op => op.memoryId === d.into && op.action === 'rewrite' && !initial.checked.includes(op.memoryId))).map(d => d.memoryId)))
   const [answers, setAnswers] = useState<Readonly<Record<string, string>>>(initial?.answers ?? {})
-  const dependents = (op: PlanOp) => plan.ops.filter(d => d.action === 'delete' && d.into === op.memoryId).map(d => d.memoryId)
   const toggle = (op: PlanOp) => {
-    const isOn = !checked.has(op.memoryId)
-    if (isOn && isOrphanDelete(op, plan.ops, checked)) return
-    const next = new Set(checked)
-    const nextHeld = new Set(held)
-    if (isOn) next.add(op.memoryId)
-    else next.delete(op.memoryId)
-    nextHeld.delete(op.memoryId)
-    if (op.action === 'rewrite') {
-      for (const d of dependents(op)) {
-        if (!isOn && next.delete(d)) nextHeld.add(d)
-        if (isOn) nextHeld.delete(d)
-      }
-    }
-    setChecked(next)
-    setHeld(nextHeld)
+    if (!checked.has(op.memoryId) && isOrphanDelete(op, plan.ops, checked)) return
+    const next = toggleWithDependents(op, plan.ops, checked, held)
+    setChecked(next.active)
+    setHeld(next.held)
   }
   const chosen = plan.ops.filter(op => op.action !== 'keep' && checked.has(op.memoryId))
   const isDeleteOnly = chosen.length > 0 && chosen.every(op => op.action === 'delete')
@@ -542,21 +538,11 @@ function ApplyStep({ session, choice, picked, drafts: initialDrafts, onDiscardAl
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set())
   /** 有删除项时点了「应用全部」：按钮原位换成确认条。 */
   const [isConfirming, setConfirming] = useState(false)
+  const live = ops.filter(op => !dropped.has(op.memoryId))
   const toggle = (op: PlanOp) => {
-    const isDropping = !dropped.has(op.memoryId)
-    const next = new Set(dropped)
-    const nextHeld = new Set(held)
-    if (isDropping) next.add(op.memoryId)
-    else next.delete(op.memoryId)
-    nextHeld.delete(op.memoryId)
-    if (op.action === 'rewrite') {
-      for (const d of ops.filter(d => d.action === 'delete' && d.into === op.memoryId)) {
-        if (isDropping && !next.has(d.memoryId)) { next.add(d.memoryId); nextHeld.add(d.memoryId) }
-        if (!isDropping) nextHeld.delete(d.memoryId)
-      }
-    }
-    setDropped(next)
-    setHeld(nextHeld)
+    const next = toggleWithDependents(op, ops, new Set(live.map(o => o.memoryId)), held)
+    setDropped(new Set(ops.filter(o => !next.active.has(o.memoryId)).map(o => o.memoryId)))
+    setHeld(next.held)
   }
   const setItemBusy = (memoryId: string, isBusy: boolean) => {
     setBusy((prev) => {
@@ -567,7 +553,6 @@ function ApplyStep({ session, choice, picked, drafts: initialDrafts, onDiscardAl
       return next
     })
   }
-  const live = ops.filter(op => !dropped.has(op.memoryId))
   const deleting = live.filter(op => op.action === 'delete')
   const deletes = deleting.length
   const nameOf = (memoryId: string) => picked.find(item => item.memory.id === memoryId)!.memory.name
@@ -700,6 +685,8 @@ function RewriteItem({ session, op, item, draft, request, answer, absorbs, isDro
   const setPhase = (next: ItemPhase) => { setPhaseState(next); onBusy(next.kind === 'busy') }
   const { memory } = item
   const label = t('library.batch.op', { action: t('library.batch.action.rewrite'), name: memory.name })
+  // 只在写要求时显示
+  const foot = requestFootOf(model, phase.kind !== 'ask' || phase.text.trim() === '', t)
 
   const toggle = () => {
     // 放弃时在等的那次作废、写了一半的要求收起
@@ -725,7 +712,7 @@ function RewriteItem({ session, op, item, draft, request, answer, absorbs, isDro
     void gateway.execute(session.sessionId, command).then((r) => {
       if (mine !== seq.current) return
       if (!r.ok && r.code === 'not-found') { setPhase({ kind: 'idle' }); onBehind(r.memoryIds ?? [memory.id]); return }
-      if (!r.ok) { setPhase({ kind: 'ask', text, error: failureOf(command, r, t) }); return }
+      if (!r.ok) { setPhase({ kind: 'ask', text, error: batchFailureOf(command, r, t) }); return }
       if (r.draft === undefined) { setPhase({ kind: 'ask', text, error: t('pending.model.invalid') }); return }
       onDraft(fillDraft(r.draft, draft))
       setRounds(prev => [...prev, text.trim()])
@@ -742,16 +729,10 @@ function RewriteItem({ session, op, item, draft, request, answer, absorbs, isDro
           : null}
       </ItemHead>
       <div className="pm-model-result">
-        <DraftCompare memories={[memory]} base={{ content: memory.content, summary: memory.summary, name: memory.name, tags: memory.tags }} draft={draft} />
+        <DraftCompare memories={[memory]} base={draftOf(memory)} draft={draft} />
       </div>
       {phase.kind === 'busy'
-        ? (
-          <div className="pm-model-busy" role="status">
-            <span className="pm-model-dot" aria-hidden="true" />
-            <span>{t('pending.model.busy')}</span>
-            <Button variant="ghost" onClick={() => { seq.current += 1; setPhase({ kind: 'ask', text: phase.text }) }}>{t('pending.model.stop')}</Button>
-          </div>
-        )
+        ? <ModelBusy label={t('pending.model.busy')} onStop={() => { seq.current += 1; setPhase({ kind: 'ask', text: phase.text }) }} />
         : phase.kind === 'ask'
           ? (
             <div className="pm-edit pm-batch-again">
@@ -765,15 +746,9 @@ function RewriteItem({ session, op, item, draft, request, answer, absorbs, isDro
               />
               {phase.error !== undefined ? <p className="pm-pending-error" role="alert">{phase.error}</p> : null}
               <div className="pm-edit-foot">
-                <span className="pm-edit-hint">{phase.text.trim() === '' && model.status !== 'unavailable' ? t('library.model.empty') : hintOf(model, t)}</span>
+                <span className="pm-edit-hint">{foot.hint}</span>
                 <Button variant="ghost" onClick={() => { setPhase({ kind: 'idle' }) }}>{t('pending.cancel')}</Button>
-                <Button
-                  variant="primary"
-                  unavailable={model.status === 'unavailable' ? t('pending.model.unavailable') : phase.text.trim() === '' ? t('library.model.empty') : undefined}
-                  onClick={() => { generate(phase.text) }}
-                >
-                  {t('pending.model.generate')}
-                </Button>
+                <Button variant="primary" unavailable={foot.blocked} onClick={() => { generate(phase.text) }}>{t('pending.model.generate')}</Button>
               </div>
             </div>
           )
