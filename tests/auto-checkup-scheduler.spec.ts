@@ -18,6 +18,7 @@ import { GLOBAL_CACHE_KEY } from '../src/governance/scope-health.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { AUTO_CHECKUP_FIRST_CHECK_MS, AUTO_CHECKUP_INTERVAL_MS, AutoCheckupScheduler, type AutoCheckupTimer } from '../src/gui/auto-checkup.ts'
 import { CHECKUP_CLAIM_REFRESH_MS } from '../src/gui/checkup-run.ts'
+import { CheckupSuggestions, type CheckupSuggestionsDeps } from '../src/gui/checkup-suggestions.ts'
 import { GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, checkupKey, checkupViewSchema, type AutoCheckupFrequency, type CheckupView, type ScopeOrAll } from '../src/gui/contract.ts'
 import { executeScan } from '../src/tools/scan.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
@@ -82,7 +83,14 @@ type HostReply = 'ok' | 'garbage' | { code: string; message: string }
  * 宿主 llm 服务的替身：每次 stream 记下请求，按宿主真实的流形状回一段：文本、usage、以 stop 收尾的 finish。
  * findings 按请求给（缺省没问题）；gate 给出时先等它，期间 signal 中断就按宿主的做法以 aborted 收尾。
  */
-function fakeHostLlm(opts: { findings?: (req: GenerateOptions) => unknown[]; gate?: () => Promise<void>; reply?: () => HostReply } = {}) {
+function fakeHostLlm(opts: {
+  findings?: (req: GenerateOptions) => unknown[]
+  gate?: () => Promise<void>
+  reply?: () => HostReply
+  /** 生成处理建议的请求怎么回（缺省按内容检查回）；suggestionGate 给出时先等它，不理会取消（模型在卸载之后才回来）。 */
+  suggestion?: () => HostReply | string
+  suggestionGate?: () => Promise<void>
+} = {}) {
   const requests: GenerateOptions[] = []
   let active = 0
   let maxActive = 0
@@ -109,6 +117,18 @@ function fakeHostLlm(opts: { findings?: (req: GenerateOptions) => unknown[]; gat
             return
           }
         }
+        if (opts.suggestion !== undefined && String(req.system).includes('两条互相矛盾的记忆')) {
+          await opts.suggestionGate?.()
+          const answer = opts.suggestion()
+          if (typeof answer === 'object') {
+            yield { type: 'finish', reason: { kind: 'error', failure: answer } } as StreamChunk
+            return
+          }
+          yield { type: 'text-delta', index: 0, text: answer }
+          yield { type: 'usage', usage: { inputTokens: 300, outputTokens: 20 } }
+          yield { type: 'finish', reason: { kind: 'stop' } }
+          return
+        }
         const reply = opts.reply?.() ?? 'ok'
         if (typeof reply === 'object') {
           // 宿主把适配器抛的错折成以 error 收尾的 finish，failure 带宿主错误码
@@ -131,6 +151,8 @@ function env(opts: {
   governanceEnabled?: boolean
   /** 包一层调度器读状态（在读完之后插入别的进程的动作）。 */
   wrapStatus?: (read: () => Promise<CheckupView>) => () => Promise<CheckupView>
+  /** 接上体检之后的后续段（生成处理建议）；给出时可以换掉它用的账本（模拟后续段出错）。 */
+  suggestions?: { decisions?: (real: PendingDecisionsStore) => CheckupSuggestionsDeps['decisions'] }
 } = {}) {
   const clock = { now: NOW }
   // 侧表也用这个时钟：认领的时间和是否残留按它算
@@ -149,6 +171,9 @@ function env(opts: {
   const collectViews = () => collectGlobalViews({ store, decisions, cache, ignores, checkups, registry, memoryRoot: root, now: () => clock.now })
   const writer = new ViewWriter({ memoryRoot: root, collect: collectViews, collectCheckups: () => collectCheckupView(source), now: () => clock.now, sleep: async () => {} })
   const timers = fakeTimer(clock)
+  const suggestions = opts.suggestions === undefined ? undefined : new CheckupSuggestions({
+    store, decisions: opts.suggestions.decisions?.(decisions) ?? decisions, checkups, views: writer, now: () => clock.now, log: { info() {}, warn() {}, error() {} },
+  })
   const scheduler = new AutoCheckupScheduler({
     scan: { store, registry, decisions, cache, ignores },
     checkups,
@@ -160,6 +185,7 @@ function env(opts: {
     timer: timers.timer,
     onChecked: () => writer.requestCheckups(),
     onClaimChanged: () => writer.requestCheckups(),
+    ...(suggestions !== undefined ? { suggestions } : {}),
     now: () => clock.now,
   })
   live.push(scheduler)
@@ -743,5 +769,67 @@ describe('自动体检调度：模型用不了', () => {
     reply = { code: 'RATE_LIMIT', message: 'too many requests' }
     await e.advance(AUTO_CHECKUP_INTERVAL_MS)
     expect((await e.readView()).scopes[0]).toMatchObject({ failure: { count: 2 }, modelUnavailable: null })
+  })
+})
+
+describe('自动体检调度：体检之后生成处理建议', () => {
+  const conflict = () => [{ type: 'conflict', memoryIds: ['mem_x', 'mem_y'], summary: '端口说法矛盾', suggestedAction: '请裁决' }]
+  async function seedDue(e: ReturnType<typeof env>) {
+    await e.store.create(record({ id: 'mem_x', name: '端口甲', content: '端口 3000' }))
+    await e.store.create(record({ id: 'mem_y', name: '端口乙', content: '端口 4000' }))
+    await e.set({ kind: 'all' }, 1)
+  }
+  const keepA = JSON.stringify({ action: 'keep-a', reason: '甲更新' })
+
+  it('故事 27：扫出的冲突接着用默认模型生成建议，卡上有建议；用量（含生成建议那次）记进这次的结果', async () => {
+    const e = env({ llm: fakeHostLlm({ findings: conflict, suggestion: () => keepA }), suggestions: {} })
+    await seedDue(e)
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    expect(e.llm.requests).toHaveLength(2)
+    expect(e.llm.requests[1]).toMatchObject(DEFAULT_ROUTE)
+    const [entry] = await e.decisions.list()
+    expect(entry?.suggestion).toMatchObject({ action: 'keep-a', reason: '甲更新' })
+    expect(entry?.suggestionAttempts?.count).toBe(1)
+    expect((await e.lastResultOf(checkupKey({ kind: 'global' })))?.usageTokens).toBe(1280 + 320)
+    expect((await e.readView()).scopes[0]?.lastResult?.usageTokens).toBe(1280 + 320)
+  })
+
+  it('故事 28：生成建议失败不影响体检：照常算做完，失败次数和重试节奏不动，卡上写没生成成', async () => {
+    const e = env({ llm: fakeHostLlm({ findings: conflict, suggestion: () => ({ code: 'RATE_LIMIT', message: 'too many requests' }) }), suggestions: {} })
+    await seedDue(e)
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    const at = NOW + AUTO_CHECKUP_FIRST_CHECK_MS
+    expect((await e.completed()).global).toEqual({ startedAt: at, completedAt: at, by: 'auto' })
+    expect((await e.readView()).scopes[0]).toMatchObject({ failure: null, isDue: false })
+    expect((await e.decisions.list())[0]?.suggestionFailure?.cause).toMatchObject({ kind: 'model-error', hostCode: 'RATE_LIMIT' })
+  })
+
+  it('后续段抛错：只记日志，体检照常算做完，不记自动体检的失败', async () => {
+    const e = env({
+      llm: fakeHostLlm({ findings: conflict, suggestion: () => keepA }),
+      suggestions: { decisions: real => ({ list: () => Promise.reject(new Error('读不了账本')), get: id => real.get(id), writeSuggestion: (...args) => real.writeSuggestion(...args) }) },
+    })
+    await seedDue(e)
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    expect((await e.readView()).scopes[0]).toMatchObject({ failure: null, isDue: false, lastResult: expect.objectContaining({ by: 'auto' }) })
+    expect((await e.decisions.list())[0]?.suggestion).toBeUndefined()
+  })
+
+  it('插件卸载时不等生成建议的模型调用结束：不写建议，体检的完成记录照留', async () => {
+    let open: (() => void) | undefined
+    const gate = new Promise<void>(resolve => { open = resolve })
+    const e = env({ llm: fakeHostLlm({ findings: conflict, suggestion: () => keepA, suggestionGate: () => gate }), suggestions: {} })
+    await seedDue(e)
+    e.scheduler.start()
+    e.timers.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+    await e.llm.nthStarted(2)
+    // 宿主这次调用不理会取消：卸载照样很快结束
+    await e.scheduler.dispose()
+    expect((await e.decisions.list())[0]?.suggestion).toBeUndefined()
+    expect((await e.completed()).global).toMatchObject({ by: 'auto' })
+    open?.()
   })
 })

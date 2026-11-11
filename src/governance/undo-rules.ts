@@ -38,6 +38,7 @@ export interface UndoRule {
 
 /**
  * 按种类的表。删一方的裁决恢复败方、提升为全局恢复原位，回到待处理；就地处理时才记的（isBornSettled）移出账本，回到没点过的样子。
+ * 冲突按处理方案落盘的（plan-applied，结清信息里带回执）按回执逐项恢复，回到待处理。
  * 留在本项目没拍快照，放回候选标记。直接改与合并、整理所选的应用、移到项目撤后移出账本；模型改写与替代撤后标已撤销。
  */
 export function undoRuleOf(entry: UndoableEntry): UndoRule {
@@ -52,6 +53,9 @@ export function undoRuleOf(entry: UndoableEntry): UndoRule {
     case 'rewrite': return { targets: entry.memoryIds, expectedStatus: 'active', mechanism: 'restore-snapshot', fate: 'mark-undone' }
     case 'supersede': return { targets: entry.memoryIds, expectedStatus: 'superseded', mechanism: 'restore-snapshot', fate: 'mark-undone' }
     default: {
+      // 冲突按处理方案落盘（plan-applied）：按回执逐项恢复，不只恢复败方
+      const { receipts } = entry.settled
+      if (receipts !== undefined) return { targets: receipts.map(r => r.memoryId), mechanism: 'restore-snapshot', fate: isBornSettled === true ? 'remove' : 'reopen', receipts }
       const loser = verdictLoser(entry, verdict)
       const targets = loser !== undefined ? [loser] : entry.kind === 'promote-candidate' ? entry.memoryIds : []
       return { targets, mechanism: verdict === 'keep-local' ? 'reflag' : 'restore-snapshot', fate: isBornSettled === true ? 'remove' : 'reopen' }

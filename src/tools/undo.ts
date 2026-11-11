@@ -289,8 +289,31 @@ async function reflag(entry: UndoableEntry, rule: UndoRule, allow: boolean | und
 }
 
 /**
+ * 融合时并入删掉的那条从最近删除恢复（用户 2026-11-11 定）：只恢复这一条，保留方的融合稿不退回；这次融合不能再整条撤销，条目清掉，
+ * 两条仍然矛盾的下次体检重新报。认领条目后重读，期间被撤销、彻底删除过的不再动手；只写回此刻仍在最近删除里的那份。
+ */
+async function restoreMergedLoser(
+  seen: { decisionId: string; at: number; memoryId: string }, snapshot: MemorySnapshot, allow: boolean | undefined, context: GovernanceContext, deps: UndoDeps,
+): Promise<RestoreDeletedResult> {
+  const { decisionId, at, memoryId } = seen
+  const claimed = await deps.decisions.withClaim(decisionId, async (): Promise<RestoreDeletedResult> => {
+    const current = (await deps.decisions.listSettled()).find(d => d.id === decisionId)
+    if (current?.settled?.at !== at || current.settled.verdict !== 'plan-applied' || verdictLoser(current, 'plan-applied') !== memoryId) {
+      return notFound(decisionId, 'no-entry')
+    }
+    const rejected = await gateRestore(snapshot.data.filter(r => r.id === memoryId), 'exact', allow, context, deps.store)
+    if (rejected.length > 0) return crossWorkspace(rejected)
+    const r = await deps.snapshots.restore(snapshot, [memoryId], deps.store, { target: 'exact', overwrite: cur => cur?.status === 'deleted', now: deps.now ?? Date.now })
+    if (r.restored.length === 0) return changed(memoryId, r.redacted.length > 0 ? 'redacted' : 'changed')
+    await deps.decisions.remove(decisionId)
+    return { kind: 'restored', restored: r.restored, snapshotId: snapshot.id }
+  })
+  return claimed.isClaimed ? claimed.value : error('claimed', `待决项 ${decisionId} 正在被另一次操作处理，未做任何改动`)
+}
+
+/**
  * 最近删除里的一条恢复。被裁决删掉的、裁决条目的快照覆盖着它：效果等于撤销那次裁决（转 executeUndo，冲突回到待处理、沿用原条目），
- * 认领后重读，期间被撤销或重新裁决过的不再按旧裁决动手。其余按最近一份含它的快照恢复；没有快照覆盖的
+ * 认领后重读，期间被撤销或重新裁决过的不再按旧裁决动手；融合时并入删掉的只恢复它自己（见 restoreMergedLoser）。其余按最近一份含它的快照恢复；没有快照覆盖的
  * （不经插件删除的归档文件）恢复归档文件本身。带了作用域时裁决条目与快照都得覆盖那一份，同 id 别的副本的快照不拿来恢复它。
  */
 export async function restoreDeleted(
@@ -308,6 +331,9 @@ export async function restoreDeleted(
     .filter(d => verdictLoser(d, d.settled!.verdict) === memoryId && covers(snapshots.find(s => s.id === d.settled!.snapshotId))).at(-1)
   if (entry !== undefined) {
     const at = entry.settled!.at
+    if (entry.settled!.verdict === 'plan-applied') {
+      return restoreMergedLoser({ decisionId: entry.id, at, memoryId }, snapshots.find(s => s.id === entry.settled!.snapshotId)!, args.allowCrossWorkspace, context, deps)
+    }
     const r = await claimAndUndo({ decisionId: entry.id, allowCrossWorkspace: args.allowCrossWorkspace }, context, deps,
       current => current.settled.at === at && verdictLoser(current, current.settled.verdict) === memoryId)
     if (r.kind === 'error') return r

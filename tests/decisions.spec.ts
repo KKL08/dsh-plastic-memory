@@ -2,9 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { PendingDecisionsStore, dedupKey } from '../src/governance/decisions.ts'
-import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, type PendingDecision } from '../src/governance/schema.ts'
-import type { KvTable } from '../src/kv-table.ts'
+import { PendingDecisionsStore, baselineBasisOf, conflictFingerprint, baselineFingerprint, dedupKey, isBaselineCurrent, isBasisCurrent, suggestionBasis } from '../src/governance/decisions.ts'
+import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, verdictLoser, type PendingDecision, type StoredSuggestion } from '../src/governance/schema.ts'
+import { editFingerprint } from '../src/governance/snapshots.ts'
+import type { MemoryRecord } from '../src/record-schema.ts'
+import type { CasKvTable, ClaimKvTable, KvTable } from '../src/kv-table.ts'
+import { RETENTION_MS } from '../src/retention.ts'
 import { SidecarStore } from '../src/storage/sidecar.ts'
 import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
 import { record } from './helpers/record.ts'
@@ -265,5 +268,340 @@ describe('dropDependingOn（彻底删除前清依赖条目）', () => {
     const left = [...await s.list(), ...await s.listSettled()].map(e => e.id).sort()
     expect(left).toEqual([merge.id, sameSnapshot.id, open.id].sort())
     expect(left).not.toContain(verdict.id)
+  })
+})
+
+describe('处理建议存在账本条目上', () => {
+  const a = record({ id: 'mem_a', content: '用 pnpm' })
+  const b = record({ id: 'mem_b', content: '用 npm' })
+  const read = (rs: MemoryRecord[]) => async (id: string) => rs.find(r => r.id === id)
+
+  async function seeded() {
+    const s = makeStore()
+    const { entry } = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器', fingerprint: 'fp' }, 1)
+    return { s, entry }
+  }
+
+  function suggestionOf(entry: PendingDecision, rs: MemoryRecord[], id = 'sg_1'): StoredSuggestion {
+    return {
+      id, action: 'keep-a', reason: '以 A 为准', ops: [{ kind: 'keep', memoryId: 'mem_a' }, { kind: 'forget', memoryId: 'mem_b' }],
+      basis: suggestionBasis(entry, rs), isSourced: false, generatedAt: 5,
+    }
+  }
+
+  it('旧条目没有新字段照常解析；带建议、失败、尝试次数的条目原样往返', () => {
+    const old = { id: 'pd_1', memoryIds: ['mem_a', 'mem_b'], summary: 's', firstSeenAt: 1, fingerprint: 'fp' }
+    expect(pendingDecisionSchema.parse(old)).toEqual(old)
+    const full = {
+      ...old,
+      suggestion: {
+        id: 'sg_1', action: 'merge', reason: 'r',
+        ops: [{ kind: 'edit', memoryId: 'mem_a', content: 'c', name: 'n', summary: 's', tags: ['t'] }, { kind: 'forget', memoryId: 'mem_b' }],
+        basis: { conflictFingerprint: 'fp', memories: [{ memoryId: 'mem_a', fingerprint: 'x', scopeKey: 'global' }, { memoryId: 'mem_b', fingerprint: 'y', scopeKey: '/w/app' }] },
+        isSourced: false, generatedAt: 2,
+      },
+      suggestionFailure: { basis: { memories: [] }, cause: { kind: 'model-error', hostCode: 'AUTH' }, at: 3 },
+      suggestionAttempts: { fingerprint: 'fp', count: 1 },
+    }
+    expect(pendingDecisionSchema.parse(full)).toEqual(full)
+  })
+
+  it('依据版本：冲突指纹或任一条的完整内容指纹（含摘要、标签）变了就不算数', async () => {
+    const { entry } = await seeded()
+    const basis = suggestionBasis(entry, [a, b])
+    expect(isBasisCurrent(entry, basis, [a, b])).toBe(true)
+    expect(isBasisCurrent({ ...entry, fingerprint: 'fp2' }, basis, [a, b])).toBe(false)
+    expect(isBasisCurrent(entry, basis, [a, { ...b, summary: '改了摘要' }])).toBe(false)
+    expect(isBasisCurrent(entry, basis, [a, { ...b, tags: ['新标签'] }])).toBe(false)
+    expect(isBasisCurrent(entry, basis, [a, undefined])).toBe(false)
+  })
+
+  it('依据版本带每条的作用域：内容没变、一条被提升为全局或移到别的项目，也不算数', async () => {
+    const { entry } = await seeded()
+    const inProject = { ...b, scope: 'workspace' as const, workspacePath: '/w/app' }
+    const basis = suggestionBasis(entry, [a, inProject])
+    expect(isBasisCurrent(entry, basis, [a, inProject])).toBe(true)
+    expect(isBasisCurrent(entry, basis, [a, { ...inProject, scope: 'global', workspacePath: undefined }])).toBe(false)
+    expect(isBasisCurrent(entry, basis, [a, { ...inProject, workspacePath: '/w/other' }])).toBe(false)
+    // 加作用域键之前写下的依据：照常解析，一律算对不上
+    const legacy = { ...basis, memories: basis.memories.map(({ scopeKey: _scopeKey, ...m }) => m) }
+    expect(pendingDecisionSchema.parse({ ...entry, suggestionFailure: { basis: legacy, cause: { kind: 'unparseable' }, at: 1 } }).suggestionFailure?.basis).toEqual(legacy)
+    expect(isBasisCurrent(entry, legacy, [a, inProject])).toBe(false)
+  })
+
+  it('垂直冲突的依据另记基线所属项目和基线指纹：项目记忆只认它自己项目里的会话，全局记忆只认扫出这条冲突的那份基线；视图侧的核对只看记忆那一半', async () => {
+    const s = makeStore()
+    const memory = record({ id: 'mem_v', content: '用 npm', scope: 'workspace', workspacePath: '/w/app' })
+    const { entry } = await s.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md', summary: '包管理器', fingerprint: 'fp' }, 1)
+    const baseline = ['用 pnpm']
+    const sided = baselineBasisOf(memory, baseline, '/w/app', 'fp')
+    expect(sided).toEqual({ workspace: '/w/app', fingerprint: baselineFingerprint(baseline) })
+    // 缺基线：会话不在这条记忆的项目里，或拿不到基线
+    expect(baselineBasisOf(memory, baseline, '/w/other', 'fp')).toBeUndefined()
+    expect(baselineBasisOf(memory, baseline, undefined, 'fp')).toBeUndefined()
+    expect(baselineBasisOf(memory, null, '/w/app', 'fp')).toBeUndefined()
+    // 全局记忆：只认扫出这条冲突的那份基线（用它重算冲突指纹和条目的一致），所属按会话所在的项目记，没有项目的会话记 global
+    const global = record({ id: 'mem_g' })
+    const scanned = conflictFingerprint([global], baseline)
+    expect(baselineBasisOf(global, baseline, '/w/other', scanned)).toEqual({ workspace: '/w/other', fingerprint: baselineFingerprint(baseline) })
+    expect(baselineBasisOf(global, baseline, undefined, scanned)).toEqual({ workspace: 'global', fingerprint: baselineFingerprint(baseline) })
+    // 换了一份指令文件（别的项目的会话）、或条目没有指纹：缺基线
+    expect(baselineBasisOf(global, ['用 yarn'], '/w/other', scanned)).toBeUndefined()
+    expect(baselineBasisOf(global, baseline, '/w/other', undefined)).toBeUndefined()
+
+    const basis = suggestionBasis(entry, [memory], sided)
+    expect(basis.baseline).toEqual(sided)
+    expect(pendingDecisionSchema.parse({ ...entry, suggestionFailure: { basis, cause: { kind: 'no-baseline' }, at: 1 } }).suggestionFailure?.basis).toEqual(basis)
+    // 视图侧只核对记忆那一半
+    expect(isBasisCurrent(entry, basis, [memory])).toBe(true)
+    // 采纳时按会话此刻的基线核对：项目、基线内容都对得上才算数
+    expect(isBaselineCurrent(basis, memory, baseline, '/w/app')).toBe(true)
+    expect(isBaselineCurrent(basis, memory, ['用 pnpm，脚本仓用 npm'], '/w/app')).toBe(false)
+    expect(isBaselineCurrent(basis, memory, baseline, '/w/other')).toBe(false)
+    expect(isBaselineCurrent(basis, memory, null, '/w/app')).toBe(false)
+    expect(isBaselineCurrent(suggestionBasis(entry, [memory]), memory, baseline, '/w/app')).toBe(false)
+    expect(isBaselineCurrent(suggestionBasis({ ...entry, fingerprint: scanned }, [global], baselineBasisOf(global, baseline, '/w/x', scanned)), global, baseline, '/w/y')).toBe(false)
+  })
+
+  it('写入：认领后重读核对，写上建议并清掉之前的失败', async () => {
+    const { s, entry } = await seeded()
+    const failure = { basis: suggestionBasis(entry, [a, b]), cause: { kind: 'unparseable' as const }, at: 2 }
+    expect(await s.writeSuggestion(entry.id, { failure }, read([a, b]))).toBe('written')
+    expect((await s.get(entry.id))?.suggestionFailure).toEqual(failure)
+    expect(await s.writeSuggestion(entry.id, { suggestion: suggestionOf(entry, [a, b]) }, read([a, b]))).toBe('written')
+    const saved = await s.get(entry.id)
+    expect(saved?.suggestion?.id).toBe('sg_1')
+    expect(saved).not.toHaveProperty('suggestionFailure')
+  })
+
+  it('已有当前依据的建议时不覆盖，失败也不记', async () => {
+    const { s, entry } = await seeded()
+    await s.writeSuggestion(entry.id, { suggestion: suggestionOf(entry, [a, b], 'sg_1') }, read([a, b]))
+    expect(await s.writeSuggestion(entry.id, { suggestion: suggestionOf(entry, [a, b], 'sg_2') }, read([a, b]))).toBe('has-current')
+    const failure = { basis: suggestionBasis(entry, [a, b]), cause: { kind: 'unparseable' as const }, at: 2 }
+    expect(await s.writeSuggestion(entry.id, { failure }, read([a, b]))).toBe('has-current')
+    const saved = await s.get(entry.id)
+    expect(saved?.suggestion?.id).toBe('sg_1')
+    expect(saved).not.toHaveProperty('suggestionFailure')
+  })
+
+  it('旧依据的建议可以被新依据的覆盖', async () => {
+    const { s, entry } = await seeded()
+    await s.writeSuggestion(entry.id, { suggestion: suggestionOf(entry, [a, b], 'sg_1') }, read([a, b]))
+    const b2 = { ...b, content: '用 npm，CI 里也是' }
+    expect(await s.writeSuggestion(entry.id, { suggestion: suggestionOf(entry, [a, b2], 'sg_2') }, read([a, b2]))).toBe('written')
+    expect((await s.get(entry.id))?.suggestion?.id).toBe('sg_2')
+  })
+
+  it('生成期间记忆被改过、或一方不在用了：依据对不上，不写', async () => {
+    const { s, entry } = await seeded()
+    const suggestion = suggestionOf(entry, [a, b])
+    expect(await s.writeSuggestion(entry.id, { suggestion }, read([a, { ...b, content: '改过' }]))).toBe('stale')
+    expect(await s.writeSuggestion(entry.id, { suggestion }, read([a, { ...b, status: 'deleted' }]))).toBe('stale')
+    expect((await s.get(entry.id))?.suggestion).toBeUndefined()
+  })
+
+  it('体检发起的生成记一次尝试（按冲突指纹计，指纹变了从头算）；不计尝试的写入（用户点「补上建议」）不动次数', async () => {
+    const { s, entry } = await seeded()
+    const failure = { basis: suggestionBasis(entry, [a, b]), cause: { kind: 'unparseable' as const }, at: 2 }
+    expect(await s.writeSuggestion(entry.id, { failure }, read([a, b]), { isAttempt: true })).toBe('written')
+    expect((await s.get(entry.id))?.suggestionAttempts).toEqual({ fingerprint: 'fp', count: 1 })
+    expect(await s.writeSuggestion(entry.id, { failure }, read([a, b]))).toBe('written')
+    expect((await s.get(entry.id))?.suggestionAttempts).toEqual({ fingerprint: 'fp', count: 1 })
+    expect(await s.writeSuggestion(entry.id, { suggestion: suggestionOf(entry, [a, b]) }, read([a, b]), { isAttempt: true })).toBe('written')
+    expect((await s.get(entry.id))?.suggestionAttempts).toEqual({ fingerprint: 'fp', count: 2 })
+    // 同一对再被扫到、双方内容变了：条目换了冲突指纹，次数从头算
+    const b2 = { ...b, content: '用 npm，CI 里也是' }
+    const { entry: changed } = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器', fingerprint: 'fp2' }, 3)
+    const again = { basis: suggestionBasis(changed, [a, b2]), cause: { kind: 'unparseable' as const }, at: 4 }
+    expect(await s.writeSuggestion(entry.id, { failure: again }, read([a, b2]), { isAttempt: true })).toBe('written')
+    expect((await s.get(entry.id))?.suggestionAttempts).toEqual({ fingerprint: 'fp2', count: 1 })
+  })
+
+  it('没写成的（依据对不上、已有当前建议）不记尝试', async () => {
+    const { s, entry } = await seeded()
+    const suggestion = suggestionOf(entry, [a, b])
+    expect(await s.writeSuggestion(entry.id, { suggestion }, read([a, { ...b, content: '改过' }]), { isAttempt: true })).toBe('stale')
+    expect(await s.writeSuggestion(entry.id, { suggestion }, read([a, b]))).toBe('written')
+    expect(await s.writeSuggestion(entry.id, { suggestion: suggestionOf(entry, [a, b], 'sg_2') }, read([a, b]), { isAttempt: true })).toBe('has-current')
+    expect((await s.get(entry.id))?.suggestionAttempts).toBeUndefined()
+  })
+
+  it('条目已结清或不在了：不写；正被别处认领：丢掉这一份', async () => {
+    const { s, entry } = await seeded()
+    const suggestion = suggestionOf(entry, [a, b])
+    expect(await s.writeSuggestion('pd_none', { suggestion }, read([a, b]))).toBe('gone')
+    const held = await s.withClaim(entry.id, () => s.writeSuggestion(entry.id, { suggestion }, read([a, b])))
+    expect(held).toEqual({ isClaimed: true, value: 'claimed' })
+    await s.settle(entry.id, 'keep-both', 3)
+    expect(await s.writeSuggestion(entry.id, { suggestion }, read([a, b]))).toBe('gone')
+  })
+
+  it('核对完、写入前，一条被删且条目被清掉：写入把条目写了回来，写后重读发现一方已不在用，撤回这一条、回 gone', async () => {
+    const table = new InMemoryKvTable<PendingDecision>()
+    const records = [a, b]
+    let isArmed = false
+    let s!: PendingDecisionsStore
+    // 删除路径的次序：先删记忆，再清条目（removeByMemoryIds 不认领条目）
+    const wrapped: ClaimKvTable<PendingDecision> & Pick<CasKvTable<PendingDecision>, 'deleteIf'> = {
+      get: key => table.get(key),
+      list: () => table.list(),
+      delete: key => table.delete(key),
+      deleteIf: (key, isStill) => table.deleteIf(key, isStill),
+      claim: key => table.claim(key),
+      put: async (key, value) => {
+        if (isArmed) {
+          isArmed = false
+          records[1] = { ...b, status: 'deleted' }
+          expect(await s.removeByMemoryIds(['mem_b'])).toBe(1)
+          expect(await table.get(key)).toBeUndefined()
+        }
+        return table.put(key, value)
+      },
+    }
+    s = new PendingDecisionsStore(wrapped)
+    const { entry } = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器', fingerprint: 'fp' }, 1)
+    isArmed = true
+    expect(await s.writeSuggestion(entry.id, { suggestion: suggestionOf(entry, [a, b]) }, read(records))).toBe('gone')
+    expect(await table.list()).toEqual([])
+  })
+})
+
+describe('应用处理方案（plan-applied）', () => {
+  const kept = record({ id: 'mem_a', content: '前端用 pnpm，脚本仓用 npm' })
+  const dropped = record({ id: 'mem_b', content: '用 npm', status: 'deleted', deletedAt: 5 })
+  const writes = [{ memoryId: 'mem_a', op: 'edit' as const, written: kept }, { memoryId: 'mem_b', op: 'forget' as const, written: dropped }]
+  const proposal = { source: 'suggestion' as const, action: 'merge' as const }
+
+  async function merged() {
+    const table = new InMemoryKvTable<PendingDecision>()
+    const s = new PendingDecisionsStore(table)
+    const { entry } = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器', fingerprint: 'fp-before' }, 1)
+    const suggestion: StoredSuggestion = {
+      id: 'sg_1', action: 'merge', reason: 'r', ops: [{ kind: 'edit', memoryId: 'mem_a', content: kept.content, name: kept.name, summary: kept.summary, tags: [] }, { kind: 'forget', memoryId: 'mem_b' }],
+      basis: { conflictFingerprint: 'fp-before', memories: [] }, isSourced: false, generatedAt: 1,
+    }
+    // 这里只验账本的记法：建议直接放到条目上
+    await table.put(entry.id, { ...entry, suggestion })
+    expect(await s.settlePlan(entry.id, { writes, proposal, snapshotId: 'snap_1', fingerprint: 'fp-after' }, 10)).toBe(true)
+    return { s, entry, suggestion }
+  }
+
+  it('结清信息里记改前快照、逐项回执、依据和结论代码、改前指纹；条目指纹换成改后的；败方是回执里删除的那条', async () => {
+    const { s, entry, suggestion } = await merged()
+    const [saved] = await s.listSettled()
+    expect(saved).toMatchObject({ id: entry.id, fingerprint: 'fp-after', suggestion })
+    expect(saved!.settled).toEqual({
+      verdict: 'plan-applied', at: 10, snapshotId: 'snap_1', proposal, priorFingerprint: 'fp-before',
+      receipts: [
+        { memoryId: 'mem_a', op: 'edit', fingerprint: editFingerprint(kept), expectedStatus: 'active' },
+        { memoryId: 'mem_b', op: 'forget', fingerprint: editFingerprint(dropped), expectedStatus: 'deleted' },
+      ],
+    })
+    expect(pendingDecisionSchema.parse(saved)).toEqual(saved)
+    expect(verdictLoser(saved!, 'plan-applied')).toBe('mem_b')
+    // 没有删除项（垂直改写）：没有败方
+    expect(verdictLoser({ ...saved!, settled: { ...saved!.settled!, receipts: saved!.settled!.receipts!.slice(0, 1) } }, 'plan-applied')).toBeUndefined()
+    expect(await s.list()).toEqual([])
+  })
+
+  it('撤销（unsettle）：条目回到待处理，指纹还原成改前的，结清信息整个去掉，建议原样还在', async () => {
+    const { s, entry, suggestion } = await merged()
+    expect(await s.unsettle(entry.id)).toBe(true)
+    const open = await s.get(entry.id)
+    expect(open).toMatchObject({ fingerprint: 'fp-before', suggestion })
+    expect(open).not.toHaveProperty('settled')
+  })
+
+  it('结清后同一对不被重报：有删除项的，败方不在用时挂账跳过；没有删除项的（垂直改写），按改后指纹再报算已结清', async () => {
+    const { s } = await merged()
+    const read = async (id: string) => (id === 'mem_a' ? kept : dropped)
+    expect((await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '再报', fingerprint: 'fp-after' }, 20, read)).isSkipped).toBe(true)
+    expect((await s.listSettled()).map(e => e.settled?.verdict)).toEqual(['plan-applied'])
+
+    const v = makeStore()
+    const { entry } = await v.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md', summary: '垂直', fingerprint: 'fp-v-before' }, 1)
+    await v.settlePlan(entry.id, { writes: [{ memoryId: 'mem_v', op: 'edit', written: record({ id: 'mem_v' }) }], proposal: { source: 'suggestion', action: 'merge' }, snapshotId: 'snap_v', fingerprint: 'fp-v-after' }, 10)
+    expect((await v.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md 换了措辞', summary: '再报', fingerprint: 'fp-v-after' }, 20)).settled).toBe(true)
+  })
+
+  it('没有删除项的垂直改写：下次体检按另一个指纹重报（基线又改了）时不删已结清条目，另挂一条未决的；撤销留到保留窗口结束，撤销后多出的那条收拢掉', async () => {
+    const v = makeStore()
+    const { entry } = await v.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md', summary: '垂直', fingerprint: 'fp-v-before' }, 1)
+    await v.settlePlan(entry.id, { writes: [{ memoryId: 'mem_v', op: 'edit', written: record({ id: 'mem_v' }) }], proposal: { source: 'suggestion', action: 'rewrite' }, snapshotId: 'snap_v', fingerprint: 'fp-v-after' }, 10)
+    const reported = await v.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md', summary: '基线又改了', fingerprint: 'fp-v-new' }, 20)
+    expect(reported.created).toBe(true)
+    expect(reported.entry.id).not.toBe(entry.id)
+    // 已结清的改写还在，撤销回执跟着在
+    const [settled] = await v.listSettled()
+    expect(settled).toMatchObject({ id: entry.id, settled: { verdict: 'plan-applied', snapshotId: 'snap_v' } })
+    expect((await v.list()).map(e => e.id)).toEqual([reported.entry.id])
+    // 再报一次同一个新指纹：沿用那条未决的，不再多建
+    expect((await v.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md', summary: '又一次', fingerprint: 'fp-v-new' }, 30)).entry.id).toBe(reported.entry.id)
+    // 撤销：改写那条回到待处理（指纹还原），按改写后内容另挂的那条收拢掉
+    expect(await v.unsettle(entry.id)).toBe(true)
+    expect((await v.list()).map(e => [e.id, e.fingerprint])).toEqual([[entry.id, 'fp-v-before']])
+    // 保留窗口过了照常清掉
+    const w = makeStore()
+    const { entry: e2 } = await w.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md', summary: '垂直', fingerprint: 'fp-v-before' }, 1)
+    await w.settlePlan(e2.id, { writes: [{ memoryId: 'mem_v', op: 'edit', written: record({ id: 'mem_v' }) }], proposal: { source: 'suggestion', action: 'rewrite' }, snapshotId: 'snap_v', fingerprint: 'fp-v-after' }, 10)
+    await w.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md', summary: '基线又改了', fingerprint: 'fp-v-new' }, 20)
+    await w.sweep(10 + RETENTION_MS + 1)
+    expect(await w.listSettled()).toEqual([])
+    expect(await w.list()).toHaveLength(1)
+  })
+
+  it('保留窗口过了：账本清理把它清掉（含没有删除项的垂直改写）', async () => {
+    const { s } = await merged()
+    const v = makeStore()
+    const { entry } = await v.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md', summary: '垂直', fingerprint: 'fp-v' }, 1)
+    await v.settlePlan(entry.id, { writes: [{ memoryId: 'mem_v', op: 'edit', written: record({ id: 'mem_v' }) }], proposal, snapshotId: 'snap_v', fingerprint: 'fp-v2' }, 10)
+    for (const store of [s, v]) {
+      await store.sweep(10 + RETENTION_MS - 1)
+      expect(await store.listSettled()).toHaveLength(1)
+      await store.sweep(10 + RETENTION_MS + 1)
+      expect(await store.listSettled()).toEqual([])
+    }
+  })
+
+  it('彻底删除前清依赖条目：快照 id 在结清信息里，找得到它', async () => {
+    const { s } = await merged()
+    await s.dropDependingOn(new Set(['snap_1']), 'mem_b')
+    expect(await s.listSettled()).toEqual([])
+  })
+
+  it('条目不在、已结清：不记，返回 false', async () => {
+    const { s, entry } = await merged()
+    expect(await s.settlePlan(entry.id, { writes, proposal, snapshotId: 'snap_2', fingerprint: 'x' }, 11)).toBe(false)
+    expect(await s.settlePlan('pd_none', { writes, proposal, snapshotId: 'snap_2', fingerprint: 'x' }, 11)).toBe(false)
+    expect((await s.listSettled())[0]!.settled?.snapshotId).toBe('snap_1')
+  })
+})
+
+describe('账本清理与条目重开交错', () => {
+  it('清理读到过期的已裁决条目后，条目被重开：不删重开的条目', async () => {
+    const table = new InMemoryKvTable<PendingDecision>()
+    let reopen: (() => Promise<void>) | undefined
+    const wrapped: ClaimKvTable<PendingDecision> & Pick<CasKvTable<PendingDecision>, 'deleteIf'> = {
+      get: key => table.get(key),
+      put: (key, value) => table.put(key, value),
+      delete: key => table.delete(key),
+      deleteIf: (key, isStill) => table.deleteIf(key, isStill),
+      claim: key => table.claim(key),
+      list: async () => {
+        const snapshot = await table.list()
+        const run = reopen
+        reopen = undefined
+        await run?.()
+        return snapshot
+      },
+    }
+    const s = new PendingDecisionsStore(wrapped)
+    const { entry } = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器', fingerprint: 'fp' }, 1)
+    await s.settle(entry.id, 'keep-left', 2, { snapshotId: 'snap_1' })
+    // 同一对再被扫到（败方回来了）：条目回到待处理
+    reopen = async () => { expect(await s.unsettle(entry.id)).toBe(true) }
+    await s.sweep(2 + RETENTION_MS + 1)
+    expect(await s.get(entry.id)).toMatchObject({ id: entry.id, memoryIds: ['mem_a', 'mem_b'] })
   })
 })

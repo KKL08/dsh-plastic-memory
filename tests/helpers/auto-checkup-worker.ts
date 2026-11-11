@@ -9,7 +9,8 @@
  *   advance <ms>  推进时钟并触发到点的定时器       → {"reply":"advance"}
  *   open          让在等的模型调用返回             → {"reply":"open"}
  *   idle          等这一轮检查（含体检）做完       → {"reply":"idle"}
- * 事件：模型调用开始 {"event":"llm"}；体检做完 {"event":"scanned"}；认领被接手 {"event":"lost"}。就绪时先打 {"event":"ready"}。
+ * 事件：内容检查的模型调用开始 {"event":"llm"}；生成处理建议的模型调用开始 {"event":"llm-suggest"}（建议的理由写着这个进程的 pid）；
+ * 体检做完 {"event":"scanned"}；认领被接手 {"event":"lost"}。就绪时先打 {"event":"ready"}。
  */
 import { createInterface } from 'node:readline'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -25,6 +26,7 @@ import { hostSemanticLlm } from '../../src/governance/host-llm.ts'
 import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../../src/governance/schema.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from '../../src/gui/view-writer.ts'
 import { AutoCheckupScheduler, type AutoCheckupTimer } from '../../src/gui/auto-checkup.ts'
+import { CheckupSuggestions } from '../../src/gui/checkup-suggestions.ts'
 
 const [root, startArg, findingsArg] = process.argv.slice(2)
 if (root === undefined || startArg === undefined || findingsArg === undefined) throw new Error('usage: auto-checkup-worker.ts <root> <start> <conflict|none>')
@@ -59,11 +61,13 @@ const findings = findingsArg === 'conflict'
   ? [{ type: 'conflict', memoryIds: ['mem_x', 'mem_y'], summary: '端口说法矛盾', suggestedAction: '请裁决' }]
   : []
 const llm = {
-  async *stream(_req: GenerateOptions): AsyncIterable<StreamChunk> {
+  async *stream(req: GenerateOptions): AsyncIterable<StreamChunk> {
     const gate = new Promise<void>(resolve => { openGate = resolve })
-    emit({ event: 'llm' })
+    const isSuggestion = String(req.system).includes('两条互相矛盾的记忆')
+    emit({ event: isSuggestion ? 'llm-suggest' : 'llm' })
     await gate
-    yield { type: 'text-delta', index: 0, text: JSON.stringify({ findings }) }
+    const text = isSuggestion ? JSON.stringify({ action: 'keep-a', reason: `pid ${process.pid}` }) : JSON.stringify({ findings })
+    yield { type: 'text-delta', index: 0, text }
     yield { type: 'usage', usage: { inputTokens: 1200, outputTokens: 80 } }
     yield { type: 'finish', reason: { kind: 'stop' } }
   },
@@ -81,6 +85,10 @@ const source = { store, checkups, autoCheckups: new AutoCheckupSettingStore(side
 const writer = new ViewWriter({ memoryRoot: root, collect: () => { throw new Error('这里只写体检视图') }, collectCheckups: () => collectCheckupView(source), now: () => clock.now, sleep: async () => {} })
 const decisions = new PendingDecisionsStore(sidecar.pending)
 const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
+// 体检之后的后续段：这里不写待处理视图，只重写体检视图
+const suggestions = new CheckupSuggestions({
+  store, decisions, checkups, views: { request: async () => {}, requestCheckups: () => writer.requestCheckups() }, now: () => clock.now, log: { ...quiet, info() {} },
+})
 const scheduler = new AutoCheckupScheduler({
   scan: { store, registry, decisions, cache: sidecar.scanCache, ignores },
   checkups,
@@ -98,6 +106,7 @@ const scheduler = new AutoCheckupScheduler({
   timer,
   onChecked: () => writer.requestCheckups(),
   onClaimChanged: () => writer.requestCheckups(),
+  suggestions,
   now: () => clock.now,
   log: { ...quiet, info: (message: string) => { if (message.includes('接手')) emit({ event: 'lost' }) } },
 })

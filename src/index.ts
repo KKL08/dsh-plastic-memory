@@ -44,6 +44,7 @@ import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { createMemoryCommand, type MemoryCommandDefinition } from './gui/commands.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from './gui/view-writer.ts'
 import { AutoCheckupScheduler, type AutoCheckupTimer } from './gui/auto-checkup.ts'
+import { CheckupSuggestions } from './gui/checkup-suggestions.ts'
 import { buildSessionView } from './gui/views.ts'
 import { ACCENTS, type Accent, type SessionView } from './gui/contract.ts'
 
@@ -306,17 +307,16 @@ export async function apply(ctx: Context, config: Config) {
   registerWrite(createSnapshotTool({ store, snapshots, host }))
   // memory_source：证据下钻（日常 + 治理都用，常驻）。sessionQuery 是 base bundle 默认服务，
   // 但按 llm 同款惯例 per-call 探测 + try/catch——某些 profile 缺席时工具内优雅降级，不挂载失败。
-  ctx.tools.register(createSourceTool({
-    store, host,
-    getReadEvent: () => {
-      try {
-        const sq = ctx.get('sessionQuery') as { readEvent?: ReadEventFn } | undefined
-        return sq?.readEvent ? sq.readEvent.bind(sq) as ReadEventFn : null
-      } catch {
-        return null
-      }
-    },
-  }))
+  // 生成处理建议时回查出处也用它（经 /memory 命令注入），没有会话的进程里同样能读。
+  const getReadEvent = (): ReadEventFn | null => {
+    try {
+      const sq = ctx.get('sessionQuery') as { readEvent?: ReadEventFn } | undefined
+      return sq?.readEvent ? sq.readEvent.bind(sq) as ReadEventFn : null
+    } catch {
+      return null
+    }
+  }
+  ctx.tools.register(createSourceTool({ store, host, getReadEvent }))
   // 体检、健康分、裁决、提升四个工具随体检开关注册 / 注销（开关热更新时再同步一次）。
   // 灵敏度与提升目标不必重注册：工具执行时经 getter 现读配置。
   let governanceTools: Array<() => void> = []
@@ -351,9 +351,16 @@ export async function apply(ctx: Context, config: Config) {
   // 那时 storageDomain 未必挂上；而没有任何会话时浏览器半侧也读不到视图，早写没有意义。
   // 体检视图与自动体检调度共用的读法：设置表、完成记录、目录清单，不读记忆文件
   const checkupSource = { store, checkups, autoCheckups, cache: scanCache, isGovernanceEnabled: () => config.governance.enabled.get() }
+  // 体检之后的后续段：给冲突逐条生成处理建议。手动体检、自动体检共用一份，进程内的「正在生成」标记随待处理视图写出
+  const checkupSuggestions = new CheckupSuggestions({
+    store, decisions, checkups, getReadEvent,
+    views: { request: async names => { await views?.request(names) }, requestCheckups: async () => { await views?.requestCheckups() } },
+    now: () => Date.now(), log: ctx.logger,
+  })
   // 四个全局视图的收集：视图写入器与自动体检（体检前后比出新增）共用
   const collectViews = () => collectGlobalViews({
     store, decisions, snapshots, cache: scanCache, ignores, checkups, autoCheckups, registry, memoryRoot, isGovernanceEnabled: () => config.governance.enabled.get(), bootedAt, log: ctx.logger,
+    generatingSuggestions: () => checkupSuggestions.generatingIds(),
   })
   ctx.inject(['commands'], child => {
     const commands = (child as unknown as { commands: { register(def: MemoryCommandDefinition): () => void } }).commands
@@ -365,16 +372,24 @@ export async function apply(ctx: Context, config: Config) {
     views = writer
     for (const [cwd, workspacePath] of earlyWorkspaces) void writer.requestWorkspace(cwd, workspacePath)
     earlyWorkspaces.clear()
+    // 卸载时取消手动体检之后还在跑的后续段（不等在途的模型调用）
+    const unload = new AbortController()
     commands.register(createMemoryCommand({
       memoryRoot, store, decisions, snapshots, cache: scanCache, checkups, autoCheckups, ignores, registry, agentsMd, views: writer,
       onAutoCheckupChanged: () => void scheduler?.recheck(),
+      suggestions: checkupSuggestions, signal: unload.signal,
       host, log: ctx.logger,
       isGovernanceEnabled: () => config.governance.enabled.get(),
       isLegacyImportSettled: () => sidecar.isLegacyImportSettled(),
+      getReadEvent,
     }))
     // 卸载时（插件重载、commands 服务撤下）停写视图：cordis 卸载会 await 这个 disposer，
     // 进行中的写入落完才轮到新实例加载，旧实例的迟到写入不会盖掉新视图
     return async () => {
+      unload.abort(new DOMException('plugin unloaded', 'AbortError'))
+      // 被取消的后续段要到之后的微任务才收尾，那时写入器已撤下：这里先清标记、重写一次待处理视图，文件里不留「正在生成」
+      checkupSuggestions.clearMarks()
+      await writer.request(['pending']).catch(() => {})
       if (views === writer) views = undefined
       await writer.dispose()
     }
@@ -396,6 +411,7 @@ export async function apply(ctx: Context, config: Config) {
       timer: { timeout: (callback, delayMs) => timer.timeout(callback, delayMs), interval: (callback, delayMs) => timer.interval(callback, delayMs) },
       onChecked: async () => { await views?.requestCheckups() },
       onClaimChanged: async () => { await views?.requestCheckups() },
+      suggestions: checkupSuggestions,
       now: () => Date.now(),
       log: ctx.logger,
     })

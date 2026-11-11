@@ -1,14 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { GUI_VIEW_VERSION, type AdviceType, type HealthView, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type PendingItem, type PendingView } from '../../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, type AdviceType, type HealthView, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type PendingItem, type PendingView, type Suggestion } from '../../src/gui/contract.ts'
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { useGateway, type PluginConfig } from '../gateway.ts'
 import { FLASH_MS } from '../library/shared.tsx'
 import { ALL_SCOPE, createNavStore, type NavStore, type PageScope } from '../nav.ts'
 import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { PendingTab } from './PendingTab.tsx'
+import { WAIT_FOR_VIEW_MS } from './suggestion.tsx'
 import { createTranslator } from '../i18n.tsx'
-import { en } from '../locales.ts'
+import { en, zh } from '../locales.ts'
 import { PanelShell } from '../ui/PanelShell.tsx'
 
 // 待处理 tab：给定一份待处理视图，断言每类卡渲染出什么、点按钮向网关发了什么命令。
@@ -44,6 +45,20 @@ function setup(items: PendingItem[], init: FakeGatewayInit = {}, nav: NavStore =
   return { ...utils, gateway, commands }
 }
 
+/** 横向冲突直接处理：点候选项，再点原位确认里的确认（都保留的确认按钮叫「都保留」）。 */
+const CONFIRM_OF = { '保留 A': '保留 A', '保留 B': '保留 B', '都保留，不算冲突': '都保留' } as const
+function ruleConflict(label: keyof typeof CONFIRM_OF) {
+  fireEvent.click(screen.getByRole('button', { name: label }))
+  fireEvent.click(within(document.querySelector('.pm-soft-confirm') as HTMLElement).getByRole('button', { name: CONFIRM_OF[label] }))
+}
+
+/** 垂直冲突直接处理：点候选项，再点原位确认里的确认。 */
+const VERTICAL_CONFIRM_OF = { '以文件为准，删除这条': '删除这条', '都保留，不算冲突': '都保留' } as const
+function ruleVertical(label: keyof typeof VERTICAL_CONFIRM_OF) {
+  fireEvent.click(screen.getByRole('button', { name: label }))
+  fireEvent.click(within(document.querySelector('.pm-soft-confirm') as HTMLElement).getByRole('button', { name: VERTICAL_CONFIRM_OF[label] }))
+}
+
 // 修改方式的偏好存在本地存储里（edit-modes.tsx），每个用例从默认「让模型改」开始
 beforeEach(() => { localStorage.clear() })
 
@@ -61,7 +76,8 @@ describe('待处理：按级别分组', () => {
     const { gateway } = setup([secret], { respond: () => new Promise<never>(() => {}) })
     act(() => { gateway.setView('pending', view(secret, horizontal)) })
     const card = screen.getByRole('heading', { level: 3, name: '测试里怎么准备数据库，两条记忆互相矛盾' }).closest('article')!
-    await act(async () => { fireEvent.click(within(card).getByRole('button', { name: '以 A 为准' })) })
+    fireEvent.click(within(card).getByRole('button', { name: '保留 A' }))
+    await act(async () => { fireEvent.click(within(card.querySelector('.pm-soft-confirm') as HTMLElement).getByRole('button', { name: '保留 A' })) })
     act(() => { gateway.setView('pending', view(secret)) })
     const after = screen.getByRole('heading', { level: 3, name: '测试里怎么准备数据库，两条记忆互相矛盾' }).closest('article')!
     expect(after).toBe(card)
@@ -107,8 +123,8 @@ describe('待处理：按级别分组', () => {
   it('全部处理完：组上方写「都处理完了，agent 之后按你的决定来。」，结果卡还在原位', async () => {
     const { gateway } = setup([horizontal, tidy])
     expect(screen.queryByText('都处理完了，agent 之后按你的决定来。')).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
-    await screen.findByText('已按 A')
+    ruleConflict('保留 A')
+    await screen.findByText('已保留 A')
     act(() => { gateway.setView('pending', view(tidy)) })
     // 还剩一条可以整理：不算处理完
     expect(screen.queryByText('都处理完了，agent 之后按你的决定来。')).toBeNull()
@@ -124,38 +140,37 @@ describe('待处理：按级别分组', () => {
     setup([secret, horizontal, promote])
     // 没处理过的卡不带结果卡的淡入
     expect(document.querySelector('.pm-pending-item--result')).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
-    await screen.findByText('已按 A')
+    ruleConflict('保留 A')
+    await screen.findByText('已保留 A')
     const yourCall = screen.getByRole('region', { name: '等你决定 1' })
-    expect(within(yourCall).getByText('已按 A')).toBeInTheDocument()
+    expect(within(yourCall).getByText('已保留 A')).toBeInTheDocument()
     expect(screen.getByRole('region', { name: '先处理 1' })).toBeInTheDocument()
     // 标记列不空出来：处理完换成灰圆点，标题不往左跳
-    expect(within(yourCall).getByText('已按 A').closest('article')!.querySelector('.pm-pending-head .pm-marker--done')).not.toBeNull()
-    expect(within(yourCall).getByText('已按 A').closest('article')).toHaveClass('pm-pending-item--result')
+    expect(within(yourCall).getByText('已保留 A').closest('article')!.querySelector('.pm-pending-head .pm-marker--done')).not.toBeNull()
+    expect(within(yourCall).getByText('已保留 A').closest('article')).toHaveClass('pm-pending-item--result')
   })
 })
 
 describe('待处理：各类卡', () => {
 
-  it('横向冲突：A / B 原文、类型显示名；三个按钮各发对应 verdict', async () => {
+  it('横向冲突：A / B 原文、类型显示名；「保留 B」确认后发对应 verdict', async () => {
     const { commands } = setup([horizontal])
     const a = screen.getByRole('region', { name: '记忆 A' })
     expect(within(a).getByText('测试用真实 Postgres。')).toBeInTheDocument()
     expect(within(a).getByText('行为偏好')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '以 B 为准' }))
+    ruleConflict('保留 B')
     await waitFor(() => { expect(commands()).toEqual([{ cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-right' }]) })
   })
 
-  it('横向冲突：三个按钮一排，上面「说明」写三种后果，决定前按哪条写在标题下；裁决不加确认，结果带撤销', async () => {
+  it('横向冲突：没有可采纳的建议时三个候选项一排、不带说明行（后果写在各自的原位确认里），决定前按哪条写在标题下；结果带撤销', async () => {
     const { commands } = setup([horizontal])
-    const keepBoth = screen.getByRole('button', { name: '都保留' })
-    const row = keepBoth.closest('.pm-conflict-buttons')!
-    expect([...row.querySelectorAll('button')].map(b => b.textContent)).toEqual(['以 A 为准', '以 B 为准', '都保留'])
-    expect(row.previousElementSibling).toHaveTextContent(/^说明.*14 天内可恢复/)
+    const row = screen.getByRole('button', { name: '都保留，不算冲突' }).closest('.pm-conflict-actions')!
+    expect([...row.querySelectorAll('button')].map(b => b.textContent)).toEqual(['保留 A', '保留 B', '都保留，不算冲突'])
+    expect(row.previousElementSibling).toBeNull()
     expect(screen.getByText('决定之前，agent 按你明确说过的 A 来做。')).toBeInTheDocument()
     expect(document.querySelector('.pm-keep-line')).toBeNull()
-    fireEvent.click(keepBoth)
-    await screen.findByText('以后体检不再把它们当冲突。')
+    ruleConflict('都保留，不算冲突')
+    await screen.findByText('按你的选择处理。以后体检不再把它们当冲突。')
     expect(screen.queryByRole('group')).toBeNull()
     expect(commands()).toEqual([{ cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-both' }])
     expect(screen.getByRole('button', { name: '撤销' })).toBeInTheDocument()
@@ -166,17 +181,17 @@ describe('待处理：各类卡', () => {
     expect(screen.getByText(/决定之前，agent 按 B 来做。/)).toBeInTheDocument()
   })
 
-  it('垂直冲突：写明基线不会被删除；「以基线为准」= keep-right、「保留这条记忆」= keep-left', async () => {
+  it('垂直冲突：写明基线不会被删除；直接处理原位确认后走裁决：「都保留，不算冲突」= keep-left、「以文件为准，删除这条」= keep-right', async () => {
     const { commands, gateway } = setup([vertical])
-    expect(screen.getByText('AGENTS.md 是基线，不会被删除。')).toBeInTheDocument()
+    expect(screen.getByText('指令文件不会被改动，处理只针对这条记忆。')).toBeInTheDocument()
     expect(screen.getByText('基线：AGENTS.md：用 pnpm')).toBeInTheDocument()
-    expect(screen.getByText(/以基线为准会删掉这条记忆，14 天内可恢复/)).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '保留这条记忆' }))
+    ruleVertical('都保留，不算冲突')
     await screen.findByText('已保留这条记忆')
     act(() => { gateway.setView('pending', view(vertical)) })
     fireEvent.click(screen.getByRole('button', { name: '撤销' }))
     await waitFor(() => { expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'd-v' }) })
-    fireEvent.click(await screen.findByRole('button', { name: '以基线为准' }))
+    await screen.findByRole('button', { name: '以文件为准，删除这条' })
+    ruleVertical('以文件为准，删除这条')
     await screen.findByText('这条记忆已删除，14 天内可恢复。')
     expect(commands()).toEqual([
       { cmd: 'resolve', decisionId: 'd-v', verdict: 'keep-left' },
@@ -378,52 +393,53 @@ describe('待处理：密钥', () => {
 describe('待处理：裁决后结果留原位、撤销', () => {
   it('裁决 → 原位结果卡（视图还没重写也不重复）→ 撤销发 undo → 视图带回冲突后只剩一张卡', async () => {
     const { gateway, commands } = setup([secret, horizontal, promote])
-    fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
-    await screen.findByText('B 已删除，14 天内可恢复。')
+    ruleConflict('保留 A')
+    await screen.findByText('按你的选择处理。B 已删除，14 天内可恢复。')
     // 视图还是旧的（仍含这条冲突）：只显示结果卡，位置不变
     expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual([
       '这条记忆里有密钥', '测试里怎么准备数据库，两条记忆互相矛盾', '这条适合所有项目',
     ])
-    expect(screen.getByText('已按 A')).toBeInTheDocument()
+    expect(screen.getByText('已保留 A')).toBeInTheDocument()
     expect(screen.getByText('测试用真实 Postgres。')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '以 B 为准' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '保留 B' })).toBeNull()
 
     // 视图重写：冲突已不在待处理里，结果卡仍在原位
     act(() => { gateway.setView('pending', view(secret, promote)) })
     expect(screen.getAllByRole('heading', { level: 3 })[1]).toHaveTextContent('测试里怎么准备数据库')
     fireEvent.click(screen.getByRole('button', { name: '撤销' }))
     // 撤销生效、视图还没带回来：原样显示冲突卡，能接着裁决
-    expect(await screen.findByRole('button', { name: '以 B 为准' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: '保留 B' })).toBeInTheDocument()
     expect(commands()).toEqual([
       { cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-left' },
       { cmd: 'undo', decisionId: 'd-h' },
     ])
 
     act(() => { gateway.setView('pending', view(secret, horizontal, promote)) })
-    expect(screen.getAllByRole('button', { name: '以 B 为准' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: '保留 B' })).toHaveLength(1)
     expect(screen.getAllByRole('heading', { level: 3 })).toHaveLength(3)
   })
 
   it('都保留：结果写「以后体检不再把它们当冲突」，可撤销', async () => {
     const { commands } = setup([horizontal])
-    fireEvent.click(screen.getByRole('button', { name: '都保留' }))
-    await screen.findByText('以后体检不再把它们当冲突。')
+    ruleConflict('都保留，不算冲突')
+    await screen.findByText('按你的选择处理。以后体检不再把它们当冲突。')
     fireEvent.click(screen.getByRole('button', { name: '撤销' }))
     await waitFor(() => { expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'd-h' }) })
   })
 
   it('PA-11 败方含密钥被彻底删除（isHardDeleted）：结果写已彻底删除、提醒换凭证，不给撤销', async () => {
     setup([{ ...horizontal, right: { ...B, hasSecret: true } } as PendingItem], { respond: command => ({ ok: true, cmd: command.cmd, decisionId: 'd-h', isHardDeleted: true }) })
-    expect(screen.getByText(/以 A 为准，B 含密钥，将彻底删除、不可恢复/)).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
-    await screen.findByText('B 含密钥，已彻底删除。如果它是真的凭证，记得去换一个新的。')
-    expect(screen.queryByText('B 已删除，14 天内可恢复。')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '保留 A' }))
+    expect(screen.getByText('保留 A：B 含密钥，将彻底删除、不可恢复。')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '彻底删除' }))
+    await screen.findByText('按你的选择处理。B 含密钥，已彻底删除。如果它是真的凭证，记得去换一个新的。')
+    expect(screen.queryByText(/B 已删除，14 天内可恢复。/)).toBeNull()
     expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
   })
 
   it('结论没记下（isUnrecorded，升级前导入、缺基线的冲突）：结果写下次体检可能还会报，不给撤销', async () => {
     setup([vertical], { respond: command => ({ ok: true, cmd: command.cmd, decisionId: 'd-v', isUnrecorded: true }) })
-    fireEvent.click(screen.getByRole('button', { name: '保留这条记忆' }))
+    ruleVertical('都保留，不算冲突')
     await screen.findByText('已保留这条记忆')
     expect(screen.getByText('这次的决定没能记下，下次体检可能还会报。')).toBeInTheDocument()
     expect(screen.queryByText('基线和记忆都不变时不再报。')).toBeNull()
@@ -437,14 +453,14 @@ describe('待处理：别处已经在处理同一条', () => {
 
   it('另一个标签页同时裁决（claimed）：写明你的选择没有生效，不显示原话；卡随视图更新消失后提示仍在原位', async () => {
     const { gateway } = setup([secret, horizontal, promote], { respond: claimed })
-    fireEvent.click(screen.getByRole('button', { name: '以 B 为准' }))
+    ruleConflict('保留 B')
     expect(await screen.findByRole('alert')).toHaveTextContent(refused)
     expect(screen.queryByText(/正在被另一次裁决处理/)).toBeNull()
-    expect(screen.queryByText('已按 B')).toBeNull()
+    expect(screen.queryByText('已保留 B')).toBeNull()
 
     // 另一个标签页的裁决写进视图：这条冲突出了待处理
     act(() => { gateway.setView('pending', view(secret, promote)) })
-    expect(screen.queryByRole('button', { name: '以 B 为准' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '保留 B' })).toBeNull()
     const notice = screen.getByRole('alert')
     expect(notice).toHaveTextContent(refused)
     // 留在冲突原来的位置：密钥卡之后、提升候选之前
@@ -455,7 +471,7 @@ describe('待处理：别处已经在处理同一条', () => {
 
   it('最后一张卡也没了：提示留在空状态上面', async () => {
     const { gateway } = setup([horizontal], { respond: claimed })
-    fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
+    ruleConflict('保留 A')
     await screen.findByRole('alert')
     act(() => { gateway.setView('pending', view()) })
     expect(screen.getByText('没有要处理的事')).toBeInTheDocument()
@@ -466,12 +482,13 @@ describe('待处理：别处已经在处理同一条', () => {
     ['提升为全局', 'claimed', '这条适合所有项目'],
     ['留在本项目', 'not-found', '这条适合所有项目'],
     ['不再提醒', 'claimed', '带入的记忆超出上限'],
-    ['以基线为准', 'not-found', '包管理器和基线矛盾'],
+    ['以文件为准，删除这条', 'not-found', '包管理器和基线矛盾'],
   ] as const)('「%s」回 %s：同样提示，卡消失后还在', async (button, code, title) => {
     const { gateway } = setup([vertical, promote, overflow], {
       respond: command => ({ ok: false, cmd: command.cmd, code, detail: `不存在或已处理：${'decisionId' in command ? command.decisionId : ''}` }),
     })
-    fireEvent.click(screen.getByRole('button', { name: button }))
+    if (button === '以文件为准，删除这条') ruleVertical(button)
+    else fireEvent.click(screen.getByRole('button', { name: button }))
     const text = `你对「${title}」的选择没有生效：它正在别处处理，或者刚在别处处理完。`
     expect(await screen.findByRole('alert')).toHaveTextContent(text)
     act(() => { gateway.setView('pending', view()) })
@@ -500,17 +517,17 @@ describe('待处理：别处已经在处理同一条', () => {
   it('结果卡上的撤销碰上别处正在处理（claimed）：结果卡不动，上面写明没有生效', async () => {
     const respond = (command: MemoryCommand) => command.cmd === 'undo' ? claimed(command) : { ok: true as const, cmd: command.cmd }
     setup([horizontal], { respond })
-    fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
+    ruleConflict('保留 A')
     fireEvent.click(await screen.findByRole('button', { name: '撤销' }))
     expect(await screen.findByRole('alert')).toHaveTextContent(refused)
-    expect(screen.getByText('已按 A')).toBeInTheDocument()
+    expect(screen.getByText('已保留 A')).toBeInTheDocument()
   })
 
   it('之后在任一张卡上做成了一件事：提示收起', async () => {
     let calls = 0
     const respond = (command: MemoryCommand) => { calls += 1; return calls === 1 ? claimed(command) : { ok: true as const, cmd: command.cmd } }
     setup([horizontal, promote], { respond })
-    fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
+    ruleConflict('保留 A')
     await screen.findByRole('alert')
     fireEvent.click(screen.getByRole('button', { name: '提升为全局' }))
     await screen.findByText('已提升为全局')
@@ -528,11 +545,11 @@ describe('待处理：跨项目先确认', () => {
         : { ok: true as const, cmd: command.cmd }
     }
     const { commands } = setup([horizontal], { respond })
-    fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
+    ruleConflict('保留 A')
     expect(await screen.findByText('这条记忆属于 blog 项目，不是当前项目。确定在这里处理它吗？')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '以 B 为准' })).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getByRole('button', { name: '保留 B' })).toHaveAttribute('aria-disabled', 'true')
     // 等确认时卡上其它按钮的提示写在等你确认，不写正在处理
-    expect(screen.getByRole('button', { name: '以 B 为准' })).toHaveAttribute('title', '等你先确认')
+    expect(screen.getByRole('button', { name: '保留 B' })).toHaveAttribute('title', '等你先确认')
     // 确认块里「取消」是幽灵按钮，和「继续处理」分出主次
     expect(screen.getByRole('button', { name: '取消' })).toHaveClass('pm-btn--ghost')
     expect(screen.getByRole('button', { name: '继续处理' })).not.toHaveClass('pm-btn--ghost')
@@ -540,9 +557,9 @@ describe('待处理：跨项目先确认', () => {
     expect(screen.queryByText(/属于 blog 项目/)).toBeNull()
     expect(commands()).toHaveLength(1)
 
-    fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
+    ruleConflict('保留 A')
     fireEvent.click(await screen.findByRole('button', { name: '继续处理' }))
-    await screen.findByText('已按 A')
+    await screen.findByText('已保留 A')
     expect(commands()).toEqual([
       { cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-left' },
       { cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-left' },
@@ -596,29 +613,33 @@ describe('待处理：确认收起后的键盘焦点', () => {
       ? { ok: true as const, cmd: command.cmd }
       : { ok: false as const, cmd: command.cmd, code: 'cross-workspace' as const, rejected: [{ id: 'a', workspacePath: '/w/blog' }] }
     setup([horizontal], { respond })
-    const keepA = screen.getByRole('button', { name: '以 A 为准' })
-    await press(keepA)
+    const keepA = () => screen.getByRole('button', { name: '保留 A' })
+    const confirmKeepA = () => within(document.querySelector('.pm-soft-confirm') as HTMLElement).getByRole('button', { name: '保留 A' })
+    await press(keepA())
+    await press(confirmKeepA())
     await press(screen.getByRole('button', { name: '取消' }))
-    await waitFor(() => { expect(keepA).toHaveFocus() })
+    await waitFor(() => { expect(keepA()).toHaveFocus() })
 
-    await press(keepA)
+    await press(keepA())
+    await press(confirmKeepA())
     await press(screen.getByRole('button', { name: '继续处理' }))
-    await screen.findByText('已按 A')
+    await screen.findByText('已保留 A')
     await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
   })
 
   // 裁决 → 视图去掉这条 → 撤销（本地原样画回）→ 视图带回：画回的卡和视图带回的是同一张，不重挂，焦点不动、位置不变
   it.each([
-    { kind: '横向冲突', item: horizontal, action: '以 A 为准', landsOn: '以 A 为准' },
-    { kind: '垂直冲突', item: vertical, action: '保留这条记忆', landsOn: undefined },
-    { kind: '提升候选', item: promote, action: '提升为全局', landsOn: undefined },
-    { kind: '超限', item: overflow, action: '不再提醒', landsOn: undefined },
-    { kind: '可以整理', item: tidy, action: '不再提醒', landsOn: undefined },
-  ])('$kind：撤销后视图带回这条，卡片不重挂、焦点留在原控件上、列表位置不变', async ({ item, action, landsOn }) => {
+    { kind: '横向冲突', item: horizontal, action: '保留 A', confirm: '保留 A', landsOn: '保留 A' },
+    { kind: '垂直冲突', item: vertical, action: '都保留，不算冲突', confirm: '都保留', landsOn: undefined },
+    { kind: '提升候选', item: promote, action: '提升为全局', confirm: undefined, landsOn: undefined },
+    { kind: '超限', item: overflow, action: '不再提醒', confirm: undefined, landsOn: undefined },
+    { kind: '可以整理', item: tidy, action: '不再提醒', confirm: undefined, landsOn: undefined },
+  ])('$kind：撤销后视图带回这条，卡片不重挂、焦点留在原控件上、列表位置不变', async ({ item, action, confirm, landsOn }) => {
     const { gateway } = setup([secret, item, unreadable])
     const headings = () => screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)
     const before = headings()
     await press(screen.getByRole('button', { name: action }))
+    if (confirm !== undefined) await press(within(document.querySelector('.pm-soft-confirm') as HTMLElement).getByRole('button', { name: confirm }))
     await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
     act(() => { gateway.setView('pending', view(secret, unreadable)) })
     await press(screen.getByRole('button', { name: '撤销' }))
@@ -650,8 +671,8 @@ describe('待处理：两态与空状态', () => {
     }
     const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(horizontal), health: scannedHealth(NOW) } })
     renderInShell(<Tab />, gateway)
-    fireEvent.click(screen.getByRole('button', { name: '以 A 为准' }))
-    await screen.findByText('已按 A')
+    ruleConflict('保留 A')
+    await screen.findByText('已保留 A')
     act(() => { gateway.setSession({ kind: 'none' }) })
     const undo = screen.getByRole('button', { name: '撤销' })
     expect(undo).toHaveAttribute('aria-disabled', 'true')
@@ -799,9 +820,8 @@ describe('待处理：定位到组', () => {
 describe('键盘', () => {
   it('裁决 / 提升 / 删除控件都是原生 button，不在 Tab 序列外', () => {
     setup([secret, horizontal, vertical, promote])
-    const names = ['以 A 为准', '以 B 为准', '都保留', '以基线为准', '保留这条记忆', '提升为全局', '留在本项目', '彻底删除…']
-    for (const name of names) {
-      const button = screen.getByRole('button', { name })
+    const names = ['保留 A', '保留 B', '都保留，不算冲突', '以文件为准，删除这条', '提升为全局', '留在本项目', '彻底删除…']
+    for (const button of names.flatMap(name => screen.getAllByRole('button', { name }))) {
       expect(button.tagName).toBe('BUTTON')
       expect(button).not.toBeDisabled()
       expect(button.tabIndex).toBe(0)
@@ -2131,5 +2151,1143 @@ describe('PA-20 类型显示名', () => {
     const card = screen.getByRole('heading', { level: 3, name: /secret/i }).closest('article')!
     expect(chipsOf(card)).toContain('Preference')
     expect(card).not.toHaveTextContent('行为偏好')
+  })
+})
+
+describe('横向冲突卡的处理建议', () => {
+  type Horizontal = Extract<PendingItem, { kind: 'conflict-horizontal' }>
+  const withState = (extra: Partial<Horizontal>): PendingItem => ({ ...horizontal, ...extra }) as PendingItem
+  const keepA: Suggestion = { id: 'sg_1', action: 'keep-a', reason: 'A 是你明确说过的，B 是推断的。', isSourced: false, ops: [{ kind: 'keep', memoryId: 'a' }, { kind: 'forget', memoryId: 'b' }] }
+  const mergeEdit = { kind: 'edit', memoryId: 'a', content: '集成测试用真实 Postgres，单元测试可以 mock 数据库。', name: A.name, summary: A.summary, tags: [] } as const satisfies Suggestion['ops'][number]
+  const merged: Suggestion = { id: 'sg_2', action: 'merge', reason: '两边各有适用场景。', isSourced: false, ops: [{ ...mergeEdit, tags: [] }, { kind: 'forget', memoryId: 'b' }] }
+  const block = () => document.querySelector('.pm-suggestion') as HTMLElement
+
+  it('有建议：模型图标、加粗的结论、一句理由；直接处理的按钮照旧，没有「补上建议」', () => {
+    setup([withState({ suggestion: keepA })])
+    expect(block().querySelector('.pm-icon, svg')).not.toBeNull()
+    expect(within(block()).getByText('保留 A').tagName).toBe('STRONG')
+    expect(within(block()).getByText('A 是你明确说过的，B 是推断的。')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /补上建议/ })).toBeNull()
+    expect(screen.getByRole('button', { name: '保留 B' })).toBeInTheDocument()
+  })
+
+  it.each([
+    ['keep-b', '保留 B'],
+    ['keep-both', '都保留（不算冲突）'],
+  ] as const)('结论 %s 写成「%s」', (action, label) => {
+    setup([withState({ suggestion: { ...keepA, action, ops: [{ kind: 'keep', memoryId: 'a' }, { kind: 'keep', memoryId: 'b' }] } })])
+    expect(within(block()).getByText(label)).toBeInTheDocument()
+  })
+
+  it('融合：直接显示融合稿和写进哪条（按实际保留方），点「看和原文的对照」原位展开、再点收起', () => {
+    setup([withState({ suggestion: merged })])
+    expect(within(block()).getByText('融合成一条')).toBeInTheDocument()
+    expect(within(block()).getByText('集成测试用真实 Postgres，单元测试可以 mock 数据库。')).toBeInTheDocument()
+    expect(within(block()).getByText('融合后（写进 A，B 进最近删除）')).toBeInTheDocument()
+    const toggle = within(block()).getByRole('button', { name: /看和原文的对照/ })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(within(block()).getByRole('region', { name: '原文' })).toBeInTheDocument()
+    fireEvent.click(within(block()).getByRole('button', { name: /收起对照/ }))
+    expect(within(block()).queryByRole('region', { name: '原文' })).toBeNull()
+  })
+
+  it('融合写进 B 时文案跟着写', () => {
+    setup([withState({ suggestion: { ...merged, ops: [{ kind: 'forget', memoryId: 'a' }, { ...mergeEdit, tags: [], memoryId: 'b' }] } })])
+    expect(within(block()).getByText('融合后（写进 B，A 进最近删除）')).toBeInTheDocument()
+  })
+
+  it('含高危密钥：写明哪条有密钥、不会发给模型，没有「补上建议」', () => {
+    setup([withState({ right: { ...B, hasSecret: true }, noSuggestion: { code: 'has-secret' } })])
+    expect(within(block()).getByText('这次没有建议')).toBeInTheDocument()
+    expect(within(block()).getByText('B 里有密钥，不会发给模型。可以直接选下面的处理方式。')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /补上建议/ })).toBeNull()
+  })
+
+  it('还没生成：页面加载时不问模型；点「补上建议」只发 suggest，生成中显示「正在生成建议……」，视图带来建议后原位换成建议', async () => {
+    const { gateway, commands } = setup([withState({ noSuggestion: { code: 'not-generated' } })], {
+      respond: command => (command.cmd === 'suggest' ? { ok: true, cmd: 'suggest', decisionId: 'd-h' } : { ok: true, cmd: command.cmd }),
+    })
+    expect(gateway.modelRequests).toEqual([])
+    expect(within(block()).getByText('这条还没有建议')).toBeInTheDocument()
+    fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+    expect(await within(block()).findByText('正在生成建议……')).toBeInTheDocument()
+    expect(commands()).toEqual([{ cmd: 'suggest', decisionId: 'd-h' }])
+    // 命令回来了、视图还没换：仍在等
+    await waitFor(() => { expect(gateway.executed).toHaveLength(1) })
+    expect(within(block()).getByText('正在生成建议……')).toBeInTheDocument()
+    act(() => { gateway.setView('pending', view(withState({ suggestion: keepA }))) })
+    expect(await within(block()).findByText('保留 A')).toBeInTheDocument()
+    expect(within(block()).queryByText('正在生成建议……')).toBeNull()
+  })
+
+  it('命令成功而视图一直没带来建议：等够时间回到「补上建议」，不一直转', async () => {
+    vi.useFakeTimers()
+    try {
+      setup([withState({ noSuggestion: { code: 'not-generated' } })], {
+        respond: command => ({ ok: true, cmd: command.cmd, decisionId: 'd-h' }) as MemoryCommandResult,
+      })
+      fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) }) // 命令结果回来，开始等视图
+      await act(async () => { await vi.advanceTimersByTimeAsync(WAIT_FOR_VIEW_MS - 1) })
+      expect(within(block()).getByText('正在生成建议……')).toBeInTheDocument()
+      await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+      expect(within(block()).queryByText('正在生成建议……')).toBeNull()
+      expect(within(block()).getByRole('button', { name: '补上建议' })).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('「停止」只是不再等：回到没有建议，迟到的失败不显示', async () => {
+    let answer!: (r: MemoryCommandResult) => void
+    setup([withState({ noSuggestion: { code: 'not-generated' } })], { respond: () => new Promise((resolve) => { answer = resolve }) })
+    fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+    fireEvent.click(await within(block()).findByRole('button', { name: '停止' }))
+    expect(within(block()).getByRole('button', { name: '补上建议' })).toBeInTheDocument()
+    await act(async () => { answer({ ok: false, cmd: 'suggest', code: 'llm-failed', detail: '限流' }) })
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(within(block()).getByRole('button', { name: '补上建议' })).toBeInTheDocument()
+  })
+
+  it('生成失败（视图带原因）：写原因，按钮变成「再试一次」', () => {
+    setup([withState({ noSuggestion: { code: 'failed', cause: { kind: 'model-error', hostCode: 'RATE_LIMIT', message: '429' } } })])
+    expect(within(block()).getByText('这条还没有建议')).toBeInTheDocument()
+    expect(within(block()).getByText('上次没生成成：请求太频繁，被限流了。')).toBeInTheDocument()
+    expect(within(block()).getByRole('button', { name: '再试一次' })).toBeInTheDocument()
+  })
+
+  it('稿里带进了密钥被丢弃：原因写清楚', () => {
+    setup([withState({ noSuggestion: { code: 'failed', cause: { kind: 'secret-in-draft' } } })])
+    expect(within(block()).getByText('上次没生成成：模型给的稿里带进了原文没有的密钥，已丢弃。')).toBeInTheDocument()
+  })
+
+  it('命令失败：原位写原因，按钮变成「再试一次」', async () => {
+    setup([withState({ noSuggestion: { code: 'not-generated' } })], { respond: () => ({ ok: false, cmd: 'suggest', code: 'llm-failed', detail: '连不上' }) })
+    fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+    expect(await within(block()).findByRole('alert')).toHaveTextContent('模型出错了：连不上')
+    expect(within(block()).getByRole('button', { name: '再试一次' })).toBeInTheDocument()
+  })
+
+  it('拿不到模型：写原因，不再显示「补上建议」', async () => {
+    setup([withState({ noSuggestion: { code: 'not-generated' } })], { respond: () => ({ ok: false, cmd: 'suggest', code: 'llm-unavailable' }) })
+    fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+    expect(await within(block()).findByText('拿不到当前会话的模型。')).toBeInTheDocument()
+    expect(within(block()).queryByRole('button', { name: /补上建议|再试一次/ })).toBeNull()
+  })
+
+  /** 待处理 tab 换一个借来的会话重画（会话由页面传进来）。 */
+  function setupSwitchable(items: PendingItem[], init: FakeGatewayInit) {
+    const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(...items), health: scannedHealth(NOW) }, ...init })
+    const ui = (session: { kind: 'ready'; sessionId: string; cwd: string }) => (
+      <PanelShell gateway={gateway} t={createTranslator(zh)}>
+        <PendingTab nav={createNavStore()} session={session} scope={ALL_SCOPE} workspacePath="/w/app" now={NOW} />
+      </PanelShell>
+    )
+    const { rerender } = render(ui(SESSION))
+    return { gateway, switchTo: (sessionId: string) => { rerender(ui({ ...SESSION, sessionId })) } }
+  }
+
+  it('拿不到模型不随会话保留：换了会话重新给「补上建议」', async () => {
+    const { gateway, switchTo } = setupSwitchable([withState({ noSuggestion: { code: 'not-generated' } })], {
+      respond: () => ({ ok: false, cmd: 'suggest', code: 'llm-unavailable' }),
+    })
+    fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+    expect(await within(block()).findByText('拿不到当前会话的模型。')).toBeInTheDocument()
+    switchTo('s2')
+    expect(within(block()).queryByText('拿不到当前会话的模型。')).toBeNull()
+    expect(within(block()).getByRole('button', { name: '补上建议' })).toBeInTheDocument()
+    expect(gateway.modelRequests).toEqual([])
+  })
+
+  it('这个会话已知拿不到模型（同页别处问过）：直接写原因、不给按钮，建议块自己不问', () => {
+    const bloat: PendingItem = { kind: 'advice', level: 'advice', type: 'bloat', memories: [memory({ id: 'bl', digest: 'sha1:bl' })] }
+    const { gateway } = setup([withState({ noSuggestion: { code: 'not-generated' } }), bloat], { model: null })
+    expect(within(block()).getByRole('button', { name: '补上建议' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '修改' }))
+    expect(gateway.modelRequests.length).toBeGreaterThan(0)
+    expect(new Set(gateway.modelRequests)).toEqual(new Set(['s1']))
+    expect(within(block()).getByText('拿不到当前会话的模型。')).toBeInTheDocument()
+    expect(within(block()).queryByRole('button', { name: /补上建议|再试一次/ })).toBeNull()
+  })
+
+  it('生成中换了会话：回到没有建议，旧会话迟到的失败不显示', async () => {
+    let answer!: (r: MemoryCommandResult) => void
+    const { switchTo } = setupSwitchable([withState({ noSuggestion: { code: 'not-generated' } })], { respond: () => new Promise((resolve) => { answer = resolve }) })
+    fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+    expect(await within(block()).findByText('正在生成建议……')).toBeInTheDocument()
+    switchTo('s2')
+    expect(within(block()).queryByText('正在生成建议……')).toBeNull()
+    expect(within(block()).getByRole('button', { name: '补上建议' })).toBeInTheDocument()
+    await act(async () => { answer({ ok: false, cmd: 'suggest', code: 'llm-failed', detail: '限流' }) })
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(within(block()).getByRole('button', { name: '补上建议' })).toBeInTheDocument()
+  })
+
+  it('写入时条目正被别处认领：回到可再点的样子，不提示别处已处理；条目不在了才提示', async () => {
+    let code: 'claimed' | 'not-found' = 'claimed'
+    setup([withState({ noSuggestion: { code: 'not-generated' } })], { respond: () => ({ ok: false, cmd: 'suggest', code }) })
+    fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+    expect(await within(block()).findByRole('button', { name: '补上建议' })).toBeInTheDocument()
+    expect(document.querySelector('.pm-pending-refused')).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+    code = 'not-found'
+    fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+    await waitFor(() => { expect(document.querySelector('.pm-pending-refused')).not.toBeNull() })
+  })
+
+  it('命令失败的结果到达时视图里的原因已经变了：让给视图，不再显示本地的错误行', async () => {
+    let answer!: (r: MemoryCommandResult) => void
+    const { gateway } = setup([withState({ noSuggestion: { code: 'not-generated' } })], { respond: () => new Promise((resolve) => { answer = resolve }) })
+    fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+    expect(await within(block()).findByText('正在生成建议……')).toBeInTheDocument()
+    act(() => { gateway.setView('pending', view(withState({ noSuggestion: { code: 'failed', cause: { kind: 'model-error', hostCode: 'RATE_LIMIT' } } }))) })
+    await act(async () => { answer({ ok: false, cmd: 'suggest', code: 'llm-failed', detail: '限流' }) })
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(within(block()).getByText('上次没生成成：请求太频繁，被限流了。')).toBeInTheDocument()
+    expect(within(block()).getByRole('button', { name: '再试一次' })).toBeInTheDocument()
+  })
+
+  it('命令成功的结果到达时视图里的原因已经变了：直接显示视图的，不再等', async () => {
+    let answer!: (r: MemoryCommandResult) => void
+    const { gateway } = setup([withState({ noSuggestion: { code: 'not-generated' } })], { respond: () => new Promise((resolve) => { answer = resolve }) })
+    fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+    expect(await within(block()).findByText('正在生成建议……')).toBeInTheDocument()
+    act(() => { gateway.setView('pending', view(withState({ noSuggestion: { code: 'undecided', reason: '需要你确认用哪个。' } }))) })
+    await act(async () => { answer({ ok: true, cmd: 'suggest', decisionId: 'd-h' }) })
+    expect(within(block()).queryByText('正在生成建议……')).toBeNull()
+    expect(within(block()).getByText('需要你确认用哪个。')).toBeInTheDocument()
+  })
+
+  it('模型判断不了哪条对：如实写明加它说的理由，下面仍给「再试一次」，不按错误显示', () => {
+    setup([withState({ noSuggestion: { code: 'undecided', reason: '两条都没写适用场景，需要你确认这个项目用哪个。' } })])
+    expect(within(block()).getByText('模型判断不了哪条对').tagName).toBe('STRONG')
+    expect(within(block()).getByText('两条都没写适用场景，需要你确认这个项目用哪个。')).toBeInTheDocument()
+    expect(within(block()).queryByText('这条还没有建议')).toBeNull()
+    expect(within(block()).getByRole('button', { name: '再试一次' })).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(block().querySelector('.pm-pending-error')).toBeNull()
+  })
+
+  it('点「补上建议」后模型判断不了：视图带来原因后原位换成如实说明', async () => {
+    const { gateway } = setup([withState({ noSuggestion: { code: 'not-generated' } })], {
+      respond: () => ({ ok: true, cmd: 'suggest', decisionId: 'd-h' }),
+    })
+    fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+    await waitFor(() => { expect(gateway.executed).toHaveLength(1) })
+    act(() => { gateway.setView('pending', view(withState({ noSuggestion: { code: 'undecided', reason: '日期一样，分不出。' } }))) })
+    expect(await within(block()).findByText('模型判断不了哪条对')).toBeInTheDocument()
+    expect(within(block()).getByText('日期一样，分不出。')).toBeInTheDocument()
+  })
+})
+
+describe('体检之后的建议：「正在生成」、名额用完、「全部补上」（票 08）', () => {
+  type Horizontal = Extract<PendingItem, { kind: 'conflict-horizontal' }>
+  const keepA: Suggestion = { id: 'sg_1', action: 'keep-a', reason: 'A 是你明确说过的。', isSourced: false, ops: [{ kind: 'keep', memoryId: 'a' }, { kind: 'forget', memoryId: 'b' }] }
+  /** 第 n 条横向冲突（各自两条记忆）。 */
+  const pair = (n: number, extra: Partial<Horizontal>): PendingItem => ({
+    ...horizontal, decisionId: `d${n}`, summary: `第 ${n} 对互相矛盾`, preferredId: `a${n}`,
+    left: memory({ id: `a${n}`, name: `A${n}`, content: `A${n} 的内容` }), right: memory({ id: `b${n}`, name: `B${n}`, content: `B${n} 的内容` }), ...extra,
+  }) as PendingItem
+  const blocks = () => [...document.querySelectorAll<HTMLElement>('.pm-suggestion')]
+  const row = () => document.querySelector('.pm-suggest-all') as HTMLElement | null
+  const missing = { noSuggestion: { code: 'not-generated' } } as const
+
+  it('故事 26：后续段正在生成的卡写「正在生成建议……」，不给「补上建议」也不给「停止」；建议随视图补上', async () => {
+    const { gateway } = setup([pair(1, { ...missing, isGeneratingSuggestion: true })])
+    const [card] = blocks()
+    expect(within(card!).getByRole('status')).toHaveTextContent('正在生成建议……')
+    expect(within(card!).queryByRole('button')).toBeNull()
+    act(() => { gateway.setView('pending', view(pair(1, { suggestion: keepA }))) })
+    expect(await within(blocks()[0]!).findByText('保留 A')).toBeInTheDocument()
+  })
+
+  it('自动体检名额用完：写原因，给「补上建议」', () => {
+    setup([pair(1, { noSuggestion: { code: 'quota-exhausted' } })])
+    const [card] = blocks()
+    expect(within(card!).getByText('这条还没有建议')).toBeInTheDocument()
+    expect(within(card!).getByText('自动体检这次给的建议条数到上限了，没轮到这条。')).toBeInTheDocument()
+    expect(within(card!).getByRole('button', { name: '补上建议' })).toBeInTheDocument()
+  })
+
+  it('故事 24b：两条以上没有建议才有「全部补上」；有建议、正在生成、含密钥、判断不了的不算', () => {
+    setup([
+      pair(1, missing),
+      pair(2, { noSuggestion: { code: 'quota-exhausted' } }),
+      pair(3, { noSuggestion: { code: 'failed', cause: { kind: 'model-error', hostCode: 'RATE_LIMIT' } } }),
+      pair(4, { suggestion: keepA }),
+      pair(5, { ...missing, isGeneratingSuggestion: true }),
+      pair(6, { noSuggestion: { code: 'has-secret' } }),
+      pair(7, { noSuggestion: { code: 'undecided', reason: '分不出。' } }),
+    ])
+    expect(row()).toHaveTextContent('3 条还没有建议')
+    // 在「等你决定」标题下面
+    expect(row()!.closest('section')?.querySelector('h2')).toHaveTextContent('等你决定')
+    expect(within(row()!).getByRole('button', { name: '全部补上' })).toBeInTheDocument()
+  })
+
+  it('只有一条没有建议：不显示「全部补上」', () => {
+    setup([pair(1, missing), pair(2, { suggestion: keepA })])
+    expect(row()).toBeNull()
+  })
+
+  it('故事 25：这个会话已知拿不到模型时不显示「全部补上」', () => {
+    const bloat: PendingItem = { kind: 'advice', level: 'advice', type: 'bloat', memories: [memory({ id: 'bl', digest: 'sha1:bl' })] }
+    setup([pair(1, missing), pair(2, missing), bloat], { model: null })
+    expect(row()).not.toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '修改' }))
+    expect(row()).toBeNull()
+  })
+
+  it('依次发：一条回来再发下一条，行内写进度，正在生成的那张卡写「正在生成」；全部发完回到原样', async () => {
+    const answers: Array<(r: MemoryCommandResult) => void> = []
+    const { gateway, commands } = setup([pair(1, missing), pair(2, missing), pair(3, missing)], {
+      respond: () => new Promise((resolve) => { answers.push(resolve) }),
+    })
+    fireEvent.click(within(row()!).getByRole('button', { name: '全部补上' }))
+    expect(await within(row()!).findByText('正在生成建议 1 / 3……')).toBeInTheDocument()
+    expect(commands()).toEqual([{ cmd: 'suggest', decisionId: 'd1' }])
+    expect(within(blocks()[0]!).getByText('正在生成建议……')).toBeInTheDocument()
+    expect(within(blocks()[1]!).getByRole('button', { name: '补上建议' })).toBeInTheDocument()
+    // 第一条写成了、视图带来建议；第二条接着发
+    act(() => { gateway.setView('pending', view(pair(1, { suggestion: keepA }), pair(2, missing), pair(3, missing))) })
+    await act(async () => { answers[0]!({ ok: true, cmd: 'suggest', decisionId: 'd1' }) })
+    expect(await within(row()!).findByText('正在生成建议 2 / 3……')).toBeInTheDocument()
+    expect(commands()).toEqual([{ cmd: 'suggest', decisionId: 'd1' }, { cmd: 'suggest', decisionId: 'd2' }])
+    expect(within(blocks()[0]!).getByText('保留 A')).toBeInTheDocument()
+    expect(within(blocks()[1]!).getByText('正在生成建议……')).toBeInTheDocument()
+    // 第二条没生成成：卡上由视图写原因，接着发第三条
+    await act(async () => { answers[1]!({ ok: false, cmd: 'suggest', code: 'llm-failed', detail: '限流' }) })
+    expect(await within(row()!).findByText('正在生成建议 3 / 3……')).toBeInTheDocument()
+    await act(async () => { answers[2]!({ ok: true, cmd: 'suggest', decisionId: 'd3' }) })
+    expect(commands().map(c => c.cmd === 'suggest' ? c.decisionId : c.cmd)).toEqual(['d1', 'd2', 'd3'])
+    await waitFor(() => { expect(within(row()!).queryByRole('status')).toBeNull() })
+    expect(within(row()!).getByRole('button', { name: '全部补上' })).toBeInTheDocument()
+  })
+
+  it('轮到时已经不缺建议的（别处生成了、处理掉了）跳过，不发', async () => {
+    const answers: Array<(r: MemoryCommandResult) => void> = []
+    const { gateway, commands } = setup([pair(1, missing), pair(2, missing), pair(3, missing)], {
+      respond: () => new Promise((resolve) => { answers.push(resolve) }),
+    })
+    fireEvent.click(within(row()!).getByRole('button', { name: '全部补上' }))
+    await waitFor(() => { expect(answers).toHaveLength(1) })
+    act(() => { gateway.setView('pending', view(pair(1, missing), pair(3, missing))) })
+    await act(async () => { answers[0]!({ ok: true, cmd: 'suggest', decisionId: 'd1' }) })
+    expect(await within(row()!).findByText('正在生成建议 3 / 3……')).toBeInTheDocument()
+    expect(commands()).toEqual([{ cmd: 'suggest', decisionId: 'd1' }, { cmd: 'suggest', decisionId: 'd3' }])
+  })
+
+  it('「停止」：不再发下一条、不再等；已发出的那条照常写入，随视图出现，已生成的保留', async () => {
+    const answers: Array<(r: MemoryCommandResult) => void> = []
+    const { gateway, commands } = setup([pair(1, missing), pair(2, missing), pair(3, missing)], {
+      respond: () => new Promise((resolve) => { answers.push(resolve) }),
+    })
+    fireEvent.click(within(row()!).getByRole('button', { name: '全部补上' }))
+    fireEvent.click(await within(row()!).findByRole('button', { name: '停止' }))
+    expect(row()).toHaveTextContent('3 条还没有建议')
+    expect(within(blocks()[0]!).getByRole('button', { name: '补上建议' })).toBeInTheDocument()
+    // 已发出的那条回来了、视图带来它的建议：不再发下一条
+    act(() => { gateway.setView('pending', view(pair(1, { suggestion: keepA }), pair(2, missing), pair(3, missing))) })
+    await act(async () => { answers[0]!({ ok: true, cmd: 'suggest', decisionId: 'd1' }) })
+    expect(commands()).toEqual([{ cmd: 'suggest', decisionId: 'd1' }])
+    expect(within(blocks()[0]!).getByText('保留 A')).toBeInTheDocument()
+    expect(row()).toHaveTextContent('2 条还没有建议')
+  })
+
+  it('发出去才知道拿不到模型：停下，行内写原因，不再发', async () => {
+    const { commands } = setup([pair(1, missing), pair(2, missing)], { respond: () => ({ ok: false, cmd: 'suggest', code: 'llm-unavailable' }) })
+    fireEvent.click(within(row()!).getByRole('button', { name: '全部补上' }))
+    await waitFor(() => { expect(row()).toHaveAttribute('role', 'alert') })
+    expect(row()).toHaveTextContent('拿不到当前会话的模型。')
+    expect(commands()).toEqual([{ cmd: 'suggest', decisionId: 'd1' }])
+    expect(screen.queryByRole('button', { name: '全部补上' })).toBeNull()
+  })
+
+  it('英文界面的进度和按钮', async () => {
+    const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(pair(1, missing), pair(2, missing)), health: scannedHealth(NOW) }, respond: () => new Promise(() => {}) })
+    render(
+      <PanelShell gateway={gateway} t={createTranslator(en)}>
+        <PendingTab nav={createNavStore()} session={SESSION} scope={ALL_SCOPE} workspacePath="/w/app" now={NOW} />
+      </PanelShell>,
+    )
+    expect(row()).toHaveTextContent('2 without a suggestion')
+    fireEvent.click(within(row()!).getByRole('button', { name: 'Suggest all' }))
+    expect(await within(row()!).findByText('Generating suggestions 1 / 2…')).toBeInTheDocument()
+  })
+})
+
+describe('横向冲突卡：采纳建议、直接处理（票 05）', () => {
+  type Horizontal = Extract<PendingItem, { kind: 'conflict-horizontal' }>
+  const withState = (extra: Partial<Horizontal>): PendingItem => ({ ...horizontal, ...extra }) as PendingItem
+  const keepA: Suggestion = { id: 'sg_1', action: 'keep-a', reason: 'A 是你明确说过的，B 是推断的。', isSourced: false, ops: [{ kind: 'keep', memoryId: 'a' }, { kind: 'forget', memoryId: 'b' }] }
+  const keepBoth: Suggestion = { id: 'sg_3', action: 'keep-both', reason: '两条说的是不同场景。', isSourced: false, ops: [{ kind: 'keep', memoryId: 'a' }, { kind: 'keep', memoryId: 'b' }] }
+  const merged: Suggestion = {
+    id: 'sg_2', action: 'merge', reason: '两边各有适用场景。', isSourced: false,
+    ops: [{ kind: 'edit', memoryId: 'a', content: '集成测试用真实 Postgres。', name: A.name, summary: A.summary, tags: [] }, { kind: 'forget', memoryId: 'b' }],
+  }
+  const DIRECT = ['保留 A', '保留 B', '都保留，不算冲突']
+  const rowOf = () => document.querySelector('.pm-conflict-actions') as HTMLElement
+  const labelsOf = (row: HTMLElement) => [...row.querySelectorAll('button')].map(b => b.textContent)
+  const press = async (button: HTMLElement) => {
+    button.focus()
+    await act(async () => { fireEvent.click(button) })
+  }
+
+  it('建议保留 A：说明行写采纳后果，按钮行「采纳建议」（主按钮）在前；点了直接发 apply-proposal（只带条目 id 和建议 id），不加确认', async () => {
+    const { commands } = setup([withState({ suggestion: keepA })])
+    expect(screen.getByText('采纳后 B 进最近删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(labelsOf(rowOf())).toEqual(['采纳建议', ...DIRECT])
+    const adopt = screen.getByRole('button', { name: '采纳建议' })
+    expect(adopt).toHaveClass('pm-btn--primary')
+    expect(adopt.tagName).toBe('BUTTON')
+    await press(adopt)
+    expect(screen.queryByRole('group')).toBeNull()
+    await waitFor(() => { expect(commands()).toEqual([{ cmd: 'apply-proposal', decisionId: 'd-h', suggestionId: 'sg_1' }]) })
+  })
+
+  it('采纳后结果卡：「已保留 A」，写「按模型建议处理。」和去向，带撤销、焦点落在「撤销」；撤销发 undo，视图带回后建议还在', async () => {
+    const { gateway, commands } = setup([withState({ suggestion: keepA })], { respond: command => ({ ok: true, cmd: command.cmd, decisionId: 'd-h' }) as MemoryCommandResult })
+    await press(screen.getByRole('button', { name: '采纳建议' }))
+    expect(await screen.findByText('已保留 A')).toBeInTheDocument()
+    expect(screen.getByText('按模型建议处理。B 已删除，14 天内可恢复。')).toBeInTheDocument()
+    await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
+    act(() => { gateway.setView('pending', view()) })
+    await press(screen.getByRole('button', { name: '撤销' }))
+    await waitFor(() => { expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'd-h' }) })
+    act(() => { gateway.setView('pending', view(withState({ suggestion: keepA }))) })
+    expect(await screen.findByRole('button', { name: '采纳建议' })).toBeInTheDocument()
+    expect(screen.getByText('A 是你明确说过的，B 是推断的。')).toBeInTheDocument()
+  })
+
+  it('建议都保留：说明行写两条都留着；采纳后「两条都保留」「按模型建议处理。以后体检不再把它们当冲突。」，可撤销', async () => {
+    setup([withState({ suggestion: keepBoth })])
+    expect(screen.getByText('采纳后两条都留着，以后体检不再把它们当冲突。')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '采纳建议' }))
+    expect(await screen.findByText('两条都保留')).toBeInTheDocument()
+    expect(screen.getByText('按模型建议处理。以后体检不再把它们当冲突。')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '撤销' })).toBeInTheDocument()
+  })
+
+  it('建议回查过两条的出处：说明行先写这一句，再写采纳后果；没回查到时不写', () => {
+    const first = setup([withState({ suggestion: { ...keepA, isSourced: true } })])
+    expect(screen.getByText('建议是回查两条的出处后给出的。采纳后 B 进最近删除，14 天内可恢复。')).toBeInTheDocument()
+    first.unmount()
+    const second = setup([withState({ suggestion: { ...keepBoth, isSourced: true } })])
+    expect(screen.getByText('建议是回查两条的出处后给出的。采纳后两条都留着，以后体检不再把它们当冲突。')).toBeInTheDocument()
+    second.unmount()
+    setup([withState({ suggestion: keepA })])
+    expect(screen.queryByText(/出处/)).toBeNull()
+  })
+
+  it('英文界面：回查过出处的说明行', () => {
+    const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(withState({ suggestion: { ...keepA, isSourced: true } })), health: scannedHealth(NOW) } })
+    render(<PanelShell gateway={gateway} t={createTranslator(en)}><PendingTab nav={createNavStore()} session={SESSION} scope={ALL_SCOPE} workspacePath="/w/app" now={NOW} /></PanelShell>)
+    expect(screen.getByText('This suggestion was made after looking up the conversations both memories came from. If you adopt it, B moves to Recently deleted and can be restored within 14 days.')).toBeInTheDocument()
+  })
+
+  it('建议保留 B：采纳后「已保留 B」，A 进最近删除', async () => {
+    setup([withState({ suggestion: { ...keepA, action: 'keep-b', ops: [{ kind: 'forget', memoryId: 'a' }, { kind: 'keep', memoryId: 'b' }] } })])
+    expect(screen.getByText('采纳后 A 进最近删除，14 天内可恢复。')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '采纳建议' }))
+    expect(await screen.findByText('已保留 B')).toBeInTheDocument()
+    expect(screen.getByText('按模型建议处理。A 已删除，14 天内可恢复。')).toBeInTheDocument()
+  })
+
+  it('融合建议（票 06）：说明行写采纳后被并入的那条去哪，「采纳建议」在前；点了直接发 apply-proposal，不加确认', async () => {
+    const { commands } = setup([withState({ suggestion: merged })])
+    expect(screen.getByText('采纳后 B 进最近删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(labelsOf(rowOf())).toEqual(['采纳建议', ...DIRECT])
+    await press(screen.getByRole('button', { name: '采纳建议' }))
+    expect(screen.queryByRole('group')).toBeNull()
+    await waitFor(() => { expect(commands()).toEqual([{ cmd: 'apply-proposal', decisionId: 'd-h', suggestionId: 'sg_2' }]) })
+  })
+
+  it('采纳融合后结果卡：「已融合成一条」，保留的那条显示融合稿，写来由和去向，撤销发 undo（冲突条目）', async () => {
+    const { commands } = setup([withState({ suggestion: merged })], {
+      respond: command => ({ ok: true, cmd: command.cmd, decisionId: 'd-h', memoryIds: ['a', 'b'], snapshotId: 'snap' }) as MemoryCommandResult,
+    })
+    await press(screen.getByRole('button', { name: '采纳建议' }))
+    expect(await screen.findByText('已融合成一条')).toBeInTheDocument()
+    expect(screen.getByText('按模型建议处理。B 已删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(screen.getByText('集成测试用真实 Postgres。')).toBeInTheDocument()
+    await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
+    await press(screen.getByRole('button', { name: '撤销' }))
+    await waitFor(() => { expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'd-h' }) })
+  })
+
+  it('融合稿写进 B 时：说明行和结果都写 A 进最近删除', async () => {
+    const intoB: Suggestion = { ...merged, ops: [{ kind: 'forget', memoryId: 'a' }, { ...merged.ops[0]!, memoryId: 'b' } as Suggestion['ops'][number]] }
+    setup([withState({ suggestion: intoB })], { respond: command => ({ ok: true, cmd: command.cmd, decisionId: 'd-h' }) as MemoryCommandResult })
+    expect(screen.getByText('采纳后 A 进最近删除，14 天内可恢复。')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '采纳建议' }))
+    expect(await screen.findByText('按模型建议处理。A 已删除，14 天内可恢复。')).toBeInTheDocument()
+  })
+
+  it.each([
+    ['退回时写盘出错、融合稿还在', { decisionId: 'pd_batch', memoryIds: ['a'], unrecordedIds: [] }, 'A 已写成融合稿，B 没有删除。撤销可把 A 退回原样。', { cmd: 'undo', decisionId: 'pd_batch' }],
+    ['退回前 A 又被别处改过', { memoryIds: [], unrecordedIds: ['a'] }, 'B 没有删除；A 退回前又被别处改过，停在那边的版本。', undefined],
+    ['A 已退回、B 仍被删', { decisionId: 'pd_batch', memoryIds: ['b'], unrecordedIds: [] }, '这次融合没有做完，A、B 现在的内容以记忆列表为准。撤销可退回这次留下的改动。', { cmd: 'undo', decisionId: 'pd_batch' }],
+    ['两条都被别处改过', { memoryIds: [], unrecordedIds: ['a', 'b'] }, '这次融合没有做完，A、B 现在的内容以记忆列表为准。', undefined],
+  ] as const)('采纳融合只完成了一部分（%s）：结果卡如实写，能撤的按那一笔撤', async (_label, partial, body, undo) => {
+    const { commands } = setup([withState({ suggestion: merged })], {
+      respond: command => ({ ok: true, cmd: command.cmd, snapshotId: 'snap', isPartial: true, ...partial }) as unknown as MemoryCommandResult,
+    })
+    await press(screen.getByRole('button', { name: '采纳建议' }))
+    expect(await screen.findByText('只完成了一部分')).toBeInTheDocument()
+    expect(screen.getByText(body)).toBeInTheDocument()
+    if (undo === undefined) {
+      expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
+      return
+    }
+    await press(screen.getByRole('button', { name: '撤销' }))
+    await waitFor(() => { expect(commands().at(-1)).toEqual(undo) })
+  })
+
+  it.each([
+    ['还没生成', { noSuggestion: { code: 'not-generated' } }],
+    ['生成失败', { noSuggestion: { code: 'failed', cause: { kind: 'unparseable' } } }],
+    ['模型判断不了', { noSuggestion: { code: 'undecided', reason: '两条都没写日期。' } }],
+    ['含高危密钥', { right: { ...B, hasSecret: true }, noSuggestion: { code: 'has-secret' } }],
+  ] as const)('没有建议（%s）：按钮行是直接处理的三个按钮，没有「采纳建议」', (_label, extra) => {
+    setup([withState(extra as Partial<Horizontal>)])
+    expect(screen.queryByRole('button', { name: '采纳建议' })).toBeNull()
+    expect(labelsOf(rowOf())).toEqual(DIRECT)
+  })
+
+  it('直接点「保留 A」：原位确认「保留 A，B 进最近删除？」，确认后走现有裁决命令；结果写「按你的选择处理。」', async () => {
+    const { commands } = setup([withState({ noSuggestion: { code: 'not-generated' } })])
+    await press(screen.getByRole('button', { name: '保留 A' }))
+    const group = screen.getByRole('group', { name: '保留 A，B 进最近删除？' })
+    expect(commands()).toEqual([])
+    await press(within(group).getByRole('button', { name: '保留 A' }))
+    await waitFor(() => { expect(commands()).toEqual([{ cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-left' }]) })
+    expect(await screen.findByText('已保留 A')).toBeInTheDocument()
+    expect(screen.getByText('按你的选择处理。B 已删除，14 天内可恢复。')).toBeInTheDocument()
+    await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
+  })
+
+  it('有建议时也能不采纳、直接选：「保留 B」确认后发 resolve keep-right，结果写「按你的选择处理。」', async () => {
+    const { commands } = setup([withState({ suggestion: keepA })])
+    fireEvent.click(screen.getByRole('button', { name: '保留 B' }))
+    fireEvent.click(within(screen.getByRole('group', { name: '保留 B，A 进最近删除？' })).getByRole('button', { name: '保留 B' }))
+    expect(await screen.findByText('已保留 B')).toBeInTheDocument()
+    expect(screen.getByText('按你的选择处理。A 已删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(commands()).toEqual([{ cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-right' }])
+  })
+
+  it('「都保留，不算冲突」：确认「都保留？以后体检不再把它们当冲突」后发 resolve keep-both', async () => {
+    const { commands } = setup([withState({ noSuggestion: { code: 'not-generated' } })])
+    fireEvent.click(screen.getByRole('button', { name: '都保留，不算冲突' }))
+    fireEvent.click(within(screen.getByRole('group', { name: '都保留？以后体检不再把它们当冲突' })).getByRole('button', { name: '都保留' }))
+    expect(await screen.findByText('两条都保留')).toBeInTheDocument()
+    expect(screen.getByText('按你的选择处理。以后体检不再把它们当冲突。')).toBeInTheDocument()
+    expect(commands()).toEqual([{ cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-both' }])
+  })
+
+  it('原位确认点「取消」：什么都不发，焦点回到原来的按钮', async () => {
+    const { commands } = setup([withState({ noSuggestion: { code: 'not-generated' } })])
+    await press(screen.getByRole('button', { name: '保留 A' }))
+    await press(within(screen.getByRole('group')).getByRole('button', { name: '取消' }))
+    await waitFor(() => { expect(screen.getByRole('button', { name: '保留 A' })).toHaveFocus() })
+    expect(commands()).toEqual([])
+  })
+
+  it('败方含高危密钥：确认写「将彻底删除、不可恢复」；彻底删除后结果卡没有撤销', async () => {
+    const { commands } = setup([withState({ right: { ...B, hasSecret: true }, noSuggestion: { code: 'has-secret' } })], {
+      respond: command => ({ ok: true, cmd: command.cmd, decisionId: 'd-h', isHardDeleted: true }) as MemoryCommandResult,
+    })
+    await press(screen.getByRole('button', { name: '保留 A' }))
+    expect(screen.getByText('保留 A：B 含密钥，将彻底删除、不可恢复。')).toBeInTheDocument()
+    expect(commands()).toEqual([])
+    await press(screen.getByRole('button', { name: '彻底删除' }))
+    expect(await screen.findByText('已保留 A')).toBeInTheDocument()
+    expect(screen.getByText('按你的选择处理。B 含密钥，已彻底删除。如果它是真的凭证，记得去换一个新的。')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
+    expect(commands()).toEqual([{ cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-left' }])
+  })
+
+  it('采纳时要删的那条含高危密钥：说明行和确认都写「将彻底删除、不可恢复」，确认后才发 apply-proposal；结果卡写按模型建议、没有撤销', async () => {
+    const { commands } = setup([withState({ right: { ...B, hasSecret: true }, suggestion: keepA })], {
+      respond: command => ({ ok: true, cmd: command.cmd, decisionId: 'd-h', isHardDeleted: true }) as MemoryCommandResult,
+    })
+    expect(screen.getByText('B 含密钥，采纳后将彻底删除、不可恢复。')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '采纳建议' }))
+    expect(screen.getByText('保留 A：B 含密钥，将彻底删除、不可恢复。')).toBeInTheDocument()
+    expect(commands()).toEqual([])
+    fireEvent.click(screen.getByRole('button', { name: '彻底删除' }))
+    expect(await screen.findByText('按模型建议处理。B 含密钥，已彻底删除。如果它是真的凭证，记得去换一个新的。')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
+    expect(commands()).toEqual([{ cmd: 'apply-proposal', decisionId: 'd-h', suggestionId: 'sg_1' }])
+  })
+
+  it('另一方含密钥、要删的这条不含：照常软删确认', () => {
+    setup([withState({ right: { ...B, hasSecret: true }, noSuggestion: { code: 'has-secret' } })])
+    fireEvent.click(screen.getByRole('button', { name: '保留 B' }))
+    expect(screen.getByRole('group', { name: '保留 B，A 进最近删除？' })).toBeInTheDocument()
+  })
+
+  it('采纳时建议已失效（服务端回 stale）：不落盘，卡片退化成没有建议、写明原因，只剩直接处理的按钮，不报通用错误', async () => {
+    setup([withState({ suggestion: keepA })], { respond: command => ({ ok: false, cmd: command.cmd, code: 'stale', detail: '建议已失效', memoryIds: ['a', 'b'] }) as MemoryCommandResult })
+    await press(screen.getByRole('button', { name: '采纳建议' }))
+    expect(await screen.findByText('这两条刚被改过，建议已失效。下次体检会重新给建议，现在可以直接选处理方式。')).toBeInTheDocument()
+    expect(screen.queryByText('A 是你明确说过的，B 是推断的。')).toBeNull()
+    expect(screen.queryByRole('button', { name: '采纳建议' })).toBeNull()
+    expect(labelsOf(rowOf())).toEqual(DIRECT)
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByText('已保留 A')).toBeNull()
+    // 焦点不掉到页首：落在卡上剩下的控件
+    await waitFor(() => { expect(document.activeElement?.closest('.pm-pending-item')).not.toBeNull() })
+  })
+
+  it('建议失效后视图带来更新的原因（模型判断不了）：写视图给的原因，不再写「建议已失效」', async () => {
+    const { gateway } = setup([withState({ suggestion: keepA })], { respond: command => ({ ok: false, cmd: command.cmd, code: 'stale', detail: '建议已失效', memoryIds: ['a', 'b'] }) as MemoryCommandResult })
+    await press(screen.getByRole('button', { name: '采纳建议' }))
+    await screen.findByText(/建议已失效/)
+    act(() => { gateway.setView('pending', view(withState({ noSuggestion: { code: 'undecided', reason: '两条同一天写的，分不出哪条对。' } }))) })
+    expect(await screen.findByText('模型判断不了哪条对')).toBeInTheDocument()
+    expect(screen.getByText('两条同一天写的，分不出哪条对。')).toBeInTheDocument()
+    expect(screen.queryByText(/建议已失效/)).toBeNull()
+  })
+
+  it('彻底删除的确认开着时卡上的建议换了一份：确认不发命令，按失效处理，显示新的一份', async () => {
+    const secretB = { ...B, hasSecret: true as const }
+    const keepASecret = withState({ right: secretB, suggestion: keepA })
+    const { gateway, commands } = setup([keepASecret])
+    await press(screen.getByRole('button', { name: '采纳建议' }))
+    const confirm = await screen.findByRole('button', { name: '彻底删除' })
+    act(() => { gateway.setView('pending', view(withState({ right: secretB, suggestion: { ...keepA, id: 'sg_9', reason: '换了一份理由。' } }))) })
+    await press(confirm)
+    expect(commands()).toEqual([])
+    expect(await screen.findByText('换了一份理由。')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '采纳建议' })).toBeInTheDocument()
+  })
+
+  it('建议失效后视图带来新的一份（id 不同）：显示新建议，「采纳建议」回来、发新 id', async () => {
+    const { gateway, commands } = setup([withState({ suggestion: keepA })], {
+      respond: command => (command.cmd === 'apply-proposal' && command.suggestionId === 'sg_1'
+        ? { ok: false, cmd: command.cmd, code: 'stale', detail: '建议已失效', memoryIds: ['a', 'b'] }
+        : { ok: true, cmd: command.cmd, decisionId: 'd-h' }) as MemoryCommandResult,
+    })
+    fireEvent.click(screen.getByRole('button', { name: '采纳建议' }))
+    await screen.findByText(/建议已失效/)
+    // 视图还带着同一份旧建议：仍按失效处理
+    act(() => { gateway.setView('pending', view(withState({ suggestion: keepA }))) })
+    expect(screen.queryByRole('button', { name: '采纳建议' })).toBeNull()
+    act(() => { gateway.setView('pending', view(withState({ suggestion: { ...keepBoth, id: 'sg_9' } }))) })
+    fireEvent.click(await screen.findByRole('button', { name: '采纳建议' }))
+    await waitFor(() => { expect(commands().at(-1)).toEqual({ cmd: 'apply-proposal', decisionId: 'd-h', suggestionId: 'sg_9' }) })
+  })
+
+  it('采纳在途：按钮都不可用（不发第二次）；其它失败原位报错，卡片照旧', async () => {
+    let answer!: (r: MemoryCommandResult) => void
+    const { commands } = setup([withState({ suggestion: keepA })], { respond: () => new Promise((resolve) => { answer = resolve }) })
+    fireEvent.click(screen.getByRole('button', { name: '采纳建议' }))
+    await waitFor(() => { expect(screen.getByRole('button', { name: '采纳建议' })).toHaveAttribute('aria-disabled', 'true') })
+    expect(screen.getByRole('button', { name: '保留 A' })).toHaveAttribute('aria-disabled', 'true')
+    fireEvent.click(screen.getByRole('button', { name: '采纳建议' }))
+    expect(commands()).toHaveLength(1)
+    await act(async () => { answer({ ok: false, cmd: 'apply-proposal', code: 'failed', detail: '磁盘满了' } as MemoryCommandResult) })
+    expect(await screen.findByRole('alert')).toHaveTextContent('磁盘满了')
+    expect(screen.getByRole('button', { name: '采纳建议' })).not.toHaveAttribute('aria-disabled')
+    expect(screen.getByText('A 是你明确说过的，B 是推断的。')).toBeInTheDocument()
+  })
+
+  it('采纳时条目已在别处处理（not-found）：交给列表提示别处已处理', async () => {
+    setup([withState({ suggestion: keepA })], { respond: command => ({ ok: false, cmd: command.cmd, code: 'not-found' }) as MemoryCommandResult })
+    fireEvent.click(screen.getByRole('button', { name: '采纳建议' }))
+    await waitFor(() => { expect(document.querySelector('.pm-pending-refused')).not.toBeNull() })
+  })
+
+  it('英文界面：按钮、说明行、结果卡都有英文', async () => {
+    const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(withState({ suggestion: keepA })), health: scannedHealth(NOW) } })
+    render(<PanelShell gateway={gateway} t={createTranslator(en)}><PendingTab nav={createNavStore()} session={SESSION} scope={ALL_SCOPE} workspacePath="/w/app" now={NOW} /></PanelShell>)
+    expect(screen.getByText('If you adopt it, B moves to Recently deleted and can be restored within 14 days.')).toBeInTheDocument()
+    expect(labelsOf(rowOf())).toEqual(['Adopt suggestion', 'Keep A', 'Keep B', 'Keep both, not a conflict'])
+    fireEvent.click(screen.getByRole('button', { name: 'Adopt suggestion' }))
+    expect(await screen.findByText('Kept A')).toBeInTheDocument()
+    expect(screen.getByText('Done as the model suggested. B was deleted and can be restored within 14 days.')).toBeInTheDocument()
+  })
+})
+
+describe('横向冲突卡：补充要求（票 07）', () => {
+  type Horizontal = Extract<PendingItem, { kind: 'conflict-horizontal' }>
+  // 视图里的卡都带内容摘要；补充要求要带卡片版本，没有摘要的卡不给这个入口
+  const A2 = { ...A, digest: 'sha1:a', updatedAt: 111 }
+  const B2 = { ...B, digest: 'sha1:b', updatedAt: 222 }
+  const card = (extra: Partial<Horizontal> = {}): PendingItem => ({ ...horizontal, left: A2, right: B2, ...extra }) as PendingItem
+  const keepA: Suggestion = { id: 'sg_1', action: 'keep-a', reason: 'A 是你明确说过的，B 是推断的。', isSourced: false, ops: [{ kind: 'keep', memoryId: 'a' }, { kind: 'forget', memoryId: 'b' }] }
+  const DIRECT = ['保留 A', '保留 B', '都保留，不算冲突']
+  const CANDIDATES = ['保留 A', '保留 B', '两者融合', '都保留，不算冲突']
+  const BASES = [{ updatedAt: 111, digest: 'sha1:a' }, { updatedAt: 222, digest: 'sha1:b' }]
+  const basis = { conflictFingerprint: 'cf', memories: [{ memoryId: 'a', fingerprint: 'fa', scopeKey: 'w' }, { memoryId: 'b', fingerprint: 'fb', scopeKey: 'w' }] }
+  const MERGED_TEXT = '集成测试用真实 Postgres，单元测试可以 mock 数据库。'
+  const mergeProposal = {
+    action: 'merge', reason: '照你说的写清了各自的场景。', basis,
+    ops: [{ kind: 'edit', memoryId: 'a', content: MERGED_TEXT, name: A.name, summary: A.summary, tags: [] }, { kind: 'forget', memoryId: 'b' }],
+  } as const
+  const keepAProposal = { action: 'keep-a', reason: '你要以 A 为准。', basis, ops: [{ kind: 'keep', memoryId: 'a' }, { kind: 'forget', memoryId: 'b' }] } as const
+  const keepBothProposal = { action: 'keep-both', reason: '你说两条都对。', basis, ops: [{ kind: 'keep', memoryId: 'a' }, { kind: 'keep', memoryId: 'b' }] } as const
+  const drafted = (proposal: object) => (command: MemoryCommand): MemoryCommandResult => (command.cmd === 'draft-proposal'
+    ? { ok: true, cmd: 'draft-proposal', proposal, model: 'deepseek-v4-flash' }
+    : { ok: true, cmd: command.cmd, decisionId: 'd-h', memoryIds: ['a', 'b'], snapshotId: 'snap' }) as MemoryCommandResult
+  const rowOf = () => document.querySelector('.pm-conflict-actions') as HTMLElement | null
+  const labelsOf = (row: HTMLElement) => [...row.querySelectorAll('button')].map(b => b.textContent)
+  const box = () => screen.getByRole('textbox', { name: '想怎么处理这两条？' })
+  const open = () => { fireEvent.click(screen.getByRole('button', { name: '补充要求' })) }
+  const write = (text: string) => { fireEvent.change(box(), { target: { value: text } }) }
+  const generate = async () => { await act(async () => { fireEvent.click(screen.getByRole('button', { name: '生成处理方案' })) }) }
+  const footLabels = () => [...(document.querySelector('.pm-proposal .pm-edit-foot') as HTMLElement).querySelectorAll('button')].map(b => b.textContent)
+
+  it('有建议：按钮行是「采纳建议」「补充要求」（直接处理挪进候选项）；没有建议：三个直接处理加「补充要求」；含密钥或卡上没有版本：只有三个直接处理', () => {
+    const first = setup([card({ suggestion: keepA })])
+    expect(labelsOf(rowOf()!)).toEqual(['采纳建议', '补充要求'])
+    expect(screen.getByRole('button', { name: '补充要求' })).not.toHaveClass('pm-btn--primary')
+    first.unmount()
+    const second = setup([card({ noSuggestion: { code: 'not-generated' } })])
+    expect(labelsOf(rowOf()!)).toEqual([...DIRECT, '补充要求'])
+    second.unmount()
+    const third = setup([card({ right: { ...B2, hasSecret: true }, noSuggestion: { code: 'has-secret' } })])
+    expect(labelsOf(rowOf()!)).toEqual(DIRECT)
+    third.unmount()
+    setup([withoutDigest({ suggestion: keepA })])
+    expect(labelsOf(rowOf()!)).toEqual(['采纳建议', ...DIRECT])
+  })
+  const withoutDigest = (extra: Partial<Horizontal>): PendingItem => ({ ...horizontal, ...extra }) as PendingItem
+
+  it('点「补充要求」：按钮行换成输入区（标签、常用处理、文本框、说明）；空着时「生成处理方案」置灰并提示；「取消」回到原来的按钮', () => {
+    const { commands } = setup([card({ suggestion: keepA })], { model: 'deepseek-v4-flash' })
+    open()
+    expect(rowOf()).toBeNull()
+    expect(screen.queryByText('采纳后 B 进最近删除，14 天内可恢复。')).toBeNull()
+    expect(box()).toHaveValue('')
+    expect(box()).toHaveAttribute('placeholder', '也可以直接写你的要求，例如：以 A 为准，但把 B 里的端口号并进来。')
+    expect(within(screen.getByRole('group', { name: '常用处理（可选）' })).getAllByRole('button').map(b => b.textContent)).toEqual(CANDIDATES)
+    expect(screen.getByText('模型按两条原文和你的要求给出处理方案，先给你看结果再决定。它只用原文和你写的信息。会消耗少量 token。')).toBeInTheDocument()
+    expect(footLabels()).toEqual(['取消', '生成处理方案'])
+    expect(screen.getByRole('button', { name: '生成处理方案' })).toHaveClass('pm-btn--primary')
+    expect(screen.getByRole('button', { name: '生成处理方案' })).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getAllByText('先写要求，或从常用处理里选一个').length).toBeGreaterThan(0)
+    write('以 A 为准')
+    expect(screen.getByRole('button', { name: '生成处理方案' })).not.toHaveAttribute('aria-disabled')
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(labelsOf(rowOf()!)).toEqual(['采纳建议', '补充要求'])
+    expect(commands()).toEqual([])
+  })
+
+  it('「两者融合」把要求填进文本框，可以接着改；生成发 draft-proposal（条目 id、要求、两条的卡片版本）', async () => {
+    const { commands } = setup([card({ suggestion: keepA })], { respond: drafted(mergeProposal) })
+    open()
+    fireEvent.click(within(screen.getByRole('group', { name: '常用处理（可选）' })).getByRole('button', { name: '两者融合' }))
+    expect(box()).toHaveValue('把两条融合成一条，写清各自适用的条件。')
+    write('把两条融合成一条，写清各自适用的条件。集成测试那条为准。')
+    await generate()
+    expect(commands()).toEqual([{ cmd: 'draft-proposal', decisionId: 'd-h', request: '把两条融合成一条，写清各自适用的条件。集成测试那条为准。', bases: BASES }])
+  })
+
+  it('候选项「保留 A」不过模型：原位确认后走现有裁决；确认里点「取消」回到输入区，写的要求还在', async () => {
+    const { commands } = setup([card({ suggestion: keepA })])
+    open()
+    write('先写一半')
+    fireEvent.click(within(screen.getByRole('group', { name: '常用处理（可选）' })).getByRole('button', { name: '保留 A' }))
+    const group = screen.getByRole('group', { name: '保留 A，B 进最近删除？' })
+    fireEvent.click(within(group).getByRole('button', { name: '取消' }))
+    expect(box()).toHaveValue('先写一半')
+    fireEvent.click(within(screen.getByRole('group', { name: '常用处理（可选）' })).getByRole('button', { name: '都保留，不算冲突' }))
+    fireEvent.click(within(screen.getByRole('group', { name: '都保留？以后体检不再把它们当冲突' })).getByRole('button', { name: '都保留' }))
+    expect(await screen.findByText('两条都保留')).toBeInTheDocument()
+    expect(screen.getByText('按你的选择处理。以后体检不再把它们当冲突。')).toBeInTheDocument()
+    expect(commands()).toEqual([{ cmd: 'resolve', decisionId: 'd-h', verdict: 'keep-both' }])
+  })
+
+  it('融合方案：结论和说明，写进哪条，原文和融合稿对照；按钮「取消」「改要求」「应用」；应用发 apply-proposal 带方案，结果卡写「按你的要求处理。」、可撤销', async () => {
+    const { commands } = setup([card({ suggestion: keepA })], { respond: drafted(mergeProposal) })
+    open()
+    write('两者融合')
+    await generate()
+    const area = document.querySelector('.pm-proposal') as HTMLElement
+    expect(within(area).getByText('融合成一条').tagName).toBe('STRONG')
+    expect(within(area).getByText('照你说的写清了各自的场景。')).toBeInTheDocument()
+    expect(within(area).getByText('融合后（写进 A，B 进最近删除）')).toBeInTheDocument()
+    expect(within(area).getByRole('region', { name: '原文' })).toBeInTheDocument()
+    expect(within(area).getByRole('region', { name: '改后' })).toHaveTextContent(MERGED_TEXT)
+    expect(footLabels()).toEqual(['取消', '改要求', '应用'])
+    expect(commands()).toEqual([{ cmd: 'draft-proposal', decisionId: 'd-h', request: '两者融合', bases: BASES }])
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '应用' })) })
+    expect(commands().at(-1)).toEqual({ cmd: 'apply-proposal', decisionId: 'd-h', proposal: mergeProposal })
+    expect(await screen.findByText('已融合成一条')).toBeInTheDocument()
+    expect(screen.getByText('按你的要求处理。B 已删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(screen.getByText(MERGED_TEXT)).toBeInTheDocument()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
+    await waitFor(() => { expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'd-h' }) })
+  })
+
+  it('只留一条的方案：留下的那条原样显示、另一条写进最近删除；应用后「已保留 A」「按你的要求处理。」', async () => {
+    const { commands } = setup([card({ noSuggestion: { code: 'not-generated' } })], { respond: drafted(keepAProposal) })
+    open()
+    write('以 A 为准')
+    await generate()
+    const area = document.querySelector('.pm-proposal') as HTMLElement
+    expect(within(area).getByText('保留 A').tagName).toBe('STRONG')
+    expect(within(area).getByText(A.content)).toBeInTheDocument()
+    expect(within(area).getByText('应用后 B 进最近删除，14 天内可恢复。')).toBeInTheDocument()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '应用' })) })
+    expect(commands().at(-1)).toEqual({ cmd: 'apply-proposal', decisionId: 'd-h', proposal: keepAProposal })
+    expect(await screen.findByText('已保留 A')).toBeInTheDocument()
+    expect(screen.getByText('按你的要求处理。B 已删除，14 天内可恢复。')).toBeInTheDocument()
+  })
+
+  it('都保留的方案：一句话；应用后「两条都保留」「按你的要求处理。」', async () => {
+    setup([card({ suggestion: keepA })], { respond: drafted(keepBothProposal) })
+    open()
+    write('两条都对')
+    await generate()
+    expect(within(document.querySelector('.pm-proposal') as HTMLElement).getByText('两条都留着，以后体检不再把它们当冲突。')).toBeInTheDocument()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '应用' })) })
+    expect(await screen.findByText('两条都保留')).toBeInTheDocument()
+    expect(screen.getByText('按你的要求处理。以后体检不再把它们当冲突。')).toBeInTheDocument()
+  })
+
+  it('做不到：只有一句说明，没有「应用」，只有「取消」「改要求」', async () => {
+    setup([card({ suggestion: keepA })], { respond: () => ({ ok: true, cmd: 'draft-proposal', infeasible: { reason: '两条里都没有端口号，没法并进来。' } }) })
+    open()
+    write('把端口号并进来')
+    await generate()
+    const area = document.querySelector('.pm-proposal') as HTMLElement
+    expect(within(area).getByText('做不到')).toBeInTheDocument()
+    expect(within(area).getByText('两条里都没有端口号，没法并进来。')).toBeInTheDocument()
+    expect(footLabels()).toEqual(['取消', '改要求'])
+    expect(screen.queryByRole('button', { name: '应用' })).toBeNull()
+  })
+
+  it('「改要求」：文本框清空等新要求，下一次带上此前的要求和上一份方案（不带依据版本）', async () => {
+    const { commands } = setup([card({ suggestion: keepA })], { respond: drafted(keepAProposal) })
+    open()
+    write('以 A 为准')
+    await generate()
+    fireEvent.click(screen.getByRole('button', { name: '改要求' }))
+    expect(box()).toHaveValue('')
+    write('还是融合吧')
+    await generate()
+    expect(commands().at(-1)).toEqual({
+      cmd: 'draft-proposal', decisionId: 'd-h', request: '还是融合吧', bases: BASES, priorRequests: ['以 A 为准'],
+      previous: { action: 'keep-a', reason: '你要以 A 为准。', ops: keepAProposal.ops },
+    })
+  })
+
+  it('生成中只锁这张卡：显示「正在生成处理方案……」和「停止」，别的卡照常可点；停止后回到输入区、要求还在，迟到的结果丢弃', async () => {
+    let answer!: (r: MemoryCommandResult) => void
+    const other: PendingItem = { ...card({ noSuggestion: { code: 'not-generated' } }), decisionId: 'd-h2', summary: '另一条冲突' } as PendingItem
+    setup([card({ suggestion: keepA }), other], { respond: command => (command.cmd === 'draft-proposal' ? new Promise((resolve) => { answer = resolve }) : { ok: true, cmd: command.cmd }) })
+    fireEvent.click(screen.getAllByRole('button', { name: '补充要求' })[0]!)
+    write('两者融合')
+    await generate()
+    expect(screen.getByText('正在生成处理方案……')).toBeInTheDocument()
+    const otherCard = screen.getByText('另一条冲突').closest('.pm-pending-item') as HTMLElement
+    expect(within(otherCard).getByRole('button', { name: '保留 A' })).not.toHaveAttribute('aria-disabled')
+    fireEvent.click(screen.getByRole('button', { name: '停止' }))
+    expect(box()).toHaveValue('两者融合')
+    await act(async () => { answer(drafted(mergeProposal)({ cmd: 'draft-proposal', decisionId: 'd-h', request: '两者融合', bases: BASES as never })) })
+    expect(screen.queryByRole('button', { name: '应用' })).toBeNull()
+    expect(box()).toHaveValue('两者融合')
+  })
+
+  it('要求里有高危密钥：本地拦住，不发送，写明原因', async () => {
+    const { commands } = setup([card({ suggestion: keepA })])
+    open()
+    write(`把 ${'sk-' + 'TESTONLY'.padEnd(24, 'a')} 并进来`)
+    await generate()
+    expect(commands()).toEqual([])
+    expect(screen.getByRole('alert')).toHaveTextContent('要求里有高危密钥，没有发送。去掉密钥再生成。')
+  })
+
+  it('融合稿像密钥：卡片里再确认一次，「仍然保存」带 force 重发', async () => {
+    const { commands } = setup([card({ suggestion: keepA })], {
+      respond: command => (command.cmd === 'apply-proposal' && command.force !== true ? { ok: false, cmd: command.cmd, code: 'secret-suspected' } : drafted(mergeProposal)(command)),
+    })
+    open()
+    write('两者融合')
+    await generate()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '应用' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '仍然保存' })) })
+    expect(commands().at(-1)).toEqual({ cmd: 'apply-proposal', decisionId: 'd-h', proposal: mergeProposal, force: true })
+    expect(await screen.findByText('已融合成一条')).toBeInTheDocument()
+  })
+
+  it('应用时两条已被别处改过（stale）：方案作废，回到输入区并提示，什么都没落', async () => {
+    setup([card({ suggestion: keepA })], {
+      respond: command => (command.cmd === 'apply-proposal' ? { ok: false, cmd: command.cmd, code: 'stale', memoryIds: ['a', 'b'] } : drafted(mergeProposal)(command)),
+    })
+    open()
+    write('两者融合')
+    await generate()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '应用' })) })
+    expect(await screen.findByText('这两条刚被改过，已换成最新内容。请重新处理。')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '应用' })).toBeNull()
+    expect(box()).toBeInTheDocument()
+    expect(screen.queryByText('已融合成一条')).toBeNull()
+  })
+
+  it('看方案时视图带来新版本（别处改了 B）：方案作废并提示', async () => {
+    const { gateway } = setup([card({ suggestion: keepA })], { respond: drafted(mergeProposal) })
+    open()
+    write('两者融合')
+    await generate()
+    expect(screen.getByRole('button', { name: '应用' })).toBeInTheDocument()
+    act(() => { gateway.setView('pending', view(card({ suggestion: keepA, right: { ...B2, updatedAt: 333, content: '别处改了' } }))) })
+    expect(await screen.findByText('这两条刚被改过，已换成最新内容。请重新处理。')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '应用' })).toBeNull()
+  })
+
+  it('同一时刻只展开一个输入区：另一张卡点「补充要求」，这张写了内容先原位问；没写内容直接换过去', async () => {
+    const other: PendingItem = { ...card({ noSuggestion: { code: 'not-generated' } }), decisionId: 'd-h2', summary: '另一条冲突' } as PendingItem
+    setup([card({ suggestion: keepA }), other])
+    const requestOn = (title: string) => within(screen.getByText(title).closest('.pm-pending-item') as HTMLElement).getByRole('button', { name: '补充要求' })
+    fireEvent.click(requestOn('另一条冲突'))
+    expect(screen.getAllByRole('textbox')).toHaveLength(1)
+    // 没写内容：直接换
+    fireEvent.click(requestOn(horizontal.summary))
+    expect(screen.getAllByRole('textbox')).toHaveLength(1)
+    write('写了一半')
+    fireEvent.click(requestOn('另一条冲突'))
+    const ask = screen.getByRole('group', { name: '放弃刚写的内容？' })
+    fireEvent.click(within(ask).getByRole('button', { name: '取消' }))
+    expect(box()).toHaveValue('写了一半')
+    fireEvent.click(requestOn('另一条冲突'))
+    fireEvent.click(within(screen.getByRole('group', { name: '放弃刚写的内容？' })).getByRole('button', { name: '放弃' }))
+    expect(screen.getAllByRole('textbox')).toHaveLength(1)
+    expect(box()).toHaveValue('')
+    expect(within(screen.getByText('另一条冲突').closest('.pm-pending-item') as HTMLElement).getByRole('textbox')).toBeInTheDocument()
+  })
+
+  it('这张卡的候选项正在原位确认时，另一张卡点「补充要求」：「放弃刚写的内容？」照样看得见', () => {
+    const other: PendingItem = { ...card({ noSuggestion: { code: 'not-generated' } }), decisionId: 'd-h2', summary: '另一条冲突' } as PendingItem
+    setup([card({ suggestion: keepA }), other])
+    const requestOn = (title: string) => within(screen.getByText(title).closest('.pm-pending-item') as HTMLElement).getByRole('button', { name: '补充要求' })
+    fireEvent.click(requestOn(horizontal.summary))
+    write('写了一半')
+    fireEvent.click(within(screen.getByRole('group', { name: '常用处理（可选）' })).getByRole('button', { name: '保留 A' }))
+    fireEvent.click(requestOn('另一条冲突'))
+    const ask = screen.getByRole('group', { name: '放弃刚写的内容？' })
+    expect(ask.closest('[hidden]')).toBeNull()
+  })
+
+  it('生成时条目已在别处处理（not-found）：交给列表提示别处已处理', async () => {
+    setup([card({ suggestion: keepA })], { respond: command => ({ ok: false, cmd: command.cmd, code: 'not-found' }) as MemoryCommandResult })
+    open()
+    write('两者融合')
+    await generate()
+    await waitFor(() => { expect(document.querySelector('.pm-pending-refused')).not.toBeNull() })
+  })
+
+  it('英文界面：入口、输入区和结果卡都有英文', async () => {
+    const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(card({ suggestion: keepA })), health: scannedHealth(NOW) }, respond: drafted(keepAProposal) })
+    render(<PanelShell gateway={gateway} t={createTranslator(en)}><PendingTab nav={createNavStore()} session={SESSION} scope={ALL_SCOPE} workspacePath="/w/app" now={NOW} /></PanelShell>)
+    fireEvent.click(screen.getByRole('button', { name: 'Say how' }))
+    expect(within(screen.getByRole('group', { name: 'Common choices (optional)' })).getAllByRole('button').map(b => b.textContent)).toEqual(['Keep A', 'Keep B', 'Merge the two', 'Keep both, not a conflict'])
+    fireEvent.change(screen.getByRole('textbox', { name: 'How should these two be handled?' }), { target: { value: 'go with A' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Make a plan' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Apply' })) })
+    expect(await screen.findByText('Done as you asked. B was deleted and can be restored within 14 days.')).toBeInTheDocument()
+  })
+})
+
+describe('垂直冲突卡：同一张处理卡（票 10）', () => {
+  type Vertical = Extract<PendingItem, { kind: 'conflict-vertical' }>
+  // 记忆在借来的会话所在项目里（/w/app），带卡片版本
+  const V = memory({ id: 'v', content: '用 npm。', digest: 'sha1:v', updatedAt: 333 })
+  const card = (extra: Partial<Vertical> = {}): PendingItem => ({ ...vertical, memory: V, ...extra }) as PendingItem
+  const REWRITTEN = 'web/ 目录下用 npm，其余照 AGENTS.md 用 pnpm。'
+  const rewrite: Suggestion = {
+    id: 'sg_r', action: 'rewrite', reason: '这条记忆只管 web 目录。', isSourced: false, baselineWorkspace: '/w/app',
+    ops: [{ kind: 'edit', memoryId: 'v', content: REWRITTEN, name: V.name, summary: V.summary, tags: [] }],
+  }
+  const del: Suggestion = { id: 'sg_d', action: 'delete', reason: '指令文件已经写清楚了。', isSourced: false, baselineWorkspace: '/w/app', ops: [{ kind: 'forget', memoryId: 'v' }] }
+  const both: Suggestion = { id: 'sg_b', action: 'keep-both', reason: '两边讲的是不同的事。', isSourced: false, baselineWorkspace: '/w/app', ops: [{ kind: 'keep', memoryId: 'v' }] }
+  const DIRECT = ['以文件为准，删除这条', '都保留，不算冲突']
+  const rowOf = () => document.querySelector('.pm-conflict-actions') as HTMLElement | null
+  const labelsOf = (row: HTMLElement) => [...row.querySelectorAll('button')].map(b => b.textContent)
+  const adopted = (command: MemoryCommand): MemoryCommandResult => ({ ok: true, cmd: command.cmd, decisionId: 'd-v', memoryIds: ['v'], snapshotId: 'snap' }) as MemoryCommandResult
+
+  it('故事 32：没有建议：建议块写还没让模型看过，按钮行是两个直接处理加「补充要求」；「补上建议」只发 suggest', async () => {
+    const { commands } = setup([card({ noSuggestion: { code: 'not-generated' } })])
+    expect(screen.getByText('这条还没有建议')).toBeInTheDocument()
+    expect(screen.getByText('还没让模型看过这条记忆和指令文件。')).toBeInTheDocument()
+    expect(labelsOf(rowOf()!)).toEqual([...DIRECT, '补充要求'])
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '补上建议' })) })
+    expect(commands()).toEqual([{ cmd: 'suggest', decisionId: 'd-v' }])
+  })
+
+  it('故事 32：改写建议：加粗结论、理由、改写稿和对照；说明行写换成改写稿；采纳只带条目 id 和建议 id，结果卡「已改写这条记忆」显示改写后的内容、写来由，撤销发 undo（冲突条目）', async () => {
+    const { commands } = setup([card({ suggestion: rewrite })], { respond: adopted })
+    expect(screen.getByText('改写这条记忆').tagName).toBe('STRONG')
+    expect(screen.getByText('这条记忆只管 web 目录。')).toBeInTheDocument()
+    expect(screen.getByText('改写后（写回这条记忆，指令文件不改）')).toBeInTheDocument()
+    expect(screen.getByText(REWRITTEN)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '看和原文的对照 ›' }))
+    expect(screen.getByRole('region', { name: '原文' })).toHaveTextContent('用 npm。')
+    expect(screen.getByText('采纳后这条记忆换成改写稿，可以撤销。')).toBeInTheDocument()
+    expect(labelsOf(rowOf()!)).toEqual(['采纳建议', '补充要求'])
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '采纳建议' })) })
+    expect(commands()).toEqual([{ cmd: 'apply-proposal', decisionId: 'd-v', suggestionId: 'sg_r' }])
+    expect(await screen.findByText('已改写这条记忆')).toBeInTheDocument()
+    expect(screen.getByText('按模型建议处理。指令文件没有改动。')).toBeInTheDocument()
+    expect(screen.getByText(REWRITTEN)).toBeInTheDocument()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
+    expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'd-v' })
+  })
+
+  it('故事 32：删除建议：说明行写进最近删除；采纳不加确认，结果「已按基线」「按模型建议处理。」、可撤销', async () => {
+    const { commands } = setup([card({ suggestion: del })], { respond: adopted })
+    expect(screen.getByText('以文件为准，删除这条').tagName).toBe('STRONG')
+    expect(screen.getByText('采纳后这条记忆进最近删除，14 天内可恢复。')).toBeInTheDocument()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '采纳建议' })) })
+    expect(commands()).toEqual([{ cmd: 'apply-proposal', decisionId: 'd-v', suggestionId: 'sg_d' }])
+    expect(await screen.findByText('已按基线')).toBeInTheDocument()
+    expect(screen.getByText('按模型建议处理。这条记忆已删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '撤销' })).toBeInTheDocument()
+  })
+
+  it('删除建议、这条含高危密钥：说明行和确认都写彻底删除，确认后才发 apply-proposal；结果没有撤销', async () => {
+    const { commands } = setup([card({ memory: { ...V, hasSecret: true }, suggestion: del })], {
+      respond: command => ({ ok: true, cmd: command.cmd, decisionId: 'd-v', isHardDeleted: true }) as MemoryCommandResult,
+    })
+    expect(screen.getByText('这条记忆含密钥，采纳后将彻底删除、不可恢复。')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '采纳建议' }))
+    expect(screen.getByText('以文件为准：这条记忆含密钥，将彻底删除、不可恢复。')).toBeInTheDocument()
+    expect(commands()).toEqual([])
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '彻底删除' })) })
+    expect(commands()).toEqual([{ cmd: 'apply-proposal', decisionId: 'd-v', suggestionId: 'sg_d' }])
+    expect(await screen.findByText(/按模型建议处理。这条记忆含密钥，已彻底删除。/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
+  })
+
+  it('故事 32：都保留建议：采纳后「已保留这条记忆」「按模型建议处理。基线和记忆都不变时不再报。」', async () => {
+    setup([card({ suggestion: both })], { respond: adopted })
+    expect(screen.getByText('采纳后这条记忆留着，它和指令文件都不变时不再报。')).toBeInTheDocument()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '采纳建议' })) })
+    expect(await screen.findByText('已保留这条记忆')).toBeInTheDocument()
+    expect(screen.getByText('按模型建议处理。基线和记忆都不变时不再报。')).toBeInTheDocument()
+  })
+
+  it.each([
+    ['有建议', { suggestion: rewrite }, '这次没有建议'],
+    ['没有建议', { noSuggestion: { code: 'not-generated' } }, '这条还没有建议'],
+  ] as const)('故事 5a：会话不在这条记忆的项目里（%s）：按没有建议显示，写「要在这个项目的会话里处理」，只剩两个直接处理', (_label, extra, title) => {
+    setup([card({ memory: { ...V, workspacePath: '/w/other' }, ...extra } as Partial<Vertical>)])
+    expect(screen.getByText(title)).toBeInTheDocument()
+    expect(screen.getByText('要在这个项目的会话里处理。')).toBeInTheDocument()
+    expect(screen.queryByText(REWRITTEN)).toBeNull()
+    expect(screen.queryByRole('button', { name: /采纳建议|补上建议|补充要求/ })).toBeNull()
+    expect(labelsOf(rowOf()!)).toEqual(DIRECT)
+  })
+
+  it('故事 5a：全局记忆的建议是在别的项目里生成的：同样要回到那个项目处理', () => {
+    setup([card({ memory: { ...V, scope: 'global', workspacePath: undefined }, suggestion: { ...rewrite, baselineWorkspace: '/w/other' } })])
+    expect(screen.getByText('要在这个项目的会话里处理。')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '采纳建议' })).toBeNull()
+  })
+
+  it('全局记忆的建议是在没有项目的会话里生成的、现在的会话在某个项目里：同样不给采纳', () => {
+    setup([card({ memory: { ...V, scope: 'global', workspacePath: undefined }, suggestion: { ...rewrite, baselineWorkspace: 'global' } })])
+    expect(screen.getByText('要在这个项目的会话里处理。')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '采纳建议' })).toBeNull()
+  })
+
+  it('故事 24：体检时缺基线、现在的会话在这个项目里：写原因，给「补上建议」', () => {
+    setup([card({ noSuggestion: { code: 'no-baseline' } })])
+    expect(screen.getByText('体检时的会话不在这个项目里，没能读到指令文件。')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '补上建议' })).toBeInTheDocument()
+  })
+
+  it('补上建议时服务端回缺基线（会话读不到指令文件）：原位写「要在这个项目的会话里处理。」', async () => {
+    setup([card({ noSuggestion: { code: 'not-generated' } })], {
+      respond: command => ({ ok: false, cmd: command.cmd, code: 'no-baseline', detail: '要在这条记忆所在项目的会话里补' }) as MemoryCommandResult,
+    })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '补上建议' })) })
+    expect(await screen.findByRole('alert')).toHaveTextContent('要在这个项目的会话里处理。')
+  })
+
+  it('含高危密钥：写这条记忆里有密钥、不会发给模型，没有「补上建议」「补充要求」', () => {
+    setup([card({ memory: { ...V, hasSecret: true }, noSuggestion: { code: 'has-secret' } })])
+    expect(screen.getByText('这条记忆里有密钥，不会发给模型。可以直接选下面的处理方式。')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /补上建议|补充要求/ })).toBeNull()
+    expect(labelsOf(rowOf()!)).toEqual(DIRECT)
+  })
+
+  it('采纳时建议已失效（服务端回 stale）：不落盘，退化成没有建议并写明原因，只剩直接处理和「补充要求」', async () => {
+    setup([card({ suggestion: rewrite })], { respond: command => ({ ok: false, cmd: command.cmd, code: 'stale', detail: '建议已失效' }) as MemoryCommandResult })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '采纳建议' })) })
+    expect(await screen.findByText('这条记忆或指令文件刚被改过，建议已失效。下次体检会重新给建议，现在可以直接选处理方式。')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '采纳建议' })).toBeNull()
+    expect(labelsOf(rowOf()!)).toEqual([...DIRECT, '补充要求'])
+  })
+
+  describe('补充要求', () => {
+    const basis = { conflictFingerprint: 'cf', memories: [{ memoryId: 'v', fingerprint: 'fv', scopeKey: '/w/app' }], baseline: { workspace: '/w/app', fingerprint: 'bf' } }
+    const rewriteProposal = { action: 'rewrite', reason: '照你说的写清了范围。', basis, ops: [{ kind: 'edit', memoryId: 'v', content: REWRITTEN, name: V.name, summary: V.summary, tags: [] }] } as const
+    const deleteProposal = { action: 'delete', reason: '你要以文件为准。', basis, ops: [{ kind: 'forget', memoryId: 'v' }] } as const
+    const drafted = (proposal: object) => (command: MemoryCommand): MemoryCommandResult => (command.cmd === 'draft-proposal'
+      ? { ok: true, cmd: 'draft-proposal', proposal, model: 'deepseek-v4-flash' }
+      : { ok: true, cmd: command.cmd, decisionId: 'd-v', memoryIds: ['v'], snapshotId: 'snap' }) as MemoryCommandResult
+    const box = () => screen.getByRole('textbox', { name: '想怎么处理这条记忆？' })
+    const candidates = () => within(screen.getByRole('group', { name: '常用处理（可选）' }))
+
+    it('故事 32：常用处理是三个候选项；「改写这条记忆」填要求；生成发 draft-proposal 带这一条的卡片版本；改写方案对照；应用发 apply-proposal 带方案，结果卡写「按你的要求处理。」', async () => {
+      const { commands } = setup([card({ noSuggestion: { code: 'not-generated' } })], { respond: drafted(rewriteProposal) })
+      fireEvent.click(screen.getByRole('button', { name: '补充要求' }))
+      expect(candidates().getAllByRole('button').map(b => b.textContent)).toEqual(['以文件为准，删除这条', '改写这条记忆', '都保留，不算冲突'])
+      expect(screen.getByText('模型按这条记忆、指令文件和你的要求给出处理方案，先给你看结果再决定。它只用原文和你写的信息。会消耗少量 token。')).toBeInTheDocument()
+      fireEvent.click(candidates().getByRole('button', { name: '改写这条记忆' }))
+      expect(box()).toHaveValue('改写这条记忆，写清它和指令文件各管什么。')
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: '生成处理方案' })) })
+      expect(commands()).toEqual([{ cmd: 'draft-proposal', decisionId: 'd-v', request: '改写这条记忆，写清它和指令文件各管什么。', bases: [{ updatedAt: 333, digest: 'sha1:v' }] }])
+      const area = document.querySelector('.pm-proposal') as HTMLElement
+      expect(within(area).getByText('改写这条记忆').tagName).toBe('STRONG')
+      expect(within(area).getByText('改写后（写回这条记忆，指令文件不改）')).toBeInTheDocument()
+      expect(within(area).getByRole('region', { name: '改后' })).toHaveTextContent(REWRITTEN)
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: '应用' })) })
+      expect(commands().at(-1)).toEqual({ cmd: 'apply-proposal', decisionId: 'd-v', proposal: rewriteProposal })
+      expect(await screen.findByText('已改写这条记忆')).toBeInTheDocument()
+      expect(screen.getByText('按你的要求处理。指令文件没有改动。')).toBeInTheDocument()
+    })
+
+    it('删除方案：一句话写去向；应用后「已按基线」「按你的要求处理。」', async () => {
+      setup([card({ noSuggestion: { code: 'not-generated' } })], { respond: drafted(deleteProposal) })
+      fireEvent.click(screen.getByRole('button', { name: '补充要求' }))
+      fireEvent.change(box(), { target: { value: '以文件为准' } })
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: '生成处理方案' })) })
+      expect(within(document.querySelector('.pm-proposal') as HTMLElement).getByText('应用后这条记忆进最近删除，14 天内可恢复。')).toBeInTheDocument()
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: '应用' })) })
+      expect(await screen.findByText('已按基线')).toBeInTheDocument()
+      expect(screen.getByText('按你的要求处理。这条记忆已删除，14 天内可恢复。')).toBeInTheDocument()
+    })
+
+    it('候选项「以文件为准，删除这条」不过模型：原位确认后发 resolve keep-right', async () => {
+      const { commands } = setup([card({ noSuggestion: { code: 'not-generated' } })])
+      fireEvent.click(screen.getByRole('button', { name: '补充要求' }))
+      fireEvent.click(candidates().getByRole('button', { name: '以文件为准，删除这条' }))
+      fireEvent.click(within(screen.getByRole('group', { name: '以文件为准，这条记忆进最近删除？' })).getByRole('button', { name: '删除这条' }))
+      expect(await screen.findByText('已按基线')).toBeInTheDocument()
+      expect(commands()).toEqual([{ cmd: 'resolve', decisionId: 'd-v', verdict: 'keep-right' }])
+    })
+  })
+
+  it('「全部补上」算上会话在项目里的垂直冲突，不在项目里的不算', () => {
+    const h = { ...horizontal, noSuggestion: { code: 'not-generated' } } as PendingItem
+    const first = setup([h, card({ noSuggestion: { code: 'not-generated' } })])
+    expect(screen.getByText('2 条还没有建议')).toBeInTheDocument()
+    first.unmount()
+    setup([h, card({ memory: { ...V, workspacePath: '/w/other' }, noSuggestion: { code: 'not-generated' } })])
+    expect(screen.queryByText(/^\d+ 条还没有建议$/)).toBeNull()
+  })
+
+  it('英文界面：候选项、结论和需要回到项目的说明', () => {
+    const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(card({ suggestion: del }), { ...card({ noSuggestion: { code: 'not-generated' } }), decisionId: 'd-v2', memory: { ...V, id: 'v2', workspacePath: '/w/other' } } as PendingItem), health: scannedHealth(NOW) } })
+    render(<PanelShell gateway={gateway} t={createTranslator(en)}><PendingTab nav={createNavStore()} session={SESSION} scope={ALL_SCOPE} workspacePath="/w/app" now={NOW} /></PanelShell>)
+    expect(screen.getByText('Go with the file, delete this one', { selector: 'strong' })).toBeInTheDocument()
+    expect(screen.getByText('Handle this in a conversation in this project.')).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'Keep both, not a conflict' }).length).toBeGreaterThan(0)
   })
 })

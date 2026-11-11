@@ -13,6 +13,7 @@ import { interpret, LLM_FAILURE_KEYS, refuseBeforeSend } from '../command/protoc
 import { useGateway, type BorrowedSession, type ModelState } from '../gateway.ts'
 import { formatNumber, useT, type Translate } from '../i18n.tsx'
 import { INTENT_BLANK, SINGLE_INTENTS, type Intent } from '../library/intents.ts'
+import type { LocaleKey } from '../locales.ts'
 import { Button } from '../ui/Button.tsx'
 import { keepFocusInPlace, useReturnFocus } from '../ui/focus-return.ts'
 import { Icon } from '../ui/Icon.tsx'
@@ -49,13 +50,13 @@ function hintOf(model: ModelState, t: Translate): string {
 
 /**
  * 写要求区底栏：左侧的提示和「生成」的置灰原因。拿不到模型最先；other 是调用方另有的原因，排在它之后、要求空着之前。
- * 要求空着（isMissing）时提示写要求，否则写用哪个模型。
+ * 要求空着（isMissing）时提示写要求（empty 是调用方换的说法），否则写用哪个模型。
  */
-export function requestFootOf(model: ModelState, isMissing: boolean, t: Translate, other?: string): { hint: string; blocked: string | undefined } {
+export function requestFootOf(model: ModelState, isMissing: boolean, t: Translate, other?: string, empty: LocaleKey = 'library.model.empty'): { hint: string; blocked: string | undefined } {
   const isUnavailable = model.status === 'unavailable'
   return {
-    hint: isMissing && !isUnavailable ? t('library.model.empty') : hintOf(model, t),
-    blocked: isUnavailable ? t('pending.model.unavailable') : other ?? (isMissing ? t('library.model.empty') : undefined),
+    hint: isMissing && !isUnavailable ? t(empty) : hintOf(model, t),
+    blocked: isUnavailable ? t('pending.model.unavailable') : other ?? (isMissing ? t(empty) : undefined),
   }
 }
 
@@ -270,15 +271,19 @@ export function DraftCompare({ memories, base, draft, keeper }: {
 
 /**
  * 写要求区：标签、快捷意图（给了才有）、要求框。点快捷意图把模板换进要求框（替换原有内容）、按钮按下，
- * 选中第一个「___」等用户改。单条修改、待处理卡的让模型改共用。
+ * 选中第一个「___」等用户改。单条修改、待处理卡的让模型改、冲突卡的补充要求共用。
+ * 没有模板的意图不填要求框，点了交给 onPick（补充要求里的保留 A、B 这类直接处理）。
  */
-export function RequestBox({ id, label, value, onChange, intents, placeholder }: {
+export function RequestBox({ id, label, value, onChange, intents, intentsLabel, onPick, placeholder }: {
   /** 要求框的 id 前缀（同一面板里的 useId）。 */
   id: string
   label: string
   value: string
   onChange: (value: string) => void
   intents?: readonly Intent[] | undefined
+  /** 快捷意图那一组的标签，缺省「快捷意图」的说法。 */
+  intentsLabel?: string | undefined
+  onPick?: ((id: string) => void) | undefined
   placeholder?: string | undefined
 }) {
   const t = useT()
@@ -299,14 +304,18 @@ export function RequestBox({ id, label, value, onChange, intents, placeholder }:
       {intents !== undefined
         ? (
           <div className="pm-intents" role="group" aria-labelledby={`${id}-intents`}>
-            <span id={`${id}-intents`} className="pm-intents-label">{t('library.model.intents')}</span>
+            <span id={`${id}-intents`} className="pm-intents-label">{intentsLabel ?? t('library.model.intents')}</span>
             {intents.map(intent => (
               <Button
                 key={intent.id}
                 variant="quiet"
                 className="pm-intent"
-                aria-pressed={picked === intent.id && value !== ''}
-                onClick={() => { onChange(t(intent.template)); setPicked(intent.id); setFilled(n => n + 1) }}
+                aria-pressed={intent.template === undefined ? undefined : picked === intent.id && value !== ''}
+                onClick={() => {
+                  const { template } = intent
+                  if (template === undefined) { onPick?.(intent.id); return }
+                  onChange(t(template)); setPicked(intent.id); setFilled(n => n + 1)
+                }}
               >
                 {t(intent.label)}
               </Button>

@@ -7,6 +7,7 @@ const ws = { kind: 'workspace', workspacePath: '/w/app' } as const
 export const SAMPLE_COMMANDS: { [K in MemoryCommand['cmd']]: Extract<MemoryCommand, { cmd: K }> } = {
   'info': { cmd: 'info' },
   'resolve': { cmd: 'resolve', decisionId: 'd1', verdict: 'keep-left' },
+  'apply-proposal': { cmd: 'apply-proposal', decisionId: 'd1', suggestionId: 'sg1' },
   'undo': { cmd: 'undo', decisionId: 'd1' },
   'promote': { cmd: 'promote', decisionId: 'd1', target: 'global' },
   'keep-local': { cmd: 'keep-local', decisionId: 'd1' },
@@ -22,6 +23,8 @@ export const SAMPLE_COMMANDS: { [K in MemoryCommand['cmd']]: Extract<MemoryComma
     cmd: 'merge-memories', memories: [{ memoryId: 'm1', layer: ws, base }, { memoryId: 'm2', base }], content: '正文', name: 'n', summary: 's', tags: [],
   },
   'model-info': { cmd: 'model-info' },
+  'suggest': { cmd: 'suggest', decisionId: 'd1' },
+  'draft-proposal': { cmd: 'draft-proposal', decisionId: 'd1', request: '两者融合', bases: [base, base] },
   'draft-edit': { cmd: 'draft-edit', adviceType: 'bloat', memories: [{ memoryId: 'm1', layer: ws }] },
   'plan-edits': { cmd: 'plan-edits', memories: [{ memoryId: 'm1', layer: ws, base }, { memoryId: 'm2', layer: ws, base }], request: '合成一条' },
   'draft-plan': {

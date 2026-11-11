@@ -9,14 +9,16 @@ import { isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
 import { RecordNotFoundError } from '../errors.ts'
 import { detectSecrets, hasCriticalSecret, hasSecret } from '../secrets.ts'
 import { computeDigest } from '../storage/frontmatter.ts'
-import { candidateFingerprint, type MisplacedIgnore, type PendingDecisionsStore } from '../governance/decisions.ts'
+import {
+  baselineBasisOf, candidateFingerprint, conflictFingerprint, isBaselineCurrent, isBasisCurrent, suggestionBasis, type MisplacedIgnore, type PendingDecisionsStore,
+} from '../governance/decisions.ts'
 import { isModelChange } from '../governance/undo-rules.ts'
 import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
-import { kindOf, type MemorySnapshot, type PendingDecision, type ScanCacheEntry, type SnapshotRecord } from '../governance/schema.ts'
+import { genId, kindOf, type MemorySnapshot, type PendingDecision, type ProposalOp, type ScanCacheEntry, type SnapshotRecord, type SuggestionBasis } from '../governance/schema.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
-import { executeConfirm } from '../tools/confirm.ts'
+import { executeConfirm, type ConfirmOptions } from '../tools/confirm.ts'
 import { executeForget } from '../tools/forget.ts'
 import { executePromote } from '../tools/promote.ts'
 import { executeUndo, restoreDeleted, type UndoResult } from '../tools/undo.ts'
@@ -24,14 +26,18 @@ import {
   copyHistory, crossWorkspaceNote, gateRecords, locateCopy, workspaceLabel, type CrossWorkspaceRejection, type GovernanceContext,
 } from '../tools/workspace-gate.ts'
 import {
-  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, VIEW_BEHIND_CODES, mergeKeeperIndex, parseMemoryCommand, sessionViewFile,
-  type ApplyEditOp, type DraftPlanOp, type GuiErrorCode, type MemoryCommand, type MemoryCommandResult,
+  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, VIEW_BEHIND_CODES, mergeKeeperIndex, parseMemoryCommand, sessionViewFile, verdictOfAction,
+  type ApplyEditOp, type DraftPlanOp, type GuiErrorCode, type MemoryCommand, type MemoryCommandResult, type ProposalSource, type RequestedProposal,
 } from './contract.ts'
 import type { ViewWriter } from './view-writer.ts'
 import { generateDraft } from './model-draft.ts'
+import { generateProposal, generateSuggestion, generateVerticalProposal, generateVerticalSuggestion } from './model-suggestion.ts'
+import { readSuggestionSources } from './suggestion-source.ts'
+import type { ReadEventFn } from '../tools/source.ts'
 import { generatePlan } from './model-plan.ts'
 import { generatePlanDrafts } from './model-draft-plan.ts'
 import { processInterval, runCheckup, type IntervalTimer } from './checkup-run.ts'
+import type { CheckupSuggestions } from './checkup-suggestions.ts'
 import { sameScope, scopeAt, scopeKey, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
 import { UNKNOWN_SESSION_ID, type ContextHost, type HostSession } from '../tools/host-session.ts'
 import { scanOutcome } from './views.ts'
@@ -56,6 +62,10 @@ export interface MemoryCommandDeps {
   onAutoCheckupChanged?: () => void
   /** scan 持有范围认领期间的心跳计时；缺省用进程自己的 setInterval。 */
   heartbeat?: IntervalTimer
+  /** scan 做完之后的后续段（给冲突生成处理建议，不等它跑完就回结果）；缺省不生成。 */
+  suggestions?: Pick<CheckupSuggestions, 'run'>
+  /** 插件卸载的取消信号：传给 scan 之后的后续段。 */
+  signal?: AbortSignal
   /** 建议忽略表（ignore-advice / unignore-advice 写它）。 */
   ignores: AdviceIgnoreStore
   registry: TypeRegistry
@@ -68,6 +78,8 @@ export interface MemoryCommandDeps {
   isGovernanceEnabled?: () => boolean
   /** 旧 KV 导入是否已结清（导完且旧行已删）；缺省视为已结清。没结清时彻底删除回 failed：续传会把旧快照里的明文放回来。 */
   isLegacyImportSettled?: () => Promise<boolean>
+  /** 宿主的读事件服务（用时探测，同 memory_source）：生成处理建议时回查两条记忆的出处。缺省或返回 null 时不带出处。 */
+  getReadEvent?: () => ReadEventFn | null
   log?: MemoryLogger
   now?: () => number
 }
@@ -92,10 +104,10 @@ export interface MemoryCommandDefinition {
  *  refresh-views 不受开关影响，撤销直接改、直接合并、模型改写与替代的 undo 也不受（见 isEditUndo）。 */
 // dismiss-overflow 不在此列：超限提醒在体检关闭时照样入账，忽略它不属于治理动作；
 // ignore-advice / unignore-advice 同理：规则类建议在体检关闭时照样列出，忽略只是用户的处置
-const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'undo', 'promote', 'promote-memory', 'move-memory', 'keep-local', 'keep-local-memory', 'scan'])
+const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'apply-proposal', 'undo', 'promote', 'promote-memory', 'move-memory', 'keep-local', 'keep-local-memory', 'scan', 'suggest', 'draft-proposal'])
 
 /** 不写任何东西的子命令：成功后也不重写视图。 */
-const READ_ONLY_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['draft-edit', 'plan-edits', 'draft-plan'])
+const READ_ONLY_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['draft-edit', 'plan-edits', 'draft-plan', 'draft-proposal'])
 
 /** 自己写视图的子命令：成功后不再按常规重写全部视图。 */
 const SELF_WRITING_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['scan', 'refresh-views', 'set-auto-checkup'])
@@ -177,6 +189,36 @@ function isStale(r: MemoryRecord, base: { updatedAt: number; digest: string }): 
   return r.updatedAt !== base.updatedAt || computeDigest(r.name, r.summary, r.content) !== base.digest
 }
 
+/** 不改写的结论每条记忆的操作，按条目的记忆顺序（横向 A、B；垂直只有那一条记忆）。 */
+const KEEP_OPS = {
+  horizontal: { 'keep-a': ['keep', 'forget'], 'keep-b': ['forget', 'keep'], 'keep-both': ['keep', 'keep'] },
+  vertical: { 'delete': ['forget'], 'keep-both': ['keep'] },
+} as const
+
+/** 冲突条目的样子：横向两条记忆，垂直一条记忆加会话的指令文件；不是这两种（提升候选、超限、不合规的条目）为 undefined。 */
+type ConflictShape = 'horizontal' | 'vertical'
+function conflictShape(entry: PendingDecision): ConflictShape | undefined {
+  if (kindOf(entry) !== 'conflict') return undefined
+  if (entry.baselineRef === undefined) return entry.memoryIds.length === 2 ? 'horizontal' : undefined
+  return entry.memoryIds.length === 1 ? 'vertical' : undefined
+}
+
+/**
+ * 界面带回来的按要求生成的方案，操作和结论对得上：每条记忆恰好一项、按条目顺序；不改写的结论按 KEEP_OPS，
+ * 融合是一条改写（正文、名称不空）加一条删除，垂直改写是那条记忆的一条改写。保留方是不是合并规则选的那条，要读到记忆才知道，写入前另查。
+ */
+function isProposalShaped(proposal: Pick<RequestedProposal, 'action' | 'ops'>, memoryIds: readonly string[], shape: ConflictShape): boolean {
+  const { action, ops } = proposal
+  if (ops.length !== memoryIds.length || ops.some((op, i) => op.memoryId !== memoryIds[i])) return false
+  const kinds = ops.map(op => op.kind)
+  const isDraftFilled = ops.every(op => op.kind !== 'edit' || (op.content.trim() !== '' && op.name.trim() !== ''))
+  const keeps: Partial<Record<string, readonly string[]>> = KEEP_OPS[shape]
+  const kept = keeps[action]
+  if (kept !== undefined) return kinds.join() === kept.join()
+  if (shape === 'vertical') return action === 'rewrite' && kinds.join() === 'edit' && isDraftFilled
+  return action === 'merge' && [...kinds].sort().join() === 'edit,forget' && isDraftFilled
+}
+
 /**
  * 「整理所选」各命令的输入校验（模型调用、快照之前）：目标 id 不重复，命令里写了作用域的都是同一个。不合规时给原因。
  * 没写作用域的按会话定位，定位之后再用 isOneScope 核对一次。
@@ -229,6 +271,63 @@ function asHandEdited(cur: MemoryRecord, fields: { content: string; name: string
 interface BatchWrite { memoryId: string; op: ApplyEditOp['kind']; written?: MemoryRecord }
 
 /**
+ * 逐项写的一项：改写成这四个面，或软删。isChanged 是写入那一刻锁内的核对：磁盘上的现状过了它就原样不写、整批停下。
+ * isSecret 是软删时哪些算含密钥、软删不了（缺省两级都算，同软删的口径）。
+ */
+interface BatchItem {
+  record: MemoryRecord
+  op: { kind: 'edit'; content: string; name: string; summary: string; tags: string[] } | { kind: 'forget' }
+  isChanged: (current: MemoryRecord) => boolean
+  isSecret?: (current: MemoryRecord) => boolean
+}
+
+/** 第一项失败的原因：锁内发现被改过、已不在，软删时刚被写进密钥，或写入抛错。 */
+type BatchFailure = { kind: 'stale' | 'not-found' | 'has-secret'; memoryId: string } | { kind: 'thrown'; error: unknown }
+
+/**
+ * 整理所选的逐项执行（应用处理方案同用）：按顺序逐项写，每项在提交那一刻记写入记录；第一项失败就停下，之后的不再写，
+ * 已写的由调用方按写入记录回退。回调里算出的只是候选（文件表复核失败会重来），调用正常返回才以返回值为准。
+ */
+async function writeBatch(items: readonly BatchItem[], store: MemoryStore, now: number): Promise<{ writes: BatchWrite[]; failure?: BatchFailure }> {
+  const writes: BatchWrite[] = []
+  for (const { record, op, isChanged, isSecret } of items) {
+    const at = scopeAt(record.workspacePath)
+    const write: BatchWrite = { memoryId: record.id, op: op.kind }
+    writes.push(write)
+    let candidate: MemoryRecord | undefined
+    let outcome: 'deleted' | 'has-secret' | 'changed' | 'missing' = 'changed'
+    try {
+      if (op.kind === 'edit') {
+        const committed = await store.update(record, (cur) => {
+          candidate = undefined
+          // 锁内按磁盘上的现状再核对一次：读过之后被改过就原样不写
+          if (isChanged(cur)) return cur
+          return (candidate = asHandEdited(cur, op, now))
+        }, at)
+        if (candidate !== undefined) write.written = committed
+      } else {
+        outcome = await store.softDeleteUnlessSecret(record, {
+          at, now, isChanged: (cur) => { candidate = cur; return isChanged(cur) }, ...(isSecret !== undefined ? { isSecret } : {}),
+        })
+        // 软删只改状态和时间，内容就是锁内最后看到的那份
+        if (outcome === 'deleted') write.written = markDeleted(candidate!, now)
+      }
+    } catch (error) {
+      if (!(error instanceof RecordNotFoundError)) {
+        // 抛错时不知道落没落盘：按 id 重读，状态和指纹与最后一次候选一致、updatedAt 是这次的才算已写（已写的一样要退回）
+        write.written = await committedAfterThrow(store, record, op.kind, candidate, now)
+        return { writes, failure: { kind: 'thrown', error } }
+      }
+      outcome = 'missing'
+    }
+    if (write.written === undefined) {
+      return { writes, failure: { kind: outcome === 'has-secret' ? 'has-secret' : outcome === 'missing' ? 'not-found' : 'stale', memoryId: record.id } }
+    }
+  }
+  return { writes }
+}
+
+/**
  * 写入调用抛错后这一项落没落盘（文件表写盘后还可能在维护目录、写统计时抛错）：按 id 在它自己的作用域里重读，
  * 状态是这一步该有的（改写在用、删除在最近删除）、指纹与最后一次候选一致、updatedAt 是这次的时刻，才算已写，返回读到的那份。
  */
@@ -269,16 +368,17 @@ async function rollBackBatch(
 }
 
 /**
- * 整理所选的结账：删除项按 id 清掉指向它们的账本条目（同 forget），再记一条带逐项回执的 batch-edited。任一步抛错时按快照 id
+ * 整理所选的结账：删除项按 id 清掉指向它们的账本条目（同 forget，keepId 那条留着），再记一条带逐项回执的 batch-edited。任一步抛错时按快照 id
  * 重读账本：新条目已在（写进去之后的清理抛错）就算记上了；不在就把这几项也按快照退回，再把错误抛出去。
  * 回退和记账都失败时，整批前拍的快照仍在保留期内，是最后的恢复依据。
  */
 async function settleBatch(
   writes: readonly BatchWrite[], workspaces: string[], snapshot: MemorySnapshot, deps: Pick<MemoryCommandDeps, 'store' | 'snapshots' | 'decisions' | 'now'>, now: number,
+  keepId?: string,
 ): Promise<PendingDecision> {
   try {
     const forgotten = writes.filter(w => w.op === 'forget').map(w => w.memoryId)
-    if (forgotten.length > 0) await deps.decisions.removeByMemoryIds(forgotten)
+    if (forgotten.length > 0) await deps.decisions.removeByMemoryIds(forgotten, keepId)
     return await deps.decisions.addBatchEdit(
       writes.map(w => ({ memoryId: w.memoryId, op: w.op, written: w.written! })), { summary: `整理所选 ${writes.length} 条`, workspaces }, snapshot.id, now,
     )
@@ -439,20 +539,199 @@ async function dispatch(
     return { ok: true, cmd, decisionId, memoryIds: r.dismissed }
   }
 
+  /**
+   * 裁决一条冲突（直接选，或采纳建议 adopt）。结果同一种形状：败方含高危密钥已物理删除时 isHardDeleted，结论没记下时 isUnrecorded，
+   * 记了快照的带 snapshotId 供撤销。
+   */
+  const resolveConflict = async (
+    decisionId: string, verdict: 'keep-left' | 'keep-right' | 'keep-both', allowCrossWorkspace: boolean | undefined,
+    adopt?: { basis: NonNullable<ConfirmOptions['adopt']>; memoryIds: string[] },
+  ): Promise<MemoryCommandResult> => {
+    // 升级前导入的垂直冲突没有指纹，两边都留时要按基线现算
+    const baseline = deps.host.baselineOf(exec)
+    const r = await executeConfirm(
+      { action: 'resolve', decisionId, verdict, allowCrossWorkspace },
+      gov, executorDeps, { ...(baseline !== null ? { baseline } : {}), ...(adopt !== undefined ? { adopt: adopt.basis } : {}) },
+    )
+    if (r.kind === 'error') {
+      if (r.code === 'cross-workspace') return fail(cmd, 'cross-workspace', r.message, r.rejected)
+      if (r.code === 'stale') return behind('stale', adopt?.memoryIds ?? [], r.message)
+      return fail(cmd, r.code ?? 'failed', r.message)
+    }
+    if (r.kind === 'resolved' && r.isUnrecorded) return { ok: true, cmd, decisionId, isUnrecorded: true }
+    if (r.kind === 'resolved' && r.isHardDeleted) return { ok: true, cmd, decisionId, isHardDeleted: true }
+    const snapshotId = (await settledEntry(decisionId))?.settled?.snapshotId
+    return { ok: true, cmd, decisionId, ...(snapshotId !== undefined ? { snapshotId } : {}) }
+  }
+
+  // —— 采纳融合建议（票 06）、按要求融合（票 07）、垂直冲突改写这条记忆（票 10）——
+
+  /**
+   * 改写记忆要落盘的方案：结论（融合、垂直改写）、来源、逐条操作、依据版本；按要求的方案带用户对疑似密钥的确认（force）。
+   * 采纳建议时由认领后重读的条目给出（建议已换了一份或结论不同为 undefined，按依据失效算）。
+   */
+  type RewritePlan = { action: 'merge' | 'rewrite'; source: ProposalSource; ops: readonly ProposalOp[]; basis: SuggestionBasis; force?: boolean | undefined }
+
+  /**
+   * 先认领条目、再认领冲突身份（同要删一方的裁决），和裁决、撤销、体检挂账、另一个标签页的采纳互斥；认领后重读条目再动手。
+   */
+  const adoptPlan = async (decisionId: string, planOf: (entry: PendingDecision) => RewritePlan | undefined, allowCrossWorkspace: boolean | undefined): Promise<MemoryCommandResult> => {
+    const claimed = await deps.decisions.withClaim(decisionId, async () => {
+      const entry = await deps.decisions.get(decisionId)
+      if (entry === undefined) return notFound(decisionId)
+      const paired = await deps.decisions.withPairClaim(entry, () => planClaimed(entry, planOf(entry), allowCrossWorkspace))
+      return paired.isClaimed ? paired.value : fail(cmd, 'claimed', `待决项 ${entry.id} 的这一对记忆正在被另一次操作处理，未做任何改动`)
+    })
+    return claimed.isClaimed ? claimed.value : fail(cmd, 'claimed', `待决项 ${decisionId} 正在被另一次操作处理，未做任何改动`)
+  }
+
+  /**
+   * 持有认领时按方案改写记忆：核对方案还在（采纳建议时建议 id 一致）和依据（冲突指纹、涉及记忆的完整内容指纹和作用域键）。
+   * 融合：保留方改写成融合稿、另一条软删；垂直改写：那条记忆改写成改写稿，另按会话此刻的基线核对依据里的基线（会话不在那个项目、
+   * 拿不到或指令文件改过按失效算），指令文件不碰。用整理所选的逐项执行（写入那一刻锁内按依据里的指纹再比一次）。整批一份快照。
+   * 结账自己做（plan-applied，见 settlePlanned）；某一项没写成时同整理所选：已写的按写入记录条件回退，没退干净的仍是这次写下的照常记一笔可撤销的账，
+   * 别处接着改过的列进 unrecordedIds，冲突条目不结清。允许全局与项目之间的冲突（写进哪条由生成建议时的合并规则定）。
+   */
+  const planClaimed = async (entry: PendingDecision, plan: RewritePlan | undefined, allowCrossWorkspace: boolean | undefined): Promise<MemoryCommandResult> => {
+    const isRewrite = plan?.action === 'rewrite'
+    const subject = isRewrite ? '这条记忆' : '这两条'
+    const draftName = isRewrite ? '改写稿' : '融合稿'
+    const stale = () => behind('stale', entry.memoryIds, plan?.source === 'request'
+      ? `${subject}${isRewrite ? '或指令文件' : ''}在方案生成后被改过，处理方案已失效。未做任何改动`
+      : `${subject}${isRewrite ? '或指令文件' : ''}刚被改过或建议已换了一份，建议已失效。未做任何改动`)
+    if (plan === undefined) return stale()
+    // 同裁决的定位口径；不在用的按对不上算
+    const located = await Promise.all(entry.memoryIds.map(id => locate(id, undefined)))
+    const live = located.map(r => (r?.status === 'active' ? r : undefined))
+    if (!isBasisCurrent(entry, plan.basis, live)) return stale()
+    const records = live as MemoryRecord[]
+    const edit = plan.ops.find(op => op.kind === 'edit')
+    const keeper = records.find(r => r.id === edit?.memoryId)
+    const loser = records.find(r => r.id !== keeper?.id && plan.ops.some(op => op.kind === 'forget' && op.memoryId === r.id))
+    // 垂直改写：采纳时用当前会话的基线重算，和依据里记的对上才执行
+    const baseline = deps.host.baselineOf(exec)
+    if (isRewrite && !isBaselineCurrent(plan.basis, records[0]!, baseline, gov.workspacePath)) return stale()
+    // 写进哪条按合并规则定（全局优先，其次先建的）：界面带回来的方案也不能把融合稿写到另一条上
+    const isShaped = isRewrite
+      ? plan.ops.length === 1 && edit?.kind === 'edit' && keeper === records[0]
+      : edit?.kind === 'edit' && keeper !== undefined && loser !== undefined && records[mergeKeeperIndex(records as [MemoryRecord, MemoryRecord])] === keeper
+    if (!isShaped || edit?.kind !== 'edit' || keeper === undefined) {
+      return fail(cmd, 'invalid-args', isRewrite ? `待决项 ${entry.id} 的改写方案不是这条记忆的一条改写，未做任何改动` : `待决项 ${entry.id} 的融合方案不是保留方一条改写加另一条删除，未做任何改动`)
+    }
+    const { rejected } = gateRecords(records, gov, allowCrossWorkspace)
+    if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
+    // 建议存盘时已保证稿里的疑似值都出自原文，采纳不再等确认；按要求的稿等用户确认（force）。高危照拦
+    const secretProblem = editSecretsProblem([edit], plan.source === 'suggestion' ? true : plan.force)
+    if (secretProblem !== undefined) return secretProblem
+
+    const what = isRewrite ? (plan.source === 'request' ? '按要求改写' : '采纳改写建议') : (plan.source === 'request' ? '按要求融合' : '采纳融合建议')
+    const snapshot = await deps.snapshots.capture({ operation: 'pre-update', description: `${what}（${entry.id}）前`, records }, now)
+    // 锁内比的是依据里的完整内容指纹：只改了摘要、标签的也挡下
+    const basisOf = (id: string) => plan.basis.memories.find(m => m.memoryId === id)?.fingerprint
+    const isChanged = (cur: MemoryRecord) => cur.status !== 'active' || editFingerprint(cur) !== basisOf(cur.id)
+    const { writes, failure } = await writeBatch([
+      { record: keeper, op: edit, isChanged },
+      // 疑似密钥是用户存下时确认过的，照常软删、可恢复；只有高危软删不了（依据比对已先挡下，这里是锁内兜底）
+      ...(loser !== undefined && !isRewrite ? [{ record: loser, op: { kind: 'forget' as const }, isChanged, isSecret: hasCriticalSecret }] : []),
+    ], deps.store, now)
+    let left: { kept: BatchWrite[]; unrecorded: string[] }
+    if (failure === undefined) {
+      const unsettled = await settlePlanned(entry, plan, writes, snapshot, isRewrite ? baseline ?? undefined : undefined)
+      if (unsettled === undefined) return { ok: true, cmd, decisionId: entry.id, memoryIds: writes.map(w => w.memoryId), snapshotId: snapshot.id }
+      left = unsettled
+    } else {
+      left = await rollBackBatch(writes, snapshot, deps)
+      if (left.kept.length === 0 && left.unrecorded.length === 0) {
+        if (failure.kind === 'thrown') throw failure.error
+        if (failure.kind === 'has-secret') return fail(cmd, 'has-secret', `记忆 ${failure.memoryId} 刚被写进密钥，没有删除；${draftName}已退回`)
+        return behind(failure.kind, [failure.memoryId], `${subject}刚被改过，界面已换成最新内容；${draftName}已退回`)
+      }
+    }
+    // 没退干净的记一笔可撤销的账（冲突条目留着，不结清）；账也记不上的列进没记上账的，整批前的快照仍可恢复
+    const { kept } = left
+    const batch = kept.length === 0 ? undefined
+      : await settleBatch(kept, kept.map(w => workspaceLabel(records.find(r => r.id === w.memoryId)!)), snapshot, deps, now, entry.id).catch(() => undefined)
+    return {
+      ok: true, cmd, ...(batch !== undefined ? { decisionId: batch.id } : {}), memoryIds: batch !== undefined ? kept.map(w => w.memoryId) : [], snapshotId: snapshot.id,
+      isPartial: true, unrecordedIds: batch !== undefined || kept.length === 0 ? left.unrecorded : [...left.unrecorded, ...kept.map(w => w.memoryId)],
+    }
+  }
+
+  /**
+   * 按方案改写的结账：冲突条目结清为 plan-applied，回执按实际提交的那几份算，改后指纹按写下的那几份算（垂直改写再加会话的基线，同体检）；
+   * 结清之后才清掉引用被删那条的其他条目（冲突条目自己留着；垂直改写没有被删的），结清不成时那些条目原样留着。结清之后重读被删的那条：
+   * 已被别处彻底删除就把这条结清也撤掉（彻底删除的连带清理可能正好落在结清的读写之间）；改写的那条被别处删掉同理。任一步抛错时按快照 id 重读账本：已结清就算记上了；
+   * 没有就按快照退回，退干净了把错误抛出去，没退干净的交回调用方如实报「部分完成」。结清了返回 undefined。
+   */
+  const settlePlanned = async (
+    entry: PendingDecision, plan: RewritePlan, writes: readonly BatchWrite[], snapshot: MemorySnapshot, baseline: readonly string[] | undefined,
+  ): Promise<{ kept: BatchWrite[]; unrecorded: string[] } | undefined> => {
+    try {
+      const written = new Map(writes.map(w => [w.memoryId, w.written!]))
+      const isSettled = await deps.decisions.settlePlan(entry.id, {
+        writes: writes.map(w => ({ memoryId: w.memoryId, op: w.op, written: w.written! })),
+        proposal: { source: plan.source, action: plan.action }, snapshotId: snapshot.id,
+        fingerprint: conflictFingerprint(entry.memoryIds.map(id => written.get(id)!), baseline),
+      }, now)
+      if (!isSettled) throw new Error(`待决项 ${entry.id} 已不在待处理，这次${plan.action === 'rewrite' ? '改写' : '融合'}没有记上`)
+      for (const w of writes.filter(w => w.op === 'forget')) {
+        const scope = scopeOfMemory(w.written!)
+        if (scope !== undefined && (await locateCopy(deps.store, w.memoryId, scope)) === undefined) await deps.decisions.dropDependingOn(new Set([snapshot.id]), w.memoryId)
+      }
+      await deps.decisions.removeByMemoryIds(writes.filter(w => w.op === 'forget').map(w => w.memoryId), entry.id)
+      // 改写的那条同理：结清的读写之间被别处删掉，删除的连带清理已经跑过，这条结清（连同建议稿）是被写回来的，照删除的规矩清掉
+      const dropped: string[] = []
+      for (const w of writes.filter(w => w.op === 'edit')) {
+        const scope = scopeOfMemory(w.written!)
+        if (scope !== undefined && (await locateCopy(deps.store, w.memoryId, scope))?.status !== 'active') dropped.push(w.memoryId)
+      }
+      if (dropped.length > 0) await deps.decisions.removeByMemoryIds(dropped)
+      return undefined
+    } catch (error) {
+      const recorded = (await deps.decisions.listSettled().catch(() => []))
+        .some(d => d.id === entry.id && d.settled?.verdict === 'plan-applied' && d.settled.snapshotId === snapshot.id)
+      if (recorded) return undefined
+      const left = await rollBackBatch(writes, snapshot, deps)
+      if (left.kept.length === 0 && left.unrecorded.length === 0) throw error
+      return left
+    }
+  }
+
   switch (command.cmd) {
     case 'resolve': {
       if (!(await deps.decisions.get(command.decisionId))) return notFound(command.decisionId)
-      // 升级前导入的垂直冲突没有指纹，两边都留时要按基线现算
-      const baseline = deps.host.baselineOf(exec)
-      const r = await executeConfirm(
-        { action: 'resolve', decisionId: command.decisionId, verdict: command.verdict, allowCrossWorkspace: command.allowCrossWorkspace },
-        gov, executorDeps, baseline !== null ? { baseline } : {},
-      )
-      if (r.kind === 'error') return r.code === 'cross-workspace' ? fail(cmd, 'cross-workspace', r.message, r.rejected) : fail(cmd, r.code ?? 'failed', r.message)
-      if (r.kind === 'resolved' && r.isUnrecorded) return { ok: true, cmd, decisionId: command.decisionId, isUnrecorded: true }
-      if (r.kind === 'resolved' && r.isHardDeleted) return { ok: true, cmd, decisionId: command.decisionId, isHardDeleted: true }
-      const snapshotId = (await settledEntry(command.decisionId))?.settled?.snapshotId
-      return { ok: true, cmd, decisionId: command.decisionId, ...(snapshotId !== undefined ? { snapshotId } : {}) }
+      return await resolveConflict(command.decisionId, command.verdict, command.allowCrossWorkspace)
+    }
+
+    case 'apply-proposal': {
+      const entry = await deps.decisions.get(command.decisionId)
+      if (entry === undefined) return notFound(command.decisionId)
+      const shape = conflictShape(entry)
+      if (shape === undefined) return fail(cmd, 'invalid-args', `待决项 ${entry.id} 不是冲突，没有可采纳的建议`)
+      const { proposal } = command
+      if (proposal !== undefined) {
+        // 按要求生成的方案由界面带回：先查操作和结论对得上，落盘时按带回的依据版本核对（认领后、锁内各一次）
+        if (!isProposalShaped(proposal, entry.memoryIds, shape)) return fail(cmd, 'invalid-args', `处理方案的操作和结论对不上（${proposal.action}），未做任何改动`)
+        const verdict = verdictOfAction(proposal.action)
+        if (verdict === undefined) {
+          const action = proposal.action === 'rewrite' ? 'rewrite' : 'merge'
+          return await adoptPlan(entry.id, () => ({ action, source: 'request', ops: proposal.ops, basis: proposal.basis, force: command.force }), command.allowCrossWorkspace)
+        }
+        return await resolveConflict(entry.id, verdict, command.allowCrossWorkspace, { basis: { request: { action: proposal.action, basis: proposal.basis } }, memoryIds: entry.memoryIds })
+      }
+      const { suggestion } = entry
+      const stale = () => behind('stale', entry.memoryIds, `${shape === 'vertical' ? '这条记忆' : '这两条'}刚被改过或建议已换了一份，建议已失效。未做任何改动`)
+      if (suggestion === undefined || suggestion.id !== command.suggestionId) return stale()
+      // 结论按账本上这一份定，不信界面；认领条目后执行器再核对一次 id 和依据
+      const verdict = verdictOfAction(suggestion.action)
+      if (verdict === undefined) {
+        const { id: suggestionId, action } = suggestion
+        if (action !== 'merge' && action !== 'rewrite') return stale()
+        return await adoptPlan(entry.id, current => (current.suggestion?.id === suggestionId && current.suggestion.action === action
+          ? { action, source: 'suggestion', ops: current.suggestion.ops, basis: current.suggestion.basis }
+          : undefined), command.allowCrossWorkspace)
+      }
+      return await resolveConflict(entry.id, verdict, command.allowCrossWorkspace, { basis: { suggestionId: suggestion.id }, memoryIds: entry.memoryIds })
     }
 
     case 'undo':
@@ -694,46 +973,8 @@ async function dispatch(
 
       // 整批一份快照，撤销全部和中途失败的回退都按它恢复
       const snapshot = await deps.snapshots.capture({ operation: 'pre-update', description: `整理所选 ${ops.length} 条前`, records: targets.map(t => t.record) }, now)
-      // 按计划顺序逐项写，每项在提交那一刻记写入记录。回调里算出的只是候选（文件表复核失败会重来），调用正常返回才以返回值为准
-      const writes: BatchWrite[] = []
-      /** 第一项失败的原因：锁内发现被改过、已不在，软删时刚被写进密钥，或写入抛错。之后的项不再写。 */
-      let failure: { kind: 'stale' | 'not-found' | 'has-secret'; memoryId: string } | { kind: 'thrown'; error: unknown } | undefined
-      for (const { op, record } of targets) {
-        const at = scopeAt(record.workspacePath)
-        const write: BatchWrite = { memoryId: record.id, op: op.kind }
-        writes.push(write)
-        let candidate: MemoryRecord | undefined
-        let outcome: 'deleted' | 'has-secret' | 'changed' | 'missing' = 'changed'
-        try {
-          if (op.kind === 'edit') {
-            const committed = await deps.store.update(record, (cur) => {
-              candidate = undefined
-              // 锁内按磁盘上的现状再核对一次：读过之后被改过就原样不写
-              if (cur.status !== 'active' || isStale(cur, op.base)) return cur
-              return (candidate = asHandEdited(cur, op, now))
-            }, at)
-            if (candidate !== undefined) write.written = committed
-          } else {
-            outcome = await deps.store.softDeleteUnlessSecret(record, {
-              at, now, isChanged: (cur) => { candidate = cur; return cur.status !== 'active' || isStale(cur, op.base) },
-            })
-            // 软删只改状态和时间，内容就是锁内最后看到的那份
-            if (outcome === 'deleted') write.written = markDeleted(candidate!, now)
-          }
-        } catch (error) {
-          if (error instanceof RecordNotFoundError) outcome = 'missing'
-          else {
-            // 抛错时不知道落没落盘：按 id 重读，状态和指纹与最后一次候选一致、updatedAt 是这次的才算已写（已写的一样要退回）
-            write.written = await committedAfterThrow(deps.store, record, op.kind, candidate, now)
-            failure = { kind: 'thrown', error }
-            break
-          }
-        }
-        if (write.written === undefined) {
-          failure = { kind: outcome === 'has-secret' ? 'has-secret' : outcome === 'missing' ? 'not-found' : 'stale', memoryId: record.id }
-          break
-        }
-      }
+      // 按计划顺序逐项写；锁内按卡片版本再核对一次
+      const { writes, failure } = await writeBatch(targets.map(({ op, record }) => ({ record, op, isChanged: cur => cur.status !== 'active' || isStale(cur, op.base) })), deps.store, now)
       const labelsOf = (done: readonly BatchWrite[]) => done.map(w => workspaceLabel(targets.find(t => t.record.id === w.memoryId)!.record))
       if (failure === undefined) {
         const entry = await settleBatch(writes, labelsOf(writes), snapshot, deps, now)
@@ -852,9 +1093,10 @@ async function dispatch(
       const target = command.layer !== undefined ? { kind: 'global' as const }
         : command.workspacePath !== undefined ? { kind: 'workspace' as const, workspacePath: command.workspacePath } : { kind: 'all' as const }
       const { workspacePath: currentWorkspace } = await deps.host.contextOf(exec)
+      const baseline = deps.host.baselineOf(exec)
       // 开跑前认领要查的范围（和自动体检共用一套认领）：正在体检就回 busy；「全部」要认领全局和每个项目，有一个认领不到整个回 busy
       const r = await runCheckup({
-        target, by: 'manual', llm, baseline: deps.host.baselineOf(exec),
+        target, by: 'manual', llm, baseline,
         ...(currentWorkspace !== undefined ? { currentWorkspace } : {}),
       }, {
         scan: { store: deps.store, registry: deps.registry, decisions: deps.decisions, cache: deps.cache, ignores: deps.ignores },
@@ -872,6 +1114,12 @@ async function dispatch(
         case 'failed':
         case 'model-unavailable': return fail(cmd, 'failed', r.cause.message ?? r.cause.hostCode ?? r.cause.kind)
       }
+      // 体检结果和冲突卡先出：建议在后续段里逐条补到卡上，命令不等它（它自己兜住异常）
+      // 垂直冲突的建议要这个会话的指令文件和所在项目
+      void deps.suggestions?.run({
+        target, by: 'manual', llm, outcome: r, baseline,
+        ...(currentWorkspace !== undefined ? { currentWorkspace } : {}), ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
+      })
       // 判新增的覆盖范围：项目体检读的是本项目的可见集合（全局 + 本项目），只查全局是全局，全库体检是全部作用域
       const covered = target.kind === 'global' ? [target]
         : target.kind === 'workspace' ? [{ kind: 'global' as const }, target] : 'all'
@@ -938,6 +1186,104 @@ async function dispatch(
         return fail(cmd, 'failed', `${failures.length} 处没处理成功，可以重试：${failures.join('；')}`)
       }
       return { ok: true, cmd, migrated, ...(command.action === 'forget' ? { skippedSecrets } : {}) }
+    }
+
+    case 'suggest': {
+      const entry = await deps.decisions.get(command.decisionId)
+      if (entry === undefined) return notFound(command.decisionId)
+      const shape = conflictShape(entry)
+      if (shape === undefined) return fail(cmd, 'invalid-args', `待决项 ${entry.id} 不是冲突，补不了建议`)
+      // 同裁决的定位口径；写入时按同一口径重读核对
+      const read = (id: string) => locate(id, undefined)
+      const records = await Promise.all(entry.memoryIds.map(read))
+      const gone = entry.memoryIds.filter((_, i) => records[i]?.status !== 'active')
+      if (gone.length > 0) return behind('not-found', gone, `不存在或已处理：${gone.join('、')}`)
+      const live = records as MemoryRecord[]
+      // 高危密钥的原文不发给模型；确认存下的疑似密钥同注入，照原文发
+      if (live.some(r => hasCriticalSecret(r))) return fail(cmd, 'has-secret', '含密钥的记忆不发给模型。未做任何改动')
+      // 垂直冲突要这条记忆所在项目的指令文件：借来的会话不属于这个项目、或拿不到指令文件时不生成，也不记在条目上
+      const baseline = shape === 'vertical' ? deps.host.baselineOf(exec) : null
+      const side = shape === 'vertical' ? baselineBasisOf(live[0]!, baseline, gov.workspacePath, entry.fingerprint) : undefined
+      if (shape === 'vertical' && side === undefined) return fail(cmd, 'no-baseline', '要在扫出这条冲突的那个项目的会话里补，并且那个会话读得到 AGENTS.md / CLAUDE.md。未做任何改动')
+      const isCurrent = entry.suggestion !== undefined && isBasisCurrent(entry, entry.suggestion.basis, live)
+        && (side === undefined || isBaselineCurrent(entry.suggestion.basis, live[0]!, baseline, gov.workspacePath))
+      if (isCurrent) return { ok: true, cmd, decisionId: entry.id }
+      const llm = deps.host.llmOf(exec)
+      if (llm === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型')
+      // 依据版本按生成前读到的算：生成在认领之外（模型调用可能超过认领的 60 秒），写入时认领、重读、核对它
+      const basis = suggestionBasis(entry, live, side)
+      // 出处按冲突所属的作用域回查；读不到的那条不带，是否回查过由生成器按实际放进提示词的片段定
+      const sources = await readSuggestionSources({ workspaces: entry.workspaces, records: live }, deps.getReadEvent?.() ?? null)
+      const generated = shape === 'vertical'
+        ? await generateVerticalSuggestion({ summary: entry.summary, baselineRef: entry.baselineRef!, record: live[0]!, baseline: baseline!, source: sources[0] }, llm)
+        : await generateSuggestion({ summary: entry.summary, records: live as [MemoryRecord, MemoryRecord], sources: [sources[0], sources[1]] }, llm)
+      const model = llm.model !== undefined ? { model: llm.model } : {}
+      const outcome = generated.ok
+        ? { suggestion: { id: genId('sg'), action: generated.action, reason: generated.reason, ops: generated.ops, basis, isSourced: generated.isSourced, generatedAt: now } }
+        : { failure: { basis, cause: generated.cause, at: now } }
+      const written = await deps.decisions.writeSuggestion(entry.id, outcome, read)
+      if (written === 'gone') return notFound(entry.id)
+      if (written === 'claimed') return fail(cmd, 'claimed', `待决项 ${entry.id} 正在被另一次操作处理，这次生成的建议没有写入`)
+      if (written === 'stale') return behind('stale', entry.memoryIds, `${shape === 'vertical' ? '这条记忆' : '这两条'}刚被改过，界面已换成最新内容；这次生成的建议没有写入`)
+      // 别处已写下当前依据的建议：这一份丢弃，卡上显示那一份。模型判断不了哪条对也算答了：原因已记在条目上，视图带出
+      if (written === 'has-current' || generated.ok || generated.cause.kind === 'undecided') return { ok: true, cmd, decisionId: entry.id, ...model }
+      // 没生成成：原因已记在条目上，视图里是「生成失败」；run 只在成功时重写视图，这里自己重写
+      await deps.views.request()
+      const { cause } = generated
+      if (cause.kind === 'model-error') return fail(cmd, 'llm-failed', cause.message ?? cause.hostCode)
+      return fail(cmd, 'llm-invalid-output', cause.kind === 'secret-in-draft' ? '模型给的稿里带进了原文没有的密钥，这份建议已丢弃' : '模型的输出不是要求的 JSON 格式')
+    }
+
+    case 'draft-proposal': {
+      const entry = await deps.decisions.get(command.decisionId)
+      if (entry === undefined) return notFound(command.decisionId)
+      const shape = conflictShape(entry)
+      if (shape === undefined) return fail(cmd, 'invalid-args', `待决项 ${entry.id} 不是冲突，没法按要求生成处理方案`)
+      const bases: readonly { updatedAt: number; digest: string }[] = command.bases
+      if (bases.length !== entry.memoryIds.length) return fail(cmd, 'invalid-args', `卡片版本给了 ${bases.length} 条，待决项 ${entry.id} 涉及 ${entry.memoryIds.length} 条记忆`)
+      // 同裁决的定位口径；生成完按同一口径重读核对
+      const read = (id: string) => locate(id, undefined)
+      const records = await Promise.all(entry.memoryIds.map(read))
+      const gone = entry.memoryIds.filter((_, i) => records[i]?.status !== 'active')
+      if (gone.length > 0) return behind('not-found', gone, `不存在或已处理：${gone.join('、')}`)
+      const live = records as MemoryRecord[]
+      // 用户写要求时看的是卡片上那一版：对不上就让界面先换成最新内容，再按新内容写要求
+      const staleIds = entry.memoryIds.filter((_, i) => isStale(live[i]!, bases[i]!))
+      if (staleIds.length > 0) return behind('stale', staleIds, '有记忆刚被改过，界面已换成最新内容。没有生成方案')
+      // 高危密钥的原文不发给模型：记忆、要求、此前的要求、上一份方案（含它的稿）都查
+      if (live.some(r => hasCriticalSecret(r))) return fail(cmd, 'has-secret', '含密钥的记忆不发给模型。未做任何改动')
+      const previousText = command.previous === undefined ? [] : [
+        command.previous.reason, ...command.previous.ops.flatMap(op => (op.kind === 'edit' ? [op.content, op.name, op.summary, ...op.tags] : [])),
+      ]
+      if (detectSecrets([command.request, ...(command.priorRequests ?? []), ...previousText].join('\n')).some(h => h.severity === 'critical')) {
+        return fail(cmd, 'secret-critical', '要求或上一份方案里有高危密钥，没有发给模型')
+      }
+      // 垂直冲突同补上建议：要这条记忆所在项目的会话和它的指令文件
+      const baseline = shape === 'vertical' ? deps.host.baselineOf(exec) : null
+      const side = shape === 'vertical' ? baselineBasisOf(live[0]!, baseline, gov.workspacePath, entry.fingerprint) : undefined
+      if (shape === 'vertical' && side === undefined) return fail(cmd, 'no-baseline', '要在扫出这条冲突的那个项目的会话里生成，并且那个会话读得到 AGENTS.md / CLAUDE.md。没有生成方案')
+      const llm = deps.host.llmOf(exec)
+      if (llm === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型')
+      // 只读、不认领：模型调用可能超过认领的 60 秒；依据版本按生成前读到的算，应用时认领、重读、核对它
+      const basis = suggestionBasis(entry, live, side)
+      const sources = await readSuggestionSources({ workspaces: entry.workspaces, records: live }, deps.getReadEvent?.() ?? null)
+      const request = { text: command.request, prior: command.priorRequests ?? [], ...(command.previous !== undefined ? { previous: command.previous } : {}) }
+      const generated = shape === 'vertical'
+        ? await generateVerticalProposal({ summary: entry.summary, baselineRef: entry.baselineRef!, record: live[0]!, baseline: baseline!, source: sources[0], request }, llm)
+        : await generateProposal({ summary: entry.summary, records: live as [MemoryRecord, MemoryRecord], sources: [sources[0], sources[1]], request }, llm)
+      if (!generated.ok) {
+        const { cause } = generated
+        if (cause.kind === 'model-error') return fail(cmd, 'llm-failed', cause.message ?? cause.hostCode)
+        return fail(cmd, 'llm-invalid-output', '模型的输出不是要求的 JSON 格式')
+      }
+      // 生成期间两条被改过（只改了摘要、标签也算）：这一份按旧内容出的，丢弃
+      const after = await Promise.all(entry.memoryIds.map(read))
+      if (!isBasisCurrent(entry, basis, after.map(r => (r?.status === 'active' ? r : undefined)))) {
+        return behind('stale', entry.memoryIds, `${shape === 'vertical' ? '这条记忆' : '这两条'}在生成期间被改过，界面已换成最新内容；这份方案已丢弃`)
+      }
+      const model = llm.model !== undefined ? { model: llm.model } : {}
+      if (generated.action === 'infeasible') return { ok: true, cmd, ...model, infeasible: { reason: generated.reason } }
+      return { ok: true, cmd, ...model, proposal: { action: generated.action, reason: generated.reason, ops: generated.ops, basis } }
     }
 
     case 'refresh-views':

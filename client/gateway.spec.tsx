@@ -908,6 +908,23 @@ describe('createHostGateway', () => {
     expect(executed).toEqual(['s1 /memory model-info', 's2 /memory model-info'])
   })
 
+  it('useModel 只读不问：自己不发 model-info，别处问过之后读到那个会话已知的状态，别的会话仍是 unknown', async () => {
+    const execute = vi.fn(async (sid: string, line: string) => {
+      executed.push(`${sid} ${line}`)
+      const text = JSON.stringify({ ok: false, cmd: 'model-info', code: 'llm-unavailable' })
+      return { ok: true as const, value: { commandId: 'c', result: { kind: 'error' as const, text } } }
+    })
+    const gateway = createHostGateway(fakeCtx({ remote: { commands: { execute } } }))(props)
+    const s1 = { kind: 'ready', sessionId: 's1', cwd: undefined } as const
+    const s2 = { kind: 'ready', sessionId: 's2', cwd: undefined } as const
+    const { result } = renderHook(() => [gateway.useModel(s1, { shouldAsk: false }), gateway.useModel(s2, { shouldAsk: false })] as const)
+    expect(result.current).toEqual([{ status: 'unknown' }, { status: 'unknown' }])
+    expect(executed).toEqual([])
+    renderHook(() => gateway.useModel(s1))
+    await waitFor(() => { expect(result.current).toEqual([{ status: 'unavailable' }, { status: 'unknown' }]) })
+    expect(executed).toEqual(['s1 /memory model-info'])
+  })
+
   it('openPath：打开只带 path，显示目录带 action: reveal；宿主拒绝或抛错都是 false', async () => {
     const gateway = createHostGateway(fakeCtx())(props)
     expect(await gateway.openPath('/m/app/a.md')).toBe(true)

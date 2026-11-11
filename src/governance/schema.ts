@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { memoryRecordSchema } from '../record-schema.ts'
-import { MODEL_CHANGE_KINDS } from '../contract-codes.ts'
+import { MODEL_CHANGE_KINDS, PROPOSAL_ACTIONS, PROPOSAL_SOURCES, SUGGESTION_FAILURE_KINDS } from '../contract-codes.ts'
 
 /** 与 mem_ id 同模式（pipeline.ts），不引入 nanoid。 */
 export function genId(prefix: string): string {
@@ -31,19 +31,31 @@ export function kindOf(entry: { kind?: PendingKind }): PendingKind {
  * rewritten / superseded：模型改写了 memoryIds 那条、模型把那条标成了已取代，snapshotId 是改前的快照，fingerprint 是改完后那条的内容（同直接改）。
  * batch-edited：整理所选一次应用（种类 edit，memoryIds 是这次写下的全部，按计划顺序），snapshotId 是整批改前的快照，
  * 不记 fingerprint，改记逐项回执 receipts。
+ * plan-applied：冲突按处理方案改写了记忆（融合、垂直改写），记在冲突条目自己身上：settled 里有改前快照 snapshotId、逐项回执 receipts、
+ * 依据和结论代码 proposal、改前的冲突指纹 priorFingerprint；条目 fingerprint 换成改后的。
  */
-export const SETTLED_VERDICTS = ['keep-both', 'dismiss', 'keep-left', 'keep-right', 'keep-local', 'promoted', 'edited', 'merged', 'moved', 'rewritten', 'superseded', 'batch-edited'] as const
+export const SETTLED_VERDICTS = ['keep-both', 'dismiss', 'keep-left', 'keep-right', 'keep-local', 'promoted', 'edited', 'merged', 'moved', 'rewritten', 'superseded', 'batch-edited', 'plan-applied'] as const
 export type SettledVerdict = (typeof SETTLED_VERDICTS)[number]
 
 /**
  * 裁决要删掉的一方（败方）；两边都留、或不是冲突条目时为 undefined。
  * 横向：left=memoryIds[0]、right=memoryIds[1]；垂直（有 baselineRef）：left=记忆、right=基线，基线不可删，keep-right 意为记忆删除。
+ * plan-applied 的败方是结清信息回执里删除的那一条（融合时并入的那条；垂直改写没有败方）。
  */
-export function verdictLoser(entry: { kind?: PendingKind; memoryIds: string[]; baselineRef?: string }, verdict: SettledVerdict): string | undefined {
+export function verdictLoser(
+  entry: { kind?: PendingKind; memoryIds: string[]; baselineRef?: string; settled?: { receipts?: readonly BatchReceipt[] } }, verdict: SettledVerdict,
+): string | undefined {
   if (kindOf(entry) !== 'conflict') return undefined
+  if (verdict === 'plan-applied') return entry.settled?.receipts?.find(r => r.op === 'forget')?.memoryId
   if (entry.baselineRef !== undefined) return verdict === 'keep-right' ? entry.memoryIds[0] : undefined
   return verdict === 'keep-left' ? entry.memoryIds[1] : verdict === 'keep-right' ? entry.memoryIds[0] : undefined
 }
+
+/**
+ * 处理方案落盘的依据（记在已结清条目上）：source 是按建议还是按要求，action 是结论代码。直接点候选项处理的条目没有它。
+ */
+export const settledProposalSchema = z.object({ source: z.enum(PROPOSAL_SOURCES), action: z.enum(PROPOSAL_ACTIONS) })
+export type SettledProposal = z.infer<typeof settledProposalSchema>
 
 /**
  * 整理所选一次应用的逐项回执：这一项是改写还是删除，写下时的内容指纹（editFingerprint，取实际提交的那份），
@@ -56,6 +68,57 @@ export const batchReceiptSchema = z.object({
   expectedStatus: z.enum(['active', 'deleted']),
 })
 export type BatchReceipt = z.infer<typeof batchReceiptSchema>
+
+/**
+ * 处理方案对一条记忆的操作（存盘形状，和 GUI 契约分开、经视图映射）：edit 改写成这一稿（四个面），forget 删除，keep 不动。
+ * 处理方案对涉及的每条记忆各有一项，按条目 memoryIds 的顺序。
+ */
+export const proposalOpSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('edit'), memoryId: z.string(), content: z.string(), name: z.string(), summary: z.string(), tags: z.array(z.string()) }),
+  z.object({ kind: z.literal('forget'), memoryId: z.string() }),
+  z.object({ kind: z.literal('keep'), memoryId: z.string() }),
+])
+export type ProposalOp = z.infer<typeof proposalOpSchema>
+
+/**
+ * 处理建议生成时的依据版本：条目当时的冲突指纹（旧条目没有指纹时缺省），和每条涉及记忆的完整内容指纹（editFingerprint，
+ * 撤销用的那一种，不含位置）、作用域键（scope.ts 的 scopeKey），按条目 memoryIds 的顺序。
+ * 条目指纹、任一条记忆此刻的指纹或作用域对不上，这份建议（或这次失败）就不算数。作用域键缺省的（加它之前写下的）一律算对不上，条目照常解析。
+ * 垂直冲突另记 baseline：生成时用的基线所属项目（会话的 workspace 路径，没有项目为 'global'）和基线指纹（decisions.ts baselineFingerprint）。
+ * 重写视图时没有会话、拿不到指令文件，视图只核对记忆那一半；基线这一半在补上建议、采纳、按要求应用时按会话此刻的基线核对。
+ */
+export const suggestionBasisSchema = z.object({
+  conflictFingerprint: z.string().optional(),
+  memories: z.array(z.object({ memoryId: z.string(), fingerprint: z.string(), scopeKey: z.string().optional() })),
+  baseline: z.object({ workspace: z.string(), fingerprint: z.string() }).optional(),
+})
+export type SuggestionBasis = z.infer<typeof suggestionBasisSchema>
+
+/**
+ * 处理建议（体检或「补上建议」时模型给一条冲突的结论）：每次生成一个新 id，处理方案（结论、一句理由、逐条操作），依据版本，
+ * 是否回查过出处（由代码设定），生成时刻。理由存盘前已按疑似级遮盖密钥；稿不遮盖，存盘前已保证不含高危密钥、疑似值都出自原文。
+ */
+export const storedSuggestionSchema = z.object({
+  id: z.string(),
+  action: z.enum(PROPOSAL_ACTIONS),
+  reason: z.string(),
+  ops: z.array(proposalOpSchema),
+  basis: suggestionBasisSchema,
+  isSourced: z.boolean(),
+  generatedAt: z.number(),
+})
+export type StoredSuggestion = z.infer<typeof storedSuggestionSchema>
+
+/**
+ * 处理建议最近一次没生成成：依据版本（同建议，对不上就不算数）、原因（kind 见 SUGGESTION_FAILURE_KINDS，原话已脱敏；
+ * undecided 带模型说明的理由 reason，已按疑似级遮盖），时刻。
+ */
+export const suggestionFailureSchema = z.object({
+  basis: suggestionBasisSchema,
+  cause: z.object({ kind: z.enum(SUGGESTION_FAILURE_KINDS), hostCode: z.string().optional(), message: z.string().optional(), reason: z.string().optional() }),
+  at: z.number(),
+})
+export type SuggestionFailure = z.infer<typeof suggestionFailureSchema>
 
 export const pendingDecisionSchema = z.object({
   id: z.string(),
@@ -73,12 +136,21 @@ export const pendingDecisionSchema = z.object({
   receipts: z.array(batchReceiptSchema).optional(),
   /** 模型改写、替代：哪个会话里哪次 memory_save 调用改的（对话卡按 callId、右侧栏按 sessionId 认领）；替代时 by 是替代它的那条。 */
   origin: z.object({ sessionId: z.string(), callId: z.string(), by: z.string().optional() }).optional(),
+  /** 冲突：模型给的处理建议，见 storedSuggestionSchema。依据版本对不上时视图当作没有建议。其余条目没有此字段。 */
+  suggestion: storedSuggestionSchema.optional(),
+  /** 冲突：处理建议最近一次没生成成的原因；生成成功时清掉。 */
+  suggestionFailure: suggestionFailureSchema.optional(),
+  /** 冲突：体检自己发起的生成对这个冲突指纹试过几次（用户点「补上建议」不计）；指纹变了从头算。 */
+  suggestionAttempts: z.object({ fingerprint: z.string().optional(), count: z.number().int().positive() }).optional(),
   /**
    * 用户已裁决：条目留作记录。两边都留的指纹不变就不再报；删一方的留着供撤销，snapshotId 是删败方前的快照。
    * isBornSettled：提升候选在等你决定之外就地处理（对话卡片、右侧栏）时账本里还没有它，这条是处理完才记的；
    * 撤销时移出账本、回到没点过的样子，不重开进等你决定。isUndone：模型改写、替代已撤销（见 PENDING_KINDS）。
    * misplacedIgnore：「留在本项目」顺带写进建议忽略表的那条「放错层」忽略（忽略时间、记忆指纹 adviceFingerprint）；
    * 记忆原本没有放错层的忽略才写、才记。撤销时只在忽略表里那一条仍是它（时间、指纹都对得上）时才删。旧条目没有此字段，撤销不碰忽略表。
+   * proposal：冲突按处理方案落盘时的依据和结论代码（见 settledProposalSchema）；撤销时随 settled 一起去掉，条目上的处理建议不动。
+   * receipts、priorFingerprint 只在 plan-applied 上：逐项回执（同整理所选，按写入顺序；整理所选的回执在条目顶层，这里在结清信息里，
+   * 撤销、账本清理随结清信息一起处理），和结清前条目的冲突指纹（旧条目没有指纹时缺省），撤销时还原。
    */
   settled: z.object({
     verdict: z.enum(SETTLED_VERDICTS),
@@ -87,6 +159,9 @@ export const pendingDecisionSchema = z.object({
     isBornSettled: z.literal(true).optional(),
     isUndone: z.literal(true).optional(),
     misplacedIgnore: z.object({ ignoredAt: z.number(), fingerprint: z.string() }).optional(),
+    proposal: settledProposalSchema.optional(),
+    receipts: z.array(batchReceiptSchema).optional(),
+    priorFingerprint: z.string().optional(),
   }).optional(),
 })
 export type PendingDecision = z.infer<typeof pendingDecisionSchema>

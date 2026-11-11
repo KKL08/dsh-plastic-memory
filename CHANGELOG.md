@@ -62,6 +62,24 @@ All notable changes to this project are documented here. The format follows
   which keywords it fully matched, or that it matched only part of one or
   only a substring, so the model can compare hits at a glance. Hits that
   contain every keyword are not marked.
+- Conflict cards now come with a suggestion. After a checkup finds a
+  conflict, the model looks at both memories and the conversations they
+  were saved from, then proposes to merge them, keep one, or keep both,
+  with a one-line reason; a merge shows the combined text next to the
+  originals. Adopt applies it and can be undone. Nothing is written until
+  you adopt, and the three direct choices are still there.
+- "Add a request" on a conflict card lets you say how to settle it in your
+  own words. The model drafts a plan from the request, you can refine the
+  request or apply the plan, and the result can be undone.
+- Conflicts between a memory and AGENTS.md / CLAUDE.md use the same card:
+  the suggestion is to rewrite the memory, delete it, or keep both. The
+  instruction file is never changed. Suggestions for these conflicts are
+  made and applied from a session in the project the conflict was found in.
+- The sidebar shows the suggestion on a conflict, with Adopt and a link to
+  settle it on the memory page.
+- Suggestions cost extra model calls: one per new conflict after a
+  checkup. Automatic checkups prepare at most 10 per run, the rest get
+  "Suggest" on the card; memories with high-risk secrets are never sent.
 
 ### Changed
 - The model gets a fuller picture of each memory type. When saving, it

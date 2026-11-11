@@ -1,10 +1,14 @@
 import { createHash } from 'node:crypto'
-import type { ClaimKvTable } from '../kv-table.ts'
+import type { CasKvTable, ClaimKvTable } from '../kv-table.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { OverflowLevel } from '../contract-codes.ts'
-import { genId, kindOf, verdictLoser, type BatchReceipt, type PendingDecision, type PendingKind, type SettledVerdict } from './schema.ts'
+import {
+  genId, kindOf, verdictLoser, type BatchReceipt, type PendingDecision, type PendingKind, type SettledProposal, type SettledVerdict, type StoredSuggestion,
+  type SuggestionBasis, type SuggestionFailure,
+} from './schema.ts'
 import { isUndoExpired } from './undo-rules.ts'
 import { editFingerprint } from './snapshots.ts'
+import { scopeAt, scopeKey } from '../scope.ts'
 
 /** 去重 key：memoryIds 排序拼接 + baselineRef（垂直冲突与横向冲突互不干扰）。 */
 export function dedupKey(memoryIds: string[], baselineRef?: string): string {
@@ -23,6 +27,67 @@ export function conflictFingerprint(records: ReadonlyArray<Pick<MemoryRecord, 'i
 /** 提升候选的内容指纹：单条记忆的 id + name + content。内容改了，「留在本项目」的旧结论作废。 */
 export function candidateFingerprint(record: Pick<MemoryRecord, 'id' | 'name' | 'content'>): string {
   return conflictFingerprint([record])
+}
+
+/** 记忆所在作用域的标准键：完整内容指纹不含位置，提升、移动要靠它认出来（融合稿写进哪条按合并规则看作用域）。 */
+const scopeKeyOf = (r: MemoryRecord) => scopeKey(scopeAt(r.workspacePath))
+
+/**
+ * 处理建议的依据版本：条目此刻的冲突指纹，和每条涉及记忆此刻的完整内容指纹、作用域键（按条目 memoryIds 的顺序）。
+ * records 与条目 memoryIds 一一对应、都是此刻读到的记录。垂直冲突带上生成时用的基线（baselineBasisOf）。
+ */
+export function suggestionBasis(entry: Pick<PendingDecision, 'fingerprint'>, records: readonly MemoryRecord[], baseline?: BaselineBasis): SuggestionBasis {
+  return {
+    ...(entry.fingerprint !== undefined ? { conflictFingerprint: entry.fingerprint } : {}),
+    memories: records.map(r => ({ memoryId: r.id, fingerprint: editFingerprint(r), scopeKey: scopeKeyOf(r) })),
+    ...(baseline !== undefined ? { baseline } : {}),
+  }
+}
+
+/** 垂直冲突依据里的基线一半：基线所属项目和基线指纹。 */
+export type BaselineBasis = NonNullable<SuggestionBasis['baseline']>
+
+/** 整份基线（会话生效的 AGENTS.md / CLAUDE.md 正文）的指纹：任一段改了就变。 */
+export function baselineFingerprint(baseline: readonly string[]): string {
+  return createHash('sha1').update(JSON.stringify(baseline)).digest('hex')
+}
+
+/**
+ * 会话此刻能给这条记忆的垂直冲突用的基线（同体检：基线随会话）：项目记忆只认它自己项目里的会话；全局记忆在哪个会话里都扫得出，
+ * 只认扫出这条冲突的那份基线（用它重算冲突指纹，和条目的 conflictFingerprint 一致）——换一个项目的会话，矛盾摘要说的就不是手上这份文件了。
+ * 基线所属按会话所在的项目记（没有项目的会话记 'global'）。拿不到基线、会话不在这条记忆的项目里、不是扫出冲突的那份时为 undefined（缺基线）。
+ */
+export function baselineBasisOf(
+  memory: MemoryRecord, baseline: readonly string[] | null | undefined, sessionWorkspace: string | undefined, entryFingerprint: string | undefined,
+): BaselineBasis | undefined {
+  if (baseline === null || baseline === undefined) return undefined
+  if (memory.scope === 'workspace' && memory.workspacePath !== sessionWorkspace) return undefined
+  if (memory.scope !== 'workspace' && conflictFingerprint([memory], baseline) !== entryFingerprint) return undefined
+  return { workspace: sessionWorkspace ?? 'global', fingerprint: baselineFingerprint(baseline) }
+}
+
+/** 依据里的基线和会话此刻的基线对得上：基线所属项目、基线指纹都一致（依据里没有基线的一律算对不上）。 */
+export function isBaselineCurrent(basis: SuggestionBasis, memory: MemoryRecord, baseline: readonly string[] | null | undefined, sessionWorkspace: string | undefined): boolean {
+  const now = baselineBasisOf(memory, baseline, sessionWorkspace, basis.conflictFingerprint)
+  return basis.baseline !== undefined && now !== undefined && now.workspace === basis.baseline.workspace && now.fingerprint === basis.baseline.fingerprint
+}
+
+/** 依据版本和此刻对得上：条目的冲突指纹一致，每条记忆（按 memoryIds 顺序）都在，完整内容指纹和作用域都一致。 */
+export function isBasisCurrent(entry: Pick<PendingDecision, 'fingerprint' | 'memoryIds'>, basis: SuggestionBasis, records: ReadonlyArray<MemoryRecord | undefined>): boolean {
+  if (entry.fingerprint !== basis.conflictFingerprint) return false
+  if (basis.memories.length !== entry.memoryIds.length || records.length !== entry.memoryIds.length) return false
+  return basis.memories.every((m, i) => {
+    const r = records[i]
+    return m.memoryId === entry.memoryIds[i] && r !== undefined && r.id === m.memoryId && editFingerprint(r) === m.fingerprint && scopeKeyOf(r) === m.scopeKey
+  })
+}
+
+/** 逐项写入的一项（整理所选、应用处理方案）：written 是这一项实际提交的那份（改写是 update 的返回值，删除是软删时锁内那份）。 */
+export type PlanWrite = { memoryId: string; op: BatchReceipt['op']; written: MemoryRecord }
+
+/** 逐项回执：指纹按实际提交的那份算；改写写完应是在用，删除写完应在最近删除里。 */
+function receiptsOf(writes: readonly PlanWrite[]): BatchReceipt[] {
+  return writes.map(w => ({ memoryId: w.memoryId, op: w.op, fingerprint: editFingerprint(w.written), expectedStatus: w.op === 'edit' ? 'active' : 'deleted' }))
 }
 
 /** 「留在本项目」顺带写的放错层忽略（见 schema settled.misplacedIgnore）。 */
@@ -56,6 +121,11 @@ function byFirstSeen(a: PendingDecision, b: PendingDecision): number {
 /** 已裁决且裁决删掉了一方的条目。 */
 function isDeletionSettled(entry: PendingDecision): boolean {
   return entry.settled !== undefined && verdictLoser(entry, entry.settled.verdict) !== undefined
+}
+
+/** 按处理方案改写了记忆、没有删除项的结清（垂直改写）：留着撤销回执，保留窗口内不因重报作废。 */
+function isRewriteSettled(entry: PendingDecision): boolean {
+  return entry.settled?.verdict === 'plan-applied' && entry.settled.receipts !== undefined && !isDeletionSettled(entry)
 }
 
 /** 超限条目的指纹：relax 为档位号（'1'、'2'…），strict 只有一档。 */
@@ -118,10 +188,13 @@ function mergeReport(existing: PendingDecision, input: UpsertInput): PendingDeci
  * settled 条目对 get / list 不可见，只有 listSettled、upsert、removeByMemoryIds、sweep 会看到它。
  * 同一对（samePair）在账本里只有一条未决条目，跨进程也成立：挂账按冲突身份认领（见 upsert）。
  */
-export class PendingDecisionsStore {
-  private table: ClaimKvTable<PendingDecision>
+/** 账本用的表：带排他认领，清理用条件删除。 */
+export type PendingTable = ClaimKvTable<PendingDecision> & Pick<CasKvTable<PendingDecision>, 'deleteIf'>
 
-  constructor(table: ClaimKvTable<PendingDecision>) {
+export class PendingDecisionsStore {
+  private table: PendingTable
+
+  constructor(table: PendingTable) {
     this.table = table
   }
 
@@ -202,6 +275,8 @@ export class PendingDecisionsStore {
             return { created: false, settled: true, entry: existing }
           }
           if (!(await holds())) return { created: false, isSkipped: true, entry: existing }
+          // 垂直改写（没有删除项）：指纹变了（基线或记忆又改了）另挂一条未决的，改写的结清留到保留窗口结束，撤销回执不丢
+          if (isRewriteSettled(existing)) return undefined
           if (!isDeletionSettled(existing)) {
             await this.table.delete(id) // 指纹变了：旧结论作废
             return undefined
@@ -249,11 +324,11 @@ export class PendingDecisionsStore {
   /**
    * 记下裁决。两边都留的靠指纹判断以后变没变：没有指纹的旧条目无从判断，退回直接移除，返回 false。
    * 删一方的留账是为了撤销，不看指纹；snapshotId 是删败方前的快照。fingerprint 给出时换掉条目上的指纹
-   * （「留在本项目」按记忆此刻的内容记，不用上次体检时的）。isBornSettled、misplacedIgnore 见 schema。顺手清扫超出保留窗口的条目。
+   * （「留在本项目」按记忆此刻的内容记，不用上次体检时的）。isBornSettled、misplacedIgnore、proposal 见 schema。顺手清扫超出保留窗口的条目。
    */
   async settle(
     id: string, verdict: SettledVerdict, now: number,
-    opts: { snapshotId?: string; fingerprint?: string; isBornSettled?: true; misplacedIgnore?: MisplacedIgnore } = {},
+    opts: { snapshotId?: string; fingerprint?: string; isBornSettled?: true; misplacedIgnore?: MisplacedIgnore; proposal?: SettledProposal } = {},
   ): Promise<boolean> {
     const entry = await this.table.get(id)
     if (!entry) return false
@@ -267,6 +342,7 @@ export class PendingDecisionsStore {
       settled: {
         verdict, at: now, ...(opts.snapshotId !== undefined ? { snapshotId: opts.snapshotId } : {}), ...(opts.isBornSettled ? { isBornSettled: true as const } : {}),
         ...(opts.misplacedIgnore !== undefined ? { misplacedIgnore: opts.misplacedIgnore } : {}),
+        ...(opts.proposal !== undefined ? { proposal: opts.proposal } : {}),
       },
     })
     await this.sweep(now)
@@ -279,17 +355,93 @@ export class PendingDecisionsStore {
    */
   async sweep(now: number): Promise<void> {
     for (const [key, e] of await this.table.list()) {
-      if (isUndoExpired(e, now)) await this.table.delete(key)
+      // 读到之后条目可能被重开（同一对再被扫到、撤销）：删之前按此刻的值再判一次
+      if (isUndoExpired(e, now)) await this.table.deleteIf(key, current => isUndoExpired(current, now))
     }
   }
 
-  /** 撤销裁决：去掉 settled，条目回到待处理（沿用原 id 与 firstSeenAt）。条目不存在或未裁决返回 false。 */
+  /**
+   * 冲突按处理方案改写了记忆（融合、垂直改写）之后结清它（裁决值 plan-applied）：writes 是这次实际提交的每一项（按写入顺序，同整理所选），
+   * 回执按它算，记进结清信息；另记改前快照、依据和结论代码、结清前的冲突指纹（撤销时还原），条目指纹换成改后的 fingerprint，
+   * 以后同一对（垂直的同一条）再被扫到时不再挂账。条目不存在或已结清返回 false。调用方持有条目认领。顺手清扫超出保留窗口的条目。
+   */
+  async settlePlan(
+    id: string, input: { writes: readonly PlanWrite[]; proposal: SettledProposal; snapshotId: string; fingerprint: string }, now: number,
+  ): Promise<boolean> {
+    const entry = await this.table.get(id)
+    if (entry === undefined || entry.settled !== undefined) return false
+    await this.table.put(id, {
+      ...entry, fingerprint: input.fingerprint,
+      settled: {
+        verdict: 'plan-applied', at: now, snapshotId: input.snapshotId, proposal: input.proposal, receipts: receiptsOf(input.writes),
+        ...(entry.fingerprint !== undefined ? { priorFingerprint: entry.fingerprint } : {}),
+      },
+    })
+    await this.sweep(now)
+    return true
+  }
+
+  /**
+   * 撤销裁决：去掉 settled，条目回到待处理（沿用原 id 与 firstSeenAt）。plan-applied 的条目指纹还原成结清前的：
+   * 两条恢复原样后和处理建议的依据对得上，建议继续显示。条目不存在或未裁决返回 false。
+   */
   async unsettle(id: string): Promise<boolean> {
     const entry = await this.table.get(id)
     if (!entry?.settled) return false
-    const { settled: _settled, ...open } = entry
-    await this.table.put(id, open)
+    const { settled, fingerprint, ...open } = entry
+    const restored = settled.verdict === 'plan-applied' ? settled.priorFingerprint : fingerprint
+    await this.table.put(id, { ...open, ...(restored !== undefined ? { fingerprint: restored } : {}) })
+    // 垂直改写之后重报另挂的那条说的是改写后的记忆，撤销后记忆回到原样，它不再成立：收拢掉，同一条只留回到待处理的这条
+    if (isRewriteSettled(entry)) {
+      const others = (await this.table.list()).filter(([key, e]) => key !== id && e.settled === undefined && samePair(e, entry)).map(([key]) => key)
+      await this.dropDuplicates(others, id, entry)
+    }
     return true
+  }
+
+  /**
+   * 把一次生成的结果（处理建议，或没生成成的原因）写到条目上。生成在认领之外做（模型调用可能超过认领的 60 秒），
+   * 这里只认领条目、重读、核对、写：条目仍未决；双方此刻都在用，依据版本和生成时一致；条目上还没有当前依据的建议
+   * （有就不覆盖，丢掉这一份，失败也不记，免得盖住别处刚写的建议）。写建议时清掉之前记的失败。
+   * 删除一条记忆的路径先删记忆、再清条目，且不认领条目：核对之后、写入之前被清掉的条目会被这次写入写回来，
+   * 所以写完（仍在认领内）再读一遍两条，任一条已不在用就撤回这次写入的条目，回 gone。
+   * isAttempt：体检自己发起的这次生成写成了，给条目此刻的冲突指纹记一次尝试（指纹变了从头算）；用户点「补上建议」不记。
+   * 垂直冲突（这一份的依据带基线）：条目上已有的建议还要是按同一份基线生成的才算当前（指令文件改过、换了项目的旧建议让位）。
+   * 返回：written 已写；has-current 已有当前建议、这份丢弃；stale 依据对不上；gone 条目不在、已结清或写完发现一方已不在用；claimed 正被别处认领、这份丢弃。
+   */
+  async writeSuggestion(
+    id: string, outcome: { suggestion: StoredSuggestion } | { failure: SuggestionFailure }, read: ReadMemory, opts: { isAttempt?: boolean } = {},
+  ): Promise<'written' | 'has-current' | 'stale' | 'gone' | 'claimed'> {
+    const basis = 'suggestion' in outcome ? outcome.suggestion.basis : outcome.failure.basis
+    const isSameBaseline = (b: SuggestionBasis) => basis.baseline === undefined
+      || (b.baseline?.workspace === basis.baseline.workspace && b.baseline.fingerprint === basis.baseline.fingerprint)
+    const claimed = await this.withClaim(id, async () => {
+      const entry = await this.table.get(id)
+      if (entry === undefined || entry.settled !== undefined) return 'gone' as const
+      const records = await Promise.all(entry.memoryIds.map(read))
+      const live = records.map(r => (r?.status === 'active' ? r : undefined))
+      if (entry.suggestion !== undefined && isBasisCurrent(entry, entry.suggestion.basis, live) && isSameBaseline(entry.suggestion.basis)) return 'has-current' as const
+      if (!isBasisCurrent(entry, basis, live)) return 'stale' as const
+      const counted = entry.suggestionAttempts?.fingerprint === entry.fingerprint ? entry.suggestionAttempts?.count ?? 0 : 0
+      const attempts = opts.isAttempt === true
+        ? { suggestionAttempts: { ...(entry.fingerprint !== undefined ? { fingerprint: entry.fingerprint } : {}), count: counted + 1 } }
+        : {}
+      if ('suggestion' in outcome) {
+        const { suggestionFailure: _failure, ...rest } = entry
+        await this.table.put(id, { ...rest, ...attempts, suggestion: outcome.suggestion })
+      } else {
+        // 垂直冲突换了基线后没生成成：按旧基线的那份建议不再留着（视图只核对记忆那一半，留着会照旧显示）
+        const { suggestion: _stale, ...rest } = entry
+        await this.table.put(id, { ...(basis.baseline !== undefined ? rest : entry), ...attempts, suggestionFailure: outcome.failure })
+      }
+      const after = await Promise.all(entry.memoryIds.map(read))
+      if (after.some(r => r?.status !== 'active')) {
+        await this.table.delete(id)
+        return 'gone' as const
+      }
+      return 'written' as const
+    })
+    return claimed.isClaimed ? claimed.value : 'claimed'
   }
 
   /** 全部超限条目（含已忽略的）：已忽略只是不再提醒，超限的事实仍在，健康把它列为问题。 */
@@ -403,11 +555,8 @@ export class PendingDecisionsStore {
    * 整理所选的应用：writes 是这次提交的每一项（按计划顺序），written 是那一项实际提交的那份（改写是 update 的返回值，
    * 删除是软删时锁内那份），回执的指纹按它算；改写写完应是在用，删除写完应在最近删除里。
    */
-  addBatchEdit(
-    writes: ReadonlyArray<{ memoryId: string; op: BatchReceipt['op']; written: MemoryRecord }>, input: { summary: string; workspaces: string[] }, snapshotId: string, now: number,
-  ) {
-    const receipts = writes.map((w): BatchReceipt => ({ memoryId: w.memoryId, op: w.op, fingerprint: editFingerprint(w.written), expectedStatus: w.op === 'edit' ? 'active' : 'deleted' }))
-    return this.addSettled({ kind: 'edit', memoryIds: writes.map(w => w.memoryId), ...input, receipts }, 'batch-edited', now, { snapshotId })
+  addBatchEdit(writes: readonly PlanWrite[], input: { summary: string; workspaces: string[] }, snapshotId: string, now: number) {
+    return this.addSettled({ kind: 'edit', memoryIds: writes.map(w => w.memoryId), ...input, receipts: receiptsOf(writes) }, 'batch-edited', now, { snapshotId })
   }
 
   /** 全局记忆移到项目：written 是移过去的那一份。 */

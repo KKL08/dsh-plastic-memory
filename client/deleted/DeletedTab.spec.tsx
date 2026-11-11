@@ -141,6 +141,18 @@ describe('最近删除', () => {
     expect(rowOf('分支直接推 main').querySelector('.pm-del-meta')).toHaveTextContent(/^以基线为准时删除/)
   })
 
+  it('融合时并入删掉的（票 06）：来源写并进了哪条，提示恢复只带回这一条、那条保持融合后的样子；恢复后只说已恢复', async () => {
+    const view: DeletedView = { version: GUI_VIEW_VERSION, items: [{ ...ruledB, cause: { decisionId: 'pd2', verdict: 'plan-applied', counterpartId: 'm9', snapshotId: 'snap2' } }] }
+    const gateway = createFakeGateway({ views: { deleted: view, library }, respond: command => ({ ok: true, cmd: command.cmd, memoryIds: ['d3'], snapshotId: 'snap2' }) })
+    renderInShell(<DeletedTab nav={createNavStore()} scope={app} session={session} now={NOW} />, gateway)
+    const row = rowOf('缩进用 tab')
+    expect(row.querySelector('.pm-del-meta')).toHaveTextContent(/^融合进「postgres-in-tests」时删除/)
+    expect(within(row).getByText('恢复只带回这一条，「postgres-in-tests」保持融合后的样子')).toHaveClass('pm-del-hint')
+    expect(within(row).queryByText('恢复后这条冲突会回到「等你决定」')).toBeNull()
+    await act(async () => { fireEvent.click(within(row).getByRole('button', { name: '恢复' })) })
+    expect(await screen.findByText('已恢复。')).toBeInTheDocument()
+  })
+
   it('胜方哪里都找不到时写它的 id；没记对方是谁（旧条目）时按裁决写 A / B', () => {
     const view: DeletedView = {
       version: GUI_VIEW_VERSION,

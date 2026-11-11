@@ -26,6 +26,9 @@ function actionOf(command: MemoryCommand): Summary {
     case 'draft-edit': return { key: 'chat.command.draftEdit' }
     case 'plan-edits': return { key: 'chat.command.planEdits' }
     case 'draft-plan': return { key: 'chat.command.draftPlan' }
+    case 'suggest': return { key: 'chat.command.suggest' }
+    case 'draft-proposal': return { key: 'chat.command.draftProposal' }
+    case 'apply-proposal': return { key: command.proposal !== undefined ? 'chat.command.applyRequestedProposal' : 'chat.command.applyProposal' }
     case 'resolve': return { key: command.verdict === 'keep-both' ? 'chat.command.resolve.both' : 'chat.command.resolve.one' }
     case 'undo': return { key: 'chat.command.undo' }
     case 'promote':

@@ -6,7 +6,7 @@ import { RETENTION_MS } from '../retention.ts'
 import { hasCriticalSecret, maskSecretSurface, maskSecrets } from '../secrets.ts'
 import { computeDigest } from '../storage/frontmatter.ts'
 import { FINDING_TYPES, kindOf, verdictLoser, type FindingType, type MemorySnapshot, type PendingDecision } from '../governance/schema.ts'
-import { candidateFingerprint, overflowLevelOf, overflowScopeOf } from '../governance/decisions.ts'
+import { candidateFingerprint, isBasisCurrent, overflowLevelOf, overflowScopeOf } from '../governance/decisions.ts'
 import { asUndoable, isModelChange, undoStateOf } from '../governance/undo-rules.ts'
 import { runRuleScan } from '../governance/rule-scan.ts'
 import { byConfidenceThenConfirmed } from '../snapshot.ts'
@@ -55,6 +55,8 @@ export interface ViewInput {
    * 只列 data.byId 取到的是别的作用域里那份的；那个作用域里已经没有的不列，按 byId 是否在那个作用域判。
    */
   entryCopies?: ReadonlyMap<string, LocatedRecord>
+  /** 本进程正在给哪些条目生成处理建议（体检之后的后续段，按条目 id）；缺省没有。 */
+  generatingSuggestions?: ReadonlySet<string>
 }
 
 export type GlobalViews = { pending: PendingView; health: HealthView; library: LibraryView; deleted: DeletedView }
@@ -134,12 +136,18 @@ export function buildPendingView(input: ViewInput): PendingView {
       items.push({ kind, level: PENDING_LEVEL_OF_KIND[kind], ...base, ...overflowLevelOf(e), ...(scope?.kind === 'workspace' ? { workspacePath: scope.workspacePath } : {}) })
     }
     else if (e.baselineRef !== undefined) {
-      items.push({ kind: 'conflict-vertical', level: PENDING_LEVEL_OF_KIND['conflict-vertical'], ...base, summary: e.summary, memory: cardOf(e.memoryIds[0], data), baselineRef: e.baselineRef })
+      items.push({
+        kind: 'conflict-vertical', level: PENDING_LEVEL_OF_KIND['conflict-vertical'], ...base, summary: e.summary, memory: cardOf(e.memoryIds[0], data), baselineRef: e.baselineRef,
+        ...suggestionState(e, data),
+        ...(input.generatingSuggestions?.has(e.id) === true ? { isGeneratingSuggestion: true as const } : {}),
+      })
     } else {
       const preferred = e.memoryIds.slice(0, 2).map(id => data.byId.get(id)).filter(r => r !== undefined).sort(byConfidenceThenConfirmed)[0]
       items.push({
         kind: 'conflict-horizontal', level: PENDING_LEVEL_OF_KIND['conflict-horizontal'], ...base, summary: e.summary, left: cardOf(e.memoryIds[0], data), right: cardOf(e.memoryIds[1], data),
         ...(preferred !== undefined ? { preferredId: preferred.id } : {}),
+        ...suggestionState(e, data),
+        ...(input.generatingSuggestions?.has(e.id) === true ? { isGeneratingSuggestion: true as const } : {}),
       })
     }
   }
@@ -165,6 +173,31 @@ export function buildPendingView(input: ViewInput): PendingView {
   const cards = items.flatMap(i => i.kind === 'conflict-horizontal' ? [i.left, i.right] : i.kind === 'advice' ? i.memories : 'memory' in i ? [i.memory] : [])
   const levelCounts = Object.fromEntries(PENDING_LEVELS.map(level => [level, items.filter(i => i.level === level).length])) as PendingView['levelCounts']
   return { version: GUI_VIEW_VERSION, generatedAt: input.now, dot, items, levelCounts, typeLabels: typeLabels(input.registry, cards.map(m => m?.type)) }
+}
+
+/**
+ * 冲突项的处理建议（账本存盘形状映射到契约）：条目未决（调用方只传未决条目）、冲突指纹和每条记忆此刻的完整内容指纹都和建议的依据一致，
+ * 才给 suggestion；否则给没有建议的原因：任一条含高危密钥、最近一次模型判断不了、自动体检名额用完、垂直冲突缺基线或生成失败（依据同样要对得上）、还没生成。
+ * 一方定位不到时两个都不给。垂直冲突只核对记忆那一半（重写视图时没有会话、拿不到指令文件），建议带上基线所属的项目，基线那一半采纳时核对。
+ * 改写稿按卡片口径遮高危密钥（存盘的稿保证没有高危，这里兜底）。
+ */
+function suggestionState(e: PendingDecision, data: ScopePreread): Pick<Extract<PendingItem, { kind: 'conflict-horizontal' }>, 'suggestion' | 'noSuggestion'> {
+  const records = e.memoryIds.map(id => data.byId.get(id))
+  if (records.some(r => r?.status !== 'active')) return {}
+  const { suggestion, suggestionFailure } = e
+  if (suggestion !== undefined && isBasisCurrent(e, suggestion.basis, records)) {
+    const ops = suggestion.ops.map(op => (op.kind === 'edit' ? { ...op, ...maskSecretSurface(op) } : op))
+    const baseline = suggestion.basis.baseline !== undefined ? { baselineWorkspace: suggestion.basis.baseline.workspace } : {}
+    return { suggestion: { id: suggestion.id, action: suggestion.action, reason: suggestion.reason, ops, isSourced: suggestion.isSourced, ...baseline } }
+  }
+  if (records.some(r => hasCriticalSecret(r!))) return { noSuggestion: { code: 'has-secret' } }
+  if (suggestionFailure !== undefined && isBasisCurrent(e, suggestionFailure.basis, records)) {
+    const { kind, hostCode, message, reason } = suggestionFailure.cause
+    if (kind === 'undecided') return { noSuggestion: { code: 'undecided', reason: reason ?? '' } }
+    if (kind === 'quota-exhausted' || kind === 'no-baseline') return { noSuggestion: { code: kind } }
+    return { noSuggestion: { code: 'failed', cause: { kind, ...(hostCode !== undefined ? { hostCode } : {}), ...(message !== undefined ? { message } : {}) } } }
+  }
+  return { noSuggestion: { code: 'not-generated' } }
 }
 
 /** 语义体检来的建议类型：内容重复整组一项，放错层、表述不清每条记忆一项。 */
@@ -487,7 +520,7 @@ export function buildDeletedView(input: ViewInput): DeletedView {
     .map(({ r, filePath, deletedAt }) => {
       const e = causeById.get(r.id)
       const verdict = e?.settled?.verdict
-      const cause = e === undefined || (verdict !== 'keep-left' && verdict !== 'keep-right') ? undefined : {
+      const cause = e === undefined || (verdict !== 'keep-left' && verdict !== 'keep-right' && verdict !== 'plan-applied') ? undefined : {
         decisionId: e.id, verdict,
         ...(e.baselineRef !== undefined ? { baselineRef: e.baselineRef } : { counterpartId: e.memoryIds.find(id => id !== r.id) }),
         ...(e.settled!.snapshotId !== undefined ? { snapshotId: e.settled!.snapshotId } : {}),

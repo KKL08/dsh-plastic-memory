@@ -5,6 +5,7 @@ import { scopeKey, type Scope } from '../scope.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import type { CheckupCause, CheckupView } from './contract.ts'
 import { runCheckup, type CheckupRunDeps, type IntervalTimer } from './checkup-run.ts'
+import type { CheckupSuggestions } from './checkup-suggestions.ts'
 
 /** 插件启动后等这么久第一次检查（不跟首轮对话抢资源）。 */
 export const AUTO_CHECKUP_FIRST_CHECK_MS = 3 * 60_000
@@ -35,6 +36,8 @@ export interface AutoCheckupSchedulerDeps {
   onChecked?: () => Promise<void>
   /** 认领到、放掉一个范围之后调用：重写体检视图（进行中）。 */
   onClaimChanged?: () => Promise<void>
+  /** 体检之后的后续段（给冲突生成处理建议，一次最多 10 条）；缺省不生成。 */
+  suggestions?: Pick<CheckupSuggestions, 'run'>
   now: () => number
   log?: MemoryLogger
 }
@@ -42,7 +45,8 @@ export interface AutoCheckupSchedulerDeps {
 /**
  * 自动体检调度：dsh 开着时，按共享的设置表和完成记录，在后台对到期的范围做体检。不借会话、不打断对话：
  * 每个范围经一次体检（checkup-run.ts，与界面手动体检同一套规则）：用宿主的默认模型无会话调用，结果照常写缓存、挂账、写完成记录（发起方 auto），
- * 做完立刻重写视图、记下最近一次结果（新增、用量、说明）。后台调用不经过会话，宿主的用量统计看不到，用量取宿主流 usage 块报的数，由插件记在结果里。
+ * 做完立刻重写视图、记下最近一次结果（新增、用量、说明），再给新的冲突逐条生成处理建议（后续段，见 checkup-suggestions.ts）。
+ * 后台调用不经过会话，宿主的用量统计看不到，用量取宿主流 usage 块报的数，由插件记在结果里（含生成建议的那几次）。
  * 到期的范围依次查、一次只跑一个（全局先，项目按路径）；一次检查每个范围只补一次。
  * 跨进程：一次体检开跑前认领这个范围，别的进程正在查就跳过；认领到之后经「认领后确认」重读完成记录，
  * 别的进程刚查过、已经不到期的放掉不跑。持有期间心跳，认领被别的进程接手就取消这次体检、不再提交。
@@ -168,6 +172,9 @@ export class AutoCheckupScheduler {
         ...(this.deps.onClaimChanged !== undefined ? { onClaimChanged: this.deps.onClaimChanged } : {}),
         now: this.deps.now, log: this.log,
       })
+      // 体检已经做完、认领已放掉：后续段在这里接着跑，卸载时同一个取消信号停下它（不等在途的模型调用）。
+      // 它自己兜住异常，不进这个范围的失败计数；等它跑完再查下一个范围，后台同时只有一次模型调用
+      await this.deps.suggestions?.run({ target: scope, by: 'auto', llm, outcome, signal: controller.signal })
       return outcome.kind === 'model-unavailable' ? { modelUnavailable: outcome.cause } : undefined
     } finally {
       this.controller = undefined

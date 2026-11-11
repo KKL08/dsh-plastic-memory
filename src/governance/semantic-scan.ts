@@ -48,7 +48,7 @@ export const BASELINE_MAX_CHARS = 8000
  * 从最新往前收：每条消息自带来源与适用范围的抬头（"Instructions from: <path>"），按字符切会把规则和它的
  * 范围拆开、让 LLM 误用到别的目录。装不下的较早消息整条舍弃并说明；最新一条自身就超预算时只保留其开头。
  */
-function renderBaselineMessages(messages: readonly string[]): string {
+export function renderBaselineMessages(messages: readonly string[]): string {
   const kept: string[] = []
   let used = 0
   for (const message of messages.toReversed()) {
@@ -89,7 +89,7 @@ export function buildSemanticPrompt(
 ): { system: string; user: string } {
   // 判断冲突用不到密钥原值，明确密钥不发给模型（与注入同口径）
   const baselineSection = baseline
-    ? `## 权威配置基线（AGENTS.md/CLAUDE.md）\n${maskSecrets(renderBaselineMessages(baseline))}`
+    ? `## 权威配置基线（AGENTS.md/CLAUDE.md）\n${renderBaselineMessages(baseline.map(m => maskSecrets(m)))}`
     : '## 权威配置基线\n（无权威配置基线，跳过垂直冲突检测）'
   return {
     system: SYSTEM_PROMPT,
@@ -236,7 +236,8 @@ function errorCode(err: unknown): string | undefined {
   return typeof code === 'string' && code.length > 0 ? code : undefined
 }
 
-function modelError(err: unknown): SemanticFailure {
+/** 模型调用抛错换成没做成的原因（脱敏口径见 SemanticFailure）：处理建议的生成共用。 */
+export function modelError(err: unknown): SemanticFailure {
   const hostCode = errorCode(err)
   if (hostCode === 'AUTH') return { kind: 'model-error', hostCode }
   return { kind: 'model-error', ...(hostCode !== undefined ? { hostCode } : {}), message: maskDiagnostic(err instanceof Error ? err.message : String(err)) }

@@ -30,6 +30,11 @@ describe('buildSemanticPrompt', () => {
     expect(user).toContain('包管理用 npm')
   })
 
+  it('基线超长被裁切、密钥正好跨在裁切处：先遮盖再裁切，密钥的前半截也不进提示词', () => {
+    const { user } = buildSemanticPrompt([record({ id: 'mem_a' })], [`${'约'.repeat(BASELINE_MAX_CHARS - 13)} ${FAKE_SECRET.github} 后面还有别的约定`])
+    expect(user).not.toContain(FAKE_SECRET.github.slice(0, 12))
+  })
+
   it('每条记忆带上名称，说明文字里提到记忆时写名称', () => {
     const { system, user } = buildSemanticPrompt([record({ id: 'mem_a', name: '包管理用 pnpm' })], null)
     expect(user).toContain('  name: 包管理用 pnpm')

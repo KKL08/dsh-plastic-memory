@@ -5,7 +5,7 @@
 import { useEffect, useRef, useSyncExternalStore } from 'react'
 import type { MemoryCommand, MemoryCommandResult } from '../src/gui/contract.ts'
 import { createDeletionStore } from './deletions.ts'
-import type { BorrowedSession, CurrentWorkspace, MemoryGateway, PluginConfig, ViewMap, ViewName, ViewState } from './gateway.ts'
+import type { BorrowedSession, CurrentWorkspace, MemoryGateway, ModelState, PluginConfig, ViewMap, ViewName, ViewState } from './gateway.ts'
 
 export interface FakeGatewayInit {
   session?: BorrowedSession
@@ -74,6 +74,8 @@ export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
   const modelRequests: string[] = []
   const freshRequests: string[] = []
   let config = init.config
+  // 各会话已知的模型状态，同宿主实现：问过（useModel 默认会问）才知道
+  const models = new Map<string, ModelState>()
   // 删除状态和宿主实现同一份逻辑：同一个假网关下的几个界面共用；推来的最近删除、全部记忆视图也进去，等同宿主读到它
   const deletions = createDeletionStore()
   const settle = (name: ViewName) => {
@@ -118,10 +120,21 @@ export function createFakeGateway(init: FakeGatewayInit = {}): FakeGateway {
       sessionRequests.push(workspacePath)
       return session
     },
-    useModel(borrowed) {
-      if (borrowed.kind === 'none') return { status: 'unknown' }
-      modelRequests.push(borrowed.sessionId)
-      return init.model === null ? { status: 'unavailable' } : { status: 'ready', model: init.model }
+    useModel(borrowed, options) {
+      useRevision()
+      const sessionId = borrowed.kind === 'ready' ? borrowed.sessionId : undefined
+      const isAsking = sessionId !== undefined && options?.shouldAsk !== false
+      const answer: ModelState = init.model === null ? { status: 'unavailable' } : { status: 'ready', model: init.model }
+      // 问到的结果记下来，只读不问的地方随后读到（宿主实现在 model-info 回来后通知）
+      useEffect(() => {
+        if (!isAsking || models.has(sessionId)) return
+        models.set(sessionId, answer)
+        bump()
+      })
+      if (sessionId === undefined) return { status: 'unknown' }
+      if (!isAsking) return models.get(sessionId) ?? { status: 'unknown' }
+      modelRequests.push(sessionId)
+      return answer
     },
     useCurrentWorkspace() {
       useRevision()

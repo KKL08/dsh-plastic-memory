@@ -95,6 +95,18 @@ export class CheckupRecordStore {
     for (const { key, result } of results) await this.table.update(key, cur => ({ ...cur, id: key, lastResult: result }))
   }
 
+  /**
+   * 体检之后生成处理建议的用量补记到那次体检的最近一次结果上：这个键的最近一次结果仍是 checkupId 那次才加，
+   * 已被之后的体检换掉的不动。宿主一次都没报过用量的结果从这次的数开始记。
+   */
+  async addUsage(key: string, checkupId: string, tokens: number): Promise<void> {
+    await this.table.update(key, (cur) => {
+      const result = cur?.lastResult
+      if (cur === undefined || result?.checkupId !== checkupId) return undefined
+      return { ...cur, lastResult: { ...result, usageTokens: (result.usageTokens ?? 0) + tokens } }
+    })
+  }
+
   /** 清掉目录已不在的项目的记录（视图生成时调用）；全局、all 等不是项目的键不动。 */
   async removeMissingWorkspaces(workspaces: ReadonlySet<string>): Promise<void> {
     for (const r of await this.list()) {

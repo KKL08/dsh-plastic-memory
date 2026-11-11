@@ -8,7 +8,8 @@
  * 宿主 grep 工具搜记忆根目录时顶层命中、.archive/ 不命中（H16）、
  * 带委派 header 的真子会话存入待确认记忆、检索排在主档后、溯源只限自己的会话、父会话接受后进新会话的注入（H19）。
  * 无 key 也跑的宿主服务契约：经宿主 commands 服务执行 `/memory` 命令，结果过 GUI 契约 schema；自动体检调度器在宿主计时服务登记了定时器。
- * 有 DEEPSEEK_API_KEY 且宿主能选出默认模型时再跑语义扫描与取消两项、以及一次真实的自动体检（H17：无会话、宿主默认模型），否则标 SKIPPED。
+ * 有 DEEPSEEK_API_KEY 且宿主能选出默认模型时再跑语义扫描与取消两项、一次真实的自动体检（H17：无会话、宿主默认模型）、
+ * 一次带出处的处理建议（H20：两条记忆的出处从真会话读回，交给真模型），否则标 SKIPPED。
  * run.sh 随后用同一个 DSH_HOME 再起一次宿主（HOST_CONTRACT_PHASE=restart）：第一趟把
  * 恢复的记录 id 写进交接文件，第二趟跑 H12，证明恢复结果过了进程重启仍可读；H14 第一趟建持久化会话、
  * 写入完整 AGENTS.md 基线，第二趟照宿主恢复配方重开，证明基线投影过了重启仍在。
@@ -26,6 +27,9 @@ import { snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
 import { createSystemMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Context } from '@deepseek-ai/cordis'
 import { memoryCommandResultSchema } from '../../src/gui/contract.ts'
+import { SidecarStore } from '../../src/storage/sidecar.ts'
+import { PendingDecisionsStore } from '../../src/governance/decisions.ts'
+import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../../src/governance/schema.ts'
 
 export const name = 'dsh-plastic-memory-host-contract'
 export const inject = ['tools', 'sessions']
@@ -192,10 +196,10 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
     const hasKey = !!process.env.DEEPSEEK_API_KEY
 
     /** 走界面同一条路执行一行 `/memory …`：宿主 commands 服务按整行执行。返回宿主的执行结果，宿主缺服务或命令没注册时返回原因。 */
-    const runMemoryCommand = async (workspacePath: string, line: string): Promise<{ kind: string; text?: string } | string> => {
+    const runMemoryCommand = async (workspacePath: string, line: string, model: ModelOpts = {}): Promise<{ kind: string; text?: string } | string> => {
       const commands = ctx.get('commands') as Commands | undefined
       if (!commands) return '宿主缺 commands 服务'
-      const agent = { session: sessions.create(undefined, { meta: { cwd: workspacePath } }), options: {} }
+      const agent = { session: sessions.create(undefined, { meta: { cwd: workspacePath } }), options: model }
       const r = await commands.execute(agent, line, [], new AbortController().signal)
       return r === undefined ? '/memory 命令没有注册' : r.result
     }
@@ -719,6 +723,44 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       return {
         ok: s.lastResult?.by === 'auto' && s.lastCheckupAt !== null && s.failure === null && s.modelUnavailable === null && !codes.includes('semantic-failed'),
         detail: `by=${s.lastResult?.by} lastCheckupAt=${s.lastCheckupAt} failure=${JSON.stringify(s.failure?.cause ?? null)} modelUnavailable=${JSON.stringify(s.modelUnavailable)} notes=${codes.join(',')}`,
+      }
+    })
+    // H20 处理建议回查出处：两条项目记忆各在一个真会话里由用户说过一句（出处里带着各自适用的目录），
+    // 账本里挂一条冲突（同体检挂账：记下两条所属的项目），界面同一条路发 /memory suggest，由真模型给建议。
+    // 两条都回查到出处时建议记 isSourced；输出合格式。
+    await attempt('H20-SUGGESTION-SOURCES', async () => {
+      const gate = semanticGate(); if (gate) return gate
+      const ws = mkWs('d')
+      // 两条故意说法相近（要构成冲突），结构去重会拦第二条：带 force 存
+      const saveAfterSaying = async (said: string, name: string, content: string): Promise<string | undefined> => {
+        const exec = mkExec(ws, sel)
+        const session = exec.agent.session as SessionLike
+        session.append('user/message', createUserMessage({ content: [{ type: 'text', text: said }], source: { kind: 'user' } }), { surfaceOp: 'append' })
+        const r = await call('memory_save', { action: 'create', name, summary: content, content, ...MEMORY_BASE, force: true }, exec) as { kind: string; record?: { id: string } }
+        return r.record?.id
+      }
+      const a = await saveAfterSaying('web/ 目录下的前端单元测试用 vitest，跑测试前不用起 5173 端口的 dev server', '前端单测框架', '单元测试用 vitest')
+      const b = await saveAfterSaying('scripts/ 目录里的老脚本测试还在用 jest，这批先别迁', '脚本单测框架', '单元测试用 jest')
+      if (a === undefined || b === undefined) return { ok: false, detail: `保存失败 a=${a} b=${b}` }
+      const sidecar = new SidecarStore({ root: memoriesRoot, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
+      const ledger = new PendingDecisionsStore(sidecar.pending)
+      const { entry } = await ledger.upsert({ memoryIds: [a, b], summary: '单元测试框架矛盾：一条说用 vitest，一条说用 jest', workspaces: [ws, ws], fingerprint: 'h20' }, Date.now())
+      const suggest = () => runMemoryCommand(ws, `/memory suggest ${JSON.stringify({ decisionId: entry.id })}`, sel)
+      let r = await suggest()
+      if (typeof r === 'string') return { ok: false, detail: r }
+      let saved = await ledger.get(entry.id)
+      // 模型偶尔给出读不出的回复，插件如实记成失败、不自动重试；这里同用户点一次「再试一次」
+      if (saved?.suggestion === undefined && saved?.suggestionFailure?.cause.kind === 'unparseable') {
+        r = await suggest()
+        if (typeof r === 'string') return { ok: false, detail: r }
+        saved = await ledger.get(entry.id)
+      }
+      const suggestion = saved?.suggestion
+      if (suggestion === undefined) return { ok: false, detail: `suggest → ${r.kind}: ${r.text}；没有建议，失败原因=${JSON.stringify(saved?.suggestionFailure?.cause ?? null)}` }
+      const draft = suggestion.ops.find(op => op.kind === 'edit')
+      return {
+        ok: r.kind === 'success' && suggestion.isSourced,
+        detail: `action=${suggestion.action} isSourced=${suggestion.isSourced} reason=${suggestion.reason} draft=${draft === undefined ? '（无）' : draft.content}`,
       }
     })
     // H18 在第三趟（凭据换成无效 key）跑；没有 key 时第三趟不起，结果在这里标 SKIPPED

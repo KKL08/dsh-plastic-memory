@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   checkupResultSchema, CROSS_WORKSPACE_COMMANDS, directoryIssueSchema, encodeMemoryCommand, MEMORY_COMMAND_NAME, memoryCommandResultSchema,
-  MAX_BATCH_EDIT, memoryCommandSchema, OPEN_ITEM_COMMANDS, parseMemoryCommand, type MemoryCommand,
+  MAX_BATCH_EDIT, memoryCommandSchema, OPEN_ITEM_COMMANDS, parseMemoryCommand, pendingItemSchema, type MemoryCommand, type RequestedProposal,
 } from '../src/gui/contract.ts'
 import { SAMPLE_COMMANDS } from '../client/command/test-commands.ts'
 
@@ -27,7 +27,7 @@ describe('契约里界面要用的命令集', () => {
       expect({ cmd, isKept: 'allowCrossWorkspace' in parsed }).toEqual({ cmd, isKept: CROSS_WORKSPACE_COMMANDS.has(cmd as never) })
     }
     expect([...CROSS_WORKSPACE_COMMANDS].sort()).toEqual([
-      'apply-edits', 'confirm', 'edit-memory', 'forget', 'hard-delete', 'keep-local', 'keep-local-memory', 'merge-memories', 'move-memory',
+      'apply-edits', 'apply-proposal', 'confirm', 'edit-memory', 'forget', 'hard-delete', 'keep-local', 'keep-local-memory', 'merge-memories', 'move-memory',
       'promote', 'promote-memory', 'resolve', 'restore', 'undo',
     ])
   })
@@ -176,5 +176,100 @@ describe('apply-edits（整理所选应用全部）', () => {
     expect(memoryCommandResultSchema.parse(JSON.parse(JSON.stringify(failure)))).toEqual(failure)
     const { memoryIds: _ids, ...bare } = failure
     expect(memoryCommandResultSchema.parse(bare)).toEqual(bare)
+  })
+})
+
+describe('suggest（补上建议）与待处理冲突项的处理建议', () => {
+  it('suggest 只带条目 id', () => {
+    const command: MemoryCommand = { cmd: 'suggest', decisionId: 'pd_1' }
+    expect(parseMemoryCommand(encodeMemoryCommand(command).slice(`/${MEMORY_COMMAND_NAME} `.length))).toEqual({ ok: true, command })
+    expect(memoryCommandSchema.safeParse({ cmd: 'suggest' }).success).toBe(false)
+  })
+
+  const horizontal = {
+    kind: 'conflict-horizontal', level: 'your-call', decisionId: 'pd_1', firstSeenAt: 1, summary: 's', left: null, right: null,
+  }
+  it('横向冲突项可带处理建议（四种结论、三种操作）或没有建议的原因码；不认识的结论、原因码拒绝', () => {
+    const item = (extra: object) => pendingItemSchema.safeParse({ ...horizontal, ...extra }).success
+    const suggestion = (action: string) => ({
+      id: 'sg_1', action, reason: 'r', isSourced: false,
+      ops: [{ kind: 'edit', memoryId: 'a', content: 'c', name: 'n', summary: 's', tags: [] }, { kind: 'forget', memoryId: 'b' }, { kind: 'keep', memoryId: 'c' }],
+    })
+    // 结论代码横向、垂直共用一个枚举（垂直的 rewrite、delete 见下一条）
+    expect(['merge', 'keep-a', 'keep-b', 'keep-both', 'replace'].map(a => item({ suggestion: suggestion(a) }))).toEqual([true, true, true, true, false])
+    expect(['has-secret', 'not-generated', 'failed', 'quota'].map(code => item({ noSuggestion: { code } }))).toEqual([true, true, true, false])
+    expect(item({ noSuggestion: { code: 'failed', cause: { kind: 'model-error', hostCode: 'AUTH' } } })).toBe(true)
+    expect(item({ noSuggestion: { code: 'failed', cause: { kind: 'secret-in-draft' } } })).toBe(true)
+    expect(item({})).toBe(true)
+  })
+
+  it('模型判断不了：原因码 undecided 带理由；unsure 不是处理方案的结论，判断不了也不当作生成失败的原因', () => {
+    const item = (extra: object) => pendingItemSchema.safeParse({ ...horizontal, ...extra }).success
+    expect(item({ noSuggestion: { code: 'undecided', reason: '需要你确认用哪个' } })).toBe(true)
+    expect(item({ suggestion: { id: 'sg_1', action: 'unsure', reason: 'r', isSourced: false, ops: [] } })).toBe(false)
+    expect(item({ noSuggestion: { code: 'failed', cause: { kind: 'undecided' } } })).toBe(false)
+  })
+
+  it('垂直冲突项（票 10）可带处理建议（改写、删除、都保留，带基线所属项目）或没有建议的原因码（含缺基线）、「正在生成」标记', () => {
+    const vertical = { kind: 'conflict-vertical', level: 'your-call', decisionId: 'pd_v', firstSeenAt: 1, summary: 's', memory: null, baselineRef: 'AGENTS.md：包管理' }
+    const item = (extra: object) => pendingItemSchema.safeParse({ ...vertical, ...extra }).success
+    const suggestion = (action: string) => ({ id: 'sg_v', action, reason: 'r', isSourced: false, baselineWorkspace: '/w/app', ops: [{ kind: 'forget', memoryId: 'v' }] })
+    expect(['rewrite', 'delete', 'keep-both'].map(a => item({ suggestion: suggestion(a) }))).toEqual([true, true, true])
+    expect(['no-baseline', 'not-generated', 'has-secret'].map(code => item({ noSuggestion: { code } }))).toEqual([true, true, true])
+    expect(item({ noSuggestion: { code: 'not-generated' }, isGeneratingSuggestion: true })).toBe(true)
+  })
+
+  it('自动体检名额用完：单独的原因码 quota-exhausted，不当作生成失败的原因；「正在生成」标记和没有建议的原因并存', () => {
+    const item = (extra: object) => pendingItemSchema.safeParse({ ...horizontal, ...extra }).success
+    expect(item({ noSuggestion: { code: 'quota-exhausted' } })).toBe(true)
+    expect(item({ noSuggestion: { code: 'failed', cause: { kind: 'quota-exhausted' } } })).toBe(false)
+    expect(item({ noSuggestion: { code: 'not-generated' }, isGeneratingSuggestion: true })).toBe(true)
+    expect(item({ isGeneratingSuggestion: false })).toBe(false)
+  })
+})
+
+describe('apply-proposal（采纳建议）', () => {
+  it('只带条目 id 和建议 id（不回传建议内容），可带跨项目确认；not-found 算别处已处理', () => {
+    const command: MemoryCommand = { cmd: 'apply-proposal', decisionId: 'pd_1', suggestionId: 'sg_1' }
+    expect(parseMemoryCommand(encodeMemoryCommand(command).slice(`/${MEMORY_COMMAND_NAME} `.length))).toEqual({ ok: true, command })
+    expect(memoryCommandSchema.safeParse({ cmd: 'apply-proposal', decisionId: 'pd_1' }).success).toBe(false)
+    expect(memoryCommandSchema.parse({ cmd: 'apply-proposal', decisionId: 'pd_1', suggestionId: 'sg_1', action: 'keep-a' })).toEqual(command)
+    expect(CROSS_WORKSPACE_COMMANDS.has('apply-proposal')).toBe(true)
+    expect(OPEN_ITEM_COMMANDS.has('apply-proposal')).toBe(true)
+  })
+})
+
+describe('补充要求：draft-proposal 与按要求应用', () => {
+  const base = { updatedAt: 1, digest: 'd' }
+  const basis = { conflictFingerprint: 'cf', memories: [{ memoryId: 'a', fingerprint: 'fa', scopeKey: 'global' }, { memoryId: 'b', fingerprint: 'fb', scopeKey: 'global' }] }
+  const proposal: RequestedProposal = {
+    action: 'merge', reason: '各有场景', basis,
+    ops: [{ kind: 'edit', memoryId: 'a', content: 'c', name: 'n', summary: 's', tags: [] }, { kind: 'forget', memoryId: 'b' }],
+  }
+
+  it('draft-proposal 带条目 id、要求（只有空白算没写）、两条的卡片版本，可带此前的要求和上一份方案（不带依据）；只读，不过跨项目门；not-found 算别处已处理', () => {
+    const command: MemoryCommand = {
+      cmd: 'draft-proposal', decisionId: 'pd_1', request: '两者融合', bases: [base, base], priorRequests: ['以 A 为准'],
+      previous: { action: proposal.action, reason: proposal.reason, ops: proposal.ops },
+    }
+    expect(parseMemoryCommand(encodeMemoryCommand(command).slice(`/${MEMORY_COMMAND_NAME} `.length))).toEqual({ ok: true, command })
+    const accepts = (args: object) => memoryCommandSchema.safeParse({ cmd: 'draft-proposal', decisionId: 'pd_1', bases: [base, base], ...args }).success
+    // 垂直冲突只有一条记忆，带一份卡片版本；三份不收
+    expect([accepts({ request: '融合' }), accepts({ request: '  ' }), accepts({}), accepts({ request: '改写', bases: [base] }), accepts({ request: '融合', bases: [base, base, base] })])
+      .toEqual([true, false, false, true, false])
+    expect(CROSS_WORKSPACE_COMMANDS.has('draft-proposal' as never)).toBe(false)
+    expect(OPEN_ITEM_COMMANDS.has('draft-proposal')).toBe(true)
+  })
+
+  it('apply-proposal 依据二选一：建议 id，或按要求生成的方案（操作、依据版本）；按要求的可带 force', () => {
+    const command: MemoryCommand = { cmd: 'apply-proposal', decisionId: 'pd_1', proposal, force: true }
+    expect(parseMemoryCommand(encodeMemoryCommand(command).slice(`/${MEMORY_COMMAND_NAME} `.length))).toEqual({ ok: true, command })
+    const accepts = (args: object) => memoryCommandSchema.safeParse({ cmd: 'apply-proposal', decisionId: 'pd_1', ...args }).success
+    expect([accepts({ suggestionId: 'sg_1', proposal }), accepts({}), accepts({ proposal: { ...proposal, basis: undefined } })]).toEqual([false, false, false])
+  })
+
+  it('结果：按要求生成的方案带依据版本；做不到只有一句说明', () => {
+    const result = (extra: object) => memoryCommandResultSchema.safeParse({ ok: true, cmd: 'draft-proposal', ...extra }).success
+    expect([result({ proposal }), result({ infeasible: { reason: '两条里都没有端口号' } }), result({ infeasible: {} })]).toEqual([true, true, false])
   })
 })
