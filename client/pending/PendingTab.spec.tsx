@@ -2427,6 +2427,23 @@ describe('横向冲突卡：采纳建议、直接处理（票 05）', () => {
     expect(screen.getByRole('button', { name: '撤销' })).toBeInTheDocument()
   })
 
+  it('建议回查过两条的出处：说明行先写这一句，再写采纳后果；没回查到时不写', () => {
+    const first = setup([withState({ suggestion: { ...keepA, isSourced: true } })])
+    expect(screen.getByText('建议是回查两条的出处后给出的。采纳后 B 进最近删除，14 天内可恢复。')).toBeInTheDocument()
+    first.unmount()
+    const second = setup([withState({ suggestion: { ...keepBoth, isSourced: true } })])
+    expect(screen.getByText('建议是回查两条的出处后给出的。采纳后两条都留着，以后体检不再把它们当冲突。')).toBeInTheDocument()
+    second.unmount()
+    setup([withState({ suggestion: keepA })])
+    expect(screen.queryByText(/出处/)).toBeNull()
+  })
+
+  it('英文界面：回查过出处的说明行', () => {
+    const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(withState({ suggestion: { ...keepA, isSourced: true } })), health: scannedHealth(NOW) } })
+    render(<PanelShell gateway={gateway} t={createTranslator(en)}><PendingTab nav={createNavStore()} session={SESSION} scope={ALL_SCOPE} workspacePath="/w/app" now={NOW} /></PanelShell>)
+    expect(screen.getByText('This suggestion was made after looking up the conversations both memories came from. If you adopt it, B moves to Recently deleted and can be restored within 14 days.')).toBeInTheDocument()
+  })
+
   it('建议保留 B：采纳后「已保留 B」，A 进最近删除', async () => {
     setup([withState({ suggestion: { ...keepA, action: 'keep-b', ops: [{ kind: 'forget', memoryId: 'a' }, { kind: 'keep', memoryId: 'b' }] } })])
     expect(screen.getByText('采纳后 A 进最近删除，14 天内可恢复。')).toBeInTheDocument()

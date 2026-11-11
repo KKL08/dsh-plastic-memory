@@ -1,4 +1,5 @@
 import type { MemoryStore } from '../store.ts'
+import type { MemoryRecord } from '../record-schema.ts'
 import type { SourceRejectCode } from '../contract-codes.ts'
 import { HAND_EDITED_NOTE } from '../index-line.ts'
 import { maskSecretSurface } from '../secrets.ts'
@@ -14,7 +15,7 @@ export interface ReadEventFn {
   }>
 }
 
-interface RawEvent {
+export interface RawEvent {
   type?: string
   seq?: number
   time?: number
@@ -67,6 +68,27 @@ export function extractEventText(event: RawEvent): { role: string; text: string 
 }
 
 /**
+ * 按记忆的出处锚开窗（memory_source 和处理建议的出处回查共用）。
+ * 创建者仍是子会话（锚还在子会话里）：入口 = 保存点（end）往前开窗，不越过本轮起点（start），往后多读一条。
+ * 子级整个任务常常只有一轮，往后开只看得到委派指令，它的观察在保存点之前的工具结果里；
+ * 不越过本轮起点，fork 型子会话就读不到继承来的父会话前缀。
+ * 其余（主会话的记录、主会话改写过的子会话记录）：入口 = 当轮 turn/start（start）往后开窗——触发保存的用户原话
+ * 紧随 turn/start，必在窗内。真机教训：主会话长 turn（宽度 >> cap）从 end 往前开，只读到 turn 尾部的结构事件，用户原话够不着。
+ * window 覆盖默认宽度，封顶 WINDOW_CAP。
+ */
+export function sourceWindow(
+  record: Pick<MemoryRecord, 'delegation'> & { source: NonNullable<MemoryRecord['source']> },
+  window?: number,
+): Parameters<ReadEventFn>[0] {
+  const { source } = record
+  const [start, end] = source.eventRange
+  const width = Math.min(Math.max(window ?? end - start, 1), WINDOW_CAP)
+  return record.delegation?.sessionId === source.sessionId
+    ? { sessionId: source.sessionId, seq: end, before: Math.min(width, end - start), after: 1 }
+    : { sessionId: source.sessionId, seq: start, before: 2, after: width }
+}
+
+/**
  * memory_source 纯逻辑：memoryId → store 取锚 → readEvent 单点+窗口 → 紧凑渲染。
  * 锚在工具内部解析，模型构造不出任意 sessionId+seq；可读位置被记忆库枚举死。
  */
@@ -101,16 +123,7 @@ export async function executeSource(
   if (!readEvent) return { kind: 'unavailable', memoryId: args.memoryId, reason: '会话查询服务未挂载' }
 
   const [start, end] = source.eventRange
-  const width = Math.min(Math.max(args.window ?? end - start, 1), WINDOW_CAP)
-  // 创建者仍是子会话（锚还在子会话里）：入口 = 保存点（end）往前开窗，不越过本轮起点（start），往后多读一条。
-  // 子级整个任务常常只有一轮，往后开只看得到委派指令，它的观察在保存点之前的工具结果里；
-  // 不越过本轮起点，fork 型子会话就读不到继承来的父会话前缀。
-  // 其余（主会话的记录、主会话改写过的子会话记录）：入口 = 当轮 turn/start（start）往后开窗——触发保存的用户原话
-  // 紧随 turn/start，必在窗内。真机教训：主会话长 turn（宽度 >> cap）从 end 往前开，只读到 turn 尾部的结构事件，用户原话够不着。
-  // window 覆盖默认宽度，封顶 WINDOW_CAP。
-  const request = record.delegation?.sessionId === source.sessionId
-    ? { sessionId: source.sessionId, seq: end, before: Math.min(width, end - start), after: 1 }
-    : { sessionId: source.sessionId, seq: start, before: 2, after: width }
+  const request = sourceWindow({ ...record, source }, args.window)
   let win: Awaited<ReturnType<ReadEventFn>>
   try {
     win = await readEvent(request)

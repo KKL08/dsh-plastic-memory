@@ -31,6 +31,7 @@ import { runSavePipeline } from '../src/pipeline.ts'
 import { executeForget } from '../src/tools/forget.ts'
 import { executeSnapshotTool } from '../src/tools/snapshot.ts'
 import { executeScan } from '../src/tools/scan.ts'
+import type { ReadEventFn } from '../src/tools/source.ts'
 import { scopeAt, scopeCacheKey, type Scope } from '../src/scope.ts'
 import { locateCopy } from '../src/tools/workspace-gate.ts'
 import { fakeExec } from './helpers/exec.ts'
@@ -70,6 +71,8 @@ interface EnvOpts {
   table?: MemoryTable
   /** 侧表的旧 KV 导入来源（缺省没有旧 KV 可导）。 */
   openLegacyKv?: () => Promise<LegacyKvTables | undefined>
+  /** 宿主的读事件服务（缺省没有，同较老宿主）。 */
+  readEvent?: ReadEventFn
 }
 
 function env(opts: EnvOpts = {}) {
@@ -103,6 +106,7 @@ function env(opts: EnvOpts = {}) {
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),
     host: { contextOf: async () => ({ workspacePath: 'workspacePath' in opts ? opts.workspacePath : SESSION_WS, delegationDepth: opts.delegationDepth ?? 0, session: { id: 'sess-1' } }), llmOf: () => (opts.llm === undefined ? null : opts.llm), baselineOf: () => opts.baseline ?? null },
     ...(opts.governanceEnabled !== undefined ? { isGovernanceEnabled: () => opts.governanceEnabled! } : {}),
+    ...(opts.readEvent !== undefined ? { getReadEvent: () => opts.readEvent! } : {}),
     isLegacyImportSettled: () => sidecar.isLegacyImportSettled(),
     now: () => clock.now,
   })
@@ -5042,6 +5046,108 @@ describe('suggest（补上建议）', () => {
     const entry = await seedPair(e)
     ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
     expect((await e.decisions.get(entry.id))!.suggestion!.reason).toBe('A 里写了 [已隐藏]')
+  })
+
+  describe('回查出处', () => {
+    /** 宿主读事件服务的替身：按会话 id 给一条用户消息、一条助手回复；不认识的会话按宿主抛 not found。记下问过哪些会话。 */
+    function sessionsSaying(said: Record<string, string>) {
+      const asked: string[] = []
+      const readEvent: ReadEventFn = async ({ sessionId }) => {
+        asked.push(sessionId)
+        const text = said[sessionId]
+        if (text === undefined) throw new Error(`session "${sessionId}" not found`)
+        return {
+          session: { id: sessionId, cwd: SESSION_WS },
+          events: [
+            { type: 'user/message', seq: 1, data: { id: `u-${sessionId}`, role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } } },
+            { type: 'tool/result', seq: 2, data: { message: { role: 'tool', content: [{ type: 'text', text: `工具输出-${sessionId}` }] } } },
+            { type: 'assistant/message', seq: 3, data: { turn: 1, step: 1, message: { id: `a-${sessionId}`, role: 'assistant', content: [{ type: 'text', text: '好的，记下了' }], source: { kind: 'model' } } } },
+          ],
+        }
+      }
+      return { readEvent, asked }
+    }
+    const anchored = (id: string, content: string, partial: Partial<MemoryRecord> = {}) => record({
+      id, name: id, content, scope: 'workspace', workspacePath: SESSION_WS, source: { sessionId: `sess-${id}`, eventRange: [0, 4], sourceMode: 'user-explicit' }, ...partial,
+    })
+    /** 体检挂账的样子：条目记下每条所属的作用域。 */
+    async function seedAnchored(e: ReturnType<typeof env>, b: Partial<MemoryRecord> = {}) {
+      const right = anchored('mem_b', '用 npm', b)
+      await e.store.create(anchored('mem_a', '用 pnpm'))
+      await e.store.create(right)
+      const label = right.scope === 'global' ? 'global' : right.workspacePath!
+      return (await e.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', workspaces: [SESSION_WS, label], fingerprint: 'fp-ab' }, 1)).entry
+    }
+
+    it('两条都回查到：提示词带两段出处（只有用户和助手的话，遮过疑似密钥），建议记 isSourced 为真，视图里也是', async () => {
+      const { llm, prompts } = scripted(KEEP_A)
+      const { readEvent } = sessionsSaying({ 'sess-mem_a': '前端仓库用 pnpm，password: abc12345x', 'sess-mem_b': '脚本仓库用 npm' })
+      const e = env({ llm, readEvent })
+      const entry = await seedAnchored(e)
+      ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+      const { user } = prompts[0]!
+      expect(user).toContain('## 记忆 A 的出处')
+      expect(user).toContain('## 记忆 B 的出处')
+      expect(user).toContain('前端仓库用 pnpm，[已隐藏]')
+      expect(user).toContain('好的，记下了')
+      expect(user).not.toContain('abc12345x')
+      expect(user).not.toContain('工具输出')
+      expect((await e.decisions.get(entry.id))!.suggestion!.isSourced).toBe(true)
+      expect((await horizontalOf(e, entry.id)).suggestion?.isSourced).toBe(true)
+    })
+
+    it('全局与项目之间的冲突：两个作用域的出处都读', async () => {
+      const { llm, prompts } = scripted(KEEP_A)
+      const { readEvent, asked } = sessionsSaying({ 'sess-mem_a': '前端仓库用 pnpm', 'sess-mem_b': '所有项目默认 npm' })
+      const e = env({ llm, readEvent })
+      const entry = await seedAnchored(e, { scope: 'global', workspacePath: undefined })
+      ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+      expect(asked.sort()).toEqual(['sess-mem_a', 'sess-mem_b'])
+      expect(prompts[0]!.user).toContain('所有项目默认 npm')
+      expect((await e.decisions.get(entry.id))!.suggestion!.isSourced).toBe(true)
+    })
+
+    it('只读到一条（另一条的会话不在了）：照常生成，只带那一段，isSourced 为假', async () => {
+      const { llm, prompts } = scripted(KEEP_A)
+      const { readEvent } = sessionsSaying({ 'sess-mem_a': '前端仓库用 pnpm' })
+      const e = env({ llm, readEvent })
+      const entry = await seedAnchored(e)
+      ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+      expect(prompts[0]!.user).toContain('## 记忆 A 的出处')
+      expect(prompts[0]!.user).not.toContain('## 记忆 B 的出处')
+      expect(prompts[0]!.system).toContain('记忆 B 没有查到出处')
+      expect((await e.decisions.get(entry.id))!.suggestion!.isSourced).toBe(false)
+      expect((await horizontalOf(e, entry.id)).suggestion?.isSourced).toBe(false)
+    })
+
+    it('宿主没有读事件服务（较老宿主）：照常生成，不带出处、不提回查，不报错', async () => {
+      const { llm, prompts } = scripted(KEEP_A)
+      const e = env({ llm })
+      const entry = await seedAnchored(e)
+      ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+      expect(prompts[0]!.system).not.toContain('出处')
+      expect(prompts[0]!.user).not.toContain('出处')
+      expect((await e.decisions.get(entry.id))!.suggestion!.isSourced).toBe(false)
+    })
+
+    it('拿不到模型、已有当前建议、含高危密钥时不去读会话', async () => {
+      const { readEvent, asked } = sessionsSaying({ 'sess-mem_a': 'a', 'sess-mem_b': 'b' })
+      const none = env({ llm: null, readEvent })
+      expect(err(await none.run({ cmd: 'suggest', decisionId: (await seedAnchored(none)).id })).code).toBe('llm-unavailable')
+      await rm(root, { recursive: true, force: true })
+      root = await mkdtemp(join(tmpdir(), 'pm-gui-commands-'))
+      const secret = env({ llm: scripted(KEEP_A).llm, readEvent })
+      expect(err(await secret.run({ cmd: 'suggest', decisionId: (await seedAnchored(secret, { content: `用 npm，${FAKE_SECRET.github}` })).id })).code).toBe('has-secret')
+      expect(asked).toEqual([])
+      await rm(root, { recursive: true, force: true })
+      root = await mkdtemp(join(tmpdir(), 'pm-gui-commands-'))
+      const current = env({ llm: scripted(KEEP_A).llm, readEvent })
+      const entry = await seedAnchored(current)
+      ok(await current.run({ cmd: 'suggest', decisionId: entry.id }))
+      asked.length = 0
+      ok(await current.run({ cmd: 'suggest', decisionId: entry.id }))
+      expect(asked).toEqual([])
+    })
   })
 })
 

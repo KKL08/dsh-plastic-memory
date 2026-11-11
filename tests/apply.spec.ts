@@ -88,6 +88,8 @@ function mockCtx(opts: {
   timer?: { timeout(callback: () => void, delayMs: number): () => void; interval(callback: () => void, delayMs: number): () => void }
   /** 宿主默认模型选择（ctx.get('agentDefaultModel')）；缺省服务缺席。 */
   agentDefaultModel?: { currentSelection(): { provider: string; model: string } }
+  /** 宿主会话查询（ctx.get('sessionQuery')）；缺省服务缺席。 */
+  sessionQuery?: unknown
 } = {}) {
   const registered: string[] = []
   const listeners = new Map<string, (...args: unknown[]) => unknown>()
@@ -142,7 +144,8 @@ function mockCtx(opts: {
       : name === 'sessionProjections' ? opts.projections
         : name === 'storageDomain' && opts.storageDomain === true ? storageDomain
           : name === 'agentDefaultModel' ? opts.agentDefaultModel
-            : undefined),
+            : name === 'sessionQuery' ? opts.sessionQuery
+              : undefined),
     // 按依赖名分发，像 cordis 一样只在依赖的服务都在时才回调
     inject: (deps: string[], callback: (child: Record<string, unknown>) => unknown) => {
       const collect = (dispose: unknown) => { if (typeof dispose === 'function') disposers.push(dispose as () => unknown) }
@@ -360,10 +363,10 @@ async function startupViews(memoryRoot: string): Promise<void> {
 /** GUI 半侧的服务端接线：commands 服务在时注册 /memory 命令处理器，缺席时静默跳过；加载期都不碰磁盘。 */
 describe('GUI 命令接线', () => {
   type CommandDef = { name: string; handler(inv: { rawInput: string; agent: unknown }): Promise<{ kind: string; text?: string }> }
-  async function withCommands() {
+  async function withCommands(o: { sessionQuery?: unknown } = {}) {
     const memoryRoot = await makeTmpRoot()
     const defs: CommandDef[] = []
-    const ctx = mockCtx({ commands: { register: (def) => { defs.push(def as CommandDef); return () => {} } } })
+    const ctx = mockCtx({ commands: { register: (def) => { defs.push(def as CommandDef); return () => {} } }, ...o })
     await apply({ ...ctx, logger: { info() {}, warn() {}, error() {} } } as never, new Config({ memoryRoot } as never))
     ctx.listeners.get('session/created')!({ id: 'sess-x' })
     await startupViews(memoryRoot)
@@ -406,8 +409,8 @@ describe('GUI 命令接线', () => {
   describe('让模型改：经宿主 llm 服务', () => {
     // 会话带 provider/model（makeSemanticLlm 三层解析的第二层），模型才解析得到
     const routed = { session: { header: { id: 'sess-x' }, seq: 1, requestHeader: () => undefined }, options: { provider: 'deepseek', model: 'deepseek-v4-flash' } }
-    async function withMemory() {
-      const t = await withCommands()
+    async function withMemory(o: { sessionQuery?: unknown } = {}) {
+      const t = await withCommands(o)
       await mkdir(join(t.memoryRoot, 'global'), { recursive: true })
       const file = join(t.memoryRoot, 'global', 'long.md')
       await writeFile(file, encodeRecord(record({ id: 'mem_long', name: '发版流程', content: '先跑测试，再打包，再发版。', summary: '发版步骤' }), {}), 'utf8')
@@ -442,6 +445,28 @@ describe('GUI 命令接线', () => {
       expect(request!.messages).toHaveLength(1)
       expect(Object.keys(request!.messages[0] as object).sort()).toEqual(['content', 'role'])
       expect(await readFile(t.file, 'utf8')).toBe(before)
+    })
+
+    it('补上建议经宿主 sessionQuery 回查两条的出处：没有会话也照常读，用户原话进提示词，建议记回查过出处', async () => {
+      const reads: string[] = []
+      const sessionQuery = {
+        readEvent: async ({ sessionId }: { sessionId: string }) => {
+          reads.push(sessionId)
+          return { events: [{ type: 'user/message', seq: 1, data: { id: `u-${sessionId}`, role: 'user', content: [{ type: 'text', text: `${sessionId} 里的原话` }], source: { kind: 'user' } } }] }
+        },
+      }
+      const t = await withMemory({ sessionQuery })
+      for (const id of ['mem_pa', 'mem_pb']) {
+        const r = record({ id, name: id, content: id === 'mem_pa' ? '用 pnpm' : '用 npm', source: { sessionId: `sess-${id}`, eventRange: [0, 2], sourceMode: 'user-explicit' } })
+        await writeFile(join(t.memoryRoot, 'global', `${id}.md`), encodeRecord(r, {}), 'utf8')
+      }
+      const { entry } = await new PendingDecisionsStore(sidecarAt(t.memoryRoot).pending)
+        .upsert({ memoryIds: ['mem_pa', 'mem_pb'], summary: '包管理器矛盾', workspaces: ['global', 'global'], fingerprint: 'fp' }, 1)
+      t.ctx.llmScript.push([{ type: 'text-delta', index: 0, text: '{"action":"keep-a","reason":"A 是明确说过的"}' }, { type: 'finish', reason: { kind: 'stop' } }])
+      expect(await t.run(`/memory suggest ${JSON.stringify({ decisionId: entry.id })}`)).toMatchObject({ ok: true, cmd: 'suggest' })
+      expect(reads.sort()).toEqual(['sess-mem_pa', 'sess-mem_pb'])
+      expect(JSON.stringify(t.ctx.llmRequests[0]!.messages)).toContain('sess-mem_pa 里的原话')
+      expect((await new PendingDecisionsStore(sidecarAt(t.memoryRoot).pending).get(entry.id))!.suggestion).toMatchObject({ action: 'keep-a', isSourced: true })
     })
 
     it('流已吐出合法 JSON 却以 error 收尾：按失败返回（llm-failed），不重试', async () => {

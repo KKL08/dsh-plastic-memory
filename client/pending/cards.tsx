@@ -290,7 +290,7 @@ function mergeSidesOf(suggestion: NonNullable<Item<'conflict-horizontal'>['sugge
  * 横向冲突卡（记忆页）A、B 下面的整块：处理建议块、说明行、按钮行（spec 故事 4–6、9、19、23、24）。
  * - 有建议时「采纳建议」（主按钮）发 apply-proposal，只带条目 id 和建议 id，一次落盘、不加确认——建议内容（融合稿也在）都在卡上，
  *   删掉的一方进最近删除、能撤销。保留一方时要删的那条含高危密钥会彻底删除，先原位确认（融合建议不会碰到：含高危密钥的不生成建议）。
- *   说明行写采纳后哪条去哪。
+ *   说明行写采纳后哪条去哪；建议回查过两条的出处时，前面先写这一句。
  * - 后面是直接处理的三个按钮「保留 A / 保留 B / 都保留，不算冲突」，不过模型：点了原位确认一句，再走现有裁决命令 resolve。
  *   没有建议（含密钥、还没生成、失败、模型判断不了）时只有这三个按钮。
  * - 采纳时服务端回 stale（建议已换了一份，或两条在建议生成后被改过）：什么都没动。卡上这份建议当作失效，建议块写明原因、
@@ -340,6 +340,9 @@ function HorizontalActions({ item, session, onDone, onRefused }: Pick<CardProps<
     : adopted === undefined ? undefined
     : adopted === horizontal.keepBoth ? t('pending.conflict.adoptNoteKeepBoth')
       : t(isPurge(adopted) ? 'pending.conflict.adoptNotePurge' : 'pending.conflict.adoptNote', { drop: sides(adopted)!.drop })
+  // 两条都回查到出处时说明行先交代一句（由服务端按实际放进提示词的片段定）；没回查到就不提
+  const sourced = suggestion?.isSourced === true ? t('pending.suggestion.sourced') : undefined
+  const note = sourced === undefined ? adoptNote : adoptNote === undefined ? sourced : t('conflict.twoSentences', { first: sourced, second: adoptNote })
   const direct = [
     [horizontal.keepA, t('pending.conflict.keepA')],
     [horizontal.keepB, t('pending.conflict.keepB')],
@@ -399,7 +402,7 @@ function HorizontalActions({ item, session, onDone, onRefused }: Pick<CardProps<
           />
         )
         : null}
-      {adoptNote !== undefined ? <AdviceNote label="note">{adoptNote}</AdviceNote> : null}
+      {note !== undefined ? <AdviceNote label="note">{note}</AdviceNote> : null}
       {row}
       {action.feedback}
     </>

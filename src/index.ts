@@ -306,17 +306,16 @@ export async function apply(ctx: Context, config: Config) {
   registerWrite(createSnapshotTool({ store, snapshots, host }))
   // memory_source：证据下钻（日常 + 治理都用，常驻）。sessionQuery 是 base bundle 默认服务，
   // 但按 llm 同款惯例 per-call 探测 + try/catch——某些 profile 缺席时工具内优雅降级，不挂载失败。
-  ctx.tools.register(createSourceTool({
-    store, host,
-    getReadEvent: () => {
-      try {
-        const sq = ctx.get('sessionQuery') as { readEvent?: ReadEventFn } | undefined
-        return sq?.readEvent ? sq.readEvent.bind(sq) as ReadEventFn : null
-      } catch {
-        return null
-      }
-    },
-  }))
+  // 生成处理建议时回查出处也用它（经 /memory 命令注入），没有会话的进程里同样能读。
+  const getReadEvent = (): ReadEventFn | null => {
+    try {
+      const sq = ctx.get('sessionQuery') as { readEvent?: ReadEventFn } | undefined
+      return sq?.readEvent ? sq.readEvent.bind(sq) as ReadEventFn : null
+    } catch {
+      return null
+    }
+  }
+  ctx.tools.register(createSourceTool({ store, host, getReadEvent }))
   // 体检、健康分、裁决、提升四个工具随体检开关注册 / 注销（开关热更新时再同步一次）。
   // 灵敏度与提升目标不必重注册：工具执行时经 getter 现读配置。
   let governanceTools: Array<() => void> = []
@@ -371,6 +370,7 @@ export async function apply(ctx: Context, config: Config) {
       host, log: ctx.logger,
       isGovernanceEnabled: () => config.governance.enabled.get(),
       isLegacyImportSettled: () => sidecar.isLegacyImportSettled(),
+      getReadEvent,
     }))
     // 卸载时（插件重载、commands 服务撤下）停写视图：cordis 卸载会 await 这个 disposer，
     // 进行中的写入落完才轮到新实例加载，旧实例的迟到写入不会盖掉新视图

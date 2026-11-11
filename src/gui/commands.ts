@@ -30,6 +30,8 @@ import {
 import type { ViewWriter } from './view-writer.ts'
 import { generateDraft } from './model-draft.ts'
 import { generateSuggestion } from './model-suggestion.ts'
+import { readSuggestionSources } from './suggestion-source.ts'
+import type { ReadEventFn } from '../tools/source.ts'
 import { generatePlan } from './model-plan.ts'
 import { generatePlanDrafts } from './model-draft-plan.ts'
 import { processInterval, runCheckup, type IntervalTimer } from './checkup-run.ts'
@@ -69,6 +71,8 @@ export interface MemoryCommandDeps {
   isGovernanceEnabled?: () => boolean
   /** 旧 KV 导入是否已结清（导完且旧行已删）；缺省视为已结清。没结清时彻底删除回 failed：续传会把旧快照里的明文放回来。 */
   isLegacyImportSettled?: () => Promise<boolean>
+  /** 宿主的读事件服务（用时探测，同 memory_source）：生成处理建议时回查两条记忆的出处。缺省或返回 null 时不带出处。 */
+  getReadEvent?: () => ReadEventFn | null
   log?: MemoryLogger
   now?: () => number
 }
@@ -1115,10 +1119,12 @@ async function dispatch(
       if (llm === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型')
       // 依据版本按生成前读到的算：生成在认领之外（模型调用可能超过认领的 60 秒），写入时认领、重读、核对它
       const basis = suggestionBasis(entry, pair)
-      const generated = await generateSuggestion({ summary: entry.summary, records: pair }, llm)
+      // 出处按冲突所属的作用域回查；读不到的那条不带，是否回查过由生成器按实际放进提示词的片段定
+      const [sourceA, sourceB] = await readSuggestionSources({ workspaces: entry.workspaces, records: pair }, deps.getReadEvent?.() ?? null)
+      const generated = await generateSuggestion({ summary: entry.summary, records: pair, sources: [sourceA, sourceB] }, llm)
       const model = llm.model !== undefined ? { model: llm.model } : {}
       const outcome = generated.ok
-        ? { suggestion: { id: genId('sg'), action: generated.action, reason: generated.reason, ops: generated.ops, basis, isSourced: false, generatedAt: now } }
+        ? { suggestion: { id: genId('sg'), action: generated.action, reason: generated.reason, ops: generated.ops, basis, isSourced: generated.isSourced, generatedAt: now } }
         : { failure: { basis, cause: generated.cause, at: now } }
       const written = await deps.decisions.writeSuggestion(entry.id, outcome, read)
       if (written === 'gone') return notFound(entry.id)

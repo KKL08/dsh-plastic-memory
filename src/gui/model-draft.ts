@@ -102,16 +102,44 @@ export const draftOutputSchema = z.object({
   tags: z.array(z.string().trim().min(1)).nullish(),
 })
 
-/** 模型回复里的 JSON 对象（容忍外面包了代码块或前后多了话）：取第一个 { 到最后一个 }；解析不了为 undefined。 */
+/**
+ * 模型回复里的 JSON 对象（容忍外面包了代码块或前后多了话）：取第一个 { 到最后一个 }；解析不了为 undefined。
+ * 中文回复里模型偶尔把两个字段之间的逗号、键后面的冒号写成全角：照原样解析不了时，把字符串外面的全角逗号、冒号换成半角再试一次。
+ * 字符串里面的内容一个字都不动（稿里的标点要逐字保留）。
+ */
 export function jsonObjectIn(raw: string): unknown {
   const start = raw.indexOf('{')
   const end = raw.lastIndexOf('}')
   if (start < 0 || end <= start) return undefined
-  try {
-    return JSON.parse(raw.slice(start, end + 1)) as unknown
-  } catch {
-    return undefined
+  const text = raw.slice(start, end + 1)
+  for (const candidate of [text, withHalfWidthSeparators(text)]) {
+    try {
+      return JSON.parse(candidate) as unknown
+    } catch {
+      // 换一种再试
+    }
   }
+  return undefined
+}
+
+/** 字符串外面的全角逗号、冒号换成半角；按引号和反斜杠转义判断在不在字符串里。 */
+function withHalfWidthSeparators(text: string): string {
+  let out = ''
+  let isInString = false
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!
+    if (isInString) {
+      out += ch
+      if (ch === '\\' && i + 1 < text.length) out += text[++i]!
+      else if (ch === '"') isInString = false
+    } else if (ch === '"') {
+      isInString = true
+      out += ch
+    } else {
+      out += ch === '，' ? ',' : ch === '：' ? ':' : ch
+    }
+  }
+  return out
 }
 
 /** 模型给的一稿换成契约的形状：名称、标签写 null 当没改，标签去重。 */
