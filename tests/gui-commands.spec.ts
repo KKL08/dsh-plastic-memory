@@ -371,12 +371,13 @@ describe('并发裁决', () => {
   })
 
   /**
-   * 体检与裁决同时进行：体检的语义层跑完之后，下一次读账本先拿到快照，再让 rule 把裁决做完，最后把裁决前的快照交给体检
-   * （体检据此挂账）。rule 由同一个实例或另一个实例（另一个宿主进程）执行。
+   * 体检与裁决同时进行：体检的语义层跑完之后，下一次读账本先拿到快照，再让 rule 发出裁决，最后把裁决前的快照交给体检
+   * （体检据此挂账）。rule 由同一个实例或另一个实例（另一个宿主进程）执行，结果从 ruled() 取。
    */
   async function scanDuringRuling(rule: (decisionId: string) => Promise<MemoryCommandResult>, scanner: (wrap: EnvOpts['wrapPending']) => ReturnType<typeof env>) {
     let decisionId = ''
     let isArmed = false
+    let ruling: MemoryCommandResult | undefined
     const wrap: EnvOpts['wrapPending'] = table => ({
       get: key => table.get(key),
       put: (key, value) => table.put(key, value),
@@ -386,7 +387,7 @@ describe('并发裁决', () => {
         const snapshot = await table.list()
         if (isArmed) {
           isArmed = false
-          ok(await rule(decisionId))
+          ruling = await rule(decisionId)
         }
         return snapshot
       },
@@ -399,38 +400,83 @@ describe('并发裁决', () => {
         return JSON.stringify({ findings: [{ type: 'conflict', memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', suggestedAction: '裁决' }] })
       },
     }
-    return { e, decisionId, armingLlm }
+    return { e, decisionId, armingLlm, ruled: () => ruling! }
   }
 
-  async function expectRulingSurvives(e: ReturnType<typeof env>, decisionId: string) {
+  /** 体检正在挂这一对时，要删一方的裁决被拒、什么都不动；体检完了条目还在待处理，再裁决一次照常生效。 */
+  async function expectRulingTurnedDownThenRetried(e: ReturnType<typeof env>, decisionId: string, ruled: MemoryCommandResult) {
+    expect(err(ruled).code).toBe('claimed')
+    expect((await e.decisions.list()).map(d => d.id)).toEqual([decisionId])
+    expect([(await e.store.get('mem_a'))!.status, (await e.store.get('mem_b'))!.status]).toEqual(['active', 'active'])
+    expect(await e.snapshots.list()).toHaveLength(0)
+
+    ok(await e.run({ cmd: 'resolve', decisionId, verdict: 'keep-left' }))
     expect(await e.decisions.list()).toEqual([])
-    expect((await e.decisions.listSettled()).map(d => [d.id, d.settled?.verdict])).toEqual([[decisionId, 'keep-left']])
     expect([(await e.store.get('mem_a'))!.status, (await e.store.get('mem_b'))!.status]).toEqual(['active', 'deleted'])
     expect(await e.snapshots.list()).toHaveLength(1)
   }
 
-  it('体检挂账时同一冲突刚被裁决：已裁决的条目不被体检改回待处理，败方只删一次', async () => {
+  /** 让条目带上体检会算出的指纹：都保留的结论按指纹判断还作不作数，夹具里的假指纹会被当成内容变了。 */
+  async function stampRealFingerprint(e: ReturnType<typeof env>) {
+    const fingerprint = conflictFingerprint([(await e.store.get('mem_a'))!, (await e.store.get('mem_b'))!])
+    await e.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', fingerprint }, 2)
+  }
+
+  async function expectKeptBothSurvives(e: ReturnType<typeof env>, decisionId: string) {
+    expect(await e.decisions.list()).toEqual([])
+    expect((await e.decisions.listSettled()).map(d => [d.id, d.settled?.verdict])).toEqual([[decisionId, 'keep-both']])
+    expect([(await e.store.get('mem_a'))!.status, (await e.store.get('mem_b'))!.status]).toEqual(['active', 'active'])
+  }
+
+  it('体检正在挂这一对时收到要删一方的裁决：裁决被拒、什么都不动，体检后重试生效', async () => {
     let llm: SemanticLlm | undefined
-    const { e, decisionId, armingLlm } = await scanDuringRuling(
+    const { e, decisionId, armingLlm, ruled } = await scanDuringRuling(
       id => e.run({ cmd: 'resolve', decisionId: id, verdict: 'keep-left' }),
       wrapPending => env({ wrapPending, llm: { complete: (...args) => llm!.complete(...args) } }),
     )
     llm = armingLlm
     ok(await e.run({ cmd: 'scan' }))
-    await expectRulingSurvives(e, decisionId)
+    await expectRulingTurnedDownThenRetried(e, decisionId, ruled())
   })
 
-  it('两个宿主实例共用一个根：一个在体检，另一个裁决同一冲突，同样不被改回待处理', async () => {
+  it('两个宿主实例共用一个根：一个在体检，另一个发来要删一方的裁决，同样被拒、重试生效', async () => {
     const other = env()
     let llm: SemanticLlm | undefined
-    const { e, decisionId, armingLlm } = await scanDuringRuling(
+    const { e, decisionId, armingLlm, ruled } = await scanDuringRuling(
       id => other.run({ cmd: 'resolve', decisionId: id, verdict: 'keep-left' }),
       wrapPending => env({ wrapPending, llm: { complete: (...args) => llm!.complete(...args) } }),
     )
     llm = armingLlm
     ok(await e.run({ cmd: 'scan' }))
-    await expectRulingSurvives(e, decisionId)
-    await expectRulingSurvives(other, decisionId)
+    await expectRulingTurnedDownThenRetried(other, decisionId, ruled())
+  })
+
+  it('体检挂账时同一冲突刚被裁决为都保留：已裁决的条目不被体检改回待处理', async () => {
+    let llm: SemanticLlm | undefined
+    const { e, decisionId, armingLlm, ruled } = await scanDuringRuling(
+      id => e.run({ cmd: 'resolve', decisionId: id, verdict: 'keep-both' }),
+      wrapPending => env({ wrapPending, llm: { complete: (...args) => llm!.complete(...args) } }),
+    )
+    llm = armingLlm
+    await stampRealFingerprint(e)
+    ok(await e.run({ cmd: 'scan' }))
+    ok(ruled())
+    await expectKeptBothSurvives(e, decisionId)
+  })
+
+  it('两个宿主实例共用一个根：一个在体检，另一个裁决为都保留，同样不被改回待处理', async () => {
+    const other = env()
+    let llm: SemanticLlm | undefined
+    const { e, decisionId, armingLlm, ruled } = await scanDuringRuling(
+      id => other.run({ cmd: 'resolve', decisionId: id, verdict: 'keep-both' }),
+      wrapPending => env({ wrapPending, llm: { complete: (...args) => llm!.complete(...args) } }),
+    )
+    llm = armingLlm
+    await stampRealFingerprint(e)
+    ok(await e.run({ cmd: 'scan' }))
+    ok(ruled())
+    await expectKeptBothSurvives(e, decisionId)
+    await expectKeptBothSurvives(other, decisionId)
   })
 
   const writeClaim = async (decisionId: string, pid: number) => {

@@ -69,6 +69,47 @@ describe('memory_confirm resolve（横向冲突）', () => {
     expect(await deps.snapshots.list()).toHaveLength(1)
   })
 
+  it('同一对冲突留有两条待决项、同时收到相反的裁决：只删一方，另一条报「正在处理」、什么都不动', async () => {
+    const table = new InMemoryKvTable<PendingDecision>()
+    const deps = { ...makeDeps(), decisions: new PendingDecisionsStore(table) }
+    await deps.store.put(record({ id: 'mem_left', content: '左' }))
+    await deps.store.put(record({ id: 'mem_right', content: '右' }))
+    // 同一对的两条条目只能直接写进账本：现在的挂账已经不会建出第二条
+    for (const id of ['pd_first', 'pd_second']) {
+      await table.put(id, { id, memoryIds: ['mem_left', 'mem_right'], summary: '矛盾', firstSeenAt: 1 })
+    }
+
+    const results = await Promise.all([
+      executeConfirm({ action: 'resolve', decisionId: 'pd_first', verdict: 'keep-left' }, { workspacePath: '/proj' }, deps),
+      executeConfirm({ action: 'resolve', decisionId: 'pd_second', verdict: 'keep-right' }, { workspacePath: '/proj' }, deps),
+    ])
+
+    expect(results.map(r => r.kind).sort()).toEqual(['error', 'resolved'])
+    expect(results.find(r => r.kind === 'error')).toMatchObject({ code: 'claimed' })
+    const statuses = [(await deps.store.get('mem_left'))!.status, (await deps.store.get('mem_right'))!.status]
+    expect(statuses.filter(s => s === 'deleted')).toHaveLength(1)
+    expect(await deps.snapshots.list()).toHaveLength(1)
+  })
+
+  it('同一对冲突留有两条待决项：不删记忆的裁决不受另一条正在裁决的影响', async () => {
+    const table = new InMemoryKvTable<PendingDecision>()
+    const deps = { ...makeDeps(), decisions: new PendingDecisionsStore(table) }
+    await deps.store.put(record({ id: 'mem_left', content: '左' }))
+    await deps.store.put(record({ id: 'mem_right', content: '右' }))
+    for (const id of ['pd_first', 'pd_second']) {
+      await table.put(id, { id, memoryIds: ['mem_left', 'mem_right'], summary: '矛盾', firstSeenAt: 1 })
+    }
+
+    const results = await Promise.all([
+      executeConfirm({ action: 'resolve', decisionId: 'pd_first', verdict: 'keep-left' }, { workspacePath: '/proj' }, deps),
+      executeConfirm({ action: 'resolve', decisionId: 'pd_second', verdict: 'keep-both' }, { workspacePath: '/proj' }, deps),
+    ])
+
+    expect(results.map(r => r.kind)).toEqual(['resolved', 'resolved'])
+    expect((await deps.store.get('mem_left'))!.status).toBe('active')
+    expect((await deps.store.get('mem_right'))!.status).toBe('deleted')
+  })
+
   it('删除败方时顺带清理其他引用该记忆的待决项，并在 actions 中报告数量', async () => {
     const deps = makeDeps()
     await deps.store.put(record({ id: 'mem_left' }))
@@ -113,6 +154,23 @@ describe('memory_confirm resolve（横向冲突）', () => {
     expect((await deps.store.get('mem_left'))!.status).toBe('deleted')
     expect((await deps.store.get('mem_right'))!.status).toBe('active')
   })
+
+  for (const status of ['deleted', 'superseded'] as const) {
+    it(`保留方已不在用（${status}）：拒绝裁决，不删败方、不拍快照，条目留在账本里`, async () => {
+      const deps = makeDeps()
+      const entry = await setupHorizontal(deps)
+      // 挂账之后保留方被别处删掉或取代了（另一条同一对的裁决、遗忘、替代）
+      await deps.store.put(record({ id: 'mem_left', content: '左', status }))
+
+      const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-left' }, { workspacePath: '/proj' }, deps)
+
+      expect(r.kind).toBe('error')
+      expect(r.message).toContain('mem_left')
+      expect((await deps.store.get('mem_right'))!.status).toBe('active')
+      expect(await deps.snapshots.list()).toHaveLength(0)
+      expect((await deps.decisions.list()).map(e => e.id)).toEqual([entry.id])
+    })
+  }
 
   it('keep-both / dismiss：不删任何记忆、不写快照、条目移除', async () => {
     for (const verdict of ['keep-both', 'dismiss'] as const) {

@@ -40,6 +40,19 @@ function samePair(a: KindKeyed, b: KindKeyed): boolean {
   return kindOf(a) === kindOf(b) && pairKey(a) === pairKey(b)
 }
 
+/**
+ * 挂账时按冲突身份（samePair 的口径）认领用的键。侧表认领按键建 `<键>.claim`，pairKey 里的 `|`、`#` 不能当文件名
+ * （不能当文件名的键认领直接放行、不排他），所以取哈希；`pair_` 前缀与条目 id（`pd_`）分开，不会和裁决认领撞上。
+ */
+function pairClaimKey(entry: KindKeyed): string {
+  return `pair_${createHash('sha1').update(`${kindOf(entry)}\n${pairKey(entry)}`).digest('hex')}`
+}
+
+/** 先出现的在前，同一时刻按 id：收拢重复条目时留下排第一的那条。 */
+function byFirstSeen(a: PendingDecision, b: PendingDecision): number {
+  return a.firstSeenAt - b.firstSeenAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+}
+
 /** 已裁决且裁决删掉了一方的条目。 */
 function isDeletionSettled(entry: PendingDecision): boolean {
   return entry.settled !== undefined && verdictLoser(entry, entry.settled.verdict) !== undefined
@@ -80,6 +93,7 @@ async function holdsNow(entry: KindKeyed & { workspaces?: string[] }, read: Read
 }
 
 type UpsertInput = { kind?: PendingKind; memoryIds: string[]; baselineRef?: string; summary: string; workspaces?: string[]; fingerprint?: string }
+type UpsertResult = { created: boolean; settled?: true; isSkipped?: true; entry: PendingDecision }
 
 /**
  * 同一对再报：更新 summary / baselineRef 措辞 / workspaces / 指纹，保留 id 与 firstSeenAt。
@@ -102,6 +116,7 @@ function mergeReport(existing: PendingDecision, input: UpsertInput): PendingDeci
  * 指纹变了（任一方改写、基线变了、换了档位）旧结论作废、按新条目重报；删掉一方的记下快照 id 供撤销，
  * 同一对再被扫到（败方回来了）就回到待处理，败方超出保留窗口后由 sweep 清掉。
  * settled 条目对 get / list 不可见，只有 listSettled、upsert、removeByMemoryIds、sweep 会看到它。
+ * 同一对（samePair）在账本里只有一条未决条目，跨进程也成立：挂账按冲突身份认领（见 upsert）。
  */
 export class PendingDecisionsStore {
   private table: ClaimKvTable<PendingDecision>
@@ -125,6 +140,11 @@ export class PendingDecisionsStore {
     }
   }
 
+  /** 认领一对冲突的身份后执行 fn（同 withClaim，不等待）：挂账和要删一方的裁决都先认领它，同一对同时只有一处在动。 */
+  withPairClaim<R>(entry: KindKeyed, fn: () => Promise<R>): Promise<{ isClaimed: true; value: R } | { isClaimed: false }> {
+    return this.withClaim(pairClaimKey(entry), fn)
+  }
+
   async list(): Promise<PendingDecision[]> {
     return (await this.table.list()).map(([, e]) => e).filter(e => !e.settled).sort((a, b) => a.firstSeenAt - b.firstSeenAt)
   }
@@ -141,18 +161,38 @@ export class PendingDecisionsStore {
 
   /**
    * settled：命中已裁决条目且指纹没变，没有挂账，entry 是那条已裁决条目。
+   * 整个查找、新建按冲突身份认领（pairClaimKey）：两次体检同时扫到同一对（agent 体检不认领体检范围、或两个宿主进程），
+   * 不认领的话都读到「还没有」、各建一条，之后两条各裁一个相反的结论会把双方都删掉。认领不到说明别处正在挂这一对，
+   * 不等待，返回 isSkipped，entry 是这次要报的内容、没写进账本，这次不挂账，下次体检再说。
    * 改已有条目前先认领它、认领后重读：读快照之后它可能刚被裁决或撤销，不拿旧快照盖掉。正被别人认领（正在裁决）的
    * 不动，返回 isSkipped。给了 read 时，把条目挂成待处理（重开删一方的裁决、作废旧结论、更新未决条目）之前按记忆
    * 此刻的状态核对一遍（holdsNow），对不上也返回 isSkipped：刚删掉败方的裁决不会被当成「败方回来了」反撤。
+   * 挂上之后（新建、更新、重开，或命中仍成立的两边都留结论）收拢同一对多出来的未决条目，见 dropDuplicates。
    */
-  async upsert(input: UpsertInput, now: number, read?: ReadMemory): Promise<{ created: boolean; settled?: true; isSkipped?: true; entry: PendingDecision }> {
+  async upsert(input: UpsertInput, now: number, read?: ReadMemory): Promise<UpsertResult> {
+    const draft: PendingDecision = {
+      id: genId('pd'),
+      ...(input.kind !== undefined && input.kind !== 'conflict' ? { kind: input.kind } : {}),
+      memoryIds: input.memoryIds,
+      ...(input.baselineRef !== undefined ? { baselineRef: input.baselineRef } : {}),
+      summary: input.summary,
+      firstSeenAt: now,
+      ...(input.workspaces !== undefined ? { workspaces: input.workspaces } : {}),
+      ...(input.fingerprint !== undefined ? { fingerprint: input.fingerprint } : {}),
+    }
+    const claimed = await this.withPairClaim(input, () => this.upsertClaimed(input, draft, read))
+    return claimed.isClaimed ? claimed.value : { created: false, isSkipped: true, entry: draft }
+  }
+
+  /** 持有冲突身份的认领时挂账：同一对的查找、新建、收拢同时只有一处在做。 */
+  private async upsertClaimed(input: UpsertInput, draft: PendingDecision, read?: ReadMemory): Promise<UpsertResult> {
     const entries = await this.table.list()
-    // 先看已裁决的同一对，再看未决的同一对（垂直冲突的 baselineRef 措辞每次扫描都可能不同，不能按它分开，否则每次重扫都多一条）
-    const matches = [
-      ...entries.filter(([, e]) => e.settled !== undefined && samePair(e, input)),
-      ...entries.filter(([, e]) => e.settled === undefined && samePair(e, input)),
-    ]
+    // 先看已裁决的同一对，再看未决的同一对（垂直冲突的 baselineRef 措辞每次扫描都可能不同，不能按它分开，否则每次重扫都多一条）。
+    // 未决的按先出现排：修复前留下的重复条目里沿用最早的那条
+    const opens = entries.filter(([, e]) => e.settled === undefined && samePair(e, input)).sort(([, a], [, b]) => byFirstSeen(a, b))
+    const matches = [...entries.filter(([, e]) => e.settled !== undefined && samePair(e, input)), ...opens]
     const holds = async () => read === undefined || await holdsNow(input, read)
+    let result: UpsertResult | undefined
     for (const [id, seen] of matches) {
       const claimed = await this.withClaim(id, async (): Promise<{ created: false; settled?: true; isSkipped?: true; entry: PendingDecision } | undefined> => {
         const existing = await this.table.get(id)
@@ -178,20 +218,32 @@ export class PendingDecisionsStore {
         return { created: false, entry: updated }
       })
       if (!claimed.isClaimed) return { created: false, isSkipped: true, entry: seen }
-      if (claimed.value !== undefined) return claimed.value
+      if (claimed.value !== undefined) {
+        result = claimed.value
+        break
+      }
     }
-    const entry: PendingDecision = {
-      id: genId('pd'),
-      ...(input.kind !== undefined && input.kind !== 'conflict' ? { kind: input.kind } : {}),
-      memoryIds: input.memoryIds,
-      ...(input.baselineRef !== undefined ? { baselineRef: input.baselineRef } : {}),
-      summary: input.summary,
-      firstSeenAt: now,
-      ...(input.workspaces !== undefined ? { workspaces: input.workspaces } : {}),
-      ...(input.fingerprint !== undefined ? { fingerprint: input.fingerprint } : {}),
+    if (result === undefined) {
+      await this.table.put(draft.id, draft)
+      result = { created: true, entry: draft }
     }
-    await this.table.put(entry.id, entry)
-    return { created: true, entry }
+    if (!result.isSkipped) await this.dropDuplicates(opens.map(([id]) => id), result.entry.id, input)
+    return result
+  }
+
+  /**
+   * 收拢同一对多出来的未决条目（按冲突身份认领之前，并发挂账会建出几条）：keepId 之外的逐条认领、重读，仍是未决的同一对才删。
+   * 留下的是这次挂上的那条，或命中的两边都留结论（结论仍成立，多出来的未决条目不该再裁一次）。
+   * 已结清的不动：删一方的裁决记着撤销要用的快照，由重开、sweep 处理。正被认领（正在裁决）的这次不动，下次挂账再收。
+   */
+  private async dropDuplicates(openIds: readonly string[], keepId: string, input: UpsertInput): Promise<void> {
+    for (const id of openIds) {
+      if (id === keepId) continue
+      await this.withClaim(id, async () => {
+        const e = await this.table.get(id)
+        if (e !== undefined && e.settled === undefined && samePair(e, input)) await this.table.delete(id)
+      })
+    }
   }
 
   /**

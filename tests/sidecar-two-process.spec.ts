@@ -11,6 +11,7 @@ import { recallStatsSchema } from '../src/storage/schema.ts'
 import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
 import { FileTable } from '../src/storage/file-table.ts'
 import { MemoryStore } from '../src/store.ts'
+import { PendingDecisionsStore, dedupKey } from '../src/governance/decisions.ts'
 import { ARCHIVE_DIR, INDEX_FILE, workspaceDirName } from '../src/storage/paths.ts'
 import type { ForgetResult } from '../src/tools/forget.ts'
 import type { SearchHit } from '../src/tools/search.ts'
@@ -141,5 +142,27 @@ describe('双进程工具调用', () => {
 
     for (const w of [a, b]) w.child.stdin!.end()
     expect((await Promise.all([a.exited, b.exited])).map(([code]) => code)).toEqual([0, 0])
+  }, 30_000)
+
+  it('两个进程同时把同一批冲突挂进待决账本：每一对只有一个条目，没挂上的那边记为跳过', async () => {
+    const pairs = Array.from({ length: 40 }, (_, i) => [`mem_l${i}`, `mem_r${i}`])
+    const a = startToolWorker('a')
+    const b = startToolWorker('b')
+    expect(await Promise.all([a.nextLine(), b.nextLine()])).toEqual(['ready', 'ready'])
+
+    // B 倒着挂：两边从两头往中间走，在中间那几对上撞到（谁先谁后不定，断言对任何交错都成立）
+    const [ra, rb] = await Promise.all([
+      a.call<{ created: number; skipped: number }>({ op: 'upsert', pairs }),
+      b.call<{ created: number; skipped: number }>({ op: 'upsert', pairs: [...pairs].reverse() }),
+    ])
+    for (const w of [a, b]) w.child.stdin!.end()
+    expect((await Promise.all([a.exited, b.exited])).map(([code]) => code)).toEqual([0, 0])
+
+    const sidecar = new SidecarStore({ root, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
+    const entries = await new PendingDecisionsStore(sidecar.pending).list()
+    expect(entries.map(e => dedupKey(e.memoryIds)).sort()).toEqual(pairs.map(p => dedupKey(p)).sort())
+    expect(ra.created + rb.created).toBe(pairs.length)
+    const files = await readdir(join(root, STATE_DIR, 'pending'))
+    expect(files.filter(f => !f.endsWith('.json'))).toEqual([]) // 认领都已释放
   }, 30_000)
 })

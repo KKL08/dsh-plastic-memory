@@ -946,17 +946,17 @@ describe('待处理：可以整理', () => {
   })
 
   it('三条以上互相重复：每条一栏，按钮写「删除」，栏名是记忆名', async () => {
-    const { commands } = setup([{ kind: 'advice', level: 'advice', type: 'redundancy', memories: [...duplicates, memory({ id: 'r3', name: '第三条' })] }])
+    const { commands } = setup([{ kind: 'advice', level: 'advice', type: 'redundancy', memories: [...duplicates, memory({ id: 'r3', name: '第三条', scope: 'global', workspacePath: undefined })] }])
     const card = cardOf('内容重复')
     expect(screen.getByText('这几条内容有重叠。说的是同一件事，留一条就够；其实是不同的事，点右上角不再提醒。')).toBeInTheDocument()
     expect(within(card).getAllByRole('button').map(b => b.textContent)).toEqual(['不再提醒', '打开文件', '删除', '打开文件', '删除', '打开文件', '删除'])
-    // 不能合并：卡片底部不留空的动作行
+    // 不能合并（跨了作用域）：卡片底部不留空的动作行
     expect(card.querySelector('.pm-pending-body > .pm-pending-actions')).toBeNull()
     const third = within(card).getByRole('region', { name: '第三条' })
     fireEvent.click(within(third).getByRole('button', { name: '删除' }))
     fireEvent.click(confirmIn(third))
     await screen.findByText('已删除')
-    expect(commands()).toEqual([{ cmd: 'forget', memoryId: 'r3', layer }])
+    expect(commands()).toEqual([{ cmd: 'forget', memoryId: 'r3', layer: { kind: 'global' } }])
   })
 
   it('内容重复删掉的那条含密钥：原位改问彻底删除，「彻底删除」发 hard-delete 删的还是那一条', async () => {
@@ -1455,6 +1455,93 @@ describe('待处理：手动改与手动合并', () => {
       fireEvent.click(screen.getByRole('button', { name: '更多' }))
       expect(screen.getByRole('textbox', { name: '名称' })).toHaveValue('翻译腔')
     })
+  })
+})
+
+describe('待处理：三条以上内容重复的合并', () => {
+  const layer = { kind: 'workspace', workspacePath: '/w/app' } as const
+  const dup = (id: string, overrides: Partial<MemoryCard> = {}) =>
+    memory({ id, name: `重复 ${id}`, content: `${id} 的内容。`, filePath: `/m/app/${id}.md`, digest: `sha1:${id}`, updatedAt: 100, ...overrides })
+  const three = [dup('d1'), dup('d2'), dup('d3')]
+  const group = (memories: MemoryCard[]): PendingItem => ({ kind: 'advice', level: 'advice', type: 'redundancy', memories })
+  const refOf = (m: MemoryCard) => ({ memoryId: m.id, layer, base: { updatedAt: m.updatedAt, digest: m.digest } })
+  const PRESET = '合成一条，各自独有的信息都留下'
+  const plan = {
+    understanding: '三条合成 d1。',
+    ops: [
+      { memoryId: 'd1', action: 'rewrite', reason: '承接另外两条。' },
+      { memoryId: 'd2', action: 'delete', reason: '并进 d1。', into: 'd1' },
+      { memoryId: 'd3', action: 'delete', reason: '并进 d1。', into: 'd1' },
+    ],
+  }
+  const respond = (command: MemoryCommand): MemoryCommandResult => {
+    if (command.cmd === 'plan-edits') return { ok: true, cmd: 'plan-edits', plan, model: 'deepseek-v4-flash' } as MemoryCommandResult
+    if (command.cmd === 'draft-plan') return { ok: true, cmd: 'draft-plan', drafts: [{ memoryId: 'd1', draft: { content: '三条合成的内容。', summary: '合成' } }] } as MemoryCommandResult
+    if (command.cmd === 'apply-edits') return { ok: true, cmd: 'apply-edits', decisionId: 'pd_b', memoryIds: ['d1', 'd2', 'd3'], snapshotId: 'snap_b' }
+    return { ok: true, cmd: command.cmd }
+  }
+  const cardOf = () => screen.getByRole('heading', { level: 3, name: '内容重复' }).closest('article')!
+  const click = async (name: string | RegExp) => { await act(async () => { fireEvent.click(screen.getByRole('button', { name })) }) }
+
+  it('同一作用域、都能改：说明写可以合并，卡片底部「合并」', () => {
+    setup([group(three)])
+    expect(screen.getByText('这几条内容有重叠。说的是同一件事，点「合并」让模型合成一条，各自独有的信息都留下；其实是不同的事，点右上角不再提醒。')).toBeInTheDocument()
+    expect(within(cardOf()).getByRole('button', { name: '合并' }).closest('.pm-pending-actions')).not.toBeNull()
+  })
+
+  it.each([
+    ['跨了作用域', [...three.slice(0, 2), dup('d3', { scope: 'global', workspacePath: undefined })]],
+    ['超过 20 条', Array.from({ length: 21 }, (_, i) => dup(`d${i}`))],
+    ['去掉含密钥的只剩一条', [dup('d1'), dup('d2', { hasSecret: true }), dup('d3', { hasSecret: true })]],
+  ])('%s：不出「合并」，说明照旧', (_label, memories) => {
+    setup([group(memories)])
+    expect(within(cardOf()).queryByRole('button', { name: '合并' })).toBeNull()
+    expect(screen.getByText('这几条内容有重叠。说的是同一件事，留一条就够；其实是不同的事，点右上角不再提醒。')).toBeInTheDocument()
+  })
+
+  it('点「合并」在卡片里展开整理所选的三步，要求预填好；生成计划发 plan-edits，含密钥的那条不发', async () => {
+    const { commands } = setup([group([...three, dup('d4', { hasSecret: true })])], { respond })
+    await click('合并')
+    expect(within(cardOf()).getByRole('heading', { name: '合并这 3 条' })).toHaveFocus()
+    expect(screen.getByRole('textbox', { name: '想怎么整理这几条？' })).toHaveValue(PRESET)
+    // 展开后右上角的叉收起
+    expect(within(cardOf()).queryByRole('button', { name: '不再提醒' })).toBeNull()
+    await click('生成整理计划')
+    expect(commands()).toEqual([{ cmd: 'plan-edits', memories: three.map(refOf), request: PRESET }])
+  })
+
+  it('「取消」收起回到卡片，焦点回到「合并」，不写', async () => {
+    const { commands } = setup([group(three)], { respond })
+    const merge = screen.getByRole('button', { name: '合并' })
+    merge.focus()
+    await click('合并')
+    await click('返回')
+    await waitFor(() => { expect(screen.getByRole('button', { name: '合并' })).toHaveFocus() })
+    expect(commands()).toEqual([])
+  })
+
+  it('看计划 → 出稿 → 应用全部（确认删除）发 apply-edits；卡片原位换成结果，写改写、删除几条，撤销发 undo', async () => {
+    const { commands, gateway } = setup([group(three)], { respond })
+    await click('合并')
+    await click('生成整理计划')
+    await click('按计划出稿')
+    await click('应用全部')
+    await click('确认应用')
+    expect(commands()[2]).toEqual({
+      cmd: 'apply-edits',
+      ops: [
+        { kind: 'edit', ...refOf(three[0]!), content: '三条合成的内容。', summary: '合成', name: '重复 d1', tags: [] },
+        { kind: 'forget', ...refOf(three[1]!), into: 'd1' },
+        { kind: 'forget', ...refOf(three[2]!), into: 'd1' },
+      ],
+    })
+    expect(await screen.findByText('已合并')).toBeInTheDocument()
+    expect(screen.getByText('改写 1 条、删除 2 条；删掉的 14 天内可在「最近删除」恢复。')).toBeInTheDocument()
+    // 视图刷新、这张卡已不在待处理：结果仍在原位
+    act(() => { gateway.setView('pending', view()) })
+    const undo = screen.getByRole('button', { name: '撤销' })
+    await act(async () => { fireEvent.click(undo) })
+    expect(commands()[3]).toEqual({ cmd: 'undo', decisionId: 'pd_b' })
   })
 })
 
