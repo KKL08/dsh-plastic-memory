@@ -41,6 +41,11 @@ export type Outcome =
    * isSuggested：采纳了模型的处理建议（横向冲突），结果卡写「按模型建议处理」；缺省是用户直接选的。
    */
   | { kind: 'resolved'; verdict: Verdict; isUnrecorded?: true; isHardDeleted?: true; isSuggested?: true }
+  /**
+   * 采纳了融合建议（横向冲突）：keeper 是写进融合稿的那条，按融合后的样子显示；keep、drop 是它和被并入的那条在卡上是 A 还是 B。
+   * isPartial：只完成了一部分（被并入的那条没删）；decisionId 是仍可撤销的那一笔（融合稿还在时有），没有就不能撤。
+   */
+  | { kind: 'plan-merged'; keeper: MemoryCardData; keep: 'A' | 'B'; drop: 'A' | 'B'; partial?: MergePartial; decisionId?: string }
   /** decisionId：撤销用的账本条目（按记忆 id 提升时由命令结果带回；提升候选用条目自己的）。 */
   | { kind: 'promoted'; target: 'global' | 'agents-md'; decisionId?: string }
   /** 全局记忆移到了 workspacePath 那个项目；decisionId 是撤销用的账本条目，filePath 是移过去之后的文件。 */
@@ -262,12 +267,32 @@ export function HorizontalCard({ item, session, now, typeLabel, onDone, onRefuse
 /** 原位确认在问哪件事；采纳记下确认的是哪一份建议。 */
 type Asking = { kind: 'rule'; verdict: Verdict } | { kind: 'adopt'; verdict: Verdict; suggestionId: string }
 
+/** 融合只完成一部分时留下了什么：kept 保留方停在融合稿、已记账可撤销；changed 保留方被别处接着改过；其余情况归 other。 */
+type MergePartial = 'kept' | 'changed' | 'other'
+function mergePartialOf(keeperId: string, recorded: readonly string[], unrecorded: readonly string[]): MergePartial {
+  if (unrecorded.length === 0 && recorded.length === 1 && recorded[0] === keeperId) return 'kept'
+  if (recorded.length === 0 && unrecorded.length === 1 && unrecorded[0] === keeperId) return 'changed'
+  return 'other'
+}
+
+/** 融合建议写进哪条、哪条并入删除：按建议里的操作，不在界面上重算合并规则。keeper 换成融合后的样子。 */
+function mergeSidesOf(suggestion: NonNullable<Item<'conflict-horizontal'>['suggestion']>, left: MemoryCardData | null, right: MemoryCardData | null) {
+  const edit = suggestion.ops.find(op => op.kind === 'edit')
+  if (edit?.kind !== 'edit') return undefined
+  const isRight = edit.memoryId === right?.id
+  const keeper = isRight ? right : edit.memoryId === left?.id ? left : null
+  if (keeper === null) return undefined
+  const { content, name, summary, tags } = edit
+  return { keeper: { ...keeper, content, name, summary, tags }, keep: isRight ? 'B' as const : 'A' as const, drop: isRight ? 'A' as const : 'B' as const }
+}
+
 /**
- * 横向冲突卡（记忆页）A、B 下面的整块：处理建议块、说明行、按钮行（spec 故事 4–6、9、23、24）。
- * - 建议是保留 A、保留 B、都保留：「采纳建议」（主按钮）发 apply-proposal，只带条目 id 和建议 id，一次落盘、不加确认——建议内容都在卡上，
- *   删掉的一方进最近删除、能撤销。要删的那条含高危密钥时会彻底删除，先原位确认。说明行写采纳后哪条去哪。
+ * 横向冲突卡（记忆页）A、B 下面的整块：处理建议块、说明行、按钮行（spec 故事 4–6、9、19、23、24）。
+ * - 有建议时「采纳建议」（主按钮）发 apply-proposal，只带条目 id 和建议 id，一次落盘、不加确认——建议内容（融合稿也在）都在卡上，
+ *   删掉的一方进最近删除、能撤销。保留一方时要删的那条含高危密钥会彻底删除，先原位确认（融合建议不会碰到：含高危密钥的不生成建议）。
+ *   说明行写采纳后哪条去哪。
  * - 后面是直接处理的三个按钮「保留 A / 保留 B / 都保留，不算冲突」，不过模型：点了原位确认一句，再走现有裁决命令 resolve。
- *   融合建议这一版只显示，没有建议（含密钥、还没生成、失败、模型判断不了）时都只有这三个按钮。
+ *   没有建议（含密钥、还没生成、失败、模型判断不了）时只有这三个按钮。
  * - 采纳时服务端回 stale（建议已换了一份，或两条在建议生成后被改过）：什么都没动。卡上这份建议当作失效，建议块写明原因、
  *   退化成没有建议的样子；视图带来另一份建议（id 不同）时照常显示。
  */
@@ -279,8 +304,12 @@ function HorizontalActions({ item, session, onDone, onRefused }: Pick<CardProps<
   const isStale = staleId !== undefined && (item.suggestion === undefined || item.suggestion.id === staleId)
   const suggestion = isStale ? undefined : item.suggestion
   const adopted = suggestion === undefined ? undefined : verdictOfAction(suggestion.action)
+  const merging = suggestion?.action === 'merge' ? mergeSidesOf(suggestion, item.left, item.right) : undefined
   const action = useCardAction(session, {
-    onOk: resolvedTo(onDone, adopted),
+    onOk: (result, command) => {
+      if (command.cmd !== 'apply-proposal' || merging === undefined) { resolvedTo(onDone, adopted)?.(result, command); return }
+      onDone({ kind: 'plan-merged', ...merging, ...(result.isPartial === true ? { partial: mergePartialOf(merging.keeper.id, result.memoryIds ?? [], result.unrecordedIds ?? []) } : {}), ...(result.decisionId !== undefined ? { decisionId: result.decisionId } : {}) })
+    },
     onHandledElsewhere: onRefused,
     // 只有采纳会回 stale；处理器按点击时那一次渲染取，记下的是当时卡上那份建议
     onFailed: (failure) => {
@@ -307,7 +336,8 @@ function HorizontalActions({ item, session, onDone, onRefused }: Pick<CardProps<
     else setStaleId(ask.suggestionId)
   }
 
-  const adoptNote = adopted === undefined ? undefined
+  const adoptNote = merging !== undefined ? t('pending.conflict.adoptNote', { drop: merging.drop })
+    : adopted === undefined ? undefined
     : adopted === horizontal.keepBoth ? t('pending.conflict.adoptNoteKeepBoth')
       : t(isPurge(adopted) ? 'pending.conflict.adoptNotePurge' : 'pending.conflict.adoptNote', { drop: sides(adopted)!.drop })
   const direct = [
@@ -343,9 +373,9 @@ function HorizontalActions({ item, session, onDone, onRefused }: Pick<CardProps<
   } else {
     row = (
       <div className="pm-conflict-actions">
-        {adopted !== undefined
+        {adopted !== undefined || merging !== undefined
           ? (
-            <Button variant="primary" unavailable={reason} onClick={() => { if (isPurge(adopted) && suggestion !== undefined) setAsking({ kind: 'adopt', verdict: adopted, suggestionId: suggestion.id }); else adopt() }}>
+            <Button variant="primary" unavailable={reason} onClick={() => { if (adopted !== undefined && isPurge(adopted) && suggestion !== undefined) setAsking({ kind: 'adopt', verdict: adopted, suggestionId: suggestion.id }); else adopt() }}>
               {t('pending.conflict.adopt')}
             </Button>
           )
@@ -956,6 +986,17 @@ function resultCopy(item: PendingItem, outcome: Outcome, t: Translate): ResultCo
         chip: t('pending.result.merged'), undoable: outcome.decisionId !== undefined,
         body: outcome.deletes > 0 ? t('pending.result.tidiedBody', { rewrites: outcome.rewrites, deletes: outcome.deletes }) : t('pending.result.tidiedBodyNoDelete', { rewrites: outcome.rewrites }),
       }
+    case 'plan-merged':
+      // 只完成了一部分：按实际留下的改动写；不是最常见的两种时不猜哪条成了，请用户看列表
+      if (outcome.partial !== undefined) {
+        const key = outcome.partial === 'kept' ? 'pending.result.mergePartialKept' : outcome.partial === 'changed' ? 'pending.result.mergePartialChanged'
+          : outcome.decisionId !== undefined ? 'pending.result.mergePartialOtherUndoable' : 'pending.result.mergePartialOther'
+        return { chip: t('pending.result.partial'), body: t(key, { keep: outcome.keep, drop: outcome.drop }), undoable: outcome.decisionId !== undefined }
+      }
+      return {
+        memory: outcome.keeper, chip: t('pending.result.mergedOne'), undoable: true,
+        body: t('conflict.twoSentences', { first: t('pending.result.bySuggestion'), second: t('pending.result.deletedSide', { side: outcome.drop }) }),
+      }
     case 'resolved': throw new Error(`resolved outcome on ${item.kind}`)
     case 'edited': case 'merged': throw new Error(`${outcome.kind} outcome renders as EditedRow`)
   }
@@ -974,7 +1015,8 @@ export function ResultCard({ item, outcome, session, now, typeLabel, onUndone, o
   const action = useCardAction(session, { onOk: () => { onUndone() }, onHandledElsewhere: onRefused })
   if (outcome.kind === 'edited' || outcome.kind === 'merged') return <EditedRow item={item} outcome={outcome} action={action} />
   const copy = resultCopy(item, outcome, t)
-  const undoId = 'decisionId' in item ? item.decisionId : outcome.kind === 'promoted' || outcome.kind === 'moved' || outcome.kind === 'tidied' ? outcome.decisionId : undefined
+  // 融合只完成一部分时可撤的是另记的那一笔，不是冲突条目
+  const undoId = outcome.kind === 'plan-merged' ? outcome.decisionId : 'decisionId' in item ? item.decisionId : outcome.kind === 'promoted' || outcome.kind === 'moved' || outcome.kind === 'tidied' ? outcome.decisionId : undefined
   // 忽略不进账本，撤销就是取消忽略；删除进了最近删除，撤销就是恢复那一份；其余撤销按账本条目
   const undo: MemoryCommand | undefined = !copy.undoable ? undefined
     : outcome.kind === 'ignored' ? { cmd: 'unignore-advice', type: outcome.type, memoryIds: outcome.memoryIds }

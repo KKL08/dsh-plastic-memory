@@ -31,16 +31,22 @@ export function kindOf(entry: { kind?: PendingKind }): PendingKind {
  * rewritten / superseded：模型改写了 memoryIds 那条、模型把那条标成了已取代，snapshotId 是改前的快照，fingerprint 是改完后那条的内容（同直接改）。
  * batch-edited：整理所选一次应用（种类 edit，memoryIds 是这次写下的全部，按计划顺序），snapshotId 是整批改前的快照，
  * 不记 fingerprint，改记逐项回执 receipts。
+ * plan-applied：冲突按处理方案改写了记忆（融合、垂直改写），记在冲突条目自己身上：settled 里有改前快照 snapshotId、逐项回执 receipts、
+ * 依据和结论代码 proposal、改前的冲突指纹 priorFingerprint；条目 fingerprint 换成改后的。
  */
-export const SETTLED_VERDICTS = ['keep-both', 'dismiss', 'keep-left', 'keep-right', 'keep-local', 'promoted', 'edited', 'merged', 'moved', 'rewritten', 'superseded', 'batch-edited'] as const
+export const SETTLED_VERDICTS = ['keep-both', 'dismiss', 'keep-left', 'keep-right', 'keep-local', 'promoted', 'edited', 'merged', 'moved', 'rewritten', 'superseded', 'batch-edited', 'plan-applied'] as const
 export type SettledVerdict = (typeof SETTLED_VERDICTS)[number]
 
 /**
  * 裁决要删掉的一方（败方）；两边都留、或不是冲突条目时为 undefined。
  * 横向：left=memoryIds[0]、right=memoryIds[1]；垂直（有 baselineRef）：left=记忆、right=基线，基线不可删，keep-right 意为记忆删除。
+ * plan-applied 的败方是结清信息回执里删除的那一条（融合时并入的那条；垂直改写没有败方）。
  */
-export function verdictLoser(entry: { kind?: PendingKind; memoryIds: string[]; baselineRef?: string }, verdict: SettledVerdict): string | undefined {
+export function verdictLoser(
+  entry: { kind?: PendingKind; memoryIds: string[]; baselineRef?: string; settled?: { receipts?: readonly BatchReceipt[] } }, verdict: SettledVerdict,
+): string | undefined {
   if (kindOf(entry) !== 'conflict') return undefined
+  if (verdict === 'plan-applied') return entry.settled?.receipts?.find(r => r.op === 'forget')?.memoryId
   if (entry.baselineRef !== undefined) return verdict === 'keep-right' ? entry.memoryIds[0] : undefined
   return verdict === 'keep-left' ? entry.memoryIds[1] : verdict === 'keep-right' ? entry.memoryIds[0] : undefined
 }
@@ -140,6 +146,8 @@ export const pendingDecisionSchema = z.object({
    * misplacedIgnore：「留在本项目」顺带写进建议忽略表的那条「放错层」忽略（忽略时间、记忆指纹 adviceFingerprint）；
    * 记忆原本没有放错层的忽略才写、才记。撤销时只在忽略表里那一条仍是它（时间、指纹都对得上）时才删。旧条目没有此字段，撤销不碰忽略表。
    * proposal：冲突按处理方案落盘时的依据和结论代码（见 settledProposalSchema）；撤销时随 settled 一起去掉，条目上的处理建议不动。
+   * receipts、priorFingerprint 只在 plan-applied 上：逐项回执（同整理所选，按写入顺序；整理所选的回执在条目顶层，这里在结清信息里，
+   * 撤销、账本清理随结清信息一起处理），和结清前条目的冲突指纹（旧条目没有指纹时缺省），撤销时还原。
    */
   settled: z.object({
     verdict: z.enum(SETTLED_VERDICTS),
@@ -149,6 +157,8 @@ export const pendingDecisionSchema = z.object({
     isUndone: z.literal(true).optional(),
     misplacedIgnore: z.object({ ignoredAt: z.number(), fingerprint: z.string() }).optional(),
     proposal: settledProposalSchema.optional(),
+    receipts: z.array(batchReceiptSchema).optional(),
+    priorFingerprint: z.string().optional(),
   }).optional(),
 })
 export type PendingDecision = z.infer<typeof pendingDecisionSchema>

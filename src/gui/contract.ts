@@ -452,10 +452,13 @@ export const deletedItemSchema = z.object({
   deletedAt: z.number(),
   /** 到这个时刻被物理清掉，之后不可恢复。 */
   purgeAt: z.number(),
-  /** 裁决时删掉的：哪条冲突、什么裁决、对方是谁（横向为对方记忆 id，垂直为基线出处）。 */
+  /**
+   * 裁决时删掉的：哪条冲突、什么裁决、对方是谁（横向为对方记忆 id，垂直为基线出处）。plan-applied 是融合时并入了另一条，
+   * 对方是写进融合稿的那条；恢复它只恢复这一条，融合稿不退回，这次融合随之不能整条撤销（结果不带 decisionId）。
+   */
   cause: z.object({
     decisionId: z.string(),
-    verdict: z.enum(['keep-left', 'keep-right']),
+    verdict: z.enum(['keep-left', 'keep-right', 'plan-applied']),
     counterpartId: z.string().optional(),
     baselineRef: z.string().optional(),
     snapshotId: z.string().optional(),
@@ -740,10 +743,13 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   z.object({ cmd: z.literal('info') }),
   z.object({ cmd: z.literal('resolve'), decisionId: z.string(), verdict: z.enum(RESOLVE_VERDICTS), allowCrossWorkspace }),
   /**
-   * 「采纳建议」：按条目上 id 为 suggestionId 的处理建议落盘，界面不回传建议内容。这一版只收横向冲突的保留 A、保留 B、都保留，
+   * 「采纳建议」：按条目上 id 为 suggestionId 的处理建议落盘，界面不回传建议内容。只收横向冲突。保留 A、保留 B、都保留
    * 记法同 resolve 的 keep-left / keep-right / keep-both（另记依据和结论代码），撤销、最近删除、败方含高危密钥时的物理删除都同 resolve。
+   * 融合：保留方改写成融合稿（标手改）、另一条进最近删除，整批一份快照，条目结清为 plan-applied，结果的 memoryIds 是保留方、被并入的；
+   * 撤销按回执把两条都恢复、冲突回到待处理；从最近删除恢复被并入的那条只恢复它。某一项没写成时同 apply-edits：已写的条件退回，
+   * 没退干净的回 isPartial（没退回、仍是这次写下的另记一笔可撤销的账，decisionId 是那一笔），冲突条目不结清。
    * 服务端认领条目后核对：建议 id 一致、依据版本（冲突指纹、每条的完整内容指纹和作用域键）仍是此刻的，对不上回 stale，什么都不动；
-   * 删败方时锁内按依据再比一次。条目不在待处理回 not-found；不是横向冲突、建议是融合回 invalid-args。过跨项目门（同 resolve）。
+   * 写入时锁内按依据再比一次。条目不在待处理回 not-found；不是横向冲突回 invalid-args。过跨项目门（同 resolve）。
    */
   z.object({ cmd: z.literal('apply-proposal'), decisionId: z.string(), suggestionId: z.string(), allowCrossWorkspace }),
   /** 撤销一条已裁决条目：去掉 settled，记了快照的按它恢复败方（提升为全局则恢复原位）；直接改、移到项目的撤销后条目移出账本；

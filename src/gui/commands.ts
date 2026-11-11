@@ -9,7 +9,7 @@ import { isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
 import { RecordNotFoundError } from '../errors.ts'
 import { detectSecrets, hasCriticalSecret, hasSecret } from '../secrets.ts'
 import { computeDigest } from '../storage/frontmatter.ts'
-import { candidateFingerprint, isBasisCurrent, suggestionBasis, type MisplacedIgnore, type PendingDecisionsStore } from '../governance/decisions.ts'
+import { candidateFingerprint, conflictFingerprint, isBasisCurrent, suggestionBasis, type MisplacedIgnore, type PendingDecisionsStore } from '../governance/decisions.ts'
 import { isModelChange } from '../governance/undo-rules.ts'
 import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
 import { genId, kindOf, type MemorySnapshot, type PendingDecision, type ScanCacheEntry, type SnapshotRecord } from '../governance/schema.ts'
@@ -230,6 +230,63 @@ function asHandEdited(cur: MemoryRecord, fields: { content: string; name: string
 interface BatchWrite { memoryId: string; op: ApplyEditOp['kind']; written?: MemoryRecord }
 
 /**
+ * 逐项写的一项：改写成这四个面，或软删。isChanged 是写入那一刻锁内的核对：磁盘上的现状过了它就原样不写、整批停下。
+ * isSecret 是软删时哪些算含密钥、软删不了（缺省两级都算，同软删的口径）。
+ */
+interface BatchItem {
+  record: MemoryRecord
+  op: { kind: 'edit'; content: string; name: string; summary: string; tags: string[] } | { kind: 'forget' }
+  isChanged: (current: MemoryRecord) => boolean
+  isSecret?: (current: MemoryRecord) => boolean
+}
+
+/** 第一项失败的原因：锁内发现被改过、已不在，软删时刚被写进密钥，或写入抛错。 */
+type BatchFailure = { kind: 'stale' | 'not-found' | 'has-secret'; memoryId: string } | { kind: 'thrown'; error: unknown }
+
+/**
+ * 整理所选的逐项执行（应用处理方案同用）：按顺序逐项写，每项在提交那一刻记写入记录；第一项失败就停下，之后的不再写，
+ * 已写的由调用方按写入记录回退。回调里算出的只是候选（文件表复核失败会重来），调用正常返回才以返回值为准。
+ */
+async function writeBatch(items: readonly BatchItem[], store: MemoryStore, now: number): Promise<{ writes: BatchWrite[]; failure?: BatchFailure }> {
+  const writes: BatchWrite[] = []
+  for (const { record, op, isChanged, isSecret } of items) {
+    const at = scopeAt(record.workspacePath)
+    const write: BatchWrite = { memoryId: record.id, op: op.kind }
+    writes.push(write)
+    let candidate: MemoryRecord | undefined
+    let outcome: 'deleted' | 'has-secret' | 'changed' | 'missing' = 'changed'
+    try {
+      if (op.kind === 'edit') {
+        const committed = await store.update(record, (cur) => {
+          candidate = undefined
+          // 锁内按磁盘上的现状再核对一次：读过之后被改过就原样不写
+          if (isChanged(cur)) return cur
+          return (candidate = asHandEdited(cur, op, now))
+        }, at)
+        if (candidate !== undefined) write.written = committed
+      } else {
+        outcome = await store.softDeleteUnlessSecret(record, {
+          at, now, isChanged: (cur) => { candidate = cur; return isChanged(cur) }, ...(isSecret !== undefined ? { isSecret } : {}),
+        })
+        // 软删只改状态和时间，内容就是锁内最后看到的那份
+        if (outcome === 'deleted') write.written = markDeleted(candidate!, now)
+      }
+    } catch (error) {
+      if (!(error instanceof RecordNotFoundError)) {
+        // 抛错时不知道落没落盘：按 id 重读，状态和指纹与最后一次候选一致、updatedAt 是这次的才算已写（已写的一样要退回）
+        write.written = await committedAfterThrow(store, record, op.kind, candidate, now)
+        return { writes, failure: { kind: 'thrown', error } }
+      }
+      outcome = 'missing'
+    }
+    if (write.written === undefined) {
+      return { writes, failure: { kind: outcome === 'has-secret' ? 'has-secret' : outcome === 'missing' ? 'not-found' : 'stale', memoryId: record.id } }
+    }
+  }
+  return { writes }
+}
+
+/**
  * 写入调用抛错后这一项落没落盘（文件表写盘后还可能在维护目录、写统计时抛错）：按 id 在它自己的作用域里重读，
  * 状态是这一步该有的（改写在用、删除在最近删除）、指纹与最后一次候选一致、updatedAt 是这次的时刻，才算已写，返回读到的那份。
  */
@@ -270,16 +327,17 @@ async function rollBackBatch(
 }
 
 /**
- * 整理所选的结账：删除项按 id 清掉指向它们的账本条目（同 forget），再记一条带逐项回执的 batch-edited。任一步抛错时按快照 id
+ * 整理所选的结账：删除项按 id 清掉指向它们的账本条目（同 forget，keepId 那条留着），再记一条带逐项回执的 batch-edited。任一步抛错时按快照 id
  * 重读账本：新条目已在（写进去之后的清理抛错）就算记上了；不在就把这几项也按快照退回，再把错误抛出去。
  * 回退和记账都失败时，整批前拍的快照仍在保留期内，是最后的恢复依据。
  */
 async function settleBatch(
   writes: readonly BatchWrite[], workspaces: string[], snapshot: MemorySnapshot, deps: Pick<MemoryCommandDeps, 'store' | 'snapshots' | 'decisions' | 'now'>, now: number,
+  keepId?: string,
 ): Promise<PendingDecision> {
   try {
     const forgotten = writes.filter(w => w.op === 'forget').map(w => w.memoryId)
-    if (forgotten.length > 0) await deps.decisions.removeByMemoryIds(forgotten)
+    if (forgotten.length > 0) await deps.decisions.removeByMemoryIds(forgotten, keepId)
     return await deps.decisions.addBatchEdit(
       writes.map(w => ({ memoryId: w.memoryId, op: w.op, written: w.written! })), { summary: `整理所选 ${writes.length} 条`, workspaces }, snapshot.id, now,
     )
@@ -464,6 +522,111 @@ async function dispatch(
     return { ok: true, cmd, decisionId, ...(snapshotId !== undefined ? { snapshotId } : {}) }
   }
 
+  // —— 采纳融合建议（票 06）——
+
+  /**
+   * 先认领条目、再认领冲突身份（同要删一方的裁决），和裁决、撤销、体检挂账、另一个标签页的采纳互斥；认领后重读条目再动手。
+   */
+  const adoptMerge = async (decisionId: string, suggestionId: string, allowCrossWorkspace: boolean | undefined): Promise<MemoryCommandResult> => {
+    const claimed = await deps.decisions.withClaim(decisionId, async () => {
+      const entry = await deps.decisions.get(decisionId)
+      if (entry === undefined) return notFound(decisionId)
+      const paired = await deps.decisions.withPairClaim(entry, () => mergeClaimed(entry, suggestionId, allowCrossWorkspace))
+      return paired.isClaimed ? paired.value : fail(cmd, 'claimed', `待决项 ${entry.id} 的这一对记忆正在被另一次操作处理，未做任何改动`)
+    })
+    return claimed.isClaimed ? claimed.value : fail(cmd, 'claimed', `待决项 ${decisionId} 正在被另一次操作处理，未做任何改动`)
+  }
+
+  /**
+   * 持有认领时采纳融合：核对建议 id 和依据（冲突指纹、两条的完整内容指纹和作用域键），保留方改写成融合稿、另一条软删，
+   * 用整理所选的逐项执行（写入那一刻锁内按依据里的指纹再比一次）。整批一份快照。结账自己做（plan-applied，见 settleMerge）；
+   * 某一项没写成时同整理所选：已写的按写入记录条件回退，没退干净的仍是这次写下的照常记一笔可撤销的账，别处接着改过的列进 unrecordedIds，
+   * 冲突条目不结清。允许全局与项目之间的冲突（写进哪条由生成建议时的合并规则定）。
+   */
+  const mergeClaimed = async (entry: PendingDecision, suggestionId: string, allowCrossWorkspace: boolean | undefined): Promise<MemoryCommandResult> => {
+    const stale = () => behind('stale', entry.memoryIds, '这两条刚被改过或建议已换了一份，建议已失效。未做任何改动')
+    const { suggestion } = entry
+    if (suggestion === undefined || suggestion.id !== suggestionId || suggestion.action !== 'merge') return stale()
+    // 同裁决的定位口径；不在用的按对不上算
+    const located = await Promise.all(entry.memoryIds.map(id => locate(id, undefined)))
+    const live = located.map(r => (r?.status === 'active' ? r : undefined))
+    if (!isBasisCurrent(entry, suggestion.basis, live)) return stale()
+    const records = live as MemoryRecord[]
+    const edit = suggestion.ops.find(op => op.kind === 'edit')
+    const keeper = records.find(r => r.id === edit?.memoryId)
+    const loser = records.find(r => r.id !== keeper?.id && suggestion.ops.some(op => op.kind === 'forget' && op.memoryId === r.id))
+    if (edit?.kind !== 'edit' || keeper === undefined || loser === undefined) {
+      return fail(cmd, 'invalid-args', `待决项 ${entry.id} 的融合建议不是一条改写加一条删除，未做任何改动`)
+    }
+    const { rejected } = gateRecords(records, gov, allowCrossWorkspace)
+    if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
+    // 存盘时已保证稿里的疑似值都出自原文，采纳不再等确认；高危照拦
+    const secretProblem = editSecretsProblem([edit], true)
+    if (secretProblem !== undefined) return secretProblem
+
+    const snapshot = await deps.snapshots.capture({ operation: 'pre-update', description: `采纳融合建议（${entry.id}）前`, records }, now)
+    // 锁内比的是依据里的完整内容指纹：只改了摘要、标签的也挡下
+    const basisOf = (id: string) => suggestion.basis.memories.find(m => m.memoryId === id)?.fingerprint
+    const isChanged = (cur: MemoryRecord) => cur.status !== 'active' || editFingerprint(cur) !== basisOf(cur.id)
+    const { writes, failure } = await writeBatch([
+      { record: keeper, op: edit, isChanged },
+      // 疑似密钥是用户存下时确认过的，照常软删、可恢复；只有高危软删不了（依据比对已先挡下，这里是锁内兜底）
+      { record: loser, op: { kind: 'forget' }, isChanged, isSecret: hasCriticalSecret },
+    ], deps.store, now)
+    let left: { kept: BatchWrite[]; unrecorded: string[] }
+    if (failure === undefined) {
+      const unsettled = await settleMerge(entry, writes, snapshot)
+      if (unsettled === undefined) return { ok: true, cmd, decisionId: entry.id, memoryIds: writes.map(w => w.memoryId), snapshotId: snapshot.id }
+      left = unsettled
+    } else {
+      left = await rollBackBatch(writes, snapshot, deps)
+      if (left.kept.length === 0 && left.unrecorded.length === 0) {
+        if (failure.kind === 'thrown') throw failure.error
+        if (failure.kind === 'has-secret') return fail(cmd, 'has-secret', `记忆 ${failure.memoryId} 刚被写进密钥，没有删除；融合稿已退回`)
+        return behind(failure.kind, [failure.memoryId], '这两条刚被改过，界面已换成最新内容；融合稿已退回')
+      }
+    }
+    // 没退干净的记一笔可撤销的账（冲突条目留着，不结清）；账也记不上的列进没记上账的，整批前的快照仍可恢复
+    const { kept } = left
+    const batch = kept.length === 0 ? undefined
+      : await settleBatch(kept, kept.map(w => workspaceLabel(records.find(r => r.id === w.memoryId)!)), snapshot, deps, now, entry.id).catch(() => undefined)
+    return {
+      ok: true, cmd, ...(batch !== undefined ? { decisionId: batch.id } : {}), memoryIds: batch !== undefined ? kept.map(w => w.memoryId) : [], snapshotId: snapshot.id,
+      isPartial: true, unrecordedIds: batch !== undefined || kept.length === 0 ? left.unrecorded : [...left.unrecorded, ...kept.map(w => w.memoryId)],
+    }
+  }
+
+  /**
+   * 融合的结账：冲突条目结清为 plan-applied，回执按实际提交的两份算，改后指纹按写下的两份算；结清之后才清掉引用被删那条的
+   * 其他条目（冲突条目自己留着），结清不成时那些条目原样留着。结清之后重读被删的那条：已被别处彻底删除就把这条结清也撤掉
+   * （彻底删除的连带清理可能正好落在结清的读写之间）。任一步抛错时按快照 id 重读账本：已结清就算记上了；没有就把两条按快照退回，
+   * 退干净了把错误抛出去，没退干净的交回调用方如实报「部分完成」。结清了返回 undefined。
+   */
+  const settleMerge = async (entry: PendingDecision, writes: readonly BatchWrite[], snapshot: MemorySnapshot): Promise<{ kept: BatchWrite[]; unrecorded: string[] } | undefined> => {
+    try {
+      const written = new Map(writes.map(w => [w.memoryId, w.written!]))
+      const isSettled = await deps.decisions.settlePlan(entry.id, {
+        writes: writes.map(w => ({ memoryId: w.memoryId, op: w.op, written: w.written! })),
+        proposal: { source: 'suggestion', action: 'merge' }, snapshotId: snapshot.id,
+        fingerprint: conflictFingerprint(entry.memoryIds.map(id => written.get(id)!)),
+      }, now)
+      if (!isSettled) throw new Error(`待决项 ${entry.id} 已不在待处理，这次融合没有记上`)
+      for (const w of writes.filter(w => w.op === 'forget')) {
+        const scope = scopeOfMemory(w.written!)
+        if (scope !== undefined && (await locateCopy(deps.store, w.memoryId, scope)) === undefined) await deps.decisions.dropDependingOn(new Set([snapshot.id]), w.memoryId)
+      }
+      await deps.decisions.removeByMemoryIds(writes.filter(w => w.op === 'forget').map(w => w.memoryId), entry.id)
+      return undefined
+    } catch (error) {
+      const recorded = (await deps.decisions.listSettled().catch(() => []))
+        .some(d => d.id === entry.id && d.settled?.verdict === 'plan-applied' && d.settled.snapshotId === snapshot.id)
+      if (recorded) return undefined
+      const left = await rollBackBatch(writes, snapshot, deps)
+      if (left.kept.length === 0 && left.unrecorded.length === 0) throw error
+      return left
+    }
+  }
+
   switch (command.cmd) {
     case 'resolve': {
       if (!(await deps.decisions.get(command.decisionId))) return notFound(command.decisionId)
@@ -481,7 +644,7 @@ async function dispatch(
       if (suggestion === undefined || suggestion.id !== command.suggestionId) return stale()
       // 结论按账本上这一份定，不信界面；认领条目后执行器再核对一次 id 和依据
       const verdict = verdictOfAction(suggestion.action)
-      if (verdict === undefined) return fail(cmd, 'invalid-args', `待决项 ${entry.id} 的建议是融合，这一版还不能采纳。未做任何改动`)
+      if (verdict === undefined) return await adoptMerge(entry.id, suggestion.id, command.allowCrossWorkspace)
       return await resolveConflict(entry.id, verdict, command.allowCrossWorkspace, { suggestionId: suggestion.id, memoryIds: entry.memoryIds })
     }
 
@@ -724,46 +887,8 @@ async function dispatch(
 
       // 整批一份快照，撤销全部和中途失败的回退都按它恢复
       const snapshot = await deps.snapshots.capture({ operation: 'pre-update', description: `整理所选 ${ops.length} 条前`, records: targets.map(t => t.record) }, now)
-      // 按计划顺序逐项写，每项在提交那一刻记写入记录。回调里算出的只是候选（文件表复核失败会重来），调用正常返回才以返回值为准
-      const writes: BatchWrite[] = []
-      /** 第一项失败的原因：锁内发现被改过、已不在，软删时刚被写进密钥，或写入抛错。之后的项不再写。 */
-      let failure: { kind: 'stale' | 'not-found' | 'has-secret'; memoryId: string } | { kind: 'thrown'; error: unknown } | undefined
-      for (const { op, record } of targets) {
-        const at = scopeAt(record.workspacePath)
-        const write: BatchWrite = { memoryId: record.id, op: op.kind }
-        writes.push(write)
-        let candidate: MemoryRecord | undefined
-        let outcome: 'deleted' | 'has-secret' | 'changed' | 'missing' = 'changed'
-        try {
-          if (op.kind === 'edit') {
-            const committed = await deps.store.update(record, (cur) => {
-              candidate = undefined
-              // 锁内按磁盘上的现状再核对一次：读过之后被改过就原样不写
-              if (cur.status !== 'active' || isStale(cur, op.base)) return cur
-              return (candidate = asHandEdited(cur, op, now))
-            }, at)
-            if (candidate !== undefined) write.written = committed
-          } else {
-            outcome = await deps.store.softDeleteUnlessSecret(record, {
-              at, now, isChanged: (cur) => { candidate = cur; return cur.status !== 'active' || isStale(cur, op.base) },
-            })
-            // 软删只改状态和时间，内容就是锁内最后看到的那份
-            if (outcome === 'deleted') write.written = markDeleted(candidate!, now)
-          }
-        } catch (error) {
-          if (error instanceof RecordNotFoundError) outcome = 'missing'
-          else {
-            // 抛错时不知道落没落盘：按 id 重读，状态和指纹与最后一次候选一致、updatedAt 是这次的才算已写（已写的一样要退回）
-            write.written = await committedAfterThrow(deps.store, record, op.kind, candidate, now)
-            failure = { kind: 'thrown', error }
-            break
-          }
-        }
-        if (write.written === undefined) {
-          failure = { kind: outcome === 'has-secret' ? 'has-secret' : outcome === 'missing' ? 'not-found' : 'stale', memoryId: record.id }
-          break
-        }
-      }
+      // 按计划顺序逐项写；锁内按卡片版本再核对一次
+      const { writes, failure } = await writeBatch(targets.map(({ op, record }) => ({ record, op, isChanged: cur => cur.status !== 'active' || isStale(cur, op.base) })), deps.store, now)
       const labelsOf = (done: readonly BatchWrite[]) => done.map(w => workspaceLabel(targets.find(t => t.record.id === w.memoryId)!.record))
       if (failure === undefined) {
         const entry = await settleBatch(writes, labelsOf(writes), snapshot, deps, now)

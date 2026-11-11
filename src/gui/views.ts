@@ -510,7 +510,7 @@ export function buildDeletedView(input: ViewInput): DeletedView {
     .map(({ r, filePath, deletedAt }) => {
       const e = causeById.get(r.id)
       const verdict = e?.settled?.verdict
-      const cause = e === undefined || (verdict !== 'keep-left' && verdict !== 'keep-right') ? undefined : {
+      const cause = e === undefined || (verdict !== 'keep-left' && verdict !== 'keep-right' && verdict !== 'plan-applied') ? undefined : {
         decisionId: e.id, verdict,
         ...(e.baselineRef !== undefined ? { baselineRef: e.baselineRef } : { counterpartId: e.memoryIds.find(id => id !== r.id) }),
         ...(e.settled!.snapshotId !== undefined ? { snapshotId: e.settled!.snapshotId } : {}),

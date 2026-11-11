@@ -53,6 +53,14 @@ export function isBasisCurrent(entry: Pick<PendingDecision, 'fingerprint' | 'mem
   })
 }
 
+/** 逐项写入的一项（整理所选、应用处理方案）：written 是这一项实际提交的那份（改写是 update 的返回值，删除是软删时锁内那份）。 */
+export type PlanWrite = { memoryId: string; op: BatchReceipt['op']; written: MemoryRecord }
+
+/** 逐项回执：指纹按实际提交的那份算；改写写完应是在用，删除写完应在最近删除里。 */
+function receiptsOf(writes: readonly PlanWrite[]): BatchReceipt[] {
+  return writes.map(w => ({ memoryId: w.memoryId, op: w.op, fingerprint: editFingerprint(w.written), expectedStatus: w.op === 'edit' ? 'active' : 'deleted' }))
+}
+
 /** 「留在本项目」顺带写的放错层忽略（见 schema settled.misplacedIgnore）。 */
 export type MisplacedIgnore = NonNullable<NonNullable<PendingDecision['settled']>['misplacedIgnore']>
 
@@ -316,12 +324,37 @@ export class PendingDecisionsStore {
     }
   }
 
-  /** 撤销裁决：去掉 settled，条目回到待处理（沿用原 id 与 firstSeenAt）。条目不存在或未裁决返回 false。 */
+  /**
+   * 冲突按处理方案改写了记忆（融合、垂直改写）之后结清它（裁决值 plan-applied）：writes 是这次实际提交的每一项（按写入顺序，同整理所选），
+   * 回执按它算，记进结清信息；另记改前快照、依据和结论代码、结清前的冲突指纹（撤销时还原），条目指纹换成改后的 fingerprint，
+   * 以后同一对（垂直的同一条）再被扫到时不再挂账。条目不存在或已结清返回 false。调用方持有条目认领。顺手清扫超出保留窗口的条目。
+   */
+  async settlePlan(
+    id: string, input: { writes: readonly PlanWrite[]; proposal: SettledProposal; snapshotId: string; fingerprint: string }, now: number,
+  ): Promise<boolean> {
+    const entry = await this.table.get(id)
+    if (entry === undefined || entry.settled !== undefined) return false
+    await this.table.put(id, {
+      ...entry, fingerprint: input.fingerprint,
+      settled: {
+        verdict: 'plan-applied', at: now, snapshotId: input.snapshotId, proposal: input.proposal, receipts: receiptsOf(input.writes),
+        ...(entry.fingerprint !== undefined ? { priorFingerprint: entry.fingerprint } : {}),
+      },
+    })
+    await this.sweep(now)
+    return true
+  }
+
+  /**
+   * 撤销裁决：去掉 settled，条目回到待处理（沿用原 id 与 firstSeenAt）。plan-applied 的条目指纹还原成结清前的：
+   * 两条恢复原样后和处理建议的依据对得上，建议继续显示。条目不存在或未裁决返回 false。
+   */
   async unsettle(id: string): Promise<boolean> {
     const entry = await this.table.get(id)
     if (!entry?.settled) return false
-    const { settled: _settled, ...open } = entry
-    await this.table.put(id, open)
+    const { settled, fingerprint, ...open } = entry
+    const restored = settled.verdict === 'plan-applied' ? settled.priorFingerprint : fingerprint
+    await this.table.put(id, { ...open, ...(restored !== undefined ? { fingerprint: restored } : {}) })
     return true
   }
 
@@ -471,11 +504,8 @@ export class PendingDecisionsStore {
    * 整理所选的应用：writes 是这次提交的每一项（按计划顺序），written 是那一项实际提交的那份（改写是 update 的返回值，
    * 删除是软删时锁内那份），回执的指纹按它算；改写写完应是在用，删除写完应在最近删除里。
    */
-  addBatchEdit(
-    writes: ReadonlyArray<{ memoryId: string; op: BatchReceipt['op']; written: MemoryRecord }>, input: { summary: string; workspaces: string[] }, snapshotId: string, now: number,
-  ) {
-    const receipts = writes.map((w): BatchReceipt => ({ memoryId: w.memoryId, op: w.op, fingerprint: editFingerprint(w.written), expectedStatus: w.op === 'edit' ? 'active' : 'deleted' }))
-    return this.addSettled({ kind: 'edit', memoryIds: writes.map(w => w.memoryId), ...input, receipts }, 'batch-edited', now, { snapshotId })
+  addBatchEdit(writes: readonly PlanWrite[], input: { summary: string; workspaces: string[] }, snapshotId: string, now: number) {
+    return this.addSettled({ kind: 'edit', memoryIds: writes.map(w => w.memoryId), ...input, receipts: receiptsOf(writes) }, 'batch-edited', now, { snapshotId })
   }
 
   /** 全局记忆移到项目：written 是移过去的那一份。 */

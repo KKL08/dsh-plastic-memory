@@ -242,3 +242,42 @@ describe('整理所选（batch-edited）：按回执逐项比', () => {
     expect(isUndoable(entry)).toBe(true)
   })
 })
+
+describe('冲突按处理方案落盘（plan-applied）：回执在结清信息里，按回执逐项比', () => {
+  const receipts: BatchReceipt[] = [
+    { memoryId: 'mem_a', op: 'edit', fingerprint: 'fp-a', expectedStatus: 'active' },
+    { memoryId: 'mem_b', op: 'forget', fingerprint: 'fp-b', expectedStatus: 'deleted' },
+  ]
+  const applied = (rs: BatchReceipt[], memoryIds = ['mem_a', 'mem_b']) => {
+    const entry = settled('conflict', memoryIds, { verdict: 'plan-applied' })
+    return { ...entry, settled: { ...entry.settled, receipts: rs } }
+  }
+
+  it('undoRuleOf：目标是全部回执项（不只败方），按改前快照恢复，撤后回到待处理', () => {
+    expect(undoRuleOf(applied(receipts))).toEqual({ targets: ['mem_a', 'mem_b'], mechanism: 'restore-snapshot', fate: 'reopen', receipts })
+  })
+
+  it('isStillOwnWrite / undoStateOfAll：每项按自己的回执比；融合稿之后又被改过、败方被单独恢复都算已改过', async () => {
+    const a = await written({ id: 'mem_a', content: '融合稿' })
+    const b = await written({ id: 'mem_b', content: '并入的', status: 'deleted', deletedAt: NOW })
+    const own: BatchReceipt[] = [
+      { memoryId: 'mem_a', op: 'edit', fingerprint: editFingerprint(a), expectedStatus: 'active' },
+      { memoryId: 'mem_b', op: 'forget', fingerprint: editFingerprint(b), expectedStatus: 'deleted' },
+    ]
+    const entry = applied(own)
+    expect([isStillOwnWrite(entry, a), isStillOwnWrite(entry, b)]).toEqual([true, true])
+    const copies = (patch: Partial<Record<string, MemoryRecord>> = {}) => new Map([
+      ['mem_a', { before: a, current: patch.mem_a ?? a }],
+      ['mem_b', { before: b, current: patch.mem_b ?? b }],
+    ])
+    expect(undoStateOfAll(entry, copies())).toBe('undoable')
+    expect(undoStateOfAll(entry, copies({ mem_a: { ...a, content: '又改了' } }))).toBe('changed')
+    expect(undoStateOfAll(entry, copies({ mem_b: { ...b, status: 'active' } }))).toBe('changed')
+    expect(undoStateOfAll(entry, new Map([['mem_a', { before: a, current: a }]]))).toBe('expired')
+  })
+
+  it('isUndoable：有删除项的、没有删除项的（垂直改写）都留作撤销，随快照过期清掉', () => {
+    expect(isUndoable(applied(receipts))).toBe(true)
+    expect(isUndoable(applied(receipts.slice(0, 1), ['mem_a']))).toBe(true)
+  })
+})

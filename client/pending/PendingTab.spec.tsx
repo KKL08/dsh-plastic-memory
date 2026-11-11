@@ -2435,10 +2435,54 @@ describe('横向冲突卡：采纳建议、直接处理（票 05）', () => {
     expect(screen.getByText('按模型建议处理。A 已删除，14 天内可恢复。')).toBeInTheDocument()
   })
 
-  it('融合建议这一版只显示：没有「采纳建议」，只有直接处理的三个按钮', () => {
-    setup([withState({ suggestion: merged })])
-    expect(screen.queryByRole('button', { name: '采纳建议' })).toBeNull()
-    expect(labelsOf(rowOf())).toEqual(DIRECT)
+  it('融合建议（票 06）：说明行写采纳后被并入的那条去哪，「采纳建议」在前；点了直接发 apply-proposal，不加确认', async () => {
+    const { commands } = setup([withState({ suggestion: merged })])
+    expect(screen.getByText('采纳后 B 进最近删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(labelsOf(rowOf())).toEqual(['采纳建议', ...DIRECT])
+    await press(screen.getByRole('button', { name: '采纳建议' }))
+    expect(screen.queryByRole('group')).toBeNull()
+    await waitFor(() => { expect(commands()).toEqual([{ cmd: 'apply-proposal', decisionId: 'd-h', suggestionId: 'sg_2' }]) })
+  })
+
+  it('采纳融合后结果卡：「已融合成一条」，保留的那条显示融合稿，写来由和去向，撤销发 undo（冲突条目）', async () => {
+    const { commands } = setup([withState({ suggestion: merged })], {
+      respond: command => ({ ok: true, cmd: command.cmd, decisionId: 'd-h', memoryIds: ['a', 'b'], snapshotId: 'snap' }) as MemoryCommandResult,
+    })
+    await press(screen.getByRole('button', { name: '采纳建议' }))
+    expect(await screen.findByText('已融合成一条')).toBeInTheDocument()
+    expect(screen.getByText('按模型建议处理。B 已删除，14 天内可恢复。')).toBeInTheDocument()
+    expect(screen.getByText('集成测试用真实 Postgres。')).toBeInTheDocument()
+    await waitFor(() => { expect(screen.getByRole('button', { name: '撤销' })).toHaveFocus() })
+    await press(screen.getByRole('button', { name: '撤销' }))
+    await waitFor(() => { expect(commands().at(-1)).toEqual({ cmd: 'undo', decisionId: 'd-h' }) })
+  })
+
+  it('融合稿写进 B 时：说明行和结果都写 A 进最近删除', async () => {
+    const intoB: Suggestion = { ...merged, ops: [{ kind: 'forget', memoryId: 'a' }, { ...merged.ops[0]!, memoryId: 'b' } as Suggestion['ops'][number]] }
+    setup([withState({ suggestion: intoB })], { respond: command => ({ ok: true, cmd: command.cmd, decisionId: 'd-h' }) as MemoryCommandResult })
+    expect(screen.getByText('采纳后 A 进最近删除，14 天内可恢复。')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '采纳建议' }))
+    expect(await screen.findByText('按模型建议处理。A 已删除，14 天内可恢复。')).toBeInTheDocument()
+  })
+
+  it.each([
+    ['退回时写盘出错、融合稿还在', { decisionId: 'pd_batch', memoryIds: ['a'], unrecordedIds: [] }, 'A 已写成融合稿，B 没有删除。撤销可把 A 退回原样。', { cmd: 'undo', decisionId: 'pd_batch' }],
+    ['退回前 A 又被别处改过', { memoryIds: [], unrecordedIds: ['a'] }, 'B 没有删除；A 退回前又被别处改过，停在那边的版本。', undefined],
+    ['A 已退回、B 仍被删', { decisionId: 'pd_batch', memoryIds: ['b'], unrecordedIds: [] }, '这次融合没有做完，A、B 现在的内容以记忆列表为准。撤销可退回这次留下的改动。', { cmd: 'undo', decisionId: 'pd_batch' }],
+    ['两条都被别处改过', { memoryIds: [], unrecordedIds: ['a', 'b'] }, '这次融合没有做完，A、B 现在的内容以记忆列表为准。', undefined],
+  ] as const)('采纳融合只完成了一部分（%s）：结果卡如实写，能撤的按那一笔撤', async (_label, partial, body, undo) => {
+    const { commands } = setup([withState({ suggestion: merged })], {
+      respond: command => ({ ok: true, cmd: command.cmd, snapshotId: 'snap', isPartial: true, ...partial }) as unknown as MemoryCommandResult,
+    })
+    await press(screen.getByRole('button', { name: '采纳建议' }))
+    expect(await screen.findByText('只完成了一部分')).toBeInTheDocument()
+    expect(screen.getByText(body)).toBeInTheDocument()
+    if (undo === undefined) {
+      expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
+      return
+    }
+    await press(screen.getByRole('button', { name: '撤销' }))
+    await waitFor(() => { expect(commands().at(-1)).toEqual(undo) })
   })
 
   it.each([

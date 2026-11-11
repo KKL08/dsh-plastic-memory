@@ -3,7 +3,8 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PendingDecisionsStore, dedupKey, isBasisCurrent, suggestionBasis } from '../src/governance/decisions.ts'
-import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, type PendingDecision, type StoredSuggestion } from '../src/governance/schema.ts'
+import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, verdictLoser, type PendingDecision, type StoredSuggestion } from '../src/governance/schema.ts'
+import { editFingerprint } from '../src/governance/snapshots.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import type { CasKvTable, ClaimKvTable, KvTable } from '../src/kv-table.ts'
 import { RETENTION_MS } from '../src/retention.ts'
@@ -403,6 +404,91 @@ describe('处理建议存在账本条目上', () => {
     isArmed = true
     expect(await s.writeSuggestion(entry.id, { suggestion: suggestionOf(entry, [a, b]) }, read(records))).toBe('gone')
     expect(await table.list()).toEqual([])
+  })
+})
+
+describe('应用处理方案（plan-applied）', () => {
+  const kept = record({ id: 'mem_a', content: '前端用 pnpm，脚本仓用 npm' })
+  const dropped = record({ id: 'mem_b', content: '用 npm', status: 'deleted', deletedAt: 5 })
+  const writes = [{ memoryId: 'mem_a', op: 'edit' as const, written: kept }, { memoryId: 'mem_b', op: 'forget' as const, written: dropped }]
+  const proposal = { source: 'suggestion' as const, action: 'merge' as const }
+
+  async function merged() {
+    const table = new InMemoryKvTable<PendingDecision>()
+    const s = new PendingDecisionsStore(table)
+    const { entry } = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器', fingerprint: 'fp-before' }, 1)
+    const suggestion: StoredSuggestion = {
+      id: 'sg_1', action: 'merge', reason: 'r', ops: [{ kind: 'edit', memoryId: 'mem_a', content: kept.content, name: kept.name, summary: kept.summary, tags: [] }, { kind: 'forget', memoryId: 'mem_b' }],
+      basis: { conflictFingerprint: 'fp-before', memories: [] }, isSourced: false, generatedAt: 1,
+    }
+    // 这里只验账本的记法：建议直接放到条目上
+    await table.put(entry.id, { ...entry, suggestion })
+    expect(await s.settlePlan(entry.id, { writes, proposal, snapshotId: 'snap_1', fingerprint: 'fp-after' }, 10)).toBe(true)
+    return { s, entry, suggestion }
+  }
+
+  it('结清信息里记改前快照、逐项回执、依据和结论代码、改前指纹；条目指纹换成改后的；败方是回执里删除的那条', async () => {
+    const { s, entry, suggestion } = await merged()
+    const [saved] = await s.listSettled()
+    expect(saved).toMatchObject({ id: entry.id, fingerprint: 'fp-after', suggestion })
+    expect(saved!.settled).toEqual({
+      verdict: 'plan-applied', at: 10, snapshotId: 'snap_1', proposal, priorFingerprint: 'fp-before',
+      receipts: [
+        { memoryId: 'mem_a', op: 'edit', fingerprint: editFingerprint(kept), expectedStatus: 'active' },
+        { memoryId: 'mem_b', op: 'forget', fingerprint: editFingerprint(dropped), expectedStatus: 'deleted' },
+      ],
+    })
+    expect(pendingDecisionSchema.parse(saved)).toEqual(saved)
+    expect(verdictLoser(saved!, 'plan-applied')).toBe('mem_b')
+    // 没有删除项（垂直改写）：没有败方
+    expect(verdictLoser({ ...saved!, settled: { ...saved!.settled!, receipts: saved!.settled!.receipts!.slice(0, 1) } }, 'plan-applied')).toBeUndefined()
+    expect(await s.list()).toEqual([])
+  })
+
+  it('撤销（unsettle）：条目回到待处理，指纹还原成改前的，结清信息整个去掉，建议原样还在', async () => {
+    const { s, entry, suggestion } = await merged()
+    expect(await s.unsettle(entry.id)).toBe(true)
+    const open = await s.get(entry.id)
+    expect(open).toMatchObject({ fingerprint: 'fp-before', suggestion })
+    expect(open).not.toHaveProperty('settled')
+  })
+
+  it('结清后同一对不被重报：有删除项的，败方不在用时挂账跳过；没有删除项的（垂直改写），按改后指纹再报算已结清', async () => {
+    const { s } = await merged()
+    const read = async (id: string) => (id === 'mem_a' ? kept : dropped)
+    expect((await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '再报', fingerprint: 'fp-after' }, 20, read)).isSkipped).toBe(true)
+    expect((await s.listSettled()).map(e => e.settled?.verdict)).toEqual(['plan-applied'])
+
+    const v = makeStore()
+    const { entry } = await v.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md', summary: '垂直', fingerprint: 'fp-v-before' }, 1)
+    await v.settlePlan(entry.id, { writes: [{ memoryId: 'mem_v', op: 'edit', written: record({ id: 'mem_v' }) }], proposal: { source: 'suggestion', action: 'merge' }, snapshotId: 'snap_v', fingerprint: 'fp-v-after' }, 10)
+    expect((await v.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md 换了措辞', summary: '再报', fingerprint: 'fp-v-after' }, 20)).settled).toBe(true)
+  })
+
+  it('保留窗口过了：账本清理把它清掉（含没有删除项的垂直改写）', async () => {
+    const { s } = await merged()
+    const v = makeStore()
+    const { entry } = await v.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md', summary: '垂直', fingerprint: 'fp-v' }, 1)
+    await v.settlePlan(entry.id, { writes: [{ memoryId: 'mem_v', op: 'edit', written: record({ id: 'mem_v' }) }], proposal, snapshotId: 'snap_v', fingerprint: 'fp-v2' }, 10)
+    for (const store of [s, v]) {
+      await store.sweep(10 + RETENTION_MS - 1)
+      expect(await store.listSettled()).toHaveLength(1)
+      await store.sweep(10 + RETENTION_MS + 1)
+      expect(await store.listSettled()).toEqual([])
+    }
+  })
+
+  it('彻底删除前清依赖条目：快照 id 在结清信息里，找得到它', async () => {
+    const { s } = await merged()
+    await s.dropDependingOn(new Set(['snap_1']), 'mem_b')
+    expect(await s.listSettled()).toEqual([])
+  })
+
+  it('条目不在、已结清：不记，返回 false', async () => {
+    const { s, entry } = await merged()
+    expect(await s.settlePlan(entry.id, { writes, proposal, snapshotId: 'snap_2', fingerprint: 'x' }, 11)).toBe(false)
+    expect(await s.settlePlan('pd_none', { writes, proposal, snapshotId: 'snap_2', fingerprint: 'x' }, 11)).toBe(false)
+    expect((await s.listSettled())[0]!.settled?.snapshotId).toBe('snap_1')
   })
 })
 

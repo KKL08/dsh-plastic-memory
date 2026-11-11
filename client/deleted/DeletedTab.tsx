@@ -27,13 +27,21 @@ function inScope(item: DeletedItem, scope: PageScope): boolean {
 }
 
 /**
- * 来源：垂直冲突（有基线出处）是「以基线为准」；横向写胜方（counterpartId）的名字，在全部记忆和最近删除里都找不到时写 id。
- * 旧条目没记对方：keep-left 删的是 B（以 A 为准），keep-right 删的是 A。
+ * 来源：垂直冲突（有基线出处）是「以基线为准」；横向写胜方（counterpartId）的名字，在全部记忆和最近删除里都找不到时写 id；
+ * 融合时并入删掉的（plan-applied）写并进了哪条。旧条目没记对方：keep-left 删的是 B（以 A 为准），keep-right 删的是 A。
  */
 function causeLabel(cause: NonNullable<DeletedItem['cause']>, names: ReadonlyMap<string, string>, t: Translate): string {
   if (cause.baselineRef !== undefined) return t('deleted.cause.baseline')
-  if (cause.counterpartId !== undefined) return t('deleted.cause.keep', { name: names.get(cause.counterpartId) ?? cause.counterpartId })
+  if (cause.counterpartId !== undefined) return t(cause.verdict === 'plan-applied' ? 'deleted.cause.merged' : 'deleted.cause.keep', { name: counterpartName(cause, names) })
   return t(cause.verdict === 'keep-left' ? 'deleted.cause.keepA' : 'deleted.cause.keepB')
+}
+
+const counterpartName = (cause: NonNullable<DeletedItem['cause']>, names: ReadonlyMap<string, string>) =>
+  cause.counterpartId === undefined ? '' : names.get(cause.counterpartId) ?? cause.counterpartId
+
+/** 恢复之后会怎样：删一方的裁决恢复即撤销、冲突回到待处理；融合时并入的只带回这一条，融合稿不退回。 */
+function restoreHint(cause: NonNullable<DeletedItem['cause']>, names: ReadonlyMap<string, string>, t: Translate): string {
+  return cause.verdict === 'plan-applied' ? t('deleted.restoreHintMerged', { name: counterpartName(cause, names) }) : t('deleted.restoreHint')
 }
 
 /** 记忆 id → 名字：全部记忆（各作用域 active）加最近删除。 */
@@ -104,7 +112,7 @@ export function DeletedTab({ nav, scope, session, fold, now = Date.now() }: {
               </Fragment>
             ))}
           </p>
-          {cause !== undefined ? <p className="pm-del-hint">{t('deleted.restoreHint')}</p> : null}
+          {cause !== undefined ? <p className="pm-del-hint">{restoreHint(cause, names, t)}</p> : null}
           {actions.feedback(memory.id)}
           {confirming === memory.id
             ? (
