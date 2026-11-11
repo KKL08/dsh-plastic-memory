@@ -3,13 +3,14 @@ import { describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import {
   GUI_VIEW_VERSION,
-  type HealthView, type LibraryView, type MemoryCard, type ModelChange, type PendingItem, type PendingView, type SessionView,
+  type HealthView, type LibraryView, type MemoryCard, type ModelChange, type PendingItem, type PendingView, type ProposalAction, type ProposalOp, type SessionView,
 } from '../../src/gui/contract.ts'
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import type { PluginConfig } from '../gateway.ts'
 import { createNavStore, openMemoryPage, PANEL_ID } from '../nav.ts'
 import { memory, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { SidebarTab, sidebarTabCss } from './SidebarTab.tsx'
+import { conflictRulingCss } from '../ui/ConflictRuling.tsx'
 import { createTranslator } from '../i18n.tsx'
 import { en } from '../locales.ts'
 import { PanelShell } from '../ui/PanelShell.tsx'
@@ -52,6 +53,17 @@ function pending(...items: PendingItem[]): PendingView {
 }
 
 const conflict: PendingItem = { kind: 'conflict-horizontal', level: 'your-call', decisionId: 'pd_1', firstSeenAt: 1, summary: '', left: pref, right: pref2 }
+const REASON = 'A 是后来明确说的，B 是早先的临时做法。'
+/** 带处理建议的冲突（结论按参数）：只留一条的另一条删除，都保留不动，融合把稿写进 A、删 B。 */
+function suggested(action: ProposalAction, id = 'sg_1', item: PendingItem = conflict): PendingItem {
+  const ops: ProposalOp[] = action === 'keep-a' ? [{ kind: 'keep', memoryId: 'p1' }, { kind: 'forget', memoryId: 'p2' }]
+    : action === 'keep-b' ? [{ kind: 'forget', memoryId: 'p1' }, { kind: 'keep', memoryId: 'p2' }]
+      : action === 'keep-both' ? [{ kind: 'keep', memoryId: 'p1' }, { kind: 'keep', memoryId: 'p2' }]
+        : [{ kind: 'edit', memoryId: 'p1', content: '集成测试用真实 Postgres，单元测试可以 mock。', name: pref.name, summary: pref.summary, tags: [] }, { kind: 'forget', memoryId: 'p2' }]
+  return { ...item, suggestion: { id, action, reason: REASON, ops, isSourced: false } } as PendingItem
+}
+/** 建议保留 A 的冲突：右侧栏能直接采纳。 */
+const adoptable = suggested('keep-a')
 const promote: PendingItem = { kind: 'promote-candidate', level: 'your-call', decisionId: 'pd_2', firstSeenAt: 1, memory: proj }
 const vertical: PendingItem = { kind: 'conflict-vertical', level: 'your-call', decisionId: 'pd_v', firstSeenAt: 1, summary: '', memory: proj, baselineRef: 'AGENTS.md：merge freeze' }
 
@@ -618,27 +630,26 @@ describe('SidebarTab 同 id 的多份副本', () => {
 })
 
 describe('SidebarTab 就地裁决', () => {
-  it('冲突卡在「等你决定」段里；裁决后结果留原位，撤销后冲突回来', async () => {
-    const { gateway, container } = setup({
+  it('冲突卡在「等你决定」段里；采纳后结果留原位，撤销后冲突回来、建议还在', async () => {
+    const { gateway } = setup({
       library: library(pref, pref2, proj, glob),
       session: snapshot({ injectedIds: ['p1', 'j1', 'p2', 'g1'] }),
-      pending: pending(conflict),
+      pending: pending(adoptable),
     })
     const group = within(screen.getByRole('region', { name: '等你决定' }))
     expect(group.getByRole('heading', { name: '两条记忆互相矛盾，等你决定' })).toBeInTheDocument()
     expect(within(screen.getByRole('region', { name: '带入的记忆' })).getByRole('heading', { name: '行为偏好 2 全文' })).toBeInTheDocument()
-    expect(container.querySelectorAll('.pm-conflict-buttons button')).toHaveLength(3)
 
-    await act(async () => { fireEvent.click(group.getByRole('button', { name: '以 A 为准' })) })
-    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'resolve', decisionId: 'pd_1', verdict: 'keep-left' }])
+    await act(async () => { fireEvent.click(group.getByRole('button', { name: '采纳建议' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'apply-proposal', decisionId: 'pd_1', suggestionId: 'sg_1' }])
     // 视图刷新：冲突出了待处理，B 被删
     act(() => {
       gateway.setView('pending', pending())
       gateway.setView('library', library(pref, proj, glob))
     })
     expect(screen.queryByRole('heading', { name: '两条记忆互相矛盾，等你决定' })).toBeNull()
-    expect(screen.getByText('已按 A')).toBeInTheDocument()
-    expect(screen.getByText(/B 已删除，14 天内可恢复。/)).toBeInTheDocument()
+    expect(screen.getByText('已保留 A')).toBeInTheDocument()
+    expect(screen.getByText(/按模型建议处理。B 已删除，14 天内可恢复。/)).toBeInTheDocument()
     // 删掉一条只影响之后的组装：这次对话冻结的快照里还是两条
     expect(screen.getByText('这次对话里已带入的不变，压缩后或下个对话起生效。')).toBeInTheDocument()
     // 「撤销」和别处一样是标准尺寸的幽灵按钮
@@ -646,87 +657,190 @@ describe('SidebarTab 就地裁决', () => {
 
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
     expect(gateway.executed.map(e => e.command)[1]).toEqual({ cmd: 'undo', decisionId: 'pd_1' })
-    expect(screen.queryByText('已按 A')).toBeNull()
+    expect(screen.queryByText('已保留 A')).toBeNull()
     act(() => {
-      gateway.setView('pending', pending(conflict))
+      gateway.setView('pending', pending(adoptable))
       gateway.setView('library', library(pref, pref2, proj, glob))
     })
     expect(screen.getByRole('heading', { name: '两条记忆互相矛盾，等你决定' })).toBeInTheDocument()
+    expect(group.getByText('保留 A')).toBeInTheDocument()
+    expect(group.getByRole('button', { name: '采纳建议' })).toBeInTheDocument()
   })
 
   it('PA-46 失败的提示各处一致：英文同一句，正文色（不另起红字）', async () => {
     const gateway = createFakeGateway({
-      views: { health: health(), library: library(pref, pref2), session: snapshot({ injectedIds: ['p1'] }), pending: pending(conflict) },
+      views: { health: health(), library: library(pref, pref2), session: snapshot({ injectedIds: ['p1'] }), pending: pending(adoptable) },
       respond: () => ({ ok: false, code: 'failed', detail: 'cannot locate the losing memory' }),
       config: configWith('plugin-global'),
     })
     render(<PanelShell gateway={gateway} t={createTranslator(en)}><SidebarTab sessionId="s1" workspacePath={WS} openPage={vi.fn()} /></PanelShell>)
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Keep both' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Adopt suggestion' })) })
     expect(screen.getByRole('alert')).toHaveTextContent('Did not work: cannot locate the losing memory')
     expect(screen.getByRole('alert')).toHaveClass('pm-pending-error')
     expect(sidebarTabCss).not.toContain('pm-side-error')
   })
 
-  it('侧栏窄（英文按钮约 283px）：冲突卡按钮放不下时换行，不强制一行', () => {
-    expect(sidebarTabCss).not.toMatch(/\.pm-conflict-buttons \{[^}]*nowrap/)
+  it('侧栏窄：建议那一行和按钮行放不下时换行，不强制一行、不溢出', () => {
+    expect(sidebarTabCss).not.toMatch(/\.pm-conflict-actions \{[^}]*nowrap/)
+    expect(sidebarTabCss).toMatch(/\.pm-side-suggestion \{[^}]*overflow-wrap: anywhere/)
+    expect(conflictRulingCss).toMatch(/\.pm-conflict-actions \{[^}]*flex-wrap: wrap/)
   })
 
   it('PA-45 撤销回 stale：写本地文案，不显示服务端的中文原话', async () => {
     const gateway = createFakeGateway({
-      views: { health: health(), library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending(conflict) },
+      views: { health: health(), library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending(suggested('keep-both')) },
       respond: command => command.cmd === 'undo'
         ? { ok: false, cmd: command.cmd, code: 'stale', detail: '记忆之后又被改过，未做任何改动' }
         : { ok: true, cmd: command.cmd, decisionId: 'pd_1' },
       config: configWith('plugin-global'),
     })
     render(<PanelShell gateway={gateway} t={createTranslator(en)}><SidebarTab sessionId="s1" workspacePath={WS} openPage={vi.fn()} /></PanelShell>)
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Keep both' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Adopt suggestion' })) })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Undo' })) })
-    expect(gateway.executed.map(e => e.command.cmd)).toEqual(['resolve', 'undo'])
+    expect(gateway.executed.map(e => e.command.cmd)).toEqual(['apply-proposal', 'undo'])
     expect(screen.getByRole('alert')).toHaveTextContent('Did not work: This memory changed afterwards, so undoing would overwrite those changes. Nothing was undone.')
     expect(screen.queryByText(/未做任何改动/)).toBeNull()
   })
 
-  it('裁决失败：原位写宿主原话，冲突卡还在', async () => {
+  it('采纳失败：原位写宿主原话，冲突卡还在', async () => {
     setup(
-      { library: library(pref, pref2), session: snapshot({ injectedIds: ['p1'] }), pending: pending(conflict) },
+      { library: library(pref, pref2), session: snapshot({ injectedIds: ['p1'] }), pending: pending(adoptable) },
       () => ({ ok: false, code: 'failed', detail: '定位不到败方记忆' }),
     )
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '都保留' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '采纳建议' })) })
     expect(screen.getByRole('alert')).toHaveTextContent('没有成功：定位不到败方记忆')
     expect(screen.getByRole('heading', { name: '两条记忆互相矛盾，等你决定' })).toBeInTheDocument()
+  })
+})
+
+describe('SidebarTab 冲突行的处理建议', () => {
+  const yourCall = () => within(screen.getByRole('region', { name: '等你决定' }))
+  const todo = { view: 'todo', scope: { kind: 'workspace', workspacePath: WS }, fromChat: true, level: 'your-call' }
+
+  it.each([
+    ['keep-a', '保留 A', '采纳后 B 进最近删除，14 天内可恢复。', '已保留 A', /按模型建议处理。B 已删除，14 天内可恢复。/],
+    ['keep-b', '保留 B', '采纳后 A 进最近删除，14 天内可恢复。', '已保留 B', /按模型建议处理。A 已删除，14 天内可恢复。/],
+    ['keep-both', '都保留（不算冲突）', '采纳后两条都留着，以后体检不再把它们当冲突。', '两条都保留', /按模型建议处理。以后体检不再把它们当冲突。/],
+  ] as const)('建议 %s：A、B 下面一行「模型建议：%s」，不显示理由；说明采纳后哪条去哪；「采纳建议」只带条目 id 和建议 id，结果写来由', async (action, conclusion, note, chip, body) => {
+    const { gateway, container } = setup({ library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1', 'p2'] }), pending: pending(suggested(action)) })
+    const line = container.querySelector('.pm-side-suggestion')!
+    expect(line).toHaveTextContent(`模型建议：${conclusion}`)
+    expect(line.querySelector('strong')).toHaveTextContent(conclusion)
+    // 在 A、B 两张卡之后
+    expect(line.closest('.pm-conflict-footer')?.previousElementSibling).toHaveClass('pm-conflict-sides')
+    expect(screen.queryByText(REASON)).toBeNull()
+    expect(yourCall().getByText(note)).toBeInTheDocument()
+    expect(container.querySelector('.pm-suggestion')).toBeNull()
+
+    await act(async () => { fireEvent.click(yourCall().getByRole('button', { name: '采纳建议' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'apply-proposal', decisionId: 'pd_1', suggestionId: 'sg_1' }])
+    act(() => { gateway.setView('pending', pending()) })
+    expect(screen.getByText(chip)).toBeInTheDocument()
+    expect(screen.getByText(body)).toBeInTheDocument()
+  })
+
+  it('有可采纳的建议时，后面跟「在记忆页处理 ›」：不想按建议处理的出口，落在记忆页的「等你决定」', () => {
+    const { openPage, gateway } = setup({ library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1', 'p2'] }), pending: pending(adoptable) })
+    const buttons = yourCall().getAllByRole('button').filter(b => b.closest('.pm-conflict-actions') !== null)
+    expect(buttons.map(b => b.textContent)).toEqual(['采纳建议', '在记忆页处理 ›'])
+    expect(buttons[0]).toHaveClass('pm-btn--primary')
+    fireEvent.click(buttons[1]!)
+    expect(openPage).toHaveBeenCalledWith(todo)
+    expect(gateway.executed).toHaveLength(0)
+  })
+
+  it('融合建议：一行「模型建议：融合成一条」，不放融合稿和对照，没有「采纳建议」，是「在记忆页处理 ›」', () => {
+    const { container, openPage } = setup({ library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1', 'p2'] }), pending: pending(suggested('merge')) })
+    expect(container.querySelector('.pm-side-suggestion')).toHaveTextContent('模型建议：融合成一条')
+    expect(screen.queryByText('集成测试用真实 Postgres，单元测试可以 mock。')).toBeNull()
+    expect(screen.queryByText(/看和原文的对照/)).toBeNull()
+    expect(screen.queryByRole('button', { name: '采纳建议' })).toBeNull()
+    // 融合时采纳后哪条去哪写不下，不画说明
+    expect(container.querySelector('.pm-conflict-footer .pm-advice')).toBeNull()
+    fireEvent.click(yourCall().getByRole('button', { name: '在记忆页处理 ›' }))
+    expect(openPage).toHaveBeenCalledWith(todo)
+  })
+
+  it.each([
+    ['任一条含高危密钥', { noSuggestion: { code: 'has-secret' } }],
+    ['还没生成', { noSuggestion: { code: 'not-generated' } }],
+    ['生成失败', { noSuggestion: { code: 'failed', cause: { kind: 'model-error', message: 'timeout' } } }],
+    ['模型判断不了', { noSuggestion: { code: 'undecided', reason: '两条都没写日期。' } }],
+    ['一方定位不到', { right: null }],
+  ] as const)('没有建议（%s）：不写建议那一行，没有「采纳建议」「补上建议」，只有「在记忆页处理 ›」', (_label, patch) => {
+    const { container, openPage } = setup({ library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1', 'p2'] }), pending: pending({ ...conflict, ...patch } as PendingItem) })
+    expect(container.querySelector('.pm-side-suggestion')).toBeNull()
+    expect(screen.queryByText(/模型建议/)).toBeNull()
+    expect(screen.queryByText('两条都没写日期。')).toBeNull()
+    expect(screen.queryByRole('button', { name: '采纳建议' })).toBeNull()
+    expect(screen.queryByRole('button', { name: /补上建议|再试一次/ })).toBeNull()
+    expect(container.querySelectorAll('.pm-conflict-actions button')).toHaveLength(1)
+    fireEvent.click(yourCall().getByRole('button', { name: '在记忆页处理 ›' }))
+    expect(openPage).toHaveBeenCalledWith(todo)
+  })
+
+  it('采纳时建议已失效（服务端回 stale）：不落盘、不写通用的失败，原位写明失效，退化成没有建议；视图带来另一份建议时照常显示', async () => {
+    const { gateway, container } = setup(
+      { library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1', 'p2'] }), pending: pending(adoptable) },
+      command => ({ ok: false, cmd: command.cmd, code: 'stale', detail: '建议已失效，未做任何改动' }),
+    )
+    await act(async () => { fireEvent.click(yourCall().getByRole('button', { name: '采纳建议' })) })
+    expect(screen.getByRole('status')).toHaveTextContent('这两条刚被改过，建议已失效。下次体检会重新给建议。')
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByText(/未做任何改动/)).toBeNull()
+    expect(container.querySelector('.pm-side-suggestion')).toBeNull()
+    expect(screen.queryByRole('button', { name: '采纳建议' })).toBeNull()
+    expect(yourCall().getByRole('button', { name: '在记忆页处理 ›' })).toBeInTheDocument()
+    expect(yourCall().getByRole('heading', { name: '两条记忆互相矛盾，等你决定' })).toBeInTheDocument()
+
+    // 视图还是那一份：照旧失效
+    act(() => { gateway.setView('pending', pending(suggested('keep-a'))) })
+    expect(screen.queryByRole('button', { name: '采纳建议' })).toBeNull()
+    // 新的一份（id 不同）
+    act(() => { gateway.setView('pending', pending(suggested('keep-b', 'sg_2'))) })
+    expect(container.querySelector('.pm-side-suggestion')).toHaveTextContent('模型建议：保留 B')
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(yourCall().getByRole('button', { name: '采纳建议' })).toBeInTheDocument()
+  })
+
+  it('英文界面：Model suggests 一行、Adopt suggestion、和底部入口同名的 Handle on the Memory page', () => {
+    const gateway = createFakeGateway({ views: { health: health(), library: library(pref, pref2), session: snapshot({ injectedIds: ['p1'] }), pending: pending(suggested('keep-both')) } })
+    const { container } = render(<PanelShell gateway={gateway} t={createTranslator(en)}><SidebarTab sessionId="s1" workspacePath={WS} openPage={vi.fn()} /></PanelShell>)
+    expect(container.querySelector('.pm-side-suggestion')).toHaveTextContent('Model suggests: Keep both (not a conflict)')
+    expect(screen.getByRole('button', { name: 'Adopt suggestion' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Handle on the Memory page ›' })).toBeInTheDocument()
   })
 })
 
 describe('SidebarTab 别处已经在处理同一条冲突', () => {
   const refused = '你的选择没有生效：这条冲突正在别处处理，或者刚在别处处理完。'
 
-  it.each(['claimed', 'not-found'] as const)('裁决回 %s：原位写明没有生效；别处的裁决写进视图、冲突卡消失后提示还在', async (code) => {
+  it.each(['claimed', 'not-found'] as const)('采纳回 %s：原位写明没有生效；别处的裁决写进视图、冲突卡消失后提示还在', async (code) => {
     const { gateway } = setup(
-      { library: library(pref, pref2, proj, glob), session: snapshot({ injectedIds: ['p1', 'j1', 'p2', 'g1'] }), pending: pending(conflict) },
+      { library: library(pref, pref2, proj, glob), session: snapshot({ injectedIds: ['p1', 'j1', 'p2', 'g1'] }), pending: pending(suggested('keep-b')) },
       command => ({ ok: false, cmd: command.cmd, code, detail: '待决项 pd_1 正在被另一次裁决处理，未做任何改动。' }),
     )
     const group = within(screen.getByRole('region', { name: '等你决定' }))
-    await act(async () => { fireEvent.click(group.getByRole('button', { name: '以 B 为准' })) })
+    await act(async () => { fireEvent.click(group.getByRole('button', { name: '采纳建议' })) })
     expect(group.getByRole('alert')).toHaveTextContent(refused)
     expect(screen.queryByText(/正在被另一次裁决处理/)).toBeNull()
 
-    // 另一个标签页以 A 为准：冲突出了待处理，B 被删
+    // 另一个标签页保留了 A：冲突出了待处理，B 被删
     act(() => {
       gateway.setView('pending', pending())
       gateway.setView('library', library(pref, proj, glob))
     })
     expect(screen.queryByRole('heading', { name: '两条记忆互相矛盾，等你决定' })).toBeNull()
-    expect(screen.queryByText('已按 B')).toBeNull()
+    expect(screen.queryByText('已保留 B')).toBeNull()
     expect(screen.getByRole('alert')).toHaveTextContent(refused)
   })
 
   it('带入的记忆都没了：提示留在空状态上面', async () => {
     const { gateway } = setup(
-      { library: library(pref, pref2), session: snapshot({ injectedIds: ['p1', 'p2'] }), pending: pending(conflict) },
+      { library: library(pref, pref2), session: snapshot({ injectedIds: ['p1', 'p2'] }), pending: pending(adoptable) },
       command => ({ ok: false, cmd: command.cmd, code: 'claimed' }),
     )
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '以 B 为准' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '采纳建议' })) })
     act(() => {
       gateway.setView('pending', pending())
       gateway.setView('library', library())
@@ -737,50 +851,50 @@ describe('SidebarTab 别处已经在处理同一条冲突', () => {
 })
 
 describe('SidebarTab 一条冲突同时只发一次裁决', () => {
-  it('裁决还没回来时做了别的动作（删新记的）：那条冲突仍不可再裁决，不会发出第二条相反的裁决', async () => {
+  it('采纳还没回来时做了别的动作（删新记的）：那条冲突仍不可再采纳，不会发出第二次', async () => {
     const fresh = memory({ id: 'n1', type: 'knowledge', content: '报销截止每月 25 日。' })
     let finish: (() => void) | undefined
     const { gateway } = setup(
-      { library: library(pref, pref2, fresh), session: snapshot({ injectedIds: ['p1', 'p2'], savedIds: ['n1'] }), pending: pending(conflict) },
-      command => command.cmd === 'resolve'
+      { library: library(pref, pref2, fresh), session: snapshot({ injectedIds: ['p1', 'p2'], savedIds: ['n1'] }), pending: pending(adoptable) },
+      command => command.cmd === 'apply-proposal'
         ? new Promise(resolve => { finish = () => { resolve({ ok: true, cmd: command.cmd, decisionId: 'pd_1' }) } })
         : { ok: true, cmd: command.cmd, memoryIds: ['n1'] },
     )
     const group = within(screen.getByRole('region', { name: '等你决定' }))
-    await act(async () => { fireEvent.click(group.getByRole('button', { name: '以 A 为准' })) })
+    await act(async () => { fireEvent.click(group.getByRole('button', { name: '采纳建议' })) })
     const saved = within(screen.getByRole('region', { name: '这次新写入的' }))
     await remove(saved.getByRole('button', { name: '删除这条记忆' }))
-    expect(group.getByRole('button', { name: '以 B 为准' })).toHaveAttribute('aria-disabled', 'true')
-    await act(async () => { fireEvent.click(group.getByRole('button', { name: '以 B 为准' })) })
-    expect(gateway.executed.map(e => e.command.cmd)).toEqual(['resolve', 'forget'])
+    expect(group.getByRole('button', { name: '采纳建议' })).toHaveAttribute('aria-disabled', 'true')
+    await act(async () => { fireEvent.click(group.getByRole('button', { name: '采纳建议' })) })
+    expect(gateway.executed.map(e => e.command.cmd)).toEqual(['apply-proposal', 'forget'])
     await act(async () => { finish!() })
-    expect(screen.getByText('已按 A')).toBeInTheDocument()
+    expect(screen.getByText('已保留 A')).toBeInTheDocument()
   })
 })
 
 describe('SidebarTab 跨项目确认', () => {
   it('对方属于别的项目：服务端拒了就原位确认，「继续处理」带 allowCrossWorkspace 重发；「取消」什么都不发', async () => {
     const other = memory({ id: 'p2', type: 'preference', workspacePath: '/w/blog', content: '测试里 mock 数据库就行。' })
-    const cross: PendingItem = { ...conflict, right: other } as PendingItem
+    const cross = suggested('keep-both', 'sg_1', { ...conflict, right: other } as PendingItem)
     const { gateway } = setup(
       { library: library(pref, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending(cross) },
       command => 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
         ? { ok: true, cmd: command.cmd }
         : { ok: false, cmd: command.cmd, code: 'cross-workspace', rejected: [{ id: 'p2', workspacePath: '/w/blog' }] },
     )
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '都保留' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '采纳建议' })) })
     expect(screen.getByText('这条记忆属于 blog 项目，不是当前项目。确定在这里处理它吗？')).toBeInTheDocument()
     expect(screen.queryByRole('alert')).toBeNull()
-    expect(screen.getByRole('button', { name: '以 A 为准' })).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getByRole('button', { name: '采纳建议' })).toHaveAttribute('aria-disabled', 'true')
 
     fireEvent.click(screen.getByRole('button', { name: '取消' }))
     expect(screen.queryByText(/属于 blog 项目/)).toBeNull()
     expect(gateway.executed).toHaveLength(1)
 
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '都保留' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '采纳建议' })) })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '继续处理' })) })
-    expect(gateway.executed.map(e => e.command).at(-1)).toEqual({ cmd: 'resolve', decisionId: 'pd_1', verdict: 'keep-both', allowCrossWorkspace: true })
-    expect(screen.getByText('以后体检不再把它们当冲突。')).toBeInTheDocument()
+    expect(gateway.executed.map(e => e.command).at(-1)).toEqual({ cmd: 'apply-proposal', decisionId: 'pd_1', suggestionId: 'sg_1', allowCrossWorkspace: true })
+    expect(screen.getByText('按模型建议处理。以后体检不再把它们当冲突。')).toBeInTheDocument()
     expect(screen.queryByText(/属于 blog 项目/)).toBeNull()
   })
 })
@@ -788,12 +902,12 @@ describe('SidebarTab 跨项目确认', () => {
 describe('SidebarTab 裁决结论没记下', () => {
   it('结果带 isUnrecorded（升级前导入、缺指纹的冲突）：写下次体检可能还会报，不给撤销', async () => {
     setup(
-      { library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending(conflict) },
+      { library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending(suggested('keep-both')) },
       command => ({ ok: true, cmd: command.cmd, decisionId: 'pd_1', isUnrecorded: true }),
     )
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '都保留' })) })
-    expect(screen.getByText('这次的决定没能记下，下次体检可能还会报。')).toBeInTheDocument()
-    expect(screen.queryByText('以后体检不再把它们当冲突。')).toBeNull()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '采纳建议' })) })
+    expect(screen.getByText('按模型建议处理。这次的决定没能记下，下次体检可能还会报。')).toBeInTheDocument()
+    expect(screen.queryByText(/以后体检不再把它们当冲突。/)).toBeNull()
     expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
   })
 })
@@ -801,13 +915,12 @@ describe('SidebarTab 裁决结论没记下', () => {
 describe('SidebarTab 裁决删掉的一方含密钥', () => {
   it('PA-11 结果带 isHardDeleted：写已彻底删除、提醒换凭证，不给撤销', async () => {
     setup(
-      { library: library(pref, { ...pref2, hasSecret: true }, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending({ ...conflict, right: { ...pref2, hasSecret: true } } as PendingItem) },
+      { library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending(adoptable) },
       command => ({ ok: true, cmd: command.cmd, decisionId: 'pd_1', isHardDeleted: true }),
     )
-    expect(screen.getByText(/以 A 为准，B 含密钥，将彻底删除、不可恢复/)).toBeInTheDocument()
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '以 A 为准' })) })
-    expect(screen.getByText('B 含密钥，已彻底删除。如果它是真的凭证，记得去换一个新的。')).toBeInTheDocument()
-    expect(screen.queryByText('B 已删除，14 天内可恢复。')).toBeNull()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '采纳建议' })) })
+    expect(screen.getByText('按模型建议处理。B 含密钥，已彻底删除。如果它是真的凭证，记得去换一个新的。')).toBeInTheDocument()
+    expect(screen.queryByText(/B 已删除，14 天内可恢复。/)).toBeNull()
     expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
   })
 })
@@ -886,12 +999,12 @@ describe('SidebarTab 底部入口', () => {
     })
     const nav = createNavStore({ view: 'library' })
     const layout = { selectPanel: vi.fn() }
-    renderInShell(
+    const { container } = renderInShell(
       <SidebarTab sessionId="s1" workspacePath={WS} openPage={(target) => { openMemoryPage({ layout }, nav, target) }} />,
       gateway,
     )
     expect(screen.getByText(/本项目还有 1 处待处理/)).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '在记忆页处理 ›' }))
+    fireEvent.click(within(container.querySelector<HTMLElement>('.pm-side-footer')!).getByRole('button', { name: '在记忆页处理 ›' }))
     expect(nav.get()).toEqual({ view: 'todo', scope: { kind: 'workspace', workspacePath: WS }, fromChat: true })
     expect(layout.selectPanel).toHaveBeenCalledWith(PANEL_ID)
   })
@@ -984,9 +1097,9 @@ describe('SidebarTab 确认收起后的键盘焦点', () => {
     await waitFor(() => { expect(note).toHaveFocus() })
   })
 
-  it('撤销裁决：撤销生效、视图还没带回冲突时「等你决定」段不消失，原位画回冲突卡，焦点落在第一个裁决按钮；视图带回后卡片不重挂、焦点不动', async () => {
-    const { gateway } = setup({ library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1', 'p2', 'j1'] }), pending: pending(conflict) })
-    await press(screen.getByRole('button', { name: '以 A 为准' }))
+  it('撤销裁决：撤销生效、视图还没带回冲突时「等你决定」段不消失，原位画回冲突卡（建议还在），焦点落在「采纳建议」；视图带回后卡片不重挂、焦点不动', async () => {
+    const { gateway } = setup({ library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1', 'p2', 'j1'] }), pending: pending(adoptable) })
+    await press(screen.getByRole('button', { name: '采纳建议' }))
     act(() => {
       gateway.setView('pending', pending())
       gateway.setView('library', library(pref, proj))
@@ -997,42 +1110,40 @@ describe('SidebarTab 确认收起后的键盘焦点', () => {
     const card = within(yourCall).getByRole('heading', { name: '两条记忆互相矛盾，等你决定' }).closest('article')!
     expect(within(card).getByText('测试里 mock 数据库就行。')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '等你决定 1' })).toHaveAttribute('aria-expanded', 'true')
-    await waitFor(() => { expect(within(card).getByRole('button', { name: '以 A 为准' })).toHaveFocus() })
+    expect(within(card).getByText('保留 A')).toBeInTheDocument()
+    await waitFor(() => { expect(within(card).getByRole('button', { name: '采纳建议' })).toHaveFocus() })
 
     act(() => {
-      gateway.setView('pending', pending(conflict))
+      gateway.setView('pending', pending(adoptable))
       gateway.setView('library', library(pref, pref2, proj))
     })
     expect(within(yourCall).getAllByRole('article')).toHaveLength(1)
     expect(within(yourCall).getByRole('article')).toBe(card)
-    expect(within(card).getByRole('button', { name: '以 A 为准' })).toHaveFocus()
+    expect(within(card).getByRole('button', { name: '采纳建议' })).toHaveFocus()
   })
 
-  it('撤销后视图还没带回冲突时可以接着裁决：发 resolve，换成新的结果卡', async () => {
-    const { gateway } = setup({ library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1', 'p2', 'j1'] }), pending: pending(conflict) })
-    await press(screen.getByRole('button', { name: '以 A 为准' }))
+  it('撤销后视图还没带回冲突时可以接着采纳：再发 apply-proposal，换成新的结果卡', async () => {
+    const { gateway } = setup({ library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1', 'p2', 'j1'] }), pending: pending(adoptable) })
+    await press(screen.getByRole('button', { name: '采纳建议' }))
     act(() => { gateway.setView('pending', pending()) })
     await press(screen.getByRole('button', { name: '撤销' }))
-    await press(await screen.findByRole('button', { name: '以 B 为准' }))
-    expect(gateway.executed.map(e => e.command)).toEqual([
-      { cmd: 'resolve', decisionId: 'pd_1', verdict: 'keep-left' },
-      { cmd: 'undo', decisionId: 'pd_1' },
-      { cmd: 'resolve', decisionId: 'pd_1', verdict: 'keep-right' },
-    ])
-    expect(screen.getByText('已按 B')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '以 A 为准' })).toBeNull()
+    await press(await screen.findByRole('button', { name: '采纳建议' }))
+    const adopt = { cmd: 'apply-proposal', decisionId: 'pd_1', suggestionId: 'sg_1' }
+    expect(gateway.executed.map(e => e.command)).toEqual([adopt, { cmd: 'undo', decisionId: 'pd_1' }, adopt])
+    expect(screen.getByText('已保留 A')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '采纳建议' })).toBeNull()
   })
 
-  it('跨项目确认：「取消」回到裁决按钮；「继续处理」裁决完落到结果的「撤销」', async () => {
+  it('跨项目确认：「取消」回到「采纳建议」；「继续处理」采纳完落到结果的「撤销」', async () => {
     const other = memory({ id: 'p2', type: 'preference', workspacePath: '/w/blog', content: '测试里 mock 数据库就行。' })
-    const cross: PendingItem = { ...conflict, right: other } as PendingItem
+    const cross = suggested('keep-both', 'sg_1', { ...conflict, right: other } as PendingItem)
     setup(
       { library: library(pref, proj), session: snapshot({ injectedIds: ['p1'] }), pending: pending(cross) },
       command => 'allowCrossWorkspace' in command && command.allowCrossWorkspace === true
         ? { ok: true, cmd: command.cmd }
         : { ok: false, cmd: command.cmd, code: 'cross-workspace', rejected: [{ id: 'p2', workspacePath: '/w/blog' }] },
     )
-    const keepBoth = screen.getByRole('button', { name: '都保留' })
+    const keepBoth = screen.getByRole('button', { name: '采纳建议' })
     await press(keepBoth)
     await press(screen.getByRole('button', { name: '取消' }))
     await waitFor(() => { expect(keepBoth).toHaveFocus() })
@@ -1124,19 +1235,19 @@ describe('SidebarTab 折叠与「等你决定」', () => {
   })
 
   it('「等你决定」可以收起，视图刷新后照旧收起；只剩结果卡时标题不写条数、不带圆点；收起后新冲突进来，标题重新带圆点和条数', async () => {
-    const { gateway } = setup({ library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1', 'p2', 'j1'] }), pending: pending(conflict) })
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '以 A 为准' })) })
+    const { gateway } = setup({ library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1', 'p2', 'j1'] }), pending: pending(adoptable) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '采纳建议' })) })
     act(() => {
       gateway.setView('pending', pending())
       gateway.setView('library', library(pref, proj))
     })
     const head = screen.getByRole('button', { name: '等你决定' })
     expect(head.querySelector('.pm-marker')).toBeNull()
-    expect(within(yourCall()).getByText('已按 A')).toBeInTheDocument()
+    expect(within(yourCall()).getByText('已保留 A')).toBeInTheDocument()
 
     fireEvent.click(head)
     expect(head).toHaveAttribute('aria-expanded', 'false')
-    expect(screen.queryByText('已按 A')).toBeNull()
+    expect(screen.queryByText('已保留 A')).toBeNull()
     act(() => { gateway.setView('pending', pending(vertical)) })
     const again = screen.getByRole('button', { name: '等你决定 1' })
     expect(again).toHaveAttribute('aria-expanded', 'false')

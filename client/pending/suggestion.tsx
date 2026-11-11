@@ -19,7 +19,8 @@ import { keepFocusInPlace } from '../ui/focus-return.ts'
 import { Icon } from '../ui/Icon.tsx'
 import { DraftCompare, ModelBusy, modelFailureOf } from './model-edit.tsx'
 
-const ACTION_LABEL = {
+/** 处理建议结论的显示名：记忆页的建议块和右侧栏的冲突行同用。 */
+export const ACTION_LABEL = {
   'merge': 'pending.suggestion.action.merge',
   'keep-a': 'pending.suggestion.action.keepA',
   'keep-b': 'pending.suggestion.action.keepB',

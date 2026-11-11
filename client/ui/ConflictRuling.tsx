@@ -1,14 +1,12 @@
 /**
- * 冲突裁决（DESIGN.md「Conflict Ruling」）：琥珀圆点 + 标题，A / B 字母标记（不套圆、不加底）+ 各自的记忆卡，
- * 三个按钮「以 A 为准 / 以 B 为准 / 都保留」，按钮到 verdict 的映射取契约 CONFLICT_ACTION_VERDICTS。
- * 两版结构相同：标题下一句默认行为，A、B 记忆卡，后果说明进建议区（「说明」），下面三个平级按钮一排。
- * 记忆页的横向冲突卡给 footer：A、B 下面整块换成处理卡的建议块、说明行和按钮行（见 pending/cards.tsx HorizontalActions），这里的说明和按钮不画。
+ * 冲突裁决（DESIGN.md「Conflict Ruling」）：琥珀圆点 + 标题，A / B 字母标记（不套圆、不加底）+ 各自的记忆卡。
+ * 横向冲突 A、B 下面的整块由调用方给（footer）：记忆页是处理卡的建议块、说明行和按钮行（pending/cards.tsx HorizontalActions），
+ * 右侧栏是建议结论一行和「采纳建议」或去记忆页的入口（sidebar/SidebarTab.tsx）。
  * - 宽版（记忆页）：A、B 各一张描边卡并排，卡里只放记忆；按钮靠右，和其它卡的动作行对齐；
  * - 窄版（右侧栏）：A、B 上下排，按钮一行靠左。
- * 任一方定位不到（视图里为 null）时裁决会报错，三个按钮都不可用。裁决后的结果态在待处理票里做。
- * 败方含高危密钥（hasSecret）时裁决会彻底删除它：后果说明里那一句换成「将彻底删除、不可恢复」。
- * 记忆和基线（AGENTS.md）冲突用 VerticalConflictRuling：同一套标题与后果说明，只有一张记忆卡，
- * 按钮「以基线为准 / 保留这条记忆」，并写明基线不会被删除。
+ * 记忆和基线（AGENTS.md）冲突用 VerticalConflictRuling：只有一张记忆卡，后果说明进建议区（「说明」），下面两个平级按钮一排
+ * 「以基线为准 / 保留这条记忆」，并写明基线不会被删除。记忆定位不到（视图里为 null）时裁决会报错，按钮都不可用；
+ * 记忆含高危密钥（hasSecret）时以基线为准会彻底删除它，后果说明里写「将彻底删除、不可恢复」。
  */
 import type { ReactNode } from 'react'
 import { CONFLICT_ACTION_VERDICTS, type MemoryCard as MemoryCardData } from '../../src/gui/contract.ts'
@@ -18,7 +16,6 @@ import { Button } from './Button.tsx'
 import { MemoryCard } from './MemoryCard.tsx'
 import { StatusMarker } from './StatusMarker.tsx'
 
-type HorizontalVerdict = (typeof CONFLICT_ACTION_VERDICTS.horizontal)[keyof typeof CONFLICT_ACTION_VERDICTS.horizontal]
 type VerticalVerdict = (typeof CONFLICT_ACTION_VERDICTS.vertical)[keyof typeof CONFLICT_ACTION_VERDICTS.vertical]
 
 /** 两版共用的参数。 */
@@ -37,21 +34,17 @@ interface RulingSharedProps {
   headExtra?: ReactNode
 }
 
-/** 默认画后果说明和三个按钮（onRule 接点击）；记忆页给 footer，A、B 下面整块换成它。 */
-export type ConflictRulingProps = RulingSharedProps & {
+export interface ConflictRulingProps extends RulingSharedProps {
   left: MemoryCardData | null
   right: MemoryCardData | null
   /** 一句默认行为（「决定之前，agent 按 A 来做。」），在标题下。 */
   note?: string | undefined
-} & ({ onRule: (verdict: HorizontalVerdict) => void; footer?: undefined } | { footer: ReactNode; onRule?: undefined })
+  /** A、B 下面的整块：建议、说明和动作。 */
+  footer: ReactNode
+}
 
 export function ConflictRuling(props: ConflictRulingProps) {
   const t = useT()
-  const { horizontal } = CONFLICT_ACTION_VERDICTS
-  const isSecretA = props.left?.hasSecret === true
-  const isSecretB = props.right?.hasSecret === true
-  const consequence = isSecretA && isSecretB ? 'conflict.consequence.secretBoth'
-    : isSecretA ? 'conflict.consequence.secretA' : isSecretB ? 'conflict.consequence.secretB' : 'conflict.consequence'
   const side = (letter: 'A' | 'B', memory: MemoryCardData | null) => (
     <section className="pm-conflict-side" aria-label={t('conflict.side', { side: letter })}>
       <span className="pm-ab" aria-hidden="true">{letter}</span>
@@ -59,18 +52,7 @@ export function ConflictRuling(props: ConflictRulingProps) {
     </section>
   )
   return (
-    <RulingShell
-      {...props}
-      title={props.title ?? t('conflict.title')}
-      isMissing={props.left === null || props.right === null}
-      consequence={t(consequence)}
-      footer={props.footer}
-      actions={[
-        [t('conflict.keepA'), () => { props.onRule?.(horizontal.keepA) }],
-        [t('conflict.keepB'), () => { props.onRule?.(horizontal.keepB) }],
-        [t('conflict.keepBoth'), () => { props.onRule?.(horizontal.keepBoth) }],
-      ]}
-    >
+    <RulingShell {...props} title={props.title ?? t('conflict.title')}>
       <div className="pm-conflict-sides">
         {side('A', props.left)}
         {side('B', props.right)}
@@ -95,12 +77,14 @@ export function VerticalConflictRuling(props: VerticalConflictRulingProps) {
       {...props}
       title={props.title ?? t('conflict.vertical.title')}
       note={t('conflict.vertical.baseline')}
-      isMissing={props.memory === null}
-      consequence={t(props.memory?.hasSecret === true ? 'conflict.vertical.consequence.secret' : 'conflict.vertical.consequence')}
-      actions={[
-        [t('conflict.vertical.keepBaseline'), () => { props.onRule(vertical.keepBaseline) }],
-        [t('conflict.vertical.keepMemory'), () => { props.onRule(vertical.keepMemory) }],
-      ]}
+      rule={{
+        isMissing: props.memory === null,
+        consequence: t(props.memory?.hasSecret === true ? 'conflict.vertical.consequence.secret' : 'conflict.vertical.consequence'),
+        actions: [
+          [t('conflict.vertical.keepBaseline'), () => { props.onRule(vertical.keepBaseline) }],
+          [t('conflict.vertical.keepMemory'), () => { props.onRule(vertical.keepMemory) }],
+        ],
+      }}
     >
       <div className="pm-conflict-single">
         <RulingMemory {...props} />
@@ -110,18 +94,23 @@ export function VerticalConflictRuling(props: VerticalConflictRulingProps) {
   )
 }
 
-/** 两版共用的外壳：标题行、标题下一句、各自的记忆区、后果说明、一排按钮（给了 footer 时换成它）。任一方定位不到（isMissing）时按钮都不可用。 */
-function RulingShell({ layout, title, headExtra, note, unavailable, isMissing, consequence, actions, footer, children }: RulingSharedProps & {
-  note?: string | undefined
+/** 记忆区下面的后果说明和一排按钮（基线冲突）。记忆定位不到（isMissing）时按钮都不可用。 */
+interface RulingActions {
   isMissing: boolean
   consequence: string
   /** 按钮文字与点击动作，按显示顺序。 */
   actions: ReadonlyArray<readonly [label: string, onClick: () => void]>
+}
+
+/** 两版共用的外壳：标题行、标题下一句、各自的记忆区，下面是调用方给的 footer，或后果说明加一排按钮（rule）。 */
+function RulingShell({ layout, title, headExtra, note, unavailable, footer, rule, children }: RulingSharedProps & {
+  note?: string | undefined
   footer?: ReactNode
+  rule?: RulingActions
   children: ReactNode
 }) {
   const t = useT()
-  const reason = unavailable ?? (isMissing ? t('conflict.missingHint') : undefined)
+  const reason = unavailable ?? (rule?.isMissing === true ? t('conflict.missingHint') : undefined)
   return (
     <article className={`pm-conflict pm-conflict--${layout}`}>
       <header className="pm-conflict-head">
@@ -131,16 +120,17 @@ function RulingShell({ layout, title, headExtra, note, unavailable, isMissing, c
       </header>
       {note !== undefined ? <p className="pm-conflict-note">{note}</p> : null}
       {children}
-      {footer !== undefined
-        ? <div className="pm-conflict-footer">{footer}</div>
-        : (
+      {footer !== undefined ? <div className="pm-conflict-footer">{footer}</div> : null}
+      {rule !== undefined
+        ? (
           <>
-            <div className="pm-conflict-advice"><AdviceNote label="note">{consequence}</AdviceNote></div>
+            <div className="pm-conflict-advice"><AdviceNote label="note">{rule.consequence}</AdviceNote></div>
             <div className="pm-conflict-buttons">
-              {actions.map(([label, onClick]) => <Button key={label} unavailable={reason} onClick={onClick}>{label}</Button>)}
+              {rule.actions.map(([label, onClick]) => <Button key={label} unavailable={reason} onClick={onClick}>{label}</Button>)}
             </div>
           </>
-        )}
+        )
+        : null}
     </article>
   )
 }
