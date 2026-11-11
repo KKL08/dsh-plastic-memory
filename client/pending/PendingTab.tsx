@@ -10,6 +10,7 @@
  * 带组标识进来时（健康页「去处理 ›」）焦点落在那一组的标题上，组已不在（处理完了）落在待处理顶部；每次导航只定位一次。
  * 「新」：最近一次界面手动或自动体检新增、这一趟进来时还没显示过的条目，标题后带「新」、排在组内最前（记录见 checkup/seen.ts）。
  * 按进入这个范围时读的记录标（记忆页给出，同一范围里切视图不重读）；显示出来的随即记下，换范围再回来就不标了。
+ * 「等你决定」标题下两条以上没有建议时有「全部补上」那一行（SuggestAll）；它正在生成的那一条，卡上的建议块写「正在生成」。
  * 带 newItem 进来时（状态条结果行的链接）跳到第一条带「新」的条目：滚到视野中间、闪一次、接住焦点；没有就落在顶部。
  */
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode, type RefObject } from 'react'
@@ -30,6 +31,7 @@ import { StatusMarker } from '../ui/StatusMarker.tsx'
 import {
   AdviceCard, adviceTitle, HorizontalCard, ItemIsNew, ItemScopeNames, OverflowCard, PromoteCard, ResultCard, SecretCard, titleOf, UnreadableCard, useCardAction, VerticalCard, type Outcome,
 } from './cards.tsx'
+import { BatchSuggesting, isMissingSuggestion, SuggestAll } from './suggestion.tsx'
 
 /** 建议整理先显示的行数，其余收进「展开其余 N 条」；要紧的两组全部显示。 */
 const GROUP_PREVIEW = 5
@@ -97,6 +99,8 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
   const [sending, setSending] = useState<ReadonlyMap<string, { item: PendingItem; index: number }>>(new Map())
   /** 点过「展开其余 N 条」的组。 */
   const [expanded, setExpanded] = useState<ReadonlySet<PendingLevel>>(new Set())
+  /** 「全部补上」正在给哪一条生成。 */
+  const [batchCurrent, setBatchCurrent] = useState<string | undefined>(undefined)
   const root = useRef<HTMLDivElement>(null)
   const revealFocus = useRevealFocus(root)
   const [mountSeen] = useState(readSeen)
@@ -162,7 +166,7 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
       node: (
         <ItemSending.Provider value={onSending}>
           <ItemIsNew.Provider value={isNewRow}>
-            <ItemScopeNames.Provider value={scopeNames(item)}>{renderCard(item, (outcome) => { done({ item, index, outcome, undone: false }) }, refuse(item, index))}</ItemScopeNames.Provider>
+            <ItemScopeNames.Provider value={scopeNames(item)}><BatchSuggesting.Provider value={batchCurrent}>{renderCard(item, (outcome) => { done({ item, index, outcome, undone: false }) }, refuse(item, index))}</BatchSuggesting.Provider></ItemScopeNames.Provider>
           </ItemIsNew.Provider>
         </ItemSending.Provider>
       ),
@@ -257,6 +261,7 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
               const tail = level === 'advice' ? ignoredBlock : null
               return group.length === 0 && tail === null ? null : (
                 <PendingGroup key={level} level={level} count={group.filter(row => row.isItem).length}>
+                  {level === 'your-call' ? <SuggestAll items={items.filter(isMissingSuggestion)} session={session} onCurrent={setBatchCurrent} /> : null}
                   {shown.map(row => (
                     <FlashRow
                       key={row.key}

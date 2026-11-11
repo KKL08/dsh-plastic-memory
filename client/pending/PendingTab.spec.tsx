@@ -2375,6 +2375,142 @@ describe('横向冲突卡的处理建议', () => {
   })
 })
 
+describe('体检之后的建议：「正在生成」、名额用完、「全部补上」（票 08）', () => {
+  type Horizontal = Extract<PendingItem, { kind: 'conflict-horizontal' }>
+  const keepA: Suggestion = { id: 'sg_1', action: 'keep-a', reason: 'A 是你明确说过的。', isSourced: false, ops: [{ kind: 'keep', memoryId: 'a' }, { kind: 'forget', memoryId: 'b' }] }
+  /** 第 n 条横向冲突（各自两条记忆）。 */
+  const pair = (n: number, extra: Partial<Horizontal>): PendingItem => ({
+    ...horizontal, decisionId: `d${n}`, summary: `第 ${n} 对互相矛盾`, preferredId: `a${n}`,
+    left: memory({ id: `a${n}`, name: `A${n}`, content: `A${n} 的内容` }), right: memory({ id: `b${n}`, name: `B${n}`, content: `B${n} 的内容` }), ...extra,
+  }) as PendingItem
+  const blocks = () => [...document.querySelectorAll<HTMLElement>('.pm-suggestion')]
+  const row = () => document.querySelector('.pm-suggest-all') as HTMLElement | null
+  const missing = { noSuggestion: { code: 'not-generated' } } as const
+
+  it('故事 26：后续段正在生成的卡写「正在生成建议……」，不给「补上建议」也不给「停止」；建议随视图补上', async () => {
+    const { gateway } = setup([pair(1, { ...missing, isGeneratingSuggestion: true })])
+    const [card] = blocks()
+    expect(within(card!).getByRole('status')).toHaveTextContent('正在生成建议……')
+    expect(within(card!).queryByRole('button')).toBeNull()
+    act(() => { gateway.setView('pending', view(pair(1, { suggestion: keepA }))) })
+    expect(await within(blocks()[0]!).findByText('保留 A')).toBeInTheDocument()
+  })
+
+  it('自动体检名额用完：写原因，给「补上建议」', () => {
+    setup([pair(1, { noSuggestion: { code: 'quota-exhausted' } })])
+    const [card] = blocks()
+    expect(within(card!).getByText('这条还没有建议')).toBeInTheDocument()
+    expect(within(card!).getByText('自动体检这次给的建议条数到上限了，没轮到这条。')).toBeInTheDocument()
+    expect(within(card!).getByRole('button', { name: '补上建议' })).toBeInTheDocument()
+  })
+
+  it('故事 24b：两条以上没有建议才有「全部补上」；有建议、正在生成、含密钥、判断不了的不算', () => {
+    setup([
+      pair(1, missing),
+      pair(2, { noSuggestion: { code: 'quota-exhausted' } }),
+      pair(3, { noSuggestion: { code: 'failed', cause: { kind: 'model-error', hostCode: 'RATE_LIMIT' } } }),
+      pair(4, { suggestion: keepA }),
+      pair(5, { ...missing, isGeneratingSuggestion: true }),
+      pair(6, { noSuggestion: { code: 'has-secret' } }),
+      pair(7, { noSuggestion: { code: 'undecided', reason: '分不出。' } }),
+    ])
+    expect(row()).toHaveTextContent('3 条还没有建议')
+    // 在「等你决定」标题下面
+    expect(row()!.closest('section')?.querySelector('h2')).toHaveTextContent('等你决定')
+    expect(within(row()!).getByRole('button', { name: '全部补上' })).toBeInTheDocument()
+  })
+
+  it('只有一条没有建议：不显示「全部补上」', () => {
+    setup([pair(1, missing), pair(2, { suggestion: keepA })])
+    expect(row()).toBeNull()
+  })
+
+  it('故事 25：这个会话已知拿不到模型时不显示「全部补上」', () => {
+    const bloat: PendingItem = { kind: 'advice', level: 'advice', type: 'bloat', memories: [memory({ id: 'bl', digest: 'sha1:bl' })] }
+    setup([pair(1, missing), pair(2, missing), bloat], { model: null })
+    expect(row()).not.toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '修改' }))
+    expect(row()).toBeNull()
+  })
+
+  it('依次发：一条回来再发下一条，行内写进度，正在生成的那张卡写「正在生成」；全部发完回到原样', async () => {
+    const answers: Array<(r: MemoryCommandResult) => void> = []
+    const { gateway, commands } = setup([pair(1, missing), pair(2, missing), pair(3, missing)], {
+      respond: () => new Promise((resolve) => { answers.push(resolve) }),
+    })
+    fireEvent.click(within(row()!).getByRole('button', { name: '全部补上' }))
+    expect(await within(row()!).findByText('正在生成建议 1 / 3……')).toBeInTheDocument()
+    expect(commands()).toEqual([{ cmd: 'suggest', decisionId: 'd1' }])
+    expect(within(blocks()[0]!).getByText('正在生成建议……')).toBeInTheDocument()
+    expect(within(blocks()[1]!).getByRole('button', { name: '补上建议' })).toBeInTheDocument()
+    // 第一条写成了、视图带来建议；第二条接着发
+    act(() => { gateway.setView('pending', view(pair(1, { suggestion: keepA }), pair(2, missing), pair(3, missing))) })
+    await act(async () => { answers[0]!({ ok: true, cmd: 'suggest', decisionId: 'd1' }) })
+    expect(await within(row()!).findByText('正在生成建议 2 / 3……')).toBeInTheDocument()
+    expect(commands()).toEqual([{ cmd: 'suggest', decisionId: 'd1' }, { cmd: 'suggest', decisionId: 'd2' }])
+    expect(within(blocks()[0]!).getByText('保留 A')).toBeInTheDocument()
+    expect(within(blocks()[1]!).getByText('正在生成建议……')).toBeInTheDocument()
+    // 第二条没生成成：卡上由视图写原因，接着发第三条
+    await act(async () => { answers[1]!({ ok: false, cmd: 'suggest', code: 'llm-failed', detail: '限流' }) })
+    expect(await within(row()!).findByText('正在生成建议 3 / 3……')).toBeInTheDocument()
+    await act(async () => { answers[2]!({ ok: true, cmd: 'suggest', decisionId: 'd3' }) })
+    expect(commands().map(c => c.cmd === 'suggest' ? c.decisionId : c.cmd)).toEqual(['d1', 'd2', 'd3'])
+    await waitFor(() => { expect(within(row()!).queryByRole('status')).toBeNull() })
+    expect(within(row()!).getByRole('button', { name: '全部补上' })).toBeInTheDocument()
+  })
+
+  it('轮到时已经不缺建议的（别处生成了、处理掉了）跳过，不发', async () => {
+    const answers: Array<(r: MemoryCommandResult) => void> = []
+    const { gateway, commands } = setup([pair(1, missing), pair(2, missing), pair(3, missing)], {
+      respond: () => new Promise((resolve) => { answers.push(resolve) }),
+    })
+    fireEvent.click(within(row()!).getByRole('button', { name: '全部补上' }))
+    await waitFor(() => { expect(answers).toHaveLength(1) })
+    act(() => { gateway.setView('pending', view(pair(1, missing), pair(3, missing))) })
+    await act(async () => { answers[0]!({ ok: true, cmd: 'suggest', decisionId: 'd1' }) })
+    expect(await within(row()!).findByText('正在生成建议 3 / 3……')).toBeInTheDocument()
+    expect(commands()).toEqual([{ cmd: 'suggest', decisionId: 'd1' }, { cmd: 'suggest', decisionId: 'd3' }])
+  })
+
+  it('「停止」：不再发下一条、不再等；已发出的那条照常写入，随视图出现，已生成的保留', async () => {
+    const answers: Array<(r: MemoryCommandResult) => void> = []
+    const { gateway, commands } = setup([pair(1, missing), pair(2, missing), pair(3, missing)], {
+      respond: () => new Promise((resolve) => { answers.push(resolve) }),
+    })
+    fireEvent.click(within(row()!).getByRole('button', { name: '全部补上' }))
+    fireEvent.click(await within(row()!).findByRole('button', { name: '停止' }))
+    expect(row()).toHaveTextContent('3 条还没有建议')
+    expect(within(blocks()[0]!).getByRole('button', { name: '补上建议' })).toBeInTheDocument()
+    // 已发出的那条回来了、视图带来它的建议：不再发下一条
+    act(() => { gateway.setView('pending', view(pair(1, { suggestion: keepA }), pair(2, missing), pair(3, missing))) })
+    await act(async () => { answers[0]!({ ok: true, cmd: 'suggest', decisionId: 'd1' }) })
+    expect(commands()).toEqual([{ cmd: 'suggest', decisionId: 'd1' }])
+    expect(within(blocks()[0]!).getByText('保留 A')).toBeInTheDocument()
+    expect(row()).toHaveTextContent('2 条还没有建议')
+  })
+
+  it('发出去才知道拿不到模型：停下，行内写原因，不再发', async () => {
+    const { commands } = setup([pair(1, missing), pair(2, missing)], { respond: () => ({ ok: false, cmd: 'suggest', code: 'llm-unavailable' }) })
+    fireEvent.click(within(row()!).getByRole('button', { name: '全部补上' }))
+    await waitFor(() => { expect(row()).toHaveAttribute('role', 'alert') })
+    expect(row()).toHaveTextContent('拿不到当前会话的模型。')
+    expect(commands()).toEqual([{ cmd: 'suggest', decisionId: 'd1' }])
+    expect(screen.queryByRole('button', { name: '全部补上' })).toBeNull()
+  })
+
+  it('英文界面的进度和按钮', async () => {
+    const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(pair(1, missing), pair(2, missing)), health: scannedHealth(NOW) }, respond: () => new Promise(() => {}) })
+    render(
+      <PanelShell gateway={gateway} t={createTranslator(en)}>
+        <PendingTab nav={createNavStore()} session={SESSION} scope={ALL_SCOPE} workspacePath="/w/app" now={NOW} />
+      </PanelShell>,
+    )
+    expect(row()).toHaveTextContent('2 without a suggestion')
+    fireEvent.click(within(row()!).getByRole('button', { name: 'Suggest all' }))
+    expect(await within(row()!).findByText('Generating suggestions 1 / 2…')).toBeInTheDocument()
+  })
+})
+
 describe('横向冲突卡：采纳建议、直接处理（票 05）', () => {
   type Horizontal = Extract<PendingItem, { kind: 'conflict-horizontal' }>
   const withState = (extra: Partial<Horizontal>): PendingItem => ({ ...horizontal, ...extra }) as PendingItem

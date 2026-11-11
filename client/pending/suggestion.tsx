@@ -5,14 +5,15 @@
  * 模型判断不了哪条对时如实写明加它说的理由，不按错误显示：不给结论，由用户用下面的按钮自己定。
  * 「补上建议」发 suggest：服务端生成后写进账本、重写视图，建议跟着视图来，命令结果只说成没成。生成中只锁这一块。
  * 「停止」只是不再等：已经发出的这一条照常生成、写进账本，稍后跟着视图出现；之后到达的结果按请求序号认出来丢掉。换了会话同样作废在途请求、清掉本地状态。
+ * 体检之后的后续段正在给这一条排队或生成时（视图带「正在生成」标记），写「正在生成建议……」、不给按钮也不给「停止」：那一段不归这张卡管，生成完建议跟着视图来。
  * 页面加载时不问模型（问一次会在借来的会话日志里留一条记录）：只读这个会话已知的模型状态（别处问过才有），此外点过之后服务端回 llm-unavailable 才知道拿不到。
  */
-import { useEffect, useRef, useState } from 'react'
-import type { MemoryCard, MemoryCommand, NoSuggestion, ProposalAction, Suggestion } from '../../src/gui/contract.ts'
+import { createContext, useContext, useEffect, useRef, useState } from 'react'
+import type { MemoryCard, MemoryCommand, NoSuggestion, PendingItem, ProposalAction, Suggestion } from '../../src/gui/contract.ts'
 import { interpret } from '../command/protocol.ts'
 import { causeText } from '../checkup/StatusBar.tsx'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
-import { useT, type Translate } from '../i18n.tsx'
+import { formatNumber, useT, type Translate } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
 import { Button } from '../ui/Button.tsx'
 import { keepFocusInPlace } from '../ui/focus-return.ts'
@@ -49,13 +50,15 @@ function failureText(cause: NonNullable<NoSuggestion['cause']>, t: Translate): s
   return causeText({ kind: cause.kind, ...(cause.hostCode !== undefined ? { hostCode: cause.hostCode } : {}) }, t)
 }
 
-export function SuggestionBlock({ decisionId, left, right, suggestion, noSuggestion, notice, session, onRefused }: {
+export function SuggestionBlock({ decisionId, left, right, suggestion, noSuggestion, isGenerating = false, notice, session, onRefused }: {
   decisionId: string
   /** A、B 两条（视图里的卡片），融合稿写进哪条、对照的原文按它们找。 */
   left: MemoryCard
   right: MemoryCard
   suggestion: Suggestion | undefined
   noSuggestion: NoSuggestion | undefined
+  /** 体检之后的后续段正在给这一条生成（视图里的「正在生成」标记）。 */
+  isGenerating?: boolean
   /** 没有建议时代替原因写的一句（采纳时建议已失效）：标题改成「这次没有建议」，读屏会念出来。 */
   notice?: string | undefined
   session: BorrowedSession
@@ -65,6 +68,7 @@ export function SuggestionBlock({ decisionId, left, right, suggestion, noSuggest
   const t = useT()
   const gateway = useGateway()
   const model = gateway.useModel(session, { shouldAsk: false })
+  const isBatchCurrent = useContext(BatchSuggesting) === decisionId
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' })
   /** 正在等的那次请求的序号：停止、换会话、卸载后序号前进，旧请求的结果对不上号就丢掉。 */
   const seq = useRef(0)
@@ -119,6 +123,13 @@ export function SuggestionBlock({ decisionId, left, right, suggestion, noSuggest
   if (phase.kind === 'busy' || phase.kind === 'waiting') {
     return <div className="pm-suggestion"><ModelBusy label={t('pending.suggestion.busy')} onStop={stop} /></div>
   }
+  if ((isGenerating || isBatchCurrent) && notice === undefined) {
+    return (
+      <div className="pm-suggestion">
+        <div className="pm-model-busy" role="status"><span className="pm-model-dot" aria-hidden="true" /><span>{t('pending.suggestion.busy')}</span></div>
+      </div>
+    )
+  }
   if (noSuggestion.code === 'has-secret') {
     const side = left.hasSecret === true && right.hasSecret === true ? 'A、B' : left.hasSecret === true ? 'A' : 'B'
     return (
@@ -135,7 +146,8 @@ export function SuggestionBlock({ decisionId, left, right, suggestion, noSuggest
   const reason = notice ?? (isUndecided ? noSuggestion.reason
     : isUnavailable ? t('pending.model.unavailable')
       : noSuggestion.code === 'failed' && noSuggestion.cause !== undefined ? t('pending.suggestion.failed', { reason: failureText(noSuggestion.cause, t) })
-        : phase.kind === 'failed' ? undefined : t('pending.suggestion.notGenerated'))
+        : phase.kind === 'failed' ? undefined
+          : noSuggestion.code === 'quota-exhausted' ? t('pending.suggestion.quotaExhausted') : t('pending.suggestion.notGenerated'))
   const isRetry = phase.kind === 'failed' || noSuggestion.code === 'failed' || isUndecided
   return (
     <div className="pm-suggestion">
@@ -153,6 +165,99 @@ export function SuggestionBlock({ decisionId, left, right, suggestion, noSuggest
             </Button>
           </div>
         )}
+    </div>
+  )
+}
+
+/** 「全部补上」此刻正在给哪一条生成：那张卡的建议块照「正在生成」显示，不再给自己的按钮。 */
+export const BatchSuggesting = createContext<string | undefined>(undefined)
+
+type HorizontalItem = Extract<PendingItem, { kind: 'conflict-horizontal' }>
+
+/** 「全部补上」要补的一条：等你决定里的横向冲突，两条都读得出，视图写着还没有建议（没生成、上次失败、自动体检名额用完），体检之后的后续段也没在生成它。 */
+export function isMissingSuggestion(item: PendingItem): item is HorizontalItem {
+  if (item.kind !== 'conflict-horizontal' || item.level !== 'your-call' || item.left === null || item.right === null) return false
+  if (item.suggestion !== undefined || item.isGeneratingSuggestion === true) return false
+  const code = item.noSuggestion?.code
+  return code === 'not-generated' || code === 'failed' || code === 'quota-exhausted'
+}
+
+type BatchPhase = { kind: 'idle' } | { kind: 'running'; at: number; total: number } | { kind: 'unavailable' }
+
+/**
+ * 「等你决定」分区标题下的一行：两条以上没有建议时写「{N} 条还没有建议 · 全部补上」。
+ * 点了按点击那一刻的这些条目依次发 suggest（一条回来再发下一条），行内写进度和「停止」；轮到时已经不缺建议的（处理掉了、别处生成了）跳过。
+ * 「停止」同单卡：只是不再等、不再发下一条，已经发出的那条照常生成、写进账本；已生成的都留着。换了会话、离开页面同样停下。
+ * 当前会话已知拿不到模型时不显示；发出去才知道拿不到（llm-unavailable）就停下，行内写原因。
+ */
+export function SuggestAll({ items, session, onCurrent }: {
+  /** 此刻视图里缺建议的条目（isMissingSuggestion）。 */
+  items: readonly HorizontalItem[]
+  session: BorrowedSession
+  /** 正在给哪一条生成（没有在生成时 undefined）。 */
+  onCurrent: (decisionId: string | undefined) => void
+}) {
+  const t = useT()
+  const gateway = useGateway()
+  const model = gateway.useModel(session, { shouldAsk: false })
+  const [phase, setPhase] = useState<BatchPhase>({ kind: 'idle' })
+  const seq = useRef(0)
+  const current = useRef(onCurrent)
+  current.current = onCurrent
+  /** 此刻还缺建议的条目：轮到某条时它已不在里面就跳过。 */
+  const missing = useRef(items)
+  missing.current = items
+  const sessionId = session.kind === 'ready' ? session.sessionId : undefined
+  useEffect(() => () => {
+    seq.current += 1
+    setPhase({ kind: 'idle' })
+    current.current(undefined)
+  }, [sessionId])
+
+  const run = async () => {
+    if (session.kind !== 'ready') return
+    const ids = items.map(item => item.decisionId)
+    const mine = ++seq.current
+    keepFocusInPlace()
+    for (const [index, decisionId] of ids.entries()) {
+      if (mine !== seq.current) return
+      if (!missing.current.some(item => item.decisionId === decisionId)) continue
+      setPhase({ kind: 'running', at: index + 1, total: ids.length })
+      current.current(decisionId)
+      const r = await gateway.execute(session.sessionId, { cmd: 'suggest', decisionId })
+      if (mine !== seq.current) return
+      // 其余的失败（没生成成、条目已在别处处理）由服务端写进视图、卡上自己写原因，接着下一条
+      if (!r.ok && r.code === 'llm-unavailable') {
+        current.current(undefined)
+        setPhase({ kind: 'unavailable' })
+        return
+      }
+    }
+    current.current(undefined)
+    setPhase({ kind: 'idle' })
+  }
+  const stop = () => {
+    seq.current += 1
+    current.current(undefined)
+    setPhase({ kind: 'idle' })
+  }
+
+  if (phase.kind === 'running') {
+    return (
+      <div className="pm-suggest-all">
+        <ModelBusy label={t('pending.suggestAll.progress', { at: formatNumber(phase.at), total: formatNumber(phase.total) })} onStop={stop} />
+      </div>
+    )
+  }
+  if (phase.kind === 'unavailable') return <p className="pm-suggest-all" role="alert">{t('pending.model.unavailable')}</p>
+  if (items.length < 2 || model.status === 'unavailable') return null
+  return (
+    <div className="pm-suggest-all">
+      <span>{t('pending.suggestAll.missing', { n: formatNumber(items.length) })}</span>
+      <i className="pm-sep" aria-hidden="true">·</i>
+      <Button variant="ghost" size="sm" unavailable={session.kind === 'ready' ? undefined : t('session.none.hint')} onClick={() => { void run() }}>
+        <Icon name="sparkle" size={14} />{t('pending.suggestAll.run')}
+      </Button>
     </div>
   )
 }
@@ -200,4 +305,7 @@ export const suggestionCss = `
 .pm-suggestion-draft > * { max-width: 100%; }
 .pm-suggestion-into { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-suggestion-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.pm-suggest-all { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
+.pm-suggest-all .pm-sep { margin: 0; }
+.pm-suggest-all .pm-model-busy { flex: 1; font-size: 12px; }
 `

@@ -395,7 +395,7 @@ function HorizontalActions({ item, session, onDone, onRefused }: Pick<CardProps<
         ? (
           <SuggestionBlock
             decisionId={item.decisionId} left={left} right={right} suggestion={suggestion}
-            noSuggestion={item.noSuggestion ?? (isStale ? { code: 'not-generated' } : undefined)}
+            noSuggestion={item.noSuggestion ?? (isStale ? { code: 'not-generated' } : undefined)} isGenerating={item.isGeneratingSuggestion === true}
             // 失效的提示只在视图没有更新的原因时写：之后生成失败、模型判断不了，写视图给的原因
             notice={isStale && (item.noSuggestion === undefined || item.noSuggestion.code === 'not-generated') ? t('pending.suggestion.stale') : undefined}
             session={session} onRefused={onRefused}

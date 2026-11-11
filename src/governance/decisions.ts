@@ -364,10 +364,11 @@ export class PendingDecisionsStore {
    * （有就不覆盖，丢掉这一份，失败也不记，免得盖住别处刚写的建议）。写建议时清掉之前记的失败。
    * 删除一条记忆的路径先删记忆、再清条目，且不认领条目：核对之后、写入之前被清掉的条目会被这次写入写回来，
    * 所以写完（仍在认领内）再读一遍两条，任一条已不在用就撤回这次写入的条目，回 gone。
+   * isAttempt：体检自己发起的这次生成写成了，给条目此刻的冲突指纹记一次尝试（指纹变了从头算）；用户点「补上建议」不记。
    * 返回：written 已写；has-current 已有当前建议、这份丢弃；stale 依据对不上；gone 条目不在、已结清或写完发现一方已不在用；claimed 正被别处认领、这份丢弃。
    */
   async writeSuggestion(
-    id: string, outcome: { suggestion: StoredSuggestion } | { failure: SuggestionFailure }, read: ReadMemory,
+    id: string, outcome: { suggestion: StoredSuggestion } | { failure: SuggestionFailure }, read: ReadMemory, opts: { isAttempt?: boolean } = {},
   ): Promise<'written' | 'has-current' | 'stale' | 'gone' | 'claimed'> {
     const claimed = await this.withClaim(id, async () => {
       const entry = await this.table.get(id)
@@ -377,11 +378,15 @@ export class PendingDecisionsStore {
       if (entry.suggestion !== undefined && isBasisCurrent(entry, entry.suggestion.basis, live)) return 'has-current' as const
       const basis = 'suggestion' in outcome ? outcome.suggestion.basis : outcome.failure.basis
       if (!isBasisCurrent(entry, basis, live)) return 'stale' as const
+      const counted = entry.suggestionAttempts?.fingerprint === entry.fingerprint ? entry.suggestionAttempts?.count ?? 0 : 0
+      const attempts = opts.isAttempt === true
+        ? { suggestionAttempts: { ...(entry.fingerprint !== undefined ? { fingerprint: entry.fingerprint } : {}), count: counted + 1 } }
+        : {}
       if ('suggestion' in outcome) {
         const { suggestionFailure: _failure, ...rest } = entry
-        await this.table.put(id, { ...rest, suggestion: outcome.suggestion })
+        await this.table.put(id, { ...rest, ...attempts, suggestion: outcome.suggestion })
       } else {
-        await this.table.put(id, { ...entry, suggestionFailure: outcome.failure })
+        await this.table.put(id, { ...entry, ...attempts, suggestionFailure: outcome.failure })
       }
       const after = await Promise.all(entry.memoryIds.map(read))
       if (after.some(r => r?.status !== 'active')) {

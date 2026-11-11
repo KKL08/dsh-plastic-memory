@@ -22,6 +22,7 @@ import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from '../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../src/gui/commands.ts'
+import { CheckupSuggestions, SUGGESTION_ATTEMPT_LIMIT } from '../src/gui/checkup-suggestions.ts'
 import {
   GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, checkupKey, encodeMemoryCommand, sessionViewFile,
   checkupViewSchema, deletedViewSchema, healthViewSchema, libraryViewSchema, memoryCommandResultSchema, pendingViewSchema, scopeOfMemory,
@@ -73,6 +74,8 @@ interface EnvOpts {
   openLegacyKv?: () => Promise<LegacyKvTables | undefined>
   /** 宿主的读事件服务（缺省没有，同较老宿主）。 */
   readEvent?: ReadEventFn
+  /** 接上 scan 之后的后续段（生成处理建议）。 */
+  withSuggestions?: boolean
 }
 
 function env(opts: EnvOpts = {}) {
@@ -89,15 +92,20 @@ function env(opts: EnvOpts = {}) {
   const cache = sidecar.scanCache
   const checkups = new CheckupRecordStore(sidecar.checkups)
   const autoCheckups = new AutoCheckupSettingStore(sidecar.autoCheckups)
+  let suggestions: CheckupSuggestions | undefined
   const views = new ViewWriter({
     memoryRoot: root,
-    collect: () => collectGlobalViews({ store, decisions, snapshots, cache, checkups, autoCheckups, registry, memoryRoot: root, now: () => clock.now }),
+    collect: () => collectGlobalViews({
+      store, decisions, snapshots, cache, checkups, autoCheckups, registry, memoryRoot: root, now: () => clock.now,
+      ...(suggestions !== undefined ? { generatingSuggestions: () => suggestions!.generatingIds() } : {}),
+    }),
     collectCheckups: () => collectCheckupView({ store, checkups, autoCheckups, cache, now: () => clock.now, ...(opts.governanceEnabled !== undefined ? { isGovernanceEnabled: () => opts.governanceEnabled! } : {}) }),
     // 替换间隔按测试时钟算、不真等：节流本身由视图测试单独覆盖
     now: () => clock.now, sleep: async () => {},
   })
   // 本进程调度器收到的「设置改了」通知次数
   const autoCheckupChanges = { count: 0 }
+  if (opts.withSuggestions === true) suggestions = new CheckupSuggestions({ store, decisions, checkups, views, now: () => clock.now, log: { info() {}, warn() {}, error() {} } })
   const command = createMemoryCommand({
     memoryRoot: root, store, decisions, snapshots, cache, checkups, autoCheckups, ignores: new AdviceIgnoreStore(sidecar.adviceIgnores), registry, views: opts.wrapViews?.(views) ?? views,
     onAutoCheckupChanged: () => { autoCheckupChanges.count++ },
@@ -108,6 +116,7 @@ function env(opts: EnvOpts = {}) {
     ...(opts.governanceEnabled !== undefined ? { isGovernanceEnabled: () => opts.governanceEnabled! } : {}),
     ...(opts.readEvent !== undefined ? { getReadEvent: () => opts.readEvent! } : {}),
     isLegacyImportSettled: () => sidecar.isLegacyImportSettled(),
+    ...(suggestions !== undefined ? { suggestions } : {}),
     now: () => clock.now,
   })
   /** 按宿主 parseCommand 的切法：命令名之后的原文（含分隔空白）交给处理器。 */
@@ -121,7 +130,7 @@ function env(opts: EnvOpts = {}) {
   const run = (c: MemoryCommand) => runRaw(encodeMemoryCommand(c).slice(`/${MEMORY_COMMAND_NAME}`.length))
   const readView = async (name: keyof typeof GUI_VIEW_FILES) => JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES[name]), 'utf8')) as unknown
   const readCheckupView = async () => checkupViewSchema.parse(JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_CHECKUP_VIEW_FILE), 'utf8')))
-  return { store, decisions, snapshots, cache, checkups, autoCheckups, autoCheckupChanges, stats: sidecar.recallStats, command, run, runRaw, readView, readCheckupView, clock }
+  return { store, decisions, snapshots, cache, checkups, autoCheckups, autoCheckupChanges, stats: sidecar.recallStats, command, run, runRaw, readView, readCheckupView, clock, suggestions }
 }
 
 type Ok = Extract<MemoryCommandResult, { ok: true }>
@@ -2124,6 +2133,40 @@ describe('scan', () => {
     const pending = pendingViewSchema.parse(await e.readView('pending'))
     expect(ledgerItems(pending).map(i => i.kind)).toEqual(['conflict-horizontal'])
     await expect(stat(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES.health))).resolves.toBeTruthy()
+  })
+
+  it('故事 26：手动体检的结果先回，冲突卡带「正在生成」；建议随后补上，用量补记进这次体检的结果', async () => {
+    let open: (() => void) | undefined
+    const gate = new Promise<void>(resolve => { open = resolve })
+    let suggestCalls = 0
+    const llm: SemanticLlm = {
+      model: 'm-test',
+      complete: async (input, _signal, onUsage) => {
+        if (!input.system.includes('两条互相矛盾的记忆')) {
+          onUsage?.(100)
+          return JSON.stringify({ findings: [{ type: 'conflict', memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', suggestedAction: '裁决' }] })
+        }
+        suggestCalls++
+        await gate
+        onUsage?.(30)
+        return JSON.stringify({ action: 'keep-a', reason: 'A 更新' })
+      },
+    }
+    const e = env({ llm, withSuggestions: true })
+    await e.store.create(record({ id: 'mem_a', name: '甲', content: '用 pnpm' }))
+    await e.store.create(record({ id: 'mem_b', name: '乙', content: '用 npm' }))
+    const body = ok(await e.run({ cmd: 'scan' }))
+    expect(body.usageTokens).toBe(100)
+    // 命令已经回了，建议还在生成
+    await vi.waitFor(() => { expect(suggestCalls).toBe(1) })
+    const during = ledgerItems(pendingViewSchema.parse(await e.readView('pending')))
+    expect(during).toEqual([expect.objectContaining({ kind: 'conflict-horizontal', isGeneratingSuggestion: true })])
+    open?.()
+    await e.suggestions!.whenIdle()
+    const after = ledgerItems(pendingViewSchema.parse(await e.readView('pending')))
+    expect(after).toEqual([expect.objectContaining({ suggestion: expect.objectContaining({ action: 'keep-a' }) })])
+    expect(after[0]).not.toHaveProperty('isGeneratingSuggestion')
+    expect((await e.readCheckupView()).allResult?.usageTokens).toBe(130)
   })
 
   it('借的会话不属于页面项目：结果带回 baseline-session-scoped', async () => {
@@ -4848,6 +4891,20 @@ describe('suggest（补上建议）', () => {
     if (item?.kind !== 'conflict-horizontal') throw new Error(`没有横向冲突项 ${id}`)
     return item
   }
+
+  it('体检发起的尝试次数到了上限，用户点「补上建议」照样生成，也不记尝试', async () => {
+    const { llm, prompts } = scripted(KEEP_A)
+    const e = env({ llm })
+    const entry = await seedPair(e)
+    const [a, b] = [await e.store.get('mem_a'), await e.store.get('mem_b')]
+    const failure = { basis: suggestionBasis(entry, [a!, b!]), cause: { kind: 'unparseable' as const }, at: NOW }
+    for (let i = 0; i < SUGGESTION_ATTEMPT_LIMIT; i++) await e.decisions.writeSuggestion(entry.id, { failure }, id => e.store.get(id), { isAttempt: true })
+    ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+    expect(prompts).toHaveLength(1)
+    const saved = await e.decisions.get(entry.id)
+    expect(saved?.suggestion?.action).toBe('keep-a')
+    expect(saved?.suggestionAttempts?.count).toBe(SUGGESTION_ATTEMPT_LIMIT)
+  })
 
   it('写到账本条目上（带 id 和依据版本、不回查出处），视图里换成建议；回结果带模型名', async () => {
     const { llm, prompts } = scripted(KEEP_A)

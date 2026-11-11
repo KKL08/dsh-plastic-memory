@@ -35,6 +35,7 @@ import type { ReadEventFn } from '../tools/source.ts'
 import { generatePlan } from './model-plan.ts'
 import { generatePlanDrafts } from './model-draft-plan.ts'
 import { processInterval, runCheckup, type IntervalTimer } from './checkup-run.ts'
+import type { CheckupSuggestions } from './checkup-suggestions.ts'
 import { sameScope, scopeAt, scopeKey, scopeOfLedger, scopeOfMemory, type Scope } from '../scope.ts'
 import { UNKNOWN_SESSION_ID, type ContextHost, type HostSession } from '../tools/host-session.ts'
 import { scanOutcome } from './views.ts'
@@ -59,6 +60,10 @@ export interface MemoryCommandDeps {
   onAutoCheckupChanged?: () => void
   /** scan 持有范围认领期间的心跳计时；缺省用进程自己的 setInterval。 */
   heartbeat?: IntervalTimer
+  /** scan 做完之后的后续段（给冲突生成处理建议，不等它跑完就回结果）；缺省不生成。 */
+  suggestions?: Pick<CheckupSuggestions, 'run'>
+  /** 插件卸载的取消信号：传给 scan 之后的后续段。 */
+  signal?: AbortSignal
   /** 建议忽略表（ignore-advice / unignore-advice 写它）。 */
   ignores: AdviceIgnoreStore
   registry: TypeRegistry
@@ -1031,6 +1036,8 @@ async function dispatch(
         case 'failed':
         case 'model-unavailable': return fail(cmd, 'failed', r.cause.message ?? r.cause.hostCode ?? r.cause.kind)
       }
+      // 体检结果和冲突卡先出：建议在后续段里逐条补到卡上，命令不等它（它自己兜住异常）
+      void deps.suggestions?.run({ target, by: 'manual', llm, outcome: r, ...(deps.signal !== undefined ? { signal: deps.signal } : {}) })
       // 判新增的覆盖范围：项目体检读的是本项目的可见集合（全局 + 本项目），只查全局是全局，全库体检是全部作用域
       const covered = target.kind === 'global' ? [target]
         : target.kind === 'workspace' ? [{ kind: 'global' as const }, target] : 'all'

@@ -55,6 +55,8 @@ export interface ViewInput {
    * 只列 data.byId 取到的是别的作用域里那份的；那个作用域里已经没有的不列，按 byId 是否在那个作用域判。
    */
   entryCopies?: ReadonlyMap<string, LocatedRecord>
+  /** 本进程正在给哪些条目生成处理建议（体检之后的后续段，按条目 id）；缺省没有。 */
+  generatingSuggestions?: ReadonlySet<string>
 }
 
 export type GlobalViews = { pending: PendingView; health: HealthView; library: LibraryView; deleted: DeletedView }
@@ -141,6 +143,7 @@ export function buildPendingView(input: ViewInput): PendingView {
         kind: 'conflict-horizontal', level: PENDING_LEVEL_OF_KIND['conflict-horizontal'], ...base, summary: e.summary, left: cardOf(e.memoryIds[0], data), right: cardOf(e.memoryIds[1], data),
         ...(preferred !== undefined ? { preferredId: preferred.id } : {}),
         ...suggestionState(e, data),
+        ...(input.generatingSuggestions?.has(e.id) === true ? { isGeneratingSuggestion: true as const } : {}),
       })
     }
   }
@@ -170,7 +173,7 @@ export function buildPendingView(input: ViewInput): PendingView {
 
 /**
  * 冲突项的处理建议（账本存盘形状映射到契约）：条目未决（调用方只传未决条目）、冲突指纹和每条记忆此刻的完整内容指纹都和建议的依据一致，
- * 才给 suggestion；否则给没有建议的原因：任一条含高危密钥、最近一次模型判断不了或生成失败（依据同样要对得上）、还没生成。一方定位不到时两个都不给。
+ * 才给 suggestion；否则给没有建议的原因：任一条含高危密钥、最近一次模型判断不了、自动体检名额用完或生成失败（依据同样要对得上）、还没生成。一方定位不到时两个都不给。
  * 改写稿按卡片口径遮高危密钥（存盘的稿保证没有高危，这里兜底）。
  */
 function suggestionState(e: PendingDecision, data: ScopePreread): Pick<Extract<PendingItem, { kind: 'conflict-horizontal' }>, 'suggestion' | 'noSuggestion'> {
@@ -185,6 +188,7 @@ function suggestionState(e: PendingDecision, data: ScopePreread): Pick<Extract<P
   if (suggestionFailure !== undefined && isBasisCurrent(e, suggestionFailure.basis, records)) {
     const { kind, hostCode, message, reason } = suggestionFailure.cause
     if (kind === 'undecided') return { noSuggestion: { code: 'undecided', reason: reason ?? '' } }
+    if (kind === 'quota-exhausted') return { noSuggestion: { code: 'quota-exhausted' } }
     return { noSuggestion: { code: 'failed', cause: { kind, ...(hostCode !== undefined ? { hostCode } : {}), ...(message !== undefined ? { message } : {}) } } }
   }
   return { noSuggestion: { code: 'not-generated' } }

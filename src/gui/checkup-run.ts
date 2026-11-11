@@ -107,6 +107,8 @@ export type CheckupRunOutcome =
       usageTokens?: number
       /** 体检前的待处理和体检后的视图；收集出错时缺省，结果里不给新增与分数。 */
       compared?: { before: PendingView; after: GlobalViews }
+      /** 写进最近一次结果的体检标识（没写结果时缺省）：之后的后续段把用量补记到这次的结果上。 */
+      checkupId?: string
     }
   | { kind: 'busy'; scope: Scope }
   | { kind: 'cancelled' }
@@ -186,19 +188,22 @@ export async function runCheckup(input: CheckupRunInput, deps: CheckupRunDeps): 
       if (semanticFailed !== undefined) return await failed(input, deps, scopes, semanticFailed.cause ?? { kind: 'model-error' }, startedAt)
     }
     const compared = before !== undefined && after !== undefined ? { before, after } : undefined
+    let checkupId: string | undefined
     if (compared !== undefined) {
       // 体检这时已经提交，记不下结果只记日志，不把做完的体检报成失败
       try {
         const resultTarget: CheckupTarget = target.kind === 'all' ? { kind: 'all', scopes } : target
+        const id = genId('ck')
         await deps.checkups.recordResults(checkupResults(compared.before, compared.after.pending, {
-          target: resultTarget, checkupId: genId('ck'), by, completedAt: deps.now(), notes: result.notes, scopeNotes,
+          target: resultTarget, checkupId: id, by, completedAt: deps.now(), notes: result.notes, scopeNotes,
           ...(result.usageTokens !== undefined ? { usageTokens: result.usageTokens } : {}),
         }))
+        checkupId = id
       } catch (err) {
         deps.log.warn('[plastic-memory] 记不下体检的结果', err)
       }
     }
-    return doneOf(result, compared)
+    return doneOf(result, compared, checkupId)
   } catch (err) {
     if (signal.aborted) {
       if (!isCommitted || startedAt === undefined) return { kind: 'cancelled' }
@@ -218,12 +223,13 @@ export async function runCheckup(input: CheckupRunInput, deps: CheckupRunDeps): 
   }
 }
 
-function doneOf(result: Exclude<ScanToolResult, { kind: 'error' }>, compared?: { before: PendingView; after: GlobalViews }): CheckupRunOutcome {
+function doneOf(result: Exclude<ScanToolResult, { kind: 'error' }>, compared?: { before: PendingView; after: GlobalViews }, checkupId?: string): CheckupRunOutcome {
   return {
     kind: 'done', notes: result.notes,
     ...(result.semanticBatches !== undefined ? { semanticBatches: result.semanticBatches } : {}),
     ...(result.usageTokens !== undefined ? { usageTokens: result.usageTokens } : {}),
     ...(compared !== undefined ? { compared } : {}),
+    ...(checkupId !== undefined ? { checkupId } : {}),
   }
 }
 

@@ -208,6 +208,14 @@ describe('suggest（补上建议）与待处理冲突项的处理建议', () => 
     expect(item({ suggestion: { id: 'sg_1', action: 'unsure', reason: 'r', isSourced: false, ops: [] } })).toBe(false)
     expect(item({ noSuggestion: { code: 'failed', cause: { kind: 'undecided' } } })).toBe(false)
   })
+
+  it('自动体检名额用完：单独的原因码 quota-exhausted，不当作生成失败的原因；「正在生成」标记和没有建议的原因并存', () => {
+    const item = (extra: object) => pendingItemSchema.safeParse({ ...horizontal, ...extra }).success
+    expect(item({ noSuggestion: { code: 'quota-exhausted' } })).toBe(true)
+    expect(item({ noSuggestion: { code: 'failed', cause: { kind: 'quota-exhausted' } } })).toBe(false)
+    expect(item({ noSuggestion: { code: 'not-generated' }, isGeneratingSuggestion: true })).toBe(true)
+    expect(item({ isGeneratingSuggestion: false })).toBe(false)
+  })
 })
 
 describe('apply-proposal（采纳建议）', () => {

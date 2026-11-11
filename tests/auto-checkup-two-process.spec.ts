@@ -127,6 +127,34 @@ describe('自动体检：两个宿主进程共用一个记忆根', () => {
     expect(await readView()).toEqual(after)
   }, 30_000)
 
+  it('两个进程的后续段同时给同一对生成建议：后写的一方发现已有当前依据的建议，丢掉自己那份，尝试次数只记先写的那次', async () => {
+    const t = await seedDueGlobal()
+    const [a, b] = await Promise.all([startHost('conflict'), startHost('conflict')])
+    await a.send('check')
+    await a.waitEvent('llm')
+    await a.send('open')
+    // a 的体检做完、认领已放掉，后续段在等模型
+    await a.waitEvent('llm-suggest')
+    expect((await t.checkups.list()).map(r => r.completed?.by)).toEqual(['auto'])
+
+    // b 两天后再查全局（又到期了）：同一对，自己的后续段生成、先写下
+    await b.send(`clock ${NOW + 2 * DAY}`)
+    await b.send('check')
+    await b.waitEvent('llm')
+    await b.send('open')
+    await b.waitEvent('llm-suggest')
+    await b.send('open')
+    await b.send('idle')
+    const [written] = await t.decisions.list()
+    expect(written?.suggestion?.reason).toBe(`pid ${b.child.pid}`)
+
+    await a.send('open')
+    await a.send('idle')
+    const [entry] = await t.decisions.list()
+    expect(entry?.suggestion).toEqual(written?.suggestion)
+    expect(entry?.suggestionAttempts?.count).toBe(1)
+  }, 30_000)
+
   it('跑的那个进程被杀掉：认领按残留清掉，另一个接手查完', async () => {
     const t = await seedDueGlobal()
     const [a, b] = await Promise.all([startHost(), startHost()])

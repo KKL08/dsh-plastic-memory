@@ -100,9 +100,10 @@ export const PROPOSAL_SOURCES = ['suggestion', 'request'] as const
 /**
  * 处理建议没生成成的原因（账本与视图同用）：model-error = 模型调用出错（宿主给了错误码时带上；鉴权错误不留原话），
  * unparseable = 输出不合格式，secret-in-draft = 稿里出现高危密钥或原文没有的疑似密钥，整份丢弃，
- * undecided = 模型正常答了，但判断不了哪条对（带它说明的理由；视图里是单独的原因码，不算生成失败）。
+ * undecided = 模型正常答了，但判断不了哪条对（带它说明的理由；视图里是单独的原因码，不算生成失败），
+ * quota-exhausted = 自动体检这次的建议名额用完，没轮到它（没调用模型，不算尝试；视图里是单独的原因码，不算生成失败）。
  */
-export const SUGGESTION_FAILURE_KINDS = ['model-error', 'unparseable', 'secret-in-draft', 'undecided'] as const
+export const SUGGESTION_FAILURE_KINDS = ['model-error', 'unparseable', 'secret-in-draft', 'undecided', 'quota-exhausted'] as const
 
 /** memory_health 建议的分层并列结构（health.ts）：独占层单元素，行动项层多元素，无事为空数组。 */
 export type HealthRecommendationKind =

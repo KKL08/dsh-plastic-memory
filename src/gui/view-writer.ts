@@ -41,6 +41,8 @@ export interface ViewSourceDeps {
   bootedAt?: number
   /** 清理忽略表出错时记一条；缺省 console。 */
   log?: MemoryLogger
+  /** 本进程正在给哪些条目生成处理建议（体检之后的后续段），收集时现读；缺省没有。 */
+  generatingSuggestions?: () => ReadonlySet<string>
 }
 
 /**
@@ -121,6 +123,7 @@ export async function collectGlobalViews(deps: ViewSourceDeps): Promise<GlobalVi
     ...(deps.bootedAt !== undefined ? { bootedAt: deps.bootedAt } : {}),
     ...(modelChangeSnapshots !== undefined ? { modelChangeSnapshots } : {}),
     entryCopies,
+    ...(deps.generatingSuggestions !== undefined ? { generatingSuggestions: deps.generatingSuggestions() } : {}),
   })
 }
 

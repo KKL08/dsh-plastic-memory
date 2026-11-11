@@ -367,6 +367,32 @@ describe('处理建议存在账本条目上', () => {
     expect((await s.get(entry.id))?.suggestion).toBeUndefined()
   })
 
+  it('体检发起的生成记一次尝试（按冲突指纹计，指纹变了从头算）；不计尝试的写入（用户点「补上建议」）不动次数', async () => {
+    const { s, entry } = await seeded()
+    const failure = { basis: suggestionBasis(entry, [a, b]), cause: { kind: 'unparseable' as const }, at: 2 }
+    expect(await s.writeSuggestion(entry.id, { failure }, read([a, b]), { isAttempt: true })).toBe('written')
+    expect((await s.get(entry.id))?.suggestionAttempts).toEqual({ fingerprint: 'fp', count: 1 })
+    expect(await s.writeSuggestion(entry.id, { failure }, read([a, b]))).toBe('written')
+    expect((await s.get(entry.id))?.suggestionAttempts).toEqual({ fingerprint: 'fp', count: 1 })
+    expect(await s.writeSuggestion(entry.id, { suggestion: suggestionOf(entry, [a, b]) }, read([a, b]), { isAttempt: true })).toBe('written')
+    expect((await s.get(entry.id))?.suggestionAttempts).toEqual({ fingerprint: 'fp', count: 2 })
+    // 同一对再被扫到、双方内容变了：条目换了冲突指纹，次数从头算
+    const b2 = { ...b, content: '用 npm，CI 里也是' }
+    const { entry: changed } = await s.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器', fingerprint: 'fp2' }, 3)
+    const again = { basis: suggestionBasis(changed, [a, b2]), cause: { kind: 'unparseable' as const }, at: 4 }
+    expect(await s.writeSuggestion(entry.id, { failure: again }, read([a, b2]), { isAttempt: true })).toBe('written')
+    expect((await s.get(entry.id))?.suggestionAttempts).toEqual({ fingerprint: 'fp2', count: 1 })
+  })
+
+  it('没写成的（依据对不上、已有当前建议）不记尝试', async () => {
+    const { s, entry } = await seeded()
+    const suggestion = suggestionOf(entry, [a, b])
+    expect(await s.writeSuggestion(entry.id, { suggestion }, read([a, { ...b, content: '改过' }]), { isAttempt: true })).toBe('stale')
+    expect(await s.writeSuggestion(entry.id, { suggestion }, read([a, b]))).toBe('written')
+    expect(await s.writeSuggestion(entry.id, { suggestion: suggestionOf(entry, [a, b], 'sg_2') }, read([a, b]), { isAttempt: true })).toBe('has-current')
+    expect((await s.get(entry.id))?.suggestionAttempts).toBeUndefined()
+  })
+
   it('条目已结清或不在了：不写；正被别处认领：丢掉这一份', async () => {
     const { s, entry } = await seeded()
     const suggestion = suggestionOf(entry, [a, b])

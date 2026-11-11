@@ -1219,6 +1219,30 @@ describe('待处理视图：冲突的处理建议', () => {
     expect(pendingViewSchema.parse((await h.views()).pending).items).toHaveLength(1)
   })
 
+  it('自动体检的建议名额用完、没轮到：原因码 quota-exhausted，不算生成失败；两条被改过后回到 not-generated', async () => {
+    const h = harness()
+    const { entry, records, read } = await seeded(h)
+    const [a, b] = await records()
+    await h.decisions.writeSuggestion(entry.id, { failure: { basis: suggestionBasis(entry, [a!, b!]), cause: { kind: 'quota-exhausted' }, at: T0 } }, read)
+    expect((await horizontal(h)).noSuggestion).toEqual({ code: 'quota-exhausted' })
+    expect(pendingViewSchema.parse((await h.views()).pending).items).toHaveLength(1)
+    await h.store.update({ id: 'mem_a', workspacePath: WS }, r => ({ ...r, content: '用 pnpm 9' }))
+    expect((await horizontal(h)).noSuggestion).toEqual({ code: 'not-generated' })
+  })
+
+  it('「正在生成」标记：本进程正在给它生成建议时带上（进程内状态，由收集视图时给出），和没有建议的原因并存', async () => {
+    const h = harness()
+    const { entry } = await seeded(h)
+    expect(await horizontal(h)).not.toHaveProperty('isGeneratingSuggestion')
+    const generating = new Set([entry.id])
+    const views = await collectGlobalViews({ ...h.sourceDeps, generatingSuggestions: () => generating })
+    const item = pendingViewSchema.parse(views.pending).items.find(i => i.kind === 'conflict-horizontal')
+    expect(item).toMatchObject({ isGeneratingSuggestion: true, noSuggestion: { code: 'not-generated' } })
+    generating.clear()
+    const cleared = (await collectGlobalViews({ ...h.sourceDeps, generatingSuggestions: () => generating })).pending.items.find(i => i.kind === 'conflict-horizontal')
+    expect(cleared).not.toHaveProperty('isGeneratingSuggestion')
+  })
+
   it('任一条含高危密钥：原因码 has-secret', async () => {
     const h = harness()
     await seeded(h, `用 pnpm，token ${FAKE_SECRET.github}`)

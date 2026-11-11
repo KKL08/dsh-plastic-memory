@@ -206,10 +206,10 @@ export type Suggestion = z.infer<typeof suggestionSchema>
 
 /**
  * 处理建议没生成成的原因（kind 见 SUGGESTION_FAILURE_KINDS）：hostCode 是宿主给的错误码，message 是脱敏后的原话（鉴权错误不留原话）。
- * 模型判断不了（undecided）不算生成失败，视图里是单独的原因码，不在这里出现。
+ * 模型判断不了（undecided）、自动体检名额用完（quota-exhausted）不算生成失败，视图里是单独的原因码，不在这里出现。
  */
 export const suggestionFailureCauseSchema = z.object({
-  kind: z.enum(SUGGESTION_FAILURE_KINDS).exclude(['undecided']),
+  kind: z.enum(SUGGESTION_FAILURE_KINDS).exclude(['undecided', 'quota-exhausted']),
   hostCode: z.string().optional(),
   message: z.string().optional(),
 })
@@ -217,10 +217,11 @@ export type SuggestionFailureCause = z.infer<typeof suggestionFailureCauseSchema
 
 /**
  * 待处理项没有处理建议的原因码：has-secret 任一条含高危密钥（原文不发给模型）；not-generated 还没生成；
- * failed 最近一次没生成成（带原因 cause）；undecided 模型判断不了哪条对（带它说明的理由 reason，已遮疑似密钥），不给结论、由用户自己选。
+ * failed 最近一次没生成成（带原因 cause）；undecided 模型判断不了哪条对（带它说明的理由 reason，已遮疑似密钥），不给结论、由用户自己选；
+ * quota-exhausted 自动体检这次的建议名额用完，没轮到它。
  * 没有可用模型由界面按现有规则自己判断，不进原因码。以后的原因往这里追加。
  */
-export const NO_SUGGESTION_CODES = ['has-secret', 'not-generated', 'failed', 'undecided'] as const
+export const NO_SUGGESTION_CODES = ['has-secret', 'not-generated', 'failed', 'undecided', 'quota-exhausted'] as const
 export type NoSuggestionCode = (typeof NO_SUGGESTION_CODES)[number]
 export const noSuggestionSchema = z.object({ code: z.enum(NO_SUGGESTION_CODES), cause: suggestionFailureCauseSchema.optional(), reason: z.string().optional() })
 export type NoSuggestion = z.infer<typeof noSuggestionSchema>
@@ -238,6 +239,8 @@ export const pendingItemSchema = z.discriminatedUnion('kind', [
     suggestion: suggestionSchema.optional(),
     /** 没有处理建议的原因。 */
     noSuggestion: noSuggestionSchema.optional(),
+    /** 体检之后正在给它生成建议（排队或生成中）：写视图的那个进程的进程内状态，别的进程写的视图里没有。和 noSuggestion 并存。 */
+    isGeneratingSuggestion: z.literal(true).optional(),
   }),
   z.object({
     kind: z.literal('conflict-vertical'), level: levelOf('conflict-vertical'), decisionId: z.string(), firstSeenAt: z.number(), summary: z.string(),
