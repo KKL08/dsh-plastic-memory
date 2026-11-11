@@ -53,7 +53,8 @@ jobs:
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm lint
-      - run: pnpm test
+      # The client tests import nothing from the host, so they don't change with its version.
+      - run: pnpm exec vitest run --project node
       - name: Cache the floor dsh host
         uses: actions/cache@v6
         with:
