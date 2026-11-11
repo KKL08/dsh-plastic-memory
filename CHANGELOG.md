@@ -15,6 +15,10 @@ All notable changes to this project are documented here. The format follows
   model proposes what to rewrite, delete or keep and asks when it lacks
   information, nothing is written until you have reviewed each change, and
   Undo all reverts the whole batch.
+- A "Duplicate content" card that lists three or more memories now has
+  Merge. It opens the same review panel as Select with the request filled
+  in, so the model combines them into one and nothing is written until you
+  have reviewed the changes.
 - Subagent sessions can save memories with `memory_save` while governance
   is on. What they save lands in the current project as pending: it is not
   injected into the main session, ranks after other memories in search, and

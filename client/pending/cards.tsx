@@ -2,9 +2,9 @@
  * 待处理的各类卡（PRD 5.2；建议整理见 spec「建议整理的动作」）与处理后留在原位的结果卡。每张卡动手前写清后果；动作经 useCardAction（命令往返模块）发命令，
  * 成功后把结果（Outcome）交给列表，由列表在原位换成结果卡。
  */
-import { createContext, useContext, useState, type ReactNode } from 'react'
+import { createContext, useContext, useRef, useState, type ReactNode } from 'react'
 import {
-  CONFLICT_ACTION_VERDICTS, MODEL_EDIT_ADVICE_TYPES, mergeKeeperIndex, relaxedCap, scopeOfMemory,
+  CONFLICT_ACTION_VERDICTS, MAX_BATCH_EDIT, MODEL_EDIT_ADVICE_TYPES, mergeKeeperIndex, sameScope, relaxedCap, scopeOfMemory,
   type AdviceType, type IgnorableAdviceType, type MemoryCard as MemoryCardData, type MemoryCommand, type ModelEditAdviceType, type PendingItem, type Scope,
 } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
@@ -24,6 +24,9 @@ import type { EditCommand } from '../command/protocol.ts'
 import { useCommandRunner, type RunHandlers } from '../command/useCommandRunner.ts'
 import { EditPanel, type EditDraft } from './edit.tsx'
 import { EditModes } from './edit-modes.tsx'
+import { BatchEdit, toBatchItems, type BatchApplication } from '../library/batch-edit.tsx'
+import { useReturnFocus } from '../ui/focus-return.ts'
+import { baseOf, draftOf, isEditable } from './card-edit.ts'
 import { ModelEditPanel } from './model-edit.tsx'
 import { MovePanel } from './move.tsx'
 
@@ -49,6 +52,8 @@ export type Outcome =
   | { kind: 'ignored'; type: IgnorableAdviceType; memoryIds: string[] }
   /** 手动改、手动合并：结果行写名称和字数变化；filePath 是写完后的文件（改了名称文件名会跟着变）。 */
   | { kind: 'edited' | 'merged'; decisionId?: string; name: string; fromChars: number; toChars: number; filePath?: string }
+  /** 三条以上内容重复的「合并」（整理所选的三步）：改写、删除了几条；decisionId 是撤销用的账本条目（撤销全部）。 */
+  | { kind: 'tidied'; decisionId?: string; rewrites: number; deletes: number }
 
 export interface CardProps<K extends PendingItem['kind']> {
   item: Item<K>
@@ -448,20 +453,10 @@ function IgnoreButton({ item, action }: { item: Item<'advice'>; action: CardActi
   return <DismissButton label={t('pending.dismiss')} unavailable={action.unavailable} onClick={() => { action.run(command) }} />
 }
 
-/**
- * 能不能修改：要有内容摘要（服务端靠它和 updatedAt 认出卡片加载后被改过），且不含密钥（界面上的文字可能是遮盖后的，
- * 照着改会把遮盖写回文件）。
- */
-export const isEditable = (memory: MemoryCardData) => memory.digest !== undefined && memory.hasSecret !== true
+export { baseOf, draftOf, isEditable }
 
 /** 能让模型改的建议类型（服务端按它给默认要求）。 */
 const isModelEditType = (type: AdviceType): type is ModelEditAdviceType => (MODEL_EDIT_ADVICE_TYPES as readonly AdviceType[]).includes(type)
-
-/** 命令里带回的卡片版本。 */
-export const baseOf = (memory: MemoryCardData) => ({ updatedAt: memory.updatedAt, digest: memory.digest ?? '' })
-
-/** 单条修改的预填：这条记忆此刻的四个面。 */
-export const draftOf = (memory: MemoryCardData): EditDraft => ({ content: memory.content, name: memory.name, summary: memory.summary, tags: memory.tags })
 
 /** 单条修改写入：按点「修改」那一刻的版本核对。 */
 const editCommandOf = (memory: MemoryCardData, draft: EditDraft): MemoryCommand =>
@@ -488,7 +483,20 @@ export function AdviceCard(props: CardProps<'advice'> & {
   const { item, session, now, typeLabel, onDone, onRefused, projects, defaultProject } = props
   const t = useT()
   const gateway = useGateway()
-  const action = useCardAction(session, { onHandledElsewhere: onRefused, onOk: (result, command) => {
+  /** 三条以上合并的应用回 stale、not-found 时交回工作区的那几条（同记忆查看的整理所选）。 */
+  const onBehind = useRef<((memoryIds: readonly string[]) => void) | undefined>(undefined)
+  const action = useCardAction(session, { onHandledElsewhere: onRefused, onFailed: (failure) => {
+    const ids = failure.memoryIds
+    if (onBehind.current === undefined || (failure.code !== 'stale' && failure.code !== 'not-found') || ids === undefined || ids.length === 0) return false
+    onBehind.current(ids)
+    return true
+  }, onOk: (result, command) => {
+    if (command.cmd === 'apply-edits') {
+      // 只应用了一部分时只算仍是这次写下的
+      const recorded = new Set(result.memoryIds ?? command.ops.map(op => op.memoryId))
+      const done = command.ops.filter(op => recorded.has(op.memoryId))
+      onDone({ kind: 'tidied', decisionId: result.decisionId, rewrites: done.filter(op => op.kind === 'edit').length, deletes: done.filter(op => op.kind === 'forget').length })
+    }
     if (command.cmd === 'confirm') onDone({ kind: 'confirmed' })
     if (command.cmd === 'forget') onDone({ kind: 'deleted', memoryId: command.memoryId, scope: command.layer })
     if (command.cmd === 'hard-delete') onDone({ kind: 'hard-deleted' })
@@ -530,7 +538,18 @@ export function AdviceCard(props: CardProps<'advice'> & {
     }
   }
   if (item.type === 'redundancy' && item.memories.length > 1) {
-    return <AdviceGroupCard {...props} action={action} buttonsOf={buttonsOf} />
+    return (
+      <AdviceGroupCard
+        {...props}
+        action={action}
+        buttonsOf={buttonsOf}
+        onApplyMany={(application, behind) => {
+          onBehind.current = behind
+          const { ops, keep } = application
+          action.run({ cmd: 'apply-edits', ops, ...(keep.length > 0 ? { keep } : {}) })
+        }}
+      />
+    )
   }
   const [memory] = item.memories
   const copy = item.type === 'misplaced' && memory.scope === 'global' ? { ...ADVICE_COPY.misplaced, ...MISPLACED_TO_PROJECT } : ADVICE_COPY[item.type]
@@ -609,18 +628,50 @@ function mergeDraft(pair: Pair): { draft: EditDraft; chars: number } {
 }
 
 /**
+ * 三条以上内容重复时能交给「合并」的那几条：同整理所选的限制（同一作用域、不超过 MAX_BATCH_EDIT 条，按整组算），
+ * 含密钥、读不到版本的不发给模型；剩下不到两条为 undefined。
+ */
+function mergeManyOf(memories: readonly MemoryCardData[]): MemoryCardData[] | undefined {
+  const [first, ...rest] = memories.map(scopeOfMemory)
+  if (memories.length > MAX_BATCH_EDIT || first === undefined || !rest.every(s => s !== undefined && sameScope(s, first))) return undefined
+  const editable = memories.filter(isEditable)
+  return editable.length >= 2 ? editable : undefined
+}
+
+/**
  * 互相重复的几条记忆一张卡：每条各自一栏，带自己的删除和打开文件。两条时左右并排，写「删除左边 / 删除右边」，
  * 两条都能改时再给「合并」（两段切换：让模型合并 | 手动合并）：合成保留的那条，另一条进最近删除。
+ * 三条以上能合并时（mergeManyOf）「合并」在卡片里展开整理所选的三步（写要求 / 看计划 / 对照应用），要求预填「合成一条，各自独有的信息都留下」，
+ * 应用发 apply-edits，结果卡写改写、删除几条，撤销同整理所选的撤销全部。
  */
-function AdviceGroupCard({ item, session, now, typeLabel, action, buttonsOf }: CardProps<'advice'> & {
+function AdviceGroupCard({ item, session, now, typeLabel, action, buttonsOf, onApplyMany }: CardProps<'advice'> & {
   action: CardAction
   buttonsOf: (memory: MemoryCardData, deleteLabel?: string) => Record<AdviceAction, ReactNode>
+  onApplyMany: (application: BatchApplication, onBehind: (memoryIds: readonly string[]) => void) => void
 }) {
   const t = useT()
   const isPair = item.memories.length === 2
   const pair = isPair && item.memories.every(isEditable) ? [item.memories[0]!, item.memories[1]!] as const : undefined
+  const many = isPair ? undefined : mergeManyOf(item.memories)
+  // 点「合并」那一刻能合并的几条：之后视图刷新了也按它们的版本核对（同整理所选的卡片快照）
+  const [mergingMany, setMergingMany] = useState<readonly MemoryCardData[]>()
   // 点「合并」那一刻的两条：之后视图刷新了也按它们预填、按它们的版本核对（同单条的修改）
   const [merging, setMerging] = useState<Pair>()
+  if (mergingMany !== undefined) {
+    return (
+      <Card title={t('pending.advice.redundancy.title')}>
+        <MergeMany
+          memories={mergingMany}
+          latest={item.memories}
+          session={session}
+          onBack={() => { setMergingMany(undefined) }}
+          onApply={onApplyMany}
+          applyUnavailable={action.unavailable}
+          applyFeedback={action.feedback}
+        />
+      </Card>
+    )
+  }
   const merge = merging === undefined ? undefined : mergeDraft(merging)
   const mergeWith = (both: Pair, draft: EditDraft) => {
     const memories = both.map(m => ({ memoryId: m.id, layer: scopeOfMemory(m), base: baseOf(m) }))
@@ -678,11 +729,13 @@ function AdviceGroupCard({ item, session, now, typeLabel, action, buttonsOf }: C
         )
           : (
             <>
-              <AdviceNote>{t(isPair ? 'pending.advice.redundancy.body' : 'pending.advice.redundancy.manyBody')}</AdviceNote>
-              {pair !== undefined
+              <AdviceNote>
+                {t(isPair ? 'pending.advice.redundancy.body' : many !== undefined ? 'pending.advice.redundancy.manyBody' : 'pending.advice.redundancy.manyBodyNoMerge')}
+              </AdviceNote>
+              {pair !== undefined || many !== undefined
                 ? (
                   <div className="pm-pending-actions">
-                    <Button unavailable={action.unavailable} onClick={() => { setMerging(pair) }}>{t('pending.merge')}</Button>
+                    <Button unavailable={action.unavailable} onClick={() => { if (pair !== undefined) setMerging(pair); else setMergingMany(many) }}>{t('pending.merge')}</Button>
                   </div>
                 )
                 : null}
@@ -690,6 +743,38 @@ function AdviceGroupCard({ item, session, now, typeLabel, action, buttonsOf }: C
           )}
       {action.feedback}
     </Card>
+  )
+}
+
+/** 三条以上的「合并」：整理所选的工作区放进卡片，要求预填；收起时焦点回到「合并」。 */
+function MergeMany({ memories, latest, session, onBack, onApply, applyUnavailable, applyFeedback }: {
+  memories: readonly MemoryCardData[]
+  latest: readonly MemoryCardData[]
+  session: BorrowedSession
+  onBack: () => void
+  onApply: (application: BatchApplication, onBehind: (memoryIds: readonly string[]) => void) => void
+  applyUnavailable: string | undefined
+  applyFeedback: ReactNode
+}) {
+  const t = useT()
+  const root = useRef<HTMLDivElement>(null)
+  useReturnFocus(root)
+  const [items] = useState(() => toBatchItems(memories))
+  return (
+    <div ref={root}>
+      <BatchEdit
+        items={items}
+        latest={latest}
+        session={session}
+        initialRequest={t('pending.mergeMany.request')}
+        titleOf={n => t('pending.mergeMany.title', { n })}
+        backLabel={t('pending.mergeMany.back')}
+        onBack={onBack}
+        onApply={(application, _picked, behind) => { onApply(application, behind) }}
+        applyUnavailable={applyUnavailable}
+        applyFeedback={applyFeedback}
+      />
+    </div>
   )
 }
 
@@ -740,6 +825,11 @@ function resultCopy(item: PendingItem, outcome: Outcome, t: Translate): ResultCo
       const ignored = item.kind === 'advice' && item.memories.length > 1 ? { memories: item.memories } : { memory }
       return { ...ignored, chip: t('pending.result.ignored'), body: t('pending.result.ignoredBody'), undoable: true }
     }
+    case 'tidied':
+      return {
+        chip: t('pending.result.merged'), undoable: outcome.decisionId !== undefined,
+        body: outcome.deletes > 0 ? t('pending.result.tidiedBody', { rewrites: outcome.rewrites, deletes: outcome.deletes }) : t('pending.result.tidiedBodyNoDelete', { rewrites: outcome.rewrites }),
+      }
     case 'resolved': throw new Error(`resolved outcome on ${item.kind}`)
     case 'edited': case 'merged': throw new Error(`${outcome.kind} outcome renders as EditedRow`)
   }
@@ -758,7 +848,7 @@ export function ResultCard({ item, outcome, session, now, typeLabel, onUndone, o
   const action = useCardAction(session, { onOk: () => { onUndone() }, onHandledElsewhere: onRefused })
   if (outcome.kind === 'edited' || outcome.kind === 'merged') return <EditedRow item={item} outcome={outcome} action={action} />
   const copy = resultCopy(item, outcome, t)
-  const undoId = 'decisionId' in item ? item.decisionId : outcome.kind === 'promoted' || outcome.kind === 'moved' ? outcome.decisionId : undefined
+  const undoId = 'decisionId' in item ? item.decisionId : outcome.kind === 'promoted' || outcome.kind === 'moved' || outcome.kind === 'tidied' ? outcome.decisionId : undefined
   // 忽略不进账本，撤销就是取消忽略；删除进了最近删除，撤销就是恢复那一份；其余撤销按账本条目
   const undo: MemoryCommand | undefined = !copy.undoable ? undefined
     : outcome.kind === 'ignored' ? { cmd: 'unignore-advice', type: outcome.type, memoryIds: outcome.memoryIds }

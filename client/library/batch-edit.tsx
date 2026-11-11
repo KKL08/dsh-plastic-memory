@@ -17,7 +17,7 @@ import { SoftDeleteConfirm } from '../command/confirm.tsx'
 import { refuseBeforeSend } from '../command/protocol.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { useT } from '../i18n.tsx'
-import { baseOf, draftOf, isEditable } from '../pending/cards.tsx'
+import { baseOf, draftOf, isEditable } from '../pending/card-edit.ts'
 import type { EditDraft } from '../pending/edit.tsx'
 import { DraftCompare, ModelBusy, modelFailureOf, RequestBox, requestFootOf } from '../pending/model-edit.tsx'
 import { Button } from '../ui/Button.tsx'
@@ -157,7 +157,7 @@ type Stage =
 
 const STEP_OF = { request: 'request', planning: 'plan', plan: 'plan', drafting: 'apply', apply: 'apply' } as const satisfies Record<Stage['kind'], BatchStep>
 
-export function BatchEdit({ items, latest, session, onBack, onApply, applyUnavailable, applyFeedback }: {
+export function BatchEdit({ items, latest, session, onBack, onApply, applyUnavailable, applyFeedback, initialRequest = '', titleOf, backLabel }: {
   items: readonly BatchItem[]
   /** 视图里此刻的记忆（视图没到时缺省）：有记忆刚被别处改过时，等这几条换成新版本再重建清单。 */
   latest?: readonly MemoryCard[] | undefined
@@ -173,6 +173,12 @@ export function BatchEdit({ items, latest, session, onBack, onApply, applyUnavai
   applyUnavailable?: string | undefined
   /** 应用的确认与失败，画在底部按钮下。 */
   applyFeedback?: ReactNode
+  /** 要求框的预填（待处理里三条以上内容重复的「合并」）；缺省空着。 */
+  initialRequest?: string
+  /** 标题（按清单条数）；缺省「整理所选的 N 条」。 */
+  titleOf?: (n: number) => string
+  /** 右上角回去的按钮；缺省「返回列表」。 */
+  backLabel?: string
 }) {
   const t = useT()
   const titleId = useId()
@@ -182,7 +188,7 @@ export function BatchEdit({ items, latest, session, onBack, onApply, applyUnavai
   useEffect(() => { title.current?.focus() }, [])
   /** 这次要整理的：起初是选中的全部，写要求时可以移出。 */
   const [picked, setPicked] = useState<readonly BatchItem[]>(items)
-  const [request, setRequest] = useState('')
+  const [request, setRequest] = useState(initialRequest)
   const [stage, setStage] = useState<Stage>({ kind: 'request' })
   /** 正在等的那次请求的序号：停止、离开后序号前进，旧请求的结果对不上号就丢掉。 */
   const seq = useRef(0)
@@ -276,8 +282,8 @@ export function BatchEdit({ items, latest, session, onBack, onApply, applyUnavai
   return (
     <section className="pm-batch" aria-labelledby={titleId}>
       <div className="pm-batch-head">
-        <h3 ref={title} id={titleId} className="pm-batch-title" tabIndex={-1}>{t('library.batch.title', { n: picked.length })}</h3>
-        <Button variant="ghost" unavailable={applyUnavailable} onClick={onBack}>{t('library.batch.back')}</Button>
+        <h3 ref={title} id={titleId} className="pm-batch-title" tabIndex={-1}>{titleOf?.(picked.length) ?? t('library.batch.title', { n: picked.length })}</h3>
+        <Button variant="ghost" unavailable={applyUnavailable} onClick={onBack}>{backLabel ?? t('library.batch.back')}</Button>
       </div>
       <BatchSteps current={STEP_OF[stage.kind]} />
       {behindCount !== undefined ? <p className="pm-notice" role="status">{t('library.batch.behind', { n: behindCount })}</p> : null}
