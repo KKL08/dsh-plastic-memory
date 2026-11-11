@@ -1,6 +1,6 @@
 import type { MemoryLogger, MemoryStore } from '../store.ts'
 import { conflictFingerprint, type PendingDecisionsStore } from '../governance/decisions.ts'
-import { kindOf, verdictLoser } from '../governance/schema.ts'
+import { kindOf, verdictLoser, type PendingDecision } from '../governance/schema.ts'
 import type { SnapshotStore } from '../governance/snapshots.ts'
 import { ALREADY_REVIEWED_REASON, NOT_DELEGATED_REASON, isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
 import type { AcceptRejectCode, DecisionRejectCode, GovernanceRejectCode } from '../contract-codes.ts'
@@ -175,6 +175,26 @@ async function resolveClaimed(
     return { kind: 'error', message: `待决项 ${entry.id} 不是冲突（${kindOf(entry)}），不能用 resolve 裁决，账本条目保留。` }
   }
 
+  if (verdictLoser(entry, args.verdict) === undefined) return resolveEntry(entry, args, context, deps, now, locate, baseline)
+  // 要删一方的裁决再认领冲突身份：账本里同一对有两条条目时（旧版本并发挂账留下的，下次体检才收拢），两条相反的裁决
+  // 各认领各的条目、都读到双方在用，会各删一方。认领之后才定位双方，后到的一条什么都不动
+  const paired = await deps.decisions.withPairClaim(entry, () => resolveEntry(entry, args, context, deps, now, locate, baseline))
+  if (!paired.isClaimed) {
+    return { kind: 'error', code: 'claimed', message: `待决项 ${entry.id} 的这一对记忆正在被另一次操作处理，未做任何改动。` }
+  }
+  return paired.value
+}
+
+/** 条目已认领（要删一方时冲突身份也已认领）后裁决。 */
+async function resolveEntry(
+  entry: PendingDecision,
+  args: Extract<ConfirmArgs, { action: 'resolve' }>,
+  context: GovernanceContext,
+  deps: ConfirmToolDeps,
+  now: number,
+  locate: (id: string) => Promise<MemoryRecord | undefined>,
+  baseline: readonly string[] | undefined,
+): Promise<ConfirmResult> {
   const vertical = entry.baselineRef !== undefined
   // 账本里的条目也要过基数校验：横向必须是两个不同 id，垂直必须恰好一个。旧版本写入的或
   // 手工篡改的非法条目一旦按 memoryIds[0]/[1] 裁决，就可能删掉用户要保留的那条。
@@ -203,6 +223,12 @@ async function resolveClaimed(
   const toDelete = loserId === undefined ? undefined : members.get(loserId)
   if (loserId !== undefined && toDelete === undefined) {
     return { kind: 'error', message: `定位不到败方记忆 ${loserId}，未做任何删除，待决项 ${entry.id} 保留在账本里。可确认 id 后重试，或用 dismiss 清除该条目。` }
+  }
+  // 横向删一方前核对保留方仍在用：挂账之后它可能已被别处删掉或取代（另一条同一对的裁决、遗忘、替代），
+  // 这时再删败方，两条就都没了。垂直冲突的保留方是基线，不用核对
+  const winnerId = loserId === undefined || vertical ? undefined : entry.memoryIds.find(id => id !== loserId)
+  if (winnerId !== undefined && members.get(winnerId)?.status !== 'active') {
+    return { kind: 'error', message: `保留方记忆 ${winnerId} 已不在用（已删除、已被取代或定位不到），未做任何删除，待决项 ${entry.id} 保留在账本里。可用 dismiss 清除该条目。` }
   }
 
   const actions: string[] = []

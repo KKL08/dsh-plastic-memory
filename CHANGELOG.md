@@ -222,6 +222,12 @@ All notable changes to this project are documented here. The format follows
 ### Fixed
 - Checkup findings referred to memories by internal ids such as
   `mem_xxx`. Their descriptions now use the memory names.
+- Two checkups running at the same time could list the same conflict twice
+  under "Waiting on you". Ruling the two copies in opposite ways deleted
+  both memories. A conflict is now listed once, copies left by an earlier
+  version are folded into one at the next checkup, and a ruling that deletes
+  a memory is turned down while another ruling on the same pair is in
+  progress or once the memory to keep is no longer in use.
 - Memory files edited outside the plugin (in an editor, by git or by a sync
   tool) did not show up on the Memory page until the plugin itself wrote a
   memory, and editing such a memory on the page failed with "refresh, then

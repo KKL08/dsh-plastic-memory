@@ -6,6 +6,7 @@
  *   {"op":"forget","ids":[...],"reason":"..."}       → executeForget 的结果
  *   {"op":"search","query":"..."}                    → executeSearch 的结果
  *   {"op":"restore","snapshotId":"..."}              → executeSnapshotTool restore 的结果
+ *   {"op":"upsert","pairs":[["mem_a","mem_b"],...]} → 逐对挂账（同体检挂冲突），回 { created, skipped } 计数
  * stdin 关闭后退出，退出码 0。
  */
 import { createInterface } from 'node:readline'
@@ -43,6 +44,7 @@ type Command =
   | { op: 'forget'; ids: string[]; reason: string }
   | { op: 'search'; query: string }
   | { op: 'restore'; snapshotId: string }
+  | { op: 'upsert'; pairs: string[][] }
 
 async function run(cmd: Command): Promise<unknown> {
   switch (cmd.op) {
@@ -52,6 +54,16 @@ async function run(cmd: Command): Promise<unknown> {
       return executeSearch({ query: cmd.query }, fakeExec(), { store, registry, host: { contextOf: async () => ({ workspacePath, session }) } })
     case 'restore':
       return executeSnapshotTool({ action: 'restore', snapshotId: cmd.snapshotId }, { workspacePath }, { store, snapshots })
+    case 'upsert': {
+      let created = 0
+      let skipped = 0
+      for (const memoryIds of cmd.pairs) {
+        const r = await decisions.upsert({ memoryIds, summary: tag, fingerprint: memoryIds.join('|') }, Date.now())
+        if (r.created) created++
+        if (r.isSkipped) skipped++
+      }
+      return { created, skipped }
+    }
   }
 }
 
