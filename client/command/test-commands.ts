@@ -24,6 +24,7 @@ export const SAMPLE_COMMANDS: { [K in MemoryCommand['cmd']]: Extract<MemoryComma
   },
   'model-info': { cmd: 'model-info' },
   'suggest': { cmd: 'suggest', decisionId: 'd1' },
+  'draft-proposal': { cmd: 'draft-proposal', decisionId: 'd1', request: '两者融合', bases: [base, base] },
   'draft-edit': { cmd: 'draft-edit', adviceType: 'bloat', memories: [{ memoryId: 'm1', layer: ws }] },
   'plan-edits': { cmd: 'plan-edits', memories: [{ memoryId: 'm1', layer: ws, base }, { memoryId: 'm2', layer: ws, base }], request: '合成一条' },
   'draft-plan': {

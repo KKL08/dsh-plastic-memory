@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { CROSS_WORKSPACE_COMMANDS, GUI_ERROR_CODES, OPEN_ITEM_COMMANDS, type GuiErrorCode, type MemoryCommand, type MemoryCommandResult } from '../../src/gui/contract.ts'
+import { CROSS_WORKSPACE_COMMANDS, GUI_ERROR_CODES, OPEN_ITEM_COMMANDS, type GuiErrorCode, type MemoryCommand, type MemoryCommandResult, type RequestedProposal } from '../../src/gui/contract.ts'
 import type { LocaleKey } from '../locales.ts'
 import { interpret, refuseBeforeSend, type Outcome } from './protocol.ts'
 import { SAMPLE_COMMANDS } from './test-commands.ts'
 
 const COMMANDS = Object.values(SAMPLE_COMMANDS) as MemoryCommand[]
+/** 按要求生成的融合方案（draft-proposal 回的形状）。 */
+const EDIT_OP = { kind: 'edit', memoryId: 'm1', content: '正文', name: '名称', summary: '摘要', tags: ['标签'] } as const satisfies RequestedProposal['ops'][number]
+const PROPOSAL: RequestedProposal = {
+  action: 'merge', reason: '照你说的', basis: { memories: [{ memoryId: 'm1', fingerprint: 'f1' }, { memoryId: 'm2', fingerprint: 'f2' }] },
+  ops: [{ ...EDIT_OP, tags: [...EDIT_OP.tags] }, { kind: 'forget', memoryId: 'm2' }],
+}
 
 const refusal = (command: MemoryCommand, code: GuiErrorCode, extra: Partial<Extract<MemoryCommandResult, { ok: false }>> = {}): MemoryCommandResult =>
   ({ ok: false, cmd: command.cmd, code, detail: `原话：${code}`, rejected: [{ id: 'm1', workspacePath: '/w/blog' }], ...extra })
@@ -67,6 +73,11 @@ describe('命令往返协议：命令 × 结果码', () => {
     expect(interpret(forget, refusal(forget, 'has-secret'))).toEqual({ kind: 'confirm-secret', resend: { ...forget, cmd: 'hard-delete' } })
     const edit = { ...SAMPLE_COMMANDS['edit-memory'], allowCrossWorkspace: true }
     expect(interpret(edit, refusal(edit, 'secret-suspected'))).toEqual({ kind: 'confirm-suspected', resend: { ...edit, force: true } })
+  })
+
+  it('按要求应用的融合稿像密钥：确认后带 force 重发（采纳建议不确认，照常显示原话）', () => {
+    const apply: MemoryCommand = { cmd: 'apply-proposal', decisionId: 'd1', proposal: PROPOSAL }
+    expect(interpret(apply, refusal(apply, 'secret-suspected'))).toEqual({ kind: 'confirm-suspected', resend: { ...apply, force: true } })
   })
 
   it('stale、not-found 带回服务端列出的 memoryIds（整理所选据此等视图换成最新内容）', () => {
@@ -144,6 +155,32 @@ describe('发出之前拦下', () => {
       expect(refuseBeforeSend(command)).toEqual(local('secret-critical', 'pending.model.secretCritical'))
     }
     expect(refuseBeforeSend({ ...draft, ops: [{ ...op, answer: 'api_key: abc12345' }] })).toBeUndefined()
+  })
+
+  it('补充要求的要求、此前的要求、上一份方案（说明和稿的四个面）任一处含高危密钥：不发，给让模型改的本地文案；疑似的照常发', () => {
+    const draft = SAMPLE_COMMANDS['draft-proposal']
+    const previous = { action: PROPOSAL.action, reason: PROPOSAL.reason, ops: [...PROPOSAL.ops] }
+    const editOf = (changed: { content?: string; name?: string; summary?: string; tags?: string[] }) => ({ ...previous, ops: [{ ...EDIT_OP, tags: [...EDIT_OP.tags], ...changed }, PROPOSAL.ops[1]!] })
+    for (const command of [
+      { ...draft, request: key },
+      { ...draft, priorRequests: ['以 A 为准', key] },
+      { ...draft, previous: { ...previous, reason: key } },
+      { ...draft, previous: editOf({ content: key }) },
+      { ...draft, previous: editOf({ name: key }) },
+      { ...draft, previous: editOf({ summary: key }) },
+      { ...draft, previous: editOf({ tags: [key] }) },
+    ]) {
+      expect(refuseBeforeSend(command)).toEqual(local('secret-critical', 'pending.model.secretCritical'))
+    }
+    expect(refuseBeforeSend({ ...draft, request: '并进 api_key: abc12345', priorRequests: ['以 A 为准'], previous })).toBeUndefined()
+  })
+
+  it('按要求应用的融合稿四个面含高危密钥：不发，给直接改的本地文案；疑似的照常发，等服务端确认', () => {
+    const apply = (changed: { content?: string; name?: string; summary?: string; tags?: string[] }): MemoryCommand => ({ cmd: 'apply-proposal', decisionId: 'd1', proposal: { ...PROPOSAL, ops: [{ ...EDIT_OP, tags: [...EDIT_OP.tags], ...changed }, PROPOSAL.ops[1]!] } })
+    for (const changed of [{ content: key }, { name: key }, { summary: key }, { tags: [key] }]) {
+      expect(refuseBeforeSend(apply(changed))).toEqual(local('secret-critical', 'pending.edit.secretCritical'))
+    }
+    expect(refuseBeforeSend(apply({ content: 'api_key: abc12345' }))).toBeUndefined()
   })
 
   it('其余命令、以及只是像密钥的内容：照常发', () => {

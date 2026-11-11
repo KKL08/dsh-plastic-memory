@@ -31,6 +31,7 @@ import { StatusMarker } from '../ui/StatusMarker.tsx'
 import {
   AdviceCard, adviceTitle, HorizontalCard, ItemIsNew, ItemScopeNames, OverflowCard, PromoteCard, ResultCard, SecretCard, titleOf, UnreadableCard, useCardAction, VerticalCard, type Outcome,
 } from './cards.tsx'
+import { RequestSlotsContext, useRequestSlots } from './proposal.tsx'
 import { BatchSuggesting, isMissingSuggestion, SuggestAll } from './suggestion.tsx'
 
 /** 建议整理先显示的行数，其余收进「展开其余 N 条」；要紧的两组全部显示。 */
@@ -101,6 +102,8 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
   const [expanded, setExpanded] = useState<ReadonlySet<PendingLevel>>(new Set())
   /** 「全部补上」正在给哪一条生成。 */
   const [batchCurrent, setBatchCurrent] = useState<string | undefined>(undefined)
+  /** 横向冲突卡「补充要求」的输入区同一时刻只展开一个。 */
+  const requestSlots = useRequestSlots()
   const root = useRef<HTMLDivElement>(null)
   const revealFocus = useRevealFocus(root)
   const [mountSeen] = useState(readSeen)
@@ -166,7 +169,7 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
       node: (
         <ItemSending.Provider value={onSending}>
           <ItemIsNew.Provider value={isNewRow}>
-            <ItemScopeNames.Provider value={scopeNames(item)}><BatchSuggesting.Provider value={batchCurrent}>{renderCard(item, (outcome) => { done({ item, index, outcome, undone: false }) }, refuse(item, index))}</BatchSuggesting.Provider></ItemScopeNames.Provider>
+            <ItemScopeNames.Provider value={scopeNames(item)}><BatchSuggesting.Provider value={batchCurrent}><RequestSlotsContext.Provider value={requestSlots}>{renderCard(item, (outcome) => { done({ item, index, outcome, undone: false }) }, refuse(item, index))}</RequestSlotsContext.Provider></BatchSuggesting.Provider></ItemScopeNames.Provider>
           </ItemIsNew.Provider>
         </ItemSending.Provider>
       ),

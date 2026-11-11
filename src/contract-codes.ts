@@ -34,7 +34,7 @@ export type GovernanceRejectCode =
 export type DecisionRejectCode =
   | 'claimed'           // 条目正被另一次裁决或体检认领
   | 'not-found'         // 条目不存在：已被裁决，或涉及的记忆已删除
-  | 'stale'             // 采纳处理建议（只有 GUI 会带）：建议已被新的一份替换，或两条在建议生成后被改过
+  | 'stale'             // 落盘处理方案（只有 GUI 会带）：建议已被新的一份替换，或两条在方案生成后被改过
 
 /** memory_confirm accept-subagent 什么都没动的原因（tools/confirm.ts）。 */
 export type AcceptRejectCode =
@@ -96,6 +96,7 @@ export function verdictOfAction(action: ProposalAction): 'keep-left' | 'keep-rig
  * 用户直接点候选项处理的不记。
  */
 export const PROPOSAL_SOURCES = ['suggestion', 'request'] as const
+export type ProposalSource = (typeof PROPOSAL_SOURCES)[number]
 
 /**
  * 处理建议没生成成的原因（账本与视图同用）：model-error = 模型调用出错（宿主给了错误码时带上；鉴权错误不留原话），

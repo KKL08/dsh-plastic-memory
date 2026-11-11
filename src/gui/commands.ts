@@ -12,11 +12,11 @@ import { computeDigest } from '../storage/frontmatter.ts'
 import { candidateFingerprint, conflictFingerprint, isBasisCurrent, suggestionBasis, type MisplacedIgnore, type PendingDecisionsStore } from '../governance/decisions.ts'
 import { isModelChange } from '../governance/undo-rules.ts'
 import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
-import { genId, kindOf, type MemorySnapshot, type PendingDecision, type ScanCacheEntry, type SnapshotRecord } from '../governance/schema.ts'
+import { genId, kindOf, type MemorySnapshot, type PendingDecision, type ProposalOp, type ScanCacheEntry, type SnapshotRecord, type SuggestionBasis } from '../governance/schema.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
-import { executeConfirm } from '../tools/confirm.ts'
+import { executeConfirm, type ConfirmOptions } from '../tools/confirm.ts'
 import { executeForget } from '../tools/forget.ts'
 import { executePromote } from '../tools/promote.ts'
 import { executeUndo, restoreDeleted, type UndoResult } from '../tools/undo.ts'
@@ -25,11 +25,11 @@ import {
 } from '../tools/workspace-gate.ts'
 import {
   GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, VIEW_BEHIND_CODES, mergeKeeperIndex, parseMemoryCommand, sessionViewFile, verdictOfAction,
-  type ApplyEditOp, type DraftPlanOp, type GuiErrorCode, type MemoryCommand, type MemoryCommandResult,
+  type ApplyEditOp, type DraftPlanOp, type GuiErrorCode, type MemoryCommand, type MemoryCommandResult, type ProposalSource, type RequestedProposal,
 } from './contract.ts'
 import type { ViewWriter } from './view-writer.ts'
 import { generateDraft } from './model-draft.ts'
-import { generateSuggestion } from './model-suggestion.ts'
+import { generateProposal, generateSuggestion } from './model-suggestion.ts'
 import { readSuggestionSources } from './suggestion-source.ts'
 import type { ReadEventFn } from '../tools/source.ts'
 import { generatePlan } from './model-plan.ts'
@@ -102,10 +102,10 @@ export interface MemoryCommandDefinition {
  *  refresh-views 不受开关影响，撤销直接改、直接合并、模型改写与替代的 undo 也不受（见 isEditUndo）。 */
 // dismiss-overflow 不在此列：超限提醒在体检关闭时照样入账，忽略它不属于治理动作；
 // ignore-advice / unignore-advice 同理：规则类建议在体检关闭时照样列出，忽略只是用户的处置
-const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'apply-proposal', 'undo', 'promote', 'promote-memory', 'move-memory', 'keep-local', 'keep-local-memory', 'scan', 'suggest'])
+const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'apply-proposal', 'undo', 'promote', 'promote-memory', 'move-memory', 'keep-local', 'keep-local-memory', 'scan', 'suggest', 'draft-proposal'])
 
 /** 不写任何东西的子命令：成功后也不重写视图。 */
-const READ_ONLY_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['draft-edit', 'plan-edits', 'draft-plan'])
+const READ_ONLY_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['draft-edit', 'plan-edits', 'draft-plan', 'draft-proposal'])
 
 /** 自己写视图的子命令：成功后不再按常规重写全部视图。 */
 const SELF_WRITING_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['scan', 'refresh-views', 'set-auto-checkup'])
@@ -185,6 +185,21 @@ async function isEditUndo(decisions: PendingDecisionsStore, command: MemoryComma
 /** 记忆和卡片加载时的版本对不上：updatedAt 变了（插件写过），或名称、摘要、正文的摘要变了（手改过文件）。 */
 function isStale(r: MemoryRecord, base: { updatedAt: number; digest: string }): boolean {
   return r.updatedAt !== base.updatedAt || computeDigest(r.name, r.summary, r.content) !== base.digest
+}
+
+/** 保留一方、都保留时每条记忆的操作，按条目的记忆顺序（A、B）。 */
+const KEEP_OPS = { 'keep-a': ['keep', 'forget'], 'keep-b': ['forget', 'keep'], 'keep-both': ['keep', 'keep'] } as const
+
+/**
+ * 界面带回来的按要求生成的方案，操作和结论对得上：每条记忆恰好一项、按条目顺序；保留一方、都保留按 KEEP_OPS，
+ * 融合是一条改写（正文、名称不空）加一条删除。保留方是不是合并规则选的那条，要读到记忆才知道，写入前另查。
+ */
+function isProposalShaped(proposal: Pick<RequestedProposal, 'action' | 'ops'>, memoryIds: readonly string[]): boolean {
+  const { action, ops } = proposal
+  if (ops.length !== memoryIds.length || ops.some((op, i) => op.memoryId !== memoryIds[i])) return false
+  const kinds = ops.map(op => op.kind)
+  if (action !== 'merge') return kinds.join() === KEEP_OPS[action].join()
+  return [...kinds].sort().join() === 'edit,forget' && ops.every(op => op.kind !== 'edit' || (op.content.trim() !== '' && op.name.trim() !== ''))
 }
 
 /**
@@ -512,13 +527,14 @@ async function dispatch(
    * 记了快照的带 snapshotId 供撤销。
    */
   const resolveConflict = async (
-    decisionId: string, verdict: 'keep-left' | 'keep-right' | 'keep-both', allowCrossWorkspace: boolean | undefined, adopt?: { suggestionId: string; memoryIds: string[] },
+    decisionId: string, verdict: 'keep-left' | 'keep-right' | 'keep-both', allowCrossWorkspace: boolean | undefined,
+    adopt?: { basis: NonNullable<ConfirmOptions['adopt']>; memoryIds: string[] },
   ): Promise<MemoryCommandResult> => {
     // 升级前导入的垂直冲突没有指纹，两边都留时要按基线现算
     const baseline = deps.host.baselineOf(exec)
     const r = await executeConfirm(
       { action: 'resolve', decisionId, verdict, allowCrossWorkspace },
-      gov, executorDeps, { ...(baseline !== null ? { baseline } : {}), ...(adopt !== undefined ? { adopt: { suggestionId: adopt.suggestionId } } : {}) },
+      gov, executorDeps, { ...(baseline !== null ? { baseline } : {}), ...(adopt !== undefined ? { adopt: adopt.basis } : {}) },
     )
     if (r.kind === 'error') {
       if (r.code === 'cross-workspace') return fail(cmd, 'cross-workspace', r.message, r.rejected)
@@ -531,51 +547,59 @@ async function dispatch(
     return { ok: true, cmd, decisionId, ...(snapshotId !== undefined ? { snapshotId } : {}) }
   }
 
-  // —— 采纳融合建议（票 06）——
+  // —— 采纳融合建议（票 06）、按要求融合（票 07）——
+
+  /**
+   * 融合要落盘的方案：来源、逐条操作、依据版本；按要求的方案带用户对疑似密钥的确认（force）。
+   * 采纳建议时由认领后重读的条目给出（建议已换了一份或不是融合为 undefined，按依据失效算）。
+   */
+  type MergePlan = { source: ProposalSource; ops: readonly ProposalOp[]; basis: SuggestionBasis; force?: boolean | undefined }
 
   /**
    * 先认领条目、再认领冲突身份（同要删一方的裁决），和裁决、撤销、体检挂账、另一个标签页的采纳互斥；认领后重读条目再动手。
    */
-  const adoptMerge = async (decisionId: string, suggestionId: string, allowCrossWorkspace: boolean | undefined): Promise<MemoryCommandResult> => {
+  const adoptMerge = async (decisionId: string, planOf: (entry: PendingDecision) => MergePlan | undefined, allowCrossWorkspace: boolean | undefined): Promise<MemoryCommandResult> => {
     const claimed = await deps.decisions.withClaim(decisionId, async () => {
       const entry = await deps.decisions.get(decisionId)
       if (entry === undefined) return notFound(decisionId)
-      const paired = await deps.decisions.withPairClaim(entry, () => mergeClaimed(entry, suggestionId, allowCrossWorkspace))
+      const paired = await deps.decisions.withPairClaim(entry, () => mergeClaimed(entry, planOf(entry), allowCrossWorkspace))
       return paired.isClaimed ? paired.value : fail(cmd, 'claimed', `待决项 ${entry.id} 的这一对记忆正在被另一次操作处理，未做任何改动`)
     })
     return claimed.isClaimed ? claimed.value : fail(cmd, 'claimed', `待决项 ${decisionId} 正在被另一次操作处理，未做任何改动`)
   }
 
   /**
-   * 持有认领时采纳融合：核对建议 id 和依据（冲突指纹、两条的完整内容指纹和作用域键），保留方改写成融合稿、另一条软删，
+   * 持有认领时融合：核对方案还在（采纳建议时建议 id 一致）和依据（冲突指纹、两条的完整内容指纹和作用域键），保留方改写成融合稿、另一条软删，
    * 用整理所选的逐项执行（写入那一刻锁内按依据里的指纹再比一次）。整批一份快照。结账自己做（plan-applied，见 settleMerge）；
    * 某一项没写成时同整理所选：已写的按写入记录条件回退，没退干净的仍是这次写下的照常记一笔可撤销的账，别处接着改过的列进 unrecordedIds，
    * 冲突条目不结清。允许全局与项目之间的冲突（写进哪条由生成建议时的合并规则定）。
    */
-  const mergeClaimed = async (entry: PendingDecision, suggestionId: string, allowCrossWorkspace: boolean | undefined): Promise<MemoryCommandResult> => {
-    const stale = () => behind('stale', entry.memoryIds, '这两条刚被改过或建议已换了一份，建议已失效。未做任何改动')
-    const { suggestion } = entry
-    if (suggestion === undefined || suggestion.id !== suggestionId || suggestion.action !== 'merge') return stale()
+  const mergeClaimed = async (entry: PendingDecision, plan: MergePlan | undefined, allowCrossWorkspace: boolean | undefined): Promise<MemoryCommandResult> => {
+    const stale = () => behind('stale', entry.memoryIds, plan?.source === 'request'
+      ? '这两条在方案生成后被改过，处理方案已失效。未做任何改动'
+      : '这两条刚被改过或建议已换了一份，建议已失效。未做任何改动')
+    if (plan === undefined) return stale()
     // 同裁决的定位口径；不在用的按对不上算
     const located = await Promise.all(entry.memoryIds.map(id => locate(id, undefined)))
     const live = located.map(r => (r?.status === 'active' ? r : undefined))
-    if (!isBasisCurrent(entry, suggestion.basis, live)) return stale()
+    if (!isBasisCurrent(entry, plan.basis, live)) return stale()
     const records = live as MemoryRecord[]
-    const edit = suggestion.ops.find(op => op.kind === 'edit')
+    const edit = plan.ops.find(op => op.kind === 'edit')
     const keeper = records.find(r => r.id === edit?.memoryId)
-    const loser = records.find(r => r.id !== keeper?.id && suggestion.ops.some(op => op.kind === 'forget' && op.memoryId === r.id))
-    if (edit?.kind !== 'edit' || keeper === undefined || loser === undefined) {
-      return fail(cmd, 'invalid-args', `待决项 ${entry.id} 的融合建议不是一条改写加一条删除，未做任何改动`)
+    const loser = records.find(r => r.id !== keeper?.id && plan.ops.some(op => op.kind === 'forget' && op.memoryId === r.id))
+    // 写进哪条按合并规则定（全局优先，其次先建的）：界面带回来的方案也不能把融合稿写到另一条上
+    if (edit?.kind !== 'edit' || keeper === undefined || loser === undefined || records[mergeKeeperIndex(records as [MemoryRecord, MemoryRecord])] !== keeper) {
+      return fail(cmd, 'invalid-args', `待决项 ${entry.id} 的融合方案不是保留方一条改写加另一条删除，未做任何改动`)
     }
     const { rejected } = gateRecords(records, gov, allowCrossWorkspace)
     if (rejected.length > 0) return fail(cmd, 'cross-workspace', crossWorkspaceNote(rejected, []), rejected)
-    // 存盘时已保证稿里的疑似值都出自原文，采纳不再等确认；高危照拦
-    const secretProblem = editSecretsProblem([edit], true)
+    // 建议存盘时已保证稿里的疑似值都出自原文，采纳不再等确认；按要求的稿等用户确认（force）。高危照拦
+    const secretProblem = editSecretsProblem([edit], plan.source === 'suggestion' ? true : plan.force)
     if (secretProblem !== undefined) return secretProblem
 
-    const snapshot = await deps.snapshots.capture({ operation: 'pre-update', description: `采纳融合建议（${entry.id}）前`, records }, now)
+    const snapshot = await deps.snapshots.capture({ operation: 'pre-update', description: `${plan.source === 'request' ? '按要求融合' : '采纳融合建议'}（${entry.id}）前`, records }, now)
     // 锁内比的是依据里的完整内容指纹：只改了摘要、标签的也挡下
-    const basisOf = (id: string) => suggestion.basis.memories.find(m => m.memoryId === id)?.fingerprint
+    const basisOf = (id: string) => plan.basis.memories.find(m => m.memoryId === id)?.fingerprint
     const isChanged = (cur: MemoryRecord) => cur.status !== 'active' || editFingerprint(cur) !== basisOf(cur.id)
     const { writes, failure } = await writeBatch([
       { record: keeper, op: edit, isChanged },
@@ -584,7 +608,7 @@ async function dispatch(
     ], deps.store, now)
     let left: { kept: BatchWrite[]; unrecorded: string[] }
     if (failure === undefined) {
-      const unsettled = await settleMerge(entry, writes, snapshot)
+      const unsettled = await settleMerge(entry, plan.source, writes, snapshot)
       if (unsettled === undefined) return { ok: true, cmd, decisionId: entry.id, memoryIds: writes.map(w => w.memoryId), snapshotId: snapshot.id }
       left = unsettled
     } else {
@@ -611,12 +635,12 @@ async function dispatch(
    * （彻底删除的连带清理可能正好落在结清的读写之间）。任一步抛错时按快照 id 重读账本：已结清就算记上了；没有就把两条按快照退回，
    * 退干净了把错误抛出去，没退干净的交回调用方如实报「部分完成」。结清了返回 undefined。
    */
-  const settleMerge = async (entry: PendingDecision, writes: readonly BatchWrite[], snapshot: MemorySnapshot): Promise<{ kept: BatchWrite[]; unrecorded: string[] } | undefined> => {
+  const settleMerge = async (entry: PendingDecision, source: ProposalSource, writes: readonly BatchWrite[], snapshot: MemorySnapshot): Promise<{ kept: BatchWrite[]; unrecorded: string[] } | undefined> => {
     try {
       const written = new Map(writes.map(w => [w.memoryId, w.written!]))
       const isSettled = await deps.decisions.settlePlan(entry.id, {
         writes: writes.map(w => ({ memoryId: w.memoryId, op: w.op, written: w.written! })),
-        proposal: { source: 'suggestion', action: 'merge' }, snapshotId: snapshot.id,
+        proposal: { source, action: 'merge' }, snapshotId: snapshot.id,
         fingerprint: conflictFingerprint(entry.memoryIds.map(id => written.get(id)!)),
       }, now)
       if (!isSettled) throw new Error(`待决项 ${entry.id} 已不在待处理，这次融合没有记上`)
@@ -648,13 +672,28 @@ async function dispatch(
       if (kindOf(entry) !== 'conflict' || entry.baselineRef !== undefined || entry.memoryIds.length !== 2) {
         return fail(cmd, 'invalid-args', `待决项 ${entry.id} 不是两条记忆的横向冲突，没有可采纳的建议`)
       }
+      const { proposal } = command
+      if (proposal !== undefined) {
+        // 按要求生成的方案由界面带回：先查操作和结论对得上，落盘时按带回的依据版本核对（认领后、锁内各一次）
+        if (!isProposalShaped(proposal, entry.memoryIds)) return fail(cmd, 'invalid-args', `处理方案的操作和结论对不上（${proposal.action}），未做任何改动`)
+        const verdict = verdictOfAction(proposal.action)
+        if (verdict === undefined) {
+          return await adoptMerge(entry.id, () => ({ source: 'request', ops: proposal.ops, basis: proposal.basis, force: command.force }), command.allowCrossWorkspace)
+        }
+        return await resolveConflict(entry.id, verdict, command.allowCrossWorkspace, { basis: { request: { action: proposal.action, basis: proposal.basis } }, memoryIds: entry.memoryIds })
+      }
       const { suggestion } = entry
       const stale = () => behind('stale', entry.memoryIds, '这两条刚被改过或建议已换了一份，建议已失效。未做任何改动')
       if (suggestion === undefined || suggestion.id !== command.suggestionId) return stale()
       // 结论按账本上这一份定，不信界面；认领条目后执行器再核对一次 id 和依据
       const verdict = verdictOfAction(suggestion.action)
-      if (verdict === undefined) return await adoptMerge(entry.id, suggestion.id, command.allowCrossWorkspace)
-      return await resolveConflict(entry.id, verdict, command.allowCrossWorkspace, { suggestionId: suggestion.id, memoryIds: entry.memoryIds })
+      if (verdict === undefined) {
+        const suggestionId = suggestion.id
+        return await adoptMerge(entry.id, current => (current.suggestion?.id === suggestionId && current.suggestion.action === 'merge'
+          ? { source: 'suggestion', ops: current.suggestion.ops, basis: current.suggestion.basis }
+          : undefined), command.allowCrossWorkspace)
+      }
+      return await resolveConflict(entry.id, verdict, command.allowCrossWorkspace, { basis: { suggestionId: suggestion.id }, memoryIds: entry.memoryIds })
     }
 
     case 'undo':
@@ -1144,6 +1183,53 @@ async function dispatch(
       const { cause } = generated
       if (cause.kind === 'model-error') return fail(cmd, 'llm-failed', cause.message ?? cause.hostCode)
       return fail(cmd, 'llm-invalid-output', cause.kind === 'secret-in-draft' ? '模型给的稿里带进了原文没有的密钥，这份建议已丢弃' : '模型的输出不是要求的 JSON 格式')
+    }
+
+    case 'draft-proposal': {
+      const entry = await deps.decisions.get(command.decisionId)
+      if (entry === undefined) return notFound(command.decisionId)
+      if (kindOf(entry) !== 'conflict' || entry.baselineRef !== undefined || entry.memoryIds.length !== 2) {
+        return fail(cmd, 'invalid-args', `待决项 ${entry.id} 不是两条记忆的横向冲突，没法按要求生成处理方案`)
+      }
+      // 同裁决的定位口径；生成完按同一口径重读核对
+      const read = (id: string) => locate(id, undefined)
+      const records = await Promise.all(entry.memoryIds.map(read))
+      const gone = entry.memoryIds.filter((_, i) => records[i]?.status !== 'active')
+      if (gone.length > 0) return behind('not-found', gone, `不存在或已处理：${gone.join('、')}`)
+      const pair = records as [MemoryRecord, MemoryRecord]
+      // 用户写要求时看的是卡片上那一版：对不上就让界面先换成最新内容，再按新内容写要求
+      const staleIds = entry.memoryIds.filter((_, i) => isStale(pair[i]!, command.bases[i]!))
+      if (staleIds.length > 0) return behind('stale', staleIds, '有记忆刚被改过，界面已换成最新内容。没有生成方案')
+      // 高危密钥的原文不发给模型：记忆、要求、此前的要求、上一份方案（含它的稿）都查
+      if (pair.some(r => hasCriticalSecret(r))) return fail(cmd, 'has-secret', '含密钥的记忆不发给模型。未做任何改动')
+      const previousText = command.previous === undefined ? [] : [
+        command.previous.reason, ...command.previous.ops.flatMap(op => (op.kind === 'edit' ? [op.content, op.name, op.summary, ...op.tags] : [])),
+      ]
+      if (detectSecrets([command.request, ...(command.priorRequests ?? []), ...previousText].join('\n')).some(h => h.severity === 'critical')) {
+        return fail(cmd, 'secret-critical', '要求或上一份方案里有高危密钥，没有发给模型')
+      }
+      const llm = deps.host.llmOf(exec)
+      if (llm === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型')
+      // 只读、不认领：模型调用可能超过认领的 60 秒；依据版本按生成前读到的算，应用时认领、重读、核对它
+      const basis = suggestionBasis(entry, pair)
+      const [sourceA, sourceB] = await readSuggestionSources({ workspaces: entry.workspaces, records: pair }, deps.getReadEvent?.() ?? null)
+      const generated = await generateProposal({
+        summary: entry.summary, records: pair, sources: [sourceA, sourceB],
+        request: { text: command.request, prior: command.priorRequests ?? [], ...(command.previous !== undefined ? { previous: command.previous } : {}) },
+      }, llm)
+      if (!generated.ok) {
+        const { cause } = generated
+        if (cause.kind === 'model-error') return fail(cmd, 'llm-failed', cause.message ?? cause.hostCode)
+        return fail(cmd, 'llm-invalid-output', '模型的输出不是要求的 JSON 格式')
+      }
+      // 生成期间两条被改过（只改了摘要、标签也算）：这一份按旧内容出的，丢弃
+      const after = await Promise.all(entry.memoryIds.map(read))
+      if (!isBasisCurrent(entry, basis, after.map(r => (r?.status === 'active' ? r : undefined)))) {
+        return behind('stale', entry.memoryIds, '这两条在生成期间被改过，界面已换成最新内容；这份方案已丢弃')
+      }
+      const model = llm.model !== undefined ? { model: llm.model } : {}
+      if (generated.action === 'infeasible') return { ok: true, cmd, ...model, infeasible: { reason: generated.reason } }
+      return { ok: true, cmd, ...model, proposal: { action: generated.action, reason: generated.reason, ops: generated.ops, basis } }
     }
 
     case 'refresh-views':

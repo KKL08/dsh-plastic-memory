@@ -5724,3 +5724,293 @@ describe('apply-proposal（采纳融合建议：保留方改写成融合稿，�
     expect(await allEntries(e)).toEqual([])
   })
 })
+
+describe('draft-proposal 与按要求应用（补充要求）', () => {
+  const LATER = NOW + 1000
+  const DRAFT = { content: '前端仓用 pnpm，脚本仓用 npm', summary: '按仓库选包管理器', name: '包管理器按仓库选', tags: ['包管理器'] }
+  function scripted(...answers: Array<string | Error | (() => Promise<string>)>) {
+    const prompts: Array<{ system: string; user: string }> = []
+    const llm: SemanticLlm = {
+      model: 'deepseek-v4-flash',
+      complete: async (prompt) => {
+        prompts.push(prompt)
+        const next = answers.shift() ?? ''
+        if (next instanceof Error) throw next
+        return typeof next === 'function' ? next() : next
+      },
+    }
+    return { llm, prompts }
+  }
+  const said = (action: string, extra: object = {}) => JSON.stringify({ action, reason: `照你说的 ${action}`, ...extra })
+  const MERGED = said('merge', { draft: DRAFT })
+  /** 卡片上那一份的版本（同 MemoryCard 的 updatedAt、digest）。 */
+  const baseOf = (r: MemoryRecord) => ({ updatedAt: r.updatedAt, digest: computeDigest(r.name, r.summary, r.content) })
+  const basesOf = async (e: ReturnType<typeof env>) => {
+    const [a, b] = [(await e.store.get('mem_a'))!, (await e.store.get('mem_b'))!]
+    return [baseOf(a), baseOf(b)] as [ReturnType<typeof baseOf>, ReturnType<typeof baseOf>]
+  }
+  /** 一对冲突，条目带真实冲突指纹。 */
+  async function seeded(opts: EnvOpts = {}) {
+    const e = env(opts)
+    await seedPair(e)
+    const pair = [(await e.store.get('mem_a'))!, (await e.store.get('mem_b'))!]
+    const { entry } = await e.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', fingerprint: conflictFingerprint(pair) }, 2)
+    return { e, entry }
+  }
+  const draft = async (e: ReturnType<typeof env>, decisionId: string, extra: Partial<Extract<MemoryCommand, { cmd: 'draft-proposal' }>> = {}) =>
+    e.run({ cmd: 'draft-proposal', decisionId, request: '两者融合', bases: await basesOf(e), ...extra })
+  /** 生成一份方案，交回给应用。 */
+  async function drafted(answer: string, opts: EnvOpts = {}) {
+    const { e, entry } = await seeded({ llm: scripted(answer).llm, ...opts })
+    const proposal = ok(await draft(e, entry.id)).proposal!
+    return { e, entry, proposal }
+  }
+  const statuses = async (e: ReturnType<typeof env>) => [(await e.store.get('mem_a'))!.status, (await e.store.get('mem_b'))!.status]
+  const files = async (e: ReturnType<typeof env>) => Promise.all(['mem_a', 'mem_b'].map(async id => {
+    const located = await e.store.locate(id, { kind: 'global' })
+    return located === undefined ? undefined : [located.filePath, await readFile(located.filePath, 'utf8')]
+  }))
+
+  describe('draft-proposal：只读，按要求回一份方案或做不到', () => {
+    it('回方案（结论、说明、逐条操作、依据版本）和模型名；不写账本、不写记忆、不拍快照，不重写视图', async () => {
+      const { llm, prompts } = scripted(MERGED)
+      const { e, entry } = await seeded({ llm })
+      const views = await e.readView('pending').catch(() => undefined)
+      const body = ok(await draft(e, entry.id))
+      const [a, b] = [(await e.store.get('mem_a'))!, (await e.store.get('mem_b'))!]
+      expect(body).toEqual({
+        ok: true, cmd: 'draft-proposal', model: 'deepseek-v4-flash',
+        proposal: {
+          action: 'merge', reason: '照你说的 merge',
+          ops: [{ kind: 'edit', memoryId: 'mem_a', ...DRAFT }, { kind: 'forget', memoryId: 'mem_b' }],
+          basis: { conflictFingerprint: entry.fingerprint, memories: suggestionBasis(entry, [a, b]).memories },
+        },
+      })
+      expect(body.proposal!.basis.memories.map(m => m.fingerprint)).toEqual([editFingerprint(a), editFingerprint(b)])
+      expect(prompts).toHaveLength(1)
+      expect(prompts[0]!.user).toContain('## 用户的要求\n两者融合')
+      expect(await e.decisions.get(entry.id)).toEqual(entry)
+      expect(await e.decisions.listSettled()).toEqual([])
+      expect(await e.snapshots.list()).toEqual([])
+      expect(await statuses(e)).toEqual(['active', 'active'])
+      expect(await e.readView('pending').catch(() => undefined)).toEqual(views)
+    })
+
+    it('改要求：此前的要求、上一份方案一起给模型（上一份方案只作参照）', async () => {
+      const { llm, prompts } = scripted(MERGED)
+      const { e, entry } = await seeded({ llm })
+      const previous = { action: 'keep-a' as const, reason: '以 A 为准', ops: [{ kind: 'keep' as const, memoryId: 'mem_a' }, { kind: 'forget' as const, memoryId: 'mem_b' }] }
+      ok(await draft(e, entry.id, { request: '还是融合吧', priorRequests: ['以 A 为准'], previous }))
+      expect(prompts[0]!.user).toContain('## 此前的要求（按先后排列）\n1. 以 A 为准')
+      expect(prompts[0]!.user).toContain('## 用户的要求\n还是融合吧')
+      expect(prompts[0]!.user).toContain('## 上一份方案\n{\n  "action": "keep-a"')
+      expect(prompts[0]!.system).toContain('上一份方案只是参照')
+    })
+
+    it('做不到：回 infeasible 只带一句说明（遮疑似密钥），没有方案', async () => {
+      const { e, entry } = await seeded({ llm: scripted(JSON.stringify({ action: 'infeasible', reason: '两条里都没有端口号，password: abc12345x' })).llm })
+      expect(ok(await draft(e, entry.id, { request: '把端口号并进来' }))).toEqual({
+        ok: true, cmd: 'draft-proposal', model: 'deepseek-v4-flash', infeasible: { reason: '两条里都没有端口号，[已隐藏]' },
+      })
+    })
+
+    it('模型调用不在认领里：生成期间别处能认领这一条', async () => {
+      let e!: ReturnType<typeof env>
+      let isClaimedElsewhere = false
+      const { llm } = scripted(async () => {
+        isClaimedElsewhere = (await e.decisions.withClaim((await e.decisions.list())[0]!.id, async () => undefined)).isClaimed
+        return MERGED
+      })
+      e = (await seeded({ llm })).e
+      ok(await draft(e, (await e.decisions.list())[0]!.id))
+      expect(isClaimedElsewhere).toBe(true)
+    })
+
+    it.each([
+      ['要求', { request: `融合，token ${FAKE_SECRET.github}` }],
+      ['此前的要求', { priorRequests: [`token ${FAKE_SECRET.github}`] }],
+      ['上一份方案', { previous: { action: 'merge' as const, reason: 'r', ops: [{ kind: 'edit' as const, memoryId: 'mem_a', content: `token ${FAKE_SECRET.github}`, name: 'n', summary: 's', tags: [] }, { kind: 'forget' as const, memoryId: 'mem_b' }] } }],
+    ])('%s含高危密钥：回 secret-critical，不发给模型', async (_label, extra) => {
+      const { llm, prompts } = scripted(MERGED)
+      const { e, entry } = await seeded({ llm })
+      expect(err(await draft(e, entry.id, extra)).code).toBe('secret-critical')
+      expect(prompts).toEqual([])
+    })
+
+    it('任一条含高危密钥：回 has-secret，不发给模型', async () => {
+      const { llm, prompts } = scripted(MERGED)
+      const { e, entry } = await seeded({ llm })
+      await e.store.update({ id: 'mem_b' }, r => ({ ...r, content: `用 npm，token ${FAKE_SECRET.github}` }))
+      expect(err(await draft(e, entry.id)).code).toBe('has-secret')
+      expect(prompts).toEqual([])
+    })
+
+    it('卡片版本对不上：回 stale 带两条的 id，不发给模型；生成期间被改过（只改了标签）也回 stale，这一份丢弃', async () => {
+      const { llm, prompts } = scripted(MERGED)
+      const { e, entry } = await seeded({ llm })
+      const bases = await basesOf(e)
+      await e.store.update({ id: 'mem_b' }, r => ({ ...r, content: '别处改了', updatedAt: 5 }))
+      expect(err(await e.run({ cmd: 'draft-proposal', decisionId: entry.id, request: '融合', bases }))).toMatchObject({ code: 'stale', memoryIds: ['mem_b'] })
+      expect(prompts).toEqual([])
+
+      let racing!: ReturnType<typeof env>
+      const during = scripted(async () => {
+        await racing.store.update({ id: 'mem_b' }, r => ({ ...r, tags: ['别处加的'] }))
+        return MERGED
+      })
+      await rm(root, { recursive: true, force: true })
+      root = await mkdtemp(join(tmpdir(), 'pm-gui-commands-'))
+      const second = await seeded({ llm: during.llm })
+      racing = second.e
+      expect(err(await draft(second.e, second.entry.id))).toMatchObject({ code: 'stale', memoryIds: ['mem_a', 'mem_b'] })
+    })
+
+    it('条目不在、不是横向冲突、一方已不在用：not-found / invalid-args / not-found 带记忆 id', async () => {
+      const { llm, prompts } = scripted(MERGED)
+      const { e, entry } = await seeded({ llm })
+      const bases = await basesOf(e)
+      expect(err(await e.run({ cmd: 'draft-proposal', decisionId: 'pd_ghost', request: '融合', bases })).code).toBe('not-found')
+      await e.store.create(record({ id: 'mem_v', content: '用 npm' }))
+      const vertical = (await e.decisions.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：用 pnpm', summary: 'v', fingerprint: 'fp-v' }, 1)).entry
+      expect(err(await e.run({ cmd: 'draft-proposal', decisionId: vertical.id, request: '融合', bases })).code).toBe('invalid-args')
+      await e.store.update({ id: 'mem_b' }, r => ({ ...r, status: 'deleted', deletedAt: NOW }))
+      expect(err(await e.run({ cmd: 'draft-proposal', decisionId: entry.id, request: '融合', bases }))).toMatchObject({ code: 'not-found', memoryIds: ['mem_b'] })
+      expect(prompts).toEqual([])
+    })
+
+    it('拿不到模型：llm-unavailable；模型报错：原话脱敏回 llm-failed；输出不合格式：llm-invalid-output。都不写账本', async () => {
+      const none = await seeded({ llm: null })
+      expect(err(await draft(none.e, none.entry.id)).code).toBe('llm-unavailable')
+      await rm(root, { recursive: true, force: true })
+      root = await mkdtemp(join(tmpdir(), 'pm-gui-commands-'))
+      const { e, entry } = await seeded({ llm: scripted(new Error(`upstream said ${FAKE_SECRET.sk}`), '不是 JSON').llm })
+      expect(err(await draft(e, entry.id))).toMatchObject({ code: 'llm-failed', detail: 'upstream said [已隐藏]' })
+      expect(err(await draft(e, entry.id)).code).toBe('llm-invalid-output')
+      expect(await e.decisions.get(entry.id)).toEqual(entry)
+    })
+
+    it('治理开关关着、子 agent 会话：拒绝，不调用模型', async () => {
+      for (const opts of [{ governanceEnabled: false }, { delegationDepth: 1 }]) {
+        const { llm, prompts } = scripted(MERGED)
+        const { e, entry } = await seeded({ llm, ...opts })
+        expect(err(await draft(e, entry.id)).code).toBe('governanceEnabled' in opts ? 'governance-disabled' : 'subagent-readonly')
+        expect(prompts).toEqual([])
+        await rm(root, { recursive: true, force: true })
+        root = await mkdtemp(join(tmpdir(), 'pm-gui-commands-'))
+      }
+    })
+
+    it('回查出处：读得到的出处一起给模型', async () => {
+      const { llm, prompts } = scripted(MERGED)
+      const readEvent: ReadEventFn = async ({ sessionId }) => ({
+        session: { id: sessionId, cwd: SESSION_WS },
+        events: [{ type: 'user/message', seq: 1, data: { id: 'u1', role: 'user', content: [{ type: 'text', text: '前端仓库用 pnpm' }], source: { kind: 'user' } } }],
+      })
+      const e = env({ llm, readEvent })
+      const source = { sessionId: 'sess-a', eventRange: [0, 4] as [number, number], sourceMode: 'user-explicit' as const }
+      await e.store.create(record({ id: 'mem_a', name: '甲', content: '用 pnpm', scope: 'workspace', workspacePath: SESSION_WS, source }))
+      await e.store.create(record({ id: 'mem_b', name: '乙', content: '用 npm', scope: 'workspace', workspacePath: SESSION_WS }))
+      const { entry } = await e.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', workspaces: [SESSION_WS, SESSION_WS], fingerprint: 'fp-ab' }, 1)
+      ok(await e.run({ cmd: 'draft-proposal', decisionId: entry.id, request: '融合', bases: [baseOf((await e.store.get('mem_a', { workspacePath: SESSION_WS }))!), baseOf((await e.store.get('mem_b', { workspacePath: SESSION_WS }))!)] }))
+      expect(prompts[0]!.user).toContain('## 记忆 A 的出处')
+      expect(prompts[0]!.user).toContain('前端仓库用 pnpm')
+    })
+  })
+
+  describe('apply-proposal 带按要求生成的方案', () => {
+    it('保留 A：B 软删，条目记删一方裁决、来源 request；撤销后 B 回来、条目回到待处理', async () => {
+      const { e, entry, proposal } = await drafted(said('keep-a'))
+      const body = ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal }))
+      const [snap] = await e.snapshots.list()
+      expect(body).toEqual({ ok: true, cmd: 'apply-proposal', decisionId: entry.id, snapshotId: snap!.id })
+      expect(await statuses(e)).toEqual(['active', 'deleted'])
+      expect((await e.decisions.listSettled()).map(d => d.settled)).toEqual([
+        { verdict: 'keep-left', at: NOW, snapshotId: snap!.id, proposal: { source: 'request', action: 'keep-a' } },
+      ])
+      ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+      expect(await statuses(e)).toEqual(['active', 'active'])
+      expect((await e.decisions.list()).map(d => d.id)).toEqual([entry.id])
+    })
+
+    it('都保留：记都保留裁决、来源 request，不拍快照', async () => {
+      const { e, entry, proposal } = await drafted(said('keep-both'))
+      ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal }))
+      expect((await e.decisions.listSettled()).map(d => d.settled)).toEqual([{ verdict: 'keep-both', at: NOW, proposal: { source: 'request', action: 'keep-both' } }])
+      expect(await e.snapshots.list()).toEqual([])
+    })
+
+    it('融合：保留方改写成融合稿、另一条软删，结清为 plan-applied、来源 request；撤销后两条逐字节恢复', async () => {
+      const { e, entry, proposal } = await drafted(MERGED)
+      const before = await files(e)
+      e.clock.now = LATER
+      const body = ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal }))
+      expect(body).toMatchObject({ ok: true, decisionId: entry.id, memoryIds: ['mem_a', 'mem_b'] })
+      expect(await e.store.get('mem_a')).toMatchObject({ ...DRAFT, status: 'active', handEdited: true })
+      expect((await e.store.get('mem_b'))!.status).toBe('deleted')
+      expect((await e.decisions.listSettled())[0]!.settled).toMatchObject({ verdict: 'plan-applied', proposal: { source: 'request', action: 'merge' } })
+      ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+      expect(await files(e)).toEqual(before)
+      expect((await e.decisions.list()).map(d => d.id)).toEqual([entry.id])
+    })
+
+    it.each([
+      ['保留一方', said('keep-a')],
+      ['融合', MERGED],
+    ])('%s：方案生成后 B 只改了标签，回 stale，什么都不动', async (_label, answer) => {
+      const { e, entry, proposal } = await drafted(answer)
+      await e.store.update({ id: 'mem_b' }, r => ({ ...r, tags: ['别处加的'] }))
+      expect(err(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal }))).toMatchObject({ code: 'stale', memoryIds: ['mem_a', 'mem_b'] })
+      expect(await statuses(e)).toEqual(['active', 'active'])
+      expect((await e.store.get('mem_a'))!.content).toBe('用 pnpm')
+      expect(await e.snapshots.list()).toEqual([])
+      expect(await e.decisions.listSettled()).toEqual([])
+    })
+
+    it('操作和结论对不上（结论 keep-a 却两条都留、改写项不在保留方、记忆 id 不是这一对）：invalid-args，什么都不动', async () => {
+      const { e, entry, proposal } = await drafted(MERGED)
+      const edit = proposal.ops[0]!
+      const bad = [
+        { ...proposal, action: 'keep-a' as const, ops: [{ kind: 'keep' as const, memoryId: 'mem_a' }, { kind: 'keep' as const, memoryId: 'mem_b' }] },
+        { ...proposal, ops: [{ kind: 'forget' as const, memoryId: 'mem_a' }, { ...edit, memoryId: 'mem_b' }] },
+        { ...proposal, ops: [edit, { kind: 'forget' as const, memoryId: 'mem_x' }] },
+        { ...proposal, ops: [edit] },
+      ]
+      for (const p of bad) expect(err(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal: p })).code).toBe('invalid-args')
+      expect(await statuses(e)).toEqual(['active', 'active'])
+      expect(await e.snapshots.list()).toEqual([])
+    })
+
+    it('融合稿含高危密钥：secret-critical；含疑似密钥：secret-suspected，带 force 后照常写入', async () => {
+      const { e, entry, proposal } = await drafted(MERGED)
+      const withContent = (content: string) => ({ ...proposal, ops: proposal.ops.map(op => (op.kind === 'edit' ? { ...op, content } : op)) })
+      expect(err(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal: withContent(`用 pnpm，token ${FAKE_SECRET.github}`) })).code).toBe('secret-critical')
+      const suspected = withContent('用 pnpm，password: abc12345x')
+      expect(err(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal: suspected })).code).toBe('secret-suspected')
+      expect(await statuses(e)).toEqual(['active', 'active'])
+      expect(await e.snapshots.list()).toEqual([])
+      ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal: suspected, force: true }))
+      expect((await e.store.get('mem_a'))!.content).toBe('用 pnpm，password: abc12345x')
+    })
+
+    it('两个标签页同时应用：只成一次，只删一方', async () => {
+      const { e, entry, proposal } = await drafted(said('keep-a'))
+      const other = env()
+      const results = await Promise.all([
+        e.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal }),
+        other.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal }),
+      ])
+      expect(results.filter(r => r.ok)).toHaveLength(1)
+      expect(await statuses(e)).toEqual(['active', 'deleted'])
+      expect(await e.snapshots.list()).toHaveLength(1)
+    })
+
+    it('条目上另有一份建议：按要求应用不看它，结清记来源 request', async () => {
+      const { e, entry } = await seeded({ llm: scripted(said('keep-b'), said('keep-a')).llm })
+      ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+      const proposal = ok(await draft(e, entry.id, { request: '保留 A' })).proposal!
+      ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal }))
+      expect(await statuses(e)).toEqual(['active', 'deleted'])
+      expect((await e.decisions.listSettled())[0]!.settled?.proposal).toEqual({ source: 'request', action: 'keep-a' })
+    })
+  })
+})

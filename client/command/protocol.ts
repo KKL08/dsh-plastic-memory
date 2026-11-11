@@ -2,7 +2,7 @@
  * 客户端的命令往返协议，只这一份：一条 `/memory` 命令的结果 → 界面该怎么做（Outcome）。纯函数，不碰网关和界面。
  * - 涉及其他项目时服务端先拒（cross-workspace，什么都没动）：确认后带 allowCrossWorkspace 重发；
  * - forget 的目标含密钥（has-secret，什么都没动）：确认后改发 hard-delete，沿用这条命令指明的那一份；
- * - 直接改、直接合并、整理所选的新内容像密钥（secret-suspected，什么都没动）：确认不是密钥后带 force 重发；
+ * - 直接改、直接合并、整理所选、按要求应用的新内容像密钥（secret-suspected，什么都没动）：确认不是密钥后带 force 重发；
  * - 条目正被别处认领（claimed），或待决项已不在（契约 OPEN_ITEM_COMMANDS 的 not-found）：别处已处理；
  * - 服务端原话只有中文的几种（stale、not-found、secret-critical、target-taken、拿不到模型、模型输出不合格式）换本地文案，其余显示原话；
  *   stale、not-found 分单条、整理所选两种口径，失败结果里的 memoryIds 照传。
@@ -17,8 +17,8 @@ import type { LocaleKey } from '../locales.ts'
 export type Ok = Extract<MemoryCommandResult, { ok: true }>
 export type EditCommand = Extract<MemoryCommand, { cmd: 'edit-memory' | 'merge-memories' }>
 type HardDeleteCommand = Extract<MemoryCommand, { cmd: 'hard-delete' }>
-/** 疑似密钥确认后可带 force 重发的命令。 */
-type ForceCommand = EditCommand | Extract<MemoryCommand, { cmd: 'apply-edits' }>
+/** 疑似密钥确认后可带 force 重发的命令（按要求应用只在带方案时：采纳建议不等确认）。 */
+type ForceCommand = EditCommand | Extract<MemoryCommand, { cmd: 'apply-edits' | 'apply-proposal' }>
 
 /**
  * 失败：isLocalized 时 detail 是文案键，否则是服务端原话（没有原话时是结果码）。
@@ -80,7 +80,7 @@ export function interpret(command: MemoryCommand, result: MemoryCommandResult): 
     }
   }
   if (code === 'has-secret' && command.cmd === 'forget') return { kind: 'confirm-secret', resend: { ...command, cmd: 'hard-delete' } }
-  if (code === 'secret-suspected' && (command.cmd === 'edit-memory' || command.cmd === 'merge-memories' || command.cmd === 'apply-edits')) {
+  if (code === 'secret-suspected' && (command.cmd === 'edit-memory' || command.cmd === 'merge-memories' || command.cmd === 'apply-edits' || (command.cmd === 'apply-proposal' && command.proposal !== undefined))) {
     return { kind: 'confirm-suspected', resend: { ...command, force: true } }
   }
   if (code === 'claimed' || (code === 'not-found' && OPEN_ITEM_COMMANDS.has(command.cmd))) return { kind: 'handled-elsewhere' }
@@ -90,9 +90,13 @@ export function interpret(command: MemoryCommand, result: MemoryCommandResult): 
 }
 
 const hasCritical = (texts: readonly string[]) => detectSecrets(texts.join('\n')).some(h => h.severity === 'critical')
+/** 改写项写进去的四个面。 */
+const editTexts = (ops: ReadonlyArray<{ kind: string } & Partial<{ content: string; name: string; summary: string; tags: string[] }>>) =>
+  ops.flatMap(op => (op.kind === 'edit' ? [op.content ?? '', op.name ?? '', op.summary ?? '', (op.tags ?? []).join(' ')] : []))
 
 /**
- * 发出之前就拦下的（与服务端同口径）：直接改、直接合并的新内容四个面，整理所选每个改写项的四个面；让模型改的要求、此前的要求、计划的文字、上一稿四个面；整理计划的要求；按计划出稿的要求和每项的理由、提问、回答。
+ * 发出之前就拦下的（与服务端同口径）：直接改、直接合并的新内容四个面，整理所选、按要求应用每个改写项的四个面；让模型改的要求、此前的要求、计划的文字、上一稿四个面；
+ * 整理计划的要求；按计划出稿的要求和每项的理由、提问、回答；补充要求的要求、此前的要求、上一份方案的说明和稿。
  * 命令文本会进借用会话的日志，含高危密钥的不能发出去；疑似的照常发，改写由服务端回 secret-suspected 再确认。
  */
 export function refuseBeforeSend(command: MemoryCommand): Failure | undefined {
@@ -100,9 +104,14 @@ export function refuseBeforeSend(command: MemoryCommand): Failure | undefined {
     const { content, name, summary, tags } = command
     return hasCritical([content, name, summary, tags.join(' ')]) ? local('secret-critical', 'pending.edit.secretCritical') : undefined
   }
-  if (command.cmd === 'apply-edits') {
-    const texts = command.ops.flatMap(op => op.kind === 'edit' ? [op.content, op.name, op.summary, op.tags.join(' ')] : [])
-    return hasCritical(texts) ? local('secret-critical', 'pending.edit.secretCritical') : undefined
+  if (command.cmd === 'apply-edits' || (command.cmd === 'apply-proposal' && command.proposal !== undefined)) {
+    const ops = command.cmd === 'apply-edits' ? command.ops : command.proposal!.ops
+    return hasCritical(editTexts(ops)) ? local('secret-critical', 'pending.edit.secretCritical') : undefined
+  }
+  if (command.cmd === 'draft-proposal') {
+    const { previous } = command
+    const texts = [command.request, ...(command.priorRequests ?? []), ...(previous !== undefined ? [previous.reason, ...editTexts(previous.ops)] : [])]
+    return hasCritical(texts) ? local('secret-critical', 'pending.model.secretCritical') : undefined
   }
   if (command.cmd === 'draft-edit') {
     const { previous, planNote } = command

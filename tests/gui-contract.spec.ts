@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   checkupResultSchema, CROSS_WORKSPACE_COMMANDS, directoryIssueSchema, encodeMemoryCommand, MEMORY_COMMAND_NAME, memoryCommandResultSchema,
-  MAX_BATCH_EDIT, memoryCommandSchema, OPEN_ITEM_COMMANDS, parseMemoryCommand, pendingItemSchema, type MemoryCommand,
+  MAX_BATCH_EDIT, memoryCommandSchema, OPEN_ITEM_COMMANDS, parseMemoryCommand, pendingItemSchema, type MemoryCommand, type RequestedProposal,
 } from '../src/gui/contract.ts'
 import { SAMPLE_COMMANDS } from '../client/command/test-commands.ts'
 
@@ -226,5 +226,38 @@ describe('apply-proposal（采纳建议）', () => {
     expect(memoryCommandSchema.parse({ cmd: 'apply-proposal', decisionId: 'pd_1', suggestionId: 'sg_1', action: 'keep-a' })).toEqual(command)
     expect(CROSS_WORKSPACE_COMMANDS.has('apply-proposal')).toBe(true)
     expect(OPEN_ITEM_COMMANDS.has('apply-proposal')).toBe(true)
+  })
+})
+
+describe('补充要求：draft-proposal 与按要求应用', () => {
+  const base = { updatedAt: 1, digest: 'd' }
+  const basis = { conflictFingerprint: 'cf', memories: [{ memoryId: 'a', fingerprint: 'fa', scopeKey: 'global' }, { memoryId: 'b', fingerprint: 'fb', scopeKey: 'global' }] }
+  const proposal: RequestedProposal = {
+    action: 'merge', reason: '各有场景', basis,
+    ops: [{ kind: 'edit', memoryId: 'a', content: 'c', name: 'n', summary: 's', tags: [] }, { kind: 'forget', memoryId: 'b' }],
+  }
+
+  it('draft-proposal 带条目 id、要求（只有空白算没写）、两条的卡片版本，可带此前的要求和上一份方案（不带依据）；只读，不过跨项目门；not-found 算别处已处理', () => {
+    const command: MemoryCommand = {
+      cmd: 'draft-proposal', decisionId: 'pd_1', request: '两者融合', bases: [base, base], priorRequests: ['以 A 为准'],
+      previous: { action: proposal.action, reason: proposal.reason, ops: proposal.ops },
+    }
+    expect(parseMemoryCommand(encodeMemoryCommand(command).slice(`/${MEMORY_COMMAND_NAME} `.length))).toEqual({ ok: true, command })
+    const accepts = (args: object) => memoryCommandSchema.safeParse({ cmd: 'draft-proposal', decisionId: 'pd_1', bases: [base, base], ...args }).success
+    expect([accepts({ request: '融合' }), accepts({ request: '  ' }), accepts({}), accepts({ request: '融合', bases: [base] })]).toEqual([true, false, false, false])
+    expect(CROSS_WORKSPACE_COMMANDS.has('draft-proposal' as never)).toBe(false)
+    expect(OPEN_ITEM_COMMANDS.has('draft-proposal')).toBe(true)
+  })
+
+  it('apply-proposal 依据二选一：建议 id，或按要求生成的方案（操作、依据版本）；按要求的可带 force', () => {
+    const command: MemoryCommand = { cmd: 'apply-proposal', decisionId: 'pd_1', proposal, force: true }
+    expect(parseMemoryCommand(encodeMemoryCommand(command).slice(`/${MEMORY_COMMAND_NAME} `.length))).toEqual({ ok: true, command })
+    const accepts = (args: object) => memoryCommandSchema.safeParse({ cmd: 'apply-proposal', decisionId: 'pd_1', ...args }).success
+    expect([accepts({ suggestionId: 'sg_1', proposal }), accepts({}), accepts({ proposal: { ...proposal, basis: undefined } })]).toEqual([false, false, false])
+  })
+
+  it('结果：按要求生成的方案带依据版本；做不到只有一句说明', () => {
+    const result = (extra: object) => memoryCommandResultSchema.safeParse({ ok: true, cmd: 'draft-proposal', ...extra }).success
+    expect([result({ proposal }), result({ infeasible: { reason: '两条里都没有端口号' } }), result({ infeasible: {} })]).toEqual([true, true, false])
   })
 })

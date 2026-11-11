@@ -4,7 +4,8 @@
  */
 import type { LocaleKey } from '../locales.ts'
 
-export interface Intent { id: string; label: LocaleKey; template: LocaleKey }
+/** template 缺省的是不填要求、交给调用方直接处理的候选项（冲突卡的保留 A、B 这类，见 RequestBox 的 onPick）。 */
+export interface Intent { id: string; label: LocaleKey; template?: LocaleKey }
 
 /** 模板里等用户填的空。 */
 export const INTENT_BLANK = '___'

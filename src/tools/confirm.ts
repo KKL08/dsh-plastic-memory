@@ -1,9 +1,9 @@
 import type { MemoryLogger, MemoryStore } from '../store.ts'
 import { conflictFingerprint, isBasisCurrent, type PendingDecisionsStore } from '../governance/decisions.ts'
-import { kindOf, verdictLoser, type PendingDecision, type SettledProposal } from '../governance/schema.ts'
+import { kindOf, verdictLoser, type PendingDecision, type SettledProposal, type SuggestionBasis } from '../governance/schema.ts'
 import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
 import { ALREADY_REVIEWED_REASON, NOT_DELEGATED_REASON, isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
-import { verdictOfAction, type AcceptRejectCode, type DecisionRejectCode, type GovernanceRejectCode } from '../contract-codes.ts'
+import { verdictOfAction, type AcceptRejectCode, type DecisionRejectCode, type GovernanceRejectCode, type ProposalAction } from '../contract-codes.ts'
 import { RecordNotFoundError } from '../errors.ts'
 import { crossWorkspaceNote, gateRecords, locateCopy, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
 import type { Scope } from '../scope.ts'
@@ -32,10 +32,11 @@ export interface ConfirmOptions {
   /** resolve 时垂直冲突的条目没有指纹，两边都留要现算指纹用的基线（GUI 从借来的会话取）。 */
   baseline?: readonly string[]
   /**
-   * resolve 是在采纳条目上的这份处理建议（GUI「采纳建议」）：认领条目后核对建议 id、结论和裁决对得上、依据版本仍是此刻的，
-   * 对不上回 stale、什么都不动；删败方时锁内按建议依据里它的完整内容指纹再比一次。结清时记下依据和结论代码。
+   * resolve 是在落盘一份处理方案：条目上的这份处理建议（GUI「采纳建议」，suggestionId），或界面带回的按要求生成的方案
+   * （GUI「补充要求」，request：结论和生成时的依据版本）。认领条目后核对建议 id（按要求的没有这一项）、结论和裁决对得上、
+   * 依据版本仍是此刻的，对不上回 stale、什么都不动；删败方时锁内按依据里它的完整内容指纹再比一次。结清时记下来源和结论代码。
    */
-  adopt?: { suggestionId: string }
+  adopt?: { suggestionId: string } | { request: { action: ProposalAction; basis: SuggestionBasis } }
 }
 
 /**
@@ -217,15 +218,17 @@ async function resolveEntry(
     const r = await locate(id)
     if (r) members.set(id, r)
   }
-  // 采纳建议：用户看到的是这一份建议、依据的是生成时的两条。认领后重读的条目上已换成别的一份，或两条（含只改了摘要、标签）被改过，都不落盘
-  const suggestion = adopt === undefined ? undefined : entry.suggestion
+  // 落盘处理方案：用户看到的是这一份方案、依据的是生成时的两条。认领后重读的条目上建议已换成别的一份，或两条（含只改了摘要、标签）被改过，都不落盘
+  const plan = adopt === undefined ? undefined : 'request' in adopt
+    ? { source: 'request' as const, ...adopt.request }
+    : entry.suggestion?.id === adopt.suggestionId ? { source: 'suggestion' as const, action: entry.suggestion.action, basis: entry.suggestion.basis } : undefined
   if (adopt !== undefined) {
     const live = entry.memoryIds.map(id => (members.get(id)?.status === 'active' ? members.get(id) : undefined))
-    if (suggestion === undefined || suggestion.id !== adopt.suggestionId || verdictOfAction(suggestion.action) !== args.verdict || !isBasisCurrent(entry, suggestion.basis, live)) {
-      return { kind: 'error', code: 'stale', message: `待决项 ${entry.id} 的处理建议已失效（换了一份，或两条在建议生成后被改过），未做任何改动。` }
+    if (plan === undefined || verdictOfAction(plan.action) !== args.verdict || !isBasisCurrent(entry, plan.basis, live)) {
+      return { kind: 'error', code: 'stale', message: `待决项 ${entry.id} 的处理方案已失效（建议换了一份，或两条在方案生成后被改过），未做任何改动。` }
     }
   }
-  const proposal: { proposal?: SettledProposal } = suggestion === undefined ? {} : { proposal: { source: 'suggestion', action: suggestion.action } }
+  const proposal: { proposal?: SettledProposal } = plan === undefined ? {} : { proposal: { source: plan.source, action: plan.action } }
   const { rejected, otherWorkspaces } = gateRecords([...members.values()], context, args.allowCrossWorkspace)
   if (rejected.length > 0) {
     return { kind: 'error', code: 'cross-workspace', rejected, message: `未裁决待决项 ${entry.id}，账本条目保留。${crossWorkspaceNote(rejected, [])}` }
@@ -256,7 +259,7 @@ async function resolveEntry(
     // 该记忆的一方删掉后，可能还挂在其他待决项上——这些冲突已无法再裁决，forget 一并清理（本次条目留着，
     // clearedDecisions 只统计「额外」清理的条目）。但不能悄悄发生：把清理数量报进 actions，让用户知道有条目被顺带处理
     // 采纳建议：核对之后、删之前败方被别处改过的，锁内按建议依据里它的指纹挡下
-    const basisFingerprint = suggestion?.basis.memories.find(m => m.memoryId === toDelete.id)?.fingerprint
+    const basisFingerprint = plan?.basis.memories.find(m => m.memoryId === toDelete.id)?.fingerprint
     const forgot = await executeForget(
       { ids: [toDelete.id], reason: `裁决冲突 ${entry.id}（${args.verdict}）删除败方`, allowCrossWorkspace: args.allowCrossWorkspace },
       context, { ...deps, now: () => now }, {
@@ -264,8 +267,8 @@ async function resolveEntry(
         ...(basisFingerprint !== undefined ? { isChanged: (cur: MemoryRecord) => cur.status !== 'active' || editFingerprint(cur) !== basisFingerprint } : {}),
       },
     )
-    if (!forgot.forgotten.includes(toDelete.id) && suggestion !== undefined) {
-      return { kind: 'error', code: 'stale', message: `败方记忆 ${toDelete.id} 在建议生成后被改过，没有删除，待决项 ${entry.id} 保留在账本里。` }
+    if (!forgot.forgotten.includes(toDelete.id) && plan !== undefined) {
+      return { kind: 'error', code: 'stale', message: `败方记忆 ${toDelete.id} 在方案生成后被改过，没有删除，待决项 ${entry.id} 保留在账本里。` }
     }
     if (!forgot.forgotten.includes(toDelete.id)) {
       return { kind: 'error', message: `败方记忆 ${toDelete.id} 没有删掉：${forgot.message}待决项 ${entry.id} 保留在账本里，可以重试。` }
