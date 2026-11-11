@@ -19,6 +19,7 @@ import { editModesCss } from './pending/edit-modes.tsx'
 import { modelEditCss } from './pending/model-edit.tsx'
 import { moveCss } from './pending/move.tsx'
 import { pendingCss } from './pending/PendingTab.tsx'
+import { suggestionCss } from './pending/suggestion.tsx'
 import { controlsCss } from './settings/controls.tsx'
 import { scenesCss } from './settings/Scenes.tsx'
 import { settingsPageCss } from './settings/SettingsPage.tsx'
@@ -30,7 +31,7 @@ import { settingsCss } from './ui/Settings.tsx'
 export const SLOT_STYLES = {
   page: {
     dismissButtonCss, memoryPageCss, titleControlsCss, statusBarCss, confirmCss, sharedTabCss, groupsCss, libraryTabCss, batchEditCss,
-    deletedTabCss, editCss, editModesCss, modelEditCss, moveCss, pendingCss,
+    deletedTabCss, editCss, editModesCss, modelEditCss, moveCss, pendingCss, suggestionCss,
   },
   sidebar: { confirmCss, modelChangeCss, sidebarTabCss },
   chat: { confirmCss, modelChangeCss, savedMemoriesCardCss },

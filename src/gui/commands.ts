@@ -9,10 +9,10 @@ import { isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
 import { RecordNotFoundError } from '../errors.ts'
 import { detectSecrets, hasCriticalSecret, hasSecret } from '../secrets.ts'
 import { computeDigest } from '../storage/frontmatter.ts'
-import { candidateFingerprint, type MisplacedIgnore, type PendingDecisionsStore } from '../governance/decisions.ts'
+import { candidateFingerprint, isBasisCurrent, suggestionBasis, type MisplacedIgnore, type PendingDecisionsStore } from '../governance/decisions.ts'
 import { isModelChange } from '../governance/undo-rules.ts'
 import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
-import { kindOf, type MemorySnapshot, type PendingDecision, type ScanCacheEntry, type SnapshotRecord } from '../governance/schema.ts'
+import { genId, kindOf, type MemorySnapshot, type PendingDecision, type ScanCacheEntry, type SnapshotRecord } from '../governance/schema.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
@@ -29,6 +29,7 @@ import {
 } from './contract.ts'
 import type { ViewWriter } from './view-writer.ts'
 import { generateDraft } from './model-draft.ts'
+import { generateSuggestion } from './model-suggestion.ts'
 import { generatePlan } from './model-plan.ts'
 import { generatePlanDrafts } from './model-draft-plan.ts'
 import { processInterval, runCheckup, type IntervalTimer } from './checkup-run.ts'
@@ -92,7 +93,7 @@ export interface MemoryCommandDefinition {
  *  refresh-views 不受开关影响，撤销直接改、直接合并、模型改写与替代的 undo 也不受（见 isEditUndo）。 */
 // dismiss-overflow 不在此列：超限提醒在体检关闭时照样入账，忽略它不属于治理动作；
 // ignore-advice / unignore-advice 同理：规则类建议在体检关闭时照样列出，忽略只是用户的处置
-const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'undo', 'promote', 'promote-memory', 'move-memory', 'keep-local', 'keep-local-memory', 'scan'])
+const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'undo', 'promote', 'promote-memory', 'move-memory', 'keep-local', 'keep-local-memory', 'scan', 'suggest'])
 
 /** 不写任何东西的子命令：成功后也不重写视图。 */
 const READ_ONLY_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['draft-edit', 'plan-edits', 'draft-plan'])
@@ -938,6 +939,44 @@ async function dispatch(
         return fail(cmd, 'failed', `${failures.length} 处没处理成功，可以重试：${failures.join('；')}`)
       }
       return { ok: true, cmd, migrated, ...(command.action === 'forget' ? { skippedSecrets } : {}) }
+    }
+
+    case 'suggest': {
+      const entry = await deps.decisions.get(command.decisionId)
+      if (entry === undefined) return notFound(command.decisionId)
+      // 这一版只给横向冲突生成；垂直冲突要会话的基线，另行接入
+      if (kindOf(entry) !== 'conflict' || entry.baselineRef !== undefined || entry.memoryIds.length !== 2) {
+        return fail(cmd, 'invalid-args', `待决项 ${entry.id} 不是两条记忆的横向冲突，补不了建议`)
+      }
+      // 同裁决的定位口径；写入时按同一口径重读核对
+      const read = (id: string) => locate(id, undefined)
+      const records = await Promise.all(entry.memoryIds.map(read))
+      const gone = entry.memoryIds.filter((_, i) => records[i]?.status !== 'active')
+      if (gone.length > 0) return behind('not-found', gone, `不存在或已处理：${gone.join('、')}`)
+      const pair = records as [MemoryRecord, MemoryRecord]
+      // 高危密钥的原文不发给模型；确认存下的疑似密钥同注入，照原文发
+      if (pair.some(r => hasCriticalSecret(r))) return fail(cmd, 'has-secret', '含密钥的记忆不发给模型。未做任何改动')
+      if (entry.suggestion !== undefined && isBasisCurrent(entry, entry.suggestion.basis, pair)) return { ok: true, cmd, decisionId: entry.id }
+      const llm = deps.host.llmOf(exec)
+      if (llm === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型')
+      // 依据版本按生成前读到的算：生成在认领之外（模型调用可能超过认领的 60 秒），写入时认领、重读、核对它
+      const basis = suggestionBasis(entry, pair)
+      const generated = await generateSuggestion({ summary: entry.summary, records: pair }, llm)
+      const model = llm.model !== undefined ? { model: llm.model } : {}
+      const outcome = generated.ok
+        ? { suggestion: { id: genId('sg'), action: generated.action, reason: generated.reason, ops: generated.ops, basis, isSourced: false, generatedAt: now } }
+        : { failure: { basis, cause: generated.cause, at: now } }
+      const written = await deps.decisions.writeSuggestion(entry.id, outcome, read)
+      if (written === 'gone') return notFound(entry.id)
+      if (written === 'claimed') return fail(cmd, 'claimed', `待决项 ${entry.id} 正在被另一次操作处理，这次生成的建议没有写入`)
+      if (written === 'stale') return behind('stale', entry.memoryIds, '这两条刚被改过，界面已换成最新内容；这次生成的建议没有写入')
+      // 别处已写下当前依据的建议：这一份丢弃，卡上显示那一份。模型判断不了哪条对也算答了：原因已记在条目上，视图带出
+      if (written === 'has-current' || generated.ok || generated.cause.kind === 'undecided') return { ok: true, cmd, decisionId: entry.id, ...model }
+      // 没生成成：原因已记在条目上，视图里是「生成失败」；run 只在成功时重写视图，这里自己重写
+      await deps.views.request()
+      const { cause } = generated
+      if (cause.kind === 'model-error') return fail(cmd, 'llm-failed', cause.message ?? cause.hostCode)
+      return fail(cmd, 'llm-invalid-output', cause.kind === 'secret-in-draft' ? '模型给的稿里带进了原文没有的密钥，这份建议已丢弃' : '模型的输出不是要求的 JSON 格式')
     }
 
     case 'refresh-views':

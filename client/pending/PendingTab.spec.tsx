@@ -1,14 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { GUI_VIEW_VERSION, type AdviceType, type HealthView, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type PendingItem, type PendingView } from '../../src/gui/contract.ts'
+import { GUI_VIEW_VERSION, type AdviceType, type HealthView, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type PendingItem, type PendingView, type Suggestion } from '../../src/gui/contract.ts'
 import { createFakeGateway, type FakeGatewayInit } from '../gateway.fake.ts'
 import { useGateway, type PluginConfig } from '../gateway.ts'
 import { FLASH_MS } from '../library/shared.tsx'
 import { ALL_SCOPE, createNavStore, type NavStore, type PageScope } from '../nav.ts'
 import { memory, NOW, renderInShell, levelCountsOf } from '../test-utils.tsx'
 import { PendingTab } from './PendingTab.tsx'
+import { WAIT_FOR_VIEW_MS } from './suggestion.tsx'
 import { createTranslator } from '../i18n.tsx'
-import { en } from '../locales.ts'
+import { en, zh } from '../locales.ts'
 import { PanelShell } from '../ui/PanelShell.tsx'
 
 // 待处理 tab：给定一份待处理视图，断言每类卡渲染出什么、点按钮向网关发了什么命令。
@@ -2131,5 +2132,233 @@ describe('PA-20 类型显示名', () => {
     const card = screen.getByRole('heading', { level: 3, name: /secret/i }).closest('article')!
     expect(chipsOf(card)).toContain('Preference')
     expect(card).not.toHaveTextContent('行为偏好')
+  })
+})
+
+describe('横向冲突卡的处理建议（只显示，不能采纳）', () => {
+  type Horizontal = Extract<PendingItem, { kind: 'conflict-horizontal' }>
+  const withState = (extra: Partial<Horizontal>): PendingItem => ({ ...horizontal, ...extra }) as PendingItem
+  const keepA: Suggestion = { id: 'sg_1', action: 'keep-a', reason: 'A 是你明确说过的，B 是推断的。', isSourced: false, ops: [{ kind: 'keep', memoryId: 'a' }, { kind: 'forget', memoryId: 'b' }] }
+  const mergeEdit = { kind: 'edit', memoryId: 'a', content: '集成测试用真实 Postgres，单元测试可以 mock 数据库。', name: A.name, summary: A.summary, tags: [] } as const satisfies Suggestion['ops'][number]
+  const merged: Suggestion = { id: 'sg_2', action: 'merge', reason: '两边各有适用场景。', isSourced: false, ops: [{ ...mergeEdit, tags: [] }, { kind: 'forget', memoryId: 'b' }] }
+  const block = () => document.querySelector('.pm-suggestion') as HTMLElement
+
+  it('有建议：模型图标、加粗的结论、一句理由；裁决按钮照旧，没有「补上建议」', () => {
+    setup([withState({ suggestion: keepA })])
+    expect(block().querySelector('.pm-icon, svg')).not.toBeNull()
+    expect(within(block()).getByText('保留 A').tagName).toBe('STRONG')
+    expect(within(block()).getByText('A 是你明确说过的，B 是推断的。')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /补上建议/ })).toBeNull()
+    expect(screen.getByRole('button', { name: '以 A 为准' })).toBeInTheDocument()
+  })
+
+  it.each([
+    ['keep-b', '保留 B'],
+    ['keep-both', '都保留（不算冲突）'],
+  ] as const)('结论 %s 写成「%s」', (action, label) => {
+    setup([withState({ suggestion: { ...keepA, action, ops: [{ kind: 'keep', memoryId: 'a' }, { kind: 'keep', memoryId: 'b' }] } })])
+    expect(within(block()).getByText(label)).toBeInTheDocument()
+  })
+
+  it('融合：直接显示融合稿和写进哪条（按实际保留方），点「看和原文的对照」原位展开、再点收起', () => {
+    setup([withState({ suggestion: merged })])
+    expect(within(block()).getByText('融合成一条')).toBeInTheDocument()
+    expect(within(block()).getByText('集成测试用真实 Postgres，单元测试可以 mock 数据库。')).toBeInTheDocument()
+    expect(within(block()).getByText('融合后（写进 A，B 进最近删除）')).toBeInTheDocument()
+    const toggle = within(block()).getByRole('button', { name: /看和原文的对照/ })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(within(block()).getByRole('region', { name: '原文' })).toBeInTheDocument()
+    fireEvent.click(within(block()).getByRole('button', { name: /收起对照/ }))
+    expect(within(block()).queryByRole('region', { name: '原文' })).toBeNull()
+  })
+
+  it('融合写进 B 时文案跟着写', () => {
+    setup([withState({ suggestion: { ...merged, ops: [{ kind: 'forget', memoryId: 'a' }, { ...mergeEdit, tags: [], memoryId: 'b' }] } })])
+    expect(within(block()).getByText('融合后（写进 B，A 进最近删除）')).toBeInTheDocument()
+  })
+
+  it('含高危密钥：写明哪条有密钥、不会发给模型，没有「补上建议」', () => {
+    setup([withState({ right: { ...B, hasSecret: true }, noSuggestion: { code: 'has-secret' } })])
+    expect(within(block()).getByText('这次没有建议')).toBeInTheDocument()
+    expect(within(block()).getByText('B 里有密钥，不会发给模型。可以直接选下面的处理方式。')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /补上建议/ })).toBeNull()
+  })
+
+  it('还没生成：页面加载时不问模型；点「补上建议」只发 suggest，生成中显示「正在生成建议……」，视图带来建议后原位换成建议', async () => {
+    const { gateway, commands } = setup([withState({ noSuggestion: { code: 'not-generated' } })], {
+      respond: command => (command.cmd === 'suggest' ? { ok: true, cmd: 'suggest', decisionId: 'd-h' } : { ok: true, cmd: command.cmd }),
+    })
+    expect(gateway.modelRequests).toEqual([])
+    expect(within(block()).getByText('这条还没有建议')).toBeInTheDocument()
+    fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+    expect(await within(block()).findByText('正在生成建议……')).toBeInTheDocument()
+    expect(commands()).toEqual([{ cmd: 'suggest', decisionId: 'd-h' }])
+    // 命令回来了、视图还没换：仍在等
+    await waitFor(() => { expect(gateway.executed).toHaveLength(1) })
+    expect(within(block()).getByText('正在生成建议……')).toBeInTheDocument()
+    act(() => { gateway.setView('pending', view(withState({ suggestion: keepA }))) })
+    expect(await within(block()).findByText('保留 A')).toBeInTheDocument()
+    expect(within(block()).queryByText('正在生成建议……')).toBeNull()
+  })
+
+  it('命令成功而视图一直没带来建议：等够时间回到「补上建议」，不一直转', async () => {
+    vi.useFakeTimers()
+    try {
+      setup([withState({ noSuggestion: { code: 'not-generated' } })], {
+        respond: command => ({ ok: true, cmd: command.cmd, decisionId: 'd-h' }) as MemoryCommandResult,
+      })
+      fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) }) // 命令结果回来，开始等视图
+      await act(async () => { await vi.advanceTimersByTimeAsync(WAIT_FOR_VIEW_MS - 1) })
+      expect(within(block()).getByText('正在生成建议……')).toBeInTheDocument()
+      await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+      expect(within(block()).queryByText('正在生成建议……')).toBeNull()
+      expect(within(block()).getByRole('button', { name: '补上建议' })).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('「停止」只是不再等：回到没有建议，迟到的失败不显示', async () => {
+    let answer!: (r: MemoryCommandResult) => void
+    setup([withState({ noSuggestion: { code: 'not-generated' } })], { respond: () => new Promise((resolve) => { answer = resolve }) })
+    fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+    fireEvent.click(await within(block()).findByRole('button', { name: '停止' }))
+    expect(within(block()).getByRole('button', { name: '补上建议' })).toBeInTheDocument()
+    await act(async () => { answer({ ok: false, cmd: 'suggest', code: 'llm-failed', detail: '限流' }) })
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(within(block()).getByRole('button', { name: '补上建议' })).toBeInTheDocument()
+  })
+
+  it('生成失败（视图带原因）：写原因，按钮变成「再试一次」', () => {
+    setup([withState({ noSuggestion: { code: 'failed', cause: { kind: 'model-error', hostCode: 'RATE_LIMIT', message: '429' } } })])
+    expect(within(block()).getByText('这条还没有建议')).toBeInTheDocument()
+    expect(within(block()).getByText('上次没生成成：请求太频繁，被限流了。')).toBeInTheDocument()
+    expect(within(block()).getByRole('button', { name: '再试一次' })).toBeInTheDocument()
+  })
+
+  it('稿里带进了密钥被丢弃：原因写清楚', () => {
+    setup([withState({ noSuggestion: { code: 'failed', cause: { kind: 'secret-in-draft' } } })])
+    expect(within(block()).getByText('上次没生成成：模型给的稿里带进了原文没有的密钥，已丢弃。')).toBeInTheDocument()
+  })
+
+  it('命令失败：原位写原因，按钮变成「再试一次」', async () => {
+    setup([withState({ noSuggestion: { code: 'not-generated' } })], { respond: () => ({ ok: false, cmd: 'suggest', code: 'llm-failed', detail: '连不上' }) })
+    fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+    expect(await within(block()).findByRole('alert')).toHaveTextContent('模型出错了：连不上')
+    expect(within(block()).getByRole('button', { name: '再试一次' })).toBeInTheDocument()
+  })
+
+  it('拿不到模型：写原因，不再显示「补上建议」', async () => {
+    setup([withState({ noSuggestion: { code: 'not-generated' } })], { respond: () => ({ ok: false, cmd: 'suggest', code: 'llm-unavailable' }) })
+    fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+    expect(await within(block()).findByText('拿不到当前会话的模型。')).toBeInTheDocument()
+    expect(within(block()).queryByRole('button', { name: /补上建议|再试一次/ })).toBeNull()
+  })
+
+  /** 待处理 tab 换一个借来的会话重画（会话由页面传进来）。 */
+  function setupSwitchable(items: PendingItem[], init: FakeGatewayInit) {
+    const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(...items), health: scannedHealth(NOW) }, ...init })
+    const ui = (session: { kind: 'ready'; sessionId: string; cwd: string }) => (
+      <PanelShell gateway={gateway} t={createTranslator(zh)}>
+        <PendingTab nav={createNavStore()} session={session} scope={ALL_SCOPE} workspacePath="/w/app" now={NOW} />
+      </PanelShell>
+    )
+    const { rerender } = render(ui(SESSION))
+    return { gateway, switchTo: (sessionId: string) => { rerender(ui({ ...SESSION, sessionId })) } }
+  }
+
+  it('拿不到模型不随会话保留：换了会话重新给「补上建议」', async () => {
+    const { gateway, switchTo } = setupSwitchable([withState({ noSuggestion: { code: 'not-generated' } })], {
+      respond: () => ({ ok: false, cmd: 'suggest', code: 'llm-unavailable' }),
+    })
+    fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+    expect(await within(block()).findByText('拿不到当前会话的模型。')).toBeInTheDocument()
+    switchTo('s2')
+    expect(within(block()).queryByText('拿不到当前会话的模型。')).toBeNull()
+    expect(within(block()).getByRole('button', { name: '补上建议' })).toBeInTheDocument()
+    expect(gateway.modelRequests).toEqual([])
+  })
+
+  it('这个会话已知拿不到模型（同页别处问过）：直接写原因、不给按钮，建议块自己不问', () => {
+    const bloat: PendingItem = { kind: 'advice', level: 'advice', type: 'bloat', memories: [memory({ id: 'bl', digest: 'sha1:bl' })] }
+    const { gateway } = setup([withState({ noSuggestion: { code: 'not-generated' } }), bloat], { model: null })
+    expect(within(block()).getByRole('button', { name: '补上建议' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '修改' }))
+    expect(gateway.modelRequests.length).toBeGreaterThan(0)
+    expect(new Set(gateway.modelRequests)).toEqual(new Set(['s1']))
+    expect(within(block()).getByText('拿不到当前会话的模型。')).toBeInTheDocument()
+    expect(within(block()).queryByRole('button', { name: /补上建议|再试一次/ })).toBeNull()
+  })
+
+  it('生成中换了会话：回到没有建议，旧会话迟到的失败不显示', async () => {
+    let answer!: (r: MemoryCommandResult) => void
+    const { switchTo } = setupSwitchable([withState({ noSuggestion: { code: 'not-generated' } })], { respond: () => new Promise((resolve) => { answer = resolve }) })
+    fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+    expect(await within(block()).findByText('正在生成建议……')).toBeInTheDocument()
+    switchTo('s2')
+    expect(within(block()).queryByText('正在生成建议……')).toBeNull()
+    expect(within(block()).getByRole('button', { name: '补上建议' })).toBeInTheDocument()
+    await act(async () => { answer({ ok: false, cmd: 'suggest', code: 'llm-failed', detail: '限流' }) })
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(within(block()).getByRole('button', { name: '补上建议' })).toBeInTheDocument()
+  })
+
+  it('写入时条目正被别处认领：回到可再点的样子，不提示别处已处理；条目不在了才提示', async () => {
+    let code: 'claimed' | 'not-found' = 'claimed'
+    setup([withState({ noSuggestion: { code: 'not-generated' } })], { respond: () => ({ ok: false, cmd: 'suggest', code }) })
+    fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+    expect(await within(block()).findByRole('button', { name: '补上建议' })).toBeInTheDocument()
+    expect(document.querySelector('.pm-pending-refused')).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+    code = 'not-found'
+    fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+    await waitFor(() => { expect(document.querySelector('.pm-pending-refused')).not.toBeNull() })
+  })
+
+  it('命令失败的结果到达时视图里的原因已经变了：让给视图，不再显示本地的错误行', async () => {
+    let answer!: (r: MemoryCommandResult) => void
+    const { gateway } = setup([withState({ noSuggestion: { code: 'not-generated' } })], { respond: () => new Promise((resolve) => { answer = resolve }) })
+    fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+    expect(await within(block()).findByText('正在生成建议……')).toBeInTheDocument()
+    act(() => { gateway.setView('pending', view(withState({ noSuggestion: { code: 'failed', cause: { kind: 'model-error', hostCode: 'RATE_LIMIT' } } }))) })
+    await act(async () => { answer({ ok: false, cmd: 'suggest', code: 'llm-failed', detail: '限流' }) })
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(within(block()).getByText('上次没生成成：请求太频繁，被限流了。')).toBeInTheDocument()
+    expect(within(block()).getByRole('button', { name: '再试一次' })).toBeInTheDocument()
+  })
+
+  it('命令成功的结果到达时视图里的原因已经变了：直接显示视图的，不再等', async () => {
+    let answer!: (r: MemoryCommandResult) => void
+    const { gateway } = setup([withState({ noSuggestion: { code: 'not-generated' } })], { respond: () => new Promise((resolve) => { answer = resolve }) })
+    fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+    expect(await within(block()).findByText('正在生成建议……')).toBeInTheDocument()
+    act(() => { gateway.setView('pending', view(withState({ noSuggestion: { code: 'undecided', reason: '需要你确认用哪个。' } }))) })
+    await act(async () => { answer({ ok: true, cmd: 'suggest', decisionId: 'd-h' }) })
+    expect(within(block()).queryByText('正在生成建议……')).toBeNull()
+    expect(within(block()).getByText('需要你确认用哪个。')).toBeInTheDocument()
+  })
+
+  it('模型判断不了哪条对：如实写明加它说的理由，下面仍给「再试一次」，不按错误显示', () => {
+    setup([withState({ noSuggestion: { code: 'undecided', reason: '两条都没写适用场景，需要你确认这个项目用哪个。' } })])
+    expect(within(block()).getByText('模型判断不了哪条对').tagName).toBe('STRONG')
+    expect(within(block()).getByText('两条都没写适用场景，需要你确认这个项目用哪个。')).toBeInTheDocument()
+    expect(within(block()).queryByText('这条还没有建议')).toBeNull()
+    expect(within(block()).getByRole('button', { name: '再试一次' })).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(block().querySelector('.pm-pending-error')).toBeNull()
+  })
+
+  it('点「补上建议」后模型判断不了：视图带来原因后原位换成如实说明', async () => {
+    const { gateway } = setup([withState({ noSuggestion: { code: 'not-generated' } })], {
+      respond: () => ({ ok: true, cmd: 'suggest', decisionId: 'd-h' }),
+    })
+    fireEvent.click(within(block()).getByRole('button', { name: '补上建议' }))
+    await waitFor(() => { expect(gateway.executed).toHaveLength(1) })
+    act(() => { gateway.setView('pending', view(withState({ noSuggestion: { code: 'undecided', reason: '日期一样，分不出。' } }))) })
+    expect(await within(block()).findByText('模型判断不了哪条对')).toBeInTheDocument()
+    expect(within(block()).getByText('日期一样，分不出。')).toBeInTheDocument()
   })
 })

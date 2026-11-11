@@ -1,7 +1,7 @@
 /**
  * 冲突裁决（DESIGN.md「Conflict Ruling」）：琥珀圆点 + 标题，A / B 字母标记（不套圆、不加底）+ 各自的记忆卡，
  * 三个按钮「以 A 为准 / 以 B 为准 / 都保留」，按钮到 verdict 的映射取契约 CONFLICT_ACTION_VERDICTS。
- * 两版结构相同：标题下一句默认行为，A、B 记忆卡，后果说明进建议区（「说明」），下面三个平级按钮一排。
+ * 两版结构相同：标题下一句默认行为，A、B 记忆卡，（记忆页）处理建议块，后果说明进建议区（「说明」），下面三个平级按钮一排。
  * - 宽版（记忆页）：A、B 各一张描边卡并排，卡里只放记忆；按钮靠右，和其它卡的动作行对齐；
  * - 窄版（右侧栏）：A、B 上下排，按钮一行靠左。
  * 任一方定位不到（视图里为 null）时裁决会报错，三个按钮都不可用。裁决后的结果态在待处理票里做。
@@ -42,6 +42,8 @@ export interface ConflictRulingProps extends RulingSharedProps {
   onRule: (verdict: HorizontalVerdict) => void
   /** 一句默认行为（「决定之前，agent 按 A 来做。」），在标题下。 */
   note?: string
+  /** 处理建议块（记忆页给），在 A、B 下面、后果说明上面。 */
+  suggestion?: ReactNode
 }
 
 export function ConflictRuling(props: ConflictRulingProps) {
@@ -73,6 +75,7 @@ export function ConflictRuling(props: ConflictRulingProps) {
         {side('A', props.left)}
         {side('B', props.right)}
       </div>
+      {props.suggestion !== undefined ? <div className="pm-conflict-suggestion">{props.suggestion}</div> : null}
     </RulingShell>
   )
 }
@@ -174,4 +177,6 @@ export const conflictRulingCss = `
 .pm-conflict-baseline { margin: 0; padding-left: 14px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); overflow-wrap: anywhere; }
 .pm-conflict--wide .pm-conflict-buttons { justify-content: flex-end; }
 .pm-conflict--wide .pm-conflict-advice { padding-left: 22px; }
+.pm-conflict-suggestion { margin-top: 12px; }
+.pm-conflict--wide .pm-conflict-suggestion { padding-left: 22px; }
 `

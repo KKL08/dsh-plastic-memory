@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   checkupResultSchema, CROSS_WORKSPACE_COMMANDS, directoryIssueSchema, encodeMemoryCommand, MEMORY_COMMAND_NAME, memoryCommandResultSchema,
-  MAX_BATCH_EDIT, memoryCommandSchema, OPEN_ITEM_COMMANDS, parseMemoryCommand, type MemoryCommand,
+  MAX_BATCH_EDIT, memoryCommandSchema, OPEN_ITEM_COMMANDS, parseMemoryCommand, pendingItemSchema, type MemoryCommand,
 } from '../src/gui/contract.ts'
 import { SAMPLE_COMMANDS } from '../client/command/test-commands.ts'
 
@@ -176,5 +176,36 @@ describe('apply-edits（整理所选应用全部）', () => {
     expect(memoryCommandResultSchema.parse(JSON.parse(JSON.stringify(failure)))).toEqual(failure)
     const { memoryIds: _ids, ...bare } = failure
     expect(memoryCommandResultSchema.parse(bare)).toEqual(bare)
+  })
+})
+
+describe('suggest（补上建议）与待处理冲突项的处理建议', () => {
+  it('suggest 只带条目 id', () => {
+    const command: MemoryCommand = { cmd: 'suggest', decisionId: 'pd_1' }
+    expect(parseMemoryCommand(encodeMemoryCommand(command).slice(`/${MEMORY_COMMAND_NAME} `.length))).toEqual({ ok: true, command })
+    expect(memoryCommandSchema.safeParse({ cmd: 'suggest' }).success).toBe(false)
+  })
+
+  const horizontal = {
+    kind: 'conflict-horizontal', level: 'your-call', decisionId: 'pd_1', firstSeenAt: 1, summary: 's', left: null, right: null,
+  }
+  it('横向冲突项可带处理建议（四种结论、三种操作）或没有建议的原因码；不认识的结论、原因码拒绝', () => {
+    const item = (extra: object) => pendingItemSchema.safeParse({ ...horizontal, ...extra }).success
+    const suggestion = (action: string) => ({
+      id: 'sg_1', action, reason: 'r', isSourced: false,
+      ops: [{ kind: 'edit', memoryId: 'a', content: 'c', name: 'n', summary: 's', tags: [] }, { kind: 'forget', memoryId: 'b' }, { kind: 'keep', memoryId: 'c' }],
+    })
+    expect(['merge', 'keep-a', 'keep-b', 'keep-both', 'rewrite'].map(a => item({ suggestion: suggestion(a) }))).toEqual([true, true, true, true, false])
+    expect(['has-secret', 'not-generated', 'failed', 'quota'].map(code => item({ noSuggestion: { code } }))).toEqual([true, true, true, false])
+    expect(item({ noSuggestion: { code: 'failed', cause: { kind: 'model-error', hostCode: 'AUTH' } } })).toBe(true)
+    expect(item({ noSuggestion: { code: 'failed', cause: { kind: 'secret-in-draft' } } })).toBe(true)
+    expect(item({})).toBe(true)
+  })
+
+  it('模型判断不了：原因码 undecided 带理由；unsure 不是处理方案的结论，判断不了也不当作生成失败的原因', () => {
+    const item = (extra: object) => pendingItemSchema.safeParse({ ...horizontal, ...extra }).success
+    expect(item({ noSuggestion: { code: 'undecided', reason: '需要你确认用哪个' } })).toBe(true)
+    expect(item({ suggestion: { id: 'sg_1', action: 'unsure', reason: 'r', isSourced: false, ops: [] } })).toBe(false)
+    expect(item({ noSuggestion: { code: 'failed', cause: { kind: 'undecided' } } })).toBe(false)
   })
 })

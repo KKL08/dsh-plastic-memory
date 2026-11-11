@@ -12,13 +12,12 @@ import { computeDigest, encodeRecord, splitFrontmatter } from '../src/storage/fr
 import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE, STATE_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
 import { MemoryStore, type MemoryLogger, type MemoryTable } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
-import { PendingDecisionsStore, candidateFingerprint, conflictFingerprint } from '../src/governance/decisions.ts'
+import { PendingDecisionsStore, candidateFingerprint, conflictFingerprint, type PendingTable } from '../src/governance/decisions.ts'
 import { SnapshotStore, editFingerprint } from '../src/governance/snapshots.ts'
 import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
-import { REDACTED_PLACEHOLDER, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type PendingDecision } from '../src/governance/schema.ts'
-import type { ClaimKvTable } from '../src/kv-table.ts'
+import { REDACTED_PLACEHOLDER, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
 import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from '../src/gui/view-writer.ts'
@@ -54,7 +53,7 @@ afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
 interface EnvOpts {
   /** 包一层账本侧表（在读写之间插入别的动作，模拟并发）。 */
-  wrapPending?: (table: ClaimKvTable<PendingDecision>) => ClaimKvTable<PendingDecision>
+  wrapPending?: (table: PendingTable) => PendingTable
   workspacePath?: string
   delegationDepth?: number
   llm?: SemanticLlm | null
@@ -382,6 +381,7 @@ describe('并发裁决', () => {
       get: key => table.get(key),
       put: (key, value) => table.put(key, value),
       delete: key => table.delete(key),
+      deleteIf: (key, isStill) => table.deleteIf(key, isStill),
       claim: key => table.claim(key),
       list: async () => {
         const snapshot = await table.list()
@@ -525,6 +525,7 @@ describe('并发裁决', () => {
         get: key => table.get(key),
         put: (key, value) => table.put(key, value),
         delete: key => table.delete(key),
+        deleteIf: (key, isStill) => table.deleteIf(key, isStill),
         list: () => table.list(),
         claim: async (key) => {
           if (key === entryId) await table.delete(key)
@@ -1670,6 +1671,7 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
           }
         },
         delete: key => table.delete(key),
+        deleteIf: (key, isStill) => table.deleteIf(key, isStill),
         claim: key => table.claim(key),
         list: () => table.list(),
       }),
@@ -1693,6 +1695,7 @@ describe('就地提升（对话卡片、右侧栏「这次新写入的」）：p
         get: key => table.get(key),
         put: (key, value) => table.put(key, value),
         delete: key => table.delete(key),
+        deleteIf: (key, isStill) => table.deleteIf(key, isStill),
         claim: key => table.claim(key),
         // 命令第一次读账本（还没有条目）之后，体检挂进一条
         list: async () => {
@@ -2374,7 +2377,7 @@ describe('scan：上次体检与完成记录', () => {
       ]),
       // 第二个冲突挂账时进程没了（第一个已挂上）
       wrapPending: table => ({
-        get: k => table.get(k), list: () => table.list(), delete: k => table.delete(k), claim: k => table.claim(k),
+        get: k => table.get(k), list: () => table.list(), delete: k => table.delete(k), deleteIf: (k, isStill) => table.deleteIf(k, isStill), claim: k => table.claim(k),
         put: async (k, v) => { if (dying && ++puts === 2) throw new Error('进程退出'); return table.put(k, v) },
       }),
     })
@@ -2798,18 +2801,18 @@ describe('refresh-views', () => {
     }
   })
 
-  it('视图版本 14：开着旧页面的升级后，磁盘上旧版本（13）的全局视图和体检视图经 refresh-views 按新版本重新生成', async () => {
-    expect(GUI_VIEW_VERSION).toBe(14)
+  it('视图版本 15：开着旧页面的升级后，磁盘上旧版本（14）的全局视图和体检视图经 refresh-views 按新版本重新生成', async () => {
+    expect(GUI_VIEW_VERSION).toBe(15)
     const e = env()
     await seedPair(e)
     await mkdir(join(root, GUI_VIEW_DIR), { recursive: true })
-    for (const file of [...Object.values(GUI_VIEW_FILES), GUI_CHECKUP_VIEW_FILE]) await writeFile(join(root, GUI_VIEW_DIR, file), JSON.stringify({ version: 13 }))
+    for (const file of [...Object.values(GUI_VIEW_FILES), GUI_CHECKUP_VIEW_FILE]) await writeFile(join(root, GUI_VIEW_DIR, file), JSON.stringify({ version: 14 }))
     ok(await e.run({ cmd: 'refresh-views' }))
-    expect(pendingViewSchema.parse(await e.readView('pending')).version).toBe(14)
-    expect(healthViewSchema.parse(await e.readView('health')).version).toBe(14)
-    expect(libraryViewSchema.parse(await e.readView('library')).version).toBe(14)
-    expect(deletedViewSchema.parse(await e.readView('deleted')).version).toBe(14)
-    expect((await e.readCheckupView()).version).toBe(14)
+    expect(pendingViewSchema.parse(await e.readView('pending')).version).toBe(15)
+    expect(healthViewSchema.parse(await e.readView('health')).version).toBe(15)
+    expect(libraryViewSchema.parse(await e.readView('library')).version).toBe(15)
+    expect(deletedViewSchema.parse(await e.readView('deleted')).version).toBe(15)
+    expect((await e.readCheckupView()).version).toBe(15)
   })
 
   it('磁盘上是旧版（版本 4，没有建议整理）的待处理视图：按新版本重写，各级条数带上建议整理', async () => {
@@ -4699,8 +4702,8 @@ describe('apply-edits（整理所选：应用全部）', () => {
     })
 
     /** 包一层账本侧表：写进新的整批条目时出错（写进去之前、或写进去之后）。 */
-    const ledgerFailing = (when: 'before' | 'after') => (table: ClaimKvTable<PendingDecision>): ClaimKvTable<PendingDecision> => ({
-      get: k => table.get(k), list: () => table.list(), delete: k => table.delete(k), claim: k => table.claim(k),
+    const ledgerFailing = (when: 'before' | 'after') => (table: PendingTable): PendingTable => ({
+      get: k => table.get(k), list: () => table.list(), delete: k => table.delete(k), deleteIf: (k, isStill) => table.deleteIf(k, isStill), claim: k => table.claim(k),
       put: async (k, v) => {
         const isBatch = v.settled?.verdict === 'batch-edited'
         if (isBatch && when === 'before') throw new Error('账本写不进去')
@@ -4818,5 +4821,226 @@ describe('apply-edits（整理所选：应用全部）', () => {
       expect(err(await e.run({ cmd: 'undo', decisionId: body.decisionId! })).code).toBe('not-found')
       expect(await files(e)).toEqual(before)
     })
+  })
+})
+
+describe('suggest（补上建议）', () => {
+  function scripted(...answers: Array<string | Error | (() => Promise<string>)>) {
+    const prompts: Array<{ system: string; user: string }> = []
+    const llm: SemanticLlm = {
+      model: 'deepseek-v4-flash',
+      complete: async (prompt) => {
+        prompts.push(prompt)
+        const next = answers.shift() ?? ''
+        if (next instanceof Error) throw next
+        return typeof next === 'function' ? next() : next
+      },
+    }
+    return { llm, prompts }
+  }
+  const KEEP_A = JSON.stringify({ action: 'keep-a', reason: 'A 更新' })
+  const horizontalOf = async (e: ReturnType<typeof env>, id: string) => {
+    const item = pendingViewSchema.parse(await e.readView('pending')).items.find(i => 'decisionId' in i && i.decisionId === id)
+    if (item?.kind !== 'conflict-horizontal') throw new Error(`没有横向冲突项 ${id}`)
+    return item
+  }
+
+  it('写到账本条目上（带 id 和依据版本、不回查出处），视图里换成建议；回结果带模型名', async () => {
+    const { llm, prompts } = scripted(KEEP_A)
+    const e = env({ llm })
+    const entry = await seedPair(e)
+    expect(ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))).toEqual({ ok: true, cmd: 'suggest', decisionId: entry.id, model: 'deepseek-v4-flash' })
+    expect(prompts).toHaveLength(1)
+    const saved = (await e.decisions.get(entry.id))!
+    const [a, b] = [await e.store.get('mem_a'), await e.store.get('mem_b')]
+    expect(saved.suggestion).toMatchObject({
+      action: 'keep-a', reason: 'A 更新', isSourced: false, generatedAt: NOW,
+      ops: [{ kind: 'keep', memoryId: 'mem_a' }, { kind: 'forget', memoryId: 'mem_b' }],
+      basis: { conflictFingerprint: 'fp-ab', memories: [{ memoryId: 'mem_a', fingerprint: editFingerprint(a!) }, { memoryId: 'mem_b', fingerprint: editFingerprint(b!) }] },
+    })
+    expect(saved.suggestion!.id).toMatch(/^sg_/)
+    const item = await horizontalOf(e, entry.id)
+    expect(item.suggestion).toEqual({ id: saved.suggestion!.id, action: 'keep-a', reason: 'A 更新', ops: saved.suggestion!.ops, isSourced: false })
+    expect(item.noSuggestion).toBeUndefined()
+    // 不写记忆、不拍快照
+    expect(await e.snapshots.list()).toEqual([])
+    expect(await e.store.get('mem_b')).toMatchObject({ status: 'active', content: '用 npm' })
+  })
+
+  it('已有当前依据的建议时直接回成功、不调用模型；两条被改过后依据作废，再点会重新生成', async () => {
+    const { llm, prompts } = scripted(KEEP_A, JSON.stringify({ action: 'keep-b', reason: 'B 改过了' }))
+    const e = env({ llm })
+    const entry = await seedPair(e)
+    ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+    const first = (await e.decisions.get(entry.id))!.suggestion!.id
+    expect(ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))).toEqual({ ok: true, cmd: 'suggest', decisionId: entry.id })
+    expect(prompts).toHaveLength(1)
+    await e.store.update({ id: 'mem_b' }, r => ({ ...r, summary: '只改了摘要', updatedAt: 5 }))
+    await e.run({ cmd: 'refresh-views' })
+    expect((await horizontalOf(e, entry.id)).noSuggestion).toEqual({ code: 'not-generated' })
+    ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+    expect(prompts).toHaveLength(2)
+    const second = (await e.decisions.get(entry.id))!.suggestion!
+    expect(second.id).not.toBe(first)
+    expect((await horizontalOf(e, entry.id)).suggestion).toMatchObject({ id: second.id, action: 'keep-b' })
+  })
+
+  it('融合：融合稿写进按合并规则保留的那条（全局优先），另一条删除', async () => {
+    const draft = { content: '前端用 pnpm，脚本仓用 npm', summary: '包管理器按仓库选', name: '包管理器' }
+    const { llm } = scripted(JSON.stringify({ action: 'merge', reason: '各有场景', draft }))
+    const e = env({ llm, workspacePath: SESSION_WS })
+    await e.store.create(record({ id: 'mem_a', name: '甲', content: '用 pnpm', scope: 'workspace', workspacePath: SESSION_WS }))
+    await e.store.create(record({ id: 'mem_b', name: '乙', content: '用 npm', tags: ['npm'] }))
+    const { entry } = await e.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', fingerprint: 'fp-ab' }, 1)
+    ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+    expect((await horizontalOf(e, entry.id)).suggestion?.ops).toEqual([
+      { kind: 'forget', memoryId: 'mem_a' },
+      { kind: 'edit', memoryId: 'mem_b', ...draft, tags: ['npm'] },
+    ])
+  })
+
+  it('任一条含高危密钥：回 has-secret，不调用模型；视图原因码是 has-secret', async () => {
+    const { llm, prompts } = scripted(KEEP_A)
+    const e = env({ llm })
+    await e.store.create(record({ id: 'mem_a', name: '甲', content: `用 pnpm，token ${FAKE_SECRET.github}` }))
+    await e.store.create(record({ id: 'mem_b', name: '乙', content: '用 npm' }))
+    const { entry } = await e.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', fingerprint: 'fp-ab' }, 1)
+    expect(err(await e.run({ cmd: 'suggest', decisionId: entry.id })).code).toBe('has-secret')
+    expect(prompts).toEqual([])
+    await e.run({ cmd: 'refresh-views' })
+    expect((await horizontalOf(e, entry.id)).noSuggestion).toEqual({ code: 'has-secret' })
+  })
+
+  it('治理开关关着、子 agent 会话：拒绝，不调用模型', async () => {
+    for (const opts of [{ governanceEnabled: false }, { delegationDepth: 1 }]) {
+      const { llm, prompts } = scripted(KEEP_A)
+      const e = env({ llm, ...opts })
+      const entry = await seedPair(e)
+      expect(err(await e.run({ cmd: 'suggest', decisionId: entry.id })).code).toBe('governanceEnabled' in opts ? 'governance-disabled' : 'subagent-readonly')
+      expect(prompts).toEqual([])
+      expect((await e.decisions.get(entry.id))!.suggestion).toBeUndefined()
+      await rm(root, { recursive: true, force: true })
+      root = await mkdtemp(join(tmpdir(), 'pm-gui-commands-'))
+    }
+  })
+
+  it('拿不到模型：llm-unavailable，账本不动', async () => {
+    const e = env({ llm: null })
+    const entry = await seedPair(e)
+    expect(err(await e.run({ cmd: 'suggest', decisionId: entry.id })).code).toBe('llm-unavailable')
+    expect(await e.decisions.get(entry.id)).toEqual(entry)
+  })
+
+  it('条目不在、不是横向冲突、一方已不在用：not-found / invalid-args / not-found 带记忆 id', async () => {
+    const { llm, prompts } = scripted(KEEP_A)
+    const e = env({ llm })
+    expect(err(await e.run({ cmd: 'suggest', decisionId: 'pd_ghost' })).code).toBe('not-found')
+    await e.store.create(record({ id: 'mem_v', content: '用 npm' }))
+    const vertical = (await e.decisions.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：用 pnpm', summary: 'v', fingerprint: 'fp-v' }, 1)).entry
+    expect(err(await e.run({ cmd: 'suggest', decisionId: vertical.id })).code).toBe('invalid-args')
+    const entry = await seedPair(e)
+    await e.store.update({ id: 'mem_b' }, r => ({ ...r, status: 'deleted', deletedAt: NOW }))
+    expect(err(await e.run({ cmd: 'suggest', decisionId: entry.id }))).toMatchObject({ code: 'not-found', memoryIds: ['mem_b'] })
+    expect(prompts).toEqual([])
+  })
+
+  it('生成期间任一条被改过：回 stale，这一份不写', async () => {
+    let e!: ReturnType<typeof env>
+    const { llm } = scripted(async () => {
+      await e.store.update({ id: 'mem_b' }, r => ({ ...r, tags: ['别处加的'], updatedAt: 5 }))
+      return KEEP_A
+    })
+    e = env({ llm })
+    const entry = await seedPair(e)
+    expect(err(await e.run({ cmd: 'suggest', decisionId: entry.id })).code).toBe('stale')
+    expect((await e.decisions.get(entry.id))!.suggestion).toBeUndefined()
+    expect((await horizontalOf(e, entry.id)).noSuggestion).toEqual({ code: 'not-generated' })
+  })
+
+  it('生成期间别处已写下当前依据的建议：不覆盖，丢掉这一份，回成功', async () => {
+    let e!: ReturnType<typeof env>
+    let otherId = ''
+    const { llm } = scripted(async () => {
+      // 另一个标签页同时点了「补上建议」，先写完
+      const other = env({ llm: scripted(JSON.stringify({ action: 'keep-both', reason: '不矛盾' })).llm })
+      ok(await other.run({ cmd: 'suggest', decisionId: (await e.decisions.list())[0]!.id }))
+      otherId = (await e.decisions.list())[0]!.suggestion!.id
+      return KEEP_A
+    })
+    e = env({ llm })
+    const entry = await seedPair(e)
+    ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+    expect((await e.decisions.get(entry.id))!.suggestion).toMatchObject({ id: otherId, action: 'keep-both' })
+  })
+
+  it('写入时条目正被别处认领：回 claimed，这一份丢弃', async () => {
+    let e!: ReturnType<typeof env>
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let held: Promise<unknown> = Promise.resolve()
+    const { llm } = scripted(async () => {
+      const id = (await e.decisions.list())[0]!.id
+      let acquired!: () => void
+      const isAcquired = new Promise<void>(resolve => { acquired = resolve })
+      held = e.decisions.withClaim(id, async () => { acquired(); await gate })
+      await isAcquired
+      return KEEP_A
+    })
+    e = env({ llm })
+    const entry = await seedPair(e)
+    expect(err(await e.run({ cmd: 'suggest', decisionId: entry.id })).code).toBe('claimed')
+    release()
+    await held
+    expect((await e.decisions.get(entry.id))!.suggestion).toBeUndefined()
+  })
+
+  it('融合稿带进了原文没有的密钥：整份丢弃，回 llm-invalid-output，失败记在条目上、视图原因码 failed', async () => {
+    const raw = JSON.stringify({ action: 'merge', reason: '合', draft: { content: `用 pnpm，${FAKE_SECRET.sk}`, summary: 's' } })
+    const e = env({ llm: scripted(raw).llm })
+    const entry = await seedPair(e)
+    expect(err(await e.run({ cmd: 'suggest', decisionId: entry.id })).code).toBe('llm-invalid-output')
+    expect((await e.decisions.get(entry.id))!.suggestion).toBeUndefined()
+    expect((await horizontalOf(e, entry.id)).noSuggestion).toEqual({ code: 'failed', cause: { kind: 'secret-in-draft' } })
+  })
+
+  it('模型报错：原话脱敏后回 llm-failed 并记进视图；鉴权错误只给错误码；之后再试成功会清掉失败', async () => {
+    const { llm } = scripted(new Error(`upstream said ${FAKE_SECRET.sk}`), Object.assign(new Error(`401 ${FAKE_SECRET.sk}`), { code: 'AUTH' }), KEEP_A)
+    const e = env({ llm })
+    const entry = await seedPair(e)
+    const masked = err(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+    expect(masked).toMatchObject({ code: 'llm-failed', detail: 'upstream said [已隐藏]' })
+    expect((await horizontalOf(e, entry.id)).noSuggestion).toEqual({ code: 'failed', cause: { kind: 'model-error', message: 'upstream said [已隐藏]' } })
+    const auth = err(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+    expect(auth).toEqual({ ok: false, cmd: 'suggest', code: 'llm-failed', detail: 'AUTH' })
+    expect((await horizontalOf(e, entry.id)).noSuggestion).toEqual({ code: 'failed', cause: { kind: 'model-error', hostCode: 'AUTH' } })
+    expect(JSON.stringify(await allEntries(e))).not.toContain(FAKE_SECRET.sk)
+    ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+    const saved = (await e.decisions.get(entry.id))!
+    expect(saved).not.toHaveProperty('suggestionFailure')
+    expect((await horizontalOf(e, entry.id)).suggestion?.action).toBe('keep-a')
+  })
+
+  it('模型判断不了哪条对：回成功（模型正常答了），记在条目上、跟着依据走，视图原因码 undecided 带遮盖后的理由；再试一次成功会清掉', async () => {
+    const unsure = JSON.stringify({ action: 'unsure', reason: '两条都没写适用场景；需要你确认 password: abc12345x 归哪个项目' })
+    const { llm, prompts } = scripted(unsure, KEEP_A)
+    const e = env({ llm })
+    const entry = await seedPair(e)
+    expect(ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))).toEqual({ ok: true, cmd: 'suggest', decisionId: entry.id, model: 'deepseek-v4-flash' })
+    const saved = (await e.decisions.get(entry.id))!
+    expect(saved.suggestion).toBeUndefined()
+    expect(saved.suggestionFailure?.cause).toEqual({ kind: 'undecided', reason: '两条都没写适用场景；需要你确认 [已隐藏] 归哪个项目' })
+    expect((await horizontalOf(e, entry.id)).noSuggestion).toEqual({ code: 'undecided', reason: '两条都没写适用场景；需要你确认 [已隐藏] 归哪个项目' })
+    // 判断不了不算有当前建议：再点会重新问模型
+    ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+    expect(prompts).toHaveLength(2)
+    expect((await e.decisions.get(entry.id))).not.toHaveProperty('suggestionFailure')
+    expect((await horizontalOf(e, entry.id)).suggestion?.action).toBe('keep-a')
+  })
+
+  it('理由按疑似级遮盖后存', async () => {
+    const e = env({ llm: scripted(JSON.stringify({ action: 'keep-a', reason: 'A 里写了 password: abc12345x' })).llm })
+    const entry = await seedPair(e)
+    ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+    expect((await e.decisions.get(entry.id))!.suggestion!.reason).toBe('A 里写了 [已隐藏]')
   })
 })

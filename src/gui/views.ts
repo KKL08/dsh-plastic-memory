@@ -6,7 +6,7 @@ import { RETENTION_MS } from '../retention.ts'
 import { hasCriticalSecret, maskSecretSurface, maskSecrets } from '../secrets.ts'
 import { computeDigest } from '../storage/frontmatter.ts'
 import { FINDING_TYPES, kindOf, verdictLoser, type FindingType, type MemorySnapshot, type PendingDecision } from '../governance/schema.ts'
-import { candidateFingerprint, overflowLevelOf, overflowScopeOf } from '../governance/decisions.ts'
+import { candidateFingerprint, isBasisCurrent, overflowLevelOf, overflowScopeOf } from '../governance/decisions.ts'
 import { asUndoable, isModelChange, undoStateOf } from '../governance/undo-rules.ts'
 import { runRuleScan } from '../governance/rule-scan.ts'
 import { byConfidenceThenConfirmed } from '../snapshot.ts'
@@ -140,6 +140,7 @@ export function buildPendingView(input: ViewInput): PendingView {
       items.push({
         kind: 'conflict-horizontal', level: PENDING_LEVEL_OF_KIND['conflict-horizontal'], ...base, summary: e.summary, left: cardOf(e.memoryIds[0], data), right: cardOf(e.memoryIds[1], data),
         ...(preferred !== undefined ? { preferredId: preferred.id } : {}),
+        ...suggestionState(e, data),
       })
     }
   }
@@ -165,6 +166,28 @@ export function buildPendingView(input: ViewInput): PendingView {
   const cards = items.flatMap(i => i.kind === 'conflict-horizontal' ? [i.left, i.right] : i.kind === 'advice' ? i.memories : 'memory' in i ? [i.memory] : [])
   const levelCounts = Object.fromEntries(PENDING_LEVELS.map(level => [level, items.filter(i => i.level === level).length])) as PendingView['levelCounts']
   return { version: GUI_VIEW_VERSION, generatedAt: input.now, dot, items, levelCounts, typeLabels: typeLabels(input.registry, cards.map(m => m?.type)) }
+}
+
+/**
+ * 冲突项的处理建议（账本存盘形状映射到契约）：条目未决（调用方只传未决条目）、冲突指纹和每条记忆此刻的完整内容指纹都和建议的依据一致，
+ * 才给 suggestion；否则给没有建议的原因：任一条含高危密钥、最近一次模型判断不了或生成失败（依据同样要对得上）、还没生成。一方定位不到时两个都不给。
+ * 改写稿按卡片口径遮高危密钥（存盘的稿保证没有高危，这里兜底）。
+ */
+function suggestionState(e: PendingDecision, data: ScopePreread): Pick<Extract<PendingItem, { kind: 'conflict-horizontal' }>, 'suggestion' | 'noSuggestion'> {
+  const records = e.memoryIds.map(id => data.byId.get(id))
+  if (records.some(r => r?.status !== 'active')) return {}
+  const { suggestion, suggestionFailure } = e
+  if (suggestion !== undefined && isBasisCurrent(e, suggestion.basis, records)) {
+    const ops = suggestion.ops.map(op => (op.kind === 'edit' ? { ...op, ...maskSecretSurface(op) } : op))
+    return { suggestion: { id: suggestion.id, action: suggestion.action, reason: suggestion.reason, ops, isSourced: suggestion.isSourced } }
+  }
+  if (records.some(r => hasCriticalSecret(r!))) return { noSuggestion: { code: 'has-secret' } }
+  if (suggestionFailure !== undefined && isBasisCurrent(e, suggestionFailure.basis, records)) {
+    const { kind, hostCode, message, reason } = suggestionFailure.cause
+    if (kind === 'undecided') return { noSuggestion: { code: 'undecided', reason: reason ?? '' } }
+    return { noSuggestion: { code: 'failed', cause: { kind, ...(hostCode !== undefined ? { hostCode } : {}), ...(message !== undefined ? { message } : {}) } } }
+  }
+  return { noSuggestion: { code: 'not-generated' } }
 }
 
 /** 语义体检来的建议类型：内容重复整组一项，放错层、表述不清每条记忆一项。 */

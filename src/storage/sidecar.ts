@@ -336,7 +336,7 @@ class MapFileTable<T> implements BatchKvTable<T> {
 
 export class SidecarStore<S extends { id: string }, P extends { id: string }, C extends { id: string }, I extends { id: string }> {
   readonly snapshots: KvTable<S>
-  readonly pending: ClaimKvTable<P>
+  readonly pending: ClaimKvTable<P> & CasKvTable<P>
   readonly scanCache: CasKvTable<C>
   readonly recallStats: BatchKvTable<RecallStats>
   readonly adviceIgnores: CasKvTable<I>

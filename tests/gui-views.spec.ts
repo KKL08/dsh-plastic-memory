@@ -7,7 +7,7 @@ import { SidecarStore } from '../src/storage/sidecar.ts'
 import { encodeRecord } from '../src/storage/frontmatter.ts'
 import { GLOBAL_DIR, STATE_DIR, workspaceDirName } from '../src/storage/paths.ts'
 import { MemoryStore } from '../src/store.ts'
-import { candidateFingerprint, PendingDecisionsStore } from '../src/governance/decisions.ts'
+import { candidateFingerprint, PendingDecisionsStore, suggestionBasis } from '../src/governance/decisions.ts'
 import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { SEVERITY_BY_TYPE, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema, type Finding, type FindingType } from '../src/governance/schema.ts'
 import { scopeCacheKey, scopeKey, type Scope } from '../src/scope.ts'
@@ -1114,8 +1114,8 @@ describe('视图写入', () => {
     expect(await readMap()).toEqual({ '/w/old': '/w/old', '/w/new': '/w/new' })
   })
 
-  it('PA-16 视图版本为 14，健康视图不含健康页拆掉后的残留字段', async () => {
-    expect(GUI_VIEW_VERSION).toBe(14)
+  it('PA-16 视图版本为 15，健康视图不含健康页拆掉后的残留字段', async () => {
+    expect(GUI_VIEW_VERSION).toBe(15)
     const h = harness()
     await h.store.create(w({ id: 'mem_old', name: '过期', validTo: EXPIRED_AT }))
     await h.decisions.syncOverflow(WS, { mode: 'relax', tier: 1 }, T0, '超限')
@@ -1136,5 +1136,103 @@ describe('视图写入', () => {
     await writer.dispose()
     await nextTicks()
     expect(await listViews()).toEqual([])
+  })
+})
+
+describe('待处理视图：冲突的处理建议', () => {
+  async function seeded(h: ReturnType<typeof harness>, contentA = '用 pnpm') {
+    await h.store.create(w({ id: 'mem_a', name: 'A', content: contentA }))
+    await h.store.create(w({ id: 'mem_b', name: 'B', content: '用 npm' }))
+    const { entry } = await h.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '矛盾', fingerprint: 'h' }, 4)
+    const records = async () => Promise.all(['mem_a', 'mem_b'].map(id => h.store.get(id, { workspacePath: WS })))
+    const read = (id: string) => h.store.get(id, { workspacePath: WS })
+    return { entry, records, read }
+  }
+  const horizontal = async (h: ReturnType<typeof harness>) => {
+    const item = (await h.views()).pending.items.find(i => i.kind === 'conflict-horizontal')
+    if (item?.kind !== 'conflict-horizontal') throw new Error('没有横向冲突项')
+    return item
+  }
+  const suggestionOf = (basis: ReturnType<typeof suggestionBasis>) => ({
+    id: 'sg_1', action: 'merge' as const, reason: '各有场景',
+    ops: [{ kind: 'edit' as const, memoryId: 'mem_a', content: '前端 pnpm，脚本 npm', name: 'A', summary: '按仓库选', tags: [] }, { kind: 'forget' as const, memoryId: 'mem_b' }],
+    basis, isSourced: false, generatedAt: T0,
+  })
+
+  it('还没生成：原因码 not-generated', async () => {
+    const h = harness()
+    await seeded(h)
+    expect(await horizontal(h)).toMatchObject({ noSuggestion: { code: 'not-generated' } })
+    expect((await horizontal(h)).suggestion).toBeUndefined()
+  })
+
+  it('三条都成立才进视图：条目未决、冲突指纹一致、每条记忆的完整内容指纹一致', async () => {
+    const h = harness()
+    const { entry, records, read } = await seeded(h)
+    const [a, b] = await records()
+    expect(await h.decisions.writeSuggestion(entry.id, { suggestion: suggestionOf(suggestionBasis(entry, [a!, b!])) }, read)).toBe('written')
+    const item = await horizontal(h)
+    expect(item.suggestion).toEqual({
+      id: 'sg_1', action: 'merge', reason: '各有场景', isSourced: false,
+      ops: [{ kind: 'edit', memoryId: 'mem_a', content: '前端 pnpm，脚本 npm', name: 'A', summary: '按仓库选', tags: [] }, { kind: 'forget', memoryId: 'mem_b' }],
+    })
+    expect(item.noSuggestion).toBeUndefined()
+    expect(pendingViewSchema.parse((await h.views()).pending).items).toHaveLength(1)
+
+    // 冲突指纹变了（同一对再报、内容变了）：建议不算数
+    await h.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '矛盾', fingerprint: 'h2' }, 5)
+    expect(await horizontal(h)).toMatchObject({ noSuggestion: { code: 'not-generated' } })
+    await h.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '矛盾', fingerprint: 'h' }, 6)
+    expect((await horizontal(h)).suggestion?.id).toBe('sg_1')
+
+    // 任一条只改了标签：完整内容指纹变了，建议不算数
+    await h.store.update({ id: 'mem_b', workspacePath: WS }, r => ({ ...r, tags: ['新标签'] }))
+    expect((await horizontal(h)).suggestion).toBeUndefined()
+    expect((await horizontal(h)).noSuggestion).toEqual({ code: 'not-generated' })
+
+    // 条目结清了：不在待处理里
+    await h.resolve(entry.id, 'keep-both')
+    expect((await h.views()).pending.items.filter(i => i.kind === 'conflict-horizontal')).toEqual([])
+  })
+
+  it('生成后一条被提升为全局（内容没变）：建议不再进视图', async () => {
+    const h = harness()
+    const { entry, records, read } = await seeded(h)
+    const [a, b] = await records()
+    expect(await h.decisions.writeSuggestion(entry.id, { suggestion: suggestionOf(suggestionBasis(entry, [a!, b!])) }, read)).toBe('written')
+    expect((await horizontal(h)).suggestion?.id).toBe('sg_1')
+    await h.store.put({ ...b!, scope: 'global', workspacePath: undefined }, { workspacePath: WS })
+    const item = await horizontal(h)
+    expect(item.right).toMatchObject({ id: 'mem_b', scope: 'global' })
+    expect(item.suggestion).toBeUndefined()
+    expect(item.noSuggestion).toEqual({ code: 'not-generated' })
+  })
+
+  it('模型判断不了哪条对：原因码 undecided 带理由，不算生成失败', async () => {
+    const h = harness()
+    const { entry, records, read } = await seeded(h)
+    const [a, b] = await records()
+    const cause = { kind: 'undecided' as const, reason: '两条都没写适用场景，需要你确认这个项目用哪个' }
+    await h.decisions.writeSuggestion(entry.id, { failure: { basis: suggestionBasis(entry, [a!, b!]), cause, at: T0 } }, read)
+    const item = await horizontal(h)
+    expect(item.noSuggestion).toEqual({ code: 'undecided', reason: cause.reason })
+    expect(pendingViewSchema.parse((await h.views()).pending).items).toHaveLength(1)
+  })
+
+  it('任一条含高危密钥：原因码 has-secret', async () => {
+    const h = harness()
+    await seeded(h, `用 pnpm，token ${FAKE_SECRET.github}`)
+    expect((await horizontal(h)).noSuggestion).toEqual({ code: 'has-secret' })
+  })
+
+  it('最近一次生成失败：原因码 failed 带原因；两条被改过后失败不算数，回到 not-generated', async () => {
+    const h = harness()
+    const { entry, records, read } = await seeded(h)
+    const [a, b] = await records()
+    const cause = { kind: 'model-error' as const, hostCode: 'RATE_LIMIT', message: '太快了' }
+    await h.decisions.writeSuggestion(entry.id, { failure: { basis: suggestionBasis(entry, [a!, b!]), cause, at: T0 } }, read)
+    expect((await horizontal(h)).noSuggestion).toEqual({ code: 'failed', cause })
+    await h.store.update({ id: 'mem_a', workspacePath: WS }, r => ({ ...r, content: '用 pnpm 9' }))
+    expect((await horizontal(h)).noSuggestion).toEqual({ code: 'not-generated' })
   })
 })

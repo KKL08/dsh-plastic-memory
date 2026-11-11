@@ -1,7 +1,10 @@
 import { z } from 'zod'
 import { memoryRecordSchema } from '../record-schema.ts'
 import { sameScope, scopeKey, scopeOfMemory, scopeSchema, type Scope } from '../scope.ts'
-import { CHECKUP_CAUSE_KINDS, CHECKUP_INITIATORS, DIRECTORY_NOTE_CODES, IGNORABLE_ADVICE_TYPES, MODEL_CHANGE_KINDS, OVERFLOW_MODES, SCAN_NOTE_CODES } from '../contract-codes.ts'
+import {
+  CHECKUP_CAUSE_KINDS, CHECKUP_INITIATORS, DIRECTORY_NOTE_CODES, IGNORABLE_ADVICE_TYPES, MODEL_CHANGE_KINDS, OVERFLOW_MODES, PROPOSAL_ACTIONS, SCAN_NOTE_CODES,
+  SUGGESTION_FAILURE_KINDS,
+} from '../contract-codes.ts'
 
 /** 快照、最近删除的保留窗口（毫秒）：对话卡据此判断模型改写的改前版本是否已过期。 */
 export { RETENTION_MS } from '../retention.ts'
@@ -20,7 +23,7 @@ export { detectSecrets } from '../secrets.ts'
  */
 
 /** 视图 schema 的版本号：视图是派生缓存，形状变了就换号，客户端读到不认识的号按「需要刷新」处理。 */
-export const GUI_VIEW_VERSION = 14
+export const GUI_VIEW_VERSION = 15
 
 /** 视图文件所在目录（相对记忆根目录，POSIX 分隔）。 */
 export const GUI_VIEW_DIR = '.state/gui'
@@ -174,6 +177,54 @@ export function isAwaitingDecision(item: Pick<PendingItem, 'kind' | 'level'>): b
 
 const levelOf = <K extends PendingItemKind>(kind: K) => z.literal(PENDING_LEVEL_OF_KIND[kind])
 
+/** 处理方案的结论代码（名字定义在 contract-codes，账本同用）。 */
+export { PROPOSAL_ACTIONS, type ProposalAction } from '../contract-codes.ts'
+
+/**
+ * 处理方案对一条记忆的操作：edit 改写成这一稿（四个面，写进去的样子），forget 删除，keep 不动。
+ * 处理方案对涉及的每条记忆各有一项，按条目的记忆顺序（横向冲突依次是 A、B）。账本存盘的形状另有一份，视图经映射给出。
+ */
+export const proposalOpSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('edit'), memoryId: z.string(), content: z.string(), name: z.string(), summary: z.string(), tags: z.array(z.string()) }),
+  z.object({ kind: z.literal('forget'), memoryId: z.string() }),
+  z.object({ kind: z.literal('keep'), memoryId: z.string() }),
+])
+export type ProposalOp = z.infer<typeof proposalOpSchema>
+
+/**
+ * 处理建议（模型给一条待处理项的结论，见词表「处理建议」）：id 每次生成一个新的；处理方案（结论、一句理由、逐条操作）；
+ * isSourced 是否回查过出处（由服务端设定）。只在依据版本和此刻对得上时进视图。理由已遮疑似密钥；改写稿进视图前按卡片口径遮高危密钥。
+ */
+export const suggestionSchema = z.object({
+  id: z.string(),
+  action: z.enum(PROPOSAL_ACTIONS),
+  reason: z.string(),
+  ops: z.array(proposalOpSchema),
+  isSourced: z.boolean(),
+})
+export type Suggestion = z.infer<typeof suggestionSchema>
+
+/**
+ * 处理建议没生成成的原因（kind 见 SUGGESTION_FAILURE_KINDS）：hostCode 是宿主给的错误码，message 是脱敏后的原话（鉴权错误不留原话）。
+ * 模型判断不了（undecided）不算生成失败，视图里是单独的原因码，不在这里出现。
+ */
+export const suggestionFailureCauseSchema = z.object({
+  kind: z.enum(SUGGESTION_FAILURE_KINDS).exclude(['undecided']),
+  hostCode: z.string().optional(),
+  message: z.string().optional(),
+})
+export type SuggestionFailureCause = z.infer<typeof suggestionFailureCauseSchema>
+
+/**
+ * 待处理项没有处理建议的原因码：has-secret 任一条含高危密钥（原文不发给模型）；not-generated 还没生成；
+ * failed 最近一次没生成成（带原因 cause）；undecided 模型判断不了哪条对（带它说明的理由 reason，已遮疑似密钥），不给结论、由用户自己选。
+ * 没有可用模型由界面按现有规则自己判断，不进原因码。以后的原因往这里追加。
+ */
+export const NO_SUGGESTION_CODES = ['has-secret', 'not-generated', 'failed', 'undecided'] as const
+export type NoSuggestionCode = (typeof NO_SUGGESTION_CODES)[number]
+export const noSuggestionSchema = z.object({ code: z.enum(NO_SUGGESTION_CODES), cause: suggestionFailureCauseSchema.optional(), reason: z.string().optional() })
+export type NoSuggestion = z.infer<typeof noSuggestionSchema>
+
 /** 待处理项。冲突、提升候选、超限来自待决账本（带 decisionId）；密钥、读不出的文件与建议整理从预读数据派生，不入账本。
  *  冲突一方定位不到时为 null（账本悬空引用，裁决会报错）。 */
 export const pendingItemSchema = z.discriminatedUnion('kind', [
@@ -183,6 +234,10 @@ export const pendingItemSchema = z.discriminatedUnion('kind', [
     left: memoryCardSchema.nullable(), right: memoryCardSchema.nullable(),
     /** 决定前 agent 按哪条来：快照注入的排序（confidence 降序 → lastConfirmedAt 降序）排在前的一方；两方都找不到时缺省。 */
     preferredId: z.string().optional(),
+    /** 处理建议：依据版本和此刻对得上才有。和 noSuggestion 恰好有一个；一方定位不到时两个都缺省。 */
+    suggestion: suggestionSchema.optional(),
+    /** 没有处理建议的原因。 */
+    noSuggestion: noSuggestionSchema.optional(),
   }),
   z.object({
     kind: z.literal('conflict-vertical'), level: levelOf('conflict-vertical'), decisionId: z.string(), firstSeenAt: z.number(), summary: z.string(),
@@ -733,6 +788,15 @@ export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   /** 借来的会话用哪个模型（「让模型改」的按钮与提示）：拿不到回 llm-unavailable；拿到了但不知道名字时 model 缺省。只读。 */
   z.object({ cmd: z.literal('model-info') }),
   /**
+   * 「补上建议」：给一条未决的横向冲突生成处理建议，写到账本条目上（视图随后带出）。单次调用借来的会话的模型，不重新扫描、不写记忆。
+   * 条目已有依据版本对得上的建议时直接回成功、不调用模型。条目不在待处理回 not-found；不是横向冲突回 invalid-args；
+   * 一方已不在用回 not-found（带 memoryIds）；任一条含高危密钥回 has-secret，原文不发给模型。
+   * 模型报错回 llm-failed（detail 已脱敏，鉴权错误只给错误码），输出不合格式、稿里带进了原文没有的密钥回 llm-invalid-output，
+   * 两者都记在条目上，视图里是「生成失败」。模型判断不了哪条对时回成功（模型正常答了），记在条目上，视图里是 undecided。
+   * 生成期间两条被改过回 stale；条目正被别处认领回 claimed，这一份丢弃。
+   */
+  z.object({ cmd: z.literal('suggest'), decisionId: z.string() }),
+  /**
    * 「让模型改 / 让模型合并」的生成：一条（合并时两条）记忆按建议类型的默认要求、或用户写的 request，单次调用借来的会话的模型，
    * 回一稿改后的内容（结果的 draft）。只读：不写记忆、不拍快照、不入账本、不进会话记录；「应用」由界面改发 edit-memory / merge-memories。
    * adviceType 缺省（记忆查看里的修改，不是从建议来的）时 request 必填。
@@ -838,10 +902,11 @@ export const CROSS_WORKSPACE_COMMANDS: ReadonlySet<CrossWorkspaceCmd> = new Set(
 /**
  * 条目还开着才能做的命令，not-found 算别处已处理：处理待决项的，not-found 只可能是条目已出了待决；按记忆 id 提升为全局的，
  * 只可能是那条记忆已不在那个项目里（别处已提升或删掉）；按记忆 id 留在本项目的，是那条已不是候选（别处已处理）；
- * 移到项目的同理，是那条已不在全局；忽略建议的，只可能是涉及的记忆已在别处删掉。undo 的 not-found 还可能是快照过期，不在其中。
+ * 移到项目的同理，是那条已不在全局；忽略建议的，只可能是涉及的记忆已在别处删掉；补上建议的，是条目已出了待决或一方已在别处删掉。
+ * undo 的 not-found 还可能是快照过期，不在其中。
  */
 export const OPEN_ITEM_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set([
-  'resolve', 'promote', 'keep-local', 'dismiss-overflow', 'promote-memory', 'keep-local-memory', 'move-memory', 'ignore-advice',
+  'resolve', 'promote', 'keep-local', 'dismiss-overflow', 'promote-memory', 'keep-local-memory', 'move-memory', 'ignore-advice', 'suggest',
 ] as const)
 
 /** 命令 → 整行文本（客户端发给 `remote.commands.execute`）。 */
@@ -883,7 +948,7 @@ export const GUI_ERROR_CODES = [
   'subagent-readonly',  // 借的会话是子 agent，不可写
   'governance-disabled', // 体检已关闭：裁决、撤销、提升、移到项目、留在本项目、体检、忽略超限不可用
   'has-secret',         // forget 的目标含密钥（任一级），只能彻底删除：什么都没动，界面确认后改发 hard-delete；
-                        // 直接改、直接合并、整理所选的应用的目标含密钥（界面上是遮盖后的正文）：什么都没动；让模型改、整理计划的目标含密钥：不发给模型
+                        // 直接改、直接合并、整理所选的应用的目标含密钥（界面上是遮盖后的正文）：什么都没动；让模型改、整理计划、补上建议的目标含密钥：不发给模型
   'stale',              // 直接改、直接合并、整理计划与应用：记忆在卡片加载后被改过；任一类撤销（含等同撤销的恢复）：目标之后又被改过或已不在原处。什么都没动（合并撤销中途被第三方改过的停在第三方的版本）
   'secret-critical',    // 直接改、直接合并、整理所选的应用的新内容含高危密钥：什么都没动；让模型改、整理计划的要求、此前的要求、计划或上一稿含高危密钥：不发给模型
   'secret-suspected',   // 直接改、直接合并、整理所选的应用的新内容含疑似密钥：什么都没动，用户确认后带 force 重发
@@ -926,7 +991,7 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
     plan: editPlanSchema.optional(),
     /** draft-plan：每个改写项一稿，按命令里 ops 的顺序。 */
     drafts: z.array(z.object({ memoryId: z.string(), draft: memoryDraftSchema })).optional(),
-    /** model-info、draft-edit、plan-edits、draft-plan：借来的会话用的模型名；拿不到名字时缺省。 */
+    /** model-info、draft-edit、plan-edits、draft-plan、suggest：借来的会话用的模型名；拿不到名字时缺省（suggest 没调用模型时也缺省）。 */
     model: z.string().optional(),
     /** scan：体检的说明码（如 baseline-session-scoped）。 */
     notes: z.array(z.enum(SCAN_NOTE_CODES)).optional(),

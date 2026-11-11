@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { memoryRecordSchema } from '../record-schema.ts'
-import { MODEL_CHANGE_KINDS } from '../contract-codes.ts'
+import { MODEL_CHANGE_KINDS, PROPOSAL_ACTIONS, SUGGESTION_FAILURE_KINDS } from '../contract-codes.ts'
 
 /** 与 mem_ id 同模式（pipeline.ts），不引入 nanoid。 */
 export function genId(prefix: string): string {
@@ -57,6 +57,54 @@ export const batchReceiptSchema = z.object({
 })
 export type BatchReceipt = z.infer<typeof batchReceiptSchema>
 
+/**
+ * 处理方案对一条记忆的操作（存盘形状，和 GUI 契约分开、经视图映射）：edit 改写成这一稿（四个面），forget 删除，keep 不动。
+ * 处理方案对涉及的每条记忆各有一项，按条目 memoryIds 的顺序。
+ */
+export const proposalOpSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('edit'), memoryId: z.string(), content: z.string(), name: z.string(), summary: z.string(), tags: z.array(z.string()) }),
+  z.object({ kind: z.literal('forget'), memoryId: z.string() }),
+  z.object({ kind: z.literal('keep'), memoryId: z.string() }),
+])
+export type ProposalOp = z.infer<typeof proposalOpSchema>
+
+/**
+ * 处理建议生成时的依据版本：条目当时的冲突指纹（旧条目没有指纹时缺省），和每条涉及记忆的完整内容指纹（editFingerprint，
+ * 撤销用的那一种，不含位置）、作用域键（scope.ts 的 scopeKey），按条目 memoryIds 的顺序。
+ * 条目指纹、任一条记忆此刻的指纹或作用域对不上，这份建议（或这次失败）就不算数。作用域键缺省的（加它之前写下的）一律算对不上，条目照常解析。
+ */
+export const suggestionBasisSchema = z.object({
+  conflictFingerprint: z.string().optional(),
+  memories: z.array(z.object({ memoryId: z.string(), fingerprint: z.string(), scopeKey: z.string().optional() })),
+})
+export type SuggestionBasis = z.infer<typeof suggestionBasisSchema>
+
+/**
+ * 处理建议（体检或「补上建议」时模型给一条冲突的结论）：每次生成一个新 id，处理方案（结论、一句理由、逐条操作），依据版本，
+ * 是否回查过出处（由代码设定），生成时刻。理由存盘前已按疑似级遮盖密钥；稿不遮盖，存盘前已保证不含高危密钥、疑似值都出自原文。
+ */
+export const storedSuggestionSchema = z.object({
+  id: z.string(),
+  action: z.enum(PROPOSAL_ACTIONS),
+  reason: z.string(),
+  ops: z.array(proposalOpSchema),
+  basis: suggestionBasisSchema,
+  isSourced: z.boolean(),
+  generatedAt: z.number(),
+})
+export type StoredSuggestion = z.infer<typeof storedSuggestionSchema>
+
+/**
+ * 处理建议最近一次没生成成：依据版本（同建议，对不上就不算数）、原因（kind 见 SUGGESTION_FAILURE_KINDS，原话已脱敏；
+ * undecided 带模型说明的理由 reason，已按疑似级遮盖），时刻。
+ */
+export const suggestionFailureSchema = z.object({
+  basis: suggestionBasisSchema,
+  cause: z.object({ kind: z.enum(SUGGESTION_FAILURE_KINDS), hostCode: z.string().optional(), message: z.string().optional(), reason: z.string().optional() }),
+  at: z.number(),
+})
+export type SuggestionFailure = z.infer<typeof suggestionFailureSchema>
+
 export const pendingDecisionSchema = z.object({
   id: z.string(),
   kind: z.enum(PENDING_KINDS).optional(),
@@ -73,6 +121,12 @@ export const pendingDecisionSchema = z.object({
   receipts: z.array(batchReceiptSchema).optional(),
   /** 模型改写、替代：哪个会话里哪次 memory_save 调用改的（对话卡按 callId、右侧栏按 sessionId 认领）；替代时 by 是替代它的那条。 */
   origin: z.object({ sessionId: z.string(), callId: z.string(), by: z.string().optional() }).optional(),
+  /** 冲突：模型给的处理建议，见 storedSuggestionSchema。依据版本对不上时视图当作没有建议。其余条目没有此字段。 */
+  suggestion: storedSuggestionSchema.optional(),
+  /** 冲突：处理建议最近一次没生成成的原因；生成成功时清掉。 */
+  suggestionFailure: suggestionFailureSchema.optional(),
+  /** 冲突：体检自己发起的生成对这个冲突指纹试过几次（用户点「补上建议」不计）；指纹变了从头算。 */
+  suggestionAttempts: z.object({ fingerprint: z.string().optional(), count: z.number().int().positive() }).optional(),
   /**
    * 用户已裁决：条目留作记录。两边都留的指纹不变就不再报；删一方的留着供撤销，snapshotId 是删败方前的快照。
    * isBornSettled：提升候选在等你决定之外就地处理（对话卡片、右侧栏）时账本里还没有它，这条是处理完才记的；

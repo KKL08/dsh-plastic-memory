@@ -75,6 +75,20 @@ export type CheckupInitiator = (typeof CHECKUP_INITIATORS)[number]
  */
 export const CHECKUP_CAUSE_KINDS = ['no-default-model', 'model-error', 'unparseable', 'error'] as const
 
+/**
+ * 处理方案的结论（待决账本的处理建议 governance/schema.ts 与 GUI 视图 gui/contract.ts 同用，存盘、上 wire）。
+ * 横向冲突：merge 融合成一条（保留方按合并规则选，另一条删除）、keep-a / keep-b 只留一条、keep-both 都保留（不算冲突）。
+ */
+export const PROPOSAL_ACTIONS = ['merge', 'keep-a', 'keep-b', 'keep-both'] as const
+export type ProposalAction = (typeof PROPOSAL_ACTIONS)[number]
+
+/**
+ * 处理建议没生成成的原因（账本与视图同用）：model-error = 模型调用出错（宿主给了错误码时带上；鉴权错误不留原话），
+ * unparseable = 输出不合格式，secret-in-draft = 稿里出现高危密钥或原文没有的疑似密钥，整份丢弃，
+ * undecided = 模型正常答了，但判断不了哪条对（带它说明的理由；视图里是单独的原因码，不算生成失败）。
+ */
+export const SUGGESTION_FAILURE_KINDS = ['model-error', 'unparseable', 'secret-in-draft', 'undecided'] as const
+
 /** memory_health 建议的分层并列结构（health.ts）：独占层单元素，行动项层多元素，无事为空数组。 */
 export type HealthRecommendationKind =
   | 'secret'                  // 本层红线门：检出密钥（独占）

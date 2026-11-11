@@ -236,7 +236,8 @@ function errorCode(err: unknown): string | undefined {
   return typeof code === 'string' && code.length > 0 ? code : undefined
 }
 
-function modelError(err: unknown): SemanticFailure {
+/** 模型调用抛错换成没做成的原因（脱敏口径见 SemanticFailure）：处理建议的生成共用。 */
+export function modelError(err: unknown): SemanticFailure {
   const hostCode = errorCode(err)
   if (hostCode === 'AUTH') return { kind: 'model-error', hostCode }
   return { kind: 'model-error', ...(hostCode !== undefined ? { hostCode } : {}), message: maskDiagnostic(err instanceof Error ? err.message : String(err)) }

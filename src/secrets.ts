@@ -38,9 +38,10 @@ export const SECRET_PATTERNS: Array<{ name: string; re: RegExp; severity: Secret
   // \S{6,} 对中文文本会把任意 6 个非空白字符当密码——中文记忆没有空格，普通句子如
   // "密码:公司统一走单点登录" 也会命中。约束取值必须像凭证（同时含数字与字母）且不含中日韩字符，
   // 排除自然语言描述、保留真正贴出来的口令。
-  { name: '硬编码密码', re: /(?:password|passwd|pwd|密码)\s*[:=＝：]\s*(?=\S*[0-9])(?=\S*[A-Za-z])[^\s㐀-鿿]{6,}/i, severity: 'suspected' },
+  // 两条都把凭据值本身放进 value 分组（不含标签、分隔符、引号）：核对改写稿里的值是不是原文里本来就有的（secretValues）。
+  { name: '硬编码密码', re: /(?:password|passwd|pwd|密码)\s*[:=＝：]\s*(?<value>(?=\S*[0-9])(?=\S*[A-Za-z])[^\s㐀-鿿]{6,})/i, severity: 'suspected' },
   // 引号改为可选：记忆内容是散文而非代码，"api_key: 1234567890abcdef" 这种写法不该被漏检。
-  { name: '通用 api_key/token/secret 赋值', re: /\b(?:api[_-]?key|access[_-]?token|secret)\s*[:=]\s*['"]?[A-Za-z0-9_-]{16,}['"]?/i, severity: 'suspected' },
+  { name: '通用 api_key/token/secret 赋值', re: /\b(?:api[_-]?key|access[_-]?token|secret)\s*[:=]\s*['"]?(?<value>[A-Za-z0-9_-]{16,})['"]?/i, severity: 'suspected' },
 ]
 
 export function detectSecrets(text: string): Array<{ name: string; severity: SecretSeverity }> {
@@ -137,6 +138,14 @@ function maskRange(text: string, spans: readonly Span[], from: number, to: numbe
 /** 按片段遮盖：命中规则的片段（口径见 MaskOptions，缺省只看 critical）换成占位文本，其余文字原样。 */
 export function maskSecrets(text: string, opts: MaskOptions = {}): string {
   return maskRange(text, secretSpans(text, opts), 0, text.length)
+}
+
+/**
+ * text 里每处命中的完整凭据值（口径见 MaskOptions）：带 value 分组的规则取值本身，不含标签、分隔符和引号；其余规则整段命中就是值。
+ * 核对一段新写的文字里的密钥是不是原文里本来就有的：值逐个精确比较，截短、加长都对不上，只改标签写法、分隔符仍对得上。
+ */
+export function secretValues(text: string, opts: MaskOptions = {}): string[] {
+  return GLOBAL_PATTERNS[opts.severity ?? 'critical'].flatMap(re => [...text.matchAll(re)].map(m => m.groups?.value ?? m[0]))
 }
 
 /** 报错、诊断文字（解析失败的原话可能引出文件里的整行）：两级密钥都遮。进视图、工具结果、日志之前过它。 */

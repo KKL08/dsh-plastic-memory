@@ -1,10 +1,14 @@
 import { createHash } from 'node:crypto'
-import type { ClaimKvTable } from '../kv-table.ts'
+import type { CasKvTable, ClaimKvTable } from '../kv-table.ts'
 import type { MemoryRecord } from '../record-schema.ts'
 import type { OverflowLevel } from '../contract-codes.ts'
-import { genId, kindOf, verdictLoser, type BatchReceipt, type PendingDecision, type PendingKind, type SettledVerdict } from './schema.ts'
+import {
+  genId, kindOf, verdictLoser, type BatchReceipt, type PendingDecision, type PendingKind, type SettledVerdict, type StoredSuggestion, type SuggestionBasis,
+  type SuggestionFailure,
+} from './schema.ts'
 import { isUndoExpired } from './undo-rules.ts'
 import { editFingerprint } from './snapshots.ts'
+import { scopeAt, scopeKey } from '../scope.ts'
 
 /** 去重 key：memoryIds 排序拼接 + baselineRef（垂直冲突与横向冲突互不干扰）。 */
 export function dedupKey(memoryIds: string[], baselineRef?: string): string {
@@ -23,6 +27,30 @@ export function conflictFingerprint(records: ReadonlyArray<Pick<MemoryRecord, 'i
 /** 提升候选的内容指纹：单条记忆的 id + name + content。内容改了，「留在本项目」的旧结论作废。 */
 export function candidateFingerprint(record: Pick<MemoryRecord, 'id' | 'name' | 'content'>): string {
   return conflictFingerprint([record])
+}
+
+/** 记忆所在作用域的标准键：完整内容指纹不含位置，提升、移动要靠它认出来（融合稿写进哪条按合并规则看作用域）。 */
+const scopeKeyOf = (r: MemoryRecord) => scopeKey(scopeAt(r.workspacePath))
+
+/**
+ * 处理建议的依据版本：条目此刻的冲突指纹，和每条涉及记忆此刻的完整内容指纹、作用域键（按条目 memoryIds 的顺序）。
+ * records 与条目 memoryIds 一一对应、都是此刻读到的记录。
+ */
+export function suggestionBasis(entry: Pick<PendingDecision, 'fingerprint'>, records: readonly MemoryRecord[]): SuggestionBasis {
+  return {
+    ...(entry.fingerprint !== undefined ? { conflictFingerprint: entry.fingerprint } : {}),
+    memories: records.map(r => ({ memoryId: r.id, fingerprint: editFingerprint(r), scopeKey: scopeKeyOf(r) })),
+  }
+}
+
+/** 依据版本和此刻对得上：条目的冲突指纹一致，每条记忆（按 memoryIds 顺序）都在，完整内容指纹和作用域都一致。 */
+export function isBasisCurrent(entry: Pick<PendingDecision, 'fingerprint' | 'memoryIds'>, basis: SuggestionBasis, records: ReadonlyArray<MemoryRecord | undefined>): boolean {
+  if (entry.fingerprint !== basis.conflictFingerprint) return false
+  if (basis.memories.length !== entry.memoryIds.length || records.length !== entry.memoryIds.length) return false
+  return basis.memories.every((m, i) => {
+    const r = records[i]
+    return m.memoryId === entry.memoryIds[i] && r !== undefined && r.id === m.memoryId && editFingerprint(r) === m.fingerprint && scopeKeyOf(r) === m.scopeKey
+  })
 }
 
 /** 「留在本项目」顺带写的放错层忽略（见 schema settled.misplacedIgnore）。 */
@@ -118,10 +146,13 @@ function mergeReport(existing: PendingDecision, input: UpsertInput): PendingDeci
  * settled 条目对 get / list 不可见，只有 listSettled、upsert、removeByMemoryIds、sweep 会看到它。
  * 同一对（samePair）在账本里只有一条未决条目，跨进程也成立：挂账按冲突身份认领（见 upsert）。
  */
-export class PendingDecisionsStore {
-  private table: ClaimKvTable<PendingDecision>
+/** 账本用的表：带排他认领，清理用条件删除。 */
+export type PendingTable = ClaimKvTable<PendingDecision> & Pick<CasKvTable<PendingDecision>, 'deleteIf'>
 
-  constructor(table: ClaimKvTable<PendingDecision>) {
+export class PendingDecisionsStore {
+  private table: PendingTable
+
+  constructor(table: PendingTable) {
     this.table = table
   }
 
@@ -279,7 +310,8 @@ export class PendingDecisionsStore {
    */
   async sweep(now: number): Promise<void> {
     for (const [key, e] of await this.table.list()) {
-      if (isUndoExpired(e, now)) await this.table.delete(key)
+      // 读到之后条目可能被重开（同一对再被扫到、撤销）：删之前按此刻的值再判一次
+      if (isUndoExpired(e, now)) await this.table.deleteIf(key, current => isUndoExpired(current, now))
     }
   }
 
@@ -290,6 +322,41 @@ export class PendingDecisionsStore {
     const { settled: _settled, ...open } = entry
     await this.table.put(id, open)
     return true
+  }
+
+  /**
+   * 把一次生成的结果（处理建议，或没生成成的原因）写到条目上。生成在认领之外做（模型调用可能超过认领的 60 秒），
+   * 这里只认领条目、重读、核对、写：条目仍未决；双方此刻都在用，依据版本和生成时一致；条目上还没有当前依据的建议
+   * （有就不覆盖，丢掉这一份，失败也不记，免得盖住别处刚写的建议）。写建议时清掉之前记的失败。
+   * 删除一条记忆的路径先删记忆、再清条目，且不认领条目：核对之后、写入之前被清掉的条目会被这次写入写回来，
+   * 所以写完（仍在认领内）再读一遍两条，任一条已不在用就撤回这次写入的条目，回 gone。
+   * 返回：written 已写；has-current 已有当前建议、这份丢弃；stale 依据对不上；gone 条目不在、已结清或写完发现一方已不在用；claimed 正被别处认领、这份丢弃。
+   */
+  async writeSuggestion(
+    id: string, outcome: { suggestion: StoredSuggestion } | { failure: SuggestionFailure }, read: ReadMemory,
+  ): Promise<'written' | 'has-current' | 'stale' | 'gone' | 'claimed'> {
+    const claimed = await this.withClaim(id, async () => {
+      const entry = await this.table.get(id)
+      if (entry === undefined || entry.settled !== undefined) return 'gone' as const
+      const records = await Promise.all(entry.memoryIds.map(read))
+      const live = records.map(r => (r?.status === 'active' ? r : undefined))
+      if (entry.suggestion !== undefined && isBasisCurrent(entry, entry.suggestion.basis, live)) return 'has-current' as const
+      const basis = 'suggestion' in outcome ? outcome.suggestion.basis : outcome.failure.basis
+      if (!isBasisCurrent(entry, basis, live)) return 'stale' as const
+      if ('suggestion' in outcome) {
+        const { suggestionFailure: _failure, ...rest } = entry
+        await this.table.put(id, { ...rest, suggestion: outcome.suggestion })
+      } else {
+        await this.table.put(id, { ...entry, suggestionFailure: outcome.failure })
+      }
+      const after = await Promise.all(entry.memoryIds.map(read))
+      if (after.some(r => r?.status !== 'active')) {
+        await this.table.delete(id)
+        return 'gone' as const
+      }
+      return 'written' as const
+    })
+    return claimed.isClaimed ? claimed.value : 'claimed'
   }
 
   /** 全部超限条目（含已忽略的）：已忽略只是不再提醒，超限的事实仍在，健康把它列为问题。 */

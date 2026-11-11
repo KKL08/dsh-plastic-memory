@@ -75,8 +75,11 @@ export interface MemoryGateway {
   execute(sessionId: string, command: MemoryCommand): Promise<MemoryCommandResult>
   /** hook：删过的记忆（见 createDeletionStore），各处显示同一条记忆时读它。 */
   useDeletions(): Deletions
-  /** hook：借来的会话能不能用模型、用的是哪个（「让模型改」面板的提示与「生成修改」）。打开面板时才问，每个会话在页面里只问一次 model-info。 */
-  useModel(session: BorrowedSession): ModelState
+  /**
+   * hook：借来的会话能不能用模型、用的是哪个（「让模型改」面板的提示与「生成修改」）。打开面板时才问，每个会话在页面里只问一次 model-info。
+   * shouldAsk 为 false 时只读这个会话已知的状态（别处问过才知道）、自己不问：页面加载就显示的地方用，问一次会在借来的会话日志里留一条记录。
+   */
+  useModel(session: BorrowedSession, options?: { shouldAsk?: boolean }): ModelState
   /** hook：插件配置里界面要用的几项；宿主还没给出（或不服务这份配置）时为 undefined。 */
   useConfig(): PluginConfig | undefined
   /** 写一个配置字段（`configForms.set`，单字段快捷写入）；宿主接受为 true。 */
@@ -472,10 +475,11 @@ export function createHostGateway(ctx: HostContext): BindGateway {
       useDeletions() {
         return useSyncExternalStore(deletions.subscribe, deletions.get)
       },
-      useModel(session) {
+      useModel(session, options) {
         const sessionId = session.kind === 'ready' ? session.sessionId : undefined
+        const shouldAsk = options?.shouldAsk !== false
         const state = useSyncExternalStore(models.subscribe, () => models.get(sessionId))
-        useEffect(() => { if (sessionId !== undefined) models.probe(sessionId) }, [sessionId])
+        useEffect(() => { if (sessionId !== undefined && shouldAsk) models.probe(sessionId) }, [sessionId, shouldAsk])
         return state
       },
       useConfig() {

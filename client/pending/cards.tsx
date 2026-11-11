@@ -29,6 +29,7 @@ import { useReturnFocus } from '../ui/focus-return.ts'
 import { baseOf, draftOf, isEditable } from './card-edit.ts'
 import { ModelEditPanel } from './model-edit.tsx'
 import { MovePanel } from './move.tsx'
+import { SuggestionBlock } from './suggestion.tsx'
 
 type Item<K extends PendingItem['kind']> = Extract<PendingItem, { kind: K }>
 type Verdict = 'keep-left' | 'keep-right' | 'keep-both'
@@ -245,6 +246,14 @@ export function HorizontalCard({ item, session, now, typeLabel, onDone, onRefuse
         typeLabel={typeLabel}
         projectName={projectNameOf(session)}
         headExtra={<ScopeChips />}
+        suggestion={item.left !== null && item.right !== null
+          ? (
+            <SuggestionBlock
+              decisionId={item.decisionId} left={item.left} right={item.right} suggestion={item.suggestion} noSuggestion={item.noSuggestion}
+              session={session} onRefused={onRefused}
+            />
+          )
+          : undefined}
         onRule={(verdict) => { action.run({ cmd: 'resolve', decisionId: item.decisionId, verdict }) }}
       />
       {action.feedback}
