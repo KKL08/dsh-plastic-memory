@@ -123,6 +123,7 @@ function SavedRow({ session, item, scope, promotion, rewrite, superseded, expire
           {feedback}
         </div>
         <Button
+          variant="ghost"
           unavailable={runner.unavailable(ROW)}
           onClick={() => { runner.run(ROW, { cmd: 'restore', memoryId: id, layer: scope }, { onFailed: 'silent' }) }}
         >
@@ -139,22 +140,21 @@ function SavedRow({ session, item, scope, promotion, rewrite, superseded, expire
         {changes}
         {feedback}
         <div className="pm-saved-foot">
-          <button type="button" className="pm-link" onClick={onDetail}>{t('chat.card.detail')}</button>
+          <button type="button" className="pm-link pm-link--muted" onClick={onDetail}>{t('chat.card.detail')}</button>
         </div>
       </div>
       <DeleteWithConfirm
         onDelete={() => { runner.run(ROW, { cmd: 'forget', memoryId: id, layer: scope }) }}
         trigger={open => (
-          <button
-            type="button"
-            className="pm-icon-btn"
+          <Button
+            variant="icon"
             aria-label={t('chat.card.delete')}
             title={t('chat.card.delete')}
-            aria-disabled={runner.unavailable(ROW) !== undefined || undefined}
-            onClick={() => { if (runner.unavailable(ROW) === undefined) open() }}
+            unavailable={runner.unavailable(ROW)}
+            onClick={open}
           >
             <Icon name="trash" size={14} />
-          </button>
+          </Button>
         )}
       />
     </div>
@@ -240,10 +240,10 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
                 <span className="pm-saved-lead">{foldedNode}</span>
                 <span className="pm-saved-first" title={saved[0]?.memory.name}>{saved[0]?.memory.name}</span>
                 {candidates > 0
-                  ? <span className="pm-saved-hint"><i className="pm-sep" aria-hidden="true">·</i>{t('chat.card.folded.promote', { count: candidates })}</span>
+                  ? <span className="pm-saved-hint" title={t('chat.card.folded.promote', { count: candidates })}><i className="pm-sep" aria-hidden="true">·</i>{t('chat.card.folded.promote', { count: candidates })}</span>
                   : null}
                 {supersededCount > 0
-                  ? <span className="pm-saved-hint"><i className="pm-sep" aria-hidden="true">·</i>{t('chat.card.folded.superseded', { count: supersededCount })}</span>
+                  ? <span className="pm-saved-hint" title={t('chat.card.folded.superseded', { count: supersededCount })}><i className="pm-sep" aria-hidden="true">·</i>{t('chat.card.folded.superseded', { count: supersededCount })}</span>
                   : null}
               </>
             )}
@@ -290,7 +290,8 @@ export const savedMemoriesCardCss = `
 }
 .pm-saved-lead { flex: none; white-space: pre; }
 .pm-saved-first { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; color: var(--pm-text-2); }
-.pm-saved-hint { flex: none; font-weight: 400; color: var(--pm-text-2); white-space: nowrap; }
+/* 末尾的提示和首条名称一起收缩，窄的时候写省略号，不画出卡片 */
+.pm-saved-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; color: var(--pm-text-2); }
 .pm-saved-chevron { flex: none; margin-left: auto; padding-left: 8px; font-weight: 400; color: var(--pm-text-2); transition: transform 120ms ease; }
 .pm-saved[data-open] .pm-saved-chevron { transform: rotate(90deg); }
 @media (prefers-reduced-motion: reduce) { .pm-saved-chevron { transition: none; } }
@@ -301,14 +302,6 @@ export const savedMemoriesCardCss = `
 .pm-saved-row--deleted { align-items: center; justify-content: space-between; }
 .pm-saved-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .pm-saved-note { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
-.pm-icon-btn {
-  flex: none; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px;
-  padding: 0; border: 0; border-radius: var(--dsw-radius-sm, 8px); background: none; color: var(--pm-text-2); cursor: pointer;
-}
-.pm-icon-btn svg { width: 14px; height: 14px; }
-.pm-icon-btn:hover:not([aria-disabled='true']) { background: var(--pm-hover); color: var(--pm-text); }
-.pm-icon-btn[aria-disabled='true'] { opacity: .4; cursor: default; }
 .pm-saved-foot { display: flex; justify-content: flex-end; }
-.pm-saved-foot .pm-link { font-size: 12px; font-weight: 400; color: var(--pm-text-2); }
-.pm-saved-foot .pm-link:hover { color: var(--pm-text); text-decoration: none; }
+.pm-saved-foot .pm-link { font-size: 12px; }
 `

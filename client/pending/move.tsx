@@ -40,7 +40,7 @@ export function MovePanel({ projects, initial, unavailable, onCancel, onMove }: 
                   onChange={() => { setSelected(path) }}
                 />
                 <span className="pm-move-name">{baseName(path)}</span>
-                <span className="pm-move-path">{path}</span>
+                <span className="pm-move-path" title={path}>{path}</span>
               </label>
             ))}
           </div>
@@ -67,6 +67,7 @@ export const moveCss = `
 .pm-move-option { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 4px 0; font-size: 13px; line-height: 1.5; color: var(--pm-text); cursor: pointer; }
 .pm-move-option input { flex-shrink: 0; margin: 0; accent-color: var(--pm-text); transform: translateY(2px); }
 .pm-move-option input:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--pm-focus); outline-offset: 2px; }
-.pm-move-name { flex-shrink: 0; }
-.pm-move-path { min-width: 0; font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 12px; color: var(--pm-text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 项目名先占满自己的宽度，太长时折行；路径分剩下的宽度，截断处悬停看全文 */
+.pm-move-name { min-width: 0; overflow-wrap: anywhere; }
+.pm-move-path { flex: 1 1 0; min-width: 0; font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 12px; color: var(--pm-text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 `

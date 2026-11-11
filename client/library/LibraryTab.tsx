@@ -13,7 +13,7 @@
  * 应用中途失败、已写的没能全部退回时同样回到列表，结果条换成「只应用了其中 k 条……」，副行写明哪几条没退回、为什么，
  * 「撤销全部」只撤仍是这次写下的；应用回 stale、not-found 时留在工作区，交给它等视图换成最新内容。
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState, type RefObject } from 'react'
 import { checkupKey, MAX_BATCH_EDIT, scopeOfMemory, type LibraryView, type MemoryCard as MemoryCardData } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
 import { baseName, useT, type Translate } from '../i18n.tsx'
@@ -24,11 +24,12 @@ import { EmptyState } from '../ui/EmptyState.tsx'
 import { Icon } from '../ui/Icon.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { DeleteWithConfirm, SoftDeleteConfirm } from '../command/confirm.tsx'
-import { baseOf, isEditable } from '../pending/cards.tsx'
+import { baseOf, draftOf, isEditable } from '../pending/cards.tsx'
 import { EditPanel, type EditDraft } from '../pending/edit.tsx'
 import { EditModes, type EditState } from '../pending/edit-modes.tsx'
 import { ModelEditPanel } from '../pending/model-edit.tsx'
 import { BatchEdit, toBatchItems, type BatchApplication, type BatchItem } from './batch-edit.tsx'
+import { useDeletedPlaceholders } from './deleted-placeholders.ts'
 import { bucketize, GROUP_PREVIEW, groupByType, MemoryGroup, RECENT_BUCKETS, recentBucketOf, useFold, type FoldMemory } from './groups.tsx'
 import { FlashRow, matchesQuery, SearchBox, useFlashTarget, useRowActions, useTypeLabel, ViewMessage } from './shared.tsx'
 
@@ -67,12 +68,6 @@ function issueText(issue: LibraryView['directoryIssues'][number], root: string, 
 }
 
 /**
- * 本页删掉的记忆：deleting 是删除发出、结果还没回来，照原样画（宿主可能先推来没有它的视图），命令不在进行中时不算；
- * deleted 画结果行；restored 是撤销了、视图还没刷新回来，照原样画。index 是删时在这个范围列表里的位置。
- */
-interface DoneRow { memory: MemoryCardData; index: number; state: 'deleting' | 'deleted' | 'restored' }
-
-/**
  * 修改后的结果行（同一时刻一条）。done：应用或保存成功，via 决定文案，before 是打开面板时的那一份、draft 是写下的稿：
  * 视图还是 before 那一版（新版本还没推来）时按 draft 画。stale：这条已被别处改过，什么都没写，行内照视图画最新内容。
  */
@@ -88,8 +83,8 @@ const TIDY = 'tidy'
 /**
  * 整理所选应用成功后的结果条。rewritten：改写项应用时工作区里的样子（命令核对的那一版）和写下的稿，视图还是那一版时按稿画；
  * deleted：删除项那一刻的样子，视图还是那一版时先不画（新视图还没推来）。isStale：撤销全部时有记忆之后又被改过，整批没动。
- * partial：只应用了一部分（退回时写盘出错、仍是这次写下的 kept，可撤销；退回前被别处接着改了的 unrecorded，不可撤销），
- * rewritten、deleted 只含 kept 里的。decisionId 缺省：没有可撤销的。
+ * partial：只应用了一部分（退回时写盘出错、仍是这次写下的 recorded，可撤销；退回前被别处接着改了的 unrecorded，不可撤销），
+ * rewritten、deleted 只含 recorded 里的。decisionId 缺省：没有可撤销的。
  */
 interface TidyResult {
   decisionId: string | undefined
@@ -99,14 +94,81 @@ interface TidyResult {
   isStale: boolean
   /** 已经整批撤销：撤回了几条。结果条换成一句「已撤销」，不再有按钮；改写、删除清空，列表照视图画。 */
   undone?: number
-  partial?: { kept: readonly MemoryCardData[]; unrecorded: readonly MemoryCardData[] }
+  partial?: { recorded: readonly MemoryCardData[]; unrecorded: readonly MemoryCardData[] }
 }
 
-const draftOf = (memory: MemoryCardData): EditDraft => ({ content: memory.content, name: memory.name, summary: memory.summary, tags: memory.tags })
 const isSameVersion = (a: MemoryCardData, b: MemoryCardData) => a.updatedAt === b.updatedAt && a.digest === b.digest
 
 /** 一个组：单个范围按类型（先露 3 条），「全部」按时间段（不截断，「更早」默认收起）。 */
 interface Group { key: string; title: string; items: MemoryCardData[]; isOpenByDefault: boolean; truncates: boolean; latest?: number }
+
+/**
+ * 整理所选的结果条：列表顶部，「已整理 N 条……」，有删除时副行说去哪找回，右侧「撤销全部」。
+ * 只应用了一部分：「只应用了其中 k 条，其余没有改动」，副行点名没退回的几条和原因；没有可撤销的就不给「撤销全部」。
+ * 已经整批撤销：换成一句「已撤销」，不带按钮。
+ */
+function TidiedBar({ result, barRef, undoUnavailable, onUndo }: {
+  result: TidyResult
+  /** 应用成功、撤销成功后焦点接到结果条上。 */
+  barRef: RefObject<HTMLDivElement>
+  undoUnavailable: string | undefined
+  onUndo: (decisionId: string) => void
+}) {
+  const t = useT()
+  const deletes = result.deleted.length
+  const rewrites = result.rewritten.size
+  const { partial, decisionId } = result
+  const names = (memories: readonly MemoryCardData[]) => memories.map(m => m.name).join(t('library.batch.nameSep'))
+  if (result.undone !== undefined) {
+    return (
+      <div ref={barRef} className="pm-lib-result pm-lib-tidied" tabIndex={-1}>
+        <p role="status" className="pm-lib-tidied-title">{t('library.batch.undone', { n: result.undone })}</p>
+      </div>
+    )
+  }
+  const subs = result.isStale ? [t('library.batch.undoStale')] : [
+    ...(partial !== undefined && partial.recorded.length > 0 ? [t('library.batch.partialKept', { names: names(partial.recorded) })] : []),
+    ...(partial !== undefined && partial.unrecorded.length > 0 ? [t('library.batch.partialChanged', { names: names(partial.unrecorded) })] : []),
+    ...(deletes > 0 ? [t('library.batch.doneDeleted')] : []),
+  ]
+  return (
+    <div ref={barRef} className="pm-lib-result pm-lib-tidied" tabIndex={-1}>
+      <div role="status">
+        <p className="pm-lib-tidied-title">
+          {partial !== undefined
+            ? t('library.batch.partial', { n: partial.recorded.length + partial.unrecorded.length })
+            : t('library.batch.done', { n: result.total, deletes, rewrites, kept: result.total - deletes - rewrites })}
+        </p>
+        {subs.map(sub => <p key={sub} className="pm-lib-result-text">{sub}</p>)}
+      </div>
+      {result.isStale || decisionId === undefined
+        ? null
+        : <Button variant="ghost" unavailable={undoUnavailable} onClick={() => { onUndo(decisionId) }}>{t('library.batch.undoAll')}</Button>}
+    </div>
+  )
+}
+
+/** 多选的操作条：浮在列表底部，「已选 N 条 · 全选当前结果 · 取消 · 整理所选…」。2 条起、不超过上限才能整理。 */
+function SelectionBar({ count: n, barRef, onSelectAll, onCancel, onTidy }: {
+  count: number
+  /** 从整理工作区回到列表时焦点回「整理所选…」。 */
+  barRef: RefObject<HTMLDivElement>
+  onSelectAll: () => void
+  onCancel: () => void
+  onTidy: () => void
+}) {
+  const t = useT()
+  const isOver = n > MAX_BATCH_EDIT
+  const blocked = n < 2 ? t('library.select.tooFew') : isOver ? t('library.select.tooMany', { n, max: MAX_BATCH_EDIT }) : undefined
+  return (
+    <div ref={barRef} className="pm-lib-selbar" role="group" aria-label={t('library.select.bar')}>
+      <p className="pm-lib-selbar-count" role="status">{isOver ? t('library.select.tooMany', { n, max: MAX_BATCH_EDIT }) : t('library.select.count', { n })}</p>
+      <Button onClick={onSelectAll}>{t('library.select.all')}</Button>
+      <Button variant="ghost" onClick={onCancel}>{t('library.select.cancel')}</Button>
+      <Button variant="primary" unavailable={blocked} onClick={onTidy}>{t('library.select.tidy')}</Button>
+    </div>
+  )
+}
 
 export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
   nav: NavStore
@@ -120,7 +182,6 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
   const gateway = useGateway()
   const view = gateway.useView(session, 'library')
   const [query, setQuery] = useState('')
-  const [done, setDone] = useState<ReadonlyMap<string, DoneRow>>(new Map())
   const actions = useRowActions(session)
   /** 正在修改的那条：点「修改」那一刻的样子，之后视图刷新了也按它预填、按它的版本核对（同待处理卡）。 */
   const [editing, setEditing] = useState<MemoryCardData>()
@@ -147,32 +208,20 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
   /** 应用成功回到列表：焦点接到结果条上。 */
   const tidiedBar = useRef<HTMLDivElement>(null)
   const isTidiedNew = useRef(false)
-  const kept = [...done.values()].filter(row => row.state !== 'deleting' || actions.isBusy(row.memory.id))
+  /** 多选操作条点「取消」：焦点回到搜索框旁的「选择」。 */
+  const libBar = useRef<HTMLDivElement>(null)
+  /** 不可选的勾选框念原因用的 id 前缀。 */
+  const checkId = useId()
+  /** 这一次渲染里展开着的组露出的行（id）。整理应用成功后只给这些行留高亮，收起的组里的行之后展开时不再突然高亮、滚过去。 */
+  const drawnRows = useRef<ReadonlySet<string>>(new Set())
+  const isTidyFlashNew = useRef(false)
   const viewItems = view.status === 'ready' ? view.data.layers.filter(l => isInScope([l.layer], scope)).flatMap(l => l.items) : []
-  // 本页删掉、视图里已经没有的那几条留在原位（等结果、结果行或撤销后等视图回来）；分组的排序是稳定的，插回原位就落回原来的组和位置
-  const scopeItems = [...viewItems]
-  for (const row of kept) {
-    const at = scopeOfMemory(row.memory)
-    if (at === undefined || !isInScope([at], scope) || scopeItems.some(m => m.id === row.memory.id)) continue
-    scopeItems.splice(Math.min(row.index, scopeItems.length), 0, row.memory)
-  }
+  const { items: scopeItems, hasPlaceholders, isDeleted, mark } = useDeletedPlaceholders(viewItems, scope, actions.isBusy)
   const isSearching = query.trim() !== ''
   // 整理删掉的、视图还没推来新版本的：先不画
   const tidyGone = (m: MemoryCardData) => tidied?.deleted.some(d => d.id === m.id && isSameVersion(m, d)) === true
   // 展开着面板的那一行不被搜索滤掉，免得面板连同写了一半的要求一起没了
   const items = scopeItems.filter(m => !tidyGone(m) && (matchesQuery(m, query) || m.id === editing?.id))
-  const viewIds = viewItems.map(m => m.id).join('\n')
-  // 撤销后视图里又有了：不用再替它占位
-  useEffect(() => {
-    const ids = new Set(viewIds.split('\n'))
-    setDone((prev) => {
-      const stale = [...prev.values()].filter(row => row.state === 'restored' && ids.has(row.memory.id))
-      if (stale.length === 0) return prev
-      const next = new Map(prev)
-      for (const row of stale) next.delete(row.memory.id)
-      return next
-    })
-  }, [viewIds])
   // 正在修改的那条在别处删掉了：面板随行消失，状态一起清掉
   const isEditingGone = editing !== undefined && view.status === 'ready' && !viewItems.some(m => m.id === editing.id)
   useEffect(() => {
@@ -201,6 +250,14 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
     isTidiedNew.current = false
     tidiedBar.current?.focus()
   }, [tidied])
+  useEffect(() => {
+    if (!isTidyFlashNew.current) return
+    isTidyFlashNew.current = false
+    setEditFlash((prev) => {
+      const next = [...prev].filter(id => drawnRows.current.has(id))
+      return next.length === prev.size ? prev : new Set(next)
+    })
+  }, [editFlash])
   const { flashId, revealId, targetId, clear } = useFlashTarget(nav, items.map(m => m.id))
   const typeLabel = useTypeLabel(session)
   const folds = useFold(fold, `library|${checkupKey(scope)}`, isSearching)
@@ -214,8 +271,8 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
     actions.run(TIDY, command, null, (result) => {
       const memoryOf = (id: string) => picked.find(item => item.memory.id === id)!.memory
       // 只应用了一部分时只列仍是这次写下的
-      const kept = new Set(result.memoryIds ?? ops.map(op => op.memoryId))
-      const rewritten = new Map(ops.flatMap(op => (op.kind === 'edit' && kept.has(op.memoryId)
+      const recorded = new Set(result.memoryIds ?? ops.map(op => op.memoryId))
+      const rewritten = new Map(ops.flatMap(op => (op.kind === 'edit' && recorded.has(op.memoryId)
         ? [[op.memoryId, { before: memoryOf(op.memoryId), draft: { content: op.content, name: op.name, summary: op.summary, tags: op.tags } }] as const]
         : [])))
       setBatch(undefined)
@@ -225,10 +282,12 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
       isTidiedNew.current = true
       setTidied({
         decisionId: result.decisionId, total, rewritten, isStale: false,
-        deleted: ops.filter(op => op.kind === 'forget' && kept.has(op.memoryId)).map(op => memoryOf(op.memoryId)),
-        ...(result.isPartial === true ? { partial: { kept: [...kept].map(memoryOf), unrecorded: (result.unrecordedIds ?? []).map(memoryOf) } } : {}),
+        deleted: ops.filter(op => op.kind === 'forget' && recorded.has(op.memoryId)).map(op => memoryOf(op.memoryId)),
+        ...(result.isPartial === true ? { partial: { recorded: [...recorded].map(memoryOf), unrecorded: (result.unrecordedIds ?? []).map(memoryOf) } } : {}),
       })
       setFresh(prev => new Set([...prev, ...rewritten.keys()]))
+      // 回到列表画完后，没画出来的（收起的组里、收在「展开其余」里的）去掉高亮
+      isTidyFlashNew.current = true
       setEditFlash(new Set(rewritten.keys()))
     }, (failure) => {
       const ids = failure.memoryIds
@@ -258,12 +317,6 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
   const total = data.layers.reduce((n, l) => n + l.items.length, 0)
   const dir = scopeDir(data, scope, viewItems[0]?.filePath)
   const notice = actions.notice
-  const mark = (memory: MemoryCardData, state: DoneRow['state']) => {
-    setDone((prev) => {
-      const index = (state === 'deleting' ? undefined : prev.get(memory.id)?.index) ?? Math.max(0, viewItems.findIndex(m => m.id === memory.id))
-      return new Map(prev).set(memory.id, { memory, index, state })
-    })
-  }
   const isAll = scope.kind === 'all'
   const groups: Group[] = isAll
     ? bucketize([...items].sort((a, b) => b.updatedAt - a.updatedAt), RECENT_BUCKETS, m => recentBucketOf(m.updatedAt, now))
@@ -368,44 +421,6 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
       return true
     })
   }
-  /**
-   * 整理所选的结果条：列表顶部，「已整理 N 条……」，有删除时副行说去哪找回，右侧「撤销全部」。
-   * 只应用了一部分：「只应用了其中 k 条，其余没有改动」，副行点名没退回的几条和原因；没有可撤销的就不给「撤销全部」。
-   */
-  const tidiedBarOf = (result: TidyResult) => {
-    const deletes = result.deleted.length
-    const rewrites = result.rewritten.size
-    const { partial, decisionId } = result
-    const names = (memories: readonly MemoryCardData[]) => memories.map(m => m.name).join(t('library.batch.nameSep'))
-    if (result.undone !== undefined) {
-      return (
-        <div ref={tidiedBar} className="pm-lib-result pm-lib-tidied" tabIndex={-1}>
-          <p role="status" className="pm-lib-tidied-title">{t('library.batch.undone', { n: result.undone })}</p>
-        </div>
-      )
-    }
-    const subs = result.isStale ? [t('library.batch.undoStale')] : [
-      ...(partial !== undefined && partial.kept.length > 0 ? [t('library.batch.partialKept', { names: names(partial.kept) })] : []),
-      ...(partial !== undefined && partial.unrecorded.length > 0 ? [t('library.batch.partialChanged', { names: names(partial.unrecorded) })] : []),
-      ...(deletes > 0 ? [t('library.batch.doneDeleted')] : []),
-    ]
-    return (
-      <div ref={tidiedBar} className="pm-lib-result pm-lib-tidied" tabIndex={-1}>
-        <div role="status">
-          <p className="pm-lib-tidied-title">
-            {partial !== undefined
-              ? t('library.batch.partial', { n: partial.kept.length + partial.unrecorded.length })
-              : t('library.batch.done', { n: result.total, deletes, rewrites, kept: result.total - deletes - rewrites })}
-          </p>
-          {subs.map(sub => <p key={sub} className="pm-lib-result-text">{sub}</p>)}
-        </div>
-        {result.isStale || decisionId === undefined
-          ? null
-          : <Button variant="ghost" unavailable={actions.unavailable(TIDY)} onClick={() => { undoTidy(result, decisionId) }}>{t('library.batch.undoAll')}</Button>}
-      </div>
-    )
-  }
-
   /** 修改面板：两段切换，两侧都按打开时的那一份预填、按它的版本核对。 */
   const editPanel = (memory: MemoryCardData) => (
     <EditModes
@@ -469,53 +484,37 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
     )
   }
 
-  /** 多选时行首的勾选框：含密钥、没有版本的置灰，悬停写明原因。 */
+  /**
+   * 多选时行首的勾选框：含密钥、没有版本的置灰，悬停写明原因。不用原生 disabled（同 Button 的 unavailable）：
+   * 读屏能念到原因（aria-describedby），点击被吞掉。
+   */
   const checkbox = (memory: MemoryCardData, isPicked: boolean) => {
     const reason = memory.hasSecret === true ? t('library.select.secret') : memory.digest === undefined ? t('library.select.noVersion') : undefined
+    const blocked = reason !== undefined
+    const reasonId = `${checkId}-${memory.id}`
     return (
       <label className="pm-lib-check" title={reason}>
         <input
           type="checkbox"
           aria-label={t('library.select.row', { name: memory.name })}
+          aria-disabled={blocked || undefined}
+          aria-describedby={blocked ? reasonId : undefined}
           checked={isPicked}
-          disabled={reason !== undefined}
-          onChange={() => { toggle(memory.id) }}
+          onChange={() => { if (!blocked) toggle(memory.id) }}
         />
+        {blocked ? <span id={reasonId} className="pm-sr-only">{reason}</span> : null}
       </label>
-    )
-  }
-
-  /** 多选的操作条：浮在列表底部。2 条起、不超过上限才能整理。 */
-  const selectBar = () => {
-    const n = picked.length
-    const isOver = n > MAX_BATCH_EDIT
-    const blocked = n < 2 ? t('library.select.tooFew') : isOver ? t('library.select.tooMany', { n, max: MAX_BATCH_EDIT }) : undefined
-    return (
-      <div ref={selectionBar} className="pm-lib-selbar" role="group" aria-label={t('library.select.bar')}>
-        <p className="pm-lib-selbar-count" role="status">{isOver ? t('library.select.tooMany', { n, max: MAX_BATCH_EDIT }) : t('library.select.count', { n })}</p>
-        <Button onClick={() => { setSelected(prev => new Set([...prev, ...items.filter(m => selectable.has(m.id)).map(m => m.id)])) }}>{t('library.select.all')}</Button>
-        <Button variant="ghost" onClick={endSelect}>{t('library.select.cancel')}</Button>
-        <Button
-          variant="primary"
-          unavailable={blocked}
-          onClick={() => {
-            // 开始下一次整理：上一次的结果条和应用留下的提示收起
-            setTidied(undefined)
-            actions.dismiss(TIDY)
-            setBatch(toBatchItems(picked))
-          }}
-        >
-          {t('library.select.tidy')}
-        </Button>
-      </div>
     )
   }
 
   const row = (memory: MemoryCardData) => {
     const own = scopeOfMemory(memory)
-    if (done.get(memory.id)?.state === 'deleted') {
+    if (isDeleted(memory.id)) {
       return (
-        <li key={memory.id} className="pm-list-row">
+        <li key={memory.id} className={selecting ? 'pm-list-row pm-lib-row--selecting' : 'pm-list-row'}>
+          {selecting
+            ? <span className="pm-lib-check pm-lib-check--blank" aria-hidden="true"><input type="checkbox" tabIndex={-1} disabled /></span>
+            : null}
           <div className="pm-row-body">
             <div className="pm-lib-gone">
               <MemoryCard
@@ -585,7 +584,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
                     onConfirm={() => { startEdit(memory) }}
                   />
                 )
-                : <Button unavailable={actions.unavailable(memory.id)} onClick={() => { modify(memory) }}>{t('pending.modify')}</Button>}
+                : <Button size="sm" unavailable={actions.unavailable(memory.id)} onClick={() => { modify(memory) }}>{t('pending.modify')}</Button>}
               <DeleteWithConfirm
                 onDelete={() => {
                   // 删的是正在高亮的那一条：当作播完，所在的组记成展开，结果行和「撤销」不缩回「展开其余」里
@@ -593,7 +592,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
                   mark(memory, 'deleting')
                   actions.run(memory.id, { cmd: 'forget', memoryId: memory.id, layer: own }, null, () => { mark(memory, 'deleted') })
                 }}
-                trigger={open => <Button variant="ghost" unavailable={actions.unavailable(memory.id)} onClick={open}>{t('library.delete')}</Button>}
+                trigger={open => <Button variant="ghost" size="sm" unavailable={actions.unavailable(memory.id)} onClick={open}>{t('library.delete')}</Button>}
               />
               <Button variant="icon" aria-label={t('library.openFile')} title={t('library.openFile')} onClick={() => { void actions.open(memory.filePath) }}>
                 <Icon name="openFile" size={14} />
@@ -604,11 +603,15 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
     )
   }
 
+  // 下面画组时记下露出的行，提交后整理的高亮据此去掉没画出来的
+  const drawn = new Set<string>()
+  drawnRows.current = drawn
   const group = ({ key, title, items: rows, isOpenByDefault, truncates, latest }: Group) => {
     const reveal = rows.findIndex(m => m.id === revealId)
     const isOpen = reveal >= 0 || folds.isOpen(key, isOpenByDefault)
     const isFull = !truncates || reveal >= GROUP_PREVIEW || folds.isFull(key)
     const shown = isFull ? rows : rows.slice(0, GROUP_PREVIEW)
+    if (isOpen) for (const m of shown) drawn.add(m.id)
     // 直达高亮期间收起这个组：高亮一起结束，不再把组撑着
     const settle = () => { if (reveal >= 0) clear() }
     return (
@@ -631,7 +634,7 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
 
   return (
     <div className="pm-lib">
-      <div className="pm-lib-bar">
+      <div ref={libBar} className="pm-lib-bar">
         <SearchBox label={t('library.search.label')} placeholder={t('library.search.placeholder')} value={query} onChange={setQuery} />
         {isAll
           ? null
@@ -663,14 +666,16 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
           </ul>
         )
         : null}
-      {tidied !== undefined ? tidiedBarOf(tidied) : null}
+      {tidied !== undefined
+        ? <TidiedBar result={tidied} barRef={tidiedBar} undoUnavailable={actions.unavailable(TIDY)} onUndo={(decisionId) => { undoTidy(tidied, decisionId) }} />
+        : null}
       {tidied !== undefined ? actions.feedback(TIDY) : null}
       {notice !== undefined ? <p className="pm-notice" role="status" tabIndex={-1}>{notice.text}</p> : null}
       {actions.strayFailures([...items.map(m => m.id), TIDY])}
       {items.length === 0
-        ? (total === 0 && kept.length === 0
+        ? (total === 0 && !hasPlaceholders
             ? <EmptyState variant="first" title={t('library.empty.first.title')}>{t('library.empty.first.body')}</EmptyState>
-            : viewItems.length > 0 || kept.length > 0
+            : viewItems.length > 0 || hasPlaceholders
               ? <EmptyState variant="daily" title={t('library.search.none')} />
               : <EmptyState variant="daily" title={t('library.empty.scope')} />)
         : (
@@ -679,7 +684,26 @@ export function LibraryTab({ nav, scope, session, fold, now = Date.now() }: {
             <div className="pm-memgroups">{groups.map(group)}</div>
           </>
         )}
-      {selecting ? selectBar() : null}
+      {selecting
+        ? (
+          <SelectionBar
+            count={picked.length}
+            barRef={selectionBar}
+            onSelectAll={() => { setSelected(prev => new Set([...prev, ...items.filter(m => selectable.has(m.id)).map(m => m.id)])) }}
+            onCancel={() => {
+              // 操作条随之收起：焦点回到「选择」（多选期间它就是「完成」，同一个按钮）
+              endSelect()
+              libBar.current?.querySelector<HTMLElement>('.pm-btn[aria-pressed]')?.focus()
+            }}
+            onTidy={() => {
+              // 开始下一次整理：上一次的结果条和应用留下的提示收起
+              setTidied(undefined)
+              actions.dismiss(TIDY)
+              setBatch(toBatchItems(picked))
+            }}
+          />
+        )
+        : null}
     </div>
   )
 }
@@ -706,7 +730,10 @@ export const libraryTabCss = `
 .pm-lib-bar > .pm-search { flex: 1; min-width: 0; }
 .pm-lib-check { display: flex; align-items: center; flex-shrink: 0; height: 22px; cursor: pointer; }
 .pm-lib-check input { margin: 0; accent-color: var(--pm-text); cursor: inherit; }
-.pm-lib-check:has(input:disabled) { cursor: default; }
+.pm-lib-check:has(input[aria-disabled='true']) { cursor: default; }
+.pm-lib-check input[aria-disabled='true'] { opacity: .4; }
+/* 刚删掉的结果行：只占勾选框那一列的位置，和别的行对齐 */
+.pm-lib-check--blank { visibility: hidden; }
 .pm-lib-row--selected { background: var(--pm-accent-tint); }
 /* 窄宽度下行改成上下排；多选时行尾按钮收起了，勾选框仍留在卡片左边 */
 @container (max-width: 500px) {

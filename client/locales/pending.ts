@@ -2,6 +2,7 @@
 
 export const pendingZh = {
   'pending.busy': '正在处理…',
+  'pending.awaitingConfirm': '等你先确认',
   'pending.undo': '撤销',
   'pending.cancel': '取消',
   'pending.cross.body': '这条记忆属于 {name} 项目，不是当前项目。确定在这里处理它吗？',
@@ -72,6 +73,7 @@ export const pendingZh = {
   'pending.overflow.saveFailed': '没有保存成功，再试一次。',
 
   'pending.unreadable.title': '有个文件读不出来',
+  'pending.unreadable.body': '这个文件现在读不出来，里面的记忆不会带入对话。打开文件改好格式后，下次打开记忆页时这条提醒会消失，记忆恢复带入。',
   'pending.unreadable.open': '打开文件',
   'pending.unreadable.revealMac': '在访达中显示',
   'pending.unreadable.revealOther': '在文件夹中显示',
@@ -85,8 +87,8 @@ export const pendingZh = {
   'pending.advice.orphan.title': '指向的旧记忆已不在',
   'pending.advice.orphan.body': '它记着取代了一条旧记忆，那条已经删除或找不到了。打开文件，去掉 supersedes 里失效的那一项。',
   'pending.advice.redundancy.title': '内容重复',
-  'pending.advice.redundancy.body': '两条说的是同一件事，留一条就够。删掉的那条 14 天内可在「最近删除」恢复。',
-  'pending.advice.redundancy.manyBody': '这几条说的是同一件事，留一条就够。删掉的 14 天内可在「最近删除」恢复。',
+  'pending.advice.redundancy.body': '这两条内容有重叠。说的是同一件事，留一条就够；各有要保留的细节，再用「合并」；其实是两件事，点右上角不再提醒。删掉的那条 14 天内可在「最近删除」恢复。',
+  'pending.advice.redundancy.manyBody': '这几条内容有重叠。说的是同一件事，留一条就够；其实是不同的事，点右上角不再提醒。',
   'pending.advice.redundancy.baselineBody': '指令文件（AGENTS.md 等）里已经写了同样的内容，这条可以删掉。删除后 14 天内可在「最近删除」恢复。',
   'pending.advice.redundancy.left': '左边这条',
   'pending.advice.redundancy.right': '右边这条',
@@ -186,6 +188,7 @@ export const pendingZh = {
   'pending.result.confirmedBody': '确认时间已更新，这条不再算作很久没确认。',
   'pending.result.deleted': '已删除',
   'pending.result.deletedBody': '14 天内可在「最近删除」恢复。',
+  'pending.result.deletedNamedBody': '「{name}」14 天内可在「最近删除」恢复。',
   'pending.result.edited': '已修改',
   'pending.result.merged': '已合并',
   'pending.result.ignored': '不再提醒',
@@ -194,6 +197,7 @@ export const pendingZh = {
 
 export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.busy': 'Working…',
+  'pending.awaitingConfirm': 'Waiting for you to confirm',
   'pending.undo': 'Undo',
   'pending.cancel': 'Cancel',
   'pending.cross.body': 'This memory belongs to project {name}, not this one. Handle it from here anyway?',
@@ -264,6 +268,7 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.overflow.saveFailed': 'Could not save. Try again.',
 
   'pending.unreadable.title': 'A file could not be read',
+  'pending.unreadable.body': 'This file cannot be read right now, so the memories in it are not brought into conversations. Open the file and fix its format; the next time you open the memory page, this reminder goes away and the memories are brought in again.',
   'pending.unreadable.open': 'Open file',
   'pending.unreadable.revealMac': 'Show in Finder',
   'pending.unreadable.revealOther': 'Show in folder',
@@ -277,8 +282,8 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.advice.orphan.title': 'Replaces a memory that is gone',
   'pending.advice.orphan.body': 'It says it replaces an older memory that has been deleted or cannot be found. Open the file and remove that entry from supersedes.',
   'pending.advice.redundancy.title': 'Duplicate content',
-  'pending.advice.redundancy.body': 'These two say the same thing, so one is enough. The one you delete can be restored from Recently deleted within 14 days.',
-  'pending.advice.redundancy.manyBody': 'These say the same thing, so one is enough. Any you delete can be restored from Recently deleted within 14 days.',
+  'pending.advice.redundancy.body': "These two overlap. If they say the same thing, one is enough; if each has details worth keeping, use “Merge”; if they are really about different things, choose “Don't remind me” at the top right. The one you delete can be restored from Recently deleted within 14 days.",
+  'pending.advice.redundancy.manyBody': "These overlap. If they say the same thing, one is enough; if they are really about different things, choose “Don't remind me” at the top right.",
   'pending.advice.redundancy.baselineBody': 'Your instruction files (AGENTS.md and the like) already say the same thing, so this one can go. If you delete it, you can restore it from Recently deleted within 14 days.',
   'pending.advice.redundancy.left': 'Left memory',
   'pending.advice.redundancy.right': 'Right memory',
@@ -378,6 +383,7 @@ export const pendingEn: Record<keyof typeof pendingZh, string> = {
   'pending.result.confirmedBody': 'Its confirmation date is updated; it no longer counts as not confirmed in a while.',
   'pending.result.deleted': 'Deleted',
   'pending.result.deletedBody': 'You can restore it from Recently deleted within 14 days.',
+  'pending.result.deletedNamedBody': '“{name}” can be restored from Recently deleted within 14 days.',
   'pending.result.edited': 'Edited',
   'pending.result.merged': 'Merged',
   'pending.result.ignored': 'Dismissed',

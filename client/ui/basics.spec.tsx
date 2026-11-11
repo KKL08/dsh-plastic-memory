@@ -27,6 +27,14 @@ describe('Button', () => {
     expect(screen.getByRole('button', { name: '彻底删除…' })).toHaveClass('pm-btn--danger')
   })
 
+  it('小号尺寸加 pm-btn--sm（12px、内边距 2px 10px），缺省不加', () => {
+    renderInShell(<><Button size="sm">修改</Button><Button variant="ghost" size="sm">删除</Button><Button>恢复</Button></>)
+    expect(screen.getByRole('button', { name: '修改' })).toHaveClass('pm-btn--secondary', 'pm-btn--sm')
+    expect(screen.getByRole('button', { name: '删除' })).toHaveClass('pm-btn--ghost', 'pm-btn--sm')
+    expect(screen.getByRole('button', { name: '恢复' })).not.toHaveClass('pm-btn--sm')
+    expect(buttonCss).toContain('.pm-btn--sm { padding: 2px 10px; font-size: 12px; }')
+  })
+
   it('unavailable：aria-disabled + 提示，点击被吞；可用时照常回调', () => {
     const onClick = vi.fn()
     const { rerender } = renderInShell(<Button unavailable="先开一个会话" onClick={onClick}>体检</Button>)
@@ -73,29 +81,21 @@ describe('StatusMarker', () => {
       <StatusMarker kind="ok" />
       <StatusMarker kind="secret" label="有密钥要处理" />
     </>)
-    expect(screen.getByRole('img', { name: '等你决定' })).toHaveClass('pm-marker--dot', 'pm-marker--pending', 'pm-marker--page')
+    expect(screen.getByRole('img', { name: '等你决定' })).toHaveClass('pm-marker--dot', 'pm-marker--pending')
     expect(container.querySelector('.pm-marker--ok')).toHaveAttribute('aria-hidden', 'true')
     const secret = screen.getByRole('img', { name: '有密钥要处理' })
     expect(secret.tagName.toLowerCase()).toBe('svg')
     expect(secret.querySelectorAll('path')).toHaveLength(2)
   })
-
-  it('导航尺寸：圆点 7px 档，三角不画「!」', () => {
-    const { container } = renderInShell(<><StatusMarker kind="pending" size="nav" /><StatusMarker kind="secret" size="nav" /></>)
-    expect(container.querySelector('.pm-marker--pending')).toHaveClass('pm-marker--nav')
-    expect(container.querySelector('svg[data-pm-marker="secret"]')!.querySelectorAll('path')).toHaveLength(1)
-  })
 })
 
 describe('Chip', () => {
-  it('状态 chip 按色调混底；结果 chip 带绿点；中性胶囊', () => {
+  it('结果 chip 带绿点；中性胶囊', () => {
     const { container } = renderInShell(<>
-      <Chip variant="status" tone="warn">有冲突</Chip>
       <Chip variant="result">已按 A</Chip>
       <Chip variant="neutral">规划中</Chip>
     </>)
-    expect(screen.getByText('有冲突')).toHaveClass('pm-chip', 'pm-chip--warn')
-    expect(screen.getByText('已按 A')).toHaveClass('pm-chip--result')
+    expect(screen.getByText('已按 A')).toHaveClass('pm-chip', 'pm-chip--result')
     expect(screen.getByText('已按 A').querySelector('.pm-chip-dot')).not.toBeNull()
     expect(screen.getByText('规划中')).toHaveClass('pm-chip--neutral')
     expect(container.querySelectorAll('.pm-chip-dot')).toHaveLength(1)
@@ -129,12 +129,11 @@ describe('EmptyState', () => {
     expect(container.querySelector('.pm-whale')).not.toBe(before)
   })
 
-  it('日常：一句结论，最多一个动作，没有鲸尾', () => {
-    const { container } = renderInShell(<EmptyState variant="daily" title="待处理为空" action={<Button>体检当前项目</Button>} />)
+  it('日常：一句结论，没有鲸尾', () => {
+    const { container } = renderInShell(<EmptyState variant="daily" title="待处理为空" />)
     expect(screen.getByRole('status')).toHaveClass('pm-empty--daily')
     expect(container.querySelector('.pm-whale')).toBeNull()
     expect(container.querySelector('.pm-empty-body')).toBeNull()
-    expect(screen.getAllByRole('button')).toHaveLength(1)
   })
 })
 

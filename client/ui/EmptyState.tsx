@@ -2,8 +2,8 @@
  * 空状态（DESIGN.md「Empty State」）：
  * - first（「还没有记忆」）：40px 银藤底图标，里面是银藤色鲸尾线稿；出现时播一次约 2 秒的出水动画，
  *   鼠标移上去重播，减弱动态效果时直接静止。不循环、不做渐变。
- * - daily（「待处理为空」「还没体检过」「体检已关闭」…）：浅灰图标底 + 次文字色图标，一句结论，最多一个动作。
- * 不放假按钮：记忆由 agent 在对话里写。
+ * - daily（「待处理为空」「还没体检过」「体检已关闭」…）：浅灰图标底 + 次文字色记忆图标，一句结论，可带一句说明。
+ * 两种都不放按钮：记忆由 agent 在对话里写，体检入口在标题行。
  */
 import { useId, useState, type ReactNode } from 'react'
 import { MemoryIcon } from '../MemoryIcon.tsx'
@@ -13,22 +13,17 @@ export interface EmptyStateProps {
   title: ReactNode
   /** 说明从哪来 / 会发生什么。 */
   children?: ReactNode
-  /** 最多一个动作（按钮或链接）。 */
-  action?: ReactNode
-  /** daily 的图标，缺省用记忆图标。 */
-  icon?: ReactNode
 }
 
-export function EmptyState({ variant, title, children, action, icon }: EmptyStateProps) {
+export function EmptyState({ variant, title, children }: EmptyStateProps) {
   const [play, setPlay] = useState(0)
   return (
     <div className={`pm-empty pm-empty--${variant}`} role="status">
       <div className="pm-empty-icon" onMouseEnter={variant === 'first' ? () => { setPlay(n => n + 1) } : undefined}>
-        {variant === 'first' ? <WhaleTail key={play} /> : (icon ?? <MemoryIcon size={20} />)}
+        {variant === 'first' ? <WhaleTail key={play} /> : <MemoryIcon size={20} />}
       </div>
       <p className="pm-empty-title">{title}</p>
       {children !== undefined ? <p className="pm-empty-body">{children}</p> : null}
-      {action !== undefined ? <div className="pm-empty-action">{action}</div> : null}
     </div>
   )
 }
@@ -67,7 +62,6 @@ export const emptyStateCss = `
 .pm-empty--first .pm-empty-icon { background: var(--pm-accent-tint); color: var(--pm-accent); }
 .pm-empty-title { margin: 4px 0 0; font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
 .pm-empty-body { margin: 0; max-width: 420px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
-.pm-empty-action { margin-top: 4px; }
 
 .pm-whale { overflow: visible; }
 .pm-whale-tail { transform-box: view-box; transform-origin: 12px 19px; animation: pm-whale-rise 2s cubic-bezier(.22,.8,.24,1) both; }

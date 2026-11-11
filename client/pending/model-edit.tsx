@@ -9,7 +9,7 @@
 import { diffWords, type Change } from 'diff'
 import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { scopeOfMemory, type MemoryCard, type MemoryCommand, type MemoryCommandResult, type ModelEditAdviceType } from '../../src/gui/contract.ts'
-import { LLM_FAILURE_KEYS, refuseBeforeSend } from '../command/protocol.ts'
+import { interpret, LLM_FAILURE_KEYS, refuseBeforeSend } from '../command/protocol.ts'
 import { useGateway, type BorrowedSession, type ModelState } from '../gateway.ts'
 import { formatNumber, useT, type Translate } from '../i18n.tsx'
 import { INTENT_BLANK, SINGLE_INTENTS, type Intent } from '../library/intents.ts'
@@ -30,19 +30,45 @@ type Phase =
 const segmenter = new Intl.Segmenter('zh', { granularity: 'word' })
 const diffOf = (before: string, after: string) => diffWords(before, after, { intlSegmenter: segmenter })
 
-function failureOf(r: Extract<MemoryCommandResult, { ok: false }>, t: Translate): string {
-  switch (r.code) {
-    case 'llm-unavailable': return t(LLM_FAILURE_KEYS[r.code])
-    case 'llm-failed': return t(LLM_FAILURE_KEYS[r.code], { detail: r.detail ?? '' })
-    case 'llm-invalid-output': return t(LLM_FAILURE_KEYS[r.code])
-    default: return t('command.failed', { detail: r.detail ?? r.code })
-  }
+/**
+ * 让模型改、整理所选这几条命令失败的文案：模型出错带原话，其余按命令协议（拿不到模型、输出不合格式、stale、not-found 等换本地文案）。
+ * 单条修改的生成和整理的计划、出稿、应用共用。
+ */
+export function modelFailureOf(command: MemoryCommand, r: Extract<MemoryCommandResult, { ok: false }>, t: Translate): string {
+  if (r.code === 'llm-failed') return t(LLM_FAILURE_KEYS[r.code], { detail: r.detail ?? '' })
+  const outcome = interpret(command, r)
+  if (outcome.kind !== 'failed') return t('command.failed', { detail: r.detail ?? r.code })
+  return outcome.isLocalized ? t(outcome.detail) : t('command.failed', { detail: outcome.detail })
 }
 
 /** 拿到模型名写全句；会话没有模型写原因；还在问或没给名字只写后半句。 */
-export function hintOf(model: ModelState, t: Translate): string {
+function hintOf(model: ModelState, t: Translate): string {
   if (model.status === 'unavailable') return t('pending.model.unavailable')
   return model.status === 'ready' && model.model !== undefined ? t('pending.model.hint', { model: model.model }) : t('pending.model.hintNoName')
+}
+
+/**
+ * 写要求区底栏：左侧的提示和「生成」的置灰原因。拿不到模型最先；other 是调用方另有的原因，排在它之后、要求空着之前。
+ * 要求空着（isMissing）时提示写要求，否则写用哪个模型。
+ */
+export function requestFootOf(model: ModelState, isMissing: boolean, t: Translate, other?: string): { hint: string; blocked: string | undefined } {
+  const isUnavailable = model.status === 'unavailable'
+  return {
+    hint: isMissing && !isUnavailable ? t('library.model.empty') : hintOf(model, t),
+    blocked: isUnavailable ? t('pending.model.unavailable') : other ?? (isMissing ? t('library.model.empty') : undefined),
+  }
+}
+
+/** 模型生成中的一行：跳动的点、在做什么、「停止」。 */
+export function ModelBusy({ label, onStop }: { label: string; onStop: () => void }) {
+  const t = useT()
+  return (
+    <div className="pm-model-busy" role="status">
+      <span className="pm-model-dot" aria-hidden="true" />
+      <span>{label}</span>
+      <Button variant="ghost" onClick={onStop}>{t('pending.model.stop')}</Button>
+    </div>
+  )
 }
 
 export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, session, unavailable, onClose, onApply, onStateChange }: {
@@ -119,7 +145,7 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
     setPhase({ kind: 'busy' })
     void gateway.execute(session.sessionId, command).then((r) => {
       if (mine !== seq.current) return
-      if (!r.ok) { setPhase({ kind: 'ask', error: failureOf(r, t) }); return }
+      if (!r.ok) { setPhase({ kind: 'ask', error: modelFailureOf(command, r, t) }); return }
       if (r.draft === undefined) { setPhase({ kind: 'ask', error: t('pending.model.invalid') }); return }
       const { content, summary, name, tags } = r.draft
       setPhase({ kind: 'result', draft: { content, summary, name: name ?? base.name, tags: tags ?? base.tags } })
@@ -133,17 +159,13 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
   if (phase.kind === 'busy') {
     return (
       <div ref={root} className="pm-edit">
-        <div className="pm-model-busy" role="status">
-          <span className="pm-model-dot" aria-hidden="true" />
-          <span>{t('pending.model.busy')}</span>
-          <Button variant="ghost" onClick={stop}>{t('pending.model.stop')}</Button>
-        </div>
+        <ModelBusy label={t('pending.model.busy')} onStop={stop} />
       </div>
     )
   }
 
   if (phase.kind === 'ask') {
-    const isMissing = isRequired && request.trim() === ''
+    const foot = requestFootOf(model, isRequired && request.trim() === '', t)
     return (
       <div ref={root} className="pm-edit">
         <RequestBox
@@ -159,15 +181,9 @@ export function ModelEditPanel({ memories, adviceType, typeTitle, base, keeper, 
           : null}
         {phase.error !== undefined ? <p className="pm-pending-error" role="alert">{phase.error}</p> : null}
         <div className="pm-edit-foot">
-          <span className="pm-edit-hint">{isMissing && model.status !== 'unavailable' ? t('library.model.empty') : hintOf(model, t)}</span>
+          <span className="pm-edit-hint">{foot.hint}</span>
           <Button variant="ghost" unavailable={unavailable} onClick={onClose}>{t('pending.cancel')}</Button>
-          <Button
-            variant="primary"
-            unavailable={unavailable ?? (model.status === 'unavailable' ? t('pending.model.unavailable') : isMissing ? t('library.model.empty') : undefined)}
-            onClick={generate}
-          >
-            {t('pending.model.generate')}
-          </Button>
+          <Button variant="primary" unavailable={unavailable ?? foot.blocked} onClick={generate}>{t('pending.model.generate')}</Button>
         </div>
       </div>
     )
@@ -324,7 +340,7 @@ function Diff({ parts, side }: { parts: Change[]; side: 'before' | 'after' }) {
 
 export const modelEditCss = `
 .pm-model-ask { min-height: 58px; resize: vertical; }
-.pm-model-ask::placeholder { color: var(--pm-text-3); }
+.pm-model-ask::placeholder { color: var(--pm-text-2); }
 .pm-intents { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .pm-intents-label { margin-right: 2px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-intent[aria-pressed='true'] { background: var(--pm-pressed); color: var(--pm-text); }

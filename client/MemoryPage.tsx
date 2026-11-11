@@ -167,11 +167,11 @@ export function MemoryPage({ nav }: { nav: NavStore }) {
             row={(s) => {
               const count = countTodo(pending, s)
               if (s.kind === 'all') return { sub: allScopesSub(projectCount, t), count }
-              const group = library?.layers.find(l => sameScope(l.layer, s))
-              const n = group?.items.length ?? 0
+              // 记忆还没读到或读取失败：不写条数，免得写成「0 条」
+              const n = library === undefined ? undefined : library.layers.find(l => sameScope(l.layer, s))?.items.length ?? 0
               // 体检在配置文件里关了：只写条数，不打分（和状态条一致）
               const score = isGovernanceEnabled ? scoreOf(health?.layers.find(l => sameScope(l.layer, s))) : undefined
-              const parts = [t(n === 1 ? 'rail.count.one' : 'rail.count', { n: formatNumber(n) })]
+              const parts: string[] = n === undefined ? [] : [t(n === 1 ? 'rail.count.one' : 'rail.count', { n: formatNumber(n) })]
               if (score === 'secret') parts.push(t('rail.unscored'))
               else if (score !== undefined) parts.push(t('health.score', { score: formatNumber(score) }))
               if (isChat(s)) parts.push(t('scope.currentChat'))
@@ -388,7 +388,7 @@ function ScopeRail({ scopes, selected, onSelect, row }: {
                 onClick={() => { if (!isSelected) onSelect(scope) }}
                 onKeyDown={onKeyDown}
               >
-                <span className="pm-rail-name">{scopeLabel(scope, t)}</span>
+                <span className="pm-rail-name" title={scopeLabel(scope, t)}>{scopeLabel(scope, t)}</span>
                 <span className="pm-rail-sub">{sub}</span>
                 {count.todo > 0
                   ? (
@@ -454,8 +454,9 @@ export const memoryPageCss = `
   background: var(--pm-bg-block); font-size: 13px; font-weight: 600; color: var(--pm-text-2);
 }
 .pm-narrow-scope select {
-  max-width: 220px; height: 100%; border: 0; background: transparent; font: inherit; font-weight: 600; color: var(--pm-text); cursor: pointer;
+  max-width: 220px; height: 100%; border: 0; outline: none; background: transparent; font: inherit; font-weight: 600; color: var(--pm-text); cursor: pointer;
 }
+.pm-narrow-scope:focus-within { outline: var(--dsw-focus-ring-width, 2px) solid var(--pm-focus); outline-offset: 0; }
 .pm-narrow-others {
   align-self: flex-start; display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; background: transparent;
   font: inherit; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); cursor: pointer;
@@ -470,7 +471,7 @@ export const memoryPageCss = `
 .pm-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; }
 /* 主区窄到放不下范围名和两个控件时，控件折到下一行靠右；再窄（「保存失败」提示也在时）动作区里接着折行，不撑出横向滚动 */
 .pm-head-main { flex: 1 1 200px; min-width: 0; display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; }
-.pm-head-title { margin: 0; font-size: 20px; font-weight: 600; line-height: 28px; color: var(--pm-text); }
+.pm-head-title { min-width: 0; overflow-wrap: anywhere; margin: 0; font-size: 20px; font-weight: 600; line-height: 28px; color: var(--pm-text); }
 .pm-head-path { min-width: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pm-head-actions {
   display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px;
@@ -478,5 +479,4 @@ export const memoryPageCss = `
 }
 .pm-tab-count { font-weight: 400; color: var(--pm-text-2); }
 .pm-page-panel { min-height: 0; }
-.pm-page-placeholder { margin: 24px 0; text-align: center; font-size: 12px; color: var(--pm-text-2); }
 `

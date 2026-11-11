@@ -1,5 +1,5 @@
 // 插件设置页：三组设置的渲染、revision 冻结与冲突提示、非法值、配置文件关掉体检时置灰、状态卡。场景与类型见 Scenes.spec.tsx。
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { GUI_VIEW_VERSION, type HealthView, type LibraryView, type PendingView } from '../../src/gui/contract.ts'
 import { createFakeGateway } from '../gateway.fake.ts'
@@ -59,6 +59,20 @@ describe('三组设置的渲染', () => {
     expect(screen.getByRole('button', { name: '编辑 术语' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '管理 ›' })).toBeNull()
     expect(screen.queryByText(/^当前：/)).toBeNull()
+  })
+
+  it('四组各一张设置卡，组标题在卡外；「记什么」的场景和记忆类型都在它那张卡里', () => {
+    const { container } = setup()
+    const groups = [...container.querySelectorAll('.pm-group')]
+    expect(groups.map(group => group.querySelector('.pm-group-title')!.textContent)).toEqual(['记什么', '怎么用', '怎么管', '外观'])
+    for (const group of groups) {
+      expect(group.querySelectorAll(':scope > .pm-group-card')).toHaveLength(1)
+      expect(group.querySelector('.pm-group-card')!.contains(group.querySelector('.pm-group-title'))).toBe(false)
+    }
+    const what = groups[0]!.querySelector('.pm-group-card') as HTMLElement
+    expect(within(what).getByRole('heading', { name: '场景' })).toBeInTheDocument()
+    expect(within(what).getByRole('heading', { name: '记忆类型' })).toBeInTheDocument()
+    expect(within(what).getByRole('radiogroup', { name: '场景' })).toBeInTheDocument()
   })
 
   it('怎么用：上限数字、超出上限两种模式的说明、溯源三档', () => {
@@ -156,6 +170,15 @@ describe('保存：revision 冻结、冲突、非法值', () => {
     expect(form.calls).toHaveLength(0)
   })
 
+  it('确认弹窗里点「保存」后焦点落在保存行（保存按钮这时置灰），不掉回页首', async () => {
+    const { form } = setup()
+    fireEvent.click(radio('办公'))
+    save().focus()
+    await clickSave(form)
+    await waitFor(() => { expect(save()).toBeDisabled() })
+    expect(save().closest('.pm-form-footer')).toHaveFocus()
+  })
+
   it('没有改动时保存置灰；多项改动一次 mutate，带开始编辑时的 revision；保存后回到干净状态', async () => {
     const { form } = setup()
     expect(save()).toBeDisabled()
@@ -239,6 +262,7 @@ describe('保存：revision 冻结、冲突、非法值', () => {
     expect(screen.getByText('当前配置是只读的，改不了。')).toBeInTheDocument()
     expect(radio('办公')).toBeDisabled()
     expect(screen.getByRole('button', { name: '新建场景' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '新建类型' })).toBeDisabled()
     expect(tab('提醒的灵敏度', '积极')).toBeDisabled()
   })
 })
@@ -370,7 +394,21 @@ describe('状态卡', () => {
 })
 
 describe('记忆文件位置「在访达中显示」', () => {
+  const onPlatform = (platform: string) => { vi.spyOn(navigator, 'platform', 'get').mockReturnValue(platform) }
+  afterEach(() => { vi.restoreAllMocks() })
+
+  it.each([
+    ['MacIntel', '在访达中显示'],
+    ['Win32', '在文件夹中显示'],
+    ['Linux x86_64', '在文件夹中显示'],
+  ])('按平台写：%s 上是「%s」', (platform, label) => {
+    onPlatform(platform)
+    setup()
+    expect(screen.getByRole('button', { name: label })).toBeInTheDocument()
+  })
+
   it('有实际路径时可以在访达中显示；宿主拒绝时写一句', async () => {
+    onPlatform('MacIntel')
     const gateway = createFakeGateway({ views: { pending: pending(), health: health(NOW), library: library(3, '/home/me/.dsh/memories') }, openOk: false })
     renderInShell(<SettingsPage form={createFakeConfigForm()} onOpenMemoryPage={() => {}} now={NOW} />, gateway)
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '在访达中显示' })) })
@@ -380,6 +418,6 @@ describe('记忆文件位置「在访达中显示」', () => {
 
   it('还不知道路径时没有这个按钮', () => {
     renderInShell(<SettingsPage form={createFakeConfigForm()} onOpenMemoryPage={() => {}} now={NOW} />, createFakeGateway())
-    expect(screen.queryByRole('button', { name: '在访达中显示' })).toBeNull()
+    expect(screen.queryByRole('button', { name: /中显示$/ })).toBeNull()
   })
 })

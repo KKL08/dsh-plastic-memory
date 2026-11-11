@@ -2,21 +2,25 @@
  * 右侧栏「记忆」tab 正文（DESIGN.md Layout「右侧栏记忆 tab 内容（结构 A）」）。只讲插件放进上下文的那份快照和这次新写入的，
  * 对话中 memory_search 搜到的算普通上下文，不列、不计用量。从上到下：
  * 面包屑「本项目 / 项目名」→ 对话开始时 / 重新 / 压缩后重新带入的记忆（随快照来历换标题，用量条）→ 这次新写入的（可删，
- * 进了新快照的移到带入的记忆）→ 带入的记忆（按类型分组，组标题标出全文、只带摘要或只带标题；
- * 带入的记忆有待决冲突时冲突卡挂在那条记忆所在组里就地裁决：横向是两条记忆，垂直是记忆对 AGENTS.md 基线）→ 底部一行入口（其余待处理只在这里带数字）。
+ * 进了新快照的移到带入的记忆）→ 等你决定（带入的记忆涉及的待决冲突就地裁决：横向是两条记忆，垂直是记忆对 AGENTS.md 基线；
+ * 刚裁决的结果卡留在原位；都没有时不画）→ 带入的记忆（按类型分组，组标题标出全文、只带摘要或只带标题；冲突双方照常列在各自组里）
+ * → 底部一行入口（其余待处理只在这里带数字）。
+ * 「等你决定」和各类型组都可折叠：「等你决定」默认展开，类型组默认收起；点过的以用户为准，tab 挂着期间保留。
  * 数据：会话视图（来历、带入 / 全文 / 只带标题 / 新写入的 id、用量）、全部记忆视图（按 id 取记忆卡）、待处理视图（冲突与本项目待处理数）、
  * 健康视图（bootedAt：插件本次加载时刻）。
  * 四种状态：无记忆、有全局没本项目、正常、frozenAt 早于插件本次加载（重启后未重新带入；视图没带 bootedAt 时不判断）。
- * 刚裁决的冲突在本地留原位可撤销，tab 卸载后收起。
+ * 刚裁决的冲突在本地留原位可撤销，tab 卸载后收起。撤销生效、视图还没把冲突带回来时，按裁决前的样子原位画回冲突卡（同记忆页处理视图），
+ * 「等你决定」不空出一帧，焦点留在这张卡上；视图带回后卡片不重挂。
  * 裁决碰上这条冲突正在别处处理或刚处理完（什么都没动）：冲突卡还在时原位说明，那边的结果写进视图、卡片消失后
- * 说明挪到「带入的记忆」上面（没有记忆了就在空状态上面），下一次动作时收起。
- * 新写入的行尾删除先在原位确认「删除这条？ 删除 · 取消」，点「删除」才发 forget。
+ * 说明挪到「等你决定」「带入的记忆」上面（没有记忆了就在空状态上面），下一次动作时收起。
+ * 新写入的行尾删除先在原位确认「删除这条？ 删除 · 取消」，点「删除」才发 forget；删后原位留「已删除」和「撤销」（发 restore，
+ * 文案和撤销失败不写原因同对话交付卡），tab 卸载后收起。别处删掉的照旧直接从列表里去掉。
  * 新写入的含密钥时不能软删（服务端回 has-secret，什么都没动）：原位确认，「彻底删除」发 hard-delete，删后原位留不可恢复的说明，tab 卸载后收起。
  * 新写入的是全局提升候选时就地给「留在本项目」「提升为全局」，处理过的换成结果文字（见 promote-in-place.tsx），不进底部的待处理计数。
  * 这次对话里模型改写、替代已有记忆的（全部记忆视图的 modelChanges，按会话认领、晚于这份快照的；同一条只列最近那次改写，本次新记的不另列）也列在「这次新写入的」：
  * 改写的那条带「已改写」、「改前 / 改后」对照与「撤销修改」，替代写「「新」替代了「旧」」与「撤销修改」（见 model-change.tsx）。
  */
-import { useMemo, useState, type ReactNode } from 'react'
+import { useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   CONFLICT_ACTION_VERDICTS, pendingItemScopes, sameScope, scopeOfMemory,
   type MemoryCard as MemoryCardData, type MemoryCommand, type ModelChange, type PendingItem, type Scope, type SnapshotOrigin,
@@ -26,14 +30,17 @@ import { samePath } from '../session-pick.ts'
 import { baseName, formatNumber, useT } from '../i18n.tsx'
 import type { LocaleKey } from '../locales.ts'
 import type { NavTarget } from '../nav.ts'
+import { GroupBody, useFold } from '../library/groups.tsx'
 import { mergeTypeLabels, ViewMessage } from '../library/shared.tsx'
 import { typeLabel } from '../type-label.ts'
 import { ResultLine } from '../ui/Advice.tsx'
+import { Button } from '../ui/Button.tsx'
 import { ConflictRuling, VerticalConflictRuling } from '../ui/ConflictRuling.tsx'
 import { ContextBudgetBar } from '../ui/ContextBudgetBar.tsx'
 import { EmptyState } from '../ui/EmptyState.tsx'
 import { Icon } from '../ui/Icon.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
+import { StatusMarker } from '../ui/StatusMarker.tsx'
 import { Arrival, useArrivals } from '../ui/motion.tsx'
 import { CommandFeedback, DeleteWithConfirm } from '../command/confirm.tsx'
 import type { Ok } from '../command/protocol.ts'
@@ -41,23 +48,9 @@ import { useCommandRunner } from '../command/useCommandRunner.ts'
 import { promotionOf, usePromoteInPlace, type InPlacePromotion } from '../chat/promote-in-place.tsx'
 import { ModelChangeLine } from '../chat/model-change.tsx'
 import { isLiveWrite, sessionCards, writtenSinceSnapshot } from './session-memories.ts'
-
-type Conflict = Extract<PendingItem, { kind: 'conflict-horizontal' }>
-type VerticalConflict = Extract<PendingItem, { kind: 'conflict-vertical' }>
-type Verdict = 'keep-left' | 'keep-right' | 'keep-both'
-
-/**
- * 刚裁决的冲突：记忆的快照留着，被删后仍能原位显示。isUnrecorded：两边都留但结论没记下（见命令结果 isUnrecorded），
- * 没有可撤销的条目。isHardDeleted：败方含密钥、已彻底删除，同样没有撤销。
- */
-type Outcome = { isUnrecorded?: true; isHardDeleted?: true }
-type Ruled =
-  | { kind: 'horizontal'; decisionId: string; verdict: Verdict; left: MemoryCardData; right: MemoryCardData } & Outcome
-  | { kind: 'vertical'; decisionId: string; verdict: Verdict; memory: MemoryCardData } & Outcome
+import { groupInjected, type Conflict, type Decision, type GroupDepth, type Outcome, type Ruled, type Verdict, type VerticalConflict } from './injected-groups.ts'
 
 const outcomeOf = (result: Ok): Outcome => ({ ...(result.isUnrecorded ? { isUnrecorded: true } : {}), ...(result.isHardDeleted ? { isHardDeleted: true } : {}) })
-
-const ruledMemories = (r: Ruled): MemoryCardData[] => r.kind === 'horizontal' ? [r.left, r.right] : [r.memory]
 
 /** 用量标题随快照来历变。 */
 const USAGE_TITLE: Record<SnapshotOrigin, LocaleKey> = {
@@ -67,11 +60,15 @@ const USAGE_TITLE: Record<SnapshotOrigin, LocaleKey> = {
   refreshed: 'sidebar.usage.titleRefreshed',
 }
 
-type Entry =
-  | { kind: 'memory'; memory: MemoryCardData }
-  | { kind: 'conflict'; item: Conflict }
-  | { kind: 'vertical'; item: VerticalConflict }
-  | { kind: 'ruled'; ruled: Ruled }
+/** 「等你决定」段在折叠状态里的键（类型组是「type|类型」）。 */
+const YOUR_CALL = 'your-call'
+
+/** 组标题后面标的带入方式。 */
+const DEPTH_LABEL: Record<GroupDepth, LocaleKey> = {
+  full: 'sidebar.groups.full',
+  summary: 'sidebar.groups.summary',
+  titleOnly: 'sidebar.groups.titleOnly',
+}
 
 export interface SidebarTabProps {
   /** tab 所在的会话。 */
@@ -102,7 +99,16 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   // 删过的记忆（这里、全部记忆或对话交付卡删的）：新记的列表里立刻去掉，不等视图刷新
   const deletions = gateway.useDeletions()
   const [ruled, setRuled] = useState<readonly Ruled[]>([])
+  /** 裁决时的那条待决项（按 decisionId），撤销后原位画回去用。 */
+  const ruledItems = useRef(new Map<string, Conflict | VerticalConflict>())
+  /** 撤销已生效、待处理视图还没带回来的冲突：照裁决前的样子原位画，可以接着裁决；视图里重新有了就去掉这一笔。 */
+  const [undone, setUndone] = useState<ReadonlyMap<string, Conflict | VerticalConflict>>(new Map())
   const [purged, setPurged] = useState<ReadonlySet<string>>(new Set())
+  /**
+   * 在这里删过的新写入：按 id 留着那张卡，软删后原位画「已删除 · 撤销」（视图刷新后卡已经不在全部记忆里）。
+   * isRestored：撤销成功、视图还没刷新回来，照原样画这张卡；视图里重新有了就去掉这一笔。
+   */
+  const [removed, setRemoved] = useState<ReadonlyMap<string, { memory: MemoryCardData; isRestored?: true }>>(new Map())
   /** 这里写进了 AGENTS.md 的：项目里那条进了最近删除、离开了视图，按 id 留着那张卡和结果。 */
   const [wroteAgentsMd, setWroteAgentsMd] = useState<ReadonlyMap<string, MemoryCardData>>(new Map())
   // 动作按条（待决项 id / 记忆 id）经命令往返模块发出：在途时这一条不可再点，同一条冲突不会发出两条相反的裁决；
@@ -115,22 +121,31 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     setRefused(undefined)
     runner.run(id, command, { onOk, onHandledElsewhere() { setRefused(id) } })
   }
+  const settle = (item: Conflict | VerticalConflict, entry: Ruled) => {
+    ruledItems.current.set(item.decisionId, item)
+    setRuled(prev => [...prev, entry])
+    setUndone((prev) => { const next = new Map(prev); next.delete(item.decisionId); return next })
+  }
   const rule = (item: Conflict, verdict: Verdict) => {
     const { left, right } = item
     if (left === null || right === null) return
     run(item.decisionId, { cmd: 'resolve', decisionId: item.decisionId, verdict }, (result) => {
-      setRuled(prev => [...prev, { kind: 'horizontal', decisionId: item.decisionId, verdict, left, right, ...outcomeOf(result) }])
+      settle(item, { kind: 'horizontal', decisionId: item.decisionId, verdict, left, right, ...outcomeOf(result) })
     })
   }
   const ruleVertical = (item: VerticalConflict, verdict: Verdict) => {
     const { memory } = item
     if (memory === null) return
     run(item.decisionId, { cmd: 'resolve', decisionId: item.decisionId, verdict }, (result) => {
-      setRuled(prev => [...prev, { kind: 'vertical', decisionId: item.decisionId, verdict, memory, ...outcomeOf(result) }])
+      settle(item, { kind: 'vertical', decisionId: item.decisionId, verdict, memory, ...outcomeOf(result) })
     })
   }
   const undo = (decisionId: string) => {
-    run(decisionId, { cmd: 'undo', decisionId }, () => { setRuled(prev => prev.filter(r => r.decisionId !== decisionId)) })
+    run(decisionId, { cmd: 'undo', decisionId }, () => {
+      const item = ruledItems.current.get(decisionId)
+      if (item !== undefined) setUndone(prev => new Map(prev).set(decisionId, item))
+      setRuled(prev => prev.filter(r => r.decisionId !== decisionId))
+    })
   }
   // 发出 forget 时就记下（含密钥时确认后改发的彻底删除沿用这一次），等删除状态记成彻底删除再换上说明：
   // 网关记删除和成功回调不在同一次提交，回调里才记会先空出一帧（这一行没了、说明还没来），焦点趁机落到后面的控件上。
@@ -138,19 +153,35 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   const forget = (memory: MemoryCardData) => {
     const memoryId = memory.id
     setPurged(prev => new Set(prev).add(memoryId))
+    // 同样在发出时记下：网关记成软删的那一帧这一行就换成「已删除」，焦点落在原位的「撤销」上
+    setRemoved(prev => new Map(prev).set(memoryId, { memory }))
     run(memoryId, { cmd: 'forget', memoryId, layer: scopeOfMemory(memory) }, (_result, sent) => {
       if (sent.cmd === 'forget') setPurged((prev) => { const next = new Set(prev); next.delete(memoryId); return next })
     })
   }
   const isPurged = (id: string) => purged.has(id) && deletions.of(id) === 'hard'
+  // 撤销删除失败不写原因，那一行还是「已删除」（同对话交付卡）
+  const restore = (memory: MemoryCardData) => {
+    runner.run(memory.id, { cmd: 'restore', memoryId: memory.id, layer: scopeOfMemory(memory) }, {
+      onFailed: 'silent',
+      onOk() { setRemoved(prev => new Map(prev).set(memory.id, { memory, isRestored: true })) },
+    })
+  }
 
   const arrivals = useArrivals(sessionView.status === 'ready' ? writtenSinceSnapshot(sessionView.data) : undefined, sessionId)
+  // 「等你决定」和各类型组的折叠：组件内状态，tab 挂着期间保留
+  const folds = useFold(undefined, 'sidebar', false)
 
   if (library.status !== 'ready') return <div className="pm-side"><ViewMessage state={library} idle={t('view.loading')} className="pm-side-hint" /></div>
 
   const snapshot = sessionView.status === 'ready' ? sessionView.data : undefined
   const ws = snapshot?.workspacePath ?? cwd
   const { byId, globalCount, projectCount } = sessionCards(library.data, ws)
+  // 撤销回来的那条视图里重新有了：以视图为准，不再按留下的卡画
+  const settled = [...removed].filter(([id, entry]) => entry.isRestored === true && byId.has(id)).map(([id]) => id)
+  if (settled.length > 0) {
+    setRemoved((prev) => { const next = new Map(prev); for (const id of settled) next.delete(id); return next })
+  }
   // 彻底删除的那条视图里已经没有了，按 id 原位留一行说明（删的是最后一条时留在空状态上面，也是焦点的落点）
   const purgedNote = (id: string) => <p key={id} className="pm-side-hint" tabIndex={-1}>{t('pending.secret.deletedNotice')}</p>
   const refusedNote = <p className="pm-pending-error" role="alert" tabIndex={-1}>{t('sidebar.action.refused')}</p>
@@ -164,58 +195,37 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     )
   }
 
-  // 带入的记忆按类型分组；记忆有待决横向冲突（或刚裁决完）时，那张冲突卡占它的位置，另一方不再单独列
   const pendingItems = pending.status === 'ready' ? pending.data.items : []
-  const conflicts = pendingItems.filter((item): item is Conflict => item.kind === 'conflict-horizontal')
-  const verticals = pendingItems.filter((item): item is VerticalConflict => item.kind === 'conflict-vertical')
+  // 撤销回来的冲突视图里重新有了：以视图为准，不再按留下的那条画
+  const backInView = [...undone.keys()].filter(id => pendingItems.some(item => 'decisionId' in item && item.decisionId === id))
+  if (backInView.length > 0) {
+    setUndone((prev) => { const next = new Map(prev); for (const id of backInView) next.delete(id); return next })
+  }
+  const stillUndone = [...undone.values()].filter(item => !backInView.includes(item.decisionId))
   const viewLabels = mergeTypeLabels(library, pending)
   const label = (type: string) => typeLabel(t, type, { viewLabels, customTypes: config?.customTypes })
   const ruledIds = new Set(ruled.map(r => r.decisionId))
-  const inline = new Set<string>()
-  const shown = new Set<string>()
-  const groups = new Map<string, Entry[]>()
-  const counts = new Map<string, number>()
-  // 每组按带入方式计数：快照按类型决定全文（core 区）、带摘要的索引行还是只带名称和标签的索引行，一组正常只有一种
-  const coreIds = new Set(snapshot?.coreIds ?? [])
-  const titleOnlyIds = new Set(snapshot?.titleOnlyIds ?? [])
-  const fullCounts = new Map<string, number>()
-  const titleCounts = new Map<string, number>()
-  const push = (type: string, entry: Entry) => { groups.set(type, [...groups.get(type) ?? [], entry]) }
-  for (const id of snapshot?.injectedIds ?? []) {
-    const done = ruled.find(r => ruledMemories(r).some(m => m.id === id))
-    const memory = byId.get(id) ?? (done === undefined ? undefined : ruledMemories(done).find(m => m.id === id))
-    if (memory === undefined) continue
-    counts.set(memory.type, (counts.get(memory.type) ?? 0) + 1)
-    if (coreIds.has(id)) fullCounts.set(memory.type, (fullCounts.get(memory.type) ?? 0) + 1)
-    if (titleOnlyIds.has(id)) titleCounts.set(memory.type, (titleCounts.get(memory.type) ?? 0) + 1)
-    if (shown.has(id)) continue
-    const open = done === undefined
-      ? conflicts.find(c => !ruledIds.has(c.decisionId) && (c.left?.id === id || c.right?.id === id))
-      : undefined
-    const openVertical = done === undefined && open === undefined
-      ? verticals.find(c => !ruledIds.has(c.decisionId) && c.memory?.id === id)
-      : undefined
-    if (done !== undefined) {
-      push(memory.type, { kind: 'ruled', ruled: done })
-      for (const m of ruledMemories(done)) shown.add(m.id)
-    } else if (openVertical !== undefined) {
-      push(memory.type, { kind: 'vertical', item: openVertical })
-      inline.add(openVertical.decisionId)
-      shown.add(id)
-    } else if (open !== undefined) {
-      push(memory.type, { kind: 'conflict', item: open })
-      inline.add(open.decisionId)
-      for (const side of [open.left, open.right]) if (side !== null) shown.add(side.id)
-    } else {
-      push(memory.type, { kind: 'memory', memory })
-      shown.add(id)
-    }
-  }
+  const { groups, decisions, inline } = groupInjected({
+    injectedIds: snapshot?.injectedIds ?? [],
+    coreIds: snapshot?.coreIds ?? [],
+    titleOnlyIds: snapshot?.titleOnlyIds ?? [],
+    byId,
+    ruled,
+    conflicts: [...pendingItems, ...stillUndone].filter((item): item is Conflict => item.kind === 'conflict-horizontal'),
+    verticals: [...pendingItems, ...stillUndone].filter((item): item is VerticalConflict => item.kind === 'conflict-vertical'),
+  })
   // 这次新写入的只列还没进快照、还在的；彻底删除的原位留说明
+  // 这里软删的原位留「已删除 · 撤销」，撤销后视图还没刷新回来的照留下的卡画
   const saved = (snapshot === undefined ? [] : writtenSinceSnapshot(snapshot))
-    .flatMap((id): Array<{ id: string; memory: MemoryCardData | undefined; isWrittenToAgentsMd?: true }> =>
-      wroteAgentsMd.has(id) ? [{ id, memory: wroteAgentsMd.get(id), isWrittenToAgentsMd: true }]
-        : isPurged(id) ? [{ id, memory: undefined }] : isLiveWrite(id, byId, deletions) ? [{ id, memory: byId.get(id) }] : [])
+    .flatMap((id): Array<{ id: string; memory: MemoryCardData | undefined; isWrittenToAgentsMd?: true; isDeleted?: true }> => {
+      if (wroteAgentsMd.has(id)) return [{ id, memory: wroteAgentsMd.get(id), isWrittenToAgentsMd: true }]
+      if (isPurged(id)) return [{ id, memory: undefined }]
+      const entry = removed.get(id)
+      const how = entry === undefined ? undefined : deletions.of(id, scopeOfMemory(entry.memory))
+      if (entry !== undefined && how === 'soft') return [{ id, memory: entry.memory, isDeleted: true }]
+      if (isLiveWrite(id, byId, deletions)) return [{ id, memory: byId.get(id) }]
+      return entry?.isRestored === true && how === undefined ? [{ id, memory: entry.memory }] : []
+    })
   // 这次对话里模型改写、替代的：快照冻结之后的（之前的已在这份快照里，同新写入的口径）。
   // 同一条改写多次只列最近那次；这次对话里新记的那条再被改写不另列，新写入那行已经是它
   const sessionChanges = snapshot === undefined ? [] : (library.data.modelChanges ?? [])
@@ -236,7 +246,6 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   )
   /** 这一条的确认、失败或没有生效。 */
   const failed = (id: string) => refused === id ? refusedNote : <CommandFeedback runner={runner} id={id} />
-  const isWaiting = (id: string) => runner.unavailable(id) !== undefined
   // 冲突对方可能在别的项目：那一方写项目名（这里的「本项目」是会话视图解析出的项目，和上面分层同一口径）
   const projectName = (m: MemoryCardData) =>
     m.scope === 'workspace' && m.workspacePath !== undefined && !samePath(m.workspacePath, ws) ? baseName(m.workspacePath) : undefined
@@ -245,15 +254,6 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
   // 会话快照冻结在插件本次加载之前 = 对话里还是重启前带入的那份
   const bootedAt = health.status === 'ready' ? health.data.bootedAt : undefined
   const usageTitle = t(USAGE_TITLE[snapshot?.origin ?? 'start'])
-  // 混着几种带入方式的组不标
-  const depthMark = (type: string) => {
-    const total = counts.get(type) ?? 0
-    const full = fullCounts.get(type) ?? 0
-    const titleOnly = titleCounts.get(type) ?? 0
-    if (full === total) return t('sidebar.groups.full')
-    if (titleOnly === total) return t('sidebar.groups.titleOnly')
-    return full === 0 && titleOnly === 0 ? t('sidebar.groups.summary') : undefined
-  }
   const usage = snapshot === undefined
     ? sessionView.status === 'missing'
       ? <Note title={t('sidebar.noSnapshot.title')}>{t('sidebar.noSnapshot.body')}</Note>
@@ -274,6 +274,55 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
         </>
       )
 
+  const waiting = decisions.filter(d => d.kind !== 'ruled').length
+  /** 「等你决定」里的一张卡：横向、基线冲突就地裁决，刚裁决的留结果和撤销。 */
+  const decision = (entry: Decision) => {
+    if (entry.kind === 'conflict') {
+      const { item } = entry
+      return (
+        <div key={item.decisionId}>
+          <ConflictRuling
+            layout="narrow"
+            left={item.left}
+            right={item.right}
+            now={now}
+            typeLabel={label}
+            hideScope={isOwnSide(item.left) && isOwnSide(item.right)}
+            projectName={projectName}
+            unavailable={runner.unavailable(item.decisionId)}
+            onRule={(verdict) => { rule(item, verdict) }}
+          />
+          {failed(item.decisionId)}
+        </div>
+      )
+    }
+    if (entry.kind === 'vertical') {
+      const { item } = entry
+      return (
+        <div key={item.decisionId}>
+          <VerticalConflictRuling
+            layout="narrow"
+            memory={item.memory}
+            baselineRef={item.baselineRef}
+            now={now}
+            typeLabel={label}
+            hideScope={item.memory?.scope !== 'global'}
+            unavailable={runner.unavailable(item.decisionId)}
+            onRule={(verdict) => { ruleVertical(item, verdict) }}
+          />
+          {failed(item.decisionId)}
+        </div>
+      )
+    }
+    const { ruled: r } = entry
+    return (
+      <div key={r.decisionId}>
+        <RuledCard ruled={r} card={card} unavailable={runner.unavailable(r.decisionId)} onUndo={() => { undo(r.decisionId) }} />
+        {failed(r.decisionId)}
+      </div>
+    )
+  }
+
   return (
     <div className="pm-side">
       {ws !== undefined
@@ -293,9 +342,18 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
               <h2 className="pm-side-title">{t('sidebar.saved.title')}</h2>
               <p className="pm-side-hint">{t('sidebar.saved.note')}</p>
             </div>
-            {saved.map(({ id, memory, isWrittenToAgentsMd }) => {
+            {saved.map(({ id, memory, isWrittenToAgentsMd, isDeleted }) => {
               const row = memory === undefined
                 ? purgedNote(id)
+                : isDeleted === true
+                  ? (
+                    <div key={id} className="pm-side-saved pm-side-saved--deleted" data-memory-id={id}>
+                      <p className="pm-side-hint">{t('chat.card.deleted')}</p>
+                      <Button variant="ghost" unavailable={runner.unavailable(id)} onClick={() => { restore(memory) }}>
+                        {t('chat.card.undo')}
+                      </Button>
+                    </div>
+                  )
                 : isWrittenToAgentsMd === true
                   ? <SavedRow key={id} session={session} memory={memory} card={card} state="wrote-agents-md">{null}</SavedRow>
                   : (
@@ -309,16 +367,15 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
                     <DeleteWithConfirm
                       onDelete={() => { forget(memory) }}
                       trigger={open => (
-                        <button
-                          type="button"
-                          className="pm-side-delete"
+                        <Button
+                          variant="icon"
                           aria-label={t('sidebar.saved.delete')}
                           title={t('sidebar.saved.delete')}
-                          aria-disabled={isWaiting(id) || undefined}
-                          onClick={() => { if (!isWaiting(id)) open() }}
+                          unavailable={runner.unavailable(id)}
+                          onClick={open}
                         >
                           <Icon name="trash" size={14} />
-                        </button>
+                        </Button>
                       )}
                     />
                     {failed(id)}
@@ -349,71 +406,59 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
         : null}
 
       {refused !== undefined && !inline.has(refused) && !ruledIds.has(refused) ? refusedNote : null}
-      {groups.size > 0
+      {decisions.length > 0
+        ? (
+          <section className="pm-side-section" aria-label={t('pending.level.your-call')}>
+            <Fold
+              level={2}
+              className="pm-side-title"
+              isOpen={folds.isOpen(YOUR_CALL, true)}
+              onToggle={() => { folds.toggle(YOUR_CALL, folds.isOpen(YOUR_CALL, true)) }}
+              heading={(
+                <>
+                  {t('pending.level.your-call')}
+                  {waiting > 0 ? <>{' '}<span className="pm-side-group-count">{formatNumber(waiting)}</span><StatusMarker kind="pending" /></> : null}
+                </>
+              )}
+            >
+              {decisions.map(decision)}
+            </Fold>
+          </section>
+        )
+        : null}
+
+      {groups.length > 0
         ? (
           <section className="pm-side-section" aria-label={t('sidebar.groups.title')}>
             <h2 className="pm-side-title">{t('sidebar.groups.title')}</h2>
-            {[...groups].map(([type, entries]) => (
-              <section key={type} className="pm-side-group" aria-label={label(type)}>
-                <h3 className="pm-side-group-title">
-                  {label(type)}{' '}
-                  <span className="pm-side-group-count">{formatNumber(counts.get(type) ?? 0)}</span>
-                  {depthMark(type) === undefined ? null : (
-                    <>
-                      {' '}<i className="pm-sep" aria-hidden="true">·</i>
-                      <span className="pm-side-group-depth">{depthMark(type)}</span>
-                    </>
-                  )}
-                </h3>
-                {entries.map((entry) => {
-                  if (entry.kind === 'memory') return <div key={entry.memory.id}>{card(entry.memory)}</div>
-                  if (entry.kind === 'conflict') {
-                    const { item } = entry
-                    return (
-                      <div key={item.decisionId}>
-                        <ConflictRuling
-                          layout="narrow"
-                          left={item.left}
-                          right={item.right}
-                          now={now}
-                          typeLabel={label}
-                          hideScope={isOwnSide(item.left) && isOwnSide(item.right)}
-                          projectName={projectName}
-                          unavailable={runner.unavailable(item.decisionId)}
-                          onRule={(verdict) => { rule(item, verdict) }}
-                        />
-                        {failed(item.decisionId)}
-                      </div>
-                    )
-                  }
-                  if (entry.kind === 'vertical') {
-                    const { item } = entry
-                    return (
-                      <div key={item.decisionId}>
-                        <VerticalConflictRuling
-                          layout="narrow"
-                          memory={item.memory}
-                          baselineRef={item.baselineRef}
-                          now={now}
-                          typeLabel={label}
-                          hideScope={item.memory?.scope !== 'global'}
-                          unavailable={runner.unavailable(item.decisionId)}
-                          onRule={(verdict) => { ruleVertical(item, verdict) }}
-                        />
-                        {failed(item.decisionId)}
-                      </div>
-                    )
-                  }
-                  const { ruled: r } = entry
-                  return (
-                    <div key={r.decisionId}>
-                      <RuledCard ruled={r} card={card} busy={isWaiting(r.decisionId)} onUndo={() => { undo(r.decisionId) }} />
-                      {failed(r.decisionId)}
-                    </div>
-                  )
-                })}
-              </section>
-            ))}
+            {groups.map(({ type, depth, memories }) => {
+              const key = `type|${type}`
+              const isOpen = folds.isOpen(key, false)
+              return (
+                <section key={type} className="pm-side-group" aria-label={label(type)}>
+                  <Fold
+                    level={3}
+                    className="pm-side-group-title"
+                    isOpen={isOpen}
+                    onToggle={() => { folds.toggle(key, isOpen) }}
+                    heading={(
+                      <>
+                        {label(type)}{' '}
+                        <span className="pm-side-group-count">{formatNumber(memories.length)}</span>
+                        {depth === undefined ? null : (
+                          <>
+                            {' '}<i className="pm-sep" aria-hidden="true">·</i>
+                            <span className="pm-side-group-depth">{t(DEPTH_LABEL[depth])}</span>
+                          </>
+                        )}
+                      </>
+                    )}
+                  >
+                    {memories.map(memory => <div key={memory.id}>{card(memory)}</div>)}
+                  </Fold>
+                </section>
+              )
+            })}
           </section>
         )
         : null}
@@ -461,10 +506,10 @@ function SavedRow({ session, memory, card, state, onWroteAgentsMd, children }: {
 }
 
 /** 刚裁决完：留下的卡（按基线则不留卡），下面结果行「已按 A」（基线冲突：「已保留这条记忆」）+ 后果 +「撤销」。 */
-function RuledCard({ ruled, card, busy, onUndo }: {
+function RuledCard({ ruled, card, unavailable, onUndo }: {
   ruled: Ruled
   card: (memory: MemoryCardData) => ReactNode
-  busy: boolean
+  unavailable: string | undefined
   onUndo: () => void
 }) {
   const t = useT()
@@ -489,15 +534,52 @@ function RuledCard({ ruled, card, busy, onUndo }: {
         undo={ruled.isUnrecorded || ruled.isHardDeleted
           ? undefined
           : (
-            <button type="button" className="pm-link" aria-disabled={busy || undefined} onClick={() => { if (!busy) onUndo() }}>
+            <Button variant="ghost" unavailable={unavailable} onClick={onUndo}>
               {t('sidebar.ruled.undo')}
-            </button>
+            </Button>
           )}
       >
         {note}
         {isDeleting ? <> <span>{t('sidebar.ruled.appliesLater')}</span></> : null}
       </ResultLine>
     </article>
+  )
+}
+
+/**
+ * 可折叠的一段：标题是整行按钮，level 2 是段标题、3 是类型组标题。箭头放在行末（展开时转 90°），
+ * 标题文字和不折叠的段标题、组里记忆卡的竖线从同一处起。
+ * 只有点标题展开时组体撑开（同记忆查看），首屏、视图刷新都瞬开，收起瞬收。
+ */
+function Fold({ level, className, heading, isOpen, onToggle, children }: {
+  level: 2 | 3
+  className: string
+  heading: ReactNode
+  isOpen: boolean
+  onToggle: () => void
+  children: ReactNode
+}) {
+  const bodyId = useId()
+  const isClicked = useRef(false)
+  const Heading = level === 2 ? 'h2' : 'h3'
+  return (
+    <>
+      <Heading className={className}>
+        <button
+          type="button"
+          className="pm-side-fold"
+          aria-expanded={isOpen}
+          aria-controls={bodyId}
+          onClick={() => { isClicked.current = !isOpen; onToggle() }}
+        >
+          <span className="pm-side-fold-label">{heading}</span>
+          <Icon name="chevronRight" size={14} />
+        </button>
+      </Heading>
+      <div id={bodyId} className="pm-side-fold-body" hidden={!isOpen}>
+        {isOpen ? <GroupBody clicked={isClicked}>{children}</GroupBody> : null}
+      </div>
+    </>
   )
 }
 
@@ -531,29 +613,33 @@ export const sidebarTabCss = `
 .pm-side-group-count { margin-left: 4px; font-weight: 400; color: var(--pm-text-2); }
 .pm-side-group-title .pm-sep { margin: 0 6px 0 2px; }
 .pm-side-group-depth { font-weight: 400; color: var(--pm-text-2); }
+.pm-side-fold {
+  display: flex; align-items: center; gap: 4px; width: calc(100% + 8px); margin: 0 -4px; padding: 2px 4px;
+  border: 0; border-radius: var(--dsw-radius-sm, 8px); background: transparent; font: inherit; color: inherit; text-align: left; cursor: pointer;
+}
+.pm-side-fold:hover { background: var(--pm-hover); }
+.pm-side-fold svg { flex: none; margin-left: auto; color: var(--pm-text-2); transition: transform 120ms ease; }
+.pm-side-fold[aria-expanded='true'] svg { transform: rotate(90deg); }
+.pm-side-fold-label { min-width: 0; overflow-wrap: anywhere; }
+.pm-side-fold-label .pm-marker { margin: -2px 0 0 6px; }
+.pm-side-fold-body, .pm-side-fold-body .pm-arrive-body { display: flex; flex-direction: column; gap: 12px; }
+.pm-side-fold-body[hidden] { display: none; }
 .pm-side-section-head { display: flex; flex-direction: column; gap: 2px; }
 .pm-side-saved { display: grid; grid-template-columns: minmax(0, 1fr) 24px; align-items: start; gap: 4px 8px; }
 .pm-side-saved > .pm-pending-error, .pm-side-saved > .pm-side-saved-promote { grid-column: 1 / -1; }
+.pm-side-saved--deleted { display: flex; align-items: center; justify-content: space-between; }
 .pm-side-saved-promote { display: flex; flex-direction: column; gap: 8px; }
 .pm-side-saved-promote:empty { display: none; }
 .pm-side-change { display: flex; flex-direction: column; gap: 6px; }
 .pm-side-change > .pm-change:only-child { padding-left: 0; }
 /* 侧栏窄，删除确认放不进行尾：换到卡片下面一行靠右，记忆卡不跟着变窄 */
 .pm-side-saved > .pm-soft-confirm { grid-column: 1 / -1; justify-self: end; }
-.pm-side-delete {
-  display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0;
-  border: 0; border-radius: var(--dsw-radius-sm, 8px); background: transparent; color: var(--pm-text-2); cursor: pointer;
-}
-.pm-side-delete:hover { background: var(--pm-hover); color: var(--pm-text); }
-.pm-side-delete[aria-disabled='true'] { opacity: .4; cursor: default; }
 .pm-side .pm-conflict { padding-bottom: 0; }
 .pm-side .pm-conflict .pm-mc-text {
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
 }
-.pm-side .pm-conflict-buttons { flex-wrap: nowrap; }
 .pm-side .pm-conflict-buttons .pm-btn { padding: 5px 10px; }
 .pm-side-ruled { display: flex; flex-direction: column; gap: 10px; }
-.pm-side .pm-link[aria-disabled='true'] { opacity: .4; cursor: default; }
 .pm-side-note { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: var(--dsw-radius-md, 12px); background: var(--pm-bg-block); }
 .pm-side-note-title { margin: 0; font-size: 13px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
 .pm-side-note-body { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
@@ -562,4 +648,7 @@ export const sidebarTabCss = `
   font-size: 12px; line-height: 1.5; color: var(--pm-text-2);
 }
 .pm-side-footer .pm-link { font-size: 12px; }
+@media (prefers-reduced-motion: reduce) {
+  .pm-side-fold svg { transition: none; }
+}
 `

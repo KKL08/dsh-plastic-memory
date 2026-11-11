@@ -12,14 +12,14 @@ import type { CommandRunner } from './useCommandRunner.ts'
  * 行内确认的外壳：说明文字 + 按钮组，role=group。收起时把焦点还给打开它的控件，控件没了就落到附近（useReturnFocus）。
  * 跨项目确认、彻底删除确认、疑似密钥确认都用它，各处不再自己管焦点。
  */
-export function ConfirmGroup({ label, children }: { label: string; children: ReactNode }) {
+function ConfirmGroup({ label, children }: { label: string; children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null)
   useReturnFocus(ref)
   return <div ref={ref} className="pm-pending-confirm" role="group" aria-label={label}>{children}</div>
 }
 
 /** 跨项目确认行：写明记忆属于哪个项目，「取消」或「继续处理」。 */
-export function CrossConfirm({ workspacePath, isMove = false, onCancel, onConfirm }: {
+function CrossConfirm({ workspacePath, isMove = false, onCancel, onConfirm }: {
   workspacePath: string
   /** 移到项目：写的是要移去的项目，不是记忆所在的项目。 */
   isMove?: boolean
@@ -32,7 +32,7 @@ export function CrossConfirm({ workspacePath, isMove = false, onCancel, onConfir
       <p className="pm-pending-text">{t(isMove ? 'pending.cross.moveBody' : 'pending.cross.body', { name: baseName(workspacePath) })}</p>
       <div className="pm-pending-actions">
         {/* 焦点移进确认，停在不改动任何东西的「取消」上 */}
-        <Button autoFocus onClick={onCancel}>{t('pending.cancel')}</Button>
+        <Button variant="ghost" autoFocus onClick={onCancel}>{t('pending.cancel')}</Button>
         <Button onClick={onConfirm}>{t('pending.cross.confirm')}</Button>
       </div>
     </ConfirmGroup>
@@ -61,7 +61,7 @@ export function SecretDeleteConfirm({ onCancel, onConfirm, unavailable, showTitl
       <p className="pm-pending-text">{body ?? t('pending.secret.confirmBody')}</p>
       <div className="pm-pending-actions">
         {/* 默认焦点在「取消」：回车不会手滑删掉 */}
-        <Button autoFocus onClick={onCancel}>{t('pending.cancel')}</Button>
+        <Button variant="ghost" autoFocus onClick={onCancel}>{t('pending.cancel')}</Button>
         <Button variant="danger" unavailable={unavailable} onClick={onConfirm}>{t('pending.secret.confirmDelete')}</Button>
       </div>
     </ConfirmGroup>
@@ -75,7 +75,7 @@ function SuspectedConfirm({ onCancel, onConfirm }: { onCancel: () => void; onCon
     <ConfirmGroup label={t('pending.edit.saveAnyway')}>
       <p className="pm-pending-text">{t('pending.edit.secretSuspected')}</p>
       <div className="pm-pending-actions">
-        <Button autoFocus onClick={onCancel}>{t('pending.cancel')}</Button>
+        <Button variant="ghost" autoFocus onClick={onCancel}>{t('pending.cancel')}</Button>
         <Button onClick={onConfirm}>{t('pending.edit.saveAnyway')}</Button>
       </div>
     </ConfirmGroup>
@@ -149,7 +149,7 @@ export function SoftDeleteConfirm({ onCancel, onConfirm, question, confirmLabel 
       <span id={questionId}>{question ?? t('pending.softDelete.question')}</span>
       <button type="button" className="pm-link" onClick={onConfirm}>{confirmLabel ?? t('pending.softDelete.confirm')}</button>
       <i className="pm-sep" aria-hidden="true">·</i>
-      <button type="button" className="pm-link pm-soft-confirm-cancel" autoFocus onClick={onCancel}>{t('pending.cancel')}</button>
+      <button type="button" className="pm-link pm-link--muted" autoFocus onClick={onCancel}>{t('pending.cancel')}</button>
     </span>
   )
 }
@@ -180,6 +180,4 @@ export const confirmCss = `
 }
 .pm-soft-confirm .pm-sep { margin: 0 -2px; }
 .pm-soft-confirm .pm-link { font-size: 12px; }
-.pm-soft-confirm .pm-soft-confirm-cancel { font-weight: 400; color: var(--pm-text-2); }
-.pm-soft-confirm .pm-soft-confirm-cancel:hover { color: var(--pm-text); text-decoration: none; }
 `

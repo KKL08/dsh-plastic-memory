@@ -5,7 +5,7 @@ import type { EditPlan, MemoryCommand, MemoryCommandResult, MemoryDraft } from '
 import { createFakeGateway } from '../gateway.fake.ts'
 import type { BorrowedSession } from '../gateway.ts'
 import { memory, renderInShell } from '../test-utils.tsx'
-import { applicationOf, BatchEdit, batchEditCss, BatchSteps, toBatchItems, type BatchItem, type PlanChoice } from './batch-edit.tsx'
+import { applicationOf, BatchEdit, batchEditCss, BatchSteps, toBatchItems, toggleWithDependents, type BatchItem, type PlanChoice } from './batch-edit.tsx'
 
 describe('整理工作区', () => {
   it('故事 18：步骤条「写要求 / 看计划 / 对照应用」，当前步标 aria-current、加粗，已完成的步前加「✓」', () => {
@@ -86,7 +86,9 @@ describe('整理所选：写要求与看计划', () => {
     expect(within(rows[0]!).getByText('事实与经验')).toHaveClass('pm-chip--neutral')
     const remove = within(rows[1]!).getByRole('button', { name: '不整理「提交前检查」' })
     expect(remove).toHaveAttribute('title', '不整理这条')
-    expect(remove).toHaveTextContent('✕')
+    // 叉是自画的线性图标，不用文字字符
+    expect(remove).toHaveTextContent(/^$/)
+    expect(remove.querySelector('svg')).toHaveAttribute('aria-hidden', 'true')
     expect(picked().getByText('4 条')).toBeInTheDocument()
   })
 
@@ -597,5 +599,25 @@ describe('整理所选：写要求与看计划', () => {
       fireEvent.click(screen.getByRole('button', { name: '全部放弃' }))
       expect(onBack).toHaveBeenCalledTimes(1)
     })
+  })
+})
+
+describe('取消改写带走依赖它的删除', () => {
+  const OPS: EditPlan['ops'] = [
+    { memoryId: 'r', action: 'rewrite', reason: '' },
+    { memoryId: 'd1', action: 'delete', reason: '', into: 'r' },
+    { memoryId: 'd2', action: 'delete', reason: '', into: 'r' },
+  ]
+
+  it('取消改写：还选着的删除项一起取消并记进 held，本来没选的不记', () => {
+    const next = toggleWithDependents(OPS[0]!, OPS, new Set(['r', 'd1']), new Set())
+    expect([...next.active]).toEqual([])
+    expect([...next.held]).toEqual(['d1'])
+  })
+
+  it('重新选上改写：删除项不带回，只移出 held', () => {
+    const next = toggleWithDependents(OPS[0]!, OPS, new Set(), new Set(['d1']))
+    expect([...next.active]).toEqual(['r'])
+    expect([...next.held]).toEqual([])
   })
 })

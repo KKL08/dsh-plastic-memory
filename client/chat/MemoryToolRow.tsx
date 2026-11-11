@@ -137,7 +137,7 @@ export function RowView({ attrs, state, title, summary, summaryClass, input, out
             {summary !== '' ? (
               <>
                 <span className="pm-tr-sep" aria-hidden="true" />
-                <span className={summaryClass}>{summary}</span>
+                <span className={summaryClass} title={summary}>{summary}</span>
               </>
             ) : null}
           </span>

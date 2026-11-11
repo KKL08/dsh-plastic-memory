@@ -4,11 +4,12 @@
  *   主按钮没有改动时 .4 置灰）。离开页面丢弃暂存改动由调用方 onDiscard 处理。
  *   和宿主不同：页面长，保存行吸在可视区底部（滚到页尾时回到原位），有改动时按钮后面写还有几项没保存。
  *   bottom 取 -48px：宿主插件页的滚动容器（.page）底部内边距 48px，吸附按内边距内沿算，不抵掉会悬在窗口底上方、下面露出内容。
- * - SettingsGroupCard：我们按用户决定加的分组卡片（「记什么 · 怎么用 · 怎么管」），组标题在卡片外。
+ * - SettingsGroupCard：我们按用户决定加的分组卡片（「记什么 · 怎么用 · 怎么管 · 外观」），组标题在卡片外。
  * - SettingsItem：卡片里的一项，上下各 14px，项与项之间 0.5px 细线。
- * - SettingsGroup：只有组标题的一组，组里放几组小卡（「记什么」的场景、记忆类型）：每组前一个小标题（.pm-subgroup-title），
+ * - 「记什么」的卡片里是两段小卡（.pm-subgroup：场景、记忆类型），段与段之间同样一条细线；每段前一个小标题（.pm-subgroup-title），
  *   小卡排成网格（.pm-tiles，同宿主 Agent 预设的卡片网格），卡身 .pm-tile-main、卡脚 .pm-tile-foot（细线隔开的操作），
- *   单选卡的整个卡身是单选框（.pm-tile-radio 盖满卡身），选中同宿主外观方块：平台底色 + bluish-400 描边；新建是网格下的虚线条（.pm-tile-add）。
+ *   单选卡的整个卡身是单选框（.pm-tile-radio 盖满卡身），选中同宿主外观方块：平台底色 + bluish-400 描边；新建是网格最后一张虚线卡（.pm-tile-add）。
+ *   小卡套在设置卡里，圆角小一档（12px）、描边浅一级（border-l2），和外框分出层次。
  */
 import { useEffect, useId, useRef, type ReactNode } from 'react'
 import { useT } from '../i18n.tsx'
@@ -42,7 +43,8 @@ export function SettingsForm({ state, pending, onSave, onDiscard, children }: {
     <div className="pm-form">
       {!state.writable ? <p className="pm-form-note" role="status">{t('settings.readOnly')}</p> : null}
       {children}
-      <div className="pm-form-footer">
+      {/* tabIndex -1：保存按钮置灰时焦点的落点（确认框点了保存之后），Tab 一下就是保存按钮 */}
+      <div className="pm-form-footer" tabIndex={-1}>
         {state.failed ? <p className="pm-form-failed" role="status">{t('settings.saveFailed')}</p> : null}
         <Button variant="primary" disabled={!state.dirty || state.invalid || state.saving || !state.writable}
           aria-describedby={pending !== undefined ? pendingId : undefined} onClick={onSave}>
@@ -54,17 +56,13 @@ export function SettingsForm({ state, pending, onSave, onDiscard, children }: {
   )
 }
 
-export function SettingsGroup({ title, children }: { title: ReactNode; children: ReactNode }) {
+export function SettingsGroupCard({ title, children }: { title: ReactNode; children: ReactNode }) {
   return (
     <section className="pm-group">
       <h2 className="pm-group-title">{title}</h2>
-      {children}
+      <div className="pm-group-card">{children}</div>
     </section>
   )
-}
-
-export function SettingsGroupCard({ title, children }: { title: ReactNode; children: ReactNode }) {
-  return <SettingsGroup title={title}><div className="pm-group-card">{children}</div></SettingsGroup>
 }
 
 export function SettingsItem({ label, hint, htmlFor, disabled = false, children }: {
@@ -92,6 +90,8 @@ export const settingsCss = `
   position: sticky; bottom: -48px; z-index: 1; display: flex; align-items: center; gap: 12px;
   margin-top: 16px; padding: 12px 0; border-top: .5px solid var(--pm-line); background: var(--pm-bg-page);
 }
+/* 只是焦点落点，不画焦点框（主题的 [tabindex] 焦点环同权重、先加载，这里加 .pm-root 压过它） */
+.pm-root .pm-form-footer:focus { outline: none; }
 .pm-form-pending { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-3); }
 .pm-form-failed { flex: 1; min-width: 0; margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-error); }
 .pm-group + .pm-group { margin-top: 32px; }
@@ -102,28 +102,42 @@ export const settingsCss = `
 .pm-setting-label { font-size: 13px; font-weight: 500; line-height: 1.5; color: var(--pm-text); }
 .pm-setting-hint { margin: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-3); }
 .pm-setting--disabled .pm-setting-label { color: var(--pm-text-3); }
-.pm-subgroup + .pm-subgroup { margin-top: 24px; }
-.pm-subgroup-title { margin: 0 0 8px; padding-left: 16px; font-size: 13px; font-weight: 500; line-height: 20px; color: var(--pm-text-2); }
-.pm-subgroup-hint { margin: -4px 0 8px; padding-left: 16px; font-size: 12px; line-height: 1.5; color: var(--pm-text-3); }
+/* 上 14px 同设置项，下 16px 让网格离外框和分隔线一样远 */
+.pm-subgroup { padding: 14px 0 16px; }
+.pm-subgroup + .pm-subgroup { border-top: .5px solid var(--pm-line); }
+.pm-subgroup-title { margin: 0 0 8px; font-size: 13px; font-weight: 500; line-height: 20px; color: var(--pm-text-2); }
+.pm-subgroup-hint { margin: -4px 0 8px; font-size: 12px; line-height: 1.5; color: var(--pm-text-3); }
 .pm-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(268px, 100%), 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
-.pm-tile { display: flex; flex-direction: column; min-width: 0; border: .5px solid var(--pm-line-card); border-radius: var(--dsw-radius-lg, 16px); background: var(--pm-bg); transition: border-color .16s, background .16s; }
+.pm-tile {
+  display: flex; flex-direction: column; min-width: 0; border: .5px solid transparent; border-radius: var(--dsw-radius-md, 12px); background: var(--pm-bg);
+  /* 宿主轻投影：描边画在投影里，重绑成 var(--pm-line) 兜住白底上的边界 */
+  --dsw-elevation-stroke-color: var(--pm-line); box-shadow: var(--dsw-elevation-soft); transition: border-color .16s, background .16s, box-shadow .16s;
+}
 .pm-tile-main { position: relative; display: flex; flex: 1; flex-direction: column; gap: 4px; padding: 14px 16px; }
 .pm-tile-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .pm-tile-title { min-width: 0; font-size: 13px; font-weight: 500; line-height: 1.5; color: var(--pm-text); }
 .pm-tile-detail { font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
-.pm-tile-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px; padding: 8px 12px; border-top: .5px solid var(--pm-line); }
+.pm-tile-foot {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px; padding: 8px 12px;
+  /* 卡脚细线同卡的外沿一样画成 0.5px 投影（border 在 1 倍屏上会取整成 1px，比外沿还重）；暗色取宿主更浅一级的发丝线，不抢过卡的外沿 */
+  box-shadow: inset 0 .5px 0 var(--dsw-alias-border-l2-darkmode-thin);
+}
 .pm-tile-radio { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
 .pm-tile-radio:disabled { cursor: default; }
 .pm-tile:not(.pm-tile--selected):has(.pm-tile-radio:enabled:hover) { background: var(--pm-hover); }
-.pm-tile--selected { border-color: var(--pm-line-selected); background: var(--pm-bg-block); }
+.pm-tile--selected { border-color: var(--pm-line-selected); background: var(--pm-bg-block); box-shadow: none; }
+/* 暗色下柔光几乎看不见，靠描边分开：对齐宿主浮层面的做法，描边深一级 */
+body[data-ds-dark-theme] .pm-tile { --dsw-elevation-stroke-color: var(--pm-line-card); }
 .pm-tile:has(.pm-tile-radio:focus-visible) { outline: var(--dsw-focus-ring-width, 2px) solid var(--pm-focus); outline-offset: 2px; }
+.pm-tile-add-item { display: flex; min-width: 0; }
+/* 独占一行时和带卡脚的普通小卡一样高：卡身 14 + 19.5 + 4 + 18 + 14，卡脚 8 + 24 + 8，加上下 0.5px 描边（卡脚细线画在投影里，不占高度），共 110.5px */
 .pm-tile-add {
-  display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; min-height: 44px; margin-top: 12px; padding: 0 16px;
-  border: 1px dashed var(--pm-line-card); border-radius: var(--dsw-radius-lg, 16px); background: transparent;
+  display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-width: 0; min-height: 110.5px; padding: 14px 16px;
+  border: 1px dashed var(--pm-line-card); border-radius: var(--dsw-radius-md, 12px); background: transparent;
   font: inherit; font-size: 13px; line-height: 1.5; color: var(--pm-text); cursor: pointer;
 }
 .pm-tile-add:hover:not(:disabled) { background: var(--pm-hover); }
 .pm-tile-add:disabled { opacity: .4; cursor: default; }
-.pm-tile-add-note { margin-left: 4px; font-size: 12px; color: var(--pm-text-3); }
-.pm-tile-group-title + .pm-tile-add { margin-top: 0; }
+.pm-tile-add-title { display: inline-flex; align-items: center; gap: 6px; }
+.pm-tile-add-note { font-size: 12px; color: var(--pm-text-3); }
 `

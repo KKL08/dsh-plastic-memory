@@ -61,7 +61,7 @@ export function ModelChangeLine({ session, change, kind, after, bySubject, count
   const before = change === 'expired' ? undefined : change.before
   const status = shown === 'undoable'
     ? (
-      <Button className="pm-change-undo" unavailable={runner.unavailable(UNDO)} onClick={undo}>
+      <Button size="sm" unavailable={runner.unavailable(UNDO)} onClick={undo}>
         {t('chat.change.undo')}
       </Button>
     )
@@ -77,7 +77,7 @@ export function ModelChangeLine({ session, change, kind, after, bySubject, count
               <span className="pm-change-text">{t('chat.change.rewritten')}</span>
               {before !== undefined && after !== undefined
                 ? (
-                  <button type="button" className="pm-link pm-change-toggle" aria-expanded={isOpen} aria-controls={diffId} onClick={() => { setOpen(!isOpen) }}>
+                  <button type="button" className="pm-link pm-link--muted pm-change-toggle" aria-expanded={isOpen} aria-controls={diffId} onClick={() => { setOpen(!isOpen) }}>
                     {t('chat.change.compare')}
                   </button>
                 )
@@ -108,9 +108,7 @@ export const modelChangeCss = `
 .pm-change-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
 .pm-change-lead { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .pm-change-text { min-width: 0; font-size: 12px; line-height: 1.5; color: var(--pm-text); overflow-wrap: anywhere; }
-.pm-change-toggle { font-size: 12px; font-weight: 400; color: var(--pm-text-2); }
-.pm-change-toggle:hover { color: var(--pm-text); text-decoration: none; }
-.pm-change .pm-change-undo { padding: 2px 10px; font-size: 12px; }
+.pm-change-toggle { font-size: 12px; }
 .pm-change-note { flex: none; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-change-diff[hidden] { display: none; }
 .pm-change-diff {

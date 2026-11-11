@@ -9,7 +9,7 @@
  * 投影的 contextWindow（宿主公式的分母）：不计上限的导航图和尾注也占上下文；读不到窗口只写「约已用 / 上限」。
  * 记忆 token 是插件估算，和宿主计数口径不同，所以一律带「约」。
  */
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import type { SessionView, SnapshotOrigin } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
@@ -68,15 +68,26 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
   const panelRef = useRef<HTMLDivElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const open = position !== null && visible
-  const close = () => { setPosition(null) }
+  /** 收起；从弹层里收起（Esc、点里面的跳转）时把焦点还给按钮，不让它掉到 body。 */
+  const close = (isFocusReturned = false) => {
+    setPosition(null)
+    if (isFocusReturned) triggerRef.current?.focus()
+  }
+
+  // 弹层传送到 body 末尾：打开时把焦点放进去（第一个链接，没有就是弹层本身），键盘用户不用 Tab 走完整页
+  useLayoutEffect(() => {
+    if (!open) return
+    const panel = panelRef.current
+    ;(panel?.querySelector<HTMLElement>('button') ?? panel)?.focus()
+  }, [open])
 
   useEffect(() => {
     if (!open) return
-    const onPointer = (e: PointerEvent) => {
-      const target = e.target as Node
-      if (rootRef.current?.contains(target) || panelRef.current?.contains(target)) return
-      setPosition(null)
-    }
+    const isOutside = (target: Node) => !(rootRef.current?.contains(target) || panelRef.current?.contains(target))
+    const onPointer = (e: PointerEvent) => { if (isOutside(e.target as Node)) setPosition(null) }
+    // Tab 走到弹层和按钮以外时收起。弹层挂在 body 末尾，往后 Tab 会先走出页面、再绕回宿主的控件，
+    // 失焦那一下看不出去向，所以按焦点落到哪里判断；只是切走窗口（焦点没落到页面里别处）时不动
+    const onFocusIn = (e: FocusEvent) => { if (isOutside(e.target as Node)) setPosition(null) }
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
       // 焦点在弹层里时收起后还给按钮，不让它掉到 body
@@ -86,9 +97,11 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
     }
     document.addEventListener('pointerdown', onPointer, true)
     document.addEventListener('keydown', onKey)
+    document.addEventListener('focusin', onFocusIn)
     return () => {
       document.removeEventListener('pointerdown', onPointer, true)
       document.removeEventListener('keydown', onKey)
+      document.removeEventListener('focusin', onFocusIn)
     }
   }, [open])
 
@@ -132,7 +145,7 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
         <MemoryIcon size={14} />
       </button>
       {open && createPortal(
-        <div ref={panelRef} className="pm-root pm-composer-panel" style={position!} role="dialog" aria-label={t('composer.dialog')} data-pm-accent={accent}>
+        <div ref={panelRef} className="pm-root pm-composer-panel" style={position!} role="dialog" aria-label={t('composer.dialog')} data-pm-accent={accent} tabIndex={-1}>
           <div className="pm-composer-header">
             {share === null ? null : (
               <>
@@ -169,11 +182,11 @@ export function MemoryButton({ sessionId, useProjection, onOpenTab, onHandle }: 
             <div className="pm-composer-line">
               {overflow}
               <i className="pm-sep" aria-hidden="true">·</i>
-              <button type="button" className="pm-link" onClick={() => { close(); onHandle() }}>{t('composer.handle')}</button>
+              <button type="button" className="pm-link" onClick={() => { close(true); onHandle() }}>{t('composer.handle')}</button>
             </div>
           )}
           {onOpenTab === undefined ? null : (
-            <button type="button" className="pm-link pm-composer-open" onClick={() => { close(); onOpenTab() }}>
+            <button type="button" className="pm-link pm-composer-open" onClick={() => { close(true); onOpenTab() }}>
               {t('composer.viewInjected')}
             </button>
           )}
@@ -200,7 +213,7 @@ export const memoryButtonCss = `
   position: fixed; z-index: 1100; padding: 12px; border-radius: var(--dsw-radius-lg);
   background: var(--dsw-specific-menu); backdrop-filter: var(--dsw-menu-backdrop-filter);
   --dsw-elevation-stroke-color: var(--dsw-alias-border-l1); box-shadow: var(--dsw-elevation-prominent);
-  font-size: 12px; line-height: 20px; color: var(--pm-text-2); cursor: default;
+  font-size: 12px; line-height: 20px; color: var(--pm-text-2); cursor: default; outline: none;
 }
 .pm-composer-header { display: flex; align-items: center; gap: 6px; }
 .pm-composer-headline { color: var(--pm-text-3); }

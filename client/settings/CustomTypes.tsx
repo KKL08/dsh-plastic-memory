@@ -47,7 +47,7 @@ export function TypeFormFields({ draft, errors, isNameLocked = false, onChange }
     const error = errorOf(key)
     return (
       <div className="pm-field">
-        <span className="pm-setting-label" id={`${id}-${key}-label`}>{t(labelKey)}</span>
+        <span className="pm-setting-label">{t(labelKey)}</span>
         <SegmentedControl<CustomTypeDraft[K]>
           id={`${id}-${key}`}
           label={t(labelKey)}

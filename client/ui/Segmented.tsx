@@ -1,6 +1,6 @@
 /**
  * 宿主两种分段控件的对齐版（技能禁止外部插件 require ui-primitives，标记与 CSS 对齐宿主 0.2.1-rc.2）：
- * - SegmentedTabs：插件页顶部的页内 tab（ui-primitives/SegmentedTabs），记忆页四个 tab 用它；
+ * - SegmentedTabs：插件页顶部的页内 tab（ui-primitives/SegmentedTabs），记忆页的三个视图（处理、记忆查看、最近删除）用它；
  * - SegmentedControl：设置卡里切换模式（ui-primitives/SegmentedControl），如「自动放宽 / 严格按上限」。
  * 两者都是受控的 tablist，左右键 / Home / End 切换，只有选中项是 tab 停靠点，面板由调用方渲染。
  */
@@ -152,7 +152,7 @@ export const segmentedCss = `
 .pm-tab {
   position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 4px; height: 34px; padding: 0 12px;
   border: none; border-radius: var(--dsw-radius-md, 12px); background: transparent; cursor: pointer;
-  font: inherit; font-size: 14px; line-height: 20px; color: var(--pm-text-2); transition: color 180ms ease;
+  font: inherit; font-size: 14px; line-height: 20px; white-space: nowrap; color: var(--pm-text-2); transition: color 180ms ease;
 }
 .pm-tab:hover, .pm-tab[aria-selected='true'] { color: var(--pm-text); }
 .pm-tab[aria-selected='true'] { font-weight: 600; }

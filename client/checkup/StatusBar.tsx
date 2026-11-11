@@ -90,9 +90,9 @@ function formatPoints(points: number): string {
 
 const Sep = () => <i className="pm-sep" aria-hidden="true">·</i>
 
-/** 用 · 连起来的几段。 */
+/** 用 · 连起来的几段。点跟着前一段：首行（flex）折行时点留在行尾，不落到下一行行首。 */
 function joined(parts: readonly ReactNode[]): ReactNode {
-  return parts.map((part, i) => <span key={i}>{i > 0 ? <Sep /> : null}{part}</span>)
+  return parts.map((part, i) => <span key={i}>{part}{i < parts.length - 1 ? <Sep /> : null}</span>)
 }
 
 export function StatusBar({ scope, view, nav, runs, seen, health, checkups, isGovernanceEnabled, memoryCount, projectCount, needs }: {
@@ -194,7 +194,8 @@ function ScopeStatus({ scopeHealth, entry, count, now, result }: {
             : (
               <>
                 <span className="pm-status-mark"><StatusMarker kind={TIER_MARKER[scopeHealth.tier]} /></span>
-                {withRollingNumber(slot => t('health.score', { score: slot }), score, formatNumber(score))}<Sep /><span className="pm-status-soft">{t(`health.tier.${scopeHealth.tier}`)}</span>
+                {/* 包一层：首行是 flex，裸文字段开头的空格会被吞掉，「98 分」变成「98分」 */}
+                <span>{withRollingNumber(slot => t('health.score', { score: slot }), score, formatNumber(score))}</span><Sep /><span className="pm-status-soft">{t(`health.tier.${scopeHealth.tier}`)}</span>
               </>
             )}
       </p>

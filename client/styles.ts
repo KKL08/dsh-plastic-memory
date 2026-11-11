@@ -3,7 +3,6 @@
  * 所有插槽根的 `<style>` 同处一个文档，类名是全局的；撞名测试按这张表认模块，新加的样式常量要登记进来。
  */
 import { modelChangeCss } from './chat/model-change.tsx'
-import { promoteInPlaceCss } from './chat/promote-in-place.tsx'
 import { savedMemoriesCardCss } from './chat/SavedMemoriesCard.tsx'
 import { statusBarCss } from './checkup/StatusBar.tsx'
 import { titleControlsCss } from './checkup/TitleControls.tsx'
@@ -33,8 +32,8 @@ export const SLOT_STYLES = {
     dismissButtonCss, memoryPageCss, titleControlsCss, statusBarCss, confirmCss, sharedTabCss, groupsCss, libraryTabCss, batchEditCss,
     deletedTabCss, editCss, editModesCss, modelEditCss, moveCss, pendingCss,
   },
-  sidebar: { confirmCss, promoteInPlaceCss, modelChangeCss, sidebarTabCss },
-  chat: { confirmCss, promoteInPlaceCss, modelChangeCss, savedMemoriesCardCss },
+  sidebar: { confirmCss, modelChangeCss, sidebarTabCss },
+  chat: { confirmCss, modelChangeCss, savedMemoriesCardCss },
   settings: { settingsCss, healthBannerCss, controlsCss, scenesCss, settingsPageCss },
   composer: { memoryButtonCss },
 }

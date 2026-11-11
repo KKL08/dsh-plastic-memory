@@ -106,6 +106,7 @@ export function SceneSection({ fields, saved, migrations, counts, canMigrate, di
     const { [sceneId]: _removed, ...scenes } = fields.scenes
     setRemoving(undefined)
     onChange({ scenes, ...(fields.template === sceneId ? { template: GENERAL_SCENE } : {}) })
+    focusNext('group:scenes')
   }
   const sceneTile = (sceneId: string) => {
     const name = sceneLabel(t, sceneId, fields.scenes)
@@ -226,11 +227,11 @@ export function SceneSection({ fields, saved, migrations, counts, canMigrate, di
       </li>
     )
   }
-  /** 一组类型卡：小标题 + 网格（一张都没有时不出网格），后面接这一组的附加行。 */
-  const typeGroup = (group: 'general' | 'preset' | 'custom', names: readonly string[], extra: ReactNode = null) => (
+  /** 一组类型卡：小标题 + 网格（一张都没有、也没有新建卡时不出网格），后面接这一组的附加行。 */
+  const typeGroup = (group: 'general' | 'preset' | 'custom', names: readonly string[], extra: ReactNode = null, addTile: ReactNode = null) => (
     <div className="pm-tile-group">
       <h4 className="pm-tile-group-title" id={`${id}-types-${group}`} tabIndex={-1} {...focusKey(`group:${group}`)}>{t(`settings.types.group.${group}`)}</h4>
-      {names.length > 0 ? <ul className="pm-tiles" aria-labelledby={`${id}-types-${group}`}>{names.map(typeTile)}</ul> : null}
+      {names.length > 0 || addTile !== null ? <ul className="pm-tiles" aria-labelledby={`${id}-types-${group}`}>{names.map(typeTile)}{addTile}</ul> : null}
       {extra}
     </div>
   )
@@ -243,19 +244,20 @@ export function SceneSection({ fields, saved, migrations, counts, canMigrate, di
   return (
     <>
       <section className="pm-subgroup">
-        <h3 className="pm-subgroup-title" id={`${id}-scenes`}>{t('settings.scene.label')}</h3>
+        <h3 className="pm-subgroup-title" id={`${id}-scenes`} tabIndex={-1} {...focusKey('group:scenes')}>{t('settings.scene.label')}</h3>
         <ul className="pm-tiles" role="radiogroup" aria-labelledby={`${id}-scenes`}>
           {sceneIds.map(sceneTile)}
+          <li className="pm-tile-add-item">
+            <button
+              type="button" className="pm-tile-add" disabled={disabled || remaining === 0}
+              aria-label={t('settings.scene.add')} aria-describedby={`${id}-remaining`}
+              onClick={() => { openDialog({ kind: 'scene' }) }}
+            >
+              <span className="pm-tile-add-title"><Icon name="plus" size={14} />{t('settings.scene.add')}</span>
+              <span className="pm-tile-add-note" id={`${id}-remaining`}>{t('settings.scene.remaining', { n: remaining })}</span>
+            </button>
+          </li>
         </ul>
-        <button
-          type="button" className="pm-tile-add" disabled={disabled || remaining === 0}
-          aria-label={t('settings.scene.add')} aria-describedby={`${id}-remaining`}
-          onClick={() => { openDialog({ kind: 'scene' }) }}
-        >
-          <Icon name="plus" size={14} />
-          {t('settings.scene.add')}
-          <span className="pm-tile-add-note" id={`${id}-remaining`}>{t('settings.scene.remaining', { n: remaining })}</span>
-        </button>
       </section>
       <section className="pm-subgroup" aria-labelledby={`${id}-types`}>
         <h3 className="pm-subgroup-title" id={`${id}-types`}>{t('settings.types.title')}</h3>
@@ -267,16 +269,17 @@ export function SceneSection({ fields, saved, migrations, counts, canMigrate, di
             <p key={name} className="pm-tile-removed">
               <span>{t('settings.types.removedLine', { label })}</span>
               <i className="pm-sep" aria-hidden="true">·</i>
-              <button type="button" className="pm-link" disabled={disabled} aria-label={t('settings.types.restoreAria', { name: label })}
+              <button type="button" className="pm-link pm-link--muted" disabled={disabled} aria-label={t('settings.types.restoreAria', { name: label })}
                 onClick={() => { restorePreset(name) }}>{t('settings.types.restore')}</button>
             </p>
           )
         }))}
-        {typeGroup('custom', Object.keys(fields.customTypes).filter(name => !isPresetType(name)), (
-          <button type="button" className="pm-tile-add" disabled={disabled} onClick={() => { openDialog({ kind: 'type' }) }}>
-            <Icon name="plus" size={14} />
-            {t('settings.types.create')}
-          </button>
+        {typeGroup('custom', Object.keys(fields.customTypes).filter(name => !isPresetType(name)), null, (
+          <li className="pm-tile-add-item">
+            <button type="button" className="pm-tile-add" disabled={disabled} onClick={() => { openDialog({ kind: 'type' }) }}>
+              <span className="pm-tile-add-title"><Icon name="plus" size={14} />{t('settings.types.create')}</span>
+            </button>
+          </li>
         ))}
       </section>
       {dialog?.kind === 'view' ? <TypeView name={dialog.name} onClose={() => { setDialog(undefined) }} /> : null}
@@ -707,15 +710,14 @@ export const scenesCss = `
 .pm-tile-code { margin-left: auto; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pm-subgroup-hint + .pm-tile-group { margin-top: 12px; }
 .pm-tile-group + .pm-tile-group { margin-top: 16px; }
-.pm-tile-group-title { margin: 0 0 8px; padding-left: 16px; font-size: 12px; font-weight: 500; line-height: 1.5; color: var(--pm-text-2); }
+.pm-tile-group-title { margin: 0 0 8px; font-size: 12px; font-weight: 500; line-height: 1.5; color: var(--pm-text-2); }
 /* 删掉一张卡后焦点落在组标题上（只供读屏和键盘接着走），不画焦点框 */
-.pm-tile-group-title:focus { outline: none; }
-.pm-tile-removed { display: flex; align-items: center; gap: 6px; margin: 8px 0 0; padding-left: 16px; font-size: 12px; line-height: 1.5; color: var(--pm-text-3); }
+.pm-tile-group-title:focus, .pm-subgroup .pm-subgroup-title:focus { outline: none; }
+.pm-tile-removed { display: flex; align-items: center; gap: 6px; margin: 8px 0 0; font-size: 12px; line-height: 1.5; color: var(--pm-text-3); }
 .pm-tile-group-title + .pm-tile-removed { margin-top: 0; }
 .pm-tile-removed + .pm-tile-removed { margin-top: 4px; }
-/* 卡片区里的链接要压过设置页的 .pm-settings .pm-link（13px，后加载） */
-.pm-tile-group .pm-tile-removed .pm-link { font-size: 12px; }
 .pm-tile-removed .pm-sep { margin: 0; }
+.pm-tile-removed .pm-link { font-weight: 600; }
 .pm-type-view { display: flex; flex-direction: column; gap: 12px; margin: 0; }
 .pm-type-view div { display: flex; flex-direction: column; gap: 2px; }
 .pm-type-view dt { font-size: 12px; font-weight: 500; line-height: 1.5; color: var(--pm-text-2); }
@@ -727,7 +729,6 @@ export const scenesCss = `
 .pm-scene-group .pm-scene-confirm--block { margin: 2px 0 6px 23px; }
 .pm-scene-confirm-note { flex-basis: 100%; color: var(--pm-text-3); }
 .pm-scene-confirm-actions { display: inline-flex; align-items: center; gap: 8px; }
-.pm-scene-confirm .pm-link, .pm-tile .pm-scene-confirm .pm-link { font-size: 12px; }
 .pm-scene-confirm .pm-link:disabled { color: var(--pm-text-3); cursor: default; text-decoration: none; }
 .pm-scene-confirm .pm-sep { margin: 0 -2px; font-style: normal; }
 .pm-scene-confirm .pm-scene-confirm-cancel { font-weight: 400; color: var(--pm-text-2); }

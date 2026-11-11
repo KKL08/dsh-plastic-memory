@@ -1,5 +1,5 @@
 /**
- * 冲突裁决（DESIGN.md「Conflict Ruling」）：琥珀圆点 + 标题，A / B 描边圆标 + 各自的记忆卡，
+ * 冲突裁决（DESIGN.md「Conflict Ruling」）：琥珀圆点 + 标题，A / B 字母标记（不套圆、不加底）+ 各自的记忆卡，
  * 三个按钮「以 A 为准 / 以 B 为准 / 都保留」，按钮到 verdict 的映射取契约 CONFLICT_ACTION_VERDICTS。
  * 两版结构相同：标题下一句默认行为，A、B 记忆卡，后果说明进建议区（「说明」），下面三个平级按钮一排。
  * - 宽版（记忆页）：A、B 各一张描边卡并排，卡里只放记忆；按钮靠右，和其它卡的动作行对齐；
@@ -20,16 +20,12 @@ import { StatusMarker } from './StatusMarker.tsx'
 type HorizontalVerdict = (typeof CONFLICT_ACTION_VERDICTS.horizontal)[keyof typeof CONFLICT_ACTION_VERDICTS.horizontal]
 type VerticalVerdict = (typeof CONFLICT_ACTION_VERDICTS.vertical)[keyof typeof CONFLICT_ACTION_VERDICTS.vertical]
 
-export interface ConflictRulingProps {
+/** 两版共用的参数。 */
+interface RulingSharedProps {
   layout: 'wide' | 'narrow'
-  left: MemoryCardData | null
-  right: MemoryCardData | null
   now: number
-  onRule: (verdict: HorizontalVerdict) => void
-  /** 缺省「两条记忆互相矛盾，等你决定」；记忆页用条目标题。 */
+  /** 缺省各自的默认标题；记忆页用条目标题。 */
   title?: ReactNode
-  /** 一句默认行为（「决定之前，agent 按 A 来做。」），在标题下。 */
-  note?: string
   /** 动作暂不可用的原因（无会话等）。 */
   unavailable?: string | undefined
   typeLabel?: (type: string) => string
@@ -40,10 +36,17 @@ export interface ConflictRulingProps {
   headExtra?: ReactNode
 }
 
+export interface ConflictRulingProps extends RulingSharedProps {
+  left: MemoryCardData | null
+  right: MemoryCardData | null
+  onRule: (verdict: HorizontalVerdict) => void
+  /** 一句默认行为（「决定之前，agent 按 A 来做。」），在标题下。 */
+  note?: string
+}
+
 export function ConflictRuling(props: ConflictRulingProps) {
   const t = useT()
   const { horizontal } = CONFLICT_ACTION_VERDICTS
-  const unavailable = props.unavailable ?? (props.left === null || props.right === null ? t('conflict.missingHint') : undefined)
   const isSecretA = props.left?.hasSecret === true
   const isSecretB = props.right?.hasSecret === true
   const consequence = isSecretA && isSecretB ? 'conflict.consequence.secretBoth'
@@ -51,78 +54,94 @@ export function ConflictRuling(props: ConflictRulingProps) {
   const side = (letter: 'A' | 'B', memory: MemoryCardData | null) => (
     <section className="pm-conflict-side" aria-label={t('conflict.side', { side: letter })}>
       <span className="pm-ab" aria-hidden="true">{letter}</span>
-      <div className="pm-conflict-body">
-        {memory === null
-          ? <p className="pm-conflict-missing">{t('conflict.missing')}</p>
-          : <MemoryCard memory={memory} now={props.now} typeLabel={props.typeLabel?.(memory.type)} hideScope={props.hideScope} projectName={props.projectName?.(memory)} />}
-      </div>
+      <div className="pm-conflict-body"><RulingMemory {...props} memory={memory} /></div>
     </section>
   )
-
   return (
-    <article className={`pm-conflict pm-conflict--${props.layout}`}>
-      <header className="pm-conflict-head">
-        <span className="pm-conflict-mark"><StatusMarker kind="pending" /></span>
-        <h3 className="pm-conflict-title">{props.title ?? t('conflict.title')}</h3>
-        {props.headExtra}
-      </header>
-      {props.note !== undefined ? <p className="pm-conflict-note">{props.note}</p> : null}
+    <RulingShell
+      {...props}
+      title={props.title ?? t('conflict.title')}
+      isMissing={props.left === null || props.right === null}
+      consequence={t(consequence)}
+      actions={[
+        [t('conflict.keepA'), () => { props.onRule(horizontal.keepA) }],
+        [t('conflict.keepB'), () => { props.onRule(horizontal.keepB) }],
+        [t('conflict.keepBoth'), () => { props.onRule(horizontal.keepBoth) }],
+      ]}
+    >
       <div className="pm-conflict-sides">
         {side('A', props.left)}
         {side('B', props.right)}
       </div>
-      <div className="pm-conflict-advice"><AdviceNote label="note">{t(consequence)}</AdviceNote></div>
-      <div className="pm-conflict-buttons">
-        <Button unavailable={unavailable} onClick={() => { props.onRule(horizontal.keepA) }}>{t('conflict.keepA')}</Button>
-        <Button unavailable={unavailable} onClick={() => { props.onRule(horizontal.keepB) }}>{t('conflict.keepB')}</Button>
-        <Button unavailable={unavailable} onClick={() => { props.onRule(horizontal.keepBoth) }}>{t('conflict.keepBoth')}</Button>
-      </div>
-    </article>
+    </RulingShell>
   )
 }
 
-export interface VerticalConflictRulingProps {
-  layout: 'wide' | 'narrow'
+export interface VerticalConflictRulingProps extends RulingSharedProps {
   memory: MemoryCardData | null
   /** 基线出处（「AGENTS.md：包管理」）。 */
   baselineRef: string
-  now: number
   onRule: (verdict: VerticalVerdict) => void
-  /** 缺省「这条记忆和基线矛盾，等你决定」；记忆页用条目标题。 */
-  title?: ReactNode
-  unavailable?: string | undefined
-  typeLabel?: (type: string) => string
-  hideScope?: boolean
-  projectName?: (memory: MemoryCardData) => string | undefined
-  headExtra?: ReactNode
 }
 
 /** 记忆和基线冲突：结构同上，只有一张记忆卡。 */
 export function VerticalConflictRuling(props: VerticalConflictRulingProps) {
   const t = useT()
   const { vertical } = CONFLICT_ACTION_VERDICTS
-  const unavailable = props.unavailable ?? (props.memory === null ? t('conflict.missingHint') : undefined)
   return (
-    <article className={`pm-conflict pm-conflict--${props.layout}`}>
-      <header className="pm-conflict-head">
-        <span className="pm-conflict-mark"><StatusMarker kind="pending" /></span>
-        <h3 className="pm-conflict-title">{props.title ?? t('conflict.vertical.title')}</h3>
-        {props.headExtra}
-      </header>
-      <p className="pm-conflict-note">{t('conflict.vertical.baseline')}</p>
+    <RulingShell
+      {...props}
+      title={props.title ?? t('conflict.vertical.title')}
+      note={t('conflict.vertical.baseline')}
+      isMissing={props.memory === null}
+      consequence={t(props.memory?.hasSecret === true ? 'conflict.vertical.consequence.secret' : 'conflict.vertical.consequence')}
+      actions={[
+        [t('conflict.vertical.keepBaseline'), () => { props.onRule(vertical.keepBaseline) }],
+        [t('conflict.vertical.keepMemory'), () => { props.onRule(vertical.keepMemory) }],
+      ]}
+    >
       <div className="pm-conflict-single">
-        {props.memory === null
-          ? <p className="pm-conflict-missing">{t('conflict.missing')}</p>
-          : <MemoryCard memory={props.memory} now={props.now} typeLabel={props.typeLabel?.(props.memory.type)} hideScope={props.hideScope} projectName={props.projectName?.(props.memory)} />}
+        <RulingMemory {...props} />
         <p className="pm-conflict-baseline">{t('conflict.vertical.baselineRef', { ref: props.baselineRef })}</p>
       </div>
-      <div className="pm-conflict-advice"><AdviceNote label="note">{t(props.memory?.hasSecret === true ? 'conflict.vertical.consequence.secret' : 'conflict.vertical.consequence')}</AdviceNote></div>
+    </RulingShell>
+  )
+}
+
+/** 两版共用的外壳：标题行、标题下一句、各自的记忆区、后果说明、一排按钮。任一方定位不到（isMissing）时按钮都不可用。 */
+function RulingShell({ layout, title, headExtra, note, unavailable, isMissing, consequence, actions, children }: RulingSharedProps & {
+  note?: string | undefined
+  isMissing: boolean
+  consequence: string
+  /** 按钮文字与点击动作，按显示顺序。 */
+  actions: ReadonlyArray<readonly [label: string, onClick: () => void]>
+  children: ReactNode
+}) {
+  const t = useT()
+  const reason = unavailable ?? (isMissing ? t('conflict.missingHint') : undefined)
+  return (
+    <article className={`pm-conflict pm-conflict--${layout}`}>
+      <header className="pm-conflict-head">
+        <span className="pm-conflict-mark"><StatusMarker kind="pending" /></span>
+        <h3 className="pm-conflict-title">{title}</h3>
+        {headExtra}
+      </header>
+      {note !== undefined ? <p className="pm-conflict-note">{note}</p> : null}
+      {children}
+      <div className="pm-conflict-advice"><AdviceNote label="note">{consequence}</AdviceNote></div>
       <div className="pm-conflict-buttons">
-        <Button unavailable={unavailable} onClick={() => { props.onRule(vertical.keepBaseline) }}>{t('conflict.vertical.keepBaseline')}</Button>
-        <Button unavailable={unavailable} onClick={() => { props.onRule(vertical.keepMemory) }}>{t('conflict.vertical.keepMemory')}</Button>
+        {actions.map(([label, onClick]) => <Button key={label} unavailable={reason} onClick={onClick}>{label}</Button>)}
       </div>
     </article>
   )
+}
+
+/** 一方的记忆卡；定位不到时一句说明。 */
+function RulingMemory({ memory, now, typeLabel, hideScope, projectName }: RulingSharedProps & { memory: MemoryCardData | null }) {
+  const t = useT()
+  return memory === null
+    ? <p className="pm-conflict-missing">{t('conflict.missing')}</p>
+    : <MemoryCard memory={memory} now={now} typeLabel={typeLabel?.(memory.type)} hideScope={hideScope} projectName={projectName?.(memory)} />
 }
 
 export const conflictRulingCss = `
@@ -132,7 +151,8 @@ export const conflictRulingCss = `
 .pm-conflict-mark { display: inline-flex; }
 .pm-conflict--wide .pm-conflict-mark { justify-content: center; flex: 0 0 14px; }
 .pm-conflict--wide .pm-conflict-note { margin-left: 22px; }
-.pm-conflict-title { margin: 0; font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
+/* 标题是模型写的摘要，可能带长函数名、路径：允许在任意处折行，不把右边的胶囊挤出去 */
+.pm-conflict-title { margin: 0; min-width: 0; overflow-wrap: anywhere; font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--pm-text); }
 .pm-conflict-note { margin: -6px 0 12px 16px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); }
 .pm-conflict-sides { display: flex; flex-direction: column; gap: 12px; }
 .pm-conflict--wide .pm-conflict-sides { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; padding-left: 22px; }
