@@ -27,6 +27,8 @@ export interface CheckupSuggestionsDeps {
   views: { request: (views: readonly GlobalViewName[]) => Promise<void>; requestCheckups: () => Promise<void> }
   /** 宿主的读事件服务：生成前回查两条的出处。缺省或返回 null 时不带出处。 */
   getReadEvent?: () => ReadEventFn | null
+  /** 自动体检一次最多补几条，缺省 AUTO_SUGGESTION_LIMIT。 */
+  autoLimit?: number
   now: () => number
   log: MemoryLogger
 }
@@ -118,7 +120,7 @@ export class CheckupSuggestions {
     }
     // 认领和标记放在同一段同步代码里：同一进程里另一段读完列表之后才看标记，不会两段都选中同一条
     const free = eligible.filter(({ entry }) => !this.generating.has(entry.id))
-    const limit = input.by === 'auto' ? AUTO_SUGGESTION_LIMIT : free.length
+    const limit = input.by === 'auto' ? deps.autoLimit ?? AUTO_SUGGESTION_LIMIT : free.length
     const targets = free.slice(0, limit)
     const mine = new Set(targets.map(({ entry }) => entry.id))
     for (const id of mine) this.generating.add(id)
