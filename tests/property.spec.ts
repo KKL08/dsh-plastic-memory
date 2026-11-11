@@ -398,30 +398,20 @@ describe('子 agent 记忆的生命周期', () => {
   const outcomesOf = (sequence: Op[], known: Set<string>) => (sequence === KNOWN ? known : new Set<string>())
 
   // INVARIANT：没有主会话或用户参与的操作，不会让任何记录从待确认变成主档——操作后已升档的子 agent 记录，操作前就已升档、升档信息不变。
-  it('无人参与的操作不会把待确认记录升成主档', async () => {
-    const outcomes = new Set<string>()
-    await fc.assert(fc.asyncProperty(ops, async sequence => {
-      await runSequence(sequence, outcomesOf(sequence, outcomes), (op, before, after) => {
-        if (!isUnattended(op)) return
-        for (const [id, { record }] of after) {
-          if (record.delegation === undefined || isPendingDelegated(record)) continue
-          expect(before.get(id)?.record.delegation?.reviewed, `${op.kind} 让 ${id} 升了档`).toEqual(record.delegation.reviewed)
-        }
-      })
-    }), runs)
-    expect([...outcomes]).toEqual(expect.arrayContaining(REACHED))
-  }, 120_000)
-
   // INVARIANT：delegation 的创建者四个字段一旦写入，此后每一步读回都在且不变（升档只加 reviewed）。
-  it('创建者四个字段写入后不变', async () => {
+  // 两条在同一批序列上查：每条序列都要整套启动插件，各跑一遍只是把同样的序列执行两次。
+  it('无人参与的操作不会把待确认记录升成主档；创建者四个字段写入后不变', async () => {
     const outcomes = new Set<string>()
     const creatorOf = (r: MemoryRecord) => r.delegation && {
       sessionId: r.delegation.sessionId, depth: r.delegation.depth, parentSessionId: r.delegation.parentSessionId, rootSessionId: r.delegation.rootSessionId,
     }
     await fc.assert(fc.asyncProperty(ops, async sequence => {
       const creators = new Map<string, unknown>()
-      await runSequence(sequence, outcomesOf(sequence, outcomes), (op, _before, after) => {
+      await runSequence(sequence, outcomesOf(sequence, outcomes), (op, before, after) => {
         for (const [id, { record }] of after) {
+          if (isUnattended(op) && record.delegation !== undefined && !isPendingDelegated(record)) {
+            expect(before.get(id)?.record.delegation?.reviewed, `${op.kind} 让 ${id} 升了档`).toEqual(record.delegation.reviewed)
+          }
           if (!creators.has(id)) {
             if (record.delegation !== undefined) creators.set(id, creatorOf(record))
             continue
