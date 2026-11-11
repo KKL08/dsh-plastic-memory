@@ -2169,6 +2169,30 @@ describe('scan', () => {
     expect((await e.readCheckupView()).allResult?.usageTokens).toBe(130)
   })
 
+  it('故事 33：手动体检之后给垂直冲突生成建议：用借来的会话的指令文件，依据记下基线所属项目', async () => {
+    const baseline = ['# AGENTS.md\n包管理统一用 pnpm']
+    let verticalPrompt = ''
+    const llm: SemanticLlm = {
+      model: 'm-test',
+      complete: async (input) => {
+        if (input.system.includes('长期记忆和项目指令文件')) {
+          verticalPrompt = input.user
+          return JSON.stringify({ action: 'delete', reason: '指令文件已经写清楚了' })
+        }
+        return JSON.stringify({ findings: [{ type: 'conflict', memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '和基线矛盾', suggestedAction: '裁决' }] })
+      },
+    }
+    const e = env({ llm, baseline, withSuggestions: true })
+    await e.store.create(record({ id: 'mem_v', name: '包管理', content: '用 npm', scope: 'workspace', workspacePath: SESSION_WS }))
+    ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    await e.suggestions!.whenIdle()
+    expect(verticalPrompt).toContain('包管理统一用 pnpm')
+    const [entry] = await e.decisions.list()
+    expect(entry?.suggestion).toMatchObject({ action: 'delete', basis: { baseline: { workspace: SESSION_WS } } })
+    const items = ledgerItems(pendingViewSchema.parse(await e.readView('pending')))
+    expect(items).toEqual([expect.objectContaining({ kind: 'conflict-vertical', suggestion: expect.objectContaining({ action: 'delete', baselineWorkspace: SESSION_WS }) })])
+  })
+
   it('借的会话不属于页面项目：结果带回 baseline-session-scoped', async () => {
     const e = env({ llm: { complete: async () => '{"findings":[]}' }, baseline: ['用 pnpm'] })
     await e.store.create(record({ id: 'mem_w', scope: 'workspace', workspacePath: OTHER_WS }))
@@ -4992,13 +5016,16 @@ describe('suggest（补上建议）', () => {
     expect(await e.decisions.get(entry.id)).toEqual(entry)
   })
 
-  it('条目不在、不是横向冲突、一方已不在用：not-found / invalid-args / not-found 带记忆 id', async () => {
+  it('条目不在、不是冲突、垂直冲突缺基线、一方已不在用：not-found / invalid-args / no-baseline / not-found 带记忆 id', async () => {
     const { llm, prompts } = scripted(KEEP_A)
     const e = env({ llm })
     expect(err(await e.run({ cmd: 'suggest', decisionId: 'pd_ghost' })).code).toBe('not-found')
     await e.store.create(record({ id: 'mem_v', content: '用 npm' }))
     const vertical = (await e.decisions.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：用 pnpm', summary: 'v', fingerprint: 'fp-v' }, 1)).entry
-    expect(err(await e.run({ cmd: 'suggest', decisionId: vertical.id })).code).toBe('invalid-args')
+    expect(err(await e.run({ cmd: 'suggest', decisionId: vertical.id })).code).toBe('no-baseline')
+    await e.decisions.syncOverflow(SESSION_WS, { mode: 'relax', tier: 1 }, 1, '超限')
+    const overflow = (await e.decisions.list()).find(d => d.kind === 'overflow')!
+    expect(err(await e.run({ cmd: 'suggest', decisionId: overflow.id })).code).toBe('invalid-args')
     const entry = await seedPair(e)
     await e.store.update({ id: 'mem_b' }, r => ({ ...r, status: 'deleted', deletedAt: NOW }))
     expect(err(await e.run({ cmd: 'suggest', decisionId: entry.id }))).toMatchObject({ code: 'not-found', memoryIds: ['mem_b'] })
@@ -5339,12 +5366,15 @@ describe('apply-proposal（采纳建议：保留一方、都保留）', () => {
     expect((await statuses(e)).filter(s => s === 'deleted')).toHaveLength(1)
   })
 
-  it('条目不在待处理：not-found；不是横向冲突：invalid-args', async () => {
+  it('条目不在待处理：not-found；不是冲突：invalid-args；垂直冲突没有这份建议：stale', async () => {
     const e = env()
     expect(err(await e.run({ cmd: 'apply-proposal', decisionId: 'pd_ghost', suggestionId: 'sg_x' })).code).toBe('not-found')
     await e.store.create(record({ id: 'mem_v', content: '用 npm' }))
     const vertical = (await e.decisions.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：用 pnpm', summary: 'v', fingerprint: 'fp-v' }, 1)).entry
-    expect(err(await e.run({ cmd: 'apply-proposal', decisionId: vertical.id, suggestionId: 'sg_x' })).code).toBe('invalid-args')
+    expect(err(await e.run({ cmd: 'apply-proposal', decisionId: vertical.id, suggestionId: 'sg_x' })).code).toBe('stale')
+    await e.decisions.syncOverflow(SESSION_WS, { mode: 'relax', tier: 1 }, 1, '超限')
+    const overflow = (await e.decisions.list()).find(d => d.kind === 'overflow')!
+    expect(err(await e.run({ cmd: 'apply-proposal', decisionId: overflow.id, suggestionId: 'sg_x' })).code).toBe('invalid-args')
   })
 
   it('一方属于别的项目：同裁决过跨项目门，带 allowCrossWorkspace 后照常采纳', async () => {
@@ -5865,7 +5895,7 @@ describe('draft-proposal 与按要求应用（补充要求）', () => {
       expect(err(await draft(second.e, second.entry.id))).toMatchObject({ code: 'stale', memoryIds: ['mem_a', 'mem_b'] })
     })
 
-    it('条目不在、不是横向冲突、一方已不在用：not-found / invalid-args / not-found 带记忆 id', async () => {
+    it('条目不在、卡片版本条数和条目对不上、一方已不在用：not-found / invalid-args / not-found 带记忆 id', async () => {
       const { llm, prompts } = scripted(MERGED)
       const { e, entry } = await seeded({ llm })
       const bases = await basesOf(e)
@@ -6011,6 +6041,256 @@ describe('draft-proposal 与按要求应用（补充要求）', () => {
       ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal }))
       expect(await statuses(e)).toEqual(['active', 'deleted'])
       expect((await e.decisions.listSettled())[0]!.settled?.proposal).toEqual({ source: 'request', action: 'keep-a' })
+    })
+  })
+})
+
+describe('垂直冲突（记忆和指令文件）用处理卡', () => {
+  const LATER = NOW + 1000
+  const BASELINE = ['Instructions from: /tmp/pm-cmd-session/AGENTS.md\n前端统一用 pnpm']
+  const DRAFT = { content: '脚本仓用 npm；前端按 AGENTS.md 用 pnpm', summary: '脚本仓的包管理器', name: '脚本仓包管理器', tags: ['npm'] }
+  const said = (action: string, extra: object = {}) => JSON.stringify({ action, reason: `模型说 ${action}`, ...extra })
+  function scripted(...answers: string[]) {
+    const prompts: Array<{ system: string; user: string }> = []
+    const llm: SemanticLlm = { model: 'deepseek-v4-flash', complete: async (prompt) => { prompts.push(prompt); return answers.shift() ?? '' } }
+    return { llm, prompts }
+  }
+  /** 本项目的一条记忆和会话的 AGENTS.md 矛盾；条目指纹同体检（含整份基线）。 */
+  async function seeded(opts: EnvOpts & { memory?: Partial<MemoryRecord> } = {}) {
+    const { memory, ...rest } = opts
+    const e = env({ baseline: BASELINE, ...rest })
+    await e.store.create(record({ id: 'mem_v', name: '包管理器', content: '用 npm', scope: 'workspace', workspacePath: SESSION_WS, ...memory }))
+    const r = (await e.store.get('mem_v', { workspacePath: SESSION_WS }))!
+    const { entry } = await e.decisions.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '记忆说 npm，AGENTS.md 说 pnpm', workspaces: [r.workspacePath ?? 'global'], fingerprint: conflictFingerprint([r], BASELINE) }, 2)
+    return { e, entry }
+  }
+  const verticalOf = async (e: ReturnType<typeof env>, id: string) => {
+    const item = pendingViewSchema.parse(await e.readView('pending')).items.find(i => 'decisionId' in i && i.decisionId === id)
+    if (item?.kind !== 'conflict-vertical') throw new Error(`没有垂直冲突项 ${id}`)
+    return item
+  }
+  const memoryNow = async (e: ReturnType<typeof env>) => (await e.store.get('mem_v', { workspacePath: SESSION_WS }))!
+  const baseOf = (r: MemoryRecord) => ({ updatedAt: r.updatedAt, digest: computeDigest(r.name, r.summary, r.content) })
+  const agentsMdPath = () => join(root, 'AGENTS.md')
+
+  describe('suggest（补上建议）', () => {
+    it('会话在这个项目里：按会话的基线生成，依据记下基线所属项目和基线指纹；指令文件按疑似级遮盖后才进提示词；视图带上建议和项目', async () => {
+      const { llm, prompts } = scripted(said('rewrite', { draft: DRAFT }))
+      const { e, entry } = await seeded({ llm, baseline: [...BASELINE, '部署口令 password: abc12345x'] })
+      ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+      expect(prompts).toHaveLength(1)
+      expect(prompts[0]!.user).toContain('前端统一用 pnpm')
+      expect(prompts[0]!.user).not.toContain('abc12345x')
+      const saved = (await e.decisions.get(entry.id))!.suggestion!
+      expect(saved).toMatchObject({ action: 'rewrite', ops: [{ kind: 'edit', memoryId: 'mem_v', ...DRAFT }] })
+      expect(saved.basis.baseline).toEqual({ workspace: SESSION_WS, fingerprint: expect.any(String) })
+      expect((await verticalOf(e, entry.id)).suggestion).toMatchObject({ id: saved.id, action: 'rewrite', baselineWorkspace: SESSION_WS })
+    })
+
+    it('缺基线：会话拿不到指令文件、或会话不在这条记忆的项目里，回 no-baseline，不调用模型、账本不动', async () => {
+      for (const opts of [{ baseline: null }, { workspacePath: OTHER_WS }] as const) {
+        const { llm, prompts } = scripted(said('delete'))
+        const { e, entry } = await seeded({ llm, ...opts })
+        expect(err(await e.run({ cmd: 'suggest', decisionId: entry.id })).code).toBe('no-baseline')
+        expect(prompts).toEqual([])
+        expect(await e.decisions.get(entry.id)).toEqual(entry)
+        await rm(root, { recursive: true, force: true })
+        root = await mkdtemp(join(tmpdir(), 'pm-gui-commands-'))
+      }
+    })
+
+    it('全局记忆：只认扫出这条冲突的那份指令文件。在那个会话里能补（依据记下会话所在的项目）；换一个项目的会话，补上、按要求生成回 no-baseline，采纳回 stale', async () => {
+      const { llm, prompts } = scripted(said('delete'))
+      const { e, entry } = await seeded({ llm, workspacePath: OTHER_WS, memory: { scope: 'global', workspacePath: undefined } })
+      // 同一份数据目录，借来的会话在另一个项目里，生效的是另一份指令文件
+      const elsewhere = env({ llm, baseline: ['Instructions from: /tmp/pm-cmd-else/AGENTS.md\n统一用 yarn'] })
+      const bases: [ReturnType<typeof baseOf>] = [baseOf(await memoryNow(e))]
+      expect(err(await elsewhere.run({ cmd: 'suggest', decisionId: entry.id })).code).toBe('no-baseline')
+      expect(err(await elsewhere.run({ cmd: 'draft-proposal', decisionId: entry.id, request: '删掉', bases })).code).toBe('no-baseline')
+      expect(prompts).toEqual([])
+      expect(await e.decisions.get(entry.id)).toEqual(entry)
+
+      ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+      const suggestion = (await e.decisions.get(entry.id))!.suggestion!
+      expect(suggestion.basis.baseline?.workspace).toBe(OTHER_WS)
+      expect(err(await elsewhere.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id })).code).toBe('stale')
+      expect(await memoryNow(e)).toMatchObject({ status: 'active', content: '用 npm' })
+    })
+
+    it('记忆含高危密钥：has-secret，不调用模型', async () => {
+      const { llm, prompts } = scripted(said('delete'))
+      const { e, entry } = await seeded({ llm, memory: { content: `用 npm，token ${FAKE_SECRET.github}` } })
+      expect(err(await e.run({ cmd: 'suggest', decisionId: entry.id })).code).toBe('has-secret')
+      expect(prompts).toEqual([])
+    })
+  })
+
+  describe('apply-proposal（采纳建议）', () => {
+    async function suggested(action: string, extra: object = {}, opts: EnvOpts = {}) {
+      const { e, entry } = await seeded({ llm: scripted(said(action, extra)).llm, ...opts })
+      ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+      return { e, entry, suggestion: (await e.decisions.get(entry.id))!.suggestion! }
+    }
+
+    it('改写：记忆换成改写稿（标手改），一份快照；条目结清为 plan-applied（只有改写一项回执、没有败方），改后指纹按会话基线重算；指令文件不改', async () => {
+      const { e, entry, suggestion } = await suggested('rewrite', { draft: DRAFT })
+      e.clock.now = LATER
+      const body = ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id }))
+      const [snap] = await e.snapshots.list()
+      expect(body).toEqual({ ok: true, cmd: 'apply-proposal', decisionId: entry.id, memoryIds: ['mem_v'], snapshotId: snap!.id })
+      const written = await memoryNow(e)
+      expect(written).toMatchObject({ ...DRAFT, status: 'active', handEdited: true })
+      const [settled] = await e.decisions.listSettled()
+      expect(settled).toMatchObject({ id: entry.id, fingerprint: conflictFingerprint([written], BASELINE) })
+      expect(settled!.settled).toEqual({
+        verdict: 'plan-applied', at: LATER, snapshotId: snap!.id, proposal: { source: 'suggestion', action: 'rewrite' }, priorFingerprint: entry.fingerprint,
+        receipts: [{ memoryId: 'mem_v', op: 'edit', fingerprint: editFingerprint(written), expectedStatus: 'active' }],
+      })
+      await expect(stat(agentsMdPath())).rejects.toThrow()
+      expect(ledgerItems(pendingViewSchema.parse(await e.readView('pending')))).toEqual([])
+      // 同一条按改后的内容再被扫到：算已结清，不再挂账
+      expect((await e.decisions.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md', summary: '再报', fingerprint: conflictFingerprint([written], BASELINE) }, LATER)).settled).toBe(true)
+    })
+
+    it('改写后撤销：记忆恢复原样，条目回到待处理，建议照常显示', async () => {
+      const { e, entry, suggestion } = await suggested('rewrite', { draft: DRAFT })
+      ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id }))
+      ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+      expect(await memoryNow(e)).toMatchObject({ content: '用 npm', name: '包管理器' })
+      expect(await e.decisions.get(entry.id)).toMatchObject({ fingerprint: entry.fingerprint })
+      expect((await verticalOf(e, entry.id)).suggestion?.id).toBe(suggestion.id)
+    })
+
+    it('两个标签页同时采纳改写：只成一次，只拍一份快照；另一次回 claimed 或 not-found', async () => {
+      const { e, entry, suggestion } = await suggested('rewrite', { draft: DRAFT })
+      const other = env({ baseline: BASELINE })
+      const adopt = (on: ReturnType<typeof env>) => on.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id })
+      const results = await Promise.all([adopt(e), adopt(other)])
+      expect(results.filter(r => r.ok)).toHaveLength(1)
+      expect(['claimed', 'not-found']).toContain(err(results.find(r => !r.ok)!).code)
+      expect(await e.snapshots.list()).toHaveLength(1)
+      expect(await memoryNow(e)).toMatchObject({ content: DRAFT.content })
+      expect((await e.decisions.listSettled()).map(d => d.settled?.verdict)).toEqual(['plan-applied'])
+    })
+
+    it('改写后记忆又被改过：撤销回 stale，什么都不动', async () => {
+      const { e, entry, suggestion } = await suggested('rewrite', { draft: DRAFT })
+      ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id }))
+      await e.store.update({ id: 'mem_v', workspacePath: SESSION_WS }, r => ({ ...r, content: '落盘后又改的' }))
+      expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('stale')
+      expect(await memoryNow(e)).toMatchObject({ status: 'active', content: '落盘后又改的' })
+      expect((await e.decisions.listSettled()).map(d => d.id)).toEqual([entry.id])
+    })
+
+    it('改写结清后指令文件改了、体检按新指纹重报：另挂一条待处理，已结清条目和撤销回执留着，照常能撤销', async () => {
+      const { e, entry, suggestion } = await suggested('rewrite', { draft: DRAFT })
+      ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id }))
+      const rescan: SemanticLlm = { model: 'm-test', complete: async () => JSON.stringify({ findings: [{ type: 'conflict', memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '还是矛盾', suggestedAction: '裁决' }] }) }
+      const later = env({ llm: rescan, baseline: [...BASELINE, '脚本仓也用 pnpm'] })
+      ok(await later.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+      expect((await e.decisions.list()).map(d => d.id)).not.toContain(entry.id)
+      expect(await e.decisions.list()).toHaveLength(1)
+      const [settled] = await e.decisions.listSettled()
+      expect(settled).toMatchObject({ id: entry.id, settled: { verdict: 'plan-applied', receipts: [expect.objectContaining({ memoryId: 'mem_v', op: 'edit' })] } })
+      ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+      expect(await memoryNow(e)).toMatchObject({ content: '用 npm', name: '包管理器' })
+    })
+
+    it('改写结清的读写之间这条记忆被别处彻底删除、账本已清：结清和建议稿不留在账本上', async () => {
+      const holder: { purge?: () => Promise<void> } = {}
+      const { e, entry, suggestion } = await suggested('rewrite', { draft: DRAFT }, {
+        wrapPending: (table: PendingTable): PendingTable => ({
+          get: k => table.get(k), list: () => table.list(), delete: k => table.delete(k), deleteIf: (k, isStill) => table.deleteIf(k, isStill), claim: k => table.claim(k),
+          put: async (k, v) => {
+            if (v.settled?.verdict === 'plan-applied') { await holder.purge?.(); await table.delete(k) }
+            await table.put(k, v)
+          },
+        }),
+      })
+      holder.purge = async () => { await e.store.hardDelete({ id: 'mem_v' }, { at: scopeAt(SESSION_WS) }) }
+      await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id })
+      expect(await e.store.get('mem_v', { workspacePath: SESSION_WS })).toBeUndefined()
+      expect(await e.decisions.listSettled()).toEqual([])
+      expect(await e.decisions.list()).toEqual([])
+    })
+
+    it('删除：记现有的删一方裁决（keep-right，带来源和结论代码），记忆进最近删除；撤销后回来', async () => {
+      const { e, entry, suggestion } = await suggested('delete')
+      ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id }))
+      expect((await memoryNow(e)).status).toBe('deleted')
+      const [settled] = await e.decisions.listSettled()
+      expect(settled!.settled).toMatchObject({ verdict: 'keep-right', proposal: { source: 'suggestion', action: 'delete' } })
+      ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+      expect((await memoryNow(e)).status).toBe('active')
+    })
+
+    it('都保留：记都保留裁决（带来源），记忆不动', async () => {
+      const { e, entry, suggestion } = await suggested('keep-both')
+      ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id }))
+      expect(await memoryNow(e)).toMatchObject({ content: '用 npm', status: 'active' })
+      expect((await e.decisions.listSettled())[0]!.settled).toMatchObject({ verdict: 'keep-both', proposal: { source: 'suggestion', action: 'keep-both' } })
+    })
+
+    it('采纳时用当前会话的基线重算：基线改了、会话换到别的项目、拿不到基线，都回 stale，什么都不动', async () => {
+      for (const later of [{ baseline: [...BASELINE, '另加一条'] }, { workspacePath: OTHER_WS }, { baseline: null }] as const) {
+        for (const action of ['rewrite', 'delete'] as const) {
+          const { e, entry, suggestion } = await suggested(action, { draft: DRAFT })
+          const before = await memoryNow(e)
+          // 同一份数据目录，换一个借来的会话再采纳
+          const other = env({ ...later, ...('baseline' in later ? {} : { baseline: BASELINE }) })
+          expect(err(await other.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id })).code).toBe('stale')
+          expect(await memoryNow(e)).toEqual(before)
+          expect(await e.decisions.get(entry.id)).toMatchObject({ suggestion: { id: suggestion.id } })
+          expect(await e.snapshots.list()).toEqual([])
+          await rm(root, { recursive: true, force: true })
+          root = await mkdtemp(join(tmpdir(), 'pm-gui-commands-'))
+        }
+      }
+    })
+  })
+
+  describe('draft-proposal 与按要求应用', () => {
+    it('按会话的基线生成：方案的依据带基线；缺基线回 no-baseline、不调用模型；卡片版本条数对不上回 invalid-args', async () => {
+      const { llm, prompts } = scripted(said('rewrite', { draft: DRAFT }))
+      const { e, entry } = await seeded({ llm })
+      const bases: [ReturnType<typeof baseOf>] = [baseOf(await memoryNow(e))]
+      const body = ok(await e.run({ cmd: 'draft-proposal', decisionId: entry.id, request: '改写这条记忆', bases }))
+      expect(body.proposal).toMatchObject({ action: 'rewrite', ops: [{ kind: 'edit', memoryId: 'mem_v', ...DRAFT }], basis: { baseline: { workspace: SESSION_WS } } })
+      expect(prompts[0]!.system).toContain('rewrite')
+      const twice: [ReturnType<typeof baseOf>, ReturnType<typeof baseOf>] = [baseOf(await memoryNow(e)), baseOf(await memoryNow(e))]
+      expect(err(await e.run({ cmd: 'draft-proposal', decisionId: entry.id, request: '改写', bases: twice })).code).toBe('invalid-args')
+
+      const other = env({ workspacePath: OTHER_WS, baseline: BASELINE, llm })
+      expect(err(await other.run({ cmd: 'draft-proposal', decisionId: entry.id, request: '改写', bases })).code).toBe('no-baseline')
+      expect(prompts).toHaveLength(1)
+    })
+
+    it('应用改写方案：记 plan-applied（来源是要求）；基线在生成后改了回 stale；疑似密钥等用户确认', async () => {
+      const { llm } = scripted(said('rewrite', { draft: DRAFT }), said('rewrite', { draft: { ...DRAFT, content: '用 npm，password: abc12345x' } }))
+      const { e, entry } = await seeded({ llm })
+      const bases: [ReturnType<typeof baseOf>] = [baseOf(await memoryNow(e))]
+      const proposal = ok(await e.run({ cmd: 'draft-proposal', decisionId: entry.id, request: '改写', bases })).proposal!
+      const changed = env({ baseline: [...BASELINE, '另加一条'] })
+      expect(err(await changed.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal })).code).toBe('stale')
+      expect(await memoryNow(e)).toMatchObject({ content: '用 npm' })
+
+      const suspicious = ok(await e.run({ cmd: 'draft-proposal', decisionId: entry.id, request: '写进口令', bases })).proposal!
+      expect(err(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal: suspicious })).code).toBe('secret-suspected')
+      ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal }))
+      expect(await memoryNow(e)).toMatchObject({ content: DRAFT.content })
+      expect((await e.decisions.listSettled())[0]!.settled).toMatchObject({ verdict: 'plan-applied', proposal: { source: 'request', action: 'rewrite' } })
+    })
+
+    it('方案的操作和结论对不上：invalid-args，什么都不动', async () => {
+      const { llm } = scripted(said('delete'))
+      const { e, entry } = await seeded({ llm })
+      const proposal = ok(await e.run({ cmd: 'draft-proposal', decisionId: entry.id, request: '删掉', bases: [baseOf(await memoryNow(e))] })).proposal!
+      for (const bad of [
+        { ...proposal, action: 'rewrite' as const },
+        { ...proposal, ops: [{ kind: 'keep' as const, memoryId: 'mem_v' }] },
+        { ...proposal, action: 'merge' as const },
+      ]) expect(err(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal: bad })).code).toBe('invalid-args')
+      expect((await memoryNow(e)).status).toBe('active')
     })
   })
 })

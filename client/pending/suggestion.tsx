@@ -1,5 +1,5 @@
 /**
- * 处理卡的建议块（见词表「处理建议」「处理卡」）：有建议时写模型图标、加粗的结论、一句理由，融合时带融合稿、写进哪条和原位对照；
+ * 处理卡的建议块（见词表「处理建议」「处理卡」）：有建议时写模型图标、加粗的结论、一句理由，融合、改写时带稿、写进哪条和原位对照；
  * 没有建议时写原因，能补的给「补上建议」（失败、模型判断不了之后是「再试一次」）。采纳和直接处理的按钮在块外（cards.tsx HorizontalActions）；
  * 采纳时这份建议已失效，卡片把它当作没有建议，并经 notice 写明原因。冲突卡之外的卡型以后各给结论文案。
  * 模型判断不了哪条对时如实写明加它说的理由，不按错误显示：不给结论，由用户用下面的按钮自己定。
@@ -7,9 +7,12 @@
  * 「停止」只是不再等：已经发出的这一条照常生成、写进账本，稍后跟着视图出现；之后到达的结果按请求序号认出来丢掉。换了会话同样作废在途请求、清掉本地状态。
  * 体检之后的后续段正在给这一条排队或生成时（视图带「正在生成」标记），写「正在生成建议……」、不给按钮也不给「停止」：那一段不归这张卡管，生成完建议跟着视图来。
  * 页面加载时不问模型（问一次会在借来的会话日志里留一条记录）：只读这个会话已知的模型状态（别处问过才有），此外点过之后服务端回 llm-unavailable 才知道拿不到。
+ * 垂直冲突（记忆和指令文件，只有一条记忆 left）：借来的会话不在这条记忆的项目里时（needsProject）按没有建议显示，写「要在这个项目的会话里处理」，
+ * 不给「补上建议」——建议要那个项目的指令文件，采纳时也按它核对。
  */
 import { createContext, useContext, useEffect, useRef, useState } from 'react'
 import type { MemoryCard, MemoryCommand, NoSuggestion, PendingItem, ProposalAction, Suggestion } from '../../src/gui/contract.ts'
+import { belongsTo, workspaceOf } from '../session-pick.ts'
 import { interpret } from '../command/protocol.ts'
 import { causeText } from '../checkup/StatusBar.tsx'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
@@ -26,7 +29,25 @@ export const ACTION_LABEL = {
   'keep-a': 'pending.suggestion.action.keepA',
   'keep-b': 'pending.suggestion.action.keepB',
   'keep-both': 'pending.suggestion.action.keepBoth',
+  'rewrite': 'pending.suggestion.action.rewrite',
+  'delete': 'pending.suggestion.action.delete',
 } as const satisfies Record<ProposalAction, LocaleKey>
+
+type VerticalItem = Extract<PendingItem, { kind: 'conflict-vertical' }>
+
+/**
+ * 垂直冲突能不能在借来的会话里补上、采纳、按要求生成（服务端同口径，见 baselineBasisOf）：项目记忆要会话属于它的项目；
+ * 全局记忆已有建议时要回到生成建议的那个会话所在的项目（建议是在没有项目的会话里生成的，就要会话也没有项目）。
+ * 没有会话时不在这里拦（按钮各自写「先开一个会话」）；全局记忆还没有建议时界面看不出冲突是对着哪份指令文件扫出来的，
+ * 会话读不读得到指令文件也看不到，都由服务端回缺基线。
+ */
+export function isInVerticalProject(item: VerticalItem, session: BorrowedSession): boolean {
+  if (session.kind !== 'ready') return true
+  const project = item.memory?.workspacePath ?? item.suggestion?.baselineWorkspace
+  if (project === undefined) return true
+  if (project === 'global') return workspaceOf(session.cwd, session.workspaces ?? {}) === undefined
+  return belongsTo(session.cwd, project, session.workspaces ?? {})
+}
 
 /**
  * 本地状态：idle 照视图显示；busy 命令在途；waiting 命令成功、等视图带来建议（signature 是点击时视图里没有建议的原因，变了就不再等）；
@@ -50,17 +71,19 @@ function failureText(cause: NonNullable<NoSuggestion['cause']>, t: Translate): s
   return causeText({ kind: cause.kind, ...(cause.hostCode !== undefined ? { hostCode: cause.hostCode } : {}) }, t)
 }
 
-export function SuggestionBlock({ decisionId, left, right, suggestion, noSuggestion, isGenerating = false, notice, session, onRefused }: {
+export function SuggestionBlock({ decisionId, left, right, suggestion, noSuggestion, isGenerating = false, notice, needsProject = false, session, onRefused }: {
   decisionId: string
-  /** A、B 两条（视图里的卡片），融合稿写进哪条、对照的原文按它们找。 */
+  /** A、B 两条（视图里的卡片），融合稿写进哪条、对照的原文按它们找；垂直冲突只有这一条（left）。 */
   left: MemoryCard
-  right: MemoryCard
+  right?: MemoryCard | undefined
   suggestion: Suggestion | undefined
   noSuggestion: NoSuggestion | undefined
   /** 体检之后的后续段正在给这一条生成（视图里的「正在生成」标记）。 */
   isGenerating?: boolean
   /** 没有建议时代替原因写的一句（采纳时建议已失效）：标题改成「这次没有建议」，读屏会念出来。 */
   notice?: string | undefined
+  /** 垂直冲突：借来的会话不在这条记忆的项目里（isInVerticalProject 为假）。 */
+  needsProject?: boolean
   session: BorrowedSession
   /** 这一条已在别处处理（条目不在了、正被认领）。 */
   onRefused: () => void
@@ -93,8 +116,19 @@ export function SuggestionBlock({ decisionId, left, right, suggestion, noSuggest
     return () => { clearTimeout(timer) }
   }, [isWaiting])
 
+  if (needsProject) {
+    return (
+      <div className="pm-suggestion">
+        <p className="pm-suggestion-line">
+          <strong className="pm-suggestion-title">{t(suggestion !== undefined ? 'pending.suggestion.none' : 'pending.suggestion.missing')}</strong>
+          <span>{t('pending.vertical.needProject')}</span>
+        </p>
+      </div>
+    )
+  }
   if (suggestion !== undefined) return <SuggestionView suggestion={suggestion} left={left} right={right} />
   if (noSuggestion === undefined) return null
+  const isVertical = right === undefined
 
   const generate = () => {
     if (session.kind !== 'ready') return
@@ -131,12 +165,12 @@ export function SuggestionBlock({ decisionId, left, right, suggestion, noSuggest
     )
   }
   if (noSuggestion.code === 'has-secret') {
-    const side = left.hasSecret === true && right.hasSecret === true ? 'A、B' : left.hasSecret === true ? 'A' : 'B'
+    const side = left.hasSecret === true && right?.hasSecret === true ? 'A、B' : left.hasSecret === true ? 'A' : 'B'
     return (
       <div className="pm-suggestion">
         <p className="pm-suggestion-line">
           <strong className="pm-suggestion-title">{t('pending.suggestion.none')}</strong>
-          <span>{t('pending.suggestion.secret', { side })}</span>
+          <span>{isVertical ? t('pending.suggestion.secretVertical') : t('pending.suggestion.secret', { side })}</span>
         </p>
       </div>
     )
@@ -147,7 +181,9 @@ export function SuggestionBlock({ decisionId, left, right, suggestion, noSuggest
     : isUnavailable ? t('pending.model.unavailable')
       : noSuggestion.code === 'failed' && noSuggestion.cause !== undefined ? t('pending.suggestion.failed', { reason: failureText(noSuggestion.cause, t) })
         : phase.kind === 'failed' ? undefined
-          : noSuggestion.code === 'quota-exhausted' ? t('pending.suggestion.quotaExhausted') : t('pending.suggestion.notGenerated'))
+          : noSuggestion.code === 'quota-exhausted' ? t('pending.suggestion.quotaExhausted')
+            : noSuggestion.code === 'no-baseline' ? t('pending.suggestion.noBaseline')
+              : t(isVertical ? 'pending.suggestion.notGeneratedVertical' : 'pending.suggestion.notGenerated'))
   const isRetry = phase.kind === 'failed' || noSuggestion.code === 'failed' || isUndecided
   return (
     <div className="pm-suggestion">
@@ -172,14 +208,19 @@ export function SuggestionBlock({ decisionId, left, right, suggestion, noSuggest
 /** 「全部补上」此刻正在给哪一条生成：那张卡的建议块照「正在生成」显示，不再给自己的按钮。 */
 export const BatchSuggesting = createContext<string | undefined>(undefined)
 
-type HorizontalItem = Extract<PendingItem, { kind: 'conflict-horizontal' }>
+type ConflictItem = Extract<PendingItem, { kind: 'conflict-horizontal' | 'conflict-vertical' }>
 
-/** 「全部补上」要补的一条：等你决定里的横向冲突，两条都读得出，视图写着还没有建议（没生成、上次失败、自动体检名额用完），体检之后的后续段也没在生成它。 */
-export function isMissingSuggestion(item: PendingItem): item is HorizontalItem {
-  if (item.kind !== 'conflict-horizontal' || item.level !== 'your-call' || item.left === null || item.right === null) return false
+/**
+ * 「全部补上」要补的一条：等你决定里的冲突，记忆都读得出，视图写着还没有建议（没生成、上次失败、自动体检名额用完；垂直冲突还有缺基线），
+ * 体检之后的后续段也没在生成它。垂直冲突只算借来的会话在它项目里的。
+ */
+export function isMissingSuggestion(item: PendingItem, session: BorrowedSession): item is ConflictItem {
+  if (item.level !== 'your-call') return false
+  if (item.kind !== 'conflict-horizontal' && item.kind !== 'conflict-vertical') return false
+  if (item.kind === 'conflict-horizontal' ? item.left === null || item.right === null : item.memory === null || !isInVerticalProject(item, session)) return false
   if (item.suggestion !== undefined || item.isGeneratingSuggestion === true) return false
   const code = item.noSuggestion?.code
-  return code === 'not-generated' || code === 'failed' || code === 'quota-exhausted'
+  return code === 'not-generated' || code === 'failed' || code === 'quota-exhausted' || (item.kind === 'conflict-vertical' && code === 'no-baseline')
 }
 
 type BatchPhase = { kind: 'idle' } | { kind: 'running'; at: number; total: number } | { kind: 'unavailable' }
@@ -192,7 +233,7 @@ type BatchPhase = { kind: 'idle' } | { kind: 'running'; at: number; total: numbe
  */
 export function SuggestAll({ items, session, onCurrent }: {
   /** 此刻视图里缺建议的条目（isMissingSuggestion）。 */
-  items: readonly HorizontalItem[]
+  items: readonly ConflictItem[]
   session: BorrowedSession
   /** 正在给哪一条生成（没有在生成时 undefined）。 */
   onCurrent: (decisionId: string | undefined) => void
@@ -262,12 +303,12 @@ export function SuggestAll({ items, session, onCurrent }: {
   )
 }
 
-/** 有建议：模型图标、加粗的结论、一句理由；融合时带融合稿、写进哪条，「看和原文的对照」原位换成左右对照。 */
-function SuggestionView({ suggestion, left, right }: { suggestion: Suggestion; left: MemoryCard; right: MemoryCard }) {
+/** 有建议：模型图标、加粗的结论、一句理由；融合、改写时带稿、写进哪条，「看和原文的对照」原位换成左右对照。 */
+function SuggestionView({ suggestion, left, right }: { suggestion: Suggestion; left: MemoryCard; right: MemoryCard | undefined }) {
   const t = useT()
   const [isComparing, setComparing] = useState(false)
   const edit = suggestion.ops.find(op => op.kind === 'edit')
-  const keeper = edit === undefined ? undefined : edit.memoryId === right.id ? right : left
+  const keeper = edit === undefined ? undefined : edit.memoryId === right?.id ? right : left
   const draft = edit === undefined ? undefined : { content: edit.content, name: edit.name, summary: edit.summary, tags: edit.tags }
   return (
     <div className="pm-suggestion">
@@ -280,7 +321,8 @@ function SuggestionView({ suggestion, left, right }: { suggestion: Suggestion; l
         ? (
           <div className="pm-suggestion-draft">
             <p className="pm-suggestion-into">
-              {t('pending.suggestion.mergeInto', keeper === right ? { keep: 'B', drop: 'A' } : { keep: 'A', drop: 'B' })}
+              {suggestion.action === 'rewrite' ? t('pending.suggestion.rewriteInto')
+                : t('pending.suggestion.mergeInto', keeper === right ? { keep: 'B', drop: 'A' } : { keep: 'A', drop: 'B' })}
             </p>
             {isComparing
               ? <DraftCompare memories={[keeper]} base={{ content: keeper.content, name: keeper.name, summary: keeper.summary, tags: keeper.tags }} draft={draft} />

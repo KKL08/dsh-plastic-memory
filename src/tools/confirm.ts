@@ -1,5 +1,5 @@
 import type { MemoryLogger, MemoryStore } from '../store.ts'
-import { conflictFingerprint, isBasisCurrent, type PendingDecisionsStore } from '../governance/decisions.ts'
+import { conflictFingerprint, isBaselineCurrent, isBasisCurrent, type PendingDecisionsStore } from '../governance/decisions.ts'
 import { kindOf, verdictLoser, type PendingDecision, type SettledProposal, type SuggestionBasis } from '../governance/schema.ts'
 import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
 import { ALREADY_REVIEWED_REASON, NOT_DELEGATED_REASON, isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
@@ -35,6 +35,7 @@ export interface ConfirmOptions {
    * resolve 是在落盘一份处理方案：条目上的这份处理建议（GUI「采纳建议」，suggestionId），或界面带回的按要求生成的方案
    * （GUI「补充要求」，request：结论和生成时的依据版本）。认领条目后核对建议 id（按要求的没有这一项）、结论和裁决对得上、
    * 依据版本仍是此刻的，对不上回 stale、什么都不动；删败方时锁内按依据里它的完整内容指纹再比一次。结清时记下来源和结论代码。
+   * 垂直冲突另按 baseline（会话此刻的基线）和会话所在项目重算依据里的基线，对不上同样回 stale。
    */
   adopt?: { suggestionId: string } | { request: { action: ProposalAction; basis: SuggestionBasis } }
 }
@@ -224,8 +225,10 @@ async function resolveEntry(
     : entry.suggestion?.id === adopt.suggestionId ? { source: 'suggestion' as const, action: entry.suggestion.action, basis: entry.suggestion.basis } : undefined
   if (adopt !== undefined) {
     const live = entry.memoryIds.map(id => (members.get(id)?.status === 'active' ? members.get(id) : undefined))
-    if (plan === undefined || verdictOfAction(plan.action) !== args.verdict || !isBasisCurrent(entry, plan.basis, live)) {
-      return { kind: 'error', code: 'stale', message: `待决项 ${entry.id} 的处理方案已失效（建议换了一份，或两条在方案生成后被改过），未做任何改动。` }
+    // 垂直冲突：采纳时用当前会话的基线重算，会话不在那个项目、拿不到或指令文件改过都对不上
+    const isBaselineOk = !vertical || (plan !== undefined && live[0] !== undefined && isBaselineCurrent(plan.basis, live[0], baseline, context.workspacePath))
+    if (plan === undefined || verdictOfAction(plan.action) !== args.verdict || !isBasisCurrent(entry, plan.basis, live) || !isBaselineOk) {
+      return { kind: 'error', code: 'stale', message: `待决项 ${entry.id} 的处理方案已失效（建议换了一份，或${vertical ? '这条记忆、指令文件' : '两条'}在方案生成后被改过），未做任何改动。` }
     }
   }
   const proposal: { proposal?: SettledProposal } = plan === undefined ? {} : { proposal: { source: plan.source, action: plan.action } }

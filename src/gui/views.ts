@@ -136,7 +136,11 @@ export function buildPendingView(input: ViewInput): PendingView {
       items.push({ kind, level: PENDING_LEVEL_OF_KIND[kind], ...base, ...overflowLevelOf(e), ...(scope?.kind === 'workspace' ? { workspacePath: scope.workspacePath } : {}) })
     }
     else if (e.baselineRef !== undefined) {
-      items.push({ kind: 'conflict-vertical', level: PENDING_LEVEL_OF_KIND['conflict-vertical'], ...base, summary: e.summary, memory: cardOf(e.memoryIds[0], data), baselineRef: e.baselineRef })
+      items.push({
+        kind: 'conflict-vertical', level: PENDING_LEVEL_OF_KIND['conflict-vertical'], ...base, summary: e.summary, memory: cardOf(e.memoryIds[0], data), baselineRef: e.baselineRef,
+        ...suggestionState(e, data),
+        ...(input.generatingSuggestions?.has(e.id) === true ? { isGeneratingSuggestion: true as const } : {}),
+      })
     } else {
       const preferred = e.memoryIds.slice(0, 2).map(id => data.byId.get(id)).filter(r => r !== undefined).sort(byConfidenceThenConfirmed)[0]
       items.push({
@@ -173,7 +177,8 @@ export function buildPendingView(input: ViewInput): PendingView {
 
 /**
  * 冲突项的处理建议（账本存盘形状映射到契约）：条目未决（调用方只传未决条目）、冲突指纹和每条记忆此刻的完整内容指纹都和建议的依据一致，
- * 才给 suggestion；否则给没有建议的原因：任一条含高危密钥、最近一次模型判断不了、自动体检名额用完或生成失败（依据同样要对得上）、还没生成。一方定位不到时两个都不给。
+ * 才给 suggestion；否则给没有建议的原因：任一条含高危密钥、最近一次模型判断不了、自动体检名额用完、垂直冲突缺基线或生成失败（依据同样要对得上）、还没生成。
+ * 一方定位不到时两个都不给。垂直冲突只核对记忆那一半（重写视图时没有会话、拿不到指令文件），建议带上基线所属的项目，基线那一半采纳时核对。
  * 改写稿按卡片口径遮高危密钥（存盘的稿保证没有高危，这里兜底）。
  */
 function suggestionState(e: PendingDecision, data: ScopePreread): Pick<Extract<PendingItem, { kind: 'conflict-horizontal' }>, 'suggestion' | 'noSuggestion'> {
@@ -182,13 +187,14 @@ function suggestionState(e: PendingDecision, data: ScopePreread): Pick<Extract<P
   const { suggestion, suggestionFailure } = e
   if (suggestion !== undefined && isBasisCurrent(e, suggestion.basis, records)) {
     const ops = suggestion.ops.map(op => (op.kind === 'edit' ? { ...op, ...maskSecretSurface(op) } : op))
-    return { suggestion: { id: suggestion.id, action: suggestion.action, reason: suggestion.reason, ops, isSourced: suggestion.isSourced } }
+    const baseline = suggestion.basis.baseline !== undefined ? { baselineWorkspace: suggestion.basis.baseline.workspace } : {}
+    return { suggestion: { id: suggestion.id, action: suggestion.action, reason: suggestion.reason, ops, isSourced: suggestion.isSourced, ...baseline } }
   }
   if (records.some(r => hasCriticalSecret(r!))) return { noSuggestion: { code: 'has-secret' } }
   if (suggestionFailure !== undefined && isBasisCurrent(e, suggestionFailure.basis, records)) {
     const { kind, hostCode, message, reason } = suggestionFailure.cause
     if (kind === 'undecided') return { noSuggestion: { code: 'undecided', reason: reason ?? '' } }
-    if (kind === 'quota-exhausted') return { noSuggestion: { code: 'quota-exhausted' } }
+    if (kind === 'quota-exhausted' || kind === 'no-baseline') return { noSuggestion: { code: kind } }
     return { noSuggestion: { code: 'failed', cause: { kind, ...(hostCode !== undefined ? { hostCode } : {}), ...(message !== undefined ? { message } : {}) } } }
   }
   return { noSuggestion: { code: 'not-generated' } }

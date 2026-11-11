@@ -943,36 +943,61 @@ describe('SidebarTab 冲突对方在别的项目', () => {
 })
 
 describe('SidebarTab 就地裁决：和基线冲突', () => {
-  it('带入的记忆和基线冲突：冲突卡在「等你决定」段里，写明基线不会被删除；以基线为准发 keep-right，结果留原位可撤销', async () => {
-    const { gateway } = setup({ library: library(pref, proj), session: snapshot({ injectedIds: ['p1', 'j1'] }), pending: pending(vertical) })
-    const group = within(screen.getByRole('region', { name: '等你决定' }))
-    expect(group.getByRole('heading', { name: '这条记忆和基线矛盾，等你决定' })).toBeInTheDocument()
-    expect(group.getByText('AGENTS.md 是基线，不会被删除。')).toBeInTheDocument()
+  /** 带处理建议的基线冲突（结论按参数）。 */
+  function verticalSuggested(action: 'rewrite' | 'delete' | 'keep-both', item: PendingItem = vertical): PendingItem {
+    const memoryId = item.kind === 'conflict-vertical' ? item.memory!.id : ''
+    const ops: ProposalOp[] = action === 'delete' ? [{ kind: 'forget', memoryId }]
+      : action === 'keep-both' ? [{ kind: 'keep', memoryId }]
+        : [{ kind: 'edit', memoryId, content: 'web/ 下 merge freeze 到 3 月 5 日，其余照 AGENTS.md。', name: proj.name, summary: proj.summary, tags: [] }]
+    return { ...item, suggestion: { id: 'sg_v', action, reason: REASON, ops, isSourced: false, baselineWorkspace: WS } } as PendingItem
+  }
+  const yourCall = () => within(screen.getByRole('region', { name: '等你决定' }))
+
+  it('带入的记忆和基线冲突：冲突卡在「等你决定」段里，写明基线不会被删除；没有建议时只有「在记忆页处理 ›」，不再有直接裁决的按钮', () => {
+    const { container, openPage, gateway } = setup({ library: library(pref, proj), session: snapshot({ injectedIds: ['p1', 'j1'] }), pending: pending(vertical) })
+    expect(yourCall().getByRole('heading', { name: '这条记忆和基线矛盾，等你决定' })).toBeInTheDocument()
+    expect(yourCall().getByText('指令文件不会被改动，处理只针对这条记忆。')).toBeInTheDocument()
     expect(screen.getAllByText('merge freeze 到 3 月 5 日。')).toHaveLength(1)
     expect(screen.queryByText(/处待处理/)).toBeNull()
+    expect(container.querySelector('.pm-side-suggestion')).toBeNull()
+    expect([...container.querySelectorAll('.pm-conflict-actions button')].map(b => b.textContent)).toEqual(['在记忆页处理 ›'])
+    fireEvent.click(yourCall().getByRole('button', { name: '在记忆页处理 ›' }))
+    expect(openPage).toHaveBeenCalledWith({ view: 'todo', scope: { kind: 'workspace', workspacePath: WS }, fromChat: true, level: 'your-call' })
+    expect(gateway.executed).toHaveLength(0)
+  })
 
-    await act(async () => { fireEvent.click(group.getByRole('button', { name: '以基线为准' })) })
-    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'resolve', decisionId: 'pd_v', verdict: 'keep-right' }])
-    act(() => {
-      gateway.setView('pending', pending())
-      gateway.setView('library', library(pref))
-    })
-    expect(screen.getByText('已按基线')).toBeInTheDocument()
-    expect(screen.getByText(/这条记忆已删除，14 天内可恢复。/)).toBeInTheDocument()
-    expect(screen.getByText('这次对话里已带入的不变，压缩后或下个对话起生效。')).toBeInTheDocument()
+  it.each([
+    ['delete', '以文件为准，删除这条', '采纳后这条记忆进最近删除，14 天内可恢复。', '已按基线', /按模型建议处理。这条记忆已删除，14 天内可恢复。/],
+    ['keep-both', '都保留（不算冲突）', '采纳后这条记忆留着，它和指令文件都不变时不再报。', '已保留这条记忆', /按模型建议处理。基线和记忆都不变时不再报。/],
+  ] as const)('故事 32：建议 %s：一行「模型建议：%s」，说明采纳后的去向；「采纳建议」只带条目 id 和建议 id，结果写来由、可撤销', async (action, conclusion, note, chip, body) => {
+    const { gateway, container } = setup({ library: library(pref, proj), session: snapshot({ injectedIds: ['p1', 'j1'] }), pending: pending(verticalSuggested(action)) })
+    expect(container.querySelector('.pm-side-suggestion')).toHaveTextContent(`模型建议：${conclusion}`)
+    expect(screen.queryByText(REASON)).toBeNull()
+    expect(yourCall().getByText(note)).toBeInTheDocument()
+    expect([...container.querySelectorAll('.pm-conflict-actions button')].map(b => b.textContent)).toEqual(['采纳建议', '在记忆页处理 ›'])
+    await act(async () => { fireEvent.click(yourCall().getByRole('button', { name: '采纳建议' })) })
+    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'apply-proposal', decisionId: 'pd_v', suggestionId: 'sg_v' }])
+    act(() => { gateway.setView('pending', pending()) })
+    expect(screen.getByText(chip)).toBeInTheDocument()
+    expect(screen.getByText(body)).toBeInTheDocument()
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
     expect(gateway.executed.map(e => e.command)[1]).toEqual({ cmd: 'undo', decisionId: 'pd_v' })
   })
 
-  it('保留这条记忆发 keep-left，记忆留在原位带「已保留这条记忆」', async () => {
-    const { gateway } = setup({ library: library(proj), session: snapshot({ injectedIds: ['j1'] }), pending: pending(vertical) })
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '保留这条记忆' })) })
-    expect(gateway.executed.map(e => e.command)).toEqual([{ cmd: 'resolve', decisionId: 'pd_v', verdict: 'keep-left' }])
-    act(() => { gateway.setView('pending', pending()) })
-    expect(screen.getByText('已保留这条记忆')).toBeInTheDocument()
-    expect(screen.getByText('merge freeze 到 3 月 5 日。')).toBeInTheDocument()
-    // 什么都没删，带入的内容之后也不变，不写生效时机
-    expect(screen.queryByText('这次对话里已带入的不变，压缩后或下个对话起生效。')).toBeNull()
+  it('故事 32：建议改写这条记忆：一行「模型建议：改写这条记忆」，不放改写稿，没有「采纳建议」，只有「在记忆页处理 ›」', () => {
+    const { container } = setup({ library: library(pref, proj), session: snapshot({ injectedIds: ['p1', 'j1'] }), pending: pending(verticalSuggested('rewrite')) })
+    expect(container.querySelector('.pm-side-suggestion')).toHaveTextContent('模型建议：改写这条记忆')
+    expect(screen.queryByText(/web\/ 下 merge freeze/)).toBeNull()
+    expect([...container.querySelectorAll('.pm-conflict-actions button')].map(b => b.textContent)).toEqual(['在记忆页处理 ›'])
+  })
+
+  it('故事 5a：会话不在这条记忆的项目里（全局记忆的建议是别的项目里生成的）：不写建议、不给「采纳建议」，只有「在记忆页处理 ›」', () => {
+    const onGlobal = { ...verticalSuggested('delete', { ...vertical, memory: glob } as PendingItem) } as PendingItem
+    const suggestion = { ...(onGlobal as Extract<PendingItem, { kind: 'conflict-vertical' }>).suggestion!, baselineWorkspace: '/w/other' }
+    const { container } = setup({ library: library(pref, glob), session: snapshot({ injectedIds: ['p1', 'g1'] }), pending: pending({ ...onGlobal, suggestion } as PendingItem) })
+    expect(container.querySelector('.pm-side-suggestion')).toBeNull()
+    expect(screen.queryByRole('button', { name: '采纳建议' })).toBeNull()
+    expect(yourCall().getByRole('button', { name: '在记忆页处理 ›' })).toBeInTheDocument()
   })
 
   it('建议整理不进右侧栏，也不算进底部「本项目还有 N 处待处理」', () => {

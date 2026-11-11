@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { PendingDecisionsStore, dedupKey, isBasisCurrent, suggestionBasis } from '../src/governance/decisions.ts'
+import { PendingDecisionsStore, baselineBasisOf, conflictFingerprint, baselineFingerprint, dedupKey, isBaselineCurrent, isBasisCurrent, suggestionBasis } from '../src/governance/decisions.ts'
 import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, verdictLoser, type PendingDecision, type StoredSuggestion } from '../src/governance/schema.ts'
 import { editFingerprint } from '../src/governance/snapshots.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
@@ -329,6 +329,40 @@ describe('处理建议存在账本条目上', () => {
     expect(isBasisCurrent(entry, legacy, [a, inProject])).toBe(false)
   })
 
+  it('垂直冲突的依据另记基线所属项目和基线指纹：项目记忆只认它自己项目里的会话，全局记忆只认扫出这条冲突的那份基线；视图侧的核对只看记忆那一半', async () => {
+    const s = makeStore()
+    const memory = record({ id: 'mem_v', content: '用 npm', scope: 'workspace', workspacePath: '/w/app' })
+    const { entry } = await s.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md', summary: '包管理器', fingerprint: 'fp' }, 1)
+    const baseline = ['用 pnpm']
+    const sided = baselineBasisOf(memory, baseline, '/w/app', 'fp')
+    expect(sided).toEqual({ workspace: '/w/app', fingerprint: baselineFingerprint(baseline) })
+    // 缺基线：会话不在这条记忆的项目里，或拿不到基线
+    expect(baselineBasisOf(memory, baseline, '/w/other', 'fp')).toBeUndefined()
+    expect(baselineBasisOf(memory, baseline, undefined, 'fp')).toBeUndefined()
+    expect(baselineBasisOf(memory, null, '/w/app', 'fp')).toBeUndefined()
+    // 全局记忆：只认扫出这条冲突的那份基线（用它重算冲突指纹和条目的一致），所属按会话所在的项目记，没有项目的会话记 global
+    const global = record({ id: 'mem_g' })
+    const scanned = conflictFingerprint([global], baseline)
+    expect(baselineBasisOf(global, baseline, '/w/other', scanned)).toEqual({ workspace: '/w/other', fingerprint: baselineFingerprint(baseline) })
+    expect(baselineBasisOf(global, baseline, undefined, scanned)).toEqual({ workspace: 'global', fingerprint: baselineFingerprint(baseline) })
+    // 换了一份指令文件（别的项目的会话）、或条目没有指纹：缺基线
+    expect(baselineBasisOf(global, ['用 yarn'], '/w/other', scanned)).toBeUndefined()
+    expect(baselineBasisOf(global, baseline, '/w/other', undefined)).toBeUndefined()
+
+    const basis = suggestionBasis(entry, [memory], sided)
+    expect(basis.baseline).toEqual(sided)
+    expect(pendingDecisionSchema.parse({ ...entry, suggestionFailure: { basis, cause: { kind: 'no-baseline' }, at: 1 } }).suggestionFailure?.basis).toEqual(basis)
+    // 视图侧只核对记忆那一半
+    expect(isBasisCurrent(entry, basis, [memory])).toBe(true)
+    // 采纳时按会话此刻的基线核对：项目、基线内容都对得上才算数
+    expect(isBaselineCurrent(basis, memory, baseline, '/w/app')).toBe(true)
+    expect(isBaselineCurrent(basis, memory, ['用 pnpm，脚本仓用 npm'], '/w/app')).toBe(false)
+    expect(isBaselineCurrent(basis, memory, baseline, '/w/other')).toBe(false)
+    expect(isBaselineCurrent(basis, memory, null, '/w/app')).toBe(false)
+    expect(isBaselineCurrent(suggestionBasis(entry, [memory]), memory, baseline, '/w/app')).toBe(false)
+    expect(isBaselineCurrent(suggestionBasis({ ...entry, fingerprint: scanned }, [global], baselineBasisOf(global, baseline, '/w/x', scanned)), global, baseline, '/w/y')).toBe(false)
+  })
+
   it('写入：认领后重读核对，写上建议并清掉之前的失败', async () => {
     const { s, entry } = await seeded()
     const failure = { basis: suggestionBasis(entry, [a, b]), cause: { kind: 'unparseable' as const }, at: 2 }
@@ -489,6 +523,32 @@ describe('应用处理方案（plan-applied）', () => {
     const { entry } = await v.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md', summary: '垂直', fingerprint: 'fp-v-before' }, 1)
     await v.settlePlan(entry.id, { writes: [{ memoryId: 'mem_v', op: 'edit', written: record({ id: 'mem_v' }) }], proposal: { source: 'suggestion', action: 'merge' }, snapshotId: 'snap_v', fingerprint: 'fp-v-after' }, 10)
     expect((await v.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md 换了措辞', summary: '再报', fingerprint: 'fp-v-after' }, 20)).settled).toBe(true)
+  })
+
+  it('没有删除项的垂直改写：下次体检按另一个指纹重报（基线又改了）时不删已结清条目，另挂一条未决的；撤销留到保留窗口结束，撤销后多出的那条收拢掉', async () => {
+    const v = makeStore()
+    const { entry } = await v.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md', summary: '垂直', fingerprint: 'fp-v-before' }, 1)
+    await v.settlePlan(entry.id, { writes: [{ memoryId: 'mem_v', op: 'edit', written: record({ id: 'mem_v' }) }], proposal: { source: 'suggestion', action: 'rewrite' }, snapshotId: 'snap_v', fingerprint: 'fp-v-after' }, 10)
+    const reported = await v.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md', summary: '基线又改了', fingerprint: 'fp-v-new' }, 20)
+    expect(reported.created).toBe(true)
+    expect(reported.entry.id).not.toBe(entry.id)
+    // 已结清的改写还在，撤销回执跟着在
+    const [settled] = await v.listSettled()
+    expect(settled).toMatchObject({ id: entry.id, settled: { verdict: 'plan-applied', snapshotId: 'snap_v' } })
+    expect((await v.list()).map(e => e.id)).toEqual([reported.entry.id])
+    // 再报一次同一个新指纹：沿用那条未决的，不再多建
+    expect((await v.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md', summary: '又一次', fingerprint: 'fp-v-new' }, 30)).entry.id).toBe(reported.entry.id)
+    // 撤销：改写那条回到待处理（指纹还原），按改写后内容另挂的那条收拢掉
+    expect(await v.unsettle(entry.id)).toBe(true)
+    expect((await v.list()).map(e => [e.id, e.fingerprint])).toEqual([[entry.id, 'fp-v-before']])
+    // 保留窗口过了照常清掉
+    const w = makeStore()
+    const { entry: e2 } = await w.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md', summary: '垂直', fingerprint: 'fp-v-before' }, 1)
+    await w.settlePlan(e2.id, { writes: [{ memoryId: 'mem_v', op: 'edit', written: record({ id: 'mem_v' }) }], proposal: { source: 'suggestion', action: 'rewrite' }, snapshotId: 'snap_v', fingerprint: 'fp-v-after' }, 10)
+    await w.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md', summary: '基线又改了', fingerprint: 'fp-v-new' }, 20)
+    await w.sweep(10 + RETENTION_MS + 1)
+    expect(await w.listSettled()).toEqual([])
+    expect(await w.list()).toHaveLength(1)
   })
 
   it('保留窗口过了：账本清理把它清掉（含没有删除项的垂直改写）', async () => {

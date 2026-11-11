@@ -4,19 +4,14 @@
  * 右侧栏是建议结论一行和「采纳建议」或去记忆页的入口（sidebar/SidebarTab.tsx）。
  * - 宽版（记忆页）：A、B 各一张描边卡并排，卡里只放记忆；按钮靠右，和其它卡的动作行对齐；
  * - 窄版（右侧栏）：A、B 上下排，按钮一行靠左。
- * 记忆和基线（AGENTS.md）冲突用 VerticalConflictRuling：只有一张记忆卡，后果说明进建议区（「说明」），下面两个平级按钮一排
- * 「以基线为准 / 保留这条记忆」，并写明基线不会被删除。记忆定位不到（视图里为 null）时裁决会报错，按钮都不可用；
- * 记忆含高危密钥（hasSecret）时以基线为准会彻底删除它，后果说明里写「将彻底删除、不可恢复」。
+ * 记忆和基线（AGENTS.md / CLAUDE.md）冲突用 VerticalConflictRuling：只有一张记忆卡，标题下写明基线不会被删除；
+ * 下面的整块同样由调用方给（记忆页是同一张处理卡，右侧栏是建议结论一行和「采纳建议」或去记忆页的入口）。
  */
 import type { ReactNode } from 'react'
-import { CONFLICT_ACTION_VERDICTS, type MemoryCard as MemoryCardData } from '../../src/gui/contract.ts'
+import type { MemoryCard as MemoryCardData } from '../../src/gui/contract.ts'
 import { useT } from '../i18n.tsx'
-import { AdviceNote } from './Advice.tsx'
-import { Button } from './Button.tsx'
 import { MemoryCard } from './MemoryCard.tsx'
 import { StatusMarker } from './StatusMarker.tsx'
-
-type VerticalVerdict = (typeof CONFLICT_ACTION_VERDICTS.vertical)[keyof typeof CONFLICT_ACTION_VERDICTS.vertical]
 
 /** 两版共用的参数。 */
 interface RulingSharedProps {
@@ -24,8 +19,6 @@ interface RulingSharedProps {
   now: number
   /** 缺省各自的默认标题；记忆页用条目标题。 */
   title?: ReactNode
-  /** 动作暂不可用的原因（无会话等）。 */
-  unavailable?: string | undefined
   typeLabel?: (type: string) => string
   hideScope?: boolean
   /** 记忆在别的项目里时的项目名（见 MemoryCard 的 projectName）。 */
@@ -65,27 +58,15 @@ export interface VerticalConflictRulingProps extends RulingSharedProps {
   memory: MemoryCardData | null
   /** 基线出处（「AGENTS.md：包管理」）。 */
   baselineRef: string
-  onRule: (verdict: VerticalVerdict) => void
+  /** 记忆卡下面的整块：建议、说明和动作。 */
+  footer: ReactNode
 }
 
 /** 记忆和基线冲突：结构同上，只有一张记忆卡。 */
 export function VerticalConflictRuling(props: VerticalConflictRulingProps) {
   const t = useT()
-  const { vertical } = CONFLICT_ACTION_VERDICTS
   return (
-    <RulingShell
-      {...props}
-      title={props.title ?? t('conflict.vertical.title')}
-      note={t('conflict.vertical.baseline')}
-      rule={{
-        isMissing: props.memory === null,
-        consequence: t(props.memory?.hasSecret === true ? 'conflict.vertical.consequence.secret' : 'conflict.vertical.consequence'),
-        actions: [
-          [t('conflict.vertical.keepBaseline'), () => { props.onRule(vertical.keepBaseline) }],
-          [t('conflict.vertical.keepMemory'), () => { props.onRule(vertical.keepMemory) }],
-        ],
-      }}
-    >
+    <RulingShell {...props} title={props.title ?? t('conflict.vertical.title')} note={t('conflict.vertical.baseline')}>
       <div className="pm-conflict-single">
         <RulingMemory {...props} />
         <p className="pm-conflict-baseline">{t('conflict.vertical.baselineRef', { ref: props.baselineRef })}</p>
@@ -94,23 +75,12 @@ export function VerticalConflictRuling(props: VerticalConflictRulingProps) {
   )
 }
 
-/** 记忆区下面的后果说明和一排按钮（基线冲突）。记忆定位不到（isMissing）时按钮都不可用。 */
-interface RulingActions {
-  isMissing: boolean
-  consequence: string
-  /** 按钮文字与点击动作，按显示顺序。 */
-  actions: ReadonlyArray<readonly [label: string, onClick: () => void]>
-}
-
-/** 两版共用的外壳：标题行、标题下一句、各自的记忆区，下面是调用方给的 footer，或后果说明加一排按钮（rule）。 */
-function RulingShell({ layout, title, headExtra, note, unavailable, footer, rule, children }: RulingSharedProps & {
+/** 两版共用的外壳：标题行、标题下一句、各自的记忆区，下面是调用方给的 footer。 */
+function RulingShell({ layout, title, headExtra, note, footer, children }: RulingSharedProps & {
   note?: string | undefined
-  footer?: ReactNode
-  rule?: RulingActions
+  footer: ReactNode
   children: ReactNode
 }) {
-  const t = useT()
-  const reason = unavailable ?? (rule?.isMissing === true ? t('conflict.missingHint') : undefined)
   return (
     <article className={`pm-conflict pm-conflict--${layout}`}>
       <header className="pm-conflict-head">
@@ -120,17 +90,7 @@ function RulingShell({ layout, title, headExtra, note, unavailable, footer, rule
       </header>
       {note !== undefined ? <p className="pm-conflict-note">{note}</p> : null}
       {children}
-      {footer !== undefined ? <div className="pm-conflict-footer">{footer}</div> : null}
-      {rule !== undefined
-        ? (
-          <>
-            <div className="pm-conflict-advice"><AdviceNote label="note">{rule.consequence}</AdviceNote></div>
-            <div className="pm-conflict-buttons">
-              {rule.actions.map(([label, onClick]) => <Button key={label} unavailable={reason} onClick={onClick}>{label}</Button>)}
-            </div>
-          </>
-        )
-        : null}
+      <div className="pm-conflict-footer">{footer}</div>
     </article>
   )
 }
@@ -166,13 +126,9 @@ export const conflictRulingCss = `
 /* A / B 改成上下排：记忆页窄屏（pm-page 720px 以下），或主区（pm-main，不含左栏）内容宽 640px 以下 */
 @container pm-page (max-width: 720px) { .pm-conflict--wide .pm-conflict-sides { grid-template-columns: minmax(0, 1fr); } }
 @container pm-main (max-width: 640px) { .pm-conflict--wide .pm-conflict-sides { grid-template-columns: minmax(0, 1fr); } }
-.pm-conflict-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-.pm-conflict-advice { margin-top: 12px; }
 .pm-conflict-single { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .pm-conflict--wide .pm-conflict-single { padding-left: 22px; }
 .pm-conflict-baseline { margin: 0; padding-left: 14px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); overflow-wrap: anywhere; }
-.pm-conflict--wide .pm-conflict-buttons { justify-content: flex-end; }
-.pm-conflict--wide .pm-conflict-advice { padding-left: 22px; }
 .pm-conflict-footer { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
 .pm-conflict--wide .pm-conflict-footer { padding-left: 22px; }
 /* footer 里的按钮行（采纳建议、三个候选项）靠左，采纳在前 */

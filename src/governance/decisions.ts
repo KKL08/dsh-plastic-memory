@@ -34,13 +34,42 @@ const scopeKeyOf = (r: MemoryRecord) => scopeKey(scopeAt(r.workspacePath))
 
 /**
  * 处理建议的依据版本：条目此刻的冲突指纹，和每条涉及记忆此刻的完整内容指纹、作用域键（按条目 memoryIds 的顺序）。
- * records 与条目 memoryIds 一一对应、都是此刻读到的记录。
+ * records 与条目 memoryIds 一一对应、都是此刻读到的记录。垂直冲突带上生成时用的基线（baselineBasisOf）。
  */
-export function suggestionBasis(entry: Pick<PendingDecision, 'fingerprint'>, records: readonly MemoryRecord[]): SuggestionBasis {
+export function suggestionBasis(entry: Pick<PendingDecision, 'fingerprint'>, records: readonly MemoryRecord[], baseline?: BaselineBasis): SuggestionBasis {
   return {
     ...(entry.fingerprint !== undefined ? { conflictFingerprint: entry.fingerprint } : {}),
     memories: records.map(r => ({ memoryId: r.id, fingerprint: editFingerprint(r), scopeKey: scopeKeyOf(r) })),
+    ...(baseline !== undefined ? { baseline } : {}),
   }
+}
+
+/** 垂直冲突依据里的基线一半：基线所属项目和基线指纹。 */
+export type BaselineBasis = NonNullable<SuggestionBasis['baseline']>
+
+/** 整份基线（会话生效的 AGENTS.md / CLAUDE.md 正文）的指纹：任一段改了就变。 */
+export function baselineFingerprint(baseline: readonly string[]): string {
+  return createHash('sha1').update(JSON.stringify(baseline)).digest('hex')
+}
+
+/**
+ * 会话此刻能给这条记忆的垂直冲突用的基线（同体检：基线随会话）：项目记忆只认它自己项目里的会话；全局记忆在哪个会话里都扫得出，
+ * 只认扫出这条冲突的那份基线（用它重算冲突指纹，和条目的 conflictFingerprint 一致）——换一个项目的会话，矛盾摘要说的就不是手上这份文件了。
+ * 基线所属按会话所在的项目记（没有项目的会话记 'global'）。拿不到基线、会话不在这条记忆的项目里、不是扫出冲突的那份时为 undefined（缺基线）。
+ */
+export function baselineBasisOf(
+  memory: MemoryRecord, baseline: readonly string[] | null | undefined, sessionWorkspace: string | undefined, entryFingerprint: string | undefined,
+): BaselineBasis | undefined {
+  if (baseline === null || baseline === undefined) return undefined
+  if (memory.scope === 'workspace' && memory.workspacePath !== sessionWorkspace) return undefined
+  if (memory.scope !== 'workspace' && conflictFingerprint([memory], baseline) !== entryFingerprint) return undefined
+  return { workspace: sessionWorkspace ?? 'global', fingerprint: baselineFingerprint(baseline) }
+}
+
+/** 依据里的基线和会话此刻的基线对得上：基线所属项目、基线指纹都一致（依据里没有基线的一律算对不上）。 */
+export function isBaselineCurrent(basis: SuggestionBasis, memory: MemoryRecord, baseline: readonly string[] | null | undefined, sessionWorkspace: string | undefined): boolean {
+  const now = baselineBasisOf(memory, baseline, sessionWorkspace, basis.conflictFingerprint)
+  return basis.baseline !== undefined && now !== undefined && now.workspace === basis.baseline.workspace && now.fingerprint === basis.baseline.fingerprint
 }
 
 /** 依据版本和此刻对得上：条目的冲突指纹一致，每条记忆（按 memoryIds 顺序）都在，完整内容指纹和作用域都一致。 */
@@ -92,6 +121,11 @@ function byFirstSeen(a: PendingDecision, b: PendingDecision): number {
 /** 已裁决且裁决删掉了一方的条目。 */
 function isDeletionSettled(entry: PendingDecision): boolean {
   return entry.settled !== undefined && verdictLoser(entry, entry.settled.verdict) !== undefined
+}
+
+/** 按处理方案改写了记忆、没有删除项的结清（垂直改写）：留着撤销回执，保留窗口内不因重报作废。 */
+function isRewriteSettled(entry: PendingDecision): boolean {
+  return entry.settled?.verdict === 'plan-applied' && entry.settled.receipts !== undefined && !isDeletionSettled(entry)
 }
 
 /** 超限条目的指纹：relax 为档位号（'1'、'2'…），strict 只有一档。 */
@@ -241,6 +275,8 @@ export class PendingDecisionsStore {
             return { created: false, settled: true, entry: existing }
           }
           if (!(await holds())) return { created: false, isSkipped: true, entry: existing }
+          // 垂直改写（没有删除项）：指纹变了（基线或记忆又改了）另挂一条未决的，改写的结清留到保留窗口结束，撤销回执不丢
+          if (isRewriteSettled(existing)) return undefined
           if (!isDeletionSettled(existing)) {
             await this.table.delete(id) // 指纹变了：旧结论作废
             return undefined
@@ -355,6 +391,11 @@ export class PendingDecisionsStore {
     const { settled, fingerprint, ...open } = entry
     const restored = settled.verdict === 'plan-applied' ? settled.priorFingerprint : fingerprint
     await this.table.put(id, { ...open, ...(restored !== undefined ? { fingerprint: restored } : {}) })
+    // 垂直改写之后重报另挂的那条说的是改写后的记忆，撤销后记忆回到原样，它不再成立：收拢掉，同一条只留回到待处理的这条
+    if (isRewriteSettled(entry)) {
+      const others = (await this.table.list()).filter(([key, e]) => key !== id && e.settled === undefined && samePair(e, entry)).map(([key]) => key)
+      await this.dropDuplicates(others, id, entry)
+    }
     return true
   }
 
@@ -365,18 +406,21 @@ export class PendingDecisionsStore {
    * 删除一条记忆的路径先删记忆、再清条目，且不认领条目：核对之后、写入之前被清掉的条目会被这次写入写回来，
    * 所以写完（仍在认领内）再读一遍两条，任一条已不在用就撤回这次写入的条目，回 gone。
    * isAttempt：体检自己发起的这次生成写成了，给条目此刻的冲突指纹记一次尝试（指纹变了从头算）；用户点「补上建议」不记。
+   * 垂直冲突（这一份的依据带基线）：条目上已有的建议还要是按同一份基线生成的才算当前（指令文件改过、换了项目的旧建议让位）。
    * 返回：written 已写；has-current 已有当前建议、这份丢弃；stale 依据对不上；gone 条目不在、已结清或写完发现一方已不在用；claimed 正被别处认领、这份丢弃。
    */
   async writeSuggestion(
     id: string, outcome: { suggestion: StoredSuggestion } | { failure: SuggestionFailure }, read: ReadMemory, opts: { isAttempt?: boolean } = {},
   ): Promise<'written' | 'has-current' | 'stale' | 'gone' | 'claimed'> {
+    const basis = 'suggestion' in outcome ? outcome.suggestion.basis : outcome.failure.basis
+    const isSameBaseline = (b: SuggestionBasis) => basis.baseline === undefined
+      || (b.baseline?.workspace === basis.baseline.workspace && b.baseline.fingerprint === basis.baseline.fingerprint)
     const claimed = await this.withClaim(id, async () => {
       const entry = await this.table.get(id)
       if (entry === undefined || entry.settled !== undefined) return 'gone' as const
       const records = await Promise.all(entry.memoryIds.map(read))
       const live = records.map(r => (r?.status === 'active' ? r : undefined))
-      if (entry.suggestion !== undefined && isBasisCurrent(entry, entry.suggestion.basis, live)) return 'has-current' as const
-      const basis = 'suggestion' in outcome ? outcome.suggestion.basis : outcome.failure.basis
+      if (entry.suggestion !== undefined && isBasisCurrent(entry, entry.suggestion.basis, live) && isSameBaseline(entry.suggestion.basis)) return 'has-current' as const
       if (!isBasisCurrent(entry, basis, live)) return 'stale' as const
       const counted = entry.suggestionAttempts?.fingerprint === entry.fingerprint ? entry.suggestionAttempts?.count ?? 0 : 0
       const attempts = opts.isAttempt === true
@@ -386,7 +430,9 @@ export class PendingDecisionsStore {
         const { suggestionFailure: _failure, ...rest } = entry
         await this.table.put(id, { ...rest, ...attempts, suggestion: outcome.suggestion })
       } else {
-        await this.table.put(id, { ...entry, ...attempts, suggestionFailure: outcome.failure })
+        // 垂直冲突换了基线后没生成成：按旧基线的那份建议不再留着（视图只核对记忆那一半，留着会照旧显示）
+        const { suggestion: _stale, ...rest } = entry
+        await this.table.put(id, { ...(basis.baseline !== undefined ? rest : entry), ...attempts, suggestionFailure: outcome.failure })
       }
       const after = await Promise.all(entry.memoryIds.map(read))
       if (after.some(r => r?.status !== 'active')) {

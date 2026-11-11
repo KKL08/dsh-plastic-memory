@@ -1,5 +1,7 @@
 /**
- * 横向冲突卡的「补充要求」（spec 故事 7–19）：写一句要求或点常用处理 → 借来的会话的模型按两条原文和要求出处理方案 → 看结论、说明和对照 → 点「应用」才落盘。
+ * 冲突卡的「补充要求」（spec 故事 7–19、32）：写一句要求或点常用处理 → 借来的会话的模型按原文和要求出处理方案 → 看结论、说明和对照 → 点「应用」才落盘。
+ * 垂直冲突（记忆和指令文件，只有一条记忆 left）同一套：常用处理是「以文件为准，删除这条」「改写这条记忆」（填要求）「都保留，不算冲突」，
+ * 生成时带这一条的卡片版本，服务端按会话的指令文件出方案。
  * - 常用处理里「保留 A / 保留 B / 都保留，不算冲突」不过模型，交回卡片走原来的裁决（原位确认）；「两者融合」把要求填进文本框，可以接着改。
  * - 生成发 draft-proposal（只读，方案只在这个组件的内存里），带条目 id、要求、两条的卡片版本；「改要求」后再带此前的要求和上一份方案（只作参照）。
  *   服务端回的方案带依据版本，应用时原样带回，由卡片发 apply-proposal。
@@ -24,7 +26,7 @@ type DraftCommand = Extract<MemoryCommand, { cmd: 'draft-proposal' }>
 type Previous = NonNullable<DraftCommand['previous']>
 type Verdict = 'keep-left' | 'keep-right' | 'keep-both'
 
-const { horizontal } = CONFLICT_ACTION_VERDICTS
+const { horizontal, vertical } = CONFLICT_ACTION_VERDICTS
 
 /** 常用处理，按显示顺序：直接处理三个（不过模型）和「两者融合」（填要求）。 */
 const CANDIDATES = [
@@ -32,6 +34,13 @@ const CANDIDATES = [
   { id: horizontal.keepB, label: 'pending.conflict.keepB' },
   { id: 'merge', label: 'pending.proposal.merge', template: 'pending.proposal.merge.template' },
   { id: horizontal.keepBoth, label: 'pending.conflict.keepBoth' },
+] as const satisfies readonly Intent[]
+
+/** 垂直冲突的常用处理：直接处理两个（不过模型，都保留同卡上的直接处理记 keep-left）和「改写这条记忆」（填要求）。 */
+const VERTICAL_CANDIDATES = [
+  { id: vertical.keepBaseline, label: 'pending.vertical.delete' },
+  { id: 'rewrite', label: 'pending.vertical.rewrite', template: 'pending.vertical.rewrite.template' },
+  { id: vertical.keepMemory, label: 'pending.conflict.keepBoth' },
 ] as const satisfies readonly Intent[]
 
 const isVerdict = (id: string): id is Verdict => id === horizontal.keepA || id === horizontal.keepB || id === horizontal.keepBoth
@@ -45,8 +54,9 @@ type Phase =
 
 export function ProposalRequest({ decisionId, left, right, session, unavailable, isHidden, voided, discardAsk, onClose, onPick, onApply, onRefused, onDirtyChange }: {
   decisionId: string
+  /** 垂直冲突只有这一条（right 缺省）。 */
   left: MemoryCard
-  right: MemoryCard
+  right?: MemoryCard | undefined
   session: BorrowedSession
   /** 卡片的忙状态（应用中、等确认）。 */
   unavailable: string | undefined
@@ -65,6 +75,8 @@ export function ProposalRequest({ decisionId, left, right, session, unavailable,
   const t = useT()
   const id = useId()
   const gateway = useGateway()
+  const isVertical = right === undefined
+  const memories = right === undefined ? [left] : [left, right]
   // 展开时才问借来的会话用哪个模型（每个会话只问一次）
   const model = gateway.useModel(session)
   const [phase, setPhase] = useState<Phase>({ kind: 'ask' })
@@ -89,9 +101,9 @@ export function ProposalRequest({ decisionId, left, right, session, unavailable,
   const invalidate = () => {
     seq.current += 1
     setPrevious(undefined)
-    setPhase(prev => (prev.kind === 'ask' ? prev : { kind: 'ask', notice: t('pending.proposal.stale') }))
+    setPhase(prev => (prev.kind === 'ask' ? prev : { kind: 'ask', notice: t(isVertical ? 'pending.vertical.stale' : 'pending.proposal.stale') }))
   }
-  const target = [left, right].map(m => `${m.id}@${m.updatedAt}@${m.digest ?? ''}`).join('|')
+  const target = memories.map(m => `${m.id}@${m.updatedAt}@${m.digest ?? ''}`).join('|')
   const lastTarget = useRef(target)
   useEffect(() => {
     if (lastTarget.current === target) return
@@ -110,7 +122,7 @@ export function ProposalRequest({ decisionId, left, right, session, unavailable,
     const text = request.trim()
     if (text === '') return
     const command: DraftCommand = {
-      cmd: 'draft-proposal', decisionId, request: text, bases: [baseOf(left), baseOf(right)],
+      cmd: 'draft-proposal', decisionId, request: text, bases: right === undefined ? [baseOf(left)] : [baseOf(left), baseOf(right)],
       ...(priorRequests.length > 0 ? { priorRequests } : {}),
       ...(previous !== undefined ? { previous } : {}),
     }
@@ -161,15 +173,15 @@ export function ProposalRequest({ decisionId, left, right, session, unavailable,
         {phase.notice !== undefined ? <p className="pm-proposal-notice" role="status">{phase.notice}</p> : null}
         <RequestBox
           id={id}
-          label={t('pending.proposal.ask')}
+          label={t(isVertical ? 'pending.vertical.ask' : 'pending.proposal.ask')}
           value={request}
           onChange={setRequest}
-          intents={CANDIDATES}
+          intents={isVertical ? VERTICAL_CANDIDATES : CANDIDATES}
           intentsLabel={t('pending.proposal.intents')}
           onPick={(picked) => { if (isVerdict(picked)) onPick(picked) }}
-          placeholder={t('pending.proposal.placeholder')}
+          placeholder={t(isVertical ? 'pending.vertical.placeholder' : 'pending.proposal.placeholder')}
         />
-        <p className="pm-model-note"><Icon name="info" size={14} /><span>{t('pending.proposal.note')}</span></p>
+        <p className="pm-model-note"><Icon name="info" size={14} /><span>{t(isVertical ? 'pending.vertical.note' : 'pending.proposal.note')}</span></p>
         {phase.error !== undefined ? <p className="pm-pending-error" role="alert">{phase.error}</p> : null}
         <div className="pm-edit-foot">
           <span className="pm-edit-hint">{hint}</span>
@@ -212,13 +224,27 @@ export function ProposalRequest({ decisionId, left, right, session, unavailable,
   )
 }
 
-/** 一份方案：模型图标、加粗的结论、说明；融合写清写进哪条、和原文对照，留一条写留下的那条和另一条的去向，都保留一句话。 */
-function ProposalView({ proposal, left, right }: { proposal: RequestedProposal; left: MemoryCard; right: MemoryCard }) {
+/**
+ * 一份方案：模型图标、加粗的结论、说明；融合写清写进哪条、和原文对照，留一条写留下的那条和另一条的去向，都保留一句话。
+ * 垂直冲突：改写写明写回这条、和原文对照，删除、都保留各一句话。
+ */
+function ProposalView({ proposal, left, right }: { proposal: RequestedProposal; left: MemoryCard; right: MemoryCard | undefined }) {
   const t = useT()
   const edit = proposal.ops.find(op => op.kind === 'edit')
   const kept = proposal.action === 'keep-a' ? left : proposal.action === 'keep-b' ? right : undefined
   let detail: ReactNode = null
-  if (proposal.action === 'merge' && edit?.kind === 'edit') {
+  if (proposal.action === 'rewrite' && edit?.kind === 'edit') {
+    detail = (
+      <div className="pm-suggestion-draft">
+        <p className="pm-suggestion-into">{t('pending.suggestion.rewriteInto')}</p>
+        <DraftCompare memories={[left]} base={draftOf(left)} draft={{ content: edit.content, name: edit.name, summary: edit.summary, tags: edit.tags }} />
+      </div>
+    )
+  } else if (proposal.action === 'delete') {
+    detail = <p className="pm-suggestion-into">{t('pending.vertical.deleteNote')}</p>
+  } else if (proposal.action === 'keep-both' && right === undefined) {
+    detail = <p className="pm-suggestion-into">{t('pending.vertical.keepBothNote')}</p>
+  } else if (proposal.action === 'merge' && edit?.kind === 'edit' && right !== undefined) {
     const keeper = edit.memoryId === right.id ? right : left
     detail = (
       <div className="pm-suggestion-draft">

@@ -12,7 +12,8 @@
  * 横向冲突在 A、B 下面写一行处理建议的结论（「模型建议：保留 A」，理由不写）。建议是保留一方、都保留时给「采纳建议」
  * （发 apply-proposal，只带条目 id 和建议 id，不加确认）和一句采纳后哪条去哪；融合稿和对照放不下，融合和没有建议时只给「在记忆页处理 ›」，
  * 有建议时它也跟在「采纳建议」后面，作为不按建议处理的出口。采纳时建议已失效（stale，什么都没动）：原位写明，退化成没有建议，
- * 视图带来另一份（id 不同）时照常显示。基线冲突仍是「以基线为准 / 保留这条记忆」两个按钮，就地裁决。
+ * 视图带来另一份（id 不同）时照常显示。基线冲突（记忆和指令文件）同样：建议是删除这条、都保留，且会话在这条记忆的项目里时给「采纳建议」，
+ * 改写和没有建议时只给「在记忆页处理 ›」；不再有直接裁决的按钮。
  * 刚裁决的冲突在本地留原位可撤销，tab 卸载后收起。撤销生效、视图还没把冲突带回来时，按裁决前的样子原位画回冲突卡（同记忆页处理视图），
  * 「等你决定」不空出一帧，焦点留在这张卡上；视图带回后卡片不重挂。
  * 裁决碰上这条冲突正在别处处理或刚处理完（什么都没动）：冲突卡还在时原位说明，那边的结果写进视图、卡片消失后
@@ -37,7 +38,7 @@ import type { NavTarget } from '../nav.ts'
 import { GroupBody, useFold } from '../library/groups.tsx'
 import { mergeTypeLabels, ViewMessage } from '../library/shared.tsx'
 import { typeLabel } from '../type-label.ts'
-import { ACTION_LABEL } from '../pending/suggestion.tsx'
+import { ACTION_LABEL, isInVerticalProject } from '../pending/suggestion.tsx'
 import { AdviceNote, ResultLine } from '../ui/Advice.tsx'
 import { Button } from '../ui/Button.tsx'
 import { ConflictRuling, VerticalConflictRuling } from '../ui/ConflictRuling.tsx'
@@ -133,12 +134,17 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     setRuled(prev => [...prev, entry])
     setUndone((prev) => { const next = new Map(prev); next.delete(item.decisionId); return next })
   }
-  const adopt = (item: Conflict, suggestion: Suggestion, verdict: Verdict) => {
-    const { left, right } = item
-    if (left === null || right === null) return
+  const adopt = (item: Conflict | VerticalConflict, suggestion: Suggestion, verdict: Verdict) => {
+    const ruledOf = (result: Ok): Ruled | undefined => {
+      if (item.kind === 'conflict-vertical') return item.memory === null ? undefined : { kind: 'vertical', decisionId: item.decisionId, verdict, memory: item.memory, ...outcomeOf(result) }
+      return item.left === null || item.right === null ? undefined : { kind: 'horizontal', decisionId: item.decisionId, verdict, left: item.left, right: item.right, ...outcomeOf(result) }
+    }
     setRefused(undefined)
     runner.run(item.decisionId, { cmd: 'apply-proposal', decisionId: item.decisionId, suggestionId: suggestion.id }, {
-      onOk(result) { settle(item, { kind: 'horizontal', decisionId: item.decisionId, verdict, left, right, ...outcomeOf(result) }) },
+      onOk(result) {
+        const entry = ruledOf(result)
+        if (entry !== undefined) settle(item, entry)
+      },
       onHandledElsewhere() { setRefused(item.decisionId) },
       // 建议已换了一份，或两条在建议生成后被改过：什么都没动，卡上这一份当作失效
       onFailed(failure) {
@@ -146,13 +152,6 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
         setStaleSuggestions(prev => new Map(prev).set(item.decisionId, suggestion.id))
         return true
       },
-    })
-  }
-  const ruleVertical = (item: VerticalConflict, verdict: Verdict) => {
-    const { memory } = item
-    if (memory === null) return
-    run(item.decisionId, { cmd: 'resolve', decisionId: item.decisionId, verdict }, (result) => {
-      settle(item, { kind: 'vertical', decisionId: item.decisionId, verdict, memory, ...outcomeOf(result) })
     })
   }
   const undo = (decisionId: string) => {
@@ -291,17 +290,55 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
 
   const waiting = decisions.filter(d => d.kind !== 'ruled').length
   const toPage = () => { openPage({ view: 'todo', ...(scope === undefined ? {} : { scope }), fromChat: true, level: 'your-call' }) }
-  /** 「等你决定」里的一张卡：横向冲突写建议结论、能采纳的就地采纳，基线冲突就地裁决，刚裁决的留结果和撤销。 */
+  /**
+   * 冲突卡下面的整块（横向、基线冲突同一套）：建议结论一行；能采纳的（保留一方、删除这条、都保留）给「采纳建议」和一句采纳后的去向，
+   * 后面跟「在记忆页处理 ›」。suggestion 是此刻卡上能用的那份（失效、记忆找不到、基线冲突不在它的项目里时为 undefined）。
+   */
+  const conflictFooter = (item: Conflict | VerticalConflict, suggestion: Suggestion | undefined, isStale: boolean) => {
+    const verdict = suggestion === undefined ? undefined : verdictOfAction(suggestion.action)
+    const { horizontal, vertical } = CONFLICT_ACTION_VERDICTS
+    const adoptNote = verdict === undefined ? undefined
+      : item.kind === 'conflict-vertical'
+        ? t(verdict === vertical.keepBaseline ? item.memory?.hasSecret === true ? 'pending.vertical.adoptNotePurge' : 'pending.vertical.adoptNoteDelete' : 'pending.vertical.adoptNoteKeepBoth')
+        : verdict === horizontal.keepBoth ? t('pending.conflict.adoptNoteKeepBoth')
+          : t('pending.conflict.adoptNote', { drop: verdict === horizontal.keepA ? 'B' : 'A' })
+    return (
+      <>
+        {suggestion !== undefined
+          ? (
+            <p className="pm-side-suggestion">
+              <span className="pm-side-suggestion-icon"><Icon name="sparkle" size={14} /></span>
+              <span>{t('sidebar.suggestion.lead')}<strong>{t(ACTION_LABEL[suggestion.action])}</strong></span>
+            </p>
+          )
+          : null}
+        {isStale ? <p className="pm-side-hint" role="status">{t('sidebar.suggestion.stale')}</p> : null}
+        {adoptNote !== undefined ? <AdviceNote label="note">{adoptNote}</AdviceNote> : null}
+        <div className="pm-conflict-actions">
+          {suggestion !== undefined && verdict !== undefined
+            ? (
+              <Button variant="primary" unavailable={runner.unavailable(item.decisionId)} onClick={() => { adopt(item, suggestion, verdict) }}>
+                {t('pending.conflict.adopt')}
+              </Button>
+            )
+            : null}
+          {/* 和底部入口同名：去的是同一处 */}
+          <button type="button" className="pm-link" onClick={toPage}>{t('sidebar.footer.pendingLink')}</button>
+        </div>
+      </>
+    )
+  }
+  /** 卡上这一份建议采纳时回过 stale：当作没有建议。 */
+  const isStaleOf = (item: Conflict | VerticalConflict) => {
+    const staleId = staleSuggestions.get(item.decisionId)
+    return staleId !== undefined && (item.suggestion === undefined || item.suggestion.id === staleId)
+  }
+  /** 「等你决定」里的一张卡：冲突写建议结论、能采纳的就地采纳，其余去记忆页；刚裁决的留结果和撤销。 */
   const decision = (entry: Decision) => {
     if (entry.kind === 'conflict') {
       const { item } = entry
-      const staleId = staleSuggestions.get(item.decisionId)
-      const isStale = staleId !== undefined && (item.suggestion === undefined || item.suggestion.id === staleId)
+      const isStale = isStaleOf(item)
       const suggestion = isStale || item.left === null || item.right === null ? undefined : item.suggestion
-      const verdict = suggestion === undefined ? undefined : verdictOfAction(suggestion.action)
-      const adoptNote = verdict === undefined ? undefined
-        : verdict === CONFLICT_ACTION_VERDICTS.horizontal.keepBoth ? t('pending.conflict.adoptNoteKeepBoth')
-          : t('pending.conflict.adoptNote', { drop: verdict === CONFLICT_ACTION_VERDICTS.horizontal.keepA ? 'B' : 'A' })
       return (
         <div key={item.decisionId}>
           <ConflictRuling
@@ -312,31 +349,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
             typeLabel={label}
             hideScope={isOwnSide(item.left) && isOwnSide(item.right)}
             projectName={projectName}
-            footer={(
-              <>
-                {suggestion !== undefined
-                  ? (
-                    <p className="pm-side-suggestion">
-                      <span className="pm-side-suggestion-icon"><Icon name="sparkle" size={14} /></span>
-                      <span>{t('sidebar.suggestion.lead')}<strong>{t(ACTION_LABEL[suggestion.action])}</strong></span>
-                    </p>
-                  )
-                  : null}
-                {isStale ? <p className="pm-side-hint" role="status">{t('sidebar.suggestion.stale')}</p> : null}
-                {adoptNote !== undefined ? <AdviceNote label="note">{adoptNote}</AdviceNote> : null}
-                <div className="pm-conflict-actions">
-                  {suggestion !== undefined && verdict !== undefined
-                    ? (
-                      <Button variant="primary" unavailable={runner.unavailable(item.decisionId)} onClick={() => { adopt(item, suggestion, verdict) }}>
-                        {t('pending.conflict.adopt')}
-                      </Button>
-                    )
-                    : null}
-                  {/* 和底部入口同名：去的是同一处 */}
-                  <button type="button" className="pm-link" onClick={toPage}>{t('sidebar.footer.pendingLink')}</button>
-                </div>
-              </>
-            )}
+            footer={conflictFooter(item, suggestion, isStale)}
           />
           {failed(item.decisionId)}
         </div>
@@ -344,6 +357,9 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     }
     if (entry.kind === 'vertical') {
       const { item } = entry
+      const isStale = isStaleOf(item)
+      // 建议要这条记忆所在项目的指令文件：会话不在那个项目里时不给采纳，去记忆页看原因
+      const suggestion = isStale || item.memory === null || !isInVerticalProject(item, session) ? undefined : item.suggestion
       return (
         <div key={item.decisionId}>
           <VerticalConflictRuling
@@ -353,8 +369,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
             now={now}
             typeLabel={label}
             hideScope={item.memory?.scope !== 'global'}
-            unavailable={runner.unavailable(item.decisionId)}
-            onRule={(verdict) => { ruleVertical(item, verdict) }}
+            footer={conflictFooter(item, suggestion, isStale)}
           />
           {failed(item.decisionId)}
         </div>
@@ -553,7 +568,7 @@ function SavedRow({ session, memory, card, state, onWroteAgentsMd, children }: {
 
 /**
  * 刚裁决完：留下的卡（按基线则不留卡），下面结果行「已保留 A」（基线冲突：「已按基线」「已保留这条记忆」）+ 后果 +「撤销」。
- * 横向冲突在这里只能采纳建议，后果前面先写来由「按模型建议处理。」（同记忆页的结果卡）。
+ * 冲突在这里只能采纳建议，后果前面先写来由「按模型建议处理。」（同记忆页的结果卡）。
  */
 function RuledCard({ ruled, card, unavailable, onUndo }: {
   ruled: Ruled
@@ -571,7 +586,7 @@ function RuledCard({ ruled, card, unavailable, onUndo }: {
     : ruled.isHardDeleted ? ruled.kind === 'vertical' ? t('conflict.purgedMemory') : t('conflict.purgedSide', { side: verdict === 'keep-left' ? 'B' : 'A' })
     : t(ruled.kind === 'vertical' ? isBaseline ? 'sidebar.ruled.deletedMemory' : 'sidebar.ruled.keptMemory'
       : verdict === 'keep-left' ? 'sidebar.ruled.deletedB' : verdict === 'keep-right' ? 'sidebar.ruled.deletedA' : 'sidebar.ruled.keptBoth')
-  const note = ruled.kind === 'horizontal' ? t('conflict.twoSentences', { first: t('pending.result.bySuggestion'), second: outcome }) : outcome
+  const note = t('conflict.twoSentences', { first: t('pending.result.bySuggestion'), second: outcome })
   // 删掉了一条时补一句生效时机：这次对话的快照已冻结，删掉的那条要到压缩后或下个对话才不再带入
   const isDeleting = ruled.kind === 'vertical' ? isBaseline : verdict !== CONFLICT_ACTION_VERDICTS.horizontal.keepBoth
   const kept = ruled.kind === 'vertical' ? isBaseline ? [] : [ruled.memory]
@@ -688,7 +703,7 @@ export const sidebarTabCss = `
 .pm-side .pm-conflict .pm-mc-text {
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
 }
-.pm-side .pm-conflict-buttons .pm-btn, .pm-side .pm-conflict-actions .pm-btn { padding: 5px 10px; }
+.pm-side .pm-conflict-actions .pm-btn { padding: 5px 10px; }
 .pm-side .pm-conflict-footer { gap: 8px; }
 /* 建议结论一行：图标和文字顶齐，窄宽度下文字折行 */
 .pm-side-suggestion {

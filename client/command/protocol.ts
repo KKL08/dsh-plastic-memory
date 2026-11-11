@@ -4,7 +4,7 @@
  * - forget 的目标含密钥（has-secret，什么都没动）：确认后改发 hard-delete，沿用这条命令指明的那一份；
  * - 直接改、直接合并、整理所选、按要求应用的新内容像密钥（secret-suspected，什么都没动）：确认不是密钥后带 force 重发；
  * - 条目正被别处认领（claimed），或待决项已不在（契约 OPEN_ITEM_COMMANDS 的 not-found）：别处已处理；
- * - 服务端原话只有中文的几种（stale、not-found、secret-critical、target-taken、拿不到模型、模型输出不合格式）换本地文案，其余显示原话；
+ * - 服务端原话只有中文的几种（stale、not-found、secret-critical、target-taken、缺基线、拿不到模型、模型输出不合格式）换本地文案，其余显示原话；
  *   stale、not-found 分单条、整理所选两种口径，失败结果里的 memoryIds 照传。
  * 确认类 Outcome 自带要重发的命令，面板不碰命令形状。
  */
@@ -58,6 +58,8 @@ function localKeyOf(command: MemoryCommand, code: GuiErrorCode): LocaleKey | und
     // 按记忆动手的：要动的记忆已经不在（多半在外面删了），服务端已重写视图。待决项的在前面算别处已处理；撤销的是快照没了，照常显示原话
     case 'not-found': return 'memoryId' in command || 'memories' in command ? 'pending.memory.gone' : undefined
     case 'secret-critical': return 'pending.edit.secretCritical'
+    // 垂直冲突的补上建议、按要求生成：借来的会话不在这条记忆的项目里，或读不到指令文件
+    case 'no-baseline': return 'pending.vertical.needProject'
     case 'target-taken':
       return command.cmd === 'undo' ? 'pending.move.undoTaken'
         : command.cmd === 'promote' || command.cmd === 'promote-memory' ? 'pending.promote.taken' : 'pending.move.taken'

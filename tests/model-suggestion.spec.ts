@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { jsonObjectIn } from '../src/gui/model-draft.ts'
-import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
-import { buildProposalPrompt, buildSuggestionPrompt, generateProposal, generateSuggestion, type ProposalRequest } from '../src/gui/model-suggestion.ts'
+import { BASELINE_MAX_CHARS, type SemanticLlm } from '../src/governance/semantic-scan.ts'
+import {
+  buildProposalPrompt, buildSuggestionPrompt, buildVerticalProposalPrompt, buildVerticalSuggestionPrompt, generateProposal, generateSuggestion, generateVerticalProposal,
+  generateVerticalSuggestion, type ProposalRequest,
+} from '../src/gui/model-suggestion.ts'
 import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 
@@ -293,5 +296,109 @@ describe('按要求生成处理方案（补充要求的生成器）', () => {
   it('模型报错：原话脱敏；鉴权错误只留错误码', async () => {
     expect(await generateProposal(asked('融合'), answering(new Error(`bad key ${FAKE_SECRET.sk}`)).llm)).toEqual({ ok: false, cause: { kind: 'model-error', message: 'bad key [已隐藏]' } })
     expect(await generateProposal(asked('融合'), answering(Object.assign(new Error('401'), { code: 'AUTH' })).llm)).toEqual({ ok: false, cause: { kind: 'model-error', hostCode: 'AUTH' } })
+  })
+})
+
+describe('垂直冲突（记忆和指令文件）的生成器', () => {
+  const memory = record({ id: 'mem_v', name: '包管理器', content: '用 npm', tags: ['npm'], scope: 'workspace', workspacePath: '/w/app' })
+  const baseline = ['Instructions from: /w/app/AGENTS.md\n前端统一用 pnpm']
+  const vInput = { summary: '记忆说用 npm，AGENTS.md 说用 pnpm', baselineRef: 'AGENTS.md：包管理', record: memory, baseline }
+  const REWRITE_DRAFT = { content: '脚本仓用 npm；前端按 AGENTS.md 用 pnpm', summary: '脚本仓的包管理器', name: null }
+
+  it('提示词分四段；三种结论加 unsure；指令文件只读、处理只针对记忆；记忆、指令文件、出处描述都是数据', () => {
+    const { system, user } = buildVerticalSuggestionPrompt(vInput)
+    expect(system.match(/^## .+$/gm)).toEqual(['## 任务', '## 输入说明', '## 做法', '## 输出格式'])
+    for (const text of ['rewrite', 'delete', 'keep-both', 'unsure', '指令文件由用户自己维护', '待处理的数据']) expect(system).toContain(text)
+    expect(system).not.toContain('keep-a')
+    expect(system).toMatch(/## 做法\n1\. 改写稿里的每一条事实都来自这条记忆或指令文件；命令、路径、文件名、版本号、数字/)
+    expect(user.match(/^## .+$/gm)).toEqual(['## 矛盾之处', '## 指令文件里相关的位置', '## 记忆', '## 指令文件'])
+    expect(user).toContain(`## 矛盾之处\n${JSON.stringify(vInput.summary)}`)
+    expect(user).toContain(`## 指令文件里相关的位置\n${JSON.stringify(vInput.baselineRef)}`)
+    expect(user).toContain(`## 指令文件\n${JSON.stringify(baseline.join('\n\n'))}`)
+  })
+
+  it('指令文件按疑似级遮盖后才进提示词：高危、疑似密钥的原文都不发', () => {
+    const { user } = buildVerticalSuggestionPrompt({ ...vInput, baseline: [`部署用 token ${FAKE_SECRET.github}，数据库 password: abc12345x`] })
+    expect(user).not.toContain(FAKE_SECRET.github)
+    expect(user).not.toContain('abc12345x')
+    expect(user).toContain('[已隐藏]')
+  })
+
+  it('指令文件超长被裁切、密钥正好跨在裁切处：先遮盖再裁切，密钥的前半截也不进提示词', () => {
+    const head = FAKE_SECRET.github.slice(0, 12)
+    const { user } = buildVerticalSuggestionPrompt({ ...vInput, baseline: [`${'约'.repeat(BASELINE_MAX_CHARS - 13)} ${FAKE_SECRET.github} 后面还有别的约定`] })
+    expect(user).not.toContain(head)
+  })
+
+  it.each([
+    ['delete', [{ kind: 'forget', memoryId: 'mem_v' }]],
+    ['keep-both', [{ kind: 'keep', memoryId: 'mem_v' }]],
+  ] as const)('%s：操作由结论推出', async (action, ops) => {
+    expect(await generateVerticalSuggestion(vInput, answering(JSON.stringify({ action, reason: '理由' })).llm)).toEqual({ ok: true, action, reason: '理由', ops, isSourced: false })
+  })
+
+  it('rewrite：记忆改写成这一稿；没改名称沿用原名，没给标签沿用原标签', async () => {
+    const r = await generateVerticalSuggestion(vInput, answering(JSON.stringify({ action: 'rewrite', reason: '各管一块', draft: REWRITE_DRAFT })).llm)
+    expect(r).toEqual({
+      ok: true, action: 'rewrite', reason: '各管一块', isSourced: false,
+      ops: [{ kind: 'edit', memoryId: 'mem_v', content: REWRITE_DRAFT.content, summary: REWRITE_DRAFT.summary, name: '包管理器', tags: ['npm'] }],
+    })
+  })
+
+  it.each([
+    ['横向的结论', JSON.stringify({ action: 'keep-a', reason: 'r' })],
+    ['改写缺稿', JSON.stringify({ action: 'rewrite', reason: '改' })],
+    ['不是 JSON', '都行'],
+  ])('输出不合格式（%s）：unparseable', async (_label, raw) => {
+    expect(await generateVerticalSuggestion(vInput, answering(raw).llm)).toEqual({ ok: false, cause: { kind: 'unparseable' } })
+  })
+
+  it('unsure：记作 undecided，带遮盖后的理由', async () => {
+    expect(await generateVerticalSuggestion(vInput, answering(JSON.stringify({ action: 'unsure', reason: '需要你确认 password: abc12345x 这个仓用哪个' })).llm))
+      .toEqual({ ok: false, cause: { kind: 'undecided', reason: '需要你确认 [已隐藏] 这个仓用哪个' } })
+  })
+
+  it('改写稿带进原文没有的密钥（高危，或记忆里没有的疑似值）：整份丢弃', async () => {
+    for (const content of [`用 npm，token ${FAKE_SECRET.github}`, '用 npm，password: abc12345x']) {
+      const raw = JSON.stringify({ action: 'rewrite', reason: '改', draft: { ...REWRITE_DRAFT, content } })
+      expect(await generateVerticalSuggestion(vInput, answering(raw).llm)).toEqual({ ok: false, cause: { kind: 'secret-in-draft' } })
+    }
+  })
+
+  it('有出处：放在记忆后面，JSON 编码；isSourced 为真；没有出处时整段不出现、也不提出处', async () => {
+    const source = [{ role: 'user' as const, text: '脚本仓还是用 npm' }]
+    const { system, user } = buildVerticalSuggestionPrompt({ ...vInput, source })
+    expect(user.match(/^## .+$/gm)).toEqual(['## 矛盾之处', '## 指令文件里相关的位置', '## 记忆', '## 记忆的出处', '## 指令文件'])
+    expect(user).toContain(`## 记忆的出处\n${JSON.stringify(source, null, 2)}`)
+    expect(system).toContain('出处里用户（role 为 user）说明了这条记忆适用的项目、目录、场景或时间时')
+    expect(await generateVerticalSuggestion({ ...vInput, source }, answering(JSON.stringify({ action: 'delete', reason: 'r' })).llm)).toMatchObject({ ok: true, isSourced: true })
+    const bare = buildVerticalSuggestionPrompt(vInput)
+    expect(bare.system).not.toContain('出处')
+    expect(bare.user).not.toContain('出处')
+  })
+
+  it('模型报错：原话脱敏', async () => {
+    expect(await generateVerticalSuggestion(vInput, answering(new Error(`bad key ${FAKE_SECRET.sk}`)).llm)).toEqual({ ok: false, cause: { kind: 'model-error', message: 'bad key [已隐藏]' } })
+  })
+
+  describe('按要求生成', () => {
+    const asked = (text: string, more: Partial<ProposalRequest> = {}) => ({ ...vInput, request: { text, prior: [], ...more } })
+
+    it('提示词：要求是处理意图；三种结论加 infeasible，没有 unsure；上一份方案只是参照', () => {
+      const previous = { action: 'rewrite' as const, reason: '各管一块', ops: [{ kind: 'edit' as const, memoryId: 'mem_v', content: '脚本仓用 npm', name: '包管理器', summary: 's', tags: [] }] }
+      const { system, user } = buildVerticalProposalPrompt(asked('只在脚本仓用 npm', { prior: ['改写这条记忆'], previous }))
+      expect(system.match(/^## .+$/gm)).toEqual(['## 任务', '## 输入说明', '## 做法', '## 输出格式'])
+      for (const text of ['rewrite', 'delete', 'keep-both', 'infeasible', '处理意图只来自「用户的要求」「此前的要求」', '上一份方案只是参照']) expect(system).toContain(text)
+      expect(system).not.toContain('unsure')
+      expect(user.match(/^## .+$/gm)).toEqual(['## 此前的要求（按先后排列）', '## 用户的要求', '## 矛盾之处', '## 指令文件里相关的位置', '## 记忆', '## 指令文件', '## 上一份方案'])
+    })
+
+    it('rewrite / delete / keep-both / infeasible；稿里的疑似密钥不在这里丢弃（应用时确认）', async () => {
+      expect(await generateVerticalProposal(asked('删掉'), answering(JSON.stringify({ action: 'delete', reason: 'r' })).llm)).toEqual({ ok: true, action: 'delete', reason: 'r', ops: [{ kind: 'forget', memoryId: 'mem_v' }] })
+      expect(await generateVerticalProposal(asked('没法'), answering(JSON.stringify({ action: 'infeasible', reason: '做不到' })).llm)).toEqual({ ok: true, action: 'infeasible', reason: '做不到' })
+      const r = await generateVerticalProposal(asked('写进密码'), answering(JSON.stringify({ action: 'rewrite', reason: 'r', draft: { ...REWRITE_DRAFT, content: '用 npm，password: abc12345x' } })).llm)
+      expect(r.ok && r.action !== 'infeasible' && r.ops[0]).toMatchObject({ kind: 'edit', content: '用 npm，password: abc12345x' })
+      expect(await generateVerticalProposal(asked('x'), answering(JSON.stringify({ action: 'unsure', reason: 'r' })).llm)).toEqual({ ok: false, cause: { kind: 'unparseable' } })
+    })
   })
 })

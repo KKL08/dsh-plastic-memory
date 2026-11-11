@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, screen, within } from '@testing-library/react'
+import { describe, expect, it } from 'vitest'
+import { screen, within } from '@testing-library/react'
 import { ConflictRuling, VerticalConflictRuling } from './ConflictRuling.tsx'
 import { memory, NOW, renderInShell } from '../test-utils.tsx'
 
@@ -38,47 +38,24 @@ describe('ConflictRuling', () => {
   })
 })
 
-describe('VerticalConflictRuling 记忆含密钥', () => {
-  const advice = (container: HTMLElement) => container.querySelector('.pm-conflict-buttons')!.previousElementSibling
-
-  it('PA-11 基线冲突里记忆含密钥：以基线为准，它将彻底删除、不可恢复', () => {
-    const { container } = renderInShell(<VerticalConflictRuling layout="narrow" memory={{ ...left, hasSecret: true }} baselineRef="AGENTS.md：用 pnpm" now={NOW} onRule={() => {}} />)
-    expect(advice(container)).toHaveTextContent('以基线为准，它将彻底删除、不可恢复')
-    expect(advice(container)).not.toHaveTextContent('14 天内可恢复')
-  })
-})
-
 describe('VerticalConflictRuling', () => {
-  it('写明基线不会被删除和基线出处；「以基线为准」= keep-right、「保留这条记忆」= keep-left', () => {
-    const onRule = vi.fn()
-    const { container } = renderInShell(<VerticalConflictRuling layout="narrow" memory={left} baselineRef="AGENTS.md：用 pnpm" now={NOW} onRule={onRule} />)
+  const footer = <p className="test-footer">建议和动作</p>
+
+  it('写明基线不会被删除和基线出处；记忆卡下面整块是调用方给的 footer，不另画裁决按钮', () => {
+    const { container } = renderInShell(<VerticalConflictRuling layout="narrow" memory={left} baselineRef="AGENTS.md：用 pnpm" now={NOW} footer={footer} />)
     expect(screen.getByRole('heading', { name: '这条记忆和基线矛盾，等你决定' })).toBeInTheDocument()
     expect(container.querySelector('.pm-conflict-head > .pm-conflict-mark > .pm-marker--pending')).not.toBeNull()
-    expect(screen.getByText('AGENTS.md 是基线，不会被删除。')).toBeInTheDocument()
+    expect(screen.getByText('指令文件不会被改动，处理只针对这条记忆。')).toBeInTheDocument()
     expect(screen.getByText('基线：AGENTS.md：用 pnpm')).toBeInTheDocument()
     expect(screen.getByText('测试用真实 Postgres。')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '以基线为准' }))
-    fireEvent.click(screen.getByRole('button', { name: '保留这条记忆' }))
-    expect(onRule.mock.calls).toEqual([['keep-right'], ['keep-left']])
-    const row = container.querySelector('.pm-conflict-buttons')!
-    expect(row.querySelectorAll('button')).toHaveLength(2)
-    expect(row.previousElementSibling).toHaveTextContent(/^说明以基线为准会删掉这条记忆/)
+    const block = container.querySelector('.pm-conflict-footer')!
+    expect(block.previousElementSibling).toHaveClass('pm-conflict-single')
+    expect(within(block as HTMLElement).getByText('建议和动作')).toBeInTheDocument()
+    expect(screen.queryByRole('button')).toBeNull()
   })
 
-  it('unavailable 时按钮带原因提示且不发裁决', () => {
-    const onRule = vi.fn()
-    renderInShell(<VerticalConflictRuling layout="narrow" memory={left} baselineRef="AGENTS.md" now={NOW} onRule={onRule} unavailable="先开一个会话" />)
-    const button = screen.getByRole('button', { name: '保留这条记忆' })
-    expect(button).toHaveAttribute('title', '先开一个会话')
-    fireEvent.click(button)
-    expect(onRule).not.toHaveBeenCalled()
-  })
-
-  it('记忆找不到：显示说明，两个按钮都不可用', () => {
-    const onRule = vi.fn()
-    renderInShell(<VerticalConflictRuling layout="narrow" memory={null} baselineRef="AGENTS.md" now={NOW} onRule={onRule} />)
+  it('记忆找不到：显示说明', () => {
+    renderInShell(<VerticalConflictRuling layout="narrow" memory={null} baselineRef="AGENTS.md" now={NOW} footer={footer} />)
     expect(screen.getByText('这条记忆找不到了，可能已经被删除。')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '以基线为准' }))
-    expect(onRule).not.toHaveBeenCalled()
   })
 })

@@ -1259,4 +1259,54 @@ describe('待处理视图：冲突的处理建议', () => {
     await h.store.update({ id: 'mem_a', workspacePath: WS }, r => ({ ...r, content: '用 pnpm 9' }))
     expect((await horizontal(h)).noSuggestion).toEqual({ code: 'not-generated' })
   })
+
+  describe('垂直冲突', () => {
+    async function seededVertical(h: ReturnType<typeof harness>, content = '用 npm') {
+      await h.store.create(w({ id: 'mem_v', name: 'V', content }))
+      const { entry } = await h.decisions.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '和 AGENTS.md 矛盾', fingerprint: 'v' }, 4)
+      const read = (id: string) => h.store.get(id, { workspacePath: WS })
+      return { entry, memory: (await read('mem_v'))!, read }
+    }
+    const vertical = async (h: ReturnType<typeof harness>) => {
+      const item = (await h.views()).pending.items.find(i => i.kind === 'conflict-vertical')
+      if (item?.kind !== 'conflict-vertical') throw new Error('没有垂直冲突项')
+      return item
+    }
+    const baseline = { workspace: WS, fingerprint: 'bfp' }
+
+    it('有建议：只核对记忆那一半，带上基线所属的项目；记忆改过后不算数，回到 not-generated', async () => {
+      const h = harness()
+      const { entry, memory, read } = await seededVertical(h)
+      const suggestion = {
+        id: 'sg_v', action: 'rewrite' as const, reason: '记忆管脚本仓，文件管前端',
+        ops: [{ kind: 'edit' as const, memoryId: 'mem_v', content: '脚本仓用 npm', name: 'V', summary: '脚本仓', tags: [] }],
+        basis: suggestionBasis(entry, [memory], baseline), isSourced: false, generatedAt: T0,
+      }
+      expect(await h.decisions.writeSuggestion(entry.id, { suggestion }, read)).toBe('written')
+      const item = await vertical(h)
+      expect(item.suggestion).toEqual({ id: 'sg_v', action: 'rewrite', reason: suggestion.reason, ops: suggestion.ops, isSourced: false, baselineWorkspace: WS })
+      expect(item.noSuggestion).toBeUndefined()
+      expect(pendingViewSchema.parse((await h.views()).pending).items).toHaveLength(1)
+      await h.store.update({ id: 'mem_v', workspacePath: WS }, r => ({ ...r, content: '用 npm 10' }))
+      expect(await vertical(h)).toMatchObject({ noSuggestion: { code: 'not-generated' } })
+      expect((await vertical(h)).suggestion).toBeUndefined()
+    })
+
+    it('缺基线：原因码 no-baseline，不算生成失败；「正在生成」标记同横向', async () => {
+      const h = harness()
+      const { entry, memory, read } = await seededVertical(h)
+      expect(await vertical(h)).toMatchObject({ noSuggestion: { code: 'not-generated' } })
+      await h.decisions.writeSuggestion(entry.id, { failure: { basis: suggestionBasis(entry, [memory]), cause: { kind: 'no-baseline' }, at: T0 } }, read)
+      expect((await vertical(h)).noSuggestion).toEqual({ code: 'no-baseline' })
+      expect(pendingViewSchema.parse((await h.views()).pending).items).toHaveLength(1)
+      const views = await collectGlobalViews({ ...h.sourceDeps, generatingSuggestions: () => new Set([entry.id]) })
+      expect(views.pending.items.find(i => i.kind === 'conflict-vertical')).toMatchObject({ isGeneratingSuggestion: true })
+    })
+
+    it('记忆含高危密钥：原因码 has-secret', async () => {
+      const h = harness()
+      await seededVertical(h, `用 npm，token ${FAKE_SECRET.github}`)
+      expect((await vertical(h)).noSuggestion).toEqual({ code: 'has-secret' })
+    })
+  })
 })

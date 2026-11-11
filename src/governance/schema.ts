@@ -84,10 +84,13 @@ export type ProposalOp = z.infer<typeof proposalOpSchema>
  * 处理建议生成时的依据版本：条目当时的冲突指纹（旧条目没有指纹时缺省），和每条涉及记忆的完整内容指纹（editFingerprint，
  * 撤销用的那一种，不含位置）、作用域键（scope.ts 的 scopeKey），按条目 memoryIds 的顺序。
  * 条目指纹、任一条记忆此刻的指纹或作用域对不上，这份建议（或这次失败）就不算数。作用域键缺省的（加它之前写下的）一律算对不上，条目照常解析。
+ * 垂直冲突另记 baseline：生成时用的基线所属项目（会话的 workspace 路径，没有项目为 'global'）和基线指纹（decisions.ts baselineFingerprint）。
+ * 重写视图时没有会话、拿不到指令文件，视图只核对记忆那一半；基线这一半在补上建议、采纳、按要求应用时按会话此刻的基线核对。
  */
 export const suggestionBasisSchema = z.object({
   conflictFingerprint: z.string().optional(),
   memories: z.array(z.object({ memoryId: z.string(), fingerprint: z.string(), scopeKey: z.string().optional() })),
+  baseline: z.object({ workspace: z.string(), fingerprint: z.string() }).optional(),
 })
 export type SuggestionBasis = z.infer<typeof suggestionBasisSchema>
 

@@ -79,16 +79,21 @@ export const CHECKUP_CAUSE_KINDS = ['no-default-model', 'model-error', 'unparsea
 /**
  * 处理方案的结论（待决账本的处理建议 governance/schema.ts 与 GUI 视图 gui/contract.ts 同用，存盘、上 wire）。
  * 横向冲突：merge 融合成一条（保留方按合并规则选，另一条删除）、keep-a / keep-b 只留一条、keep-both 都保留（不算冲突）。
+ * 垂直冲突（记忆和 AGENTS.md / CLAUDE.md）：rewrite 改写这条记忆、delete 以文件为准删除这条、keep-both 都保留。指令文件插件不改。
  */
-export const PROPOSAL_ACTIONS = ['merge', 'keep-a', 'keep-b', 'keep-both'] as const
+export const PROPOSAL_ACTIONS = ['merge', 'keep-a', 'keep-b', 'keep-both', 'rewrite', 'delete'] as const
 export type ProposalAction = (typeof PROPOSAL_ACTIONS)[number]
+/** 横向冲突能用的结论（生成器按它解析模型输出）。 */
+export const HORIZONTAL_PROPOSAL_ACTIONS = ['merge', 'keep-a', 'keep-b', 'keep-both'] as const satisfies readonly ProposalAction[]
+/** 垂直冲突能用的结论。 */
+export const VERTICAL_PROPOSAL_ACTIONS = ['rewrite', 'delete', 'keep-both'] as const satisfies readonly ProposalAction[]
 
 /**
- * 采纳处理建议时结论对应的裁决：只留一条记现有的删一方裁决（keep-a = 留 memoryIds[0]），都保留记现有的都保留裁决，
- * 和用户直接点候选项是同一种记法。融合不是这几种裁决之一，返回 undefined。服务端核对采纳和浏览器写结果卡同用这一份。
+ * 采纳处理建议时结论对应的裁决：只留一条记现有的删一方裁决（keep-a = 留 memoryIds[0]；垂直 delete 是基线胜、记忆删除，同 keep-right），
+ * 都保留记现有的都保留裁决，和用户直接点候选项是同一种记法。融合、改写不是这几种裁决之一，返回 undefined。服务端核对采纳和浏览器写结果卡同用这一份。
  */
 export function verdictOfAction(action: ProposalAction): 'keep-left' | 'keep-right' | 'keep-both' | undefined {
-  return action === 'keep-a' ? 'keep-left' : action === 'keep-b' ? 'keep-right' : action === 'keep-both' ? 'keep-both' : undefined
+  return action === 'keep-a' ? 'keep-left' : action === 'keep-b' || action === 'delete' ? 'keep-right' : action === 'keep-both' ? 'keep-both' : undefined
 }
 
 /**
@@ -102,9 +107,10 @@ export type ProposalSource = (typeof PROPOSAL_SOURCES)[number]
  * 处理建议没生成成的原因（账本与视图同用）：model-error = 模型调用出错（宿主给了错误码时带上；鉴权错误不留原话），
  * unparseable = 输出不合格式，secret-in-draft = 稿里出现高危密钥或原文没有的疑似密钥，整份丢弃，
  * undecided = 模型正常答了，但判断不了哪条对（带它说明的理由；视图里是单独的原因码，不算生成失败），
- * quota-exhausted = 自动体检这次的建议名额用完，没轮到它（没调用模型，不算尝试；视图里是单独的原因码，不算生成失败）。
+ * quota-exhausted = 自动体检这次的建议名额用完，没轮到它（没调用模型，不算尝试；视图里是单独的原因码，不算生成失败），
+ * no-baseline = 垂直冲突缺基线：体检用的会话不在这条记忆的项目里，或拿不到指令文件（没调用模型，不算尝试；视图里是单独的原因码）。
  */
-export const SUGGESTION_FAILURE_KINDS = ['model-error', 'unparseable', 'secret-in-draft', 'undecided', 'quota-exhausted'] as const
+export const SUGGESTION_FAILURE_KINDS = ['model-error', 'unparseable', 'secret-in-draft', 'undecided', 'quota-exhausted', 'no-baseline'] as const
 
 /** memory_health 建议的分层并列结构（health.ts）：独占层单元素，行动项层多元素，无事为空数组。 */
 export type HealthRecommendationKind =

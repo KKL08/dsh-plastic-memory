@@ -39,8 +39,8 @@ let root: string
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pm-checkup-sg-')) })
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
-/** 生成建议的提示词（system）里有这句；内容检查的没有。 */
-const isSuggestionCall = (input: { system: string }) => input.system.includes('两条互相矛盾的记忆')
+/** 生成建议的提示词（system）里有这句（横向、垂直各一句）；内容检查的没有。 */
+const isSuggestionCall = (input: { system: string }) => input.system.includes('两条互相矛盾的记忆') || input.system.includes('长期记忆和项目指令文件')
 
 type Reply = string | { code: string } | 'wait'
 
@@ -48,7 +48,7 @@ type Reply = string | { code: string } | 'wait'
  * 假模型：内容检查报 conflicts 里、这次输入里双方都在的冲突，用量 100；生成建议按 suggest 回（缺省「保留 A」），用量 30。
  * 'wait' 一直等到 release()（不理会取消信号：模型在取消之后才回来）；{ code } 按宿主错误码抛错。
  */
-function fakeModel(conflicts: Array<[string, string]>, suggest: (user: string, n: number) => Reply = () => JSON.stringify({ action: 'keep-a', reason: '以 A 为准' })) {
+function fakeModel(conflicts: Array<[string, string] | [string]>, suggest: (user: string, n: number) => Reply = () => JSON.stringify({ action: 'keep-a', reason: '以 A 为准' })) {
   const suggestCalls: string[] = []
   let scanCalls = 0
   let release: (() => void) | undefined
@@ -61,7 +61,7 @@ function fakeModel(conflicts: Array<[string, string]>, suggest: (user: string, n
         scanCalls++
         onUsage?.(100)
         const findings = conflicts.filter(ids => ids.every(id => input.user.includes(id)))
-          .map(memoryIds => ({ type: 'conflict', memoryIds, summary: '说法矛盾', suggestedAction: '请裁决' }))
+          .map(memoryIds => ({ type: 'conflict', memoryIds, summary: '说法矛盾', suggestedAction: '请裁决', ...(memoryIds.length === 1 ? { baselineRef: 'AGENTS.md：包管理' } : {}) }))
         return JSON.stringify({ findings })
       }
       suggestCalls.push(input.user)
@@ -113,14 +113,18 @@ function env(opts: { readEvent?: ReadEventFn } = {}) {
     const outcome = await runCheckup({ by, baseline: null, ...input, target }, {
       scan: { store, registry, decisions, cache, ignores }, checkups, views: writer, interval: heartbeat, now: () => clock.now, log: quietLog,
     })
-    const followUp = suggestions.run({ target, by, llm: input.llm, outcome, ...(signal !== undefined ? { signal } : {}) })
+    const followUp = suggestions.run({
+      target, by, llm: input.llm, outcome, baseline: input.baseline ?? null,
+      ...(input.currentWorkspace !== undefined ? { currentWorkspace: input.currentWorkspace } : {}), ...(signal !== undefined ? { signal } : {}),
+    })
     return { outcome, followUp }
   }
   const readPending = async () => pendingViewSchema.parse(JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES.pending), 'utf8')))
   const conflictItems = async () => (await readPending()).items.flatMap(i => (i.kind === 'conflict-horizontal' ? [i] : []))
+  const verticalItems = async () => (await readPending()).items.flatMap(i => (i.kind === 'conflict-vertical' ? [i] : []))
   const entryOf = async (a: string, b: string) => (await decisions.list()).find(d => d.memoryIds.join() === [a, b].join())
   const lastResult = async (key: string) => (await checkups.list()).find(r => r.id === key)?.lastResult
-  return { clock, sidecar, store, decisions, checkups, suggestions, writer, warnings, checkup, readPending, conflictItems, entryOf, lastResult }
+  return { clock, sidecar, store, decisions, checkups, suggestions, writer, warnings, checkup, readPending, conflictItems, verticalItems, entryOf, lastResult }
 }
 type Env = ReturnType<typeof env>
 
@@ -432,5 +436,89 @@ describe('自动体检之后补上建议', () => {
     await (await e.checkup({ llm: m.llm, target: GLOBAL as Scope, by: 'auto' })).followUp
     expect(m.suggestCalls).toHaveLength(AUTO_SUGGESTION_LIMIT + 2)
     expect((await e.conflictItems()).every(i => i.suggestion !== undefined)).toBe(true)
+  })
+})
+
+describe('垂直冲突（记忆和指令文件）的建议', () => {
+  const BASELINE = ['# AGENTS.md\n包管理统一用 npm']
+  const REWRITE = JSON.stringify({ action: 'rewrite', reason: '记忆管前端目录', draft: { content: 'web/ 目录下用 pnpm，其余照 AGENTS.md 用 npm', summary: 'web 目录用 pnpm', name: 'web 包管理' } })
+  const seedVertical = (e: Env) => e.store.create(record({ id: 'mem_v', name: 'mem_v 名', content: 'mem_v：用 pnpm', scope: 'workspace', workspacePath: WS }))
+
+  it('故事 33：手动体检、会话在这条记忆的项目里：给垂直冲突生成建议，依据记下基线所属项目和基线指纹，提示词带指令文件', async () => {
+    const e = env()
+    await seedVertical(e)
+    const m = fakeModel([['mem_v']], () => REWRITE)
+    await (await e.checkup({ llm: m.llm, target: PROJECT, baseline: BASELINE, currentWorkspace: WS })).followUp
+    expect(m.suggestCalls).toHaveLength(1)
+    expect(m.suggestCalls[0]).toContain('包管理统一用 npm')
+    const [entry] = (await e.decisions.list()).filter(d => d.baselineRef !== undefined)
+    expect(entry?.suggestion).toMatchObject({ action: 'rewrite', basis: { baseline: { workspace: WS } } })
+    expect(entry?.suggestion?.basis.baseline?.fingerprint).toEqual(expect.any(String))
+    expect(entry?.suggestionAttempts).toMatchObject({ count: 1 })
+    expect((await e.verticalItems())[0]).toMatchObject({ suggestion: { action: 'rewrite', baselineWorkspace: WS } })
+
+    // 同一份基线、记忆没变：再体检不再调用模型
+    await (await e.checkup({ llm: m.llm, target: PROJECT, baseline: BASELINE, currentWorkspace: WS })).followUp
+    expect(m.suggestCalls).toHaveLength(1)
+  })
+
+  it('故事 33：指令文件改过：按新基线重新生成', async () => {
+    const e = env()
+    await seedVertical(e)
+    const m = fakeModel([['mem_v']], () => REWRITE)
+    await (await e.checkup({ llm: m.llm, target: PROJECT, baseline: BASELINE, currentWorkspace: WS })).followUp
+    await (await e.checkup({ llm: m.llm, target: PROJECT, baseline: [...BASELINE, '# CLAUDE.md\n补充'], currentWorkspace: WS })).followUp
+    expect(m.suggestCalls).toHaveLength(2)
+  })
+
+  it('故事 5a：手动体检的会话不在这条记忆的项目里：不调用模型，记「缺基线」、不算尝试；视图原因码是缺基线', async () => {
+    const e = env()
+    await seedVertical(e)
+    await e.decisions.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '与基线矛盾' }, NOW - 1000)
+    const m = fakeModel([], () => REWRITE)
+    await (await e.checkup({ llm: m.llm, baseline: BASELINE, currentWorkspace: OTHER_WS })).followUp
+    expect(m.suggestCalls).toHaveLength(0)
+    const [entry] = (await e.decisions.list()).filter(d => d.baselineRef !== undefined)
+    expect(entry?.suggestionFailure?.cause).toEqual({ kind: 'no-baseline' })
+    expect(entry?.suggestionAttempts).toBeUndefined()
+    expect((await e.verticalItems())[0]?.noSuggestion).toEqual({ code: 'no-baseline' })
+
+    // 回到这个项目的会话再体检：照常生成，缺基线的原因让位
+    await (await e.checkup({ llm: m.llm, baseline: BASELINE, currentWorkspace: WS })).followUp
+    expect(m.suggestCalls).toHaveLength(1)
+    expect((await e.verticalItems())[0]).toMatchObject({ suggestion: { action: 'rewrite' } })
+  })
+
+  it('故事 5a：缺基线时不盖住已有的建议（视图只核对记忆那一半，卡上照常显示，由卡片判断会话在不在项目里）', async () => {
+    const e = env()
+    await seedVertical(e)
+    const m = fakeModel([['mem_v']], () => REWRITE)
+    await (await e.checkup({ llm: m.llm, target: PROJECT, baseline: BASELINE, currentWorkspace: WS })).followUp
+    // 没有基线的体检扫不出垂直冲突（假模型这次不报它）
+    await (await e.checkup({ llm: fakeModel([], () => REWRITE).llm, baseline: null })).followUp
+    const [entry] = (await e.decisions.list()).filter(d => d.baselineRef !== undefined)
+    expect(entry?.suggestion).toMatchObject({ action: 'rewrite' })
+    expect(entry?.suggestionFailure).toBeUndefined()
+  })
+
+  it('故事 33：自动体检不给垂直冲突生成建议，也不记原因', async () => {
+    const e = env()
+    await seedVertical(e)
+    await e.decisions.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '与基线矛盾' }, NOW - 1000)
+    const m = fakeModel([], () => REWRITE)
+    await (await e.checkup({ llm: m.llm, target: PROJECT, by: 'auto' })).followUp
+    expect(m.suggestCalls).toHaveLength(0)
+    const [entry] = (await e.decisions.list()).filter(d => d.baselineRef !== undefined)
+    expect(entry?.suggestionFailure).toBeUndefined()
+    expect((await e.verticalItems())[0]?.noSuggestion).toEqual({ code: 'not-generated' })
+  })
+
+  it('垂直冲突的记忆含高危密钥：不发给模型', async () => {
+    const e = env()
+    await e.store.create(record({ id: 'mem_v', name: 'mem_v 名', content: `mem_v：用 pnpm ${FAKE_SECRET.github}`, scope: 'workspace', workspacePath: WS }))
+    await e.decisions.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '与基线矛盾' }, NOW - 1000)
+    const m = fakeModel([], () => REWRITE)
+    await (await e.checkup({ llm: m.llm, target: PROJECT, baseline: BASELINE, currentWorkspace: WS })).followUp
+    expect(m.suggestCalls).toHaveLength(0)
   })
 })
