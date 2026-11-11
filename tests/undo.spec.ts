@@ -647,6 +647,45 @@ describe('最近删除的恢复', () => {
     expect(await allEntries(e)).toEqual([])
   })
 
+  /** 不是裁决删掉的 mem_f：删前留快照、软删进最近删除。 */
+  async function seedForgotten(e: Env) {
+    await e.store.create(record({ id: 'mem_f', content: '删前的内容' }))
+    const rec = (await copy(e, 'mem_f'))!
+    await e.snapshots.capture({ operation: 'pre-forget', description: '删除前', records: [rec] }, NOW)
+    await e.store.softDelete(rec, { at: GLOBAL, now: NOW })
+  }
+
+  it('列出快照之后、写回之前它因含密钥被物理删除（快照只剩脱敏副本）：拒绝恢复，提示说明原因，记忆仍在最近删除', async () => {
+    const e = env()
+    await seedForgotten(e)
+    const restore = e.snapshots.restore.bind(e.snapshots)
+    e.snapshots.restore = async (...args) => {
+      await e.snapshots.redact(new Set(['mem_f']))
+      return restore(...args)
+    }
+    const r = errorOf(await e.restore('mem_f', GLOBAL))
+    expect(r.code).toBe('failed')
+    expect(r.message).toContain('mem_f')
+    expect(r.message).toContain('含密钥已物理删除，快照里只剩脱敏副本')
+    expect((await copy(e, 'mem_f'))!.status).toBe('deleted')
+  })
+
+  it('核对之后、写回之前别处把它恢复并改过：拒绝恢复，提示「快照后被修改过」，别处改的内容不被快照盖掉', async () => {
+    const e = env()
+    await seedForgotten(e)
+    const restore = e.snapshots.restore.bind(e.snapshots)
+    e.snapshots.restore = async (...args) => {
+      expect(await e.store.restoreArchived({ id: 'mem_f' }, { at: GLOBAL, now: NOW })).toBe(true)
+      await e.store.update({ id: 'mem_f' }, cur => ({ ...cur, content: '恢复后又改的' }), GLOBAL)
+      return restore(...args)
+    }
+    const r = errorOf(await e.restore('mem_f', GLOBAL))
+    expect(r.code).toBe('failed')
+    expect(r.message).toContain('mem_f')
+    expect(r.message).toContain('快照后被修改过')
+    expect(await copy(e, 'mem_f')).toMatchObject({ status: 'active', content: '恢复后又改的' })
+  })
+
   it('还在用的记忆：not-found', async () => {
     const e = env()
     await e.store.create(record({ id: 'mem_live' }))
