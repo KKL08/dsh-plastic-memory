@@ -11,9 +11,9 @@ import type { TypeRegistry } from '../type-registry.ts'
 function describeTypes(registry: TypeRegistry): string {
   const list = registry.all().map(t => t.recall === 'core' ? `${t.name}（${t.label}）：通常已整条带入开头的长期记忆` : `${t.name}（${t.label}）`)
   return [
-    '按类型筛选，不填查全部类型。类型名是开头记忆索引分组标题括号里的英文名。',
+    '按类型筛选，不填查全部类型。',
     'query 留空、只填 types 时列出这几类的记忆，按置信度和最近确认时间排，受 limit 限制，命中更多时结果开头会说明总数。',
-    '其他场景和已退役类型的记忆也能按类型名搜到。',
+    '其他场景和已退役类型的记忆也能按类型名搜到，类型名是开头记忆索引分组标题括号里的英文名。',
     `当前场景的类型：${list.join('；')}`,
   ].join('')
 }
