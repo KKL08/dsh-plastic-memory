@@ -1,6 +1,7 @@
 /**
  * 处理卡的建议块（见词表「处理建议」「处理卡」）：有建议时写模型图标、加粗的结论、一句理由，融合时带融合稿、写进哪条和原位对照；
- * 没有建议时写原因，能补的给「补上建议」（失败、模型判断不了之后是「再试一次」）。这一版只显示，采纳在后续版本接上；冲突卡之外的卡型以后各给结论文案。
+ * 没有建议时写原因，能补的给「补上建议」（失败、模型判断不了之后是「再试一次」）。采纳和直接处理的按钮在块外（cards.tsx HorizontalActions）；
+ * 采纳时这份建议已失效，卡片把它当作没有建议，并经 notice 写明原因。冲突卡之外的卡型以后各给结论文案。
  * 模型判断不了哪条对时如实写明加它说的理由，不按错误显示：不给结论，由用户用下面的按钮自己定。
  * 「补上建议」发 suggest：服务端生成后写进账本、重写视图，建议跟着视图来，命令结果只说成没成。生成中只锁这一块。
  * 「停止」只是不再等：已经发出的这一条照常生成、写进账本，稍后跟着视图出现；之后到达的结果按请求序号认出来丢掉。换了会话同样作废在途请求、清掉本地状态。
@@ -47,13 +48,15 @@ function failureText(cause: NonNullable<NoSuggestion['cause']>, t: Translate): s
   return causeText({ kind: cause.kind, ...(cause.hostCode !== undefined ? { hostCode: cause.hostCode } : {}) }, t)
 }
 
-export function SuggestionBlock({ decisionId, left, right, suggestion, noSuggestion, session, onRefused }: {
+export function SuggestionBlock({ decisionId, left, right, suggestion, noSuggestion, notice, session, onRefused }: {
   decisionId: string
   /** A、B 两条（视图里的卡片），融合稿写进哪条、对照的原文按它们找。 */
   left: MemoryCard
   right: MemoryCard
   suggestion: Suggestion | undefined
   noSuggestion: NoSuggestion | undefined
+  /** 没有建议时代替原因写的一句（采纳时建议已失效）：标题改成「这次没有建议」，读屏会念出来。 */
+  notice?: string | undefined
   session: BorrowedSession
   /** 这一条已在别处处理（条目不在了、正被认领）。 */
   onRefused: () => void
@@ -128,15 +131,15 @@ export function SuggestionBlock({ decisionId, left, right, suggestion, noSuggest
   }
   const isUnavailable = model.status === 'unavailable' || phase.kind === 'unavailable'
   const isUndecided = noSuggestion.code === 'undecided'
-  const reason = isUndecided ? noSuggestion.reason
+  const reason = notice ?? (isUndecided ? noSuggestion.reason
     : isUnavailable ? t('pending.model.unavailable')
       : noSuggestion.code === 'failed' && noSuggestion.cause !== undefined ? t('pending.suggestion.failed', { reason: failureText(noSuggestion.cause, t) })
-        : phase.kind === 'failed' ? undefined : t('pending.suggestion.notGenerated')
+        : phase.kind === 'failed' ? undefined : t('pending.suggestion.notGenerated'))
   const isRetry = phase.kind === 'failed' || noSuggestion.code === 'failed' || isUndecided
   return (
     <div className="pm-suggestion">
-      <p className="pm-suggestion-line">
-        <strong className="pm-suggestion-title">{t(isUndecided ? 'pending.suggestion.undecided' : 'pending.suggestion.missing')}</strong>
+      <p className="pm-suggestion-line" role={notice !== undefined ? 'status' : undefined}>
+        <strong className="pm-suggestion-title">{t(notice !== undefined ? 'pending.suggestion.none' : isUndecided ? 'pending.suggestion.undecided' : 'pending.suggestion.missing')}</strong>
         {reason !== undefined ? <span>{reason}</span> : null}
       </p>
       {phase.kind === 'failed' ? <p className="pm-pending-error" role="alert">{phase.message}</p> : null}

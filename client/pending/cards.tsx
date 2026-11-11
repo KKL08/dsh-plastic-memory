@@ -4,7 +4,7 @@
  */
 import { createContext, useContext, useRef, useState, type ReactNode } from 'react'
 import {
-  CONFLICT_ACTION_VERDICTS, MAX_BATCH_EDIT, MODEL_EDIT_ADVICE_TYPES, mergeKeeperIndex, sameScope, relaxedCap, scopeOfMemory,
+  CONFLICT_ACTION_VERDICTS, MAX_BATCH_EDIT, MODEL_EDIT_ADVICE_TYPES, mergeKeeperIndex, sameScope, relaxedCap, scopeOfMemory, verdictOfAction,
   type AdviceType, type IgnorableAdviceType, type MemoryCard as MemoryCardData, type MemoryCommand, type ModelEditAdviceType, type PendingItem, type Scope,
 } from '../../src/gui/contract.ts'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
@@ -19,7 +19,7 @@ import { ConflictRuling, VerticalConflictRuling } from '../ui/ConflictRuling.tsx
 import { DismissButton } from '../ui/DismissButton.tsx'
 import { MemoryCard } from '../ui/MemoryCard.tsx'
 import { StatusMarker } from '../ui/StatusMarker.tsx'
-import { CommandFeedback, DeleteWithConfirm, SecretDeleteConfirm } from '../command/confirm.tsx'
+import { CommandFeedback, DeleteWithConfirm, SecretDeleteConfirm, SoftDeleteConfirm } from '../command/confirm.tsx'
 import type { EditCommand } from '../command/protocol.ts'
 import { useCommandRunner, type RunHandlers } from '../command/useCommandRunner.ts'
 import { EditPanel, type EditDraft } from './edit.tsx'
@@ -36,8 +36,11 @@ type Verdict = 'keep-left' | 'keep-right' | 'keep-both'
 
 /** 一次动作的结果，结果卡按它写文案、决定能不能撤销。 */
 export type Outcome =
-  /** isUnrecorded：两边都留但结论没记下（见命令结果 isUnrecorded），没有可撤销的条目。isHardDeleted：败方含密钥、已彻底删除，没有撤销。 */
-  | { kind: 'resolved'; verdict: Verdict; isUnrecorded?: true; isHardDeleted?: true }
+  /**
+   * isUnrecorded：两边都留但结论没记下（见命令结果 isUnrecorded），没有可撤销的条目。isHardDeleted：败方含密钥、已彻底删除，没有撤销。
+   * isSuggested：采纳了模型的处理建议（横向冲突），结果卡写「按模型建议处理」；缺省是用户直接选的。
+   */
+  | { kind: 'resolved'; verdict: Verdict; isUnrecorded?: true; isHardDeleted?: true; isSuggested?: true }
   /** decisionId：撤销用的账本条目（按记忆 id 提升时由命令结果带回；提升候选用条目自己的）。 */
   | { kind: 'promoted'; target: 'global' | 'agents-md'; decisionId?: string }
   /** 全局记忆移到了 workspacePath 那个项目；decisionId 是撤销用的账本条目，filePath 是移过去之后的文件。 */
@@ -220,14 +223,18 @@ export function SecretCard({ item, session, now, typeLabel, onDone }: CardProps<
 
 // —— 冲突 ——
 
-/** 裁决成功 → 结果卡的 Outcome。 */
-const resolvedTo = (onDone: (outcome: Outcome) => void): RunHandlers['onOk'] => (result, command) => {
-  if (command.cmd === 'resolve') onDone({ kind: 'resolved', verdict: command.verdict, ...(result.isUnrecorded ? { isUnrecorded: true } : {}), ...(result.isHardDeleted ? { isHardDeleted: true } : {}) })
+/** 裁决成功 → 结果卡的 Outcome。采纳建议的命令只带建议 id，裁决由点击时卡上那份建议的结论给（adopted）。 */
+const resolvedTo = (onDone: (outcome: Outcome) => void, adopted?: Verdict): RunHandlers['onOk'] => (result, command) => {
+  const verdict = command.cmd === 'resolve' ? command.verdict : command.cmd === 'apply-proposal' ? adopted : undefined
+  if (verdict === undefined) return
+  onDone({
+    kind: 'resolved', verdict,
+    ...(result.isUnrecorded ? { isUnrecorded: true } : {}), ...(result.isHardDeleted ? { isHardDeleted: true } : {}), ...(command.cmd === 'apply-proposal' ? { isSuggested: true } : {}),
+  })
 }
 
 export function HorizontalCard({ item, session, now, typeLabel, onDone, onRefused }: CardProps<'conflict-horizontal'>) {
   const t = useT()
-  const action = useCardAction(session, { onOk: resolvedTo(onDone), onHandledElsewhere: onRefused })
   const preferred = item.preferredId === undefined ? undefined
     : item.left?.id === item.preferredId ? { side: 'A', memory: item.left }
       : item.right?.id === item.preferredId ? { side: 'B', memory: item.right } : undefined
@@ -242,22 +249,130 @@ export function HorizontalCard({ item, session, now, typeLabel, onDone, onRefuse
         now={now}
         title={titleOf(item, t, session)}
         note={note}
-        unavailable={action.unavailable}
         typeLabel={typeLabel}
         projectName={projectNameOf(session)}
         headExtra={<ScopeChips />}
-        suggestion={item.left !== null && item.right !== null
-          ? (
-            <SuggestionBlock
-              decisionId={item.decisionId} left={item.left} right={item.right} suggestion={item.suggestion} noSuggestion={item.noSuggestion}
-              session={session} onRefused={onRefused}
-            />
-          )
-          : undefined}
-        onRule={(verdict) => { action.run({ cmd: 'resolve', decisionId: item.decisionId, verdict }) }}
+        footer={<HorizontalActions item={item} session={session} onDone={onDone} onRefused={onRefused} />}
       />
-      {action.feedback}
     </div>
+  )
+}
+
+/** 直接处理、采纳建议时点了先原位确认的那一个：rule 是三个候选项之一，adopt 是采纳（只有要删的那条含高危密钥时才确认）。 */
+/** 原位确认在问哪件事；采纳记下确认的是哪一份建议。 */
+type Asking = { kind: 'rule'; verdict: Verdict } | { kind: 'adopt'; verdict: Verdict; suggestionId: string }
+
+/**
+ * 横向冲突卡（记忆页）A、B 下面的整块：处理建议块、说明行、按钮行（spec 故事 4–6、9、23、24）。
+ * - 建议是保留 A、保留 B、都保留：「采纳建议」（主按钮）发 apply-proposal，只带条目 id 和建议 id，一次落盘、不加确认——建议内容都在卡上，
+ *   删掉的一方进最近删除、能撤销。要删的那条含高危密钥时会彻底删除，先原位确认。说明行写采纳后哪条去哪。
+ * - 后面是直接处理的三个按钮「保留 A / 保留 B / 都保留，不算冲突」，不过模型：点了原位确认一句，再走现有裁决命令 resolve。
+ *   融合建议这一版只显示，没有建议（含密钥、还没生成、失败、模型判断不了）时都只有这三个按钮。
+ * - 采纳时服务端回 stale（建议已换了一份，或两条在建议生成后被改过）：什么都没动。卡上这份建议当作失效，建议块写明原因、
+ *   退化成没有建议的样子；视图带来另一份建议（id 不同）时照常显示。
+ */
+function HorizontalActions({ item, session, onDone, onRefused }: Pick<CardProps<'conflict-horizontal'>, 'item' | 'session' | 'onDone' | 'onRefused'>) {
+  const t = useT()
+  const { horizontal } = CONFLICT_ACTION_VERDICTS
+  const [staleId, setStaleId] = useState<string | undefined>(undefined)
+  const [asking, setAsking] = useState<Asking | undefined>(undefined)
+  const isStale = staleId !== undefined && (item.suggestion === undefined || item.suggestion.id === staleId)
+  const suggestion = isStale ? undefined : item.suggestion
+  const adopted = suggestion === undefined ? undefined : verdictOfAction(suggestion.action)
+  const action = useCardAction(session, {
+    onOk: resolvedTo(onDone, adopted),
+    onHandledElsewhere: onRefused,
+    // 只有采纳会回 stale；处理器按点击时那一次渲染取，记下的是当时卡上那份建议
+    onFailed: (failure) => {
+      if (failure.code !== 'stale' || suggestion === undefined) return false
+      setStaleId(suggestion.id)
+      return true
+    },
+  })
+  const { left, right } = item
+  const reason = action.unavailable ?? (left === null || right === null ? t('conflict.missingHint') : undefined)
+  /** 每种裁决留哪边、删哪边；都保留不删。 */
+  const sides = (verdict: Verdict) => (verdict === horizontal.keepA ? { keep: 'A', drop: 'B', loser: right }
+    : verdict === horizontal.keepB ? { keep: 'B', drop: 'A', loser: left } : undefined)
+  const isPurge = (verdict: Verdict) => sides(verdict)?.loser?.hasSecret === true
+  const adopt = () => {
+    if (suggestion !== undefined) action.run({ cmd: 'apply-proposal', decisionId: item.decisionId, suggestionId: suggestion.id })
+  }
+  const rule = (verdict: Verdict) => { action.run({ cmd: 'resolve', decisionId: item.decisionId, verdict }) }
+  const send = (ask: Asking) => {
+    setAsking(undefined)
+    if (ask.kind === 'rule') { rule(ask.verdict); return }
+    // 确认框开着时卡上的建议换了或没了：确认的是那一份，不拿它去采纳另一份，按失效处理
+    if (suggestion?.id === ask.suggestionId) adopt()
+    else setStaleId(ask.suggestionId)
+  }
+
+  const adoptNote = adopted === undefined ? undefined
+    : adopted === horizontal.keepBoth ? t('pending.conflict.adoptNoteKeepBoth')
+      : t(isPurge(adopted) ? 'pending.conflict.adoptNotePurge' : 'pending.conflict.adoptNote', { drop: sides(adopted)!.drop })
+  const direct = [
+    [horizontal.keepA, t('pending.conflict.keepA')],
+    [horizontal.keepB, t('pending.conflict.keepB')],
+    [horizontal.keepBoth, t('pending.conflict.keepBoth')],
+  ] as const
+
+  let row: ReactNode
+  if (asking !== undefined && isPurge(asking.verdict)) {
+    const { keep, drop } = sides(asking.verdict)!
+    row = (
+      <SecretDeleteConfirm
+        showTitle={false}
+        body={t('pending.conflict.confirmPurge', { keep, drop })}
+        unavailable={action.unavailable}
+        onCancel={() => { setAsking(undefined) }}
+        onConfirm={() => { send(asking) }}
+      />
+    )
+  } else if (asking !== undefined) {
+    const side = sides(asking.verdict)
+    row = (
+      <div className="pm-conflict-actions">
+        <SoftDeleteConfirm
+          question={side === undefined ? t('pending.conflict.confirmKeepBoth') : t('pending.conflict.confirmKeep', { keep: side.keep, drop: side.drop })}
+          confirmLabel={side === undefined ? t('pending.conflict.confirmKeepBothLabel') : t(side.keep === 'A' ? 'pending.conflict.keepA' : 'pending.conflict.keepB')}
+          onCancel={() => { setAsking(undefined) }}
+          onConfirm={() => { send(asking) }}
+        />
+      </div>
+    )
+  } else {
+    row = (
+      <div className="pm-conflict-actions">
+        {adopted !== undefined
+          ? (
+            <Button variant="primary" unavailable={reason} onClick={() => { if (isPurge(adopted) && suggestion !== undefined) setAsking({ kind: 'adopt', verdict: adopted, suggestionId: suggestion.id }); else adopt() }}>
+              {t('pending.conflict.adopt')}
+            </Button>
+          )
+          : null}
+        {direct.map(([verdict, label]) => (
+          <Button key={verdict} unavailable={reason} onClick={() => { setAsking({ kind: 'rule', verdict }) }}>{label}</Button>
+        ))}
+      </div>
+    )
+  }
+  return (
+    <>
+      {left !== null && right !== null
+        ? (
+          <SuggestionBlock
+            decisionId={item.decisionId} left={left} right={right} suggestion={suggestion}
+            noSuggestion={item.noSuggestion ?? (isStale ? { code: 'not-generated' } : undefined)}
+            // 失效的提示只在视图没有更新的原因时写：之后生成失败、模型判断不了，写视图给的原因
+            notice={isStale && (item.noSuggestion === undefined || item.noSuggestion.code === 'not-generated') ? t('pending.suggestion.stale') : undefined}
+            session={session} onRefused={onRefused}
+          />
+        )
+        : null}
+      {adoptNote !== undefined ? <AdviceNote label="note">{adoptNote}</AdviceNote> : null}
+      {row}
+      {action.feedback}
+    </>
   )
 }
 
@@ -794,11 +909,13 @@ interface ResultCopy { memory?: MemoryCardData | null; memories?: readonly Memor
 
 function resultCopy(item: PendingItem, outcome: Outcome, t: Translate): ResultCopy {
   if (outcome.kind === 'resolved' && item.kind === 'conflict-horizontal') {
-    const deleted = (side: 'A' | 'B') => (outcome.isHardDeleted ? t('conflict.purgedSide', { side }) : t('pending.result.deletedSide', { side }))
+    // 来由（按模型建议 / 你直接选的）在前，去向在后
+    const by = (second: string) => t('conflict.twoSentences', { first: t(outcome.isSuggested ? 'pending.result.bySuggestion' : 'pending.result.byChoice'), second })
+    const deleted = (side: 'A' | 'B') => by(outcome.isHardDeleted ? t('conflict.purgedSide', { side }) : t('pending.result.deletedSide', { side }))
     if (outcome.verdict === 'keep-left') return { memory: item.left, chip: t('pending.result.keptA'), body: deleted('B'), undoable: outcome.isHardDeleted !== true }
     if (outcome.verdict === 'keep-right') return { memory: item.right, chip: t('pending.result.keptB'), body: deleted('A'), undoable: outcome.isHardDeleted !== true }
-    if (outcome.isUnrecorded) return { chip: t('pending.result.keptBoth'), body: t('pending.result.unrecordedBody'), undoable: false }
-    return { chip: t('pending.result.keptBoth'), body: t('pending.result.keptBothBody'), undoable: true }
+    if (outcome.isUnrecorded) return { chip: t('pending.result.keptBoth'), body: by(t('pending.result.unrecordedBody')), undoable: false }
+    return { chip: t('pending.result.keptBoth'), body: by(t('pending.result.keptBothBody')), undoable: true }
   }
   if (outcome.kind === 'resolved' && item.kind === 'conflict-vertical') {
     if (outcome.verdict === CONFLICT_ACTION_VERDICTS.vertical.keepBaseline) {

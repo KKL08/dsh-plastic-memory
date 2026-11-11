@@ -7,6 +7,7 @@ const ws = { kind: 'workspace', workspacePath: '/w/app' } as const
 export const SAMPLE_COMMANDS: { [K in MemoryCommand['cmd']]: Extract<MemoryCommand, { cmd: K }> } = {
   'info': { cmd: 'info' },
   'resolve': { cmd: 'resolve', decisionId: 'd1', verdict: 'keep-left' },
+  'apply-proposal': { cmd: 'apply-proposal', decisionId: 'd1', suggestionId: 'sg1' },
   'undo': { cmd: 'undo', decisionId: 'd1' },
   'promote': { cmd: 'promote', decisionId: 'd1', target: 'global' },
   'keep-local': { cmd: 'keep-local', decisionId: 'd1' },

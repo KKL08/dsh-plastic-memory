@@ -27,7 +27,7 @@ describe('契约里界面要用的命令集', () => {
       expect({ cmd, isKept: 'allowCrossWorkspace' in parsed }).toEqual({ cmd, isKept: CROSS_WORKSPACE_COMMANDS.has(cmd as never) })
     }
     expect([...CROSS_WORKSPACE_COMMANDS].sort()).toEqual([
-      'apply-edits', 'confirm', 'edit-memory', 'forget', 'hard-delete', 'keep-local', 'keep-local-memory', 'merge-memories', 'move-memory',
+      'apply-edits', 'apply-proposal', 'confirm', 'edit-memory', 'forget', 'hard-delete', 'keep-local', 'keep-local-memory', 'merge-memories', 'move-memory',
       'promote', 'promote-memory', 'resolve', 'restore', 'undo',
     ])
   })
@@ -207,5 +207,16 @@ describe('suggest（补上建议）与待处理冲突项的处理建议', () => 
     expect(item({ noSuggestion: { code: 'undecided', reason: '需要你确认用哪个' } })).toBe(true)
     expect(item({ suggestion: { id: 'sg_1', action: 'unsure', reason: 'r', isSourced: false, ops: [] } })).toBe(false)
     expect(item({ noSuggestion: { code: 'failed', cause: { kind: 'undecided' } } })).toBe(false)
+  })
+})
+
+describe('apply-proposal（采纳建议）', () => {
+  it('只带条目 id 和建议 id（不回传建议内容），可带跨项目确认；not-found 算别处已处理', () => {
+    const command: MemoryCommand = { cmd: 'apply-proposal', decisionId: 'pd_1', suggestionId: 'sg_1' }
+    expect(parseMemoryCommand(encodeMemoryCommand(command).slice(`/${MEMORY_COMMAND_NAME} `.length))).toEqual({ ok: true, command })
+    expect(memoryCommandSchema.safeParse({ cmd: 'apply-proposal', decisionId: 'pd_1' }).success).toBe(false)
+    expect(memoryCommandSchema.parse({ cmd: 'apply-proposal', decisionId: 'pd_1', suggestionId: 'sg_1', action: 'keep-a' })).toEqual(command)
+    expect(CROSS_WORKSPACE_COMMANDS.has('apply-proposal')).toBe(true)
+    expect(OPEN_ITEM_COMMANDS.has('apply-proposal')).toBe(true)
   })
 })

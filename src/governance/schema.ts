@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { memoryRecordSchema } from '../record-schema.ts'
-import { MODEL_CHANGE_KINDS, PROPOSAL_ACTIONS, SUGGESTION_FAILURE_KINDS } from '../contract-codes.ts'
+import { MODEL_CHANGE_KINDS, PROPOSAL_ACTIONS, PROPOSAL_SOURCES, SUGGESTION_FAILURE_KINDS } from '../contract-codes.ts'
 
 /** 与 mem_ id 同模式（pipeline.ts），不引入 nanoid。 */
 export function genId(prefix: string): string {
@@ -44,6 +44,12 @@ export function verdictLoser(entry: { kind?: PendingKind; memoryIds: string[]; b
   if (entry.baselineRef !== undefined) return verdict === 'keep-right' ? entry.memoryIds[0] : undefined
   return verdict === 'keep-left' ? entry.memoryIds[1] : verdict === 'keep-right' ? entry.memoryIds[0] : undefined
 }
+
+/**
+ * 处理方案落盘的依据（记在已结清条目上）：source 是按建议还是按要求，action 是结论代码。直接点候选项处理的条目没有它。
+ */
+export const settledProposalSchema = z.object({ source: z.enum(PROPOSAL_SOURCES), action: z.enum(PROPOSAL_ACTIONS) })
+export type SettledProposal = z.infer<typeof settledProposalSchema>
 
 /**
  * 整理所选一次应用的逐项回执：这一项是改写还是删除，写下时的内容指纹（editFingerprint，取实际提交的那份），
@@ -133,6 +139,7 @@ export const pendingDecisionSchema = z.object({
    * 撤销时移出账本、回到没点过的样子，不重开进等你决定。isUndone：模型改写、替代已撤销（见 PENDING_KINDS）。
    * misplacedIgnore：「留在本项目」顺带写进建议忽略表的那条「放错层」忽略（忽略时间、记忆指纹 adviceFingerprint）；
    * 记忆原本没有放错层的忽略才写、才记。撤销时只在忽略表里那一条仍是它（时间、指纹都对得上）时才删。旧条目没有此字段，撤销不碰忽略表。
+   * proposal：冲突按处理方案落盘时的依据和结论代码（见 settledProposalSchema）；撤销时随 settled 一起去掉，条目上的处理建议不动。
    */
   settled: z.object({
     verdict: z.enum(SETTLED_VERDICTS),
@@ -141,6 +148,7 @@ export const pendingDecisionSchema = z.object({
     isBornSettled: z.literal(true).optional(),
     isUndone: z.literal(true).optional(),
     misplacedIgnore: z.object({ ignoredAt: z.number(), fingerprint: z.string() }).optional(),
+    proposal: settledProposalSchema.optional(),
   }).optional(),
 })
 export type PendingDecision = z.infer<typeof pendingDecisionSchema>

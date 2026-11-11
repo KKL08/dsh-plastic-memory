@@ -284,7 +284,8 @@ describe('立即体检：体检中…', () => {
       ? { ok: false, cmd: 'scan', code: 'llm-unavailable' }
       : { ok: false, cmd: command.cmd, code: 'claimed', detail: '待决项 c1 正在被另一次裁决处理，未做任何改动。' }
     open(APP, { respond })
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '以 B 为准' })) })
+    fireEvent.click(screen.getByRole('button', { name: '保留 B' }))
+    await act(async () => { fireEvent.click(within(document.querySelector('.pm-soft-confirm') as HTMLElement).getByRole('button', { name: '保留 B' })) })
     expect(await screen.findByRole('alert')).toHaveTextContent('没有生效：它正在别处处理，或者刚在别处处理完。')
     expect(runButton()).toHaveTextContent('立即体检')
     await act(async () => { fireEvent.click(runButton()) })

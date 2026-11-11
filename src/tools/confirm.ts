@@ -1,9 +1,9 @@
 import type { MemoryLogger, MemoryStore } from '../store.ts'
-import { conflictFingerprint, type PendingDecisionsStore } from '../governance/decisions.ts'
-import { kindOf, verdictLoser, type PendingDecision } from '../governance/schema.ts'
-import type { SnapshotStore } from '../governance/snapshots.ts'
+import { conflictFingerprint, isBasisCurrent, type PendingDecisionsStore } from '../governance/decisions.ts'
+import { kindOf, verdictLoser, type PendingDecision, type SettledProposal } from '../governance/schema.ts'
+import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
 import { ALREADY_REVIEWED_REASON, NOT_DELEGATED_REASON, isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
-import type { AcceptRejectCode, DecisionRejectCode, GovernanceRejectCode } from '../contract-codes.ts'
+import { verdictOfAction, type AcceptRejectCode, type DecisionRejectCode, type GovernanceRejectCode } from '../contract-codes.ts'
 import { RecordNotFoundError } from '../errors.ts'
 import { crossWorkspaceNote, gateRecords, locateCopy, type CrossWorkspaceRejection, type GovernanceContext, type OtherWorkspaceMark } from './workspace-gate.ts'
 import type { Scope } from '../scope.ts'
@@ -31,6 +31,11 @@ export interface ConfirmOptions {
   target?: Scope
   /** resolve 时垂直冲突的条目没有指纹，两边都留要现算指纹用的基线（GUI 从借来的会话取）。 */
   baseline?: readonly string[]
+  /**
+   * resolve 是在采纳条目上的这份处理建议（GUI「采纳建议」）：认领条目后核对建议 id、结论和裁决对得上、依据版本仍是此刻的，
+   * 对不上回 stale、什么都不动；删败方时锁内按建议依据里它的完整内容指纹再比一次。结清时记下依据和结论代码。
+   */
+  adopt?: { suggestionId: string }
 }
 
 /**
@@ -99,7 +104,7 @@ export async function executeConfirm(
   if (args.action === 'accept-subagent') return acceptSubagent(args, context, deps, now, locate)
 
   // 先认领条目再裁决：两条相反的裁决同时到（两个标签页、两个宿主进程），只让一条删败方，另一条什么都不动
-  const claimed = await deps.decisions.withClaim(args.decisionId, () => resolveClaimed(args, context, deps, now, locate, options.baseline))
+  const claimed = await deps.decisions.withClaim(args.decisionId, () => resolveClaimed(args, context, deps, now, locate, options))
   if (!claimed.isClaimed) {
     return { kind: 'error', code: 'claimed', message: `待决项 ${args.decisionId} 正在被另一次裁决处理，未做任何改动。` }
   }
@@ -163,7 +168,7 @@ async function resolveClaimed(
   deps: ConfirmToolDeps,
   now: number,
   locate: (id: string) => Promise<MemoryRecord | undefined>,
-  baseline: readonly string[] | undefined,
+  options: ConfirmOptions,
 ): Promise<ConfirmResult> {
   const entry = await deps.decisions.get(args.decisionId)
   if (!entry) {
@@ -175,10 +180,10 @@ async function resolveClaimed(
     return { kind: 'error', message: `待决项 ${entry.id} 不是冲突（${kindOf(entry)}），不能用 resolve 裁决，账本条目保留。` }
   }
 
-  if (verdictLoser(entry, args.verdict) === undefined) return resolveEntry(entry, args, context, deps, now, locate, baseline)
+  if (verdictLoser(entry, args.verdict) === undefined) return resolveEntry(entry, args, context, deps, now, locate, options)
   // 要删一方的裁决再认领冲突身份：账本里同一对有两条条目时（旧版本并发挂账留下的，下次体检才收拢），两条相反的裁决
   // 各认领各的条目、都读到双方在用，会各删一方。认领之后才定位双方，后到的一条什么都不动
-  const paired = await deps.decisions.withPairClaim(entry, () => resolveEntry(entry, args, context, deps, now, locate, baseline))
+  const paired = await deps.decisions.withPairClaim(entry, () => resolveEntry(entry, args, context, deps, now, locate, options))
   if (!paired.isClaimed) {
     return { kind: 'error', code: 'claimed', message: `待决项 ${entry.id} 的这一对记忆正在被另一次操作处理，未做任何改动。` }
   }
@@ -193,7 +198,7 @@ async function resolveEntry(
   deps: ConfirmToolDeps,
   now: number,
   locate: (id: string) => Promise<MemoryRecord | undefined>,
-  baseline: readonly string[] | undefined,
+  { baseline, adopt }: ConfirmOptions,
 ): Promise<ConfirmResult> {
   const vertical = entry.baselineRef !== undefined
   // 账本里的条目也要过基数校验：横向必须是两个不同 id，垂直必须恰好一个。旧版本写入的或
@@ -212,6 +217,15 @@ async function resolveEntry(
     const r = await locate(id)
     if (r) members.set(id, r)
   }
+  // 采纳建议：用户看到的是这一份建议、依据的是生成时的两条。认领后重读的条目上已换成别的一份，或两条（含只改了摘要、标签）被改过，都不落盘
+  const suggestion = adopt === undefined ? undefined : entry.suggestion
+  if (adopt !== undefined) {
+    const live = entry.memoryIds.map(id => (members.get(id)?.status === 'active' ? members.get(id) : undefined))
+    if (suggestion === undefined || suggestion.id !== adopt.suggestionId || verdictOfAction(suggestion.action) !== args.verdict || !isBasisCurrent(entry, suggestion.basis, live)) {
+      return { kind: 'error', code: 'stale', message: `待决项 ${entry.id} 的处理建议已失效（换了一份，或两条在建议生成后被改过），未做任何改动。` }
+    }
+  }
+  const proposal: { proposal?: SettledProposal } = suggestion === undefined ? {} : { proposal: { source: 'suggestion', action: suggestion.action } }
   const { rejected, otherWorkspaces } = gateRecords([...members.values()], context, args.allowCrossWorkspace)
   if (rejected.length > 0) {
     return { kind: 'error', code: 'cross-workspace', rejected, message: `未裁决待决项 ${entry.id}，账本条目保留。${crossWorkspaceNote(rejected, [])}` }
@@ -241,10 +255,18 @@ async function resolveEntry(
     // 走 forget 的同一条路：先拍快照；含高危密钥的物理删除、所有快照里脱敏，其余（含只有疑似密钥的，用户存的时候确认过）软删、误操作可以恢复。
     // 该记忆的一方删掉后，可能还挂在其他待决项上——这些冲突已无法再裁决，forget 一并清理（本次条目留着，
     // clearedDecisions 只统计「额外」清理的条目）。但不能悄悄发生：把清理数量报进 actions，让用户知道有条目被顺带处理
+    // 采纳建议：核对之后、删之前败方被别处改过的，锁内按建议依据里它的指纹挡下
+    const basisFingerprint = suggestion?.basis.memories.find(m => m.memoryId === toDelete.id)?.fingerprint
     const forgot = await executeForget(
       { ids: [toDelete.id], reason: `裁决冲突 ${entry.id}（${args.verdict}）删除败方`, allowCrossWorkspace: args.allowCrossWorkspace },
-      context, { ...deps, now: () => now }, { keepDecisionId: entry.id, operation: 'pre-resolve', isSecret: hasCriticalSecret },
+      context, { ...deps, now: () => now }, {
+        keepDecisionId: entry.id, operation: 'pre-resolve', isSecret: hasCriticalSecret,
+        ...(basisFingerprint !== undefined ? { isChanged: (cur: MemoryRecord) => cur.status !== 'active' || editFingerprint(cur) !== basisFingerprint } : {}),
+      },
     )
+    if (!forgot.forgotten.includes(toDelete.id) && suggestion !== undefined) {
+      return { kind: 'error', code: 'stale', message: `败方记忆 ${toDelete.id} 在建议生成后被改过，没有删除，待决项 ${entry.id} 保留在账本里。` }
+    }
     if (!forgot.forgotten.includes(toDelete.id)) {
       return { kind: 'error', message: `败方记忆 ${toDelete.id} 没有删掉：${forgot.message}待决项 ${entry.id} 保留在账本里，可以重试。` }
     }
@@ -257,7 +279,7 @@ async function resolveEntry(
     } else {
       actions.push(`已删除败方记忆 ${toDelete.id}（快照 ${forgot.snapshotId}）`)
       // 条目标 settled 留在账本里并记下快照 id，供撤销（撤销 = 去掉 settled、按快照恢复败方）
-      await deps.decisions.settle(entry.id, args.verdict, now, { snapshotId: forgot.snapshotId! })
+      await deps.decisions.settle(entry.id, args.verdict, now, { snapshotId: forgot.snapshotId!, ...proposal })
     }
     if (alsoCleared > 0) {
       actions.push(`另清理 ${alsoCleared} 条同样引用该记忆的待决冲突（其一方已删除，无法再裁决）`)
@@ -270,7 +292,7 @@ async function resolveEntry(
     // 败方早已删除的删一方裁决同样记下（没有快照可恢复）。
     // 升级前导入的条目没有指纹：按双方此刻的内容现算（同体检），垂直冲突拿不到它所在项目的基线时算不出，只能移出账本
     const fingerprint = entry.fingerprint !== undefined || loserId !== undefined ? undefined : currentFingerprint(entry, members, baseline, context.workspacePath)
-    if (await deps.decisions.settle(entry.id, args.verdict, now, fingerprint !== undefined ? { fingerprint } : {})) {
+    if (await deps.decisions.settle(entry.id, args.verdict, now, { ...(fingerprint !== undefined ? { fingerprint } : {}), ...proposal })) {
       if (loserId === undefined) actions.push('以后体检不再报这一对，除非其中一条（或基线）被改写')
     } else isUnrecorded = true
   }

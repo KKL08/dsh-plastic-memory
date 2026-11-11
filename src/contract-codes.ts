@@ -34,6 +34,7 @@ export type GovernanceRejectCode =
 export type DecisionRejectCode =
   | 'claimed'           // 条目正被另一次裁决或体检认领
   | 'not-found'         // 条目不存在：已被裁决，或涉及的记忆已删除
+  | 'stale'             // 采纳处理建议（只有 GUI 会带）：建议已被新的一份替换，或两条在建议生成后被改过
 
 /** memory_confirm accept-subagent 什么都没动的原因（tools/confirm.ts）。 */
 export type AcceptRejectCode =
@@ -81,6 +82,20 @@ export const CHECKUP_CAUSE_KINDS = ['no-default-model', 'model-error', 'unparsea
  */
 export const PROPOSAL_ACTIONS = ['merge', 'keep-a', 'keep-b', 'keep-both'] as const
 export type ProposalAction = (typeof PROPOSAL_ACTIONS)[number]
+
+/**
+ * 采纳处理建议时结论对应的裁决：只留一条记现有的删一方裁决（keep-a = 留 memoryIds[0]），都保留记现有的都保留裁决，
+ * 和用户直接点候选项是同一种记法。融合不是这几种裁决之一，返回 undefined。服务端核对采纳和浏览器写结果卡同用这一份。
+ */
+export function verdictOfAction(action: ProposalAction): 'keep-left' | 'keep-right' | 'keep-both' | undefined {
+  return action === 'keep-a' ? 'keep-left' : action === 'keep-b' ? 'keep-right' : action === 'keep-both' ? 'keep-both' : undefined
+}
+
+/**
+ * 处理方案按什么落盘的（记在待决账本已结清条目上，存盘）：suggestion = 采纳了模型的处理建议，request = 按用户补充的要求生成的方案。
+ * 用户直接点候选项处理的不记。
+ */
+export const PROPOSAL_SOURCES = ['suggestion', 'request'] as const
 
 /**
  * 处理建议没生成成的原因（账本与视图同用）：model-error = 模型调用出错（宿主给了错误码时带上；鉴权错误不留原话），

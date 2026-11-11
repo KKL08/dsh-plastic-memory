@@ -5044,3 +5044,175 @@ describe('suggest（补上建议）', () => {
     expect((await e.decisions.get(entry.id))!.suggestion!.reason).toBe('A 里写了 [已隐藏]')
   })
 })
+
+describe('apply-proposal（采纳建议：保留一方、都保留）', () => {
+  /** 模型桩按顺序给出这几份回答。 */
+  const answering = (...answers: string[]): SemanticLlm => ({ model: 'deepseek-v4-flash', complete: async () => answers.shift() ?? '' })
+  const said = (action: string, extra: object = {}) => JSON.stringify({ action, reason: `模型说 ${action}`, ...extra })
+  const horizontalOf = async (e: ReturnType<typeof env>, id: string) => {
+    const item = pendingViewSchema.parse(await e.readView('pending')).items.find(i => 'decisionId' in i && i.decisionId === id)
+    if (item?.kind !== 'conflict-horizontal') throw new Error(`没有横向冲突项 ${id}`)
+    return item
+  }
+  /** 一对冲突，账本条目带真实指纹和一份建议（走「补上建议」写进去，依据由真实函数算出）。 */
+  async function suggested(action: string, extra: object = {}) {
+    const e = env({ llm: answering(said(action, extra)) })
+    await seedPair(e)
+    const fingerprint = conflictFingerprint([(await e.store.get('mem_a'))!, (await e.store.get('mem_b'))!])
+    const { entry } = await e.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', fingerprint }, 2)
+    ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+    const suggestion = (await e.decisions.get(entry.id))!.suggestion!
+    return { e, entry, suggestion }
+  }
+  const statuses = async (e: ReturnType<typeof env>) => [(await e.store.get('mem_a'))!.status, (await e.store.get('mem_b'))!.status]
+
+  it('保留 A：B 软删、快照先行，条目记现有的删一方裁决加依据和结论代码；撤销后 B 回来、条目回到待处理、建议还在', async () => {
+    const { e, entry, suggestion } = await suggested('keep-a')
+    const body = ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id }))
+    expect(await statuses(e)).toEqual(['active', 'deleted'])
+    const [snap] = await e.snapshots.list()
+    expect(body).toEqual({ ok: true, cmd: 'apply-proposal', decisionId: entry.id, snapshotId: snap!.id })
+    expect((await e.decisions.listSettled()).map(d => d.settled)).toEqual([
+      { verdict: 'keep-left', at: NOW, snapshotId: snap!.id, proposal: { source: 'suggestion', action: 'keep-a' } },
+    ])
+    // 最近删除的来由同直接裁决：恢复它等同撤销这次裁决
+    expect(deletedViewSchema.parse(await e.readView('deleted')).items.map(i => [i.memory.id, i.cause?.decisionId])).toEqual([['mem_b', entry.id]])
+
+    ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+    expect(await statuses(e)).toEqual(['active', 'active'])
+    expect(await e.decisions.listSettled()).toEqual([])
+    expect((await horizontalOf(e, entry.id)).suggestion).toMatchObject({ id: suggestion.id, action: 'keep-a' })
+  })
+
+  it('保留 B：删 A，记 keep-right', async () => {
+    const { e, entry, suggestion } = await suggested('keep-b')
+    ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id }))
+    expect(await statuses(e)).toEqual(['deleted', 'active'])
+    expect((await e.decisions.listSettled()).map(d => [d.settled?.verdict, d.settled?.proposal])).toEqual([['keep-right', { source: 'suggestion', action: 'keep-b' }]])
+  })
+
+  it('都保留：记现有的都保留裁决加依据，体检同一对不再挂账；撤销后建议还在', async () => {
+    const { e, entry, suggestion } = await suggested('keep-both')
+    const body = ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id }))
+    expect(body).toEqual({ ok: true, cmd: 'apply-proposal', decisionId: entry.id })
+    expect(await statuses(e)).toEqual(['active', 'active'])
+    expect(await e.snapshots.list()).toEqual([])
+    const [settled] = await e.decisions.listSettled()
+    expect(settled!.settled).toEqual({ verdict: 'keep-both', at: NOW, proposal: { source: 'suggestion', action: 'keep-both' } })
+    expect((await e.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '再报', fingerprint: settled!.fingerprint! }, 3)).settled).toBe(true)
+
+    ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+    expect((await horizontalOf(e, entry.id)).suggestion?.id).toBe(suggestion.id)
+  })
+
+  it('直接裁决不带依据：结清信息里没有 proposal', async () => {
+    const { e, entry } = await suggested('keep-a')
+    ok(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' }))
+    expect((await e.decisions.listSettled())[0]!.settled).not.toHaveProperty('proposal')
+  })
+
+  it('建议 id 对不上（已被新的一份替换、或条目上没有建议）：回 stale，什么都不动，视图重写', async () => {
+    const { e, entry } = await suggested('keep-a')
+    const body = err(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: 'sg_old' }))
+    expect(body.code).toBe('stale')
+    expect(await statuses(e)).toEqual(['active', 'active'])
+    expect(await e.snapshots.list()).toEqual([])
+    expect(await e.decisions.listSettled()).toEqual([])
+
+    await rm(root, { recursive: true, force: true })
+    root = await mkdtemp(join(tmpdir(), 'pm-gui-commands-'))
+    const bare = env()
+    const plain = await seedPair(bare)
+    expect(err(await bare.run({ cmd: 'apply-proposal', decisionId: plain.id, suggestionId: 'sg_x' })).code).toBe('stale')
+    expect(await statuses(bare)).toEqual(['active', 'active'])
+  })
+
+  it.each([
+    ['只改了摘要', (r: MemoryRecord) => ({ ...r, summary: '只改了摘要' })],
+    ['只改了标签', (r: MemoryRecord) => ({ ...r, tags: ['别处加的'] })],
+  ])('建议生成后 B %s：回 stale，什么都不删，视图里建议随之失效', async (_label, change) => {
+    const { e, entry, suggestion } = await suggested('keep-a')
+    await e.store.update({ id: 'mem_b' }, change)
+    expect(err(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id })).code).toBe('stale')
+    expect(await statuses(e)).toEqual(['active', 'active'])
+    expect(await e.decisions.listSettled()).toEqual([])
+    expect((await horizontalOf(e, entry.id)).suggestion).toBeUndefined()
+  })
+
+  it('核对之后、软删之前 B 被别处改过：锁内比对挡下，回 stale，B 不删、条目不结清', async () => {
+    const { e, entry, suggestion } = await suggested('keep-a')
+    const softDelete = e.store.softDeleteUnlessSecret.bind(e.store)
+    e.store.softDeleteUnlessSecret = (async (r: MemoryRecord, ...rest: unknown[]) => {
+      if (r.id === 'mem_b') await e.store.update({ id: 'mem_b' }, cur => ({ ...cur, summary: '别处刚改的' }))
+      return (softDelete as (...args: unknown[]) => Promise<unknown>)(r, ...rest)
+    }) as never
+    expect(err(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id })).code).toBe('stale')
+    expect(await e.store.get('mem_b')).toMatchObject({ status: 'active', summary: '别处刚改的' })
+    expect(await e.decisions.listSettled()).toEqual([])
+    expect((await e.decisions.list()).map(d => d.id)).toEqual([entry.id])
+  })
+
+  it('融合建议这一版不能采纳：回 invalid-args，什么都不动', async () => {
+    const { e, entry, suggestion } = await suggested('merge', { draft: { content: '前端用 pnpm，脚本仓用 npm', summary: '按仓库选' } })
+    expect(err(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id })).code).toBe('invalid-args')
+    expect(await statuses(e)).toEqual(['active', 'active'])
+    expect(await e.decisions.listSettled()).toEqual([])
+  })
+
+  it('两个标签页同时采纳：只成一次，只删一方、只拍一份快照；另一次回 claimed 或 not-found，什么都不动', async () => {
+    const { e, entry, suggestion } = await suggested('keep-a')
+    const other = env()
+    const results = await Promise.all([
+      e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id }),
+      other.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id }),
+    ])
+    expect(results.filter(r => r.ok)).toHaveLength(1)
+    expect(['claimed', 'not-found']).toContain(err(results.find(r => !r.ok)!).code)
+    expect(await statuses(e)).toEqual(['active', 'deleted'])
+    expect(await e.snapshots.list()).toHaveLength(1)
+    expect((await e.decisions.listSettled()).map(d => d.settled?.verdict)).toEqual(['keep-left'])
+  })
+
+  it('采纳与相反的直接裁决同时到：只有一条生效，只删一方', async () => {
+    const { e, entry, suggestion } = await suggested('keep-a')
+    const results = await Promise.all([
+      e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id }),
+      e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-right' }),
+    ])
+    expect(results.filter(r => r.ok)).toHaveLength(1)
+    expect((await statuses(e)).filter(s => s === 'deleted')).toHaveLength(1)
+  })
+
+  it('条目不在待处理：not-found；不是横向冲突：invalid-args', async () => {
+    const e = env()
+    expect(err(await e.run({ cmd: 'apply-proposal', decisionId: 'pd_ghost', suggestionId: 'sg_x' })).code).toBe('not-found')
+    await e.store.create(record({ id: 'mem_v', content: '用 npm' }))
+    const vertical = (await e.decisions.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：用 pnpm', summary: 'v', fingerprint: 'fp-v' }, 1)).entry
+    expect(err(await e.run({ cmd: 'apply-proposal', decisionId: vertical.id, suggestionId: 'sg_x' })).code).toBe('invalid-args')
+  })
+
+  it('一方属于别的项目：同裁决过跨项目门，带 allowCrossWorkspace 后照常采纳', async () => {
+    const e = env({ llm: answering(said('keep-a')) })
+    await e.store.create(record({ id: 'mem_a', name: '甲', content: '用 pnpm' }))
+    await e.store.create(record({ id: 'mem_b', name: '乙', content: '用 npm', scope: 'workspace', workspacePath: OTHER_WS }))
+    const records = [(await e.store.get('mem_a'))!, (await e.store.get('mem_b', { workspacePath: OTHER_WS }))!]
+    const { entry } = await e.decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', fingerprint: conflictFingerprint(records) }, 1)
+    ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+    const suggestionId = (await e.decisions.get(entry.id))!.suggestion!.id
+    expect(err(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId })).code).toBe('cross-workspace')
+    expect((await e.store.get('mem_b', { workspacePath: OTHER_WS }))!.status).toBe('active')
+    ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId, allowCrossWorkspace: true }))
+    expect((await e.store.get('mem_b', { workspacePath: OTHER_WS }))!.status).toBe('deleted')
+  })
+
+  it('治理开关关着、子 agent 会话：拒绝，什么都不动', async () => {
+    for (const opts of [{ governanceEnabled: false }, { delegationDepth: 1 }]) {
+      const e = env(opts)
+      const entry = await seedPair(e)
+      expect(err(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: 'sg_x' })).code).toBe('governanceEnabled' in opts ? 'governance-disabled' : 'subagent-readonly')
+      expect(await statuses(e)).toEqual(['active', 'active'])
+      await rm(root, { recursive: true, force: true })
+      root = await mkdtemp(join(tmpdir(), 'pm-gui-commands-'))
+    }
+  })
+})

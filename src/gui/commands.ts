@@ -24,7 +24,7 @@ import {
   copyHistory, crossWorkspaceNote, gateRecords, locateCopy, workspaceLabel, type CrossWorkspaceRejection, type GovernanceContext,
 } from '../tools/workspace-gate.ts'
 import {
-  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, VIEW_BEHIND_CODES, mergeKeeperIndex, parseMemoryCommand, sessionViewFile,
+  GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_VIEW_VERSION, MEMORY_COMMAND_NAME, VIEW_BEHIND_CODES, mergeKeeperIndex, parseMemoryCommand, sessionViewFile, verdictOfAction,
   type ApplyEditOp, type DraftPlanOp, type GuiErrorCode, type MemoryCommand, type MemoryCommandResult,
 } from './contract.ts'
 import type { ViewWriter } from './view-writer.ts'
@@ -93,7 +93,7 @@ export interface MemoryCommandDefinition {
  *  refresh-views 不受开关影响，撤销直接改、直接合并、模型改写与替代的 undo 也不受（见 isEditUndo）。 */
 // dismiss-overflow 不在此列：超限提醒在体检关闭时照样入账，忽略它不属于治理动作；
 // ignore-advice / unignore-advice 同理：规则类建议在体检关闭时照样列出，忽略只是用户的处置
-const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'undo', 'promote', 'promote-memory', 'move-memory', 'keep-local', 'keep-local-memory', 'scan', 'suggest'])
+const GOVERNANCE_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['resolve', 'apply-proposal', 'undo', 'promote', 'promote-memory', 'move-memory', 'keep-local', 'keep-local-memory', 'scan', 'suggest'])
 
 /** 不写任何东西的子命令：成功后也不重写视图。 */
 const READ_ONLY_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set(['draft-edit', 'plan-edits', 'draft-plan'])
@@ -440,20 +440,49 @@ async function dispatch(
     return { ok: true, cmd, decisionId, memoryIds: r.dismissed }
   }
 
+  /**
+   * 裁决一条冲突（直接选，或采纳建议 adopt）。结果同一种形状：败方含高危密钥已物理删除时 isHardDeleted，结论没记下时 isUnrecorded，
+   * 记了快照的带 snapshotId 供撤销。
+   */
+  const resolveConflict = async (
+    decisionId: string, verdict: 'keep-left' | 'keep-right' | 'keep-both', allowCrossWorkspace: boolean | undefined, adopt?: { suggestionId: string; memoryIds: string[] },
+  ): Promise<MemoryCommandResult> => {
+    // 升级前导入的垂直冲突没有指纹，两边都留时要按基线现算
+    const baseline = deps.host.baselineOf(exec)
+    const r = await executeConfirm(
+      { action: 'resolve', decisionId, verdict, allowCrossWorkspace },
+      gov, executorDeps, { ...(baseline !== null ? { baseline } : {}), ...(adopt !== undefined ? { adopt: { suggestionId: adopt.suggestionId } } : {}) },
+    )
+    if (r.kind === 'error') {
+      if (r.code === 'cross-workspace') return fail(cmd, 'cross-workspace', r.message, r.rejected)
+      if (r.code === 'stale') return behind('stale', adopt?.memoryIds ?? [], r.message)
+      return fail(cmd, r.code ?? 'failed', r.message)
+    }
+    if (r.kind === 'resolved' && r.isUnrecorded) return { ok: true, cmd, decisionId, isUnrecorded: true }
+    if (r.kind === 'resolved' && r.isHardDeleted) return { ok: true, cmd, decisionId, isHardDeleted: true }
+    const snapshotId = (await settledEntry(decisionId))?.settled?.snapshotId
+    return { ok: true, cmd, decisionId, ...(snapshotId !== undefined ? { snapshotId } : {}) }
+  }
+
   switch (command.cmd) {
     case 'resolve': {
       if (!(await deps.decisions.get(command.decisionId))) return notFound(command.decisionId)
-      // 升级前导入的垂直冲突没有指纹，两边都留时要按基线现算
-      const baseline = deps.host.baselineOf(exec)
-      const r = await executeConfirm(
-        { action: 'resolve', decisionId: command.decisionId, verdict: command.verdict, allowCrossWorkspace: command.allowCrossWorkspace },
-        gov, executorDeps, baseline !== null ? { baseline } : {},
-      )
-      if (r.kind === 'error') return r.code === 'cross-workspace' ? fail(cmd, 'cross-workspace', r.message, r.rejected) : fail(cmd, r.code ?? 'failed', r.message)
-      if (r.kind === 'resolved' && r.isUnrecorded) return { ok: true, cmd, decisionId: command.decisionId, isUnrecorded: true }
-      if (r.kind === 'resolved' && r.isHardDeleted) return { ok: true, cmd, decisionId: command.decisionId, isHardDeleted: true }
-      const snapshotId = (await settledEntry(command.decisionId))?.settled?.snapshotId
-      return { ok: true, cmd, decisionId: command.decisionId, ...(snapshotId !== undefined ? { snapshotId } : {}) }
+      return await resolveConflict(command.decisionId, command.verdict, command.allowCrossWorkspace)
+    }
+
+    case 'apply-proposal': {
+      const entry = await deps.decisions.get(command.decisionId)
+      if (entry === undefined) return notFound(command.decisionId)
+      if (kindOf(entry) !== 'conflict' || entry.baselineRef !== undefined || entry.memoryIds.length !== 2) {
+        return fail(cmd, 'invalid-args', `待决项 ${entry.id} 不是两条记忆的横向冲突，没有可采纳的建议`)
+      }
+      const { suggestion } = entry
+      const stale = () => behind('stale', entry.memoryIds, '这两条刚被改过或建议已换了一份，建议已失效。未做任何改动')
+      if (suggestion === undefined || suggestion.id !== command.suggestionId) return stale()
+      // 结论按账本上这一份定，不信界面；认领条目后执行器再核对一次 id 和依据
+      const verdict = verdictOfAction(suggestion.action)
+      if (verdict === undefined) return fail(cmd, 'invalid-args', `待决项 ${entry.id} 的建议是融合，这一版还不能采纳。未做任何改动`)
+      return await resolveConflict(entry.id, verdict, command.allowCrossWorkspace, { suggestionId: suggestion.id, memoryIds: entry.memoryIds })
     }
 
     case 'undo':

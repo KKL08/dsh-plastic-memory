@@ -1,7 +1,8 @@
 /**
  * 冲突裁决（DESIGN.md「Conflict Ruling」）：琥珀圆点 + 标题，A / B 字母标记（不套圆、不加底）+ 各自的记忆卡，
  * 三个按钮「以 A 为准 / 以 B 为准 / 都保留」，按钮到 verdict 的映射取契约 CONFLICT_ACTION_VERDICTS。
- * 两版结构相同：标题下一句默认行为，A、B 记忆卡，（记忆页）处理建议块，后果说明进建议区（「说明」），下面三个平级按钮一排。
+ * 两版结构相同：标题下一句默认行为，A、B 记忆卡，后果说明进建议区（「说明」），下面三个平级按钮一排。
+ * 记忆页的横向冲突卡给 footer：A、B 下面整块换成处理卡的建议块、说明行和按钮行（见 pending/cards.tsx HorizontalActions），这里的说明和按钮不画。
  * - 宽版（记忆页）：A、B 各一张描边卡并排，卡里只放记忆；按钮靠右，和其它卡的动作行对齐；
  * - 窄版（右侧栏）：A、B 上下排，按钮一行靠左。
  * 任一方定位不到（视图里为 null）时裁决会报错，三个按钮都不可用。裁决后的结果态在待处理票里做。
@@ -36,15 +37,13 @@ interface RulingSharedProps {
   headExtra?: ReactNode
 }
 
-export interface ConflictRulingProps extends RulingSharedProps {
+/** 默认画后果说明和三个按钮（onRule 接点击）；记忆页给 footer，A、B 下面整块换成它。 */
+export type ConflictRulingProps = RulingSharedProps & {
   left: MemoryCardData | null
   right: MemoryCardData | null
-  onRule: (verdict: HorizontalVerdict) => void
   /** 一句默认行为（「决定之前，agent 按 A 来做。」），在标题下。 */
-  note?: string
-  /** 处理建议块（记忆页给），在 A、B 下面、后果说明上面。 */
-  suggestion?: ReactNode
-}
+  note?: string | undefined
+} & ({ onRule: (verdict: HorizontalVerdict) => void; footer?: undefined } | { footer: ReactNode; onRule?: undefined })
 
 export function ConflictRuling(props: ConflictRulingProps) {
   const t = useT()
@@ -65,17 +64,17 @@ export function ConflictRuling(props: ConflictRulingProps) {
       title={props.title ?? t('conflict.title')}
       isMissing={props.left === null || props.right === null}
       consequence={t(consequence)}
+      footer={props.footer}
       actions={[
-        [t('conflict.keepA'), () => { props.onRule(horizontal.keepA) }],
-        [t('conflict.keepB'), () => { props.onRule(horizontal.keepB) }],
-        [t('conflict.keepBoth'), () => { props.onRule(horizontal.keepBoth) }],
+        [t('conflict.keepA'), () => { props.onRule?.(horizontal.keepA) }],
+        [t('conflict.keepB'), () => { props.onRule?.(horizontal.keepB) }],
+        [t('conflict.keepBoth'), () => { props.onRule?.(horizontal.keepBoth) }],
       ]}
     >
       <div className="pm-conflict-sides">
         {side('A', props.left)}
         {side('B', props.right)}
       </div>
-      {props.suggestion !== undefined ? <div className="pm-conflict-suggestion">{props.suggestion}</div> : null}
     </RulingShell>
   )
 }
@@ -111,13 +110,14 @@ export function VerticalConflictRuling(props: VerticalConflictRulingProps) {
   )
 }
 
-/** 两版共用的外壳：标题行、标题下一句、各自的记忆区、后果说明、一排按钮。任一方定位不到（isMissing）时按钮都不可用。 */
-function RulingShell({ layout, title, headExtra, note, unavailable, isMissing, consequence, actions, children }: RulingSharedProps & {
+/** 两版共用的外壳：标题行、标题下一句、各自的记忆区、后果说明、一排按钮（给了 footer 时换成它）。任一方定位不到（isMissing）时按钮都不可用。 */
+function RulingShell({ layout, title, headExtra, note, unavailable, isMissing, consequence, actions, footer, children }: RulingSharedProps & {
   note?: string | undefined
   isMissing: boolean
   consequence: string
   /** 按钮文字与点击动作，按显示顺序。 */
   actions: ReadonlyArray<readonly [label: string, onClick: () => void]>
+  footer?: ReactNode
   children: ReactNode
 }) {
   const t = useT()
@@ -131,10 +131,16 @@ function RulingShell({ layout, title, headExtra, note, unavailable, isMissing, c
       </header>
       {note !== undefined ? <p className="pm-conflict-note">{note}</p> : null}
       {children}
-      <div className="pm-conflict-advice"><AdviceNote label="note">{consequence}</AdviceNote></div>
-      <div className="pm-conflict-buttons">
-        {actions.map(([label, onClick]) => <Button key={label} unavailable={reason} onClick={onClick}>{label}</Button>)}
-      </div>
+      {footer !== undefined
+        ? <div className="pm-conflict-footer">{footer}</div>
+        : (
+          <>
+            <div className="pm-conflict-advice"><AdviceNote label="note">{consequence}</AdviceNote></div>
+            <div className="pm-conflict-buttons">
+              {actions.map(([label, onClick]) => <Button key={label} unavailable={reason} onClick={onClick}>{label}</Button>)}
+            </div>
+          </>
+        )}
     </article>
   )
 }
@@ -177,6 +183,8 @@ export const conflictRulingCss = `
 .pm-conflict-baseline { margin: 0; padding-left: 14px; font-size: 12px; line-height: 1.5; color: var(--pm-text-2); overflow-wrap: anywhere; }
 .pm-conflict--wide .pm-conflict-buttons { justify-content: flex-end; }
 .pm-conflict--wide .pm-conflict-advice { padding-left: 22px; }
-.pm-conflict-suggestion { margin-top: 12px; }
-.pm-conflict--wide .pm-conflict-suggestion { padding-left: 22px; }
+.pm-conflict-footer { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+.pm-conflict--wide .pm-conflict-footer { padding-left: 22px; }
+/* footer 里的按钮行（采纳建议、三个候选项）靠左，采纳在前 */
+.pm-conflict-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 `

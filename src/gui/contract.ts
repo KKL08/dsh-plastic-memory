@@ -178,7 +178,7 @@ export function isAwaitingDecision(item: Pick<PendingItem, 'kind' | 'level'>): b
 const levelOf = <K extends PendingItemKind>(kind: K) => z.literal(PENDING_LEVEL_OF_KIND[kind])
 
 /** 处理方案的结论代码（名字定义在 contract-codes，账本同用）。 */
-export { PROPOSAL_ACTIONS, type ProposalAction } from '../contract-codes.ts'
+export { PROPOSAL_ACTIONS, verdictOfAction, type ProposalAction } from '../contract-codes.ts'
 
 /**
  * 处理方案对一条记忆的操作：edit 改写成这一稿（四个面，写进去的样子），forget 删除，keep 不动。
@@ -739,6 +739,13 @@ export const MEMORY_COMMAND_NAME = 'memory'
 export const memoryCommandSchema = z.discriminatedUnion('cmd', [
   z.object({ cmd: z.literal('info') }),
   z.object({ cmd: z.literal('resolve'), decisionId: z.string(), verdict: z.enum(RESOLVE_VERDICTS), allowCrossWorkspace }),
+  /**
+   * 「采纳建议」：按条目上 id 为 suggestionId 的处理建议落盘，界面不回传建议内容。这一版只收横向冲突的保留 A、保留 B、都保留，
+   * 记法同 resolve 的 keep-left / keep-right / keep-both（另记依据和结论代码），撤销、最近删除、败方含高危密钥时的物理删除都同 resolve。
+   * 服务端认领条目后核对：建议 id 一致、依据版本（冲突指纹、每条的完整内容指纹和作用域键）仍是此刻的，对不上回 stale，什么都不动；
+   * 删败方时锁内按依据再比一次。条目不在待处理回 not-found；不是横向冲突、建议是融合回 invalid-args。过跨项目门（同 resolve）。
+   */
+  z.object({ cmd: z.literal('apply-proposal'), decisionId: z.string(), suggestionId: z.string(), allowCrossWorkspace }),
   /** 撤销一条已裁决条目：去掉 settled，记了快照的按它恢复败方（提升为全局则恢复原位）；直接改、移到项目的撤销后条目移出账本；
    *  模型改写、替代（全部记忆视图的 modelChanges）按改前快照恢复，撤销后条目标已撤销留着。
    *  六类撤销遇到目标之后又被改过（或已不在原处）一律回 stale、条目留着；合并的撤销不会只恢复一半：要么都不动，要么写回的那条中途被第三方改过、停在第三方的版本。 */
@@ -906,7 +913,7 @@ export const CROSS_WORKSPACE_COMMANDS: ReadonlySet<CrossWorkspaceCmd> = new Set(
  * undo 的 not-found 还可能是快照过期，不在其中。
  */
 export const OPEN_ITEM_COMMANDS: ReadonlySet<MemoryCommand['cmd']> = new Set([
-  'resolve', 'promote', 'keep-local', 'dismiss-overflow', 'promote-memory', 'keep-local-memory', 'move-memory', 'ignore-advice', 'suggest',
+  'resolve', 'apply-proposal', 'promote', 'keep-local', 'dismiss-overflow', 'promote-memory', 'keep-local-memory', 'move-memory', 'ignore-advice', 'suggest',
 ] as const)
 
 /** 命令 → 整行文本（客户端发给 `remote.commands.execute`）。 */
@@ -949,7 +956,7 @@ export const GUI_ERROR_CODES = [
   'governance-disabled', // 体检已关闭：裁决、撤销、提升、移到项目、留在本项目、体检、忽略超限不可用
   'has-secret',         // forget 的目标含密钥（任一级），只能彻底删除：什么都没动，界面确认后改发 hard-delete；
                         // 直接改、直接合并、整理所选的应用的目标含密钥（界面上是遮盖后的正文）：什么都没动；让模型改、整理计划、补上建议的目标含密钥：不发给模型
-  'stale',              // 直接改、直接合并、整理计划与应用：记忆在卡片加载后被改过；任一类撤销（含等同撤销的恢复）：目标之后又被改过或已不在原处。什么都没动（合并撤销中途被第三方改过的停在第三方的版本）
+  'stale',              // 直接改、直接合并、整理计划与应用：记忆在卡片加载后被改过；采纳建议：建议已换了一份，或两条在建议生成后被改过；任一类撤销（含等同撤销的恢复）：目标之后又被改过或已不在原处。什么都没动（合并撤销中途被第三方改过的停在第三方的版本）
   'secret-critical',    // 直接改、直接合并、整理所选的应用的新内容含高危密钥：什么都没动；让模型改、整理计划的要求、此前的要求、计划或上一稿含高危密钥：不发给模型
   'secret-suspected',   // 直接改、直接合并、整理所选的应用的新内容含疑似密钥：什么都没动，用户确认后带 force 重发
   'claimed',            // 待决项正被另一次操作（别的标签页、宿主进程或体检）认领：什么都没动
@@ -983,7 +990,7 @@ export const memoryCommandResultSchema = z.discriminatedUnion('ok', [
      * 下次体检同一对还会报，也没有可撤销的条目。
      */
     isUnrecorded: z.literal(true).optional(),
-    /** resolve 删一方：败方含高危密钥，已物理删除、不可恢复，条目已移出账本，没有可撤销的条目。 */
+    /** resolve、apply-proposal 删一方：败方含高危密钥，已物理删除、不可恢复，条目已移出账本，没有可撤销的条目。 */
     isHardDeleted: z.literal(true).optional(),
     /** draft-edit：模型给的改后稿。 */
     draft: memoryDraftSchema.optional(),
