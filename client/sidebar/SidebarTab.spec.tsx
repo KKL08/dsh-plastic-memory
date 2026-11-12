@@ -749,6 +749,14 @@ describe('SidebarTab 冲突行的处理建议', () => {
     expect(gateway.executed).toHaveLength(0)
   })
 
+  it('模型判断不了：写明需要用户来定，没有「采纳建议」，只给「在记忆页处理 ›」', () => {
+    const undecided = { ...conflict, noSuggestion: { code: 'undecided', reason: '分不出哪条对' } } as PendingItem
+    const { container } = setup({ library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1', 'p2'] }), pending: pending(undecided) })
+    expect(screen.getByText('模型判断不了该怎么处理，需要你来定。')).toBeInTheDocument()
+    expect(container.querySelector('.pm-side-suggestion')).toBeNull()
+    expect(screen.queryByRole('button', { name: '采纳建议' })).toBeNull()
+  })
+
   it('融合建议：一行「模型建议：融合成一条」，不放融合稿和对照，没有「采纳建议」，是「在记忆页处理 ›」', () => {
     const { container, openPage } = setup({ library: library(pref, pref2, proj), session: snapshot({ injectedIds: ['p1', 'p2'] }), pending: pending(suggested('merge')) })
     expect(container.querySelector('.pm-side-suggestion')).toHaveTextContent('模型建议：融合成一条')
