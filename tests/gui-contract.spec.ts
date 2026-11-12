@@ -14,6 +14,10 @@ describe('契约的枚举字段', () => {
       checkupId: 'c1', by: 'manual', completedAt: 1, added: { keys: [], pending: 0, advice: 0 }, notes: [{ code }],
     }).success
     expect([result('semantic-batched'), result('semantic-timeout')]).toEqual([true, false])
+    // 旧版写进体检记录、现在不再产生的说明码：读的时候丢掉，别的说明照留
+    expect(checkupResultSchema.parse({
+      checkupId: 'c1', by: 'manual', completedAt: 1, added: { keys: [], pending: 0, advice: 0 }, notes: [{ code: 'semantic-batched' }, { code: 'baseline-session-scoped' }],
+    }).notes).toEqual([{ code: 'semantic-batched' }])
 
     const scan = (code: string) => memoryCommandResultSchema.safeParse({ ok: true, cmd: 'scan', notes: [code] }).success
     expect([scan('baseline-missing'), scan('baseline-gone')]).toEqual([true, false])

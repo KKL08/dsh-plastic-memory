@@ -375,15 +375,16 @@ function ResultRow({ scope, isTodoView, nav, runs, seen, checkups, now }: {
           : null}
       </Line>
     )
-    const notes = result.notes.flatMap(({ code, cause }): ReactNode[] => {
+    // 「全部」体检里同一说明可能来自几个作用域（原因各不相同），同一说明码只写一行
+    const notes = result.notes.filter((n, i) => result.notes.findIndex(m => m.code === n.code) === i).flatMap(({ code, cause }): ReactNode[] => {
       const text = code === 'semantic-failed'
         ? cause === undefined ? t('checkup.result.note.semanticFailed.bare') : t('checkup.result.note.semanticFailed', { cause: causeText(cause, t) })
         : code === 'model-unavailable'
           ? cause === undefined ? t('checkup.result.note.modelUnavailable.bare') : t('checkup.result.note.modelUnavailable', { cause: causeText(cause, t) })
           : code === 'semantic-batched' ? t('checkup.result.note.semanticBatched')
-            : code === 'baseline-session-scoped' ? t(lineKey === 'all' ? 'checkup.result.note.baselineSessionScoped.all' : 'checkup.result.note.baselineSessionScoped')
-              // 自动体检没有会话、不查和基线的冲突；手动体检缺基线是常态，不写
-              : code === 'baseline-missing' && result.by === 'auto' ? t('checkup.result.note.autoBaseline') : undefined
+            // 指令文件读取失败（没有指令文件不算）、太长被截断时各说一句；读取失败的原因在 title 里
+            : code === 'baseline-missing' ? t('checkup.result.note.baselineMissing')
+              : code === 'baseline-truncated' ? t('checkup.result.note.baselineTruncated') : undefined
       return text === undefined ? [] : [<Line key={`${lineKey}:${code}`} title={cause?.message}>{text}</Line>]
     })
     return [head, ...notes]

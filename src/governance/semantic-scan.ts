@@ -40,34 +40,6 @@ export function isAbort(err: unknown, signal?: AbortSignal): boolean {
 /** 一次调用里记忆列表的 token 预算（snapshot.estimateTokens 估算）。整库塞进一条消息会撑爆上下文窗口，超了就分批。 */
 export const SEMANTIC_BATCH_TOKEN_BUDGET = 30_000
 
-/** 基线全文长度上限——大基线不设限会连同记忆列表一起撑爆上下文，导致语义层整体 failed。 */
-export const BASELINE_MAX_CHARS = 8000
-
-/**
- * 基线是按事件顺序排列的指令消息（越靠后越新，同一文件的修订顶替旧文本后排在后面）。预算按整条消息分配、
- * 从最新往前收：每条消息自带来源与适用范围的抬头（"Instructions from: <path>"），按字符切会把规则和它的
- * 范围拆开、让 LLM 误用到别的目录。装不下的较早消息整条舍弃并说明；最新一条自身就超预算时只保留其开头。
- */
-export function renderBaselineMessages(messages: readonly string[]): string {
-  const kept: string[] = []
-  let used = 0
-  for (const message of messages.toReversed()) {
-    if (used + message.length > BASELINE_MAX_CHARS) break
-    kept.unshift(message)
-    used += message.length
-  }
-  if (kept.length === messages.length) return messages.join('\n\n')
-  if (kept.length === 0) {
-    const newest = messages[messages.length - 1]!
-    const cut = newest.length - BASELINE_MAX_CHARS
-    const earlier = messages.length > 1 ? `，更早的 ${messages.length - 1} 条未纳入垂直冲突检测` : ''
-    return `（基线过长：最新一条指令消息已截断末尾 ${cut} 字符${earlier}）\n${newest.slice(0, BASELINE_MAX_CHARS)}`
-  }
-  const dropped = messages.slice(0, messages.length - kept.length)
-  const droppedChars = dropped.reduce((n, m) => n + m.length, 0)
-  return `（基线过长：较早的 ${dropped.length} 条指令消息共 ${droppedChars} 字符未纳入垂直冲突检测，较新的修订优先保留）\n${kept.join('\n\n')}`
-}
-
 const SEMANTIC_TYPES = new Set(['conflict', 'redundancy', 'misplaced', 'unclear'])
 
 const SYSTEM_PROMPT = `你是记忆库治理审查员。对给出的记忆列表做四类语义问题检测：
@@ -87,9 +59,9 @@ export function buildSemanticPrompt(
   records: MemoryRecord[],
   baseline: readonly string[] | null,
 ): { system: string; user: string } {
-  // 判断冲突用不到密钥原值，明确密钥不发给模型（与注入同口径）
+  // 判断冲突用不到密钥原值，明确密钥不发给模型（与注入同口径）。指令文件整份原样给：长度由读取时的上限管，超了另有截断说明
   const baselineSection = baseline
-    ? `## 权威配置基线（AGENTS.md/CLAUDE.md）\n${renderBaselineMessages(baseline.map(m => maskSecrets(m)))}`
+    ? `## 权威配置基线（AGENTS.md/CLAUDE.md）\n${baseline.map(m => maskSecrets(m)).join('\n\n')}`
     : '## 权威配置基线\n（无权威配置基线，跳过垂直冲突检测）'
   return {
     system: SYSTEM_PROMPT,

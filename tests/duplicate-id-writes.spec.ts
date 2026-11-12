@@ -18,6 +18,7 @@ import { FAKE_SECRET } from './helpers/secrets.ts'
 import type { Scope } from '../src/scope.ts'
 import { InMemoryTable } from './helpers/in-memory-table.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
+import { noInstructions } from './helpers/instructions.ts'
 
 // 同 id 多副本时，执行器预读 / 过门用的那份记录与最终写入落到的那份
 // 必须是同一个文件，否则会改到门没检查过的副本（其他项目的、或 global 上被修改过的）。
@@ -36,7 +37,7 @@ function world() {
   const snapshots = new SnapshotStore(new InMemoryKvTable<MemorySnapshot>())
   const decisions = new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>())
   const agentsMd = { lines: [] as string[], append: async function (line: string) { this.lines.push(line) } }
-  const deps = { store, snapshots, decisions, agentsMd, log: quiet, now: () => 5000 }
+  const deps = { store, snapshots, decisions, agentsMd, log: quiet, now: () => 5000, instructions: noInstructions }
   const seed = (dir: string, fileName: string, rec: MemoryRecord) => table.seedFile({ dir, fileName, record: rec })
   const wsDir = (path: string) => join('/in-memory', workspaceDirName(path))
   const activeIn = async (scope: Scope) =>

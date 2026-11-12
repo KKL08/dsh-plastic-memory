@@ -8,11 +8,13 @@ import { isPendingDelegated, type MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
 import { InMemoryTable } from './helpers/in-memory-table.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
+import { noInstructions } from './helpers/instructions.ts'
 
 // memory_confirm accept-subagent：主会话把子 agent 存的待确认记录接受为本项目主档。
 
 function makeDeps(): ConfirmToolDeps {
   return {
+    instructions: noInstructions,
     store: new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable()),
     decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
     snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),

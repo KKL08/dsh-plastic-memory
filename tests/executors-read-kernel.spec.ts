@@ -28,6 +28,7 @@ import { fakeExec } from './helpers/exec.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
 import { writesDuring } from './helpers/fs-writes.ts'
+import { noInstructions } from './helpers/instructions.ts'
 
 // 执行器切到按范围读取与两级定位。全部用真实目录（FileTable + .state 侧表），
 // 只 mock 进程边界（sessionQuery.readEvent）；文件直接写盘模拟用户手编、git、其他进程。
@@ -93,7 +94,7 @@ function harness(opts: { readEvent?: ReadEventFn; now?: number } = {}) {
     store, registry, decisions, cache: sidecar.scanCache, thresholds: resolveHealthThresholds('normal'), host: { contextOf: ctx(ws) }, now,
   })
   const scanDeps = (ws: string | null = WS): ScanToolDeps => ({
-    store, registry, decisions, cache: sidecar.scanCache, host: { contextOf: ctx(ws), llmOf: () => null, baselineOf: () => null }, now,
+    store, registry, decisions, cache: sidecar.scanCache, instructions: noInstructions, host: { contextOf: ctx(ws), llmOf: () => null }, now,
   })
   const cache = new SnapshotCache({ store, registry, budget: 4000, memoryRoot: root })
   return {

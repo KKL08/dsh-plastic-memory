@@ -1,5 +1,6 @@
 import type { MemoryLogger, MemoryStore } from '../store.ts'
 import { conflictFingerprint, isBaselineCurrent, isBasisCurrent, type PendingDecisionsStore } from '../governance/decisions.ts'
+import { baselineFor, type ReadInstructions } from '../governance/instructions.ts'
 import { kindOf, verdictLoser, type PendingDecision, type SettledProposal, type SuggestionBasis } from '../governance/schema.ts'
 import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
 import { ALREADY_REVIEWED_REASON, NOT_DELEGATED_REASON, isPendingDelegated, type MemoryRecord } from '../record-schema.ts'
@@ -17,6 +18,11 @@ export interface ConfirmToolDeps {
   now?: () => number
   /** 日志注入口（裁决删败方走 forget，它记删除日志），缺省回退 console。 */
   log?: MemoryLogger
+  /**
+   * 按作用域取指令文件。resolve 垂直冲突时取这条记忆对应的那份（项目记忆是它所在项目的，全局记忆是全局层的），
+   * 用来核对采纳的依据、给没有指纹的旧条目现算两边都留的指纹；界面和 agent 工具用同一个来源。
+   */
+  instructions: ReadInstructions
 }
 
 /** allowCrossWorkspace：用户明确选择「全局整理」时才为 true，放行其他项目的记录（见 workspace-gate.ts）。 */
@@ -29,20 +35,18 @@ export type ConfirmArgs =
 export interface ConfirmOptions {
   /** refresh 时同 id 多副本只认这一份（GUI 按页面上那一份操作）；缺省按会话 workspace 定位。跨 workspace 门照旧按会话判定。 */
   target?: Scope
-  /** resolve 时垂直冲突的条目没有指纹，两边都留要现算指纹用的基线（GUI 从借来的会话取）。 */
-  baseline?: readonly string[]
   /**
    * resolve 是在落盘一份处理方案：条目上的这份处理建议（GUI「采纳建议」，suggestionId），或界面带回的按要求生成的方案
    * （GUI「补充要求」，request：结论和生成时的依据版本）。认领条目后核对建议 id（按要求的没有这一项）、结论和裁决对得上、
    * 依据版本仍是此刻的，对不上回 stale、什么都不动；删败方时锁内按依据里它的完整内容指纹再比一次。结清时记下来源和结论代码。
-   * 垂直冲突另按 baseline（会话此刻的基线）和会话所在项目重算依据里的基线，对不上同样回 stale。
+   * 垂直冲突另按这条记忆此刻对应的指令文件（deps.instructions）重算依据里的基线，对不上同样回 stale。
    */
   adopt?: { suggestionId: string } | { request: { action: ProposalAction; basis: SuggestionBasis } }
 }
 
 /**
  * otherWorkspaces：带参数放行、属于其他项目的记录；error 带 code 时 rejected 列出被拒记录。
- * isUnrecorded：两边都留，但条目没有指纹、也现算不出（垂直冲突缺基线，或记忆属于别的项目、会话的基线不是它的），结论没记下，条目已移出账本。
+ * isUnrecorded：两边都留，但条目没有指纹、也现算不出（垂直冲突取不到或没有这条记忆对应的指令文件），结论没记下，条目已移出账本。
  * isHardDeleted：败方含高危密钥，已物理删除、不可恢复，条目已移出账本，没有撤销。
  */
 export type ConfirmResult =
@@ -200,7 +204,7 @@ async function resolveEntry(
   deps: ConfirmToolDeps,
   now: number,
   locate: (id: string) => Promise<MemoryRecord | undefined>,
-  { baseline, adopt }: ConfirmOptions,
+  { adopt }: ConfirmOptions,
 ): Promise<ConfirmResult> {
   const vertical = entry.baselineRef !== undefined
   // 账本里的条目也要过基数校验：横向必须是两个不同 id，垂直必须恰好一个。旧版本写入的或
@@ -219,14 +223,17 @@ async function resolveEntry(
     const r = await locate(id)
     if (r) members.set(id, r)
   }
+  // 垂直冲突这条记忆此刻对应的指令文件：采纳核对依据、旧条目现算指纹都用它
+  const vertMemory = vertical ? members.get(entry.memoryIds[0]!) : undefined
+  const baseline = vertMemory !== undefined ? await baselineFor(deps.instructions, vertMemory) : null
   // 落盘处理方案：用户看到的是这一份方案、依据的是生成时的两条。认领后重读的条目上建议已换成别的一份，或两条（含只改了摘要、标签）被改过，都不落盘
   const plan = adopt === undefined ? undefined : 'request' in adopt
     ? { source: 'request' as const, ...adopt.request }
     : entry.suggestion?.id === adopt.suggestionId ? { source: 'suggestion' as const, action: entry.suggestion.action, basis: entry.suggestion.basis } : undefined
   if (adopt !== undefined) {
     const live = entry.memoryIds.map(id => (members.get(id)?.status === 'active' ? members.get(id) : undefined))
-    // 垂直冲突：采纳时用当前会话的基线重算，会话不在那个项目、拿不到或指令文件改过都对不上
-    const isBaselineOk = !vertical || (plan !== undefined && live[0] !== undefined && isBaselineCurrent(plan.basis, live[0], baseline, context.workspacePath))
+    // 垂直冲突：采纳时按这条记忆此刻对应的指令文件重算，取不到或指令文件改过都对不上
+    const isBaselineOk = !vertical || (plan !== undefined && live[0] !== undefined && isBaselineCurrent(plan.basis, baseline))
     if (plan === undefined || verdictOfAction(plan.action) !== args.verdict || !isBasisCurrent(entry, plan.basis, live) || !isBaselineOk) {
       return { kind: 'error', code: 'stale', message: `待决项 ${entry.id} 的处理方案已失效（建议换了一份，或${vertical ? '这条记忆、指令文件' : '两条'}在方案生成后被改过），未做任何改动。` }
     }
@@ -296,8 +303,8 @@ async function resolveEntry(
     if (args.verdict === 'dismiss') actions.push('标记为误报')
     // 两边都留（keep-both / dismiss / 垂直 keep-left）：记下裁决，双方内容不变时体检不再报。
     // 败方早已删除的删一方裁决同样记下（没有快照可恢复）。
-    // 升级前导入的条目没有指纹：按双方此刻的内容现算（同体检），垂直冲突拿不到它所在项目的基线时算不出，只能移出账本
-    const fingerprint = entry.fingerprint !== undefined || loserId !== undefined ? undefined : currentFingerprint(entry, members, baseline, context.workspacePath)
+    // 升级前导入的条目没有指纹：按双方此刻的内容现算（同体检），垂直冲突拿不到这条记忆对应的指令文件时算不出，只能移出账本
+    const fingerprint = entry.fingerprint !== undefined || loserId !== undefined ? undefined : currentFingerprint(entry, members, baseline)
     if (await deps.decisions.settle(entry.id, args.verdict, now, { ...(fingerprint !== undefined ? { fingerprint } : {}), ...proposal })) {
       if (loserId === undefined) actions.push('以后体检不再报这一对，除非其中一条（或基线）被改写')
     } else isUnrecorded = true
@@ -311,19 +318,16 @@ async function resolveEntry(
 }
 
 /**
- * 冲突双方此刻的内容指纹（同体检挂账时算的）；有一方定位不到、或垂直冲突没有基线时为 undefined。
- * 基线随会话：记忆属于别的项目时会话的基线不是它的（体检扫别的项目也跳过垂直冲突），同样算不出。
+ * 冲突双方此刻的内容指纹（同体检挂账时算的）；有一方定位不到、或垂直冲突没有这条记忆对应的指令文件时为 undefined。
  */
 function currentFingerprint(
   entry: { memoryIds: string[]; baselineRef?: string },
   members: ReadonlyMap<string, MemoryRecord>,
-  baseline: readonly string[] | undefined,
-  sessionWorkspace: string | undefined,
+  baseline: readonly string[] | null,
 ): string | undefined {
   const records = entry.memoryIds.flatMap(id => members.get(id) ?? [])
   if (records.length !== entry.memoryIds.length) return undefined
   if (entry.baselineRef === undefined) return conflictFingerprint(records)
-  const ws = records[0]!.scope === 'workspace' ? records[0]!.workspacePath : undefined
-  if (baseline === undefined || (ws !== undefined && ws !== sessionWorkspace)) return undefined
+  if (baseline === null) return undefined
   return conflictFingerprint(records, baseline)
 }

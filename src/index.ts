@@ -39,7 +39,7 @@ import { CheckupRecordStore } from './governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from './governance/auto-checkups.ts'
 import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from './governance/schema.ts'
 import type { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
-import { baselineProjectionDefinition } from './governance/baseline.ts'
+import { createInstructionReader } from './governance/instructions.ts'
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { createMemoryCommand, type MemoryCommandDefinition } from './gui/commands.ts'
 import { ViewWriter, collectCheckupView, collectGlobalViews } from './gui/view-writer.ts'
@@ -215,11 +215,9 @@ export async function apply(ctx: Context, config: Config) {
   const checkups = new CheckupRecordStore(sidecar.checkups)
   // 自动体检设置表：记忆页经 /memory set-auto-checkup 改，几个宿主进程共用一份
   const autoCheckups = new AutoCheckupSettingStore(sidecar.autoCheckups)
-  // AGENTS.md 基线投影走可选注册：插件的 inject 不列 sessionProjections（精简 profile 可能没有这个服务），
-  // 改在 ctx.inject(['sessionProjections'], …) 里注册，这是宿主 registry 文档（dsh-session-projection README）
-  // 给出的保留可选注册的写法。disposer 随 child fiber 走，插件卸载键即消失。服务缺席时插件照常挂载，
-  // 只是不注册投影：垂直冲突检测跳过，memory_scan 打 baseline-missing。
-  ctx.inject(['sessionProjections'], child => void child.sessionProjections.register(baselineProjectionDefinition))
+  // 指令文件（AGENTS.md / CLAUDE.md）按作用域现读，用宿主自己的指令文件包（用到时才加载，解析到宿主那份）：
+  // 体检、垂直冲突的建议与采纳都按记忆对应的那份，不随会话。加载不了时垂直冲突检测跳过，体检打 baseline-missing。
+  const instructions = createInstructionReader(() => import('@deepseek-ai/dsh-agent-instructions'))
   // GUI 视图写入器：宿主有 commands 服务（GUI 半侧可用）时才有，见下方 ctx.inject(['commands'], …)
   let views: ViewWriter | undefined
   // 自动体检调度器：宿主有计时服务时才有，见下方 ctx.inject(['timer'], …)
@@ -324,11 +322,11 @@ export async function apply(ctx: Context, config: Config) {
     for (const dispose of governanceTools.splice(0)) dispose()
     if (!config.governance.enabled.get()) return
     governanceTools = [
-      registerWrite(createConfirmTool({ store, decisions, snapshots, log: ctx.logger, host })),
-      // 基线按触发调用的 session 取（宿主投影 cell 按 session 隔离，防多会话串台）。
+      registerWrite(createConfirmTool({ store, decisions, snapshots, log: ctx.logger, host, instructions })),
+      // 垂直冲突对照每条记忆所在项目的指令文件，和触发调用的会话无关。
       // 扫描会写语义缓存、登记待决冲突，归写工具；health 纯读，不套门
       registerWrite(createScanTool({
-        store, registry, decisions, cache: scanCache, ignores, checkups,
+        store, registry, decisions, cache: scanCache, ignores, checkups, instructions,
         host,
       })),
       ctx.tools.register(createHealthTool({
@@ -353,7 +351,7 @@ export async function apply(ctx: Context, config: Config) {
   const checkupSource = { store, checkups, autoCheckups, cache: scanCache, isGovernanceEnabled: () => config.governance.enabled.get() }
   // 体检之后的后续段：给冲突逐条生成处理建议。手动体检、自动体检共用一份，进程内的「正在生成」标记随待处理视图写出
   const checkupSuggestions = new CheckupSuggestions({
-    store, decisions, checkups, getReadEvent,
+    store, decisions, checkups, getReadEvent, instructions,
     views: { request: async names => { await views?.request(names) }, requestCheckups: async () => { await views?.requestCheckups() } },
     now: () => Date.now(), log: ctx.logger,
   })
@@ -375,7 +373,7 @@ export async function apply(ctx: Context, config: Config) {
     // 卸载时取消手动体检之后还在跑的后续段（不等在途的模型调用）
     const unload = new AbortController()
     commands.register(createMemoryCommand({
-      memoryRoot, store, decisions, snapshots, cache: scanCache, checkups, autoCheckups, ignores, registry, agentsMd, views: writer,
+      memoryRoot, store, decisions, snapshots, cache: scanCache, checkups, autoCheckups, ignores, registry, agentsMd, views: writer, instructions,
       onAutoCheckupChanged: () => void scheduler?.recheck(),
       suggestions: checkupSuggestions, signal: unload.signal,
       host, log: ctx.logger,
@@ -401,7 +399,7 @@ export async function apply(ctx: Context, config: Config) {
   ctx.inject(['timer'], child => {
     const timer = child as unknown as AutoCheckupTimer
     const created = new AutoCheckupScheduler({
-      scan: { store, registry, decisions, cache: scanCache, ignores },
+      scan: { store, registry, decisions, cache: scanCache, ignores, instructions },
       checkups,
       // 体检前只收集；体检后立刻重写全部视图（没有视图写入器时一次体检改为现收一份）
       views: { collectViews, rewriteAll: async () => views?.rewriteAll() },
@@ -488,7 +486,6 @@ export async function apply(ctx: Context, config: Config) {
     }
   })
   lifecycle.on('session/event', (session, event) => {
-    // 基线由宿主投影随事件折叠（plasticMemoryBaseline），不在这里观察；
     // 本监听只留 compaction 过期标记——快照按 session 冻结，压缩结束后由下一个发送点重建。
     // 带 error 的结束是失败的压缩（如摘要不比被遮蔽内容小），什么都没遮蔽：旧快照还在可见面上，
     // 这时重建会让下一个发送点再发一份；阈值附近它几乎每步失败一次，所以只在成功时标过期。

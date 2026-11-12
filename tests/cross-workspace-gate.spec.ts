@@ -34,6 +34,7 @@ import { record } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { InMemoryTable } from './helpers/in-memory-table.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
+import { noInstructions } from './helpers/instructions.ts'
 
 // 治理动作只有在用户明确选择「全局整理」后才能跨项目。
 // 场景统一为：会话在项目 A，B 是另一个项目；global 记忆对任何会话都可见。
@@ -59,7 +60,7 @@ function world() {
   const now = () => 5000
   return {
     store, snapshots, decisions, agentsMd,
-    deps: { store, snapshots, decisions, agentsMd, now },
+    deps: { store, snapshots, decisions, agentsMd, now, instructions: noInstructions },
     host: { contextOf: async () => ({ workspacePath: A as string | undefined }) },
     seed: async (...records: MemoryRecord[]) => { for (const r of records) await store.put(r) },
   }
@@ -347,7 +348,7 @@ describe('待决账本条目新增 workspaces 字段（global 用 global），sc
     }
     const r = await executeScan({ layers: 'full' }, {
       store, registry, decisions, cache: new InMemoryKvTable<ScanCacheEntry>(),
-      host: { contextOf: async () => ({ workspacePath: A }), llmOf: () => conflictLlm, baselineOf: () => null },
+      instructions: noInstructions, host: { contextOf: async () => ({ workspacePath: A }), llmOf: () => conflictLlm },
       now: () => 9000,
     }, fakeExec())
     if (r.kind !== 'single') throw new Error(r.kind)
@@ -511,7 +512,7 @@ describe('在项目 A 的会话里操作项目 B 记录的正反两组测试', (
     await store.create(inA('mem_a', { name: 'A 规则' }))
     await store.create(inB('mem_b', { name: 'B 规则' }))
     const exists = (p: string) => access(p).then(() => true, () => false)
-    return { root, store, deps: { store, snapshots, decisions, now: () => 5000 }, exists }
+    return { root, store, deps: { store, snapshots, decisions, now: () => 5000, instructions: noInstructions }, exists }
   }
 
   it('反：不带参数，A 会话遗忘 B 的记录被拒，B 目录里的文件原地不动', async () => {

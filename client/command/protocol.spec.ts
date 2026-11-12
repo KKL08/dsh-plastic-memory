@@ -33,7 +33,7 @@ const EXPECTED: Record<GuiErrorCode, (command: MemoryCommand) => Outcome> = {
     : 'memoryId' in c || 'memories' in c ? local('not-found', 'pending.memory.gone') : raw('not-found'),
   'stale': c => local('stale', isTidy(c) ? 'library.batch.stale' : is(c, 'undo', 'restore') ? 'pending.undo.stale' : is(c, 'ignore-advice') ? 'pending.ignore.stale' : 'pending.edit.stale'),
   'secret-critical': () => local('secret-critical', 'pending.edit.secretCritical'),
-  'no-baseline': () => local('no-baseline', 'pending.vertical.needProject'),
+  'no-baseline': () => local('no-baseline', 'pending.suggestion.noBaseline'),
   'target-taken': c => local('target-taken', is(c, 'undo') ? 'pending.move.undoTaken' : is(c, 'promote', 'promote-memory') ? 'pending.promote.taken' : 'pending.move.taken'),
   'llm-unavailable': () => local('llm-unavailable', 'pending.model.unavailable'),
   'llm-invalid-output': () => local('llm-invalid-output', 'pending.model.invalid'),

@@ -11,6 +11,7 @@ import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgn
 import { executeConfirm } from '../src/tools/confirm.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import { record } from './helpers/record.ts'
+import { noInstructions } from './helpers/instructions.ts'
 
 // 败方过了保留窗口被维护点物理删除时，引用它的删一方已裁决条目一起清掉；两边都留的、窗口内的不动。
 
@@ -28,7 +29,7 @@ describe('保留窗口过后连带清理已裁决条目', () => {
     const decisions = new PendingDecisionsStore(sidecar.pending)
     const snapshots = new SnapshotStore(sidecar.snapshots)
     const resolve = (decisionId: string, verdict: 'keep-left' | 'keep-both') =>
-      executeConfirm({ action: 'resolve', decisionId, verdict }, { workspacePath: undefined }, { store, decisions, snapshots, now: () => clock })
+      executeConfirm({ action: 'resolve', decisionId, verdict }, { workspacePath: undefined }, { instructions: noInstructions, store, decisions, snapshots, now: () => clock })
     for (const id of ['mem_a', 'mem_b', 'mem_c', 'mem_d', 'mem_e', 'mem_f']) await store.create(record({ id, name: id }))
 
     const del = (await decisions.upsert({ memoryIds: ['mem_a', 'mem_b'], summary: '1', fingerprint: 'f1' }, T0)).entry

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { PendingDecisionsStore, baselineBasisOf, conflictFingerprint, baselineFingerprint, dedupKey, isBaselineCurrent, isBasisCurrent, suggestionBasis } from '../src/governance/decisions.ts'
+import { PendingDecisionsStore, baselineBasisOf, baselineFingerprint, conflictFingerprint, dedupKey, isBaselineCurrent, isBasisCurrent, suggestionBasis } from '../src/governance/decisions.ts'
 import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, verdictLoser, type PendingDecision, type StoredSuggestion } from '../src/governance/schema.ts'
 import { editFingerprint } from '../src/governance/snapshots.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
@@ -329,38 +329,42 @@ describe('处理建议存在账本条目上', () => {
     expect(isBasisCurrent(entry, legacy, [a, inProject])).toBe(false)
   })
 
-  it('垂直冲突的依据另记基线所属项目和基线指纹：项目记忆只认它自己项目里的会话，全局记忆只认扫出这条冲突的那份基线；视图侧的核对只看记忆那一半', async () => {
+  it('垂直冲突的依据另记指令文件所属和基线指纹：所属按记忆自己的作用域记（只作说明），核对只看指纹；视图侧的核对只看记忆那一半', async () => {
     const s = makeStore()
     const memory = record({ id: 'mem_v', content: '用 npm', scope: 'workspace', workspacePath: '/w/app' })
     const { entry } = await s.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md', summary: '包管理器', fingerprint: 'fp' }, 1)
     const baseline = ['用 pnpm']
-    const sided = baselineBasisOf(memory, baseline, '/w/app', 'fp')
+    const sided = baselineBasisOf(memory, baseline, entry.fingerprint)
     expect(sided).toEqual({ workspace: '/w/app', fingerprint: baselineFingerprint(baseline) })
-    // 缺基线：会话不在这条记忆的项目里，或拿不到基线
-    expect(baselineBasisOf(memory, baseline, '/w/other', 'fp')).toBeUndefined()
-    expect(baselineBasisOf(memory, baseline, undefined, 'fp')).toBeUndefined()
-    expect(baselineBasisOf(memory, null, '/w/app', 'fp')).toBeUndefined()
-    // 全局记忆：只认扫出这条冲突的那份基线（用它重算冲突指纹和条目的一致），所属按会话所在的项目记，没有项目的会话记 global
+    // 缺基线：这条记忆对应的指令文件取不到或不存在
+    expect(baselineBasisOf(memory, null, entry.fingerprint)).toBeUndefined()
+    // 全局记忆对全局层：所属记 global
     const global = record({ id: 'mem_g' })
-    const scanned = conflictFingerprint([global], baseline)
-    expect(baselineBasisOf(global, baseline, '/w/other', scanned)).toEqual({ workspace: '/w/other', fingerprint: baselineFingerprint(baseline) })
-    expect(baselineBasisOf(global, baseline, undefined, scanned)).toEqual({ workspace: 'global', fingerprint: baselineFingerprint(baseline) })
-    // 换了一份指令文件（别的项目的会话）、或条目没有指纹：缺基线
-    expect(baselineBasisOf(global, ['用 yarn'], '/w/other', scanned)).toBeUndefined()
-    expect(baselineBasisOf(global, baseline, '/w/other', undefined)).toBeUndefined()
+    expect(baselineBasisOf(global, baseline, conflictFingerprint([global], baseline))).toEqual({ workspace: 'global', fingerprint: baselineFingerprint(baseline) })
 
     const basis = suggestionBasis(entry, [memory], sided)
     expect(basis.baseline).toEqual(sided)
     expect(pendingDecisionSchema.parse({ ...entry, suggestionFailure: { basis, cause: { kind: 'no-baseline' }, at: 1 } }).suggestionFailure?.basis).toEqual(basis)
     // 视图侧只核对记忆那一半
     expect(isBasisCurrent(entry, basis, [memory])).toBe(true)
-    // 采纳时按会话此刻的基线核对：项目、基线内容都对得上才算数
-    expect(isBaselineCurrent(basis, memory, baseline, '/w/app')).toBe(true)
-    expect(isBaselineCurrent(basis, memory, ['用 pnpm，脚本仓用 npm'], '/w/app')).toBe(false)
-    expect(isBaselineCurrent(basis, memory, baseline, '/w/other')).toBe(false)
-    expect(isBaselineCurrent(basis, memory, null, '/w/app')).toBe(false)
-    expect(isBaselineCurrent(suggestionBasis(entry, [memory]), memory, baseline, '/w/app')).toBe(false)
-    expect(isBaselineCurrent(suggestionBasis({ ...entry, fingerprint: scanned }, [global], baselineBasisOf(global, baseline, '/w/x', scanned)), global, baseline, '/w/y')).toBe(false)
+    // 采纳时按这条记忆此刻对应的指令文件核对：内容对得上才算数
+    expect(isBaselineCurrent(basis, baseline)).toBe(true)
+    expect(isBaselineCurrent(basis, ['用 pnpm，脚本仓用 npm'])).toBe(false)
+    expect(isBaselineCurrent(basis, null)).toBe(false)
+    expect(isBaselineCurrent(suggestionBasis(entry, [memory]), baseline)).toBe(false)
+    // 升级前按会话所在项目记下的所属不影响核对：指纹一致就算数
+    expect(isBaselineCurrent({ ...basis, baseline: { workspace: '/w/other', fingerprint: baselineFingerprint(baseline) } }, baseline)).toBe(true)
+  })
+
+  it('全局记忆的条目不是对着全局层扫出来的（升级前按某个项目的指令文件扫出、还没清理）：按缺基线算；项目记忆不比条目指纹', () => {
+    const global = record({ id: 'mem_g', content: '注释用中文' })
+    const globalLayer = ['全局：注释用英文']
+    const projectText = ['全局：注释用英文\n项目：用 pnpm']
+    expect(baselineBasisOf(global, globalLayer, conflictFingerprint([global], projectText))).toBeUndefined()
+    expect(baselineBasisOf(global, globalLayer, undefined)).toBeUndefined()
+    expect(baselineBasisOf(global, globalLayer, conflictFingerprint([global], globalLayer))).toEqual({ workspace: 'global', fingerprint: baselineFingerprint(globalLayer) })
+    const project = record({ id: 'mem_p', scope: 'workspace', workspacePath: '/w/app' })
+    expect(baselineBasisOf(project, projectText, undefined)).toEqual({ workspace: '/w/app', fingerprint: baselineFingerprint(projectText) })
   })
 
   it('写入：认领后重读核对，写上建议并清掉之前的失败', async () => {

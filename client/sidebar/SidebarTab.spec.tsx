@@ -999,13 +999,12 @@ describe('SidebarTab 就地裁决：和基线冲突', () => {
     expect([...container.querySelectorAll('.pm-conflict-actions button')].map(b => b.textContent)).toEqual(['在记忆页处理 ›'])
   })
 
-  it('故事 5a：会话不在这条记忆的项目里（全局记忆的建议是别的项目里生成的）：不写建议、不给「采纳建议」，只有「在记忆页处理 ›」', () => {
+  it('全局记忆的建议是在别的项目的会话里生成的：照样写建议、给「采纳建议」', () => {
     const onGlobal = { ...verticalSuggested('delete', { ...vertical, memory: glob } as PendingItem) } as PendingItem
     const suggestion = { ...(onGlobal as Extract<PendingItem, { kind: 'conflict-vertical' }>).suggestion!, baselineWorkspace: '/w/other' }
     const { container } = setup({ library: library(pref, glob), session: snapshot({ injectedIds: ['p1', 'g1'] }), pending: pending({ ...onGlobal, suggestion } as PendingItem) })
-    expect(container.querySelector('.pm-side-suggestion')).toBeNull()
-    expect(screen.queryByRole('button', { name: '采纳建议' })).toBeNull()
-    expect(yourCall().getByRole('button', { name: '在记忆页处理 ›' })).toBeInTheDocument()
+    expect(container.querySelector('.pm-side-suggestion')).toHaveTextContent('模型建议：以文件为准，删除这条')
+    expect([...container.querySelectorAll('.pm-conflict-actions button')].map(b => b.textContent)).toEqual(['采纳建议', '在记忆页处理 ›'])
   })
 
   it('建议整理不进右侧栏，也不算进底部「本项目还有 N 处待处理」', () => {

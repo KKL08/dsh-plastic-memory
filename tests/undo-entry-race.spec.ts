@@ -21,6 +21,7 @@ import { MEMORY_COMMAND_NAME, encodeMemoryCommand, type MemoryCommand } from '..
 import { runSavePipeline } from '../src/pipeline.ts'
 import { scopeAt } from '../src/scope.ts'
 import { candidate, record } from './helpers/record.ts'
+import { noInstructions } from './helpers/instructions.ts'
 
 // 撤销条目的指纹取本次提交的那条：A 已写盘、还没记撤销条目时 B 写进同一条，撤销 A 不能把 B 当成 A 写的盖掉。
 // fs 是进程边界：给 writeFile 套一层闸门，让 A 写盘后维护索引那一步停住；这时另一个进程（真实 writeFile）把 B 写进同一个文件，再放行 A。
@@ -64,7 +65,7 @@ function env() {
     memoryRoot: root, store, decisions, snapshots, cache: sidecar.scanCache, registry, views, ignores,
     checkups: new CheckupRecordStore(sidecar.checkups), autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups),
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),
-    host: { contextOf: async () => ({ workspacePath: WS, delegationDepth: 0, session: { id: 'sess-1' } }), llmOf: () => null, baselineOf: () => null },
+    instructions: noInstructions, host: { contextOf: async () => ({ workspacePath: WS, delegationDepth: 0, session: { id: 'sess-1' } }), llmOf: () => null },
     now, log: quietLog,
   })
   const run = async (c: MemoryCommand) =>

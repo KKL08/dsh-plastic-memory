@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildSemanticPrompt, parseSemanticFindings, runSemanticScan, planSemanticBatches, reportedTokens, semanticMemoryLine, SEMANTIC_BATCH_TOKEN_BUDGET, BASELINE_MAX_CHARS } from '../src/governance/semantic-scan.ts'
+import { buildSemanticPrompt, parseSemanticFindings, runSemanticScan, planSemanticBatches, reportedTokens, semanticMemoryLine, SEMANTIC_BATCH_TOKEN_BUDGET } from '../src/governance/semantic-scan.ts'
 import { estimateTokens } from '../src/snapshot.ts'
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { record } from './helpers/record.ts'
@@ -30,9 +30,12 @@ describe('buildSemanticPrompt', () => {
     expect(user).toContain('包管理用 npm')
   })
 
-  it('基线超长被裁切、密钥正好跨在裁切处：先遮盖再裁切，密钥的前半截也不进提示词', () => {
-    const { user } = buildSemanticPrompt([record({ id: 'mem_a' })], [`${'约'.repeat(BASELINE_MAX_CHARS - 13)} ${FAKE_SECRET.github} 后面还有别的约定`])
-    expect(user).not.toContain(FAKE_SECRET.github.slice(0, 12))
+  it('指令文件很长也整份发给模型（长度由读取时的上限管），末尾的规则在、其中的密钥遮住', () => {
+    const long = `${'全局约定。'.repeat(2000)}\n部署 token ${FAKE_SECRET.github}\n项目：用 pnpm`
+    const { user } = buildSemanticPrompt([record({ id: 'mem_a' })], [long])
+    expect(user).toContain('项目：用 pnpm')
+    expect(user).toContain('全局约定。'.repeat(2000))
+    expect(user).not.toContain(FAKE_SECRET.github)
   })
 
   it('每条记忆带上名称，说明文字里提到记忆时写名称', () => {
@@ -44,24 +47,6 @@ describe('buildSemanticPrompt', () => {
   it('无基线时 user 说明基线缺失，system 要求跳过垂直冲突', () => {
     const { user } = buildSemanticPrompt([record({ id: 'mem_a' })], null)
     expect(user).toContain('（无权威配置基线，跳过垂直冲突检测）')
-  })
-
-  it('基线超预算时按整条消息从最新往前收，装不下的较早消息整条舍弃并说明', () => {
-    const stale = 'Instructions from: AGENTS.md\n\n包管理用 npm'.padEnd(BASELINE_MAX_CHARS, '。')
-    const fresh = 'Updated instructions from: AGENTS.md\n\n包管理用 pnpm'
-    const { user } = buildSemanticPrompt([record({ id: 'mem_a' })], [stale, fresh])
-    expect(user).toContain('较早的 1 条指令消息共 8000 字符未纳入垂直冲突检测')
-    expect(user).toContain(fresh)
-    expect(user).not.toContain('包管理用 npm')
-  })
-
-  it('最新一条消息自身超预算时只保留其开头（来源抬头在前），并说明截断', () => {
-    const huge = 'Instructions from: AGENTS.md\n\n' + 'x'.repeat(BASELINE_MAX_CHARS + 500)
-    const { user } = buildSemanticPrompt([record({ id: 'mem_a' })], ['更早的一条', huge])
-    expect(user).toContain('最新一条指令消息已截断末尾')
-    expect(user).toContain('Instructions from: AGENTS.md')
-    expect(user).not.toContain('x'.repeat(BASELINE_MAX_CHARS + 1))
-    expect(user).not.toContain('更早的一条')
   })
 
   it('明确密钥不发给模型：记忆正文、摘要与基线里遮成占位，疑似密钥照原文', () => {
@@ -84,12 +69,11 @@ describe('buildSemanticPrompt', () => {
     expect(lines).toEqual([`  content: 网关 key 用 ${SECRET_MASK}`, `  content: 网关 key 用 ${SECRET_MASK}`])
   })
 
-  it('基线不超预算时按顺序原样纳入，不带说明', () => {
+  it('指令文件按顺序原样纳入', () => {
     const a = 'Instructions from: AGENTS.md\n\n包管理用 pnpm'
     const b = 'Additional instructions from: pkg/AGENTS.md\n\n子包用 vitest'
     const { user } = buildSemanticPrompt([record({ id: 'mem_a' })], [a, b])
     expect(user).toContain(`${a}\n\n${b}`)
-    expect(user).not.toContain('基线过长')
   })
 })
 

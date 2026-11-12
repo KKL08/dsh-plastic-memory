@@ -3250,42 +3250,33 @@ describe('垂直冲突卡：同一张处理卡（票 10）', () => {
   })
 
   it.each([
-    ['有建议', { suggestion: rewrite }],
-    ['没有建议', { noSuggestion: { code: 'not-generated' } }],
-    ['模型判断不了', { noSuggestion: { code: 'undecided', reason: '分不出' } }],
-  ] as const)('故事 5a：会话不在这条记忆的项目里（%s）：不显示建议，只写「要在这个项目的会话里处理」，只剩两个直接处理', (_label, extra) => {
-    setup([card({ memory: { ...V, workspacePath: '/w/other' }, ...extra } as Partial<Vertical>)])
-    expect(screen.queryByText(/没有建议|判断不了/)).toBeNull()
-    expect(screen.getByText('要在这个项目的会话里处理。')).toBeInTheDocument()
-    expect(screen.queryByText(REWRITTEN)).toBeNull()
-    expect(screen.queryByRole('button', { name: /采纳建议|补上建议|补充要求/ })).toBeNull()
-    expect(labelsOf(rowOf()!)).toEqual(DIRECT)
+    ['项目记忆，会话在别的项目', { memory: { ...V, workspacePath: '/w/other' }, suggestion: rewrite }],
+    ['全局记忆，建议是在别的项目的会话里生成的', { memory: { ...V, scope: 'global', workspacePath: undefined }, suggestion: { ...rewrite, baselineWorkspace: '/w/other' } }],
+    ['全局记忆，建议是在没有项目的会话里生成的', { memory: { ...V, scope: 'global', workspacePath: undefined }, suggestion: { ...rewrite, baselineWorkspace: 'global' } }],
+  ] as const)('会话在哪个项目都不影响处理（%s）：照样显示建议、给「采纳建议」「补充要求」', (_label, extra) => {
+    setup([card(extra as Partial<Vertical>)])
+    expect(screen.getByText(REWRITTEN)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '采纳建议' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '补充要求' })).toBeInTheDocument()
   })
 
-  it('故事 5a：全局记忆的建议是在别的项目里生成的：同样要回到那个项目处理', () => {
-    setup([card({ memory: { ...V, scope: 'global', workspacePath: undefined }, suggestion: { ...rewrite, baselineWorkspace: '/w/other' } })])
-    expect(screen.getByText('要在这个项目的会话里处理。')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '采纳建议' })).toBeNull()
-  })
-
-  it('全局记忆的建议是在没有项目的会话里生成的、现在的会话在某个项目里：同样不给采纳', () => {
-    setup([card({ memory: { ...V, scope: 'global', workspacePath: undefined }, suggestion: { ...rewrite, baselineWorkspace: 'global' } })])
-    expect(screen.getByText('要在这个项目的会话里处理。')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '采纳建议' })).toBeNull()
-  })
-
-  it('故事 24：体检时缺基线、现在的会话在这个项目里：写原因，给「补上建议」', () => {
-    setup([card({ noSuggestion: { code: 'no-baseline' } })])
-    expect(screen.getByText('体检时的会话不在这个项目里，没能读到指令文件。')).toBeInTheDocument()
+  it('会话不在这条记忆的项目里、还没有建议：照样给「补上建议」', () => {
+    setup([card({ memory: { ...V, workspacePath: '/w/other' }, noSuggestion: { code: 'not-generated' } })])
     expect(screen.getByRole('button', { name: '补上建议' })).toBeInTheDocument()
   })
 
-  it('补上建议时服务端回缺基线（会话读不到指令文件）：原位写「要在这个项目的会话里处理。」', async () => {
+  it('故事 24：体检时读不到指令文件：写原因，给「补上建议」', () => {
+    setup([card({ noSuggestion: { code: 'no-baseline' } })])
+    expect(screen.getByText('这条记忆对应的指令文件读不到，或在体检后改过。重新体检后再试。')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '补上建议' })).toBeInTheDocument()
+  })
+
+  it('补上建议时服务端回缺基线（指令文件读不到或在体检后改过）：原位写原因', async () => {
     setup([card({ noSuggestion: { code: 'not-generated' } })], {
-      respond: command => ({ ok: false, cmd: command.cmd, code: 'no-baseline', detail: '要在这条记忆所在项目的会话里补' }) as MemoryCommandResult,
+      respond: command => ({ ok: false, cmd: command.cmd, code: 'no-baseline', detail: '这条记忆对应的指令文件读不到，或在体检后改过。重新体检后再试。未做任何改动' }) as MemoryCommandResult,
     })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '补上建议' })) })
-    expect(await screen.findByRole('alert')).toHaveTextContent('要在这个项目的会话里处理。')
+    expect(await screen.findByRole('alert')).toHaveTextContent('这条记忆对应的指令文件读不到，或在体检后改过。重新体检后再试。')
   })
 
   it('含高危密钥：写这条记忆里有密钥、不会发给模型，没有「补上建议」「补充要求」', () => {
@@ -3353,20 +3344,20 @@ describe('垂直冲突卡：同一张处理卡（票 10）', () => {
     })
   })
 
-  it('「全部补上」算上会话在项目里的垂直冲突，不在项目里的不算', () => {
+  it('「全部补上」算上垂直冲突，会话不在它的项目里也算；读不到指令文件的也算', () => {
     const h = { ...horizontal, noSuggestion: { code: 'not-generated' } } as PendingItem
     const first = setup([h, card({ noSuggestion: { code: 'not-generated' } })])
     expect(screen.getByText('2 条还没有建议')).toBeInTheDocument()
     first.unmount()
-    setup([h, card({ memory: { ...V, workspacePath: '/w/other' }, noSuggestion: { code: 'not-generated' } })])
-    expect(screen.queryByText(/^\d+ 条还没有建议$/)).toBeNull()
+    setup([h, card({ memory: { ...V, workspacePath: '/w/other' }, noSuggestion: { code: 'not-generated' } }), { ...card({ noSuggestion: { code: 'no-baseline' } }), decisionId: 'd-v2', memory: { ...V, id: 'v2' } } as PendingItem])
+    expect(screen.getByText('3 条还没有建议')).toBeInTheDocument()
   })
 
-  it('英文界面：候选项、结论和需要回到项目的说明', () => {
-    const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(card({ suggestion: del }), { ...card({ noSuggestion: { code: 'not-generated' } }), decisionId: 'd-v2', memory: { ...V, id: 'v2', workspacePath: '/w/other' } } as PendingItem), health: scannedHealth(NOW) } })
+  it('英文界面：候选项、结论和缺基线的说明', () => {
+    const gateway = createFakeGateway({ session: SESSION, config, views: { pending: view(card({ suggestion: del }), { ...card({ noSuggestion: { code: 'no-baseline' } }), decisionId: 'd-v2', memory: { ...V, id: 'v2', workspacePath: '/w/other' } } as PendingItem), health: scannedHealth(NOW) } })
     render(<PanelShell gateway={gateway} t={createTranslator(en)}><PendingTab nav={createNavStore()} session={SESSION} scope={ALL_SCOPE} workspacePath="/w/app" now={NOW} /></PanelShell>)
     expect(screen.getByText('Go with the file, delete this one', { selector: 'strong' })).toBeInTheDocument()
-    expect(screen.getByText('Handle this in a conversation in this project.')).toBeInTheDocument()
+    expect(screen.getByText('The instruction file for this memory could not be read, or it changed after the checkup. Run a checkup and try again.')).toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: 'Keep both, not a conflict' }).length).toBeGreaterThan(0)
   })
 })

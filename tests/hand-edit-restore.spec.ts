@@ -24,6 +24,7 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { formatValidity } from '../src/validity.ts'
+import { noInstructions } from './helpers/instructions.ts'
 
 // 手编检测与恢复比较投影。
 // 全部用真实目录（FileTable + .state 侧表）；文件直接改盘模拟用户手编。
@@ -238,7 +239,7 @@ describe('手编检测与恢复比较投影', () => {
     const path = await writeMem('keep.md', wsRec({ id: 'mem_keep', globalCandidate: true }))
     const before = (await frontmatter(path)).updatedAt
 
-    const confirmed = await executeConfirm({ action: 'refresh', memoryId: 'mem_keep' }, { workspacePath: WS }, { store: h.store, decisions: h.decisions, snapshots: h.snapshots })
+    const confirmed = await executeConfirm({ action: 'refresh', memoryId: 'mem_keep' }, { workspacePath: WS }, { instructions: noInstructions, store: h.store, decisions: h.decisions, snapshots: h.snapshots })
     expect(confirmed.kind).toBe('refreshed')
     expect((await frontmatter(path)).updatedAt).toBe(before)
 

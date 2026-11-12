@@ -22,6 +22,7 @@ import type { MemorySnapshot, PendingDecision, ScanCacheEntry } from '../src/gov
 import type { MemoryRecord } from '../src/record-schema.ts'
 import { InMemoryTable } from './helpers/in-memory-table.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
+import { noInstructions } from './helpers/instructions.ts'
 
 /**
  * 九个工具绑定层（src/tools/*-tool.ts）的契约测试。绑定层此前从未被测：纯逻辑在
@@ -363,7 +364,7 @@ describe('memory_confirm 绑定', () => {
     const store = new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable())
     await store.put(record({ id: 'mem_c' }))
     return createConfirmTool({
-      store, decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
+      instructions: noInstructions, store, decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
       snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()), now: () => NOW,
       host: { contextOf: async () => ({ workspacePath: '/proj' }) },
     })
@@ -492,7 +493,7 @@ describe('memory_scan 绑定', () => {
       decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
       cache: new InMemoryKvTable<ScanCacheEntry>(),
       // 无 LLM：语义层跳过，只跑规则层
-      host: { contextOf: async () => ({ workspacePath }), llmOf: () => null, baselineOf: () => null },
+      instructions: noInstructions, host: { contextOf: async () => ({ workspacePath }), llmOf: () => null },
       now: () => NOW,
     })
   }

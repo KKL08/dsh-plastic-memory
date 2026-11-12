@@ -17,6 +17,7 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 import { record as baseRecord } from './helpers/record.ts'
 import { InMemoryTable } from './helpers/in-memory-table.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
+import { noInstructions } from './helpers/instructions.ts'
 
 // 同一个 id 在本项目和全局各有一份在用的：指明了项目那一份的确认、提升，读和写都只认那一份，全局那份一字不动。
 // 两个后端都跑，两份各自较新时各跑一遍（定位不带层时按「在用、较新」挑，正好把两种挑法都走到）。
@@ -87,7 +88,7 @@ describe.each(backends)('指明项目那一份的写入只改它：$name', ({ ma
     }
 
     const deps = () => ({
-      store: h.store,
+      store: h.store, instructions: noInstructions,
       decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
       snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
       now: () => NOW,

@@ -73,8 +73,7 @@ All notable changes to this project are documented here. The format follows
   request or apply the plan, and the result can be undone.
 - Conflicts between a memory and AGENTS.md / CLAUDE.md use the same card:
   the suggestion is to rewrite the memory, delete it, or keep both. The
-  instruction file is never changed. Suggestions for these conflicts are
-  made and applied from a session in the project the conflict was found in.
+  instruction file is never changed.
 - The sidebar shows the suggestion on a conflict, with Adopt and a link to
   settle it on the memory page.
 - Suggestions cost extra model calls: one per new conflict after a
@@ -82,6 +81,14 @@ All notable changes to this project are documented here. The format follows
   "Suggest" on the card; memories with high-risk secrets are never sent.
 
 ### Changed
+- Checkups compare each project's memories with that project's own
+  AGENTS.md / CLAUDE.md, the files a new conversation there would read,
+  including checkups of everything and automatic checkups; global memories
+  are compared with the global ones. Conflicts with these files can be
+  settled from any conversation, and automatic checkups use somewhat more
+  tokens now that they check them too. The files are checked in full, up to
+  the size DeepSeek Harness itself reads, and the checkup result says so
+  when they couldn't be read.
 - The built-in type definitions are clearer about what goes where. The
   user profile covers the person (everyday habits, interests, background),
   while preferences cover how you want work done in a project or task. A
@@ -114,6 +121,9 @@ All notable changes to this project are documented here. The format follows
   contract, checks that automatic checkups register a timer with it, and
   checks that every slot the interface uses is declared by the installed
   DeepSeek Harness.
+- `host:contract` checks that the installed plugin reads a project's
+  instruction files the way DeepSeek Harness does; with a model key, it also
+  checks that the model in a real conversation receives the same text.
 - `memory_save` takes `validFrom` and `validTo` as local `YYYY-MM-DD HH:mm`,
   or just a date when no time was given, which then gets the time of saving.
   Models often got the old epoch milliseconds wrong, saving memories that had

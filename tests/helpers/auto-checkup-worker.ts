@@ -27,6 +27,7 @@ import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCa
 import { ViewWriter, collectCheckupView, collectGlobalViews } from '../../src/gui/view-writer.ts'
 import { AutoCheckupScheduler, type AutoCheckupTimer } from '../../src/gui/auto-checkup.ts'
 import { CheckupSuggestions } from '../../src/gui/checkup-suggestions.ts'
+import { noInstructions } from './instructions.ts'
 
 const [root, startArg, findingsArg] = process.argv.slice(2)
 if (root === undefined || startArg === undefined || findingsArg === undefined) throw new Error('usage: auto-checkup-worker.ts <root> <start> <conflict|none>')
@@ -87,10 +88,10 @@ const decisions = new PendingDecisionsStore(sidecar.pending)
 const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
 // 体检之后的后续段：这里不写待处理视图，只重写体检视图
 const suggestions = new CheckupSuggestions({
-  store, decisions, checkups, views: { request: async () => {}, requestCheckups: () => writer.requestCheckups() }, now: () => clock.now, log: { ...quiet, info() {} },
+  store, instructions: noInstructions, decisions, checkups, views: { request: async () => {}, requestCheckups: () => writer.requestCheckups() }, now: () => clock.now, log: { ...quiet, info() {} },
 })
 const scheduler = new AutoCheckupScheduler({
-  scan: { store, registry, decisions, cache: sidecar.scanCache, ignores },
+  scan: { store, registry, decisions, cache: sidecar.scanCache, ignores, instructions: noInstructions },
   checkups,
   views: {
     collectViews: () => collectGlobalViews({ store, decisions, cache: sidecar.scanCache, ignores, checkups, registry, memoryRoot: root, now: () => clock.now }),

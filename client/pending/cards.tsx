@@ -30,7 +30,7 @@ import { baseOf, draftOf, isEditable } from './card-edit.ts'
 import { ModelEditPanel } from './model-edit.tsx'
 import { MovePanel } from './move.tsx'
 import { ProposalRequest, useRequestSlot } from './proposal.tsx'
-import { isInVerticalProject, SuggestionBlock } from './suggestion.tsx'
+import { SuggestionBlock } from './suggestion.tsx'
 
 type Item<K extends PendingItem['kind']> = Extract<PendingItem, { kind: K }>
 type Verdict = 'keep-left' | 'keep-right' | 'keep-both'
@@ -502,8 +502,8 @@ function rewrittenOf(ops: readonly ProposalOp[], memory: MemoryCardData | null):
  *   都保留（记 keep-both）。采纳只带条目 id 和建议 id；删除时这条含高危密钥会彻底删除，先原位确认。指令文件插件不改。
  * - 直接处理「以文件为准，删除这条」「都保留，不算冲突」不过模型：原位确认后走裁决命令 resolve（keep-right / keep-left）。
  * - 「补充要求」同横向，常用处理多一个「改写这条记忆」（填要求）。
- * - 补上建议、采纳、补充要求都要借来的会话在这条记忆的项目里（isInVerticalProject）：不在时建议块写「要在这个项目的会话里处理」，
- *   只留两个直接处理。采纳时服务端回 stale（建议换了一份、记忆或指令文件改过、会话换了项目）同横向：卡上这份建议当作失效。
+ * - 补上建议、采纳、补充要求在哪个会话里都能做：服务端按这条记忆对应的指令文件核对。
+ *   采纳时服务端回 stale（建议换了一份、记忆或指令文件改过）同横向：卡上这份建议当作失效。
  */
 function VerticalActions({ item, session, onDone, onRefused }: Pick<CardProps<'conflict-vertical'>, 'item' | 'session' | 'onDone' | 'onRefused'>) {
   const t = useT()
@@ -516,10 +516,8 @@ function VerticalActions({ item, session, onDone, onRefused }: Pick<CardProps<'c
   const slot = useRequestSlot(item.decisionId)
   const model = gateway.useModel(session, { shouldAsk: false })
   const { memory } = item
-  const isInProject = isInVerticalProject(item, session)
   const isStale = staleId !== undefined && (item.suggestion === undefined || item.suggestion.id === staleId)
-  const shown = isStale ? undefined : item.suggestion
-  const suggestion = isInProject ? shown : undefined
+  const suggestion = isStale ? undefined : item.suggestion
   const adopted = suggestion === undefined ? undefined : verdictOfAction(suggestion.action)
   const rewriting = suggestion?.action === 'rewrite' ? rewrittenOf(suggestion.ops, memory) : undefined
   const action = useCardAction(session, {
@@ -548,7 +546,7 @@ function VerticalActions({ item, session, onDone, onRefused }: Pick<CardProps<'c
     action.run(command)
   }
   const reason = action.unavailable ?? (memory === null ? t('conflict.missingHint') : undefined)
-  const canRequest = memory !== null && isEditable(memory) && model.status !== 'unavailable' && isInProject
+  const canRequest = memory !== null && isEditable(memory) && model.status !== 'unavailable'
   const isRequesting = canRequest && slot.isOpen
   const isPurge = (verdict: Verdict) => verdict === vertical.keepBaseline && memory?.hasSecret === true
   const adopt = () => {
@@ -620,7 +618,7 @@ function VerticalActions({ item, session, onDone, onRefused }: Pick<CardProps<'c
       {memory !== null
         ? (
           <SuggestionBlock
-            decisionId={item.decisionId} left={memory} suggestion={shown} needsProject={!isInProject}
+            decisionId={item.decisionId} left={memory} suggestion={suggestion}
             noSuggestion={item.noSuggestion ?? (isStale ? { code: 'not-generated' } : undefined)} isGenerating={item.isGeneratingSuggestion === true}
             notice={isStale && (item.noSuggestion === undefined || item.noSuggestion.code === 'not-generated') ? t('pending.suggestion.staleVertical') : undefined}
             session={session} onRefused={onRefused}

@@ -16,6 +16,7 @@ import { isModelChange } from '../governance/undo-rules.ts'
 import { editFingerprint, type SnapshotStore } from '../governance/snapshots.ts'
 import { genId, kindOf, type MemorySnapshot, type PendingDecision, type ProposalOp, type ScanCacheEntry, type SnapshotRecord, type SuggestionBasis } from '../governance/schema.ts'
 import type { AdviceIgnoreStore } from '../governance/advice-ignores.ts'
+import { baselineFor, type ReadInstructions } from '../governance/instructions.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import type { AutoCheckupSettingStore } from '../governance/auto-checkups.ts'
 import { executeConfirm, type ConfirmOptions } from '../tools/confirm.ts'
@@ -72,8 +73,10 @@ export interface MemoryCommandDeps {
   agentsMd: AgentsMdWriter
   views: Pick<ViewWriter, 'request' | 'rewriteAll' | 'collectViews' | 'requestCheckups'>
   /** 宿主会话（与工具共用同一个适配器，exec 只带 agent）：借来的会话 → workspace、子 agent 深度、会话 id；
-   *  在它的 agent 上解析模型（null = 拿不到）、取它的 AGENTS.md 基线。 */
-  host: ContextHost<{ workspacePath: string | undefined; delegationDepth: number; session: { id: string } }> & Pick<HostSession, 'llmOf' | 'baselineOf'>
+   *  在它的 agent 上解析模型（null = 拿不到）。 */
+  host: ContextHost<{ workspacePath: string | undefined; delegationDepth: number; session: { id: string } }> & Pick<HostSession, 'llmOf'>
+  /** 按作用域取指令文件（AGENTS.md / CLAUDE.md）：体检、垂直冲突的建议与采纳都按记忆对应的那份，和借来的会话在哪个项目无关。 */
+  instructions: ReadInstructions
   /** 体检开关（用时读配置）；关闭时治理类子命令返回 governance-disabled。缺省视为开启。 */
   isGovernanceEnabled?: () => boolean
   /** 旧 KV 导入是否已结清（导完且旧行已删）；缺省视为已结清。没结清时彻底删除回 failed：续传会把旧快照里的明文放回来。 */
@@ -195,7 +198,7 @@ const KEEP_OPS = {
   vertical: { 'delete': ['forget'], 'keep-both': ['keep'] },
 } as const
 
-/** 冲突条目的样子：横向两条记忆，垂直一条记忆加会话的指令文件；不是这两种（提升候选、超限、不合规的条目）为 undefined。 */
+/** 冲突条目的样子：横向两条记忆，垂直一条记忆加它对应的指令文件；不是这两种（提升候选、超限、不合规的条目）为 undefined。 */
 type ConflictShape = 'horizontal' | 'vertical'
 function conflictShape(entry: PendingDecision): ConflictShape | undefined {
   if (kindOf(entry) !== 'conflict') return undefined
@@ -422,7 +425,7 @@ async function dispatch(
   now: number,
 ): Promise<MemoryCommandResult> {
   const { cmd } = command
-  const executorDeps = { store: deps.store, decisions: deps.decisions, snapshots: deps.snapshots, log: deps.log, now: () => now }
+  const executorDeps = { store: deps.store, decisions: deps.decisions, snapshots: deps.snapshots, log: deps.log, instructions: deps.instructions, now: () => now }
   const notFound = (what: string) => fail(cmd, 'not-found', `不存在或已处理：${what}`)
   /** 界面落后于磁盘（卡片版本对不上、要动的已经不在）：失败结果带上是哪几条，界面据此等视图换成最新内容。 */
   const behind = (code: 'stale' | 'not-found', memoryIds: readonly string[], detail: string): Err => ({ ...fail(cmd, code, detail), memoryIds: [...memoryIds] })
@@ -547,11 +550,10 @@ async function dispatch(
     decisionId: string, verdict: 'keep-left' | 'keep-right' | 'keep-both', allowCrossWorkspace: boolean | undefined,
     adopt?: { basis: NonNullable<ConfirmOptions['adopt']>; memoryIds: string[] },
   ): Promise<MemoryCommandResult> => {
-    // 升级前导入的垂直冲突没有指纹，两边都留时要按基线现算
-    const baseline = deps.host.baselineOf(exec)
+    // 垂直冲突：采纳时核对依据里的基线；升级前导入的没有指纹，两边都留时要按这条记忆对应的指令文件现算
     const r = await executeConfirm(
       { action: 'resolve', decisionId, verdict, allowCrossWorkspace },
-      gov, executorDeps, { ...(baseline !== null ? { baseline } : {}), ...(adopt !== undefined ? { adopt: adopt.basis } : {}) },
+      gov, executorDeps, adopt !== undefined ? { adopt: adopt.basis } : {},
     )
     if (r.kind === 'error') {
       if (r.code === 'cross-workspace') return fail(cmd, 'cross-workspace', r.message, r.rejected)
@@ -587,8 +589,8 @@ async function dispatch(
 
   /**
    * 持有认领时按方案改写记忆：核对方案还在（采纳建议时建议 id 一致）和依据（冲突指纹、涉及记忆的完整内容指纹和作用域键）。
-   * 融合：保留方改写成融合稿、另一条软删；垂直改写：那条记忆改写成改写稿，另按会话此刻的基线核对依据里的基线（会话不在那个项目、
-   * 拿不到或指令文件改过按失效算），指令文件不碰。用整理所选的逐项执行（写入那一刻锁内按依据里的指纹再比一次）。整批一份快照。
+   * 融合：保留方改写成融合稿、另一条软删；垂直改写：那条记忆改写成改写稿，另按这条记忆此刻对应的指令文件核对依据里的基线（取不到
+   * 或指令文件改过按失效算），指令文件不碰。用整理所选的逐项执行（写入那一刻锁内按依据里的指纹再比一次）。整批一份快照。
    * 结账自己做（plan-applied，见 settlePlanned）；某一项没写成时同整理所选：已写的按写入记录条件回退，没退干净的仍是这次写下的照常记一笔可撤销的账，
    * 别处接着改过的列进 unrecordedIds，冲突条目不结清。允许全局与项目之间的冲突（写进哪条由生成建议时的合并规则定）。
    */
@@ -608,9 +610,9 @@ async function dispatch(
     const edit = plan.ops.find(op => op.kind === 'edit')
     const keeper = records.find(r => r.id === edit?.memoryId)
     const loser = records.find(r => r.id !== keeper?.id && plan.ops.some(op => op.kind === 'forget' && op.memoryId === r.id))
-    // 垂直改写：采纳时用当前会话的基线重算，和依据里记的对上才执行
-    const baseline = deps.host.baselineOf(exec)
-    if (isRewrite && !isBaselineCurrent(plan.basis, records[0]!, baseline, gov.workspacePath)) return stale()
+    // 垂直改写：采纳时按这条记忆此刻对应的指令文件重算，和依据里记的对上才执行
+    const baseline = isRewrite ? await baselineFor(deps.instructions, records[0]!) : null
+    if (isRewrite && !isBaselineCurrent(plan.basis, baseline)) return stale()
     // 写进哪条按合并规则定（全局优先，其次先建的）：界面带回来的方案也不能把融合稿写到另一条上
     const isShaped = isRewrite
       ? plan.ops.length === 1 && edit?.kind === 'edit' && keeper === records[0]
@@ -658,7 +660,7 @@ async function dispatch(
   }
 
   /**
-   * 按方案改写的结账：冲突条目结清为 plan-applied，回执按实际提交的那几份算，改后指纹按写下的那几份算（垂直改写再加会话的基线，同体检）；
+   * 按方案改写的结账：冲突条目结清为 plan-applied，回执按实际提交的那几份算，改后指纹按写下的那几份算（垂直改写再加这条记忆对应的指令文件，同体检）；
    * 结清之后才清掉引用被删那条的其他条目（冲突条目自己留着；垂直改写没有被删的），结清不成时那些条目原样留着。结清之后重读被删的那条：
    * 已被别处彻底删除就把这条结清也撤掉（彻底删除的连带清理可能正好落在结清的读写之间）；改写的那条被别处删掉同理。任一步抛错时按快照 id 重读账本：已结清就算记上了；
    * 没有就按快照退回，退干净了把错误抛出去，没退干净的交回调用方如实报「部分完成」。结清了返回 undefined。
@@ -1093,13 +1095,12 @@ async function dispatch(
       const target = command.layer !== undefined ? { kind: 'global' as const }
         : command.workspacePath !== undefined ? { kind: 'workspace' as const, workspacePath: command.workspacePath } : { kind: 'all' as const }
       const { workspacePath: currentWorkspace } = await deps.host.contextOf(exec)
-      const baseline = deps.host.baselineOf(exec)
       // 开跑前认领要查的范围（和自动体检共用一套认领）：正在体检就回 busy；「全部」要认领全局和每个项目，有一个认领不到整个回 busy
       const r = await runCheckup({
-        target, by: 'manual', llm, baseline,
+        target, by: 'manual', llm,
         ...(currentWorkspace !== undefined ? { currentWorkspace } : {}),
       }, {
-        scan: { store: deps.store, registry: deps.registry, decisions: deps.decisions, cache: deps.cache, ignores: deps.ignores },
+        scan: { store: deps.store, registry: deps.registry, decisions: deps.decisions, cache: deps.cache, ignores: deps.ignores, instructions: deps.instructions },
         checkups: deps.checkups, views: deps.views,
         interval: deps.heartbeat ?? processInterval,
         onClaimChanged: () => deps.views.requestCheckups(),
@@ -1115,10 +1116,8 @@ async function dispatch(
         case 'model-unavailable': return fail(cmd, 'failed', r.cause.message ?? r.cause.hostCode ?? r.cause.kind)
       }
       // 体检结果和冲突卡先出：建议在后续段里逐条补到卡上，命令不等它（它自己兜住异常）
-      // 垂直冲突的建议要这个会话的指令文件和所在项目
       void deps.suggestions?.run({
-        target, by: 'manual', llm, outcome: r, baseline,
-        ...(currentWorkspace !== undefined ? { currentWorkspace } : {}), ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
+        target, by: 'manual', llm, outcome: r, ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
       })
       // 判新增的覆盖范围：项目体检读的是本项目的可见集合（全局 + 本项目），只查全局是全局，全库体检是全部作用域
       const covered = target.kind === 'global' ? [target]
@@ -1201,12 +1200,12 @@ async function dispatch(
       const live = records as MemoryRecord[]
       // 高危密钥的原文不发给模型；确认存下的疑似密钥同注入，照原文发
       if (live.some(r => hasCriticalSecret(r))) return fail(cmd, 'has-secret', '含密钥的记忆不发给模型。未做任何改动')
-      // 垂直冲突要这条记忆所在项目的指令文件：借来的会话不属于这个项目、或拿不到指令文件时不生成，也不记在条目上
-      const baseline = shape === 'vertical' ? deps.host.baselineOf(exec) : null
-      const side = shape === 'vertical' ? baselineBasisOf(live[0]!, baseline, gov.workspacePath, entry.fingerprint) : undefined
-      if (shape === 'vertical' && side === undefined) return fail(cmd, 'no-baseline', '要在扫出这条冲突的那个项目的会话里补，并且那个会话读得到 AGENTS.md / CLAUDE.md。未做任何改动')
+      // 垂直冲突要这条记忆对应的指令文件（项目记忆是它所在项目的，全局记忆是全局层的）：取不到或不存在时不生成，也不记在条目上
+      const baseline = shape === 'vertical' ? await baselineFor(deps.instructions, live[0]!) : null
+      const side = shape === 'vertical' ? baselineBasisOf(live[0]!, baseline, entry.fingerprint) : undefined
+      if (shape === 'vertical' && side === undefined) return fail(cmd, 'no-baseline', '这条记忆对应的指令文件读不到，或在体检后改过。重新体检后再试。未做任何改动')
       const isCurrent = entry.suggestion !== undefined && isBasisCurrent(entry, entry.suggestion.basis, live)
-        && (side === undefined || isBaselineCurrent(entry.suggestion.basis, live[0]!, baseline, gov.workspacePath))
+        && (side === undefined || isBaselineCurrent(entry.suggestion.basis, baseline))
       if (isCurrent) return { ok: true, cmd, decisionId: entry.id }
       const llm = deps.host.llmOf(exec)
       if (llm === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型')
@@ -1258,10 +1257,10 @@ async function dispatch(
       if (detectSecrets([command.request, ...(command.priorRequests ?? []), ...previousText].join('\n')).some(h => h.severity === 'critical')) {
         return fail(cmd, 'secret-critical', '要求或上一份方案里有高危密钥，没有发给模型')
       }
-      // 垂直冲突同补上建议：要这条记忆所在项目的会话和它的指令文件
-      const baseline = shape === 'vertical' ? deps.host.baselineOf(exec) : null
-      const side = shape === 'vertical' ? baselineBasisOf(live[0]!, baseline, gov.workspacePath, entry.fingerprint) : undefined
-      if (shape === 'vertical' && side === undefined) return fail(cmd, 'no-baseline', '要在扫出这条冲突的那个项目的会话里生成，并且那个会话读得到 AGENTS.md / CLAUDE.md。没有生成方案')
+      // 垂直冲突同补上建议：要这条记忆对应的指令文件
+      const baseline = shape === 'vertical' ? await baselineFor(deps.instructions, live[0]!) : null
+      const side = shape === 'vertical' ? baselineBasisOf(live[0]!, baseline, entry.fingerprint) : undefined
+      if (shape === 'vertical' && side === undefined) return fail(cmd, 'no-baseline', '这条记忆对应的指令文件读不到，或在体检后改过。重新体检后再试。没有生成方案')
       const llm = deps.host.llmOf(exec)
       if (llm === null) return fail(cmd, 'llm-unavailable', '借用的会话拿不到模型')
       // 只读、不认领：模型调用可能超过认领的 60 秒；依据版本按生成前读到的算，应用时认领、重读、核对它

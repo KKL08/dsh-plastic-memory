@@ -3,13 +3,14 @@ import type { MemoryStore } from '../store.ts'
 import type { CheckupInitiator, CodedNote, ScanNoteCode } from '../contract-codes.ts'
 import type { TypeRegistry } from '../type-registry.ts'
 import type { MemoryRecord } from '../record-schema.ts'
-import { maskSecretSurface } from '../secrets.ts'
+import { maskDiagnostic, maskSecretSurface } from '../secrets.ts'
 import { candidateFingerprint, conflictFingerprint, type PendingDecisionsStore } from '../governance/decisions.ts'
 import type { CasKvTable } from '../kv-table.ts'
 import type { Finding, ScanCacheEntry } from '../governance/schema.ts'
 import { runRuleScan, buildMalformedFindings } from '../governance/rule-scan.ts'
 import { runSemanticScan, type SemanticLlm } from '../governance/semantic-scan.ts'
 import { isModelUnavailableCode } from '../governance/host-llm.ts'
+import { cacheInstructions, instructionTexts, type InstructionFiles, type ReadInstructions } from '../governance/instructions.ts'
 import type { ContextHost, HostSession } from './host-session.ts'
 import type { CheckupCause } from '../gui/contract.ts'
 import { scoreScope, listWorkspaces, validateScopePaths, crossScopeConflicts, checkupRowBase, ignoredNote, findingFingerprints, GLOBAL_CACHE_KEY, TIER_LABEL } from '../governance/scope-health.ts'
@@ -31,14 +32,15 @@ export interface ScanToolDeps {
   ignores?: Pick<AdviceIgnoreStore, 'list'>
   /** 体检记录表：一次体检全部写完后给覆盖到的范围写完成记录（提交点）。缺省不写。 */
   checkups?: Pick<CheckupRecordStore, 'list' | 'complete'>
-  /** 宿主会话，都按触发调用的会话取：baselineOf 是该会话的 AGENTS.md/CLAUDE.md 基线（宿主投影按 session 隔离）；
-   *  llmOf 按调用解析——provider/model 只能从触发调用的 agent 拿到，插件加载时不存在，null = 拿不到 LLM（语义层跳过并说明）；
-   *  contextOf 给当前会话的 workspace（默认口径"当前项目"的来源）。 */
-  host: ContextHost<{ workspacePath: string | undefined }> & Pick<HostSession, 'llmOf' | 'baselineOf'>
+  /** 按作用域取指令文件（AGENTS.md / CLAUDE.md）：垂直冲突对照它，项目记忆对它所在项目的，全局记忆对全局层。一次扫描内每个作用域只读一次。 */
+  instructions: ReadInstructions
+  /** 宿主会话，都按触发调用的会话取：llmOf 按调用解析——provider/model 只能从触发调用的 agent 拿到，插件加载时不存在，
+   *  null = 拿不到 LLM（语义层跳过并说明）；contextOf 给当前会话的 workspace（默认口径"当前项目"的来源）。 */
+  host: ContextHost<{ workspacePath: string | undefined }> & Pick<HostSession, 'llmOf'>
   now?: () => number
 }
 
-/** 扫描核心的依赖：工具依赖去掉宿主会话（模型、基线、当前项目由调用方解析好传进 ScanInput）。 */
+/** 扫描核心的依赖：工具依赖去掉宿主会话（模型、当前项目由调用方解析好传进 ScanInput）。 */
 export type ScanCoreDeps = Omit<ScanToolDeps, 'host'>
 
 export interface ScanArgs {
@@ -55,7 +57,7 @@ export interface ScanRun {
   /** 只查全局：只读写全局记忆，只写全局的缓存与完成记录；给出时忽略 scope / scopes。 */
   isGlobalOnly?: boolean
   /**
-   * 全库体检每扫完一个作用域，交出它自己的说明：没有基线、它的语义层分批 / 没做成、它跳过了基线检查等。
+   * 全库体检每扫完一个作用域，交出它自己的说明：指令文件取不到或被截断、它的语义层分批 / 没做成等。
    * 只关乎整次的（跨项目重复没做成）不在里面，只在结果的 notes 里。
    */
   onScopeNotes?: (scope: Scope, notes: readonly ScanNote[]) => void
@@ -232,7 +234,7 @@ async function scanPass(
   quarantined: readonly { path: string; error: string }[],
   layers: 'rule' | 'semantic' | 'full',
   llm: SemanticLlm | null,
-  baseline: readonly string[] | null,
+  instructions: ReadInstructions,
   now: number,
   signal?: AbortSignal,
   onUsage?: (tokens: number) => void,
@@ -243,6 +245,8 @@ async function scanPass(
   const scopeLabel = scopeKey(scope)
   let semanticBatches = 0
   let isSemanticDone = false
+  // 这个作用域对照的指令文件：项目是全局层加本项目，全局只有全局层。只在跑内容检查时读
+  let baseline: readonly string[] | null = null
   if (layers === 'rule' || layers === 'full') {
     findings.push(...runRuleScan(records, id => byId.get(id), now))
     findings.push(...buildMalformedFindings(quarantined))
@@ -255,12 +259,19 @@ async function scanPass(
         ? { code: 'no-layer-executed', text: '语义层不可用（当前环境拿不到 LLM），且 layers=semantic 不含规则层，本次未执行任何检测' }
         : { code: 'semantic-unavailable', text: '语义层不可用（当前环境拿不到 LLM），只返回规则层结果' })
     } else {
+      const files = await instructions(scope)
+      baseline = instructionTexts(files)
+      notes.push(...instructionNotes(files))
       // 一批装得下时按治理优先级 + 新近度发给模型；分批时由 planSemanticBatches 按稳定键重排，批的边界不随编辑漂移
       const priorityOrder = { high: 0, medium: 1, low: 2 } as const
       const ordered = [...records].sort((a, b) =>
         priorityOrder[deps.registry.get(a.type).governancePriority] - priorityOrder[deps.registry.get(b.type).governancePriority]
         || b.updatedAt - a.updatedAt)
-      const semantic = await runSemanticScan(ordered, baseline, llm, signal, onUsage)
+      const scanned = await runSemanticScan(ordered, baseline, llm, signal, onUsage)
+      // 项目这一轮的可见集合含全局记忆：全局记忆对指令文件的冲突只在全局这一轮查（对全局层），这里报出的丢掉
+      const semantic = scope.kind === 'workspace'
+        ? { ...scanned, findings: scanned.findings.filter(f => f.baselineRef === undefined || byId.get(f.memoryIds[0]!)?.scope === 'workspace') }
+        : scanned
       // 失败时这个作用域整个没有语义结果，只报失败
       if (semantic.batches > 1 && !semantic.failed) {
         semanticBatches = semantic.batches
@@ -339,6 +350,17 @@ async function scanPass(
   return { findings, scanned: records.length, semanticCachedAt, notes, decisionItems, created, existing, semanticBatches, isChecked: layers === 'full' && isSemanticDone }
 }
 
+/** 指令文件的说明：取不到时垂直冲突没查，被截断时只对照了一部分；没有指令文件是常态，不说明。 */
+function instructionNotes(files: InstructionFiles): ScanNote[] {
+  if (files.kind === 'unavailable') {
+    // 原因是读取时的报错原话，同其他诊断文字先遮密钥
+    const reason = maskDiagnostic(files.reason)
+    return [{ code: 'baseline-missing', text: `取不到 AGENTS.md / CLAUDE.md（${reason}），垂直冲突检测未执行`, cause: { kind: 'error', message: reason } }]
+  }
+  if (files.kind === 'found' && files.isTruncated) return [{ code: 'baseline-truncated', text: 'AGENTS.md / CLAUDE.md 超过长度上限，垂直冲突只对照了其中一部分' }]
+  return []
+}
+
 /**
  * 提升候选入账：扫到的每个项目，把带 globalCandidate 的 active 记忆同步成 promote-candidate 条目（GUI 待处理读它）。
  * 只看规则数据、不调模型，所以 layers=rule 也做；只动本次扫到的项目，别的项目的条目等扫到它再说。
@@ -361,7 +383,7 @@ async function syncPromoteCandidates(
 }
 
 /**
- * 扫描核心的输入：模型、基线、当前项目都已解析好，不认识工具调用上下文。
+ * 扫描核心的输入：模型、当前项目都已解析好，不认识工具调用上下文。
  * target 是单个作用域（扫它的可见集合）或全库体检（各项目独立扫 + 全局专项，workspaces 缺省 = 库里全部项目）。
  */
 export interface ScanInput {
@@ -369,8 +391,6 @@ export interface ScanInput {
   layers?: 'rule' | 'semantic' | 'full'
   /** null = 拿不到 LLM（语义层跳过并说明）。 */
   llm: SemanticLlm | null
-  /** 当前会话的 AGENTS.md/CLAUDE.md 基线；null = 没有。只对当前项目和全局生效。 */
-  baseline: readonly string[] | null
   /** 当前会话的 workspace；缺省 = 没有当前项目（全局会话、无会话的自动体检）。 */
   currentWorkspace?: string
   /** 用户取消信号：每个语义调用透传，各写入前设检查点。 */
@@ -380,15 +400,14 @@ export interface ScanInput {
 }
 
 /**
- * memory_scan 的工具壳：从调用上下文解析模型、基线、当前项目，把参数翻成扫描目标，交给 runScan。
+ * memory_scan 的工具壳：从调用上下文解析模型、当前项目，把参数翻成扫描目标，交给 runScan。
  * 默认口径=当前 workspace 的可见集合（global + 本项目）；scope='all' 或 scopes 列表进入全库体检；
  * run.isGlobalOnly 只查全局（记忆页的全局体检），给出时忽略 scope / scopes。
  */
 export async function executeScan(args: ScanArgs, deps: ScanToolDeps, exec: ToolRunContext, run: ScanRun = {}): Promise<ScanToolResult> {
-  // 开始时间、模型、基线在调用进来时就定，不等解析会话
+  // 开始时间、模型在调用进来时就定，不等解析会话
   const startedAt = deps.now?.() ?? Date.now()
   const llm = deps.host.llmOf(exec)
-  const baseline = deps.host.baselineOf(exec)
   const currentWorkspace = exec !== undefined ? (await deps.host.contextOf(exec)).workspacePath : undefined
   const isCheckup = !run.isGlobalOnly && (args.scope === 'all' || (args.scopes !== undefined && args.scopes.length > 0))
   // 单个作用域的目标：只查全局 > 显式路径 > 当前会话 workspace > 全局（无 workspace 会话）
@@ -399,7 +418,7 @@ export async function executeScan(args: ScanArgs, deps: ScanToolDeps, exec: Tool
   return runScan({
     target,
     ...(args.layers !== undefined ? { layers: args.layers } : {}),
-    llm, baseline,
+    llm,
     ...(currentWorkspace !== undefined ? { currentWorkspace } : {}),
     ...(exec?.signal !== undefined ? { signal: exec.signal } : {}),
     startedAt,
@@ -410,10 +429,12 @@ export async function executeScan(args: ScanArgs, deps: ScanToolDeps, exec: Tool
  * 扫描核心：只读+报告。副作用仅两处——语义结果写 scan_cache；conflict 与提升候选进 pending_decisions。
  * 清理动作由模型经用户确认后调 forget/save 执行。
  * 提交点：缓存、账本、提升候选都写完之后，给规则检查和内容检查都做完的每个作用域写完成记录（上次体检）；没走到这一步就不算做完。
+ * 指令文件按作用域现读（项目：全局层加本项目；全局：只有全局层），这次扫描内每个作用域只读一次。全局做完时顺带清全局记忆的遗留垂直条目。
  */
 export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<ScanRun, 'by' | 'onScopeNotes' | 'onCommitted'> = {}): Promise<ScanToolResult> {
-  const { llm, baseline, signal, currentWorkspace: currentWs } = input
+  const { llm, signal, currentWorkspace: currentWs } = input
   const layers = input.layers ?? 'full'
+  const instructions = cacheInstructions(deps.instructions)
   const now = input.startedAt ?? deps.now?.() ?? Date.now()
   // 本次扫描各次模型调用的实际用量合计；宿主一次都没报时保持 undefined，不拿估算顶替
   let usageTokens: number | undefined
@@ -422,10 +443,18 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
     ...(semanticBatches > 0 ? { semanticBatches } : {}),
     ...(usageTokens !== undefined ? { usageTokens } : {}),
   })
-  /** 扫完之后的收尾管道：扫到的项目同步提升候选，再给做完的作用域写完成记录（开始时间是这次扫描开始的时刻，完成时间现读）。 */
-  const settle = async (workspaces: readonly string[], checked: readonly Scope[]) => {
+  /**
+   * 扫完之后的收尾管道：扫到的项目同步提升候选；全局做完了就按全局层的指令文件清全局记忆的遗留垂直条目（取不到时不清）；
+   * 再给做完的作用域写完成记录（开始时间是这次扫描开始的时刻，完成时间现读）。byId 是这次扫描读到的记忆。
+   */
+  const settle = async (workspaces: readonly string[], checked: readonly Scope[], byId: ReadonlyMap<string, MemoryRecord>) => {
     signal?.throwIfAborted()
     await syncPromoteCandidates(deps, workspaces, now)
+    if (checked.some(scope => scope.kind === 'global')) {
+      const globalFiles = await instructions({ kind: 'global' })
+      signal?.throwIfAborted()
+      if (globalFiles.kind !== 'unavailable') await deps.decisions.dropStaleGlobalVertical(instructionTexts(globalFiles), id => byId.get(id))
+    }
     if (deps.checkups !== undefined && checked.length > 0) {
       signal?.throwIfAborted()
       await deps.checkups.complete(checked, { startedAt: now, completedAt: deps.now?.() ?? Date.now(), by: run.by ?? 'agent' })
@@ -462,10 +491,6 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
   if (checkup) {
     const wsList = requestedWs ?? listWorkspaces(data.byId.values())
     const notes: ScanNote[] = []
-    if (baseline === null) notes.push({ code: 'baseline-missing', text: '未检测到 AGENTS.md 基线，垂直冲突检测未执行' })
-    // 没有基线对每个作用域都成立
-    const everyScope = [...notes]
-    const isVerticalSkippable = llm !== null && layers !== 'rule'
 
     const decisionItems: ScanPass['decisionItems'] = []
     const seenDecisions = new Set<string>()
@@ -481,39 +506,28 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
     }
 
     // 每个 workspace 独立扫描：输入是该 ws 的可见集合（含 global，跨作用域的冲突要在同一 prompt 里才可判），
-    // 语义缓存按作用域分别写；分数由 scoreScope 按归属规则计算（纯 global 噪音不进 ws 分数）
-    // 基线是当前会话的指令内容（含本项目 CLAUDE.md），拿它去判其他 workspace 的垂直冲突
-    // 会误判——只对当前会话所属 ws 和全局生效，其余 ws 跳过垂直检测并如实说明
+    // 语义缓存按作用域分别写；分数由 scoreScope 按归属规则计算（纯 global 噪音不进 ws 分数）。
+    // 垂直冲突各对各的指令文件：本项目记忆对本项目的（含全局层），全局记忆只在下面全局这一轮对全局层
     const byWorkspace = new Map<string, MemoryRecord[]>()
     const checked: Scope[] = []
-    let baselineSkipped = 0
     for (const ws of wsList) {
       signal?.throwIfAborted()
       const visible = active(visibleTo(ws))
-      const wsBaseline = ws === currentWs ? baseline : null
-      const isBaselineSkipped = baseline !== null && wsBaseline === null
-      if (isBaselineSkipped) baselineSkipped++
       const scope: Scope = { kind: 'workspace', workspacePath: ws }
-      const pass = await scanPass(deps, data.byId, visible, scope, quarantinedIn(scope), layers, llm, wsBaseline, now, signal, onUsage)
+      const pass = await scanPass(deps, data.byId, visible, scope, quarantinedIn(scope), layers, llm, instructions, now, signal, onUsage)
       collect(pass)
-      run.onScopeNotes?.(scope, [
-        ...everyScope, ...pass.notes,
-        ...(isBaselineSkipped && isVerticalSkippable ? [{ code: 'baseline-session-scoped' as const, text: '基线随当前会话，扫描其他 workspace 时垂直冲突检测已跳过' }] : []),
-      ])
+      run.onScopeNotes?.(scope, pass.notes)
       if (pass.isChecked) checked.push(scope)
       byWorkspace.set(ws, active(r => r.scope === 'workspace' && r.workspacePath === ws))
     }
     // 全局：global-only 输入，单独一个缓存键
     signal?.throwIfAborted()
     const globalRecords = active(isGlobal)
-    const globalPass = await scanPass(deps, data.byId, globalRecords, { kind: 'global' }, quarantinedIn({ kind: 'global' }), layers, llm, baseline, now, signal, onUsage)
+    const globalPass = await scanPass(deps, data.byId, globalRecords, { kind: 'global' }, quarantinedIn({ kind: 'global' }), layers, llm, instructions, now, signal, onUsage)
     collect(globalPass)
-    run.onScopeNotes?.({ kind: 'global' }, [...everyScope, ...globalPass.notes])
+    run.onScopeNotes?.({ kind: 'global' }, globalPass.notes)
     if (globalPass.isChecked) checked.push({ kind: 'global' })
-    if (baselineSkipped > 0 && isVerticalSkippable) {
-      notes.push({ code: 'baseline-session-scoped', text: `基线随当前会话，${baselineSkipped} 个其他 workspace 的垂直冲突检测已跳过` })
-    }
-    await settle(wsList, checked)
+    await settle(wsList, checked, data.byId)
     const created = decisionItems.filter(i => i.isNew).length
     const existing = decisionItems.length - created
 
@@ -579,16 +593,10 @@ export async function runScan(input: ScanInput, deps: ScanCoreDeps, run: Pick<Sc
   // 单个作用域：输入用可见集合（global + 本项目）——global 里的问题（含最高危的 secret）对本会话同样生效，
   // 跨作用域的冲突也要双方同在 prompt 里才可判；分数归属的拆分在 memory_health（scoreScope）做。
   const records = active(wsPath !== undefined ? visibleTo(wsPath) : isGlobal)
-  // 显式扫别的 workspace 时基线不适用（基线随当前会话）；扫自己或全局照用
-  const passBaseline = wsPath === undefined || wsPath === currentWs ? baseline : null
   signal?.throwIfAborted()
-  const pass = await scanPass(deps, data.byId, records, target, quarantinedIn(target), layers, llm, passBaseline, now, signal, onUsage)
-  await settle(wsPath !== undefined ? [wsPath] : [], pass.isChecked ? [target] : [])
+  const pass = await scanPass(deps, data.byId, records, target, quarantinedIn(target), layers, llm, instructions, now, signal, onUsage)
+  await settle(wsPath !== undefined ? [wsPath] : [], pass.isChecked ? [target] : [], data.byId)
   const notes = [...pass.notes]
-  if ((layers === 'semantic' || layers === 'full') && llm) {
-    if (baseline === null) notes.push({ code: 'baseline-missing', text: '未检测到 AGENTS.md 基线，垂直冲突检测未执行' })
-    else if (passBaseline === null) notes.push({ code: 'baseline-session-scoped', text: '基线随当前会话，扫描其他 workspace 时垂直冲突检测已跳过' })
-  }
 
   // 用户忽略的建议不列为发现（语义缓存仍存完整结果：取消忽略后不用重扫就能回来）
   const { kept: findings, ignored } = applyIgnores(pass.findings, data.ignores, data.byId)

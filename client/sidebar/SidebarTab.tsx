@@ -38,7 +38,7 @@ import type { NavTarget } from '../nav.ts'
 import { GroupBody, useFold } from '../library/groups.tsx'
 import { mergeTypeLabels, ViewMessage } from '../library/shared.tsx'
 import { typeLabel } from '../type-label.ts'
-import { ACTION_LABEL, isInVerticalProject } from '../pending/suggestion.tsx'
+import { ACTION_LABEL } from '../pending/suggestion.tsx'
 import { AdviceNote, ResultLine } from '../ui/Advice.tsx'
 import { Button } from '../ui/Button.tsx'
 import { ConflictRuling, VerticalConflictRuling } from '../ui/ConflictRuling.tsx'
@@ -361,8 +361,7 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
     if (entry.kind === 'vertical') {
       const { item } = entry
       const isStale = isStaleOf(item)
-      // 建议要这条记忆所在项目的指令文件：会话不在那个项目里时不给采纳，去记忆页看原因
-      const suggestion = isStale || item.memory === null || !isInVerticalProject(item, session) ? undefined : item.suggestion
+      const suggestion = isStale || item.memory === null ? undefined : item.suggestion
       return (
         <div key={item.decisionId}>
           <VerticalConflictRuling

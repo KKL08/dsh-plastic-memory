@@ -6,6 +6,7 @@ import type { SemanticLlm } from '../governance/semantic-scan.ts'
 import { isModelUnavailableCode } from '../governance/host-llm.ts'
 import type { CheckupRecordStore } from '../governance/checkup-records.ts'
 import { baselineBasisOf, isBaselineCurrent, isBasisCurrent, suggestionBasis, type BaselineBasis, type PendingDecisionsStore } from '../governance/decisions.ts'
+import { baselineFor, cacheInstructions, type ReadInstructions } from '../governance/instructions.ts'
 import { genId, kindOf, type PendingDecision } from '../governance/schema.ts'
 import { SCOPE_KEYS, checkupKey, type GlobalViewName } from './contract.ts'
 import type { CheckupRunOutcome } from './checkup-run.ts'
@@ -25,6 +26,8 @@ export interface CheckupSuggestionsDeps {
   checkups: Pick<CheckupRecordStore, 'addUsage'>
   /** 重写待处理视图（标记变了、写下一条之后）、体检视图（补记了用量之后）。没有视图写入器时什么都不做。 */
   views: { request: (views: readonly GlobalViewName[]) => Promise<void>; requestCheckups: () => Promise<void> }
+  /** 按作用域取指令文件：垂直冲突对照这条记忆对应的那份（项目记忆是它所在项目的，全局记忆是全局层的）。一段内每个作用域只读一次。 */
+  instructions: ReadInstructions
   /** 宿主的读事件服务：生成前回查两条的出处。缺省或返回 null 时不带出处。 */
   getReadEvent?: () => ReadEventFn | null
   /** 自动体检一次最多补几条，缺省 AUTO_SUGGESTION_LIMIT。 */
@@ -43,16 +46,15 @@ export interface CheckupSuggestionsInput {
   outcome: CheckupRunOutcome
   /** 调用方的取消信号（插件卸载）：传进模型调用；触发后不等在途的调用，不再写。 */
   signal?: AbortSignal
-  /** 体检借来的会话生效的 AGENTS.md / CLAUDE.md（垂直冲突要它）；缺省或 null = 没有（自动体检）。 */
-  baseline?: readonly string[] | null
-  /** 体检借来的会话所在项目；缺省 = 没有项目。 */
-  currentWorkspace?: string
 }
 
-/** 要体检来生成的一条：横向是两条记忆；垂直是那一条，side 是会话此刻能给它用的基线（undefined = 缺基线，只记原因、不生成）。 */
+/**
+ * 要体检来生成的一条：横向是两条记忆；垂直是那一条和它对应的指令文件（baseline），side 是依据里的基线一半
+ * （undefined = 缺基线：指令文件取不到或不存在，只记原因、不生成）。
+ */
 type Needing =
   | { shape: 'horizontal'; records: [MemoryRecord, MemoryRecord] }
-  | { shape: 'vertical'; records: [MemoryRecord]; side: BaselineBasis | undefined }
+  | { shape: 'vertical'; records: [MemoryRecord]; baseline: readonly string[] | null; side: BaselineBasis | undefined }
 
 /**
  * 体检之后的后续段：给这次体检范围内还没有建议的冲突逐条生成处理建议，写到账本条目上。
@@ -62,8 +64,8 @@ type Needing =
  *
  * 对象：范围内未决、双方都在用、都不含高危密钥、没有当前依据的建议、模型没对当前依据答过「判断不了」、尝试次数没到上限的冲突，先旧后新。
  * 手动体检不设上限；自动体检一次最多 AUTO_SUGGESTION_LIMIT 条，没轮到的记成「名额用完」（不调用模型、不算尝试）。
- * 垂直冲突（记忆和指令文件）要借来的会话属于这条记忆的项目、读得到指令文件：手动体检能给的照常生成，依据记下基线所属项目和基线指纹；
- * 给不了的记成「缺基线」（不调用模型、不算尝试），卡上写要到那个项目的会话里处理。自动体检没有会话，不碰垂直冲突。
+ * 垂直冲突（记忆和指令文件）对照这条记忆对应的指令文件（项目记忆是它所在项目的，全局记忆是全局层的），手动、自动体检都生成，
+ * 依据记下指令文件所属和基线指纹；指令文件取不到或不存在的记成「缺基线」（不调用模型、不算尝试）。
  *
  * 每条一次模型调用，生成在条目认领之外；写入时认领、重读、核对（同「补上建议」），写成了就给这次的冲突指纹记一次尝试。
  * 每写一条重写一次待处理视图；正在排队或生成的条目带「正在生成」标记（进程内状态，见 generatingIds），段结束或被取消时清掉。
@@ -111,10 +113,12 @@ export class CheckupSuggestions {
     if (outcome.notes.some(n => n.code === 'model-unavailable' || n.code === 'semantic-failed')) return
     const { deps } = this
     const read = (id: string) => deps.store.get(id, input.target.kind === 'workspace' ? { workspacePath: input.target.workspacePath } : {})
+    // 这一段内每个作用域的指令文件只读一次
+    const instructions = cacheInstructions(deps.instructions)
     const eligible: Array<{ entry: PendingDecision; need: Needing }> = []
     const lacking: Array<{ entry: PendingDecision; records: [MemoryRecord] }> = []
     for (const entry of await deps.decisions.list()) {
-      const need = await this.needing(entry, input, read)
+      const need = await this.needing(entry, input, read, instructions)
       if (need?.shape === 'vertical' && need.side === undefined) lacking.push({ entry, records: need.records })
       else if (need !== undefined) eligible.push({ entry, need })
     }
@@ -145,7 +149,7 @@ export class CheckupSuggestions {
         if (isAborted()) break
         // 排队期间条目和记忆可能已经变了（被处理、被改、别处已生成）：重读后再判一次，免得白花一次调用
         const entry = await deps.decisions.get(listed.id)
-        const need = entry === undefined ? undefined : await this.needing(entry, input, read)
+        const need = entry === undefined ? undefined : await this.needing(entry, input, read, instructions)
         const side = need?.shape === 'vertical' ? need.side : undefined
         if (entry !== undefined && need !== undefined && (need.shape === 'horizontal' || side !== undefined)) {
           const basis = suggestionBasis(entry, need.records, side)
@@ -153,7 +157,7 @@ export class CheckupSuggestions {
           const sources = await untilAborted(readSuggestionSources({ workspaces: entry.workspaces, records: need.records }, deps.getReadEvent?.() ?? null), signal)
           if (sources === undefined) break
           const generated = need.shape === 'vertical'
-            ? await generateVerticalSuggestion({ summary: entry.summary, baselineRef: entry.baselineRef!, record: need.records[0], baseline: input.baseline!, source: sources[0] }, llm)
+            ? await generateVerticalSuggestion({ summary: entry.summary, baselineRef: entry.baselineRef!, record: need.records[0], baseline: need.baseline!, source: sources[0] }, llm)
             : await generateSuggestion({ summary: entry.summary, records: need.records, sources: [sources[0], sources[1]] }, llm)
           if (isAborted()) break
           if (!generated.ok && generated.cause.kind === 'model-error' && isModelUnavailableCode(generated.cause.hostCode)) {
@@ -186,26 +190,28 @@ export class CheckupSuggestions {
   /**
    * 这一条要不要体检来生成：冲突、在这次体检范围内、双方都在用、都不含高危密钥、没有当前依据的建议、
    * 模型没对当前依据答过「判断不了」（它答了，同样的输入再问多半还是这样）、这个冲突指纹的尝试次数没到上限。
-   * 垂直冲突只在手动体检里算，当前依据还要是同一份基线（缺基线时只核对记忆那一半：视图同样只核对这一半）。
+   * 垂直冲突的当前依据还要是同一份指令文件（缺基线时只核对记忆那一半：视图同样只核对这一半）。
    */
-  private async needing(entry: PendingDecision, input: CheckupSuggestionsInput, read: (id: string) => Promise<MemoryRecord | undefined>): Promise<Needing | undefined> {
+  private async needing(
+    entry: PendingDecision, input: CheckupSuggestionsInput, read: (id: string) => Promise<MemoryRecord | undefined>, instructions: ReadInstructions,
+  ): Promise<Needing | undefined> {
     if (kindOf(entry) !== 'conflict') return undefined
     const isVertical = entry.baselineRef !== undefined && entry.memoryIds.length === 1
     if (!isVertical && (entry.baselineRef !== undefined || entry.memoryIds.length !== 2)) return undefined
-    if (isVertical && input.by === 'auto') return undefined
     const { suggestionAttempts: attempts } = entry
     if (attempts !== undefined && attempts.fingerprint === entry.fingerprint && attempts.count >= SUGGESTION_ATTEMPT_LIMIT) return undefined
     const records = await Promise.all(entry.memoryIds.map(read))
     if (!records.every(r => r?.status === 'active')) return undefined
     const live = records as MemoryRecord[]
     if (!live.every(r => isInRange(r, input.target)) || live.some(r => hasCriticalSecret(r))) return undefined
-    const side = isVertical ? baselineBasisOf(live[0]!, input.baseline, input.currentWorkspace, entry.fingerprint) : undefined
+    const baseline = isVertical ? await baselineFor(instructions, live[0]!) : null
+    const side = isVertical ? baselineBasisOf(live[0]!, baseline, entry.fingerprint) : undefined
     /** 依据里的基线和这次的一致（横向、缺基线时不比）。 */
-    const isSameSide = (basis: Parameters<typeof isBaselineCurrent>[0]) => side === undefined || isBaselineCurrent(basis, live[0]!, input.baseline, input.currentWorkspace)
+    const isSameSide = (basis: Parameters<typeof isBaselineCurrent>[0]) => side === undefined || isBaselineCurrent(basis, baseline)
     if (entry.suggestion !== undefined && isBasisCurrent(entry, entry.suggestion.basis, live) && isSameSide(entry.suggestion.basis)) return undefined
     const failure = entry.suggestionFailure
     if (failure?.cause.kind === 'undecided' && isBasisCurrent(entry, failure.basis, live) && isSameSide(failure.basis)) return undefined
-    return isVertical ? { shape: 'vertical', records: [live[0]!], side } : { shape: 'horizontal', records: live as [MemoryRecord, MemoryRecord] }
+    return isVertical ? { shape: 'vertical', records: [live[0]!], baseline, side } : { shape: 'horizontal', records: live as [MemoryRecord, MemoryRecord] }
   }
 }
 

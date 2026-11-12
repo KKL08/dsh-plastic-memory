@@ -24,6 +24,7 @@ import {
 } from '../src/gui/contract.ts'
 import { record } from './helpers/record.ts'
 import { InMemoryKvTable } from './helpers/in-memory-kv.ts'
+import { noInstructions } from './helpers/instructions.ts'
 
 // 提升候选与放错层合并：同一条项目记忆既是提升候选、又被判放错层（项目 → 全局）时，处理视图只出提升卡；
 // 「留在本项目」顺带写一条放错层的忽略并记进账本条目，撤销时只删它写的那一条。
@@ -55,7 +56,7 @@ function env() {
   const command = createMemoryCommand({
     memoryRoot: root, store, decisions, snapshots, cache, checkups, autoCheckups, ignores, registry, views,
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),
-    host: { contextOf: async () => ({ workspacePath: WS, delegationDepth: 0, session: { id: 'sess-1' } }), llmOf: () => misplacedLlm, baselineOf: () => null },
+    instructions: noInstructions, host: { contextOf: async () => ({ workspacePath: WS, delegationDepth: 0, session: { id: 'sess-1' } }), llmOf: () => misplacedLlm },
     now: () => clock.now,
   })
   const run = async (c: MemoryCommand): Promise<MemoryCommandResult> => memoryCommandResultSchema.parse(JSON.parse(

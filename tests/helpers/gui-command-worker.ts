@@ -22,6 +22,7 @@ import { AdviceIgnoreStore } from '../../src/governance/advice-ignores.ts'
 import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../../src/governance/schema.ts'
 import { ViewWriter, collectGlobalViews } from '../../src/gui/view-writer.ts'
 import { createMemoryCommand } from '../../src/gui/commands.ts'
+import { noInstructions } from './instructions.ts'
 
 const [root, workspacePath, tag, nowArg] = process.argv.slice(2)
 if (root === undefined || workspacePath === undefined || tag === undefined || nowArg === undefined) {
@@ -49,7 +50,7 @@ const command = createMemoryCommand({
   memoryRoot: root, store, decisions, snapshots: new SnapshotStore(sidecar.snapshots), cache,
   checkups: new CheckupRecordStore(sidecar.checkups), autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups), ignores, registry, views,
   agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),
-  host: { contextOf: async () => ({ workspacePath, delegationDepth: 0, session: { id: `s-${tag}` } }), llmOf: () => null, baselineOf: () => null },
+  instructions: noInstructions, host: { contextOf: async () => ({ workspacePath, delegationDepth: 0, session: { id: `s-${tag}` } }), llmOf: () => null },
   now,
 })
 

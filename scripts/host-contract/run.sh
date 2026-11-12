@@ -50,10 +50,13 @@ if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
   ( umask 077; printf 'version: %s\nrefs:\n  DEEPSEEK_API_KEY: "%s"\nrecords: {}\n' "$CREDENTIALS_SCHEMA_VERSION" "$DEEPSEEK_API_KEY" > "$HOMEDIR/.credentials.yaml" )
   chmod 600 "$HOMEDIR/.credentials.yaml"  # the host refuses a credentials file readable beyond its owner
 fi
+# The shared agents root (global AGENTS.md / skills) also points into the temp
+# dir, so the host and the plugin never read the real ~/.agents.
+AGENTS_HOME="$TMP/agents"
 RESULTS="$TMP/results.json"
 HANDOFF="$TMP/handoff.json"
 set +e
-env DSH_HOME="$HOMEDIR" HOST_CONTRACT_OUT="$RESULTS" HOST_CONTRACT_HANDOFF="$HANDOFF" "$DSH" --profile host --patch "$PATCH" >"$LOGS/boot.log" 2>&1
+env DSH_HOME="$HOMEDIR" DSH_AGENTS_HOME="$AGENTS_HOME" HOST_CONTRACT_OUT="$RESULTS" HOST_CONTRACT_HANDOFF="$HANDOFF" "$DSH" --profile host --patch "$PATCH" >"$LOGS/boot.log" 2>&1
 code=$?
 set -e
 STEP=boot
@@ -72,7 +75,7 @@ if [ ! -f "$HANDOFF" ]; then
   exit 1
 fi
 set +e
-env DSH_HOME="$HOMEDIR" HOST_CONTRACT_OUT="$RESULTS2" HOST_CONTRACT_HANDOFF="$HANDOFF" HOST_CONTRACT_PHASE=restart "$DSH" --profile host --patch "$PATCH" >"$LOGS/restart.log" 2>&1
+env DSH_HOME="$HOMEDIR" DSH_AGENTS_HOME="$AGENTS_HOME" HOST_CONTRACT_OUT="$RESULTS2" HOST_CONTRACT_HANDOFF="$HANDOFF" HOST_CONTRACT_PHASE=restart "$DSH" --profile host --patch "$PATCH" >"$LOGS/restart.log" 2>&1
 code2=$?
 set -e
 if [ ! -f "$RESULTS2" ]; then
@@ -89,7 +92,7 @@ if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
   ( umask 077; printf 'version: %s\nrefs:\n  DEEPSEEK_API_KEY: "%s"\nrecords: {}\n' "$CREDENTIALS_SCHEMA_VERSION" "host-contract-invalid-key-$RANDOM$RANDOM" > "$HOMEDIR/.credentials.yaml" )
   chmod 600 "$HOMEDIR/.credentials.yaml"
   set +e
-  env DSH_HOME="$HOMEDIR" HOST_CONTRACT_OUT="$RESULTS3" HOST_CONTRACT_PHASE=bad-key "$DSH" --profile host --patch "$PATCH" >"$LOGS/bad-key.log" 2>&1
+  env DSH_HOME="$HOMEDIR" DSH_AGENTS_HOME="$AGENTS_HOME" HOST_CONTRACT_OUT="$RESULTS3" HOST_CONTRACT_PHASE=bad-key "$DSH" --profile host --patch "$PATCH" >"$LOGS/bad-key.log" 2>&1
   code3=$?
   set -e
   if [ ! -f "$RESULTS3" ]; then

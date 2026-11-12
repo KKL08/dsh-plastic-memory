@@ -11,15 +11,15 @@
  * 有 DEEPSEEK_API_KEY 且宿主能选出默认模型时再跑语义扫描与取消两项、一次真实的自动体检（H17：无会话、宿主默认模型）、
  * 一次带出处的处理建议（H20：两条记忆的出处从真会话读回，交给真模型），否则标 SKIPPED。
  * run.sh 随后用同一个 DSH_HOME 再起一次宿主（HOST_CONTRACT_PHASE=restart）：第一趟把
- * 恢复的记录 id 写进交接文件，第二趟跑 H12，证明恢复结果过了进程重启仍可读；H14 第一趟建持久化会话、
- * 写入完整 AGENTS.md 基线，第二趟照宿主恢复配方重开，证明基线投影过了重启仍在。
+ * 恢复的记录 id 写进交接文件，第二趟跑 H12，证明恢复结果过了进程重启仍可读。
+ * 指令文件按项目现读（H14）：无 key 时装好的插件取到项目的 AGENTS.md，和宿主函数直接取到的一致（agent 工具裁决旧式条目时现算的指纹不用模型，
+ * 无 key 也能比）；有 key 时再在真会话里跑一轮，
+ * 模型收到的指令文件正文和宿主函数返回的逐字相同。
  * 有 key 时 run.sh 再把凭据换成无效 key 起第三趟（HOST_CONTRACT_PHASE=bad-key）跑 H18：宿主报 AUTH，
  * 扫描结果和体检视图只记 hostCode、不带宿主原话；没有 key 时第一趟把 H18 标 SKIPPED。
  *
  * 只用可擦除的 TypeScript 语法（engines 要求的 Node 22.19+/24 原生 strip-types 直接加载，不需要构建）。
  */
-// H14 构造 agent-instructions 来源的消息，需要该包对 MessageSourceMap 的类型增广（纯类型引用，无运行时导入）
-/// <reference types="@deepseek-ai/dsh-agent-instructions" />
 import { existsSync, readdirSync, readFileSync, mkdtempSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -28,7 +28,8 @@ import { createSystemMessage, createToolResultMessage, createUserMessage } from 
 import type { Context } from '@deepseek-ai/cordis'
 import { memoryCommandResultSchema } from '../../src/gui/contract.ts'
 import { SidecarStore } from '../../src/storage/sidecar.ts'
-import { PendingDecisionsStore } from '../../src/governance/decisions.ts'
+import { PendingDecisionsStore, baselineFingerprint, conflictFingerprint } from '../../src/governance/decisions.ts'
+import { INSTRUCTION_MAX_BYTES } from '../../src/governance/instructions.ts'
 import { adviceIgnoreSchema, memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema } from '../../src/governance/schema.ts'
 
 export const name = 'dsh-plastic-memory-host-contract'
@@ -59,39 +60,10 @@ type SearchHitShape = { id: string; path?: unknown }
 const hitPathsAbsolute = (hits: SearchHitShape[] | undefined) =>
   (hits ?? []).length > 0 && (hits ?? []).every(h => typeof h.path === 'string' && isAbsolute(h.path) && existsSync(h.path))
 
-/** H14 用到的宿主会话持久化最小契约（照 agent-loop 的建会话/恢复配方：prepare → create 句柄 → enter + announce；
- *  恢复是 open + read(0) → prepare(seed) → enter + announce）。 */
-type SessionHeaderLike = { id: string; cwd?: string }
-type StoredHandle = {
-  header: SessionHeaderLike
-  inheritedEventCount: number
-  read(offset?: number): Promise<{ events: readonly unknown[]; eventState: string }>
-  close(): Promise<void>
-}
-type Persistence = {
-  create(header: SessionHeaderLike, options?: { inheritedEventCount?: number }): Promise<StoredHandle>
-  open(id: string, access: 'read' | 'write'): Promise<StoredHandle>
-}
-type PreparedSession = SessionLike & { id: string; inheritedEventCount: number }
-type SessionPhases = {
-  prepare(id: string, options: { meta?: unknown; seed?: readonly unknown[]; inheritedEventCount?: number; eventState?: string }): PreparedSession
-  enter(session: PreparedSession): () => void
-  announce(session: PreparedSession): void
-}
-type Projections = {
-  checkpoint(session: PreparedSession): Record<string, { ver: number; seq: number; val: unknown } | undefined>
-  stateOf(session: PreparedSession, key: string): unknown
-}
-type ProjectionCache = { write(session: PreparedSession): Promise<void> }
-
-/** 插件基线投影的键与 stateVersion（与 src/governance/baseline.ts 的定义同步，递增时这里跟着改）。 */
-const BASELINE_KEY = 'plasticMemoryBaseline'
-const BASELINE_STATE_VERSION = 1
-/** H14 完整基线消息的正文：投影状态与重启后的 stateOf 里都要能找到它。 */
-const H14_PROBE = 'H14 基线探针：重启宿主后 AGENTS.md 基线必须仍在投影里'
-
-/** H14 第一趟的结论随交接文件带到第二趟，由第二趟合成一条结果（整条用例只出一行）。 */
-interface H14Handoff { ok: boolean; skipped?: boolean; detail: string; sessionId?: string }
+/** H14 读真会话：宿主 agent 循环的状态与入队用户消息（同 followup）。 */
+type RunnableAgent = { status: string; followup(message: unknown): void; session: { deriveMessages(): Array<{ source: { kind: string }; content?: Array<{ type: string; text?: string }> }> } }
+/** 等 H14 真会话那一轮跑完的上限。 */
+const H14_TURN_WAIT_MS = 120_000
 
 /** 宿主 commands 服务的最小契约：按整行执行插件命令（同界面发 `/memory …`）。agent 只当作用域键和写命令生命周期事件的会话。 */
 type Commands = {
@@ -117,8 +89,8 @@ const CHECKUP_VIEW_PATH = ['.state', 'gui', 'checkups.json']
 const AUTO_CHECKUP_WAIT_MS = 180_000
 const AUTO_CHECKUP_POLL_MS = 500
 
-/** 第一趟写、第二趟读的交接内容：重启后要重新读取的记录与它所属的 workspace；H14 第一趟的结论与会话 id。 */
-interface Handoff { savedId: string; wsA: string; snapshotId: string | undefined; h14: H14Handoff | undefined }
+/** 第一趟写、第二趟读的交接内容：重启后要重新读取的记录与它所属的 workspace。 */
+interface Handoff { savedId: string; wsA: string; snapshotId: string | undefined }
 
 async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
   const outcomes: Outcome[] = []
@@ -167,23 +139,6 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
     const readMemoryFile = (id: string): string | undefined => {
       const path = memoryFilePath(id)
       return path === undefined ? undefined : readFileSync(path, 'utf8')
-    }
-
-    // H14 的宿主服务按需探测，不进 inject（进了就是硬依赖，缺一个整个契约插件起不来）：缺持久化或投影时该用例标 SKIPPED，
-    // 缺 checkpoint 缓存只在 detail 里注明（这条证明端到端存活，不依赖 checkpoint 被消费）。
-    const phases = sessions as unknown as SessionPhases
-    const h14Services = (): { persistence: Persistence; projections: Projections; cache: ProjectionCache | undefined } | string => {
-      const persistence = ctx.get('sessionPersistence') as Persistence | undefined
-      const projections = ctx.get('sessionProjections') as Projections | undefined
-      if (persistence && projections) return { persistence, projections, cache: ctx.get('sessionProjectionCache') as ProjectionCache | undefined }
-      return `SKIPPED: 宿主缺 ${[persistence ? '' : 'sessionPersistence', projections ? '' : 'sessionProjections'].filter(Boolean).join(',')}`
-    }
-    const hasProbe = (state: unknown) => ((state as { entries?: Array<{ text: string }> } | undefined)?.entries ?? []).some(e => e.text.includes(H14_PROBE))
-    /** 全库体检（无 key 也跑）：只看它带不带 baseline-missing。 */
-    const checkupBaseline = async (session: PreparedSession) => {
-      const exec: Exec = { agent: { session, options: {} }, signal: new AbortController().signal }
-      const r = await call('memory_scan', { scope: 'all' }, exec) as { kind: string; notes?: Array<{ code: string }> }
-      return { kind: r.kind, missing: (r.notes ?? []).some(n => n.code === 'baseline-missing') }
     }
 
     // 语义层用例的前提：凭证 + 宿主可选默认模型（agentDefaultModel，自动体检无会话时也用它）
@@ -301,37 +256,14 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
         const snapshotKept = shown.kind === 'shown' && (shown.entries ?? []).some(e => e.id === handoff.savedId)
         return { ok: searchable && pathsOk && activeOnDisk && snapshotKept, detail: `restarted host: searchable=${searchable} pathsAbsolute=${pathsOk} activeOnDisk=${activeOnDisk} snapshotKept=${snapshotKept} (snap=${handoff.snapshotId})` }
       })
-      // H14 第二趟：按宿主恢复配方重开第一趟持久化的会话（open read → read(0) → prepare(seed) → enter + announce），
-      // 投影里基线仍在、checkup 不带 baseline-missing。证明的是端到端存活，不是 checkpoint 被消费（恢复读全量日志）。
-      // 第一趟的结论经交接文件带过来，整条用例在这里只出一行。
-      await attempt('H14-BASELINE-SURVIVES-RESTART', async () => {
-        const first = handoff.h14
-        if (first === undefined) return { ok: false, detail: '第一趟没有留下 H14 结论' }
-        if (!first.ok || first.skipped === true || first.sessionId === undefined) return { ok: first.ok, skipped: first.skipped, detail: `phase1: ${first.detail}` }
-        const svc = h14Services()
-        if (typeof svc === 'string') return { ok: true, skipped: true, detail: `phase1: ${first.detail} | restart: ${svc}` }
-        const handle = await svc.persistence.open(first.sessionId, 'read')
-        const cold = await handle.read(0).finally(() => handle.close())
-        const session = phases.prepare(first.sessionId, { seed: cold.events, meta: structuredClone(handle.header), inheritedEventCount: handle.inheritedEventCount, eventState: cold.eventState })
-        const detach = phases.enter(session)
-        try {
-          phases.announce(session)
-          const restored = hasProbe(svc.projections.stateOf(session, BASELINE_KEY))
-          const scan = await checkupBaseline(session)
-          return {
-            ok: restored && scan.kind === 'checkup' && !scan.missing,
-            detail: `phase1: ${first.detail} | restart: reopened events=${cold.events.length} eventState=${cold.eventState} stateOf.hasBaseline=${restored} checkup=${scan.kind} baselineMissing=${scan.missing}`,
-          }
-        } finally {
-          detach()
-        }
-      })
       finish()
       return
     }
 
     const wsA = mkWs('a')
     const execA = mkExec(wsA)
+    /** H14 无 key 那条里插件记下的基线指纹，带 key 那条拿它和模型收到的正文比。 */
+    let h14Fingerprint: string | undefined
 
     // H1 九工具经真实 ctx.tools 可见
     await attempt('H1-TOOLS-REGISTERED', async () => {
@@ -596,44 +528,6 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
       }
     })
 
-    // H14 第一趟：照 agent-loop 的建会话配方造一个持久化的真会话（prepare → create 写句柄 → enter + announce，
-    // 之后事件由后端按 session id 路由进句柄），追加一条 agent-instructions 完整基线消息。对照：追加前 checkup 带
-    // baseline-missing；追加后不带，checkpoint 行 ver 对、val 含正文；落 checkpoint、关句柄。结论不单独出行，
-    // 随交接文件交给第二趟合成 H14 一条结果。
-    const h14 = await (async (): Promise<H14Handoff> => {
-      const svc = h14Services()
-      if (typeof svc === 'string') return { ok: true, skipped: true, detail: svc }
-      const session = phases.prepare(`h14-${Math.random().toString(36).slice(2, 8)}`, { meta: { cwd: mkWs('h14') } })
-      const handle = await svc.persistence.create(session.header, { inheritedEventCount: session.inheritedEventCount })
-      const detach = phases.enter(session)
-      try {
-        phases.announce(session)
-        const before = await checkupBaseline(session)
-        // 形状照宿主 agent-instructions 的完整基线：user-global 与项目根两个 scope（目录 + NUL + 文件名）
-        const appended = session.append('user/message', createUserMessage({
-          content: [{ type: 'text', text: H14_PROBE }],
-          source: {
-            kind: 'agent-instructions', form: 'instructions', baseline: true,
-            changes: [
-              { action: 'set', scope: 'user-global\u0000AGENTS.md', path: '~/.dsh/AGENTS.md' },
-              { action: 'set', scope: '.\u0000AGENTS.md', path: 'AGENTS.md' },
-            ],
-          },
-        }), { surfaceOp: 'append' })
-        const after = await checkupBaseline(session)
-        const row = svc.projections.checkpoint(session)[BASELINE_KEY]
-        const inRow = row !== undefined && hasProbe(row.val)
-        if (svc.cache) await svc.cache.write(session)
-        return {
-          ok: before.missing && after.kind === 'checkup' && !after.missing && row?.ver === BASELINE_STATE_VERSION && inRow,
-          detail: `session=${session.id} baselineSeq=${appended.seq} checkup baselineMissing before=${before.missing} after=${after.missing} row.ver=${row?.ver} row.seq=${row?.seq} row.hasBaseline=${inRow} checkpointCache=${svc.cache ? 'written' : 'absent'}`,
-          sessionId: session.id,
-        }
-      } finally {
-        try { await handle.close() } finally { detach() }
-      }
-    })().catch((e: unknown): H14Handoff => ({ ok: false, detail: `异常: ${e instanceof Error ? e.stack ?? e.message : String(e)}` }))
-
     // 无 key 档的宿主服务契约：命令服务或计时服务变了，这两项先红，不必等带 key 的 H17
     await attempt('PA-49-COMMANDS-GUI-CONTRACT', async () => {
       const ws = mkWs('pa49')
@@ -763,10 +657,99 @@ async function run(ctx: Context, exit: (code: number) => void): Promise<void> {
         detail: `action=${suggestion.action} isSourced=${suggestion.isSourced} reason=${suggestion.reason} draft=${draft === undefined ? '（无）' : draft.content}`,
       }
     })
+    // H14 指令文件按项目现读：一个项目根放 AGENTS.md，另一个什么都不放；各存一条记忆、账本里各挂一条和指令文件的冲突，
+    // 界面同一条路发 /memory suggest。没有指令文件的回 no-baseline；有的那个，插件记下的基线指纹要和宿主函数直接取到的正文一致
+    // （模型用不了时建议没生成，原因和依据照样记在条目上；拿不到模型时只能看到它过了缺基线那一关）。
+    // 不用模型的那条证据：各再挂一条没有指纹的旧式条目，经 agent 工具 memory_confirm 裁决「保留」。插件按这条记忆所在项目的指令文件
+    // 现算指纹记下，它要等于按宿主函数直接取到的正文算的；没有指令文件的那个算不出，条目移出账本、不记结论。
+    const loadInstructions = async (cwd: string) => {
+      const { loadBaselineInstructions } = await import('@deepseek-ai/dsh-agent-instructions')
+      return (await loadBaselineInstructions({ cwd, maxBytes: INSTRUCTION_MAX_BYTES }))?.text
+    }
+    const h14Probe = 'H14 指令文件探针：这个项目的包管理统一用 pnpm'
+    const wsH14 = mkWs('h14')
+    mkdirSync(join(wsH14, '.git'), { recursive: true })
+    writeFileSync(join(wsH14, 'AGENTS.md'), `${h14Probe}\n`)
+    await attempt('H14-INSTRUCTIONS-INSTALLED', async () => {
+      const wsNone = mkWs('h14-none')
+      mkdirSync(join(wsNone, '.git'), { recursive: true })
+      const sidecar = new SidecarStore({ root: memoriesRoot, schemas: { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema } })
+      const ledger = new PendingDecisionsStore(sidecar.pending)
+      const suggestIn = async (ws: string) => {
+        const saved = await call('memory_save', { action: 'create', name: 'h14-npm', summary: '包管理用 npm', content: '包管理用 npm', ...MEMORY_BASE }, mkExec(ws)) as { record?: { id: string } }
+        if (saved.record === undefined) return { error: 'memory_save 没存下' }
+        const { entry } = await ledger.upsert({ memoryIds: [saved.record.id], baselineRef: 'AGENTS.md：包管理', summary: '记忆说 npm，AGENTS.md 说 pnpm', workspaces: [ws], fingerprint: `h14-${ws}` }, Date.now())
+        const r = await runMemoryCommand(ws, `/memory suggest ${JSON.stringify({ decisionId: entry.id })}`, sel)
+        if (typeof r === 'string') return { error: r }
+        const parsed = memoryCommandResultSchema.safeParse(JSON.parse(r.text ?? 'null'))
+        if (!parsed.success) return { error: `结果不合 GUI 契约: ${r.text}` }
+        const after = await ledger.get(entry.id)
+        return { result: parsed.data, basis: after?.suggestion?.basis ?? after?.suggestionFailure?.basis }
+      }
+      const keepIn = async (ws: string) => {
+        const saved = await call('memory_save', { action: 'create', name: 'h14-keep', summary: '注释用中文', content: '注释用中文', ...MEMORY_BASE }, mkExec(ws)) as { record?: { id: string; name: string; content: string } }
+        if (saved.record === undefined) return undefined
+        const { entry } = await ledger.upsert({ memoryIds: [saved.record.id], baselineRef: 'AGENTS.md：注释语言', summary: '旧式条目（没有指纹）', workspaces: [ws] }, Date.now())
+        await call('memory_confirm', { action: 'resolve', decisionId: entry.id, verdict: 'keep-left' }, mkExec(ws))
+        const settled = (await ledger.listSettled()).find(e => e.id === entry.id)
+        return { record: saved.record, isOpen: await ledger.get(entry.id) !== undefined, settledFingerprint: settled?.fingerprint }
+      }
+      const none = await suggestIn(wsNone)
+      const found = await suggestIn(wsH14)
+      const keptNone = await keepIn(wsNone)
+      const kept = await keepIn(wsH14)
+      const direct = await loadInstructions(wsH14)
+      const codeOf = (o: Awaited<ReturnType<typeof suggestIn>>) => ('error' in o ? o.error : o.result.ok ? 'ok' : o.result.code)
+      const noneOk = codeOf(none) === 'no-baseline' && keptNone !== undefined && !keptNone.isOpen && keptNone.settledFingerprint === undefined
+      const fingerprint = 'basis' in found ? found.basis?.baseline?.fingerprint : undefined
+      h14Fingerprint = fingerprint
+      const isSameText = direct !== undefined && direct.includes(h14Probe) && fingerprint === baselineFingerprint([direct])
+      // 不用模型：插件现算的指纹和按宿主函数直接取到的正文算的一致，证明插件读到的就是这份 AGENTS.md
+      const isKeptSame = kept !== undefined && direct !== undefined && direct.includes(h14Probe)
+        && kept.settledFingerprint === conflictFingerprint([kept.record], [direct])
+      const foundOk = isSameText || (fingerprint === undefined && codeOf(found) === 'llm-unavailable')
+      return {
+        ok: noneOk && foundOk && isKeptSame,
+        detail: `without files: ${codeOf(none)} keep=${keptNone?.settledFingerprint === undefined && keptNone?.isOpen === false ? 'unrecorded' : 'recorded'}`
+          + ` | with AGENTS.md: ${codeOf(found)} basisFingerprint=${fingerprint ?? '（没记依据）'} sameAsHostFunction=${isSameText} keepFingerprintSameAsHostFunction=${isKeptSame}`,
+      }
+    })
+    // H14 有 key：在那个项目里开一个真会话跑一轮，宿主送进这一轮的指令文件消息正文要和宿主函数返回的逐字相同，
+    // 也和插件记下的基线指纹对得上（插件对照的就是模型在这个项目里读到的那份）。
+    await attempt('H14-INSTRUCTIONS-MODEL-INPUT', async () => {
+      const gate = semanticGate(); if (gate) return gate
+      const agents = ctx.get('agents') as { create(options: { sessionId: string; meta?: { cwd?: string }; agentOptions?: ModelOpts }): Promise<{ agent: RunnableAgent; dispose(): Promise<void> }> } | undefined
+      if (!agents) return { ok: false, detail: 'agents service unavailable' }
+      // 建 agent 不带模型时这一轮在第一步之前就以「没有 provider/model」结束，指令文件也就不会进会话：用宿主默认模型
+      const handle = await agents.create({ sessionId: `h14-${Math.random().toString(36).slice(2, 8)}`, meta: { cwd: wsH14 }, agentOptions: sel })
+      try {
+        const { agent } = handle
+        agent.followup(createUserMessage({ content: [{ type: 'text', text: '只回复 ok' }], source: { kind: 'user' } }))
+        const deadline = Date.now() + H14_TURN_WAIT_MS
+        let hasStarted = false
+        while (Date.now() < deadline) {
+          if (agent.status === 'running') hasStarted = true
+          else if (hasStarted) break
+          await new Promise(resolve => setTimeout(resolve, AUTO_CHECKUP_POLL_MS))
+        }
+        const sent = agent.session.deriveMessages().filter(m => m.source.kind === 'agent-instructions')
+          .map(m => (m.content ?? []).filter(b => b.type === 'text').map(b => b.text ?? '').join(''))
+        const direct = await loadInstructions(wsH14)
+        const isSame = sent.length === 1 && direct !== undefined && sent[0] === direct
+        const matchesPlugin = direct !== undefined && h14Fingerprint === baselineFingerprint([direct])
+        return {
+          ok: isSame && matchesPlugin,
+          detail: `turnFinished=${hasStarted && agent.status !== 'running'} instructionMessages=${sent.length} sameAsHostFunction=${isSame} pluginFingerprintMatches=${matchesPlugin}`
+            + ` messages=${agent.session.deriveMessages().map(m => m.source.kind).join(',')}`,
+        }
+      } finally {
+        await handle.dispose()
+      }
+    })
     // H18 在第三趟（凭据换成无效 key）跑；没有 key 时第三趟不起，结果在这里标 SKIPPED
     if (!hasKey) push({ id: 'H18-AUTH-ERROR-MASKED', ok: true, skipped: true, detail: 'SKIPPED: 无 DEEPSEEK_API_KEY' })
     // 交接给第二趟（重启验证）：恢复过的记录 id、它的 workspace、H7 拍的快照 id
-    if (handoffPath) writeFileSync(handoffPath, JSON.stringify({ savedId, wsA, snapshotId, h14 } satisfies Handoff))
+    if (handoffPath) writeFileSync(handoffPath, JSON.stringify({ savedId, wsA, snapshotId } satisfies Handoff))
   } catch (e) {
     push({ id: 'FATAL', ok: false, detail: `顶层异常: ${e instanceof Error ? e.stack : String(e)}` })
   }

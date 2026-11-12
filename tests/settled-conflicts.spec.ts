@@ -10,6 +10,7 @@ import type { MemorySnapshot, PendingDecision, ScanCacheEntry } from '../src/gov
 import { record } from './helpers/record.ts'
 import { InMemoryTable } from './helpers/in-memory-table.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
+import { instructionsOf, noInstructions } from './helpers/instructions.ts'
 
 /** 裁决「两条都留」后，体检记住这个结论：两边内容（垂直冲突含基线）都没变就不再报。 */
 
@@ -37,7 +38,7 @@ function makeEnv({ host, ...overrides }: Partial<Omit<ScanToolDeps, 'host'>> & {
     store, decisions,
     registry: buildTypeRegistry({ template: 'coding', customTypes: {} }),
     cache: new InMemoryKvTable<ScanCacheEntry>(),
-    host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: () => horizontalLlm, baselineOf: () => null, ...host },
+    instructions: noInstructions, host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: () => horizontalLlm, ...host },
     now: () => 9000,
     ...overrides,
   }
@@ -47,7 +48,7 @@ function makeEnv({ host, ...overrides }: Partial<Omit<ScanToolDeps, 'host'>> & {
     return r
   }
   const resolve = (decisionId: string, verdict: 'keep-left' | 'keep-right' | 'keep-both' | 'dismiss') =>
-    executeConfirm({ action: 'resolve', decisionId, verdict }, { workspacePath: undefined }, { store, decisions, snapshots, now: () => 9500 })
+    executeConfirm({ action: 'resolve', decisionId, verdict }, { workspacePath: undefined }, { instructions: noInstructions, store, decisions, snapshots, now: () => 9500 })
   return { store, decisions, scan, resolve }
 }
 
@@ -89,8 +90,9 @@ describe('裁决过的冲突不再重报', () => {
   })
 
   it('垂直冲突 keep-left 后：baselineRef 措辞变了也不再报；基线改了才重新报', async () => {
-    let baseline = ['# AGENTS.md\n用 pnpm']
-    const env = makeEnv({ host: { llmOf: (_exec: unknown) => llm, baselineOf: () => baseline }, })
+    // mem_v 是全局记忆，对照全局层的指令文件
+    let baseline = '# AGENTS.md\n用 pnpm'
+    const env = makeEnv({ host: { llmOf: (_exec: unknown) => llm }, instructions: instructionsOf({ global: () => baseline }) })
     const llm = verticalLlm()
     await env.store.put(record({ id: 'mem_v', content: '这个项目用 npm' }))
     const first = await env.scan()
@@ -100,7 +102,7 @@ describe('裁决过的冲突不再重报', () => {
     expect(again.pendingDecisions.items).toHaveLength(0)
     expect(conflicts(again)).toHaveLength(0)
 
-    baseline = ['# AGENTS.md\n用 pnpm，禁止 npm']
+    baseline = '# AGENTS.md\n用 pnpm，禁止 npm'
     const changed = await env.scan()
     expect(changed.pendingDecisions.created).toBe(1)
   })

@@ -19,7 +19,7 @@ export interface AutoCheckupTimer {
 }
 
 export interface AutoCheckupSchedulerDeps {
-  /** 体检核心里和会话无关的依赖；模型、基线、所属项目由调度器按无会话给。 */
+  /** 体检核心里和会话无关的依赖（含按范围取指令文件）；模型、所属项目由调度器按无会话给。 */
   scan: CheckupRunDeps['scan']
   /** 体检记录表：一次体检认领、写完成记录、最近一次结果和失败；调度器自己只读状态、记「模型用不了」。 */
   checkups: CheckupRunDeps['checkups'] & Pick<CheckupRecordStore, 'recordModelUnavailable'>
@@ -156,7 +156,7 @@ export class AutoCheckupScheduler {
   }
 
   /**
-   * 体检一个范围，和手动体检那个范围同口径：项目读全局加本项目、写本项目的缓存；全局只查全局。后台没有会话投影，不查基线。
+   * 体检一个范围，和手动体检那个范围同口径：项目读全局加本项目、写本项目的缓存；全局只查全局。指令文件按范围现读，垂直冲突照查。
    * 没做完的由一次体检记失败；碰上模型用不了不记，返回原因交给调用方。取消（插件卸载、认领被接手、已不到期）什么都不记。
    */
   private async run(scope: Scope, llm: SemanticLlm): Promise<{ modelUnavailable: CheckupCause } | undefined> {
@@ -164,7 +164,7 @@ export class AutoCheckupScheduler {
     this.controller = controller
     try {
       const outcome = await runCheckup({
-        target: scope, by: 'auto', llm, baseline: null, signal: controller.signal,
+        target: scope, by: 'auto', llm, signal: controller.signal,
         confirmHeld: () => this.isStillDue(scope),
       }, {
         scan: this.deps.scan, checkups: this.deps.checkups, views: this.deps.views,

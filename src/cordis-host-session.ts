@@ -3,7 +3,6 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type { SaveDelegation } from './pipeline.ts'
 import { UNKNOWN_SESSION_ID, type HostContext, type HostSession } from './tools/host-session.ts'
 import { delegationDepthOf, resolveRootSessionId, subagentModeOf, type DelegationHeader, type ProjectionReader } from './tools/subagent-gate.ts'
-import { readBaseline, type BaselineState } from './governance/baseline.ts'
 import type { SemanticLlm } from './governance/semantic-scan.ts'
 import { hostSemanticLlm, type HostLlmService, type HostModelRoute } from './governance/host-llm.ts'
 
@@ -99,32 +98,6 @@ export function createCordisHostSession(deps: CordisHostSessionDeps): HostSessio
     return mode
   }
 
-  // 状态里的形状漂移按 session 对象、每个 seq 只 warn 一次（插件重载后对历史漂移会再 warn 一次），自带一套集合
-  const baselineDriftWarned = new WeakMap<Session, Set<number>>()
-  const baselineOf = (exec: ToolRunContext): readonly string[] | null => {
-    const session = exec.agent?.session
-    if (session === undefined) return null
-    let projections: ProjectionReader | undefined
-    try {
-      projections = deps.lookup('sessionProjections') as ProjectionReader | undefined
-    } catch {
-      return null
-    }
-    let state
-    try {
-      state = projections?.stateOf(session, 'plasticMemoryBaseline') as BaselineState | undefined
-    } catch (error) {
-      warnOnce(session, 'baseline-read', `[plastic-memory] 会话 "${session.header.id}" 读 plasticMemoryBaseline 投影出错，这次不带 AGENTS.md 基线：${String(error)}`)
-      return null
-    }
-    if (state === undefined) return null
-    let drift = baselineDriftWarned.get(session)
-    if (drift === undefined) baselineDriftWarned.set(session, drift = new Set())
-    const { texts, warnings } = readBaseline(state, drift)
-    for (const message of warnings) logger.warn(message)
-    return texts.length === 0 ? null : texts
-  }
-
   /** 读 turnBoundary 投影的 lastTurn（宿主按事件增量折叠，不读日志）；读不到按没有。 */
   const hasEarlierTurns = (session: object): boolean => {
     try {
@@ -192,5 +165,5 @@ export function createCordisHostSession(deps: CordisHostSessionDeps): HostSessio
 
   const workspaceOf = (session: object) => resolveCwd((session as { header?: SessionHeader }).header?.cwd)
 
-  return { contextOf, saveContextOf, llmOf, defaultLlm, baselineOf, modeOf, hasEarlierTurns, remember, ownSessionIdOf, workspaceOf }
+  return { contextOf, saveContextOf, llmOf, defaultLlm, modeOf, hasEarlierTurns, remember, ownSessionIdOf, workspaceOf }
 }

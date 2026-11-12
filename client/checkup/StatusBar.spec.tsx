@@ -249,14 +249,14 @@ describe('结果行：体检完成', () => {
   it('写新增几条等你决定、几条可以整理（链接），用量；说明各占一行', () => {
     const last = result({
       added: { keys: [KEY.p1, KEY.expired], pending: 1, advice: 1 }, usageTokens: 3120,
-      notes: [{ code: 'semantic-batched' }, { code: 'baseline-session-scoped' }],
+      notes: [{ code: 'semantic-batched' }, { code: 'baseline-truncated' }],
     })
     open(APP, { views: { checkups: checkups({ scopes: { '/w/app': { lastResult: last } } }) } })
     const rows = [...live().querySelectorAll('p')].map(p => p.textContent)
     expect(rows[0]).toMatch(/^体检完成：新增 1 条等你决定 ›\s*·\s*新增 1 条可以整理 ›\s*·\s*本次用了约 3,120 token$/)
     expect(rows.slice(1)).toEqual([
       '记忆较多，分批检查，不同批之间的冲突和重复可能查不出。',
-      '这次没有对照本项目的 AGENTS.md 检查冲突：借用的会话不在这个项目里。在本项目的对话里体检可以补上。',
+      '指令文件太长，只检查了其中一部分。',
     ])
     expect(within(live()).getByRole('button', { name: '新增 1 条等你决定 ›' })).toBeInTheDocument()
   })
@@ -283,12 +283,21 @@ describe('结果行：体检完成', () => {
     ])
   })
 
-  it('自动体检的结果写明后台不查和 AGENTS.md 的冲突；手动体检的不写', () => {
-    const notes: CheckupResult['notes'] = [{ code: 'baseline-missing' }]
+  it('读取指令文件失败：手动、自动体检都说一句，有原因时放进 title', () => {
+    const MISSING = '这次没能读取指令文件，没有检查记忆和它的冲突。'
+    const notes: CheckupResult['notes'] = [{ code: 'baseline-missing', cause: { kind: 'error', message: 'EACCES: permission denied' } }]
     const { gateway } = open(APP, { views: { checkups: checkups({ scopes: { '/w/app': { lastResult: result({ by: 'auto', notes }) } } }) } })
-    expect([...live().querySelectorAll('p')].map(p => p.textContent).slice(1)).toEqual(['自动体检在后台进行，没有对照 AGENTS.md 检查冲突。'])
-    act(() => { gateway.setView('checkups', checkups({ scopes: { '/w/app': { lastResult: result({ checkupId: 'ck2', notes }) } } })) })
-    expect([...live().querySelectorAll('p')].map(p => p.textContent)).toEqual(['体检完成：没有发现新问题'])
+    const lines = () => [...live().querySelectorAll('p')]
+    expect(lines().map(p => p.textContent)).toEqual(['自动体检完成：没有发现新问题', MISSING])
+    expect(lines()[1]).toHaveAttribute('title', 'EACCES: permission denied')
+    act(() => { gateway.setView('checkups', checkups({ scopes: { '/w/app': { lastResult: result({ checkupId: 'ck2', notes: [{ code: 'baseline-missing' }] }) } } })) })
+    expect(lines().map(p => p.textContent)).toEqual(['体检完成：没有发现新问题', MISSING])
+    expect(lines()[1]).not.toHaveAttribute('title')
+    // 「全部」体检里几个项目都读不到（原因各不相同）：只说一句，title 取第一个原因
+    const twice: CheckupResult['notes'] = [{ code: 'baseline-missing', cause: { kind: 'error', message: 'EACCES' } }, { code: 'baseline-missing', cause: { kind: 'error', message: 'EIO' } }]
+    act(() => { gateway.setView('checkups', checkups({ scopes: { '/w/app': { lastResult: result({ checkupId: 'ck3', notes: twice }) } } })) })
+    expect(lines().map(p => p.textContent)).toEqual(['体检完成：没有发现新问题', MISSING])
+    expect(lines()[1]).toHaveAttribute('title', 'EACCES')
   })
 
   it('看过这个范围的处理视图后，离开再回来结果行收起；没看过处理视图的不收', () => {
@@ -509,13 +518,13 @@ describe('「全部」的结果行', () => {
     expect(rows()).toEqual([])
   })
 
-  it('借用的会话不在某些项目里：「全部」的说明写「有的项目」，不写「本项目」', () => {
-    const notes: CheckupResult['notes'] = [{ code: 'baseline-session-scoped' }]
+  it('指令文件被截断：「全部」和单个项目的结果都写同一句', () => {
+    const notes: CheckupResult['notes'] = [{ code: 'baseline-truncated' }]
     const { gateway } = open({ view: 'todo', scope: { kind: 'all' } }, { views: { checkups: checkups({ allResult: result({ checkupId: 'ck-all', notes }) }) } })
-    expect([...live().querySelectorAll('p')].map(p => p.textContent).slice(1)).toEqual(['这次有的项目没有对照自己的 AGENTS.md 检查冲突：借用的会话不在那些项目里。在各项目的对话里体检可以补上。'])
+    expect([...live().querySelectorAll('p')].map(p => p.textContent).slice(1)).toEqual(['指令文件太长，只检查了其中一部分。'])
     act(() => { gateway.setView('checkups', checkups({ scopes: { '/w/app': { lastResult: result({ checkupId: 'ck-app', notes }) } } })) })
     pick('app')
-    expect([...live().querySelectorAll('p')].map(p => p.textContent).slice(1)).toEqual(['这次没有对照本项目的 AGENTS.md 检查冲突：借用的会话不在这个项目里。在本项目的对话里体检可以补上。'])
+    expect([...live().querySelectorAll('p')].map(p => p.textContent).slice(1)).toEqual(['指令文件太长，只检查了其中一部分。'])
   })
 
   it('自动体检的结果同样带「新」；在那个范围看过了，「全部」里不再合计', () => {
