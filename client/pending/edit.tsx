@@ -154,7 +154,9 @@ export const editCss = `
   display: inline-flex; align-items: center; gap: 2px; align-self: flex-start; padding: 2px 0; border: 0; background: none;
   font: inherit; font-size: 12px; color: var(--pm-text-2); cursor: pointer;
 }
+.pm-edit-more svg { transition: transform 120ms ease; }
 .pm-edit-more[aria-expanded='true'] svg { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) { .pm-edit-more svg { transition: none; } }
 .pm-edit-more:hover { color: var(--pm-text); }
 .pm-edit-fields { display: flex; flex-direction: column; gap: 6px; }
 .pm-edit-fields .pm-edit-label { margin-top: 4px; }

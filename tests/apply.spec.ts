@@ -685,21 +685,27 @@ describe('体检后续段接线', () => {
     { type: 'finish', reason: { kind: 'stop' } },
   ]
 
-  /** 两条互相矛盾的全局记忆；llm 缺省用替身 ctx 的脚本化假模型，给了就换成它。 */
-  async function boot(llm?: { stream(req: unknown): AsyncIterable<StreamChunk> }) {
+  /**
+   * 两条互相矛盾的全局记忆；llm 缺省用替身 ctx 的脚本化假模型，给了就换成它。
+   * sessionQuery：宿主会话查询的替身（缺省缺席）；给了时两条记忆各带一段出处（会话 sess-<记忆 id>）。
+   */
+  async function boot(llm?: { stream(req: unknown): AsyncIterable<StreamChunk> }, o: { sessionQuery?: unknown } = {}) {
     const memoryRoot = await makeTmpRoot()
     await mkdir(join(memoryRoot, 'global'), { recursive: true })
     for (const [id, content] of [['mem_a', '用 pnpm'], ['mem_b', '用 npm']] as const) {
-      await writeFile(join(memoryRoot, 'global', `${id}.md`), encodeRecord(record({ id, name: id, content }), {}), 'utf8')
+      const source = o.sessionQuery === undefined ? {} : { source: { sessionId: `sess-${id}`, eventRange: [0, 2] as [number, number], sourceMode: 'user-explicit' as const } }
+      await writeFile(join(memoryRoot, 'global', `${id}.md`), encodeRecord(record({ id, name: id, content, ...source }), {}), 'utf8')
     }
     const defs: CommandDef[] = []
-    const ctx = mockCtx({ commands: { register: (def) => { defs.push(def as CommandDef); return () => {} } } })
+    const ctx = mockCtx({ commands: { register: (def) => { defs.push(def as CommandDef); return () => {} } }, ...(o.sessionQuery !== undefined ? { sessionQuery: o.sessionQuery } : {}) })
     const get = (name: string) => (name === 'llm' && llm !== undefined ? llm : ctx.get(name))
-    await apply({ ...ctx, get, logger: { info() {}, warn() {}, error() {} } } as never, new Config({ memoryRoot } as never))
+    const tools = new Map<string, { execute(args: unknown, exec: unknown): Promise<unknown> }>()
+    const register = (def: { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }) => { tools.set(def.name, def); return ctx.tools.register(def) }
+    await apply({ ...ctx, get, tools: { register }, logger: { info() {}, warn() {}, error() {} } } as never, new Config({ memoryRoot } as never))
     const scanGlobal = async () => JSON.parse((await defs[0]!.handler({ rawInput: ' scan {"layer":{"kind":"global"}}', agent: routed })).text!) as Record<string, unknown>
     const pendingView = async () => pendingViewSchema.parse(JSON.parse(await readFile(join(memoryRoot, GUI_VIEW_DIR, GUI_VIEW_FILES.pending), 'utf8')))
     const ledger = () => new PendingDecisionsStore(sidecarAt(memoryRoot).pending).list()
-    return { ctx, scanGlobal, pendingView, ledger }
+    return { ctx, tools, scanGlobal, pendingView, ledger }
   }
 
   it('手动体检扫出横向冲突后，后续段在后台用同一个模型生成建议：账本条目记上建议，待处理视图带着它', async () => {
@@ -718,6 +724,60 @@ describe('体检后续段接线', () => {
     })
     expect(t.ctx.llmRequests).toHaveLength(2)
     expect(t.ctx.llmRequests[1]).toMatchObject({ provider: 'deepseek', model: 'deepseek-v4-flash' })
+  })
+
+  it('后续段生成建议时经宿主 sessionQuery 回查两条的出处：用户原话进提示词，条目上的建议记回查过出处', async () => {
+    const reads: string[] = []
+    const sessionQuery = {
+      readEvent: async ({ sessionId }: { sessionId: string }) => {
+        reads.push(sessionId)
+        return { events: [{ type: 'user/message', seq: 1, data: { id: `u-${sessionId}`, role: 'user', content: [{ type: 'text', text: `${sessionId} 里的原话` }], source: { kind: 'user' } } }] }
+      },
+    }
+    const t = await boot(undefined, { sessionQuery })
+    t.ctx.llmScript.push(conflictFound, [
+      { type: 'text-delta', index: 0, text: '{"action":"keep-a","reason":"A 是明确说过的"}' },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ])
+    expect(await t.scanGlobal()).toMatchObject({ ok: true, cmd: 'scan' })
+    await vi.waitFor(async () => {
+      expect((await t.ledger())[0]).toMatchObject({ suggestion: { action: 'keep-a', isSourced: true } })
+    })
+    expect(reads.sort()).toEqual(['sess-mem_a', 'sess-mem_b'])
+    expect(t.ctx.llmRequests).toHaveLength(2)
+    const prompt = JSON.stringify(t.ctx.llmRequests[1]!.messages)
+    expect(prompt).toContain('sess-mem_a 里的原话')
+    expect(prompt).toContain('sess-mem_b 里的原话')
+  })
+
+  it('对话里 agent 调 memory_scan 扫出冲突：不跟着生成建议；之后在记忆页手动体检才生成，用的是记忆页借来的会话的模型', async () => {
+    /** 生成建议的那几次调用各用了哪个模型；体检的内容检查一律回一条横向冲突。 */
+    const suggestionModels: string[] = []
+    const llm = {
+      async *stream(req: { model?: string; messages: unknown[] }): AsyncIterable<StreamChunk> {
+        if (!JSON.stringify(req.messages).includes('## 记忆 A')) {
+          yield* conflictFound
+          return
+        }
+        suggestionModels.push(req.model ?? '')
+        yield { type: 'text-delta', index: 0, text: '{"action":"keep-a","reason":"A 是明确说过的"}' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    }
+    const t = await boot(llm)
+    const exec = fakeExec({
+      agent: { session: { header: { id: 'sess-chat', cwd: await makeTmpRoot() }, seq: 0, requestHeader: () => undefined }, options: { provider: 'deepseek', model: 'chat-model' } } as unknown as ToolRunContext['agent'],
+    })
+    await t.tools.get('memory_scan')!.execute({ layers: 'semantic' }, exec)
+    const [entry] = await t.ledger()
+    expect(entry).toMatchObject({ memoryIds: ['mem_a', 'mem_b'] })
+    expect(entry!.suggestion).toBeUndefined()
+    // 对话里那次如果也跟出一段，会先于下面这段用对话的模型生成；这里只该有记忆页这一段、用记忆页的模型
+    expect(await t.scanGlobal()).toMatchObject({ ok: true, cmd: 'scan' })
+    await vi.waitFor(async () => {
+      expect((await t.ledger())[0]).toMatchObject({ id: entry!.id, suggestion: { action: 'keep-a' } })
+    })
+    expect(suggestionModels).toEqual(['deepseek-v4-flash'])
   })
 
   it('建议生成到一半（模型调用一直不返回）时卸载插件：卸载照常完成，落盘的待处理视图里不留「正在生成」标记', async () => {

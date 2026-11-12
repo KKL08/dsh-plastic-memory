@@ -43,7 +43,7 @@ export const checkupZh = {
   'checkup.auto.foot.allOwn': '其余范围和新项目都按这个频率查，各自计时。',
   'checkup.auto.foot.global': '只查全局记忆。',
   'checkup.auto.foot.workspace': '只查 {name} 的记忆。',
-  'checkup.auto.foot.model': '用 dsh 当前的默认模型检查内容，记忆越多，token 用得越多；dsh 没开时不查，打开后补上。',
+  'checkup.auto.foot.model': '用 dsh 当前的默认模型检查内容、给新冲突出处理建议，记忆越多，token 用得越多；dsh 没开时不查，打开后补上。',
   'checkup.auto.saveFailed': '没有保存成功，再试一次。',
 
   'checkup.status.count': '{n} 条记忆',
@@ -168,7 +168,7 @@ export const checkupEn: Record<CheckupLocaleKey, string> = {
   'checkup.auto.foot.allOwn': 'Other scopes and new projects are checked at this frequency, each on its own timer.',
   'checkup.auto.foot.global': 'Checks global memories only.',
   'checkup.auto.foot.workspace': 'Checks the memories of {name} only.',
-  'checkup.auto.foot.model': 'Content is checked with the current dsh default model; more memories use more tokens. Nothing runs while dsh is closed; it catches up once dsh opens.',
+  'checkup.auto.foot.model': 'The current dsh default model checks the content and suggests how to settle new conflicts; more memories use more tokens. Nothing runs while dsh is closed; it catches up once dsh opens.',
   'checkup.auto.saveFailed': 'Could not save. Try again.',
 
   'checkup.status.count': '{n} memories',

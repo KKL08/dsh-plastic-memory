@@ -961,7 +961,7 @@ describe('SidebarTab 就地裁决：和基线冲突', () => {
   }
   const yourCall = () => within(screen.getByRole('region', { name: '等你决定' }))
 
-  it('带入的记忆和基线冲突：冲突卡在「等你决定」段里，写明基线不会被删除；没有建议时只有「在记忆页处理 ›」，不再有直接裁决的按钮', () => {
+  it('带入的记忆和基线冲突：冲突卡在「等你决定」段里，写明指令文件不会被改动、处理只针对这条记忆；没有建议时只有「在记忆页处理 ›」，不再有直接裁决的按钮', () => {
     const { container, openPage, gateway } = setup({ library: library(pref, proj), session: snapshot({ injectedIds: ['p1', 'j1'] }), pending: pending(vertical) })
     expect(yourCall().getByRole('heading', { name: '这条记忆和基线矛盾，等你决定' })).toBeInTheDocument()
     expect(yourCall().getByText('指令文件不会被改动，处理只针对这条记忆。')).toBeInTheDocument()

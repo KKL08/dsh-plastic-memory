@@ -118,6 +118,9 @@ export const controlsCss = `
   padding: max(24px, var(--dsh-frame-overlay-top, 24px)) 24px;
 }
 .pm-dialog-mask { position: absolute; inset: var(--dsh-frame-chrome-top, 0px) 0 0; backdrop-filter: var(--dsw-mask-blur); background: var(--dsw-alias-bg-mask-1); }
+.pm-dialog-mask, .pm-dialog { animation: pm-dialog-in 200ms cubic-bezier(0.4, 0, 0.2, 1); }
+@keyframes pm-dialog-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .pm-dialog-mask, .pm-dialog { animation: none; } }
 .pm-dialog {
   position: relative; z-index: 1; display: flex; flex-direction: column; gap: 20px; width: min(440px, 100%); max-height: 100%;
   padding: 0 0 24px; overflow: hidden; border-radius: var(--dsw-radius-panel, 20px); background: var(--dsw-alias-bg-layer-2);
