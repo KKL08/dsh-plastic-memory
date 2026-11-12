@@ -8,65 +8,52 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
-- A graphical interface in DeepSeek Harness, so managing memories no longer
-  needs YAML or tool calls. The Memory page in the left nav lists the scopes
-  (All, Global, each project) with their health score, checkup controls and
-  three views: To do, Browse and Recently deleted. It needs no open chat and
-  rereads the memory files each time it opens, so outside edits show up. Its
-  nav icon shows an amber dot when something waits for your decision and a
-  red one when a secret was found.
+- A graphical interface in DeepSeek Harness. The Memory page in the left nav
+  lists the scopes (All, Global, each project) with their health score,
+  checkup controls and three views: To do, Browse and Recently deleted. It
+  works without an open chat once DeepSeek Harness has at least one, and
+  rereads the memory files each time it opens. Its nav icon shows an amber
+  dot when something waits for your decision and a red triangle when a
+  secret was found.
 - To do sorts what needs you into High priority (secrets, unreadable files),
   Waiting on you (conflicts, promotion candidates, budget overflows) and
   Suggested cleanup (expired, long unconfirmed, too long, duplicate, in the
-  wrong scope, unclear). Each card says why it is there and what each choice
-  does, is handled in place and can be undone where the action allows; "Don't
-  remind me" hides a suggestion until the memory changes.
+  wrong scope, unclear, replacing a memory that is gone). Each card says why
+  it is there and what each choice does, is handled in place and can be
+  undone where the action allows; "Don't remind me" hides a suggestion until
+  the memory changes.
 - Browse groups memories by type, or for All by when they last changed.
   Recently deleted keeps memories for 14 days with restore, permanent delete
   and search, and says which memory won when a conflict ruling removed one.
   Deleting anywhere in the interface asks first.
 - Edit on a memory lets you rewrite it yourself or tell the model what to
-  change. Select tidies 2–20 memories of one scope at once, and a duplicate
-  card with three or more memories offers Merge: the model proposes each
-  change and asks when it lacks information, nothing is written until you have
-  reviewed it, and the whole batch can be undone.
-- A Memory tab in each chat's right sidebar shows which memories the chat
-  brought in, their share of the budget and what the model saved or rewrote;
-  conflicts among them can be settled there. A card under each turn that saved
-  memories offers promotion when the model marked one as fitting every
-  project, and shows rewrites before and after with Undo for 14 days. A Memory
-  button next to the composer shows the share of the context window.
-- A settings page in the plugin manager covers scenes and types, the budget
-  and overflow handling, source lookup, checkups and the promotion target. It
-  writes the same `cordis.patch.yml` and applies without a restart. `accent`
-  picks the theme color: Ella (default) or Blue Whale.
-- Automatic checkups: each scope can be checked every 1–90 days or only by
-  hand, the default. They run in the background while DeepSeek Harness is
-  open, on its default model. Every checkup reports roughly how many tokens
-  it used.
-- Checkups compare each project's memories with that project's own
-  `AGENTS.md` / `CLAUDE.md`, the files a new conversation there would read,
-  and global memories with the global ones. Checkups of everything and
-  automatic checkups cover every project, and the result says so when the
-  files were cut off or couldn't be read.
+  change. Select tidies 2–20 memories of one scope at once, and duplicate
+  cards offer Merge. The model proposes each change and asks when it lacks
+  information, nothing is written until you have reviewed it, and the whole
+  batch can be undone.
 - Conflict cards come with a suggestion: the model reads both memories and the
   conversations they came from, then proposes to merge them, keep one or keep
   both, or drafts a plan from your own words. Nothing is written until you
   adopt, and adopting can be undone. Conflicts with `AGENTS.md` / `CLAUDE.md`
-  use the same card, only ever change the memory, and can be settled from
-  any conversation.
+  use the same card and can be settled from any conversation.
 - Suggestions cost one extra model call per new conflict after a checkup;
   automatic checkups prepare at most 10 per run, the rest get Suggest on the
   card. Memories holding a high-risk secret are never sent to the model.
-- Subagent sessions can save with `memory_save` while governance is on. Their
-  memories stay pending in the current project: not injected into the main
-  session, ranked last in search, marked unconfirmed and traceable to the
-  delegating session. They can only create `knowledge` and `project` memories
-  the scene includes, without `supersedes` or `force`, up to
-  `subagent.maxSavesPerSession` (default 10) per session, and update only
-  pending memories they saved. The main session accepts one with
-  `memory_confirm` `accept-subagent`, a `memory_save` update or a promotion;
-  editing it on the memory page accepts it too.
+- A Memory tab in each chat's right sidebar shows which memories the chat
+  brought in, their share of the budget and what the model saved or rewrote;
+  conflicts among them can be settled there. A card under each turn that saved
+  memories offers promotion when the model marked one as fitting every
+  project, and shows rewrites before and after with Undo for 14 days. Memory
+  tool calls fold into one line in the chat, with secrets masked. A Memory
+  button next to the composer shows the share of the context window.
+- A settings page in the plugin manager covers scenes and types, the budget
+  and overflow handling, source lookup, reminder sensitivity and the
+  promotion target. It writes the same `cordis.patch.yml` and applies without
+  a restart. `accent` picks the theme color: Ella (default) or Blue Whale.
+- Automatic checkups: each scope can be checked every 1–90 days or only by
+  hand, the default. They run in the background while DeepSeek Harness is
+  open, on its default model. Every checkup reports roughly how many tokens
+  it used.
 - Chinese word segmentation for `memory_search` through the optional
   dependency `@node-rs/jieba`, so long Chinese questions match by word. Where
   it cannot be installed, Chinese search falls back to two-character segments
@@ -83,36 +70,31 @@ All notable changes to this project are documented here. The format follows
 - Requires DeepSeek Harness v0.2.1-rc.2 or later, the first version with the
   interface slots the plugin uses. Older hosts refuse to install or start this
   release; stay on 0.1.1-beta.5 there.
-- Memories are plain files and nothing else: the plugin keeps no copy in
-  memory, so a file changed by hand, by git or by another process shows up at
-  the next tool call. On 10 projects × 1000 memories (Apple M4), the 1.5 s
-  start-up load and the 109 ms check before every tool call are gone;
-  `pnpm bench:storage` measures this on your machine.
+- Memories are read from their files on demand; the plugin keeps no copy of
+  the library in memory and no longer loads it at start-up.
+  `pnpm bench:storage` measures storage timings on your machine.
 - Each scope directory gains `.archive/` (forgotten and superseded memories,
   kept 14 days, hidden from DeepSeek Harness's grep tool), and the root gains
   `.state/` (snapshots, pending decisions, scan cache, recall statistics,
-  checkup settings). Memory files are used in place. Snapshots and pending
-  decisions are imported once from DeepSeek Harness's KV store and removed
-  there; recall statistics and the scan cache start fresh.
+  checkup settings and records). Memory files are used in place. Snapshots
+  and pending decisions are imported once from DeepSeek Harness's KV store
+  and removed there; recall statistics and the scan cache start fresh.
 - Hand-written memory files need only `name` and `type`, and timestamps accept
-  plain dates and ISO 8601. A file that fails to parse is set aside instead of
-  breaking the library; `memory_health` lists it along with directory problems
-  such as duplicate ids.
+  plain dates and ISO 8601.
 - The model asks before rewriting or replacing a memory you edited by hand:
   `memory_save` returns the current text and needs `force: true` after you
   agree. A rewrite of a memory that changed meanwhile is rejected with the
   current content.
-- `validFrom` / `validTo` are local `YYYY-MM-DD HH:mm` (or a date alone) in
-  memory files and in `memory_save`, instead of epoch milliseconds, which
-  models often got wrong; impossible dates and passed deadlines are rejected.
+- `validFrom` / `validTo` are local `YYYY-MM-DD HH:mm`, or a date alone, both
+  in memory files (UTC ISO timestamps before) and in `memory_save` (epoch
+  milliseconds before); impossible dates and passed deadlines are rejected.
   Existing files are converted at the next write, rounded so nothing expires
-  earlier. A memory past its `validTo` stays on disk but is no longer injected
-  or found. Versions before 0.2.0 cannot read files in the new form.
+  earlier. Versions before 0.2.0 cannot read files in the new form.
 - Scenes replace the three fixed templates: a scene is the set of types the
   model can add, picked from the five built-in types, the presets `procedure`
   and `decision`, and your custom types. General (`template: custom`) stays
-  fixed; Coding and Office can be edited or removed, and up to five more
-  scenes of 1 to 8 types can be added under `scenes`. Memories of every type
+  fixed; Coding and Office can be edited or removed, and `scenes` holds up to
+  five scenes besides General, each with 1 to 8 types. Memories of every type
   stay injected and searchable whichever scene is current.
 - Custom types now apply only in scenes that include them, and no config is
   migrated: after upgrading, tick your `customTypes` into a scene on the
@@ -125,42 +107,51 @@ All notable changes to this project are documented here. The format follows
   person, `preference` how you want work done, `project` also personal
   matters, `reference` also where things are kept or whom to ask. Saving
   guidance asks for the reason behind a rule, synonyms and bilingual aliases
-  as tags, and no fast-changing details. The model no longer turns a save into
-  its reply. Existing memories are not rewritten.
-- The memory snapshot is its own message instead of part of DeepSeek
-  Harness's shared runtime context, so other plugins' changes no longer
-  resend it and minimal mode brings memories in too. After each compaction
-  the chat carries exactly one up-to-date snapshot. Index lines end with the
-  file path, and the snapshot says how to use each type and that memories
-  never start a task.
+  as tags, and no fast-changing details. Existing memories are not rewritten.
+- The memory snapshot is its own message, separate from DeepSeek Harness's
+  shared runtime context, so changes from other plugins do not resend it.
+  Index lines end with the file path, and the snapshot says how to use each
+  type and that memories never start a task.
 - Settings changed in the interface or `cordis.patch.yml` reach running chats
   at their next step; only settings that shape the snapshot refresh it.
-- Memories over `snapshotTokenBudget` are no longer cut by default:
-  `snapshotOverflow: relax` injects everything and reports each 25 % step over
-  the budget on the memory page; `strict` keeps the old cut-off.
+- Memories over `snapshotTokenBudget` are injected in full by default:
+  `snapshotOverflow: relax` reports each 25 % step over the budget on the
+  memory page; `strict` keeps the cut-off.
 - Tokens are estimated per character, calibrated against DeepSeek's tokenizer
   (0.6 per CJK character, 0.3 per other). The default 4,000 now fits about
-  6,700 Chinese characters instead of 2,700; English-heavy memories estimate
+  6,700 Chinese characters, up from 2,700; English-heavy memories estimate
   higher and may cross the budget.
-- Checkups examine every memory in batches of about 30,000 tokens instead of
-  the first 200, and say when a scope needed several batches, since conflicts
-  across batches can be missed.
-- `memory_search` ranks by relevance: hits containing every keyword first,
-  whole words above partial ones, name, summary and tags above content. Notes
-  on weak matches or types without memories are signals for the model. Long
-  memories and lower-ranked hits return an excerpt.
+- Checkups examine every memory, in batches of about 30,000 tokens (the first
+  200 memories before), and say when a scope needed several batches, since
+  conflicts across batches can be missed.
+- Checkups compare each project's memories with that project's own
+  `AGENTS.md` / `CLAUDE.md`, the files a new conversation there would read,
+  and global memories with the global ones. Checkups of everything and
+  automatic checkups cover every project, and the result says so when the
+  files were cut off or couldn't be read.
+- `memory_search` ranks whole-word matches above partial ones and name,
+  summary and tags above content. Notes on weak matches or types without
+  memories are signals for the model. Long memories and lower-ranked hits
+  return an excerpt.
 - A memory holding a secret is deleted at once by `memory_forget` or a
-  conflict ruling instead of going to `.archive/`, with its copies in global
-  and the current project, and every snapshot replaces it with
+  conflict ruling, with its copies in global and the current project, and
+  keeps no recoverable copy; every snapshot replaces it with
   `[redacted: secret]`. `memory_save` refuses a suspected secret (a password
   or `api_key` without vendor format) until you confirm and it is resent with
   `force: true`.
 - Governance tools act on global and current-project memories only; another
   project's memory needs `allowCrossWorkspace: true`. `memory_source` output
   includes tool results.
-- In subagent sessions, writing tools other than `memory_save` are refused
-  with `subagent-readonly`; search, `memory_health` and injection work as
-  before, and `memory_source` traces only memories that session saved.
+- In subagent sessions `memory_save` is the only writing tool, and only while
+  governance is on. What it saves stays pending in the current project: not
+  injected into the main session, ranked last in search, marked unconfirmed
+  and traceable to the delegating session. A subagent can create `knowledge`
+  and `project` memories the scene includes, without `supersedes` or `force`,
+  up to `subagent.maxSavesPerSession` (default 10) per session, and update
+  only pending memories it saved. The main session accepts one with
+  `memory_confirm` `accept-subagent`, a `memory_save` update, a promotion or
+  an edit on the memory page. `memory_source` in a subagent traces only
+  memories that session saved.
 - Testing: `pnpm host:contract` now also covers hand-written files, the grep
   tool, subagent writes on a real child session, `/memory` commands, the
   checkup timer, the interface slots, and that the installed plugin reads
@@ -170,6 +161,9 @@ All notable changes to this project are documented here. The format follows
   evaluation set.
 
 ### Fixed
+- Two memory files with the same id: the older one was deleted when the
+  library loaded. Both are now kept and `memory_health` reports the
+  duplicate.
 - A vendor-format key (`sk-`, `ghp_`, AWS, PEM private key) typed into a
   memory file was injected as is. It is now masked as `[已隐藏]` in the
   snapshot, search results, checkups and the interface.
@@ -177,9 +171,9 @@ All notable changes to this project are documented here. The format follows
   summary or a parse error were logged and saved as is; they are now masked.
 - Promoting a memory with a secret to `AGENTS.md` copied the secret there and
   is now refused. An unreadable `~/.dsh/AGENTS.md` was replaced on promotion
-  and is now left alone. Promoting to global no longer overwrites a global
-  memory with the same id.
-- A suspected secret confirmed with `force: true` kept the health check red.
+  and is now left alone.
+- A suspected secret such as `password: …` or `api_key=…` kept the health
+  check red with no way to clear it. Only vendor-format keys do now.
 - A conflict settled by keeping both memories came back at the next scan. The
   verdict is now remembered until either side changes, conflicts carried over
   from 0.1.x included, and a conflict is listed only once.
