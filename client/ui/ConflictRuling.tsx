@@ -4,7 +4,7 @@
  * 右侧栏是建议结论一行和「采纳建议」或去记忆页的入口（sidebar/SidebarTab.tsx）。
  * - 宽版（记忆页）：A、B 各一张描边卡并排，卡里只放记忆；按钮靠右，和其它卡的动作行对齐；
  * - 窄版（右侧栏）：A、B 上下排，按钮一行靠左。
- * 记忆和基线（AGENTS.md / CLAUDE.md）冲突用 VerticalConflictRuling：只有一张记忆卡，标题下写明基线不会被删除；
+ * 记忆和基线（AGENTS.md / CLAUDE.md）冲突用 VerticalConflictRuling：只有一张记忆卡，标题下写明指令文件不会被改动、处理只针对这条记忆；
  * 下面的整块同样由调用方给（记忆页是同一张处理卡，右侧栏是建议结论一行和「采纳建议」或去记忆页的入口）。
  */
 import type { ReactNode } from 'react'

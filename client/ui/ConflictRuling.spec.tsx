@@ -41,7 +41,7 @@ describe('ConflictRuling', () => {
 describe('VerticalConflictRuling', () => {
   const footer = <p className="test-footer">建议和动作</p>
 
-  it('写明基线不会被删除和基线出处；记忆卡下面整块是调用方给的 footer，不另画裁决按钮', () => {
+  it('写明指令文件不会被改动、处理只针对这条记忆，以及基线出处；记忆卡下面整块是调用方给的 footer，不另画裁决按钮', () => {
     const { container } = renderInShell(<VerticalConflictRuling layout="narrow" memory={left} baselineRef="AGENTS.md：用 pnpm" now={NOW} footer={footer} />)
     expect(screen.getByRole('heading', { name: '这条记忆和基线矛盾，等你决定' })).toBeInTheDocument()
     expect(container.querySelector('.pm-conflict-head > .pm-conflict-mark > .pm-marker--pending')).not.toBeNull()

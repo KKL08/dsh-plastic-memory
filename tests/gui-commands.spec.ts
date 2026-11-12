@@ -4952,6 +4952,28 @@ describe('suggest（补上建议）', () => {
     expect(await e.store.get('mem_b')).toMatchObject({ status: 'active', content: '用 npm' })
   })
 
+  it('不认领体检范围、不写体检完成记录：生成期间同一范围照样能体检，之后上次体检时间不变', async () => {
+    const PROJECT = { kind: 'workspace' as const, workspacePath: SESSION_WS }
+    const GLOBAL = { kind: 'global' as const }
+    let e!: ReturnType<typeof env>
+    const inProgress: boolean[] = []
+    const llm: SemanticLlm = {
+      complete: async () => {
+        inProgress.push(await e.checkups.isInProgress(PROJECT), await e.checkups.isInProgress(GLOBAL))
+        return KEEP_A
+      },
+    }
+    e = env({ llm })
+    const entry = await seedPair(e, SESSION_WS)
+    ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+    expect((await e.decisions.get(entry.id))!.suggestion?.action).toBe('keep-a')
+    expect(inProgress).toEqual([false, false])
+    expect(await e.checkups.list()).toEqual([])
+    const lastCheckups = healthViewSchema.parse(await e.readView('health')).layers.map(l => l.lastCheckupAt)
+    expect(lastCheckups.length).toBeGreaterThan(0)
+    expect(lastCheckups.every(at => at === null)).toBe(true)
+  })
+
   it('已有当前依据的建议时直接回成功、不调用模型；两条被改过后依据作废，再点会重新生成', async () => {
     const { llm, prompts } = scripted(KEEP_A, JSON.stringify({ action: 'keep-b', reason: 'B 改过了' }))
     const e = env({ llm })
