@@ -29,7 +29,7 @@ export function createSaveTool(deps: SaveToolDeps, options: { allowSubagent?: bo
       name: { type: 'string', required: true, description: '简短标题（2-16 字）' },
       type: { type: 'string', enum: typeNames, required: true },
       scope: { type: 'string', enum: ['global', 'workspace'], required: true },
-      content: { type: 'string', required: true, description: '正文。按所选类型说明里的「正文」写法组织（类型说明没写正文写法的，写清事实和它的依据或情境），写成陈述句并标明主体（「用户要求…」「项目定了…」），日后读到时能和用户当下的话分开；只写对话或资料里有依据的内容，不替用户编理由；原话里的人名、地名、数字和单位照写，不概括成类别。不写使用场景清单和通用注意事项；不写行号、临时路径这类很快过时的细节，改写稳定的位置描述。完整经过可以用 memory_source 回查，不用抄进正文。' },
+      content: { type: 'string', required: true, description: '正文。按所选类型说明里的「正文」写法组织（类型说明没写正文写法的，写清事实和它的依据或情境），写成陈述句并标明主体（「用户要求…」「项目定了…」），日后读到时能和用户当下的话分开；只写对话或资料里有依据的内容，不替用户编理由；原话里的人名、地名、数字和单位照写，不概括成类别。怎么用由类型统一交代，正文里不另列泛泛的使用场景和注意事项；不写行号、临时路径这类很快过时的细节，改用稳定的位置描述。完整经过可以用 memory_source 回查，不用抄进正文。' },
       summary: { type: 'string', required: true, description: '一句话说清这条记忆讲什么，显示在索引里，供人和模型判断相关不相关；不复述 name，不堆关键词。' },
       tags: { type: 'array', items: { type: 'string' }, description: '只写正文、name、summary 里都没出现、但以后可能被拿来搜它的词：同义词、中英文别名、缩写。不写泛化概念。' },
       sourceMode: { type: 'string', enum: ['user-explicit', 'user-behavior', 'environment-observed', 'agent-inferred', 'agent-action-confirmed'], required: true, description: '信息从哪来，决定置信度上限。user-explicit：用户明说的。agent-action-confirmed：你做的事经用户确认有效，或被采纳。user-behavior：用户反复做出的动作（多次改写、撤销、拒绝同一类做法）；对一次举动揣测动机不算。environment-observed：从文件、命令输出、配置里直接读到的事实。agent-inferred：你自己的推断和解读；只要中间有一步是你推出来的、不是直接看到的，就填它。' },

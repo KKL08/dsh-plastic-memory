@@ -82,6 +82,11 @@ All notable changes to this project are documented here. The format follows
   "Suggest" on the card; memories with high-risk secrets are never sent.
 
 ### Changed
+- The built-in type definitions are clearer about what goes where. The
+  user profile covers the person (everyday habits, interests, background),
+  while preferences cover how you want work done in a project or task. A
+  reference now asks for a title that says what it points to, since only
+  the title and tags are shown when it is brought into a conversation.
 - The model gets a fuller picture of each memory type. When saving, it
   sees what each type holds, how to write it and an example, next to when
   to save it; a custom type's `description` is now part of this too. The

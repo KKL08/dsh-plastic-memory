@@ -71,7 +71,7 @@ describe('buildTypeRegistry', () => {
     for (const t of BUILTIN_TYPES) expect(text).toContain(t.name)
     expect(text).toMatch(/未来的我会不会/)            // 守门句
     expect(text).toMatch(/边做边记|别拖到最后/)        // γ 收尾提示
-    expect(text).toMatch(/低置信|0\.5|agent-inferred/) // D3 推断低置信
+    expect(text).toMatch(/低置信|0\.5|agent-inferred/) // D3 推断标 agent-inferred
     expect(text).toMatch(/AGENTS\.md|CLAUDE\.md/)      // 别与基线重复
     expect(text).toMatch(/性别|年龄|没明说/)           // 隐私负向
   })
