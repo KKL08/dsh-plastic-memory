@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, render, renderHook, screen } from '@testing-library/react'
 import { useRef, useState } from 'react'
-import { Arrival, RollingNumber, useArrivals, useHeightTransition, withRollingNumber, type Arrivals } from './motion.tsx'
+import { Arrival, RollingNumber, motionCss, useArrivals, useHeightTransition, withRollingNumber, type Arrivals } from './motion.tsx'
 import { savedMemoriesCardCss } from '../chat/SavedMemoriesCard.tsx'
 import { statusBarCss } from '../checkup/StatusBar.tsx'
 import { titleControlsCss } from '../checkup/TitleControls.tsx'
+import { editCss } from '../pending/edit.tsx'
 import { pendingCss } from '../pending/PendingTab.tsx'
+import { controlsCss } from '../settings/controls.tsx'
 
 /** jsdom 没有 Element.animate：换成记录调用的假实现，测完还原。 */
 function stubAnimate() {
@@ -204,9 +206,27 @@ describe('展开箭头的转动（CSS）', () => {
     ['对话卡「这轮记住了」', savedMemoriesCardCss, '.pm-saved-chevron'],
     ['状态条「分数怎么来的」', statusBarCss, '.pm-status-why svg'],
     ['待处理「不再提醒的 N 条」', pendingCss, '.pm-ignored-toggle svg'],
+    ['修改面板「更多字段」', editCss, '.pm-edit-more svg'],
   ])('%s：transform 120ms ease，减少动态效果时去掉过渡', (_name, css, selector) => {
     expect(bodiesOf(css, selector, '').some(body => /(^|;)\s*transition:\s*transform 120ms ease\s*(;|$)/.test(body))).toBe(true)
     expect(bodiesOf(css, selector, REDUCE).some(body => /(^|;)\s*transition:\s*none\s*(;|$)/.test(body))).toBe(true)
+  })
+})
+
+describe('数字滚动的格宽（CSS）', () => {
+  it('滚出去的旧数字绝对定位、不撑宽格子，格子横向不裁切（位数变少时滚完不再左跳，宽的旧数字也不被切掉）', () => {
+    expect(bodiesOf(motionCss, '.pm-roll > span[aria-hidden]', '').some(body => /(^|;)\s*position:\s*absolute\s*(;|$)/.test(body))).toBe(true)
+    const roll = bodiesOf(motionCss, '.pm-roll', '').join(';')
+    expect(roll).toMatch(/(^|;)\s*position:\s*relative\s*(;|$)/)
+    expect(roll).toMatch(/(^|;)\s*overflow:\s*visible clip\s*(;|$)/)
+  })
+})
+
+describe('设置页弹层淡入（CSS）', () => {
+  it.each(['.pm-dialog-mask', '.pm-dialog'])('%s：打开时透明度 200ms 淡入；减少动态效果时没有淡入', (selector) => {
+    expect(bodiesOf(controlsCss, selector, '').some(body => /animation:\s*pm-dialog-in 200ms cubic-bezier\(0\.4, 0, 0\.2, 1\)/.test(body))).toBe(true)
+    expect(bodiesOf(controlsCss, selector, REDUCE).some(body => /animation:\s*none/.test(body))).toBe(true)
+    expect(controlsCss).toMatch(/@keyframes pm-dialog-in \{ from \{ opacity: 0; \} \}/)
   })
 })
 

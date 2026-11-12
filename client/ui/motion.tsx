@@ -140,8 +140,10 @@ export const motionCss = `
   animation: pm-arrive-tint 1800ms ease-out both;
 }
 @keyframes pm-arrive-tint { 0%, 60% { background: var(--pm-accent-tint); } 100% { background: transparent; } }
-.pm-roll { display: inline-grid; vertical-align: top; overflow: hidden; }
+.pm-roll { position: relative; display: inline-grid; vertical-align: top; overflow: visible clip; }
 .pm-roll > span { grid-area: 1 / 1; }
+/* 离场的旧数字不占宽度：格宽只由新数字定，位数变少时宽度在开始那一刻就变，滚完不再跳；横向不裁，宽的旧数字不被切掉 */
+.pm-roll > span[aria-hidden] { position: absolute; inset-inline-start: 0; }
 @media (prefers-reduced-motion: reduce) {
   .pm-arrive, .pm-arrive-body { transition: none; animation: none; }
 }
