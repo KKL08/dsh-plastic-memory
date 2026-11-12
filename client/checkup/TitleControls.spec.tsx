@@ -470,7 +470,7 @@ describe('自动体检按钮与菜单：情况表', () => {
     open()
     fireEvent.click(autoButton())
     expect(menu()).toHaveAccessibleName('全部记忆的自动体检')
-    expect(menu()).toHaveTextContent('全局和各项目都按这个频率查，各自计时；新项目也一样。用 dsh 当前的默认模型检查内容，记忆越多，token 用得越多；dsh 没开时不查，打开后补上。')
+    expect(menu()).toHaveTextContent('全局和各项目都按这个频率查，各自计时；新项目也一样。用 dsh 当前的默认模型检查内容、给新冲突出处理建议，记忆越多，token 用得越多；dsh 没开时不查，打开后补上。')
     fireEvent.keyDown(menu(), { key: 'Escape' })
     pick('全局')
     fireEvent.click(autoButton())
