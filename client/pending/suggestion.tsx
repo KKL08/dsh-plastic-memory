@@ -7,7 +7,7 @@
  * 「停止」只是不再等：已经发出的这一条照常生成、写进账本，稍后跟着视图出现；之后到达的结果按请求序号认出来丢掉。换了会话同样作废在途请求、清掉本地状态。
  * 体检之后的后续段正在给这一条排队或生成时（视图带「正在生成」标记），写「正在生成建议……」、不给按钮也不给「停止」：那一段不归这张卡管，生成完建议跟着视图来。
  * 页面加载时不问模型（问一次会在借来的会话日志里留一条记录）：只读这个会话已知的模型状态（别处问过才有），此外点过之后服务端回 llm-unavailable 才知道拿不到。
- * 垂直冲突（记忆和指令文件，只有一条记忆 left）：借来的会话不在这条记忆的项目里时（needsProject）按没有建议显示，写「要在这个项目的会话里处理」，
+ * 垂直冲突（记忆和指令文件，只有一条记忆 left）：借来的会话不在这条记忆的项目里时（needsProject）只写「要在这个项目的会话里处理」，
  * 不给「补上建议」——建议要那个项目的指令文件，采纳时也按它核对。
  */
 import { createContext, useContext, useEffect, useRef, useState } from 'react'
@@ -120,7 +120,7 @@ export function SuggestionBlock({ decisionId, left, right, suggestion, noSuggest
     return (
       <div className="pm-suggestion">
         <p className="pm-suggestion-line">
-          <strong className="pm-suggestion-title">{t(suggestion !== undefined ? 'pending.suggestion.none' : 'pending.suggestion.missing')}</strong>
+          {/* 建议有没有、模型定没定，都要回它的项目里看：这里只写去哪处理 */}
           <span>{t('pending.vertical.needProject')}</span>
         </p>
       </div>

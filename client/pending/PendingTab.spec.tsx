@@ -3172,11 +3172,12 @@ describe('垂直冲突卡：同一张处理卡（票 10）', () => {
   })
 
   it.each([
-    ['有建议', { suggestion: rewrite }, '这次没有建议'],
-    ['没有建议', { noSuggestion: { code: 'not-generated' } }, '这条还没有建议'],
-  ] as const)('故事 5a：会话不在这条记忆的项目里（%s）：按没有建议显示，写「要在这个项目的会话里处理」，只剩两个直接处理', (_label, extra, title) => {
+    ['有建议', { suggestion: rewrite }],
+    ['没有建议', { noSuggestion: { code: 'not-generated' } }],
+    ['模型判断不了', { noSuggestion: { code: 'undecided', reason: '分不出' } }],
+  ] as const)('故事 5a：会话不在这条记忆的项目里（%s）：不显示建议，只写「要在这个项目的会话里处理」，只剩两个直接处理', (_label, extra) => {
     setup([card({ memory: { ...V, workspacePath: '/w/other' }, ...extra } as Partial<Vertical>)])
-    expect(screen.getByText(title)).toBeInTheDocument()
+    expect(screen.queryByText(/没有建议|判断不了/)).toBeNull()
     expect(screen.getByText('要在这个项目的会话里处理。')).toBeInTheDocument()
     expect(screen.queryByText(REWRITTEN)).toBeNull()
     expect(screen.queryByRole('button', { name: /采纳建议|补上建议|补充要求/ })).toBeNull()

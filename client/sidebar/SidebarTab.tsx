@@ -312,6 +312,9 @@ export function SidebarTab({ sessionId, workspacePath: cwd, openPage }: SidebarT
             </p>
           )
           : null}
+        {suggestion === undefined && !isStale && item.noSuggestion?.code === 'undecided'
+          ? <p className="pm-side-hint">{t('sidebar.suggestion.undecided')}</p>
+          : null}
         {isStale ? <p className="pm-side-hint" role="status">{t('sidebar.suggestion.stale')}</p> : null}
         {adoptNote !== undefined ? <AdviceNote label="note">{adoptNote}</AdviceNote> : null}
         <div className="pm-conflict-actions">

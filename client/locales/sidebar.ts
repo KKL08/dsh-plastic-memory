@@ -37,6 +37,7 @@ export const sidebarZh = {
 
   'sidebar.suggestion.lead': '模型建议：',
   'sidebar.suggestion.stale': '这两条刚被改过，建议已失效。下次体检会重新给建议。',
+  'sidebar.suggestion.undecided': '模型判断不了该怎么处理，需要你来定。',
   'sidebar.ruled.keepA': '已保留 A',
   'sidebar.ruled.keepB': '已保留 B',
   'sidebar.ruled.keepBoth': '两条都保留',
@@ -88,6 +89,7 @@ export const sidebarEn: Record<keyof typeof sidebarZh, string> = {
 
   'sidebar.suggestion.lead': 'Model suggests: ',
   'sidebar.suggestion.stale': 'These two changed after the suggestion was made, so it no longer applies. The next checkup will suggest again.',
+  'sidebar.suggestion.undecided': 'The model could not tell how to settle this. It needs your call.',
   'sidebar.ruled.keepA': 'Kept A',
   'sidebar.ruled.keepB': 'Kept B',
   'sidebar.ruled.keepBoth': 'Kept both',

@@ -5831,7 +5831,7 @@ describe('draft-proposal 与按要求应用（补充要求）', () => {
       const { e, entry } = await seeded({ llm })
       const previous = { action: 'keep-a' as const, reason: '以 A 为准', ops: [{ kind: 'keep' as const, memoryId: 'mem_a' }, { kind: 'forget' as const, memoryId: 'mem_b' }] }
       ok(await draft(e, entry.id, { request: '还是融合吧', priorRequests: ['以 A 为准'], previous }))
-      expect(prompts[0]!.user).toContain('## 此前的要求（按先后排列）\n1. 以 A 为准')
+      expect(prompts[0]!.user).toContain('## 此前的要求\n1. 以 A 为准')
       expect(prompts[0]!.user).toContain('## 用户的要求\n还是融合吧')
       expect(prompts[0]!.user).toContain('## 上一份方案\n{\n  "action": "keep-a"')
       expect(prompts[0]!.system).toContain('上一份方案只是参照')
