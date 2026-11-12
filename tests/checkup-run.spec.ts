@@ -22,6 +22,8 @@ import { GUI_VIEW_DIR, GUI_VIEW_FILES, checkupKey, pendingItemKey, pendingViewSc
 import type { Scope } from '../src/scope.ts'
 import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
+import { instructionsOf, noInstructions } from './helpers/instructions.ts'
+import type { ReadInstructions } from '../src/governance/instructions.ts'
 
 // 一次体检：真实临时目录（FileTable + .state 侧表 + 视图文件），体检核心用真的；
 // 只把进程边界换掉：宿主模型（假 llm）、心跳计时（手动触发）、时钟、文件系统故障。
@@ -34,6 +36,8 @@ const SESSION = { kind: 'workspace' as const, workspacePath: SESSION_WS }
 const OTHER = { kind: 'workspace' as const, workspacePath: OTHER_WS }
 const registry = buildTypeRegistry({ template: 'coding', customTypes: {} })
 const quietLog = { info() {}, warn() {}, error() {} }
+/** 超过长度上限、只留了前面一部分的指令文件。 */
+const TRUNCATED = { kind: 'found' as const, texts: ['只检查前面的部分'], isTruncated: true }
 const schemas = { snapshots: memorySnapshotSchema, pending: pendingDecisionSchema, scanCache: scanCacheSchema, adviceIgnores: adviceIgnoreSchema }
 
 let root: string
@@ -54,7 +58,7 @@ function manualHeartbeat() {
   return { beats, interval }
 }
 
-function env(opts: { log?: CheckupRunDeps['log']; views?: (w: ViewWriter) => CheckupRunDeps['views']; onClaimChanged?: () => Promise<void> } = {}) {
+function env(opts: { log?: CheckupRunDeps['log']; views?: (w: ViewWriter) => CheckupRunDeps['views']; onClaimChanged?: () => Promise<void>; instructions?: ReadInstructions } = {}) {
   const clock = { now: NOW }
   const sidecar = new SidecarStore({ root, schemas, now: () => clock.now, log: quietLog })
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now }), quietLog, sidecar.recallStats)
@@ -73,14 +77,14 @@ function env(opts: { log?: CheckupRunDeps['log']; views?: (w: ViewWriter) => Che
   })
   const heartbeat = manualHeartbeat()
   const deps: CheckupRunDeps = {
-    scan: { store, registry, decisions, cache, ignores },
+    scan: { store, registry, decisions, cache, ignores, instructions: opts.instructions ?? noInstructions },
     checkups, views: opts.views?.(writer) ?? writer,
     interval: heartbeat.interval,
     ...(opts.onClaimChanged !== undefined ? { onClaimChanged: opts.onClaimChanged } : {}),
     now: () => clock.now, log: opts.log ?? quietLog,
   }
   const run = (input: Partial<CheckupRunInput> & Pick<CheckupRunInput, 'target' | 'llm'>) =>
-    runCheckup({ by: 'manual', baseline: null, currentWorkspace: SESSION_WS, ...input }, deps)
+    runCheckup({ by: 'manual', currentWorkspace: SESSION_WS, ...input }, deps)
   /** 同一个记忆根上的另一个宿主进程：另一份侧表（同一个时钟）。 */
   const otherProcess = () => new SidecarStore({ root, schemas, now: () => clock.now, log: quietLog }).checkups
   const recordOf = async (key: string) => (await checkups.list()).find(r => r.id === key)
@@ -350,7 +354,7 @@ describe('做完：重写视图与最近一次结果', () => {
 
   it('PA-34 项目体检做完立即重写视图；记下体检标识、属于本项目的新增身份与条数、宿主报的用量、说明码；全局自己的记录不动', async () => {
     const { llm, calls } = answering([crossConflict, redundancy], { usage: 300 })
-    const e = env()
+    const e = env({ instructions: instructionsOf({ [SESSION_WS]: TRUNCATED }) })
     await seed(e)
     const r = await e.run({ target: SESSION, llm })
     // 返回时视图已经写好：新冲突已在待处理里
@@ -361,7 +365,7 @@ describe('做完：重写视图与最近一次结果', () => {
       added: { keys: [cc, await keyOf(e, adviceOf('redundancy'))], pending: 1, advice: 1 },
       globalAdded: { keys: [], pending: 0, advice: 0 },
       usageTokens: calls.length * 300,
-      notes: [{ code: 'baseline-missing' }],
+      notes: [{ code: 'baseline-truncated' }],
     })
     expect(await resultOf(e, GLOBAL)).toBeUndefined()
     expect(await e.recordOf('all')).toBeUndefined()
@@ -378,7 +382,8 @@ describe('做完：重写视图与最近一次结果', () => {
 
   it('PA-34 全部体检：每个被查的范围各写自己的结果（同一个体检标识），另写键 all 的一条（新增按身份去重、按所属范围分组，带用量和说明）', async () => {
     const { llm, calls } = answering([globalConflict, crossConflict, redundancy, otherUnclear], { usage: 100 })
-    const e = env()
+    // 只有另一个项目的指令文件太长
+    const e = env({ instructions: instructionsOf({ [OTHER_WS]: TRUNCATED }) })
     await seed(e)
     expect((await e.run({ target: { kind: 'all' }, llm })).kind).toBe('done')
     const gc = await keyOf(e, conflictOf('mem_g1', 'mem_g2'))
@@ -388,8 +393,9 @@ describe('做完：重写视图与最近一次结果', () => {
     const [global, session, other] = await Promise.all([GLOBAL, SESSION, OTHER].map(s => resultOf(e, s)))
     const all = (await e.recordOf('all'))!
     const checkupId = all.lastResult!.checkupId
-    // 说明码各记各的范围（没有基线对每个范围都成立）；用量是整次体检的，只记在 all 上
-    for (const r of [global, session, other]) expect(r).toMatchObject({ checkupId, by: 'manual', completedAt: NOW, notes: [{ code: 'baseline-missing' }] })
+    // 说明码各记各的范围；用量是整次体检的，只记在 all 上
+    for (const r of [global, session]) expect(r).toMatchObject({ checkupId, by: 'manual', completedAt: NOW, notes: [] })
+    expect(other).toMatchObject({ checkupId, by: 'manual', completedAt: NOW, notes: [{ code: 'baseline-truncated' }] })
     for (const r of [global, session, other]) expect(r).not.toHaveProperty('usageTokens')
     expect({ ...global!.added, keys: sorted(global!.added.keys) }).toEqual({ keys: sorted([gc, cc]), pending: 2, advice: 0 })
     expect(session!.added).toEqual({ keys: [cc, red], pending: 1, advice: 1 })
@@ -404,7 +410,7 @@ describe('做完：重写视图与最近一次结果', () => {
         { scope: SESSION, keys: [cc, red] },
       ],
       usageTokens: calls.length * 100,
-      notes: expect.arrayContaining([{ code: 'baseline-missing' }]),
+      notes: expect.arrayContaining([{ code: 'baseline-truncated' }]),
     })
     expect(sorted(all.lastResult!.added.keys)).toEqual(sorted([gc, cc, red, unclear]))
     // 体检视图：各范围带自己的最近一次结果，「全部」的结果单独一项；all 不是体检视图里的范围
@@ -440,7 +446,7 @@ describe('做完：重写视图与最近一次结果', () => {
     const { llm, calls } = answering([crossConflict], { usage: 1280 })
     const e = env()
     await seed(e)
-    expect(await e.run({ target: SESSION, llm, by: 'auto', baseline: null, currentWorkspace: undefined })).toMatchObject({ kind: 'done' })
+    expect(await e.run({ target: SESSION, llm, by: 'auto', currentWorkspace: undefined })).toMatchObject({ kind: 'done' })
     const cc = await keyOf(e, conflictOf('mem_g1', 'mem_s1'))
     const result = await resultOf(e, SESSION)
     expect(result).toEqual({
@@ -448,7 +454,7 @@ describe('做完：重写视图与最近一次结果', () => {
       added: { keys: [cc], pending: 1, advice: 0 },
       globalAdded: { keys: [], pending: 0, advice: 0 },
       usageTokens: calls.length * 1280,
-      notes: [{ code: 'baseline-missing' }],
+      notes: [],
     })
     expect((await e.recordOf(checkupKey(SESSION)))?.completed).toEqual({ startedAt: NOW, completedAt: NOW, by: 'auto' })
     const view = await e.checkupView()
@@ -578,7 +584,7 @@ describe('收集与记录出错不挡体检', () => {
     const e = env({ log: l, views: w => ({ rewriteAll: () => w.rewriteAll(), collectViews: () => Promise.reject(new Error('读不出')) }) })
     await seedScopes(e)
     const r = await e.run({ target: SESSION, llm: answering([{ type: 'conflict', memoryIds: ['mem_g', 'mem_s'], summary: '矛盾', suggestedAction: '裁决' }]).llm })
-    expect(r).toMatchObject({ kind: 'done', notes: [{ code: 'baseline-missing' }] })
+    expect(r).toMatchObject({ kind: 'done', notes: [] })
     expect(r).not.toHaveProperty('compared')
     expect(await e.decisions.list()).toHaveLength(1)
     expect((await e.recordOf(checkupKey(SESSION)))?.lastResult).toBeUndefined()

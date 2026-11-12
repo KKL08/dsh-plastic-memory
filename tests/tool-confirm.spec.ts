@@ -8,9 +8,12 @@ import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { InMemoryTable } from './helpers/in-memory-table.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
+import { instructionsOf, noInstructions } from './helpers/instructions.ts'
+import { conflictFingerprint } from '../src/governance/decisions.ts'
 
 function makeDeps(): ConfirmToolDeps {
   return {
+    instructions: noInstructions,
     store: new MemoryStore(new InMemoryTable(), undefined, new InMemoryBatchKvTable()),
     decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
     snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
@@ -225,6 +228,31 @@ describe('memory_confirm resolve（垂直冲突）', () => {
     expect((await deps.store.get('mem_v'))!.status).toBe('active')
     expect(await deps.snapshots.list()).toHaveLength(0)
     expect(await deps.decisions.list()).toHaveLength(0)
+  })
+
+  it('没有指纹的旧条目 keep-left：按这条项目记忆所在项目的指令文件现算指纹记下，不标 isUnrecorded', async () => {
+    const deps = { ...makeDeps(), instructions: instructionsOf({ global: '全局指令', '/proj': '全局指令\n本项目用 pnpm' }) }
+    const memory = record({ id: 'mem_v', content: '与基线矛盾的记忆', scope: 'workspace', workspacePath: '/proj' })
+    await deps.store.put(memory)
+    const { entry } = await deps.decisions.upsert(
+      { memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '与基线矛盾' }, 1)
+    expect(entry.fingerprint).toBeUndefined()
+    const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-left' }, { workspacePath: '/proj' }, deps)
+    expect(r.kind).toBe('resolved')
+    if (r.kind !== 'resolved') return
+    expect(r.isUnrecorded).toBeUndefined()
+    const [settled] = await deps.decisions.listSettled()
+    expect(settled.fingerprint).toBe(conflictFingerprint([(await deps.store.get('mem_v'))!], ['全局指令\n本项目用 pnpm']))
+  })
+
+  it('没有指纹的旧条目 keep-left：这条记忆对应的作用域没有指令文件时算不出，标 isUnrecorded', async () => {
+    const deps = { ...makeDeps(), instructions: instructionsOf({ '/other': '别的项目' }) }
+    await deps.store.put(record({ id: 'mem_v', content: '与基线矛盾的记忆', scope: 'workspace', workspacePath: '/proj' }))
+    const { entry } = await deps.decisions.upsert(
+      { memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '与基线矛盾' }, 1)
+    const r = await executeConfirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-left' }, { workspacePath: '/proj' }, deps)
+    expect(r.kind === 'resolved' && r.isUnrecorded).toBe(true)
+    expect(await deps.decisions.listSettled()).toEqual([])
   })
 
   it('keep-right：基线胜，删记忆（先快照）', async () => {

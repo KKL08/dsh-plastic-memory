@@ -11,6 +11,7 @@ import { record } from './helpers/record.ts'
 import { DAY } from './helpers/clock.ts'
 import { InMemoryTable } from './helpers/in-memory-table.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
+import { noInstructions } from './helpers/instructions.ts'
 
 const NOW = 100 * DAY
 
@@ -23,7 +24,7 @@ function sharedDeps(store: MemoryStore, decisions: PendingDecisionsStore, cache:
   const shared = { store, registry: buildTypeRegistry({ template: 'coding', customTypes: {} }), decisions, cache }
   const scanDeps: ScanToolDeps = {
     ...shared,
-    host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: (_exec: unknown) => null, baselineOf: () => null },
+    instructions: noInstructions, host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: (_exec: unknown) => null },
     now: () => NOW,
   }
   const healthDeps: HealthToolDeps = {

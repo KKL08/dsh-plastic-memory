@@ -12,7 +12,7 @@ import { computeDigest, encodeRecord, splitFrontmatter } from '../src/storage/fr
 import { ARCHIVE_DIR, GLOBAL_DIR, INDEX_FILE, STATE_DIR, WORKSPACE_MARKER, workspaceDirName } from '../src/storage/paths.ts'
 import { MemoryStore, type MemoryLogger, type MemoryTable } from '../src/store.ts'
 import { buildTypeRegistry } from '../src/type-registry.ts'
-import { PendingDecisionsStore, candidateFingerprint, conflictFingerprint, suggestionBasis, type PendingTable } from '../src/governance/decisions.ts'
+import { PendingDecisionsStore, baselineFingerprint, candidateFingerprint, conflictFingerprint, suggestionBasis, type PendingTable } from '../src/governance/decisions.ts'
 import { SnapshotStore, editFingerprint } from '../src/governance/snapshots.ts'
 import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
@@ -40,6 +40,7 @@ import type { MemoryRecord } from '../src/record-schema.ts'
 import { candidate, record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { InMemoryTable } from './helpers/in-memory-table.ts'
+import { instructionsOf, noInstructions } from './helpers/instructions.ts'
 
 // /memory 命令处理器：真实临时目录（FileTable + .state 侧表 + 视图文件），只把宿主那一侧
 // （借来的会话：workspace、子 agent 深度、模型、基线）换成测试桩。断言账本、记忆文件、快照与视图的终态。
@@ -59,7 +60,8 @@ interface EnvOpts {
   workspacePath?: string
   delegationDepth?: number
   llm?: SemanticLlm | null
-  baseline?: readonly string[] | null
+  /** 各作用域的指令文件（键：全局 `global`、项目为路径；项目给的是全局层加本项目那一段）；缺省哪里都没有。 */
+  instructions?: Parameters<typeof instructionsOf>[0]
   now?: number
   /** 体检开关；缺省视为开启。 */
   governanceEnabled?: boolean
@@ -105,14 +107,16 @@ function env(opts: EnvOpts = {}) {
   })
   // 本进程调度器收到的「设置改了」通知次数
   const autoCheckupChanges = { count: 0 }
-  if (opts.withSuggestions === true) suggestions = new CheckupSuggestions({ store, decisions, checkups, views, now: () => clock.now, log: { info() {}, warn() {}, error() {} } })
+  const instructions = instructionsOf(opts.instructions)
+  if (opts.withSuggestions === true) suggestions = new CheckupSuggestions({ store, decisions, checkups, views, instructions, now: () => clock.now, log: { info() {}, warn() {}, error() {} } })
   const command = createMemoryCommand({
     memoryRoot: root, store, decisions, snapshots, cache, checkups, autoCheckups, ignores: new AdviceIgnoreStore(sidecar.adviceIgnores), registry, views: opts.wrapViews?.(views) ?? views,
     onAutoCheckupChanged: () => { autoCheckupChanges.count++ },
     ...(opts.log !== undefined ? { log: opts.log } : {}),
     ...(opts.heartbeat !== undefined ? { heartbeat: opts.heartbeat } : {}),
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),
-    host: { contextOf: async () => ({ workspacePath: 'workspacePath' in opts ? opts.workspacePath : SESSION_WS, delegationDepth: opts.delegationDepth ?? 0, session: { id: 'sess-1' } }), llmOf: () => (opts.llm === undefined ? null : opts.llm), baselineOf: () => opts.baseline ?? null },
+    host: { contextOf: async () => ({ workspacePath: 'workspacePath' in opts ? opts.workspacePath : SESSION_WS, delegationDepth: opts.delegationDepth ?? 0, session: { id: 'sess-1' } }), llmOf: () => (opts.llm === undefined ? null : opts.llm) },
+    instructions,
     ...(opts.governanceEnabled !== undefined ? { isGovernanceEnabled: () => opts.governanceEnabled! } : {}),
     ...(opts.readEvent !== undefined ? { getReadEvent: () => opts.readEvent! } : {}),
     isLegacyImportSettled: () => sidecar.isLegacyImportSettled(),
@@ -304,7 +308,7 @@ describe('resolve 与 undo', () => {
     const llm = { complete: async () => JSON.stringify({ findings: [{ type: 'conflict', memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', suggestedAction: '裁决' }] }) }
     const scanned = await executeScan({}, {
       store: e.store, registry, decisions: e.decisions, cache: e.cache, checkups: e.checkups,
-      host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: () => llm, baselineOf: () => null }, now: () => e.clock.now,
+      host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: () => llm }, instructions: noInstructions, now: () => e.clock.now,
     }, fakeExec())
     if (scanned.kind !== 'single') throw new Error(`expected single, got ${scanned.kind}`)
     expect(scanned.pendingDecisions.created).toBe(0)
@@ -316,8 +320,8 @@ describe('resolve 与 undo', () => {
     expect((await e.decisions.list()).map(d => d.id)).toEqual([entry.id])
   })
 
-  it('没有指纹的垂直冲突保留记忆：拿得到基线时现算指纹记下；拿不到时结果标 isUnrecorded，条目移出账本', async () => {
-    const withBaseline = env({ baseline: ['包管理统一用 pnpm'] })
+  it('没有指纹的垂直冲突保留记忆：拿得到这条记忆对应的指令文件时现算指纹记下；拿不到时结果标 isUnrecorded，条目移出账本', async () => {
+    const withBaseline = env({ instructions: { global: '包管理统一用 pnpm' } })
     await withBaseline.store.create(record({ id: 'mem_v', name: '丙', content: '用 yarn' }))
     const { entry } = await withBaseline.decisions.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '与基线矛盾' }, 1)
     expect(ok(await withBaseline.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' })).isUnrecorded).toBeUndefined()
@@ -333,17 +337,18 @@ describe('resolve 与 undo', () => {
     expect((await noBaseline.store.get('mem_v'))!.status).toBe('active')
   })
 
-  it('没有指纹的垂直冲突，记忆属于别的项目（跨项目确认后裁决）：会话的基线不是它的，不现算，结果标 isUnrecorded、不能撤销', async () => {
-    const e = env({ baseline: ['包管理统一用 pnpm'] })
+  it('没有指纹的垂直冲突，记忆属于别的项目（跨项目确认后裁决）：按它所在项目的指令文件现算指纹记下，和会话所在项目无关', async () => {
+    const e = env({ instructions: { [SESSION_WS]: '会话项目：用 npm', [OTHER_WS]: '包管理统一用 pnpm' } })
     await e.store.create(record({ id: 'mem_v', name: '丙', content: '用 yarn', scope: 'workspace', workspacePath: OTHER_WS }))
     const { entry } = await e.decisions.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '与基线矛盾' }, 1)
     expect(err(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left' })).code).toBe('cross-workspace')
     const body = ok(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left', allowCrossWorkspace: true }))
-    expect(body.isUnrecorded).toBe(true)
-    expect(body.snapshotId).toBeUndefined()
-    expect(await allEntries(e)).toEqual([])
-    expect((await e.store.get('mem_v', { kind: 'workspace', workspacePath: OTHER_WS }))!.status).toBe('active')
-    expect(err(await e.run({ cmd: 'undo', decisionId: entry.id })).code).toBe('not-found')
+    expect(body.isUnrecorded).toBeUndefined()
+    const written = (await e.store.get('mem_v', { kind: 'workspace', workspacePath: OTHER_WS }))!
+    expect(written.status).toBe('active')
+    expect((await e.decisions.listSettled()).map(d => [d.id, d.fingerprint])).toEqual([[entry.id, conflictFingerprint([written], ['包管理统一用 pnpm'])]])
+    ok(await e.run({ cmd: 'undo', decisionId: entry.id }))
+    expect((await e.decisions.list()).map(d => d.id)).toEqual([entry.id])
   })
 
 })
@@ -2169,8 +2174,7 @@ describe('scan', () => {
     expect((await e.readCheckupView()).allResult?.usageTokens).toBe(130)
   })
 
-  it('故事 33：手动体检之后给垂直冲突生成建议：用借来的会话的指令文件，依据记下基线所属项目', async () => {
-    const baseline = ['# AGENTS.md\n包管理统一用 pnpm']
+  it('故事 33：手动体检之后给垂直冲突生成建议：用记忆所在项目的指令文件（会话在别的项目也一样），依据记下那个项目', async () => {
     let verticalPrompt = ''
     const llm: SemanticLlm = {
       model: 'm-test',
@@ -2182,22 +2186,24 @@ describe('scan', () => {
         return JSON.stringify({ findings: [{ type: 'conflict', memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '和基线矛盾', suggestedAction: '裁决' }] })
       },
     }
-    const e = env({ llm, baseline, withSuggestions: true })
-    await e.store.create(record({ id: 'mem_v', name: '包管理', content: '用 npm', scope: 'workspace', workspacePath: SESSION_WS }))
-    ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
+    const e = env({ llm, instructions: { [SESSION_WS]: '# AGENTS.md\n会话项目用 yarn', [OTHER_WS]: '# AGENTS.md\n包管理统一用 pnpm' }, withSuggestions: true })
+    await e.store.create(record({ id: 'mem_v', name: '包管理', content: '用 npm', scope: 'workspace', workspacePath: OTHER_WS }))
+    const body = ok(await e.run({ cmd: 'scan', workspacePath: OTHER_WS }))
+    expect(body.notes ?? []).toEqual([])
     await e.suggestions!.whenIdle()
     expect(verticalPrompt).toContain('包管理统一用 pnpm')
+    expect(verticalPrompt).not.toContain('会话项目用 yarn')
     const [entry] = await e.decisions.list()
-    expect(entry?.suggestion).toMatchObject({ action: 'delete', basis: { baseline: { workspace: SESSION_WS } } })
+    expect(entry?.suggestion).toMatchObject({ action: 'delete', basis: { baseline: { workspace: OTHER_WS } } })
     const items = ledgerItems(pendingViewSchema.parse(await e.readView('pending')))
-    expect(items).toEqual([expect.objectContaining({ kind: 'conflict-vertical', suggestion: expect.objectContaining({ action: 'delete', baselineWorkspace: SESSION_WS }) })])
+    expect(items).toEqual([expect.objectContaining({ kind: 'conflict-vertical', suggestion: expect.objectContaining({ action: 'delete', baselineWorkspace: OTHER_WS }) })])
   })
 
-  it('借的会话不属于页面项目：结果带回 baseline-session-scoped', async () => {
-    const e = env({ llm: { complete: async () => '{"findings":[]}' }, baseline: ['用 pnpm'] })
+  it('指令文件太长、只留了前面一部分：结果带回 baseline-truncated', async () => {
+    const e = env({ llm: { complete: async () => '{"findings":[]}' }, instructions: { [OTHER_WS]: { kind: 'found', texts: ['用 pnpm'], isTruncated: true } } })
     await e.store.create(record({ id: 'mem_w', scope: 'workspace', workspacePath: OTHER_WS }))
     const body = ok(await e.run({ cmd: 'scan', workspacePath: OTHER_WS }))
-    expect(body.notes).toContain('baseline-session-scoped')
+    expect(body.notes).toContain('baseline-truncated')
   })
 
   it('分了批：带回 semantic-batched 与批数；用量是宿主报的合计，每次体检各算各的', async () => {
@@ -2249,7 +2255,7 @@ describe('scan', () => {
 
     it('未决的垂直冲突再体检时模型换了基线出处的措辞：不算新增，待处理里仍是一张卡、健康照样扣分', async () => {
       let wording = 'AGENTS.md：包管理用 pnpm'
-      const e = env({ llm: answering(() => [{ type: 'conflict', memoryIds: ['mem_a'], baselineRef: wording, summary: '与基线矛盾' }]), baseline: ['包管理统一用 pnpm'] })
+      const e = env({ llm: answering(() => [{ type: 'conflict', memoryIds: ['mem_a'], baselineRef: wording, summary: '与基线矛盾' }]), instructions: { [SESSION_WS]: '包管理统一用 pnpm' } })
       await seedFour(e)
       expect(ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS })).added).toEqual({ pending: 1, advice: 0, pendingLevel: 'your-call' })
       wording = 'AGENTS.md 里「统一用 pnpm」那条'
@@ -2487,7 +2493,7 @@ describe('scan：上次体检与完成记录', () => {
     e.clock.now = NOW + 1000
     const late = executeScan({ scope: SESSION_WS }, {
       store: e.store, registry, decisions: e.decisions, cache: e.cache, checkups: e.checkups,
-      host: { contextOf: async () => ({ workspacePath: SESSION_WS }), llmOf: () => slow, baselineOf: () => null }, now: () => e.clock.now,
+      host: { contextOf: async () => ({ workspacePath: SESSION_WS }), llmOf: () => slow }, instructions: noInstructions, now: () => e.clock.now,
     }, fakeExec())
     e.clock.now = NOW + 2000
     ok(await e.run({ cmd: 'scan', workspacePath: SESSION_WS }))
@@ -2552,18 +2558,18 @@ describe('scan：最近一次结果', () => {
   const recordOf = async (e: ReturnType<typeof env>, key: string) => (await e.checkups.list()).find(r => r.id === key)
   const resultOf = async (e: ReturnType<typeof env>, layer: Parameters<typeof checkupKey>[0]) => (await recordOf(e, checkupKey(layer)))?.lastResult
 
-  it('全部体检的说明码按范围给：一个范围内容检查没做完，别的范围不带；跳过基线检查只记在被跳过的范围；整次的合并记在 all', async () => {
+  it('全部体检的说明码按范围给：一个范围内容检查没做完，别的范围不带；指令文件被截断只记在那个范围；整次的合并记在 all', async () => {
     // 输入里有别的项目的记忆就输出无法解析（这个项目的内容检查和跨项目重复都没做成），其余照常
     const llm: SemanticLlm = { complete: async (input) => JSON.stringify(input).includes('mem_o') ? 'not json' : '{"findings":[]}' }
-    const e = env({ llm, baseline: ['用 pnpm'] })
+    const e = env({ llm, instructions: { [OTHER_WS]: { kind: 'found', texts: ['用 pnpm'], isTruncated: true } } })
     await seed(e)
     ok(await e.run({ cmd: 'scan' }))
     const codes = async (layer: Parameters<typeof checkupKey>[0]) => (await resultOf(e, layer))!.notes.map(n => n.code)
     expect(await codes(SESSION)).toEqual([])
     expect(await codes(GLOBAL)).toEqual([])
-    expect(await codes(OTHER)).toEqual(['semantic-failed', 'baseline-session-scoped'])
+    expect((await codes(OTHER)).sort()).toEqual(['baseline-truncated', 'semantic-failed'])
     expect((await recordOf(e, 'all'))!.lastResult!.notes.map(n => n.code).sort())
-      .toEqual(['baseline-session-scoped', 'cross-ws-failed', 'semantic-failed'])
+      .toEqual(['baseline-truncated', 'cross-ws-failed', 'semantic-failed'])
   })
 
   it('agent 体检（memory_scan）只写完成记录、不写结果：之前的最近一次结果原样留着', async () => {
@@ -2575,21 +2581,21 @@ describe('scan：最近一次结果', () => {
     e.clock.now = NOW + 1000
     await executeScan({ scope: OTHER_WS }, {
       store: e.store, registry, decisions: e.decisions, cache: e.cache, checkups: e.checkups,
-      host: { contextOf: async () => ({ workspacePath: SESSION_WS }), llmOf: () => llm, baselineOf: () => null }, now: () => e.clock.now,
+      host: { contextOf: async () => ({ workspacePath: SESSION_WS }), llmOf: () => llm }, instructions: noInstructions, now: () => e.clock.now,
     }, fakeExec())
     await executeScan({ scope: SESSION_WS }, {
       store: e.store, registry, decisions: e.decisions, cache: e.cache, checkups: e.checkups,
-      host: { contextOf: async () => ({ workspacePath: SESSION_WS }), llmOf: () => llm, baselineOf: () => null }, now: () => e.clock.now,
+      host: { contextOf: async () => ({ workspacePath: SESSION_WS }), llmOf: () => llm }, instructions: noInstructions, now: () => e.clock.now,
     }, fakeExec())
     expect(await recordOf(e, checkupKey(OTHER))).toEqual({ id: checkupKey(OTHER), completed: { startedAt: NOW + 1000, completedAt: NOW + 1000, by: 'agent' } })
     expect((await recordOf(e, checkupKey(SESSION)))).toMatchObject({ completed: { by: 'agent' }, lastResult: before })
   })
 
-  it('说明码：分了批、基线检查被跳过（查的不是借来的会话所在的项目）', async () => {
-    const e = env({ llm: answering([]).llm, baseline: ['用 pnpm'] })
+  it('说明码：分了批、指令文件被截断（查的不是会话所在的项目也照样对照它自己的）', async () => {
+    const e = env({ llm: answering([]).llm, instructions: { [OTHER_WS]: { kind: 'found', texts: ['用 pnpm'], isTruncated: true } } })
     for (let i = 0; i < 6; i++) await e.store.create(record({ id: `mem_big${i}`, name: `大${i}`, content: '记'.repeat(10_000), scope: 'workspace', workspacePath: OTHER_WS }))
     ok(await e.run({ cmd: 'scan', workspacePath: OTHER_WS }))
-    expect((await resultOf(e, OTHER))!.notes.map(n => n.code)).toEqual(expect.arrayContaining(['semantic-batched', 'baseline-session-scoped']))
+    expect((await resultOf(e, OTHER))!.notes.map(n => n.code)).toEqual(expect.arrayContaining(['semantic-batched', 'baseline-truncated']))
   })
 
 })
@@ -6069,7 +6075,10 @@ describe('draft-proposal 与按要求应用（补充要求）', () => {
 
 describe('垂直冲突（记忆和指令文件）用处理卡', () => {
   const LATER = NOW + 1000
-  const BASELINE = ['Instructions from: /tmp/pm-cmd-session/AGENTS.md\n前端统一用 pnpm']
+  const PROJECT_TEXT = 'Instructions from: /tmp/pm-cmd-session/AGENTS.md\n前端统一用 pnpm'
+  const BASELINE = [PROJECT_TEXT]
+  /** 记忆所在项目（SESSION_WS）的指令文件；另一个项目、全局层各有自己的一份。 */
+  const FILES = { [SESSION_WS]: PROJECT_TEXT, [OTHER_WS]: 'Instructions from: /tmp/pm-cmd-other/AGENTS.md\n统一用 yarn', global: '全局：注释用英文' }
   const DRAFT = { content: '脚本仓用 npm；前端按 AGENTS.md 用 pnpm', summary: '脚本仓的包管理器', name: '脚本仓包管理器', tags: ['npm'] }
   const said = (action: string, extra: object = {}) => JSON.stringify({ action, reason: `模型说 ${action}`, ...extra })
   function scripted(...answers: string[]) {
@@ -6077,13 +6086,13 @@ describe('垂直冲突（记忆和指令文件）用处理卡', () => {
     const llm: SemanticLlm = { model: 'deepseek-v4-flash', complete: async (prompt) => { prompts.push(prompt); return answers.shift() ?? '' } }
     return { llm, prompts }
   }
-  /** 本项目的一条记忆和会话的 AGENTS.md 矛盾；条目指纹同体检（含整份基线）。 */
+  /** 一个项目的一条记忆和那个项目的 AGENTS.md 矛盾（改成全局记忆时对全局层）；条目指纹同体检（含这条记忆对应的整份基线）。 */
   async function seeded(opts: EnvOpts & { memory?: Partial<MemoryRecord> } = {}) {
     const { memory, ...rest } = opts
-    const e = env({ baseline: BASELINE, ...rest })
+    const e = env({ instructions: FILES, ...rest })
     await e.store.create(record({ id: 'mem_v', name: '包管理器', content: '用 npm', scope: 'workspace', workspacePath: SESSION_WS, ...memory }))
     const r = (await e.store.get('mem_v', { workspacePath: SESSION_WS }))!
-    const { entry } = await e.decisions.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '记忆说 npm，AGENTS.md 说 pnpm', workspaces: [r.workspacePath ?? 'global'], fingerprint: conflictFingerprint([r], BASELINE) }, 2)
+    const { entry } = await e.decisions.upsert({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '记忆说 npm，AGENTS.md 说 pnpm', workspaces: [r.workspacePath ?? 'global'], fingerprint: conflictFingerprint([r], r.scope === 'workspace' ? BASELINE : [FILES.global]) }, 2)
     return { e, entry }
   }
   const verticalOf = async (e: ReturnType<typeof env>, id: string) => {
@@ -6096,12 +6105,13 @@ describe('垂直冲突（记忆和指令文件）用处理卡', () => {
   const agentsMdPath = () => join(root, 'AGENTS.md')
 
   describe('suggest（补上建议）', () => {
-    it('会话在这个项目里：按会话的基线生成，依据记下基线所属项目和基线指纹；指令文件按疑似级遮盖后才进提示词；视图带上建议和项目', async () => {
+    it('按这条记忆所在项目的指令文件生成，会话在别的项目也一样：依据记下记忆所在项目和基线指纹；指令文件按疑似级遮盖后才进提示词；视图带上建议和项目', async () => {
       const { llm, prompts } = scripted(said('rewrite', { draft: DRAFT }))
-      const { e, entry } = await seeded({ llm, baseline: [...BASELINE, '部署口令 password: abc12345x'] })
+      const { e, entry } = await seeded({ llm, workspacePath: OTHER_WS, instructions: { ...FILES, [SESSION_WS]: `${PROJECT_TEXT}\n部署口令 password: abc12345x` } })
       ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
       expect(prompts).toHaveLength(1)
       expect(prompts[0]!.user).toContain('前端统一用 pnpm')
+      expect(prompts[0]!.user).not.toContain('统一用 yarn')
       expect(prompts[0]!.user).not.toContain('abc12345x')
       const saved = (await e.decisions.get(entry.id))!.suggestion!
       expect(saved).toMatchObject({ action: 'rewrite', ops: [{ kind: 'edit', memoryId: 'mem_v', ...DRAFT }] })
@@ -6109,10 +6119,10 @@ describe('垂直冲突（记忆和指令文件）用处理卡', () => {
       expect((await verticalOf(e, entry.id)).suggestion).toMatchObject({ id: saved.id, action: 'rewrite', baselineWorkspace: SESSION_WS })
     })
 
-    it('缺基线：会话拿不到指令文件、或会话不在这条记忆的项目里，回 no-baseline，不调用模型、账本不动', async () => {
-      for (const opts of [{ baseline: null }, { workspacePath: OTHER_WS }] as const) {
+    it('缺基线：这条记忆所在项目一个指令文件都没有、或取不到，回 no-baseline，不调用模型、账本不动', async () => {
+      for (const files of [{ ...FILES, [SESSION_WS]: { kind: 'none' } }, { ...FILES, [SESSION_WS]: { kind: 'unavailable', reason: 'EACCES' } }] as const) {
         const { llm, prompts } = scripted(said('delete'))
-        const { e, entry } = await seeded({ llm, ...opts })
+        const { e, entry } = await seeded({ llm, instructions: files })
         expect(err(await e.run({ cmd: 'suggest', decisionId: entry.id })).code).toBe('no-baseline')
         expect(prompts).toEqual([])
         expect(await e.decisions.get(entry.id)).toEqual(entry)
@@ -6121,22 +6131,77 @@ describe('垂直冲突（记忆和指令文件）用处理卡', () => {
       }
     })
 
-    it('全局记忆：只认扫出这条冲突的那份指令文件。在那个会话里能补（依据记下会话所在的项目）；换一个项目的会话，补上、按要求生成回 no-baseline，采纳回 stale', async () => {
-      const { llm, prompts } = scripted(said('delete'))
-      const { e, entry } = await seeded({ llm, workspacePath: OTHER_WS, memory: { scope: 'global', workspacePath: undefined } })
-      // 同一份数据目录，借来的会话在另一个项目里，生效的是另一份指令文件
-      const elsewhere = env({ llm, baseline: ['Instructions from: /tmp/pm-cmd-else/AGENTS.md\n统一用 yarn'] })
-      const bases: [ReturnType<typeof baseOf>] = [baseOf(await memoryNow(e))]
-      expect(err(await elsewhere.run({ cmd: 'suggest', decisionId: entry.id })).code).toBe('no-baseline')
-      expect(err(await elsewhere.run({ cmd: 'draft-proposal', decisionId: entry.id, request: '删掉', bases })).code).toBe('no-baseline')
+    it('升级前按某个项目的指令文件扫出的全局记忆条目（还没被覆盖全局的体检清掉）：补上建议、补充要求都回 no-baseline，不拿全局层调用模型；对着全局层扫出的照常', async () => {
+      const { llm, prompts } = scripted(said('delete'), said('delete'))
+      const e = env({ instructions: FILES, llm })
+      await e.store.create(record({ id: 'mem_g', name: '注释语言', content: '注释用中文' }))
+      const g = (await e.store.get('mem_g'))!
+      const legacy = (await e.decisions.upsert({ memoryIds: ['mem_g'], baselineRef: 'AGENTS.md：注释语言', summary: '记忆说中文', workspaces: ['global'], fingerprint: conflictFingerprint([g], BASELINE) }, 2)).entry
+      const NO_BASELINE = '这条记忆对应的指令文件读不到，或在体检后改过。重新体检后再试。'
+      expect(err(await e.run({ cmd: 'suggest', decisionId: legacy.id }))).toMatchObject({ code: 'no-baseline', detail: `${NO_BASELINE}未做任何改动` })
+      expect(err(await e.run({ cmd: 'draft-proposal', decisionId: legacy.id, request: '删掉', bases: [baseOf(g)] }))).toMatchObject({ code: 'no-baseline', detail: `${NO_BASELINE}没有生成方案` })
       expect(prompts).toEqual([])
-      expect(await e.decisions.get(entry.id)).toEqual(entry)
+      expect(await e.decisions.get(legacy.id)).toEqual(legacy)
 
+      const current = (await e.decisions.upsert({ memoryIds: ['mem_g'], baselineRef: 'AGENTS.md：注释语言', summary: '记忆说中文', workspaces: ['global'], fingerprint: conflictFingerprint([g], [FILES.global]) }, 3)).entry
+      ok(await e.run({ cmd: 'suggest', decisionId: current.id }))
+      expect(prompts[0]!.user).toContain('注释用英文')
+      expect((await e.decisions.get(current.id))!.suggestion!.basis.baseline).toEqual({ workspace: 'global', fingerprint: expect.any(String) })
+    })
+
+    it('会话不在这个项目、或没有会话项目：补上建议、按要求生成、采纳、直接裁决都照常', async () => {
+      for (const workspacePath of [OTHER_WS, undefined]) {
+        const { llm } = scripted(said('delete'), said('keep-both'))
+        const { e, entry } = await seeded({ llm, workspacePath })
+        ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+        const suggestion = (await e.decisions.get(entry.id))!.suggestion!
+        const proposal = ok(await e.run({ cmd: 'draft-proposal', decisionId: entry.id, request: '都留着', bases: [baseOf(await memoryNow(e))] })).proposal!
+        expect(proposal).toMatchObject({ action: 'keep-both', basis: { baseline: { workspace: SESSION_WS } } })
+        ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id, allowCrossWorkspace: true }))
+        expect((await memoryNow(e)).status).toBe('deleted')
+        ok(await e.run({ cmd: 'undo', decisionId: entry.id, allowCrossWorkspace: true }))
+        // 直接裁决：保留记忆，两边都留的指纹按它所在项目的指令文件记下
+        ok(await e.run({ cmd: 'resolve', decisionId: entry.id, verdict: 'keep-left', allowCrossWorkspace: true }))
+        expect((await e.decisions.listSettled()).find(d => d.id === entry.id)).toMatchObject({ settled: { verdict: 'keep-left' }, fingerprint: conflictFingerprint([await memoryNow(e)], BASELINE) })
+        await rm(root, { recursive: true, force: true })
+        root = await mkdtemp(join(tmpdir(), 'pm-gui-commands-'))
+      }
+    })
+
+    it('全局记忆：对照全局层的指令文件，和会话在哪个项目无关；在一个会话里补上的建议，换一个项目的会话照样能采纳', async () => {
+      const { llm, prompts } = scripted(said('delete'), said('delete'))
+      const { e, entry } = await seeded({ llm, workspacePath: OTHER_WS, memory: { scope: 'global', workspacePath: undefined } })
+      ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
+      expect(prompts[0]!.user).toContain('注释用英文')
+      expect(prompts[0]!.user).not.toContain('统一用 yarn')
+      const suggestion = (await e.decisions.get(entry.id))!.suggestion!
+      expect(suggestion.basis.baseline).toEqual({ workspace: 'global', fingerprint: expect.any(String) })
+      // 同一份数据目录，换一个项目的会话
+      const elsewhere = env({ llm, instructions: FILES })
+      expect(ok(await elsewhere.run({ cmd: 'draft-proposal', decisionId: entry.id, request: '删掉', bases: [baseOf(await memoryNow(e))] })).proposal)
+        .toMatchObject({ action: 'delete', basis: { baseline: { workspace: 'global' } } })
+      ok(await elsewhere.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id }))
+      expect((await memoryNow(e)).status).toBe('deleted')
+    })
+
+    it('升级前在别的会话里给全局记忆补的建议（依据记的是那个会话的项目）：全局层指令文件没变就照常能采纳', async () => {
+      const { llm } = scripted(said('delete'))
+      // 写建议时把依据里的基线所属换成会话的项目，同旧版写下的
+      const { e, entry } = await seeded({
+        llm, memory: { scope: 'global', workspacePath: undefined },
+        wrapPending: (table: PendingTable): PendingTable => ({
+          get: k => table.get(k), list: () => table.list(), delete: k => table.delete(k), deleteIf: (k, isStill) => table.deleteIf(k, isStill), claim: k => table.claim(k),
+          put: async (k, v) => {
+            const baseline = v.suggestion?.basis.baseline
+            await table.put(k, baseline === undefined ? v : { ...v, suggestion: { ...v.suggestion!, basis: { ...v.suggestion!.basis, baseline: { ...baseline, workspace: OTHER_WS } } } })
+          },
+        }),
+      })
       ok(await e.run({ cmd: 'suggest', decisionId: entry.id }))
       const suggestion = (await e.decisions.get(entry.id))!.suggestion!
       expect(suggestion.basis.baseline?.workspace).toBe(OTHER_WS)
-      expect(err(await elsewhere.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id })).code).toBe('stale')
-      expect(await memoryNow(e)).toMatchObject({ status: 'active', content: '用 npm' })
+      ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id }))
+      expect((await memoryNow(e)).status).toBe('deleted')
     })
 
     it('记忆含高危密钥：has-secret，不调用模型', async () => {
@@ -6154,7 +6219,23 @@ describe('垂直冲突（记忆和指令文件）用处理卡', () => {
       return { e, entry, suggestion: (await e.decisions.get(entry.id))!.suggestion! }
     }
 
-    it('改写：记忆换成改写稿（标手改），一份快照；条目结清为 plan-applied（只有改写一项回执、没有败方），改后指纹按会话基线重算；指令文件不改', async () => {
+    it('全局记忆的条目上存着升级前的建议、依据里的基线是某个项目的指令文件：直接采纳回 stale，记忆和条目都不动', async () => {
+      const e = env({ instructions: FILES })
+      await e.store.create(record({ id: 'mem_g', name: '注释语言', content: '注释用中文' }))
+      const g = (await e.store.get('mem_g'))!
+      const { entry } = await e.decisions.upsert({ memoryIds: ['mem_g'], baselineRef: 'AGENTS.md：注释语言', summary: '记忆说中文', workspaces: ['global'], fingerprint: conflictFingerprint([g], BASELINE) }, 2)
+      const suggestion = {
+        id: 'sg_legacy', action: 'delete' as const, reason: '以指令文件为准', ops: [{ kind: 'forget' as const, memoryId: 'mem_g' }],
+        basis: suggestionBasis(entry, [g], { workspace: SESSION_WS, fingerprint: baselineFingerprint(BASELINE) }), isSourced: false, generatedAt: NOW,
+      }
+      expect(await e.decisions.writeSuggestion(entry.id, { suggestion }, id => e.store.get(id))).toBe('written')
+      expect(err(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id })).code).toBe('stale')
+      expect(await e.store.get('mem_g')).toEqual(g)
+      expect(await e.decisions.get(entry.id)).toMatchObject({ suggestion: { id: 'sg_legacy' } })
+      expect(await e.snapshots.list()).toEqual([])
+    })
+
+    it('改写：记忆换成改写稿（标手改），一份快照；条目结清为 plan-applied（只有改写一项回执、没有败方），改后指纹按这条记忆所在项目的指令文件重算；指令文件不改', async () => {
       const { e, entry, suggestion } = await suggested('rewrite', { draft: DRAFT })
       e.clock.now = LATER
       const body = ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id }))
@@ -6185,7 +6266,7 @@ describe('垂直冲突（记忆和指令文件）用处理卡', () => {
 
     it('两个标签页同时采纳改写：只成一次，只拍一份快照；另一次回 claimed 或 not-found', async () => {
       const { e, entry, suggestion } = await suggested('rewrite', { draft: DRAFT })
-      const other = env({ baseline: BASELINE })
+      const other = env({ instructions: FILES })
       const adopt = (on: ReturnType<typeof env>) => on.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id })
       const results = await Promise.all([adopt(e), adopt(other)])
       expect(results.filter(r => r.ok)).toHaveLength(1)
@@ -6208,7 +6289,7 @@ describe('垂直冲突（记忆和指令文件）用处理卡', () => {
       const { e, entry, suggestion } = await suggested('rewrite', { draft: DRAFT })
       ok(await e.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id }))
       const rescan: SemanticLlm = { model: 'm-test', complete: async () => JSON.stringify({ findings: [{ type: 'conflict', memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理', summary: '还是矛盾', suggestedAction: '裁决' }] }) }
-      const later = env({ llm: rescan, baseline: [...BASELINE, '脚本仓也用 pnpm'] })
+      const later = env({ llm: rescan, instructions: { ...FILES, [SESSION_WS]: `${PROJECT_TEXT}\n脚本仓也用 pnpm` } })
       ok(await later.run({ cmd: 'scan', workspacePath: SESSION_WS }))
       expect((await e.decisions.list()).map(d => d.id)).not.toContain(entry.id)
       expect(await e.decisions.list()).toHaveLength(1)
@@ -6253,13 +6334,13 @@ describe('垂直冲突（记忆和指令文件）用处理卡', () => {
       expect((await e.decisions.listSettled())[0]!.settled).toMatchObject({ verdict: 'keep-both', proposal: { source: 'suggestion', action: 'keep-both' } })
     })
 
-    it('采纳时用当前会话的基线重算：基线改了、会话换到别的项目、拿不到基线，都回 stale，什么都不动', async () => {
-      for (const later of [{ baseline: [...BASELINE, '另加一条'] }, { workspacePath: OTHER_WS }, { baseline: null }] as const) {
+    it('采纳时按这条记忆所在项目此刻的指令文件重算：指令文件改了、或取不到、或删光了，都回 stale，什么都不动', async () => {
+      for (const now of [`${PROJECT_TEXT}\n另加一条`, { kind: 'unavailable', reason: 'EACCES' }, { kind: 'none' }] as const) {
         for (const action of ['rewrite', 'delete'] as const) {
           const { e, entry, suggestion } = await suggested(action, { draft: DRAFT })
           const before = await memoryNow(e)
-          // 同一份数据目录，换一个借来的会话再采纳
-          const other = env({ ...later, ...('baseline' in later ? {} : { baseline: BASELINE }) })
+          // 同一份数据目录，指令文件此刻已经不同
+          const other = env({ instructions: { ...FILES, [SESSION_WS]: now } })
           expect(err(await other.run({ cmd: 'apply-proposal', decisionId: entry.id, suggestionId: suggestion.id })).code).toBe('stale')
           expect(await memoryNow(e)).toEqual(before)
           expect(await e.decisions.get(entry.id)).toMatchObject({ suggestion: { id: suggestion.id } })
@@ -6272,7 +6353,7 @@ describe('垂直冲突（记忆和指令文件）用处理卡', () => {
   })
 
   describe('draft-proposal 与按要求应用', () => {
-    it('按会话的基线生成：方案的依据带基线；缺基线回 no-baseline、不调用模型；卡片版本条数对不上回 invalid-args', async () => {
+    it('按记忆所在项目的指令文件生成：方案的依据带基线；缺基线回 no-baseline、不调用模型；卡片版本条数对不上回 invalid-args', async () => {
       const { llm, prompts } = scripted(said('rewrite', { draft: DRAFT }))
       const { e, entry } = await seeded({ llm })
       const bases: [ReturnType<typeof baseOf>] = [baseOf(await memoryNow(e))]
@@ -6282,8 +6363,8 @@ describe('垂直冲突（记忆和指令文件）用处理卡', () => {
       const twice: [ReturnType<typeof baseOf>, ReturnType<typeof baseOf>] = [baseOf(await memoryNow(e)), baseOf(await memoryNow(e))]
       expect(err(await e.run({ cmd: 'draft-proposal', decisionId: entry.id, request: '改写', bases: twice })).code).toBe('invalid-args')
 
-      const other = env({ workspacePath: OTHER_WS, baseline: BASELINE, llm })
-      expect(err(await other.run({ cmd: 'draft-proposal', decisionId: entry.id, request: '改写', bases })).code).toBe('no-baseline')
+      const missing = env({ instructions: { ...FILES, [SESSION_WS]: { kind: 'none' } }, llm })
+      expect(err(await missing.run({ cmd: 'draft-proposal', decisionId: entry.id, request: '改写', bases })).code).toBe('no-baseline')
       expect(prompts).toHaveLength(1)
     })
 
@@ -6292,7 +6373,7 @@ describe('垂直冲突（记忆和指令文件）用处理卡', () => {
       const { e, entry } = await seeded({ llm })
       const bases: [ReturnType<typeof baseOf>] = [baseOf(await memoryNow(e))]
       const proposal = ok(await e.run({ cmd: 'draft-proposal', decisionId: entry.id, request: '改写', bases })).proposal!
-      const changed = env({ baseline: [...BASELINE, '另加一条'] })
+      const changed = env({ instructions: { ...FILES, [SESSION_WS]: `${PROJECT_TEXT}\n另加一条` } })
       expect(err(await changed.run({ cmd: 'apply-proposal', decisionId: entry.id, proposal })).code).toBe('stale')
       expect(await memoryNow(e)).toMatchObject({ content: '用 npm' })
 

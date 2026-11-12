@@ -58,8 +58,8 @@ function localKeyOf(command: MemoryCommand, code: GuiErrorCode): LocaleKey | und
     // 按记忆动手的：要动的记忆已经不在（多半在外面删了），服务端已重写视图。待决项的在前面算别处已处理；撤销的是快照没了，照常显示原话
     case 'not-found': return 'memoryId' in command || 'memories' in command ? 'pending.memory.gone' : undefined
     case 'secret-critical': return 'pending.edit.secretCritical'
-    // 垂直冲突的补上建议、按要求生成：借来的会话不在这条记忆的项目里，或读不到指令文件
-    case 'no-baseline': return 'pending.vertical.needProject'
+    // 垂直冲突的补上建议、按要求生成：这条记忆对应的指令文件读不到，或在体检后改过
+    case 'no-baseline': return 'pending.suggestion.noBaseline'
     case 'target-taken':
       return command.cmd === 'undo' ? 'pending.move.undoTaken'
         : command.cmd === 'promote' || command.cmd === 'promote-memory' ? 'pending.promote.taken' : 'pending.move.taken'

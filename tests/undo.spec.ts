@@ -21,6 +21,7 @@ import { locateCopy } from '../src/tools/workspace-gate.ts'
 import { RETENTION_MS } from '../src/retention.ts'
 import { scopeAt, type Scope } from '../src/scope.ts'
 import { candidate, record } from './helpers/record.ts'
+import { noInstructions } from './helpers/instructions.ts'
 
 // 撤销执行模块：种类 × 现状的表格测试，走真实文件表与 .state 侧表。条目都经真实的写入路径记下（裁决、提升、管线、账本按种类的方法），
 // 交错用透传包装插进去（先做真写再插别处的动作），不替换自己的模块。
@@ -44,7 +45,7 @@ function env() {
   const decisions = new PendingDecisionsStore(sidecar.pending)
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const ignores = new AdviceIgnoreStore(sidecar.adviceIgnores)
-  const deps = { store, decisions, snapshots, ignores, now }
+  const deps = { store, decisions, snapshots, ignores, now, instructions: noInstructions }
   const context = { workspacePath: WS }
   return {
     ...deps, clock, context,

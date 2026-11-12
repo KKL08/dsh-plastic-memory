@@ -106,36 +106,6 @@ describe('PA-28 宿主服务缺席、未注册、调用抛错时各自退化，�
     expect(warnings.filter(w => w.includes('subagent'))).toHaveLength(1)
   })
 
-  it('基线：读取抛错为 null，每个会话警告一次；服务缺席、查找抛错、键未注册为 null 且不警告', () => {
-    const s = session('sess-a')
-    const broken = boot({ sessionProjections: projections({ plasticMemoryBaseline: throwing }) })
-    expect(broken.host.baselineOf(execOf(s))).toBeNull()
-    expect(broken.host.baselineOf(execOf(s))).toBeNull()
-    expect(broken.warnings).toHaveLength(1)
-    expect(broken.warnings[0]).toContain('plasticMemoryBaseline')
-    expect(broken.warnings[0]).toContain('sess-a')
-    expect(broken.warnings[0]).toContain('boom')
-    for (const services of [{}, { sessionProjections: throwing }, { sessionProjections: projections({}) }]) {
-      const quiet = boot(services)
-      expect(quiet.host.baselineOf(execOf(s))).toBeNull()
-      expect(quiet.warnings).toEqual([])
-    }
-    expect(boot().host.baselineOf(execOf())).toBeNull()
-  })
-
-  it('基线：取当前生效的正文；状态里的形状漂移每个会话每个 seq 只警告一次', () => {
-    const state = { entries: [{ text: '用 pnpm', scopes: ['.'] }], baselineScopes: ['.'], drift: [{ seq: 0, kind: 'no-changes' }] }
-    const { host, warnings } = boot({ sessionProjections: projections({ plasticMemoryBaseline: state }) })
-    const a = session('sess-a')
-    expect(host.baselineOf(execOf(a))).toEqual(['用 pnpm'])
-    expect(host.baselineOf(execOf(a))).toEqual(['用 pnpm'])
-    expect(warnings).toEqual(['agent-instructions message at seq 0 carries no changes array; keeping its text without scope tracking'])
-    host.baselineOf(execOf(session('sess-b')))
-    expect(warnings).toHaveLength(2)
-    const empty = boot({ sessionProjections: projections({ plasticMemoryBaseline: { entries: [], baselineScopes: [], drift: [] } }) })
-    expect(empty.host.baselineOf(execOf(a))).toBeNull()
-  })
-
   it('更早的轮：读不到（缺席、抛错）按没有；lastTurn 大于 1 才算', () => {
     const s = session('sess-a')
     expect(boot().host.hasEarlierTurns(s)).toBe(false)

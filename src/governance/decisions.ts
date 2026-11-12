@@ -47,29 +47,26 @@ export function suggestionBasis(entry: Pick<PendingDecision, 'fingerprint'>, rec
 /** 垂直冲突依据里的基线一半：基线所属项目和基线指纹。 */
 export type BaselineBasis = NonNullable<SuggestionBasis['baseline']>
 
-/** 整份基线（会话生效的 AGENTS.md / CLAUDE.md 正文）的指纹：任一段改了就变。 */
+/** 整份基线（这条记忆对应的 AGENTS.md / CLAUDE.md 正文）的指纹：任一段改了就变。 */
 export function baselineFingerprint(baseline: readonly string[]): string {
   return createHash('sha1').update(JSON.stringify(baseline)).digest('hex')
 }
 
 /**
- * 会话此刻能给这条记忆的垂直冲突用的基线（同体检：基线随会话）：项目记忆只认它自己项目里的会话；全局记忆在哪个会话里都扫得出，
- * 只认扫出这条冲突的那份基线（用它重算冲突指纹，和条目的 conflictFingerprint 一致）——换一个项目的会话，矛盾摘要说的就不是手上这份文件了。
- * 基线所属按会话所在的项目记（没有项目的会话记 'global'）。拿不到基线、会话不在这条记忆的项目里、不是扫出冲突的那份时为 undefined（缺基线）。
+ * 这条记忆的垂直冲突此刻能用的基线（依据里的基线一半）：baseline 是这条记忆对应的指令文件（项目记忆对它所在项目的，全局记忆对全局层），
+ * 由调用方按记忆现读。基线所属记这条记忆的作用域（项目路径，全局为 'global'），只作说明；拿不到或没有指令文件时为 undefined（缺基线）。
+ * 全局记忆还要条目是对着这份全局层扫出来的（按它重算的冲突指纹等于 entryFingerprint）：升级前按某个项目的指令文件扫出的条目，
+ * 矛盾摘要说的不是全局层，在覆盖全局的体检清掉它之前同样按缺基线算。
  */
-export function baselineBasisOf(
-  memory: MemoryRecord, baseline: readonly string[] | null | undefined, sessionWorkspace: string | undefined, entryFingerprint: string | undefined,
-): BaselineBasis | undefined {
-  if (baseline === null || baseline === undefined) return undefined
-  if (memory.scope === 'workspace' && memory.workspacePath !== sessionWorkspace) return undefined
+export function baselineBasisOf(memory: MemoryRecord, baseline: readonly string[] | null, entryFingerprint: string | undefined): BaselineBasis | undefined {
+  if (baseline === null) return undefined
   if (memory.scope !== 'workspace' && conflictFingerprint([memory], baseline) !== entryFingerprint) return undefined
-  return { workspace: sessionWorkspace ?? 'global', fingerprint: baselineFingerprint(baseline) }
+  return { workspace: memory.scope === 'workspace' && memory.workspacePath !== undefined ? memory.workspacePath : 'global', fingerprint: baselineFingerprint(baseline) }
 }
 
-/** 依据里的基线和会话此刻的基线对得上：基线所属项目、基线指纹都一致（依据里没有基线的一律算对不上）。 */
-export function isBaselineCurrent(basis: SuggestionBasis, memory: MemoryRecord, baseline: readonly string[] | null | undefined, sessionWorkspace: string | undefined): boolean {
-  const now = baselineBasisOf(memory, baseline, sessionWorkspace, basis.conflictFingerprint)
-  return basis.baseline !== undefined && now !== undefined && now.workspace === basis.baseline.workspace && now.fingerprint === basis.baseline.fingerprint
+/** 依据里的基线和这条记忆此刻对应的指令文件对得上：基线指纹一致（依据里没有基线、此刻取不到的一律算对不上）。 */
+export function isBaselineCurrent(basis: SuggestionBasis, baseline: readonly string[] | null): boolean {
+  return basis.baseline !== undefined && baseline !== null && basis.baseline.fingerprint === baselineFingerprint(baseline)
 }
 
 /** 依据版本和此刻对得上：条目的冲突指纹一致，每条记忆（按 memoryIds 顺序）都在，完整内容指纹和作用域都一致。 */
@@ -406,15 +403,14 @@ export class PendingDecisionsStore {
    * 删除一条记忆的路径先删记忆、再清条目，且不认领条目：核对之后、写入之前被清掉的条目会被这次写入写回来，
    * 所以写完（仍在认领内）再读一遍两条，任一条已不在用就撤回这次写入的条目，回 gone。
    * isAttempt：体检自己发起的这次生成写成了，给条目此刻的冲突指纹记一次尝试（指纹变了从头算）；用户点「补上建议」不记。
-   * 垂直冲突（这一份的依据带基线）：条目上已有的建议还要是按同一份基线生成的才算当前（指令文件改过、换了项目的旧建议让位）。
+   * 垂直冲突（这一份的依据带基线）：条目上已有的建议还要是按同一份基线生成的才算当前（指令文件改过的旧建议让位）。
    * 返回：written 已写；has-current 已有当前建议、这份丢弃；stale 依据对不上；gone 条目不在、已结清或写完发现一方已不在用；claimed 正被别处认领、这份丢弃。
    */
   async writeSuggestion(
     id: string, outcome: { suggestion: StoredSuggestion } | { failure: SuggestionFailure }, read: ReadMemory, opts: { isAttempt?: boolean } = {},
   ): Promise<'written' | 'has-current' | 'stale' | 'gone' | 'claimed'> {
     const basis = 'suggestion' in outcome ? outcome.suggestion.basis : outcome.failure.basis
-    const isSameBaseline = (b: SuggestionBasis) => basis.baseline === undefined
-      || (b.baseline?.workspace === basis.baseline.workspace && b.baseline.fingerprint === basis.baseline.fingerprint)
+    const isSameBaseline = (b: SuggestionBasis) => basis.baseline === undefined || b.baseline?.fingerprint === basis.baseline.fingerprint
     const claimed = await this.withClaim(id, async () => {
       const entry = await this.table.get(id)
       if (entry === undefined || entry.settled !== undefined) return 'gone' as const
@@ -581,6 +577,24 @@ export class PendingDecisionsStore {
 
   async remove(id: string): Promise<boolean> {
     return this.table.delete(id)
+  }
+
+  /**
+   * 覆盖全局的体检提交时清全局记忆的遗留垂直条目：未决、记忆是全局记忆、条目指纹和按全局层指令文件（globalBaseline，没有为 null）
+   * 重算的对不上——升级前按某个项目的指令文件扫出的，或之后全局记忆、全局指令文件改过而这一轮没再报出的。这一轮全局再报的已换成全局层的指纹，留着。
+   * 实际范围：比对的只是按全局层重算的指纹；全局层取不到、全局的内容检查没做完、只查单个项目时调用方不调它，已结清的不动。
+   * read 给体检读到的那一版记忆（和挂账算指纹同一份）；读不到、已不是全局记忆的不动。已结清的不动。逐条认领、重读再删，正被认领的这次不动。
+   */
+  async dropStaleGlobalVertical(globalBaseline: readonly string[] | null, read: (id: string) => MemoryRecord | undefined): Promise<void> {
+    for (const entry of await this.list()) {
+      if (entry.baselineRef === undefined || entry.memoryIds.length !== 1 || entry.fingerprint === undefined) continue
+      const memory = read(entry.memoryIds[0]!)
+      if (memory?.scope !== 'global' || conflictFingerprint([memory], globalBaseline ?? []) === entry.fingerprint) continue
+      await this.withClaim(entry.id, async () => {
+        const current = await this.table.get(entry.id)
+        if (current !== undefined && current.settled === undefined && current.fingerprint === entry.fingerprint) await this.table.delete(entry.id)
+      })
+    }
   }
 
   /**

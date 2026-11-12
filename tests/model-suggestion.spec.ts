@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { jsonObjectIn } from '../src/gui/model-draft.ts'
-import { BASELINE_MAX_CHARS, type SemanticLlm } from '../src/governance/semantic-scan.ts'
+import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import {
   buildProposalPrompt, buildSuggestionPrompt, buildVerticalProposalPrompt, buildVerticalSuggestionPrompt, generateProposal, generateSuggestion, generateVerticalProposal,
   generateVerticalSuggestion, type ProposalRequest,
@@ -336,6 +336,7 @@ describe('垂直冲突（记忆和指令文件）的生成器', () => {
     expect(system).toMatch(/## 做法\n1\. 改写稿写这条记忆自己的内容和它适用的条件，每一条事实都来自这条记忆。提到指令文件时只写它管哪一块/)
     expect(system).toContain('从内容看不出该以哪边为准')
     expect(system).toContain('name、tags 能沿用时省略（沿用原名、原标签）')
+    expect(system).toContain('- 「指令文件」：这条记忆对应的 AGENTS.md / CLAUDE.md 正文（项目记忆含全局层和本项目，全局记忆只有全局层），JSON 字符串；从宽到窄排列，越靠后越具体、越优先；每段开头写着来自哪个文件；疑似密钥已遮盖。')
     expect(user.match(/^## .+$/gm)).toEqual(['## 矛盾之处', '## 指令文件里相关的位置', '## 记忆', '## 指令文件'])
     expect(user).toContain(`## 矛盾之处\n${JSON.stringify(vInput.summary)}`)
     expect(user).toContain(`## 指令文件里相关的位置\n${JSON.stringify(vInput.baselineRef)}`)
@@ -349,10 +350,12 @@ describe('垂直冲突（记忆和指令文件）的生成器', () => {
     expect(user).toContain('[已隐藏]')
   })
 
-  it('指令文件超长被裁切、密钥正好跨在裁切处：先遮盖再裁切，密钥的前半截也不进提示词', () => {
-    const head = FAKE_SECRET.github.slice(0, 12)
-    const { user } = buildVerticalSuggestionPrompt({ ...vInput, baseline: [`${'约'.repeat(BASELINE_MAX_CHARS - 13)} ${FAKE_SECRET.github} 后面还有别的约定`] })
-    expect(user).not.toContain(head)
+  it('指令文件很长也整份进提示词（长度由读取时的上限管），末尾的规则在、其中的密钥遮住', () => {
+    const long = `${'全局约定。'.repeat(2000)}\n部署 token ${FAKE_SECRET.github}\n项目：用 pnpm`
+    const { user } = buildVerticalSuggestionPrompt({ ...vInput, baseline: [long] })
+    expect(user).toContain('项目：用 pnpm')
+    expect(user).toContain('全局约定。'.repeat(2000))
+    expect(user).not.toContain(FAKE_SECRET.github)
   })
 
   it.each([

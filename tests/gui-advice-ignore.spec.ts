@@ -33,6 +33,7 @@ import { executeHealth, renderHealthResult, type SingleHealthResult, type Checku
 import { executeScan, renderScanResult, type SingleScanResult } from '../src/tools/scan.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { record } from './helpers/record.ts'
+import { noInstructions } from './helpers/instructions.ts'
 
 // 建议整理的忽略与取消忽略：真实临时目录（FileTable + .state 侧表 + 视图文件），宿主那一侧（借来的会话、模型）换成测试桩。
 // 断言命令结果、写出的视图、忽略表的终态，以及 memory_health / memory_scan 的输出与界面一致。
@@ -59,12 +60,11 @@ function env(opts: { llm?: SemanticLlm } = {}) {
   const host = {
     contextOf: async () => ({ workspacePath: WS, delegationDepth: 0, session: { id: 'sess-1' } }),
     llmOf: () => opts.llm ?? null,
-    baselineOf: () => null,
   }
   const command = createMemoryCommand({
     memoryRoot: root, store, decisions, snapshots, cache, checkups: new CheckupRecordStore(sidecar.checkups), autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups), ignores, registry, views,
     agentsMd: createAgentsMdWriter(join(root, 'AGENTS.md')),
-    host, now: () => NOW,
+    host, instructions: noInstructions, now: () => NOW,
   })
   /** 按宿主 parseCommand 的切法：命令名之后的原文交给处理器。 */
   const runRaw = async (rawInput: string): Promise<MemoryCommandResult> =>
@@ -73,7 +73,7 @@ function env(opts: { llm?: SemanticLlm } = {}) {
   const readView = async (name: keyof typeof GUI_VIEW_FILES) => JSON.parse(await readFile(join(root, GUI_VIEW_DIR, GUI_VIEW_FILES[name]), 'utf8')) as unknown
   const pending = async () => pendingViewSchema.parse(await readView('pending'))
   const health = async () => healthViewSchema.parse(await readView('health'))
-  const toolDeps = { store, registry, decisions, cache, ignores, host, now: () => NOW }
+  const toolDeps = { store, registry, decisions, cache, ignores, host, instructions: noInstructions, now: () => NOW }
   const healthTool = (scope?: string) => executeHealth(scope === undefined ? {} : { scope }, { ...toolDeps, thresholds: resolveHealthThresholds('normal') }, fakeExec())
   const scanTool = (args: { scope?: string; layers?: 'rule' | 'full' } = {}) =>
     executeScan({ layers: 'rule', ...args }, toolDeps, fakeExec())

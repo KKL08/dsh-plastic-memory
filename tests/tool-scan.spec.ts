@@ -14,7 +14,7 @@ import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { MODEL_UNAVAILABLE_HOST_CODES, hostSemanticLlm } from '../src/governance/host-llm.ts'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { MemoryStore } from '../src/store.ts'
-import { PendingDecisionsStore } from '../src/governance/decisions.ts'
+import { PendingDecisionsStore, conflictFingerprint } from '../src/governance/decisions.ts'
 import { type CasKvTable } from '../src/kv-table.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { checkupKey } from '../src/gui/contract.ts'
@@ -26,6 +26,9 @@ import { record } from './helpers/record.ts'
 import { FAKE_SECRET } from './helpers/secrets.ts'
 import { InMemoryTable } from './helpers/in-memory-table.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
+import { instructionsOf, noInstructions } from './helpers/instructions.ts'
+import type { ScanNote } from '../src/tools/scan.ts'
+import type { Scope } from '../src/scope.ts'
 
 /** host 只给要换的方法，其余用无会话的缺省。 */
 type DepsOverrides = Partial<Omit<ScanToolDeps, 'host'>> & { host?: Partial<ScanToolDeps['host']> }
@@ -37,9 +40,10 @@ function makeDeps(overrides: DepsOverrides = {}): ScanToolDeps {
     registry: buildTypeRegistry({ template: 'coding', customTypes: {} }),
     decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
     cache: new InMemoryKvTable<ScanCacheEntry>(),
+    instructions: noInstructions,
     now: () => 9000,
     ...rest,
-    host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: () => null, baselineOf: () => null, ...host },
+    host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: () => null, ...host },
   }
 }
 
@@ -363,13 +367,6 @@ describe('executeScan 全库体检', () => {
     expect((await deps.cache.get(GLOBAL_CACHE_KEY))?.scannedAt).toBe(9000)
   })
 
-  it('无 AGENTS.md 基线时 note 带 baseline-missing', async () => {
-    const deps = makeDeps({ host: { baselineOf: () => null } })
-    await seedTwoWs(deps)
-    const r = await executeScan({ scope: 'all', layers: 'rule' }, deps, fakeExec())
-    if (r.kind !== 'checkup') throw new Error(r.kind)
-    expect(r.notes.map(n => n.code)).toContain('baseline-missing')
-  })
 
   it('跨项目重复分析输出无法解析：note 带 cross-ws-failed，退用实体聚类', async () => {
     const brokenCrossLlm = {
@@ -448,27 +445,6 @@ describe('executeScan 全库体检', () => {
     expect(r.duplicates.items[0].topic).toBe('pnpm')  // 反引号实体在两个 ws 出现且 global 缺位
   })
 
-  it('基线只用于当前会话所属 workspace 与 global 层：其他 ws 跳过垂直检测并留 note', async () => {
-    const deps = makeDeps({
-      host: { contextOf: async () => ({ workspacePath: '/proj-a' }), llmOf: (_exec: unknown) => ({ complete: async () => JSON.stringify({ findings: [] }) }), baselineOf: () => ['# CLAUDE.md\n用 pnpm'] },
-    })
-    await seedTwoWs(deps)
-    const r = await executeScan({ scopes: ['/proj-a', '/proj-b'] }, deps, fakeExec())
-    if (r.kind !== 'checkup') throw new Error(r.kind)
-    expect(r.notes.map(n => n.code)).toContain('baseline-session-scoped')
-  })
-
-  it('单层显式扫别的 workspace：基线不适用并留 note；扫自己不留', async () => {
-    const deps = makeDeps({
-      host: { contextOf: async () => ({ workspacePath: '/proj-a' }), llmOf: (_exec: unknown) => ({ complete: async () => JSON.stringify({ findings: [] }) }), baselineOf: () => ['基线内容'] },
-    })
-    await seedTwoWs(deps)
-    const other = await scanSingle({ scope: '/proj-b' }, deps)
-    expect(other.notes.map(n => n.code)).toContain('baseline-session-scoped')
-    const own = await scanSingle({ scope: '/proj-a' }, deps)
-    expect(own.notes.map(n => n.code)).not.toContain('baseline-session-scoped')
-  })
-
   it('单层 malformed 按所在目录归层，与 memory_health 同口径', async () => {
     const { store } = await fileBackedStore({
       [`${workspaceDirName('/proj-a')}/bad.md`]: '没有 frontmatter\n',
@@ -489,11 +465,11 @@ describe('executeScan 全库体检', () => {
           ? JSON.stringify({ findings: [{ type: 'conflict', memoryIds: ['mem_g1'], baselineRef: 'AGENTS.md：规则', summary: '与基线矛盾', suggestedAction: '裁决' }] })
           : JSON.stringify({ findings: [] }),
     }
-    const deps = makeDeps({ host: { llmOf: (_exec: unknown) => verticalLlm, baselineOf: () => ['基线'] }, })
+    const deps = makeDeps({ host: { llmOf: (_exec: unknown) => verticalLlm }, instructions: instructionsOf({ global: '基线' }) })
     await seedTwoWs(deps)
     const first = await executeScan({ scope: 'all' }, deps, fakeExec())
     if (first.kind !== 'checkup') throw new Error(first.kind)
-    // mem_g1 在两个 ws 的 visible 集合与 global 层各被发现一次，dedupKey 收敛为一条
+    // mem_g1 在两个 ws 的 visible 集合里也被模型报出，全局记忆的垂直冲突只在全局这一轮挂账，收敛为一条
     expect(first.pendingDecisions.items).toHaveLength(1)
     expect(first.pendingDecisions.created).toBe(1)
     expect(first.pendingDecisions.existing).toBe(0)
@@ -965,5 +941,175 @@ describe('executeScan 模型错误分类（宿主错误码从模型适配层带�
     await deps.store.put(record({ id: 'mem_g' }))
     const r = await scanSingle({}, deps)
     expect(r.notes.find(n => n.code === 'semantic-failed')?.cause).toEqual({ kind: 'unparseable' })
+  })
+})
+
+describe('executeScan 垂直冲突按记忆所在项目取指令文件', () => {
+  const GLOBAL_TEXT = '全局：注释用英文'
+  const A_TEXT = `${GLOBAL_TEXT}\nA：用 pnpm`
+  const B_TEXT = `${GLOBAL_TEXT}\nB：用 yarn`
+  const files = instructionsOf({ global: GLOBAL_TEXT, '/proj-a': A_TEXT, '/proj-b': B_TEXT })
+
+  /**
+   * 假模型：发给它的指令文件里有 rules 里那句、记忆列表里有那条记忆，就报这条记忆和指令文件冲突。
+   * 它不分全局记忆和项目记忆，扫描自己决定哪些发现算数；跨项目重复检查回空。
+   */
+  const verticalWhen = (rules: Record<string, string>, calls: string[] = []): SemanticLlm => ({
+    complete: async ({ system, user }) => {
+      if (system.includes('global 缺位')) return JSON.stringify({ duplicates: [] })
+      const [instructionPart, list] = user.split('## 记忆列表')
+      calls.push(instructionPart!)
+      const findings = Object.entries(rules)
+        .filter(([id, text]) => list!.includes(`id=${id} `) && instructionPart!.includes(text))
+        .map(([id, text]) => ({ type: 'conflict', memoryIds: [id], baselineRef: `AGENTS.md：${text}`, summary: '和指令文件矛盾', suggestedAction: '裁决' }))
+      return JSON.stringify({ findings })
+    },
+  })
+
+  async function seed(deps: ScanToolDeps) {
+    const a = record({ id: 'mem_a', scope: 'workspace', workspacePath: '/proj-a', content: '用 npm' })
+    const b = record({ id: 'mem_b', scope: 'workspace', workspacePath: '/proj-b', content: '用 npm' })
+    const g1 = record({ id: 'mem_g1', content: '全局都用 npm' })
+    const g2 = record({ id: 'mem_g2', content: '注释用中文' })
+    for (const r of [a, b, g1, g2]) await deps.store.put(r)
+    return { a, b, g1, g2 }
+  }
+  const verticalIds = async (deps: ScanToolDeps) => (await deps.decisions.list()).filter(e => e.baselineRef !== undefined).map(e => e.memoryIds[0]).sort()
+
+  it('「全部」体检：每个项目对照自己的指令文件，两边的冲突都报；全局记忆对项目文件不报、对全局文件报', async () => {
+    const llm = verticalWhen({ mem_a: 'A：用 pnpm', mem_b: 'B：用 yarn', mem_g1: 'A：用 pnpm', mem_g2: '注释用英文' })
+    // 会话在 /proj-a 也一样：哪个项目都按它自己的指令文件查
+    const deps = makeDeps({ host: { contextOf: async () => ({ workspacePath: '/proj-a' }), llmOf: () => llm }, instructions: files })
+    const { a, b, g2 } = await seed(deps)
+    const r = await executeScan({ scope: 'all' }, deps, fakeExec())
+    if (r.kind !== 'checkup') throw new Error(r.kind)
+    expect(await verticalIds(deps)).toEqual(['mem_a', 'mem_b', 'mem_g2'])
+    const fingerprintOf = async (id: string) => (await deps.decisions.list()).find(e => e.memoryIds[0] === id)?.fingerprint
+    expect(await fingerprintOf('mem_a')).toBe(conflictFingerprint([a], [A_TEXT]))
+    expect(await fingerprintOf('mem_b')).toBe(conflictFingerprint([b], [B_TEXT]))
+    expect(await fingerprintOf('mem_g2')).toBe(conflictFingerprint([g2], [GLOBAL_TEXT]))
+    expect(r.notes.map(n => n.code)).not.toContain('baseline-missing')
+  })
+
+  it('单个项目体检：对照这个项目的指令文件，和会话在哪个项目无关；全局记忆的垂直冲突不在这里报', async () => {
+    const llm = verticalWhen({ mem_b: 'B：用 yarn', mem_g2: '注释用英文' })
+    const deps = makeDeps({ host: { contextOf: async () => ({ workspacePath: '/proj-a' }), llmOf: () => llm }, instructions: files })
+    await seed(deps)
+    const r = await scanSingle({ scope: '/proj-b' }, deps)
+    expect(await verticalIds(deps)).toEqual(['mem_b'])
+    expect(r.notes).toEqual([])
+  })
+
+  it.each([
+    ['「全部」体检', { scope: 'all' }],
+    ['单个项目体检', { scope: '/proj-a' }],
+  ] as const)('%s：项目记忆和全局 AGENTS.md 里的规则矛盾，照常报，指纹按这个项目取到的整份指令文件算', async (_, args) => {
+    const llm = verticalWhen({ mem_c: '注释用英文' })
+    const deps = makeDeps({ host: { contextOf: async () => ({ workspacePath: '/proj-b' }), llmOf: () => llm }, instructions: files })
+    const c = record({ id: 'mem_c', scope: 'workspace', workspacePath: '/proj-a', content: '注释用中文' })
+    await deps.store.put(c)
+    await executeScan(args, deps, fakeExec())
+    const [entry, ...rest] = (await deps.decisions.list()).filter(e => e.baselineRef !== undefined)
+    expect(rest).toEqual([])
+    expect(entry).toMatchObject({ memoryIds: ['mem_c'], baselineRef: 'AGENTS.md：注释用英文', fingerprint: conflictFingerprint([c], [A_TEXT]) })
+  })
+
+  it('全局层很长（9000 字符）、项目层只有一条规则：项目记忆和这条规则矛盾照常报，不打截断说明', async () => {
+    const longGlobal = '全局约定'.repeat(2250)
+    expect(longGlobal).toHaveLength(9000)
+    const llm = verticalWhen({ mem_a: 'A：用 pnpm' })
+    const deps = makeDeps({ host: { llmOf: () => llm }, instructions: instructionsOf({ global: longGlobal, '/proj-a': `${longGlobal}\nA：用 pnpm` }) })
+    await seed(deps)
+    const r = await scanSingle({ scope: '/proj-a' }, deps)
+    expect(await verticalIds(deps)).toEqual(['mem_a'])
+    expect(r.notes).toEqual([])
+  })
+
+  it('没有任何指令文件：没有可查的，不打说明', async () => {
+    const calls: string[] = []
+    const deps = makeDeps({ host: { llmOf: () => verticalWhen({}, calls) } })
+    await seed(deps)
+    const notes = new Map<string, readonly ScanNote[]>()
+    const r = await executeScan({ scope: 'all' }, deps, fakeExec(), { onScopeNotes: (scope, n) => { notes.set(scope.kind === 'global' ? 'global' : scope.workspacePath, n) } })
+    if (r.kind !== 'checkup') throw new Error(r.kind)
+    expect(r.notes).toEqual([])
+    expect([...notes.values()].every(n => n.length === 0)).toBe(true)
+    expect(calls.every(text => text.includes('无权威配置基线'))).toBe(true)
+  })
+
+  it('某个项目的指令文件取不到：这个项目打 baseline-missing（带原因）、不查垂直，别的照查', async () => {
+    const llm = verticalWhen({ mem_a: 'A：用 pnpm', mem_b: 'B：用 yarn' })
+    const deps = makeDeps({
+      host: { llmOf: () => llm },
+      instructions: instructionsOf({ global: GLOBAL_TEXT, '/proj-a': { kind: 'unavailable', reason: `EACCES token=${FAKE_SECRET.github}` }, '/proj-b': B_TEXT }),
+    })
+    await seed(deps)
+    const notes = new Map<string, readonly ScanNote[]>()
+    const r = await executeScan({ scope: 'all' }, deps, fakeExec(), { onScopeNotes: (scope, n) => { notes.set(scope.kind === 'global' ? 'global' : scope.workspacePath, n) } })
+    if (r.kind !== 'checkup') throw new Error(r.kind)
+    expect(await verticalIds(deps)).toEqual(['mem_b'])
+    expect(notes.get('/proj-a')!.map(n => n.code)).toEqual(['baseline-missing'])
+    // 原因原话同诊断文字：密钥遮住
+    const [missing] = notes.get('/proj-a')!
+    expect(missing!.text).toContain('EACCES')
+    expect(missing!.cause).toEqual({ kind: 'error', message: expect.stringContaining('EACCES') })
+    expect(`${missing!.text}${missing!.cause?.message}`).not.toContain(FAKE_SECRET.github)
+    expect(notes.get('/proj-b')).toEqual([])
+    expect(notes.get('global')).toEqual([])
+    expect(r.notes.map(n => n.code)).toEqual(['baseline-missing'])
+  })
+
+  it('指令文件超过上限被截断：那个作用域打 baseline-truncated，照常查', async () => {
+    const llm = verticalWhen({ mem_a: 'A：用 pnpm' })
+    const deps = makeDeps({ host: { llmOf: () => llm }, instructions: instructionsOf({ '/proj-a': { kind: 'found', texts: [A_TEXT], isTruncated: true } }) })
+    await seed(deps)
+    const r = await scanSingle({ scope: '/proj-a' }, deps)
+    expect(r.notes.map(n => n.code)).toEqual(['baseline-truncated'])
+    expect(await verticalIds(deps)).toEqual(['mem_a'])
+  })
+
+  it('同一次体检里每个作用域的指令文件只读一次', async () => {
+    const reads: string[] = []
+    const deps = makeDeps({
+      host: { llmOf: () => verticalWhen({}) },
+      instructions: async (scope: Scope) => { reads.push(scope.kind === 'global' ? 'global' : scope.workspacePath); return files(scope) },
+    })
+    await seed(deps)
+    await executeScan({ scope: 'all' }, deps, fakeExec())
+    expect(reads.sort()).toEqual(['/proj-a', '/proj-b', 'global'])
+  })
+
+  it('覆盖全局的体检提交时，清掉全局记忆按项目指令文件记下的遗留垂直条目；只查项目、全局层取不到、内容检查没做完时不清；仍对得上全局层的、已结清的、项目记忆的不动', async () => {
+    const deps = makeDeps({ host: { llmOf: () => verticalWhen({}) }, instructions: files })
+    const { a, g1, g2 } = await seed(deps)
+    const g3 = record({ id: 'mem_g3', content: '全局：缩进两格' })
+    await deps.store.put(g3)
+    const legacy = (await deps.decisions.upsert({ memoryIds: ['mem_g1'], baselineRef: 'A', summary: '遗留', fingerprint: conflictFingerprint([g1], [A_TEXT]) }, 1)).entry
+    const current = (await deps.decisions.upsert({ memoryIds: ['mem_g2'], baselineRef: 'G', summary: '仍对得上', fingerprint: conflictFingerprint([g2], [GLOBAL_TEXT]) }, 1)).entry
+    const settled = (await deps.decisions.upsert({ memoryIds: ['mem_g3'], baselineRef: 'A', summary: '已裁决', fingerprint: conflictFingerprint([g3], [A_TEXT]) }, 1)).entry
+    await deps.decisions.settle(settled.id, 'keep-left', 2)
+    const project = (await deps.decisions.upsert({ memoryIds: ['mem_a'], baselineRef: 'A', summary: '项目', fingerprint: conflictFingerprint([a], [A_TEXT]) }, 1)).entry
+
+    // 只查项目不碰全局：遗留条目还在
+    await scanSingle({ scope: '/proj-a' }, deps)
+    expect(await deps.decisions.get(legacy.id)).toBeDefined()
+
+    // 全局层取不到时无从判断，也不动
+    const unavailable = { ...deps, instructions: instructionsOf({ global: { kind: 'unavailable', reason: 'EACCES' } }) }
+    await executeScan({}, unavailable, fakeExec(), { isGlobalOnly: true })
+    expect(await deps.decisions.get(legacy.id)).toBeDefined()
+
+    // 全局的内容检查这一轮没做完（模型输出不合格式）：不清
+    const failing = { ...deps, host: { ...deps.host, llmOf: () => ({ complete: async () => '不是 JSON' }) } }
+    const failed = await executeScan({}, failing, fakeExec(), { isGlobalOnly: true })
+    if (failed.kind !== 'single') throw new Error(failed.kind)
+    expect(failed.notes.map(n => n.code)).toContain('semantic-failed')
+    expect(await deps.decisions.get(legacy.id)).toBeDefined()
+
+    await executeScan({}, deps, fakeExec(), { isGlobalOnly: true })
+    expect(await deps.decisions.get(legacy.id)).toBeUndefined()
+    expect(await deps.decisions.get(current.id)).toBeDefined()
+    expect((await deps.decisions.listSettled()).map(e => e.id)).toEqual([settled.id])
+    expect(await deps.decisions.get(project.id)).toBeDefined()
   })
 })

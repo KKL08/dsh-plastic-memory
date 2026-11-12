@@ -1,14 +1,13 @@
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fakeExec } from './helpers/exec.ts'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { TurnBoundaryProjection } from '@deepseek-ai/dsh-agent'
 import { Context } from '@deepseek-ai/cordis'
-import Registry, { type SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import { Session, SESSION_FORMAT_VERSION, type SessionEvent, type SessionHeader, type SessionId } from '@deepseek-ai/dsh-session'
-import { createSystemMessage, createUserMessage, type MessageSourceMap, type UserMessage } from '@deepseek-ai/dsh-llm'
+import { createSystemMessage, createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 
 // 真实 dsh-tools / dsh-storage-domain 包已从 npm 装好，此处不 mock 任何框架包。
 import { apply, Config, inject } from '../src/index.ts'
@@ -31,7 +30,7 @@ import {
   memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema,
   type MemorySnapshot, type PendingDecision, type ScanCacheEntry,
 } from '../src/governance/schema.ts'
-import { baselineProjectionDefinition, type BaselineState } from '../src/governance/baseline.ts'
+import { INSTRUCTION_MAX_BYTES } from '../src/governance/instructions.ts'
 import { EVIDENCE_GUIDANCE } from '../src/evidence-guidance.ts'
 import {
   GUI_CHECKUP_VIEW_FILE, GUI_VIEW_DIR, GUI_VIEW_FILES, GUI_WORKSPACE_MAP_FILE, deletedViewSchema, libraryViewSchema, pendingViewSchema, sessionViewFile, sessionViewSchema,
@@ -84,12 +83,11 @@ async function seedMemory(memoryRoot: string): Promise<string> {
 const liveCtxs: Array<() => Promise<void>> = []
 
 /**
- * projections：ctx.get('sessionProjections') 给出的注册表（缺省 = 服务缺席）。inject 仿 cordis 的
- * ctx.inject(deps, cb)：依赖齐了才同步回调、把服务放进 child；registerProjection=false 模拟回调始终没触发。
+ * inject 仿 cordis 的 ctx.inject(deps, cb)：依赖齐了才同步回调、把服务放进 child。
  * 回调返回的 disposer 记下来，dispose() 仿插件卸载逆序逐个 await。
  */
 function mockCtx(opts: {
-  projections?: SessionProjectionRegistry; registerProjection?: boolean; storageDomain?: boolean; commands?: { register(def: unknown): () => void }
+  storageDomain?: boolean; commands?: { register(def: unknown): () => void }
   /** 宿主计时服务（ctx.inject(['timer'], …) 的 child 上的 timeout / interval）；缺省服务缺席。 */
   timer?: { timeout(callback: () => void, delayMs: number): () => void; interval(callback: () => void, delayMs: number): () => void }
   /** 宿主默认模型选择（ctx.get('agentDefaultModel')）；缺省服务缺席。 */
@@ -143,21 +141,17 @@ function mockCtx(opts: {
       return () => {}
     },
     effect: (fn: () => unknown) => { fn() },
-    // 按服务名分发：'llm' 给上面的假 llm，'sessionProjections' 给 opts.projections，'storageDomain'
+    // 按服务名分发：'llm' 给上面的假 llm，'storageDomain'
     // 按 opts.storageDomain 给旧 KV 域；其余（如 resolveWorkspacePath 的 workspaceRegistry）一律
     // undefined，判为服务缺席——这里不模拟 cordis proxy 对未知服务名的抛错行为。
     get: (name: string) => (name === 'llm' ? llm
-      : name === 'sessionProjections' ? opts.projections
-        : name === 'storageDomain' && opts.storageDomain === true ? storageDomain
-          : name === 'agentDefaultModel' ? opts.agentDefaultModel
-            : name === 'sessionQuery' ? opts.sessionQuery
-              : undefined),
+      : name === 'storageDomain' && opts.storageDomain === true ? storageDomain
+        : name === 'agentDefaultModel' ? opts.agentDefaultModel
+          : name === 'sessionQuery' ? opts.sessionQuery
+            : undefined),
     // 按依赖名分发，像 cordis 一样只在依赖的服务都在时才回调
     inject: (deps: string[], callback: (child: Record<string, unknown>) => unknown) => {
       const collect = (dispose: unknown) => { if (typeof dispose === 'function') disposers.push(dispose as () => unknown) }
-      if (deps.includes('sessionProjections') && opts.projections !== undefined && opts.registerProjection !== false) {
-        collect(callback({ sessionProjections: opts.projections }))
-      }
       if (deps.includes('commands') && opts.commands !== undefined) collect(callback({ commands: opts.commands }))
       if (deps.includes('timer') && opts.timer !== undefined) collect(callback({ timeout: opts.timer.timeout, interval: opts.timer.interval }))
       return () => {}
@@ -191,7 +185,14 @@ async function makeTmpRoot(): Promise<string> {
   tmpDirs.push(dir)
   return dir
 }
+// 体检读宿主的全局指令文件：全局层指到空的临时目录，不读真实家目录（用例要全局层时自己再指）
+beforeEach(async () => {
+  const homes = await makeTmpRoot()
+  vi.stubEnv('DSH_HOME', join(homes, 'dsh'))
+  vi.stubEnv('DSH_AGENTS_HOME', join(homes, 'agents'))
+})
 afterEach(async () => {
+  vi.unstubAllEnvs()
   fsTrace.hold = undefined
   await Promise.all(liveCtxs.splice(0).map(dispose => dispose()))
   await Promise.all(tmpDirs.splice(0).map(d => rm(d, { recursive: true, force: true })))
@@ -1687,114 +1688,60 @@ describe('证据锚：读 turnBoundary 投影', () => {
 })
 
 /**
- * AGENTS.md 基线来自插件注册到宿主的 plasticMemoryBaseline 投影。这里用真的 SessionProjectionRegistry
- * （挂在裸 cordis Context 上），会话给结构化对象：registry 首次触碰时对 snapshotEvents() 全量补折。
+ * 指令文件按项目现读：apply() 把宿主的指令文件包接到体检上。全局层指到临时目录（DSH_HOME、DSH_AGENTS_HOME），
+ * 项目层在会话 cwd 里放 AGENTS.md；断言发给模型的指令文件段和宿主函数直接取到的渲染一致。
  */
-describe('AGENTS.md 基线：读 plasticMemoryBaseline 投影', () => {
+describe('指令文件：体检按项目读宿主的指令文件', () => {
   type ToolDef = { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }
   type ScanOut = { notes?: Array<{ code: string }> }
 
-  async function hostRegistry(): Promise<SessionProjectionRegistry> {
-    const host = new Context()
-    await host.plugin(Registry)
-    return host.sessionProjections
-  }
-
-  /** 宿主 agent-instructions 的完整基线消息（source 形状照 AgentInstructionSource）。 */
-  function baselineMessage(seq: number, text: string): SessionEvent {
-    const source: MessageSourceMap['agent-instructions'] = {
-      kind: 'agent-instructions', form: 'instructions', baseline: true,
-      changes: [{ action: 'set', scope: '.', path: 'AGENTS.md' }],
-    }
-    return { type: 'user/message', seq, time: 0, data: { id: `instr-${seq}`, role: 'user', content: [{ type: 'text', text }], source } } as unknown as SessionEvent
-  }
-
-  let sessionCount = 0
-  function fakeSession(cwd: string, events: SessionEvent[]) {
-    return {
-      header: { id: `sess-${++sessionCount}`, cwd },
-      inheritedEventCount: 0,
-      get seq() { return events.length },
-      snapshotEvents: () => events,
-      eventAt: (seq: number) => events[seq],
-      requestHeader: () => undefined,
-    }
-  }
-
-  async function boot(base: ReturnType<typeof mockCtx>, overrides: { get?: (name: string) => unknown } = {}) {
+  async function boot() {
     const defs = new Map<string, ToolDef>()
-    const ctx = {
-      ...base,
-      ...overrides,
-      tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } },
-      logger: { info() {}, warn: (msg: string) => { warnings.push(msg) }, error() {} },
-    }
-    const warnings: string[] = []
-    await apply(ctx as never, new Config({ memoryRoot: await seedMemory(await makeTmpRoot()) } as never))
-    const scan = async (session: object, args: object) => await defs.get('memory_scan')!.execute(args, fakeExec({
-      agent: { session, options: { provider: 'deepseek', model: 'deepseek-chat' } } as unknown as ToolRunContext['agent'],
-    })) as ScanOut
-    return { scan, warnings }
-  }
-  /** prompt 里的基线段（记忆列表之前的部分）。 */
-  const promptUser = (request: { messages: unknown[] } | undefined) =>
-    baselinePart((request?.messages[0] as { content: Array<{ text: string }> }).content[0]!.text)
-  const baselinePart = (user: string) => user.split('\n\n## 记忆列表')[0]!
-  const expectedBaseline = (baseline: string[]) => baselinePart(buildSemanticPrompt([], baseline).user)
-
-  it('apply() 注册 plasticMemoryBaseline：checkpoint 读回键、ver 与折叠出的正文', async () => {
-    const projections = await hostRegistry()
-    await boot(mockCtx({ projections }))
-    const session = fakeSession(await makeTmpRoot(), [baselineMessage(0, '# AGENTS.md\n用 pnpm')])
-    const row = projections.checkpoint(session as never).plasticMemoryBaseline
-    expect(row?.ver).toBe(baselineProjectionDefinition.stateVersion)
-    expect(row?.val).toMatchObject({ entries: [{ text: '# AGENTS.md\n用 pnpm' }] })
-  })
-
-  it('注册归属随父插件（真 cordis）：父插件经 inject 注册，dispose 后键随之卸载，stateOf 返回 undefined', async () => {
-    const host = new Context()
-    await host.plugin(Registry)
-    let child: unknown
-    const parent = await host.plugin({
-      name: 'parent',
-      apply(p: Context) { child = p.inject(['sessionProjections'], c => void c.sessionProjections.register(baselineProjectionDefinition)) },
+    const base = mockCtx()
+    const ctx = { ...base, tools: { register: (def: ToolDef) => { defs.set(def.name, def); return () => {} } }, logger: { info() {}, warn() {}, error() {} } }
+    const memoryRoot = await seedMemory(await makeTmpRoot())
+    await apply(ctx as never, new Config({ memoryRoot } as never))
+    const execIn = (cwd: string) => fakeExec({
+      agent: { session: { header: { id: 'sess-1', cwd }, seq: 0, requestHeader: () => undefined }, options: { provider: 'deepseek', model: 'deepseek-chat' } } as unknown as ToolRunContext['agent'],
     })
-    await child
-    const session = fakeSession(await makeTmpRoot(), [baselineMessage(0, '# AGENTS.md\n用 pnpm')])
-    expect((host.sessionProjections.stateOf(session as never, 'plasticMemoryBaseline') as BaselineState | undefined)?.entries).toEqual([{ text: '# AGENTS.md\n用 pnpm', scopes: ['.'] }])
-    const row = host.sessionProjections.checkpoint(session as never).plasticMemoryBaseline
-    expect(row?.ver).toBe(baselineProjectionDefinition.stateVersion)
-    expect(baselineProjectionDefinition.stateSchema.safeParse(row?.val).success).toBe(true)
-    await parent.dispose()
-    expect(host.sessionProjections.stateOf(session as never, 'plasticMemoryBaseline')).toBeUndefined()
-    await host.fiber.dispose()
-  })
+    const scan = async (cwd: string) => await defs.get('memory_scan')!.execute({ layers: 'semantic' }, execIn(cwd)) as ScanOut
+    const confirm = async (args: unknown, cwd: string) => await defs.get('memory_confirm')!.execute(args, execIn(cwd))
+    return { scan, confirm, memoryRoot, llmRequests: base.llmRequests }
+  }
+  /** prompt 里的指令文件段（记忆列表之前的部分）。 */
+  const instructionPart = (user: string) => user.split('\n\n## 记忆列表')[0]!
+  const promptOf = (request: { messages: unknown[] } | undefined) =>
+    instructionPart((request?.messages[0] as { content: Array<{ text: string }> }).content[0]!.text)
 
-  it('日志里早有完整基线、之后才注册：首次语义扫描的 prompt 就带基线正文（宿主晚注册补折）', async () => {
-    const projections = await hostRegistry()
-    const session = fakeSession(await makeTmpRoot(), [baselineMessage(0, '# AGENTS.md\n不要 mock 数据库')])
-    const base = mockCtx({ projections })
-    const { scan } = await boot(base)
-    const out = await scan(session, { layers: 'semantic' })
-    expect(base.llmRequests).toHaveLength(1)
-    expect(promptUser(base.llmRequests[0])).toBe(expectedBaseline(['# AGENTS.md\n不要 mock 数据库']))
+  it('会话所在项目有 AGENTS.md、全局层也有：发给模型的是两层合起来的那段，和宿主函数直接取到的相同；不打 baseline-missing', async () => {
+    const dshHome = process.env.DSH_HOME!
+    await mkdir(dshHome, { recursive: true })
+    await writeFile(join(dshHome, 'AGENTS.md'), '全局：注释用英文')
+    const project = await realpath(await makeTmpRoot())
+    await writeFile(join(project, 'AGENTS.md'), '项目：不要 mock 数据库')
+    const { scan, llmRequests } = await boot()
+    const out = await scan(project)
+    const { loadBaselineInstructions } = await import('@deepseek-ai/dsh-agent-instructions')
+    const direct = await loadBaselineInstructions({ cwd: project, maxBytes: INSTRUCTION_MAX_BYTES })
+    expect(direct?.text).toContain('不要 mock 数据库')
+    expect(direct?.text).toContain('注释用英文')
+    expect(llmRequests).toHaveLength(1)
+    expect(promptOf(llmRequests[0])).toBe(instructionPart(buildSemanticPrompt([], [direct!.text]).user))
     expect(out.notes?.map(n => n.code) ?? []).not.toContain('baseline-missing')
   })
 
-  it('两个 session 的基线互不串台', async () => {
-    const projections = await hostRegistry()
-    const base = mockCtx({ projections })
-    const { scan } = await boot(base)
-    const a = fakeSession(await makeTmpRoot(), [baselineMessage(0, '项目甲：用 pnpm')])
-    const b = fakeSession(await makeTmpRoot(), [baselineMessage(0, '项目乙：用 npm')])
-    await scan(a, { layers: 'semantic' })
-    await scan(b, { layers: 'semantic' })
-    await scan(a, { layers: 'semantic' })
-    expect(base.llmRequests.map(promptUser)).toEqual([
-      expectedBaseline(['项目甲：用 pnpm']),
-      expectedBaseline(['项目乙：用 npm']),
-      expectedBaseline(['项目甲：用 pnpm']),
-    ])
+  it('agent 裁决没有指纹的旧垂直条目「保留」：按这条全局记忆对应的全局层现算指纹记下', async () => {
+    const dshHome = process.env.DSH_HOME!
+    await mkdir(dshHome, { recursive: true })
+    await writeFile(join(dshHome, 'AGENTS.md'), '全局：注释用英文')
+    const { confirm, memoryRoot } = await boot()
+    const ledger = new PendingDecisionsStore(sidecarAt(memoryRoot).pending)
+    const { entry } = await ledger.upsert({ memoryIds: ['mem_seed'], baselineRef: 'AGENTS.md：注释语言', summary: '与全局指令矛盾' }, 1)
+    expect(entry.fingerprint).toBeUndefined()
+    await confirm({ action: 'resolve', decisionId: entry.id, verdict: 'keep-left' }, await realpath(await makeTmpRoot()))
+    const settled = await ledger.listSettled()
+    expect(settled.map(d => [d.id, d.settled?.verdict])).toEqual([[entry.id, 'keep-left']])
+    expect(settled[0]!.fingerprint).toEqual(expect.any(String))
   })
 })
 

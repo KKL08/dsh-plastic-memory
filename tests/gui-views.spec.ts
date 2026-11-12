@@ -28,6 +28,7 @@ import { record } from './helpers/record.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { FAKE_SECRET, generatePrivateKeyPem } from './helpers/secrets.ts'
 import { SECRET_MASK } from '../src/secrets.ts'
+import { noInstructions } from './helpers/instructions.ts'
 
 // 进程边界：记下每次 rename 的目标路径（视图写入是 tmp + rename，一次 rename 就是一次文件替换）；
 // readFailures 里的路径读时报对应的错误码（权限、I/O 这类读错）。其余原样透传。
@@ -67,7 +68,7 @@ function harness() {
     setClock: (t: number) => { clock = t },
     views: () => collectGlobalViews(sourceDeps),
     resolve: (decisionId: string, verdict: 'keep-left' | 'keep-right' | 'keep-both') =>
-      executeConfirm({ action: 'resolve', decisionId, verdict }, { workspacePath: WS }, { store, decisions, snapshots, now: () => clock }),
+      executeConfirm({ action: 'resolve', decisionId, verdict }, { workspacePath: WS }, { instructions: noInstructions, store, decisions, snapshots, now: () => clock }),
     forget: (ids: string[]) => executeForget({ ids, reason: '测试' }, { workspacePath: WS }, { store, snapshots, decisions, now: () => clock }),
     health: () => executeHealth({}, {
       store, registry, decisions, cache: sidecar.scanCache, thresholds: resolveHealthThresholds('normal'),
@@ -316,7 +317,7 @@ describe('待处理视图：建议整理', () => {
     await fix('mem_expired', { validTo: T0 + DAY })
     await fix('mem_bloat', { content: '精简后' })
     await fix('mem_orphan', { supersedes: [] })
-    const refreshed = await executeConfirm({ action: 'refresh', memoryId: 'mem_stale' }, { workspacePath: WS }, { store: h.store, decisions: h.decisions, snapshots: h.snapshots, now: () => T0 })
+    const refreshed = await executeConfirm({ action: 'refresh', memoryId: 'mem_stale' }, { workspacePath: WS }, { instructions: noInstructions, store: h.store, decisions: h.decisions, snapshots: h.snapshots, now: () => T0 })
     expect(refreshed.kind).toBe('refreshed')
     const { pending } = await h.views()
     expect(pending.items).toEqual([])

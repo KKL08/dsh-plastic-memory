@@ -7,12 +7,9 @@
  * 「停止」只是不再等：已经发出的这一条照常生成、写进账本，稍后跟着视图出现；之后到达的结果按请求序号认出来丢掉。换了会话同样作废在途请求、清掉本地状态。
  * 体检之后的后续段正在给这一条排队或生成时（视图带「正在生成」标记），写「正在生成建议……」、不给按钮也不给「停止」：那一段不归这张卡管，生成完建议跟着视图来。
  * 页面加载时不问模型（问一次会在借来的会话日志里留一条记录）：只读这个会话已知的模型状态（别处问过才有），此外点过之后服务端回 llm-unavailable 才知道拿不到。
- * 垂直冲突（记忆和指令文件，只有一条记忆 left）：借来的会话不在这条记忆的项目里时（needsProject）只写「要在这个项目的会话里处理」，
- * 不给「补上建议」——建议要那个项目的指令文件，采纳时也按它核对。
  */
 import { createContext, useContext, useEffect, useRef, useState } from 'react'
 import type { MemoryCard, MemoryCommand, NoSuggestion, PendingItem, ProposalAction, Suggestion } from '../../src/gui/contract.ts'
-import { belongsTo, workspaceOf } from '../session-pick.ts'
 import { interpret } from '../command/protocol.ts'
 import { causeText } from '../checkup/StatusBar.tsx'
 import { useGateway, type BorrowedSession } from '../gateway.ts'
@@ -32,22 +29,6 @@ export const ACTION_LABEL = {
   'rewrite': 'pending.suggestion.action.rewrite',
   'delete': 'pending.suggestion.action.delete',
 } as const satisfies Record<ProposalAction, LocaleKey>
-
-type VerticalItem = Extract<PendingItem, { kind: 'conflict-vertical' }>
-
-/**
- * 垂直冲突能不能在借来的会话里补上、采纳、按要求生成（服务端同口径，见 baselineBasisOf）：项目记忆要会话属于它的项目；
- * 全局记忆已有建议时要回到生成建议的那个会话所在的项目（建议是在没有项目的会话里生成的，就要会话也没有项目）。
- * 没有会话时不在这里拦（按钮各自写「先开一个会话」）；全局记忆还没有建议时界面看不出冲突是对着哪份指令文件扫出来的，
- * 会话读不读得到指令文件也看不到，都由服务端回缺基线。
- */
-export function isInVerticalProject(item: VerticalItem, session: BorrowedSession): boolean {
-  if (session.kind !== 'ready') return true
-  const project = item.memory?.workspacePath ?? item.suggestion?.baselineWorkspace
-  if (project === undefined) return true
-  if (project === 'global') return workspaceOf(session.cwd, session.workspaces ?? {}) === undefined
-  return belongsTo(session.cwd, project, session.workspaces ?? {})
-}
 
 /**
  * 本地状态：idle 照视图显示；busy 命令在途；waiting 命令成功、等视图带来建议（signature 是点击时视图里没有建议的原因，变了就不再等）；
@@ -71,7 +52,7 @@ function failureText(cause: NonNullable<NoSuggestion['cause']>, t: Translate): s
   return causeText({ kind: cause.kind, ...(cause.hostCode !== undefined ? { hostCode: cause.hostCode } : {}) }, t)
 }
 
-export function SuggestionBlock({ decisionId, left, right, suggestion, noSuggestion, isGenerating = false, notice, needsProject = false, session, onRefused }: {
+export function SuggestionBlock({ decisionId, left, right, suggestion, noSuggestion, isGenerating = false, notice, session, onRefused }: {
   decisionId: string
   /** A、B 两条（视图里的卡片），融合稿写进哪条、对照的原文按它们找；垂直冲突只有这一条（left）。 */
   left: MemoryCard
@@ -82,8 +63,6 @@ export function SuggestionBlock({ decisionId, left, right, suggestion, noSuggest
   isGenerating?: boolean
   /** 没有建议时代替原因写的一句（采纳时建议已失效）：标题改成「这次没有建议」，读屏会念出来。 */
   notice?: string | undefined
-  /** 垂直冲突：借来的会话不在这条记忆的项目里（isInVerticalProject 为假）。 */
-  needsProject?: boolean
   session: BorrowedSession
   /** 这一条已在别处处理（条目不在了、正被认领）。 */
   onRefused: () => void
@@ -116,16 +95,6 @@ export function SuggestionBlock({ decisionId, left, right, suggestion, noSuggest
     return () => { clearTimeout(timer) }
   }, [isWaiting])
 
-  if (needsProject) {
-    return (
-      <div className="pm-suggestion">
-        <p className="pm-suggestion-line">
-          {/* 建议有没有、模型定没定，都要回它的项目里看：这里只写去哪处理 */}
-          <span>{t('pending.vertical.needProject')}</span>
-        </p>
-      </div>
-    )
-  }
   if (suggestion !== undefined) return <SuggestionView suggestion={suggestion} left={left} right={right} />
   if (noSuggestion === undefined) return null
   const isVertical = right === undefined
@@ -212,12 +181,12 @@ type ConflictItem = Extract<PendingItem, { kind: 'conflict-horizontal' | 'confli
 
 /**
  * 「全部补上」要补的一条：等你决定里的冲突，记忆都读得出，视图写着还没有建议（没生成、上次失败、自动体检名额用完；垂直冲突还有缺基线），
- * 体检之后的后续段也没在生成它。垂直冲突只算借来的会话在它项目里的。
+ * 体检之后的后续段也没在生成它。
  */
-export function isMissingSuggestion(item: PendingItem, session: BorrowedSession): item is ConflictItem {
+export function isMissingSuggestion(item: PendingItem): item is ConflictItem {
   if (item.level !== 'your-call') return false
   if (item.kind !== 'conflict-horizontal' && item.kind !== 'conflict-vertical') return false
-  if (item.kind === 'conflict-horizontal' ? item.left === null || item.right === null : item.memory === null || !isInVerticalProject(item, session)) return false
+  if (item.kind === 'conflict-horizontal' ? item.left === null || item.right === null : item.memory === null) return false
   if (item.suggestion !== undefined || item.isGeneratingSuggestion === true) return false
   const code = item.noSuggestion?.code
   return code === 'not-generated' || code === 'failed' || code === 'quota-exhausted' || (item.kind === 'conflict-vertical' && code === 'no-baseline')

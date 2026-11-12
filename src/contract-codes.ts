@@ -56,12 +56,17 @@ export const SCAN_NOTE_CODES = [
   'semantic-batched',        // 记忆超出一次调用的 token 预算，语义层分批检查，跨批的成对问题可能漏
   'semantic-failed',         // LLM 抛异常或两次输出无法解析，未更新语义缓存
   'model-unavailable',       // 模型用不了：宿主报未登录或缺凭据（governance/host-llm.ts MODEL_UNAVAILABLE_HOST_CODES），未更新语义缓存；不算失败
-  'baseline-missing',        // 未检测到 AGENTS.md 基线，垂直冲突检测未执行
-  'baseline-session-scoped', // 基线随当前会话，其他 workspace 的垂直冲突检测已跳过
+  'baseline-missing',        // 指令文件（AGENTS.md / CLAUDE.md）取不到，这个作用域的垂直冲突检测未执行
+  'baseline-truncated',      // 指令文件超过长度上限被截断，垂直冲突只对照了其中一部分
   'cross-ws-failed',         // 跨项目重复分析失败，退用实体聚类保底
   'conflicts-settled',       // 有冲突此前裁决为两边都留、双方未改，本次不再列出
 ] as const
 export type ScanNoteCode = (typeof SCAN_NOTE_CODES)[number]
+
+/** 不再产生的说明码：旧版写进体检记录的，读的时候丢掉。 */
+export const RETIRED_SCAN_NOTE_CODES = [
+  'baseline-session-scoped', // 旧版的指令文件跟着会话取，查的不是会话所在项目时跳过垂直冲突检测
+] as const
 
 /**
  * 体检完成记录的发起方（体检记录表，storage/schema.ts）：manual = 界面手动（记忆页的 `/memory scan`），auto = 自动体检，
@@ -108,7 +113,7 @@ export type ProposalSource = (typeof PROPOSAL_SOURCES)[number]
  * unparseable = 输出不合格式，secret-in-draft = 稿里出现高危密钥或原文没有的疑似密钥，整份丢弃，
  * undecided = 模型正常答了，但判断不了哪条对（带它说明的理由；视图里是单独的原因码，不算生成失败），
  * quota-exhausted = 自动体检这次的建议名额用完，没轮到它（没调用模型，不算尝试；视图里是单独的原因码，不算生成失败），
- * no-baseline = 垂直冲突缺基线：体检用的会话不在这条记忆的项目里，或拿不到指令文件（没调用模型，不算尝试；视图里是单独的原因码）。
+ * no-baseline = 垂直冲突缺基线：这条记忆对应的指令文件取不到或不存在（没调用模型，不算尝试；视图里是单独的原因码）。
  */
 export const SUGGESTION_FAILURE_KINDS = ['model-error', 'unparseable', 'secret-in-draft', 'undecided', 'quota-exhausted', 'no-baseline'] as const
 

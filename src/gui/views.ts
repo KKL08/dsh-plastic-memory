@@ -178,7 +178,7 @@ export function buildPendingView(input: ViewInput): PendingView {
 /**
  * 冲突项的处理建议（账本存盘形状映射到契约）：条目未决（调用方只传未决条目）、冲突指纹和每条记忆此刻的完整内容指纹都和建议的依据一致，
  * 才给 suggestion；否则给没有建议的原因：任一条含高危密钥、最近一次模型判断不了、自动体检名额用完、垂直冲突缺基线或生成失败（依据同样要对得上）、还没生成。
- * 一方定位不到时两个都不给。垂直冲突只核对记忆那一半（重写视图时没有会话、拿不到指令文件），建议带上基线所属的项目，基线那一半采纳时核对。
+ * 一方定位不到时两个都不给。垂直冲突只核对记忆那一半（重写视图时不读指令文件），建议带上基线所属的项目，基线那一半采纳时核对。
  * 改写稿按卡片口径遮高危密钥（存盘的稿保证没有高危，这里兜底）。
  */
 function suggestionState(e: PendingDecision, data: ScopePreread): Pick<Extract<PendingItem, { kind: 'conflict-horizontal' }>, 'suggestion' | 'noSuggestion'> {

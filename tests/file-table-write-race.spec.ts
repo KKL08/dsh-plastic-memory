@@ -24,6 +24,7 @@ import { executeSnapshotTool } from '../src/tools/snapshot.ts'
 import { record as baseRecord, candidate } from './helpers/record.ts'
 import { captureRejection } from './helpers/errors.ts'
 import { InMemoryKvTable, InMemoryBatchKvTable } from './helpers/in-memory-kv.ts'
+import { noInstructions } from './helpers/instructions.ts'
 
 // 写路径锁内 locate 之后、写盘之前，别的宿主进程或用户改了这个文件：update 要在新内容上重算，put 要基于新的
 // 位置与附加字段重写，都不能拿旧读数盖掉新内容。fs 是进程边界：只给 readFile 套一层，在指定路径第 n 次读完
@@ -201,7 +202,7 @@ describe('读改写的工具调用：读到之后被别处改过的正文不丢'
     await store.put(record())
     changeContentAfterGet(store, 'mem_race', '并发改的')
     const deps = {
-      store, now: () => 5000,
+      store, now: () => 5000, instructions: noInstructions,
       decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
       snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
     }
@@ -289,7 +290,7 @@ describe('memory_snapshot restore：预读之后被改的记录按「快照后�
 describe('读改写的工具调用：读到之后记录被别处删掉，返回可读结果而不是抛错', () => {
   const newStore = () => new MemoryStore(newTable(), undefined, new InMemoryBatchKvTable())
   const confirmDeps = (store: MemoryStore) => ({
-    store, now: () => 5000,
+    store, now: () => 5000, instructions: noInstructions,
     decisions: new PendingDecisionsStore(new InMemoryKvTable<PendingDecision>()),
     snapshots: new SnapshotStore(new InMemoryKvTable<MemorySnapshot>()),
   })

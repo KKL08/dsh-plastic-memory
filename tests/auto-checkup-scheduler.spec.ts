@@ -25,6 +25,8 @@ import type { SemanticLlm } from '../src/governance/semantic-scan.ts'
 import { fakeExec } from './helpers/exec.ts'
 import { record } from './helpers/record.ts'
 import { DAY, NOW } from './helpers/clock.ts'
+import { instructionsOf, noInstructions } from './helpers/instructions.ts'
+import type { ReadInstructions } from '../src/governance/instructions.ts'
 
 // 自动体检调度（测试切入点 2）：真实记忆根（FileTable + .state 侧表 + 视图文件），只在进程边界换成假的：
 // 时钟、宿主计时服务、宿主默认模型选择和宿主 llm 服务（按宿主真实的流形状回 text-delta / usage / finish）。
@@ -117,7 +119,7 @@ function fakeHostLlm(opts: {
             return
           }
         }
-        if (opts.suggestion !== undefined && String(req.system).includes('两条互相矛盾的记忆')) {
+        if (opts.suggestion !== undefined && /两条互相矛盾的记忆|一条长期记忆和项目指令文件/.test(String(req.system))) {
           await opts.suggestionGate?.()
           const answer = opts.suggestion()
           if (typeof answer === 'object') {
@@ -153,6 +155,8 @@ function env(opts: {
   wrapStatus?: (read: () => Promise<CheckupView>) => () => Promise<CheckupView>
   /** 接上体检之后的后续段（生成处理建议）；给出时可以换掉它用的账本（模拟后续段出错）。 */
   suggestions?: { decisions?: (real: PendingDecisionsStore) => CheckupSuggestionsDeps['decisions'] }
+  /** 各项目的指令文件；不给就哪里都没有。 */
+  instructions?: ReadInstructions
 } = {}) {
   const clock = { now: NOW }
   // 侧表也用这个时钟：认领的时间和是否残留按它算
@@ -171,11 +175,12 @@ function env(opts: {
   const collectViews = () => collectGlobalViews({ store, decisions, cache, ignores, checkups, registry, memoryRoot: root, now: () => clock.now })
   const writer = new ViewWriter({ memoryRoot: root, collect: collectViews, collectCheckups: () => collectCheckupView(source), now: () => clock.now, sleep: async () => {} })
   const timers = fakeTimer(clock)
+  const instructions = opts.instructions ?? noInstructions
   const suggestions = opts.suggestions === undefined ? undefined : new CheckupSuggestions({
-    store, decisions: opts.suggestions.decisions?.(decisions) ?? decisions, checkups, views: writer, now: () => clock.now, log: { info() {}, warn() {}, error() {} },
+    store, instructions, decisions: opts.suggestions.decisions?.(decisions) ?? decisions, checkups, views: writer, now: () => clock.now, log: { info() {}, warn() {}, error() {} },
   })
   const scheduler = new AutoCheckupScheduler({
-    scan: { store, registry, decisions, cache, ignores },
+    scan: { store, registry, decisions, cache, ignores, instructions },
     checkups,
     views: writer,
     status: opts.wrapStatus?.(() => collectCheckupView(source)) ?? (() => collectCheckupView(source)),
@@ -258,8 +263,8 @@ describe('自动体检调度：到期就在后台体检一次', () => {
     const at = NOW + AUTO_CHECKUP_FIRST_CHECK_MS
     expect((await e.completed())[checkupKey({ kind: 'workspace', workspacePath: DISCUSSION })]).toEqual({ startedAt: at, completedAt: at, by: 'auto' })
     expect((await e.decisions.list()).map(d => d.memoryIds)).toEqual([['mem_x', 'mem_y']])
-    // 后台没有会话投影：不查和 AGENTS.md 基线的冲突，结果带 baseline-missing；只查这一个范围，不跑跨项目重复检查
-    expect((await e.lastResultOf(checkupKey(ws(DISCUSSION))))?.notes).toEqual([{ code: 'baseline-missing' }])
+    // 这个项目没有指令文件，结果不带说明；只查这一个范围，不跑跨项目重复检查
+    expect((await e.lastResultOf(checkupKey(ws(DISCUSSION))))?.notes).toEqual([])
     expect(await e.lastResultOf(checkupKey({ kind: 'global' }))).toBeUndefined()
 
     const view = await e.readView()
@@ -472,7 +477,7 @@ describe('自动体检调度：按范围认领', () => {
     e.clock.now = autoStartedAt + 1000
     const agent = executeScan({}, {
       store: e.store, registry, decisions: e.decisions, cache: e.cache, checkups: e.checkups,
-      host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: () => agentLlm, baselineOf: () => null }, now: () => e.clock.now,
+      instructions: noInstructions, host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: () => agentLlm }, now: () => e.clock.now,
     }, fakeExec())
     await agentStarted
     expect(await e.checkups.isInProgress({ kind: 'global' })).toBe(true)
@@ -585,7 +590,7 @@ describe('自动体检调度：失败与重试', () => {
     const manualAt = e.clock.now
     await executeScan({ layers: 'full' }, {
       store: e.store, registry, decisions: e.decisions, cache: e.cache, checkups: e.checkups,
-      host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: () => ({ complete: async () => '{"findings":[]}' }), baselineOf: () => null }, now: () => e.clock.now,
+      instructions: noInstructions, host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: () => ({ complete: async () => '{"findings":[]}' }) }, now: () => e.clock.now,
     }, fakeExec(), { by: 'manual', isGlobalOnly: true })
     await e.advance(AUTO_CHECKUP_INTERVAL_MS)
     expect((await e.readView()).scopes[0]).toMatchObject({ failure: null, lastCheckupAt: manualAt, nextCheckupAt: manualAt + DAY, isDue: false })
@@ -638,7 +643,7 @@ describe('自动体检调度：上次体检的兜底（没有完成记录时取�
     })
     await executeScan({ layers: 'full' }, {
       store: e.store, registry, decisions: e.decisions, cache, checkups: e.checkups,
-      host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: () => ({ complete: async () => '{"findings":[]}' }), baselineOf: () => null }, now: () => e.clock.now,
+      instructions: noInstructions, host: { contextOf: async () => ({ workspacePath: undefined }), llmOf: () => ({ complete: async () => '{"findings":[]}' }) }, now: () => e.clock.now,
     }, { ...fakeExec(), signal: controller.signal }, { by: 'auto', isGlobalOnly: true }).catch(() => undefined)
     expect(await e.cache.list()).toHaveLength(1)
     expect(await e.completed()).toEqual({})
@@ -816,6 +821,30 @@ describe('自动体检调度：体检之后生成处理建议', () => {
     await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
     expect((await e.readView()).scopes[0]).toMatchObject({ failure: null, isDue: false, lastResult: expect.objectContaining({ by: 'auto' }) })
     expect((await e.decisions.list())[0]?.suggestion).toBeUndefined()
+  })
+
+  it('到期项目的记忆和这个项目的指令文件矛盾：后台体检照样查出来，接着生成建议；发给模型的是这个项目的指令文件', async () => {
+    const PROJECT_TEXT = '全局：注释用英文\nA：包管理用 pnpm'
+    const llm = fakeHostLlm({
+      // 指令文件里有那句、记忆列表里有那条记忆，就报这条记忆和指令文件矛盾
+      findings: req => JSON.stringify(req.messages).includes('包管理用 pnpm')
+        ? [{ type: 'conflict', memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理用 pnpm', summary: '和指令文件矛盾', suggestedAction: '请裁决' }]
+        : [],
+      suggestion: () => JSON.stringify({ action: 'delete', reason: '指令文件已经规定' }),
+    })
+    const e = env({ llm, suggestions: {}, instructions: instructionsOf({ [DISCUSSION]: PROJECT_TEXT }) })
+    await e.store.create(record({ id: 'mem_v', name: '包管理', content: '包管理用 npm', scope: 'workspace', workspacePath: DISCUSSION }))
+    await e.set(ws(DISCUSSION), 1)
+    e.scheduler.start()
+    await e.advance(AUTO_CHECKUP_FIRST_CHECK_MS)
+
+    const [entry] = await e.decisions.list()
+    expect(entry).toMatchObject({ memoryIds: ['mem_v'], baselineRef: 'AGENTS.md：包管理用 pnpm' })
+    expect(entry?.suggestion).toMatchObject({ action: 'delete', reason: '指令文件已经规定' })
+    expect(entry?.suggestion?.basis?.baseline).toMatchObject({ workspace: DISCUSSION })
+    expect(e.llm.requests).toHaveLength(2)
+    expect(JSON.stringify(e.llm.requests[1]!.messages)).toContain('A：包管理用 pnpm')
+    expect((await e.lastResultOf(checkupKey(ws(DISCUSSION))))?.notes).toEqual([])
   })
 
   it('插件卸载时不等生成建议的模型调用结束：不写建议，体检的完成记录照留', async () => {

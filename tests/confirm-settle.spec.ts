@@ -10,6 +10,7 @@ import { SnapshotStore } from '../src/governance/snapshots.ts'
 import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
 import { executeConfirm } from '../src/tools/confirm.ts'
 import { record } from './helpers/record.ts'
+import { noInstructions } from './helpers/instructions.ts'
 
 // 删一方的裁决（keep-left / keep-right）不再从账本删条目：标 settled 并记下删败方前的快照 id，供撤销。
 // 真实临时目录：FileTable + .state 侧表。
@@ -24,7 +25,7 @@ function env() {
   const decisions = new PendingDecisionsStore(sidecar.pending)
   const snapshots = new SnapshotStore(sidecar.snapshots)
   const resolve = (decisionId: string, verdict: 'keep-left' | 'keep-right' | 'keep-both') =>
-    executeConfirm({ action: 'resolve', decisionId, verdict }, { workspacePath: undefined }, { store, decisions, snapshots, now: () => 5000 })
+    executeConfirm({ action: 'resolve', decisionId, verdict }, { workspacePath: undefined }, { instructions: noInstructions, store, decisions, snapshots, now: () => 5000 })
   return { store, decisions, snapshots, resolve }
 }
 

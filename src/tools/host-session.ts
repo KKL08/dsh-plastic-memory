@@ -41,8 +41,6 @@ export interface HostSession {
   llmOf(exec: ToolRunContext): SemanticLlm | null
   /** 无会话时（自动体检）用宿主的默认模型选择，每次现读。 */
   defaultLlm(): SemanticLlm | null
-  /** 触发调用的会话当前生效的 AGENTS.md 指令正文；没有或读不到为 null。 */
-  baselineOf(exec: ToolRunContext): readonly string[] | null
   modeOf(session: Session): SaveDelegation['mode']
   /** 会话是否已过了第 1 轮（重启续上或插件重载）。 */
   hasEarlierTurns(session: object): boolean

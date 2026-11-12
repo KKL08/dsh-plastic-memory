@@ -264,7 +264,7 @@ export function PendingTab({ nav, session, scope, workspacePath, seen: visitSeen
               const tail = level === 'advice' ? ignoredBlock : null
               return group.length === 0 && tail === null ? null : (
                 <PendingGroup key={level} level={level} count={group.filter(row => row.isItem).length}>
-                  {level === 'your-call' ? <SuggestAll items={items.filter(item => isMissingSuggestion(item, session))} session={session} onCurrent={setBatchCurrent} /> : null}
+                  {level === 'your-call' ? <SuggestAll items={items.filter(item => isMissingSuggestion(item))} session={session} onCurrent={setBatchCurrent} /> : null}
                   {shown.map(row => (
                     <FlashRow
                       key={row.key}

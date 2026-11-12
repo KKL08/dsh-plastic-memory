@@ -24,6 +24,7 @@ import { AdviceIgnoreStore } from '../src/governance/advice-ignores.ts'
 import { CheckupRecordStore } from '../src/governance/checkup-records.ts'
 import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
 import { memorySnapshotSchema, pendingDecisionSchema, scanCacheSchema, adviceIgnoreSchema } from '../src/governance/schema.ts'
+import { noInstructions } from './helpers/instructions.ts'
 
 // Names mixing filesystem-forbidden chars, whitespace and CJK, long enough to
 // exercise the 40-char truncation path in slugifyName.
@@ -250,7 +251,7 @@ describe('子 agent 记忆的生命周期', () => {
       checkups: new CheckupRecordStore(sidecar.checkups), autoCheckups: new AutoCheckupSettingStore(sidecar.autoCheckups), ignores: new AdviceIgnoreStore(sidecar.adviceIgnores),
       registry: buildTypeRegistry({ template: 'coding', customTypes: {} }), agentsMd: createAgentsMdWriter(join(memoryRoot, 'AGENTS.md')),
       views: { request: async () => undefined, rewriteAll: async () => undefined, collectViews: async () => { throw new Error('不收集视图') }, requestCheckups: async () => {} },
-      host: { contextOf: async () => ({ workspacePath: ws, delegationDepth: 0, session: { id: 'sess-main' } }), llmOf: () => null, baselineOf: () => null },
+      instructions: noInstructions, host: { contextOf: async () => ({ workspacePath: ws, delegationDepth: 0, session: { id: 'sess-main' } }), llmOf: () => null },
       
     })
     const session = (id: string, header: { delegationDepth?: number; parentSession?: string } = {}) =>

@@ -88,8 +88,6 @@ export interface CheckupRunInput {
   target: Scope | { kind: 'all' }
   by: 'manual' | 'auto'
   llm: SemanticLlm
-  /** 当前会话的 AGENTS.md/CLAUDE.md 基线；null = 没有（自动体检无会话）。 */
-  baseline: readonly string[] | null
   /** 当前会话的 workspace；缺省 = 没有当前项目。 */
   currentWorkspace?: string
   /** 调用方的取消信号（插件卸载）；认领被接手时这次体检另有自己的取消。 */
@@ -171,7 +169,7 @@ export async function runCheckup(input: CheckupRunInput, deps: CheckupRunDeps): 
     // 开始时间是核心开读的时刻：认领、收集视图花的时间不算，完成记录才不会被这段时间里开跑的 agent 体检挡掉
     startedAt = deps.now()
     const result = await runScan({
-      target: scanTarget, layers: 'full', llm: input.llm, baseline: input.baseline,
+      target: scanTarget, layers: 'full', llm: input.llm,
       ...(input.currentWorkspace !== undefined ? { currentWorkspace: input.currentWorkspace } : {}),
       signal, startedAt,
     }, { ...deps.scan, checkups: deps.checkups, now: deps.now }, {
