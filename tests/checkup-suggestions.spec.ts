@@ -83,7 +83,10 @@ function fakeModel(conflicts: Array<[string, string] | [string]>, suggest: (user
   return { llm, suggestCalls, scanCalls: () => scanCalls, release: () => release?.(), started: () => isStarted }
 }
 
-function env(opts: { readEvent?: ReadEventFn } = {}) {
+/** 测试里自动体检一次补几条（产品缺省见 AUTO_SUGGESTION_LIMIT）。 */
+const LIMIT = 2
+
+function env(opts: { readEvent?: ReadEventFn; autoLimit?: number } = {}) {
   const clock = { now: NOW }
   const sidecar = new SidecarStore({ root, schemas, now: () => clock.now, log: quietLog })
   const store = new MemoryStore(new FileTable({ root, stats: sidecar.recallStats, now: () => clock.now }), quietLog, sidecar.recallStats)
@@ -104,7 +107,7 @@ function env(opts: { readEvent?: ReadEventFn } = {}) {
   })
   const warnings: unknown[][] = []
   const log = { info() {}, error() {}, warn: (...args: unknown[]) => { warnings.push(args) } }
-  suggestions = new CheckupSuggestions({ store, decisions, checkups, views: writer, now: () => clock.now, log, ...(opts.readEvent !== undefined ? { getReadEvent: () => opts.readEvent! } : {}) })
+  suggestions = new CheckupSuggestions({ store, decisions, checkups, views: writer, now: () => clock.now, log, ...(opts.readEvent !== undefined ? { getReadEvent: () => opts.readEvent! } : {}), ...(opts.autoLimit !== undefined ? { autoLimit: opts.autoLimit } : {}) })
   const heartbeat = () => () => {}
   /** 一次体检（手动缺省），做完后接着跑后续段；返回体检结果和后续段（不等它）。 */
   const checkup = async (input: Partial<CheckupRunInput> & Pick<CheckupRunInput, 'llm'>, signal?: AbortSignal) => {
@@ -170,9 +173,10 @@ describe('手动体检之后补上建议', () => {
   })
 
   it('手动体检不设条数上限，先旧后新；含高危密钥的不发给模型', async () => {
-    const e = env()
+    // 每补一条都重写一次待处理视图，冲突多了测试就慢：自动体检的名额设成 2，4 对就够看出手动不受它限制
+    const e = env({ autoLimit: LIMIT })
     const pairs: Array<[string, string]> = []
-    for (let i = 0; i < AUTO_SUGGESTION_LIMIT + 2; i++) {
+    for (let i = 0; i < LIMIT + 2; i++) {
       const pair: [string, string] = [`mem_${i}a`, `mem_${i}b`]
       await seedPair(e, ...pair)
       // 先挂账的算旧：按 i 的顺序挂
@@ -182,10 +186,10 @@ describe('手动体检之后补上建议', () => {
     await seedPair(e, 'mem_sa', 'mem_sb', { contentA: `mem_sa：token ${FAKE_SECRET.github}` })
     const m = fakeModel([...pairs, ['mem_sa', 'mem_sb']])
     await (await e.checkup({ llm: m.llm })).followUp
-    expect(m.suggestCalls).toHaveLength(AUTO_SUGGESTION_LIMIT + 2)
+    expect(m.suggestCalls).toHaveLength(LIMIT + 2)
     expect(m.suggestCalls.map(u => /mem_(\d+)a/.exec(u)?.[1])).toEqual(pairs.map((_, i) => String(i)))
     const items = await e.conflictItems()
-    expect(items.filter(i => i.suggestion !== undefined)).toHaveLength(AUTO_SUGGESTION_LIMIT + 2)
+    expect(items.filter(i => i.suggestion !== undefined)).toHaveLength(LIMIT + 2)
     expect(items.find(i => i.left?.id === 'mem_sa')?.noSuggestion).toEqual({ code: 'has-secret' })
   })
 
@@ -415,10 +419,11 @@ describe('体检之后的建议也回查出处', () => {
 })
 
 describe('自动体检之后补上建议', () => {
-  it('一次最多 10 条，先旧后新；没轮到的记「名额用完」，不调用模型、不算尝试；下一次自动体检接着补', async () => {
-    const e = env()
+  it('一次有名额上限（缺省 10 条），先旧后新；没轮到的记「名额用完」，不调用模型、不算尝试；下一次自动体检接着补', async () => {
+    expect(AUTO_SUGGESTION_LIMIT).toBe(10)
+    const e = env({ autoLimit: LIMIT })
     const pairs: Array<[string, string]> = []
-    for (let i = 0; i < AUTO_SUGGESTION_LIMIT + 2; i++) {
+    for (let i = 0; i < LIMIT + 2; i++) {
       const pair: [string, string] = [`mem_${String(i).padStart(2, '0')}a`, `mem_${String(i).padStart(2, '0')}b`]
       await seedPair(e, ...pair)
       await e.decisions.upsert({ memoryIds: pair, summary: '说法矛盾' }, NOW - 1000 + i)
@@ -426,15 +431,15 @@ describe('自动体检之后补上建议', () => {
     }
     const m = fakeModel(pairs)
     await (await e.checkup({ llm: m.llm, target: GLOBAL as Scope, by: 'auto' })).followUp
-    expect(m.suggestCalls).toHaveLength(AUTO_SUGGESTION_LIMIT)
+    expect(m.suggestCalls).toHaveLength(LIMIT)
     const items = await e.conflictItems()
-    expect(items.slice(0, AUTO_SUGGESTION_LIMIT).every(i => i.suggestion !== undefined)).toBe(true)
-    expect(items.slice(AUTO_SUGGESTION_LIMIT).map(i => i.noSuggestion)).toEqual([{ code: 'quota-exhausted' }, { code: 'quota-exhausted' }])
-    const late = await e.entryOf(...pairs[AUTO_SUGGESTION_LIMIT]!)
+    expect(items.slice(0, LIMIT).every(i => i.suggestion !== undefined)).toBe(true)
+    expect(items.slice(LIMIT).map(i => i.noSuggestion)).toEqual([{ code: 'quota-exhausted' }, { code: 'quota-exhausted' }])
+    const late = await e.entryOf(...pairs[LIMIT]!)
     expect(late?.suggestionAttempts).toBeUndefined()
 
     await (await e.checkup({ llm: m.llm, target: GLOBAL as Scope, by: 'auto' })).followUp
-    expect(m.suggestCalls).toHaveLength(AUTO_SUGGESTION_LIMIT + 2)
+    expect(m.suggestCalls).toHaveLength(LIMIT + 2)
     expect((await e.conflictItems()).every(i => i.suggestion !== undefined)).toBe(true)
   })
 })

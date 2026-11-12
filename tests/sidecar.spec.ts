@@ -281,6 +281,22 @@ describe('SidecarStore：四张表落 .state/', () => {
     expect(warns.some(w => w.includes('mem_bad'))).toBe(true)
   })
 
+  it.each([
+    ['数组', '[1, 2]'],
+    ['字符串', '"text"'],
+    ['数字', '42'],
+    ['null', 'null'],
+  ])('recall-stats.json 是合法 JSON 但不是对象（%s）：按空表读、不抛，记一条日志', async (_label, text) => {
+    const { warns, log } = makeLog()
+    const s = new SidecarStore({ root, schemas, log })
+    await mkdir(state, { recursive: true })
+    await writeFile(join(state, RECALL_STATS_FILE), text, 'utf8')
+    expect(await s.recallStats.list()).toEqual([])
+    expect(warns).toHaveLength(1)
+    expect(warns[0]).toContain(RECALL_STATS_FILE)
+    expect(warns[0]).toContain('不是对象')
+  })
+
   it('put 的键必须等于值的 id（list 从文件内容还原键）', async () => {
     const s = new SidecarStore({ root, schemas })
     await expect(s.snapshots.put('snap_a', snap('snap_b'))).rejects.toThrow()

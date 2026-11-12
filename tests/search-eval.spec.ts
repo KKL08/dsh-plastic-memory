@@ -114,9 +114,12 @@ describe('评估语料本身', () => {
 })
 
 describe('不变量（与权重无关）', { timeout: 60_000 }, () => {
-  it('id 直达：以任一条记忆的 id（前后带空白也行）为查询，该条排第一', async () => {
+  it('id 直达：以一条记忆的 id（前后带空白也行）为查询，该条排第一', async () => {
     useTier('bigram')   // id 不含汉字，两档同一分词器
-    for (const r of EVAL_RECORDS) {
+    // 直达是和内容无关的确定路径，抽首、中、尾三条，外加 id 被别条正文提到的那条（提到它的不能排到它前面）
+    const mentioned = EVAL_RECORDS.filter(r => EVAL_RECORDS.some(o => o !== r && o.content.includes(r.id))).slice(0, 1)
+    const sample = new Set([EVAL_RECORDS[0]!, EVAL_RECORDS[EVAL_RECORDS.length >> 1]!, EVAL_RECORDS[EVAL_RECORDS.length - 1]!, ...mentioned])
+    for (const r of sample) {
       expect((await search(` ${r.id} `, 3)).hits[0]?.id).toBe(r.id)
     }
   })

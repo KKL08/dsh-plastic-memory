@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { fakeExec } from './helpers/exec.ts'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -43,11 +43,17 @@ import { AutoCheckupSettingStore } from '../src/governance/auto-checkups.ts'
 import { defaultJiebaLoader } from '../src/search/jieba-segmenter.ts'
 
 // 进程边界的观察：fsTrace.on 期间记下插件对 node:fs、node:fs/promises 的每次调用（函数名 + 第一个参数）。平时原样透传。
-const { fsTrace } = vi.hoisted(() => ({ fsTrace: { on: false, calls: [] as string[] } }))
+// fsTrace.hold：给了就先问它一次（参数形如 `readFile(<路径>)`），返回 promise 的那次 node:fs/promises 调用等它落定再执行。
+const { fsTrace } = vi.hoisted(() => ({ fsTrace: { on: false, calls: [] as string[], hold: undefined as ((call: string) => Promise<void> | undefined) | undefined } }))
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<Record<string, unknown>>()
   return Object.fromEntries(Object.entries(actual).map(([key, value]) => [key, typeof value === 'function' && /^[a-z]/.test(key)
-    ? (...args: unknown[]) => { if (fsTrace.on) fsTrace.calls.push(`fs/promises.${key}(${String(args[0])})`); return (value as (...a: unknown[]) => unknown)(...args) }
+    ? (...args: unknown[]) => {
+      if (fsTrace.on) fsTrace.calls.push(`fs/promises.${key}(${String(args[0])})`)
+      const call = () => (value as (...a: unknown[]) => unknown)(...args)
+      const held = fsTrace.hold?.(`${key}(${String(args[0])})`)
+      return held === undefined ? call() : held.then(call)
+    }
     : value]))
 })
 vi.mock('node:fs', async importOriginal => {
@@ -186,6 +192,7 @@ async function makeTmpRoot(): Promise<string> {
   return dir
 }
 afterEach(async () => {
+  fsTrace.hold = undefined
   await Promise.all(liveCtxs.splice(0).map(dispose => dispose()))
   await Promise.all(tmpDirs.splice(0).map(d => rm(d, { recursive: true, force: true })))
 })
@@ -666,6 +673,115 @@ describe('自动体检接线', () => {
     expect(await scan(agentOn('sess-b', 'deepseek-v4-pro'))).toMatchObject({ ok: true, cmd: 'scan' })
     expect(ctx.llmRequests.length).toBeGreaterThan(before)
     expect(ctx.llmRequests.slice(before).every(r => (r as { model?: string }).model === 'deepseek-v4-pro')).toBe(true)
+  })
+})
+
+/** 体检后续段：手动体检之后在后台给新冲突生成处理建议；插件卸载时取消它，视图文件里不留「正在生成」。 */
+describe('体检后续段接线', () => {
+  type CommandDef = { handler(inv: { rawInput: string; agent: unknown }): Promise<{ text?: string }> }
+  const routed = { session: { header: { id: 'sess-x' }, seq: 1, requestHeader: () => undefined }, options: { provider: 'deepseek', model: 'deepseek-v4-flash' } }
+  const conflictFound: StreamChunk[] = [
+    { type: 'text-delta', index: 0, text: JSON.stringify({ findings: [{ type: 'conflict', memoryIds: ['mem_a', 'mem_b'], summary: '包管理器矛盾', suggestedAction: '裁决' }] }) },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+
+  /** 两条互相矛盾的全局记忆；llm 缺省用替身 ctx 的脚本化假模型，给了就换成它。 */
+  async function boot(llm?: { stream(req: unknown): AsyncIterable<StreamChunk> }) {
+    const memoryRoot = await makeTmpRoot()
+    await mkdir(join(memoryRoot, 'global'), { recursive: true })
+    for (const [id, content] of [['mem_a', '用 pnpm'], ['mem_b', '用 npm']] as const) {
+      await writeFile(join(memoryRoot, 'global', `${id}.md`), encodeRecord(record({ id, name: id, content }), {}), 'utf8')
+    }
+    const defs: CommandDef[] = []
+    const ctx = mockCtx({ commands: { register: (def) => { defs.push(def as CommandDef); return () => {} } } })
+    const get = (name: string) => (name === 'llm' && llm !== undefined ? llm : ctx.get(name))
+    await apply({ ...ctx, get, logger: { info() {}, warn() {}, error() {} } } as never, new Config({ memoryRoot } as never))
+    const scanGlobal = async () => JSON.parse((await defs[0]!.handler({ rawInput: ' scan {"layer":{"kind":"global"}}', agent: routed })).text!) as Record<string, unknown>
+    const pendingView = async () => pendingViewSchema.parse(JSON.parse(await readFile(join(memoryRoot, GUI_VIEW_DIR, GUI_VIEW_FILES.pending), 'utf8')))
+    const ledger = () => new PendingDecisionsStore(sidecarAt(memoryRoot).pending).list()
+    return { ctx, scanGlobal, pendingView, ledger }
+  }
+
+  it('手动体检扫出横向冲突后，后续段在后台用同一个模型生成建议：账本条目记上建议，待处理视图带着它', async () => {
+    const t = await boot()
+    t.ctx.llmScript.push(conflictFound, [
+      { type: 'text-delta', index: 0, text: '{"action":"keep-a","reason":"A 是明确说过的"}' },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ])
+    expect(await t.scanGlobal()).toMatchObject({ ok: true, cmd: 'scan' })
+    await vi.waitFor(async () => {
+      const [entry] = await t.ledger()
+      expect(entry).toMatchObject({ memoryIds: ['mem_a', 'mem_b'], suggestion: { action: 'keep-a' } })
+      const item = (await t.pendingView()).items.find(i => i.kind === 'conflict-horizontal')
+      expect(item).toMatchObject({ decisionId: entry!.id, suggestion: { action: 'keep-a' } })
+      expect(item).not.toHaveProperty('isGeneratingSuggestion')
+    })
+    expect(t.ctx.llmRequests).toHaveLength(2)
+    expect(t.ctx.llmRequests[1]).toMatchObject({ provider: 'deepseek', model: 'deepseek-v4-flash' })
+  })
+
+  it('建议生成到一半（模型调用一直不返回）时卸载插件：卸载照常完成，落盘的待处理视图里不留「正在生成」标记', async () => {
+    let calls = 0
+    let markStarted!: () => void
+    const suggestionStarted = new Promise<void>(resolve => { markStarted = resolve })
+    // 第一次调用是体检的内容检查，回一条横向冲突；之后是生成建议，挂住不返回，也不理取消信号
+    const llm = {
+      async *stream(): AsyncIterable<StreamChunk> {
+        if (++calls === 1) {
+          yield* conflictFound
+          return
+        }
+        markStarted()
+        await new Promise<never>(() => {})
+      },
+    }
+    const t = await boot(llm)
+    expect(await t.scanGlobal()).toMatchObject({ ok: true, cmd: 'scan' })
+    await suggestionStarted
+    // 前提：生成开始前已写出带标记的视图
+    expect((await t.pendingView()).items.find(i => i.kind === 'conflict-horizontal')).toMatchObject({ isGeneratingSuggestion: true })
+
+    await t.ctx.dispose()
+
+    const items = (await t.pendingView()).items
+    expect(items.map(i => i.kind)).toContain('conflict-horizontal')
+    expect(items.filter(i => 'isGeneratingSuggestion' in i)).toEqual([])
+  })
+
+  it('卸载时后续段正卡在读账本（读盘不受取消管，收不了尾）：卸载不等它，自己清掉标记、重写待处理视图，文件里不留「正在生成」', async () => {
+    const t = await boot()
+    t.ctx.llmScript.push(conflictFound)
+    expect(await t.scanGlobal()).toMatchObject({ ok: true, cmd: 'scan' })
+    // 体检返回后，待处理视图的下一次替换是后续段写出标记；紧接着它重读这条冲突的账本文件，在这里挂住（只挂这一次）
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let markHeld!: () => void
+    const held = new Promise<void>(resolve => { markHeld = resolve })
+    let isArmed = false
+    const ledgerDir = `${join(STATE_DIR, 'pending')}${sep}`
+    fsTrace.hold = call => {
+      if (call.startsWith('rename(') && call.includes(`${GUI_VIEW_FILES.pending}.tmp-`)) isArmed = true
+      else if (isArmed && call.startsWith('readFile(') && call.includes(ledgerDir) && call.endsWith('.json)')) {
+        isArmed = false
+        fsTrace.hold = undefined
+        markHeld()
+        return gate
+      }
+      return undefined
+    }
+    try {
+      await held
+      // 前提：后续段挂住时，盘上的视图带着标记
+      expect((await t.pendingView()).items.find(i => i.kind === 'conflict-horizontal')).toMatchObject({ isGeneratingSuggestion: true })
+
+      await t.ctx.dispose()
+
+      const items = (await t.pendingView()).items
+      expect(items.map(i => i.kind)).toContain('conflict-horizontal')
+      expect(items.filter(i => 'isGeneratingSuggestion' in i)).toEqual([])
+    } finally {
+      release()
+    }
   })
 })
 
