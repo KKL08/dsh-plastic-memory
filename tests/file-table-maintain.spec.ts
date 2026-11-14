@@ -279,6 +279,8 @@ describe('维护点动作 ④：手建 / 手编文件回写', () => {
 
   it('.archive/ 里含保留键的文件照常回写：保留键去掉，active 归一成 deleted', async () => {
     const path = await writeRaw(archiveOf(wsDir()), 'hand.md', '---\nname: 归档的手写\ntype: preference\nscope: global\n---\n\n正文\n')
+    // 没有 deletedAt 的归档文件按 mtime 算保留期：mtime 跟测试时钟走，平移时钟下也不会被当成过期清掉
+    await utimes(path, new Date(), new Date())
     await ensureDir(wsDir(), WS)
     const { table } = open()
     await table.maintain([wsDir()])
