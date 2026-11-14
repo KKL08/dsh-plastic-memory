@@ -228,6 +228,27 @@ describe('匹配模式 match', () => {
     expect((await run(store, '部署流程 回滚', { match: 'all', limit: 1 })).hits.map(h => h.id)).toEqual(['mem_main'])
   })
 
+  it('all 模式下 scope、types 照常生效：只在限定的范围和类型里找全命中', async () => {
+    const store = await memStore([
+      { id: 'mem_g_k', scope: 'global', type: 'knowledge', content: '部署流程 回滚' },
+      { id: 'mem_g_p', scope: 'global', type: 'preference', content: '部署流程 回滚' },
+      { id: 'mem_w_k', scope: 'workspace', workspacePath: '/proj', type: 'knowledge', content: '部署流程 回滚' },
+      { id: 'mem_w_p', scope: 'workspace', workspacePath: '/proj', type: 'preference', content: '部署流程 回滚' },
+      { id: 'mem_w_half', scope: 'workspace', workspacePath: '/proj', type: 'preference', content: '部署流程' },
+      { id: 'mem_other', scope: 'workspace', workspacePath: '/other', type: 'preference', content: '部署流程 回滚' },
+    ])
+    const deps: SearchToolDeps = { store, registry, host: { contextOf: async () => ({ workspacePath: '/proj', session: { id: 's', lastSeq: 1 } }) } }
+    const ids = async (extra: Partial<Parameters<typeof executeSearch>[0]>) =>
+      (await executeSearch({ query: '部署流程 回滚', match: 'all', ...extra }, fakeExec(), deps)).hits.map(h => h.id).sort()
+
+    expect(await ids({})).toEqual(['mem_g_k', 'mem_g_p', 'mem_w_k', 'mem_w_p'])
+    expect(await ids({ scope: 'workspace' })).toEqual(['mem_w_k', 'mem_w_p'])
+    expect(await ids({ scope: 'global' })).toEqual(['mem_g_k', 'mem_g_p'])
+    expect(await ids({ types: ['preference'] })).toEqual(['mem_g_p', 'mem_w_p'])
+    expect(await ids({ scope: 'workspace', types: ['preference'] })).toEqual(['mem_w_p'])
+    expect(await ids({ scope: 'global', types: ['knowledge'] })).toEqual(['mem_g_k'])
+  })
+
   it('截断说明：any 且全部结果里有非全命中才提 all；全是全命中或 all 模式不提', async () => {
     const mixed = await memStore([
       { id: 'mem_f1', content: 'alpha beta' },

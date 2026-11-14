@@ -488,6 +488,39 @@ describe('全部记忆视图', () => {
     expect(items.find(i => i.id === 'mem_sus')!.hasSecret).toBeUndefined()
   })
 
+  it('库里只有疑似密钥：待处理里没有密钥项、「必须处理」为 0，健康不判红；同库加一条高危密钥才进必须处理、判红', async () => {
+    const h = harness()
+    await h.store.create(g({ id: 'mem_pwd', name: '测试库', content: '测试库 password: Hunter2-2026' }))
+    await h.store.create(w({ id: 'mem_key', name: '沙箱', content: '沙箱 api_key: TESTONLY0000000000000000' }))
+
+    const { pending, health, library } = await h.views()
+    expect(pending.items.filter(i => i.level === 'must-fix')).toEqual([])
+    expect(pending.levelCounts['must-fix']).toBe(0)
+    expect(pending.dot).not.toBe('red')
+    expect(library.layers.flatMap(l => l.items).filter(i => i.hasSecret === true)).toEqual([])
+    expect(health.layers.map(l => [l.tier, l.gate.secret])).toEqual([['green', false], ['green', false]])
+    const tool = await h.health()
+    expect(tool).toMatchObject({ kind: 'single', gate: { secret: false } })
+    expect(tool.kind === 'single' && [tool.tier, tool.globalSecretAlert, tool.recommendationKinds.filter(k => k.includes('secret'))]).toEqual(['green', 0, []])
+
+    await h.store.create(w({ id: 'mem_crit', name: '部署凭证', content: `token ${FAKE_SECRET.sk}` }))
+    const after = await h.views()
+    expect(after.pending.items.filter(i => i.level === 'must-fix').map(i => i.kind === 'secret' && i.memory.id)).toEqual(['mem_crit'])
+    expect(after.pending.dot).toBe('red')
+    expect(after.health.layers.map(l => [l.tier, l.gate.secret])).toEqual([['green', false], ['red', true]])
+    expect(await h.health()).toMatchObject({ gate: { secret: true }, tier: 'red' })
+  })
+
+  it('读不出的文件名里带高危密钥：待处理项的相对路径和报错里遮成占位', async () => {
+    const h = harness()
+    await h.store.create(w({ id: 'mem_a', name: 'A', content: '用 pnpm' }))
+    await writeFile(join(wsDir(), `部署 ${FAKE_SECRET.sk}.md`), '---\nname: [\n---\n正文\n')
+    const { pending } = await h.views()
+    const bad = pending.items.find(i => i.kind === 'unreadable-file')
+    expect(bad).toMatchObject({ relativePath: `${workspaceDirName(WS)}/部署 ${SECRET_MASK}.md` })
+    expect(bad!.kind === 'unreadable-file' && bad!.error).not.toContain(FAKE_SECRET.sk)
+  })
+
   it('同 id 在 global 与本项目各一份：删掉 global 那份后本项目这份照常列出；删掉的那份进最近删除，不算同 id 副本', async () => {
     const h = harness()
     await h.store.create(g({ id: 'mem_same', name: '全局那份' }))
