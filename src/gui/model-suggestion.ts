@@ -363,7 +363,8 @@ function verticalSystemPrompt(hasSource: boolean): string {
     '指令文件已经覆盖了这条记忆，或这条记忆已经过时：选 delete。',
     '两边讲的是不同的事，放在一起并不矛盾：选 keep-both。',
     `两边直接矛盾，从${hasSource ? '内容和出处' : '内容'}看不出该以哪边为准：选 unsure，reason 写清为什么分不出、用户需要确认什么。`,
-    'reason 用一句话向用户说明为什么这样处理，只依据上面给出的输入，用记忆的语言写。',
+    'reason 先用一句话向用户说明为什么这样处理，只依据上面给出的输入，用记忆的语言写。',
+    `这条记忆${hasSource ? '或出处' : ''}里写明做法后来改了（修改日期可作佐证），指令文件里相关的描述还是改之前的：以这条记忆为准，结论在 rewrite、keep-both、unsure 里选。reason 的第二句建议用户同步更新指令文件里的这段描述，点明文件名和描述的是哪件事，例如「建议同步更新 AGENTS.md 里关于 X 的描述」。改写稿只写现在的做法，指令文件过时这件事只写在 reason 里。`,
     VERTICAL_DRAFT_STEP,
     '选 delete、keep-both、unsure 时只给 action 和 reason。',
   ]
