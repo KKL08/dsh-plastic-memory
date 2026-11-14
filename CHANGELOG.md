@@ -73,6 +73,8 @@ All notable changes to this project are documented here. The format follows
   slots the plugin uses and shows the plugin's own description on the plugin
   page. Older hosts refuse to install or start this release; stay on
   0.1.1-beta.5 there.
+- The plugin page shows a short introduction (what the plugin does, its
+  design principles and how to get started) instead of the whole README.
 - Memories are read from their files on demand; the plugin keeps no copy of
   the library in memory and no longer loads it at start-up.
   `pnpm bench:storage` measures storage timings on your machine.
@@ -182,8 +184,6 @@ All notable changes to this project are documented here. The format follows
   verdict is now remembered until either side changes, conflicts carried over
   from 0.1.x included, and a conflict is listed only once.
 - Checkup findings named memories by internal ids such as `mem_xxx`.
-- On DeepSeek Harness v0.2.2-rc.1 the plugin page showed the README's images
-  as broken; they now ship with the package.
 
 ### Removed
 - The `commitment` and `person` types: Office now adds only `decision`, which

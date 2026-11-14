@@ -1,6 +1,7 @@
 {
   "meta": {
     "title": "可塑性记忆",
-    "description": "自带治理的跨会话记忆插件。"
+    "description": "一款集记忆的自动沉淀、按需唤起与质量维护于一体的记忆插件。",
+    "detail": "locale/detail.zh.md"
   }
 }

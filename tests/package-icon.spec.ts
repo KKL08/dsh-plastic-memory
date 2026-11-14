@@ -26,22 +26,32 @@ describe('插件图标', () => {
   })
 })
 
-// 宿主的插件管理页把 README 渲染成插件详情，相对路径的图片从已安装的包里读：没随包发布就是一张裂图。
-describe('README 里的本地图片', () => {
-  const images = ['README.md', 'README.en.md'].flatMap(file =>
-    [...readFileSync(file, 'utf8').matchAll(/!\[[^\]]*\]\(([^)\s]+)\)/g)].map(m => m[1]!).filter(src => !/^[a-z]+:/i.test(src)))
-
-  it('README 引用了本地图片（防止正则失效后下一条空过）', () => {
-    expect(images.length).toBeGreaterThan(0)
+// 插件页详情读 locale/<语言>.json 的 meta.detail 指向的 Markdown，各语言最后回退到英文，再回退到 README。
+// 中英文都指向随包发布的文档，插件页就不会显示 README；文档里的相对路径图片从已安装的包里读，没随包发布就是裂图。
+describe('插件页详情文档', () => {
+  const docs = ['en', 'zh'].map(lang => {
+    const meta = (JSON.parse(readFileSync(`locale/${lang}.json`, 'utf8')) as { meta: { detail?: string } }).meta
+    return { lang, detail: meta.detail }
   })
 
-  it('每张都在两份发布清单里', () => {
+  it('中英文都声明了 meta.detail，指向 locale/ 下存在的 Markdown 文件', () => {
+    for (const { lang, detail } of docs) {
+      expect(detail, lang).toMatch(/^locale\/[^/]+\.md$/)
+      expect(statSync(detail!).isFile(), lang).toBe(true)
+    }
+    expect(pkg.files).toContain('locale')
+  })
+
+  it('文档里的本地图片都在两份发布清单里', () => {
+    const images = docs.flatMap(({ detail }) =>
+      [...readFileSync(detail!, 'utf8').matchAll(/!\[[^\]]*\]\(([^)\s]+)\)/g)].map(m => m[1]!).filter(src => !/^[a-z]+:/i.test(src)))
     const out = join(mkdtempSync(join(tmpdir(), 'pm-shape-')), 'package.json')
     execFileSync(process.execPath, ['scripts/publish-shape.cjs', 'package.json', out])
     const shaped = JSON.parse(readFileSync(out, 'utf8')) as { files: string[] }
     for (const src of images) {
-      expect(pkg.files, src).toContain(src)
-      expect(shaped.files, src).toContain(src)
+      const path = join('locale', src).replace(/\\/g, '/')
+      expect(pkg.files.some(f => path === f || path.startsWith(`${f}/`)), path).toBe(true)
+      expect(shaped.files.some(f => path === f || path.startsWith(`${f}/`)), path).toBe(true)
     }
   })
 })

@@ -9,6 +9,6 @@ trap 'rm -f "$log"' EXIT
 pnpm pack --dry-run >"$log" 2>&1 || { cat "$log"; exit 1; }
 cat "$log"
 if grep -E '^\s*(src|tests|client|docs|e2e)/' "$log"; then echo 'unexpected files in the package'; exit 1; fi
-for f in lib/index.js lib/client.js locale/en.json locale/zh.json assets/icon.svg assets/banner.jpg assets/architecture.svg assets/architecture.en.svg cordis.patch.yml README.md README.en.md; do
+for f in lib/index.js lib/client.js locale/en.json locale/zh.json locale/detail.en.md locale/detail.zh.md assets/icon.svg cordis.patch.yml README.md README.en.md; do
   grep -Eq "^\s*$f\s*$" "$log" || { echo "missing from the package: $f"; exit 1; }
 done
