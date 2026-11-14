@@ -184,6 +184,8 @@ export function SavedMemoriesCard({ sessionId, cwd, saved, now, openDetail }: Sa
   // 提升过的按全局那一份写作用域，删除、撤销、查看详情也落在全局
   const current = (item: SavedMemory): { memory: SavedMemory['memory']; promotion: InPlacePromotion | undefined } => {
     if (wroteAgentsMd.has(item.memory.id)) return { memory: item.memory, promotion: 'wrote-agents-md' }
+    // 写下（或改写前）就在全局的，谈不上提升
+    if (item.memory.scope === 'global') return { memory: item.memory, promotion: undefined }
     const live = liveCard(library.status === 'ready' ? library.data : undefined, item.memory.id, scopeOf(item.memory))
     const promotion = promotionOf(live)
     if (promotion !== 'promoted') return { memory: item.memory, promotion }

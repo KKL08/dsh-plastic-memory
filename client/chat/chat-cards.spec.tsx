@@ -1445,6 +1445,18 @@ describe('交付卡：模型改写、替代已有记忆', () => {
     expect(row('mem_1').queryByRole('button', { name: '撤销修改' })).toBeNull()
   })
 
+  it('改写的是本来就在全局的记忆：不写「已提升为全局」', () => {
+    const globalBefore = { ...saved('mem_r', '改前的正文', 'global').memory, name: '改写的那条' }
+    const library: LibraryView = {
+      ...libraryWith([change({ before: globalBefore })]),
+      layers: [{ layer: { kind: 'global' }, items: [{ ...rewrite().memory }] }],
+    }
+    renderInShell(<SavedMemoriesCard sessionId="s1" cwd={WS} saved={[rewrite()]} now={NOW} openDetail={() => {}} />, createFakeGateway({ views: { library } }))
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    expect(row('mem_r').getByText('已改写')).toBeInTheDocument()
+    expect(row('mem_r').queryByText('已提升为全局')).toBeNull()
+  })
+
   it('「撤销修改」按这次改动发 undo（不用原位确认），成功后换成「已撤销」', async () => {
     const gateway = card([rewrite()], [change()])
     fireEvent.click(screen.getByRole('button', { expanded: false }))

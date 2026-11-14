@@ -35,7 +35,9 @@ All notable changes to this project are documented here. The format follows
   conversations they came from, then proposes to merge them, keep one or keep
   both, or drafts a plan from your own words. Nothing is written until you
   adopt, and adopting can be undone. Conflicts with `AGENTS.md` / `CLAUDE.md`
-  use the same card and can be settled from any conversation.
+  use the same card and can be settled from any conversation. When the memory
+  records a later change, the suggestion also asks you to update that part of
+  the file; the plugin never edits it.
 - Suggestions cost one extra model call per new conflict after a checkup;
   automatic checkups prepare at most 10 per run, the rest get Suggest on the
   card. Memories holding a high-risk secret are never sent to the model.
