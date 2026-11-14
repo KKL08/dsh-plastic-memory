@@ -1,335 +1,127 @@
-# dsh-plastic-memory
+<div align="center">
 
 ![Plastic Memories](assets/banner.jpg)
 
+*"I'm scared. Sometimes I even think it would have been better to have none of these memories from the start. If memories didn't keep piling up, and I were just something that ran on its program, how much easier that would be." — Isla, Plastic Memories*
+
+# dsh-plastic-memory
+
+**Plastic Memories · a long-term memory plugin for DeepSeek Harness**
+
+[简体中文](README.md) · **English**
+
 ![Version](https://img.shields.io/badge/version-0.2.0--beta.1-yellow)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
-![Platform](https://img.shields.io/badge/platform-DeepSeek%20Harness%20%E2%89%A5v0.2.1--rc.2-4D6BFF)
-![Node](https://img.shields.io/badge/node-%5E22.19.0%20%7C%7C%20%E2%89%A524-339933?logo=node.js&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-DeepSeek%20Harness%20%E2%89%A5v0.2.2--rc.1-4D6BFF)
 
-[简体中文](README.md) | **English**
+[Installation](#installation) · [Getting started](#getting-started) · [Guides](#guides)
 
-*"I hope that, one day, you'll be reunited with the one you cherish." — Plastic Memories*
+</div>
 
-Interactions leave traces. Traces crystallize into memories. Memories are refined cognition that persists across a lifetime — continuously shaped until the very end.
+A long-term memory plugin for DeepSeek Harness that saves memories automatically, brings them back when needed and keeps them in good health. It notes the information worth keeping from everyday chats and tasks, offers that context in later work, and maintains the quality of what it remembers through regular health checks.
 
----
+## What it does
 
+- **Saves on its own**  
+Your habits and preferences, lessons learned, project background and workflows are noted by the model as you chat, each marked as something you said explicitly or something the model observed or inferred. Every memory is a Markdown file stored per project; when one fits every project, the plugin suggests promoting it to a global memory.
+- **Recalls when needed**  
+A new chat starts with the core memories and an index already loaded. During the chat the model searches for more relevant memories as needed, and when necessary goes back to the conversation a memory came from.
+- **Regular checkups**  
+Checkups look for duplicates, contradictions, outdated and overly long memories within a project, and between project memories, global memories and `AGENTS.md`, then give a health score and suggestions. Run one by hand or schedule automatic checkups.
+- **Always visible**  
+When a chat adds or updates memories, a card appears under the reply so you can deal with them on the spot. The whale-tail icon below the input box shows memory usage and counts; the right sidebar shows the memories brought in at the start of this chat and the ones written along the way. Problems found by a checkup light up the Memory entry at the top left, which opens the page for reviewing and handling memories.
+- **Your own setup**  
+General, Coding and Office modes are built in, and you can define your own scenes and memory types, choosing what gets remembered and how. The injection budget, source lookup and health reminder sensitivity are all adjustable on the settings page.
 
+<table>
+  <tr>
+    <td width="33%"><img src="assets/screenshots/sidebar-and-card.png" alt="Memory card in a chat and the right sidebar"></td>
+    <td width="33%"><img src="assets/screenshots/settings.png" alt="Settings page: scenes and memory types"></td>
+    <td width="33%"><img src="assets/screenshots/memory-pending.png" alt="Memory page: suggestions for conflicts and promotions"></td>
+  </tr>
+  <tr>
+    <td align="center">Chat card and right sidebar</td>
+    <td align="center">Settings page: scenes and memory types</td>
+    <td align="center">Memory page: suggestions for conflicts and promotions</td>
+  </tr>
+</table>
 
-## 💡 Inspiration
+## Design principles
 
-The name comes from the anime *Plastic Memories*. In that world, Giftias — androids with genuine consciousness — have a hard lifespan cap of **81,920 hours (~9 years and 4 months)**. When a Giftia's memory overflows without proper management and retrieval, its personality collapses irreversibly, turning it into a mindless **Wanderer**.
+- **Recording matters; upkeep matters more**  
+Saving and searching are only part of long-term memory. Over time, duplicate, conflicting and outdated memories pile up and start to lead the model astray. Checking memory health, resolving contradictions and letting stale information go are just as much part of the job.
+- **You make the key calls**  
+The model proposes how to maintain and improve your memories, and nothing is carried out until you confirm. The model proposes and executes; the key decisions stay with you.
+- **Every bit of your attention counts**  
+Working with an agent comes down to where your attention goes. Most of the time the plugin and the model handle saving, searching and automatic checkups in the background without you. The cards in the chat start folded, and together with the right sidebar and the Memory entry at the top left they keep memory in view without breaking your flow, ready to expand and drill into whenever you want to look or step in. When a checkup finds problems, the items that need you are sorted by priority, so your effort goes to the decisions that matter most. As models get more capable, the plugin will take on more of the work and ask for confirmation less often.
+- **Plastic memories**  
+Everyone works with agents in their own way, and memory shouldn't be a rigid preset template. Beyond the ready-to-use base modes, the plugin lets you adjust how memory runs through custom scenes and types and the options on the settings page. The plugin is still at an early stage and many parts still need work; more combinable modules are planned to make it more freely plastic and help you build the memory that fits you best.
 
-LLM agents face a strikingly similar challenge: stale, contradictory, redundant, and orphaned memories pile up over time, causing cognitive drift, hallucinations, conflicting decisions, wasted tokens, and degraded output quality.
+## Installation
 
-`dsh-plastic-memory` is a **memory plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** that brings **plasticity** and **lifecycle management** to agent memory. It stores, classifies, retrieves, and governs memories — distilling valuable knowledge for precise recall, diagnosing memory health, detecting factual conflicts, and gracefully forgetting what no longer serves.
+Requires DeepSeek Harness v0.2.2-rc.1 or later. Both the desktop app and the web version are supported; the desktop app currently gives the best experience.
 
----
+**Desktop app (recommended)**: open the Plugins page in the sidebar, click Add plugin, enter `dsh-plastic-memory` and confirm.
 
+**Web version**: add it on the Plugins page as well; pnpm must be installed on your machine.
 
-
-## 🎬 Anime–Plugin Parallels
-
-
-| *Plastic Memories* Lore                | Plugin Feature                                      | What It Does                                                                             |
-| -------------------------------------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| **Isla's diary**                       | **Save memories from conversation** (`memory_save`) | Distill key insights from dialogue and persist them automatically                        |
-| **Giftia soul vessel — Alma OS**       | **File-based storage (Markdown)**                   | Each memory is a standalone Markdown file — transparent, human-editable, easy to maintain |
-| **Giftia's finite lifespan**           | **Freshness & decay** (`decayDays`)                 | Time-based freshness scoring for every memory                                            |
-| **Wanderers**                          | **Memory rot & factual conflicts**                  | Stale or contradictory memories degrade context; targeted scans detect and resolve them   |
-| **Terminal Service #1 (lifecycle ops)**| **Governance layer**                                | Full-library health checks, confidence refresh, cleanup of problematic or orphaned entries |
-| **Human–Giftia partner system**        | **User-gated promotion** (`memory_promote`)         | Promoting memories to global scope **requires explicit user approval**                   |
-| **The moment of first encounter**      | **Provenance tracking** (`memory_source`)           | Every memory anchors back to the original conversation slice that produced it             |
-
-
----
-
-
-
-## ✨ Key Features
-
-- **Typed & extensible memory**  
-  Five built-in types — `profile`, `preference`, `knowledge`, `project`, `reference` — covering identity, habits, domain knowledge, project decisions, and external resources. Add your own types and combine them into scenes that decide which types get saved.
-- **Strict workspace isolation & write protection**  
-  Workspace memories are physically isolated; global memories are shared read-only across projects. The model cannot write to the global scope directly — any promotion from workspace to global must be explicitly approved by the user, preventing uncontrolled rule sprawl.
-- **Built-in governance**  
-  Health checks block high-risk writes (e.g. leaked API keys), surface rule conflicts, and guard against cognitive degradation over long-running sessions.
-- **Causal provenance**  
-  Every memory records the conversation slice it was distilled from. When deeper context is needed, the model can call `memory_source` to trace back to the original dialogue.
-
----
-
-
-
-## 🏗️ Architecture
-
-![Architecture Overview](assets/architecture.en.svg)
-
-
-
-**How it works:** During conversation, the model calls `memory_save` to distill noteworthy information. Before writing, a safety pipeline deduplicates and blocks secret leaks. Memories are persisted as Markdown files and injected as read-only snapshots when a session starts or the context is compressed. A governance layer sits on top of storage, continuously auditing the memory library to suppress context degradation and rule drift.
-
----
-
-
-
-## 📦 Installation
-
-> **0.2.0 is coming soon and includes breaking changes:** it requires DeepSeek Harness v0.2.1-rc.2 or later. We recommend waiting for 0.2.0 before using the plugin for real work. For now only the previous release can be installed; it offers a basic experience of saving, searching and injecting memories, health checks and more. When you later upgrade to 0.2.0, existing memories are used in place and pending decisions are migrated automatically.
-
-Previous release, 0.1.1-beta.5:
+**Command line**: replace `web` with the profile you want to install into, then restart.
 
 ```bash
-dsh plugin --profile web add dsh-plastic-memory@0.1.1-beta.5
+dsh plugin --profile web add dsh-plastic-memory
 ```
 
-> Replace `web` with the name of your target profile (it will be created automatically if it doesn't exist). The plugin declaration is written to the profile's `cordis.patch.yml` and takes effect after a restart. The package ships prebuilt on npm — no build step required.  
-> **Desktop app:** open the DeepSeek Harness desktop app once so it creates its profile, quit it completely, run the command below in a terminal, then reopen the app. Either the npm-installed `dsh` or the command bundled with the desktop app works.
->
-> ```bash
-> dsh plugin --profile desktop add dsh-plastic-memory@0.1.1-beta.5
-> ```
->
-> **Requirements:** Node.js `^22.19.0 || >=24`, DeepSeek Harness v0.2.1-rc.2 or later.
-> **Chinese word segmentation:** the optional dependency `@node-rs/jieba` (prebuilt binaries for each platform) is installed automatically with the npm package, so Chinese queries match by word. If it cannot be installed on your platform, the plugin still installs, Chinese search falls back to two-character segments, and nothing else is affected.
-> (DeepSeek Harness is still in pre-release and may ship further breaking changes; before upgrading the host, check the version range this plugin currently supports, see the badge at the top and the CHANGELOG.)
->
-> While in beta, pin the exact version in the install command. Once a stable release ships, you can simply run `dsh plugin --profile web add dsh-plastic-memory`.
+Installation details and upgrade notes
 
----
+- To install into the desktop app from the command line (`--profile desktop`): open the desktop app once, quit it completely, run the command, then reopen the app. Other profiles are created automatically if they don't exist. Either the npm-installed `dsh` or the one bundled with the desktop app works.
+- Runtime: Node.js `^22.19.0 || >=24`.
+- Upgrading from 0.1.x keeps your existing memories in place and migrates pending items automatically. 0.2.0 requires DeepSeek Harness v0.2.2-rc.1 or later; on an older DeepSeek Harness, upgrade it before installing this plugin.
+- DeepSeek Harness is still in pre-release and may ship breaking changes. Before upgrading DeepSeek Harness, check the supported versions in this document and the changelog.
 
+## Getting started
 
+1. **Chat as usual** and the plugin notes what is worth remembering. Each time it saves something, a small card appears under the reply: open it to see what was saved, delete it right there, or jump to the Memory page to edit it further.
+2. **Start a new chat** and click the whale-tail icon below the input box to see how many memories this chat brought in and wrote. Open the Memory tab in the right sidebar to see exactly which memories were injected and which were written along the way.
+3. **Open the Memory entry at the top left** to browse global memories and every project's memories in one place. You can search, edit and delete them, and recover anything deleted in the last 14 days.
+4. **Try a checkup**: click Check now or set up Auto checkup. Issues that need you are collected under To do with carefully analysed suggestions, and the final call is yours.
 
-## 🚀 Quick Start
+## Guides
 
-1. **Save** — Tell the agent something worth remembering. It automatically identifies and persists the memory. On the next session, saved memories are injected into the context snapshot — no manual steps needed.
-2. **Search** — Ask the agent to look up related memories. Supports filtering by type and scope.
-3. **Check health** — Ask the agent to assess the overall health score of the memory library.
-4. **Tidy up** — Ask the agent to scan for conflicts, redundancies, and stale entries, then review and apply the suggested fixes.
+The guides are currently available in Chinese only.
 
----
+| Guide | Contents |
+| --- | --- |
+| [Everyday interface guide](https://github.com/KKL08/dsh-plastic-memory/blob/main/guide/interface.md) | The Memory page, right sidebar, chat cards and settings page, and what each can do |
+| [Memory types and scenes](https://github.com/KKL08/dsh-plastic-memory/blob/main/guide/memory-types.md) | The five base types, scenes, how memories are brought in, custom types, rules for subagent memories |
+| [Files and manual editing](https://github.com/KKL08/dsh-plastic-memory/blob/main/guide/files.md) | Where memories live, what the files look like, what to watch for when editing by hand |
+| [Configuration](https://github.com/KKL08/dsh-plastic-memory/blob/main/guide/configuration.md) | Every option in `cordis.patch.yml` |
+| [Architecture and tools](https://github.com/KKL08/dsh-plastic-memory/blob/main/guide/how-it-works.md) | How memories are written, brought in and maintained, and the nine tools the model can use |
+| Contributing | Docs in progress |
 
+## Data and privacy
 
+- Memories are stored as local files on your device, by default under `~/.dsh/memories`.
+- Memories brought into a chat, and memories examined during a checkup, are sent to the model service you use in DeepSeek Harness.
+- The plugin blocks secrets (such as `sk-…`) from being written; content that looks like a secret is saved only after you confirm. Secrets already in your memories, or written by accident, are masked when brought into a chat or shown in the interface, and checkups flag them as the highest-priority risk.
 
-## 🖥️ Interface
+## Where the name comes from
 
-Once installed, nothing requires YAML. Three surfaces live inside the host's web UI:
+The plugin is named after the anime *Plastic Memories*.
 
-- **The 「记忆」 (Memory) page in the left nav**: four tabs. *Pending* lists what waits for your decision — conflicts found by a checkup, memories worth promoting to global, budget overflows, secrets, files that failed to parse — and each item is handled in place (pick the winning side, undo, promote or keep local, delete a secret for good). *All memories* browses by project or global, opens the file or shows it in Finder, deletes. *Health* shows each layer's score and issues, with a "check this project" button in the header. *Recently deleted* restores anything removed in the last 14 days and says which memory won when a ruling deleted it. The page does not need a running conversation: it borrows an idle session of the current project to run its commands, and shows an empty state when no session exists yet.
-- **A 「记忆」 tab in the right sidebar**: which memories this conversation brought in, how much of the context they use, what the model saved during the conversation; conflicts among the injected memories can be ruled right there.
-- **The plugin's settings page** (its entry in the host's plugin manager): scenes (pick the current scene; add, edit, remove scenes), memory types (view the base five; edit, remove and restore the preset types; add, edit, remove custom types), context budget and overflow mode, source lookup, checkup switch and sensitivity, where global promotions go, plus a status card. Saving writes the profile's `cordis.patch.yml` and takes effect without a restart.
+In the series, Giftias are androids with human-like feelings and personalities of their own, and their minds have a strict lifespan of **81,920 hours (about 9 years and 4 months)**. Past that limit, without proper care and retrieval, their memory storage falls into severe disorder until they lose their minds and turn into uncontrollable Wanderers.
 
-Every turn in which the model saved a memory gets a card with a delete button; the dot on the left-nav icon lights amber only when something waits for your decision, and turns red when a secret was found.
+An agent's long-term memory faces a similar fate: if memories are only ever written and never maintained, outdated, contradictory and redundant ones pile up, crowding the context budget and leading the model astray. So beyond remembering and searching, this plugin gives agent memory **plasticity and a lifecycle**, putting the quality and upkeep of memories first, so that valuable memories stay fresh and stale information steps aside in good order.
 
----
+| In *Plastic Memories* | In the plugin |
+| :--- | :--- |
+| **Isla's diary** | Memories captured from everyday chats and kept as local Markdown files, one per memory |
+| **Wanderers out of control** | Degraded memories that pile up over time, contradict each other, go stale and lead the model astray |
+| **SAI Corp. Terminal Service No. 1** | Regular health checks, cross-checking and cleanup of the memory library |
+| **Spotter and Marksman partnership** | The model proposes and executes; key calls such as retrieval, cleanup and promotion to global are yours |
+| **Revisiting the first meeting** | Memory provenance: when needed, the model goes back to the conversation a memory came from to check it |
 
-
-
-## 🧠 Memory Types
-
-Five built-in types cover the most common interaction scenarios:
-
-
-| Type         | Purpose                                                      |
-| ------------ | ------------------------------------------------------------ |
-| `profile`    | User identity, background, location, interests, and skill set |
-| `preference` | Requirements and habits the user stated, corrected, or confirmed |
-| `knowledge`  | Confirmed facts, rules, and lessons that will matter again   |
-| `project`    | Current state and plans of ongoing projects or personal matters |
-| `reference`  | Where to find documents, files, and resources                |
-
-
-
-
-### Scenes
-
-A scene decides which types of memory the model can add, picked from the type pool: the base five, two preset types (`procedure` for reusable standard operating procedures, `decision` for decisions and commitments: who decided what, who promised whom what), and your own custom types.
-
-- General (`custom`) — the base five, fixed; it cannot be edited or removed.
-- Coding (`coding`, default) — the base five + `procedure`.
-- Office (`office`) — the base five + `decision`.
-- Your own scenes — created on the settings page, starting from the base five, which you can untick.
-
-Coding and Office can be edited or removed. Each scene holds 1 to 8 types, and you can have up to 5 scenes besides General. One scene is current at a time, shared by the whole profile. Switching scenes only affects new memories: existing memories of any type in the pool are still injected and searchable.
-
-The base five are fixed; the settings page only shows their definitions. The two preset types can be edited (their identifiers stay the same) or removed: a removed preset gets no new memories, its existing ones are still read, and you can restore it on the settings page later. An edited preset is stored as an entry of the same name under `customTypes`; removed ones are listed in `removedPresetTypes`.
-
-The old Office template's `commitment` merged into `decision`, and `person` was removed. Existing memories of these two types are still read, but new ones can no longer be added.
-
-
-
-### Recall Modes (`recall`)
-
-Control how each memory type appears in the context window:
-
-
-| Mode      | Injection Behavior                                                     | Best For                            |
-| --------- | ---------------------------------------------------------------------- | ----------------------------------- |
-| `core`    | **Full-text:** always present in the system context                    | High-frequency preferences & persona |
-| `search`  | **Index:** listed in the overview index, fetched on demand by the model | Detailed procedures & domain knowledge |
-| `passive` | **Minimal index:** title-only listing, maximizing token savings | Rarely accessed reference material   |
-
-
-
-
-### Defining Custom Types
-
-Create them in the scene dialog on the settings page, or declare them under the `customTypes` config key (names must not collide with the five built-ins). Custom types join the type pool and are used for new memories once ticked into a scene. On the settings page, when you rename a type that already has memories, they can follow the new name or move to Recently deleted; when you remove one, you can keep its memories or move them to Recently deleted:
-
-```yaml
-customTypes:
-  ritual:
-    label: Team Rituals
-    description: Recurring team processes and ceremonies
-    whenToSave: When the user mentions a regularly scheduled process or ceremony
-    howToUse: Follow the recorded schedule and conventions when planning related work
-    recall: search
-    governancePriority: low
-    decayDays: 90
-scenes:
-  scene-mh2k9x:
-    label: Teamwork
-    types: [profile, preference, knowledge, project, reference, decision, ritual]
-template: scene-mh2k9x
-```
-
-`description` and `whenToSave` are written for the model: when saving, it uses them to decide which type a memory belongs to and how to write it. `howToUse` is optional and says how to use these memories once they are brought into a chat; the model gets it along with the memories. `decayDays` is the decay period: a memory not confirmed within that many days is only marked as possibly outdated and stays valid; `null` means it never decays.
-
-### Memories Written by Subagents
-
-Subagents that DeepSeek Harness delegates to (including the ones they delegate to in turn) can also save memories with `memory_save`. These memories start out pending: they stay in the current project, are not injected into the main session, rank after all other memories in search, and are marked as written by a subagent and unconfirmed in index lines and search results. The subagent reports what it saved in its reply, and the main session decides what happens to it:
-
-- Accept: `memory_confirm` with the `accept-subagent` action; from then on it is injected and searched like the project's other memories.
-- Rewrite: `memory_save update`, which accepts it as well.
-- Drop: `memory_forget`.
-
-What the main session leaves alone stays pending. You don't need to go through them one by one: when the main session thinks one should be global, it shows up among the promotion candidates under Pending as usual. Memory cards also show "Written by a subagent · level N · pending review" ("accepted by the main session" or "edited by you" once accepted), and editing or promoting a pending memory directly on the memory page accepts it.
-
-Subagents can only write `knowledge` and `project` memories, and only types the current scene includes; the source (`sourceMode`) can only be observed or inferred. They cannot use `supersedes` or `force`, and can only update pending memories their own session saved. Each subagent session creates at most `subagent.maxSavesPerSession` memories (default 10). Subagent writing follows the governance switch: with `governance.enabled` set to `false`, subagent sessions stay read-only.
-
-**Known limitations:** these rules only bind tool calls. A subagent with file tools that edits the files in the memory directory directly is not bound by them, and a child process started with the DeepSeek Harness SDK that also loads this plugin is treated as a main session.
-
----
-
-
-
-## 🛠️ Tools
-
-
-
-### Core Tools
-
-
-| Tool              | Description                                                                                                          |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `memory_save`     | Distill or update a memory. Built-in dedup and secret detection; when near-duplicate content is found, prompts the user to `update` or `force` |
-| `memory_search`   | Searches memories by relevance; works for Chinese and English queries. Memories containing every keyword come before those containing only some of them, and a keyword that appears as a whole word ranks above one that only appears inside a longer word (`scope` in `readScope`). Chinese and English spellings are matched separately. When no memory contains every keyword, the result says so at the top; if the top hit matches at least half of the query but lacks some keywords, it shows how many memories each keyword matched. If the top hit matches less than half of the query's content words, or only literal substring matches are left, the result is also flagged as a weak match and suggests rephrasing. These notes are hints; the model decides how many searches it needs. A hit that lacks some keywords says on its first line which keywords it fully matched, or that it matched only part of one or only a substring. `match` defaults to `any`, which returns every hit ranked as above; `all` returns only memories that contain every keyword, and when there are none the result shows how many memories each keyword matched and suggests `any` for partial hits. `types` filters by type: leave it out to search every type; with an empty `query` and only `types`, it lists memories of those types; when the given types have no memories in scope, the result lists the types that do and how many each has. Each hit carries the absolute path of the memory file. Top hits include the full text; very long memories and lower-ranked hits may show only a passage of the text (around the matched keywords when there are any), marked as an excerpt. For the full text, search for the memory's id or read the file directly. Scope filter; returns up to 10 results by default (max 50) |
-| `memory_forget`   | Batch-remove memories: the file moves to `.archive/`, a snapshot is taken first, recoverable within 14 days. Memories containing secrets are the exception: deleted physically at once, their copies in every snapshot redacted, not recoverable |
-| `memory_snapshot` | Snapshot management: manual tagging, diff comparison, rollback, and undelete                                         |
-| `memory_source`   | **Provenance:** trace back to the original conversation slice a memory was distilled from — verify intent and guard against hallucination |
-
-
-
-
-### Governance Tools (`governance.enabled = true`)
-
-
-| Tool             | Description                                                                                                         |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `memory_health`  | **Health score (0–100):** assess overall memory library quality; also lists quarantined files that failed to parse and directory problems (duplicate ids, missing `.workspace` marker, …) |
-| `memory_scan`    | Deep audit — rule layer (secret leaks, oversized entries, orphaned refs, corrupt files); semantic layer (conflicts, redundancies) calls LLM on demand |
-| `memory_confirm` | **Freshness refresh & triage:** reaffirm stale memories to extend their lifecycle, arbitrate conflict scan results, or accept a pending memory a subagent saved |
-| `memory_promote` | **Scope promotion:** elevate validated workspace memories to global or sync to `AGENTS.md` — **requires explicit user approval** |
-
-Governance tools act on global and current-workspace memories only; pass `allowCrossWorkspace: true` to touch other projects' memories (when the user explicitly asks for a library-wide clean-up). In subagent sessions, `memory_search` and `memory_health` work as usual, `memory_source` only traces memories whose source is that session, `memory_save` writes under the rules in "Memories Written by Subagents", every other writing tool (including `memory_scan` and `memory_confirm`) is refused, and memories are still injected as usual.
-
-
----
-
-
-
-## 📂 Storage Layout
-
-Memories are files: the Markdown on disk is the only source of truth and the plugin keeps no copy in memory. Create, edit or delete a file in your editor and the next tool call or new session sees it, no restart needed.
-
-```text
-<memoryRoot>/
-  global/                    # Global memories (shared across projects)
-    <name-slug>.md           # One memory per file (YAML frontmatter + body)
-    MEMORY.md                # Generated index of live memories; hand edits are overwritten
-    .archive/                # Forgotten and superseded memories; purged 14 days after forgetting
-  <project-slug>-<hash>/    # Workspace memories (isolated per project)
-    .workspace               # One line: the project's absolute path
-    <name-slug>.md
-    MEMORY.md
-    .archive/
-  .state/                    # Plugin bookkeeping: snapshots, pending decisions, scan cache, recall stats
-```
-
-Index lines end with the file name, so the model can open the full text directly; `.archive/` is a hidden directory, so the host's grep does not surface forgotten content.
-
-
-
-### Manual Editing
-
-- **Create**: a `.md` file whose frontmatter has at least `name` and `type`; the body is the memory. `id`, timestamps, `tags`, `summary` and `confidence` may be omitted and are filled in on the next write or session start (the `id` is derived from the file path and then stays with the file).
-- **Timestamps**: `2026-09-01`, `2026-09-01T08:30:00Z` and offsets are all accepted; missing ones default to the file's modification time.
-- **Edit**: after a hand edit the memory is marked as hand-edited and `memory_source` warns that the provenance may no longer match; updating it with `memory_save` clears the mark.
-- **Expiry**: `validFrom` / `validTo` appear in the file in local time, such as `2026-11-05 18:00`; edit them in the same form. A date alone takes the hour and minute of the file's modification time. Files written by older versions in UTC are converted automatically at the next write or session start. A memory whose `validTo` has passed stays in place but is neither injected nor searched; `memory_health` suggests extending it or forgetting it.
-- **Recovery**: a memory forgotten by mistake sits in `.archive/`; restore it with `memory_snapshot`, or move the file back up one level and set `status` to `active`.
-- **Malformed files** are quarantined individually and never block other memories; `memory_health` and `memory_scan` list them, and a fix takes effect immediately.
-- `MEMORY.md` is generated; do not edit it by hand.
-
----
-
-
-
-## ⚙️ Configuration Reference
-
-Adjust `plastic-memory` settings in the profile's `cordis.patch.yml`:
-
-
-| Key                                | Default             | Description                                                                              |
-| ---------------------------------- | ------------------- | ---------------------------------------------------------------------------------------- |
-| `writeMode`                        | `'proactive'`       | Write mode (currently the only value; more modes planned)                                |
-| `snapshotTokenBudget`              | `4000`              | Token limit for memories loaded automatically into each chat; search results don't count |
-| `snapshotOverflow`                 | `'relax'`           | Over budget: `relax` injects everything and reports each 25 % step / `strict` cuts index lines and says how many were left out |
-| `evidenceLookup`                   | `'strict'`          | Provenance mode: `off` / `strict` (prompt on strong signals only) / `active` (proactive guidance) |
-| `template`                         | `'coding'`          | Current scene: `custom` (General) / `coding` / `office` / the id of a scene you created  |
-| `customTypes`                      | `{}`                | Custom memory type definitions, added to the type pool                                   |
-| `scenes`                           | Coding and Office   | Scene definitions: `label` is the name, `types` the types it includes (1 to 8). General is fixed and not listed here |
-| `removedPresetTypes`               | `[]`                | Removed preset types (`procedure`, `decision`): no new memories, existing ones are still read |
-| `governance.enabled`               | `true`              | Enable the governance layer (health checks, scoring, promotion)                          |
-| `governance.health.sensitivity`    | `'normal'`          | Health alert sensitivity: `conservative` / `normal` / `proactive`                        |
-| `governance.globalPromoteTarget`   | `'plugin-global'`   | Promotion target: `plugin-global` (plugin's global scope) or `agents-md` (`~/.dsh/AGENTS.md`) |
-| `subagent.maxSavesPerSession`      | `10`                | How many memories each subagent session can create (config file only); applied from the next save |
-| `accent`                           | `'ella'`            | Theme color for the memory panels: `ella` / `blue-whale` (follows the DeepSeek Harness brand blue) |
-| `memoryRoot`                       | `''`                | Storage root path; defaults to `${DSH_HOME:-~/.dsh}/memories`                            |
-| `search.userDictionaryPath`        | unset               | User dictionary path (config file only): added on top of the built-in dictionary, applied from the next search. Must be an absolute path; one entry per line as `word frequency tag`, the frequency is required and entries without it have no effect, for example `插件记忆 10 n`. Has no effect unless `@node-rs/jieba` is installed |
-
-
----
-
-
-
-## 🧪 Development
-
-```bash
-pnpm install --frozen-lockfile
-pnpm typecheck && pnpm lint && pnpm test && pnpm build
-pnpm host:smoke      # Install the build artifact into a clean dsh host to verify installation and loading (no API key required)
-pnpm host:contract   # Run all nine tools against the host to verify contract compliance (no API key required; with a key, two additional semantic-layer checks run)
-```
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow, testing guide, and commit conventions. See [CHANGELOG.md](CHANGELOG.md) for release history.
-
----
-
-## 📄 License
+## License
 
 [MIT License](LICENSE)
 
----
-
-If this project is useful to you, a star would be much appreciated.
+If this project helps you, a ⭐ would be much appreciated.
