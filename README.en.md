@@ -61,14 +61,14 @@ Everyone works with agents in their own way, and memory shouldn't be a rigid pre
 
 Requires DeepSeek Harness v0.2.2-rc.1 or later. Both the desktop app and the web version are supported; the desktop app currently gives the best experience.
 
-**Desktop app (recommended)**: open the Plugins page in the sidebar, click Add plugin, enter `dsh-plastic-memory` and confirm.
+**Desktop app (recommended)**: open the Plugins page in the sidebar, click Add plugin, enter `dsh-plastic-memory@0.2.0-beta.1` and confirm.
 
 **Web version**: add it on the Plugins page as well; pnpm must be installed on your machine.
 
 **Command line**: replace `web` with the profile you want to install into, then restart.
 
 ```bash
-dsh plugin --profile web add dsh-plastic-memory
+dsh plugin --profile web add dsh-plastic-memory@0.2.0-beta.1
 ```
 
 Installation details and upgrade notes
