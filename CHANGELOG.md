@@ -67,9 +67,10 @@ All notable changes to this project are documented here. The format follows
   memories once they are brought into a chat.
 
 ### Changed
-- Requires DeepSeek Harness v0.2.1-rc.2 or later, the first version with the
-  interface slots the plugin uses. Older hosts refuse to install or start this
-  release; stay on 0.1.1-beta.5 there.
+- Requires DeepSeek Harness v0.2.2-rc.1 or later, which has the interface
+  slots the plugin uses and shows the plugin's own description on the plugin
+  page. Older hosts refuse to install or start this release; stay on
+  0.1.1-beta.5 there.
 - Memories are read from their files on demand; the plugin keeps no copy of
   the library in memory and no longer loads it at start-up.
   `pnpm bench:storage` measures storage timings on your machine.
@@ -95,7 +96,8 @@ All notable changes to this project are documented here. The format follows
   and `decision`, and your custom types. General (`template: custom`) stays
   fixed; Coding and Office can be edited or removed, and `scenes` holds up to
   five scenes besides General, each with 1 to 8 types. Memories of every type
-  stay injected and searchable whichever scene is current.
+  stay injected and searchable whichever scene is current. The default scene
+  is now General; pick Coding on the settings page to keep `procedure`.
 - Custom types now apply only in scenes that include them, and no config is
   migrated: after upgrading, tick your `customTypes` into a scene on the
   settings page. With `template: custom`, create a new scene, since General is

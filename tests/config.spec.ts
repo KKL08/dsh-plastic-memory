@@ -11,7 +11,7 @@ describe('Config schema', () => {
     expect(value.writeMode).toBe('proactive')
     expect(value.evidenceLookup.get()).toBe('strict')
     expect(value.snapshotTokenBudget.get()).toBe(4000)
-    expect(value.template.get()).toBe('coding')
+    expect(value.template.get()).toBe('custom')
     expect(value.governance.enabled.get()).toBe(true)
   })
 
@@ -28,7 +28,7 @@ describe('Config schema', () => {
       snapshotTokenBudget: 4000,
       snapshotOverflow: 'relax',
       evidenceLookup: 'strict',
-      template: 'coding',
+      template: 'custom',
       customTypes: {},
       scenes: PRESET_SCENES,
       removedPresetTypes: [],

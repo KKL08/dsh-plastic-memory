@@ -1898,7 +1898,7 @@ describe('配置热生效（loader/volatile-update）', () => {
   })
 
   it('改场景与自定义类型：memory_save 重注册（类型枚举重算），写时只认新场景，带入按类型池定义', async () => {
-    const t = await setup()
+    const t = await setup({ template: 'coding' })
     await t.putGlobal({ id: 'mem_reg', type: 'regulation', content: '数据出境要先过安全评估', summary: '数据出境' })
     const saveDef = t.tool('memory_save')
     expect(saveDef.parameters.properties.type!.enum).toContain('procedure')
@@ -1957,21 +1957,21 @@ describe('配置热生效（loader/volatile-update）', () => {
   })
 
   it('删掉预设类型：memory_save 重注册、不能再新增；已有记忆照常带入，分组名按出厂定义', async () => {
-    const t = await setup()
+    const t = await setup({ template: 'coding' })
     await t.putGlobal({ id: 'mem_proc', type: 'procedure', name: '发版流程', summary: '发版步骤' })
-    expect(await t.update({ removedPresetTypes: ['procedure'] })).toEqual([['removedPresetTypes']])
+    expect(await t.update({ template: 'coding', removedPresetTypes: ['procedure'] })).toEqual([['removedPresetTypes']])
     expect(t.tool('memory_save').parameters.properties.type!.enum).not.toContain('procedure')
     await expect(t.save({ type: 'procedure', name: '流程', content: '删掉的预设' })).rejects.toThrow(/type/)
     expect(await t.assembleOnce()).toContain('## 可复用流程（procedure）\n- [mem_proc] 发版流程（发版步骤）')
-    await t.update({ removedPresetTypes: [] })
+    await t.update({ template: 'coding', removedPresetTypes: [] })
     expect(t.tool('memory_save').parameters.properties.type!.enum).toContain('procedure')
   })
 
   it('自定义类型只加进类型池不生效；勾进当前场景后不重启就能 memory_save', async () => {
-    const t = await setup()
-    await t.update({ customTypes: { regulation } })
+    const t = await setup({ template: 'coding' })
+    await t.update({ template: 'coding', customTypes: { regulation } })
     await expect(t.save({ type: 'regulation', name: '合规', content: '某条合规' })).rejects.toThrow(/type/)
-    expect(await t.update({ customTypes: { regulation }, scenes: { ...PRESET_SCENES, coding: { label: '编码', types: [...PRESET_SCENES.coding.types, 'regulation'] } } }))
+    expect(await t.update({ template: 'coding', customTypes: { regulation }, scenes: { ...PRESET_SCENES, coding: { label: '编码', types: [...PRESET_SCENES.coding.types, 'regulation'] } } }))
       .toEqual([['scenes']])
     const saved = await t.save({ type: 'regulation', name: '数据出境', content: '数据出境要先过安全评估' })
     expect(saved).toMatchObject({ kind: 'saved' })

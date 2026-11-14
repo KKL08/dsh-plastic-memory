@@ -8,4 +8,4 @@
       name: dsh-plastic-memory
       config:
         writeMode: proactive
-        template: coding
+        template: custom

@@ -354,7 +354,7 @@ const PATHS: Record<Exclude<keyof SettingsFields, 'scenes' | 'customTypes' | 're
 }
 
 const DEFAULTS: SettingsFields = {
-  template: 'coding', scenes: PRESET_SCENES, customTypes: {}, removedPresets: [], budget: '4000', overflow: 'relax', evidence: 'strict',
+  template: 'custom', scenes: PRESET_SCENES, customTypes: {}, removedPresets: [], budget: '4000', overflow: 'relax', evidence: 'strict',
   sensitivity: 'normal', promoteTarget: 'plugin-global', accent: 'ella',
 }
 
